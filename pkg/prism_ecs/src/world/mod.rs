@@ -13,12 +13,15 @@
 //! [`Commands`](crate::command::Commands) buffer records the same operations to
 //! be applied later at a synchronization point.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::archetype::Archetypes;
 use crate::bundle::Bundle;
 use crate::change::Tick;
-use crate::component::{Component, ComponentId, ComponentSet, Components, StorageType};
+use crate::component::{
+    Component, ComponentId, ComponentSet, Components, RequiredCtor, StorageType,
+};
 use crate::component_hooks::{ComponentHook, HookContext};
 use crate::entity::{Entities, Entity, EntityLocation};
 use crate::query::{QueryData, QueryFilter, QueryState, ReadOnlyQueryData};
@@ -243,6 +246,62 @@ impl World {
         id
     }
 
+    /// Declare that component `T` requires component `R` (design §16.1),
+    /// auto-inserting `R::default()` whenever `T` is inserted and `R` is
+    /// absent. Requirements are transitive and de-duplicated; the constructor
+    /// nearest an explicitly-inserted component wins. Both types are registered
+    /// if needed.
+    pub fn register_required_component<T: Component, R: Component + Default>(&mut self) {
+        let t = self.components.register::<T>();
+        let r = self.components.register::<R>();
+        let ctor: RequiredCtor = Arc::new(|out: &mut dyn FnMut(*mut u8)| {
+            // Produce one owned `R`; the callback moves the bytes out, so the
+            // local must not also be dropped (mirrors `Bundle::get_components`).
+            let mut value = core::mem::ManuallyDrop::new(R::default());
+            out((&mut *value as *mut R).cast::<u8>());
+        });
+        let ok = self.components.register_required(t, r, ctor);
+        debug_assert!(ok, "distinct registered components must accept a required edge");
+    }
+
+    /// Like [`World::register_required_component`] but supplies a custom
+    /// constructor for `R` instead of relying on [`Default`] (design §16.1).
+    pub fn register_required_component_with<T: Component, R: Component>(
+        &mut self,
+        ctor: fn() -> R,
+    ) {
+        let t = self.components.register::<T>();
+        let r = self.components.register::<R>();
+        let ctor: RequiredCtor = Arc::new(move |out: &mut dyn FnMut(*mut u8)| {
+            let mut value = core::mem::ManuallyDrop::new(ctor());
+            out((&mut *value as *mut R).cast::<u8>());
+        });
+        let ok = self.components.register_required(t, r, ctor);
+        debug_assert!(ok, "distinct registered components must accept a required edge");
+    }
+
+    /// Collect the required-component additions implied by inserting the
+    /// `explicit` ids (design §16.1): each explicit id's flattened required
+    /// set, excluding ids the bundle already supplies, de-duplicated with the
+    /// nearest requirer winning. Presence on the target entity is filtered by
+    /// the caller. Each entry carries a fresh handle to its default-value
+    /// constructor.
+    fn collect_required(&self, explicit: &[ComponentId]) -> Vec<(ComponentId, RequiredCtor)> {
+        let mut out: Vec<(ComponentId, RequiredCtor)> = Vec::new();
+        for &id in explicit {
+            if let Some(info) = self.components.info(id) {
+                for rc in info.required() {
+                    let rid = rc.id();
+                    if explicit.contains(&rid) || out.iter().any(|(x, _)| *x == rid) {
+                        continue;
+                    }
+                    out.push((rid, rc.ctor()));
+                }
+            }
+        }
+        out
+    }
+
     /// Whether `entity` is live.
     #[inline]
     pub fn contains(&self, entity: Entity) -> bool {
@@ -296,15 +355,30 @@ impl World {
             "a bundle may not contain the same component type twice"
         );
 
+        // Required components (design §16.1): a fresh spawn holds nothing, so
+        // every transitively-required component the bundle omits is added with
+        // its default constructor. Gated so the common case pays nothing.
+        let required: Vec<(ComponentId, RequiredCtor)> = if self.components.has_required() {
+            self.collect_required(&ids)
+        } else {
+            Vec::new()
+        };
+        let explicit_len = ids.len();
+
+        // Combined id list: explicit bundle ids first, then required additions.
+        let mut all_ids = ids;
+        all_ids.extend(required.iter().map(|(id, _)| *id));
+
         // Classify each id by storage; pre-create any sparse sets so the fill
-        // closure only has to look them up.
-        let storages = self.classify_storages(&ids);
-        self.ensure_sparse_sets(&ids, &storages);
+        // closures only have to look them up.
+        let storages = self.classify_storages(&all_ids);
+        self.ensure_sparse_sets(&all_ids, &storages);
 
         // Only table components fragment the archetype; sparse ones are routed
         // out of band (design §6).
         let table_set = ComponentSet::from_ids(
-            ids.iter()
+            all_ids
+                .iter()
                 .zip(&storages)
                 .filter(|(_, s)| **s == StorageType::Table)
                 .map(|(id, _)| *id),
@@ -323,12 +397,13 @@ impl World {
                 .table_mut();
             let row = table.allocate(entity);
             let mut i = 0usize;
-            // SAFETY: `get_components` yields one pointer per id in `ids` order,
-            // each a valid owned component value routed exactly once into its
-            // matching table column or sparse set, restoring both invariants.
+            // SAFETY: `get_components` yields one pointer per explicit id in
+            // `all_ids[..explicit_len]` order, each a valid owned component
+            // value routed exactly once into its matching table column or
+            // sparse set, restoring both invariants.
             unsafe {
                 bundle.get_components(&mut |ptr| {
-                    let id = ids[i];
+                    let id = all_ids[i];
                     let storage = storages[i];
                     i += 1;
                     match storage {
@@ -344,7 +419,31 @@ impl World {
                     }
                 });
             }
-            debug_assert_eq!(i, ids.len());
+            debug_assert_eq!(i, explicit_len);
+            // Required default values occupy the tail of `all_ids`.
+            for (k, (rid, ctor)) in required.iter().enumerate() {
+                let storage = storages[explicit_len + k];
+                let ctor_fn: &(dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync) = &**ctor;
+                ctor_fn(&mut |ptr| {
+                    // SAFETY: the ctor hands back one freshly constructed `rid`
+                    // value, moved exactly once into its (empty) table column at
+                    // the just-allocated row or its pre-created sparse set, and
+                    // never dropped by the ctor itself.
+                    unsafe {
+                        match storage {
+                            StorageType::Table => {
+                                table.column_for_fill(*rid).push(ptr, change_tick);
+                            }
+                            StorageType::SparseSet => {
+                                sparse_sets
+                                    .get_mut(*rid)
+                                    .expect("sparse set pre-created")
+                                    .insert(entity, ptr, change_tick);
+                            }
+                        }
+                    }
+                });
+            }
             row
         };
 
@@ -357,12 +456,13 @@ impl World {
         );
 
         // Lifecycle hooks (design §12): a fresh spawn newly adds every
-        // component, so fire on_add then on_insert for all of them with the
-        // world fully consistent. Gated so hook-free spawns pay nothing.
-        if self.any_hooks(&ids) {
-            let add = self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_add);
+        // component (explicit and required), so fire on_add then on_insert for
+        // all of them with the world fully consistent. Gated so hook-free
+        // spawns pay nothing.
+        if self.any_hooks(&all_ids) {
+            let add = self.collect_hooks(&all_ids, crate::component_hooks::ComponentHooks::on_add);
             let insert =
-                self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_insert);
+                self.collect_hooks(&all_ids, crate::component_hooks::ComponentHooks::on_insert);
             self.run_hooks(entity, &add);
             self.run_hooks(entity, &insert);
         }
@@ -541,15 +641,62 @@ impl World {
             .components()
             .clone();
 
+        // Required components (design §16.1): inserting a component auto-adds
+        // every transitively-required component the entity still lacks, with
+        // its default constructor. Explicit bundle values always win (they are
+        // excluded by `collect_required`) and resident components are never
+        // overwritten (present ids are filtered out here). Gated so the common
+        // hook-free, requirement-free insert pays nothing.
+        let required: Vec<(ComponentId, RequiredCtor, StorageType)> =
+            if self.components.has_required() {
+                let mut out = Vec::new();
+                for (rid, ctor) in self.collect_required(&ids) {
+                    let storage = self
+                        .components
+                        .info(rid)
+                        .expect("registered required component")
+                        .storage();
+                    let present = match storage {
+                        StorageType::Table => current.contains(rid),
+                        StorageType::SparseSet => self.sparse_sets.contains(rid, entity),
+                    };
+                    if !present {
+                        out.push((rid, ctor, storage));
+                    }
+                }
+                out
+            } else {
+                Vec::new()
+            };
+
+        // Pre-create backing sets for any sparse required additions so the
+        // write closures can assume the set exists (mirrors the explicit path).
+        if required.iter().any(|(_, _, s)| *s == StorageType::SparseSet) {
+            let req_sparse: Vec<ComponentId> = required
+                .iter()
+                .filter(|(_, _, s)| *s == StorageType::SparseSet)
+                .map(|(id, _, _)| *id)
+                .collect();
+            let req_sparse_storages: Vec<StorageType> =
+                req_sparse.iter().map(|_| StorageType::SparseSet).collect();
+            self.ensure_sparse_sets(&req_sparse, &req_sparse_storages);
+        }
+
         // Only *table* components the entity lacks force an archetype move;
         // sparse components are routed out of band and never fragment (§6).
-        let add_ids: Vec<ComponentId> = ids
+        // Required table additions are always absent, so they join `add_ids`.
+        let mut add_ids: Vec<ComponentId> = ids
             .iter()
             .copied()
             .zip(&storages)
             .filter(|(id, s)| **s == StorageType::Table && !current.contains(*id))
             .map(|(id, _)| id)
             .collect();
+        for (rid, _, storage) in &required {
+            if *storage == StorageType::Table {
+                add_ids.push(*rid);
+            }
+        }
 
         if add_ids.is_empty() {
             // No new table column: overwrite existing table columns in place
@@ -589,6 +736,23 @@ impl World {
                         }
                     }
                 });
+                // Required components (§16.1): in the no-move branch every
+                // required addition is sparse (a new required table column would
+                // force the move branch). Each is absent on `entity`, so fill
+                // its set once with the default-constructed value.
+                // SAFETY (inherits the enclosing block): the ctor hands back
+                // one freshly constructed `rid` value, moved exactly once into
+                // its pre-created sparse set and never dropped by the ctor.
+                for (rid, ctor, storage) in &required {
+                    debug_assert_eq!(*storage, StorageType::SparseSet);
+                    let ctor_fn: &(dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync) = &**ctor;
+                    ctor_fn(&mut |ptr| {
+                        sparse_sets
+                            .get_mut(*rid)
+                            .expect("required sparse set pre-created")
+                            .insert(entity, ptr, change_tick);
+                    });
+                }
             }
         } else {
             // At least one new table component: move into `current ∪ table add_ids`.
@@ -654,6 +818,27 @@ impl World {
                         }
                     }
                 });
+                // Required components (§16.1): write each absent required
+                // addition after the explicit values. New table columns fill
+                // their (empty) slot at `dst_row`; sparse ids go to their set.
+                // SAFETY (inherits the enclosing block): the ctor hands back
+                // one freshly constructed `rid` value, moved exactly once. A new
+                // table column fills its empty slot at `dst_row`; a sparse id
+                // inserts into its pre-created set. The ctor never drops it.
+                for (rid, ctor, storage) in &required {
+                    let ctor_fn: &(dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync) = &**ctor;
+                    ctor_fn(&mut |ptr| match storage {
+                        StorageType::Table => {
+                            table.column_for_fill(*rid).push(ptr, change_tick);
+                        }
+                        StorageType::SparseSet => {
+                            sparse_sets
+                                .get_mut(*rid)
+                                .expect("required sparse set pre-created")
+                                .insert(entity, ptr, change_tick);
+                        }
+                    });
+                }
             }
         }
 
@@ -663,12 +848,22 @@ impl World {
         // Post-write lifecycle hooks (design §12): on_add fires for components
         // newly added to the entity on this call, then on_insert for every
         // written component. Both observe a fully consistent world.
-        if hooks_active {
-            let added: Vec<ComponentId> =
+        let req_ids: Vec<ComponentId> = required.iter().map(|(id, _, _)| *id).collect();
+        if hooks_active || self.any_hooks(&req_ids) {
+            // on_add fires for every component newly resident on this call:
+            // explicit ids not already present (`had`) plus the required
+            // additions (always new). When `hooks_active` is false `had` is
+            // empty, but explicit ids then have no hooks so `collect_hooks`
+            // filters them out and only required hooks fire.
+            let mut added: Vec<ComponentId> =
                 ids.iter().copied().filter(|id| !had.contains(id)).collect();
+            added.extend(req_ids.iter().copied());
             let add = self.collect_hooks(&added, crate::component_hooks::ComponentHooks::on_add);
+            // on_insert fires for every written component: explicit plus required.
+            let mut inserted: Vec<ComponentId> = ids.clone();
+            inserted.extend(req_ids.iter().copied());
             let insert =
-                self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_insert);
+                self.collect_hooks(&inserted, crate::component_hooks::ComponentHooks::on_insert);
             self.run_hooks(entity, &add);
             self.run_hooks(entity, &insert);
         }
@@ -1334,5 +1529,145 @@ mod tests {
         let ticks = w.get_ticks::<Charge>(e).unwrap();
         assert_eq!(ticks.added.age_since(w.change_tick()), Tick::MAX_CHANGE_AGE);
         assert_eq!(ticks.changed.age_since(w.change_tick()), Tick::MAX_CHANGE_AGE);
+    }
+
+    // ----- Required components (design §16.1) --------------------------------
+
+    /// A table component that pulls in its dependencies when inserted.
+    #[derive(Debug, PartialEq)]
+    struct RqPlayer;
+    impl Component for RqPlayer {}
+
+    /// A required table component with a non-trivial default value.
+    #[derive(Debug, PartialEq)]
+    struct RqHealth(u32);
+    impl Component for RqHealth {}
+    impl Default for RqHealth {
+        fn default() -> Self {
+            RqHealth(100)
+        }
+    }
+
+    /// A required component supplied via a custom constructor.
+    #[derive(Debug, PartialEq)]
+    struct RqMana(u32);
+    impl Component for RqMana {}
+
+    /// A required component stored out of band to exercise the sparse path.
+    #[derive(Debug, PartialEq, Default)]
+    struct RqShield(u32);
+    impl Component for RqShield {
+        const STORAGE: StorageType = StorageType::SparseSet;
+    }
+
+    /// Transitive chain `RqA` -> `RqB` -> `RqC`.
+    #[derive(Debug, PartialEq, Default)]
+    struct RqA;
+    impl Component for RqA {}
+    #[derive(Debug, PartialEq, Default)]
+    struct RqB;
+    impl Component for RqB {}
+    #[derive(Debug, PartialEq, Default)]
+    struct RqC;
+    impl Component for RqC {}
+
+    #[test]
+    fn required_component_auto_added_on_spawn() {
+        let mut w = World::new();
+        w.register_required_component::<RqPlayer, RqHealth>();
+        let e = w.spawn(RqPlayer);
+        assert!(w.has::<RqPlayer>(e));
+        assert_eq!(w.get::<RqHealth>(e), Some(&RqHealth(100)));
+    }
+
+    #[test]
+    fn required_components_are_transitive() {
+        let mut w = World::new();
+        w.register_required_component::<RqA, RqB>();
+        w.register_required_component::<RqB, RqC>();
+        let e = w.spawn(RqA);
+        assert!(w.has::<RqA>(e));
+        assert!(w.has::<RqB>(e), "direct requirement missing");
+        assert!(w.has::<RqC>(e), "transitive requirement missing");
+    }
+
+    #[test]
+    fn required_explicit_value_wins() {
+        let mut w = World::new();
+        w.register_required_component::<RqPlayer, RqHealth>();
+        // The bundle supplies `RqHealth` explicitly: the default ctor must not
+        // run and the explicit value must survive.
+        let e = w.spawn((RqPlayer, RqHealth(42)));
+        assert_eq!(w.get::<RqHealth>(e), Some(&RqHealth(42)));
+    }
+
+    #[test]
+    fn required_present_value_not_overwritten_on_insert() {
+        let mut w = World::new();
+        w.register_required_component::<RqPlayer, RqHealth>();
+        let e = w.spawn(RqHealth(7));
+        // Inserting the requirer must not clobber the already-resident value
+        // with the default ctor.
+        assert!(w.insert(e, RqPlayer));
+        assert_eq!(w.get::<RqHealth>(e), Some(&RqHealth(7)));
+    }
+
+    #[test]
+    fn required_added_via_insert_path() {
+        let mut w = World::new();
+        w.register_required_component::<RqPlayer, RqHealth>();
+        let e = w.spawn(());
+        assert!(w.insert(e, RqPlayer));
+        assert!(w.has::<RqPlayer>(e));
+        assert_eq!(w.get::<RqHealth>(e), Some(&RqHealth(100)));
+    }
+
+    #[test]
+    fn required_added_via_insert_in_place_sparse() {
+        let mut w = World::new();
+        // Spawn the requirer first, *before* the requirement edge exists, so
+        // the entity already lives in the `{RqPlayer}` table with no shield.
+        let e = w.spawn(RqPlayer);
+        assert!(!w.has::<RqShield>(e));
+        // `RqShield` is sparse, so re-inserting the (already present) requirer
+        // adds no new table column: the no-move branch must still route the
+        // required sparse component out of band.
+        w.register_required_component::<RqPlayer, RqShield>();
+        assert!(w.insert(e, RqPlayer));
+        assert!(w.has::<RqShield>(e));
+        assert_eq!(w.get::<RqShield>(e), Some(&RqShield(0)));
+    }
+
+    #[test]
+    fn required_component_with_custom_ctor() {
+        let mut w = World::new();
+        w.register_required_component_with::<RqPlayer, RqMana>(|| RqMana(7));
+        let e = w.spawn(RqPlayer);
+        assert_eq!(w.get::<RqMana>(e), Some(&RqMana(7)));
+    }
+
+    #[derive(Default)]
+    struct RqHookLog {
+        health_adds: u32,
+    }
+    impl crate::resource::Resource for RqHookLog {}
+
+    fn rq_health_on_add(ctx: crate::component_hooks::HookContext<'_>) {
+        ctx.world.resource_mut::<RqHookLog>().health_adds += 1;
+    }
+
+    #[test]
+    fn required_add_fires_hooks() {
+        let mut w = World::new();
+        w.insert_resource(RqHookLog::default());
+        w.register_component_hooks::<RqHealth>(
+            crate::component_hooks::ComponentHooks::new().with_on_add(rq_health_on_add),
+        );
+        w.register_required_component::<RqPlayer, RqHealth>();
+        // `RqPlayer` itself has no hooks, so this proves the required addition
+        // drives the lifecycle hooks on its own.
+        let e = w.spawn(RqPlayer);
+        assert!(w.has::<RqHealth>(e));
+        assert_eq!(w.resource::<RqHookLog>().health_adds, 1);
     }
 }

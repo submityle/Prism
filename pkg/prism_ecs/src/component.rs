@@ -10,6 +10,7 @@
 
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::any::{TypeId, type_name};
@@ -70,6 +71,41 @@ impl ComponentId {
 /// this function was created for, and the value must not be used afterwards.
 pub type DropFn = unsafe fn(*mut u8);
 
+/// Type-erased constructor for a required component's default value (design
+/// §16.1).
+///
+/// It produces exactly one owned value and hands a pointer to it to `out`,
+/// following the same ownership contract as
+/// [`Bundle::get_components`](crate::bundle::Bundle::get_components): the
+/// callback takes ownership of the bytes, so the constructor must not also drop
+/// the value. Wrapped in [`Arc`] so a single constructor can be shared across
+/// every component that transitively requires it, and so [`ComponentInfo`] can
+/// cheaply clone it into flattened closures.
+pub type RequiredCtor = Arc<dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync>;
+
+/// One entry in a component's required-components set (design §16.1): the id of
+/// a component to auto-insert whenever the requiring component is inserted, and
+/// the constructor that supplies its default value.
+#[derive(Clone)]
+pub struct RequiredComponent {
+    id: ComponentId,
+    ctor: RequiredCtor,
+}
+
+impl RequiredComponent {
+    /// The id of the required component.
+    #[inline]
+    pub fn id(&self) -> ComponentId {
+        self.id
+    }
+
+    /// A fresh [`Arc`] handle to this entry's default-value constructor.
+    #[inline]
+    pub fn ctor(&self) -> RequiredCtor {
+        Arc::clone(&self.ctor)
+    }
+}
+
 /// Runtime metadata for one registered component type.
 pub struct ComponentInfo {
     id: ComponentId,
@@ -79,6 +115,8 @@ pub struct ComponentInfo {
     type_id: Option<TypeId>,
     drop: Option<DropFn>,
     hooks: ComponentHooks,
+    /// Flattened (transitive, first-wins) required components (design §16.1).
+    required: Vec<RequiredComponent>,
 }
 
 impl ComponentInfo {
@@ -129,6 +167,16 @@ impl ComponentInfo {
     pub fn hooks(&self) -> &ComponentHooks {
         &self.hooks
     }
+
+    /// The flattened, transitive set of components this component requires
+    /// (design §16.1), in breadth-first "nearest requirer wins" order. Empty
+    /// unless requirements were declared via
+    /// [`Components::register_required`] /
+    /// [`World::register_required_component`](crate::world::World::register_required_component).
+    #[inline]
+    pub fn required(&self) -> &[RequiredComponent] {
+        &self.required
+    }
 }
 
 /// Build an [`unsafe`] drop function for `T`, or `None` if `T` needs no drop.
@@ -163,6 +211,13 @@ pub struct Components {
     /// the structural paths skip all hook bookkeeping with a single branch in
     /// the overwhelmingly common hook-free case (design §12).
     hooks_registered: bool,
+    /// Directly-declared required-component edges: `requirer -> its immediate
+    /// requirements` (design §16.1). The flattened transitive closure is cached
+    /// on each [`ComponentInfo::required`] and rebuilt whenever an edge changes.
+    direct_required: HashMap<ComponentId, Vec<RequiredComponent>>,
+    /// Set once any required-component edge is declared, letting the structural
+    /// paths skip required-component expansion in the common case.
+    required_registered: bool,
 }
 
 impl Components {
@@ -172,6 +227,8 @@ impl Components {
             infos: Vec::new(),
             by_type: HashMap::default(),
             hooks_registered: false,
+            direct_required: HashMap::default(),
+            required_registered: false,
         }
     }
 
@@ -202,6 +259,7 @@ impl Components {
             type_id: Some(type_id),
             drop: drop_fn_of::<T>(),
             hooks: ComponentHooks::new(),
+            required: Vec::new(),
         });
         self.by_type.insert(type_id, id);
         id
@@ -229,6 +287,7 @@ impl Components {
             type_id: None,
             drop,
             hooks: ComponentHooks::new(),
+            required: Vec::new(),
         });
         id
     }
@@ -255,6 +314,87 @@ impl Components {
     #[inline]
     pub fn has_hooks(&self) -> bool {
         self.hooks_registered
+    }
+
+    /// Declare that `requirer` requires `required`, auto-constructed via `ctor`
+    /// whenever `requirer` is inserted and `required` is absent (design §16.1).
+    ///
+    /// Re-declaring the same edge replaces its constructor. Rebuilds the
+    /// transitive, de-duplicated closure cached on every component. Returns
+    /// `false` (and does nothing) if either id is not registered, or if the
+    /// edge is a direct self-requirement.
+    pub fn register_required(
+        &mut self,
+        requirer: ComponentId,
+        required: ComponentId,
+        ctor: RequiredCtor,
+    ) -> bool {
+        if requirer == required {
+            return false;
+        }
+        if self.info(requirer).is_none() || self.info(required).is_none() {
+            return false;
+        }
+        let edges = self.direct_required.entry(requirer).or_default();
+        if let Some(existing) = edges.iter_mut().find(|e| e.id == required) {
+            existing.ctor = ctor;
+        } else {
+            edges.push(RequiredComponent {
+                id: required,
+                ctor,
+            });
+        }
+        self.required_registered = true;
+        self.recompute_required_closures();
+        true
+    }
+
+    /// Whether any required-component edge has been declared — a cheap global
+    /// gate for the structural paths (design §16.1).
+    #[inline]
+    pub fn has_required(&self) -> bool {
+        self.required_registered
+    }
+
+    /// Rebuild the flattened transitive required-component closure for every
+    /// component from the `direct_required` edge set. Breadth-first so the
+    /// requirement nearest an explicitly-inserted component wins when the same
+    /// id is reachable through multiple paths; cycle-safe via a visited set
+    /// seeded with the root (a component never requires itself).
+    fn recompute_required_closures(&mut self) {
+        let n = self.infos.len();
+        for i in 0..n {
+            let root = ComponentId(i as u32);
+            let mut out: Vec<RequiredComponent> = Vec::new();
+            let mut seen: Vec<ComponentId> = alloc::vec![root];
+            let mut queue: Vec<ComponentId> = Vec::new();
+            // Seed with the root's direct requirements.
+            if let Some(direct) = self.direct_required.get(&root) {
+                for rc in direct {
+                    if !seen.contains(&rc.id) {
+                        seen.push(rc.id);
+                        out.push(rc.clone());
+                        queue.push(rc.id);
+                    }
+                }
+            }
+            // Expand breadth-first.
+            let mut qi = 0;
+            while qi < queue.len() {
+                let cur = queue[qi];
+                qi += 1;
+                if let Some(direct) = self.direct_required.get(&cur) {
+                    for rc in direct {
+                        if !seen.contains(&rc.id) {
+                            seen.push(rc.id);
+                            out.push(rc.clone());
+                            queue.push(rc.id);
+                        }
+                    }
+                }
+            }
+            self.infos[i].required = out;
+        }
     }
 
     /// Look up the id previously assigned to Rust type `T`, without
