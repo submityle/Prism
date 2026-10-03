@@ -34,6 +34,7 @@ const MAX_GRID_WEIGHTS: usize = 64;
 /// # Errors
 /// Returns [`AstcError::Reserved`] if the stored weight range is not a valid
 /// BISE level count, or if the grid exceeds the single-plane weight budget.
+#[cfg(test)]
 pub(super) fn infill_weights_4x4(
     block: &[u8; 16],
     weights_x: u32,
@@ -43,27 +44,6 @@ pub(super) fn infill_weights_4x4(
     let mut out = [0u8; 16];
     infill_weights(block, weights_x, weights_y, levels, 4, 4, &mut out)?;
     Ok(out)
-}
-
-/// Decode a **dual-plane** weight grid of `weights_x` x `weights_y` grid points
-/// from `block` and bilinearly resample both planes to the sixteen 4x4 texel
-/// positions on the `0..=64` scale in row-major order (`texel = y * 4 + x`).
-///
-/// # Errors
-/// Returns [`AstcError::Reserved`] if the stored weight range is not a valid
-/// BISE level count, or if the doubled weight count exceeds the ASTC budget.
-pub(super) fn infill_dual_plane_4x4(
-    block: &[u8; 16],
-    weights_x: u32,
-    weights_y: u32,
-    levels: u32,
-) -> Result<([u8; 16], [u8; 16]), AstcError> {
-    let mut out0 = [0u8; 16];
-    let mut out1 = [0u8; 16];
-    infill_dual_plane(
-        block, weights_x, weights_y, levels, 4, 4, &mut out0, &mut out1,
-    )?;
-    Ok((out0, out1))
 }
 
 /// Footprint-generic single-plane infill. Decodes a `weights_x` x `weights_y`
