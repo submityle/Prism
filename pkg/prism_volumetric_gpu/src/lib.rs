@@ -188,6 +188,7 @@ pub mod gaussian_splat;
 pub mod geom_raster_project;
 pub mod ggx_energy_compensation;
 pub mod ggx_ms_albedo;
+pub mod ggx_smith_visibility;
 pub mod gi_probe;
 pub mod gjk_2d;
 pub mod gjk_3d;
@@ -357,7 +358,11 @@ pub mod sat_collision_2d;
 pub mod scanline_polygon_fill;
 pub mod screen_space_reflection;
 pub mod sdf;
+pub mod sdf_box_triangle;
+pub mod sdf_polygon;
 pub mod sdf_smooth_ops;
+pub mod sdf_torus;
+pub mod sdf_vesica;
 pub mod segment_closest_point_3d;
 pub mod segment_intersect_2d;
 pub mod segment_obb_intersect;
@@ -488,6 +493,7 @@ pub mod water_wetness_response;
 pub mod welzl_min_sphere;
 pub mod wind_field;
 pub mod worley;
+pub mod worley_noise;
 pub mod wu_circle;
 pub mod wu_line;
 pub mod ycbcr_bt709;
@@ -683,6 +689,9 @@ pub use ggx_energy_compensation::{
     GgxEnergyCompensationQuery, GgxEnergyCompensationResult, GpuGgxEnergyCompensation,
 };
 pub use ggx_ms_albedo::{GgxMsAlbedoQuery, GgxMsAlbedoResult, GpuGgxMsAlbedo};
+pub use ggx_smith_visibility::{
+    GgxSmithVisibilityQuery, GgxSmithVisibilityResult, GpuGgxSmithVisibility,
+};
 pub use gi_probe::{GiProbeQuery, GiProbeResult, GpuGiProbe};
 pub use gjk_2d::{GpuGjk2d, GpuGjk2dQuery, GpuGjk2dResult};
 pub use gjk_3d::{GpuGjk3d, GpuGjk3dQuery, GpuGjk3dResult};
@@ -937,7 +946,11 @@ pub use screen_space_reflection::{
     GpuScreenSpaceReflection, ScreenSpaceReflectionQuery, ScreenSpaceReflectionResult,
 };
 pub use sdf::{GpuSignedDistanceField, SdfQuery, SdfResult};
+pub use sdf_box_triangle::{GpuSdfBoxTriangle, SdfBoxTriangleQuery, SdfBoxTriangleResult};
+pub use sdf_polygon::{GpuSdfPolygon, SdfPolygonQuery, SdfPolygonResult};
 pub use sdf_smooth_ops::{GpuSdfSmoothOps, SdfSmoothOpsQuery, SdfSmoothOpsResult};
+pub use sdf_torus::{GpuSdfTorus, SdfTorusQuery, SdfTorusResult};
+pub use sdf_vesica::{GpuSdfVesica, SdfVesicaQuery, SdfVesicaResult};
 pub use segment_closest_point_3d::{
     GpuSegmentClosestPoint3d, SegmentClosestQuery, SegmentClosestResult,
 };
@@ -1158,6 +1171,10 @@ pub use water_wetness_response::{
 pub use welzl_min_sphere::{GpuWelzlMinSphere, WelzlMinSphereQuery, WelzlMinSphereResult};
 pub use wind_field::{GpuWindField, WindFieldQuery, WindFieldResult};
 pub use worley::{GpuWorley, WorleyQuery};
+pub use worley_noise::{
+    GpuWorleyNoise, WorleyNoiseQuery, WorleyNoiseResult, METRIC_CHEBYSHEV, METRIC_EUCLIDEAN,
+    METRIC_MANHATTAN,
+};
 pub use wu_circle::{GpuWuCircle, WuCircleQuery, WuCircleResult};
 pub use wu_line::{GpuWuLineRasterizer, WuLineQuery, WuLineResult, WuPixel};
 pub use ycbcr_bt709::{GpuYcbcrBt709, YcbcrOp, YcbcrQuery, YcbcrResult};
