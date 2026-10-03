@@ -1440,6 +1440,44 @@ mod pipelined_tests {
         app.update();
         app.update();
     }
+
+    /// Under the pipelined executor the per-frame extract cost is recorded on
+    /// every frame, while a simulate/render overlap sample is recorded only on
+    /// frames after the first: the first frame has no prior render in flight,
+    /// so it is skipped rather than scored as a spurious perfect overlap.
+    #[test]
+    fn pipelined_records_extract_cost_and_overlap() {
+        let render_count = Arc::new(AtomicU64::new(0));
+
+        let mut app = App::new();
+        app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+        app.set_fixed_timestep_hz(100.0);
+        app.insert_sub_app(RenderApp, make_render_sub_app(render_count.clone()));
+        app.set_extract(
+            RenderApp,
+            |_m: &mut prism_ecs::world::World, _s: &mut prism_ecs::world::World| {},
+        );
+        app.enable_pipelined_rendering();
+        app.init_frame_diagnostics();
+
+        const FRAMES: u64 = 4;
+        for _ in 0..FRAMES {
+            app.update();
+        }
+
+        let diag = app.frame_diagnostics().expect("installed");
+        // Extract is timed on every pipelined frame.
+        assert_eq!(diag.extract_time().total_frames(), FRAMES);
+        // Overlap is recorded only on frames with a prior render in flight, so
+        // the first of the FRAMES frames is skipped.
+        assert_eq!(diag.pipeline_sim().total_frames(), FRAMES - 1);
+        assert_eq!(diag.pipeline_wait().total_frames(), FRAMES - 1);
+        // The derived ratio, when present, is a well-formed fraction. It is
+        // timing-dependent, so we assert sanity rather than require `Some`.
+        if let Some(ratio) = diag.pipeline_overlap_ratio() {
+            assert!((0.0..=1.0).contains(&ratio), "overlap ratio {ratio} out of range");
+        }
+    }
 }
 
 // ---- M4 Inc2: platform lifecycle events + graceful shutdown ------------
@@ -2584,6 +2622,48 @@ mod diagnostics_tests {
         assert_eq!(w.len(), 1);
         assert_eq!(w.last(), Some(9));
         assert_eq!(w.total_samples(), 2);
+    }
+
+    /// The serial frame path times the secondary-sub-app extract step and
+    /// records one extract sample per `update()`, while never recording a
+    /// pipeline-overlap sample (overlap is a `pipelined`-only quantity, so the
+    /// derived ratio stays `None` on the serial path).
+    #[test]
+    fn frame_diagnostics_records_serial_extract_cost() {
+        let mut app = App::new();
+        app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+        app.set_fixed_timestep_hz(100.0);
+
+        // A secondary sub-app with a real extract that reads the main world.
+        app.world_mut().insert_resource(Counter::default());
+        app.add_systems(Update, |mut c: ResMut<Counter>| {
+            c.0 += 1;
+        });
+        let mut render = SubApp::new();
+        render.world.insert_resource(Counter::default());
+        app.insert_sub_app(RenderApp, render);
+        app.set_extract(
+            RenderApp,
+            |main: &mut prism_ecs::world::World, sub: &mut prism_ecs::world::World| {
+                sub.resource_mut::<Counter>().0 = main.resource::<Counter>().0;
+            },
+        );
+
+        app.init_frame_diagnostics();
+
+        const FRAMES: u64 = 4;
+        for _ in 0..FRAMES {
+            app.update();
+        }
+
+        let diag = app.frame_diagnostics().expect("installed");
+        // One extract sample recorded per frame on the serial path.
+        assert_eq!(diag.extract_time().total_frames(), FRAMES);
+        // The serial path never overlaps simulate and render, so no overlap
+        // sample is recorded and the derived ratio is absent.
+        assert_eq!(diag.pipeline_sim().total_frames(), 0);
+        assert_eq!(diag.pipeline_wait().total_frames(), 0);
+        assert_eq!(diag.pipeline_overlap_ratio(), None);
     }
 }
 

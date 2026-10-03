@@ -12,8 +12,10 @@
 //! wall clock:
 //!
 //! - [`FrameDiagnostics`] — rolling [`FrameStats`] over the whole-frame work
-//!   time, a per-phase [`FrameStats`] for each core frame phase, and a
-//!   [`CountWindow`] of the fixed-timestep **substep count** per frame.
+//!   time, a per-phase [`FrameStats`] for each core frame phase, a
+//!   [`CountWindow`] of the fixed-timestep **substep count** per frame, the
+//!   per-frame secondary-sub-app **extract cost**, and — under the `pipelined`
+//!   feature — the simulate/render **pipeline-overlap rate**.
 //! - [`StartupDiagnostics`] — each plugin's [`build`](crate::plugin::Plugin::build)
 //!   and [`finish`](crate::plugin::Plugin::finish) wall time, in registration
 //!   order, so a slow boot can be attributed to a specific plugin.
@@ -40,14 +42,31 @@
 //! Work time answers "how long did simulation take?"; cadence answers "how fast
 //! are we actually running?". Both are design §16 metrics and both are real.
 //!
+//! # Extract cost and pipeline overlap
+//!
+//! Two more design §16 frame metrics *are* measured, because they are real
+//! wall-clock quantities `prism_app` itself drives:
+//!
+//! - **Extract cost** ([`FrameDiagnostics::extract_time`]) — the per-frame time
+//!   spent running every secondary sub-app's
+//!   [`ExtractFn`](crate::sub_app::ExtractFn) against the just-simulated main
+//!   world (the one-way `main → sub` seam, design §21 / §25.2). Recorded by the
+//!   serial path and the `pipelined` executor alike, so it means the same thing
+//!   either way.
+//! - **Pipeline-overlap rate** ([`FrameDiagnostics::pipeline_overlap_ratio`]) —
+//!   under the `pipelined` feature, how much of a secondary's render was hidden
+//!   behind the next frame's simulation, derived from the measured simulate
+//!   time ([`pipeline_sim`](FrameDiagnostics::pipeline_sim)) and the measured
+//!   join-wait tail ([`pipeline_wait`](FrameDiagnostics::pipeline_wait)). It is
+//!   recorded only on frames with a prior render actually in flight, so the
+//!   first frame is skipped rather than scored as a spurious perfect overlap.
+//!
 //! # Honestly deferred
 //!
-//! - **Extract cost / pipeline-overlap rate / present latency** (design §16)
-//!   are *not* measured here. Extract and overlap are properties of the
-//!   secondary-sub-app seam and the `pipelined` executor; present latency needs
-//!   a `prism_window`/RHI present timestamp that does not exist yet. Measuring
-//!   them now would mean fabricating numbers, so they are documented as absent
-//!   rather than stubbed.
+//! - **Present latency** (design §16) is *not* measured here: it needs a
+//!   `prism_window`/RHI present timestamp that does not exist yet. Measuring it
+//!   now would mean fabricating numbers, so it is documented as absent rather
+//!   than stubbed.
 //! - **Per-system flame graph** (design §16: ECS §16.6 system timing) belongs
 //!   to `prism_ecs`'s executor, not this crate; `prism_app` only times at the
 //!   phase/schedule granularity it drives.
@@ -175,6 +194,9 @@ pub struct FrameDiagnostics {
     frame_time: FrameStats,
     phases: BTreeMap<&'static str, FrameStats>,
     fixed_substeps: CountWindow,
+    extract_time: FrameStats,
+    pipeline_sim: FrameStats,
+    pipeline_wait: FrameStats,
 }
 
 impl FrameDiagnostics {
@@ -197,6 +219,9 @@ impl FrameDiagnostics {
             frame_time: FrameStats::new(window),
             phases: BTreeMap::new(),
             fixed_substeps: CountWindow::new(window),
+            extract_time: FrameStats::new(window),
+            pipeline_sim: FrameStats::new(window),
+            pipeline_wait: FrameStats::new(window),
         }
     }
 
@@ -216,6 +241,37 @@ impl FrameDiagnostics {
     /// Record how many fixed substeps ran this frame.
     pub fn record_substeps(&mut self, substeps: u32) {
         self.fixed_substeps.record(substeps);
+    }
+
+    /// Record this frame's total secondary-sub-app **extract** time
+    /// (design §16: *"extract 耗时"*).
+    ///
+    /// This is the wall time spent running every secondary sub-app's
+    /// [`ExtractFn`](crate::sub_app::ExtractFn) against the just-simulated main
+    /// world — the one-way `main → sub` synchronization point (design §21,
+    /// §25.2). It is recorded by both the serial per-frame path
+    /// ([`SubApps::update`](crate::sub_app::SubApps)) and, under the
+    /// `pipelined` feature, the cross-thread executor, so the metric means the
+    /// same thing on either path. An app with no secondary sub-apps records a
+    /// near-zero duration each frame rather than nothing.
+    pub fn record_extract(&mut self, elapsed: Duration) {
+        self.extract_time.record(elapsed);
+    }
+
+    /// Record one pipelined frame's overlap sample: `sim` is the main-thread
+    /// simulation time that ran **while the previous frame's render was in
+    /// flight**, and `wait` is the time the main thread then blocked joining
+    /// that render (design §16: *"流水线重叠率"*).
+    ///
+    /// Only the `pipelined` cross-thread executor records this, and only on
+    /// frames that actually had a prior render in flight (the first frame has
+    /// no overlap to measure, so it is skipped rather than recorded as a
+    /// spurious perfect overlap). See
+    /// [`pipeline_overlap_ratio`](Self::pipeline_overlap_ratio) for the derived
+    /// rate.
+    pub fn record_pipeline_overlap(&mut self, sim: Duration, wait: Duration) {
+        self.pipeline_sim.record(sim);
+        self.pipeline_wait.record(wait);
     }
 
     /// Rolling whole-frame work-time statistics.
@@ -241,6 +297,57 @@ impl FrameDiagnostics {
     #[must_use]
     pub fn fixed_substeps(&self) -> &CountWindow {
         &self.fixed_substeps
+    }
+
+    /// Rolling secondary-sub-app extract-time statistics (design §16).
+    ///
+    /// Empty ([`FrameStats::is_empty`]) until the first instrumented frame with
+    /// at least one secondary sub-app has run.
+    #[must_use]
+    pub fn extract_time(&self) -> &FrameStats {
+        &self.extract_time
+    }
+
+    /// Rolling statistics for the pipelined per-frame **simulation** time that
+    /// overlapped the previous frame's render (design §16). Empty until the
+    /// `pipelined` executor has driven at least one overlapped frame.
+    #[must_use]
+    pub fn pipeline_sim(&self) -> &FrameStats {
+        &self.pipeline_sim
+    }
+
+    /// Rolling statistics for the time the main thread **blocked** joining the
+    /// overlapped render after simulation finished (design §16). A near-zero
+    /// mean means the render fit entirely inside the simulation window; a large
+    /// mean means the render overran and stalled the next frame.
+    #[must_use]
+    pub fn pipeline_wait(&self) -> &FrameStats {
+        &self.pipeline_wait
+    }
+
+    /// The derived pipeline-overlap ratio in `0.0..=1.0` (design §16:
+    /// *"流水线重叠率"*), or `None` before any overlapped frame is recorded.
+    ///
+    /// Computed from the mean simulation and mean join-wait times as
+    /// `mean_sim / (mean_sim + mean_wait)`:
+    ///
+    /// - `1.0` — the overlapped render finished before simulation did, so it
+    ///   was fully hidden behind the next frame's simulation (ideal).
+    /// - `< 1.0` — the render overran the simulation window by the wait tail,
+    ///   so throughput is bounded by the render, not the simulation.
+    ///
+    /// A zero mean simulation time (sub-microsecond frames) yields `None`
+    /// rather than a meaningless ratio.
+    #[must_use]
+    pub fn pipeline_overlap_ratio(&self) -> Option<f64> {
+        let sim = self.pipeline_sim.average()?.as_secs_f64();
+        let wait = self.pipeline_wait.average()?.as_secs_f64();
+        let denom = sim + wait;
+        if denom > 0.0 {
+            Some(sim / denom)
+        } else {
+            None
+        }
     }
 
     /// The configured rolling-window length.

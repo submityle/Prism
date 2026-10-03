@@ -95,17 +95,48 @@ impl PipelinedExecutor {
     /// by the newly spawned render frame until [`sync`](Self::sync) (or the
     /// next `drive`) brings them back.
     pub fn drive(&mut self, main: &mut SubApp, secondary: &mut Secondaries) {
-        // 1. Simulate this frame while last frame's render overlaps.
-        main.update();
+        use std::time::Instant;
 
-        // 2. Reclaim last frame's secondaries from the render worker.
+        // 1. Simulate this frame while last frame's render overlaps. If a
+        //    render is in flight now, this whole `update` runs concurrently
+        //    with it — the overlap window the pipeline exists to create.
+        let had_in_flight = self.in_flight.is_some();
+        let sim_start = Instant::now();
+        main.update();
+        let sim = sim_start.elapsed();
+
+        // 2. Reclaim last frame's secondaries from the render worker. The time
+        //    spent blocked here is the render tail that overran the simulation
+        //    window above (zero when the render finished first).
+        let wait_start = Instant::now();
         self.join_in_flight(secondary);
+        let wait = wait_start.elapsed();
+
+        // Observability (design §16: 流水线重叠率): record the overlap sample
+        // only when a render was genuinely in flight during the simulate above,
+        // so the first frame (nothing to overlap) is skipped rather than scored
+        // as a spurious perfect overlap.
+        if had_in_flight
+            && let Some(diag) = main
+                .world
+                .get_resource_mut::<crate::diagnostics::FrameDiagnostics>()
+        {
+            diag.record_pipeline_overlap(sim, wait);
+        }
 
         // 3. Extract on the main thread (one-way main → sub, design §21): the
         //    only point a secondary reads the main world, run with no render
         //    thread live so the read is of a complete frame.
+        let extract_start = Instant::now();
         for (_, sub_app) in secondary.iter_mut() {
             sub_app.run_extract(&mut main.world);
+        }
+        let extract = extract_start.elapsed();
+        if let Some(diag) = main
+            .world
+            .get_resource_mut::<crate::diagnostics::FrameDiagnostics>()
+        {
+            diag.record_extract(extract);
         }
 
         // 4. Hand the secondaries to a worker thread and render this frame

@@ -368,6 +368,37 @@ impl SubApps {
     fn update_serial(&mut self) {
         self.main.update();
         let main_world = &mut self.main.world;
+
+        // Opt-in observability (design §16): when the main world carries a
+        // `FrameDiagnostics` resource, time the extract step as one contiguous
+        // block and record the total extract cost. Grouping every secondary's
+        // extract before every secondary's update is behaviourally identical to
+        // interleaving them — extract reads the main world and writes only its
+        // own sub-world, while update touches only its own sub-world, so no
+        // secondary observes another — and it mirrors the `pipelined`
+        // executor's extract/update split, keeping the metric consistent across
+        // both paths.
+        #[cfg(feature = "std")]
+        if main_world
+            .get_resource::<crate::diagnostics::FrameDiagnostics>()
+            .is_some()
+        {
+            let start = std::time::Instant::now();
+            for (_, sub_app) in &mut self.secondary {
+                sub_app.run_extract(main_world);
+            }
+            let extract = start.elapsed();
+            if let Some(diag) =
+                main_world.get_resource_mut::<crate::diagnostics::FrameDiagnostics>()
+            {
+                diag.record_extract(extract);
+            }
+            for (_, sub_app) in &mut self.secondary {
+                sub_app.update();
+            }
+            return;
+        }
+
         for (_, sub_app) in &mut self.secondary {
             sub_app.run_extract(main_world);
             sub_app.update();
