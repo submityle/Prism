@@ -305,6 +305,7 @@ pub mod quality_decision;
 pub mod quaternion_rotate;
 pub mod quickselect_u32;
 pub mod radix_sort_u32;
+pub mod raster_triangle_vis;
 pub mod ray_aabb;
 pub mod ray_capsule;
 pub mod ray_cone;
@@ -394,6 +395,7 @@ pub mod tonemap;
 pub mod total_coverage;
 pub mod tracking_transmittance;
 pub mod transcendental_approx;
+pub mod transparency_bin_draws;
 pub mod transparency_path_select;
 pub mod transparency_route_select;
 pub mod tri_tri_intersect;
@@ -424,6 +426,7 @@ pub mod voxel_traversal;
 pub mod water_breaking_classify;
 pub mod water_caustics_intensity;
 pub mod water_coupling_forces;
+pub mod water_coupling_plan;
 pub mod water_dispersion_offsets;
 pub mod water_foam_decay;
 pub mod water_mg_prolong;
@@ -431,6 +434,7 @@ pub mod water_mg_residual;
 pub mod water_mg_restrict;
 pub mod water_mg_smooth;
 pub mod water_multigrid_level;
+pub mod water_ocean_bin;
 pub mod water_ocean_cascade;
 pub mod water_ocean_clipmap;
 pub mod water_ocean_patch;
@@ -439,10 +443,12 @@ pub mod water_pbf_constraint;
 pub mod water_pbf_correction;
 pub mod water_pbf_density;
 pub mod water_pbf_kernels;
+pub mod water_pbf_neighbors;
 pub mod water_shading_npr;
 pub mod water_shading_pbr;
 pub mod water_swe_cfl;
 pub mod water_swe_inject;
+pub mod water_swe_step;
 pub mod water_swe_volume;
 pub mod water_swe_wavespeed;
 pub mod water_transition_blend;
@@ -815,6 +821,9 @@ pub use quality_decision::{GpuQualityDecision, QualityDecisionQuery, QualityDeci
 pub use quaternion_rotate::{GpuQuaternionRotate, QuatRotateQuery, QuatRotateResult};
 pub use quickselect_u32::{GpuQuickselect, GpuQuickselectU32, QuickselectQuery};
 pub use radix_sort_u32::{GpuRadixSort, GpuRadixSortU32};
+pub use raster_triangle_vis::{
+    GpuRasterTriangleVis, RasterTriangleVisQuery, RasterTriangleVisResult,
+};
 pub use ray_aabb::{GpuRayAabb, RayAabbQuery, RayAabbResult};
 pub use ray_capsule::{GpuRayCapsule, RayCapsuleQuery, RayCapsuleResult};
 pub use ray_cone::{GpuRayCone, RayConeQuery, RayConeResult};
@@ -959,6 +968,9 @@ pub use tracking_transmittance::{
     GpuTrackingTransmittance, TrackingEstimate, TrackingTransmittanceQuery,
 };
 pub use transcendental_approx::{GpuTranscendental, TranscendentalQuery, TranscendentalResult};
+pub use transparency_bin_draws::{
+    GpuTransparencyBinDraws, TransparencyBinDrawsQuery, TransparencyBinDrawsResult,
+};
 pub use transparency_path_select::{
     GpuTransparencyPathSelect, TransparencyPathSelectQuery, TransparencyPathSelectResult,
 };
@@ -1001,6 +1013,9 @@ pub use water_caustics_intensity::{
 pub use water_coupling_forces::{
     GpuWaterCouplingForces, WaterCouplingForcesQuery, WaterCouplingForcesResult,
 };
+pub use water_coupling_plan::{
+    GpuWaterCouplingPlan, WaterCouplingPlanQuery, WaterCouplingPlanResult,
+};
 pub use water_dispersion_offsets::{
     GpuWaterDispersionOffsets, WaterDispersionOffsetsQuery, WaterDispersionOffsetsResult,
 };
@@ -1012,6 +1027,7 @@ pub use water_mg_smooth::{GpuWaterMgSmooth, WaterMgSmoothQuery, WaterMgSmoothRes
 pub use water_multigrid_level::{
     GpuWaterMultigridLevel, WaterMultigridLevelQuery, WaterMultigridLevelResult,
 };
+pub use water_ocean_bin::{GpuWaterOceanBin, WaterOceanBinQuery, WaterOceanBinResult};
 pub use water_ocean_cascade::{
     GpuWaterOceanCascade, WaterOceanCascadeQuery, WaterOceanCascadeResult,
 };
@@ -1028,10 +1044,14 @@ pub use water_pbf_correction::{
 };
 pub use water_pbf_density::{GpuWaterPbfDensity, WaterPbfDensityQuery, WaterPbfDensityResult};
 pub use water_pbf_kernels::{GpuWaterPbfKernels, WaterPbfKernelsQuery, WaterPbfKernelsResult};
+pub use water_pbf_neighbors::{
+    GpuWaterPbfNeighbors, WaterPbfNeighborsQuery, WaterPbfNeighborsResult,
+};
 pub use water_shading_npr::{GpuWaterShadingNpr, WaterShadingNprQuery, WaterShadingNprResult};
 pub use water_shading_pbr::{GpuWaterShadingPbr, WaterShadingPbrQuery, WaterShadingPbrResult};
 pub use water_swe_cfl::{GpuWaterSweCfl, WaterSweCflQuery, WaterSweCflResult};
 pub use water_swe_inject::{GpuWaterSweInject, WaterSweInjectQuery, WaterSweInjectResult};
+pub use water_swe_step::{GpuWaterSweStep, WaterSweStepQuery, WaterSweStepResult};
 pub use water_swe_volume::{GpuWaterSweVolume, WaterSweVolumeQuery, WaterSweVolumeResult};
 pub use water_swe_wavespeed::{
     GpuWaterSweWavespeed, WaterSweWavespeedQuery, WaterSweWavespeedResult,
