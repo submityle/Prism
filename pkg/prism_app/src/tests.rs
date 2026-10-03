@@ -6916,4 +6916,122 @@ mod cvar_tests {
             Some(SettingsLayer::EngineDefault)
         );
     }
+
+    #[test]
+    fn write_user_config_emits_only_user_layer_archived_cvars() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.quality", 1_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 3))
+                .flag(CvarFlags::ARCHIVE),
+        )
+        .unwrap();
+        app.register_cvar(
+            CvarSpec::new("r.vsync", true)
+                .category(CvarCategory::Render)
+                .flag(CvarFlags::ARCHIVE),
+        )
+        .unwrap();
+        // An archived cvar whose only override is at Runtime must not persist.
+        app.register_cvar(
+            CvarSpec::new("r.gamma", 1.0_f64)
+                .category(CvarCategory::Render)
+                .flag(CvarFlags::ARCHIVE),
+        )
+        .unwrap();
+        // A non-archived cvar set at User must not persist either.
+        app.register_cvar(CvarSpec::new("sys.debug", false).category(CvarCategory::System))
+            .unwrap();
+
+        app.set_cvar_at(SettingsLayer::User, "r.quality", 3_i64)
+            .unwrap();
+        app.set_cvar_at(SettingsLayer::User, "r.vsync", false).unwrap();
+        app.set_cvar("r.gamma", 2.0_f64).unwrap(); // Runtime, not User.
+        app.set_cvar_at(SettingsLayer::User, "sys.debug", true)
+            .unwrap(); // not ARCHIVE.
+
+        let config = app.write_user_config();
+        let body: Vec<&str> = config
+            .lines()
+            .filter(|line| !line.starts_with("//"))
+            .collect();
+        // Ascending-name order, only archived + User-layer values.
+        assert_eq!(body, ["r.quality 3", "r.vsync false"]);
+    }
+
+    #[test]
+    fn write_user_config_round_trips_through_load_user_config() {
+        fn registered() -> App {
+            let mut app = App::new();
+            app.register_cvar(
+                CvarSpec::new("r.quality", 1_i64)
+                    .category(CvarCategory::Render)
+                    .bounds(CvarBounds::Int(0, 3))
+                    .flag(CvarFlags::ARCHIVE),
+            )
+            .unwrap();
+            app.register_cvar(
+                CvarSpec::new("r.gamma", 1.0_f64)
+                    .category(CvarCategory::Render)
+                    .flag(CvarFlags::ARCHIVE),
+            )
+            .unwrap();
+            app
+        }
+
+        let mut source = registered();
+        source.set_cvar_at(SettingsLayer::User, "r.quality", 2_i64).unwrap();
+        source.set_cvar_at(SettingsLayer::User, "r.gamma", 2.5_f64).unwrap();
+        let config = source.write_user_config();
+
+        let mut loaded = registered();
+        loaded.load_user_config(&config);
+        assert_eq!(loaded.cvar_int("r.quality"), Some(2));
+        assert_eq!(loaded.cvar_float("r.gamma"), Some(2.5));
+        assert_eq!(
+            loaded.world().resource::<Settings>().resolved_layer("r.quality"),
+            Some(SettingsLayer::User)
+        );
+        assert_eq!(
+            loaded.world().resource::<Settings>().resolved_layer("r.gamma"),
+            Some(SettingsLayer::User)
+        );
+    }
+
+    #[test]
+    fn write_user_config_is_header_only_without_user_values() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.vsync", true)
+                .category(CvarCategory::Render)
+                .flag(CvarFlags::ARCHIVE),
+        )
+        .unwrap();
+        app.set_cvar("r.vsync", false).unwrap(); // Runtime only.
+
+        let config = app.write_user_config();
+        // Only the comment header; nothing persisted.
+        assert!(config.lines().all(|line| line.starts_with("//")));
+        // Reloading a header-only config is a no-op.
+        let outcomes = app.load_user_config(&config);
+        assert!(outcomes.iter().all(|o| *o == ConsoleOutcome::Empty));
+    }
+
+    #[test]
+    fn write_user_config_skips_user_string_with_newline() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("sys.motd", "hello")
+                .category(CvarCategory::System)
+                .flag(CvarFlags::ARCHIVE),
+        )
+        .unwrap();
+        app.set_cvar_at(SettingsLayer::User, "sys.motd", "line1\nline2")
+            .unwrap();
+
+        let config = app.write_user_config();
+        // The newline-bearing value is skipped rather than corrupting the file.
+        assert!(config.lines().all(|line| line.starts_with("//")));
+    }
 }

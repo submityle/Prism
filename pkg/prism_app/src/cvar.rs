@@ -1262,6 +1262,67 @@ impl App {
         out
     }
 
+    /// Serialise the [`User`](crate::settings::SettingsLayer::User)-layer value
+    /// of every [`ARCHIVE`](CvarFlags::ARCHIVE) cvar as console lines suitable
+    /// for persisting to a user config file and reloading through
+    /// [`load_user_config`](App::load_user_config) (design §14 config layering,
+    /// §24.6).
+    ///
+    /// This is the save half of the User-layer round-trip, the layer-correct
+    /// counterpart to [`write_archive_config`](App::write_archive_config):
+    /// where that method writes each cvar's *resolved* cascade value (useful
+    /// for a full snapshot), this writes **only** the value the user explicitly
+    /// set at the [`User`](crate::settings::SettingsLayer::User) layer. A cvar
+    /// whose current value comes from a lower layer (engine default, platform
+    /// tier) or a higher one (command-line flag, runtime console tweak) is
+    /// *not* emitted, so transient launch flags and live console edits never
+    /// leak into the persisted user preferences. Reloading the output through
+    /// [`load_user_config`](App::load_user_config) restores exactly those user
+    /// choices into the `User` layer.
+    ///
+    /// Only [`ARCHIVE`](CvarFlags::ARCHIVE) cvars are considered — the flag is
+    /// the declared opt-in for "persist this to the user config" — and they are
+    /// emitted in ascending-name order via [`CvarRegistry::archived`], so the
+    /// output is deterministic. As with
+    /// [`write_archive_config`](App::write_archive_config), a string value
+    /// containing a newline cannot be represented in this line-based format and
+    /// is skipped. This crate performs no file I/O: callers write the returned
+    /// string to disk themselves.
+    #[must_use]
+    pub fn write_user_config(&self) -> String {
+        let mut out = String::from(
+            "// Prism user cvars — generated config; reload via load_user_config.\n",
+        );
+        let Some(registry) = self.world().get_resource::<CvarRegistry>() else {
+            return out;
+        };
+        let Some(settings) = self.world().get_resource::<Settings>() else {
+            return out;
+        };
+        for name in registry.archived() {
+            // Only the value the user actually set at the User layer is
+            // persisted; lower/higher layers are left to their own sources.
+            let Some(value) = settings
+                .layers_for(name)
+                .and_then(|by_layer| by_layer.get(&SettingsLayer::User))
+            else {
+                continue;
+            };
+            if let SettingValue::Str(text) = value
+                && text.contains('\n')
+            {
+                // A newline would split one value across config lines; skip it
+                // rather than emit a corrupt, non-round-tripping entry.
+                continue;
+            }
+            out.push_str(name);
+            out.push(' ');
+            out.push_str(&format_cvar_token(value));
+            out.push('\n');
+        }
+        out
+    }
+
     /// Snapshot every registered cvar as a [`CvarListing`], in ascending-name
     /// order (design §24.6 console enumeration/help).
     ///
