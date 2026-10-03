@@ -30,4 +30,5 @@
 //! virtual-voice promotion/demotion of design section 25.
 
 pub mod critical_bands;
+pub mod hdr_gate;
 pub mod masking_model;
