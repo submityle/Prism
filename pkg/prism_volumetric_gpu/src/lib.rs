@@ -358,13 +358,18 @@ pub mod sat_collision_2d;
 pub mod scanline_polygon_fill;
 pub mod screen_space_reflection;
 pub mod sdf;
+pub mod sdf_2d_ops;
 pub mod sdf_arc2d;
 pub mod sdf_box2d;
 pub mod sdf_box_triangle;
 pub mod sdf_capsule2d;
 pub mod sdf_cone_segment;
 pub mod sdf_cone_solid;
+pub mod sdf_csg_blend;
 pub mod sdf_cylinder_cone;
+pub mod sdf_domain_repeat;
+pub mod sdf_domain_shell;
+pub mod sdf_domain_transform;
 pub mod sdf_ellipsoid;
 pub mod sdf_gradient2d;
 pub mod sdf_gradient3d_a;
@@ -372,6 +377,7 @@ pub mod sdf_gradient3d_b;
 pub mod sdf_misc2d;
 pub mod sdf_organic2d;
 pub mod sdf_polygon;
+pub mod sdf_primitives_3d;
 pub mod sdf_prism3d;
 pub mod sdf_regular_poly2d;
 pub mod sdf_segment3d;
@@ -964,13 +970,20 @@ pub use screen_space_reflection::{
     GpuScreenSpaceReflection, ScreenSpaceReflectionQuery, ScreenSpaceReflectionResult,
 };
 pub use sdf::{GpuSignedDistanceField, SdfQuery, SdfResult};
+pub use sdf_2d_ops::{GpuSdf2dOps, Sdf2dOpsQuery, Sdf2dOpsResult};
 pub use sdf_arc2d::{GpuSdfArc2d, SdfArc2dQuery, SdfArc2dResult};
 pub use sdf_box2d::{GpuSdfBox2d, SdfBox2dQuery, SdfBox2dResult};
 pub use sdf_box_triangle::{GpuSdfBoxTriangle, SdfBoxTriangleQuery, SdfBoxTriangleResult};
 pub use sdf_capsule2d::{GpuSdfCapsule2d, SdfCapsule2dQuery, SdfCapsule2dResult};
 pub use sdf_cone_segment::{GpuSdfConeSegment, SdfConeSegmentQuery, SdfConeSegmentResult};
 pub use sdf_cone_solid::{GpuSdfConeSolid, SdfConeSolidQuery, SdfConeSolidResult};
+pub use sdf_csg_blend::{GpuSdfCsgBlend, SdfCsgBlendQuery, SdfCsgBlendResult};
 pub use sdf_cylinder_cone::{GpuSdfCylinderCone, SdfCylinderConeQuery, SdfCylinderConeResult};
+pub use sdf_domain_repeat::{GpuSdfDomainRepeat, SdfDomainRepeatQuery, SdfDomainRepeatResult};
+pub use sdf_domain_shell::{GpuSdfDomainShell, SdfDomainShellQuery, SdfDomainShellResult};
+pub use sdf_domain_transform::{
+    GpuSdfDomainTransform, SdfDomainTransformQuery, SdfDomainTransformResult,
+};
 pub use sdf_ellipsoid::{GpuSdfEllipsoid, SdfEllipsoidQuery, SdfEllipsoidResult};
 pub use sdf_gradient2d::{GpuSdfGradient2d, SdfGradient2dQuery, SdfGradient2dResult};
 pub use sdf_gradient3d_a::{GpuSdfGradient3dA, SdfGradient3dAQuery, SdfGradient3dAResult};
@@ -978,6 +991,7 @@ pub use sdf_gradient3d_b::{GpuSdfGradient3dB, SdfGradient3dBQuery, SdfGradient3d
 pub use sdf_misc2d::{GpuSdfMisc2d, SdfMisc2dQuery, SdfMisc2dResult};
 pub use sdf_organic2d::{GpuSdfOrganic2d, SdfOrganic2dQuery, SdfOrganic2dResult};
 pub use sdf_polygon::{GpuSdfPolygon, SdfPolygonQuery, SdfPolygonResult};
+pub use sdf_primitives_3d::{GpuSdfPrimitives3d, SdfPrimitives3dQuery, SdfPrimitives3dResult};
 pub use sdf_prism3d::{GpuSdfPrism3d, SdfPrism3dQuery, SdfPrism3dResult};
 pub use sdf_regular_poly2d::{GpuSdfRegularPoly2d, SdfRegularPoly2dQuery, SdfRegularPoly2dResult};
 pub use sdf_segment3d::{GpuSdfSegment3d, SdfSegment3dQuery, SdfSegment3dResult};
