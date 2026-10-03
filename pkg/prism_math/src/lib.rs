@@ -33,8 +33,13 @@
 //!   disk/sphere/Gaussian sampling), Perlin/Simplex noise with fractal
 //!   helpers ([`noise`]), and AVX2-accelerated batched transforms
 //!   ([`batch`]) with a scalar reference and parity tests.
-//! - **M6+ (planned):** dual-quaternions, `f16`, octahedral/SoA, and the
-//!   `compat-bevy` migration aliases.
+//! - **M6 (this crate, done):** dual quaternions ([`dual_quat`]:
+//!   `DualQuat` rigid transforms with `nlerp`/`sclerp`/weighted skinning
+//!   blends), half precision ([`f16`]: IEEE 754 `binary16` `F16` scalar with
+//!   round-to-nearest-even conversions plus `F16Vec2/3/4` storage vectors),
+//!   octahedral normal encoding ([`octahedral`]), structure-of-arrays batches
+//!   ([`soa`]: `SoaVec3`), full swizzle coverage ([`swizzle`]), and the
+//!   `compat-bevy` migration aliases ([`compat_bevy`], feature-gated).
 //!
 //! The scalar backend here is the behavioural reference that later SIMD
 //! backends must match within documented tolerances.
@@ -46,6 +51,8 @@
 // grant narrowly-scoped `#[allow(unsafe_code, reason = ...)]` exceptions in the
 // backend modules, each paired with `// SAFETY:` justifications.
 
+extern crate alloc;
+
 mod affine;
 mod backend;
 mod bigworld;
@@ -55,6 +62,15 @@ mod float;
 mod mat;
 mod quat;
 mod vec;
+
+pub mod dual_quat;
+pub mod f16;
+pub mod octahedral;
+pub mod soa;
+mod swizzle;
+
+#[cfg(feature = "compat-bevy")]
+pub mod compat_bevy;
 
 pub mod batch;
 pub mod color;
@@ -85,6 +101,10 @@ pub use self::fixed::{
 pub use self::color::{Hsla, Hsva, LinearRgba, Oklaba, Oklcha, Srgba, Xyza};
 pub use self::noise::{Fractal, Noise2, Noise3, Perlin, Simplex};
 pub use self::rng::{Pcg32, Rng, SplitMix64, Xoshiro256StarStar};
+
+pub use self::dual_quat::DualQuat;
+pub use self::f16::{F16, F16Vec2, F16Vec3, F16Vec4};
+pub use self::soa::SoaVec3;
 
 /// Mathematical constant helpers (`f32`).
 pub mod consts {
@@ -193,6 +213,9 @@ pub mod prelude {
         Fractal, Hsla, Hsva, LinearRgba, Noise2, Noise3, Oklaba, Oklcha, Pcg32, Perlin, Rng,
         Simplex, SplitMix64, Srgba, Xoshiro256StarStar, Xyza, batch, color, noise, rng,
     };
+    pub use crate::{
+        DualQuat, F16, F16Vec2, F16Vec3, F16Vec4, SoaVec3, dual_quat, f16, octahedral, soa,
+    };
 }
 
 #[cfg(test)]
@@ -205,3 +228,7 @@ mod m3_tests;
 mod m4_tests;
 #[cfg(test)]
 mod m5_tests;
+#[cfg(test)]
+mod tests_m6_core;
+#[cfg(all(test, feature = "compat-bevy"))]
+mod tests_m6_compat;

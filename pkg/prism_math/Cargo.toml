@@ -20,5 +20,9 @@ default = ["std"]
 # facade is no_std and falls back to compile-time `cfg(target_feature=...)`.
 std = ["prism_platform/std"]
 
+# M6 migration shim: glam/bevy_math-shaped type aliases (e.g. `Affine3A`).
+# Purely additive aliases over the existing types; no behavior or layout change.
+compat-bevy = []
+
 [lints]
 workspace = true
