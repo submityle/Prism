@@ -1,0 +1,40 @@
+[package]
+name = "prism_audio_immersive"
+version = "0.1.0"
+edition = "2024"
+description = "Six-degree-of-freedom immersive audio interchange and loudspeaker-array rendering for Prism's next-generation audio engine: MPEG-I-style Encoder Input Format (EIF) scene import/export, ADM/BW64/S-ADM production interchange, and VBAP/AllRAD/WFS/beamforming array panners. Classic data model and geometric/matrix amplitude-panning only, no AI/ML. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, Google Resonance Audio, Dolby, or MPEG source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+prism_audio_spatial = { path = "../prism_audio_spatial" }
+prism_audio_object = { path = "../prism_audio_object" }
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_immersive = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = [
+  "prism_audio_core/std",
+  "prism_audio_spatial/std",
+  "prism_audio_object/std",
+  "bevy_math/std",
+]
+serialize = [
+  "dep:serde",
+  "prism_audio_core/serialize",
+  "prism_audio_spatial/serialize",
+  "prism_audio_object/serialize",
+  "bevy_math/serialize",
+]
+
+[lints]
+workspace = true
