@@ -41,5 +41,9 @@ max_level_info = []
 max_level_debug = []
 max_level_trace = []
 
+[[bench]]
+name = "log_dispatch"
+harness = false
+
 [lints]
 workspace = true
