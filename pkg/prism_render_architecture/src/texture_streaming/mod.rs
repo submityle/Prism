@@ -13,15 +13,32 @@
 //! * [`scheduler`] — a byte-budget-constrained greedy pass that picks the
 //!   resident set and reports the frame's uploads and evictions.
 //!
-//! No layer holds a `GPU` handle: the backend keys its physical store on
-//! [`TexturePageKey`] and consults these tables to decide what to upload and
-//! drop, pending the `GPU` backend.
+//! Two further layers turn that `CPU`-side decision into a device-ready backend
+//! core, still holding no `GPU` handle so the crate stays device-free:
+//!
+//! * [`pool`] — the [`pool::PhysicalPagePool`] slot allocator that binds each
+//!   resident [`TexturePageKey`] to a physical tile slot with a deterministic,
+//!   lowest-free-first policy, and turns a [`scheduler::StreamingPlan`] into the
+//!   frame's [`pool::PageUpload`] copy list.
+//! * [`indirection`] — the [`indirection::GpuPageTable`] serialiser that packs
+//!   the resident `(key, slot)` set into a flat, sorted, binary-searchable `u32`
+//!   buffer whose compare order matches [`TexturePageKey`], so a shader resolves
+//!   a page coordinate with the same comparison sequence as the golden
+//!   [`indirection::GpuPageTable::lookup`].
+//!
+//! The only device-side work left to a scene-layer twin is recording the
+//! staging-to-atlas copies described by [`pool::PageUpload`] and uploading
+//! [`indirection::GpuPageTable::words`]; this crate computes both deterministically.
 
 pub mod feedback;
+pub mod indirection;
+pub mod pool;
 pub mod residency;
 pub mod scheduler;
 
 pub use feedback::{PageDemand, SemanticWeights, MAX_SCREEN_IMPORTANCE, MIP_URGENCY};
+pub use indirection::{GpuPageTable, PAGE_TABLE_ENTRY_WORDS};
+pub use pool::{PageUpload, PhysicalPagePool};
 pub use residency::{PageRecord, PageResidency, TextureResidencyTable};
 pub use scheduler::{schedule, schedule_and_apply, StreamingPlan};
 
