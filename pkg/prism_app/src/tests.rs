@@ -3531,8 +3531,8 @@ mod determinism_tests {
     use super::*;
 
     use crate::determinism::{
-        DeterministicRng, FrameHash, HashDivergence, InputRecording, RecordedInput, ReplayLog,
-        ReplayMode, DEFAULT_HASH_HISTORY,
+        DeterministicRng, FrameHash, FrameHashManifest, HashDivergence, InputRecording,
+        RecordedInput, ReplayLog, ReplayMode, DEFAULT_HASH_HISTORY,
     };
 
     // ---- DeterministicRng -------------------------------------------------
@@ -4110,6 +4110,114 @@ mod determinism_tests {
         assert_eq!(rec.len(), 2);
         // FrameHash available for divergence detection.
         assert!(app.frame_hash().is_some());
+    }
+
+    // ---- FrameHashManifest ------------------------------------------------
+
+    /// Capture a golden run's hashes into a manifest, then confirm an identical
+    /// run matches frame-for-frame (no divergence) and the manifest exposes its
+    /// recorded range and expected values.
+    #[test]
+    fn frame_hash_manifest_captures_a_clean_run() {
+        // Golden run: fold three frames of authoritative state.
+        let mut golden = FrameHash::new();
+        for v in [1u64, 2, 3] {
+            golden.write_u64(v);
+            golden.finalize_frame();
+        }
+        let manifest = FrameHashManifest::from_frame_hash(&golden);
+        assert_eq!(manifest.start_frame(), 0);
+        assert_eq!(manifest.len(), 3);
+        assert!(!manifest.is_empty());
+        assert_eq!(manifest.end_frame(), 3);
+        assert_eq!(manifest.expected_at(1), golden.hash_at(1));
+        assert_eq!(manifest.expected_at(3), None);
+
+        // An identical replay hashes the same way: no divergence.
+        let mut replay = FrameHash::new();
+        for v in [1u64, 2, 3] {
+            replay.write_u64(v);
+            replay.finalize_frame();
+        }
+        assert_eq!(manifest.first_divergence(&replay), None);
+    }
+
+    /// A manifest pins the first frame where a divergent run breaks from the
+    /// golden expectation, reporting expected (left) vs actual (right).
+    #[test]
+    fn frame_hash_manifest_detects_divergence() {
+        let mut golden = FrameHash::new();
+        for v in [10u64, 20, 30, 40] {
+            golden.write_u64(v);
+            golden.finalize_frame();
+        }
+        let manifest = FrameHashManifest::from_frame_hash(&golden);
+
+        // Divergent run: frame index 2 folds different state.
+        let mut actual = FrameHash::new();
+        for v in [10u64, 20, 99, 40] {
+            actual.write_u64(v);
+            actual.finalize_frame();
+        }
+        let div = manifest.first_divergence(&actual).expect("divergence at frame 2");
+        assert_eq!(div.frame, 2);
+        assert_eq!(div.left, manifest.expected_at(2).unwrap());
+        assert_eq!(div.right, actual.hash_at(2).unwrap());
+        assert_ne!(div.left, div.right);
+    }
+
+    /// Incremental capture via `recording_from` + `push` retains history beyond
+    /// a hasher's rolling window, and `App::verify_against_manifest` runs the
+    /// one-call dual-run check against the live `FrameHash`.
+    #[test]
+    fn app_verify_against_manifest_round_trips() {
+        // Build a golden manifest incrementally, anchored at frame 0.
+        let mut golden = FrameHash::new();
+        let mut manifest = FrameHashManifest::recording_from(0);
+        for v in [5u64, 6, 7] {
+            golden.write_u64(v);
+            golden.finalize_frame();
+            manifest.push(golden.last().unwrap());
+        }
+        assert_eq!(manifest.len(), 3);
+
+        // No FrameHash installed yet -> nothing to compare -> None.
+        let mut app = App::new();
+        assert_eq!(app.verify_against_manifest(&manifest), None);
+
+        // Install a hasher and reproduce the golden run exactly: matches.
+        app.init_frame_hash();
+        {
+            let hash = app
+                .world_mut()
+                .get_resource_mut::<FrameHash>()
+                .expect("frame hash installed");
+            for v in [5u64, 6, 7] {
+                hash.write_u64(v);
+                hash.finalize_frame();
+            }
+        }
+        assert_eq!(app.verify_against_manifest(&manifest), None);
+
+        // Fold a divergent fourth frame against a one-longer manifest.
+        let mut golden2 = FrameHash::new();
+        for v in [5u64, 6, 7, 8] {
+            golden2.write_u64(v);
+            golden2.finalize_frame();
+        }
+        let manifest2 = FrameHashManifest::from_frame_hash(&golden2);
+        {
+            let hash = app
+                .world_mut()
+                .get_resource_mut::<FrameHash>()
+                .expect("frame hash installed");
+            hash.write_u64(999);
+            hash.finalize_frame();
+        }
+        let div = app
+            .verify_against_manifest(&manifest2)
+            .expect("fourth frame diverges");
+        assert_eq!(div.frame, 3);
     }
 }
 

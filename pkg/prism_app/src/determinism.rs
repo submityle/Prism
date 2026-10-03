@@ -431,6 +431,162 @@ impl Default for FrameHash {
     }
 }
 
+/// A persisted "golden" sequence of per-frame [`FrameHash`] digests captured
+/// from a known-good run, for later dual-run regression checks (design §22's
+/// *"deterministic dual-run frame-hash equality"*, design §15 record/replay).
+///
+/// [`FrameHash::first_divergence`] compares two *live* hashers, but is bounded
+/// by the frames **both** still retain in their rolling windows — fine for an
+/// A/B dual-run executed together, useless once the golden run is over and its
+/// hasher is gone. A manifest is the durable other half: it snapshots the
+/// ordered finalized hashes (unbounded by any live window, starting at an
+/// absolute [`start_frame`](FrameHashManifest::start_frame)) so a *later* run
+/// — a replay of a [`ReplayLog`], a CI re-run, a port to another toolchain —
+/// can be checked against the recorded expectation.
+///
+/// Pair it with a [`ReplayLog`]: the log reproduces the inputs, the manifest
+/// asserts the reproduced run hashed identically frame-for-frame.
+///
+/// Like [`ReplayLog`], this is the in-memory artifact; a stable on-disk format
+/// is a thin serialization layer left to the application (the module owns no
+/// serialization format), so persistence is honestly out of this crate's
+/// scope rather than faked here.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct FrameHashManifest {
+    start_frame: u64,
+    hashes: Vec<u64>,
+}
+
+impl FrameHashManifest {
+    /// Build a manifest from an explicit `start_frame` (the absolute
+    /// [`FrameHash::frame_index`] of `hashes[0]`) and the consecutive
+    /// per-frame `hashes` that followed it.
+    #[inline]
+    #[must_use]
+    pub fn new(start_frame: u64, hashes: Vec<u64>) -> Self {
+        Self { start_frame, hashes }
+    }
+
+    /// Begin an empty manifest whose first [`push`](FrameHashManifest::push)ed
+    /// hash will be recorded at absolute frame `start_frame`. Use this to
+    /// capture a golden run incrementally (append [`FrameHash::last`] after
+    /// each [`finalize_frame`](FrameHash::finalize_frame)) when the run outlives
+    /// the hasher's rolling [`window`](FrameHash::window).
+    #[inline]
+    #[must_use]
+    pub fn recording_from(start_frame: u64) -> Self {
+        Self {
+            start_frame,
+            hashes: Vec::new(),
+        }
+    }
+
+    /// Snapshot every finalized hash currently retained in `hash`'s rolling
+    /// window, in frame order, into a manifest anchored at the window's
+    /// [`oldest_frame_index`](FrameHash::oldest_frame_index).
+    ///
+    /// Captures only the retained window, so for a run longer than the hasher's
+    /// [`window`](FrameHash::window) the earliest frames are already evicted;
+    /// build incrementally with
+    /// [`recording_from`](FrameHashManifest::recording_from) plus
+    /// [`push`](FrameHashManifest::push) to retain the full history instead.
+    /// An un-finalized hasher yields an empty manifest anchored at its current
+    /// [`frame_index`](FrameHash::frame_index).
+    #[inline]
+    #[must_use]
+    pub fn from_frame_hash(hash: &FrameHash) -> Self {
+        Self {
+            start_frame: hash.oldest_frame_index().unwrap_or_else(|| hash.frame_index()),
+            hashes: hash.history().collect(),
+        }
+    }
+
+    /// Append the next consecutive golden hash (the frame following the last
+    /// recorded one). Pairs with [`recording_from`](FrameHashManifest::recording_from).
+    #[inline]
+    pub fn push(&mut self, hash: u64) {
+        self.hashes.push(hash);
+    }
+
+    /// Absolute frame index of the first recorded hash.
+    #[inline]
+    #[must_use]
+    pub fn start_frame(&self) -> u64 {
+        self.start_frame
+    }
+
+    /// One past the last recorded absolute frame index: the manifest covers the
+    /// range `start_frame()..end_frame()`.
+    #[inline]
+    #[must_use]
+    pub fn end_frame(&self) -> u64 {
+        self.start_frame + self.hashes.len() as u64
+    }
+
+    /// The recorded golden hashes, in frame order.
+    #[inline]
+    #[must_use]
+    pub fn hashes(&self) -> &[u64] {
+        &self.hashes
+    }
+
+    /// Number of recorded frames.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.hashes.len()
+    }
+
+    /// Whether the manifest records no frames.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.hashes.is_empty()
+    }
+
+    /// The golden hash expected at absolute frame index `frame`, if that frame
+    /// is within the recorded range `start_frame()..end_frame()`.
+    #[inline]
+    #[must_use]
+    pub fn expected_at(&self, frame: u64) -> Option<u64> {
+        if frame < self.start_frame {
+            return None;
+        }
+        self.hashes.get((frame - self.start_frame) as usize).copied()
+    }
+
+    /// Find the first frame at which the live `actual` run disagrees with this
+    /// golden manifest, scanning the absolute frame-index range the manifest
+    /// records and `actual` still retains.
+    ///
+    /// Returns the [`HashDivergence`] at the earliest mismatch, with
+    /// [`left`](HashDivergence::left) carrying the manifest's **expected** hash
+    /// and [`right`](HashDivergence::right) the live run's **actual** hash, or
+    /// `None` when every comparable frame matches. As with
+    /// [`FrameHash::first_divergence`], `None` means *"no divergence within the
+    /// comparable range"*: if `actual`'s window has slid entirely past the
+    /// manifest's span there is nothing to compare.
+    #[must_use]
+    pub fn first_divergence(&self, actual: &FrameHash) -> Option<HashDivergence> {
+        let actual_oldest = actual.oldest_frame_index()?;
+        let start = self.start_frame.max(actual_oldest);
+        let end = self.end_frame().min(actual.frame_index());
+        for frame in start..end {
+            if let (Some(expected), Some(got)) =
+                (self.expected_at(frame), actual.hash_at(frame))
+                && expected != got
+            {
+                return Some(HashDivergence {
+                    frame,
+                    left: expected,
+                    right: got,
+                });
+            }
+        }
+        None
+    }
+}
+
 /// Whether an [`InputRecording`] is capturing, replaying, or idle.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ReplayMode {
@@ -791,6 +947,24 @@ impl crate::app::App {
     #[must_use]
     pub fn frame_hash(&self) -> Option<&FrameHash> {
         self.world().get_resource::<FrameHash>()
+    }
+
+    /// Check the live [`FrameHash`] against a golden [`FrameHashManifest`],
+    /// returning the first [`HashDivergence`] (expected vs actual) or `None`
+    /// when every comparable frame matches.
+    ///
+    /// `None` is also returned when no [`FrameHash`] is installed — there is
+    /// nothing to compare — so a `None` result means *"no divergence
+    /// detectable"*, consistent with
+    /// [`FrameHashManifest::first_divergence`]. This is the one-call dual-run
+    /// regression check: replay a [`ReplayLog`], then verify the reproduced
+    /// run hashed identically to the recorded golden manifest.
+    #[must_use]
+    pub fn verify_against_manifest(
+        &self,
+        manifest: &FrameHashManifest,
+    ) -> Option<HashDivergence> {
+        manifest.first_divergence(self.frame_hash()?)
     }
 
     /// Borrow the main world's [`InputRecording<F>`], if installed.

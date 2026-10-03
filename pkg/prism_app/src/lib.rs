@@ -216,8 +216,8 @@ pub use lifecycle::{
 };
 #[cfg(feature = "determinism")]
 pub use determinism::{
-    DeterministicRng, FrameHash, HashDivergence, InputRecording, RecordedInput, ReplayLog,
-    ReplayMode,
+    DeterministicRng, FrameHash, FrameHashManifest, HashDivergence, InputRecording,
+    RecordedInput, ReplayLog, ReplayMode,
 };
 #[cfg(feature = "std")]
 pub use diagnostics::{
@@ -273,8 +273,8 @@ pub mod prelude {
     };
     #[cfg(feature = "determinism")]
     pub use crate::determinism::{
-        DeterministicRng, FrameHash, HashDivergence, InputRecording, RecordedInput, ReplayLog,
-        ReplayMode,
+        DeterministicRng, FrameHash, FrameHashManifest, HashDivergence, InputRecording,
+        RecordedInput, ReplayLog, ReplayMode,
     };
     #[cfg(feature = "std")]
     pub use crate::diagnostics::{
