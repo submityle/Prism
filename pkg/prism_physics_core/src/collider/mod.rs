@@ -99,6 +99,10 @@ pub use feature_edges::{
     extract_feature_edges, EdgeKind, FeatureEdge, FeatureEdgeParams, FeatureEdges,
 };
 
+pub mod quality_report;
+
+pub use quality_report::{analyze_mesh_quality, MeshQualityParams, MeshQualityReport};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
