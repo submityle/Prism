@@ -30,6 +30,12 @@ mod pipeline;
 // the `Core3d` dispatch node that records against it arrives in the next slice.
 mod bind_groups;
 
+// `Core3d` node recording the reuse compute dispatch. Consumes `pipeline`'s
+// id, `bind_groups`' per-view group and `resources`' viewport extent; added to
+// the Core3d schedule (after SSR trace/repack + reuse prep, before the
+// composite) by the plugin slice that follows.
+mod dispatch;
+
 #[cfg(test)]
 mod shader_tests;
 
