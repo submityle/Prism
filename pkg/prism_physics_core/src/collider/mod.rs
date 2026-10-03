@@ -63,6 +63,12 @@ pub mod decimate;
 
 pub use decimate::{decimate_mesh, DecimateParams, DecimateTarget, DecimatedMesh};
 
+pub mod lod;
+
+pub use lod::{
+    build_lod_chain, LodChainParams, LodSchedule, MeshLod, MeshLodChain, MIN_LOD_TRIANGLES,
+};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
