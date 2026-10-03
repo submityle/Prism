@@ -133,6 +133,7 @@ pub mod density_delta;
 pub mod depth_downsample;
 pub mod depth_linearize;
 pub mod depth_of_field;
+pub mod display_tonemap_target;
 pub mod distance_field_shadow;
 pub mod draw_pass_buffers;
 pub mod dual_lobe_phase;
@@ -245,7 +246,9 @@ pub mod modeling;
 pub mod morton_code;
 pub mod motion_blur;
 pub mod motion_disocclusion;
+pub mod motion_tile_classify;
 pub mod motion_vector_dilate;
+pub mod motion_vector_quantize;
 pub mod motion_vectors;
 pub mod multigrid_pressure;
 pub mod multiscatter_lut_build;
@@ -353,9 +356,12 @@ pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
 pub mod sutherland_hodgman_2d;
 pub mod sweep_aabb;
+pub mod taau_catmull_rom;
 pub mod taau_color_transform;
+pub mod taau_jitter_offset;
 pub mod taau_neighborhood_clip;
 pub mod taau_rcas_sharpen;
+pub mod taau_resolution_map;
 pub mod taau_thin_feature_lock;
 pub mod temporal_dither;
 pub mod temporal_reproject;
@@ -502,6 +508,9 @@ pub use density_delta::{CarveBrush, DensityDeltaQuery, GpuDensityDelta};
 pub use depth_downsample::{DepthDownsampleQuery, GpuDepthDownsample};
 pub use depth_linearize::{DepthLinearizeQuery, DepthLinearizeResult, GpuDepthLinearize};
 pub use depth_of_field::{DepthOfFieldQuery, DepthOfFieldSample, GpuDepthOfField};
+pub use display_tonemap_target::{
+    DisplayTonemapTargetQuery, DisplayTonemapTargetResult, GpuDisplayTonemapTarget,
+};
 pub use distance_field_shadow::{GpuDistanceFieldShadow, GpuSdfGrid, SdfShadowRay};
 pub use draw_pass_buffers::{GpuDrawPassBufferQuery, GpuDrawPassBufferResult, GpuDrawPassBuffers};
 pub use dual_lobe_phase::{DualLobePhaseQuery, GpuDualLobePhase};
@@ -664,8 +673,14 @@ pub use motion_disocclusion::{
     GpuMotionDisocclusion, MotionDisocclusionParams, MotionDisocclusionQuery,
     MotionDisocclusionResult, MotionSurfacePoint,
 };
+pub use motion_tile_classify::{
+    GpuMotionTileClassify, MotionTileClassifyQuery, MotionTileClassifyResult,
+};
 pub use motion_vector_dilate::{
     GpuMotionVectorDilate, MotionVectorDilateInput, MotionVectorDilateOrder,
+};
+pub use motion_vector_quantize::{
+    GpuMotionVectorQuantize, MotionVectorQuantizeQuery, MotionVectorQuantizeResult,
 };
 pub use motion_vectors::{GpuMotionVectors, MotionVectorQuery};
 pub use multigrid_pressure::{
@@ -807,13 +822,18 @@ pub use sutherland_hodgman_2d::{
     GpuSutherlandHodgman2d, SutherlandHodgman2dQuery, SutherlandHodgman2dResult,
 };
 pub use sweep_aabb::{GpuSweepAabb, SweepAabbQuery};
+pub use taau_catmull_rom::{GpuTaauCatmullRom, TaauCatmullRomQuery, TaauCatmullRomResult};
 pub use taau_color_transform::{
     GpuTaauColorTransform, TaauColorTransformQuery, TaauColorTransformResult,
 };
+pub use taau_jitter_offset::{GpuTaauJitterOffset, TaauJitterOffsetQuery, TaauJitterOffsetResult};
 pub use taau_neighborhood_clip::{
     GpuTaauNeighborhoodClip, TaauNeighborhoodClipQuery, TaauNeighborhoodClipResult,
 };
 pub use taau_rcas_sharpen::{GpuTaauRcasSharpen, TaauRcasSharpenQuery, TaauRcasSharpenResult};
+pub use taau_resolution_map::{
+    GpuTaauResolutionMap, TaauResolutionMapQuery, TaauResolutionMapResult,
+};
 pub use taau_thin_feature_lock::{
     GpuTaauThinFeatureLock, TaauThinFeatureLockQuery, TaauThinFeatureLockResult,
 };
