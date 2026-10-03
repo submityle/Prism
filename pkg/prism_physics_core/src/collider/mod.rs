@@ -251,6 +251,8 @@ pub mod tet_fem_newmark;
 pub use tet_fem_newmark::{
     initial_acceleration, step_newmark, NewmarkParams, NewmarkState, NewmarkStepResult,
 };
+pub mod tet_fem_dirichlet;
+pub use tet_fem_dirichlet::step_newmark_prescribed;
 pub mod tet_fem_anisotropic;
 pub use tet_fem_anisotropic::{
     orthotropic_fiber_energy, orthotropic_fiber_first_piola, FiberDirection, FiberFamily,

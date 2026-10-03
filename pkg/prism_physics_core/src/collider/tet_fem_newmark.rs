@@ -43,6 +43,7 @@
 //! finite-element constructions. This file contains no Unreal Engine source or
 //! derived code.
 
+use super::tet_fem_assembly::GlobalStiffness;
 use super::tet_fem_basis::TetFemBasis;
 use super::tet_fem_cg::{CgParams, CgReport};
 use super::tet_fem_corotational_assembly::{
@@ -219,21 +220,45 @@ fn zero_pinned(values: &mut [f32], pinned: Option<&[bool]>) {
     }
 }
 
-/// Advances a corotational tetrahedral FEM body by one implicit Newmark-β step.
+/// Intermediate quantities every Newmark variant shares for one step.
 ///
-/// `state` holds `(x_n, v_n, a_n)`; `external_forces` is the per-vertex external
-/// load in Newtons; `pinned` optionally freezes vertices. Returns the updated
-/// `(x_{n+1}, v_{n+1}, a_{n+1})` and the linear-solve diagnostics, or `None` on
-/// dimension mismatch, failed assembly, singular preconditioner, or solver
-/// breakdown.
-#[must_use]
+/// Both the plain [`step_newmark`] step and the prescribed-motion variant
+/// [`step_newmark_prescribed`](super::tet_fem_dirichlet::step_newmark_prescribed)
+/// assemble the identical corotational tangent, the Newmark predictors and the
+/// system right-hand side before diverging only in how they impose boundary
+/// conditions, so that shared work is factored out here.
+pub(crate) struct NewmarkSystem {
+    /// Corotational tangent stiffness `K` evaluated at `x_n`.
+    pub(crate) stiffness: GlobalStiffness,
+    /// Velocity predictor `v* = v_n + h(1-γ) a_n`.
+    pub(crate) v_star: Vec<Vec3>,
+    /// Displacement predictor `d* = h v_n + h²(½-β) a_n`.
+    pub(crate) d_star: Vec<Vec3>,
+    /// System right-hand side `b = f_ext + f_r0 - C v* - K d*` (unfiltered).
+    pub(crate) rhs: Vec<f32>,
+    /// Mass coefficient `c_m = 1 + γ h η_M`.
+    pub(crate) c_m: f64,
+    /// Stiffness coefficient `c_k = γ h η_K + β h²`.
+    pub(crate) c_k: f64,
+    /// Time step `h`.
+    pub(crate) h: f64,
+    /// Newmark `β`.
+    pub(crate) beta: f64,
+    /// Newmark `γ`.
+    pub(crate) gamma: f64,
+}
+
+/// Validates the inputs and assembles the shared Newmark system for one step.
+///
+/// Returns `None` on dimension mismatch, invalid parameters, or failed
+/// corotational assembly. The returned right-hand side is unfiltered; callers
+/// impose their own Dirichlet conditions on top.
 #[expect(
     clippy::too_many_arguments,
-    reason = "an implicit Newmark step is parameterised by its mesh, material, \
-              mass, rest/current state, external load and boundary mask; bundling \
-              them would only hide the explicit per-step inputs"
+    reason = "assembling the Newmark system needs the full dynamic configuration; \
+              bundling the inputs would only hide the explicit per-step state"
 )]
-pub fn step_newmark(
+pub(crate) fn assemble_newmark_system(
     basis: &TetFemBasis,
     tets: &[[u32; 4]],
     material: &IsotropicElasticity,
@@ -243,7 +268,7 @@ pub fn step_newmark(
     external_forces: &[Vec3],
     pinned: Option<&[bool]>,
     params: &NewmarkParams,
-) -> Option<NewmarkStepResult> {
+) -> Option<NewmarkSystem> {
     let n = state.positions.len();
     if n == 0
         || rest.len() != n
@@ -292,29 +317,81 @@ pub fn step_newmark(
     let k_dstar = stiffness.apply(&d_star_flat)?;
     let f_r = flatten(&restoring);
     let f_ext = flatten(external_forces);
-    let mut b = Vec::with_capacity(3 * n);
+    let mut rhs = Vec::with_capacity(3 * n);
     for i in 0..3 * n {
         let value = f64::from(f_ext[i]) + f64::from(f_r[i])
             - eta_m * f64::from(m_vstar[i])
             - eta_k * f64::from(k_vstar[i])
             - f64::from(k_dstar[i]);
-        b.push(value as f32);
+        rhs.push(value as f32);
     }
 
-    let (a_next_flat, solver) = solve_filtered_spd(
-        &stiffness,
-        mass,
+    Some(NewmarkSystem {
+        stiffness,
+        v_star,
+        d_star,
+        rhs,
         c_m,
         c_k,
-        &b,
+        h,
+        beta,
+        gamma,
+    })
+}
+
+/// Advances a corotational tetrahedral FEM body by one implicit Newmark-β step.
+///
+/// `state` holds `(x_n, v_n, a_n)`; `external_forces` is the per-vertex external
+/// load in Newtons; `pinned` optionally freezes vertices. Returns the updated
+/// `(x_{n+1}, v_{n+1}, a_{n+1})` and the linear-solve diagnostics, or `None` on
+/// dimension mismatch, failed assembly, singular preconditioner, or solver
+/// breakdown.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an implicit Newmark step is parameterised by its mesh, material, \
+              mass, rest/current state, external load and boundary mask; bundling \
+              them would only hide the explicit per-step inputs"
+)]
+pub fn step_newmark(
+    basis: &TetFemBasis,
+    tets: &[[u32; 4]],
+    material: &IsotropicElasticity,
+    mass: &LumpedMass,
+    rest: &[Vec3],
+    state: &NewmarkState,
+    external_forces: &[Vec3],
+    pinned: Option<&[bool]>,
+    params: &NewmarkParams,
+) -> Option<NewmarkStepResult> {
+    let sys = assemble_newmark_system(
+        basis,
+        tets,
+        material,
+        mass,
+        rest,
+        state,
+        external_forces,
+        pinned,
+        params,
+    )?;
+    let n = state.positions.len();
+    let x = &state.positions;
+
+    let (a_next_flat, solver) = solve_filtered_spd(
+        &sys.stiffness,
+        mass,
+        sys.c_m,
+        sys.c_k,
+        &sys.rhs,
         pinned,
         params.preconditioner,
         &params.cg,
     )?;
     let a_next = unflatten(&a_next_flat);
 
-    let c_v = (gamma * h) as f32;
-    let c_x = (beta * h * h) as f32;
+    let c_v = (sys.gamma * sys.h) as f32;
+    let c_x = (sys.beta * sys.h * sys.h) as f32;
     let mut positions_next = Vec::with_capacity(n);
     let mut velocities_next = Vec::with_capacity(n);
     let mut accelerations_next = Vec::with_capacity(n);
@@ -324,8 +401,8 @@ pub fn step_newmark(
             velocities_next.push(Vec3::ZERO);
             accelerations_next.push(Vec3::ZERO);
         } else {
-            velocities_next.push(v_star[i] + c_v * a_next[i]);
-            positions_next.push(x[i] + d_star[i] + c_x * a_next[i]);
+            velocities_next.push(sys.v_star[i] + c_v * a_next[i]);
+            positions_next.push(x[i] + sys.d_star[i] + c_x * a_next[i]);
             accelerations_next.push(a_next[i]);
         }
     }
