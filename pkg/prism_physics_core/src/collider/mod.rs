@@ -133,6 +133,11 @@ pub mod shell_thickness;
 pub use shell_thickness::{
     estimate_shell_thickness, ShellThickness, ShellThicknessParams, ThicknessSample,
 };
+pub mod hausdorff;
+pub use hausdorff::{
+    measure_directed_distance, measure_mesh_distance, DirectedMeshDistance, MeshDistance,
+    MeshDistanceParams,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
