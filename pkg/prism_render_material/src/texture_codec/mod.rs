@@ -60,7 +60,7 @@ pub use astc::{
     encode_astc_single_partition_4x4_ldr_quality, encode_astc_single_partition_4x4_ldr_rgba,
     encode_astc_single_partition_4x4_ldr_rgba_q6, encode_astc_single_partition_5x4_ldr,
     encode_astc_single_partition_5x5_ldr, encode_astc_single_partition_6x6_ldr,
-    encode_astc_single_partition_8x8_ldr, AstcError,
+    encode_astc_single_partition_8x5_ldr, encode_astc_single_partition_8x8_ldr, AstcError,
 };
 pub use bc6h::{
     bc6h_mode_bits, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
