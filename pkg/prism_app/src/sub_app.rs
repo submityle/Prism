@@ -4,8 +4,8 @@
 //!
 //! An [`App`](crate::app::App) owns a *main* `SubApp` and (in later
 //! milestones) named secondary sub-apps such as a render sub-app driven by a
-//! one-way extract step. M1 ships only the main sub-app and the variable-step
-//! frame loop over it.
+//! one-way extract step. The main sub-app runs the full frame order including
+//! the fixed-timestep inner loop (M2); secondary sub-apps are a later milestone.
 //!
 //! Per design §5 the sub-app **reuses the `prism_ecs` scheduling graph**: the
 //! schedules live inside the world (not a separate hand-rolled registry), and
@@ -59,17 +59,22 @@ impl SubApp {
         self.run_schedule(PostStartup);
     }
 
-    /// Run one variable-step frame: the M1 main-frame order (design §7),
-    /// `First → PreUpdate → StateTransition → Update → PostUpdate → Last`.
+    /// Run one frame in the full main-frame order (design §7, §21 invariant):
+    /// `First → RunFixedMainLoop → PreUpdate → StateTransition → Update →
+    /// PostUpdate → Last`.
     ///
-    /// # Honestly deferred
-    ///
-    /// The full order also interleaves `RunFixedMainLoop` (the fixed-timestep
-    /// inner loop, M2) between `First` and `PreUpdate`. That phase is absent
-    /// here, not stubbed, and lands with the milestone that implements its
-    /// accumulator behavior.
+    /// Before `First`, [`advance_time`](crate::time::advance_time) steps the
+    /// clocks (real → virtual → fixed accumulator). `RunFixedMainLoop` then
+    /// drains the fixed accumulator via
+    /// [`run_fixed_main_loop`](crate::fixed::run_fixed_main_loop), running the
+    /// `FixedMain` tick group once per fixed step. A sub-app without an
+    /// [`EngineClocks`](crate::time::EngineClocks) resource simply skips the
+    /// time and fixed-loop steps, so a clock-less secondary sub-app still runs
+    /// its variable-step phases.
     pub fn update(&mut self) {
+        crate::time::advance_time(&mut self.world);
         self.run_schedule(First);
+        crate::fixed::run_fixed_main_loop(&mut self.world);
         self.run_schedule(PreUpdate);
         self.run_schedule(StateTransition);
         self.run_schedule(Update);

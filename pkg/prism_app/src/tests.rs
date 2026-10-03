@@ -848,3 +848,182 @@ fn app_builds_group_in_resolved_order() {
     app.add_plugins(DemoGroup);
     assert_eq!(app.world().resource::<Order>().0, vec!["core", "renderer"]);
 }
+
+// ---- fixed timestep ----
+
+use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
+use crate::time::{EngineClocks, TimeUpdateStrategy};
+use prism_time::{DefaultSource, Duration};
+
+/// Count how many times a schedule's system ran across `frames` frames, with the
+/// real clock advanced by a fixed `delta` each frame and the fixed rate set to
+/// `hz`. Returns `(fixed_runs, update_runs)`.
+fn run_fixed_counts(hz: f64, delta: Duration, frames: u64) -> (u64, u64) {
+    let fixed = Arc::new(AtomicU64::new(0));
+    let update = Arc::new(AtomicU64::new(0));
+    let fx = fixed.clone();
+    let up = update.clone();
+
+    let mut app = App::new();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(delta));
+    app.set_fixed_timestep_hz(hz);
+    app.add_systems(FixedUpdate, move || {
+        fx.fetch_add(1, Ordering::Relaxed);
+    });
+    app.add_systems(Update, move || {
+        up.fetch_add(1, Ordering::Relaxed);
+    });
+    app.set_runner(move |app| HeadlessRunner::with_max_frames(frames).run(app));
+    app.run();
+
+    (
+        fixed.load(Ordering::Relaxed),
+        update.load(Ordering::Relaxed),
+    )
+}
+
+/// A frame delta equal to the fixed timestep expends exactly one step per frame.
+#[test]
+fn fixed_update_runs_once_per_frame_at_matching_rate() {
+    // 100 Hz => 10 ms step; feed 10 ms per frame.
+    let (fixed, update) = run_fixed_counts(100.0, Duration::from_millis(10), 5);
+    assert_eq!(fixed, 5, "one fixed step per 10 ms frame over 5 frames");
+    assert_eq!(update, 5, "variable Update still runs once per frame");
+}
+
+/// A frame delta of several timesteps expends that many fixed steps per frame.
+#[test]
+fn fixed_update_runs_multiple_substeps_per_frame() {
+    // 100 Hz => 10 ms step; 30 ms per frame => 3 steps/frame; 2 frames => 6.
+    let (fixed, update) = run_fixed_counts(100.0, Duration::from_millis(30), 2);
+    assert_eq!(fixed, 6, "three fixed steps per 30 ms frame over 2 frames");
+    assert_eq!(update, 2);
+}
+
+/// A hitch cannot queue unbounded fixed steps: the accumulator is capped at
+/// `max_substeps` (default 8), so even a huge frame delta runs at most 8 steps.
+#[test]
+fn fixed_loop_is_capped_by_max_substeps() {
+    // 100 Hz => 10 ms step. One 1 s frame: Virtual clamps the real delta to its
+    // 250 ms max first, then the fixed accumulator caps at 8 * 10 ms = 80 ms,
+    // so exactly max_substeps (8) steps run — not 25 or 100.
+    let (fixed, update) = run_fixed_counts(100.0, Duration::from_secs(1), 1);
+    assert_eq!(fixed, 8, "death-spiral cap bounds the step count at max_substeps");
+    assert_eq!(update, 1);
+}
+
+/// After a frame the default clock source is restored to `Virtual`, so the
+/// variable-step phases read virtual time (the fixed loop only borrows the
+/// default source for its inner steps).
+#[test]
+fn default_clock_source_is_virtual_after_frame() {
+    let mut app = App::new();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+    app.set_fixed_timestep_hz(100.0);
+    app.update();
+    assert_eq!(
+        app.world().resource::<EngineClocks>().source(),
+        DefaultSource::Virtual
+    );
+}
+
+/// Within one fixed step the sub-phases run in the invariant tick-group order
+/// `FixedFirst → FixedPreUpdate → FixedUpdate → FixedPostUpdate → FixedLast`.
+#[test]
+fn fixed_phases_run_in_order_within_a_step() {
+    let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+    let mut app = App::new();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+    app.set_fixed_timestep_hz(100.0);
+    {
+        let o = order.clone();
+        app.add_systems(FixedFirst, move || o.lock().unwrap().push("ffirst"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(FixedPreUpdate, move || o.lock().unwrap().push("fpre"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(FixedUpdate, move || o.lock().unwrap().push("fupdate"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(FixedPostUpdate, move || o.lock().unwrap().push("fpost"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(FixedLast, move || o.lock().unwrap().push("flast"));
+    }
+    app.update();
+
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec!["ffirst", "fpre", "fupdate", "fpost", "flast"]
+    );
+}
+
+/// `RunFixedMainLoop` runs between `First` and `PreUpdate` in the frame order
+/// (design §7, §21 invariant), observable via a `FixedUpdate` system landing
+/// between `First` and `PreUpdate` systems.
+#[test]
+fn fixed_loop_runs_between_first_and_pre_update() {
+    let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+    let mut app = App::new();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+    app.set_fixed_timestep_hz(100.0);
+    {
+        let o = order.clone();
+        app.add_systems(First, move || o.lock().unwrap().push("first"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(FixedUpdate, move || o.lock().unwrap().push("fixed"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(PreUpdate, move || o.lock().unwrap().push("pre"));
+    }
+    app.update();
+
+    assert_eq!(*order.lock().unwrap(), vec!["first", "fixed", "pre"]);
+}
+
+/// A world without an `EngineClocks` resource skips the time + fixed-loop steps
+/// entirely rather than panicking (a clock-less secondary sub-app path).
+#[test]
+fn clockless_world_skips_time_and_fixed_loop() {
+    use prism_ecs::world::World;
+
+    let mut world = World::new();
+    // No EngineClocks inserted. Both drivers must early-return without touching
+    // any (absent) schedules or clocks.
+    crate::time::advance_time(&mut world);
+    crate::fixed::run_fixed_main_loop(&mut world);
+    // Reaching here without a panic is the assertion.
+}
+
+/// Pausing virtual time freezes the fixed accumulator: no fixed steps run while
+/// paused, even though frames keep advancing the real clock.
+#[test]
+fn paused_virtual_time_freezes_fixed_steps() {
+    let fixed = Arc::new(AtomicU64::new(0));
+    let fx = fixed.clone();
+
+    let mut app = App::new();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+    app.set_fixed_timestep_hz(100.0);
+    app.world_mut()
+        .resource_mut::<EngineClocks>()
+        .virtual_time_mut()
+        .pause();
+    app.add_systems(FixedUpdate, move || {
+        fx.fetch_add(1, Ordering::Relaxed);
+    });
+    app.set_runner(|app| HeadlessRunner::with_max_frames(5).run(app));
+    app.run();
+
+    assert_eq!(fixed.load(Ordering::Relaxed), 0, "paused clock feeds no fixed steps");
+}

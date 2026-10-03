@@ -19,13 +19,16 @@
 //! sequence. Startup runs exactly once before the first frame:
 //! `PreStartup → Startup → PostStartup`.
 //!
+//! # The fixed loop
+//!
+//! `RunFixedMainLoop` (the fixed-timestep inner loop, design §8) is **M2** and
+//! now implemented in [`crate::fixed`]: it slots between [`First`] and
+//! [`PreUpdate`] in the frame order below and drives the `FixedMain` tick group
+//! once per fixed step. The accumulator itself lives in `prism_time` (the
+//! single source of truth, design §25.1); this crate only drives it.
+//!
 //! # Honestly deferred
 //!
-//! - `RunFixedMainLoop` (the fixed-timestep inner loop, design §8) needs
-//!   `prism_time` and lands in **M2**. It is intentionally **absent** from the
-//!   frame order below rather than stubbed as an empty phase that silently does
-//!   nothing — adding it before its accumulator machinery exists would be a
-//!   hollow placeholder.
 //! - **Dynamic phase insertion** (design §7: a plugin inserting a new phase
 //!   *before/after* a core one, which requires an ordered list of boxed phase
 //!   labels) is not yet possible through the public API:
@@ -98,10 +101,19 @@ core_phase! {
 /// distinct types and cannot share one array).
 pub const STARTUP_PHASES: [&str; 3] = ["PreStartup", "Startup", "PostStartup"];
 
-/// The per-frame phases, in run order (design §7). `RunFixedMainLoop` (M2) is
-/// honestly absent; see the module docs.
-pub const FRAME_PHASES: [&str; 6] =
-    ["First", "PreUpdate", "StateTransition", "Update", "PostUpdate", "Last"];
+/// The per-frame phases, in run order (design §7). `RunFixedMainLoop` is the
+/// native fixed-step driver ([`crate::fixed::run_fixed_main_loop`]), not a user
+/// schedule, so it appears here as a phase marker without a registered
+/// `Schedule`.
+pub const FRAME_PHASES: [&str; 7] = [
+    "First",
+    "RunFixedMainLoop",
+    "PreUpdate",
+    "StateTransition",
+    "Update",
+    "PostUpdate",
+    "Last",
+];
 
 // Compile-time proof that every core phase satisfies the ECS `ScheduleLabel`
 // bound, so a drift in the blanket impl's requirements fails the build here

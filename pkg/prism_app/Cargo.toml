@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 prism_ecs = { path = "../prism_ecs" }
+prism_time = { path = "../prism_time", default-features = false }
 
 [features]
 # `std` is on by default: the Runner / main loop needs std (design §1). The
@@ -16,7 +17,7 @@ prism_ecs = { path = "../prism_ecs" }
 # ships the std runner, so std is required for now. This is an honest current
 # constraint, not a permanent design decision.
 default = ["std"]
-std = []
+std = ["prism_time/std"]
 
 # AAA lint bar. prism_app contains no `unsafe`, so unlike prism_ecs it can keep
 # the workspace-strength lints as warnings and still hit zero warnings.

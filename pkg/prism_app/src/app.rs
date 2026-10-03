@@ -22,12 +22,14 @@ use prism_ecs::schedule::{IntoSystemConfigs, Schedule, ScheduleLabel, Schedules}
 use prism_ecs::world::World;
 
 use crate::exit::{AppExit, AppExitRequest};
+use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
 use crate::plugin::Plugin;
 use crate::plugin_group::PluginGroup;
 use crate::schedule::{
     First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
 };
 use crate::sub_app::SubApp;
+use crate::time::{EngineClocks, TimeUpdateStrategy};
 
 /// The monotonic plugin-assembly state machine (design §21).
 ///
@@ -81,6 +83,13 @@ impl App {
         let mut app = Self::empty();
         app.init_core_schedules();
         app.main.world.insert_resource(AppExitRequest::default());
+        // The time context (design §8, §25.1): the clocks bundle plus the
+        // real-clock advancement strategy. Installed on the main world so the
+        // frame loop can drive the fixed-step accumulator from frame one.
+        app.main.world.insert_resource(EngineClocks::new());
+        app.main
+            .world
+            .insert_resource(TimeUpdateStrategy::default());
         app
     }
 
@@ -101,6 +110,14 @@ impl App {
         schedules.insert(Update, Schedule::new());
         schedules.insert(PostUpdate, Schedule::new());
         schedules.insert(Last, Schedule::new());
+        // The FixedMain tick group (design §8, §22 M2). RunFixedMainLoop itself
+        // is a native driver (see crate::fixed), not a schedule, so only the
+        // five fixed sub-phases get empty schedules here.
+        schedules.insert(FixedFirst, Schedule::new());
+        schedules.insert(FixedPreUpdate, Schedule::new());
+        schedules.insert(FixedUpdate, Schedule::new());
+        schedules.insert(FixedPostUpdate, Schedule::new());
+        schedules.insert(FixedLast, Schedule::new());
     }
 
     /// Create a bare app: a main sub-app with no schedules, no plugins, and no
@@ -181,6 +198,32 @@ impl App {
     /// Insert a resource via [`Default`] if absent, returning `&mut self`.
     pub fn init_resource<R: Resource + Default>(&mut self) -> &mut Self {
         self.main.world.init_resource::<R>();
+        self
+    }
+
+    // ---- time -------------------------------------------------------------
+
+    /// Set how the frame loop advances the real clock each frame (design §8).
+    ///
+    /// Use [`TimeUpdateStrategy::ManualDelta`] to decouple the loop from
+    /// wall-clock timing for deterministic headless / server / test runs
+    /// (design §15); the default [`TimeUpdateStrategy::Automatic`] paces from
+    /// the platform monotonic clock.
+    pub fn set_time_update_strategy(&mut self, strategy: TimeUpdateStrategy) -> &mut Self {
+        self.main.world.insert_resource(strategy);
+        self
+    }
+
+    /// Set the fixed-timestep rate in hertz for the [`FixedMain`](crate::fixed)
+    /// tick group (design §8). For example `60.0` runs `FixedUpdate` at a
+    /// 1/60 s step. Panics only if the main world has no [`EngineClocks`]
+    /// resource, which [`App::new`] always installs.
+    pub fn set_fixed_timestep_hz(&mut self, hz: f64) -> &mut Self {
+        self.main
+            .world
+            .resource_mut::<EngineClocks>()
+            .fixed_mut()
+            .set_timestep_hz(hz);
         self
     }
 
