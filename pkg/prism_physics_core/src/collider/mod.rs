@@ -169,6 +169,8 @@ pub use auto_collision::{
 };
 pub mod mesh_offset;
 pub use mesh_offset::{offset_mesh, MeshOffsetParams, OffsetMesh};
+pub mod orientation;
+pub use orientation::{orient_outward, OrientedMesh};
 
 /// A handle into a [`ShapeRegistry`].
 ///
