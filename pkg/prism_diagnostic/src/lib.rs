@@ -24,6 +24,19 @@
 //! - A [`Hud`](metrics::Hud) data provider that formats metrics + frame stats
 //!   into overlay text lines; this crate performs no rendering.
 //!
+//! ## M3 scope (this build) — ECS/tasks integration
+//! - Automatic instrumentation in [`instrument`]:
+//!   [`SystemScope`](instrument::SystemScope)/[`instrument_system`] time an ECS
+//!   system's per-frame work, and [`JobFlow`](instrument::JobFlow)/
+//!   [`JobScope`](instrument::JobScope) time a task enqueued on one thread and
+//!   executed on another. The opt-in [`Instrumentable`](instrument::Instrumentable)
+//!   trait lets `prism_ecs`/`prism_tasks` adopt this without a dependency edge.
+//! - Cross-thread flow connection: [`trace::flow`] records Chrome flow
+//!   (`s`/`t`/`f`) and async (`b`/`e`) events, serialized by the Chrome exporter
+//!   with `id`/`cat`/`tid`, so a job that hops threads is visually linked.
+//! - Load visualization: [`LoadProfile`](metrics::LoadProfile) rolls recorded
+//!   spans up into per-thread utilization and per-system totals.
+//!
 //! Later milestones add GPU timing scopes, lock-free Tracy/Perfetto sinks, and
 //! crash/minidump capture.
 //!
@@ -34,6 +47,7 @@
 
 pub mod filter;
 pub mod fmt;
+pub mod instrument;
 pub mod macros;
 pub mod metrics;
 pub mod model;
@@ -43,15 +57,20 @@ pub mod span;
 pub mod trace;
 
 pub use filter::{max_level, set_max_level};
+pub use instrument::{
+    async_begin, async_end, flow_finish, flow_start, flow_step, instrument, instrument_system,
+    next_flow_id, FlowId, Instrumentable, JobFlow, JobScope, SystemScope,
+};
 pub use metrics::{
     hud_lines, Counter, FrameStatsSnapshot, FrameTimer, Gauge, Histogram, HistogramSnapshot, Hud,
-    HudSnapshot, MetricRegistry, RegistrySnapshot, Sum,
+    HudSnapshot, LoadProfile, MetricRegistry, RegistrySnapshot, Sum, SystemLoad, ThreadLoad,
 };
 pub use model::{Event, Field, FieldValue, Level};
 pub use sink::{clear_sink, set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
 pub use span::Scope;
 pub use trace::{
-    export_chrome_string, export_chrome_to_file, RingBuffer, SpanRecord, ThreadTrace,
+    export_chrome_string, export_chrome_to_file, FlowPhase, FlowRecord, RingBuffer, SpanRecord,
+    ThreadTrace,
 };
 
 /// Macro support: build and dispatch an event from `format_args!` output.

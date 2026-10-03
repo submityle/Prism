@@ -3,8 +3,12 @@
 //! Serializes completed spans from every registered thread into the
 //! `chrome://tracing` / Perfetto `traceEvents` array. Each span becomes a
 //! complete event (`"ph":"X"`) carrying `ts`/`dur` in microseconds, a `pid`,
-//! a `tid`, the span `name`, an optional `cat`, and optional `args`. The JSON
-//! is hand-rolled with proper string escaping; there is no `serde` dependency.
+//! a `tid`, the span `name`, an optional `cat`, and optional `args`.
+//!
+//! Cross-thread [`FlowRecord`]s are appended as flow (`s`/`t`/`f`) and async
+//! (`b`/`e`) events, each carrying the `id` and `cat` the trace UI uses to draw
+//! the connecting arrow (or async duration bar) between threads. The JSON is
+//! hand-rolled with proper string escaping; there is no `serde` dependency.
 
 extern crate alloc;
 
@@ -13,6 +17,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use super::flow::{flow_records, FlowRecord};
 use super::ring::{registered_threads, SpanRecord, ThreadTrace};
 
 /// Process id reported in exported events. The Prism model is single-process;
@@ -22,10 +27,10 @@ const PROCESS_ID: u64 = 1;
 /// Serialize every registered thread's retained spans to a Chrome Trace JSON
 /// string.
 pub fn export_string() -> String {
-    export_threads(&registered_threads())
+    export_trace(&registered_threads(), &flow_records())
 }
 
-fn export_threads(threads: &[Arc<ThreadTrace>]) -> String {
+fn export_trace(threads: &[Arc<ThreadTrace>], flows: &[FlowRecord]) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str("{\"traceEvents\":[");
     let mut first = true;
@@ -54,8 +59,36 @@ fn export_threads(threads: &[Arc<ThreadTrace>]) -> String {
         }
     }
 
+    // Flow ("s"/"t"/"f") and async ("b"/"e") events, connected across threads
+    // by their id + category.
+    for flow in flows {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        write_flow_event(&mut out, flow);
+    }
+
     out.push_str("],\"displayTimeUnit\":\"ms\"}");
     out
+}
+
+fn write_flow_event(out: &mut String, flow: &FlowRecord) {
+    out.push_str("{\"name\":");
+    write_json_string(out, &flow.name);
+    out.push_str(",\"cat\":");
+    write_json_string(out, &flow.category);
+    out.push_str(",\"ph\":\"");
+    out.push_str(flow.phase.chrome_ph());
+    out.push_str("\",\"pid\":");
+    let _ = write!(out, "{PROCESS_ID}");
+    out.push_str(",\"tid\":");
+    let _ = write!(out, "{}", flow.thread_id);
+    out.push_str(",\"ts\":");
+    write_micros(out, flow.timestamp_nanos);
+    out.push_str(",\"id\":");
+    let _ = write!(out, "{}", flow.id);
+    out.push('}');
 }
 
 fn write_complete_event(out: &mut String, tid: u64, span: &SpanRecord) {
@@ -233,6 +266,44 @@ mod tests {
             assert!(json.contains(&needle), "missing {needle}");
         }
         assert!(is_balanced_json(&json), "unbalanced JSON");
+    }
+
+    #[test]
+    fn flow_events_roundtrip_through_export_with_matching_ids() {
+        use crate::trace::flow::{record_flow, FlowPhase, FlowRecord};
+        use crate::trace::ring;
+
+        let tid = ring::current_thread_id();
+        // A unique id so the assertions survive the process-global flow buffer
+        // being shared with other tests running in parallel.
+        let id: u64 = 0x00C0_FFEE;
+        record_flow(FlowRecord {
+            name: String::from("job_hop"),
+            category: String::from("flow"),
+            id,
+            phase: FlowPhase::Start,
+            thread_id: tid,
+            timestamp_nanos: 1_000,
+        });
+        record_flow(FlowRecord {
+            name: String::from("job_hop"),
+            category: String::from("flow"),
+            id,
+            phase: FlowPhase::Finish,
+            thread_id: tid,
+            timestamp_nanos: 2_000,
+        });
+
+        let json = super::export_string();
+        assert!(is_balanced_json(&json), "unbalanced JSON: {json}");
+        // Both ends of the flow serialized with the matching id and the right
+        // flow phases.
+        let needle_id = format!("\"id\":{id}");
+        let matches = json.matches(needle_id.as_str()).count();
+        assert!(matches >= 2, "expected >=2 flow events with id {id}, got {matches}");
+        assert!(json.contains("\"ph\":\"s\""), "missing flow start phase");
+        assert!(json.contains("\"ph\":\"f\""), "missing flow finish phase");
+        assert!(json.contains("job_hop"));
     }
 
     #[test]

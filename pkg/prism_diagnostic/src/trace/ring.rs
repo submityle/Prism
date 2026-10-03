@@ -43,13 +43,13 @@ pub struct SpanRecord {
 /// A fixed-capacity ring of [`SpanRecord`]s. When full, pushing overwrites the
 /// oldest record and increments the dropped counter rather than growing.
 #[derive(Debug)]
-pub struct RingBuffer {
-    records: alloc::collections::VecDeque<SpanRecord>,
+pub struct RingBuffer<T = SpanRecord> {
+    records: alloc::collections::VecDeque<T>,
     capacity: usize,
     dropped: u64,
 }
 
-impl RingBuffer {
+impl<T> RingBuffer<T> {
     /// Create a ring with `capacity` slots (clamped to at least 1).
     pub fn with_capacity(capacity: usize) -> Self {
         let capacity = capacity.max(1);
@@ -66,7 +66,7 @@ impl RingBuffer {
     }
 
     /// Push a completed span, overwriting the oldest record when full.
-    pub fn push(&mut self, record: SpanRecord) {
+    pub fn push(&mut self, record: T) {
         if self.records.len() == self.capacity {
             self.records.pop_front();
             self.dropped += 1;
@@ -75,12 +75,15 @@ impl RingBuffer {
     }
 
     /// Clone the retained records in chronological (oldest-first) order.
-    pub fn snapshot(&self) -> Vec<SpanRecord> {
+    pub fn snapshot(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
         self.records.iter().cloned().collect()
     }
 
     /// Remove and return all retained records in chronological order.
-    pub fn drain(&mut self) -> Vec<SpanRecord> {
+    pub fn drain(&mut self) -> Vec<T> {
         self.records.drain(..).collect()
     }
 
@@ -110,7 +113,7 @@ impl RingBuffer {
     }
 }
 
-impl Default for RingBuffer {
+impl<T> Default for RingBuffer<T> {
     fn default() -> Self {
         Self::new()
     }
