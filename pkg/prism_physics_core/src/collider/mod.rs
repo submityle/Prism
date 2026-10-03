@@ -253,6 +253,8 @@ pub use tet_fem_newmark::{
 };
 pub mod tet_fem_dirichlet;
 pub use tet_fem_dirichlet::step_newmark_prescribed;
+pub mod tet_fem_substep;
+pub use tet_fem_substep::{step_newmark_substeps, SubstepParams, SubstepResult};
 pub mod tet_fem_anisotropic;
 pub use tet_fem_anisotropic::{
     orthotropic_fiber_energy, orthotropic_fiber_first_piola, FiberDirection, FiberFamily,
