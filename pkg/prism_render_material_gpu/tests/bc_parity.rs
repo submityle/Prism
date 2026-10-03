@@ -12,19 +12,19 @@
 
 use prism_render_material::{
     decode_astc_4x4_hdr, decode_astc_4x4_ldr, decode_astc_4x4_weights, decode_astc_4x4_weights_ise,
-    decode_astc_ldr, decode_astc_void_extent_hdr, decode_astc_void_extent_ldr, decode_bc1,
-    decode_bc3, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned, decode_bc6h_mode12_signed,
-    decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned,
-    decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned, decode_bc6h_mode1_signed,
-    decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned,
-    decode_bc6h_mode3_signed, decode_bc6h_mode3_unsigned, decode_bc6h_mode4_signed,
-    decode_bc6h_mode4_unsigned, decode_bc6h_mode5_signed, decode_bc6h_mode5_unsigned,
-    decode_bc6h_mode6_signed, decode_bc6h_mode6_unsigned, decode_bc6h_mode7_signed,
-    decode_bc6h_mode7_unsigned, decode_bc6h_mode8_signed, decode_bc6h_mode8_unsigned,
-    decode_bc6h_mode9_signed, decode_bc6h_mode9_unsigned, decode_bc6h_signed, decode_bc6h_unsigned,
-    decode_bc7, decode_bc7_mode0, decode_bc7_mode1, decode_bc7_mode2, decode_bc7_mode3,
-    decode_bc7_mode7, encode_bc1, encode_bc3, encode_bc6h_mode11_unsigned, encode_bc7_mode4,
-    encode_bc7_mode5, encode_bc7_mode6,
+    decode_astc_hdr, decode_astc_ldr, decode_astc_void_extent_hdr, decode_astc_void_extent_ldr,
+    decode_bc1, decode_bc3, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
+    decode_bc6h_mode12_signed, decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed,
+    decode_bc6h_mode13_unsigned, decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned,
+    decode_bc6h_mode1_signed, decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed,
+    decode_bc6h_mode2_unsigned, decode_bc6h_mode3_signed, decode_bc6h_mode3_unsigned,
+    decode_bc6h_mode4_signed, decode_bc6h_mode4_unsigned, decode_bc6h_mode5_signed,
+    decode_bc6h_mode5_unsigned, decode_bc6h_mode6_signed, decode_bc6h_mode6_unsigned,
+    decode_bc6h_mode7_signed, decode_bc6h_mode7_unsigned, decode_bc6h_mode8_signed,
+    decode_bc6h_mode8_unsigned, decode_bc6h_mode9_signed, decode_bc6h_mode9_unsigned,
+    decode_bc6h_signed, decode_bc6h_unsigned, decode_bc7, decode_bc7_mode0, decode_bc7_mode1,
+    decode_bc7_mode2, decode_bc7_mode3, decode_bc7_mode7, encode_bc1, encode_bc3,
+    encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -4163,5 +4163,108 @@ fn astc_single_partition_larger_footprint_parity_against_gpu_hardware_decode() {
     eprintln!(
         "ASTC larger-footprint single-partition parity: {compared} RGBA lanes match hardware across {} footprints x {PER_FOOTPRINT} blocks",
         FOOTPRINTS.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ASTC single-partition HDR, larger (non-4x4) footprints.
+//
+// Mirrors the LDR larger-footprint proof but on the HDR profile: it validates
+// the `decode_astc_hdr(block, bx, by)` entry against the native hardware
+// decoder via `BlockOracle::decode_raw_footprint` with an HDR channel. This
+// proves the Khronos weight-infill decimation plus the HDR LNS endpoint lerp
+// on non-4x4 (and non-square) footprints bit-for-bit against hardware.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_single_partition_hdr_larger_footprint_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC HDR larger-footprint parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC_HDR)
+    {
+        eprintln!("adapter lacks ASTC HDR support; skipping ASTC HDR larger-footprint parity");
+        return;
+    }
+
+    // Footprints exercising both square and non-square decimation on each axis.
+    const FOOTPRINTS: [(u32, u32); 8] = [
+        (5, 5),
+        (6, 6),
+        (8, 8),
+        (10, 10),
+        (12, 12),
+        (8, 5),
+        (10, 6),
+        (12, 10),
+    ];
+    // (CEM, integer_count): LUM_LARGE=2, LUM_SMALL=2, RGB_SCALE=4, RGB=6,
+    // RGB_LDR_ALPHA=8, RGB_HDR_ALPHA=8.
+    const HDR_CEMS: [(u32, usize); 6] = [(2, 2), (3, 2), (7, 4), (11, 6), (14, 8), (15, 8)];
+    const BM: u32 = 67; // trit weights, 1 low bit, 6 levels; 4x4 grid fits any footprint >=4/axis
+    const PER_COMBO: u32 = 24;
+    let mut rng = Rng(0x9D1E_3C77);
+    let mut compared = 0u64;
+    let mut skipped = 0u64;
+
+    for (bx, by) in FOOTPRINTS {
+        let format = TextureFormat::Astc {
+            block: astc_block_for_footprint(bx, by),
+            channel: wgpu::AstcChannel::Hdr,
+        };
+        let texels = (bx * by) as usize;
+        for (cem, int_count) in HDR_CEMS {
+            for _ in 0..PER_COMBO {
+                let mut ep = [0u8; 8];
+                for e in ep[..int_count].iter_mut() {
+                    *e = (rng.next_u32() & 0xFF) as u8;
+                }
+                let mut blk = astc_hdr_block(BM, cem, &ep[..int_count]);
+                let mut raw = [0u8; 16];
+                for r in raw.iter_mut() {
+                    *r = (rng.next_u32() % 6) as u8;
+                }
+                astc_set_weights_ise(&mut blk, WeightForm::Trit, 1, &raw);
+
+                let (cpu, count) =
+                    decode_astc_hdr(&blk, bx, by).expect("supported HDR larger-footprint block");
+                assert_eq!(count, texels, "{bx}x{by} texel count");
+                let gpu = oracle.decode_raw_footprint(format, &blk, bx, by);
+                assert_eq!(gpu.len(), texels, "{bx}x{by} GPU texel count");
+
+                for t in 0..texels {
+                    // RGB always; alpha only for the modes that carry it (CEM
+                    // 14 linear LDR alpha, CEM 15 log HDR alpha). The RGB-only
+                    // modes emit a default FP16 1.0 alpha that hardware may
+                    // represent differently, so restrict alpha checks.
+                    let chans = if cem == 14 || cem == 15 { 4 } else { 3 };
+                    for c in 0..chans {
+                        let (cv, gv) = (cpu[t][c], gpu[t][c]);
+                        // Skip the FP16 saturation boundary: at/above ~65504 the
+                        // CPU clamps to the max finite half while hardware may
+                        // emit +Inf.
+                        if !cv.is_finite() || !gv.is_finite() || cv.abs() >= 6.5e4 {
+                            skipped += 1;
+                            continue;
+                        }
+                        let tol = cv.abs() * 1e-3 + 1e-3;
+                        assert!(
+                            (cv - gv).abs() <= tol,
+                            "ASTC HDR {bx}x{by} cem={cem} block={blk:02x?} texel {t} chan {c}: ep={:?} raw_w={} cpu={cv} gpu={gv}",
+                            &ep[..int_count],
+                            raw[t]
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC HDR larger-footprint single-partition parity: {compared} lanes match hardware across {} footprints x {} CEMs x {PER_COMBO} blocks ({skipped} saturated lanes skipped)",
+        FOOTPRINTS.len(),
+        HDR_CEMS.len()
     );
 }
