@@ -357,6 +357,33 @@ impl ShapeRegistry {
             unit_density_inertia: mesh.unit_density_inertia(),
         })
     }
+
+    /// Cooks a concave triangle mesh into a *compound convex collider*: a set of
+    /// convex hulls (via [`convex_decompose`]) that together approximate the
+    /// solid, each inserted into this registry and paired with a ready
+    /// [`ColliderShape::ConvexHull`].
+    ///
+    /// This is the content-pipeline entry point for authored concave geometry
+    /// (the analogue of `PhysX`/Chaos compound-convex cooking): attach every
+    /// returned shape to the same body at the same local transform to collide
+    /// against the whole approximation. Returns an empty vector when the mesh is
+    /// degenerate and cannot form a single solid hull.
+    pub fn cook_convex_decomposition(
+        &mut self,
+        vertices: &[Vec3],
+        triangles: &[[u32; 3]],
+        params: DecompositionParams,
+    ) -> Vec<(ConvexMeshHandle, ColliderShape)> {
+        let hulls = convex_decompose(vertices, triangles, params);
+        let mut out = Vec::with_capacity(hulls.len());
+        for mesh in hulls {
+            let handle = self.insert_convex_mesh(mesh);
+            if let Some(shape) = self.convex_hull_shape(handle) {
+                out.push((handle, shape));
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -424,5 +451,66 @@ mod tests {
             Some(ColliderShape::Sphere { radius }) if (*radius - 1.0).abs() < 1e-6
         ));
         assert!(reg.get(ColliderHandle(99)).is_none());
+    }
+
+    /// A closed, watertight L-shaped prism (concave) for cooking tests.
+    fn l_prism() -> (Vec<Vec3>, Vec<[u32; 3]>) {
+        let xy = [
+            (0.0f32, 0.0f32),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+            (0.0, 1.0),
+        ];
+        let mut verts = Vec::with_capacity(14);
+        for &(x, y) in &xy {
+            verts.push(Vec3::new(x, y, 0.0));
+        }
+        for &(x, y) in &xy {
+            verts.push(Vec3::new(x, y, 1.0));
+        }
+        let cap: [[u32; 3]; 5] = [[0, 1, 2], [0, 2, 3], [0, 3, 6], [6, 3, 4], [6, 4, 5]];
+        let boundary: [(u32, u32); 7] = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 0)];
+        let mut tris: Vec<[u32; 3]> = Vec::new();
+        for t in &cap {
+            tris.push([t[0] + 7, t[1] + 7, t[2] + 7]);
+        }
+        for t in &cap {
+            tris.push([t[0], t[2], t[1]]);
+        }
+        for &(a, b) in &boundary {
+            tris.push([a, b, b + 7]);
+            tris.push([a, b + 7, a + 7]);
+        }
+        (verts, tris)
+    }
+
+    #[test]
+    fn cook_convex_decomposition_produces_compound_hulls() {
+        let mut reg = ShapeRegistry::new();
+        let (v, t) = l_prism();
+        let params = DecompositionParams {
+            resolution: 24,
+            max_convex_hulls: 8,
+            ..DecompositionParams::default()
+        };
+        let parts = reg.cook_convex_decomposition(&v, &t, params);
+        assert!(parts.len() >= 2, "concave L must cook to >= 2 hulls");
+        assert_eq!(reg.convex_mesh_count(), parts.len());
+        for (handle, shape) in &parts {
+            assert!(matches!(shape, ColliderShape::ConvexHull { .. }));
+            let mesh = reg.convex_mesh(*handle).expect("handle resolves");
+            assert!(mesh.volume() > 0.0);
+        }
+    }
+
+    #[test]
+    fn cook_degenerate_mesh_yields_no_hulls() {
+        let mut reg = ShapeRegistry::new();
+        let parts = reg.cook_convex_decomposition(&[], &[], DecompositionParams::default());
+        assert!(parts.is_empty());
+        assert_eq!(reg.convex_mesh_count(), 0);
     }
 }
