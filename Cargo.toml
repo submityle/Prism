@@ -59,6 +59,8 @@ members = [
   "pkg/prism_audio_authoring",
   # Prism next-generation audio engine performance governor and psychoacoustic virtualization.
   "pkg/prism_audio_governor",
+  # Prism next-generation audio engine physics-coupled procedural audio and procedural soundscape.
+  "pkg/prism_audio_procedural",
   # Prism next-generation audio engine asset banks, streaming, codecs and dialogue/localization.
   "pkg/prism_audio_assets",
   # Prism next-generation audio engine Bevy ECS front-end (emitter/listener components -> prism_audio_rt command ring; telemetry resource).
