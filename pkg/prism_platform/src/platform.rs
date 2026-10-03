@@ -79,6 +79,15 @@ pub struct PlatformCaps {
     /// [`PlatformCaps::has_monotonic_clock`]: the wall clock is UTC/calendar
     /// time (can step), the monotonic clock is for measuring elapsed time.
     pub has_wall_clock: bool,
+    /// Real crash capture is available (design doc §16, §22 M6): the
+    /// async-signal-safe `POSIX` signal backend is compiled in.
+    ///
+    /// `true` on desktop `POSIX` hosts (Linux and macOS); `false` on Web,
+    /// Android, iOS, and other targets, where [`crate::crash::install`]
+    /// returns [`crate::crash::CrashError::Unsupported`] and callers should
+    /// degrade gracefully. The in-process [`crate::crash::mock`] backend is
+    /// independent of this bit.
+    pub has_crash_capture: bool,
 }
 
 impl PlatformCaps {
@@ -99,6 +108,7 @@ impl PlatformCaps {
             has_dynlib_unload: cfg!(feature = "dynlib") && cfg!(any(unix, windows)),
             has_subprocess: cfg!(feature = "std") && cfg!(not(target_family = "wasm")),
             has_wall_clock: cfg!(feature = "std"),
+            has_crash_capture: crate::crash::SUPPORTED,
         }
     }
 }

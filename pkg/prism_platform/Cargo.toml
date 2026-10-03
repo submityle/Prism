@@ -19,6 +19,10 @@ dynlib = ["std"]
 # bare `std` toggle so a minimal `std` build need not compile the native
 # watcher backends unless watching is actually wanted.
 watch = ["std"]
+# In-process `mock` crash backend (design doc §19) used to drive the crash
+# capture pipeline in tests without raising a real signal. Pure `core`; adds
+# no dependency and does not imply `std`.
+mock = []
 
 [lints]
 workspace = true

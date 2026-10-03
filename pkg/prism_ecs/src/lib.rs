@@ -106,14 +106,18 @@ pub mod prelude {
     };
     pub use crate::schedule::{
         apply_state_transition, in_state, resource_equals, resource_exists, run_once,
-        IntoSystemConfigs, NextState, OnEnter, OnExit, Phase, Schedule, ScheduleLabel, Schedules,
+        IntoSystemConfigs, IntoSystemConfigs as IntoScheduleConfigs, NextState, OnEnter, OnExit,
+        Phase, Schedule, ScheduleLabel, Schedules,
         SetConfig, State, States, SystemConfigs, SystemSet,
     };
     pub use crate::system::{
         IntoSystem, Local, Query, Res, ResMut, System, SystemParam,
     };
     pub use crate::world::snapshot::{FnvHasher, SnapshotDelta, SnapshotRing, WorldSnapshot};
-    pub use crate::world::World;
+    pub use crate::world::{EntityRef, World};
+    // Derive macros. These live in the macro namespace and coexist with the
+    // same-named traits (`Component`, `Bundle`) re-exported above.
+    pub use prism_ecs_macros::{Bundle, Component, SystemSet};
 }
 
 /// Internal type aliases for the hash maps/sets used throughout the kernel.

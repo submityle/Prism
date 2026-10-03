@@ -1197,6 +1197,22 @@ impl World {
         );
     }
 
+    /// Return a borrowed read handle to `entity`, or `Err(entity)` if it is
+    /// not currently live.
+    ///
+    /// The returned [`EntityRef`] is the `bevy_ecs`-style ergonomic entry point
+    /// for reading one entity's components (and their change state) without
+    /// repeating the [`Entity`] id. Mirrors `bevy_ecs`'s
+    /// `World::get_entity -> Result<EntityRef, Entity>`.
+    #[inline]
+    pub fn get_entity(&self, entity: Entity) -> Result<EntityRef<'_>, Entity> {
+        if self.entities.location(entity).is_some() {
+            Ok(EntityRef::new(self, entity))
+        } else {
+            Err(entity)
+        }
+    }
+
     /// Borrow component `T` of `entity`, or `None` if the entity is dead or
     /// lacks the component.
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
@@ -1397,6 +1413,10 @@ impl World {
 }
 
 mod relations;
+
+/// Borrowed single-entity read handle ([`EntityRef`]).
+mod entity_ref;
+pub use entity_ref::EntityRef;
 
 /// Non-`Send` resource store (design §16 / §18 bevy-compat); `std`-only.
 #[cfg(feature = "std")]

@@ -27,3 +27,5 @@ pub use crate::process::{self, args as process_args, env as process_env, Child, 
 
 #[cfg(feature = "std")]
 pub use crate::stdio::{self, Stream};
+
+pub use crate::crash::{self, Backtrace, BuildMetadata, CrashContext, CrashError, Signal};

@@ -15,10 +15,21 @@ rust-version = "1.96.0"
 [workspace]
 resolver = "3"
 members = [
+  "pkg/prism_utils",
+  "pkg/prism_reflect_macros",
+  "pkg/prism_reflect",
+  "pkg/prism_time",
+  "pkg/prism_tasks",
+  "pkg/prism_transform",
+  "pkg/prism_diagnostic",
+  "pkg/prism_platform",
+  "pkg/prism_math",
   # All of Bevy's official crates are within the `crates` folder!
   "crates/*",
   # Prism next-generation data-oriented ECS kernel (greenfield chunked-archetype).
   "pkg/prism_ecs",
+  # Derive macros (Component/Bundle/SystemSet) for the ECS kernel.
+  "pkg/prism_ecs_macros",
   # Prism's experimental next-generation rendering architecture.
   "pkg/prism_render_architecture",
   "pkg/prism_render_material",
