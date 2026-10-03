@@ -3946,3 +3946,112 @@ fn astc_single_partition_hdr_alpha_parity_against_gpu_hardware_decode() {
         ALPHA_CEMS.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// ASTC multi-partition HDR *alpha* parity (Milestone #13 cont.): extends the
+// single-partition alpha proof to 2-partition blocks whose shared CEM carries
+// alpha (CEM 14 = HDR RGB + LDR alpha, CEM 15 = HDR RGB + HDR alpha). Both
+// partitions share one CEM (base class 0), so the 6-bit field at [23,29) holds
+// `cem << 2` and no CEM high part is spent. Each partition contributes 8 colour
+// integers (6 RGB + 2 alpha), so `ic = 16`; the shared colour budget
+// `color_bits = 99 - weight_bits` cannot hold 16 QUANT_256 bytes, so the colour
+// ISE drops to the quant level `color_quant_level_test` selects and
+// `set_color_endpoints` lays via the trit/quint/bit table — the same low-quant
+// colour path already RGB-proven for shared-CEM multi-partition blocks, now
+// exercised through the alpha lanes against Metal ASTC-HDR hardware.
+// ---------------------------------------------------------------------------
+
+/// `(block_mode, weights_x, weights_y, weight_levels, weight_bits, cem)` for
+/// 2-partition shared-CEM HDR-alpha blocks (ic = 2 x 8 = 16).
+const MULTI_PART_HDR_ALPHA: [(u32, u32, u32, u32, u32, u32); 4] = [
+    (19, 4, 2, 8, 24, 14),
+    (19, 4, 2, 8, 24, 15),
+    (814, 2, 3, 16, 24, 14),
+    (814, 2, 3, 16, 24, 15),
+];
+
+#[test]
+fn astc_multi_partition_hdr_alpha_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC multi-partition HDR alpha parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC_HDR)
+    {
+        eprintln!("adapter lacks ASTC HDR support; skipping ASTC multi-partition HDR alpha parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Hdr,
+    };
+    let mut rng = Rng(0x7C4E_1B9D);
+    const PER_MODE: u32 = 128;
+    const PC: u32 = 2;
+    const IC: u32 = 16; // 2 partitions x 8 integers (6 RGB + 2 alpha)
+    let mut compared = 0u64;
+    let mut alpha_compared = 0u64;
+    let mut skipped = 0u64;
+    for (mode, wx, wy, levels, weight_bits, cem) in MULTI_PART_HDR_ALPHA {
+        let (form, bits) = levels_to_grid_form(levels);
+        let weight_count = (wx * wy) as usize;
+        // Shared CEM (base class 0): no CEM high part, so the colour budget is
+        // the full `99 - weight_bits`.
+        let color_bits = 99 - weight_bits as i32;
+        assert!(color_bits >= 0);
+        let level = color_quant_level_test(IC, color_bits as usize);
+        assert!(
+            level >= 4,
+            "config mode {mode} cem {cem} derived level {level} below QUANT_6"
+        );
+        for _ in 0..PER_MODE {
+            let mut blk = [0u8; 16];
+            astc_set_bits(&mut blk, 0, 11, mode);
+            astc_set_bits(&mut blk, 11, 2, PC - 1);
+            astc_set_bits(&mut blk, 13, 10, rng.next_u32() & 0x3FF);
+            astc_set_bits(&mut blk, 23, 6, cem << 2);
+            set_color_endpoints(&mut blk, 29, level, IC as usize, &mut rng);
+
+            let mut weights = [0u8; 64];
+            for w in weights.iter_mut().take(weight_count) {
+                *w = rand_grid_weight(&mut rng, form, bits);
+            }
+            astc_set_grid_weights(&mut blk, form, bits, &weights[..weight_count]);
+
+            let cpu = decode_astc_4x4_hdr(&blk).unwrap_or_else(|e| {
+                panic!(
+                    "mp HDR-alpha mode {mode} ({wx}x{wy}, pc {PC}, cem {cem}, level {level}) block {blk:02x?} rejected: {e:?}"
+                )
+            });
+            let gpu = oracle.decode_raw(format, &blk);
+            for t in 0..16 {
+                for c in 0..4 {
+                    let (cv, gv) = (cpu[t][c], gpu[t][c]);
+                    if !cv.is_finite() || !gv.is_finite() || cv.abs() >= 6.5e4 {
+                        skipped += 1;
+                        continue;
+                    }
+                    let tol = cv.abs() * 1e-3 + 1e-3;
+                    assert!(
+                        (cv - gv).abs() <= tol,
+                        "ASTC mp HDR-alpha mode {mode} ({wx}x{wy}, pc {PC}, cem {cem}, level {level}) block={blk:02x?} texel {t} chan {c}: cpu={cv} gpu={gv}"
+                    );
+                    compared += 1;
+                    if c == 3 {
+                        alpha_compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        alpha_compared > 0,
+        "expected at least one finite alpha lane to be hardware-proven"
+    );
+    eprintln!(
+        "ASTC multi-partition HDR alpha parity: {compared} RGBA lanes match hardware ({alpha_compared} alpha lanes) across {} configs x {PER_MODE} blocks ({skipped} saturated lanes skipped)",
+        MULTI_PART_HDR_ALPHA.len()
+    );
+}
