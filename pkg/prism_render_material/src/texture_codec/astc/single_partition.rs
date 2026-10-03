@@ -20,9 +20,7 @@
 use super::block_mode::decode_block_mode_2d;
 use super::cem::cem_is_ldr;
 use super::endpoints::decode_cem_endpoints;
-use super::infill::{
-    infill_dual_plane, infill_dual_plane_4x4, infill_weights, infill_weights_4x4, MAX_TEXELS,
-};
+use super::infill::{infill_dual_plane, infill_weights, MAX_TEXELS};
 use super::AstcError;
 
 /// Interpolate one 8-bit LDR colour component between endpoints `e0` and `e1`
