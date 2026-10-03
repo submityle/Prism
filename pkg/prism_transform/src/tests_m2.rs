@@ -99,8 +99,7 @@ fn subtree_size(g: &TransformGraph, node: NodeId) -> usize {
 }
 
 fn alloc_vec(seed: NodeId) -> Vec<NodeId> {
-    let mut v = Vec::new();
-    v.push(seed);
+    let v = vec![seed];
     v
 }
 
@@ -266,7 +265,7 @@ fn incremental_matches_full_over_random_edits() {
     // distinct, deterministic seed.
     for trial in 0..16u64 {
         let (mut g, ids) = build_sample_tree();
-        let mut rng = Rng::new(0xC0FFEE_1234_5678 ^ trial.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let mut rng = Rng::new(0x00C0_FFEE_1234_5678 ^ trial.wrapping_mul(0x9E37_79B9_7F4A_7C15));
         // Prime both the incremental graph and the invariant that globals are
         // valid before incremental passes.
         g.propagate_incremental();

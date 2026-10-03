@@ -67,7 +67,7 @@ impl Rng {
                 self.range(-50.0, 50.0),
             ),
             // Non-uniform scale so hierarchical shear actually exercises Affine3.
-            rotation: Quat::from_axis_angle(axis, self.range(-3.14, 3.14)),
+            rotation: Quat::from_axis_angle(axis, self.range(-core::f32::consts::PI, core::f32::consts::PI)),
             scale: vec3(
                 self.range(0.3, 2.5),
                 self.range(0.3, 2.5),
@@ -133,7 +133,7 @@ fn parallel_equals_serial_on_large_forest() {
     let pool = TaskPool::new();
     // Comfortably above PARALLEL_THRESHOLD so several levels take the task path.
     let n = PARALLEL_THRESHOLD * 12 + 37;
-    let (h, locals) = random_forest(n, 0xC0FFEE_1234);
+    let (h, locals) = random_forest(n, 0x00C0_FFEE_1234);
     assert!(h.len() >= n);
     assert_parallel_equals_serial(&pool, &h, &locals);
 }

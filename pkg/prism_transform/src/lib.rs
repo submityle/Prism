@@ -1,4 +1,4 @@
-//! # prism_transform
+//! # `prism_transform`
 //!
 //! The transform algebra at the base of Prism's spatial hierarchy.
 //!
@@ -485,10 +485,10 @@ impl TransformGraph {
         if !self.hierarchy.contains(child) {
             return Err(HierarchyError::InvalidNode);
         }
-        if let Some(parent) = new_parent {
-            if !self.hierarchy.contains(parent) {
-                return Err(HierarchyError::InvalidNode);
-            }
+        if let Some(parent) = new_parent
+            && !self.hierarchy.contains(parent)
+        {
+            return Err(HierarchyError::InvalidNode);
         }
 
         self.propagate();
