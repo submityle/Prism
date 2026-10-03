@@ -155,6 +155,12 @@ use super::{
         ssr_color_mips_pass, ssr_composite_pass, ssr_hzb_pass, ssr_prepass_pass,
         ssr_reconstruct_pass, ssr_repack_pass, ssr_temporal_pass, ssr_trace_pass,
     },
+    surface_cache::{
+        init_surface_cache_composite_pipeline, init_surface_cache_pipeline,
+        prepare_surface_cache_bind_groups, prepare_surface_cache_composite_bind_groups,
+        prepare_surface_cache_resources, surface_cache_composite_pass, surface_cache_pass,
+        PrismSurfaceCacheSettings, SurfaceCacheBuffers,
+    },
     taa::{
         init_taa_resolve_pipeline, prepare_taa_bind_groups, prepare_taa_jitter,
         prepare_taa_textures, taa_resolve_pass,
@@ -252,6 +258,11 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/world_space_gi_probe_update.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_resolve.wesl");
         embedded_asset!(app, "../shaders/world_space_gi_composite.wesl");
+        embedded_asset!(app, "../shaders/surface_cache_alloc.wesl");
+        embedded_asset!(app, "../shaders/surface_cache_update.wesl");
+        embedded_asset!(app, "../shaders/surface_cache_spatial_filter.wesl");
+        embedded_asset!(app, "../shaders/surface_cache_coverage.wesl");
+        embedded_asset!(app, "../shaders/surface_cache_composite.wesl");
         embedded_asset!(app, "../shaders/light_routing.wesl");
         embedded_asset!(app, "../shaders/taa_resolve.wesl");
         embedded_asset!(app, "../shaders/vsm_receiver_gen.wesl");
@@ -352,6 +363,8 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismWorldRestirSettings>()
             .init_resource::<WorldRestirLights>()
             .init_resource::<PrismWorldSpaceGiSettings>()
+            .init_resource::<PrismSurfaceCacheSettings>()
+            .init_resource::<SurfaceCacheBuffers>()
             .init_resource::<PrismLightRoutingSettings>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
@@ -431,6 +444,8 @@ impl Plugin for PrismShadingPlugin {
                         init_hatching_pipeline,
                         init_halftone_pipeline,
                         init_upscale_pipeline,
+                        init_surface_cache_pipeline,
+                        init_surface_cache_composite_pipeline,
                     ),
                     init_dfg_lut_texture,
                     init_brdf_lut_pipeline,
@@ -881,6 +896,26 @@ impl Plugin for PrismShadingPlugin {
                         .in_set(RenderSystems::PrepareBindGroups),
                 ),
             )
+            // Surface cache (persistent surfel radiance cache): the surfel
+            // atlas buffers live in a RetainedViewEntity-keyed resource that
+            // survives the per-frame entity rebuild; the per-view scratch
+            // textures are allocated here, then the bind groups wire the
+            // persistent buffers + prepass textures for the same-frame passes.
+            .add_systems(
+                Render,
+                (
+                    prepare_surface_cache_resources
+                        .after(prepare_ssr_textures)
+                        .after(prepare_visibility_buffers)
+                        .in_set(RenderSystems::PrepareResources),
+                    prepare_surface_cache_bind_groups
+                        .after(prepare_surface_cache_resources)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                    prepare_surface_cache_composite_bind_groups
+                        .after(prepare_surface_cache_bind_groups)
+                        .in_set(RenderSystems::PrepareBindGroups),
+                ),
+            )
             // Light-routing (Lighting Channels) per-view buffers + cull bind
             // group. `prepare_light_routing_buffers` allocates/uploads in
             // `PrepareResources` (so it runs before the resolve's own
@@ -1035,10 +1070,21 @@ impl Plugin for PrismShadingPlugin {
                         .after(world_space_gi_pass)
                         .after(ssgi_composite_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // Surface cache gathers its persistent surfels off the
+                    // fully SSR/SSGI/world-space-GI-composited scene_color, then
+                    // its own composite folds the surfel diffuse back in
+                    // (energy-conserving ambient substitution) before TAA.
+                    surface_cache_pass
+                        .after(world_space_gi_composite_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    surface_cache_composite_pass
+                        .after(surface_cache_pass)
+                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
                     taa_resolve_pass
                         .after(ssr_composite_pass)
                         .after(ssgi_composite_pass)
                         .after(world_space_gi_composite_pass)
+                        .after(surface_cache_composite_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
                 // Nested to keep the Core3d tuple within Bevy's 20-element

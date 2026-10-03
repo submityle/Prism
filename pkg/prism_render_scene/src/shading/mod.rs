@@ -31,6 +31,7 @@ mod sky;
 pub mod specular_aa;
 mod ssgi;
 mod ssr;
+mod surface_cache;
 mod taa;
 mod tonemap;
 mod transparent;
