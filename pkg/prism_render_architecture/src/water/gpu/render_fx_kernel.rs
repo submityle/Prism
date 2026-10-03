@@ -29,6 +29,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::super::foam::FoamConfig;
+use super::super::wetness::WetnessParams;
 use super::super::{exp_approx, EPS};
 
 /// `WESL` source of the water render-FX compute kernels.
@@ -142,10 +143,129 @@ pub fn dispatch_foam_advect(prev: &[f32], drive: &[f32], cfg: FoamConfig, dt: f3
     out
 }
 
+/// Byte stride of one entry in the per-cell wetness drive buffer.
+///
+/// Each cell occupies two `vec4<f32>` lanes (32 bytes): `(wetness, puddle,
+/// contact, rain)` then `(drain, pad, pad, pad)`. `contact` is a boolean
+/// encoded as a float, which the shader treats as submerged when `> 0.5`.
+/// Mirrors the `@binding(0) wet_drive: array<vec4<f32>>` declaration, read two
+/// lanes at a time.
+pub const WETNESS_DRIVE_STRIDE: u32 = 32;
+
+/// Number of `f32` lanes in one wetness drive entry (two `vec4<f32>`).
+pub const WETNESS_DRIVE_FLOATS: usize = (WETNESS_DRIVE_STRIDE as usize) / size_of::<f32>();
+
+/// Number of `f32` lanes the twin writes per cell: `(wetness, puddle)`,
+/// matching the `rg32float` texel the shader stores.
+pub const WETNESS_OUT_FLOATS: usize = 2;
+
+/// Absorbs moisture over `dt`, reconstructing the shader's `wet_absorb`
+/// tap-for-tap (golden [`wetness::absorb`](super::super::wetness::absorb)): the
+/// remaining dry fraction decays exponentially via the shared
+/// [`exp_approx`](super::super::exp_approx), result clamped to `0..=1`. Kept
+/// independent of the golden so the parity test proves the transcription rather
+/// than asserting a tautology.
+fn wet_absorb_twin(wetness: f32, rate: f32, dt: f32) -> f32 {
+    let w = wetness.clamp(0.0, 1.0);
+    let dry_fraction = (1.0 - w) * exp_approx(-rate.max(0.0) * dt.max(0.0));
+    (1.0 - dry_fraction).clamp(0.0, 1.0)
+}
+
+/// Dries moisture over `dt`, reconstructing the shader's `wet_dry` (golden
+/// [`wetness::dry`](super::super::wetness::dry)): `w * exp(-rate * dt)` via the
+/// shared [`exp_approx`](super::super::exp_approx).
+fn wet_dry_twin(wetness: f32, rate: f32, dt: f32) -> f32 {
+    let w = wetness.clamp(0.0, 1.0);
+    w * exp_approx(-rate.max(0.0) * dt.max(0.0))
+}
+
+/// One wetness-film step, reconstructing the shader's `update_wetness` (golden
+/// [`wetness::update_wetness`](super::super::wetness::update_wetness)): direct
+/// contact soaks at the full absorb rate, otherwise rain soaks at a rain-scaled
+/// rate and a rain-free exposed surface dries. The rain-vs-dry branch keys on
+/// [`EPS`] exactly as the shader keys on its `wet_params.eps` uniform.
+fn update_wetness_twin(
+    current: f32,
+    params: WetnessParams,
+    water_contact: bool,
+    rain_rate: f32,
+    dt: f32,
+) -> f32 {
+    if water_contact {
+        return wet_absorb_twin(current, params.absorb_rate, dt);
+    }
+    let rain = rain_rate.max(0.0);
+    if rain > EPS {
+        wet_absorb_twin(current, params.absorb_rate * rain.min(1.0), dt)
+    } else {
+        wet_dry_twin(current, params.dry_rate, dt)
+    }
+}
+
+/// One puddle-depth step, reconstructing the shader's `step_puddle` (golden
+/// [`wetness::puddle_depth`](super::super::wetness::puddle_depth)): rain fills,
+/// drainage empties, clamped non-negative.
+fn step_puddle_twin(accumulated: f32, rain_rate: f32, drain_rate: f32, dt: f32) -> f32 {
+    let base = accumulated.max(0.0);
+    (base + (rain_rate.max(0.0) - drain_rate.max(0.0)) * dt.max(0.0)).max(0.0)
+}
+
+/// Runs the whole `water_wetness_step` dispatch on the `CPU`: one invocation
+/// per surface cell, exactly as the shader maps one `global_invocation_id` to
+/// one cell.
+///
+/// `drive` is the flat `array<vec4<f32>>` of per-cell entries,
+/// [`WETNESS_DRIVE_FLOATS`] lanes each: `(wetness, puddle, contact, rain)` then
+/// `(drain, pad, pad, pad)`, where `contact > 0.5` marks a submerged cell.
+/// `nx`/`nz` are the grid dimensions; unlike the foam config the shader's
+/// `wet_params` carries them in its own uniform lanes, so the twin takes them
+/// explicitly. The result is the interleaved `(wetness, puddle)` pair per cell
+/// in row-major order, [`WETNESS_OUT_FLOATS`] lanes each. A drive buffer shorter
+/// than the grid is handled without panicking, mirroring the shader's bounds
+/// guard that returns early.
+#[must_use]
+pub fn dispatch_wetness_step(
+    drive: &[f32],
+    params: WetnessParams,
+    nx: usize,
+    nz: usize,
+    dt: f32,
+) -> Vec<f32> {
+    let n = nx * nz;
+    let mut out = vec![0.0_f32; n * WETNESS_OUT_FLOATS];
+    if n == 0 || drive.len() < n * WETNESS_DRIVE_FLOATS {
+        return out;
+    }
+    let mut z = 0;
+    while z < nz {
+        let mut x = 0;
+        while x < nx {
+            let idx = z * nx + x;
+            let base = idx * WETNESS_DRIVE_FLOATS;
+            let wetness_prev = drive[base];
+            let puddle_prev = drive[base + 1];
+            let water_contact = drive[base + 2] > 0.5;
+            let rain = drive[base + 3];
+            let drain = drive[base + 4];
+
+            let wetness = update_wetness_twin(wetness_prev, params, water_contact, rain, dt);
+            let puddle = step_puddle_twin(puddle_prev, rain, drain, dt);
+
+            out[idx * WETNESS_OUT_FLOATS] = wetness;
+            out[idx * WETNESS_OUT_FLOATS + 1] = puddle;
+
+            x += 1;
+        }
+        z += 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::foam::step_foam;
     use super::super::super::kernels::WaterKernel;
+    use super::super::super::wetness::{step_moisture, SurfaceMoisture};
     use super::*;
 
     const CFG: FoamConfig = FoamConfig {
@@ -254,6 +374,140 @@ mod tests {
         assert_eq!(
             FOAM_DRIVE_STRIDE as usize,
             FOAM_DRIVE_FLOATS * size_of::<f32>()
+        );
+    }
+
+    const WET_PARAMS: WetnessParams = WetnessParams {
+        max_capillary_height: 0.5,
+        absorb_rate: 2.0,
+        dry_rate: 0.5,
+        darkening_strength: 0.4,
+        puddle_threshold: 0.02,
+    };
+
+    /// Packs separate per-cell fields into the flat wetness drive `ABI`.
+    fn pack_wet_drive(
+        wet: &[f32],
+        pud: &[f32],
+        contact: &[f32],
+        rain: &[f32],
+        drain: &[f32],
+    ) -> Vec<f32> {
+        let n = wet.len();
+        let mut drive = vec![0.0_f32; n * WETNESS_DRIVE_FLOATS];
+        let mut i = 0;
+        while i < n {
+            let base = i * WETNESS_DRIVE_FLOATS;
+            drive[base] = wet[i];
+            drive[base + 1] = pud[i];
+            drive[base + 2] = contact[i];
+            drive[base + 3] = rain[i];
+            drive[base + 4] = drain[i];
+            // Lanes 5..8 stay padding zeros, matching the shader's second vec4.
+            i += 1;
+        }
+        drive
+    }
+
+    #[test]
+    fn wetness_twin_matches_cpu_golden_bit_for_bit() {
+        let nx = 8usize;
+        let nz = 8usize;
+        let n = nx * nz;
+        for seed in [0x1357_9bdf_u32, 0x2468_ace0, 0xcafe_babe, 0x0bad_f00d] {
+            let wet = fill(seed, 0.0, 1.0, n);
+            let pud = fill(seed ^ 0x00ff_00ff, 0.0, 0.1, n);
+            // Spread across 0..1 so roughly half the cells read as submerged.
+            let contact = fill(seed ^ 0x1234_0000, 0.0, 1.0, n);
+            // Include negative rain to exercise the dry branch and the clamp.
+            let rain = fill(seed ^ 0x0000_abcd, -0.2, 1.2, n);
+            let drain = fill(seed ^ 0x9999_1111, 0.0, 0.3, n);
+            let drive = pack_wet_drive(&wet, &pud, &contact, &rain, &drain);
+            let twin = dispatch_wetness_step(&drive, WET_PARAMS, nx, nz, 0.05);
+            let mut i = 0;
+            while i < n {
+                let water_contact = contact[i] > 0.5;
+                let golden = step_moisture(
+                    SurfaceMoisture {
+                        wetness: wet[i],
+                        puddle_depth: pud[i],
+                    },
+                    WET_PARAMS,
+                    water_contact,
+                    rain[i],
+                    drain[i],
+                    0.05,
+                );
+                assert_eq!(
+                    twin[i * WETNESS_OUT_FLOATS],
+                    golden.wetness,
+                    "wetness diverged cell {i} seed {seed:#x}"
+                );
+                assert_eq!(
+                    twin[i * WETNESS_OUT_FLOATS + 1],
+                    golden.puddle_depth,
+                    "puddle diverged cell {i} seed {seed:#x}"
+                );
+                i += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn wetness_twin_keeps_outputs_valid() {
+        let nx = 8usize;
+        let nz = 8usize;
+        let n = nx * nz;
+        // Deliberately out-of-range inputs: the twin must still clamp wetness to
+        // `0..=1` and keep puddle depth non-negative.
+        let wet = fill(0x55aa_1234, -0.5, 1.5, n);
+        let pud = fill(0x1234_55aa, -0.1, 0.2, n);
+        let contact = fill(0x0f0f_f0f0, 0.0, 1.0, n);
+        let rain = fill(0xfeed_0001, -0.5, 2.0, n);
+        let drain = fill(0x0001_feed, 0.0, 1.0, n);
+        let drive = pack_wet_drive(&wet, &pud, &contact, &rain, &drain);
+        let out = dispatch_wetness_step(&drive, WET_PARAMS, nx, nz, 0.1);
+        let mut i = 0;
+        while i < n {
+            let w = out[i * WETNESS_OUT_FLOATS];
+            let p = out[i * WETNESS_OUT_FLOATS + 1];
+            assert!((0.0..=1.0).contains(&w), "wetness out of range: {w}");
+            assert!(p >= 0.0, "puddle depth negative: {p}");
+            i += 1;
+        }
+    }
+
+    #[test]
+    fn wetness_short_buffers_do_not_panic() {
+        // One cell's worth of drive for an 8x8 grid: everything past it is
+        // skipped, and the output stays the full zero-filled grid.
+        let out = dispatch_wetness_step(&[0.1; 8], WET_PARAMS, 8, 8, 0.05);
+        assert_eq!(out.len(), 8 * 8 * WETNESS_OUT_FLOATS);
+        assert!(out.iter().all(|&v| v.abs() < EPS));
+    }
+
+    #[test]
+    fn wesl_wetness_kernel_declares_expected_abi() {
+        let s = WATER_RENDER_FX_WESL;
+        assert!(s.contains("@compute"));
+        assert!(s.contains(&format!(
+            "fn {}",
+            WaterKernel::WetnessStep.wesl_entry_point()
+        )));
+        assert!(s.contains("@workgroup_size(8, 8, 1)"));
+        assert!(s.contains("moisture_next"));
+        assert!(s.contains("wet_drive"));
+        assert!(s.contains("wet_params"));
+    }
+
+    #[test]
+    fn wetness_drive_abi_strides_are_consistent() {
+        assert_eq!(WETNESS_DRIVE_STRIDE, 32);
+        assert_eq!(WETNESS_DRIVE_FLOATS, 8);
+        assert_eq!(WETNESS_OUT_FLOATS, 2);
+        assert_eq!(
+            WETNESS_DRIVE_STRIDE as usize,
+            WETNESS_DRIVE_FLOATS * size_of::<f32>()
         );
     }
 }

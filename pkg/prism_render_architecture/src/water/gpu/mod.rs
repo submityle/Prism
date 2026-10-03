@@ -57,7 +57,8 @@ pub use pipeline::{
 };
 
 pub use render_fx_kernel::{
-    dispatch_foam_advect, FOAM_DRIVE_FLOATS, FOAM_DRIVE_STRIDE, WATER_RENDER_FX_WESL,
+    dispatch_foam_advect, dispatch_wetness_step, FOAM_DRIVE_FLOATS, FOAM_DRIVE_STRIDE,
+    WATER_RENDER_FX_WESL, WETNESS_DRIVE_FLOATS, WETNESS_DRIVE_STRIDE, WETNESS_OUT_FLOATS,
 };
 
 pub use spectral_plan::{

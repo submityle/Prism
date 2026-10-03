@@ -128,3 +128,109 @@ fn water_foam_advect(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     textureStore(foam_next, vec2<i32>(i32(x), i32(z)), vec4<f32>(coverage, 0.0, 0.0, 0.0));
 }
+
+// ---------------------------------------------------------------------------
+// Surface wetness / puddle step (GPU twin of `wetness::step_moisture`).
+//
+// Second render-FX kernel in this module. One invocation per surface cell
+// advances both the wetness-saturation film and the standing puddle depth for
+// one weather/contact step, writing the pair into an rg32float texel
+// (`.r` = wetness in 0..=1, `.g` = puddle depth in meters, >= 0). Reuses the
+// shared `exp_approx` above so the absorb/dry envelopes stay bit-identical to
+// `water::exp_approx`.
+//
+// Buffer / binding ABI (mirrors `kernels::WaterKernel::WetnessStep.descriptor()`:
+// 1 storage buffer, 1 uniform, 1 storage texture, 0 sampled textures, 8x8 tile):
+//   @binding(0) wet_drive      per-cell drive, two vec4<f32> (32-byte stride):
+//                              (wetness, puddle, contact, rain), (drain, _, _, _)
+//   @binding(1) moisture_next  next (wetness, puddle) pair, one rg32float texel
+//   @binding(2) wet_params     wetness tuning + grid size + dt + eps
+// ---------------------------------------------------------------------------
+
+struct WetnessParams {
+    // Maximum capillary rise in meters (<= 0 disables the band).
+    max_capillary_height: f32,
+    // Absorption rate per second under contact / full rain.
+    absorb_rate: f32,
+    // Drying rate per second while exposed and rain-free.
+    dry_rate: f32,
+    // Peak fractional albedo darkening at full saturation, in 0..=1.
+    darkening_strength: f32,
+    // Puddle depth (meters) above which a cell counts as a puddle.
+    puddle_threshold: f32,
+    // Explicit integration step in seconds.
+    dt: f32,
+    // Absolute tolerance guarding the rain-vs-dry branch.
+    eps: f32,
+    // Grid cell counts along x and z.
+    nx: u32,
+    nz: u32,
+    // Padding to a 16-byte multiple for the uniform address space.
+    pad0: f32,
+    pad1: f32,
+    pad2: f32,
+}
+
+@group(0) @binding(0) var<storage, read> wet_drive: array<vec4<f32>>;
+@group(0) @binding(1) var moisture_next: texture_storage_2d<rg32float, write>;
+@group(0) @binding(2) var<uniform> wet_params: WetnessParams;
+
+// Absorbs moisture over dt, driving saturation toward 1 (`wetness::absorb`):
+// the remaining dry fraction decays exponentially, result clamped to 0..=1.
+fn wet_absorb(wetness: f32, rate: f32, dt: f32) -> f32 {
+    let w: f32 = clamp(wetness, 0.0, 1.0);
+    let dry_fraction: f32 = (1.0 - w) * exp_approx(-max(rate, 0.0) * max(dt, 0.0));
+    return clamp(1.0 - dry_fraction, 0.0, 1.0);
+}
+
+// Dries moisture over dt, driving saturation toward 0 (`wetness::dry`).
+fn wet_dry(wetness: f32, rate: f32, dt: f32) -> f32 {
+    let w: f32 = clamp(wetness, 0.0, 1.0);
+    return w * exp_approx(-max(rate, 0.0) * max(dt, 0.0));
+}
+
+// One wetness-film step (`wetness::update_wetness`): direct contact soaks at
+// the full absorb rate; otherwise rain soaks at a rain-scaled rate and a
+// rain-free exposed surface dries.
+fn update_wetness(current: f32, water_contact: bool, rain_rate: f32, dt: f32) -> f32 {
+    if (water_contact) {
+        return wet_absorb(current, wet_params.absorb_rate, dt);
+    }
+    let rain: f32 = max(rain_rate, 0.0);
+    if (rain > wet_params.eps) {
+        return wet_absorb(current, wet_params.absorb_rate * min(rain, 1.0), dt);
+    }
+    return wet_dry(current, wet_params.dry_rate, dt);
+}
+
+// One puddle-depth step (`wetness::puddle_depth`): rain fills, drainage empties,
+// clamped non-negative.
+fn step_puddle(accumulated: f32, rain_rate: f32, drain_rate: f32, dt: f32) -> f32 {
+    let base: f32 = max(accumulated, 0.0);
+    return max(base + (max(rain_rate, 0.0) - max(drain_rate, 0.0)) * max(dt, 0.0), 0.0);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn water_wetness_step(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= wet_params.nx || gid.y >= wet_params.nz) {
+        return;
+    }
+    let idx: u32 = gid.y * wet_params.nx + gid.x;
+    let a: vec4<f32> = wet_drive[idx * 2u];
+    let b: vec4<f32> = wet_drive[idx * 2u + 1u];
+
+    let wetness_prev: f32 = a.x;
+    let puddle_prev: f32 = a.y;
+    let water_contact: bool = a.z > 0.5;
+    let rain: f32 = a.w;
+    let drain: f32 = b.x;
+
+    let wetness: f32 = update_wetness(wetness_prev, water_contact, rain, wet_params.dt);
+    let puddle: f32 = step_puddle(puddle_prev, rain, drain, wet_params.dt);
+
+    textureStore(
+        moisture_next,
+        vec2<i32>(i32(gid.x), i32(gid.y)),
+        vec4<f32>(wetness, puddle, 0.0, 0.0),
+    );
+}
