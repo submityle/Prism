@@ -58,15 +58,27 @@ pub(crate) struct Shared {
     /// Reusable fiber stacks (fiber feature only).
     #[cfg(feature = "fibers")]
     stack_pool: StackPool,
+    /// Optional worker->core pinning plan (M4). When present, each worker pins
+    /// itself to its assigned core at startup (best-effort; see
+    /// [`crate::affinity`]). `None` means run unpinned.
+    affinity_plan: Option<crate::affinity::WorkerCorePlan>,
 }
 
 impl Shared {
     pub(crate) fn new(num_workers: usize) -> Self {
+        Self::with_affinity(num_workers, None)
+    }
+
+    /// Build shared state, optionally carrying a worker->core pinning plan (M4).
+    pub(crate) fn with_affinity(
+        num_workers: usize,
+        affinity_plan: Option<crate::affinity::WorkerCorePlan>,
+    ) -> Self {
         let mut deques = Vec::with_capacity(num_workers);
         for _ in 0..num_workers {
             deques.push(Mutex::new(VecDeque::new()));
         }
-        Self {
+        let shared = Self {
             deques,
             injector: Mutex::new(VecDeque::new()),
             async_ready: Mutex::new(VecDeque::new()),
@@ -78,7 +90,17 @@ impl Shared {
             wait_set: WaitSet::new(),
             #[cfg(feature = "fibers")]
             stack_pool: StackPool::new(),
-        }
+            affinity_plan,
+        };
+        // M4: pre-warm the large-stack free list with one stack per worker so
+        // the first fork-join frame reuses stacks instead of paying allocation
+        // latency on its critical path (design §8/§12 预分配复用). Small stacks
+        // stay cold until a shallow job asks for one.
+        #[cfg(feature = "fibers")]
+        shared
+            .stack_pool
+            .prewarm(crate::fiber::stack::StackClass::Large, num_workers);
+        shared
     }
 
     pub(crate) fn num_workers(&self) -> usize {
@@ -143,6 +165,12 @@ impl Shared {
     /// loop depending on the `fibers` feature.
     pub(crate) fn run_worker(&self, pool_id: usize, index: usize) {
         WORKER.with(|w| w.set(Some((pool_id, index))));
+        // M4: pin this worker to its assigned core when a plan is present.
+        // Best-effort — an unsupported platform (e.g. macOS) or an OS error
+        // just leaves the worker unpinned; correctness never depends on it.
+        if let Some(plan) = &self.affinity_plan {
+            let _ = plan.pin_current(index);
+        }
         #[cfg(feature = "fibers")]
         self.run_worker_fibers(index);
         #[cfg(not(feature = "fibers"))]
@@ -310,5 +338,16 @@ impl Shared {
 
     pub(crate) fn id(&self) -> usize {
         self.pool_id()
+    }
+
+    /// The caller's worker index within this pool, if the current thread is one
+    /// of its workers (M4 — lets the application index per-worker frame arenas).
+    pub(crate) fn current_worker_index(&self) -> Option<usize> {
+        self.local_hint()
+    }
+
+    /// The worker->core pinning plan, if this pool was built with pinning.
+    pub(crate) fn affinity_plan(&self) -> Option<&crate::affinity::WorkerCorePlan> {
+        self.affinity_plan.as_ref()
     }
 }

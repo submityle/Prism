@@ -21,6 +21,12 @@ single = ["std"]
 # other jobs/fibers instead of busy-helping. Off by default; implies the
 # multi-threaded pool. When off, `wait` keeps the help-on-wait fallback.
 fibers = ["multi_thread"]
+# M4: NUMA-aware scheduling. Records intent to prefer same-NUMA-node steals and
+# node-local per-worker arenas/stacks. Honest degradation: without an OS NUMA
+# map (none is exposed by `prism_platform` today) the topology stays a single
+# node, so enabling this does not fabricate nodes — it only flips the
+# `numa_enabled` request flag and compiles the NUMA scheduling paths.
+numa = []
 
 [lints]
 workspace = true

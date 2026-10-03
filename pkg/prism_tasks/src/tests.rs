@@ -888,3 +888,222 @@ mod m3 {
         assert_eq!(*done, 4);
     }
 }
+
+/// M4 (内存/亲和/NUMA) pool-level wiring: frame arenas, worker pinning,
+/// worker-index lookup, and the affinity→NUMA steal-order plumbing. The
+/// mechanism-level unit tests live in `arena.rs`, `numa.rs`, and `affinity.rs`;
+/// these exercise the `TaskPool` surface that stitches them together.
+mod m4 {
+    use crate::{
+        CoreClass, CoreClassPolicy, CoreInfo, NumaNodeId, TaskPool, TaskPoolConfig, Topology,
+        affinity_supported, plan_worker_cores, steal_order,
+    };
+    // These are only touched by the worker-backed tests below, which the
+    // synchronous `single` fallback compiles out.
+    #[cfg(not(feature = "single"))]
+    use crate::{Counter, DEFAULT_ARENA_CAPACITY};
+    #[cfg(not(feature = "single"))]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(not(feature = "single"))]
+    use std::sync::{Arc, Mutex};
+
+    /// Drain `counter` by spinning *without* helping, so queued jobs run only
+    /// on the pool's worker threads (never inline on this external thread).
+    /// Lets the worker-identity / per-worker-arena assertions below be
+    /// deterministic rather than racing `TaskPool::wait`'s help-on-wait.
+    #[cfg(not(feature = "single"))]
+    fn drain_on_workers(counter: &Counter) {
+        while !counter.is_complete() {
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn default_config_does_not_pin() {
+        let cfg = TaskPoolConfig::default();
+        assert!(!cfg.pin_workers);
+        assert_eq!(cfg.core_class_policy, CoreClassPolicy::PerformanceFirst);
+    }
+
+    #[test]
+    fn pool_affinity_supported_matches_free_fn() {
+        // The pool accessor must forward the platform capability verbatim —
+        // never fake support where the OS lacks it (macOS reports false).
+        let pool = TaskPool::with_threads(2);
+        assert_eq!(pool.affinity_supported(), affinity_supported());
+    }
+
+    #[test]
+    fn single_pool_frame_arenas_has_one_arena() {
+        // Even the synchronous fallback yields a usable (>=1) arena set so
+        // frame-scratch code works regardless of the configured thread count.
+        let pool = TaskPool::with_threads(0);
+        let arenas = pool.new_frame_arenas(4096);
+        assert_eq!(arenas.len(), 1);
+        assert_eq!(arenas.arena(0).unwrap().capacity(), 4096);
+    }
+
+    #[test]
+    fn current_worker_index_none_on_external_thread() {
+        // The calling (test) thread is never one of the pool's workers.
+        let pool = TaskPool::with_threads(2);
+        assert_eq!(pool.current_worker_index(), None);
+    }
+
+    #[test]
+    fn plan_feeds_steal_order_end_to_end() {
+        // A synthetic two-node topology drives the worker->node vector that the
+        // steal policy consumes — the affinity+NUMA wiring, exercised without
+        // any platform NUMA map (honest, machine-independent).
+        let topo = Topology::from_cores(vec![
+            CoreInfo { id: 0, node: NumaNodeId::new(0), class: CoreClass::Performance },
+            CoreInfo { id: 1, node: NumaNodeId::new(0), class: CoreClass::Performance },
+            CoreInfo { id: 2, node: NumaNodeId::new(1), class: CoreClass::Performance },
+            CoreInfo { id: 3, node: NumaNodeId::new(1), class: CoreClass::Performance },
+        ]);
+        let plan = plan_worker_cores(&topo, 4, CoreClassPolicy::Flat);
+        let nodes = plan.worker_nodes();
+        // Worker 0 (node 0): same-node victim 1 first, then cross-node 2, 3.
+        assert_eq!(steal_order(&nodes, 0), vec![1, 2, 3]);
+        // Worker 2 (node 1): same-node victim 3 first, then cross-node 0, 1.
+        assert_eq!(steal_order(&nodes, 2), vec![3, 0, 1]);
+    }
+
+    #[cfg(not(feature = "single"))]
+    #[test]
+    fn pinned_pool_runs_all_jobs() {
+        // Pinning is best-effort: whether or not the OS honors it, every job
+        // must still run exactly once and the pool must not deadlock.
+        let pool = TaskPool::with_config(TaskPoolConfig {
+            threads: 4,
+            pin_workers: true,
+            core_class_policy: CoreClassPolicy::PerformanceFirst,
+        });
+        let counter = Counter::new();
+        let sum = Arc::new(AtomicUsize::new(0));
+        for i in 1..=200 {
+            let sum = Arc::clone(&sum);
+            pool.spawn(&counter, move || {
+                sum.fetch_add(i, Ordering::Relaxed);
+            });
+        }
+        pool.wait(&counter);
+        assert!(counter.is_complete());
+        assert_eq!(sum.load(Ordering::Relaxed), (1..=200).sum());
+    }
+
+    #[cfg(not(feature = "single"))]
+    #[test]
+    fn new_frame_arenas_sized_per_worker() {
+        let pool = TaskPool::with_threads(4);
+        let arenas = pool.new_frame_arenas(DEFAULT_ARENA_CAPACITY);
+        assert_eq!(arenas.len(), pool.worker_count());
+        for w in 0..arenas.len() {
+            let arena = arenas.arena(w).unwrap();
+            assert_eq!(arena.capacity(), DEFAULT_ARENA_CAPACITY);
+            // Unpinned pool on a platform with no NUMA map => node 0.
+            assert_eq!(arena.node(), NumaNodeId::ZERO);
+        }
+    }
+
+    #[cfg(not(feature = "single"))]
+    #[test]
+    fn current_worker_index_some_inside_job() {
+        let pool = TaskPool::with_threads(3);
+        let counter = Counter::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        for _ in 0..64 {
+            let p = pool.clone();
+            let seen = Arc::clone(&seen);
+            pool.spawn(&counter, move || {
+                if let Some(idx) = p.current_worker_index() {
+                    seen.lock().unwrap().push(idx);
+                }
+            });
+        }
+        drain_on_workers(&counter);
+        let seen = seen.lock().unwrap();
+        // Draining only on workers means every job observed a worker index,
+        // and each index is a valid worker of this pool.
+        assert_eq!(seen.len(), 64);
+        assert!(seen.iter().all(|&i| i < pool.worker_count()));
+    }
+
+    #[cfg(not(feature = "single"))]
+    #[test]
+    fn jobs_allocate_from_their_worker_arena() {
+        let pool = TaskPool::with_threads(3);
+        let arenas = Arc::new(pool.new_frame_arenas(64 * 1024));
+        let counter = Counter::new();
+        for _ in 0..128 {
+            let p = pool.clone();
+            let arenas = Arc::clone(&arenas);
+            pool.spawn(&counter, move || {
+                if let Some(idx) = p.current_worker_index() {
+                    if let Some(arena) = arenas.arena(idx) {
+                        // Bump a small per-job record; overflow just falls back
+                        // to the heap (alloc returns Err), which is also fine.
+                        let _ = arena.alloc([0u8; 128]);
+                    }
+                }
+            });
+        }
+        drain_on_workers(&counter);
+        // Lock-free bump allocation from inside live worker jobs recorded a
+        // peak across the per-worker arenas.
+        assert!(arenas.total_high_water() > 0);
+    }
+
+    #[cfg(not(feature = "single"))]
+    #[test]
+    fn frame_arenas_reset_between_frames() {
+        let pool = TaskPool::with_threads(2);
+        let mut arenas = pool.new_frame_arenas(4096);
+        // Frame 1: fill scratch directly (single owner, no sharing needed).
+        for w in 0..arenas.len() {
+            let _ = arenas.arena(w).unwrap().alloc([1u8; 256]).unwrap();
+            assert!(arenas.arena(w).unwrap().used() >= 256);
+        }
+        let peak = arenas.total_high_water();
+        assert!(peak >= 256 * arenas.len());
+        // Frame 2: whole-arena reset rewinds every cursor; peak survives.
+        arenas.reset_all();
+        for w in 0..arenas.len() {
+            assert_eq!(arenas.arena(w).unwrap().used(), 0);
+        }
+        assert_eq!(arenas.total_high_water(), peak);
+    }
+
+    // Running jobs drives them onto large-class fibers (the default class), so
+    // the pool reports a non-zero large-class peak and a still-cold small class
+    // (design §8 大/小两档; §16 water mark). A freshly built pool reports zero.
+    #[cfg(all(feature = "fibers", not(feature = "single")))]
+    #[test]
+    fn fiber_stack_high_water_tracks_large_class_usage() {
+        let pool = TaskPool::with_threads(3);
+        // Nothing has run yet: peak occupancy is zero for both classes.
+        let fresh = pool.fiber_stack_high_water();
+        assert_eq!(fresh.small_high_water, 0);
+        assert_eq!(fresh.large_high_water, 0);
+        // Run a batch of jobs; each executes on a large-class fiber.
+        let counter = Counter::new();
+        for _ in 0..8 {
+            pool.spawn(&counter, || {});
+        }
+        pool.wait(&counter);
+        let after = pool.fiber_stack_high_water();
+        assert!(after.large_high_water >= 1);
+        // Shallow jobs never request the small class, so it stays cold.
+        assert_eq!(after.small_high_water, 0);
+    }
+
+    // In the synchronous fallback no fibers run, so occupancy is zero.
+    #[cfg(all(feature = "fibers", feature = "single"))]
+    #[test]
+    fn fiber_stack_high_water_zero_in_single_fallback() {
+        let pool = TaskPool::new();
+        let stats = pool.fiber_stack_high_water();
+        assert_eq!(stats.small_high_water, 0);
+        assert_eq!(stats.large_high_water, 0);
+    }
+}

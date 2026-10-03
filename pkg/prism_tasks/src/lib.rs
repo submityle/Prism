@@ -42,12 +42,15 @@
 // and the stackful-fiber context switching behind the off-by-default `fibers`
 // feature (see the `fiber` module, especially `fiber::context`).
 
+mod affinity;
+mod arena;
 mod async_exec;
 mod counter;
 #[cfg(feature = "fibers")]
 mod fiber;
 mod job;
 mod named;
+mod numa;
 mod parallel;
 mod scheduler;
 mod scope;
@@ -55,8 +58,18 @@ mod scope;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+pub use affinity::{
+    affinity_supported, pin_current_thread_to_core, plan_worker_cores, CoreAssignment,
+    CoreClassPolicy, WorkerCorePlan,
+};
+pub use arena::{FrameArena, FrameArenas, DEFAULT_ARENA_CAPACITY};
 pub use async_exec::{CounterFuture, Task};
 pub use counter::Counter;
+pub use numa::{
+    steal_order, steal_penalty, CoreClass, CoreInfo, NumaNodeId, Topology,
+    CROSS_NODE_STEAL_PENALTY,
+};
+pub use prism_platform::AffinityError;
 pub use named::{NamedThreads, NamedThreadsConfig, ThreadCategory};
 pub use scope::Scope;
 use scheduler::Shared;
@@ -66,12 +79,21 @@ use scheduler::Shared;
 pub struct TaskPoolConfig {
     /// Number of worker threads. `0` selects the synchronous fallback.
     pub threads: usize,
+    /// M4: pin each worker to a fixed OS core for cache/NUMA locality. Default
+    /// `false` — pinning is best-effort and a no-op on platforms that cannot
+    /// pin (e.g. macOS). See [`crate::affinity`].
+    pub pin_workers: bool,
+    /// M4: how to spread workers across hybrid (big.LITTLE) core classes when
+    /// pinning. Ignored when `pin_workers` is `false`.
+    pub core_class_policy: CoreClassPolicy,
 }
 
 impl Default for TaskPoolConfig {
     fn default() -> Self {
         Self {
             threads: default_thread_count(),
+            pin_workers: false,
+            core_class_policy: CoreClassPolicy::PerformanceFirst,
         }
     }
 }
@@ -99,7 +121,10 @@ impl TaskPool {
 
     /// Build a pool with an explicit worker-thread count.
     pub fn with_threads(threads: usize) -> Self {
-        Self::with_config(TaskPoolConfig { threads })
+        Self::with_config(TaskPoolConfig {
+            threads,
+            ..TaskPoolConfig::default()
+        })
     }
 
     /// Build a pool from a full configuration.
@@ -113,7 +138,20 @@ impl TaskPool {
             };
         }
 
-        let shared = Arc::new(Shared::new(config.threads));
+        // M4: when pinning is requested, resolve the machine topology (honest
+        // single-node fallback where the platform exposes none) and build a
+        // deterministic worker->core plan the workers pin themselves with.
+        let affinity_plan = if config.pin_workers {
+            let topology = Topology::detect();
+            Some(plan_worker_cores(
+                &topology,
+                config.threads,
+                config.core_class_policy,
+            ))
+        } else {
+            None
+        };
+        let shared = Arc::new(Shared::with_affinity(config.threads, affinity_plan));
         let pool_id = shared.id();
         let mut handles = Vec::with_capacity(config.threads);
         for index in 0..config.threads {
@@ -214,6 +252,61 @@ impl TaskPool {
         (ra, rb)
     }
 
+    /// The index of the current worker within this pool, if the calling thread
+    /// is one of its workers. Use it to pick this worker's per-worker frame
+    /// arena from a [`FrameArenas`] (M4). Returns `None` on an external thread
+    /// or the single-threaded fallback.
+    pub fn current_worker_index(&self) -> Option<usize> {
+        if self.single {
+            None
+        } else {
+            self.shared.current_worker_index()
+        }
+    }
+
+    /// Allocate a [`FrameArenas`] sized to this pool — one arena per worker,
+    /// each placed on the NUMA node its worker is pinned to (node 0 when the
+    /// pool is unpinned or the platform has no NUMA map). `capacity` is the
+    /// per-worker arena size in bytes; pass [`DEFAULT_ARENA_CAPACITY`] for the
+    /// default. The returned arenas are reset each frame via
+    /// [`FrameArenas::reset_all`] (M4, design §12).
+    pub fn new_frame_arenas(&self, capacity: usize) -> FrameArenas {
+        let workers = self.worker_count().max(1);
+        match self.shared.affinity_plan() {
+            Some(plan) => {
+                FrameArenas::with_nodes(workers, capacity, |w| plan.node_of_worker(w))
+            }
+            None => FrameArenas::new(workers, capacity),
+        }
+    }
+
+    /// Whether this build can pin workers to cores (false on macOS and other
+    /// unsupported platforms). Forwarded from [`crate::affinity`].
+    pub fn affinity_supported(&self) -> bool {
+        affinity_supported()
+    }
+
+    /// Peak fiber-stack occupancy per size class since this pool was created
+    /// (design §16 "fiber 栈占用峰值"). Use it to size the pool and to alarm on
+    /// the §23-risk-6 "ran out of stacks" condition. Only present with the
+    /// `fibers` feature; the synchronous fallback reports zeros since it runs
+    /// no fibers.
+    #[cfg(feature = "fibers")]
+    pub fn fiber_stack_high_water(&self) -> FiberStackStats {
+        use crate::fiber::stack::StackClass;
+        if self.single {
+            return FiberStackStats {
+                small_high_water: 0,
+                large_high_water: 0,
+            };
+        }
+        let pool = self.shared.stack_pool();
+        FiberStackStats {
+            small_high_water: pool.high_water(StackClass::Small),
+            large_high_water: pool.high_water(StackClass::Large),
+        }
+    }
+
     /// Push an already-boxed job directly onto the pool, waking a worker. Used
     /// by the structured-parallelism scope, which manages its own counter.
     pub(crate) fn push_job(&self, job: job::Job) {
@@ -224,6 +317,18 @@ impl TaskPool {
     pub(crate) fn shared_state(&self) -> &Arc<Shared> {
         &self.shared
     }
+}
+
+/// Peak fiber-stack occupancy per size class, from
+/// [`TaskPool::fiber_stack_high_water`] (design §16). Only built with the
+/// `fibers` feature.
+#[cfg(feature = "fibers")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FiberStackStats {
+    /// Peak number of concurrently live small-class fiber stacks.
+    pub small_high_water: usize,
+    /// Peak number of concurrently live large-class fiber stacks.
+    pub large_high_water: usize,
 }
 
 impl Default for TaskPool {
