@@ -42,7 +42,7 @@ use crate::buffer;
 use crate::cloth::layout::{buffer_entry, entry};
 use crate::context::GpuContext;
 
-use super::super::body::collider::pack_body_colliders;
+use super::super::body::collider::{pack_body_scene, GpuConvexPlane};
 
 /// Scalar type shared with [`prism_physics_core`] (`f32`).
 type Real = f32;
@@ -114,6 +114,7 @@ impl GpuClothCcd {
                 buffer_entry(3, write),
                 buffer_entry(4, read),
                 buffer_entry(5, read),
+                buffer_entry(6, read),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -192,7 +193,16 @@ impl GpuClothCcd {
             .map(|p| [p.x, p.y, p.z, 0.0])
             .collect();
         let packed_vel: Vec<[f32; 4]> = velocities.iter().map(|v| [v.x, v.y, v.z, 0.0]).collect();
-        let packed_colliders = pack_body_colliders(colliders);
+        let scene = pack_body_scene(colliders);
+        let packed_colliders = scene.records;
+        // A zero-length storage buffer is invalid; feed a one-element dummy
+        // when no convex hull contributed any face planes.
+        let convex_dummy = [GpuConvexPlane::zeroed()];
+        let convex_slice: &[GpuConvexPlane] = if scene.planes.is_empty() {
+            &convex_dummy
+        } else {
+            &scene.planes
+        };
 
         let positions_buf = buffer::storage_rw_init(device, "prism_cloth_ccd_pos", &packed_pos);
         let prev_buf = buffer::storage_read(device, "prism_cloth_ccd_prev", &packed_prev);
@@ -200,6 +210,7 @@ impl GpuClothCcd {
         let inv_mass_buf = buffer::storage_read(device, "prism_cloth_ccd_invmass", inverse_masses);
         let colliders_buf =
             buffer::storage_read(device, "prism_cloth_ccd_colliders", &packed_colliders);
+        let convex_buf = buffer::storage_read(device, "prism_cloth_ccd_convex", convex_slice);
 
         let uniform = Params {
             particle_count: u32::try_from(count).unwrap_or(u32::MAX),
@@ -223,6 +234,7 @@ impl GpuClothCcd {
                 entry(3, &velocities_buf),
                 entry(4, &inv_mass_buf),
                 entry(5, &colliders_buf),
+                entry(6, &convex_buf),
             ],
         });
 

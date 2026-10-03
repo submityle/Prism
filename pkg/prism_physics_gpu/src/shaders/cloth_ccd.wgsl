@@ -28,6 +28,7 @@ const COLLIDER_SPHERE: u32 = 0u;
 const COLLIDER_CAPSULE: u32 = 1u;
 const COLLIDER_HALF_SPACE: u32 = 2u;
 const COLLIDER_OBB: u32 = 3u;
+const COLLIDER_CONVEX: u32 = 4u;
 
 struct Collider {
     kind: u32,
@@ -66,6 +67,15 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> velocities: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> inv_mass: array<f32>;
 @group(0) @binding(5) var<storage, read> colliders: array<Collider>;
+
+// One oriented face of a convex hull: `plane.xyz` is the outward unit
+// normal, `plane.w` the plane offset. A convex collider's `pad0`/`pad1`
+// carry the [offset, count) run of its faces inside this shared pool
+// (see `pack_body_scene` on the host).
+struct ConvexPlane {
+    plane: vec4<f32>,
+};
+@group(0) @binding(6) var<storage, read> convex_planes: array<ConvexPlane>;
 
 // Earliest root in [0, 1] of `a*t^2 + b*t + c <= 0` for non-negative `a`, or
 // `NO_HIT`. A start value `c <= 0` is already inside and reports `t == 0`.
@@ -274,6 +284,106 @@ fn obb_toi(
     return t_enter;
 }
 
+// Earliest time in [0, 1] at which the segment `prev -> curr` enters the
+// convex solid (intersection of half-spaces), or `NO_HIT`. Standard slab
+// clip: `t_enter` is the latest entry across approached faces, `t_exit` the
+// earliest exit across receding faces; a segment starting inside yields a
+// negative entry and is rejected (left to the discrete projection). Mirrors
+// `ConvexProxy::segment_toi` in prism_physics_core.
+fn convex_toi(prev: vec3<f32>, curr: vec3<f32>, plane_offset: u32, plane_count: u32) -> f32 {
+    if (plane_count == 0u) {
+        return NO_HIT;
+    }
+    let dir = curr - prev;
+    var t_enter = -3.4028235e38;
+    var t_exit = 3.4028235e38;
+    for (var i = 0u; i < plane_count; i = i + 1u) {
+        let plane = convex_planes[plane_offset + i].plane;
+        let normal = plane.xyz;
+        if (dot(normal, normal) <= EPS_LEN_SQ) {
+            continue;
+        }
+        // f(t) = normal.(prev + t*dir) - offset; inside is f <= 0.
+        let num = dot(normal, prev) - plane.w;
+        let rate = dot(normal, dir);
+        if (abs(rate) <= EPS_LEN_SQ) {
+            // Parallel to this face: a start outside it can never enter.
+            if (num > 0.0) {
+                return NO_HIT;
+            }
+            continue;
+        }
+        let t = -num / rate;
+        if (rate > 0.0) {
+            t_exit = min(t_exit, t);
+        } else {
+            t_enter = max(t_enter, t);
+        }
+        if (t_enter > t_exit) {
+            return NO_HIT;
+        }
+    }
+    if (t_exit < 0.0 || t_enter < 0.0 || t_enter > 1.0) {
+        return NO_HIT;
+    }
+    return t_enter;
+}
+
+// Projects `pos` out to the least-penetrating face of the convex solid when
+// strictly inside, otherwise returns `pos`. Mirrors `ConvexProxy::project_out`
+// (a non-negative signed distance on any face proves the point is outside).
+fn project_out_of_convex(pos: vec3<f32>, plane_offset: u32, plane_count: u32) -> vec3<f32> {
+    var best_pen = 0.0;
+    var best_normal = vec3<f32>(0.0, 0.0, 0.0);
+    var found = false;
+    for (var i = 0u; i < plane_count; i = i + 1u) {
+        let plane = convex_planes[plane_offset + i].plane;
+        let normal = plane.xyz;
+        if (dot(normal, normal) <= EPS_LEN_SQ) {
+            continue;
+        }
+        let signed = dot(normal, pos) - plane.w;
+        if (signed >= 0.0) {
+            return pos;
+        }
+        let pen = -signed;
+        if (!found || pen < best_pen) {
+            best_pen = pen;
+            best_normal = normal;
+            found = true;
+        }
+    }
+    if (!found) {
+        return pos;
+    }
+    return pos + best_normal * best_pen;
+}
+
+// Outward unit normal of the convex face the surface point `surf` lies on
+// (the face with the largest signed distance), or the zero vector for a
+// degenerate hull. Mirrors `ConvexProxy::face_normal`.
+fn convex_face_normal(surf: vec3<f32>, plane_offset: u32, plane_count: u32) -> vec3<f32> {
+    var best_signed = -3.4028235e38;
+    var best_normal = vec3<f32>(0.0, 0.0, 0.0);
+    for (var i = 0u; i < plane_count; i = i + 1u) {
+        let plane = convex_planes[plane_offset + i].plane;
+        let normal = plane.xyz;
+        if (dot(normal, normal) <= EPS_LEN_SQ) {
+            continue;
+        }
+        let signed = dot(normal, surf) - plane.w;
+        if (signed > best_signed) {
+            best_signed = signed;
+            best_normal = normal;
+        }
+    }
+    let len_sq = dot(best_normal, best_normal);
+    if (len_sq <= EPS_LEN_SQ) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    return best_normal * inverseSqrt(len_sq);
+}
+
 fn collider_toi(c: Collider, prev: vec3<f32>, curr: vec3<f32>) -> f32 {
     if (c.kind == COLLIDER_SPHERE) {
         return sphere_toi(prev, curr, c.p0.xyz, c.radius);
@@ -283,6 +393,9 @@ fn collider_toi(c: Collider, prev: vec3<f32>, curr: vec3<f32>) -> f32 {
     }
     if (c.kind == COLLIDER_OBB) {
         return obb_toi(prev, curr, c.p0.xyz, c.p2, c.p1.xyz);
+    }
+    if (c.kind == COLLIDER_CONVEX) {
+        return convex_toi(prev, curr, c.pad0, c.pad1);
     }
     return half_space_toi(prev, curr, c.p0.xyz, c.radius);
 }
@@ -415,6 +528,9 @@ fn project_collider(c: Collider, pos: vec3<f32>) -> vec3<f32> {
     if (c.kind == COLLIDER_OBB) {
         return project_out_of_obb(pos, c.p0.xyz, c.p2, c.p1.xyz);
     }
+    if (c.kind == COLLIDER_CONVEX) {
+        return project_out_of_convex(pos, c.pad0, c.pad1);
+    }
     return project_out_of_half_space(pos, c.p0.xyz, c.radius);
 }
 
@@ -429,6 +545,8 @@ fn outward_normal(c: Collider, surf: vec3<f32>) -> vec3<f32> {
         n = surf - closest;
     } else if (c.kind == COLLIDER_OBB) {
         n = obb_face_normal(c.p0.xyz, c.p2, c.p1.xyz, surf);
+    } else if (c.kind == COLLIDER_CONVEX) {
+        n = convex_face_normal(surf, c.pad0, c.pad1);
     } else {
         n = c.p0.xyz;
     }

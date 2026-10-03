@@ -18,7 +18,7 @@
 //! source or derived code.
 
 use glam::Vec3;
-use prism_physics_core::{BodyCollider, CcdParams};
+use prism_physics_core::{BodyCollider, CcdParams, ConvexProxy, Plane};
 use prism_physics_gpu::context::GpuContext;
 use prism_physics_gpu::{cpu_cloth_ccd, GpuClothCcd};
 
@@ -462,5 +462,187 @@ fn mixed_batch_many_particles_and_colliders() {
         params,
         DT,
         0.4,
+    );
+}
+
+/// Builds a `ConvexHull` collider from an oriented box.
+fn convex_box(center: Vec3, orientation: glam::Quat, half_extents: Vec3) -> BodyCollider {
+    BodyCollider::ConvexHull(ConvexProxy::from_box(center, orientation, half_extents))
+}
+
+/// A unit box with its +X+Y+Z corner shaved off: six axis faces plus one
+/// diagonal bevel, seven live faces total.
+fn bevelled_convex() -> BodyCollider {
+    let planes = [
+        Plane {
+            normal: Vec3::X,
+            offset: 1.0,
+        },
+        Plane {
+            normal: -Vec3::X,
+            offset: 1.0,
+        },
+        Plane {
+            normal: Vec3::Y,
+            offset: 1.0,
+        },
+        Plane {
+            normal: -Vec3::Y,
+            offset: 1.0,
+        },
+        Plane {
+            normal: Vec3::Z,
+            offset: 1.0,
+        },
+        Plane {
+            normal: -Vec3::Z,
+            offset: 1.0,
+        },
+        Plane {
+            normal: Vec3::new(1.0, 1.0, 1.0),
+            offset: 2.2,
+        },
+    ];
+    BodyCollider::ConvexHull(
+        ConvexProxy::from_planes(Vec3::ZERO, 1.8, &planes)
+            .expect("bevelled hull is within the plane budget"),
+    )
+}
+
+/// A particle sweeping clean through a convex box in one step must register the
+/// earliest slab entry (segment TOI) exactly as the CPU golden, matching the
+/// oriented-box twin.
+#[test]
+fn tunnelling_through_convex_box_is_caught() {
+    let Some(ctx) = headless() else { return };
+    let kernel = GpuClothCcd::new(&ctx);
+    let orientation = glam::Quat::from_euler(glam::EulerRot::XYZ, 0.4, 0.9, -0.3);
+    let positions = [Vec3::new(2.4, 0.15, -0.1)];
+    let prev = [Vec3::new(-2.2, 0.15, -0.1)];
+    let velocities = [Vec3::ZERO];
+    let inv_mass = [1.0];
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &prev,
+        &velocities,
+        &inv_mass,
+        &[convex_box(
+            Vec3::ZERO,
+            orientation,
+            Vec3::new(0.7, 0.5, 0.6),
+        )],
+        CcdParams::default(),
+        DT,
+        0.0,
+    );
+}
+
+/// Sweeping through a seven-face bevelled hull stresses the slab clip across
+/// more faces than a box and the least-penetration surface snap.
+#[test]
+fn tunnelling_through_bevelled_convex_is_caught() {
+    let Some(ctx) = headless() else { return };
+    let kernel = GpuClothCcd::new(&ctx);
+    // Aim at the shaved corner so the diagonal bevel is the entry face.
+    let positions = [Vec3::new(2.0, 2.0, 2.0)];
+    let prev = [Vec3::new(-2.0, -2.0, -2.0)];
+    let velocities = [Vec3::ZERO];
+    let inv_mass = [1.0];
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &prev,
+        &velocities,
+        &inv_mass,
+        &[bevelled_convex()],
+        CcdParams::default(),
+        DT,
+        0.0,
+    );
+}
+
+/// A convex-hull hit with restitution and Coulomb friction exercises the full
+/// post-impact response (surface snap + normal reflection + tangential damping)
+/// on the convex arm.
+#[test]
+fn convex_hit_with_restitution_and_friction_matches_cpu() {
+    let Some(ctx) = headless() else { return };
+    let kernel = GpuClothCcd::new(&ctx);
+    let positions = [Vec3::new(1.6, 0.4, 0.2)];
+    let prev = [Vec3::new(-1.4, 0.4, 0.2)];
+    // A diagonal inbound velocity so friction has a tangential component.
+    let velocities = [Vec3::new(40.0, 6.0, -3.0)];
+    let inv_mass = [1.0];
+    let params = CcdParams {
+        restitution: 0.6,
+        ..CcdParams::default()
+    };
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &prev,
+        &velocities,
+        &inv_mass,
+        &[convex_box(
+            Vec3::ZERO,
+            glam::Quat::from_rotation_y(0.5),
+            Vec3::new(0.8, 0.6, 0.7),
+        )],
+        params,
+        DT,
+        0.5,
+    );
+}
+
+/// A mixed scene with two distinct convex hulls plus analytic primitives checks
+/// that the host packs each hull's face run at the right plane offset and the
+/// shader indexes the correct slice per collider across the swept walk.
+#[test]
+fn mixed_scene_with_convex_hulls_matches_cpu() {
+    let Some(ctx) = headless() else { return };
+    let kernel = GpuClothCcd::new(&ctx);
+    let positions = [
+        Vec3::new(2.0, 0.0, 0.0),
+        Vec3::new(-2.0, 0.1, 0.0),
+        Vec3::new(0.0, 2.0, 0.3),
+        Vec3::new(0.2, -2.0, -0.1),
+    ];
+    let prev = [
+        Vec3::new(-2.0, 0.0, 0.0),
+        Vec3::new(2.0, 0.1, 0.0),
+        Vec3::new(0.0, -2.0, 0.3),
+        Vec3::new(0.2, 2.0, -0.1),
+    ];
+    let velocities = [Vec3::ZERO; 4];
+    let inv_mass = [1.0; 4];
+    let colliders = [
+        sphere(Vec3::new(0.0, 0.0, 0.0), 0.4),
+        convex_box(
+            Vec3::new(-0.6, 0.0, 0.0),
+            glam::Quat::IDENTITY,
+            Vec3::new(0.4, 0.4, 0.4),
+        ),
+        half_space(Vec3::Y, -1.5),
+        convex_box(
+            Vec3::new(0.7, 0.1, -0.2),
+            glam::Quat::from_rotation_z(0.9),
+            Vec3::new(0.5, 0.3, 0.6),
+        ),
+    ];
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &prev,
+        &velocities,
+        &inv_mass,
+        &colliders,
+        CcdParams::default(),
+        DT,
+        0.0,
     );
 }
