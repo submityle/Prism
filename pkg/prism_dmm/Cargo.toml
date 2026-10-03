@@ -1,0 +1,17 @@
+[package]
+name = "prism_dmm"
+version = "0.1.0"
+edition = "2024"
+description = "Prism device-free Displaced Micro-Map (DMM) baker: the CPU golden that tessellates a base triangle into a regular micro-mesh and bakes a per-micro-vertex scalar displacement into the raw 11-bit unorm DM layout used by DXR/Vulkan displacement micro-maps. Pure classical numerics (canonical barycentric micro-vertex lattice + bilinear height sampling + per-triangle scale/bias + 11-bit unorm quantization + raw little-endian bit packing + identical-micromap deduplication); no_std + alloc, no AI/ML, and no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+libm = "0.2"
+
+[features]
+default = ["std"]
+std = []
+
+[lints]
+workspace = true

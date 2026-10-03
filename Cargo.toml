@@ -69,6 +69,8 @@ members = [
   "pkg/prism_hair_gpu",
   # Prism device-free Opacity Micromap (OMM) CPU golden baker.
   "pkg/prism_micromap",
+  # Prism device-free Displaced Micro-Map (DMM) CPU golden baker.
+  "pkg/prism_dmm",
   # Prism experimental next-generation audio engine.
   "pkg/prism_audio_core",
   # Prism next-generation audio engine real-time runtime bridge (command/telemetry rings + epoch reclamation).
