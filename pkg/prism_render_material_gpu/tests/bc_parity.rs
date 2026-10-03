@@ -3214,3 +3214,210 @@ fn astc_multi_partition_per_partition_cem_parity_against_gpu_hardware_decode() {
         PER_PARTITION_CEM.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// ASTC multi-partition DUAL-PLANE LDR parity (Milestone #9: dual-plane x
+// multi-partition).
+//
+// Previously `multi_partition.rs` rejected every dual-plane block; it now
+// decodes two- and three-partition dual-plane blocks (four-partition dual-plane
+// is forbidden by the spec and still rejected). A dual-plane block carries two
+// interleaved weight planes plus a 2-bit colour component selector (CCS) that
+// routes one channel to plane 1 while the other three use plane 0; the CCS sits
+// immediately below the weight region and, when the per-partition CEM form is
+// used, below its high part as well. The partition hash still assigns each
+// texel to a region, and that region's endpoint pair is interpolated with the
+// per-channel plane weight.
+//
+// Test A drives the shared CEM class (base class 0) at identity QUANT_256
+// colour so endpoints are raw 8-bit integers written forward from bit 29. Each
+// tuple is (block_mode, weights_x, weights_y, weight_levels, weight_bits,
+// partition_count, cem, color_integer_count). color_bits =
+// 99 - weight_bits - 2 (the dual-plane CCS steals two bits; the shared class
+// spends no CEM high part); every config keeps color_integer_count*8 <=
+// color_bits so the colour ISE stays at QUANT_256, and the endpoint run
+// [29, 29 + 8*n_int) never reaches the CCS/weight region at the top. The grid
+// shapes and weight ISE forms (pure-bit, trit, quint) are drawn from the
+// GPU-proven single-partition dual-plane mode list.
+const MULTI_PART_DUAL_PLANE_SHARED: [(u32, u32, u32, u32, u32, u32, u32, u32); 7] = [
+    (1057, 4, 3, 2, 24, 2, 0, 4),
+    (1041, 4, 2, 3, 26, 2, 6, 8),
+    (1805, 2, 2, 10, 27, 2, 4, 8),
+    (1089, 4, 4, 2, 32, 2, 6, 8),
+    (1026, 4, 2, 4, 32, 3, 0, 6),
+    (1057, 4, 3, 2, 24, 3, 0, 6),
+    (1041, 4, 2, 3, 26, 3, 0, 6),
+];
+
+#[test]
+fn astc_multi_partition_dual_plane_shared_cem_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC multi-partition dual-plane parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC multi-partition dual-plane parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0x3C9A_71E5);
+    const PER_MODE: u32 = 128;
+    for (mode, wx, wy, levels, weight_bits, pc, cem, n_int) in MULTI_PART_DUAL_PLANE_SHARED {
+        let (form, bits) = levels_to_grid_form(levels);
+        // Dual-plane stores two interleaved weights per grid point.
+        let seq_count = (wx * wy * 2) as usize;
+        // Shared class spends no CEM high part, so the CCS sits directly below
+        // the weight region.
+        let ccs_pos = 128 - weight_bits - 2;
+        for n in 0..PER_MODE {
+            let mut blk = [0u8; 16];
+            astc_set_bits(&mut blk, 0, 11, mode);
+            astc_set_bits(&mut blk, 11, 2, pc - 1); // partition count minus one
+            astc_set_bits(&mut blk, 13, 10, rng.next_u32() & 0x3FF); // partition seed
+
+            // Shared CEM class (base class 0): the colour format sits in bits
+            // 2..6 of the 6-bit field at [23,29); the two low base-class bits
+            // are zero so no CEM high part is spent.
+            astc_set_bits(&mut blk, 23, 6, cem << 2);
+
+            // n_int raw 8-bit (QUANT_256) colour integers written forward from
+            // bit 29 (= 19 + PARTITION_INDEX_BITS).
+            for i in 0..n_int {
+                astc_set_bits(&mut blk, 29 + i * 8, 8, rng.byte() as u32);
+            }
+
+            // 2 * wx * wy interleaved grid weights (even -> plane 0, odd ->
+            // plane 1), laid into the bit-reversed weight region.
+            let mut seq = [0u8; 64];
+            for w in seq.iter_mut().take(seq_count) {
+                *w = rand_grid_weight(&mut rng, form, bits);
+            }
+            astc_set_grid_weights(&mut blk, form, bits, &seq[..seq_count]);
+
+            // Colour component selector: cycle all four channels.
+            let ccs = n % 4;
+            astc_set_bits(&mut blk, ccs_pos, 2, ccs);
+
+            let cpu = decode_astc_4x4_ldr(&blk).unwrap_or_else(|e| {
+                panic!(
+                    "mp dual-plane shared mode {mode} ({wx}x{wy}, pc {pc}, cem {cem}, ccs {ccs}) block {blk:02x?} rejected: {e:?}"
+                )
+            });
+            let gpu = oracle.decode_unorm8(format, &blk);
+            for t in 0..16 {
+                for c in 0..4 {
+                    let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                    assert!(
+                        d <= 1,
+                        "ASTC mp dual-plane shared mode {mode} ({wx}x{wy}, pc {pc}, cem {cem}, ccs {ccs}) block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                        cpu[t][c],
+                        gpu[t][c]
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC multi-partition dual-plane (shared CEM) parity: {} configs x {PER_MODE} blocks within 1 LSB of hardware",
+        MULTI_PART_DUAL_PLANE_SHARED.len()
+    );
+}
+
+// Test B drives the PER-PARTITION CEM class form (base class != 0) together
+// with dual-plane weights, so the CEM high part (3*pc - 4 bits, here 2 bits for
+// two partitions) sits just below the weight region and the CCS sits two bits
+// below *that*. Both partitions use CEM 4 (luminance+alpha, endpoint class 1)
+// expressed through the per-partition encoding: the 6-bit field at [23,29) is
+// 0b000010 (base class 2 => class 1 per partition, all class/low bits zero) and
+// the 2-bit high part is zero. color_bits = 99 - weight_bits - 2 (high part) -
+// 2 (CCS); every config keeps 8*8 = 64 <= color_bits so colour stays at
+// QUANT_256 and endpoints remain raw 8-bit integers from bit 29.
+const MULTI_PART_DUAL_PLANE_PERPART: [(u32, u32, u32, u32, u32); 3] = [
+    (1057, 4, 3, 2, 24),
+    (1041, 4, 2, 3, 26),
+    (1805, 2, 2, 10, 27),
+];
+
+#[test]
+fn astc_multi_partition_dual_plane_per_partition_cem_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC multi-partition dual-plane per-partition parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC mp dual-plane per-partition parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0x1B57_9EEF);
+    const PER_MODE: u32 = 128;
+    const PC: u32 = 2;
+    const N_INT: u32 = 8; // 2 partitions x CEM4 (4 integers each)
+    for (mode, wx, wy, levels, weight_bits) in MULTI_PART_DUAL_PLANE_PERPART {
+        let (form, bits) = levels_to_grid_form(levels);
+        let seq_count = (wx * wy * 2) as usize;
+        // Per-partition form spends a (3*pc - 4)-bit high part just below the
+        // weight region; the CCS sits two bits below the high part.
+        let highpart = 3 * PC - 4; // == 2 for two partitions
+        let highpart_pos = 128 - weight_bits - highpart;
+        let ccs_pos = highpart_pos - 2;
+        for n in 0..PER_MODE {
+            let mut blk = [0u8; 16];
+            astc_set_bits(&mut blk, 0, 11, mode);
+            astc_set_bits(&mut blk, 11, 2, PC - 1);
+            astc_set_bits(&mut blk, 13, 10, rng.next_u32() & 0x3FF);
+
+            // Per-partition CEM: 6-bit field = base class 2 (=> class 1 = CEM4
+            // for both partitions), high part = 0.
+            astc_set_bits(&mut blk, 23, 6, 0b00_0010);
+            astc_set_bits(&mut blk, highpart_pos, highpart, 0);
+
+            for i in 0..N_INT {
+                astc_set_bits(&mut blk, 29 + i * 8, 8, rng.byte() as u32);
+            }
+
+            let mut seq = [0u8; 64];
+            for w in seq.iter_mut().take(seq_count) {
+                *w = rand_grid_weight(&mut rng, form, bits);
+            }
+            astc_set_grid_weights(&mut blk, form, bits, &seq[..seq_count]);
+
+            let ccs = n % 4;
+            astc_set_bits(&mut blk, ccs_pos, 2, ccs);
+
+            let cpu = decode_astc_4x4_ldr(&blk).unwrap_or_else(|e| {
+                panic!(
+                    "mp dual-plane per-part mode {mode} ({wx}x{wy}, ccs {ccs}) block {blk:02x?} rejected: {e:?}"
+                )
+            });
+            let gpu = oracle.decode_unorm8(format, &blk);
+            for t in 0..16 {
+                for c in 0..4 {
+                    let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                    assert!(
+                        d <= 1,
+                        "ASTC mp dual-plane per-part mode {mode} ({wx}x{wy}, ccs {ccs}) block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                        cpu[t][c],
+                        gpu[t][c]
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC multi-partition dual-plane (per-partition CEM) parity: {} configs x {PER_MODE} blocks within 1 LSB of hardware",
+        MULTI_PART_DUAL_PLANE_PERPART.len()
+    );
+}
