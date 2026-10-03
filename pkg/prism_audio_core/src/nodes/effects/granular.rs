@@ -64,8 +64,8 @@ use bevy_math::ops;
 use core::f32::consts::TAU;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, equal_power_pan, flush_denormal, lerp};
-use crate::nodes::effects::pitch_shifter::{MAX_PITCH_RATIO, MIN_PITCH_RATIO, semitones_to_ratio};
+use crate::math::{equal_power_pan, flush_denormal, lerp, Sample};
+use crate::nodes::effects::pitch_shifter::{semitones_to_ratio, MAX_PITCH_RATIO, MIN_PITCH_RATIO};
 use crate::param::{Ramp, Smoothed};
 
 /// Maximum number of grains that can sound simultaneously.
@@ -150,11 +150,25 @@ impl GranularParams {
     pub fn sanitised(self) -> Self {
         let d = Self::default();
         let fix = |x: Sample, lo: Sample, hi: Sample, fallback: Sample| {
-            if x.is_finite() { x.clamp(lo, hi) } else { fallback }
+            if x.is_finite() {
+                x.clamp(lo, hi)
+            } else {
+                fallback
+            }
         };
         Self {
-            grain_size_ms: fix(self.grain_size_ms, MIN_GRAIN_MS, MAX_GRAIN_MS, d.grain_size_ms),
-            density_hz: fix(self.density_hz, MIN_DENSITY_HZ, MAX_DENSITY_HZ, d.density_hz),
+            grain_size_ms: fix(
+                self.grain_size_ms,
+                MIN_GRAIN_MS,
+                MAX_GRAIN_MS,
+                d.grain_size_ms,
+            ),
+            density_hz: fix(
+                self.density_hz,
+                MIN_DENSITY_HZ,
+                MAX_DENSITY_HZ,
+                d.density_hz,
+            ),
             position_seconds: fix(
                 self.position_seconds,
                 0.0,
@@ -162,7 +176,12 @@ impl GranularParams {
                 d.position_seconds,
             ),
             position_jitter_ms: fix(self.position_jitter_ms, 0.0, 10_000.0, d.position_jitter_ms),
-            pitch_ratio: fix(self.pitch_ratio, MIN_PITCH_RATIO, MAX_PITCH_RATIO, d.pitch_ratio),
+            pitch_ratio: fix(
+                self.pitch_ratio,
+                MIN_PITCH_RATIO,
+                MAX_PITCH_RATIO,
+                d.pitch_ratio,
+            ),
             pitch_jitter_semitones: fix(self.pitch_jitter_semitones, 0.0, 48.0, 0.0),
             spread: fix(self.spread, 0.0, MAX_SPREAD, d.spread),
             wet: fix(self.wet, 0.0, 8.0, d.wet),
@@ -308,11 +327,6 @@ impl GranularNode {
     /// assert!(output.channel(0).iter().all(|s| s.is_finite()));
     /// ```
     #[must_use]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "capture length is a positive, bounded frame count"
-    )]
     pub fn new(sample_rate: u32, channels: usize, params: GranularParams) -> Self {
         let p = params.sanitised();
         let channels = channels.max(1);
@@ -444,7 +458,11 @@ impl GranularNode {
 
     /// Sets the base pitch from a semitone offset.
     pub fn set_pitch_semitones(&mut self, semitones: Sample) {
-        let st = if semitones.is_finite() { semitones } else { 0.0 };
+        let st = if semitones.is_finite() {
+            semitones
+        } else {
+            0.0
+        };
         self.set_pitch_ratio(semitones_to_ratio(st));
     }
 
@@ -509,41 +527,22 @@ impl GranularNode {
 }
 
 /// Rounds a grain length in frames to at least two samples.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "grain length is a small positive frame count after rounding"
-)]
 fn grain_length(frames: Sample) -> u32 {
     (ops::round(frames) as u32).max(2)
 }
 
 /// Returns the newest recorded frame index as a float timeline position.
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "frame counts stay far below 2^52 so the f64 conversion is exact"
-)]
 fn newest_frame(write_total: u64) -> f64 {
     write_total.saturating_sub(1) as f64
 }
 
 /// Reduces an absolute frame index to a capture-ring slot.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the modular index is strictly less than len, which fits usize"
-)]
 fn ring_index(abs: u64, len: usize) -> usize {
     (abs % len as u64) as usize
 }
 
 /// Reads the capture ring at absolute position `pos` with linear
 /// interpolation, clamped to the valid recorded window.
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
-    reason = "pos is clamped non-negative before flooring; frame counts stay below 2^52"
-)]
 fn read_capture(capture: &[Sample], write_total: u64, len: usize, pos: f64) -> Sample {
     if write_total == 0 {
         return 0.0;
@@ -932,7 +931,10 @@ mod tests {
         let out = render(&mut node, &input, 1);
         let half = out.active_frames() / 2;
         let energy: Sample = out.channel(0)[half..].iter().map(|v| v * v).sum();
-        assert!(energy > 1.0, "mono cloud should be audible, energy = {energy}");
+        assert!(
+            energy > 1.0,
+            "mono cloud should be audible, energy = {energy}"
+        );
     }
 
     #[test]

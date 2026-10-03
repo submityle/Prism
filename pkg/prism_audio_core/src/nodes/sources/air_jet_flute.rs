@@ -251,12 +251,6 @@ impl WaveguideDelay {
     }
 
     #[inline]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "delay is clamped to [1, len-1]; the integer part fits a usize exactly"
-    )]
     fn read(&self, delay: Sample) -> Sample {
         let len = self.buf.len();
         let d = delay.clamp(1.0, (len - 1) as Sample);
@@ -389,12 +383,6 @@ impl AirJetFluteNode {
     /// 2]`, `jet_ratio` to `[MIN_JET_RATIO, MAX_JET_RATIO]`, and
     /// `breath_pressure`/`brightness`/`breath_noise` to `[0, 1]`.
     #[must_use]
-    #[expect(
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        reason = "the buffer length is tiny relative to f32's integer precision"
-    )]
     pub fn new(sample_rate: u32, params: AirJetFluteParams) -> Self {
         let sr = (sample_rate.max(1)) as Sample;
         // Longest bore delay (frames at the lowest pitch): bore_delay = sr / f0.
@@ -530,10 +518,6 @@ impl AirJetFluteNode {
     }
 
     /// Recomputes the latched loop coefficients from the user-facing parameters.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "the buffer length is tiny relative to f32's integer precision"
-    )]
     fn recompute(&mut self) {
         let sr = self.sample_rate;
         // One-pole loss-filter coefficient S in [0, 0.5]: brightness 1 -> S 0.

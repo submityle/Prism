@@ -55,7 +55,7 @@ use alloc::{vec, vec::Vec};
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, lerp};
+use crate::math::{flush_denormal, lerp, Sample};
 
 /// Largest per-side delay time, in milliseconds, the node can address.
 pub const MAX_PING_PONG_DELAY_MS: Sample = 2_000.0;
@@ -123,7 +123,12 @@ impl PingPongDelayParams {
             }
         };
         Self {
-            left_delay_ms: clamp(self.left_delay_ms, 0.0, MAX_PING_PONG_DELAY_MS, d.left_delay_ms),
+            left_delay_ms: clamp(
+                self.left_delay_ms,
+                0.0,
+                MAX_PING_PONG_DELAY_MS,
+                d.left_delay_ms,
+            ),
             right_delay_ms: clamp(
                 self.right_delay_ms,
                 0.0,
@@ -442,7 +447,11 @@ mod tests {
         let mut node = PingPongDelayNode::new(SR, 2, params);
         let left = impulse(256);
         let (lo, _ro) = run_stereo(&mut node, &left, &vec![0.0; 256]);
-        assert!((lo[96] - 1.0).abs() < 1e-5, "echo should land at frame 96: {}", lo[96]);
+        assert!(
+            (lo[96] - 1.0).abs() < 1e-5,
+            "echo should land at frame 96: {}",
+            lo[96]
+        );
         for (f, &v) in lo.iter().enumerate().take(96) {
             assert!(v.abs() < 1e-6, "no echo before frame 96 (frame {f} = {v})");
         }
@@ -481,7 +490,11 @@ mod tests {
         let left = impulse(512);
         let (lo, _ro) = run_stereo(&mut node, &left, &vec![0.0; 512]);
         // 2 ms at 48 kHz is 96 frames: the first repeat lands on the input side.
-        assert!(lo[96].abs() > 0.1, "first echo on input side at frame 96: {}", lo[96]);
+        assert!(
+            lo[96].abs() > 0.1,
+            "first echo on input side at frame 96: {}",
+            lo[96]
+        );
     }
 
     #[test]
@@ -642,7 +655,10 @@ mod tests {
         for (a, b) in first.1.iter().zip(second.1.iter()) {
             max_err = max_err.max((a - b).abs());
         }
-        assert!(max_err < 1e-6, "reset must reproduce the fresh response: {max_err}");
+        assert!(
+            max_err < 1e-6,
+            "reset must reproduce the fresh response: {max_err}"
+        );
     }
 
     #[test]
@@ -671,7 +687,10 @@ mod tests {
         // 2 ms -> 96 frames, 4 ms -> 192 frames.
         assert!((short[96] - 1.0).abs() < 1e-5);
         assert!((long[192] - 1.0).abs() < 1e-5);
-        assert!(long[96].abs() < 1e-6, "longer delay must not echo at the old time");
+        assert!(
+            long[96].abs() < 1e-6,
+            "longer delay must not echo at the old time"
+        );
     }
 
     #[test]
@@ -686,6 +705,9 @@ mod tests {
         let mut node = PingPongDelayNode::new(SR, 1, params);
         let out = run_mono(&mut node, &impulse(1_024));
         assert!(out.iter().all(|x| x.is_finite()));
-        assert!(rms(&out) > 1e-4, "a mono line must still echo back on itself");
+        assert!(
+            rms(&out) > 1e-4,
+            "a mono line must still echo back on itself"
+        );
     }
 }

@@ -99,7 +99,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
+use crate::math::{db_to_linear, flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Largest saturation drive, so a very hot input cannot push the clipper into
@@ -689,7 +689,11 @@ mod tests {
         let mut node = TubeNode::new(params(), SR, 1);
         let mut input = mono(64);
         for (i, s) in input.channel_mut(0).iter_mut().enumerate() {
-            *s = if i % 3 == 0 { Sample::NAN } else { Sample::INFINITY };
+            *s = if i % 3 == 0 {
+                Sample::NAN
+            } else {
+                Sample::INFINITY
+            };
         }
         let inputs = [input];
         let mut outputs = [mono(64)];
@@ -788,7 +792,10 @@ mod tests {
         node.process(&ctx(frames), &mut io);
         let tail = &outputs[0].channel(0)[frames - 512..];
         let mean = tail.iter().copied().sum::<Sample>() / tail.len() as Sample;
-        assert!(mean.abs() < 1.0e-3, "DC leaked through coupling block: {mean}");
+        assert!(
+            mean.abs() < 1.0e-3,
+            "DC leaked through coupling block: {mean}"
+        );
     }
 
     #[test]

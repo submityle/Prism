@@ -73,7 +73,7 @@ use bevy_math::ops;
 use core::f32::consts::FRAC_1_SQRT_2;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Smallest permitted display-point ring capacity.
 pub const MIN_POINT_CAPACITY: usize = 1;
@@ -351,7 +351,11 @@ mod tests {
         let n = g.points_ordered(&mut pts);
         assert_eq!(n, 1);
         assert!(approx(pts[0].x, 0.0, 1e-7), "x {}", pts[0].x);
-        assert!(approx(pts[0].y, 0.5 * 2.0 * FRAC_1_SQRT_2, 1e-6), "y {}", pts[0].y);
+        assert!(
+            approx(pts[0].y, 0.5 * 2.0 * FRAC_1_SQRT_2, 1e-6),
+            "y {}",
+            pts[0].y
+        );
     }
 
     #[test]
@@ -362,7 +366,11 @@ mod tests {
         let n = g.points_ordered(&mut pts);
         assert_eq!(n, 1);
         assert!(approx(pts[0].y, 0.0, 1e-7), "y {}", pts[0].y);
-        assert!(approx(pts[0].x, 0.5 * 2.0 * FRAC_1_SQRT_2, 1e-6), "x {}", pts[0].x);
+        assert!(
+            approx(pts[0].x, 0.5 * 2.0 * FRAC_1_SQRT_2, 1e-6),
+            "x {}",
+            pts[0].x
+        );
     }
 
     #[test]
@@ -400,7 +408,11 @@ mod tests {
         // Oldest retained pair is i=2, then 3, then 4; y = 2*i*FRAC_1_SQRT_2.
         for (k, p) in pts.iter().enumerate() {
             let i = (k + 2) as Sample;
-            assert!(approx(p.y, 2.0 * i * FRAC_1_SQRT_2, 1e-5), "point {k} y {}", p.y);
+            assert!(
+                approx(p.y, 2.0 * i * FRAC_1_SQRT_2, 1e-5),
+                "point {k} y {}",
+                p.y
+            );
         }
     }
 
@@ -422,7 +434,11 @@ mod tests {
         g.feed_sample(1.0, 1.0);
         g.feed_sample(0.1, 0.1);
         // Largest pair is (1,1): radius = sqrt(2).
-        assert!(approx(g.peak_radius(), ops::sqrt(2.0), 1e-6), "peak {}", g.peak_radius());
+        assert!(
+            approx(g.peak_radius(), ops::sqrt(2.0), 1e-6),
+            "peak {}",
+            g.peak_radius()
+        );
     }
 
     #[test]

@@ -11,20 +11,20 @@
 //!
 //! # Catalogue
 //!
-//! - [`compressor::CompressorNode`] — soft-knee feed-forward compressor with
+//! - [`compressor::CompressorNode`] -- soft-knee feed-forward compressor with
 //!   peak/RMS detection, look-ahead, make-up gain, and parallel wet/dry mix.
-//! - [`de_esser::DeEsserNode`] — split-band de-esser: a crossover keyed off the
+//! - [`de_esser::DeEsserNode`] -- split-band de-esser: a crossover keyed off the
 //!   high band tames vocal sibilance while the body of the voice passes through.
 //! - [`dynamic_eq::DynamicEqNode`] -- single parametric bell whose boost/cut is
 //!   cross-faded by a band-level detector (dynamic equalisation).
-//! - [`limiter::LimiterNode`] — look-ahead brick-wall peak limiter with a
+//! - [`limiter::LimiterNode`] -- look-ahead brick-wall peak limiter with a
 //!   guaranteed output ceiling.
-//! - [`multiband::MultibandCompressorNode`] — Linkwitz-Riley band split
+//! - [`multiband::MultibandCompressorNode`] -- Linkwitz-Riley band split
 //!   feeding an independent compressor per band, recombined flat.
 //! - [`transient_shaper::TransientShaperNode`] - differential-envelope
 //!   attack / sustain designer (fast vs slow follower), threshold-free.
-//! - [`gate::ExpanderGateNode`] — downward expander / noise gate with hold.
-//! - [`ducking::DuckingNode`] — side-chain ducker (key on input port 1).
+//! - [`gate::ExpanderGateNode`] -- downward expander / noise gate with hold.
+//! - [`ducking::DuckingNode`] -- side-chain ducker (key on input port 1).
 //! - [`upward_compressor::UpwardCompressorNode`] -- feed-forward upward
 //!   compressor that lifts signal below the threshold (boost = (1-1/R)*under,
 //!   capped by `max_gain_db`); stereo-linked, reusing the shared detector and
@@ -52,6 +52,6 @@ pub use limiter::{LimiterNode, LimiterParams};
 pub use multiband::MultibandCompressorNode;
 pub use transient_shaper::{TransientShaperNode, TransientShaperParams};
 pub use upward_compressor::{
-    DEFAULT_UPWARD_MAX_GAIN_DB, DEFAULT_UPWARD_RATIO, DEFAULT_UPWARD_THRESHOLD_DB,
-    MAX_UPWARD_GAIN_DB, UpwardCompressorNode, UpwardCompressorParams, upward_boost_db,
+    upward_boost_db, UpwardCompressorNode, UpwardCompressorParams, DEFAULT_UPWARD_MAX_GAIN_DB,
+    DEFAULT_UPWARD_RATIO, DEFAULT_UPWARD_THRESHOLD_DB, MAX_UPWARD_GAIN_DB,
 };

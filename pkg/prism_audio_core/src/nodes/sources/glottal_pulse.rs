@@ -650,8 +650,10 @@ mod tests {
 
     #[test]
     fn silent_when_amplitude_zero() {
-        let mut p = GlottalPulseParams::default();
-        p.amplitude = 0.0;
+        let p = GlottalPulseParams {
+            amplitude: 0.0,
+            ..GlottalPulseParams::default()
+        };
         let mut node = GlottalPulseNode::new(SR, p);
         let out = render(&mut node, 2048);
         assert!(out.iter().all(|&s| s == 0.0), "zero amplitude must be silent");
@@ -660,14 +662,18 @@ mod tests {
     #[test]
     fn amplitude_scales_energy_quadratically() {
         let quiet = {
-            let mut p = GlottalPulseParams::default();
-            p.amplitude = 0.25;
+            let p = GlottalPulseParams {
+                amplitude: 0.25,
+                ..GlottalPulseParams::default()
+            };
             let mut node = GlottalPulseNode::new(SR, p);
             energy(&render(&mut node, SR as usize))
         };
         let loud = {
-            let mut p = GlottalPulseParams::default();
-            p.amplitude = 0.5;
+            let p = GlottalPulseParams {
+                amplitude: 0.5,
+                ..GlottalPulseParams::default()
+            };
             let mut node = GlottalPulseNode::new(SR, p);
             energy(&render(&mut node, SR as usize))
         };

@@ -82,7 +82,11 @@ pub fn linear_to_db(linear: Sample) -> Sample {
 #[inline]
 #[must_use]
 pub fn flush_denormal(x: Sample) -> Sample {
-    if x.abs() < f32::MIN_POSITIVE { 0.0 } else { x }
+    if x.abs() < f32::MIN_POSITIVE {
+        0.0
+    } else {
+        x
+    }
 }
 
 /// Clamps a sample into the closed range `[-1.0, 1.0]`.

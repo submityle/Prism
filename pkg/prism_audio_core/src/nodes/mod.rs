@@ -7,13 +7,13 @@
 //!
 //! # Node catalogue
 //!
-//! - [`gain::GainNode`] — click-free level trim driven by a
+//! - [`gain::GainNode`] -- click-free level trim driven by a
 //!   [`Smoothed`](crate::param::Smoothed) parameter.
-//! - [`biquad::BiquadNode`] — a second-order RBJ-cookbook IIR filter
+//! - [`biquad::BiquadNode`] -- a second-order RBJ-cookbook IIR filter
 //!   (low/high-pass, band-pass, notch, peaking, shelving).
-//! - [`pan::StereoPanNode`] — equal-power mono-to-stereo panner.
-//! - [`mix::SumNode`] — explicit N-input summing node (a bus mixer primitive).
-//! - [`crossover::LinkwitzRileyCrossover`] — fourth-order Linkwitz-Riley
+//! - [`pan::StereoPanNode`] -- equal-power mono-to-stereo panner.
+//! - [`mix::SumNode`] -- explicit N-input summing node (a bus mixer primitive).
+//! - [`crossover::LinkwitzRileyCrossover`] -- fourth-order Linkwitz-Riley
 //!   multi-band splitter whose bands sum back to a flat response.
 //! - [`svf::SvfNode`] - topology-preserving (TPT) state-variable filter with
 //!   simultaneous low/high/band-pass, notch, peak, all-pass, bell, and shelf
@@ -61,11 +61,10 @@ pub mod sources;
 pub mod svf;
 
 pub use analysis::{
-    CorrelationMeasurement, CorrelationMeter, CorrelationMeterNode, DEFAULT_DECIMATION,
-    DEFAULT_FFT_SIZE, DEFAULT_HOP, DEFAULT_POINT_CAPACITY, Goniometer, GoniometerNode,
+    CorrelationMeasurement, CorrelationMeter, CorrelationMeterNode, Goniometer, GoniometerNode,
     GoniometerPoint, GoniometerStats, KWeighting, LoudnessMeasurement, LoudnessMeter,
-    LoudnessMeterNode, MIN_FFT_SIZE, MIN_POINT_CAPACITY, SpectrumAnalyzer, SpectrumNode,
-    TruePeakMeter, Window,
+    LoudnessMeterNode, SpectrumAnalyzer, SpectrumNode, TruePeakMeter, Window, DEFAULT_DECIMATION,
+    DEFAULT_FFT_SIZE, DEFAULT_HOP, DEFAULT_POINT_CAPACITY, MIN_FFT_SIZE, MIN_POINT_CAPACITY,
 };
 pub use biquad::{BiquadKind, BiquadNode};
 pub use crossover::{LinkwitzRileyCrossover, MAX_BANDS, MAX_CROSSOVERS};
@@ -76,18 +75,17 @@ pub use dynamics::{
 };
 pub use effects::{
     BitcrusherNode, BitcrusherParams, ChorusNode, ChorusParams, CombResonatorNode,
-    CombResonatorParams, DelayNode, EqBand, FlangerNode, FlangerParams, MAX_BIT_DEPTH,
-    MIN_BIT_DEPTH, Oversample, ParametricEqNode, PhaserNode, PhaserParams, RingModulatorNode,
-    RingModulatorParams, SaturationCurve, SaturationNode, SaturationParams, TremoloMode,
-    TremoloNode, TremoloParams, VibratoNode, VibratoParams,
-    WaveshaperNode,
+    CombResonatorParams, DelayNode, EqBand, FlangerNode, FlangerParams, Oversample,
+    ParametricEqNode, PhaserNode, PhaserParams, RingModulatorNode, RingModulatorParams,
+    SaturationCurve, SaturationNode, SaturationParams, TremoloMode, TremoloNode, TremoloParams,
+    VibratoNode, VibratoParams, WaveshaperNode, MAX_BIT_DEPTH, MIN_BIT_DEPTH,
 };
 pub use gain::GainNode;
 pub use mastering::{
+    normalization_gain_db, Dither, DitherNode, DitherParams, DitherType, LoudnessNormalizerNode,
+    LoudnessNormalizerParams, MasteringChainNode, MasteringChainParams, NoiseShaping,
     DEFAULT_DITHER_BITS, DEFAULT_MAX_GAIN_DB, DEFAULT_MAX_TRUE_PEAK_DBTP, DEFAULT_RAMP_SECONDS,
-    DEFAULT_TARGET_LUFS, Dither, DitherNode, DitherParams, DitherType, LoudnessNormalizerNode,
-    LoudnessNormalizerParams, MAX_DITHER_BITS, MIN_DITHER_BITS, MasteringChainNode,
-    MasteringChainParams, NoiseShaping, SILENCE_GATE_LUFS, normalization_gain_db,
+    DEFAULT_TARGET_LUFS, MAX_DITHER_BITS, MIN_DITHER_BITS, SILENCE_GATE_LUFS,
 };
 pub use mix::SumNode;
 pub use pan::StereoPanNode;

@@ -17,7 +17,7 @@ use crate::buffer::AudioBuffer;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use bevy_math::ops;
 
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// The filter response computed from the cookbook coefficients.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -104,7 +104,14 @@ impl BiquadCoeffs {
                 // Constant peak gain = Q (the "0 dB peak" variant uses alpha for b0).
                 (alpha, 0.0, -alpha, 1.0 + alpha, -2.0 * cos_w0, 1.0 - alpha)
             }
-            BiquadKind::Notch => (1.0, -2.0 * cos_w0, 1.0, 1.0 + alpha, -2.0 * cos_w0, 1.0 - alpha),
+            BiquadKind::Notch => (
+                1.0,
+                -2.0 * cos_w0,
+                1.0,
+                1.0 + alpha,
+                -2.0 * cos_w0,
+                1.0 - alpha,
+            ),
             BiquadKind::Peaking => (
                 1.0 + alpha * a,
                 -2.0 * cos_w0,

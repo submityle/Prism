@@ -49,8 +49,8 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
-use crate::oversampler::{DEFAULT_TAPS_PER_PHASE, DryDelay, Oversampler, OversamplerState};
+use crate::math::{flush_denormal, Sample};
+use crate::oversampler::{DryDelay, Oversampler, OversamplerState, DEFAULT_TAPS_PER_PHASE};
 use crate::param::{Ramp, Smoothed};
 
 /// The internal processing rate relative to the host sample rate.

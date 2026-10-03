@@ -297,10 +297,6 @@ fn clamp_lag(rounded: Sample, lo: usize, hi: usize) -> usize {
 }
 
 /// Runs one `YIN` pass over `frame`, writing scratch into `diff` / `cmnd`.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a free YIN pass takes the frame, its window, both lag bounds, the threshold, the rate, and two preallocated scratch buffers"
-)]
 fn run_yin(
     frame: &[Sample],
     window: usize,
@@ -529,7 +525,11 @@ mod tests {
     fn detects_low_and_high_tones() {
         let low = detect_sine(80.0, 16_384, 512);
         assert!(low.is_voiced);
-        assert!((low.frequency_hz - 80.0).abs() < 3.0, "low {}", low.frequency_hz);
+        assert!(
+            (low.frequency_hz - 80.0).abs() < 3.0,
+            "low {}",
+            low.frequency_hz
+        );
 
         let high = detect_sine(1_500.0, 8_192, 256);
         assert!(high.is_voiced);
@@ -582,7 +582,11 @@ mod tests {
         }
         let est = det.latest();
         assert!(est.is_voiced);
-        assert!((est.frequency_hz - 220.0).abs() < 4.0, "f0 {}", est.frequency_hz);
+        assert!(
+            (est.frequency_hz - 220.0).abs() < 4.0,
+            "f0 {}",
+            est.frequency_hz
+        );
     }
 
     #[test]
@@ -636,7 +640,11 @@ mod tests {
         let mut det = PitchDetector::new(SR, 50.0, 2_000.0, 256);
         let w = core::f32::consts::TAU * 440.0 / SR as Sample;
         for n in 0..4_096 {
-            let x = if n % 500 == 0 { Sample::NAN } else { ops::sin(w * n as Sample) };
+            let x = if n % 500 == 0 {
+                Sample::NAN
+            } else {
+                ops::sin(w * n as Sample)
+            };
             det.feed_sample(x);
         }
         let est = det.latest();

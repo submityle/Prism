@@ -18,14 +18,14 @@
 //!   audio-rate control signal rather than consuming it internally; reuses
 //!   the dynamics family's shared [`LevelDetector`](crate::nodes::dynamics::detector::LevelDetector)
 //!   detection stage for side-chain, ducking-trigger, or modulation routing.
-//! - [`parametric_eq::ParametricEqNode`] — multi-band parametric EQ built by
+//! - [`parametric_eq::ParametricEqNode`] -- multi-band parametric EQ built by
 //!   cascading reusable [`Biquad`](crate::nodes::biquad::Biquad) sections.
 //! - [`graphic_eq::GraphicEqNode`] -- fixed ISO octave / third-octave graphic
 //!   equalizer: a bank of constant-Q RBJ peaking biquads on standardized
 //!   center frequencies, giving bit-exact bypass when every band is flat;
 //!   distinct from [`parametric_eq::ParametricEqNode`], which exposes an
 //!   arbitrary frequency / Q / gain / shape per band.
-//! - [`delay::DelayNode`] — fractional delay line with feedback and wet/dry
+//! - [`delay::DelayNode`] -- fractional delay line with feedback and wet/dry
 //!   mix (the echo / slap-back / modulated-delay primitive).
 //! - [`dc_blocker::DcBlockerNode`] -- first-order DC-blocking high pass
 //!   `y = x - x[-1] + R * y[-1]` whose zero sits exactly at 0 Hz, removing
@@ -40,13 +40,13 @@
 //!   distinct from [`delay::DelayNode`] (one per-channel fractional tap)
 //!   and from the LFO-swept [`chorus::ChorusNode`] / [`flanger::FlangerNode`]
 //!   whose taps modulate cyclically rather than stay fixed.
-//! - [`waveshaper::WaveshaperNode`] — `tanh` soft-clip saturation with optional
+//! - [`waveshaper::WaveshaperNode`] -- `tanh` soft-clip saturation with optional
 //!   2x/4x band-limiting oversampling.
 //! - [`wavefolder::WavefolderNode`] -- west-coast reflective wave folder
 //!   (triangle / sine fold) with selectable up-to-8x oversampling; unlike the
 //!   compressive [`waveshaper::WaveshaperNode`] it mirrors signal past the fold
 //!   threshold for bright, metallic, harmonically dense timbres.
-//! - [`chorus::ChorusNode`] — multi-voice LFO-modulated delay ensemble (no
+//! - [`chorus::ChorusNode`] -- multi-voice LFO-modulated delay ensemble (no
 //!   feedback) for shimmering thickening.
 //! - [`clipper::ClipperNode`] -- transparent-below-ceiling peak clipper
 //!   (hard brick-wall or soft tanh knee) with anti-aliasing oversampling;
@@ -56,17 +56,17 @@
 //!   input with one delayed, scaled copy for static flanging and metallic
 //!   coloration; the finite-response counterpart to the recirculating
 //!   [`comb_resonator::CombResonatorNode`].
-//! - [`flanger::FlangerNode`] — single short LFO-swept delay with feedback for
+//! - [`flanger::FlangerNode`] -- single short LFO-swept delay with feedback for
 //!   the classic sweeping comb / "jet" effect.
 //! - [`formant_filter::FormantFilterNode`] -- parallel band-pass resonator bank
 //!   tuned to the five cardinal vowels, with continuous vowel morphing, for
 //!   talk-box / vocal-pad timbres; distinct from the series EQ nodes and from
 //!   the single swept band of [`auto_wah::AutoWahNode`].
-//! - [`comb_resonator::CombResonatorNode`] — pitched feedback comb with a
+//! - [`comb_resonator::CombResonatorNode`] -- pitched feedback comb with a
 //!   lowpass in the loop for plucked-string / resonant-body voices.
-//! - [`phaser::PhaserNode`] — cascaded first-order all-pass stages swept by an
+//! - [`phaser::PhaserNode`] -- cascaded first-order all-pass stages swept by an
 //!   LFO to drag notches through the spectrum.
-//! - [`stereo_width::StereoWidthNode`] — Mid-Side stereo widener with an
+//! - [`stereo_width::StereoWidthNode`] -- Mid-Side stereo widener with an
 //!   optional bass-mono crossover for image control.
 //! - [`mid_side_matrix::MidSideMatrixNode`] -- pure Mid-Side (sum and
 //!   difference) encoder / decoder with independent mid and side trim
@@ -93,11 +93,11 @@
 //!   stereo motion with mechanical spin-up / spin-down inertia. Distinct from
 //!   [`tremolo::TremoloNode`] (amplitude only) and [`vibrato::VibratoNode`]
 //!   (pitch only) because it couples pitch, amplitude, and stereo image.
-//! - [`tremolo::TremoloNode`] — low-frequency amplitude modulation / auto-pan
+//! - [`tremolo::TremoloNode`] -- low-frequency amplitude modulation / auto-pan
 //!   driven by a control-rate LFO.
-//! - [`bitcrusher::BitcrusherNode`] — bit-depth quantization plus sample-rate
+//! - [`bitcrusher::BitcrusherNode`] -- bit-depth quantization plus sample-rate
 //!   reduction (sample-and-hold decimation) for gritty lo-fi degradation.
-//! - [`ring_modulator::RingModulatorNode`] — multiplies the signal by a
+//! - [`ring_modulator::RingModulatorNode`] -- multiplies the signal by a
 //!   bipolar audio-rate carrier for inharmonic, bell-like, or robotic timbres.
 //! - [`frequency_shifter::FrequencyShifterNode`] -- single-sideband (SSB)
 //!   shifter that adds a constant Hz offset to every partial via a Hilbert
@@ -116,17 +116,17 @@
 //!   phase-accumulating resynthesis; distinct from the inharmonic
 //!   [`frequency_shifter::FrequencyShifterNode`] (adds a Hz offset) and the
 //!   time-domain [`vibrato::VibratoNode`] (cyclic delay-based bend).
-//! - [`vibrato::VibratoNode`] — single LFO-swept fractional delay for
+//! - [`vibrato::VibratoNode`] -- single LFO-swept fractional delay for
 //!   periodic pitch modulation.
 //! - [`vocoder::VocoderNode`] -- channel vocoder cross-synthesis: a band bank
 //!   imprints the moving spectral envelope of a modulator (input 0) onto a
 //!   carrier (input 1); distinct from the fixed vowel bank of
 //!   [`formant_filter::FormantFilterNode`] and from the single-signal band
 //!   splitting of [`crate::nodes::dynamics::multiband`].
-//! - [`exciter::ExciterNode`] — high-frequency harmonic exciter / aural
+//! - [`exciter::ExciterNode`] -- high-frequency harmonic exciter / aural
 //!   enhancer: a highpass-isolated band is `tanh`-shaped to synthesize added
 //!   odd / even harmonics that are mixed back for presence and air.
-//! - [`tape::TapeNode`] — analog tape-machine emulation: `tanh` drive / bias
+//! - [`tape::TapeNode`] -- analog tape-machine emulation: `tanh` drive / bias
 //!   saturation feeding a wow / flutter modulated fractional delay and a
 //!   one-pole high-frequency rolloff for vintage warmth and pitch wobble.
 //! - [`saturation::SaturationNode`] -- multi-curve asymmetric saturator

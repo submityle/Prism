@@ -18,7 +18,7 @@ pub struct GainNode {
 
 impl GainNode {
     /// Creates a gain node settled at `initial_linear` (a linear multiplier,
-    /// not decibels — use [`db_to_linear`](crate::math::db_to_linear) to
+    /// not decibels -- use [`db_to_linear`](crate::math::db_to_linear) to
     /// convert).
     #[must_use]
     pub fn new(initial_linear: Sample) -> Self {

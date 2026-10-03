@@ -63,16 +63,16 @@ pub mod spectrum;
 
 pub use correlation::{CorrelationMeasurement, CorrelationMeter, CorrelationMeterNode};
 pub use goniometer::{
-    DEFAULT_DECIMATION, DEFAULT_POINT_CAPACITY, Goniometer, GoniometerNode, GoniometerPoint,
-    GoniometerStats, MIN_POINT_CAPACITY,
+    Goniometer, GoniometerNode, GoniometerPoint, GoniometerStats, DEFAULT_DECIMATION,
+    DEFAULT_POINT_CAPACITY, MIN_POINT_CAPACITY,
 };
 pub use loudness::{
     KWeighting, LoudnessMeasurement, LoudnessMeter, LoudnessMeterNode, TruePeakMeter,
 };
 pub use pitch_detector::{PitchDetector, PitchDetectorNode, PitchEstimate};
 pub use spectral_features::{
-    DEFAULT_ROLLOFF_FRACTION, SpectralFeatureSet, SpectralFeatures, SpectralFeaturesNode,
+    SpectralFeatureSet, SpectralFeatures, SpectralFeaturesNode, DEFAULT_ROLLOFF_FRACTION,
 };
 pub use spectrum::{
-    DEFAULT_FFT_SIZE, DEFAULT_HOP, MIN_FFT_SIZE, SpectrumAnalyzer, SpectrumNode, Window,
+    SpectrumAnalyzer, SpectrumNode, Window, DEFAULT_FFT_SIZE, DEFAULT_HOP, MIN_FFT_SIZE,
 };

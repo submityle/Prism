@@ -41,7 +41,11 @@ mod tests {
     use crate::buffer::{AudioBuffer, ChannelLayout};
 
     fn ctx() -> RenderContext {
-        RenderContext { sample_rate: 48_000, frames: 4, playhead: 0 }
+        RenderContext {
+            sample_rate: 48_000,
+            frames: 4,
+            playhead: 0,
+        }
     }
 
     #[test]

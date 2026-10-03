@@ -80,9 +80,9 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 use core::f32::consts::{PI, TAU};
 
-use crate::fft::{Fft, power_of_two_at_least};
+use crate::fft::{power_of_two_at_least, Fft};
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Analysis/synthesis overlap factor; the hop is `fft_size / OVERLAP_FACTOR`.
 pub const OVERLAP_FACTOR: usize = 4;
@@ -214,7 +214,11 @@ impl PitchShifterNode {
             overlap_sum += win[k] * win[k];
             k += hop;
         }
-        let ola_norm = if overlap_sum > 0.0 { 1.0 / overlap_sum } else { 0.0 };
+        let ola_norm = if overlap_sum > 0.0 {
+            1.0 / overlap_sum
+        } else {
+            0.0
+        };
 
         let sr = sample_rate.max(1) as Sample;
         let freq_per_bin = sr / size as Sample;
@@ -288,11 +292,6 @@ impl PitchShifterNode {
 
     /// Transforms one buffered frame for channel `ch`, pitch-shifts it, and
     /// overlap-adds the result into that channel's accumulator.
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "k * ratio is non-negative and range-checked before the usize cast"
-    )]
     fn process_frame(&mut self, ch: usize) {
         let fifo_base = ch * self.size;
         let phase_base = ch * self.bins;
@@ -394,7 +393,11 @@ impl AudioNode for PitchShifterNode {
                 let x = if x.is_finite() { x } else { 0.0 };
                 self.in_fifo[fifo_base + rover] = x;
                 let y = self.out_fifo[fifo_base + (rover - fifo_latency)];
-                let y = if y.is_finite() { flush_denormal(y) } else { 0.0 };
+                let y = if y.is_finite() {
+                    flush_denormal(y)
+                } else {
+                    0.0
+                };
                 output.channel_mut(ch)[i] = y;
             }
 
@@ -533,7 +536,10 @@ mod tests {
         let mut outputs = [output];
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx(len), &mut io);
-        (outputs[0].channel(0).to_vec(), outputs[0].channel(1).to_vec())
+        (
+            outputs[0].channel(0).to_vec(),
+            outputs[0].channel(1).to_vec(),
+        )
     }
 
     #[test]
@@ -585,7 +591,10 @@ mod tests {
     fn params_sanitised_clamps() {
         let p = PitchShifterParams { pitch_ratio: 1e9 }.sanitised();
         assert!((p.pitch_ratio - MAX_PITCH_RATIO).abs() < 1e-6);
-        let p = PitchShifterParams { pitch_ratio: Sample::NAN }.sanitised();
+        let p = PitchShifterParams {
+            pitch_ratio: Sample::NAN,
+        }
+        .sanitised();
         assert!((p.pitch_ratio - 1.0).abs() < 1e-6);
     }
 
@@ -593,7 +602,10 @@ mod tests {
     fn silence_in_silence_out() {
         let mut node = PitchShifterNode::new(SR, 1, 512, PitchShifterParams { pitch_ratio: 2.0 });
         let out = run_mono(&mut node, &vec![0.0; 4096]);
-        assert!(out.iter().all(|&y| y.abs() < 1e-6), "silence produced output");
+        assert!(
+            out.iter().all(|&y| y.abs() < 1e-6),
+            "silence produced output"
+        );
     }
 
     #[test]
@@ -626,7 +638,10 @@ mod tests {
         let tail = &out[4_096..];
         let m1000 = goertzel(tail, 1_000.0);
         let m2000 = goertzel(tail, 2_000.0);
-        assert!(m1000 > m2000 * 4.0, "fundamental not dominant: {m1000} vs {m2000}");
+        assert!(
+            m1000 > m2000 * 4.0,
+            "fundamental not dominant: {m1000} vs {m2000}"
+        );
         let level = rms(tail) / rms(&signal[4_096..]);
         assert!((0.7..1.3).contains(&level), "level ratio drifted: {level}");
     }
@@ -639,7 +654,10 @@ mod tests {
         let tail = &out[4_096..];
         let m1000 = goertzel(tail, 1_000.0);
         let m2000 = goertzel(tail, 2_000.0);
-        assert!(m2000 > m1000, "shifted tone not at 2 kHz: {m2000} vs {m1000}");
+        assert!(
+            m2000 > m1000,
+            "shifted tone not at 2 kHz: {m2000} vs {m1000}"
+        );
     }
 
     #[test]
@@ -650,7 +668,10 @@ mod tests {
         let tail = &out[4_096..];
         let m1000 = goertzel(tail, 1_000.0);
         let m500 = goertzel(tail, 500.0);
-        assert!(m500 > m1000, "shifted tone not at 500 Hz: {m500} vs {m1000}");
+        assert!(
+            m500 > m1000,
+            "shifted tone not at 500 Hz: {m500} vs {m1000}"
+        );
     }
 
     #[test]

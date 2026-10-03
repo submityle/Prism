@@ -2,8 +2,8 @@
 //!
 //! A *voice* is one sounding instance of a source (a single `Event` trigger can
 //! spawn several). Rendering an unbounded number of them would blow the CPU
-//! budget, so — like Wwise's Virtual Voices / Playback Limit and Godot's
-//! `AudioStreamPolyphonic` — Resonance manages voices through a **pre-allocated
+//! budget, so -- like Wwise's Virtual Voices / Playback Limit and Godot's
+//! `AudioStreamPolyphonic` -- Resonance manages voices through a **pre-allocated
 //! pool** that never grows on the audio thread. This module is the pure,
 //! device-agnostic bookkeeping layer: it decides *which* voices are audible,
 //! which are demoted to inaudible "virtual" state, which are stolen, and where
@@ -17,10 +17,10 @@
 //! (audible, rendered), or [`Virtual`](VoiceState::Virtual) (culled but still
 //! tracked so it can be revived). Two independent limits govern the pool:
 //!
-//! - **Capacity** — the total number of slots (physical + virtual). When it is
+//! - **Capacity** -- the total number of slots (physical + virtual). When it is
 //!   exhausted, [`allocate`](VoicePool::allocate) either steals the globally
 //!   weakest voice (if the newcomer is more important) or refuses.
-//! - **Physical budget** — the maximum number of *audible* voices, tracking the
+//! - **Physical budget** -- the maximum number of *audible* voices, tracking the
 //!   CPU budget of the quality governor. Exceeding it demotes the weakest
 //!   physical voices to virtual according to their [`VirtualBehavior`].
 //!
@@ -30,7 +30,7 @@
 //! voices for overlapping one-shots without hand-managing instances.
 //!
 //! Effective **importance** (an already-combined estimate of explicit priority
-//! × loudness × distance × masking) is the single scalar the pool ranks voices
+//! x loudness x distance x masking) is the single scalar the pool ranks voices
 //! by, so higher layers stay free to compute it however they like.
 //!
 //! # Real-time contract
@@ -67,8 +67,8 @@ use alloc::vec::Vec;
 
 use crate::math::Sample;
 
-/// Effective, already-combined voice importance (priority × loudness × distance
-/// × masking). Higher means "keep me audible"; the pool never interprets the
+/// Effective, already-combined voice importance (priority x loudness x distance
+/// x masking). Higher means "keep me audible"; the pool never interprets the
 /// individual factors, only compares the final scalar.
 pub type Importance = Sample;
 
@@ -427,10 +427,6 @@ impl VoicePool {
         self.enforce_physical_limit();
 
         Some(VoiceHandle {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "index is a slot position < capacity, which fits in u32 in practice"
-            )]
             index: index as u32,
             generation,
         })
@@ -649,10 +645,6 @@ impl VoicePool {
         self.slots.iter().enumerate().filter_map(move |(i, s)| {
             if s.state == state {
                 Some(VoiceHandle {
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "i is a slot position < capacity, which fits in u32 in practice"
-                    )]
                     index: i as u32,
                     generation: s.generation,
                 })
@@ -800,7 +792,11 @@ impl VoicePool {
 /// Replaces non-finite importance values with zero so ordering never sees NaN.
 #[inline]
 fn sanitize(v: Importance) -> Importance {
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]

@@ -80,7 +80,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, lerp};
+use crate::math::{flush_denormal, lerp, Sample};
 use crate::modulation::{Lfo, LfoWaveform};
 use crate::param::{Ramp, Smoothed};
 
@@ -533,8 +533,8 @@ impl AudioNode for TapeNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
     use crate::buffer::{AudioBuffer, ChannelLayout};
+    use alloc::vec::Vec;
 
     const SR: u32 = 48_000;
 
@@ -581,7 +581,10 @@ mod tests {
         let big = tape.saturate(4.0);
         assert!(big.abs() < 4.0, "large peak was not compressed: {big}");
         let small = tape.saturate(0.001);
-        assert!((small - 0.001).abs() < 1.0e-4, "small-signal gain drifted: {small}");
+        assert!(
+            (small - 0.001).abs() < 1.0e-4,
+            "small-signal gain drifted: {small}"
+        );
     }
 
     #[test]
@@ -596,7 +599,10 @@ mod tests {
         let tape = Tape::new(params(), SR, 1);
         let pos = tape.saturate(0.7);
         let neg = tape.saturate(-0.7);
-        assert!((pos + neg).abs() > 1.0e-3, "biased curve should be asymmetric");
+        assert!(
+            (pos + neg).abs() > 1.0e-3,
+            "biased curve should be asymmetric"
+        );
     }
 
     #[test]
@@ -606,7 +612,10 @@ mod tests {
         let tape = Tape::new(p, SR, 1);
         let pos = tape.saturate(0.7);
         let neg = tape.saturate(-0.7);
-        assert!((pos + neg).abs() < 1.0e-6, "unbiased curve should be symmetric");
+        assert!(
+            (pos + neg).abs() < 1.0e-6,
+            "unbiased curve should be symmetric"
+        );
     }
 
     #[test]
@@ -656,7 +665,10 @@ mod tests {
             let mut outputs = [mono(4096)];
             let mut io = ProcessIo::new(&inputs, &mut outputs);
             node.process(&ctx(4096), &mut io);
-            outputs[0].channel(0)[2048..].iter().map(|&s| s * s).sum::<Sample>()
+            outputs[0].channel(0)[2048..]
+                .iter()
+                .map(|&s| s * s)
+                .sum::<Sample>()
         }
         assert!(
             energy(500.0) > energy(10_000.0) * 2.0,
@@ -789,7 +801,10 @@ mod tests {
         let d = tape.advance();
         let a = tape.voice(0, 0.8, d);
         let b = tape.voice(1, 0.0, d);
-        assert!((a - b).abs() > 1.0e-6, "channels should hold independent state");
+        assert!(
+            (a - b).abs() > 1.0e-6,
+            "channels should hold independent state"
+        );
     }
 
     #[test]

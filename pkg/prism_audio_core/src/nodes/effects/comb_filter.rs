@@ -63,7 +63,7 @@ use bevy_math::ops;
 
 use crate::buffer::ChannelLayout;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, lerp};
+use crate::math::{flush_denormal, lerp, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Largest comb delay in milliseconds. Bounds the pre-allocated ring length.
@@ -86,7 +86,11 @@ pub const DEFAULT_MIX: Sample = 1.0;
 /// against `NaN`/infinity leaking into the delay-tap arithmetic.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Converts a delay in milliseconds to a (possibly fractional) frame count at
@@ -203,8 +207,8 @@ impl CombFilterNode {
 
         let max_delay = max_delay_frames as Sample;
         let delay = ms_to_frames(params.delay_ms, sr, max_delay);
-        let feedforward =
-            finite_or(params.feedforward, DEFAULT_FEEDFORWARD).clamp(-MAX_FEEDFORWARD, MAX_FEEDFORWARD);
+        let feedforward = finite_or(params.feedforward, DEFAULT_FEEDFORWARD)
+            .clamp(-MAX_FEEDFORWARD, MAX_FEEDFORWARD);
         let mix = finite_or(params.mix, DEFAULT_MIX).clamp(0.0, 1.0);
 
         Self {
@@ -283,7 +287,10 @@ impl CombFilterNode {
 impl AudioNode for CombFilterNode {
     fn process(&mut self, _ctx: &RenderContext, io: &mut ProcessIo<'_>) {
         let (input, output) = io.io(0, 0);
-        let channels = output.channels().min(input.channels()).min(self.rings.len());
+        let channels = output
+            .channels()
+            .min(input.channels())
+            .min(self.rings.len());
         let frames = output.active_frames();
         if frames == 0 || channels == 0 {
             return;
@@ -405,7 +412,11 @@ mod tests {
         CombFilterNode::new(
             SR,
             ChannelLayout::Mono,
-            CombFilterParams { delay_ms, feedforward, mix },
+            CombFilterParams {
+                delay_ms,
+                feedforward,
+                mix,
+            },
         )
     }
 
@@ -477,7 +488,10 @@ mod tests {
         let out = run(&mut n, &input);
         let tail = &out.channel(0)[200..];
         let peak = tail.iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
-        assert!((peak - 2.0).abs() < 2e-2, "expected doubling, got peak {peak}");
+        assert!(
+            (peak - 2.0).abs() < 2e-2,
+            "expected doubling, got peak {peak}"
+        );
     }
 
     #[test]
@@ -488,7 +502,10 @@ mod tests {
         let out = run(&mut n, &input);
         let tail = &out.channel(0)[200..];
         let energy: Sample = tail.iter().map(|s| s * s).sum::<Sample>() / tail.len() as Sample;
-        assert!(energy < 1e-3, "inverted notch did not cancel: rms^2 {energy}");
+        assert!(
+            energy < 1e-3,
+            "inverted notch did not cancel: rms^2 {energy}"
+        );
     }
 
     #[test]
@@ -502,7 +519,10 @@ mod tests {
         let b = out.channel(0)[101];
         assert!(a > 0.3 && a < 0.7, "frame 100 weight {a}");
         assert!(b > 0.3 && b < 0.7, "frame 101 weight {b}");
-        assert!((a + b - 1.0).abs() < 1e-3, "weights should sum to ~1: {a}+{b}");
+        assert!(
+            (a + b - 1.0).abs() < 1e-3,
+            "weights should sum to ~1: {a}+{b}"
+        );
     }
 
     #[test]
@@ -525,7 +545,11 @@ mod tests {
     #[test]
     fn delay_is_clamped() {
         let n = node(10_000.0, 0.5, 1.0);
-        assert!((n.delay_ms() - MAX_DELAY_MS).abs() < 1e-3, "delay {}", n.delay_ms());
+        assert!(
+            (n.delay_ms() - MAX_DELAY_MS).abs() < 1e-3,
+            "delay {}",
+            n.delay_ms()
+        );
     }
 
     #[test]
@@ -538,7 +562,11 @@ mod tests {
 
     #[test]
     fn from_params_matches_direct_fields() {
-        let p = CombFilterParams { delay_ms: 3.0, feedforward: 0.4, mix: 0.8 };
+        let p = CombFilterParams {
+            delay_ms: 3.0,
+            feedforward: 0.4,
+            mix: 0.8,
+        };
         let n = CombFilterNode::new(SR, ChannelLayout::Mono, p);
         assert!((n.delay_ms() - 3.0).abs() < 1e-3);
         assert_eq!(n.feedforward(), 0.4);

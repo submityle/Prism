@@ -705,8 +705,8 @@ mod tests {
         let node = TonewheelOrganNode::new(SR, TonewheelOrganParams::default());
         assert_eq!(node.frequency_hz(), DEFAULT_FREQUENCY_HZ);
         assert_eq!(node.amplitude(), DEFAULT_AMPLITUDE);
-        for i in 0..NUM_DRAWBARS {
-            assert_eq!(node.drawbar(i), DEFAULT_DRAWBARS[i]);
+        for (i, &expected) in DEFAULT_DRAWBARS.iter().enumerate().take(NUM_DRAWBARS) {
+            assert_eq!(node.drawbar(i), expected);
         }
         // Out-of-range indices are reported as inert rather than panicking.
         assert_eq!(node.drawbar(NUM_DRAWBARS), 0.0);

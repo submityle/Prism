@@ -57,7 +57,7 @@ use alloc::vec::Vec;
 
 use crate::buffer::ChannelLayout;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Smallest corner frequency (Hz) the node accepts.
 pub const MIN_DC_BLOCKER_CUTOFF_HZ: Sample = 0.1;
@@ -217,7 +217,11 @@ impl AudioNode for DcBlockerNode {
             for n in 0..frames {
                 let x = {
                     let v = input.channel(ch)[n];
-                    if v.is_finite() { v } else { 0.0 }
+                    if v.is_finite() {
+                        v
+                    } else {
+                        0.0
+                    }
                 };
                 let y = flush_denormal(x - x1 + r * y1);
                 output.channel_mut(ch)[n] = y;
@@ -288,9 +292,7 @@ mod tests {
 
     /// Peak absolute amplitude over the tail (skipping the startup transient).
     fn tail_peak(v: &[Sample], skip: usize) -> Sample {
-        v.iter()
-            .skip(skip)
-            .fold(0.0_f32, |m, &x| m.max(x.abs()))
+        v.iter().skip(skip).fold(0.0_f32, |m, &x| m.max(x.abs()))
     }
 
     fn mean(v: &[Sample]) -> Sample {
@@ -324,7 +326,10 @@ mod tests {
     fn sanitise_clamps_cutoff() {
         let low = DcBlockerParams { cutoff_hz: -5.0 }.sanitised();
         assert!((low.cutoff_hz - MIN_DC_BLOCKER_CUTOFF_HZ).abs() < 1e-6);
-        let high = DcBlockerParams { cutoff_hz: 10_000.0 }.sanitised();
+        let high = DcBlockerParams {
+            cutoff_hz: 10_000.0,
+        }
+        .sanitised();
         assert!((high.cutoff_hz - MAX_DC_BLOCKER_CUTOFF_HZ).abs() < 1e-6);
     }
 
@@ -400,7 +405,13 @@ mod tests {
     #[test]
     fn output_finite_for_non_finite_input() {
         let mut node = DcBlockerNode::new(SR, ChannelLayout::Mono, DcBlockerParams::default());
-        let input = vec![Sample::NAN, Sample::INFINITY, 0.5, -0.5, Sample::NEG_INFINITY];
+        let input = vec![
+            Sample::NAN,
+            Sample::INFINITY,
+            0.5,
+            -0.5,
+            Sample::NEG_INFINITY,
+        ];
         let out = run_mono(&mut node, &input);
         assert!(out.iter().all(|s| s.is_finite()));
     }
@@ -435,7 +446,10 @@ mod tests {
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx(len), &mut io);
         // Left DC decays away; right stays exactly silent.
-        assert!(outputs[0].channel(0)[..len].iter().skip(6_000).all(|s| s.abs() < 1e-2));
+        assert!(outputs[0].channel(0)[..len]
+            .iter()
+            .skip(6_000)
+            .all(|s| s.abs() < 1e-2));
         assert!(outputs[0].channel(1)[..len].iter().all(|s| s.abs() < 1e-9));
     }
 
@@ -477,7 +491,10 @@ mod tests {
         node.set_params(DcBlockerParams { cutoff_hz: 200.0 });
         let after = node.coeff();
         // A higher corner pushes the pole further from unity (smaller R).
-        assert!(after < before, "higher cutoff should lower the pole: {before} -> {after}");
+        assert!(
+            after < before,
+            "higher cutoff should lower the pole: {before} -> {after}"
+        );
         assert!((node.cutoff_hz() - 200.0).abs() < 1e-3);
     }
 
@@ -503,7 +520,11 @@ mod tests {
         let input: Vec<Sample> = sine(500.0, 16_384).iter().map(|&s| s + 0.8).collect();
         let out = run_mono(&mut node, &input);
         let tail = &out[8_000..];
-        assert!(mean(tail).abs() < 1e-2, "mean should be driven to zero: {}", mean(tail));
+        assert!(
+            mean(tail).abs() < 1e-2,
+            "mean should be driven to zero: {}",
+            mean(tail)
+        );
     }
 
     #[test]
@@ -516,7 +537,8 @@ mod tests {
     #[test]
     fn extreme_params_do_not_panic() {
         for &c in &[Sample::NAN, -1e9, 1e9, 0.0, Sample::INFINITY] {
-            let mut node = DcBlockerNode::new(SR, ChannelLayout::Stereo, DcBlockerParams { cutoff_hz: c });
+            let mut node =
+                DcBlockerNode::new(SR, ChannelLayout::Stereo, DcBlockerParams { cutoff_hz: c });
             let out = run_mono(&mut node, &sine(220.0, 512));
             assert!(out.iter().all(|s| s.is_finite()));
         }

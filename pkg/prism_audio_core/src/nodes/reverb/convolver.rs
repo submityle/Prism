@@ -25,7 +25,7 @@
 use alloc::vec::Vec;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Per-channel convolution state: the impulse response and a matching ring of
@@ -235,7 +235,11 @@ mod tests {
         node.process(&ctx(n), &mut io);
         let out = outputs[0].channel(0);
         for (i, &c) in ir.iter().enumerate() {
-            assert!((out[i] - c).abs() < 1e-6, "tap {i}: got {} want {c}", out[i]);
+            assert!(
+                (out[i] - c).abs() < 1e-6,
+                "tap {i}: got {} want {c}",
+                out[i]
+            );
         }
         for &s in &out[ir.len()..] {
             assert!(s.abs() < 1e-6, "energy past the impulse response: {s}");
@@ -264,7 +268,11 @@ mod tests {
                     want += c * x[i - k];
                 }
             }
-            assert!((out[i] - want).abs() < 1e-6, "sample {i}: got {} want {want}", out[i]);
+            assert!(
+                (out[i] - want).abs() < 1e-6,
+                "sample {i}: got {} want {want}",
+                out[i]
+            );
         }
     }
 

@@ -68,7 +68,7 @@ pub mod voice;
 
 pub use buffer::{AudioBuffer, ChannelLayout};
 pub use graph::{AudioGraph, AudioNode, NodeId, PortRef, ProcessIo, RenderContext};
-pub use math::{Sample, db_to_linear, linear_to_db};
+pub use math::{db_to_linear, linear_to_db, Sample};
 pub use modulation::{Lfo, LfoWaveform};
 pub use param::{Ramp, Smoothed};
 pub use scheduler::{EventScheduler, Grid, NamedClock};

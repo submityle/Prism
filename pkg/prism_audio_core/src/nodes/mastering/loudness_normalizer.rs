@@ -63,7 +63,7 @@
 //! [`MasteringChainNode`](crate::nodes::mastering::MasteringChainNode).
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, linear_to_db};
+use crate::math::{db_to_linear, linear_to_db, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Default delivery target loudness (`-14` `LUFS`, the common streaming
@@ -463,8 +463,12 @@ mod tests {
         let mut node = LoudnessNormalizerNode::new(48_000, &node_params);
         let expected = db_to_linear(6.0);
         let mut input = AudioBuffer::new(ChannelLayout::Stereo, 4);
-        input.channel_mut(0).copy_from_slice(&[1.0, 0.5, -0.5, 0.25]);
-        input.channel_mut(1).copy_from_slice(&[0.5, 1.0, 0.25, -0.5]);
+        input
+            .channel_mut(0)
+            .copy_from_slice(&[1.0, 0.5, -0.5, 0.25]);
+        input
+            .channel_mut(1)
+            .copy_from_slice(&[0.5, 1.0, 0.25, -0.5]);
         let output = AudioBuffer::new(ChannelLayout::Stereo, 4);
         let inputs = [input];
         let mut outputs = [output];

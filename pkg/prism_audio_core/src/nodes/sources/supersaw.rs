@@ -79,15 +79,8 @@ const CENTER_VOICE: usize = SUPERSAW_VOICES / 2;
 
 /// Symmetric per-voice detune spread. The center entry is exactly `0.0` so the
 /// fundamental is always present; the outer voices reach `+/-1.0`.
-const VOICE_OFFSETS: [Sample; SUPERSAW_VOICES] = [
-    -1.0,
-    -2.0 / 3.0,
-    -1.0 / 3.0,
-    0.0,
-    1.0 / 3.0,
-    2.0 / 3.0,
-    1.0,
-];
+const VOICE_OFFSETS: [Sample; SUPERSAW_VOICES] =
+    [-1.0, -2.0 / 3.0, -1.0 / 3.0, 0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0];
 
 /// Default fundamental frequency in hertz.
 pub const DEFAULT_SUPERSAW_FREQUENCY_HZ: Sample = 110.0;
@@ -108,7 +101,11 @@ pub const MAX_SUPERSAW_DETUNE_CENTS: Sample = 100.0;
 /// Replaces a non-finite value with `fallback`, otherwise returns the input.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Band-limited bipolar sawtooth for normalized phase `t` with per-sample
@@ -213,7 +210,12 @@ impl SupersawNode {
     /// Builds a super saw from a [`SupersawParams`] bundle.
     #[must_use]
     pub fn from_params(params: SupersawParams) -> Self {
-        Self::new(params.frequency_hz, params.detune, params.mix, params.amplitude)
+        Self::new(
+            params.frequency_hz,
+            params.detune,
+            params.mix,
+            params.amplitude,
+        )
     }
 
     /// Sets the fundamental frequency in hertz (clamped non-negative).
@@ -241,7 +243,8 @@ impl SupersawNode {
     /// Sets a new target amplitude (linear), gliding with `ramp`.
     #[inline]
     pub fn set_amplitude(&mut self, linear: Sample, ramp: Ramp) {
-        self.amplitude.set_target(finite_or(linear, self.amplitude.target()), ramp);
+        self.amplitude
+            .set_target(finite_or(linear, self.amplitude.target()), ramp);
     }
 
     /// Returns the current fundamental frequency in hertz.
@@ -305,7 +308,11 @@ impl SupersawNode {
 
         let mut acc = 0.0;
         for (v, (phase, dt)) in self.phases.iter_mut().zip(dts.iter()).enumerate() {
-            let g = if v == CENTER_VOICE { center_gain } else { side_gain };
+            let g = if v == CENTER_VOICE {
+                center_gain
+            } else {
+                side_gain
+            };
             acc += g * band_limited_saw(*phase, *dt);
 
             *phase += *dt;
@@ -430,7 +437,10 @@ mod tests {
         for (x, y) in a.channel(0).iter().zip(b.channel(0)) {
             max_diff = max_diff.max((x - y).abs());
         }
-        assert!(max_diff > 0.05, "detune had no effect (max_diff={max_diff})");
+        assert!(
+            max_diff > 0.05,
+            "detune had no effect (max_diff={max_diff})"
+        );
     }
 
     #[test]
@@ -608,7 +618,12 @@ mod tests {
         let sample_rate = 48_000;
         let frames: usize = 1_024;
         let mut node = SupersawNode::new(110.0, 0.7, 0.0, 1.0);
-        node.set_mix(1.0, Ramp::Linear { samples: frames as u32 });
+        node.set_mix(
+            1.0,
+            Ramp::Linear {
+                samples: frames as u32,
+            },
+        );
         let out = render(&mut node, sample_rate, frames);
         for &s in out.channel(0) {
             assert!(s.is_finite() && s.abs() <= 1.1, "s={s}");

@@ -63,7 +63,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Number of taps in the Hilbert-transform FIR. Must be odd so the filter has
 /// an integer group delay and a true quadrature centre tap.
@@ -321,7 +321,10 @@ mod tests {
         assert!(at_shifted > at_original * 4.0, "energy should sit at f+s");
         // SSB: the mirror (f-s) sideband is strongly suppressed, unlike a ring
         // modulator which would produce it symmetrically.
-        assert!(at_shifted > at_mirror * 4.0, "lower sideband must be rejected");
+        assert!(
+            at_shifted > at_mirror * 4.0,
+            "lower sideband must be rejected"
+        );
     }
 
     #[test]

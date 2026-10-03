@@ -2,8 +2,8 @@
 //!
 //! A limiter is a compressor with an (effectively) infinite ratio and a hard
 //! ceiling: it guarantees the output never exceeds a chosen level. This node
-//! uses **look-ahead** — the audio is delayed by a few milliseconds while the
-//! detector reads the un-delayed signal — so the gain can slew down smoothly
+//! uses **look-ahead** -- the audio is delayed by a few milliseconds while the
+//! detector reads the un-delayed signal -- so the gain can slew down smoothly
 //! and reach full attenuation exactly as a transient arrives, avoiding the
 //! audible distortion of a zero-attack clipper. A final clamp at the ceiling
 //! guarantees a true brick wall even for the residual overshoot that smoothing
@@ -15,7 +15,7 @@
 use alloc::vec::Vec;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
+use crate::math::{db_to_linear, flush_denormal, Sample};
 use crate::nodes::dynamics::detector::GainBallistics;
 use crate::param::Smoothed;
 
@@ -69,8 +69,9 @@ impl LimiterNode {
     #[must_use]
     pub fn new(sample_rate: u32, channels: usize, params: LimiterParams) -> Self {
         let channels = channels.max(1);
-        let lookahead = bevy_math::ops::round(params.lookahead_ms.max(0.0) * (sample_rate as Sample) * 0.001)
-            as usize;
+        let lookahead =
+            bevy_math::ops::round(params.lookahead_ms.max(0.0) * (sample_rate as Sample) * 0.001)
+                as usize;
         let rings = if lookahead > 0 {
             let mut v = Vec::with_capacity(channels);
             for _ in 0..channels {

@@ -67,7 +67,7 @@ use bevy_math::ops;
 use core::f32::consts::{FRAC_2_PI, FRAC_PI_2, PI};
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::nodes::effects::waveshaper::Oversample;
 use crate::param::{Ramp, Smoothed};
 
@@ -473,7 +473,10 @@ impl SaturationNode {
 impl AudioNode for SaturationNode {
     fn process(&mut self, _ctx: &RenderContext, io: &mut ProcessIo<'_>) {
         let (input, output) = io.io(0, 0);
-        let channels = output.channels().min(input.channels()).min(self.channels.len());
+        let channels = output
+            .channels()
+            .min(input.channels())
+            .min(self.channels.len());
         let frames = output.active_frames().min(input.active_frames());
         let factor = self.oversample.factor();
         let curve = self.curve;
@@ -624,7 +627,13 @@ mod tests {
         out.channel(0)[..frames].to_vec()
     }
 
-    fn node(curve: SaturationCurve, drive: Sample, bias: Sample, mix: Sample, dc: bool) -> SaturationNode {
+    fn node(
+        curve: SaturationCurve,
+        drive: Sample,
+        bias: Sample,
+        mix: Sample,
+        dc: bool,
+    ) -> SaturationNode {
         SaturationNode::new(
             48_000,
             1,
@@ -685,7 +694,11 @@ mod tests {
     fn arctan_curve_approaches_unity() {
         let mut n = node(SaturationCurve::Arctan, 1.0, 0.0, 1.0, false);
         let out = run_mono(&mut n, &[1000.0]);
-        assert!(out[0] > 0.99 && out[0] < 1.0 + 1e-6, "arctan not normalised: {}", out[0]);
+        assert!(
+            out[0] > 0.99 && out[0] < 1.0 + 1e-6,
+            "arctan not normalised: {}",
+            out[0]
+        );
     }
 
     #[test]
@@ -706,8 +719,16 @@ mod tests {
         ] {
             let mut n = node(curve, 1.0, 0.0, 1.0, false);
             let out = run_mono(&mut n, &[50.0, -50.0]);
-            assert!(out[0] <= 1.0 && out[0] > 0.9, "curve {curve:?} high: {}", out[0]);
-            assert!(out[1] >= -1.0 && out[1] < -0.9, "curve {curve:?} low: {}", out[1]);
+            assert!(
+                out[0] <= 1.0 && out[0] > 0.9,
+                "curve {curve:?} high: {}",
+                out[0]
+            );
+            assert!(
+                out[1] >= -1.0 && out[1] < -0.9,
+                "curve {curve:?} low: {}",
+                out[1]
+            );
         }
     }
 
@@ -727,7 +748,10 @@ mod tests {
         let out = run_mono(&mut n, &[0.5, -0.5]);
         // With a non-zero bias the positive and negative responses differ in
         // magnitude (even harmonics appear).
-        assert!((out[0].abs() - out[1].abs()).abs() > 1e-3, "bias did not break symmetry");
+        assert!(
+            (out[0].abs() - out[1].abs()).abs() > 1e-3,
+            "bias did not break symmetry"
+        );
     }
 
     #[test]
@@ -755,7 +779,10 @@ mod tests {
         let mean_on = mean(&out_on).abs();
         let mean_off = mean(&out_off).abs();
         assert!(mean_off > 0.01, "expected DC without blocker: {mean_off}");
-        assert!(mean_on < mean_off * 0.1, "blocker did not remove DC: on={mean_on} off={mean_off}");
+        assert!(
+            mean_on < mean_off * 0.1,
+            "blocker did not remove DC: on={mean_on} off={mean_off}"
+        );
     }
 
     #[test]
@@ -806,8 +833,22 @@ mod tests {
 
     #[test]
     fn oversampling_reports_latency() {
-        let n2 = SaturationNode::new(48_000, 1, SaturationParams { oversample: Oversample::X2, ..Default::default() });
-        let n4 = SaturationNode::new(48_000, 1, SaturationParams { oversample: Oversample::X4, ..Default::default() });
+        let n2 = SaturationNode::new(
+            48_000,
+            1,
+            SaturationParams {
+                oversample: Oversample::X2,
+                ..Default::default()
+            },
+        );
+        let n4 = SaturationNode::new(
+            48_000,
+            1,
+            SaturationParams {
+                oversample: Oversample::X4,
+                ..Default::default()
+            },
+        );
         assert!(n2.filter_taps() > 0 && n2.latency_frames() > 0);
         assert!(n4.filter_taps() > n2.filter_taps());
     }
@@ -829,11 +870,19 @@ mod tests {
         let mut n = SaturationNode::new(
             48_000,
             1,
-            SaturationParams { curve: SaturationCurve::Tanh, oversample: Oversample::X4, drive: 6.0, ..Default::default() },
+            SaturationParams {
+                curve: SaturationCurve::Tanh,
+                oversample: Oversample::X4,
+                drive: 6.0,
+                ..Default::default()
+            },
         );
         let out = run_mono(&mut n, &data);
         for &y in &out {
-            assert!(y.is_finite() && y.abs() <= 1.5, "oversampled output out of range: {y}");
+            assert!(
+                y.is_finite() && y.abs() <= 1.5,
+                "oversampled output out of range: {y}"
+            );
         }
     }
 
@@ -845,13 +894,24 @@ mod tests {
         n.reset();
         let second = run_mono(&mut n, &data);
         for i in 0..data.len() {
-            assert!((first[i] - second[i]).abs() < 1e-6, "reset not deterministic at {i}");
+            assert!(
+                (first[i] - second[i]).abs() < 1e-6,
+                "reset not deterministic at {i}"
+            );
         }
     }
 
     #[test]
     fn channels_are_processed_independently() {
-        let mut n = SaturationNode::new(48_000, 2, SaturationParams { drive: 4.0, dc_block: false, ..Default::default() });
+        let mut n = SaturationNode::new(
+            48_000,
+            2,
+            SaturationParams {
+                drive: 4.0,
+                dc_block: false,
+                ..Default::default()
+            },
+        );
         let mut input = AudioBuffer::new(ChannelLayout::Stereo, 3);
         input.set_active_frames(3);
         input.channel_mut(0).copy_from_slice(&[0.5, -0.5, 0.9]);
@@ -874,7 +934,10 @@ mod tests {
     #[test]
     fn non_finite_input_is_safe() {
         let mut n = node(SaturationCurve::Tanh, 2.0, 0.0, 1.0, true);
-        let out = run_mono(&mut n, &[Sample::NAN, Sample::INFINITY, -Sample::INFINITY, 0.3]);
+        let out = run_mono(
+            &mut n,
+            &[Sample::NAN, Sample::INFINITY, -Sample::INFINITY, 0.3],
+        );
         for &y in &out {
             assert!(y.is_finite(), "non-finite leaked: {y}");
         }
@@ -905,6 +968,9 @@ mod tests {
         n.set_curve(SaturationCurve::Reciprocal);
         assert_eq!(n.curve(), SaturationCurve::Reciprocal);
         let out = run_mono(&mut n, &[2.0]);
-        assert!((out[0] - 2.0 / 3.0).abs() < 1e-6, "did not switch to reciprocal");
+        assert!(
+            (out[0] - 2.0 / 3.0).abs() < 1e-6,
+            "did not switch to reciprocal"
+        );
     }
 }

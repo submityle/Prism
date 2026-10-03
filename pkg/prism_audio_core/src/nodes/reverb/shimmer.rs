@@ -57,9 +57,9 @@
 
 use crate::buffer::{AudioBuffer, ChannelLayout};
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::nodes::effects::pitch_shifter::{
-    PitchShifterNode, PitchShifterParams, semitones_to_ratio,
+    semitones_to_ratio, PitchShifterNode, PitchShifterParams,
 };
 use crate::nodes::reverb::fdn::{FdnReverb, FdnReverbParams};
 use crate::param::{Ramp, Smoothed};
@@ -126,7 +126,8 @@ impl ShimmerReverbParams {
             room_size: fix(self.room_size, 1.0).clamp(0.1, 4.0),
             decay_rt60_seconds: fix(self.decay_rt60_seconds, 2.8).max(0.01),
             damping: fix(self.damping, 0.4).clamp(0.0, 0.999),
-            pitch_semitones: fix(self.pitch_semitones, DEFAULT_SHIMMER_SEMITONES).clamp(-24.0, 24.0),
+            pitch_semitones: fix(self.pitch_semitones, DEFAULT_SHIMMER_SEMITONES)
+                .clamp(-24.0, 24.0),
             shimmer_feedback: fix(self.shimmer_feedback, 0.5).clamp(0.0, MAX_SHIMMER_FEEDBACK),
             wet: fix(self.wet, 0.3).clamp(0.0, 4.0),
             dry: fix(self.dry, 1.0).clamp(0.0, 4.0),
@@ -339,10 +340,7 @@ impl AudioNode for ShimmerReverb {
         let (input, output) = io.io(0, 0);
         let out_channels = output.channels();
         let in_channels = input.channels();
-        let frames = output
-            .active_frames()
-            .min(input.active_frames())
-            .min(cap);
+        let frames = output.active_frames().min(input.active_frames()).min(cap);
         if frames == 0 || out_channels == 0 {
             return;
         }
@@ -515,21 +513,39 @@ mod tests {
 
     #[test]
     fn reports_zero_latency() {
-        let verb = ShimmerReverb::new(SR, ChannelLayout::Stereo, BLOCK, ShimmerReverbParams::default());
+        let verb = ShimmerReverb::new(
+            SR,
+            ChannelLayout::Stereo,
+            BLOCK,
+            ShimmerReverbParams::default(),
+        );
         assert_eq!(verb.latency_frames(), 0);
     }
 
     #[test]
     fn default_pitch_is_one_octave_up() {
-        let verb = ShimmerReverb::new(SR, ChannelLayout::Stereo, BLOCK, ShimmerReverbParams::default());
+        let verb = ShimmerReverb::new(
+            SR,
+            ChannelLayout::Stereo,
+            BLOCK,
+            ShimmerReverbParams::default(),
+        );
         assert!((verb.pitch_ratio() - 2.0).abs() < 1e-4);
     }
 
     #[test]
     fn silence_in_silence_out() {
-        let mut verb = ShimmerReverb::new(SR, ChannelLayout::Stereo, BLOCK, ShimmerReverbParams::default());
+        let mut verb = ShimmerReverb::new(
+            SR,
+            ChannelLayout::Stereo,
+            BLOCK,
+            ShimmerReverbParams::default(),
+        );
         let out = run(&mut verb, &vec![0.0; 4 * BLOCK]);
-        assert!(out.iter().all(|&s| s.abs() < 1e-7), "silence must stay silent");
+        assert!(
+            out.iter().all(|&s| s.abs() < 1e-7),
+            "silence must stay silent"
+        );
     }
 
     #[test]
@@ -627,7 +643,10 @@ mod tests {
             .map(|n| ops::sin(TAU * 300.0 * n as Sample / SR as Sample))
             .collect();
         let out = run(&mut verb, &input);
-        assert!(out.iter().all(|s| s.is_finite()), "loop must not produce NaN/inf");
+        assert!(
+            out.iter().all(|s| s.is_finite()),
+            "loop must not produce NaN/inf"
+        );
         let peak = out.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
         assert!(peak < 50.0, "loop must stay bounded, peak={peak}");
     }
@@ -644,12 +663,20 @@ mod tests {
         let _ = run(&mut verb, &tone_then_silence(400.0, 0.7, 2_048, 8 * BLOCK));
         verb.reset();
         let out = run(&mut verb, &vec![0.0; 4 * BLOCK]);
-        assert!(out.iter().all(|&s| s.abs() < 1e-7), "reset must silence the tail");
+        assert!(
+            out.iter().all(|&s| s.abs() < 1e-7),
+            "reset must silence the tail"
+        );
     }
 
     #[test]
     fn zero_frames_is_safe() {
-        let mut verb = ShimmerReverb::new(SR, ChannelLayout::Stereo, BLOCK, ShimmerReverbParams::default());
+        let mut verb = ShimmerReverb::new(
+            SR,
+            ChannelLayout::Stereo,
+            BLOCK,
+            ShimmerReverbParams::default(),
+        );
         let mut inb = AudioBuffer::new(ChannelLayout::Stereo, BLOCK);
         inb.set_active_frames(0);
         let mut outb = AudioBuffer::new(ChannelLayout::Stereo, BLOCK);
@@ -678,7 +705,12 @@ mod tests {
 
     #[test]
     fn both_channels_are_finite() {
-        let mut verb = ShimmerReverb::new(SR, ChannelLayout::Stereo, BLOCK, ShimmerReverbParams::default());
+        let mut verb = ShimmerReverb::new(
+            SR,
+            ChannelLayout::Stereo,
+            BLOCK,
+            ShimmerReverbParams::default(),
+        );
         let input = tone_then_silence(440.0, 0.5, 2_048, 8 * BLOCK);
         let total = input.len();
         let mut i = 0;
@@ -726,7 +758,12 @@ mod tests {
 
     #[test]
     fn set_shimmer_feedback_clamps() {
-        let mut verb = ShimmerReverb::new(SR, ChannelLayout::Stereo, BLOCK, ShimmerReverbParams::default());
+        let mut verb = ShimmerReverb::new(
+            SR,
+            ChannelLayout::Stereo,
+            BLOCK,
+            ShimmerReverbParams::default(),
+        );
         verb.set_shimmer_feedback(5.0, Ramp::Immediate);
         assert!((verb.shimmer_feedback() - MAX_SHIMMER_FEEDBACK).abs() < 1e-6);
         verb.set_shimmer_feedback(Sample::NAN, Ramp::Immediate);
@@ -736,7 +773,12 @@ mod tests {
 
     #[test]
     fn getters_report_configuration() {
-        let verb = ShimmerReverb::new(SR, ChannelLayout::Stereo, BLOCK, ShimmerReverbParams::default());
+        let verb = ShimmerReverb::new(
+            SR,
+            ChannelLayout::Stereo,
+            BLOCK,
+            ShimmerReverbParams::default(),
+        );
         assert_eq!(verb.layout(), ChannelLayout::Stereo);
         assert_eq!(verb.channels(), 2);
         assert_eq!(verb.max_block_frames(), BLOCK);

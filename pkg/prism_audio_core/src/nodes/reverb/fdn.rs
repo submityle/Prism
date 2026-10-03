@@ -7,7 +7,7 @@
 //! mixing matrix is *lossless* (orthonormal), the only energy loss is the
 //! per-line feedback gain, which is chosen to hit a target `RT60` decay time,
 //! and an optional per-line one-pole low-pass that makes the high frequencies
-//! die away faster than the lows — exactly what happens as sound is absorbed by
+//! die away faster than the lows -- exactly what happens as sound is absorbed by
 //! air and soft surfaces.
 //!
 //! This design follows the classic Jot / Stautner-Puckette formulation:
@@ -29,7 +29,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Maximum number of delay lines the network can hold. Fixed so the hot-path
@@ -212,7 +212,12 @@ impl FdnReverb {
         // wide rather than a mono duplicate.
         let mut out_l = [0.0; MAX_LINES];
         let mut out_r = [0.0; MAX_LINES];
-        for (i, (l, r)) in out_l.iter_mut().zip(out_r.iter_mut()).enumerate().take(lines) {
+        for (i, (l, r)) in out_l
+            .iter_mut()
+            .zip(out_r.iter_mut())
+            .enumerate()
+            .take(lines)
+        {
             *l = 1.0;
             *r = if i % 2 == 0 { 1.0 } else { -1.0 };
         }
@@ -461,7 +466,10 @@ mod tests {
         }
         let short = late_energy(0.4);
         let long = late_energy(3.5);
-        assert!(long > short, "longer RT60 should retain more late energy: short={short} long={long}");
+        assert!(
+            long > short,
+            "longer RT60 should retain more late energy: short={short} long={long}"
+        );
     }
 
     #[test]

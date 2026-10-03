@@ -62,7 +62,7 @@ use core::f32::consts::TAU;
 
 use crate::buffer::{AudioBuffer, ChannelLayout};
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, lerp};
+use crate::math::{flush_denormal, lerp, Sample};
 use crate::nodes::crossover::LinkwitzRileyCrossover;
 use crate::param::{Ramp, Smoothed};
 
@@ -367,12 +367,8 @@ impl LeslieNode {
         let srf = sr as Sample;
         let frames = max_block_frames.max(1);
 
-        let crossover = LinkwitzRileyCrossover::new(
-            sr,
-            ChannelLayout::Mono,
-            &[p.crossover_hz],
-            frames,
-        );
+        let crossover =
+            LinkwitzRileyCrossover::new(sr, ChannelLayout::Mono, &[p.crossover_hz], frames);
         let mono = AudioBuffer::new(ChannelLayout::Mono, frames);
         let bands = vec![
             AudioBuffer::new(ChannelLayout::Mono, frames),
@@ -494,7 +490,11 @@ impl LeslieNode {
 
 /// Returns `x` if finite, otherwise `0`.
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 impl AudioNode for LeslieNode {
@@ -925,7 +925,10 @@ mod tests {
         for i in 0..2048 {
             let expected = 0.5 * (stereo_out[0].channel(0)[i] + stereo_out[0].channel(1)[i]);
             let got = mono_out[0].channel(0)[i];
-            assert!((got - expected).abs() < 1.0e-5, "frame {i}: {got} vs {expected}");
+            assert!(
+                (got - expected).abs() < 1.0e-5,
+                "frame {i}: {got} vs {expected}"
+            );
         }
     }
 

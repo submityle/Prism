@@ -123,7 +123,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Lowest tunable fundamental in hertz. Bounds the pre-allocated delay lines
@@ -175,7 +175,11 @@ const STRING_REFLECTION_GAIN: Sample = 0.95;
 /// Replaces a non-finite value with `fallback`, otherwise returns the input.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Clamps `frequency_hz` to `[MIN_FREQUENCY_HZ, sample_rate / 2]`, falling back
@@ -203,17 +207,14 @@ struct WaveguideDelay {
 
 impl WaveguideDelay {
     fn new(capacity: usize) -> Self {
-        Self { buf: vec![0.0; capacity.max(2)], write: 0 }
+        Self {
+            buf: vec![0.0; capacity.max(2)],
+            write: 0,
+        }
     }
 
     /// Reads the wave delayed by `delay` samples with linear interpolation.
     #[inline]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "delay is clamped to [1, len-1]; the integer part fits a usize exactly"
-    )]
     fn read(&self, delay: Sample) -> Sample {
         let len = self.buf.len();
         let d = delay.clamp(1.0, (len - 1) as Sample);
@@ -348,8 +349,8 @@ impl BowedStringNode {
         let capacity = max_delay_frames + 4;
 
         let frequency_hz = sanitize_frequency(params.frequency_hz, sr);
-        let bow_position =
-            finite_or(params.bow_position, DEFAULT_BOW_POSITION).clamp(MIN_BOW_POSITION, MAX_BOW_POSITION);
+        let bow_position = finite_or(params.bow_position, DEFAULT_BOW_POSITION)
+            .clamp(MIN_BOW_POSITION, MAX_BOW_POSITION);
         let bow_force = finite_or(params.bow_force, DEFAULT_BOW_FORCE).clamp(0.0, 1.0);
         let brightness = finite_or(params.brightness, DEFAULT_BRIGHTNESS).clamp(0.0, 1.0);
         let bow_velocity = finite_or(params.bow_velocity, DEFAULT_BOW_VELOCITY).clamp(0.0, 1.0);
@@ -464,10 +465,6 @@ impl BowedStringNode {
     }
 
     /// Recomputes the latched loop coefficients from the user-facing parameters.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "the buffer length is tiny relative to f32's integer precision"
-    )]
     fn recompute(&mut self) {
         let sr = self.sample_rate;
         // One-zero bridge-filter coefficient S in [0, 0.5]: brightness 1 -> S 0.
@@ -582,7 +579,9 @@ mod tests {
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx, &mut io);
         let channels = outputs[0].channels();
-        (0..channels).map(|ch| outputs[0].channel(ch).to_vec()).collect()
+        (0..channels)
+            .map(|ch| outputs[0].channel(ch).to_vec())
+            .collect()
     }
 
     fn peak(block: &[Sample]) -> Sample {
@@ -592,7 +591,6 @@ mod tests {
     fn energy(block: &[Sample]) -> f64 {
         block.iter().map(|&s| f64::from(s) * f64::from(s)).sum()
     }
-
 
     #[test]
     fn default_self_oscillates() {

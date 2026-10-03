@@ -185,7 +185,11 @@ impl Fft {
                 for k in 0..half {
                     let tw = k * step;
                     let wr = self.tw_re[tw];
-                    let wi = if inverse { -self.tw_im[tw] } else { self.tw_im[tw] };
+                    let wi = if inverse {
+                        -self.tw_im[tw]
+                    } else {
+                        self.tw_im[tw]
+                    };
                     let a = base + k;
                     let b = base + k + half;
                     let tr = wr * re[b] - wi * im[b];
@@ -271,7 +275,11 @@ mod tests {
         let mut re = vec![1.0; 8];
         let mut im = vec![0.0; 8];
         fft.forward(&mut re, &mut im);
-        assert!((re[0] - 8.0).abs() < 1e-4, "DC bin should equal N: {}", re[0]);
+        assert!(
+            (re[0] - 8.0).abs() < 1e-4,
+            "DC bin should equal N: {}",
+            re[0]
+        );
         for bin in 1..8 {
             assert!(re[bin].abs() < 1e-4, "non-DC bin leaked: {}", re[bin]);
             assert!(im[bin].abs() < 1e-4, "non-DC imag leaked: {}", im[bin]);
@@ -292,7 +300,10 @@ mod tests {
         for bin in 0..n {
             let mag = ops::sqrt(re[bin] * re[bin] + im[bin] * im[bin]);
             if bin == k_tone || bin == n - k_tone {
-                assert!((mag - (n as Sample) / 2.0).abs() < 1e-2, "bin {bin} mag {mag}");
+                assert!(
+                    (mag - (n as Sample) / 2.0).abs() < 1e-2,
+                    "bin {bin} mag {mag}"
+                );
             } else {
                 assert!(mag < 1e-2, "bin {bin} should be empty, mag {mag}");
             }
@@ -341,7 +352,11 @@ mod tests {
         let b_re: Vec<Sample> = (0..n).map(|t| ops::cos(0.3 * t as Sample)).collect();
         let zero = vec![0.0; n];
 
-        let mut sum_re: Vec<Sample> = a_re.iter().zip(&b_re).map(|(a, b)| 2.0 * a + 3.0 * b).collect();
+        let mut sum_re: Vec<Sample> = a_re
+            .iter()
+            .zip(&b_re)
+            .map(|(a, b)| 2.0 * a + 3.0 * b)
+            .collect();
         let mut sum_im = zero.clone();
         fft.forward(&mut sum_re, &mut sum_im);
 

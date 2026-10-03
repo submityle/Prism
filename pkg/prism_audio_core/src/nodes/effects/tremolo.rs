@@ -40,7 +40,7 @@ use alloc::vec::Vec;
 
 use crate::buffer::ChannelLayout;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, equal_power_pan};
+use crate::math::{equal_power_pan, Sample};
 use crate::modulation::{Lfo, LfoWaveform};
 
 /// How the modulation LFO is mapped onto the channels.
@@ -331,7 +331,10 @@ mod tests {
         let out = run(&mut node, &input);
         for &s in out.channel(0) {
             assert!(s.is_finite());
-            assert!((0.5 - 1e-4..=1.0 + 1e-4).contains(&s), "outside envelope: {s}");
+            assert!(
+                (0.5 - 1e-4..=1.0 + 1e-4).contains(&s),
+                "outside envelope: {s}"
+            );
         }
     }
 

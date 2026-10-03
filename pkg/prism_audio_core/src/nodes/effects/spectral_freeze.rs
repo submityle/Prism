@@ -55,9 +55,9 @@ use bevy_math::ops;
 
 use core::f32::consts::{PI, TAU};
 
-use crate::fft::{Fft, power_of_two_at_least};
+use crate::fft::{power_of_two_at_least, Fft};
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Analysis/synthesis overlap factor; the hop is `fft_size / OVERLAP_FACTOR`.
 pub const OVERLAP_FACTOR: usize = 4;
@@ -236,7 +236,11 @@ impl SpectralFreezeNode {
             overlap_sum += win[k] * win[k];
             k += hop;
         }
-        let ola_norm = if overlap_sum > 0.0 { 1.0 / overlap_sum } else { 0.0 };
+        let ola_norm = if overlap_sum > 0.0 {
+            1.0 / overlap_sum
+        } else {
+            0.0
+        };
 
         let sr = sample_rate.max(1) as Sample;
         let expct = TAU * hop as Sample / size as Sample;
@@ -417,7 +421,11 @@ impl AudioNode for SpectralFreezeNode {
                 let x = if x.is_finite() { x } else { 0.0 };
                 self.in_fifo[fifo_base + rover] = x;
                 let y = self.out_fifo[fifo_base + (rover - fifo_latency)];
-                let y = if y.is_finite() { flush_denormal(y) } else { 0.0 };
+                let y = if y.is_finite() {
+                    flush_denormal(y)
+                } else {
+                    0.0
+                };
                 output.channel_mut(ch)[i] = y;
             }
 
@@ -649,7 +657,10 @@ mod tests {
     fn silence_in_silence_out() {
         let mut node = SpectralFreezeNode::new(SR, 1, 512, SpectralFreezeParams::default());
         let out = run_mono(&mut node, &vec![0.0; 4_096]);
-        assert!(out.iter().all(|&y| y.abs() < 1e-6), "silence produced output");
+        assert!(
+            out.iter().all(|&y| y.abs() < 1e-6),
+            "silence produced output"
+        );
     }
 
     #[test]
@@ -682,9 +693,15 @@ mod tests {
         let tail = &out[4_096..];
         let m1000 = goertzel(tail, 1_000.0);
         let m2000 = goertzel(tail, 2_000.0);
-        assert!(m1000 > m2000 * 4.0, "fundamental not dominant: {m1000} vs {m2000}");
+        assert!(
+            m1000 > m2000 * 4.0,
+            "fundamental not dominant: {m1000} vs {m2000}"
+        );
         let level = rms(tail) / rms(&signal[4_096..]);
-        assert!((0.7..1.3).contains(&level), "unity reconstruction drifted: {level}");
+        assert!(
+            (0.7..1.3).contains(&level),
+            "unity reconstruction drifted: {level}"
+        );
     }
 
     #[test]
@@ -692,7 +709,10 @@ mod tests {
         let tail = frozen_tail(0.0, 8_192);
         // After the input has gone silent, the latched spectrum keeps ringing.
         let energy = rms(&tail[2_048..]);
-        assert!(energy > 0.05, "frozen spectrum decayed to silence: {energy}");
+        assert!(
+            energy > 0.05,
+            "frozen spectrum decayed to silence: {energy}"
+        );
     }
 
     #[test]
@@ -701,7 +721,10 @@ mod tests {
         let back = &tail[2_048..];
         let m1000 = goertzel(back, 1_000.0);
         let m2000 = goertzel(back, 2_000.0);
-        assert!(m1000 > m2000 * 4.0, "sustained tone off frequency: {m1000} vs {m2000}");
+        assert!(
+            m1000 > m2000 * 4.0,
+            "sustained tone off frequency: {m1000} vs {m2000}"
+        );
     }
 
     #[test]
@@ -727,12 +750,18 @@ mod tests {
         node.set_frozen(true);
         let out = run_mono(&mut node, &signal);
         // The crossfade bounds the output; no gross discontinuity may appear.
-        assert!(out.iter().all(|&y| y.is_finite() && y.abs() < 2.0), "freeze toggle spiked");
+        assert!(
+            out.iter().all(|&y| y.is_finite() && y.abs() < 2.0),
+            "freeze toggle spiked"
+        );
         let max_step = out
             .windows(2)
             .map(|w| (w[1] - w[0]).abs())
             .fold(0.0f32, f32::max);
-        assert!(max_step < 0.5, "sample-to-sample jump too large: {max_step}");
+        assert!(
+            max_step < 0.5,
+            "sample-to-sample jump too large: {max_step}"
+        );
     }
 
     #[test]

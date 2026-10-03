@@ -63,7 +63,7 @@ use alloc::vec::Vec;
 
 use crate::buffer::ChannelLayout;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Smallest slew time (milliseconds) the node accepts. Zero means the edge is
 /// unlimited and the output follows the input instantly.
@@ -293,7 +293,11 @@ impl AudioNode for SlewLimiterNode {
             for n in 0..frames {
                 let x = {
                     let v = input.channel(ch)[n];
-                    if v.is_finite() { v } else { 0.0 }
+                    if v.is_finite() {
+                        v
+                    } else {
+                        0.0
+                    }
                 };
                 // `down` and `up` are both non-negative (or +inf), so the low
                 // bound is never above the high bound and the clamp is valid.
@@ -386,10 +390,18 @@ mod tests {
 
     #[test]
     fn sanitise_clamps_times() {
-        let low = SlewLimiterParams { rise_ms: -5.0, fall_ms: -1.0 }.sanitised();
+        let low = SlewLimiterParams {
+            rise_ms: -5.0,
+            fall_ms: -1.0,
+        }
+        .sanitised();
         assert!((low.rise_ms - MIN_SLEW_MS).abs() < 1e-6);
         assert!((low.fall_ms - MIN_SLEW_MS).abs() < 1e-6);
-        let high = SlewLimiterParams { rise_ms: 1e9, fall_ms: 1e9 }.sanitised();
+        let high = SlewLimiterParams {
+            rise_ms: 1e9,
+            fall_ms: 1e9,
+        }
+        .sanitised();
         assert!((high.rise_ms - MAX_SLEW_MS).abs() < 1e-3);
         assert!((high.fall_ms - MAX_SLEW_MS).abs() < 1e-3);
     }
@@ -399,7 +411,10 @@ mod tests {
         let mut node = SlewLimiterNode::new(
             SR,
             ChannelLayout::Mono,
-            SlewLimiterParams { rise_ms: 0.0, fall_ms: 0.0 },
+            SlewLimiterParams {
+                rise_ms: 0.0,
+                fall_ms: 0.0,
+            },
         );
         assert!(node.rise_step().is_infinite());
         assert!(node.fall_step().is_infinite());
@@ -416,7 +431,10 @@ mod tests {
         let mut node = SlewLimiterNode::new(
             SR,
             ChannelLayout::Mono,
-            SlewLimiterParams { rise_ms: 1.0, fall_ms: 1.0 },
+            SlewLimiterParams {
+                rise_ms: 1.0,
+                fall_ms: 1.0,
+            },
         );
         let input = vec![1.0_f32; 128];
         let out = run_mono(&mut node, &input);
@@ -436,7 +454,10 @@ mod tests {
         let mut node = SlewLimiterNode::new(
             SR,
             ChannelLayout::Mono,
-            SlewLimiterParams { rise_ms: 0.0, fall_ms: 1.0 },
+            SlewLimiterParams {
+                rise_ms: 0.0,
+                fall_ms: 1.0,
+            },
         );
         // Jump instantly to 1.0 (rise unlimited), then command 0.0.
         let mut input = vec![1.0_f32; 16];
@@ -456,7 +477,10 @@ mod tests {
         let mut node = SlewLimiterNode::new(
             SR,
             ChannelLayout::Mono,
-            SlewLimiterParams { rise_ms: 1.0, fall_ms: 10.0 },
+            SlewLimiterParams {
+                rise_ms: 1.0,
+                fall_ms: 10.0,
+            },
         );
         let mut input = vec![1.0_f32; 64];
         input.extend(core::iter::repeat_n(0.0_f32, 1_024));
@@ -464,7 +488,11 @@ mod tests {
         // Reached 1.0 within the fast-rise window.
         assert!((out[63] - 1.0).abs() < 1e-3, "{}", out[63]);
         // Ten times slower fall: 10 ms -> 480 samples to return to 0.
-        assert!(out[64 + 240] > 0.4 && out[64 + 240] < 0.6, "mid-fall: {}", out[64 + 240]);
+        assert!(
+            out[64 + 240] > 0.4 && out[64 + 240] < 0.6,
+            "mid-fall: {}",
+            out[64 + 240]
+        );
     }
 
     #[test]
@@ -474,11 +502,18 @@ mod tests {
         let mut node = SlewLimiterNode::new(
             SR,
             ChannelLayout::Mono,
-            SlewLimiterParams { rise_ms: 20.0, fall_ms: 20.0 },
+            SlewLimiterParams {
+                rise_ms: 20.0,
+                fall_ms: 20.0,
+            },
         );
         let out = run_mono(&mut node, &input);
         let tail = &out[4_096..];
-        assert!(peak(tail) < 0.9, "slew-limited peak should drop: {}", peak(tail));
+        assert!(
+            peak(tail) < 0.9,
+            "slew-limited peak should drop: {}",
+            peak(tail)
+        );
     }
 
     #[test]
@@ -488,17 +523,28 @@ mod tests {
         let mut node = SlewLimiterNode::new(
             SR,
             ChannelLayout::Stereo,
-            SlewLimiterParams { rise_ms: 3.0, fall_ms: 7.0 },
+            SlewLimiterParams {
+                rise_ms: 3.0,
+                fall_ms: 7.0,
+            },
         );
         let out = run_mono(&mut node, &input);
-        assert!(peak(&out) <= in_peak + 1e-6, "{} vs {}", peak(&out), in_peak);
+        assert!(
+            peak(&out) <= in_peak + 1e-6,
+            "{} vs {}",
+            peak(&out),
+            in_peak
+        );
     }
 
     #[test]
     fn slow_slew_attenuates_high_frequencies_more() {
         let low = sine(100.0, 16_384);
         let high = sine(2_000.0, 16_384);
-        let params = SlewLimiterParams { rise_ms: 10.0, fall_ms: 10.0 };
+        let params = SlewLimiterParams {
+            rise_ms: 10.0,
+            fall_ms: 10.0,
+        };
         let mut a = SlewLimiterNode::new(SR, ChannelLayout::Mono, params);
         let mut b = SlewLimiterNode::new(SR, ChannelLayout::Mono, params);
         let low_peak = peak(&run_mono(&mut a, &low)[8_000..]);
@@ -521,7 +567,10 @@ mod tests {
         let mut node = SlewLimiterNode::new(
             SR,
             ChannelLayout::Mono,
-            SlewLimiterParams { rise_ms: 2.0, fall_ms: 2.0 },
+            SlewLimiterParams {
+                rise_ms: 2.0,
+                fall_ms: 2.0,
+            },
         );
         let out = run_mono(&mut node, &vec![0.7_f32; 4_096]);
         assert!((out[4_095] - 0.7).abs() < 1e-5, "{}", out[4_095]);
@@ -532,7 +581,10 @@ mod tests {
         let mut node = SlewLimiterNode::new(
             SR,
             ChannelLayout::Mono,
-            SlewLimiterParams { rise_ms: 4.0, fall_ms: 4.0 },
+            SlewLimiterParams {
+                rise_ms: 4.0,
+                fall_ms: 4.0,
+            },
         );
         let input = sine(300.0, 2_048);
         let first = run_mono(&mut node, &input);
@@ -548,10 +600,16 @@ mod tests {
         let mut node = SlewLimiterNode::new(
             SR,
             ChannelLayout::Mono,
-            SlewLimiterParams { rise_ms: 1.0, fall_ms: 1.0 },
+            SlewLimiterParams {
+                rise_ms: 1.0,
+                fall_ms: 1.0,
+            },
         );
         let before = node.rise_step();
-        node.set_params(SlewLimiterParams { rise_ms: 2.0, fall_ms: 2.0 });
+        node.set_params(SlewLimiterParams {
+            rise_ms: 2.0,
+            fall_ms: 2.0,
+        });
         let after = node.rise_step();
         // A longer slew time means a smaller per-sample step.
         assert!(after < before, "{before} -> {after}");
@@ -564,7 +622,10 @@ mod tests {
             let mut node = SlewLimiterNode::new(
                 SR,
                 ChannelLayout::Stereo,
-                SlewLimiterParams { rise_ms: r, fall_ms: r },
+                SlewLimiterParams {
+                    rise_ms: r,
+                    fall_ms: r,
+                },
             );
             let out = run_mono(&mut node, &sine(220.0, 512));
             assert!(out.iter().all(|s| s.is_finite()));
@@ -574,14 +635,21 @@ mod tests {
     #[test]
     fn non_finite_input_falls_back() {
         let mut node = SlewLimiterNode::new(SR, ChannelLayout::Mono, SlewLimiterParams::default());
-        let input = vec![Sample::NAN, Sample::INFINITY, 0.5, Sample::NEG_INFINITY, 0.2];
+        let input = vec![
+            Sample::NAN,
+            Sample::INFINITY,
+            0.5,
+            Sample::NEG_INFINITY,
+            0.2,
+        ];
         let out = run_mono(&mut node, &input);
         assert!(out.iter().all(|s| s.is_finite()));
     }
 
     #[test]
     fn mono_input_into_stereo_is_finite() {
-        let mut node = SlewLimiterNode::new(SR, ChannelLayout::Stereo, SlewLimiterParams::default());
+        let mut node =
+            SlewLimiterNode::new(SR, ChannelLayout::Stereo, SlewLimiterParams::default());
         let len = 256;
         let mut input = AudioBuffer::new(ChannelLayout::Mono, len);
         let mut output = AudioBuffer::new(ChannelLayout::Stereo, len);
@@ -603,7 +671,10 @@ mod tests {
         let mut node = SlewLimiterNode::new(
             SR,
             ChannelLayout::Stereo,
-            SlewLimiterParams { rise_ms: 2.0, fall_ms: 2.0 },
+            SlewLimiterParams {
+                rise_ms: 2.0,
+                fall_ms: 2.0,
+            },
         );
         let len = 1_024;
         let tone = sine(400.0, len);
@@ -637,7 +708,10 @@ mod tests {
 
     #[test]
     fn from_params_matches_direct_fields() {
-        let p = SlewLimiterParams { rise_ms: 3.0, fall_ms: 8.0 };
+        let p = SlewLimiterParams {
+            rise_ms: 3.0,
+            fall_ms: 8.0,
+        };
         let node = SlewLimiterNode::new(SR, ChannelLayout::Mono, p);
         assert!((node.rise_ms() - 3.0).abs() < 1e-6);
         assert!((node.fall_ms() - 8.0).abs() < 1e-6);
@@ -648,7 +722,10 @@ mod tests {
         let node = SlewLimiterNode::new(
             SR,
             ChannelLayout::Mono,
-            SlewLimiterParams { rise_ms: 1.0, fall_ms: 1.0 },
+            SlewLimiterParams {
+                rise_ms: 1.0,
+                fall_ms: 1.0,
+            },
         );
         assert!(node.rise_step() > 0.0 && node.rise_step().is_finite());
         assert!(node.fall_step() > 0.0 && node.fall_step().is_finite());

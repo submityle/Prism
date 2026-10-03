@@ -69,9 +69,9 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
+use crate::math::{db_to_linear, flush_denormal, Sample};
 use crate::nodes::effects::waveshaper::Oversample;
-use crate::oversampler::{DEFAULT_TAPS_PER_PHASE, DryDelay, Oversampler, OversamplerState};
+use crate::oversampler::{DryDelay, Oversampler, OversamplerState, DEFAULT_TAPS_PER_PHASE};
 use crate::param::{Ramp, Smoothed};
 
 /// Default ceiling in dBFS (0 dBFS = full scale).
@@ -130,7 +130,11 @@ pub fn clip_sample(x: Sample, ceiling: Sample, knee: Sample, mode: ClipperMode) 
                 u
             } else if k <= 0.0 {
                 // Degenerate knee collapses to a hard clamp.
-                if u >= 0.0 { 1.0 } else { -1.0 }
+                if u >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                }
             } else {
                 let s = if u >= 0.0 { 1.0 } else { -1.0 };
                 let over = (a - t) / (1.0 - t);
@@ -364,8 +368,8 @@ impl AudioNode for ClipperNode {
                 let wv = wet.next_sample();
                 let drv = dry.next_sample();
 
-                let clipped =
-                    oversampler.process_sample(state, x, |v| clip_sample(ig * v, ceiling, knee, mode));
+                let clipped = oversampler
+                    .process_sample(state, x, |v| clip_sample(ig * v, ceiling, knee, mode));
                 let dry_sig = dry_delay.push(x);
                 dst[i] = flush_denormal(wv * (clipped * og) + drv * dry_sig);
             }
@@ -566,7 +570,11 @@ mod tests {
         // -20 dBFS sine, well below the 0 dBFS ceiling -> unchanged.
         let amp = 0.1;
         let out = run_mono(&mut node, amp, 2_000);
-        assert!((peak(&out) - amp).abs() < amp * 0.01, "{} vs {amp}", peak(&out));
+        assert!(
+            (peak(&out) - amp).abs() < amp * 0.01,
+            "{} vs {amp}",
+            peak(&out)
+        );
     }
 
     #[test]
@@ -650,7 +658,11 @@ mod tests {
         let out = run_mono(&mut node, 1.0, 4_000);
         // At heavy drive f32 `tanh` saturates to 1.0, so the soft curve bounds
         // the output to (not strictly below, but never above) the ceiling.
-        assert!(peak(&out) <= 1.0 + 1e-6, "soft exceeded ceiling: {}", peak(&out));
+        assert!(
+            peak(&out) <= 1.0 + 1e-6,
+            "soft exceeded ceiling: {}",
+            peak(&out)
+        );
     }
 
     #[test]

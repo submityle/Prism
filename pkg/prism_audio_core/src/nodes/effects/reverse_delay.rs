@@ -54,7 +54,7 @@ use core::f32::consts::TAU;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Largest segment length, in milliseconds, the node can capture and reverse.
 pub const MAX_REVERSE_SEGMENT_MS: Sample = 2_000.0;
@@ -408,7 +408,7 @@ mod tests {
         let mut node = ReverseDelayNode::new(SR, 2, params);
         let mut left = vec![0.0; 1_024];
         for (i, s) in left.iter_mut().enumerate() {
-            *s = (i as Sample * 0.01).sin();
+            *s = ops::sin(i as Sample * 0.01);
         }
         let right = vec![0.0; 1_024];
         let (lo, ro) = run_stereo(&mut node, &left, &right);
@@ -464,7 +464,10 @@ mod tests {
         assert!(out.iter().all(|x| x.is_finite()));
         let early = rms(&out[seg..3 * seg]);
         let late = rms(&out[9 * seg..]);
-        assert!(late < early, "reverse tail must decay: early={early} late={late}");
+        assert!(
+            late < early,
+            "reverse tail must decay: early={early} late={late}"
+        );
     }
 
     #[test]
@@ -563,7 +566,10 @@ mod tests {
         for (a, b) in first.iter().zip(second.iter()) {
             max_err = max_err.max((a - b).abs());
         }
-        assert!(max_err < 1e-6, "reset must reproduce the fresh response: {max_err}");
+        assert!(
+            max_err < 1e-6,
+            "reset must reproduce the fresh response: {max_err}"
+        );
     }
 
     // Helper: run a mono signal through a stereo node on channel 0 only.
@@ -610,6 +616,9 @@ mod tests {
         }
         let out = run_mono(&mut node, &sig);
         assert!(out.iter().all(|x| x.is_finite()));
-        assert!(rms(&out[seg..2 * seg]) > 1e-3, "a mono reverse delay must echo back reversed");
+        assert!(
+            rms(&out[seg..2 * seg]) > 1e-3,
+            "a mono reverse delay must echo back reversed"
+        );
     }
 }

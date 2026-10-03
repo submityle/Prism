@@ -107,7 +107,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
+use crate::math::{db_to_linear, flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Largest clipping drive, so a very hot input cannot push the implicit solve
@@ -441,7 +441,8 @@ impl DiodeClipper {
     pub fn voice(&mut self, ch: usize, x: Sample) -> Sample {
         // Implicit antiparallel-diode clamp with asymmetry bias, normalised to
         // unity small-signal gain by dividing out the drive.
-        let shaped = self.diode_shape(self.drive * x + self.bias) * self.inv_drive - self.bias_offset;
+        let shaped =
+            self.diode_shape(self.drive * x + self.bias) * self.inv_drive - self.bias_offset;
 
         // Coupling-capacitor first-order high pass (DC block) removes the
         // static offset the asymmetry bias introduces.
@@ -645,7 +646,12 @@ mod tests {
 
     /// Runs a single mono tone through a node and returns the output tail
     /// (second half, so filter transients have settled).
-    fn run_tone(mut node: DiodeClipperNode, freq_hz: Sample, amp: Sample, frames: usize) -> Vec<Sample> {
+    fn run_tone(
+        mut node: DiodeClipperNode,
+        freq_hz: Sample,
+        amp: Sample,
+        frames: usize,
+    ) -> Vec<Sample> {
         let mut input = mono(frames);
         sine(&mut input, freq_hz, amp);
         let inputs = [input];
@@ -684,7 +690,11 @@ mod tests {
         let mut node = DiodeClipperNode::new(params(), SR, 1);
         let mut input = mono(64);
         for (i, s) in input.channel_mut(0).iter_mut().enumerate() {
-            *s = if i % 3 == 0 { Sample::NAN } else { Sample::INFINITY };
+            *s = if i % 3 == 0 {
+                Sample::NAN
+            } else {
+                Sample::INFINITY
+            };
         }
         let inputs = [input];
         let mut outputs = [mono(64)];
@@ -796,7 +806,10 @@ mod tests {
         node.process(&ctx(SR as usize), &mut io);
         let tail = &outputs[0].channel(0)[(SR as usize) * 3 / 4..];
         let mean = tail.iter().sum::<Sample>() / tail.len() as Sample;
-        assert!(mean.abs() < 1.0e-3, "DC was not blocked: settled mean={mean}");
+        assert!(
+            mean.abs() < 1.0e-3,
+            "DC was not blocked: settled mean={mean}"
+        );
     }
 
     #[test]
@@ -856,7 +869,10 @@ mod tests {
         p.knee = 0.1;
         let out = run_tone(DiodeClipperNode::new(p, SR, 1), f, 1.0, frames);
         let peak = out.iter().fold(0.0_f32, |m, &y| m.max(y.abs()));
-        assert!(peak < 1.0, "large drive output was not bounded: peak={peak}");
+        assert!(
+            peak < 1.0,
+            "large drive output was not bounded: peak={peak}"
+        );
     }
 
     #[test]

@@ -104,7 +104,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Lowest tunable fundamental in hertz. This bounds the pre-allocated delay
@@ -130,7 +130,11 @@ const MIN_DECAY_SECONDS: Sample = 1.0e-3;
 /// survive `clamp`).
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Self-contained deterministic PRNG (Marsaglia xorshift64) seeded via
@@ -693,7 +697,8 @@ mod tests {
 
         let early = 1000..3000;
         let late = 20_000..22_000;
-        let bright_ratio = hf_energy(&bright_sig[late.clone()]) / hf_energy(&bright_sig[early.clone()]);
+        let bright_ratio =
+            hf_energy(&bright_sig[late.clone()]) / hf_energy(&bright_sig[early.clone()]);
         let dark_ratio = hf_energy(&dark_sig[late]) / hf_energy(&dark_sig[early]);
         assert!(
             bright_ratio > dark_ratio,
@@ -725,7 +730,10 @@ mod tests {
         let tail = energy(&render(&mut node, 1024));
         node.trigger();
         let fresh = energy(&render(&mut node, 1024));
-        assert!(fresh > tail, "retrigger energy {fresh} should exceed tail {tail}");
+        assert!(
+            fresh > tail,
+            "retrigger energy {fresh} should exceed tail {tail}"
+        );
     }
 
     #[test]

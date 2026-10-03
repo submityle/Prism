@@ -43,7 +43,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, lerp};
+use crate::math::{flush_denormal, lerp, Sample};
 use crate::modulation::{Lfo, LfoWaveform};
 use crate::param::{Ramp, Smoothed};
 
@@ -316,7 +316,11 @@ mod tests {
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx(1024), &mut io);
         let out = outputs[0].channel(0);
-        assert!(out[0].abs() < 1e-6, "no dry click when fully wet: {}", out[0]);
+        assert!(
+            out[0].abs() < 1e-6,
+            "no dry click when fully wet: {}",
+            out[0]
+        );
         let delay = 96usize;
         let energy: Sample = out[(delay - 2)..=(delay + 2)].iter().map(|v| v.abs()).sum();
         assert!(energy > 0.5, "expected delayed impulse near frame {delay}");

@@ -1,7 +1,7 @@
 //! Equal-power mono-to-stereo panner node.
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, equal_power_pan};
+use crate::math::{equal_power_pan, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Pans a mono input (port 0) into a stereo output (port 0) using the
@@ -58,7 +58,11 @@ mod tests {
     use crate::buffer::{AudioBuffer, ChannelLayout};
 
     fn ctx() -> RenderContext {
-        RenderContext { sample_rate: 48_000, frames: 4, playhead: 0 }
+        RenderContext {
+            sample_rate: 48_000,
+            frames: 4,
+            playhead: 0,
+        }
     }
 
     #[test]

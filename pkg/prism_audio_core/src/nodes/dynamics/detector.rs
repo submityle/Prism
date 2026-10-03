@@ -8,16 +8,16 @@
 
 use bevy_math::ops;
 
-use crate::math::{Sample, linear_to_db};
+use crate::math::{linear_to_db, Sample};
 
 /// How the side-chain signal level is measured before the gain computer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub enum DetectionMode {
-    /// Instantaneous absolute peak — fast, transient-accurate, used by
+    /// Instantaneous absolute peak -- fast, transient-accurate, used by
     /// limiters and percussive compression.
     Peak,
-    /// Root-mean-square power average — smoother and closer to perceived
+    /// Root-mean-square power average -- smoother and closer to perceived
     /// loudness, used for musical bus compression.
     Rms,
 }
@@ -107,7 +107,7 @@ pub struct GainBallistics {
     release_coef: Sample,
     /// First (release) smoothing stage state.
     y1: Sample,
-    /// Second (attack) smoothing stage state — the applied reduction in dB.
+    /// Second (attack) smoothing stage state -- the applied reduction in dB.
     y: Sample,
 }
 
@@ -284,7 +284,11 @@ mod tests {
         for _ in 0..48_000 {
             b.process(0.0);
         }
-        assert!(b.current_db() < 1.0, "release did not recover: {}", b.current_db());
+        assert!(
+            b.current_db() < 1.0,
+            "release did not recover: {}",
+            b.current_db()
+        );
     }
 
     #[test]

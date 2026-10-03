@@ -4,8 +4,8 @@
 //! Ducking is the "lower the music while the voice-over plays" effect and the
 //! engine backbone of dialogue-priority mixing in games (UE's source-bus
 //! side-chain, Unity's snapshot ducking, Godot's bus send routing). It is a
-//! compressor whose detector listens to a *different* input — input port 1 (the
-//! key) — while the gain is applied to input port 0 (the main). The attenuation
+//! compressor whose detector listens to a *different* input -- input port 1 (the
+//! key) -- while the gain is applied to input port 0 (the main). The attenuation
 //! is bounded by `range_db` so the main never disappears entirely.
 //!
 //! - **Input port 0**: main signal (e.g. music / ambience).
@@ -18,9 +18,9 @@
 
 use crate::buffer::AudioBuffer;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear};
+use crate::math::{db_to_linear, Sample};
 use crate::nodes::dynamics::detector::{
-    DetectionMode, GainBallistics, LevelDetector, compressor_reduction_db,
+    compressor_reduction_db, DetectionMode, GainBallistics, LevelDetector,
 };
 
 /// Construction parameters for a [`DuckingNode`].
@@ -124,7 +124,8 @@ impl AudioNode for DuckingNode {
             }
 
             let level_db = self.detector.level_db(key_peak);
-            let raw = compressor_reduction_db(level_db, self.threshold_db, self.ratio, self.knee_db);
+            let raw =
+                compressor_reduction_db(level_db, self.threshold_db, self.ratio, self.knee_db);
             let target = raw.min(self.range_db);
             let reduction_db = self.ballistics.process(target);
             let gain = db_to_linear(-reduction_db);
@@ -193,9 +194,16 @@ mod tests {
         let mut outputs = [mono(9_600)];
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx(9_600), &mut io);
-        let peak_in = inputs[0].channel(0)[4_800..].iter().fold(0.0, |m, &v| v.abs().max(m));
-        let peak_out = outputs[0].channel(0)[4_800..].iter().fold(0.0, |m, &v| v.abs().max(m));
-        assert!(peak_out < peak_in * 0.6, "not ducked: in={peak_in} out={peak_out}");
+        let peak_in = inputs[0].channel(0)[4_800..]
+            .iter()
+            .fold(0.0, |m, &v| v.abs().max(m));
+        let peak_out = outputs[0].channel(0)[4_800..]
+            .iter()
+            .fold(0.0, |m, &v| v.abs().max(m));
+        assert!(
+            peak_out < peak_in * 0.6,
+            "not ducked: in={peak_in} out={peak_out}"
+        );
         assert!(node.gain_reduction_db() > 3.0);
         // Attenuation is bounded by range_db.
         assert!(node.gain_reduction_db() <= 18.0 + 1e-3);

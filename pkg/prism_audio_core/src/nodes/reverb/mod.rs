@@ -7,15 +7,15 @@
 //!
 //! # Catalogue
 //!
-//! - [`fdn::FdnReverb`] — a Feedback Delay Network: several prime-length delay
+//! - [`fdn::FdnReverb`] -- a Feedback Delay Network: several prime-length delay
 //!   lines recirculated through an orthogonal Hadamard mixing matrix with
 //!   per-line damping. This is the modern, efficient workhorse for lush,
 //!   colour-controllable tails (the family behind most game-audio reverbs).
-//! - [`convolver::Convolver`] — a partitioned time-domain convolution reverb.
+//! - [`convolver::Convolver`] -- a partitioned time-domain convolution reverb.
 //!   It reproduces the *exact* acoustic fingerprint of a measured space by
 //!   convolving the input with a recorded impulse response, one response per
 //!   channel.
-//! - [`algorithmic::AlgorithmicRoom`] — a Schroeder/Freeverb-style room built
+//! - [`algorithmic::AlgorithmicRoom`] -- a Schroeder/Freeverb-style room built
 //!   from a pre-delay, a tapped early-reflection delay line, and a late tail of
 //!   parallel feedback combs feeding series all-pass diffusers.
 //! - [`plate::PlateReverb`] -- a Dattorro figure-eight plate: a four-stage
@@ -58,15 +58,15 @@ pub use algorithmic::{AlgorithmicRoom, AlgorithmicRoomParams};
 pub use convolver::Convolver;
 pub use fdn::{FdnOrder, FdnReverb, FdnReverbParams};
 pub use gated_reverb::{
-    DEFAULT_GATED_ATTACK_MS, DEFAULT_GATED_DAMPING, DEFAULT_GATED_HOLD_MS,
-    DEFAULT_GATED_MIX, DEFAULT_GATED_PRE_DELAY_MS, DEFAULT_GATED_RELEASE_MS,
-    DEFAULT_GATED_ROOM_SIZE, DEFAULT_GATED_THRESHOLD_DB, GatedReverbNode,
-    GatedReverbParams, MAX_GATED_HOLD_MS, MAX_GATED_PRE_DELAY_MS, MIN_GATED_TIME_MS,
+    GatedReverbNode, GatedReverbParams, DEFAULT_GATED_ATTACK_MS, DEFAULT_GATED_DAMPING,
+    DEFAULT_GATED_HOLD_MS, DEFAULT_GATED_MIX, DEFAULT_GATED_PRE_DELAY_MS, DEFAULT_GATED_RELEASE_MS,
+    DEFAULT_GATED_ROOM_SIZE, DEFAULT_GATED_THRESHOLD_DB, MAX_GATED_HOLD_MS, MAX_GATED_PRE_DELAY_MS,
+    MIN_GATED_TIME_MS,
 };
 pub use plate::{PlateReverb, PlateReverbParams};
-pub use shimmer::{MAX_SHIMMER_FEEDBACK, ShimmerReverb, ShimmerReverbParams};
+pub use shimmer::{ShimmerReverb, ShimmerReverbParams, MAX_SHIMMER_FEEDBACK};
 pub use spring_reverb::{
-    DEFAULT_SPRING_DAMPING, DEFAULT_SPRING_DECAY, DEFAULT_SPRING_DISPERSION,
-    DEFAULT_SPRING_MIX, DEFAULT_SPRING_SIZE_MS, MAX_SPRING_FEEDBACK, MAX_SPRING_SIZE_MS,
-    MIN_SPRING_SIZE_MS, SPRING_ALLPASS_STAGES, SpringReverbNode, SpringReverbParams,
+    SpringReverbNode, SpringReverbParams, DEFAULT_SPRING_DAMPING, DEFAULT_SPRING_DECAY,
+    DEFAULT_SPRING_DISPERSION, DEFAULT_SPRING_MIX, DEFAULT_SPRING_SIZE_MS, MAX_SPRING_FEEDBACK,
+    MAX_SPRING_SIZE_MS, MIN_SPRING_SIZE_MS, SPRING_ALLPASS_STAGES,
 };

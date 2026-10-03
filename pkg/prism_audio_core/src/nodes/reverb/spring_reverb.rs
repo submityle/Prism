@@ -65,7 +65,7 @@ use alloc::{vec, vec::Vec};
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Largest spring-length (loop delay) in milliseconds.
 pub const MAX_SPRING_SIZE_MS: Sample = 100.0;
@@ -130,10 +130,19 @@ impl SpringReverbParams {
     fn sanitised(self) -> Self {
         let d = Self::default();
         let clamp = |v: Sample, lo: Sample, hi: Sample, fallback: Sample| {
-            if v.is_finite() { v.clamp(lo, hi) } else { fallback }
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                fallback
+            }
         };
         Self {
-            size_ms: clamp(self.size_ms, MIN_SPRING_SIZE_MS, MAX_SPRING_SIZE_MS, d.size_ms),
+            size_ms: clamp(
+                self.size_ms,
+                MIN_SPRING_SIZE_MS,
+                MAX_SPRING_SIZE_MS,
+                d.size_ms,
+            ),
             decay: clamp(self.decay, 0.0, MAX_SPRING_FEEDBACK, d.decay),
             dispersion: clamp(self.dispersion, 0.0, 1.0, d.dispersion),
             damping: clamp(self.damping, 0.0, 1.0, d.damping),
@@ -282,7 +291,11 @@ impl AudioNode for SpringReverbNode {
                 output.channel_mut(ch)[f] = dry * x + wet * d;
             }
 
-            self.write_pos = if write_pos + 1 == ring_len { 0 } else { write_pos + 1 };
+            self.write_pos = if write_pos + 1 == ring_len {
+                0
+            } else {
+                write_pos + 1
+            };
         }
 
         // Pass surplus channels (beyond the processed set) through untouched.
@@ -417,7 +430,10 @@ mod tests {
         let early = rms(&out[delay..delay + 4_000]);
         let late = rms(&out[12_000..16_000]);
         assert!(early > 1e-4, "early tail should carry energy: {early}");
-        assert!(late < early, "tail should decay: early {early}, late {late}");
+        assert!(
+            late < early,
+            "tail should decay: early {early}, late {late}"
+        );
         assert!(late > 0.0, "tail should still be audible mid-decay");
     }
 
@@ -437,7 +453,10 @@ mod tests {
         let mut node_long = SpringReverbNode::new(SR, 1, long);
         let tail_short = rms(&run_mono(&mut node_short, &impulse(20_000))[12_000..]);
         let tail_long = rms(&run_mono(&mut node_long, &impulse(20_000))[12_000..]);
-        assert!(tail_long > tail_short, "short {tail_short}, long {tail_long}");
+        assert!(
+            tail_long > tail_short,
+            "short {tail_short}, long {tail_long}"
+        );
     }
 
     #[test]

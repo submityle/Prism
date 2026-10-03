@@ -62,7 +62,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 use core::f32::consts::PI;
 
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Default number of filter taps per polyphase branch.
 ///
@@ -124,11 +124,6 @@ impl Oversampler {
 
         // Linear-phase group delay of the up/down filter pair is `taps - 1`
         // samples at the oversampled rate, i.e. `(taps - 1) / factor` frames.
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "rounded non-negative latency fits comfortably in u32"
-        )]
         let latency = ops::round((taps as Sample - 1.0) / factor as Sample) as u32;
 
         Self {
@@ -420,7 +415,10 @@ mod tests {
         for _ in 0..256 {
             last = os.process_sample(&mut state, dc, identity);
         }
-        assert!((last - dc).abs() < 1.0e-3, "DC not preserved: {last} vs {dc}");
+        assert!(
+            (last - dc).abs() < 1.0e-3,
+            "DC not preserved: {last} vs {dc}"
+        );
     }
 
     #[test]

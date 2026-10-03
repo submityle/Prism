@@ -47,7 +47,7 @@ use bevy_math::ops;
 
 use crate::buffer::AudioBuffer;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// The response shape read out of the shared SVF core.
@@ -658,8 +658,10 @@ mod tests {
         let c = ctx(256);
         // Two blocks: the first sweeps, the second is settled.
         for _ in 0..2 {
-            let mut io =
-                ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+            let mut io = ProcessIo::new(
+                core::slice::from_ref(&input),
+                core::slice::from_mut(&mut output),
+            );
             node.process(&c, &mut io);
             for ch in 0..2 {
                 assert!(output.channel(ch).iter().all(|s| s.is_finite()));
@@ -677,8 +679,10 @@ mod tests {
         output.set_active_frames(16);
         let c = ctx(16);
         {
-            let mut io =
-                ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+            let mut io = ProcessIo::new(
+                core::slice::from_ref(&input),
+                core::slice::from_mut(&mut output),
+            );
             node.process(&c, &mut io);
         }
         node.reset();
@@ -688,7 +692,10 @@ mod tests {
         silent.set_active_frames(16);
         let mut out2 = AudioBuffer::new(ChannelLayout::Mono, 16);
         out2.set_active_frames(16);
-        let mut io = ProcessIo::new(core::slice::from_ref(&silent), core::slice::from_mut(&mut out2));
+        let mut io = ProcessIo::new(
+            core::slice::from_ref(&silent),
+            core::slice::from_mut(&mut out2),
+        );
         node.process(&c, &mut io);
         assert!(out2.channel(0).iter().all(|s| *s == 0.0));
     }

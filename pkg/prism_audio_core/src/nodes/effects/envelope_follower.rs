@@ -45,8 +45,8 @@ use alloc::vec::Vec;
 
 use crate::buffer::ChannelLayout;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
-use crate::nodes::dynamics::detector::{DetectionMode, LevelDetector, time_to_coef};
+use crate::math::{db_to_linear, flush_denormal, Sample};
+use crate::nodes::dynamics::detector::{time_to_coef, DetectionMode, LevelDetector};
 
 /// Largest attack / release / window time the follower accepts, in ms.
 pub const MAX_ENVELOPE_TIME_MS: Sample = 2_000.0;
@@ -253,7 +253,11 @@ impl AudioNode for EnvelopeFollowerNode {
             for n in 0..frames {
                 let x = if have_in {
                     let v = input.channel(ch)[n];
-                    if v.is_finite() { v } else { 0.0 }
+                    if v.is_finite() {
+                        v
+                    } else {
+                        0.0
+                    }
                 } else {
                     0.0
                 };
@@ -330,8 +334,12 @@ mod tests {
 
     #[test]
     fn latency_is_zero() {
-        let node =
-            EnvelopeFollowerNode::new(SR, ChannelLayout::Mono, 256, EnvelopeFollowerParams::default());
+        let node = EnvelopeFollowerNode::new(
+            SR,
+            ChannelLayout::Mono,
+            256,
+            EnvelopeFollowerParams::default(),
+        );
         assert_eq!(node.latency_frames(), 0);
     }
 
@@ -374,16 +382,24 @@ mod tests {
 
     #[test]
     fn silence_produces_zero_envelope() {
-        let mut node =
-            EnvelopeFollowerNode::new(SR, ChannelLayout::Mono, 1_024, EnvelopeFollowerParams::default());
+        let mut node = EnvelopeFollowerNode::new(
+            SR,
+            ChannelLayout::Mono,
+            1_024,
+            EnvelopeFollowerParams::default(),
+        );
         let out = run_mono(&mut node, &vec![0.0; 4_096]);
         assert!(out.iter().all(|&x| x == 0.0));
     }
 
     #[test]
     fn envelope_is_non_negative() {
-        let mut node =
-            EnvelopeFollowerNode::new(SR, ChannelLayout::Mono, 4_096, EnvelopeFollowerParams::default());
+        let mut node = EnvelopeFollowerNode::new(
+            SR,
+            ChannelLayout::Mono,
+            4_096,
+            EnvelopeFollowerParams::default(),
+        );
         let out = run_mono(&mut node, &sine(220.0, 0.7, 4_096));
         assert!(out.iter().all(|&x| x >= 0.0));
     }
@@ -391,8 +407,12 @@ mod tests {
     #[test]
     fn tracks_constant_amplitude() {
         // Peak mode on a DC level converges to that level.
-        let mut node =
-            EnvelopeFollowerNode::new(SR, ChannelLayout::Mono, SR as usize, EnvelopeFollowerParams::default());
+        let mut node = EnvelopeFollowerNode::new(
+            SR,
+            ChannelLayout::Mono,
+            SR as usize,
+            EnvelopeFollowerParams::default(),
+        );
         let out = run_mono(&mut node, &vec![0.5; SR as usize / 2]);
         let settled = mean(&out[out.len() - 2_000..]);
         assert!((settled - 0.5).abs() < 1e-2, "settled near 0.5: {settled}");
@@ -426,8 +446,14 @@ mod tests {
         let peak_level = mean(&out_peak[tail..]);
         let rms_level = mean(&out_rms[tail..]);
         // Peak tracks ~amp; RMS tracks ~amp/sqrt(2) ~= 0.566.
-        assert!(peak_level > rms_level + 0.1, "peak {peak_level} vs rms {rms_level}");
-        assert!(rms_level > 0.4 && rms_level < 0.7, "rms near amp/sqrt(2): {rms_level}");
+        assert!(
+            peak_level > rms_level + 0.1,
+            "peak {peak_level} vs rms {rms_level}"
+        );
+        assert!(
+            rms_level > 0.4 && rms_level < 0.7,
+            "rms near amp/sqrt(2): {rms_level}"
+        );
     }
 
     #[test]
@@ -465,7 +491,12 @@ mod tests {
         let out_fast = run_mono(&mut fast, &signal);
         let out_slow = run_mono(&mut slow, &signal);
         // At a fixed early time the fast attack is further along.
-        assert!(out_fast[500] > out_slow[500], "fast {} slow {}", out_fast[500], out_slow[500]);
+        assert!(
+            out_fast[500] > out_slow[500],
+            "fast {} slow {}",
+            out_fast[500],
+            out_slow[500]
+        );
     }
 
     #[test]
@@ -491,13 +522,22 @@ mod tests {
         let out_slow = run_mono(&mut slow, &signal);
         // A short time after the signal stops, the fast release has fallen more.
         let probe = onset + 2_000;
-        assert!(out_fast[probe] < out_slow[probe], "fast {} slow {}", out_fast[probe], out_slow[probe]);
+        assert!(
+            out_fast[probe] < out_slow[probe],
+            "fast {} slow {}",
+            out_fast[probe],
+            out_slow[probe]
+        );
     }
 
     #[test]
     fn non_finite_input_stays_finite() {
-        let mut node =
-            EnvelopeFollowerNode::new(SR, ChannelLayout::Mono, 512, EnvelopeFollowerParams::default());
+        let mut node = EnvelopeFollowerNode::new(
+            SR,
+            ChannelLayout::Mono,
+            512,
+            EnvelopeFollowerParams::default(),
+        );
         let mut signal = vec![0.0; 2_048];
         signal[0] = Sample::NAN;
         signal[1] = Sample::INFINITY;
@@ -509,16 +549,24 @@ mod tests {
 
     #[test]
     fn tone_output_is_finite() {
-        let mut node =
-            EnvelopeFollowerNode::new(SR, ChannelLayout::Mono, 512, EnvelopeFollowerParams::default());
+        let mut node = EnvelopeFollowerNode::new(
+            SR,
+            ChannelLayout::Mono,
+            512,
+            EnvelopeFollowerParams::default(),
+        );
         let out = run_mono(&mut node, &sine(330.0, 0.5, SR as usize));
         assert!(out.iter().all(|&x| x.is_finite()));
     }
 
     #[test]
     fn zero_frames_is_safe() {
-        let mut node =
-            EnvelopeFollowerNode::new(SR, ChannelLayout::Mono, 256, EnvelopeFollowerParams::default());
+        let mut node = EnvelopeFollowerNode::new(
+            SR,
+            ChannelLayout::Mono,
+            256,
+            EnvelopeFollowerParams::default(),
+        );
         let mut input = AudioBuffer::new(ChannelLayout::Mono, 1);
         let mut output = AudioBuffer::new(ChannelLayout::Mono, 1);
         input.set_active_frames(0);
@@ -550,7 +598,10 @@ mod tests {
         let mut outputs = [output];
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx(len), &mut io);
-        assert!(outputs[0].channel(0)[len - 1] > 0.4, "left tracks the signal");
+        assert!(
+            outputs[0].channel(0)[len - 1] > 0.4,
+            "left tracks the signal"
+        );
         assert!(outputs[0].channel(1)[len - 1] < 1e-6, "right stays silent");
     }
 
@@ -622,10 +673,18 @@ mod tests {
 
     #[test]
     fn envelope_getter_reports_state() {
-        let mut node =
-            EnvelopeFollowerNode::new(SR, ChannelLayout::Mono, SR as usize, EnvelopeFollowerParams::default());
+        let mut node = EnvelopeFollowerNode::new(
+            SR,
+            ChannelLayout::Mono,
+            SR as usize,
+            EnvelopeFollowerParams::default(),
+        );
         let _ = run_mono(&mut node, &vec![0.5; SR as usize / 2]);
-        assert!((node.envelope(0) - 0.5).abs() < 1e-2, "getter: {}", node.envelope(0));
+        assert!(
+            (node.envelope(0) - 0.5).abs() < 1e-2,
+            "getter: {}",
+            node.envelope(0)
+        );
         assert_eq!(node.envelope(99), 0.0);
     }
 

@@ -268,12 +268,6 @@ impl WaveguideDelay {
 
     /// Reads the wave delayed by `delay` samples with linear interpolation.
     #[inline]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "delay is clamped to [1, len-1]; the integer part fits a usize exactly"
-    )]
     fn read(&self, delay: Sample) -> Sample {
         let len = self.buf.len();
         let d = delay.clamp(1.0, (len - 1) as Sample);
@@ -402,12 +396,6 @@ impl ConicalReedNode {
     /// defaults, `frequency_hz` is clamped to `[MIN_FREQUENCY_HZ, sample_rate /
     /// 2]`, and `breath_pressure`/`reed_stiffness`/`brightness` to `[0, 1]`.
     #[must_use]
-    #[expect(
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        reason = "the buffer length is tiny relative to f32's integer precision"
-    )]
     pub fn new(sample_rate: u32, params: ConicalReedParams) -> Self {
         let sr = (sample_rate.max(1)) as Sample;
         // Longest per-line delay (frames at the lowest pitch): delay = sr /
@@ -519,10 +507,6 @@ impl ConicalReedNode {
     }
 
     /// Recomputes the latched loop coefficients from the user-facing parameters.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "the buffer length is tiny relative to f32's integer precision"
-    )]
     fn recompute(&mut self) {
         let sr = self.sample_rate;
         // One-zero bell-filter coefficient S in [0, 0.5]: brightness 1 -> S 0.

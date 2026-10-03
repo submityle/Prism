@@ -12,9 +12,9 @@
 //! safe.
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear};
+use crate::math::{db_to_linear, Sample};
 use crate::nodes::dynamics::detector::{
-    DetectionMode, LevelDetector, expander_reduction_db, time_to_coef,
+    expander_reduction_db, time_to_coef, DetectionMode, LevelDetector,
 };
 
 /// Construction parameters for an [`ExpanderGateNode`].
@@ -92,7 +92,8 @@ impl ExpanderGateNode {
     #[must_use]
     pub fn new(sample_rate: u32, _channels: usize, params: GateParams) -> Self {
         let closed_gain = db_to_linear(-params.range_db.max(0.0));
-        let hold_frames = bevy_math::ops::round(params.hold_ms.max(0.0) * (sample_rate as Sample) * 0.001) as u32;
+        let hold_frames =
+            bevy_math::ops::round(params.hold_ms.max(0.0) * (sample_rate as Sample) * 0.001) as u32;
         Self {
             threshold_db: params.threshold_db,
             ratio: params.ratio.max(1.0),
@@ -132,8 +133,13 @@ impl AudioNode for ExpanderGateNode {
             }
 
             let level_db = self.detector.level_db(peak);
-            let reduction =
-                expander_reduction_db(level_db, self.threshold_db, self.ratio, self.knee_db, self.range_db);
+            let reduction = expander_reduction_db(
+                level_db,
+                self.threshold_db,
+                self.ratio,
+                self.knee_db,
+                self.range_db,
+            );
             let target_gain = db_to_linear(-reduction);
 
             if target_gain >= self.gain {
@@ -195,10 +201,18 @@ mod tests {
         let mut outputs = [mono(4_800)];
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx(4_800), &mut io);
-        assert!(node.current_gain() > 0.9, "gate did not open: {}", node.current_gain());
+        assert!(
+            node.current_gain() > 0.9,
+            "gate did not open: {}",
+            node.current_gain()
+        );
         // Settled tail should pass at (near) unity.
-        let peak_in = inputs[0].channel(0)[2_400..].iter().fold(0.0, |m, &v| v.abs().max(m));
-        let peak_out = outputs[0].channel(0)[2_400..].iter().fold(0.0, |m, &v| v.abs().max(m));
+        let peak_in = inputs[0].channel(0)[2_400..]
+            .iter()
+            .fold(0.0, |m, &v| v.abs().max(m));
+        let peak_out = outputs[0].channel(0)[2_400..]
+            .iter()
+            .fold(0.0, |m, &v| v.abs().max(m));
         assert!(peak_out > peak_in * 0.9, "in={peak_in} out={peak_out}");
     }
 
@@ -220,9 +234,16 @@ mod tests {
         let mut outputs = [mono(4_800)];
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx(4_800), &mut io);
-        let peak_in = inputs[0].channel(0)[2_400..].iter().fold(0.0, |m, &v| v.abs().max(m));
-        let peak_out = outputs[0].channel(0)[2_400..].iter().fold(0.0, |m, &v| v.abs().max(m));
-        assert!(peak_out < peak_in * 0.2, "gate did not attenuate: in={peak_in} out={peak_out}");
+        let peak_in = inputs[0].channel(0)[2_400..]
+            .iter()
+            .fold(0.0, |m, &v| v.abs().max(m));
+        let peak_out = outputs[0].channel(0)[2_400..]
+            .iter()
+            .fold(0.0, |m, &v| v.abs().max(m));
+        assert!(
+            peak_out < peak_in * 0.2,
+            "gate did not attenuate: in={peak_in} out={peak_out}"
+        );
     }
 
     #[test]

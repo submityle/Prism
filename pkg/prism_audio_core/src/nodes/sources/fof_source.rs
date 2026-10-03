@@ -86,7 +86,7 @@ use bevy_math::ops;
 use core::f32::consts::{PI, TAU};
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Number of formants the node tracks. A formant with zero gain is inert.
@@ -126,18 +126,22 @@ pub const FOF_RETIRE_LEVEL: Sample = 1.0e-4;
 /// Replaces a non-finite value with `fallback`, otherwise returns the input.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Wraps a normalized phase accumulator back into `[0, 1)` without a transcendental.
 #[inline]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "phase is small and bounded; the i64 floor is exact for audio phases"
-)]
 fn wrap01(phase: Sample) -> Sample {
     let p = phase - (phase as i64 as Sample);
-    if p < 0.0 { p + 1.0 } else { p }
+    if p < 0.0 {
+        p + 1.0
+    } else {
+        p
+    }
 }
 
 /// One formant's steady spectral description (centre, width, and level).
@@ -202,11 +206,31 @@ pub struct FofSourceParams {
 
 /// The default formant bank: an open `/a/`-like vowel.
 const DEFAULT_FORMANTS: [Formant; MAX_FORMANTS] = [
-    Formant { frequency_hz: 800.0, bandwidth_hz: 80.0, gain: 1.0 },
-    Formant { frequency_hz: 1_150.0, bandwidth_hz: 90.0, gain: 0.5 },
-    Formant { frequency_hz: 2_900.0, bandwidth_hz: 120.0, gain: 0.25 },
-    Formant { frequency_hz: 3_900.0, bandwidth_hz: 130.0, gain: 0.2 },
-    Formant { frequency_hz: 4_950.0, bandwidth_hz: 140.0, gain: 0.1 },
+    Formant {
+        frequency_hz: 800.0,
+        bandwidth_hz: 80.0,
+        gain: 1.0,
+    },
+    Formant {
+        frequency_hz: 1_150.0,
+        bandwidth_hz: 90.0,
+        gain: 0.5,
+    },
+    Formant {
+        frequency_hz: 2_900.0,
+        bandwidth_hz: 120.0,
+        gain: 0.25,
+    },
+    Formant {
+        frequency_hz: 3_900.0,
+        bandwidth_hz: 130.0,
+        gain: 0.2,
+    },
+    Formant {
+        frequency_hz: 4_950.0,
+        bandwidth_hz: 140.0,
+        gain: 0.1,
+    },
 ];
 
 impl Default for FofSourceParams {
@@ -467,7 +491,11 @@ mod tests {
     const SR: u32 = 48_000;
 
     fn ctx(sample_rate: u32, frames: usize) -> RenderContext {
-        RenderContext { sample_rate, frames, playhead: 0 }
+        RenderContext {
+            sample_rate,
+            frames,
+            playhead: 0,
+        }
     }
 
     fn render(node: &mut FofSourceNode, layout: ChannelLayout, frames: usize) -> AudioBuffer {
@@ -518,7 +546,11 @@ mod tests {
         let mut b = default_node();
         let ba = render(&mut a, ChannelLayout::Mono, 4_800);
         let bb = render(&mut b, ChannelLayout::Mono, 4_800);
-        assert_eq!(ba.channel(0), bb.channel(0), "schedule carries no randomness");
+        assert_eq!(
+            ba.channel(0),
+            bb.channel(0),
+            "schedule carries no randomness"
+        );
     }
 
     #[test]
@@ -527,12 +559,19 @@ mod tests {
         let first = render(&mut node, ChannelLayout::Mono, 4_800);
         node.reset();
         let second = render(&mut node, ChannelLayout::Mono, 4_800);
-        assert_eq!(first.channel(0), second.channel(0), "reset must replay the tone");
+        assert_eq!(
+            first.channel(0),
+            second.channel(0),
+            "reset must replay the tone"
+        );
     }
 
     #[test]
     fn zero_fundamental_is_silent() {
-        let params = FofSourceParams { fundamental_hz: 0.0, ..FofSourceParams::default() };
+        let params = FofSourceParams {
+            fundamental_hz: 0.0,
+            ..FofSourceParams::default()
+        };
         let mut node = FofSourceNode::from_params(params);
         let buf = render(&mut node, ChannelLayout::Mono, 4_800);
         assert_eq!(peak(&buf, 0), 0.0, "no fundamental means no glottal pulses");
@@ -562,7 +601,10 @@ mod tests {
         let bq = render(&mut quiet, ChannelLayout::Mono, 4_800);
         let bl = render(&mut loud, ChannelLayout::Mono, 4_800);
         for (q, l) in bq.channel(0).iter().zip(bl.channel(0).iter()) {
-            assert!((2.0 * q - l).abs() <= 1.0e-5, "amplitude is a linear scalar");
+            assert!(
+                (2.0 * q - l).abs() <= 1.0e-5,
+                "amplitude is a linear scalar"
+            );
         }
     }
 
@@ -572,7 +614,11 @@ mod tests {
         let buf = render(&mut node, ChannelLayout::Surround5_1, 2_400);
         let base = buf.channel(0).to_vec();
         for ch in 1..buf.channels() {
-            assert_eq!(buf.channel(ch), base.as_slice(), "channels must be identical");
+            assert_eq!(
+                buf.channel(ch),
+                base.as_slice(),
+                "channels must be identical"
+            );
         }
     }
 
@@ -585,7 +631,11 @@ mod tests {
         let mut outputs = [out];
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx(SR, 0), &mut io);
-        assert_eq!(outputs[0].active_frames(), 0, "zero-frame render is a no-op");
+        assert_eq!(
+            outputs[0].active_frames(),
+            0,
+            "zero-frame render is a no-op"
+        );
     }
 
     #[test]
@@ -611,7 +661,10 @@ mod tests {
         assert_eq!(node.fundamental(), 0.0);
         node.set_fundamental(123.0);
         node.set_fundamental(Sample::NAN);
-        assert!((node.fundamental() - 123.0).abs() < 1.0e-6, "NaN keeps the old value");
+        assert!(
+            (node.fundamental() - 123.0).abs() < 1.0e-6,
+            "NaN keeps the old value"
+        );
     }
 
     #[test]
@@ -636,7 +689,11 @@ mod tests {
         let before = node.formant(0);
         node.set_formant(
             MAX_FORMANTS,
-            Formant { frequency_hz: 1.0, bandwidth_hz: 50.0, gain: 1.0 },
+            Formant {
+                frequency_hz: 1.0,
+                bandwidth_hz: 50.0,
+                gain: 1.0,
+            },
         );
         assert_eq!(node.formant(0).frequency_hz, before.frequency_hz);
     }
@@ -646,7 +703,11 @@ mod tests {
         let mut node = default_node();
         node.set_formant(
             0,
-            Formant { frequency_hz: 1_000.0, bandwidth_hz: 1.0, gain: 2.0 },
+            Formant {
+                frequency_hz: 1_000.0,
+                bandwidth_hz: 1.0,
+                gain: 2.0,
+            },
         );
         let f = node.formant(0);
         assert!((f.frequency_hz - 1_000.0).abs() < 1.0e-6);
@@ -667,8 +728,11 @@ mod tests {
             fundamental_hz: Sample::INFINITY,
             skirt_ms: Sample::NAN,
             amplitude: Sample::NAN,
-            formants: [Formant { frequency_hz: -1.0, bandwidth_hz: -5.0, gain: -2.0 };
-                MAX_FORMANTS],
+            formants: [Formant {
+                frequency_hz: -1.0,
+                bandwidth_hz: -5.0,
+                gain: -2.0,
+            }; MAX_FORMANTS],
         }
         .sanitised();
         assert!((params.fundamental_hz - DEFAULT_FOF_FUNDAMENTAL_HZ).abs() < 1.0e-6);
@@ -714,10 +778,21 @@ mod tests {
     fn formant_frequency_affects_output() {
         let mut a = default_node();
         let mut b = default_node();
-        b.set_formant(0, Formant { frequency_hz: 1_600.0, bandwidth_hz: 80.0, gain: 1.0 });
+        b.set_formant(
+            0,
+            Formant {
+                frequency_hz: 1_600.0,
+                bandwidth_hz: 80.0,
+                gain: 1.0,
+            },
+        );
         let ba = render(&mut a, ChannelLayout::Mono, 4_800);
         let bb = render(&mut b, ChannelLayout::Mono, 4_800);
-        assert_ne!(ba.channel(0), bb.channel(0), "formant centre shapes the timbre");
+        assert_ne!(
+            ba.channel(0),
+            bb.channel(0),
+            "formant centre shapes the timbre"
+        );
     }
 
     #[test]
@@ -728,7 +803,10 @@ mod tests {
         });
         let buf = render(&mut node, ChannelLayout::Mono, 48_000);
         for &s in buf.channel(0) {
-            assert!(s.is_finite() && s.abs() < 64.0, "retired slots must recycle cleanly");
+            assert!(
+                s.is_finite() && s.abs() < 64.0,
+                "retired slots must recycle cleanly"
+            );
         }
     }
 

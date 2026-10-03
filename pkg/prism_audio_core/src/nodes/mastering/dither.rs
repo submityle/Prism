@@ -88,7 +88,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Smallest supported delivery bit depth (a two-level, one-bit grid).
 pub const MIN_DITHER_BITS: u32 = 1;
@@ -578,10 +578,7 @@ mod tests {
             seed: 1,
         };
         let mut a = Dither::new(base, 1);
-        let mut b = Dither::new(
-            DitherParams { seed: 2, ..base },
-            1,
-        );
+        let mut b = Dither::new(DitherParams { seed: 2, ..base }, 1);
         let mut differed = false;
         for i in 0..1000 {
             let x = ops::sin(0.01 * i as Sample) * 0.3;
@@ -656,7 +653,10 @@ mod tests {
         }
         // The undithered quiet tone collapses to a near-constant code; the
         // dithered one keeps toggling.
-        assert!(dith_unique > flat_unique, "dith {dith_unique} flat {flat_unique}");
+        assert!(
+            dith_unique > flat_unique,
+            "dith {dith_unique} flat {flat_unique}"
+        );
     }
 
     #[test]

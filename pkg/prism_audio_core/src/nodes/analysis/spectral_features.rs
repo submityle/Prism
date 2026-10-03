@@ -330,12 +330,20 @@ impl SpectralFeatures {
         let rolloff = rolloff_bin as f64 * hz_per_bin;
 
         // Slope: least-squares regression of magnitude on frequency.
-        let slope = if var_f > SILENCE_FLOOR { cov_fm / var_f } else { 0.0 };
+        let slope = if var_f > SILENCE_FLOOR {
+            cov_fm / var_f
+        } else {
+            0.0
+        };
 
         // MPEG-7 spectral decrease (bins 1..K relative to bin 0).
         let m0 = {
             let v = f64::from(magnitudes[0]);
-            if v.is_finite() { v.abs() } else { 0.0 }
+            if v.is_finite() {
+                v.abs()
+            } else {
+                0.0
+            }
         };
         let mut dec_num = 0.0f64;
         let mut dec_den = 0.0f64;
@@ -345,7 +353,11 @@ impl SpectralFeatures {
             dec_num += (m - m0) / k as f64;
             dec_den += m;
         }
-        let decrease = if dec_den > SILENCE_FLOOR { dec_num / dec_den } else { 0.0 };
+        let decrease = if dec_den > SILENCE_FLOOR {
+            dec_num / dec_den
+        } else {
+            0.0
+        };
 
         // Flux: L2 distance from the previous frame's magnitudes.
         let flux = self.spectral_flux(magnitudes);
@@ -464,7 +476,12 @@ impl SpectralFeaturesNode {
     /// `requested_size`, `hop`, and `window` configure the embedded
     /// [`SpectrumAnalyzer`]; `rolloff_fraction` is clamped to `0..=1`.
     #[must_use]
-    pub fn new(requested_size: usize, hop: usize, window: Window, rolloff_fraction: Sample) -> Self {
+    pub fn new(
+        requested_size: usize,
+        hop: usize,
+        window: Window,
+        rolloff_fraction: Sample,
+    ) -> Self {
         Self {
             analyzer: SpectrumAnalyzer::new(requested_size, hop, window),
             features: SpectralFeatures::new(rolloff_fraction),
@@ -542,7 +559,9 @@ impl AudioNode for SpectralFeaturesNode {
         let computed = self.analyzer.frames_computed();
         if computed > self.last_frame {
             self.last_frame = computed;
-            self.latest = self.features.analyze(self.analyzer.magnitudes(), ctx.sample_rate);
+            self.latest = self
+                .features
+                .analyze(self.analyzer.magnitudes(), ctx.sample_rate);
             self.frames_analyzed += 1;
         }
     }
@@ -559,8 +578,8 @@ impl AudioNode for SpectralFeaturesNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
     use crate::buffer::{AudioBuffer, ChannelLayout};
+    use alloc::vec;
 
     const SR: u32 = 48_000;
 
@@ -581,7 +600,11 @@ mod tests {
         // size = (5 - 1) * 2 = 8; with SR = 8 Hz, hz_per_bin = 1 Hz.
         let mut f = SpectralFeatures::new(0.85);
         let set = f.analyze(&peak_spectrum(5, 3), 8);
-        assert!((set.centroid - 3.0).abs() < 1e-4, "centroid {}", set.centroid);
+        assert!(
+            (set.centroid - 3.0).abs() < 1e-4,
+            "centroid {}",
+            set.centroid
+        );
         // A lone peak has zero spread about its own frequency.
         assert!(set.spread < 1e-3, "spread {}", set.spread);
     }
@@ -618,7 +641,11 @@ mod tests {
         let mut f = SpectralFeatures::new(0.85);
         for &v in &[0.01f32, 0.5, 2.0, 100.0] {
             let set = f.analyze(&flat_spectrum(32, v), SR);
-            assert!((0.0..=1.0).contains(&set.flatness), "flatness {}", set.flatness);
+            assert!(
+                (0.0..=1.0).contains(&set.flatness),
+                "flatness {}",
+                set.flatness
+            );
         }
     }
 
@@ -663,7 +690,9 @@ mod tests {
     #[test]
     fn kurtosis_and_spread_are_sane() {
         // A broad spectrum has larger spread than a narrow one.
-        let narrow: Vec<Sample> = (0..64).map(|k| if (28..=36).contains(&k) { 1.0 } else { 0.0 }).collect();
+        let narrow: Vec<Sample> = (0..64)
+            .map(|k| if (28..=36).contains(&k) { 1.0 } else { 0.0 })
+            .collect();
         let broad = flat_spectrum(64, 1.0);
         let mut f = SpectralFeatures::new(0.85);
         let s_narrow = f.analyze(&narrow, SR).spread;
@@ -747,7 +776,11 @@ mod tests {
             let output = AudioBuffer::new(ChannelLayout::Mono, 512);
             let inputs = [input];
             let mut outputs = [output];
-            let ctx = RenderContext { sample_rate: SR, frames: 512, playhead: 0 };
+            let ctx = RenderContext {
+                sample_rate: SR,
+                frames: 512,
+                playhead: 0,
+            };
             let mut io = ProcessIo::new(&inputs, &mut outputs);
             node.process(&ctx, &mut io);
         }
@@ -758,13 +791,17 @@ mod tests {
         let mut node = SpectralFeaturesNode::new(1024, 512, Window::Hann, 0.85);
         let mut input = AudioBuffer::new(ChannelLayout::Mono, 512);
         for (i, s) in input.channel_mut(0).iter_mut().enumerate() {
-            *s = (i as Sample * 0.001).sin();
+            *s = ops::sin(i as Sample * 0.001);
         }
         let expected: Vec<Sample> = input.channel(0).to_vec();
         let output = AudioBuffer::new(ChannelLayout::Mono, 512);
         let inputs = [input];
         let mut outputs = [output];
-        let ctx = RenderContext { sample_rate: SR, frames: 512, playhead: 0 };
+        let ctx = RenderContext {
+            sample_rate: SR,
+            frames: 512,
+            playhead: 0,
+        };
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx, &mut io);
         assert_eq!(outputs[0].channel(0), expected.as_slice());

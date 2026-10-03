@@ -46,7 +46,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, equal_power_pan, flush_denormal, lerp};
+use crate::math::{equal_power_pan, flush_denormal, lerp, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Maximum number of simultaneous taps a [`MultiTapDelayNode`] can read.
@@ -290,7 +290,11 @@ impl MultiTapDelayNode {
 /// feedback loop.
 #[inline]
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Computes the two neighbouring ring indices and the interpolation fraction

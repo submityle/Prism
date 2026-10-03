@@ -60,7 +60,7 @@ use core::f32::consts::TAU;
 
 use crate::fft::Fft;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
+use crate::math::{db_to_linear, flush_denormal, Sample};
 
 /// Smallest permitted transform size, in samples.
 pub const MIN_FFT_SIZE: usize = 64;
@@ -197,9 +197,17 @@ impl SpectralGateNode {
             overlap_sum += win[k] * win[k];
             k += hop;
         }
-        let ola_norm = if overlap_sum > 0.0 { 1.0 / overlap_sum } else { 0.0 };
+        let ola_norm = if overlap_sum > 0.0 {
+            1.0 / overlap_sum
+        } else {
+            0.0
+        };
 
-        let inv_window_sum = if window_sum > 0.0 { 1.0 / window_sum } else { 0.0 };
+        let inv_window_sum = if window_sum > 0.0 {
+            1.0 / window_sum
+        } else {
+            0.0
+        };
 
         Self {
             size,
@@ -287,7 +295,11 @@ impl AudioNode for SpectralGateNode {
                 let x = if x.is_finite() { x } else { 0.0 };
                 in_fifo[fifo_base + rover] = x;
                 let y = out_fifo[fifo_base + (rover - fifo_latency)];
-                let y = if y.is_finite() { flush_denormal(y) } else { 0.0 };
+                let y = if y.is_finite() {
+                    flush_denormal(y)
+                } else {
+                    0.0
+                };
                 output.channel_mut(ch)[i] = y;
             }
 
@@ -612,7 +624,10 @@ mod tests {
         for (a, b) in after_reset.iter().zip(baseline.iter()) {
             max_err = max_err.max((a - b).abs());
         }
-        assert!(max_err < 1.0e-6, "state leaked past reset: max_err {max_err}");
+        assert!(
+            max_err < 1.0e-6,
+            "state leaked past reset: max_err {max_err}"
+        );
     }
 
     #[test]

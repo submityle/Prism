@@ -61,7 +61,7 @@
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::nodes::svf::{Svf, SvfCoeffs, SvfKind};
 use crate::param::{Ramp, Smoothed};
 
@@ -169,7 +169,13 @@ impl Exciter {
         let sr = sample_rate.max(1);
         let freq = params.frequency_hz.max(1.0);
         // A gentle Butterworth-ish high-pass (Q = 1/sqrt(2)) for both stages.
-        let coeffs = SvfCoeffs::design(SvfKind::HighPass, sr, freq, core::f32::consts::FRAC_1_SQRT_2, 0.0);
+        let coeffs = SvfCoeffs::design(
+            SvfKind::HighPass,
+            sr,
+            freq,
+            core::f32::consts::FRAC_1_SQRT_2,
+            0.0,
+        );
         let chans = channels.max(1);
         Self {
             pre: Svf::new(coeffs, chans),
@@ -371,8 +377,8 @@ impl AudioNode for ExciterNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
     use crate::buffer::{AudioBuffer, ChannelLayout};
+    use alloc::vec::Vec;
 
     const SR: u32 = 48_000;
 
@@ -520,7 +526,10 @@ mod tests {
         }
         let a = exciter.harmonics(0, 0.8);
         let b = exciter.harmonics(1, 0.0);
-        assert!((a - b).abs() > 1e-6, "channels should hold independent state");
+        assert!(
+            (a - b).abs() > 1e-6,
+            "channels should hold independent state"
+        );
     }
 
     #[test]
@@ -542,7 +551,10 @@ mod tests {
             frames: 32,
             playhead: 0,
         };
-        let mut io = ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+        let mut io = ProcessIo::new(
+            core::slice::from_ref(&input),
+            core::slice::from_mut(&mut output),
+        );
         node.process(&ctx, &mut io);
         for f in 0..32 {
             assert!((output.channel(0)[f] - input.channel(0)[f]).abs() < 1e-6);
@@ -566,7 +578,10 @@ mod tests {
             frames: 256,
             playhead: 0,
         };
-        let mut io = ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+        let mut io = ProcessIo::new(
+            core::slice::from_ref(&input),
+            core::slice::from_mut(&mut output),
+        );
         node.process(&ctx, &mut io);
         let mut changed = false;
         for f in 128..256 {
@@ -596,15 +611,20 @@ mod tests {
             playhead: 0,
         };
         {
-            let mut io =
-                ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+            let mut io = ProcessIo::new(
+                core::slice::from_ref(&input),
+                core::slice::from_mut(&mut output),
+            );
             node.process(&ctx, &mut io);
         }
         node.reset();
         let silent = AudioBuffer::new(ChannelLayout::Mono, 64);
         let mut after = AudioBuffer::new(ChannelLayout::Mono, 64);
         after.set_active_frames(64);
-        let mut io = ProcessIo::new(core::slice::from_ref(&silent), core::slice::from_mut(&mut after));
+        let mut io = ProcessIo::new(
+            core::slice::from_ref(&silent),
+            core::slice::from_mut(&mut after),
+        );
         node.process(&ctx, &mut io);
         for f in 0..64 {
             assert!(after.channel(0)[f].abs() < 1e-6, "tail not cleared at {f}");
@@ -639,7 +659,10 @@ mod tests {
             frames: 16,
             playhead: 0,
         };
-        let mut io = ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+        let mut io = ProcessIo::new(
+            core::slice::from_ref(&input),
+            core::slice::from_mut(&mut output),
+        );
         node.process(&ctx, &mut io);
         assert!(output.channel(0).iter().all(|s| s.is_finite()));
     }
@@ -655,7 +678,10 @@ mod tests {
             frames: 0,
             playhead: 0,
         };
-        let mut io = ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+        let mut io = ProcessIo::new(
+            core::slice::from_ref(&input),
+            core::slice::from_mut(&mut output),
+        );
         node.process(&ctx, &mut io);
         assert_eq!(output.active_frames(), 0);
     }

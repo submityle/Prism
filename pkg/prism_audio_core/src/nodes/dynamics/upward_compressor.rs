@@ -69,7 +69,7 @@
 //! ballistics are used.
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
+use crate::math::{db_to_linear, flush_denormal, Sample};
 use crate::nodes::dynamics::detector::{DetectionMode, GainBallistics, LevelDetector};
 use crate::param::{Ramp, Smoothed};
 
@@ -262,7 +262,8 @@ impl UpwardCompressorNode {
     /// Updates the attack / release times in milliseconds (state preserved).
     #[inline]
     pub fn set_times(&mut self, attack_ms: Sample, release_ms: Sample, sample_rate: u32) {
-        self.ballistics.set_times(attack_ms, release_ms, sample_rate);
+        self.ballistics
+            .set_times(attack_ms, release_ms, sample_rate);
     }
 
     /// Sets the make-up gain in dB.
@@ -433,7 +434,10 @@ mod tests {
         // The knee value matches the linear region at the lower knee edge.
         let edge_quad = upward_boost_db(-27.0, -24.0, 2.0, 6.0, 48.0);
         let edge_lin = upward_boost_db(-27.001, -24.0, 2.0, 0.0, 48.0);
-        assert!((edge_quad - edge_lin).abs() < 1e-2, "{edge_quad} vs {edge_lin}");
+        assert!(
+            (edge_quad - edge_lin).abs() < 1e-2,
+            "{edge_quad} vs {edge_lin}"
+        );
     }
 
     #[test]
@@ -443,7 +447,10 @@ mod tests {
         let amp = 0.01;
         let out = run_mono(&mut node, amp, 48_000);
         let peak = tail_peak(&out, 24_000);
-        assert!(peak > amp * 1.5, "quiet signal should be lifted: {peak} vs {amp}");
+        assert!(
+            peak > amp * 1.5,
+            "quiet signal should be lifted: {peak} vs {amp}"
+        );
         assert!(node.gain_boost_db() > 0.0);
     }
 
@@ -457,7 +464,10 @@ mod tests {
         let amp = 0.5;
         let out = run_mono(&mut node, amp, 48_000);
         let peak = tail_peak(&out, 44_000);
-        assert!((peak - amp).abs() < amp * 0.05, "loud signal altered: {peak} vs {amp}");
+        assert!(
+            (peak - amp).abs() < amp * 0.05,
+            "loud signal altered: {peak} vs {amp}"
+        );
     }
 
     #[test]
@@ -470,7 +480,11 @@ mod tests {
         let mut node = UpwardCompressorNode::new(SR, 1, params);
         // Extremely quiet input drives the boost to its ceiling.
         let _ = run_mono(&mut node, 1e-4, 48_000);
-        assert!(node.gain_boost_db() <= 6.0 + 1e-3, "{}", node.gain_boost_db());
+        assert!(
+            node.gain_boost_db() <= 6.0 + 1e-3,
+            "{}",
+            node.gain_boost_db()
+        );
     }
 
     #[test]
@@ -483,7 +497,10 @@ mod tests {
         let amp = 0.02;
         let out = run_mono(&mut node, amp, 8_000);
         let peak = tail_peak(&out, 4_000);
-        assert!((peak - amp).abs() < amp * 0.05, "ratio 1 altered signal: {peak} vs {amp}");
+        assert!(
+            (peak - amp).abs() < amp * 0.05,
+            "ratio 1 altered signal: {peak} vs {amp}"
+        );
     }
 
     #[test]
@@ -508,7 +525,10 @@ mod tests {
         // Loud channel is above threshold so almost no gain is applied; the
         // quiet right channel inherits that same (near-unity) gain.
         let right_peak = tail_peak(outputs[0].channel(1), 24_000);
-        assert!(right_peak < 0.01 * 2.0, "right over-boosted despite link: {right_peak}");
+        assert!(
+            right_peak < 0.01 * 2.0,
+            "right over-boosted despite link: {right_peak}"
+        );
     }
 
     #[test]
@@ -539,7 +559,10 @@ mod tests {
         let out = run_mono(&mut node, amp, 8_000);
         let peak = tail_peak(&out, 4_000);
         // +6 dB ~= x1.995.
-        assert!(peak > amp * 1.8 && peak < amp * 2.1, "makeup not applied: {peak}");
+        assert!(
+            peak > amp * 1.8 && peak < amp * 2.1,
+            "makeup not applied: {peak}"
+        );
     }
 
     #[test]

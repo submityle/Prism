@@ -38,7 +38,7 @@
 //! documented theory.
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::modulation::{Lfo, LfoWaveform};
 
 /// Configuration for a [`RingModulatorNode`].
@@ -181,7 +181,11 @@ mod tests {
         let mut node = RingModulatorNode::new(SR, params);
         let out = run(&mut node, &input);
         // A sine carrier starts at phase 0 (value 0) and stays bounded.
-        assert!(out.channel(0)[0].abs() < 1e-6, "first {}", out.channel(0)[0]);
+        assert!(
+            out.channel(0)[0].abs() < 1e-6,
+            "first {}",
+            out.channel(0)[0]
+        );
         for &s in out.channel(0) {
             assert!((-1.0..=1.0).contains(&s), "out of range {s}");
         }

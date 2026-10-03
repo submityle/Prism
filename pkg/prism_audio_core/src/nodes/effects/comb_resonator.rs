@@ -57,7 +57,7 @@ use bevy_math::ops;
 
 use crate::buffer::ChannelLayout;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, lerp};
+use crate::math::{flush_denormal, lerp, Sample};
 
 /// Lowest tunable fundamental in hertz. This bounds the pre-allocated ring
 /// length (`sample_rate / MIN_FREQUENCY_HZ` frames of maximum delay).
@@ -72,7 +72,11 @@ pub const MAX_FEEDBACK: Sample = 0.999;
 /// survive `clamp`).
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Configuration for a [`CombResonatorNode`].
@@ -277,7 +281,10 @@ impl CombResonatorNode {
 impl AudioNode for CombResonatorNode {
     fn process(&mut self, _ctx: &RenderContext, io: &mut ProcessIo<'_>) {
         let (input, output) = io.io(0, 0);
-        let channels = output.channels().min(input.channels()).min(self.rings.len());
+        let channels = output
+            .channels()
+            .min(input.channels())
+            .min(self.rings.len());
         let frames = output.active_frames();
         if frames == 0 || channels == 0 {
             return;
@@ -404,7 +411,8 @@ mod tests {
     #[test]
     fn silence_in_silence_out() {
         let input = signal(ChannelLayout::Mono, 128, &[&[0.0; 128]]);
-        let mut node = CombResonatorNode::new(SR, ChannelLayout::Mono, CombResonatorParams::default());
+        let mut node =
+            CombResonatorNode::new(SR, ChannelLayout::Mono, CombResonatorParams::default());
         let out = run(&mut node, &input);
         for &s in out.channel(0) {
             assert!(s.abs() < 1e-9, "expected silence, got {s}");
@@ -427,12 +435,32 @@ mod tests {
             },
         );
         let out = run(&mut node, &input);
-        assert!((out.channel(0)[0] - 1.0).abs() < 1e-6, "dc {}", out.channel(0)[0]);
-        assert!((out.channel(0)[100] - 0.9).abs() < 1e-5, "1st {}", out.channel(0)[100]);
-        assert!((out.channel(0)[200] - 0.81).abs() < 1e-5, "2nd {}", out.channel(0)[200]);
-        assert!((out.channel(0)[300] - 0.729).abs() < 1e-4, "3rd {}", out.channel(0)[300]);
+        assert!(
+            (out.channel(0)[0] - 1.0).abs() < 1e-6,
+            "dc {}",
+            out.channel(0)[0]
+        );
+        assert!(
+            (out.channel(0)[100] - 0.9).abs() < 1e-5,
+            "1st {}",
+            out.channel(0)[100]
+        );
+        assert!(
+            (out.channel(0)[200] - 0.81).abs() < 1e-5,
+            "2nd {}",
+            out.channel(0)[200]
+        );
+        assert!(
+            (out.channel(0)[300] - 0.729).abs() < 1e-4,
+            "3rd {}",
+            out.channel(0)[300]
+        );
         // Between repeats the response is silent.
-        assert!(out.channel(0)[150].abs() < 1e-6, "gap {}", out.channel(0)[150]);
+        assert!(
+            out.channel(0)[150].abs() < 1e-6,
+            "gap {}",
+            out.channel(0)[150]
+        );
     }
 
     #[test]
@@ -450,8 +478,16 @@ mod tests {
             },
         );
         let out = run(&mut node, &input);
-        assert!((out.channel(0)[200] - 0.8).abs() < 1e-5, "repeat {}", out.channel(0)[200]);
-        assert!(out.channel(0)[100].abs() < 1e-6, "no early repeat {}", out.channel(0)[100]);
+        assert!(
+            (out.channel(0)[200] - 0.8).abs() < 1e-5,
+            "repeat {}",
+            out.channel(0)[200]
+        );
+        assert!(
+            out.channel(0)[100].abs() < 1e-6,
+            "no early repeat {}",
+            out.channel(0)[100]
+        );
     }
 
     #[test]
@@ -470,8 +506,16 @@ mod tests {
         node.set_frequency_hz(SR, 240.0);
         let out = run(&mut node, &input);
         // Now a 200-frame loop, not 100.
-        assert!(out.channel(0)[100].abs() < 1e-6, "stale period {}", out.channel(0)[100]);
-        assert!((out.channel(0)[200] - 0.8).abs() < 1e-5, "new period {}", out.channel(0)[200]);
+        assert!(
+            out.channel(0)[100].abs() < 1e-6,
+            "stale period {}",
+            out.channel(0)[100]
+        );
+        assert!(
+            (out.channel(0)[200] - 0.8).abs() < 1e-5,
+            "new period {}",
+            out.channel(0)[200]
+        );
     }
 
     #[test]
@@ -523,9 +567,7 @@ mod tests {
         let out_low = run(&mut low, &input);
         let out_high = run(&mut high, &input);
         // Measure energy in the tail (after the initial impulse).
-        let energy = |b: &AudioBuffer| -> Sample {
-            b.channel(0)[8..].iter().map(|&s| s * s).sum()
-        };
+        let energy = |b: &AudioBuffer| -> Sample { b.channel(0)[8..].iter().map(|&s| s * s).sum() };
         assert!(
             energy(&out_high) > 4.0 * energy(&out_low),
             "high {} vs low {}",
@@ -562,17 +604,21 @@ mod tests {
             SR,
             ChannelLayout::Mono,
             CombResonatorParams {
-                frequency_hz: 5.0,      // below MIN_FREQUENCY_HZ
-                feedback: 4.0,          // above MAX_FEEDBACK
-                damping: -1.0,          // below 0
-                mix: 9.0,               // above 1
+                frequency_hz: 5.0, // below MIN_FREQUENCY_HZ
+                feedback: 4.0,     // above MAX_FEEDBACK
+                damping: -1.0,     // below 0
+                mix: 9.0,          // above 1
             },
         );
         assert!((node.feedback() - MAX_FEEDBACK).abs() < 1e-6);
         assert!(node.damping().abs() < 1e-6);
         assert!((node.mix() - 1.0).abs() < 1e-6);
         // 20 Hz at 48 kHz => 2400-frame loop (the maximum).
-        assert!((node.delay_frames() - 2400.0).abs() < 1e-3, "delay {}", node.delay_frames());
+        assert!(
+            (node.delay_frames() - 2400.0).abs() < 1e-3,
+            "delay {}",
+            node.delay_frames()
+        );
 
         node.set_feedback(-2.0);
         node.set_damping(3.0);
@@ -619,7 +665,11 @@ mod tests {
             },
         );
         let out = run(&mut node, &input);
-        assert!((out.channel(0)[100] - 0.9).abs() < 1e-5, "left {}", out.channel(0)[100]);
+        assert!(
+            (out.channel(0)[100] - 0.9).abs() < 1e-5,
+            "left {}",
+            out.channel(0)[100]
+        );
         for &s in out.channel(1) {
             assert!(s.abs() < 1e-9, "right leaked {s}");
         }
@@ -648,7 +698,8 @@ mod tests {
     #[test]
     fn reset_is_reproducible() {
         let input = impulse(ChannelLayout::Mono, 512);
-        let mut node = CombResonatorNode::new(SR, ChannelLayout::Mono, CombResonatorParams::default());
+        let mut node =
+            CombResonatorNode::new(SR, ChannelLayout::Mono, CombResonatorParams::default());
         let first = run(&mut node, &input);
         node.reset();
         let second = run(&mut node, &input);
@@ -659,7 +710,8 @@ mod tests {
 
     #[test]
     fn zero_frames_do_not_panic() {
-        let mut node = CombResonatorNode::new(SR, ChannelLayout::Mono, CombResonatorParams::default());
+        let mut node =
+            CombResonatorNode::new(SR, ChannelLayout::Mono, CombResonatorParams::default());
         let input = impulse(ChannelLayout::Mono, 16);
         let mut out = AudioBuffer::new(ChannelLayout::Mono, 16);
         out.set_active_frames(0);

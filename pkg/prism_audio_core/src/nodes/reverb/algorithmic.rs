@@ -5,14 +5,14 @@
 //! measured impulse response, the [`AlgorithmicRoom`] *models* a room from three
 //! classic building blocks chained in series:
 //!
-//! 1. **Pre-delay** — a short delay before any reflections, modelling the time
+//! 1. **Pre-delay** -- a short delay before any reflections, modelling the time
 //!    the direct sound takes to reach the first wall. It cleanly separates the
 //!    dry source from its ambience and is the single most important cue for
 //!    perceived room size.
-//! 2. **Early reflections** — a handful of discrete taps off a delay line, the
+//! 2. **Early reflections** -- a handful of discrete taps off a delay line, the
 //!    sparse first-order echoes bouncing off nearby surfaces. Their pattern and
 //!    spacing tell the ear the geometry and scale of the space.
-//! 3. **Late reverberation** — a Schroeder/Freeverb tail: eight parallel
+//! 3. **Late reverberation** -- a Schroeder/Freeverb tail: eight parallel
 //!    low-pass feedback comb filters (which build a dense, coloured decay) feed
 //!    four series all-pass diffusers (which smear the combs' regular echoes into
 //!    a smooth, uncorrelated wash).
@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Sample rate the tuning tables below are expressed at; lengths are rescaled
@@ -500,10 +500,7 @@ impl AlgorithmicRoom {
 impl AudioNode for AlgorithmicRoom {
     fn process(&mut self, _ctx: &RenderContext, io: &mut ProcessIo<'_>) {
         let (input, output) = io.io(0, 0);
-        let channels = output
-            .channels()
-            .min(input.channels())
-            .min(self.channels);
+        let channels = output.channels().min(input.channels()).min(self.channels);
         let frames = output.active_frames().min(input.active_frames());
 
         for f in 0..frames {

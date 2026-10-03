@@ -238,7 +238,10 @@ mod tests {
         }
         // A stable IIR impulse response has decayed to near silence by 400
         // samples in.
-        assert!(energy_tail < 1.0e-4, "impulse response did not decay: {energy_tail}");
+        assert!(
+            energy_tail < 1.0e-4,
+            "impulse response did not decay: {energy_tail}"
+        );
     }
 
     #[test]

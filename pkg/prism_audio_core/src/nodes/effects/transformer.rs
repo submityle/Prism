@@ -99,7 +99,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
+use crate::math::{db_to_linear, flush_denormal, Sample};
 use crate::nodes::biquad::{BiquadCoeffs, BiquadKind};
 use crate::param::{Ramp, Smoothed};
 
@@ -229,7 +229,11 @@ fn clamp_trim_db(db: Sample) -> Sample {
 #[must_use]
 fn normalising_gain(drive: Sample, tanh_bias: Sample) -> Sample {
     let g = drive * (1.0 - tanh_bias * tanh_bias);
-    if g.abs() < 1.0e-6 { 1.0 } else { g }
+    if g.abs() < 1.0e-6 {
+        1.0
+    } else {
+        g
+    }
 }
 
 /// A single Direct Form I (`DF1`) biquad state cell: `[x1, x2, y1, y2]`.
@@ -753,8 +757,8 @@ impl AudioNode for TransformerNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
     use crate::buffer::{AudioBuffer, ChannelLayout};
+    use alloc::vec::Vec;
 
     const SR: u32 = 48_000;
 
@@ -815,7 +819,12 @@ mod tests {
 
     /// Runs a single mono tone through a node and returns the output tail
     /// (second half, so filter transients have settled).
-    fn run_tone(mut node: TransformerNode, freq_hz: Sample, amp: Sample, frames: usize) -> Vec<Sample> {
+    fn run_tone(
+        mut node: TransformerNode,
+        freq_hz: Sample,
+        amp: Sample,
+        frames: usize,
+    ) -> Vec<Sample> {
         let mut input = mono(frames);
         sine(&mut input, freq_hz, amp);
         let inputs = [input];
@@ -854,7 +863,11 @@ mod tests {
         let mut node = TransformerNode::new(params(), SR, 1);
         let mut input = mono(64);
         for (i, s) in input.channel_mut(0).iter_mut().enumerate() {
-            *s = if i % 3 == 0 { Sample::NAN } else { Sample::INFINITY };
+            *s = if i % 3 == 0 {
+                Sample::NAN
+            } else {
+                Sample::INFINITY
+            };
         }
         let inputs = [input];
         let mut outputs = [mono(64)];
@@ -964,7 +977,10 @@ mod tests {
         node.process(&ctx(frames), &mut io);
         let tail = &outputs[0].channel(0)[frames / 2..];
         let mean = tail.iter().sum::<Sample>() / tail.len() as Sample;
-        assert!(mean.abs() < 1.0e-3, "DC component not blocked: mean = {mean}");
+        assert!(
+            mean.abs() < 1.0e-3,
+            "DC component not blocked: mean = {mean}"
+        );
     }
 
     #[test]

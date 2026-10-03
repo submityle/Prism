@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, lerp};
+use crate::math::{flush_denormal, lerp, Sample};
 use crate::modulation::{Lfo, LfoWaveform};
 use crate::param::{Ramp, Smoothed};
 
@@ -295,7 +295,11 @@ mod tests {
         node.process(&ctx(512), &mut io);
         let delay = (0.002 * 48_000.0) as usize; // 96 frames
         let out = outputs[0].channel(0);
-        assert!((out[delay] - 1.0).abs() < 1e-3, "impulse at {delay}: {}", out[delay]);
+        assert!(
+            (out[delay] - 1.0).abs() < 1e-3,
+            "impulse at {delay}: {}",
+            out[delay]
+        );
         assert!(out[0].abs() < 1e-6);
     }
 

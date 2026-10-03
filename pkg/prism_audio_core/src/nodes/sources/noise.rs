@@ -1,12 +1,12 @@
 //! Deterministic colored-noise source node (white, pink, brown).
 //!
 //! A [`NoiseNode`] is a zero-input, one-output source that synthesizes a noise
-//! stream directly from an internal pseudo-random generator — it never reads
+//! stream directly from an internal pseudo-random generator -- it never reads
 //! its inputs. Three spectral "colors" are supported:
 //!
-//! - [`NoiseColor::White`] — flat power spectrum, straight from the PRNG.
-//! - [`NoiseColor::Pink`] — `-3 dB`/octave, via the Paul Kellet economy filter.
-//! - [`NoiseColor::Brown`] — `-6 dB`/octave, via a leaky integrator of white.
+//! - [`NoiseColor::White`] -- flat power spectrum, straight from the PRNG.
+//! - [`NoiseColor::Pink`] -- `-3 dB`/octave, via the Paul Kellet economy filter.
+//! - [`NoiseColor::Brown`] -- `-6 dB`/octave, via a leaky integrator of white.
 //!
 //! # Determinism
 //!
@@ -249,7 +249,7 @@ impl NoiseNode {
     }
 
     /// Generates the next colored noise sample (pre-amplitude), advancing the
-    /// PRNG and — depending on `color` — the relevant filter state.
+    /// PRNG and -- depending on `color` -- the relevant filter state.
     #[inline]
     fn next_colored(&mut self) -> Sample {
         let white = self.rng.next_bipolar();

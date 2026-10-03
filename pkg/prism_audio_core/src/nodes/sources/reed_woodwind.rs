@@ -114,7 +114,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Lowest tunable fundamental in hertz. Bounds the pre-allocated delay lines.
@@ -154,7 +154,11 @@ const BELL_REFLECTION_GAIN: Sample = 0.97;
 /// Replaces a non-finite value with `fallback`, otherwise returns the input.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Clamps `frequency_hz` to `[MIN_FREQUENCY_HZ, sample_rate / 2]`, falling back
@@ -180,17 +184,14 @@ struct WaveguideDelay {
 
 impl WaveguideDelay {
     fn new(capacity: usize) -> Self {
-        Self { buf: vec![0.0; capacity.max(2)], write: 0 }
+        Self {
+            buf: vec![0.0; capacity.max(2)],
+            write: 0,
+        }
     }
 
     /// Reads the wave delayed by `delay` samples with linear interpolation.
     #[inline]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "delay is clamped to [1, len-1]; the integer part fits a usize exactly"
-    )]
     fn read(&self, delay: Sample) -> Sample {
         let len = self.buf.len();
         let d = delay.clamp(1.0, (len - 1) as Sample);
@@ -309,12 +310,6 @@ impl ReedWoodwindNode {
     /// defaults, `frequency_hz` is clamped to `[MIN_FREQUENCY_HZ, sample_rate /
     /// 2]`, and `breath_pressure`/`reed_stiffness`/`brightness` to `[0, 1]`.
     #[must_use]
-    #[expect(
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss,
-        clippy::cast_possible_truncation,
-        reason = "the buffer length is tiny relative to f32's integer precision"
-    )]
     pub fn new(sample_rate: u32, params: ReedWoodwindParams) -> Self {
         let sr = (sample_rate.max(1)) as Sample;
         // Longest per-line delay (frames at the lowest pitch): delay = sr /
@@ -323,9 +318,11 @@ impl ReedWoodwindNode {
         let capacity = max_delay_frames + 4;
 
         let frequency_hz = sanitize_frequency(params.frequency_hz, sr);
-        let reed_stiffness = finite_or(params.reed_stiffness, DEFAULT_REED_STIFFNESS).clamp(0.0, 1.0);
+        let reed_stiffness =
+            finite_or(params.reed_stiffness, DEFAULT_REED_STIFFNESS).clamp(0.0, 1.0);
         let brightness = finite_or(params.brightness, DEFAULT_BRIGHTNESS).clamp(0.0, 1.0);
-        let breath_pressure = finite_or(params.breath_pressure, DEFAULT_BREATH_PRESSURE).clamp(0.0, 1.0);
+        let breath_pressure =
+            finite_or(params.breath_pressure, DEFAULT_BREATH_PRESSURE).clamp(0.0, 1.0);
         let amplitude = finite_or(params.amplitude, DEFAULT_AMPLITUDE);
 
         let mut node = Self {
@@ -419,10 +416,6 @@ impl ReedWoodwindNode {
     }
 
     /// Recomputes the latched loop coefficients from the user-facing parameters.
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "the buffer length is tiny relative to f32's integer precision"
-    )]
     fn recompute(&mut self) {
         let sr = self.sample_rate;
         // One-zero bell-filter coefficient S in [0, 0.5]: brightness 1 -> S 0.
@@ -537,7 +530,9 @@ mod tests {
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx, &mut io);
         let channels = outputs[0].channels();
-        (0..channels).map(|ch| outputs[0].channel(ch).to_vec()).collect()
+        (0..channels)
+            .map(|ch| outputs[0].channel(ch).to_vec())
+            .collect()
     }
 
     fn peak(block: &[Sample]) -> Sample {

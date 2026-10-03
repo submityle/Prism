@@ -83,7 +83,7 @@ use bevy_math::ops;
 
 use crate::buffer::ChannelLayout;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Default dry (unprocessed) level: the input passes through at unity.
@@ -116,7 +116,11 @@ pub const SUB_RELEASE_MS: Sample = 30.0;
 /// Returns `value` when finite, otherwise `fallback`.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Converts the fixed [`SUB_RELEASE_MS`] release time to a one-pole decay
@@ -378,7 +382,11 @@ impl AudioNode for OctaveDividerNode {
             for ch in 0..channels {
                 let x = {
                     let v = input.channel(ch)[f];
-                    if v.is_finite() { v } else { 0.0 }
+                    if v.is_finite() {
+                        v
+                    } else {
+                        0.0
+                    }
                 };
                 let st = &mut self.state[ch];
 
@@ -536,7 +544,8 @@ mod tests {
 
     #[test]
     fn new_reports_channels_and_layout() {
-        let node = OctaveDividerNode::new(SR, ChannelLayout::Stereo, OctaveDividerParams::default());
+        let node =
+            OctaveDividerNode::new(SR, ChannelLayout::Stereo, OctaveDividerParams::default());
         assert_eq!(node.channels(), 2);
         assert_eq!(node.layout(), ChannelLayout::Stereo);
         assert_eq!(node.sample_rate(), SR);
@@ -558,7 +567,12 @@ mod tests {
         let mut node = OctaveDividerNode::new(
             SR,
             ChannelLayout::Mono,
-            OctaveDividerParams { dry: 1.0, sub1: 0.0, sub2: 0.0, hysteresis: 0.02 },
+            OctaveDividerParams {
+                dry: 1.0,
+                sub1: 0.0,
+                sub2: 0.0,
+                hysteresis: 0.02,
+            },
         );
         let input = sine_buffer(220.0, 0.8, 2_000);
         let reference: Vec<Sample> = input.channel(0).to_vec();
@@ -573,7 +587,12 @@ mod tests {
         let mut node = OctaveDividerNode::new(
             SR,
             ChannelLayout::Mono,
-            OctaveDividerParams { dry: 0.0, sub1: 0.0, sub2: 0.0, hysteresis: 0.02 },
+            OctaveDividerParams {
+                dry: 0.0,
+                sub1: 0.0,
+                sub2: 0.0,
+                hysteresis: 0.02,
+            },
         );
         let input = sine_buffer(220.0, 1.0, 2_000);
         let out = run(&mut node, input);
@@ -585,17 +604,20 @@ mod tests {
         let mut node = OctaveDividerNode::new(
             SR,
             ChannelLayout::Mono,
-            OctaveDividerParams { dry: 0.0, sub1: 1.0, sub2: 0.0, hysteresis: 0.02 },
+            OctaveDividerParams {
+                dry: 0.0,
+                sub1: 1.0,
+                sub2: 0.0,
+                hysteresis: 0.02,
+            },
         );
         let freq = 200.0;
         let frames = SR as usize; // one second
         let input = sine_buffer(freq, 1.0, frames);
         let out = run(&mut node, input);
         // Reference: how many input cycles in the measured region.
-        let input_cycles = rising_sign_changes(
-            &sine_buffer(freq, 1.0, frames).channel(0).to_vec(),
-            2_000,
-        );
+        let input_cycles =
+            rising_sign_changes(sine_buffer(freq, 1.0, frames).channel(0), 2_000);
         let sub_cycles = rising_sign_changes(out.channel(0), 2_000);
         // flop1 completes one full square cycle every two input periods.
         let ratio = sub_cycles as f32 / input_cycles as f32;
@@ -607,16 +629,19 @@ mod tests {
         let mut node = OctaveDividerNode::new(
             SR,
             ChannelLayout::Mono,
-            OctaveDividerParams { dry: 0.0, sub1: 0.0, sub2: 1.0, hysteresis: 0.02 },
+            OctaveDividerParams {
+                dry: 0.0,
+                sub1: 0.0,
+                sub2: 1.0,
+                hysteresis: 0.02,
+            },
         );
         let freq = 200.0;
         let frames = SR as usize;
         let input = sine_buffer(freq, 1.0, frames);
         let out = run(&mut node, input);
-        let input_cycles = rising_sign_changes(
-            &sine_buffer(freq, 1.0, frames).channel(0).to_vec(),
-            2_000,
-        );
+        let input_cycles =
+            rising_sign_changes(sine_buffer(freq, 1.0, frames).channel(0), 2_000);
         let sub_cycles = rising_sign_changes(out.channel(0), 2_000);
         let ratio = sub_cycles as f32 / input_cycles as f32;
         assert!((ratio - 0.25).abs() < 0.03, "ratio={ratio}");
@@ -628,7 +653,12 @@ mod tests {
             OctaveDividerNode::new(
                 SR,
                 ChannelLayout::Mono,
-                OctaveDividerParams { dry: 0.0, sub1: 1.0, sub2: 0.0, hysteresis: 0.01 },
+                OctaveDividerParams {
+                    dry: 0.0,
+                    sub1: 1.0,
+                    sub2: 0.0,
+                    hysteresis: 0.01,
+                },
             )
         };
         let frames = SR as usize / 2;
@@ -650,7 +680,12 @@ mod tests {
         let mut node = OctaveDividerNode::new(
             SR,
             ChannelLayout::Mono,
-            OctaveDividerParams { dry: 0.0, sub1: 1.0, sub2: 0.0, hysteresis: 0.01 },
+            OctaveDividerParams {
+                dry: 0.0,
+                sub1: 1.0,
+                sub2: 0.0,
+                hysteresis: 0.01,
+            },
         );
         // Loud burst, then silence.
         let frames = SR as usize / 2;
@@ -671,7 +706,12 @@ mod tests {
         let mut node = OctaveDividerNode::new(
             SR,
             ChannelLayout::Mono,
-            OctaveDividerParams { dry: 1.0, sub1: 1.0, sub2: 1.0, hysteresis: 0.01 },
+            OctaveDividerParams {
+                dry: 1.0,
+                sub1: 1.0,
+                sub2: 1.0,
+                hysteresis: 0.01,
+            },
         );
         let out = run(&mut node, sine_buffer(200.0, 1.0, SR as usize / 2));
         let peak = out.channel(0).iter().fold(0.0_f32, |m, s| m.max(s.abs()));
@@ -695,7 +735,12 @@ mod tests {
         let mut node = OctaveDividerNode::new(
             SR,
             ChannelLayout::Mono,
-            OctaveDividerParams { dry: 0.0, sub1: 1.0, sub2: 0.0, hysteresis: 0.1 },
+            OctaveDividerParams {
+                dry: 0.0,
+                sub1: 1.0,
+                sub2: 0.0,
+                hysteresis: 0.1,
+            },
         );
         let frames = 4_000;
         let mut input = AudioBuffer::new(ChannelLayout::Mono, frames);
@@ -716,7 +761,12 @@ mod tests {
         let mut node = OctaveDividerNode::new(
             SR,
             ChannelLayout::Mono,
-            OctaveDividerParams { dry: 0.0, sub1: 1.0, sub2: 0.0, hysteresis: 0.02 },
+            OctaveDividerParams {
+                dry: 0.0,
+                sub1: 1.0,
+                sub2: 0.0,
+                hysteresis: 0.02,
+            },
         );
         let _ = run(&mut node, sine_buffer(200.0, 1.0, 2_000));
         node.reset();
@@ -779,13 +829,16 @@ mod tests {
 
     #[test]
     fn stereo_correlated_input_is_coherent() {
-        let mut node =
-            OctaveDividerNode::new(SR, ChannelLayout::Stereo, OctaveDividerParams {
+        let mut node = OctaveDividerNode::new(
+            SR,
+            ChannelLayout::Stereo,
+            OctaveDividerParams {
                 dry: 0.0,
                 sub1: 1.0,
                 sub2: 0.0,
                 hysteresis: 0.02,
-            });
+            },
+        );
         let frames = 4_000;
         let mut input = AudioBuffer::new(ChannelLayout::Stereo, frames);
         input.set_active_frames(frames);

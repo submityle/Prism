@@ -61,7 +61,7 @@ use core::f32::consts::FRAC_1_SQRT_2;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, linear_to_db};
+use crate::math::{flush_denormal, linear_to_db, Sample};
 use crate::nodes::dynamics::detector::time_to_coef;
 
 /// Default integration time in milliseconds for the running averages.

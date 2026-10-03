@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, lerp};
+use crate::math::{flush_denormal, lerp, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Largest stable feedback coefficient. Kept just below unity so a sustained
@@ -108,7 +108,8 @@ impl DelayNode {
     /// `ramp` so sweeps do not click.
     #[inline]
     pub fn set_delay_frames(&mut self, frames: Sample, ramp: Ramp) {
-        self.delay.set_target(frames.clamp(1.0, self.max_delay), ramp);
+        self.delay
+            .set_target(frames.clamp(1.0, self.max_delay), ramp);
     }
 
     /// Sets the delay time in seconds (converted with the sample rate).
@@ -121,7 +122,8 @@ impl DelayNode {
     /// Sets the feedback coefficient, clamped to `[0, 0.999]`.
     #[inline]
     pub fn set_feedback(&mut self, feedback: Sample, ramp: Ramp) {
-        self.feedback.set_target(feedback.clamp(0.0, MAX_FEEDBACK), ramp);
+        self.feedback
+            .set_target(feedback.clamp(0.0, MAX_FEEDBACK), ramp);
     }
 
     /// Sets the wet (processed) mix gain.
@@ -230,7 +232,10 @@ mod tests {
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx(16), &mut io);
         let out = outputs[0].channel(0);
-        assert!((out[4] - 1.0).abs() < 1e-6, "impulse should land at frame 4: {out:?}");
+        assert!(
+            (out[4] - 1.0).abs() < 1e-6,
+            "impulse should land at frame 4: {out:?}"
+        );
         for (i, &s) in out.iter().enumerate() {
             if i != 4 {
                 assert!(s.abs() < 1e-6, "unexpected energy at frame {i}: {s}");

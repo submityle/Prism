@@ -58,7 +58,7 @@
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::nodes::dynamics::detector::time_to_coef;
 use crate::nodes::svf::{Svf, SvfCoeffs, SvfKind};
 use crate::param::{Ramp, Smoothed};
@@ -485,8 +485,8 @@ impl AudioNode for AutoWahNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
     use crate::buffer::{AudioBuffer, ChannelLayout};
+    use alloc::vec::Vec;
 
     const SR: u32 = 48_000;
 

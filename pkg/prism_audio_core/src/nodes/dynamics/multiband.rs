@@ -76,7 +76,8 @@ impl MultibandCompressorNode {
         band_params: &[CompressorParams],
         max_frames: usize,
     ) -> Self {
-        let crossover = LinkwitzRileyCrossover::new(sample_rate, layout, crossover_freqs, max_frames);
+        let crossover =
+            LinkwitzRileyCrossover::new(sample_rate, layout, crossover_freqs, max_frames);
         let num_bands = crossover.num_bands().min(MAX_BANDS);
         let channels = layout.channel_count().max(1);
         let frames = max_frames.max(1);
@@ -257,8 +258,13 @@ mod tests {
 
     #[test]
     fn single_band_transparent_is_near_identity() {
-        let mut node =
-            MultibandCompressorNode::new(SR, ChannelLayout::Mono, &[], &[transparent_params()], 1024);
+        let mut node = MultibandCompressorNode::new(
+            SR,
+            ChannelLayout::Mono,
+            &[],
+            &[transparent_params()],
+            1024,
+        );
         assert_eq!(node.num_bands(), 1);
         let mut input = mono(1024);
         fill_sine(&mut input, 1_000.0, 0.3);
@@ -271,7 +277,11 @@ mod tests {
 
     #[test]
     fn transparent_bands_reconstruct_flat_magnitude() {
-        let params = [transparent_params(), transparent_params(), transparent_params()];
+        let params = [
+            transparent_params(),
+            transparent_params(),
+            transparent_params(),
+        ];
         let mut node =
             MultibandCompressorNode::new(SR, ChannelLayout::Mono, &[300.0, 3_000.0], &params, 2048);
         assert_eq!(node.num_bands(), 3);
@@ -308,7 +318,10 @@ mod tests {
         let out = run(&mut node, &input);
         let in_rms = tail_rms(&input, 2048);
         let out_rms = tail_rms(&out, 2048);
-        assert!(out_rms < in_rms * 0.85, "expected reduction: in {in_rms} out {out_rms}");
+        assert!(
+            out_rms < in_rms * 0.85,
+            "expected reduction: in {in_rms} out {out_rms}"
+        );
         assert!(node.band_gain_reduction_db(0) > 1.0);
     }
 
@@ -332,13 +345,15 @@ mod tests {
         let out = run(&mut node, &input);
         let in_rms = tail_rms(&input, 2048);
         let out_rms = tail_rms(&out, 2048);
-        assert!(out_rms > in_rms * 0.9, "high tone should survive: in {in_rms} out {out_rms}");
+        assert!(
+            out_rms > in_rms * 0.9,
+            "high tone should survive: in {in_rms} out {out_rms}"
+        );
     }
 
     #[test]
     fn reset_clears_tail() {
-        let mut node =
-            MultibandCompressorNode::new(SR, ChannelLayout::Mono, &[500.0], &[], 512);
+        let mut node = MultibandCompressorNode::new(SR, ChannelLayout::Mono, &[500.0], &[], 512);
         let mut input = mono(512);
         fill_sine(&mut input, 700.0, 0.5);
         input.set_active_frames(512);

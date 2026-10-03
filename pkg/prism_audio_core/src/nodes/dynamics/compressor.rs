@@ -14,9 +14,9 @@
 use alloc::vec::Vec;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
+use crate::math::{db_to_linear, flush_denormal, Sample};
 use crate::nodes::dynamics::detector::{
-    DetectionMode, GainBallistics, LevelDetector, compressor_reduction_db,
+    compressor_reduction_db, DetectionMode, GainBallistics, LevelDetector,
 };
 use crate::param::{Ramp, Smoothed};
 
@@ -98,8 +98,9 @@ impl CompressorNode {
     #[must_use]
     pub fn new(sample_rate: u32, channels: usize, params: CompressorParams) -> Self {
         let channels = channels.max(1);
-        let lookahead = bevy_math::ops::round(params.lookahead_ms.max(0.0) * (sample_rate as Sample) * 0.001)
-            as usize;
+        let lookahead =
+            bevy_math::ops::round(params.lookahead_ms.max(0.0) * (sample_rate as Sample) * 0.001)
+                as usize;
         let rings = if lookahead > 0 {
             let mut v = Vec::with_capacity(channels);
             for _ in 0..channels {

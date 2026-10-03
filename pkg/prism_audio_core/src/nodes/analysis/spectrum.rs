@@ -408,8 +408,14 @@ mod tests {
 
     #[test]
     fn min_fft_size_enforced() {
-        assert_eq!(SpectrumAnalyzer::new(0, 1, Window::Hann).size(), MIN_FFT_SIZE);
-        assert_eq!(SpectrumAnalyzer::new(1, 1, Window::Hann).size(), MIN_FFT_SIZE);
+        assert_eq!(
+            SpectrumAnalyzer::new(0, 1, Window::Hann).size(),
+            MIN_FFT_SIZE
+        );
+        assert_eq!(
+            SpectrumAnalyzer::new(1, 1, Window::Hann).size(),
+            MIN_FFT_SIZE
+        );
     }
 
     #[test]

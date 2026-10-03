@@ -52,7 +52,7 @@ use alloc::vec::Vec;
 
 use crate::buffer::{AudioBuffer, ChannelLayout};
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear};
+use crate::math::{db_to_linear, Sample};
 use crate::nodes::biquad::{Biquad, BiquadCoeffs, BiquadKind};
 use crate::nodes::dynamics::detector::time_to_coef;
 
@@ -231,7 +231,12 @@ impl Vocoder {
         self.params = params;
         let (low, high) = sanitize_range(params.low_hz, params.high_hz, self.sample_rate);
         let coeffs = band_coeffs(low, high, self.sample_rate);
-        for (i, (m, c)) in self.mod_bank.iter_mut().zip(self.car_bank.iter_mut()).enumerate() {
+        for (i, (m, c)) in self
+            .mod_bank
+            .iter_mut()
+            .zip(self.car_bank.iter_mut())
+            .enumerate()
+        {
             m.set_coeffs(coeffs[i]);
             c.set_coeffs(coeffs[i]);
         }
@@ -401,11 +406,7 @@ mod tests {
     }
 
     /// Runs the node with a modulator and carrier, returning the output.
-    fn run(
-        node: &mut VocoderNode,
-        modulator: &AudioBuffer,
-        carrier: &AudioBuffer,
-    ) -> AudioBuffer {
+    fn run(node: &mut VocoderNode, modulator: &AudioBuffer, carrier: &AudioBuffer) -> AudioBuffer {
         let frames = modulator.active_frames().min(carrier.active_frames());
         let inputs = [modulator.clone(), carrier.clone()];
         let mut out = AudioBuffer::new(modulator.layout(), modulator.capacity_frames().max(1));
@@ -531,7 +532,10 @@ mod tests {
         let out_high = run(&mut high, &sine(5000.0, frames), &carrier);
         let low_at_300 = goertzel_magnitude(out_low.channel(0), 300.0);
         let high_at_300 = goertzel_magnitude(out_high.channel(0), 300.0);
-        assert!(low_at_300 > high_at_300, "low {low_at_300} high {high_at_300}");
+        assert!(
+            low_at_300 > high_at_300,
+            "low {low_at_300} high {high_at_300}"
+        );
     }
 
     #[test]
@@ -570,7 +574,9 @@ mod tests {
         let mono_mod = noise(frames);
         let mono_car = sine(2000.0, frames);
         for ch in 0..2 {
-            modulator.channel_mut(ch).copy_from_slice(mono_mod.channel(0));
+            modulator
+                .channel_mut(ch)
+                .copy_from_slice(mono_mod.channel(0));
             carrier.channel_mut(ch).copy_from_slice(mono_car.channel(0));
         }
         let out = run(&mut node, &modulator, &carrier);

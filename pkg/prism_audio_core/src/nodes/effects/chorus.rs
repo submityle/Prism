@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, lerp};
+use crate::math::{flush_denormal, lerp, Sample};
 use crate::modulation::{Lfo, LfoWaveform};
 use crate::param::{Ramp, Smoothed};
 

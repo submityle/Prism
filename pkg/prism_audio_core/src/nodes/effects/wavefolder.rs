@@ -69,8 +69,8 @@ use bevy_math::ops;
 use core::f32::consts::FRAC_PI_2;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
-use crate::oversampler::{DEFAULT_TAPS_PER_PHASE, DryDelay, Oversampler, OversamplerState};
+use crate::math::{flush_denormal, Sample};
+use crate::oversampler::{DryDelay, Oversampler, OversamplerState, DEFAULT_TAPS_PER_PHASE};
 use crate::param::{Ramp, Smoothed};
 
 /// The internal processing rate relative to the host sample rate.
@@ -204,7 +204,11 @@ impl WavefolderParams {
 /// Returns `value` when finite, otherwise `fallback`.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// A west-coast wave folder with selectable fold shape and anti-aliasing
@@ -458,7 +462,10 @@ mod tests {
         // Always bounded, even for absurd drive.
         for k in 0..200 {
             let v = k as Sample * 0.37 - 37.0;
-            assert!(s.fold(v).abs() <= 1.0 + 1.0e-6, "sine fold unbounded at {v}");
+            assert!(
+                s.fold(v).abs() <= 1.0 + 1.0e-6,
+                "sine fold unbounded at {v}"
+            );
         }
     }
 

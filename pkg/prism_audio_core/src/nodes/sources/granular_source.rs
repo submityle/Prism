@@ -94,7 +94,7 @@ use bevy_math::ops;
 use core::f32::consts::TAU;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, equal_power_pan, flush_denormal};
+use crate::math::{equal_power_pan, flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Maximum number of grains that can sound simultaneously. Spawns beyond this
@@ -140,14 +140,22 @@ pub const MAX_GRANULAR_PITCH_SPREAD: Sample = 48.0;
 /// Replaces a non-finite value with `fallback`, otherwise returns the input.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Wraps a normalized phase accumulator back into `[0, 1)` without a transcendental.
 #[inline]
 fn wrap01(phase: Sample) -> Sample {
     let p = phase - (phase as i64 as Sample);
-    if p < 0.0 { p + 1.0 } else { p }
+    if p < 0.0 {
+        p + 1.0
+    } else {
+        p
+    }
 }
 
 /// Self-contained deterministic PRNG (Marsaglia `xorshift64`) seeded via
@@ -162,7 +170,9 @@ impl GrainRng {
     /// Builds a generator whose state is diffused from `seed` via `SplitMix64`.
     #[inline]
     fn new(seed: u64) -> Self {
-        Self { state: seed_to_state(seed) }
+        Self {
+            state: seed_to_state(seed),
+        }
     }
 
     /// Advances the generator and returns the next 32-bit word.
@@ -200,7 +210,11 @@ fn seed_to_state(seed: u64) -> u64 {
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^= z >> 31;
     // Guarantee a non-zero state (xorshift cannot leave the all-zero state).
-    if z == 0 { 0x9E37_79B9_7F4A_7C15 } else { z }
+    if z == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        z
+    }
 }
 
 /// A single live grain: a Hann-windowed sine carrier with a fixed pan.
@@ -606,7 +620,6 @@ impl AudioNode for GranularSourceNode {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,7 +628,11 @@ mod tests {
     const SR: u32 = 48_000;
 
     fn ctx(sample_rate: u32, frames: usize) -> RenderContext {
-        RenderContext { sample_rate, frames, playhead: 0 }
+        RenderContext {
+            sample_rate,
+            frames,
+            playhead: 0,
+        }
     }
 
     fn render(node: &mut GranularSourceNode, layout: ChannelLayout, frames: usize) -> AudioBuffer {
@@ -755,7 +772,10 @@ mod tests {
     fn zero_spread_ignores_seed() {
         // Documents the above: with no spread the seed cannot change the cloud.
         let mut a = GranularSourceNode::from_params(GranularSourceParams { seed: 1, ..dense() });
-        let mut b = GranularSourceNode::from_params(GranularSourceParams { seed: 999, ..dense() });
+        let mut b = GranularSourceNode::from_params(GranularSourceParams {
+            seed: 999,
+            ..dense()
+        });
         let oa = render(&mut a, ChannelLayout::Mono, 4_096);
         let ob = render(&mut b, ChannelLayout::Mono, 4_096);
         assert_eq!(oa.channel(0), ob.channel(0));
@@ -794,8 +814,10 @@ mod tests {
     #[test]
     fn amplitude_scales_linearly() {
         let mut unit = GranularSourceNode::from_params(dense());
-        let mut doubled =
-            GranularSourceNode::from_params(GranularSourceParams { amplitude: 2.0, ..dense() });
+        let mut doubled = GranularSourceNode::from_params(GranularSourceParams {
+            amplitude: 2.0,
+            ..dense()
+        });
         let a = render(&mut unit, ChannelLayout::Mono, 4_096);
         let b = render(&mut doubled, ChannelLayout::Mono, 4_096);
         for (x, y) in a.channel(0).iter().zip(b.channel(0).iter()) {

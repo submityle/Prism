@@ -70,7 +70,7 @@ use core::f32::consts::PI;
 
 use crate::buffer::ChannelLayout;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, linear_to_db};
+use crate::math::{flush_denormal, linear_to_db, Sample};
 use crate::nodes::biquad::{BiquadCoeffs, BiquadKind};
 
 /// The `LUFS` calibration offset (`-0.691` `LU`) from `ITU-R` `BS.1770`.
@@ -789,8 +789,16 @@ mod tests {
         let amp = 0.070_794_57; // 10^(-23/20)
         feed_tone(&mut meter, 1_000.0, amp, 1.0);
         let m = meter.measurement();
-        assert!((m.momentary_lufs - (-23.0)).abs() < 1.0, "{}", m.momentary_lufs);
-        assert!((m.integrated_lufs - (-23.0)).abs() < 1.0, "{}", m.integrated_lufs);
+        assert!(
+            (m.momentary_lufs - (-23.0)).abs() < 1.0,
+            "{}",
+            m.momentary_lufs
+        );
+        assert!(
+            (m.integrated_lufs - (-23.0)).abs() < 1.0,
+            "{}",
+            m.integrated_lufs
+        );
     }
 
     #[test]
@@ -914,7 +922,10 @@ mod tests {
 
     #[test]
     fn surround_channels_use_surround_weight() {
-        assert_eq!(channel_weight(ChannelLayout::Surround5_1, 4), SURROUND_WEIGHT);
+        assert_eq!(
+            channel_weight(ChannelLayout::Surround5_1, 4),
+            SURROUND_WEIGHT
+        );
         assert_eq!(channel_weight(ChannelLayout::Quad, 2), SURROUND_WEIGHT);
         assert_eq!(channel_weight(ChannelLayout::Stereo, 0), 1.0);
     }
@@ -993,8 +1004,12 @@ mod tests {
             playhead: 0,
         };
         let mut input = AudioBuffer::new(ChannelLayout::Stereo, 4);
-        input.channel_mut(0).copy_from_slice(&[0.1, -0.2, 0.3, -0.4]);
-        input.channel_mut(1).copy_from_slice(&[0.5, -0.6, 0.7, -0.8]);
+        input
+            .channel_mut(0)
+            .copy_from_slice(&[0.1, -0.2, 0.3, -0.4]);
+        input
+            .channel_mut(1)
+            .copy_from_slice(&[0.5, -0.6, 0.7, -0.8]);
         let output = AudioBuffer::new(ChannelLayout::Stereo, 4);
         let inputs = [input];
         let mut outputs = [output];

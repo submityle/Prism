@@ -44,7 +44,7 @@
 //! documented M/S formulas and a standard biquad are used.
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::nodes::biquad::{BiquadCoeffs, BiquadKind};
 use crate::param::{Ramp, Smoothed};
 
@@ -229,8 +229,8 @@ impl AudioNode for StereoWidthNode {
 mod tests {
     use super::*;
     use crate::buffer::{AudioBuffer, ChannelLayout};
-    use bevy_math::ops;
     use alloc::vec::Vec;
+    use bevy_math::ops;
 
     fn ctx(frames: usize) -> RenderContext {
         RenderContext {

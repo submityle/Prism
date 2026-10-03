@@ -44,7 +44,7 @@
 
 use crate::buffer::AudioBuffer;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear};
+use crate::math::{db_to_linear, Sample};
 use crate::nodes::biquad::{Biquad, BiquadCoeffs, BiquadKind};
 
 /// Number of parallel formant resonators per vowel.
@@ -200,7 +200,11 @@ fn resolved_formants(params: FormantFilterParams) -> [FormantSpec; FORMANT_COUNT
 }
 
 /// Computes band-pass coefficients and linear level for one resolved formant.
-fn formant_coeffs(spec: FormantSpec, resonance: Sample, sample_rate: u32) -> (BiquadCoeffs, Sample) {
+fn formant_coeffs(
+    spec: FormantSpec,
+    resonance: Sample,
+    sample_rate: u32,
+) -> (BiquadCoeffs, Sample) {
     let bw = spec.bandwidth_hz.max(MIN_RESONANCE);
     let q = (spec.freq_hz / bw) * resonance.max(MIN_RESONANCE);
     let coeffs = BiquadCoeffs::design(BiquadKind::BandPass, sample_rate, spec.freq_hz, q, 0.0);
@@ -287,7 +291,9 @@ impl FormantFilter {
             // Copy the dry input into scratch, band-pass it, then add it in
             // scaled by the formant level.
             let level = self.levels[i];
-            let copy_channels = out_channels.min(self.scratch.channels()).min(input.channels());
+            let copy_channels = out_channels
+                .min(self.scratch.channels())
+                .min(input.channels());
             for ch in 0..copy_channels {
                 let src = input.channel(ch);
                 let dst = self.scratch.channel_mut(ch);

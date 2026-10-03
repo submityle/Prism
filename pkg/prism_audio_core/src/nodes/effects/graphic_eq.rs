@@ -416,14 +416,23 @@ mod tests {
 
         let mut boost = GraphicEqNode::new(SR, 1, GraphicEqSpacing::Octave);
         boost.set_gain(5, 12.0);
-        let wet_boost = bin_magnitude(render(&mut boost, &tone(1_000.0, 8_192)).channel(0), 1_000.0);
+        let wet_boost = bin_magnitude(
+            render(&mut boost, &tone(1_000.0, 8_192)).channel(0),
+            1_000.0,
+        );
 
         let mut cut = GraphicEqNode::new(SR, 1, GraphicEqSpacing::Octave);
         cut.set_gain(5, -12.0);
         let wet_cut = bin_magnitude(render(&mut cut, &tone(1_000.0, 8_192)).channel(0), 1_000.0);
 
-        assert!(wet_boost > dry * 1.5, "boost should raise 1 kHz: {wet_boost} vs {dry}");
-        assert!(wet_cut < dry * 0.75, "cut should lower 1 kHz: {wet_cut} vs {dry}");
+        assert!(
+            wet_boost > dry * 1.5,
+            "boost should raise 1 kHz: {wet_boost} vs {dry}"
+        );
+        assert!(
+            wet_cut < dry * 0.75,
+            "cut should lower 1 kHz: {wet_cut} vs {dry}"
+        );
     }
 
     #[test]
@@ -433,7 +442,10 @@ mod tests {
         eq.set_gain(0, 12.0);
         let dry = bin_magnitude(tone(1_000.0, 8_192).channel(0), 1_000.0);
         let wet = bin_magnitude(render(&mut eq, &tone(1_000.0, 8_192)).channel(0), 1_000.0);
-        assert!((wet - dry).abs() < dry * 0.1, "far band changed 1 kHz: {wet} vs {dry}");
+        assert!(
+            (wet - dry).abs() < dry * 0.1,
+            "far band changed 1 kHz: {wet} vs {dry}"
+        );
     }
 
     #[test]
@@ -480,7 +492,10 @@ mod tests {
         let mut src = AudioBuffer::new(ChannelLayout::Mono, 4);
         src.set_active_frames(4);
         let out = render(&mut eq, &src);
-        assert!(out.channel(0).iter().all(|&s| s == 0.0), "state not cleared");
+        assert!(
+            out.channel(0).iter().all(|&s| s == 0.0),
+            "state not cleared"
+        );
     }
 
     #[test]

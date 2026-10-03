@@ -53,7 +53,7 @@ use core::f32::consts::PI;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Largest slice length, in milliseconds, the node can capture and repeat.
 pub const MAX_STUTTER_SLICE_MS: Sample = 1_000.0;
@@ -117,10 +117,19 @@ impl StutterParams {
     fn sanitised(self) -> Self {
         let d = Self::default();
         let clamp = |v: Sample, lo: Sample, hi: Sample, fallback: Sample| {
-            if v.is_finite() { v.clamp(lo, hi) } else { fallback }
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                fallback
+            }
         };
         Self {
-            slice_ms: clamp(self.slice_ms, MIN_STUTTER_SLICE_MS, MAX_STUTTER_SLICE_MS, d.slice_ms),
+            slice_ms: clamp(
+                self.slice_ms,
+                MIN_STUTTER_SLICE_MS,
+                MAX_STUTTER_SLICE_MS,
+                d.slice_ms,
+            ),
             repeats: self.repeats.clamp(1, MAX_STUTTER_REPEATS),
             fade_ms: clamp(self.fade_ms, 0.0, MAX_STUTTER_FADE_MS, d.fade_ms),
             mix: clamp(self.mix, 0.0, 1.0, d.mix),
@@ -448,8 +457,7 @@ mod tests {
             ..StutterParams::default()
         };
         let node = StutterNode::new(SR, 1, params);
-        let expected =
-            ops::floor(MIN_STUTTER_SLICE_MS * SR as Sample / 1_000.0) as usize;
+        let expected = ops::floor(MIN_STUTTER_SLICE_MS * SR as Sample / 1_000.0) as usize;
         assert_eq!(node.seg_frames, expected);
     }
 
@@ -460,8 +468,7 @@ mod tests {
             ..StutterParams::default()
         };
         let node = StutterNode::new(SR, 1, params);
-        let expected =
-            ops::floor(MAX_STUTTER_SLICE_MS * SR as Sample / 1_000.0) as usize;
+        let expected = ops::floor(MAX_STUTTER_SLICE_MS * SR as Sample / 1_000.0) as usize;
         assert_eq!(node.seg_frames, expected);
     }
 

@@ -88,7 +88,11 @@ const DIRICHLET_EPSILON: Sample = 1.0e-4;
 /// Replaces a non-finite value with `fallback`, otherwise returns the input.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Normalized Dirichlet kernel `D_M(t) = sin(M*pi*t) / (M*sin(pi*t))`.
@@ -367,11 +371,14 @@ mod tests {
         let mut node = ImpulseTrainNode::new(freq, 1.0);
         let frames: usize = 48_000; // one full second => integer number of cycles
         let out = render(&mut node, sample_rate, frames);
-        let mean: Sample =
-            out.channel(0).iter().copied().sum::<Sample>() / frames as Sample;
+        let mean: Sample = out.channel(0).iter().copied().sum::<Sample>() / frames as Sample;
         let dt = freq / sample_rate as Sample;
         let m = ImpulseTrainNode::harmonic_count(dt);
-        assert!((mean - 1.0 / m).abs() < 2e-3, "mean {mean}, 1/m {}", 1.0 / m);
+        assert!(
+            (mean - 1.0 / m).abs() < 2e-3,
+            "mean {mean}, 1/m {}",
+            1.0 / m
+        );
     }
 
     #[test]
@@ -514,7 +521,12 @@ mod tests {
         let sample_rate = 48_000u32;
         let frames: usize = 512;
         let mut node = ImpulseTrainNode::new(220.0, 1.0);
-        node.set_amplitude(0.0, Ramp::Linear { samples: frames as u32 });
+        node.set_amplitude(
+            0.0,
+            Ramp::Linear {
+                samples: frames as u32,
+            },
+        );
         let out = render(&mut node, sample_rate, frames);
         // Successive samples should not jump wildly from the ramp alone.
         for &s in out.channel(0) {

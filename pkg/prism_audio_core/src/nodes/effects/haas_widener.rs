@@ -55,7 +55,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, lerp};
+use crate::math::{flush_denormal, lerp, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Largest side-blend amount the node accepts.
@@ -203,7 +203,8 @@ impl HaasWidenerNode {
     /// [`set_params`](Self::set_params).
     fn apply_params(&mut self, params: &HaasWidenerParams, ramp: Ramp) {
         let frames = finite(params.delay_ms).max(0.0) * self.sample_rate as Sample / 1000.0;
-        self.delay.set_target(frames.clamp(0.0, self.max_delay), ramp);
+        self.delay
+            .set_target(frames.clamp(0.0, self.max_delay), ramp);
         self.width
             .set_target(finite(params.width).clamp(0.0, MAX_WIDTH), ramp);
         self.side_level
@@ -215,7 +216,11 @@ impl HaasWidenerNode {
 /// side path.
 #[inline]
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 impl AudioNode for HaasWidenerNode {

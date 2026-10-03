@@ -83,7 +83,7 @@ use alloc::{vec, vec::Vec};
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Two-pi, the full-cycle argument for the additive sine partials.
@@ -113,7 +113,11 @@ const AMPLITUDE_EPSILON: Sample = 1.0e-12;
 /// (a `NaN` would otherwise survive `clamp`).
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Clamps `frequency_hz` to the playable range `[MIN_FREQUENCY_HZ,
@@ -277,11 +281,6 @@ fn select(tables: &[Mipmap], nf: Sample) -> usize {
 /// can hold an immutable borrow of the selected table while mutably advancing
 /// the node's phase and amplitude fields.
 #[inline]
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the normalized phase is in [0, 1) so pos is in [0, data.len()); truncating to usize is an exact floor that never wraps"
-)]
 fn sample_table(data: &[Sample], phase: Sample) -> Sample {
     let n = data.len();
     if n == 0 {

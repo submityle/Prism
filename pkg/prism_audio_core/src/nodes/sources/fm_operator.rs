@@ -126,7 +126,11 @@ impl Default for FmOperatorParams {
 /// Replaces a non-finite value with `fallback`, otherwise returns the input.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// A phase-modulation (FM) operator source node.
@@ -196,8 +200,7 @@ impl FmOperatorNode {
                 finite_or(mod_index, DEFAULT_FM_MOD_INDEX).clamp(0.0, MAX_FM_MOD_INDEX),
             ),
             feedback: Smoothed::new(
-                finite_or(feedback, DEFAULT_FM_FEEDBACK)
-                    .clamp(-MAX_FM_FEEDBACK, MAX_FM_FEEDBACK),
+                finite_or(feedback, DEFAULT_FM_FEEDBACK).clamp(-MAX_FM_FEEDBACK, MAX_FM_FEEDBACK),
             ),
             amplitude: Smoothed::new(finite_or(amplitude, DEFAULT_FM_AMPLITUDE)),
             phase: 0.0,
@@ -237,15 +240,16 @@ impl FmOperatorNode {
     /// `ramp`.
     #[inline]
     pub fn set_feedback(&mut self, radians: Sample, ramp: Ramp) {
-        let target = finite_or(radians, self.feedback.target())
-            .clamp(-MAX_FM_FEEDBACK, MAX_FM_FEEDBACK);
+        let target =
+            finite_or(radians, self.feedback.target()).clamp(-MAX_FM_FEEDBACK, MAX_FM_FEEDBACK);
         self.feedback.set_target(target, ramp);
     }
 
     /// Sets a new target amplitude (linear), gliding with `ramp`.
     #[inline]
     pub fn set_amplitude(&mut self, linear: Sample, ramp: Ramp) {
-        self.amplitude.set_target(finite_or(linear, self.amplitude.target()), ramp);
+        self.amplitude
+            .set_target(finite_or(linear, self.amplitude.target()), ramp);
     }
 
     /// Returns the current carrier frequency in hertz.
@@ -449,8 +453,9 @@ mod tests {
         // differ from the pure carrier (sidebands appear).
         let sample_rate = 48_000;
         let frames = 1_024;
-        let modulator: Vec<Sample> =
-            (0..frames).map(|i| ops::sin(TAU * 220.0 * i as Sample / sample_rate as Sample)).collect();
+        let modulator: Vec<Sample> = (0..frames)
+            .map(|i| ops::sin(TAU * 220.0 * i as Sample / sample_rate as Sample))
+            .collect();
 
         let mut modded = FmOperatorNode::new(440.0, 2.0, 0.0, 1.0);
         let a = render_modulated(&mut modded, &modulator, sample_rate);
@@ -462,7 +467,10 @@ mod tests {
         for (x, y) in a.channel(0).iter().zip(b.channel(0)) {
             max_diff = max_diff.max((x - y).abs());
         }
-        assert!(max_diff > 0.1, "modulation produced no change (max_diff={max_diff})");
+        assert!(
+            max_diff > 0.1,
+            "modulation produced no change (max_diff={max_diff})"
+        );
     }
 
     #[test]
@@ -472,7 +480,9 @@ mod tests {
         let frames = 300;
         let freq = 500.0;
         let index = 1.5;
-        let modulator: Vec<Sample> = (0..frames).map(|i| 0.5 * ops::sin(0.07 * i as Sample)).collect();
+        let modulator: Vec<Sample> = (0..frames)
+            .map(|i| 0.5 * ops::sin(0.07 * i as Sample))
+            .collect();
 
         let mut node = FmOperatorNode::new(freq, index, 0.0, 1.0);
         let out = render_modulated(&mut node, &modulator, sample_rate);
@@ -531,7 +541,10 @@ mod tests {
         for (x, y) in a.channel(0).iter().zip(b.channel(0)) {
             max_diff = max_diff.max((x - y).abs());
         }
-        assert!(max_diff > 0.1, "feedback had no audible effect (max_diff={max_diff})");
+        assert!(
+            max_diff > 0.1,
+            "feedback had no audible effect (max_diff={max_diff})"
+        );
     }
 
     #[test]
@@ -713,8 +726,9 @@ mod tests {
         // value; the output stays bounded throughout the ramp.
         let sample_rate = 48_000;
         let frames = 512;
-        let modulator: Vec<Sample> =
-            (0..frames).map(|i| ops::sin(TAU * 110.0 * i as Sample / sample_rate as Sample)).collect();
+        let modulator: Vec<Sample> = (0..frames)
+            .map(|i| ops::sin(TAU * 110.0 * i as Sample / sample_rate as Sample))
+            .collect();
         let mut node = FmOperatorNode::new(440.0, 0.0, 0.0, 1.0);
         node.set_mod_index(4.0, Ramp::Linear { samples: frames });
         let out = render_modulated(&mut node, &modulator, sample_rate);

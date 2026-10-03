@@ -44,10 +44,10 @@ use alloc::vec::Vec;
 
 use crate::buffer::{AudioBuffer, ChannelLayout};
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear};
+use crate::math::{db_to_linear, Sample};
 use crate::nodes::crossover::LinkwitzRileyCrossover;
 use crate::nodes::dynamics::detector::{
-    DetectionMode, GainBallistics, LevelDetector, compressor_reduction_db,
+    compressor_reduction_db, DetectionMode, GainBallistics, LevelDetector,
 };
 
 /// How the computed sibilance gain reduction is applied.
@@ -311,8 +311,15 @@ mod tests {
         // Skip the crossover settling transient; compare the steady tail.
         let tail_in: Sample = input.channel(0)[2048..].iter().map(|s| s * s).sum();
         let tail_out: Sample = out.channel(0)[2048..].iter().map(|s| s * s).sum();
-        assert!(tail_out > tail_in * 0.9, "low band lost energy: {tail_out} vs {tail_in}");
-        assert!(node.reduction_db() < 1.0, "unexpected reduction {}", node.reduction_db());
+        assert!(
+            tail_out > tail_in * 0.9,
+            "low band lost energy: {tail_out} vs {tail_in}"
+        );
+        assert!(
+            node.reduction_db() < 1.0,
+            "unexpected reduction {}",
+            node.reduction_db()
+        );
     }
 
     #[test]
@@ -327,7 +334,11 @@ mod tests {
         let mut node = DeEsserNode::new(SR, ChannelLayout::Mono, params, 8192);
         let out = run(&mut node, &input);
         assert!(rms(&out) < rms(&input), "sibilance not reduced");
-        assert!(node.reduction_db() > 1.0, "expected reduction, got {}", node.reduction_db());
+        assert!(
+            node.reduction_db() > 1.0,
+            "expected reduction, got {}",
+            node.reduction_db()
+        );
     }
 
     #[test]
@@ -343,7 +354,11 @@ mod tests {
         };
         let mut node = DeEsserNode::new(SR, ChannelLayout::Mono, params, 8192);
         let _ = run(&mut node, &input);
-        assert!(node.reduction_db() < 1.0, "quiet ess should not duck: {}", node.reduction_db());
+        assert!(
+            node.reduction_db() < 1.0,
+            "quiet ess should not duck: {}",
+            node.reduction_db()
+        );
     }
 
     #[test]
@@ -372,7 +387,11 @@ mod tests {
         };
         let mut node = DeEsserNode::new(SR, ChannelLayout::Mono, params, 8192);
         let _ = run(&mut node, &input);
-        assert!(node.reduction_db() <= 3.0 + 1e-3, "cap exceeded: {}", node.reduction_db());
+        assert!(
+            node.reduction_db() <= 3.0 + 1e-3,
+            "cap exceeded: {}",
+            node.reduction_db()
+        );
     }
 
     #[test]

@@ -62,7 +62,7 @@
 //! matrix formulas.
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
+use crate::math::{db_to_linear, flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Time constant for the mid / side trim-gain smoothers, in seconds.

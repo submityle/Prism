@@ -37,18 +37,15 @@ impl ChannelLayout {
     /// Returns the number of channels this layout occupies.
     #[inline]
     #[must_use]
-    #[expect(
-        clippy::match_same_arms,
-        reason = "distinct layouts may share a channel count (e.g. Quad and FOA are both four channels); separate arms document each layout"
-    )]
     pub const fn channel_count(self) -> usize {
         match self {
             ChannelLayout::Mono => 1,
             ChannelLayout::Stereo => 2,
-            ChannelLayout::Quad => 4,
+            // Quad and first-order ambisonics (W, X, Y, Z) both occupy four
+            // channels; they share one arm because the count is identical.
+            ChannelLayout::Quad | ChannelLayout::AmbisonicFoa => 4,
             ChannelLayout::Surround5_1 => 6,
             ChannelLayout::Surround7_1 => 8,
-            ChannelLayout::AmbisonicFoa => 4,
         }
     }
 }
@@ -156,14 +153,21 @@ impl AudioBuffer {
     /// Panics if the indices are equal or out of range.
     pub fn channel_pair_mut(&mut self, a: usize, b: usize) -> (&mut [Sample], &mut [Sample]) {
         assert!(a != b, "channel indices must differ");
-        assert!(a < self.channels && b < self.channels, "channel out of range");
+        assert!(
+            a < self.channels && b < self.channels,
+            "channel out of range"
+        );
         let cap = self.capacity_frames;
         let active = self.active_frames;
         let (lo, hi, swapped) = if a < b { (a, b, false) } else { (b, a, true) };
         let (left, right) = self.data.split_at_mut(hi * cap);
         let first = &mut left[lo * cap..lo * cap + active];
         let second = &mut right[..active];
-        if swapped { (second, first) } else { (first, second) }
+        if swapped {
+            (second, first)
+        } else {
+            (first, second)
+        }
     }
 
     /// Fills every active sample with silence.

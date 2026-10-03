@@ -135,7 +135,8 @@ impl LinkwitzRileyCrossover {
         let mut lp: Vec<[Biquad; 2]> = Vec::with_capacity(m);
         let mut hp: Vec<[Biquad; 2]> = Vec::with_capacity(m);
         for &fc in &freqs {
-            let lp_c = BiquadCoeffs::design(BiquadKind::LowPass, sample_rate, fc, BUTTERWORTH_Q, 0.0);
+            let lp_c =
+                BiquadCoeffs::design(BiquadKind::LowPass, sample_rate, fc, BUTTERWORTH_Q, 0.0);
             let hp_c =
                 BiquadCoeffs::design(BiquadKind::HighPass, sample_rate, fc, BUTTERWORTH_Q, 0.0);
             lp.push([Biquad::new(lp_c, channels), Biquad::new(lp_c, channels)]);
@@ -398,7 +399,10 @@ mod tests {
         let low = tail_rms(&bands[0], skip);
         let high = tail_rms(&bands[1], skip);
         assert!(low > 0.5, "low band keeps the 100 Hz tone (rms {low})");
-        assert!(high < 0.05, "high band rejects the 100 Hz tone (rms {high})");
+        assert!(
+            high < 0.05,
+            "high band rejects the 100 Hz tone (rms {high})"
+        );
     }
 
     #[test]
@@ -415,8 +419,14 @@ mod tests {
         let low = tail_rms(&bands[0], skip) / in_rms;
         let high = tail_rms(&bands[1], skip) / in_rms;
         // LR4 is -6 dB (half amplitude) in each band at the crossover.
-        assert!((low - 0.5).abs() < 0.05, "low band -6 dB at fc (ratio {low})");
-        assert!((high - 0.5).abs() < 0.05, "high band -6 dB at fc (ratio {high})");
+        assert!(
+            (low - 0.5).abs() < 0.05,
+            "low band -6 dB at fc (ratio {low})"
+        );
+        assert!(
+            (high - 0.5).abs() < 0.05,
+            "high band -6 dB at fc (ratio {high})"
+        );
     }
 
     #[test]
@@ -451,8 +461,14 @@ mod tests {
         // Low band passes DC; high band blocks it.
         let low = bands[0].channel(0)[skip];
         let high = bands[1].channel(0)[skip];
-        assert!((low - 1.0).abs() < 0.02, "DC passes the low band (got {low})");
-        assert!(high.abs() < 0.02, "DC blocked from the high band (got {high})");
+        assert!(
+            (low - 1.0).abs() < 0.02,
+            "DC passes the low band (got {low})"
+        );
+        assert!(
+            high.abs() < 0.02,
+            "DC blocked from the high band (got {high})"
+        );
     }
 
     #[test]

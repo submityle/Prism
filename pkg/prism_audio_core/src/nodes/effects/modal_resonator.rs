@@ -64,7 +64,7 @@ use alloc::{vec, vec::Vec};
 use core::f32::consts::{LN_10, PI};
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
+use crate::math::{db_to_linear, flush_denormal, Sample};
 use crate::nodes::biquad::{BiquadCoeffs, BiquadKind};
 
 /// Maximum number of resonant modes the bank can hold.
@@ -122,7 +122,11 @@ impl ModalMode {
         } else {
             d.decay_s
         };
-        let gain = if self.gain.is_finite() { self.gain } else { d.gain };
+        let gain = if self.gain.is_finite() {
+            self.gain
+        } else {
+            d.gain
+        };
         Self {
             freq_hz,
             decay_s,
@@ -165,7 +169,10 @@ impl ModalResonatorParams {
         } else {
             d.output_gain_db
         };
-        Self { mix, output_gain_db }
+        Self {
+            mix,
+            output_gain_db,
+        }
     }
 }
 
@@ -398,7 +405,10 @@ mod tests {
         let mut outputs = [output];
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx(len), &mut io);
-        (outputs[0].channel(0).to_vec(), outputs[0].channel(1).to_vec())
+        (
+            outputs[0].channel(0).to_vec(),
+            outputs[0].channel(1).to_vec(),
+        )
     }
 
     fn impulse(len: usize) -> Vec<Sample> {
@@ -582,10 +592,7 @@ mod tests {
         let out = run_mono(&mut node, &impulse(SR as usize));
         let on_band = goertzel(&out, 1_000.0);
         let off_band = goertzel(&out, 4_000.0);
-        assert!(
-            on_band > off_band * 20.0,
-            "on {on_band} off {off_band}"
-        );
+        assert!(on_band > off_band * 20.0, "on {on_band} off {off_band}");
     }
 
     #[test]

@@ -70,7 +70,11 @@ pub const DEFAULT_ADDITIVE_AMPLITUDE: Sample = 1.0;
 /// Replaces a non-finite value with `fallback`, otherwise returns the input.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Construction parameters for an [`AdditiveOscillatorNode`].
@@ -173,7 +177,8 @@ impl AdditiveOscillatorNode {
     /// Sets a new target master amplitude (linear), gliding with `ramp`.
     #[inline]
     pub fn set_amplitude(&mut self, linear: Sample, ramp: Ramp) {
-        self.amplitude.set_target(finite_or(linear, self.amplitude.target()), ramp);
+        self.amplitude
+            .set_target(finite_or(linear, self.amplitude.target()), ramp);
     }
 
     /// Sets the target linear gain of harmonic `index + 1`, gliding with
@@ -368,7 +373,10 @@ mod tests {
             .zip(b.channel(0))
             .map(|(x, y)| (x - y).abs())
             .sum();
-        assert!(diff > 1e-2, "adding a harmonic should change the signal, diff={diff}");
+        assert!(
+            diff > 1e-2,
+            "adding a harmonic should change the signal, diff={diff}"
+        );
     }
 
     #[test]
@@ -514,7 +522,13 @@ mod tests {
         let sr = 48_000;
         let frames: usize = 1_024;
         let mut node = AdditiveOscillatorNode::new(110.0, 1.0);
-        node.set_partial(3, 0.8, Ramp::Linear { samples: frames as u32 });
+        node.set_partial(
+            3,
+            0.8,
+            Ramp::Linear {
+                samples: frames as u32,
+            },
+        );
         let out = render(&mut node, sr, frames);
         let ch = out.channel(0);
         for w in ch.windows(2) {

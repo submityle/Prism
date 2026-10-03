@@ -58,8 +58,10 @@ use bevy_math::ops;
 
 use crate::buffer::{AudioBuffer, ChannelLayout};
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
-use crate::nodes::effects::pitch_shifter::{PitchShifterNode, PitchShifterParams, semitones_to_ratio};
+use crate::math::{flush_denormal, Sample};
+use crate::nodes::effects::pitch_shifter::{
+    semitones_to_ratio, PitchShifterNode, PitchShifterParams,
+};
 use crate::param::{Ramp, Smoothed};
 
 /// Largest delay time the pitch delay accepts, in milliseconds.
@@ -122,10 +124,19 @@ impl PitchDelayParams {
     pub fn sanitised(self) -> Self {
         let d = Self::default();
         let fix = |v: Sample, lo: Sample, hi: Sample, def: Sample| {
-            if v.is_finite() { v.clamp(lo, hi) } else { def }
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                def
+            }
         };
         Self {
-            delay_ms: fix(self.delay_ms, MIN_PITCH_DELAY_MS, MAX_PITCH_DELAY_MS, d.delay_ms),
+            delay_ms: fix(
+                self.delay_ms,
+                MIN_PITCH_DELAY_MS,
+                MAX_PITCH_DELAY_MS,
+                d.delay_ms,
+            ),
             feedback: fix(self.feedback, 0.0, MAX_PITCH_DELAY_FEEDBACK, d.feedback),
             pitch_semitones: fix(
                 self.pitch_semitones,
@@ -303,10 +314,7 @@ impl AudioNode for PitchDelayNode {
         let (input, output) = io.io(0, 0);
         let out_channels = output.channels();
         let in_channels = input.channels();
-        let frames = output
-            .active_frames()
-            .min(input.active_frames())
-            .min(cap);
+        let frames = output.active_frames().min(input.active_frames()).min(cap);
         if frames == 0 || out_channels == 0 {
             return;
         }
@@ -322,13 +330,21 @@ impl AudioNode for PitchDelayNode {
         for n in 0..frames {
             let fb_gain = self.feedback.next_sample();
             let w = self.write_pos;
-            let read_pos = if w >= delay { w - delay } else { w + ring_len - delay };
+            let read_pos = if w >= delay {
+                w - delay
+            } else {
+                w + ring_len - delay
+            };
             for ch in 0..ch_n {
                 let d = self.rings[ch][read_pos];
                 self.delayed_buf.channel_mut(ch)[n] = d;
                 let x = if ch < in_channels {
                     let v = input.channel(ch)[n];
-                    if v.is_finite() { v } else { 0.0 }
+                    if v.is_finite() {
+                        v
+                    } else {
+                        0.0
+                    }
                 } else {
                     0.0
                 };
@@ -348,7 +364,11 @@ impl AudioNode for PitchDelayNode {
             for ch in 0..out_channels {
                 let x = if ch < in_channels {
                     let v = input.channel(ch)[n];
-                    if v.is_finite() { v } else { 0.0 }
+                    if v.is_finite() {
+                        v
+                    } else {
+                        0.0
+                    }
                 } else {
                     0.0
                 };
@@ -614,7 +634,11 @@ mod tests {
         let out = run_mono(&mut node, &impulse(2_048));
         // The wet tap is read straight from the line, so the impulse re-emerges
         // exactly `delay_frames` later with no shift (feedback is zero).
-        assert!((out[delay] - 1.0).abs() < 1e-6, "peak at delay: {}", out[delay]);
+        assert!(
+            (out[delay] - 1.0).abs() < 1e-6,
+            "peak at delay: {}",
+            out[delay]
+        );
         let pre: Sample = out[..delay].iter().map(|&x| x.abs()).sum();
         assert!(pre < 1e-5, "no energy before the delay: {pre}");
     }

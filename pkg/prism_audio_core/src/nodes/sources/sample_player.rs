@@ -267,10 +267,6 @@ impl SamplePlayerNode {
     /// selected interpolation kernel. All source indices are clamped, so
     /// boundary positions read the edge sample rather than over-running.
     #[inline]
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the interpolated PCM value is finite and within the f32 Sample range; narrowing the f64 accumulator back to the engine's f32 sample type is intentional"
-    )]
     fn interpolate(&self, ch: usize, pos: f64) -> Sample {
         let (idx, frac) = split_pos(pos);
         let value = match self.interpolation {
@@ -358,11 +354,6 @@ impl SamplePlayerNode {
 /// truncation, which equals `floor` for the non-negative positions this node
 /// guarantees (avoiding `f64::floor`, which is unavailable under `no_std`).
 #[inline]
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the read position is clamped non-negative and bounded by the buffer length, so truncating to usize is exact and never wraps"
-)]
 fn split_pos(pos: f64) -> (usize, f64) {
     let idx = pos as usize;
     (idx, pos - to_f64(idx))
@@ -370,10 +361,6 @@ fn split_pos(pos: f64) -> (usize, f64) {
 
 /// Converts a source-frame count/index to `f64`.
 #[inline]
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "source-frame indices stay far below f64's 2^53 exact-integer limit for any realistic audio buffer"
-)]
 fn to_f64(index: usize) -> f64 {
     index as f64
 }

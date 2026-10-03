@@ -13,7 +13,7 @@
 use alloc::vec::Vec;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::modulation::{Lfo, LfoWaveform};
 use crate::param::{Ramp, Smoothed};
 
@@ -269,7 +269,10 @@ mod tests {
         let peak = outputs[0].channel(0)[2048..]
             .iter()
             .fold(0.0 as Sample, |m, &v| m.max(v.abs()));
-        assert!((peak - 0.5).abs() < 0.05, "allpass changed amplitude: {peak}");
+        assert!(
+            (peak - 0.5).abs() < 0.05,
+            "allpass changed amplitude: {peak}"
+        );
     }
 
     #[test]

@@ -64,7 +64,7 @@ use bevy_math::ops;
 
 use crate::buffer::{AudioBuffer, ChannelLayout};
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear, flush_denormal};
+use crate::math::{db_to_linear, flush_denormal, Sample};
 use crate::nodes::reverb::algorithmic::{AlgorithmicRoom, AlgorithmicRoomParams};
 use crate::param::{Ramp, Smoothed};
 
@@ -147,12 +147,21 @@ impl GatedReverbParams {
     pub fn sanitised(self) -> Self {
         let d = Self::default();
         let fix = |v: Sample, lo: Sample, hi: Sample, def: Sample| {
-            if v.is_finite() { v.clamp(lo, hi) } else { def }
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                def
+            }
         };
         Self {
             room_size: fix(self.room_size, 0.0, 1.0, d.room_size),
             damping: fix(self.damping, 0.0, 1.0, d.damping),
-            pre_delay_ms: fix(self.pre_delay_ms, 0.0, MAX_GATED_PRE_DELAY_MS, d.pre_delay_ms),
+            pre_delay_ms: fix(
+                self.pre_delay_ms,
+                0.0,
+                MAX_GATED_PRE_DELAY_MS,
+                d.pre_delay_ms,
+            ),
             threshold_db: fix(self.threshold_db, -120.0, 0.0, d.threshold_db),
             attack_ms: fix(self.attack_ms, MIN_GATED_TIME_MS, 1_000.0, d.attack_ms),
             hold_ms: fix(self.hold_ms, 0.0, MAX_GATED_HOLD_MS, d.hold_ms),
@@ -361,10 +370,7 @@ impl AudioNode for GatedReverbNode {
         let (input, output) = io.io(0, 0);
         let out_channels = output.channels();
         let in_channels = input.channels();
-        let frames = output
-            .active_frames()
-            .min(input.active_frames())
-            .min(cap);
+        let frames = output.active_frames().min(input.active_frames()).min(cap);
         if frames == 0 || out_channels == 0 {
             return;
         }
@@ -378,7 +384,11 @@ impl AudioNode for GatedReverbNode {
             let src_ch = if ch < in_channels { ch } else { usize::MAX };
             let dst = self.in_buf.channel_mut(ch);
             for (n, d) in dst[..frames].iter_mut().enumerate() {
-                let x = if src_ch == usize::MAX { 0.0 } else { input.channel(src_ch)[n] };
+                let x = if src_ch == usize::MAX {
+                    0.0
+                } else {
+                    input.channel(src_ch)[n]
+                };
                 *d = if x.is_finite() { x } else { 0.0 };
             }
         }
@@ -408,7 +418,11 @@ impl AudioNode for GatedReverbNode {
             for ch in 0..out_channels {
                 let x = if ch < in_channels {
                     let v = input.channel(ch)[n];
-                    if v.is_finite() { v } else { 0.0 }
+                    if v.is_finite() {
+                        v
+                    } else {
+                        0.0
+                    }
                 } else {
                     0.0
                 };
@@ -489,19 +503,22 @@ mod tests {
 
     #[test]
     fn reports_zero_latency() {
-        let node = GatedReverbNode::new(SR, ChannelLayout::Stereo, 256, GatedReverbParams::default());
+        let node =
+            GatedReverbNode::new(SR, ChannelLayout::Stereo, 256, GatedReverbParams::default());
         assert_eq!(node.latency_frames(), 0);
     }
 
     #[test]
     fn channels_getter_reports_build_width() {
-        let node = GatedReverbNode::new(SR, ChannelLayout::Stereo, 256, GatedReverbParams::default());
+        let node =
+            GatedReverbNode::new(SR, ChannelLayout::Stereo, 256, GatedReverbParams::default());
         assert_eq!(node.channels(), 2);
     }
 
     #[test]
     fn layout_and_block_getters_report_build_values() {
-        let node = GatedReverbNode::new(SR, ChannelLayout::Stereo, 128, GatedReverbParams::default());
+        let node =
+            GatedReverbNode::new(SR, ChannelLayout::Stereo, 128, GatedReverbParams::default());
         assert_eq!(node.layout(), ChannelLayout::Stereo);
         assert_eq!(node.max_block_frames(), 128);
     }
@@ -514,7 +531,8 @@ mod tests {
 
     #[test]
     fn silence_in_silence_out() {
-        let mut node = GatedReverbNode::new(SR, ChannelLayout::Mono, 4_096, GatedReverbParams::default());
+        let mut node =
+            GatedReverbNode::new(SR, ChannelLayout::Mono, 4_096, GatedReverbParams::default());
         let out = run_mono(&mut node, &vec![0.0; 8_000]);
         assert!(out.iter().all(|&v| v == 0.0));
     }
@@ -529,7 +547,10 @@ mod tests {
         let sig: Vec<Sample> = (0..6_000).map(|i| ops::sin(i as Sample * 0.05)).collect();
         let out = run_mono(&mut node, &sig);
         for (o, s) in out.iter().zip(sig.iter()) {
-            assert!((o - s).abs() < 1e-6, "dry mix should be identity: {o} vs {s}");
+            assert!(
+                (o - s).abs() < 1e-6,
+                "dry mix should be identity: {o} vs {s}"
+            );
         }
     }
 
@@ -552,7 +573,10 @@ mod tests {
         let early = rms(&out[burst_len..burst_len + 2_000]);
         // Window ~0.5 s later (gate fully closed well past hold + release).
         let late = rms(&out[30_000..32_000]);
-        assert!(early > 1e-3, "tail should bloom right after the burst: {early}");
+        assert!(
+            early > 1e-3,
+            "tail should bloom right after the burst: {early}"
+        );
         assert!(
             late < early * 0.05,
             "gate should cut the tail: early {early}, late {late}"
@@ -587,25 +611,40 @@ mod tests {
             ..GatedReverbParams::default()
         };
         let mut node = GatedReverbNode::new(SR, ChannelLayout::Mono, 48_000, params);
-        let quiet: Vec<Sample> = (0..20_000).map(|i| 0.01 * ops::sin(i as Sample * 0.05)).collect();
+        let quiet: Vec<Sample> = (0..20_000)
+            .map(|i| 0.01 * ops::sin(i as Sample * 0.05))
+            .collect();
         let out = run_mono(&mut node, &quiet);
         // mix=1 means dry is fully removed; a never-opening gate keeps output ~0.
-        assert!(rms(&out) < 1e-3, "closed gate should suppress the wet tail: {}", rms(&out));
+        assert!(
+            rms(&out) < 1e-3,
+            "closed gate should suppress the wet tail: {}",
+            rms(&out)
+        );
     }
 
     #[test]
     fn non_finite_input_is_treated_as_silence() {
-        let mut node = GatedReverbNode::new(SR, ChannelLayout::Mono, 4_096, GatedReverbParams::default());
+        let mut node =
+            GatedReverbNode::new(SR, ChannelLayout::Mono, 4_096, GatedReverbParams::default());
         let mut sig = vec![0.0; 4_000];
         sig[10] = Sample::INFINITY;
         sig[20] = Sample::NAN;
         let out = run_mono(&mut node, &sig);
-        assert!(out.iter().all(|&v| v.is_finite()), "output must stay finite");
+        assert!(
+            out.iter().all(|&v| v.is_finite()),
+            "output must stay finite"
+        );
     }
 
     #[test]
     fn tone_output_is_finite() {
-        let mut node = GatedReverbNode::new(SR, ChannelLayout::Mono, 48_000, GatedReverbParams::default());
+        let mut node = GatedReverbNode::new(
+            SR,
+            ChannelLayout::Mono,
+            48_000,
+            GatedReverbParams::default(),
+        );
         let sig: Vec<Sample> = (0..20_000).map(|i| ops::sin(i as Sample * 0.05)).collect();
         let out = run_mono(&mut node, &sig);
         assert!(out.iter().all(|&v| v.is_finite()));
@@ -613,7 +652,8 @@ mod tests {
 
     #[test]
     fn zero_frames_is_safe() {
-        let mut node = GatedReverbNode::new(SR, ChannelLayout::Mono, 256, GatedReverbParams::default());
+        let mut node =
+            GatedReverbNode::new(SR, ChannelLayout::Mono, 256, GatedReverbParams::default());
         let mut input = AudioBuffer::new(ChannelLayout::Mono, 1);
         let mut output = AudioBuffer::new(ChannelLayout::Mono, 1);
         input.set_active_frames(0);
@@ -637,7 +677,11 @@ mod tests {
         input.set_active_frames(len);
         output.set_active_frames(len);
         for i in 0..len {
-            input.channel_mut(0)[i] = if i < 100 { ops::sin(i as Sample * 0.08) } else { 0.0 };
+            input.channel_mut(0)[i] = if i < 100 {
+                ops::sin(i as Sample * 0.08)
+            } else {
+                0.0
+            };
             input.channel_mut(1)[i] = 0.0;
         }
         let inputs = [input];
@@ -647,14 +691,22 @@ mod tests {
         // The left channel was excited; the two tails should differ.
         let left = rms(outputs[0].channel(0));
         let right = rms(outputs[0].channel(1));
-        assert!(left > right, "excited left should exceed silent right: {left} vs {right}");
+        assert!(
+            left > right,
+            "excited left should exceed silent right: {left} vs {right}"
+        );
     }
 
     #[test]
     fn surplus_output_channels_are_filled() {
         // A quad output from a mono reverb width: extra channels should be
         // silent rather than garbage.
-        let mut node = GatedReverbNode::new(SR, ChannelLayout::Stereo, 1_024, GatedReverbParams::default());
+        let mut node = GatedReverbNode::new(
+            SR,
+            ChannelLayout::Stereo,
+            1_024,
+            GatedReverbParams::default(),
+        );
         let len = 512;
         let mut input = AudioBuffer::new(ChannelLayout::Stereo, len);
         let mut output = AudioBuffer::new(ChannelLayout::Quad, len);
@@ -688,12 +740,16 @@ mod tests {
             .zip(second.iter())
             .map(|(a, b)| (a - b).abs())
             .fold(0.0_f32, f32::max);
-        assert!(max_err < 1e-6, "reset should reproduce a fresh run: {max_err}");
+        assert!(
+            max_err < 1e-6,
+            "reset should reproduce a fresh run: {max_err}"
+        );
     }
 
     #[test]
     fn set_params_updates_mix_and_gate() {
-        let mut node = GatedReverbNode::new(SR, ChannelLayout::Mono, 8_192, GatedReverbParams::default());
+        let mut node =
+            GatedReverbNode::new(SR, ChannelLayout::Mono, 8_192, GatedReverbParams::default());
         node.set_params(GatedReverbParams {
             mix: 0.0,
             ..GatedReverbParams::default()
@@ -708,7 +764,8 @@ mod tests {
 
     #[test]
     fn set_params_rebuilds_reverb_on_pre_delay_change() {
-        let mut node = GatedReverbNode::new(SR, ChannelLayout::Mono, 8_192, GatedReverbParams::default());
+        let mut node =
+            GatedReverbNode::new(SR, ChannelLayout::Mono, 8_192, GatedReverbParams::default());
         node.set_params(GatedReverbParams {
             pre_delay_ms: 60.0,
             ..GatedReverbParams::default()
@@ -767,7 +824,10 @@ mod tests {
         // Window ~0.3 s after the burst: inside the long hold, past the short one.
         let s = rms(&run_mono(&mut node_short, &sig)[16_000..18_000]);
         let l = rms(&run_mono(&mut node_long, &sig)[16_000..18_000]);
-        assert!(l > s, "longer hold should sustain the tail: short {s}, long {l}");
+        assert!(
+            l > s,
+            "longer hold should sustain the tail: short {s}, long {l}"
+        );
     }
 
     #[test]
@@ -781,6 +841,10 @@ mod tests {
         let mut node = GatedReverbNode::new(SR, ChannelLayout::Mono, 4_096, params);
         let _ = run_mono(&mut node, &burst(2_000, 4_000));
         // After a 2000-frame loud burst the gate must be essentially fully open.
-        assert!(node.gate_gain > 0.9, "gate should open on a loud onset: {}", node.gate_gain);
+        assert!(
+            node.gate_gain > 0.9,
+            "gate should open on a loud onset: {}",
+            node.gate_gain
+        );
     }
 }

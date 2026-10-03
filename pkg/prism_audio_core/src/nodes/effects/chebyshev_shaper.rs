@@ -93,7 +93,7 @@ use bevy_math::ops;
 
 use crate::buffer::ChannelLayout;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Number of Chebyshev harmonics the node synthesises (`T_1` through
@@ -131,7 +131,11 @@ pub const DC_BLOCKER_CUTOFF_HZ: Sample = 20.0;
 /// Returns `value` when finite, otherwise `fallback`.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Maps the fixed [`DC_BLOCKER_CUTOFF_HZ`] corner to the real pole
@@ -388,7 +392,7 @@ impl ChebyshevShaperNode {
         let mut t_cur = xc; // T_1(xc)
         let mut z_prev = 1.0; // T_0(0)
         let mut z_cur = 0.0; // T_1(0)
-        // harmonics[0] weights T_1 (odd order): DC-free, routed directly.
+                             // harmonics[0] weights T_1 (odd order): DC-free, routed directly.
         let mut direct = self.harmonics[0] * t_cur;
         let mut even_sum = 0.0;
         let mut order = 2usize; // order of the next polynomial generated (T_2 ...)
@@ -435,7 +439,11 @@ impl AudioNode for ChebyshevShaperNode {
             for ch in 0..channels {
                 let x = {
                     let v = input.channel(ch)[f];
-                    if v.is_finite() { v } else { 0.0 }
+                    if v.is_finite() {
+                        v
+                    } else {
+                        0.0
+                    }
                 };
                 // Clamp into the domain where the Chebyshev identity holds and
                 // the polynomials stay bounded.
@@ -631,8 +639,8 @@ mod tests {
         let reference: Vec<Sample> = input.channel(0).to_vec();
         let out = run(&mut node, input);
         // After the DC blocker settles the shaped output tracks the input.
-        for n in 1_000..4_800 {
-            assert!((out.channel(0)[n] - reference[n]).abs() < 1e-2);
+        for (actual, expected) in out.channel(0).iter().zip(reference.iter()).skip(1_000).take(3_800) {
+            assert!((actual - expected).abs() < 1e-2);
         }
     }
 
@@ -651,8 +659,7 @@ mod tests {
         let freq = 300.0;
         let frames = SR as usize;
         let out = run(&mut node, sine_buffer(freq, 1.0, frames));
-        let input_cycles =
-            rising_sign_changes(sine_buffer(freq, 1.0, frames).channel(0), 2_000);
+        let input_cycles = rising_sign_changes(sine_buffer(freq, 1.0, frames).channel(0), 2_000);
         let out_cycles = rising_sign_changes(out.channel(0), 2_000);
         let ratio = out_cycles as f32 / input_cycles as f32;
         assert!((ratio - 2.0).abs() < 0.1, "ratio={ratio}");
@@ -673,8 +680,7 @@ mod tests {
         let freq = 300.0;
         let frames = SR as usize;
         let out = run(&mut node, sine_buffer(freq, 1.0, frames));
-        let input_cycles =
-            rising_sign_changes(sine_buffer(freq, 1.0, frames).channel(0), 2_000);
+        let input_cycles = rising_sign_changes(sine_buffer(freq, 1.0, frames).channel(0), 2_000);
         let out_cycles = rising_sign_changes(out.channel(0), 2_000);
         let ratio = out_cycles as f32 / input_cycles as f32;
         assert!((ratio - 3.0).abs() < 0.15, "ratio={ratio}");
@@ -688,7 +694,12 @@ mod tests {
         let mut node = ChebyshevShaperNode::new(
             SR,
             ChannelLayout::Mono,
-            ChebyshevShaperParams { drive: MAX_DRIVE, harmonics, mix: 1.0, output: 1.0 },
+            ChebyshevShaperParams {
+                drive: MAX_DRIVE,
+                harmonics,
+                mix: 1.0,
+                output: 1.0,
+            },
         );
         let out = run(&mut node, sine_buffer(220.0, 10.0, 2_000));
         for &s in out.channel(0) {
@@ -741,7 +752,10 @@ mod tests {
         };
         let full = peak(1.0);
         let half = peak(0.5);
-        assert!((full - 2.0 * half).abs() < 0.05 * full, "full={full} half={half}");
+        assert!(
+            (full - 2.0 * half).abs() < 0.05 * full,
+            "full={full} half={half}"
+        );
     }
 
     #[test]

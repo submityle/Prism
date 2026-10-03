@@ -47,7 +47,7 @@
 //! implemented purely from that publicly documented signal-processing theory.
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, db_to_linear};
+use crate::math::{db_to_linear, Sample};
 use crate::param::{Ramp, Smoothed};
 
 use super::detector::time_to_coef;
@@ -341,7 +341,11 @@ mod tests {
         };
         let mut node = TransientShaperNode::new(SR, 1, params);
         let out = run(&mut node, &input);
-        assert!(peak(&out) > base * 1.05, "shaped peak {} base {base}", peak(&out));
+        assert!(
+            peak(&out) > base * 1.05,
+            "shaped peak {} base {base}",
+            peak(&out)
+        );
     }
 
     #[test]
@@ -395,7 +399,11 @@ mod tests {
         let mut node = TransientShaperNode::new(SR, 1, params);
         let _ = run(&mut node, &input);
         let ceil = db_to_linear(3.0);
-        assert!(node.last_gain <= ceil + 1e-4, "gain {} ceil {ceil}", node.last_gain);
+        assert!(
+            node.last_gain <= ceil + 1e-4,
+            "gain {} ceil {ceil}",
+            node.last_gain
+        );
         assert!(node.last_gain >= db_to_linear(-3.0) - 1e-4);
     }
 

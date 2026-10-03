@@ -50,7 +50,7 @@ use bevy_math::ops;
 
 use crate::buffer::ChannelLayout;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 
 /// Smallest effective bit depth (a two-level, hard 1-bit grid).
 pub const MIN_BIT_DEPTH: Sample = 1.0;

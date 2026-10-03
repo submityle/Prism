@@ -4,12 +4,12 @@
 //! module answers "when should this happen, exactly?". It provides two
 //! primitives that together give the engine UE-Quartz-class timing:
 //!
-//! - [`NamedClock`] — an independent tempo grid (its own BPM, time signature,
+//! - [`NamedClock`] -- an independent tempo grid (its own BPM, time signature,
 //!   and sample origin) that can [`quantize`](NamedClock::quantize) an
 //!   arbitrary sample position up to the next beat/bar/subdivision boundary.
 //!   Several clocks can run concurrently (a 128 BPM music clock next to an
 //!   ambient pulse clock), each with its own grid.
-//! - [`EventScheduler`] — a bounded, allocation-free min-heap of timestamped
+//! - [`EventScheduler`] -- a bounded, allocation-free min-heap of timestamped
 //!   payloads. Each block, [`drain_due`](EventScheduler::drain_due) yields the
 //!   events that fall inside the block together with their exact frame offset,
 //!   so voices and parameter changes start on the right sample rather than on
@@ -170,21 +170,14 @@ impl NamedClock {
             return target_sample;
         };
         if step <= 0.0 || target_sample <= self.sample_origin {
-            return self.sample_origin.max(target_sample.min(self.sample_origin));
+            return self
+                .sample_origin
+                .max(target_sample.min(self.sample_origin));
         }
         // Relative position from the grid origin, rounded up to the next step.
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "sample counts stay well within f64's 53-bit exact integer range for any realistic session length"
-        )]
         let rel = (target_sample - self.sample_origin) as f64;
         let steps = libm::ceil(rel / step);
         let boundary = libm::round(steps * step);
-        #[expect(
-            clippy::cast_sign_loss,
-            clippy::cast_possible_truncation,
-            reason = "boundary is non-negative and bounded by realistic session length"
-        )]
         let offset = boundary as u64;
         self.sample_origin + offset
     }
@@ -303,10 +296,6 @@ impl<E> EventScheduler<E> {
                 .at_sample
                 .saturating_sub(block_start)
                 .min(block_len.saturating_sub(1) as u64);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "offset is clamped below block_len (a usize) so the cast is exact"
-            )]
             f(offset as usize, slot.payload);
         }
     }

@@ -166,10 +166,7 @@ impl MasteringChainNode {
     ) -> Self {
         let channels = layout.channel_count();
         let cap = max_block_frames.max(1);
-        let scratch = [
-            AudioBuffer::new(layout, cap),
-            AudioBuffer::new(layout, cap),
-        ];
+        let scratch = [AudioBuffer::new(layout, cap), AudioBuffer::new(layout, cap)];
         Self {
             eq: ParametricEqNode::new(sample_rate, channels, &params.eq_bands),
             compressor: CompressorNode::new(sample_rate, channels, params.compressor),

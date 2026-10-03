@@ -75,7 +75,7 @@ use bevy_math::ops;
 use core::f32::consts::{FRAC_PI_2, TAU};
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Sample rate the tuning table below is expressed at (Dattorro's reference).
@@ -124,11 +124,6 @@ const MAX_CHANNELS: usize = 8;
 
 /// Rounds a reference-rate frame count to the runtime rate, never below one.
 #[inline]
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "rounded product of a non-negative length and ratio fits usize"
-)]
 fn scale_frames(reference: usize, rate_scale: Sample) -> usize {
     let scaled = ops::round(reference as Sample * rate_scale);
     (scaled as usize).max(1)
@@ -137,11 +132,6 @@ fn scale_frames(reference: usize, rate_scale: Sample) -> usize {
 /// Converts milliseconds to frames at `sample_rate`, flooring to zero when the
 /// requested time is non-positive.
 #[inline]
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "rounded non-negative frame count fits usize"
-)]
 fn ms_to_frames(ms: Sample, sample_rate: u32) -> usize {
     if ms <= 0.0 {
         return 0;
@@ -153,7 +143,11 @@ fn ms_to_frames(ms: Sample, sample_rate: u32) -> usize {
 /// Replaces a non-finite control with a fallback.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// A circular delay line. `read(d)` returns the sample written `d` steps ago
@@ -189,11 +183,6 @@ impl DelayLine {
 
     /// Reads a fractional delay (linear interpolation) clamped to `[1, len-1]`.
     #[inline]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "floor of a value clamped to [1, len-1] is a valid in-range index"
-    )]
     fn read_frac(&self, delay: Sample) -> Sample {
         let len = self.buf.len();
         let max_delay = (len - 1) as Sample;
@@ -279,12 +268,13 @@ struct ModulatedAllpass {
 
 impl ModulatedAllpass {
     #[inline]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "ceil of a non-negative delay bound fits usize"
-    )]
-    fn new(base: Sample, excursion: Sample, g: Sample, sample_rate: Sample, init_phase: Sample) -> Self {
+    fn new(
+        base: Sample,
+        excursion: Sample,
+        g: Sample,
+        sample_rate: Sample,
+        init_phase: Sample,
+    ) -> Self {
         let span = ops::round(base + excursion.abs()) as usize + 2;
         Self {
             line: DelayLine::new(span),
@@ -476,10 +466,22 @@ impl PlateReverb {
         let pre_delay = DelayLine::new(pre_delay_len.max(1));
 
         let in_ap = [
-            Allpass::new(scale_frames(INPUT_DIFFUSION_DELAYS[0], rate_scale), p.input_diffusion_1),
-            Allpass::new(scale_frames(INPUT_DIFFUSION_DELAYS[1], rate_scale), p.input_diffusion_1),
-            Allpass::new(scale_frames(INPUT_DIFFUSION_DELAYS[2], rate_scale), p.input_diffusion_2),
-            Allpass::new(scale_frames(INPUT_DIFFUSION_DELAYS[3], rate_scale), p.input_diffusion_2),
+            Allpass::new(
+                scale_frames(INPUT_DIFFUSION_DELAYS[0], rate_scale),
+                p.input_diffusion_1,
+            ),
+            Allpass::new(
+                scale_frames(INPUT_DIFFUSION_DELAYS[1], rate_scale),
+                p.input_diffusion_1,
+            ),
+            Allpass::new(
+                scale_frames(INPUT_DIFFUSION_DELAYS[2], rate_scale),
+                p.input_diffusion_2,
+            ),
+            Allpass::new(
+                scale_frames(INPUT_DIFFUSION_DELAYS[3], rate_scale),
+                p.input_diffusion_2,
+            ),
         ];
 
         let excursion = MOD_EXCURSION_FRAMES * rate_scale * p.mod_depth;
@@ -712,15 +714,13 @@ impl PlateReverb {
         self.right_out = new_right_out;
 
         // Seven signed taps per output drawn from the two halves' delays.
-        let yl = self.delay_r1.read(self.yl_taps[0])
-            + self.delay_r1.read(self.yl_taps[1])
+        let yl = self.delay_r1.read(self.yl_taps[0]) + self.delay_r1.read(self.yl_taps[1])
             - self.ap_r2.tap(self.yl_taps[2])
             + self.delay_r2.read(self.yl_taps[3])
             - self.delay_l1.read(self.yl_taps[4])
             - self.ap_l2.tap(self.yl_taps[5])
             - self.delay_l2.read(self.yl_taps[6]);
-        let yr = self.delay_l1.read(self.yr_taps[0])
-            + self.delay_l1.read(self.yr_taps[1])
+        let yr = self.delay_l1.read(self.yr_taps[0]) + self.delay_l1.read(self.yr_taps[1])
             - self.ap_l2.tap(self.yr_taps[2])
             + self.delay_l2.read(self.yr_taps[3])
             - self.delay_r1.read(self.yr_taps[4])
@@ -832,7 +832,10 @@ mod tests {
                 input.channel_mut(1)[0] = 1.0;
                 first = false;
             }
-            let mut io = ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+            let mut io = ProcessIo::new(
+                core::slice::from_ref(&input),
+                core::slice::from_mut(&mut output),
+            );
             plate.process(&ctx(n), &mut io);
             out.extend_from_slice(output.channel(0));
             remaining -= n;
@@ -851,9 +854,15 @@ mod tests {
         assert!(total > 0.0, "plate must produce a non-trivial tail");
         let head = energy(&ir[..12_000]);
         let tail = energy(&ir[36_000..]);
-        assert!(tail < head, "late energy {tail} must fall below early {head}");
+        assert!(
+            tail < head,
+            "late energy {tail} must fall below early {head}"
+        );
         let peak = ir.iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
-        assert!(peak.is_finite() && peak < 8.0, "output must stay bounded: {peak}");
+        assert!(
+            peak.is_finite() && peak < 8.0,
+            "output must stay bounded: {peak}"
+        );
     }
 
     #[test]
@@ -915,7 +924,10 @@ mod tests {
         output.set_active_frames(n);
         input.channel_mut(0)[0] = 1.0;
         input.channel_mut(1)[0] = 1.0;
-        let mut io = ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+        let mut io = ProcessIo::new(
+            core::slice::from_ref(&input),
+            core::slice::from_mut(&mut output),
+        );
         plate.process(&ctx(n), &mut io);
         // Compare the two output channels past the dry impulse.
         let left = &output.channel(0)[64..];
@@ -946,7 +958,10 @@ mod tests {
             input.channel_mut(0)[f] = v;
             input.channel_mut(1)[f] = -v;
         }
-        let mut io = ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+        let mut io = ProcessIo::new(
+            core::slice::from_ref(&input),
+            core::slice::from_mut(&mut output),
+        );
         plate.process(&ctx(n), &mut io);
         for f in 0..n {
             assert!((output.channel(0)[f] - input.channel(0)[f]).abs() < 1e-6);
@@ -985,8 +1000,10 @@ mod tests {
         input.channel_mut(0)[0] = 1.0;
         input.channel_mut(1)[0] = 1.0;
         {
-            let mut io =
-                ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+            let mut io = ProcessIo::new(
+                core::slice::from_ref(&input),
+                core::slice::from_mut(&mut output),
+            );
             plate.process(&ctx(n), &mut io);
         }
         plate.reset();
@@ -998,11 +1015,13 @@ mod tests {
         output2.set_active_frames(n);
         input2.channel_mut(0)[0] = 1.0;
         input2.channel_mut(1)[0] = 1.0;
-        let mut io =
-            ProcessIo::new(core::slice::from_ref(&input2), core::slice::from_mut(&mut output2));
+        let mut io = ProcessIo::new(
+            core::slice::from_ref(&input2),
+            core::slice::from_mut(&mut output2),
+        );
         plate.process(&ctx(n), &mut io);
-        for f in 0..n {
-            assert!((output2.channel(0)[f] - fresh[f]).abs() < 1e-6);
+        for (actual, expected) in output2.channel(0).iter().zip(fresh.iter()).take(n) {
+            assert!((actual - expected).abs() < 1e-6);
         }
     }
 
@@ -1030,7 +1049,10 @@ mod tests {
         input.set_active_frames(n);
         output.set_active_frames(n);
         input.channel_mut(0)[0] = 1.0;
-        let mut io = ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+        let mut io = ProcessIo::new(
+            core::slice::from_ref(&input),
+            core::slice::from_mut(&mut output),
+        );
         plate.process(&ctx(n), &mut io);
         assert!(output.channel(0).iter().all(|s| s.is_finite()));
         assert!(energy(output.channel(0)) > 0.0);
@@ -1071,7 +1093,10 @@ mod tests {
         let mut plate = PlateReverb::new(48_000, 2, PlateReverbParams::default());
         let input = stereo(16);
         let mut output = stereo(16);
-        let mut io = ProcessIo::new(core::slice::from_ref(&input), core::slice::from_mut(&mut output));
+        let mut io = ProcessIo::new(
+            core::slice::from_ref(&input),
+            core::slice::from_mut(&mut output),
+        );
         plate.process(&ctx(0), &mut io);
     }
 }

@@ -76,7 +76,7 @@ use core::f32::consts::TAU;
 
 use crate::fft::Fft;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal, lerp};
+use crate::math::{flush_denormal, lerp, Sample};
 
 /// Smallest permitted transform size, in samples.
 pub const MIN_SPECTRAL_DELAY_FFT_SIZE: usize = 64;
@@ -221,7 +221,11 @@ fn fill_delay_table(
         };
         let ms = lerp(low_delay_ms, high_delay_ms, t);
         let frames = ops::round(ms / hop_period_ms);
-        let frames = if frames.is_finite() { frames.max(0.0) } else { 0.0 };
+        let frames = if frames.is_finite() {
+            frames.max(0.0)
+        } else {
+            0.0
+        };
         *slot = (frames as usize).min(max_cap);
     }
 }
@@ -276,7 +280,11 @@ impl SpectralDelayNode {
             overlap_sum += win[k] * win[k];
             k += hop;
         }
-        let ola_norm = if overlap_sum > 0.0 { 1.0 / overlap_sum } else { 0.0 };
+        let ola_norm = if overlap_sum > 0.0 {
+            1.0 / overlap_sum
+        } else {
+            0.0
+        };
 
         let params = params.sanitised();
         let mut delay_frames = vec![0usize; bin_count];
@@ -387,7 +395,11 @@ impl AudioNode for SpectralDelayNode {
                 let x = if x.is_finite() { x } else { 0.0 };
                 in_fifo[fifo_base + rover] = x;
                 let y = out_fifo[fifo_base + (rover - fifo_latency)];
-                let y = if y.is_finite() { flush_denormal(y) } else { 0.0 };
+                let y = if y.is_finite() {
+                    flush_denormal(y)
+                } else {
+                    0.0
+                };
                 output.channel_mut(ch)[i] = y;
             }
 
@@ -397,11 +409,11 @@ impl AudioNode for SpectralDelayNode {
             }
             rover = fifo_latency;
 
-            #[expect(
-                clippy::needless_range_loop,
-                reason = "ch also indexes fifo_base, ring_base, and the input and output channels"
-            )]
-            for ch in 0..channels {
+            // `ch` indexes `fifo_base`, `ring_base`, `write_idx`, and both the
+            // input and output channels, so a manual counter is clearer than an
+            // iterator adaptor here.
+            let mut ch = 0;
+            while ch < channels {
                 let fifo_base = ch * size;
 
                 // Analysis window into the complex scratch.
@@ -462,6 +474,8 @@ impl AudioNode for SpectralDelayNode {
                 for n in 0..(size - hop) {
                     in_fifo[fifo_base + n] = in_fifo[fifo_base + n + hop];
                 }
+
+                ch += 1;
             }
         }
 
@@ -814,7 +828,10 @@ mod tests {
         for (a, b) in after_reset.iter().zip(baseline.iter()) {
             max_err = max_err.max((a - b).abs());
         }
-        assert!(max_err < 1.0e-6, "state leaked past reset: max_err {max_err}");
+        assert!(
+            max_err < 1.0e-6,
+            "state leaked past reset: max_err {max_err}"
+        );
     }
 
     #[test]

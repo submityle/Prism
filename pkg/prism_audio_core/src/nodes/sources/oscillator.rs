@@ -1,7 +1,7 @@
 //! Band-limited virtual-analog oscillator source node.
 //!
 //! [`OscillatorNode`] is a *source* (zero inputs, one output) that synthesizes a
-//! classic analog waveform — sine, sawtooth, square, or triangle — from a
+//! classic analog waveform -- sine, sawtooth, square, or triangle -- from a
 //! phase accumulator. The naive sawtooth and square shapes contain hard
 //! discontinuities that alias badly when sampled; this node suppresses that
 //! aliasing with **`PolyBLEP`** (polynomial band-limited step) correction, which

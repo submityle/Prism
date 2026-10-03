@@ -85,9 +85,9 @@
 use alloc::vec::Vec;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::nodes::biquad::{BiquadCoeffs, BiquadKind};
-use crate::nodes::dynamics::detector::{DetectionMode, LevelDetector, time_to_coef};
+use crate::nodes::dynamics::detector::{time_to_coef, DetectionMode, LevelDetector};
 
 /// Default band centre frequency (Hz).
 pub const DEFAULT_FREQUENCY_HZ: Sample = 1_000.0;
@@ -268,8 +268,13 @@ impl DynamicEqNode {
     pub fn new(sample_rate: u32, channels: usize, params: DynamicEqParams) -> Self {
         let sample_rate = sample_rate.max(1);
         let channels = channels.max(1);
-        let detect_coeffs =
-            BiquadCoeffs::design(BiquadKind::BandPass, sample_rate, params.frequency_hz, params.q, 0.0);
+        let detect_coeffs = BiquadCoeffs::design(
+            BiquadKind::BandPass,
+            sample_rate,
+            params.frequency_hz,
+            params.q,
+            0.0,
+        );
         let shaping_coeffs = BiquadCoeffs::design(
             BiquadKind::Peaking,
             sample_rate,
@@ -466,7 +471,10 @@ mod tests {
         let in_rms = tail_rms(input.channel(0));
         let out_rms = tail_rms(out.channel(0));
         assert!(node.depth() < 0.05, "depth must stay low: {}", node.depth());
-        assert!((out_rms - in_rms).abs() / in_rms < 0.05, "near flat passthrough");
+        assert!(
+            (out_rms - in_rms).abs() / in_rms < 0.05,
+            "near flat passthrough"
+        );
     }
 
     #[test]
@@ -487,7 +495,10 @@ mod tests {
         let in_rms = tail_rms(input.channel(0));
         let out_rms = tail_rms(out.channel(0));
         assert!(node.depth() > 0.5, "depth must engage: {}", node.depth());
-        assert!(out_rms < in_rms * 0.6, "band energy must drop: {out_rms} vs {in_rms}");
+        assert!(
+            out_rms < in_rms * 0.6,
+            "band energy must drop: {out_rms} vs {in_rms}"
+        );
     }
 
     #[test]
@@ -507,7 +518,10 @@ mod tests {
         let out = render(&mut node, &input);
         let in_rms = tail_rms(input.channel(0));
         let out_rms = tail_rms(out.channel(0));
-        assert!(out_rms > in_rms * 1.5, "positive range must boost: {out_rms} vs {in_rms}");
+        assert!(
+            out_rms > in_rms * 1.5,
+            "positive range must boost: {out_rms} vs {in_rms}"
+        );
     }
 
     #[test]
@@ -528,7 +542,10 @@ mod tests {
         // essentially untouched: the shaping is frequency-selective.
         let in_rms = tail_rms(input.channel(0));
         let out_rms = tail_rms(out.channel(0));
-        assert!((out_rms - in_rms).abs() / in_rms < 0.1, "out-of-band stays flat");
+        assert!(
+            (out_rms - in_rms).abs() / in_rms < 0.1,
+            "out-of-band stays flat"
+        );
     }
 
     #[test]
@@ -549,8 +566,15 @@ mod tests {
         let out = render(&mut node, &input);
         let in_rms = tail_rms(input.channel(0));
         let out_rms = tail_rms(out.channel(0));
-        assert!(node.depth() > 0.5, "below mode must engage when quiet: {}", node.depth());
-        assert!(out_rms > in_rms * 1.5, "quiet band is lifted: {out_rms} vs {in_rms}");
+        assert!(
+            node.depth() > 0.5,
+            "below mode must engage when quiet: {}",
+            node.depth()
+        );
+        assert!(
+            out_rms > in_rms * 1.5,
+            "quiet band is lifted: {out_rms} vs {in_rms}"
+        );
     }
 
     #[test]
