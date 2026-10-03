@@ -534,6 +534,7 @@ pub mod water_pbf_plan;
 pub mod water_shading_npr;
 pub mod water_shading_pbr;
 pub mod water_spectrum_advance;
+pub mod water_surface_synth;
 pub mod water_swe_cfl;
 pub mod water_swe_inject;
 pub mod water_swe_step;
@@ -1286,6 +1287,7 @@ pub use water_shading_pbr::{GpuWaterShadingPbr, WaterShadingPbrQuery, WaterShadi
 pub use water_spectrum_advance::{
     GpuWaterSpectrumAdvance, WaterSpectrumAdvanceQuery, WaterSpectrumAdvanceResult,
 };
+pub use water_surface_synth::{GpuWaterSurfaceSynth, WaterSurface, WaterSurfaceComplex};
 pub use water_swe_cfl::{GpuWaterSweCfl, WaterSweCflQuery, WaterSweCflResult};
 pub use water_swe_inject::{GpuWaterSweInject, WaterSweInjectQuery, WaterSweInjectResult};
 pub use water_swe_step::{GpuWaterSweStep, WaterSweStepQuery, WaterSweStepResult};
