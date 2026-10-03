@@ -24,5 +24,9 @@ watch = ["std"]
 # no dependency and does not imply `std`.
 mock = []
 
+[[bench]]
+name = "vm_commit"
+harness = false
+
 [lints]
 workspace = true
