@@ -31,8 +31,18 @@
 //!   wires this in and returns [`dirty::DirtyStats`] so a static scene can be
 //!   asserted to recompute nothing. Results are identical to the full M1 pass;
 //!   only the work differs.
-//! - **M3+ (planned):** parallel propagation via `prism_tasks`, fixed-step
-//!   interpolation, big-world/deterministic paths, and GPU upload.
+//! - **M3 (this update, done):** multi-threaded hierarchy propagation via
+//!   `prism_tasks`. The [`parallel`] module groups nodes by depth level — every
+//!   node in a level depends only on strictly-shallower levels, so each level is
+//!   embarrassingly parallel — and runs each large level through a
+//!   [`prism_tasks::TaskPool`] scope, computing into disjoint scratch chunks that
+//!   read the immutable finalized `globals` and scattering back serially. Small
+//!   levels fall back to an inline serial sweep. The result is **identical** to
+//!   the serial [`propagation::propagate`] pass (same `Affine3` operand order),
+//!   proven by parity tests over large random forests. A cacheable [`parallel::LevelPlan`]
+//!   amortizes the depth-bucketing for a static topology. This path is `std`-only.
+//! - **M4+ (planned):** fixed-step interpolation, big-world/deterministic paths,
+//!   and GPU upload.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -46,6 +56,8 @@ use prism_math::{Affine3, Mat4, Quat, Vec3};
 pub mod change;
 pub mod dirty;
 pub mod hierarchy;
+#[cfg(feature = "std")]
+pub mod parallel;
 pub mod propagation;
 
 use change::ChangeTicks;
@@ -490,6 +502,8 @@ pub mod prelude {
     pub use crate::dirty::{DirtyPropagator, DirtyStats};
     pub use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
     pub use crate::propagation::propagate;
+    #[cfg(feature = "std")]
+    pub use crate::parallel::{LevelPlan, propagate_parallel, propagate_parallel_with_plan};
     pub use crate::{GlobalTransform, Transform, TransformGraph};
 }
 
@@ -501,3 +515,6 @@ mod tests_m1;
 
 #[cfg(test)]
 mod tests_m2;
+
+#[cfg(all(test, feature = "std"))]
+mod tests_m3;

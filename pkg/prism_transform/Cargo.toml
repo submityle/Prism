@@ -9,10 +9,11 @@ publish = false
 
 [dependencies]
 prism_math = { path = "../prism_math" }
+prism_tasks = { path = "../prism_tasks", optional = true }
 
 [features]
 default = ["std"]
-std = ["prism_math/std"]
+std = ["prism_math/std", "dep:prism_tasks"]
 
 [lints]
 workspace = true
