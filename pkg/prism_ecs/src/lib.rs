@@ -57,6 +57,7 @@ mod component_hooks_tests;
 pub mod entity;
 pub mod event;
 pub mod query;
+pub mod relation;
 pub mod resource;
 pub mod schedule;
 pub mod storage;
@@ -76,6 +77,10 @@ pub mod prelude {
     pub use crate::event::{Event, EventCursor, EventId, Events};
     pub use crate::resource::{Resource, ResourceId, Resources};
     pub use crate::query::{Added, Changed, Or, With, Without};
+    pub use crate::relation::{
+        CascadeEdge, CascadePlan, CleanupPolicy, Pair, PairKey, RelationId, RelationIndex,
+        RelationKind, RelationTarget, Relations, TargetId,
+    };
     pub use crate::schedule::{
         apply_state_transition, in_state, resource_equals, resource_exists, run_once,
         IntoSystemConfigs, NextState, OnEnter, OnExit, Phase, Schedule, ScheduleLabel, Schedules,
