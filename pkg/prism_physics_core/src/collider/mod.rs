@@ -198,34 +198,30 @@ pub use tet_partition::{
 pub mod tet_vertex_adjacency;
 pub use tet_vertex_adjacency::{build_tet_vertex_adjacency, TetVertexAdjacency};
 pub mod tet_vertex_coloring;
-pub use tet_vertex_coloring::{
-    colour_tet_vertex_graph, colour_tet_vertices, TetVertexColoring,
-};
+pub use tet_vertex_coloring::{colour_tet_vertex_graph, colour_tet_vertices, TetVertexColoring};
 pub mod tet_vertex_reorder;
 pub use tet_vertex_reorder::{
     reorder_tet_vertex_graph, reorder_tet_vertices, vertex_bandwidth, TetVertexReorder,
 };
 pub mod tet_fem_basis;
-pub use tet_fem_basis::{
-    build_tet_fem_basis, TetFemBasis, TetFemBasisParams, TetFemElement,
-};
+pub use tet_fem_basis::{build_tet_fem_basis, TetFemBasis, TetFemBasisParams, TetFemElement};
 pub mod tet_embedding;
 pub use tet_embedding::{
     build_tet_embedding, locate_point, TetBinding, TetEmbedding, TetEmbeddingParams,
 };
 pub mod tet_fem_stiffness;
-pub use tet_fem_stiffness::{
-    element_stiffness, IsotropicElasticity, TetStiffness,
-};
+pub use tet_fem_stiffness::{element_stiffness, IsotropicElasticity, TetStiffness};
 pub mod tet_fem_assembly;
 pub use tet_fem_assembly::{assemble_global_stiffness, GlobalStiffness};
 pub mod tet_lumped_mass;
-pub use tet_lumped_mass::{
-    build_lumped_mass, build_lumped_mass_from_mesh, LumpedMass,
-};
+pub use tet_lumped_mass::{build_lumped_mass, build_lumped_mass_from_mesh, LumpedMass};
 pub mod tet_fem_cg;
-pub use tet_fem_cg::{
-    conjugate_gradient, solve_implicit_system, CgParams, CgReport,
+pub use tet_fem_cg::{conjugate_gradient, solve_implicit_system, CgParams, CgReport};
+pub mod tet_fem_constitutive;
+pub use tet_fem_constitutive::{
+    linear_first_piola, linear_strain_energy_density, stable_neo_hookean_first_piola,
+    stable_neo_hookean_strain_energy_density, stvk_first_piola, stvk_strain_energy_density,
+    HyperelasticModel, LameParameters,
 };
 
 /// A handle into a [`ShapeRegistry`].
