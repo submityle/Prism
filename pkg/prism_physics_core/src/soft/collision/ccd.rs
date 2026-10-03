@@ -294,6 +294,7 @@ fn outward_normal(collider: BodyCollider, surf: Vec3) -> Option<Vec3> {
             orientation,
             half_extents,
         } => obb_face_normal(center, orientation, half_extents, surf),
+        BodyCollider::ConvexHull(proxy) => proxy.face_normal(surf),
     };
     if n.length_squared() <= EPS_LEN_SQ {
         None
@@ -314,6 +315,7 @@ fn collider_toi(collider: BodyCollider, prev: Vec3, curr: Vec3) -> Option<Real> 
             orientation,
             half_extents,
         } => obb_toi(prev, curr, center, orientation, half_extents),
+        BodyCollider::ConvexHull(proxy) => proxy.segment_toi(prev, curr),
     }
 }
 

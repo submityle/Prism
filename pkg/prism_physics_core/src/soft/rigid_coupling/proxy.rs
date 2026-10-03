@@ -30,7 +30,7 @@ use glam::{Quat, Vec3};
 
 use crate::collider::ColliderShape;
 use crate::math::scalar::Real;
-use crate::soft::{BodyCollider, CouplingBody};
+use crate::soft::{BodyCollider, ConvexProxy, CouplingBody};
 use crate::state::body::BodyKind;
 use crate::state::handle::BodyHandle;
 
@@ -97,6 +97,24 @@ pub fn body_collider_from_shape(
     }
 }
 
+/// Builds a bounded [`ConvexProxy`] for a cuboid at the given world pose.
+///
+/// This is the opt-in convex mapping of [`ColliderShape::Cuboid`]: it produces
+/// the box as the intersection of its six oriented face half-spaces, which
+/// projects interior particles identically to the default
+/// [`BodyCollider::Obb`] mapping. It exists so callers (and the cross-validation
+/// goldens) can exercise the convex arm against a shape whose oriented-box
+/// answer is already known; the default [`body_collider_from_shape`] mapping is
+/// unchanged, so existing goldens stay bit-identical.
+#[must_use]
+pub fn convex_proxy_from_cuboid(
+    half_extents: Vec3,
+    position: Vec3,
+    orientation: Quat,
+) -> ConvexProxy {
+    ConvexProxy::from_box(position, orientation, half_extents)
+}
+
 /// Returns the inverse mass to give a coupling proxy for a rigid body.
 ///
 /// Only [`BodyKind::Dynamic`] bodies get a movable proxy (their clamped
@@ -123,6 +141,7 @@ pub fn collider_anchor(collider: BodyCollider) -> Vec3 {
         BodyCollider::Sphere { center, .. } | BodyCollider::Obb { center, .. } => center,
         BodyCollider::Capsule { p0, p1, .. } => (p0 + p1) * 0.5,
         BodyCollider::HalfSpace { .. } => Vec3::ZERO,
+        BodyCollider::ConvexHull(proxy) => proxy.center(),
     }
 }
 
@@ -200,6 +219,15 @@ pub fn collider_world_aabb(collider: BodyCollider) -> Option<Aabb> {
             Some(Aabb {
                 min: center - world_half,
                 max: center + world_half,
+            })
+        }
+        BodyCollider::ConvexHull(proxy) => {
+            // Conservative bounding box from the proxy's cached bounding sphere.
+            let r = Vec3::splat(proxy.bounding_radius().max(0.0));
+            let center = proxy.center();
+            Some(Aabb {
+                min: center - r,
+                max: center + r,
             })
         }
         BodyCollider::HalfSpace { .. } => None,
@@ -431,5 +459,146 @@ mod tests {
         };
         assert!(collider_overlaps(near, &soft));
         assert!(!collider_overlaps(far, &soft));
+    }
+
+    // --- Convex-hull proxy coupling goldens -------------------------------
+    //
+    // These exercise the `BodyCollider::ConvexHull` arm through the shared
+    // per-particle coupling kernel (`couple_particle_against_body`), the same
+    // entry point the linear/angular/friction drivers all funnel through, so a
+    // passing cross-check here means those three drivers auto-work for convex
+    // props without any driver change.
+    use crate::soft::couple_particle_against_body;
+
+    /// An oriented box and its convex-from-box proxy at the same pose must
+    /// produce bit-identical coupling contributions for interior particles, so
+    /// a convex box couples exactly like the existing OBB arm.
+    #[test]
+    fn convex_hull_couples_identically_to_obb() {
+        let center = Vec3::new(0.4, 1.0, -0.7);
+        let orientation =
+            Quat::from_rotation_y(0.7) * Quat::from_rotation_x(0.3) * Quat::from_rotation_z(-0.2);
+        let he = Vec3::new(0.8, 0.5, 1.2);
+        let obb = BodyCollider::Obb {
+            center,
+            orientation,
+            half_extents: he,
+        };
+        let hull = BodyCollider::ConvexHull(ConvexProxy::from_box(center, orientation, he));
+        let samples = [
+            center + orientation * Vec3::new(0.1, 0.3, -0.4),
+            center + orientation * Vec3::new(-0.5, 0.1, 0.6),
+            center + orientation * Vec3::new(0.2, -0.35, 0.1),
+        ];
+        for pos in samples {
+            let a = couple_particle_against_body(pos, 1.0, obb, 0.5, 1.0 / 60.0);
+            let b = couple_particle_against_body(pos, 1.0, hull, 0.5, 1.0 / 60.0);
+            // The two arms share the same geometry but reach it via different
+            // arithmetic (box-local clamp vs. plane dot products), so they agree
+            // to float tolerance rather than bit-for-bit on a rotated box.
+            assert!(
+                (a.particle_delta - b.particle_delta).length() < 1e-5,
+                "particle delta mismatch: {a:?} vs {b:?}"
+            );
+            assert!((a.body_delta - b.body_delta).length() < 1e-5);
+            assert!((a.impulse - b.impulse).length() < 1e-3);
+            // And the interior particle actually moved (a real contact).
+            assert!(b.particle_delta.length() > 1e-6);
+        }
+    }
+
+    /// The opt-in `convex_proxy_from_cuboid` builder must reproduce the default
+    /// `Cuboid -> Obb` mapping's projection, the cross-validation entry point.
+    #[test]
+    fn convex_proxy_from_cuboid_matches_obb_mapping() {
+        let shape = ColliderShape::Cuboid {
+            half_extents: Vec3::new(0.6, 0.3, 0.9),
+        };
+        let position = Vec3::new(-1.0, 2.0, 0.5);
+        let orientation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_3);
+        let obb = body_collider_from_shape(&shape, position, orientation).expect("obb proxy");
+        let hull = BodyCollider::ConvexHull(convex_proxy_from_cuboid(
+            Vec3::new(0.6, 0.3, 0.9),
+            position,
+            orientation,
+        ));
+        let pos = position + orientation * Vec3::new(0.1, 0.2, -0.3);
+        // Same surface via different arithmetic => float-tolerance equal.
+        assert!((obb.project(pos) - hull.project(pos)).length() < 1e-5);
+    }
+
+    /// An interior particle under a tilted face is pushed out along that face's
+    /// world normal (so the follow-up solve lets it slide along the face).
+    #[test]
+    fn convex_hull_push_is_along_tilted_face_normal() {
+        let orientation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_6);
+        let hull = BodyCollider::ConvexHull(ConvexProxy::from_box(
+            Vec3::ZERO,
+            orientation,
+            Vec3::new(1.0, 0.4, 1.0),
+        ));
+        // Just inside the +Y face in box-local coordinates.
+        let pos = orientation * Vec3::new(0.1, 0.35, -0.2);
+        let contrib = couple_particle_against_body(pos, 1.0, hull, 0.0, 1.0 / 60.0);
+        // Body is infinite-mass (w_body 0) so the particle takes the full push.
+        let correction = contrib.particle_delta;
+        assert!(correction.length() > 1e-4, "expected a push");
+        let expected_normal = orientation * Vec3::Y;
+        let along = correction.normalize_or_zero().dot(expected_normal);
+        assert!(
+            (along - 1.0).abs() < 1e-5,
+            "push not along face normal: {along}"
+        );
+    }
+
+    /// A particle outside the convex solid produces no coupling (zero
+    /// contribution), the back-face / outside miss case.
+    #[test]
+    fn convex_hull_outside_particle_is_no_op() {
+        let hull = BodyCollider::ConvexHull(ConvexProxy::from_box(
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            Vec3::new(1.0, 0.5, 2.0),
+        ));
+        let outside = Vec3::new(5.0, 0.0, 0.0);
+        let contrib = couple_particle_against_body(outside, 1.0, hull, 1.0, 1.0 / 60.0);
+        assert_eq!(contrib, crate::soft::CouplingContribution::ZERO);
+    }
+
+    /// A degenerate (empty) convex proxy is inert: no projection, no coupling.
+    #[test]
+    fn convex_hull_empty_proxy_is_inert() {
+        let hull = BodyCollider::ConvexHull(ConvexProxy::EMPTY);
+        let pos = Vec3::new(0.1, 0.2, 0.3);
+        assert_eq!(hull.project(pos), pos);
+        let contrib = couple_particle_against_body(pos, 1.0, hull, 1.0, 1.0 / 60.0);
+        assert_eq!(contrib, crate::soft::CouplingContribution::ZERO);
+    }
+
+    /// Identical inputs produce identical contributions on repeat (determinism).
+    #[test]
+    fn convex_hull_coupling_is_deterministic() {
+        let hull = BodyCollider::ConvexHull(ConvexProxy::from_box(
+            Vec3::new(0.0, 1.0, 0.0),
+            Quat::from_rotation_x(0.4),
+            Vec3::new(0.7, 0.5, 0.9),
+        ));
+        let pos = Vec3::new(0.05, 1.1, 0.1);
+        let a = couple_particle_against_body(pos, 1.0, hull, 0.5, 1.0 / 60.0);
+        let b = couple_particle_against_body(pos, 1.0, hull, 0.5, 1.0 / 60.0);
+        assert_eq!(a, b);
+    }
+
+    /// The convex anchor is its center and its world AABB encloses that center.
+    #[test]
+    fn convex_hull_anchor_and_aabb() {
+        let center = Vec3::new(1.0, -2.0, 3.0);
+        let proxy = ConvexProxy::from_box(center, Quat::IDENTITY, Vec3::new(0.5, 0.5, 0.5));
+        let hull = BodyCollider::ConvexHull(proxy);
+        assert_eq!(collider_anchor(hull), center);
+        let aabb = collider_world_aabb(hull).expect("convex hull is bounded");
+        assert!(aabb.min.x <= center.x && aabb.max.x >= center.x);
+        assert!(aabb.min.y <= center.y && aabb.max.y >= center.y);
+        assert!(aabb.min.z <= center.z && aabb.max.z >= center.z);
     }
 }

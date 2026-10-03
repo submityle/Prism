@@ -141,8 +141,9 @@ pub use soft::collision::{
     resolve_self_collision_virtual_augment, resolve_self_collision_virtual_augment_jacobi,
     resolve_self_collision_virtual_jacobi, resolve_self_collision_with_friction,
     resolve_self_collision_with_friction_jacobi, resolve_two_way_coupling, sphere_toi,
-    swept_pair_toi, Backstop, BodyCollider, CcdParams, CouplingBody, CouplingContribution,
-    LayerParams, SelfCcdParams, VirtualParticle, VirtualParticlePattern,
+    swept_pair_toi, Backstop, BodyCollider, CcdParams, ConvexProxy, CouplingBody,
+    CouplingContribution, LayerParams, Plane, SelfCcdParams, VirtualParticle,
+    VirtualParticlePattern, MAX_CONVEX_PLANES,
 };
 pub use soft::constraint::{
     mesh_volume, project_bending, project_long_range, project_pressure, project_strain_limit,
@@ -156,9 +157,9 @@ pub use soft::damage::{
 };
 pub use soft::particle::{ParticleHandle, ParticleStorage};
 pub use soft::rigid_coupling::{
-    couple_cloth_to_rigid, couple_cloth_to_rigid_angular, couple_cloth_to_rigid_friction,
-    gather_rigid_proxies, AngularCouplingReport, ClothRigidCouplingConfig, CouplingReport,
-    FrictionCouplingReport, RigidProxy,
+    convex_proxy_from_cuboid, couple_cloth_to_rigid, couple_cloth_to_rigid_angular,
+    couple_cloth_to_rigid_friction, gather_rigid_proxies, AngularCouplingReport,
+    ClothRigidCouplingConfig, CouplingReport, FrictionCouplingReport, RigidProxy,
 };
 pub use soft::solver::{
     SelfCollisionParams, SoftContacts, SoftSolver, SoftSolverConfig, VirtualSelfCollisionParams,

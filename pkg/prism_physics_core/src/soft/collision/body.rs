@@ -30,6 +30,7 @@ use glam::{Quat, Vec3};
 
 use crate::math::scalar::Real;
 
+use super::convex::ConvexProxy;
 use super::friction::{apply_coulomb_friction, sanitize_friction};
 use super::EPS_LEN_SQ;
 
@@ -83,6 +84,14 @@ pub enum BodyCollider {
         /// Half-extents along the box's local x/y/z axes.
         half_extents: Vec3,
     },
+    /// A bounded convex polytope proxy: the intersection of up to
+    /// [`MAX_CONVEX_PLANES`](super::MAX_CONVEX_PLANES) outward-facing
+    /// half-spaces. Interior points are pushed out along the face of least
+    /// penetration, the direct generalization of the [`BodyCollider::Obb`] arm
+    /// to bevelled crates, wedges, and low-poly props. The payload is a `Copy`,
+    /// stack-resident [`ConvexProxy`] so this variant leaves the shared
+    /// coupling kernel's by-value signatures unchanged.
+    ConvexHull(ConvexProxy),
 }
 
 impl BodyCollider {
@@ -108,6 +117,7 @@ impl BodyCollider {
                 orientation,
                 half_extents,
             } => project_out_of_obb(pos, center, orientation, half_extents),
+            BodyCollider::ConvexHull(proxy) => proxy.project_out(pos),
         }
     }
 }
