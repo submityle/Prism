@@ -89,6 +89,10 @@ pub mod winding_number;
 
 pub use winding_number::{generalized_winding_number, point_is_inside, winding_numbers};
 
+pub mod vertex_normals;
+
+pub use vertex_normals::{face_normals, vertex_normals};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
