@@ -48,6 +48,7 @@
 
 extern crate alloc;
 
+pub mod acoustic_format;
 pub mod air;
 pub mod ambisonics;
 pub mod articulation_loss;
@@ -102,6 +103,7 @@ pub mod spread;
 pub mod stage_support;
 pub mod useful_to_detrimental_ratio;
 
+pub use acoustic_format::AcousticFormat;
 pub use air::{AirAbsorption, AirAbsorptionNode, AtmosphericConditions, absorption_db_per_metre};
 pub use ambisonics::{
     FOA_CHANNELS, FoaEncoderNode, decode_foa, encode_foa_gains, encode_foa_sample, rotate_foa,
@@ -200,7 +202,8 @@ pub use room_clarity::{
 };
 pub use room_modes::{MAX_ROOM_MODES, ModeKind, RoomMode, RoomModes};
 pub use rooms::{
-    Portal, Room, RoomId, RoomNetwork, obliquity_factor, portal_coupling_gain, room_of,
+    Portal, PortalFrame, Room, RoomId, RoomNetwork, obliquity_factor, portal_coupling_gain,
+    room_of,
 };
 pub use scattering::{
     ScatteringSpectrum, SurfaceScatter, diffuse_fraction, lambert_directivity, lambert_weight,

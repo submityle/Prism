@@ -82,8 +82,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use bevy_math::{Vec3, ops};
-use prism_audio_core::math::{Sample, equal_power_pan};
+use bevy_math::{ops, Vec3};
+use prism_audio_core::math::{equal_power_pan, Sample};
 
 use crate::geometry::Listener;
 
@@ -149,7 +149,11 @@ impl ShoeboxRoom {
         for i in 0..6 {
             clamped[i] = wall_absorption[i].clamp(0.0, 1.0);
         }
-        Self { min, max, wall_absorption: clamped }
+        Self {
+            min,
+            max,
+            wall_absorption: clamped,
+        }
     }
 
     /// A room with the given corners and perfectly reflecting walls
@@ -312,10 +316,6 @@ fn wall_counts(n: i32) -> (u32, u32) {
 /// assert!(direct.direction.z < 0.0);
 /// ```
 #[must_use]
-#[expect(
-    clippy::needless_range_loop,
-    reason = "index-parallel access to out plus arithmetic on the loop index is clearer than iterator adaptors"
-)]
 pub fn compute_early_reflections(
     room: &ShoeboxRoom,
     listener: &Listener,
@@ -415,9 +415,9 @@ pub fn compute_early_reflections(
                     // Replace the weakest stored tap if this one is stronger.
                     let mut min_index = 0;
                     let mut min_gain = out[0].gain;
-                    for i in 1..cap {
-                        if out[i].gain < min_gain {
-                            min_gain = out[i].gain;
+                    for (i, slot) in out.iter().enumerate().take(cap).skip(1) {
+                        if slot.gain < min_gain {
+                            min_gain = slot.gain;
                             min_index = i;
                         }
                     }
@@ -552,12 +552,17 @@ mod tests {
         let source = Vec3::splat(2.0);
         let mut taps = empty_taps();
         let n = compute_early_reflections(
-            &room, &listener, source, 1, 48_000.0, DEFAULT_SOUND_SPEED, &mut taps,
+            &room,
+            &listener,
+            source,
+            1,
+            48_000.0,
+            DEFAULT_SOUND_SPEED,
+            &mut taps,
         );
         // 1 direct + 6 first-order images.
         assert_eq!(n, 7);
-        let firsts: Vec<&ReflectionTap> =
-            taps[..n].iter().filter(|t| t.order == 1).collect();
+        let firsts: Vec<&ReflectionTap> = taps[..n].iter().filter(|t| t.order == 1).collect();
         assert_eq!(firsts.len(), 6);
         // All six share one delay and one gain (distance == box side == 4 m).
         let d0 = firsts[0].delay_samples;
@@ -574,9 +579,7 @@ mod tests {
         let listener = Listener::default();
         let source = Vec3::new(0.0, 0.0, -3.43); // 3.43 m ahead
         let mut taps = empty_taps();
-        let n = compute_early_reflections(
-            &room, &listener, source, 0, 100.0, 343.0, &mut taps,
-        );
+        let n = compute_early_reflections(&room, &listener, source, 0, 100.0, 343.0, &mut taps);
         assert_eq!(n, 1);
         assert!(taps[0].is_direct);
         // 3.43 m / 343 m/s = 0.01 s * 100 Hz = 1 sample.
@@ -591,13 +594,9 @@ mod tests {
 
         let near = Vec3::new(0.0, 0.0, -2.0);
         let far = Vec3::new(0.0, 0.0, -4.0);
-        let _ = compute_early_reflections(
-            &room, &listener, near, 0, 48_000.0, 343.0, &mut taps,
-        );
+        let _ = compute_early_reflections(&room, &listener, near, 0, 48_000.0, 343.0, &mut taps);
         let g_near = taps[0].gain;
-        let _ = compute_early_reflections(
-            &room, &listener, far, 0, 48_000.0, 343.0, &mut taps,
-        );
+        let _ = compute_early_reflections(&room, &listener, far, 0, 48_000.0, 343.0, &mut taps);
         let g_far = taps[0].gain;
         // Doubling distance halves the 1/r gain.
         assert!(approx(g_near / g_far, 2.0, 1e-4));
@@ -613,18 +612,16 @@ mod tests {
         let big = ShoeboxRoom::rigid(Vec3::splat(-8.0), Vec3::splat(8.0));
 
         // Place listener at the centre of each; compare a first-order delay.
-        let n_small = compute_early_reflections(
-            &small, &listener, source, 1, 48_000.0, 343.0, &mut taps,
-        );
+        let n_small =
+            compute_early_reflections(&small, &listener, source, 1, 48_000.0, 343.0, &mut taps);
         let small_first = taps[..n_small]
             .iter()
             .filter(|t| t.order == 1)
             .map(|t| t.delay_samples)
             .max()
             .unwrap();
-        let n_big = compute_early_reflections(
-            &big, &listener, source, 1, 48_000.0, 343.0, &mut taps,
-        );
+        let n_big =
+            compute_early_reflections(&big, &listener, source, 1, 48_000.0, 343.0, &mut taps);
         let big_first = taps[..n_big]
             .iter()
             .filter(|t| t.order == 1)
@@ -643,9 +640,7 @@ mod tests {
         };
         let source = Vec3::splat(2.0);
         let mut taps = empty_taps();
-        let n = compute_early_reflections(
-            &room, &listener, source, 1, 48_000.0, 343.0, &mut taps,
-        );
+        let n = compute_early_reflections(&room, &listener, source, 1, 48_000.0, 343.0, &mut taps);
         // First-order gain must equal pure 1/distance (beta == 1 everywhere).
         let first = taps[..n].iter().find(|t| t.order == 1).unwrap();
         assert!(approx(first.gain, 1.0 / 4.0, 1e-5));
@@ -654,20 +649,14 @@ mod tests {
     #[test]
     fn full_absorption_silences_that_face() {
         // Absorb the x-high wall (index 1) completely; keep others rigid.
-        let room = ShoeboxRoom::new(
-            Vec3::ZERO,
-            Vec3::splat(4.0),
-            [0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
-        );
+        let room = ShoeboxRoom::new(Vec3::ZERO, Vec3::splat(4.0), [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
         let listener = Listener {
             position: Vec3::splat(2.0),
             ..Listener::default()
         };
         let source = Vec3::splat(2.0);
         let mut taps = empty_taps();
-        let n = compute_early_reflections(
-            &room, &listener, source, 1, 48_000.0, 343.0, &mut taps,
-        );
+        let n = compute_early_reflections(&room, &listener, source, 1, 48_000.0, 343.0, &mut taps);
         // The x-high image (nx = 1) must be silenced; the x-low image is intact.
         // Identify by direction: x-high image is to the listener's +X.
         let x_high = taps[..n]
@@ -687,9 +676,7 @@ mod tests {
         let listener = Listener::default();
         let source = Vec3::new(0.0, 0.0, -1.0);
         let mut taps = empty_taps();
-        let n = compute_early_reflections(
-            &room, &listener, source, 2, 48_000.0, 343.0, &mut taps,
-        );
+        let n = compute_early_reflections(&room, &listener, source, 2, 48_000.0, 343.0, &mut taps);
         // Every reported order is within [0, 2].
         for t in &taps[..n] {
             assert!(t.order <= 2);
@@ -709,9 +696,7 @@ mod tests {
         };
         let source = Vec3::new(0.0, 0.0, -3.0);
         let mut taps = empty_taps();
-        let n = compute_early_reflections(
-            &room, &listener, source, 0, 48_000.0, 343.0, &mut taps,
-        );
+        let n = compute_early_reflections(&room, &listener, source, 0, 48_000.0, 343.0, &mut taps);
         assert_eq!(n, 1);
         // With a +90 deg yaw the forward world source lands on local +X.
         assert!(taps[0].direction.x > 0.9);
@@ -725,20 +710,23 @@ mod tests {
         // Zero-size box.
         let flat = ShoeboxRoom::rigid(Vec3::ZERO, Vec3::ZERO);
         let listener = Listener::default();
-        let _ = compute_early_reflections(
-            &flat, &listener, Vec3::ZERO, 3, 48_000.0, 343.0, &mut taps,
-        );
+        let _ =
+            compute_early_reflections(&flat, &listener, Vec3::ZERO, 3, 48_000.0, 343.0, &mut taps);
 
         // Point outside the box, zero sample rate, and over-large order.
         let room = ShoeboxRoom::rigid(Vec3::splat(-1.0), Vec3::splat(1.0));
         let outside = Vec3::new(100.0, -50.0, 25.0);
-        let _ = compute_early_reflections(
-            &room, &listener, outside, 999, 0.0, 0.0, &mut taps,
-        );
+        let _ = compute_early_reflections(&room, &listener, outside, 999, 0.0, 0.0, &mut taps);
 
         // Source coincident with the listener.
         let _ = compute_early_reflections(
-            &room, &listener, listener.position, 1, 48_000.0, 343.0, &mut taps,
+            &room,
+            &listener,
+            listener.position,
+            1,
+            48_000.0,
+            343.0,
+            &mut taps,
         );
 
         // Empty output slice.
@@ -759,23 +747,23 @@ mod tests {
         let source = Vec3::new(0.5, 0.0, -0.5);
 
         let mut full = empty_taps();
-        let n_full = compute_early_reflections(
-            &room, &listener, source, 3, 48_000.0, 343.0, &mut full,
-        );
+        let n_full =
+            compute_early_reflections(&room, &listener, source, 3, 48_000.0, 343.0, &mut full);
         assert!(n_full > 4);
 
         let mut small = [ReflectionTap::SILENT; 4];
-        let n_small = compute_early_reflections(
-            &room, &listener, source, 3, 48_000.0, 343.0, &mut small,
-        );
+        let n_small =
+            compute_early_reflections(&room, &listener, source, 3, 48_000.0, 343.0, &mut small);
         assert_eq!(n_small, 4);
 
         // The weakest kept tap must be >= the 4th strongest overall.
-        let mut gains: Vec<Sample> =
-            full[..n_full].iter().map(|t| t.gain).collect();
+        let mut gains: Vec<Sample> = full[..n_full].iter().map(|t| t.gain).collect();
         gains.sort_by(|a, b| b.partial_cmp(a).unwrap());
         let fourth_strongest = gains[3];
-        let kept_min = small.iter().map(|t| t.gain).fold(Sample::INFINITY, Sample::min);
+        let kept_min = small
+            .iter()
+            .map(|t| t.gain)
+            .fold(Sample::INFINITY, Sample::min);
         assert!(kept_min >= fourth_strongest - 1e-6);
     }
 

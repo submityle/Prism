@@ -147,6 +147,53 @@ impl Room {
 
 /// A rectangular opening connecting two rooms (a door, window, or archway).
 ///
+/// The oriented rectangular aperture of a [`Portal`]: where the opening is,
+/// which way it faces, and how big it is.
+///
+/// Bundling the five geometric parameters that describe the aperture plane
+/// into one value keeps [`Portal::new`] readable and makes it impossible to
+/// transpose, for example, the width and height. The frame is centred at
+/// `center`, faces along `normal`, and is spanned by tangents derived from
+/// `up`; `half_width`/`half_height` are its half-extents along those tangents,
+/// in metres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
+pub struct PortalFrame {
+    /// World-space centre of the aperture, in metres.
+    pub center: Vec3,
+    /// Aperture facing direction (need not be normalised; re-normalised on use).
+    pub normal: Vec3,
+    /// Reference "up" tangent; orthogonalised against `normal` on use.
+    pub up: Vec3,
+    /// Half-width of the aperture along its right tangent, in metres.
+    pub half_width: Sample,
+    /// Half-height of the aperture along its up tangent, in metres.
+    pub half_height: Sample,
+}
+
+impl PortalFrame {
+    /// Builds an aperture frame from its centre, facing, up tangent, and
+    /// half-extents. The half-extents are stored verbatim; [`Portal::new`]
+    /// floors them at `0`.
+    #[inline]
+    #[must_use]
+    pub const fn new(
+        center: Vec3,
+        normal: Vec3,
+        up: Vec3,
+        half_width: Sample,
+        half_height: Sample,
+    ) -> Self {
+        Self {
+            center,
+            normal,
+            up,
+            half_width,
+            half_height,
+        }
+    }
+}
+
 /// The aperture is centred at `center`, faces along `normal`, and is spanned by
 /// tangents derived from `up`; `half_width`/`half_height` are its half-extents
 /// in those tangent directions. `openness` in `[0, 1]` is how far it is open
@@ -176,30 +223,25 @@ pub struct Portal {
 }
 
 impl Portal {
-    /// Builds a portal. `openness` is clamped to `[0, 1]`.
+    /// Builds a portal from its aperture [`PortalFrame`], the rooms on either
+    /// side (`None` == outside), how far it is open, and the closed-leaf
+    /// material. `openness` is clamped to `[0, 1]` and the frame's half-extents
+    /// are floored at `0`.
     #[inline]
     #[must_use]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "a portal is a flat aperture description; bundling its fields into a sub-struct would not reduce the caller burden"
-    )]
     pub fn new(
-        center: Vec3,
-        normal: Vec3,
-        up: Vec3,
-        half_width: Sample,
-        half_height: Sample,
+        frame: PortalFrame,
         front: Option<RoomId>,
         back: Option<RoomId>,
         openness: Sample,
         material: AcousticMaterial,
     ) -> Self {
         Self {
-            center,
-            normal,
-            up,
-            half_width: half_width.max(0.0),
-            half_height: half_height.max(0.0),
+            center: frame.center,
+            normal: frame.normal,
+            up: frame.up,
+            half_width: frame.half_width.max(0.0),
+            half_height: frame.half_height.max(0.0),
             front,
             back,
             openness: openness.clamp(0.0, 1.0),
@@ -374,7 +416,7 @@ pub fn room_of(point: Vec3, rooms: &[Room]) -> Option<RoomId> {
 /// use prism_audio_spatial::propagation::{
 ///     AcousticMaterial, PropagationBackend, PropagationPath,
 /// };
-/// use prism_audio_spatial::rooms::{Portal, Room, RoomId, RoomNetwork};
+/// use prism_audio_spatial::rooms::{Portal, PortalFrame, Room, RoomId, RoomNetwork};
 ///
 /// // Two rooms side by side along +X, joined by an open door on the shared wall.
 /// let brick = AcousticMaterial::new(40.0, 0.2);
@@ -383,7 +425,7 @@ pub fn room_of(point: Vec3, rooms: &[Room]) -> Option<RoomId> {
 ///     Room::new(RoomId(1), Vec3::new(5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
 /// ];
 /// let door = Portal::new(
-///     Vec3::ZERO, Vec3::X, Vec3::Y, 0.5, 1.0,
+///     PortalFrame::new(Vec3::ZERO, Vec3::X, Vec3::Y, 0.5, 1.0),
 ///     Some(RoomId(1)), Some(RoomId(0)), 1.0, AcousticMaterial::OPEN,
 /// );
 /// let portals = [door];
@@ -599,11 +641,7 @@ mod tests {
     #[test]
     fn portal_connects_symmetric() {
         let p = Portal::new(
-            Vec3::ZERO,
-            Vec3::X,
-            Vec3::Y,
-            0.5,
-            1.0,
+            PortalFrame::new(Vec3::ZERO, Vec3::X, Vec3::Y, 0.5, 1.0),
             Some(RoomId(1)),
             Some(RoomId(0)),
             1.0,
@@ -620,11 +658,7 @@ mod tests {
     fn portal_transmission_gain_blends_openness() {
         let closed_mat = AcousticMaterial::new(20.0, 0.0); // ~0.1 linear
         let mut p = Portal::new(
-            Vec3::ZERO,
-            Vec3::X,
-            Vec3::Y,
-            0.5,
-            1.0,
+            PortalFrame::new(Vec3::ZERO, Vec3::X, Vec3::Y, 0.5, 1.0),
             None,
             None,
             0.0,
@@ -641,11 +675,7 @@ mod tests {
     #[test]
     fn portal_new_clamps_openness_and_extents() {
         let p = Portal::new(
-            Vec3::ZERO,
-            Vec3::X,
-            Vec3::Y,
-            -1.0,
-            2.0,
+            PortalFrame::new(Vec3::ZERO, Vec3::X, Vec3::Y, -1.0, 2.0),
             None,
             None,
             5.0,
@@ -660,11 +690,7 @@ mod tests {
     fn closest_point_clamps_to_rectangle() {
         // Aperture in the x=0 plane, facing +X, 1 wide (y) and 2 tall (z-ish).
         let p = Portal::new(
-            Vec3::ZERO,
-            Vec3::X,
-            Vec3::Z,
-            0.5,
-            1.0,
+            PortalFrame::new(Vec3::ZERO, Vec3::X, Vec3::Z, 0.5, 1.0),
             None,
             None,
             1.0,
@@ -691,11 +717,7 @@ mod tests {
     #[test]
     fn coupling_stronger_on_axis_than_oblique() {
         let door = Portal::new(
-            Vec3::ZERO,
-            Vec3::X,
-            Vec3::Y,
-            0.5,
-            1.0,
+            PortalFrame::new(Vec3::ZERO, Vec3::X, Vec3::Y, 0.5, 1.0),
             Some(RoomId(1)),
             Some(RoomId(0)),
             1.0,
@@ -719,11 +741,7 @@ mod tests {
     fn coupling_closed_matches_material_on_axis() {
         let mat = AcousticMaterial::new(20.0, 0.0);
         let door = Portal::new(
-            Vec3::ZERO,
-            Vec3::X,
-            Vec3::Y,
-            0.5,
-            1.0,
+            PortalFrame::new(Vec3::ZERO, Vec3::X, Vec3::Y, 0.5, 1.0),
             Some(RoomId(1)),
             Some(RoomId(0)),
             0.0,
@@ -745,11 +763,7 @@ mod tests {
             Room::new(RoomId(1), Vec3::new(5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
         ];
         let door = Portal::new(
-            Vec3::ZERO,
-            Vec3::X,
-            Vec3::Y,
-            0.5,
-            1.0,
+            PortalFrame::new(Vec3::ZERO, Vec3::X, Vec3::Y, 0.5, 1.0),
             Some(RoomId(1)),
             Some(RoomId(0)),
             1.0,
@@ -819,11 +833,7 @@ mod tests {
             Room::new(RoomId(1), Vec3::new(5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
         ];
         let door = Portal::new(
-            Vec3::new(0.0, 0.0, 3.0),
-            Vec3::X,
-            Vec3::Y,
-            0.5,
-            1.0,
+            PortalFrame::new(Vec3::new(0.0, 0.0, 3.0), Vec3::X, Vec3::Y, 0.5, 1.0),
             Some(RoomId(1)),
             Some(RoomId(0)),
             1.0,
@@ -886,11 +896,7 @@ mod tests {
             Room::new(RoomId(1), Vec3::new(5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
         ];
         let door = Portal::new(
-            Vec3::ZERO,
-            Vec3::X,
-            Vec3::Y,
-            0.5,
-            1.0,
+            PortalFrame::new(Vec3::ZERO, Vec3::X, Vec3::Y, 0.5, 1.0),
             Some(RoomId(1)),
             Some(RoomId(0)),
             1.0,

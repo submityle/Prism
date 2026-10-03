@@ -68,7 +68,7 @@
 //! (exactly what [`HoaEncoderNode::set_direction`] does); first-order fields
 //! can still be rotated directly with [`crate::ambisonics::rotate_foa`].
 
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 
 use prism_audio_core::graph::{AudioNode, ProcessIo, RenderContext};
 use prism_audio_core::math::Sample;
@@ -111,17 +111,15 @@ pub const fn hoa_channel_count(order: usize) -> usize {
 #[inline]
 #[must_use]
 pub const fn acn_index(n: usize, m: isize) -> usize {
-    #[expect(
-        clippy::cast_possible_wrap,
-        reason = "n is a small Ambisonic degree; n*n + n never approaches isize::MAX"
-    )]
-    let base = (n * n + n) as isize;
-    #[expect(
-        clippy::cast_sign_loss,
-        reason = "base + m is non-negative for valid -n <= m <= n"
-    )]
-    let idx = (base + m) as usize;
-    idx
+    // `n^2 + n` is the ACN base of degree `n`; the order `m` in `-n..=n` then
+    // offsets it symmetrically. Working in `usize` with `unsigned_abs` avoids
+    // any signed-cast round trip while staying valid in a `const fn`.
+    let base = n * n + n;
+    if m >= 0 {
+        base + m.unsigned_abs()
+    } else {
+        base - m.unsigned_abs()
+    }
 }
 
 /// Odd double factorial `(2m - 1)!! = 1 * 3 * ... * (2m - 1)` for `m >= 1`.
@@ -168,10 +166,6 @@ fn sn3d_norm(n: usize, am: usize) -> Sample {
 /// associated Legendre functions `P_n^m(sin beta)` with the standard upward
 /// recurrences (no Condon-Shortley phase), then combines them with the `SN3D`
 /// normalisation.
-#[expect(
-    clippy::needless_range_loop,
-    reason = "the associated-Legendre recurrences walk p[n][m] triangularly by degree/order; index arithmetic between neighbouring terms is intrinsic and clearer than iterator adaptors"
-)]
 fn fill_hoa_coeffs(direction: Vec3, order: usize, coeffs: &mut [Sample; MAX_HOA_CHANNELS]) {
     // Zeroth order: the omni pressure is always unit under SN3D.
     coeffs[0] = W_GAIN;
@@ -214,22 +208,35 @@ fn fill_hoa_coeffs(direction: Vec3, order: usize, coeffs: &mut [Sample; MAX_HOA_
     p[0][0] = 1.0;
     // Diagonal: P[m][m] = (2m-1)!! * horiz^m (horiz = cos beta).
     let mut horiz_pow: Sample = 1.0;
-    for m in 1..=order {
+    for (m, row) in p.iter_mut().enumerate().take(order + 1).skip(1) {
         horiz_pow *= horiz;
-        p[m][m] = dblfact_odd(m) * horiz_pow;
+        row[m] = dblfact_odd(m) * horiz_pow;
     }
     // First sub-diagonal: P[m+1][m] = sin_beta * (2m + 1) * P[m][m].
-    for m in 0..order {
-        p[m + 1][m] = sin_beta * ((2 * m + 1) as Sample) * p[m][m];
+    let diag: [Sample; MAX_HOA_ORDER + 1] = core::array::from_fn(|i| p[i][i]);
+    for (row_index, row) in p.iter_mut().enumerate().take(order + 1).skip(1) {
+        let m = row_index - 1;
+        row[m] = sin_beta * ((2 * m + 1) as Sample) * diag[m];
     }
-    // Upward recurrence in n for the remaining terms.
-    for m in 0..=order {
-        for n in (m + 2)..=order {
-            let nn = n as Sample;
+    // Upward recurrence: fill P[n][m] for n >= m + 2. Each row n only reads the
+    // two rows below it (n - 1, n - 2), so a `split_at_mut` isolates the mutable
+    // destination row from the immutable predecessors, and `zip` over the three
+    // rows avoids indexing by the loop variable while preserving column order.
+    for n in 2..=order {
+        let (lower, upper) = p.split_at_mut(n);
+        let dst = &mut upper[0];
+        let prev1 = &lower[n - 1];
+        let prev2 = &lower[n - 2];
+        let nn = n as Sample;
+        for (m, ((cell, &p1), &p2)) in dst
+            .iter_mut()
+            .zip(prev1.iter())
+            .zip(prev2.iter())
+            .enumerate()
+            .take(n - 1)
+        {
             let mm = m as Sample;
-            p[n][m] =
-                ((2.0 * nn - 1.0) * sin_beta * p[n - 1][m] - (nn + mm - 1.0) * p[n - 2][m])
-                    / (nn - mm);
+            *cell = ((2.0 * nn - 1.0) * sin_beta * p1 - (nn + mm - 1.0) * p2) / (nn - mm);
         }
     }
 
@@ -335,7 +342,11 @@ impl HoaEncoderNode {
         let active_channels = hoa_channel_count(order);
         let mut gains = [Smoothed::new(0.0); MAX_HOA_CHANNELS];
         gains[0] = Smoothed::new(W_GAIN);
-        Self { gains, order, active_channels }
+        Self {
+            gains,
+            order,
+            active_channels,
+        }
     }
 
     /// The Ambisonic order this encoder produces.
@@ -522,7 +533,10 @@ mod tests {
             let mut coeffs = [0.0 as Sample; MAX_HOA_CHANNELS];
             let n = encode_hoa(dir, order, &mut coeffs);
             let here = decode_hoa(&coeffs[..n], dir, order);
-            assert!(approx(here, 1.0), "order {order}: decode at source = {here}");
+            assert!(
+                approx(here, 1.0),
+                "order {order}: decode at source = {here}"
+            );
         }
     }
 
@@ -548,7 +562,10 @@ mod tests {
         let n3 = encode_hoa(FRONT, 3, &mut o3);
         let leak1 = decode_hoa(&o1[..n1], side, 1).abs();
         let leak3 = decode_hoa(&o3[..n3], side, 3).abs();
-        assert!(leak3 < leak1, "order3 leak {leak3} should be < order1 {leak1}");
+        assert!(
+            leak3 < leak1,
+            "order3 leak {leak3} should be < order1 {leak1}"
+        );
     }
 
     #[test]
@@ -606,7 +623,11 @@ mod tests {
         let mut input = AudioBuffer::new(ChannelLayout::Mono, 8);
         input.channel_mut(0).copy_from_slice(&[1.0; 8]);
         let mut outputs = [AudioBuffer::new(ChannelLayout::Quad, 8)];
-        let ctx = RenderContext { sample_rate: 48_000, frames: 8, playhead: 0 };
+        let ctx = RenderContext {
+            sample_rate: 48_000,
+            frames: 8,
+            playhead: 0,
+        };
         let inputs = [input];
         {
             let mut io = ProcessIo::new(&inputs, &mut outputs);
@@ -633,7 +654,11 @@ mod tests {
         let mut input = AudioBuffer::new(ChannelLayout::Mono, 8);
         input.channel_mut(0).copy_from_slice(&[1.0; 8]);
         let mut outputs = [AudioBuffer::new(ChannelLayout::Quad, 8)];
-        let ctx = RenderContext { sample_rate: 48_000, frames: 8, playhead: 0 };
+        let ctx = RenderContext {
+            sample_rate: 48_000,
+            frames: 8,
+            playhead: 0,
+        };
         let inputs = [input];
         {
             let mut io = ProcessIo::new(&inputs, &mut outputs);
@@ -659,7 +684,11 @@ mod tests {
         let mut input = AudioBuffer::new(ChannelLayout::Mono, 4);
         input.channel_mut(0).copy_from_slice(&[1.0; 4]);
         let mut outputs = [AudioBuffer::new(ChannelLayout::Quad, 4)];
-        let ctx = RenderContext { sample_rate: 48_000, frames: 4, playhead: 0 };
+        let ctx = RenderContext {
+            sample_rate: 48_000,
+            frames: 4,
+            playhead: 0,
+        };
         let inputs = [input];
         {
             let mut io = ProcessIo::new(&inputs, &mut outputs);
@@ -671,7 +700,12 @@ mod tests {
         let mut target = [0.0 as Sample; MAX_HOA_CHANNELS];
         encode_hoa(LEFT, 1, &mut target);
         for k in 0..4 {
-            assert!(approx(g[k], target[k]), "channel {k}: {} vs {}", g[k], target[k]);
+            assert!(
+                approx(g[k], target[k]),
+                "channel {k}: {} vs {}",
+                g[k],
+                target[k]
+            );
         }
     }
 
@@ -684,7 +718,11 @@ mod tests {
         let mut input = AudioBuffer::new(ChannelLayout::Mono, 4);
         input.channel_mut(0).copy_from_slice(&[1.0; 4]);
         let mut outputs = [AudioBuffer::new(ChannelLayout::Mono, 4)];
-        let ctx = RenderContext { sample_rate: 48_000, frames: 4, playhead: 0 };
+        let ctx = RenderContext {
+            sample_rate: 48_000,
+            frames: 4,
+            playhead: 0,
+        };
         let inputs = [input];
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx, &mut io);

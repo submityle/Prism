@@ -64,11 +64,11 @@
 //! across targets and can be golden-compared sample-for-sample. This is
 //! enforced by the workspace lints.
 
-use bevy_math::{Mat3, Quat, Vec3, ops};
+use bevy_math::{ops, Mat3, Quat, Vec3};
 
 use prism_audio_core::math::Sample;
 
-use crate::hoa::{MAX_HOA_CHANNELS, MAX_HOA_ORDER, acn_index, hoa_channel_count};
+use crate::hoa::{acn_index, hoa_channel_count, MAX_HOA_CHANNELS, MAX_HOA_ORDER};
 
 /// The largest per-degree block dimension, `2 * MAX_HOA_ORDER + 1` (third
 /// order gives a `7 x 7` block).
@@ -114,7 +114,12 @@ fn r1_get(r1: &[[Sample; 3]; 3], a: isize, b: isize) -> Sample {
 /// panic free and correct: out-of-block terms are exactly the ones the
 /// `u`/`v`/`w` coefficients multiply by zero.
 #[inline]
-fn block_get(block: &[[Sample; MAX_BLOCK_DIM]; MAX_BLOCK_DIM], bound: isize, a: isize, b: isize) -> Sample {
+fn block_get(
+    block: &[[Sample; MAX_BLOCK_DIM]; MAX_BLOCK_DIM],
+    bound: isize,
+    a: isize,
+    b: isize,
+) -> Sample {
     if a < -bound || a > bound || b < -bound || b > bound {
         return 0.0;
     }
@@ -263,10 +268,6 @@ impl HoaRotationMatrix {
     /// free. A non-finite or (near) zero-length quaternion is treated as the
     /// identity rotation.
     #[must_use]
-    #[expect(
-        clippy::needless_range_loop,
-        reason = "the Ivanic-Ruedenberg recurrence and block placement walk paired (row, col) SH orders with signed offset arithmetic; explicit indices are clearer and match the neighbouring hoa module"
-    )]
     pub fn from_quat(order: usize, rotation: Quat) -> Self {
         let order = order.min(MAX_HOA_ORDER);
         let channels = hoa_channel_count(order);
@@ -275,7 +276,11 @@ impl HoaRotationMatrix {
         // Zeroth order: the omni W component is rotation invariant.
         matrix[0][0] = 1.0;
         if order == 0 {
-            return Self { matrix, channels, order };
+            return Self {
+                matrix,
+                channels,
+                order,
+            };
         }
 
         // Sanitise the quaternion off the hot path: guard against non-finite or
@@ -303,9 +308,9 @@ impl HoaRotationMatrix {
             let li = l as isize;
             let mut cur = [[0.0 as Sample; MAX_BLOCK_DIM]; MAX_BLOCK_DIM];
             let dim = 2 * l + 1;
-            for mi in 0..dim {
+            for (mi, cur_row) in cur.iter_mut().enumerate().take(dim) {
                 let m = mi as isize - li;
-                for ni in 0..dim {
+                for (ni, cur_cell) in cur_row.iter_mut().enumerate().take(dim) {
                     let n = ni as isize - li;
 
                     let lf = l as Sample;
@@ -337,14 +342,18 @@ impl HoaRotationMatrix {
                     if w != 0.0 {
                         value += w * w_term(m, n, li, &r1, &prev);
                     }
-                    cur[mi][ni] = value;
+                    *cur_cell = value;
                     matrix[acn_index(l, m)][acn_index(l, n)] = value;
                 }
             }
             prev = cur;
         }
 
-        Self { matrix, channels, order }
+        Self {
+            matrix,
+            channels,
+            order,
+        }
     }
 
     /// The Ambisonic order this matrix rotates.
@@ -366,19 +375,15 @@ impl HoaRotationMatrix {
     /// Only the leading `min(channels, coeffs.len())` channels are touched, so
     /// a shorter buffer never panics; trailing channels are left unchanged.
     /// **Real-time**: allocation, lock, and panic free.
-    #[expect(
-        clippy::needless_range_loop,
-        reason = "a dense matrix-vector product over paired (row, col) channel indices reads more clearly with explicit indices than zipped iterators"
-    )]
     pub fn apply(&self, coeffs: &mut [Sample]) {
         let n = self.channels.min(coeffs.len());
         let mut out = [0.0 as Sample; MAX_HOA_CHANNELS];
-        for i in 0..n {
-            let mut acc = 0.0 as Sample;
-            for j in 0..n {
-                acc += self.matrix[i][j] * coeffs[j];
-            }
-            out[i] = acc;
+        for (out_i, row) in out[..n].iter_mut().zip(self.matrix.iter()) {
+            *out_i = row[..n]
+                .iter()
+                .zip(&coeffs[..n])
+                .map(|(&weight, &sample)| weight * sample)
+                .sum();
         }
         coeffs[..n].copy_from_slice(&out[..n]);
     }
@@ -477,7 +482,8 @@ mod tests {
 
     #[test]
     fn composite_rotation_matches_encode() {
-        let q = Quat::from_rotation_y(0.6) * Quat::from_rotation_x(-0.4) * Quat::from_rotation_z(1.1);
+        let q =
+            Quat::from_rotation_y(0.6) * Quat::from_rotation_x(-0.4) * Quat::from_rotation_z(1.1);
         let dir = Vec3::new(0.5, 0.5, -0.5).normalize();
         for order in 1..=MAX_HOA_ORDER {
             assert_rotation_matches_encode(dir, q, order);
@@ -541,10 +547,17 @@ mod tests {
         let n = encode_hoa(dir, MAX_HOA_ORDER, &mut coeffs);
         let before = coeffs;
         // A zero quaternion is non-normalisable and must not produce NaNs.
-        rotate_hoa(&mut coeffs[..n], MAX_HOA_ORDER, Quat::from_xyzw(0.0, 0.0, 0.0, 0.0));
+        rotate_hoa(
+            &mut coeffs[..n],
+            MAX_HOA_ORDER,
+            Quat::from_xyzw(0.0, 0.0, 0.0, 0.0),
+        );
         for k in 0..n {
             assert!(coeffs[k].is_finite());
-            assert!(approx(coeffs[k], before[k]), "channel {k} moved on identity fallback");
+            assert!(
+                approx(coeffs[k], before[k]),
+                "channel {k} moved on identity fallback"
+            );
         }
     }
 

@@ -66,11 +66,12 @@
 //! from [`crate::rooms`]) and elementary bounded graph search (acyclic
 //! depth-first enumeration of shortest paths), with no proprietary algorithm.
 
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 use prism_audio_core::math::Sample;
 
+use crate::acoustic_format::AcousticFormat;
 use crate::geometry::{Emitter, Listener};
-use crate::rooms::{Portal, Room, RoomId, portal_coupling_gain, room_of};
+use crate::rooms::{portal_coupling_gain, room_of, Portal, Room, RoomId};
 
 /// Maximum number of rooms the search will consider (extra rooms are ignored).
 pub const MAX_ROOMS: usize = 64;
@@ -87,12 +88,8 @@ pub const MAX_PORTAL_HOPS: usize = 4;
 /// Maximum number of routed paths returned by a single query.
 pub const MAX_ROUTED_PATHS: usize = 32;
 
-/// Default speed of sound in dry air at room temperature (metres per second).
-pub const DEFAULT_SOUND_SPEED: Sample = 343.0;
+pub use crate::acoustic_format::DEFAULT_SOUND_SPEED;
 
-/// Largest representable delay in whole samples (matches the crate's other
-/// delay-line modules); accumulated distances that exceed it are clamped.
-const MAX_DELAY_SAMPLES: usize = 1 << 18;
 
 /// Distances below this (metres) are clamped before the spreading division to
 /// avoid a blow-up when waypoints coincide.
@@ -114,7 +111,10 @@ pub struct PortalHop {
 
 impl PortalHop {
     /// A placeholder hop used to initialise fixed-size storage.
-    const EMPTY: Self = Self { portal_index: 0, aperture: Vec3::ZERO };
+    const EMPTY: Self = Self {
+        portal_index: 0,
+        aperture: Vec3::ZERO,
+    };
 }
 
 /// One routed arrival: an ordered chain of portal hops with the accumulated
@@ -167,28 +167,6 @@ fn distance(a: Vec3, b: Vec3) -> Sample {
     ops::sqrt(d.dot(d))
 }
 
-/// Converts a delay in seconds to whole samples by integer stepping (no
-/// float-to-int cast), rounding to nearest and clamping to [`MAX_DELAY_SAMPLES`].
-#[must_use]
-fn seconds_to_samples(seconds: Sample, sample_rate: Sample) -> usize {
-    let cap = MAX_DELAY_SAMPLES as Sample;
-    let exact = (seconds * sample_rate).max(0.0).min(cap);
-    let mut n: usize = 0;
-    let mut acc: Sample = 0.0;
-    while acc + 1024.0 <= exact {
-        acc += 1024.0;
-        n += 1024;
-    }
-    while acc + 1.0 <= exact {
-        acc += 1.0;
-        n += 1;
-    }
-    if exact - acc >= 0.5 {
-        n += 1;
-    }
-    n
-}
-
 /// Mutable state threaded through the recursive search.
 struct Search<'a> {
     portals: &'a [Portal],
@@ -196,8 +174,7 @@ struct Search<'a> {
     listener_pos: Vec3,
     listener_room: Option<RoomId>,
     max_hops: usize,
-    sample_rate: Sample,
-    sound_speed: Sample,
+    format: AcousticFormat,
     out: &'a mut [RoutedPath],
     cap: usize,
     count: usize,
@@ -269,7 +246,10 @@ impl Search<'_> {
             };
             total_distance += distance(prev, aperture);
             gain *= portal_coupling_gain(next, prev, portal);
-            hops[i] = PortalHop { portal_index: idx, aperture };
+            hops[i] = PortalHop {
+                portal_index: idx,
+                aperture,
+            };
             prev = aperture;
             i += 1;
         }
@@ -278,8 +258,7 @@ impl Search<'_> {
 
         let spread = 1.0 / total_distance.max(MIN_DISTANCE_METRES);
         gain *= spread;
-        let speed = self.sound_speed.max(1.0);
-        let delay_samples = seconds_to_samples(total_distance / speed, self.sample_rate);
+        let delay_samples = self.format.delay_samples(total_distance);
 
         let path = RoutedPath {
             hop_count: depth,
@@ -338,8 +317,9 @@ impl Search<'_> {
 /// use bevy_math::Vec3;
 /// use prism_audio_spatial::geometry::{Emitter, Listener};
 /// use prism_audio_spatial::propagation::AcousticMaterial;
-/// use prism_audio_spatial::rooms::{Portal, Room, RoomId};
-/// use prism_audio_spatial::portal_graph::{route_portals, RoutedPath, DEFAULT_SOUND_SPEED};
+/// use prism_audio_spatial::rooms::{Portal, PortalFrame, Room, RoomId};
+/// use prism_audio_spatial::acoustic_format::AcousticFormat;
+/// use prism_audio_spatial::portal_graph::{route_portals, RoutedPath};
 ///
 /// // A linear chain A(-10) - B(0) - C(10) joined by two open doors.
 /// let rooms = [
@@ -348,32 +328,27 @@ impl Search<'_> {
 ///     Room::new(RoomId(2), Vec3::new(10.0, 0.0, 0.0), Vec3::splat(5.0), AcousticMaterial::OPEN),
 /// ];
 /// let portals = [
-///     Portal::new(Vec3::new(-5.0, 0.0, 0.0), Vec3::X, Vec3::Y, 1.0, 1.0,
+///     Portal::new(PortalFrame::new(Vec3::new(-5.0, 0.0, 0.0), Vec3::X, Vec3::Y, 1.0, 1.0),
 ///         Some(RoomId(1)), Some(RoomId(0)), 1.0, AcousticMaterial::OPEN),
-///     Portal::new(Vec3::new(5.0, 0.0, 0.0), Vec3::X, Vec3::Y, 1.0, 1.0,
+///     Portal::new(PortalFrame::new(Vec3::new(5.0, 0.0, 0.0), Vec3::X, Vec3::Y, 1.0, 1.0),
 ///         Some(RoomId(2)), Some(RoomId(1)), 1.0, AcousticMaterial::OPEN),
 /// ];
 /// let listener = Listener { position: Vec3::new(-9.0, 0.0, 0.0), ..Listener::default() };
 /// let emitter = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
 ///
 /// let mut out = [RoutedPath::SILENT; 8];
-/// let n = route_portals(&rooms, &portals, &listener, &emitter, 4, 48_000.0, DEFAULT_SOUND_SPEED, &mut out);
+/// let n = route_portals(&rooms, &portals, &listener, &emitter, 4, AcousticFormat::with_default_speed(48_000.0), &mut out);
 /// assert_eq!(n, 1);
 /// assert_eq!(out[0].hop_count, 2);
 /// ```
 #[must_use]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a routing query needs the full scene, endpoints, and audio format"
-)]
 pub fn route_portals(
     rooms: &[Room],
     portals: &[Portal],
     listener: &Listener,
     emitter: &Emitter,
     max_hops: usize,
-    sample_rate: Sample,
-    sound_speed: Sample,
+    format: AcousticFormat,
     out: &mut [RoutedPath],
 ) -> usize {
     let cap = out.len().min(MAX_ROUTED_PATHS);
@@ -388,8 +363,7 @@ pub fn route_portals(
     if source_room == listener_room {
         let dist = distance(emitter.position, listener.position);
         let spread = 1.0 / dist.max(MIN_DISTANCE_METRES);
-        let speed = sound_speed.max(1.0);
-        let delay_samples = seconds_to_samples(dist / speed, sample_rate);
+        let delay_samples = format.delay_samples(dist);
         out[0] = RoutedPath {
             hop_count: 0,
             hops: [PortalHop::EMPTY; MAX_PORTAL_HOPS],
@@ -412,8 +386,7 @@ pub fn route_portals(
         listener_pos: listener.position,
         listener_room,
         max_hops: effective_hops,
-        sample_rate,
-        sound_speed,
+        format,
         out,
         cap,
         count: 0,
@@ -434,6 +407,7 @@ pub fn route_portals(
 mod tests {
     use super::*;
     use crate::propagation::AcousticMaterial;
+    use crate::rooms::PortalFrame;
 
     const FS: Sample = 48_000.0;
 
@@ -443,11 +417,7 @@ mod tests {
 
     fn open_door(center: Vec3, a: u32, b: u32) -> Portal {
         Portal::new(
-            center,
-            Vec3::X,
-            Vec3::Y,
-            1.0,
-            1.0,
+            PortalFrame::new(center, Vec3::X, Vec3::Y, 1.0, 1.0),
             Some(RoomId(a)),
             Some(RoomId(b)),
             1.0,
@@ -472,10 +442,21 @@ mod tests {
     #[test]
     fn two_hop_chain_found_in_order() {
         let (rooms, portals) = chain_scene();
-        let listener = Listener { position: Vec3::new(-9.0, 0.0, 0.0), ..Listener::default() };
+        let listener = Listener {
+            position: Vec3::new(-9.0, 0.0, 0.0),
+            ..Listener::default()
+        };
         let emitter = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
         let mut out = [RoutedPath::SILENT; 8];
-        let n = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut out);
+        let n = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut out,
+        );
         assert_eq!(n, 1);
         assert_eq!(out[0].hop_count, 2);
         // Source is in room C, so the first portal traversed is the C<->B door
@@ -487,10 +468,21 @@ mod tests {
     #[test]
     fn detour_longer_than_straight_line() {
         let (rooms, portals) = chain_scene();
-        let listener = Listener { position: Vec3::new(-9.0, 0.0, 0.0), ..Listener::default() };
+        let listener = Listener {
+            position: Vec3::new(-9.0, 0.0, 0.0),
+            ..Listener::default()
+        };
         let emitter = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
         let mut out = [RoutedPath::SILENT; 8];
-        let n = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut out);
+        let n = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut out,
+        );
         assert_eq!(n, 1);
         let straight = distance(emitter.position, listener.position);
         // Doors are on the direct axis here, so the detour equals the straight
@@ -510,10 +502,21 @@ mod tests {
             open_door(Vec3::new(-5.0, 0.0, 3.0), 1, 0),
             open_door(Vec3::new(5.0, 0.0, 3.0), 2, 1),
         ];
-        let listener = Listener { position: Vec3::new(-9.0, 0.0, 0.0), ..Listener::default() };
+        let listener = Listener {
+            position: Vec3::new(-9.0, 0.0, 0.0),
+            ..Listener::default()
+        };
         let emitter = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
         let mut out = [RoutedPath::SILENT; 8];
-        let n = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut out);
+        let n = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut out,
+        );
         assert_eq!(n, 1);
         let straight = distance(emitter.position, listener.position);
         // The offset doors force a detour strictly longer than the straight line.
@@ -524,10 +527,21 @@ mod tests {
     #[test]
     fn same_room_is_zero_hop_direct() {
         let (rooms, portals) = chain_scene();
-        let listener = Listener { position: Vec3::new(9.5, 0.0, 0.0), ..Listener::default() };
+        let listener = Listener {
+            position: Vec3::new(9.5, 0.0, 0.0),
+            ..Listener::default()
+        };
         let emitter = Emitter::point(Vec3::new(10.5, 0.0, 0.0), Vec3::ZERO);
         let mut out = [RoutedPath::SILENT; 8];
-        let n = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut out);
+        let n = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut out,
+        );
         assert_eq!(n, 1);
         assert_eq!(out[0].hop_count, 0);
         let dist = distance(emitter.position, listener.position);
@@ -542,10 +556,21 @@ mod tests {
             open_room(1, Vec3::new(10.0, 0.0, 0.0)),
         ];
         let portals: [Portal; 0] = [];
-        let listener = Listener { position: Vec3::new(-9.0, 0.0, 0.0), ..Listener::default() };
+        let listener = Listener {
+            position: Vec3::new(-9.0, 0.0, 0.0),
+            ..Listener::default()
+        };
         let emitter = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
         let mut out = [RoutedPath::SILENT; 8];
-        let n = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut out);
+        let n = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut out,
+        );
         assert_eq!(n, 0);
     }
 
@@ -564,10 +589,21 @@ mod tests {
             open_door(Vec3::new(5.0, 0.0, 5.0), 2, 1),  // B<->C
             open_door(Vec3::new(0.0, 0.0, 0.0), 2, 0),  // C<->A
         ];
-        let listener = Listener { position: Vec3::new(-9.0, 0.0, 0.0), ..Listener::default() };
+        let listener = Listener {
+            position: Vec3::new(-9.0, 0.0, 0.0),
+            ..Listener::default()
+        };
         let emitter = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
         let mut out = [RoutedPath::SILENT; 8];
-        let n = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut out);
+        let n = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut out,
+        );
         // The one-hop direct route and the two-hop detour: exactly two paths.
         assert_eq!(n, 2);
         for path in &out[..n] {
@@ -578,11 +614,22 @@ mod tests {
     #[test]
     fn max_hops_clamp_blocks_long_route() {
         let (rooms, portals) = chain_scene();
-        let listener = Listener { position: Vec3::new(-9.0, 0.0, 0.0), ..Listener::default() };
+        let listener = Listener {
+            position: Vec3::new(-9.0, 0.0, 0.0),
+            ..Listener::default()
+        };
         let emitter = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
         let mut out = [RoutedPath::SILENT; 8];
         // The only route needs 2 hops; allowing only 1 finds nothing.
-        let n = route_portals(&rooms, &portals, &listener, &emitter, 1, FS, DEFAULT_SOUND_SPEED, &mut out);
+        let n = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            1,
+            AcousticFormat::with_default_speed(FS),
+            &mut out,
+        );
         assert_eq!(n, 0);
     }
 
@@ -599,10 +646,21 @@ mod tests {
             open_door(Vec3::new(5.0, 0.0, 5.0), 2, 1),
             open_door(Vec3::new(0.0, 0.0, 0.0), 2, 0),
         ];
-        let listener = Listener { position: Vec3::new(-9.0, 0.0, 0.0), ..Listener::default() };
+        let listener = Listener {
+            position: Vec3::new(-9.0, 0.0, 0.0),
+            ..Listener::default()
+        };
         let emitter = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
         let mut out = [RoutedPath::SILENT; 8];
-        let n = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut out);
+        let n = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut out,
+        );
         assert_eq!(n, 2);
         // Find the 1-hop and 2-hop paths and confirm the shorter one is louder.
         let one = out[..n].iter().find(|p| p.hop_count == 1).copied();
@@ -626,17 +684,36 @@ mod tests {
             open_door(Vec3::new(5.0, 0.0, 5.0), 2, 1),
             open_door(Vec3::new(0.0, 0.0, 0.0), 2, 0),
         ];
-        let listener = Listener { position: Vec3::new(-9.0, 0.0, 0.0), ..Listener::default() };
+        let listener = Listener {
+            position: Vec3::new(-9.0, 0.0, 0.0),
+            ..Listener::default()
+        };
         let emitter = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
         let mut full = [RoutedPath::SILENT; 8];
-        let nf = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut full);
+        let nf = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut full,
+        );
         assert_eq!(nf, 2);
         let strongest = full[..nf]
             .iter()
             .map(|p| p.total_gain)
             .fold(0.0_f32, f32::max);
         let mut one = [RoutedPath::SILENT; 1];
-        let n = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut one);
+        let n = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut one,
+        );
         assert_eq!(n, 1);
         assert!((one[0].total_gain - strongest).abs() < 1e-6);
     }
@@ -644,12 +721,31 @@ mod tests {
     #[test]
     fn deterministic_portal_order() {
         let (rooms, portals) = chain_scene();
-        let listener = Listener { position: Vec3::new(-9.0, 0.0, 0.0), ..Listener::default() };
+        let listener = Listener {
+            position: Vec3::new(-9.0, 0.0, 0.0),
+            ..Listener::default()
+        };
         let emitter = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
         let mut a = [RoutedPath::SILENT; 8];
         let mut b = [RoutedPath::SILENT; 8];
-        let na = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut a);
-        let nb = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut b);
+        let na = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut a,
+        );
+        let nb = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut b,
+        );
         assert_eq!(na, nb);
         assert_eq!(a[..na], b[..nb]);
     }
@@ -662,31 +758,61 @@ mod tests {
         let emitter = Emitter::point(Vec3::ZERO, Vec3::ZERO);
         // Empty scene: both endpoints are outside -> one zero-hop direct path.
         let mut out = [RoutedPath::SILENT; 4];
-        let n = route_portals(&empty_rooms, &empty_portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut out);
+        let n = route_portals(
+            &empty_rooms,
+            &empty_portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut out,
+        );
         assert_eq!(n, 1);
         assert_eq!(out[0].hop_count, 0);
 
         // Zero-length output slice.
         let mut none: [RoutedPath; 0] = [];
-        let n0 = route_portals(&empty_rooms, &empty_portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut none);
+        let n0 = route_portals(
+            &empty_rooms,
+            &empty_portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut none,
+        );
         assert_eq!(n0, 0);
 
         // Zero sample rate and zero sound speed must not divide by zero/panic.
         let (rooms, portals) = chain_scene();
-        let l2 = Listener { position: Vec3::new(-9.0, 0.0, 0.0), ..Listener::default() };
+        let l2 = Listener {
+            position: Vec3::new(-9.0, 0.0, 0.0),
+            ..Listener::default()
+        };
         let e2 = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
         let mut out2 = [RoutedPath::SILENT; 8];
-        let n2 = route_portals(&rooms, &portals, &l2, &e2, 4, 0.0, 0.0, &mut out2);
+        let n2 = route_portals(&rooms, &portals, &l2, &e2, 4, AcousticFormat::new(0.0, 0.0), &mut out2);
         assert_eq!(n2, 1);
     }
 
     #[test]
     fn coincident_source_listener_is_finite() {
         let (rooms, portals) = chain_scene();
-        let listener = Listener { position: Vec3::new(10.0, 0.0, 0.0), ..Listener::default() };
+        let listener = Listener {
+            position: Vec3::new(10.0, 0.0, 0.0),
+            ..Listener::default()
+        };
         let emitter = Emitter::point(Vec3::new(10.0, 0.0, 0.0), Vec3::ZERO);
         let mut out = [RoutedPath::SILENT; 4];
-        let n = route_portals(&rooms, &portals, &listener, &emitter, 4, FS, DEFAULT_SOUND_SPEED, &mut out);
+        let n = route_portals(
+            &rooms,
+            &portals,
+            &listener,
+            &emitter,
+            4,
+            AcousticFormat::with_default_speed(FS),
+            &mut out,
+        );
         assert_eq!(n, 1);
         assert_eq!(out[0].hop_count, 0);
         assert!(out[0].total_gain.is_finite());
