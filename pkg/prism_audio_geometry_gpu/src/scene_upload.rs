@@ -5,15 +5,21 @@
 //! every kernel dispatch. Each record carries the three world-space vertices,
 //! the geometric face normal (the same `(b - a) x (c - a)` unit normal the
 //! `CPU` [`AcousticScene::triangle_normal`] computes, or zero for a degenerate
-//! face), and the two acoustic gains the kernels need.
+//! face), and the per-band acoustics the kernels need: a three-band
+//! transmission spectrum, a three-band reflection spectrum, and the scalar
+//! scattering coefficient.
 //!
-//! # Why the gains are pre-computed on the host
+//! # Why the spectra are pre-computed on the host
 //!
-//! The `CPU` backend derives a surface's linear transmission gain from its
-//! decibel transmission loss (`10^(-loss/20)`) and clamps the reflection
-//! coefficient to `[0, 1]`. Both are evaluated here, on the host, so the device
-//! buffer stores finished linear gains. The kernels then need only multiplies,
-//! dot products, and a square root, keeping every transcendental out of the
+//! The `CPU` backend stores each surface as a
+//! [`BandedAcousticMaterial`](prism_audio_spatial::material_spectrum::BandedAcousticMaterial):
+//! a low/mid/high [`BandGains`](prism_audio_spatial::BandGains) transmission
+//! spectrum, the matching reflection spectrum, and a scattering coefficient. All
+//! three are already clamped to `[0, 1]` on construction, so the host simply
+//! copies the three band gains of each spectrum (plus the scalar scattering)
+//! into the device record. The kernels then need only multiplies, dot products,
+//! and a square root -- the same per-band `combine`/`scaled`/`split_peak`
+//! arithmetic the `CPU` path uses -- keeping every transcendental out of the
 //! shader so the `GPU` result tracks the `CPU` golden twin without a
 //! platform-dependent `exp`/`log` approximation drifting the two apart.
 //!
@@ -54,12 +60,17 @@ pub(crate) struct GpuTriangle {
     /// Unit face normal `(b - a) x (c - a)` normalised, or zero when the face
     /// is degenerate (xyz; w padding).
     pub(crate) normal: [f32; 4],
-    /// Linear transmission gain through this surface, in `(0, 1]`.
-    pub(crate) transmission_gain: f32,
-    /// Linear specular reflection gain off this surface, in `[0, 1]`.
-    pub(crate) reflection_gain: f32,
+    /// Per-band linear transmission gains through this surface, each in
+    /// `[0, 1]` (xyz = low/mid/high; w padding).
+    pub(crate) transmission: [f32; 4],
+    /// Per-band linear reflection coefficients off this surface, each in
+    /// `[0, 1]` (xyz = low/mid/high; w padding).
+    pub(crate) reflection: [f32; 4],
+    /// Scattering coefficient in `[0, 1]` diverting energy out of the specular
+    /// lobe (the specular share is weighted by `sqrt(1 - scattering)`).
+    pub(crate) scattering: f32,
     /// Padding to a 16-byte stride.
-    pub(crate) _pad: [f32; 2],
+    pub(crate) _pad: [f32; 3],
 }
 
 /// A triangle-mesh acoustic scene uploaded to the device.
@@ -92,14 +103,17 @@ impl GpuScene {
                 .triangle_normal(index)
                 .unwrap_or(bevy_math::Vec3::ZERO);
             let material = scene.material(index);
+            let transmission = material.transmission().bands();
+            let reflection = material.reflection().bands();
             triangles.push(GpuTriangle {
                 a: [a.x, a.y, a.z, 0.0],
                 b: [b.x, b.y, b.z, 0.0],
                 c: [c.x, c.y, c.z, 0.0],
                 normal: [normal.x, normal.y, normal.z, 0.0],
-                transmission_gain: material.broadband_transmission(),
-                reflection_gain: material.broadband_reflection(),
-                _pad: [0.0, 0.0],
+                transmission: [transmission[0], transmission[1], transmission[2], 0.0],
+                reflection: [reflection[0], reflection[1], reflection[2], 0.0],
+                scattering: material.scattering(),
+                _pad: [0.0, 0.0, 0.0],
             });
         }
         // A storage buffer with a non-zero length is required for binding even

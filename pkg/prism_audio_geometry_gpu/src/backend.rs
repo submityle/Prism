@@ -240,7 +240,11 @@ fn assemble(
                     delay_seconds: candidate.delay_seconds,
                     gain: candidate.gain,
                     cutoff_hz: FULL_BAND_CUTOFF_HZ,
-                    bands: BandGains::UNITY,
+                    bands: BandGains::new([
+                        candidate.bands[0],
+                        candidate.bands[1],
+                        candidate.bands[2],
+                    ]),
                     direction: Vec3::new(
                         candidate.direction[0],
                         candidate.direction[1],
@@ -268,7 +272,7 @@ fn assemble(
                 delay_seconds: direct.delay_seconds,
                 gain: direct.gain,
                 cutoff_hz: direct.cutoff_hz,
-                bands: BandGains::from_lowpass_cutoff(direct.cutoff_hz),
+                bands: BandGains::new([direct.bands[0], direct.bands[1], direct.bands[2]]),
                 direction: Vec3::new(
                     direct.direction[0],
                     direct.direction[1],
@@ -309,6 +313,7 @@ mod tests {
     use prism_audio_geometry::reflection_path::resolve_reflections;
     use prism_audio_geometry::{AcousticScene, GeometricBackend, MaterialTable};
     use prism_audio_spatial::propagation::{AcousticMaterial, PropagationBackend};
+    use prism_audio_spatial::BandedAcousticMaterial;
 
     use crate::direct::cpu_direct;
     use crate::query::DIRECT_KIND_TRANSMISSION;
@@ -329,14 +334,17 @@ mod tests {
                 .unwrap_or([Vec3::ZERO, Vec3::ZERO, Vec3::ZERO]);
             let normal = scene.triangle_normal(index).unwrap_or(Vec3::ZERO);
             let material = scene.material(index);
+            let transmission = material.transmission().bands();
+            let reflection = material.reflection().bands();
             triangles.push(GpuTriangle {
                 a: [a.x, a.y, a.z, 0.0],
                 b: [b.x, b.y, b.z, 0.0],
                 c: [c.x, c.y, c.z, 0.0],
                 normal: [normal.x, normal.y, normal.z, 0.0],
-                transmission_gain: material.broadband_transmission(),
-                reflection_gain: material.broadband_reflection(),
-                _pad: [0.0, 0.0],
+                transmission: [transmission[0], transmission[1], transmission[2], 0.0],
+                reflection: [reflection[0], reflection[1], reflection[2], 0.0],
+                scattering: material.scattering(),
+                _pad: [0.0, 0.0, 0.0],
             });
         }
         triangles
@@ -463,7 +471,11 @@ mod tests {
                 delay_seconds: candidate.delay_seconds,
                 gain: candidate.gain,
                 cutoff_hz: FULL_BAND_CUTOFF_HZ,
-                bands: BandGains::UNITY,
+                bands: BandGains::new([
+                    candidate.bands[0],
+                    candidate.bands[1],
+                    candidate.bands[2],
+                ]),
                 direction: Vec3::new(
                     candidate.direction[0],
                     candidate.direction[1],
@@ -486,6 +498,128 @@ mod tests {
         assert!((twin.gain - want.gain).abs() < TOL);
         assert!((twin.delay_seconds - want.delay_seconds).abs() < TOL);
         assert!(twin.direction.dot(want.direction) > 1.0 - TOL);
+    }
+
+    /// A wall whose per-band transmission colours the arrival: the opaque wall
+    /// of [`wall_scene`] carries a scalar loss, but a real window darkens high
+    /// frequencies more than low. This builds the same geometry with a banded
+    /// material so the twins can prove the colour survives the march.
+    fn wall_scene_banded(material: BandedAcousticMaterial) -> AcousticScene {
+        let vertices = Vec::from([
+            Vec3::new(0.0, -5.0, -5.0),
+            Vec3::new(0.0, 5.0, -5.0),
+            Vec3::new(0.0, 5.0, 5.0),
+            Vec3::new(0.0, -5.0, 5.0),
+        ]);
+        let indices = Vec::from([[0, 1, 2], [0, 2, 3]]);
+        AcousticScene::new(vertices, indices, MaterialTable::uniform(material))
+            .expect("banded wall scene builds")
+    }
+
+    /// The floor of [`floor_scene`] rebuilt with a banded reflection spectrum and
+    /// surface roughness, so the specular bounce keeps a frequency colour.
+    fn floor_scene_banded(material: BandedAcousticMaterial) -> AcousticScene {
+        let vertices = Vec::from([
+            Vec3::new(-10.0, 0.0, -10.0),
+            Vec3::new(10.0, 0.0, -10.0),
+            Vec3::new(10.0, 0.0, 10.0),
+            Vec3::new(-10.0, 0.0, 10.0),
+        ]);
+        let indices = Vec::from([[0, 1, 2], [0, 2, 3]]);
+        AcousticScene::new(vertices, indices, MaterialTable::uniform(material))
+            .expect("banded floor scene builds")
+    }
+
+    #[test]
+    fn direct_twin_carries_banded_transmission_colour() {
+        let material =
+            BandedAcousticMaterial::new(BandGains::SILENT, BandGains::new([0.8, 0.4, 0.1]), 0.0);
+        let scene = wall_scene_banded(material);
+        let config = GeometricConfig::new(48_000);
+        let listener = listener_at(Vec3::new(-3.0, 0.0, 0.0));
+        let emitter = Emitter::point(Vec3::new(3.0, 0.0, 0.0), Vec3::ZERO);
+
+        let triangles = pack(&scene);
+        let params = params_for(&scene, &config);
+        let query = GpuQuery::new(&listener, &emitter);
+        let twin = cpu_direct(&triangles, &query, &params);
+
+        let reference = resolve_direct(&scene, &listener, &emitter, &config);
+        let want = reference.path.bands.bands();
+
+        assert_eq!(twin.kind, DIRECT_KIND_TRANSMISSION);
+        assert_eq!(reference.path.kind, PathKind::Transmission);
+        assert!(twin.audible != 0 && reference.audible);
+        // The peak-normalised gain tracks the brightest band (the low band at
+        // 0.8), matching the CPU golden rather than a broadband average.
+        assert!((twin.gain - reference.path.gain).abs() < TOL);
+        assert!((twin.gain - 0.8).abs() < TOL);
+        // The arrival darkens towards high frequency, and the twin reproduces
+        // the CPU colour band-by-band instead of collapsing to one number.
+        assert!(twin.bands[2] < twin.bands[0]);
+        for (&want_band, &twin_band) in want.iter().zip(twin.bands.iter()) {
+            assert!((twin_band - want_band).abs() < TOL);
+        }
+    }
+
+    #[test]
+    fn reflection_twin_carries_banded_colour() {
+        let material = BandedAcousticMaterial::new(
+            BandGains::new([0.9, 0.6, 0.3]),
+            BandGains::new([0.8, 0.5, 0.2]),
+            0.25,
+        );
+        let scene = floor_scene_banded(material);
+        let config = GeometricConfig::new(48_000);
+        let listener = listener_at(Vec3::new(-4.0, 2.0, 0.0));
+        let emitter = Emitter::point(Vec3::new(4.0, 2.0, 0.0), Vec3::ZERO);
+
+        let triangles = pack(&scene);
+        let params = params_for(&scene, &config);
+        let query = GpuQuery::new(&listener, &emitter);
+
+        let base_distance = resolve_direct(&scene, &listener, &emitter, &config).base_distance;
+        let reference = resolve_reflections(&scene, &listener, &emitter, &config, base_distance);
+
+        let mut twins: Vec<PropagationPath> = Vec::new();
+        for index in 0..triangles.len() {
+            let candidate = cpu_reflection(&triangles, &query, index, &params);
+            if candidate.valid == 0 {
+                continue;
+            }
+            let path = PropagationPath {
+                kind: PathKind::Reflection,
+                delay_seconds: candidate.delay_seconds,
+                gain: candidate.gain,
+                cutoff_hz: FULL_BAND_CUTOFF_HZ,
+                bands: BandGains::new([candidate.bands[0], candidate.bands[1], candidate.bands[2]]),
+                direction: Vec3::new(
+                    candidate.direction[0],
+                    candidate.direction[1],
+                    candidate.direction[2],
+                ),
+            };
+            if is_duplicate(&twins, &path) {
+                continue;
+            }
+            twins.push(path);
+        }
+        twins.sort_by(|l, r| r.gain.partial_cmp(&l.gain).unwrap_or(Ordering::Equal));
+        twins.truncate(config.max_reflections);
+
+        assert_eq!(reference.len(), 1);
+        assert_eq!(twins.len(), 1);
+        let twin = twins[0];
+        let want = reference[0];
+        let twin_bands = twin.bands.bands();
+        let want_bands = want.bands.bands();
+        assert!((twin.gain - want.gain).abs() < TOL);
+        for band in 0..3 {
+            assert!((twin_bands[band] - want_bands[band]).abs() < TOL);
+        }
+        // The specular reflection keeps a clear low-to-high colour gradient
+        // (bright low band, dim high band), not a flat spectrum.
+        assert!((twin_bands[0] - twin_bands[2]).abs() > 0.1);
     }
 
     #[test]

@@ -51,6 +51,29 @@ const FULL_BAND: f32 = 1.0e6;
 /// `MAX_MARCH_HITS` in the shader and the `CPU` `march_segment`.
 const MAX_MARCH_HITS: u32 = 64;
 
+/// Root-mean-square of three per-band gains, matching `BandGains::broadband_rms`
+/// and the shader's `broadband_rms3`: the single broadband amplitude that
+/// preserves energy when the three-band spectrum collapses to one number.
+#[must_use]
+fn broadband_rms3(v: [f32; 3]) -> f32 {
+    sqrt((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) / 3.0)
+}
+
+/// Factors three per-band gains into the peak scalar and the normalised colour,
+/// mirroring `BandGains::split_peak` and the shader's inline peak/colour split.
+///
+/// A spectrum whose peak is zero has no colour to recover and factors into a
+/// zero scalar and a silent colour, exactly as the spatial crate does.
+#[must_use]
+fn split_peak3(v: [f32; 3]) -> (f32, [f32; 3]) {
+    let peak = v[0].max(v[1]).max(v[2]);
+    if peak <= 0.0 {
+        (0.0, [0.0, 0.0, 0.0])
+    } else {
+        (peak, [v[0] / peak, v[1] / peak, v[2] / peak])
+    }
+}
+
 /// Compiled direct-path compute pipeline and its bind-group layout.
 pub(crate) struct DirectKernel {
     /// The compiled `resolve_direct` pipeline.
@@ -174,7 +197,7 @@ pub(crate) fn cpu_direct(
     let delay = distance / params.speed_of_sound;
 
     let eps = params.surface_epsilon.max(0.0);
-    let mut transmitted = 1.0_f32;
+    let mut transmitted = [1.0_f32, 1.0, 1.0];
     let mut crossings = 0u32;
     if dist > 0.0 {
         let dir = to_source / dist;
@@ -188,10 +211,13 @@ pub(crate) fn cpu_direct(
             if !hit.valid {
                 break;
             }
-            transmitted *= triangles[hit.index].transmission_gain;
+            let band = triangles[hit.index].transmission;
+            for k in 0..3 {
+                transmitted[k] *= band[k];
+            }
             crossings += 1;
             if !matches!(
-                transmitted.partial_cmp(&params.min_gain),
+                broadband_rms3(transmitted).partial_cmp(&params.min_gain),
                 Some(core::cmp::Ordering::Greater)
             ) {
                 break;
@@ -212,21 +238,26 @@ pub(crate) fn cpu_direct(
         occlusion: 0.0,
         kind: DIRECT_KIND_DIRECT,
         audible: 0,
+        bands: [0.0, 0.0, 0.0, 0.0],
     };
     if crossings == 0 {
         out.gain = 1.0;
+        out.bands = [1.0, 1.0, 1.0, 0.0];
         out.obstruction = 0.0;
         out.occlusion = 0.0;
         out.kind = DIRECT_KIND_DIRECT;
         out.audible = 1;
     } else {
-        let blocked = (1.0 - transmitted).clamp(0.0, 1.0);
+        let survived = broadband_rms3(transmitted);
+        let blocked = (1.0 - survived).clamp(0.0, 1.0);
         out.obstruction = blocked;
         out.occlusion = blocked;
         out.kind = DIRECT_KIND_TRANSMISSION;
-        let audible = params.transmission_enabled != 0 && transmitted > params.min_gain;
+        let (peak, colour) = split_peak3(transmitted);
+        out.bands = [colour[0], colour[1], colour[2], 0.0];
+        let audible = params.transmission_enabled != 0 && survived > params.min_gain;
         if audible {
-            out.gain = transmitted;
+            out.gain = peak;
             out.audible = 1;
         } else {
             out.gain = 0.0;

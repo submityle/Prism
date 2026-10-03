@@ -27,10 +27,12 @@ struct Triangle {
     b: vec4<f32>,
     c: vec4<f32>,
     normal: vec4<f32>,
-    transmission_gain: f32,
-    reflection_gain: f32,
+    transmission: vec4<f32>,
+    reflection: vec4<f32>,
+    scattering: f32,
     pad0: f32,
     pad1: f32,
+    pad2: f32,
 };
 
 struct Query {
@@ -49,6 +51,7 @@ struct DirectResult {
     occlusion: f32,
     kind: u32,
     audible: u32,
+    bands: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -62,6 +65,13 @@ const COINCIDENT: f32 = 1.0e-6;
 const KIND_DIRECT: u32 = 0u;
 const KIND_TRANSMISSION: u32 = 1u;
 const MAX_MARCH_HITS: u32 = 64u;
+
+// Root-mean-square of three per-band gains, matching `BandGains::broadband_rms`
+// on the CPU: the single broadband amplitude that preserves energy when the
+// three-band spectrum is collapsed to one number.
+fn broadband_rms3(v: vec3<f32>) -> f32 {
+    return sqrt(dot(v, v) / 3.0);
+}
 
 // Conjugate of a unit quaternion equals its inverse.
 fn quat_conj(q: vec4<f32>) -> vec4<f32> {
@@ -166,7 +176,7 @@ fn resolve_direct(@builtin(global_invocation_id) gid: vec3<u32>) {
     // March the segment, folding each partition's transmission gain exactly as
     // the CPU `march_segment` + `resolve_direct` visit does.
     let eps = max(params.surface_epsilon, 0.0);
-    var transmitted = 1.0;
+    var transmitted = vec3<f32>(1.0, 1.0, 1.0);
     var crossings = 0u;
     if dist > 0.0 {
         let dir = to_source / dist;
@@ -180,9 +190,9 @@ fn resolve_direct(@builtin(global_invocation_id) gid: vec3<u32>) {
             if !hit.valid {
                 break;
             }
-            transmitted = transmitted * triangles[hit.index].transmission_gain;
+            transmitted = transmitted * triangles[hit.index].transmission.xyz;
             crossings = crossings + 1u;
-            if !(transmitted > params.min_gain) {
+            if !(broadband_rms3(transmitted) > params.min_gain) {
                 break;
             }
             let step = hit.t + eps;
@@ -198,18 +208,26 @@ fn resolve_direct(@builtin(global_invocation_id) gid: vec3<u32>) {
     out.base_distance = distance;
     if crossings == 0u {
         out.gain = 1.0;
+        out.bands = vec4<f32>(1.0, 1.0, 1.0, 0.0);
         out.obstruction = 0.0;
         out.occlusion = 0.0;
         out.kind = KIND_DIRECT;
         out.audible = 1u;
     } else {
-        let blocked = clamp(1.0 - transmitted, 0.0, 1.0);
+        let survived = broadband_rms3(transmitted);
+        let blocked = clamp(1.0 - survived, 0.0, 1.0);
         out.obstruction = blocked;
         out.occlusion = blocked;
         out.kind = KIND_TRANSMISSION;
-        let audible_bool = (params.transmission_enabled != 0u) && (transmitted > params.min_gain);
+        let peak = max(transmitted.x, max(transmitted.y, transmitted.z));
+        var colour = vec3<f32>(0.0, 0.0, 0.0);
+        if peak > 0.0 {
+            colour = transmitted / peak;
+        }
+        out.bands = vec4<f32>(colour, 0.0);
+        let audible_bool = (params.transmission_enabled != 0u) && (survived > params.min_gain);
         if audible_bool {
-            out.gain = transmitted;
+            out.gain = peak;
             out.audible = 1u;
         } else {
             out.gain = 0.0;

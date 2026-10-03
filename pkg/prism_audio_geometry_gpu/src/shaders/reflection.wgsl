@@ -28,10 +28,12 @@ struct Triangle {
     b: vec4<f32>,
     c: vec4<f32>,
     normal: vec4<f32>,
-    transmission_gain: f32,
-    reflection_gain: f32,
+    transmission: vec4<f32>,
+    reflection: vec4<f32>,
+    scattering: f32,
     pad0: f32,
     pad1: f32,
+    pad2: f32,
 };
 
 struct Query {
@@ -46,6 +48,7 @@ struct ReflectionCandidate {
     gain: f32,
     valid: u32,
     pad: f32,
+    bands: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -180,6 +183,7 @@ fn resolve_reflection(@builtin(global_invocation_id) gid: vec3<u32>) {
     out.gain = 0.0;
     out.valid = 0u;
     out.pad = 0.0;
+    out.bands = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 
     let query = queries[q];
     let lp = query.listener_pos.xyz;
@@ -239,11 +243,22 @@ fn resolve_reflection(@builtin(global_invocation_id) gid: vec3<u32>) {
     let base_vec = ep - lp;
     let base = sqrt(dot(base_vec, base_vec));
     let spreading = clamp(base / path_length, 0.0, 1.0);
-    let gain = clamp(tri.reflection_gain * spreading, 0.0, 1.0);
-    if gain <= params.min_gain {
+    // Specular share weights the reflection by sqrt(1 - scattering) band by
+    // band (energy split), then the spreading factor scales the amplitude;
+    // both match the CPU `specular_reflection().scaled(spreading)` path.
+    let spec_weight = sqrt(max(1.0 - tri.scattering, 0.0));
+    let specular = clamp(tri.reflection.xyz * spec_weight, vec3<f32>(0.0), vec3<f32>(1.0));
+    let effective = clamp(specular * spreading, vec3<f32>(0.0), vec3<f32>(1.0));
+    let peak = max(effective.x, max(effective.y, effective.z));
+    if peak <= params.min_gain {
         results[idx] = out;
         return;
     }
+    var colour = vec3<f32>(0.0, 0.0, 0.0);
+    if peak > 0.0 {
+        colour = effective / peak;
+    }
+    let gain = peak;
 
     // localize the reflection point direction into the listener frame.
     let to_point = point - lp;
@@ -258,5 +273,6 @@ fn resolve_reflection(@builtin(global_invocation_id) gid: vec3<u32>) {
     out.gain = gain;
     out.valid = 1u;
     out.pad = 0.0;
+    out.bands = vec4<f32>(colour, 0.0);
     results[idx] = out;
 }

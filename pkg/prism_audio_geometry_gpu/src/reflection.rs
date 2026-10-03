@@ -217,6 +217,7 @@ pub(crate) fn cpu_reflection(
         gain: 0.0,
         valid: 0,
         _pad: 0.0,
+        bands: [0.0, 0.0, 0.0, 0.0],
     };
 
     let tri = triangles[tri_index];
@@ -267,10 +268,25 @@ pub(crate) fn cpu_reflection(
     let base_vec = ep - lp;
     let base = sqrt(base_vec.dot(base_vec));
     let spreading = (base / path_length).clamp(0.0, 1.0);
-    let gain = (tri.reflection_gain * spreading).clamp(0.0, 1.0);
-    if gain <= params.min_gain {
+    // Specular share weighted by sqrt(1 - scattering) band by band, then scaled
+    // by the spreading factor; mirrors the CPU
+    // `specular_reflection().scaled(spreading)` and the shader's inline split.
+    let spec_weight = sqrt((1.0 - tri.scattering).max(0.0));
+    let mut effective = [0.0_f32; 3];
+    for (slot, &reflection) in effective.iter_mut().zip(tri.reflection.iter()) {
+        let specular = (reflection * spec_weight).clamp(0.0, 1.0);
+        *slot = (specular * spreading).clamp(0.0, 1.0);
+    }
+    let peak = effective[0].max(effective[1]).max(effective[2]);
+    if peak <= params.min_gain {
         return out;
     }
+    let colour = if peak > 0.0 {
+        [effective[0] / peak, effective[1] / peak, effective[2] / peak]
+    } else {
+        [0.0, 0.0, 0.0]
+    };
+    let gain = peak;
 
     let to_point = point - lp;
     let d = sqrt(to_point.dot(to_point));
@@ -284,5 +300,6 @@ pub(crate) fn cpu_reflection(
     out.gain = gain;
     out.valid = 1;
     out._pad = 0.0;
+    out.bands = [colour[0], colour[1], colour[2], 0.0];
     out
 }

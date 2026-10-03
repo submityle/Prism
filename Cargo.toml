@@ -88,6 +88,8 @@ members = [
   "pkg/prism_audio_snapshot",
   # Prism next-generation audio engine geometric acoustics propagation backend (design section 14): ray-traced direct/reflection/diffraction PropagationBackend over a triangle-mesh scene.
   "pkg/prism_audio_geometry",
+  # Prism next-generation audio engine optional wgpu compute backend (design section 31): GPU ray/path tracing mirroring the CPU geometric acoustics backend, every kernel validated against a CPU golden twin.
+  "pkg/prism_audio_geometry_gpu",
   "pkg/prism_audio_profiler",
   # Prism next-generation audio engine Bevy ECS front-end (emitter/listener components -> prism_audio_rt command ring; telemetry resource).
   "pkg/prism_audio_bevy",

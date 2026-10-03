@@ -78,8 +78,9 @@ impl GpuQuery {
 /// listener-local arrival direction, its delay/gain/cutoff, the base distance
 /// secondary arrivals attenuate against, the obstruction/occlusion the
 /// occlusion model consumes, the path kind
-/// ([`DIRECT_KIND_DIRECT`]/[`DIRECT_KIND_TRANSMISSION`]), and whether the
-/// arrival is audible.
+/// ([`DIRECT_KIND_DIRECT`]/[`DIRECT_KIND_TRANSMISSION`]), whether the arrival
+/// is audible, and the normalised per-band colour the host pairs with the
+/// scalar gain.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub(crate) struct GpuDirectResult {
@@ -102,6 +103,12 @@ pub(crate) struct GpuDirectResult {
     pub(crate) kind: u32,
     /// Non-zero when the arrival should be rendered.
     pub(crate) audible: u32,
+    /// Per-band relative colour of the arrival, normalised so the brightest
+    /// band is unity (xyz = low/mid/high; w padding). Multiplying by
+    /// [`gain`](Self::gain) recovers the absolute per-band transmission, so a
+    /// direct arrival carries [`BandGains::UNITY`](prism_audio_spatial::BandGains)
+    /// colour while a transmitted arrival keeps the surface's spectral tilt.
+    pub(crate) bands: [f32; 4],
 }
 
 /// One (query, triangle) specular reflection candidate the reflection kernel
@@ -121,6 +128,11 @@ pub(crate) struct GpuReflectionCandidate {
     pub(crate) gain: f32,
     /// Non-zero when this candidate is a real, audible reflection.
     pub(crate) valid: u32,
-    /// Padding to a 32-byte stride.
+    /// Padding so the trailing `bands` vector begins on its 16-byte boundary.
     pub(crate) _pad: f32,
+    /// Per-band relative colour of the reflection, normalised so the brightest
+    /// band is unity (xyz = low/mid/high; w padding). Multiplying by
+    /// [`gain`](Self::gain) recovers the absolute per-band specular reflection
+    /// coefficient after the spreading and scattering weights are applied.
+    pub(crate) bands: [f32; 4],
 }
