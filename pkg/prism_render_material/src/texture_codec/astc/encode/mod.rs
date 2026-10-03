@@ -825,6 +825,40 @@ pub fn encode_astc_single_partition_10x5_ldr(texels: &[[u8; 4]; 50]) -> [u8; 16]
     w.into_block()
 }
 
+/// Encode thirty LDR RGBA texels (6 wide x 5 tall) into one 16-byte ASTC block
+/// using single-partition block **mode 354**: a full 6x5 weight grid (no
+/// bilinear infill) with a QUANT_4 two-bit weight range (four interpolation
+/// levels, 30*2 = 60 weight bits) paired with QUANT_256 identity colour (six
+/// 8-bit endpoint bytes, color_bits = 111 - 60 = 51) and CEM 8 (RGB direct,
+/// alpha forced to 255). This blends the identity-colour endpoints of 10x5
+/// mode 357 with the two-bit weights of 8x5 mode 102: the richer four-level
+/// weights track a gradient far closer than the one-bit identity modes while
+/// keeping endpoints bit-exact. Texels are row-major (`texel = y * 6 + x`).
+pub fn encode_astc_single_partition_6x5_ldr(texels: &[[u8; 4]; 30]) -> [u8; 16] {
+    const BLOCK_MODE: u32 = 354;
+    const CEM_RGB_DIRECT: u32 = 8;
+    const WEIGHT_BITS: u32 = 2; // QUANT_4, two-bit (four levels)
+
+    // Identity colour: the fit already orders `hadd(e0) <= hadd(e1)`, so the
+    // CEM-8 decoder reproduces the raw endpoint bytes without a swap.
+    let (e0, e1) = endpoint_fit::fit_rgb_endpoints(texels);
+
+    // Four-level weights against the exact endpoints (no infill on a full grid).
+    let raw = weight_fit::quantize_weights_bits(texels, e0, e1, WEIGHT_BITS);
+
+    let mut w = bits::BlockWriter::new();
+    w.write_bits(0, 11, BLOCK_MODE);
+    w.write_bits(13, 4, CEM_RGB_DIRECT);
+    let vals = [e0[0], e1[0], e0[1], e1[1], e0[2], e1[2]];
+    for (i, v) in vals.iter().enumerate() {
+        w.write_bits(17 + i as u32 * 8, 8, u32::from(*v));
+    }
+    // Sixty weight bits packed bit-reversed from the top of the block
+    // (bits 68..128).
+    w.write_weights_reversed(&raw, WEIGHT_BITS);
+    w.into_block()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
@@ -838,6 +872,7 @@ mod tests {
     use super::encode_astc_single_partition_4x4_ldr_rgba_q6;
     use super::encode_astc_single_partition_5x4_ldr;
     use super::encode_astc_single_partition_5x5_ldr;
+    use super::encode_astc_single_partition_6x5_ldr;
     use super::encode_astc_single_partition_6x6_ldr;
     use super::encode_astc_single_partition_8x5_ldr;
     use super::encode_astc_single_partition_8x6_ldr;
@@ -1641,6 +1676,67 @@ mod tests {
         assert!(
             max_rgb_err_50(&src, &dec) <= 160,
             "10x5 gradient error exceeds the two-level budget"
+        );
+    }
+
+    fn max_rgb_err_30(src: &[[u8; 4]; 30], dec: &[[u8; 4]; 30]) -> i32 {
+        let mut m = 0;
+        for (s, d) in src.iter().zip(dec.iter()) {
+            for c in 0..3 {
+                m = m.max((i32::from(s[c]) - i32::from(d[c])).abs());
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn six_by_five_constant_block_round_trips_exactly() {
+        let src = [[41u8, 173, 98, 255]; 30];
+        let blk = encode_astc_single_partition_6x5_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 constant");
+        assert_eq!(count, 30, "6x5 footprint must decode 30 texels");
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        assert_eq!(
+            max_rgb_err_30(&src, &dec),
+            0,
+            "6x5 constant block must round-trip exactly with identity colour"
+        );
+        for d in &dec {
+            assert_eq!(d[3], 255, "CEM 8 forces alpha 255");
+        }
+    }
+
+    #[test]
+    fn six_by_five_two_colour_endpoints_are_exact() {
+        let a = [15u8, 35, 55, 255];
+        let b = [210u8, 190, 170, 255];
+        let src: [[u8; 4]; 30] = core::array::from_fn(|t| if t % 2 == 0 { a } else { b });
+        let blk = encode_astc_single_partition_6x5_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 two-colour");
+        assert_eq!(count, 30);
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        assert_eq!(
+            max_rgb_err_30(&src, &dec),
+            0,
+            "6x5 two-colour block must hit both exact endpoints"
+        );
+    }
+
+    #[test]
+    fn six_by_five_rgb_gradient_round_trips_within_tolerance() {
+        // Four weight levels track the gradient much tighter than the one-bit
+        // identity modes; the worst midrange texel stays well inside 96 LSB.
+        let src: [[u8; 4]; 30] = core::array::from_fn(|t| {
+            let v = (t * 8) as u8;
+            [v, 255 - v, (v / 2).wrapping_add(40), 255]
+        });
+        let blk = encode_astc_single_partition_6x5_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 gradient");
+        assert_eq!(count, 30);
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_30(&src, &dec) <= 96,
+            "6x5 gradient error exceeds the four-level budget"
         );
     }
 }
