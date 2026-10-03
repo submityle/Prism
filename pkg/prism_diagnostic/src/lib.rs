@@ -1,4 +1,4 @@
-//! # prism_diagnostic
+//! # `prism_diagnostic`
 //!
 //! Prism's diagnostic kernel: a cross-cutting logging/observability surface
 //! that every subsystem depends on by "instrumenting" itself.

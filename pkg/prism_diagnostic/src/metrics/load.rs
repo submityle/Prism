@@ -39,11 +39,7 @@ pub struct SystemLoad {
 impl SystemLoad {
     /// Mean invocation duration in nanoseconds (`0` when never called).
     pub fn mean_nanos(&self) -> u64 {
-        if self.call_count == 0 {
-            0
-        } else {
-            self.total_nanos / self.call_count
-        }
+        self.total_nanos.checked_div(self.call_count).unwrap_or(0)
     }
 }
 

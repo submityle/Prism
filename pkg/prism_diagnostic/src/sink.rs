@@ -20,7 +20,7 @@ pub trait Sink: Send + Sync {
 pub struct ConsoleSink;
 
 impl Sink for ConsoleSink {
-    #[allow(
+    #[expect(
         clippy::print_stderr,
         reason = "the console sink is the one place diagnostics are intentionally written to stderr"
     )]
