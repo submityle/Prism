@@ -281,6 +281,11 @@ pub mod tet_fem_orthotropic_strain_limit;
 pub use tet_fem_orthotropic_strain_limit::{
     project_orthotropic_strain_limits, OrthotropicStrainLimitParams, OrthotropicStrainLimitReport,
 };
+pub mod tet_fem_anisotropic_projection_pass;
+pub use tet_fem_anisotropic_projection_pass::{
+    run_anisotropic_projection_pass, AnisotropicProjectionParams, AnisotropicProjectionReport,
+    AnisotropicStage,
+};
 pub mod tet_fem_anisotropic;
 pub use tet_fem_anisotropic::{
     orthotropic_fiber_energy, orthotropic_fiber_first_piola, FiberDirection, FiberFamily,
