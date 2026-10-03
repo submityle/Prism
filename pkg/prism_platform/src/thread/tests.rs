@@ -1,7 +1,7 @@
 //! Unit tests for the M2 threading layer.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use alloc::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::thread::affinity::{self, AffinityError};

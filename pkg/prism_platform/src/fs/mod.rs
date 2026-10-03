@@ -20,11 +20,22 @@
 //! - [`path`]: lexical [`path::normalize`] and small [`std::path::Path`]
 //!   helpers.
 //! - [`dirs`]: per-OS standard directories (config/data/cache/home/temp).
+//! - [`mmap`]: zero-copy memory-mapped files (M4), with an honest
+//!   fallback-by-read on targets without `mmap`.
+//! - [`watch`]: file-system watching for hot-reload (M4), a native `kqueue`
+//!   backend on macOS/BSD plus a portable polling fallback. Requires the
+//!   `watch` feature.
 
 pub mod dir;
 pub mod dirs;
 pub mod file;
+pub mod mmap;
 pub mod path;
+/// File-system watching for hot-reload of assets/scripts/shaders.
+///
+/// Requires the `watch` feature.
+#[cfg(feature = "watch")]
+pub mod watch;
 
 use core::fmt;
 use std::path::PathBuf;
@@ -89,6 +100,9 @@ impl FsError {
 
 pub use dir::{create_dir, create_dir_all, read_dir, remove_dir, remove_dir_all, walk, DirEntry};
 pub use file::{Metadata, OpenOptions};
+pub use mmap::{mmap_supported, Mmap, MmapError, MmapMut};
+#[cfg(feature = "watch")]
+pub use watch::{Backend as WatchBackend, Event, EventKind, WatchError, Watcher};
 
 /// Re-export of [`std::path::PathBuf`] for convenience at the module root.
 pub type OwnedPath = PathBuf;

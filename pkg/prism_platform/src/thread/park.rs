@@ -13,7 +13,7 @@
 //! [`Unparker`] is cloneable and `Send`, so any thread may wake the parked one.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Arc;
+use alloc::sync::Arc;
 use std::thread::Thread;
 use std::time::Duration;
 
@@ -75,20 +75,18 @@ impl Parker {
         {
             return;
         }
-        // Announce that we are about to park.
-        match self.inner.state.compare_exchange(
+        // Announce that we are about to park. A token arriving between the two
+        // checks shows up here as `Err(NOTIFIED)`: consume it and return. Any
+        // other outcome (we installed PARKED, or a spurious state) proceeds to
+        // block.
+        if let Err(NOTIFIED) = self.inner.state.compare_exchange(
             EMPTY,
             PARKED,
             Ordering::Acquire,
             Ordering::Acquire,
         ) {
-            Ok(_) => {}
-            // A token arrived between the two checks: consume and return.
-            Err(NOTIFIED) => {
-                self.inner.state.store(EMPTY, Ordering::Release);
-                return;
-            }
-            Err(_) => {}
+            self.inner.state.store(EMPTY, Ordering::Release);
+            return;
         }
         loop {
             std::thread::park();
@@ -119,18 +117,16 @@ impl Parker {
         {
             return true;
         }
-        match self.inner.state.compare_exchange(
+        // As above: a late token surfaces as `Err(NOTIFIED)`; consume it and
+        // report success. Otherwise fall through and block.
+        if let Err(NOTIFIED) = self.inner.state.compare_exchange(
             EMPTY,
             PARKED,
             Ordering::Acquire,
             Ordering::Acquire,
         ) {
-            Ok(_) => {}
-            Err(NOTIFIED) => {
-                self.inner.state.store(EMPTY, Ordering::Release);
-                return true;
-            }
-            Err(_) => {}
+            self.inner.state.store(EMPTY, Ordering::Release);
+            return true;
         }
         std::thread::park_timeout(timeout);
         // Reclaim the slot regardless of why we woke; report whether a token

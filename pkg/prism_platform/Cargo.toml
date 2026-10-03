@@ -12,6 +12,13 @@ publish = false
 [features]
 default = ["std"]
 std = []
+# Dynamic-library loading + hot-reload facade (design doc §10, §17). Implies
+# `std`: it opens files and copies hot-reload temporaries through the std fs.
+dynlib = ["std"]
+# File-watching facade (design doc §8). Implies `std`. Kept distinct from the
+# bare `std` toggle so a minimal `std` build need not compile the native
+# watcher backends unless watching is actually wanted.
+watch = ["std"]
 
 [lints]
 workspace = true

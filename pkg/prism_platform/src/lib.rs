@@ -1,4 +1,4 @@
-//! # prism_platform
+//! # `prism_platform`
 //!
 //! Prism's platform-abstraction kernel. It sits at the root of the dependency
 //! graph alongside `prism_math` and `prism_utils` and is depended on by
@@ -29,16 +29,31 @@
 //!   behind the `std` feature. This is the page substrate under the
 //!   `prism_utils` allocators.
 //!
-//! Later milestones add virtual memory, dynamic libraries, process control,
-//! and crash/minidump backends per OS.
+//! ## M4 scope — mmap, file watching, and dynamic libraries
+//! - [`fs::mmap`]: zero-copy memory-mapped files (`mmap`/`munmap`/`msync` on
+//!   Unix, `CreateFileMapping`/`MapViewOfFile` on Windows) with an honest
+//!   read-into-buffer fallback where mapping is unavailable. Part of [`fs`]
+//!   (requires `std`).
+//! - [`fs::watch`]: file-system watching for hot-reload — a native `kqueue`
+//!   backend on macOS/BSD plus a portable `stat`-based polling fallback that
+//!   covers Linux/Windows/everywhere. Requires the `watch` feature.
+//! - [`dynlib`]: dynamic-library load / symbol lookup / unload with hot-reload
+//!   via a temp copy and a per-load version (`dlopen` family on Unix,
+//!   `LoadLibrary` family on Windows). Requires the `dynlib` feature.
+//!
+//! Later milestones add process control and crash/minidump backends per OS.
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
 //!
 //! The crate uses no `unsafe` except narrowly scoped, documented FFI in
-//! [`thread::affinity`] and the [`vm`] virtual-memory backends; the
-//! workspace-level `unsafe_code = "deny"` lint stays in force and is overridden
-//! only there via `#[expect(unsafe_code, reason)]` sites.
+//! [`thread::affinity`], the [`vm`] virtual-memory backends, and the M4
+//! [`fs::mmap`] / [`fs::watch`] / [`dynlib`] backends; the workspace-level
+//! `unsafe_code = "deny"` lint stays in force and is overridden only there via
+//! per-site `#[expect(unsafe_code, reason)]` with a `// SAFETY:` comment on
+//! every `unsafe` block.
+
+extern crate alloc;
 
 pub mod atomics;
 pub mod clock;
@@ -63,10 +78,18 @@ pub mod thread;
 #[cfg(feature = "std")]
 pub mod vm;
 
+/// Dynamic-library loading, symbol lookup, and hot-reload.
+///
+/// Requires the `dynlib` feature (which implies `std`); absent otherwise.
+#[cfg(feature = "dynlib")]
+pub mod dynlib;
+
 pub use clock::{now, MonotonicNanos};
 pub use cpu::CpuInfo;
 #[cfg(feature = "std")]
-pub use fs::{FsError, Result as FsResult};
+pub use fs::{mmap_supported, FsError, Mmap, MmapError, MmapMut, Result as FsResult};
+#[cfg(feature = "watch")]
+pub use fs::{Event, EventKind, WatchBackend, WatchError, Watcher};
 pub use platform::{Os, Platform, PlatformCaps};
 #[cfg(feature = "std")]
 pub use thread::{
@@ -80,6 +103,8 @@ pub use vm::{
     huge_pages_supported, large_page_size, memory_info, page_size, virtual_memory_supported,
     MemoryInfo, Protection, Reservation, VmError,
 };
+#[cfg(feature = "dynlib")]
+pub use dynlib::{supported as dynlib_supported, DynlibError, Library, Symbol};
 
 #[cfg(test)]
 mod tests;

@@ -15,7 +15,7 @@ impl MonotonicNanos {
 /// Read the platform monotonic clock.
 ///
 /// With `std` this wraps `std::time::Instant` relative to a process-start
-/// anchor. Without `std` it returns zero (a real no_std backend lands with the
+/// anchor. Without `std` it returns zero (a real `no_std` backend lands with the
 /// platform clock milestone).
 #[cfg(feature = "std")]
 pub fn now() -> MonotonicNanos {
@@ -26,7 +26,7 @@ pub fn now() -> MonotonicNanos {
     MonotonicNanos(start.elapsed().as_nanos() as u64)
 }
 
-/// Read the platform monotonic clock (no_std stub: always zero).
+/// Read the platform monotonic clock (`no_std` fallback: always zero).
 #[cfg(not(feature = "std"))]
 pub fn now() -> MonotonicNanos {
     MonotonicNanos(0)

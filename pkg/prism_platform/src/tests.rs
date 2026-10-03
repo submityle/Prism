@@ -30,5 +30,14 @@ fn platform_current_is_consistent() {
     let p = Platform::current();
     assert_eq!(p.caps.has_std, cfg!(feature = "std"));
     assert_ne!(p.os, Os::Unknown, "desktop test target should be known");
+    // M4 capability bits track feature + target cfg honestly.
+    assert_eq!(
+        p.caps.has_mmap,
+        cfg!(feature = "std") && cfg!(any(unix, windows))
+    );
+    assert_eq!(
+        p.caps.has_dynlib_unload,
+        cfg!(feature = "dynlib") && cfg!(any(unix, windows))
+    );
     let _ = (spin_hint(), full_fence());
 }

@@ -1,7 +1,7 @@
 //! CPU instruction-set and topology probing.
 
 /// A snapshot of CPU capabilities relevant to engine dispatch (SIMD width,
-/// logical core count). M0 covers the common x86-64 and AArch64 flags via
+/// logical core count). M0 covers the common x86-64 and `AArch64` flags via
 /// compile-time `target_feature` plus a runtime core count.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CpuInfo {
@@ -15,7 +15,7 @@ pub struct CpuInfo {
     pub avx2: bool,
     /// x86-64 AVX-512F is available.
     pub avx512f: bool,
-    /// AArch64 NEON is available (always true on `aarch64`).
+    /// `AArch64` NEON is available (always true on `aarch64`).
     pub neon: bool,
 }
 
@@ -64,7 +64,7 @@ const fn arch_name() -> &'static str {
 #[cfg(feature = "std")]
 fn logical_core_count() -> usize {
     std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(std::num::NonZero::get)
         .unwrap_or(1)
 }
 

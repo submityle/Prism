@@ -263,6 +263,10 @@ pub struct Reservation {
     huge: bool,
 }
 
+#[expect(
+    unsafe_code,
+    reason = "a reservation is a self-contained OS mapping with no thread affinity, so it is Send + Sync like other handle types"
+)]
 // SAFETY: a `Reservation` owns a unique OS address-space mapping identified by
 // raw pointers; those pointers carry no thread affinity, so transferring
 // ownership to another thread is sound (equivalent to moving a `Box`). The type
@@ -270,18 +274,14 @@ pub struct Reservation {
 // is also sound; coordinating overlapping commit/protect calls on the same
 // sub-range is the caller's responsibility, exactly as it is for the raw
 // pointers obtained from it.
-#[expect(
-    unsafe_code,
-    reason = "a reservation is a self-contained OS mapping with no thread affinity, so it is Send + Sync like other handle types"
-)]
 unsafe impl Send for Reservation {}
 
-// SAFETY: see the `Send` impl above — `&Reservation` grants only read access to
-// the stored pointer/length and never mutates shared Rust state.
 #[expect(
     unsafe_code,
     reason = "a reservation is a self-contained OS mapping with no thread affinity, so it is Send + Sync like other handle types"
 )]
+// SAFETY: see the `Send` impl above — `&Reservation` grants only read access to
+// the stored pointer/length and never mutates shared Rust state.
 unsafe impl Sync for Reservation {}
 
 impl Reservation {
@@ -426,7 +426,7 @@ impl Reservation {
     /// reservation, returning the absolute pointer to `offset`.
     fn checked_subrange(&self, offset: usize, len: usize) -> Result<*mut u8> {
         let ps = page_size();
-        if len == 0 || offset % ps != 0 || len % ps != 0 {
+        if len == 0 || !offset.is_multiple_of(ps) || !len.is_multiple_of(ps) {
             return Err(VmError::InvalidArgument);
         }
         let end = offset.checked_add(len).ok_or(VmError::InvalidArgument)?;
