@@ -1218,3 +1218,187 @@ fn set_extract_on_missing_sub_app_panics() {
     let mut app = App::new();
     app.set_extract(RenderApp, |_m: &mut prism_ecs::world::World, _s: &mut prism_ecs::world::World| {});
 }
+
+// ---- M3 Inc2: cross-thread sub-app pipelining -----------------------------
+//
+// These tests are gated on the `pipelined` feature. They assert that the
+// opt-in pipeline (a) runs every frame's render exactly once, (b) keeps the
+// one-way extract seam intact (sub reads the main world's completed frame),
+// (c) produces results identical to the serial path (determinism), and
+// (d) parks secondary sub-apps on the worker thread until `sync_sub_apps`.
+
+#[cfg(feature = "pipelined")]
+mod pipelined_tests {
+    use super::*;
+
+    /// Build a render sub-app whose `Update` schedule bumps `render_count` and
+    /// which owns a `Counter` resource for extract to write into.
+    fn make_render_sub_app(render_count: Arc<AtomicU64>) -> SubApp {
+        let mut render = SubApp::new();
+        render.world.insert_resource(Counter::default());
+        render
+            .world
+            .resource_mut::<prism_ecs::schedule::Schedules>()
+            .insert(Update, prism_ecs::schedule::Schedule::new());
+        render
+            .world
+            .resource_mut::<prism_ecs::schedule::Schedules>()
+            .get_mut(Update)
+            .unwrap()
+            .add_systems(move || {
+                render_count.fetch_add(1, Ordering::Relaxed);
+            });
+        render
+    }
+
+    /// Enabling pipelining is reflected by `is_pipelined` and is idempotent.
+    #[test]
+    fn enable_is_idempotent_and_observable() {
+        let mut app = App::new();
+        assert!(!app.is_pipelined());
+        app.enable_pipelined_rendering();
+        assert!(app.is_pipelined());
+        // Enabling again keeps it on (and does not reset in-flight state).
+        app.enable_pipelined_rendering();
+        assert!(app.is_pipelined());
+    }
+
+    /// Over N pipelined frames the render sub-app runs exactly N times once the
+    /// final in-flight frame is synced.
+    #[test]
+    fn pipelined_runs_every_frame_once() {
+        let render_count = Arc::new(AtomicU64::new(0));
+
+        let mut app = App::new();
+        app.insert_sub_app(RenderApp, make_render_sub_app(render_count.clone()));
+        app.enable_pipelined_rendering();
+
+        app.set_runner(|app| HeadlessRunner::with_max_frames(5).run(app));
+        app.run();
+
+        // The runner's final `sync_sub_apps` brings the last render home, so
+        // all 5 frames have rendered.
+        assert_eq!(render_count.load(Ordering::Relaxed), 5);
+    }
+
+    /// Extract stays one-way (main → sub) and the sub-app sees the main world's
+    /// completed frame, exactly as in the serial path.
+    #[test]
+    fn pipelined_extract_sees_completed_frame() {
+        let render_count = Arc::new(AtomicU64::new(0));
+
+        let mut app = App::new();
+        app.world_mut().insert_resource(Counter::default());
+        app.add_systems(Update, |mut c: ResMut<Counter>| {
+            c.0 += 10;
+        });
+        app.insert_sub_app(RenderApp, make_render_sub_app(render_count.clone()));
+        app.set_extract(
+            RenderApp,
+            |main: &mut prism_ecs::world::World, sub: &mut prism_ecs::world::World| {
+                let value = main.resource::<Counter>().0;
+                sub.resource_mut::<Counter>().0 = value;
+            },
+        );
+        app.enable_pipelined_rendering();
+
+        // Drive four frames directly, then sync to inspect the secondary.
+        app.update();
+        app.update();
+        app.update();
+        app.update();
+        app.sync_sub_apps();
+
+        assert_eq!(app.world().resource::<Counter>().0, 40);
+        assert_eq!(
+            app.get_sub_app(RenderApp).unwrap().world.resource::<Counter>().0,
+            40
+        );
+        assert_eq!(render_count.load(Ordering::Relaxed), 4);
+    }
+
+    /// The pipelined path yields the same observable result as the serial path
+    /// (determinism: pipelining only overlaps timing, never changes outcomes).
+    #[test]
+    fn pipelined_matches_serial() {
+        fn drive(pipelined: bool, frames: u64) -> (u64, u64, u64) {
+            let render_count = Arc::new(AtomicU64::new(0));
+            let mut app = App::new();
+            app.world_mut().insert_resource(Counter::default());
+            app.add_systems(Update, |mut c: ResMut<Counter>| {
+                c.0 += 7;
+            });
+            app.insert_sub_app(RenderApp, make_render_sub_app(render_count.clone()));
+            app.set_extract(
+                RenderApp,
+                |main: &mut prism_ecs::world::World, sub: &mut prism_ecs::world::World| {
+                    let value = main.resource::<Counter>().0;
+                    sub.resource_mut::<Counter>().0 = value;
+                },
+            );
+            if pipelined {
+                app.enable_pipelined_rendering();
+            }
+            for _ in 0..frames {
+                app.update();
+            }
+            app.sync_sub_apps();
+            (
+                app.world().resource::<Counter>().0,
+                app.get_sub_app(RenderApp).unwrap().world.resource::<Counter>().0,
+                render_count.load(Ordering::Relaxed),
+            )
+        }
+
+        let serial = drive(false, 6);
+        let pipelined = drive(true, 6);
+        assert_eq!(serial, pipelined);
+        // Sanity: 6 frames × +7 = 42 in both worlds, 6 renders.
+        assert_eq!(pipelined, (42, 42, 6));
+    }
+
+    /// While a render frame is in flight the secondary sub-app is resident on
+    /// the worker thread and unreachable until `sync_sub_apps` brings it home.
+    #[test]
+    fn secondaries_resident_on_worker_until_sync() {
+        let render_count = Arc::new(AtomicU64::new(0));
+
+        let mut app = App::new();
+        app.insert_sub_app(RenderApp, make_render_sub_app(render_count.clone()));
+        app.enable_pipelined_rendering();
+
+        app.update();
+        // Render frame 0 is in flight: the secondary is not on the main thread.
+        assert!(app.get_sub_app(RenderApp).is_none());
+
+        app.sync_sub_apps();
+        // Now it is home and reachable again.
+        assert!(app.get_sub_app(RenderApp).is_some());
+    }
+
+    /// A render-thread panic is propagated on the main thread (never silently
+    /// swallowed) when the in-flight frame is joined.
+    #[test]
+    #[should_panic(expected = "render boom")]
+    fn render_thread_panic_propagates() {
+        let mut app = App::new();
+        let mut render = SubApp::new();
+        render
+            .world
+            .resource_mut::<prism_ecs::schedule::Schedules>()
+            .insert(Update, prism_ecs::schedule::Schedule::new());
+        render
+            .world
+            .resource_mut::<prism_ecs::schedule::Schedules>()
+            .get_mut(Update)
+            .unwrap()
+            .add_systems(|| panic!("render boom"));
+        app.insert_sub_app(RenderApp, render);
+        app.enable_pipelined_rendering();
+
+        // Frame 0 kicks render 0 (which will panic). Frame 1 joins it and the
+        // panic surfaces here on the main thread.
+        app.update();
+        app.update();
+    }
+}

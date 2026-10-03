@@ -37,15 +37,19 @@ impl HeadlessRunner {
     /// [`AppExit::Success`] when the frame cap is reached.
     pub fn run(self, mut app: App) -> AppExit {
         let mut frame: u64 = 0;
-        loop {
+        let exit = loop {
             app.update();
             if let Some(exit) = app.should_exit() {
-                return exit;
+                break exit;
             }
             frame = frame.saturating_add(1);
             if self.max_frames.is_some_and(|max| frame >= max) {
-                return AppExit::Success;
+                break AppExit::Success;
             }
-        }
+        };
+        // Bring any pipelined render frame home before returning so the final
+        // frame's render has completed (no-op in the serial / feature-off case).
+        app.sync_sub_apps();
+        exit
     }
 }

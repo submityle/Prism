@@ -22,5 +22,8 @@ impl ScheduleRunnerOnce {
 /// request (defaulting to [`AppExit::Success`]).
 pub fn run_once(mut app: App) -> AppExit {
     app.update();
+    // Bring any pipelined render frame home before reading final state
+    // (no-op without the `pipelined` feature / unless pipelining was enabled).
+    app.sync_sub_apps();
     app.should_exit().unwrap_or(AppExit::Success)
 }

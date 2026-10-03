@@ -25,9 +25,14 @@
 //!   ordered set of labeled secondary sub-apps keyed by [`SubAppLabel`]. Each
 //!   frame, after the main sub-app updates, every secondary sub-app runs its
 //!   one-way [`ExtractFn`] (`main world → sub world`, design §9/§25.2) and then
-//!   updates — **serially** for now (design §23 risk #1: serial extract first,
-//!   `pipelined` later). Cross-thread pipelined overlap is M3 Inc2 and honestly
-//!   absent, not stubbed.
+//!   updates. The default is **serial** (design §23 risk #1: serial extract
+//!   first). Under the `pipelined` feature, `App::enable_pipelined_rendering`
+//!   opts into cross-thread overlap (M3 Inc2): a secondary sub-app renders
+//!   frame *N* on a worker thread while the main sub-app simulates frame *N+1*
+//!   (design §9/§24.3/§25.2, `PipelinedExecutor`). The pipeline keeps the
+//!   serial extract semantics (extract still runs on the main thread, one-way,
+//!   against a complete frame), so a pipelined run is bit-for-bit equivalent to
+//!   the serial run — only the timing overlaps.
 //! - The [`Plugin`] trait (`build` / `ready` / `finish` / `cleanup`, plus
 //!   declared [`dependencies`](crate::plugin::Plugin::dependencies)) and an
 //!   editable [`PluginGroup`]: [`PluginGroupBuilder`] supports ordered,
@@ -86,6 +91,8 @@ pub mod fixed;
 pub mod plugin;
 pub mod plugin_group;
 pub mod plugin_graph;
+#[cfg(feature = "pipelined")]
+pub mod pipelined;
 pub mod runner;
 pub mod schedule;
 pub mod state;
@@ -106,6 +113,8 @@ pub use fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpd
 pub use schedule::{
     First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
 };
+#[cfg(feature = "pipelined")]
+pub use pipelined::PipelinedExecutor;
 pub use sub_app::{ExtractFn, SubApp, SubApps};
 pub use sub_app_label::{BoxedSubAppLabel, SubAppLabel};
 pub use time::{EngineClocks, TimeUpdateStrategy};
@@ -125,6 +134,8 @@ pub mod prelude {
         First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup,
         Update,
     };
+    #[cfg(feature = "pipelined")]
+    pub use crate::pipelined::PipelinedExecutor;
     pub use crate::sub_app::{ExtractFn, SubApp, SubApps};
     pub use crate::sub_app_label::{BoxedSubAppLabel, SubAppLabel};
     pub use crate::time::{EngineClocks, TimeUpdateStrategy};

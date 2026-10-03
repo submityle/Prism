@@ -161,6 +161,12 @@ pub struct SubApps {
     pub main: SubApp,
     /// Labeled secondary sub-apps in insertion order.
     secondary: Vec<(BoxedSubAppLabel, SubApp)>,
+    /// The cross-thread pipeline driver (design §9, §24.3). `Some` once a
+    /// caller opts in via `enable_pipelining`;
+    /// `None` means the serial path. Only present under the `pipelined`
+    /// feature so a build without it carries zero pipeline state.
+    #[cfg(feature = "pipelined")]
+    pipeline: Option<crate::pipelined::PipelinedExecutor>,
 }
 
 impl Default for SubApps {
@@ -175,6 +181,8 @@ impl SubApps {
         Self {
             main: SubApp::new(),
             secondary: Vec::new(),
+            #[cfg(feature = "pipelined")]
+            pipeline: None,
         }
     }
 
@@ -183,6 +191,8 @@ impl SubApps {
         Self {
             main,
             secondary: Vec::new(),
+            #[cfg(feature = "pipelined")]
+            pipeline: None,
         }
     }
 
@@ -240,20 +250,91 @@ impl SubApps {
         }
     }
 
-    /// Run one frame: update the main sub-app, then for each secondary sub-app
-    /// (in insertion order) run its extract (`main world → sub world`) followed
-    /// by its own update (design §9, §25.2).
+    /// Run one frame.
     ///
-    /// This is **serial** (design §23 risk #1: serial extract first, pipelined
-    /// later). The strict ordering — main before every secondary, and extract
-    /// before each secondary's update — guarantees a secondary sub-app always
-    /// reads the main world's just-finished frame, never a half-updated one.
+    /// By default this is the **serial** path (`update_serial`):
+    /// update the main sub-app, then for each secondary sub-app (in insertion
+    /// order) run its extract (`main world → sub world`) followed by its own
+    /// update (design §9, §25.2, §23 risk #1).
+    ///
+    /// When the `pipelined` feature is enabled *and* a caller has opted in via
+    /// `enable_pipelining`, it instead drives the
+    /// cross-thread pipeline (see the `pipelined` module), overlapping a
+    /// secondary's render of frame *N* with the main sub-app's simulation of
+    /// frame *N+1*. The pipeline preserves the serial path's extract semantics
+    /// (extract still runs on the main thread, one-way, against a complete
+    /// frame), so results are identical; only the timing overlaps.
     pub fn update(&mut self) {
+        // Opt-in cross-thread pipeline (design §9/§24.3): only taken when the
+        // `pipelined` feature is compiled in *and* a caller enabled it. In
+        // every other case this falls through to the serial path below, which
+        // is therefore the default and the sole path when the feature is off.
+        #[cfg(feature = "pipelined")]
+        if self.pipeline.is_some() {
+            // Disjoint field borrows so the executor can hold `&mut main` and
+            // `&mut secondary` at once.
+            let Self {
+                main,
+                secondary,
+                pipeline,
+            } = self;
+            pipeline
+                .as_mut()
+                .expect("pipeline is Some")
+                .drive(main, secondary);
+            return;
+        }
+
+        self.update_serial();
+    }
+
+    /// The serial per-frame path (design §23 risk #1): update the main sub-app,
+    /// then for each secondary (in insertion order) run its extract
+    /// (`main world → sub world`) followed by its own update.
+    ///
+    /// The strict ordering — main before every secondary, and extract before
+    /// each secondary's update — guarantees a secondary sub-app always reads
+    /// the main world's just-finished frame, never a half-updated one. This is
+    /// also the body the pipelined path reuses conceptually (its extract step
+    /// runs on the main thread at the same synchronization point).
+    fn update_serial(&mut self) {
         self.main.update();
         let main_world = &mut self.main.world;
         for (_, sub_app) in &mut self.secondary {
             sub_app.run_extract(main_world);
             sub_app.update();
+        }
+    }
+
+    /// Opt into cross-thread pipelined execution (design §9, §24.3, §25.2).
+    ///
+    /// After this, [`update`](SubApps::update) overlaps a secondary sub-app's
+    /// render of frame *N* with the main sub-app's simulation of frame *N+1*
+    /// (see the `pipelined` module). Idempotent: enabling an already-pipelined
+    /// collection keeps the existing in-flight state. Only available under the
+    /// `pipelined` feature.
+    #[cfg(feature = "pipelined")]
+    pub fn enable_pipelining(&mut self) {
+        if self.pipeline.is_none() {
+            self.pipeline = Some(crate::pipelined::PipelinedExecutor::new());
+        }
+    }
+
+    /// Whether cross-thread pipelining is enabled on this collection.
+    #[cfg(feature = "pipelined")]
+    #[must_use]
+    pub fn is_pipelined(&self) -> bool {
+        self.pipeline.is_some()
+    }
+
+    /// Block until any in-flight render frame finishes, bringing the secondary
+    /// sub-apps back to the calling thread so they can be inspected via
+    /// [`get`](SubApps::get) / [`get_mut`](SubApps::get_mut). A no-op when
+    /// pipelining is disabled or nothing is in flight.
+    #[cfg(feature = "pipelined")]
+    pub fn sync(&mut self) {
+        if let Some(pipeline) = self.pipeline.as_mut() {
+            pipeline.sync(&mut self.secondary);
         }
     }
 }

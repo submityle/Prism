@@ -19,6 +19,14 @@ prism_time = { path = "../prism_time", default-features = false }
 default = ["std"]
 std = ["prism_time/std"]
 
+# Cross-thread sub-app pipelining (design §9 / §24.3 / §25.2): run a secondary
+# (e.g. render) sub-app for frame N on a worker thread while the main sub-app
+# simulates frame N+1. Opt-in at runtime via
+# `App::enable_pipelined_rendering`; the serial extract path (M3 Inc1) stays
+# the default and is the only path when this feature is off. Needs `std`
+# (threads), so it implies it.
+pipelined = ["std"]
+
 # AAA lint bar. prism_app contains no `unsafe`, so unlike prism_ecs it can keep
 # the workspace-strength lints as warnings and still hit zero warnings.
 [lints.rust]

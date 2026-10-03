@@ -345,6 +345,46 @@ impl App {
         self.sub_apps.update();
     }
 
+    /// Opt into cross-thread pipelined rendering (design §9, §24.3, §25.2).
+    ///
+    /// After this, each [`update`](App::update) overlaps a secondary sub-app's
+    /// render of frame *N* with the main sub-app's simulation of frame *N+1*
+    /// on a worker thread, trading latency for throughput. The extract step
+    /// still runs one-way on the main thread against a completed frame, so
+    /// results match the serial path exactly (see
+    /// [`crate::pipelined`]). Idempotent.
+    ///
+    /// While pipelining is active a secondary sub-app lives on the worker
+    /// thread between frames and is **not** reachable through
+    /// [`get_sub_app`](App::get_sub_app) / [`sub_app_mut`](App::sub_app_mut)
+    /// until [`sync_sub_apps`](App::sync_sub_apps) brings it home. Only
+    /// available under the `pipelined` feature.
+    #[cfg(feature = "pipelined")]
+    pub fn enable_pipelined_rendering(&mut self) -> &mut Self {
+        self.sub_apps.enable_pipelining();
+        self
+    }
+
+    /// Whether cross-thread pipelined rendering is enabled.
+    #[cfg(feature = "pipelined")]
+    #[must_use]
+    pub fn is_pipelined(&self) -> bool {
+        self.sub_apps.is_pipelined()
+    }
+
+    /// Bring any in-flight pipelined render frame home, so secondary sub-apps
+    /// are resident on the calling thread and reachable through
+    /// [`get_sub_app`](App::get_sub_app) / [`sub_app_mut`](App::sub_app_mut).
+    ///
+    /// A no-op unless the `pipelined` feature is enabled, pipelining was turned
+    /// on, and a render frame is in flight. Runners call this once the frame
+    /// loop ends; a caller inspecting a secondary mid-run must call it first.
+    pub fn sync_sub_apps(&mut self) -> &mut Self {
+        #[cfg(feature = "pipelined")]
+        self.sub_apps.sync();
+        self
+    }
+
     /// Finalize plugins, run startup once, then hand the app to its runner.
     ///
     /// If no runner was set, defaults to [`run_once`](crate::runner::run_once),
