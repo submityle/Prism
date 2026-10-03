@@ -212,6 +212,8 @@ pub mod lens_flare;
 pub mod liang_barsky_clip;
 pub mod light_clustered;
 pub mod light_shaft;
+pub mod lighting_cluster_cull;
+pub mod lighting_cluster_importance;
 pub mod line_line_closest_3d;
 pub mod lod;
 pub mod luminance_hist;
@@ -285,6 +287,7 @@ pub mod powder;
 pub mod premultiply_alpha;
 pub mod probe_grid_sample;
 pub mod pyrocumulus_buoyancy;
+pub mod quality_decision;
 pub mod quaternion_rotate;
 pub mod quickselect_u32;
 pub mod radix_sort_u32;
@@ -300,8 +303,10 @@ pub mod rayleigh_phase;
 pub mod raytrace;
 pub mod readback_reduce;
 pub mod reflect_refract_vec;
+pub mod regir_grid_index;
 pub mod relax_coverage;
 pub mod reservoir_sample;
+pub mod restir_spatial_admissible;
 pub mod rgb_ycocg;
 pub mod rgbe_encode;
 pub mod ribbon_geometry;
@@ -364,6 +369,7 @@ pub mod tonemap;
 pub mod total_coverage;
 pub mod tracking_transmittance;
 pub mod transcendental_approx;
+pub mod transparency_path_select;
 pub mod tri_tri_intersect;
 pub mod triangle_aabb_overlap;
 pub mod triangle_circumcircle;
@@ -607,6 +613,12 @@ pub use light_clustered::{
     GpuLightClustered, LightClusteredQuery, LightClusteredResult, MAX_SLICE_BOUNDARIES,
 };
 pub use light_shaft::{GpuLightShaft, GpuLightShaftParams, LightShaftResult};
+pub use lighting_cluster_cull::{
+    GpuLightClusterCull, LightClusterCullQuery, LightClusterCullResult,
+};
+pub use lighting_cluster_importance::{
+    GpuLightClusterImportance, LightClusterImportanceQuery, LightClusterImportanceResult,
+};
 pub use line_line_closest_3d::{GpuLineLineClosest3d, LineLineQuery, LineLineResult};
 pub use lod::{GpuParticleLod, ParticleLodQuery, ParticleLodResult};
 pub use luminance_hist::{GpuLuminanceHist, LuminanceHistQuery};
@@ -705,6 +717,7 @@ pub use powder::{GpuPowder, PowderQuery};
 pub use premultiply_alpha::GpuPremultiplyAlpha;
 pub use probe_grid_sample::{GpuProbeGridSample, ProbeSampleQuery, PROBE_BANDS};
 pub use pyrocumulus_buoyancy::{GpuPyrocumulusBuoyancy, PyrocumulusBuoyancyQuery};
+pub use quality_decision::{GpuQualityDecision, QualityDecisionQuery, QualityDecisionResult};
 pub use quaternion_rotate::{GpuQuaternionRotate, QuatRotateQuery, QuatRotateResult};
 pub use quickselect_u32::{GpuQuickselect, GpuQuickselectU32, QuickselectQuery};
 pub use radix_sort_u32::{GpuRadixSort, GpuRadixSortU32};
@@ -723,8 +736,12 @@ pub use raytrace::{
 };
 pub use readback_reduce::{GpuReadbackReduce, GpuReadbackReduceQuery, GpuReadbackReduceResult};
 pub use reflect_refract_vec::{GpuReflectRefractVec, ReflectRefractQuery, ReflectRefractResult};
+pub use regir_grid_index::{GpuRegirGridIndex, RegirGridIndexQuery, RegirGridIndexResult};
 pub use relax_coverage::{GpuRelaxCoverage, RelaxCoverageQuery};
 pub use reservoir_sample::{GpuReservoirSample, ReservoirValue};
+pub use restir_spatial_admissible::{
+    GpuRestirSpatialAdmissible, RestirSpatialAdmissibleQuery, RestirSpatialAdmissibleResult,
+};
 pub use rgb_ycocg::GpuRgbYCoCg;
 pub use rgbe_encode::{GpuRgbeEncode, RgbePrimQuery, RgbePrimResult};
 pub use ribbon_geometry::{GpuRibbonGeometry, RibbonStripQuery};
@@ -820,6 +837,9 @@ pub use tracking_transmittance::{
     GpuTrackingTransmittance, TrackingEstimate, TrackingTransmittanceQuery,
 };
 pub use transcendental_approx::{GpuTranscendental, TranscendentalQuery, TranscendentalResult};
+pub use transparency_path_select::{
+    GpuTransparencyPathSelect, TransparencyPathSelectQuery, TransparencyPathSelectResult,
+};
 pub use tri_tri_intersect::{GpuTriTriIntersect, TriTriQuery};
 pub use triangle_aabb_overlap::{GpuTriangleAabbOverlap, TriangleAabbQuery};
 pub use triangle_circumcircle::{GpuTriangleCircumcircle, TriangleCircumcircleResult};
