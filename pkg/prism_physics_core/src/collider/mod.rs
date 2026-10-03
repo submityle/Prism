@@ -187,6 +187,8 @@ pub mod tet_mass;
 pub use tet_mass::{compute_tet_mass_properties, TetMassParams, TetMassProperties};
 pub mod tet_adjacency;
 pub use tet_adjacency::{build_tet_adjacency, TetAdjacency};
+pub mod tet_coloring;
+pub use tet_coloring::{colour_tet_adjacency, colour_tet_mesh, TetColoring};
 
 /// A handle into a [`ShapeRegistry`].
 ///
