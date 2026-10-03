@@ -217,6 +217,8 @@ pub mod tet_fem_stiffness;
 pub use tet_fem_stiffness::{
     element_stiffness, IsotropicElasticity, TetStiffness,
 };
+pub mod tet_fem_assembly;
+pub use tet_fem_assembly::{assemble_global_stiffness, GlobalStiffness};
 
 /// A handle into a [`ShapeRegistry`].
 ///
