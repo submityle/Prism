@@ -24,5 +24,13 @@ std = ["prism_platform/std"]
 # Purely additive aliases over the existing types; no behavior or layout change.
 compat-bevy = []
 
+[[bench]]
+name = "batch_transform"
+harness = false
+
+[[bench]]
+name = "fixed_determinism"
+harness = false
+
 [lints]
 workspace = true
