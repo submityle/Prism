@@ -6311,4 +6311,169 @@ mod cvar_tests {
         }
         assert_eq!(app.cvar_bool("g.godmode"), Some(true));
     }
+
+    /// `write_archive_config` serialises only the ARCHIVE cvars, in ascending
+    /// name order, as `name value` console lines under a `//` header; an
+    /// un-archived cvar is omitted.
+    #[test]
+    fn archive_config_lists_only_archived_cvars_in_ascending_order() {
+        let mut app = App::new();
+        // Registered out of alphabetical order with mixed ARCHIVE flags.
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .bounds(CvarBounds::Int(0, 4))
+                .flag(CvarFlags::ARCHIVE),
+        )
+        .unwrap();
+        app.register_cvar(CvarSpec::new("dbg.fps", false).flag(CvarFlags::ARCHIVE))
+            .unwrap();
+        app.register_cvar(CvarSpec::new("net.rate", 60_i64)).unwrap(); // not archived
+        app.register_cvar(CvarSpec::new("snd.volume", 0.5_f64).flag(CvarFlags::ARCHIVE))
+            .unwrap();
+
+        let config = app.write_archive_config();
+        let lines: Vec<&str> = config.lines().collect();
+        assert!(lines[0].starts_with("//"), "first line is a comment header");
+        assert_eq!(
+            &lines[1..],
+            &["dbg.fps false", "r.shadows 2", "snd.volume 0.5"],
+        );
+        // The un-archived cvar never appears.
+        assert!(!config.contains("net.rate"));
+    }
+
+    /// A `write_archive_config()` -> `exec_console_script()` cycle restores every
+    /// archived value into a fresh App with the same schema, losslessly.
+    #[test]
+    fn archive_config_round_trips_through_exec_console_script() {
+        fn schema(app: &mut App) {
+            app.register_cvar(
+                CvarSpec::new("r.shadows", 2_i64)
+                    .bounds(CvarBounds::Int(0, 4))
+                    .flag(CvarFlags::ARCHIVE),
+            )
+            .unwrap();
+            app.register_cvar(CvarSpec::new("snd.volume", 0.5_f64).flag(CvarFlags::ARCHIVE))
+                .unwrap();
+            app.register_cvar(CvarSpec::new("net.name", "default").flag(CvarFlags::ARCHIVE))
+                .unwrap();
+        }
+
+        let mut source = App::new();
+        schema(&mut source);
+        // Mutate away from the defaults at the runtime layer.
+        source.set_cvar("r.shadows", SettingValue::Int(4)).unwrap();
+        source.set_cvar("snd.volume", SettingValue::Float(0.25)).unwrap();
+        source
+            .set_cvar("net.name", SettingValue::Str("alice".to_owned()))
+            .unwrap();
+        let config = source.write_archive_config();
+
+        let mut restored = App::new();
+        schema(&mut restored);
+        let outcomes = restored.exec_console_script(&config);
+        // Header comment line + three cvar lines (ascending: net.name, r.shadows, snd.volume).
+        assert_eq!(outcomes.len(), 4);
+        assert_eq!(outcomes[0], ConsoleOutcome::Empty); // header comment
+        assert!(matches!(outcomes[1], ConsoleOutcome::Set(_)));
+
+        assert_eq!(restored.cvar_int("r.shadows"), Some(4));
+        assert_eq!(restored.cvar_float("snd.volume"), Some(0.25));
+        assert_eq!(restored.cvar_str("net.name"), Some("alice"));
+    }
+
+    /// Blank lines and `//` comments in a script are no-ops; real lines apply.
+    #[test]
+    fn exec_console_script_skips_blank_and_comment_lines() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
+            .unwrap();
+
+        let outcomes = app.exec_console_script("// header\n\nr.shadows 3\n   \n// trailing");
+        assert_eq!(outcomes.len(), 5);
+        assert_eq!(outcomes[0], ConsoleOutcome::Empty);
+        assert_eq!(outcomes[1], ConsoleOutcome::Empty);
+        assert!(matches!(outcomes[2], ConsoleOutcome::Set(_)));
+        assert_eq!(outcomes[3], ConsoleOutcome::Empty);
+        assert_eq!(outcomes[4], ConsoleOutcome::Empty);
+        assert_eq!(app.cvar_int("r.shadows"), Some(3));
+    }
+
+    /// A string cvar with interior spaces round-trips without quoting, because
+    /// the console takes the whole trimmed line remainder as the value.
+    #[test]
+    fn archive_config_round_trips_multi_word_string() {
+        fn schema(app: &mut App) {
+            app.register_cvar(CvarSpec::new("player.name", "anon").flag(CvarFlags::ARCHIVE))
+                .unwrap();
+        }
+
+        let mut source = App::new();
+        schema(&mut source);
+        source
+            .set_cvar("player.name", SettingValue::Str("The Brave One".to_owned()))
+            .unwrap();
+        let config = source.write_archive_config();
+        assert!(config.contains("player.name The Brave One"));
+
+        let mut restored = App::new();
+        schema(&mut restored);
+        restored.exec_console_script(&config);
+        assert_eq!(restored.cvar_str("player.name"), Some("The Brave One"));
+    }
+
+    /// A float cvar holding an integral value is written with a trailing `.0`
+    /// and restored as a float, not accidentally coerced through an int token.
+    #[test]
+    fn archive_config_integral_float_round_trips_as_float() {
+        fn schema(app: &mut App) {
+            app.register_cvar(
+                CvarSpec::new("r.gamma", 2.2_f64)
+                    .bounds(CvarBounds::Float(0.0, 4.0))
+                    .flag(CvarFlags::ARCHIVE),
+            )
+            .unwrap();
+        }
+
+        let mut source = App::new();
+        schema(&mut source);
+        source.set_cvar("r.gamma", SettingValue::Float(2.0)).unwrap();
+        let config = source.write_archive_config();
+        assert!(config.contains("r.gamma 2.0"), "got: {config:?}");
+
+        let mut restored = App::new();
+        schema(&mut restored);
+        restored.exec_console_script(&config);
+        assert_eq!(restored.cvar_float("r.gamma"), Some(2.0));
+        assert_eq!(restored.cvar("r.gamma"), Some(&SettingValue::Float(2.0)));
+    }
+
+    /// An unset archived cvar is still written from its declared default, and a
+    /// string value containing a newline is skipped as a documented limitation.
+    #[test]
+    fn archive_config_uses_defaults_and_skips_newline_strings() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.vsync", true).flag(CvarFlags::ARCHIVE))
+            .unwrap();
+        app.register_cvar(CvarSpec::new("sys.motd", "hi").flag(CvarFlags::ARCHIVE))
+            .unwrap();
+        // Give the string cvar a pathological newline-containing value.
+        app.set_cvar("sys.motd", SettingValue::Str("line1\nline2".to_owned()))
+            .unwrap();
+
+        let config = app.write_archive_config();
+        // The unset bool cvar is written from its seeded default.
+        assert!(config.contains("r.vsync true"));
+        // The newline-containing string is skipped entirely.
+        assert!(!config.contains("sys.motd"));
+    }
+
+    /// A fresh App that never registered a cvar yields just the header comment.
+    #[test]
+    fn archive_config_without_registry_is_header_only() {
+        let app = App::new();
+        let config = app.write_archive_config();
+        assert!(config.starts_with("//"));
+        assert_eq!(config.lines().count(), 1);
+    }
 }

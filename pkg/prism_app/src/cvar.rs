@@ -998,6 +998,78 @@ impl App {
         }
     }
 
+    /// Execute a multi-line console `script`, running each line through
+    /// [`exec_console`](App::exec_console) in order and collecting the per-line
+    /// [`ConsoleOutcome`]s (design §24.6 console/config-file form, §14 config
+    /// layering).
+    ///
+    /// The script is split on **newlines** only (never `;`), so a value with
+    /// interior spaces survives intact — [`exec_console`](App::exec_console)
+    /// takes the whole trimmed line remainder as the value. Blank lines and
+    /// `//` comments become [`ConsoleOutcome::Empty`], so the header emitted by
+    /// [`write_archive_config`](App::write_archive_config) is a no-op and
+    /// `write_archive_config()` → `exec_console_script(..)` is a lossless
+    /// save/load round-trip for archived cvars.
+    ///
+    /// Each line is independent: a [`Rejected`](ConsoleOutcome::Rejected) or
+    /// [`Unknown`](ConsoleOutcome::Unknown) line leaves all state untouched
+    /// (design §25.3) and never aborts the remaining lines, so a single stale
+    /// entry in a config file cannot discard the rest of it.
+    pub fn exec_console_script(&mut self, script: &str) -> Vec<ConsoleOutcome> {
+        script.lines().map(|line| self.exec_console(line)).collect()
+    }
+
+    /// Serialise every [`ARCHIVE`](CvarFlags::ARCHIVE) cvar as console lines
+    /// suitable for persisting to a user config file and replaying through
+    /// [`exec_console_script`](App::exec_console_script) (design §24.6 "控制台/
+    /// 配置文件/命令行可设", §14 config layering).
+    ///
+    /// Each archived cvar is written as a `name value` line — the exact form
+    /// [`exec_console`](App::exec_console) consumes — in ascending-name order
+    /// via [`CvarRegistry::archived`], so the output is deterministic. The
+    /// resolved value from the cascade is used, falling back to the declared
+    /// default when a cvar is unset. The text is prefixed with a `//` comment
+    /// header, which [`exec_console`](App::exec_console) treats as a no-op on
+    /// reload.
+    ///
+    /// This crate performs no file I/O: callers write the returned string to
+    /// disk themselves. Reloading `write_archive_config()` output through
+    /// [`exec_console_script`](App::exec_console_script) restores the archived
+    /// values losslessly, with one honest limitation — a string value
+    /// containing a newline cannot be represented in this line-based format and
+    /// is skipped (such a value is pathological for an archived cvar). Interior
+    /// spaces and tabs in a string value survive without quoting.
+    #[must_use]
+    pub fn write_archive_config(&self) -> String {
+        let mut out = String::from(
+            "// Prism archived cvars — generated config; reload via exec_console_script.\n",
+        );
+        let Some(registry) = self.world().get_resource::<CvarRegistry>() else {
+            return out;
+        };
+        let settings = self.world().get_resource::<Settings>();
+        for name in registry.archived() {
+            let resolved = settings
+                .and_then(|table| table.get(name).cloned())
+                .or_else(|| registry.get(name).map(|cvar| cvar.default.clone()));
+            let Some(value) = resolved else {
+                continue;
+            };
+            if let SettingValue::Str(text) = &value
+                && text.contains('\n')
+            {
+                // A newline would split one value across config lines; skip it
+                // rather than emit a corrupt, non-round-tripping entry.
+                continue;
+            }
+            out.push_str(name);
+            out.push(' ');
+            out.push_str(&format_cvar_token(&value));
+            out.push('\n');
+        }
+        out
+    }
+
     /// Clear the cvar `name`'s [`Runtime`](crate::settings::SettingsLayer::Runtime)
     /// override, letting it fall back to a lower cascade layer (design §24.6).
     ///
@@ -1234,5 +1306,30 @@ impl App {
                 report.settings.push(change);
             }
         }
+    }
+}
+
+/// Format a [`SettingValue`] back into a single console token that
+/// [`SettingValue::parse`](crate::settings::SettingValue::parse) reads back as
+/// an equivalent value, so [`App::write_archive_config`] output round-trips
+/// through [`App::exec_console_script`].
+///
+/// A float holding an integral value is written with a trailing `.0` so it
+/// parses back as a [`Float`](SettingValue::Float) rather than an
+/// [`Int`](SettingValue::Int); every other variant uses its natural textual
+/// form. A string is emitted verbatim: the console treats the whole trimmed
+/// line remainder as the value, so interior spaces survive without quoting.
+fn format_cvar_token(value: &SettingValue) -> String {
+    match value {
+        SettingValue::Bool(flag) => flag.to_string(),
+        SettingValue::Int(int) => int.to_string(),
+        SettingValue::Float(float) => {
+            if float.is_finite() && float.fract() == 0.0 {
+                format!("{float}.0")
+            } else {
+                float.to_string()
+            }
+        }
+        SettingValue::Str(text) => text.clone(),
     }
 }
