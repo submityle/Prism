@@ -30,6 +30,7 @@
 
 use super::config::XpbdConfig;
 use super::contact_constraint::{self, ContactConstraint};
+use super::graph_color::{self, DynamicBodies};
 use super::island_solve::SolveIslands;
 use super::{integrate, joint_constraint, velocity_solve};
 use crate::collider::{ColliderHandle, PhysicsMaterial};
@@ -192,14 +193,90 @@ impl IslandScratch {
             active: &self.active,
         };
         let iterations = config.position_iterations.max(1);
-        for _ in 0..iterations {
-            for joint in &self.joints {
-                joint_constraint::solve_joint(&mut view, joint, h);
+        if config.parallel_within_island {
+            // Colour the island once per sub-step (the constraint graph is
+            // fixed across the position iterations) and relax one colour at a
+            // time. Joints and contacts are coloured separately so the natural
+            // "all joints, then all contacts" phase ordering is preserved; only
+            // the order *within* each phase changes, from natural index order
+            // to colour-major order.
+            let joint_bodies: Vec<DynamicBodies> = self
+                .joints
+                .iter()
+                .map(|j| {
+                    Self::dynamic_bodies(
+                        &self.kinds,
+                        &self.active,
+                        j.anchor_a.body.index() as usize,
+                        j.anchor_b.body.index() as usize,
+                    )
+                })
+                .collect();
+            let contact_bodies: Vec<DynamicBodies> = self
+                .contacts
+                .iter()
+                .map(|c| Self::dynamic_bodies(&self.kinds, &self.active, c.slot_a, c.slot_b))
+                .collect();
+            let slot_count = self.slots.len();
+            let joint_coloring = graph_color::color_constraints(&joint_bodies, slot_count);
+            let contact_coloring = graph_color::color_constraints(&contact_bodies, slot_count);
+            // Flatten the colour-major order once; `color_range` then slices the
+            // constraints that make up each colour.
+            let joint_order: Vec<usize> =
+                joint_coloring.order().iter().map(|&i| i as usize).collect();
+            let contact_order: Vec<usize> = contact_coloring
+                .order()
+                .iter()
+                .map(|&i| i as usize)
+                .collect();
+            for _ in 0..iterations {
+                for colour in 0..joint_coloring.color_count() as usize {
+                    for &ji in &joint_order[joint_coloring.color_range(colour)] {
+                        joint_constraint::solve_joint(&mut view, &self.joints[ji], h);
+                    }
+                }
+                for colour in 0..contact_coloring.color_count() as usize {
+                    let members = &contact_order[contact_coloring.color_range(colour)];
+                    contact_constraint::solve_positions_indexed(
+                        &mut view,
+                        &mut self.contacts,
+                        members,
+                        config,
+                        h,
+                    );
+                }
             }
-            contact_constraint::solve_positions(&mut view, &mut self.contacts, config, h);
+        } else {
+            for _ in 0..iterations {
+                for joint in &self.joints {
+                    joint_constraint::solve_joint(&mut view, joint, h);
+                }
+                contact_constraint::solve_positions(&mut view, &mut self.contacts, config, h);
+            }
         }
         integrate::recover_velocities(&mut view, h);
         velocity_solve::solve(&mut view, &self.contacts, config, h);
+    }
+
+    /// Classifies the dynamic bodies a constraint between `slot_a`/`slot_b`
+    /// couples for colouring: only live dynamic locals gate a colour, since the
+    /// position solve never writes static or kinematic separators.
+    fn dynamic_bodies(
+        kinds: &[BodyKind],
+        active: &[bool],
+        slot_a: usize,
+        slot_b: usize,
+    ) -> DynamicBodies {
+        let is_dyn = |slot: usize| {
+            active.get(slot).copied().unwrap_or(false)
+                && kinds.get(slot).copied() == Some(BodyKind::Dynamic)
+        };
+        match (is_dyn(slot_a), is_dyn(slot_b)) {
+            (true, true) => DynamicBodies::two(slot_a, slot_b),
+            (true, false) => DynamicBodies::one(slot_a),
+            (false, true) => DynamicBodies::one(slot_b),
+            (false, false) => DynamicBodies::none(),
+        }
     }
 
     /// Writes the solved dynamic-body columns back into the global view.
@@ -387,6 +464,102 @@ mod tests {
         assert!(
             serial.0[1].y - serial.0[0].y > 0.9,
             "island A did not separate"
+        );
+    }
+
+    /// A single tall stack is one dense island: colouring is the only way to
+    /// parallelise it. The colour-ordered sweep reorders Gauss-Seidel so it is
+    /// *not* bit-identical to the natural-index sweep, but it must converge to
+    /// the same rest state. This proves the intra-island colouring path does
+    /// real, correct work rather than silently falling back.
+    fn chained_stack(n: usize) -> BodyStorage {
+        let mut s = BodyStorage::new();
+        // Boxes stacked along Y, each penetrating the one below by 0.1.
+        for i in 0..n {
+            s.insert(
+                BodyDesc::dynamic_at(Vec3::new(0.0, i as f32 * 0.9, 0.0))
+                    .with_mass_properties(unit_mass()),
+            );
+        }
+        s
+    }
+
+    fn chain_manifolds(s: &BodyStorage, n: usize) -> Vec<ContactManifold> {
+        let h = |slot: usize| s.handle_at_slot(slot).expect("live slot");
+        let mut out = Vec::new();
+        for i in 0..n - 1 {
+            let y = (i as f32 + 0.5) * 0.9;
+            let mut m = ContactManifold::new(h(i), h(i + 1), Vec3::Y);
+            m.push(ContactPoint::new(
+                Vec3::new(0.0, y + 0.05, 0.0),
+                Vec3::new(0.0, y - 0.05, 0.0),
+                0.1,
+            ));
+            out.push(m);
+        }
+        out
+    }
+
+    #[test]
+    fn intra_island_colouring_matches_natural_order_closely() {
+        let n = 6;
+        let h = 1.0 / 60.0;
+        let run = |within: bool| -> Vec<Vec3> {
+            let mut s = chained_stack(n);
+            let ms = chain_manifolds(&s, n);
+            let mut view = s.solver_view_mut();
+            let constraints = ContactConstraint::build(&view, &ms);
+            let islands = SolveIslands::build(&view, &constraints, &[]);
+            // The whole stack must be a single island, otherwise this test is
+            // not exercising intra-island colouring at all.
+            let awake = (0..islands.island_count())
+                .filter(|&i| !islands.members(i).is_empty())
+                .count();
+            assert_eq!(awake, 1, "chained stack should form exactly one island");
+            let active =
+                sleep_solve::classify_and_wake(&mut view, &islands, &SleepConfig::default());
+            let config = XpbdConfig {
+                position_iterations: 8,
+                parallel_within_island: within,
+                ..XpbdConfig::default()
+            };
+            // Advance several sub-steps so the stack settles.
+            for _ in 0..20 {
+                solve_islands_parallel(
+                    &mut view,
+                    &islands,
+                    &active,
+                    &constraints,
+                    &[],
+                    &config,
+                    h,
+                    true,
+                );
+            }
+            view.positions.to_vec()
+        };
+        let natural = run(false);
+        let coloured = run(true);
+        assert_eq!(natural.len(), coloured.len());
+        // Reordering Gauss-Seidel is not bit-identical, so require closeness,
+        // not equality — mirrors the VBD colour-vs-natural-order golden.
+        for (i, (nat, col)) in natural.iter().zip(&coloured).enumerate() {
+            assert!(
+                (*nat - *col).length() < 1e-3,
+                "body {i} diverged between natural and coloured sweeps: {nat:?} vs {col:?}"
+            );
+        }
+        // And the colouring must have done real separation work: the stack is
+        // monotonically increasing in Y and the first gap opened up.
+        for i in 1..coloured.len() {
+            assert!(
+                coloured[i].y > coloured[i - 1].y,
+                "coloured stack not ordered at body {i}"
+            );
+        }
+        assert!(
+            coloured[1].y - coloured[0].y > 0.2,
+            "coloured stack did not separate"
         );
     }
 }

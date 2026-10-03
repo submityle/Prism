@@ -41,6 +41,25 @@ pub struct XpbdConfig {
     /// bit-identical to the serial path (islands touch disjoint dynamic
     /// bodies), so toggling it never changes results, only throughput.
     pub parallel_islands: bool,
+    /// Colour a single island's constraint graph and solve one colour at a time
+    /// so a *large* island can relax across worker threads instead of pinning
+    /// one thread with a serial Gauss-Seidel sweep.
+    ///
+    /// Islands with disjoint dynamic bodies already run on separate threads via
+    /// [`parallel_islands`](Self::parallel_islands); this flag targets the
+    /// opposite case — one dense island (a tall stack, a big pile) that other
+    /// agents' workloads cannot be split across. Constraints are partitioned so
+    /// no two in a colour write the same dynamic body, then colours are applied
+    /// in order (Gauss-Seidel across colours, order-independent within a
+    /// colour).
+    ///
+    /// Unlike [`parallel_islands`](Self::parallel_islands), enabling this
+    /// **changes the solve order** within an island, so the floating-point
+    /// result differs from the natural-index sweep (it converges to the same
+    /// rest state, not the same bits). It is therefore gated and defaults to
+    /// `false`, which keeps the existing bit-identical island behaviour and all
+    /// position goldens intact. Only takes effect with the `parallel` feature.
+    pub parallel_within_island: bool,
 }
 
 impl XpbdConfig {
@@ -58,6 +77,7 @@ impl Default for XpbdConfig {
             contact_compliance: 0.0,
             restitution_threshold: Self::DEFAULT_RESTITUTION_THRESHOLD,
             parallel_islands: true,
+            parallel_within_island: false,
         }
     }
 }
@@ -72,5 +92,10 @@ mod tests {
         assert_eq!(c.position_iterations, 1);
         assert_eq!(c.contact_compliance, 0.0);
         assert!((c.restitution_threshold - 0.5).abs() < 1e-6);
+        assert!(c.parallel_islands);
+        assert!(
+            !c.parallel_within_island,
+            "intra-island colouring is opt-in so default stays bit-identical"
+        );
     }
 }

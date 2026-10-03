@@ -14,6 +14,7 @@
 //! - [`island_solve`] — grouping of contacts/joints into independent islands.
 //! - [`parallel_solve`] — rayon-backed per-island solve (feature `parallel`).
 //! - [`contact_constraint`] — the position-level contact + static-friction solve.
+//! - [`graph_color`] — constraint-graph colouring for intra-island parallelism.
 //! - [`velocity_solve`] — the velocity-level restitution + dynamic-friction solve.
 //! - [`sleep_solve`] — island sleeping so settled bodies stop costing time.
 //! - [`config`] — the [`XpbdConfig`] tuning parameters.
@@ -35,6 +36,7 @@
 
 pub mod config;
 pub mod contact_constraint;
+pub mod graph_color;
 pub mod integrate;
 pub mod island_solve;
 pub mod joint_constraint;
