@@ -17,6 +17,8 @@
 //! because it is driven by the entry vector, but the fixed seed keeps the whole
 //! structure free of run-to-run entropy.)
 
+extern crate alloc;
+
 use core::borrow::Borrow;
 use core::fmt;
 use core::hash::Hash;
@@ -328,7 +330,7 @@ impl<K: Hash + Eq + Clone, V> Extend<(K, V)> for OrderedMap<K, V> {
 
 /// Owning iterator over `(K, V)` in insertion order.
 pub struct IntoIter<K, V> {
-    inner: std::vec::IntoIter<(K, V)>,
+    inner: alloc::vec::IntoIter<(K, V)>,
 }
 
 impl<K, V> Iterator for IntoIter<K, V> {

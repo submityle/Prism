@@ -2,7 +2,7 @@
 //!
 //! M0 provides type aliases over the standard-library hash containers keyed by
 //! the fast [`FxBuildHasher`](crate::hash::FxBuildHasher). The public names are
-//! stable so a self-owned SwissTable backend can be swapped in later without
+//! stable so a self-owned `SwissTable` backend can be swapped in later without
 //! touching call sites.
 
 
