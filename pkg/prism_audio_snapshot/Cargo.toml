@@ -1,0 +1,37 @@
+[package]
+name = "prism_audio_snapshot"
+version = "0.1.0"
+edition = "2024"
+description = "Mixer-state snapshot and interpolated transition system for Prism's next-generation audio engine (design section 13): named snapshots capture target mixer/bus/effect parameter values, with parameter-kind-aware blending, timed interpolated transitions, weighted multi-snapshot blends, and State-driven activation (design section 18). Classic deterministic DSP, no AI/ML. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, Dolby, or Google Resonance Audio source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+prism_audio_content = { path = "../prism_audio_content" }
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_snapshot = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = [
+  "prism_audio_core/std",
+  "prism_audio_content/std",
+  "bevy_math/std",
+]
+serialize = [
+  "dep:serde",
+  "prism_audio_core/serialize",
+  "prism_audio_content/serialize",
+  "bevy_math/serialize",
+]
+
+[lints]
+workspace = true
