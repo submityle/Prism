@@ -59,6 +59,9 @@ pub use mesh_bvh::{MeshBvh, MeshClosestPoint, MeshRayHit};
 pub mod quadric;
 
 pub use quadric::Quadric;
+pub mod decimate;
+
+pub use decimate::{decimate_mesh, DecimateParams, DecimateTarget, DecimatedMesh};
 
 /// A handle into a [`ShapeRegistry`].
 ///
