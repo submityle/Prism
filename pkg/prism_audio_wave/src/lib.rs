@@ -52,6 +52,7 @@ pub mod grid;
 pub mod hybrid;
 pub mod lookup;
 pub mod openings;
+pub mod router;
 pub mod solver;
 
 pub use backend::{WaveBackend, WaveParameterSource};
@@ -64,6 +65,7 @@ pub use grid::{Aabb, ProbeGrid, TrilinearSample};
 pub use hybrid::{blend_spatial, HybridWeights};
 pub use lookup::{ParameterLookup, WaveParamSmoother};
 pub use openings::MultiStateOpening;
+pub use router::{route, weights_for_tier};
 pub use solver::{
     ImpulseResponse, Partition, SolveConfig, VoxelScene, WaveSolver, DEFAULT_SOUND_SPEED,
 };

@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 prism_audio_core = { path = "../prism_audio_core" }
 prism_audio_spatial = { path = "../prism_audio_spatial" }
+prism_audio_governor = { path = "../prism_audio_governor", default-features = false }
 bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
   "nostd-libm",
 ] }
@@ -21,11 +22,12 @@ prism_audio_wave = { path = ".", features = ["serialize"] }
 
 [features]
 default = ["std"]
-std = ["prism_audio_core/std", "prism_audio_spatial/std", "bevy_math/std"]
+std = ["prism_audio_core/std", "prism_audio_spatial/std", "prism_audio_governor/std", "bevy_math/std"]
 serialize = [
   "dep:serde",
   "prism_audio_core/serialize",
   "prism_audio_spatial/serialize",
+  "prism_audio_governor/serialize",
   "bevy_math/serialize",
 ]
 
