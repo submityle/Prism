@@ -54,6 +54,7 @@ pub mod surface_bindings;
 pub mod surface_mesh;
 pub mod surface_mesh_kernel;
 pub mod surface_pass;
+pub mod surface_reconstruct_kernel;
 pub mod swe_kernel;
 pub mod underwater_kernel;
 pub mod waterline_kernel;
@@ -123,6 +124,11 @@ pub use surface_mesh_kernel::{
 pub use surface_pass::{
     plan_surface_draw, DepthTest, SurfaceBlend, SurfaceDepth, SurfaceDrawDescriptor,
     WaterRenderTarget,
+};
+
+pub use surface_reconstruct_kernel::{
+    dispatch_surface_reconstruct, ReconstructParams, RECONSTRUCT_OUT_FLOATS,
+    WATER_SURFACE_RECONSTRUCT_WESL,
 };
 
 pub use dispersion_kernel::{
