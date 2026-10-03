@@ -17,6 +17,9 @@ pub use material::PhysicsMaterial;
 pub mod convex_mesh;
 
 pub use convex_mesh::{ConvexMeshData, ConvexMeshHandle, ConvexProjection, ConvexRayHit};
+pub mod tri_mesh;
+
+pub use tri_mesh::{TriMeshData, TriMeshHandle};
 
 /// A handle into a [`ShapeRegistry`].
 ///
@@ -153,6 +156,7 @@ fn mass_props_from_diagonal(mass: f32, inertia: Vec3) -> MassProperties {
 pub struct ShapeRegistry {
     shapes: Vec<ColliderShape>,
     convex_meshes: Vec<ConvexMeshData>,
+    tri_meshes: Vec<TriMeshData>,
 }
 
 impl ShapeRegistry {
@@ -206,6 +210,26 @@ impl ShapeRegistry {
     #[must_use]
     pub fn convex_mesh_count(&self) -> usize {
         self.convex_meshes.len()
+    }
+
+    /// Inserts a triangle mesh into the triangle-mesh arena and returns a handle.
+    pub fn insert_tri_mesh(&mut self, mesh: TriMeshData) -> TriMeshHandle {
+        let handle = TriMeshHandle(self.tri_meshes.len() as u32);
+        self.tri_meshes.push(mesh);
+        handle
+    }
+
+    /// Returns a reference to the triangle mesh for `handle`, or `None` if the
+    /// handle is out of range.
+    #[must_use]
+    pub fn tri_mesh(&self, handle: TriMeshHandle) -> Option<&TriMeshData> {
+        self.tri_meshes.get(handle.0 as usize)
+    }
+
+    /// Returns the number of triangle meshes stored in the arena.
+    #[must_use]
+    pub fn tri_mesh_count(&self) -> usize {
+        self.tri_meshes.len()
     }
 }
 
