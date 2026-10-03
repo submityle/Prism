@@ -30,6 +30,7 @@
 //! `water_surface`) and mirror the `CPU` golden reference byte-for-byte.
 
 pub mod buffers;
+pub mod caustics_kernel;
 pub mod coupling_readback_kernel;
 pub mod dispersion_kernel;
 pub mod fft_plan;
@@ -108,4 +109,9 @@ pub use underwater_kernel::{
 pub use coupling_readback_kernel::{
     dispatch_coupling_readback, CouplingReadbackParams, COUPLING_BODY_FLOATS,
     COUPLING_FORCE_FLOATS, WATER_COUPLING_READBACK_WESL,
+};
+
+pub use caustics_kernel::{
+    dispatch_caustics_project, CausticsParams, CAUSTICS_OUT_FLOATS, CAUSTICS_RECEIVER_FLOATS,
+    CAUSTICS_SCENE_FLOATS, WATER_CAUSTICS_PROJECT_WESL,
 };
