@@ -661,6 +661,68 @@ pub fn encode_astc_single_partition_8x5_ldr(texels: &[[u8; 4]; 40]) -> [u8; 16] 
     w.into_block()
 }
 
+/// Encode forty-eight `RGBA8` texels (row-major, `texel = y * 8 + x`, 8 wide x
+/// 6 tall) into a single **8x6** ASTC LDR block (`AstcBlock::B8x6`), extending
+/// the non-square footprint family with an identity-colour recipe.
+///
+/// Configuration (verified against the authoritative block-mode scan,
+/// footprint (8, 6)):
+/// * **block mode 324** (`0b0101000100`): an 8x6 weight grid, single plane,
+///   weight range **QUANT_2** (one bit -> two interpolation levels, 48*1 = 48
+///   weight bits);
+/// * **single partition**, **CEM 8** (RGB direct, alpha forced to 255);
+/// * **QUANT_256 colour**: with `color_bits = 111 - 48 = 63` and six CEM-8
+///   integers the colour quant level is QUANT_256 (8-bit identity), so the six
+///   endpoint bytes are written straight into the block and decode back
+///   bit-for-bit -- the endpoints are *exact*.
+///
+/// This is the identity-colour trade mirrored from the 6x6 mode-276 encoder,
+/// but with a single-bit weight range instead of trit weights: a larger 8x6
+/// footprint leaves 63 colour bits (enough for identity endpoints) yet only one
+/// weight bit per texel, so each texel snaps to the nearer of the two exact
+/// endpoints. Because the 8x6 weight grid equals the footprint there is **no
+/// bilinear infill** -- weight `t` maps 1:1 to texel `t` in row-major order.
+///
+/// The weight stream is a plain 1-bit range packed with the bit-only
+/// `bits::BlockWriter::write_weights_reversed`; the colour is six direct 8-bit
+/// values at block bit 17 (colour 17..65 and weights 80..128 do not overlap).
+///
+/// CEM 8 carries no alpha, so the decoded block has alpha 255 for every texel
+/// and the input alpha channel is ignored.
+#[must_use]
+pub fn encode_astc_single_partition_8x6_ldr(texels: &[[u8; 4]; 48]) -> [u8; 16] {
+    const BLOCK_MODE: u32 = 324;
+    const CEM_RGB_DIRECT: u32 = 8;
+    const WEIGHT_BITS: u32 = 1; // QUANT_2, bit-only (two levels)
+
+    // Fit the principal-axis RGB endpoints over all forty-eight texels. The fit
+    // orders them so `hadd(e0) <= hadd(e1)`, which with QUANT_256 identity
+    // colour means the CEM-8 decoder reproduces them without its
+    // blue-contraction swap -- so the raw bytes are also the decoded endpoints.
+    let (e0, e1) = endpoint_fit::fit_rgb_endpoints(texels);
+
+    // Fit the forty-eight 1-bit weights against the exact endpoints (no infill
+    // on a full grid): each texel snaps to the nearer endpoint.
+    let raw = weight_fit::quantize_weights_bits(texels, e0, e1, WEIGHT_BITS);
+
+    let mut w = bits::BlockWriter::new();
+    // Block mode occupies block bits 0..11; single partition leaves the
+    // partition-count field (bits 11,12) at 0.
+    w.write_bits(0, 11, BLOCK_MODE);
+    // CEM field: 4 bits at block bit 13. CEM 8 sets only block bit 16.
+    w.write_bits(13, 4, CEM_RGB_DIRECT);
+    // Six 8-bit identity colour values at block bit 17, LSB-first, in the
+    // decoder's read order [e0.r, e1.r, e0.g, e1.g, e0.b, e1.b].
+    let vals = [e0[0], e1[0], e0[1], e1[1], e0[2], e1[2]];
+    for (i, v) in vals.iter().enumerate() {
+        w.write_bits(17 + i as u32 * 8, 8, u32::from(*v));
+    }
+    // Forty-eight 1-bit weights packed bit-reversed from the top of the block
+    // (bits 80..128).
+    w.write_weights_reversed(&raw, WEIGHT_BITS);
+    w.into_block()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
@@ -674,6 +736,7 @@ mod tests {
     use super::encode_astc_single_partition_5x5_ldr;
     use super::encode_astc_single_partition_6x6_ldr;
     use super::encode_astc_single_partition_8x5_ldr;
+    use super::encode_astc_single_partition_8x6_ldr;
     use super::encode_astc_single_partition_8x8_ldr;
 
     /// Max per-channel RGB error over the sixteen texels after a round trip.
@@ -1291,6 +1354,71 @@ mod tests {
         assert!(
             max_rgb_err_40(&src, &dec) <= 70,
             "8x5 gradient error exceeds the four-level + QUANT_32 budget"
+        );
+    }
+
+    fn max_rgb_err_48(src: &[[u8; 4]; 48], dec: &[[u8; 4]; 48]) -> i32 {
+        let mut m = 0;
+        for (s, d) in src.iter().zip(dec.iter()) {
+            for c in 0..3 {
+                m = m.max((i32::from(s[c]) - i32::from(d[c])).abs());
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn eight_by_six_constant_block_round_trips_exactly() {
+        // Mode 324 uses QUANT_256 identity colour, so a constant block
+        // reconstructs the endpoints exactly (err == 0).
+        let src = [[41u8, 173, 98, 255]; 48];
+        let blk = encode_astc_single_partition_8x6_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 8, 6).expect("decode 8x6 constant");
+        assert_eq!(count, 48, "8x6 footprint must decode 48 texels");
+        let dec: [[u8; 4]; 48] = core::array::from_fn(|t| dec144[t]);
+        assert_eq!(
+            max_rgb_err_48(&src, &dec),
+            0,
+            "8x6 constant block must round-trip exactly with identity colour"
+        );
+        for d in &dec {
+            assert_eq!(d[3], 255, "CEM 8 forces alpha 255");
+        }
+    }
+
+    #[test]
+    fn eight_by_six_two_colour_endpoints_are_exact() {
+        // A hard split between two colours: identity endpoints plus the two
+        // weight levels (0 / max) hit both colours exactly (err == 0).
+        let a = [15u8, 35, 55, 255];
+        let b = [210u8, 190, 170, 255];
+        let src: [[u8; 4]; 48] = core::array::from_fn(|t| if t % 2 == 0 { a } else { b });
+        let blk = encode_astc_single_partition_8x6_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 8, 6).expect("decode 8x6 two-colour");
+        assert_eq!(count, 48);
+        let dec: [[u8; 4]; 48] = core::array::from_fn(|t| dec144[t]);
+        assert_eq!(
+            max_rgb_err_48(&src, &dec),
+            0,
+            "8x6 two-colour block must hit both exact endpoints"
+        );
+    }
+
+    #[test]
+    fn eight_by_six_rgb_gradient_round_trips_within_tolerance() {
+        // A smooth RGB gradient: only two weight levels, so the midrange is
+        // quantised coarsely (<= 128 LSB), but endpoints stay exact.
+        let src: [[u8; 4]; 48] = core::array::from_fn(|t| {
+            let v = (t * 5) as u8;
+            [v, 255 - v, (v / 2).wrapping_add(40), 255]
+        });
+        let blk = encode_astc_single_partition_8x6_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 8, 6).expect("decode 8x6 gradient");
+        assert_eq!(count, 48);
+        let dec: [[u8; 4]; 48] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_48(&src, &dec) <= 128,
+            "8x6 gradient error exceeds the two-level budget"
         );
     }
 }
