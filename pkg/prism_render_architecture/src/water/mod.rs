@@ -66,6 +66,7 @@ pub mod ocean_lod;
 pub mod optics;
 pub mod pbf;
 pub mod pipeline;
+pub mod pressure_multigrid;
 pub mod profile;
 pub mod reconstruct;
 pub mod shading;
