@@ -16,6 +16,7 @@
 //! * [`metadata`] -- keyframed, sampleable object metadata streams.
 //! * [`scene`] -- an [`scene::ObjectScene`] aggregating a bed and objects.
 //! * [`budget`] -- the hardware renderable-object budget model.
+//! * [`budget_split`] -- Atmos-style top-K discrete plus overflow-to-bed split.
 //! * [`clustering`] -- energy-preserving object clustering fallback.
 //! * [`pan`] -- VBAP panning onto a bed's speakers.
 //! * [`fold`] -- object-to-bed downmix matrices and object-to-binaural params.
@@ -39,6 +40,7 @@ extern crate alloc;
 pub mod ambisonics;
 pub mod bed;
 pub mod budget;
+pub mod budget_split;
 pub mod clustering;
 pub mod fold;
 pub mod metadata;
