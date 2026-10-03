@@ -41,8 +41,18 @@
 //!   the serial [`propagation::propagate`] pass (same `Affine3` operand order),
 //!   proven by parity tests over large random forests. A cacheable [`parallel::LevelPlan`]
 //!   amortizes the depth-bucketing for a static topology. This path is `std`-only.
-//! - **M4+ (planned):** fixed-step interpolation, big-world/deterministic paths,
-//!   and GPU upload.
+//! - **M4 (this update, done):** fixed-step **render interpolation**. The
+//!   [`interpolation`] module blends the previous and current fixed-step poses
+//!   by the accumulator's overstep fraction `alpha` — translation/scale `lerp`,
+//!   rotation shortest-path `slerp` — via [`Transform::interpolate`] and
+//!   [`GlobalTransform::interpolate`] (the latter decomposes the world affine to
+//!   SRT so shear never corrupts the rotation blend). [`InterpolationBuffer`]
+//!   double-buffers every node's world transform and carries a packed teleport
+//!   bitset so a discontinuously-moved node snaps to its new pose instead of
+//!   smearing across the jump. Pure `alloc` math — no threads, no clock — and the
+//!   authoritative simulation state is never mutated; interpolation only produces
+//!   display poses.
+//! - **M5+ (planned):** big-world/deterministic paths and GPU upload.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -56,6 +66,7 @@ use prism_math::{Affine3, Mat4, Quat, Vec3};
 pub mod change;
 pub mod dirty;
 pub mod hierarchy;
+pub mod interpolation;
 #[cfg(feature = "std")]
 pub mod parallel;
 pub mod propagation;
@@ -504,6 +515,7 @@ pub mod prelude {
     pub use crate::propagation::propagate;
     #[cfg(feature = "std")]
     pub use crate::parallel::{LevelPlan, propagate_parallel, propagate_parallel_with_plan};
+    pub use crate::interpolation::InterpolationBuffer;
     pub use crate::{GlobalTransform, Transform, TransformGraph};
 }
 
@@ -518,3 +530,6 @@ mod tests_m2;
 
 #[cfg(all(test, feature = "std"))]
 mod tests_m3;
+
+#[cfg(test)]
+mod tests_m4;
