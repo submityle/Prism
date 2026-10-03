@@ -1,0 +1,17 @@
+[package]
+name = "prism_micromap"
+version = "0.1.0"
+edition = "2024"
+description = "Prism device-free Opacity Micromap (OMM) baker: the CPU golden that bakes an alpha-test coverage mask into the DXR/Vulkan tri-state micro-triangle layout (Transparent / Opaque / Unknown) used to skip any-hit evaluation during hardware ray tracing of foliage, fences, and hair cards. Pure classical numerics (recursive barycentric micro-triangle subdivision + conservative coverage classification + 1-bit/2-bit DXR bit packing + identical-micromap deduplication); no_std + alloc, no AI/ML, and no Unreal Engine source or derived code. The optional wgpu device twin validates element-for-element against this golden."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+libm = "0.2"
+
+[features]
+default = ["std"]
+std = []
+
+[lints]
+workspace = true

@@ -67,6 +67,8 @@ members = [
   "pkg/prism_volumetric_gpu",
   # Prism experimental strand-hair body-collider projection GPU twin.
   "pkg/prism_hair_gpu",
+  # Prism device-free Opacity Micromap (OMM) CPU golden baker.
+  "pkg/prism_micromap",
   # Prism experimental next-generation audio engine.
   "pkg/prism_audio_core",
   # Prism next-generation audio engine real-time runtime bridge (command/telemetry rings + epoch reclamation).
