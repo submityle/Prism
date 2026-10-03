@@ -179,29 +179,6 @@ mod tests {
         strength: 3.0,
     };
 
-    // Deterministic scene gradient and a water gbuffer that disperses rightward.
-    fn fields(width: usize, height: usize) -> (Vec<f32>, Vec<f32>) {
-        let total = width * height;
-        let mut scene = Vec::with_capacity(total * DISPERSION_SCENE_FLOATS);
-        let mut gbuffer = Vec::with_capacity(total * DISPERSION_GBUFFER_FLOATS);
-        let mut idx = 0usize;
-        while idx < total {
-            let f = idx as f32;
-            scene.push(0.02 * f);
-            scene.push(0.03 * f + 0.1);
-            scene.push(0.05 * f + 0.2);
-            scene.push(1.0);
-            // sin_incidence sweeps 0..~1 across the grid; horizontal refract dir.
-            let sin = ((f * 0.017) % 1.0).clamp(0.0, 1.0);
-            gbuffer.push(sin);
-            gbuffer.push(1.0);
-            gbuffer.push(0.0);
-            gbuffer.push(1.0);
-            idx += 1;
-        }
-        (scene, gbuffer)
-    }
-
     #[test]
     fn offsets_match_cpu_golden_bit_for_bit() {
         // The per-channel offsets the twin bakes into its sampling must equal
