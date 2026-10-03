@@ -4470,3 +4470,210 @@ fn astc_multi_partition_hdr_larger_footprint_parity_against_gpu_hardware_decode(
         MULTI_PART_HDR_SINGLE_PLANE.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// ASTC dual-plane single-partition LDR parity on LARGER FOOTPRINTS.
+//
+// The committed `astc_dual_plane_single_partition_parity` test proves dual-plane
+// decode (two interleaved weight planes + 2-bit CCS routing one channel to
+// plane 1) on the 4x4 footprint only. This reuses the exact same hand-built
+// CEM8 QUANT_256 block layout from DUAL_PLANE_MODES (all grids <= 4 on each
+// axis, so they fit every footprint >= 4) and decodes under larger footprint
+// formats through the footprint-generic `decode_astc_ldr(block, bx, by)`. The
+// reference is the native hardware decoder via `decode_raw_footprint`. This
+// proves that `infill_dual_plane` resamples BOTH planes correctly across non-4x4
+// (and non-square) decimation and that the CCS channel routing is applied per
+// decimated texel bit-for-bit against hardware.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_dual_plane_single_partition_larger_footprint_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC dual-plane larger-footprint parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC dual-plane larger-footprint parity");
+        return;
+    }
+
+    const FOOTPRINTS: [(u32, u32); 8] = [
+        (5, 5),
+        (6, 6),
+        (8, 8),
+        (10, 10),
+        (12, 12),
+        (8, 5),
+        (10, 6),
+        (12, 10),
+    ];
+    const PER_COMBO: u32 = 24;
+    let mut rng = Rng(0x1D2F_5B8E);
+    let mut compared = 0u64;
+
+    for (bx, by) in FOOTPRINTS {
+        let format = TextureFormat::Astc {
+            block: astc_block_for_footprint(bx, by),
+            channel: wgpu::AstcChannel::Unorm,
+        };
+        let texels = (bx * by) as usize;
+        for (mode, wx, wy, levels, weight_bits) in DUAL_PLANE_MODES {
+            let (form, bits) = levels_to_grid_form(levels);
+            let seq_count = (wx * wy * 2) as usize;
+            let ccs_pos = 128 - weight_bits - 2;
+            for n in 0..PER_COMBO {
+                let mut blk = [0u8; 16];
+                astc_set_bits(&mut blk, 0, 11, mode);
+                astc_set_bits(&mut blk, 13, 4, 8); // CEM 8 (LDR direct RGB)
+                for i in 0..6u32 {
+                    astc_set_bits(&mut blk, 17 + i * 8, 8, rng.byte() as u32);
+                }
+                let mut seq = [0u8; 64];
+                for w in seq.iter_mut().take(seq_count) {
+                    *w = rand_grid_weight(&mut rng, form, bits);
+                }
+                astc_set_grid_weights(&mut blk, form, bits, &seq[..seq_count]);
+                let ccs = n % 4;
+                astc_set_bits(&mut blk, ccs_pos, 2, ccs);
+
+                let (cpu, count) = decode_astc_ldr(&blk, bx, by).unwrap_or_else(|e| {
+                    panic!(
+                        "dp {bx}x{by} mode {mode} ({wx}x{wy}, ccs {ccs}) block {blk:02x?} rejected: {e:?}"
+                    )
+                });
+                assert_eq!(count, texels, "{bx}x{by} texel count");
+                let gpu = oracle.decode_raw_footprint(format, &blk, bx, by);
+                assert_eq!(gpu.len(), texels, "{bx}x{by} GPU texel count");
+
+                for t in 0..texels {
+                    for c in 0..4 {
+                        let gv = (gpu[t][c].clamp(0.0, 1.0) * 255.0 + 0.5) as i32;
+                        let d = (cpu[t][c] as i32 - gv).abs();
+                        assert!(
+                            d <= 1,
+                            "ASTC dp {bx}x{by} mode {mode} ({wx}x{wy}, ccs {ccs}) block={blk:02x?} texel {t} chan {c}: cpu={} gpu={gv} (|d|={d})",
+                            cpu[t][c]
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC dual-plane larger-footprint single-partition parity: {compared} RGBA lanes match hardware across {} footprints x {} modes x {PER_COMBO} blocks",
+        FOOTPRINTS.len(),
+        DUAL_PLANE_MODES.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ASTC dual-plane single-partition HDR parity on LARGER FOOTPRINTS.
+//
+// Mirrors the LDR dual-plane larger-footprint proof on the HDR profile. It
+// reuses the committed single-partition DUAL_PLANE_MODES grids but drives HDR
+// colour-endpoint modes (RGB_SCALE=7 with 4 integers, RGB=11 with 6 integers;
+// both keep 8*n_int <= color_bits = 109 - weight_bits so colour stays at the
+// QUANT_256 identity level) and decodes under larger footprint formats through
+// the footprint-generic `decode_astc_hdr(block, bx, by)`. The reference is the
+// native hardware HDR decoder. This proves dual-plane weight-infill decimation
+// of BOTH planes plus HDR LNS endpoint interpolation and CCS channel routing on
+// non-4x4 footprints bit-for-bit against hardware.
+// ---------------------------------------------------------------------------
+#[test]
+fn astc_dual_plane_single_partition_hdr_larger_footprint_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC dual-plane HDR larger-footprint parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC_HDR)
+    {
+        eprintln!(
+            "adapter lacks ASTC HDR support; skipping ASTC dual-plane HDR larger-footprint parity"
+        );
+        return;
+    }
+
+    const FOOTPRINTS: [(u32, u32); 8] = [
+        (5, 5),
+        (6, 6),
+        (8, 8),
+        (10, 10),
+        (12, 12),
+        (8, 5),
+        (10, 6),
+        (12, 10),
+    ];
+    // (CEM, integer_count): RGB_SCALE=4 ints, RGB=6 ints. Both fit the dual-plane
+    // colour budget (109 - weight_bits >= 57 for every DUAL_PLANE_MODE).
+    const HDR_CEMS: [(u32, usize); 2] = [(7, 4), (11, 6)];
+    const PER_COMBO: u32 = 12;
+    let mut rng = Rng(0x2A6B_C4F1);
+    let mut compared = 0u64;
+    let mut skipped = 0u64;
+
+    for (bx, by) in FOOTPRINTS {
+        let format = TextureFormat::Astc {
+            block: astc_block_for_footprint(bx, by),
+            channel: wgpu::AstcChannel::Hdr,
+        };
+        let texels = (bx * by) as usize;
+        for (mode, wx, wy, levels, weight_bits) in DUAL_PLANE_MODES {
+            let (form, bits) = levels_to_grid_form(levels);
+            let seq_count = (wx * wy * 2) as usize;
+            let ccs_pos = 128 - weight_bits - 2;
+            for (cem, int_count) in HDR_CEMS {
+                for n in 0..PER_COMBO {
+                    let mut blk = [0u8; 16];
+                    astc_set_bits(&mut blk, 0, 11, mode);
+                    astc_set_bits(&mut blk, 13, 4, cem);
+                    for i in 0..int_count as u32 {
+                        astc_set_bits(&mut blk, 17 + i * 8, 8, rng.byte() as u32);
+                    }
+                    let mut seq = [0u8; 64];
+                    for w in seq.iter_mut().take(seq_count) {
+                        *w = rand_grid_weight(&mut rng, form, bits);
+                    }
+                    astc_set_grid_weights(&mut blk, form, bits, &seq[..seq_count]);
+                    let ccs = n % 4;
+                    astc_set_bits(&mut blk, ccs_pos, 2, ccs);
+
+                    let (cpu, count) = decode_astc_hdr(&blk, bx, by).unwrap_or_else(|e| {
+                        panic!(
+                            "dp HDR {bx}x{by} mode {mode} ({wx}x{wy}, cem {cem}, ccs {ccs}) block {blk:02x?} rejected: {e:?}"
+                        )
+                    });
+                    assert_eq!(count, texels, "{bx}x{by} texel count");
+                    let gpu = oracle.decode_raw_footprint(format, &blk, bx, by);
+                    assert_eq!(gpu.len(), texels, "{bx}x{by} GPU texel count");
+
+                    for t in 0..texels {
+                        for c in 0..3 {
+                            let (cv, gv) = (cpu[t][c], gpu[t][c]);
+                            if !cv.is_finite() || !gv.is_finite() || cv.abs() >= 6.5e4 {
+                                skipped += 1;
+                                continue;
+                            }
+                            let tol = cv.abs() * 1e-3 + 1e-3;
+                            assert!(
+                                (cv - gv).abs() <= tol,
+                                "ASTC dp HDR {bx}x{by} mode {mode} (cem {cem}, ccs {ccs}) block={blk:02x?} texel {t} chan {c}: cpu={cv} gpu={gv}"
+                            );
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC dual-plane HDR larger-footprint single-partition parity: {compared} RGB lanes match hardware across {} footprints x {} modes x {} CEMs x {PER_COMBO} blocks ({skipped} saturated lanes skipped)",
+        FOOTPRINTS.len(),
+        DUAL_PLANE_MODES.len(),
+        HDR_CEMS.len()
+    );
+}
