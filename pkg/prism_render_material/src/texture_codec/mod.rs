@@ -56,7 +56,7 @@ mod source;
 pub use astc::{
     decode_astc_4x4_hdr, decode_astc_4x4_ldr, decode_astc_4x4_weights, decode_astc_4x4_weights_ise,
     decode_astc_hdr, decode_astc_ldr, decode_astc_void_extent_hdr, decode_astc_void_extent_ldr,
-    AstcError,
+    encode_astc_single_partition_4x4_ldr, AstcError,
 };
 pub use bc6h::{
     bc6h_mode_bits, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned,
