@@ -188,6 +188,7 @@ pub mod gpu_timer_query;
 pub mod gravity_wave;
 pub mod gray_code;
 pub mod hair_melanin_absorption;
+pub mod hair_spectral_absorption;
 pub mod half_float_f16;
 pub mod halton_sequence;
 pub mod hash_rng;
@@ -252,6 +253,7 @@ pub mod motion_blur;
 pub mod motion_disocclusion;
 pub mod motion_mat4_transform;
 pub mod motion_reproject_ndc_pixel;
+pub mod motion_tile_blur_length;
 pub mod motion_tile_classify;
 pub mod motion_vector_dilate;
 pub mod motion_vector_quantize;
@@ -272,6 +274,7 @@ pub mod oren_nayar;
 pub mod orientation_basis;
 pub mod overshooting_bump;
 pub mod ozone_absorption;
+pub mod page_table_key_pack;
 pub mod parallax_offset;
 pub mod particle_multiscatter;
 pub mod perf_budget;
@@ -320,6 +323,7 @@ pub mod restir_di_reuse_weight;
 pub mod restir_gi_reconnection_jacobian;
 pub mod restir_gi_spatial_admissible;
 pub mod restir_spatial_admissible;
+pub mod restir_temporal_reproject;
 pub mod rgb_ycocg;
 pub mod rgbe_encode;
 pub mod ribbon_geometry;
@@ -366,6 +370,7 @@ pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
 pub mod sutherland_hodgman_2d;
 pub mod sweep_aabb;
+pub mod taau_advance_lock;
 pub mod taau_catmull_rom;
 pub mod taau_color_transform;
 pub mod taau_jitter_offset;
@@ -413,6 +418,7 @@ pub mod volumetric_multiscatter;
 pub mod volumetrics;
 pub mod vorticity_confinement;
 pub mod voxel_traversal;
+pub mod water_shading_pbr;
 pub mod welzl_min_sphere;
 pub mod wind_field;
 pub mod worley;
@@ -605,6 +611,9 @@ pub use gray_code::GpuGrayCode;
 pub use hair_melanin_absorption::{
     GpuHairMelaninAbsorption, HairMelaninAbsorptionQuery, HairMelaninAbsorptionResult,
 };
+pub use hair_spectral_absorption::{
+    GpuHairSpectralAbsorption, HairSpectralAbsorptionQuery, HairSpectralAbsorptionResult,
+};
 pub use half_float_f16::{GpuHalfFloatF16, HalfFloatQuery, HalfFloatResult};
 pub use halton_sequence::GpuHaltonSequence;
 pub use hash_rng::{GpuHashRng, HashRngSample};
@@ -701,6 +710,9 @@ pub use motion_mat4_transform::{
 pub use motion_reproject_ndc_pixel::{
     GpuMotionReprojectNdcPixel, MotionReprojectNdcPixelQuery, MotionReprojectNdcPixelResult,
 };
+pub use motion_tile_blur_length::{
+    GpuMotionTileBlurLength, MotionTileBlurLengthQuery, MotionTileBlurLengthResult,
+};
 pub use motion_tile_classify::{
     GpuMotionTileClassify, MotionTileClassifyQuery, MotionTileClassifyResult,
 };
@@ -729,6 +741,7 @@ pub use oren_nayar::{GpuOrenNayar, OrenNayarQuery, OrenNayarResult};
 pub use orientation_basis::{GpuOrientationBasis, OrientationQuery};
 pub use overshooting_bump::{GpuOvershootingBump, OvershootingBumpQuery};
 pub use ozone_absorption::{GpuOzoneAbsorption, OzoneAbsorptionQuery};
+pub use page_table_key_pack::{GpuPageTableKeyPack, PageTableKeyPackQuery, PageTableKeyPackResult};
 pub use parallax_offset::{GpuParallaxOffset, ParallaxOffsetQuery, ParallaxOffsetResult};
 pub use particle_multiscatter::{GpuParticleMultiScatter, MultiScatterResponse};
 pub use perf_budget::{GpuPerfBudget, PerfBudgetQuery, PerfBudgetResult};
@@ -796,6 +809,9 @@ pub use restir_gi_spatial_admissible::{
 pub use restir_spatial_admissible::{
     GpuRestirSpatialAdmissible, RestirSpatialAdmissibleQuery, RestirSpatialAdmissibleResult,
 };
+pub use restir_temporal_reproject::{
+    GpuRestirTemporalReproject, RestirTemporalReprojectQuery, RestirTemporalReprojectResult,
+};
 pub use rgb_ycocg::GpuRgbYCoCg;
 pub use rgbe_encode::{GpuRgbeEncode, RgbePrimQuery, RgbePrimResult};
 pub use ribbon_geometry::{GpuRibbonGeometry, RibbonStripQuery};
@@ -861,6 +877,7 @@ pub use sutherland_hodgman_2d::{
     GpuSutherlandHodgman2d, SutherlandHodgman2dQuery, SutherlandHodgman2dResult,
 };
 pub use sweep_aabb::{GpuSweepAabb, SweepAabbQuery};
+pub use taau_advance_lock::{GpuTaauAdvanceLock, TaauAdvanceLockQuery, TaauAdvanceLockResult};
 pub use taau_catmull_rom::{GpuTaauCatmullRom, TaauCatmullRomQuery, TaauCatmullRomResult};
 pub use taau_color_transform::{
     GpuTaauColorTransform, TaauColorTransformQuery, TaauColorTransformResult,
@@ -934,6 +951,7 @@ pub use volumetric_multiscatter::{
 pub use volumetrics::{GpuVolumetrics, VolumetricsQuery, VolumetricsResult};
 pub use vorticity_confinement::{GpuVorticityConfinement, VorticityResult};
 pub use voxel_traversal::{GpuVoxelTraversal, VoxelTraversalQuery, VoxelTraversalResult};
+pub use water_shading_pbr::{GpuWaterShadingPbr, WaterShadingPbrQuery, WaterShadingPbrResult};
 pub use welzl_min_sphere::{GpuWelzlMinSphere, WelzlMinSphereQuery, WelzlMinSphereResult};
 pub use wind_field::{GpuWindField, WindFieldQuery, WindFieldResult};
 pub use worley::{GpuWorley, WorleyQuery};
