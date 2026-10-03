@@ -6,19 +6,21 @@
 //!
 //! * single partition,
 //! * single weight plane,
-//! * a 4x4 weight grid (identity texel->weight mapping, no bilinear infill),
+//! * any single-plane weight grid (resampled to the 4x4 texel footprint by
+//!   the Khronos bilinear infill; the identity 4x4 grid is the degenerate
+//!   case),
 //! * any of the ten LDR Colour Endpoint Modes (0/1/4/5/6/8/9/10/12/13).
 //!
-//! Everything else (multi-partition, dual-plane, non-4x4 grids and the six
-//! HDR CEMs) returns an [`AstcError`] until its own GPU-validated milestone
-//! lands, so no path silently produces wrong pixels.
+//! Everything else (multi-partition, dual-plane and the six HDR CEMs) returns
+//! an [`AstcError`] until its own GPU-validated milestone lands, so no path
+//! silently produces wrong pixels.
 //!
 //! Decode is pure integer arithmetic -- no AI/ML path.
 
 use super::block_mode::decode_block_mode_2d;
 use super::cem::cem_is_ldr;
 use super::endpoints::decode_cem_endpoints;
-use super::weights::decode_astc_4x4_weights_ise;
+use super::infill::infill_weights_4x4;
 use super::AstcError;
 
 /// Interpolate one 8-bit LDR colour component between endpoints `e0` and `e1`
@@ -50,16 +52,23 @@ pub(super) fn decode_single_partition_4x4_ldr(
     let mode = (u16::from(block[1]) << 8 | u16::from(block[0])) & 0x07FF;
     let bm = decode_block_mode_2d(mode).ok_or(AstcError::UnsupportedBlockMode)?;
 
+    // The weight grid must fit inside the 4x4 texel footprint. A block mode
+    // whose grid exceeds the block dimensions is illegal for this footprint and
+    // is rejected by conformant hardware (the Metal decoder returns its error
+    // colour). Matching that, we refuse to synthesise pixels for such a mode
+    // rather than silently resampling an over-sized grid. See the ASTC spec
+    // block-mode legality rule (astcenc `init_block_size_descriptor`:
+    // `weights_x > texels_x || weights_y > texels_y` => skip).
+    if bm.weights_x > 4 || bm.weights_y > 4 {
+        return Err(AstcError::UnsupportedBlockMode);
+    }
+
     // Partition count is the 2-bit field at block bits [11, 13); 0 => single.
     let partition_count = ((u32::from(block[1]) >> 3) & 0x3) + 1;
     if partition_count != 1 {
         return Err(AstcError::UnsupportedBlockMode);
     }
     if bm.dual_plane {
-        return Err(AstcError::UnsupportedBlockMode);
-    }
-    // Only an exact 4x4 weight grid is supported here (identity infill).
-    if bm.weights_x != 4 || bm.weights_y != 4 {
         return Err(AstcError::UnsupportedBlockMode);
     }
 
@@ -73,8 +82,7 @@ pub(super) fn decode_single_partition_4x4_ldr(
     }
 
     let endpoints = decode_cem_endpoints(block, bm.weight_bits, cem)?;
-    let weights =
-        decode_astc_4x4_weights_ise(block, bm.weight_levels).ok_or(AstcError::Reserved)?;
+    let weights = infill_weights_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
 
     let mut out = [[0u8; 4]; 16];
     for (texel, w) in weights.iter().enumerate() {
@@ -107,6 +115,33 @@ mod tests {
         // Half weight lands on the average (within rounding).
         let m = lerp_component(0, 255, 32);
         assert!((127..=128).contains(&m), "midpoint {m}");
+    }
+
+    #[test]
+    fn rejects_grid_larger_than_the_4x4_footprint() {
+        // Mode 7 decodes to an 8x2 weight grid, which exceeds the 4x4 texel
+        // footprint and is therefore an illegal block mode that conformant
+        // hardware rejects. We must refuse it rather than resample an
+        // over-sized grid into bogus pixels.
+        let mut block = [0u8; 16];
+        block[0] = 7u16 as u8;
+        block[1] = (7u16 >> 8) as u8;
+        assert_eq!(
+            decode_single_partition_4x4_ldr(&block),
+            Err(AstcError::UnsupportedBlockMode),
+            "8x2 grid must be rejected for a 4x4 block"
+        );
+
+        // Mode 73 decodes to a 4x8 grid: oversized on the Y axis, likewise
+        // illegal and rejected.
+        let mut block = [0u8; 16];
+        block[0] = 73u16 as u8;
+        block[1] = (73u16 >> 8) as u8;
+        assert_eq!(
+            decode_single_partition_4x4_ldr(&block),
+            Err(AstcError::UnsupportedBlockMode),
+            "4x8 grid must be rejected for a 4x4 block"
+        );
     }
 
     #[test]

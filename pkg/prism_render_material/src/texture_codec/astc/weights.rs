@@ -141,6 +141,45 @@ pub fn decode_astc_4x4_weights_ise(block: &[u8; 16], levels: u32) -> Option<[u8;
     Some(out)
 }
 
+/// Decode `weight_count` single-plane weights (quantised to `levels` BISE
+/// levels) from `block` into `out`, each unquantized onto the `0..=64` scale.
+///
+/// Generalizes [`decode_astc_4x4_weights_ise`] to arbitrary single-plane grid
+/// sizes (`weight_count == weights_x * weights_y`) for the non-4x4 bilinear
+/// infill path. The weights share the same bit-reversed top-of-block layout as
+/// the 4x4 grid; only the count differs.
+///
+/// `out.len()` must equal `weight_count`, and `weight_count` must not exceed
+/// the sixty-four-weight single-plane budget.
+///
+/// Returns `None` if `levels` is not a valid BISE level count.
+#[must_use]
+pub(super) fn decode_grid_weights_ise(
+    block: &[u8; 16],
+    weight_count: u32,
+    levels: u32,
+    out: &mut [u8],
+) -> Option<()> {
+    debug_assert_eq!(
+        out.len() as u32,
+        weight_count,
+        "weight output slice length mismatch"
+    );
+    if weight_count as usize > 64 {
+        return None;
+    }
+    let range = super::bise::IseRange::from_num_levels(levels)?;
+    let reversed = reverse_block_bits(block);
+    let mut raw = [0u8; 64];
+    let n = weight_count as usize;
+    // Infallible for every well-formed BISE range.
+    let _ = super::bise::decode_ise(&reversed, 0, range, weight_count, &mut raw[..n]);
+    for (o, &r) in out.iter_mut().zip(raw[..n].iter()) {
+        *o = super::weight_unquant::unquant_weight(r as u32, range);
+    }
+    Some(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

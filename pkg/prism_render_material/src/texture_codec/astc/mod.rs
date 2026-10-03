@@ -24,6 +24,7 @@ mod block_reader;
 mod cem;
 mod color_unquant;
 mod endpoints;
+mod infill;
 mod quant_mode;
 mod single_partition;
 mod trit_quint;
@@ -54,9 +55,10 @@ pub enum AstcError {
 /// Decode a single 4x4 ASTC **LDR** block to sixteen `RGBA8` texels.
 ///
 /// Dispatches void-extent (constant-colour) blocks and single-partition,
-/// single-plane 4x4-grid CEM 8 (LDR direct RGB, QUANT_256) weighted blocks.
-/// Blocks outside that subset (multi-partition, dual-plane, non-4x4 grids,
-/// other CEMs or non-identity colour quantisation) return an [`AstcError`]
+/// single-plane LDR weighted blocks: all ten LDR Colour Endpoint Modes, any
+/// colour quantisation, and any single-plane weight grid (resampled to the
+/// 4x4 footprint by the Khronos bilinear infill). Blocks outside that subset
+/// (multi-partition, dual-plane, and the six HDR CEMs) return an [`AstcError`]
 /// rather than approximate pixels, until their own milestones land.
 ///
 /// # Errors
