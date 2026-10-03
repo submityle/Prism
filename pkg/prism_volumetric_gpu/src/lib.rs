@@ -170,6 +170,7 @@ pub mod frustum_plane_extract;
 pub mod fxaa;
 pub mod gamut_clip;
 pub mod gaussian_splat;
+pub mod geom_raster_project;
 pub mod ggx_energy_compensation;
 pub mod gi_probe;
 pub mod gjk_2d;
@@ -423,7 +424,12 @@ pub mod water_caustics_intensity;
 pub mod water_coupling_forces;
 pub mod water_dispersion_offsets;
 pub mod water_foam_decay;
+pub mod water_mg_prolong;
+pub mod water_mg_residual;
+pub mod water_mg_restrict;
+pub mod water_mg_smooth;
 pub mod water_multigrid_level;
+pub mod water_ocean_cascade;
 pub mod water_ocean_clipmap;
 pub mod water_optics_plan;
 pub mod water_pbf_constraint;
@@ -598,6 +604,9 @@ pub use fxaa::{FxaaQuery, GpuFxaa};
 pub use gamut_clip::{GamutClipMode, GamutClipQuery, GpuGamutClip};
 pub use gaussian_splat::{
     GaussianSplatProjection, GpuGaussianSplat, GpuGaussianSplatQuery, SplatFootprint,
+};
+pub use geom_raster_project::{
+    GeomRasterProjectQuery, GeomRasterProjectResult, GpuGeomRasterProject,
 };
 pub use ggx_energy_compensation::{
     GgxEnergyCompensationQuery, GgxEnergyCompensationResult, GpuGgxEnergyCompensation,
@@ -984,8 +993,15 @@ pub use water_dispersion_offsets::{
     GpuWaterDispersionOffsets, WaterDispersionOffsetsQuery, WaterDispersionOffsetsResult,
 };
 pub use water_foam_decay::{GpuWaterFoamDecay, WaterFoamDecayQuery, WaterFoamDecayResult};
+pub use water_mg_prolong::{GpuWaterMgProlong, WaterMgProlongQuery, WaterMgProlongResult};
+pub use water_mg_residual::{GpuWaterMgResidual, WaterMgResidualQuery, WaterMgResidualResult};
+pub use water_mg_restrict::{GpuWaterMgRestrict, WaterMgRestrictQuery, WaterMgRestrictResult};
+pub use water_mg_smooth::{GpuWaterMgSmooth, WaterMgSmoothQuery, WaterMgSmoothResult};
 pub use water_multigrid_level::{
     GpuWaterMultigridLevel, WaterMultigridLevelQuery, WaterMultigridLevelResult,
+};
+pub use water_ocean_cascade::{
+    GpuWaterOceanCascade, WaterOceanCascadeQuery, WaterOceanCascadeResult,
 };
 pub use water_ocean_clipmap::{
     GpuWaterOceanClipmap, WaterOceanClipmapQuery, WaterOceanClipmapResult,
