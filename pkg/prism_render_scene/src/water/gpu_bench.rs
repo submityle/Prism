@@ -2275,3 +2275,205 @@ fn flip_transfer_pass_gpu_budget_is_measured() {
         }
     }
 }
+
+/// Uniform driving one butterfly `FFT` pass; mirrors the `FftParams` struct in
+/// `water_butterfly.wesl` (16 bytes, four `u32`s, `std140`-safe). The bench
+/// defines its own copy rather than reaching into the sibling parity suite's
+/// private type, keeping the timing module self-contained.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuFftParams {
+    n: u32,
+    axis: u32,
+    len: u32,
+    log2n: u32,
+}
+
+/// Compiles `water_butterfly.wesl` to `Wgsl` through the render-world cache,
+/// mirroring [`compile_spectrum_fft_wgsl`] but for the ping-pong butterfly
+/// module (the separable radix-2 inverse transform every shipping ocean uses
+/// in place of the reference `O(N^4)` direct sum).
+fn compile_butterfly_wgsl() -> String {
+    let mut cache = ShaderCache::new((), keep_wgsl);
+    let id = AssetId::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5741_5445_5242_5546_0002),
+    };
+    cache.set_shader(
+        id,
+        Shader::from_wesl(
+            include_str!("../shaders/water_butterfly.wesl"),
+            "embedded://prism_render_scene/shaders/water_butterfly.wesl",
+        ),
+    );
+    let module = cache
+        .get(0, id, &[])
+        .unwrap_or_else(|error| panic!("water_butterfly.wesl failed to compile: {error}"));
+    (*module).clone()
+}
+
+/// Times the three butterfly passes (`bitrev`, one `stage`, `normalize`) over an
+/// `N x N` grid and returns their median measured microseconds as
+/// `(bitrev, stage, normalize)`.
+///
+/// Every pass shares the same `group(0)` layout — `fft_src` (read),
+/// `fft_dst` (read_write), `fft_params` (uniform) — so a single ping-pong pair
+/// of storage buffers and one params uniform serve all three; the auto-derived
+/// layout is taken from each pipeline. The reorder and normalize passes launch
+/// over the full `N x N` domain (`groups = ceil(N/8)^2`); a stage owns one
+/// butterfly per invocation across the `N/2` pairs per line
+/// (`groups_x = ceil((N/2)/8)`). A single stage's work is constant regardless of
+/// `len`, so timing one stage at `len = N` is representative of every stage, and
+/// the test derives the full-`IFFT2` aggregate from these per-pass medians.
+fn measure_butterfly(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    bitrev: &str,
+    stage: &str,
+    normalize: &str,
+    n: u32,
+) -> (f64, f64, f64) {
+    let cell_count = (n * n) as usize;
+    let byte_len = (cell_count * size_of::<[f32; 2]>()) as u64;
+
+    // A deterministic finite seed; the butterfly control flow is
+    // data-independent, so any finite pattern yields a representative timing.
+    let seed: Vec<[f32; 2]> = (0..cell_count)
+        .map(|i| [(i as f32).mul_add(1.0e-3, 1.0), (i as f32) * 2.0e-3])
+        .collect();
+
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("bench_butterfly"),
+        source: ShaderSource::Wgsl(wgsl.into()),
+    });
+
+    let src_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_butterfly_src"),
+        contents: bytemuck::cast_slice(&seed),
+        usage: BufferUsages::STORAGE,
+    });
+    let dst_buf = device.create_buffer(&BufferDescriptor {
+        label: Some("bench_butterfly_dst"),
+        size: byte_len,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+
+    // `len = n` exercises a representative (final) stage; `bitrev`/`normalize`
+    // ignore `len`, so one uniform serves all three passes. `log2n` is exact
+    // because every `BENCH_GRIDS` entry is a power of two.
+    let params = GpuFftParams {
+        n,
+        axis: 0,
+        len: n,
+        log2n: n.trailing_zeros(),
+    };
+    let params_buf = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("bench_butterfly_params"),
+        contents: bytemuck::bytes_of(&params),
+        usage: BufferUsages::UNIFORM,
+    });
+
+    let full_groups = n.div_ceil(8);
+    let stage_groups_x = (n / 2).div_ceil(8);
+
+    let measure_pass = |entry: &str, groups_x: u32, groups_y: u32| -> f64 {
+        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("bench_butterfly"),
+            layout: None,
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let layout = pipeline.get_bind_group_layout(0);
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("bench_butterfly_bind_group"),
+            layout: &layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: src_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: dst_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let timer = PassTimer::new(device);
+        time_dispatch(
+            device,
+            queue,
+            &pipeline,
+            &bind_group,
+            groups_x,
+            groups_y,
+            &timer,
+        )
+    };
+
+    let bitrev_us = measure_pass(bitrev, full_groups, full_groups);
+    let stage_us = measure_pass(stage, stage_groups_x, full_groups);
+    let normalize_us = measure_pass(normalize, full_groups, full_groups);
+    (bitrev_us, stage_us, normalize_us)
+}
+
+/// Measures the ocean spectrum's separable butterfly `IFFT` on the real device.
+///
+/// Reports each pass's median microseconds and the derived full-inverse-of-an-
+/// `N x N`-grid cost: `2 * bitrev + 2 * log2(N) * stage + normalize` (a bit
+/// reversal plus `log2 N` stages along each of the two axes, then one
+/// normalize) — exactly the row-then-column, normalize-once order the `CPU`
+/// golden `transform2` performs. `256 x 256` is the production ocean tile the
+/// design budget (§12) targets. Skips with a printed notice on any host without
+/// a timestamp-capable adapter.
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the measured budget (and the skip notice) must reach the test log so it can be captured"
+)]
+fn fft_butterfly_pass_gpu_budget_is_measured() {
+    let Some((device, queue)) = try_timing_device() else {
+        eprintln!(
+            "fft_butterfly_pass_gpu_budget_is_measured: no timestamp-capable wgpu adapter, skipping on-device timing"
+        );
+        return;
+    };
+
+    let wgsl = compile_butterfly_wgsl();
+    let bitrev_entry = find_entry_point(&wgsl, "water_fft_bitrev");
+    let stage_entry = find_entry_point(&wgsl, "water_fft_stage");
+    let normalize_entry = find_entry_point(&wgsl, "water_fft_normalize");
+
+    for n in BENCH_GRIDS {
+        let (bitrev_us, stage_us, normalize_us) = measure_butterfly(
+            &device,
+            &queue,
+            &wgsl,
+            &bitrev_entry,
+            &stage_entry,
+            &normalize_entry,
+            n,
+        );
+        let log2n = f64::from(n.trailing_zeros());
+        let full_ifft2_us = 2.0f64.mul_add(bitrev_us, 2.0 * log2n * stage_us) + normalize_us;
+        eprintln!(
+            "water butterfly IFFT budget @ {n}x{n}: bitrev = {bitrev_us:.2} us, stage = {stage_us:.2} us, normalize = {normalize_us:.2} us; full IFFT2 ~= {full_ifft2_us:.2} us (derived 2*bitrev + 2*log2N*stage + normalize, measured median of {TIMED_RUNS})"
+        );
+        for (label, us) in [
+            ("water_fft_bitrev", bitrev_us),
+            ("water_fft_stage", stage_us),
+            ("water_fft_normalize", normalize_us),
+        ] {
+            assert!(
+                us.is_finite() && us > 0.0 && us < MAX_PASS_MICROS,
+                "butterfly {label} @ {n}x{n} measured {us} us is not a healthy bounded timing"
+            );
+        }
+    }
+}
