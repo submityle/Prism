@@ -118,6 +118,25 @@ pub trait Plugin: Send + Sync + 'static {
     fn is_unique(&self) -> bool {
         true
     }
+
+    /// Whether this plugin requires a rendering-capable run mode.
+    ///
+    /// Defaults to `false`: a plugin runs in every
+    /// [`RunMode`](crate::run_mode::RunMode). Override it to return `true` for a
+    /// plugin that only makes sense when the app actually drives presentation —
+    /// a window, renderer, swapchain, or audio-output plugin. Such a plugin has
+    /// no purpose in a headless or dedicated-server launch and typically pulls
+    /// in GPU / display / audio devices that are absent there.
+    ///
+    /// This pairs with
+    /// [`RunMode::drives_rendering`](crate::run_mode::RunMode::drives_rendering):
+    /// [`PluginGroupBuilder::disable_for_run_mode`](crate::plugin_group::PluginGroupBuilder::disable_for_run_mode)
+    /// disables every render-requiring member when assembling a group for a
+    /// non-rendering mode, so a headless build carries zero rendering
+    /// dependencies (design §24.4 "无头模式零渲染依赖").
+    fn needs_rendering(&self) -> bool {
+        false
+    }
 }
 
 /// A declared dependency of one plugin on another plugin *type*.

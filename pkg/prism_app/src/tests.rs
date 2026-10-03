@@ -551,6 +551,7 @@ fn repeated_add_event_is_idempotent() {
 use crate::plugin::PluginDependency;
 use crate::plugin_graph::PluginGraphError;
 use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
+use crate::run_mode::RunMode;
 
 /// The resolved build-order names of a group's enabled members.
 fn group_order(builder: PluginGroupBuilder) -> Vec<String> {
@@ -786,6 +787,130 @@ fn dependency_on_disabled_member_is_missing() {
         .add(Opt)
         .add(Needs)
         .disable::<Opt>()
+        .try_into_plugins();
+    assert!(matches!(
+        result,
+        Err(PluginGraphError::MissingDependency { .. })
+    ));
+}
+
+/// A render-only plugin: it requires a rendering-capable run mode.
+struct RenderOnly;
+impl Plugin for RenderOnly {
+    fn build(&self, _app: &mut App) {}
+    fn name(&self) -> &str {
+        "render"
+    }
+    fn needs_rendering(&self) -> bool {
+        true
+    }
+}
+
+/// A simulation plugin that runs in every mode (uses the `needs_rendering`
+/// default of `false`).
+struct SimOnly;
+impl Plugin for SimOnly {
+    fn build(&self, _app: &mut App) {}
+    fn name(&self) -> &str {
+        "sim"
+    }
+}
+
+/// `Plugin::needs_rendering` defaults to `false`, so an un-annotated plugin
+/// runs in every mode.
+#[test]
+fn needs_rendering_defaults_to_false() {
+    assert!(!SimOnly.needs_rendering());
+    assert!(RenderOnly.needs_rendering(), "the override reports true");
+}
+
+/// In a non-rendering mode (`Headless`), `disable_for_run_mode` drops only the
+/// render-requiring members and keeps the simulation ones.
+#[test]
+fn disable_for_run_mode_disables_render_plugins_in_headless() {
+    let builder = PluginGroupBuilder::new()
+        .add(SimOnly)
+        .add(RenderOnly)
+        .disable_for_run_mode(RunMode::Headless);
+    assert!(builder.is_enabled::<SimOnly>(), "simulation survives headless");
+    assert!(
+        !builder.is_enabled::<RenderOnly>(),
+        "rendering is dropped in headless"
+    );
+    assert_eq!(group_order(builder), vec!["sim"]);
+}
+
+/// In a rendering mode (`Client`), `disable_for_run_mode` is a no-op: every
+/// member, including render plugins, stays enabled.
+#[test]
+fn disable_for_run_mode_is_noop_in_client_mode() {
+    let builder = PluginGroupBuilder::new()
+        .add(SimOnly)
+        .add(RenderOnly)
+        .disable_for_run_mode(RunMode::Client);
+    assert!(builder.is_enabled::<SimOnly>());
+    assert!(builder.is_enabled::<RenderOnly>(), "client keeps rendering");
+    assert_eq!(group_order(builder), vec!["sim", "render"]);
+}
+
+/// `disable_for_run_mode` only toggles the enabled flag, so a later `enable`
+/// restores the render plugin in its original position.
+#[test]
+fn disabled_render_plugin_can_be_re_enabled() {
+    let builder = PluginGroupBuilder::new()
+        .add(RenderOnly)
+        .add(SimOnly)
+        .disable_for_run_mode(RunMode::Headless)
+        .enable::<RenderOnly>();
+    assert!(builder.is_enabled::<RenderOnly>(), "re-enabled in place");
+    // Original explicit order (render before sim) is preserved.
+    assert_eq!(group_order(builder), vec!["render", "sim"]);
+}
+
+/// A dedicated server is also a non-rendering mode, so it drops render plugins
+/// just like plain headless.
+#[test]
+fn disable_for_run_mode_for_dedicated_server_also_drops_rendering() {
+    let builder = PluginGroupBuilder::new()
+        .add(RenderOnly)
+        .add(SimOnly)
+        .disable_for_run_mode(RunMode::DedicatedServer);
+    assert!(!builder.is_enabled::<RenderOnly>());
+    assert!(builder.is_enabled::<SimOnly>());
+}
+
+/// An editor-embedded launch drives rendering, so `disable_for_run_mode` keeps
+/// render plugins there too.
+#[test]
+fn disable_for_run_mode_keeps_rendering_for_editor_embedded() {
+    let builder = PluginGroupBuilder::new()
+        .add(RenderOnly)
+        .add(SimOnly)
+        .disable_for_run_mode(RunMode::EditorEmbedded);
+    assert!(builder.is_enabled::<RenderOnly>(), "editor drives rendering");
+    assert!(builder.is_enabled::<SimOnly>());
+}
+
+/// If a non-render member depends on a render member that headless filtering
+/// disabled, the broken edge surfaces honestly as a missing dependency at
+/// assembly time rather than being silently ignored.
+#[test]
+fn disabling_a_depended_on_render_plugin_errors_at_assembly() {
+    struct NeedsRender;
+    impl Plugin for NeedsRender {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "needs-render"
+        }
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<RenderOnly>()]
+        }
+    }
+
+    let result = PluginGroupBuilder::new()
+        .add(RenderOnly)
+        .add(NeedsRender)
+        .disable_for_run_mode(RunMode::Headless)
         .try_into_plugins();
     assert!(matches!(
         result,

@@ -14,6 +14,8 @@
 //! - [`disable`](PluginGroupBuilder::disable) /
 //!   [`enable`](PluginGroupBuilder::enable) — toggle a member without removing
 //!   it, so its position is preserved if it is re-enabled.
+//! - [`disable_for_run_mode`](PluginGroupBuilder::disable_for_run_mode) —
+//!   disable every render-requiring member for a non-rendering run mode.
 //! - [`set`](PluginGroupBuilder::set) — replace a member's instance in place.
 //!
 //! Each member is keyed by its concrete type, so a type appears at most once
@@ -32,6 +34,7 @@ use std::collections::HashMap;
 
 use crate::plugin::Plugin;
 use crate::plugin_graph::{Node, PluginGraphError, topological_order};
+use crate::run_mode::RunMode;
 
 /// One member of a [`PluginGroupBuilder`]: a boxed plugin plus whether it is
 /// currently enabled.
@@ -203,6 +206,39 @@ impl PluginGroupBuilder {
         self.plugins
             .get(&TypeId::of::<P>())
             .is_some_and(|e| e.enabled)
+    }
+
+    /// Disable every render-requiring member for a non-rendering `mode`.
+    ///
+    /// When `mode` does not [drive rendering](RunMode::drives_rendering) — a
+    /// [`DedicatedServer`](RunMode::DedicatedServer) or
+    /// [`Headless`](RunMode::Headless) launch — this disables each member whose
+    /// [`Plugin::needs_rendering`] returns `true`, so the assembled app carries
+    /// no window / renderer / audio
+    /// plugins and therefore none of their GPU / display / audio dependencies
+    /// (design §24.4 "模式决定加载哪些插件组…无头模式零渲染依赖").
+    ///
+    /// In a rendering mode ([`Client`](RunMode::Client) or
+    /// [`EditorEmbedded`](RunMode::EditorEmbedded)) this is a no-op: every
+    /// member is kept.
+    ///
+    /// Like [`disable`](Self::disable), this toggles the enabled flag without
+    /// removing the member, so its explicit position is preserved and a later
+    /// [`enable`](Self::enable) restores it. If a *non*-render member still
+    /// declares a [dependency](crate::plugin::Plugin::dependencies) on a member
+    /// disabled here, that surfaces honestly as
+    /// [`PluginGraphError::MissingDependency`] at assembly time rather than
+    /// being silently papered over.
+    #[must_use]
+    pub fn disable_for_run_mode(mut self, mode: RunMode) -> Self {
+        if !mode.drives_rendering() {
+            for entry in self.plugins.values_mut() {
+                if entry.plugin.needs_rendering() {
+                    entry.enabled = false;
+                }
+            }
+        }
+        self
     }
 
     /// Resolve the enabled members into their final build order, or report the
