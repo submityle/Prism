@@ -3,11 +3,13 @@
 //!
 //! Building a state registers every component the query names, computes the
 //! read/write [`Access`] set (panicking on an internal aliasing conflict), and
-//! can be reused across frames. For M0 the matched-archetype list is recomputed
-//! on each iteration by scanning all archetypes; the incremental match cache
-//! that avoids the full scan is an M2 refinement (design §7).
+//! can be reused across frames. The matched-archetype list is maintained
+//! *incrementally*: each refresh only tests archetypes created since the last
+//! refresh and appends the matches to a cached list, so steady-state iteration
+//! never rescans the whole archetype table (design §7, M2 query cache).
 
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 
 use crate::archetype::ArchetypeId;
@@ -19,12 +21,46 @@ use crate::query::filter::QueryFilter;
 use crate::query::iter::QueryIter;
 use crate::world::World;
 
+/// Incrementally-maintained set of archetypes a query matches.
+///
+/// Archetype component sets are immutable and archetypes are never removed from
+/// a [`World`], so a match decision for a given [`ArchetypeId`] is permanent:
+/// once an archetype has been tested it never needs retesting. The cache
+/// records how many archetypes have been examined (`checked`) and the ids that
+/// matched (`ids`), so a refresh only has to test archetypes created since the
+/// previous refresh.
+struct MatchedArchetypes {
+    /// Ids of every archetype matched so far, in ascending id order.
+    ids: Vec<ArchetypeId>,
+    /// Number of the world's archetypes already tested. Archetypes with index
+    /// `< checked` have a settled (permanent) match decision.
+    checked: usize,
+}
+
 /// The resolved, reusable state of a `Query<D, F>`.
 pub struct QueryState<D: QueryData, F: QueryFilter = ()> {
     data_state: D::State,
     filter_state: F::State,
     access: Access,
+    /// Incremental archetype-match cache (design §7). Behind an [`UnsafeCell`]
+    /// so the `&self` iteration entry points can refresh it lazily; see the
+    /// [`Sync`] impl for why single-cell mutation through `&self` is sound.
+    matched: UnsafeCell<MatchedArchetypes>,
     _marker: PhantomData<fn() -> (D, F)>,
+}
+
+// SAFETY: the only non-`Sync` field is the `UnsafeCell` match cache. A
+// `QueryState` instance is owned by exactly one system (its cached param state)
+// or by one `World::query` call site, and the scheduler never runs a given
+// system on two threads at once, so a given instance's cache cell is only ever
+// touched by a single thread at a time. No `&QueryState` is ever shared between
+// threads while its cache is mutated. The `data_state`/`filter_state` bounds
+// keep the promise honest: the resolved term states must themselves be `Sync`.
+unsafe impl<D: QueryData, F: QueryFilter> Sync for QueryState<D, F>
+where
+    D::State: Sync,
+    F::State: Sync,
+{
 }
 
 impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
@@ -44,6 +80,10 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             data_state,
             filter_state,
             access,
+            matched: UnsafeCell::new(MatchedArchetypes {
+                ids: Vec::new(),
+                checked: 0,
+            }),
             _marker: PhantomData,
         }
     }
@@ -54,18 +94,42 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         &self.access
     }
 
-    /// Compute the ids of archetypes this query matches, by scanning all of
-    /// `world`'s archetypes (M0 behaviour; cached incrementally in M2).
-    pub(crate) fn matched_archetypes(&self, world: &World) -> Vec<ArchetypeId> {
-        let mut out = Vec::new();
-        for archetype in world.archetypes().iter() {
+    /// Bring the match cache up to date with `world`, testing only archetypes
+    /// created since the previous refresh.
+    ///
+    /// Relies on the archetype invariants (immutable component sets, never
+    /// removed) so that an id tested once never needs retesting.
+    fn refresh_matched(&self, world: &World) {
+        // SAFETY: a `QueryState` instance is single-threaded (see the `Sync`
+        // impl), so this is the only live borrow of the cache cell; the `&mut`
+        // does not alias and is dropped before this method returns.
+        let cache = unsafe { &mut *self.matched.get() };
+        let total = world.archetypes().len();
+        if cache.checked >= total {
+            return;
+        }
+        for archetype in world.archetypes().iter().skip(cache.checked) {
             if D::matches(&self.data_state, archetype)
                 && F::matches(&self.filter_state, archetype)
             {
-                out.push(archetype.id());
+                cache.ids.push(archetype.id());
             }
         }
-        out
+        cache.checked = total;
+    }
+
+    /// The ids of archetypes this query matches.
+    ///
+    /// Refreshes the incremental cache (testing only newly-created archetypes)
+    /// and returns a copy of the matched-id list, which the iterator drivers
+    /// take ownership of. The copy is `O(matched)`, while the full
+    /// `D::matches`/`F::matches` scan it replaces was `O(total archetypes)`.
+    pub(crate) fn matched_archetypes(&self, world: &World) -> Vec<ArchetypeId> {
+        self.refresh_matched(world);
+        // SAFETY: single-threaded per instance (see the `Sync` impl); this
+        // shared borrow of the cache does not alias any live `&mut`.
+        let cache = unsafe { &*self.matched.get() };
+        cache.ids.clone()
     }
 
     /// Iterate the rows matched by this query over a shared view of `world`.

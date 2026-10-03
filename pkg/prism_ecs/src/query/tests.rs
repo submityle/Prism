@@ -163,3 +163,61 @@ fn self_conflicting_read_and_write_panics() {
     // `&Position` aliases the `&mut Position` write of the same query.
     let _state = w.query::<(&mut Position, &Position)>();
 }
+
+/// The incremental archetype-match cache (design §7) must observe archetypes
+/// created *after* a query state's first iteration: reusing one state, a spawn
+/// into a brand-new matching archetype shows up on the next iteration without
+/// the state being rebuilt.
+#[test]
+fn incremental_cache_sees_archetypes_created_after_first_iter() {
+    let mut w = World::new();
+    w.spawn(Position(1, 0));
+
+    let state = w.query::<&Position>();
+    assert_eq!(state.iter(&w).count(), 1);
+
+    // New archetype {Position, Velocity} did not exist at the first refresh.
+    w.spawn((Position(2, 0), Velocity(0, 0)));
+    w.spawn((Position(3, 0), Velocity(0, 0)));
+    assert_eq!(state.iter(&w).count(), 3, "cache picks up the new archetype");
+
+    // Another new archetype {Position, Tag}.
+    w.spawn((Position(4, 0), Tag));
+    let mut xs: Vec<i32> = state.iter(&w).map(|p| p.0).collect();
+    xs.sort_unstable();
+    assert_eq!(xs, [1, 2, 3, 4]);
+}
+
+/// A filtered query's cache must *exclude* newly-created archetypes that do not
+/// match, proving the per-id match decision is applied to new archetypes too.
+#[test]
+fn incremental_cache_excludes_new_non_matching_archetypes() {
+    let mut w = World::new();
+    w.spawn((Position(1, 0), Velocity(0, 0)));
+
+    let state = w.query_filtered::<&Position, Without<Velocity>>();
+    assert_eq!(state.iter(&w).count(), 0, "only match has Velocity");
+
+    // New archetype {Position} matches `Without<Velocity>`...
+    w.spawn(Position(2, 0));
+    // ...new archetype {Position, Velocity, Tag} does not.
+    w.spawn((Position(3, 0), Velocity(0, 0), Tag));
+    let xs: Vec<i32> = state.iter(&w).map(|p| p.0).collect();
+    assert_eq!(xs, [2], "only the Velocity-free archetype is cached");
+}
+
+/// Repeated iterations with no structural change return identical results (the
+/// cache short-circuits once every archetype has been tested).
+#[test]
+fn incremental_cache_is_stable_across_repeated_iters() {
+    let mut w = World::new();
+    w.spawn(Position(1, 0));
+    w.spawn((Position(2, 0), Velocity(0, 0)));
+
+    let state = w.query::<&Position>();
+    let first = state.iter(&w).count();
+    for _ in 0..8 {
+        assert_eq!(state.iter(&w).count(), first);
+    }
+    assert_eq!(first, 2);
+}
