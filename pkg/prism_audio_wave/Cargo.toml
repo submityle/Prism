@@ -1,0 +1,33 @@
+[package]
+name = "prism_audio_wave"
+version = "0.1.0"
+edition = "2024"
+description = "Wave-acoustics baking and runtime perceptual parameter fields for Prism's next-generation audio engine: offline ARD-style wave solve on a probe grid, perceptual encoding (occlusion/decay/arrival direction/wet-dry), and runtime trilinear lookup feeding the shared spatial parameter bus. Classic numerical acoustics, no AI/ML. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, Microsoft Project Acoustics, or Google Resonance Audio source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_core = { path = "../prism_audio_core" }
+prism_audio_spatial = { path = "../prism_audio_spatial" }
+bevy_math = { path = "../../crates/bevy_math", default-features = false, features = [
+  "nostd-libm",
+] }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+], optional = true }
+
+[dev-dependencies]
+prism_audio_wave = { path = ".", features = ["serialize"] }
+
+[features]
+default = ["std"]
+std = ["prism_audio_core/std", "prism_audio_spatial/std", "bevy_math/std"]
+serialize = [
+  "dep:serde",
+  "prism_audio_core/serialize",
+  "prism_audio_spatial/serialize",
+  "bevy_math/serialize",
+]
+
+[lints]
+workspace = true
