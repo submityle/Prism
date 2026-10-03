@@ -67,6 +67,17 @@ pub(crate) struct PrismDdgiSettings {
     /// Artistic gain applied to the resolved GI irradiance. `1` reproduces the
     /// golden magnitude exactly.
     pub intensity: f32,
+    /// World-space anchor of probe coordinate `(0, 0, 0)` (the lattice corner).
+    ///
+    /// A later block re-centres this on the camera each frame; the default
+    /// anchors the lattice at the world origin so the resources allocate
+    /// deterministically.
+    pub origin: Vec3,
+    /// World-space spacing between adjacent probes along each axis (golden
+    /// `ProbeGrid` sanitises each component positive).
+    pub spacing: Vec3,
+    /// Probe counts along each axis (golden `ProbeGrid` clamps each to `>= 1`).
+    pub counts: IVec3,
 }
 
 impl Default for PrismDdgiSettings {
@@ -87,6 +98,12 @@ impl Default for PrismDdgiSettings {
             depth_sharpness: DEFAULT_DEPTH_SHARPNESS,
             relocation_limit: DEFAULT_RELOCATION_LIMIT,
             intensity: 1.0,
+            // Anchor at the world origin; a later block re-centres on the
+            // camera. A 16 x 8 x 16 lattice at one-metre spacing is a sane,
+            // non-degenerate default room-scale volume.
+            origin: Vec3::ZERO,
+            spacing: Vec3::splat(1.0),
+            counts: IVec3::new(16, 8, 16),
         }
     }
 }
@@ -118,6 +135,17 @@ impl PrismDdgiSettings {
             self.intensity,
         );
         (grid, gpu)
+    }
+
+    /// Builds the golden [`ProbeGrid`] and its [`GpuDdgiVolume`] twin for the
+    /// lattice this resource is configured with ([`origin`](Self::origin),
+    /// [`spacing`](Self::spacing), [`counts`](Self::counts)).
+    ///
+    /// The per-view resources size their probe-meta buffer and octahedral
+    /// atlases from the probe count this returns, so the device allocation and
+    /// the CPU golden describe the same lattice.
+    pub(crate) fn configured_volume(&self) -> (ProbeGrid, GpuDdgiVolume) {
+        self.volume(self.origin, self.spacing, self.counts)
     }
 }
 
@@ -164,5 +192,17 @@ mod tests {
         let settings = PrismDdgiSettings::default();
         let (_grid, gpu) = settings.volume(Vec3::ZERO, Vec3::splat(1.0), IVec3::new(8, 4, 2));
         assert_eq!(gpu.probe_count(), 8 * 4 * 2);
+    }
+
+    #[test]
+    fn configured_volume_uses_the_default_lattice() {
+        let settings = PrismDdgiSettings::default();
+        let (grid, gpu) = settings.configured_volume();
+        // The default 16 x 8 x 16 room-scale lattice at the world origin.
+        assert_eq!(grid.counts, IVec3::new(16, 8, 16));
+        assert_eq!(gpu.counts, [16, 8, 16]);
+        assert_eq!(gpu.origin, [0.0, 0.0, 0.0]);
+        assert_eq!(gpu.spacing, [1.0, 1.0, 1.0]);
+        assert_eq!(gpu.probe_count(), 16 * 8 * 16);
     }
 }

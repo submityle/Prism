@@ -40,9 +40,11 @@
 #![allow(dead_code, unused_imports)]
 
 mod abi;
+mod resources;
 mod settings;
 
 pub(crate) use abi::{GpuDdgiSampleParams, GpuDdgiVolume, DDGI_WORKGROUP_SIZE};
+pub(crate) use resources::{prepare_ddgi_textures, ViewDdgi};
 pub(crate) use settings::PrismDdgiSettings;
 
 #[cfg(test)]
