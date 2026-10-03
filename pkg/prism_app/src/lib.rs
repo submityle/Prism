@@ -193,7 +193,8 @@ pub use app::{App, Plugins, PluginsState};
 pub use capability::{Capabilities, QualityTier};
 pub use cvar::{
     ConsoleOutcome, Cvar, CvarBounds, CvarCategory, CvarChanged, CvarCliApplied, CvarCliRejection,
-    CvarCliReport, CvarError, CvarFlags, CvarRegistry, CvarSetOutcome, CvarSpec, ValidatedWrite,
+    CvarCliReport, CvarError, CvarFlags, CvarListing, CvarRegistry, CvarSetOutcome, CvarSpec,
+    ValidatedWrite,
 };
 #[cfg(feature = "std")]
 pub use crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
@@ -250,8 +251,8 @@ pub mod prelude {
     pub use crate::capability::{Capabilities, QualityTier};
     pub use crate::cvar::{
         ConsoleOutcome, Cvar, CvarBounds, CvarCategory, CvarChanged, CvarCliApplied,
-        CvarCliRejection, CvarCliReport, CvarError, CvarFlags, CvarRegistry, CvarSetOutcome,
-        CvarSpec, ValidatedWrite,
+        CvarCliRejection, CvarCliReport, CvarError, CvarFlags, CvarListing, CvarRegistry,
+        CvarSetOutcome, CvarSpec, ValidatedWrite,
     };
     #[cfg(feature = "std")]
     pub use crate::crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};

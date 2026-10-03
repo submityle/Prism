@@ -512,6 +512,81 @@ pub enum ConsoleOutcome {
     Rejected(CvarError),
 }
 
+/// A read-only snapshot of one cvar, joining its immutable [schema](Cvar) with
+/// its resolved value from the [`Settings`] cascade (design §24.6 "分类（渲染/
+/// 网络/调试）" + console enumeration/help).
+///
+/// Produced by the console listing entry points [`App::list_cvars`],
+/// [`App::list_cvars_in_category`], and [`App::find_cvars`]. It is an owned,
+/// point-in-time copy — the live schema stays in [`CvarRegistry`] and the live
+/// value in [`Settings`] — so a console / developer overlay can render a cvar
+/// list without holding a borrow on the [`App`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct CvarListing {
+    /// The cvar's flat-namespace name (e.g. `r.shadows`).
+    pub name: String,
+    /// The subsystem [category](CvarCategory) the cvar belongs to.
+    pub category: CvarCategory,
+    /// The resolved value from the cascade (falls back to [`default`](CvarListing::default)
+    /// when the cvar is otherwise unset).
+    pub value: SettingValue,
+    /// The registered default value (the
+    /// [`EngineDefault`](crate::settings::SettingsLayer::EngineDefault) contribution).
+    pub default: SettingValue,
+    /// The declared numeric [bounds](CvarBounds) (`None` for bool/string cvars).
+    pub bounds: CvarBounds,
+    /// The permission / behaviour [flags](CvarFlags).
+    pub flags: CvarFlags,
+    /// The accepted [`SettingValue`] kind, as a stable label (see [`Cvar::kind`]).
+    pub kind: &'static str,
+    /// The cascade [layer](crate::settings::SettingsLayer) the resolved value
+    /// came from, or `None` if the value is the schema default with no cascade
+    /// entry.
+    pub source: Option<SettingsLayer>,
+    /// The human-readable description (may be empty).
+    pub description: String,
+}
+
+impl CvarListing {
+    /// Render a single-line console summary of this cvar, in the shape a
+    /// shipping `cvarlist` / `find` command prints: `name = value`, the default
+    /// in parentheses when the value has diverged from it, a bracketed list of
+    /// active flag labels, and the description after a dash. For example
+    /// `r.shadows = 4 (default 2) [archive] - shadow quality`.
+    #[must_use]
+    pub fn summary_line(&self) -> String {
+        let mut line = format!("{} = {}", self.name, format_cvar_token(&self.value));
+        if self.value != self.default {
+            line.push_str(" (default ");
+            line.push_str(&format_cvar_token(&self.default));
+            line.push(')');
+        }
+        let mut labels: Vec<&str> = Vec::new();
+        if self.flags.contains(CvarFlags::CHEAT) {
+            labels.push("cheat");
+        }
+        if self.flags.contains(CvarFlags::READ_ONLY) {
+            labels.push("readonly");
+        }
+        if self.flags.contains(CvarFlags::ARCHIVE) {
+            labels.push("archive");
+        }
+        if self.flags.contains(CvarFlags::NOTIFY) {
+            labels.push("notify");
+        }
+        if !labels.is_empty() {
+            line.push_str(" [");
+            line.push_str(&labels.join(","));
+            line.push(']');
+        }
+        if !self.description.is_empty() {
+            line.push_str(" - ");
+            line.push_str(&self.description);
+        }
+        line
+    }
+}
+
 /// The result of [`CvarRegistry::validate_set`]: the value that should be
 /// written to the cascade (type-coerced into the declared kind and clamped into
 /// the declared [bounds](CvarBounds)), plus whether clamping altered it.
@@ -1070,6 +1145,67 @@ impl App {
         out
     }
 
+    /// Snapshot every registered cvar as a [`CvarListing`], in ascending-name
+    /// order (design §24.6 console enumeration/help).
+    ///
+    /// Each listing joins the immutable [schema](Cvar) with the value resolved
+    /// from the [`Settings`] cascade, so a console `cvarlist` command or a
+    /// developer overlay can render the full cvar table in one call. Returns an
+    /// empty vector when no cvar has ever been registered.
+    #[must_use]
+    pub fn list_cvars(&self) -> Vec<CvarListing> {
+        let Some(registry) = self.world().get_resource::<CvarRegistry>() else {
+            return Vec::new();
+        };
+        let settings = self.world().get_resource::<Settings>();
+        registry
+            .iter()
+            .map(|(name, cvar)| build_cvar_listing(name, cvar, settings))
+            .collect()
+    }
+
+    /// Snapshot every registered cvar in `category` as a [`CvarListing`], in
+    /// ascending-name order (design §24.6 "分类（渲染/网络/调试）").
+    ///
+    /// This is the category-filtered form of [`list_cvars`](App::list_cvars)
+    /// (e.g. a console `cvarlist render`); see it for the join semantics.
+    #[must_use]
+    pub fn list_cvars_in_category(&self, category: CvarCategory) -> Vec<CvarListing> {
+        let Some(registry) = self.world().get_resource::<CvarRegistry>() else {
+            return Vec::new();
+        };
+        let settings = self.world().get_resource::<Settings>();
+        registry
+            .iter_category(category)
+            .map(|(name, cvar)| build_cvar_listing(name, cvar, settings))
+            .collect()
+    }
+
+    /// Snapshot every cvar whose name **or** description contains `needle`
+    /// (ASCII/Unicode case-insensitive), in ascending-name order — the console
+    /// `find` command (design §24.6 console help).
+    ///
+    /// Matching is a plain case-folded substring test, so `find shadow` surfaces
+    /// `r.shadows` and any cvar documented with "shadow". An empty `needle`
+    /// matches everything, making `find ""` an alias for
+    /// [`list_cvars`](App::list_cvars).
+    #[must_use]
+    pub fn find_cvars(&self, needle: &str) -> Vec<CvarListing> {
+        let needle = needle.to_lowercase();
+        let Some(registry) = self.world().get_resource::<CvarRegistry>() else {
+            return Vec::new();
+        };
+        let settings = self.world().get_resource::<Settings>();
+        registry
+            .iter()
+            .filter(|(name, cvar)| {
+                name.to_lowercase().contains(&needle)
+                    || cvar.description().to_lowercase().contains(&needle)
+            })
+            .map(|(name, cvar)| build_cvar_listing(name, cvar, settings))
+            .collect()
+    }
+
     /// Clear the cvar `name`'s [`Runtime`](crate::settings::SettingsLayer::Runtime)
     /// override, letting it fall back to a lower cascade layer (design §24.6).
     ///
@@ -1331,5 +1467,27 @@ fn format_cvar_token(value: &SettingValue) -> String {
             }
         }
         SettingValue::Str(text) => text.clone(),
+    }
+}
+
+/// Build a [`CvarListing`] snapshot for one cvar, joining its [schema](Cvar)
+/// with the value resolved from the [`Settings`] cascade (and the layer that
+/// value came from). When the cvar has no cascade entry the schema default is
+/// used and the source layer is `None`.
+fn build_cvar_listing(name: &str, cvar: &Cvar, settings: Option<&Settings>) -> CvarListing {
+    let value = settings
+        .and_then(|table| table.get(name).cloned())
+        .unwrap_or_else(|| cvar.default_value().clone());
+    let source = settings.and_then(|table| table.resolved_layer(name));
+    CvarListing {
+        name: name.to_owned(),
+        category: cvar.category(),
+        value,
+        default: cvar.default_value().clone(),
+        bounds: cvar.bounds(),
+        flags: cvar.flags(),
+        kind: cvar.kind(),
+        source,
+        description: cvar.description().to_owned(),
     }
 }

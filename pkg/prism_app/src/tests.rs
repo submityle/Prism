@@ -5512,7 +5512,7 @@ mod cvar_tests {
 
     use crate::cvar::{
         ConsoleOutcome, CvarBounds, CvarCategory, CvarChanged, CvarCliRejection, CvarError,
-        CvarFlags, CvarRegistry, CvarSpec, ValidatedWrite,
+        CvarFlags, CvarListing, CvarRegistry, CvarSpec, ValidatedWrite,
     };
 
     /// Registering a cvar seeds its default into the `EngineDefault` settings
@@ -6475,5 +6475,190 @@ mod cvar_tests {
         let config = app.write_archive_config();
         assert!(config.starts_with("//"));
         assert_eq!(config.lines().count(), 1);
+    }
+
+    /// `list_cvars` snapshots every registered cvar in ascending-name order,
+    /// resolves each value through the cascade (so a runtime override shows the
+    /// overridden value sourced from `Runtime`), and reports an unset cvar from
+    /// its seeded `EngineDefault` default.
+    #[test]
+    fn list_cvars_snapshots_all_in_order_with_resolved_values() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4))
+                .flag(CvarFlags::ARCHIVE)
+                .description("shadow quality"),
+        )
+        .unwrap();
+        app.register_cvar(
+            CvarSpec::new("net.tickrate", 30_i64)
+                .category(CvarCategory::Network)
+                .bounds(CvarBounds::Int(1, 128)),
+        )
+        .unwrap();
+
+        // Override one cvar at runtime; leave the other at its default.
+        app.set_cvar("r.shadows", 4_i64).unwrap();
+
+        let listings = app.list_cvars();
+        // Ascending by name: `net.tickrate` precedes `r.shadows`.
+        let names: Vec<&str> = listings.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["net.tickrate", "r.shadows"]);
+
+        let tickrate = &listings[0];
+        assert_eq!(tickrate.category, CvarCategory::Network);
+        assert_eq!(tickrate.value, SettingValue::Int(30));
+        assert_eq!(tickrate.default, SettingValue::Int(30));
+        assert_eq!(tickrate.bounds, CvarBounds::Int(1, 128));
+        assert_eq!(tickrate.kind, "int");
+        // An unset cvar still resolves from the seeded `EngineDefault` layer.
+        assert_eq!(tickrate.source, Some(SettingsLayer::EngineDefault));
+        assert!(tickrate.flags.is_empty());
+
+        let shadows = &listings[1];
+        assert_eq!(shadows.value, SettingValue::Int(4));
+        assert_eq!(shadows.default, SettingValue::Int(2));
+        // The runtime override is sourced from the `Runtime` layer.
+        assert_eq!(shadows.source, Some(SettingsLayer::Runtime));
+        assert!(shadows.flags.contains(CvarFlags::ARCHIVE));
+        assert_eq!(shadows.description, "shadow quality");
+    }
+
+    /// `list_cvars_in_category` returns only the cvars whose category matches,
+    /// in ascending-name order.
+    #[test]
+    fn list_cvars_in_category_filters_to_one_category() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).category(CvarCategory::Render))
+            .unwrap();
+        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
+            .unwrap();
+        app.register_cvar(CvarSpec::new("net.tickrate", 30_i64).category(CvarCategory::Network))
+            .unwrap();
+
+        let render: Vec<String> = app
+            .list_cvars_in_category(CvarCategory::Render)
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(render, ["r.shadows", "r.vsync"]);
+
+        let network: Vec<String> = app
+            .list_cvars_in_category(CvarCategory::Network)
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(network, ["net.tickrate"]);
+
+        // A category with no registered cvars yields an empty vector.
+        assert!(app.list_cvars_in_category(CvarCategory::Audio).is_empty());
+    }
+
+    /// `find_cvars` matches a case-insensitive substring against both the name
+    /// and the description, and an empty needle lists everything.
+    #[test]
+    fn find_cvars_matches_name_or_description_case_insensitively() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .description("shadow quality"),
+        )
+        .unwrap();
+        app.register_cvar(
+            CvarSpec::new("r.ao", 1_i64)
+                .category(CvarCategory::Render)
+                .description("ambient occlusion with soft SHADOWing"),
+        )
+        .unwrap();
+        app.register_cvar(CvarSpec::new("net.tickrate", 30_i64).category(CvarCategory::Network))
+            .unwrap();
+
+        // Name substring, case-insensitive.
+        let by_name: Vec<String> = app.find_cvars("SHADOW").into_iter().map(|l| l.name).collect();
+        // `r.ao` matches on its description ("SHADOWing"), `r.shadows` on name.
+        assert_eq!(by_name, ["r.ao", "r.shadows"]);
+
+        // Pure name-prefix match.
+        let net: Vec<String> = app.find_cvars("net.").into_iter().map(|l| l.name).collect();
+        assert_eq!(net, ["net.tickrate"]);
+
+        // An empty needle is an alias for `list_cvars`.
+        assert_eq!(app.find_cvars("").len(), app.list_cvars().len());
+
+        // A needle that matches nothing yields an empty vector.
+        assert!(app.find_cvars("nonexistent").is_empty());
+    }
+
+    /// `summary_line` renders the console shape: `name = value`, a parenthesised
+    /// default only when the value diverges, bracketed flag labels, and the
+    /// description after a dash.
+    #[test]
+    fn summary_line_matches_console_shape() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4))
+                .flag(CvarFlags::ARCHIVE)
+                .description("shadow quality"),
+        )
+        .unwrap();
+        app.set_cvar("r.shadows", 4_i64).unwrap();
+
+        let listing = &app.find_cvars("r.shadows")[0];
+        assert_eq!(
+            listing.summary_line(),
+            "r.shadows = 4 (default 2) [archive] - shadow quality"
+        );
+
+        // A cvar sitting at its default, with no flags and no description,
+        // renders as just `name = value`.
+        let plain = CvarListing {
+            name: "sys.quiet".to_owned(),
+            category: CvarCategory::System,
+            value: SettingValue::Bool(false),
+            default: SettingValue::Bool(false),
+            bounds: CvarBounds::None,
+            flags: CvarFlags::EMPTY,
+            kind: "bool",
+            source: Some(SettingsLayer::EngineDefault),
+            description: String::new(),
+        };
+        assert_eq!(plain.summary_line(), "sys.quiet = false");
+    }
+
+    /// Multiple active flags are rendered as a comma-joined label list in a
+    /// stable, declaration order.
+    #[test]
+    fn summary_line_joins_multiple_flag_labels() {
+        let listing = CvarListing {
+            name: "sv.cheats".to_owned(),
+            category: CvarCategory::Debug,
+            value: SettingValue::Bool(true),
+            default: SettingValue::Bool(false),
+            bounds: CvarBounds::None,
+            flags: CvarFlags::CHEAT | CvarFlags::NOTIFY,
+            kind: "bool",
+            source: Some(SettingsLayer::Runtime),
+            description: "enable cheats".to_owned(),
+        };
+        assert_eq!(
+            listing.summary_line(),
+            "sv.cheats = true (default false) [cheat,notify] - enable cheats"
+        );
+    }
+
+    /// All three console enumeration entry points return an empty vector on a
+    /// fresh `App` that has never registered a cvar (no `CvarRegistry`).
+    #[test]
+    fn list_cvars_without_registry_is_empty() {
+        let app = App::new();
+        assert!(app.world().get_resource::<CvarRegistry>().is_none());
+        assert!(app.list_cvars().is_empty());
+        assert!(app.list_cvars_in_category(CvarCategory::Render).is_empty());
+        assert!(app.find_cvars("r.").is_empty());
     }
 }
