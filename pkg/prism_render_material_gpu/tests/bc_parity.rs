@@ -12,8 +12,8 @@
 
 use prism_render_material::{
     decode_astc_4x4_hdr, decode_astc_4x4_ldr, decode_astc_4x4_weights, decode_astc_4x4_weights_ise,
-    decode_astc_void_extent_hdr, decode_astc_void_extent_ldr, decode_bc1, decode_bc3,
-    decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned, decode_bc6h_mode12_signed,
+    decode_astc_ldr, decode_astc_void_extent_hdr, decode_astc_void_extent_ldr, decode_bc1,
+    decode_bc3, decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned, decode_bc6h_mode12_signed,
     decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned,
     decode_bc6h_mode14_signed, decode_bc6h_mode14_unsigned, decode_bc6h_mode1_signed,
     decode_bc6h_mode1_unsigned, decode_bc6h_mode2_signed, decode_bc6h_mode2_unsigned,
@@ -4053,5 +4053,115 @@ fn astc_multi_partition_hdr_alpha_parity_against_gpu_hardware_decode() {
     eprintln!(
         "ASTC multi-partition HDR alpha parity: {compared} RGBA lanes match hardware ({alpha_compared} alpha lanes) across {} configs x {PER_MODE} blocks ({skipped} saturated lanes skipped)",
         MULTI_PART_HDR_ALPHA.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ASTC single-partition LDR parity on LARGER FOOTPRINTS (5x5 .. 12x12).
+//
+// Every ASTC test above runs on the 4x4 footprint. ASTC footprints are a
+// property of the *texture* format, not the block payload: the same 128-bit
+// block decodes to bx*by texels under format ASTC_bx_by. We reuse the
+// GPU-proven CEM8 mode-67 block (4x4 trit weight grid, QUANT_256 colour) whose
+// grid fits inside every footprint >= 4 on each axis, set random endpoints and
+// weights, and decode on the CPU through the new footprint-generic
+// `decode_astc_ldr(block, bx, by)` entry point. The reference is the native
+// hardware decoder via `BlockOracle::decode_raw_footprint`, which creates a
+// bx x by single-block ASTC texture and reads back every texel. This proves the
+// Khronos weight-infill decimation on non-4x4 (and non-square) footprints
+// bit-for-bit against hardware, not just the 4x4 identity case.
+// ---------------------------------------------------------------------------
+
+fn astc_block_for_footprint(bx: u32, by: u32) -> wgpu::AstcBlock {
+    match (bx, by) {
+        (4, 4) => wgpu::AstcBlock::B4x4,
+        (5, 4) => wgpu::AstcBlock::B5x4,
+        (5, 5) => wgpu::AstcBlock::B5x5,
+        (6, 5) => wgpu::AstcBlock::B6x5,
+        (6, 6) => wgpu::AstcBlock::B6x6,
+        (8, 5) => wgpu::AstcBlock::B8x5,
+        (8, 6) => wgpu::AstcBlock::B8x6,
+        (8, 8) => wgpu::AstcBlock::B8x8,
+        (10, 5) => wgpu::AstcBlock::B10x5,
+        (10, 6) => wgpu::AstcBlock::B10x6,
+        (10, 8) => wgpu::AstcBlock::B10x8,
+        (10, 10) => wgpu::AstcBlock::B10x10,
+        (12, 10) => wgpu::AstcBlock::B12x10,
+        (12, 12) => wgpu::AstcBlock::B12x12,
+        _ => panic!("unsupported ASTC footprint {bx}x{by}"),
+    }
+}
+
+#[test]
+fn astc_single_partition_larger_footprint_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC larger-footprint parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC larger-footprint parity");
+        return;
+    }
+
+    // Footprints exercising both square and non-square decimation on each axis.
+    const FOOTPRINTS: [(u32, u32); 8] = [
+        (5, 5),
+        (6, 6),
+        (8, 8),
+        (10, 10),
+        (12, 12),
+        (8, 5),
+        (10, 6),
+        (12, 10),
+    ];
+    const PER_FOOTPRINT: u32 = 64;
+    let mut rng = Rng(0x5F37_A1CE);
+    let mut compared = 0u64;
+
+    for (bx, by) in FOOTPRINTS {
+        let format = TextureFormat::Astc {
+            block: astc_block_for_footprint(bx, by),
+            channel: wgpu::AstcChannel::Unorm,
+        };
+        let texels = (bx * by) as usize;
+        for _ in 0..PER_FOOTPRINT {
+            let mut ep = [0u8; 6];
+            for e in ep.iter_mut() {
+                *e = (rng.next_u32() & 0xFF) as u8;
+            }
+            // Mode 67: single-partition CEM8, 4x4 trit weight grid (6 levels).
+            let mut blk = astc_cem8_block(67, ep);
+            let mut raw = [0u8; 16];
+            for r in raw.iter_mut() {
+                *r = (rng.next_u32() % 6) as u8;
+            }
+            astc_set_weights_ise(&mut blk, WeightForm::Trit, 1, &raw);
+
+            let (cpu, count) =
+                decode_astc_ldr(&blk, bx, by).expect("supported larger-footprint block");
+            assert_eq!(count, texels, "{bx}x{by} texel count");
+            let gpu = oracle.decode_raw_footprint(format, &blk, bx, by);
+            assert_eq!(gpu.len(), texels, "{bx}x{by} GPU texel count");
+
+            for t in 0..texels {
+                for c in 0..4 {
+                    let gv = (gpu[t][c].clamp(0.0, 1.0) * 255.0 + 0.5) as i32;
+                    let d = (cpu[t][c] as i32 - gv).abs();
+                    assert!(
+                        d <= 1,
+                        "ASTC {bx}x{by} block={blk:02x?} texel {t} chan {c}: ep={ep:?} cpu={} gpu={gv} (|d|={d})",
+                        cpu[t][c]
+                    );
+                    compared += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC larger-footprint single-partition parity: {compared} RGBA lanes match hardware across {} footprints x {PER_FOOTPRINT} blocks",
+        FOOTPRINTS.len()
     );
 }
