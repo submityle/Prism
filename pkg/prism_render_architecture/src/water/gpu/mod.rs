@@ -43,6 +43,7 @@ pub mod flip_mac_g2p_kernel;
 pub mod flip_mac_p2g_kernel;
 pub mod flip_mac_pressure_kernel;
 pub mod flip_mac_project_kernel;
+pub mod gerstner_displace_kernel;
 pub mod pbf_density_kernel;
 pub mod pipeline;
 pub mod render_fx_kernel;
@@ -156,6 +157,11 @@ pub use flip_mac_pressure_kernel::{
 
 pub use flip_mac_project_kernel::{
     dispatch_mac_project, MacProjectParams, WATER_FLIP_MAC_PROJECT_WESL,
+};
+
+pub use gerstner_displace_kernel::{
+    dispatch_gerstner_displace, GerstnerFields, GerstnerParams, GERSTNER_OUT_FLOATS,
+    GERSTNER_WAVE_FLOATS, WATER_GERSTNER_DISPLACE_WESL,
 };
 
 pub use pbf_density_kernel::{
