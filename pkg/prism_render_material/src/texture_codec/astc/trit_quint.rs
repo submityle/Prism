@@ -205,14 +205,12 @@ pub(super) fn decode_quint_sequence(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloc::vec;
-
-    /// Packed trit value for digits `[t0..t4]`, indexed `[t4][t3][t2][t1][t0]`.
-    #[rustfmt::skip]
-    const INTEGER_OF_TRITS: [u8; 243] = [
+/// Packed trit value for digit tuple `[t0,t1,t2,t3,t4]`, indexed
+/// `(((t4*3+t3)*3+t2)*3+t1)*3+t0`. The exact inverse of
+/// [`TRITS_OF_INTEGER`] (proven over all `3^5` tuples in tests); transcribed
+/// from the ARM `astcenc` reference encoder.
+#[rustfmt::skip]
+pub(super) const INTEGER_OF_TRITS: [u8; 243] = [
     0, 1, 2, 4, 5, 6, 8, 9, 10, 16, 17, 18,
     20, 21, 22, 24, 25, 26, 3, 7, 15, 19, 23, 27,
     12, 13, 14, 32, 33, 34, 36, 37, 38, 40, 41, 42,
@@ -234,10 +232,13 @@ mod tests {
     28, 29, 30, 60, 61, 62, 92, 93, 94, 156, 157, 158,
     188, 189, 190, 220, 221, 222, 31, 63, 127, 159, 191, 255,
     252, 253, 254,
-    ];
-    /// Packed quint value for digits `[q0,q1,q2]`, indexed `[q2][q1][q0]`.
-    #[rustfmt::skip]
-    const INTEGER_OF_QUINTS: [u8; 125] = [
+];
+
+/// Packed quint value for digit tuple `[q0,q1,q2]`, indexed
+/// `(q2*5+q1)*5+q0`. The exact inverse of [`QUINTS_OF_INTEGER`] (proven over
+/// all `5^3` tuples in tests); transcribed from the ARM `astcenc` encoder.
+#[rustfmt::skip]
+pub(super) const INTEGER_OF_QUINTS: [u8; 125] = [
     0, 1, 2, 3, 4, 8, 9, 10, 11, 12, 16, 17,
     18, 19, 20, 24, 25, 26, 27, 28, 5, 13, 21, 29,
     6, 32, 33, 34, 35, 36, 40, 41, 42, 43, 44, 48,
@@ -249,20 +250,133 @@ mod tests {
     109, 117, 125, 30, 102, 103, 70, 71, 38, 110, 111, 78,
     79, 46, 118, 119, 86, 87, 54, 126, 127, 94, 95, 62,
     39, 47, 55, 63, 31,
-    ];
+];
 
-    fn enc_trit(t: [u8; 5]) -> u8 {
-        INTEGER_OF_TRITS[((((t[4] as usize * 3 + t[3] as usize) * 3 + t[2] as usize) * 3
-            + t[1] as usize)
-            * 3)
-            + t[0] as usize]
+/// Set the low `count` bits of `val` into `block` at bit offset `lo`, LSB-first.
+fn write_bits_le(block: &mut [u8; 16], lo: u32, count: u32, val: u32) {
+    for i in 0..count {
+        if (val >> i) & 1 == 1 {
+            let bit = lo + i;
+            block[(bit >> 3) as usize] |= 1 << (bit & 7);
+        }
     }
-    fn enc_quint(q: [u8; 3]) -> u8 {
-        INTEGER_OF_QUINTS[(q[2] as usize * 5 + q[1] as usize) * 5 + q[0] as usize]
-    }
+}
 
-    /// Every decode-table entry is the exact inverse of the encode table, over
-    /// all 3^5 trit tuples and 5^3 quint tuples.
+/// Packed trit integer for the five base-3 digits `t` (MSB digit `t[4]`).
+#[inline]
+pub(super) fn pack_trit(t: [u8; 5]) -> u8 {
+    INTEGER_OF_TRITS[((((t[4] as usize * 3 + t[3] as usize) * 3 + t[2] as usize) * 3
+        + t[1] as usize)
+        * 3)
+        + t[0] as usize]
+}
+
+/// Packed quint integer for the three base-5 digits `q` (MSB digit `q[2]`).
+#[inline]
+pub(super) fn pack_quint(q: [u8; 3]) -> u8 {
+    INTEGER_OF_QUINTS[(q[2] as usize * 5 + q[1] as usize) * 5 + q[0] as usize]
+}
+
+/// Encode a BISE **trit** sequence: the exact inverse of
+/// [`decode_trit_sequence`]. Each value in `vals` is `low | (trit << bits)`
+/// with `low` in `0..2^bits` and `trit` in `0..3`; the stream is written
+/// starting at bit `start` of `block` in `astcenc` collection order.
+pub(super) fn encode_trit_sequence(block: &mut [u8; 16], start: u32, bits: u32, vals: &[u8]) {
+    let mask = (1u32 << bits) - 1;
+    let count = vals.len();
+    let mut off = start;
+    let mut i = 0usize;
+    let full = count / 5;
+    let shifts = [0u32, 2, 4, 5, 7];
+    let tb = [2u32, 2, 1, 2, 1];
+    for _ in 0..full {
+        let t = pack_trit([
+            vals[i] >> bits,
+            vals[i + 1] >> bits,
+            vals[i + 2] >> bits,
+            vals[i + 3] >> bits,
+            vals[i + 4] >> bits,
+        ]) as u32;
+        for e in 0..5 {
+            let pack =
+                ((vals[i] as u32) & mask) | (((t >> shifts[e]) & ((1 << tb[e]) - 1)) << bits);
+            write_bits_le(block, off, bits + tb[e], pack);
+            off += bits + tb[e];
+            i += 1;
+        }
+    }
+    if i != count {
+        let g = |k: usize| {
+            if i + k >= count {
+                0
+            } else {
+                vals[i + k] >> bits
+            }
+        };
+        let t = pack_trit([g(0), g(1), g(2), g(3), 0]) as u32;
+        let mut j = 0usize;
+        while i < count {
+            let pack =
+                ((vals[i] as u32) & mask) | (((t >> shifts[j]) & ((1 << tb[j]) - 1)) << bits);
+            write_bits_le(block, off, bits + tb[j], pack);
+            off += bits + tb[j];
+            i += 1;
+            j += 1;
+        }
+    }
+}
+
+/// Encode a BISE **quint** sequence: the exact inverse of
+/// [`decode_quint_sequence`]. Each value in `vals` is `low | (quint << bits)`
+/// with `low` in `0..2^bits` and `quint` in `0..5`; written starting at bit
+/// `start` of `block` in `astcenc` collection order.
+pub(super) fn encode_quint_sequence(block: &mut [u8; 16], start: u32, bits: u32, vals: &[u8]) {
+    let mask = (1u32 << bits) - 1;
+    let count = vals.len();
+    let mut off = start;
+    let mut i = 0usize;
+    let full = count / 3;
+    let shifts = [0u32, 3, 5];
+    let tb = [3u32, 2, 2];
+    for _ in 0..full {
+        let t = pack_quint([vals[i] >> bits, vals[i + 1] >> bits, vals[i + 2] >> bits]) as u32;
+        for e in 0..3 {
+            let pack =
+                ((vals[i] as u32) & mask) | (((t >> shifts[e]) & ((1 << tb[e]) - 1)) << bits);
+            write_bits_le(block, off, bits + tb[e], pack);
+            off += bits + tb[e];
+            i += 1;
+        }
+    }
+    if i != count {
+        let g = |k: usize| {
+            if i + k >= count {
+                0
+            } else {
+                vals[i + k] >> bits
+            }
+        };
+        let t = pack_quint([g(0), g(1), 0]) as u32;
+        let mut j = 0usize;
+        while i < count {
+            let pack =
+                ((vals[i] as u32) & mask) | (((t >> shifts[j]) & ((1 << tb[j]) - 1)) << bits);
+            write_bits_le(block, off, bits + tb[j], pack);
+            off += bits + tb[j];
+            i += 1;
+            j += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// Every decode-table entry is the exact inverse of the production encode
+    /// table, over all 3^5 trit tuples and 5^3 quint tuples.
     #[test]
     fn decode_tables_invert_encode_tables() {
         for t0 in 0..3 {
@@ -271,7 +385,7 @@ mod tests {
                     for t3 in 0..3 {
                         for t4 in 0..3 {
                             let tup = [t0, t1, t2, t3, t4];
-                            assert_eq!(TRITS_OF_INTEGER[enc_trit(tup) as usize], tup);
+                            assert_eq!(TRITS_OF_INTEGER[pack_trit(tup) as usize], tup);
                         }
                     }
                 }
@@ -281,7 +395,7 @@ mod tests {
             for q1 in 0..5 {
                 for q2 in 0..5 {
                     let tup = [q0, q1, q2];
-                    assert_eq!(QUINTS_OF_INTEGER[enc_quint(tup) as usize], tup);
+                    assert_eq!(QUINTS_OF_INTEGER[pack_quint(tup) as usize], tup);
                 }
             }
         }
@@ -299,105 +413,8 @@ mod tests {
         }
     }
 
-    fn write_bits(block: &mut [u8; 16], lo: u32, count: u32, val: u32) {
-        for i in 0..count {
-            if (val >> i) & 1 == 1 {
-                let bit = lo + i;
-                block[(bit >> 3) as usize] |= 1 << (bit & 7);
-            }
-        }
-    }
-
-    /// astcenc-order trit encoder (mirror of `decode_trit_sequence`), used only
-    /// to synthesise known bit streams for the round-trip test.
-    fn encode_trit(block: &mut [u8; 16], start: u32, bits: u32, vals: &[u8]) {
-        let mask = (1u32 << bits) - 1;
-        let count = vals.len();
-        let mut off = start;
-        let mut i = 0usize;
-        let full = count / 5;
-        for _ in 0..full {
-            let t = enc_trit([
-                vals[i] >> bits,
-                vals[i + 1] >> bits,
-                vals[i + 2] >> bits,
-                vals[i + 3] >> bits,
-                vals[i + 4] >> bits,
-            ]) as u32;
-            let shifts = [0u32, 2, 4, 5, 7];
-            let tb = [2u32, 2, 1, 2, 1];
-            for e in 0..5 {
-                let pack =
-                    ((vals[i] as u32) & mask) | (((t >> shifts[e]) & ((1 << tb[e]) - 1)) << bits);
-                write_bits(block, off, bits + tb[e], pack);
-                off += bits + tb[e];
-                i += 1;
-            }
-        }
-        if i != count {
-            let g = |k: usize| {
-                if i + k >= count {
-                    0
-                } else {
-                    vals[i + k] >> bits
-                }
-            };
-            let t = enc_trit([g(0), g(1), g(2), g(3), 0]) as u32;
-            let tbits = [2u32, 2, 1, 2];
-            let tshift = [0u32, 2, 4, 5];
-            let mut j = 0usize;
-            while i < count {
-                let pack = ((vals[i] as u32) & mask)
-                    | (((t >> tshift[j]) & ((1 << tbits[j]) - 1)) << bits);
-                write_bits(block, off, bits + tbits[j], pack);
-                off += bits + tbits[j];
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-
-    fn encode_quint(block: &mut [u8; 16], start: u32, bits: u32, vals: &[u8]) {
-        let mask = (1u32 << bits) - 1;
-        let count = vals.len();
-        let mut off = start;
-        let mut i = 0usize;
-        let full = count / 3;
-        for _ in 0..full {
-            let t = enc_quint([vals[i] >> bits, vals[i + 1] >> bits, vals[i + 2] >> bits]) as u32;
-            let shifts = [0u32, 3, 5];
-            let tb = [3u32, 2, 2];
-            for e in 0..3 {
-                let pack =
-                    ((vals[i] as u32) & mask) | (((t >> shifts[e]) & ((1 << tb[e]) - 1)) << bits);
-                write_bits(block, off, bits + tb[e], pack);
-                off += bits + tb[e];
-                i += 1;
-            }
-        }
-        if i != count {
-            let g = |k: usize| {
-                if i + k >= count {
-                    0
-                } else {
-                    vals[i + k] >> bits
-                }
-            };
-            let t = enc_quint([g(0), g(1), 0]) as u32;
-            let tbits = [3u32, 2];
-            let tshift = [0u32, 3];
-            let mut j = 0usize;
-            while i < count {
-                let pack = ((vals[i] as u32) & mask)
-                    | (((t >> tshift[j]) & ((1 << tbits[j]) - 1)) << bits);
-                write_bits(block, off, bits + tbits[j], pack);
-                off += bits + tbits[j];
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-
+    /// The production `encode_trit_sequence` is the exact inverse of
+    /// `decode_trit_sequence` for every supported width and element count.
     #[test]
     fn trit_sequences_round_trip_every_width_and_count() {
         let mut rng = Rng(0x1234_5678);
@@ -408,11 +425,11 @@ mod tests {
                     continue;
                 }
                 for _ in 0..64 {
-                    let vals: vec::Vec<u8> = (0..count)
+                    let vals: Vec<u8> = (0..count)
                         .map(|_| (rng.next_u32() % levels) as u8)
                         .collect();
                     let mut blk = [0u8; 16];
-                    encode_trit(&mut blk, 3, bits, &vals);
+                    encode_trit_sequence(&mut blk, 3, bits, &vals);
                     let mut out = vec![0u8; count as usize];
                     decode_trit_sequence(&blk, 3, bits, count, &mut out);
                     assert_eq!(out, vals, "trit bits={bits} count={count}");
@@ -421,6 +438,8 @@ mod tests {
         }
     }
 
+    /// The production `encode_quint_sequence` is the exact inverse of
+    /// `decode_quint_sequence` for every supported width and element count.
     #[test]
     fn quint_sequences_round_trip_every_width_and_count() {
         let mut rng = Rng(0x9E37_79B9);
@@ -431,11 +450,11 @@ mod tests {
                     continue;
                 }
                 for _ in 0..64 {
-                    let vals: vec::Vec<u8> = (0..count)
+                    let vals: Vec<u8> = (0..count)
                         .map(|_| (rng.next_u32() % levels) as u8)
                         .collect();
                     let mut blk = [0u8; 16];
-                    encode_quint(&mut blk, 3, bits, &vals);
+                    encode_quint_sequence(&mut blk, 3, bits, &vals);
                     let mut out = vec![0u8; count as usize];
                     decode_quint_sequence(&blk, 3, bits, count, &mut out);
                     assert_eq!(out, vals, "quint bits={bits} count={count}");
