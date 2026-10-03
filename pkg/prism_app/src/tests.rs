@@ -1953,3 +1953,248 @@ mod dedicated_server {
         );
     }
 }
+
+// ---- settings
+
+use crate::settings::{SettingChanged, SettingValue, Settings, SettingsLayer};
+
+/// Layer precedence: the highest present layer wins, and `SettingsLayer`'s
+/// derived `Ord` matches the documented ascending-precedence order.
+#[test]
+fn settings_resolve_highest_layer_and_order_is_precedence() {
+    assert!(SettingsLayer::EngineDefault < SettingsLayer::PlatformTier);
+    assert!(SettingsLayer::PlatformTier < SettingsLayer::User);
+    assert!(SettingsLayer::User < SettingsLayer::CommandLine);
+    assert!(SettingsLayer::CommandLine < SettingsLayer::Runtime);
+    assert_eq!(SettingsLayer::ALL.len(), 5);
+    assert_eq!(SettingsLayer::EngineDefault.precedence(), 0);
+    assert_eq!(SettingsLayer::Runtime.precedence(), 4);
+
+    let mut s = Settings::new();
+    s.set(SettingsLayer::EngineDefault, "r.shadows", 1_i64);
+    s.set(SettingsLayer::User, "r.shadows", 2_i64);
+    s.set(SettingsLayer::PlatformTier, "r.shadows", 3_i64);
+
+    // User (rank 2) outranks PlatformTier (rank 1) and EngineDefault (rank 0).
+    assert_eq!(s.get_int("r.shadows"), Some(2));
+    assert_eq!(s.resolved_layer("r.shadows"), Some(SettingsLayer::User));
+    // All three contributions are retained underneath.
+    assert_eq!(s.layers_for("r.shadows").map(|m| m.len()), Some(3));
+}
+
+/// Clearing the top layer transparently falls back to the next layer down;
+/// clearing a shadowed (lower) layer does not change the resolved value.
+#[test]
+fn settings_clear_falls_back_to_lower_layer() {
+    let mut s = Settings::new();
+    s.set(SettingsLayer::EngineDefault, "net.tickrate", 30_i64);
+    s.set(SettingsLayer::Runtime, "net.tickrate", 128_i64);
+    assert_eq!(s.get_int("net.tickrate"), Some(128));
+
+    // Clearing a lower, shadowed layer changes nothing resolved.
+    assert!(s.clear(SettingsLayer::EngineDefault, "net.tickrate").is_none());
+    assert_eq!(s.get_int("net.tickrate"), Some(128));
+
+    // Re-add the default, then clear the top layer: falls back to the default.
+    s.set(SettingsLayer::EngineDefault, "net.tickrate", 30_i64);
+    let change = s
+        .clear(SettingsLayer::Runtime, "net.tickrate")
+        .expect("clearing the top layer changes the resolved value");
+    assert_eq!(change.previous, Some(SettingValue::Int(128)));
+    assert_eq!(change.current, Some(SettingValue::Int(30)));
+    assert_eq!(s.get_int("net.tickrate"), Some(30));
+
+    // Clearing the last remaining layer makes the key absent entirely.
+    let change = s
+        .clear(SettingsLayer::EngineDefault, "net.tickrate")
+        .expect("clearing the last layer unsets the key");
+    assert_eq!(change.current, None);
+    assert!(!s.contains("net.tickrate"));
+    assert!(s.layers_for("net.tickrate").is_none());
+}
+
+/// `set` only reports a change when the *resolved* value actually moves.
+#[test]
+fn settings_set_reports_resolved_change_only() {
+    let mut s = Settings::new();
+
+    // First write of a key: unset -> value is a change.
+    let change = s
+        .set(SettingsLayer::User, "vol", 50_i64)
+        .expect("first write is a change");
+    assert_eq!(change.key, "vol");
+    assert_eq!(change.previous, None);
+    assert_eq!(change.current, Some(SettingValue::Int(50)));
+
+    // Writing a lower layer while User still overrides it: no resolved change.
+    assert!(s.set(SettingsLayer::EngineDefault, "vol", 10_i64).is_none());
+    // Rewriting the top layer with an equal value: no change.
+    assert!(s.set(SettingsLayer::User, "vol", 50_i64).is_none());
+    // Rewriting the top layer with a different value: a change.
+    assert!(s.set(SettingsLayer::User, "vol", 60_i64).is_some());
+}
+
+/// `SettingValue::parse` infers the most specific type, and the typed accessors
+/// / `From` impls round-trip.
+#[test]
+fn setting_value_parse_infers_type() {
+    assert_eq!(SettingValue::parse("true"), SettingValue::Bool(true));
+    assert_eq!(SettingValue::parse("false"), SettingValue::Bool(false));
+    assert_eq!(SettingValue::parse("42"), SettingValue::Int(42));
+    assert_eq!(SettingValue::parse("-7"), SettingValue::Int(-7));
+    assert_eq!(SettingValue::parse("3.5"), SettingValue::Float(3.5));
+    assert_eq!(SettingValue::parse("hi"), SettingValue::Str("hi".to_owned()));
+    // An empty token is not a bool/int/float, so it stays a string.
+    assert_eq!(SettingValue::parse(""), SettingValue::Str(String::new()));
+
+    assert_eq!(SettingValue::from(true).as_bool(), Some(true));
+    assert_eq!(SettingValue::from(9_i64).as_int(), Some(9));
+    assert_eq!(SettingValue::from(1.25_f64).as_float(), Some(1.25));
+    assert_eq!(SettingValue::from("s").as_str(), Some("s"));
+    assert_eq!(SettingValue::from(String::from("t")).as_str(), Some("t"));
+    // Cross-type accessors return None, not a coercion.
+    assert_eq!(SettingValue::Int(1).as_bool(), None);
+    assert_eq!(SettingValue::Bool(true).as_int(), None);
+}
+
+/// A `Float(NaN)` never equals itself, so re-setting NaN re-signals a change
+/// (documented behavior).
+#[test]
+fn settings_nan_float_resignals_change() {
+    let mut s = Settings::new();
+    assert!(s.set(SettingsLayer::User, "x", f64::NAN).is_some());
+    // Resolved value is NaN; writing NaN again counts as a change.
+    assert!(s.set(SettingsLayer::User, "x", f64::NAN).is_some());
+    // A finite value re-set to the same finite value does not re-signal.
+    s.set(SettingsLayer::User, "y", 1.0_f64);
+    assert!(s.set(SettingsLayer::User, "y", 1.0_f64).is_none());
+}
+
+/// CLI parsing: `--key=value`, `key=value`, and bare `--flag` land in the
+/// CommandLine layer with inferred types.
+#[test]
+fn settings_apply_cli_args_parses_forms() {
+    let mut s = Settings::new();
+    let changes = s.apply_cli_args([
+        "--r.shadows=2",
+        "net.tickrate=128",
+        "--vsync",
+        "--name=prism",
+    ]);
+    assert_eq!(changes.len(), 4);
+    assert_eq!(s.get_int("r.shadows"), Some(2));
+    assert_eq!(s.resolved_layer("r.shadows"), Some(SettingsLayer::CommandLine));
+    assert_eq!(s.get_int("net.tickrate"), Some(128));
+    assert_eq!(s.get_bool("vsync"), Some(true));
+    assert_eq!(s.get_str("name"), Some("prism"));
+
+    // A bare "--" with no key is ignored rather than inserting an empty key.
+    let none = s.apply_cli_args(["--"]);
+    assert!(none.is_empty());
+    assert!(!s.contains(""));
+}
+
+/// Env folding: only prefixed vars are taken, the prefix is stripped, and
+/// `_`→`.` lowercase mapping matches the cvar namespace. Env + CLI share one
+/// CommandLine layer, so a later env write overrides an earlier CLI write.
+#[test]
+fn settings_apply_env_vars_folds_into_command_line_layer() {
+    let mut s = Settings::new();
+    s.apply_cli_args(["r.shadows=1"]);
+    let changes = s.apply_env_vars(
+        [
+            ("PRISM_R_SHADOWS", "4"),
+            ("PRISM_NET_TICKRATE", "60"),
+            ("PATH", "/usr/bin"), // no prefix -> ignored
+        ],
+        "PRISM_",
+    );
+    // r.shadows changed 1 -> 4; net.tickrate newly set; PATH ignored.
+    assert_eq!(changes.len(), 2);
+    assert_eq!(s.get_int("r.shadows"), Some(4));
+    assert_eq!(s.resolved_layer("r.shadows"), Some(SettingsLayer::CommandLine));
+    assert_eq!(s.get_int("net.tickrate"), Some(60));
+    assert!(!s.contains("path"));
+}
+
+/// Resolved iteration is deterministic (ascending key order), independent of
+/// insertion order.
+#[test]
+fn settings_iter_is_deterministic() {
+    let mut a = Settings::new();
+    a.set(SettingsLayer::User, "zeta", 1_i64);
+    a.set(SettingsLayer::User, "alpha", 2_i64);
+    a.set(SettingsLayer::User, "mid", 3_i64);
+
+    let mut b = Settings::new();
+    b.set(SettingsLayer::User, "mid", 3_i64);
+    b.set(SettingsLayer::User, "zeta", 1_i64);
+    b.set(SettingsLayer::User, "alpha", 2_i64);
+
+    let keys_a: Vec<&str> = a.iter().map(|(k, _)| k).collect();
+    let keys_b: Vec<&str> = b.iter().map(|(k, _)| k).collect();
+    assert_eq!(keys_a, ["alpha", "mid", "zeta"]);
+    assert_eq!(keys_a, keys_b);
+}
+
+/// `App::insert_setting` auto-initialises the store and broadcasts a
+/// `SettingChanged` event carrying the resolved transition; a shadowed write
+/// broadcasts nothing.
+#[test]
+fn app_insert_setting_broadcasts_resolved_change() {
+    let mut app = App::new();
+
+    // Settings is opt-in: not installed until a settings helper runs.
+    assert!(app.world().get_resource::<Settings>().is_none());
+
+    let seen = Arc::new(Mutex::new(Vec::<(String, Option<i64>, Option<i64>)>::new()));
+    let seen_sys = seen.clone();
+    app.init_settings();
+    app.add_systems(
+        Update,
+        move |mut cursor: Local<EventCursor<SettingChanged>>, events: Res<Events<SettingChanged>>| {
+            for change in cursor.read(&events) {
+                seen_sys.lock().unwrap().push((
+                    change.key.clone(),
+                    change.previous.as_ref().and_then(SettingValue::as_int),
+                    change.current.as_ref().and_then(SettingValue::as_int),
+                ));
+            }
+        },
+    );
+
+    app.insert_setting(SettingsLayer::EngineDefault, "r.shadows", 1_i64);
+    app.insert_setting(SettingsLayer::Runtime, "r.shadows", 3_i64);
+    // Shadowed lower-layer write: no resolved change, no event.
+    app.insert_setting(SettingsLayer::User, "r.shadows", 2_i64);
+
+    assert_eq!(app.setting_int("r.shadows"), Some(3));
+
+    // Two frames of grace to let the reader observe buffered events.
+    app.update();
+    app.update();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        seen.as_slice(),
+        [
+            ("r.shadows".to_owned(), None, Some(1)),
+            ("r.shadows".to_owned(), Some(1), Some(3)),
+        ]
+    );
+}
+
+/// `App::apply_cli_overrides` initialises the store and the typed getters read
+/// the resolved values back.
+#[test]
+fn app_apply_cli_overrides_and_typed_getters() {
+    let mut app = App::new();
+    app.apply_cli_overrides(["--net.tickrate=128", "--vsync", "--name=prism", "--gain=0.5"]);
+
+    assert_eq!(app.setting_int("net.tickrate"), Some(128));
+    assert_eq!(app.setting_bool("vsync"), Some(true));
+    assert_eq!(app.setting_str("name"), Some("prism"));
+    assert_eq!(app.setting_float("gain"), Some(0.5));
+    // Unset key resolves to None through the App getter.
+    assert_eq!(app.setting("missing"), None);
+}

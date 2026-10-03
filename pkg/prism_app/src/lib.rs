@@ -130,6 +130,7 @@ pub mod plugin_graph;
 pub mod pipelined;
 pub mod runner;
 pub mod schedule;
+pub mod settings;
 pub mod state;
 pub mod sub_app;
 pub mod sub_app_label;
@@ -156,6 +157,7 @@ pub use schedule::{
     First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown, StateTransition, Startup,
     Update,
 };
+pub use settings::{SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer};
 #[cfg(feature = "pipelined")]
 pub use pipelined::PipelinedExecutor;
 pub use sub_app::{ExtractFn, SubApp, SubApps};
@@ -183,6 +185,9 @@ pub mod prelude {
     pub use crate::schedule::{
         First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown, StateTransition,
         Startup, Update,
+    };
+    pub use crate::settings::{
+        SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer,
     };
     #[cfg(feature = "pipelined")]
     pub use crate::pipelined::PipelinedExecutor;
