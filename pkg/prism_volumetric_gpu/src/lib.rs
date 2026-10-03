@@ -104,6 +104,9 @@ pub mod cielab;
 pub mod clamp_history;
 pub mod classify_precip;
 pub mod closest_point_obb;
+pub mod cloth_bending_project;
+pub mod cloth_mesh_volume;
+pub mod cloth_wind_force;
 pub mod cloud_shadow_modulation;
 pub mod cohen_sutherland_clip;
 pub mod collision;
@@ -305,6 +308,7 @@ pub mod quality_decision;
 pub mod quaternion_rotate;
 pub mod quickselect_u32;
 pub mod radix_sort_u32;
+pub mod raster_cluster_vis;
 pub mod raster_triangle_vis;
 pub mod ray_aabb;
 pub mod ray_capsule;
@@ -426,6 +430,7 @@ pub mod voxel_traversal;
 pub mod water_breaking_classify;
 pub mod water_caustics_intensity;
 pub mod water_coupling_forces;
+pub mod water_coupling_frame;
 pub mod water_coupling_plan;
 pub mod water_dispersion_offsets;
 pub mod water_foam_decay;
@@ -524,6 +529,11 @@ pub use cielab::{CielabQuery, CielabResult, GpuCielab};
 pub use clamp_history::{ClampHistoryQuery, GpuClampHistory};
 pub use classify_precip::{ClassifyPrecipQuery, GpuClassifyPrecip};
 pub use closest_point_obb::{ClosestPointObbQuery, ClosestPointObbResult, GpuClosestPointObb};
+pub use cloth_bending_project::{
+    ClothBendingProjectQuery, ClothBendingProjectResult, GpuClothBendingProject,
+};
+pub use cloth_mesh_volume::{ClothMeshVolumeQuery, ClothMeshVolumeResult, GpuClothMeshVolume};
+pub use cloth_wind_force::{ClothWindForceQuery, ClothWindForceResult, GpuClothWindForce};
 pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
 pub use cohen_sutherland_clip::{
     ClipSegmentQuery, ClipSegmentResult, GpuCohenSutherlandClip, OUTCODE_BOTTOM, OUTCODE_INSIDE,
@@ -821,6 +831,7 @@ pub use quality_decision::{GpuQualityDecision, QualityDecisionQuery, QualityDeci
 pub use quaternion_rotate::{GpuQuaternionRotate, QuatRotateQuery, QuatRotateResult};
 pub use quickselect_u32::{GpuQuickselect, GpuQuickselectU32, QuickselectQuery};
 pub use radix_sort_u32::{GpuRadixSort, GpuRadixSortU32};
+pub use raster_cluster_vis::{GpuRasterClusterVis, RasterClusterVisQuery, RasterClusterVisResult};
 pub use raster_triangle_vis::{
     GpuRasterTriangleVis, RasterTriangleVisQuery, RasterTriangleVisResult,
 };
@@ -1012,6 +1023,9 @@ pub use water_caustics_intensity::{
 };
 pub use water_coupling_forces::{
     GpuWaterCouplingForces, WaterCouplingForcesQuery, WaterCouplingForcesResult,
+};
+pub use water_coupling_frame::{
+    GpuWaterCouplingFrame, WaterCouplingFrameQuery, WaterCouplingFrameResult,
 };
 pub use water_coupling_plan::{
     GpuWaterCouplingPlan, WaterCouplingPlanQuery, WaterCouplingPlanResult,
