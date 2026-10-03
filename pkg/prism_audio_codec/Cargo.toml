@@ -1,0 +1,24 @@
+[package]
+name = "prism_audio_codec"
+version = "0.1.0"
+edition = "2024"
+description = "Symphonia-backed compressed-codec decoders (FLAC/Vorbis/MP3/AAC) that implement Prism's pluggable SourceDecoder trait and register into the DecoderRegistry (design sections 20 and 44.1). Asset-time / off-real-time decode only. Contains no Unreal Engine, Unity, Godot, Wwise, FMOD, Steam Audio, or Google Resonance Audio source or derived code; no AI/ML."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_audio_assets = { path = "../prism_audio_assets" }
+prism_audio_core = { path = "../prism_audio_core" }
+symphonia = { version = "0.5", default-features = false, features = [
+  "flac",
+  "mp3",
+  "aac",
+  "pcm",
+  "vorbis",
+  "isomp4",
+  "ogg",
+  "wav",
+] }
+
+[lints]
+workspace = true
