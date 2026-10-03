@@ -44,6 +44,9 @@ pub use bounding_sphere::{mesh_bounding_sphere, minimal_bounding_sphere, Boundin
 pub mod inertia;
 
 pub use inertia::{full_inertia_tensor, principal_axes, MeshInertia, PrincipalInertia};
+pub mod heightfield;
+
+pub use heightfield::{HeightField, HeightFieldRayHit};
 
 /// A handle into a [`ShapeRegistry`].
 ///
