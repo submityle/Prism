@@ -119,6 +119,22 @@ pub fn plan_reorder(keys: &[CoherenceKey], batch_shift: u32) -> ReorderPlan {
     let mut order: Vec<u32> = (0..keys.len() as u32).collect();
     order.sort_by_key(|&i| keys[i as usize].raw());
 
+    finalize_plan(keys, order, batch_shift)
+}
+
+/// Builds the batch table + stats for an already-ordered permutation.
+///
+/// Shared by [`plan_reorder`] (comparison sort) and
+/// [`super::radix::plan_reorder_radix`] (`GPU`-faithful radix sort): both must
+/// produce the *same* [`ReorderPlan`] from the same stable `order`, so the
+/// batching lives in one place. `order` must be a permutation of
+/// `0..keys.len()` and must be non-empty (callers short-circuit empty input).
+#[must_use]
+pub(super) fn finalize_plan(
+    keys: &[CoherenceKey],
+    order: Vec<u32>,
+    batch_shift: u32,
+) -> ReorderPlan {
     // Walk the sorted order grouping consecutive equal prefixes into runs.
     let mut batches: Vec<CoherentBatch> = Vec::new();
     let mut largest_batch: u32 = 0;

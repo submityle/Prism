@@ -44,9 +44,11 @@
 //!   EG 2021 (ray sorting for coherence).
 
 pub mod plan;
+pub mod radix;
 pub mod sort_key;
 
 pub use plan::{plan_reorder, CoherentBatch, ReorderPlan, ReorderStats};
+pub use radix::{plan_reorder_radix, radix_order, PASSES, RADIX, RADIX_BITS};
 pub use sort_key::{
     CoherenceKey, CoherenceKeyLayout, LayoutError, SpatialBounds, KEY_BIT_BUDGET,
     MAX_DIR_BITS_PER_AXIS, MAX_SPATIAL_BITS_PER_AXIS,
