@@ -32,6 +32,7 @@
 pub mod buffers;
 pub mod fft_plan;
 pub mod pipeline;
+pub mod render_fx_kernel;
 pub mod spectral_plan;
 pub mod surface_bindings;
 pub mod surface_mesh;
@@ -53,6 +54,10 @@ pub use fft_plan::{
 pub use pipeline::{
     extract, plan_frame, prepare, queue, PlannedDispatch, WaterGpuExtract, WaterGpuFramePlan,
     WaterGpuPrepare, WaterGpuQueue, WaterPasses,
+};
+
+pub use render_fx_kernel::{
+    dispatch_foam_advect, FOAM_DRIVE_FLOATS, FOAM_DRIVE_STRIDE, WATER_RENDER_FX_WESL,
 };
 
 pub use spectral_plan::{
