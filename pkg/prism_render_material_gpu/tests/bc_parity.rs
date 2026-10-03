@@ -2652,3 +2652,104 @@ fn astc_infill_non44_single_plane_parity_against_gpu_hardware_decode() {
         INFILL_MODES.len()
     );
 }
+
+// -------------------------------------------------------------------------
+// ASTC dual-plane single-partition LDR parity (Milestone #7).
+//
+// A dual-plane block stores two interleaved weight planes plus a 2-bit colour
+// component selector (CCS): the selected channel interpolates with plane 1,
+// the other three with plane 0. We build CEM8 QUANT_256 blocks (six raw 8-bit
+// colour integers at bits [17..65)) across a spread of legal dual-plane grid
+// shapes and all three weight ISE forms, write 2*wx*wy interleaved grid
+// weights, set the CCS just below the weight region, and confirm the CPU
+// `decode_astc_4x4_ldr` matches the Metal ASTC hardware decoder within 1 LSB.
+//
+// Each tuple is (block_mode, weights_x, weights_y, weight_levels, weight_bits);
+// weight_bits positions the CCS at `128 - weight_bits - 2`. Every mode keeps
+// color_bits = 109 - weight_bits >= 48 so CEM8 stays at QUANT_256.
+const DUAL_PLANE_MODES: [(u32, u32, u32, u32, u32); 12] = [
+    (1057, 4, 3, 2, 24),
+    (1026, 4, 2, 4, 32),
+    (1043, 4, 2, 8, 48),
+    (1806, 2, 2, 16, 32),
+    (1089, 4, 4, 2, 32),
+    (1041, 4, 2, 3, 26),
+    (1027, 4, 2, 6, 42),
+    (1105, 4, 4, 3, 52),
+    (1470, 3, 3, 5, 42),
+    (1805, 2, 2, 10, 27),
+    (1359, 2, 4, 6, 42),
+    (1485, 3, 4, 2, 24),
+];
+
+#[test]
+fn astc_dual_plane_single_partition_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC dual-plane parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC)
+    {
+        eprintln!("adapter lacks ASTC support; skipping ASTC dual-plane parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Unorm,
+    };
+    let mut rng = Rng(0x5EED_D0AB);
+    const PER_MODE: u32 = 128;
+    for (mode, wx, wy, levels, weight_bits) in DUAL_PLANE_MODES {
+        let (form, bits) = levels_to_grid_form(levels);
+        // Dual plane stores two interleaved weights per grid point.
+        let seq_count = (wx * wy * 2) as usize;
+        let ccs_pos = 128 - weight_bits - 2;
+        for n in 0..PER_MODE {
+            let mut blk = [0u8; 16];
+            astc_set_bits(&mut blk, 0, 11, mode);
+            astc_set_bits(&mut blk, 13, 4, 8); // CEM 8 (LDR direct RGB)
+
+            // Six raw 8-bit (QUANT_256) colour integers at bits [17..65).
+            for i in 0..6u32 {
+                astc_set_bits(&mut blk, 17 + i * 8, 8, rng.byte() as u32);
+            }
+
+            // 2 * wx * wy interleaved grid weights (even -> plane 0, odd ->
+            // plane 1), laid into the bit-reversed weight region.
+            let mut seq = [0u8; 64];
+            for w in seq.iter_mut().take(seq_count) {
+                *w = rand_grid_weight(&mut rng, form, bits);
+            }
+            astc_set_grid_weights(&mut blk, form, bits, &seq[..seq_count]);
+
+            // Colour component selector: cycle through all four channels so
+            // every plane-routing case is exercised.
+            let ccs = n % 4;
+            astc_set_bits(&mut blk, ccs_pos, 2, ccs);
+
+            let cpu = decode_astc_4x4_ldr(&blk).unwrap_or_else(|e| {
+                panic!(
+                    "dual-plane mode {mode} ({wx}x{wy}, {levels} levels, ccs {ccs}) block {blk:02x?} rejected: {e:?}"
+                )
+            });
+            let gpu = oracle.decode_unorm8(format, &blk);
+            for t in 0..16 {
+                for c in 0..4 {
+                    let d = (cpu[t][c] as i32 - gpu[t][c] as i32).abs();
+                    assert!(
+                        d <= 1,
+                        "ASTC dual-plane mode {mode} ({wx}x{wy}, ccs {ccs}) block={blk:02x?} texel {t} chan {c}: cpu={} gpu={} (|d|={d})",
+                        cpu[t][c],
+                        gpu[t][c]
+                    );
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC dual-plane single-partition parity: {} grid modes x {PER_MODE} blocks within 1 LSB of hardware",
+        DUAL_PLANE_MODES.len()
+    );
+}
