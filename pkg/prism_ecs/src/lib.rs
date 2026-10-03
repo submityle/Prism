@@ -54,6 +54,7 @@ pub mod event;
 pub mod query;
 pub mod resource;
 pub mod storage;
+pub mod system;
 pub mod world;
 
 /// Commonly used exports. Mirrors the ergonomics of `bevy_ecs::prelude` to keep
@@ -66,6 +67,9 @@ pub mod prelude {
     pub use crate::event::{Event, EventCursor, EventId, Events};
     pub use crate::resource::{Resource, ResourceId, Resources};
     pub use crate::query::{With, Without};
+    pub use crate::system::{
+        IntoSystem, Local, Query, Res, ResMut, System, SystemParam,
+    };
     pub use crate::world::World;
 }
 

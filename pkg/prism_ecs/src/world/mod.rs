@@ -66,6 +66,21 @@ impl World {
         &self.resources
     }
 
+    /// Mutable access to the component registry (crate-internal: used by the
+    /// system-param layer to resolve [`SystemParam`](crate::system::SystemParam)
+    /// state against the world).
+    #[inline]
+    pub(crate) fn components_mut(&mut self) -> &mut Components {
+        &mut self.components
+    }
+
+    /// Mutable access to the resource store (crate-internal: used by the
+    /// system-param layer).
+    #[inline]
+    pub(crate) fn resources_mut(&mut self) -> &mut Resources {
+        &mut self.resources
+    }
+
     /// Insert `value` as the world-global resource `R`, returning the previous
     /// value if one was present.
     #[inline]

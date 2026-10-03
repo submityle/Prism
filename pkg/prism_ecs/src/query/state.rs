@@ -97,4 +97,32 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // `matched_archetypes`, so it satisfies `D::matches`.
         unsafe { QueryIter::new(world_ptr, &self.data_state, archetypes) }
     }
+
+    /// Iterate the rows matched by this query from a raw `*mut World`.
+    ///
+    /// This is the entry point used by the scheduler's `Query` system
+    /// parameter, which only ever holds a `*mut World` (never a `&mut World`),
+    /// so that disjoint systems and params can run against the same world under
+    /// the kernel's access-conflict discipline (design doc §8.2).
+    ///
+    /// # Safety
+    /// `world` must point to a live [`World`] that stays valid for `'w`, and the
+    /// caller must guarantee that no other live borrow aliases the component
+    /// columns this query's `D`/`F` terms touch. This is upheld by the
+    /// per-system access set plus the scheduler's conflict analysis.
+    #[inline]
+    pub(crate) unsafe fn iter_from_ptr<'w, 's>(
+        &'s self,
+        world: *mut World,
+    ) -> QueryIter<'w, 's, D, F> {
+        // SAFETY: the caller guarantees `world` is live for `'w`. Forming a
+        // shared `&World` (never `&mut`) matches the kernel discipline and is
+        // all that is needed to enumerate matched archetypes.
+        let world_ref: &World = unsafe { &*world };
+        let archetypes = self.matched_archetypes(world_ref);
+        // SAFETY: every id in `archetypes` came from `matched_archetypes`, so it
+        // satisfies `D::matches`; the caller upholds non-aliasing of the fetched
+        // columns for `'w`.
+        unsafe { QueryIter::new(world, &self.data_state, archetypes) }
+    }
 }
