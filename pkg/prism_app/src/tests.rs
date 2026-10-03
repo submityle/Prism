@@ -4193,6 +4193,122 @@ mod state_depth_tests {
         );
     }
 
+    /// A sub-state gated by the *computed* [`Activity`] state (not a base
+    /// state): it exists only while `Activity` is `Playing`, activating into
+    /// `Explore`. Its [`DEPENDENCY_DEPTH`](SubStates::DEPENDENCY_DEPTH) is the
+    /// computed source's depth plus one, so it shares the computed-state depth
+    /// ordering and settles in the same frame as its source.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    enum PlayMode {
+        Explore,
+        Fight,
+    }
+    impl States for PlayMode {}
+    impl SubStates for PlayMode {
+        type SourceStates = Activity;
+        const DEPENDENCY_DEPTH: usize = <Activity as ComputedStates>::DEPENDENCY_DEPTH + 1;
+        fn should_exist(source: &Activity) -> Option<Self> {
+            matches!(source, Activity::Playing).then_some(PlayMode::Explore)
+        }
+    }
+
+    fn log_playmode_edges(app: &mut App, log: &Log) {
+        for (value, enter, exit) in [
+            (PlayMode::Explore, "enter:explore", "exit:explore"),
+            (PlayMode::Fight, "enter:fight", "exit:fight"),
+        ] {
+            let l = log.clone();
+            app.add_systems(OnEnter(value), move || l.lock().unwrap().push(enter));
+            let l = log.clone();
+            app.add_systems(OnExit(value), move || l.lock().unwrap().push(exit));
+        }
+    }
+
+    /// A sub-state whose parent is a computed state settles in a single frame:
+    /// when the base state moves, the depth-1 computed source ([`Activity`]) and
+    /// the depth-2 sub-state ([`PlayMode`]) both resolve within the same
+    /// [`StateTransition`], with the computed edges firing before the sub-state
+    /// edges. Without the shared [`ComputeDepth`] ordering the sub-state would
+    /// read a stale `Activity` and lag one frame. The sub-state is registered
+    /// *before* its computed source to prove only the depth edges fix the order.
+    #[test]
+    fn sub_state_on_computed_source_settles_in_one_frame() {
+        let log = log();
+        let mut app = App::new();
+        app.insert_state(AppState::Menu)
+            .add_sub_state::<PlayMode>()
+            .add_computed_state::<Activity>();
+        log_activity_edges(&mut app, &log);
+        log_playmode_edges(&mut app, &log);
+
+        // Frame 1: Menu. Neither the computed source nor the sub-state exists.
+        app.update();
+        assert!(
+            app.world().get_resource::<State<Activity>>().is_none(),
+            "Activity must not exist in Menu"
+        );
+        assert!(
+            app.world().get_resource::<State<PlayMode>>().is_none(),
+            "PlayMode must not exist while its computed parent is absent"
+        );
+        assert!(drain(&log).is_empty(), "no edges while in Menu");
+
+        // Menu -> InGame: Activity becomes Playing AND the PlayMode sub-state
+        // activates into Explore in the SAME frame, computed edge first.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::InGame);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource::<State<Activity>>()
+                .map(|s| *s.get()),
+            Some(Activity::Playing),
+        );
+        assert_eq!(
+            app.world()
+                .get_resource::<State<PlayMode>>()
+                .map(|s| *s.get()),
+            Some(PlayMode::Explore),
+            "the sub-state must activate the same frame its computed parent appears"
+        );
+        assert_eq!(drain(&log), vec!["enter:playing", "enter:explore"]);
+
+        // While active, gameplay drives the sub-state freely via NextState.
+        app.world_mut()
+            .resource_mut::<NextState<PlayMode>>()
+            .set(PlayMode::Fight);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource::<State<PlayMode>>()
+                .map(|s| *s.get()),
+            Some(PlayMode::Fight),
+        );
+        assert_eq!(drain(&log), vec!["exit:explore", "enter:fight"]);
+
+        // InGame -> Paused: Activity -> Halted, so the sub-state deactivates,
+        // again in one frame. Computed exit/enter fire before the sub-state exit.
+        app.world_mut()
+            .resource_mut::<NextState<AppState>>()
+            .set(AppState::Paused);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get_resource::<State<Activity>>()
+                .map(|s| *s.get()),
+            Some(Activity::Halted),
+        );
+        assert!(
+            app.world().get_resource::<State<PlayMode>>().is_none(),
+            "PlayMode must deactivate the same frame Activity leaves Playing"
+        );
+        assert_eq!(
+            drain(&log),
+            vec!["exit:playing", "enter:halted", "exit:fight"]
+        );
+    }
+
     /// A two-mode base state with a nested sub-machine scoped to `InGame`.
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
     enum Shell {

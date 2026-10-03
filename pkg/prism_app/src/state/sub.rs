@@ -48,6 +48,19 @@
 //! ignored while the sub-state is already live (gameplay drives it through
 //! [`NextState<S>`]).
 //!
+//! # Chaining on a computed or sub source
+//!
+//! A sub-state's parent is any [`States`] value, so it may be gated by a
+//! [computed state](crate::state::computed) or by another sub-state rather than
+//! a base state. Because every state settles inside the one
+//! [`StateTransitionSet::Compute`] group, such a sub-state must apply *after*
+//! its source has recomputed this frame — otherwise it reads a stale parent and
+//! lags a frame behind. [`App::add_sub_state`] reuses the same
+//! [`ComputeDepth`] ordering as computed states:
+//! declare [`DEPENDENCY_DEPTH`](SubStates::DEPENDENCY_DEPTH) as the source's
+//! depth plus one and the apply is pinned after every shallower depth, so the
+//! whole chain (base → computed → sub, or sub → sub) settles in a single frame.
+//!
 //! [`NextState<S>`]: prism_ecs::schedule::NextState
 
 use core::any::TypeId;
@@ -58,6 +71,7 @@ use prism_ecs::world::World;
 use crate::app::App;
 use crate::schedule::StateTransition;
 use crate::state::StateTransitionSet;
+use crate::state::computed::ComputeDepth;
 
 /// A [`States`] value that only exists while a parent mode is active.
 ///
@@ -68,6 +82,21 @@ use crate::state::StateTransitionSet;
 pub trait SubStates: States {
     /// The parent state whose value gates this sub-state's existence.
     type SourceStates: States;
+
+    /// Position of this sub-state in a derivation chain, used to order
+    /// [`apply_sub_state`] within [`StateTransitionSet::Compute`] relative to
+    /// any computed/sub source it reads (see the [module docs](crate::state::sub#chaining-on-a-computed-or-sub-source)).
+    ///
+    /// A sub-state gated by a base [`States`] value has depth `1` (the default):
+    /// its parent is already settled by [`StateTransitionSet::Apply`]. A
+    /// sub-state gated by a *computed* state or *another* sub-state at depth `n`
+    /// must set this to `n + 1` so it runs after the source has recomputed this
+    /// frame instead of reading a stale value and lagging a frame; compute it
+    /// from the source — `<Source as ComputedStates>::DEPENDENCY_DEPTH + 1` (or
+    /// the `SubStates` equivalent) — rather than hard-coding a literal. A depth
+    /// of `0` is clamped to `1`, since a sub-state always settles at least one
+    /// tier after [`Apply`](StateTransitionSet::Apply).
+    const DEPENDENCY_DEPTH: usize = 1;
 
     /// Whether the sub-state should exist for the given parent `source`.
     ///
@@ -146,20 +175,37 @@ impl App {
     /// [`StateTransition`] phase in
     /// [`StateTransitionSet::Compute`], ordered after
     /// [`StateTransitionSet::Apply`] so it reads the frame's settled parent
-    /// mode. The parent state must itself be registered (e.g. with
-    /// [`insert_state`](App::insert_state)).
+    /// mode. The parent state must itself be registered — a base state via
+    /// [`insert_state`](App::insert_state), or a computed/sub parent via its own
+    /// `add_computed_state`/`add_sub_state`.
+    ///
+    /// When the parent is itself a computed state or another sub-state, the
+    /// apply is additionally placed in the [`ComputeDepth`] sub-tier for `S`'s
+    /// [`DEPENDENCY_DEPTH`](SubStates::DEPENDENCY_DEPTH) and ordered after the
+    /// previous depth. This shares one depth ordering with computed states, so a
+    /// sub-state gated by a depth-`n` source settles in the *same* frame as its
+    /// source rather than lagging. Registration order between the source and the
+    /// sub-state does not matter; the depth edges fix the order.
     ///
     /// Idempotent: wiring and the queue install happen only once per `S`, so a
     /// repeated call never clobbers an in-flight queued transition.
     pub fn add_sub_state<S: SubStates>(&mut self) -> &mut Self {
         if self.initialized_states.insert(TypeId::of::<NextState<S>>()) {
             self.insert_resource(NextState::<S>(None));
-            self.add_systems(
-                StateTransition,
-                apply_sub_state::<S>
-                    .in_set(StateTransitionSet::Compute)
-                    .after(StateTransitionSet::Apply),
-            );
+            // Depth 0 is meaningless (a sub-state always settles at least one
+            // tier after `Apply`), so clamp it up to 1.
+            let depth = S::DEPENDENCY_DEPTH.max(1);
+            let mut config = apply_sub_state::<S>
+                .in_set(StateTransitionSet::Compute)
+                .in_set(ComputeDepth(depth))
+                .after(StateTransitionSet::Apply);
+            if depth > 1 {
+                // Run strictly after the previous depth's recomputations so a
+                // computed/sub parent is already settled this frame. The edge is
+                // transitive, so this also follows every shallower depth.
+                config = config.after(ComputeDepth(depth - 1));
+            }
+            self.add_systems(StateTransition, config);
         }
         self
     }
