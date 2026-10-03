@@ -1,0 +1,16 @@
+[package]
+name = "prism_virtual_texture_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu compute backend for Prism's sparse/runtime virtual texturing. A real-device page-table indirection-lookup twin of the prism_render_architecture texture_streaming CPU golden: a shader binary-searches the flat GpuPageTable words with the exact same unsigned lexicographic compare sequence, so the resolved physical slot per sampled page coordinate matches the golden GpuPageTable::lookup bit-for-bit. Integer-only, no floating point, exact-equality parity. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_architecture = { path = "../prism_render_architecture" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+
+[lints]
+workspace = true
