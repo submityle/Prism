@@ -900,11 +900,86 @@ pub fn encode_astc_single_partition_6x5_ldr_mode369(texels: &[[u8; 4]; 30]) -> [
     w.into_block()
 }
 
+/// Encode fifty LDR RGBA texels (10 wide x 5 tall) into one 16-byte ASTC block
+/// using single-partition block **mode 373**: a full 10x5 weight grid (no
+/// bilinear infill) with a QUANT_3 trit weight range (one trit, zero low bits
+/// -> three interpolation levels, fifty trits BISE-packed into 80 weight bits)
+/// paired with **QUANT_32 bit colour** (`color_bits = 111 - 80 = 31`, six 5-bit
+/// bit-only endpoint integers) and CEM 8 (RGB direct, alpha forced to 255).
+///
+/// This is the first encoder in the *fourth* recipe family: it fuses the
+/// QUANT_32 bit-colour endpoint path of modes 706/102/357's siblings (quantise
+/// each channel to one of 32 levels, reconstruct the decoded endpoints, and
+/// pre-swap so the CEM-8 blue-contraction path is bypassed) with the trit
+/// weight stream of mode 369/276 (three interpolation levels packed as a trit
+/// BISE sequence and mirrored into the top of the block). The 10x5 weight grid
+/// equals the footprint, so there is no infill -- weight `t` maps 1:1 to texel
+/// `t` in row-major order (`texel = y*10 + x`). Three weight levels give a
+/// middle grey over 32-level endpoints, the richest colour budget 10x5 admits
+/// alongside a trit weight stream. Reuses the const-generic endpoint/weight
+/// primitives (`N = 50`).
+///
+/// CEM 8 carries no alpha, so the decoded block has alpha 255 for every texel
+/// and the input alpha channel is ignored.
+#[must_use]
+pub fn encode_astc_single_partition_10x5_ldr_mode373(texels: &[[u8; 4]; 50]) -> [u8; 16] {
+    const BLOCK_MODE: u32 = 373;
+    const CEM_RGB_DIRECT: u32 = 8;
+    const WEIGHT_LEVELS: u32 = 3; // QUANT_3: one trit, zero low bits
+    const WEIGHT_LOW_BITS: u32 = 0;
+    const COLOR_LEVEL: usize = 7; // QUANT_32 (5-bit, bit-only)
+    const COLOR_BITS: u32 = 5;
+
+    // Fit the principal-axis RGB endpoints, then quantise each channel into the
+    // QUANT_32 packed representation (bit-colour path, as in mode 706/102/357).
+    let (e0_raw, e1_raw) = endpoint_fit::fit_rgb_endpoints(texels);
+    let mut p0: [u8; 3] =
+        core::array::from_fn(|c| color_quant::quantize_color_channel(COLOR_LEVEL, e0_raw[c]));
+    let mut p1: [u8; 3] =
+        core::array::from_fn(|c| color_quant::quantize_color_channel(COLOR_LEVEL, e1_raw[c]));
+
+    // Reconstruct the decoded endpoints the hardware interpolates between.
+    let unq = |p: [u8; 3]| -> [u8; 3] {
+        core::array::from_fn(|c| super::color_unquant::unquant_color(COLOR_LEVEL, p[c]))
+    };
+    let mut d0 = unq(p0);
+    let mut d1 = unq(p1);
+
+    // CEM 8 applies blue-contraction + endpoint swap when `hadd(e0) > hadd(e1)`
+    // on the *decoded* colours. Pre-swap the packed endpoints so the decoder
+    // interpolates d0..d1 directly; weights are fitted after the swap.
+    let hadd = |c: [u8; 3]| u32::from(c[0]) + u32::from(c[1]) + u32::from(c[2]);
+    if hadd(d0) > hadd(d1) {
+        core::mem::swap(&mut p0, &mut p1);
+        core::mem::swap(&mut d0, &mut d1);
+    }
+
+    // Fifty trit weights against the *decoded* endpoints (no infill, full grid).
+    let raw = weight_fit::quantize_weights_ise(texels, d0, d1, WEIGHT_LEVELS);
+
+    let mut w = bits::BlockWriter::new();
+    w.write_bits(0, 11, BLOCK_MODE);
+    w.write_bits(13, 4, CEM_RGB_DIRECT);
+    // Six QUANT_32 colour integers (5-bit bit-only) at block bit 17, LSB-first,
+    // in the decoder's read order [e0.r, e1.r, e0.g, e1.g, e0.b, e1.b].
+    let packed = [p0[0], p1[0], p0[1], p1[1], p0[2], p1[2]];
+    for (i, &v) in packed.iter().enumerate() {
+        w.write_bits(17 + i as u32 * COLOR_BITS, COLOR_BITS, u32::from(v));
+    }
+    // Encode the fifty trit weights LSB-first from bit 0, then mirror the
+    // stream into the top of the block (bit p -> 127-p).
+    let mut scratch = [0u8; 16];
+    super::trit_quint::encode_trit_sequence(&mut scratch, 0, WEIGHT_LOW_BITS, &raw);
+    w.mirror_weight_stream(&scratch);
+    w.into_block()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
     use super::super::decode_astc_ldr;
     use super::encode_astc_single_partition_10x5_ldr;
+    use super::encode_astc_single_partition_10x5_ldr_mode373;
     use super::encode_astc_single_partition_10x6_ldr;
     use super::encode_astc_single_partition_4x4_ldr;
     use super::encode_astc_single_partition_4x4_ldr_q192;
@@ -1842,6 +1917,69 @@ mod tests {
         assert!(
             max_rgb_err_30(&src, &dec) <= 8,
             "6x5 mode369 three-level block must resolve the midpoint tightly"
+        );
+    }
+
+    #[test]
+    fn ten_by_five_mode373_constant_block_round_trips_within_quant32() {
+        // Mode 373 uses QUANT_32 (5-bit) bit colour, so a constant block
+        // reconstructs within the QUANT_32 quantisation budget (<= 5 LSB).
+        let src = [[41u8, 173, 98, 255]; 50];
+        let blk = encode_astc_single_partition_10x5_ldr_mode373(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 10, 5).expect("decode 10x5 m373 constant");
+        assert_eq!(count, 50, "10x5 footprint must decode 50 texels");
+        let dec: [[u8; 4]; 50] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_50(&src, &dec) <= 5,
+            "10x5 mode373 constant block must round-trip within the QUANT_32 budget"
+        );
+        for d in &dec {
+            assert_eq!(d[3], 255, "CEM 8 forces alpha 255");
+        }
+    }
+
+    #[test]
+    fn ten_by_five_mode373_two_colour_endpoints_within_quant32() {
+        // A hard split: every texel sits on one of the two endpoints, reached
+        // exactly by the trit weight extremes (0 / max), so the only error is
+        // the QUANT_32 endpoint quantisation (<= 5 LSB).
+        let a = [15u8, 35, 55, 255];
+        let b = [210u8, 190, 170, 255];
+        let src: [[u8; 4]; 50] = core::array::from_fn(|t| if t % 2 == 0 { a } else { b });
+        let blk = encode_astc_single_partition_10x5_ldr_mode373(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 10, 5).expect("decode 10x5 m373 two-colour");
+        assert_eq!(count, 50);
+        let dec: [[u8; 4]; 50] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_50(&src, &dec) <= 5,
+            "10x5 mode373 two-colour block must hit both endpoints within QUANT_32"
+        );
+    }
+
+    #[test]
+    fn ten_by_five_mode373_thirds_midpoint_within_tolerance() {
+        // Three trit weight levels add a middle grey, so a low/mid/high split
+        // reconstructs within the combined QUANT_32 endpoint and trit-midpoint
+        // budget (tighter than any two-level mode on the same footprint).
+        let a = [10u8, 20, 30, 255];
+        let b = [220u8, 210, 200, 255];
+        let src: [[u8; 4]; 50] = core::array::from_fn(|t| match t % 3 {
+            0 => a,
+            1 => [
+                ((a[0] as u16 + b[0] as u16) / 2) as u8,
+                ((a[1] as u16 + b[1] as u16) / 2) as u8,
+                ((a[2] as u16 + b[2] as u16) / 2) as u8,
+                255,
+            ],
+            _ => b,
+        });
+        let blk = encode_astc_single_partition_10x5_ldr_mode373(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 10, 5).expect("decode 10x5 m373 thirds");
+        assert_eq!(count, 50);
+        let dec: [[u8; 4]; 50] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_50(&src, &dec) <= 16,
+            "10x5 mode373 three-level block must resolve the midpoint within QUANT_32 + trit budget"
         );
     }
 }
