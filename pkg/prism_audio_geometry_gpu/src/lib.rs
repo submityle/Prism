@@ -67,6 +67,7 @@ mod context;
 mod direct;
 mod layout;
 mod params;
+mod propagation;
 mod query;
 mod reflection;
 mod scene_upload;
@@ -74,4 +75,5 @@ mod trace;
 
 pub use backend::{GpuGeometryBackend, ResolvedQuery};
 pub use context::GpuContext;
+pub use propagation::GpuPropagationBackend;
 pub use scene_upload::GpuScene;
