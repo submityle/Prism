@@ -49,6 +49,7 @@ pub mod pipeline;
 pub mod render_fx_kernel;
 pub mod spectral_plan;
 pub mod spectrum_assemble_kernel;
+pub mod spectrum_evolve_kernel;
 pub mod spectrum_ifft_kernel;
 pub mod surface_bindings;
 pub mod surface_mesh;
@@ -99,6 +100,11 @@ pub use spectral_plan::{
 pub use spectrum_assemble_kernel::{
     dispatch_spectrum_assemble, AssembleFields, AssembleParams, ASSEMBLE_MAX_CASCADES,
     ASSEMBLE_OUT_FLOATS, CASCADE_TEXEL_FLOATS, WATER_SPECTRUM_ASSEMBLE_WESL,
+};
+
+pub use spectrum_evolve_kernel::{
+    dispatch_spectrum_evolve, EvolveParams, SpectrumEvolveBuffers, EVOLVE_COMPLEX_FLOATS,
+    EVOLVE_PACKED_FIELDS, WATER_SPECTRUM_EVOLVE_WESL,
 };
 
 pub use spectrum_ifft_kernel::{

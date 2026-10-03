@@ -1,0 +1,19 @@
+[package]
+name = "prism_shader"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism shader composition kernel: the backend-agnostic layer that turns authored WGSL/WESL modules plus a permutation of shader-defs into one final, deterministic source string ready for prism_render_driver. M0 delivers typed shader-defs (bool/i32/u32), an order-independent stable permutation id, a classic C-style preprocessor (#ifdef/#ifndef/#if/#elif/#else/#endif with a full recursive-descent #if expression evaluator over defs), module import resolution (#import/#include) with deterministic topological ordering, dedup, and cycle detection, and a ShaderComposer registry that composes a root module + defs into final source. Pure, deterministic, no_std + alloc, no unsafe; borrows the shape of mature shader-preprocessor layers (naga_oil-style) without copying their source."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[features]
+default = ["std"]
+# `std` is reserved for host-side tooling; the M0 defs, permutation id,
+# preprocessor, expression evaluator, and composer are fully `no_std + alloc`.
+std = []
+
+[lints]
+workspace = true

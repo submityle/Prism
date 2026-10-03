@@ -27,6 +27,7 @@ members = [
   "pkg/prism_asset",
   "pkg/prism_render_driver",
   "pkg/prism_input",
+  "pkg/prism_shader",
   "pkg/prism_window",
   # All of Bevy's official crates are within the `crates` folder!
   "crates/*",
@@ -94,6 +95,8 @@ members = [
   "pkg/prism_audio_procedural",
   # Prism next-generation audio engine asset banks, streaming, codecs and dialogue/localization.
   "pkg/prism_audio_assets",
+  # Prism next-generation audio engine Symphonia-backed compressed codecs (FLAC/Vorbis/MP3/AAC) implementing the pluggable SourceDecoder (design sections 20 and 44.1); asset-time decode only.
+  "pkg/prism_audio_codec",
   # Prism next-generation audio engine real-time communication (uplink DSP/jitter buffer/PLC/positional voice).
   "pkg/prism_audio_comm",
   # Prism next-generation audio engine expressive control and MIDI 2.0 / MPE.
