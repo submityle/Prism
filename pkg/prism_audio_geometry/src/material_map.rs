@@ -1,12 +1,12 @@
 //! Per-triangle acoustic-material assignment.
 //!
-//! A [`MaterialTable`] maps each triangle of a scene mesh to an
-//! [`AcousticMaterial`](prism_audio_spatial::propagation::AcousticMaterial)
-//! through a small palette: a list of distinct materials plus one palette index
-//! per triangle. This keeps a large mesh that reuses a handful of surface types
-//! compact while still letting every triangle carry its own acoustics. Any
-//! triangle without an explicit assignment, and any out-of-range index, resolve
-//! to a caller-chosen default, so the table never leaves an acoustic hole.
+//! A [`MaterialTable`] maps each triangle of a scene mesh to a
+//! [`BandedAcousticMaterial`] through a small palette: a list of distinct
+//! materials plus one palette index per triangle. This keeps a large mesh that
+//! reuses a handful of surface types compact while still letting every triangle
+//! carry its own per-band acoustics. Any triangle without an explicit
+//! assignment, and any out-of-range index, resolve to a caller-chosen default,
+//! so the table never leaves an acoustic hole.
 //!
 //! # Provenance
 //!
@@ -16,23 +16,26 @@
 //! # Relationship
 //!
 //! Held by [`crate::scene::AcousticScene`] and read by every path builder to
-//! fetch the [`AcousticMaterial`](prism_audio_spatial::propagation::AcousticMaterial)
-//! governing a ray hit.
+//! fetch the [`BandedAcousticMaterial`] governing a ray hit. A legacy scalar
+//! [`AcousticMaterial`] is promoted to a frequency-flat band material through
+//! [`MaterialTable::uniform_scalar`] and
+//! [`BandedAcousticMaterial::from_scalar`].
 
 use alloc::vec;
 use alloc::vec::Vec;
 
+use prism_audio_spatial::material_spectrum::BandedAcousticMaterial;
 use prism_audio_spatial::propagation::AcousticMaterial;
 
 /// Maps triangle indices to acoustic materials via a shared palette.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize, serde::Deserialize))]
 pub struct MaterialTable {
-    palette: Vec<AcousticMaterial>,
+    palette: Vec<BandedAcousticMaterial>,
     /// One palette index per triangle. Entries past `assignments.len()` or past
     /// the palette resolve to `default`.
     assignments: Vec<u32>,
-    default: AcousticMaterial,
+    default: BandedAcousticMaterial,
 }
 
 impl MaterialTable {
@@ -40,7 +43,7 @@ impl MaterialTable {
     /// explicit assignment is added. The default is seeded as palette slot 0.
     #[inline]
     #[must_use]
-    pub fn uniform(default: AcousticMaterial) -> Self {
+    pub fn uniform(default: BandedAcousticMaterial) -> Self {
         Self {
             palette: vec![default],
             assignments: Vec::new(),
@@ -48,14 +51,27 @@ impl MaterialTable {
         }
     }
 
+    /// Builds a uniform table from a legacy scalar [`AcousticMaterial`],
+    /// promoting it to a frequency-flat [`BandedAcousticMaterial`] via
+    /// [`BandedAcousticMaterial::from_scalar`].
+    ///
+    /// This is the bridge for callers that still describe surfaces with a single
+    /// broadband transmission loss and absorption rather than a per-band
+    /// spectrum.
+    #[inline]
+    #[must_use]
+    pub fn uniform_scalar(default: AcousticMaterial) -> Self {
+        Self::uniform(BandedAcousticMaterial::from_scalar(&default))
+    }
+
     /// Builds a table from an explicit palette, a per-triangle index list, and
     /// a fallback material used for unassigned or out-of-range triangles.
     #[inline]
     #[must_use]
     pub fn from_palette(
-        palette: Vec<AcousticMaterial>,
+        palette: Vec<BandedAcousticMaterial>,
         assignments: Vec<u32>,
-        default: AcousticMaterial,
+        default: BandedAcousticMaterial,
     ) -> Self {
         Self {
             palette,
@@ -67,7 +83,7 @@ impl MaterialTable {
     /// Interns `material` into the palette (reusing an identical existing slot)
     /// and returns its palette index.
     #[must_use]
-    pub fn intern(&mut self, material: AcousticMaterial) -> u32 {
+    pub fn intern(&mut self, material: BandedAcousticMaterial) -> u32 {
         for (slot, existing) in self.palette.iter().enumerate() {
             if *existing == material {
                 return slot as u32;
@@ -80,7 +96,7 @@ impl MaterialTable {
 
     /// Assigns `material` to `triangle`, growing the assignment list with the
     /// default palette slot (0) for any triangles skipped before it.
-    pub fn assign(&mut self, triangle: usize, material: AcousticMaterial) {
+    pub fn assign(&mut self, triangle: usize, material: BandedAcousticMaterial) {
         let slot = self.intern(material);
         if triangle >= self.assignments.len() {
             self.assignments.resize(triangle + 1, 0);
@@ -92,7 +108,7 @@ impl MaterialTable {
     /// default when the triangle is unassigned or its palette index is stale.
     #[inline]
     #[must_use]
-    pub fn material(&self, triangle: usize) -> AcousticMaterial {
+    pub fn material(&self, triangle: usize) -> BandedAcousticMaterial {
         match self.assignments.get(triangle) {
             Some(&slot) => self
                 .palette
@@ -106,7 +122,7 @@ impl MaterialTable {
     /// The fallback material used for unassigned or out-of-range triangles.
     #[inline]
     #[must_use]
-    pub fn default_material(&self) -> AcousticMaterial {
+    pub fn default_material(&self) -> BandedAcousticMaterial {
         self.default
     }
 
@@ -120,10 +136,10 @@ impl MaterialTable {
 
 impl Default for MaterialTable {
     /// A table whose every triangle resolves to
-    /// [`AcousticMaterial::OPEN`](prism_audio_spatial::propagation::AcousticMaterial::OPEN).
+    /// [`BandedAcousticMaterial::OPEN`].
     #[inline]
     fn default() -> Self {
-        Self::uniform(AcousticMaterial::OPEN)
+        Self::uniform(BandedAcousticMaterial::OPEN)
     }
 }
 
@@ -131,23 +147,35 @@ impl Default for MaterialTable {
 mod tests {
     use super::MaterialTable;
     use alloc::vec;
+    use prism_audio_spatial::material_spectrum::BandedAcousticMaterial;
     use prism_audio_spatial::propagation::AcousticMaterial;
+
+    fn wall(transmission_loss_db: f32, absorption: f32) -> BandedAcousticMaterial {
+        BandedAcousticMaterial::from_scalar(&AcousticMaterial::new(transmission_loss_db, absorption))
+    }
 
     #[test]
     fn uniform_resolves_everywhere() {
-        let m = AcousticMaterial::new(20.0, 0.5);
+        let m = wall(20.0, 0.5);
         let table = MaterialTable::uniform(m);
         assert_eq!(table.material(0), m);
         assert_eq!(table.material(10_000), m);
     }
 
     #[test]
+    fn uniform_scalar_promotes_to_flat_band_material() {
+        let scalar = AcousticMaterial::new(20.0, 0.5);
+        let table = MaterialTable::uniform_scalar(scalar);
+        assert_eq!(table.material(0), BandedAcousticMaterial::from_scalar(&scalar));
+    }
+
+    #[test]
     fn assign_overrides_single_triangle() {
-        let base = AcousticMaterial::OPEN;
-        let wall = AcousticMaterial::new(30.0, 0.8);
+        let base = BandedAcousticMaterial::OPEN;
+        let brick = wall(30.0, 0.8);
         let mut table = MaterialTable::uniform(base);
-        table.assign(5, wall);
-        assert_eq!(table.material(5), wall);
+        table.assign(5, brick);
+        assert_eq!(table.material(5), brick);
         // Triangles skipped before index 5 keep palette slot 0 (the default).
         assert_eq!(table.material(0), base);
         // Out-of-range still falls back.
@@ -156,9 +184,9 @@ mod tests {
 
     #[test]
     fn intern_deduplicates() {
-        let mut table = MaterialTable::uniform(AcousticMaterial::OPEN);
-        let a = table.intern(AcousticMaterial::new(12.0, 0.3));
-        let b = table.intern(AcousticMaterial::new(12.0, 0.3));
+        let mut table = MaterialTable::uniform(BandedAcousticMaterial::OPEN);
+        let a = table.intern(wall(12.0, 0.3));
+        let b = table.intern(wall(12.0, 0.3));
         assert_eq!(a, b);
         // OPEN(slot 0) + the one distinct material.
         assert_eq!(table.palette_len(), 2);
@@ -166,10 +194,10 @@ mod tests {
 
     #[test]
     fn from_palette_resolves_and_falls_back() {
-        let open = AcousticMaterial::OPEN;
-        let wall = AcousticMaterial::new(25.0, 0.6);
-        let table = MaterialTable::from_palette(vec![open, wall], vec![1, 0, 9], open);
-        assert_eq!(table.material(0), wall);
+        let open = BandedAcousticMaterial::OPEN;
+        let brick = wall(25.0, 0.6);
+        let table = MaterialTable::from_palette(vec![open, brick], vec![1, 0, 9], open);
+        assert_eq!(table.material(0), brick);
         assert_eq!(table.material(1), open);
         // Stale palette index 9 -> default.
         assert_eq!(table.material(2), open);

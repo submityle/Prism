@@ -33,10 +33,9 @@ use prism_audio_core::math::Sample;
 use prism_audio_spatial::BandGains;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
+use prism_audio_spatial::material_spectrum::BandedAcousticMaterial;
 use prism_audio_spatial::occlusion::OcclusionFactors;
-use prism_audio_spatial::propagation::{
-    AcousticMaterial, PathKind, PropagationPath, FULL_BAND_CUTOFF_HZ,
-};
+use prism_audio_spatial::propagation::{PathKind, PropagationPath, FULL_BAND_CUTOFF_HZ};
 
 use crate::config::GeometricConfig;
 use crate::scene::AcousticScene;
@@ -73,18 +72,21 @@ pub fn resolve_direct(
     // Walk every partition between listener and emitter, folding in each
     // transmission gain. An empty scene (or a clear line) leaves the product at
     // unity.
-    let mut transmitted = 1.0_f32;
+    let mut transmitted = BandGains::UNITY;
     let mut crossings = 0_u32;
     scene.march_segment(
         listener.position,
         emitter.position,
         config.surface_epsilon_m,
         |hit| {
-            transmitted *= hit.material.transmission_gain();
+            // Series transmission through the partition is the per-band product
+            // of the surviving fractions, so a window that is dull at high
+            // frequencies darkens the arrival instead of just lowering a scalar.
+            transmitted = transmitted.combine(hit.material.transmission());
             crossings += 1;
-            // Stop once the running product is already below the floor: nothing
-            // beyond can make it audible again.
-            transmitted > config.min_gain
+            // Stop once the surviving broadband energy is already below the
+            // floor: nothing beyond can make it audible again.
+            transmitted.broadband_rms() > config.min_gain
         },
     );
 
@@ -105,19 +107,25 @@ pub fn resolve_direct(
         };
     }
 
-    // Blocked: the surviving fraction is the transmitted product. Both the
-    // direct and reverberant blocking scale with how much was stopped.
-    let blocked = (1.0 - transmitted).clamp(0.0, 1.0);
+    // Blocked: the surviving fraction is the transmitted spectrum. Both the
+    // direct and reverberant blocking scale with how much broadband energy was
+    // stopped, while the arrival keeps the per-band colour of the partition.
+    let survived = transmitted.broadband_rms();
+    let blocked = (1.0 - survived).clamp(0.0, 1.0);
     let occlusion = OcclusionFactors::new(blocked, blocked);
-    let audible = config.transmission_enabled && transmitted > config.min_gain;
+    let audible = config.transmission_enabled && survived > config.min_gain;
+    // Factor the surviving spectrum into a flat broadband gain and a relative
+    // colour; `effective_bands` on the path multiplies them back into the true
+    // per-band transmission the voice renders.
+    let (peak_gain, bands) = transmitted.split_peak();
 
     DirectResult {
         path: PropagationPath {
             kind: PathKind::Transmission,
             delay_seconds,
-            gain: if audible { transmitted } else { 0.0 },
+            gain: if audible { peak_gain } else { 0.0 },
             cutoff_hz: FULL_BAND_CUTOFF_HZ,
-            bands: BandGains::UNITY,
+            bands,
             direction: local.direction,
         },
         occlusion,
@@ -126,18 +134,24 @@ pub fn resolve_direct(
     }
 }
 
-/// The linear transmission gain accumulated by crossing `materials` in order.
+/// The per-band transmission spectrum accumulated by crossing `materials` in
+/// order.
 ///
 /// A small helper mirroring the per-surface fold used by [`resolve_direct`],
 /// exposed for callers that already hold the partition list (for example a
-/// reflection sub-segment that passes through a window).
+/// reflection sub-segment that passes through a window). Each surface multiplies
+/// the running spectrum band-by-band via [`BandGains::combine`], so the result
+/// preserves the frequency colour of the whole chain rather than collapsing it
+/// to one number. An empty list leaves the spectrum at [`BandGains::UNITY`].
 #[must_use]
-pub fn transmission_product(materials: impl IntoIterator<Item = AcousticMaterial>) -> Sample {
-    let mut product = 1.0_f32;
+pub fn transmission_product(
+    materials: impl IntoIterator<Item = BandedAcousticMaterial>,
+) -> BandGains {
+    let mut product = BandGains::UNITY;
     for material in materials {
-        product *= material.transmission_gain();
+        product = product.combine(material.transmission());
     }
-    product.clamp(0.0, 1.0)
+    product
 }
 
 #[cfg(test)]
@@ -146,6 +160,7 @@ mod tests {
     use alloc::vec;
     use bevy_math::Vec3;
     use prism_audio_spatial::geometry::{Emitter, Listener};
+    use prism_audio_spatial::material_spectrum::BandedAcousticMaterial;
     use prism_audio_spatial::propagation::{AcousticMaterial, PathKind};
 
     use crate::config::GeometricConfig;
@@ -160,7 +175,7 @@ mod tests {
             Vec3::new(0.0, -2.0, 2.0),
         ];
         let indices = vec![[0, 1, 2], [0, 2, 3]];
-        AcousticScene::new(vertices, indices, MaterialTable::uniform(material)).unwrap()
+        AcousticScene::new(vertices, indices, MaterialTable::uniform_scalar(material)).unwrap()
     }
 
     fn empty_scene() -> AcousticScene {
@@ -212,9 +227,12 @@ mod tests {
 
     #[test]
     fn transmission_product_folds_materials() {
-        let half = AcousticMaterial::new(6.0206, 0.0);
+        // Two 6 dB partitions in series pass ~0.5 each, so the surviving
+        // broadband energy is ~0.25.
+        let half = BandedAcousticMaterial::from_scalar(&AcousticMaterial::new(6.0206, 0.0));
         let p = transmission_product([half, half]);
-        assert!((p - 0.25).abs() < 2e-2);
-        assert!((transmission_product([]) - 1.0).abs() < 1e-6);
+        assert!((p.broadband_rms() - 0.25).abs() < 2e-2);
+        // An empty chain transmits everything unchanged.
+        assert!(transmission_product([]).is_full_band(1e-6));
     }
 }

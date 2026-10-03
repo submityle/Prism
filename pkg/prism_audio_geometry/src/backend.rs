@@ -186,7 +186,7 @@ mod tests {
         ];
         let indices = vec![[0, 1, 2], [0, 2, 3]];
         let material = prism_audio_spatial::propagation::AcousticMaterial::new(0.0, 0.9);
-        let scene = AcousticScene::new(vertices, indices, MaterialTable::uniform(material)).unwrap();
+        let scene = AcousticScene::new(vertices, indices, MaterialTable::uniform_scalar(material)).unwrap();
         let backend = GeometricBackend::new(scene, GeometricConfig::new(48_000));
         let listener = Listener::new(Vec3::new(-4.0, 2.0, 0.0), Quat::IDENTITY, Vec3::ZERO);
         let emitter = Emitter::point(Vec3::new(4.0, 2.0, 0.0), Vec3::ZERO);
@@ -211,7 +211,7 @@ mod tests {
         ];
         let indices = vec![[0, 1, 2], [0, 2, 3]];
         let material = prism_audio_spatial::propagation::AcousticMaterial::new(80.0, 0.0);
-        let scene = AcousticScene::new(vertices, indices, MaterialTable::uniform(material)).unwrap();
+        let scene = AcousticScene::new(vertices, indices, MaterialTable::uniform_scalar(material)).unwrap();
         let cfg = GeometricConfig::new(48_000).without_reflections();
         let backend = GeometricBackend::new(scene, cfg);
         // Both below the top edge (y = 1), opposite sides: direct line crosses

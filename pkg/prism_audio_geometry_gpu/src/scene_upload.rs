@@ -97,8 +97,8 @@ impl GpuScene {
                 b: [b.x, b.y, b.z, 0.0],
                 c: [c.x, c.y, c.z, 0.0],
                 normal: [normal.x, normal.y, normal.z, 0.0],
-                transmission_gain: material.transmission_gain(),
-                reflection_gain: material.reflection_gain(),
+                transmission_gain: material.broadband_transmission(),
+                reflection_gain: material.broadband_reflection(),
                 _pad: [0.0, 0.0],
             });
         }

@@ -1,9 +1,9 @@
 //! The triangle-mesh scene the geometric backend traces.
 //!
 //! An [`AcousticScene`] pairs a [`TriangleMesh`] (with its built-in
-//! bounding-volume-hierarchy ray cast) with a [`MaterialTable`] assigning an
-//! [`AcousticMaterial`](prism_audio_spatial::propagation::AcousticMaterial) to
-//! each triangle. It is the single geometry authority every path builder shares:
+//! bounding-volume-hierarchy ray cast) with a [`MaterialTable`] assigning a
+//! [`BandedAcousticMaterial`](prism_audio_spatial::material_spectrum::BandedAcousticMaterial)
+//! to each triangle. It is the single geometry authority every path builder shares:
 //! it answers "what is the nearest surface a ray hits, and what is it made of?"
 //! and marches a segment to enumerate every partition between two points, which
 //! is how the direct path accumulates transmission loss and how reflections and
@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use bevy_math::Vec3;
 use prism_audio_core::math::Sample;
-use prism_audio_spatial::propagation::AcousticMaterial;
+use prism_audio_spatial::material_spectrum::BandedAcousticMaterial;
 use prism_physics_geometry::{Ray, TriangleMesh};
 
 use crate::material_map::MaterialTable;
@@ -58,8 +58,8 @@ pub struct SceneRayHit {
     pub point: Vec3,
     /// Geometric (face) unit normal of the hit triangle.
     pub normal: Vec3,
-    /// Acoustic material of the hit triangle.
-    pub material: AcousticMaterial,
+    /// Per-band acoustic material of the hit triangle.
+    pub material: BandedAcousticMaterial,
 }
 
 /// A triangle mesh plus the acoustic material of each triangle.
@@ -147,7 +147,7 @@ impl AcousticScene {
     /// The acoustic material of triangle `index` (default when unassigned).
     #[inline]
     #[must_use]
-    pub fn material(&self, index: usize) -> AcousticMaterial {
+    pub fn material(&self, index: usize) -> BandedAcousticMaterial {
         self.materials.material(index)
     }
 
@@ -242,6 +242,7 @@ mod tests {
     use super::{AcousticScene, SceneBuildError, MAX_MARCH_HITS};
     use alloc::vec;
     use bevy_math::Vec3;
+    use prism_audio_spatial::material_spectrum::BandedAcousticMaterial;
     use prism_audio_spatial::propagation::AcousticMaterial;
 
     use crate::material_map::MaterialTable;
@@ -256,7 +257,7 @@ mod tests {
             Vec3::new(0.0, -1.0, 1.0),
         ];
         let indices = vec![[0, 1, 2], [0, 2, 3]];
-        AcousticScene::new(vertices, indices, MaterialTable::uniform(material)).unwrap()
+        AcousticScene::new(vertices, indices, MaterialTable::uniform_scalar(material)).unwrap()
     }
 
     #[test]
@@ -281,7 +282,7 @@ mod tests {
             .first_hit(Vec3::new(-2.0, 0.0, 0.0), Vec3::X, 10.0)
             .expect("ray toward wall should hit");
         assert!((hit.distance - 2.0).abs() < 1e-4);
-        assert_eq!(hit.material, wall);
+        assert_eq!(hit.material, BandedAcousticMaterial::from_scalar(&wall));
         assert!(hit.point.x.abs() < 1e-4);
     }
 

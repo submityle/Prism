@@ -261,7 +261,7 @@ mod tests {
         AcousticScene::new(
             vertices,
             indices,
-            MaterialTable::uniform(AcousticMaterial::new(60.0, 0.0)),
+            MaterialTable::uniform_scalar(AcousticMaterial::new(60.0, 0.0)),
         )
         .unwrap()
     }

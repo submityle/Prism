@@ -221,7 +221,7 @@ mod tests {
         ];
         let indices = vec![[0, 1, 2], [0, 2, 3]];
         let material = AcousticMaterial::new(0.0, 0.9);
-        AcousticScene::new(vertices, indices, MaterialTable::uniform(material))
+        AcousticScene::new(vertices, indices, MaterialTable::uniform_scalar(material))
             .expect("floor scene builds")
     }
 
@@ -234,7 +234,7 @@ mod tests {
         ];
         let indices = vec![[0, 1, 2], [0, 2, 3]];
         let material = AcousticMaterial::new(80.0, 0.0);
-        AcousticScene::new(vertices, indices, MaterialTable::uniform(material))
+        AcousticScene::new(vertices, indices, MaterialTable::uniform_scalar(material))
             .expect("barrier scene builds")
     }
 

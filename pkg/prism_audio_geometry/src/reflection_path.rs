@@ -34,7 +34,6 @@ use core::cmp::Ordering;
 use bevy_math::ops;
 use bevy_math::Vec3;
 use prism_audio_core::math::Sample;
-use prism_audio_spatial::BandGains;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
 use prism_audio_spatial::propagation::{PathKind, PropagationPath, FULL_BAND_CUTOFF_HZ};
@@ -113,7 +112,17 @@ pub fn resolve_reflections(
         }
 
         let spreading = (base_distance / path_length).clamp(0.0, 1.0);
-        let gain = (scene.material(triangle).reflection_gain() * spreading).clamp(0.0, 1.0);
+        // Take the specular share of the per-band reflection: scattering diverts
+        // energy out of the mirror direction, so a rough surface reflects a
+        // dimmer, differently coloured specular arrival. Spreading then folds in
+        // the extra divergence of the longer bounced route.
+        let effective = scene
+            .material(triangle)
+            .specular_reflection()
+            .scaled(spreading);
+        // Factor into a flat broadband gain (used for ranking and distance) and
+        // the relative colour the voice renders through its filterbank.
+        let (gain, bands) = effective.split_peak();
         if gain <= config.min_gain {
             continue;
         }
@@ -124,7 +133,7 @@ pub fn resolve_reflections(
             delay_seconds: path_length / SPEED_OF_SOUND_MPS,
             gain,
             cutoff_hz: FULL_BAND_CUTOFF_HZ,
-            bands: BandGains::UNITY,
+            bands,
             direction: local.direction,
         };
         if !is_duplicate(&paths, &candidate) {
@@ -201,7 +210,7 @@ mod tests {
             Vec3::new(-10.0, 0.0, 10.0),
         ];
         let indices = vec![[0, 1, 2], [0, 2, 3]];
-        AcousticScene::new(vertices, indices, MaterialTable::uniform(material)).unwrap()
+        AcousticScene::new(vertices, indices, MaterialTable::uniform_scalar(material)).unwrap()
     }
 
     #[test]

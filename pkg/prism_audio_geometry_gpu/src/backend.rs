@@ -334,8 +334,8 @@ mod tests {
                 b: [b.x, b.y, b.z, 0.0],
                 c: [c.x, c.y, c.z, 0.0],
                 normal: [normal.x, normal.y, normal.z, 0.0],
-                transmission_gain: material.transmission_gain(),
-                reflection_gain: material.reflection_gain(),
+                transmission_gain: material.broadband_transmission(),
+                reflection_gain: material.broadband_reflection(),
                 _pad: [0.0, 0.0],
             });
         }
@@ -367,7 +367,7 @@ mod tests {
             Vec3::new(-10.0, 0.0, 10.0),
         ]);
         let indices = Vec::from([[0, 1, 2], [0, 2, 3]]);
-        let table = MaterialTable::uniform(AcousticMaterial::new(0.0, 0.9));
+        let table = MaterialTable::uniform_scalar(AcousticMaterial::new(0.0, 0.9));
         AcousticScene::new(vertices, indices, table).expect("floor scene builds")
     }
 
@@ -381,7 +381,7 @@ mod tests {
             Vec3::new(0.0, -5.0, 5.0),
         ]);
         let indices = Vec::from([[0, 1, 2], [0, 2, 3]]);
-        let table = MaterialTable::uniform(AcousticMaterial::new(6.020_6, 0.0));
+        let table = MaterialTable::uniform_scalar(AcousticMaterial::new(6.020_6, 0.0));
         AcousticScene::new(vertices, indices, table).expect("wall scene builds")
     }
 

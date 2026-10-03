@@ -214,6 +214,32 @@ impl BandGains {
             .fold(0.0, |acc, g| if g > acc { g } else { acc })
     }
 
+    /// Factors the spectrum into a broadband scalar gain and a normalised
+    /// colour such that `scalar * colour` reproduces `self` exactly.
+    ///
+    /// The scalar is the [`peak`](Self::peak) band gain and the colour is the
+    /// spectrum divided by that peak, so every band of the returned colour lies
+    /// in `[0, 1]` with at least one band at unity. This is the inverse of
+    /// [`scaled`](Self::scaled): `colour.scaled(scalar)` recovers `self` with no
+    /// clamping loss, because dividing by the peak can never push a band above
+    /// one. It is the canonical way to hand a coloured arrival to a consumer
+    /// that stores a flat broadband gain alongside a relative
+    /// [`BandGains`](Self) colour, matching the
+    /// [`PropagationPath`](crate::propagation::PropagationPath) split between
+    /// `gain` and `bands`.
+    ///
+    /// A fully silent spectrum has no colour to recover, so it factors into a
+    /// zero scalar and the [`SILENT`](Self::SILENT) colour.
+    #[must_use]
+    pub fn split_peak(self) -> (Sample, Self) {
+        let peak = self.peak();
+        if peak <= 0.0 {
+            (0.0, Self::SILENT)
+        } else {
+            (peak, self.scaled(1.0 / peak))
+        }
+    }
+
     /// The spectrum gain at an arbitrary frequency, interpolated linearly in
     /// `log(frequency)` between the two bracketing band centres.
     ///
@@ -478,5 +504,35 @@ mod tests {
         let expected_low = ops::sqrt((1.0 - low_alpha).max(0.0));
         let g = BandGains::reflection_from_absorption(&carpet);
         assert!(approx(g.low(), expected_low, 1e-5));
+    }
+
+    #[test]
+    fn split_peak_is_the_inverse_of_scaled() {
+        // A coloured spectrum factors into its peak and a normalised colour
+        // whose brightest band is unity, and multiplying them back is lossless.
+        let g = BandGains::new([0.3, 0.6, 0.15]);
+        let (scalar, colour) = g.split_peak();
+        assert!(approx(scalar, 0.6, 1e-6));
+        assert!(approx(colour.peak(), 1.0, 1e-6));
+        let recovered = colour.scaled(scalar);
+        assert!(approx(recovered.low(), g.low(), 1e-6));
+        assert!(approx(recovered.mid(), g.mid(), 1e-6));
+        assert!(approx(recovered.high(), g.high(), 1e-6));
+    }
+
+    #[test]
+    fn split_peak_of_uniform_is_flat_colour() {
+        // A frequency-flat spectrum keeps all its energy in the scalar and
+        // yields a unity colour, so a uniform material is unchanged.
+        let (scalar, colour) = BandGains::uniform(0.42).split_peak();
+        assert!(approx(scalar, 0.42, 1e-6));
+        assert!(colour.is_full_band(1e-6));
+    }
+
+    #[test]
+    fn split_peak_of_silence_has_no_colour() {
+        let (scalar, colour) = BandGains::SILENT.split_peak();
+        assert!(approx(scalar, 0.0, 1e-6));
+        assert!(colour.is_silent(1e-6));
     }
 }

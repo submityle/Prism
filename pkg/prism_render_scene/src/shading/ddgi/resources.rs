@@ -36,8 +36,8 @@ use bevy_math::UVec2;
 use bevy_render::{
     camera::ExtractedCamera,
     render_resource::{
-        Buffer, BufferDescriptor, BufferUsages, TextureDescriptor, TextureDimension, TextureUsages,
-        TextureView,
+        Buffer, BufferDescriptor, BufferInitDescriptor, BufferUsages, TextureDescriptor,
+        TextureDimension, TextureUsages, TextureView,
     },
     renderer::RenderDevice,
     texture::{CachedTexture, TextureCache},
@@ -98,6 +98,10 @@ pub(crate) struct ViewDdgi {
     /// [`PROBE_META_STRIDE`] bytes (relocation offset + activity flag), written
     /// by the relocation / classification stage and read by `sample_main`.
     probe_meta: Buffer,
+    /// Uniform-buffer twin of the lattice + field metadata ([`GpuDdgiVolume`]),
+    /// bound at group(0) binding 2 of `sample_main`. Re-uploaded whenever the
+    /// configured lattice changes (static for the view's lifetime otherwise).
+    volume_uniform: Buffer,
     /// Full-resolution diffuse GI irradiance export (`rgba16float`): `rgb` =
     /// irradiance, `a` = blend confidence. Written by `sample_main` and sampled
     /// by the composite; never copied over `scene_color`.
@@ -131,6 +135,11 @@ impl ViewDdgi {
         &self.probe_meta
     }
 
+    /// Uniform buffer carrying the [`GpuDdgiVolume`] lattice + field metadata.
+    pub(crate) fn volume_uniform(&self) -> &Buffer {
+        &self.volume_uniform
+    }
+
     /// Storage/texture view of the GI irradiance export written by `sample_main`.
     pub(crate) fn gi_out_view(&self) -> &TextureView {
         &self.gi_out.default_view
@@ -145,6 +154,11 @@ impl ViewDdgi {
     /// Probe count the atlases + metadata buffer were sized for.
     pub(crate) fn probe_count(&self) -> u32 {
         self.probe_count
+    }
+
+    /// Full-resolution framebuffer extent the GI export was sized for.
+    pub(crate) fn size(&self) -> UVec2 {
+        self.size
     }
 }
 
@@ -239,6 +253,14 @@ pub(crate) fn prepare_ddgi_textures(
             mapped_at_creation: false,
         });
 
+        // Lattice + field metadata uniform, uploaded once per (re)allocation;
+        // `sample_main` reads it at group(0) binding 2.
+        let volume_uniform = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("prism DDGI volume"),
+            contents: bytemuck::bytes_of(&volume),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+
         // GI export: full-resolution wide HDR, written by `sample_main`
         // (storage) and sampled by the composite (texture).
         let gi_out = texture_cache.get(
@@ -276,6 +298,7 @@ pub(crate) fn prepare_ddgi_textures(
             irradiance_atlas,
             depth_atlas,
             probe_meta,
+            volume_uniform,
             gi_out,
             gi_base,
             size,
