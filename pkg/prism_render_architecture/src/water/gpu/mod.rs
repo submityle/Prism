@@ -37,6 +37,7 @@ pub mod spectral_plan;
 pub mod surface_bindings;
 pub mod surface_mesh;
 pub mod surface_pass;
+pub mod swe_kernel;
 
 pub use buffers::{
     AsyncFrameState, BufferParity, FrameSlot, PipelineError, SlotState, WaterBufferCounts,
@@ -59,6 +60,10 @@ pub use pipeline::{
 pub use render_fx_kernel::{
     dispatch_foam_advect, dispatch_wetness_step, FOAM_DRIVE_FLOATS, FOAM_DRIVE_STRIDE,
     WATER_RENDER_FX_WESL, WETNESS_DRIVE_FLOATS, WETNESS_DRIVE_STRIDE, WETNESS_OUT_FLOATS,
+};
+
+pub use swe_kernel::{
+    dispatch_swe_step, SweStepOutput, SWE_VEL_FLOATS, SWE_VEL_STRIDE, WATER_SWE_WESL,
 };
 
 pub use spectral_plan::{
