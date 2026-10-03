@@ -859,6 +859,47 @@ pub fn encode_astc_single_partition_6x5_ldr(texels: &[[u8; 4]; 30]) -> [u8; 16] 
     w.into_block()
 }
 
+/// Encode thirty LDR RGBA texels (6 wide x 5 tall) into one 16-byte ASTC block
+/// using single-partition block **mode 369**: a full 6x5 weight grid (no
+/// bilinear infill) with a QUANT_3 trit weight range (one trit, zero low bits
+/// -> three interpolation levels, 48 weight bits) paired with QUANT_256
+/// identity colour (six 8-bit endpoint bytes, color_bits = 111 - 48 = 63) and
+/// CEM 8 (RGB direct, alpha forced to 255). This is the 6x6 mode-276 identity +
+/// trit-weight recipe re-targeted to a thirty-texel footprint: three weight
+/// levels (vs the two of mode 353/354's sibling one-bit path) give a middle
+/// grey while endpoints stay bit-exact. Texels are row-major (`texel = y*6+x`).
+///
+/// The weight stream is a trit BISE sequence, so it is packed with
+/// `trit_quint::encode_trit_sequence` + `bits::BlockWriter::mirror_weight_stream`
+/// (the exact inverse of the decoder's reversed-ISE weight read).
+pub fn encode_astc_single_partition_6x5_ldr_mode369(texels: &[[u8; 4]; 30]) -> [u8; 16] {
+    const BLOCK_MODE: u32 = 369;
+    const CEM_RGB_DIRECT: u32 = 8;
+    const WEIGHT_LEVELS: u32 = 3; // QUANT_3: one trit, zero low bits
+    const WEIGHT_LOW_BITS: u32 = 0;
+
+    // Identity colour: the fit orders `hadd(e0) <= hadd(e1)`, so the CEM-8
+    // decoder reproduces the raw endpoint bytes without a blue-contraction swap.
+    let (e0, e1) = endpoint_fit::fit_rgb_endpoints(texels);
+
+    // Thirty trit weights against the exact endpoints (no infill, full grid).
+    let raw = weight_fit::quantize_weights_ise(texels, e0, e1, WEIGHT_LEVELS);
+
+    let mut w = bits::BlockWriter::new();
+    w.write_bits(0, 11, BLOCK_MODE);
+    w.write_bits(13, 4, CEM_RGB_DIRECT);
+    let vals = [e0[0], e1[0], e0[1], e1[1], e0[2], e1[2]];
+    for (i, v) in vals.iter().enumerate() {
+        w.write_bits(17 + i as u32 * 8, 8, u32::from(*v));
+    }
+    // Encode the thirty trit weights LSB-first from bit 0, then mirror the
+    // stream into the top of the block (bit p -> 127-p).
+    let mut scratch = [0u8; 16];
+    super::trit_quint::encode_trit_sequence(&mut scratch, 0, WEIGHT_LOW_BITS, &raw);
+    w.mirror_weight_stream(&scratch);
+    w.into_block()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
@@ -873,6 +914,7 @@ mod tests {
     use super::encode_astc_single_partition_5x4_ldr;
     use super::encode_astc_single_partition_5x5_ldr;
     use super::encode_astc_single_partition_6x5_ldr;
+    use super::encode_astc_single_partition_6x5_ldr_mode369;
     use super::encode_astc_single_partition_6x6_ldr;
     use super::encode_astc_single_partition_8x5_ldr;
     use super::encode_astc_single_partition_8x6_ldr;
@@ -1737,6 +1779,69 @@ mod tests {
         assert!(
             max_rgb_err_30(&src, &dec) <= 96,
             "6x5 gradient error exceeds the four-level budget"
+        );
+    }
+
+    #[test]
+    fn six_by_five_mode369_constant_block_round_trips_exactly() {
+        let src = [[41u8, 173, 98, 255]; 30];
+        let blk = encode_astc_single_partition_6x5_ldr_mode369(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 m369 constant");
+        assert_eq!(count, 30);
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        assert_eq!(
+            max_rgb_err_30(&src, &dec),
+            0,
+            "6x5 mode369 constant block must round-trip exactly with identity colour"
+        );
+        for d in &dec {
+            assert_eq!(d[3], 255, "CEM 8 forces alpha 255");
+        }
+    }
+
+    #[test]
+    fn six_by_five_mode369_two_colour_endpoints_are_exact() {
+        let a = [15u8, 35, 55, 255];
+        let b = [210u8, 190, 170, 255];
+        let src: [[u8; 4]; 30] = core::array::from_fn(|t| if t % 2 == 0 { a } else { b });
+        let blk = encode_astc_single_partition_6x5_ldr_mode369(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 m369 two-colour");
+        assert_eq!(count, 30);
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        assert_eq!(
+            max_rgb_err_30(&src, &dec),
+            0,
+            "6x5 mode369 two-colour block must hit both exact endpoints"
+        );
+    }
+
+    #[test]
+    fn six_by_five_mode369_gradient_beats_two_level_midpoint() {
+        // Three trit levels add a middle grey, so a 50/50 split of two colours
+        // reconstructs their midpoint closer than any two-level (one-bit) mode.
+        let a = [10u8, 20, 30, 255];
+        let b = [220u8, 210, 200, 255];
+        let src: [[u8; 4]; 30] = core::array::from_fn(|t| {
+            // Thirds: low third = a, middle third ~ midpoint, high third = b.
+            match t % 3 {
+                0 => a,
+                1 => [
+                    ((a[0] as u16 + b[0] as u16) / 2) as u8,
+                    ((a[1] as u16 + b[1] as u16) / 2) as u8,
+                    ((a[2] as u16 + b[2] as u16) / 2) as u8,
+                    255,
+                ],
+                _ => b,
+            }
+        });
+        let blk = encode_astc_single_partition_6x5_ldr_mode369(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 m369 thirds");
+        assert_eq!(count, 30);
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        // The middle level lands within a trit step of the true midpoint.
+        assert!(
+            max_rgb_err_30(&src, &dec) <= 8,
+            "6x5 mode369 three-level block must resolve the midpoint tightly"
         );
     }
 }
