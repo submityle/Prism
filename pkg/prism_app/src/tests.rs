@@ -31,6 +31,44 @@ fn headless_runner_drives_requested_frames() {
     assert_eq!(frames.load(Ordering::Relaxed), 5);
 }
 
+/// A `HeadlessRunner` with a `FrameLimit` still drives the requested frames and
+/// actually paces the loop: with an explicit per-frame period the run cannot
+/// finish faster than the paced minimum (one sleep per inter-frame boundary).
+#[test]
+fn headless_runner_frame_limit_paces_the_loop() {
+    use crate::pacing::FrameLimit;
+    use prism_time::Duration;
+
+    let frames = Arc::new(AtomicU64::new(0));
+    let f = frames.clone();
+
+    let mut app = App::new();
+    app.add_systems(Update, move || {
+        f.fetch_add(1, Ordering::Relaxed);
+    });
+    // 4 frames at a 2ms minimum period: the first limited frame anchors the
+    // cadence without sleeping, then the two interior boundaries each sleep
+    // ~2ms (the 4th frame breaks before throttling), so the run takes at least
+    // ~4ms. Assert a conservative lower bound to prove the pacer slept.
+    let period = Duration::from_millis(2);
+    app.set_runner(move |app| {
+        HeadlessRunner::with_max_frames(4)
+            .with_frame_limit(FrameLimit::Period(period))
+            .run(app)
+    });
+
+    let start = std::time::Instant::now();
+    let exit = app.run();
+    let elapsed = start.elapsed();
+
+    assert_eq!(exit, AppExit::Success);
+    assert_eq!(frames.load(Ordering::Relaxed), 4);
+    assert!(
+        elapsed >= Duration::from_millis(3),
+        "frame limiter did not pace the loop: {elapsed:?}"
+    );
+}
+
 /// Startup schedules run exactly once; frame schedules run every frame.
 #[test]
 fn startup_runs_once_update_runs_each_frame() {

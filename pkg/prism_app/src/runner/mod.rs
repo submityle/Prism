@@ -10,7 +10,9 @@
 //! M0 ships two platform-free runners:
 //!
 //! - [`run_once`] / [`ScheduleRunnerOnce`] — exactly one frame.
-//! - [`HeadlessRunner`] — loop until exit (optionally bounded by a frame cap).
+//! - [`HeadlessRunner`] — loop until exit (optionally bounded by a frame
+//!   cap, and optionally paced to a [`FrameLimit`](crate::pacing::FrameLimit)
+//!   under `std`, design §13).
 //!
 //! # Honestly deferred
 //!

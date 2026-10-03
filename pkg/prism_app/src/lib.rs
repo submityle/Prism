@@ -13,8 +13,9 @@
 //!
 //! This crate is built in milestones (design §22). **M0** shipped the shell;
 //! **M1** layered the full phase order, the plugin dependency graph, the state
-//! machine, and buffered events; **M2** adds the fixed-timestep inner loop.
-//! Currently implemented:
+//! machine, and buffered events; **M2** adds the fixed-timestep inner loop;
+//! **M4** begins the window/runner tier, starting with drift-free frame
+//! pacing (this increment). Currently implemented:
 //!
 //! - [`App`] with a monotonic [`PluginsState`] assembly
 //!   state machine and a swappable [runner].
@@ -63,6 +64,18 @@
 //!   an [`Events<E>`](prism_ecs::event::Events) resource and rotates its double
 //!   buffer once per frame in [`First`], so events are readable for the frame
 //!   they are sent and the frame after (design §22 M1).
+//! - A drift-free [frame pacer](crate::pacing) (design §13, §22 M4): the
+//!   [`FramePacer`] caps the loop to a [`FrameLimit`] (unlimited / target
+//!   FPS / explicit period) by pacing to a *moving* cadence
+//!   (`deadline += period`, never `now + period`) so rounding error cannot
+//!   accumulate, with an anti-death-spiral clamp that resyncs after a hitch
+//!   and rolling [`FrameStats`] for the design §16 diagnostics. Present-
+//!   timestamp / VRR alignment stays deferred until `prism_window`/RHI can
+//!   supply a present estimate (documented in the module). The
+//!   [`HeadlessRunner`] can opt into a cap via
+//!   [`with_frame_limit`](crate::runner::HeadlessRunner::with_frame_limit)
+//!   for a mobile frame limiter or a server tickrate; the default stays
+//!   uncapped.
 //! - Platform-free runners: [`HeadlessRunner`] and
 //!   [`ScheduleRunnerOnce`].
 //!
@@ -88,6 +101,8 @@ pub mod app;
 pub mod event;
 pub mod exit;
 pub mod fixed;
+#[cfg(feature = "std")]
+pub mod pacing;
 pub mod plugin;
 pub mod plugin_group;
 pub mod plugin_graph;
@@ -110,6 +125,8 @@ pub use plugin_graph::PluginGraphError;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 pub use runner::{HeadlessRunner, ScheduleRunnerOnce, run_once};
 pub use fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
+#[cfg(feature = "std")]
+pub use pacing::{FrameLimit, FramePacer, FrameStats};
 pub use schedule::{
     First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
 };
@@ -130,6 +147,8 @@ pub mod prelude {
     pub use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
     pub use crate::runner::{HeadlessRunner, ScheduleRunnerOnce};
     pub use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
+    #[cfg(feature = "std")]
+    pub use crate::pacing::{FrameLimit, FramePacer, FrameStats};
     pub use crate::schedule::{
         First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup,
         Update,
