@@ -65,6 +65,7 @@ pub mod doppler;
 pub mod early_reflections;
 pub mod echo_criterion;
 pub mod echo_density;
+pub mod fresnel_transition;
 pub mod geometry;
 pub mod ground_effect;
 pub mod hoa;
@@ -103,6 +104,7 @@ pub mod speech_transmission_index;
 pub mod spread;
 pub mod stage_support;
 pub mod useful_to_detrimental_ratio;
+pub mod utd_diffraction;
 
 pub use acoustic_format::AcousticFormat;
 pub use air::{AirAbsorption, AirAbsorptionNode, AtmosphericConditions, absorption_db_per_metre};
@@ -143,6 +145,7 @@ pub use echo_density::{
     ECHO_DENSITY_WINDOW_MS, EchoDensityProfile, GAUSSIAN_EXCEEDANCE, MIXING_THRESHOLD,
     NO_MIXING_TIME_MS, mixing_time_ms, normalized_echo_density,
 };
+pub use fresnel_transition::{TransitionValue, fresnel_integrals, transition};
 pub use geometry::{Emitter, Listener, LocalSource};
 pub use ground_effect::GroundEffect;
 pub use hoa::{
@@ -235,3 +238,4 @@ pub use stage_support::{
 pub use useful_to_detrimental_ratio::{
     NO_USEFUL_RATIO_DB, UsefulToDetrimental, useful_to_detrimental_ratio_db,
 };
+pub use utd_diffraction::UtdWedge;
