@@ -187,6 +187,7 @@ pub mod gpu_stream_append;
 pub mod gpu_timer_query;
 pub mod gravity_wave;
 pub mod gray_code;
+pub mod hair_melanin_absorption;
 pub mod half_float_f16;
 pub mod halton_sequence;
 pub mod hash_rng;
@@ -221,6 +222,7 @@ pub mod luminance_hist;
 pub mod marching_cubes;
 pub mod marching_squares;
 pub mod mask;
+pub mod material_registry_resolve;
 pub mod material_resolve_bin;
 pub mod matrix_decompose;
 pub mod merge_sort_stable;
@@ -248,6 +250,7 @@ pub mod modeling;
 pub mod morton_code;
 pub mod motion_blur;
 pub mod motion_disocclusion;
+pub mod motion_mat4_transform;
 pub mod motion_reproject_ndc_pixel;
 pub mod motion_tile_classify;
 pub mod motion_vector_dilate;
@@ -313,7 +316,9 @@ pub mod regir_grid_index;
 pub mod relax_coverage;
 pub mod reservoir_sample;
 pub mod restir_di_finalize;
+pub mod restir_di_reuse_weight;
 pub mod restir_gi_reconnection_jacobian;
+pub mod restir_gi_spatial_admissible;
 pub mod restir_spatial_admissible;
 pub mod rgb_ycocg;
 pub mod rgbe_encode;
@@ -366,6 +371,7 @@ pub mod taau_color_transform;
 pub mod taau_jitter_offset;
 pub mod taau_neighborhood_clip;
 pub mod taau_rcas_sharpen;
+pub mod taau_reconstruct_sanitize_color;
 pub mod taau_reconstruct_sanitize_params;
 pub mod taau_resolution_map;
 pub mod taau_thin_feature_lock;
@@ -596,6 +602,9 @@ pub use gpu_timer_query::{
 };
 pub use gravity_wave::{GpuGravityWave, GravityWaveQuery};
 pub use gray_code::GpuGrayCode;
+pub use hair_melanin_absorption::{
+    GpuHairMelaninAbsorption, HairMelaninAbsorptionQuery, HairMelaninAbsorptionResult,
+};
 pub use half_float_f16::{GpuHalfFloatF16, HalfFloatQuery, HalfFloatResult};
 pub use halton_sequence::GpuHaltonSequence;
 pub use hash_rng::{GpuHashRng, HashRngSample};
@@ -640,6 +649,9 @@ pub use luminance_hist::{GpuLuminanceHist, LuminanceHistQuery};
 pub use marching_cubes::{GpuMarchingCubes, MarchingCubesCellQuery, MarchingCubesCellResult};
 pub use marching_squares::{GpuMarchingSquares, MarchingSquaresQuery, MarchingSquaresResult};
 pub use mask::{GpuScatteringMask, MaskQuery};
+pub use material_registry_resolve::{
+    GpuMaterialRegistryResolve, MaterialRegistryResolveQuery, MaterialRegistryResolveResult,
+};
 pub use material_resolve_bin::{
     GpuMaterialResolveBin, MaterialResolveBinQuery, MaterialResolveBinResult,
 };
@@ -682,6 +694,9 @@ pub use motion_blur::{GpuMotionBlur, MotionBlurQuery, MotionBlurResult};
 pub use motion_disocclusion::{
     GpuMotionDisocclusion, MotionDisocclusionParams, MotionDisocclusionQuery,
     MotionDisocclusionResult, MotionSurfacePoint,
+};
+pub use motion_mat4_transform::{
+    GpuMotionMat4Transform, MotionMat4TransformQuery, MotionMat4TransformResult,
 };
 pub use motion_reproject_ndc_pixel::{
     GpuMotionReprojectNdcPixel, MotionReprojectNdcPixelQuery, MotionReprojectNdcPixelResult,
@@ -768,9 +783,15 @@ pub use regir_grid_index::{GpuRegirGridIndex, RegirGridIndexQuery, RegirGridInde
 pub use relax_coverage::{GpuRelaxCoverage, RelaxCoverageQuery};
 pub use reservoir_sample::{GpuReservoirSample, ReservoirValue};
 pub use restir_di_finalize::{GpuRestirDiFinalize, RestirDiFinalizeQuery, RestirDiFinalizeResult};
+pub use restir_di_reuse_weight::{
+    GpuRestirDiReuseWeight, RestirDiReuseWeightQuery, RestirDiReuseWeightResult,
+};
 pub use restir_gi_reconnection_jacobian::{
     GpuRestirGiReconnectionJacobian, RestirGiReconnectionJacobianQuery,
     RestirGiReconnectionJacobianResult,
+};
+pub use restir_gi_spatial_admissible::{
+    GpuRestirGiSpatialAdmissible, RestirGiSpatialAdmissibleQuery, RestirGiSpatialAdmissibleResult,
 };
 pub use restir_spatial_admissible::{
     GpuRestirSpatialAdmissible, RestirSpatialAdmissibleQuery, RestirSpatialAdmissibleResult,
@@ -849,6 +870,10 @@ pub use taau_neighborhood_clip::{
     GpuTaauNeighborhoodClip, TaauNeighborhoodClipQuery, TaauNeighborhoodClipResult,
 };
 pub use taau_rcas_sharpen::{GpuTaauRcasSharpen, TaauRcasSharpenQuery, TaauRcasSharpenResult};
+pub use taau_reconstruct_sanitize_color::{
+    GpuTaauReconstructSanitizeColor, TaauReconstructSanitizeColorQuery,
+    TaauReconstructSanitizeColorResult,
+};
 pub use taau_reconstruct_sanitize_params::{
     GpuTaauReconstructSanitizeParams, TaauReconstructSanitizeParamsQuery,
     TaauReconstructSanitizeParamsResult,
