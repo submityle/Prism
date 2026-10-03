@@ -150,6 +150,8 @@ pub use rotational_symmetry::{
 };
 pub mod geodesic;
 pub use geodesic::{GeodesicPath, MeshEdgeGraph};
+pub mod min_area_fill;
+pub use min_area_fill::{triangulate_min_area, MinAreaFill, MAX_LOOP_VERTICES};
 
 /// A handle into a [`ShapeRegistry`].
 ///
