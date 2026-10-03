@@ -159,6 +159,7 @@ pub mod determinism;
 pub mod diagnostics;
 #[cfg(feature = "std")]
 pub mod pacing;
+pub mod platform_tier;
 pub mod plugin;
 pub mod plugin_group;
 pub mod plugin_graph;
@@ -204,6 +205,7 @@ pub use schedule::{
     First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown, StateTransition, Startup,
     Update,
 };
+pub use platform_tier::PlatformTierProfile;
 pub use settings::{SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer};
 pub use state::{ComputedStates, StateScoped, StateTransitionSet, SubStates};
 #[cfg(feature = "pipelined")]
@@ -244,6 +246,7 @@ pub mod prelude {
         First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown, StateTransition,
         Startup, Update,
     };
+    pub use crate::platform_tier::PlatformTierProfile;
     pub use crate::settings::{
         SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer,
     };

@@ -3364,3 +3364,214 @@ mod capability_tests {
         assert!(res < Duration::from_secs(1));
     }
 }
+
+// ---- platform tier -> settings PlatformTier layer (design §3, §14) ---------
+//
+// The `QualityTier` the app derives from its probed `Capabilities` is the
+// natural source of the `PlatformTier` settings layer. These tests pin the
+// per-tier profile to the design §3 server/mobile/desktop table, the
+// serialisation into the dynamically-typed store, the layered `write_into`
+// semantics (a higher layer keeps winning), and the `App` helpers that
+// broadcast one `SettingChanged` per resolved change.
+mod platform_tier_tests {
+    use super::*;
+    use crate::capability::{Capabilities, QualityTier};
+    use crate::platform_tier::{
+        self, PlatformTierProfile, KEY_FRAME_LIMIT_FPS, KEY_PIPELINED_RENDERING,
+        KEY_POWER_AWARE_VARIABLE_STEP, KEY_RENDER_PRESENT, KEY_SUSPEND_RESUME_LIFECYCLE,
+    };
+    use crate::settings::{SettingChanged, Settings, SettingsLayer};
+
+    /// The three tier profiles match the design §3 server/mobile/desktop table
+    /// field-for-field, and the `QualityTier::platform_profile` shortcut agrees
+    /// with `PlatformTierProfile::for_tier`.
+    #[test]
+    fn profiles_match_design_table() {
+        let server = PlatformTierProfile::for_tier(QualityTier::Server);
+        assert_eq!(
+            server,
+            PlatformTierProfile {
+                presents_display: false,
+                frame_limit_fps: 0,
+                pipelined_rendering: false,
+                power_aware_variable_step: false,
+                suspend_resume_lifecycle: false,
+            }
+        );
+
+        let mobile = PlatformTierProfile::for_tier(QualityTier::Mobile);
+        assert_eq!(
+            mobile,
+            PlatformTierProfile {
+                presents_display: true,
+                frame_limit_fps: 60,
+                pipelined_rendering: false,
+                power_aware_variable_step: true,
+                suspend_resume_lifecycle: true,
+            }
+        );
+
+        let desktop = PlatformTierProfile::for_tier(QualityTier::Desktop);
+        assert_eq!(
+            desktop,
+            PlatformTierProfile {
+                presents_display: true,
+                frame_limit_fps: 0,
+                pipelined_rendering: true,
+                power_aware_variable_step: false,
+                suspend_resume_lifecycle: false,
+            }
+        );
+
+        // The shortcut is exactly the free constructor.
+        assert_eq!(QualityTier::Server.platform_profile(), server);
+        assert_eq!(QualityTier::Mobile.platform_profile(), mobile);
+        assert_eq!(QualityTier::Desktop.platform_profile(), desktop);
+    }
+
+    /// `entries` serialises every field under its stable key, in `ALL_KEYS`
+    /// order, with the FPS cap stored as an integer and the rest as booleans.
+    #[test]
+    fn entries_serialise_every_field_under_its_key() {
+        let profile = PlatformTierProfile::for_tier(QualityTier::Mobile);
+        let entries = profile.entries();
+
+        let keys: Vec<&str> = entries.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, platform_tier::ALL_KEYS);
+
+        // Spot-check each payload against the mobile profile.
+        assert_eq!(entries[0].1.as_bool(), Some(true)); // render.present
+        assert_eq!(entries[1].1.as_int(), Some(60)); // pacing.frame_limit_fps
+        assert_eq!(entries[2].1.as_bool(), Some(false)); // pipeline.pipelined_rendering
+        assert_eq!(entries[3].1.as_bool(), Some(true)); // power-aware step
+        assert_eq!(entries[4].1.as_bool(), Some(true)); // suspend/resume
+    }
+
+    /// `write_into` populates the `PlatformTier` layer so every key resolves to
+    /// the profile value, and re-writing the same profile is idempotent.
+    #[test]
+    fn write_into_populates_platform_tier_layer_idempotently() {
+        let mut settings = Settings::new();
+        let profile = QualityTier::Desktop.platform_profile();
+
+        let changed = profile.write_into(&mut settings);
+        assert_eq!(changed, platform_tier::ALL_KEYS.len());
+
+        assert_eq!(settings.get_bool(KEY_RENDER_PRESENT), Some(true));
+        assert_eq!(settings.get_int(KEY_FRAME_LIMIT_FPS), Some(0));
+        assert_eq!(settings.get_bool(KEY_PIPELINED_RENDERING), Some(true));
+        assert_eq!(settings.get_bool(KEY_POWER_AWARE_VARIABLE_STEP), Some(false));
+        assert_eq!(settings.get_bool(KEY_SUSPEND_RESUME_LIFECYCLE), Some(false));
+        assert_eq!(
+            settings.resolved_layer(KEY_RENDER_PRESENT),
+            Some(SettingsLayer::PlatformTier)
+        );
+
+        // Re-applying the identical profile resolves to the same values, so
+        // nothing changed.
+        assert_eq!(profile.write_into(&mut settings), 0);
+    }
+
+    /// A higher-precedence layer keeps winning: the tier populates the
+    /// `PlatformTier` layer underneath an existing user override, which is left
+    /// resolving and reports no change for that key.
+    #[test]
+    fn higher_layer_override_survives_tier_application() {
+        let mut settings = Settings::new();
+        // The user forced presentation off and pinned a 30 FPS cap.
+        settings.set(SettingsLayer::User, KEY_RENDER_PRESENT, false);
+        settings.set(SettingsLayer::User, KEY_FRAME_LIMIT_FPS, 30_i64);
+
+        // Desktop would present and run uncapped, but the user layer wins.
+        let changed = QualityTier::Desktop.platform_profile().write_into(&mut settings);
+        // Three keys resolve to the tier value; the two user-pinned keys do not
+        // change their resolved value.
+        assert_eq!(changed, 3);
+        assert_eq!(settings.get_bool(KEY_RENDER_PRESENT), Some(false));
+        assert_eq!(settings.get_int(KEY_FRAME_LIMIT_FPS), Some(30));
+        assert_eq!(
+            settings.resolved_layer(KEY_RENDER_PRESENT),
+            Some(SettingsLayer::User)
+        );
+        // Clearing the user layer transparently falls back to the tier value.
+        settings.clear(SettingsLayer::User, KEY_RENDER_PRESENT);
+        assert_eq!(settings.get_bool(KEY_RENDER_PRESENT), Some(true));
+        assert_eq!(
+            settings.resolved_layer(KEY_RENDER_PRESENT),
+            Some(SettingsLayer::PlatformTier)
+        );
+    }
+
+    /// `App::apply_platform_tier` auto-initialises the store and broadcasts one
+    /// `SettingChanged` per key whose resolved value changed.
+    #[test]
+    fn app_apply_platform_tier_broadcasts_changes() {
+        let mut app = App::new();
+        assert!(app.world().get_resource::<Settings>().is_none());
+
+        let count = Arc::new(Mutex::new(0usize));
+        let count_sys = count.clone();
+        app.init_settings();
+        app.add_systems(
+            Update,
+            move |mut cursor: Local<EventCursor<SettingChanged>>,
+                  events: Res<Events<SettingChanged>>| {
+                *count_sys.lock().unwrap() += cursor.read(&events).count();
+            },
+        );
+
+        app.apply_platform_tier(QualityTier::Mobile);
+        // Every mobile key resolves from the tier (empty store underneath).
+        assert_eq!(app.setting_bool(KEY_RENDER_PRESENT), Some(true));
+        assert_eq!(app.setting_int(KEY_FRAME_LIMIT_FPS), Some(60));
+        assert_eq!(app.setting_bool(KEY_SUSPEND_RESUME_LIFECYCLE), Some(true));
+
+        app.update();
+        app.update();
+        assert_eq!(*count.lock().unwrap(), platform_tier::ALL_KEYS.len());
+    }
+
+    /// `App::apply_detected_platform_tier` applies the tier the app derived from
+    /// its probed capabilities: the resolved presentation flag agrees with the
+    /// tier's `presents`.
+    #[test]
+    fn app_apply_detected_platform_tier_matches_quality_tier() {
+        let mut app = App::new();
+        let tier = app.quality_tier();
+        app.apply_detected_platform_tier();
+        assert_eq!(app.setting_bool(KEY_RENDER_PRESENT), Some(tier.presents()));
+    }
+
+    /// The std-only `frame_limit` helper turns the FPS cap into a `FrameLimit`:
+    /// the mobile 60 FPS cap paces the loop; the uncapped tiers are `Off`.
+    #[cfg(feature = "std")]
+    #[test]
+    fn frame_limit_reflects_fps_cap() {
+        use crate::pacing::FrameLimit;
+
+        let mobile = QualityTier::Mobile.platform_profile().frame_limit();
+        assert_eq!(mobile, FrameLimit::from_fps(60));
+        assert!(mobile.is_limited());
+
+        assert_eq!(
+            QualityTier::Desktop.platform_profile().frame_limit(),
+            FrameLimit::Off
+        );
+        assert_eq!(
+            QualityTier::Server.platform_profile().frame_limit(),
+            FrameLimit::Off
+        );
+    }
+
+    /// A headless-shaped capability set derives the server profile: no
+    /// presentation, no pipeline, no mobile lifecycle.
+    #[test]
+    fn headless_capabilities_yield_server_profile() {
+        let caps = Capabilities::headless();
+        let tier = QualityTier::from_capabilities(&caps);
+        let profile = tier.platform_profile();
+        assert!(!profile.presents_display);
+        assert!(!profile.pipelined_rendering);
+        assert!(!profile.suspend_resume_lifecycle);
+    }
+}
