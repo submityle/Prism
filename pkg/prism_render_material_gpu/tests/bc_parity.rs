@@ -11,7 +11,7 @@
 //! without a usable adapter the oracle returns `None` and the test skips.
 
 use prism_render_material::{
-    decode_astc_4x4_ldr, decode_astc_4x4_weights, decode_astc_4x4_weights_ise,
+    decode_astc_4x4_hdr, decode_astc_4x4_ldr, decode_astc_4x4_weights, decode_astc_4x4_weights_ise,
     decode_astc_void_extent_hdr, decode_astc_void_extent_ldr, decode_bc1, decode_bc3,
     decode_bc6h_mode10_signed, decode_bc6h_mode10_unsigned, decode_bc6h_mode12_signed,
     decode_bc6h_mode12_unsigned, decode_bc6h_mode13_signed, decode_bc6h_mode13_unsigned,
@@ -3419,5 +3419,104 @@ fn astc_multi_partition_dual_plane_per_partition_cem_parity_against_gpu_hardware
     eprintln!(
         "ASTC multi-partition dual-plane (per-partition CEM) parity: {} configs x {PER_MODE} blocks within 1 LSB of hardware",
         MULTI_PART_DUAL_PLANE_PERPART.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ASTC single-partition HDR parity (the six HDR Colour Endpoint Modes).
+//
+// Proves `decode_astc_4x4_hdr` against the Metal ASTC-HDR hardware decoder.
+// Each block uses block mode 67 (trit weights, 1 low bit, 6 levels), whose
+// single-partition colour budget is `color_bits = 111 - 42 = 69`, mapping to
+// QUANT_256 for every HDR integer count (<= 8), so the colour integers are the
+// raw 8-bit values laid directly at bit 17 (no colour unquant table). For each
+// HDR CEM we emit random 8-bit endpoint integers and random trit weights, then
+// compare the RGB FP16 output. The oracle drops the alpha lane, so alpha is
+// implemented (CEM 14 linear, others LNS) but only RGB is hardware-proven here.
+//
+// Both the Metal decoder and this CPU path follow the Khronos ASTC spec: the
+// endpoint lanes are interpolated in the integer domain, then mapped to FP16
+// via a deterministic LNS / UNORM16 conversion, so agreement is near-exact.
+// FP16 saturates at 65504 (0x7BFF); texels that reach that clamp (or that the
+// hardware renders as non-finite) are a spec-boundary ambiguity and are counted
+// and skipped rather than asserted, so the proof covers the representable range.
+// ---------------------------------------------------------------------------
+
+/// Build a single-partition HDR block of block mode `bm` and CEM `cem`, laying
+/// `ep` as consecutive 8-bit (QUANT_256) colour integers at bits [17..].
+fn astc_hdr_block(bm: u32, cem: u32, ep: &[u8]) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    astc_set_bits(&mut b, 0, 11, bm);
+    astc_set_bits(&mut b, 13, 4, cem);
+    for (i, v) in ep.iter().enumerate() {
+        astc_set_bits(&mut b, 17 + i as u32 * 8, 8, u32::from(*v));
+    }
+    b
+}
+
+#[test]
+fn astc_single_partition_hdr_parity_against_gpu_hardware_decode() {
+    let Some(oracle) = BlockOracle::try_new() else {
+        eprintln!("no GPU adapter; skipping ASTC single-partition HDR parity");
+        return;
+    };
+    if !oracle
+        .features()
+        .contains(Features::TEXTURE_COMPRESSION_ASTC_HDR)
+    {
+        eprintln!("adapter lacks ASTC HDR support; skipping ASTC single-partition HDR parity");
+        return;
+    }
+    let format = TextureFormat::Astc {
+        block: wgpu::AstcBlock::B4x4,
+        channel: wgpu::AstcChannel::Hdr,
+    };
+    // (CEM, integer_count): LUM_LARGE=2, LUM_SMALL=2, RGB_SCALE=4, RGB=6,
+    // RGB_LDR_ALPHA=8, RGB_HDR_ALPHA=8.
+    const HDR_CEMS: [(u32, usize); 6] = [(2, 2), (3, 2), (7, 4), (11, 6), (14, 8), (15, 8)];
+    const BM: u32 = 67; // trit weights, 1 low bit, 6 levels
+    const PER_CEM: u32 = 128;
+    let mut rng = Rng(0x4D7_0C7A);
+    let mut compared = 0u64;
+    let mut skipped = 0u64;
+    for (cem, int_count) in HDR_CEMS {
+        for _ in 0..PER_CEM {
+            let mut ep = [0u8; 8];
+            for e in ep[..int_count].iter_mut() {
+                *e = (rng.next_u32() & 0xFF) as u8;
+            }
+            let mut blk = astc_hdr_block(BM, cem, &ep[..int_count]);
+            let mut raw = [0u8; 16];
+            for r in raw.iter_mut() {
+                *r = (rng.next_u32() % 6) as u8;
+            }
+            astc_set_weights_ise(&mut blk, WeightForm::Trit, 1, &raw);
+
+            let cpu = decode_astc_4x4_hdr(&blk).expect("supported single-partition HDR block");
+            let gpu = oracle.decode_rgb_f32(format, &blk);
+            for t in 0..16 {
+                for c in 0..3 {
+                    let (cv, gv) = (cpu[t][c], gpu[t][c]);
+                    // Skip the FP16 saturation boundary: at/above ~65504 the CPU
+                    // clamps to the max finite half while hardware may emit +Inf.
+                    if !cv.is_finite() || !gv.is_finite() || cv.abs() >= 6.5e4 {
+                        skipped += 1;
+                        continue;
+                    }
+                    let tol = cv.abs() * 1e-3 + 1e-3;
+                    assert!(
+                        (cv - gv).abs() <= tol,
+                        "ASTC HDR cem={cem} bm={BM} block={blk:02x?} texel {t} chan {c}: ep={:?} raw_w={} cpu={cv} gpu={gv}",
+                        &ep[..int_count],
+                        raw[t]
+                    );
+                    compared += 1;
+                }
+            }
+        }
+    }
+    eprintln!(
+        "ASTC single-partition HDR parity: {compared} RGB lanes match hardware across {} CEMs x {PER_CEM} blocks ({skipped} saturated lanes skipped)",
+        HDR_CEMS.len()
     );
 }
