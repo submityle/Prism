@@ -19,6 +19,7 @@ use super::{
         prepare_gtao_kernel_bind_groups, prepare_gtao_prepass_bind_groups,
         prepare_gtao_temporal_bind_groups, prepare_gtao_temporal_textures, prepare_gtao_textures,
     },
+    area_light::{init_area_light_ltc_lut, PrismAreaLightSettings},
     bloom::{bloom_pass, init_bloom_pipelines, prepare_bloom_bind_groups, prepare_bloom_textures},
     cas::{
         cas_pass, init_cas_pipeline, prepare_cas_bind_groups, prepare_cas_textures,
@@ -263,6 +264,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/surface_cache_spatial_filter.wesl");
         embedded_asset!(app, "../shaders/surface_cache_coverage.wesl");
         embedded_asset!(app, "../shaders/surface_cache_composite.wesl");
+        embedded_asset!(app, "../shaders/area_light_ltc.wesl");
         embedded_asset!(app, "../shaders/light_routing.wesl");
         embedded_asset!(app, "../shaders/taa_resolve.wesl");
         embedded_asset!(app, "../shaders/vsm_receiver_gen.wesl");
@@ -366,6 +368,7 @@ impl Plugin for PrismShadingPlugin {
             .init_resource::<PrismSurfaceCacheSettings>()
             .init_resource::<SurfaceCacheBuffers>()
             .init_resource::<PrismLightRoutingSettings>()
+            .init_resource::<PrismAreaLightSettings>()
             .insert_resource(ShadingFrameGraph {
                 compiled: compiled_graph,
             })
@@ -485,6 +488,11 @@ impl Plugin for PrismShadingPlugin {
             // `add_systems` call so the already-full RenderStartup tuples stay
             // within Bevy's 20-element limit.
             .add_systems(RenderStartup, init_light_routing_pipeline)
+            // Area-light `LTC` `LUT` bake + upload (opt-in, Heitz et al. 2016).
+            // Own `add_systems` call so the already-full RenderStartup tuples
+            // stay within Bevy's 20-element limit; gated on the settings
+            // `enabled` flag, so disabled it bakes and uploads nothing.
+            .add_systems(RenderStartup, init_area_light_ltc_lut)
             // Volumetric-cloud domain + per-view resource and bind-group
             // preparation. Self-contained (its own resident textures + view
             // cache, gated on the opt-in settings), so it lives in its own

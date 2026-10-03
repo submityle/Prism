@@ -1,4 +1,5 @@
 mod ao;
+mod area_light;
 mod bloom;
 mod cas;
 mod chromatic_aberration;
