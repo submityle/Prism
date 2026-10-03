@@ -160,6 +160,76 @@ fn write_json_string(out: &mut String, s: &str) {
     out.push('"');
 }
 
+/// Base `tid` for GPU queue tracks, offset far above CPU thread ids so GPU
+/// queues render as their own tracks alongside the CPU threads.
+#[cfg(feature = "gpu")]
+pub const GPU_TRACK_TID_BASE: u64 = 0x1_0000_0000;
+
+/// Serialize every registered CPU thread's spans **plus** a GPU track for the
+/// given projected GPU spans, all on one aligned timeline.
+///
+/// GPU spans must already be projected onto the CPU nanosecond base (see
+/// [`GpuClockCalibration::project_span`](crate::gpu::calibration::GpuClockCalibration::project_span)),
+/// so the GPU track lines up with the CPU tracks. Each GPU queue becomes its own
+/// `tid` ([`GPU_TRACK_TID_BASE`] + queue id) with a `thread_name` metadata event
+/// labeled `"GPU Queue <n>"`.
+#[cfg(feature = "gpu")]
+pub fn export_string_with_gpu(gpu_spans: &[crate::gpu::ProjectedGpuSpan]) -> String {
+    use alloc::collections::BTreeSet;
+    use alloc::format;
+
+    let mut out = export_string();
+    // Splice GPU events in just before the closing `]` of `traceEvents`.
+    let tail = "],\"displayTimeUnit\":\"ms\"}";
+    let Some(cut) = out.rfind(tail) else {
+        return out;
+    };
+    out.truncate(cut);
+
+    let mut queues = BTreeSet::new();
+    for span in gpu_spans {
+        queues.insert(span.queue.0);
+    }
+    for queue in queues {
+        out.push(',');
+        let tid = GPU_TRACK_TID_BASE + queue as u64;
+        write_thread_name_event(&mut out, tid, &format!("GPU Queue {queue}"));
+    }
+    for span in gpu_spans {
+        out.push(',');
+        let tid = GPU_TRACK_TID_BASE + span.queue.0 as u64;
+        write_gpu_complete_event(&mut out, tid, span);
+    }
+
+    out.push_str(tail);
+    out
+}
+
+/// Write one projected GPU span as a Chrome complete (`"X"`) event with a
+/// `gpu` category and `queue`/`frame`/`correlation` args.
+#[cfg(feature = "gpu")]
+fn write_gpu_complete_event(out: &mut String, tid: u64, span: &crate::gpu::ProjectedGpuSpan) {
+    out.push_str("{\"name\":");
+    write_json_string(out, &span.label);
+    out.push_str(",\"cat\":\"gpu\",\"ph\":\"X\",\"pid\":");
+    let _ = write!(out, "{PROCESS_ID}");
+    out.push_str(",\"tid\":");
+    let _ = write!(out, "{tid}");
+    out.push_str(",\"ts\":");
+    write_micros(out, span.cpu_start_nanos);
+    out.push_str(",\"dur\":");
+    write_micros(out, span.cpu_duration_nanos);
+    out.push_str(",\"args\":{\"queue\":");
+    let _ = write!(out, "{}", span.queue.0);
+    out.push_str(",\"frame\":");
+    let _ = write!(out, "{}", span.frame);
+    if let Some(corr) = span.correlation {
+        out.push_str(",\"correlation\":");
+        let _ = write!(out, "{}", corr.0);
+    }
+    out.push_str("}}");
+}
+
 /// Write the Chrome Trace JSON for all registered threads to `path`.
 pub fn export_to_file(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
     use std::io::Write as _;
@@ -319,5 +389,36 @@ mod tests {
         assert!(contents.contains("file_scope"));
         assert!(is_balanced_json(&contents));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_track_appears_aligned_with_cpu_track() {
+        use crate::gpu::{CorrelationId, GpuQueueId, ProjectedGpuSpan};
+
+        ring::clear_current_thread();
+        {
+            let _s = Scope::new("cpu_work").with_category("render");
+        }
+        let gpu = [
+            ProjectedGpuSpan {
+                label: String::from("ShadowPass"),
+                queue: GpuQueueId::GRAPHICS,
+                cpu_start_nanos: 2_000_000,
+                cpu_duration_nanos: 500_000,
+                correlation: Some(CorrelationId(7)),
+                frame: 3,
+                depth: 0,
+            },
+        ];
+        let json = super::export_string_with_gpu(&gpu);
+        assert!(is_balanced_json(&json), "unbalanced JSON: {json}");
+        assert!(json.contains("cpu_work"), "missing CPU span");
+        assert!(json.contains("ShadowPass"), "missing GPU span");
+        assert!(json.contains("\"cat\":\"gpu\""), "missing gpu category");
+        assert!(json.contains("GPU Queue 0"), "missing GPU track name");
+        assert!(json.contains("\"correlation\":7"), "missing correlation arg");
+        // GPU span starts at 2_000_000 ns == 2000 us.
+        assert!(json.contains("\"ts\":2000.000"), "GPU ts not aligned to CPU us base");
     }
 }

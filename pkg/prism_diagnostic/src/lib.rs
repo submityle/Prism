@@ -37,6 +37,20 @@
 //! - Load visualization: [`LoadProfile`](metrics::LoadProfile) rolls recorded
 //!   spans up into per-thread utilization and per-system totals.
 //!
+//! ## M4 scope (this build, `gpu` feature) — GPU timing + unified timeline
+//! - Backend-neutral GPU timing in [`gpu`]: a timestamp-query model
+//!   ([`GpuSpan`](gpu::GpuSpan)/[`GpuTick`](gpu::GpuTick)), CPU↔GPU affine
+//!   calibration ([`GpuClockCalibration`](gpu::GpuClockCalibration)), an
+//!   N-frame readback correlation ring ([`GpuReadbackRing`](gpu::GpuReadbackRing)),
+//!   cross-queue correlation tokens ([`CorrelationId`](gpu::CorrelationId)), and a
+//!   [`UnifiedTimeline`](gpu::UnifiedTimeline) that projects CPU and GPU spans
+//!   onto one axis. The Chrome exporter can emit an aligned GPU track via
+//!   [`export_chrome_with_gpu`](trace::export_chrome_with_gpu).
+//! - This is implemented as a pure ingestion API with no GPU-backend
+//!   dependency; a future RHI backend feeds raw ticks in. Live multi-driver GPU
+//!   validation is deferred to that backend (the ingestion seam makes it
+//!   non-blocking).
+//!
 //! Later milestones add GPU timing scopes, lock-free Tracy/Perfetto sinks, and
 //! crash/minidump capture.
 //!
@@ -47,6 +61,8 @@
 
 pub mod filter;
 pub mod fmt;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod instrument;
 pub mod macros;
 pub mod metrics;
@@ -66,12 +82,20 @@ pub use metrics::{
     HudSnapshot, LoadProfile, MetricRegistry, RegistrySnapshot, Sum, SystemLoad, ThreadLoad,
 };
 pub use model::{Event, Field, FieldValue, Level};
+#[cfg(feature = "gpu")]
+pub use gpu::{
+    next_correlation_id, AffineFit, CalibrationSample, CorrelationId, GpuClockCalibration,
+    GpuQueryId, GpuQueueId, GpuReadbackRing, GpuSpan, GpuTick, PendingQuery, ProjectedGpuSpan,
+    TimelineEntry, TimelineTrack, UnifiedTimeline,
+};
 pub use sink::{clear_sink, set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
 pub use span::Scope;
 pub use trace::{
     export_chrome_string, export_chrome_to_file, FlowPhase, FlowRecord, RingBuffer, SpanRecord,
     ThreadTrace,
 };
+#[cfg(feature = "gpu")]
+pub use trace::export_chrome_with_gpu;
 
 /// Macro support: build and dispatch an event from `format_args!` output.
 /// Not part of the stable surface; call the logging macros instead.

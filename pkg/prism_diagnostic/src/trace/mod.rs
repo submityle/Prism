@@ -11,6 +11,10 @@ pub mod flow;
 pub mod ring;
 
 pub use chrome::{export_string as export_chrome_string, export_to_file as export_chrome_to_file};
+#[cfg(feature = "gpu")]
+pub use chrome::{
+    export_string_with_gpu as export_chrome_with_gpu, GPU_TRACK_TID_BASE,
+};
 pub use flow::{
     clear_flow, flow_len, flow_records, record_flow, FlowPhase, FlowRecord, DEFAULT_FLOW_CAPACITY,
 };

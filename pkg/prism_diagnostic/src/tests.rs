@@ -17,10 +17,27 @@ fn runtime_filter_drops_below_threshold() {
     crate::warn!("this passes {}", 2);
     crate::error!("this also passes");
     let events = sink.events();
-    assert_eq!(events.len(), 2);
-    assert_eq!(events[0].level, Level::Warn);
-    assert_eq!(events[0].message, "this passes 2");
-    assert_eq!(events[1].level, Level::Error);
+
+    // The compile-time floor (`max_level_*` features) can further suppress
+    // events before the runtime threshold even sees them, so compute the
+    // expected survivors from that floor rather than assuming `std`-only
+    // defaults. With the runtime threshold at `Warn`, `info` is always dropped;
+    // `warn`/`error` survive only if the compile-time floor also admits them.
+    let warn_in = crate::filter::enabled(Level::Warn);
+    let error_in = crate::filter::enabled(Level::Error);
+    let expected: Vec<(Level, &str)> = [
+        warn_in.then_some((Level::Warn, "this passes 2")),
+        error_in.then_some((Level::Error, "this also passes")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    assert_eq!(events.len(), expected.len());
+    for (event, (level, message)) in events.iter().zip(expected) {
+        assert_eq!(event.level, level);
+        assert_eq!(event.message, message);
+    }
     crate::clear_sink();
 }
 
