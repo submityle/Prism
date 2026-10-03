@@ -1440,3 +1440,274 @@ mod pipelined_tests {
         app.update();
     }
 }
+
+// ---- M4 Inc2: platform lifecycle events + graceful shutdown ------------
+
+use crate::lifecycle::{
+    AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+};
+use crate::schedule::Shutdown;
+
+/// `add_lifecycle_events` registers all five lifecycle event types and installs
+/// the `AppLifecycle` resource defaulting to `Running`.
+#[test]
+fn add_lifecycle_events_registers_events_and_installs_running_state() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+
+    // Each lifecycle event has an installed buffer.
+    assert!(app.world().get_resource::<Events<Suspended>>().is_some());
+    assert!(app.world().get_resource::<Events<Resumed>>().is_some());
+    assert!(app.world().get_resource::<Events<LowMemory>>().is_some());
+    assert!(app.world().get_resource::<Events<FocusChanged>>().is_some());
+    assert!(
+        app.world()
+            .get_resource::<Events<WillRenderFirstFrame>>()
+            .is_some()
+    );
+
+    // The coarse run-state resource is installed, defaulting to Running.
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Running,
+    );
+}
+
+/// `add_lifecycle_events` is idempotent: calling it again neither loses a
+/// buffered event nor resets an already-advanced `AppLifecycle`.
+#[test]
+fn add_lifecycle_events_is_idempotent() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+
+    // Seed a buffered event and manually advance the run state.
+    app.send_event(FocusChanged { focused: true });
+    *app.world_mut().resource_mut::<AppLifecycle>() = AppLifecycle::Suspended;
+
+    // A second registration must not clobber either.
+    app.add_lifecycle_events();
+    assert_eq!(
+        app.world().resource::<Events<FocusChanged>>().len(),
+        1,
+        "re-registering must not reset the event buffer",
+    );
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Suspended,
+        "re-registering must not reset an advanced AppLifecycle",
+    );
+}
+
+/// `send_event` auto-registers the event type on first use, then buffers the
+/// event so it participates in the normal rotation.
+#[test]
+fn send_event_auto_registers_and_buffers() {
+    let mut app = App::new();
+    // No prior `add_event`/`add_lifecycle_events`.
+    app.send_event(LowMemory);
+    let events = app
+        .world()
+        .get_resource::<Events<LowMemory>>()
+        .expect("send_event should auto-install the Events<LowMemory> resource");
+    assert_eq!(events.len(), 1, "the sent event is buffered");
+}
+
+/// A lifecycle event sent via `send_event` is observed exactly once by a reader
+/// cursor running in a frame, exactly as it will be under a platform runner.
+#[test]
+fn lifecycle_event_is_delivered_to_a_reader() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+
+    let seen = Arc::new(Mutex::new(Vec::<bool>::new()));
+    let seen_sys = seen.clone();
+    app.add_systems(
+        Update,
+        move |mut cursor: Local<EventCursor<FocusChanged>>, events: Res<Events<FocusChanged>>| {
+            for ev in cursor.read(&events) {
+                seen_sys.lock().unwrap().push(ev.focused);
+            }
+        },
+    );
+
+    // Inject a focus-lost then focus-gained event before the frame runs.
+    app.send_event(FocusChanged { focused: false });
+    app.send_event(FocusChanged { focused: true });
+    app.update();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![false, true],
+        "the reader observes each lifecycle event once, in send order",
+    );
+}
+
+/// `run_shutdown` runs the dedicated `Shutdown` schedule exactly once, even when
+/// called repeatedly, and reports `shutdown_ran`.
+#[test]
+fn run_shutdown_runs_shutdown_schedule_exactly_once() {
+    let mut app = App::new();
+
+    let runs = Arc::new(AtomicU64::new(0));
+    let r = runs.clone();
+    app.add_systems(Shutdown, move || {
+        r.fetch_add(1, Ordering::Relaxed);
+    });
+
+    assert!(!app.shutdown_ran());
+    app.run_shutdown();
+    assert!(app.shutdown_ran());
+    app.run_shutdown();
+    app.run_shutdown();
+
+    assert_eq!(
+        runs.load(Ordering::Relaxed),
+        1,
+        "the Shutdown schedule runs exactly once regardless of repeated calls",
+    );
+}
+
+/// `run_shutdown` advances `AppLifecycle` to `WillExit` before running the
+/// `Shutdown` schedule, so a shutdown system observes the exiting state.
+#[test]
+fn run_shutdown_sets_will_exit_before_running_shutdown_systems() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+
+    let observed = Arc::new(Mutex::new(None::<AppLifecycle>));
+    let o = observed.clone();
+    app.add_systems(Shutdown, move |state: Res<AppLifecycle>| {
+        *o.lock().unwrap() = Some(*state);
+    });
+
+    app.run_shutdown();
+
+    assert_eq!(
+        *observed.lock().unwrap(),
+        Some(AppLifecycle::WillExit),
+        "a shutdown system sees AppLifecycle::WillExit",
+    );
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::WillExit,
+    );
+}
+
+/// Plugins are torn down in the *reverse* of registration order at shutdown,
+/// distinct from the forward-order post-startup `cleanup`.
+#[test]
+fn plugin_shutdown_runs_in_reverse_registration_order() {
+    #[derive(Default)]
+    struct Teardown(Vec<&'static str>);
+    impl Resource for Teardown {}
+
+    struct A;
+    impl Plugin for A {
+        fn build(&self, app: &mut App) {
+            app.init_resource::<Teardown>();
+        }
+        fn cleanup(&self, app: &mut App) {
+            app.world_mut().resource_mut::<Teardown>().0.push("cleanup-A");
+        }
+        fn shutdown(&self, app: &mut App) {
+            app.world_mut().resource_mut::<Teardown>().0.push("shutdown-A");
+        }
+    }
+    struct B;
+    impl Plugin for B {
+        fn build(&self, _app: &mut App) {}
+        fn cleanup(&self, app: &mut App) {
+            app.world_mut().resource_mut::<Teardown>().0.push("cleanup-B");
+        }
+        fn shutdown(&self, app: &mut App) {
+            app.world_mut().resource_mut::<Teardown>().0.push("shutdown-B");
+        }
+    }
+    struct C;
+    impl Plugin for C {
+        fn build(&self, _app: &mut App) {}
+        fn shutdown(&self, app: &mut App) {
+            app.world_mut().resource_mut::<Teardown>().0.push("shutdown-C");
+        }
+    }
+
+    let mut app = App::new();
+    app.add_plugins(A).add_plugins(B).add_plugins(C);
+
+    // cleanup is forward order (A, B); C defines no cleanup. `cleanup` requires
+    // `finish` to have advanced the assembly state first.
+    app.finish();
+    app.cleanup();
+    assert_eq!(
+        app.world().resource::<Teardown>().0,
+        vec!["cleanup-A", "cleanup-B"],
+        "cleanup runs in forward registration order",
+    );
+
+    // shutdown is reverse order (C, B, A).
+    app.run_shutdown();
+    assert_eq!(
+        app.world().resource::<Teardown>().0,
+        vec![
+            "cleanup-A",
+            "cleanup-B",
+            "shutdown-C",
+            "shutdown-B",
+            "shutdown-A",
+        ],
+        "shutdown runs in reverse registration order, after cleanup",
+    );
+}
+
+/// The `HeadlessRunner` runs the graceful-shutdown path once after its frame
+/// loop ends: the `Shutdown` schedule fires exactly once and `AppLifecycle`
+/// reaches `WillExit`.
+#[test]
+fn headless_runner_runs_shutdown_once_after_frame_loop() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+
+    let shutdowns = Arc::new(AtomicU64::new(0));
+    let will_exit = Arc::new(Mutex::new(false));
+    let s = shutdowns.clone();
+    let w = will_exit.clone();
+    app.add_systems(Shutdown, move |state: Res<AppLifecycle>| {
+        s.fetch_add(1, Ordering::Relaxed);
+        if state.is_exiting() {
+            *w.lock().unwrap() = true;
+        }
+    });
+
+    let exit = app.set_runner(|app| HeadlessRunner::with_max_frames(3).run(app)).run();
+    assert_eq!(exit, AppExit::Success);
+    assert_eq!(
+        shutdowns.load(Ordering::Relaxed),
+        1,
+        "the runner runs the Shutdown schedule exactly once",
+    );
+    assert!(
+        *will_exit.lock().unwrap(),
+        "the shutdown system observes AppLifecycle::WillExit",
+    );
+}
+
+/// `run_once` also runs the graceful-shutdown path before returning.
+#[test]
+fn run_once_runs_shutdown_path() {
+    use crate::runner::run_once;
+
+    let mut app = App::new();
+    let ran = Arc::new(AtomicU64::new(0));
+    let r = ran.clone();
+    app.add_systems(Shutdown, move || {
+        r.fetch_add(1, Ordering::Relaxed);
+    });
+
+    let exit = run_once(app);
+    assert_eq!(exit, AppExit::Success);
+    assert_eq!(
+        ran.load(Ordering::Relaxed),
+        1,
+        "run_once drives the Shutdown schedule exactly once",
+    );
+}

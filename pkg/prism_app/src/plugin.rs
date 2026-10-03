@@ -30,6 +30,8 @@ use crate::app::App;
 ///    now-available handles.
 /// 4. [`cleanup`](Plugin::cleanup) — called after finishing; drop build-time
 ///    scratch state.
+/// 5. [`shutdown`](Plugin::shutdown) — called once at graceful exit, in
+///    *reverse* registration order; persist state and release devices.
 ///
 /// # Dependencies
 ///
@@ -89,6 +91,20 @@ pub trait Plugin: Send + Sync + 'static {
 
     /// Release build-time scratch after finishing. Defaults to a no-op.
     fn cleanup(&self, _app: &mut App) {}
+
+    /// Tear this plugin down at graceful shutdown. Defaults to a no-op.
+    ///
+    /// Called once from
+    /// [`App::run_shutdown`](crate::app::App::run_shutdown) when the app exits,
+    /// in the **reverse** of the order plugins were added, so a plugin tears
+    /// down before the plugins it was built after (design §12 / §21 / §24.5).
+    /// Use it to save state, disconnect from the network, flush to disk, or
+    /// release GPU devices.
+    ///
+    /// This is distinct from [`cleanup`](Plugin::cleanup): `cleanup` runs once
+    /// *after startup* (forward order) to drop build-time scratch, whereas
+    /// `shutdown` runs once *at exit* (reverse order) to persist and release.
+    fn shutdown(&self, _app: &mut App) {}
 
     /// A stable, human-readable name. Defaults to the implementing type's
     /// fully-qualified name and is used for [`is_unique`](Plugin::is_unique)

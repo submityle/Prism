@@ -5,13 +5,21 @@
 //! carries an [`AppExit`] code so a process can map a clean quit vs. an error
 //! to an OS exit status.
 //!
+//! # Graceful shutdown
+//!
+//! The graceful-shutdown path (design §12 / §21 / §24.5) is implemented in
+//! [`App::run_shutdown`](crate::app::App::run_shutdown), which the runners call
+//! once the frame loop ends: it runs the dedicated
+//! [`Shutdown`](crate::schedule::Shutdown) schedule (draining each system's
+//! deferred commands at the schedule's sync points), materialises reserved
+//! entities, and tears plugins down in reverse registration order via
+//! [`Plugin::shutdown`](crate::plugin::Plugin::shutdown).
+//!
 //! # Honestly deferred
 //!
-//! Bevy-style `EventWriter<AppExit>` ergonomics (an event, not a resource) and
-//! the full graceful-shutdown path — drain commands, run `Last`, run plugin
-//! `cleanup` in reverse (design §12 / §21) — are M1/M4. M0 provides the
-//! resource-based request and an immediate, honest stop; it does not pretend to
-//! run a graceful drain it has not implemented.
+//! Bevy-style `EventWriter<AppExit>` ergonomics (modelling exit as an event
+//! rather than this resource) remain future work; the resource-based request
+//! here is the stable, honest surface and is what the runners observe.
 
 use prism_ecs::resource::Resource;
 

@@ -90,6 +90,15 @@ core_phase! {
     /// Final phase of every frame (frame cleanup / bookkeeping).
     Last
 }
+core_phase! {
+    /// Runs **once** at graceful exit, driven by
+    /// [`App::run_shutdown`](crate::app::App::run_shutdown) (design §12, §21,
+    /// §24.5). Register save / disconnect / flush / release systems here. This
+    /// is distinct from the per-frame [`Last`] phase: it runs exactly once when
+    /// a shutdown is requested, not every frame, so a one-shot "write the save
+    /// file" system cannot double-fire.
+    Shutdown
+}
 
 /// The startup phases, in run order. Driven exactly once by
 /// [`App::run`](crate::app::App::run) before the first frame.
@@ -129,4 +138,5 @@ const _: fn() = || {
     assert_label::<Update>();
     assert_label::<PostUpdate>();
     assert_label::<Last>();
+    assert_label::<Shutdown>();
 };

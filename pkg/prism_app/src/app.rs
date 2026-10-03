@@ -25,8 +25,12 @@ use crate::exit::{AppExit, AppExitRequest};
 use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
 use crate::plugin::Plugin;
 use crate::plugin_group::PluginGroup;
+use crate::lifecycle::{
+    AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+};
 use crate::schedule::{
-    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
+    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown, StateTransition, Startup,
+    Update,
 };
 use crate::sub_app::{SubApp, SubApps};
 use crate::sub_app_label::SubAppLabel;
@@ -68,6 +72,9 @@ pub struct App {
     /// so a repeated `add_event` neither reinserts the `Events` resource (which
     /// would discard buffered events) nor schedules a second rotation system.
     pub(crate) added_events: HashSet<TypeId>,
+    /// Whether [`run_shutdown`](App::run_shutdown) has already run, so a runner
+    /// (or a double call) runs the graceful-shutdown path exactly once.
+    shutdown_ran: bool,
 }
 
 impl Default for App {
@@ -111,6 +118,9 @@ impl App {
         schedules.insert(Update, Schedule::new());
         schedules.insert(PostUpdate, Schedule::new());
         schedules.insert(Last, Schedule::new());
+        // The graceful-exit schedule (design §12/§21/§24.5): run once by
+        // `run_shutdown`, never per frame.
+        schedules.insert(Shutdown, Schedule::new());
         // The FixedMain tick group (design §8, §22 M2). RunFixedMainLoop itself
         // is a native driver (see crate::fixed), not a schedule, so only the
         // five fixed sub-phases get empty schedules here.
@@ -133,6 +143,7 @@ impl App {
             plugins_state: PluginsState::Adding,
             initialized_states: HashSet::new(),
             added_events: HashSet::new(),
+            shutdown_ran: false,
         }
     }
 
@@ -409,6 +420,83 @@ impl App {
             .world
             .get_resource::<AppExitRequest>()
             .and_then(AppExitRequest::get)
+    }
+
+    /// Run the graceful-shutdown path exactly once (design §12 / §21 / §24.5).
+    ///
+    /// In order:
+    ///
+    /// 1. Advance [`AppLifecycle`] (if installed) to
+    ///    [`WillExit`](crate::lifecycle::AppLifecycle::WillExit).
+    /// 2. Run the dedicated [`Shutdown`] schedule once on the main world, so
+    ///    user "save / disconnect / flush / release" systems run. Each system's
+    ///    deferred [`Commands`](prism_ecs::command::Commands) are applied at the
+    ///    schedule's per-system sync points, draining the command queue
+    ///    (design §21: "退出 … 排空命令队列、运行收尾 system").
+    /// 3. [`flush_reserved`](prism_ecs::world::World::flush_reserved) the main
+    ///    world so any reserved entities a shutdown system handed out are fully
+    ///    materialised.
+    /// 4. Run each plugin's [`shutdown`](crate::plugin::Plugin::shutdown) in the
+    ///    **reverse** of registration order, so a plugin tears down before the
+    ///    plugins it was built after.
+    ///
+    /// Idempotent: a second call is a no-op, so a runner can call it on every
+    /// exit path without double-running teardown. Runners
+    /// ([`HeadlessRunner`](crate::runner::HeadlessRunner),
+    /// [`run_once`](crate::runner::run_once)) call this once the frame loop ends,
+    /// before returning the [`AppExit`].
+    ///
+    /// [`Shutdown`]: crate::schedule::Shutdown
+    pub fn run_shutdown(&mut self) -> &mut Self {
+        if self.shutdown_ran {
+            return self;
+        }
+        self.shutdown_ran = true;
+
+        if let Some(lifecycle) = self.sub_apps.main.world.get_resource_mut::<AppLifecycle>() {
+            *lifecycle = AppLifecycle::WillExit;
+        }
+
+        self.sub_apps.main.run_schedule(Shutdown);
+        self.sub_apps.main.world.flush_reserved();
+
+        // Reverse-order plugin teardown. Take the vec out first so each
+        // `shutdown` can hold `&mut self` without aliasing the plugin list
+        // (mirrors `finish`/`cleanup`).
+        let plugins = core::mem::take(&mut self.plugins);
+        for plugin in plugins.iter().rev() {
+            plugin.shutdown(self);
+        }
+        self.plugins = plugins;
+        self
+    }
+
+    /// Whether [`run_shutdown`](App::run_shutdown) has already run.
+    #[must_use]
+    pub fn shutdown_ran(&self) -> bool {
+        self.shutdown_ran
+    }
+
+    /// Register the platform [lifecycle events](crate::lifecycle) and install
+    /// the [`AppLifecycle`] resource (defaulting to
+    /// [`Running`](crate::lifecycle::AppLifecycle::Running)).
+    ///
+    /// After this, systems can read [`Suspended`] / [`Resumed`] /
+    /// [`LowMemory`] / [`FocusChanged`] / [`WillRenderFirstFrame`] with an
+    /// [`EventCursor`](prism_ecs::event::EventCursor), and a platform runner
+    /// (or a test) can emit them via [`send_event`](App::send_event). Idempotent
+    /// per event type; calling it again does not reset an already-advanced
+    /// [`AppLifecycle`].
+    pub fn add_lifecycle_events(&mut self) -> &mut Self {
+        self.add_event::<Suspended>()
+            .add_event::<Resumed>()
+            .add_event::<LowMemory>()
+            .add_event::<FocusChanged>()
+            .add_event::<WillRenderFirstFrame>();
+        if self.sub_apps.main.world.get_resource::<AppLifecycle>().is_none() {
+            self.insert_resource(AppLifecycle::Running);
+        }
+        self
     }
 
     // ---- accessors --------------------------------------------------------

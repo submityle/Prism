@@ -14,8 +14,9 @@
 //! This crate is built in milestones (design §22). **M0** shipped the shell;
 //! **M1** layered the full phase order, the plugin dependency graph, the state
 //! machine, and buffered events; **M2** adds the fixed-timestep inner loop;
-//! **M4** begins the window/runner tier, starting with drift-free frame
-//! pacing (this increment). Currently implemented:
+//! **M4** begins the window/runner tier: drift-free frame pacing, then
+//! platform lifecycle events plus the graceful-shutdown path (this increment).
+//! Currently implemented:
 //!
 //! - [`App`] with a monotonic [`PluginsState`] assembly
 //!   state machine and a swappable [runner].
@@ -76,6 +77,20 @@
 //!   [`with_frame_limit`](crate::runner::HeadlessRunner::with_frame_limit)
 //!   for a mobile frame limiter or a server tickrate; the default stays
 //!   uncapped.
+//! - Platform [lifecycle] events (design §12, §22 M4):
+//!   [`Suspended`] / [`Resumed`] / [`LowMemory`] / [`FocusChanged`] /
+//!   [`WillRenderFirstFrame`] and an [`AppLifecycle`] run-state resource,
+//!   registered together by [`App::add_lifecycle_events`] and emittable from a
+//!   runner or test via [`App::send_event`]. The windowed runner that forwards
+//!   these from the OS is a later M4 increment and is documented as absent, not
+//!   stubbed.
+//! - A graceful-shutdown path (design §12/§21/§24.5):
+//!   [`App::run_shutdown`] runs the dedicated [`Shutdown`] schedule once
+//!   (draining each system's deferred commands), materialises reserved
+//!   entities, and tears plugins down in **reverse** registration order via
+//!   [`Plugin::shutdown`] — distinct from the post-startup, forward-order
+//!   [`cleanup`](crate::plugin::Plugin::cleanup). The runners invoke it once the
+//!   frame loop ends.
 //! - Platform-free runners: [`HeadlessRunner`] and
 //!   [`ScheduleRunnerOnce`].
 //!
@@ -101,6 +116,7 @@ pub mod app;
 pub mod event;
 pub mod exit;
 pub mod fixed;
+pub mod lifecycle;
 #[cfg(feature = "std")]
 pub mod pacing;
 pub mod plugin;
@@ -125,10 +141,14 @@ pub use plugin_graph::PluginGraphError;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 pub use runner::{HeadlessRunner, ScheduleRunnerOnce, run_once};
 pub use fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
+pub use lifecycle::{
+    AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+};
 #[cfg(feature = "std")]
 pub use pacing::{FrameLimit, FramePacer, FrameStats};
 pub use schedule::{
-    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
+    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown, StateTransition, Startup,
+    Update,
 };
 #[cfg(feature = "pipelined")]
 pub use pipelined::PipelinedExecutor;
@@ -147,11 +167,14 @@ pub mod prelude {
     pub use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
     pub use crate::runner::{HeadlessRunner, ScheduleRunnerOnce};
     pub use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
+    pub use crate::lifecycle::{
+        AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+    };
     #[cfg(feature = "std")]
     pub use crate::pacing::{FrameLimit, FramePacer, FrameStats};
     pub use crate::schedule::{
-        First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup,
-        Update,
+        First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown, StateTransition,
+        Startup, Update,
     };
     #[cfg(feature = "pipelined")]
     pub use crate::pipelined::PipelinedExecutor;

@@ -25,5 +25,8 @@ pub fn run_once(mut app: App) -> AppExit {
     // Bring any pipelined render frame home before reading final state
     // (no-op without the `pipelined` feature / unless pipelining was enabled).
     app.sync_sub_apps();
-    app.should_exit().unwrap_or(AppExit::Success)
+    let exit = app.should_exit().unwrap_or(AppExit::Success);
+    // Graceful-shutdown path once, before returning (design §12/§21).
+    app.run_shutdown();
+    exit
 }

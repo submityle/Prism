@@ -90,6 +90,9 @@ impl HeadlessRunner {
         // Bring any pipelined render frame home before returning so the final
         // frame's render has completed (no-op in the serial / feature-off case).
         app.sync_sub_apps();
+        // Run the graceful-shutdown path once (design §12/§21): drain the
+        // Shutdown schedule and tear plugins down in reverse order.
+        app.run_shutdown();
         exit
     }
 }

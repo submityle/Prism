@@ -67,4 +67,22 @@ impl App {
         }
         self
     }
+
+    /// Send one event of type `E`, registering `E` first if it was not already
+    /// registered via [`add_event`](App::add_event).
+    ///
+    /// This is the out-of-system entry point a platform runner (or a test) uses
+    /// to inject an event — most importantly the [lifecycle
+    /// events](crate::lifecycle) a windowed runner will forward from the OS.
+    /// Because it auto-registers `E`, the event is buffered and participates in
+    /// the normal once-per-frame rotation, so it stays readable for the frame
+    /// it is sent and the frame after, exactly like an event sent from inside a
+    /// system.
+    pub fn send_event<E: Event>(&mut self, event: E) -> &mut Self {
+        if !self.added_events.contains(&TypeId::of::<E>()) {
+            self.add_event::<E>();
+        }
+        self.world_mut().resource_mut::<Events<E>>().send(event);
+        self
+    }
 }
