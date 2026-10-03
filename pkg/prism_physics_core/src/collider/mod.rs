@@ -50,6 +50,10 @@ pub use heightfield::{HeightField, HeightFieldRayHit};
 pub mod sdf;
 
 pub use sdf::{MeshSdf, SdfBuildParams};
+pub mod sdf_narrowband;
+
+pub use sdf_narrowband::{NarrowBandParams, NarrowBandSdf};
+
 pub mod weld;
 
 pub use weld::{weld_mesh, WeldParams, WeldedMesh};
