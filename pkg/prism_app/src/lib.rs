@@ -203,7 +203,10 @@ pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 pub use runner::{DedicatedServerRunner, ServerTickDiagnostics};
 pub use runner::{HeadlessRunner, ScheduleRunnerOnce, run_once};
 pub use run_mode::RunMode;
-pub use fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
+pub use fixed::{
+    AfterFixedMainLoop, BeforeFixedMainLoop, FixedFirst, FixedLast, FixedPostUpdate,
+    FixedPreUpdate, FixedUpdate,
+};
 pub use lifecycle::{
     AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
 };
@@ -250,7 +253,10 @@ pub mod prelude {
     pub use crate::runner::{DedicatedServerRunner, ServerTickDiagnostics};
     pub use crate::runner::{HeadlessRunner, ScheduleRunnerOnce};
     pub use crate::run_mode::RunMode;
-    pub use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
+    pub use crate::fixed::{
+        AfterFixedMainLoop, BeforeFixedMainLoop, FixedFirst, FixedLast, FixedPostUpdate,
+        FixedPreUpdate, FixedUpdate,
+    };
     pub use crate::lifecycle::{
         AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
     };

@@ -24,14 +24,36 @@
 //! so a long frame cannot spiral into an unbounded number of steps — it slows
 //! down gracefully instead of locking up.
 //!
-//! # Honestly deferred
+//! # Per-frame hooks around the inner loop
 //!
-//! `RunFixedMainLoop` here is a native driver, so inserting *user* systems
-//! `before` / `after` the inner loop *within* `RunFixedMainLoop` (as Bevy's
-//! system-based driver allows) is not yet possible. Attach fixed-rate systems
-//! to the [`FixedMain`](FIXED_MAIN_PHASES) tick group (commonly
-//! [`FixedUpdate`]) instead. The system-based, user-extensible driver is a
-//! later refinement and is documented as absent, not stubbed.
+//! Two user schedules bracket the inner loop *within* `RunFixedMainLoop`, each
+//! running exactly **once per frame** regardless of how many fixed steps the
+//! accumulator yields this frame (including zero):
+//!
+//! - [`BeforeFixedMainLoop`] runs first, while the default clock still reads
+//!   [`Virtual`](prism_time::Virtual) time. Variable-rate systems that feed the
+//!   fixed simulation (buffering input the fixed sim drains) or snapshot
+//!   pre-step state (storing a *previous* transform for later interpolation)
+//!   attach here.
+//! - [`AfterFixedMainLoop`] runs last, after the accumulator is drained and the
+//!   default clock is restored to `Virtual`. The fixed clock's
+//!   [`overstep`](prism_time::Time::overstep) (interpolation alpha) is final for
+//!   the frame here, so render-interpolation systems attach to this schedule.
+//!
+//! Attach *fixed-rate* work (physics, netcode) to the per-step
+//! [`FixedMain`](FIXED_MAIN_PHASES) tick group (commonly [`FixedUpdate`])
+//! instead; those run once per *step*, not once per frame.
+//!
+//! # Honestly scoped
+//!
+//! The two bracket schedules deliver the same user-facing capability as Bevy's
+//! `RunFixedMainLoopSystem::{BeforeFixedMainLoop, AfterFixedMainLoop}`. The one
+//! remaining difference is a deliberate design choice, documented rather than
+//! faked: the accumulator drain itself is a native driver *between* the two
+//! hook schedules, not a system a user can reorder relative to other systems in
+//! the same schedule. The bracket schedules cover the real use cases (pre-step
+//! input, post-step interpolation) without exposing the drain as a reorderable
+//! system; a fully system-based driver is a later refinement, not a stub.
 
 use prism_ecs::schedule::ScheduleLabel;
 use prism_ecs::world::World;
@@ -83,6 +105,31 @@ pub const FIXED_MAIN_PHASES: [&str; 5] = [
     "FixedLast",
 ];
 
+fixed_phase! {
+    /// Runs **once per frame**, before the fixed inner loop drains the
+    /// accumulator, while the default clock still reads
+    /// [`Virtual`](prism_time::Virtual) time (design §8).
+    ///
+    /// Unlike the per-*step* [`FixedMain`](FIXED_MAIN_PHASES) phases
+    /// ([`FixedFirst`] … [`FixedLast`]), this bracket schedule fires exactly
+    /// once each frame regardless of the step count — including frames that
+    /// take zero fixed steps. Attach variable-rate systems that prepare input
+    /// for the fixed simulation, or snapshot pre-step state for interpolation.
+    BeforeFixedMainLoop
+}
+fixed_phase! {
+    /// Runs **once per frame**, after the fixed inner loop has drained the
+    /// accumulator and the default clock is restored to
+    /// [`Virtual`](prism_time::Virtual) (design §8).
+    ///
+    /// Like [`BeforeFixedMainLoop`] it fires exactly once per frame regardless
+    /// of step count. The fixed clock's
+    /// [`overstep`](prism_time::Time::overstep) (interpolation alpha) is final
+    /// for the frame here, so render-interpolation systems attach to this
+    /// schedule.
+    AfterFixedMainLoop
+}
+
 /// Run the `RunFixedMainLoop` phase: drain the fixed accumulator, running the
 /// `FixedMain` tick group once per fixed step.
 ///
@@ -108,6 +155,10 @@ pub fn run_fixed_main_loop(world: &mut World) {
     if world.get_resource::<EngineClocks>().is_none() {
         return;
     }
+
+    // Per-frame before-hook (design §8): runs once, before any fixed step,
+    // while the default clock still reads virtual time. See `BeforeFixedMainLoop`.
+    world.run_schedule(BeforeFixedMainLoop);
 
     world
         .resource_mut::<EngineClocks>()
@@ -152,6 +203,12 @@ pub fn run_fixed_main_loop(world: &mut World) {
     clocks.set_source(DefaultSource::Virtual);
     clocks.sync_default();
 
+    // Per-frame after-hook (design §8): runs once, after the accumulator is
+    // drained and the default clock is back on virtual time. The fixed clock's
+    // overstep (interpolation alpha) is final for the frame. See
+    // `AfterFixedMainLoop`.
+    world.run_schedule(AfterFixedMainLoop);
+
     #[cfg(feature = "std")]
     if instrument
         && let Some(diag) = world.get_resource_mut::<crate::diagnostics::FrameDiagnostics>()
@@ -169,4 +226,6 @@ const _: fn() = || {
     assert_label::<FixedUpdate>();
     assert_label::<FixedPostUpdate>();
     assert_label::<FixedLast>();
+    assert_label::<BeforeFixedMainLoop>();
+    assert_label::<AfterFixedMainLoop>();
 };

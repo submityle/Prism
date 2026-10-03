@@ -22,7 +22,10 @@ use prism_ecs::schedule::{IntoSystemConfigs, Schedule, ScheduleLabel, Schedules}
 use prism_ecs::world::World;
 
 use crate::exit::{AppExit, AppExitRequest};
-use crate::fixed::{FixedFirst, FixedLast, FixedPostUpdate, FixedPreUpdate, FixedUpdate};
+use crate::fixed::{
+    AfterFixedMainLoop, BeforeFixedMainLoop, FixedFirst, FixedLast, FixedPostUpdate,
+    FixedPreUpdate, FixedUpdate,
+};
 use crate::plugin::Plugin;
 use crate::plugin_group::PluginGroup;
 use crate::capability::{Capabilities, QualityTier};
@@ -146,6 +149,10 @@ impl App {
         schedules.insert(FixedUpdate, Schedule::new());
         schedules.insert(FixedPostUpdate, Schedule::new());
         schedules.insert(FixedLast, Schedule::new());
+        // Per-frame bracket hooks around the fixed inner loop (design §8): each
+        // runs once per frame, driven by `run_fixed_main_loop`.
+        schedules.insert(BeforeFixedMainLoop, Schedule::new());
+        schedules.insert(AfterFixedMainLoop, Schedule::new());
     }
 
     /// Create a bare app: a main sub-app with no schedules, no plugins, and no

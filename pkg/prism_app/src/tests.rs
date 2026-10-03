@@ -1067,6 +1067,177 @@ fn paused_virtual_time_freezes_fixed_steps() {
     assert_eq!(fixed.load(Ordering::Relaxed), 0, "paused clock feeds no fixed steps");
 }
 
+// ---- fixed-loop per-frame bracket hooks (BeforeFixedMainLoop / AfterFixedMainLoop) ----
+
+use crate::fixed::{AfterFixedMainLoop, BeforeFixedMainLoop};
+
+/// Both bracket hooks fire exactly once per frame when the frame expends
+/// several fixed steps — they bracket the *loop*, not each step.
+#[test]
+fn fixed_bracket_hooks_run_once_per_frame_with_many_substeps() {
+    let before = Arc::new(AtomicU64::new(0));
+    let after = Arc::new(AtomicU64::new(0));
+    let fixed = Arc::new(AtomicU64::new(0));
+    let (bf, af, fx) = (before.clone(), after.clone(), fixed.clone());
+
+    let mut app = App::new();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(30)));
+    app.set_fixed_timestep_hz(100.0); // 10 ms step => 3 steps / 30 ms frame
+    app.add_systems(BeforeFixedMainLoop, move || {
+        bf.fetch_add(1, Ordering::Relaxed);
+    });
+    app.add_systems(AfterFixedMainLoop, move || {
+        af.fetch_add(1, Ordering::Relaxed);
+    });
+    app.add_systems(FixedUpdate, move || {
+        fx.fetch_add(1, Ordering::Relaxed);
+    });
+    app.set_runner(|app| HeadlessRunner::with_max_frames(2).run(app));
+    app.run();
+
+    assert_eq!(fixed.load(Ordering::Relaxed), 6, "3 fixed steps x 2 frames");
+    assert_eq!(before.load(Ordering::Relaxed), 2, "before-hook once per frame");
+    assert_eq!(after.load(Ordering::Relaxed), 2, "after-hook once per frame");
+}
+
+/// The bracket hooks still fire on frames that expend **zero** fixed steps
+/// (frame delta smaller than one timestep) — they are per-frame, not per-step.
+#[test]
+fn fixed_bracket_hooks_run_on_zero_substep_frames() {
+    let before = Arc::new(AtomicU64::new(0));
+    let after = Arc::new(AtomicU64::new(0));
+    let fixed = Arc::new(AtomicU64::new(0));
+    let (bf, af, fx) = (before.clone(), after.clone(), fixed.clone());
+
+    let mut app = App::new();
+    // 3 ms per frame vs a 10 ms step: the accumulator never reaches a full step
+    // within 3 frames, so zero fixed steps run.
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(3)));
+    app.set_fixed_timestep_hz(100.0);
+    app.add_systems(BeforeFixedMainLoop, move || {
+        bf.fetch_add(1, Ordering::Relaxed);
+    });
+    app.add_systems(AfterFixedMainLoop, move || {
+        af.fetch_add(1, Ordering::Relaxed);
+    });
+    app.add_systems(FixedUpdate, move || {
+        fx.fetch_add(1, Ordering::Relaxed);
+    });
+    app.set_runner(|app| HeadlessRunner::with_max_frames(3).run(app));
+    app.run();
+
+    assert_eq!(fixed.load(Ordering::Relaxed), 0, "no full step accumulates in 3 ms frames");
+    assert_eq!(before.load(Ordering::Relaxed), 3, "before-hook fires every frame");
+    assert_eq!(after.load(Ordering::Relaxed), 3, "after-hook fires every frame");
+}
+
+/// The hooks bracket the inner loop: `BeforeFixedMainLoop` → fixed steps →
+/// `AfterFixedMainLoop`, and the whole bracket sits between `First` and
+/// `PreUpdate` (within the `RunFixedMainLoop` phase, design §7/§8 invariant).
+#[test]
+fn fixed_bracket_hooks_wrap_the_inner_loop_in_frame_order() {
+    let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+    let mut app = App::new();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(20)));
+    app.set_fixed_timestep_hz(100.0); // 10 ms step => 2 steps this frame
+    {
+        let o = order.clone();
+        app.add_systems(First, move || o.lock().unwrap().push("first"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(BeforeFixedMainLoop, move || o.lock().unwrap().push("before"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(FixedUpdate, move || o.lock().unwrap().push("step"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(AfterFixedMainLoop, move || o.lock().unwrap().push("after"));
+    }
+    {
+        let o = order.clone();
+        app.add_systems(PreUpdate, move || o.lock().unwrap().push("pre"));
+    }
+    app.update();
+
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec!["first", "before", "step", "step", "after", "pre"],
+        "before runs once pre-loop, steps drain, after runs once post-loop, all before PreUpdate"
+    );
+}
+
+/// The before-hook runs *before* the accumulator is drained and the after-hook
+/// runs *after*: the before-hook observes a full pending step in the fixed
+/// overstep (alpha) while the after-hook observes the drained leftover. This
+/// proves the native drain happens between the two bracket schedules.
+#[test]
+fn fixed_bracket_hooks_straddle_the_accumulator_drain() {
+    let before_overstep = Arc::new(Mutex::new(Duration::ZERO));
+    let after_overstep = Arc::new(Mutex::new(Duration::ZERO));
+    let bo = before_overstep.clone();
+    let ao = after_overstep.clone();
+
+    let mut app = App::new();
+    // 15 ms frame vs a 10 ms step: one step drains, leaving a 5 ms overstep.
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(15)));
+    app.set_fixed_timestep_hz(100.0);
+    app.add_systems(BeforeFixedMainLoop, move |clocks: Res<EngineClocks>| {
+        *bo.lock().unwrap() = clocks.fixed().overstep();
+    });
+    app.add_systems(AfterFixedMainLoop, move |clocks: Res<EngineClocks>| {
+        *ao.lock().unwrap() = clocks.fixed().overstep();
+    });
+    app.update();
+
+    let step = Duration::from_millis(10);
+    assert!(
+        *before_overstep.lock().unwrap() >= step,
+        "before-hook sees a full step still pending in the accumulator"
+    );
+    assert!(
+        *after_overstep.lock().unwrap() < step,
+        "after-hook sees the drained leftover (< one timestep)"
+    );
+    assert_eq!(
+        *after_overstep.lock().unwrap(),
+        Duration::from_millis(5),
+        "15 ms frame - one 10 ms step = 5 ms interpolation alpha"
+    );
+}
+
+/// A clock-less world skips both bracket hooks along with the fixed loop
+/// (no `EngineClocks` => the whole `RunFixedMainLoop` driver is a no-op).
+#[test]
+fn clockless_world_skips_bracket_hooks() {
+    use prism_ecs::schedule::{Schedule, Schedules};
+    use prism_ecs::world::World;
+
+    let ran = Arc::new(AtomicU64::new(0));
+    let r = ran.clone();
+
+    let mut world = World::new();
+    world.init_resource::<Schedules>();
+    // Register the bracket schedules but install NO EngineClocks: the driver
+    // must early-return before touching them.
+    let schedules = world.resource_mut::<Schedules>();
+    schedules.insert(BeforeFixedMainLoop, Schedule::new());
+    schedules.insert(AfterFixedMainLoop, Schedule::new());
+    world
+        .resource_mut::<Schedules>()
+        .get_mut(BeforeFixedMainLoop)
+        .unwrap()
+        .add_systems(move || {
+            r.fetch_add(1, Ordering::Relaxed);
+        });
+
+    crate::fixed::run_fixed_main_loop(&mut world);
+    assert_eq!(ran.load(Ordering::Relaxed), 0, "no clock => no bracket hooks run");
+}
+
 // ---- M3 Inc1: secondary sub-apps + one-way extract seam -------------------
 
 use crate::sub_app::SubApp;
