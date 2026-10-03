@@ -10,11 +10,15 @@
 //! the following blocks.
 
 // Host ABI for the glossy-specular ReSTIR *reuse* pass (storage reservoir +
-// dispatch uniform). Gated to test builds until the pipeline/bind-group/
-// dispatch slices land a non-test consumer; its live consumers today are the
-// layout + round-trip parity tests in `reuse_tests` and `abi`'s own `tests`.
-#[cfg(test)]
+// dispatch uniform). Promoted to a non-test module now that [`resources`] sizes
+// the resident ping-pong reservoir buffers against `GpuSpecrReservoir`; the
+// `GpuSpecGiReuseConfig` uniform it also exports is consumed by the bind-group /
+// dispatch slices that follow.
 mod abi;
+
+// Per-view resident resources for the reuse pass: the ping-pong pair of glossy
+// reservoir storage buffers and the resolved specular+confidence target.
+mod resources;
 
 #[cfg(test)]
 mod shader_tests;

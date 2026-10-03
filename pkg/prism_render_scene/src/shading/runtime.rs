@@ -65,6 +65,15 @@ pub struct PrismShadingSettings {
     /// view-space normal the SSR trace consumes (there is no G-buffer). Off by
     /// default.
     pub enable_ssr: bool,
+    /// Enables the glossy-specular ReSTIR *reuse* pass. Requires `enable_ssr`
+    /// and the visibility buffer: it reconstructs each pixel's view-space glossy
+    /// point from the SSR prepass reverse-Z depth and packed `normal_roughness`,
+    /// streams the current-frame screen-space GGX candidate into a per-pixel
+    /// reservoir, temporally merges the reprojected prior-frame reservoir under
+    /// a roughness-tightened confidence cap, and resolves a low-variance
+    /// specular estimate (+ confidence) the `spec_denoise` passes and the
+    /// energy-conserving composite consume. Off by default.
+    pub enable_spec_gi: bool,
     /// Enables the temporal anti-aliasing (TAA) resolve compute pass. Requires
     /// the visibility buffer (for the composited `scene_color` and the
     /// motion-vector G-buffer); the pass motion-reprojects and YCoCg-variance
@@ -203,6 +212,7 @@ impl Default for PrismShadingSettings {
             ibl_dfg_sample_count: 1024,
             ibl_prefilter_sample_count: 256,
             enable_ssr: false,
+            enable_spec_gi: false,
             enable_taa: false,
             enable_virtual_shadow: false,
             enable_ssgi: false,
