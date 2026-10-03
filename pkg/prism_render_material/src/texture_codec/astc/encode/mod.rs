@@ -1055,6 +1055,90 @@ pub fn encode_astc_single_partition_6x5_ldr_mode371(texels: &[[u8; 4]; 30]) -> [
     block
 }
 
+/// Encode thirty LDR RGBA texels (6 wide x 5 tall) into one 16-byte ASTC block
+/// using single-partition block **mode 355**: a full 6x5 weight grid (no
+/// bilinear infill) with a **QUANT_6 weight range** (one trit + one low bit ->
+/// six interpolation levels, thirty weights BISE-packed into 78 weight bits)
+/// paired with **QUANT_40 quint colour** (`color_bits = 111 - 78 = 33`, six
+/// quint-BISE endpoint integers with three low bits packed into 32 bits) and
+/// CEM 8 (RGB direct, alpha forced to 255).
+///
+/// This is the first encoder in the *sixth* recipe family: both the colour and
+/// the weight stream are mixed-radix BISE sequences with low bits. It fuses the
+/// pre-swap bit-colour endpoint fit with a **quint** colour BISE
+/// (`encode_quint_sequence`, three low bits) and a **trit** weight BISE
+/// (`encode_trit_sequence`, one low bit, mirrored into the top of the block).
+/// The 6x5 weight grid equals the footprint, so there is no infill -- weight
+/// `t` maps 1:1 to texel `t` in row-major order (`texel = y * 6 + x`). Six
+/// weight levels over forty-level endpoints balance a finer colour palette than
+/// mode 371's QUANT_10 against a middle-grey-plus weight ramp.
+///
+/// Neither field is a plain bit run: the six QUANT_40 endpoint values (each
+/// packed `low | (quint << 3)`) go through `encode_quint_sequence` at block
+/// bit 17 (bits 17..49), and the thirty QUANT_6 weights (each `low | (trit << 1)`)
+/// are packed LSB-first by `encode_trit_sequence` then mirrored into the top of
+/// the block (bits 50..128). The two regions and the mode/CEM header (bits
+/// 0..17) do not overlap.
+///
+/// CEM 8 carries no alpha, so the decoded block has alpha 255 for every texel
+/// and the input alpha channel is ignored.
+#[must_use]
+pub fn encode_astc_single_partition_6x5_ldr_mode355(texels: &[[u8; 4]; 30]) -> [u8; 16] {
+    const BLOCK_MODE: u32 = 355;
+    const CEM_RGB_DIRECT: u32 = 8;
+    const WEIGHT_LEVELS: u32 = 6; // QUANT_6: one trit + one low bit (six levels)
+    const WEIGHT_LOW_BITS: u32 = 1;
+    const COLOR_LEVEL: usize = 8; // QUANT_40 (quint + three low bits)
+    const COLOR_LOW_BITS: u32 = 3;
+
+    // Fit the principal-axis RGB endpoints over all thirty texels, then quantise
+    // each channel into the QUANT_40 packed representation (quint + three low
+    // bits).
+    let (e0_raw, e1_raw) = endpoint_fit::fit_rgb_endpoints(texels);
+    let mut p0: [u8; 3] =
+        core::array::from_fn(|c| color_quant::quantize_color_channel(COLOR_LEVEL, e0_raw[c]));
+    let mut p1: [u8; 3] =
+        core::array::from_fn(|c| color_quant::quantize_color_channel(COLOR_LEVEL, e1_raw[c]));
+
+    // Reconstruct the decoded endpoints the hardware interpolates between.
+    let unq = |p: [u8; 3]| -> [u8; 3] {
+        core::array::from_fn(|c| super::color_unquant::unquant_color(COLOR_LEVEL, p[c]))
+    };
+    let mut d0 = unq(p0);
+    let mut d1 = unq(p1);
+
+    // CEM 8 applies blue-contraction + endpoint swap when `hadd(e0) > hadd(e1)`
+    // on the *decoded* colours. Pre-swap the packed endpoints so the decoder
+    // interpolates d0..d1 directly; weights are fitted after the swap.
+    let hadd = |c: [u8; 3]| u32::from(c[0]) + u32::from(c[1]) + u32::from(c[2]);
+    if hadd(d0) > hadd(d1) {
+        core::mem::swap(&mut p0, &mut p1);
+        core::mem::swap(&mut d0, &mut d1);
+    }
+
+    // Fit the thirty QUANT_6 weights against the *decoded* endpoints (no infill
+    // on a full grid): each texel picks the nearest of six levels.
+    let raw = weight_fit::quantize_weights_ise(texels, d0, d1, WEIGHT_LEVELS);
+
+    let mut w = bits::BlockWriter::new();
+    w.write_bits(0, 11, BLOCK_MODE);
+    w.write_bits(13, 4, CEM_RGB_DIRECT);
+    // Encode the thirty QUANT_6 weights (trit + one low bit) LSB-first from
+    // bit 0, then mirror the stream into the top of the block (bit p -> 127-p).
+    let mut scratch = [0u8; 16];
+    super::trit_quint::encode_trit_sequence(&mut scratch, 0, WEIGHT_LOW_BITS, &raw);
+    w.mirror_weight_stream(&scratch);
+    let mut block = w.into_block();
+
+    // Six QUANT_40 colour values (each packed `low | (quint << 3)`) in the
+    // decoder's read order [e0.r, e1.r, e0.g, e1.g, e0.b, e1.b], emitted as a
+    // quint BISE at block bit 17 (bits 17..49, disjoint from the weight stream
+    // at 50..128).
+    let packed = [p0[0], p1[0], p0[1], p1[1], p0[2], p1[2]];
+    super::trit_quint::encode_quint_sequence(&mut block, 17, COLOR_LOW_BITS, &packed);
+    block
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
@@ -1070,6 +1154,7 @@ mod tests {
     use super::encode_astc_single_partition_5x4_ldr;
     use super::encode_astc_single_partition_5x5_ldr;
     use super::encode_astc_single_partition_6x5_ldr;
+    use super::encode_astc_single_partition_6x5_ldr_mode355;
     use super::encode_astc_single_partition_6x5_ldr_mode369;
     use super::encode_astc_single_partition_6x5_ldr_mode371;
     use super::encode_astc_single_partition_6x6_ldr;
@@ -2126,6 +2211,68 @@ mod tests {
         assert!(
             max_rgb_err_30(&src, &dec) <= 32,
             "6x5 mode371 eight-level gradient must stay within the QUANT_10 + weight budget"
+        );
+    }
+
+    #[test]
+    fn six_by_five_mode355_constant_block_round_trips_within_quant40() {
+        // Mode 355 uses QUANT_40 (quint + 3 low bits, forty-level) colour, so a
+        // constant block reconstructs within the QUANT_40 quantisation budget
+        // (step ~255/39).
+        let src = [[41u8, 173, 98, 255]; 30];
+        let blk = encode_astc_single_partition_6x5_ldr_mode355(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 m355 constant");
+        assert_eq!(count, 30, "6x5 footprint must decode 30 texels");
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_30(&src, &dec) <= 8,
+            "6x5 mode355 constant block must round-trip within the QUANT_40 budget"
+        );
+        for d in &dec {
+            assert_eq!(d[3], 255, "CEM 8 forces alpha 255");
+        }
+    }
+
+    #[test]
+    fn six_by_five_mode355_two_colour_endpoints_within_quant40() {
+        // A hard split: every texel sits on one of the two endpoints, reached
+        // exactly by the QUANT_6 weight extremes (0 / max), so the only error is
+        // the QUANT_40 endpoint quantisation.
+        let a = [15u8, 35, 55, 255];
+        let b = [210u8, 190, 170, 255];
+        let src: [[u8; 4]; 30] = core::array::from_fn(|t| if t % 2 == 0 { a } else { b });
+        let blk = encode_astc_single_partition_6x5_ldr_mode355(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 m355 two-colour");
+        assert_eq!(count, 30);
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_30(&src, &dec) <= 8,
+            "6x5 mode355 two-colour block must hit both endpoints within QUANT_40"
+        );
+    }
+
+    #[test]
+    fn six_by_five_mode355_gradient_resolves_six_levels() {
+        // Six weight levels (trit + one low bit) resolve a per-row ramp within
+        // the combined QUANT_40 endpoint and six-level weight budget.
+        let a = [10u8, 20, 30, 255];
+        let b = [220u8, 210, 200, 255];
+        let src: [[u8; 4]; 30] = core::array::from_fn(|t| {
+            let x = (t % 6) as u16; // 0..5 across the row
+            [
+                (a[0] as u16 + (b[0] as u16 - a[0] as u16) * x / 5) as u8,
+                (a[1] as u16 + (b[1] as u16 - a[1] as u16) * x / 5) as u8,
+                (a[2] as u16 + (b[2] as u16 - a[2] as u16) * x / 5) as u8,
+                255,
+            ]
+        });
+        let blk = encode_astc_single_partition_6x5_ldr_mode355(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 6, 5).expect("decode 6x5 m355 gradient");
+        assert_eq!(count, 30);
+        let dec: [[u8; 4]; 30] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_30(&src, &dec) <= 48,
+            "6x5 mode355 six-level gradient must stay within the QUANT_40 + weight budget"
         );
     }
 }
