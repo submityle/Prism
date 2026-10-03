@@ -257,6 +257,8 @@ pub mod tet_fem_substep;
 pub use tet_fem_substep::{step_newmark_substeps, SubstepParams, SubstepResult};
 pub mod tet_fem_diagnostics;
 pub use tet_fem_diagnostics::{angular_momentum, elastic_energy, kinetic_energy, linear_momentum};
+pub mod tet_fem_strain_limit;
+pub use tet_fem_strain_limit::{project_strain_limits, StrainLimitParams, StrainLimitReport};
 pub mod tet_fem_anisotropic;
 pub use tet_fem_anisotropic::{
     orthotropic_fiber_energy, orthotropic_fiber_first_piola, FiberDirection, FiberFamily,
