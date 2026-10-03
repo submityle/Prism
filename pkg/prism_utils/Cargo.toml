@@ -23,6 +23,12 @@ determinism = []
 # for when a consumer explicitly opts in (the conservative default from the
 # design doc §11/§24.2).
 concurrent = ["std"]
+# M6 `bevy_utils`-shaped container aliases (`HashMap`/`HashSet`/`StableHashMap`/
+# `EntityHashMap`/`SmallVec`, …) to ease porting a Bevy codebase onto Prism by
+# changing `use` paths only. The `StableHashMap`/`StableHashSet` aliases wrap
+# `std::collections::HashMap`, so this capability layer pulls in `std`. It is
+# OFF by default: a non-migrating consumer pays nothing for it.
+compat-bevy = ["std"]
 
 [lints]
 workspace = true

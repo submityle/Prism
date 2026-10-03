@@ -24,6 +24,16 @@
 //! - [`AllocBox`](crate::alloc_::boxed::AllocBox): a `Box`-like owner that is
 //!   generic over any [`Allocator`], demonstrating "容器带分配器".
 //!
+//! ## M6 region sub-allocators
+//! - [`BuddyAllocator`](crate::alloc_::buddy::BuddyAllocator): a buddy
+//!   sub-allocator that carves a power-of-two region into coalescing blocks.
+//! - [`TlsfAllocator`](crate::alloc_::tlsf::TlsfAllocator): a Two-Level
+//!   Segregated Fit sub-allocator with `O(1)` allocate/free over a region.
+//!
+//! Both manage *byte offsets* into a caller-owned backing region (host RAM, a
+//! `GPU` heap, a streaming buffer) rather than dereferencing memory, so they
+//! are safe code and usable for large-world / `GPU` sub-allocation.
+//!
 //! Everything here is `no_std` + `alloc` compatible and uses only `core` and
 //! `alloc`.
 
@@ -34,12 +44,16 @@ use core::fmt;
 use core::ptr::NonNull;
 
 pub mod boxed;
+pub mod buddy;
 pub mod frame;
 pub mod pool;
+pub mod tlsf;
 
 pub use boxed::AllocBox;
+pub use buddy::BuddyAllocator;
 pub use frame::FrameAllocator;
 pub use pool::Pool;
+pub use tlsf::TlsfAllocator;
 
 /// The error returned when an [`Allocator`] cannot satisfy a request.
 ///

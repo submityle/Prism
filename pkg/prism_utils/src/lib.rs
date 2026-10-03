@@ -63,7 +63,22 @@
 //! tier is gated behind the `concurrent` feature so a single-threaded build
 //! pays nothing for it (the conservative default from the design doc §11/§23).
 //!
-//! Later milestones add advanced layout/migration helpers (M6).
+//! ## M6 scope (this build): advanced layout + migration
+//! - [`HierarchicalBitSet`](hbitset::HierarchicalBitSet): a layered bit set
+//!   with summary levels so "find the next set bit" is close to `O(set bits)`
+//!   even over a very large, sparse index domain (big-world entity/archetype
+//!   masks).
+//! - [`SoaVec`](soa::SoaVec): derive-free structure-of-arrays columnar storage
+//!   (one contiguous column per tuple field) for cache-friendly, vectorisable
+//!   batch passes.
+//! - [`Cow`](cow::Cow): an `Arc`-backed copy-on-write container that is cheap
+//!   to clone and only deep-copies on first mutation of a shared value.
+//! - [`BuddyAllocator`](alloc_::BuddyAllocator)/[`TlsfAllocator`](alloc_::TlsfAllocator):
+//!   offset-based region sub-allocators for large-world / `GPU` heap carving
+//!   (buddy coalescing; `O(1)` Two-Level Segregated Fit).
+//! - [`compat_bevy`]: `bevy_utils`-shaped container aliases (the `compat-bevy`
+//!   feature) so porting a Bevy codebase onto Prism is mostly a `use`-path
+//!   change.
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -80,20 +95,30 @@ pub mod alloc_;
 pub mod array_vec;
 pub mod arena;
 pub mod bit_set;
+#[cfg(feature = "compat-bevy")]
+pub mod compat_bevy;
 #[cfg(feature = "concurrent")]
 pub mod concurrent;
+pub mod cow;
 pub mod determinism;
 pub mod hash;
+pub mod hbitset;
 pub mod intern;
 pub mod prelude;
 pub mod slot_map;
 pub mod small_vec;
+pub mod soa;
 pub mod sparse_set;
 
-pub use alloc_::{AllocBox, AllocError, Allocator, FrameAllocator, Global, Pool};
+pub use alloc_::{
+    AllocBox, AllocError, Allocator, BuddyAllocator, FrameAllocator, Global, Pool, TlsfAllocator,
+};
 pub use array_vec::ArrayVec;
 pub use arena::{Arena, ArenaIndex};
 pub use bit_set::BitSet;
+pub use cow::Cow;
+pub use hbitset::HierarchicalBitSet;
+pub use soa::{Soa, SoaVec};
 #[cfg(feature = "concurrent")]
 pub use concurrent::{
     Collector, ConcurrentHashMap, Guard, LocalHandle, MpmcQueue, SpscConsumer, SpscProducer,
@@ -111,3 +136,5 @@ pub use sparse_set::SparseSet;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_m6;
