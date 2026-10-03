@@ -8,12 +8,14 @@
 
 mod blob_vec;
 mod chunk;
+mod owning_group;
 mod sparse;
 mod sparse_sets;
 mod table;
 
 pub use blob_vec::BlobVec;
 pub use chunk::{rows_per_chunk, ChunkVersions, TARGET_CHUNK_BYTES};
+pub use owning_group::{OwningGroup, OwningGroupId, OwningGroupIter};
 pub use sparse::ComponentSparseSet;
 pub use sparse_sets::SparseSets;
 pub use table::{Column, Table};
