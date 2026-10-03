@@ -10,7 +10,7 @@
 //!
 //! Because a dynamic value has no single static Rust type, it reports an
 //! optional *represented* type name (the concrete type it stands in for, when
-//! known) and a placeholder [`TypeInfo`](crate::TypeInfo) whose kind matches
+//! known) and a synthetic [`TypeInfo`](crate::TypeInfo) whose kind matches
 //! the value but whose field metadata is empty. Use the represented type name
 //! for identity and the kind traits for traversal.
 

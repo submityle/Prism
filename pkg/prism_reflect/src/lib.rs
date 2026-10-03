@@ -53,8 +53,17 @@
 //!   [`diff`]/[`merge`] compute and apply a minimal [`Patch`] between two
 //!   reflected values (design §24.4).
 //!
-//! Later milestones (design §22): ECS/scene/editor/script/network integration
-//! (M6).
+//! - **M6 integration:** the [`integration`] layer turns the reflection core
+//!   into the shared contract behind entity-component-system (ECS) snapshots,
+//!   scenes, editors, scripting, and networking:
+//!   [`DynamicScene`](integration::DynamicScene) for ordered, type-tagged
+//!   component snapshots with binary and framed-text serialization;
+//!   [`inspect`](integration::inspect) for a backend-agnostic editor property
+//!   tree with metadata-driven hints; [`replicated_diff`](integration::replicated_diff)
+//!   for field-level network deltas honouring `replicate`/`no_replicate`
+//!   intent; and [`ScriptBridge`](integration::ScriptBridge) for safe path
+//!   get/set plus call-by-name. The `compat-bevy` feature adds a
+//!   [`bevy_reflect`-compatible prelude](compat_bevy) (no `bevy_*` dependency).
 //!
 //! This crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -83,6 +92,9 @@ mod reflect_trait;
 mod registry;
 mod runtime_type;
 pub mod schema;
+#[cfg(feature = "compat-bevy")]
+pub mod compat_bevy;
+pub mod integration;
 mod ser;
 mod type_data;
 mod type_info;
@@ -124,6 +136,11 @@ pub use schema::{
     AttributeValue, FieldMetadata, MigrateError, Migration, SchemaRegistry, SchemaVersion,
     TypeMetadata, TypeSchema, ValidationError,
 };
+pub use integration::{
+    DynamicScene, InspectorHints, InspectorKind, InspectorNode, ReplicationError, ReplicationPlan,
+    ReplicationPolicy, SceneEntry, SceneError, ScriptBridge, ScriptError, apply_replicated, inspect,
+    replicated_diff,
+};
 
 /// Convenient re-exports for downstream crates.
 pub mod prelude {
@@ -140,6 +157,10 @@ pub mod prelude {
         to_ron,
     };
     pub use crate::reflect_trait;
+    pub use crate::integration::{
+        DynamicScene, InspectorNode, ReplicationPlan, ReplicationPolicy, ScriptBridge,
+        apply_replicated, inspect, replicated_diff,
+    };
     pub use crate::schema::{
         AttributeValue, FieldMetadata, MigrateError, Migration, SchemaRegistry, SchemaVersion,
         TypeMetadata, TypeSchema, ValidationError, from_versioned_binary, from_versioned_ron,
@@ -149,3 +170,6 @@ pub mod prelude {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_m6;

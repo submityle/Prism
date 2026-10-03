@@ -17,6 +17,8 @@ default = ["std", "math"]
 std = ["prism_utils/std"]
 # Reflect prism_math value types (Vec2/Vec3/Vec3A/Vec4/Quat/Mat4).
 math = ["dep:prism_math"]
+# bevy_reflect-compatible aliases + prelude (no bevy_* dependency).
+compat-bevy = []
 
 [lints]
 workspace = true

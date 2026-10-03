@@ -1546,3 +1546,441 @@ mod m4_schema {
         ));
     }
 }
+
+mod function_reflection {
+    use crate::{ArgList, FunctionError, FunctionRegistry, IntoFunction};
+    use core::any::type_name;
+
+    fn add(a: i32, b: i32) -> i32 {
+        a + b
+    }
+
+    fn greet() -> String {
+        "hi".into()
+    }
+
+    fn noop(_value: i32) {}
+
+    #[test]
+    fn call_by_name_happy_path() {
+        let mut registry = FunctionRegistry::new();
+        registry.register("add", add);
+        let result = registry
+            .call("add", ArgList::new().push(2_i32).push(40_i32))
+            .expect("add call succeeds");
+        assert_eq!(result.downcast_ref::<i32>(), Some(&42));
+    }
+
+    #[test]
+    fn zero_arg_and_void_return() {
+        let mut registry = FunctionRegistry::new();
+        registry.register("greet", greet);
+        registry.register("noop", noop);
+
+        let greeting = registry
+            .call("greet", ArgList::new())
+            .expect("greet call succeeds");
+        assert_eq!(greeting.downcast_ref::<String>().map(String::as_str), Some("hi"));
+
+        let nothing = registry
+            .call("noop", ArgList::new().push(7_i32))
+            .expect("noop call succeeds");
+        assert!(nothing.downcast_ref::<()>().is_some());
+    }
+
+    #[test]
+    fn closure_capture_registers() {
+        let base = 100_i32;
+        let mut registry = FunctionRegistry::new();
+        registry.register("addbase", move |x: i32| x + base);
+        let result = registry
+            .call("addbase", ArgList::new().push(5_i32))
+            .expect("closure call succeeds");
+        assert_eq!(result.downcast_ref::<i32>(), Some(&105));
+    }
+
+    #[test]
+    fn unknown_function_errors() {
+        let registry = FunctionRegistry::new();
+        let err = registry
+            .call("missing", ArgList::new())
+            .err()
+            .expect("unknown function errors");
+        assert_eq!(err, FunctionError::UnknownFunction { name: "missing".into() });
+    }
+
+    #[test]
+    fn arity_mismatch_errors() {
+        let mut registry = FunctionRegistry::new();
+        registry.register("add", add);
+        let err = registry
+            .call("add", ArgList::new().push(1_i32))
+            .err()
+            .expect("arity mismatch errors");
+        assert_eq!(
+            err,
+            FunctionError::ArityMismatch {
+                function: Some("add".into()),
+                expected: 2,
+                actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn arg_type_mismatch_errors() {
+        let mut registry = FunctionRegistry::new();
+        registry.register("add", add);
+        let err = registry
+            .call("add", ArgList::new().push(1_i32).push(true))
+            .err()
+            .expect("argument type mismatch errors");
+        assert_eq!(
+            err,
+            FunctionError::ArgTypeMismatch {
+                index: 1,
+                expected: type_name::<i32>(),
+                actual: type_name::<bool>(),
+            }
+        );
+    }
+
+    #[test]
+    fn direct_dynamic_function_and_info() {
+        let function = add.into_function().with_name("add");
+        assert_eq!(function.name(), Some("add"));
+        assert_eq!(function.info().arg_count(), 2);
+        assert_eq!(function.info().arg_types(), &[type_name::<i32>(), type_name::<i32>()]);
+        assert_eq!(function.info().return_type(), type_name::<i32>());
+        let result = function
+            .call(&ArgList::new().push(3_i32).push(4_i32))
+            .expect("direct call succeeds");
+        assert_eq!(result.downcast_ref::<i32>(), Some(&7));
+    }
+
+    #[test]
+    fn registry_iter_and_contains() {
+        let mut registry = FunctionRegistry::new();
+        registry.register("add", add);
+        registry.register("greet", greet);
+        assert_eq!(registry.len(), 2);
+        assert!(!registry.is_empty());
+        assert!(registry.contains("add"));
+        assert!(registry.contains("greet"));
+        assert!(!registry.contains("missing"));
+        let mut names: Vec<&str> = registry.iter().map(|(name, _)| name).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["add", "greet"]);
+    }
+}
+
+mod reflect_trait_dispatch {
+    use crate::{Reflect, TypeRegistry, reflect_trait};
+
+    trait Area: Reflect {
+        fn area(&self) -> f32;
+        fn scale(&mut self, factor: f32);
+    }
+
+    reflect_trait!(
+        /// Reflected accessor for [`Area`].
+        ReflectArea for Area
+    );
+
+    #[derive(Reflect)]
+    struct Circle {
+        radius: f32,
+    }
+
+    impl Area for Circle {
+        fn area(&self) -> f32 {
+            core::f32::consts::PI * self.radius * self.radius
+        }
+
+        fn scale(&mut self, factor: f32) {
+            self.radius *= factor;
+        }
+    }
+
+    #[test]
+    fn dispatch_shared_and_mut() {
+        let mut registry = TypeRegistry::new();
+        registry.register::<Circle>();
+        assert!(registry.register_type_data::<Circle, ReflectArea>(ReflectArea::from_type::<Circle>()));
+
+        let mut value = Circle { radius: 2.0 };
+        let type_id = value.as_any().type_id();
+        let accessor = *registry
+            .get(type_id)
+            .expect("registration")
+            .data::<ReflectArea>()
+            .expect("ReflectArea type data");
+
+        let area = accessor.get(&value).expect("shared downcast").area();
+        assert!((area - core::f32::consts::PI * 4.0).abs() < 1e-5);
+
+        accessor.get_mut(&mut value).expect("mutable downcast").scale(3.0);
+        assert!((value.radius - 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dispatch_rejects_wrong_type() {
+        let accessor = ReflectArea::from_type::<Circle>();
+        let other = 5_i32;
+        assert!(accessor.get(&other).is_none());
+    }
+}
+
+mod runtime_types {
+    use crate::{
+        DynamicStruct, DynamicVariant, EnumTypeBuilder, Reflect, ReflectRef, StructTypeBuilder,
+        TypeInfo, TypeRegistry, from_binary, to_binary,
+    };
+    use crate::DynamicEnum;
+
+    #[test]
+    fn struct_builder_registers_and_round_trips() {
+        let mut registry = TypeRegistry::new();
+        let info = StructTypeBuilder::new("game::Health")
+            .with_field("current", "i32")
+            .with_field("max", "i32")
+            .register(&mut registry);
+        assert!(matches!(info, TypeInfo::Struct(_)));
+        assert!(registry.get_with_name("game::Health").is_some());
+
+        let mut value = DynamicStruct::new();
+        value.set_represented_type_name("game::Health");
+        value.insert("current", 7_i32);
+        value.insert("max", 10_i32);
+
+        let bytes = to_binary(&value).expect("encode runtime struct");
+        let decoded = from_binary(&bytes, &registry, info).expect("decode runtime struct");
+        let ReflectRef::Struct(decoded) = decoded.reflect_ref() else {
+            panic!("decoded value is not a struct");
+        };
+        assert_eq!(
+            decoded.field("current").and_then(|f| f.downcast_ref::<i32>()),
+            Some(&7)
+        );
+        assert_eq!(
+            decoded.field("max").and_then(|f| f.downcast_ref::<i32>()),
+            Some(&10)
+        );
+    }
+
+    #[test]
+    fn nested_runtime_struct_round_trips() {
+        let mut registry = TypeRegistry::new();
+        StructTypeBuilder::new("game::Vec2")
+            .with_field("x", "f32")
+            .with_field("y", "f32")
+            .register(&mut registry);
+        let transform_info = StructTypeBuilder::new("game::Transform")
+            .with_field("position", "game::Vec2")
+            .with_field("rotation", "f32")
+            .register(&mut registry);
+
+        let mut position = DynamicStruct::new();
+        position.set_represented_type_name("game::Vec2");
+        position.insert("x", 1.5_f32);
+        position.insert("y", -2.5_f32);
+
+        let mut transform = DynamicStruct::new();
+        transform.set_represented_type_name("game::Transform");
+        transform.insert_boxed("position", Box::new(position));
+        transform.insert("rotation", 0.25_f32);
+
+        let bytes = to_binary(&transform).expect("encode nested runtime struct");
+        let decoded = from_binary(&bytes, &registry, transform_info).expect("decode nested");
+        let ReflectRef::Struct(decoded) = decoded.reflect_ref() else {
+            panic!("decoded value is not a struct");
+        };
+        assert_eq!(
+            decoded.field("rotation").and_then(|f| f.downcast_ref::<f32>()),
+            Some(&0.25)
+        );
+        let ReflectRef::Struct(inner) = decoded
+            .field("position")
+            .expect("position field")
+            .reflect_ref()
+        else {
+            panic!("nested position is not a struct");
+        };
+        assert_eq!(inner.field("x").and_then(|f| f.downcast_ref::<f32>()), Some(&1.5));
+        assert_eq!(inner.field("y").and_then(|f| f.downcast_ref::<f32>()), Some(&-2.5));
+    }
+
+    #[test]
+    fn enum_builder_round_trips() {
+        let mut registry = TypeRegistry::new();
+        let info = EnumTypeBuilder::new("game::State")
+            .with_unit_variant("Idle")
+            .with_tuple_variant("Score", vec!["i32"])
+            .with_struct_variant("Named", vec![("name", "String")])
+            .register(&mut registry);
+        assert!(matches!(info, TypeInfo::Enum(_)));
+        assert!(registry.get_with_name("game::State").is_some());
+
+        let mut value = DynamicEnum::new(
+            1,
+            "Score",
+            DynamicVariant::Tuple(vec![Box::new(99_i32) as Box<dyn Reflect>]),
+        );
+        value.set_represented_type_name("game::State");
+
+        let bytes = to_binary(&value).expect("encode runtime enum");
+        let decoded = from_binary(&bytes, &registry, info).expect("decode runtime enum");
+        let ReflectRef::Enum(decoded) = decoded.reflect_ref() else {
+            panic!("decoded value is not an enum");
+        };
+        assert_eq!(decoded.variant_name(), "Score");
+        assert_eq!(decoded.variant_index(), 1);
+        assert_eq!(
+            decoded.field_at(0).and_then(|f| f.downcast_ref::<i32>()),
+            Some(&99)
+        );
+    }
+}
+
+mod diff_merge {
+    use crate::{DiffError, DynamicEnum, DynamicVariant, Patch, Reflect, diff, merge};
+    use std::collections::{HashMap, HashSet};
+
+    #[derive(Reflect, Clone, PartialEq, Debug)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+
+    #[derive(Reflect, Clone, PartialEq, Debug)]
+    struct Nested {
+        point: Point,
+        label: String,
+    }
+
+    #[derive(Reflect, Clone, PartialEq, Debug)]
+    struct Tup(i32, bool);
+
+    #[derive(Reflect, Clone, PartialEq, Debug)]
+    enum Choice {
+        A(i32),
+        B { v: i32 },
+    }
+
+    #[test]
+    fn struct_field_change() {
+        let a = Point { x: 1, y: 2 };
+        let b = Point { x: 1, y: 9 };
+        let mut merged = a.clone();
+        diff(&a, &b).apply(&mut merged).expect("apply struct patch");
+        assert_eq!(merged, b);
+    }
+
+    #[test]
+    fn identical_is_unchanged() {
+        let a = Point { x: 3, y: 4 };
+        assert!(diff(&a, &a).is_unchanged());
+    }
+
+    #[test]
+    fn nested_struct_round_trips() {
+        let a = Nested {
+            point: Point { x: 1, y: 2 },
+            label: "a".into(),
+        };
+        let b = Nested {
+            point: Point { x: 1, y: 7 },
+            label: "a".into(),
+        };
+        let patch = diff(&a, &b);
+        assert!(matches!(patch, Patch::Struct(_)));
+        let mut merged = a.clone();
+        patch.apply(&mut merged).expect("apply nested patch");
+        assert_eq!(merged, b);
+    }
+
+    #[test]
+    fn list_grow_and_modify() {
+        let a: Vec<i32> = vec![1, 2];
+        let b: Vec<i32> = vec![9, 2, 3];
+        let mut merged = a.clone();
+        merge(&mut merged, &diff(&a, &b)).expect("apply list patch");
+        assert_eq!(merged, b);
+    }
+
+    #[test]
+    fn map_modify_and_insert() {
+        let mut a = HashMap::new();
+        a.insert("hp".to_string(), 10_i32);
+        a.insert("mp".to_string(), 5_i32);
+        let mut b = HashMap::new();
+        b.insert("hp".to_string(), 99_i32);
+        b.insert("mp".to_string(), 5_i32);
+        b.insert("xp".to_string(), 1_i32);
+
+        let mut merged = a.clone();
+        diff(&a, &b).apply(&mut merged).expect("apply map patch");
+        assert_eq!(merged, b);
+    }
+
+    #[test]
+    fn set_add_round_trips() {
+        let a: HashSet<i32> = [1, 2].into_iter().collect();
+        let b: HashSet<i32> = [1, 2, 3].into_iter().collect();
+        let mut merged = a.clone();
+        diff(&a, &b).apply(&mut merged).expect("apply set patch");
+        assert_eq!(merged, b);
+    }
+
+    #[test]
+    fn enum_same_variant_modify() {
+        let a = Choice::A(1);
+        let b = Choice::A(5);
+        let patch = diff(&a, &b);
+        assert!(matches!(patch, Patch::Enum(_)));
+        let mut merged = a.clone();
+        patch.apply(&mut merged).expect("apply enum patch");
+        assert_eq!(merged, b);
+    }
+
+    #[test]
+    fn struct_variant_modify_round_trips() {
+        let a = Choice::B { v: 1 };
+        let b = Choice::B { v: 42 };
+        let mut merged = a.clone();
+        diff(&a, &b).apply(&mut merged).expect("apply struct-variant patch");
+        assert_eq!(merged, b);
+    }
+
+    #[test]
+    fn tuple_struct_change() {
+        let a = Tup(1, true);
+        let b = Tup(9, false);
+        let patch = diff(&a, &b);
+        assert!(matches!(patch, Patch::TupleStruct(_)));
+        let mut merged = a.clone();
+        patch.apply(&mut merged).expect("apply tuple-struct patch");
+        assert_eq!(merged, b);
+    }
+
+    #[test]
+    fn kind_mismatch_errors() {
+        // A struct patch applied onto a value of a different kind is a mismatch.
+        let patch = diff(&Point { x: 1, y: 2 }, &Point { x: 3, y: 4 });
+        assert!(matches!(patch, Patch::Struct(_)));
+        let mut wrong = 0_i32;
+        let err = patch.apply(&mut wrong).expect_err("kind mismatch errors");
+        assert!(matches!(err, DiffError::KindMismatch));
+    }
+
+    #[test]
+    fn dynamic_enum_variant_switch_via_replace() {
+        let a = DynamicEnum::new(0, "A", DynamicVariant::Tuple(vec![Box::new(1_i32) as Box<dyn Reflect>]));
+        let b = DynamicEnum::new(1, "B", DynamicVariant::Tuple(vec![Box::new(2_i32) as Box<dyn Reflect>]));
+        let patch = diff(&a, &b);
+        assert!(matches!(patch, Patch::Replace(_)));
+        let mut merged = DynamicEnum::new(0, "A", DynamicVariant::Tuple(vec![Box::new(1_i32) as Box<dyn Reflect>]));
+        patch.apply(&mut merged).expect("apply replace onto dynamic enum");
+        assert_eq!(crate::Enum::variant_name(&merged), "B");
+    }
+}
