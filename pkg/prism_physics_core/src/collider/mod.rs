@@ -213,6 +213,10 @@ pub mod tet_embedding;
 pub use tet_embedding::{
     build_tet_embedding, locate_point, TetBinding, TetEmbedding, TetEmbeddingParams,
 };
+pub mod tet_fem_stiffness;
+pub use tet_fem_stiffness::{
+    element_stiffness, IsotropicElasticity, TetStiffness,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
