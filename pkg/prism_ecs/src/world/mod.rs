@@ -25,7 +25,7 @@ use crate::component::{
 use crate::component_hooks::{ComponentHook, HookContext};
 use crate::entity::{Entities, Entity, EntityLocation};
 use crate::query::{QueryData, QueryFilter, QueryState, ReadOnlyQueryData};
-use crate::storage::SparseSets;
+use crate::storage::{OwningGroupId, SparseSets};
 use crate::relation::Relations;
 use crate::observer::{LifecycleEvent, Observers};
 use crate::resource::{Resource, Resources};
@@ -62,6 +62,11 @@ pub struct World {
     /// that may not cross threads (design §16 / §18 bevy-compat). `std`-only.
     #[cfg(feature = "std")]
     non_send: non_send::NonSendResources,
+    /// Declared owning groups (design §6 四态 OwningGroup / §17 / §20
+    /// 单一拥有者不变量). Empty by default; structural-change paths short
+    /// circuit on [`OwningGroupRegistry::is_empty`] so unused worlds pay
+    /// nothing.
+    owning_groups: OwningGroupRegistry,
 }
 
 impl Default for World {
@@ -90,6 +95,7 @@ impl World {
             last_change_tick: Tick::ZERO,
             #[cfg(feature = "std")]
             non_send: non_send::NonSendResources::new(),
+            owning_groups: OwningGroupRegistry::new(),
         }
     }
 
@@ -552,6 +558,13 @@ impl World {
                 self.fire_lifecycle_observers(LifecycleEvent::Insert, entity, &all_ids);
             }
         }
+
+        // Owning-group maintenance (design §6 / §17): a fresh spawn newly
+        // holds every id in `all_ids`, which may complete one or more
+        // owning groups.
+        if !self.owning_groups.is_empty() {
+            self.update_owning_groups(entity, &all_ids);
+        }
     }
 
     /// Gather the `(id, hook)` pairs for every id in `ids` whose component has
@@ -964,6 +977,15 @@ impl World {
                 self.fire_lifecycle_observers(LifecycleEvent::Insert, entity, &inserted);
             }
         }
+
+        // Owning-group maintenance (design §6 / §17): the written set
+        // (explicit bundle ids plus required additions) may complete a
+        // group for `entity`.
+        if !self.owning_groups.is_empty() {
+            let mut touched = ids.clone();
+            touched.extend(req_ids.iter().copied());
+            self.update_owning_groups(entity, &touched);
+        }
         true
     }
 
@@ -1035,7 +1057,11 @@ impl World {
             .map(|(id, _)| id)
             .collect();
         if to_remove.is_empty() {
-            // No structural change; success iff a sparse component was removed.
+            // No archetype move; success iff a sparse component was removed.
+            // A removed sparse component can still break an owning group.
+            if removed_any && !self.owning_groups.is_empty() {
+                self.update_owning_groups(entity, &ids);
+            }
             return removed_any;
         }
 
@@ -1066,6 +1092,12 @@ impl World {
         // Columns kept (new_set) were moved out of src; removed columns remain
         // and are dropped by `swap_remove_row`.
         self.finish_move(entity, loc, src_id, new_set.ids(), dst_id, dst_row);
+
+        // Owning-group maintenance (design §6 / §17): losing any owned
+        // component drops `entity` out of that group's packed prefix.
+        if !self.owning_groups.is_empty() {
+            self.update_owning_groups(entity, &ids);
+        }
         true
     }
 
@@ -1074,6 +1106,14 @@ impl World {
     pub fn despawn(&mut self, entity: Entity) -> bool {
         if self.entities.location(entity).is_none() {
             return false;
+        }
+
+        // Owning-group maintenance (design §6 / §17): the entity ceases to
+        // exist, so drop it from every group up front — this covers all of
+        // despawn's later early-return paths and recursive relation
+        // cascades (each recursive despawn drops itself).
+        if !self.owning_groups.is_empty() {
+            self.owning_groups.remove_entity(entity);
         }
 
         // Relation cascade (design §11 / §23.2): before tearing `entity` down,
@@ -1352,6 +1392,135 @@ impl World {
         Some(col.component_ticks(row))
     }
 
+    /// Declare an owning group over the component set `owned` (design §6 四态
+    /// "OwningGroup" / §17 "超热查询完美打包" / §20 不变量 "owning group 单一
+    /// 拥有者").
+    ///
+    /// The returned [`OwningGroupId`] names a packed membership of every entity
+    /// that owns **all** of `owned`; the member set is kept hole-free and
+    /// contiguous as entities gain or lose those components, so iterating it via
+    /// [`World::owning_group`] is a branch-free linear scan.
+    ///
+    /// Groups may be declared before or after the matching entities exist: this
+    /// call retroactively packs every live entity that already satisfies the
+    /// whole set, and subsequent `spawn` / `insert` / `remove` / `despawn`
+    /// maintain membership incrementally.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OwningGroupError::Empty`] if `owned` is empty, or
+    /// [`OwningGroupError::AlreadyOwned`] if any component is already owned by a
+    /// different group — the single-owner invariant, since two groups cannot
+    /// each impose a packing order on the same component.
+    pub fn register_owning_group(
+        &mut self,
+        owned: &[ComponentId],
+    ) -> Result<OwningGroupId, OwningGroupError> {
+        let id = self.owning_groups.register(owned)?;
+        // Retroactively pack entities that already satisfy the whole group so
+        // the member prefix is correct even when the group is declared after
+        // spawn. A non-empty owned set can only be satisfied by an entity that
+        // lives in some archetype table (an entity with zero table components
+        // can still hold sparse ones, but then it is still enumerated here only
+        // if it occupies a table row; a purely-sparse entity with no table
+        // components has an empty-archetype row and is covered too, since even
+        // the empty archetype's table tracks its entities).
+        let owned_set: Vec<ComponentId> = self
+            .owning_groups
+            .get(id)
+            .expect("just-registered group")
+            .owned()
+            .to_vec();
+        let mut members: Vec<Entity> = Vec::new();
+        for archetype in self.archetypes.iter() {
+            for &entity in archetype.table().entities() {
+                if owned_set
+                    .iter()
+                    .all(|&component| self.has_component_id(component, entity))
+                {
+                    members.push(entity);
+                }
+            }
+        }
+        if let Some(group) = self.owning_groups.get_mut(id) {
+            for entity in members {
+                group.insert(entity);
+            }
+        }
+        Ok(id)
+    }
+
+    /// Borrow the owning group with id `id`, or `None` if `id` was never
+    /// declared on this world.
+    ///
+    /// The group's packed member prefix
+    /// ([`OwningGroup::packed`](crate::storage::OwningGroup::packed) /
+    /// [`OwningGroup::iter`](crate::storage::OwningGroup::iter)) is exactly the
+    /// set of live entities that own every component of the group, with no gaps
+    /// — the fastest possible iteration order for a super-hot query (design
+    /// §17).
+    pub fn owning_group(
+        &self,
+        id: OwningGroupId,
+    ) -> Option<&crate::storage::OwningGroup> {
+        self.owning_groups.get(id)
+    }
+
+    /// The number of owning groups declared on this world (design §6 /
+    /// §17). Zero on a world that never calls
+    /// [`World::register_owning_group`].
+    pub fn owning_group_count(&self) -> usize {
+        self.owning_groups.len()
+    }
+
+    /// Whether `entity` currently holds the component identified by `id`,
+    /// regardless of its storage. The id-keyed sibling of [`World::has`], used
+    /// to re-evaluate owning-group membership without a static component type.
+    fn has_component_id(&self, id: ComponentId, entity: Entity) -> bool {
+        let Some(loc) = self.entities.location(entity) else {
+            return false;
+        };
+        if self
+            .components
+            .info(id)
+            .is_some_and(|info| info.storage() == StorageType::SparseSet)
+        {
+            return self.sparse_sets.contains(id, entity);
+        }
+        self.archetypes
+            .get(loc.archetype_id)
+            .is_some_and(|archetype| archetype.contains(id))
+    }
+
+    /// Re-evaluate owning-group membership for `entity` after a structural
+    /// change touched the components in `changed`.
+    ///
+    /// Only groups that own at least one changed component are inspected; for
+    /// each, `entity` becomes a packed member iff it now holds the group's whole
+    /// owned set, and is otherwise dropped from the group. Both transitions are
+    /// O(1) on the owned structure. Callers gate on
+    /// [`OwningGroupRegistry::is_empty`] so this is never reached on worlds
+    /// without owning groups.
+    fn update_owning_groups(&mut self, entity: Entity, changed: &[ComponentId]) {
+        let affected = self.owning_groups.groups_touching(changed);
+        for group_id in affected {
+            let owned: Vec<ComponentId> = match self.owning_groups.get(group_id) {
+                Some(group) => group.owned().to_vec(),
+                None => continue,
+            };
+            let has_all = owned
+                .iter()
+                .all(|&component| self.has_component_id(component, entity));
+            if let Some(group) = self.owning_groups.get_mut(group_id) {
+                if has_all {
+                    group.insert(entity);
+                } else {
+                    group.remove(entity);
+                }
+            }
+        }
+    }
+
     /// Whether `entity` currently has component `T`.
     pub fn has<T: Component>(&self, entity: Entity) -> bool {
         let Some(id) = self.components.id_of::<T>() else {
@@ -1421,6 +1590,10 @@ pub use entity_ref::EntityRef;
 /// Non-`Send` resource store (design §16 / §18 bevy-compat); `std`-only.
 #[cfg(feature = "std")]
 mod non_send;
+
+mod owning_groups;
+pub use owning_groups::OwningGroupError;
+use owning_groups::OwningGroupRegistry;
 
 /// Structured, differential world snapshots (design §14 / §16.5).
 pub mod snapshot;
