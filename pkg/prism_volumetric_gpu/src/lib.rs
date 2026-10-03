@@ -505,6 +505,7 @@ pub mod water_coupling_forces;
 pub mod water_coupling_frame;
 pub mod water_coupling_plan;
 pub mod water_dispersion_offsets;
+pub mod water_fft;
 pub mod water_flip_apic;
 pub mod water_flip_mac;
 pub mod water_foam_decay;
@@ -1226,6 +1227,7 @@ pub use water_coupling_plan::{
 pub use water_dispersion_offsets::{
     GpuWaterDispersionOffsets, WaterDispersionOffsetsQuery, WaterDispersionOffsetsResult,
 };
+pub use water_fft::{GpuWaterFft, WaterFftComplex};
 pub use water_flip_apic::{GpuWaterFlipApic, WaterFlipApicQuery, WaterFlipApicResult};
 pub use water_flip_mac::{GpuWaterFlipMac, WaterFlipMacQuery, WaterFlipMacResult};
 pub use water_foam_decay::{GpuWaterFoamDecay, WaterFoamDecayQuery, WaterFoamDecayResult};
