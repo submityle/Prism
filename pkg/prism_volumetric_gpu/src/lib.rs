@@ -109,6 +109,7 @@ pub mod cloth_bending_apply;
 pub mod cloth_bending_project;
 pub mod cloth_mesh_volume;
 pub mod cloth_pressure_project;
+pub mod cloth_vertex_normals;
 pub mod cloth_wind_force;
 pub mod cloud_shadow_modulation;
 pub mod cohen_sutherland_clip;
@@ -284,6 +285,7 @@ pub mod overshooting_bump;
 pub mod ozone_absorption;
 pub mod page_table_key_pack;
 pub mod parallax_offset;
+pub mod particle_ao_samples;
 pub mod particle_multiscatter;
 pub mod perf_budget;
 pub mod perlin;
@@ -433,10 +435,13 @@ pub mod vorticity_confinement;
 pub mod voxel_traversal;
 pub mod water_breaking_classify;
 pub mod water_caustics_intensity;
+pub mod water_caustics_select;
 pub mod water_coupling_forces;
 pub mod water_coupling_frame;
 pub mod water_coupling_plan;
 pub mod water_dispersion_offsets;
+pub mod water_flip_apic;
+pub mod water_flip_mac;
 pub mod water_foam_decay;
 pub mod water_mg_prolong;
 pub mod water_mg_residual;
@@ -465,6 +470,7 @@ pub mod water_transition_blend;
 pub mod water_underwater_depth_color;
 pub mod water_underwater_scatter;
 pub mod water_underwater_transmittance;
+pub mod water_wake_amplitude;
 pub mod water_waterline_weight;
 pub mod water_wetness_response;
 pub mod welzl_min_sphere;
@@ -544,6 +550,9 @@ pub use cloth_bending_project::{
 pub use cloth_mesh_volume::{ClothMeshVolumeQuery, ClothMeshVolumeResult, GpuClothMeshVolume};
 pub use cloth_pressure_project::{
     ClothPressureProjectQuery, ClothPressureProjectResult, GpuClothPressureProject,
+};
+pub use cloth_vertex_normals::{
+    ClothVertexNormalsQuery, ClothVertexNormalsResult, GpuClothVertexNormals,
 };
 pub use cloth_wind_force::{ClothWindForceQuery, ClothWindForceResult, GpuClothWindForce};
 pub use cloud_shadow_modulation::{CloudShadowModulationQuery, GpuCloudShadowModulation};
@@ -809,6 +818,9 @@ pub use overshooting_bump::{GpuOvershootingBump, OvershootingBumpQuery};
 pub use ozone_absorption::{GpuOzoneAbsorption, OzoneAbsorptionQuery};
 pub use page_table_key_pack::{GpuPageTableKeyPack, PageTableKeyPackQuery, PageTableKeyPackResult};
 pub use parallax_offset::{GpuParallaxOffset, ParallaxOffsetQuery, ParallaxOffsetResult};
+pub use particle_ao_samples::{
+    GpuParticleAoSamples, ParticleAoSamplesQuery, ParticleAoSamplesResult,
+};
 pub use particle_multiscatter::{GpuParticleMultiScatter, MultiScatterResponse};
 pub use perf_budget::{GpuPerfBudget, PerfBudgetQuery, PerfBudgetResult};
 pub use perlin::{GpuPerlin, PerlinQuery};
@@ -1034,6 +1046,9 @@ pub use water_breaking_classify::{
 pub use water_caustics_intensity::{
     GpuWaterCausticsIntensity, WaterCausticsIntensityQuery, WaterCausticsIntensityResult,
 };
+pub use water_caustics_select::{
+    GpuWaterCausticsSelect, WaterCausticsSelectQuery, WaterCausticsSelectResult,
+};
 pub use water_coupling_forces::{
     GpuWaterCouplingForces, WaterCouplingForcesQuery, WaterCouplingForcesResult,
 };
@@ -1046,6 +1061,8 @@ pub use water_coupling_plan::{
 pub use water_dispersion_offsets::{
     GpuWaterDispersionOffsets, WaterDispersionOffsetsQuery, WaterDispersionOffsetsResult,
 };
+pub use water_flip_apic::{GpuWaterFlipApic, WaterFlipApicQuery, WaterFlipApicResult};
+pub use water_flip_mac::{GpuWaterFlipMac, WaterFlipMacQuery, WaterFlipMacResult};
 pub use water_foam_decay::{GpuWaterFoamDecay, WaterFoamDecayQuery, WaterFoamDecayResult};
 pub use water_mg_prolong::{GpuWaterMgProlong, WaterMgProlongQuery, WaterMgProlongResult};
 pub use water_mg_residual::{GpuWaterMgResidual, WaterMgResidualQuery, WaterMgResidualResult};
@@ -1096,6 +1113,9 @@ pub use water_underwater_scatter::{
 pub use water_underwater_transmittance::{
     GpuWaterUnderwaterTransmittance, WaterUnderwaterTransmittanceQuery,
     WaterUnderwaterTransmittanceResult,
+};
+pub use water_wake_amplitude::{
+    GpuWaterWakeAmplitude, WaterWakeAmplitudeQuery, WaterWakeAmplitudeResult,
 };
 pub use water_waterline_weight::{
     GpuWaterWaterlineWeight, WaterWaterlineWeightQuery, WaterWaterlineWeightResult,
