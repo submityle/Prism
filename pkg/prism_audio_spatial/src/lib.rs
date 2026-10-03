@@ -106,6 +106,7 @@ pub mod spread;
 pub mod stage_support;
 pub mod useful_to_detrimental_ratio;
 pub mod utd_diffraction;
+pub mod wave_field;
 
 pub use acoustic_format::AcousticFormat;
 pub use air::{AirAbsorption, AirAbsorptionNode, AtmosphericConditions, absorption_db_per_metre};
@@ -243,3 +244,4 @@ pub use useful_to_detrimental_ratio::{
     NO_USEFUL_RATIO_DB, UsefulToDetrimental, useful_to_detrimental_ratio_db,
 };
 pub use utd_diffraction::UtdWedge;
+pub use wave_field::{WaveFieldBackend, WaveParameters, WaveProbeGrid, WaveReverb};
