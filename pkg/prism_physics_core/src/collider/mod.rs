@@ -53,6 +53,9 @@ pub use sdf::{MeshSdf, SdfBuildParams};
 pub mod weld;
 
 pub use weld::{weld_mesh, WeldParams, WeldedMesh};
+pub mod mesh_bvh;
+
+pub use mesh_bvh::{MeshBvh, MeshClosestPoint, MeshRayHit};
 
 /// A handle into a [`ShapeRegistry`].
 ///

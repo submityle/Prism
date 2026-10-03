@@ -363,7 +363,7 @@ fn ray_triangle_forward_hit(origin: Vec3, dir: Vec3, tri: &Tri) -> bool {
 /// Classic Voronoi-region closest-point algorithm (Ericson, *Real-Time
 /// Collision Detection*): classify `p` against the triangle's vertex, edge and
 /// face regions and return the squared distance to the closest feature.
-fn point_triangle_distance_sq(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
+pub(crate) fn point_triangle_distance_sq(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
     let ab = b - a;
     let ac = c - a;
     let ap = p - a;
