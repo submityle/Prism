@@ -1,0 +1,38 @@
+[package]
+name = "prism_ecs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism's next-generation data-oriented ECS kernel (greenfield chunked-archetype). no_std + alloc core; cache-friendly columnar storage, generational entities, archetype graph, and ergonomic queries. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
+
+[dev-dependencies]
+prism_ecs = { path = "." }
+
+[features]
+default = ["std"]
+# Enable std-backed facilities (currently only used to light up std-only tests
+# and future multi-threaded executors). The core kernel is no_std + alloc.
+std = []
+
+# NOTE: this crate intentionally does NOT inherit `[lints] workspace = true`.
+# A type-erased columnar ECS fundamentally requires `unsafe` for component
+# storage, so the workspace-wide `unsafe_code = "deny"` cannot apply here.
+# We re-declare the same high-signal lints and keep `undocumented_unsafe_blocks`
+# as "warn" so every `unsafe` block must carry a `// SAFETY:` justification.
+[lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "warn"
+semicolon_if_nothing_returned = "warn"
+ptr_as_ptr = "warn"
+type_complexity = "allow"
+too_many_arguments = "allow"
+needless_lifetimes = "allow"

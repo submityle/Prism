@@ -1,0 +1,557 @@
+//! The [`World`]: the owning container for all entities, components, and their
+//! archetype-grouped storage, plus the public API for spawning, mutating, and
+//! despawning entities.
+//!
+//! A [`World`] bundles three registries:
+//! - [`Entities`] — the generational-index allocator and location table.
+//! - [`Components`] — the component-type metadata registry.
+//! - [`Archetypes`] — the archetype graph and its columnar [`Table`]s.
+//!
+//! Structural changes (spawn / insert / remove / despawn) move component data
+//! between archetype tables while keeping every entity's recorded location in
+//! sync. All of these operations are **immediate**; the deferred
+//! [`Commands`](crate::command::Commands) buffer records the same operations to
+//! be applied later at a synchronization point.
+
+use alloc::vec::Vec;
+
+use crate::archetype::Archetypes;
+use crate::bundle::Bundle;
+use crate::component::{Component, ComponentId, ComponentSet, Components};
+use crate::entity::{Entities, Entity, EntityLocation};
+use crate::query::{QueryData, QueryFilter, QueryState, ReadOnlyQueryData};
+
+/// The authoritative container of all ECS state.
+#[derive(Default)]
+pub struct World {
+    entities: Entities,
+    components: Components,
+    archetypes: Archetypes,
+}
+
+impl World {
+    /// Create an empty world (with just the empty archetype allocated).
+    pub fn new() -> Self {
+        Self {
+            entities: Entities::new(),
+            components: Components::new(),
+            archetypes: Archetypes::new(),
+        }
+    }
+
+    /// The entity allocator / location table.
+    #[inline]
+    pub fn entities(&self) -> &Entities {
+        &self.entities
+    }
+
+    /// The component-type registry.
+    #[inline]
+    pub fn components(&self) -> &Components {
+        &self.components
+    }
+
+    /// The archetype graph.
+    #[inline]
+    pub fn archetypes(&self) -> &Archetypes {
+        &self.archetypes
+    }
+
+    /// Number of currently-live entities.
+    #[inline]
+    pub fn entity_count(&self) -> u32 {
+        self.entities.len()
+    }
+
+    /// Register component type `T`, returning its id (idempotent).
+    #[inline]
+    pub fn register_component<T: Component>(&mut self) -> ComponentId {
+        self.components.register::<T>()
+    }
+
+    /// Whether `entity` is live.
+    #[inline]
+    pub fn contains(&self, entity: Entity) -> bool {
+        self.entities.contains(entity)
+    }
+
+    /// Spawn a new entity carrying the components of `bundle`.
+    ///
+    /// # Panics
+    /// Panics if `bundle` contains the same component type more than once.
+    pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
+        let entity = self.entities.alloc();
+        self.place_new_entity(entity, bundle);
+        entity
+    }
+
+    /// Place `bundle`'s components onto an entity that is live but not yet
+    /// resident in any archetype table (an [`EntityLocation::EMPTY`] slot).
+    ///
+    /// This is the write half of a deferred spawn: the entity handle was handed
+    /// out earlier via [`Entities::reserve_entity`] and materialised by
+    /// [`World::flush_reserved`], and this call moves it into the archetype that
+    /// matches `bundle`.
+    ///
+    /// # Panics
+    /// Panics if `bundle` contains the same component type more than once, or
+    /// (in debug builds) if `entity` is not a live, unplaced slot.
+    pub fn spawn_at<B: Bundle>(&mut self, entity: Entity, bundle: B) {
+        debug_assert!(
+            self.entities
+                .location(entity)
+                .is_some_and(|loc| loc.is_empty()),
+            "spawn_at requires a live entity with no existing archetype placement"
+        );
+        self.place_new_entity(entity, bundle);
+    }
+
+    /// Shared spawn core: compute `bundle`'s archetype, allocate a row, move its
+    /// values into the columns, and record `entity`'s location. `entity` must be
+    /// live and currently unplaced.
+    fn place_new_entity<B: Bundle>(&mut self, entity: Entity, bundle: B) {
+        let mut ids = Vec::new();
+        B::component_ids(&mut self.components, &mut ids);
+        let set = ComponentSet::from_ids(ids.iter().copied());
+        assert_eq!(
+            set.len(),
+            ids.len(),
+            "a bundle may not contain the same component type twice"
+        );
+        let archetype_id = self.archetypes.get_or_create(&set, &self.components);
+
+        let row = {
+            let arch = self
+                .archetypes
+                .get_mut(archetype_id)
+                .expect("archetype just created");
+            let table = arch.table_mut();
+            let row = table.allocate(entity);
+            let mut i = 0usize;
+            // SAFETY: `get_components` yields one pointer per id in `ids` order,
+            // and each pointer is a valid, owned component value moved into its
+            // matching column exactly once, restoring the table invariant.
+            unsafe {
+                bundle.get_components(&mut |ptr| {
+                    let id = ids[i];
+                    i += 1;
+                    table.column_for_fill(id).push(ptr);
+                });
+            }
+            debug_assert_eq!(i, ids.len());
+            row
+        };
+
+        self.entities.set_location(
+            entity,
+            EntityLocation {
+                archetype_id,
+                row: row as u32,
+            },
+        );
+    }
+
+    /// Insert the components of `bundle` onto an existing `entity`.
+    ///
+    /// Components the entity already has are overwritten (last-wins); genuinely
+    /// new components trigger a move to the appropriate archetype. Returns
+    /// `false` if `entity` is not live.
+    ///
+    /// # Panics
+    /// Panics if `bundle` contains the same component type more than once.
+    pub fn insert<B: Bundle>(&mut self, entity: Entity, bundle: B) -> bool {
+        let mut ids = Vec::new();
+        B::component_ids(&mut self.components, &mut ids);
+        {
+            let set = ComponentSet::from_ids(ids.iter().copied());
+            assert_eq!(
+                set.len(),
+                ids.len(),
+                "a bundle may not contain the same component type twice"
+            );
+        }
+        let Some(loc) = self.entities.location(entity) else {
+            return false;
+        };
+        let src_id = loc.archetype_id;
+        let current = self
+            .archetypes
+            .get(src_id)
+            .expect("live entity archetype")
+            .components()
+            .clone();
+
+        let add_ids: Vec<ComponentId> = ids
+            .iter()
+            .copied()
+            .filter(|id| !current.contains(*id))
+            .collect();
+
+        if add_ids.is_empty() {
+            // Pure overwrite — no structural move needed.
+            let table = self
+                .archetypes
+                .get_mut(src_id)
+                .expect("live entity archetype")
+                .table_mut();
+            let row = loc.row as usize;
+            let mut i = 0usize;
+            // SAFETY: every id is already a column of this table (add_ids empty),
+            // `row` is in-bounds, and each pointer is a valid owned value that
+            // `replace` moves in while dropping the previous value exactly once.
+            unsafe {
+                bundle.get_components(&mut |ptr| {
+                    let id = ids[i];
+                    i += 1;
+                    table
+                        .column_mut(id)
+                        .expect("overwrite column exists")
+                        .replace(row, ptr);
+                });
+            }
+            return true;
+        }
+
+        // Structural move into the archetype that is `current ∪ add_ids`.
+        let mut new_set = current.clone();
+        for &id in &add_ids {
+            new_set = new_set.with(id);
+        }
+        let dst_id = self.archetypes.get_or_create(&new_set, &self.components);
+
+        let dst_row = self
+            .archetypes
+            .get_mut(dst_id)
+            .expect("dst archetype")
+            .table_mut()
+            .allocate(entity);
+
+        {
+            let (src_arch, dst_arch) = self.archetypes.get_pair_mut(src_id, dst_id);
+            // SAFETY: both tables derive from the same registry (identical shared
+            // layouts) and `loc.row` is in-bounds in the source table.
+            unsafe {
+                dst_arch
+                    .table_mut()
+                    .move_shared_columns_from(src_arch.table_mut(), loc.row as usize);
+            }
+        }
+
+        {
+            let table = self
+                .archetypes
+                .get_mut(dst_id)
+                .expect("dst archetype")
+                .table_mut();
+            let mut i = 0usize;
+            // SAFETY: ids present in `current` were just relocated to `dst_row`
+            // and are overwritten in place; genuinely new ids fill their (so far
+            // empty) column at `dst_row`. Each value is owned and consumed once.
+            unsafe {
+                bundle.get_components(&mut |ptr| {
+                    let id = ids[i];
+                    i += 1;
+                    if current.contains(id) {
+                        table
+                            .column_mut(id)
+                            .expect("moved column exists")
+                            .replace(dst_row, ptr);
+                    } else {
+                        table.column_for_fill(id).push(ptr);
+                    }
+                });
+            }
+        }
+
+        self.finish_move(entity, loc, src_id, current.ids(), dst_id, dst_row);
+        true
+    }
+
+    /// Remove the components named by bundle type `B` from `entity`.
+    ///
+    /// Returns `true` if the entity was live and at least one of the named
+    /// components was present (and thus removed).
+    pub fn remove<B: Bundle>(&mut self, entity: Entity) -> bool {
+        let mut ids = Vec::new();
+        B::component_ids(&mut self.components, &mut ids);
+        let Some(loc) = self.entities.location(entity) else {
+            return false;
+        };
+        let src_id = loc.archetype_id;
+        let current = self
+            .archetypes
+            .get(src_id)
+            .expect("live entity archetype")
+            .components()
+            .clone();
+
+        let to_remove: Vec<ComponentId> = ids
+            .iter()
+            .copied()
+            .filter(|id| current.contains(*id))
+            .collect();
+        if to_remove.is_empty() {
+            return false;
+        }
+
+        let mut new_set = current.clone();
+        for &id in &to_remove {
+            new_set = new_set.without(id);
+        }
+        let dst_id = self.archetypes.get_or_create(&new_set, &self.components);
+
+        let dst_row = self
+            .archetypes
+            .get_mut(dst_id)
+            .expect("dst archetype")
+            .table_mut()
+            .allocate(entity);
+
+        {
+            let (src_arch, dst_arch) = self.archetypes.get_pair_mut(src_id, dst_id);
+            // SAFETY: shared layouts (same registry) and in-bounds source row;
+            // only columns present in `new_set` (⊂ current) are relocated.
+            unsafe {
+                dst_arch
+                    .table_mut()
+                    .move_shared_columns_from(src_arch.table_mut(), loc.row as usize);
+            }
+        }
+
+        // Columns kept (new_set) were moved out of src; removed columns remain
+        // and are dropped by `swap_remove_row`.
+        self.finish_move(entity, loc, src_id, new_set.ids(), dst_id, dst_row);
+        true
+    }
+
+    /// Despawn `entity`, dropping all of its components. Returns `false` if the
+    /// entity was already dead.
+    pub fn despawn(&mut self, entity: Entity) -> bool {
+        let Some(loc) = self.entities.free(entity) else {
+            return false;
+        };
+        if loc.is_empty() {
+            return true;
+        }
+        let moved = {
+            let table = self
+                .archetypes
+                .get_mut(loc.archetype_id)
+                .expect("live entity archetype")
+                .table_mut();
+            // SAFETY: `loc.row` is in-bounds; nothing was pre-moved so every
+            // column value at that row is dropped exactly once.
+            unsafe { table.swap_remove_row(loc.row as usize, &[]) }
+        };
+        if let Some(moved_entity) = moved {
+            self.entities.set_location(moved_entity, loc);
+        }
+        true
+    }
+
+    /// Shared helper: after a destination row has been fully populated, remove
+    /// the source row (forgetting `moved_ids` which were relocated) and patch
+    /// both the relocated and the swapped entity's locations.
+    fn finish_move(
+        &mut self,
+        entity: Entity,
+        src_loc: EntityLocation,
+        src_id: crate::archetype::ArchetypeId,
+        moved_ids: &[ComponentId],
+        dst_id: crate::archetype::ArchetypeId,
+        dst_row: usize,
+    ) {
+        let moved = {
+            let table = self
+                .archetypes
+                .get_mut(src_id)
+                .expect("src archetype")
+                .table_mut();
+            // SAFETY: `src_loc.row` is in-bounds; `moved_ids` columns were
+            // relocated (so they are forgotten, not double-dropped) and the rest
+            // are dropped.
+            unsafe { table.swap_remove_row(src_loc.row as usize, moved_ids) }
+        };
+        if let Some(moved_entity) = moved {
+            self.entities.set_location(moved_entity, src_loc);
+        }
+        self.entities.set_location(
+            entity,
+            EntityLocation {
+                archetype_id: dst_id,
+                row: dst_row as u32,
+            },
+        );
+    }
+
+    /// Borrow component `T` of `entity`, or `None` if the entity is dead or
+    /// lacks the component.
+    pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
+        let id = self.components.id_of::<T>()?;
+        let loc = self.entities.location(entity)?;
+        let arch = self.archetypes.get(loc.archetype_id)?;
+        let col = arch.table().column(id)?;
+        let row = loc.row as usize;
+        if row >= col.len() {
+            return None;
+        }
+        // SAFETY: `row < col.len()` and `T` is exactly the type registered for
+        // `id` (we looked `id` up from `T`), so the column stores `T`.
+        Some(unsafe { col.get::<T>(row) })
+    }
+
+    /// Mutably borrow component `T` of `entity`, or `None` if the entity is
+    /// dead or lacks the component.
+    pub fn get_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
+        let id = self.components.id_of::<T>()?;
+        let loc = self.entities.location(entity)?;
+        let arch = self.archetypes.get_mut(loc.archetype_id)?;
+        let col = arch.table_mut().column_mut(id)?;
+        let row = loc.row as usize;
+        if row >= col.len() {
+            return None;
+        }
+        // SAFETY: `row < col.len()`, `T` matches `id`, and `&mut self` gives us
+        // exclusive access, so forming a unique `&mut T` cannot alias.
+        Some(unsafe { col.get_mut::<T>(row) })
+    }
+
+    /// Whether `entity` currently has component `T`.
+    pub fn has<T: Component>(&self, entity: Entity) -> bool {
+        let Some(id) = self.components.id_of::<T>() else {
+            return false;
+        };
+        let Some(loc) = self.entities.location(entity) else {
+            return false;
+        };
+        self.archetypes
+            .get(loc.archetype_id)
+            .is_some_and(|a| a.contains(id))
+    }
+
+    /// Materialise every entity handed out by
+    /// [`Entities::reserve_entity`](crate::entity::Entities::reserve_entity)
+    /// since the last flush into a live, unplaced slot.
+    ///
+    /// Run at a synchronization point before reading reserved entities; this is
+    /// what [`CommandQueue::apply`](crate::command::CommandQueue::apply) calls
+    /// before draining deferred spawns.
+    #[inline]
+    pub fn flush_reserved(&mut self) {
+        self.entities.flush();
+    }
+
+    /// Build a reusable [`QueryState`] over data terms `D` with no filter.
+    ///
+    /// Registers every component `D` names and computes its access set. The
+    /// returned state can be iterated with [`QueryState::iter`] /
+    /// [`QueryState::iter_mut`] and reused across frames.
+    #[inline]
+    pub fn query<D: QueryData>(&mut self) -> QueryState<D> {
+        QueryState::new(&mut self.components)
+    }
+
+    /// Build a reusable [`QueryState`] over data terms `D` narrowed by filter
+    /// `F` (e.g. [`With`](crate::query::With) / [`Without`](crate::query::Without)).
+    #[inline]
+    pub fn query_filtered<D: QueryData, F: QueryFilter>(&mut self) -> QueryState<D, F> {
+        QueryState::new(&mut self.components)
+    }
+
+    /// Convenience: build a read-only query state and immediately collect its
+    /// items. Prefer caching the [`QueryState`] via [`World::query`] in hot
+    /// loops; this helper is for one-shot reads and tests.
+    pub fn for_each<D: ReadOnlyQueryData>(&mut self, mut f: impl FnMut(D::Item<'_>)) {
+        let state = self.query::<D>();
+        for item in state.iter(self) {
+            f(item);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, PartialEq)]
+    struct Position(f32, f32);
+    impl Component for Position {}
+    #[derive(Debug, PartialEq)]
+    struct Velocity(f32, f32);
+    impl Component for Velocity {}
+    #[derive(Debug, PartialEq)]
+    struct Name(alloc::string::String);
+    impl Component for Name {}
+
+    #[test]
+    fn spawn_get_and_mutate() {
+        let mut w = World::new();
+        let e = w.spawn((Position(1.0, 2.0), Velocity(3.0, 4.0)));
+        assert_eq!(w.entity_count(), 1);
+        assert_eq!(w.get::<Position>(e), Some(&Position(1.0, 2.0)));
+        assert_eq!(w.get::<Velocity>(e), Some(&Velocity(3.0, 4.0)));
+        w.get_mut::<Position>(e).unwrap().0 = 10.0;
+        assert_eq!(w.get::<Position>(e), Some(&Position(10.0, 2.0)));
+    }
+
+    #[test]
+    fn spawn_empty_and_despawn() {
+        let mut w = World::new();
+        let e = w.spawn(());
+        assert!(w.contains(e));
+        assert_eq!(w.get::<Position>(e), None);
+        assert!(w.despawn(e));
+        assert!(!w.contains(e));
+        assert!(!w.despawn(e));
+    }
+
+    #[test]
+    fn insert_adds_and_overwrites() {
+        let mut w = World::new();
+        let e = w.spawn(Position(1.0, 1.0));
+        // Add a new component -> structural move.
+        assert!(w.insert(e, Velocity(5.0, 5.0)));
+        assert_eq!(w.get::<Position>(e), Some(&Position(1.0, 1.0)));
+        assert_eq!(w.get::<Velocity>(e), Some(&Velocity(5.0, 5.0)));
+        // Overwrite existing -> in place.
+        assert!(w.insert(e, Position(2.0, 2.0)));
+        assert_eq!(w.get::<Position>(e), Some(&Position(2.0, 2.0)));
+    }
+
+    #[test]
+    fn remove_component() {
+        let mut w = World::new();
+        let e = w.spawn((Position(1.0, 1.0), Velocity(2.0, 2.0)));
+        assert!(w.has::<Velocity>(e));
+        assert!(w.remove::<Velocity>(e));
+        assert!(!w.has::<Velocity>(e));
+        assert_eq!(w.get::<Velocity>(e), None);
+        assert_eq!(w.get::<Position>(e), Some(&Position(1.0, 1.0)));
+        // Removing again is a no-op.
+        assert!(!w.remove::<Velocity>(e));
+    }
+
+    #[test]
+    fn despawn_swaps_and_fixes_locations() {
+        let mut w = World::new();
+        let a = w.spawn(Position(1.0, 0.0));
+        let b = w.spawn(Position(2.0, 0.0));
+        let c = w.spawn(Position(3.0, 0.0));
+        // Despawn the middle entity; `c` should swap into its slot but still be
+        // readable at the correct value.
+        assert!(w.despawn(b));
+        assert_eq!(w.get::<Position>(a), Some(&Position(1.0, 0.0)));
+        assert_eq!(w.get::<Position>(c), Some(&Position(3.0, 0.0)));
+        assert!(!w.contains(b));
+        assert_eq!(w.entity_count(), 2);
+    }
+
+    #[test]
+    fn drop_runs_on_despawn() {
+        let mut w = World::new();
+        let e = w.spawn(Name(alloc::string::String::from("hello")));
+        assert_eq!(w.get::<Name>(e).map(|n| n.0.as_str()), Some("hello"));
+        // Despawn must drop the String without leaking (miri/asan would catch).
+        assert!(w.despawn(e));
+    }
+}
