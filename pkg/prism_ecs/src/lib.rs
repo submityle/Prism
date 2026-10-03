@@ -54,6 +54,7 @@ pub mod component;
 pub mod component_hooks;
 #[cfg(test)]
 mod component_hooks_tests;
+pub mod diagnostics;
 pub mod entity;
 pub mod event;
 pub mod gpu_resident;
