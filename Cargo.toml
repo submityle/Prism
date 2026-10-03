@@ -75,6 +75,7 @@ members = [
   "pkg/prism_audio_object",
   "pkg/prism_audio_immersive",
   "pkg/prism_audio_haptics",
+  "pkg/prism_audio_remote",
   "pkg/prism_audio_profiler",
   # Prism next-generation audio engine Bevy ECS front-end (emitter/listener components -> prism_audio_rt command ring; telemetry resource).
   "pkg/prism_audio_bevy",
