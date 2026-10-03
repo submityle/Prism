@@ -32,25 +32,52 @@ use super::cem::{cem_integer_count, cem_is_ldr, unpack_endpoints};
 use super::hdr_endpoints::{
     expand_ldr_endpoints_to_hdr, lerp_hdr_lane, unpack_hdr_endpoints, HdrEndpoints,
 };
-use super::infill::{infill_dual_plane_4x4, infill_weights_4x4};
+use super::infill::{infill_dual_plane, infill_weights, MAX_TEXELS};
 use super::multi_partition::{parse_multi_partition_color, MultiPartitionColor};
 use super::partition::select_partition;
 use super::AstcError;
 
 /// Decode a multi-partition (2/3/4) 4x4 **HDR** ASTC `block` to sixteen RGBA
-/// texels in `f32`, row-major (`texel = y * 4 + x`). Both single- and
-/// dual-plane weights are handled.
+/// texels in `f32`, row-major (`texel = y * 4 + x`). Thin wrapper over
+/// [`decode_multi_partition_hdr`] on the 4x4 footprint.
 ///
 /// # Errors
-/// Returns an [`AstcError`] for any block outside the supported subset: a
-/// single-partition block (handled elsewhere), a four-partition dual-plane
-/// block (forbidden by the spec), an oversized weight grid, or any encoding
-/// whose derived colour quant level is below QUANT_6. LDR, HDR and mixed
-/// LDR/HDR partition combinations all decode. No unsupported block is decoded
-/// to approximate pixels.
+/// Propagates [`AstcError`] from [`decode_multi_partition_hdr`].
 pub(super) fn decode_multi_partition_4x4_hdr(
     block: &[u8; 16],
 ) -> Result<[[f32; 4]; 16], AstcError> {
+    let mut out = [[0.0f32; 4]; 16];
+    decode_multi_partition_hdr(block, 4, 4, &mut out)?;
+    Ok(out)
+}
+
+/// Decode a multi-partition (2/3/4) **HDR** ASTC `block` for an arbitrary 2D
+/// footprint `bx` x `by` (4..=12 per axis), writing `bx * by` RGBA `f32` texels
+/// into `out[..bx*by]` in row-major order (`texel = y * bx + x`). Both single-
+/// and dual-plane weights are handled; LDR, HDR and mixed LDR/HDR partition
+/// combinations all decode.
+///
+/// The procedural partition assignment uses the small-block coordinate bias
+/// when the footprint has fewer than 32 texels (astcenc `small_block`).
+///
+/// # Errors
+/// Returns [`AstcError::Reserved`] for an out-of-range footprint or short `out`
+/// slice, and otherwise an [`AstcError`] for any block outside the supported
+/// subset: a single-partition block (handled elsewhere), a four-partition
+/// dual-plane block (forbidden by the spec), an oversized weight grid, or any
+/// encoding whose derived colour quant level is below QUANT_6. No unsupported
+/// block is decoded to approximate pixels.
+pub(super) fn decode_multi_partition_hdr(
+    block: &[u8; 16],
+    bx: u32,
+    by: u32,
+    out: &mut [[f32; 4]],
+) -> Result<(), AstcError> {
+    let texels = (bx as usize) * (by as usize);
+    if texels == 0 || texels > MAX_TEXELS || out.len() < texels {
+        return Err(AstcError::Reserved);
+    }
+
     let MultiPartitionColor {
         bm,
         partition_count,
@@ -58,7 +85,7 @@ pub(super) fn decode_multi_partition_4x4_hdr(
         color_formats,
         effective_highpart_size,
         vals,
-    } = parse_multi_partition_color(block)?;
+    } = parse_multi_partition_color(block, bx, by)?;
     let pc = partition_count as usize;
 
     // Split the integer run per partition and expand each endpoint pair into
@@ -74,11 +101,6 @@ pub(super) fn decode_multi_partition_4x4_hdr(
         let count = cem_integer_count(fmt) as usize;
         let run = &vals[off..off + count];
         endpoints[i] = if cem_is_ldr(fmt) {
-            // LDR partition in the HDR profile: unpack the 8-bit LDR endpoints
-            // and widen each lane into the 16-bit linear HDR domain (x257,
-            // `lns = false`). The per-texel loop below mixes these linear lanes
-            // with the logarithmic lanes of any HDR partition transparently via
-            // the per-channel `lns` mask.
             expand_ldr_endpoints_to_hdr(&unpack_endpoints(fmt, run))
         } else {
             unpack_hdr_endpoints(fmt, run)
@@ -87,21 +109,29 @@ pub(super) fn decode_multi_partition_4x4_hdr(
     }
 
     // --- Per-texel partition dispatch + logarithmic interpolation ----------
-    // 4x4 has 16 texels (< 32) so the small-block partition coordinate bias is
-    // active (`select_partition(.., small_block = true)`).
-    let mut out = [[0.0f32; 4]; 16];
+    // The small-block coordinate bias is active when the footprint has < 32
+    // texels (astcenc `small_block`).
+    let small_block = texels < 32;
+    let bxi = bx as i32;
+    let byi = by as i32;
     if bm.dual_plane {
-        // Dual-plane colour component selector: two bits immediately below the
-        // weight region and, when the per-partition CEM form is used, below its
-        // high part as well (astcenc `below_weights_pos - 2`). The selected
-        // channel interpolates with plane 1; the other three use plane 0.
         let ccs = read_bits(block, 128 - bm.weight_bits - effective_highpart_size - 2, 2);
-        let (plane0, plane1) =
-            infill_dual_plane_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
-        for y in 0..4i32 {
-            for x in 0..4i32 {
-                let texel = (y * 4 + x) as usize;
-                let part = select_partition(seed, x, y, 0, partition_count, true) as usize;
+        let mut plane0 = [0u8; MAX_TEXELS];
+        let mut plane1 = [0u8; MAX_TEXELS];
+        infill_dual_plane(
+            block,
+            bm.weights_x,
+            bm.weights_y,
+            bm.weight_levels,
+            bx,
+            by,
+            &mut plane0[..texels],
+            &mut plane1[..texels],
+        )?;
+        for y in 0..byi {
+            for x in 0..bxi {
+                let texel = (y * bxi + x) as usize;
+                let part = select_partition(seed, x, y, 0, partition_count, small_block) as usize;
                 let ep = &endpoints[part];
                 for c in 0..4usize {
                     let w = u32::from(if c as u32 == ccs {
@@ -114,11 +144,20 @@ pub(super) fn decode_multi_partition_4x4_hdr(
             }
         }
     } else {
-        let weights = infill_weights_4x4(block, bm.weights_x, bm.weights_y, bm.weight_levels)?;
-        for y in 0..4i32 {
-            for x in 0..4i32 {
-                let texel = (y * 4 + x) as usize;
-                let part = select_partition(seed, x, y, 0, partition_count, true) as usize;
+        let mut weights = [0u8; MAX_TEXELS];
+        infill_weights(
+            block,
+            bm.weights_x,
+            bm.weights_y,
+            bm.weight_levels,
+            bx,
+            by,
+            &mut weights[..texels],
+        )?;
+        for y in 0..byi {
+            for x in 0..bxi {
+                let texel = (y * bxi + x) as usize;
+                let part = select_partition(seed, x, y, 0, partition_count, small_block) as usize;
                 let ep = &endpoints[part];
                 let w = u32::from(weights[texel]);
                 for c in 0..4usize {
@@ -127,7 +166,7 @@ pub(super) fn decode_multi_partition_4x4_hdr(
             }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -170,5 +209,56 @@ mod tests {
                 assert!(c.is_finite(), "lane must be finite, got {c}");
             }
         }
+    }
+
+    struct Rng(u32);
+    impl Rng {
+        fn next_u32(&mut self) -> u32 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            self.0 = x;
+            x
+        }
+    }
+
+    #[test]
+    fn generic_4x4_matches_fixed_wrapper() {
+        let mut rng = Rng(0xFEED_BEEF);
+        for _ in 0..512 {
+            let mut block = [0u8; 16];
+            for b in &mut block {
+                *b = (rng.next_u32() & 0xFF) as u8;
+            }
+            block[1] = (block[1] & !(0b11 << 3)) | (((rng.next_u32() % 3 + 1) as u8) << 3);
+            let fixed = decode_multi_partition_4x4_hdr(&block);
+            let mut generic = [[0.0f32; 4]; 16];
+            let gres = decode_multi_partition_hdr(&block, 4, 4, &mut generic);
+            match (fixed, gres) {
+                (Ok(f), Ok(())) => {
+                    for (fx, gx) in f.iter().zip(generic.iter()) {
+                        assert_eq!(fx.map(f32::to_bits), gx.map(f32::to_bits));
+                    }
+                }
+                (Err(a), Err(b)) => assert_eq!(a, b),
+                (a, b) => panic!("wrapper/generic disagree: {a:?} vs {b:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn generic_rejects_bad_footprint_and_short_slice() {
+        let block = [0u8; 16];
+        let mut out = [[0.0f32; 4]; MAX_TEXELS];
+        assert_eq!(
+            decode_multi_partition_hdr(&block, 13, 12, &mut out),
+            Err(AstcError::Reserved)
+        );
+        let mut tiny = [[0.0f32; 4]; 16];
+        assert_eq!(
+            decode_multi_partition_hdr(&block, 8, 8, &mut tiny),
+            Err(AstcError::Reserved)
+        );
     }
 }

@@ -125,12 +125,11 @@ pub fn decode_astc_4x4_hdr(block: &[u8; 16]) -> Result<[[f32; 4]; 16], AstcError
 /// row-major order (`texel = y * bx + x`). This avoids a heap allocation on the
 /// decode hot path.
 ///
-/// Dispatches void-extent (constant-colour, replicated to the footprint) and
-/// single-partition LDR weighted blocks (all ten LDR CEMs, any colour
-/// quantisation, any legal weight grid, single- or dual-plane). At the 4x4
-/// footprint multi-partition blocks route through the dedicated 4x4 decoder;
-/// multi-partition decode for larger footprints is not yet implemented and
-/// returns [`AstcError::UnsupportedBlockMode`] rather than approximate pixels.
+/// Dispatches void-extent (constant-colour, replicated to the footprint),
+/// single-partition and multi-partition (2/3/4) LDR weighted blocks across all
+/// footprints: all ten LDR CEMs, any colour quantisation, any legal weight
+/// grid, single- or dual-plane. Unsupported block types return an
+/// [`AstcError`] rather than approximate pixels.
 ///
 /// # Errors
 /// Returns [`AstcError::Reserved`] for an out-of-range footprint, or propagates
@@ -156,11 +155,8 @@ pub fn decode_astc_ldr(
         let partition_count = ((u32::from(block[1]) >> 3) & 0x3) + 1;
         if partition_count == 1 {
             single_partition::decode_single_partition_ldr(block, bx, by, &mut out[..texels])?;
-        } else if bx == 4 && by == 4 {
-            let fixed = multi_partition::decode_multi_partition_4x4_ldr(block)?;
-            out[..16].copy_from_slice(&fixed);
         } else {
-            return Err(AstcError::UnsupportedBlockMode);
+            multi_partition::decode_multi_partition_ldr(block, bx, by, &mut out[..texels])?;
         }
     }
     Ok((out, texels))
@@ -175,11 +171,10 @@ pub fn decode_astc_ldr(
 /// decode hot path.
 ///
 /// Dispatches HDR void-extent (constant-colour FP16, replicated to the
-/// footprint) and single-partition HDR weighted blocks (the six HDR CEMs, any
-/// colour quantisation, any legal weight grid, single- or dual-plane). At the
-/// 4x4 footprint multi-partition blocks route through the dedicated 4x4 HDR
-/// decoder; multi-partition HDR decode for larger footprints is not yet
-/// implemented and returns [`AstcError::UnsupportedBlockMode`] rather than
+/// footprint), single-partition and multi-partition (2/3/4) HDR weighted
+/// blocks across all footprints: the six HDR CEMs (with any LDR/HDR partition
+/// mix), any colour quantisation, any legal weight grid, single- or
+/// dual-plane. Unsupported block types return an [`AstcError`] rather than
 /// approximate pixels.
 ///
 /// # Errors
@@ -206,11 +201,8 @@ pub fn decode_astc_hdr(
         let partition_count = ((u32::from(block[1]) >> 3) & 0x3) + 1;
         if partition_count == 1 {
             hdr_endpoints::decode_single_partition_hdr(block, bx, by, &mut out[..texels])?;
-        } else if bx == 4 && by == 4 {
-            let fixed = multi_partition_hdr::decode_multi_partition_4x4_hdr(block)?;
-            out[..16].copy_from_slice(&fixed);
         } else {
-            return Err(AstcError::UnsupportedBlockMode);
+            multi_partition_hdr::decode_multi_partition_hdr(block, bx, by, &mut out[..texels])?;
         }
     }
     Ok((out, texels))
