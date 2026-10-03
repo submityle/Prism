@@ -148,6 +148,8 @@ pub mod rotational_symmetry;
 pub use rotational_symmetry::{
     detect_rotational_symmetry, MeshRotationalSymmetry, RotationalAxis, RotationalSymmetryParams,
 };
+pub mod geodesic;
+pub use geodesic::{GeodesicPath, MeshEdgeGraph};
 
 /// A handle into a [`ShapeRegistry`].
 ///
