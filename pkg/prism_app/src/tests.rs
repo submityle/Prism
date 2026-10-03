@@ -3826,8 +3826,8 @@ mod cvar_tests {
     use super::*;
 
     use crate::cvar::{
-        CvarBounds, CvarCategory, CvarChanged, CvarError, CvarFlags, CvarRegistry, CvarSpec,
-        ValidatedWrite,
+        CvarBounds, CvarCategory, CvarChanged, CvarCliRejection, CvarError, CvarFlags,
+        CvarRegistry, CvarSpec, ValidatedWrite,
     };
 
     /// Registering a cvar seeds its default into the `EngineDefault` settings
@@ -4197,5 +4197,229 @@ mod cvar_tests {
         );
         registry.set_cheats_enabled(true);
         assert!(registry.validate_set("g.noclip", SettingValue::Bool(true)).is_ok());
+    }
+
+    /// A command-line override for a declared cvar is validated and clamped into
+    /// the declared bounds, written to the `CommandLine` layer, and reported as
+    /// an accepted (clamped) cvar — not written raw.
+    #[test]
+    fn cli_overrides_validate_and_clamp_declared_cvar() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
+            .unwrap();
+
+        // `99` is out of the [0, 4] bounds: it is clamped, not rejected.
+        let report = app.apply_cvar_cli_overrides(["--r.shadows=99"]);
+
+        assert_eq!(report.cvars.len(), 1);
+        assert!(report.settings.is_empty());
+        assert!(!report.has_rejections());
+        let applied = &report.cvars[0];
+        assert_eq!(applied.name, "r.shadows");
+        assert!(applied.outcome.changed);
+        assert!(applied.outcome.clamped);
+        assert_eq!(applied.outcome.resolved, SettingValue::Int(4));
+
+        assert_eq!(app.cvar_int("r.shadows"), Some(4));
+        assert_eq!(
+            app.world().resource::<Settings>().resolved_layer("r.shadows"),
+            Some(SettingsLayer::CommandLine),
+        );
+    }
+
+    /// A command-line value of the wrong type for a declared cvar is rejected at
+    /// the boundary (not coerced, not written): the cascade keeps the seeded
+    /// default and the rejection carries the `TypeMismatch` error.
+    #[test]
+    fn cli_overrides_reject_wrong_type_leaving_cascade_untouched() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
+            .unwrap();
+
+        let report = app.apply_cvar_cli_overrides(["r.shadows=high"]);
+
+        assert!(report.cvars.is_empty());
+        assert_eq!(report.rejected_count(), 1);
+        assert_eq!(report.rejected[0].key, "r.shadows");
+        assert!(matches!(
+            report.rejected[0].error,
+            CvarError::TypeMismatch { .. }
+        ));
+        // Untouched: still the EngineDefault seed.
+        assert_eq!(app.cvar_int("r.shadows"), Some(2));
+        assert_eq!(
+            app.world().resource::<Settings>().resolved_layer("r.shadows"),
+            Some(SettingsLayer::EngineDefault),
+        );
+    }
+
+    /// Read-only and cheat-protected cvars refuse command-line writes at the
+    /// boundary; enabling cheats first lets the cheat cvar through.
+    #[test]
+    fn cli_overrides_respect_read_only_and_cheat_flags() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("sys.build", 7_i64).flag(CvarFlags::READ_ONLY))
+            .unwrap();
+        app.register_cvar(CvarSpec::new("g.noclip", false).flag(CvarFlags::CHEAT))
+            .unwrap();
+
+        let report = app.apply_cvar_cli_overrides(["--sys.build=9", "--g.noclip=true"]);
+        assert!(report.cvars.is_empty());
+        assert_eq!(report.rejected_count(), 2);
+        assert_eq!(
+            report.rejected,
+            vec![
+                CvarCliRejection {
+                    key: "sys.build".to_owned(),
+                    error: CvarError::ReadOnly("sys.build".to_owned()),
+                },
+                CvarCliRejection {
+                    key: "g.noclip".to_owned(),
+                    error: CvarError::CheatProtected("g.noclip".to_owned()),
+                },
+            ],
+        );
+        assert_eq!(app.cvar_int("sys.build"), Some(7));
+        assert_eq!(app.cvar_bool("g.noclip"), Some(false));
+
+        // With cheats enabled, the cheat cvar is accepted; read-only stays refused.
+        app.set_cheats_enabled(true);
+        let report = app.apply_cvar_cli_overrides(["--sys.build=9", "--g.noclip=true"]);
+        assert_eq!(report.rejected_count(), 1);
+        assert_eq!(report.rejected[0].key, "sys.build");
+        assert_eq!(report.cvars.len(), 1);
+        assert_eq!(report.cvars[0].name, "g.noclip");
+        assert_eq!(app.cvar_bool("g.noclip"), Some(true));
+    }
+
+    /// A key that is not a declared cvar is written verbatim into the
+    /// `CommandLine` layer as an ordinary setting (cvars are opt-in), and shows
+    /// up in the report's `settings` bucket.
+    #[test]
+    fn cli_overrides_undeclared_key_written_as_plain_setting() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
+            .unwrap();
+
+        let report = app.apply_cvar_cli_overrides(["--window.title=Prism", "--r.shadows=1"]);
+
+        assert_eq!(report.settings.len(), 1);
+        assert_eq!(report.settings[0].key, "window.title");
+        assert_eq!(
+            report.settings[0].current,
+            Some(SettingValue::Str("Prism".to_owned()))
+        );
+        assert_eq!(report.cvars.len(), 1);
+        assert_eq!(report.cvars[0].name, "r.shadows");
+        assert_eq!(
+            app.world().resource::<Settings>().get("window.title"),
+            Some(&SettingValue::Str("Prism".to_owned()))
+        );
+        assert_eq!(app.cvar_int("r.shadows"), Some(1));
+    }
+
+    /// A bare `--flag` (no `=`) means `Bool(true)`; applied to a declared bool
+    /// cvar it validates and sets it true.
+    #[test]
+    fn cli_overrides_bare_flag_sets_bool_cvar_true() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.vsync", false)).unwrap();
+
+        let report = app.apply_cvar_cli_overrides(["--r.vsync"]);
+
+        assert_eq!(report.cvars.len(), 1);
+        assert_eq!(report.cvars[0].name, "r.vsync");
+        assert!(report.cvars[0].outcome.changed);
+        assert_eq!(app.cvar_bool("r.vsync"), Some(true));
+    }
+
+    /// Launch flags land in the `CommandLine` layer, which sits *below*
+    /// `Runtime`: a cvar already overridden at runtime resolves unchanged, yet
+    /// the command-line contribution is still recorded (changed = false).
+    #[test]
+    fn cli_overrides_below_runtime_report_unchanged() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("net.tickrate", 30_i64).bounds(CvarBounds::Int(1, 240)))
+            .unwrap();
+        app.set_cvar("net.tickrate", 128_i64).unwrap();
+        assert_eq!(app.cvar_int("net.tickrate"), Some(128));
+
+        let report = app.apply_cvar_cli_overrides(["--net.tickrate=60"]);
+
+        assert_eq!(report.cvars.len(), 1);
+        assert!(!report.cvars[0].outcome.changed);
+        // Runtime still wins; the CommandLine value sits underneath.
+        assert_eq!(app.cvar_int("net.tickrate"), Some(128));
+        assert_eq!(
+            app.world().resource::<Settings>().resolved_layer("net.tickrate"),
+            Some(SettingsLayer::Runtime),
+        );
+    }
+
+    /// Accepting a `NOTIFY` cvar through the command line broadcasts a
+    /// `CvarChanged` event (same path as `set_cvar`).
+    #[test]
+    fn cli_overrides_emit_cvar_changed_for_notify_flag() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4))
+                .flag(CvarFlags::NOTIFY),
+        )
+        .unwrap();
+
+        app.add_systems(
+            Update,
+            |mut cursor: Local<EventCursor<CvarChanged>>, events: Res<Events<CvarChanged>>| {
+                for ev in cursor.read(&events) {
+                    assert_eq!(ev.name, "r.shadows");
+                    assert_eq!(ev.category, CvarCategory::Render);
+                    assert_eq!(ev.current, SettingValue::Int(3));
+                }
+            },
+        );
+
+        let report = app.apply_cvar_cli_overrides(["--r.shadows=3"]);
+        assert!(report.cvars[0].outcome.changed);
+        app.update();
+        app.update();
+    }
+
+    /// Environment-style overrides map `PREFIX_A_B` → `a.b` and run declared
+    /// cvars through the same validation/clamping as the command-line path.
+    #[test]
+    fn env_overrides_map_prefix_and_validate() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64).bounds(CvarBounds::Int(0, 4)))
+            .unwrap();
+
+        let report = app.apply_cvar_env_overrides(
+            [
+                ("PRISM_R_SHADOWS", "99"),
+                ("PRISM_WINDOW_TITLE", "Prism"),
+                ("OTHER_IGNORED", "x"),
+            ],
+            "PRISM_",
+        );
+
+        // r.shadows is a declared cvar: clamped into bounds.
+        assert_eq!(report.cvars.len(), 1);
+        assert_eq!(report.cvars[0].name, "r.shadows");
+        assert!(report.cvars[0].outcome.clamped);
+        assert_eq!(app.cvar_int("r.shadows"), Some(4));
+        // window.title is undeclared: written verbatim.
+        assert_eq!(report.settings.len(), 1);
+        assert_eq!(report.settings[0].key, "window.title");
+        // The non-prefixed var is ignored entirely.
+        assert_eq!(app.world().resource::<Settings>().get("other.ignored"), None);
+    }
+
+    /// An empty / all-no-op override pass produces an empty report.
+    #[test]
+    fn cli_overrides_empty_report_when_nothing_applies() {
+        let mut app = App::new();
+        let report = app.apply_cvar_cli_overrides(["--", "=value", ""]);
+        assert!(report.is_empty());
     }
 }

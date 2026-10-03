@@ -492,6 +492,87 @@ pub struct ValidatedWrite {
     pub clamped: bool,
 }
 
+/// A per-argument report from a cvar-aware launch-override pass
+/// ([`App::apply_cvar_cli_overrides`] / [`App::apply_cvar_env_overrides`],
+/// design §24.6, §25.3, §14).
+///
+/// Launch overrides (command-line flags, environment variables) are the
+/// *outermost* input to the settings cascade, so they are also where a typo or
+/// an out-of-range value first arrives. Rather than letting such input bypass a
+/// declared cvar's schema — or crash the process — each argument is classified:
+///
+/// * [`cvars`](CvarCliReport::cvars) — keys that name a **declared** cvar and
+///   passed [validation](CvarRegistry::validate_set); their type-coerced,
+///   clamped value was written to the
+///   [`CommandLine`](crate::settings::SettingsLayer::CommandLine) cascade layer.
+/// * [`rejected`](CvarCliReport::rejected) — keys that name a declared cvar but
+///   whose value was refused at the boundary (wrong type, read-only, or
+///   cheat-protected while cheats are off). The cascade is left untouched for
+///   that key (design §25.3 "非法输入按安全边界拒绝而非崩溃"), so a launcher can
+///   log the [`CvarError`] and keep running.
+/// * [`settings`](CvarCliReport::settings) — keys that are **not** declared
+///   cvars; these are written verbatim into the `CommandLine` layer as ordinary
+///   [`Settings`] keys (cvars are opt-in, so undeclared launch keys keep working
+///   exactly like [`Settings::apply_cli_args`]).
+///
+/// The report preserves argument order within each bucket.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CvarCliReport {
+    /// Declared cvars that were accepted, in argument order, each with the
+    /// [`CvarSetOutcome`] describing whether the resolved value changed and
+    /// whether the input was clamped.
+    pub cvars: Vec<CvarCliApplied>,
+    /// Undeclared keys written as ordinary settings, in argument order, each
+    /// carrying the [`SettingChange`](crate::settings::SettingChange) that
+    /// actually altered a resolved value.
+    pub settings: Vec<crate::settings::SettingChange>,
+    /// Declared cvars whose value was rejected at the boundary, in argument
+    /// order, each with the [`CvarError`] explaining why and leaving the
+    /// cascade untouched for that key.
+    pub rejected: Vec<CvarCliRejection>,
+}
+
+impl CvarCliReport {
+    /// Whether no argument produced any effect or error (every argument was
+    /// empty or left its resolved value unchanged).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cvars.is_empty() && self.settings.is_empty() && self.rejected.is_empty()
+    }
+
+    /// Whether at least one declared-cvar argument was rejected at the boundary.
+    #[must_use]
+    pub fn has_rejections(&self) -> bool {
+        !self.rejected.is_empty()
+    }
+
+    /// The number of rejected declared-cvar arguments.
+    #[must_use]
+    pub fn rejected_count(&self) -> usize {
+        self.rejected.len()
+    }
+}
+
+/// One accepted declared-cvar launch override (see [`CvarCliReport::cvars`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CvarCliApplied {
+    /// The cvar name as declared (the key with any leading `--` stripped).
+    pub name: String,
+    /// The validated write's outcome: whether the resolved value changed and
+    /// whether the input was clamped into the declared bounds.
+    pub outcome: CvarSetOutcome,
+}
+
+/// One rejected declared-cvar launch override (see [`CvarCliReport::rejected`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CvarCliRejection {
+    /// The offending key (with any leading `--` stripped).
+    pub key: String,
+    /// Why the write was refused at the boundary; the cascade was left
+    /// unchanged for this key.
+    pub error: CvarError,
+}
+
 /// The stable kind label for a [`SettingValue`], used in error messages and in
 /// [`Cvar::kind`].
 #[must_use]
@@ -905,5 +986,153 @@ impl App {
     #[must_use]
     pub fn cvar_str(&self, name: &str) -> Option<&str> {
         self.cvar(name).and_then(SettingValue::as_str)
+    }
+
+    /// Apply command-line-style launch overrides, routing **declared cvars**
+    /// through [validation](CvarRegistry::validate_set) and writing everything
+    /// into the [`CommandLine`](crate::settings::SettingsLayer::CommandLine)
+    /// cascade layer (design §24.6, §25.3, §14).
+    ///
+    /// This is the cvar-aware counterpart to
+    /// [`apply_cli_overrides`](App::apply_cli_overrides): it accepts the same
+    /// argument syntax (`--key=value`, `key=value`, or a bare `--flag` meaning
+    /// [`Bool(true)`](crate::settings::SettingValue::Bool), with a leading `--`
+    /// stripped), but it does not blindly write every argument. For each key:
+    ///
+    /// * if the key names a **registered cvar**, the parsed value is run through
+    ///   [`set_cvar_at`](App::set_cvar_at) at the `CommandLine` layer, so it is
+    ///   type-coerced, clamped into the declared [bounds](CvarBounds), and
+    ///   refused if the cvar is [read-only](CvarFlags::READ_ONLY) or
+    ///   [cheat-protected](CvarFlags::CHEAT) while cheats are off. Illegal input
+    ///   is rejected at the boundary with a [`CvarError`] (recorded in
+    ///   [`CvarCliReport::rejected`]) and leaves the cascade untouched for that
+    ///   key, never panicking (design §25.3);
+    /// * otherwise the key is treated as an ordinary, undeclared
+    ///   [`Settings`] key and written verbatim into
+    ///   the `CommandLine` layer, exactly like
+    ///   [`Settings::apply_cli_args`].
+    ///
+    /// Each accepted or rejected argument broadcasts the usual
+    /// [`SettingChanged`](crate::settings::SettingChanged) (and, for a `NOTIFY`
+    /// cvar whose resolved value changed, [`CvarChanged`]) events through the
+    /// same paths as the other setters. The returned [`CvarCliReport`] lets a
+    /// launcher surface what was applied, clamped, or rejected.
+    ///
+    /// Auto-initialises the registry, cascade, and events. Because launch flags
+    /// are a *lower* cascade layer than `Runtime`, a declared cvar already
+    /// overridden at `Runtime` resolves unchanged (its
+    /// [`CvarSetOutcome::changed`] is `false`); the `CommandLine` contribution is
+    /// still recorded underneath. Note that cheat-protected cvars are refused
+    /// here unless [cheats are enabled](App::set_cheats_enabled) first, so a dev
+    /// build that wants to honour cheat cvars from the command line must enable
+    /// cheats before calling this.
+    pub fn apply_cvar_cli_overrides<I, S>(&mut self, args: I) -> CvarCliReport
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.init_cvars();
+        let mut report = CvarCliReport::default();
+        for arg in args {
+            let arg = arg.as_ref();
+            let (key, value) = match arg.split_once('=') {
+                Some((k, v)) => (
+                    k.trim_start_matches("--").to_owned(),
+                    SettingValue::parse(v),
+                ),
+                None => (
+                    arg.trim_start_matches("--").to_owned(),
+                    SettingValue::Bool(true),
+                ),
+            };
+            if key.is_empty() {
+                continue;
+            }
+            self.fold_launch_override(&key, value, &mut report);
+        }
+        report
+    }
+
+    /// Apply environment-style launch overrides, routing **declared cvars**
+    /// through [validation](CvarRegistry::validate_set) and writing everything
+    /// into the [`CommandLine`](crate::settings::SettingsLayer::CommandLine)
+    /// cascade layer (design §24.6, §25.3, §14).
+    ///
+    /// The cvar-aware counterpart to
+    /// [`apply_env_vars`](crate::settings::Settings::apply_env_vars): only
+    /// variables whose name starts with `prefix` are considered; the prefix is
+    /// stripped, the remainder is lowercased with each `_` mapped to `.` (so
+    /// `PRISM_R_SHADOWS` → `r.shadows`, matching the dotted cvar namespace), and
+    /// the value is parsed with
+    /// [`SettingValue::parse`](crate::settings::SettingValue::parse). Each
+    /// resulting `(key, value)` is then classified and applied exactly like
+    /// [`apply_cvar_cli_overrides`](App::apply_cvar_cli_overrides) — declared
+    /// cvars validated and clamped, undeclared keys written verbatim, illegal
+    /// cvar input rejected at the boundary into [`CvarCliReport::rejected`].
+    ///
+    /// Launch flags and the environment are a single launch-time layer, so these
+    /// share the `CommandLine` layer with
+    /// [`apply_cvar_cli_overrides`](App::apply_cvar_cli_overrides).
+    pub fn apply_cvar_env_overrides<I, K, V>(&mut self, vars: I, prefix: &str) -> CvarCliReport
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        self.init_cvars();
+        let mut report = CvarCliReport::default();
+        for (name, value) in vars {
+            let name = name.as_ref();
+            let Some(rest) = name.strip_prefix(prefix) else {
+                continue;
+            };
+            if rest.is_empty() {
+                continue;
+            }
+            let key = rest.to_lowercase().replace('_', ".");
+            let value = SettingValue::parse(value.as_ref());
+            self.fold_launch_override(&key, value, &mut report);
+        }
+        report
+    }
+
+    /// Classify and apply a single parsed launch override into the
+    /// [`CommandLine`](crate::settings::SettingsLayer::CommandLine) layer,
+    /// recording the outcome in `report`.
+    ///
+    /// Shared by [`apply_cvar_cli_overrides`](App::apply_cvar_cli_overrides) and
+    /// [`apply_cvar_env_overrides`](App::apply_cvar_env_overrides): a declared
+    /// cvar goes through [`set_cvar_at`](App::set_cvar_at) (validated/clamped,
+    /// rejected on error); any other key is written verbatim as an ordinary
+    /// setting and its [`SettingChanged`](crate::settings::SettingChanged) event
+    /// broadcast.
+    fn fold_launch_override(
+        &mut self,
+        key: &str,
+        value: SettingValue,
+        report: &mut CvarCliReport,
+    ) {
+        let is_cvar = self.world().resource::<CvarRegistry>().contains(key);
+        if is_cvar {
+            match self.set_cvar_at(SettingsLayer::CommandLine, key, value) {
+                Ok(outcome) => report.cvars.push(CvarCliApplied {
+                    name: key.to_owned(),
+                    outcome,
+                }),
+                Err(error) => report.rejected.push(CvarCliRejection {
+                    key: key.to_owned(),
+                    error,
+                }),
+            }
+        } else {
+            let change = self
+                .world_mut()
+                .resource_mut::<Settings>()
+                .set(SettingsLayer::CommandLine, key.to_owned(), value);
+            if let Some(change) = change {
+                self.send_event(change.clone());
+                report.settings.push(change);
+            }
+        }
     }
 }
