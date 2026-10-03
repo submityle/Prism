@@ -411,6 +411,90 @@ pub fn encode_astc_single_partition_6x6_ldr(texels: &[[u8; 4]; 36]) -> [u8; 16] 
     w.into_block()
 }
 
+/// Encode sixty-four `RGBA8` texels (row-major, `texel = y * 8 + x`) into a
+/// single **8x8** ASTC LDR block.
+///
+/// Configuration (verified against the authoritative block-mode scan -- 8x8 is
+/// the *only* single-plane CEM-8 full-grid mode on this footprint):
+/// * **block mode 1348** (`0b10101000100`): an 8x8 weight grid, single plane,
+///   weight range **QUANT_2** (one bit -> two interpolation levels, 64 weight
+///   bits);
+/// * **single partition**, **CEM 8** (RGB direct, alpha forced to 255);
+/// * **QUANT_192 trit colour**: with `color_bits = 111 - 64 = 47` the six CEM-8
+///   integers are a QUANT_192 trit BISE sequence (46 bits), not identity
+///   colour, so the endpoints are quantised to QUANT_192 and pre-swapped to
+///   dodge the decoder's blue-contraction branch (mirrors the mode-578 4x4
+///   encoder's colour path).
+///
+/// 8x8 is a legal hardware footprint (`AstcBlock::B8x8`), and the 8x8 weight
+/// grid equals the footprint so there is **no bilinear infill** -- weight `t`
+/// maps 1:1 to texel `t` in row-major order. The single-bit weight range means
+/// each texel snaps to the nearer of the two QUANT_192 endpoints.
+///
+/// The weight stream is a plain 1-bit range, packed with the bit-only
+/// `bits::BlockWriter::write_weights_reversed`; the colour is a trit BISE
+/// written with `trit_quint::encode_trit_sequence` at block bit 17 (the two
+/// regions, colour 17..63 and weights 64..128, do not overlap).
+///
+/// CEM 8 carries no alpha, so the decoded block has alpha 255 for every texel
+/// and the input alpha channel is ignored.
+#[must_use]
+pub fn encode_astc_single_partition_8x8_ldr(texels: &[[u8; 4]; 64]) -> [u8; 16] {
+    const BLOCK_MODE: u32 = 1348;
+    const CEM_RGB_DIRECT: u32 = 8;
+    const WEIGHT_BITS: u32 = 1; // QUANT_2, bit-only (two levels)
+    const COLOR_LEVEL: usize = 15; // QUANT_192 (trit + 6 low bits)
+    const COLOR_LOW_BITS: u32 = 6; // QUANT_192 trit range low bits
+
+    // Fit the principal-axis RGB endpoints over all sixty-four texels, then
+    // quantise each channel into the QUANT_192 packed representation.
+    let (e0_raw, e1_raw) = endpoint_fit::fit_rgb_endpoints(texels);
+    let mut p0: [u8; 3] =
+        core::array::from_fn(|c| color_quant::quantize_color_channel(COLOR_LEVEL, e0_raw[c]));
+    let mut p1: [u8; 3] =
+        core::array::from_fn(|c| color_quant::quantize_color_channel(COLOR_LEVEL, e1_raw[c]));
+
+    // Reconstruct the decoded endpoints the hardware interpolates between.
+    let unq = |p: [u8; 3]| -> [u8; 3] {
+        core::array::from_fn(|c| super::color_unquant::unquant_color(COLOR_LEVEL, p[c]))
+    };
+    let mut d0 = unq(p0);
+    let mut d1 = unq(p1);
+
+    // CEM 8 applies blue-contraction + endpoint swap when `hadd(e0) > hadd(e1)`
+    // on the *decoded* colours. Pre-swap the packed endpoints so the decoder
+    // takes the plain path and interpolates d0..d1 directly; weights are fitted
+    // after the swap so the texel mapping stays correct.
+    let hadd = |c: [u8; 3]| u32::from(c[0]) + u32::from(c[1]) + u32::from(c[2]);
+    if hadd(d0) > hadd(d1) {
+        core::mem::swap(&mut p0, &mut p1);
+        core::mem::swap(&mut d0, &mut d1);
+    }
+
+    // Fit the sixty-four 1-bit weights against the *decoded* endpoints (no
+    // infill on a full grid): each texel snaps to the nearer endpoint.
+    let raw = weight_fit::quantize_weights_bits(texels, d0, d1, WEIGHT_BITS);
+
+    let mut w = bits::BlockWriter::new();
+    // Block mode occupies block bits 0..11; single partition leaves the
+    // partition-count field (bits 11,12) at 0.
+    w.write_bits(0, 11, BLOCK_MODE);
+    // CEM field: 4 bits at block bit 13. CEM 8 sets only block bit 16.
+    w.write_bits(13, 4, CEM_RGB_DIRECT);
+    // Sixty-four 1-bit weights packed bit-reversed from the top of the block
+    // (bits 64..128).
+    w.write_weights_reversed(&raw, WEIGHT_BITS);
+    let mut block = w.into_block();
+
+    // Six QUANT_192 colour integers as a trit BISE at block bit 17, in the
+    // decoder's read order [e0.r, e1.r, e0.g, e1.g, e0.b, e1.b]. Each packed
+    // value is `low(6 bits) | (trit << 6)`, exactly the table index. Colour
+    // (17..63) and the weights (64..128) do not overlap.
+    let packed = [p0[0], p1[0], p0[1], p1[1], p0[2], p1[2]];
+    super::trit_quint::encode_trit_sequence(&mut block, 17, COLOR_LOW_BITS, &packed);
+    block
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::decode_astc_4x4_ldr;
@@ -422,6 +506,7 @@ mod tests {
     use super::encode_astc_single_partition_4x4_ldr_rgba_q6;
     use super::encode_astc_single_partition_5x5_ldr;
     use super::encode_astc_single_partition_6x6_ldr;
+    use super::encode_astc_single_partition_8x8_ldr;
 
     /// Max per-channel RGB error over the sixteen texels after a round trip.
     fn max_rgb_err(src: &[[u8; 4]; 16], dec: &[[u8; 4]; 16]) -> i32 {
@@ -844,6 +929,70 @@ mod tests {
         assert!(
             max_rgb_err_36(&src, &dec) <= 70,
             "6x6 gray ramp error too large for three trit levels"
+        );
+    }
+
+    fn max_rgb_err_64(src: &[[u8; 4]; 64], dec: &[[u8; 4]; 64]) -> i32 {
+        let mut m = 0i32;
+        for (s, d) in src.iter().zip(dec.iter()) {
+            for c in 0..3 {
+                m = m.max((i32::from(s[c]) - i32::from(d[c])).abs());
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn eight_by_eight_constant_block_round_trips_within_quant192() {
+        // Mode 1348 uses QUANT_192 trit colour (not identity), so a constant
+        // block reconstructs within the QUANT_192 quantisation budget (<= 2
+        // LSB) rather than bit-exactly, regardless of the single-bit weights.
+        let src = [[41u8, 173, 98, 255]; 64];
+        let blk = encode_astc_single_partition_8x8_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 8, 8).expect("decode 8x8 constant");
+        assert_eq!(count, 64, "8x8 footprint must decode 64 texels");
+        let dec: [[u8; 4]; 64] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_64(&src, &dec) <= 2,
+            "8x8 constant block must round-trip within the QUANT_192 budget"
+        );
+        for d in &dec {
+            assert_eq!(d[3], 255, "CEM 8 forces alpha 255");
+        }
+    }
+
+    #[test]
+    fn eight_by_eight_two_colour_endpoints_within_quant192() {
+        // A hard split between two colours: every texel sits on one of the two
+        // endpoints. With exact snapping the only error is the QUANT_192
+        // endpoint quantisation (<= 2 LSB), not weight interpolation.
+        let a = [15u8, 35, 55, 255];
+        let b = [210u8, 190, 170, 255];
+        let src: [[u8; 4]; 64] = core::array::from_fn(|t| if t % 2 == 0 { a } else { b });
+        let blk = encode_astc_single_partition_8x8_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 8, 8).expect("decode 8x8 two-colour");
+        assert_eq!(count, 64);
+        let dec: [[u8; 4]; 64] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_64(&src, &dec) <= 2,
+            "8x8 two-colour block must hit both endpoints within QUANT_192"
+        );
+    }
+
+    #[test]
+    fn eight_by_eight_gray_ramp_snaps_to_nearer_endpoint() {
+        // A smooth gray ramp with only two weight levels: every texel snaps to
+        // whichever endpoint is closer, so the worst case is about half the
+        // endpoint span plus the QUANT_192 endpoint budget.
+        let src: [[u8; 4]; 64] =
+            core::array::from_fn(|t| [(t * 4) as u8, (t * 4) as u8, (t * 4) as u8, 255]);
+        let blk = encode_astc_single_partition_8x8_ldr(&src);
+        let (dec144, count) = decode_astc_ldr(&blk, 8, 8).expect("decode 8x8 gray ramp");
+        assert_eq!(count, 64);
+        let dec: [[u8; 4]; 64] = core::array::from_fn(|t| dec144[t]);
+        assert!(
+            max_rgb_err_64(&src, &dec) <= 128,
+            "8x8 gray ramp error exceeds the two-level half-span bound"
         );
     }
 }
