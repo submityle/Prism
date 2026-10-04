@@ -29,6 +29,11 @@ pub use crate::profiler::{
 };
 pub use crate::sink::{set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
 pub use crate::span::Scope;
+pub use crate::telemetry::{
+    build_event, hash_identifier, redact_user_path, truncate_str, AggregatedEvent, EventAggregator,
+    EventSchema, FieldDisposition, FieldTier, RedactedEvent, RedactionPolicy, SampleOutcome,
+    SampleRatio, TelemetrySampler,
+};
 pub use crate::trace::{
     export_chrome_string, export_chrome_to_file, FlowPhase, FlowRecord, SpanRecord,
 };

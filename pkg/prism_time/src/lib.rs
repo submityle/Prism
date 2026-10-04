@@ -58,6 +58,7 @@
 extern crate alloc;
 
 mod clock;
+pub mod adaptive_quality;
 #[cfg(feature = "compat-bevy")]
 pub mod compat_bevy;
 pub mod determinism;
@@ -73,10 +74,14 @@ pub mod multiworld;
 pub mod net;
 pub mod recording;
 pub mod scheduler;
+pub mod suspend;
 pub mod timeline;
 pub mod timer;
 mod virtual_time;
 
+pub use adaptive_quality::{
+    utilization_ppm, AdaptiveQualityConfig, AdaptiveQualityController, QualityAdjustment,
+};
 pub use clock::{Clocks, DefaultSource};
 pub use core::time::Duration;
 pub use determinism::{RationalStep, TickClock, TickSnapshot};
@@ -96,6 +101,7 @@ pub use multiworld::{
 };
 pub use recording::{Player, Recorder, RecordedFrame, Recording};
 pub use scheduler::{Fired, Scheduler, TimerHandle, TimerKind};
+pub use suspend::SuspendableClock;
 pub use timeline::{
     PlaybackMode, Sequencer, SequencerFull, Timeline, TimelineMarker, TimelineTick,
 };
@@ -244,17 +250,15 @@ impl Time<Real> {
 /// Common imports.
 pub mod prelude {
     pub use crate::{
-        compare_trails, composite_scale, fnv1a_64, AuditDiff, AuditTrail, ClockOffsetEstimator,
-        ClockSync, Clocks, Cooldown, DefaultSource, DriftCorrector, Duration, Easing, Fired,
-        Fixed, FrameBudget,
+        compare_trails, composite_scale, fnv1a_64, utilization_ppm, AdaptiveQualityConfig,
+        AdaptiveQualityController, AuditDiff, AuditTrail, ClockOffsetEstimator, ClockSync, Clocks,
+        Cooldown, DefaultSource, DriftCorrector, Duration, Easing, Fired, Fixed, FrameBudget,
         FrameReport, FrameStats, FrameStepper, Instant, InterpolationBuffer, Lerp, MonotonicBaseline,
-        OffsetSample,
-        PlaybackMode, Player, RationalStep, Real, RecordedFrame, Recorder, Recording, Sampled,
-        ScaleTransition, Scheduler, Sequencer, ServerTick, SmoothedDelta, StateHasher, StepState,
-        Stopwatch,
-        Throttle, TickClock, TickSnapshot, Time, TimeDriver, TimeScaleDomain, Timeline,
-        TimelineMarker, TimelineTick, Timer, TimerHandle, TimerKind, TimerMode, Virtual, WorldSet,
-        WorldTimeDomain,
+        OffsetSample, PlaybackMode, Player, QualityAdjustment, RationalStep, Real, RecordedFrame,
+        Recorder, Recording, Sampled, ScaleTransition, Scheduler, Sequencer, ServerTick,
+        SmoothedDelta, StateHasher, StepState, Stopwatch, SuspendableClock, Throttle, TickClock,
+        TickSnapshot, Time, TimeDriver, TimeScaleDomain, Timeline, TimelineMarker, TimelineTick,
+        Timer, TimerHandle, TimerKind, TimerMode, Virtual, WorldSet, WorldTimeDomain,
     };
 }
 
@@ -270,3 +274,7 @@ mod tests_multiworld;
 mod tests_record_replay;
 #[cfg(test)]
 mod tests_scheduler;
+#[cfg(test)]
+mod tests_adaptive_quality;
+#[cfg(test)]
+mod tests_suspend;

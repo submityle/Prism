@@ -9,7 +9,7 @@
 > - **仿射运算**：glam `Affine3A`（SIMD）、经典 3×4 仿射矩阵
 > 本文为纯经典线性代数 / 层级传播路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.4（核心 M0–M6 已落地并验证；§24 高级增补中 **§24.1 静态变换烘焙与批合并（`bake`）**、**§24.3 双缓冲/多缓冲变换（`double_buffer`）**、**§24.2 姿态量化压缩（`quantize`）**、**§24.4 变换 Observer 钩子（`observer`）**、**§24.6 轻量约束（`constraint`）** 已交付并验证，其余 §24 项仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：静态变换烘焙与批合并/姿态量化压缩/双缓冲读取一致性/变换 Observer 钩子/空间加速结构增量同步/轻量约束(look-at/aim/parent-blend)/GPU 侧层级传播/扫掠变换(CCD/运动模糊)；§24.1/24.2/24.3/24.4/24.6 已交付，其余仍为 PLANNED）
+- 版本: v0.4（核心 M0–M6 已落地并验证；§24 高级增补中 **§24.1 静态变换烘焙与批合并（`bake`）**、**§24.3 双缓冲/多缓冲变换（`double_buffer`）**、**§24.2 姿态量化压缩（`quantize`）**、**§24.4 变换 Observer 钩子（`observer`）**、**§24.5 空间加速结构增量同步（`spatial_sync`）**、**§24.6 轻量约束（`constraint`）**、**§24.8 扫掠变换（`sweep`）** 已交付并验证，其余 §24 项仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：静态变换烘焙与批合并/姿态量化压缩/双缓冲读取一致性/变换 Observer 钩子/空间加速结构增量同步/轻量约束(look-at/aim/parent-blend)/GPU 侧层级传播/扫掠变换(CCD/运动模糊)；§24.1/24.2/24.3/24.4/24.5/24.6/24.8 已交付，其余（24.7 GPU 侧）仍为 PLANNED）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_math`（Vec3/Quat/Affine3/Mat4、SIMD）、`prism_ecs`（组件存储 + `ChildOf` 关系 + 变更检测 + 并行查询）、`prism_tasks`（分块并行传播）；可选 `prism_time`（插值 alpha）、`prism_diagnostic`
 - 层级定位: ECS 文档 L3「仿真」；渲染提取（ECS §15）与物理/相机的空间输入供给方
@@ -490,13 +490,19 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 > - `TransformChange { node, old, new }` 配 `translation_delta` / `moved(eps)` / `basis_changed(eps)` / `mask(eps) -> ChangeMask { translation, basis }`（`basis` 为 3×3 线性部整体变化；精细 rotation/scale 拆分留给订阅方从 `old`/`new` 自行分解）。
 > - `no_std + alloc`，无原子、无线程、无 ECS 绑定——脏集与世界姿态由调用方（如 `dirty`）提供。确定性单测（`tests_observer.rs`，12 项）。
 
-### 24.5 空间加速结构增量同步（BVH / Grid Hash）
+### 24.5 空间加速结构增量同步（BVH / Grid Hash）✅ 已交付（`spatial_sync`）
 
 空间查询(拾取、范围检索、宽相位碰撞、剔除)依赖加速结构;变换变化应**增量更新**而非每帧重建:
 
 - 动态实体变换变化(经 §24.4 钩子或脏集)驱动其在 BVH/网格哈希中的 refit/重插入。
 - 静态实体(§24.1)入独立静态结构,一次构建永不动。
 - 与 `prism_render_visibility`(剔除)、`prism_physics`(宽相位)、`prism_navigation`(空间查询)共享同一套同步契约,避免每个子系统各维护一份空间索引。
+
+> **交付状态（`pkg/prism_transform/src/spatial_sync.rs`）：✅ 已交付并验证。**
+> `SpatialSync` 是「变换脏集 → 空间加速结构增量指令」的纯确定性桥接层（不做真实 BVH/网格重建——那属空间索引 crate）。每个被追踪实体登记其**对象空间**（局部）`Aabb3`；`observe(dirty, globals)` 对脏且被追踪的代理，用世界 `GlobalTransform` 变换局部盒的八个角点并重拟合出**世界空间**紧致盒；`drain()` 产出按 `NodeId` 升序排序的 `SpatialCommand` 流（`Insert`/`Update`/`Remove`）与 `SyncStats` 计数，输出是「观测到的变化」的确定性函数，与登记/观测/移除的调用顺序无关。
+> - **重拟合策略（`margin`）**：`margin == 0`（精确模式）任意世界盒变化（增或缩）都发 `Update`；`margin > 0`（胖盒模式）仿动态树纪律，仅当新紧致盒**逃出**已存胖盒时才发 `Update` 并重新加胖，盒内抖动不产生指令——与 `prism_physics` 宽相位动态树的 fat-AABB refit 一致。
+> - **增量 diff**：`transform_aabb`（角点变换重拟合，对仿射精确）/ `world_aabb` 为可复用公共辅助；`register`/`remove` 支持热插拔，脏集可直接喂整棵层级（未追踪的脏节点被忽略，无需预过滤）；一帧内对同一节点多次 `observe` 取最后姿态；`drain_into` 复用调用方缓冲避免每帧分配。
+> - `no_std + alloc`，无原子、无线程、无 ECS 绑定——脏集与世界姿态由调用方（如 `dirty`/`observer`）提供，产出的指令由空间索引 crate 消费。确定性 + 几何 oracle 单测（`tests_spatial_sync.rs`，17 项）。
 
 ### 24.6 轻量变换约束（Constraints: look-at / aim / parent-blend）✅ 已交付（`constraint`）
 
@@ -529,7 +535,7 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 - 与 §13 GPU 变换列、ECS §15 GPU 驱动一致;仅对「只在 GPU 消费、CPU 无需读回」的子树启用(如纯视觉植被)。
 - `gpu` feature + RHI(`prism_render_driver`)compute 能力探测门控。
 
-### 24.8 扫掠变换（Swept Transform）—— CCD / 运动模糊
+### 24.8 扫掠变换（Swept Transform）—— CCD / 运动模糊 ✅ 已交付（`sweep`）
 
 保存实体「上一位姿 → 当前位姿」的扫掠信息,供两类消费:
 
@@ -537,16 +543,25 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 - **运动模糊 / TAA 速度向量**:渲染用前后帧世界矩阵算屏幕空间速度(供 `prism_render_scene` 的 motion vector pass)。
 - 复用 §10 插值已存的 prev/curr,无额外存储;瞬移(teleport)标记须清零扫掠,避免假速度拉花。
 
+> **交付状态（`pkg/prism_transform/src/sweep.rs`）：✅ 已交付并验证。**
+> `SweptMotion` 存实体「上一帧 → 本帧」世界姿态 + 对象空间 `Aabb3`，复用 §10 插值已有的 prev/curr 快照，无额外每实体存储。
+> - **保守扫掠包围**：`bounds()` 返回**可证明保守**的世界 `Aabb3`——沿插值轨迹（平移/缩放 `lerp`、旋转最短弧 `slerp`，与 `GlobalTransform::interpolate` 一致）的每一时刻该盒都包含代理。构造复刻生产物理引擎的经典 temporal-AABB 界：取两端点世界盒之并集（平移沿直线段、缩放 `lerp` 使中间角点落在端点像的连线上，范数不超过端点，故线性/缩放运动已被并集覆盖），再按旋转弧长 `θ·r`（`θ` 扫掠角、`r` 角点到帧原点的半径）向各轴外扩以保守吞下旋转外凸（弧矢高 ≤ 弧长）。
+> - **TOI 时间细分数据模型**：`bounds_sub(t0,t1)` 对任意子区间给保守盒，`subdivide(n)` 走 `[0,1]` 的等分区间产出每片 `SweepSegment{t0,t1,bounds}`——子区间越小 `θ` 与端点跨度越小、盒越紧，正是保守推进（conservative advancement）夹逼 TOI 所需；另有 `pose_at(t)`/`box_at(t)` 精确采样、`angular_motion()`/`translation_delta()` 运动度量。
+> - **瞬移**：`teleported(curr, local)` 构造的扫掠包围塌缩为当前盒、报告速度为零，杜绝假速度拉花（供运动模糊 / TAA 速度向量）；`still(pose, local)` 为静止退化。
+> - `no_std + alloc`，纯 `prism_math` 数学，无线程无时钟，从不改动权威仿真态。保守正确性由**稠密采样对拍**验证（平移/旋转/平移+旋转+缩放组合，每时刻采样盒 ⊆ 扫掠盒）；窄相位扫掠测试与真实 motion vector pass 归 `prism_physics`/`prism_render_scene`。几何 + 保守性单测（`tests_sweep.rs`，13 项）。
+
 ### 24.9 诚实边界
 
-本章 **24.1 静态烘焙（`bake`）**、**24.3 双缓冲（`double_buffer`）**、**24.2 姿态量化（`quantize`）**、**24.4 变换 Observer（`observer`）**、**24.6 轻量约束（`constraint`）** 已落地并通过验证（实现 + 单测，`cargo clippy --all-targets` 零告警、`cargo test` 零失败）；其余为 PLANNED 设计目标,无代码。诚实边界：
+本章 **24.1 静态烘焙（`bake`）**、**24.3 双缓冲（`double_buffer`）**、**24.2 姿态量化（`quantize`）**、**24.4 变换 Observer（`observer`）**、**24.5 空间加速结构增量同步（`spatial_sync`）**、**24.6 轻量约束（`constraint`）**、**24.8 扫掠变换（`sweep`）** 已落地并通过验证（实现 + 单测，`cargo clippy --all-targets` 零告警、`cargo test` 零失败）；其余为 PLANNED 设计目标,无代码。诚实边界：
 
 - **24.1 已交付的边界**：`StaticBaker` 是纯计算核心（并行数组 + 增量 `bake` + 批合并），不含「静态标记来源」——`TransformStatic` 组件语义、离线/加载期触发点仍属 `prism_scene`/`prism_asset_bake`，由消费方接线；静态根挂动态父时的世界种子需调用方显式传入 `parent_globals`。`merge_meshes` 产出 CPU 侧世界顶点缓冲，GPU 常驻/绘制合并由渲染侧消费。
 - **24.3 已交付的边界**：`MultiBuffer` 是纯数据结构，自身无原子、无线程，只编码所有权纪律；跨线程的原子切换 / copy-on-extract 时序由 ECS §23.5 提取流水线与调度器维持，本 crate 不越界实现线程同步。
 - **24.2 已交付的边界**：`quantize` 是纯编解码核心（smallest-three 旋转 + 盒内/分层平移 + 1 bit 单位缩放旁路 + 整姿态组合），只保证确定性与误差界；网络/快照的位流格式契约、分档策略与 §12 定点一致性由 `prism_replication` 消费方定义，本 crate 不越界定义线格式。
 - **24.4 已交付的边界**：`observer` 是纯数据结构，无原子、无线程、无 ECS Observer 绑定——脏集与世界姿态由调用方（如 `dirty`/传播流水线）提供；本帧合并与升序派发是确定性契约，但精细的 rotation/scale 拆分、以及实际订阅方（空间索引 §24.5、音频、探针缓存失效）的接线留给消费方。
 - **24.6 已交付的边界**：`constraint` 只做轻量无 rig 约束（`LookAt`/`Aim`/`ParentBlend`/`PositionLimit`），完整骨骼 rig 归 `prism_anim_runtime`；求解器在传播之后求值并回写 `GlobalTransform`，约束间的定序与避免环由调用方负责（`solve_chain` 不做环检测）；`to_scale_rotation_translation` 分解假设无 shear，父级非均匀缩放叠子级旋转产生的 shear 场景只在 TRS 可表示精度内保真。
-- 其余 PLANNED：24.5 随空间查询消费方(物理/剔除/导航)落地;**24.7 GPU 侧层级传播**等需 GPU compute 的部分本次不做（纯 CPU 子 agent 无 RHI/设备接线能力，诚实标注），随 M6 GPU 驱动落地;24.8 随物理/渲染运动向量需求落地。
+- **24.5 已交付的边界**：`spatial_sync` 只是「变换脏集 → 空间加速结构增量指令」的纯桥接 diff 层，**不做真实 BVH/网格哈希的树重建、节点分裂/合并、SAH 优化**——那属空间索引 crate（`prism_render_visibility` 剔除树、`prism_physics` 宽相位动态树、`prism_navigation` 空间哈希），本 crate 只产出 `Insert`/`Update`/`Remove` 指令流由它们消费接线；脏集与世界 `GlobalTransform` 姿态由调用方（`dirty`/`observer`）提供，`SpatialSync` 不做实体查找、不触发传播；胖盒 `margin` 的重拟合纪律与真实树的 fat-AABB 一致，但最终树形态与查询性能取决于消费侧实现。
+- **24.8 已交付的边界**：`sweep` 只给**保守扫掠包围与 TOI 时间细分数据模型**，不做窄相位求解——真实 CCD 命中（扫掠体 vs 几何的最早接触求根）归 `prism_physics`，真实 motion vector pass / 速度缓冲写出归 `prism_render_scene`；`bounds()` 的 temporal-AABB 界**保证保守（含整段轨迹）但非最紧**（旋转按弧长 `θ·r` 外扩，是上界非精确凸包），需更紧包围时应 `subdivide` 细分夹逼；插值假设与 `GlobalTransform::interpolate` 一致（平移/缩放 `lerp`、旋转最短弧 `slerp`），非此插值模型的运动不在保守性证明范围内；`SweptMotion` 从不改动权威仿真态，瞬移须由调用方以 `teleported` 显式标记。
+- 其余 PLANNED：**24.7 GPU 侧层级传播**等需 GPU compute 的部分本次不做（纯 CPU 子 agent 无 RHI/设备接线能力，诚实标注），随 M6 GPU 驱动落地。
 
 所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
 

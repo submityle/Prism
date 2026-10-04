@@ -129,6 +129,7 @@ pub mod replay;
 pub mod sampling;
 pub mod sink;
 pub mod span;
+pub mod telemetry;
 pub mod trace;
 #[cfg(any(feature = "tracy", feature = "remote", feature = "crash"))]
 pub mod wire;
@@ -197,6 +198,12 @@ pub use sampling::{
 };
 pub use sink::{clear_sink, set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
 pub use span::Scope;
+pub use telemetry::{
+    build_event as build_telemetry_event, hash_identifier, redact_user_path, truncate_str,
+    AggregatedEvent, EventAggregator, EventSchema, FieldDisposition, FieldTier, RedactedEvent,
+    RedactionPolicy, SampleOutcome, SampleRatio, TelemetrySampler, DEFAULT_MAX_STRING_CHARS,
+    REDACTED_SEGMENT, TRUNCATION_MARKER,
+};
 #[cfg(feature = "gpu")]
 pub use trace::export_chrome_with_gpu;
 pub use trace::{
@@ -231,6 +238,8 @@ mod tests_determinism;
 mod tests_mem;
 #[cfg(test)]
 mod tests_sampling;
+#[cfg(test)]
+mod tests_telemetry;
 #[cfg(test)]
 mod tests_m6_hitch;
 #[cfg(test)]

@@ -119,7 +119,9 @@ pub mod observer;
 pub mod parallel;
 pub mod propagation;
 pub mod quantize;
+pub mod spatial_sync;
 pub mod stats;
+pub mod sweep;
 pub mod transform_2d;
 
 use change::ChangeTicks;
@@ -662,7 +664,9 @@ pub mod prelude {
         BoundedQuantizer, LayeredQuantizer, LayeredTranslation, PoseQuantizer, QuantizedPose,
         QuantizedVec3, QuatQuantized, QuatQuantizer, ScaleQuantized, ScaleQuantizer,
     };
+    pub use crate::spatial_sync::{SpatialCommand, SpatialSync, SyncStats};
     pub use crate::stats::PropagationStats;
+    pub use crate::sweep::{SweepSegment, SweptMotion};
     pub use crate::transform_2d::{
         propagate_2d, Affine2, GlobalTransform2d, Transform2d, TransformGraph2d,
     };
@@ -716,3 +720,9 @@ mod tests_constraint;
 
 #[cfg(test)]
 mod tests_observer;
+
+#[cfg(test)]
+mod tests_spatial_sync;
+
+#[cfg(test)]
+mod tests_sweep;

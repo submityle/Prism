@@ -9,7 +9,7 @@
 > - **帧统计/HUD**：Unreal `stat` 命令族、Unity Profiler 计数器
 > 本文为纯经典可观测性 / 计时 / 日志路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：实时性能预算与自动回归告警/CPU·GPU 统一时间线跨队列关联/内存分配追踪与泄漏碎片可视化/确定性回放与 trace 对拍(反 desync)/统计采样剖析器(低开销)/分布式多实例聚合观测/发行版遥测与隐私脱敏；其中 24.1/24.3/24.4/24.5/24.6 已交付代码+单测，余项为 PLANNED）
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：实时性能预算与自动回归告警/CPU·GPU 统一时间线跨队列关联/内存分配追踪与泄漏碎片可视化/确定性回放与 trace 对拍(反 desync)/统计采样剖析器(低开销)/分布式多实例聚合观测/发行版遥测与隐私脱敏；其中 24.1/24.3/24.4/24.5/24.6/24.7 已交付代码+单测，余项为 PLANNED）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_utils`（无锁环形缓冲 / 字符串驻留 / 位集）、`prism_platform`（高精度时钟 / 线程 ID / 文件写出 / minidump）、`prism_time`（帧序号 / 时间线对齐）；可选 `prism_render_driver`（GPU timestamp query）、`prism_tasks`（job 时间线）
 - 层级定位: L1 地基（被所有上层 crate 以「埋点」方式依赖；是横切关注点，不反向依赖业务 crate）
@@ -328,7 +328,7 @@ pkg/prism_diagnostic/
 
 ## 23. 诚实边界与风险
 
-- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（55 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」中 24.1/24.3/24.4/24.5/24.6 已交付（见 §24.8），余项仍为 PLANNED，按本文优先级随消费方接线落地。
+- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（55 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」中 24.1/24.3/24.4/24.5/24.6/24.7 已交付（见 §24.8），余项仍为 PLANNED，按本文优先级随消费方接线落地。
 - **高风险项**：
   1. **埋点开销失控（M1/M2）**：埋点太细（每顶点/每实体）会反噬帧预算，观测拖垮被观测；必须严守「仅作用域/帧级埋点 + 热路径零 I/O」，并由 §16 自观测兜底。
   2. **CPU/GPU 时间对齐（M4）**：GPU 时间戳域与 CPU 不同、读回有延迟、驱动差异大；标定不准则火焰图误导人；需多驱动验证。
@@ -428,12 +428,21 @@ AAA 项目的帧时间是**契约**（60/120Hz 必达），不能靠事后看 tr
 纯 `core`/`alloc` 整数、无 `unsafe`、始终编译。专项测试 `tests_aggregate.rs`（23 用例，独立 oracle 对拍：最近秩分位、池化分布、MAD 单/双异常与误报抑制、trace 树/关键路径/服务归因/orphan/去重、采样率上报模式与计数、boost 与基线覆盖）全绿，`cargo clippy -p prism_diagnostic --all-targets` 零告警。
 已知边界：网络传输 / RPC（把报告与 span 在进程间搬运）属上层接线，本层只拥有确定性的集群聚合（池化分位、鲁棒中位 + MAD 异常定位）、分布式 trace 关联/树装配、采样率策略数据结构，全部离线 oracle 对拍。
 
-### 24.7 发行版遥测与隐私脱敏
+### 24.7 发行版遥测与隐私脱敏 —— ✅ 已交付（`telemetry` 模块）
 
 - **分级遥测**：开发全量、发行版仅关键指标（崩溃率、帧时间 p99、内存峰值），可远程调级。
 - **隐私/合规**：遥测与崩溃转储（§12）默认脱敏（去 PII、去绝对路径、去内存明文），需用户同意方上传，策略在本层统一（接 platform §16 只负责产 dump）。
 - **符号化离线化**：崩溃堆栈用稳定堆栈哈希分桶聚类，上传最小化，符号在后端离线还原。
 
+**交付状态**：§24.7 的脱敏 + 事件构建数据模型已交付，置于独立 `telemetry` 子模块（`src/telemetry/`：`redact`/`event`/`sampling` + `mod`，纯 `core`/`alloc` 整数、无 `unsafe`、无时钟、无 RNG，始终编译）：
+
+- 隐私脱敏（`telemetry::redact`）：`redact_user_path` 剥离绝对家目录的用户名段（`/Users/<name>/`→`/Users/redacted/`、`/home/<name>/`、Windows `\Users\<name>\`，支持内嵌于长串/多次出现/非 ASCII 用户名，按 ASCII 字节边界扫描保证 UTF-8 安全）；`hash_identifier` 复用 crate 稳定 `FNV`-1a（`determinism::fnv1a_64`）把标识符单向哈希成 `h:<16hex>` 稳定非加密 token；`truncate_str` 按 `char` 截断并追加省略号标记（不切裂多字节）；`RedactionPolicy` 把字段白名单/黑名单过滤与「丢弃/哈希/路径剥离+截断」per-value 变换组合（优先级 deny>allow>hash>keep）。
+- 事件构建（`telemetry::event`）：`EventSchema` 把字段分级为必采/可选/禁采（未声明字段默认禁采 = 严格白名单，`allow_unknown` 可放宽）；`build_event` 产出 `RedactedEvent`（字段按 key 排序、禁采/被丢字段入 `dropped`、缺失必采字段入 `missing_required` 而非伪造），`canonical` 确定性可逆序列化（`\`/`|`/`=` 转义）+ 64 位 `digest`；`EventAggregator` 按 digest 把同签名事件折叠成聚合计数（`ranked` 按计数降序定序）。
+- 确定性采样（`telemetry::sampling`）：`SampleRatio`（keep/out_of，`always`/`never`/`one_in`/`ratio` 构造并钳定不变量，`admits`/`expected_keep`/`fraction`）对「事件名加盐的 key 哈希桶」做决策——绝不用真随机，相同 key 在相同事件名下恒落同一桶；`TelemetrySampler` 带默认率 + per-event 覆盖率（发行版可崩溃全采、帧统计稀疏采），事件名加盐使各事件流采样相互独立。
+
+确定性 + 隐私是本层双契约：相同输入事件恒产生相同脱敏/序列化/采样结果，且敏感原文（用户名、原始标识符）在输出中可证缺席。专项测试 `tests_telemetry.rs`（38 用例，固定输入手算 oracle 对拍：`FNV`-1a 钉死的哈希/桶/digest 向量、路径剥离各形态、UTF-8 截断、策略优先级、分级构建与缺失必采、转义、聚合排名、采样钳定/边界/确定性）全绿，`cargo clippy -p prism_diagnostic --all-targets` 零告警。
+已知边界：真实网络上传 / 后端摄取与用户同意获取属上层接线（`prism_platform` §16 产原始 dump 并拥有同意弹窗），崩溃堆栈的离线符号化在后端完成；本层只拥有确定性的脱敏 + 事件构建 + 采样数据模型，全部离线 oracle 对拍。
+
 ### 24.8 诚实边界
 
-**24.1 性能预算 + 自动回归告警已交付**（`budget` 模块：预算声明/帧级红标/调度余量/p50-p99 回归告警/热点 diff 归因）。**24.3 内存追踪已交付**（`alloc_track` 热路径核心 + `mem` 对账/守卫层：泄漏带符号残差对账、per-类别预算红标、碎片 run/占用图谱分析）；已知边界：per-tag 统计为累计分配字节而非 live（per-tag live 为后续 follow-up），泄漏/碎片层的输入快照与占用列表由调用方在边界处采集。**24.4 确定性回放与 trace 对拍已交付**（`determinism` 模块：稳定 `FNV`-1a `StateHasher`、`DeterminismTrace` 逐帧状态哈希、`InputRecorder`/`InputReplay` 输入+种子录制回放、`compare` 返回首个分叉帧 `Identical`/`Diverged`/`LengthMismatch`；纯 `core`/`alloc` 整数、无 `unsafe`、始终编译）；已知边界：各帧关键状态哈希的内容由调用方用 `StateHasher` 折叠喂入，跨三端位对拍需上层接 ECS 序/time 定点后对接，本层只提供确定性整数对拍原语、不自带模拟或 RNG，与 `prism_time::multiworld::audit` 概念对齐但无依赖边。**24.5 统计采样剖析器已交付**（`sampling` 模块：符号驻留、`StackSample`/`SamplingProfiler` 采样数据模型、`flat_profile` 自身/包含折叠、`call_tree` 自顶向下/自底向上调用树、`collapsed_stacks` 折叠格式、车道/线程分面、插桩 + 采样融合与背离定位；纯 `core`/`alloc` 整数、无 `unsafe`、始终编译）；已知边界：真实定时中断采样 + 栈回溯 + `<1%` 开销由上层 `prism_platform` 接线触发，本层只拥有确定性采样数据模型与离线统计还原、不自带时钟或中断。**24.6 分布式 / 多实例聚合观测已交付**（`aggregate` 模块：`InstanceSummary` 单实例汇总、`ClusterAggregator` 池化分布 + 中位 p99 x 因子 + MAD 鲁棒异常定位、`TraceAssembler` 分布式 span 树装配/关键路径/服务归因/orphan 处理、`SampleRate`/`SamplingController` 自适应采样上报与异常自动提采样；纯 `core`/`alloc` 整数、无 `unsafe`、始终编译）；已知边界：网络传输 / RPC 属上层接线，本层只拥有确定性集群聚合、分布式 trace 关联/树装配、采样率策略数据结构。其余为 PLANNED 设计目标，无代码。24.2 CPU·GPU 时间线随 RHI/render 接线落地；24.7 发行版遥测随发行阶段落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+**24.1 性能预算 + 自动回归告警已交付**（`budget` 模块：预算声明/帧级红标/调度余量/p50-p99 回归告警/热点 diff 归因）。**24.3 内存追踪已交付**（`alloc_track` 热路径核心 + `mem` 对账/守卫层：泄漏带符号残差对账、per-类别预算红标、碎片 run/占用图谱分析）；已知边界：per-tag 统计为累计分配字节而非 live（per-tag live 为后续 follow-up），泄漏/碎片层的输入快照与占用列表由调用方在边界处采集。**24.4 确定性回放与 trace 对拍已交付**（`determinism` 模块：稳定 `FNV`-1a `StateHasher`、`DeterminismTrace` 逐帧状态哈希、`InputRecorder`/`InputReplay` 输入+种子录制回放、`compare` 返回首个分叉帧 `Identical`/`Diverged`/`LengthMismatch`；纯 `core`/`alloc` 整数、无 `unsafe`、始终编译）；已知边界：各帧关键状态哈希的内容由调用方用 `StateHasher` 折叠喂入，跨三端位对拍需上层接 ECS 序/time 定点后对接，本层只提供确定性整数对拍原语、不自带模拟或 RNG，与 `prism_time::multiworld::audit` 概念对齐但无依赖边。**24.5 统计采样剖析器已交付**（`sampling` 模块：符号驻留、`StackSample`/`SamplingProfiler` 采样数据模型、`flat_profile` 自身/包含折叠、`call_tree` 自顶向下/自底向上调用树、`collapsed_stacks` 折叠格式、车道/线程分面、插桩 + 采样融合与背离定位；纯 `core`/`alloc` 整数、无 `unsafe`、始终编译）；已知边界：真实定时中断采样 + 栈回溯 + `<1%` 开销由上层 `prism_platform` 接线触发，本层只拥有确定性采样数据模型与离线统计还原、不自带时钟或中断。**24.6 分布式 / 多实例聚合观测已交付**（`aggregate` 模块：`InstanceSummary` 单实例汇总、`ClusterAggregator` 池化分布 + 中位 p99 x 因子 + MAD 鲁棒异常定位、`TraceAssembler` 分布式 span 树装配/关键路径/服务归因/orphan 处理、`SampleRate`/`SamplingController` 自适应采样上报与异常自动提采样；纯 `core`/`alloc` 整数、无 `unsafe`、始终编译）；已知边界：网络传输 / RPC 属上层接线，本层只拥有确定性集群聚合、分布式 trace 关联/树装配、采样率策略数据结构。**24.7 发行版遥测与隐私脱敏已交付**（`telemetry` 模块：`redact_user_path` 用户名路径剥离 / `hash_identifier` 稳定 `FNV`-1a 单向哈希 / `truncate_str` UTF-8 安全截断 / `RedactionPolicy` 白黑名单+per-value 变换、`EventSchema` 必采/可选/禁采分级 + `build_event` 确定性 `canonical`/`digest` + `EventAggregator` 聚合计数、`SampleRatio`/`TelemetrySampler` 事件名加盐 key 哈希的确定性采样；纯 `core`/`alloc` 整数、无 `unsafe`、无时钟、无 RNG、始终编译）；已知边界：真实网络上传 / 后端摄取与用户同意获取属上层接线（`prism_platform` §16 产 dump 并拥有同意弹窗），崩溃堆栈离线符号化在后端完成，本层只拥有确定性脱敏 + 事件构建 + 采样数据模型。其余为 PLANNED 设计目标，无代码。24.2 CPU·GPU 时间线随 RHI/render 接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

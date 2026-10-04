@@ -120,6 +120,7 @@ mod scope;
 mod scope_concurrency;
 mod throttle;
 mod thread_class;
+mod topology;
 mod trace;
 
 use alloc::sync::Arc;
@@ -165,6 +166,9 @@ pub use thread_class::{
     ThreadClassPool, WorkClass, CLASS_COUNT,
 };
 pub use prism_platform::AffinityError;
+pub use topology::{
+    choose_balanced_node, nearest_node, plan_partitioned, plan_placement, rank_nodes_by_distance, shared_l3, CacheInfo, CacheLevel, CacheTopology, DistanceError, NumaDistanceMatrix, PlacementPlan, TopologyDescriptor, TopologyError, WorkerPlacement, WorkloadClass, LOCAL_DISTANCE,
+};
 pub use reduce::tree_combine;
 pub use replay::{DeterministicSession, ReplayError, ReplayRecord, SplitEvent};
 use scheduler::Shared;
@@ -468,3 +472,5 @@ mod tests_scope_concurrency;
 mod tests_deterministic_replay;
 #[cfg(test)]
 mod tests_thread_class;
+#[cfg(test)]
+mod tests_topology;

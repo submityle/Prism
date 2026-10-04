@@ -9,7 +9,7 @@
 > - **网络时间**：GGPO/Quantum 的 tick 对齐、NTP 式时钟同步、插值延迟缓冲
 > 本文为纯经典时间/积分路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补：24.1 录制回放 + 24.5 长会话漂移修正 + 24.6 游戏内定时调度器 + 24.8 多世界/确定性审计已落地，余项仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：输入+时间录制回放/帧节奏与低延迟(VRR/Reflex 形态)/帧预算驱动自适应质量/长会话高精度与漂移修正/游戏内定时调度器/挂起恢复与后台暂停/多世界时间域隔离/确定性时间审计；均为 PLANNED，无代码）
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补：24.1 录制回放 + 24.4 帧预算自适应质量 + 24.5 长会话漂移修正 + 24.6 游戏内定时调度器 + 24.8 多世界/确定性审计已落地，24.7 挂起/恢复已落地纯 CPU 可做部分（时间戳层确定性修正，OS 信号接线仍 PLANNED），余项（24.2/24.3）仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：输入+时间录制回放/帧节奏与低延迟(VRR/Reflex 形态)/帧预算驱动自适应质量/长会话高精度与漂移修正/游戏内定时调度器/挂起恢复与后台暂停/多世界时间域隔离/确定性时间审计；均为 PLANNED，无代码）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_platform`（单调高精度时钟），可选 `prism_math`（有理/定点时间）、`prism_diagnostic`
 - 层级定位: ECS 文档 L3「运行时服务」；App 文档 §8 固定步长的时钟供给方
@@ -315,7 +315,7 @@ pkg/prism_time/
 
 ## 23. 诚实边界与风险
 
-- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（lib 测试全绿，含 §24.1/§24.8 新增 20 项）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」中 24.1/24.5/24.6/24.8 已落地，余项仍为 PLANNED，按本文优先级随消费方接线落地。
+- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（lib 测试全绿，含 §24.1/§24.8 新增 20 项）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」中 24.1/24.4/24.5/24.6/24.8 已落地、24.7 已落地纯 CPU 可做部分（OS 挂起信号接线仍 PLANNED），余项（24.2/24.3）仍为 PLANNED，按本文优先级随消费方接线落地。
 - **高风险项**：
   1. **死亡螺旋熔断参数（M2）**：`max_delta`/`max_substeps` 错配会在卡顿时表现为慢放或穿墙；须按内容压测标定，并与 App §8 保持单一真相（避免两处各算一套累加器）。
   2. **确定性步长（M4）**：`f32` 的 1/60 不精确会长时程漂移；必须有理/定点 + 整数 tick，且跨平台一致要定点数学路径验证。
@@ -360,13 +360,21 @@ G-Sync/FreeSync/VRR 下显示刷新非固定:
 - 时间系统感知显示器可变刷新窗口,把 present 调度到最优时刻,配合帧节奏(§24.2)。
 - 固定步仿真(§7)与可变显示解耦,表现层插值 alpha(§12)吸收刷新抖动。
 
-### 24.4 帧预算驱动的自适应质量
+### 24.4 帧预算驱动的自适应质量 ✅ 已交付（`adaptive_quality`）
 
 时间系统把「本帧用了多少/还剩多少毫秒」作为**反馈信号**喂给质量调节：
 
 - 导出帧预算与各阶段耗时(接 §16 可观测性、`prism_profiler`)。
 - 子系统据此动态调节:动态分辨率、LOD 偏置、阴影级联数、粒子上限、`prism_tasks` 的 `Background` 车道顺延(tasks §24.1)。
 - 闭环:超预算→降质保帧率;富余→回升画质,平滑迟滞避免振荡。
+
+**交付状态（已落地）**：`pkg/prism_time/src/adaptive_quality.rs`（纯 CPU 控制器，不碰渲染）。
+- **分级质量 + 迟滞死区**：`AdaptiveQualityController` 在 `min_level..=max_level` 整数档位上闭环。每帧按整数 ppm 计算利用率 `util_ppm = frame_ns × 1_000_000 / budget_ns`（`utilization_ppm` 公开，`budget=0` 返回 0），仅当 `util ≥ downgrade_ppm`（默认 100%）记为超预算、`util ≤ upgrade_ppm`（默认 80%）记为富余，二者之间为**中性死区**不动——上下阈分离杜绝单一设定点附近的振荡。
+- **超预算快降、富余缓升**：降档只需 `downgrade_patience`（默认 2）连续超预算帧即触发以快速保帧率；升档需 `upgrade_patience`（默认 30）连续富余帧，只有持续有余量才回升画质。中性帧清零两侧连击计数（要求严格连续信号）。
+- **冷却期防抖**：任意调整后进入 `cooldown_frames`（默认 8）帧冷却，期间抑制常规升降，钳住 ping-pong。
+- **尖峰逃生档**：`util ≥ severe_ppm`（默认 150%）一帧即一次跌 `severe_step`（默认 2）档，**绕过 patience 与冷却**——卡顿/死亡螺旋的快速 bail-out（已在底则钳到 `min_level`）。
+- **配置自洽钳制**：构造器 `clamped` 强制 `max_level ≥ min_level`、`upgrade_ppm ≤ downgrade_ppm ≤ severe_ppm`、step/patience `≥ 1`，非法组合不会把控制律带进不一致态。决策以 `QualityAdjustment{Hold|Downgrade{from,to}|Upgrade{from,to}}` 返回（带 `changed`/`delta`/`to_level`）。
+- 全程整数/ppm 定点运算，无浮点、不读墙钟：同一 `(frame,budget)` 序列跨运行产出位相同的档位轨迹，可从确定性回放驱动。`no_std + alloc`、无 `unsafe`。单测见 `tests_adaptive_quality.rs`（利用率精确值、patience 快降/缓升、死区保持与连击清零、尖峰多级跌档且绕冷却、底则钳制、冷却窗口精确计数、配置钳制、`set_level`/`reset`、双跑一致等）。
 
 ### 24.5 长会话高精度与漂移修正 ✅ 已交付（`drift`）
 
@@ -404,13 +412,20 @@ time.schedule_every(Duration::from_millis(500), |w| tick_regen(w));
 - **诚实边界（payload 而非闭包）**：本层不存 `FnMut` 闭包（闭包无法确定性 `Clone` 做双跑比对，也无法在无分配器 `no_std` 内核落地），而是拥有时间内核能确定性拥有的部分——按精确触发时间定序、携带用户 payload 的优先队列；由 payload 映射回 gameplay 动作（刷怪 / buff 到期 / 冷却）属 gameplay 层接线（见 §24.9）。走 Virtual（受暂停/缩放）或 Real（UI/心跳）时钟由调用方选择喂哪条 delta。
 - `no_std + alloc`（堆为 `alloc::collections::BinaryHeap`）、无 `unsafe`。单测见 `tests_scheduler.rs`（准点单发、同刻按序、大 delta 时序、周期追帧、取消、重调度保句柄、槽位复用不复活陈旧句柄、触发上限分批、双跑一致、零周期 panic 等）。
 
-### 24.7 挂起 / 恢复与后台暂停
+### 24.7 挂起 / 恢复与后台暂停 ✅ 已部分交付（`suspend`，CPU 可做部分）
 
 进程挂起（移动端切后台、主机休眠、窗口最小化）后恢复：
 
 - 恢复时**不把挂起时长算成一帧巨 delta**（否则物理穿墙/动画跳跃）——钳制或丢弃该帧 delta（接 §12 最大 delta 钳制）。
 - 可配置后台行为:暂停 Virtual(游戏冻结)、Real 照走(网络心跳不断)、或低频后台更新。
 - 平台挂起/恢复事件由 `prism_platform`/`prism_app` 转发给时间系统。
+
+**交付状态（已落地：纯 CPU 可做部分）**：`pkg/prism_time/src/suspend.rs`（对调用方喂入的时间戳做确定性修正，不调用任何 OS 挂起 API）。
+- **挂起期 elapsed 不计入**：`SuspendableClock` 消费单调递增的墙钟时间戳（`Duration`，自任意 epoch 起），**只在运行区间**把墙钟差折进模拟 elapsed；`suspend(at)` 先把挂起瞬刻前的运行部分计入再停表，`resume(at)` 以 resume 瞬刻为新基准重开——`[suspend, resume]` 这段挂起墙钟差对 elapsed/tick 贡献为零，故恢复瞬间**不产生巨 delta 跳变**（避免物理穿墙/动画跳跃）。
+- **elapsed/tick 确定性修正**：权威 elapsed 为整数纳秒（`u128`），`elapsed()`/`elapsed_nanos()`/`ticks(tick)=⌊elapsed/tick⌋` 均由其派生；挂起/恢复的修正体现在同一权威量上，tick 视图与 elapsed 恒一致。
+- **可选最大追帧钳制**：`with_max_delta`（接 §12 最大 delta 钳制）把任一次运行步长的折入上限钳住，超额部分丢弃并计入 `total_clamped`——既吸收普通卡顿，也兜底任何异常长步；`total_suspended` 报告累计被排除的挂起时长。挂起态下喂入的时间戳被忽略（`advance_to` 返回零），非单调回退时间戳饱和为零 delta。
+- 全程整数纳秒运算，内部不读墙钟、无浮点：同一时间戳序列跨运行产出位相同的模拟时间线。`no_std + alloc`、无 `unsafe`。单测见 `tests_suspend.rs`（运行累加、挂起恢复排除间隙且无尖峰、首观测前挂起、重复挂起/游离恢复幂等、最大 delta 钳制与丢弃计量、零钳制冻结、`reset` 保钳、双跑一致等）。
+- **诚实边界（PLANNED）**：真实 OS 挂起/恢复信号的接线（移动端切后台、主机休眠、窗口最小化）与后台策略选择（冻结 Virtual / Real 照走心跳 / 低频后台更新）由 `prism_platform`/`prism_app` 读取并转发给本时钟——该事件源接线仍为 **PLANNED**；本层只对调用方喂入的时间戳做确定性修正，不触碰任何 OS API 或系统时钟。
 
 ### 24.8 多世界时间域隔离与确定性审计 ✅ 已交付（`multiworld`）
 
@@ -424,9 +439,11 @@ time.schedule_every(Duration::from_millis(500), |w| tick_regen(w));
 
 ### 24.9 诚实边界
 
-本章 **24.1 录制回放、24.5 长会话漂移修正、24.6 游戏内定时调度器、24.8 多世界时间域隔离/确定性审计已落地**（见各节「交付状态」，`recording` / `drift` / `scheduler` / `multiworld` 四模块，`cargo test -p prism_time` 全绿、`cargo clippy --all-targets` 零告警）；其余小节仍为 PLANNED 设计目标、无代码。**24.1 录制回放 + 24.8 确定性审计**是确定性系统(物理/网络)的调试基石,已随 M4 确定性路线落地;24.2 帧节奏 + 24.3 VRR + 24.7 挂起恢复随 M2 主循环/平台接线落地;24.4 自适应质量随 `prism_profiler`/渲染反馈落地。
+本章 **24.1 录制回放、24.4 帧预算自适应质量、24.5 长会话漂移修正、24.6 游戏内定时调度器、24.8 多世界时间域隔离/确定性审计已落地，24.7 挂起/恢复已落地纯 CPU 可做部分**（见各节「交付状态」，`recording` / `adaptive_quality` / `drift` / `scheduler` / `multiworld` / `suspend` 六模块，`cargo test -p prism_time` 全绿、`cargo clippy --all-targets` 零告警）；其余小节（24.2 帧节奏、24.3 VRR）仍为 PLANNED 设计目标、无代码。**24.1 录制回放 + 24.8 确定性审计**是确定性系统(物理/网络)的调试基石,已随 M4 确定性路线落地;**24.4 自适应质量**已交付纯 CPU 控制器（档位决策），真实 per-stage 耗时采集(`prism_profiler`/§16)与档位→渲染设置映射属消费方接线;**24.7 挂起/恢复**已交付时间戳层确定性修正（挂起期不计入 elapsed/tick、可选最大追帧钳制），真实 OS 挂起/恢复信号接线仍为 PLANNED,随平台接线落地;24.2 帧节奏 + 24.3 VRR 随 M2 主循环/平台接线落地。
 
-**24.5 与 24.6 的诚实边界（硬件 / 接线归属）**：本层只提供**确定性算法**,不碰任何真实硬件或墙钟。
+**24.4 / 24.5 / 24.6 / 24.7 的诚实边界（硬件 / 接线归属）**：本层只提供**确定性算法 / 控制决策数据模型**,不碰任何真实硬件、渲染或墙钟。
+- **24.4 自适应质量**：`AdaptiveQualityController` 只产出整数质量档位与升降决策；真实 per-stage 帧耗时采集(`prism_profiler`/§16 可观测性)与把档位映射到动态分辨率/LOD/阴影级联/粒子上限等渲染设置,属渲染/gameplay 层接线,控制器自身不分配、不读时钟。
+- **24.7 挂起/恢复**：`SuspendableClock` 只对调用方喂入的单调时间戳做确定性修正(挂起期不计入 elapsed/tick、可选最大追帧钳制);真实 OS 挂起/恢复事件源与后台策略(冻结 Virtual / Real 照走 / 低频后台)由 `prism_platform`/`prism_app` 转发——该接线为 **PLANNED**,本层不调用任何 OS 挂起 API。
 - **真实 OS 单调时钟 / 平台计数器频率与位宽**由 `prism_platform` 读取并注入；`MonotonicBaseline` 只对调用方喂入的原始计数值做回绕安全累加,位宽(`width_bits`)/频率(`ticks_per_sec`)为调用方声明的参数,本模块不探测硬件。
 - **NTP / 权威服务器参考样本**由 net 层(往返估计)或平台授时提供；`DriftCorrector` 只消费调用方给出的参考 `Duration`/偏移,执行有界 slew 修正,不发起网络请求、不读系统墙钟。真实网络条件下的收敛手感须联网实测,本层仅保证算法层面的单调性与确定性。
 - **调度器 payload→动作映射、Virtual/Real 时钟选择、World 调用**属 gameplay 层接线；`Scheduler` 不存闭包、不调用 World,只按精确触发时间定序派发携带 payload 的 `Fired` 事件(理由见 §24.6「诚实边界」)。喂哪条时钟的 delta 由调用方决定。
