@@ -485,11 +485,14 @@ pub struct CvarSetOutcome {
 /// current resolved value); a **write** (`name value`, which sets the cvar at
 /// the [`Runtime`](crate::settings::SettingsLayer::Runtime) layer); the
 /// reserved **`reset`** command (`reset <name>` to revert one cvar's runtime
-/// override, or a bare `reset` to revert them all); or the reserved
+/// override, or a bare `reset` to revert them all); the reserved
 /// **`toggle`** command (`toggle <name>` to flip a boolean, or
-/// `toggle <name> <v1> <v2>…` to cycle an explicit value list), which reports
-/// its result through the same [`Set`](ConsoleOutcome::Set) variant as a
-/// write. This enum captures every outcome so a console front end can echo an
+/// `toggle <name> <v1> <v2>…` to cycle an explicit value list); or the
+/// reserved **`incrementvar`** command (`incrementvar <name> <min> <max>
+/// <delta>` to step a numeric cvar within a wrapping range). The `toggle` and
+/// `incrementvar` commands report their result through the same
+/// [`Set`](ConsoleOutcome::Set) variant as a write. This enum captures every
+/// outcome so a console front end can echo an
 /// accurate response without panicking, mirroring the reject-at-the-boundary
 /// contract of [`CvarError`] (design §25.3).
 #[derive(Clone, Debug, PartialEq)]
@@ -1119,6 +1122,88 @@ impl App {
         Ok(outcome)
     }
 
+    /// Step the numeric cvar `name` by `delta`, wrapping within the cycle range
+    /// `[min, max]` — the Source console `incrementvar` command (design §24.6)
+    /// — writing the result at the
+    /// [`Runtime`](crate::settings::SettingsLayer::Runtime) layer.
+    ///
+    /// The current resolved value is read as an `f64` and advanced by `delta`
+    /// (which may be negative to step downward). Matching Source's
+    /// `incrementvar`, the step wraps as a single reset rather than a modulo: a
+    /// result past `max` snaps to `min`, and a result below `min` snaps to
+    /// `max`, so repeated calls cycle `min → … → max → min` (or the reverse for
+    /// a negative `delta`).
+    ///
+    /// The stepped value is written back in the cvar's own kind: a
+    /// [`Float`](crate::settings::SettingValue::Float) cvar stores the `f64`
+    /// directly, while an [`Int`](crate::settings::SettingValue::Int) cvar
+    /// rounds to the nearest whole number (integral `min`/`max`/`delta` keep
+    /// every step exact). The write then goes through the cvar's normal
+    /// validation, so the final value is still clamped to the cvar's *declared*
+    /// bounds — distinct from the `[min, max]` cycle range — with any clamp
+    /// reported through [`CvarSetOutcome::clamped`].
+    ///
+    /// Fails with [`Unregistered`](CvarError::Unregistered) for an unknown cvar,
+    /// with [`TypeMismatch`](CvarError::TypeMismatch) (`expected: "number"`) for
+    /// a non-numeric (boolean or string) cvar, and with
+    /// [`ReadOnly`](CvarError::ReadOnly) /
+    /// [`CheatProtected`](CvarError::CheatProtected) under the same rules as
+    /// [`set_cvar`](App::set_cvar). Emits the same
+    /// [`SettingChanged`](crate::settings::SettingChanged) / [`CvarChanged`]
+    /// events as a direct write when the resolved value actually changes.
+    pub fn increment_cvar(
+        &mut self,
+        name: &str,
+        min: f64,
+        max: f64,
+        delta: f64,
+    ) -> Result<CvarSetOutcome, CvarError> {
+        self.init_cvars();
+        if !self.world().resource::<CvarRegistry>().contains(name) {
+            return Err(CvarError::Unregistered(name.to_owned()));
+        }
+        // The cvar's current resolved value (cascade winner, or schema default).
+        let current = self.cvar(name).cloned().unwrap_or_else(|| {
+            self.world()
+                .resource::<CvarRegistry>()
+                .get(name)
+                .map(|cvar| cvar.default.clone())
+                .expect("cvar is registered")
+        });
+
+        // Read the current value as an f64, matching Source's float arithmetic;
+        // a non-numeric cvar has no meaningful step and is rejected.
+        let current_number = match &current {
+            SettingValue::Int(value) => *value as f64,
+            SettingValue::Float(value) => *value,
+            other => {
+                return Err(CvarError::TypeMismatch {
+                    name: name.to_owned(),
+                    expected: "number",
+                    found: value_kind(other),
+                });
+            }
+        };
+
+        // Source `incrementvar` wrap: a result past `max` snaps to `min`, a
+        // result below `min` snaps to `max` (so a negative delta cycles down).
+        let mut stepped = current_number + delta;
+        if stepped > max {
+            stepped = min;
+        } else if stepped < min {
+            stepped = max;
+        }
+
+        // Store in the cvar's declared kind; an integer cvar rounds to the
+        // nearest whole step. The write below still clamps to the cvar's own
+        // declared bounds (separate from the cycle range).
+        let next = match current {
+            SettingValue::Int(_) => SettingValue::Int(stepped.round() as i64),
+            _ => SettingValue::Float(stepped),
+        };
+        self.set_cvar(name, next)
+    }
+
     /// Execute one Quake/Source-style console command `line` against the cvar
     /// registry (design §24.6, which quotes the console form `r.shadows 2`).
     ///
@@ -1143,15 +1228,18 @@ impl App {
     ///   *not* an error: it is clamped into bounds and reported through
     ///   [`CvarSetOutcome::clamped`].
     ///
-    /// Two first words are **reserved console commands** that shadow the
-    /// query/assignment grammar for that leading token (both interactive-only —
-    /// neither is honoured by [`load_user_config`](App::load_user_config)):
+    /// Three first words are **reserved console commands** that shadow the
+    /// query/assignment grammar for that leading token (all interactive-only —
+    /// none is honoured by [`load_user_config`](App::load_user_config)):
     /// `reset` reverts runtime overrides (`reset <name>`, or a bare `reset` for
-    /// all), and `toggle` flips a boolean cvar or cycles an explicit value list
+    /// all); `toggle` flips a boolean cvar or cycles an explicit value list
     /// (`toggle r.vsync`, `toggle r.shadows 0 2 4`) via
-    /// [`toggle_cvar`](App::toggle_cvar). A reserved word with no operand (a
-    /// bare `toggle`) falls through to the query grammar as an ordinary cvar
-    /// name lookup.
+    /// [`toggle_cvar`](App::toggle_cvar); and `incrementvar` steps a numeric
+    /// cvar within a wrapping range (`incrementvar r.shadows 0 4 1`) via
+    /// [`increment_cvar`](App::increment_cvar). A reserved word with no operand
+    /// (a bare `toggle`), or an `incrementvar` without a target plus exactly
+    /// three finite numeric arguments, falls through to the query grammar as an
+    /// ordinary cvar name lookup.
     ///
     /// Like every mutating entry point in this module, a rejected line leaves
     /// all state untouched and never panics (design §25.3). A successful write
@@ -1209,6 +1297,38 @@ impl App {
                 Err(CvarError::Unregistered(name)) => ConsoleOutcome::Unknown(name),
                 Err(error) => ConsoleOutcome::Rejected(error),
             };
+        }
+        if first == "incrementvar"
+            && let Some((_, rest)) = line.split_once(char::is_whitespace)
+        {
+            // `incrementvar` is a reserved *console* command, like `reset` and
+            // `toggle`: `incrementvar <cvar> <min> <max> <delta>` steps a
+            // numeric cvar by `delta`, wrapping within `[min, max]`. It requires
+            // a target plus exactly three finite numeric arguments; a bare or
+            // malformed `incrementvar` falls through to the query grammar below
+            // (reported as an unknown cvar named `incrementvar`). Like the other
+            // reserved words it is interactive-only — declarative config loads
+            // never honour it.
+            let mut tokens = rest.split_whitespace();
+            if let (Some(target), Some(min_token), Some(max_token), Some(delta_token), None) = (
+                tokens.next(),
+                tokens.next(),
+                tokens.next(),
+                tokens.next(),
+                tokens.next(),
+            ) && let Ok(min) = min_token.parse::<f64>()
+                && min.is_finite()
+                && let Ok(max) = max_token.parse::<f64>()
+                && max.is_finite()
+                && let Ok(delta) = delta_token.parse::<f64>()
+                && delta.is_finite()
+            {
+                return match self.increment_cvar(target, min, max, delta) {
+                    Ok(outcome) => ConsoleOutcome::Set(outcome),
+                    Err(CvarError::Unregistered(name)) => ConsoleOutcome::Unknown(name),
+                    Err(error) => ConsoleOutcome::Rejected(error),
+                };
+            }
         }
         // The query/assignment grammar is shared with config loading; the
         // console writes successful assignments into the highest-precedence

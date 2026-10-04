@@ -7353,4 +7353,218 @@ mod cvar_tests {
         assert_eq!(outcomes, vec![ConsoleOutcome::Unknown("toggle".to_owned())]);
         assert_eq!(app.cvar_bool("r.vsync"), Some(true));
     }
+
+    #[test]
+    fn increment_cvar_steps_an_int_within_range() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.increment_cvar("r.shadows", 0.0, 4.0, 1.0).unwrap().resolved,
+            SettingValue::Int(1)
+        );
+        assert_eq!(
+            app.increment_cvar("r.shadows", 0.0, 4.0, 1.0).unwrap().resolved,
+            SettingValue::Int(2)
+        );
+        assert_eq!(app.cvar_int("r.shadows"), Some(2));
+    }
+
+    #[test]
+    fn increment_cvar_wraps_past_max_to_min() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+        app.set_cvar("r.shadows", SettingValue::Int(4)).unwrap();
+
+        // 4 + 1 = 5 is past max (4), so it wraps to min (0).
+        let outcome = app.increment_cvar("r.shadows", 0.0, 4.0, 1.0).unwrap();
+        assert!(outcome.changed);
+        assert_eq!(outcome.resolved, SettingValue::Int(0));
+    }
+
+    #[test]
+    fn increment_cvar_negative_delta_wraps_below_min_to_max() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+
+        // 0 - 1 = -1 is below min (0), so it wraps to max (4).
+        assert_eq!(
+            app.increment_cvar("r.shadows", 0.0, 4.0, -1.0).unwrap().resolved,
+            SettingValue::Int(4)
+        );
+    }
+
+    #[test]
+    fn increment_cvar_steps_a_float() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.gamma", 0.0_f64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Float(0.0, 1.0)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5).unwrap().resolved,
+            SettingValue::Float(0.5)
+        );
+        assert_eq!(
+            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5).unwrap().resolved,
+            SettingValue::Float(1.0)
+        );
+        // 1.0 + 0.5 = 1.5 is past max, so it wraps to min (0.0).
+        assert_eq!(
+            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5).unwrap().resolved,
+            SettingValue::Float(0.0)
+        );
+    }
+
+    #[test]
+    fn increment_cvar_result_is_clamped_to_declared_bounds() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 2)),
+        )
+        .unwrap();
+
+        // The cycle range (0..=10) is wider than the declared bounds (0..=2):
+        // 0 + 5 = 5 is within the cycle range but clamps to the declared max 2.
+        let outcome = app.increment_cvar("r.shadows", 0.0, 10.0, 5.0).unwrap();
+        assert!(outcome.clamped);
+        assert_eq!(outcome.resolved, SettingValue::Int(2));
+    }
+
+    #[test]
+    fn increment_cvar_rejects_non_numeric() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
+            .unwrap();
+
+        let err = app.increment_cvar("r.vsync", 0.0, 4.0, 1.0).unwrap_err();
+        assert_eq!(
+            err,
+            CvarError::TypeMismatch {
+                name: "r.vsync".to_owned(),
+                expected: "number",
+                found: "bool",
+            }
+        );
+        assert_eq!(app.cvar_bool("r.vsync"), Some(true));
+    }
+
+    #[test]
+    fn increment_cvar_unknown_cvar_errors() {
+        let mut app = App::new();
+        let err = app.increment_cvar("r.nope", 0.0, 4.0, 1.0).unwrap_err();
+        assert_eq!(err, CvarError::Unregistered("r.nope".to_owned()));
+    }
+
+    #[test]
+    fn console_incrementvar_steps_value() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+
+        match app.exec_console("incrementvar r.shadows 0 4 1") {
+            ConsoleOutcome::Set(outcome) => assert_eq!(outcome.resolved, SettingValue::Int(1)),
+            other => panic!("expected Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn console_incrementvar_wraps() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+        app.set_cvar("r.shadows", SettingValue::Int(4)).unwrap();
+
+        match app.exec_console("incrementvar r.shadows 0 4 1") {
+            ConsoleOutcome::Set(outcome) => assert_eq!(outcome.resolved, SettingValue::Int(0)),
+            other => panic!("expected Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn console_incrementvar_unknown_cvar_is_unknown() {
+        let mut app = App::new();
+        assert_eq!(
+            app.exec_console("incrementvar r.nope 0 4 1"),
+            ConsoleOutcome::Unknown("r.nope".to_owned())
+        );
+    }
+
+    #[test]
+    fn console_incrementvar_malformed_falls_through_to_unknown() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+
+        // Too few numeric arguments: the whole line is treated as a query for a
+        // cvar literally named `incrementvar`, which is not registered.
+        assert_eq!(
+            app.exec_console("incrementvar r.shadows 0 4"),
+            ConsoleOutcome::Unknown("incrementvar".to_owned())
+        );
+        // A non-numeric argument is likewise not the increment command.
+        assert_eq!(
+            app.exec_console("incrementvar r.shadows 0 4 up"),
+            ConsoleOutcome::Unknown("incrementvar".to_owned())
+        );
+        // A bare `incrementvar` is a query for the unregistered cvar.
+        assert_eq!(
+            app.exec_console("incrementvar"),
+            ConsoleOutcome::Unknown("incrementvar".to_owned())
+        );
+        // The cvar was never touched by any of the malformed lines.
+        assert_eq!(app.cvar_int("r.shadows"), Some(0));
+    }
+
+    #[test]
+    fn console_incrementvar_is_not_honoured_by_config_loads() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+        // In a declarative config, `incrementvar …` is an assignment to a cvar
+        // named `incrementvar`, not the increment command — so it is Unknown and
+        // r.shadows is untouched.
+        let outcomes = app.load_user_config("incrementvar r.shadows 0 4 1");
+        assert_eq!(
+            outcomes,
+            vec![ConsoleOutcome::Unknown("incrementvar".to_owned())]
+        );
+        assert_eq!(app.cvar_int("r.shadows"), Some(0));
+    }
 }
