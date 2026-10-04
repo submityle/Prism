@@ -1,5 +1,6 @@
 //! Content-specific transparency strategies.
 
+pub mod adaptive;
 pub mod layered_glass;
 pub mod moment_oit;
 pub mod routing;
