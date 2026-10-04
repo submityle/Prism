@@ -196,3 +196,32 @@ fn prism_orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, z_near: f
         vec4<f32>(-(right + left) * rcp_w, -(top + bottom) * rcp_h, z_near * rcp_d, 1.0)\n\
     );\n\
 }\n";
+
+/// The authoritative WGSL source for the right-handed **view** (look-at)
+/// matrix builders, mirroring [`crate::projection::look_at_rh`] and
+/// [`crate::projection::look_to_rh`] **term for term**.
+///
+/// A consumer embeds this verbatim so a GPU-built view matrix cannot drift from
+/// the CPU constructors: the orthonormal-basis derivation (`normalize`,
+/// `cross`), operand order, and the column-major `mat4x4<f32>` layout are
+/// identical to the Rust source. The camera forward is `-Z` (right-handed).
+///
+/// `prism_look_to_rh` takes an explicit (unnormalized) forward `dir`;
+/// `prism_look_at_rh` derives it as `focus - eye` and delegates, exactly as
+/// the CPU pair does.
+pub const WGSL_LOOK_AT_RH: &str = "\
+fn prism_look_to_rh(eye: vec3<f32>, dir: vec3<f32>, up: vec3<f32>) -> mat4x4<f32> {\n\
+    let f = normalize(dir);\n\
+    let s = normalize(cross(f, up));\n\
+    let u = cross(s, f);\n\
+    return mat4x4<f32>(\n\
+        vec4<f32>(s.x, u.x, -f.x, 0.0),\n\
+        vec4<f32>(s.y, u.y, -f.y, 0.0),\n\
+        vec4<f32>(s.z, u.z, -f.z, 0.0),\n\
+        vec4<f32>(-dot(s, eye), -dot(u, eye), dot(f, eye), 1.0)\n\
+    );\n\
+}\n\
+\n\
+fn prism_look_at_rh(eye: vec3<f32>, focus: vec3<f32>, up: vec3<f32>) -> mat4x4<f32> {\n\
+    return prism_look_to_rh(eye, focus - eye, up);\n\
+}\n";
