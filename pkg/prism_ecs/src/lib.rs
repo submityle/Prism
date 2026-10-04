@@ -110,6 +110,8 @@ pub mod prelude {
     pub use crate::partition::streaming::{CellEntityIndex, WeakEntity, WeakRefs};
     #[cfg(feature = "partition")]
     pub use crate::partition::view::OriginView;
+    #[cfg(feature = "partition")]
+    pub use crate::partition::world_partition::WorldPartition;
     pub use crate::prefab::IsA;
     pub use crate::query::{Added, Changed, Or, With, Without};
     pub use crate::reaction::{NodeId, ReactionGraph};

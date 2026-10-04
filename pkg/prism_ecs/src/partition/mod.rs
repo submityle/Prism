@@ -13,3 +13,4 @@ pub mod lod;
 pub mod processor;
 pub mod streaming;
 pub mod view;
+pub mod world_partition;
