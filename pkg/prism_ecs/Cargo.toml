@@ -32,6 +32,18 @@ multi_thread = ["std", "dep:prism_tasks"]
 # dual-run test. No `portable_simd`/nightly: the crate stays on stable.
 simd = []
 
+# World Partition streaming + entity LOD/dormancy + 64-bit floating origin
+# (design §13 / §3 quality tier). An opt-in scale tier: the base build pays
+# nothing for large-world machinery, while high-end desktop/console enables it.
+# no_std + alloc clean; does not require `std`.
+partition = []
+
+# GPU-resident component columns with dirty-block tracking (design §15 / §3).
+# Opt-in GPU-driven tier: persistent column mapping + incremental dirty upload
+# accessors live here; the actual upload is on the render side. The base build
+# pays nothing. no_std + alloc clean; does not require `std`.
+gpu_resident = []
+
 # NOTE: this crate intentionally does NOT inherit `[lints] workspace = true`.
 # A type-erased columnar ECS fundamentally requires `unsafe` for component
 # storage, so the workspace-wide `unsafe_code = "deny"` cannot apply here.

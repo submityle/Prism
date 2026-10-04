@@ -57,8 +57,10 @@ mod component_hooks_tests;
 pub mod diagnostics;
 pub mod entity;
 pub mod event;
+#[cfg(feature = "gpu_resident")]
 pub mod gpu_resident;
 pub mod observer;
+#[cfg(feature = "partition")]
 pub mod partition;
 pub mod prefab;
 pub mod query;
@@ -81,15 +83,20 @@ pub mod prelude {
     pub use crate::component_hooks::{ComponentHook, ComponentHooks, HookContext};
     pub use crate::entity::Entity;
     pub use crate::event::{Event, EventCursor, EventId, Events};
+    #[cfg(feature = "gpu_resident")]
     pub use crate::gpu_resident::{DirtyBlock, GpuResidentColumn, GpuResidentColumns};
     pub use crate::observer::{
         EventContext, LifecycleEvent, ObserverContext, ObserverId, Observers,
     };
+    #[cfg(feature = "partition")]
     pub use crate::partition::cell::{
         CellCoord, CellState, CellStreamer, StreamingDelta, WorldPartitionCell,
     };
+    #[cfg(feature = "partition")]
     pub use crate::partition::dormant::{DormancySet, Dormant};
+    #[cfg(feature = "partition")]
     pub use crate::partition::floating_origin::{FloatingOrigin, GridCell, LocalPos, WorldPos};
+    #[cfg(feature = "partition")]
     pub use crate::partition::lod::{
         distance_sq, LodBand, LodDecision, LodLevel, LodSchedule, OutOfRange,
     };
