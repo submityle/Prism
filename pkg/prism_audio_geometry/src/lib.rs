@@ -20,6 +20,10 @@
 //!
 //! # Module map
 //!
+//! - [`air_absorption`] folds frequency-dependent atmospheric air
+//!   absorption (ISO 9613-1) into every resolved arrival, rolling off the
+//!   highs with travelled distance; opt-in through
+//!   [`config::GeometricConfig::with_air_absorption`].
 //! - [`config`] holds [`config::GeometricConfig`], the control-rate budget and
 //!   feature switches (reflection order, ray/edge budgets, audibility floor).
 //! - [`material_map`] holds [`material_map::MaterialTable`], the per-triangle
@@ -88,6 +92,7 @@
 
 extern crate alloc;
 
+pub mod air_absorption;
 pub mod backend;
 pub mod config;
 pub mod coupled_path;

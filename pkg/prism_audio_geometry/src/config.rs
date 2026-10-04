@@ -19,6 +19,7 @@
 //! [`MAX_PROPAGATION_PATHS`](prism_audio_spatial::propagation::MAX_PROPAGATION_PATHS).
 
 use prism_audio_core::math::Sample;
+use prism_audio_spatial::air::AtmosphericConditions;
 
 /// Default audibility floor (linear gain). Arrivals quieter than this are
 /// dropped rather than consuming a bounded path slot: -60 dB is the classic
@@ -163,6 +164,16 @@ pub struct GeometricConfig {
     /// arbitrary-order interleaved reflect/diffract sequences from
     /// [`crate::coupled_sequence`], clamped to [`MAX_SUPPORTED_COUPLED_ORDER`]).
     pub max_coupled_order: usize,
+    /// Whether to apply frequency-dependent atmospheric air absorption to
+    /// every resolved arrival (ISO 9613-1). Opt-in through
+    /// [`GeometricConfig::with_air_absorption`]; defaults to `false` so
+    /// existing callers keep the original un-absorbed spectra. See
+    /// [`crate::air_absorption`].
+    pub air_absorption_enabled: bool,
+    /// The atmosphere air absorption is evaluated in when
+    /// [`Self::air_absorption_enabled`] is set. Defaults to the standard
+    /// reference atmosphere (20 degrees Celsius, 50 % humidity, 101.325 kPa).
+    pub atmosphere: AtmosphericConditions,
 }
 
 impl GeometricConfig {
@@ -187,6 +198,8 @@ impl GeometricConfig {
             coupled_enabled: false,
             max_coupled_paths: DEFAULT_MAX_COUPLED_PATHS,
             max_coupled_order: DEFAULT_MAX_COUPLED_ORDER,
+            air_absorption_enabled: false,
+            atmosphere: AtmosphericConditions::default(),
         }
     }
 
@@ -302,6 +315,42 @@ impl GeometricConfig {
         self
     }
 
+    /// Returns a copy with frequency-dependent atmospheric air absorption
+    /// enabled, using the current [`Self::atmosphere`].
+    ///
+    /// Air absorption rolls off the highs with travelled distance (ISO
+    /// 9613-1). It only tilts each arrival's per-band spectrum and corner,
+    /// never its broadband gain, so enabling it complements the geometric
+    /// spreading and surface colour the path builders already compute.
+    #[inline]
+    #[must_use]
+    pub fn with_air_absorption(mut self) -> Self {
+        self.air_absorption_enabled = true;
+        self
+    }
+
+    /// Returns a copy whose air absorption is evaluated in `atmosphere`, and
+    /// enables air absorption.
+    ///
+    /// Setting a specific atmosphere implies you want it applied, so this
+    /// also sets [`Self::air_absorption_enabled`] (matching the way
+    /// [`Self::with_max_coupled_order`] enables coupling).
+    #[inline]
+    #[must_use]
+    pub fn with_atmosphere(mut self, atmosphere: AtmosphericConditions) -> Self {
+        self.atmosphere = atmosphere;
+        self.air_absorption_enabled = true;
+        self
+    }
+
+    /// Returns a copy with atmospheric air absorption disabled.
+    #[inline]
+    #[must_use]
+    pub fn without_air_absorption(mut self) -> Self {
+        self.air_absorption_enabled = false;
+        self
+    }
+
     /// Returns a copy with the audibility floor set to `gain` (clamped to be
     /// non-negative).
     #[inline]
@@ -323,6 +372,7 @@ impl Default for GeometricConfig {
 #[cfg(test)]
 mod tests {
     use super::{DiffractionModel, GeometricConfig};
+    use prism_audio_spatial::air::AtmosphericConditions;
 
     #[test]
     fn new_enables_all_mechanisms() {
@@ -425,5 +475,26 @@ mod tests {
         let low = GeometricConfig::new(48_000).with_max_coupled_order(0);
         assert_eq!(low.max_coupled_order, 2);
         assert!(low.coupled_enabled);
+    }
+    #[test]
+    fn air_absorption_defaults_off_with_reference_atmosphere() {
+        let cfg = GeometricConfig::new(48_000);
+        assert!(!cfg.air_absorption_enabled);
+        assert_eq!(cfg.atmosphere, AtmosphericConditions::default());
+    }
+
+    #[test]
+    fn air_absorption_builder_toggles() {
+        let on = GeometricConfig::new(48_000).with_air_absorption();
+        assert!(on.air_absorption_enabled);
+        assert!(!on.without_air_absorption().air_absorption_enabled);
+    }
+
+    #[test]
+    fn with_atmosphere_sets_conditions_and_enables() {
+        let humid = AtmosphericConditions::new(25.0, 80.0, 101.0);
+        let cfg = GeometricConfig::new(48_000).with_atmosphere(humid);
+        assert!(cfg.air_absorption_enabled);
+        assert_eq!(cfg.atmosphere, humid);
     }
 }

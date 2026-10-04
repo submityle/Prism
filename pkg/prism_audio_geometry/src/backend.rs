@@ -23,7 +23,8 @@
 //! Implements [`prism_audio_spatial::propagation::PropagationBackend`] by
 //! composing [`crate::direct_path`], [`crate::reflection_path`],
 //! [`crate::diffraction_path`], [`crate::coupled_path`], and
-//! [`crate::coupled_sequence`] over a
+//! [`crate::coupled_sequence`] (optionally folding in
+//! [`crate::air_absorption`]) over a
 //! [`crate::scene::AcousticScene`] and a [`crate::config::GeometricConfig`].
 
 use alloc::vec::Vec;
@@ -33,6 +34,7 @@ use prism_audio_spatial::geometry::{Emitter, Listener};
 use prism_audio_spatial::occlusion::OcclusionFactors;
 use prism_audio_spatial::propagation::{PropagationBackend, PropagationPath, PropagationSummary};
 
+use crate::air_absorption::apply_air_absorption;
 use crate::config::GeometricConfig;
 use crate::coupled_path::resolve_coupled_paths;
 use crate::coupled_sequence::resolve_coupled_sequences;
@@ -164,6 +166,14 @@ impl PropagationBackend for GeometricBackend {
             }
             paths[written] = path;
             written += 1;
+        }
+
+        // Frequency-dependent atmospheric air absorption is a purely
+        // spectral, opt-in roll-off applied once every arrival is placed; it
+        // only tilts each path's bands/corner (never its scalar gain), so it
+        // runs after the loudest-first ordering above without disturbing it.
+        if self.config.air_absorption_enabled {
+            apply_air_absorption(&mut paths[..written], &self.config);
         }
 
         PropagationSummary {
