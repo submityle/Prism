@@ -348,6 +348,10 @@ pub use tet_fem_drucker_prager_force_assembly::{
     assemble_drucker_prager_forces, rest_drucker_prager_states,
     total_drucker_prager_elastic_potential_energy, DruckerPragerAssembly,
 };
+pub mod tet_fem_mohr_coulomb_plasticity;
+pub use tet_fem_mohr_coulomb_plasticity::{
+    return_map_mohr_coulomb, MohrCoulombModel, MohrCoulombState, MohrCoulombStep, MohrCoulombYield,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
