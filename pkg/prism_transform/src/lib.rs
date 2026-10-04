@@ -102,6 +102,7 @@ use prism_math::{Affine3, Mat4, Quat, Vec3};
 
 pub mod bake;
 pub mod change;
+pub mod compute_hierarchy;
 pub mod constraint;
 #[cfg(feature = "compat-bevy")]
 pub mod compat_bevy;
@@ -642,6 +643,7 @@ pub mod prelude {
         StaticBaker,
     };
     pub use crate::change::{ChangeTicks, Tick};
+    pub use crate::compute_hierarchy::{ComputeHierarchyInput, LevelSchedule};
     pub use crate::constraint::{
         solve_chain, Aim, Constraint, LookAt, ParentBlend, PositionLimit,
     };
@@ -726,3 +728,6 @@ mod tests_spatial_sync;
 
 #[cfg(test)]
 mod tests_sweep;
+
+#[cfg(test)]
+mod tests_compute_hierarchy;
