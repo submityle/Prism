@@ -97,22 +97,12 @@ impl WorldRestirPipeline {
         &self.fill_layout
     }
 
-    /// The `inject_main` compute pipeline id. Recorded by the inject dispatch
-    /// in a follow-up slice.
-    #[expect(
-        dead_code,
-        reason = "the inject dispatch records this pipeline in a follow-up slice; no render-graph node reads it yet"
-    )]
+    /// The `inject_main` compute pipeline id, recorded by the inject dispatch.
     pub(crate) fn inject(&self) -> CachedComputePipelineId {
         self.inject
     }
 
-    /// group-0 layout for the `inject_main` dispatch. The inject bind group
-    /// builds against it in a follow-up slice.
-    #[expect(
-        dead_code,
-        reason = "the inject bind group builds against this layout in a follow-up slice; no host path reads it yet"
-    )]
+    /// group-0 layout for the `inject_main` dispatch, bound by the inject bind group.
     pub(crate) fn inject_layout(&self) -> &BindGroupLayout {
         &self.inject_layout
     }

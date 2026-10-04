@@ -17,6 +17,7 @@ use bevy_render::{
 
 use super::pipeline::WorldRestirPipeline;
 use super::resources::ViewWorldRestir;
+use super::visible_points::ViewWorldRestirVisiblePoints;
 
 /// The group-0 bind group a single view's fill pass records against. Present
 /// only while the view's resident reservoir table ([`ViewWorldRestir`]) is.
@@ -25,12 +26,23 @@ pub(crate) struct ViewWorldRestirBindGroups {
     /// group 0 for `fill_main`: previous reservoir table read-only (0) and the
     /// next reservoir table read-write (1).
     fill: BindGroup,
+    /// group 0 for `inject_main`: the per-frame visible-point list read-only
+    /// (0), this frame's reservoir table read-write (1) and the per-slot
+    /// claim-guard array read-write (2). Present only when the view carries a
+    /// resident visible-point list (i.e. the producer pass ran this frame).
+    inject: Option<BindGroup>,
 }
 
 impl ViewWorldRestirBindGroups {
     /// group-0 bind group for the `fill_main` dispatch.
     pub(crate) fn fill_group(&self) -> &BindGroup {
         &self.fill
+    }
+
+    /// group-0 bind group for the `inject_main` dispatch, present only when the
+    /// view's visible-point list is resident this frame.
+    pub(crate) fn inject_group(&self) -> Option<&BindGroup> {
+        self.inject.as_ref()
     }
 }
 
@@ -44,9 +56,13 @@ pub(crate) fn prepare_world_restir_bind_groups(
     mut commands: Commands,
     pipeline: Res<WorldRestirPipeline>,
     device: Res<RenderDevice>,
-    views: Query<(Entity, &ViewWorldRestir)>,
+    views: Query<(
+        Entity,
+        &ViewWorldRestir,
+        Option<&ViewWorldRestirVisiblePoints>,
+    )>,
 ) {
-    for (entity, restir) in &views {
+    for (entity, restir, visible_points) in &views {
         // fill group: previous reservoir table read-only (0), next reservoir
         // table read-write (1). Both follow this frame's ping-pong selection.
         let fill = device.create_bind_group(
@@ -58,8 +74,25 @@ pub(crate) fn prepare_world_restir_bind_groups(
             )),
         );
 
+        // inject group: the per-frame visible-point list read-only (0), this
+        // frame's reservoir table read-write (1) and the per-slot claim-guard
+        // array read-write (2). Built only when the view carries a resident
+        // visible-point list, so the inject pass auto-skips a view whose
+        // producer pass did not run (disabled or missing SSR prepass).
+        let inject = visible_points.map(|vp| {
+            device.create_bind_group(
+                "prism world-space ReSTIR inject",
+                pipeline.inject_layout(),
+                &BindGroupEntries::sequential((
+                    vp.buffer().as_entire_binding(),
+                    restir.src_buffer().as_entire_binding(),
+                    restir.slot_state_buffer().as_entire_binding(),
+                )),
+            )
+        });
+
         commands
             .entity(entity)
-            .insert(ViewWorldRestirBindGroups { fill });
+            .insert(ViewWorldRestirBindGroups { fill, inject });
     }
 }

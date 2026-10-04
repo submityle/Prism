@@ -50,13 +50,19 @@ mod lights;
 mod pipeline;
 mod resources;
 mod settings;
+mod visible_points;
 
 pub(crate) use bind_groups::prepare_world_restir_bind_groups;
 pub(crate) use dispatch::world_restir_fill_pass;
+pub(crate) use dispatch::world_restir_inject_pass;
 pub(crate) use lights::{prepare_world_restir_lights, WorldRestirLights};
 pub(crate) use pipeline::init_world_restir_pipeline;
 pub(crate) use resources::prepare_world_restir_reservoirs;
 pub(crate) use settings::PrismWorldRestirSettings;
+pub(crate) use visible_points::{
+    init_world_restir_visible_points_pipeline, prepare_world_restir_visible_points,
+    prepare_world_restir_visible_points_bind_groups, world_restir_visible_points_pass,
+};
 
 #[cfg(test)]
 mod shader_tests;

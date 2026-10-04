@@ -91,10 +91,6 @@ impl ViewWorldRestir {
     }
 
     /// The resident inject claim-guard array (one `atomic<u32>` per slot).
-    #[expect(
-        dead_code,
-        reason = "the inject bind group binds this at @binding(2) in a follow-up slice; nothing reads it yet"
-    )]
     pub(crate) fn slot_state_buffer(&self) -> &Buffer {
         &self.slot_state
     }

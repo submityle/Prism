@@ -314,25 +314,11 @@ impl GpuWorldRestirSeedParams {
 /// Must match `@workgroup_size(N, 1, 1)` in `world_restir_inject.wesl`; the
 /// inject dispatch rounds the visible-point count up to a multiple of this and
 /// the shader bounds-checks every invocation against the live point count.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "inject dispatch extent constant; consumed once the inject pipeline is wired in                   a follow-up slice, so no host path reads it yet"
-    )
-)]
 pub(crate) const WORLD_RESTIR_INJECT_WORKGROUP_SIZE: u32 = 64;
 
 /// Per-point injection storage stride in bytes: two `vec4<f32>` lanes (a `vec3`
 /// payload plus one trailing pad word each) = 32 bytes, matching the WGSL
 /// `InjectPoint` struct's std430 layout and its 16-byte array stride.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "inject point-buffer stride; consumed once the inject bind group binds the                   visible-point list in a follow-up slice, so no host path reads it yet"
-    )
-)]
 pub(crate) const WORLD_RESTIR_INJECT_POINT_STRIDE: u64 = 32;
 
 /// Per-slot inject claim-guard stride in bytes: one `atomic<u32>` checksum
@@ -422,13 +408,6 @@ impl GpuWorldRestirInjectParams {
     /// Builds the inject immediate block from the camera position, the
     /// per-frame jitter + visible-point count + frame index, and the live
     /// settings (capacity floored at `1`, the grid tunables forwarded verbatim).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "inject immediate builder; called once the inject dispatch is wired in a                       follow-up slice, so no host path constructs it yet"
-        )
-    )]
     pub(crate) fn from_settings(
         camera_position: Vec3,
         jitter: Vec3,

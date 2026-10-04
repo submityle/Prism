@@ -230,8 +230,11 @@ use super::{
         volumetrics_pass, PrismVolumetricsSettings, VolumetricsTextureCache,
     },
     world_restir::{
-        init_world_restir_pipeline, prepare_world_restir_bind_groups, prepare_world_restir_lights,
-        prepare_world_restir_reservoirs, world_restir_fill_pass, PrismWorldRestirSettings,
+        init_world_restir_pipeline, init_world_restir_visible_points_pipeline,
+        prepare_world_restir_bind_groups, prepare_world_restir_lights,
+        prepare_world_restir_reservoirs, prepare_world_restir_visible_points,
+        prepare_world_restir_visible_points_bind_groups, world_restir_fill_pass,
+        world_restir_inject_pass, world_restir_visible_points_pass, PrismWorldRestirSettings,
         WorldRestirLights,
     },
     world_space_gi::{
@@ -329,6 +332,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/world_restir_seed.wesl");
         embedded_asset!(app, "../shaders/world_restir_fill.wesl");
         embedded_asset!(app, "../shaders/world_restir_inject.wesl");
+        embedded_asset!(app, "../shaders/world_restir_visible_points.wesl");
         register_shadow_depth_shader(app);
         register_vsm_caster_depth_shader(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -1094,6 +1098,7 @@ impl Plugin for PrismShadingPlugin {
         // Opt-in: a no-op unless `PrismWorldRestirSettings::enabled`, so the
         // default renderer allocates and dispatches nothing.
         render_app.add_systems(RenderStartup, init_world_restir_pipeline);
+        render_app.add_systems(RenderStartup, init_world_restir_visible_points_pipeline);
         // Area-light `LTC` render-world systems. The `GpuAreaLight` storage
         // buffer, the per-frame extract from the main world, and the
         // rebuild/upload pair each live in their own `add_systems` call so the
@@ -1118,17 +1123,32 @@ impl Plugin for PrismShadingPlugin {
                 // producer like the reservoirs: repacked from the extracted
                 // lights in PrepareResources, independent of the ping-pong flip.
                 prepare_world_restir_lights.in_set(RenderSystems::PrepareResources),
+                // The visible-point list is sized to the SSR prepass tile grid
+                // in PrepareResources; its producer group and the inject group
+                // both read it in PrepareBindGroups.
+                prepare_world_restir_visible_points.in_set(RenderSystems::PrepareResources),
+                prepare_world_restir_visible_points_bind_groups
+                    .after(prepare_world_restir_visible_points)
+                    .in_set(RenderSystems::PrepareBindGroups),
                 prepare_world_restir_bind_groups
                     .after(prepare_world_restir_reservoirs)
+                    .after(prepare_world_restir_visible_points)
                     .in_set(RenderSystems::PrepareBindGroups),
             ),
         );
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
-            // Pure world-space table producer: it reads last frame's reservoirs
-            // and writes this frame's, touching no screen targets, so it only
-            // has to finish before the main pass samples the table.
-            world_restir_fill_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
+            // World-space ReSTIR runs producer -> inject -> fill each frame: the
+            // producer turns the SSR prepass into a visible-point list, inject
+            // open-address claims one SHARC cell per point, and fill streams
+            // spatial reuse over the claimed cells. All three touch no screen
+            // targets, so the chain only has to finish before the main pass
+            // samples the resident table.
+            (
+                world_restir_visible_points_pass.before(world_restir_inject_pass),
+                world_restir_inject_pass.before(world_restir_fill_pass),
+                world_restir_fill_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
+            ),
         );
         render_app.add_systems(
             bevy_core_pipeline::Core3d,

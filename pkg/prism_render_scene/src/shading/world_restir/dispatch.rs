@@ -23,7 +23,10 @@ use bevy_render::{
     view::ExtractedView,
 };
 
-use super::abi::{GpuWorldRestirFillParams, WORLD_RESTIR_WORKGROUP_SIZE};
+use super::abi::{
+    GpuWorldRestirFillParams, GpuWorldRestirInjectParams, WORLD_RESTIR_INJECT_WORKGROUP_SIZE,
+    WORLD_RESTIR_WORKGROUP_SIZE,
+};
 use super::bind_groups::ViewWorldRestirBindGroups;
 use super::pipeline::WorldRestirPipeline;
 use super::resources::ViewWorldRestir;
@@ -79,6 +82,75 @@ pub(crate) fn world_restir_fill_pass(
     });
     pass.set_pipeline(fill_pipeline);
     pass.set_bind_group(0, groups.fill_group(), &[]);
+    pass.set_immediates(0, bytemuck::bytes_of(&params));
+    pass.dispatch_workgroups(groups_x, 1, 1);
+}
+
+/// `Core3d` scheduling system recording the `inject_main` dispatch for every
+/// view whose resident reservoir table, inject bind group and visible-point
+/// list are live.
+///
+/// The producer fills the per-frame visible-point list, the inject pass then
+/// open-address claims one `SHARC` cell per visible point and writes the slot
+/// geometry, and the fill pass streams spatial reuse over the claimed cells.
+/// Inject therefore runs after the producer and before fill. Each frame starts
+/// from an empty, spatial-only table, so the per-slot claim guard and the
+/// reservoir table inject writes geometry into are cleared on the encoder
+/// before the compute pass (no temporal accumulation yet).
+pub(crate) fn world_restir_inject_pass(
+    settings: Res<PrismWorldRestirSettings>,
+    view: ViewQuery<(
+        &ViewWorldRestir,
+        &ViewWorldRestirBindGroups,
+        &super::visible_points::ViewWorldRestirVisiblePoints,
+        &ExtractedView,
+    )>,
+    pipeline: Res<WorldRestirPipeline>,
+    cache: Res<PipelineCache>,
+    mut ctx: RenderContext,
+) {
+    if !settings.enabled {
+        return;
+    }
+    let (restir, groups, points, extracted) = view.into_inner();
+
+    // The inject bind group is present only when the producer's visible-point
+    // list is resident; absence (disabled producer / no SSR prepass) skips.
+    let Some(inject_group) = groups.inject_group() else {
+        return;
+    };
+    // The inject pipeline must be resident before the pass runs.
+    let Some(inject_pipeline) = cache.get_compute_pipeline(pipeline.inject()) else {
+        return;
+    };
+
+    // Camera world position anchors the same hash-grid level selection the fill
+    // pass uses; grid-phase jitter stays zero (spatial-only, no temporal phase).
+    let camera_position = extracted.world_from_view.translation();
+    let params = GpuWorldRestirInjectParams::from_settings(
+        camera_position,
+        Vec3::ZERO,
+        points.point_count(),
+        restir.frame(),
+        &settings,
+    );
+
+    let groups_x = points
+        .point_count()
+        .max(1)
+        .div_ceil(WORLD_RESTIR_INJECT_WORKGROUP_SIZE);
+
+    let encoder = ctx.command_encoder();
+    // Per-frame spatial-only reset: clear the claim guard and the reservoir
+    // table inject writes slot geometry into before any cell is claimed.
+    encoder.clear_buffer(restir.slot_state_buffer(), 0, None);
+    encoder.clear_buffer(restir.src_buffer(), 0, None);
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("prism world-space ReSTIR inject"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(inject_pipeline);
+    pass.set_bind_group(0, inject_group, &[]);
     pass.set_immediates(0, bytemuck::bytes_of(&params));
     pass.dispatch_workgroups(groups_x, 1, 1);
 }
