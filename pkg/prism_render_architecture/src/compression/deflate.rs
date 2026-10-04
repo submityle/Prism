@@ -47,7 +47,7 @@ pub(crate) const DIST_EXTRA: [u32; 30] = [
     13,
 ];
 /// Order the code-length code lengths are stored in (`RFC 1951` §3.2.7).
-const CODE_LENGTH_ORDER: [usize; 19] = [
+pub(crate) const CODE_LENGTH_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 

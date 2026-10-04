@@ -17,6 +17,7 @@
 
 pub mod deflate;
 mod deflate_encode;
+mod deflate_huffman;
 pub mod gdeflate;
 
 pub use deflate::{inflate, InflateError};
