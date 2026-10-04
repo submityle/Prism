@@ -431,13 +431,14 @@ pkg/prism_math/
 - 供 `prism_gi`（Lumen 形态 GI）的辐照度探针、天光、球谐光照烘焙；与 §11 线性颜色空间协同（SH 存线性光）。
 - 纯经典球谐数学（实数基、Condon–Shortley 约定明确），CPU 烘焙 + GPU 求值共享（接 §24.1 shader 镜像）。
 
-### 24.7 空间编码（Morton / Hilbert 曲线）
+### 24.7 空间编码（Morton / Hilbert 曲线）—— ✅ 已交付（`spatial` 模块）
 
 空间局部性编码，供空间加速结构、GPU 排序、流送：
 
 - `morton_encode3(x,y,z)` / `hilbert_encode`：3D 坐标 ⇄ 一维排序键，保空间局部性。
 - 用途：BVH/八叉树构建的 radix 排序键（GPU 并行建树）、空间哈希槽位、大世界 cell 索引线性化（接 transform §9、ECS §13.3 分区）、流送优先级排序。
 - 纯位运算（bit interleaving），确定性档友好（整数运算、跨平台一致）。
+- **交付状态**：`spatial` 模块已落地 `morton_encode2/3`、`morton_decode2/3`（Z-order，21bit/轴 3D、32bit/轴 2D）与 `hilbert_encode3`/`hilbert_decode3`（Skilling 转置算法，21bit/轴）；纯整数、无 `alloc`、`no_std`、跨平台位级一致。correctness oracle：随机往返 1e4 组、4×4×4 立方体双射、相邻 Hilbert 索引曼哈顿距离恒为 1。`cargo clippy --all-targets` 零告警、8 项单测全绿。
 
 ### 24.8 高阶样条曲面（Bezier Patch / Tensor-Product，`curve` 扩展）
 
@@ -457,4 +458,4 @@ pkg/prism_math/
 
 ### 24.10 诚实边界
 
-本章全部 PLANNED，无代码。落地优先级建议：**24.4 补偿求和**（直接服务确定归并，随 tasks M4）与 **24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）优先；24.3 区间算术随物理 CCD/渲染遮挡剔除；24.6 SH 随 `prism_gi`；24.7 Morton 随空间加速结构消费方；24.5 对偶数随 IK/物理雅可比；24.8 曲面随地形；24.9 大世界定点随联机开放世界。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章全部 PLANNED，无代码。落地优先级建议：**24.4 补偿求和**（直接服务确定归并，随 tasks M4）与 **24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）优先；24.3 区间算术随物理 CCD/渲染遮挡剔除；24.6 SH 随 `prism_gi`；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数随 IK/物理雅可比；24.8 曲面随地形；24.9 大世界定点随联机开放世界。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
