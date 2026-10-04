@@ -85,6 +85,14 @@
 //!   and the largest / smallest batch — surfacing plans that barely batch
 //!   (too many unique mesh+material keys) (design §16.6 / §15 / §6;
 //!   `gpu_resident` feature).
+//! * [`gpu_resident_upload`] — GPU-resident column upload / dirty-block
+//!   census (design §15 脏块增量上传): per-column pending (coalesced) upload
+//!   bytes, upload amplification (pending over live — `1000` means the whole
+//!   column is being re-sent), dirty-span contiguity, and capacity pressure
+//!   over a set of [`GpuResidentColumn`](crate::gpu_resident::GpuResidentColumn)s,
+//!   plus a registry-wide roll-up — surfacing frames where incremental upload
+//!   degenerates into a full re-upload (design §16.6 / §15 / §1;
+//!   `gpu_resident` feature).
 //! * [`partition_occupancy`] — world-partition cell occupancy / streaming
 //!   census (design §13.1): joins the cell streamer with the entity index
 //!   per cell to report per-cell [`CellState`](crate::partition::cell::CellState)
@@ -113,6 +121,8 @@ pub mod determinism_readiness;
 pub mod frame_profile;
 #[cfg(feature = "gpu_resident")]
 pub mod gpu_batch_efficiency;
+#[cfg(feature = "gpu_resident")]
+pub mod gpu_resident_upload;
 pub mod hook_coverage;
 pub mod inspector;
 pub mod memory_footprint;
@@ -143,6 +153,8 @@ pub use determinism_readiness::{
 pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
 #[cfg(feature = "gpu_resident")]
 pub use gpu_batch_efficiency::{BatchEntry, GpuBatchEfficiencyReport};
+#[cfg(feature = "gpu_resident")]
+pub use gpu_resident_upload::{ColumnUploadEntry, GpuUploadReport};
 pub use hook_coverage::{HookCoverageEntry, HookCoverageReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
 pub use memory_footprint::{ArchetypeMemoryEntry, MemoryFootprintReport};
