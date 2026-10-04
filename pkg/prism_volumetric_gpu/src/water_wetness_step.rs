@@ -224,7 +224,7 @@ impl GpuWaterWetnessStep {
             usage: BufferUsages::STORAGE,
         });
 
-        let out_bytes = (count * size_of::<f32>()) as u64;
+        let out_bytes = size_of_val(wetness) as u64;
         let wetness_out_buf = device.create_buffer(&BufferDescriptor {
             label: Some("prism_volumetric_water_wetness_step_wetness_out"),
             size: out_bytes,

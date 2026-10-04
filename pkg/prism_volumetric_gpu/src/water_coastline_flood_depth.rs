@@ -177,7 +177,7 @@ impl GpuWaterCoastlineFloodDepth {
             usage: BufferUsages::STORAGE,
         });
 
-        let out_bytes = (count * size_of::<f32>()) as u64;
+        let out_bytes = size_of_val(heights) as u64;
         let out_buf = device.create_buffer(&BufferDescriptor {
             label: Some("prism_volumetric_water_coastline_flood_depth_out"),
             size: out_bytes,
