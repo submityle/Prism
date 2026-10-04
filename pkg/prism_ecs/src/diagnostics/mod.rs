@@ -141,6 +141,15 @@
 //!   plus the two streaming consistency gaps the join exposes — entities in
 //!   non-resident cells and entities stranded in untracked cells
 //!   (design §16.6 / §13.1 / §17; `partition` feature).
+//! * [`dormancy_census`] — dormant-entity id-space census
+//!   (design §13.2): reads a [`DormancySet`](crate::partition::dormant::DormancySet)
+//!   and reports the *shape* of the dormant population in the entity
+//!   id-space — slot-index span and fill density, contiguity (maximal
+//!   runs of consecutive indices and the longest run), a bit-width
+//!   histogram of slot indices and of generations (recycle depth), and the
+//!   pending-wake churn — distinguishing a tightly-pooled, serialise-cheap
+//!   block from a scattered, heavily-recycled one
+//!   (design §16.6 / §13.2; `partition` feature).
 //! * [`floating_origin_precision`] — 64-bit floating-origin rebase
 //!   precision budget audit (design §13.3): a power-of-two ring ladder
 //!   reporting the exact `f32` ULP available at each distance from the
@@ -177,6 +186,8 @@ pub mod churn_cost;
 pub mod component_distribution;
 pub mod component_memory;
 pub mod determinism_readiness;
+#[cfg(feature = "partition")]
+pub mod dormancy_census;
 #[cfg(feature = "partition")]
 pub mod floating_origin_precision;
 pub mod frame_profile;
@@ -220,6 +231,8 @@ pub use component_memory::{ComponentMemoryEntry, ComponentMemoryReport};
 pub use determinism_readiness::{
     DeterminismClass, DeterminismReadinessEntry, DeterminismReadinessReport,
 };
+#[cfg(feature = "partition")]
+pub use dormancy_census::{DormancyCensus, GenerationBucketEntry, IndexBucketEntry};
 #[cfg(feature = "partition")]
 pub use floating_origin_precision::{
     FloatingOriginPrecisionAudit, PrecisionRingEntry, RebaseSampleAudit,
