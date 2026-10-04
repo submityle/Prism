@@ -89,6 +89,13 @@
 //!   snapshot-only (a desync blind spot — rolled back but invisible to
 //!   the state hash), hash-only (rollback gap), or opaque, surfacing the
 //!   gaps that break rollback networking (design §16.6 / §14).
+//! * [`event_flow_health`] — double-buffered event-queue flow and
+//!   reader-backpressure census (design §16.7): live buffer occupancy
+//!   versus lifetime throughput, and per reader cursor how far it lags,
+//!   whether it is caught up, and whether it is *saturated* (pinned at the
+//!   oldest event and about to drop the older half on the next buffer
+//!   rotation) — surfacing readers that run hot enough to silently miss
+//!   events (design §16.6 / §16.7).
 //! * [`hook_coverage`] — component lifecycle-hook coverage (design §12):
 //!   which of `on_add` / `on_insert` / `on_replace` / `on_remove` each
 //!   component registers, flagging acquire/release asymmetries (acquire
@@ -195,6 +202,7 @@ pub mod component_memory;
 pub mod determinism_readiness;
 #[cfg(feature = "partition")]
 pub mod dormancy_census;
+pub mod event_flow_health;
 #[cfg(feature = "partition")]
 pub mod floating_origin_precision;
 pub mod frame_profile;
@@ -242,6 +250,7 @@ pub use determinism_readiness::{
 };
 #[cfg(feature = "partition")]
 pub use dormancy_census::{DormancyCensus, GenerationBucketEntry, IndexBucketEntry};
+pub use event_flow_health::{EventFlowHealth, EventReaderEntry};
 #[cfg(feature = "partition")]
 pub use floating_origin_precision::{
     FloatingOriginPrecisionAudit, PrecisionRingEntry, RebaseSampleAudit,
