@@ -474,6 +474,8 @@ pub use capillary_bridge_resolver::{
 };
 pub mod wet_granular_pile;
 pub use wet_granular_pile::{WetGranularPileBody, WetGranularPileStepReport};
+pub mod uniform_grid_broadphase;
+pub use uniform_grid_broadphase::UniformGridBroadphase;
 
 /// A handle into a [`ShapeRegistry`].
 ///
