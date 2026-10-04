@@ -57,9 +57,11 @@
 extern crate alloc;
 
 pub mod media;
+pub mod responsive;
 pub mod scope;
 pub mod scoped_sheet;
 
 pub use media::{MediaResolver, ResolvedSheet};
+pub use responsive::{responsive_segments, segment_at, ResponsiveSegment};
 pub use scope::{Scope, ScopeAllocator, ScopeId};
 pub use scoped_sheet::ScopedSheet;
