@@ -572,6 +572,8 @@ pub mod granular_peclet;
 pub use granular_peclet::{GranularPeclet, PecletRegime};
 pub mod granular_bond_number;
 pub use granular_bond_number::{BondRegime, GranularBondNumber};
+pub mod stress_dilatancy;
+pub use stress_dilatancy::StressDilatancy;
 
 /// A handle into a [`ShapeRegistry`].
 ///
