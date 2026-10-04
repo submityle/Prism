@@ -69,6 +69,7 @@ pub mod layer;
 pub mod polygon;
 pub mod raster;
 pub mod scene;
+pub mod simplify;
 pub mod sdf;
 
 pub use batch::{batch, instance_count, Batch, GlyphInstance, RectInstance, ShadowInstance};
@@ -81,3 +82,4 @@ pub use layer::{Layer, LayerTree};
 pub use polygon::{sd_polygon, sd_triangle};
 pub use raster::{rasterize, Framebuffer};
 pub use scene::RetainedScene;
+pub use simplify::simplify;

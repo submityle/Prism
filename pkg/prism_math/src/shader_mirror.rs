@@ -765,3 +765,30 @@ fn prism_f16_pack2(a: f32, b: f32) -> u32 {\n\
 fn prism_f16_unpack2(bits: u32) -> vec2<f32> {\n\
     return unpack2x16float(bits);\n\
 }\n";
+
+/// Single-sourced WGSL for the sRGB electro-optical transfer functions
+/// (gamma encode/decode), mirroring the CPU exact piecewise IEC 61966-2-1
+/// definition in [`crate::color::transfer`].
+///
+/// `prism_srgb_to_linear` decodes one non-linear sRGB component to linear
+/// light; `prism_linear_to_srgb` encodes the inverse. Both use the exact
+/// piecewise curve with the identical breakpoint literals as the CPU path, so
+/// for the same input both sides take the same branch. The linear segment is a
+/// bare multiply/divide; the power segment calls the WGSL `pow` builtin, which
+/// Metal compiles under fast-math, so the §24.1 contract on the power segment
+/// is a small tolerance rather than a bit contract (`libm::powf` versus device
+/// `pow`). Alpha never passes through these curves.
+pub const WGSL_SRGB: &str = "\
+fn prism_srgb_to_linear(c: f32) -> f32 {\n\
+    if (c <= 0.040448237) {\n\
+        return c / 12.92;\n\
+    }\n\
+    return pow((c + 0.055) / 1.055, 2.4);\n\
+}\n\
+\n\
+fn prism_linear_to_srgb(c: f32) -> f32 {\n\
+    if (c <= 0.0031308) {\n\
+        return c * 12.92;\n\
+    }\n\
+    return 1.055 * pow(c, 1.0 / 2.4) - 0.055;\n\
+}\n";
