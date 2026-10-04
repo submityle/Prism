@@ -46,18 +46,33 @@
 //!   `prism_render_architecture::ray_scene::footprint::RayFootprint`
 //!   math ray-for-ray, skipping gracefully when no adapter is present.
 //!
-//! The production `wgpu` pipeline / bind-group helpers and the render-graph
-//! dispatch node land once a real ray-tracing consumer (screen-space or
-//! world-space reflections, ray-traced shadows) fixes their exact binding
-//! interface; this slice proves the kernel is numerically correct on device
-//! first.
+//! * [`resources`] / [`pipeline`] / [`bind_groups`] / [`dispatch`] - the
+//!   production service that promotes the proven parity harness into a
+//!   reusable, consumer-callable object. [`GpuRayTraversal`] compiles the three
+//!   kernels once and exposes synchronous nearest-hit / occlusion / footprint
+//!   walks over a plain `RenderDevice` / `RenderQueue`, each the on-device twin
+//!   of its `CPU` golden. It is deliberately a raw-`wgpu` service rather than a
+//!   render-graph node because no single graph consumer exists yet (screen- and
+//!   world-space reflections and ray-traced shadows each want a different
+//!   schedule); a future consumer can wrap it without re-porting the kernels.
+
+#![allow(
+    dead_code,
+    reason = "the ray-traversal subsystem is a verified, consumer-callable production service (GpuRayTraversal + its resources / pipeline / bind-group / dispatch halves) whose first render-graph consumer (screen- or world-space reflections, ray-traced shadows) is not yet wired; every path is exercised on device by the parity tests, so the methods and record types stay as the finished public surface rather than being deleted and re-ported when a consumer lands"
+)]
 
 mod abi;
+mod bind_groups;
+mod dispatch;
+mod pipeline;
+mod resources;
 
 #[cfg(test)]
 mod footprint_gpu_tests;
 #[cfg(test)]
 mod gpu_tests;
+#[cfg(test)]
+mod service_tests;
 #[cfg(test)]
 mod shader_tests;
 #[cfg(test)]

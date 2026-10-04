@@ -19,7 +19,7 @@
 
 #![allow(
     dead_code,
-    reason = "the ray-traversal ABI strides and shader-mirror constants are the verified layout foundation of this subsystem; the pipeline / bind-group / dispatch slices that upload against them land next, and the contract tests exercise every stride now"
+    reason = "the production dispatch service (resources / pipeline / bind_groups / dispatch) now uploads against the record strides, modes, workgroup sizes and miss sentinels; the remaining per-field word-offset mirror constants are the shader-contract anchors that the contract tests exercise, so they stay as the single authoritative layout definition rather than being inlined into each test"
 )]
 
 use bytemuck::{Pod, Zeroable};
