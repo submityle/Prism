@@ -352,6 +352,10 @@ pub mod tet_fem_mohr_coulomb_plasticity;
 pub use tet_fem_mohr_coulomb_plasticity::{
     return_map_mohr_coulomb, MohrCoulombModel, MohrCoulombState, MohrCoulombStep, MohrCoulombYield,
 };
+pub mod tet_fem_mohr_coulomb_force;
+pub use tet_fem_mohr_coulomb_force::{
+    element_mohr_coulomb_force, mohr_coulomb_elastic_potential_energy, MohrCoulombForce,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
