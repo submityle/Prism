@@ -44,6 +44,7 @@
 use alloc::vec::Vec;
 
 use crate::partition::cell::{CellCoord, CellStreamer};
+use crate::partition::data_layer::DataLayers;
 use crate::partition::driver::{StreamDriver, StreamResult};
 use crate::partition::floating_origin::{FloatingOrigin, GridCell, LocalPos, WorldPos};
 use crate::partition::interest::InterestGrid;
@@ -64,6 +65,7 @@ pub struct WorldPartition {
     origin: FloatingOrigin,
     interest: InterestGrid,
     driver: StreamDriver,
+    data_layers: DataLayers,
 }
 
 impl WorldPartition {
@@ -86,6 +88,7 @@ impl WorldPartition {
             origin,
             interest,
             driver: StreamDriver::new(load_radius, unload_radius),
+            data_layers: DataLayers::new(),
         }
     }
 
@@ -101,6 +104,7 @@ impl WorldPartition {
             origin,
             interest,
             driver: StreamDriver::with_streamer(streamer),
+            data_layers: DataLayers::new(),
         }
     }
 
@@ -129,6 +133,24 @@ impl WorldPartition {
         &mut self.driver
     }
 
+    /// The data-layer registry (shared ref). Empty by default, in which case
+    /// every cell is streamable and [`advance`](Self::advance) behaves like
+    /// plain proximity streaming (design §13.1).
+    #[inline]
+    pub fn data_layers(&self) -> &DataLayers {
+        &self.data_layers
+    }
+
+    /// The data-layer registry (mutable ref): register layers, toggle their
+    /// [`DataLayerState`](crate::partition::data_layer::DataLayerState), and
+    /// assign cells to them. Changes take effect on the next
+    /// [`advance`](Self::advance) — unloading a layer evicts its resident cells,
+    /// (re)loading it lets them stream back in (design §13.1).
+    #[inline]
+    pub fn data_layers_mut(&mut self) -> &mut DataLayers {
+        &mut self.data_layers
+    }
+
     /// Advances streaming for one frame.
     ///
     /// 1. recenters the floating origin onto the cell containing `camera`, so
@@ -138,7 +160,9 @@ impl WorldPartition {
     ///    lattice via the interest grid — sorted and de-duplicated (§14);
     /// 3. drives the [`StreamDriver`], evicting cells that left every interest's
     ///    unload ball (despawning their entities) and surfacing the still-
-    ///    pending loads.
+    ///    pending loads. The eviction/load set is gated by the subsystem's
+    ///    [`DataLayers`](Self::data_layers): a cell whose data layer is unloaded
+    ///    is neither loaded nor kept resident (§13.1).
     ///
     /// Returns the resulting [`StreamResult`]: the unload half is already
     /// applied to `world`, the load half is the owner's to satisfy. The
@@ -159,7 +183,9 @@ impl WorldPartition {
         // one shared lattice. Collecting into a small scratch Vec keeps the
         // determinism (sort + dedup) in `InterestGrid::interests`.
         let interests = self.interests_for(camera, extra);
-        self.driver.stream(world, &interests)
+        let data_layers = &self.data_layers;
+        self.driver
+            .stream_filtered(world, &interests, |cell| data_layers.is_cell_streamable(cell))
     }
 
     /// Projects `camera` plus `extra` onto the streaming lattice, returning the
@@ -322,5 +348,64 @@ mod tests {
             p.interests_for(camera, &[]),
             alloc::vec![p.interest_grid().cell_of(camera)]
         );
+    }
+
+    #[test]
+    fn data_layer_gates_streaming_and_eviction() {
+        use crate::partition::data_layer::{DataLayerId, DataLayerState};
+
+        let mut world = World::new();
+        let mut p = WorldPartition::new(100.0, 1, 1);
+
+        // Tag the camera's own cell with a data layer and leave it unloaded.
+        let home = CellCoord::new(0, 0, 0);
+        let layer = DataLayerId::new(1);
+        p.data_layers_mut().assign(home, layer);
+
+        // Layer unloaded -> the home cell must NOT be requested.
+        let camera = WorldPos::new(50.0, 50.0, 50.0); // cell (0,0,0)
+        let result = p.advance(&mut world, camera, &[]);
+        assert!(!result.to_load.contains(&home));
+        assert_eq!(p.driver().streamer().state(home), CellState::Unloaded);
+
+        // Activate the layer -> the home cell streams in on the next tick.
+        p.data_layers_mut().set_state(layer, DataLayerState::Activated);
+        let result = p.advance(&mut world, camera, &[]);
+        assert!(result.to_load.contains(&home));
+        assert_eq!(p.driver().streamer().state(home), CellState::Loading);
+    }
+
+    #[test]
+    fn unloading_data_layer_evicts_resident_cell() {
+        use crate::partition::data_layer::DataLayerId;
+
+        let mut world = World::new();
+        let mut p = WorldPartition::new(100.0, 1, 1);
+
+        let home = CellCoord::new(0, 0, 0);
+        let layer = DataLayerId::new(1);
+        p.data_layers_mut().assign(home, layer);
+        p.data_layers_mut().activate(layer);
+
+        // Resident cell with an entity while the layer is active.
+        let ents = populate(&mut p, &mut world, home, 1);
+        assert!(world.contains(ents[0]));
+
+        // Camera stays on `home`, but unloading the layer evicts it.
+        p.data_layers_mut().unload(layer);
+        let camera = WorldPos::new(50.0, 50.0, 50.0);
+        let result = p.advance(&mut world, camera, &[]);
+        assert!(result.unloaded_cells.contains(&home));
+        assert!(!world.contains(ents[0]));
+    }
+
+    #[test]
+    fn empty_data_layers_impose_no_gate() {
+        // With no layers assigned, advance is identical to plain proximity
+        // streaming: a radius-1 ball around the camera cell = 27 cells.
+        let mut world = World::new();
+        let mut p = WorldPartition::new(100.0, 1, 2);
+        let result = p.advance(&mut world, WorldPos::new(50.0, 50.0, 50.0), &[]);
+        assert_eq!(result.to_load.len(), 27);
     }
 }

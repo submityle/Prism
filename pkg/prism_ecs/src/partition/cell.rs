@@ -231,14 +231,42 @@ impl CellStreamer {
     /// Both result vectors are sorted by `(x, y, z)`. With no interests the
     /// desired set is empty, so every tracked cell is scheduled for unload.
     pub fn update(&mut self, interests: &[CellCoord]) -> StreamingDelta {
+        // Unfiltered streaming: every cell is eligible.
+        self.update_filtered(interests, |_| true)
+    }
+
+    /// Like [`update`](Self::update) but gated by a per-cell `eligible`
+    /// predicate (design §13.1 data layers).
+    ///
+    /// The predicate decides, independent of distance, whether a cell is
+    /// allowed to be resident at all — this is how World Partition **data
+    /// layers** ([`DataLayers`](crate::partition::data_layer::DataLayers)) gate
+    /// the spatial schedule. It affects both passes:
+    ///
+    /// * a desired cell (inside some interest's `load_radius` ball) is only
+    ///   requested if `eligible(cell)` is true, so blocked cells never enter
+    ///   `to_load` and never thrash;
+    /// * a tracked cell is kept only if it is both within some interest's
+    ///   `unload_radius` ball **and** still eligible, so a cell whose layer was
+    ///   just unloaded is evicted on the next tick even while the camera sits
+    ///   right on top of it.
+    ///
+    /// [`update`](Self::update) is exactly this with an always-true predicate,
+    /// so the hysteresis and revive semantics are identical. Both result
+    /// vectors are sorted by `(x, y, z)`.
+    pub fn update_filtered<F>(&mut self, interests: &[CellCoord], eligible: F) -> StreamingDelta
+    where
+        F: Fn(CellCoord) -> bool,
+    {
         let load_r = self.load_radius as i32;
         let unload_r = self.unload_radius as i32;
 
         let mut to_load = Vec::new();
         let mut to_unload = Vec::new();
 
-        // 1. Desired set = union of load balls. A HashMap keyed by coord acts
-        //    as a dedup'd set (several interests overlap in dense scenes).
+        // 1. Desired set = union of load balls, restricted to eligible cells.
+        //    A HashMap keyed by coord acts as a dedup'd set (several interests
+        //    overlap in dense scenes).
         let mut desired: HashMap<CellCoord, ()> = HashMap::new();
         for interest in interests {
             for dz in -load_r..=load_r {
@@ -246,7 +274,9 @@ impl CellStreamer {
                     for dx in -load_r..=load_r {
                         let coord =
                             CellCoord::new(interest.x + dx, interest.y + dy, interest.z + dz);
-                        desired.insert(coord, ());
+                        if eligible(coord) {
+                            desired.insert(coord, ());
+                        }
                     }
                 }
             }
@@ -264,14 +294,16 @@ impl CellStreamer {
             }
         }
 
-        // 3. Unload pass: any tracked cell outside the unload ball of *every*
-        //    interest is evicted. Collect first to avoid mutating while reading.
+        // 3. Unload pass: a tracked cell survives only if it is still eligible
+        //    *and* within the unload ball of some interest; otherwise it is
+        //    evicted. Collect first to avoid mutating while reading.
         let mut evicting = Vec::new();
         for (&coord, &state) in self.cells.iter() {
             if state == CellState::Unloading {
                 continue; // already in flight; don't re-emit.
             }
-            let kept = interests.iter().any(|i| i.ring_distance(coord) <= unload_r);
+            let kept = eligible(coord)
+                && interests.iter().any(|i| i.ring_distance(coord) <= unload_r);
             if !kept {
                 evicting.push(coord);
             }
@@ -600,5 +632,46 @@ mod tests {
         let mut a = CellStreamer::new(2, 3);
         let mut b = CellStreamer::new(2, 3);
         assert_eq!(a.update(&interests), b.update(&interests));
+    }
+
+    #[test]
+    fn update_filtered_blocks_ineligible_cells() {
+        // Only cells with x >= 0 are eligible. A radius-1 ball around the
+        // origin spans x in [-1, 1]; the x == -1 plane must be withheld.
+        let mut s = CellStreamer::new(1, 2);
+        let delta = s.update_filtered(&[CellCoord::ORIGIN], |c| c.x >= 0);
+        assert!(delta.to_load.iter().all(|c| c.x >= 0));
+        assert!(!delta.to_load.iter().any(|c| c.x < 0));
+        // The blocked plane is never tracked (not Loading).
+        assert_eq!(s.state(CellCoord::new(-1, 0, 0)), CellState::Unloaded);
+        // 2 eligible x-planes (0, 1) * 3 * 3 = 18 cells.
+        assert_eq!(delta.to_load.len(), 18);
+    }
+
+    #[test]
+    fn update_filtered_evicts_cell_that_became_ineligible() {
+        let mut s = CellStreamer::new(1, 2);
+        let c = CellCoord::ORIGIN;
+        // First load everything with no gate and settle resident.
+        let first = s.update_filtered(&[c], |_| true);
+        for cell in &first.to_load {
+            s.mark_loaded(*cell);
+        }
+        assert!(s.is_loaded(c));
+
+        // Camera stays put, but the origin cell is now ineligible: it must be
+        // evicted even though it is well inside the unload ball.
+        let delta = s.update_filtered(&[c], |cell| cell != c);
+        assert!(delta.to_unload.contains(&c));
+        assert_eq!(s.state(c), CellState::Unloading);
+    }
+
+    #[test]
+    fn update_matches_update_filtered_true() {
+        // The convenience `update` must equal `update_filtered(|_| true)`.
+        let interests = [CellCoord::new(0, 0, 0), CellCoord::new(2, -1, 3)];
+        let mut a = CellStreamer::new(1, 2);
+        let mut b = CellStreamer::new(1, 2);
+        assert_eq!(a.update(&interests), b.update_filtered(&interests, |_| true));
     }
 }

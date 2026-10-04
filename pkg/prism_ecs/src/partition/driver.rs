@@ -174,7 +174,32 @@ impl StreamDriver {
     /// `to_unload` is drained from the index, its entities despawned from
     /// `world` in deterministic order, and the cell settled to `Unloaded`.
     pub fn stream(&mut self, world: &mut World, interests: &[CellCoord]) -> StreamResult {
-        let StreamingDelta { to_load, to_unload } = self.streamer.update(interests);
+        self.stream_filtered(world, interests, |_| true)
+    }
+
+    /// Like [`stream`](Self::stream) but gated by a per-cell `eligible`
+    /// predicate (design §13.1 data layers).
+    ///
+    /// Drives the streamer with
+    /// [`CellStreamer::update_filtered`](crate::partition::cell::CellStreamer::update_filtered),
+    /// so cells the predicate rejects are never requested and any resident cell
+    /// that just became ineligible (e.g. its
+    /// [`DataLayer`](crate::partition::data_layer::DataLayers) was unloaded) is
+    /// evicted this tick — its entities despawned from `world` — exactly like a
+    /// cell that drifted out of range. The load/evict closure and determinism
+    /// are identical to [`stream`](Self::stream); only the desired/kept set is
+    /// filtered.
+    pub fn stream_filtered<F>(
+        &mut self,
+        world: &mut World,
+        interests: &[CellCoord],
+        eligible: F,
+    ) -> StreamResult
+    where
+        F: Fn(CellCoord) -> bool,
+    {
+        let StreamingDelta { to_load, to_unload } =
+            self.streamer.update_filtered(interests, eligible);
 
         // Drain every evicted cell's entities in one deterministic pass
         // (grouped by cell order, by handle within a cell — design §14), then
@@ -415,5 +440,42 @@ mod tests {
         }
         assert_eq!(driver.streamer().state(c), CellState::Unloaded);
         assert!(driver.index().is_empty());
+    }
+
+    #[test]
+    fn stream_filtered_despawns_cell_that_became_ineligible() {
+        let mut driver = StreamDriver::new(1, 1);
+        let mut world = World::new();
+
+        // Populate a resident cell with entities (settled Loaded).
+        let home = cell(0, 0, 0);
+        let ents = populate(&mut driver, &mut world, home, 3);
+        for &e in &ents {
+            assert!(world.contains(e));
+        }
+
+        // Stream with the camera still on `home`, but gate it out: the cell is
+        // ineligible, so it must be evicted and its entities despawned even
+        // though it is inside the unload ball.
+        let result = driver.stream_filtered(&mut world, &[home], |c| c != home);
+        assert!(result.unloaded_cells.contains(&home));
+        let mut expected = ents.clone();
+        expected.sort();
+        assert_eq!(result.despawned, expected);
+        for &e in &ents {
+            assert!(!world.contains(e));
+        }
+        // The gated-out home cell is never re-requested (its neighbours still are).
+        assert!(!result.to_load.contains(&home));
+    }
+
+    #[test]
+    fn stream_filtered_withholds_blocked_loads() {
+        let mut driver = StreamDriver::new(1, 2);
+        let mut world = World::new();
+        // Only the z == 0 plane is eligible.
+        let result = driver.stream_filtered(&mut world, &[cell(0, 0, 0)], |c| c.z == 0);
+        assert!(result.to_load.iter().all(|c| c.z == 0));
+        assert_eq!(result.to_load.len(), 9); // 3x3x1
     }
 }

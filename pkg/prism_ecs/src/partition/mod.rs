@@ -5,6 +5,7 @@
 //! [`floating_origin`]; cell streaming and LOD/dormancy follow.
 
 pub mod cell;
+pub mod data_layer;
 pub mod driver;
 pub mod dormant;
 pub mod floating_origin;

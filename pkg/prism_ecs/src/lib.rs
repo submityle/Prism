@@ -93,6 +93,8 @@ pub mod prelude {
         CellCoord, CellState, CellStreamer, StreamingDelta, WorldPartitionCell,
     };
     #[cfg(feature = "partition")]
+    pub use crate::partition::data_layer::{DataLayerId, DataLayerState, DataLayers};
+    #[cfg(feature = "partition")]
     pub use crate::partition::driver::{StreamDriver, StreamResult};
     #[cfg(feature = "partition")]
     pub use crate::partition::dormant::{DormancySet, Dormant};
