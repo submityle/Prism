@@ -67,6 +67,7 @@ pub mod analytic_single_scatter;
 pub mod analytic_transmittance;
 pub mod anamorphic_streak;
 pub mod anisotropic_clearcoat;
+pub mod anisotropic_conductor_bsdf;
 pub mod anisotropic_footprint;
 pub mod anvil_profile;
 pub mod ao_sample;
@@ -149,6 +150,7 @@ pub mod density_delta;
 pub mod depth_downsample;
 pub mod depth_linearize;
 pub mod depth_of_field;
+pub mod dielectric_energy_compensation;
 pub mod display_tonemap_target;
 pub mod distance_field_shadow;
 pub mod draine_phase_blend;
@@ -167,6 +169,7 @@ pub mod exposure_log2;
 pub mod fibonacci_lfsr;
 pub mod film_grain;
 pub mod film_grain_luma;
+pub mod firefly_luminance_clamp;
 pub mod fixed_point_q16;
 pub mod fixed_point_q16_muldiv;
 pub mod fixed_point_q24_8;
@@ -181,6 +184,7 @@ pub mod fluid_pressure_jacobi;
 pub mod fluid_vorticity;
 pub mod fog;
 pub mod forces;
+pub mod fresnel_blend_bsdf;
 pub mod fresnel_dielectric;
 pub mod fresnel_rim;
 pub mod froxel_injection;
@@ -275,6 +279,7 @@ pub mod mesh_tangents;
 pub mod mesh_triangle_eval;
 pub mod mesh_triangle_quality;
 pub mod mesh_volume_contribution;
+pub mod metal_fresnel_preset;
 pub mod mg_coarsen;
 pub mod mg_divergence_gradient;
 pub mod mg_is_coarsest;
@@ -283,6 +288,7 @@ pub mod mg_level_residual;
 pub mod mg_prolong;
 pub mod mg_remove_mean;
 pub mod mg_restrict;
+pub mod microfacet_anisotropic;
 pub mod microfacet_ggx;
 pub mod midpoint_circle;
 pub mod minkowski_sum_2d;
@@ -309,6 +315,7 @@ pub mod normal_reconstruct;
 pub mod nurbs_surface;
 pub mod obb_obb_sat_3d;
 pub mod occlusion;
+pub mod octahedral_map;
 pub mod octave;
 pub mod oit;
 pub mod oklab_color;
@@ -326,6 +333,7 @@ pub mod perlin_worley;
 pub mod phase;
 pub mod philox_counter;
 pub mod pipeline_layout;
+pub mod pixel_reconstruction_filter;
 pub mod plane_aabb_classify;
 pub mod plane_clip;
 pub mod plane_line_intersect;
@@ -384,6 +392,7 @@ pub mod rgbe_encode;
 pub mod ribbon_geometry;
 pub mod ribbon_trail;
 pub mod ritter_bounding_sphere;
+pub mod rough_dielectric_bsdf;
 pub mod sat_collision_2d;
 pub mod scanline_polygon_fill;
 pub mod screen_space_reflection;
@@ -576,6 +585,9 @@ pub use anamorphic_streak::{AnamorphicStreakQuery, AnamorphicStreakResult, GpuAn
 pub use anisotropic_clearcoat::{
     AnisotropicClearcoatQuery, AnisotropicClearcoatResult, GpuAnisotropicClearcoat,
 };
+pub use anisotropic_conductor_bsdf::{
+    AnisoConductorQuery, AnisoConductorResult, GpuAnisoConductor,
+};
 pub use anisotropic_footprint::{FootprintQuery, FootprintResult, GpuAnisotropicFootprint};
 pub use anvil_profile::{AnvilProfileQuery, GpuAnvilProfile};
 pub use ao_sample::GpuAoSample;
@@ -692,6 +704,9 @@ pub use density_delta::{CarveBrush, DensityDeltaQuery, GpuDensityDelta};
 pub use depth_downsample::{DepthDownsampleQuery, GpuDepthDownsample};
 pub use depth_linearize::{DepthLinearizeQuery, DepthLinearizeResult, GpuDepthLinearize};
 pub use depth_of_field::{DepthOfFieldQuery, DepthOfFieldSample, GpuDepthOfField};
+pub use dielectric_energy_compensation::{
+    DielectricEnergyQuery, DielectricEnergyResult, GpuDielectricEnergy,
+};
 pub use display_tonemap_target::{
     DisplayTonemapTargetQuery, DisplayTonemapTargetResult, GpuDisplayTonemapTarget,
 };
@@ -716,6 +731,7 @@ pub use exposure_log2::{ExposureLog2Query, ExposureLog2Result, GpuExposureLog2};
 pub use fibonacci_lfsr::GpuFibonacciLfsr;
 pub use film_grain::{FilmGrainPixel, FilmGrainQuery, GpuFilmGrain};
 pub use film_grain_luma::{FilmGrainLumaQuery, FilmGrainLumaResult, GpuFilmGrainLuma};
+pub use firefly_luminance_clamp::{FireflyClampQuery, FireflyClampResult, GpuFireflyClamp};
 pub use fixed_point_q16::{GpuFixedPointQ16, GpuQ16Op, GpuQ16Query};
 pub use fixed_point_q16_muldiv::{GpuQ16MulDiv, GpuQ16MulDivQuery, GpuQ16MulOp};
 pub use fixed_point_q24_8::{GpuFixedPointQ24_8, GpuQ24Op, GpuQ24Query};
@@ -738,6 +754,7 @@ pub use forces::{
     FORCE_LINE_ATTRACTOR, FORCE_ORBITAL, FORCE_POINT_ATTRACTOR, FORCE_QUADRATIC_DRAG, FORCE_RADIAL,
     FORCE_SPRING_DAMPER, FORCE_TURBULENCE,
 };
+pub use fresnel_blend_bsdf::{FresnelBlendQuery, FresnelBlendResult, GpuFresnelBlend};
 pub use fresnel_dielectric::{
     FresnelDielectricQuery, FresnelDielectricResult, GpuFresnelDielectric,
 };
@@ -905,6 +922,7 @@ pub use mesh_triangle_quality::{
 pub use mesh_volume_contribution::{
     GpuMeshVolumeContribution, MeshVolumeContributionQuery, MeshVolumeContributionResult,
 };
+pub use metal_fresnel_preset::{GpuMetalFresnel, MetalFresnelQuery, MetalFresnelResult};
 pub use mg_coarsen::{GpuMgCoarsen, GpuMgCoarsenQuery, GpuMgCoarsenResult};
 pub use mg_divergence_gradient::{GpuDivergenceQuery, GpuMgDivergenceGradient, GpuProjectionQuery};
 pub use mg_is_coarsest::{GpuMgIsCoarsest, GpuMgIsCoarsestQuery, GpuMgIsCoarsestResult};
@@ -918,6 +936,7 @@ pub use mg_level_residual::{
 pub use mg_prolong::{GpuMgProlong, GpuMgProlongQuery, GpuMgProlongResult};
 pub use mg_remove_mean::{GpuMgRemoveMean, GpuMgRemoveMeanQuery, GpuMgRemoveMeanResult};
 pub use mg_restrict::{GpuMgRestrict, GpuMgRestrictQuery, GpuMgRestrictResult};
+pub use microfacet_anisotropic::{GgxAnisotropicQuery, GgxAnisotropicResult, GpuGgxAnisotropic};
 pub use microfacet_ggx::{GpuMicrofacetGgx, MicrofacetSample};
 pub use midpoint_circle::{GpuMidpointCircle, GpuMidpointCircleQuery, GpuMidpointCircleResult};
 pub use minkowski_sum_2d::{GpuMinkowskiSum2d, MinkowskiSum2dQuery, MinkowskiSum2dResult};
@@ -961,6 +980,7 @@ pub use normal_reconstruct::{GpuNormalReconstruct, NormalQuery, NormalResult};
 pub use nurbs_surface::{GpuNurbsSurface, NurbsSurfaceQuery, NurbsSurfaceResult};
 pub use obb_obb_sat_3d::{GpuObbSat3d, ObbSat3dQuery, ObbSat3dResult};
 pub use occlusion::{GpuOcclusion, GpuOcclusionQuery, GpuOcclusionResult};
+pub use octahedral_map::{GpuOctahedralMap, OctahedralMapQuery, OctahedralMapResult};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
 pub use oit::{GpuOit, OitQuery, OitResult};
 pub use oklab_color::{GpuOklabColor, OklabColorQuery, OklabColorResult, CHROMA_FLOOR};
@@ -980,6 +1000,7 @@ pub use perlin_worley::{GpuPerlinWorley, PerlinWorleyQuery};
 pub use phase::{GpuPhaseEvaluator, PhaseQuery};
 pub use philox_counter::{GpuPhiloxCounter, PhiloxCounterQuery, PhiloxCounterResult};
 pub use pipeline_layout::{GpuPipelineLayout, GpuPipelineLayoutQuery, GpuPipelineLayoutResult};
+pub use pixel_reconstruction_filter::{GpuPixelFilter, PixelFilterQuery, PixelFilterResult};
 pub use plane_aabb_classify::{GpuPlaneAabbClassify, PlaneAabbClassifyQuery};
 pub use plane_clip::{
     GpuPlaneClip, PlaneClipQuery, PlaneClipResult, SIDE_INSIDE, SIDE_ON, SIDE_OUTSIDE,
@@ -1065,6 +1086,7 @@ pub use rgbe_encode::{GpuRgbeEncode, RgbePrimQuery, RgbePrimResult};
 pub use ribbon_geometry::{GpuRibbonGeometry, RibbonStripQuery};
 pub use ribbon_trail::{GpuRibbonTrail, GpuRibbonTrailQuery, GpuRibbonTrailResult};
 pub use ritter_bounding_sphere::{GpuRitterBoundingSphere, GpuRitterSphere, RitterQuery};
+pub use rough_dielectric_bsdf::{GpuRoughDielectric, RoughDielectricQuery, RoughDielectricResult};
 pub use sat_collision_2d::{GpuSatCollision2d, SatCollision2dQuery, SatCollision2dResult};
 pub use scanline_polygon_fill::{GpuScanlineFill, GpuScanlinePolygonFill, GpuSpan};
 pub use screen_space_reflection::{
