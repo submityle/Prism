@@ -216,7 +216,7 @@ impl EntityLodProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::partition::lod::{LodLevel, OutOfRange};
+    use crate::partition::lod::{LodLevel, LodQuality, OutOfRange};
 
     fn ent(index: u32, generation: u32) -> Entity {
         Entity::from_bits(((generation as u64) << 32) | index as u64)
@@ -321,6 +321,39 @@ mod tests {
         // decisions preserve input order.
         let order: Vec<Entity> = r.decisions.iter().map(|&(e, _)| e).collect();
         assert_eq!(order, alloc::vec![a, b, c]);
+    }
+
+    #[test]
+    fn decisions_carry_the_band_precision_tier() {
+        // A schedule whose bands carry distinct precision tiers; the processor
+        // must surface each entity's tier in its decision so the owner can pick
+        // a full vs. approximate simulation path (design §23.7).
+        let sched = LodSchedule::from_sorted_triples(&[
+            (100.0, 1, LodQuality(0)),    // near: full precision
+            (2_500.0, 4, LodQuality(2)),  // mid: coarser
+            (40_000.0, 16, LodQuality(4)),
+        ])
+        .with_policy(OutOfRange::Dormant);
+        let proc = EntityLodProcessor::new(sched);
+        let mut dormancy = DormancySet::new();
+
+        let near = ent(1, 1);
+        let mid = ent(2, 1);
+        let pop = [
+            (near, [5.0, 0.0, 0.0]),  // d² 25  → band 0, tier 0
+            (mid, [40.0, 0.0, 0.0]),  // d² 1600 → band 1, tier 2
+        ];
+        let r = proc.drive([0.0; 3], &pop, 0, &mut dormancy);
+
+        // decisions keep input order; check each entity's reported tier.
+        let near_q = r.decisions.iter().find(|&&(e, _)| e == near).unwrap().1.quality;
+        let mid_q = r.decisions.iter().find(|&&(e, _)| e == mid).unwrap().1.quality;
+        assert_eq!(near_q, LodQuality(0));
+        assert_eq!(mid_q, LodQuality(2));
+
+        // The pure evaluate() path agrees.
+        assert_eq!(proc.evaluate([0.0; 3], [5.0, 0.0, 0.0], near, 0).quality, LodQuality(0));
+        assert_eq!(proc.evaluate([0.0; 3], [40.0, 0.0, 0.0], mid, 0).quality, LodQuality(2));
     }
 
     #[test]

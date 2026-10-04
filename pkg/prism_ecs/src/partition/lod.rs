@@ -68,6 +68,35 @@ impl LodLevel {
 
 impl crate::component::Component for LodLevel {}
 
+/// A per-band *simulation precision / quality tier* for an entity
+/// (design §23.7 分档精度).
+///
+/// §23.7 bands scale updates along **two independent axes**: *frequency*
+/// (how often an entity ticks, carried by [`LodBand::tick_period`]) and
+/// *precision* (how much work each tick does — e.g. full IK + perception vs. a
+/// cheap positional approximation). This type is that second axis, kept
+/// deliberately separate from both the cadence and the band index so content
+/// can decouple them: two distance bands may share one quality tier, or a
+/// full-rate band may still run reduced-precision work (e.g. near-but-occluded
+/// agents).
+///
+/// `0` is the highest precision / most expensive tier (the near default); each
+/// increment is a coarser, cheaper tier. Ordering follows the numeric value, so
+/// `LodQuality(0) < LodQuality(1)` means "more precise than". The type is small
+/// and `Copy` so it can double as a per-entity
+/// [`Component`](crate::component::Component) tag the owner writes back from a
+/// [`LodDecision`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub struct LodQuality(pub u8);
+
+impl LodQuality {
+    /// The highest-precision / most expensive tier (`LodQuality(0)`), the
+    /// default for the nearest entities.
+    pub const HIGHEST: Self = Self(0);
+}
+
+impl crate::component::Component for LodQuality {}
+
 /// One distance band in a [`LodSchedule`] (design §13.2).
 ///
 /// A band is active for entities whose *squared* distance to the viewer is at
@@ -84,16 +113,44 @@ pub struct LodBand {
     /// Update cadence: entities in this band tick once every `tick_period`
     /// frames. `1` means every frame; must be `>= 1`.
     pub tick_period: u32,
+    /// Simulation precision tier for entities in this band (design §23.7). The
+    /// cadence axis above says *how often* they tick; this says *how much work*
+    /// each tick does. Independent of the band index, so precision can be tuned
+    /// separately from distance and frequency.
+    pub quality: LodQuality,
 }
 
 impl LodBand {
     /// Creates a band from its inclusive squared-distance bound and tick
-    /// period.
+    /// period, at the highest precision tier ([`LodQuality::HIGHEST`]).
+    ///
+    /// Use [`with_quality`](Self::with_quality) (or [`quality`](Self::quality))
+    /// to assign a coarser precision tier to farther bands.
     pub const fn new(max_distance_sq: f32, tick_period: u32) -> Self {
         Self {
             max_distance_sq,
             tick_period,
+            quality: LodQuality::HIGHEST,
         }
+    }
+
+    /// Creates a band with an explicit precision tier (design §23.7).
+    pub const fn with_quality(
+        max_distance_sq: f32,
+        tick_period: u32,
+        quality: LodQuality,
+    ) -> Self {
+        Self {
+            max_distance_sq,
+            tick_period,
+            quality,
+        }
+    }
+
+    /// Returns this band with its precision tier replaced (chainable builder).
+    pub const fn quality(mut self, quality: LodQuality) -> Self {
+        self.quality = quality;
+        self
     }
 }
 
@@ -120,6 +177,11 @@ pub struct LodDecision {
     /// Whether the entity should run its simulation update on this frame. Always
     /// `false` when `level` is `None`.
     pub tick_this_frame: bool,
+    /// The precision tier of the selected band (design §23.7). The owner reads
+    /// this to pick which simulation path to run for a ticking entity (e.g.
+    /// full vs. approximate). Defaults to [`LodQuality::HIGHEST`] when the
+    /// entity is dormant (`level` is `None`).
+    pub quality: LodQuality,
 }
 
 /// An ordered set of distance bands plus an out-of-range policy that maps an
@@ -184,6 +246,19 @@ impl LodSchedule {
         Self::new(bands)
     }
 
+    /// Convenience constructor from `(max_distance_sq, tick_period, quality)`
+    /// triples, nearest first, assigning each band an explicit precision tier
+    /// (design §23.7). Same contract as [`new`](Self::new).
+    pub fn from_sorted_triples(triples: &[(f32, u32, LodQuality)]) -> Self {
+        let bands = triples
+            .iter()
+            .map(|&(max_distance_sq, tick_period, quality)| {
+                LodBand::with_quality(max_distance_sq, tick_period, quality)
+            })
+            .collect();
+        Self::new(bands)
+    }
+
     /// Returns a copy of this schedule with its out-of-range policy replaced.
     pub fn with_policy(mut self, beyond_last: OutOfRange) -> Self {
         self.beyond_last = beyond_last;
@@ -241,6 +316,14 @@ impl LodSchedule {
         self.bands[idx].tick_period
     }
 
+    /// The precision tier of a band, clamped to the last band if `level` is out
+    /// of range (design §23.7). Pairs with [`tick_period`](Self::tick_period):
+    /// one gives the cadence, the other the per-tick precision.
+    pub fn quality(&self, level: LodLevel) -> LodQuality {
+        let idx = (level.0 as usize).min(self.bands.len() - 1);
+        self.bands[idx].quality
+    }
+
     /// Whether a band's entities should tick on `frame`.
     ///
     /// True exactly when `frame` is a multiple of the band's `tick_period`, so
@@ -280,10 +363,12 @@ impl LodSchedule {
             Some(level) => LodDecision {
                 level: Some(level),
                 tick_this_frame: self.should_tick_phased(level, frame, phase),
+                quality: self.quality(level),
             },
             None => LodDecision {
                 level: None,
                 tick_this_frame: false,
+                quality: LodQuality::HIGHEST,
             },
         }
     }
@@ -466,6 +551,84 @@ mod tests {
         assert_eq!(s.band_count(), 3);
         assert_eq!(s.bands().len(), 3);
         assert_eq!(s.bands()[0], LodBand::new(100.0, 1));
+    }
+
+    #[test]
+    fn quality_tier_defaults_to_highest_and_is_ordered() {
+        // Bands built via the frequency-only path default to full precision.
+        let s = sched();
+        assert_eq!(s.quality(LodLevel(0)), LodQuality::HIGHEST);
+        assert_eq!(s.quality(LodLevel(2)), LodQuality::HIGHEST);
+        assert_eq!(LodQuality::default(), LodQuality(0));
+        assert!(LodQuality(0) < LodQuality(1));
+    }
+
+    #[test]
+    fn quality_is_independent_of_cadence_and_band_index() {
+        // Decouple precision from both distance and frequency: a full-rate near
+        // band may still request reduced precision, and two bands can share a
+        // tier regardless of their index.
+        let s = LodSchedule::from_sorted_triples(&[
+            (100.0, 1, LodQuality(1)),   // near, every frame, but coarse precision
+            (2_500.0, 4, LodQuality(1)), // shares tier 1 with the nearer band
+            (40_000.0, 16, LodQuality(3)),
+        ]);
+        assert_eq!(s.quality(LodLevel(0)), LodQuality(1));
+        assert_eq!(s.quality(LodLevel(1)), LodQuality(1));
+        assert_eq!(s.quality(LodLevel(2)), LodQuality(3));
+        // Cadence axis is still independent.
+        assert_eq!(s.tick_period(LodLevel(0)), 1);
+        assert_eq!(s.tick_period(LodLevel(2)), 16);
+    }
+
+    #[test]
+    fn quality_clamps_past_last_band() {
+        let s = LodSchedule::from_sorted_triples(&[
+            (100.0, 1, LodQuality(0)),
+            (2_500.0, 4, LodQuality(2)),
+        ]);
+        // Out-of-range level clamps to the last band's tier.
+        assert_eq!(s.quality(LodLevel(9)), LodQuality(2));
+    }
+
+    #[test]
+    fn evaluate_reports_selected_band_quality() {
+        let s = LodSchedule::from_sorted_triples(&[
+            (100.0, 1, LodQuality(0)),
+            (2_500.0, 4, LodQuality(2)),
+            (40_000.0, 16, LodQuality(4)),
+        ]);
+        // Mid band (d² 900 → level 1), frame 8 ticks (8 % 4 == 0).
+        let d = s.evaluate(900.0, 8);
+        assert_eq!(d.level, Some(LodLevel(1)));
+        assert!(d.tick_this_frame);
+        assert_eq!(d.quality, LodQuality(2));
+
+        // A ticking far entity still reports the coarse tier.
+        let far = s.evaluate(39_000.0, 16);
+        assert_eq!(far.level, Some(LodLevel(2)));
+        assert_eq!(far.quality, LodQuality(4));
+    }
+
+    #[test]
+    fn dormant_decision_reports_highest_quality_default() {
+        let s = LodSchedule::with_out_of_range(
+            alloc::vec![LodBand::with_quality(100.0, 1, LodQuality(3))],
+            OutOfRange::Dormant,
+        );
+        let d = s.evaluate(1_000.0, 0); // beyond last band, dormant
+        assert_eq!(d.level, None);
+        assert!(!d.tick_this_frame);
+        assert_eq!(d.quality, LodQuality::HIGHEST);
+    }
+
+    #[test]
+    fn with_quality_builder_matches_field() {
+        let b = LodBand::new(100.0, 2).quality(LodQuality(5));
+        assert_eq!(b.quality, LodQuality(5));
+        assert_eq!(b.tick_period, 2);
+        assert_eq!(b.max_distance_sq, 100.0);
+        assert_eq!(LodBand::with_quality(100.0, 2, LodQuality(5)), b);
     }
 
     #[test]

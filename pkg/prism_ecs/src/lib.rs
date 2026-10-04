@@ -114,7 +114,7 @@ pub mod prelude {
     pub use crate::partition::interest::InterestGrid;
     #[cfg(feature = "partition")]
     pub use crate::partition::lod::{
-        distance_sq, LodBand, LodDecision, LodLevel, LodSchedule, OutOfRange,
+        distance_sq, LodBand, LodDecision, LodLevel, LodQuality, LodSchedule, OutOfRange,
     };
     #[cfg(feature = "partition")]
     pub use crate::partition::processor::{EntityLodProcessor, LodTickResult, PhasePolicy};
