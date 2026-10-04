@@ -290,3 +290,51 @@ fn prism_dq_skin4(\n\
     let t4 = 2.0 * prism_quat_mul(dual, prism_quat_conj(real));\n\
     return prism_quat_rotate(real, p) + t4.xyz;\n\
 }\n";
+/// The authoritative WGSL source for order-3 (16-coefficient) real spherical
+/// harmonics **evaluation**, mirroring [`crate::spherical::basis3`] and
+/// [`crate::spherical::Sh3::eval`] **term for term**: the same Condon–Shortley
+/// folded constants, the same direction-cosine polynomials, and the same
+/// sequential 16-term accumulation. This is the GPU side of GI probe
+/// reconstruction — a fragment or compute shader samples a probe's `SH` vector
+/// and evaluates it per shading direction.
+///
+/// `dir` must be unit length (the polynomials assume `x^2 + y^2 + z^2 = 1`). A
+/// consumer embeds this verbatim so the GPU probe evaluation cannot drift from
+/// the CPU bake/reference.
+pub const WGSL_SH3_EVAL: &str = "\
+fn prism_sh3_basis(dir: vec3<f32>) -> array<f32, 16> {\n\
+    let x = dir.x;\n\
+    let y = dir.y;\n\
+    let z = dir.z;\n\
+    let x2 = x * x;\n\
+    let y2 = y * y;\n\
+    let z2 = z * z;\n\
+    return array<f32, 16>(\n\
+        0.28209479,\n\
+        0.48860251 * y,\n\
+        0.48860251 * z,\n\
+        0.48860251 * x,\n\
+        1.0925484 * x * y,\n\
+        1.0925484 * y * z,\n\
+        0.31539157 * (3.0 * z2 - 1.0),\n\
+        1.0925484 * x * z,\n\
+        0.5462742 * (x2 - y2),\n\
+        0.5900436 * y * (3.0 * x2 - y2),\n\
+        2.8906114 * x * y * z,\n\
+        0.4570458 * y * (5.0 * z2 - 1.0),\n\
+        0.3731763 * z * (5.0 * z2 - 3.0),\n\
+        0.4570458 * x * (5.0 * z2 - 1.0),\n\
+        0.5 * 2.8906114 * z * (x2 - y2),\n\
+        0.5900436 * x * (x2 - 3.0 * y2)\n\
+    );\n\
+}\n\
+\n\
+fn prism_sh3_eval(coeffs: array<f32, 16>, dir: vec3<f32>) -> f32 {\n\
+    var c = coeffs;\n\
+    var basis = prism_sh3_basis(dir);\n\
+    var acc = 0.0;\n\
+    for (var i = 0u; i < 16u; i = i + 1u) {\n\
+        acc = acc + c[i] * basis[i];\n\
+    }\n\
+    return acc;\n\
+}\n";
