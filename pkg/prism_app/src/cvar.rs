@@ -483,12 +483,15 @@ pub struct CvarSetOutcome {
 ///
 /// A console line is one of: a **query** (a bare cvar name, which reports the
 /// current resolved value); a **write** (`name value`, which sets the cvar at
-/// the [`Runtime`](crate::settings::SettingsLayer::Runtime) layer); or the
+/// the [`Runtime`](crate::settings::SettingsLayer::Runtime) layer); the
 /// reserved **`reset`** command (`reset <name>` to revert one cvar's runtime
-/// override, or a bare `reset` to revert them all). This enum captures every
-/// outcome so a console front end can echo an accurate response without
-/// panicking, mirroring the reject-at-the-boundary contract of [`CvarError`]
-/// (design §25.3).
+/// override, or a bare `reset` to revert them all); or the reserved
+/// **`toggle`** command (`toggle <name>` to flip a boolean, or
+/// `toggle <name> <v1> <v2>…` to cycle an explicit value list), which reports
+/// its result through the same [`Set`](ConsoleOutcome::Set) variant as a
+/// write. This enum captures every outcome so a console front end can echo an
+/// accurate response without panicking, mirroring the reject-at-the-boundary
+/// contract of [`CvarError`] (design §25.3).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConsoleOutcome {
     /// The line was empty or a `//` comment, so nothing happened.
@@ -1027,6 +1030,95 @@ impl App {
         self.set_cvar_at(SettingsLayer::Runtime, name, value)
     }
 
+    /// Cycle the cvar `name` to its next value — the Quake/Source console
+    /// `toggle` command (design §24.6) — writing the result at the
+    /// [`Runtime`](crate::settings::SettingsLayer::Runtime) layer.
+    ///
+    /// With an empty `values` list this flips a **boolean** cvar: `true`
+    /// becomes `false` and vice versa. A non-boolean cvar has no canonical
+    /// "other" value without an explicit list, so it is rejected with a
+    /// [`TypeMismatch`](CvarError::TypeMismatch) (`expected: "bool"`) rather
+    /// than guessing an opposite.
+    ///
+    /// With a non-empty `values` list this cycles through the given values in
+    /// order: the cvar advances from its current resolved value to the next
+    /// entry (wrapping past the end), and lands on the first entry when the
+    /// current value matches none of them — the shape of a key-bound
+    /// `toggle r.shadows 0 2 4` quality cycle. Each candidate is parsed with
+    /// [`SettingValue::parse`](crate::settings::SettingValue::parse) and
+    /// validated against the cvar's declared kind and bounds exactly as a
+    /// direct write would be, so comparison and storage both use the
+    /// kind-coerced, clamped form; if any candidate is the wrong type the whole
+    /// command is rejected and nothing is written. When the selected candidate
+    /// is clamped into bounds the returned [`CvarSetOutcome::clamped`] is set,
+    /// just as a direct write reports its own clamp.
+    ///
+    /// Fails with [`Unregistered`](CvarError::Unregistered) for an unknown cvar
+    /// and with [`ReadOnly`](CvarError::ReadOnly) /
+    /// [`CheatProtected`](CvarError::CheatProtected) under the same rules as
+    /// [`set_cvar`](App::set_cvar). Emits the same
+    /// [`SettingChanged`](crate::settings::SettingChanged) / [`CvarChanged`]
+    /// events as a direct write when the resolved value actually changes.
+    pub fn toggle_cvar(
+        &mut self,
+        name: &str,
+        values: &[&str],
+    ) -> Result<CvarSetOutcome, CvarError> {
+        self.init_cvars();
+        if !self.world().resource::<CvarRegistry>().contains(name) {
+            return Err(CvarError::Unregistered(name.to_owned()));
+        }
+        // The cvar's current resolved value (cascade winner, or schema default).
+        let current = self.cvar(name).cloned().unwrap_or_else(|| {
+            self.world()
+                .resource::<CvarRegistry>()
+                .get(name)
+                .map(|cvar| cvar.default.clone())
+                .expect("cvar is registered")
+        });
+
+        // `cycle_clamped` records whether the *selected* cycle candidate had
+        // to be clamped into the declared bounds during canonicalisation. The
+        // final write below sees an already-canonical value and so would not
+        // report the clamp itself, so we fold the flag back into the returned
+        // outcome to keep the clamp honestly visible to the caller.
+        let mut cycle_clamped = false;
+        let next = if values.is_empty() {
+            match current {
+                SettingValue::Bool(flag) => SettingValue::Bool(!flag),
+                other => {
+                    return Err(CvarError::TypeMismatch {
+                        name: name.to_owned(),
+                        expected: "bool",
+                        found: value_kind(&other),
+                    });
+                }
+            }
+        } else {
+            // Canonicalise every candidate through the same validation a direct
+            // write uses, so cycling compares and stores kind-coerced, clamped
+            // values. A wrong-typed candidate rejects the whole command.
+            let registry = self.world().resource::<CvarRegistry>();
+            let mut canonical = Vec::with_capacity(values.len());
+            let mut clamps = Vec::with_capacity(values.len());
+            for candidate in values {
+                let validated = registry.validate_set(name, SettingValue::parse(candidate))?;
+                canonical.push(validated.value);
+                clamps.push(validated.clamped);
+            }
+            let index = canonical
+                .iter()
+                .position(|value| *value == current)
+                .map_or(0, |found| (found + 1) % canonical.len());
+            cycle_clamped = clamps[index];
+            canonical[index].clone()
+        };
+
+        let mut outcome = self.set_cvar(name, next)?;
+        outcome.clamped |= cycle_clamped;
+        Ok(outcome)
+    }
+
     /// Execute one Quake/Source-style console command `line` against the cvar
     /// registry (design §24.6, which quotes the console form `r.shadows 2`).
     ///
@@ -1050,6 +1142,16 @@ impl App {
     ///   [`Rejected`](ConsoleOutcome::Rejected). Out-of-range numeric input is
     ///   *not* an error: it is clamped into bounds and reported through
     ///   [`CvarSetOutcome::clamped`].
+    ///
+    /// Two first words are **reserved console commands** that shadow the
+    /// query/assignment grammar for that leading token (both interactive-only —
+    /// neither is honoured by [`load_user_config`](App::load_user_config)):
+    /// `reset` reverts runtime overrides (`reset <name>`, or a bare `reset` for
+    /// all), and `toggle` flips a boolean cvar or cycles an explicit value list
+    /// (`toggle r.vsync`, `toggle r.shadows 0 2 4`) via
+    /// [`toggle_cvar`](App::toggle_cvar). A reserved word with no operand (a
+    /// bare `toggle`) falls through to the query grammar as an ordinary cvar
+    /// name lookup.
     ///
     /// Like every mutating entry point in this module, a rejected line leaves
     /// all state untouched and never panics (design §25.3). A successful write
@@ -1088,6 +1190,24 @@ impl App {
                     Err(CvarError::Unregistered(name)) => ConsoleOutcome::Unknown(name),
                     Err(error) => ConsoleOutcome::Rejected(error),
                 },
+            };
+        }
+        if first == "toggle"
+            && let Some((_, rest)) = line.split_once(char::is_whitespace)
+            && let Some(target) = rest.split_whitespace().next()
+        {
+            // `toggle` is a reserved *console* command, like `reset`: it flips a
+            // boolean cvar (`toggle r.vsync`) or cycles an explicit value list
+            // (`toggle r.shadows 0 2 4`). The target is the first token after
+            // the keyword; any remaining tokens are the cycle values. A bare
+            // `toggle` with no target falls through to the query grammar below
+            // (reported as an unknown cvar named `toggle`), and the command is
+            // interactive-only — declarative config loads never honour it.
+            let values: Vec<&str> = rest.split_whitespace().skip(1).collect();
+            return match self.toggle_cvar(target, &values) {
+                Ok(outcome) => ConsoleOutcome::Set(outcome),
+                Err(CvarError::Unregistered(name)) => ConsoleOutcome::Unknown(name),
+                Err(error) => ConsoleOutcome::Rejected(error),
             };
         }
         // The query/assignment grammar is shared with config loading; the

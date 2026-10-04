@@ -7165,4 +7165,192 @@ mod cvar_tests {
         app.reset_cvar("r.shadows").unwrap();
         assert!(app.list_modified_cvars().is_empty());
     }
+
+    #[test]
+    fn toggle_cvar_flips_a_boolean() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
+            .unwrap();
+
+        let outcome = app.toggle_cvar("r.vsync", &[]).unwrap();
+        assert!(outcome.changed);
+        assert_eq!(outcome.resolved, SettingValue::Bool(false));
+        assert_eq!(app.cvar_bool("r.vsync"), Some(false));
+
+        // Toggling again flips back.
+        let outcome = app.toggle_cvar("r.vsync", &[]).unwrap();
+        assert_eq!(outcome.resolved, SettingValue::Bool(true));
+        assert_eq!(app.cvar_bool("r.vsync"), Some(true));
+    }
+
+    #[test]
+    fn toggle_cvar_without_values_rejects_non_boolean() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+
+        let err = app.toggle_cvar("r.shadows", &[]).unwrap_err();
+        assert_eq!(
+            err,
+            CvarError::TypeMismatch {
+                name: "r.shadows".to_owned(),
+                expected: "bool",
+                found: "int",
+            }
+        );
+        // Nothing was written.
+        assert!(app.list_modified_cvars().is_empty());
+    }
+
+    #[test]
+    fn toggle_cvar_cycles_an_explicit_value_list() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+
+        // 0 → 2 → 4 → wrap back to 0.
+        assert_eq!(
+            app.toggle_cvar("r.shadows", &["0", "2", "4"]).unwrap().resolved,
+            SettingValue::Int(2)
+        );
+        assert_eq!(
+            app.toggle_cvar("r.shadows", &["0", "2", "4"]).unwrap().resolved,
+            SettingValue::Int(4)
+        );
+        assert_eq!(
+            app.toggle_cvar("r.shadows", &["0", "2", "4"]).unwrap().resolved,
+            SettingValue::Int(0)
+        );
+    }
+
+    #[test]
+    fn toggle_cvar_lands_on_first_when_current_matches_none() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 1_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+        // Current value 1 is not in the cycle list, so toggle lands on the first.
+        assert_eq!(
+            app.toggle_cvar("r.shadows", &["0", "2", "4"]).unwrap().resolved,
+            SettingValue::Int(0)
+        );
+    }
+
+    #[test]
+    fn toggle_cvar_rejects_wrong_typed_candidate_without_writing() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+
+        let err = app
+            .toggle_cvar("r.shadows", &["0", "notanint", "4"])
+            .unwrap_err();
+        assert!(matches!(err, CvarError::TypeMismatch { .. }));
+        // The whole command was rejected: still at the default.
+        assert_eq!(app.cvar_int("r.shadows"), Some(0));
+    }
+
+    #[test]
+    fn toggle_cvar_unknown_cvar_errors() {
+        let mut app = App::new();
+        let err = app.toggle_cvar("r.nope", &[]).unwrap_err();
+        assert_eq!(err, CvarError::Unregistered("r.nope".to_owned()));
+    }
+
+    #[test]
+    fn toggle_cvar_cycle_value_is_clamped_into_bounds() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+        // The out-of-range candidate 9 clamps to 4, and cycling compares the
+        // clamped form, so a second toggle wraps back to 0.
+        let outcome = app.toggle_cvar("r.shadows", &["9"]).unwrap();
+        assert!(outcome.clamped);
+        assert_eq!(outcome.resolved, SettingValue::Int(4));
+        let outcome = app.toggle_cvar("r.shadows", &["9"]).unwrap();
+        assert_eq!(outcome.resolved, SettingValue::Int(4));
+    }
+
+    #[test]
+    fn console_toggle_flips_boolean() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
+            .unwrap();
+
+        match app.exec_console("toggle r.vsync") {
+            ConsoleOutcome::Set(outcome) => {
+                assert_eq!(outcome.resolved, SettingValue::Bool(false));
+            }
+            other => panic!("expected Set, got {other:?}"),
+        }
+        assert_eq!(app.cvar_bool("r.vsync"), Some(false));
+    }
+
+    #[test]
+    fn console_toggle_cycles_value_list() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 0_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+
+        match app.exec_console("toggle r.shadows 0 2 4") {
+            ConsoleOutcome::Set(outcome) => assert_eq!(outcome.resolved, SettingValue::Int(2)),
+            other => panic!("expected Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn console_toggle_unknown_cvar_is_unknown() {
+        let mut app = App::new();
+        assert_eq!(
+            app.exec_console("toggle r.nope"),
+            ConsoleOutcome::Unknown("r.nope".to_owned())
+        );
+    }
+
+    #[test]
+    fn console_bare_toggle_is_an_unknown_cvar_query() {
+        let mut app = App::new();
+        // A bare `toggle` has no operand, so it is treated as a query for a cvar
+        // literally named `toggle`, which is not registered.
+        assert_eq!(
+            app.exec_console("toggle"),
+            ConsoleOutcome::Unknown("toggle".to_owned())
+        );
+    }
+
+    #[test]
+    fn console_toggle_is_not_honoured_by_config_loads() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
+            .unwrap();
+        // In a declarative config, `toggle r.vsync` is an assignment to a cvar
+        // named `toggle`, not the toggle command — so it is Unknown and r.vsync
+        // is untouched.
+        let outcomes = app.load_user_config("toggle r.vsync");
+        assert_eq!(outcomes, vec![ConsoleOutcome::Unknown("toggle".to_owned())]);
+        assert_eq!(app.cvar_bool("r.vsync"), Some(true));
+    }
 }
