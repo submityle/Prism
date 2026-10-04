@@ -574,6 +574,8 @@ pub mod granular_bond_number;
 pub use granular_bond_number::{BondRegime, GranularBondNumber};
 pub mod stress_dilatancy;
 pub use stress_dilatancy::StressDilatancy;
+pub mod stress_triaxiality;
+pub use stress_triaxiality::{StressTriaxiality, TriaxialityState};
 
 /// A handle into a [`ShapeRegistry`].
 ///
