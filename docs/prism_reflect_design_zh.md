@@ -436,16 +436,17 @@ derive 支持字段/类型级特性,驱动序列化、UI、校验:
 | `#[reflect(clamp(0..=1))]` | 编辑器/反序列化范围钳制 |
 | `#[reflect(tooltip = "...")]` | 编辑器提示 |
 
-### 24.8 不可信反序列化安全边界
+### 24.8 不可信反序列化安全边界 ✅ 已交付（二进制读取器核心防御）
 
-反射反序列化是**攻击面**（存档/网络来自不可信源）：
+反射反序列化是**攻击面**（存档/网络来自不可信源）。二进制读取器已内建可配置的 `DeserializeLimits`（`ser/limits.rs`），`from_binary` 走默认策略、`from_binary_with_limits` 可显式收紧（或 `DeserializeLimits::UNLIMITED` 供完全可信的进程内流）：
 
-- **递归深度限幅** + 集合长度上限,防「十亿笑脸」式膨胀/栈溢出。
-- 未知类型/字段按策略(忽略/拒绝/迁移)处理,不 panic。
-- 分配上限 + 超时,防内存耗尽 DoS。
-- 与 `prism_tasks` 背压(tasks §24.8)协同对流式输入限速。
+- ✅ **递归深度限幅**（`max_depth`，默认 128）：读取器按复合节点嵌套层级计深，超限返回 `DeserializeError::DepthLimitExceeded` 而非让原生栈溢出（崩溃/abort）。
+- ✅ **集合长度上限**（`max_collection_len`，默认 64 Mi）：list/array/map/set 与批量 POD blob 在**读取任何元素之前**校验声明长度,超限返回 `DeserializeError::CollectionTooLarge`,封堵「十亿笑脸」式膨胀。
+- ✅ **分配上限（输入成比例）**：每个推测性预分配被夹到流中**剩余字节数**(每元素至少 1 字节),因此即便在 `UNLIMITED` 下,一个声明 ~43 亿元素却无载荷的 POD blob 也只会得到干净的 `UnexpectedEof` 截断错误,而非 OOM abort。
+- ✅ **不 panic**：未知类型/字段/标签一律走 `DeserializeError`(`UnregisteredType`/`UnknownField`/`UnknownNodeTag` 等)返回,不触发 panic。
+- ⬜ **超时 / 与 `prism_tasks` 背压协同的流式限速**仍为 PLANNED(消费方 `prism_asset` 流式加载 + tasks §24.8 背压落地后接入);迁移策略(忽略/拒绝/迁移)由 §23 schema 迁移层承担。
 
 ### 24.9 诚实边界
 
-本章全部为 PLANNED 设计目标,无代码。**24.1 静态 TypeInfo + 24.2 访问器代码生成**是性能地基,建议随 M0/M1 优先落地;24.3 二进制序列化、24.8 安全边界随 `prism_asset` 存档/加载落地;24.4 diff/patch 与 24.5 网络增量随 `prism_replication` 落地;24.6 属性桥、24.7 特性随编辑器(`prism_editor`)落地。反射的误用易成性能黑洞(热路径走动态查名),§24.2 缓存与 lint 必须兜底。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
+**已交付**:§24.3 二进制零拷贝序列化(定长数值整块编码)、§24.4 Diff/Patch(M5 core)、§24.8 不可信反序列化安全边界(读取器核心防御)。**仍为 PLANNED**:**24.1 静态 TypeInfo + 24.2 访问器代码生成**是性能地基,建议随 M0/M1 优先落地;§24.8 的流式超时/背压随 `prism_asset` 存档流式加载落地;24.5 网络增量随 `prism_replication` 落地;24.6 属性桥、24.7 特性随编辑器(`prism_editor`)落地。反射的误用易成性能黑洞(热路径走动态查名),§24.2 缓存与 lint 必须兜底。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
 

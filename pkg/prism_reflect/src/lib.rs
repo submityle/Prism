@@ -123,7 +123,8 @@ pub use type_info::{
     TypeInfo, UnnamedField, ValueInfo, VariantInfo, VariantKind,
 };
 pub use ser::{
-    DeserializeError, SerializeError, StableTypeId, from_binary, from_ron, to_binary, to_ron,
+    DeserializeError, DeserializeLimits, SerializeError, StableTypeId, from_binary,
+    from_binary_with_limits, from_ron, to_binary, to_ron,
 };
 pub use diff::{DiffError, Patch, diff, merge};
 pub use func::{
@@ -145,7 +146,8 @@ pub use integration::{
 /// Convenient re-exports for downstream crates.
 pub mod prelude {
     pub use crate::{
-        Access, ApplyError, ArgList, Array, ArrayInfo, DeserializeError, DiffError, DynamicArray,
+        Access, ApplyError, ArgList, Array, ArrayInfo, DeserializeError, DeserializeLimits,
+        DiffError, DynamicArray,
         DynamicEnum, DynamicFunction, DynamicList, DynamicMap, DynamicSet, DynamicStruct,
         DynamicTupleStruct, DynamicVariant, Enum, EnumInfo, EnumTypeBuilder, FromReflect,
         FunctionError, FunctionInfo, FunctionRegistry, GetTypeRegistration, IntoFunction, List,
@@ -153,7 +155,8 @@ pub mod prelude {
         ReflectDefault, ReflectMut, ReflectRef, SerializeError, Set, SetInfo, StableTypeId, Struct,
         StructInfo, StructTypeBuilder, TupleStruct, TupleStructInfo, TypeData, TypeInfo,
         TypeRegistration, TypeRegistry, Typed, UnnamedField, ValueInfo, VariantInfo, VariantKind,
-        VariantType, diff, from_binary, from_ron, merge, reflect_path, reflect_path_mut, to_binary,
+        VariantType, diff, from_binary, from_binary_with_limits, from_ron, merge, reflect_path,
+        reflect_path_mut, to_binary,
         to_ron,
     };
     pub use crate::reflect_trait;

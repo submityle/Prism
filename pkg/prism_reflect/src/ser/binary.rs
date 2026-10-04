@@ -23,6 +23,7 @@ use crate::ser::encode::{serialize_value, Encoder};
 use crate::ser::pod;
 use crate::ser::error::{DeserializeError, SerializeError};
 use crate::ser::primitive::{leaf_primitive, node_tag, write_varint, ByteReader, Primitive};
+use crate::ser::limits::DeserializeLimits;
 use crate::ser::stable_id::StableTypeId;
 use crate::type_info::TypeInfo;
 use crate::{
@@ -218,6 +219,28 @@ pub fn from_binary(
     registry: &TypeRegistry,
     target: &TypeInfo,
 ) -> Result<Box<dyn Reflect>, DeserializeError> {
+    from_binary_with_limits(bytes, registry, target, &DeserializeLimits::DEFAULT)
+}
+
+/// Deserialize a reflected value, enforcing explicit untrusted-input
+/// [`DeserializeLimits`] (design §24.8).
+///
+/// Identical to [`from_binary`] but with a caller-chosen resource policy. Use
+/// a tightened policy for save files, network packets, or mod content, or
+/// [`DeserializeLimits::UNLIMITED`] for streams produced by a fully trusted,
+/// in-process writer.
+///
+/// # Errors
+/// In addition to every error [`from_binary`] can raise, returns
+/// [`DeserializeError::DepthLimitExceeded`] when composite nesting is deeper
+/// than `limits.max_depth`, or [`DeserializeError::CollectionTooLarge`] when a
+/// collection declares more elements than `limits.max_collection_len`.
+pub fn from_binary_with_limits(
+    bytes: &[u8],
+    registry: &TypeRegistry,
+    target: &TypeInfo,
+    limits: &DeserializeLimits,
+) -> Result<Box<dyn Reflect>, DeserializeError> {
     let mut reader = ByteReader::new(bytes);
     let magic = reader.read_array::<4>()?;
     if magic != MAGIC {
@@ -237,7 +260,7 @@ pub fn from_binary(
     }
 
     let schema = root_schema(target);
-    let value = read_node(&mut reader, registry, &schema)?;
+    let value = read_node(&mut reader, registry, &schema, limits, 1)?;
 
     if reader.is_empty() {
         Ok(value)
@@ -246,19 +269,40 @@ pub fn from_binary(
     }
 }
 
+/// Reject a declared collection length that exceeds the configured budget.
+fn check_collection_len(
+    declared: usize,
+    limits: &DeserializeLimits,
+) -> Result<(), DeserializeError> {
+    if declared > limits.max_collection_len {
+        return Err(DeserializeError::CollectionTooLarge {
+            limit: limits.max_collection_len,
+            declared,
+        });
+    }
+    Ok(())
+}
+
 /// Read one node from `reader` under the guidance of `schema`.
 fn read_node(
     reader: &mut ByteReader<'_>,
     registry: &TypeRegistry,
     schema: &Schema<'_>,
+    limits: &DeserializeLimits,
+    depth: usize,
 ) -> Result<Box<dyn Reflect>, DeserializeError> {
+    if depth > limits.max_depth {
+        return Err(DeserializeError::DepthLimitExceeded {
+            limit: limits.max_depth,
+        });
+    }
     let tag = reader.read_u8()?;
     match schema {
         Schema::Primitive(primitive) => {
             expect_tag(tag, node_tag::VALUE, "Value")?;
             read_primitive(reader, *primitive)
         }
-        Schema::Info(info) => read_info_node(reader, registry, tag, info),
+        Schema::Info(info) => read_info_node(reader, registry, tag, info, limits, depth),
     }
 }
 
@@ -268,6 +312,8 @@ fn read_info_node(
     registry: &TypeRegistry,
     tag: u8,
     info: &TypeInfo,
+    limits: &DeserializeLimits,
+    depth: usize,
 ) -> Result<Box<dyn Reflect>, DeserializeError> {
     match info {
         TypeInfo::Struct(struct_info) => {
@@ -280,7 +326,7 @@ fn read_info_node(
             dynamic.set_represented_type_name(struct_info.type_name());
             for field in struct_info.fields() {
                 let child_schema = resolve(registry, field.type_name())?;
-                let child = read_node(reader, registry, &child_schema)?;
+                let child = read_node(reader, registry, &child_schema, limits, depth + 1)?;
                 dynamic.insert_boxed(field.name(), child);
             }
             Ok(Box::new(dynamic))
@@ -295,7 +341,7 @@ fn read_info_node(
             dynamic.set_represented_type_name(tuple_info.type_name());
             for field in tuple_info.fields() {
                 let child_schema = resolve(registry, field.type_name())?;
-                let child = read_node(reader, registry, &child_schema)?;
+                let child = read_node(reader, registry, &child_schema, limits, depth + 1)?;
                 dynamic.insert_boxed(child);
             }
             Ok(Box::new(dynamic))
@@ -322,7 +368,7 @@ fn read_info_node(
                     let mut values = Vec::with_capacity(fields.len());
                     for field in fields {
                         let child_schema = resolve(registry, field.type_name())?;
-                        values.push(read_node(reader, registry, &child_schema)?);
+                        values.push(read_node(reader, registry, &child_schema, limits, depth + 1)?);
                     }
                     DynamicVariant::Tuple(values)
                 }
@@ -333,7 +379,7 @@ fn read_info_node(
                     let mut values = Vec::with_capacity(fields.len());
                     for field in fields {
                         let child_schema = resolve(registry, field.type_name())?;
-                        let child = read_node(reader, registry, &child_schema)?;
+                        let child = read_node(reader, registry, &child_schema, limits, depth + 1)?;
                         values.push((field.name(), child));
                     }
                     DynamicVariant::Struct(values)
@@ -348,14 +394,15 @@ fn read_info_node(
             let mut dynamic = DynamicList::new();
             dynamic.set_represented_type_name(list_info.type_name());
             if tag == node_tag::POD_BLOB {
-                for element in read_pod_blob(reader, &item_schema)? {
+                for element in read_pod_blob(reader, &item_schema, limits)? {
                     dynamic.push_boxed(element);
                 }
             } else {
                 expect_tag(tag, node_tag::LIST, "List")?;
                 let len = reader.read_len()?;
+                check_collection_len(len, limits)?;
                 for _ in 0..len {
-                    let child = read_node(reader, registry, &item_schema)?;
+                    let child = read_node(reader, registry, &item_schema, limits, depth + 1)?;
                     dynamic.push_boxed(child);
                 }
             }
@@ -366,14 +413,15 @@ fn read_info_node(
             let mut dynamic = DynamicArray::new();
             dynamic.set_represented_type_name(array_info.type_name());
             if tag == node_tag::POD_BLOB {
-                for element in read_pod_blob(reader, &item_schema)? {
+                for element in read_pod_blob(reader, &item_schema, limits)? {
                     dynamic.push_boxed(element);
                 }
             } else {
                 expect_tag(tag, node_tag::ARRAY, "Array")?;
                 let len = reader.read_len()?;
+                check_collection_len(len, limits)?;
                 for _ in 0..len {
-                    let child = read_node(reader, registry, &item_schema)?;
+                    let child = read_node(reader, registry, &item_schema, limits, depth + 1)?;
                     dynamic.push_boxed(child);
                 }
             }
@@ -382,13 +430,14 @@ fn read_info_node(
         TypeInfo::Map(map_info) => {
             expect_tag(tag, node_tag::MAP, "Map")?;
             let len = reader.read_len()?;
+            check_collection_len(len, limits)?;
             let key_schema = resolve(registry, map_info.key_type_name())?;
             let value_schema = resolve(registry, map_info.value_type_name())?;
             let mut dynamic = DynamicMap::new();
             dynamic.set_represented_type_name(map_info.type_name());
             for _ in 0..len {
-                let key = read_node(reader, registry, &key_schema)?;
-                let mapped = read_node(reader, registry, &value_schema)?;
+                let key = read_node(reader, registry, &key_schema, limits, depth + 1)?;
+                let mapped = read_node(reader, registry, &value_schema, limits, depth + 1)?;
                 dynamic.insert_boxed(key, mapped);
             }
             Ok(Box::new(dynamic))
@@ -396,11 +445,12 @@ fn read_info_node(
         TypeInfo::Set(set_info) => {
             expect_tag(tag, node_tag::SET, "Set")?;
             let len = reader.read_len()?;
+            check_collection_len(len, limits)?;
             let value_schema = resolve(registry, set_info.value_type_name())?;
             let mut dynamic = DynamicSet::new();
             dynamic.set_represented_type_name(set_info.type_name());
             for _ in 0..len {
-                let child = read_node(reader, registry, &value_schema)?;
+                let child = read_node(reader, registry, &value_schema, limits, depth + 1)?;
                 dynamic.push_boxed(child);
             }
             Ok(Box::new(dynamic))
@@ -477,6 +527,7 @@ fn read_primitive(
 fn read_pod_blob(
     reader: &mut ByteReader<'_>,
     item_schema: &Schema<'_>,
+    limits: &DeserializeLimits,
 ) -> Result<Vec<Box<dyn Reflect>>, DeserializeError> {
     let Schema::Primitive(expected) = item_schema else {
         return Err(DeserializeError::KindMismatch {
@@ -497,6 +548,7 @@ fn read_pod_blob(
         });
     }
     let count = reader.read_len()?;
+    check_collection_len(count, limits)?;
     pod::read_blob(reader, *expected, count)
 }
 
@@ -638,5 +690,121 @@ mod pod_tests {
         let decoded =
             from_binary(&bytes, &registry, <Vec<i32> as Typed>::type_info()).expect("decode");
         assert_eq!(<Vec<i32>>::from_reflect(&*decoded).unwrap(), elements.to_vec());
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    //! Untrusted-input hardening (design §24.8): nesting-depth caps, declared
+    //! collection-length caps, and input-proportional pre-allocation that
+    //! turns a length bomb into a clean truncation error rather than an abort.
+
+    use super::{from_binary, from_binary_with_limits, node_tag, to_binary, MAGIC, VERSION};
+    use crate::ser::primitive::{prim_tag, write_varint};
+    use crate::ser::stable_id::StableTypeId;
+    use crate::{DeserializeError, DeserializeLimits, Typed, TypeRegistry};
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn registry() -> TypeRegistry {
+        let mut registry = TypeRegistry::new();
+        registry.register::<i32>();
+        registry.register::<Vec<i32>>();
+        registry.register::<Vec<Vec<i32>>>();
+        registry
+    }
+
+    fn framed(type_name: &str, body: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.push(VERSION);
+        bytes.extend_from_slice(&StableTypeId::of_path(type_name).value().to_le_bytes());
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    /// A nested value that exceeds `max_depth` is rejected before the native
+    /// stack can overflow, and the same bytes still decode under the default
+    /// policy.
+    #[test]
+    fn depth_limit_rejects_deep_nesting() {
+        let registry = registry();
+        let value: Vec<Vec<i32>> = vec![vec![1, 2], vec![3]];
+        let bytes = to_binary(&value).expect("serialize");
+        let target = <Vec<Vec<i32>> as Typed>::type_info();
+
+        let shallow = DeserializeLimits::new(1, usize::MAX);
+        let Err(err) = from_binary_with_limits(&bytes, &registry, target, &shallow) else {
+            panic!("depth 2 must exceed max_depth 1");
+        };
+        assert_eq!(err, DeserializeError::DepthLimitExceeded { limit: 1 });
+
+        from_binary(&bytes, &registry, target).expect("default policy decodes");
+    }
+
+    /// A collection declaring more elements than the policy allows is rejected
+    /// up front, before any element is read.
+    #[test]
+    fn collection_length_cap_rejects_oversized_list() {
+        let registry = registry();
+        // Hand-build a LIST frame that *claims* 100 elements but carries none.
+        let mut body = Vec::new();
+        body.push(node_tag::LIST);
+        write_varint(&mut body, 100);
+        let bytes = framed(<Vec<i32> as Typed>::type_info().type_name(), &body);
+
+        let tight = DeserializeLimits::new(usize::MAX, 10);
+        let Err(err) = from_binary_with_limits(
+            &bytes,
+            &registry,
+            <Vec<i32> as Typed>::type_info(),
+            &tight,
+        ) else {
+            panic!("declared 100 > limit 10");
+        };
+        assert_eq!(
+            err,
+            DeserializeError::CollectionTooLarge {
+                limit: 10,
+                declared: 100,
+            }
+        );
+    }
+
+    /// A POD blob that declares a gigantic element count but carries no payload
+    /// must fail as a clean truncation (`UnexpectedEof`) — the speculative
+    /// reservation is clamped to the bytes that remain, so there is no
+    /// out-of-memory abort even under `UNLIMITED` limits.
+    #[test]
+    fn pod_blob_length_bomb_is_bounded_by_input() {
+        let registry = registry();
+        let mut body = Vec::new();
+        body.push(node_tag::POD_BLOB);
+        body.push(prim_tag::I32);
+        write_varint(&mut body, u64::from(u32::MAX)); // ~4.29 billion elements
+        // ...but zero payload bytes follow.
+        let bytes = framed(<Vec<i32> as Typed>::type_info().type_name(), &body);
+
+        let Err(err) = from_binary_with_limits(
+            &bytes,
+            &registry,
+            <Vec<i32> as Typed>::type_info(),
+            &DeserializeLimits::UNLIMITED,
+        ) else {
+            panic!("payload is truncated");
+        };
+        assert_eq!(err, DeserializeError::UnexpectedEof);
+    }
+
+    /// The default limits leave legitimate payloads untouched.
+    #[test]
+    fn default_limits_round_trip_normal_values() {
+        use crate::FromReflect;
+        let registry = registry();
+        let value: Vec<i32> = vec![1, 2, 3, 4, 5];
+        let bytes = to_binary(&value).expect("serialize");
+        let decoded = from_binary(&bytes, &registry, <Vec<i32> as Typed>::type_info())
+            .expect("decode");
+        assert_eq!(<Vec<i32>>::from_reflect(&*decoded).unwrap(), value);
     }
 }

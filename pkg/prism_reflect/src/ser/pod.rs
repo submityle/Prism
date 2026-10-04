@@ -188,7 +188,10 @@ pub fn read_blob(
     primitive: Primitive,
     count: usize,
 ) -> Result<Vec<Box<dyn Reflect>>, DeserializeError> {
-    let mut out = Vec::with_capacity(count);
+    // Clamp the speculative reservation to the bytes that remain: a bogus
+    // `count` from a hostile stream must not drive an out-of-memory abort
+    // before the (short) input is found to be truncated.
+    let mut out = Vec::with_capacity(count.min(reader.remaining()));
     for _ in 0..count {
         out.push(read_one(reader, primitive)?);
     }

@@ -251,6 +251,16 @@ impl<'a> ByteReader<'a> {
         self.pos >= self.bytes.len()
     }
 
+    /// How many bytes remain unread.
+    ///
+    /// Used to clamp speculative pre-allocation during deserialization: every
+    /// element costs at least one byte, so a collection can hold no more
+    /// elements than there are bytes left in the stream.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.pos)
+    }
+
     /// Read a single byte.
     ///
     /// # Errors

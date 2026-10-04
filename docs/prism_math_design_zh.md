@@ -409,12 +409,12 @@ pkg/prism_math/
 - 与 §17.5 精确谓词互补：精确谓词给「符号绝对正确」，区间算术给「范围绝对包含」。
 - **交付状态**：`interval` 模块已落地 `Interval{lo,hi}`（`+ - * /`、`neg`/`abs`/`sqrt`/`hull`/`intersect`/`overlaps`/`contains`）与 `IntervalVec3`（保守 AABB：`contains`/`overlaps`/`hull`/`+ -`）。`no_std` 不可移植切换 FP 舍入模式，故采「向最近舍入 + 单 ULP 外扩」（`next_up`/`next_down` 位级步进）保证真值恒被包含，跨平台确定。除零的除数区间跨 0 → 返回 `UNBOUNDED`。correctness oracle：5e4 组标量四则运算 f64 包含断言 + 2e4 组宽区间四角点包含 + ULP 步进夹逼。`cargo clippy --all-targets` 零告警、8 项单测全绿。
 
-### 24.4 补偿求和 / 扩展精度（Kahan / Neumaier / double-double）
+### 24.4 补偿求和 / 扩展精度（Kahan / Neumaier / double-double）—— ✅ 部分已交付（`fixed::compensated` 模块：Kahan/Neumaier；double-double 仍为 PLANNED）
 
 长链累加（大世界坐标累积、确定归并求和、海量变换链、物理积分）里，f32/f64 的舍入误差会累积成可见漂移：
 
 - `KahanSum` / `NeumaierSum`：补偿求和，供 `prism_tasks` 确定归并（tasks §24.7）的**顺序无关一致求和**——并行分块各自 Kahan 累加再合并，结果与串行位级一致。
-- `double-double`（两个 f64 表 ~106 bit 尾数）：极端大世界坐标/高精度离线烘焙的扩展精度路径，无需上 f128。
+- `double-double`（两个 f64 表 ~106 bit 尾数）：极端大世界坐标/高精度离线烘焙的扩展精度路径，无需上 f128。**（PLANNED：当前 `compensated` 模块仅提供 `KahanSum`/`NeumaierSum` 与 `kahan_sum`/`neumaier_sum`；double-double 待高精度离线烘焙消费方驱动落地。）**
 - 与 §13 定点档并列：定点保「跨平台位级一致」，补偿求和保「单平台高精度低漂移」，按场景选。
 
 ### 24.5 经典前向自动微分（Dual Number，非 ML）—— ✅ 已交付（`dual` 模块）

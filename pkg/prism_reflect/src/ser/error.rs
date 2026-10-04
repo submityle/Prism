@@ -86,6 +86,22 @@ pub enum DeserializeError {
     InvalidUtf8,
     /// Bytes/characters remained after the root value was fully decoded.
     TrailingData,
+    /// The stream nested composite nodes deeper than
+    /// [`DeserializeLimits::max_depth`](crate::DeserializeLimits::max_depth)
+    /// allows, which would otherwise risk a native stack overflow.
+    DepthLimitExceeded {
+        /// The configured maximum nesting depth that was exceeded.
+        limit: usize,
+    },
+    /// A collection node declared more elements than
+    /// [`DeserializeLimits::max_collection_len`](crate::DeserializeLimits::max_collection_len)
+    /// permits, guarding against length-bomb memory exhaustion.
+    CollectionTooLarge {
+        /// The configured maximum per-collection element count.
+        limit: usize,
+        /// The element count the stream actually declared.
+        declared: usize,
+    },
     /// The RON text was malformed; the string describes what was expected.
     RonSyntax(String),
 }
@@ -123,6 +139,13 @@ impl ::core::fmt::Display for DeserializeError {
             }
             DeserializeError::InvalidUtf8 => write!(f, "invalid UTF-8 in string leaf"),
             DeserializeError::TrailingData => write!(f, "trailing data after root value"),
+            DeserializeError::DepthLimitExceeded { limit } => {
+                write!(f, "nesting depth exceeded limit of {limit}")
+            }
+            DeserializeError::CollectionTooLarge { limit, declared } => write!(
+                f,
+                "collection declared {declared} elements, over the limit of {limit}"
+            ),
             DeserializeError::RonSyntax(msg) => write!(f, "RON syntax error: {msg}"),
         }
     }
