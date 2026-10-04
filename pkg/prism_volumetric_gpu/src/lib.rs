@@ -462,7 +462,13 @@ pub mod sim_pass_buffers;
 pub mod sim_space;
 pub mod single_scatter_reference;
 pub mod sky_state_transition;
+pub mod soft_attachment_project;
+pub mod soft_bending_project;
+pub mod soft_long_range_project;
 pub mod soft_particle;
+pub mod soft_pull_to_target;
+pub mod soft_strain_limit_project;
+pub mod soft_tetra_volume_project;
 pub mod sort_cull;
 pub mod sort_pass_buffers;
 pub mod spatial_hash;
@@ -1209,7 +1215,23 @@ pub use sim_pass_buffers::{GpuSimPassBuffers, GpuSimPassBuffersQuery, GpuSimPass
 pub use sim_space::{GpuSimSpace, GpuSimSpaceQuery, GpuSimSpaceResult};
 pub use single_scatter_reference::{GpuSingleScatterReference, SingleScatterReferenceQuery};
 pub use sky_state_transition::{GpuSkyStateTransition, SkyStateTransition};
+pub use soft_attachment_project::{
+    GpuSoftAttachmentProject, SoftAttachmentProjectQuery, SoftAttachmentProjectResult,
+};
+pub use soft_bending_project::{
+    GpuSoftBendingProject, SoftBendingProjectQuery, SoftBendingProjectResult,
+};
+pub use soft_long_range_project::{
+    GpuSoftLongRangeProject, SoftLongRangeProjectQuery, SoftLongRangeProjectResult,
+};
 pub use soft_particle::{GpuSoftParticle, LinearizeQuery, SoftParticleQuery, SoftParticleSample};
+pub use soft_pull_to_target::{GpuSoftPullToTarget, SoftPullToTargetQuery, SoftPullToTargetResult};
+pub use soft_strain_limit_project::{
+    GpuSoftStrainLimitProject, SoftStrainLimitProjectQuery, SoftStrainLimitProjectResult,
+};
+pub use soft_tetra_volume_project::{
+    GpuSoftTetraVolumeProject, SoftTetraVolumeProjectQuery, SoftTetraVolumeProjectResult,
+};
 pub use sort_cull::{GpuSortCull, GpuSortCullQuery, GpuSortCullResult};
 pub use sort_pass_buffers::{GpuSortPassBufferQuery, GpuSortPassBufferResult, GpuSortPassBuffers};
 pub use spatial_hash::GpuSpatialHash;
