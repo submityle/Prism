@@ -747,6 +747,7 @@ pub mod hyperboloid_gpu_layout;
 pub mod indexed_bilinear_patch_mesh;
 pub mod indexed_bilinear_patch_mesh_gpu_layout;
 pub mod lbvh;
+pub mod dynamic_blas;
 pub mod mesh_border_detection;
 pub mod mesh_bounding_sphere;
 pub mod mesh_closest_point;
