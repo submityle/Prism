@@ -339,6 +339,10 @@ pub use tet_fem_drucker_prager_plasticity::{
     return_map_drucker_prager, DruckerPragerModel, DruckerPragerState, DruckerPragerStep,
     DruckerPragerYield,
 };
+pub mod tet_fem_drucker_prager_force;
+pub use tet_fem_drucker_prager_force::{
+    drucker_prager_elastic_potential_energy, element_drucker_prager_force, DruckerPragerForce,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
