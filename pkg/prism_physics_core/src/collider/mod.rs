@@ -562,6 +562,8 @@ pub mod granular_flow_regime;
 pub use granular_flow_regime::{FlowRegime, GranularFlowRegime};
 pub mod finite_strain;
 pub use finite_strain::FiniteStrain;
+pub mod savage_number;
+pub use savage_number::{SavageNumber, SavageRegime};
 
 /// A handle into a [`ShapeRegistry`].
 ///
