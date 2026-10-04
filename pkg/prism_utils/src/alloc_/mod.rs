@@ -48,6 +48,7 @@ pub mod buddy;
 pub mod frame;
 pub mod guard;
 pub mod pool;
+pub mod scope;
 pub mod tlsf;
 
 pub use boxed::AllocBox;
@@ -55,6 +56,7 @@ pub use buddy::BuddyAllocator;
 pub use frame::FrameAllocator;
 pub use guard::{GuardConfig, GuardedAllocator};
 pub use pool::Pool;
+pub use scope::{Scope, ScopeMark, ScopeStack};
 pub use tlsf::TlsfAllocator;
 
 /// The error returned when an [`Allocator`] cannot satisfy a request.
