@@ -418,6 +418,9 @@ pub use bonded_particle_integrator::{BondStepReport, BondedParticleBody};
 pub mod bonded_particle_contact;
 pub use bonded_particle_contact::{contact_between, evaluate_contact, ContactForce, ContactModel};
 
+pub mod bonded_particle_contact_resolver;
+pub use bonded_particle_contact_resolver::{resolve_contacts, Contact, ContactResolution};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
