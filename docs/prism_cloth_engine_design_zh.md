@@ -62,9 +62,9 @@ fallback:
 - **碰撞代理**：绑定骨骼的 capsule/sphere/convex 身体代理体 + 自碰撞（空间哈希 + 虚拟粒子，含 CCD）。
 - **绑定**：服装绑定到蒙皮 mesh，固定点随蒙皮移动（形变父级 = 材质设计 §6.1 蒙皮地基）。
 
-代码落点（`prism_render_architecture::cloth`，**待建，与 `hair` 对称**）：
-- `ClothPieceHandle`、`ClothPiece{ sim_vertex_count, render_vertex_count, constraint_count, native_form, deformation }`（规划 `cloth/mod.rs`）。
-- `ClothLodTier{ FullSim, ReducedSim, SkinnedProxy }` + `is_simulated()`（规划 `cloth/mod.rs`）。
+代码落点（`prism_render_architecture::cloth`，**已落，与 `hair` 对称**）：
+- `ClothPieceHandle`、`ClothPiece{ handle, sim_vertex_count, render_vertex_count, constraint_count, deformation, native_form }`（`cloth/mod.rs`，已实现 + 单测）。
+- `ClothLodTier{ FullSim, ReducedSim, SkinnedProxy }` + `is_simulated()` / `coarseness()` / `coarser_of()`（`cloth/mod.rs`，已实现 + 单测）。
 - 复用**已落**的 `deformation::DeformationKind::Cloth` 与 `deformation::schedule` 形变预算仲裁。
 
 ---
@@ -73,12 +73,12 @@ fallback:
 
 | 阶段 | 内容 | 对标 | 代码落点 |
 |---|---|---|---|
-| 1. 导入/缝合 | 版片缝合 → sim mesh；render mesh 嵌入绑定 | Marvelous / CLO | 规划 `cloth/asset.rs` |
-| 2. 约束构建 | 拉伸/弯曲/剪切/LRA/tether/pressure 约束图 + 图着色分批 | Chaos / NvCloth | 规划 `cloth/constraints.rs` |
-| 3. 布料动力学 | XPBD/VBD 子步求解（compliance）+ strain limiting | Chaos / Vellum / VBD | 规划 `cloth/dynamics.rs`（→ `deformation::schedule`；原语对齐 `prism_physics_core` §3/§4）|
-| 4. 碰撞 | 身体代理体 + 自碰撞 CCD + backstop | PhysX Clothing / Havok | 规划 `cloth/collision.rs` |
-| 5. LOD | 覆盖度/距离选档 + 连续降分辨率 + 自适应重网格，禁硬切换 | Chaos LOD / Vellum | 规划 `cloth/lod.rs`（对称 `hair/lod.rs`）|
-| 6. 嵌入 | render mesh 跟随 sim mesh（重心坐标/蒙皮嵌入）| UE5 | 规划 `cloth/embed.rs` |
+| 1. 导入/缝合 | 版片缝合 → sim mesh；render mesh 嵌入绑定 | Marvelous / CLO | 已落 `cloth/asset.rs` |
+| 2. 约束构建 | 拉伸/弯曲/剪切/LRA/tether/pressure 约束图 + 图着色分批 | Chaos / NvCloth | 已落 `cloth/constraints.rs` |
+| 3. 布料动力学 | XPBD/VBD 子步求解（compliance）+ strain limiting | Chaos / Vellum / VBD | 已落 `cloth/dynamics.rs`（→ `deformation::schedule`；原语对齐 `prism_physics_core` §3/§4）|
+| 4. 碰撞 | 身体代理体 + 自碰撞 CCD + backstop | PhysX Clothing / Havok | 已落 `cloth/collision.rs` |
+| 5. LOD | 覆盖度/距离选档 + 连续降分辨率 + 自适应重网格，禁硬切换 | Chaos LOD / Vellum | 已落 `cloth/lod.rs`（对称 `hair/lod.rs`）|
+| 6. 嵌入 | render mesh 跟随 sim mesh（重心坐标/蒙皮嵌入）| UE5 | 已落 `cloth/embed.rs` |
 | 7. 着色 | cloth sheen/fuzz closure + 双面薄透射（见 §7）| 材质系统 closure | `material` cloth closure（不在 cloth 内重写）|
 | 8. 透明/合成 | 薄纱走共享 OIT | `transparency` | **已落** `transparency::routing` |
 
@@ -166,7 +166,7 @@ fallback:
 
 ## 9. 可测性
 
-布料 sim / 约束 / LOD / 嵌入落"compute 可移植"桶（材质设计 §8.1）：数组进数组出，可写手写 Rust CPU golden 逐值对数。规划 `cloth/lod.rs` 首批确定性单测（对称 `hair/lod.rs` 13 测）：阈值分档、连续降分辨率、代理档不发 sim 请求、sim 档发 `DeformationKind::Cloth` 请求（`vertex_count = sim_vertex_count`）、分桶保序、越界跳过、空输入、`native_form` 钳制、`coarser_of` 秩比较。XPBD/VBD 约束投影可 golden（固定拓扑 + 固定子步 + 固定图着色序）；RT traversal 不可（驱动 BVH）——与全引擎三桶边界一致。
+布料 sim / 约束 / LOD / 嵌入落"compute 可移植"桶（材质设计 §8.1）：数组进数组出，可写手写 Rust CPU golden 逐值对数。`cloth/lod.rs` 已落确定性单测（20 测，对称 `hair/lod.rs`）：阈值分档、连续降分辨率、代理档不发 sim 请求、sim 档发 `DeformationKind::Cloth` 请求（`vertex_count = sim_vertex_count`）、分桶保序、越界跳过、空输入、`native_form` 钳制、`coarser_of` 秩比较。XPBD/VBD 约束投影可 golden（固定拓扑 + 固定子步 + 固定图着色序）；RT traversal 不可（驱动 BVH）——与全引擎三桶边界一致。
 
 ---
 
@@ -179,7 +179,7 @@ fallback:
 5. **碰撞** `cloth/collision.rs`：身体代理体 + 自碰撞（空间哈希/虚拟粒子/CCD）+ backstop。
 6. **嵌入** `cloth/embed.rs`：render mesh 重心坐标/蒙皮嵌入。
 7. **着色分叉**（材质侧）：cloth sheen/fuzz closure（Charlie → Estevez-Kulla）+ 薄透射 + `prism_render_npr` 风格化响应。
-8. **高级项**（§6 十二项）：**CPU 算法层已落**（每项真实现 + 确定性单测，仅 `sqrt`）——多求解器插槽 `cloth/dynamics.rs`+`cloth/vbd.rs`（XPBD 基线 / VBD 高保真）、自碰撞 + CCD `cloth/collision.rs`+`cloth/ccd.rs`、空气动力学 / 风场 `cloth/wind.rs`、strain limiting `cloth/dynamics.rs`、绘制约束（backstop/max-distance/blend-weight/anim-drive）`cloth/painted.rs`、多层服装耦合 `cloth/layers.rs`（§6.7 跨层最小分离保叠放次序）、两向刚体耦合 `cloth/coupling.rs`（§6.10 质量加权接触 + 反作用冲量，重求解在物理内核）、撕裂 / 塑性 `cloth/tearing.rs`、压力约束 `cloth/pressure.rs`、休眠 / 激活 `cloth/sleep.rs`、子步 substepping + compliance `cloth/dynamics.rs`；端到端集成于 `cloth/pipeline.rs` `Garment::step`。张力褶皱法线属材质 closure 侧（§7.6，不在本 crate）；GPU 持久化 + 异步流水线待渲染后端接入（本 crate 只产几何 / 形变请求）。
+8. **高级项**（§6 十二项）：**CPU 算法层已落**（每项真实现 + 确定性单测，仅 `sqrt`）——多求解器插槽 `cloth/dynamics.rs`+`cloth/vbd.rs`（XPBD 基线 / VBD 高保真）、自碰撞 + CCD `cloth/collision.rs`+`cloth/ccd.rs`、空气动力学 / 风场 `cloth/wind.rs`、strain limiting `cloth/dynamics.rs`、绘制约束（backstop/max-distance/blend-weight/anim-drive）`cloth/painted.rs`、多层服装耦合 `cloth/layers.rs`（§6.7 跨层最小分离保叠放次序）、两向刚体耦合 `cloth/coupling.rs`（§6.10 质量加权接触 + 反作用冲量，重求解在物理内核）、撕裂 / 塑性 `cloth/tearing.rs`、压力约束 `cloth/pressure.rs`、休眠 / 激活 `cloth/sleep.rs`、子步 substepping + compliance `cloth/dynamics.rs`；端到端集成于 `cloth/pipeline.rs` `Garment::step`。张力褶皱法线属材质 closure 侧（§7.6，不在本 crate）；GPU 持久化 + 异步流水线**已在 `prism_render_scene::cloth` 落地**（resident 设备缓冲 + `Core3d` 图节点 dispatch，主通道前记录；对拍 `prism_render_architecture` CPU golden = `prism_physics_core::soft`，真机 Metal parity 全绿）——本 crate 只产几何 / 形变请求，不持 GPU 句柄。
 
 **优先级**：先落骨架 + `cloth/lod.rs`（最低冲突、与毛发对称、`Cloth` 枚举已备），XPBD 动力学与自碰撞随物理内核对齐逐步点亮；每步 wgpu 可编译 + 单测绿。
 
