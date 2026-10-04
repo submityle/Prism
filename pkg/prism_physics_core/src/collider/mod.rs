@@ -421,6 +421,9 @@ pub use bonded_particle_contact::{contact_between, evaluate_contact, ContactForc
 pub mod bonded_particle_contact_resolver;
 pub use bonded_particle_contact_resolver::{resolve_contacts, Contact, ContactResolution};
 
+pub mod bonded_particle_contact_integrator;
+pub use bonded_particle_contact_integrator::{ContactBody, ContactStepReport};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
