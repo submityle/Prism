@@ -65,6 +65,7 @@
 
 extern crate alloc;
 
+pub mod apportion;
 pub mod budget;
 pub mod lane;
 pub mod reconcile;
@@ -72,6 +73,7 @@ pub mod scheduler;
 pub mod visibility;
 pub mod work;
 
+pub use apportion::{apportion, apportion_lanes};
 pub use budget::{Clock, Deadline, FrameBudget, ManualClock};
 pub use lane::{Lane, LaneMask};
 pub use reconcile::{update_budgeted, ReconcileBatch};
