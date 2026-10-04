@@ -9,13 +9,17 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use crate::encoding::{form_decode, percent_decode};
+
 /// A parsed location: a path, its segments, a query map, and an optional
 /// fragment.
 ///
 /// Construct one with [`Location::new`]. The original path portion is preserved
 /// verbatim (including any trailing slash) and can be read with
 /// [`Location::path`], while [`Location::segments`] exposes the non-empty path
-/// segments used for route matching.
+/// segments used for route matching, percent-decoded. Query components are
+/// decoded with form-urlencoded semantics (`+` is a space) and the fragment is
+/// percent-decoded.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Location {
     path: String,
@@ -35,7 +39,7 @@ impl Location {
     pub fn new(input: &str) -> Self {
         // Split off the fragment first, as it is the trailing component.
         let (before_fragment, fragment) = match input.split_once('#') {
-            Some((head, frag)) => (head, Some(frag.to_string())),
+            Some((head, frag)) => (head, Some(percent_decode(frag))),
             None => (input, None),
         };
 
@@ -54,7 +58,7 @@ impl Location {
         let segments = raw_path
             .split('/')
             .filter(|segment| !segment.is_empty())
-            .map(ToString::to_string)
+            .map(percent_decode)
             .collect();
 
         let mut query = BTreeMap::new();
@@ -67,7 +71,7 @@ impl Location {
                     Some((key, value)) => (key, value),
                     None => (pair, ""),
                 };
-                query.insert(key.to_string(), value.to_string());
+                query.insert(form_decode(key), form_decode(value));
             }
         }
 
@@ -147,5 +151,32 @@ mod tests {
     fn query_without_value_is_empty_string() {
         let loc = Location::new("/search?q");
         assert_eq!(loc.query("q"), Some(""));
+    }
+
+    #[test]
+    fn segments_are_percent_decoded() {
+        let loc = Location::new("/users/john%20doe/caf%C3%A9");
+        assert_eq!(loc.segments(), ["users", "john doe", "café"]);
+        // The raw path is preserved verbatim for round-tripping / history.
+        assert_eq!(loc.path(), "/users/john%20doe/caf%C3%A9");
+    }
+
+    #[test]
+    fn encoded_slash_stays_within_one_segment() {
+        let loc = Location::new("/files/a%2Fb/c");
+        assert_eq!(loc.segments(), ["files", "a/b", "c"]);
+    }
+
+    #[test]
+    fn query_uses_form_decoding_with_plus_as_space() {
+        let loc = Location::new("/search?q=hello+world&tag=a%26b");
+        assert_eq!(loc.query("q"), Some("hello world"));
+        assert_eq!(loc.query("tag"), Some("a&b"));
+    }
+
+    #[test]
+    fn fragment_is_percent_decoded() {
+        let loc = Location::new("/doc#section%201");
+        assert_eq!(loc.fragment(), Some("section 1"));
     }
 }

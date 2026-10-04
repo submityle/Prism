@@ -50,6 +50,7 @@
 
 extern crate alloc;
 
+mod encoding;
 mod guard;
 mod matcher;
 mod param;
@@ -57,6 +58,7 @@ mod path;
 mod route;
 mod router;
 
+pub use encoding::{form_decode, form_encode, percent_decode, percent_encode};
 pub use guard::{
     DeepLinkState, FnGuard, Guard, GuardOutcome, GuardPoll, ManualGuard, PendingNavigation,
 };
