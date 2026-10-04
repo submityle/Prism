@@ -380,6 +380,10 @@ pub use tet_fem_perzyna_viscoplasticity::{
 };
 pub mod tet_fem_damage;
 pub use tet_fem_damage::{equivalent_strain, update_damage, DamageModel, DamageState, DamageStep};
+pub mod tet_fem_damage_force;
+pub use tet_fem_damage_force::{
+    damaged_elastic_potential_energy, element_damaged_force, DamagedForce,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
