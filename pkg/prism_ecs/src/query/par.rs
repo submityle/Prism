@@ -42,6 +42,7 @@ use crate::archetype::ArchetypeId;
 use crate::change::Tick;
 use crate::query::fetch::QueryData;
 use crate::query::filter::QueryFilter;
+use crate::query::slice::ColumnSliceData;
 use crate::world::World;
 
 /// A raw world pointer that is safe to move across the task boundary *under the
@@ -211,6 +212,159 @@ pub(crate) unsafe fn par_for_each_raw<D, F, Func>(
                         filter_state,
                         batch,
                         last_run,
+                        this_run,
+                        func,
+                    );
+                }
+            });
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Chunk-aligned slice-parallel path (design §8.3 `jobs.par_chunks`).
+//
+// Where the row path above hands each task one `D::Item<'_>` per row, this path
+// hands each task one aligned typed column slice ([`ColumnSliceData::Slice`])
+// covering a whole run of rows, so a DOTS-style `IJobChunk` kernel can run over
+// the slice in a single (SIMD) pass. Batches are **chunk-aligned** so each
+// task owns whole chunks and the coarse per-chunk change version is a
+// task-exclusive write; see [`crate::query::slice`] for the full soundness
+// model. The archetypal filter is applied at archetype granularity only
+// (enforced by the `ArchetypalFilter` bound at the `QueryState` entry points),
+// so `archetypes` is already the exact matched set and no per-row filter runs.
+// ---------------------------------------------------------------------------
+
+/// Partition the matched archetypes into **chunk-aligned** batches targeting
+/// about `target_rows` rows each.
+///
+/// Every batch covers a whole number of chunks (`chunks_per_task *
+/// rows_per_chunk` rows), so no two batches of one archetype ever share a
+/// chunk. `target_rows` is a soft target rounded *down* to a chunk multiple
+/// (always at least one chunk, so progress is guaranteed). The final batch of
+/// an archetype is clamped to the archetype length and may end inside its last,
+/// partial chunk — of which it is still the sole owner. Empty archetypes are
+/// skipped.
+fn build_chunk_aligned_batches(
+    world: &World,
+    archetypes: &[ArchetypeId],
+    target_rows: usize,
+) -> Vec<Batch> {
+    let target_rows = target_rows.max(1);
+    let mut batches = Vec::new();
+    for &archetype in archetypes {
+        let arch = world
+            .archetypes()
+            .get(archetype)
+            .expect("matched archetype id must resolve");
+        let len = arch.len();
+        if len == 0 {
+            continue;
+        }
+        let rows_per_chunk = arch.table().rows_per_chunk().max(1);
+        let chunks_per_task = (target_rows / rows_per_chunk).max(1);
+        let rows_per_task = chunks_per_task * rows_per_chunk;
+        let mut start = 0;
+        while start < len {
+            let end = (start + rows_per_task).min(len);
+            batches.push(Batch {
+                archetype,
+                start,
+                end,
+            });
+            start = end;
+        }
+    }
+    batches
+}
+
+/// Run `func` once over the whole typed column slice of a single chunk-aligned
+/// batch (design §8.3 `jobs.par_chunks`).
+///
+/// # Safety
+/// - `world` must be valid for reads for the duration of the call, and the
+///   batch's rows must be touched by no other concurrent access (upheld by the
+///   chunk-aligned, disjoint partition plus the caller's exclusive-world
+///   contract).
+/// - `batch.archetype` must satisfy `D::matches` for `data_state`, and
+///   `batch.start <= batch.end <= archetype.len()`.
+unsafe fn run_chunk_batch<D, Func>(
+    world: *mut World,
+    data_state: &D::State,
+    batch: Batch,
+    this_run: Tick,
+    func: &Func,
+) where
+    D: ColumnSliceData,
+    Func: Fn(D::Slice<'_>),
+{
+    // SAFETY: `world` is valid for reads for this call (caller contract); we
+    // only form a shared `&World` to reach the archetype storage. `&mut` slice
+    // terms write through the interior-mutability column helpers, never through
+    // this ref.
+    let world: &World = unsafe { &*world };
+    let archetype = world
+        .archetypes()
+        .get(batch.archetype)
+        .expect("batch archetype id must resolve");
+    // SAFETY: `batch.start <= batch.end <= archetype.len()` and
+    // `batch.archetype` satisfies `D::matches` (both caller contract), so every
+    // term's column exists; the batch's rows are task-exclusive, so each
+    // `&mut [T]` is unique and the per-chunk version stamps never race.
+    let slice =
+        unsafe { D::column_slice(data_state, archetype, batch.start, batch.end, this_run) };
+    func(slice);
+}
+
+/// Dispatch `func` over every matched row in chunk-aligned typed slices, in
+/// parallel (design §8.3 `jobs.par_chunks`).
+///
+/// `archetypes` is the already-filtered matched set (the `ArchetypalFilter`
+/// bound at the `QueryState` entry points guarantees the filter's per-row
+/// verdict equals its per-archetype verdict), so no per-row filter runs inside
+/// a batch — each task simply receives the typed slice for its chunk-aligned
+/// range.
+///
+/// # Safety
+/// - `world` must stay valid for the whole call and must not be aliased by any
+///   other access that conflicts with `D`'s terms (upheld by the exclusive
+///   `&mut World` of the mutable entry point, or the `ReadOnlyQueryData` bound
+///   of the shared one).
+/// - every id in `archetypes` must satisfy `D::matches` and the query's filter.
+pub(crate) unsafe fn par_chunks_raw<D, Func>(
+    world: *mut World,
+    data_state: &D::State,
+    archetypes: &[ArchetypeId],
+    this_run: Tick,
+    pool: &TaskPool,
+    batch_size: usize,
+    func: &Func,
+) where
+    D: ColumnSliceData,
+    Func: Fn(D::Slice<'_>) + Send + Sync,
+{
+    // SAFETY: forming a shared `&World` to size the batches is sound under the
+    // caller's validity contract.
+    let batches = build_chunk_aligned_batches(unsafe { &*world }, archetypes, batch_size);
+    if batches.is_empty() {
+        return;
+    }
+
+    let send_world = SendWorldPtr(world);
+    pool.scope(|scope| {
+        for batch in &batches {
+            let batch = *batch;
+            scope.spawn(move || {
+                // SAFETY: `send_world.0` is valid for the scope (joined before
+                // the enclosing world borrow ends); `batch` is a chunk-aligned,
+                // disjoint row range of a matched archetype, so this task's
+                // accesses — including the per-chunk version stamps — never
+                // alias any sibling task's.
+                unsafe {
+                    run_chunk_batch::<D, Func>(
+                        send_world.get(),
+                        data_state,
+                        batch,
                         this_run,
                         func,
                     );

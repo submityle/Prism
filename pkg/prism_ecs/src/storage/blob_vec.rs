@@ -160,6 +160,59 @@ impl BlobVec {
         unsafe { core::slice::from_raw_parts_mut(self.data.as_ptr().cast::<T>(), self.len) }
     }
 
+    /// Borrow the half-open sub-range `[start, end)` as a typed slice `&[T]`.
+    ///
+    /// Builds the slice *directly* from the element base pointer rather than
+    /// subslicing [`BlobVec::as_slice`]: forming a whole-column `&[T]` only to
+    /// index into it would transiently create a column-wide borrow, which the
+    /// chunk-parallel slice path (design §8.3) must avoid so that disjoint row
+    /// ranges can be handed to different threads without overlapping borrows.
+    ///
+    /// # Safety
+    /// `T` must be the exact type this column stores; `start <= end <= len()`;
+    /// and the caller must hold shared access to every element in the range for
+    /// the slice's lifetime.
+    #[inline]
+    pub unsafe fn as_slice_range<T>(&self, start: usize, end: usize) -> &[T] {
+        debug_assert!(start <= end && end <= self.len);
+        // SAFETY: the forwarded type contract makes the base a valid `*const T`;
+        // `start <= len` keeps the offset in-bounds (or one-past-the-end when
+        // `start == len`, still a valid slice base), and `end - start` elements
+        // are live per the range precondition.
+        unsafe {
+            core::slice::from_raw_parts(
+                self.data.as_ptr().cast::<T>().add(start),
+                end - start,
+            )
+        }
+    }
+
+    /// Borrow the half-open sub-range `[start, end)` as a typed mutable slice
+    /// `&mut [T]`, built directly from the element base pointer.
+    ///
+    /// See [`BlobVec::as_slice_range`] for why the slice is formed from the
+    /// offset base rather than by subslicing a whole-column `&mut [T]`.
+    ///
+    /// # Safety
+    /// `T` must be the exact type this column stores; `start <= end <= len()`;
+    /// and the caller must hold unique access to every element in the range for
+    /// the slice's lifetime (disjoint ranges on the same column may be lent to
+    /// different threads).
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn as_mut_slice_range<T>(&self, start: usize, end: usize) -> &mut [T] {
+        debug_assert!(start <= end && end <= self.len);
+        // SAFETY: as [`BlobVec::as_slice_range`], plus the caller's unique-access
+        // guarantee over `[start, end)` makes the `&mut [T]` non-aliasing even
+        // when sibling ranges of the same column are borrowed concurrently.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.data.as_ptr().cast::<T>().add(start),
+                end - start,
+            )
+        }
+    }
+
     /// Append a value by copying `item_layout.size()` bytes from `value`.
     ///
     /// Ownership of the value is transferred into the column (a bitwise move);

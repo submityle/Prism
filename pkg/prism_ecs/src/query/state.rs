@@ -18,6 +18,8 @@ use crate::component::Components;
 use crate::query::access::Access;
 use crate::query::fetch::{QueryData, ReadOnlyQueryData};
 use crate::query::filter::QueryFilter;
+#[cfg(feature = "multi_thread")]
+use crate::query::slice::{ArchetypalFilter, ColumnSliceData};
 use crate::query::iter::QueryIter;
 use crate::world::World;
 
@@ -334,6 +336,120 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // each `&mut` term unique across threads.
         unsafe {
             self.par_for_each_from_ptr(world_ptr, last_run, this_run, pool, batch_size, &func);
+        }
+    }
+
+    /// Raw-pointer slice-parallel driver (design §8.3 `jobs.par_chunks`): hand
+    /// each task one aligned typed column slice ([`ColumnSliceData::Slice`])
+    /// covering a chunk-aligned run of rows, instead of one item per row.
+    ///
+    /// The matched archetypes are resolved here and forwarded as the already
+    /// exact set — the [`ArchetypalFilter`] bound guarantees `F`'s per-row
+    /// verdict equals its per-archetype verdict, so no per-row filter runs.
+    ///
+    /// # Safety
+    /// `world` must point to a live [`World`] that stays valid for the whole
+    /// call, and the caller must guarantee that no other live borrow aliases the
+    /// component columns this query's `D` terms touch for the duration of the
+    /// dispatch (upheld by the per-system access set plus the scheduler's
+    /// conflict analysis, or by an exclusive `&mut World`).
+    #[cfg(feature = "multi_thread")]
+    pub(crate) unsafe fn par_chunks_from_ptr<Func>(
+        &self,
+        world: *mut World,
+        this_run: Tick,
+        pool: &prism_tasks::TaskPool,
+        batch_size: usize,
+        func: &Func,
+    ) where
+        D: ColumnSliceData,
+        F: ArchetypalFilter,
+        Func: Fn(<D as ColumnSliceData>::Slice<'_>) + Send + Sync,
+    {
+        // SAFETY: the caller guarantees `world` is live for the call; forming a
+        // shared `&World` (never `&mut`) is all that is needed to enumerate the
+        // matched archetypes.
+        let world_ref: &World = unsafe { &*world };
+        let archetypes = self.matched_archetypes(world_ref);
+        // SAFETY: every id in `archetypes` came from `matched_archetypes`, so it
+        // satisfies `D::matches`/`F::matches`; the caller upholds non-aliasing of
+        // the fetched columns for the whole (scope-joined) dispatch.
+        unsafe {
+            crate::query::par::par_chunks_raw::<D, Func>(
+                world,
+                &self.data_state,
+                &archetypes,
+                this_run,
+                pool,
+                batch_size,
+                func,
+            );
+        }
+    }
+
+    /// Visit every matched row in chunk-aligned typed slices in parallel over a
+    /// shared view of `world` (design §8.3 `jobs.par_chunks`), calling `func`
+    /// once per chunk-aligned batch with a read-only slice tuple.
+    ///
+    /// Only read-only data terms are reachable (the `D: `[`ReadOnlyQueryData`]
+    /// bound), so the shared borrow suffices and several parallel passes may
+    /// coexist. The `D: `[`ColumnSliceData`] and `F: `[`ArchetypalFilter`]
+    /// bounds are checked once up front via their `assert_*` hooks (rejecting
+    /// sparse/shared data and per-row / sparse filters with a clear panic).
+    #[cfg(feature = "multi_thread")]
+    pub fn par_chunks<Func>(
+        &self,
+        world: &World,
+        pool: &prism_tasks::TaskPool,
+        batch_size: usize,
+        func: Func,
+    ) where
+        D: ColumnSliceData + ReadOnlyQueryData,
+        F: ArchetypalFilter,
+        Func: Fn(<D as ColumnSliceData>::Slice<'_>) + Send + Sync,
+    {
+        <D as ColumnSliceData>::assert_sliceable();
+        <F as ArchetypalFilter>::assert_archetypal();
+        let this_run = world.change_tick();
+        let world_ptr = (world as *const World).cast_mut();
+        // SAFETY: `D: ReadOnlyQueryData`, so no `&mut [T]` slice is ever formed
+        // and the shared `&World` borrow keeps the world live for the whole
+        // (scope-joined) call; several read-only passes may coexist.
+        unsafe {
+            self.par_chunks_from_ptr(world_ptr, this_run, pool, batch_size, &func);
+        }
+    }
+
+    /// Visit every matched row in chunk-aligned typed slices in parallel over an
+    /// exclusive view of `world`, permitting `&mut [T]` slice terms (design
+    /// §8.3 `jobs.par_chunks`, the SIMD-skinning headline).
+    ///
+    /// Because batches are chunk-aligned and disjoint, the `&mut [T]` slices
+    /// different threads form never overlap, and each `&mut T` term stamps the
+    /// change ticks of its whole handed-out range up front (a bare slice loses
+    /// the per-row write information). The call returns only after every batch
+    /// has completed.
+    #[cfg(feature = "multi_thread")]
+    pub fn par_chunks_mut<Func>(
+        &self,
+        world: &mut World,
+        pool: &prism_tasks::TaskPool,
+        batch_size: usize,
+        func: Func,
+    ) where
+        D: ColumnSliceData,
+        F: ArchetypalFilter,
+        Func: Fn(<D as ColumnSliceData>::Slice<'_>) + Send + Sync,
+    {
+        <D as ColumnSliceData>::assert_sliceable();
+        <F as ArchetypalFilter>::assert_archetypal();
+        let this_run = world.change_tick();
+        let world_ptr = world as *mut World;
+        // SAFETY: `world` is exclusively borrowed, so the raw pointer is the sole
+        // route to the world for the whole dispatch; chunk-aligned disjoint
+        // batches make each `&mut [T]` slice unique across threads.
+        unsafe {
+            self.par_chunks_from_ptr(world_ptr, this_run, pool, batch_size, &func);
         }
     }
 }

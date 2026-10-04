@@ -15,6 +15,8 @@
 //! the same world at once under the kernel's access-conflict discipline.
 
 use crate::query::{Access, QueryData, QueryFilter, QueryIter, QueryState, ReadOnlyQueryData};
+#[cfg(feature = "multi_thread")]
+use crate::query::{ArchetypalFilter, ColumnSliceData};
 use crate::system::param::SystemParam;
 use crate::system::world_cell::UnsafeWorldCell;
 use crate::world::World;
@@ -170,6 +172,78 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
             self.state.par_for_each_from_ptr(
                 self.world.as_ptr(),
                 self.world.last_run(),
+                self.world.this_run(),
+                pool,
+                batch_size,
+                &func,
+            );
+        }
+    }
+
+    /// Visit every matched row in **chunk-aligned typed column slices** in
+    /// parallel with shared access (design §8.3 `jobs.par_chunks` — the
+    /// `IJobChunk`/SIMD-skinning form), calling `func` once per chunk-aligned
+    /// batch with a read-only slice tuple.
+    ///
+    /// Available only when every data term is read-only
+    /// (`D: `[`ReadOnlyQueryData`]) and sliceable (`D: `[`ColumnSliceData`]),
+    /// with an archetype-uniform filter (`F: `[`ArchetypalFilter`]); the two
+    /// `assert_*` checks run once up front. Each batch covers a whole number of
+    /// 16KiB chunks, so a kernel can run a single SIMD pass over the slice. The
+    /// call returns only after every batch has completed.
+    #[cfg(feature = "multi_thread")]
+    #[inline]
+    pub fn par_chunks<Func>(&self, pool: &prism_tasks::TaskPool, batch_size: usize, func: Func)
+    where
+        D: ReadOnlyQueryData + ColumnSliceData,
+        F: ArchetypalFilter,
+        Func: Fn(<D as ColumnSliceData>::Slice<'_>) + Send + Sync,
+    {
+        // SAFETY: `self.world` is live for `'w`; `D: ReadOnlyQueryData` means no
+        // `&mut [T]` slice is ever formed, and this system's declared read
+        // access (upheld by the scheduler's conflict analysis) guarantees
+        // nothing writes the columns we read for the duration of the dispatch.
+        unsafe {
+            self.state.par_chunks_from_ptr(
+                self.world.as_ptr(),
+                self.world.this_run(),
+                pool,
+                batch_size,
+                &func,
+            );
+        }
+    }
+
+    /// Visit every matched row in **chunk-aligned typed column slices** in
+    /// parallel with exclusive access, permitting `&mut [T]` slice terms
+    /// (design §8.3 `jobs.par_chunks`, e.g. SIMD skinning writing a `&mut
+    /// [Mat4]` column).
+    ///
+    /// Takes `&mut self`, so the borrow checker forbids a second concurrent
+    /// dispatch of the same query. Batches are chunk-aligned and disjoint, so
+    /// the `&mut [T]` slices different threads form never overlap; each `&mut T`
+    /// term stamps the change ticks of its whole handed-out range up front. The
+    /// call returns only after every batch has completed.
+    #[cfg(feature = "multi_thread")]
+    #[inline]
+    pub fn par_chunks_mut<Func>(
+        &mut self,
+        pool: &prism_tasks::TaskPool,
+        batch_size: usize,
+        func: Func,
+    ) where
+        D: ColumnSliceData,
+        F: ArchetypalFilter,
+        Func: Fn(<D as ColumnSliceData>::Slice<'_>) + Send + Sync,
+    {
+        // SAFETY: `self.world` is live for `'w`; `&mut self` makes this the sole
+        // live dispatch of this query, and the system's declared write access
+        // (upheld by the scheduler's conflict analysis) guarantees nothing else
+        // touches the columns we write; chunk-aligned disjoint batches keep each
+        // `&mut [T]` slice unique across threads for the dispatch.
+        unsafe {
+            self.state.par_chunks_from_ptr(
+                self.world.as_ptr(),
                 self.world.this_run(),
                 pool,
                 batch_size,

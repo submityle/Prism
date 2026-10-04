@@ -24,6 +24,8 @@ mod filter;
 mod iter;
 #[cfg(feature = "multi_thread")]
 mod par;
+#[cfg(feature = "multi_thread")]
+mod slice;
 #[cfg(feature = "simd")]
 mod simd;
 mod state;
@@ -35,6 +37,8 @@ pub use filter::{Added, Changed, Or, QueryFilter, With, Without};
 pub use iter::QueryIter;
 #[cfg(feature = "simd")]
 pub use simd::{active, add_assign, axpy_assign, scale_assign, sum, Backend};
+#[cfg(feature = "multi_thread")]
+pub use slice::{ArchetypalFilter, ColumnSliceData};
 pub use state::QueryState;
 
 #[cfg(test)]
@@ -43,6 +47,8 @@ mod change_detection_tests;
 mod dirty_tests;
 #[cfg(all(test, feature = "multi_thread"))]
 mod par_tests;
+#[cfg(all(test, feature = "multi_thread"))]
+mod slice_tests;
 #[cfg(test)]
 mod sparse_tests;
 #[cfg(test)]

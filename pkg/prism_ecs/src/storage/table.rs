@@ -136,6 +136,41 @@ impl Column {
         unsafe { self.data.as_mut_slice::<T>() }
     }
 
+    /// Borrow the half-open row range `[start, end)` as a typed slice `&[T]`.
+    ///
+    /// Forwards to [`BlobVec::as_slice_range`], which builds the slice directly
+    /// from the offset element base so that disjoint row ranges of one column
+    /// can be lent to different threads (the chunk-parallel slice path, design
+    /// §8.3) without ever forming an overlapping whole-column borrow.
+    ///
+    /// # Safety
+    /// `T` must be the exact component type stored here; `start <= end <=
+    /// len()`; and the caller must hold shared access to rows `[start, end)`
+    /// for the slice's lifetime.
+    #[inline]
+    pub unsafe fn as_slice_range<T>(&self, start: usize, end: usize) -> &[T] {
+        // SAFETY: forwarded type + range + access contract.
+        unsafe { self.data.as_slice_range::<T>(start, end) }
+    }
+
+    /// Borrow the half-open row range `[start, end)` as a typed mutable slice
+    /// `&mut [T]`.
+    ///
+    /// Like [`Column::as_mut_slice`] this stamps no change ticks; the
+    /// chunk-parallel slice path stamps per-row ticks for the covered range
+    /// before handing out the slice.
+    ///
+    /// # Safety
+    /// `T` must be the exact component type stored here; `start <= end <=
+    /// len()`; and the caller must hold unique access to rows `[start, end)`
+    /// for the slice's lifetime (sibling ranges may be borrowed concurrently).
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn as_mut_slice_range<T>(&self, start: usize, end: usize) -> &mut [T] {
+        // SAFETY: forwarded type + range + unique-access contract.
+        unsafe { self.data.as_mut_slice_range::<T>(start, end) }
+    }
+
     /// Append a value by moving `size` bytes from `value`, stamping both its
     /// added and changed ticks with `change_tick` (a brand-new value).
     ///

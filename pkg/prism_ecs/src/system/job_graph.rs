@@ -10,8 +10,9 @@
 //! across the pool, e.g.
 //!
 //! ```ignore
-//! fn skinning(mut q: Query<(&mut SkinnedMesh, &Pose)>, jobs: JobGraph) {
-//!     jobs.par_for_each_mut(&mut q, 256, |(mesh, pose)| { /* SIMD 蒙皮 */ });
+//! fn skinning(mut q: Query<(&mut Joint, &Pose)>, jobs: JobGraph) {
+//!     // one chunk-aligned slice per sub-job — SIMD over the whole run at once
+//!     jobs.par_chunks_mut(&mut q, 256, |(joints, poses)| { /* SIMD 蒙皮 */ });
 //! }
 //! ```
 //!
@@ -21,18 +22,26 @@
 //! [`SystemParam`] that reads it. A system that uses `JobGraph` therefore
 //! requires `ComputeTaskPool` to be inserted into the world first.
 //!
-//! # Granularity: rows now, slices later
+//! # Granularity: rows and slices
 //!
-//! §8.3 sketches `jobs.par_chunks(&mut q, |chunk| ...)` handing each sub-job a
-//! whole chunk/slice so the body can run SIMD kernels over it. That slice-fetch
-//! form needs a column-slice `QueryData` path that does not yet exist, so it is
-//! an honest follow-up. What ships here is the **row-granular** form
-//! ([`par_for_each`](JobGraph::par_for_each) /
-//! [`par_for_each_mut`](JobGraph::par_for_each_mut)): rows are still partitioned
-//! into disjoint batches and run in parallel across the pool — the same load
-//! balancing — just invoking `func` once per row rather than once per slice.
+//! Two fan-out granularities ship, both over the same shared pool:
+//!
+//! * **Row-granular** ([`par_for_each`](JobGraph::par_for_each) /
+//!   [`par_for_each_mut`](JobGraph::par_for_each_mut)): rows are partitioned
+//!   into disjoint batches and `func` is invoked once per row — the general
+//!   form that accepts any [`QueryData`]/[`QueryFilter`].
+//! * **Slice-granular** ([`par_chunks`](JobGraph::par_chunks) /
+//!   [`par_chunks_mut`](JobGraph::par_chunks_mut)): §8.3's headline
+//!   `jobs.par_chunks(&mut q, |chunk| ...)`. Each sub-job receives one
+//!   **chunk-aligned typed column slice** (`&[T]` / `&mut [T]`, or a tuple), so
+//!   the body can run a DOTS-style `IJobChunk` SIMD kernel over the whole slice
+//!   in a single pass. This form restricts the query to table-backed, sliceable
+//!   data ([`ColumnSliceData`](crate::query::ColumnSliceData)) and an
+//!   archetype-uniform filter ([`ArchetypalFilter`](crate::query::ArchetypalFilter));
+//!   the per-row change filters and sparse/shared storage are rejected at
+//!   compile time (see [`crate::query::slice`]).
 
-use crate::query::{Access, QueryData, QueryFilter, ReadOnlyQueryData};
+use crate::query::{Access, ArchetypalFilter, ColumnSliceData, QueryData, QueryFilter, ReadOnlyQueryData};
 use crate::resource::{Resource, ResourceId};
 use crate::system::param::SystemParam;
 use crate::system::query_param::Query;
@@ -69,10 +78,10 @@ impl ComputeTaskPool {
 /// world's [`ComputeTaskPool`] (design §8.3).
 ///
 /// It reads the [`ComputeTaskPool`] resource and exposes it through the
-/// `par_for_each*` helpers, which forward to [`Query::par_for_each`] /
-/// [`Query::par_for_each_mut`]. Declaring it as a resource read lets the
-/// conflict-graph executor keep systems that only *use* the pool able to run
-/// alongside each other.
+/// `par_for_each*` (row-granular) and `par_chunks*` (slice-granular) helpers,
+/// which forward to the matching [`Query`] methods. Declaring it as a resource
+/// read lets the conflict-graph executor keep systems that only *use* the pool
+/// able to run alongside each other.
 pub struct JobGraph<'w> {
     pool: &'w TaskPool,
 }
@@ -124,6 +133,48 @@ impl<'w> JobGraph<'w> {
         Func: Fn(D::Item<'_>) + Send + Sync,
     {
         q.par_for_each_mut(self.pool, batch_size, func);
+    }
+
+    /// Fan `q`'s matched rows out across the pool as **chunk-aligned typed
+    /// column slices** with shared access (design §8.3 `jobs.par_chunks`),
+    /// invoking `func` once per chunk-aligned batch with a read-only slice
+    /// tuple.
+    ///
+    /// Available only for read-only (`D: `[`ReadOnlyQueryData`]), sliceable
+    /// (`D: `[`ColumnSliceData`]) queries with an archetype-uniform filter
+    /// (`F: `[`ArchetypalFilter`]). `batch_size` is the soft target row count,
+    /// rounded down to a whole number of 16KiB chunks (at least one). The call
+    /// returns once every batch completes.
+    #[inline]
+    pub fn par_chunks<D, F, Func>(&self, q: &Query<'_, '_, D, F>, batch_size: usize, func: Func)
+    where
+        D: QueryData + ReadOnlyQueryData + ColumnSliceData,
+        F: ArchetypalFilter,
+        Func: Fn(<D as ColumnSliceData>::Slice<'_>) + Send + Sync,
+    {
+        q.par_chunks(self.pool, batch_size, func);
+    }
+
+    /// Fan `q`'s matched rows out across the pool as **chunk-aligned typed
+    /// column slices** with exclusive access, permitting `&mut [T]` slice terms
+    /// (design §8.3 `jobs.par_chunks`, the SIMD-skinning headline).
+    ///
+    /// Batches are chunk-aligned and disjoint, so the `&mut [T]` slices
+    /// different threads form never overlap; a `&mut T` term stamps the change
+    /// ticks of its whole handed-out range up front. The call returns once every
+    /// batch completes.
+    #[inline]
+    pub fn par_chunks_mut<D, F, Func>(
+        &self,
+        q: &mut Query<'_, '_, D, F>,
+        batch_size: usize,
+        func: Func,
+    ) where
+        D: QueryData + ColumnSliceData,
+        F: ArchetypalFilter,
+        Func: Fn(<D as ColumnSliceData>::Slice<'_>) + Send + Sync,
+    {
+        q.par_chunks_mut(self.pool, batch_size, func);
     }
 }
 
