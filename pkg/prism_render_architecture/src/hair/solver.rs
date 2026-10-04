@@ -17,6 +17,14 @@
 //! while staying a simple, allocation-light, deterministic array-in/array-out
 //! kernel (design §9) — no global matrix, no sparse solve.
 //!
+//! The per-vertex Newton step itself — the implicit-Euler inertia term, the
+//! stretch-spring force / `PSD`-Hessian, and the `3x3` local solve — is **not**
+//! re-implemented here: it is delegated to the shared
+//! [`prism_physics_core::vbd`] kernel through
+//! [`super::physics_bridge::solve_vbd_vertex`]. This module owns only the
+//! poly-line topology, the Gauss-Seidel sweep order, and the strand-specific
+//! point-to-midpoint bending pull.
+//!
 //! [`HairSolverKind`] plus [`SolverSelection`] pick between the two per groom:
 //! ordinary hair stays on the cheap XPBD path, and only grooms whose authored
 //! stiffness crosses a threshold pay for VBD. Collision projection reuses the
@@ -90,108 +98,6 @@ pub struct VbdParams {
     pub damping: f32,
 }
 
-/// Vectors shorter than the square root of this are treated as zero-length.
-const EPS_LEN_SQ: f32 = 1.0e-24;
-/// A symmetric 3x3 solve is skipped when the determinant is below this, so a
-/// degenerate (singular) Hessian never divides by ~0.
-const EPS_DET: f32 = 1.0e-20;
-
-/// A dense 3x3 matrix in row-major order; used only for per-vertex Hessians.
-#[derive(Clone, Copy)]
-struct Mat3 {
-    m: [f32; 9],
-}
-
-impl Mat3 {
-    /// A scalar multiple of the identity.
-    fn scaled_identity(s: f32) -> Self {
-        let mut m = [0.0; 9];
-        m[0] = s;
-        m[4] = s;
-        m[8] = s;
-        Self { m }
-    }
-
-    fn add(self, rhs: Self) -> Self {
-        let mut m = [0.0; 9];
-        for (out, (a, b)) in m.iter_mut().zip(self.m.iter().zip(rhs.m.iter())) {
-            *out = a + b;
-        }
-        Self { m }
-    }
-
-    /// The outer product `v vᵀ` scaled by `s`.
-    fn scaled_outer(v: Vec3, s: f32) -> Self {
-        Self {
-            m: [
-                s * v.x * v.x,
-                s * v.x * v.y,
-                s * v.x * v.z,
-                s * v.y * v.x,
-                s * v.y * v.y,
-                s * v.y * v.z,
-                s * v.z * v.x,
-                s * v.z * v.y,
-                s * v.z * v.z,
-            ],
-        }
-    }
-
-    /// Solves `self * x = rhs` by explicit cofactor inversion. Returns `None`
-    /// when the matrix is (near-)singular so the caller can simply not move the
-    /// vertex this sweep instead of producing a non-finite position.
-    fn solve(self, rhs: Vec3) -> Option<Vec3> {
-        let m = &self.m;
-        let c00 = m[4] * m[8] - m[5] * m[7];
-        let c01 = m[5] * m[6] - m[3] * m[8];
-        let c02 = m[3] * m[7] - m[4] * m[6];
-        let det = m[0] * c00 + m[1] * c01 + m[2] * c02;
-        if det.abs() < EPS_DET {
-            return None;
-        }
-        let inv_det = 1.0 / det;
-        // Cofactor (adjugate) rows; the inverse is adjugateᵀ / det.
-        let c10 = m[2] * m[7] - m[1] * m[8];
-        let c11 = m[0] * m[8] - m[2] * m[6];
-        let c12 = m[1] * m[6] - m[0] * m[7];
-        let c20 = m[1] * m[5] - m[2] * m[4];
-        let c21 = m[2] * m[3] - m[0] * m[5];
-        let c22 = m[0] * m[4] - m[1] * m[3];
-        let x = (c00 * rhs.x + c10 * rhs.y + c20 * rhs.z) * inv_det;
-        let y = (c01 * rhs.x + c11 * rhs.y + c21 * rhs.z) * inv_det;
-        let z = (c02 * rhs.x + c12 * rhs.y + c22 * rhs.z) * inv_det;
-        let out = Vec3::new(x, y, z);
-        if out.x.is_finite() && out.y.is_finite() && out.z.is_finite() {
-            Some(out)
-        } else {
-            None
-        }
-    }
-}
-
-/// Accumulates one spring's gradient and (PSD-projected) Hessian contribution
-/// for the vertex at `x`, connected to `other` with rest length `rest` and
-/// stiffness `k`.
-///
-/// The Hessian uses the standard positive-semidefinite spring form
-/// `k·nnᵀ + k·max(0, 1 - rest/len)·(I - nnᵀ)`, which drops the indefinite part
-/// when the spring is compressed (`len < rest`) so the per-vertex Newton step
-/// stays a descent direction and the sweep never blows up.
-fn accumulate_spring(grad: &mut Vec3, hess: &mut Mat3, x: Vec3, other: Vec3, rest: f32, k: f32) {
-    let d = x.sub(other);
-    let len_sq = d.length_squared();
-    if len_sq < EPS_LEN_SQ {
-        return;
-    }
-    let len = len_sq.sqrt();
-    let n = d.scale(1.0 / len);
-    *grad = grad.add(n.scale(k * (len - rest)));
-    let tangential = (1.0 - rest / len).max(0.0);
-    // k·tangential·I + k·(1 - tangential)·nnᵀ
-    *hess = hess.add(Mat3::scaled_identity(k * tangential));
-    *hess = hess.add(Mat3::scaled_outer(n, k * (1.0 - tangential)));
-}
-
 /// Advances a single guide strand by `params.dt` with the VBD solver.
 ///
 /// The contract matches [`super::dynamics::simulate_strand`]: `particles` is the
@@ -242,7 +148,9 @@ pub fn simulate_strand_vbd(
             particle.prev_position = particle.position;
         }
 
-        // 2. Gauss-Seidel vertex sweeps: one exact Newton step per free vertex.
+        // 2. Gauss-Seidel vertex sweeps: one exact per-vertex Newton step,
+        //    delegated to the shared physics-core VBD kernel so the stretch and
+        //    bending constitutive math is never re-implemented here.
         let count = particles.len();
         for _ in 0..params.iterations {
             for i in 0..count {
@@ -251,50 +159,45 @@ pub fn simulate_strand_vbd(
                 }
                 let x = particles[i].position;
                 let mass = 1.0 / particles[i].inverse_mass;
-                let inertia = mass / sub_dt_sq;
 
-                let mut grad = x.sub(targets[i]).scale(inertia);
-                let mut hess = Mat3::scaled_identity(inertia);
-
-                // Segment to the next particle uses rest_lengths[i].
-                if i + 1 < count
-                    && let Some(&rest) = rest_lengths.get(i)
-                {
-                    accumulate_spring(
-                        &mut grad,
-                        &mut hess,
-                        x,
-                        particles[i + 1].position,
-                        rest,
-                        stretch,
-                    );
-                }
-                // Segment to the previous particle uses rest_lengths[i - 1].
-                if i >= 1
-                    && let Some(&rest) = rest_lengths.get(i - 1)
-                {
-                    accumulate_spring(
-                        &mut grad,
-                        &mut hess,
-                        x,
-                        particles[i - 1].position,
-                        rest,
-                        stretch,
-                    );
-                }
-                // Bending: pull an interior vertex toward its neighbors' midpoint.
-                if bending > 0.0 && i >= 1 && i + 1 < count {
+                // Segment to the next particle uses rest_lengths[i]; the segment
+                // to the previous particle uses rest_lengths[i - 1].
+                let next_neighbor = if i + 1 < count {
+                    rest_lengths
+                        .get(i)
+                        .map(|&rest| (particles[i + 1].position, rest))
+                } else {
+                    None
+                };
+                let prev_neighbor = if i >= 1 {
+                    rest_lengths
+                        .get(i - 1)
+                        .map(|&rest| (particles[i - 1].position, rest))
+                } else {
+                    None
+                };
+                // Bending pulls an interior vertex toward its neighbors' midpoint.
+                let bending_pull = if bending > 0.0 && i >= 1 && i + 1 < count {
                     let mid = particles[i - 1]
                         .position
                         .add(particles[i + 1].position)
                         .scale(0.5);
-                    grad = grad.add(x.sub(mid).scale(bending));
-                    hess = hess.add(Mat3::scaled_identity(bending));
-                }
+                    Some((mid, bending))
+                } else {
+                    None
+                };
 
-                if let Some(delta) = hess.solve(grad) {
-                    particles[i].position = x.sub(delta);
-                }
+                let dx = super::physics_bridge::solve_vbd_vertex(
+                    x,
+                    targets[i],
+                    mass,
+                    sub_dt,
+                    prev_neighbor,
+                    next_neighbor,
+                    stretch,
+                    bending_pull,
+                );
+                particles[i].position = x.add(dx);
             }
         }
 

@@ -224,6 +224,73 @@ pub(crate) fn solve_self_collision_pair(
     Some((from_glam(new_i), from_glam(new_j)))
 }
 
+/// Delegates one Vertex Block Descent (`VBD`) per-vertex Newton step to the
+/// shared [`prism_physics_core`] `VBD` kernel.
+///
+/// Assembles, for a single strand vertex, the implicit-Euler inertia term, the
+/// stretch-spring force / `PSD`-Hessian for each incident segment, and an
+/// optional point-to-midpoint bending term into a
+/// [`prism_physics_core::vbd::VertexSystem`], then returns the position delta
+/// `dx` (add it to the current position). The inertia term uses mass over the
+/// substep so the assembled system is always invertible for a free vertex; a
+/// singular system yields [`Vec3::ZERO`] so the vertex simply holds still.
+///
+/// `prev_neighbor` / `next_neighbor` are the `(position, rest_length)` of the
+/// segments toward particle `i - 1` / `i + 1`; `bending` is the
+/// `(neighbor_midpoint, bending_stiffness)` of the interior bending pull. The
+/// stretch and bending constitutive math lives entirely in the physics core so
+/// the strand solver owns only the poly-line topology and sweep order.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a single VBD vertex genuinely needs its inertia, both incident \
+              segments, the stretch stiffness, and the bending pull as inputs"
+)]
+pub(crate) fn solve_vbd_vertex(
+    position: Vec3,
+    target: Vec3,
+    mass: f32,
+    sub_dt: f32,
+    prev_neighbor: Option<(Vec3, f32)>,
+    next_neighbor: Option<(Vec3, f32)>,
+    stretch_stiffness: f32,
+    bending: Option<(Vec3, f32)>,
+) -> Vec3 {
+    use glam::Mat3 as GlamMat3;
+    use prism_physics_core::vbd::{spring_contribution_between, SpringContribution, VertexSystem};
+
+    let x = to_glam(position);
+    let mut system = VertexSystem::new();
+    system.add_inertia(mass, sub_dt, x, to_glam(target));
+
+    // Segment to the next particle first, then the previous one, matching the
+    // historical strand accumulation order.
+    if let Some((next_position, rest)) = next_neighbor {
+        system.add_spring(spring_contribution_between(
+            x,
+            to_glam(next_position),
+            rest,
+            stretch_stiffness,
+        ));
+    }
+    if let Some((prev_position, rest)) = prev_neighbor {
+        system.add_spring(spring_contribution_between(
+            x,
+            to_glam(prev_position),
+            rest,
+            stretch_stiffness,
+        ));
+    }
+    if let Some((midpoint, bending_stiffness)) = bending {
+        let mid = to_glam(midpoint);
+        system.add_spring(SpringContribution {
+            force: (x - mid) * (-bending_stiffness),
+            hessian: GlamMat3::IDENTITY * bending_stiffness,
+        });
+    }
+
+    from_glam(system.solve())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
