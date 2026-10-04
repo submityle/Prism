@@ -570,6 +570,8 @@ pub mod principal_strain;
 pub use principal_strain::PrincipalStrain;
 pub mod granular_peclet;
 pub use granular_peclet::{GranularPeclet, PecletRegime};
+pub mod granular_bond_number;
+pub use granular_bond_number::{BondRegime, GranularBondNumber};
 
 /// A handle into a [`ShapeRegistry`].
 ///
