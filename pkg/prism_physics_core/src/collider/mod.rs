@@ -306,6 +306,8 @@ pub mod tet_fem_sand_plasticity;
 pub use tet_fem_sand_plasticity::{return_map_sand, SandModel, SandState, SandStep, SandYield};
 pub mod tet_fem_snow_plasticity;
 pub use tet_fem_snow_plasticity::{hardened_lame, return_map_snow, SnowModel, SnowState, SnowStep};
+pub mod tet_fem_snow_force;
+pub use tet_fem_snow_force::{element_snow_force, snow_elastic_potential_energy, SnowForce};
 
 /// A handle into a [`ShapeRegistry`].
 ///
