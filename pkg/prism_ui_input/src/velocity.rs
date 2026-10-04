@@ -24,6 +24,7 @@
 use alloc::vec::Vec;
 
 use crate::geometry::Point;
+use crate::swipe::{classify_swipe, Swipe, SwipeConfig};
 
 /// Longest history retained, matching Android's `VelocityTracker` horizon.
 const MAX_SAMPLES: usize = 20;
@@ -135,6 +136,16 @@ impl VelocityTracker {
         let vx = fit_axis(&times, &xs)?;
         let vy = fit_axis(&times, &ys)?;
         Some(Point::new(vx as f32, vy as f32))
+    }
+
+    /// Classifies the current release velocity into a discrete swipe.
+    ///
+    /// Convenience wrapper over [`VelocityTracker::velocity`] and
+    /// [`classify_swipe`]: returns `None` when there is no velocity estimate or
+    /// the motion is too slow or too diagonal for `config`.
+    #[must_use]
+    pub fn swipe(&self, config: &SwipeConfig) -> Option<Swipe> {
+        classify_swipe(self.velocity()?, config)
     }
 }
 

@@ -59,6 +59,7 @@ pub mod geometry;
 pub mod gesture;
 pub mod hit_test;
 pub mod multitap;
+pub mod swipe;
 pub mod velocity;
 
 pub use dispatch::{DispatchOutcome, Dispatcher, EventContext};
@@ -73,4 +74,5 @@ pub use gesture::{
 };
 pub use hit_test::{hit_test, HitNode, PointerEvents};
 pub use multitap::MultiTapRecognizer;
+pub use swipe::{classify_swipe, Swipe, SwipeConfig, SwipeDirection};
 pub use velocity::VelocityTracker;
