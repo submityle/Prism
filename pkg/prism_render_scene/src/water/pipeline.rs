@@ -124,6 +124,19 @@ pub(crate) struct WaterComputePipelines {
     /// bindings: the mesh uniform, the sampled displacement / normal cascade
     /// textures, the sampler, and the four write-only per-vertex arrays).
     pub(crate) surface_mesh_layout: BindGroupLayout,
+    /// `@group(0)` shared by the counting-sort histogram and exclusive-scan
+    /// passes (`water_flip_cell_histogram.wesl` + `water_flip_cell_scan.wesl`,
+    /// three bindings each: one read-only input, one read-write output and the
+    /// matching uniform).
+    pub(crate) flip_cell_count_layout: BindGroupLayout,
+    /// `@group(0)` for `water_flip_cell_scatter.wesl` (four bindings: the
+    /// read-only packed positions, the read-write cursor seed, the read-write
+    /// sorted-index output and the grid uniform).
+    pub(crate) flip_cell_scatter_layout: BindGroupLayout,
+    /// `@group(0)` for `water_flip_particle_reorder.wesl` (four bindings: the
+    /// read-only sorted indices, the read-only source particle pool, the
+    /// read-write reordered output and the reorder uniform).
+    pub(crate) flip_particle_reorder_layout: BindGroupLayout,
 
     /// `water_spectrum_ifft`: evolve and inverse-`FFT` the wave spectrum.
     pub(crate) spectrum_ifft: CachedComputePipelineId,
@@ -181,6 +194,18 @@ pub(crate) struct WaterComputePipelines {
     /// textures and scatter the four per-vertex storage arrays the raster draw
     /// consumes.
     pub(crate) surface_mesh: CachedComputePipelineId,
+    /// `water_flip_cell_histogram`: count the particles falling in each
+    /// pressure cell (counting-sort histogram).
+    pub(crate) flip_cell_histogram: CachedComputePipelineId,
+    /// `water_flip_cell_scan`: exclusive-scan the per-cell counts into start
+    /// offsets (single-workgroup prefix sum).
+    pub(crate) flip_cell_scan: CachedComputePipelineId,
+    /// `water_flip_cell_scatter`: scatter each particle index into its sorted
+    /// slot using the scanned offsets as atomic cursors.
+    pub(crate) flip_cell_scatter: CachedComputePipelineId,
+    /// `water_flip_particle_reorder`: gather the particle pool into
+    /// cell-contiguous order for coherent `MAC` scatter/gather.
+    pub(crate) flip_particle_reorder: CachedComputePipelineId,
 }
 
 impl WaterComputePipelines {
@@ -218,6 +243,10 @@ impl WaterComputePipelines {
             WaterKernel::FftNormalize => self.fft_normalize,
             WaterKernel::SpectrumAssemble => self.spectrum_assemble,
             WaterKernel::SurfaceMesh => self.surface_mesh,
+            WaterKernel::FlipCellHistogram => self.flip_cell_histogram,
+            WaterKernel::FlipCellScan => self.flip_cell_scan,
+            WaterKernel::FlipCellScatter => self.flip_cell_scatter,
+            WaterKernel::FlipParticleReorder => self.flip_particle_reorder,
         }
     }
 
@@ -247,6 +276,11 @@ impl WaterComputePipelines {
             WaterKernel::WetnessStep => &self.wetness_layout,
             WaterKernel::CouplingReadback => &self.coupling_layout,
             WaterKernel::SurfaceMesh => &self.surface_mesh_layout,
+            WaterKernel::FlipCellHistogram | WaterKernel::FlipCellScan => {
+                &self.flip_cell_count_layout
+            }
+            WaterKernel::FlipCellScatter => &self.flip_cell_scatter_layout,
+            WaterKernel::FlipParticleReorder => &self.flip_particle_reorder_layout,
             WaterKernel::SpectrumEvolve | WaterKernel::SpectrumAssemble => {
                 &self.spectrum_fft_layout
             }
@@ -290,7 +324,11 @@ pub(crate) fn wesl_group(kernel: WaterKernel) -> u32 {
         | WaterKernel::FftStage
         | WaterKernel::FftNormalize
         | WaterKernel::SpectrumAssemble
-        | WaterKernel::SurfaceMesh => 0,
+        | WaterKernel::SurfaceMesh
+        | WaterKernel::FlipCellHistogram
+        | WaterKernel::FlipCellScan
+        | WaterKernel::FlipCellScatter
+        | WaterKernel::FlipParticleReorder => 0,
     }
 }
 
@@ -379,6 +417,52 @@ fn mac_g2p_layout_entries() -> BindGroupLayoutEntries<4> {
             storage_buffer_sized(false, None),
             storage_buffer_read_only_sized(false, None),
             storage_buffer_read_only_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the shared counting-sort cell-count `@group(0)` layout entries (three
+/// bindings): one read-only input, one read-write output, and the matching
+/// uniform. The histogram pass binds packed positions in and the atomic count
+/// buffer out; the exclusive-scan pass binds the counts in and the offsets out.
+fn flip_cell_count_layout_entries() -> BindGroupLayoutEntries<3> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the `water_flip_cell_scatter.wesl` `@group(0)` layout entries (four
+/// bindings): the read-only packed particle positions, the read-write cursor
+/// seed (the scanned offsets consumed by `atomic` increment), the read-write
+/// sorted-index output, and the grid uniform.
+fn flip_cell_scatter_layout_entries() -> BindGroupLayoutEntries<4> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
+/// Builds the `water_flip_particle_reorder.wesl` `@group(0)` layout entries
+/// (four bindings): the read-only sorted indices, the read-only source particle
+/// pool, the read-write reordered output pool, and the reorder uniform.
+fn flip_particle_reorder_layout_entries() -> BindGroupLayoutEntries<4> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_sized(false, None),
             uniform_buffer_sized(false, None),
         ),
     )
@@ -640,6 +724,9 @@ pub(crate) fn init_water_compute_pipelines(
     let mac_solve_entries = mac_solve_layout_entries();
     let mac_g2p_entries = mac_g2p_layout_entries();
     let surface_mesh_entries = surface_mesh_layout_entries();
+    let flip_cell_count_entries = flip_cell_count_layout_entries();
+    let flip_cell_scatter_entries = flip_cell_scatter_layout_entries();
+    let flip_particle_reorder_entries = flip_particle_reorder_layout_entries();
 
     let ocean_descriptor = BindGroupLayoutDescriptor::new("prism water ocean", &ocean_entries);
     let surface_reconstruct_descriptor = BindGroupLayoutDescriptor::new(
@@ -674,6 +761,14 @@ pub(crate) fn init_water_compute_pipelines(
         BindGroupLayoutDescriptor::new("prism water mac g2p", &mac_g2p_entries);
     let surface_mesh_descriptor =
         BindGroupLayoutDescriptor::new("prism water surface mesh", &surface_mesh_entries);
+    let flip_cell_count_descriptor =
+        BindGroupLayoutDescriptor::new("prism water flip cell count", &flip_cell_count_entries);
+    let flip_cell_scatter_descriptor =
+        BindGroupLayoutDescriptor::new("prism water flip cell scatter", &flip_cell_scatter_entries);
+    let flip_particle_reorder_descriptor = BindGroupLayoutDescriptor::new(
+        "prism water flip particle reorder",
+        &flip_particle_reorder_entries,
+    );
 
     // Empty placeholder layout padding the lower, unused group slots of the
     // `@group(1..=4)` passes so the `wgpu` pipeline layout stays contiguous; the
@@ -710,6 +805,14 @@ pub(crate) fn init_water_compute_pipelines(
     let mac_g2p_layout = device.create_bind_group_layout("prism water mac g2p", &mac_g2p_entries);
     let surface_mesh_layout =
         device.create_bind_group_layout("prism water surface mesh", &surface_mesh_entries);
+    let flip_cell_count_layout =
+        device.create_bind_group_layout("prism water flip cell count", &flip_cell_count_entries);
+    let flip_cell_scatter_layout = device
+        .create_bind_group_layout("prism water flip cell scatter", &flip_cell_scatter_entries);
+    let flip_particle_reorder_layout = device.create_bind_group_layout(
+        "prism water flip particle reorder",
+        &flip_particle_reorder_entries,
+    );
 
     let ocean_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_ocean.wesl");
@@ -735,6 +838,22 @@ pub(crate) fn init_water_compute_pipelines(
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_flip_mac_g2p.wesl");
     let surface_mesh_shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/water_surface_mesh.wesl");
+    let flip_cell_histogram_shader: Handle<Shader> = load_embedded_asset!(
+        asset_server.as_ref(),
+        "../shaders/water_flip_cell_histogram.wesl"
+    );
+    let flip_cell_scan_shader: Handle<Shader> = load_embedded_asset!(
+        asset_server.as_ref(),
+        "../shaders/water_flip_cell_scan.wesl"
+    );
+    let flip_cell_scatter_shader: Handle<Shader> = load_embedded_asset!(
+        asset_server.as_ref(),
+        "../shaders/water_flip_cell_scatter.wesl"
+    );
+    let flip_particle_reorder_shader: Handle<Shader> = load_embedded_asset!(
+        asset_server.as_ref(),
+        "../shaders/water_flip_particle_reorder.wesl"
+    );
 
     // Every water pipeline binds the layout(s) matching its shader's declared
     // `@group(N)` index; passes on `@group(1..=4)` prepend empty placeholder
@@ -921,6 +1040,30 @@ pub(crate) fn init_water_compute_pipelines(
         &surface_mesh_shader,
         WaterKernel::SurfaceMesh,
     );
+    let flip_cell_histogram = queue(
+        "prism water flip cell histogram",
+        vec![flip_cell_count_descriptor.clone()],
+        &flip_cell_histogram_shader,
+        WaterKernel::FlipCellHistogram,
+    );
+    let flip_cell_scan = queue(
+        "prism water flip cell scan",
+        vec![flip_cell_count_descriptor.clone()],
+        &flip_cell_scan_shader,
+        WaterKernel::FlipCellScan,
+    );
+    let flip_cell_scatter = queue(
+        "prism water flip cell scatter",
+        vec![flip_cell_scatter_descriptor.clone()],
+        &flip_cell_scatter_shader,
+        WaterKernel::FlipCellScatter,
+    );
+    let flip_particle_reorder = queue(
+        "prism water flip particle reorder",
+        vec![flip_particle_reorder_descriptor.clone()],
+        &flip_particle_reorder_shader,
+        WaterKernel::FlipParticleReorder,
+    );
 
     commands.insert_resource(WaterComputePipelines {
         ocean_layout,
@@ -955,6 +1098,9 @@ pub(crate) fn init_water_compute_pipelines(
         mac_solve_layout,
         mac_g2p_layout,
         surface_mesh_layout,
+        flip_cell_count_layout,
+        flip_cell_scatter_layout,
+        flip_particle_reorder_layout,
         spectrum_evolve,
         spectrum_assemble,
         fft_bit_reverse,
@@ -967,6 +1113,10 @@ pub(crate) fn init_water_compute_pipelines(
         mac_project,
         mac_g2p,
         surface_mesh,
+        flip_cell_histogram,
+        flip_cell_scan,
+        flip_cell_scatter,
+        flip_particle_reorder,
     });
 }
 
@@ -1025,6 +1175,9 @@ mod tests {
         assert_eq!(mac_solve_layout_entries().len(), 5);
         assert_eq!(mac_g2p_layout_entries().len(), 4);
         assert_eq!(surface_mesh_layout_entries().len(), 8);
+        assert_eq!(flip_cell_count_layout_entries().len(), 3);
+        assert_eq!(flip_cell_scatter_layout_entries().len(), 4);
+        assert_eq!(flip_particle_reorder_layout_entries().len(), 4);
 
         for kernel in WaterKernel::ALL {
             assert!(

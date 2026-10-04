@@ -63,6 +63,12 @@ fn bind_group_for<'a>(
         | WaterKernel::FlipMacPressure
         | WaterKernel::FlipMacProject => &groups.mac_solve,
         WaterKernel::FlipMacG2P => &groups.mac_g2p,
+        // `FLIP`/`APIC` counting sort: histogram -> scan -> scatter -> reorder,
+        // each binding its own standalone `@group(0)` interface.
+        WaterKernel::FlipCellHistogram => &groups.cell_histogram,
+        WaterKernel::FlipCellScan => &groups.cell_scan,
+        WaterKernel::FlipCellScatter => &groups.cell_scatter,
+        WaterKernel::FlipParticleReorder => &groups.particle_reorder,
         // The spectral evolve/assemble and the three butterfly passes are only
         // ever recorded through the `SpectrumIfft` expansion below (which binds
         // the per-pass ping-pong groups directly), never as a top-level planned
@@ -305,6 +311,10 @@ mod tests {
             | WaterKernel::FlipMacPressure
             | WaterKernel::FlipMacProject => 14,
             WaterKernel::FlipMacG2P => 15,
+            WaterKernel::FlipCellHistogram => 18,
+            WaterKernel::FlipCellScan => 19,
+            WaterKernel::FlipCellScatter => 20,
+            WaterKernel::FlipParticleReorder => 21,
             // All five spectral/butterfly kernels bind the shared spectrum_fft
             // group in `bind_group_for`, so the mirror collapses them together.
             WaterKernel::SpectrumEvolve

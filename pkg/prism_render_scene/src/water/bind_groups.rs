@@ -48,11 +48,13 @@ use bevy_render::{
 };
 use bytemuck::Pod;
 use prism_render_architecture::water::gpu::buffers::{
-    WaterBufferCounts, WaterPersistentBufferSet, GRID_SCALAR_STRIDE, PBF_PARTICLE_STRIDE,
+    WaterBufferCounts, WaterPersistentBufferSet, FLIP_PARTICLE_STRIDE, GRID_SCALAR_STRIDE,
+    PBF_PARTICLE_STRIDE,
 };
 use prism_render_architecture::water::gpu::fft_pass_ping_pong;
 use prism_render_architecture::water::gpu::pipeline::mac_face_count;
 
+use super::abi::{GpuFlipCellGridParams, GpuFlipReorderParams, GpuFlipScanParams};
 use super::abi::{
     GpuFlipParticle, GpuFlipSimParams, GpuFlipSurfaceParams, GpuGerstnerWave, GpuMacParams,
     GpuPbfParams, GpuSprayParams, GpuSprayParticle, GpuSpraySource, GpuSpraySpawnHeader,
@@ -287,6 +289,19 @@ pub(crate) struct WaterBodyGpuBuffers {
     pub(crate) flip_surface_thickness: Buffer,
     pub(crate) flip_surface_normal: TextureView,
     pub(crate) flip_surface_params: Buffer,
+    // `FLIP`/`APIC` counting-sort (cell histogram -> scan -> scatter ->
+    // particle reorder): the packed `vec4` positions the histogram and
+    // scatter read, the per-cell counts and scanned start offsets, the
+    // sorted particle indices, the cell-contiguous reordered pool, and the
+    // three sort uniforms.
+    pub(crate) flip_particle_positions: Buffer,
+    pub(crate) flip_cell_counts: Buffer,
+    pub(crate) flip_cell_offsets: Buffer,
+    pub(crate) flip_sorted_indices: Buffer,
+    pub(crate) flip_particles_reordered: Buffer,
+    pub(crate) flip_cell_grid_params: Buffer,
+    pub(crate) flip_cell_scan_params: Buffer,
+    pub(crate) flip_particle_reorder_params: Buffer,
     // Face-centered staggered `MAC` projection buffers (shared `FLIP`/`APIC`
     // grid): the packed `[u | v | w]` faces, the `P2G` momentum/mass atomic
     // scatter, a pre-projection snapshot for the `G2P` `FLIP` delta, and the
@@ -506,6 +521,56 @@ impl WaterBodyGpuBuffers {
             device,
             "prism water flip surface params",
             &upload.flip_surface_params,
+        );
+
+        // ---- FLIP / APIC counting sort (cell histogram -> scan -> scatter ->
+        // particle reorder) ----
+        // The histogram and scatter passes read a packed `array<vec4<f32>>` of
+        // particle positions (16 bytes/particle), not the full 80-byte
+        // `GpuFlipParticle`, so derive that tight position pool here rather than
+        // aliasing `flip_particles` (which would mis-stride the read). The
+        // reorder pass gathers the full `flip_particles` pool into a
+        // cell-contiguous copy sized identically to the source.
+        let flip_positions: Vec<[f32; 4]> = upload.flip_particles.iter().map(|p| p.pos).collect();
+        let flip_particle_positions = readable_storage(
+            device,
+            "prism water flip particle positions",
+            &flip_positions,
+        );
+        let flip_cell_counts = zeroed_storage(
+            device,
+            "prism water flip cell counts",
+            u64::from(upload.flip_grid_cells) * u64::from(GRID_SCALAR_STRIDE),
+        );
+        let flip_cell_offsets = zeroed_storage(
+            device,
+            "prism water flip cell offsets",
+            (u64::from(upload.flip_grid_cells) + 1) * u64::from(GRID_SCALAR_STRIDE),
+        );
+        let flip_sorted_indices = zeroed_storage(
+            device,
+            "prism water flip sorted indices",
+            (upload.flip_particles.len() as u64) * u64::from(GRID_SCALAR_STRIDE),
+        );
+        let flip_particles_reordered = zeroed_storage(
+            device,
+            "prism water flip particles reordered",
+            (upload.flip_particles.len() as u64) * u64::from(FLIP_PARTICLE_STRIDE),
+        );
+        let flip_cell_grid_params = uniform(
+            device,
+            "prism water flip cell grid params",
+            &GpuFlipCellGridParams::from_flip(&upload.flip_params),
+        );
+        let flip_cell_scan_params = uniform(
+            device,
+            "prism water flip cell scan params",
+            &GpuFlipScanParams::from_flip(&upload.flip_params),
+        );
+        let flip_particle_reorder_params = uniform(
+            device,
+            "prism water flip particle reorder params",
+            &GpuFlipReorderParams::from_flip(&upload.flip_params),
         );
 
         // ---- Face-centered staggered MAC projection ----
@@ -784,6 +849,14 @@ impl WaterBodyGpuBuffers {
             flip_surface_thickness,
             flip_surface_normal,
             flip_surface_params,
+            flip_particle_positions,
+            flip_cell_counts,
+            flip_cell_offsets,
+            flip_sorted_indices,
+            flip_particles_reordered,
+            flip_cell_grid_params,
+            flip_cell_scan_params,
+            flip_particle_reorder_params,
             mac_faces,
             mac_face_scatter,
             mac_faces_preproj,
@@ -905,6 +978,18 @@ pub(crate) struct WaterBodyBindGroups {
     /// `@group(0)` for `water_flip_mac_g2p` (particles, the projected faces, the
     /// pre-projection snapshot and the shared `FLIP` uniform).
     pub(crate) mac_g2p: BindGroup,
+    /// `@group(0)` for `water_flip_cell_histogram` (the packed positions, the
+    /// atomic per-cell counts and the grid uniform).
+    pub(crate) cell_histogram: BindGroup,
+    /// `@group(0)` for `water_flip_cell_scan` (the counts in, the scanned
+    /// offsets out and the scan uniform).
+    pub(crate) cell_scan: BindGroup,
+    /// `@group(0)` for `water_flip_cell_scatter` (the packed positions, the
+    /// scanned-offset cursors, the sorted-index output and the grid uniform).
+    pub(crate) cell_scatter: BindGroup,
+    /// `@group(0)` for `water_flip_particle_reorder` (the sorted indices, the
+    /// source pool, the reordered output pool and the reorder uniform).
+    pub(crate) particle_reorder: BindGroup,
     /// `@group(0)` for `spectrum_evolve` + `spectrum_assemble` (thirteen
     /// bindings), one bind group per cascade in cascade order. The recorder
     /// binds `spectrum_fft[c]` so each inverse `FFT` transforms atlas tile `c`.
@@ -1106,6 +1191,44 @@ impl WaterBodyBindGroups {
                 buffers.flip_params.as_entire_binding(),
             )),
         );
+        let cell_histogram = device.create_bind_group(
+            "prism water flip cell histogram",
+            &pipelines.flip_cell_count_layout,
+            &BindGroupEntries::sequential((
+                buffers.flip_particle_positions.as_entire_binding(),
+                buffers.flip_cell_counts.as_entire_binding(),
+                buffers.flip_cell_grid_params.as_entire_binding(),
+            )),
+        );
+        let cell_scan = device.create_bind_group(
+            "prism water flip cell scan",
+            &pipelines.flip_cell_count_layout,
+            &BindGroupEntries::sequential((
+                buffers.flip_cell_counts.as_entire_binding(),
+                buffers.flip_cell_offsets.as_entire_binding(),
+                buffers.flip_cell_scan_params.as_entire_binding(),
+            )),
+        );
+        let cell_scatter = device.create_bind_group(
+            "prism water flip cell scatter",
+            &pipelines.flip_cell_scatter_layout,
+            &BindGroupEntries::sequential((
+                buffers.flip_particle_positions.as_entire_binding(),
+                buffers.flip_cell_offsets.as_entire_binding(),
+                buffers.flip_sorted_indices.as_entire_binding(),
+                buffers.flip_cell_grid_params.as_entire_binding(),
+            )),
+        );
+        let particle_reorder = device.create_bind_group(
+            "prism water flip particle reorder",
+            &pipelines.flip_particle_reorder_layout,
+            &BindGroupEntries::sequential((
+                buffers.flip_sorted_indices.as_entire_binding(),
+                buffers.flip_particles.as_entire_binding(),
+                buffers.flip_particles_reordered.as_entire_binding(),
+                buffers.flip_particle_reorder_params.as_entire_binding(),
+            )),
+        );
         // One spectral bind group per cascade: the concatenated `h0` pools and
         // shared ping-pong grids stay bound, and `@binding(2)` selects the
         // cascade's own spectral uniform so the evolve reads its `h0_offset`
@@ -1205,6 +1328,10 @@ impl WaterBodyBindGroups {
             mac_p2g,
             mac_solve,
             mac_g2p,
+            cell_histogram,
+            cell_scan,
+            cell_scatter,
+            particle_reorder,
             spectrum_fft,
             butterfly_passes,
             surface_mesh,

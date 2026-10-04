@@ -261,6 +261,105 @@ pub(crate) struct GpuFlipSurfaceParams {
 }
 
 // ===========================================================================
+// `FLIP`/`APIC` cell counting-sort (water_flip_cell_*.wesl + reorder)
+// ===========================================================================
+
+/// Row-major pressure-cell grid description shared by the counting-sort
+/// histogram and scatter passes. Byte-compatible with `FlipHistogramParams` in
+/// `water_flip_cell_histogram.wesl` and `FlipScatterParams` in
+/// `water_flip_cell_scatter.wesl` (identical layout): a `vec3 + f32` origin/`dx`
+/// row plus four scalar cell/particle counts, 32 bytes. Derived from the live
+/// [`GpuFlipSimParams`] so the sort reuses the one authored `MAC` grid.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuFlipCellGridParams {
+    /// Minimum corner of the domain, world space.
+    pub grid_origin: [f32; 3],
+    /// Cell edge length `dx` (`> 0`).
+    pub dx: f32,
+    /// Cell count along x (`>= 1`).
+    pub nx: u32,
+    /// Cell count along y (`>= 1`).
+    pub ny: u32,
+    /// Cell count along z (`>= 1`).
+    pub nz: u32,
+    /// Number of particles bounding the per-particle dispatch.
+    pub particle_count: u32,
+}
+
+impl GpuFlipCellGridParams {
+    /// Derives the counting-sort grid uniform from the live `FLIP`/`APIC` grid
+    /// so the histogram and scatter passes resolve each particle's pressure
+    /// cell with the exact authored origin, spacing and resolution.
+    #[must_use]
+    pub(crate) fn from_flip(flip: &GpuFlipSimParams) -> Self {
+        Self {
+            grid_origin: [flip.origin[0], flip.origin[1], flip.origin[2]],
+            dx: flip.dx,
+            nx: flip.dim[0],
+            ny: flip.dim[1],
+            nz: flip.dim[2],
+            particle_count: flip.particle_count,
+        }
+    }
+}
+
+/// Flat cell count for the counting-sort exclusive scan. Byte-compatible with
+/// `FlipScanParams` in `water_flip_cell_scan.wesl`, padded to the 16-byte
+/// uniform stride.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuFlipScanParams {
+    /// Number of pressure cells (`nx * ny * nz`); the `offsets` buffer holds
+    /// `cell_count + 1` entries.
+    pub cell_count: u32,
+    /// Padding to the 16-byte uniform stride; never read.
+    pub _pad: [u32; 3],
+}
+
+impl GpuFlipScanParams {
+    /// Derives the scan uniform from the live `FLIP`/`APIC` grid cell count.
+    #[must_use]
+    pub(crate) fn from_flip(flip: &GpuFlipSimParams) -> Self {
+        Self {
+            cell_count: flip.cell_count,
+            _pad: [0; 3],
+        }
+    }
+}
+
+/// Dispatch bounds for the counting-sort particle reorder (gather). Byte-
+/// compatible with `FlipReorderParams` in `water_flip_particle_reorder.wesl`,
+/// padded to the 16-byte uniform stride.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuFlipReorderParams {
+    /// Number of output slots (the in-grid particle total, `offsets[last]`).
+    pub sorted_count: u32,
+    /// Number of particles in the source pool (bounds the gather read).
+    pub src_count: u32,
+    /// Padding to a 16-byte uniform stride; never read.
+    pub _pad0: u32,
+    /// Padding to a 16-byte uniform stride; never read.
+    pub _pad1: u32,
+}
+
+impl GpuFlipReorderParams {
+    /// Derives the reorder bounds from the live `FLIP`/`APIC` particle count.
+    /// A conservative bound sets both counts to the live particle total; the
+    /// shader skips any slot or source index beyond its own buffer length.
+    #[must_use]
+    pub(crate) fn from_flip(flip: &GpuFlipSimParams) -> Self {
+        Self {
+            sorted_count: flip.particle_count,
+            src_count: flip.particle_count,
+            _pad0: 0,
+            _pad1: 0,
+        }
+    }
+}
+
+// ===========================================================================
 // Volume `PBF` + spray (water_pbf.wesl)
 // ===========================================================================
 
@@ -748,6 +847,45 @@ mod tests {
     fn mac_params_is_uniform_stride() {
         assert_eq!(size_of::<GpuMacParams>(), 32);
         assert_eq!(size_of::<GpuMacParams>() % 16, 0);
+    }
+
+    /// The counting-sort grid, scan and reorder uniforms round up to their
+    /// `std140`/`std430` uniform strides (32, 16 and 16 bytes).
+    #[test]
+    fn flip_cell_sort_params_are_uniform_stride() {
+        assert_eq!(size_of::<GpuFlipCellGridParams>(), 32);
+        assert_eq!(size_of::<GpuFlipCellGridParams>() % 16, 0);
+        assert_eq!(size_of::<GpuFlipScanParams>(), 16);
+        assert_eq!(size_of::<GpuFlipScanParams>() % 16, 0);
+        assert_eq!(size_of::<GpuFlipReorderParams>(), 16);
+        assert_eq!(size_of::<GpuFlipReorderParams>() % 16, 0);
+    }
+
+    /// The counting-sort grid uniform derives its origin, spacing, resolution
+    /// and particle count straight from the live `FLIP`/`APIC` grid.
+    #[test]
+    fn flip_cell_grid_params_derive_from_flip() {
+        let flip = GpuFlipSimParams {
+            origin: [1.0, 2.0, 3.0, 0.0],
+            dim: [4, 5, 6, 0],
+            dx: 0.25,
+            particle_count: 42,
+            cell_count: 120,
+            ..Default::default()
+        };
+        let grid = GpuFlipCellGridParams::from_flip(&flip);
+        assert_eq!(grid.grid_origin[0].to_bits(), 1.0_f32.to_bits());
+        assert_eq!(grid.grid_origin[1].to_bits(), 2.0_f32.to_bits());
+        assert_eq!(grid.grid_origin[2].to_bits(), 3.0_f32.to_bits());
+        assert_eq!(grid.nx, 4);
+        assert_eq!(grid.ny, 5);
+        assert_eq!(grid.nz, 6);
+        assert_eq!(grid.particle_count, 42);
+        let scan = GpuFlipScanParams::from_flip(&flip);
+        assert_eq!(scan.cell_count, 120);
+        let reorder = GpuFlipReorderParams::from_flip(&flip);
+        assert_eq!(reorder.sorted_count, 42);
+        assert_eq!(reorder.src_count, 42);
     }
 
     /// The `FLIP` surface uniform rounds up to a 32-byte uniform stride.

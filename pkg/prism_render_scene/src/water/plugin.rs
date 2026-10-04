@@ -86,6 +86,10 @@ impl Plugin for WaterPlugin {
         embedded_asset!(app, "../shaders/water_flip_mac_p2g.wesl");
         embedded_asset!(app, "../shaders/water_flip_mac.wesl");
         embedded_asset!(app, "../shaders/water_flip_mac_g2p.wesl");
+        embedded_asset!(app, "../shaders/water_flip_cell_histogram.wesl");
+        embedded_asset!(app, "../shaders/water_flip_cell_scan.wesl");
+        embedded_asset!(app, "../shaders/water_flip_cell_scatter.wesl");
+        embedded_asset!(app, "../shaders/water_flip_particle_reorder.wesl");
         embedded_asset!(app, "../shaders/water_surface_mesh.wesl");
         embedded_asset!(app, "../shaders/water_surface_raster.wesl");
 
