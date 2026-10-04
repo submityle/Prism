@@ -490,6 +490,8 @@ pub mod sphere_narrow_phase;
 pub use sphere_narrow_phase::{SphereContact, SphereNarrowPhase};
 pub mod sphere_contact_forces;
 pub use sphere_contact_forces::{resolve_sphere_contact_forces, SphereContactForceResolution};
+pub mod sphere_dem_integrator;
+pub use sphere_dem_integrator::{SphereDemIntegrator, SphereDemState, SphereDemStepReport};
 
 /// A handle into a [`ShapeRegistry`].
 ///
