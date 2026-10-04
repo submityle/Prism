@@ -1557,3 +1557,73 @@ fn prism_ease(op: u32, t: f32) -> f32 {\n\
         default: { return t; }\n\
     }\n\
 }\n";
+
+/// Cubic-spline segment evaluators mirroring [`crate::curve::spline`], acting on
+/// `vec3<f32>` control values (the AAA use case being 3D position/velocity
+/// curves). Each positional evaluator has a matching `*_tangent` returning the
+/// derivative w.r.t. `t`. The dispatcher `prism_spline(op, a, b, c, d, t)`
+/// selects a function by op code; `a..d` are the four control vectors in the
+/// order each CPU function takes them. Pure multiply/add polynomials, so the
+/// parity contract is a tight FMA tolerance with no transcendental calls.
+pub const WGSL_SPLINE: &str = "\
+fn prism_spline_hermite(p0: vec3<f32>, m0: vec3<f32>, p1: vec3<f32>, m1: vec3<f32>, t: f32) -> vec3<f32> {\n\
+    let t2 = t * t;\n\
+    let t3 = t2 * t;\n\
+    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;\n\
+    let h10 = t3 - 2.0 * t2 + t;\n\
+    let h01 = -2.0 * t3 + 3.0 * t2;\n\
+    let h11 = t3 - t2;\n\
+    return p0 * h00 + m0 * h10 + p1 * h01 + m1 * h11;\n\
+}\n\
+\n\
+fn prism_spline_hermite_tangent(p0: vec3<f32>, m0: vec3<f32>, p1: vec3<f32>, m1: vec3<f32>, t: f32) -> vec3<f32> {\n\
+    let t2 = t * t;\n\
+    let h00 = 6.0 * t2 - 6.0 * t;\n\
+    let h10 = 3.0 * t2 - 4.0 * t + 1.0;\n\
+    let h01 = -6.0 * t2 + 6.0 * t;\n\
+    let h11 = 3.0 * t2 - 2.0 * t;\n\
+    return p0 * h00 + m0 * h10 + p1 * h01 + m1 * h11;\n\
+}\n\
+\n\
+fn prism_spline_catmull_rom(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, p3: vec3<f32>, t: f32) -> vec3<f32> {\n\
+    let m1 = (p2 - p0) * 0.5;\n\
+    let m2 = (p3 - p1) * 0.5;\n\
+    return prism_spline_hermite(p1, m1, p2, m2, t);\n\
+}\n\
+\n\
+fn prism_spline_catmull_rom_tangent(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, p3: vec3<f32>, t: f32) -> vec3<f32> {\n\
+    let m1 = (p2 - p0) * 0.5;\n\
+    let m2 = (p3 - p1) * 0.5;\n\
+    return prism_spline_hermite_tangent(p1, m1, p2, m2, t);\n\
+}\n\
+\n\
+fn prism_spline_bezier_cubic(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, p3: vec3<f32>, t: f32) -> vec3<f32> {\n\
+    let u = 1.0 - t;\n\
+    let uu = u * u;\n\
+    let tt = t * t;\n\
+    let b0 = uu * u;\n\
+    let b1 = 3.0 * uu * t;\n\
+    let b2 = 3.0 * u * tt;\n\
+    let b3 = tt * t;\n\
+    return p0 * b0 + p1 * b1 + p2 * b2 + p3 * b3;\n\
+}\n\
+\n\
+fn prism_spline_bezier_cubic_tangent(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, p3: vec3<f32>, t: f32) -> vec3<f32> {\n\
+    let u = 1.0 - t;\n\
+    let c0 = 3.0 * u * u;\n\
+    let c1 = 6.0 * u * t;\n\
+    let c2 = 3.0 * t * t;\n\
+    return (p1 - p0) * c0 + (p2 - p1) * c1 + (p3 - p2) * c2;\n\
+}\n\
+\n\
+fn prism_spline(op: u32, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>, t: f32) -> vec3<f32> {\n\
+    switch (op) {\n\
+        case 0u: { return prism_spline_hermite(a, b, c, d, t); }\n\
+        case 1u: { return prism_spline_hermite_tangent(a, b, c, d, t); }\n\
+        case 2u: { return prism_spline_catmull_rom(a, b, c, d, t); }\n\
+        case 3u: { return prism_spline_catmull_rom_tangent(a, b, c, d, t); }\n\
+        case 4u: { return prism_spline_bezier_cubic(a, b, c, d, t); }\n\
+        case 5u: { return prism_spline_bezier_cubic_tangent(a, b, c, d, t); }\n\
+        default: { return a; }\n\
+    }\n\
+}\n";
