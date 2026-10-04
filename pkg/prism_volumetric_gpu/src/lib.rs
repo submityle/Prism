@@ -81,6 +81,7 @@ pub mod avsm_transmittance;
 pub mod backface_outline_expand;
 pub mod barrier_contact_force;
 pub mod barycentric_coord;
+pub mod beverloo_slot_discharge;
 pub mod bezier_patch;
 pub mod bezier_surface;
 pub mod bicubic_sample;
@@ -245,7 +246,10 @@ pub mod gpu_scan_segmented;
 pub mod gpu_scan_warp;
 pub mod gpu_stream_append;
 pub mod gpu_timer_query;
+pub mod granular_dilatancy_law;
+pub mod granular_equation_of_state;
 pub mod granular_mu_i_rheology;
+pub mod granular_transport_closure;
 pub mod gravity_wave;
 pub mod gray_code;
 pub mod haff_cooling_law;
@@ -286,6 +290,7 @@ pub mod integrate_segment;
 pub mod interval_overlap_1d;
 pub mod interval_tree_1d;
 pub mod janssen_cross_section;
+pub mod janssen_pressure_profile;
 pub mod janssen_stress_state;
 pub mod kawase_blur;
 pub mod kawase_dual_blur;
@@ -349,6 +354,7 @@ pub mod mip_error;
 pub mod mis_heuristics;
 pub mod modeling;
 pub mod mohr_coulomb_angle_trig;
+pub mod mohr_coulomb_yield_envelope;
 pub mod morton_code;
 pub mod motion_blur;
 pub mod motion_disocclusion;
@@ -698,6 +704,9 @@ pub use barrier_contact_force::{
     BarrierContactForceQuery, BarrierContactForceResult, GpuBarrierContactForce,
 };
 pub use barycentric_coord::{BarycentricQuery, BarycentricResult, GpuBarycentricCoord};
+pub use beverloo_slot_discharge::{
+    BeverlooSlotDischargeQuery, BeverlooSlotDischargeResult, GpuBeverlooSlotDischarge,
+};
 pub use bezier_patch::{BezierPatchQuery, BezierPatchResult, GpuBezierPatch};
 pub use bezier_surface::{BezierSurfaceQuery, BezierSurfaceResult, GpuBezierSurface};
 pub use bicubic_sample::GpuBicubicSample;
@@ -982,8 +991,17 @@ pub use gpu_stream_append::{
 pub use gpu_timer_query::{
     GpuTimerQueryLayout, GpuTimerQueryLayoutQuery, GpuTimerQueryLayoutResult, GpuTimerQueryOp,
 };
+pub use granular_dilatancy_law::{
+    GpuGranularDilatancyLaw, GranularDilatancyLawQuery, GranularDilatancyLawResult,
+};
+pub use granular_equation_of_state::{
+    GpuGranularEquationOfState, GranularEquationOfStateQuery, GranularEquationOfStateResult,
+};
 pub use granular_mu_i_rheology::{
     GpuGranularMuIRheology, GranularMuIRheologyQuery, GranularMuIRheologyResult,
+};
+pub use granular_transport_closure::{
+    GpuGranularTransportClosure, GranularTransportClosureQuery, GranularTransportClosureResult,
 };
 pub use gravity_wave::{GpuGravityWave, GravityWaveQuery};
 pub use gray_code::GpuGrayCode;
@@ -1050,6 +1068,9 @@ pub use interval_overlap_1d::{GpuIntervalOverlap1d, IntervalOverlapQuery, Interv
 pub use interval_tree_1d::{GpuIntervalTree1d, IntervalTree1dQuery, IntervalTree1dResult};
 pub use janssen_cross_section::{
     GpuJanssenCrossSection, JanssenCrossSectionQuery, JanssenCrossSectionResult,
+};
+pub use janssen_pressure_profile::{
+    GpuJanssenPressureProfile, JanssenPressureProfileQuery, JanssenPressureProfileResult,
 };
 pub use janssen_stress_state::{
     GpuJanssenStressState, JanssenStressStateQuery, JanssenStressStateResult,
@@ -1169,6 +1190,10 @@ pub use mis_heuristics::{GpuMisHeuristics, MisHeuristicsQuery, MisHeuristicsResu
 pub use modeling::{GpuModeling, ModelingQuery};
 pub use mohr_coulomb_angle_trig::{
     GpuMohrCoulombAngleTrig, MohrCoulombAngleTrigQuery, MohrCoulombAngleTrigResult,
+};
+pub use mohr_coulomb_yield_envelope::{
+    GpuMohrCoulombYieldEnvelope, MohrCoulombMode, MohrCoulombYieldEnvelopeQuery,
+    MohrCoulombYieldEnvelopeResult,
 };
 pub use morton_code::GpuMortonCode;
 pub use motion_blur::{GpuMotionBlur, MotionBlurQuery, MotionBlurResult};
