@@ -114,6 +114,7 @@ pub mod closest_point_obb;
 pub mod cloth_aero_gather;
 pub mod cloth_bending_apply;
 pub mod cloth_bending_project;
+pub mod cloth_collision_project;
 pub mod cloth_mesh_volume;
 pub mod cloth_pressure_project;
 pub mod cloth_vertex_normals;
@@ -214,8 +215,12 @@ pub mod gpu_stream_append;
 pub mod gpu_timer_query;
 pub mod gravity_wave;
 pub mod gray_code;
+pub mod hair_follicle_bind;
+pub mod hair_line_coverage;
 pub mod hair_melanin_absorption;
+pub mod hair_reactive_mask;
 pub mod hair_spectral_absorption;
+pub mod hair_wetness_response;
 pub mod half_float_f16;
 pub mod halton_sequence;
 pub mod hash_rng;
@@ -649,6 +654,9 @@ pub use cloth_bending_apply::{
 pub use cloth_bending_project::{
     ClothBendingProjectQuery, ClothBendingProjectResult, GpuClothBendingProject,
 };
+pub use cloth_collision_project::{
+    ClothCollisionProjectQuery, ClothCollisionProjectResult, GpuClothCollisionProject,
+};
 pub use cloth_mesh_volume::{ClothMeshVolumeQuery, ClothMeshVolumeResult, GpuClothMeshVolume};
 pub use cloth_pressure_project::{
     ClothPressureProjectQuery, ClothPressureProjectResult, GpuClothPressureProject,
@@ -804,11 +812,17 @@ pub use gpu_timer_query::{
 };
 pub use gravity_wave::{GpuGravityWave, GravityWaveQuery};
 pub use gray_code::GpuGrayCode;
+pub use hair_follicle_bind::{GpuHairFollicleBind, HairFollicleBindQuery, HairFollicleBindResult};
+pub use hair_line_coverage::{GpuHairLineCoverage, HairLineCoverageQuery, HairLineCoverageResult};
 pub use hair_melanin_absorption::{
     GpuHairMelaninAbsorption, HairMelaninAbsorptionQuery, HairMelaninAbsorptionResult,
 };
+pub use hair_reactive_mask::{GpuHairReactiveMask, HairReactiveMaskQuery, HairReactiveMaskResult};
 pub use hair_spectral_absorption::{
     GpuHairSpectralAbsorption, HairSpectralAbsorptionQuery, HairSpectralAbsorptionResult,
+};
+pub use hair_wetness_response::{
+    GpuHairWetnessResponse, HairWetnessResponseQuery, HairWetnessResponseResult,
 };
 pub use half_float_f16::{GpuHalfFloatF16, HalfFloatQuery, HalfFloatResult};
 pub use halton_sequence::GpuHaltonSequence;
