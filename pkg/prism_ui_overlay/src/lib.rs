@@ -52,8 +52,10 @@ mod focus;
 mod id;
 mod kind;
 mod manager;
+mod position;
 
 pub use focus::FocusTrap;
 pub use id::OverlayId;
 pub use kind::OverlayKind;
 pub use manager::{OverlayEntry, OverlayIter, OverlayManager};
+pub use position::{position, Align, Placement, PositionConfig, Positioned, Side};
