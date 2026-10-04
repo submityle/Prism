@@ -7,6 +7,8 @@
 
 use alloc::string::String;
 
+use crate::calc::CalcValue;
+
 /// A styleable property.
 ///
 /// Properties are physical/longhand (for example `PaddingLeft` rather than a
@@ -93,6 +95,22 @@ pub enum Length {
     Auto,
 }
 
+impl Length {
+    /// Resolves this length to logical pixels against a `reference` dimension
+    /// (the parent length a percentage is taken against).
+    ///
+    /// Returns [`None`] for [`Length::Auto`], whose concrete value is chosen by
+    /// the layout engine rather than the style layer.
+    #[must_use]
+    pub fn resolve(self, reference: f32) -> Option<f32> {
+        match self {
+            Length::Px(px) => Some(px),
+            Length::Percent(pct) => Some(pct / 100.0 * reference),
+            Length::Auto => None,
+        }
+    }
+}
+
 /// An `RGBA` color stored as four linear channels in the range `0.0..=1.0`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Color {
@@ -176,6 +194,9 @@ pub enum Keyword {
 pub enum StyleValue {
     /// A length (pixels, percentage or auto).
     Length(Length),
+    /// A CSS math value (`calc()`, `min()`, `max()`, `clamp()`) that resolves
+    /// to a length against a reference dimension.
+    Calc(CalcValue),
     /// A unitless number, used for factors like flex-grow and opacity.
     Number(f32),
     /// A color.
@@ -203,6 +224,12 @@ impl StyleValue {
     #[must_use]
     pub const fn auto() -> Self {
         StyleValue::Length(Length::Auto)
+    }
+
+    /// Creates a CSS math value (`calc()`/`min()`/`max()`/`clamp()`).
+    #[must_use]
+    pub const fn calc(value: CalcValue) -> Self {
+        StyleValue::Calc(value)
     }
 
     /// Creates a unitless number value.
@@ -239,5 +266,20 @@ impl StyleValue {
     #[must_use]
     pub const fn is_token_ref(&self) -> bool {
         matches!(self, StyleValue::TokenRef(_))
+    }
+
+    /// Resolves this value to a length in logical pixels against a `reference`
+    /// dimension.
+    ///
+    /// Returns [`None`] when the value is not a length-typed value, when it is
+    /// [`Length::Auto`], when it is an unresolved [`StyleValue::TokenRef`], or
+    /// when a [`StyleValue::Calc`] expression does not type check to a length.
+    #[must_use]
+    pub fn resolve_length(&self, reference: f32) -> Option<f32> {
+        match self {
+            StyleValue::Length(length) => length.resolve(reference),
+            StyleValue::Calc(calc) => calc.resolve_length(reference),
+            _ => None,
+        }
     }
 }

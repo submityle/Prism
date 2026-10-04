@@ -55,7 +55,7 @@ pub use atlas::{
 };
 pub use feedback::{PageDemand, SemanticWeights, MAX_SCREEN_IMPORTANCE, MIP_URGENCY};
 pub use feedback_decode::{decode_feedback, FeedbackTextureDesc, NOT_REQUESTED};
-pub use indirection::{GpuPageTable, PAGE_TABLE_ENTRY_WORDS};
+pub use indirection::{GpuPageTable, PageResolution, PAGE_TABLE_ENTRY_WORDS};
 pub use pool::{PageUpload, PhysicalPagePool};
 pub use residency::{PageRecord, PageResidency, TextureResidencyTable};
 pub use scheduler::{schedule, schedule_and_apply, StreamingPlan};

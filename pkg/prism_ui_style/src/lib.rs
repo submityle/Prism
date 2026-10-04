@@ -61,6 +61,7 @@ extern crate alloc;
 
 pub mod cascade;
 pub mod class;
+pub mod calc;
 pub mod error;
 pub mod selector;
 pub mod theme;
@@ -73,4 +74,5 @@ pub use error::StyleError;
 pub use selector::{Breakpoint, InteractionState, InteractionStateFlags, MatchContext};
 pub use theme::Theme;
 pub use token::{DesignToken, TokenStore};
+pub use calc::{CalcError, CalcType, CalcValue};
 pub use value::{Color, Keyword, Length, StyleProp, StyleValue};

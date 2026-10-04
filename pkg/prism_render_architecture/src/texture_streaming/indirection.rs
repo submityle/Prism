@@ -162,6 +162,63 @@ impl GpuPageTable {
         }
         None
     }
+
+    /// Resolves `key` to the best resident tile, falling back to a coarser mip
+    /// when the exact page has not streamed in yet.
+    ///
+    /// A virtual-texture sampler must never return a hole: when the page at the
+    /// requested `mip` is absent, it reads the nearest resident coarser mip of
+    /// the same `(texture, layer)` that still covers the sampled texels. Because
+    /// every page holds a fixed texel count, mip `m + d` packs the footprint of
+    /// `key` into page coordinate `(x >> d, y >> d)`, so this walks `d` upward
+    /// from `0` (an exact hit) until a resident covering page is found or
+    /// `coarsest_mip` is exceeded. `coarsest_mip` is clamped up to `key.mip`, so
+    /// a value below the request still probes the exact page.
+    ///
+    /// The returned [`PageResolution::mip_bias`] is that `d`: the sampler scales
+    /// its intra-page `UV` by `1 / (1 << mip_bias)` and offsets into the
+    /// sub-tile the fine page occupies to read the correct texels from the
+    /// coarser tile. Returns [`None`] only when neither the exact page nor any
+    /// coarser covering page up to `coarsest_mip` is resident.
+    #[must_use]
+    pub fn resolve(&self, key: TexturePageKey, coarsest_mip: u8) -> Option<PageResolution> {
+        let last = coarsest_mip.max(key.mip);
+        for mip in key.mip..=last {
+            let d = mip - key.mip;
+            let shift = u32::from(d);
+            let candidate = TexturePageKey {
+                texture: key.texture,
+                mip,
+                layer: key.layer,
+                // A `d >= 16` delta shifts every bit of the `u16` coordinate out,
+                // collapsing onto the single top-mip page `(0, 0)`.
+                x: key.x.checked_shr(shift).unwrap_or(0),
+                y: key.y.checked_shr(shift).unwrap_or(0),
+            };
+            if let Some(slot) = self.lookup(candidate) {
+                return Some(PageResolution {
+                    key: candidate,
+                    slot,
+                    mip_bias: d,
+                });
+            }
+        }
+        None
+    }
+}
+
+/// Outcome of resolving a sampled page against the resident set, including any
+/// fallback to a coarser resident mip (see [`GpuPageTable::resolve`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PageResolution {
+    /// The resident page that satisfied the request: the exact page when
+    /// [`mip_bias`](Self::mip_bias) is `0`, otherwise the coarser covering page.
+    pub key: TexturePageKey,
+    /// Physical slot bound to [`key`](Self::key).
+    pub slot: u32,
+    /// Mip levels coarser than the request: `0` for an exact hit, `n > 0` when
+    /// an `n`-levels-coarser page was substituted.
+    pub mip_bias: u8,
 }
 
 #[cfg(test)]
@@ -301,5 +358,83 @@ mod tests {
         assert_eq!(table.lookup(key(2, 0, 0, 1, 0)), Some(7));
         // A page not in the bindings resolves to nothing.
         assert_eq!(table.lookup(key(9, 0, 0, 0, 0)), None);
+    }
+
+    #[test]
+    fn resolve_returns_exact_hit_with_zero_bias() {
+        let table = GpuPageTable::from_bindings(&[(key(3, 2, 1, 7, 9), 42)]);
+        let hit = table.resolve(key(3, 2, 1, 7, 9), 10).expect("exact page resident");
+        assert_eq!(hit.key, key(3, 2, 1, 7, 9));
+        assert_eq!(hit.slot, 42);
+        assert_eq!(hit.mip_bias, 0);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_coarser_covering_page() {
+        // Fine page (mip 0, x=6, y=10) is absent; its mip-2 cover is (6>>2, 10>>2)
+        // = (1, 2), which IS resident.
+        let table = GpuPageTable::from_bindings(&[(key(1, 2, 0, 1, 2), 5)]);
+        let res = table.resolve(key(1, 0, 0, 6, 10), 4).expect("coarser cover resident");
+        assert_eq!(res.key, key(1, 2, 0, 1, 2));
+        assert_eq!(res.slot, 5);
+        assert_eq!(res.mip_bias, 2);
+    }
+
+    #[test]
+    fn resolve_prefers_finest_resident_mip() {
+        // Both mip 1 and mip 2 covers are resident; the finer (smaller bias) wins.
+        let table = GpuPageTable::from_bindings(&[
+            (key(1, 1, 0, 3, 3), 11), // cover of (mip0, 6,6) at d=1 -> (3,3)
+            (key(1, 2, 0, 1, 1), 22), // cover at d=2 -> (1,1)
+        ]);
+        let res = table.resolve(key(1, 0, 0, 6, 6), 5).expect("a cover resident");
+        assert_eq!(res.key, key(1, 1, 0, 3, 3));
+        assert_eq!(res.slot, 11);
+        assert_eq!(res.mip_bias, 1);
+    }
+
+    #[test]
+    fn resolve_respects_coarsest_mip_cap() {
+        // The only cover sits at mip 3, but the cap stops the walk at mip 2.
+        let table = GpuPageTable::from_bindings(&[(key(1, 3, 0, 0, 0), 7)]);
+        assert_eq!(table.resolve(key(1, 0, 0, 4, 4), 2), None);
+        // Raising the cap to 3 lets the same request resolve.
+        let res = table.resolve(key(1, 0, 0, 4, 4), 3).expect("cover within raised cap");
+        assert_eq!(res.key, key(1, 3, 0, 0, 0));
+        assert_eq!(res.mip_bias, 3);
+    }
+
+    #[test]
+    fn resolve_returns_none_when_nothing_covers() {
+        let table = GpuPageTable::from_bindings(&[(key(2, 0, 0, 0, 0), 1)]);
+        // Different texture: no cover at any mip.
+        assert_eq!(table.resolve(key(1, 0, 0, 0, 0), 8), None);
+    }
+
+    #[test]
+    fn resolve_does_not_cross_layers() {
+        // A resident cover on layer 0 must not satisfy a request on layer 1.
+        let table = GpuPageTable::from_bindings(&[(key(1, 2, 0, 0, 0), 9)]);
+        assert_eq!(table.resolve(key(1, 0, 1, 0, 0), 4), None);
+    }
+
+    #[test]
+    fn resolve_cap_below_request_still_probes_exact_page() {
+        // coarsest_mip < key.mip is clamped up so the exact page is still tried.
+        let table = GpuPageTable::from_bindings(&[(key(1, 5, 0, 2, 2), 8)]);
+        let res = table.resolve(key(1, 5, 0, 2, 2), 0).expect("exact page probed");
+        assert_eq!(res.key, key(1, 5, 0, 2, 2));
+        assert_eq!(res.mip_bias, 0);
+    }
+
+    #[test]
+    fn resolve_large_mip_delta_collapses_to_top_page_without_panic() {
+        // A >=16-level delta shifts every coordinate bit out, collapsing to (0,0).
+        let table = GpuPageTable::from_bindings(&[(key(1, 20, 0, 0, 0), 3)]);
+        let res = table
+            .resolve(key(1, 0, 0, 0xFFFF, 0xFFFF), 20)
+            .expect("top-mip page covers everything");
+        assert_eq!(res.key, key(1, 20, 0, 0, 0));
+        assert_eq!(res.mip_bias, 20);
     }
 }
