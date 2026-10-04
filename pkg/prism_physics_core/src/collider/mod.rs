@@ -518,6 +518,8 @@ pub mod granular_scene;
 pub use granular_scene::{ContainerKind, GranularScene, GranularSceneParams};
 pub mod radial_distribution;
 pub use radial_distribution::RadialDistribution;
+pub mod angle_of_repose;
+pub use angle_of_repose::AngleOfRepose;
 
 /// A handle into a [`ShapeRegistry`].
 ///
