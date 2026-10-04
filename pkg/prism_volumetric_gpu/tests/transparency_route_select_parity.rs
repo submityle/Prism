@@ -59,6 +59,7 @@ fn oracle(q: &TransparencyRouteSelectQuery) -> TransparencyRouteSelectResult {
     };
     let capability = TransparencyCapability {
         moment_oit: q.moment_oit,
+        adaptive_oit: false,
     };
     let path: TransparencyPath = select_transparency_path(surface, capability);
     let outputs = outputs_for(path);

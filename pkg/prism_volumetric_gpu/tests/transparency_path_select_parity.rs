@@ -55,6 +55,11 @@ fn path_code(path: TransparencyPath) -> u32 {
         TransparencyPath::SingleLayerWater => TransparencyPathSelectResult::PATH_SINGLE_LAYER_WATER,
         TransparencyPath::HairVisibility => TransparencyPathSelectResult::PATH_HAIR_VISIBILITY,
         TransparencyPath::Volumetric => TransparencyPathSelectResult::PATH_VOLUMETRIC,
+        // This twin fixes `adaptive_oit` to `false`, so the golden never
+        // selects `TransparencyPath::Adaptive`; it has no kernel `path_code`.
+        TransparencyPath::Adaptive => {
+            unreachable!("adaptive_oit disabled in this twin; golden never selects Adaptive")
+        }
     }
 }
 
@@ -101,6 +106,7 @@ fn oracle(q: &TransparencyPathSelectQuery) -> TransparencyPathSelectResult {
     let surface = golden_surface(q, kind);
     let capability = TransparencyCapability {
         moment_oit: q.moment_oit,
+        adaptive_oit: false,
     };
     let path = select_transparency_path(surface, capability);
     TransparencyPathSelectResult {

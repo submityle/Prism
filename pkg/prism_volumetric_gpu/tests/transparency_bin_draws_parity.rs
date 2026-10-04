@@ -91,6 +91,7 @@ fn check_result(idx: usize, got: &TransparencyBinDrawsResult, scenario: &Scenari
     let surfaces = scenario.surfaces();
     let capability = TransparencyCapability {
         moment_oit: scenario.moment_oit,
+        adaptive_oit: false,
     };
     let golden = bin_transparent_draws(&scenario.draws, &surfaces, capability);
     let paths = [

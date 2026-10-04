@@ -12,15 +12,16 @@ pub enum TransparencyPath {
     Sorted,
     WeightedOit,
     MomentOit,
-    /// Order-independent resolve that keeps a bounded, explicit per-pixel
-    /// visibility curve (adaptive transparency). Higher fidelity than weighted
-    /// OIT with capped memory; approaches the exact `A-buffer` as its node
-    /// budget grows.
-    Adaptive,
     LayeredGlass,
     SingleLayerWater,
     HairVisibility,
     Volumetric,
+    /// Order-independent resolve that keeps a bounded, explicit per-pixel
+    /// visibility curve (adaptive transparency). Higher fidelity than weighted
+    /// OIT with capped memory; approaches the exact `A-buffer` as its node
+    /// budget grows. Appended last to preserve the established
+    /// `TransparencyPath as u32` wire encoding used by GPU twins.
+    Adaptive,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
