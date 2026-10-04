@@ -343,6 +343,11 @@ pub mod tet_fem_drucker_prager_force;
 pub use tet_fem_drucker_prager_force::{
     drucker_prager_elastic_potential_energy, element_drucker_prager_force, DruckerPragerForce,
 };
+pub mod tet_fem_drucker_prager_force_assembly;
+pub use tet_fem_drucker_prager_force_assembly::{
+    assemble_drucker_prager_forces, rest_drucker_prager_states,
+    total_drucker_prager_elastic_potential_energy, DruckerPragerAssembly,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
