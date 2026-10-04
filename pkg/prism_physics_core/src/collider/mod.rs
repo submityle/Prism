@@ -610,6 +610,8 @@ pub mod lode_shape_factor;
 pub use lode_shape_factor::LodeShapeFactor;
 pub mod rowe_stress_dilatancy;
 pub use rowe_stress_dilatancy::RoweStressDilatancy;
+pub mod bolton_dilatancy_index;
+pub use bolton_dilatancy_index::BoltonDilatancyIndex;
 
 /// A handle into a [`ShapeRegistry`].
 ///
