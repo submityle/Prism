@@ -39,6 +39,13 @@
 //! - [`reflection_path`] resolves first-order specular reflections with the
 //!   image-source method: mirror the source across each reflector, validate the
 //!   reflection point lies on the face, and check both sub-segments are clear.
+//! - [`diffuse_reflection`] gathers the *scattered* share of first-order
+//!   reflections that the specular image source in [`reflection_path`]
+//!   deliberately discards: it sums each visible surface's Lambert-weighted
+//!   diffuse coefficient incoherently into one aggregate reverberant send
+//!   [`diffuse_reflection::DiffuseReflectionField`], the natural consumer of
+//!   the spatial material's `BandedAcousticMaterial::diffuse_reflection` split
+//!   that no stage previously rendered.
 //! - [`higher_order_reflection`] resolves the second- and higher-order specular
 //!   bounces with the recursive image-source method, complementing (never
 //!   duplicating) the single bounce from [`reflection_path`]; enabled by
@@ -123,6 +130,7 @@ pub mod coupled_path;
 pub mod coupled_sequence;
 pub mod diffraction_edges;
 pub mod diffraction_path;
+pub mod diffuse_reflection;
 pub mod direct_path;
 pub mod doppler;
 pub mod higher_order_diffraction;
