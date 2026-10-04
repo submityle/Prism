@@ -602,6 +602,8 @@ pub mod fabric_reorientation;
 pub use fabric_reorientation::FabricReorientation;
 pub mod state_parameter;
 pub use state_parameter::StateParameter;
+pub mod skempton_pore_pressure;
+pub use skempton_pore_pressure::SkemptonPorePressure;
 
 /// A handle into a [`ShapeRegistry`].
 ///
