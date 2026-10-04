@@ -451,6 +451,11 @@ pub use rotational_contact::{
     rotational_contact_between, ContactSprings, RollingContactModel, RotationalContact,
 };
 
+pub mod rotational_contact_resolver;
+pub use rotational_contact_resolver::{
+    RollingContactResolution, RollingContactResolver, RollingPairContact,
+};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
