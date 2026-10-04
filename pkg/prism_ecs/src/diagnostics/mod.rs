@@ -78,6 +78,13 @@
 //!   density, flagging declared-but-empty or low-density groups that pay
 //!   registration / maintenance cost without earning branch-free iteration
 //!   (design §16.6 / §6 / §17).
+//! * [`gpu_batch_efficiency`] — GPU draw-batch efficiency census
+//!   (design §15): per-batch instance fill over a
+//!   [`GpuBatchPlan`](crate::gpu_batch::GpuBatchPlan) — indirect-draw count,
+//!   mean instances-per-draw (the amortisation factor), singleton-draw waste,
+//!   and the largest / smallest batch — surfacing plans that barely batch
+//!   (too many unique mesh+material keys) (design §16.6 / §15 / §6;
+//!   `gpu_resident` feature).
 //! * [`partition_occupancy`] — world-partition cell occupancy / streaming
 //!   census (design §13.1): joins the cell streamer with the entity index
 //!   per cell to report per-cell [`CellState`](crate::partition::cell::CellState)
@@ -104,6 +111,8 @@ pub mod component_distribution;
 pub mod component_memory;
 pub mod determinism_readiness;
 pub mod frame_profile;
+#[cfg(feature = "gpu_resident")]
+pub mod gpu_batch_efficiency;
 pub mod hook_coverage;
 pub mod inspector;
 pub mod memory_footprint;
@@ -132,6 +141,8 @@ pub use determinism_readiness::{
     DeterminismClass, DeterminismReadinessEntry, DeterminismReadinessReport,
 };
 pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
+#[cfg(feature = "gpu_resident")]
+pub use gpu_batch_efficiency::{BatchEntry, GpuBatchEfficiencyReport};
 pub use hook_coverage::{HookCoverageEntry, HookCoverageReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
 pub use memory_footprint::{ArchetypeMemoryEntry, MemoryFootprintReport};
