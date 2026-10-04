@@ -141,9 +141,9 @@ mod tests {
             (1.0_f32, 0.0_f32),
             (2.0, core::f32::consts::LN_2),
             (0.5, -core::f32::consts::LN_2),
-            (10.0, 2.302_585_1),
-            (0.1, -2.302_585_1),
-            (0.001, -6.907_755),
+            (10.0, core::f32::consts::LN_10),
+            (0.1, -core::f32::consts::LN_10),
+            (0.001, -3.0 * core::f32::consts::LN_10),
         ];
         for (x, want) in cases {
             let got = ln(x);

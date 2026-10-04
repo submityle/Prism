@@ -115,7 +115,6 @@ mod tests {
     use super::*;
     use crate::transparency::sorted_oit::SortedResolve;
     use alloc::vec;
-    use alloc::vec::Vec;
 
     fn frag(color: [f32; 3], alpha: f32, view_depth: f32) -> OitFragment {
         OitFragment {
