@@ -115,6 +115,7 @@ pub mod cloth_aero_gather;
 pub mod cloth_bending_apply;
 pub mod cloth_bending_project;
 pub mod cloth_collision_project;
+pub mod cloth_lod;
 pub mod cloth_mesh_volume;
 pub mod cloth_pressure_project;
 pub mod cloth_vertex_normals;
@@ -129,6 +130,7 @@ pub mod color_temperature;
 pub mod composite_motion_vector;
 pub mod compression;
 pub mod conductor_fresnel;
+pub mod conductor_multiscatter_bsdf;
 pub mod conservative_raster;
 pub mod constraints;
 pub mod contact_shadow;
@@ -217,8 +219,12 @@ pub mod gravity_wave;
 pub mod gray_code;
 pub mod hair_follicle_bind;
 pub mod hair_line_coverage;
+pub mod hair_lod;
+pub mod hair_lod_transition;
 pub mod hair_melanin_absorption;
+pub mod hair_orthonormal_basis;
 pub mod hair_reactive_mask;
+pub mod hair_scatter_lod;
 pub mod hair_spectral_absorption;
 pub mod hair_wetness_response;
 pub mod half_float_f16;
@@ -657,6 +663,7 @@ pub use cloth_bending_project::{
 pub use cloth_collision_project::{
     ClothCollisionProjectQuery, ClothCollisionProjectResult, GpuClothCollisionProject,
 };
+pub use cloth_lod::{ClothLodQuery, ClothLodResult, GpuClothLod};
 pub use cloth_mesh_volume::{ClothMeshVolumeQuery, ClothMeshVolumeResult, GpuClothMeshVolume};
 pub use cloth_pressure_project::{
     ClothPressureProjectQuery, ClothPressureProjectResult, GpuClothPressureProject,
@@ -682,6 +689,9 @@ pub use composite_motion_vector::{
 };
 pub use compression::{CompressionQuery, CompressionResult, GpuCompression};
 pub use conductor_fresnel::{ConductorFresnelQuery, ConductorFresnelResult, GpuConductorFresnel};
+pub use conductor_multiscatter_bsdf::{
+    ConductorMultiscatterBsdfQuery, ConductorMultiscatterBsdfResult, GpuConductorMultiscatterBsdf,
+};
 pub use conservative_raster::{
     ConservativeRasterQuery, ConservativeRasterResult, GpuConservativeRaster,
 };
@@ -814,10 +824,18 @@ pub use gravity_wave::{GpuGravityWave, GravityWaveQuery};
 pub use gray_code::GpuGrayCode;
 pub use hair_follicle_bind::{GpuHairFollicleBind, HairFollicleBindQuery, HairFollicleBindResult};
 pub use hair_line_coverage::{GpuHairLineCoverage, HairLineCoverageQuery, HairLineCoverageResult};
+pub use hair_lod::{GpuHairLod, HairLodQuery, HairLodResult};
+pub use hair_lod_transition::{
+    GpuHairLodTransition, HairLodTransitionQuery, HairLodTransitionResult,
+};
 pub use hair_melanin_absorption::{
     GpuHairMelaninAbsorption, HairMelaninAbsorptionQuery, HairMelaninAbsorptionResult,
 };
+pub use hair_orthonormal_basis::{
+    GpuHairOrthonormalBasis, HairOrthonormalBasisQuery, HairOrthonormalBasisResult,
+};
 pub use hair_reactive_mask::{GpuHairReactiveMask, HairReactiveMaskQuery, HairReactiveMaskResult};
+pub use hair_scatter_lod::{GpuHairScatterLod, HairScatterLodQuery, HairScatterLodResult};
 pub use hair_spectral_absorption::{
     GpuHairSpectralAbsorption, HairSpectralAbsorptionQuery, HairSpectralAbsorptionResult,
 };
