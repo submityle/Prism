@@ -101,6 +101,7 @@ pub mod bspline_surface;
 pub mod bvh;
 pub mod camera;
 pub mod capsule_capsule_closest;
+pub mod capsule_plane_contact;
 pub mod capsule_sdf;
 pub mod catmull_rom_patch;
 pub mod checkerboard_resolve;
@@ -335,6 +336,7 @@ pub mod noise_fbm;
 pub mod normal_reconstruct;
 pub mod nurbs_surface;
 pub mod obb_obb_sat_3d;
+pub mod obb_world_aabb;
 pub mod occlusion;
 pub mod octahedral_map;
 pub mod octave;
@@ -488,6 +490,10 @@ pub mod spawn_pass_buffers;
 pub mod spectral_to_rgb;
 pub mod specular_aa;
 pub mod sphere_aabb;
+pub mod sphere_capsule_contact;
+pub mod sphere_obb_contact;
+pub mod sphere_plane_contact;
+pub mod sphere_sphere_contact;
 pub mod sphere_sweep;
 pub mod spherical_harmonics_rotate;
 pub mod spline;
@@ -668,6 +674,9 @@ pub use bvh::{BvhQuery, BvhResult, GpuBvh};
 pub use camera::{CameraQuery, CameraResult, GpuCamera};
 pub use capsule_capsule_closest::{
     CapsuleClosestQuery, CapsuleClosestResult, GpuCapsuleCapsuleClosest,
+};
+pub use capsule_plane_contact::{
+    CapsulePlaneContactQuery, CapsulePlaneContactResult, GpuCapsulePlaneContact,
 };
 pub use capsule_sdf::{CapsuleSdfQuery, CapsuleSdfResult, GpuCapsuleSdf};
 pub use catmull_rom_patch::{CatmullRomPatchQuery, CatmullRomPatchResult, GpuCatmullRomPatch};
@@ -1059,6 +1068,7 @@ pub use noise_fbm::{GpuNoiseFbm, NoiseFbmQuery, NoiseFbmResult};
 pub use normal_reconstruct::{GpuNormalReconstruct, NormalQuery, NormalResult};
 pub use nurbs_surface::{GpuNurbsSurface, NurbsSurfaceQuery, NurbsSurfaceResult};
 pub use obb_obb_sat_3d::{GpuObbSat3d, ObbSat3dQuery, ObbSat3dResult};
+pub use obb_world_aabb::{GpuObbWorldAabb, ObbWorldAabbQuery, ObbWorldAabbResult};
 pub use occlusion::{GpuOcclusion, GpuOcclusionQuery, GpuOcclusionResult};
 pub use octahedral_map::{GpuOctahedralMap, OctahedralMapQuery, OctahedralMapResult};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
@@ -1294,6 +1304,16 @@ pub use specular_aa::{
     SpecularAaScalars,
 };
 pub use sphere_aabb::{GpuSphereAabb, SphereAabbQuery};
+pub use sphere_capsule_contact::{
+    GpuSphereCapsuleContact, SphereCapsuleContactQuery, SphereCapsuleContactResult,
+};
+pub use sphere_obb_contact::{GpuSphereObbContact, SphereObbContactQuery, SphereObbContactResult};
+pub use sphere_plane_contact::{
+    GpuSpherePlaneContact, SpherePlaneContactQuery, SpherePlaneContactResult,
+};
+pub use sphere_sphere_contact::{
+    GpuSphereSphereContact, SphereSphereContactQuery, SphereSphereContactResult,
+};
 pub use sphere_sweep::{GpuSphereSweep, SphereSweepOp, SphereSweepQuery};
 pub use spherical_harmonics_rotate::{
     GpuSphericalHarmonicsRotate, ShRotationProbe, ShRotationResult, L2_COEFF_COUNT,
