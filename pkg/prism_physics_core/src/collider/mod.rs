@@ -486,6 +486,8 @@ pub mod wet_bridge_hysteresis;
 pub use wet_bridge_hysteresis::{WetBridgeHysteresis, WetBridgeReport};
 pub mod wet_cohesion_driver;
 pub use wet_cohesion_driver::{WetCohesionDriver, WetCohesionReport};
+pub mod sphere_narrow_phase;
+pub use sphere_narrow_phase::{SphereContact, SphereNarrowPhase};
 
 /// A handle into a [`ShapeRegistry`].
 ///
