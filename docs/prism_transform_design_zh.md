@@ -9,7 +9,7 @@
 > - **仿射运算**：glam `Affine3A`（SIMD）、经典 3×4 仿射矩阵
 > 本文为纯经典线性代数 / 层级传播路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.4（核心 M0–M6 已落地并验证；§24 高级增补中 **§24.1 静态变换烘焙与批合并（`bake`）**、**§24.3 双缓冲/多缓冲变换（`double_buffer`）**、**§24.2 姿态量化压缩（`quantize`）**、**§24.4 变换 Observer 钩子（`observer`）**、**§24.5 空间加速结构增量同步（`spatial_sync`）**、**§24.6 轻量约束（`constraint`）**、**§24.7 GPU 侧层级传播（`compute_hierarchy`，可移植调度 + 上传载荷 + CPU 参考层）**、**§24.8 扫掠变换（`sweep`）** 已交付并验证，其余 §24 项（及 §24.7 真实 GPU dispatch）仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：静态变换烘焙与批合并/姿态量化压缩/双缓冲读取一致性/变换 Observer 钩子/空间加速结构增量同步/轻量约束(look-at/aim/parent-blend)/GPU 侧层级传播/扫掠变换(CCD/运动模糊)；§24.1/24.2/24.3/24.4/24.5/24.6/24.7(可移植层)/24.8 已交付，其余（24.7 真实 GPU dispatch）仍为 PLANNED）
+- 版本: v0.4（核心 M0–M6 已落地并验证；§24 高级增补中 **§24.1 静态变换烘焙与批合并（`bake`）**、**§24.3 双缓冲/多缓冲变换（`double_buffer`）**、**§24.2 姿态量化压缩（`quantize`）**、**§24.4 变换 Observer 钩子（`observer`）**、**§24.5 空间加速结构增量同步（`spatial_sync`）**、**§24.6 轻量约束（`constraint`）**、**§24.7 GPU 侧层级传播（`compute_hierarchy` 可移植层 + `prism_transform_gpu` 真实 GPU twin，真机 parity 验证）**、**§24.8 扫掠变换（`sweep`）** 已交付并验证（§24.7 含真实 GPU dispatch twin），其余 §24 项仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：静态变换烘焙与批合并/姿态量化压缩/双缓冲读取一致性/变换 Observer 钩子/空间加速结构增量同步/轻量约束(look-at/aim/parent-blend)/GPU 侧层级传播/扫掠变换(CCD/运动模糊)；§24.1/24.2/24.3/24.4/24.5/24.6/24.7(可移植层 + 真实 GPU twin)/24.8 已交付，其余（24.7 免回读渲染接线）仍为 PLANNED）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_math`（Vec3/Quat/Affine3/Mat4、SIMD）、`prism_ecs`（组件存储 + `ChildOf` 关系 + 变更检测 + 并行查询）、`prism_tasks`（分块并行传播）；可选 `prism_time`（插值 alpha）、`prism_diagnostic`
 - 层级定位: ECS 文档 L3「仿真」；渲染提取（ECS §15）与物理/相机的空间输入供给方
@@ -526,7 +526,7 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 > - 辅助 `look_at_rotation` / `rotation_arc`（最短弧，含 180° 稳定回退）；`Constraint` 枚举 + `solve_chain(&[Constraint], current)` 按切片序折叠（顺序显著、调用方负责定序与避免环）。
 > - `no_std + alloc`（标量数学走 `libm`），复用 `prism_math` 的 `Vec3`/`Quat`/`Mat3`。几何 oracle 单测（`tests_constraint.rs`，17 项）。
 
-### 24.7 GPU 侧层级传播（Compute Hierarchy）✅ 已交付（`compute_hierarchy`，可移植调度 + 上传载荷层）
+### 24.7 GPU 侧层级传播（Compute Hierarchy）✅ 已完整交付（`compute_hierarchy` 可移植层 + `prism_transform_gpu` 真实 GPU twin）
 
 超大层级(集群动画、植被、人群)在 CPU 传播会成瓶颈。可把层级传播下放 GPU compute:
 
@@ -541,6 +541,8 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 > - `propagate_by_levels(hier,&schedule,locals,globals)`：**GPU twin 的 CPU 参考 / parity oracle**，逐层做与 shader 完全一致的「父世界 × 本地」累乘；用相同的 `Affine3` 复合与算子次序，故与串行 `propagate` **位对位相等**（仅求值分组不同），单测固定森林手算对拍。
 > - `ComputeHierarchyInput::pack(hier,&schedule,locals,layout)`：**device-free 上传载荷**——`parents: Vec<i32>`（root=`-1`）、`local_matrices: Vec<u8>`（节点序、行主序打包本地 `Affine3`，复用输出路径同款 `MatrixLayout{RowMajor3x4=48B,RowMajor4x4=64B}` 以便 shader 共用解码）、`dispatch_order: Vec<u32>` + `level_ranges: Vec<(u32,u32)>`（驱动按层 dispatch）。驱动可 `memcpy` 直传、逐层 dispatch，无需再做 CPU 计算。
 > - `no_std + alloc`，从不分配设备 / 开线程 / 读时钟；节点上限由 `i32` 父索引约束（`pack` 断言）。oracle + parity + 字节布局单测（`tests_compute_hierarchy.rs`，7 项），`cargo test` 零失败、`cargo clippy --all-targets` 零告警、无桩。
+>
+> **真实 GPU twin（`pkg/prism_transform_gpu/`，新建 crate）：✅ 已交付并真机验证。** 仿 `prism_math_gpu` 结构分模块不堆单文件：`src/context`（`GpuContext::try_headless`，wgpu 30，backends METAL|VULKAN|DX12，无适配器优雅跳过）、`src/buffer`（storage/uniform/staging/回读助手 + `storage_bytes` 直传已打包字节）、`src/hierarchy`（`GpuHierarchyPropagate`）。kernel 直接消费 `ComputeHierarchyInput::pack` 产出的 `parents: array<i32>` / `dispatch_order: array<u32>` / 行主序 `locals: array<Mat3x4>`（`Mat3x4`=三行 `vec4<f32>`，48B，与 `gpu_upload` 的 `RowMajor3x4` 同款编码，host/device 单源解码）；**每个深度层一次 compute pass**（shallow→deep，`wgpu` 在 pass 间自动插入 storage barrier），层内节点互相独立、父世界矩阵已在更浅层求解完毕；`affine_mul(a,b)` 以与 `prism_math::Affine3` 的 `Mul` 完全一致的列主序算子次序复合（`world.basis = a.basis * b.basis`、`world.t = a.basis * b.t + a.t`），回读世界矩阵解码回 `GlobalTransform`。诚实边界：Metal 以 fast-math 编译 WGSL（允许 FMA 收缩/重结合），故 parity 用**容差**（`1e-4` 绝对+相对）对拍 `propagate_by_levels` CPU 参考，而非位对位——这正是 GPU twin 的契约。验证：`cargo build`/`cargo clippy --all-targets` 零告警、`cargo test --test hierarchy_parity` **5 真机 parity 测试在真实 GPU 上全绿**（空森林 / 全单位本地直通 / 深链 32 层 / 多根扇出森林 / 单层 4001 节点跨多 workgroup），无桩。
 
 ### 24.8 扫掠变换（Swept Transform）—— CCD / 运动模糊 ✅ 已交付（`sweep`）
 
@@ -567,9 +569,9 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 - **24.4 已交付的边界**：`observer` 是纯数据结构，无原子、无线程、无 ECS Observer 绑定——脏集与世界姿态由调用方（如 `dirty`/传播流水线）提供；本帧合并与升序派发是确定性契约，但精细的 rotation/scale 拆分、以及实际订阅方（空间索引 §24.5、音频、探针缓存失效）的接线留给消费方。
 - **24.6 已交付的边界**：`constraint` 只做轻量无 rig 约束（`LookAt`/`Aim`/`ParentBlend`/`PositionLimit`），完整骨骼 rig 归 `prism_anim_runtime`；求解器在传播之后求值并回写 `GlobalTransform`，约束间的定序与避免环由调用方负责（`solve_chain` 不做环检测）；`to_scale_rotation_translation` 分解假设无 shear，父级非均匀缩放叠子级旋转产生的 shear 场景只在 TRS 可表示精度内保真。
 - **24.5 已交付的边界**：`spatial_sync` 只是「变换脏集 → 空间加速结构增量指令」的纯桥接 diff 层，**不做真实 BVH/网格哈希的树重建、节点分裂/合并、SAH 优化**——那属空间索引 crate（`prism_render_visibility` 剔除树、`prism_physics` 宽相位动态树、`prism_navigation` 空间哈希），本 crate 只产出 `Insert`/`Update`/`Remove` 指令流由它们消费接线；脏集与世界 `GlobalTransform` 姿态由调用方（`dirty`/`observer`）提供，`SpatialSync` 不做实体查找、不触发传播；胖盒 `margin` 的重拟合纪律与真实树的 fat-AABB 一致，但最终树形态与查询性能取决于消费侧实现。
-- **24.7 已交付的边界**：`compute_hierarchy` 只拥有**可移植、无设备**的三层——逐层 dispatch 调度（`LevelSchedule`）、与串行位对位相等的 CPU 参考 / parity oracle（`propagate_by_levels`）、以及 device-free 上传载荷（`ComputeHierarchyInput`：父索引 + 行主序本地矩阵 + dispatch 序 + 层范围）。**真实的 WGSL compute dispatch、GPU 存储缓冲上传/绑定、以及世界矩阵常驻 GPU 直供实例化/间接绘制（免回读）属消费侧 RHI/渲染驱动（`prism_render_driver` compute 能力探测 + `gpu` feature 门控），本 crate 不越界实现设备侧代码**；GPU twin 的正确性由上述 CPU 参考对拍保障，真实设备 parity 测试落在接线的渲染/驱动 crate。本层按节点序打包、层内按 `NodeId` 升序 dispatch，保证与串行传播确定性一致，但多队列/多 workgroup 的实际并行度与占用率取决于消费侧 shader 实现。
+- **24.7 已交付的边界**：`prism_transform`（核心 crate）拥有**可移植、无设备**的三层——逐层 dispatch 调度（`LevelSchedule`）、与串行位对位相等的 CPU 参考 / parity oracle（`propagate_by_levels`）、以及 device-free 上传载荷（`ComputeHierarchyInput`：父索引 + 行主序本地矩阵 + dispatch 序 + 层范围）。**真实的 WGSL compute dispatch、设备缓冲上传/绑定与逐层回读由独立 crate `prism_transform_gpu` 落地并以 5 项真机 parity 测试对拍 `propagate_by_levels` 验证（见 §24.7 真实 GPU twin）**，核心 crate 仍不含设备侧代码（保持 `no_std + forbid(unsafe)`）。诚实边界：parity 为**容差**对拍（Metal fast-math FMA），非位对位；且「世界矩阵常驻 GPU 直供实例化/间接绘制、免回读」的**渲染接线**仍归消费侧 RHI/渲染驱动（`prism_render_driver` compute 能力探测 + `gpu` feature 门控）——`prism_transform_gpu` 为验证正确性做了回读，生产免回读路径由渲染侧消费。本层按节点序打包、层内按 `NodeId` 升序 dispatch，保证与串行传播确定性一致，但多队列/多 workgroup 的实际并行度与占用率取决于消费侧 shader 实现。
 - **24.8 已交付的边界**：`sweep` 只给**保守扫掠包围与 TOI 时间细分数据模型**，不做窄相位求解——真实 CCD 命中（扫掠体 vs 几何的最早接触求根）归 `prism_physics`，真实 motion vector pass / 速度缓冲写出归 `prism_render_scene`；`bounds()` 的 temporal-AABB 界**保证保守（含整段轨迹）但非最紧**（旋转按弧长 `θ·r` 外扩，是上界非精确凸包），需更紧包围时应 `subdivide` 细分夹逼；插值假设与 `GlobalTransform::interpolate` 一致（平移/缩放 `lerp`、旋转最短弧 `slerp`），非此插值模型的运动不在保守性证明范围内；`SweptMotion` 从不改动权威仿真态，瞬移须由调用方以 `teleported` 显式标记。
-- 其余 PLANNED：**24.7 的真实 GPU compute dispatch 与设备常驻缓冲**（可移植调度 + 上传载荷 + CPU 参考已交付如上，仅剩需 RHI/设备的接线部分）随 M6 GPU 驱动落地。
+- 其余 PLANNED：**24.7 的世界矩阵 GPU 常驻、免回读直供实例化/间接绘制的渲染接线**随 M6 GPU 驱动落地（真实 compute dispatch + 回读 parity 已由 `prism_transform_gpu` 交付验证如上）。
 
 所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
 

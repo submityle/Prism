@@ -1,0 +1,17 @@
+[package]
+name = "prism_transform_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu compute twin for Prism's §24.7 GPU-side hierarchy propagation. The real-device half of prism_transform::compute_hierarchy: a compute kernel walks a transform forest by depth level, multiplying each child's local affine by its already-resolved parent's world affine, and parity tests diff the GPU readback of world matrices against the CPU reference propagate_by_levels within a float tolerance (Metal compiles WGSL under fast-math, so FMA contraction forbids a bit-exact claim). The device payload is produced by ComputeHierarchyInput::pack so the GPU twin consumes exactly the portable schedule/upload layer. Contains no Unreal Engine or Unity source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_math = { path = "../prism_math" }
+prism_transform = { path = "../prism_transform" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+
+[lints]
+workspace = true
