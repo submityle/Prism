@@ -100,6 +100,21 @@ impl CapabilitySet {
     pub fn allows_event(&self, name: &str) -> bool {
         self.events.contains(name)
     }
+
+    /// Iterates the whitelisted component kinds in sorted order.
+    pub fn kinds(&self) -> impl Iterator<Item = &str> {
+        self.kinds.iter().map(String::as_str)
+    }
+
+    /// Iterates the whitelisted style tokens in sorted order.
+    pub fn styles(&self) -> impl Iterator<Item = &str> {
+        self.styles.iter().map(String::as_str)
+    }
+
+    /// Iterates the whitelisted event names in sorted order.
+    pub fn events(&self) -> impl Iterator<Item = &str> {
+        self.events.iter().map(String::as_str)
+    }
 }
 
 #[cfg(test)]

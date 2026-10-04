@@ -74,6 +74,7 @@ pub mod decode;
 pub mod pipeline;
 pub mod sandbox;
 pub mod schema;
+pub mod set_ops;
 pub mod version;
 
 pub use budget::NodeBudget;
