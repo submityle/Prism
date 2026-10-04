@@ -15,6 +15,12 @@
 //! * [`archetype_fragmentation`] — archetype-explosion and chunk
 //!   internal-fragmentation accounting with a worst-occupancy-first
 //!   ranking (design §16.6 / §22 risk #5).
+//! * [`change_tick_health`] — change-detection tick-saturation census
+//!   (design §10 / §14): per-archetype oldest added / changed / chunk-version
+//!   age relative to the world change tick, with a registry-wide saturation
+//!   per-mille and `needs_check` / saturated flags — surfacing columns whose
+//!   ticks approach `MAX_CHANGE_AGE` and risk aliasing stale `Changed<T>`
+//!   unless `check_change_ticks` clamps them (design §16.6 / §10 / §14).
 //! * [`change_volume`] — dirty-chunk and changed/added-cell accounting that
 //!   quantifies the design headline "成本 ∝ 变化量".
 //! * [`churn_cost`] — the *gross* dual of [`system_cost`]: joins per-system
@@ -113,6 +119,7 @@
 //! chunks and are therefore outside these reports.
 
 pub mod archetype_fragmentation;
+pub mod change_tick_health;
 pub mod change_volume;
 pub mod churn_cost;
 pub mod component_distribution;
@@ -143,6 +150,7 @@ pub mod system_cost;
 pub mod time_travel;
 
 pub use archetype_fragmentation::{ArchetypeFragmentEntry, ArchetypeFragmentationReport};
+pub use change_tick_health::{ArchetypeTickAgeEntry, TickAgeReport};
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use churn_cost::{ChurnCostEntry, ChurnCostProfile};
 pub use component_distribution::{ComponentDistributionEntry, ComponentDistributionReport};
