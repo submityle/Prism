@@ -9,7 +9,7 @@
 > - **曲线 / 噪声**：经典 Bezier/Hermite/Catmull-Rom、Perlin/Simplex（Ken Perlin 经典算法）
 > 本文为纯经典线性代数 / 数值计算 / 经典噪声路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：CPU/GPU 数学一致性契约(shader 镜像)/编译期 const 数学/区间算术保守剔除/补偿求和(Kahan/double-double)扩展精度/经典前向自动微分(dual number)/球谐光照探针/Morton·Hilbert 空间编码/高阶样条曲面(Bezier patch)/大世界定点分层；24.2–24.10 已随核心路线落地，24.1 CPU/GPU 一致性契约**已完整交付**：可移植 `shader_mirror`（std140 布局契约 + CPU 参考 op + 单源 WGSL 片段）+ 真实 GPU twin crate `prism_math_gpu`（真实 wgpu dispatch/回读，与 CPU 参考容差对拍，真机 parity 全绿））
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补 24.1–24.9 已全部交付；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：CPU/GPU 数学一致性契约(shader 镜像)/编译期 const 数学/区间算术保守剔除/补偿求和(Kahan/double-double)扩展精度/经典前向自动微分(dual number)/球谐光照探针/Morton·Hilbert 空间编码/高阶样条曲面(Bezier patch)/大世界定点分层；24.2–24.10 已随核心路线落地，24.1 CPU/GPU 一致性契约**已完整交付**：可移植 `shader_mirror`（std140 布局契约 + CPU 参考 op + 单源 WGSL 片段）+ 真实 GPU twin crate `prism_math_gpu`（真实 wgpu dispatch/回读，与 CPU 参考容差对拍，真机 parity 全绿））
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: **无 Prism 上游依赖**（本 crate 是依赖图的根）；仅经典 crate 级 `libm`（`no_std` 超越函数）、可选 `bytemuck`（POD/GPU 直传）、`rand_core` 形态的自有 PRNG trait；SIMD 走 `core::arch` 内在函数，不引第三方 SIMD 框架
 - 层级定位: L0 地基（被 `prism_ecs` / `prism_transform` / `prism_tasks`(确定归并数值) / `prism_time`(定点步长) / 渲染 / 物理 / 动画 / 音频空间化 全体依赖）
@@ -364,7 +364,7 @@ pkg/prism_math/
 
 ## 23. 诚实边界与风险
 
-- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（138 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」仍为 PLANNED，按本文优先级随消费方接线落地。
+- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（138 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」24.1–24.9 已全部交付（见各小节 ✅ 与 §24.10 诚实边界），按本文优先级随消费方接线深化。
 - **高风险项**：
   1. **多后端一致性（M1）**：SSE/AVX/NEON/WASM 四套内在函数与 scalar 基准须在容差内一致，`rsqrt`/`fma` 近似、浮点结合律差异易产生「同代码不同结果」；必须 CI 跨平台对拍，否则物理/动画在不同机器行为漂移。
   2. **定点确定性（M4）**：超越函数定点逼近的精度/范围权衡、溢出处理、与并行归并序（tasks §24.7）的协同，任一处非确定即联机 desync；需严格跨平台位级对拍 + 状态哈希。
@@ -379,7 +379,7 @@ pkg/prism_math/
 
 ## 24. AAA 高级功能增补（v0.2）
 
-本章在 §17（双四元数 / SoA / f16 / octahedral / 精确谓词 / 弧长表）之外，补齐**跨 CPU-GPU 一致性、保守数值、扩展精度、经典微分、空间编码、GI 数值**等 AAA 引擎真正吃到的高级数学能力。所有条目均为 PLANNED，无代码，纯经典数值路线、不含任何 AI/ML。
+本章在 §17（双四元数 / SoA / f16 / octahedral / 精确谓词 / 弧长表）之外，补齐**跨 CPU-GPU 一致性、保守数值、扩展精度、经典微分、空间编码、GI 数值**等 AAA 引擎真正吃到的高级数学能力。各条目均已交付（见各小节 ✅ 与 §24.10 汇总），纯经典数值路线、不含任何 AI/ML。
 
 ### 24.1 CPU/GPU 数学一致性契约（Shader 镜像）—— ✅ 已交付（`shader_mirror` 可移植层 + `prism_math_gpu` 真实 GPU twin）
 

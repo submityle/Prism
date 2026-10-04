@@ -7,7 +7,7 @@
 > - **系统/底层**：mimalloc / jemalloc（虚拟内存与大页策略）、Breakpad / Crashpad（minidump）、hwloc（拓扑 / NUMA）
 > 本文为纯经典系统编程路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：高级异步 I/O(io_uring·IOCP·批量提交)/虚拟内存进阶(稀疏堆·按需提交·GPU 共享内存)/混合核·NUMA·能耗感知调度钩子/高级崩溃观测(跨进程 Crashpad·稳定堆栈哈希分桶)/安全加固探测(ASLR·DEP·CFG·代码签名)/平台能力数据库与降级矩阵/Web·主机后端进阶；多数已随消费方接线落地，详见第 24 章各小节「交付状态」）
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补多数已交付（24.1/24.2/24.3/24.5/24.6）；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：高级异步 I/O(io_uring·IOCP·批量提交)/虚拟内存进阶(稀疏堆·按需提交·GPU 共享内存)/混合核·NUMA·能耗感知调度钩子/高级崩溃观测(跨进程 Crashpad·稳定堆栈哈希分桶)/安全加固探测(ASLR·DEP·CFG·代码签名)/平台能力数据库与降级矩阵/Web·主机后端进阶；多数已随消费方接线落地，详见第 24 章各小节「交付状态」）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: **无 Prism 上游依赖或仅依赖 `prism_utils`**（与 `prism_math` / `prism_utils` 同处依赖图根级）；底层经典 crate `libc` / `rustix` / `windows-sys` / `parking_lot`(可选) / `libloading`(可选)
 - 层级定位: L1 地基根级（被 `prism_time`(时钟) / `prism_tasks`(线程) / `prism_app`(主循环/命令行) / `prism_asset`(文件/VFS) / `prism_diagnostic`(minidump) / `prism_math`(SIMD 探测) / `prism_script`(动态库热重载) 直接依赖）
@@ -330,7 +330,7 @@ pkg/prism_platform/
 
 ## 23. 诚实边界与风险
 
-- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（56 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」仍为 PLANNED，按本文优先级随消费方接线落地。
+- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（56 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」24.1/24.2/24.3/24.5/24.6 已交付（含 macOS 真机验证），24.4 跨进程崩溃/24.7 Web·主机后端及别平台 OS 后端仍为 PLANNED，按本文优先级随消费方接线深化。
 - **高风险项**：
   1. **跨平台后端维护成本（全程）**：每个 OS 一个后端，Win/Apple/Linux/Android/Web/主机差异巨大，门面抽象漏一处即到处 `#[cfg]` 反噬；必须严守「差异锁后端、门面保纯净」，并以 mock + 真机 CI 多平台持续验证。
   2. **崩溃捕获正确性（M6）**：信号/SEH/mach 异常处理器本身在崩溃上下文中运行，可用操作极受限（不能分配、不能加锁），写错即二次崩溃丢现场；需严格异步信号安全 + 可选越进程 handler。

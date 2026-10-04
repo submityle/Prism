@@ -9,7 +9,7 @@
 > - **仿射运算**：glam `Affine3A`（SIMD）、经典 3×4 仿射矩阵
 > 本文为纯经典线性代数 / 层级传播路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.4（核心 M0–M6 已落地并验证；§24 高级增补中 **§24.1 静态变换烘焙与批合并（`bake`）**、**§24.3 双缓冲/多缓冲变换（`double_buffer`）**、**§24.2 姿态量化压缩（`quantize`）**、**§24.4 变换 Observer 钩子（`observer`）**、**§24.5 空间加速结构增量同步（`spatial_sync`）**、**§24.6 轻量约束（`constraint`）**、**§24.7 GPU 侧层级传播（`compute_hierarchy` 可移植层 + `prism_transform_gpu` 真实 GPU twin，真机 parity 验证）**、**§24.8 扫掠变换（`sweep`）** 已交付并验证（§24.7 含真实 GPU dispatch twin），其余 §24 项仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：静态变换烘焙与批合并/姿态量化压缩/双缓冲读取一致性/变换 Observer 钩子/空间加速结构增量同步/轻量约束(look-at/aim/parent-blend)/GPU 侧层级传播/扫掠变换(CCD/运动模糊)；§24.1/24.2/24.3/24.4/24.5/24.6/24.7(可移植层 + 真实 GPU twin)/24.8 已交付，其余（24.7 免回读渲染接线）仍为 PLANNED）
+- 版本: v0.4（核心 M0–M6 已落地并验证；§24 高级增补中 **§24.1 静态变换烘焙与批合并（`bake`）**、**§24.3 双缓冲/多缓冲变换（`double_buffer`）**、**§24.2 姿态量化压缩（`quantize`）**、**§24.4 变换 Observer 钩子（`observer`）**、**§24.5 空间加速结构增量同步（`spatial_sync`）**、**§24.6 轻量约束（`constraint`）**、**§24.7 GPU 侧层级传播（`compute_hierarchy` 可移植层 + `prism_transform_gpu` 真实 GPU twin，真机 parity 验证）**、**§24.8 扫掠变换（`sweep`）** 已交付并验证（§24.7 含真实 GPU dispatch twin），§24 各节均已交付（仅 §24.7 免回读渲染接线归 M6 渲染侧）；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：静态变换烘焙与批合并/姿态量化压缩/双缓冲读取一致性/变换 Observer 钩子/空间加速结构增量同步/轻量约束(look-at/aim/parent-blend)/GPU 侧层级传播/扫掠变换(CCD/运动模糊)；§24.1/24.2/24.3/24.4/24.5/24.6/24.7(可移植层 + 真实 GPU twin)/24.8 已交付，其余（24.7 免回读渲染接线）仍为 PLANNED）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_math`（Vec3/Quat/Affine3/Mat4、SIMD）、`prism_ecs`（组件存储 + `ChildOf` 关系 + 变更检测 + 并行查询）、`prism_tasks`（分块并行传播）；可选 `prism_time`（插值 alpha）、`prism_diagnostic`
 - 层级定位: ECS 文档 L3「仿真」；渲染提取（ECS §15）与物理/相机的空间输入供给方
@@ -404,7 +404,7 @@ pkg/prism_transform/
 
 ## 23. 诚实边界与风险
 
-- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（135 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」中 **§24.1 静态烘焙（`bake`）**、**§24.3 双缓冲（`double_buffer`）** 已随 M2/M3 优先落地并验证，**§24.2 姿态量化（`quantize`）**、**§24.4 变换 Observer（`observer`）**、**§24.6 轻量约束（`constraint`）** 本次作为纯/可测优先项落地并验证，其余 §24 项仍为 PLANNED，按本文优先级随消费方接线落地。
+- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（135 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」中 **§24.1 静态烘焙（`bake`）**、**§24.3 双缓冲（`double_buffer`）** 已随 M2/M3 优先落地并验证，**§24.2 姿态量化（`quantize`）**、**§24.4 变换 Observer（`observer`）**、**§24.6 轻量约束（`constraint`）** 本次作为纯/可测优先项落地并验证，其余 §24.5 空间同步（`spatial_sync`）、§24.7 GPU 层级传播（`compute_hierarchy` + 真实 GPU twin）、§24.8 扫掠（`sweep`）亦已交付，仅 §24.7 免回读渲染接线归 M6 渲染侧。
 - **高风险项**：
   1. **非均匀缩放 + 层级（M1）**：父子均非均匀缩放会产生错切，无法无损写回子 TRS；须坚持「Global 仅为缓存、Local 为权威」，并在文档/API 明确告警，否则会出现「子物体被意外拉斜」类顽疾。
   2. **大世界精度（M5）**：f64 全量代价大、cell rebasing 边界处理（跨 cell 物理/碰撞/网络）复杂；需真实开放世界里程压测，错配会在边界出现瞬移或抖动。
