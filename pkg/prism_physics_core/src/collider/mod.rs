@@ -310,6 +310,11 @@ pub mod tet_fem_snow_force;
 pub use tet_fem_snow_force::{element_snow_force, snow_elastic_potential_energy, SnowForce};
 pub mod tet_fem_sand_force;
 pub use tet_fem_sand_force::{element_sand_force, sand_elastic_potential_energy, SandForce};
+pub mod tet_fem_plastic_force_assembly;
+pub use tet_fem_plastic_force_assembly::{
+    assemble_elastoplastic_forces, rest_states, total_elastic_potential_energy,
+    ElastoplasticAssembly,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
