@@ -8,6 +8,13 @@
 //! during capture, so they are safe to drive from a diagnostics system.
 //!
 //! * [`inspector`] — archetype / chunk occupancy snapshots.
+//! * [`entity_residency`] — entity-allocator occupancy and location-table
+//!   integrity census (design §5.1 / §5.3 / §20): reconciles the
+//!   [`Entities`](crate::entity::Entities) allocator (live / high-water
+//!   slot capacity / recycled free-list depth / peak generation) against
+//!   the physical placement in the archetype graph, surfacing misplaced,
+//!   dangling, or duplicated handles — the orthogonal handle-allocator axis
+//!   to the chunk-row geometry [`inspector`] measures.
 //! * [`memory_footprint`] — byte-level resident-memory accounting:
 //!   per-archetype reserved / live / wasted column payload derived from
 //!   row width and chunk geometry, ranked most-wasted-first for reclamation
@@ -227,6 +234,7 @@ pub mod component_memory;
 pub mod determinism_readiness;
 #[cfg(feature = "partition")]
 pub mod dormancy_census;
+pub mod entity_residency;
 pub mod event_flow_health;
 #[cfg(feature = "partition")]
 pub mod floating_origin_precision;
@@ -281,6 +289,7 @@ pub use determinism_readiness::{
 };
 #[cfg(feature = "partition")]
 pub use dormancy_census::{DormancyCensus, GenerationBucketEntry, IndexBucketEntry};
+pub use entity_residency::EntityResidencyReport;
 pub use event_flow_health::{EventFlowHealth, EventReaderEntry};
 #[cfg(feature = "partition")]
 pub use floating_origin_precision::{
