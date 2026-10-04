@@ -18,6 +18,7 @@ extern crate alloc;
 
 mod rng;
 
+pub mod automix;
 pub mod modulation;
 pub mod patch;
 
