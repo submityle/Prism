@@ -500,6 +500,8 @@ pub use sphere_dem_friction_integrator::{
 };
 pub mod sphere_boundary_driver;
 pub use sphere_boundary_driver::{SphereBoundaryDriver, SphereBoundaryResolution};
+pub mod sphere_packing;
+pub use sphere_packing::{pack_spheres, SpherePacking, SpherePackingParams};
 
 /// A handle into a [`ShapeRegistry`].
 ///
