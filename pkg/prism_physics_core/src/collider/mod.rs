@@ -478,6 +478,10 @@ pub mod uniform_grid_broadphase;
 pub use uniform_grid_broadphase::UniformGridBroadphase;
 pub mod capillary_liquid_distribution;
 pub use capillary_liquid_distribution::LiquidDistribution;
+pub mod finite_liquid_capillary_forces;
+pub use finite_liquid_capillary_forces::{
+    FiniteLiquidBridge, FiniteLiquidCapillary, FiniteLiquidResolution,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
