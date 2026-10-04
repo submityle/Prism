@@ -81,6 +81,14 @@
 //!   with a per-parameter one-pole glide, swelling new arrivals up from
 //!   silence and fading vanished ones out, so the real-time voice never hears
 //!   a jumped gain, delay, or filter corner.
+//! - [`doppler`] is the per-path pitch companion to [`backend`] and
+//!   [`path_smoothing`]: a stateful [`doppler::PerPathDoppler`] the caller
+//!   ticks once per query to difference each resolved arrival's
+//!   [`delay_seconds`](prism_audio_spatial::propagation::PropagationPath::delay_seconds)
+//!   across frames into a clamped, glided per-path Doppler pitch factor, so an
+//!   approaching reflection rises in pitch and a receding one falls
+//!   independently of the direct sound and of the delay-line length the voice
+//!   renders.
 //!
 //! # Determinism
 //!
@@ -116,6 +124,7 @@ pub mod coupled_sequence;
 pub mod diffraction_edges;
 pub mod diffraction_path;
 pub mod direct_path;
+pub mod doppler;
 pub mod higher_order_diffraction;
 pub mod higher_order_reflection;
 pub mod material_map;
