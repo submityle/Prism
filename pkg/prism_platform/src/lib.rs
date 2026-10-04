@@ -125,6 +125,13 @@ pub mod stdio;
 /// Requires the `std` feature; absent in `no_std` builds.
 #[cfg(feature = "std")]
 pub mod thread;
+/// Advanced asynchronous I/O: a batch submission / completion queue facade for
+/// high-throughput streaming reads (design doc §24.1).
+///
+/// Requires the `std` feature; absent in `no_std` builds.
+#[cfg(feature = "std")]
+pub mod aio;
+
 /// Virtual memory: reserve/commit/decommit/release, aligned reservations,
 /// guard pages, optional large (huge) pages, page protection, and physical
 /// memory information.
@@ -193,6 +200,8 @@ pub use vm::{
     huge_pages_supported, large_page_size, memory_info, page_size, virtual_memory_supported,
     MemoryInfo, MirroredRing, Protection, Reservation, VmError,
 };
+#[cfg(feature = "std")]
+pub use aio::{AioError, AioQueue, Completion, IoPriority, ReadOp, Result as AioResult};
 #[cfg(feature = "std")]
 pub use wallclock::{now as wall_now, sample as wall_sample, WallClock, WallClockSample, WallTime};
 

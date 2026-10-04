@@ -345,7 +345,7 @@ pkg/prism_platform/
 
 本章补齐顶级平台抽象层在真实 AAA 项目里缺一不可的能力。均 feature/能力位门控，默认不付成本；与前文的文件/时钟/线程/虚存/动态库内核互补。
 
-### 24.1 高级异步 I/O（io_uring / IOCP / 批量提交）
+### 24.1 高级异步 I/O（io_uring / IOCP / 批量提交）—— 🟡 批量提交/完成队列门面已交付并真机验证（macOS POSIX AIO `lio_listio`）
 
 AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 
@@ -353,6 +353,10 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 - **零拷贝 + 对齐直读**：绕过页缓存的 direct I/O + 页对齐缓冲（接 §9 虚存），大资产直落目标内存。
 - **优先级 I/O**：关键流送（镜头前方区块）高优先，预取低优先，接 `prism_tasks` §24.5 异步 I/O 桥。
 - **I/O 带宽预算**：限速 + 背压，防流送挤垮磁盘/网络，供 `prism_asset` 流送调度。
+
+**交付状态（已落地提交/完成队列门面 + macOS 真实后端，真机验证）**：`pkg/prism_platform/src/aio/`（`mod` 门面 + `posix` 后端两个独立模块，`#[cfg(feature="std")]` 门控）落地了 §24.1 的核心形态——「一次调用批量提交 N 个读、乱序 reap 完成」的提交/完成队列。公共门面 `AioQueue`：`new()`（无真实后端处诚实返回 `AioError::Unsupported`）、`unsafe submit(&[ReadOp]) -> usize`（返回被内核实际纳入在飞集合的请求数，不足即为内核背压，调用方重投尾部）、`wait(max, timeout) -> Vec<Completion>`（阻塞到 ≥1 完成，乱序经 `Completion::user_data` 关联）、`pending()`、`supported()`。`ReadOp{fd,offset,buf,len,user_data,priority}` + `IoPriority{High,Normal,Low}`（映射 POSIX `aio_reqprio` 增量，best-effort，macOS 多半忽略，已诚实注明；排序正确性不依赖它）。`submit` 标 `unsafe`——调用方须保证 `fd` 与 `buf/len` 活到对应 `Completion` 被 reap（或队列被 Drop）；`AioQueue` Drop 时对每个在飞请求 `aio_cancel` + 阻塞排空 + `aio_return` 收尾，保证内核停止写入已释放缓冲。**macOS/BSD 真实后端用 POSIX AIO**：`lio_listio(LIO_NOWAIT)` 一次 syscall 批量提交（>内核 `AIO_LISTIO_MAX` 自动分块、尊重 `AIO_MAX` 背压上限），`aio_suspend` 阻塞到完成，`aio_error`/`aio_return` 逐个 reap（每个完成的控制块恰好 `aio_return` 一次以释放内核资源），控制块以 `Box<Aiocb>` 保地址稳定；全部为无依赖 `extern "C"` FFI（无 `libc` crate），每处 `unsafe` 带 `#[expect]`+`// SAFETY:`。覆盖 `src/aio/tests.rs` 6 项真机测试（批量乱序读回逐字节校验、超 `AIO_LISTIO_MAX` 的分块+背压重投全读回、空提交 no-op、负 fd 校验、空在飞 wait 超时、能力诚实），`cargo test -p prism_platform aio::` 真机 6/6 全绿、`cargo clippy -p prism_platform --all-targets` 零告警、无桩。
+
+**诚实边界 / 仍属 PLANNED**：真实后端仅在已验证的 Apple（macOS）给出，其余平台 `AioQueue::supported()==false` 且 `AioQueue::new()` 返回 `AioError::Unsupported`（而非返回不读的假缓冲）。**Linux `io_uring`**（`io_uring_setup`+SQ/CQ 环映射+`io_uring_enter`）与 **Windows IOCP**（`CreateIoCompletionPort`+`ReadFile(OVERLAPPED)`+`GetQueuedCompletionStatusEx`）的真实后端为 PLANNED——本机为 macOS 无法真机验证，诚实留空而非下发未验证代码。**零拷贝 / 对齐直读**（Linux `O_DIRECT`、macOS `F_NOCACHE`、Windows `FILE_FLAG_NO_BUFFERING`，接 §9 虚存页对齐缓冲）与 **I/O 带宽预算**（限速+背压的字节/时间片配额）属 PLANNED，待接 `prism_asset` 流送调度；当前仅暴露 best-effort 优先级提示。接 `prism_tasks` §24.5 异步 I/O 桥（把 `Completion` 唤醒接入任务系统）为下一步接线项。
 
 ### 24.2 虚拟内存进阶（稀疏堆 / 按需提交 / GPU 共享内存）—— 🟡 环形流送堆（magic ring buffer）已交付并真机验证（macOS Mach VM）
 
@@ -426,4 +430,4 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 
 ### 24.8 诚实边界
 
-本章多数为 PLANNED 设计目标。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；其中 **24.2 环形流送堆（`MirroredRing` magic ring buffer）已交付并真机验证**（见 `vm/ring.rs`，macOS `mach_vm_remap` 镜像映射，Linux/Windows 镜像后端 PLANNED），稀疏堆可复用现有 `Reservation` 按需提交；24.3 调度钩子的**可移植数据模型 / QoS 映射 / 能耗热策略已交付**（见 `topology` 模块），**真实 OS 拓扑探测 twin（`prism_platform_os` sibling crate，Apple Silicon 真机验证）已交付**，Linux/Windows 拓扑后端与 QoS/能耗 syscall 接线仍 PLANNED；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固的**可移植加固姿态数据模型 / 完整性加载策略 / 沙箱能力映射已交付**（见 `security` 模块），**Apple Silicon 真实 OS 活探测 twin（`prism_platform_os`，读 Mach-O `MH_PIE`/`arm64e` + `csops` 签名状态，真机验证）已交付**，Linux/Windows/Android 活探测后端仍 PLANNED；24.6 能力数据库**已交付**（见 `capability` 模块，贯穿始终、降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章多数为 PLANNED 设计目标。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；其中 **24.1 批量提交/完成队列门面（`AioQueue`）已交付并真机验证**（见 `aio/` 模块，macOS POSIX AIO `lio_listio`/`aio_suspend`/`aio_error`/`aio_return`/`aio_cancel`，Linux `io_uring`/Windows IOCP 后端与零拷贝直读/带宽预算 PLANNED），**24.2 环形流送堆（`MirroredRing` magic ring buffer）已交付并真机验证**（见 `vm/ring.rs`，macOS `mach_vm_remap` 镜像映射，Linux/Windows 镜像后端 PLANNED），稀疏堆可复用现有 `Reservation` 按需提交；24.3 调度钩子的**可移植数据模型 / QoS 映射 / 能耗热策略已交付**（见 `topology` 模块），**真实 OS 拓扑探测 twin（`prism_platform_os` sibling crate，Apple Silicon 真机验证）已交付**，Linux/Windows 拓扑后端与 QoS/能耗 syscall 接线仍 PLANNED；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固的**可移植加固姿态数据模型 / 完整性加载策略 / 沙箱能力映射已交付**（见 `security` 模块），**Apple Silicon 真实 OS 活探测 twin（`prism_platform_os`，读 Mach-O `MH_PIE`/`arm64e` + `csops` 签名状态，真机验证）已交付**，Linux/Windows/Android 活探测后端仍 PLANNED；24.6 能力数据库**已交付**（见 `capability` 模块，贯穿始终、降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
