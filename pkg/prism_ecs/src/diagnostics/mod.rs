@@ -56,6 +56,10 @@
 //! * [`relation_topology`] — per-relation directed-graph shape: longest
 //!   chain depth, fan-out / fan-in extremes, and root / sink counts
 //!   (design §16.6 / §11 / §22 risk #5).
+//! * [`required_closure`] — required-components graph shape (design §16.1):
+//!   per-component closure size (insert blast radius) and fan-in (hot
+//!   shared dependency), ranked hottest-dependency first (design §16.6 /
+//!   §16.1).
 //! * [`time_travel`] — frame-indexed world snapshot record/seek (`std` only).
 //!
 //! All occupancy and change-volume figures describe the chunked Table-backed
@@ -74,6 +78,7 @@ pub mod profiler;
 pub mod relation_graph;
 pub mod relation_cycles;
 pub mod relation_topology;
+pub mod required_closure;
 pub mod step_inspector;
 pub mod storage_distribution;
 pub mod structural_churn;
@@ -92,6 +97,7 @@ pub use memory_footprint::{ArchetypeMemoryEntry, MemoryFootprintReport};
 pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
+pub use required_closure::{RequiredClosureEntry, RequiredClosureReport};
 pub use step_inspector::{StepObservation, SteppingInspector};
 pub use storage_distribution::{StorageBucketEntry, StorageDistributionReport};
 pub use structural_churn::{StructuralChurnProfile, SystemChurnEntry};
