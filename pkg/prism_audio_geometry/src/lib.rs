@@ -75,6 +75,12 @@
 //! - [`backend`] assembles the above into [`backend::GeometricBackend`], the
 //!   [`PropagationBackend`](prism_audio_spatial::propagation::PropagationBackend)
 //!   implementation that fills the caller's bounded path buffer.
+//! - [`path_smoothing`] is the control-rate companion to [`backend`]: a
+//!   stateful [`path_smoothing::PathSmoother`] the caller ticks once per
+//!   query to ease each resolved arrival toward the backend's newest target
+//!   with a per-parameter one-pole glide, swelling new arrivals up from
+//!   silence and fading vanished ones out, so the real-time voice never hears
+//!   a jumped gain, delay, or filter corner.
 //!
 //! # Determinism
 //!
@@ -113,6 +119,7 @@ pub mod direct_path;
 pub mod higher_order_diffraction;
 pub mod higher_order_reflection;
 pub mod material_map;
+pub mod path_smoothing;
 pub mod receiver_directivity;
 pub mod reflection_path;
 pub mod scene;
