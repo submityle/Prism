@@ -94,6 +94,9 @@ pub mod blend_with_atmosphere;
 pub mod bloom_threshold;
 pub mod bloom_upsample;
 pub mod boids;
+pub mod bounding_capsule_axis;
+pub mod bounding_capsule_volume;
+pub mod bounding_sphere_contains;
 pub mod bounds;
 pub mod bresenham_line;
 pub mod bspline_patch;
@@ -335,7 +338,10 @@ pub mod noise;
 pub mod noise_fbm;
 pub mod normal_reconstruct;
 pub mod nurbs_surface;
+pub mod obb_contains_point;
+pub mod obb_corners;
 pub mod obb_obb_sat_3d;
+pub mod obb_volume;
 pub mod obb_world_aabb;
 pub mod occlusion;
 pub mod octahedral_map;
@@ -666,6 +672,15 @@ pub use blend_with_atmosphere::{BlendQuery, BlendedColor, GpuBlendWithAtmosphere
 pub use bloom_threshold::{BloomThresholdQuery, GpuBloomThreshold};
 pub use bloom_upsample::{BloomUpsampleQuery, GpuBloomUpsample};
 pub use boids::{BoidsQuery, BoidsResult, GpuBoids, MAX_NEIGHBORS};
+pub use bounding_capsule_axis::{
+    BoundingCapsuleAxisQuery, BoundingCapsuleAxisResult, GpuBoundingCapsuleAxis,
+};
+pub use bounding_capsule_volume::{
+    BoundingCapsuleVolumeQuery, BoundingCapsuleVolumeResult, GpuBoundingCapsuleVolume,
+};
+pub use bounding_sphere_contains::{
+    BoundingSphereContainsQuery, BoundingSphereContainsResult, GpuBoundingSphereContains,
+};
 pub use bounds::{GpuBounds, GpuBoundsQuery, GpuBoundsResult, AXIS_X, AXIS_Y, AXIS_Z};
 pub use bresenham_line::{GpuBresenhamLine, GpuBresenhamQuery, GpuBresenhamResult};
 pub use bspline_patch::{BsplinePatchQuery, BsplinePatchResult, GpuBsplinePatch};
@@ -1067,7 +1082,10 @@ pub use noise::{GpuFbmParams, GpuNoise, GpuTurbulenceParams, NoiseQuery, NoiseRe
 pub use noise_fbm::{GpuNoiseFbm, NoiseFbmQuery, NoiseFbmResult};
 pub use normal_reconstruct::{GpuNormalReconstruct, NormalQuery, NormalResult};
 pub use nurbs_surface::{GpuNurbsSurface, NurbsSurfaceQuery, NurbsSurfaceResult};
+pub use obb_contains_point::{GpuObbContainsPoint, ObbContainsPointQuery, ObbContainsPointResult};
+pub use obb_corners::{GpuObbCorners, ObbCornersQuery, ObbCornersResult};
 pub use obb_obb_sat_3d::{GpuObbSat3d, ObbSat3dQuery, ObbSat3dResult};
+pub use obb_volume::{GpuObbVolume, ObbVolumeQuery, ObbVolumeResult};
 pub use obb_world_aabb::{GpuObbWorldAabb, ObbWorldAabbQuery, ObbWorldAabbResult};
 pub use occlusion::{GpuOcclusion, GpuOcclusionQuery, GpuOcclusionResult};
 pub use octahedral_map::{GpuOctahedralMap, OctahedralMapQuery, OctahedralMapResult};
