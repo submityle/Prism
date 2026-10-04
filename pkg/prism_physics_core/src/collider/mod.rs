@@ -468,6 +468,10 @@ pub mod granular_pile_integrator;
 pub use granular_pile_integrator::{GranularPileBody, GranularPileStepReport};
 pub mod capillary_bridge;
 pub use capillary_bridge::{CapillaryBridge, CapillaryBridgeModel};
+pub mod capillary_bridge_resolver;
+pub use capillary_bridge_resolver::{
+    CapillaryBridgeResolver, CapillaryPairBridge, CapillaryResolution,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
