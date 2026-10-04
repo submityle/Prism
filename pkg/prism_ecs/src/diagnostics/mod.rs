@@ -20,6 +20,9 @@
 //! * [`component_distribution`] — component-first distribution / spread view:
 //!   per-component archetype spread, live-instance count, and chunk
 //!   footprint, ranked most-spread-first (design §16.6 / §5.3 / §22 risk #5).
+//! * [`component_memory`] — component-first byte-level memory: per-type
+//!   reserved / live / wasted column payload, ranked heaviest-first; the
+//!   byte dual of [`memory_footprint`] (design §16.6 / §5.3 / §17).
 //! * [`frame_profile`] — per-system change-volume ranking folded from a
 //!   [`step_inspector`] frame trace (design §16.6 "帧级变更量").
 //! * [`profiler`] — nested system-span timing and flame-graph export
@@ -52,6 +55,7 @@
 pub mod archetype_fragmentation;
 pub mod change_volume;
 pub mod component_distribution;
+pub mod component_memory;
 pub mod frame_profile;
 pub mod inspector;
 pub mod memory_footprint;
@@ -68,6 +72,7 @@ pub mod time_travel;
 pub use archetype_fragmentation::{ArchetypeFragmentEntry, ArchetypeFragmentationReport};
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use component_distribution::{ComponentDistributionEntry, ComponentDistributionReport};
+pub use component_memory::{ComponentMemoryEntry, ComponentMemoryReport};
 pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
 pub use memory_footprint::{ArchetypeMemoryEntry, MemoryFootprintReport};
