@@ -65,6 +65,7 @@ pub mod draw;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod hull;
+pub mod inside;
 pub mod layer;
 pub mod measure;
 pub mod polygon;
@@ -79,6 +80,7 @@ pub use draw::{DrawCommand, DrawList, GlyphCmd, LayerCmd, RectCmd, ShadowCmd};
 #[cfg(feature = "gpu")]
 pub use gpu::GpuRasterizer;
 pub use hull::convex_hull;
+pub use inside::point_in_polygon;
 pub use layer::{Layer, LayerTree};
 pub use measure::{area, centroid, signed_area};
 pub use polygon::{sd_polygon, sd_triangle};
