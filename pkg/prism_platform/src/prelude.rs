@@ -10,6 +10,10 @@ pub use crate::capability::{
 pub use crate::topology::power::{PowerPolicy, PowerSource, PowerState, ThermalState};
 pub use crate::topology::qos::{qos_hint, EngineQos, OsQosHint};
 pub use crate::topology::{CoreKind, CpuTopology, TopologyBuilder, TopologyCore};
+pub use crate::security::{
+    Access, IntegrityPolicy, LoadDecision, Mitigation, MitigationStatus, SandboxCapabilities,
+    SandboxModel, SecurityPosture, SigningStatus, SigningStrictness,
+};
 #[cfg(feature = "std")]
 pub use crate::wallclock::{self, now as wall_now, WallClock, WallClockSample, WallTime};
 

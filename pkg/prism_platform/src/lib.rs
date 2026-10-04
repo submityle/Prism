@@ -145,6 +145,13 @@ pub mod dynlib;
 /// Pure `core`+`alloc`; available in every build configuration.
 pub mod topology;
 
+/// Security-hardening posture: exploit-mitigation baseline, code-signing /
+/// module-integrity policy, and sandbox capabilities as portable data
+/// (design §24.5). Defensive probing/policy only; no bypass or attack code.
+///
+/// Pure `core`+`alloc`; available in every build configuration.
+pub mod security;
+
 pub use clock::{now, MonotonicNanos};
 pub use cpu::CpuInfo;
 pub use capability::{
@@ -165,6 +172,11 @@ pub use platform::{Os, Platform, PlatformCaps};
 pub use topology::power::{PowerPolicy, PowerSource, PowerState, ThermalState};
 pub use topology::qos::{qos_hint, EngineQos, OsQosHint};
 pub use topology::{CoreKind, CpuTopology, TopologyBuilder, TopologyCore, TopologyError};
+pub use security::{
+    Access, IntegrityPolicy, LoadDecision, Mitigation, MitigationStatus, PostureBuilder,
+    RejectReason, SandboxCapabilities, SandboxModel, SecurityPosture, SigningStatus,
+    SigningStrictness, MITIGATION_COUNT,
+};
 #[cfg(feature = "std")]
 pub use process::{Child, Command, ExitStatus, Output, Stdio};
 #[cfg(feature = "std")]
@@ -195,3 +207,6 @@ mod tests_capability;
 
 #[cfg(test)]
 mod tests_topology;
+
+#[cfg(test)]
+mod tests_security;
