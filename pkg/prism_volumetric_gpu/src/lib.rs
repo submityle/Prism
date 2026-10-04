@@ -147,6 +147,7 @@ pub mod cloud_shadow_modulation;
 pub mod cohen_sutherland_clip;
 pub mod cohesive_dissipated_energy;
 pub mod cohesive_envelope_traction;
+pub mod cohesive_mixed_mode_traction;
 pub mod cohesive_onset_final_separation;
 pub mod cohesive_zone_damage;
 pub mod collision;
@@ -244,8 +245,10 @@ pub mod gpu_scan_segmented;
 pub mod gpu_scan_warp;
 pub mod gpu_stream_append;
 pub mod gpu_timer_query;
+pub mod granular_mu_i_rheology;
 pub mod gravity_wave;
 pub mod gray_code;
+pub mod haff_cooling_law;
 pub mod hair_follicle_bind;
 pub mod hair_line_coverage;
 pub mod hair_lod;
@@ -270,6 +273,7 @@ pub mod hertz_elastic_force;
 pub mod hertz_reduced_radius;
 pub mod hilbert_curve;
 pub mod histogram_equalize;
+pub mod hoek_brown_yield_surface;
 pub mod hue_shift;
 pub mod imposter_fade;
 pub mod indirect_dispatch;
@@ -285,6 +289,7 @@ pub mod janssen_cross_section;
 pub mod janssen_stress_state;
 pub mod kawase_blur;
 pub mod kawase_dual_blur;
+pub mod kinetic_theory_enskog;
 pub mod lens_distortion;
 pub mod lens_flare;
 pub mod liang_barsky_clip;
@@ -400,6 +405,7 @@ pub mod polygon_area_2d;
 pub mod polyline_sdf_2d;
 pub mod popcount_hamming;
 pub mod powder;
+pub mod powder_flowability_index;
 pub mod premultiply_alpha;
 pub mod principal_curvature_gaussian;
 pub mod principal_curvature_mean;
@@ -820,6 +826,9 @@ pub use cohesive_dissipated_energy::{
 pub use cohesive_envelope_traction::{
     CohesiveEnvelopeTractionQuery, CohesiveEnvelopeTractionResult, GpuCohesiveEnvelopeTraction,
 };
+pub use cohesive_mixed_mode_traction::{
+    CohesiveMixedModeTractionQuery, CohesiveMixedModeTractionResult, GpuCohesiveMixedModeTraction,
+};
 pub use cohesive_onset_final_separation::{
     CohesiveOnsetFinalSeparationQuery, CohesiveOnsetFinalSeparationResult,
     GpuCohesiveOnsetFinalSeparation,
@@ -973,8 +982,12 @@ pub use gpu_stream_append::{
 pub use gpu_timer_query::{
     GpuTimerQueryLayout, GpuTimerQueryLayoutQuery, GpuTimerQueryLayoutResult, GpuTimerQueryOp,
 };
+pub use granular_mu_i_rheology::{
+    GpuGranularMuIRheology, GranularMuIRheologyQuery, GranularMuIRheologyResult,
+};
 pub use gravity_wave::{GpuGravityWave, GravityWaveQuery};
 pub use gray_code::GpuGrayCode;
+pub use haff_cooling_law::{GpuHaffCoolingLaw, HaffCoolingLawQuery, HaffCoolingLawResult};
 pub use hair_follicle_bind::{GpuHairFollicleBind, HairFollicleBindQuery, HairFollicleBindResult};
 pub use hair_line_coverage::{GpuHairLineCoverage, HairLineCoverageQuery, HairLineCoverageResult};
 pub use hair_lod::{GpuHairLod, HairLodQuery, HairLodResult};
@@ -1019,6 +1032,9 @@ pub use hilbert_curve::{GpuHilbertCurve, MAX_ORDER};
 pub use histogram_equalize::{
     GpuHistogramEqualize, HistogramEqualizeQuery, HistogramEqualizeResult,
 };
+pub use hoek_brown_yield_surface::{
+    GpuHoekBrownYieldSurface, HoekBrownYieldSurfaceQuery, HoekBrownYieldSurfaceResult,
+};
 pub use hue_shift::{GpuHueShift, HueShiftQuery, HueShiftResult};
 pub use imposter_fade::{GpuImposterFade, ImposterFadeQuery};
 pub use indirect_dispatch::{
@@ -1040,6 +1056,9 @@ pub use janssen_stress_state::{
 };
 pub use kawase_blur::{GpuKawaseBlur, KawaseBlurQuery};
 pub use kawase_dual_blur::{GpuKawaseDualBlur, GpuKawaseDualBlurQuery, GpuKawaseDualBlurResult};
+pub use kinetic_theory_enskog::{
+    GpuKineticTheoryEnskog, KineticTheoryEnskogQuery, KineticTheoryEnskogResult,
+};
 pub use lens_distortion::GpuLensDistortion;
 pub use lens_flare::{GpuLensFlare, LensFlareQuery, LensFlareResult};
 pub use liang_barsky_clip::{GpuLiangBarskyClip, LiangBarskyQuery, LiangBarskyResult, CLIP_EPS};
@@ -1233,6 +1252,9 @@ pub use polygon_area_2d::{GpuPolygonArea2d, GpuPolygonMetrics, MAX_POLYGON_VERTS
 pub use polyline_sdf_2d::{GpuPolylineSdf, GpuPolylineSdf2d, PolylineSdf2dQuery};
 pub use popcount_hamming::GpuPopcountHamming;
 pub use powder::{GpuPowder, PowderQuery};
+pub use powder_flowability_index::{
+    GpuPowderFlowabilityIndex, PowderFlowabilityIndexQuery, PowderFlowabilityIndexResult,
+};
 pub use premultiply_alpha::GpuPremultiplyAlpha;
 pub use principal_curvature_gaussian::{
     GpuPrincipalCurvatureGaussian, PrincipalCurvatureGaussianQuery,
