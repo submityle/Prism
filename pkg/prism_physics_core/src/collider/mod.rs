@@ -604,6 +604,8 @@ pub mod state_parameter;
 pub use state_parameter::StateParameter;
 pub mod skempton_pore_pressure;
 pub use skempton_pore_pressure::SkemptonPorePressure;
+pub mod bishop_effective_stress;
+pub use bishop_effective_stress::BishopEffectiveStress;
 
 /// A handle into a [`ShapeRegistry`].
 ///
