@@ -12,6 +12,12 @@ pub use crate::concurrent::{
     SpscQueue, TreiberStack,
 };
 pub use crate::cow::Cow;
+pub use crate::det::{
+    mix64, reproducible_hash_ordered, reproducible_hash_unordered, DeterministicMerge,
+    OrderedHashCombiner, UnorderedHashCombiner,
+};
+#[cfg(feature = "concurrent")]
+pub use crate::det::ConcurrentMerge;
 pub use crate::determinism::{OrderedMap, OrderedSet};
 pub use crate::guard::{GuardConfig, GuardError, GuardHandle, GuardedBuffer, GuardedPool};
 pub use crate::hash::{
@@ -23,6 +29,10 @@ pub use crate::layout::{
     ColumnPlan, ColumnShape, ColumnShapes, GroupLayout, HotCold, LayoutPlan, Temperature,
 };
 pub use crate::intern::{FName, InternCache, Interned, Interner, Istr};
+pub use crate::reloc::{
+    OffsetPtr, OffsetSlice, Reloc, RelocError, RelocMap, RelocMapView, RelocVec,
+    RelocVecView,
+};
 pub use crate::slot_map::{SlotKey, SlotMap};
 pub use crate::small_vec::SmallVec;
 pub use crate::soa::{Soa, SoaVec};

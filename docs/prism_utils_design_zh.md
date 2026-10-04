@@ -389,13 +389,15 @@ pkg/prism_utils/
 
 **交付状态**：热冷分离容器与 SoA 自动布局已随本构建交付，位于 `prism_utils` 的独立 `layout` 模块（`layout/hotcold.rs` + `layout/plan.rs`，`lib.rs` 以 `pub mod layout` + `pub use` 导出，并进 `prelude`）。`HotCold` 复用 §24.4/§17 的 derive-free `Soa` 列存，纯安全代码、零 `unsafe`、no_std+alloc 兼容（`extern crate alloc`，与既有模块一致）；`LayoutPlan` 为纯确定性布局描述，不分配被存数据。专项单测覆盖热/冷列独立增删一致、索引访问、切片迭代顺序、布局对齐/步长、空/单元素边界（见 `src/tests_hotcold.rs`，15 项）。AoSoA 混合物理块仍为 PLANNED。
 
-### 24.5 可重定位 / 内存映射友好容器（offset 指针）
+### 24.5 可重定位 / 内存映射友好容器（offset 指针）—— ✅ 已交付（`reloc`）
 
 资产直接 mmap 后用、免反序列化，是 AAA 加载速度的关键：
 
-- **offset 指针**：容器内部用相对偏移而非绝对指针，整块可 memcpy/mmap 到任意地址仍有效（Unreal `TArray` 序列化、Flatbuffers 形态）。
-- **可重定位容器**：`RelocVec`/`RelocMap` 支持「烘焙成连续 blob → 运行期 mmap 零解析直接用」（接 platform §6 mmap、`prism_asset` 烘焙）。
-- **POD 布局版本化**：接 §14 bytemuck，blob 布局版本化，GPU/磁盘直传。
+- **offset 指针**：容器内部用相对偏移而非绝对指针，整块可 memcpy/mmap 到任意地址仍有效（Unreal `TArray` 序列化、`FlatBuffers` 形态）。 **（✅ 已交付：`reloc::OffsetPtr<T>`/`reloc::OffsetSlice<T>`——以 `i32` **自相对**偏移（相对字段自身地址）而非绝对指针寻址，`OffsetPtr` 以偏移 `0` 表示 NULL，`OffsetSlice` 为 `i32` 偏移 + `u32` 长度；整块 `memcpy` 或内嵌进更大 blob 后，偏移语义不变，无需任何重定位修补。）**
+- **可重定位容器**：`RelocVec`/`RelocMap` 支持「烘焙成连续 `blob` → 运行期 mmap 零解析直接用」（接 platform §6 mmap、`prism_asset` 烘焙）。 **（✅ 已交付：`reloc::RelocVec<T>`/`reloc::RelocMap<K, V>` 将元素序列化为**带魔数头的连续字节 `blob`**（`RelocVec` 魔数 `0x3143_5652`、头 16 字节；`RelocMap` 魔数 `0x3150_4D52`、头 28 字节、键有序存储供二分查找），对应 `RelocVecView`/`RelocMapView` 以**纯安全边界检查**在原地（memcpy 到任意地址后）零拷贝解析，所有读取均先验证魔数、长度与元素边界，越界/坏魔数/尺寸不符一律返回 `RelocError`。）**
+- **POD 布局版本化**：`blob` 布局以魔数区分，GPU/磁盘直传。 **（✅ 已交付：`reloc::Reloc` trait 为 POD 标量（`u8`..`u64`/`i8`..`i64`/`f32`/`f64`/`bool`，经 `impl_reloc_le!` 覆盖）定义**固定字节宽 + 小端（LE）**的 `encode`/`decode`，跨大小端平台位级一致；容器头的魔数即最小布局版本标记。嵌套变长图与 bytemuck 整体零拷贝转型属更上层能力，见诚实边界。）**
+
+**交付状态**：可重定位 offset 指针容器已随本构建交付，位于 `prism_utils` 的独立 `reloc` 模块（`reloc/mod.rs` 的 `RelocError`/`Reloc` trait/`impl_reloc_le!`，`reloc/offset.rs` 的 `OffsetPtr`/`OffsetSlice`，`reloc/vec.rs` 的 `RelocVec`/`RelocVecView`，`reloc/map.rs` 的 `RelocMap`/`RelocMapView`）。**纯安全**实现：全部序列化/解析用安全的字节切片边界检查、LE 定宽编解码与 `u32`/`i32` 偏移算术完成，`#![forbid(unsafe_code)]`、零 `unsafe`、无一处本地 lint 覆盖；no_std 风格 + alloc 兼容（各文件 `extern crate alloc`，与既有模块一致）。`lib.rs` 以 `pub use reloc::{OffsetPtr, OffsetSlice, Reloc, RelocError, RelocMap, RelocMapView, RelocVec, RelocVecView}` 导出并进 `prelude`。专项单测以手算 LE 字节序列为 oracle 对拍，覆盖标量编解码位级向量、`RelocVec`/`RelocMap` 烘焙→解析往返、整块 `memcpy` 到新缓冲后仍有效、内嵌进更大 blob 后按偏移解析、`RelocMap` 二分查找命中/未命中、坏魔数/截断/尺寸不符的 corruption 检测、空/单元素边界（见 `src/reloc/tests.rs`，20 项）。
 
 ### 24.6 内容寻址与去重缓存 —— ✅ 已交付（`intern::InternCache`）
 
@@ -405,12 +407,14 @@ pkg/prism_utils/
 
 **交付状态**：内容寻址去重缓存已随本构建交付，位于 `prism_utils` 的独立 `intern` 模块（原字符串驻留 `intern.rs` 重构为 `intern/string.rs`，新增 `intern/cache.rs` 的 `InternCache`/`Interned`、与字符串驻留共享 `intern/domain.rs` 的域标记，`intern/mod.rs` 汇总）。纯安全代码、零 `unsafe`、no_std+alloc 兼容（`extern crate alloc`），底层复用 `Vec<T>` + `HashMap<u64, Vec<u32>>` 桶索引。`lib.rs` 以 `pub use intern::{InternCache, Interned, …}` 导出并进 `prelude`。专项单测以线性扫描 `Vec<T>` 为 oracle 对拍，覆盖去重、句柄等价⇔内容等价、`resolve` 往返、`get`/`contains` 不插入、`intern_ref`、4000 次伪随机混合序对拍、插入序迭代、`clear` 回收、`content_hash` 稳定、域类型隔离、句柄 `u32` 大小与 `Copy`（见 `src/intern/cache_tests.rs`，11 项）。
 
-### 24.7 确定性进阶（有序并发 / 可复现哈希）
+### 24.7 确定性进阶（有序并发 / 可复现哈希）—— ✅ 已交付（`det`）
 
-- **有序并发容器**：`concurrent` + `determinism` 双档下，并发写入最终以确定序归并（接 tasks §24.7 确定归并），保证回放一致。
-- **可复现哈希**：固定种子 + 固定迭代序的 SwissTable 变体，跨运行跨平台位级一致，是四方确定性的容器底座（接 ECS/replication）。
-- **确定性分配**：确定性档下分配地址无关的 ID/序，容器状态可跨机复现（调试 desync）。
+- **有序并发容器**：`concurrent` + `determinism` 双档下，并发写入最终以确定序归并（接 tasks §24.7 确定归并），保证回放一致。 **（✅ 已交付：`det::DeterministicMerge<K, V>` 收集任意顺序的 `(K, V)` 贡献，`into_sorted()` 按键稳定排序给出**与贡献/交错顺序无关**的确定结果，`into_reduced(combine)` 按键归约；`concurrent` 档下的 `det::ConcurrentMerge<K, V>`（内部 std `Mutex`）允许多线程并发 `contribute`，最终归并结果位级等同单线程 oracle，保证回放一致。）**
+- **可复现哈希**：固定种子 + 固定迭代序，跨运行跨平台位级一致，是四方确定性的哈希底座（接 ECS/replication）。 **（✅ 已交付：`det::mix64`（`splitmix64` finalizer，`const fn`）+ `det::OrderedHashCombiner`/`det::UnorderedHashCombiner` + `det::reproducible_hash_ordered`/`det::reproducible_hash_unordered`——有序组合器对序列敏感、无序组合器用可交换的异或折叠使**集合哈希与元素顺序无关**，全程无浮点、无地址依赖、无 `std::hash` 随机种子，跨运行跨平台位级一致。）**
+- **确定性分配**：确定性档下分配地址无关的 ID/序，容器状态可跨机复现（调试 desync）。 **（PLANNED：`DeterministicMerge` 的键序结果已地址无关；地址无关 ID 分配器待确定性档整体落地。）**
+
+**交付状态**：确定性进阶（有序并发合并 + 可复现哈希）已随本构建交付，位于 `prism_utils` 的独立 `det` 模块（`det/hash.rs` 的 `mix64`/`OrderedHashCombiner`/`UnorderedHashCombiner`/`reproducible_hash_ordered`/`reproducible_hash_unordered`，`det/merge.rs` 的 `DeterministicMerge` 与 `concurrent` 档下的 `ConcurrentMerge`）。**纯安全**实现：哈希为非加密、非 ML 的 `splitmix64` 风格整数混合（固定常量 + 固定折叠序），合并为稳定排序 + 归约，`#![forbid(unsafe_code)]`、零 `unsafe`；no_std 风格 + alloc 兼容（各文件 `extern crate alloc`，`ConcurrentMerge` 仅在 `concurrent` 档启用、用 std `Mutex`）。`lib.rs` 以 `pub use det::{mix64, reproducible_hash_ordered, reproducible_hash_unordered, DeterministicMerge, OrderedHashCombiner, UnorderedHashCombiner}`（+ `#[cfg(feature = "concurrent")] ConcurrentMerge`）导出并进 `prelude`。专项单测以**冻结的已知哈希向量**（手算/独立 oracle 复核，如 `mix64(1)=0x5692161d100b05e5`、`ordered([1,2,3])=0xee3314c644c036cd`、`unordered([1,2,3])==unordered([3,2,1])=0xb8c190a947434478`）对拍，覆盖跨调用稳定、空/单元素、有序敏感性、无序置换不变性、`DeterministicMerge` 乱序贡献→有序结果、归约求和、以及 `concurrent` 档下 8 线程并发贡献等同单线程 oracle 且多次独立运行一致（见 `src/det/tests.rs`，17 项，其中 2 项 `concurrent`-gated）。
 
 ### 24.8 诚实边界
 
-**24.1 作用域分配器已交付**（`alloc_::scope::ScopeStack`），**24.2 无锁进阶已交付**（`concurrent::Collector`/`Guard` epoch 回收 + `concurrent::Rcu` 读多写少 RCU + `concurrent::ConcurrentHashMap` 分片并发哈希；均在 `concurrent` 档下，默认关闭），**24.3 内存安全加固已交付**（纯安全容器层 `guard::GuardedBuffer`/`guard::GuardedPool` + 既有裸内存分配层 `alloc_::guard::GuardedAllocator`；保护页属 platform §9、分配栈追踪属 `prism_diagnostic` §24.3，仍为 PLANNED），**24.4 热冷分离 + SoA 自动布局已交付**（`layout::HotCold` + `layout::LayoutPlan`；其中 AoSoA 混合物理块仍为 PLANNED）；其余为 PLANNED。**24.1 作用域分配器 + 24.4 热冷/SoA 布局**是 ECS/tasks/渲染最先依赖的能力，建议随 M2/M3 优先落地；24.5 可重定位容器随 `prism_asset` 烘焙落地；24.6 内容寻址去重已交付（`intern::InternCache`）；24.2 无锁进阶已随 M5 落地（RCU 本次补齐），24.7 确定性进阶随 M5 落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+**24.1 作用域分配器已交付**（`alloc_::scope::ScopeStack`），**24.2 无锁进阶已交付**（`concurrent::Collector`/`Guard` epoch 回收 + `concurrent::Rcu` 读多写少 RCU + `concurrent::ConcurrentHashMap` 分片并发哈希；均在 `concurrent` 档下，默认关闭），**24.3 内存安全加固已交付**（纯安全容器层 `guard::GuardedBuffer`/`guard::GuardedPool` + 既有裸内存分配层 `alloc_::guard::GuardedAllocator`；保护页属 platform §9、分配栈追踪属 `prism_diagnostic` §24.3，仍为 PLANNED），**24.4 热冷分离 + SoA 自动布局已交付**（`layout::HotCold` + `layout::LayoutPlan`；其中 AoSoA 混合物理块仍为 PLANNED），**24.5 可重定位 offset 指针容器已交付**（`reloc::OffsetPtr`/`OffsetSlice` + `reloc::RelocVec`/`RelocMap` + `reloc::Reloc` LE 编解码；仅支持定宽 POD 标量与单层 blob 的 memcpy/重定位后有效，**嵌套变长图/字符串池、运行期 mmap 系统调用属 platform §6**、bytemuck 整体零拷贝转型属 §14，仍为 PLANNED），**24.7 确定性进阶已交付**（`det::DeterministicMerge` 确定序归并 + `concurrent` 档 `det::ConcurrentMerge` + `det::reproducible_hash_ordered`/`reproducible_hash_unordered` 可复现哈希；**哈希为非加密、非 ML 稳定哈希**，`into_reduced` 的 `combine` 需可交换且可结合、`UnorderedHashCombiner` 的无序不变性仅对去重后集合成立，地址无关 ID 分配器待确定性档整体落地，仍为 PLANNED）；其余为 PLANNED。**24.1 作用域分配器 + 24.4 热冷/SoA 布局**是 ECS/tasks/渲染最先依赖的能力，建议随 M2/M3 优先落地；24.5 可重定位容器已交付（`reloc`），后续随 `prism_asset` 烘焙对接；24.6 内容寻址去重已交付（`intern::InternCache`）；24.2 无锁进阶已随 M5 落地（RCU 本次补齐），24.7 确定性进阶已随 M5 落地（`det`）。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

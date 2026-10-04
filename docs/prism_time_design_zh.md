@@ -9,7 +9,7 @@
 > - **网络时间**：GGPO/Quantum 的 tick 对齐、NTP 式时钟同步、插值延迟缓冲
 > 本文为纯经典时间/积分路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：输入+时间录制回放/帧节奏与低延迟(VRR/Reflex 形态)/帧预算驱动自适应质量/长会话高精度与漂移修正/游戏内定时调度器/挂起恢复与后台暂停/多世界时间域隔离/确定性时间审计；均为 PLANNED，无代码）
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补：24.1 录制回放 + 24.5 长会话漂移修正 + 24.6 游戏内定时调度器 + 24.8 多世界/确定性审计已落地，余项仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：输入+时间录制回放/帧节奏与低延迟(VRR/Reflex 形态)/帧预算驱动自适应质量/长会话高精度与漂移修正/游戏内定时调度器/挂起恢复与后台暂停/多世界时间域隔离/确定性时间审计；均为 PLANNED，无代码）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_platform`（单调高精度时钟），可选 `prism_math`（有理/定点时间）、`prism_diagnostic`
 - 层级定位: ECS 文档 L3「运行时服务」；App 文档 §8 固定步长的时钟供给方
@@ -315,7 +315,7 @@ pkg/prism_time/
 
 ## 23. 诚实边界与风险
 
-- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（117 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」仍为 PLANNED，按本文优先级随消费方接线落地。
+- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（lib 测试全绿，含 §24.1/§24.8 新增 20 项）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」中 24.1/24.5/24.6/24.8 已落地，余项仍为 PLANNED，按本文优先级随消费方接线落地。
 - **高风险项**：
   1. **死亡螺旋熔断参数（M2）**：`max_delta`/`max_substeps` 错配会在卡顿时表现为慢放或穿墙；须按内容压测标定，并与 App §8 保持单一真相（避免两处各算一套累加器）。
   2. **确定性步长（M4）**：`f32` 的 1/60 不精确会长时程漂移；必须有理/定点 + 整数 tick，且跨平台一致要定点数学路径验证。
@@ -331,13 +331,19 @@ pkg/prism_time/
 
 本章补齐顶级时间系统常被忽视、却在真实 AAA 项目里缺一不可的能力。均 feature/档位门控，默认不付成本；与前文三时钟、固定步、时间膨胀、确定性时钟、网络同步互补。
 
-### 24.1 输入 + 时间录制回放
+### 24.1 输入 + 时间录制回放 ✅ 已交付（`recording`）
 
 把每帧的输入与时间推进记录成轨道,可逐帧回放,用于 bug 复现、回归测试、过场录制:
 
 - 录制 `(tick, fixed_dt, 输入快照)`;回放时**用录制的 delta 喂时钟**,不读墙钟,保证严格复现。
 - 与 §确定性时钟 + ECS 回滚联动:同输入 + 同步长 → 同结果(位等价),是确定性调试的闭环工具。
 - 供自动化测试:录一段玩法,CI 回放断言状态哈希一致。
+
+**交付状态（已落地）**：`pkg/prism_time/src/recording/`（`mod.rs` 共享数据 + `record.rs` 录制态 + `replay.rs` 回放态）。
+- `RecordedFrame<I>` 记录每帧 `(dt, 输入快照, 随机种子)`；`Recording<I>` 为有序确定性时间线（纯数据、`Clone`、可被两条独立回放复用做双跑比对）。
+- **两态逐帧投喂**：`Recorder<I>` 为录制态（`record_frame` 逐帧追加 → `finish()` 产出 `Recording`）；`Player<I>` 为回放态（`next_frame()` 逐帧投喂，取回放 `dt` 喂时钟而非读墙钟，`seek`/`reset` 支持逐帧拖拽调试）。
+- **严格复现**：回放用录制 delta 驱动 `TickClock`，与原跑逐帧 tick/累加器位等价；同种子经确定性 PRNG 复现同一随机流；配合 `multiworld` 审计可录一段玩法、CI 回放断言状态哈希逐帧一致（闭环）。
+- 纯整数/`Duration` 运算，`no_std + alloc`（时间线用 `alloc::Vec`，热路径无额外分配）。单测见 `tests_record_replay.rs`（录→放逐帧一致、种子复现、时钟逐帧对齐、拖拽、空录制与边界、闭环哈希一致）。
 
 ### 24.2 帧节奏与低延迟（Frame Pacing / Reflex 形态）
 
@@ -362,7 +368,7 @@ G-Sync/FreeSync/VRR 下显示刷新非固定:
 - 子系统据此动态调节:动态分辨率、LOD 偏置、阴影级联数、粒子上限、`prism_tasks` 的 `Background` 车道顺延(tasks §24.1)。
 - 闭环:超预算→降质保帧率;富余→回升画质,平滑迟滞避免振荡。
 
-### 24.5 长会话高精度与漂移修正
+### 24.5 长会话高精度与漂移修正 ✅ 已交付（`drift`）
 
 24/7 服务器、长流程单机会话的时间精度:
 
@@ -370,7 +376,14 @@ G-Sync/FreeSync/VRR 下显示刷新非固定:
 - 单调时钟溢出/回绕处理(平台计数器位宽有限)。
 - 可选对墙钟做缓慢漂移修正(服务器长跑与 NTP 对齐),但不破坏单调与固定步确定性。
 
-### 24.6 游戏内定时调度器
+**交付状态（已落地）**：`pkg/prism_time/src/drift/`（`mod.rs` + `monotonic.rs` 单调基准 + `corrector.rs` 漂移修正）。
+- **整数 tick 权威，杜绝 f32 漂移**：`MonotonicBaseline` 把定频、定位宽的硬件计数器累加为无界 `u128` tick 总量作为权威 elapsed，`Duration`/`f64` 视图均由整数 tick 派生——长会话不积累 `f32`/`f64` 精度误差（动画/计时不错位）。
+- **回绕安全**：`update(raw)` 以 `(raw.wrapping_sub(last)) & mask` 处理固定位宽计数器溢出回绕（`width_bits` 1..=64，掩码截断），只要每个回绕周期至少轮询一次即可重建真实前进量；回绕周期对任何现实频率/位宽都远长于一帧。
+- **有界 slew 漂移修正，不破坏单调**：`DriftCorrector` 以 `residual = reference - corrected` 跟踪待吸收偏移，每步 `slew = clamp(residual, ±max_slew)`，`max_slew = real_delta × ppm / 1e6`；slew 上限严格 < 1e6 ppm（默认 500 ppm），故修正量恒小于真实 delta，corrected 时间**严格单调、绝不跳变**，保全固定步确定性，多帧后 residual 收敛至零。
+- **会话边界硬跳**：`resync(reference)` 为首次同步 / 挂起恢复等真实不连续点提供一次显式、可报告的阶跃（返回有符号跳变 ns），由调用方当作会话边界而非逐帧修正处理。
+- 全程确定性整数运算（`u128`/`i128` 纳秒，无浮点进修正路径），同一 delta 与参考样本序列跨运行产出位相同的修正时间线；`no_std + alloc`、无 `unsafe`。单测见 `tests_drift.rs`（回绕重建、整数权威无漂移、slew 严格单调收敛、ppm 边界、`resync` 阶跃、双跑一致等）。
+
+### 24.6 游戏内定时调度器 ✅ 已交付（`scheduler`）
 
 统一的「在 T 时刻/经过 D 后/每隔 P」回调调度(高于裸 Timer):
 
@@ -382,6 +395,15 @@ time.schedule_every(Duration::from_millis(500), |w| tick_regen(w));
 - 走 Virtual 时钟(受暂停/缩放影响)或 Real 时钟(UI/网络心跳)可选。
 - 支持取消句柄、合并、确定性排序(回放一致)。供 gameplay 冷却、刷怪、buff 到期。
 
+**交付状态（已落地）**：`pkg/prism_time/src/scheduler/`（`mod.rs` + `handle.rs` 句柄/事件 + `queue.rs` 最小堆队列）。
+- **延迟 / 定点 / 周期调度**：`schedule_after(delay, payload)` / `schedule_at(when, payload)` / `schedule_every(period, payload)`（及 `schedule_every_from(first, period, payload)` 分离首帧与周期），周期为零会 panic（零周期无法前进）。
+- **确定性时间轮进**：时间以精确整数纳秒（`u128`）累加，不读墙钟、调度路径无浮点；`advance(delta, out)` 推进并按序追加 `Fired<T>` 事件流，`advance_collect` 为便捷分配版。
+- **确定性排序**：事件按 `(fire_time, 插入 seq)` 定序——同刻事件按调度顺序触发，故两次以相同顺序调度相同 timer 的运行产出逐字节一致的 `Fired` 流（§24.6 要求的回放一致）。
+- **取消 / 重调度（句柄稳定）**：`TimerHandle` 跨 `reschedule` 保持有效；`cancel` 升 generation 退役槽位，`reschedule` 升 epoch 作废旧堆项——二者 O(1) + 懒清理；槽位经 free list 复用并以 generation 区分，陈旧句柄不会复活。
+- **大 delta 追帧与尖峰防护**：周期 timer 靠最小堆自然补齐跨越的多个周期；`max_fires_per_advance`（默认 4096）为单次 advance 的触发上限，防止极小周期在巨 delta 下无界 spin，余量由后续 `advance`/`drain_due` 续排。
+- **诚实边界（payload 而非闭包）**：本层不存 `FnMut` 闭包（闭包无法确定性 `Clone` 做双跑比对，也无法在无分配器 `no_std` 内核落地），而是拥有时间内核能确定性拥有的部分——按精确触发时间定序、携带用户 payload 的优先队列；由 payload 映射回 gameplay 动作（刷怪 / buff 到期 / 冷却）属 gameplay 层接线（见 §24.9）。走 Virtual（受暂停/缩放）或 Real（UI/心跳）时钟由调用方选择喂哪条 delta。
+- `no_std + alloc`（堆为 `alloc::collections::BinaryHeap`）、无 `unsafe`。单测见 `tests_scheduler.rs`（准点单发、同刻按序、大 delta 时序、周期追帧、取消、重调度保句柄、槽位复用不复活陈旧句柄、触发上限分批、双跑一致、零周期 panic 等）。
+
 ### 24.7 挂起 / 恢复与后台暂停
 
 进程挂起（移动端切后台、主机休眠、窗口最小化）后恢复：
@@ -390,12 +412,24 @@ time.schedule_every(Duration::from_millis(500), |w| tick_regen(w));
 - 可配置后台行为:暂停 Virtual(游戏冻结)、Real 照走(网络心跳不断)、或低频后台更新。
 - 平台挂起/恢复事件由 `prism_platform`/`prism_app` 转发给时间系统。
 
-### 24.8 多世界时间域隔离与确定性审计
+### 24.8 多世界时间域隔离与确定性审计 ✅ 已交付（`multiworld`）
 
 - **多世界**:每个 World（主世界、编辑器预览、服务器子应用）持独立时间上下文,互不干扰(接 App §子应用)。
 - **确定性审计**(`determinism` + `trace` 档):记录每 tick 的 `dt`/累加器/子步数,双跑比对定位首个发散 tick,是确定性回归的诊断利器。
 
+**交付状态（已落地）**：`pkg/prism_time/src/multiworld/`（`mod.rs` + `time_domain.rs` 多世界 + `audit.rs` 确定性审计）。
+- **多世界隔离**：`WorldTimeDomain` 为每个 World 持独立的 `scale`/`pause`/累加器与确定性 tick（内置 `TickClock`）；推进一个世界只改该世界状态——暂停编辑器预览世界不影响主世界运行，各世界 `scale` 相互独立。`WorldSet` 以同一真实 delta 推进多个世界，各自套用自己的策略。
+- **确定性审计**：`StateHasher`（64 位 FNV-1a，无随机种子、跨平台确定）把每帧关键状态（tick/累加器/步长/scale 位/暂停位）哈希为摘要；`AuditTrail` 逐帧记录；`compare_trails` 双跑比对，`AuditDiff` 报告 `Identical` / 首个发散帧 `Diverged{frame,left,right}` / 等长不符 `LengthMismatch`——首个分叉即定位。
+- 纯整数/`Duration`/`f64`-bit 确定性运算，`no_std + alloc`。单测见 `tests_multiworld.rs`（暂停隔离、scale 独立、`WorldSet` 独立推进、审计双跑一致、首个发散定位、长度不符、哈希确定性、重置与边界、精确步长零漂移）。
+
 ### 24.9 诚实边界
 
-本章全部为 PLANNED 设计目标,无代码。**24.1 录制回放 + 24.8 确定性审计**是确定性系统(物理/网络)的调试基石,建议随 M4 落地;24.2 帧节奏 + 24.3 VRR + 24.7 挂起恢复随 M2 主循环/平台接线落地;24.4 自适应质量随 `prism_profiler`/渲染反馈落地;24.5 长会话精度贯穿始终;24.6 调度器随 gameplay 层落地。帧节奏/低延迟须真实硬件(含主机/VRR 显示器/移动端)验证,设计阶段无法断言数值。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
+本章 **24.1 录制回放、24.5 长会话漂移修正、24.6 游戏内定时调度器、24.8 多世界时间域隔离/确定性审计已落地**（见各节「交付状态」，`recording` / `drift` / `scheduler` / `multiworld` 四模块，`cargo test -p prism_time` 全绿、`cargo clippy --all-targets` 零告警）；其余小节仍为 PLANNED 设计目标、无代码。**24.1 录制回放 + 24.8 确定性审计**是确定性系统(物理/网络)的调试基石,已随 M4 确定性路线落地;24.2 帧节奏 + 24.3 VRR + 24.7 挂起恢复随 M2 主循环/平台接线落地;24.4 自适应质量随 `prism_profiler`/渲染反馈落地。
+
+**24.5 与 24.6 的诚实边界（硬件 / 接线归属）**：本层只提供**确定性算法**,不碰任何真实硬件或墙钟。
+- **真实 OS 单调时钟 / 平台计数器频率与位宽**由 `prism_platform` 读取并注入；`MonotonicBaseline` 只对调用方喂入的原始计数值做回绕安全累加,位宽(`width_bits`)/频率(`ticks_per_sec`)为调用方声明的参数,本模块不探测硬件。
+- **NTP / 权威服务器参考样本**由 net 层(往返估计)或平台授时提供；`DriftCorrector` 只消费调用方给出的参考 `Duration`/偏移,执行有界 slew 修正,不发起网络请求、不读系统墙钟。真实网络条件下的收敛手感须联网实测,本层仅保证算法层面的单调性与确定性。
+- **调度器 payload→动作映射、Virtual/Real 时钟选择、World 调用**属 gameplay 层接线；`Scheduler` 不存闭包、不调用 World,只按精确触发时间定序派发携带 payload 的 `Fired` 事件(理由见 §24.6「诚实边界」)。喂哪条时钟的 delta 由调用方决定。
+
+帧节奏/低延迟须真实硬件(含主机/VRR 显示器/移动端)验证,设计阶段无法断言数值。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
 

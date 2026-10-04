@@ -24,6 +24,10 @@
 //! - [`TreiberStack`](stack::TreiberStack): a lock-free stack that reclaims its
 //!   popped nodes through [`epoch`], serving as the worked example that the
 //!   reclaimer is correct under contention.
+//! - [`Rcu`](rcu::Rcu): a read-copy-update cell for read-mostly shared state
+//!   (type registry / asset index / config snapshot form). Readers never lock
+//!   or spin — one atomic load behind an epoch pin — while writers publish by
+//!   swapping in a fresh copy and reclaiming the old one through [`epoch`].
 //!
 //! ## Correctness posture
 //! The design doc is explicit (§23): lock-free containers are notoriously hard
@@ -42,12 +46,14 @@
 pub mod epoch;
 pub mod hash;
 pub mod mpmc;
+pub mod rcu;
 pub mod spsc;
 pub mod stack;
 
 pub use epoch::{Collector, Guard, LocalHandle};
 pub use hash::ConcurrentHashMap;
 pub use mpmc::MpmcQueue;
+pub use rcu::{Rcu, RcuGuard};
 pub use spsc::{SpscConsumer, SpscProducer, SpscQueue};
 pub use stack::TreiberStack;
 
@@ -104,5 +110,7 @@ impl<T: core::fmt::Debug> core::fmt::Debug for CachePadded<T> {
     }
 }
 
+#[cfg(test)]
+mod rcu_tests;
 #[cfg(test)]
 mod tests;

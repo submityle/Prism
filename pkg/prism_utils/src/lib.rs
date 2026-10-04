@@ -125,6 +125,7 @@ pub mod compat_bevy;
 #[cfg(feature = "concurrent")]
 pub mod concurrent;
 pub mod cow;
+pub mod det;
 pub mod determinism;
 pub mod guard;
 pub mod hash;
@@ -132,6 +133,7 @@ pub mod hbitset;
 pub mod intern;
 pub mod layout;
 pub mod prelude;
+pub mod reloc;
 pub mod slot_map;
 pub mod small_vec;
 pub mod soa;
@@ -149,6 +151,12 @@ pub use concurrent::{
     SpscProducer, SpscQueue, TreiberStack,
 };
 pub use cow::Cow;
+pub use det::{
+    mix64, reproducible_hash_ordered, reproducible_hash_unordered, DeterministicMerge,
+    OrderedHashCombiner, UnorderedHashCombiner,
+};
+#[cfg(feature = "concurrent")]
+pub use det::ConcurrentMerge;
 pub use determinism::{OrderedMap, OrderedSet};
 pub use guard::{GuardConfig, GuardError, GuardHandle, GuardedBuffer, GuardedPool};
 pub use hash::{
@@ -160,6 +168,9 @@ pub use intern::{domain, FName, InternCache, Interned, Interner, Istr};
 pub use layout::{
     align_up, ColumnPlan, ColumnShape, ColumnShapes, GroupLayout, HotCold, LayoutPlan,
     Temperature, CACHE_LINE,
+};
+pub use reloc::{
+    OffsetPtr, OffsetSlice, Reloc, RelocError, RelocMap, RelocMapView, RelocVec, RelocVecView,
 };
 pub use slot_map::{SlotKey, SlotMap};
 pub use small_vec::SmallVec;

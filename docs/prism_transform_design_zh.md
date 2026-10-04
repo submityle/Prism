@@ -9,7 +9,7 @@
 > - **仿射运算**：glam `Affine3A`（SIMD）、经典 3×4 仿射矩阵
 > 本文为纯经典线性代数 / 层级传播路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：静态变换烘焙与批合并/姿态量化压缩/双缓冲读取一致性/变换 Observer 钩子/空间加速结构增量同步/轻量约束(look-at/aim/parent-blend)/GPU 侧层级传播/扫掠变换(CCD/运动模糊)；均为 PLANNED，无代码）
+- 版本: v0.4（核心 M0–M6 已落地并验证；§24 高级增补中 **§24.1 静态变换烘焙与批合并（`bake`）**、**§24.3 双缓冲/多缓冲变换（`double_buffer`）**、**§24.2 姿态量化压缩（`quantize`）**、**§24.4 变换 Observer 钩子（`observer`）**、**§24.6 轻量约束（`constraint`）** 已交付并验证，其余 §24 项仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：静态变换烘焙与批合并/姿态量化压缩/双缓冲读取一致性/变换 Observer 钩子/空间加速结构增量同步/轻量约束(look-at/aim/parent-blend)/GPU 侧层级传播/扫掠变换(CCD/运动模糊)；§24.1/24.2/24.3/24.4/24.6 已交付，其余仍为 PLANNED）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_math`（Vec3/Quat/Affine3/Mat4、SIMD）、`prism_ecs`（组件存储 + `ChildOf` 关系 + 变更检测 + 并行查询）、`prism_tasks`（分块并行传播）；可选 `prism_time`（插值 alpha）、`prism_diagnostic`
 - 层级定位: ECS 文档 L3「仿真」；渲染提取（ECS §15）与物理/相机的空间输入供给方
@@ -404,7 +404,7 @@ pkg/prism_transform/
 
 ## 23. 诚实边界与风险
 
-- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（69 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」仍为 PLANNED，按本文优先级随消费方接线落地。
+- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（135 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」中 **§24.1 静态烘焙（`bake`）**、**§24.3 双缓冲（`double_buffer`）** 已随 M2/M3 优先落地并验证，**§24.2 姿态量化（`quantize`）**、**§24.4 变换 Observer（`observer`）**、**§24.6 轻量约束（`constraint`）** 本次作为纯/可测优先项落地并验证，其余 §24 项仍为 PLANNED，按本文优先级随消费方接线落地。
 - **高风险项**：
   1. **非均匀缩放 + 层级（M1）**：父子均非均匀缩放会产生错切，无法无损写回子 TRS；须坚持「Global 仅为缓存、Local 为权威」，并在文档/API 明确告警，否则会出现「子物体被意外拉斜」类顽疾。
   2. **大世界精度（M5）**：f64 全量代价大、cell rebasing 边界处理（跨 cell 物理/碰撞/网络）复杂；需真实开放世界里程压测，错配会在边界出现瞬移或抖动。
@@ -421,7 +421,7 @@ pkg/prism_transform/
 
 本章补齐顶级变换系统常被忽视、却在真实 AAA 项目里缺一不可的能力。均 feature/档位门控，默认不付成本；与 §17 的高级功能互补、不重叠（§17 偏「传播正确性与大世界」，本章偏「流水线、带宽、空间集成与 GPU 卸载」）。
 
-### 24.1 静态变换烘焙与批合并（Static Baking）
+### 24.1 静态变换烘焙与批合并（Static Baking）✅ 已交付（`bake`）
 
 对标记 `TransformStatic`（关卡几何、建筑、地形装饰）的实体，在加载/构建期一次性烘焙世界矩阵并**退出传播集**：
 
@@ -431,7 +431,14 @@ pkg/prism_transform/
 
 收益:大世界里 90%+ 实体是静态的,把它们移出热路径是最大的一笔传播省时。
 
-### 24.2 姿态量化压缩（Quantization）—— 网络 / 存储 / GPU 带宽
+> **交付状态（`pkg/prism_transform/src/bake.rs`）：✅ 已交付并验证。**
+> `StaticBaker` 以并行数组伴随 `TransformGraph`：`is_static` 标记、冻结世界变换 `baked`、逐节点 `valid` 位与一个 `generation` 计数器（供合并批次 / GPU 常驻缓存廉价探测失效）。核心 API：`mark_static` / `clear_static` / `is_static` / `is_baked` / `baked` / `try_baked` / `static_roots` / `bake` / `invalidate_subtree` / `unfreeze_subtree`。
+> - **烘焙 & 冻结**：`bake` 是**增量**的——仅重算 `valid == false` 的节点（新标记或被 `invalidate_subtree` 置脏的子树闭包），父优先 BFS 用 `baked[parent].mul_transform(local)` 预乘；静态根若挂在动态父上，则从调用方给的 `parent_globals` 取世界种子。重算 0 个节点时不 bump `generation`，故「静止场景重烘焙幂等」。返回 `BakeStats { baked, roots }`。
+> - **批合并**：`merge_instances`（按 `BatchKey(u64)` 分组、按 key 升序排序、组内保持输入序，产出各组世界实例矩阵 `InstanceBatch`）与 `merge_meshes`（把各 `MeshSource` 的 local 顶点用 baked 世界变换烘焙到世界空间并拼接成单个 `MergedMesh`，记录每源顶点 `range`）。两者都只纳入 `is_baked` 的源，对标 UE 静态网格合并 / Unity static batching。
+> - **可逆**：`unfreeze_subtree` 把子树退回动态集，`invalidate_subtree` 置脏并 bump 代际，供运行时「解冻移动」。
+> - **纯确定性**：`no_std + alloc`、无线程 / 无时钟 / 无 ECS 依赖，核心对拍逐级传播 oracle 单测（`tests_bake.rs`，12 项）。
+
+### 24.2 姿态量化压缩（Quantization）—— 网络 / 存储 / GPU 带宽 ✅ 已交付（`quantize`）
 
 姿态在网络复制、存档、GPU 上传时按需量化,显著压带宽:
 
@@ -440,7 +447,15 @@ pkg/prism_transform/
 - **缩放**:多数实体缩放=1,用 1 bit「是否单位缩放」旁路,仅异常者存全量。
 - 解码在接收/读取侧,误差有界且可配置;与 §12 定点、`prism_replication` 快照格式契约一致。
 
-### 24.3 双缓冲 / 多缓冲变换（渲染-仿真读取一致性）
+> **交付状态（`pkg/prism_transform/src/quantize.rs`）：✅ 已交付并验证。**
+> 全部编解码为纯 `no_std` 整型/`f32` 运算，固定「非负映射值 round-half-up」舍入规则，故编/解码跨平台位一致、往返误差永不超过广告界。
+> - **旋转 smallest-three**：`QuatQuantizer` / `QuatQuantized`。先归一化并符号规范化（使被丢弃分量非负），丢掉绝对值最大的分量、存其 2 bit 索引 + 其余三分量在 `[-1/√2, 1/√2]` 上的量化码；解码由单位长约束重建被丢分量。默认 `QuatQuantizer::DEFAULT`（10 bit/分量）配 `to_bits`/`from_bits` 打包成单个 32 bit 字。`max_component_error = (1/√2)/(2^bits − 1)`。
+> - **平移**：`BoundedQuantizer` / `QuantizedVec3` 在调用方给定的 AABB 盒内每轴均匀量化（越界饱和、落在栅格点精确、`max_abs_error` 为半步）；`LayeredQuantizer` / `LayeredTranslation` 用「粗 `cell_size` 整数格 + 格内定点」分层，精度处处一致（不随世界范围增长），`max_abs_error = 0.5·cell_size/(2^bits−1)`。
+> - **缩放**：`ScaleQuantizer` / `ScaleQuantized` 用 1 bit「是否单位缩放」旁路（在 `tolerance` 内精确解回 `(1,1,1)`），仅非单位缩放付三分量码。
+> - **整姿态**：`PoseQuantizer` / `QuantizedPose` 组合三者编解码整个 `Transform`，并暴露 `max_translation_error` / `max_scale_error` / `max_rotation_component_error` 误差界查询。
+> - `no_std + alloc`（标量 `sqrt`/`floor`/`abs` 走 `libm`）。确定性往返与误差界单测（`tests_quantize.rs`，13 项，含手算 oracle 码值）。
+
+### 24.3 双缓冲 / 多缓冲变换（渲染-仿真读取一致性）✅ 已交付（`double_buffer`）
 
 配合 ECS §23.5 的渲染提取流水线:渲染线程读取的世界变换必须是**一帧内不被仿真写撕裂**的稳定快照。
 
@@ -448,7 +463,14 @@ pkg/prism_transform/
 - 渲染可与下一帧仿真流水线并行(见 App §子应用流水线),互不读到半更新状态。
 - 仅对参与渲染的变换列双缓冲,非渲染实体不付此内存成本。
 
-### 24.4 变换 Observer / 钩子（OnTransformChanged）
+> **交付状态（`pkg/prism_transform/src/double_buffer.rs`）：✅ 已交付并验证。**
+> 泛型 `MultiBuffer<T: Copy>` 维护 `buffer_count` 份等长列（钳制到 ≥ 2），以 `write_idx` / `read_idx` / `version` 记录所有权。构造 `new` / `double` / `triple`，写侧 `write` / `write_at` / `write_all` / `prime_write_from_read`（把当前读列拷进写列，供只改部分实体的帧携带前帧其余项前进），读侧 `read` / `columns` / `read_token`，发布 `publish` / `publish_from`，另有 `resize` / `buffer_count` / `len` / `version`。
+> - **无撕裂发布**：`publish` 执行 `read_idx = write_idx; write_idx = (write_idx + 1) % count; version += 1`——它只把「已写完」的列翻为可读，绝不改写读者可能持有的列。写列与读列初始即不混叠（`write_idx = 1, read_idx = 0`），故首次 `publish` 前读旧写新互不干扰。
+> - **快照存活语义**：读者取 `Copy` 的 `ReadToken { buffer, version }`，之后用 `columns(token)` 重新以不可变借用读回那一列；`is_token_live` 据 `version` 判断仿真是否已旋转回该列。双缓冲下快照在下一次 `publish` 即失效；三（多）缓冲下仿真可边写 N+1 帧边让渲染读 N 帧快照，快照存活 `buffer_count - 1` 次 publish。
+> - **借用即纪律**：类型本身无原子、无自带线程，仅编码「哪列可写、哪些是冻结快照」的所有权纪律，由调度器跨线程维持；写者可变借用写列、读者不可变借用快照列，借用检查器已禁止「边写边读同一列」。
+> - 别名 `TransformDoubleBuffer` / `TransformTripleBuffer` = `MultiBuffer<GlobalTransform>`。`no_std + alloc`，确定性读写一致性单测（`tests_double_buffer.rs`，12 项）。
+
+### 24.4 变换 Observer / 钩子（OnTransformChanged）✅ 已交付（`observer`）
 
 接 ECS §12 Observer:变换变化可触发派生更新,免轮询:
 
@@ -461,6 +483,13 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 - 典型订阅方:空间加速结构(§24.5)、音频空间化、阴影/反射探针缓存失效、触发器体积进出检测。
 - Observer 批量合并(本帧多次变化只回调一次),避免抖动放大。
 
+> **交付状态（`pkg/prism_transform/src/observer.rs`）：✅ 已交付并验证。**
+> `TransformObserver` 是产生「哪些节点动了、动了多少」信号的纯数据结构：按节点维护「上次已上报的基线世界姿态」，一帧内一次或多次 `observe(dirty, globals)` 把脏节点及其新世界姿态折叠进待发集（**本帧内同一节点多次触碰合并**），`flush()` 按 `NodeId` 升序对净姿态异于基线者各发一条 `TransformChange`、推进基线、递增 `epoch`。
+> - **确定性**：派发顺序只取决于节点下标；一帧内多次变化合并成一条净变化；一帧内「动了又动回基线」净零则不通知。
+> - **API**：`new` / `with_capacity` / `push`（追加带基线的节点）/ `ensure_len`（以 `IDENTITY` 为基线扩容，新出现节点下次 flush 报告从单位姿态到真实姿态的变化）/ `prime`（以当前 `globals` 设基线且不发事件，用于首帧传播后播种）/ `observe` / `flush`（返回 `Vec<TransformChange>`）/ `dispatch`（回调队列形态）/ `epoch` / `len`。
+> - `TransformChange { node, old, new }` 配 `translation_delta` / `moved(eps)` / `basis_changed(eps)` / `mask(eps) -> ChangeMask { translation, basis }`（`basis` 为 3×3 线性部整体变化；精细 rotation/scale 拆分留给订阅方从 `old`/`new` 自行分解）。
+> - `no_std + alloc`，无原子、无线程、无 ECS 绑定——脏集与世界姿态由调用方（如 `dirty`）提供。确定性单测（`tests_observer.rs`，12 项）。
+
 ### 24.5 空间加速结构增量同步（BVH / Grid Hash）
 
 空间查询(拾取、范围检索、宽相位碰撞、剔除)依赖加速结构;变换变化应**增量更新**而非每帧重建:
@@ -469,7 +498,7 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 - 静态实体(§24.1)入独立静态结构,一次构建永不动。
 - 与 `prism_render_visibility`(剔除)、`prism_physics`(宽相位)、`prism_navigation`(空间查询)共享同一套同步契约,避免每个子系统各维护一份空间索引。
 
-### 24.6 轻量变换约束（Constraints: look-at / aim / parent-blend）
+### 24.6 轻量变换约束（Constraints: look-at / aim / parent-blend）✅ 已交付（`constraint`）
 
 对标 Unity Constraints / Unreal 控制绑定的**运行时轻量约束**(非完整 rig,归 `prism_anim_runtime`):
 
@@ -481,6 +510,15 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 | `PositionLimit` | 位置/旋转范围钳制 |
 
 约束在传播**之后**求值并回写 Global(或反解 Local),顺序由 system set 固定;可链式但需显式声明依赖避免环。
+
+> **交付状态（`pkg/prism_transform/src/constraint.rs`）：✅ 已交付并验证。**
+> 对标生产引擎的运行时轻量约束（非完整 rig，rig 归 `prism_anim_runtime`）。每个求解器都是其输入的**纯确定性函数**：世界目标点/父姿态由调用方解析好传入（求解器从不做实体查找），算术为定序 `f32`，故同输入恒同输出。
+> - `LookAt { target, up }`：保平移/缩放，重写旋转使节点前向（Prism 约定 `-Z`）指向世界目标，`up` 作滚转提示；节点落在目标上（视向为零）则保持原姿态；前向与 `up` 共线时确定性回退另一上轴。
+> - `Aim { aim_axis, target }`：对某**局部轴**施加最小旋转使其世界像对准目标方向（炮塔/摄像机），不约束绕该轴的扭转。
+> - `ParentBlend { poses: Vec<(GlobalTransform, f32)> }`：按权重线性混合平移/缩放、以符号对齐的归一化四元数均值（nlerp 式）混合旋转；无候选或权重和近零时回退 `IDENTITY`。
+> - `PositionLimit { min, max }`：把世界平移钳进 AABB 盒，保旋转/缩放。
+> - 辅助 `look_at_rotation` / `rotation_arc`（最短弧，含 180° 稳定回退）；`Constraint` 枚举 + `solve_chain(&[Constraint], current)` 按切片序折叠（顺序显著、调用方负责定序与避免环）。
+> - `no_std + alloc`（标量数学走 `libm`），复用 `prism_math` 的 `Vec3`/`Quat`/`Mat3`。几何 oracle 单测（`tests_constraint.rs`，17 项）。
 
 ### 24.7 GPU 侧层级传播（Compute Hierarchy）
 
@@ -501,5 +539,14 @@ world.observe::<OnChanged<GlobalTransform>>(|e, world| {
 
 ### 24.9 诚实边界
 
-本章全部为 PLANNED 设计目标,无代码。**24.1 静态烘焙**(省时最大)与 **24.3 双缓冲**(渲染解耦正确性)建议随 M2/M3 优先落地;24.4/24.5 随空间查询消费方(物理/剔除/导航)落地;24.2 随 M5 网络、24.7 随 M6 GPU、24.8 随物理/渲染运动向量需求落地;24.6 约束与 `prism_anim_runtime` 边界须划清(本 crate 只做轻量无 rig 约束)。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
+本章 **24.1 静态烘焙（`bake`）**、**24.3 双缓冲（`double_buffer`）**、**24.2 姿态量化（`quantize`）**、**24.4 变换 Observer（`observer`）**、**24.6 轻量约束（`constraint`）** 已落地并通过验证（实现 + 单测，`cargo clippy --all-targets` 零告警、`cargo test` 零失败）；其余为 PLANNED 设计目标,无代码。诚实边界：
+
+- **24.1 已交付的边界**：`StaticBaker` 是纯计算核心（并行数组 + 增量 `bake` + 批合并），不含「静态标记来源」——`TransformStatic` 组件语义、离线/加载期触发点仍属 `prism_scene`/`prism_asset_bake`，由消费方接线；静态根挂动态父时的世界种子需调用方显式传入 `parent_globals`。`merge_meshes` 产出 CPU 侧世界顶点缓冲，GPU 常驻/绘制合并由渲染侧消费。
+- **24.3 已交付的边界**：`MultiBuffer` 是纯数据结构，自身无原子、无线程，只编码所有权纪律；跨线程的原子切换 / copy-on-extract 时序由 ECS §23.5 提取流水线与调度器维持，本 crate 不越界实现线程同步。
+- **24.2 已交付的边界**：`quantize` 是纯编解码核心（smallest-three 旋转 + 盒内/分层平移 + 1 bit 单位缩放旁路 + 整姿态组合），只保证确定性与误差界；网络/快照的位流格式契约、分档策略与 §12 定点一致性由 `prism_replication` 消费方定义，本 crate 不越界定义线格式。
+- **24.4 已交付的边界**：`observer` 是纯数据结构，无原子、无线程、无 ECS Observer 绑定——脏集与世界姿态由调用方（如 `dirty`/传播流水线）提供；本帧合并与升序派发是确定性契约，但精细的 rotation/scale 拆分、以及实际订阅方（空间索引 §24.5、音频、探针缓存失效）的接线留给消费方。
+- **24.6 已交付的边界**：`constraint` 只做轻量无 rig 约束（`LookAt`/`Aim`/`ParentBlend`/`PositionLimit`），完整骨骼 rig 归 `prism_anim_runtime`；求解器在传播之后求值并回写 `GlobalTransform`，约束间的定序与避免环由调用方负责（`solve_chain` 不做环检测）；`to_scale_rotation_translation` 分解假设无 shear，父级非均匀缩放叠子级旋转产生的 shear 场景只在 TRS 可表示精度内保真。
+- 其余 PLANNED：24.5 随空间查询消费方(物理/剔除/导航)落地;**24.7 GPU 侧层级传播**等需 GPU compute 的部分本次不做（纯 CPU 子 agent 无 RHI/设备接线能力，诚实标注），随 M6 GPU 驱动落地;24.8 随物理/渲染运动向量需求落地。
+
+所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
 

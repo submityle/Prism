@@ -10,7 +10,7 @@
 > - **异步**：Rust `futures` / async executor（与作业图共存，统一一个线程池）
 > 本文为纯经典并发/调度路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：优先级/QoS 车道/帧预算调度/主线程亲和与线程类分离/结构化并发与取消/并行原语(parallel_for/reduce/scan)/异步 I/O 桥/NUMA 与混合核拓扑感知/确定性并行/背压与死锁预防；其中 24.1/24.2/24.3/24.4/24.8 已落地，余为 PLANNED）
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：优先级/QoS 车道/帧预算调度/主线程亲和与线程类分离/结构化并发与取消/并行原语(parallel_for/reduce/scan)/异步 I/O 桥/NUMA 与混合核拓扑感知/确定性并行/背压与死锁预防；其中 24.1/24.2/24.3/24.4/24.7/24.8 已落地，余为 PLANNED）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_math`（可选 SIMD 并行原语）、`prism_platform`（线程/亲和/NUMA/高精度计时）、`prism_diagnostic`（可选 trace）
 - 层级定位: ECS 文档 L4「Schedule/Executor/Fiber 作业图」的执行底座；App 文档 L3「运行时服务」
@@ -460,13 +460,15 @@ tasks.join(|| left(), || right());                 // 分治二叉 join
 - **混合核（P-core/E-core）**：感知 Intel/ARM big.LITTLE 拓扑，`Critical` 车道优先派给性能核，`Background` 派给能效核；移动端省电。
 - 拓扑探测由 `prism_platform` 提供，缺失时退化为均匀池。
 
-### 24.7 确定性并行（可回放）
+### 24.7 确定性并行（可回放）—— ✅ 已交付（`deterministic_replay` 模块）
 
 回滚网络/录像要求并行结果**与线程数/窃取时序无关**：
 
 - 并行 `reduce`/`scan` 走**确定归并树**（固定结合顺序），而非到达序累加。
 - 结果写回按实体/索引有序，不依赖 worker 完成先后。
 - 与 ECS §确定性、`prism_replication` 契约一致：同输入 → 同输出（位等价），无论几核。
+
+**交付状态**：`pkg/prism_tasks/src/deterministic_replay/`（`order.rs` 纯决策核心 + `mod.rs` 线程池门面）已落地，模块文件头 `#![forbid(unsafe_code)]`。核心抓住一个诚实事实：真正不确定的只有**顺序敏感归并**（非交换 fold：序列拼接/哈希/`wrapping_mul` 链）**各任务结果被提交进累加器的先后**——哪个 worker 先完成、提交以何序落地，取决于 OS 调度与窃取时序，是工作窃取池里的真实竞态。模块把该竞态**可复现而不改变结果**：`SeedStream`（`splitmix64`，`for_task(seed,i)` 为纯函数，worker 与串行 oracle 对同一任务索引算出同值）合成「同种子 → 同输入」的工作负载；`ExecutionOrder`（种子 + `0..len` 的**提交序排列**，`validate` 校验为真排列）捕获该次提交序，可序列化为文本（`prism-order v1 seed=.. len=..` + 每行一索引）与紧凑二进制（`PROR` 魔数 + 版本 + LE 种子/长度/索引），往返无损；`fold_in_order` 是**纯串行 oracle**——按给定序重算每任务值并折叠，replay 必须逐位复现它。门面在既有 `TaskPool` 上**复用而非重写**：`record_ordered(seed,len,compute,init,combine)` 经 `TaskPool::scope`（help-on-wait join 栅栏 + 单线程内联回退）并行算值、在一把 `Mutex` 下提交（到达锁的顺序即真实完成序，逐一 append 索引并折叠），返回 `ReplayOutcome{value,order}`；`replay_ordered(&order,…)` 校验排列后并行把每任务值算入各自槽位、再在调用线程**严格按记录序**折叠，结果与录制 run **位等价**，与本次 replay 的 worker 数无关；`deterministic_ordered(seed,len,…)` 直接按**规范序 `0..len`** 折叠，是「同种子 → 同结果、与核数无关」的免录制确定性原语。门面不新增任何并发原语、不引入 `unsafe`。`no_std`+`alloc` 兼容（`order.rs` 仅用 `core`+`alloc`；门面合理使用 `std::sync::Mutex`）。**19 单测绿**：排列校验/非法序拒绝（重复·越界）、文本/二进制往返、畸形输入拒绝（截断·坏头·坏项·长度不符·非排列）、`SeedStream` 可复现且按索引寻址、`fold_in_order` 顺序敏感性（正序≠逆序）、**录制值对拍其自身序的串行 oracle**（2000 任务 8 worker）、**replay 在 1/2/4/8-worker 与单线程回退上逐位复现录制值**、序列化往返后 replay 仍复现、**规范序折叠跨 1/2/4/8/单线程 worker 数不变**对拍 oracle、规范序≠逆序 replay、异种子异结果、重复录制各自对拍 oracle 并 replay 复现、空负载往返、单线程录制序即规范序；`cargo clippy -p prism_tasks --all-targets` 零告警。诚实边界：本模块把并行的**结果排序**规整为确定——它**不复现底层线程的原始窃取/调度时序**（那是 OS 不可控的非确定输入），只捕获并复现「提交序对结果的影响」；`compute` **必须是任务索引（与种子）的纯函数**，否则 replay 不保证复现（这是契约，非实现缺陷）；`record_ordered` 的提交点是一把全局 `Mutex`（刻意串行化 commit 以取真实到达序），其并行性在于**提交前的 compute**，故适配「并行映射 + 顺序敏感归并」这类负载；对**交换律**归并，`deterministic_ordered` 的结果本就与序无关，record/replay 主要服务于「要复现某一次具体非确定交织以供调试/回放」的场景。
 
 ### 24.8 背压、死锁预防与健康监测 —— ✅ 已交付（`health` 模块）
 
@@ -478,5 +480,5 @@ tasks.join(|| left(), || right());                 // 分治二叉 join
 
 ### 24.9 诚实边界
 
-**24.1 优先级 / QoS 车道 + 帧预算调度**（`qos` 模块）、**24.2 主线程亲和与线程类分离**（`thread_class` 模块）、**24.3 结构化并发与取消**（`scope_concurrency` 模块）、**24.4 并行原语标定**（`par_cost` 模块）与 **24.8 背压、死锁预防与健康监测**（`health` 模块）已落地（见各节「交付状态」），是其他 crate（transform/ECS/物理）最先依赖的能力；本章其余小节（24.5 异步 I/O、24.6 NUMA/混合核、24.7 确定性并行）仍为 PLANNED 设计目标。24.1 的帧预算门控与 `prism_diagnostic` 的 `remaining_background_nanos` 严格对齐（背景作业据可用余量决定是否本帧执行）；24.2 线程类分离（`thread_class` 模块：compute 入工作窃取池、I-O 走 `NamedThreads` 离池阻塞线程、main-only 候 `pump_main` 主线程抽水，`io_slots=0` 时 compute/main 不受阻）已落地，纯 `ClassRouter` 决策核心对拍独立 oracle、门面复用既有 `TaskPool`/`NamedThreads`；真正的平台异步 I-O 唤醒属 §24.5 随 `prism_asset`；24.5 异步 I/O 随 `prism_asset` 落地；24.6 NUMA/混合核、24.7 确定性并行随 M5 落地。24.3 结构化并发（`scope_concurrency` 模块：纯 `ScopeTree` 决策核心对拍独立 oracle、`StructuredScope` 门面复用 `TaskPool::scope` 的 join 栅栏 + `CancelToken` 树做协作式取消与跳过记账）已落地，诚实边界为协作式取消依赖真实线程何时抵达检查点。24.8 背压/死锁预防/健康监测（`health` 模块：`QueueBackpressure` 双水位滞回准入、`WaitGraph` 提交期环检测 + 链深限幅、`PoolHealthMonitor` 确定性指标）已落地，诚实边界为 `HealthProbe` 墙钟延迟采样取决于真实 OS 调度（唯一非确定输入，其后派生指标全确定）、死锁预防为提交期静态检测而非运行期实时消解。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+**24.1 优先级 / QoS 车道 + 帧预算调度**（`qos` 模块）、**24.2 主线程亲和与线程类分离**（`thread_class` 模块）、**24.3 结构化并发与取消**（`scope_concurrency` 模块）、**24.4 并行原语标定**（`par_cost` 模块）与 **24.8 背压、死锁预防与健康监测**（`health` 模块）已落地（见各节「交付状态」），是其他 crate（transform/ECS/物理）最先依赖的能力；本章其余小节（24.5 异步 I/O、24.6 NUMA/混合核）仍为 PLANNED 设计目标，24.7 确定性并行（可回放）已落地（见该节「交付状态」）。24.1 的帧预算门控与 `prism_diagnostic` 的 `remaining_background_nanos` 严格对齐（背景作业据可用余量决定是否本帧执行）；24.2 线程类分离（`thread_class` 模块：compute 入工作窃取池、I-O 走 `NamedThreads` 离池阻塞线程、main-only 候 `pump_main` 主线程抽水，`io_slots=0` 时 compute/main 不受阻）已落地，纯 `ClassRouter` 决策核心对拍独立 oracle、门面复用既有 `TaskPool`/`NamedThreads`；真正的平台异步 I-O 唤醒属 §24.5 随 `prism_asset`；24.5 异步 I/O 随 `prism_asset` 落地；24.6 NUMA/混合核随 M5 落地。24.7 确定性并行（`deterministic_replay` 模块：`ExecutionOrder` 捕获提交序排列 + `fold_in_order` 纯串行 oracle + 门面 `record_ordered`/`replay_ordered`/`deterministic_ordered` 复用 `TaskPool::scope`）已落地，诚实边界为只规整并行**结果排序**的确定性、不复现底层窃取/调度原始时序，且要求 `compute` 为任务索引的纯函数。24.3 结构化并发（`scope_concurrency` 模块：纯 `ScopeTree` 决策核心对拍独立 oracle、`StructuredScope` 门面复用 `TaskPool::scope` 的 join 栅栏 + `CancelToken` 树做协作式取消与跳过记账）已落地，诚实边界为协作式取消依赖真实线程何时抵达检查点。24.8 背压/死锁预防/健康监测（`health` 模块：`QueueBackpressure` 双水位滞回准入、`WaitGraph` 提交期环检测 + 链深限幅、`PoolHealthMonitor` 确定性指标）已落地，诚实边界为 `HealthProbe` 墙钟延迟采样取决于真实 OS 调度（唯一非确定输入，其后派生指标全确定）、死锁预防为提交期静态检测而非运行期实时消解。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
 

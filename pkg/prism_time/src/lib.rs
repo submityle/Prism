@@ -55,6 +55,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
 mod clock;
 #[cfg(feature = "compat-bevy")]
 pub mod compat_bevy;
@@ -62,11 +64,15 @@ pub mod determinism;
 pub mod diagnostics;
 mod domain;
 pub mod driver;
+pub mod drift;
 mod easing;
 mod fixed;
 pub mod frame_step;
 mod instant;
+pub mod multiworld;
 pub mod net;
+pub mod recording;
+pub mod scheduler;
 pub mod timeline;
 pub mod timer;
 mod virtual_time;
@@ -74,16 +80,24 @@ mod virtual_time;
 pub use clock::{Clocks, DefaultSource};
 pub use core::time::Duration;
 pub use determinism::{RationalStep, TickClock, TickSnapshot};
-pub use domain::{TimeScaleDomain, composite_scale};
-pub use easing::{Easing, ScaleTransition};
 pub use diagnostics::{FrameBudget, FrameStats};
+pub use domain::{composite_scale, TimeScaleDomain};
 pub use driver::{FrameReport, TimeDriver};
-pub use frame_step::{FrameStepper, StepState};
-pub use timeline::{PlaybackMode, Sequencer, SequencerFull, Timeline, TimelineMarker, TimelineTick};
+pub use drift::{DriftCorrector, MonotonicBaseline};
+pub use easing::{Easing, ScaleTransition};
 pub use fixed::Fixed;
+pub use frame_step::{FrameStepper, StepState};
 pub use instant::Instant;
 pub use net::{
     ClockOffsetEstimator, ClockSync, InterpolationBuffer, Lerp, OffsetSample, Sampled, ServerTick,
+};
+pub use multiworld::{
+    compare_trails, fnv1a_64, AuditDiff, AuditTrail, StateHasher, WorldSet, WorldTimeDomain,
+};
+pub use recording::{Player, Recorder, RecordedFrame, Recording};
+pub use scheduler::{Fired, Scheduler, TimerHandle, TimerKind};
+pub use timeline::{
+    PlaybackMode, Sequencer, SequencerFull, Timeline, TimelineMarker, TimelineTick,
 };
 pub use timer::{Cooldown, SmoothedDelta, Stopwatch, Throttle, Timer, TimerMode};
 pub use virtual_time::Virtual;
@@ -230,12 +244,17 @@ impl Time<Real> {
 /// Common imports.
 pub mod prelude {
     pub use crate::{
-        Clocks, ClockOffsetEstimator, ClockSync, Cooldown, DefaultSource, Duration, Easing, Fixed,
-        FrameBudget, FrameReport, FrameStats, FrameStepper, Instant, InterpolationBuffer, Lerp,
-        OffsetSample, PlaybackMode, RationalStep, Real, Sampled, ScaleTransition, Sequencer,
-        ServerTick, SmoothedDelta, StepState, Stopwatch, Throttle, TickClock, TickSnapshot, Time,
-        TimeDriver, TimeScaleDomain, Timeline, TimelineMarker, TimelineTick, Timer, TimerMode,
-        Virtual, composite_scale,
+        compare_trails, composite_scale, fnv1a_64, AuditDiff, AuditTrail, ClockOffsetEstimator,
+        ClockSync, Clocks, Cooldown, DefaultSource, DriftCorrector, Duration, Easing, Fired,
+        Fixed, FrameBudget,
+        FrameReport, FrameStats, FrameStepper, Instant, InterpolationBuffer, Lerp, MonotonicBaseline,
+        OffsetSample,
+        PlaybackMode, Player, RationalStep, Real, RecordedFrame, Recorder, Recording, Sampled,
+        ScaleTransition, Scheduler, Sequencer, ServerTick, SmoothedDelta, StateHasher, StepState,
+        Stopwatch,
+        Throttle, TickClock, TickSnapshot, Time, TimeDriver, TimeScaleDomain, Timeline,
+        TimelineMarker, TimelineTick, Timer, TimerHandle, TimerKind, TimerMode, Virtual, WorldSet,
+        WorldTimeDomain,
     };
 }
 
@@ -243,3 +262,11 @@ pub mod prelude {
 mod tests;
 #[cfg(test)]
 mod tests_m6;
+#[cfg(test)]
+mod tests_drift;
+#[cfg(test)]
+mod tests_multiworld;
+#[cfg(test)]
+mod tests_record_replay;
+#[cfg(test)]
+mod tests_scheduler;

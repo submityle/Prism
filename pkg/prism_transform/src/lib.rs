@@ -100,22 +100,27 @@ use alloc::vec::Vec;
 
 use prism_math::{Affine3, Mat4, Quat, Vec3};
 
+pub mod bake;
 pub mod change;
+pub mod constraint;
+#[cfg(feature = "compat-bevy")]
+pub mod compat_bevy;
 #[cfg(feature = "determinism")]
 pub mod determinism;
 pub mod dirty;
+pub mod double_buffer;
+pub mod gpu_upload;
 pub mod hierarchy;
 pub mod interpolation;
 #[cfg(feature = "f64")]
 pub mod large_world;
+pub mod observer;
 #[cfg(feature = "std")]
 pub mod parallel;
 pub mod propagation;
-pub mod gpu_upload;
+pub mod quantize;
 pub mod stats;
 pub mod transform_2d;
-#[cfg(feature = "compat-bevy")]
-pub mod compat_bevy;
 
 use change::ChangeTicks;
 use dirty::{DirtyPropagator, DirtyStats};
@@ -142,28 +147,47 @@ impl Default for Transform {
 
 impl Transform {
     /// The identity transform (no translation, no rotation, unit scale).
-    pub const IDENTITY: Self =
-        Self { translation: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE };
+    pub const IDENTITY: Self = Self {
+        translation: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+    };
 
     /// Translation-only transform from components.
     #[inline]
     pub const fn from_xyz(x: f32, y: f32, z: f32) -> Self {
-        Self { translation: Vec3::new(x, y, z), rotation: Quat::IDENTITY, scale: Vec3::ONE }
+        Self {
+            translation: Vec3::new(x, y, z),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
     }
     /// Translation-only transform.
     #[inline]
     pub const fn from_translation(translation: Vec3) -> Self {
-        Self { translation, rotation: Quat::IDENTITY, scale: Vec3::ONE }
+        Self {
+            translation,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
     }
     /// Rotation-only transform.
     #[inline]
     pub const fn from_rotation(rotation: Quat) -> Self {
-        Self { translation: Vec3::ZERO, rotation, scale: Vec3::ONE }
+        Self {
+            translation: Vec3::ZERO,
+            rotation,
+            scale: Vec3::ONE,
+        }
     }
     /// Scale-only transform.
     #[inline]
     pub const fn from_scale(scale: Vec3) -> Self {
-        Self { translation: Vec3::ZERO, rotation: Quat::IDENTITY, scale }
+        Self {
+            translation: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale,
+        }
     }
 
     /// Builder: set translation.
@@ -327,7 +351,11 @@ impl GlobalTransform {
     #[inline]
     pub fn compute_transform(&self) -> Transform {
         let (scale, rotation, translation) = self.0.to_scale_rotation_translation();
-        Transform { translation, rotation, scale }
+        Transform {
+            translation,
+            rotation,
+            scale,
+        }
     }
 }
 
@@ -485,7 +513,12 @@ impl TransformGraph {
     pub fn propagate_incremental(&mut self) -> DirtyStats {
         let stats = self
             .dirty
-            .propagate(&self.hierarchy, &self.ticks, &self.locals, &mut self.globals)
+            .propagate(
+                &self.hierarchy,
+                &self.ticks,
+                &self.locals,
+                &mut self.globals,
+            )
             .expect("TransformGraph buffers stay in sync with the hierarchy");
         self.ticks.end_pass();
         stats
@@ -527,7 +560,12 @@ impl TransformGraph {
     pub fn propagate_incremental_stats(&mut self) -> stats::PropagationStats {
         let dirty = self
             .dirty
-            .propagate(&self.hierarchy, &self.ticks, &self.locals, &mut self.globals)
+            .propagate(
+                &self.hierarchy,
+                &self.ticks,
+                &self.locals,
+                &mut self.globals,
+            )
             .expect("TransformGraph buffers stay in sync with the hierarchy");
         self.ticks.end_pass();
         stats::PropagationStats::from_incremental(&self.hierarchy, dirty)
@@ -597,23 +635,36 @@ impl TransformGraph {
 
 /// Common imports.
 pub mod prelude {
+    pub use crate::bake::{
+        merge_instances, merge_meshes, BakeStats, BatchKey, InstanceBatch, MergedMesh, MeshSource,
+        StaticBaker,
+    };
     pub use crate::change::{ChangeTicks, Tick};
-    pub use crate::dirty::{DirtyPropagator, DirtyStats};
-    pub use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
-    pub use crate::propagation::propagate;
-    #[cfg(feature = "std")]
-    pub use crate::parallel::{LevelPlan, propagate_parallel, propagate_parallel_with_plan};
-    pub use crate::interpolation::InterpolationBuffer;
-    #[cfg(feature = "f64")]
-    pub use crate::large_world::{
-        FloatingOrigin, GlobalTransformHp, TransformHp, propagate_hp,
+    pub use crate::constraint::{
+        solve_chain, Aim, Constraint, LookAt, ParentBlend, PositionLimit,
     };
     #[cfg(feature = "determinism")]
-    pub use crate::determinism::{FxAffine3, FxMat3, hash_globals, propagate_fixed};
+    pub use crate::determinism::{hash_globals, propagate_fixed, FxAffine3, FxMat3};
+    pub use crate::dirty::{DirtyPropagator, DirtyStats};
+    pub use crate::double_buffer::{
+        MultiBuffer, ReadToken, TransformDoubleBuffer, TransformTripleBuffer,
+    };
     pub use crate::gpu_upload::{GpuColumnBuffer, MatrixLayout, UploadRange};
+    pub use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
+    pub use crate::interpolation::InterpolationBuffer;
+    pub use crate::observer::{ChangeMask, TransformChange, TransformObserver};
+    #[cfg(feature = "f64")]
+    pub use crate::large_world::{propagate_hp, FloatingOrigin, GlobalTransformHp, TransformHp};
+    #[cfg(feature = "std")]
+    pub use crate::parallel::{propagate_parallel, propagate_parallel_with_plan, LevelPlan};
+    pub use crate::propagation::propagate;
+    pub use crate::quantize::{
+        BoundedQuantizer, LayeredQuantizer, LayeredTranslation, PoseQuantizer, QuantizedPose,
+        QuantizedVec3, QuatQuantized, QuatQuantizer, ScaleQuantized, ScaleQuantizer,
+    };
     pub use crate::stats::PropagationStats;
     pub use crate::transform_2d::{
-        Affine2, GlobalTransform2d, Transform2d, TransformGraph2d, propagate_2d,
+        propagate_2d, Affine2, GlobalTransform2d, Transform2d, TransformGraph2d,
     };
     pub use crate::{GlobalTransform, Transform, TransformGraph};
 }
@@ -650,3 +701,18 @@ mod tests_m6_stats;
 
 #[cfg(all(test, feature = "compat-bevy"))]
 mod tests_m6_compat;
+
+#[cfg(test)]
+mod tests_bake;
+
+#[cfg(test)]
+mod tests_double_buffer;
+
+#[cfg(test)]
+mod tests_quantize;
+
+#[cfg(test)]
+mod tests_constraint;
+
+#[cfg(test)]
+mod tests_observer;

@@ -98,6 +98,7 @@ mod cancel;
 #[cfg(feature = "compat-bevy")]
 mod compat_bevy;
 mod counter;
+mod deterministic_replay;
 #[cfg(feature = "fibers")]
 mod fiber;
 mod health;
@@ -137,6 +138,9 @@ pub use compat_bevy::{
     IoTaskPool, TaskPoolBuilder,
 };
 pub use counter::Counter;
+pub use deterministic_replay::{
+    fold_in_order, ExecutionOrder, ReplayOrderError, ReplayOutcome, SeedStream,
+};
 pub use health::{
     Admission, BackpressureLimits, BackpressureQueue, BackpressureRunReport, DeadlockError,
     HealthProbe, HealthReport, LatencyHistogram, PoolHealthMonitor, QueueBackpressure,
@@ -460,5 +464,7 @@ mod tests_health;
 mod tests_qos;
 #[cfg(test)]
 mod tests_scope_concurrency;
+#[cfg(test)]
+mod tests_deterministic_replay;
 #[cfg(test)]
 mod tests_thread_class;
