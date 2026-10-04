@@ -392,6 +392,11 @@ pub mod cohesive_zone;
 pub use cohesive_zone::{
     cohesive_traction, dissipated_energy, CohesiveModel, CohesiveState, CohesiveStep,
 };
+pub mod cohesive_zone_assembly;
+pub use cohesive_zone_assembly::{
+    assemble_cohesive_forces, rest_states as cohesive_rest_states, total_dissipated_energy,
+    CohesiveAssembly, CohesiveFacetStep, CohesiveInterface,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
