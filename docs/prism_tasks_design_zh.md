@@ -426,7 +426,7 @@ scope(|s| {
 - **取消令牌**：长作业（寻路、烘焙）可携带 `CancelToken`，关卡切换/玩家离开时协作式取消，释放资源。
 - 取消是**协作式**（作业在检查点自查），非强杀，保证状态一致。
 
-### 24.4 数据并行原语（parallel_for / reduce / scan / join）
+### 24.4 数据并行原语（parallel_for / reduce / scan / join）—— ✅ 已交付（`par_cost` 模块）
 
 高层门面，隐藏手工分块：
 
@@ -438,6 +438,8 @@ tasks.join(|| left(), || right());                 // 分治二叉 join
 
 - 粒度自适应：运行期按单元耗时标定 chunk 大小，平衡调度开销与负载均衡。
 - 供 `prism_transform` 分块传播（见 transform §8）、ECS 并行查询、物理 island 求解直接复用。
+
+**交付状态**：核心 `parallel_for`/`reduce`/`prefix_sum`/`join` 早在 M1/M5/M6 已落地（按 len+worker 数静态选 grain）。本次补齐 §24.4 真正的增量——**运行期按单元耗时标定 grain**：`pkg/prism_tasks/src/par_cost.rs` 的 `CostModel`（`target_chunk_nanos`/`min_grain`/`probe_items`/`oversubscription`，纯函数 `grain(len,workers,cost_per_item_nanos)`：成本下界摊销调度开销 ⊓ 负载均衡上界保证 `workers×oversubscription` 个块 ⊓ 硬下限 ⊓ 不超 len）与门面 `TaskPool::par_for_calibrated`/`par_reduce_calibrated`（先把真实工作的前缀 probe 内联计时估单元成本，再按标定 grain 经 `scope` 扇出，每索引恰好访问一次）。标定读时钟→块数随运行变动,故 `par_reduce_calibrated` 对非结合 combine **非位复现**（位复现走 §24.7 `deterministic_reduce`,文档已明示边界）。9 单测绿（grain 三段式钳位/廉价摊到下限/昂贵细分/不超 len/builder 钳 1/for 全索引覆盖/空·小区间/reduce 对拍串行和/小区间走 probe 结果）,clippy 零告警。
 
 ### 24.5 异步 I/O 桥（async/await 集成）
 

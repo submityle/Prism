@@ -87,6 +87,8 @@ mod affinity;
 mod arena;
 mod async_exec;
 mod cancel;
+#[cfg(feature = "compat-bevy")]
+mod compat_bevy;
 mod counter;
 #[cfg(feature = "fibers")]
 mod fiber;
@@ -94,6 +96,7 @@ mod job;
 mod named;
 mod numa;
 mod panic;
+mod par_cost;
 mod par_iter;
 mod parallel;
 mod partition;
@@ -105,8 +108,6 @@ mod scheduler;
 mod scope;
 mod throttle;
 mod trace;
-#[cfg(feature = "compat-bevy")]
-mod compat_bevy;
 
 use alloc::sync::Arc;
 use std::thread::JoinHandle;
@@ -117,30 +118,30 @@ pub use affinity::{
 };
 pub use arena::{FrameArena, FrameArenas, DEFAULT_ARENA_CAPACITY};
 pub use async_exec::{CounterFuture, Task};
-pub use counter::Counter;
-pub use numa::{
-    steal_order, steal_penalty, CoreClass, CoreInfo, NumaNodeId, Topology,
-    CROSS_NODE_STEAL_PENALTY,
-};
-pub use prism_platform::AffinityError;
-pub use named::{NamedThreads, NamedThreadsConfig, ThreadCategory};
 pub use cancel::{CancelOutcome, CancelToken, Cancelled};
-pub use panic::JobHandle;
-pub use partition::{FixedPartition, DEFAULT_TARGET_CHUNKS};
-pub use par_iter::{ParRange, ParSlice, ParSliceMut, DEFAULT_MIN_LEN};
-pub use pipeline::{Pipeline, Stage};
-pub use trace::{JobTrace, Span};
 #[cfg(feature = "compat-bevy")]
 pub use compat_bevy::{
     prelude as bevy_prelude, AsyncComputeTaskPool, CompatScope, CompatTaskPool, ComputeTaskPool,
     IoTaskPool, TaskPoolBuilder,
 };
+pub use counter::Counter;
+pub use named::{NamedThreads, NamedThreadsConfig, ThreadCategory};
+pub use numa::{
+    steal_order, steal_penalty, CoreClass, CoreInfo, NumaNodeId, Topology, CROSS_NODE_STEAL_PENALTY,
+};
+pub use panic::JobHandle;
+pub use par_cost::CostModel;
+pub use par_iter::{ParRange, ParSlice, ParSliceMut, DEFAULT_MIN_LEN};
+pub use partition::{FixedPartition, DEFAULT_TARGET_CHUNKS};
+pub use pipeline::{Pipeline, Stage};
 pub use priority::{Priority, PriorityCell, PriorityGroup};
+pub use prism_platform::AffinityError;
 pub use reduce::tree_combine;
 pub use replay::{DeterministicSession, ReplayError, ReplayRecord, SplitEvent};
+use scheduler::Shared;
 pub use scope::Scope;
 pub use throttle::{Permit, Throttle};
-use scheduler::Shared;
+pub use trace::{JobTrace, Span};
 
 /// Configuration for a [`TaskPool`].
 #[derive(Clone, Copy, Debug)]
@@ -341,9 +342,7 @@ impl TaskPool {
     pub fn new_frame_arenas(&self, capacity: usize) -> FrameArenas {
         let workers = self.worker_count().max(1);
         match self.shared.affinity_plan() {
-            Some(plan) => {
-                FrameArenas::with_nodes(workers, capacity, |w| plan.node_of_worker(w))
-            }
+            Some(plan) => FrameArenas::with_nodes(workers, capacity, |w| plan.node_of_worker(w)),
             None => FrameArenas::new(workers, capacity),
         }
     }
@@ -421,11 +420,11 @@ impl Drop for TaskPool {
 #[cfg(test)]
 mod tests;
 
+#[cfg(all(test, feature = "compat-bevy"))]
+mod tests_m6_compat;
 #[cfg(test)]
 mod tests_m6_par_iter;
 #[cfg(test)]
 mod tests_m6_pipeline;
 #[cfg(test)]
 mod tests_m6_trace;
-#[cfg(all(test, feature = "compat-bevy"))]
-mod tests_m6_compat;
