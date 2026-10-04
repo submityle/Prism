@@ -60,6 +60,7 @@
 extern crate alloc;
 
 pub mod batch;
+pub mod clip;
 pub mod curve;
 pub mod draw;
 #[cfg(feature = "gpu")]
@@ -76,6 +77,7 @@ pub mod simplify;
 pub mod sdf;
 
 pub use batch::{batch, instance_count, Batch, GlyphInstance, RectInstance, ShadowInstance};
+pub use clip::clip_polygon;
 pub use curve::CubicBezier;
 pub use draw::{DrawCommand, DrawList, GlyphCmd, LayerCmd, RectCmd, ShadowCmd};
 #[cfg(feature = "gpu")]
