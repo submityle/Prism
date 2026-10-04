@@ -61,6 +61,11 @@
 //!   per-system change volume ([`frame_profile`]) by name, flagging
 //!   hot-and-churny systems (batching targets) vs. compute-bound
 //!   systems (SIMD / owning-group targets) (design §16.6 / §17 / §10).
+//! * [`schedule_ambiguity_audit`] — schedule-ambiguity blast-radius and
+//!   contention census (design §23.4): folds the detector's ambiguous-pair
+//!   list into per-system involvement (hotspot) and per-datum contention
+//!   rankings plus a whole-world / component / resource roll-up, pointing
+//!   at the highest-leverage ordering fix (design §16.6 / §23.4).
 //! * [`relation_cascade`] — cleanup-policy and cascade blast-radius
 //!   census (design §23.2): per-kind [`CleanupPolicy`](crate::relation::CleanupPolicy)
 //!   metadata joined with the pure cascade planner, giving — for every
@@ -237,6 +242,7 @@ pub mod relation_graph;
 pub mod relation_cycles;
 pub mod relation_topology;
 pub mod required_closure;
+pub mod schedule_ambiguity_audit;
 pub mod sparse_set_occupancy;
 pub mod step_inspector;
 pub mod storage_distribution;
@@ -287,6 +293,9 @@ pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
 pub use required_closure::{RequiredClosureEntry, RequiredClosureReport};
+pub use schedule_ambiguity_audit::{
+    AmbiguousSystemEntry, ContendedComponentEntry, ContendedResourceEntry, ScheduleAmbiguityAudit,
+};
 pub use sparse_set_occupancy::{SparseSetOccupancyEntry, SparseSetOccupancyReport};
 pub use step_inspector::{StepObservation, SteppingInspector};
 pub use storage_distribution::{StorageBucketEntry, StorageDistributionReport};
