@@ -508,6 +508,8 @@ pub mod grain_size_distribution;
 pub use grain_size_distribution::{GrainSizeDistribution, SieveBin};
 pub mod grid_sphere_packing;
 pub use grid_sphere_packing::pack_spheres_grid;
+pub mod distribution_packing;
+pub use distribution_packing::{pack_spheres_from_distribution, DistributionPackingParams};
 
 /// A handle into a [`ShapeRegistry`].
 ///
