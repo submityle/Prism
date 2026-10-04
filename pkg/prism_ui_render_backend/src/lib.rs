@@ -59,6 +59,7 @@
 
 extern crate alloc;
 
+pub mod arc;
 pub mod batch;
 pub mod calipers;
 pub mod circle;
@@ -84,6 +85,7 @@ pub mod sdf;
 pub mod triangulate;
 pub mod width;
 
+pub use arc::{arc_segment_count, flatten_arc};
 pub use batch::{batch, instance_count, Batch, GlyphInstance, RectInstance, ShadowInstance};
 pub use calipers::{convex_diameter, convex_diameter_pair};
 pub use circle::{min_enclosing_circle, Circle};
