@@ -69,6 +69,7 @@ extern crate alloc;
 
 mod aggregate;
 mod boundary;
+mod combinator;
 mod race;
 mod resource;
 mod state;
