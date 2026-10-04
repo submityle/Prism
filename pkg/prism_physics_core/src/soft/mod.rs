@@ -29,6 +29,7 @@ pub mod damage;
 pub mod particle;
 pub mod rigid_coupling;
 pub mod solver;
+pub mod vbd_sweep;
 
 pub use aero::{
     apply_aero_forces, apply_aero_to_columns, triangle_aero_force, turbulence_offset, AeroParams,

@@ -31,7 +31,9 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{ClothParticle, Compliance, Constraint, Vec3, EPS_LEN_SQ};
+use super::{physics_bridge, ClothParticle, Compliance, Constraint, Vec3};
+
+use prism_physics_core::soft::vbd_sweep;
 
 /// Which cloth solver a piece uses.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -125,109 +127,6 @@ impl VbdParams {
     }
 }
 
-/// A symmetric 3x3 solve is skipped when the determinant is below this, so a
-/// degenerate (singular) Hessian never divides by ~0.
-const EPS_DET: f32 = 1.0e-20;
-/// Upper bound on per-constraint stiffness. A perfectly rigid constraint
-/// (`compliance == 0`) or a vanishingly small compliance would otherwise imply
-/// an infinite stiffness; capping it keeps the Hessian finite while still
-/// dominating the inertial term by many orders of magnitude, which reads as
-/// "rigid" to the per-vertex Newton step.
-const MAX_STIFFNESS: f32 = 1.0e9;
-
-/// A dense 3x3 matrix in row-major order; used only for per-vertex Hessians.
-#[derive(Clone, Copy)]
-struct Mat3 {
-    /// Row-major entries `[m00, m01, m02, m10, m11, m12, m20, m21, m22]`.
-    m: [f32; 9],
-}
-
-impl Mat3 {
-    /// A scalar multiple of the identity.
-    fn scaled_identity(s: f32) -> Self {
-        let mut m = [0.0; 9];
-        m[0] = s;
-        m[4] = s;
-        m[8] = s;
-        Self { m }
-    }
-
-    /// The outer product `v vᵀ` scaled by `s`.
-    fn scaled_outer(v: Vec3, s: f32) -> Self {
-        Self {
-            m: [
-                s * v.x * v.x,
-                s * v.x * v.y,
-                s * v.x * v.z,
-                s * v.y * v.x,
-                s * v.y * v.y,
-                s * v.y * v.z,
-                s * v.z * v.x,
-                s * v.z * v.y,
-                s * v.z * v.z,
-            ],
-        }
-    }
-
-    /// Component-wise matrix sum `self + rhs`.
-    fn add(self, rhs: Self) -> Self {
-        let mut m = [0.0; 9];
-        for (out, (a, b)) in m.iter_mut().zip(self.m.iter().zip(rhs.m.iter())) {
-            *out = a + b;
-        }
-        Self { m }
-    }
-
-    /// Solves `self * x = rhs` by explicit cofactor inversion. Returns `None`
-    /// when the matrix is (near-)singular or the result is non-finite, so the
-    /// caller can simply not move the vertex this sweep instead of producing a
-    /// `NaN` position.
-    fn solve(self, rhs: Vec3) -> Option<Vec3> {
-        let m = &self.m;
-        let c00 = m[4] * m[8] - m[5] * m[7];
-        let c01 = m[5] * m[6] - m[3] * m[8];
-        let c02 = m[3] * m[7] - m[4] * m[6];
-        let det = m[0] * c00 + m[1] * c01 + m[2] * c02;
-        if det.abs() < EPS_DET {
-            return None;
-        }
-        let inv_det = 1.0 / det;
-        // Cofactor (adjugate) columns; the inverse is adjugateᵀ / det.
-        let c10 = m[2] * m[7] - m[1] * m[8];
-        let c11 = m[0] * m[8] - m[2] * m[6];
-        let c12 = m[1] * m[6] - m[0] * m[7];
-        let c20 = m[1] * m[5] - m[2] * m[4];
-        let c21 = m[2] * m[3] - m[0] * m[5];
-        let c22 = m[0] * m[4] - m[1] * m[3];
-        let x = (c00 * rhs.x + c10 * rhs.y + c20 * rhs.z) * inv_det;
-        let y = (c01 * rhs.x + c11 * rhs.y + c21 * rhs.z) * inv_det;
-        let z = (c02 * rhs.x + c12 * rhs.y + c22 * rhs.z) * inv_det;
-        let out = Vec3::new(x, y, z);
-        if out.x.is_finite() && out.y.is_finite() && out.z.is_finite() {
-            Some(out)
-        } else {
-            None
-        }
-    }
-}
-
-/// Converts an XPBD [`Compliance`] into the VBD energy stiffness `k` for one
-/// substep of size `dt_sub`.
-///
-/// XPBD compliance `α` relates to stiffness by `k = 1 / (α · dt²)`. A rigid
-/// constraint (`α == 0`) or a tiny compliance would blow that up, so the result
-/// is capped at [`MAX_STIFFNESS`]: still stiff enough to dominate inertia, but
-/// finite. `dt_sub` is always positive here (guaranteed by the caller), so the
-/// division is safe.
-fn constraint_stiffness(compliance: Compliance, dt_sub_sq: f32) -> f32 {
-    let alpha = compliance.value();
-    if alpha > 0.0 {
-        (1.0 / (alpha * dt_sub_sq)).min(MAX_STIFFNESS)
-    } else {
-        MAX_STIFFNESS
-    }
-}
-
 /// Builds the per-vertex adjacency: `out[i]` lists the indices (into
 /// `constraints`) of every constraint that touches particle `i`.
 ///
@@ -248,44 +147,6 @@ fn build_adjacency(constraints: &[Constraint], particle_count: usize) -> Vec<Vec
         adjacency[b].push(index as u32);
     }
     adjacency
-}
-
-/// Accumulates one distance constraint's gradient and (PSD-projected) Hessian
-/// contribution for the vertex at `x`, connected to `other` with rest length
-/// `rest` and stiffness `k`.
-///
-/// The Hessian uses the standard positive-semidefinite spring form
-/// `k·nnᵀ + k·max(0, 1 - rest/len)·(I - nnᵀ)`, which drops the indefinite part
-/// when the constraint is compressed (`len < rest`) so the per-vertex Newton
-/// step stays a descent direction and the sweep never blows up. When
-/// `one_sided` is set (LRA / tether), a constraint that is slack or at rest
-/// (`len <= rest`) contributes nothing, matching the XPBD path's over-extension
-/// gate so an anchor never yanks slack cloth inward.
-fn accumulate_constraint(
-    grad: &mut Vec3,
-    hess: &mut Mat3,
-    x: Vec3,
-    other: Vec3,
-    rest: f32,
-    k: f32,
-    one_sided: bool,
-) {
-    let d = x.sub(other);
-    let len_sq = d.length_squared();
-    if len_sq < EPS_LEN_SQ {
-        return;
-    }
-    let len = len_sq.sqrt();
-    if one_sided && len <= rest {
-        return;
-    }
-    let n = d.scale(1.0 / len);
-    *grad = grad.add(n.scale(k * (len - rest)));
-    let tangential = (1.0 - rest / len).max(0.0);
-    // k·tangential·(I - nnᵀ) + k·nnᵀ, regrouped as k·tangential·I plus the
-    // remaining k·(1 - tangential)·nnᵀ.
-    *hess = hess.add(Mat3::scaled_identity(k * tangential));
-    *hess = hess.add(Mat3::scaled_outer(n, k * (1.0 - tangential)));
 }
 
 /// Advances a cloth patch by `dt` seconds in place with the VBD solver.
@@ -333,7 +194,14 @@ pub fn solve_cloth_vbd(
     let mut previous: Vec<Vec3> = vec![Vec3::ZERO; count];
 
     for _ in 0..params.substeps {
-        predict_targets(particles, &mut previous, &mut targets, retain, dt_sub, gravity_step);
+        predict_targets(
+            particles,
+            &mut previous,
+            &mut targets,
+            retain,
+            dt_sub,
+            gravity_step,
+        );
 
         // Gauss-Seidel vertex sweeps in natural (ascending) order: one exact
         // Newton step per free vertex, reading neighbors' current positions.
@@ -389,7 +257,14 @@ pub fn solve_cloth_vbd_colored(
     let mut previous: Vec<Vec3> = vec![Vec3::ZERO; count];
 
     for _ in 0..params.substeps {
-        predict_targets(particles, &mut previous, &mut targets, retain, dt_sub, gravity_step);
+        predict_targets(
+            particles,
+            &mut previous,
+            &mut targets,
+            retain,
+            dt_sub,
+            gravity_step,
+        );
 
         // Gauss-Seidel across colors, Jacobi within a color: iterate colors in
         // order, and each color's vertices in the coloring's ascending order.
@@ -464,33 +339,37 @@ fn relax_vertex(
         return;
     }
     let x = particles[i].position;
-    let mass = 1.0 / particles[i].inverse_mass;
-    let inertia = mass / dt_sub_sq;
+    let inverse_mass = particles[i].inverse_mass;
 
-    let mut grad = x.sub(target).scale(inertia);
-    let mut hess = Mat3::scaled_identity(inertia);
-
-    for &c_index in &adjacency[i] {
+    // Delegate the per-vertex variational solve (inertia + PSD-projected spring
+    // Hessians, cofactor 3x3 inverse) to the single physics-core source of
+    // truth. The incident constraints are streamed in `adjacency[i]` order so
+    // the summed gradient / Hessian — and therefore every f32 operation — match
+    // the `cloth_vbd_sweep_color` GPU kernel bit-for-bit (asserted by the
+    // render-scene `vbd_parity` golden).
+    let incident = adjacency[i].iter().map(|&c_index| {
         let constraint = constraints[c_index as usize];
         let other_index = if constraint.a as usize == i {
             constraint.b as usize
         } else {
             constraint.a as usize
         };
-        let k = constraint_stiffness(constraint.compliance, dt_sub_sq);
-        accumulate_constraint(
-            &mut grad,
-            &mut hess,
-            x,
-            particles[other_index].position,
-            constraint.rest_length,
-            k,
-            constraint.kind.is_one_sided(),
-        );
-    }
+        vbd_sweep::IncidentConstraint {
+            other: physics_bridge::to_glam(particles[other_index].position),
+            rest: constraint.rest_length,
+            k: vbd_sweep::constraint_stiffness(constraint.compliance.value(), dt_sub_sq),
+            one_sided: constraint.kind.is_one_sided(),
+        }
+    });
 
-    if let Some(delta) = hess.solve(grad) {
-        particles[i].position = x.sub(delta);
+    if let Some(delta) = vbd_sweep::relax_delta(
+        physics_bridge::to_glam(x),
+        physics_bridge::to_glam(target),
+        inverse_mass,
+        dt_sub_sq,
+        incident,
+    ) {
+        particles[i].position = x.sub(physics_bridge::from_glam(delta));
     }
 }
 
@@ -825,7 +704,9 @@ mod tests {
             assert_eq!(a.position.x.to_bits(), b.position.x.to_bits());
             assert_eq!(a.position.y.to_bits(), b.position.y.to_bits());
             assert_eq!(a.position.z.to_bits(), b.position.z.to_bits());
-            assert!(a.position.x.is_finite() && a.position.y.is_finite() && a.position.z.is_finite());
+            assert!(
+                a.position.x.is_finite() && a.position.y.is_finite() && a.position.z.is_finite()
+            );
         }
     }
 
