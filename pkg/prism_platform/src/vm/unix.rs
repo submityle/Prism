@@ -153,7 +153,11 @@ fn is_map_failed(p: *mut c_void) -> bool {
 pub(super) fn page_size() -> usize {
     // SAFETY: `sysconf` is a pure query with no memory arguments.
     let v = unsafe { sysconf(sys::SC_PAGESIZE) };
-    if v > 0 { v as usize } else { 4096 }
+    if v > 0 {
+        v as usize
+    } else {
+        4096
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -413,7 +417,11 @@ pub(super) fn commit(ptr: *mut u8, len: usize, prot: Protection) -> Result<()> {
     // SAFETY: `ptr`/`len` is a page-aligned sub-range of a live reservation
     // (validated by the caller); `mprotect` only changes its protection.
     let rc = unsafe { mprotect(ptr.cast::<c_void>(), len, prot_bits(prot)) };
-    if rc == 0 { Ok(()) } else { Err(os_error()) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(os_error())
+    }
 }
 
 pub(super) fn decommit(ptr: *mut u8, len: usize) -> Result<()> {
@@ -437,7 +445,11 @@ pub(super) fn decommit(ptr: *mut u8, len: usize) -> Result<()> {
                 0,
             )
         };
-        return if is_map_failed(addr) { Err(os_error()) } else { Ok(()) };
+        return if is_map_failed(addr) {
+            Err(os_error())
+        } else {
+            Ok(())
+        };
     }
     // SAFETY: `ptr`/`len` is a validated page-aligned sub-range of a live
     // reservation. `madvise` drops the physical pages; `mprotect` re-arms
@@ -448,14 +460,22 @@ pub(super) fn decommit(ptr: *mut u8, len: usize) -> Result<()> {
     }
     // SAFETY: same validated sub-range as above.
     let rc = unsafe { mprotect(ptr.cast::<c_void>(), len, PROT_NONE) };
-    if rc == 0 { Ok(()) } else { Err(os_error()) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(os_error())
+    }
 }
 
 pub(super) fn protect(ptr: *mut u8, len: usize, prot: Protection) -> Result<()> {
     // SAFETY: `ptr`/`len` is a validated page-aligned sub-range of a live
     // reservation; `mprotect` only changes its protection.
     let rc = unsafe { mprotect(ptr.cast::<c_void>(), len, prot_bits(prot)) };
-    if rc == 0 { Ok(()) } else { Err(os_error()) }
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(os_error())
+    }
 }
 
 pub(super) fn release(region: Region, _huge: bool) {
@@ -463,5 +483,183 @@ pub(super) fn release(region: Region, _huge: bool) {
     // reservation owns; `munmap` is called once, from `Drop`.
     unsafe {
         munmap(region.base.cast::<c_void>(), region.base_len);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Magic ring buffer (mirrored mapping) — design doc §24.2 "环形流送堆".
+// ---------------------------------------------------------------------------
+
+#[cfg(target_vendor = "apple")]
+pub(super) use mirror::{map as mirror_map, release as mirror_release, SUPPORTED as MIRROR_SUPPORTED};
+
+#[cfg(not(target_vendor = "apple"))]
+/// This build can mirror-map a magic ring buffer.
+///
+/// A real Linux backend (`memfd_create` + `ftruncate` + two `mmap` views over
+/// one anonymous file) is PLANNED but not shipped unverified from a macOS host;
+/// see the design doc's honest-boundary note.
+pub(super) const MIRROR_SUPPORTED: bool = false;
+
+#[cfg(not(target_vendor = "apple"))]
+/// Map a mirrored ring (not yet implemented on this Unix).
+pub(super) fn mirror_map(_size: usize) -> Result<Region> {
+    Err(VmError::Unsupported)
+}
+
+#[cfg(not(target_vendor = "apple"))]
+/// Release a mirrored ring (no-op until this platform's backend lands).
+pub(super) fn mirror_release(_region: Region) {}
+
+#[cfg(target_vendor = "apple")]
+mod mirror {
+    //! macOS mirrored-mapping backend built on the Mach VM API.
+    //!
+    //! `mach_vm_allocate` reserves a contiguous `2N`-byte placeholder; then a
+    //! single `mach_vm_remap` with `VM_FLAGS_OVERWRITE` and `copy = false`
+    //! aliases the lower `N` bytes over the upper `N`, so both halves share the
+    //! same physical pages. Release deallocates the whole `2N` span once.
+    //!
+    //! The `mach_vm_*` entry points and the `mach_task_self_` port are exported
+    //! by the system `libSystem` that `std` already links, so no extra crate is
+    //! required — matching the rest of this module.
+
+    use super::{Region, Result, VmError};
+
+    #[expect(non_camel_case_types, reason = "names mirror the Mach C ABI typedefs")]
+    type kern_return_t = i32;
+    #[expect(non_camel_case_types, reason = "names mirror the Mach C ABI typedefs")]
+    type mach_port_t = u32;
+    #[expect(non_camel_case_types, reason = "names mirror the Mach C ABI typedefs")]
+    type mach_vm_address_t = u64;
+    #[expect(non_camel_case_types, reason = "names mirror the Mach C ABI typedefs")]
+    type mach_vm_size_t = u64;
+    #[expect(non_camel_case_types, reason = "names mirror the Mach C ABI typedefs")]
+    type mach_vm_offset_t = u64;
+    #[expect(non_camel_case_types, reason = "names mirror the Mach C ABI typedefs")]
+    type vm_prot_t = i32;
+    #[expect(non_camel_case_types, reason = "names mirror the Mach C ABI typedefs")]
+    type vm_inherit_t = u32;
+    #[expect(non_camel_case_types, reason = "names mirror the Mach C ABI typedefs")]
+    type boolean_t = i32;
+
+    const KERN_SUCCESS: kern_return_t = 0;
+    /// Let the kernel pick the placeholder address.
+    const VM_FLAGS_ANYWHERE: i32 = 0x0001;
+    /// Place the remap at the requested address.
+    const VM_FLAGS_FIXED: i32 = 0x0000;
+    /// Overwrite the existing mapping at the target address.
+    const VM_FLAGS_OVERWRITE: i32 = 0x4000;
+    /// Child processes get a copy of the mapping on fork (the allocate default).
+    const VM_INHERIT_COPY: vm_inherit_t = 1;
+
+    unsafe extern "C" {
+        /// Exported self-task port global (`mach_task_self()` is a macro over it).
+        static mach_task_self_: mach_port_t;
+        fn mach_vm_allocate(
+            target: mach_port_t,
+            address: *mut mach_vm_address_t,
+            size: mach_vm_size_t,
+            flags: i32,
+        ) -> kern_return_t;
+        fn mach_vm_deallocate(
+            target: mach_port_t,
+            address: mach_vm_address_t,
+            size: mach_vm_size_t,
+        ) -> kern_return_t;
+        fn mach_vm_remap(
+            target_task: mach_port_t,
+            target_address: *mut mach_vm_address_t,
+            size: mach_vm_size_t,
+            mask: mach_vm_offset_t,
+            flags: i32,
+            src_task: mach_port_t,
+            src_address: mach_vm_address_t,
+            copy: boolean_t,
+            cur_protection: *mut vm_prot_t,
+            max_protection: *mut vm_prot_t,
+            inheritance: vm_inherit_t,
+        ) -> kern_return_t;
+    }
+
+    /// This build has a working mirrored-mapping backend.
+    pub(crate) const SUPPORTED: bool = true;
+
+    fn self_task() -> mach_port_t {
+        // SAFETY: `mach_task_self_` is an exported immutable port value; reading
+        // it yields this task's send right, as `mach_task_self()` does in C.
+        unsafe { mach_task_self_ }
+    }
+
+    pub(crate) fn map(size: usize) -> Result<Region> {
+        let double = size.checked_mul(2).ok_or(VmError::InvalidArgument)?;
+        let task = self_task();
+
+        let mut addr: mach_vm_address_t = 0;
+        // SAFETY: `&mut addr` is a writable out-parameter; with
+        // `VM_FLAGS_ANYWHERE` the kernel allocates `double` read/write bytes at
+        // an address it chooses and stores it in `addr`. No input buffer is read.
+        let kr = unsafe {
+            mach_vm_allocate(
+                task,
+                core::ptr::from_mut(&mut addr),
+                double as mach_vm_size_t,
+                VM_FLAGS_ANYWHERE,
+            )
+        };
+        if kr != KERN_SUCCESS {
+            return Err(VmError::SystemError(kr));
+        }
+
+        let mut target: mach_vm_address_t = addr + size as mach_vm_address_t;
+        let mut cur_prot: vm_prot_t = 0;
+        let mut max_prot: vm_prot_t = 0;
+        // SAFETY: `target` points one half into the live placeholder we just
+        // allocated; `VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE` replaces exactly that
+        // upper `size` bytes with a shared (`copy = 0`) alias of the lower
+        // `size` bytes starting at `addr`, within the same task. `cur_prot`/
+        // `max_prot` are writable out-parameters. On failure nothing in the
+        // placeholder is leaked because we deallocate it below.
+        let kr = unsafe {
+            mach_vm_remap(
+                task,
+                core::ptr::from_mut(&mut target),
+                size as mach_vm_size_t,
+                0,
+                VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                task,
+                addr,
+                0,
+                core::ptr::from_mut(&mut cur_prot),
+                core::ptr::from_mut(&mut max_prot),
+                VM_INHERIT_COPY,
+            )
+        };
+        if kr != KERN_SUCCESS {
+            // SAFETY: `addr`/`double` is exactly the placeholder we allocated
+            // above and still own; deallocating it releases the whole span.
+            unsafe {
+                mach_vm_deallocate(task, addr, double as mach_vm_size_t);
+            }
+            return Err(VmError::SystemError(kr));
+        }
+
+        let base = core::ptr::with_exposed_provenance_mut::<u8>(addr as usize);
+        Ok(Region {
+            base,
+            base_len: double,
+            ptr: base,
+            len: size,
+        })
+    }
+
+    pub(crate) fn release(region: Region) {
+        let task = self_task();
+        // SAFETY: `region.base`/`region.base_len` is exactly the `2N` span this
+        // ring allocated with `mach_vm_allocate`; deallocating it releases both
+        // aliased halves exactly once, from `Drop`.
+        unsafe {
+            mach_vm_deallocate(task, region.base.addr() as mach_vm_address_t, region.base_len as mach_vm_size_t);
+        }
     }
 }

@@ -354,12 +354,16 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 - **优先级 I/O**：关键流送（镜头前方区块）高优先，预取低优先，接 `prism_tasks` §24.5 异步 I/O 桥。
 - **I/O 带宽预算**：限速 + 背压，防流送挤垮磁盘/网络，供 `prism_asset` 流送调度。
 
-### 24.2 虚拟内存进阶（稀疏堆 / 按需提交 / GPU 共享内存）
+### 24.2 虚拟内存进阶（稀疏堆 / 按需提交 / GPU 共享内存）—— 🟡 环形流送堆（magic ring buffer）已交付并真机验证（macOS Mach VM）
 
 - **稀疏虚拟堆**：预留巨大地址空间（如 TB 级 world），仅对访问到的页按需 commit（commit-on-fault），供大世界/虚拟纹理稀疏驻留。
 - **环形流送堆**：虚拟地址镜像映射（magic ring buffer），环形缓冲跨界读写无需分支，供音频/流送环。
 - **GPU 共享 / 可见内存**：抽象 host-visible / upload / readback 内存域（接 `prism_render_driver` RHI），统一 CPU-GPU 内存桥。
 - **内存域标签**：虚存区段带类别标签，供 `prism_diagnostic` §24.3 内存图谱按域可视化。
+
+**交付状态（环形流送堆已落地并真机验证；其余仍属 PLANNED）**：新增 `pkg/prism_platform/src/vm/ring.rs` 的 `MirroredRing`（镜像映射 / magic ring buffer），直接扩展既有 `vm` 模块的 in-crate `#[cfg(feature="std")]` 后端（无 `libc` crate、依赖 std 已链接的 C/系统运行时、每处 `unsafe` 均 `#[expect(unsafe_code, reason)]`+`// SAFETY:` 审计），与 `topology`/`security` 另建 libc sibling crate 的 twin 模式互补。`MirroredRing::with_min_capacity(min_bytes)` 向上取整到整页后预留 `2N` 虚拟字节，但只用 `N` 物理字节——同一批物理页在相邻虚拟地址被映射两次，因此偏移 `i` 与偏移 `cap+i` 落在同一物理页：生产者/消费者跨越环尾时无需取模或分支即可用单次 `memcpy` 读写一段跨界数据（音频混音环、资产流送队列的底座）。macOS 后端（`mach_vm_allocate` 预留 `2N` 占位 + 单次 `mach_vm_remap(VM_FLAGS_OVERWRITE, copy=false)` 把下半 `N` 别名映射到上半 `N`，经 `mach_task_self_`/`mach_vm_deallocate` 收尾）在 Apple M2 真机验证：一页环（`capacity==page_size`）写下半读上半逐字节相等、写 `[cap, 2*cap)` 等价于写 `[0, cap)`（环尾回绕）、跨线程 `Send+Sync` 搬运后别名仍一致。`src/vm/tests.rs` 新增 4 项（别名一致/能力诚实/零容量拒绝/`Send+Sync`），`cargo test -p prism_platform` vm 子集 14/14 全绿（沙盒外，mmap/mach 真调），`cargo clippy -p prism_platform --all-targets` 零告警、无桩实现。
+
+**诚实边界 / 仍属 PLANNED**：环形流送堆仅在已验证的 Apple（macOS）给出真实镜像映射，其余平台 `MirroredRing::is_supported()==false` 且构造返回 `VmError::Unsupported`（而非返回不镜像的假缓冲）——调用方须先查 `is_supported()`。Linux（`memfd_create`+`ftruncate`+双 `mmap`）与 Windows（`CreateFileMapping`+双 `MapViewOfFileEx` 或 `VirtualAlloc2`/`MapViewOfFile3` 占位）的真实镜像后端为 PLANNED，本机为 macOS 无法真机验证故不下发未验证代码，诚实留空而非造桩。**稀疏虚拟堆**（commit-on-fault）可直接复用现有 `Reservation`（`reserve(PROT_NONE)` + 按需 `commit(mprotect)`）做显式按需提交；真·缺页即提交需 SIGSEGV handler，风险高暂不引入。**GPU 共享 / 可见内存**（接 `prism_render_driver` RHI）与**内存域标签**（接 `prism_diagnostic` §24.3）归渲染/诊断侧接线，属 PLANNED。
 
 ### 24.3 混合核 / NUMA / 能耗感知调度钩子 —— ✅ 可移植数据模型 + 真实 OS 拓扑探测 twin 已交付（`topology` 模块 + `prism_platform_os` sibling crate）
 
@@ -422,4 +426,4 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 
 ### 24.8 诚实边界
 
-本章全部为 PLANNED 设计目标，无代码。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；24.3 调度钩子的**可移植数据模型 / QoS 映射 / 能耗热策略已交付**（见 `topology` 模块），**真实 OS 拓扑探测 twin（`prism_platform_os` sibling crate，Apple Silicon 真机验证）已交付**，Linux/Windows 拓扑后端与 QoS/能耗 syscall 接线仍 PLANNED；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固的**可移植加固姿态数据模型 / 完整性加载策略 / 沙箱能力映射已交付**（见 `security` 模块），**Apple Silicon 真实 OS 活探测 twin（`prism_platform_os`，读 Mach-O `MH_PIE`/`arm64e` + `csops` 签名状态，真机验证）已交付**，Linux/Windows/Android 活探测后端仍 PLANNED；24.6 能力数据库**已交付**（见 `capability` 模块，贯穿始终、降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章多数为 PLANNED 设计目标。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；其中 **24.2 环形流送堆（`MirroredRing` magic ring buffer）已交付并真机验证**（见 `vm/ring.rs`，macOS `mach_vm_remap` 镜像映射，Linux/Windows 镜像后端 PLANNED），稀疏堆可复用现有 `Reservation` 按需提交；24.3 调度钩子的**可移植数据模型 / QoS 映射 / 能耗热策略已交付**（见 `topology` 模块），**真实 OS 拓扑探测 twin（`prism_platform_os` sibling crate，Apple Silicon 真机验证）已交付**，Linux/Windows 拓扑后端与 QoS/能耗 syscall 接线仍 PLANNED；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固的**可移植加固姿态数据模型 / 完整性加载策略 / 沙箱能力映射已交付**（见 `security` 模块），**Apple Silicon 真实 OS 活探测 twin（`prism_platform_os`，读 Mach-O `MH_PIE`/`arm64e` + `csops` 签名状态，真机验证）已交付**，Linux/Windows/Android 活探测后端仍 PLANNED；24.6 能力数据库**已交付**（见 `capability` 模块，贯穿始终、降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

@@ -115,6 +115,17 @@ mod backend {
 
     /// Release a mapping (no-op; nothing was ever reserved here).
     pub(super) fn release(_region: Region, _huge: bool) {}
+
+    /// This build can mirror-map a magic ring buffer.
+    pub(super) const MIRROR_SUPPORTED: bool = false;
+
+    /// Map a mirrored ring (unsupported here).
+    pub(super) fn mirror_map(_size: usize) -> Result<Region> {
+        Err(VmError::Unsupported)
+    }
+
+    /// Release a mirrored ring (no-op; nothing was ever mapped here).
+    pub(super) fn mirror_release(_region: Region) {}
 }
 
 /// Result type for every virtual-memory operation in this module.
@@ -144,7 +155,10 @@ impl fmt::Display for VmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             VmError::Unsupported => {
-                write!(f, "virtual-memory capability is unsupported on this platform")
+                write!(
+                    f,
+                    "virtual-memory capability is unsupported on this platform"
+                )
             }
             VmError::InvalidArgument => write!(f, "invalid virtual-memory argument"),
             VmError::OutOfMemory => write!(f, "out of address space or physical memory"),
@@ -460,6 +474,10 @@ fn round_up(v: usize, align: usize) -> Option<usize> {
     debug_assert!(align.is_power_of_two());
     v.checked_add(align - 1).map(|s| s & !(align - 1))
 }
+
+/// Magic ring buffer (mirrored virtual-memory mapping); see [`MirroredRing`].
+mod ring;
+pub use ring::MirroredRing;
 
 #[cfg(test)]
 mod tests;

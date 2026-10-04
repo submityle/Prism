@@ -18,13 +18,19 @@ use super::{
 fn page_size_is_sane() {
     let ps = page_size();
     assert!(ps >= 4096, "page size should be at least 4 KiB, got {ps}");
-    assert!(ps.is_power_of_two(), "page size {ps} must be a power of two");
+    assert!(
+        ps.is_power_of_two(),
+        "page size {ps} must be a power of two"
+    );
 }
 
 #[test]
 fn memory_info_is_sane() {
     let info = memory_info().expect("desktop hosts expose memory info");
-    assert!(info.total_physical > 0, "total physical memory must be positive");
+    assert!(
+        info.total_physical > 0,
+        "total physical memory must be positive"
+    );
     assert!(
         info.available_physical > 0,
         "available physical memory should be positive on a live host"
@@ -141,7 +147,8 @@ fn guard_page_installs_without_error() {
     // it must succeed. (Verifying the fault itself needs a signal handler and
     // is out of scope for a unit test.)
     res.guard_page(0).expect("front guard page should install");
-    res.guard_page(ps * 2).expect("back guard page should install");
+    res.guard_page(ps * 2)
+        .expect("back guard page should install");
 }
 
 #[test]
@@ -176,14 +183,20 @@ fn huge_pages_capability_is_honest() {
         // Unsupported platforms (macOS, wasm) must report no large-page size
         // and reject huge reservations with Unsupported.
         assert!(large_page_size().is_none());
-        assert!(matches!(Reservation::reserve_huge(1 << 20), Err(VmError::Unsupported)));
+        assert!(matches!(
+            Reservation::reserve_huge(1 << 20),
+            Err(VmError::Unsupported)
+        ));
     }
 }
 
 #[test]
 fn invalid_arguments_are_rejected() {
     let ps = page_size();
-    assert!(matches!(Reservation::reserve(0), Err(VmError::InvalidArgument)));
+    assert!(matches!(
+        Reservation::reserve(0),
+        Err(VmError::InvalidArgument)
+    ));
     // Non-power-of-two alignment.
     assert!(matches!(
         Reservation::reserve_aligned(ps, 3),
@@ -232,4 +245,87 @@ fn reservation_is_send_and_sync() {
         bytes[0]
     });
     assert_eq!(handle.join().unwrap(), 7);
+}
+
+#[test]
+fn mirrored_ring_capability_is_honest() {
+    use super::MirroredRing;
+    // On an unsupported platform the constructor must honestly refuse rather
+    // than hand back a non-mirroring buffer.
+    if !MirroredRing::is_supported() {
+        assert!(matches!(
+            MirroredRing::with_min_capacity(page_size()),
+            Err(VmError::Unsupported)
+        ));
+    }
+}
+
+#[test]
+fn mirrored_ring_aliases_both_halves() {
+    use super::MirroredRing;
+    if !MirroredRing::is_supported() {
+        return; // Honest skip on platforms without a mirroring backend.
+    }
+    let ps = page_size();
+    let ring = MirroredRing::with_min_capacity(1).expect("one-page ring should map");
+    let cap = ring.capacity();
+    assert_eq!(cap, ps, "capacity rounds up to a whole page");
+    assert!(!ring.is_empty());
+    assert!(!ring.as_ptr().is_null());
+
+    let base = ring.as_mut_ptr();
+    // SAFETY: the mapping is valid for reads and writes across the full `2*cap`
+    // span and owned by `ring` for the duration of this borrow. The upper half
+    // aliases the lower half.
+    let full = unsafe { core::slice::from_raw_parts_mut(base, 2 * cap) };
+
+    // A write into the lower half is visible in the mirror at `cap + i`.
+    for (i, b) in full[..cap].iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    for i in 0..cap {
+        assert_eq!(
+            full[cap + i],
+            (i % 251) as u8,
+            "mirror byte at {} must alias lower byte {i}",
+            cap + i
+        );
+    }
+
+    // A write into the upper (mirror) half is visible in the lower half: this is
+    // exactly the wrap a ring producer relies on when a record straddles the end.
+    full[cap] = 0x5A;
+    full[2 * cap - 1] = 0xA5;
+    assert_eq!(full[0], 0x5A, "write at cap wraps to offset 0");
+    assert_eq!(full[cap - 1], 0xA5, "write at 2*cap-1 wraps to cap-1");
+}
+
+#[test]
+fn mirrored_ring_rejects_zero_capacity() {
+    use super::MirroredRing;
+    assert!(matches!(
+        MirroredRing::with_min_capacity(0),
+        Err(VmError::InvalidArgument)
+    ));
+}
+
+#[test]
+fn mirrored_ring_is_send_and_sync() {
+    use super::MirroredRing;
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<MirroredRing>();
+
+    if !MirroredRing::is_supported() {
+        return;
+    }
+    let ps = page_size();
+    let ring = MirroredRing::with_min_capacity(ps).expect("ring should map");
+    let handle = std::thread::spawn(move || {
+        let cap = ring.capacity();
+        // SAFETY: valid for the full mirrored span; owned by this thread now.
+        let full = unsafe { core::slice::from_raw_parts_mut(ring.as_mut_ptr(), 2 * cap) };
+        full[0] = 0x33;
+        full[cap] // reads the alias of offset 0
+    });
+    assert_eq!(handle.join().unwrap(), 0x33);
 }

@@ -191,7 +191,7 @@ pub use thread::{
 #[cfg(feature = "std")]
 pub use vm::{
     huge_pages_supported, large_page_size, memory_info, page_size, virtual_memory_supported,
-    MemoryInfo, Protection, Reservation, VmError,
+    MemoryInfo, MirroredRing, Protection, Reservation, VmError,
 };
 #[cfg(feature = "std")]
 pub use wallclock::{now as wall_now, sample as wall_sample, WallClock, WallClockSample, WallTime};

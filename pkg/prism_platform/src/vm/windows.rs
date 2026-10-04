@@ -132,13 +132,21 @@ fn system_info() -> SystemInfo {
 
 pub(super) fn page_size() -> usize {
     let ps = system_info().dw_page_size as usize;
-    if ps > 0 { ps } else { 4096 }
+    if ps > 0 {
+        ps
+    } else {
+        4096
+    }
 }
 
 pub(super) fn large_page_size() -> Option<usize> {
     // SAFETY: `GetLargePageMinimum` is a pure query taking no arguments.
     let min = unsafe { GetLargePageMinimum() };
-    if min > 0 { Some(min) } else { None }
+    if min > 0 {
+        Some(min)
+    } else {
+        None
+    }
 }
 
 pub(super) fn huge_pages_supported() -> bool {
@@ -174,9 +182,7 @@ pub(super) fn memory_info() -> Result<MemoryInfo> {
 pub(super) fn reserve(size: usize) -> Result<Region> {
     // SAFETY: a null `address` lets the OS choose the base; `MEM_RESERVE` with
     // `PAGE_NOACCESS` touches no memory. The result is validated before use.
-    let p = unsafe {
-        VirtualAlloc(core::ptr::null_mut(), size, MEM_RESERVE, PAGE_NOACCESS)
-    };
+    let p = unsafe { VirtualAlloc(core::ptr::null_mut(), size, MEM_RESERVE, PAGE_NOACCESS) };
     if p.is_null() {
         return Err(os_error());
     }
@@ -193,9 +199,7 @@ pub(super) fn reserve_aligned(size: usize, align: usize) -> Result<Region> {
     let total = size.checked_add(align).ok_or(VmError::InvalidArgument)?;
     // SAFETY: see `reserve`; this reserves `size + align` bytes so an aligned
     // sub-range is guaranteed to fit.
-    let p = unsafe {
-        VirtualAlloc(core::ptr::null_mut(), total, MEM_RESERVE, PAGE_NOACCESS)
-    };
+    let p = unsafe { VirtualAlloc(core::ptr::null_mut(), total, MEM_RESERVE, PAGE_NOACCESS) };
     if p.is_null() {
         return Err(os_error());
     }
@@ -242,7 +246,11 @@ pub(super) fn commit(ptr: *mut u8, len: usize, prot: Protection) -> Result<()> {
     // SAFETY: `ptr`/`len` is a validated page-aligned sub-range of a live
     // reservation; committing it with the requested protection is sound.
     let p = unsafe { VirtualAlloc(ptr.cast::<c_void>(), len, MEM_COMMIT, prot_bits(prot)) };
-    if p.is_null() { Err(os_error()) } else { Ok(()) }
+    if p.is_null() {
+        Err(os_error())
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn decommit(ptr: *mut u8, len: usize) -> Result<()> {
@@ -250,7 +258,11 @@ pub(super) fn decommit(ptr: *mut u8, len: usize) -> Result<()> {
     // reservation; `MEM_DECOMMIT` returns its physical pages while keeping the
     // address space reserved.
     let rc = unsafe { VirtualFree(ptr.cast::<c_void>(), len, MEM_DECOMMIT) };
-    if rc == 0 { Err(os_error()) } else { Ok(()) }
+    if rc == 0 {
+        Err(os_error())
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn protect(ptr: *mut u8, len: usize, prot: Protection) -> Result<()> {
@@ -265,7 +277,11 @@ pub(super) fn protect(ptr: *mut u8, len: usize, prot: Protection) -> Result<()> 
             core::ptr::from_mut(&mut old),
         )
     };
-    if rc == 0 { Err(os_error()) } else { Ok(()) }
+    if rc == 0 {
+        Err(os_error())
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn release(region: Region, _huge: bool) {
@@ -276,3 +292,19 @@ pub(super) fn release(region: Region, _huge: bool) {
         VirtualFree(region.base.cast::<c_void>(), 0, MEM_RELEASE);
     }
 }
+
+/// This build can mirror-map a magic ring buffer.
+///
+/// A real Windows backend (`CreateFileMapping` + two `MapViewOfFileEx` views
+/// over one section, or `VirtualAlloc2`/`MapViewOfFile3` placeholders) is
+/// PLANNED but not shipped unverified from a macOS host; see the design doc's
+/// honest-boundary note.
+pub(super) const MIRROR_SUPPORTED: bool = false;
+
+/// Map a mirrored ring (not yet implemented on Windows).
+pub(super) fn mirror_map(_size: usize) -> Result<Region> {
+    Err(VmError::Unsupported)
+}
+
+/// Release a mirrored ring (no-op until the Windows backend lands).
+pub(super) fn mirror_release(_region: Region) {}
