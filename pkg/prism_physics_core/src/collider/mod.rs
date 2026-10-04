@@ -568,6 +568,8 @@ pub mod granular_froude;
 pub use granular_froude::{FroudeRegime, GranularFroude};
 pub mod principal_strain;
 pub use principal_strain::PrincipalStrain;
+pub mod granular_peclet;
+pub use granular_peclet::{GranularPeclet, PecletRegime};
 
 /// A handle into a [`ShapeRegistry`].
 ///
