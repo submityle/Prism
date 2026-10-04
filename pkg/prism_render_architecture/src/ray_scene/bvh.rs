@@ -317,6 +317,19 @@ struct PrimRef {
 }
 
 impl Bvh {
+    /// Wraps a pre-flattened node array and reordered primitive table.
+    ///
+    /// The caller must uphold the [`LinearBvhNode`] invariants: a depth-first
+    /// layout where an interior node's first child sits immediately after it and
+    /// its second child is at [`LinearBvhNode::second_child`], and `primitives`
+    /// is indexed by [`LinearBvhNode::first_primitive`]. This is the shared
+    /// constructor for alternative builders (e.g. the parallel linear builder in
+    /// [`super::lbvh`]) that produce the same layout the binned-`SAH` builder does.
+    #[must_use]
+    pub(crate) fn from_linear(nodes: Vec<LinearBvhNode>, primitives: Vec<Triangle>) -> Self {
+        Self { nodes, primitives }
+    }
+
     /// Builds a `BVH` over `triangles` with [`BvhBuildConfig::default`].
     #[must_use]
     pub fn build(triangles: &[Triangle]) -> Self {
@@ -1079,7 +1092,12 @@ mod tests {
         }
         for i in 0..8u32 {
             let x = 100.0 + i as f32;
-            tris.push(tri([x, 0.0, 0.0], [x + 0.5, 0.0, 0.0], [x, 0.5, 0.0], 8 + i));
+            tris.push(tri(
+                [x, 0.0, 0.0],
+                [x + 0.5, 0.0, 0.0],
+                [x, 0.5, 0.0],
+                8 + i,
+            ));
         }
         let mut bvh = Bvh::build(&tris);
         let before = bvh.refit_quality(0.125);
@@ -1087,12 +1105,12 @@ mod tests {
         // Interleave the two clusters in place: same connectivity, but the
         // original split plane now separates spatially mixed primitives.
         bvh.refit(|id| {
-            let base = if id % 2 == 0 { id as f32 } else { 100.0 + id as f32 };
-            [
-                [base, 0.0, 0.0],
-                [base + 0.5, 0.0, 0.0],
-                [base, 0.5, 0.0],
-            ]
+            let base = if id % 2 == 0 {
+                id as f32
+            } else {
+                100.0 + id as f32
+            };
+            [[base, 0.0, 0.0], [base + 0.5, 0.0, 0.0], [base, 0.5, 0.0]]
         });
         let after = bvh.refit_quality(0.125);
         assert!(

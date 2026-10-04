@@ -704,286 +704,281 @@
 //!   traversal to the device `acceleration_structure` and writes the shared
 //!   [`gpu_trace_io`] hit record, aligning with `Lumen`-style `HWRT`.
 
+pub mod aabb_primitive;
+pub mod aabb_primitive_gpu_layout;
 pub mod acceleration;
+pub mod adaptive_tessellation;
+pub mod alpha_mesh;
+pub mod alpha_mesh_gpu_layout;
 pub mod backend;
+pub mod bezier_patch;
+pub mod bezier_surface;
+pub mod bilinear_patch;
+pub mod bilinear_patch_gpu_layout;
+pub mod bspline_patch;
+pub mod bspline_surface;
 pub mod bvh;
 pub mod bvh_wide;
 pub mod bvh_wide_gpu_layout;
+pub mod capsule;
+pub mod capsule_gpu_layout;
+pub mod catmull_rom_patch;
+pub mod cone;
+pub mod cone_gpu_layout;
 pub mod curve;
 pub mod curve_gpu_layout;
 pub mod cylinder;
 pub mod cylinder_gpu_layout;
 pub mod disk;
 pub mod disk_gpu_layout;
-pub mod rectangle;
-pub mod rectangle_gpu_layout;
-pub mod cone;
-pub mod cone_gpu_layout;
-pub mod paraboloid;
-pub mod paraboloid_gpu_layout;
-pub mod hyperboloid;
-pub mod hyperboloid_gpu_layout;
-pub mod capsule;
-pub mod capsule_gpu_layout;
-pub mod round_cone;
-pub mod round_cone_gpu_layout;
-pub mod bilinear_patch;
-pub mod bilinear_patch_gpu_layout;
-pub mod shaded_bilinear_patch;
-pub mod shaded_bilinear_patch_gpu_layout;
-pub mod indexed_bilinear_patch_mesh;
-pub mod indexed_bilinear_patch_mesh_gpu_layout;
-pub mod bezier_patch;
-pub mod catmull_rom_patch;
-pub mod bspline_patch;
-pub mod rational_bezier_patch;
-pub mod bspline_surface;
-pub mod nurbs_surface;
-pub mod bezier_surface;
 pub mod displaced_surface;
-pub mod trimmed_surface;
-pub mod surface_group;
-pub mod patch_tessellation;
-pub mod adaptive_tessellation;
 pub mod displacement_tessellation;
-pub mod patch_grid;
-pub mod mesh_tangents;
-pub mod mesh_subdivision;
-pub mod silhouette_tessellation;
-pub mod mesh_welding;
-pub mod mesh_smooth_normals;
-pub mod mesh_decimation;
-pub mod mesh_laplacian_smoothing;
-pub mod mesh_border_detection;
-pub mod mesh_edge_split;
-pub mod mesh_vertex_clustering;
-pub mod mesh_connected_components;
-pub mod mesh_normal_consistency;
-pub mod mesh_feature_edges;
-pub mod mesh_hard_normal_split;
-pub mod mesh_vertex_valence;
-pub mod mesh_triangle_quality;
-pub mod mesh_edge_length_stats;
-pub mod mesh_dihedral_cosine;
-pub mod mesh_mass_properties;
-pub mod mesh_euler_characteristic;
-pub mod mesh_bounding_sphere;
-pub mod mesh_planar_regions;
-pub mod mesh_closest_point;
-pub mod mesh_self_intersections;
-pub mod mesh_voxelize;
-pub mod mesh_voxel_distance_field;
-pub mod mesh_solid_voxelization;
-pub mod mesh_signed_distance_field;
-pub mod mesh_sdf_raymarch;
-pub mod mesh_sdf_normal;
-pub mod mesh_sdf_tetrahedron_normal;
-pub mod mesh_sdf_curvature;
-pub mod mesh_sdf_curvature_masks;
-pub mod mesh_sdf_surface_projection;
-pub mod sdf_csg;
-pub mod mesh_voxel_padding;
-pub mod mesh_sdf_soft_shadow;
-pub mod mesh_sdf_ambient_occlusion;
-pub mod mesh_sdf_cone_occlusion;
-pub mod sdf_domain;
-pub mod mesh_sdf_thickness;
-pub mod sdf_primitives;
-pub mod sdf_unsigned;
-pub mod mesh_sdf_enhanced_trace;
 pub mod ellipsoid;
 pub mod ellipsoid_gpu_layout;
-pub mod obb;
-pub mod obb_gpu_layout;
-pub mod shaded_triangle;
-pub mod shaded_triangle_gpu_layout;
-pub mod spline;
-pub mod spline_strip;
-pub mod triangle_mesh;
-pub mod triangle_mesh_gpu_layout;
-pub mod alpha_mesh;
-pub mod alpha_mesh_gpu_layout;
-pub mod heightfield;
-pub mod heightfield_gpu_layout;
-pub mod sdf_brick;
-pub mod sdf_brick_gpu_layout;
 pub mod footprint;
 pub mod gpu_layout;
 pub mod gpu_trace_io;
 pub mod gpu_trace_kernel;
 pub mod hardware_ray_query;
+pub mod heightfield;
+pub mod heightfield_gpu_layout;
+pub mod hyperboloid;
+pub mod hyperboloid_gpu_layout;
+pub mod indexed_bilinear_patch_mesh;
+pub mod indexed_bilinear_patch_mesh_gpu_layout;
+pub mod lbvh;
+pub mod mesh_border_detection;
+pub mod mesh_bounding_sphere;
+pub mod mesh_closest_point;
+pub mod mesh_connected_components;
+pub mod mesh_decimation;
+pub mod mesh_dihedral_cosine;
+pub mod mesh_edge_length_stats;
+pub mod mesh_edge_split;
+pub mod mesh_euler_characteristic;
+pub mod mesh_feature_edges;
+pub mod mesh_hard_normal_split;
+pub mod mesh_laplacian_smoothing;
+pub mod mesh_mass_properties;
+pub mod mesh_normal_consistency;
+pub mod mesh_planar_regions;
+pub mod mesh_sdf_ambient_occlusion;
+pub mod mesh_sdf_cone_occlusion;
+pub mod mesh_sdf_curvature;
+pub mod mesh_sdf_curvature_masks;
+pub mod mesh_sdf_enhanced_trace;
+pub mod mesh_sdf_normal;
+pub mod mesh_sdf_raymarch;
+pub mod mesh_sdf_soft_shadow;
+pub mod mesh_sdf_surface_projection;
+pub mod mesh_sdf_tetrahedron_normal;
+pub mod mesh_sdf_thickness;
+pub mod mesh_self_intersections;
+pub mod mesh_signed_distance_field;
+pub mod mesh_smooth_normals;
+pub mod mesh_solid_voxelization;
+pub mod mesh_subdivision;
+pub mod mesh_tangents;
+pub mod mesh_triangle_quality;
+pub mod mesh_vertex_clustering;
+pub mod mesh_vertex_valence;
+pub mod mesh_voxel_distance_field;
+pub mod mesh_voxel_padding;
+pub mod mesh_voxelize;
+pub mod mesh_welding;
 pub mod motion;
 pub mod motion_gpu_layout;
+pub mod nurbs_surface;
+pub mod obb;
+pub mod obb_gpu_layout;
+pub mod paraboloid;
+pub mod paraboloid_gpu_layout;
+pub mod patch_grid;
+pub mod patch_tessellation;
+pub mod rational_bezier_patch;
 pub mod ray_offset;
+pub mod rectangle;
+pub mod rectangle_gpu_layout;
+pub mod reorder;
+pub mod round_cone;
+pub mod round_cone_gpu_layout;
 pub mod scheduler;
-pub mod aabb_primitive;
+pub mod sdf_brick;
+pub mod sdf_brick_gpu_layout;
+pub mod sdf_csg;
+pub mod sdf_domain;
+pub mod sdf_primitives;
+pub mod sdf_unsigned;
+pub mod shaded_bilinear_patch;
+pub mod shaded_bilinear_patch_gpu_layout;
+pub mod shaded_triangle;
+pub mod shaded_triangle_gpu_layout;
+pub mod silhouette_tessellation;
 pub mod sphere;
-pub mod aabb_primitive_gpu_layout;
 pub mod sphere_gpu_layout;
+pub mod spline;
+pub mod spline_strip;
+pub mod surface_group;
 pub mod tlas;
 pub mod traversal;
 pub mod traversal_stackless;
 pub mod traversal_stackless_gpu_layout;
-pub mod reorder;
+pub mod triangle_mesh;
+pub mod triangle_mesh_gpu_layout;
+pub mod trimmed_surface;
 
+pub use aabb_primitive::{AabbBvh, AabbHit, AabbPrimitive};
+pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
 pub use acceleration::{
     update_scratch_bytes, AccelerationUpdate, AccelerationUpdatePolicy, GeometryChange,
     RebuildLedger,
 };
+pub use adaptive_tessellation::AdaptiveTessellation;
+pub use alpha_mesh::{AlphaMesh, AlphaMeshBvh, AlphaTexture, AlphaTextureError};
+pub use alpha_mesh_gpu_layout::{GpuAlphaMeshBvhBuffers, ALPHA_HEADER_WORDS};
 pub use backend::{
     select_backend, BackendCapabilities, BackendRejection, BackendSelection, TraceBackend,
     TraceRequirements,
 };
-pub use footprint::{log2_linear, RayFootprint};
+pub use bezier_patch::BezierPatch;
+pub use bezier_surface::{BezierSurface, BezierSurfaceError};
+pub use bilinear_patch::{BilinearPatch, BilinearPatchBvh, BilinearPatchHit};
+pub use bilinear_patch_gpu_layout::{GpuBilinearPatchBvhBuffers, BILINEAR_PATCH_WORDS};
+pub use bspline_patch::BsplinePatch;
+pub use bspline_surface::{BsplineSurface, BsplineSurfaceError};
 pub use bvh::{Aabb, Axis, Bvh, BvhBuildConfig, LinearBvhNode, Triangle};
 pub use bvh_wide::{WideBvh, WideChild, WideNode, QUANT_STEPS, WIDE_BRANCHING};
 pub use bvh_wide_gpu_layout::{
     GpuWideBvh, CHILD_EMPTY, CHILD_INTERIOR, CHILD_LEAF, WIDE_NODE_WORDS, WIDE_TRIANGLE_WORDS,
 };
-pub use tlas::{Affine3, Instance, Tlas, TlasHit};
-pub use motion::{MotionInstance, MotionTlas};
-pub use motion_gpu_layout::{GpuMotionTlasBuffers, MOTION_INSTANCE_WORDS};
-pub use ray_offset::offset_ray_origin;
-pub use scheduler::{AccelerationScheduler, ScheduledUpdate};
-pub use aabb_primitive::{AabbBvh, AabbHit, AabbPrimitive};
-pub use sphere::{Sphere, SphereBvh, SphereHit};
+pub use capsule::{Capsule, CapsuleBvh, CapsuleHit};
+pub use capsule_gpu_layout::{GpuCapsuleBvhBuffers, CAPSULE_WORDS};
+pub use catmull_rom_patch::CatmullRomPatch;
+pub use cone::{Cone, ConeBvh, ConeHit};
+pub use cone_gpu_layout::{GpuConeBvhBuffers, CONE_WORDS};
 pub use curve::{Curve, CurveBvh, CurveHit};
 pub use curve_gpu_layout::{GpuCurveBvhBuffers, CURVE_WORDS};
 pub use cylinder::{Cylinder, CylinderBvh, CylinderHit};
 pub use cylinder_gpu_layout::{GpuCylinderBvhBuffers, CYLINDER_WORDS};
 pub use disk::{Disk, DiskBvh, DiskHit};
 pub use disk_gpu_layout::{GpuDiskBvhBuffers, DISK_WORDS};
-pub use rectangle::{Rectangle, RectangleBvh, RectangleHit};
-pub use cone::{Cone, ConeBvh, ConeHit};
-pub use cone_gpu_layout::{GpuConeBvhBuffers, CONE_WORDS};
-pub use paraboloid::{Paraboloid, ParaboloidBvh, ParaboloidHit};
-pub use paraboloid_gpu_layout::{GpuParaboloidBvhBuffers, PARABOLOID_WORDS};
+pub use displaced_surface::{DisplacedSurface, HeightMap, HeightMapError, ParametricSurface};
+pub use displacement_tessellation::{DisplacedField, DisplacementTessellation};
+pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
+pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
+pub use footprint::{log2_linear, RayFootprint};
+pub use gpu_layout::{
+    GpuBlasPool, GpuBvhBuffers, GpuTlasBuffers, TlasPackedHit, BLAS_OFFSET_WORDS, INSTANCE_WORDS,
+    NODE_WORDS, TRIANGLE_WORDS,
+};
+pub use heightfield::{Heightfield, HeightfieldBvh, HeightfieldError, HeightfieldHit};
+pub use heightfield_gpu_layout::{GpuHeightfieldBvhBuffers, HEIGHTFIELD_HEADER_WORDS};
 pub use hyperboloid::{Hyperboloid, HyperboloidBvh, HyperboloidHit};
 pub use hyperboloid_gpu_layout::{GpuHyperboloidBvhBuffers, HYPERBOLOID_WORDS};
-pub use capsule::{Capsule, CapsuleBvh, CapsuleHit};
-pub use capsule_gpu_layout::{GpuCapsuleBvhBuffers, CAPSULE_WORDS};
+pub use indexed_bilinear_patch_mesh::{
+    IndexedBilinearPatchMesh, IndexedBilinearPatchMeshBvh, IndexedBilinearPatchMeshError,
+};
+pub use indexed_bilinear_patch_mesh_gpu_layout::{
+    GpuIndexedBilinearPatchMeshBvhBuffers, PATCH_MESH_INDEX_WORDS, PATCH_MESH_VERTEX_WORDS,
+};
+pub use mesh_border_detection::{detect_borders, MeshBorders};
+pub use mesh_bounding_sphere::{bounding_sphere, BoundingSphere};
+pub use mesh_closest_point::{closest_point_on_mesh, MeshClosestPoint};
+pub use mesh_connected_components::{connected_components, split_components, MeshComponents};
+pub use mesh_decimation::{decimate, DecimationError};
+pub use mesh_dihedral_cosine::{dihedral_cosines, DihedralCosines, DihedralEdge};
+pub use mesh_edge_length_stats::{edge_length_stats, EdgeLengthStats};
+pub use mesh_edge_split::{split_long_edges, MAX_PASSES as EDGE_SPLIT_MAX_PASSES};
+pub use mesh_euler_characteristic::{mesh_topology, MeshTopology};
+pub use mesh_feature_edges::{detect_feature_edges, EdgeKind, FeatureEdgeError, FeatureEdges};
+pub use mesh_hard_normal_split::{split_hard_normals, HardNormalError, HardNormalSplit};
+pub use mesh_laplacian_smoothing::{BoundaryRule, LaplacianSmoothing};
+pub use mesh_mass_properties::{mass_properties, MeshMassProperties};
+pub use mesh_normal_consistency::{make_winding_consistent, WindingFix};
+pub use mesh_planar_regions::{planar_regions, PlanarRegions, RegionPlane};
+pub use mesh_sdf_ambient_occlusion::sdf_ambient_occlusion;
+pub use mesh_sdf_cone_occlusion::{sdf_cone_occlusion, ConeOcclusion};
+pub use mesh_sdf_curvature::{sdf_curvature, SdfCurvature};
+pub use mesh_sdf_curvature_masks::{
+    curvature_masks, curvature_masks_from_principals, sdf_curvature_masks, CurvatureMaskParams,
+    CurvatureMasks,
+};
+pub use mesh_sdf_enhanced_trace::{enhanced_sphere_trace, EnhancedSdfHit};
+pub use mesh_sdf_normal::{sdf_gradient, sdf_normal};
+pub use mesh_sdf_raymarch::{sample_signed_distance, sphere_trace, SdfHit};
+pub use mesh_sdf_soft_shadow::{sdf_soft_shadow, SoftShadow};
+pub use mesh_sdf_surface_projection::{project_to_surface, SurfaceProjection};
+pub use mesh_sdf_tetrahedron_normal::{sdf_tetrahedron_gradient, sdf_tetrahedron_normal};
+pub use mesh_sdf_thickness::sdf_thickness;
+pub use mesh_self_intersections::{mesh_self_intersections, triangles_intersect};
+pub use mesh_signed_distance_field::{signed_distance_field, SignedDistanceField};
+pub use mesh_smooth_normals::{compute_smooth_normals, with_smooth_normals};
+pub use mesh_solid_voxelization::{solidify, CellClass, SolidVoxelization};
+pub use mesh_subdivision::{subdivide, MAX_LEVELS as SUBDIVISION_MAX_LEVELS};
+pub use mesh_tangents::{compute_tangents, TangentError};
+pub use mesh_triangle_quality::{triangle_quality, TriangleQuality};
+pub use mesh_vertex_clustering::{cluster_vertices, ClusterError};
+pub use mesh_vertex_valence::{vertex_valence, VertexValence};
+pub use mesh_voxel_distance_field::{voxel_distance_field, VoxelDistanceField};
+pub use mesh_voxel_padding::pad_voxel_grid;
+pub use mesh_voxelize::{triangle_box_overlap, voxelize_surface, VoxelGrid};
+pub use mesh_welding::{weld_vertices, WeldError};
+pub use motion::{MotionInstance, MotionTlas};
+pub use motion_gpu_layout::{GpuMotionTlasBuffers, MOTION_INSTANCE_WORDS};
+pub use nurbs_surface::{NurbsSurface, NurbsSurfaceError};
+pub use obb::{Obb, ObbBvh, ObbHit};
+pub use obb_gpu_layout::{GpuObbBvhBuffers, OBB_WORDS};
+pub use paraboloid::{Paraboloid, ParaboloidBvh, ParaboloidHit};
+pub use paraboloid_gpu_layout::{GpuParaboloidBvhBuffers, PARABOLOID_WORDS};
+pub use patch_grid::PatchGrid;
+pub use patch_tessellation::{Edge, PatchTessellation, MAX_FACTOR};
+pub use rational_bezier_patch::RationalBezierPatch;
+pub use ray_offset::offset_ray_origin;
+pub use rectangle::{Rectangle, RectangleBvh, RectangleHit};
+pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
+pub use reorder::{
+    plan_reorder, CoherenceKey, CoherenceKeyLayout, CoherentBatch, LayoutError, ReorderPlan,
+    ReorderStats, SpatialBounds,
+};
 pub use round_cone::{RoundCone, RoundConeBvh, RoundConeHit};
 pub use round_cone_gpu_layout::{GpuRoundConeBvhBuffers, ROUND_CONE_WORDS};
-pub use bilinear_patch::{BilinearPatch, BilinearPatchBvh, BilinearPatchHit};
-pub use bilinear_patch_gpu_layout::{GpuBilinearPatchBvhBuffers, BILINEAR_PATCH_WORDS};
+pub use scheduler::{AccelerationScheduler, ScheduledUpdate};
+pub use sdf_brick::{SdfBrick, SdfBrickBvh, SdfBrickError, SdfBrickHit};
+pub use sdf_brick_gpu_layout::{GpuSdfBrickBvhBuffers, SDF_BRICK_WORDS};
+pub use sdf_csg::{
+    intersection, smooth_intersection, smooth_intersection_blend, smooth_subtraction,
+    smooth_subtraction_blend, smooth_union, smooth_union_blend, subtraction, union,
+};
+pub use sdf_domain::{
+    elongate, mirror, onion, repeat, round_distance, scale_distance, scale_point, translate,
+};
+pub use sdf_primitives::{
+    box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cone_sdf,
+    cut_hollow_sphere, cut_sphere, death_star, ellipsoid_sdf, hex_prism, infinite_cylinder,
+    line_sdf, link, octahedron, plane, pyramid, rhombus, round_box, round_cone_sdf,
+    rounded_cylinder, solid_angle, sphere, torus, triangular_prism, vesica,
+};
+pub use sdf_unsigned::{segment_distance, triangle_distance};
 pub use shaded_bilinear_patch::{
     ShadedBilinearPatch, ShadedBilinearPatchBvh, ShadedBilinearPatchHit,
 };
 pub use shaded_bilinear_patch_gpu_layout::{
     GpuShadedBilinearPatchBvhBuffers, SHADED_BILINEAR_PATCH_WORDS,
 };
-pub use indexed_bilinear_patch_mesh::{
-    IndexedBilinearPatchMesh, IndexedBilinearPatchMeshBvh,
-    IndexedBilinearPatchMeshError,
-};
-pub use indexed_bilinear_patch_mesh_gpu_layout::{
-    GpuIndexedBilinearPatchMeshBvhBuffers, PATCH_MESH_INDEX_WORDS,
-    PATCH_MESH_VERTEX_WORDS,
-};
-pub use bezier_patch::BezierPatch;
-pub use catmull_rom_patch::CatmullRomPatch;
-pub use bspline_patch::BsplinePatch;
-pub use rational_bezier_patch::RationalBezierPatch;
-pub use bspline_surface::{BsplineSurface, BsplineSurfaceError};
-pub use nurbs_surface::{NurbsSurface, NurbsSurfaceError};
-pub use bezier_surface::{BezierSurface, BezierSurfaceError};
-pub use displaced_surface::{DisplacedSurface, HeightMap, HeightMapError, ParametricSurface};
-pub use trimmed_surface::{TrimLoop, TrimmedSurface, TrimmedSurfaceError};
-pub use surface_group::{SurfaceGroup, SurfaceGroupBvh, SurfaceGroupError, SurfaceGroupHit};
-pub use patch_tessellation::{Edge, PatchTessellation, MAX_FACTOR};
-pub use adaptive_tessellation::AdaptiveTessellation;
-pub use displacement_tessellation::{DisplacedField, DisplacementTessellation};
-pub use patch_grid::PatchGrid;
-pub use mesh_tangents::{compute_tangents, TangentError};
-pub use mesh_subdivision::{subdivide, MAX_LEVELS as SUBDIVISION_MAX_LEVELS};
-pub use silhouette_tessellation::SilhouetteTessellation;
-pub use mesh_welding::{weld_vertices, WeldError};
-pub use mesh_smooth_normals::{compute_smooth_normals, with_smooth_normals};
-pub use mesh_decimation::{decimate, DecimationError};
-pub use mesh_laplacian_smoothing::{BoundaryRule, LaplacianSmoothing};
-pub use mesh_border_detection::{detect_borders, MeshBorders};
-pub use mesh_edge_split::{split_long_edges, MAX_PASSES as EDGE_SPLIT_MAX_PASSES};
-pub use mesh_vertex_clustering::{cluster_vertices, ClusterError};
-pub use mesh_connected_components::{connected_components, split_components, MeshComponents};
-pub use mesh_normal_consistency::{make_winding_consistent, WindingFix};
-pub use mesh_feature_edges::{detect_feature_edges, EdgeKind, FeatureEdgeError, FeatureEdges};
-pub use mesh_hard_normal_split::{split_hard_normals, HardNormalError, HardNormalSplit};
-pub use mesh_vertex_valence::{vertex_valence, VertexValence};
-pub use mesh_triangle_quality::{triangle_quality, TriangleQuality};
-pub use mesh_edge_length_stats::{edge_length_stats, EdgeLengthStats};
-pub use mesh_dihedral_cosine::{dihedral_cosines, DihedralCosines, DihedralEdge};
-pub use mesh_mass_properties::{mass_properties, MeshMassProperties};
-pub use mesh_euler_characteristic::{mesh_topology, MeshTopology};
-pub use mesh_bounding_sphere::{bounding_sphere, BoundingSphere};
-pub use mesh_planar_regions::{planar_regions, PlanarRegions, RegionPlane};
-pub use mesh_closest_point::{closest_point_on_mesh, MeshClosestPoint};
-pub use mesh_self_intersections::{mesh_self_intersections, triangles_intersect};
-pub use mesh_voxelize::{triangle_box_overlap, voxelize_surface, VoxelGrid};
-pub use mesh_voxel_distance_field::{voxel_distance_field, VoxelDistanceField};
-pub use mesh_solid_voxelization::{solidify, CellClass, SolidVoxelization};
-pub use mesh_signed_distance_field::{signed_distance_field, SignedDistanceField};
-pub use mesh_sdf_raymarch::{sample_signed_distance, sphere_trace, SdfHit};
-pub use mesh_sdf_normal::{sdf_gradient, sdf_normal};
-pub use mesh_sdf_tetrahedron_normal::{sdf_tetrahedron_gradient, sdf_tetrahedron_normal};
-pub use mesh_sdf_curvature::{sdf_curvature, SdfCurvature};
-pub use mesh_sdf_curvature_masks::{
-    curvature_masks, curvature_masks_from_principals, sdf_curvature_masks, CurvatureMaskParams,
-    CurvatureMasks,
-};
-pub use mesh_sdf_surface_projection::{project_to_surface, SurfaceProjection};
-pub use sdf_csg::{
-    intersection, smooth_intersection, smooth_intersection_blend, smooth_subtraction,
-    smooth_subtraction_blend, smooth_union, smooth_union_blend, subtraction, union,
-};
-pub use mesh_voxel_padding::pad_voxel_grid;
-pub use mesh_sdf_soft_shadow::{sdf_soft_shadow, SoftShadow};
-pub use mesh_sdf_ambient_occlusion::sdf_ambient_occlusion;
-pub use mesh_sdf_cone_occlusion::{sdf_cone_occlusion, ConeOcclusion};
-pub use sdf_domain::{
-    elongate, mirror, onion, repeat, round_distance, scale_distance, scale_point, translate,
-};
-pub use mesh_sdf_thickness::sdf_thickness;
-pub use sdf_primitives::{
-    box_frame, box_sdf, capped_cone, capped_cylinder, capped_torus, capsule, cone_sdf, cut_hollow_sphere,
-    cut_sphere,
-    death_star,
-    ellipsoid_sdf,
-    hex_prism, infinite_cylinder, line_sdf, link, octahedron, plane, pyramid, rhombus, round_box,
-    round_cone_sdf,
-    rounded_cylinder,
-    solid_angle, sphere, torus, triangular_prism, vesica,
-};
-pub use sdf_unsigned::{segment_distance, triangle_distance};
-pub use mesh_sdf_enhanced_trace::{enhanced_sphere_trace, EnhancedSdfHit};
-pub use ellipsoid::{Ellipsoid, EllipsoidBvh, EllipsoidHit};
-pub use ellipsoid_gpu_layout::{GpuEllipsoidBvhBuffers, ELLIPSOID_WORDS};
-pub use obb::{Obb, ObbBvh, ObbHit};
-pub use obb_gpu_layout::{GpuObbBvhBuffers, OBB_WORDS};
 pub use shaded_triangle::{ShadedTriangle, ShadedTriangleBvh, ShadedTriangleHit};
 pub use shaded_triangle_gpu_layout::{GpuShadedTriangleBvhBuffers, SHADED_TRI_WORDS};
+pub use silhouette_tessellation::SilhouetteTessellation;
+pub use sphere::{Sphere, SphereBvh, SphereHit};
+pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
 pub use spline::{SplineBasis, SplineBvh, SplineCurve};
 pub use spline_strip::{SplineStrip, SplineStripBvh};
+pub use surface_group::{SurfaceGroup, SurfaceGroupBvh, SurfaceGroupError, SurfaceGroupHit};
+pub use tlas::{Affine3, Instance, Tlas, TlasHit};
+pub use traversal::{Hit, Ray};
+pub use traversal_stackless::{BvhEscapeTable, ESCAPE_SENTINEL};
+pub use traversal_stackless_gpu_layout::GpuStacklessBvh;
 pub use triangle_mesh::{MeshHit, TriangleMesh, TriangleMeshBvh, TriangleMeshError};
 pub use triangle_mesh_gpu_layout::{
     GpuTriangleMeshBvhBuffers, MESH_INDEX_WORDS, MESH_VERTEX_WORDS,
 };
-pub use alpha_mesh::{AlphaMesh, AlphaMeshBvh, AlphaTexture, AlphaTextureError};
-pub use alpha_mesh_gpu_layout::{ALPHA_HEADER_WORDS, GpuAlphaMeshBvhBuffers};
-pub use heightfield::{Heightfield, HeightfieldBvh, HeightfieldError, HeightfieldHit};
-pub use heightfield_gpu_layout::{GpuHeightfieldBvhBuffers, HEIGHTFIELD_HEADER_WORDS};
-pub use sdf_brick::{SdfBrick, SdfBrickBvh, SdfBrickError, SdfBrickHit};
-pub use sdf_brick_gpu_layout::{GpuSdfBrickBvhBuffers, SDF_BRICK_WORDS};
-pub use rectangle_gpu_layout::{GpuRectangleBvhBuffers, RECTANGLE_WORDS};
-pub use aabb_primitive_gpu_layout::{GpuAabbBvhBuffers, AABB_PRIMITIVE_WORDS};
-pub use sphere_gpu_layout::{GpuSphereBvhBuffers, SPHERE_WORDS};
-pub use traversal::{Hit, Ray};
-pub use traversal_stackless::{BvhEscapeTable, ESCAPE_SENTINEL};
-pub use traversal_stackless_gpu_layout::GpuStacklessBvh;
-pub use reorder::{
-    plan_reorder, CoherenceKey, CoherenceKeyLayout, CoherentBatch, LayoutError, ReorderPlan,
-    ReorderStats, SpatialBounds,
-};
-pub use gpu_layout::{
-    GpuBlasPool, GpuBvhBuffers, GpuTlasBuffers, TlasPackedHit, BLAS_OFFSET_WORDS, INSTANCE_WORDS,
-    NODE_WORDS, TRIANGLE_WORDS,
-};
+pub use trimmed_surface::{TrimLoop, TrimmedSurface, TrimmedSurfaceError};
