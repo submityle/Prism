@@ -9,7 +9,7 @@
 //! [`prism_ui_anim`] and the pure-data style values in [`prism_ui_style`], and
 //! like them it is `no_std + alloc` friendly and free of `unsafe` code.
 //!
-//! It provides three layers:
+//! It provides four layers:
 //!
 //! * [`TransitionTracker`] — **implicit style transitions**: remember the last
 //!   value of each [`StyleProp`] and tween to new values automatically.
@@ -17,6 +17,9 @@
 //!   element smoothly from an old layout rectangle to a new one.
 //! * [`SharedElementTransition`] — **shared-element (Hero) transitions**: fly a
 //!   keyed element from a source rectangle to a destination rectangle.
+//! * [`Spring`] / [`SpringState`] — **physics-based spring motion**: drive a
+//!   value toward a target with a damped harmonic oscillator, so a
+//!   mid-flight retarget keeps its velocity and settles naturally.
 //!
 //! The shared geometry types [`Rect`] and [`Transform`] implement
 //! [`prism_ui_anim::Lerp`], so they drop straight into a
@@ -50,12 +53,14 @@ extern crate alloc;
 pub mod flip;
 pub mod geometry;
 pub mod shared_element;
+pub mod spring;
 pub mod transition;
 pub mod value_anim;
 
 pub use flip::{FlipAnimation, FlipState};
 pub use geometry::{Rect, Transform};
 pub use shared_element::{FallbackRole, SharedElementTransition, SharedPair};
+pub use spring::{Spring, SpringState, SpringTolerance};
 pub use transition::{PropertyTransition, TransitionSpec, TransitionTracker};
 pub use value_anim::{interpolate, interpolate_with, is_continuous, AnimatableValue};
 
