@@ -409,12 +409,12 @@ pkg/prism_math/
 - 与 §17.5 精确谓词互补：精确谓词给「符号绝对正确」，区间算术给「范围绝对包含」。
 - **交付状态**：`interval` 模块已落地 `Interval{lo,hi}`（`+ - * /`、`neg`/`abs`/`sqrt`/`hull`/`intersect`/`overlaps`/`contains`）与 `IntervalVec3`（保守 AABB：`contains`/`overlaps`/`hull`/`+ -`）。`no_std` 不可移植切换 FP 舍入模式，故采「向最近舍入 + 单 ULP 外扩」（`next_up`/`next_down` 位级步进）保证真值恒被包含，跨平台确定。除零的除数区间跨 0 → 返回 `UNBOUNDED`。correctness oracle：5e4 组标量四则运算 f64 包含断言 + 2e4 组宽区间四角点包含 + ULP 步进夹逼。`cargo clippy --all-targets` 零告警、8 项单测全绿。
 
-### 24.4 补偿求和 / 扩展精度（Kahan / Neumaier / double-double）—— ✅ 部分已交付（`fixed::compensated` 模块：Kahan/Neumaier；double-double 仍为 PLANNED）
+### 24.4 补偿求和 / 扩展精度（Kahan / Neumaier / double-double）—— ✅ 已交付（`fixed::compensated`：Kahan/Neumaier；`fixed::double_double::DoubleDouble`：~106bit 双精度算术）
 
 长链累加（大世界坐标累积、确定归并求和、海量变换链、物理积分）里，f32/f64 的舍入误差会累积成可见漂移：
 
 - `KahanSum` / `NeumaierSum`：补偿求和，供 `prism_tasks` 确定归并（tasks §24.7）的**顺序无关一致求和**——并行分块各自 Kahan 累加再合并，结果与串行位级一致。
-- `double-double`（两个 f64 表 ~106 bit 尾数）：极端大世界坐标/高精度离线烘焙的扩展精度路径，无需上 f128。**（PLANNED：当前 `compensated` 模块仅提供 `KahanSum`/`NeumaierSum` 与 `kahan_sum`/`neumaier_sum`；double-double 待高精度离线烘焙消费方驱动落地。）**
+- `double-double`（两个 f64 表 ~106 bit 尾数）：极端大世界坐标/高精度离线烘焙的扩展精度路径，无需上 f128。**（✅ 已交付：`fixed::double_double::DoubleDouble{hi,lo}`，error-free transforms（two_sum/two_prod + `libm::fma`）、add/sub/mul/div(QD Newton)/sqr/sqrt(Karp) 与全套 `core::ops`，no_std 纯 `libm`，8 单测全绿。）**
 - 与 §13 定点档并列：定点保「跨平台位级一致」，补偿求和保「单平台高精度低漂移」，按场景选。
 
 ### 24.5 经典前向自动微分（Dual Number，非 ML）—— ✅ 已交付（`dual` 模块）
@@ -469,4 +469,4 @@ pkg/prism_math/
 
 ### 24.10 诚实边界
 
-落地优先级建议：**24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）为唯一消费方驱动后置项；24.2 编译期 const 数学 **已交付**（`const_math`）；24.4 补偿求和 **已交付**（`fixed` 的 Kahan/Neumaier）；24.3 区间算术 **已交付**（`interval`）；24.6 SH **已交付**（`spherical`，SH 旋转/探针随 `prism_gi` 接入）；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数 **已交付**（`dual`，供 IK/物理雅可比接入）；24.8 曲面 **已交付**（`curve::surface`，LOD 细分随 `prism_terrain` 接入）；24.9 大世界定点 **已交付**（`bigworld::hierfixed`，`FixedGridPosition`：纯整数/Q32.32 cell+local，canonical/translated/rebased_offset/distance_squared 全程无浮点，供联机开放世界位级一致）。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+落地优先级建议：**24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）为唯一消费方驱动后置项；24.2 编译期 const 数学 **已交付**（`const_math`）；24.4 补偿求和/扩展精度 **已交付**（`fixed` 的 Kahan/Neumaier 与 `double_double::DoubleDouble`）；24.3 区间算术 **已交付**（`interval`）；24.6 SH **已交付**（`spherical`，SH 旋转/探针随 `prism_gi` 接入）；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数 **已交付**（`dual`，供 IK/物理雅可比接入）；24.8 曲面 **已交付**（`curve::surface`，LOD 细分随 `prism_terrain` 接入）；24.9 大世界定点 **已交付**（`bigworld::hierfixed`，`FixedGridPosition`：纯整数/Q32.32 cell+local，canonical/translated/rebased_offset/distance_squared 全程无浮点，供联机开放世界位级一致）。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
