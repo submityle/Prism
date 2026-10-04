@@ -17,6 +17,11 @@
 //!   ranking (design §16.6 / §22 risk #5).
 //! * [`change_volume`] — dirty-chunk and changed/added-cell accounting that
 //!   quantifies the design headline "成本 ∝ 变化量".
+//! * [`churn_cost`] — the *gross* dual of [`system_cost`]: joins per-system
+//!   self time ([`profiler`]) with the *gross* structural churn of
+//!   [`structural_churn`] by name, surfacing expensive oscillators — systems
+//!   burning time thrashing structure that nets out — that net-change cost
+//!   accounting cannot see (design §16.6 / §9 / §10 / §17).
 //! * [`component_distribution`] — component-first distribution / spread view:
 //!   per-component archetype spread, live-instance count, and chunk
 //!   footprint, ranked most-spread-first (design §16.6 / §5.3 / §22 risk #5).
@@ -59,6 +64,7 @@
 
 pub mod archetype_fragmentation;
 pub mod change_volume;
+pub mod churn_cost;
 pub mod component_distribution;
 pub mod component_memory;
 pub mod frame_profile;
@@ -77,6 +83,7 @@ pub mod time_travel;
 
 pub use archetype_fragmentation::{ArchetypeFragmentEntry, ArchetypeFragmentationReport};
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
+pub use churn_cost::{ChurnCostEntry, ChurnCostProfile};
 pub use component_distribution::{ComponentDistributionEntry, ComponentDistributionReport};
 pub use component_memory::{ComponentMemoryEntry, ComponentMemoryReport};
 pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
