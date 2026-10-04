@@ -40,6 +40,7 @@ use prism_audio_spatial::propagation::{PathKind, PropagationPath, FULL_BAND_CUTO
 
 use crate::config::GeometricConfig;
 use crate::scene::AcousticScene;
+use crate::receiver_directivity;
 use crate::source_directivity;
 
 /// Barycentric tolerance when testing whether the reflection point lands on the
@@ -140,6 +141,9 @@ pub fn resolve_reflections(
         // The bounce leaves the emitter toward its reflection point; weight it
         // by the source's radiation along that departure (no-op when disabled).
         source_directivity::weight_path(&mut candidate, config, emitter, point - emitter.position);
+        // The arrival reaches the listener from its bounce point; weight it by
+        // the receiver's pickup along that bearing (no-op when disabled).
+        receiver_directivity::weight_path(&mut candidate, config);
         if !is_duplicate(&paths, &candidate) {
             paths.push(candidate);
         }

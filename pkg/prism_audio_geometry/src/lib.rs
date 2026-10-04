@@ -67,6 +67,11 @@
 //!   frequency-dependent omni-to-cardioid radiation pattern), darkening and
 //!   quieting off-axis arrivals; opt-in through
 //!   [`config::GeometricConfig::with_source_directivity`].
+//! - [`receiver_directivity`] weights each resolved arrival by how sensitively
+//!   the listener hears along that arrival's direction (the same
+//!   frequency-dependent omni-to-cardioid pattern used for the source, applied
+//!   as a receiver pickup), the receiver-side mirror of [`source_directivity`];
+//!   opt-in through [`config::GeometricConfig::with_receiver_directivity`].
 //! - [`backend`] assembles the above into [`backend::GeometricBackend`], the
 //!   [`PropagationBackend`](prism_audio_spatial::propagation::PropagationBackend)
 //!   implementation that fills the caller's bounded path buffer.
@@ -108,6 +113,7 @@ pub mod direct_path;
 pub mod higher_order_diffraction;
 pub mod higher_order_reflection;
 pub mod material_map;
+pub mod receiver_directivity;
 pub mod reflection_path;
 pub mod scene;
 pub mod source_directivity;

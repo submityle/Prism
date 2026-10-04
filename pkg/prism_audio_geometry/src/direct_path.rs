@@ -39,6 +39,7 @@ use prism_audio_spatial::BandGains;
 
 use crate::config::GeometricConfig;
 use crate::scene::AcousticScene;
+use crate::receiver_directivity;
 use crate::source_directivity;
 
 /// The resolved direct arrival plus the blocking it implies.
@@ -105,6 +106,7 @@ pub fn resolve_direct(
             direction: local.direction,
         };
         source_directivity::weight_path(&mut path, config, emitter, departure);
+        receiver_directivity::weight_path(&mut path, config);
         return DirectResult {
             path,
             occlusion: OcclusionFactors::OPEN,
@@ -134,6 +136,7 @@ pub fn resolve_direct(
         direction: local.direction,
     };
     source_directivity::weight_path(&mut path, config, emitter, departure);
+    receiver_directivity::weight_path(&mut path, config);
     DirectResult {
         path,
         occlusion,

@@ -187,6 +187,18 @@ pub struct GeometricConfig {
     /// [`DirectivityPreset::Omni`] (uniform radiation), so even an
     /// accidentally enabled directivity leaves every arrival at unity.
     pub source_directivity: SourceDirectivity,
+    /// Whether to weight every resolved arrival by how sensitively the listener
+    /// hears along that arrival's direction (the frequency-dependent
+    /// omni-to-cardioid pickup pattern of [`Self::receiver_directivity`]).
+    /// Opt-in through [`GeometricConfig::with_receiver_directivity`]; defaults
+    /// to `false` so existing callers keep the original omnidirectional
+    /// receiver. See [`crate::receiver_directivity`].
+    pub receiver_directivity_enabled: bool,
+    /// The receiver pickup pattern applied when
+    /// [`Self::receiver_directivity_enabled`] is set. Defaults to
+    /// [`DirectivityPreset::Omni`] (uniform pickup), so even an accidentally
+    /// enabled directivity leaves every arrival at unity.
+    pub receiver_directivity: SourceDirectivity,
 }
 
 impl GeometricConfig {
@@ -215,6 +227,8 @@ impl GeometricConfig {
             atmosphere: AtmosphericConditions::default(),
             source_directivity_enabled: false,
             source_directivity: SourceDirectivity::from_preset(DirectivityPreset::Omni),
+            receiver_directivity_enabled: false,
+            receiver_directivity: SourceDirectivity::from_preset(DirectivityPreset::Omni),
         }
     }
 
@@ -405,6 +419,47 @@ impl GeometricConfig {
     #[must_use]
     pub fn without_source_directivity(mut self) -> Self {
         self.source_directivity_enabled = false;
+        self
+    }
+
+    /// Returns a copy that weights every arrival by the listener's pickup
+    /// `directivity`, and enables receiver directivity.
+    ///
+    /// The arrival direction is each path's own listener-local bearing (toward
+    /// the source for the direct arrival, toward the bounce point for a
+    /// reflection, toward the silhouette corner for a diffraction), so a source
+    /// behind a forward-facing listener is heard darker and quieter exactly as
+    /// it would be in the field. Setting a specific pattern implies you want it
+    /// applied, so this also sets [`Self::receiver_directivity_enabled`]
+    /// (matching the way [`Self::with_source_directivity`] enables source
+    /// directivity).
+    #[inline]
+    #[must_use]
+    pub fn with_receiver_directivity(mut self, directivity: SourceDirectivity) -> Self {
+        self.receiver_directivity = directivity;
+        self.receiver_directivity_enabled = true;
+        self
+    }
+
+    /// Returns a copy that weights every arrival by the named pickup `preset`,
+    /// and enables receiver directivity.
+    ///
+    /// A convenience over [`Self::with_receiver_directivity`] for the common
+    /// presets ([`DirectivityPreset::Cardioid`], [`DirectivityPreset::Voice`],
+    /// and the like).
+    #[inline]
+    #[must_use]
+    pub fn with_receiver_directivity_preset(self, preset: DirectivityPreset) -> Self {
+        self.with_receiver_directivity(SourceDirectivity::from_preset(preset))
+    }
+
+    /// Returns a copy with receiver directivity disabled (arrivals are no
+    /// longer weighted by the listener's facing). The stored pattern is kept so
+    /// it can be re-enabled without respecifying it.
+    #[inline]
+    #[must_use]
+    pub fn without_receiver_directivity(mut self) -> Self {
+        self.receiver_directivity_enabled = false;
         self
     }
 

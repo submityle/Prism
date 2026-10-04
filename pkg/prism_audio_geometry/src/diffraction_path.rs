@@ -46,6 +46,7 @@ use prism_audio_spatial::{BandGains, PROPAGATION_BAND_COUNT};
 use crate::config::{DiffractionModel, GeometricConfig};
 use crate::diffraction_edges::{diffracting_edges, distance, least_detour_point, utd_wedge};
 use crate::scene::AcousticScene;
+use crate::receiver_directivity;
 use crate::source_directivity;
 
 /// Resolves the edge-diffracted arrivals of `emitter` at `listener`.
@@ -126,6 +127,9 @@ pub fn resolve_diffraction(
         // The bend leaves the emitter toward its first silhouette corner;
         // weight it by the source's radiation there (no-op when disabled).
         source_directivity::weight_path(&mut candidate, config, emitter, corner - emitter.position);
+        // The arrival reaches the listener from its silhouette corner; weight it
+        // by the receiver's pickup along that bearing (no-op when disabled).
+        receiver_directivity::weight_path(&mut candidate, config);
         if !is_duplicate(&paths, &candidate) {
             paths.push(candidate);
         }
