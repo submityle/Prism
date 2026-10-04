@@ -438,6 +438,11 @@ pub use tangential_history_contact::{
     evaluate_tangential_history, tangential_history_between, CundallStrackModel,
 };
 
+pub mod tangential_history_resolver;
+pub use tangential_history_resolver::{
+    TangentialContact, TangentialHistoryResolution, TangentialHistoryResolver,
+};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
