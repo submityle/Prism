@@ -502,6 +502,8 @@ pub mod sphere_boundary_driver;
 pub use sphere_boundary_driver::{SphereBoundaryDriver, SphereBoundaryResolution};
 pub mod sphere_packing;
 pub use sphere_packing::{pack_spheres, SpherePacking, SpherePackingParams};
+pub mod boundary_container;
+pub use boundary_container::{closed_box, open_top_box, wedge_hopper};
 
 /// A handle into a [`ShapeRegistry`].
 ///
