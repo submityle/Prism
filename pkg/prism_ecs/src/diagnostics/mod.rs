@@ -35,6 +35,12 @@
 //!   [`structural_churn`] by name, surfacing expensive oscillators — systems
 //!   burning time thrashing structure that nets out — that net-change cost
 //!   accounting cannot see (design §16.6 / §9 / §10 / §17).
+//! * [`component_alignment`] — per-component column layout + SIMD-packing
+//!   readiness: element size / align / packed stride / per-element padding,
+//!   an alignment histogram, and the SIMD-ready share — the per-type view
+//!   neither [`storage_distribution`] (per-bucket `max_align` only) nor
+//!   [`component_memory`] (padding-free size model) can give
+//!   (design §16.6 / §17 / §7).
 //! * [`component_distribution`] — component-first distribution / spread view:
 //!   per-component archetype spread, live-instance count, and chunk
 //!   footprint, ranked most-spread-first (design §16.6 / §5.3 / §22 risk #5).
@@ -210,6 +216,7 @@ pub mod blob_reference_health;
 pub mod change_tick_health;
 pub mod change_volume;
 pub mod churn_cost;
+pub mod component_alignment;
 pub mod component_distribution;
 pub mod component_memory;
 pub mod determinism_readiness;
@@ -258,6 +265,9 @@ pub use blob_reference_health::{BlobReferenceEntry, BlobReferenceHealth};
 pub use change_tick_health::{ArchetypeTickAgeEntry, TickAgeReport};
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use churn_cost::{ChurnCostEntry, ChurnCostProfile};
+pub use component_alignment::{
+    ComponentAlignmentBucket, ComponentAlignmentEntry, ComponentAlignmentReport,
+};
 pub use component_distribution::{ComponentDistributionEntry, ComponentDistributionReport};
 pub use component_memory::{ComponentMemoryEntry, ComponentMemoryReport};
 pub use determinism_readiness::{
