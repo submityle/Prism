@@ -106,6 +106,7 @@
 
 #[cfg(feature = "alloc-track")]
 pub mod alloc_track;
+pub mod budget;
 #[cfg(feature = "crash")]
 pub mod crash;
 pub mod filter;
@@ -128,44 +129,6 @@ pub mod trace;
 #[cfg(any(feature = "tracy", feature = "remote", feature = "crash"))]
 pub mod wire;
 
-pub use filter::{max_level, set_max_level};
-pub use instrument::{
-    async_begin, async_end, flow_finish, flow_start, flow_step, instrument, instrument_system,
-    next_flow_id, FlowId, Instrumentable, JobFlow, JobScope, SystemScope,
-};
-pub use metrics::{
-    hud_lines, Counter, FrameStatsSnapshot, FrameTimer, Gauge, Histogram, HistogramSnapshot, Hud,
-    HudSnapshot, LoadProfile, MetricRegistry, RegistrySnapshot, Sum, SystemLoad, ThreadLoad,
-};
-pub use model::{Event, Field, FieldValue, Level};
-#[cfg(feature = "gpu")]
-pub use gpu::{
-    next_correlation_id, AffineFit, CalibrationSample, CorrelationId, GpuClockCalibration,
-    GpuQueryId, GpuQueueId, GpuReadbackRing, GpuSpan, GpuTick, PendingQuery, ProjectedGpuSpan,
-    TimelineEntry, TimelineTrack, UnifiedTimeline,
-};
-pub use hitch::{HitchConfig, HitchDetector, HitchEvent};
-pub use replay::{
-    compare_timelines, fnv1a_64, ReplayDivergence, ReplayMarker, ReplayTimeline,
-};
-pub use sink::{clear_sink, set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
-pub use span::Scope;
-pub use profiler::{
-    clear_profiler, emit_span, frame_mark, gpu_zone, is_active as profiler_active, message, plot,
-    set_profiler, zone as profile_zone, FrameMark, GpuZone, NoopProfiler, PlotValue, ProfiledZone,
-    Profiler, Zone,
-};
-pub use trace::{
-    export_chrome_string, export_chrome_to_file, FlowPhase, FlowRecord, RingBuffer, SpanRecord,
-    ThreadTrace,
-};
-#[cfg(feature = "gpu")]
-pub use trace::export_chrome_with_gpu;
-#[cfg(feature = "remote")]
-pub use remote::{
-    CommandOutcome, FrameSummary, RemoteClient, RemoteCommand, RemoteEvent, RemoteServer,
-    RemoteServerHandle, RuntimeControls,
-};
 #[cfg(feature = "alloc-track")]
 pub use alloc_track::{
     register_tag, reset_all, reset_peak, set_enabled, snapshot as alloc_snapshot, tag_report,
@@ -175,6 +138,46 @@ pub use alloc_track::{
 pub use crash::{
     CrashContext, CrashReason, CrashReport, ModuleEntry, RegisterSnapshot, StackFrame,
     ThreadContext, CRASH_REPORT_MAGIC, CRASH_REPORT_VERSION,
+};
+pub use budget::{
+    hotspot_diff, Baseline, BudgetRegistry, BudgetStatus, FrameBudget, FrameBudgetReport,
+    Hotspot, HotspotDelta, RegressionAlert, RegressionConfig, RegressionTracker,
+};
+pub use filter::{max_level, set_max_level};
+#[cfg(feature = "gpu")]
+pub use gpu::{
+    next_correlation_id, AffineFit, CalibrationSample, CorrelationId, GpuClockCalibration,
+    GpuQueryId, GpuQueueId, GpuReadbackRing, GpuSpan, GpuTick, PendingQuery, ProjectedGpuSpan,
+    TimelineEntry, TimelineTrack, UnifiedTimeline,
+};
+pub use hitch::{HitchConfig, HitchDetector, HitchEvent};
+pub use instrument::{
+    async_begin, async_end, flow_finish, flow_start, flow_step, instrument, instrument_system,
+    next_flow_id, FlowId, Instrumentable, JobFlow, JobScope, SystemScope,
+};
+pub use metrics::{
+    hud_lines, Counter, FrameStatsSnapshot, FrameTimer, Gauge, Histogram, HistogramSnapshot, Hud,
+    HudSnapshot, LoadProfile, MetricRegistry, RegistrySnapshot, Sum, SystemLoad, ThreadLoad,
+};
+pub use model::{Event, Field, FieldValue, Level};
+pub use profiler::{
+    clear_profiler, emit_span, frame_mark, gpu_zone, is_active as profiler_active, message, plot,
+    set_profiler, zone as profile_zone, FrameMark, GpuZone, NoopProfiler, PlotValue, ProfiledZone,
+    Profiler, Zone,
+};
+#[cfg(feature = "remote")]
+pub use remote::{
+    CommandOutcome, FrameSummary, RemoteClient, RemoteCommand, RemoteEvent, RemoteServer,
+    RemoteServerHandle, RuntimeControls,
+};
+pub use replay::{compare_timelines, fnv1a_64, ReplayDivergence, ReplayMarker, ReplayTimeline};
+pub use sink::{clear_sink, set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
+pub use span::Scope;
+#[cfg(feature = "gpu")]
+pub use trace::export_chrome_with_gpu;
+pub use trace::{
+    export_chrome_string, export_chrome_to_file, FlowPhase, FlowRecord, RingBuffer, SpanRecord,
+    ThreadTrace,
 };
 
 /// Macro support: build and dispatch an event from `format_args!` output.
@@ -194,6 +197,8 @@ mod tests;
 mod tests_m6_alloc;
 #[cfg(all(test, feature = "crash"))]
 mod tests_m6_crash;
+#[cfg(test)]
+mod tests_budget;
 #[cfg(test)]
 mod tests_m6_hitch;
 #[cfg(test)]

@@ -343,7 +343,7 @@ pkg/prism_diagnostic/
 
 本章补齐顶级可观测性系统在真实 AAA 项目里缺一不可、却常被最先砍掉的能力。均 feature/档位门控，默认不付成本；与前文的无锁环形缓冲 + Span/Counter 内核互补。
 
-### 24.1 实时性能预算与自动回归告警
+### 24.1 实时性能预算与自动回归告警 —— ✅ 已交付（`budget` 模块）
 
 AAA 项目的帧时间是**契约**（60/120Hz 必达），不能靠事后看 trace：
 
@@ -351,6 +351,9 @@ AAA 项目的帧时间是**契约**（60/120Hz 必达），不能靠事后看 tr
 - **自动回归检测**：CI/夜构里把每帧关键 Span 的 p50/p99 存基线，新提交超阈值（如 +5%）自动告警并定位到提交，杜绝「性能慢性退化」。
 - **预算接 tasks 调度**：实时帧预算喂给 `prism_tasks`（见 tasks §24.1 帧预算调度），背景作业据此顺延，形成「观测→调度」闭环。
 - **热点自动归因**：火焰图顶部帧按耗时自动排序 + diff 上一基线，直接指向回归函数。
+
+**交付状态**：已落地 `pkg/prism_diagnostic/src/budget.rs`（`no_std` + `alloc`，纯 `core` 算术、无自带时钟、确定性）。`BudgetRegistry`：各子系统 `declare(category, budget_nanos)` 声明帧预算（60/120Hz 预设 `fps_60`/`fps_120`），`evaluate`/`evaluate_frame` 对比实测 → 超支 `BudgetStatus{over_budget, overspend_nanos, utilization}` 红标；`FrameBudgetReport{total_measured_nanos, over_frame, remaining_background_nanos}` 把帧内剩余余量喂给 `prism_tasks` 帧预算调度（tasks §24.1，纯 `u64` 读数，无依赖边）。`RegressionTracker`：存 `Baseline{p50,p99}`（`from_samples` 最近秩分位，与 `hitch` 同法），`check(key, p50, p99, commit)` 超阈值（默认 +5%，带噪声下限滤除微 span）→ `RegressionAlert`（归因到提交），不自动晋升基线。`hotspot_diff(current, baseline, threshold)`：按自耗时降序（火焰图顶部）稳定排序 + 逐名 diff，新出现热点与超阈值项标 `is_regression`。10 单测全绿、`cargo clippy --all-targets` 零告警。
+**优先级**：高（帧时间契约地基；预算→调度闭环的观测侧，CI 回归告警防性能慢性退化）。
 
 ### 24.2 CPU·GPU 统一时间线与跨队列关联
 
@@ -399,4 +402,4 @@ AAA 项目的帧时间是**契约**（60/120Hz 必达），不能靠事后看 tr
 
 ### 24.8 诚实边界
 
-本章全部为 PLANNED 设计目标，无代码。**24.1 性能预算 + 24.3 内存追踪**是其他 crate 最先依赖的能力，建议随 M2/M3 优先落地；24.2 CPU·GPU 时间线随 RHI/render 接线落地；24.4 确定性对拍随 ECS/replication 确定性落地；24.5 采样剖析随 platform 栈回溯落地；24.6 分布式聚合、24.7 发行版遥测随联网/发行阶段落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+**24.1 性能预算 + 自动回归告警已交付**（`budget` 模块：预算声明/帧级红标/调度余量/p50-p99 回归告警/热点 diff 归因）；其余为 PLANNED 设计目标，无代码。**24.3 内存追踪**是其他 crate 最先依赖的能力，建议随 M2/M3 优先落地；24.2 CPU·GPU 时间线随 RHI/render 接线落地；24.4 确定性对拍随 ECS/replication 确定性落地；24.5 采样剖析随 platform 栈回溯落地；24.6 分布式聚合、24.7 发行版遥测随联网/发行阶段落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
