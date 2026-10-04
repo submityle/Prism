@@ -53,6 +53,13 @@
 //!   pure, device-free `CPU` transform verified against the golden
 //!   `GpuTlasBuffers::closest_hit` walk.
 //!
+//! * [`extract`] - the Bevy half of that bridge: it gathers [`scene`]'s inputs
+//!   each frame from the live `RenderGpuScene` mirror and the resident
+//!   `RenderShadingGeometryRegistry`, caches the packed hierarchy in the
+//!   `RenderWorldAcceleration` resource and rebuilds only when a folded
+//!   scene-epoch / geometry-revision signature changes. The gather itself is
+//!   the same pure `CPU` transform, unit-tested against the golden walk.
+//!
 //! * [`resources`] / [`pipeline`] / [`bind_groups`] / [`dispatch`] - the
 //!   production service that promotes the proven parity harness into a
 //!   reusable, consumer-callable object. [`GpuRayTraversal`] compiles the three
@@ -71,6 +78,7 @@
 mod abi;
 mod bind_groups;
 mod dispatch;
+mod extract;
 mod pipeline;
 mod resources;
 mod scene;
