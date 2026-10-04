@@ -116,6 +116,15 @@
 //!   plus a registry-wide roll-up — surfacing frames where incremental upload
 //!   degenerates into a full re-upload (design §16.6 / §15 / §1;
 //!   `gpu_resident` feature).
+//! * [`hlod_pyramid`] — World-Partition HLOD proxy-pyramid structure and
+//!   shown-proxy census (design §13.1): a pure read of an
+//!   [`Hlod`](crate::partition::hlod::Hlod) that reports each layer's draw
+//!   band geometry and `extent³` footprint, flags the one convention its
+//!   constructor does not enforce — layers that fail to coarsen outward
+//!   (`extent` regressing with level) — and buckets the currently shown
+//!   proxies by level with their covered source-cell area, plus a
+//!   cross-check between the layer table and the shown set
+//!   (design §16.6 / §13.1; `partition` feature).
 //! * [`lod_schedule_audit`] — LOD schedule band-table well-formedness
 //!   audit (design §13.2 / §23.7): a pure read of a
 //!   [`LodSchedule`](crate::partition::lod::LodSchedule) that flags the
@@ -164,6 +173,8 @@ pub mod frame_profile;
 pub mod gpu_batch_efficiency;
 #[cfg(feature = "gpu_resident")]
 pub mod gpu_resident_upload;
+#[cfg(feature = "partition")]
+pub mod hlod_pyramid;
 pub mod hook_coverage;
 pub mod inspector;
 #[cfg(feature = "partition")]
@@ -203,6 +214,8 @@ pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
 pub use gpu_batch_efficiency::{BatchEntry, GpuBatchEfficiencyReport};
 #[cfg(feature = "gpu_resident")]
 pub use gpu_resident_upload::{ColumnUploadEntry, GpuUploadReport};
+#[cfg(feature = "partition")]
+pub use hlod_pyramid::{HlodLayerAudit, HlodPyramidAudit};
 pub use hook_coverage::{HookCoverageEntry, HookCoverageReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
 #[cfg(feature = "partition")]
