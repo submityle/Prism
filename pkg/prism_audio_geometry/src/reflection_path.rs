@@ -40,6 +40,7 @@ use prism_audio_spatial::propagation::{PathKind, PropagationPath, FULL_BAND_CUTO
 
 use crate::config::GeometricConfig;
 use crate::scene::AcousticScene;
+use crate::source_directivity;
 
 /// Barycentric tolerance when testing whether the reflection point lands on the
 /// candidate face. A small positive slack keeps points on a shared edge valid
@@ -128,7 +129,7 @@ pub fn resolve_reflections(
         }
 
         let local = listener.localize(&Emitter::point(point, Vec3::ZERO));
-        let candidate = PropagationPath {
+        let mut candidate = PropagationPath {
             kind: PathKind::Reflection,
             delay_seconds: path_length / SPEED_OF_SOUND_MPS,
             gain,
@@ -136,6 +137,9 @@ pub fn resolve_reflections(
             bands,
             direction: local.direction,
         };
+        // The bounce leaves the emitter toward its reflection point; weight it
+        // by the source's radiation along that departure (no-op when disabled).
+        source_directivity::weight_path(&mut candidate, config, emitter, point - emitter.position);
         if !is_duplicate(&paths, &candidate) {
             paths.push(candidate);
         }

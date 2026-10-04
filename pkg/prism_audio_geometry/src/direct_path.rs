@@ -30,15 +30,16 @@
 //! assembled by [`crate::backend::GeometricBackend`].
 
 use prism_audio_core::math::Sample;
-use prism_audio_spatial::BandGains;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
 use prism_audio_spatial::material_spectrum::BandedAcousticMaterial;
 use prism_audio_spatial::occlusion::OcclusionFactors;
 use prism_audio_spatial::propagation::{PathKind, PropagationPath, FULL_BAND_CUTOFF_HZ};
+use prism_audio_spatial::BandGains;
 
 use crate::config::GeometricConfig;
 use crate::scene::AcousticScene;
+use crate::source_directivity;
 
 /// The resolved direct arrival plus the blocking it implies.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,6 +69,9 @@ pub fn resolve_direct(
     let local = listener.localize(emitter);
     let distance = local.distance;
     let delay_seconds = distance / SPEED_OF_SOUND_MPS;
+    // The direct/transmitted wave leaves the emitter straight toward the
+    // listener; source directivity (when enabled) weights it by that angle.
+    let departure = listener.position - emitter.position;
 
     // Walk every partition between listener and emitter, folding in each
     // transmission gain. An empty scene (or a clear line) leaves the product at
@@ -92,15 +96,17 @@ pub fn resolve_direct(
 
     if crossings == 0 {
         // Clear line of sight: a unity, full-band direct arrival.
+        let mut path = PropagationPath {
+            kind: PathKind::Direct,
+            delay_seconds,
+            gain: 1.0,
+            cutoff_hz: FULL_BAND_CUTOFF_HZ,
+            bands: BandGains::UNITY,
+            direction: local.direction,
+        };
+        source_directivity::weight_path(&mut path, config, emitter, departure);
         return DirectResult {
-            path: PropagationPath {
-                kind: PathKind::Direct,
-                delay_seconds,
-                gain: 1.0,
-                cutoff_hz: FULL_BAND_CUTOFF_HZ,
-                bands: BandGains::UNITY,
-                direction: local.direction,
-            },
+            path,
             occlusion: OcclusionFactors::OPEN,
             audible: true,
             base_distance: distance,
@@ -119,15 +125,17 @@ pub fn resolve_direct(
     // per-band transmission the voice renders.
     let (peak_gain, bands) = transmitted.split_peak();
 
+    let mut path = PropagationPath {
+        kind: PathKind::Transmission,
+        delay_seconds,
+        gain: if audible { peak_gain } else { 0.0 },
+        cutoff_hz: FULL_BAND_CUTOFF_HZ,
+        bands,
+        direction: local.direction,
+    };
+    source_directivity::weight_path(&mut path, config, emitter, departure);
     DirectResult {
-        path: PropagationPath {
-            kind: PathKind::Transmission,
-            delay_seconds,
-            gain: if audible { peak_gain } else { 0.0 },
-            cutoff_hz: FULL_BAND_CUTOFF_HZ,
-            bands,
-            direction: local.direction,
-        },
+        path,
         occlusion,
         audible,
         base_distance: distance,
@@ -192,7 +200,10 @@ mod tests {
         assert!(r.audible);
         assert_eq!(r.path.kind, PathKind::Direct);
         assert!((r.path.gain - 1.0).abs() < 1e-6);
-        assert_eq!(r.occlusion, prism_audio_spatial::occlusion::OcclusionFactors::OPEN);
+        assert_eq!(
+            r.occlusion,
+            prism_audio_spatial::occlusion::OcclusionFactors::OPEN
+        );
         assert!((r.base_distance - 10.0).abs() < 1e-4);
     }
 
@@ -200,7 +211,11 @@ mod tests {
     fn wall_transmits_and_blocks() {
         // 6 dB transmission loss -> ~0.5 linear.
         let scene = wall(AcousticMaterial::new(6.0206, 0.0));
-        let listener = Listener::new(Vec3::new(-3.0, 0.0, 0.0), bevy_math::Quat::IDENTITY, Vec3::ZERO);
+        let listener = Listener::new(
+            Vec3::new(-3.0, 0.0, 0.0),
+            bevy_math::Quat::IDENTITY,
+            Vec3::ZERO,
+        );
         let emitter = Emitter::point(Vec3::new(3.0, 0.0, 0.0), Vec3::ZERO);
         let cfg = GeometricConfig::new(48_000);
         let r = resolve_direct(&scene, &listener, &emitter, &cfg);
@@ -213,7 +228,11 @@ mod tests {
     #[test]
     fn transmission_disabled_silences_but_reports_blocking() {
         let scene = wall(AcousticMaterial::new(40.0, 0.0));
-        let listener = Listener::new(Vec3::new(-3.0, 0.0, 0.0), bevy_math::Quat::IDENTITY, Vec3::ZERO);
+        let listener = Listener::new(
+            Vec3::new(-3.0, 0.0, 0.0),
+            bevy_math::Quat::IDENTITY,
+            Vec3::ZERO,
+        );
         let emitter = Emitter::point(Vec3::new(3.0, 0.0, 0.0), Vec3::ZERO);
         let cfg = GeometricConfig::new(48_000);
         let disabled = GeometricConfig {

@@ -20,6 +20,7 @@
 
 use prism_audio_core::math::Sample;
 use prism_audio_spatial::air::AtmosphericConditions;
+use prism_audio_spatial::source_directivity::{DirectivityPreset, SourceDirectivity};
 
 /// Default audibility floor (linear gain). Arrivals quieter than this are
 /// dropped rather than consuming a bounded path slot: -60 dB is the classic
@@ -174,6 +175,18 @@ pub struct GeometricConfig {
     /// [`Self::air_absorption_enabled`] is set. Defaults to the standard
     /// reference atmosphere (20 degrees Celsius, 50 % humidity, 101.325 kPa).
     pub atmosphere: AtmosphericConditions,
+    /// Whether to weight every resolved arrival by how strongly the source
+    /// radiates along that arrival's departure direction (the frequency
+    /// -dependent omni-to-cardioid pattern of [`Self::source_directivity`]).
+    /// Opt-in through [`GeometricConfig::with_source_directivity`]; defaults
+    /// to `false` so existing callers keep the original point-source spectra.
+    /// See [`crate::source_directivity`].
+    pub source_directivity_enabled: bool,
+    /// The source radiation pattern applied when
+    /// [`Self::source_directivity_enabled`] is set. Defaults to
+    /// [`DirectivityPreset::Omni`] (uniform radiation), so even an
+    /// accidentally enabled directivity leaves every arrival at unity.
+    pub source_directivity: SourceDirectivity,
 }
 
 impl GeometricConfig {
@@ -200,6 +213,8 @@ impl GeometricConfig {
             max_coupled_order: DEFAULT_MAX_COUPLED_ORDER,
             air_absorption_enabled: false,
             atmosphere: AtmosphericConditions::default(),
+            source_directivity_enabled: false,
+            source_directivity: SourceDirectivity::from_preset(DirectivityPreset::Omni),
         }
     }
 
@@ -348,6 +363,48 @@ impl GeometricConfig {
     #[must_use]
     pub fn without_air_absorption(mut self) -> Self {
         self.air_absorption_enabled = false;
+        self
+    }
+
+    /// Returns a copy that weights every arrival by `directivity`, the
+    /// source's frequency-dependent radiation pattern, and enables source
+    /// directivity.
+    ///
+    /// Each resolved arrival is folded with the radiation gain for the
+    /// direction it leaves the emitter (toward the listener for the direct
+    /// arrival, toward the first bounce point for a reflection, toward the
+    /// first silhouette corner for a diffraction), so an off-axis listener
+    /// hears a darker, quieter source exactly as it would in the field.
+    /// Setting a specific pattern implies you want it applied, so this also
+    /// sets [`Self::source_directivity_enabled`] (matching the way
+    /// [`Self::with_atmosphere`] enables air absorption).
+    #[inline]
+    #[must_use]
+    pub fn with_source_directivity(mut self, directivity: SourceDirectivity) -> Self {
+        self.source_directivity = directivity;
+        self.source_directivity_enabled = true;
+        self
+    }
+
+    /// Returns a copy that weights every arrival by the named radiation
+    /// `preset`, and enables source directivity.
+    ///
+    /// A convenience over [`Self::with_source_directivity`] for the common
+    /// presets ([`DirectivityPreset::Voice`], [`DirectivityPreset::Trumpet`],
+    /// and the like).
+    #[inline]
+    #[must_use]
+    pub fn with_source_directivity_preset(self, preset: DirectivityPreset) -> Self {
+        self.with_source_directivity(SourceDirectivity::from_preset(preset))
+    }
+
+    /// Returns a copy with source directivity disabled (arrivals are no
+    /// longer weighted by the source's facing). The stored pattern is kept
+    /// so it can be re-enabled without respecifying it.
+    #[inline]
+    #[must_use]
+    pub fn without_source_directivity(mut self) -> Self {
+        self.source_directivity_enabled = false;
         self
     }
 

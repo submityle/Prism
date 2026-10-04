@@ -62,6 +62,11 @@
 //!   [`coupled_path`] past the order-2 coupling without re-tracing the pure
 //!   reflection or diffraction sets; enabled by
 //!   [`config::GeometricConfig::with_max_coupled_order`].
+//! - [`source_directivity`] weights each resolved arrival by how strongly the
+//!   source radiates along that arrival's departure direction (the
+//!   frequency-dependent omni-to-cardioid radiation pattern), darkening and
+//!   quieting off-axis arrivals; opt-in through
+//!   [`config::GeometricConfig::with_source_directivity`].
 //! - [`backend`] assembles the above into [`backend::GeometricBackend`], the
 //!   [`PropagationBackend`](prism_audio_spatial::propagation::PropagationBackend)
 //!   implementation that fills the caller's bounded path buffer.
@@ -105,6 +110,7 @@ pub mod higher_order_reflection;
 pub mod material_map;
 pub mod reflection_path;
 pub mod scene;
+pub mod source_directivity;
 
 pub use backend::GeometricBackend;
 pub use config::GeometricConfig;
