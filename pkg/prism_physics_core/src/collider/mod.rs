@@ -443,6 +443,9 @@ pub use tangential_history_resolver::{
     TangentialContact, TangentialHistoryResolution, TangentialHistoryResolver,
 };
 
+pub mod tangential_history_integrator;
+pub use tangential_history_integrator::{TangentialHistoryBody, TangentialHistoryStepReport};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
