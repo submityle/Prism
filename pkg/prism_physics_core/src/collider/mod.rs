@@ -409,6 +409,9 @@ pub use bonded_particle_assembly::{
 pub mod bonded_particle_network_builder;
 pub use bonded_particle_network_builder::{build_bond_network, BondNetwork};
 
+pub mod bonded_particle_integrator;
+pub use bonded_particle_integrator::{BondStepReport, BondedParticleBody};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
