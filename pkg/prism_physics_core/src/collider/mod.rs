@@ -406,6 +406,8 @@ pub use bonded_particle_assembly::{
     assemble_bond_forces, broken_bond_count, intact_bond_count, rest_bond_states, BondAssembly,
     BondNetworkStep, ParticleBond,
 };
+pub mod bonded_particle_network_builder;
+pub use bonded_particle_network_builder::{build_bond_network, BondNetwork};
 
 /// A handle into a [`ShapeRegistry`].
 ///
