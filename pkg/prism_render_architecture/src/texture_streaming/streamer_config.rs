@@ -75,6 +75,13 @@ pub struct StreamerConfig {
     /// `None`, the frame reports no atlas plan and the caller lays copies out
     /// itself.
     pub atlas: Option<AtlasGeometry>,
+    /// Optional per-frame upload-bandwidth budget in staging bytes. When set,
+    /// the streamer uploads at most this many bytes of newly admitted pages per
+    /// frame, draining any remaining admitted-but-not-yet-uploaded pages over
+    /// later frames in priority order; a page is not published into the `GPU`
+    /// page table until its upload completes. `None` uploads every admitted page
+    /// the frame it is seated, matching an unbounded upload path.
+    pub upload_budget_bytes: Option<u64>,
 }
 
 impl StreamerConfig {
@@ -96,6 +103,7 @@ impl StreamerConfig {
             min_resident_frames: 2,
             protection_bonus: super::feedback::MIP_URGENCY,
             atlas: None,
+            upload_budget_bytes: None,
         }
     }
 
@@ -144,6 +152,17 @@ impl StreamerConfig {
         self
     }
 
+    /// Caps the staging bytes uploaded per frame, or clears the cap with `None`.
+    ///
+    /// A `Some(0)` budget still admits one page per frame so the loop cannot
+    /// deadlock: the highest-priority pending page is always uploaded even when
+    /// its cost alone exceeds the budget.
+    #[must_use]
+    pub const fn with_upload_budget(mut self, staging_bytes: Option<u64>) -> Self {
+        self.upload_budget_bytes = staging_bytes;
+        self
+    }
+
     /// Returns a copy with degenerate knobs clamped to values that keep the
     /// streaming loop live.
     ///
@@ -182,6 +201,7 @@ mod tests {
         assert_eq!(cfg.min_resident_frames, 2);
         assert_eq!(cfg.protection_bonus, super::super::feedback::MIP_URGENCY);
         assert_eq!(cfg.atlas, None);
+        assert_eq!(cfg.upload_budget_bytes, None);
         assert_eq!(cfg.semantic_weights, SemanticWeights::DEFAULT);
     }
 
@@ -198,6 +218,14 @@ mod tests {
         assert_eq!(cfg.decay_min, 8);
         assert_eq!(cfg.min_resident_frames, 6);
         assert_eq!(cfg.protection_bonus, 42);
+    }
+
+    #[test]
+    fn upload_budget_setter_round_trips() {
+        let cfg = StreamerConfig::new(100).with_upload_budget(Some(4096));
+        assert_eq!(cfg.upload_budget_bytes, Some(4096));
+        let cleared = cfg.with_upload_budget(None);
+        assert_eq!(cleared.upload_budget_bytes, None);
     }
 
     #[test]

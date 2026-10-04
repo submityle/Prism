@@ -66,6 +66,28 @@ impl GpuPageTable {
         Self { words }
     }
 
+    /// Builds the table from an explicit `(page, slot)` binding list.
+    ///
+    /// Unlike [`from_pool`](Self::from_pool), the caller supplies the exact set
+    /// of bindings to publish, so a streamer can withhold pages that are seated
+    /// in the pool but whose upload has not yet completed. The bindings are
+    /// sorted ascending by [`TexturePageKey`] here, so the caller need not
+    /// pre-sort; the resulting buffer still matches the shader compare order.
+    #[must_use]
+    pub fn from_bindings(bindings: &[(TexturePageKey, u32)]) -> Self {
+        let mut sorted: Vec<(TexturePageKey, u32)> = bindings.to_vec();
+        sorted.sort_unstable_by_key(|entry| entry.0);
+        let mut words = Vec::with_capacity(sorted.len() * PAGE_TABLE_ENTRY_WORDS);
+        for (key, slot) in sorted {
+            let [w0, w1, w2] = Self::compare_words(key);
+            words.push(w0);
+            words.push(w1);
+            words.push(w2);
+            words.push(slot);
+        }
+        Self { words }
+    }
+
     /// Packs a key into its three compare words `(w0, w1, w2)`.
     ///
     /// Lexicographic order over the returned words equals [`Ord`] on
@@ -254,5 +276,30 @@ mod tests {
     fn entry_out_of_range_is_none() {
         let table = GpuPageTable::new();
         assert_eq!(table.entry(0), None);
+    }
+
+    #[test]
+    fn from_bindings_sorts_and_matches_lookup() {
+        // Deliberately unsorted bindings; a withheld page is simply absent.
+        let bindings = [
+            (key(2, 0, 0, 1, 0), 7u32),
+            (key(1, 0, 0, 0, 0), 3u32),
+            (key(1, 1, 0, 0, 0), 5u32),
+        ];
+        let table = GpuPageTable::from_bindings(&bindings);
+        // Entries come out key-ascending regardless of input order.
+        let mut prev: Option<TexturePageKey> = None;
+        for i in 0..table.len() {
+            let (k, _slot) = table.entry(i).expect("entry in range");
+            if let Some(p) = prev {
+                assert!(p <= k, "entries must be key-ascending");
+            }
+            prev = Some(k);
+        }
+        assert_eq!(table.lookup(key(1, 0, 0, 0, 0)), Some(3));
+        assert_eq!(table.lookup(key(1, 1, 0, 0, 0)), Some(5));
+        assert_eq!(table.lookup(key(2, 0, 0, 1, 0)), Some(7));
+        // A page not in the bindings resolves to nothing.
+        assert_eq!(table.lookup(key(9, 0, 0, 0, 0)), None);
     }
 }

@@ -39,6 +39,16 @@ pub struct StreamerFrame {
     /// Requested, non-resident pages withheld from upload this frame because the
     /// load debounce was not yet satisfied.
     pub deferred_loads: usize,
+    /// Staging bytes actually uploaded this frame, i.e. the summed byte cost of
+    /// [`uploads`](Self::uploads). Never exceeds the configured upload budget
+    /// except when a single highest-priority page is larger than the whole
+    /// budget, which is always admitted to keep the loop live.
+    pub uploaded_bytes: u64,
+    /// Pages seated in the physical pool but still awaiting upload after this
+    /// frame because the upload budget was exhausted. They carry forward and
+    /// drain in priority order on later frames, and are absent from the `GPU`
+    /// page table until uploaded. Always `0` when no upload budget is set.
+    pub pending_uploads: usize,
 }
 
 impl StreamerFrame {
@@ -61,7 +71,7 @@ impl StreamerFrame {
     /// doing streaming work.
     #[must_use]
     pub fn is_steady(&self) -> bool {
-        self.uploads.is_empty() && self.plan.evicts.is_empty()
+        self.uploads.is_empty() && self.plan.evicts.is_empty() && self.pending_uploads == 0
     }
 }
 
@@ -77,6 +87,8 @@ mod tests {
         assert_eq!(frame.evicted(), 0);
         assert_eq!(frame.resident_bytes, 0);
         assert_eq!(frame.resident_count, 0);
+        assert_eq!(frame.uploaded_bytes, 0);
+        assert_eq!(frame.pending_uploads, 0);
         assert!(frame.atlas.is_none());
     }
 }

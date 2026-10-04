@@ -53,13 +53,13 @@
 use super::feedback::PageDemand;
 use super::feedback_decode::{decode_feedback, FeedbackTextureDesc};
 use super::indirection::GpuPageTable;
-use super::pool::PhysicalPagePool;
+use super::pool::{PageUpload, PhysicalPagePool};
 use super::residency::TextureResidencyTable;
 use super::scheduler::schedule;
 use super::streamer_config::StreamerConfig;
 use super::streamer_frame::StreamerFrame;
 use super::{atlas::plan_atlas_copies, TexturePageKey};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 /// One texture's feedback grid for a single frame.
@@ -114,6 +114,10 @@ pub struct VirtualTextureStreamer {
     pool: PhysicalPagePool,
     page_table: GpuPageTable,
     tracks: BTreeMap<TexturePageKey, PageTrack>,
+    /// Pages seated in the pool whose staging upload has not yet completed.
+    /// Non-empty only when an upload budget throttles a frame; these pages are
+    /// withheld from the published page table until drained.
+    pending: BTreeSet<TexturePageKey>,
     frame: u64,
 }
 
@@ -133,6 +137,7 @@ impl VirtualTextureStreamer {
             pool: PhysicalPagePool::new(pool_capacity),
             page_table: GpuPageTable::new(),
             tracks: BTreeMap::new(),
+            pending: BTreeSet::new(),
             frame: 0,
         }
     }
@@ -284,24 +289,40 @@ impl VirtualTextureStreamer {
             }
         }
 
-        // (4) Schedule within the hard byte budget and apply to the pool.
+        // (4) Schedule within the hard byte budget and seat the admitted set in
+        // the physical pool. `apply_plan` returns the pages newly seated this
+        // frame; their staging upload is resolved in stage (5b).
         let plan = schedule(&table, self.config.byte_budget);
-        let uploads = self.pool.apply_plan(&plan);
+        let admitted = self.pool.apply_plan(&plan);
 
-        // (5) Reflect residency changes back into the history.
+        // (5a) Reflect residency changes back into the history and the pending
+        // upload set. A page leaving the pool can never owe an upload; a page
+        // entering it owes one until stage (5b) drains it.
         for key in &plan.evicts {
             if let Some(track) = self.tracks.get_mut(key) {
                 track.resident_since = None;
             }
+            self.pending.remove(key);
         }
-        for upload in &uploads {
+        for upload in &admitted {
             if let Some(track) = self.tracks.get_mut(&upload.key) {
                 track.resident_since = Some(frame);
             }
+            self.pending.insert(upload.key);
         }
 
-        // (6) Rebuild the GPU page table and optional atlas plan.
-        self.page_table = GpuPageTable::from_pool(&self.pool);
+        // (5b) Resolve this frame's actual uploads from the pending backlog,
+        // honouring the optional per-frame upload-bandwidth budget. Without a
+        // budget the whole backlog uploads at once; with one, the
+        // highest-priority pending pages upload until the staging budget is
+        // spent and the rest carry forward.
+        let (uploads, uploaded_bytes) = self.drain_pending_uploads();
+
+        // (6) Rebuild the GPU page table from the uploaded resident set only
+        // (pages still owing an upload are withheld so a shader never samples a
+        // slot whose tile data has not landed yet), plus the optional atlas plan
+        // over the pages uploaded this frame.
+        self.page_table = self.rebuild_page_table();
         let atlas = self
             .config
             .atlas
@@ -319,6 +340,7 @@ impl VirtualTextureStreamer {
         // (8) Measure truthful post-apply telemetry from the pool.
         let resident_bytes = self.resident_bytes();
         let resident_count = self.pool.resident_count() as usize;
+        let pending_uploads = self.pending.len();
 
         StreamerFrame {
             plan,
@@ -328,7 +350,92 @@ impl VirtualTextureStreamer {
             resident_count,
             demanded_pages,
             deferred_loads,
+            uploaded_bytes,
+            pending_uploads,
         }
+    }
+
+    /// Retained streaming priority of a tracked page, or `0` if untracked.
+    fn effective_priority_of(&self, key: TexturePageKey) -> u64 {
+        self.tracks
+            .get(&key)
+            .map_or(0, |track| track.effective_priority)
+    }
+
+    /// Latest physical byte cost of a tracked page, or `0` if untracked.
+    fn byte_cost_of(&self, key: TexturePageKey) -> u64 {
+        self.tracks.get(&key).map_or(0, |track| track.byte_cost)
+    }
+
+    /// Uploads pending pages subject to the optional upload-bandwidth budget,
+    /// returning the frame's upload list (key-ascending) and the staging bytes
+    /// it consumed. Uploaded pages are removed from the pending set.
+    fn drain_pending_uploads(&mut self) -> (Vec<PageUpload>, u64) {
+        if self.pending.is_empty() {
+            return (Vec::new(), 0);
+        }
+        match self.config.upload_budget_bytes {
+            // No budget: the whole backlog uploads this frame, key-ascending.
+            None => {
+                let drained = core::mem::take(&mut self.pending);
+                let mut uploads = Vec::with_capacity(drained.len());
+                let mut bytes = 0u64;
+                for key in drained {
+                    if let Some(slot) = self.pool.slot_of(key) {
+                        uploads.push(PageUpload { key, slot });
+                        bytes = bytes.saturating_add(self.byte_cost_of(key));
+                    }
+                }
+                (uploads, bytes)
+            }
+            // Budgeted: pack the highest-priority pending pages that fit, always
+            // admitting the single top page so a page larger than the whole
+            // budget cannot deadlock the backlog. Lower-priority pages that
+            // still fit the remaining budget are packed opportunistically.
+            Some(budget) => {
+                let mut ranked: Vec<(u64, u64, TexturePageKey)> = self
+                    .pending
+                    .iter()
+                    .map(|&key| (self.effective_priority_of(key), self.byte_cost_of(key), key))
+                    .collect();
+                ranked.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+                let mut selected: Vec<(TexturePageKey, u32)> = Vec::new();
+                let mut bytes = 0u64;
+                for (_priority, cost, key) in ranked {
+                    let would = bytes.saturating_add(cost);
+                    if !selected.is_empty() && would > budget {
+                        continue;
+                    }
+                    if let Some(slot) = self.pool.slot_of(key) {
+                        selected.push((key, slot));
+                        bytes = would;
+                    }
+                }
+                for (key, _slot) in &selected {
+                    self.pending.remove(key);
+                }
+                let mut uploads: Vec<PageUpload> = selected
+                    .into_iter()
+                    .map(|(key, slot)| PageUpload { key, slot })
+                    .collect();
+                uploads.sort_unstable_by_key(|upload| upload.key);
+                (uploads, bytes)
+            }
+        }
+    }
+
+    /// Rebuilds the published page table from the pool, withholding pages that
+    /// are seated but still owe an upload.
+    fn rebuild_page_table(&self) -> GpuPageTable {
+        if self.pending.is_empty() {
+            return GpuPageTable::from_pool(&self.pool);
+        }
+        let bindings: Vec<(TexturePageKey, u32)> = self
+            .pool
+            .iter()
+            .filter(|(key, _slot)| !self.pending.contains(key))
+            .collect();
+        GpuPageTable::from_bindings(&bindings)
     }
 }
 
@@ -619,5 +726,105 @@ mod tests {
         assert_eq!(f.demanded_pages, 1);
         assert_eq!(f.loaded(), 1);
         assert_eq!(f.uploads[0].key.mip, 0);
+    }
+
+    #[test]
+    fn no_upload_budget_uploads_whole_backlog_at_once() {
+        // Default (unbudgeted) path: every admitted page uploads immediately and
+        // nothing is left pending, preserving the original contract.
+        let mut streamer = VirtualTextureStreamer::new(
+            StreamerConfig::new(100 * PAGE_BYTES).with_min_demand_frames(1),
+            64,
+        );
+        let f = streamer.stream_demands(&[demand(key(0), 300), demand(key(1), 500), demand(key(2), 400)]);
+        assert_eq!(f.loaded(), 3);
+        assert_eq!(f.pending_uploads, 0);
+        assert_eq!(f.uploaded_bytes, 3 * PAGE_BYTES);
+        assert!(f.is_steady() == false || f.plan.evicts.is_empty());
+    }
+
+    #[test]
+    fn upload_budget_throttles_and_drains_in_priority_order() {
+        // A one-page-per-frame upload budget: all three pages seat in the pool
+        // immediately, but only the highest-priority page's data lands per frame,
+        // and the rest drain over subsequent frames in priority order.
+        let mut streamer = VirtualTextureStreamer::new(
+            StreamerConfig::new(100 * PAGE_BYTES)
+                .with_min_demand_frames(1)
+                .with_protection(0, 0)
+                .with_upload_budget(Some(PAGE_BYTES)),
+            64,
+        );
+        let demands = [demand(key(0), 300), demand(key(1), 500), demand(key(2), 400)];
+
+        let f1 = streamer.stream_demands(&demands);
+        assert_eq!(f1.loaded(), 1, "only one page uploads under the budget");
+        assert_eq!(f1.uploads[0].key, key(1), "highest importance uploads first");
+        assert_eq!(f1.uploaded_bytes, PAGE_BYTES);
+        assert_eq!(f1.pending_uploads, 2);
+        assert!(!f1.is_steady(), "a backlog is not steady");
+        // All three are seated in the pool, but only the uploaded one is published.
+        assert!(streamer.pool().contains(key(0)));
+        assert!(streamer.pool().contains(key(1)));
+        assert!(streamer.pool().contains(key(2)));
+        assert_eq!(streamer.page_table().lookup(key(1)), streamer.pool().slot_of(key(1)));
+        assert_eq!(streamer.page_table().lookup(key(0)), None, "pending page withheld");
+        assert_eq!(streamer.page_table().lookup(key(2)), None, "pending page withheld");
+
+        let f2 = streamer.stream_demands(&demands);
+        assert_eq!(f2.loaded(), 1);
+        assert_eq!(f2.uploads[0].key, key(2), "next-highest drains second");
+        assert_eq!(f2.pending_uploads, 1);
+        assert!(f2.plan.loads.is_empty(), "no new seats: pool already holds all three");
+
+        let f3 = streamer.stream_demands(&demands);
+        assert_eq!(f3.loaded(), 1);
+        assert_eq!(f3.uploads[0].key, key(0), "lowest drains last");
+        assert_eq!(f3.pending_uploads, 0);
+
+        let f4 = streamer.stream_demands(&demands);
+        assert!(f4.is_steady(), "backlog cleared and resident set stable");
+        assert_eq!(streamer.page_table().words(), GpuPageTable::from_pool(streamer.pool()).words());
+    }
+
+    #[test]
+    fn zero_upload_budget_still_makes_progress() {
+        // A zero budget must not deadlock: the single top page always uploads.
+        let mut streamer = VirtualTextureStreamer::new(
+            StreamerConfig::new(100 * PAGE_BYTES)
+                .with_min_demand_frames(1)
+                .with_protection(0, 0)
+                .with_upload_budget(Some(0)),
+            64,
+        );
+        let f = streamer.stream_demands(&[demand(key(0), 300), demand(key(1), 500)]);
+        assert_eq!(f.loaded(), 1, "one page uploads even against a zero budget");
+        assert_eq!(f.uploads[0].key, key(1));
+        assert_eq!(f.uploaded_bytes, PAGE_BYTES);
+        assert_eq!(f.pending_uploads, 1);
+    }
+
+    #[test]
+    fn evicting_a_pending_page_cancels_its_upload() {
+        // A page seated but not yet uploaded that gets evicted before its turn
+        // must simply drop out of the backlog, never emitting a stale upload.
+        let mut streamer = VirtualTextureStreamer::new(
+            StreamerConfig::new(2 * PAGE_BYTES)
+                .with_min_demand_frames(1)
+                .with_protection(0, 0)
+                .with_upload_budget(Some(PAGE_BYTES)),
+            4,
+        );
+        // Frame 1: seat two pages (byte budget = 2 pages), upload only the top.
+        let f1 = streamer.stream_demands(&[demand(key(0), 300), demand(key(1), 500)]);
+        assert_eq!(f1.loaded(), 1);
+        assert_eq!(f1.uploads[0].key, key(1));
+        assert_eq!(f1.pending_uploads, 1, "key(0) is seated but pending");
+        // Frame 2: a far more important third page forces key(0) (pending, lowest
+        // priority) out of the pool before it ever uploaded.
+        let f2 = streamer.stream_demands(&[demand(key(1), 500), demand(key(2), 900)]);
+        assert!(f2.plan.evicts.contains(&key(0)), "the pending page is evicted");
+        assert!(!streamer.pool().contains(key(0)));
+        assert!(f2.uploads.iter().all(|u| u.key != key(0)), "no stale upload for an evicted page");
     }
 }
