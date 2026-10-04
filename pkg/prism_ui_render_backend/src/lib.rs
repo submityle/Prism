@@ -60,6 +60,7 @@
 extern crate alloc;
 
 pub mod batch;
+pub mod calipers;
 pub mod circle;
 pub mod clip;
 pub mod curve;
@@ -81,6 +82,7 @@ pub mod sdf;
 pub mod triangulate;
 
 pub use batch::{batch, instance_count, Batch, GlyphInstance, RectInstance, ShadowInstance};
+pub use calipers::{convex_diameter, convex_diameter_pair};
 pub use circle::{min_enclosing_circle, Circle};
 pub use clip::clip_polygon;
 pub use curve::CubicBezier;
