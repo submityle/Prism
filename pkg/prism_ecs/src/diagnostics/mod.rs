@@ -66,6 +66,11 @@
 //!   transitive, how large its reachability closure grows versus
 //!   its direct edges, quantifying the cost of not caching the
 //!   closure (design §16.6 / §11).
+//! * [`relation_degree`] — per-entity relation connectivity census
+//!   (design §11 / §16.6): rolls every relation kind up by entity to
+//!   surface the aggregate relation hubs (out-degree / in-degree) and
+//!   each entity's structural role (pure source / sink / relay), the
+//!   entity-centric dual of the per-kind shape views (design §16.6 / §11).
 //! * [`relation_graph`] — read-only relation-kind and edge-topology summary
 //!   (design §16.6 "关系图谱").
 //! * [`relation_cycles`] — per-relation directed-cycle detection over the
@@ -160,6 +165,7 @@ pub mod prefab_inheritance;
 pub mod profiler;
 pub mod relation_cascade;
 pub mod relation_closure;
+pub mod relation_degree;
 pub mod relation_graph;
 pub mod relation_cycles;
 pub mod relation_topology;
@@ -195,6 +201,7 @@ pub use partition_occupancy::{CellOccupancyEntry, PartitionOccupancyReport};
 pub use prefab_inheritance::{PrefabInheritanceReport, PrefabInstanceEntry, PrefabTemplateEntry};
 pub use relation_cascade::{CascadeBlastEntry, RelationCascadeReport, RelationPolicyEntry};
 pub use relation_closure::{RelationClosureReport, TransitiveClosureEntry};
+pub use relation_degree::{RelationDegreeEntry, RelationDegreeReport};
 pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
