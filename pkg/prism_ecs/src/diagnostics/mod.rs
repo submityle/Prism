@@ -21,11 +21,13 @@
 pub mod change_volume;
 pub mod inspector;
 pub mod profiler;
+pub mod step_inspector;
 #[cfg(feature = "std")]
 pub mod time_travel;
 
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
+pub use step_inspector::{StepObservation, SteppingInspector};
 #[cfg(feature = "std")]
 pub use profiler::SpanRecorder;
 pub use profiler::{FlameGraph, SpanNode, SystemInstrument};
