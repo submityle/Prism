@@ -60,6 +60,12 @@
 //!   per-component closure size (insert blast radius) and fan-in (hot
 //!   shared dependency), ranked hottest-dependency first (design §16.6 /
 //!   §16.1).
+//! * [`determinism_readiness`] — per-component determinism / replication
+//!   readiness (design §14 / §16.5): classifies every component by its
+//!   snapshot (clone) and desync-hash glue into fully-deterministic,
+//!   snapshot-only (a desync blind spot — rolled back but invisible to
+//!   the state hash), hash-only (rollback gap), or opaque, surfacing the
+//!   gaps that break rollback networking (design §16.6 / §14).
 //! * [`hook_coverage`] — component lifecycle-hook coverage (design §12):
 //!   which of `on_add` / `on_insert` / `on_replace` / `on_remove` each
 //!   component registers, flagging acquire/release asymmetries (acquire
@@ -77,6 +83,7 @@ pub mod change_volume;
 pub mod churn_cost;
 pub mod component_distribution;
 pub mod component_memory;
+pub mod determinism_readiness;
 pub mod frame_profile;
 pub mod hook_coverage;
 pub mod inspector;
@@ -98,6 +105,9 @@ pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use churn_cost::{ChurnCostEntry, ChurnCostProfile};
 pub use component_distribution::{ComponentDistributionEntry, ComponentDistributionReport};
 pub use component_memory::{ComponentMemoryEntry, ComponentMemoryReport};
+pub use determinism_readiness::{
+    DeterminismClass, DeterminismReadinessEntry, DeterminismReadinessReport,
+};
 pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
 pub use hook_coverage::{HookCoverageEntry, HookCoverageReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
