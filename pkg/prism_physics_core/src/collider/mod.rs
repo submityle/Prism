@@ -528,6 +528,8 @@ pub mod janssen_pressure;
 pub use janssen_pressure::{JanssenProfile, SiloCrossSection, StressSample};
 pub mod fabric_tensor;
 pub use fabric_tensor::FabricTensor;
+pub mod granular_temperature;
+pub use granular_temperature::GranularTemperature;
 
 /// A handle into a [`ShapeRegistry`].
 ///
