@@ -173,6 +173,13 @@
 //!   `sparse_overhead_permille` that flags sets which have decayed into
 //!   mostly-empty index space (design §16.6 / §6).
 //! * [`time_travel`] — frame-indexed world snapshot record/seek (`std` only).
+//! * [`weak_reference_health`] — weak cross-cell reference table health
+//!   census (design §13.1 / §22 risk 4): resolves every stored generational
+//!   weak handle against the live world and reports liveness / prune pressure,
+//!   duplicate multiplicity and max fan-in, plus a deterministic per-target
+//!   breakdown — surfacing stale handles left after streaming unloads and
+//!   tables accreting redundant references (design §16.6 / §13.1;
+//!   `partition` feature).
 //!
 //! Every occupancy and change-volume figure except [`sparse_set_occupancy`]
 //! describes the chunked Table-backed storage (design §6); `SparseSet`
@@ -221,6 +228,8 @@ pub mod structural_churn;
 pub mod system_cost;
 #[cfg(feature = "std")]
 pub mod time_travel;
+#[cfg(feature = "partition")]
+pub mod weak_reference_health;
 
 pub use archetype_fragmentation::{ArchetypeFragmentEntry, ArchetypeFragmentationReport};
 pub use change_tick_health::{ArchetypeTickAgeEntry, TickAgeReport};
@@ -270,3 +279,5 @@ pub use profiler::SpanRecorder;
 pub use profiler::{FlameGraph, SpanNode, SystemInstrument};
 #[cfg(feature = "std")]
 pub use time_travel::TimeTravel;
+#[cfg(feature = "partition")]
+pub use weak_reference_health::{WeakReferenceHealth, WeakTargetEntry};
