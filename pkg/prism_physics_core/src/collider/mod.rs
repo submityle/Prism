@@ -401,6 +401,11 @@ pub mod bonded_particle;
 pub use bonded_particle::{update_bond, BondModel, BondState, BondStep};
 pub mod cohesive_interface_builder;
 pub use cohesive_interface_builder::{insert_cohesive_interfaces, CohesiveMesh};
+pub mod bonded_particle_assembly;
+pub use bonded_particle_assembly::{
+    assemble_bond_forces, broken_bond_count, intact_bond_count, rest_bond_states, BondAssembly,
+    BondNetworkStep, ParticleBond,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
