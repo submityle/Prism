@@ -356,6 +356,11 @@ pub mod tet_fem_mohr_coulomb_force;
 pub use tet_fem_mohr_coulomb_force::{
     element_mohr_coulomb_force, mohr_coulomb_elastic_potential_energy, MohrCoulombForce,
 };
+pub mod tet_fem_mohr_coulomb_force_assembly;
+pub use tet_fem_mohr_coulomb_force_assembly::{
+    assemble_mohr_coulomb_forces, rest_mohr_coulomb_states,
+    total_mohr_coulomb_elastic_potential_energy, MohrCoulombAssembly,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
