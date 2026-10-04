@@ -65,6 +65,7 @@ members = [
   "pkg/prism_virtual_geometry_gpu",
   # Prism experimental volumetric-cloud scattering GPU twin.
   "pkg/prism_volumetric_gpu",
+  "pkg/prism_water_render",
   # Prism experimental strand-hair body-collider projection GPU twin.
   "pkg/prism_hair_gpu",
   # Prism device-free Opacity Micromap (OMM) CPU golden baker.

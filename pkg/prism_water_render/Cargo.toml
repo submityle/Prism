@@ -1,0 +1,22 @@
+[package]
+name = "prism_water_render"
+version = "0.1.0"
+edition = "2024"
+description = "Real-device wgpu renderer for Prism water surfaces. Rasterises a Gerstner-displaced water grid with a Fresnel reflection and analytic sun-specular shading model and reads the frame back to a portable image, giving the water subsystem its first visible render product (not a compute-only parity twin). Portable core WGSL, Metal/Vulkan/DX12 ready. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_architecture = { path = "../prism_render_architecture" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+
+[dev-dependencies]
+prism_water_render = { path = "." }
+
+[features]
+default = []
+
+[lints]
+workspace = true
