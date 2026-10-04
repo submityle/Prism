@@ -1,7 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 //! Loom text stack: segmentation, line breaking, rich text, shaping, cursor /
-//! selection and a minimal bidi implementation.
+//! selection and a conformant Unicode bidirectional (UAX#9) implementation.
 //!
 //! The crate is deliberately engine- and font-agnostic. All geometry is
 //! produced by a pluggable [`shaper::Shaper`]; the default
@@ -20,7 +20,9 @@
 //! * [`rich_text`] — span-level styling and paragraph properties.
 //! * [`shaper`] — the [`shaper::Shaper`] trait and its deterministic default.
 //! * [`cursor`] — caret / selection model and glyph hit-testing.
-//! * [`bidi`] — a documented minimal subset of UAX#9.
+//! * [`bidi`] — a conformant implementation of the Unicode Bidirectional
+//!   Algorithm (UAX#9): explicit levels and isolates, the weak and neutral
+//!   rules, paired brackets (N0) and visual reordering (L1/L2).
 //! * [`cache`] — shaping-result cache keyed by `(text, style, width)`.
 //!
 //! # Example
@@ -54,7 +56,7 @@ pub mod rich_text;
 pub mod segmentation;
 pub mod shaper;
 
-pub use bidi::{base_direction, resolve_levels, Direction, Run};
+pub use bidi::{base_direction, char_direction, resolve_levels, BidiInfo, Direction, Run};
 pub use cache::{CacheKey, ShapeCache};
 pub use cursor::{caret_positions, hit_test, x_for_offset, Caret, Composition, Selection};
 pub use line_break::{break_opportunities, wrap_by_width, BreakKind, BreakPoint, WrappedLine};
