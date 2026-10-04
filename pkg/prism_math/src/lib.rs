@@ -64,11 +64,12 @@ mod quat;
 mod vec;
 
 pub mod const_math;
+pub mod dual;
 pub mod dual_quat;
 pub mod f16;
-pub mod dual;
 pub mod interval;
 pub mod octahedral;
+pub mod shader_mirror;
 pub mod soa;
 pub mod spatial;
 pub mod spherical;
@@ -90,35 +91,38 @@ pub use affine::Affine3;
 pub use backend::Backend;
 pub use mat::{Mat2, Mat3, Mat4};
 pub use quat::Quat;
-pub use vec::{Vec2, Vec3, Vec3A, Vec4, vec2, vec3, vec3a, vec4};
+pub use vec::{vec2, vec3, vec3a, vec4, Vec2, Vec3, Vec3A, Vec4};
 
 pub use geom::{Aabb3, BoundingSphere, Frustum, Plane, Ray3, Segment3};
 pub use intersect::{Containment, RayHit};
 
 pub use self::bigworld::{FixedGridPosition, GridCell, GridPosition};
+pub use self::color::{Hsla, Hsva, LinearRgba, Oklaba, Oklcha, Srgba, Xyza};
 pub use self::f64::{
-    DAffine3, DMat2, DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, dvec2, dvec3, dvec4,
+    dvec2, dvec3, dvec4, DAffine3, DMat2, DMat3, DMat4, DQuat, DVec2, DVec3, DVec4,
 };
 pub use self::fixed::{
-    CompensableFloat, Fixed, FxVec2, FxVec3, FxVec4, I16F16, KahanSum, NeumaierSum, StateHasher,
-    fxvec2, fxvec3, fxvec4, kahan_sum, neumaier_sum,
+    fxvec2, fxvec3, fxvec4, kahan_sum, neumaier_sum, CompensableFloat, Fixed, FxVec2, FxVec3,
+    FxVec4, KahanSum, NeumaierSum, StateHasher, I16F16,
 };
-pub use self::color::{Hsla, Hsva, LinearRgba, Oklaba, Oklcha, Srgba, Xyza};
 pub use self::noise::{Fractal, Noise2, Noise3, Perlin, Simplex};
 pub use self::rng::{Pcg32, Rng, SplitMix64, Xoshiro256StarStar};
 
-pub use self::dual_quat::DualQuat;
-pub use self::f16::{F16, F16Vec2, F16Vec3, F16Vec4};
-pub use self::soa::SoaVec3;
+pub use self::const_math::{
+    convert_point, LookupTable, FLIP_HANDEDNESS_Z, Y_UP_TO_Z_UP, Z_UP_TO_Y_UP,
+};
 pub use self::dual::{Dual, DualVec3};
+pub use self::dual_quat::DualQuat;
+pub use self::f16::{F16Vec2, F16Vec3, F16Vec4, F16};
 pub use self::interval::{Interval, IntervalVec3};
+pub use self::soa::SoaVec3;
 pub use self::spatial::{
     hilbert_decode3, hilbert_encode3, morton_decode2, morton_decode3, morton_encode2,
     morton_encode3,
 };
-pub use self::spherical::{Sh2, Sh3, basis2, basis3};
-pub use self::const_math::{
-    FLIP_HANDEDNESS_Z, LookupTable, Y_UP_TO_Z_UP, Z_UP_TO_Y_UP, convert_point,
+pub use self::spherical::{basis2, basis3, Sh2, Sh3};
+pub use self::shader_mirror::{
+    pack_mat3_std140, pack_mat4, pack_quat, pack_vec3_std140, pack_vec4, quat_rotate_vec3,
 };
 
 /// Mathematical constant helpers (`f32`).
@@ -217,24 +221,22 @@ fn detect_wasm_simd() -> bool {
 /// Glob-import the common types and helpers.
 pub mod prelude {
     pub use crate::{
-        Aabb3, Affine3, Backend, BoundingSphere, CompensableFloat, Containment, DAffine3, DMat2,
-        DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, Fixed, FixedGridPosition, Frustum, FxVec2, FxVec3,
-        FxVec4, GridCell, GridPosition, I16F16, KahanSum, Mat2, Mat3, Mat4, MathCaps, NeumaierSum, Plane, Quat, Ray3,
-        RayHit, Segment3, StateHasher, Vec2, Vec3, Vec3A, Vec4, consts, curve, dvec2, dvec3, dvec4,
-        fxvec2, fxvec3, fxvec4, geom, intersect, kahan_sum, lerp, neumaier_sum, to_degrees,
-        to_radians, vec2, vec3, vec3a, vec4,
+        batch, color, noise, rng, Fractal, Hsla, Hsva, LinearRgba, Noise2, Noise3, Oklaba, Oklcha,
+        Pcg32, Perlin, Rng, Simplex, SplitMix64, Srgba, Xoshiro256StarStar, Xyza,
     };
     pub use crate::{
-        Fractal, Hsla, Hsva, LinearRgba, Noise2, Noise3, Oklaba, Oklcha, Pcg32, Perlin, Rng,
-        Simplex, SplitMix64, Srgba, Xoshiro256StarStar, Xyza, batch, color, noise, rng,
+        consts, curve, dvec2, dvec3, dvec4, fxvec2, fxvec3, fxvec4, geom, intersect, kahan_sum,
+        lerp, neumaier_sum, to_degrees, to_radians, vec2, vec3, vec3a, vec4, Aabb3, Affine3,
+        Backend, BoundingSphere, CompensableFloat, Containment, DAffine3, DMat2, DMat3, DMat4,
+        DQuat, DVec2, DVec3, DVec4, Fixed, FixedGridPosition, Frustum, FxVec2, FxVec3, FxVec4,
+        GridCell, GridPosition, KahanSum, Mat2, Mat3, Mat4, MathCaps, NeumaierSum, Plane, Quat,
+        Ray3, RayHit, Segment3, StateHasher, Vec2, Vec3, Vec3A, Vec4, I16F16,
     };
     pub use crate::{
-        DualQuat, F16, F16Vec2, F16Vec3, F16Vec4, SoaVec3, dual_quat, f16, octahedral, soa,
+        dual_quat, f16, octahedral, soa, DualQuat, F16Vec2, F16Vec3, F16Vec4, SoaVec3, F16,
     };
 }
 
-#[cfg(test)]
-mod tests;
 #[cfg(test)]
 mod m2_tests;
 #[cfg(test)]
@@ -244,6 +246,11 @@ mod m4_tests;
 #[cfg(test)]
 mod m5_tests;
 #[cfg(test)]
-mod tests_m6_core;
+mod tests;
 #[cfg(all(test, feature = "compat-bevy"))]
 mod tests_m6_compat;
+#[cfg(test)]
+mod tests_m6_core;
+
+#[cfg(test)]
+mod tests_shader_mirror;
