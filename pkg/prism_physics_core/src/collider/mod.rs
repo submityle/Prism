@@ -427,6 +427,9 @@ pub use bonded_particle_contact_integrator::{ContactBody, ContactStepReport};
 pub mod hertz_contact;
 pub use hertz_contact::{evaluate_hertz_contact, hertz_contact_between, HertzModel};
 
+pub mod hertz_contact_resolver;
+pub use hertz_contact_resolver::{resolve_hertz_contacts, HertzContact, HertzContactResolution};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
