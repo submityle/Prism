@@ -106,6 +106,7 @@ pub mod bresenham_line;
 pub mod bspline_patch;
 pub mod bspline_surface;
 pub mod bvh;
+pub mod camclay_yield_function;
 pub mod camera;
 pub mod capillary_force_at_gap;
 pub mod capillary_max_force;
@@ -144,7 +145,9 @@ pub mod cloth_wind_force;
 pub mod cloud_coverage_remap;
 pub mod cloud_shadow_modulation;
 pub mod cohen_sutherland_clip;
+pub mod cohesive_dissipated_energy;
 pub mod cohesive_envelope_traction;
+pub mod cohesive_onset_final_separation;
 pub mod cohesive_zone_damage;
 pub mod collision;
 pub mod color_grade_lut;
@@ -183,6 +186,7 @@ pub mod display_tonemap_target;
 pub mod distance_field_shadow;
 pub mod draine_phase_blend;
 pub mod draw_pass_buffers;
+pub mod drucker_prager_friction_alpha;
 pub mod dual_lobe_phase;
 pub mod dual_quaternion;
 pub mod ear_clip_triangulate;
@@ -336,6 +340,7 @@ pub mod minkowski_sum_2d;
 pub mod mip_error;
 pub mod mis_heuristics;
 pub mod modeling;
+pub mod mohr_coulomb_angle_trig;
 pub mod morton_code;
 pub mod motion_blur;
 pub mod motion_disocclusion;
@@ -552,6 +557,7 @@ pub mod temporal_dither;
 pub mod temporal_reproject;
 pub mod temporal_reprojection;
 pub mod terrain_occlusion;
+pub mod tet_quality_metrics;
 pub mod tetrahedron_volume;
 pub mod tile_light_cull;
 pub mod tiled_depth_sort;
@@ -722,6 +728,9 @@ pub use bresenham_line::{GpuBresenhamLine, GpuBresenhamQuery, GpuBresenhamResult
 pub use bspline_patch::{BsplinePatchQuery, BsplinePatchResult, GpuBsplinePatch};
 pub use bspline_surface::{BsplineSurfaceQuery, BsplineSurfaceResult, GpuBsplineSurface};
 pub use bvh::{BvhQuery, BvhResult, GpuBvh};
+pub use camclay_yield_function::{
+    CamClayYieldFunctionQuery, CamClayYieldFunctionResult, GpuCamClayYieldFunction,
+};
 pub use camera::{CameraQuery, CameraResult, GpuCamera};
 pub use capillary_force_at_gap::{
     CapillaryForceAtGapQuery, CapillaryForceAtGapResult, GpuCapillaryForceAtGap,
@@ -799,8 +808,15 @@ pub use cohen_sutherland_clip::{
     ClipSegmentQuery, ClipSegmentResult, GpuCohenSutherlandClip, OUTCODE_BOTTOM, OUTCODE_INSIDE,
     OUTCODE_LEFT, OUTCODE_RIGHT, OUTCODE_TOP,
 };
+pub use cohesive_dissipated_energy::{
+    CohesiveDissipatedEnergyQuery, CohesiveDissipatedEnergyResult, GpuCohesiveDissipatedEnergy,
+};
 pub use cohesive_envelope_traction::{
     CohesiveEnvelopeTractionQuery, CohesiveEnvelopeTractionResult, GpuCohesiveEnvelopeTraction,
+};
+pub use cohesive_onset_final_separation::{
+    CohesiveOnsetFinalSeparationQuery, CohesiveOnsetFinalSeparationResult,
+    GpuCohesiveOnsetFinalSeparation,
 };
 pub use cohesive_zone_damage::{
     CohesiveZoneDamageQuery, CohesiveZoneDamageResult, GpuCohesiveZoneDamage,
@@ -858,6 +874,10 @@ pub use display_tonemap_target::{
 pub use distance_field_shadow::{GpuDistanceFieldShadow, GpuSdfGrid, SdfShadowRay};
 pub use draine_phase_blend::{DrainePhaseBlendQuery, DrainePhaseBlendResult, GpuDrainePhaseBlend};
 pub use draw_pass_buffers::{GpuDrawPassBufferQuery, GpuDrawPassBufferResult, GpuDrawPassBuffers};
+pub use drucker_prager_friction_alpha::{
+    DruckerPragerFrictionAlphaQuery, DruckerPragerFrictionAlphaResult,
+    GpuDruckerPragerFrictionAlpha,
+};
 pub use dual_lobe_phase::{DualLobePhaseQuery, GpuDualLobePhase};
 pub use dual_quaternion::{DualQuatTransformQuery, GpuDualQuaternion};
 pub use ear_clip_triangulate::{EarClipAnswer, EarClipQuery, GpuEarClipTriangulate};
@@ -1113,6 +1133,9 @@ pub use minkowski_sum_2d::{GpuMinkowskiSum2d, MinkowskiSum2dQuery, MinkowskiSum2
 pub use mip_error::{GpuMipError, MipErrorQuery, MipErrorResult};
 pub use mis_heuristics::{GpuMisHeuristics, MisHeuristicsQuery, MisHeuristicsResult};
 pub use modeling::{GpuModeling, ModelingQuery};
+pub use mohr_coulomb_angle_trig::{
+    GpuMohrCoulombAngleTrig, MohrCoulombAngleTrigQuery, MohrCoulombAngleTrigResult,
+};
 pub use morton_code::GpuMortonCode;
 pub use motion_blur::{GpuMotionBlur, MotionBlurQuery, MotionBlurResult};
 pub use motion_disocclusion::{
@@ -1465,6 +1488,9 @@ pub use temporal_reprojection::{
     GpuTemporalReprojection, TemporalReprojectionQuery, TemporalReprojectionResult,
 };
 pub use terrain_occlusion::{GpuTerrainOcclusion, TerrainOcclusionQuery};
+pub use tet_quality_metrics::{
+    GpuTetQualityMetrics, TetQualityMetricsQuery, TetQualityMetricsResult,
+};
 pub use tetrahedron_volume::{
     GpuTetrahedronVolume, TetrahedronVolumeQuery, TetrahedronVolumeResult,
 };
