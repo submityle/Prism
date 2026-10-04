@@ -27,6 +27,10 @@
 //!   spawns and despawns add instead of cancelling, surfacing the
 //!   oscillation (thrash) that net accounting hides and that command
 //!   batching targets (design §16.6 / §9 / §10).
+//! * [`system_cost`] — joins per-system self time ([`profiler`]) with
+//!   per-system change volume ([`frame_profile`]) by name, flagging
+//!   hot-and-churny systems (batching targets) vs. compute-bound
+//!   systems (SIMD / owning-group targets) (design §16.6 / §17 / §10).
 //! * [`relation_graph`] — read-only relation-kind and edge-topology summary
 //!   (design §16.6 "关系图谱").
 //! * [`relation_cycles`] — per-relation directed-cycle detection over the
@@ -52,6 +56,7 @@ pub mod relation_cycles;
 pub mod relation_topology;
 pub mod step_inspector;
 pub mod structural_churn;
+pub mod system_cost;
 #[cfg(feature = "std")]
 pub mod time_travel;
 
@@ -65,6 +70,7 @@ pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
 pub use step_inspector::{StepObservation, SteppingInspector};
 pub use structural_churn::{StructuralChurnProfile, SystemChurnEntry};
+pub use system_cost::{SystemCostEntry, SystemCostProfile};
 #[cfg(feature = "std")]
 pub use profiler::SpanRecorder;
 pub use profiler::{FlameGraph, SpanNode, SystemInstrument};

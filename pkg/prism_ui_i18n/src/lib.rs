@@ -11,6 +11,8 @@
 //! * [`Catalog`] — one locale's keyed [`Message`]s (simple or plural).
 //! * [`PluralCategory`] / [`PluralRules`] — integer-only plural selection.
 //! * [`Args`] / [`Value`] — the interpolation argument map.
+//! * [`canonicalize`] / [`lookup`] / [`basic_filter`] — BCP 47 tag
+//!   canonicalization and RFC 4647 locale negotiation.
 //! * [`I18n`] — the reactive facade tying everything together.
 //!
 //! # Example
@@ -47,12 +49,14 @@ extern crate alloc;
 
 pub mod catalog;
 pub mod format;
+pub mod langtag;
 pub mod locale;
 pub mod message;
 pub mod plural;
 
 pub use catalog::{Catalog, Message};
 pub use format::{interpolate, Args, Value};
+pub use langtag::{basic_filter, canonicalize, lookup, truncation_chain};
 pub use locale::{I18n, LocaleId};
 pub use message::{MessageParseError, MessagePattern, ParseErrorKind};
 pub use plural::{
