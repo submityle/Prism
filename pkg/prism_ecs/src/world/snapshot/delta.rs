@@ -24,6 +24,7 @@ use crate::entity::EntitiesState;
 use core::alloc::Layout;
 
 use super::column::SnapshotColumn;
+use super::resource::{clone_resources, SnapshotResource};
 use super::WorldSnapshot;
 
 /// Where a single reconstructed cell's value comes from when
@@ -77,6 +78,11 @@ pub struct SnapshotDelta {
     entities: Vec<crate::entity::Entity>,
     /// One delta per component column present in the target, ascending by id.
     columns: Vec<ColumnDelta>,
+    /// The target's opt-in resources, copied in full (design §14/§16.5).
+    /// Resources are singletons, so they are not delta-compressed — carrying
+    /// them verbatim keeps a reconstructed snapshot byte/tick-identical to a
+    /// direct capture at negligible cost.
+    resources: Vec<SnapshotResource>,
 }
 
 impl SnapshotDelta {
@@ -154,6 +160,7 @@ impl SnapshotDelta {
             entities_state: self.entities_state.clone(),
             entities: self.entities.clone(),
             columns,
+            resources: clone_resources(&self.resources),
         }
     }
 }
@@ -239,6 +246,7 @@ impl WorldSnapshot {
             entities_state: target.entities_state.clone(),
             entities: target.entities.clone(),
             columns,
+            resources: clone_resources(&target.resources),
         }
     }
 }

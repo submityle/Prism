@@ -39,6 +39,7 @@ mod capture;
 mod column;
 mod delta;
 mod hash;
+mod resource;
 mod restore;
 mod rollback;
 
@@ -50,6 +51,7 @@ use crate::entity::{EntitiesState, Entity};
 use crate::world::World;
 
 use column::SnapshotColumn;
+use resource::SnapshotResource;
 
 pub use delta::SnapshotDelta;
 pub use hash::FnvHasher;
@@ -69,6 +71,12 @@ pub struct WorldSnapshot {
     entities: Vec<Entity>,
     /// One column per component that has holders, ascending by [`ComponentId`].
     columns: Vec<SnapshotColumn>,
+    /// Captured opt-in resources, ascending by [`ResourceId`](crate::resource::ResourceId)
+    /// (design §14/§16.5). Only resources explicitly registered via
+    /// [`register_snapshot_resource`](World::register_snapshot_resource) and
+    /// currently holding a value appear here; see the [`resource`] module for
+    /// the opt-in contract and honesty boundary.
+    resources: Vec<SnapshotResource>,
 }
 
 impl WorldSnapshot {
@@ -89,6 +97,12 @@ impl WorldSnapshot {
     #[inline]
     pub fn column_count(&self) -> usize {
         self.columns.len()
+    }
+
+    /// The number of opt-in resources captured with a value (design §14/§16.5).
+    #[inline]
+    pub fn resource_count(&self) -> usize {
+        self.resources.len()
     }
 
     /// The world change tick frozen at capture time.
@@ -136,6 +150,19 @@ impl WorldSnapshot {
                 hasher.write_u8(hashed as u8);
             }
         }
+        // Opt-in resources (design §14): fold each registered resource's id and,
+        // for hashable ones, its value hash; clone-only resources fold only a
+        // presence marker (honesty boundary — no value bytes available).
+        for res in &self.resources {
+            hasher.write_u64(res.id().index() as u64);
+            match res.value_hash() {
+                Some(h) => {
+                    hasher.write_u8(1);
+                    hasher.write_u64(h);
+                }
+                None => hasher.write_u8(0),
+            }
+        }
         hasher.finish()
     }
 
@@ -171,6 +198,20 @@ impl WorldSnapshot {
                 }
             }
         }
+        // Opt-in resources, ascending by id (capture order). Resources carry no
+        // raw bytes and no `PartialEq`, so equality compares id + type +
+        // optional value hash; clone-only resources compare presence/type only.
+        if self.resources.len() != other.resources.len() {
+            return false;
+        }
+        for (a, b) in self.resources.iter().zip(&other.resources) {
+            if a.id() != b.id()
+                || a.type_id() != b.type_id()
+                || a.value_hash() != b.value_hash()
+            {
+                return false;
+            }
+        }
         true
     }
 }
@@ -190,6 +231,29 @@ impl World {
         &mut self,
     ) -> ComponentId {
         self.components_mut().register_hashable::<T>()
+    }
+
+    /// Register resource `T` so its value is captured by
+    /// [`snapshot`](World::snapshot) and restored by [`restore`](World::restore)
+    /// (design §14/§16.5). Opt-in: resources not registered this way are left
+    /// untouched by snapshot/restore, so infrastructure singletons never block
+    /// or distort a rollback. Idempotent; returns the resource id.
+    pub fn register_snapshot_resource<T: crate::resource::Resource + Clone>(
+        &mut self,
+    ) -> crate::resource::ResourceId {
+        self.resources_mut().register_snapshot::<T>()
+    }
+
+    /// Register resource `T` with clone glue *and* deterministic value hashing,
+    /// so it contributes its value to
+    /// [`state_hash`](WorldSnapshot::state_hash) (design §14). Idempotent;
+    /// returns the resource id.
+    pub fn register_snapshot_resource_hashable<
+        T: crate::resource::Resource + Clone + core::hash::Hash,
+    >(
+        &mut self,
+    ) -> crate::resource::ResourceId {
+        self.resources_mut().register_snapshot_hashable::<T>()
     }
 
     /// Capture a [`WorldSnapshot`] of the current world state.

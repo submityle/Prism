@@ -294,3 +294,147 @@ fn restore_rebuilds_owning_group_membership() {
     assert!(g.contains(member));
     assert!(!g.contains(other));
 }
+
+// --- Opt-in resource snapshot (design §14 / §16.5) ---------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Score(u32);
+impl crate::resource::Resource for Score {}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct RoundTimer(u64);
+impl crate::resource::Resource for RoundTimer {}
+
+// A clone-only gameplay resource (holds a value that is not `Hash` in spirit —
+// here `f32`), to exercise the clone-only honesty boundary.
+#[derive(Clone, Debug, PartialEq)]
+struct Multiplier(f32);
+impl crate::resource::Resource for Multiplier {}
+
+// An infrastructure singleton that is deliberately NOT snapshot-registered and
+// must survive snapshot/restore untouched.
+#[derive(Debug, PartialEq)]
+struct DeviceHandle(u64);
+impl crate::resource::Resource for DeviceHandle {}
+
+#[test]
+fn resources_roundtrip_through_restore() {
+    let mut w = world_with_glue();
+    w.register_snapshot_resource_hashable::<Score>();
+    w.register_snapshot_resource_hashable::<RoundTimer>();
+    w.insert_resource(Score(10));
+    w.insert_resource(RoundTimer(5));
+
+    let e = w.spawn((Pos { x: 1, y: 1 }, Vel(2)));
+    let snap = w.snapshot();
+    assert_eq!(snap.resource_count(), 2);
+
+    // Diverge both the component world and the gameplay resources.
+    w.get_mut::<Pos>(e).unwrap().x = 999;
+    w.get_resource_mut::<Score>().unwrap().0 = 777;
+    w.remove_resource::<RoundTimer>();
+
+    w.restore(&snap);
+
+    // Components and resources both revert exactly.
+    assert_eq!(w.get::<Pos>(e).unwrap().x, 1);
+    assert_eq!(w.get_resource::<Score>(), Some(&Score(10)));
+    assert_eq!(w.get_resource::<RoundTimer>(), Some(&RoundTimer(5)));
+    assert!(w.snapshot().structurally_eq(&snap));
+}
+
+#[test]
+fn unregistered_resources_are_untouched_by_snapshot_and_restore() {
+    let mut w = world_with_glue();
+    w.register_snapshot_resource_hashable::<Score>();
+    w.insert_resource(Score(1));
+    // Infrastructure singleton: never registered for snapshotting.
+    w.insert_resource(DeviceHandle(0xDEAD_BEEF));
+
+    let snap = w.snapshot();
+    // Only the opt-in resource is captured; the device handle is ignored.
+    assert_eq!(snap.resource_count(), 1);
+
+    // Mutate both after capture, then restore.
+    w.get_resource_mut::<Score>().unwrap().0 = 42;
+    w.insert_resource(DeviceHandle(0x1234));
+    w.restore(&snap);
+
+    // Score reverts; the unregistered handle keeps its *current* (post-capture)
+    // value — restore must not reach it.
+    assert_eq!(w.get_resource::<Score>(), Some(&Score(1)));
+    assert_eq!(w.get_resource::<DeviceHandle>(), Some(&DeviceHandle(0x1234)));
+}
+
+#[test]
+fn hashable_resource_values_enter_state_hash() {
+    let mut a = World::new();
+    a.register_snapshot_resource_hashable::<Score>();
+    a.insert_resource(Score(1));
+    let mut b = World::new();
+    b.register_snapshot_resource_hashable::<Score>();
+    b.insert_resource(Score(2));
+
+    // Differing hashable resource values must diverge the state hash.
+    assert_ne!(a.snapshot().state_hash(), b.snapshot().state_hash());
+
+    // Aligning the value re-converges the hash.
+    b.get_resource_mut::<Score>().unwrap().0 = 1;
+    assert_eq!(a.snapshot().state_hash(), b.snapshot().state_hash());
+}
+
+#[test]
+fn clone_only_resource_restores_value_but_not_hashed() {
+    let mut w = World::new();
+    // Clone-only: registered without the hashable glue.
+    w.register_snapshot_resource::<Multiplier>();
+    w.insert_resource(Multiplier(2.5));
+
+    let snap = w.snapshot();
+    // Clone-only resources contribute presence but no value hash.
+    let baseline = w.snapshot().state_hash();
+
+    // Value still restores exactly even though it is not hashed.
+    w.get_resource_mut::<Multiplier>().unwrap().0 = 9.0;
+    // A clone-only value change does not move the state hash (honesty boundary).
+    assert_eq!(w.snapshot().state_hash(), baseline);
+    w.restore(&snap);
+    assert_eq!(w.get_resource::<Multiplier>(), Some(&Multiplier(2.5)));
+}
+
+#[test]
+fn absent_registered_resource_is_cleared_on_restore() {
+    let mut w = world_with_glue();
+    w.register_snapshot_resource_hashable::<Score>();
+    // No value inserted at capture time.
+    let snap = w.snapshot();
+    assert_eq!(snap.resource_count(), 0);
+
+    // Insert after capture, then restore: the slot must be cleared to match.
+    w.insert_resource(Score(5));
+    assert!(w.get_resource::<Score>().is_some());
+    w.restore(&snap);
+    assert!(w.get_resource::<Score>().is_none());
+}
+
+#[test]
+fn delta_apply_preserves_resources() {
+    let mut w = world_with_glue();
+    w.register_snapshot_resource_hashable::<Score>();
+    w.insert_resource(Score(3));
+    let base = w.spawn((Pos { x: 1, y: 1 }, Vel(1)));
+    let base_snap = w.snapshot();
+
+    // Advance: change a component and the resource.
+    w.get_mut::<Pos>(base).unwrap().x = 2;
+    w.get_resource_mut::<Score>().unwrap().0 = 99;
+    let target = w.snapshot();
+
+    // A delta reconstructed against its base must be byte/tick identical to a
+    // direct capture — including the opt-in resources.
+    let delta = base_snap.diff(&target);
+    let reconstructed = delta.apply(&base_snap);
+    assert!(reconstructed.structurally_eq(&target));
+    assert_eq!(reconstructed.state_hash(), target.state_hash());
+    assert_eq!(reconstructed.resource_count(), 1);
+}

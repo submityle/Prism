@@ -60,6 +60,7 @@ pub(super) fn capture(world: &World) -> Result<WorldSnapshot, Vec<ComponentId>> 
         entities_state: world.entities.capture_state(),
         entities,
         columns,
+        resources: super::resource::capture_resources(world),
     })
 }
 

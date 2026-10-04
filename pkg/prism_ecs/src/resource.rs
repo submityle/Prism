@@ -53,6 +53,57 @@ impl ResourceId {
     }
 }
 
+/// Type-erased clone glue for a snapshot-registered [`Resource`] (design
+/// §14/§16.5): clones the concrete value behind a `&dyn Any` into a fresh box.
+pub type ResourceCloneFn = fn(&(dyn Any + Send + Sync)) -> Box<dyn Any + Send + Sync>;
+
+/// Type-erased deterministic value-hash glue for a snapshot-registered
+/// [`Resource`] (design §14 逐帧状态哈希): folds the concrete value into a
+/// `&mut dyn Hasher`.
+pub type ResourceHashFn = fn(&(dyn Any + Send + Sync), &mut dyn core::hash::Hasher);
+
+/// Build type-erased clone glue for a resource type `T`.
+fn resource_clone_fn_of<T: Resource + Clone>() -> ResourceCloneFn {
+    fn clone_boxed<T: Resource + Clone>(
+        value: &(dyn Any + Send + Sync),
+    ) -> Box<dyn Any + Send + Sync> {
+        let value = value
+            .downcast_ref::<T>()
+            .expect("resource clone glue invoked on the wrong type");
+        Box::new(value.clone())
+    }
+    clone_boxed::<T>
+}
+
+/// Build type-erased deterministic hash glue for a resource type `T`.
+fn resource_hash_fn_of<T: Resource + core::hash::Hash>() -> ResourceHashFn {
+    fn hash_boxed<T: Resource + core::hash::Hash>(
+        value: &(dyn Any + Send + Sync),
+        hasher: &mut dyn core::hash::Hasher,
+    ) {
+        let value = value
+            .downcast_ref::<T>()
+            .expect("resource hash glue invoked on the wrong type");
+        core::hash::Hash::hash(value, &mut ResourceHasherShim(hasher));
+    }
+    hash_boxed::<T>
+}
+
+/// Adapts a `&mut dyn Hasher` so a generic `Hash::hash<H: Hasher>` can drive it;
+/// forwards every write through the trait object.
+struct ResourceHasherShim<'a>(&'a mut dyn core::hash::Hasher);
+
+impl core::hash::Hasher for ResourceHasherShim<'_> {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0.finish()
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes);
+    }
+}
+
 /// Runtime metadata for one registered resource type.
 struct ResourceInfo {
     name: &'static str,
@@ -60,6 +111,13 @@ struct ResourceInfo {
     /// The type-erased value, or `None` if the type is registered (has an id)
     /// but no value is currently inserted.
     value: Option<Box<dyn Any + Send + Sync>>,
+    /// Opt-in snapshot clone glue (design §14/§16.5). `Some` iff the resource
+    /// was registered via [`Resources::register_snapshot`]; only such resources
+    /// participate in world snapshot/restore.
+    clone: Option<ResourceCloneFn>,
+    /// Opt-in deterministic value-hash glue (design §14). `Some` iff registered
+    /// via [`Resources::register_snapshot_hashable`].
+    hash: Option<ResourceHashFn>,
 }
 
 /// The per-world registry and store of resources.
@@ -108,6 +166,8 @@ impl Resources {
             name: type_name::<T>(),
             type_id,
             value: None,
+            clone: None,
+            hash: None,
         });
         self.by_type.insert(type_id, id);
         id
@@ -179,6 +239,110 @@ impl Resources {
                 .downcast::<T>()
                 .expect("resource slot held the wrong type"),
         )
+    }
+
+    /// Register `T` (idempotently) and attach clone glue so its value is
+    /// captured by [`World::snapshot`](crate::world::World::snapshot) and
+    /// restored by [`restore`](crate::world::World::restore) (design §14/§16.5).
+    ///
+    /// Resource capture is strictly **opt-in**: unlike a component (whose
+    /// resident-but-unregistered value *blocks* a capture), a resource that is
+    /// never registered here is simply left untouched by snapshot/restore. This
+    /// is deliberate — most resources are infrastructure singletons (task
+    /// pools, device handles, asset servers) that are not meaningfully `Clone`
+    /// and must not participate in rollback; only explicitly registered
+    /// gameplay resources (score, timers, RNG cursor) join a snapshot.
+    pub fn register_snapshot<T: Resource + Clone>(&mut self) -> ResourceId {
+        let id = self.register::<T>();
+        self.infos[id.0 as usize].clone = Some(resource_clone_fn_of::<T>());
+        id
+    }
+
+    /// Register `T` (idempotently) with clone glue *and* deterministic value
+    /// hash glue, so it contributes its value to a world
+    /// [`state_hash`](crate::world::snapshot::WorldSnapshot::state_hash)
+    /// (design §14). Returns the resource id.
+    pub fn register_snapshot_hashable<T: Resource + Clone + core::hash::Hash>(
+        &mut self,
+    ) -> ResourceId {
+        let id = self.register_snapshot::<T>();
+        self.infos[id.0 as usize].hash = Some(resource_hash_fn_of::<T>());
+        id
+    }
+
+    /// Every snapshot-registered resource id (clone glue present), ascending by
+    /// id. Includes ids whose value slot is currently empty: capture skips
+    /// those, while restore uses them to clear a stale live value.
+    pub(crate) fn snapshot_registered_ids(&self) -> Vec<ResourceId> {
+        self.infos
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.clone.is_some())
+            .map(|(idx, _)| ResourceId(idx as u32))
+            .collect()
+    }
+
+    /// The [`TypeId`] recorded for resource `id`, if registered.
+    #[inline]
+    pub(crate) fn type_id_of(&self, id: ResourceId) -> Option<TypeId> {
+        self.infos.get(id.0 as usize).map(|i| i.type_id)
+    }
+
+    /// The clone glue registered for resource `id`, if any.
+    #[inline]
+    pub(crate) fn clone_fn_of(&self, id: ResourceId) -> Option<ResourceCloneFn> {
+        self.infos.get(id.0 as usize).and_then(|i| i.clone)
+    }
+
+    /// Clone the current value of snapshot-registered resource `id` into a fresh
+    /// box via its clone glue, or `None` if `id` lacks glue or holds no value.
+    pub(crate) fn clone_value_boxed(&self, id: ResourceId) -> Option<Box<dyn Any + Send + Sync>> {
+        let info = self.infos.get(id.0 as usize)?;
+        let clone = info.clone?;
+        let value = info.value.as_ref()?;
+        Some(clone(&**value))
+    }
+
+    /// Fold the value of snapshot-registered resource `id` into `hasher` via its
+    /// hash glue. Returns `true` iff a value was hashed (hash glue present and a
+    /// value resident), `false` otherwise.
+    pub(crate) fn hash_value_into(
+        &self,
+        id: ResourceId,
+        hasher: &mut dyn core::hash::Hasher,
+    ) -> bool {
+        let Some(info) = self.infos.get(id.0 as usize) else {
+            return false;
+        };
+        match (info.hash, info.value.as_ref()) {
+            (Some(hash), Some(value)) => {
+                hash(&**value, hasher);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Overwrite the value slot of `id` with an already-boxed value (restore
+    /// path). Debug-asserts the box's dynamic type matches the registered one.
+    pub(crate) fn insert_boxed(&mut self, id: ResourceId, value: Box<dyn Any + Send + Sync>) {
+        if let Some(info) = self.infos.get_mut(id.0 as usize) {
+            debug_assert_eq!(
+                (*value).type_id(),
+                info.type_id,
+                "insert_boxed dynamic-type mismatch for resource {}",
+                info.name
+            );
+            info.value = Some(value);
+        }
+    }
+
+    /// Clear the value slot of `id`, keeping its registration. Restore uses this
+    /// to drop a resource that held no value at capture time.
+    pub(crate) fn clear_value(&mut self, id: ResourceId) {
+        if let Some(info) = self.infos.get_mut(id.0 as usize) {
+            info.value = None;
+        }
     }
 
     /// Obtain a raw `*mut T` to the stored value of `T` from a shared borrow,

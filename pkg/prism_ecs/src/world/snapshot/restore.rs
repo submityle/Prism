@@ -179,4 +179,9 @@ pub(super) fn restore(world: &mut World, snapshot: &WorldSnapshot) {
     //    membership against the freshly re-materialised storage so iteration is
     //    correct post-rollback (design §6 / §14). No-op without groups.
     world.rebuild_all_owning_groups();
+
+    // 8. Restore opt-in resources (design §14/§16.5). Independent of entity /
+    //    component storage: snapshot-registered resources are overwritten (or
+    //    cleared) to match the capture; unregistered resources are untouched.
+    super::resource::restore_resources(world, &snapshot.resources);
 }
