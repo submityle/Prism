@@ -821,3 +821,32 @@ fn prism_pack_snorm4x8(v: vec4<f32>) -> u32 {\n\
 fn prism_unpack_snorm4x8(bits: u32) -> vec4<f32> {\n\
     return unpack4x8snorm(bits);\n\
 }\n";
+
+/// Single-sourced WGSL for the 16-bit-per-channel vertex-attribute pack/unpack
+/// helpers mirrored by [`crate::pack16`].
+///
+/// The `pack` helpers fold a `vec2<f32>` into one `u32` of two 16-bit channels
+/// (component 0 in the low half-word) and the `unpack` inverses widen them
+/// back, wrapping the WGSL built-ins `pack2x16unorm` / `pack2x16snorm` /
+/// `unpack2x16unorm` / `unpack2x16snorm`. The WGSL spec defines the quantizers
+/// as `⌊0.5 + N·clamp(c)⌋` (`N` = 65535 unorm / 32767 snorm), the same rounding
+/// the CPU reference uses, so for exactly-representable quantized inputs the
+/// packed half-words match the CPU path **bit-for-bit**; arbitrary inputs may
+/// differ by at most one code at a rounding tie (a documented honest boundary).
+/// The widening (`unpack`) direction is exact on both sides.
+pub const WGSL_PACK16: &str = "\
+fn prism_pack_unorm2x16(v: vec2<f32>) -> u32 {\n\
+    return pack2x16unorm(v);\n\
+}\n\
+\n\
+fn prism_unpack_unorm2x16(bits: u32) -> vec2<f32> {\n\
+    return unpack2x16unorm(bits);\n\
+}\n\
+\n\
+fn prism_pack_snorm2x16(v: vec2<f32>) -> u32 {\n\
+    return pack2x16snorm(v);\n\
+}\n\
+\n\
+fn prism_unpack_snorm2x16(bits: u32) -> vec2<f32> {\n\
+    return unpack2x16snorm(bits);\n\
+}\n";

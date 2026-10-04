@@ -69,6 +69,7 @@ pub mod dual_quat;
 pub mod f16;
 pub mod interval;
 pub mod octahedral;
+pub mod pack16;
 pub mod pack8;
 pub mod shader_mirror;
 pub mod projection;
