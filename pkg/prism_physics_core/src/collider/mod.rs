@@ -578,6 +578,8 @@ pub mod stress_triaxiality;
 pub use stress_triaxiality::{StressTriaxiality, TriaxialityState};
 pub mod stress_path;
 pub use stress_path::StressPath;
+pub mod stress_strainrate_coaxiality;
+pub use stress_strainrate_coaxiality::StressStrainRateCoaxiality;
 
 /// A handle into a [`ShapeRegistry`].
 ///
