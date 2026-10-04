@@ -383,7 +383,7 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 - **可控转储粒度**：mini / full dump 可选，含/不含堆内存，平衡体积与可调试性；默认脱敏（去明文）。
 - **符号化离线化**：转储只带模块+偏移，符号在后端离线还原，发行版不带符号表。
 
-### 24.5 安全加固探测（ASLR / DEP / CFG / 代码签名） —— 🟡 部分已交付（`security` 模块：可移植加固姿态数据模型 + 完整性/沙箱策略）
+### 24.5 安全加固探测（ASLR / DEP / CFG / 代码签名） —— 🟡 部分已交付（`security` 模块：可移植加固姿态数据模型 + 完整性/沙箱策略；**Apple Silicon 真实 OS 活探测 twin 已交付**）
 
 - **缓解措施探测/启用**：探测并（可）启用 ASLR、DEP/NX、Control Flow Guard、stack canary，发行版默认开。
 - **代码签名 / 完整性校验**：探测二进制签名、校验动态库签名（接 §10），拒载未签名模块（反注入/反作弊基础设施，非作弊本身）。
@@ -395,7 +395,15 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 - `signing.rs`：`SigningStatus`（`Trusted`/`SignedUntrusted`/`Invalid`/`Unsigned`/`Unknown`）+ `IntegrityPolicy`（`Observe`/`RejectBad`/`RequireTrusted` 三档严格度 × `allow_unknown`）；`decision(status)` 是纯函数的「拒载未签名/被篡改模块」判定（接 §10 动态库加载，反注入/反作弊基础设施，非作弊本身）。
 - `sandbox.rs`：`SandboxModel`（无沙箱 / Apple App Sandbox / Hardened Runtime / Windows `AppContainer` / Linux seccomp / Linux 命名空间 / Android 沙箱 / Web 浏览器）→ `SandboxCapabilities`（文件/网络 `Access` 可达性 + 可否 fork 子进程），`default_for(os)` 给出**保守**默认（仅 Android/Web 恒定沙箱，桌面默认无沙箱待真实探测）。
 - 顶层 `SecurityPosture::detect()` 用编译期目标 OS 填充基线并 `is_probed()==false`，诚实区分「策略基线」与「真实活进程探测」；`PostureBuilder::mark_probed()` 供真实后端接线。
-覆盖 `src/tests_security.rs` 18 项手算 oracle（含各 OS 基线对拍、完整性判定矩阵全枚举、沙箱能力表），`cargo test -p prism_platform` 全绿、`cargo clippy -p prism_platform --all-targets` 零告警。**仍 PLANNED**：真实 OS 活探测（读运行镜像加载配置 / Authenticode·`codesign`·IMA 验签 / 查实际沙箱 profile）需各 OS syscall，尚未接线，见 §24.8 诚实边界。
+覆盖 `src/tests_security.rs` 18 项手算 oracle（含各 OS 基线对拍、完整性判定矩阵全枚举、沙箱能力表），`cargo test -p prism_platform` 全绿、`cargo clippy -p prism_platform --all-targets` 零告警。
+
+**真实 OS 活探测 twin（已交付，Apple Silicon macOS 真机验证）**：核心 `prism_platform` 守 `no_std + forbid(unsafe)`，真实活探测隔离到 std sibling crate `pkg/prism_platform_os/`（对标拓扑 twin 与各 GPU twin），其 `src/security/mod.rs` 对**本进程**做真实读取：
+- 经 `_dyld_get_image_header(0)` 读主镜像 Mach-O 头：`MH_PIE` 位 → `Mitigation::Pie`、`arm64e` CPU 子类型 → `Mitigation::PointerAuth`。
+- 经 `csops(CS_OPS_STATUS)` 读内核代码签名状态字：`CS_VALID` → `Mitigation::CodeSigningEnforced`、`CS_RUNTIME` → `SandboxModel::AppleHardenedRuntime`。
+- 经核心 `SecurityPosture::builder(Os::Apple)…mark_probed().build()` 产出 `is_probed()==true` 的真实姿态；每处 unsafe 均带 `#[expect(unsafe_code, reason=…)]` + `// SAFETY:` 审计注释。
+**诚实边界**：`csops` 给的是内核签名状态位、**非信任链验签**，故本探测绝不据此上报 `Trusted`；未逐项活探测的 `ASLR`/`DEP·NX`/stack canary 保留 Apple Silicon 架构保证的基线值；`arm64`（非 `arm64e`）构建下 `PointerAuth` 保留基线 `Unknown` 而非谎报 `NotEnforced`。真机验证（沙箱外）：`is_probed()==true`、`code_signing_enforced=enforced`、`pie=enforced`、`sandbox=None`（dev 构建非 Hardened Runtime），`cargo test -p prism_platform_os` 2 项安全测试全绿、`cargo clippy -p prism_platform_os --all-targets` 零告警、无桩。
+
+**仍 PLANNED**：Linux（读 `/proc/self`·`auxv`·IMA）/ Windows（Authenticode·load config）/ Android 的真实活探测后端需各自 OS syscall，本机 macOS 无法真机验证，诚实留空；见 §24.8 诚实边界。
 
 ### 24.6 平台能力数据库与降级矩阵 ✅ 已交付（`capability` 模块）
 
@@ -414,4 +422,4 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 
 ### 24.8 诚实边界
 
-本章全部为 PLANNED 设计目标，无代码。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；24.3 调度钩子的**可移植数据模型 / QoS 映射 / 能耗热策略已交付**（见 `topology` 模块），**真实 OS 拓扑探测 twin（`prism_platform_os` sibling crate，Apple Silicon 真机验证）已交付**，Linux/Windows 拓扑后端与 QoS/能耗 syscall 接线仍 PLANNED；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固的**可移植加固姿态数据模型 / 完整性加载策略 / 沙箱能力映射已交付**（见 `security` 模块），真实 OS 活探测（镜像加载配置读取、OS 验签、沙箱 profile 查询）仍 PLANNED；24.6 能力数据库**已交付**（见 `capability` 模块，贯穿始终、降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章全部为 PLANNED 设计目标，无代码。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；24.3 调度钩子的**可移植数据模型 / QoS 映射 / 能耗热策略已交付**（见 `topology` 模块），**真实 OS 拓扑探测 twin（`prism_platform_os` sibling crate，Apple Silicon 真机验证）已交付**，Linux/Windows 拓扑后端与 QoS/能耗 syscall 接线仍 PLANNED；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固的**可移植加固姿态数据模型 / 完整性加载策略 / 沙箱能力映射已交付**（见 `security` 模块），**Apple Silicon 真实 OS 活探测 twin（`prism_platform_os`，读 Mach-O `MH_PIE`/`arm64e` + `csops` 签名状态，真机验证）已交付**，Linux/Windows/Android 活探测后端仍 PLANNED；24.6 能力数据库**已交付**（见 `capability` 模块，贯穿始终、降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

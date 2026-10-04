@@ -1,7 +1,7 @@
 //! # `prism_platform_os`
 //!
 //! Real-OS probe **twin** for the portable data models in [`prism_platform`]
-//! (design doc §24.3).
+//! (design doc §24.3 CPU topology and §24.5 security posture).
 //!
 //! The core [`prism_platform`] crate is `#![forbid(unsafe_code)]` + `no_std`
 //! and deliberately *probes nothing it cannot prove*: its
@@ -26,14 +26,27 @@
 //! fabricating a layout it cannot confirm; callers fall back to
 //! [`prism_platform::topology::CpuTopology::detect`].
 //!
+//! [`probe_security`] follows the same contract for
+//! [`prism_platform::security::SecurityPosture`]: on Apple Silicon macOS it
+//! reads this process's real Mach-O load flags and code-signing status
+//! (`_dyld_get_image_header`, `csops`) and returns a posture whose
+//! [`is_probed`](prism_platform::security::SecurityPosture::is_probed) is
+//! `true`; on other targets it returns [`ProbeError::Unsupported`].
+//!
 //! [`TopologyBuilder`]: prism_platform::topology::TopologyBuilder
 
 extern crate alloc;
 
+pub mod error;
+pub mod security;
 pub mod sysctl;
 pub mod topology;
 
-pub use topology::{probe_topology, ProbeError};
+pub use error::ProbeError;
+pub use security::probe_security;
+pub use topology::probe_topology;
 
+#[cfg(test)]
+mod tests_security;
 #[cfg(test)]
 mod tests_topology;

@@ -19,47 +19,8 @@
 //! [`CpuTopology::detect`]: prism_platform::topology::CpuTopology::detect
 //! [`CpuTopology::is_probed`]: prism_platform::topology::CpuTopology::is_probed
 
-use prism_platform::topology::{CpuTopology, TopologyError};
-
-/// Why a real topology probe could not produce an `is_probed()` topology.
-#[derive(Debug)]
-pub enum ProbeError {
-    /// The current target has no verified real-probe backend; callers should
-    /// fall back to [`prism_platform::topology::CpuTopology::detect`].
-    Unsupported,
-    /// A required OS query failed (for example `sysctl` denied by a sandbox).
-    Os(std::io::Error),
-    /// The OS values were read but did not form a valid topology.
-    Build(TopologyError),
-}
-
-impl core::fmt::Display for ProbeError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            ProbeError::Unsupported => {
-                f.write_str("no verified real CPU-topology probe for this target")
-            }
-            ProbeError::Os(e) => write!(f, "OS topology query failed: {e}"),
-            ProbeError::Build(e) => write!(f, "probed values rejected: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for ProbeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ProbeError::Os(e) => Some(e),
-            ProbeError::Build(e) => Some(e),
-            ProbeError::Unsupported => None,
-        }
-    }
-}
-
-impl From<TopologyError> for ProbeError {
-    fn from(e: TopologyError) -> Self {
-        ProbeError::Build(e)
-    }
-}
+use crate::error::ProbeError;
+use prism_platform::topology::CpuTopology;
 
 /// Probe the host OS for a genuine [`CpuTopology`] whose
 /// [`CpuTopology::is_probed`] is `true`.
@@ -70,7 +31,7 @@ impl From<TopologyError> for ProbeError {
 /// # Errors
 ///
 /// Returns [`ProbeError::Unsupported`] on targets without a verified backend,
-/// [`ProbeError::Os`] if an OS query fails, or [`ProbeError::Build`] if the
+/// [`ProbeError::Os`] if an OS query fails, or [`ProbeError::Invalid`] if the
 /// probed values are internally inconsistent.
 ///
 /// [`CpuTopology`]: prism_platform::topology::CpuTopology
@@ -143,6 +104,8 @@ mod macos_arm {
             }
         }
 
-        builder.build().map_err(ProbeError::Build)
+        builder
+            .build()
+            .map_err(|e| ProbeError::Invalid(e.to_string()))
     }
 }
