@@ -374,6 +374,10 @@ pub use tet_fem_hoek_brown_force_assembly::{
     assemble_hoek_brown_forces, rest_hoek_brown_states, total_hoek_brown_elastic_potential_energy,
     HoekBrownAssembly,
 };
+pub mod tet_fem_perzyna_viscoplasticity;
+pub use tet_fem_perzyna_viscoplasticity::{
+    return_map_perzyna, PerzynaModel, PerzynaState, PerzynaStep,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
