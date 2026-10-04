@@ -516,6 +516,7 @@ pub mod water_dispersion_offsets;
 pub mod water_fft;
 pub mod water_flip_apic;
 pub mod water_flip_mac;
+pub mod water_foam_advect;
 pub mod water_foam_decay;
 pub mod water_initial_spectrum;
 pub mod water_mg_prolong;
@@ -1258,6 +1259,7 @@ pub use water_dispersion_offsets::{
 pub use water_fft::{GpuWaterFft, WaterFftComplex};
 pub use water_flip_apic::{GpuWaterFlipApic, WaterFlipApicQuery, WaterFlipApicResult};
 pub use water_flip_mac::{GpuWaterFlipMac, WaterFlipMacQuery, WaterFlipMacResult};
+pub use water_foam_advect::{GpuWaterFoamAdvect, WaterFoamAdvect};
 pub use water_foam_decay::{GpuWaterFoamDecay, WaterFoamDecayQuery, WaterFoamDecayResult};
 pub use water_initial_spectrum::{
     GpuWaterInitialSpectrum, WaterInitialSpectrumField, WaterSpectrumComplex, WaterSpectrumKind,
