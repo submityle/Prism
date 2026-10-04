@@ -556,6 +556,8 @@ pub mod granular_transport;
 pub use granular_transport::GranularTransport;
 pub mod granular_self_diffusion;
 pub use granular_self_diffusion::SelfDiffusionAnalysis;
+pub mod stress_invariants;
+pub use stress_invariants::StressInvariants;
 
 /// A handle into a [`ShapeRegistry`].
 ///
