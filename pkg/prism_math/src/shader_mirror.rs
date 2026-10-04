@@ -850,3 +850,56 @@ fn prism_pack_snorm2x16(v: vec2<f32>) -> u32 {\n\
 fn prism_unpack_snorm2x16(bits: u32) -> vec2<f32> {\n\
     return unpack2x16snorm(bits);\n\
 }\n";
+
+/// Single-sourced WGSL for the linear-sRGB <-> `OkLab` perceptual color
+/// conversions mirrored by [`crate::color::oklab::Oklaba`].
+///
+/// `OkLab` (Björn Ottosson, 2020) is the modern perceptually-uniform space used
+/// for color grading and gradient mixing. The forward helper applies the LMS
+/// analysis matrix, a per-channel cube root, and the `OkLab` matrix; the inverse
+/// undoes them. Both carry the fourth lane (alpha) through unchanged. The 3x3
+/// matrix literals match the CPU reference [`Oklaba::from_linear`] /
+/// [`Oklaba::to_linear`] component-for-component.
+///
+/// WGSL has no `cbrt` built-in, so `prism_cbrt` is composed as
+/// `sign(x) * pow(abs(x), 1/3)`. The CPU reference uses `libm::cbrt`
+/// (near-correctly-rounded), so the two differ by a small `pow` rounding error:
+/// this is a documented honest boundary, verified with a tolerance rather than
+/// bit-exactly. The matrix/cube inverse direction is ordinary FMA arithmetic.
+pub const WGSL_OKLAB: &str = "\
+fn prism_cbrt(x: f32) -> f32 {\n\
+    return sign(x) * pow(abs(x), 0.3333333333333333);\n\
+}\n\
+\n\
+fn prism_linear_to_oklab(c: vec4<f32>) -> vec4<f32> {\n\
+    let r = c.x;\n\
+    let g = c.y;\n\
+    let b = c.z;\n\
+    let l = 0.41222147 * r + 0.53633255 * g + 0.051445995 * b;\n\
+    let m = 0.2119035 * r + 0.6806995 * g + 0.10739696 * b;\n\
+    let s = 0.08830246 * r + 0.28171885 * g + 0.6299787 * b;\n\
+    let l_ = prism_cbrt(l);\n\
+    let m_ = prism_cbrt(m);\n\
+    let s_ = prism_cbrt(s);\n\
+    return vec4<f32>(\n\
+        0.21045426 * l_ + 0.7936178 * m_ - 0.004072047 * s_,\n\
+        1.9779985 * l_ - 2.4285922 * m_ + 0.4505937 * s_,\n\
+        0.025904037 * l_ + 0.78277177 * m_ - 0.80867577 * s_,\n\
+        c.w,\n\
+    );\n\
+}\n\
+\n\
+fn prism_oklab_to_linear(c: vec4<f32>) -> vec4<f32> {\n\
+    let l_ = c.x + 0.39633778 * c.y + 0.21580376 * c.z;\n\
+    let m_ = c.x - 0.105561346 * c.y - 0.06385417 * c.z;\n\
+    let s_ = c.x - 0.08948418 * c.y - 1.2914855 * c.z;\n\
+    let l = l_ * l_ * l_;\n\
+    let m = m_ * m_ * m_;\n\
+    let s = s_ * s_ * s_;\n\
+    return vec4<f32>(\n\
+        4.0767417 * l - 3.3077116 * m + 0.23096994 * s,\n\
+        -1.268438 * l + 2.6097574 * m - 0.34131938 * s,\n\
+        -0.0041960863 * l - 0.7034186 * m + 1.7076147 * s,\n\
+        c.w,\n\
+    );\n\
+}\n";
