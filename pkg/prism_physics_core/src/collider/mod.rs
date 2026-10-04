@@ -369,6 +369,11 @@ pub mod tet_fem_hoek_brown_force;
 pub use tet_fem_hoek_brown_force::{
     element_hoek_brown_force, hoek_brown_elastic_potential_energy, HoekBrownForce,
 };
+pub mod tet_fem_hoek_brown_force_assembly;
+pub use tet_fem_hoek_brown_force_assembly::{
+    assemble_hoek_brown_forces, rest_hoek_brown_states, total_hoek_brown_elastic_potential_energy,
+    HoekBrownAssembly,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
