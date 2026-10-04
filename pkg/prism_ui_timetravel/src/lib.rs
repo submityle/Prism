@@ -11,7 +11,10 @@
 //! On top of the timeline, [`Replay`] offers read-only inspection — textual
 //! diffs between any two frames, a per-step change summary, and the ordered
 //! labels — while [`Replayer`] is a forward cursor for driving a backend
-//! through recorded history one frame at a time.
+//! through recorded history one frame at a time. For locating *when* a
+//! regression first appeared, [`bisect`] offers a `git bisect`-style binary
+//! search over the timeline — [`first_matching`] for an automatic predicate
+//! and [`Bisection`] for an interactive good/bad session.
 //!
 //! All navigation is deterministic and free of floating-point math, so the
 //! behavior is fully reproducible and simple to test.
@@ -48,10 +51,12 @@
 
 extern crate alloc;
 
+pub mod bisect;
 pub mod frame;
 pub mod replay;
 pub mod timeline;
 
+pub use bisect::{first_matching, first_matching_index, Bisection};
 pub use frame::Frame;
 pub use replay::{Replay, ReplayStep, Replayer};
 pub use timeline::Timeline;
