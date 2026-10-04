@@ -10,6 +10,8 @@
 use crate::kinds::VariantType;
 use crate::reflect::Reflect;
 use crate::ser::error::SerializeError;
+use crate::ser::pod;
+use crate::ser::primitive::Primitive;
 use crate::type_info::{TypeInfo, VariantKind};
 use crate::{DynamicEnum, DynamicVariant, ReflectRef};
 use alloc::string::String;
@@ -57,6 +59,29 @@ pub trait Encoder {
     fn encode_f64(&mut self, value: f64);
     /// Emit a string leaf.
     fn encode_str(&mut self, value: &str);
+
+    /// Whether this back-end wants homogeneous fixed-width numeric sequences
+    /// delivered as a single bulk blob via [`encode_pod_blob`](Self::encode_pod_blob)
+    /// instead of per-element callbacks (design §24.3).
+    ///
+    /// Defaults to `false`: text and other back-ends keep the per-element path.
+    /// A back-end that returns `true` **must** override
+    /// [`encode_pod_blob`](Self::encode_pod_blob); the driver only calls it when
+    /// this returns `true`.
+    fn wants_pod_blobs(&self) -> bool {
+        false
+    }
+
+    /// Emit a homogeneous fixed-width numeric sequence as one bulk blob.
+    ///
+    /// `raw_le` holds `count` little-endian elements of `primitive`
+    /// back-to-back. Called only when [`wants_pod_blobs`](Self::wants_pod_blobs)
+    /// returns `true`; the default panics to flag a back-end that opted in
+    /// without providing an implementation.
+    fn encode_pod_blob(&mut self, primitive: Primitive, count: usize, raw_le: &[u8]) {
+        let _ = (primitive, count, raw_le);
+        unreachable!("encode_pod_blob called without opting in via wants_pod_blobs");
+    }
 
     /// Begin a named-field struct with `count` fields.
     fn begin_struct(&mut self, count: usize);
@@ -169,10 +194,11 @@ pub fn serialize_value(
                     }
                 }
                 VariantType::Struct => {
-                    let names = enum_struct_field_names(value, e.variant_name())
-                        .ok_or(SerializeError::UnsupportedLeaf {
+                    let names = enum_struct_field_names(value, e.variant_name()).ok_or(
+                        SerializeError::UnsupportedLeaf {
                             type_name: value.type_name(),
-                        })?;
+                        },
+                    )?;
                     for index in 0..count {
                         let name = names.get(index).copied().unwrap_or("");
                         encoder.before_enum_struct_field(name, index);
@@ -187,27 +213,43 @@ pub fn serialize_value(
         }
         ReflectRef::List(list) => {
             let len = list.len();
-            encoder.begin_list(len);
-            for index in 0..len {
-                encoder.before_list_element(index);
-                let element = list
-                    .get(index)
-                    .expect("list element within len must exist");
-                serialize_value(element, encoder)?;
+            let blob = if encoder.wants_pod_blobs() {
+                pod::collect(list.iter_reflect(), len)
+            } else {
+                None
+            };
+            if let Some((primitive, raw)) = blob {
+                encoder.encode_pod_blob(primitive, len, &raw);
+            } else {
+                encoder.begin_list(len);
+                for index in 0..len {
+                    encoder.before_list_element(index);
+                    let element = list.get(index).expect("list element within len must exist");
+                    serialize_value(element, encoder)?;
+                }
+                encoder.end_list();
             }
-            encoder.end_list();
         }
         ReflectRef::Array(array) => {
             let len = array.len();
-            encoder.begin_array(len);
-            for index in 0..len {
-                encoder.before_array_element(index);
-                let element = array
-                    .get(index)
-                    .expect("array element within len must exist");
-                serialize_value(element, encoder)?;
+            let blob = if encoder.wants_pod_blobs() {
+                pod::collect(array.iter_reflect(), len)
+            } else {
+                None
+            };
+            if let Some((primitive, raw)) = blob {
+                encoder.encode_pod_blob(primitive, len, &raw);
+            } else {
+                encoder.begin_array(len);
+                for index in 0..len {
+                    encoder.before_array_element(index);
+                    let element = array
+                        .get(index)
+                        .expect("array element within len must exist");
+                    serialize_value(element, encoder)?;
+                }
+                encoder.end_array();
             }
-            encoder.end_array();
         }
         ReflectRef::Set(set) => {
             let len = set.len();
@@ -294,7 +336,12 @@ fn enum_struct_field_names(value: &dyn Reflect, variant_name: &str) -> Option<Ve
         && let Some(variant) = info.variant(variant_name)
         && let VariantKind::Struct(fields) = variant.kind()
     {
-        return Some(fields.iter().map(crate::type_info::NamedField::name).collect());
+        return Some(
+            fields
+                .iter()
+                .map(crate::type_info::NamedField::name)
+                .collect(),
+        );
     }
     if let Some(dynamic) = value.as_any().downcast_ref::<DynamicEnum>()
         && let DynamicVariant::Struct(fields) = dynamic.variant()

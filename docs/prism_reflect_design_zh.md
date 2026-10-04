@@ -364,13 +364,30 @@ pkg/prism_reflect_macros/      # #[derive(Reflect)] + #[reflect_trait] + 属性�
 - derive 期为每字段生成 `offset_of` 常量 + 类型化 getter/setter，动态路径（如 `"transform.translation.x"`）首次解析后**缓存成偏移链**，后续 O(1) 直取。
 - 序列化/网络/编辑器批量访问同一类型时复用缓存访问计划，避免重复解析。
 
-### 24.3 二进制零拷贝序列化
+### 24.3 二进制零拷贝序列化 ✅ 已交付（定长数值整块编码；非指针级 memcpy）
 
 文本（RON/JSON）用于编辑器/调试；运行时存档/网络走紧凑二进制：
 
-- 定长 POD 字段**整块 memcpy**（零拷贝），变长字段（String/Vec）走长度前缀。
+- 定长 POD 字段整块编码，变长字段（String/Vec）走长度前缀。
 - 版本化二进制头 + StableTypeId，配合 §schema 迁移做跨版本读取。
 - 与 `prism_tasks` 异步 I/O（tasks §24.5）协同做流式反/序列化。
+
+**交付状态**：同质定长数值序列（`Vec<T>`/`[T;N]`，`T` 为 `i8..=u128`/`isize`/`usize`/
+`f32`/`f64`）的二进制编码现走**批量 POD blob 快路径**（`pkg/prism_reflect/src/ser/pod.rs`）。
+在新增的 `node_tag::POD_BLOB = 8` 节点下，整段序列写为「一个 primitive tag + 一个
+`LEB128` 元素数 + 元素小端字节连续排布」，省去逐元素的 `VALUE`/primitive tag 与递归派发，
+并以单次 `extend_from_slice` 落盘。读路径对同一逻辑值同时接受 `POD_BLOB` 与旧的逐元素
+`LIST`/`ARRAY` 编码，故为**向后兼容**的纯增量（旧流永不含该 tag）。所有标量按小端编码，
+blob 跨目标端序逐字节一致，维持格式的跨平台契约。
+
+**诚实边界**：这是**安全**批量路径，非指针级 `memcpy`。工作区 `deny(unsafe_code)`，不借
+buffer 做 `&[T]` transmute；写侧仍逐元素经反射取值并 `to_le_bytes`，读侧逐元素 `from_le_bytes`。
+收益来自消除逐元素帧开销（tag 字节 + 递归）与连续内存写入，而非免拷贝。`bool`/`char`
+（读时需校验）与 `String`（变长）不入快路径，空序列（无法分类首元素类型）回退逐元素编码。
+覆盖 118 项 `prism_reflect` 库测试（含 5 项新 POD 用例：tag 落位、`i32`/`f32`/`[u8;N]`
+往返、空序列回退、旧 `LIST` 帧仍可解码）。
+
+**优先级**：高（存档/网络热路径地基，已落地于真实二进制序列化路径，非独立库桩）。
 
 ### 24.4 部分 Patch 与反射 Diff
 

@@ -104,6 +104,12 @@ pub mod node_tag {
     pub const SET: u8 = 6;
     /// Tag for a leaf value node.
     pub const VALUE: u8 = 7;
+    /// Tag for a bulk POD (fixed-width numeric) sequence node (design §24.3).
+    ///
+    /// A backward-compatible addition: streams written before this tag existed
+    /// never contain it, and the reader accepts both this and the per-element
+    /// `LIST`/`ARRAY` encodings for the same logical value.
+    pub const POD_BLOB: u8 = 8;
 }
 
 impl Primitive {
@@ -250,7 +256,10 @@ impl<'a> ByteReader<'a> {
     /// # Errors
     /// Returns [`DeserializeError::UnexpectedEof`] at end of input.
     pub fn read_u8(&mut self) -> Result<u8, DeserializeError> {
-        let byte = *self.bytes.get(self.pos).ok_or(DeserializeError::UnexpectedEof)?;
+        let byte = *self
+            .bytes
+            .get(self.pos)
+            .ok_or(DeserializeError::UnexpectedEof)?;
         self.pos += 1;
         Ok(byte)
     }
@@ -261,8 +270,14 @@ impl<'a> ByteReader<'a> {
     /// Returns [`DeserializeError::UnexpectedEof`] when fewer than `len` bytes
     /// remain.
     pub fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], DeserializeError> {
-        let end = self.pos.checked_add(len).ok_or(DeserializeError::UnexpectedEof)?;
-        let slice = self.bytes.get(self.pos..end).ok_or(DeserializeError::UnexpectedEof)?;
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or(DeserializeError::UnexpectedEof)?;
+        let slice = self
+            .bytes
+            .get(self.pos..end)
+            .ok_or(DeserializeError::UnexpectedEof)?;
         self.pos = end;
         Ok(slice)
     }

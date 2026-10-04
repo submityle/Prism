@@ -18,10 +18,11 @@
 
 use crate::kinds::VariantType;
 use crate::reflect::Reflect;
-use crate::ser::de::{Schema, resolve, root_schema};
-use crate::ser::encode::{Encoder, serialize_value};
+use crate::ser::de::{resolve, root_schema, Schema};
+use crate::ser::encode::{serialize_value, Encoder};
+use crate::ser::pod;
 use crate::ser::error::{DeserializeError, SerializeError};
-use crate::ser::primitive::{ByteReader, Primitive, leaf_primitive, node_tag, write_varint};
+use crate::ser::primitive::{leaf_primitive, node_tag, write_varint, ByteReader, Primitive};
 use crate::ser::stable_id::StableTypeId;
 use crate::type_info::TypeInfo;
 use crate::{
@@ -117,6 +118,17 @@ impl Encoder for BinaryEncoder {
         self.out.push(Primitive::String.tag());
         write_varint(&mut self.out, value.len() as u64);
         self.out.extend_from_slice(value.as_bytes());
+    }
+
+    fn wants_pod_blobs(&self) -> bool {
+        true
+    }
+
+    fn encode_pod_blob(&mut self, primitive: Primitive, count: usize, raw_le: &[u8]) {
+        self.out.push(node_tag::POD_BLOB);
+        self.out.push(primitive.tag());
+        write_varint(&mut self.out, count as u64);
+        self.out.extend_from_slice(raw_le);
     }
 
     fn begin_struct(&mut self, count: usize) {
@@ -327,32 +339,43 @@ fn read_info_node(
                     DynamicVariant::Struct(values)
                 }
             };
-            let mut dynamic =
-                DynamicEnum::new(variant_index, variant.name(), dynamic_variant);
+            let mut dynamic = DynamicEnum::new(variant_index, variant.name(), dynamic_variant);
             dynamic.set_represented_type_name(enum_info.type_name());
             Ok(Box::new(dynamic))
         }
         TypeInfo::List(list_info) => {
-            expect_tag(tag, node_tag::LIST, "List")?;
-            let len = reader.read_len()?;
             let item_schema = resolve(registry, list_info.item_type_name())?;
             let mut dynamic = DynamicList::new();
             dynamic.set_represented_type_name(list_info.type_name());
-            for _ in 0..len {
-                let child = read_node(reader, registry, &item_schema)?;
-                dynamic.push_boxed(child);
+            if tag == node_tag::POD_BLOB {
+                for element in read_pod_blob(reader, &item_schema)? {
+                    dynamic.push_boxed(element);
+                }
+            } else {
+                expect_tag(tag, node_tag::LIST, "List")?;
+                let len = reader.read_len()?;
+                for _ in 0..len {
+                    let child = read_node(reader, registry, &item_schema)?;
+                    dynamic.push_boxed(child);
+                }
             }
             Ok(Box::new(dynamic))
         }
         TypeInfo::Array(array_info) => {
-            expect_tag(tag, node_tag::ARRAY, "Array")?;
-            let len = reader.read_len()?;
             let item_schema = resolve(registry, array_info.item_type_name())?;
             let mut dynamic = DynamicArray::new();
             dynamic.set_represented_type_name(array_info.type_name());
-            for _ in 0..len {
-                let child = read_node(reader, registry, &item_schema)?;
-                dynamic.push_boxed(child);
+            if tag == node_tag::POD_BLOB {
+                for element in read_pod_blob(reader, &item_schema)? {
+                    dynamic.push_boxed(element);
+                }
+            } else {
+                expect_tag(tag, node_tag::ARRAY, "Array")?;
+                let len = reader.read_len()?;
+                for _ in 0..len {
+                    let child = read_node(reader, registry, &item_schema)?;
+                    dynamic.push_boxed(child);
+                }
             }
             Ok(Box::new(dynamic))
         }
@@ -419,9 +442,7 @@ fn read_primitive(
         Primitive::I128 => Box::new(i128::from_le_bytes(reader.read_array::<16>()?)),
         Primitive::Isize => {
             let value = i64::from_le_bytes(reader.read_array::<8>()?);
-            Box::new(
-                isize::try_from(value).map_err(|_| DeserializeError::TrailingData)?,
-            )
+            Box::new(isize::try_from(value).map_err(|_| DeserializeError::TrailingData)?)
         }
         Primitive::U8 => Box::new(reader.read_u8()?),
         Primitive::U16 => Box::new(u16::from_le_bytes(reader.read_array::<2>()?)),
@@ -430,28 +451,61 @@ fn read_primitive(
         Primitive::U128 => Box::new(u128::from_le_bytes(reader.read_array::<16>()?)),
         Primitive::Usize => {
             let value = u64::from_le_bytes(reader.read_array::<8>()?);
-            Box::new(
-                usize::try_from(value).map_err(|_| DeserializeError::TrailingData)?,
-            )
+            Box::new(usize::try_from(value).map_err(|_| DeserializeError::TrailingData)?)
         }
-        Primitive::F32 => {
-            Box::new(f32::from_bits(u32::from_le_bytes(reader.read_array::<4>()?)))
-        }
-        Primitive::F64 => {
-            Box::new(f64::from_bits(u64::from_le_bytes(reader.read_array::<8>()?)))
-        }
+        Primitive::F32 => Box::new(f32::from_bits(u32::from_le_bytes(
+            reader.read_array::<4>()?,
+        ))),
+        Primitive::F64 => Box::new(f64::from_bits(u64::from_le_bytes(
+            reader.read_array::<8>()?,
+        ))),
         Primitive::String => {
             let len = reader.read_len()?;
             let bytes = reader.read_bytes(len)?;
-            let text = String::from_utf8(bytes.to_vec())
-                .map_err(|_| DeserializeError::InvalidUtf8)?;
+            let text =
+                String::from_utf8(bytes.to_vec()).map_err(|_| DeserializeError::InvalidUtf8)?;
             Box::new(text)
         }
     })
 }
 
+/// Read a bulk POD sequence body (design §24.3): a validating primitive tag,
+/// a varint element count, then the little-endian element bytes.
+///
+/// The sequence's `item_schema` must be a POD-eligible leaf primitive matching
+/// the stored primitive tag; otherwise the stream is rejected as corrupt.
+fn read_pod_blob(
+    reader: &mut ByteReader<'_>,
+    item_schema: &Schema<'_>,
+) -> Result<Vec<Box<dyn Reflect>>, DeserializeError> {
+    let Schema::Primitive(expected) = item_schema else {
+        return Err(DeserializeError::KindMismatch {
+            expected: "Value",
+            found: "PodBlob",
+        });
+    };
+    if pod::pod_width(*expected).is_none() {
+        return Err(DeserializeError::LeafTypeMismatch {
+            expected: expected.type_name(),
+        });
+    }
+    let stored_tag = reader.read_u8()?;
+    let found = Primitive::from_tag(stored_tag)?;
+    if found != *expected {
+        return Err(DeserializeError::LeafTypeMismatch {
+            expected: expected.type_name(),
+        });
+    }
+    let count = reader.read_len()?;
+    pod::read_blob(reader, *expected, count)
+}
+
 /// Validate a node tag against the kind the schema expects at this position.
-fn expect_tag(found: u8, expected: u8, expected_kind: &'static str) -> Result<(), DeserializeError> {
+fn expect_tag(
+    found: u8,
+    expected: u8,
+    expected_kind: &'static str,
+) -> Result<(), DeserializeError> {
     if found == expected {
         return Ok(());
     }
@@ -473,6 +527,116 @@ fn node_kind_name(tag: u8) -> Result<&'static str, DeserializeError> {
         node_tag::MAP => "Map",
         node_tag::SET => "Set",
         node_tag::VALUE => "Value",
+        node_tag::POD_BLOB => "PodBlob",
         other => return Err(DeserializeError::UnknownNodeTag(other)),
     })
+}
+
+#[cfg(test)]
+mod pod_tests {
+    //! Bulk POD blob encoding (design §24.3): fast-path firing, round-trips,
+    //! and backward-compatible decoding of the legacy per-element framing.
+
+    use super::{from_binary, node_tag, to_binary, MAGIC, VERSION};
+    use crate::ser::primitive::{prim_tag, write_varint};
+    use crate::ser::stable_id::StableTypeId;
+    use crate::{FromReflect, Typed, TypeRegistry};
+    use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn registry() -> TypeRegistry {
+        let mut registry = TypeRegistry::new();
+        registry.register::<Vec<i32>>();
+        registry.register::<Vec<f32>>();
+        registry.register::<Vec<String>>();
+        registry.register::<[u8; 4]>();
+        registry
+    }
+
+    /// A numeric `Vec` must serialize through the bulk `POD_BLOB` tag, not the
+    /// per-element `LIST` framing.
+    #[test]
+    fn numeric_vec_uses_pod_blob_tag() {
+        let value: Vec<i32> = vec![1, -2, 3, -4, 5];
+        let bytes = to_binary(&value).expect("serialize");
+        // header = MAGIC(4) + VERSION(1) + root id(8); body opens at index 13.
+        assert_eq!(bytes[13], node_tag::POD_BLOB);
+        assert_eq!(bytes[14], prim_tag::I32);
+        // 5 elements * 4 bytes, with no per-element VALUE/primitive tags.
+        // body = tag + prim + varint(5) + 20 bytes = 23; total = 13 + 23.
+        assert_eq!(bytes.len(), 13 + 1 + 1 + 1 + 20);
+    }
+
+    /// Round-trip numeric lists and arrays through the bulk path.
+    #[test]
+    fn pod_blob_round_trips() {
+        let registry = registry();
+
+        let ints: Vec<i32> = vec![7, 8, 9, i32::MIN, i32::MAX];
+        let bytes = to_binary(&ints).expect("serialize ints");
+        let decoded = from_binary(&bytes, &registry, <Vec<i32> as Typed>::type_info())
+            .expect("decode ints");
+        assert_eq!(<Vec<i32>>::from_reflect(&*decoded).unwrap(), ints);
+
+        let floats: Vec<f32> = vec![0.0, -1.5, f32::INFINITY, f32::NEG_INFINITY];
+        let bytes = to_binary(&floats).expect("serialize floats");
+        let decoded = from_binary(&bytes, &registry, <Vec<f32> as Typed>::type_info())
+            .expect("decode floats");
+        assert_eq!(<Vec<f32>>::from_reflect(&*decoded).unwrap(), floats);
+
+        let array: [u8; 4] = [10, 20, 30, 40];
+        let bytes = to_binary(&array).expect("serialize array");
+        let decoded = from_binary(&bytes, &registry, <[u8; 4] as Typed>::type_info())
+            .expect("decode array");
+        assert_eq!(<[u8; 4]>::from_reflect(&*decoded).unwrap(), array);
+    }
+
+    /// An empty numeric `Vec` has no element to classify, so it falls back to
+    /// the per-element `LIST` encoding and still round-trips.
+    #[test]
+    fn empty_vec_falls_back_to_list() {
+        let registry = registry();
+        let value: Vec<i32> = Vec::new();
+        let bytes = to_binary(&value).expect("serialize");
+        assert_eq!(bytes[13], node_tag::LIST);
+        let decoded =
+            from_binary(&bytes, &registry, <Vec<i32> as Typed>::type_info()).expect("decode");
+        assert!(<Vec<i32>>::from_reflect(&*decoded).unwrap().is_empty());
+    }
+
+    /// A `Vec<String>` is variable-width, so it keeps per-element framing.
+    #[test]
+    fn string_vec_keeps_list_tag() {
+        let value: Vec<String> = vec![String::from("a"), String::from("bc")];
+        let bytes = to_binary(&value).expect("serialize");
+        assert_eq!(bytes[13], node_tag::LIST);
+    }
+
+    /// A stream written with the legacy per-element `LIST` framing must still
+    /// decode: the reader accepts both tags for the same logical value.
+    #[test]
+    fn legacy_list_framing_still_decodes() {
+        let registry = registry();
+        let elements: [i32; 3] = [100, -200, 300];
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        bytes.push(VERSION);
+        let root_id =
+            StableTypeId::of_path(<Vec<i32> as Typed>::type_info().type_name()).value();
+        bytes.extend_from_slice(&root_id.to_le_bytes());
+        // Hand-build the LIST body the pre-§24.3 encoder would have produced.
+        bytes.push(node_tag::LIST);
+        write_varint(&mut bytes, elements.len() as u64);
+        for value in elements {
+            bytes.push(node_tag::VALUE);
+            bytes.push(prim_tag::I32);
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+
+        let decoded =
+            from_binary(&bytes, &registry, <Vec<i32> as Typed>::type_info()).expect("decode");
+        assert_eq!(<Vec<i32>>::from_reflect(&*decoded).unwrap(), elements.to_vec());
+    }
 }

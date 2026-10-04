@@ -30,6 +30,7 @@ mod binary;
 mod de;
 mod encode;
 mod error;
+mod pod;
 mod primitive;
 mod ron;
 mod stable_id;
