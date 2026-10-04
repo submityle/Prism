@@ -398,13 +398,14 @@ pkg/prism_math/
 - 查找表（缓动曲线采样、定点超越函数表、噪声梯度表）`const` 生成，烧进只读段，免运行时初始化与堆分配。
 - 坐标系转换矩阵（Y-up↔Z-up、右手↔左手）作为 `const` 提供，上层做互操作零运行时成本。
 
-### 24.3 区间算术 / 误差界（Interval Arithmetic，保守剔除/CCD）
+### 24.3 区间算术 / 误差界（Interval Arithmetic，保守剔除/CCD）—— ✅ 已交付（`interval` 模块）
 
 对「必须保守、宁可多算不可漏判」的场景提供带误差界的区间类型：
 
 - `Interval<f32>`、`IntervalVec3`：运算结果为**保守区间**（含上下界），用于保守视锥/遮挡剔除（宁可误判可见，绝不误删）、光线包围盒保守求交、CCD 保守步进（防穿透）。
 - 浮点舍入方向控制（向外取整），保证区间**真包含**真值；供 `prism_physics` CCD、`prism_render` 遮挡剔除。
 - 与 §17.5 精确谓词互补：精确谓词给「符号绝对正确」，区间算术给「范围绝对包含」。
+- **交付状态**：`interval` 模块已落地 `Interval{lo,hi}`（`+ - * /`、`neg`/`abs`/`sqrt`/`hull`/`intersect`/`overlaps`/`contains`）与 `IntervalVec3`（保守 AABB：`contains`/`overlaps`/`hull`/`+ -`）。`no_std` 不可移植切换 FP 舍入模式，故采「向最近舍入 + 单 ULP 外扩」（`next_up`/`next_down` 位级步进）保证真值恒被包含，跨平台确定。除零的除数区间跨 0 → 返回 `UNBOUNDED`。correctness oracle：5e4 组标量四则运算 f64 包含断言 + 2e4 组宽区间四角点包含 + ULP 步进夹逼。`cargo clippy --all-targets` 零告警、8 项单测全绿。
 
 ### 24.4 补偿求和 / 扩展精度（Kahan / Neumaier / double-double）
 
@@ -458,4 +459,4 @@ pkg/prism_math/
 
 ### 24.10 诚实边界
 
-本章全部 PLANNED，无代码。落地优先级建议：**24.4 补偿求和**（直接服务确定归并，随 tasks M4）与 **24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）优先；24.3 区间算术随物理 CCD/渲染遮挡剔除；24.6 SH 随 `prism_gi`；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数随 IK/物理雅可比；24.8 曲面随地形；24.9 大世界定点随联机开放世界。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章全部 PLANNED，无代码。落地优先级建议：**24.4 补偿求和**（直接服务确定归并，随 tasks M4）与 **24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）优先；24.3 区间算术 **已交付**（`interval`）；24.6 SH 随 `prism_gi`；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数随 IK/物理雅可比；24.8 曲面随地形；24.9 大世界定点随联机开放世界。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
