@@ -1364,3 +1364,80 @@ fn prism_simplex_get3(xin: f32, yin: f32, zin: f32) -> f32 {\n\
     let n3 = prism_simplex_corner3(x3, y3, z3, prism_simplex_grad(gi3));\n\
     return 32.0 * (n0 + n1 + n2 + n3);\n\
 }\n";
+
+/// Single-sourced fractal (multi-octave) WGSL fragment: fBm, turbulence, and
+/// ridged multifractal, mirroring [`prism_math::noise::Fractal`]'s `fbm2` /
+/// `fbm3` / `turbulence2` / `ridged2` operator-for-operator (amplitude-weighted
+/// octave sum with `freq *= lacunarity`, `amp *= gain`, normalized by the
+/// accumulated amplitude).
+///
+/// These octave loops call `prism_base_sample2` / `prism_base_sample3`, which
+/// are **not** defined here: the host (`prism_math_gpu::fractal`) prepends one
+/// base-noise fragment ([`WGSL_PERLIN`] or [`WGSL_SIMPLEX`]) plus a two-line
+/// alias that forwards `prism_base_sample*` to that source's `get2` / `get3`.
+/// Only one base fragment is prepended per kernel, because both declare the
+/// same `@binding(1)` permutation storage array and prepending both would
+/// collide. The fractal math is therefore single-sourced and cannot drift from
+/// the CPU reference.
+pub const WGSL_FRACTAL: &str = "\
+fn prism_fbm2(x: f32, y: f32, octaves: u32, lacunarity: f32, gain: f32, frequency: f32) -> f32 {\n\
+    var freq = frequency;\n\
+    var amp = 1.0;\n\
+    var sum = 0.0;\n\
+    var norm = 0.0;\n\
+    let oct = max(octaves, 1u);\n\
+    for (var o = 0u; o < oct; o = o + 1u) {\n\
+        sum = sum + amp * prism_base_sample2(x * freq, y * freq);\n\
+        norm = norm + amp;\n\
+        freq = freq * lacunarity;\n\
+        amp = amp * gain;\n\
+    }\n\
+    return sum / norm;\n\
+}\n\
+\n\
+fn prism_fbm3(x: f32, y: f32, z: f32, octaves: u32, lacunarity: f32, gain: f32, frequency: f32) -> f32 {\n\
+    var freq = frequency;\n\
+    var amp = 1.0;\n\
+    var sum = 0.0;\n\
+    var norm = 0.0;\n\
+    let oct = max(octaves, 1u);\n\
+    for (var o = 0u; o < oct; o = o + 1u) {\n\
+        sum = sum + amp * prism_base_sample3(x * freq, y * freq, z * freq);\n\
+        norm = norm + amp;\n\
+        freq = freq * lacunarity;\n\
+        amp = amp * gain;\n\
+    }\n\
+    return sum / norm;\n\
+}\n\
+\n\
+fn prism_turbulence2(x: f32, y: f32, octaves: u32, lacunarity: f32, gain: f32, frequency: f32) -> f32 {\n\
+    var freq = frequency;\n\
+    var amp = 1.0;\n\
+    var sum = 0.0;\n\
+    var norm = 0.0;\n\
+    let oct = max(octaves, 1u);\n\
+    for (var o = 0u; o < oct; o = o + 1u) {\n\
+        sum = sum + amp * abs(prism_base_sample2(x * freq, y * freq));\n\
+        norm = norm + amp;\n\
+        freq = freq * lacunarity;\n\
+        amp = amp * gain;\n\
+    }\n\
+    return sum / norm;\n\
+}\n\
+\n\
+fn prism_ridged2(x: f32, y: f32, octaves: u32, lacunarity: f32, gain: f32, frequency: f32) -> f32 {\n\
+    var freq = frequency;\n\
+    var amp = 1.0;\n\
+    var sum = 0.0;\n\
+    var norm = 0.0;\n\
+    let oct = max(octaves, 1u);\n\
+    for (var o = 0u; o < oct; o = o + 1u) {\n\
+        let n = 1.0 - abs(prism_base_sample2(x * freq, y * freq));\n\
+        sum = sum + amp * n * n;\n\
+        norm = norm + amp;\n\
+        freq = freq * lacunarity;\n\
+        amp = amp * gain;\n\
+    }\n\
+    return sum / norm;\n\
+}\n\
+";
