@@ -389,17 +389,24 @@ buffer 做 `&[T]` transmute；写侧仍逐元素经反射取值并 `to_le_bytes`
 
 **优先级**：高（存档/网络热路径地基，已落地于真实二进制序列化路径，非独立库桩）。
 
-### 24.4 部分 Patch 与反射 Diff
+### 24.4 部分 Patch 与反射 Diff ✅ 已交付（M5 core：`diff`/`merge`/`Patch::apply`）
 
 对两个同类型值做反射级 diff，产出**最小变更集**；或把部分 patch 应用到实例：
 
 ```rust
-let patch = reflect_diff(&old, &new);   // 仅含变化字段
-reflect_apply(&mut target, &patch);     // 部分覆盖
+let patch = diff(&old, &new);        // Patch，仅含变化字段（pkg/prism_reflect/src/diff.rs）
+patch.apply(&mut target)?;           // 部分覆盖（等价 merge(&mut target, &patch)）
 ```
 
 - 用途:热重载(改一个字段不重建整对象)、编辑器撤销/重做、网络增量(§24.5)、预制体覆盖(prefab override)。
 - diff 递归进嵌套结构/集合,带路径定位。
+
+**交付状态**：`diff.rs`（482 行）随 M5 落地并已 commit。`Patch` 枚举对
+struct/tuple-struct/enum（同变体）/list（`modified`+`appended`）/array/map
+（`modified`+`inserted`）/set（新增成员）各携**最小变更子集**，不变字段记 `Patch::Unchanged`
+或从父变更列表省略；`Replace(Box<dyn Reflect>)` 兜底整体替换。`apply`/`merge` 把 patch
+就地回写，kind/字段/键缺失或容器拒收追加项时返回 `DiffError`。tests_m6 的
+`replicated_diff_*` 用例覆盖「仅变化字段参与、非结构体被拒、无变化报 Unchanged」。
 
 ### 24.5 反射驱动的字段级网络增量
 
