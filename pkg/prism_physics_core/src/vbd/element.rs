@@ -41,6 +41,47 @@ pub fn outer(a: Vec3, b: Vec3) -> Mat3 {
     Mat3::from_cols(a * b.x, a * b.y, a * b.z)
 }
 
+/// Computes the elastic force and PSD Hessian a single Hookean stretch spring
+/// contributes to the endpoint at `pa`, given the other endpoint `pb`, without
+/// minting [`ParticleHandle`]s or a positions store.
+///
+/// This is the handle-free sibling of [`SpringElement::contribution`] for
+/// callers (such as the strand `VBD` integrator) that evaluate one spring at a
+/// time against a Gauss-Seidel-updated poly-line. It reproduces that method's
+/// arithmetic bit-for-bit for endpoint `a`: `force = -k (l - rest) n` and the
+/// PSD-clamped Hessian `k n n^T + max(0, k (l - rest) / l) (I - n n^T)`, with a
+/// zero contribution for a degenerate (coincident) spring.
+#[must_use]
+pub fn spring_contribution_between(
+    pa: Vec3,
+    pb: Vec3,
+    rest_length: Real,
+    stiffness: Real,
+) -> SpringContribution {
+    let d = pa - pb;
+    let l = d.length();
+    if l <= EPSILON {
+        return SpringContribution {
+            force: Vec3::ZERO,
+            hessian: Mat3::ZERO,
+        };
+    }
+    let n = d / l;
+    let c = l - rest_length;
+    let k = stiffness;
+
+    // Force is the negative energy gradient at `pa`: `-(k C n)`.
+    let force = n * (-(k * c));
+
+    // Raw Hessian `k n n^T + k (C / l) (I - n n^T)`, PSD-projected by clamping
+    // the transverse coefficient non-negative.
+    let nnt = outer(n, n);
+    let transverse = (k * c / l).max(0.0);
+    let hessian = nnt * k + (Mat3::IDENTITY - nnt) * transverse;
+
+    SpringContribution { force, hessian }
+}
+
 /// A Hookean stretch spring between two particles.
 ///
 /// Springs are the structural, shear, and bending edges of cloth, the links of
@@ -200,6 +241,42 @@ mod tests {
 
     fn h(i: u32) -> ParticleHandle {
         ParticleHandle::from_index(i)
+    }
+
+    #[test]
+    fn handle_free_contribution_matches_element_method() {
+        // The handle-free convenience must reproduce `SpringElement::contribution`
+        // for endpoint `a` bit-for-bit across stretched, compressed, and
+        // degenerate configurations.
+        let cases = [
+            (
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                1.0,
+                10.0,
+            ),
+            (
+                Vec3::new(0.3, 0.0, 0.0),
+                Vec3::new(0.9, 0.0, 0.0),
+                1.0,
+                250.0,
+            ),
+            (
+                Vec3::new(1.0, 2.0, 3.0),
+                Vec3::new(-1.0, 0.5, 2.0),
+                2.5,
+                73.0,
+            ),
+            (Vec3::ZERO, Vec3::ZERO, 1.0, 10.0),
+        ];
+        for &(pa, pb, rest, k) in &cases {
+            let positions = [pa, pb];
+            let via_element =
+                SpringElement::new(h(0), h(1), rest, k).contribution(h(0), &positions);
+            let via_free = spring_contribution_between(pa, pb, rest, k);
+            assert_eq!(via_free.force, via_element.force);
+            assert_eq!(via_free.hessian, via_element.hessian);
+        }
     }
 
     #[test]

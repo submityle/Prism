@@ -37,6 +37,8 @@ pub mod system;
 pub use body::VbdBody;
 pub use coloring::{color_springs, VbdColoring};
 pub use config::VbdConfig;
-pub use element::{outer, SpringContribution, SpringElement, SpringSet};
+pub use element::{
+    outer, spring_contribution_between, SpringContribution, SpringElement, SpringSet,
+};
 pub use solver::VbdSolver;
 pub use system::VertexSystem;

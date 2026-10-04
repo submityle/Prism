@@ -15,6 +15,8 @@
 //! * [`FixedList`] — constant-time metrics for uniform item sizes.
 //! * [`VariableList`] — prefix-sum metrics for per-item sizes, with a binary
 //!   search from pixel offset to item index.
+//! * [`DynamicVariableList`] — Fenwick-tree metrics for per-item sizes with
+//!   `O(log n)` incremental single-item resize, for lazily measured lists.
 //! * [`RecyclePool`] — deterministic reuse of a bounded set of render slots as
 //!   items scroll in and out of view.
 //! * [`virtualize_fixed`] / [`virtualize_variable`] — assemble the windowed
@@ -44,12 +46,14 @@
 
 extern crate alloc;
 
+mod dynamic;
 mod fixed;
 mod pool;
 mod variable;
 mod viewport;
 mod virtualize;
 
+pub use dynamic::DynamicVariableList;
 pub use fixed::FixedList;
 pub use pool::{RecyclePool, SlotId};
 pub use variable::VariableList;
