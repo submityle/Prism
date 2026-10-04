@@ -636,3 +636,48 @@ fn prism_ray_aabb(origin: vec3<f32>, dir: vec3<f32>, lo: vec3<f32>, hi: vec3<f32
     out.normal = normal;\n\
     return out;\n\
 }\n";
+
+/// Single-sourced WGSL for quaternion interpolation (`slerp` / `nlerp`).
+///
+/// Mirrors the CPU references [`prism_math::Quat::slerp`] and
+/// [`prism_math::Quat::nlerp`] step for step: both take the shortest arc by
+/// flipping `b` when `dot(a, b) < 0`; `nlerp` is a normalized component-wise
+/// lerp; `slerp` falls back to `nlerp` when the endpoints are nearly colinear
+/// (`dot > 0.9995`, the CPU `DOT_THRESHOLD`) and otherwise blends by
+/// `sin((1-t)θ)/sinθ` and `sin(tθ)/sinθ` with `θ = acos(clamp(dot,-1,1))`.
+///
+/// Parity, not bit-exactness: the device evaluates `acos`/`sin`/`normalize`
+/// with Metal fast-math rounding (and the CPU routes the same transcendentals
+/// through `libm` for determinism), so the twin agrees within tolerance, not
+/// bit-for-bit. The quaternions `vec4<f32>` are laid out `xyzw`, matching
+/// [`pack_quat`].
+pub const WGSL_QUAT_INTERP: &str = "\
+fn prism_quat_dot(a: vec4<f32>, b: vec4<f32>) -> f32 {\n\
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;\n\
+}\n\
+\n\
+fn prism_quat_nlerp(a: vec4<f32>, b_in: vec4<f32>, t: f32) -> vec4<f32> {\n\
+    var b = b_in;\n\
+    if (prism_quat_dot(a, b) < 0.0) {\n\
+        b = -b;\n\
+    }\n\
+    let r = a + (b - a) * t;\n\
+    return normalize(r);\n\
+}\n\
+\n\
+fn prism_quat_slerp(a: vec4<f32>, b_in: vec4<f32>, t: f32) -> vec4<f32> {\n\
+    var b = b_in;\n\
+    var d = prism_quat_dot(a, b);\n\
+    if (d < 0.0) {\n\
+        b = -b;\n\
+        d = -d;\n\
+    }\n\
+    if (d > 0.9995) {\n\
+        return prism_quat_nlerp(a, b, t);\n\
+    }\n\
+    let theta = acos(clamp(d, -1.0, 1.0));\n\
+    let sin_theta = sin(theta);\n\
+    let s0 = sin((1.0 - t) * theta) / sin_theta;\n\
+    let s1 = sin(t * theta) / sin_theta;\n\
+    return a * s0 + b * s1;\n\
+}\n";
