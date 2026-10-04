@@ -542,6 +542,8 @@ pub mod haff_cooling;
 pub use haff_cooling::HaffCooling;
 pub mod nonaffine_displacement;
 pub use nonaffine_displacement::NonaffineField;
+pub mod force_chain_network;
+pub use force_chain_network::ForceChainNetwork;
 
 /// A handle into a [`ShapeRegistry`].
 ///
