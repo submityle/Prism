@@ -62,11 +62,13 @@ mod escape;
 
 pub mod compare;
 pub mod diff;
+pub mod hunk;
 pub mod layout_snapshot;
 pub mod serialize;
 
 pub use compare::{Comparison, Snapshot};
 pub use diff::diff;
+pub use hunk::{diff_hunks, format_unified, Hunk, HunkLine};
 pub use layout_snapshot::{
     capture_layout, format_fixed, parse_layout, serialize_layout, LayoutParseError, LayoutQuery,
     LayoutSnapshotNode,

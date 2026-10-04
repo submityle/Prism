@@ -17,7 +17,7 @@ use crate::escape::unescape;
 use crate::serialize::INDENT_UNIT;
 
 /// A single aligned step produced by the diff alignment.
-enum Op {
+pub(crate) enum Op {
     /// A line present and identical on both sides, at the given expected index.
     Equal(usize),
     /// A line present only in the expected text, at the given index.
@@ -94,7 +94,7 @@ pub fn diff(expected: &str, actual: &str) -> String {
 }
 
 /// Computes a longest-common-subsequence alignment of the two line slices.
-fn align(expected: &[&str], actual: &[&str]) -> Vec<Op> {
+pub(crate) fn align(expected: &[&str], actual: &[&str]) -> Vec<Op> {
     let n = expected.len();
     let m = actual.len();
     let mut table = vec![vec![0usize; m + 1]; n + 1];
