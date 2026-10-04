@@ -576,6 +576,8 @@ pub mod stress_dilatancy;
 pub use stress_dilatancy::StressDilatancy;
 pub mod stress_triaxiality;
 pub use stress_triaxiality::{StressTriaxiality, TriaxialityState};
+pub mod stress_path;
+pub use stress_path::StressPath;
 
 /// A handle into a [`ShapeRegistry`].
 ///
