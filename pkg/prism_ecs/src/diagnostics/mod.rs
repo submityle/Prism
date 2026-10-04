@@ -13,6 +13,9 @@
 //!   ranking (design §16.6 / §22 risk #5).
 //! * [`change_volume`] — dirty-chunk and changed/added-cell accounting that
 //!   quantifies the design headline "成本 ∝ 变化量".
+//! * [`component_distribution`] — component-first distribution / spread view:
+//!   per-component archetype spread, live-instance count, and chunk
+//!   footprint, ranked most-spread-first (design §16.6 / §5.3 / §22 risk #5).
 //! * [`frame_profile`] — per-system change-volume ranking folded from a
 //!   [`step_inspector`] frame trace (design §16.6 "帧级变更量").
 //! * [`profiler`] — nested system-span timing and flame-graph export
@@ -35,6 +38,7 @@
 
 pub mod archetype_fragmentation;
 pub mod change_volume;
+pub mod component_distribution;
 pub mod frame_profile;
 pub mod inspector;
 pub mod profiler;
@@ -47,6 +51,7 @@ pub mod time_travel;
 
 pub use archetype_fragmentation::{ArchetypeFragmentEntry, ArchetypeFragmentationReport};
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
+pub use component_distribution::{ComponentDistributionEntry, ComponentDistributionReport};
 pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
 pub use relation_graph::{RelationGraphReport, RelationKindReport};
