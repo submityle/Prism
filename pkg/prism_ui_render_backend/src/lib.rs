@@ -60,6 +60,7 @@
 extern crate alloc;
 
 pub mod batch;
+pub mod circle;
 pub mod clip;
 pub mod curve;
 pub mod draw;
@@ -78,6 +79,7 @@ pub mod sdf;
 pub mod triangulate;
 
 pub use batch::{batch, instance_count, Batch, GlyphInstance, RectInstance, ShadowInstance};
+pub use circle::{min_enclosing_circle, Circle};
 pub use clip::clip_polygon;
 pub use curve::CubicBezier;
 pub use draw::{DrawCommand, DrawList, GlyphCmd, LayerCmd, RectCmd, ShadowCmd};
