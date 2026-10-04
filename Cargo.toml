@@ -26,6 +26,7 @@ members = [
   "pkg/prism_math",
   "pkg/prism_math_gpu",
   "pkg/prism_transform_gpu",
+  "pkg/prism_platform_os",
   "pkg/prism_asset",
   "pkg/prism_render_driver",
   "pkg/prism_input",

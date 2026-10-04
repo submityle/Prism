@@ -1,0 +1,17 @@
+[package]
+name = "prism_platform_os"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Real-OS probe twin for prism_platform's portable topology data model (design §24.3). A std sibling crate that reads genuine CPU topology (hybrid P/E split, L2 cache clusters, SMT, NUMA) from the host OS and fills prism_platform's validated CpuTopology so is_probed() == true. The core prism_platform crate stays no_std + forbid(unsafe); the real syscall / FFI probe lives here. Verified on Apple Silicon macOS; other targets return an honest Unsupported."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_platform = { path = "../prism_platform" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true

@@ -7,7 +7,7 @@
 > - **系统/底层**：mimalloc / jemalloc（虚拟内存与大页策略）、Breakpad / Crashpad（minidump）、hwloc（拓扑 / NUMA）
 > 本文为纯经典系统编程路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：高级异步 I/O(io_uring·IOCP·批量提交)/虚拟内存进阶(稀疏堆·按需提交·GPU 共享内存)/混合核·NUMA·能耗感知调度钩子/高级崩溃观测(跨进程 Crashpad·稳定堆栈哈希分桶)/安全加固探测(ASLR·DEP·CFG·代码签名)/平台能力数据库与降级矩阵/Web·主机后端进阶；均为 PLANNED，无代码）
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：高级异步 I/O(io_uring·IOCP·批量提交)/虚拟内存进阶(稀疏堆·按需提交·GPU 共享内存)/混合核·NUMA·能耗感知调度钩子/高级崩溃观测(跨进程 Crashpad·稳定堆栈哈希分桶)/安全加固探测(ASLR·DEP·CFG·代码签名)/平台能力数据库与降级矩阵/Web·主机后端进阶；多数已随消费方接线落地，详见第 24 章各小节「交付状态」）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: **无 Prism 上游依赖或仅依赖 `prism_utils`**（与 `prism_math` / `prism_utils` 同处依赖图根级）；底层经典 crate `libc` / `rustix` / `windows-sys` / `parking_lot`(可选) / `libloading`(可选)
 - 层级定位: L1 地基根级（被 `prism_time`(时钟) / `prism_tasks`(线程) / `prism_app`(主循环/命令行) / `prism_asset`(文件/VFS) / `prism_diagnostic`(minidump) / `prism_math`(SIMD 探测) / `prism_script`(动态库热重载) 直接依赖）
@@ -361,7 +361,7 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 - **GPU 共享 / 可见内存**：抽象 host-visible / upload / readback 内存域（接 `prism_render_driver` RHI），统一 CPU-GPU 内存桥。
 - **内存域标签**：虚存区段带类别标签，供 `prism_diagnostic` §24.3 内存图谱按域可视化。
 
-### 24.3 混合核 / NUMA / 能耗感知调度钩子 —— ✅ 部分已交付（`topology` 模块：可移植数据模型 + QoS 映射 + 能耗/热策略）
+### 24.3 混合核 / NUMA / 能耗感知调度钩子 —— ✅ 可移植数据模型 + 真实 OS 拓扑探测 twin 已交付（`topology` 模块 + `prism_platform_os` sibling crate）
 
 - **拓扑即数据**：导出完整 CPU 拓扑（P/E-core、SMT、NUMA 节点、缓存共享域，接 §12），供 `prism_tasks` 构建绑核策略。
 - **能耗/热感知**：读取平台能耗状态/热节流信号（移动/主机关键），提供钩子让调度器在过热时降背景负载、让关键路径上性能核。
@@ -370,7 +370,9 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 
 **交付状态（已落地 CPU/数据侧，真实 OS 探测待接线）**：`pkg/prism_platform/src/topology/`（`mod`/`qos`/`power` 三子模块，纯 `core`+`alloc`、`#![forbid(unsafe_code)]`、全平台可测）落地了「拓扑即数据」的可移植内核：`CpuTopology` + `TopologyBuilder` 把 P/E-core 类别（`CoreKind`）、SMT 兄弟（`physical_id` 共享）、NUMA 节点、LLC 缓存域建模为一次性校验的只读数据，供 `prism_tasks` §24.6 的 `TopologyDescriptor` 直接消费；`CpuTopology::detect()` 在 `std` 下给出诚实的 best-effort（真实逻辑核数 + 单一扁平节点 + `CoreKind::Unknown`），并用 `is_probed()==false` 显式标注「这不是真正的 P/E/NUMA/缓存读数」，杜绝把回退当真值。`qos::qos_hint(os, lane)` 把引擎车道（`EngineQos` Critical…Background）映射到各 OS 的 QoS 类（Apple `QOS_CLASS_*`、Windows QoS 档、Linux `nice`），纯数据、无 syscall，供线程后端照单执行。`power::PowerState::policy()` 由电源/热/低电量状态推导出可测的 `PowerPolicy`（背景负载配额、是否偏好能效核、帧率上限），接 `prism_time` 帧节流与调度器背景降载。覆盖 `src/tests_topology.rs` 13 项手算 oracle 测试，`cargo test -p prism_platform` 全绿、`cargo clippy -p prism_platform --all-targets` 零告警、无桩实现。
 
-**仍属 PLANNED（需真实 OS 接线）**：从 `/sys`/`GetLogicalProcessorInformationEx`/`sysctl` 真实读取 P/E 拓扑与缓存几何来填充 `TopologyBuilder`；订阅 Apple `thermalState`/Android `thermalStatus`/电源事件来驱动 `PowerState`；在线程后端真正调用 `pthread_set_qos_class_self_np`/`SetThreadInformation`/`setpriority`。本波只落地其中与具体 OS 无关、可移植且可测的数据模型与策略层。
+**真实 OS 拓扑探测 twin（本波已交付并真机验证）**：新建 sibling crate `pkg/prism_platform_os/`（`std`，专职真实 OS 读取；核心 `prism_platform` 保持 `no_std + #![forbid(unsafe_code)]` 不变，二者分工对标工作区的 GPU twin 模式——可移植纯 `core` 数据模型 + 设备/OS 侧 sibling 填充并对真实硬件验证）。`sysctl/mod.rs` 用窄 FFI（`libc::sysctlbyname`，每处 `unsafe` 均 `#[expect(unsafe_code, reason)]`+`// SAFETY:` 审计、长度先探后读、兼容 `int`/`int64` 两种编码）读 macOS 内核；`topology/mod.rs::probe_topology()` 消费 `hw.nperflevels`/`hw.perflevel{N}.logicalcpu`/`hw.perflevel{N}.cpusperl2`，经核心 crate 的 `TopologyBuilder` 产出 `is_probed()==true` 的真实 `CpuTopology`：Apple Silicon 的性能级 0=P 簇、级 1=E 簇、无 SMT（`physical_id==logical_id`）、统一内存单 NUMA 节点、`cpusperl2` 定义共享 L2（LLC）域。真机（Apple M2）验证读出 8 逻辑核 = 4 P（LLC 域 0）+ 4 E（LLC 域 1），`is_probed()==true`，与 `std::available_parallelism` 一致。`src/tests_topology.rs` 2 项真机 oracle（运行期一致性 + Apple Silicon 混合核/无 SMT/单节点/P·E 分属不同 L2 域）在沙盒外全绿，`cargo clippy -p prism_platform_os --all-targets` 零告警、无桩实现。**诚实边界**：`probe_topology()` 仅在已验证的 Apple Silicon macOS（`aarch64`）给出真实读数，其余 target 返回 `ProbeError::Unsupported`（而非臆造 SMT/NUMA 布局），调用方回退 `CpuTopology::detect()`；`sysctl` 在沙盒内被拒时返回 `ProbeError::Os`，须在沙盒外运行方能真机验证。
+
+**仍属 PLANNED（需各自 OS 接线）**：Linux `/sys/devices/system/cpu/` 与 Windows `GetLogicalProcessorInformationEx` 的真实拓扑探测后端（本机为 macOS，无法真机验证故未落地，诚实留空而非造桩）；订阅 Apple `thermalState`/Android `thermalStatus`/电源事件来驱动 `PowerState`；在线程后端真正调用 `pthread_set_qos_class_self_np`/`SetThreadInformation`/`setpriority`。QoS 映射与能耗/热策略层仍只落地与具体 OS 无关、可移植且可测的数据模型。
 
 ### 24.4 高级崩溃观测（跨进程 Crashpad / 稳定堆栈哈希分桶）
 
@@ -412,4 +414,4 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 
 ### 24.8 诚实边界
 
-本章全部为 PLANNED 设计目标，无代码。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；24.3 调度钩子的**可移植数据模型 / QoS 映射 / 能耗热策略已交付**（见 `topology` 模块），真实 OS 探测与 syscall 接线仍 PLANNED；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固的**可移植加固姿态数据模型 / 完整性加载策略 / 沙箱能力映射已交付**（见 `security` 模块），真实 OS 活探测（镜像加载配置读取、OS 验签、沙箱 profile 查询）仍 PLANNED；24.6 能力数据库**已交付**（见 `capability` 模块，贯穿始终、降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章全部为 PLANNED 设计目标，无代码。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；24.3 调度钩子的**可移植数据模型 / QoS 映射 / 能耗热策略已交付**（见 `topology` 模块），**真实 OS 拓扑探测 twin（`prism_platform_os` sibling crate，Apple Silicon 真机验证）已交付**，Linux/Windows 拓扑后端与 QoS/能耗 syscall 接线仍 PLANNED；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固的**可移植加固姿态数据模型 / 完整性加载策略 / 沙箱能力映射已交付**（见 `security` 模块），真实 OS 活探测（镜像加载配置读取、OS 验签、沙箱 profile 查询）仍 PLANNED；24.6 能力数据库**已交付**（见 `capability` 模块，贯穿始终、降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
