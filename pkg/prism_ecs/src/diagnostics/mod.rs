@@ -15,6 +15,13 @@
 //! * [`archetype_fragmentation`] — archetype-explosion and chunk
 //!   internal-fragmentation accounting with a worst-occupancy-first
 //!   ranking (design §16.6 / §22 risk #5).
+//! * [`blob_reference_health`] — reference-count and orphan census over a
+//!   working set of [`BlobHandle`](crate::blob::BlobHandle)s resolved
+//!   against a [`BlobStore`](crate::blob::BlobStore): per-handle liveness /
+//!   refcount / byte length / working-set reference sites, deduplication
+//!   visibility, and resident-but-unreferenced orphan accounting — the leak
+//!   signal a content-addressed refcounted arena cannot otherwise raise
+//!   (design §16.4 / §16.6).
 //! * [`change_tick_health`] — change-detection tick-saturation census
 //!   (design §10 / §14): per-archetype oldest added / changed / chunk-version
 //!   age relative to the world change tick, with a registry-wide saturation
@@ -194,6 +201,7 @@
 //! them separately out of the world's sparse-set registry.
 
 pub mod archetype_fragmentation;
+pub mod blob_reference_health;
 pub mod change_tick_health;
 pub mod change_volume;
 pub mod churn_cost;
@@ -240,6 +248,7 @@ pub mod time_travel;
 pub mod weak_reference_health;
 
 pub use archetype_fragmentation::{ArchetypeFragmentEntry, ArchetypeFragmentationReport};
+pub use blob_reference_health::{BlobReferenceEntry, BlobReferenceHealth};
 pub use change_tick_health::{ArchetypeTickAgeEntry, TickAgeReport};
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use churn_cost::{ChurnCostEntry, ChurnCostProfile};
