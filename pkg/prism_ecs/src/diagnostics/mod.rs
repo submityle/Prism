@@ -23,6 +23,11 @@
 //! * [`component_memory`] — component-first byte-level memory: per-type
 //!   reserved / live / wasted column payload, ranked heaviest-first; the
 //!   byte dual of [`memory_footprint`] (design §16.6 / §5.3 / §17).
+//! * [`storage_distribution`] — registration-time classification of every
+//!   component type by physical [`StorageType`](crate::component::StorageType):
+//!   per-bucket type count, zero-sized / dynamic / drop-glue counts, and the
+//!   element size / alignment profile — a glance at the §6 four-state storage
+//!   mix (design §16.6 / §6 / §17).
 //! * [`frame_profile`] — per-system change-volume ranking folded from a
 //!   [`step_inspector`] frame trace (design §16.6 "帧级变更量").
 //! * [`profiler`] — nested system-span timing and flame-graph export
@@ -64,6 +69,7 @@ pub mod relation_graph;
 pub mod relation_cycles;
 pub mod relation_topology;
 pub mod step_inspector;
+pub mod storage_distribution;
 pub mod structural_churn;
 pub mod system_cost;
 #[cfg(feature = "std")]
@@ -80,6 +86,7 @@ pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
 pub use step_inspector::{StepObservation, SteppingInspector};
+pub use storage_distribution::{StorageBucketEntry, StorageDistributionReport};
 pub use structural_churn::{StructuralChurnProfile, SystemChurnEntry};
 pub use system_cost::{SystemCostEntry, SystemCostProfile};
 #[cfg(feature = "std")]
