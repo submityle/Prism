@@ -112,11 +112,19 @@
 //!   hot reused templates, and `IsA` cycle detection — surfacing deep
 //!   resolution chains, authoring hubs, and modelling bugs
 //!   (design §16.6 / §16.3 / §11).
+//! * [`sparse_set_occupancy`] — sparse-set storage occupancy / keyspace-
+//!   fragmentation census (design §6 四态存储): the out-of-band counterpart
+//!   to the Table-path reports above — per sparse-set component and
+//!   world-wide live count, dense payload / bookkeeping bytes, the
+//!   sparse-index bytes implied by the current entity-index span, and a
+//!   `sparse_overhead_permille` that flags sets which have decayed into
+//!   mostly-empty index space (design §16.6 / §6).
 //! * [`time_travel`] — frame-indexed world snapshot record/seek (`std` only).
 //!
-//! All occupancy and change-volume figures describe the chunked Table-backed
-//! storage (design §6); `SparseSet` components are not laid out in archetype
-//! chunks and are therefore outside these reports.
+//! Every occupancy and change-volume figure except [`sparse_set_occupancy`]
+//! describes the chunked Table-backed storage (design §6); `SparseSet`
+//! components are not laid out in archetype chunks, so that module accounts
+//! them separately out of the world's sparse-set registry.
 
 pub mod archetype_fragmentation;
 pub mod change_tick_health;
@@ -142,6 +150,7 @@ pub mod relation_graph;
 pub mod relation_cycles;
 pub mod relation_topology;
 pub mod required_closure;
+pub mod sparse_set_occupancy;
 pub mod step_inspector;
 pub mod storage_distribution;
 pub mod structural_churn;
@@ -174,6 +183,7 @@ pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
 pub use required_closure::{RequiredClosureEntry, RequiredClosureReport};
+pub use sparse_set_occupancy::{SparseSetOccupancyEntry, SparseSetOccupancyReport};
 pub use step_inspector::{StepObservation, SteppingInspector};
 pub use storage_distribution::{StorageBucketEntry, StorageDistributionReport};
 pub use structural_churn::{StructuralChurnProfile, SystemChurnEntry};
