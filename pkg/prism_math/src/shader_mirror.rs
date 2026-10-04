@@ -404,3 +404,37 @@ fn prism_morton_encode3(x: u32, y: u32, z: u32) -> u32 {\n\
 fn prism_morton_decode3(code: u32) -> vec3<u32> {\n\
     return vec3<u32>(prism_morton_compact1by2(code), prism_morton_compact1by2(code >> 1u), prism_morton_compact1by2(code >> 2u));\n\
 }\n";
+/// Single-sourced WGSL for GPU-driven view-frustum culling, mirroring the CPU
+/// classifiers [`crate::intersect::frustum_sphere`] /
+/// [`crate::intersect::frustum_aabb`]. Each plane is passed as a `vec4<f32>`
+/// `(normal.xyz, d)` with an inward-facing unit normal, so the signed distance
+/// is `dot(normal, p) + d`; the returned `u32` matches the
+/// [`Containment`](crate::intersect::Containment) discriminants exactly
+/// (`0 = Outside`, `1 = Intersecting`, `2 = Inside`). The arithmetic is the
+/// identical plane/p-vertex test, so the discrete classification agrees with
+/// the CPU for any geometry not within fast-math rounding of a plane boundary
+/// (the standard conservative-culling caveat).
+pub const WGSL_FRUSTUM_CULL: &str = "\
+fn prism_frustum_classify_sphere(planes: array<vec4<f32>, 6>, center: vec3<f32>, radius: f32) -> u32 {\n\
+    var result = 2u;\n\
+    for (var i = 0u; i < 6u; i = i + 1u) {\n\
+        let pl = planes[i];\n\
+        let dist = dot(pl.xyz, center) + pl.w;\n\
+        if (dist < -radius) { return 0u; }\n\
+        if (dist < radius) { result = 1u; }\n\
+    }\n\
+    return result;\n\
+}\n\
+\n\
+fn prism_frustum_classify_aabb(planes: array<vec4<f32>, 6>, center: vec3<f32>, extent: vec3<f32>) -> u32 {\n\
+    var result = 2u;\n\
+    for (var i = 0u; i < 6u; i = i + 1u) {\n\
+        let pl = planes[i];\n\
+        let n = pl.xyz;\n\
+        let r = extent.x * abs(n.x) + extent.y * abs(n.y) + extent.z * abs(n.z);\n\
+        let s = dot(n, center) + pl.w;\n\
+        if (s < -r) { return 0u; }\n\
+        if (s < r) { result = 1u; }\n\
+    }\n\
+    return result;\n\
+}\n";

@@ -35,6 +35,7 @@ extern crate alloc;
 
 pub mod buffer;
 pub mod context;
+pub mod frustum_cull;
 pub mod morton;
 pub mod projection;
 pub mod quat;
@@ -43,6 +44,7 @@ pub mod skinning;
 pub mod view;
 
 pub use context::{GpuContext, block_on};
+pub use frustum_cull::GpuFrustumCull;
 pub use morton::GpuMorton;
 pub use projection::{GpuProjection, ProjectionKind};
 pub use quat::GpuQuatRotate;
