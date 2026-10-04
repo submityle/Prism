@@ -199,6 +199,169 @@ fn sdr_reproject_specular(
     return out;
 }
 
+// --- real reprojection pass ---------------------------------------------------
+// The scheduled entry point. One invocation per framebuffer texel reconstructs
+// the pixel's world-space surface position from the SSR prepass reverse-Z depth,
+// forms the virtual reflection point and its roughness-weighted reprojection
+// confidence (via the parity-tested helpers above), reprojects the surface into
+// the previous frame to fetch the specular history, and rejects disoccluded
+// taps by a world-space distance guard. It writes the reprojected history
+// (`rgb`) plus the reprojection confidence (`a`) the history-clamp pass blends.
+//
+// The specular history buffer is resident per surface pixel, so the history is
+// fetched at the *surface* reprojection; the virtual-point parallax enters only
+// through `reproj.confidence`, which down-weights fast-moving glossy highlights
+// exactly as the golden `reproject_specular` prescribes. The group-0 contract
+// is frozen here and mirrored by the Rust bind-group layout that drives it.
+
+struct SpecDenoiseReprojectConfig {
+    // Current camera: clip (NDC, reverse-Z) -> world, to rebuild the surface.
+    world_from_clip: mat4x4<f32>,
+    // Previous camera: world -> clip (NDC), to find the history texel.
+    prev_clip_from_world: mat4x4<f32>,
+    // Previous camera: clip (NDC) -> world, to rebuild the stored surface for
+    // the world-space disocclusion guard.
+    prev_world_from_clip: mat4x4<f32>,
+    // Current camera: view -> world rotation, lifting the view-space G-buffer
+    // normal into the world space the reprojection maths runs in.
+    world_from_view: mat4x4<f32>,
+    curr_cam_pos: vec3<f32>,
+    parallax_sensitivity: f32,
+    prev_cam_pos: vec3<f32>,
+    virtual_exponent: f32,
+    width: u32,
+    height: u32,
+    min_confidence: f32,
+    // Relative world-space disocclusion tolerance (fraction of the view
+    // distance): a reprojected tap is rejected once the stored prev surface has
+    // drifted further than `depth_rejection * dist(cam, surface)`.
+    depth_rejection: f32,
+}
+
+@group(0) @binding(0) var<uniform> sdr_config: SpecDenoiseReprojectConfig;
+// Packed G-buffer: rgb = view normal * 2 - 1, a = perceptual roughness.
+@group(0) @binding(1) var sdr_nr: texture_2d<f32>;
+// SSR trace per-pixel hit distance (view-space units) in the red channel.
+@group(0) @binding(2) var sdr_hit: texture_2d<f32>;
+// SSR prepass reverse-Z device depth (1.0 = near, 0.0 = background/sky).
+@group(0) @binding(3) var sdr_depth: texture_2d<f32>;
+// Previous frame's accumulated specular history: rgb = radiance, a = age/conf.
+@group(0) @binding(4) var sdr_prev_history: texture_2d<f32>;
+// Previous frame's reverse-Z device depth, for the disocclusion guard.
+@group(0) @binding(5) var sdr_prev_depth: texture_2d<f32>;
+// Write-only reprojected history (rgb) + reprojection confidence (a).
+@group(0) @binding(6) var sdr_reprojected: texture_storage_2d<rgba16float, write>;
+
+fn sdr_params_from_config() -> SdrParams {
+    var p: SdrParams;
+    p.parallax_sensitivity = sdr_config.parallax_sensitivity;
+    p.virtual_exponent = sdr_config.virtual_exponent;
+    p.min_confidence = sdr_config.min_confidence;
+    return p;
+}
+
+// Reconstruct the current-frame world-space position from framebuffer UV +
+// reverse-Z device depth through the current `world_from_clip`.
+fn sdr_reconstruct_world_position(uv: vec2<f32>, device_depth: f32) -> vec3<f32> {
+    let ndc = vec3<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, device_depth);
+    let world = sdr_config.world_from_clip * vec4<f32>(ndc, 1.0);
+    return world.xyz / world.w;
+}
+
+// Reconstruct a previous-frame world position from a prev-frame UV + prev
+// reverse-Z device depth through `prev_world_from_clip` (disocclusion guard).
+fn sdr_reconstruct_prev_world_position(uv: vec2<f32>, device_depth: f32) -> vec3<f32> {
+    let ndc = vec3<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, device_depth);
+    let world = sdr_config.prev_world_from_clip * vec4<f32>(ndc, 1.0);
+    return world.xyz / world.w;
+}
+
+// Project a world position into the previous frame, returning `(uv, device_z)`.
+// Points behind the previous camera (`w <= 0`) return an out-of-range uv so the
+// caller treats them as invalid.
+fn sdr_project_prev(world_pos: vec3<f32>) -> vec3<f32> {
+    let clip = sdr_config.prev_clip_from_world * vec4<f32>(world_pos, 1.0);
+    if clip.w <= 1.0e-6 {
+        return vec3<f32>(-1.0, -1.0, -1.0);
+    }
+    let ndc = clip.xyz / clip.w;
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 1.0 - (ndc.y * 0.5 + 0.5));
+    return vec3<f32>(uv, ndc.z);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn spec_denoise_reproject(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= sdr_config.width || id.y >= sdr_config.height {
+        return;
+    }
+    let pixel = vec2<i32>(i32(id.x), i32(id.y));
+    let extent = vec2<f32>(f32(sdr_config.width), f32(sdr_config.height));
+    let max_coord = vec2<i32>(i32(sdr_config.width) - 1, i32(sdr_config.height) - 1);
+
+    let device_depth = textureLoad(sdr_depth, pixel, 0).x;
+    if device_depth <= 0.0 {
+        // Background / sky: no reflection history to reproject.
+        textureStore(sdr_reprojected, pixel, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    let uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) / extent;
+    let world_pos = sdr_reconstruct_world_position(uv, device_depth);
+
+    let nr = textureLoad(sdr_nr, pixel, 0);
+    let view_normal = nr.xyz * 2.0 - 1.0;
+    let world_normal = sdr_safe_normalize(
+        (sdr_config.world_from_view * vec4<f32>(view_normal, 0.0)).xyz
+    );
+    let roughness = clamp(nr.w, 0.0, 1.0);
+    let hit = textureLoad(sdr_hit, pixel, 0).x;
+
+    let view_dir = sdr_safe_normalize(sdr_config.curr_cam_pos - world_pos);
+    let params = sdr_params_from_config();
+
+    // Virtual-reflection reprojection: the roughness-weighted virtual point and
+    // its parallax drive the confidence; the surface position anchors the fetch.
+    let reproj = sdr_reproject_specular(
+        world_pos,
+        world_pos,
+        view_dir,
+        world_normal,
+        hit,
+        roughness,
+        sdr_config.prev_cam_pos,
+        sdr_config.curr_cam_pos,
+        params,
+    );
+
+    let prev = sdr_project_prev(world_pos);
+    let in_bounds = prev.x >= 0.0 && prev.x <= 1.0 && prev.y >= 0.0 && prev.y <= 1.0;
+
+    var history = vec3<f32>(0.0, 0.0, 0.0);
+    var confidence = 0.0;
+    if in_bounds {
+        let prev_px = clamp(
+            vec2<i32>(i32(prev.x * extent.x), i32(prev.y * extent.y)),
+            vec2<i32>(0, 0),
+            max_coord,
+        );
+        let prev_depth = textureLoad(sdr_prev_depth, prev_px, 0).x;
+        if prev_depth > 0.0 {
+            let prev_uv = (vec2<f32>(prev_px) + vec2<f32>(0.5)) / extent;
+            let prev_world = sdr_reconstruct_prev_world_position(prev_uv, prev_depth);
+            let drift = length(prev_world - world_pos);
+            let scale = max(length(world_pos - sdr_config.curr_cam_pos), 1.0e-3);
+            let tol = max(sdr_config.depth_rejection, 1.0e-4) * scale;
+            if drift <= tol {
+                let ph = textureLoad(sdr_prev_history, prev_px, 0);
+                history = sdr_sanitize_vec(ph.xyz);
+                confidence = reproj.confidence;
+            }
+        }
+    }
+
+    textureStore(sdr_reprojected, pixel, vec4<f32>(history, confidence));
+}
+
 // --- compile-coverage harness -------------------------------------------------
 // A trivial entry point that folds every public helper into one output so the
 // module validates standalone through the render world's `ShaderCache` (naga
@@ -207,7 +370,7 @@ struct SdrProbe {
     value: vec4<f32>,
 }
 
-@group(0) @binding(0) var<storage, read_write> sdr_probe: SdrProbe;
+@group(1) @binding(0) var<storage, read_write> sdr_probe: SdrProbe;
 
 @compute @workgroup_size(1, 1, 1)
 fn spec_denoise_reproject_probe(@builtin(global_invocation_id) id: vec3<u32>) {
