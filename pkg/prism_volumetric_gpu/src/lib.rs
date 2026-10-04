@@ -412,6 +412,11 @@ pub mod rgb_ycocg;
 pub mod rgbe_encode;
 pub mod ribbon_geometry;
 pub mod ribbon_trail;
+pub mod rigid_apply_angular_delta;
+pub mod rigid_apply_position_impulse;
+pub mod rigid_apply_velocity_impulse;
+pub mod rigid_generalized_inverse_mass;
+pub mod rigid_inv_inertia_world;
 pub mod ritter_bounding_sphere;
 pub mod rough_dielectric_bsdf;
 pub mod sat_collision_2d;
@@ -467,6 +472,7 @@ pub mod soft_attachment_project;
 pub mod soft_bending_project;
 pub mod soft_closest_point_on_segment;
 pub mod soft_distance_project;
+pub mod soft_isometric_bending_project;
 pub mod soft_long_range_project;
 pub mod soft_particle;
 pub mod soft_project_out_of_half_space;
@@ -1159,6 +1165,22 @@ pub use rgb_ycocg::GpuRgbYCoCg;
 pub use rgbe_encode::{GpuRgbeEncode, RgbePrimQuery, RgbePrimResult};
 pub use ribbon_geometry::{GpuRibbonGeometry, RibbonStripQuery};
 pub use ribbon_trail::{GpuRibbonTrail, GpuRibbonTrailQuery, GpuRibbonTrailResult};
+pub use rigid_apply_angular_delta::{
+    GpuRigidApplyAngularDelta, RigidApplyAngularDeltaQuery, RigidApplyAngularDeltaResult,
+};
+pub use rigid_apply_position_impulse::{
+    GpuRigidApplyPositionImpulse, RigidApplyPositionImpulseQuery, RigidApplyPositionImpulseResult,
+};
+pub use rigid_apply_velocity_impulse::{
+    GpuRigidApplyVelocityImpulse, RigidApplyVelocityImpulseQuery, RigidApplyVelocityImpulseResult,
+};
+pub use rigid_generalized_inverse_mass::{
+    GpuRigidGeneralizedInverseMass, RigidGeneralizedInverseMassQuery,
+    RigidGeneralizedInverseMassResult,
+};
+pub use rigid_inv_inertia_world::{
+    GpuRigidInvInertiaWorld, RigidInvInertiaWorldQuery, RigidInvInertiaWorldResult,
+};
 pub use ritter_bounding_sphere::{GpuRitterBoundingSphere, GpuRitterSphere, RitterQuery};
 pub use rough_dielectric_bsdf::{GpuRoughDielectric, RoughDielectricQuery, RoughDielectricResult};
 pub use sat_collision_2d::{GpuSatCollision2d, SatCollision2dQuery, SatCollision2dResult};
@@ -1235,6 +1257,10 @@ pub use soft_closest_point_on_segment::{
 };
 pub use soft_distance_project::{
     GpuSoftDistanceProject, SoftDistanceProjectQuery, SoftDistanceProjectResult,
+};
+pub use soft_isometric_bending_project::{
+    GpuSoftIsometricBendingProject, SoftIsometricBendingProjectQuery,
+    SoftIsometricBendingProjectResult,
 };
 pub use soft_long_range_project::{
     GpuSoftLongRangeProject, SoftLongRangeProjectQuery, SoftLongRangeProjectResult,
