@@ -8,6 +8,7 @@
 > v3 变更：顶格增补 §8.5「最新 AAA 高级特性」——对标最新实时 AAA 产品（UE5.4+ Groom、最新 RTX Hair/LSS 曲线图元、TressFX 4.x、Alan Wake 2 / Hellblade II 发丝、影视 Weta Cosserat），全部纯经典数值、**无 AI/ML/神经网络路径**：离散弹性杆/Cosserat 卷发扭转、DFTL 不可伸长积分、体素密度自碰撞+发-发摩擦、C-IPC 式屏障摩擦接触、Nanite 式 strand 簇化 GPU 剔除、深阴影图/ATSM 自适应透射、PPLL/矩/MLAB 发丝 OIT、黑色素(eumelanin/pheomelanin)物理吸收、近场/远场自适应散射 + BSDF 重要性采样、硬件 RT 曲线/LSS 真发自阴影与反射、发丝感知 TAA reactive mask + 抖动 alpha、mesh-shader GPU strand 扩展、GPU Work Graphs/持久线程约束图着色；§0 产品对标补最新档，行数估算上调。
 > v4 变更：再顶格增补 §8.6「更新一代 AAA 高级特性」——对标更晚近实时/影视路线（湿发含水、投影动力学/ADMM、curl-noise 风场、双重散射球谐缓存、解析亚像素线覆盖、光谱黑色素/Hero-wavelength、Groom→card 自动烘焙、卵泡头皮绑定），仍**全部纯经典数值、无 AI/ML/神经网络路径**；§0 产品对标补两档，行数估算再上调。
 > v5 变更：§8.5「最新 AAA 高级特性」item1-15 全部落 main 为 CPU golden / GPU 契约侧（见 §8.5 落地状态），毛发 sim 前沿（Cosserat / DFTL / 体素自碰撞 / C-IPC 屏障 / 卷发 helix）与 GPU-driven 契约（Nanite 簇化 / ATSM / 发丝 OIT / 黑色素 / 散射 LOD / RT 曲线 / reactive mask / mesh-shader 扩展 / Work Graphs 调度 / 持久线程图着色）至此架构侧完整，仅剩 GPU 真机 parity 孪生；item13 落点由「并入 `cluster.rs`」修订为新独立文件 `hair/mesh_shader_strand.rs`（遵循一关注点一文件）。
+> v6 变更：§6 通用求解数值（VBD 逐顶点 Newton 步 + 距离/碰撞/弯曲/LRA/Cosserat stretch 子步）全部 delegate 到 `prism_physics_core`，毛发侧只保留 strand 专有算法（Cosserat bend-twist / DFTL / PD 全局 / 体素自碰撞 / C-IPC 屏障），消除重复实现（见 §6「与物理内核的边界」）；`pkg/prism_hair_gpu` 真机 parity 升至 **87 套件、Apple M2 Metal 全绿**，闭合全程标注的「真机数值标定待硬件」缺口（见 §8.5 落地状态 v6 与 §9.1）。
 
 ---
 
@@ -206,7 +207,7 @@ fallback:
 
 - **行数估算（v3 上调）**：A 组 ~2.5–4k、B 组 ~3–5k、C 组 ~1–2k（含孪生 + 测试），合计在现有 hair core 之上再增 **~7–11k 行**；连同 `prism_hair_gpu` 真机 parity 孪生，毛发子系统总量上调至 **~3–4 万行**量级（含测试与 WESL 孪生）。
 
-**§8.5 落地状态（v5，CPU golden / GPU 契约侧全落 main）**：§8.5 全部 15 条已逐条落地、`cargo test -p prism_render_architecture` 全绿，严格复用 §1 共享基底、无假实现 / 无桩；真渲染图接线（dispatch / RT BLAS / work graph）与 GPU 真机 parity 孪生仍归后续（见 §9.1）。
+**§8.5 落地状态（v6，CPU golden + GPU 真机 parity 全落 main）**：§8.5 全部 15 条已逐条落地、`cargo test -p prism_render_architecture` 全绿，严格复用 §1 共享基底、无假实现 / 无桩。**GPU 真机数值标定缺口已闭合**：`pkg/prism_hair_gpu` 现有 **87 个真机 parity 测试套件**（含 §8.5 全部 `.wesl` 孪生：cosserat / dftl / self_collision_voxel / barrier_contact / rest_helix / cluster_cull / adaptive_transmittance / oit_composite / melanin / scatter_lod / rt_curve / reactive_mask / mesh_shell / 以及 §6 下放的 vbd_solver / guide_solver / sdf_collision / collision 等），`cargo test -p prism_hair_gpu` 在 Apple M2 Metal 后端**全绿**（容差 `abs<1e-4 || rel<1e-3`），即每条移植 kernel 与 `CPU` golden 真机逐值对拍一致的直接证据——各 `.wesl` 孪生此前标注的「真机 dispatch / 数值标定待硬件」中**数值标定部分已验证闭合**。仅余**真渲染图接线**（跨子系统 dispatch / RT BLAS / work graph，归调度子系统，hair 侧只落架构契约）。
 
 - A 组仿真：item1 `hair/cosserat.rs`（Bergou DER + Kugelstadt PB Cosserat，无-trig 四元数积分，17 测）/ item2 `hair/dftl.rs`（DFTL 不可伸长积分）/ item3 `hair/self_collision_voxel.rs`（体素密度自碰撞 + 发-发摩擦）/ item4 `hair/barrier_contact.rs`（C-IPC 式 C¹ 有理屏障 + 库仑锥摩擦，18 测）/ item5 `hair/rest_helix.rs`（卷发 helix rest 复数步进 + 各向异性弯曲刚度，14 测）。
 - B 组渲染：item6 `hair/cluster.rs`（Nanite 式簇化剔除 + 连续抽稀）/ item7 `hair/adaptive_transmittance.rs`（ATSM 变节点透射）/ item8 `hair/oit_frontend.rs`（PPLL / 矩 / MLAB 分桶）/ item9 `hair/melanin.rs`（eumelanin / pheomelanin → σ_a 映射）/ item10 `hair/scatter_lod.rs`（近 / 远场自适应 + BSDF 重要性采样）/ item11 `hair/rt_curve.rs`（LSS / 曲线 BLAS 构建描述契约）/ item12 `hair/reactive_mask.rs`（reactive mask + 抖动 alpha）。
@@ -253,6 +254,7 @@ fallback:
 - **统一 dispatch 形态**：一线程一 query/strand/particle，`@workgroup_size(64)` + `if(idx>=count){return;}`；uniform 计数 + 只读 query buffer + 读写 value buffer，新 kernel 即插即用。所有 strand-无关派生标量一律 host 预算并上传，保 bit-faithful（只余 `GPU` 可能 fuse 的 fma 低位分歧）。
 - **正确性模型**：核心为闭式几何、无超越调用，`CPU`/`GPU` 算同一公式，但**非位精确**（`GPU` 可 fuse mul-add，扰动低位 mantissa 几 `ULP`），故每分量断言容差 `abs_diff<1e-4` 或 `rel_diff<1e-3`；迭代类 kernel 参数保守以控 fma 累积。每个 parity 测试均带物理断言 + 非平凡断言（防 no-op 蒙混）+ 空/退化输入用例。
 - **可移植性**：只用 `sqrt`/`min`/`max`/`clamp`/`dot`/mul-add 的 core-`WGSL` 子集——无 `exp`/`pow`/可选 device feature——故孪生在 Metal/Vulkan/DX12 不改即跑。
+- **落地状态（v6）**：`pkg/prism_hair_gpu/tests/` 现有 **87 个 parity 套件**，`cargo test -p prism_hair_gpu` 在 Apple M2 Metal 后端全绿（含 §6 物理内核下放后的 `vbd_solver_parity` / `guide_solver_parity` / `cosserat_parity` / `sdf_collision_parity` / `collision_parity` 等 delegate 侧孪生，验证下放到 `prism_physics_core` 的求解原语在真机上仍与 `CPU` golden 逐值一致）。至此设计文档全程标注的「真机数值标定待硬件」缺口已闭合，`prism_hair_gpu` 从「编译 + 类型检查通过」升级为「真机逐值对拍通过」。
 
 当前已落 **87 个真机对拍孪生**（Apple M2 Metal 全绿 **601 passed**）：
 
