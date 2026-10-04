@@ -39,6 +39,13 @@ pub use crate::trace::{
 };
 pub use crate::{debug, error, event, info, instrument_system, profiled_zone, span, trace, warn};
 
+#[cfg(feature = "gpu")]
+pub use crate::gpu::{
+    next_correlation_id, CorrelationBreakdown, CorrelationId, GpuBubble, GpuClockCalibration,
+    GpuQueueId, GpuReadbackRing, GpuSpan, GpuTick, ProjectedGpuSpan, TimelineEntry,
+    TimelineTrack, UnifiedTimeline,
+};
+
 #[cfg(feature = "remote")]
 pub use crate::remote::{
     CommandOutcome, RemoteClient, RemoteCommand, RemoteEvent, RemoteServer, RemoteServerHandle,

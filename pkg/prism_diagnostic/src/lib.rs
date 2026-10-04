@@ -240,6 +240,8 @@ mod tests_mem;
 mod tests_sampling;
 #[cfg(test)]
 mod tests_telemetry;
+#[cfg(all(test, feature = "gpu"))]
+mod tests_gpu_timeline;
 #[cfg(test)]
 mod tests_m6_hitch;
 #[cfg(test)]

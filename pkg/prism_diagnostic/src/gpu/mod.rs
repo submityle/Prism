@@ -41,15 +41,21 @@
 //! - [`ring`] — the N-frame readback correlation ring.
 //! - [`timeline`] — the unified CPU+GPU timeline and cross-queue latency
 //!   reconstruction.
+//! - [`latency`] — submit→execute latency decomposition and GPU-bubble
+//!   (idle-gap) analysis over the projected timeline.
 
 pub mod calibration;
+pub mod latency;
 pub mod ring;
 pub mod scope;
 pub mod timeline;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-pub use calibration::{AffineFit, CalibrationSample, GpuClockCalibration, DEFAULT_CALIBRATION_WINDOW};
+pub use calibration::{
+    AffineFit, CalibrationSample, GpuClockCalibration, DEFAULT_CALIBRATION_WINDOW,
+};
+pub use latency::{CorrelationBreakdown, GpuBubble};
 pub use ring::{GpuQueryId, GpuReadbackRing, PendingQuery, DEFAULT_RESOLVED_CAPACITY};
 pub use scope::{CorrelationId, GpuQueueId, GpuSpan, GpuTick};
 pub use timeline::{ProjectedGpuSpan, TimelineEntry, TimelineTrack, UnifiedTimeline};

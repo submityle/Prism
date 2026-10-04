@@ -472,6 +472,8 @@ pub mod capillary_bridge_resolver;
 pub use capillary_bridge_resolver::{
     CapillaryBridgeResolver, CapillaryPairBridge, CapillaryResolution,
 };
+pub mod wet_granular_pile;
+pub use wet_granular_pile::{WetGranularPileBody, WetGranularPileStepReport};
 
 /// A handle into a [`ShapeRegistry`].
 ///
