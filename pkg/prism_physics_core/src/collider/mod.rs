@@ -296,6 +296,8 @@ pub use tet_fem_anisotropic::{
     orthotropic_fiber_energy, orthotropic_fiber_first_piola, FiberDirection, FiberFamily,
     FiberResponse, TransverselyIsotropicMaterial,
 };
+pub mod tet_fem_plasticity;
+pub use tet_fem_plasticity::{return_map, PlasticModel, PlasticState, PlasticStep};
 
 /// A handle into a [`ShapeRegistry`].
 ///
