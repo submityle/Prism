@@ -361,12 +361,16 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 - **GPU 共享 / 可见内存**：抽象 host-visible / upload / readback 内存域（接 `prism_render_driver` RHI），统一 CPU-GPU 内存桥。
 - **内存域标签**：虚存区段带类别标签，供 `prism_diagnostic` §24.3 内存图谱按域可视化。
 
-### 24.3 混合核 / NUMA / 能耗感知调度钩子
+### 24.3 混合核 / NUMA / 能耗感知调度钩子 —— ✅ 部分已交付（`topology` 模块：可移植数据模型 + QoS 映射 + 能耗/热策略）
 
 - **拓扑即数据**：导出完整 CPU 拓扑（P/E-core、SMT、NUMA 节点、缓存共享域，接 §12），供 `prism_tasks` 构建绑核策略。
 - **能耗/热感知**：读取平台能耗状态/热节流信号（移动/主机关键），提供钩子让调度器在过热时降背景负载、让关键路径上性能核。
 - **QoS 类映射**：把引擎车道（Critical/Background，tasks §24.1）映射到 OS QoS 类（Apple QoS、Win Quality of Service），OS 据此派核与调频。
 - **省电模式**：移动端前后台切换、低电量时的降频/降帧钩子（接 `prism_time` 帧节流）。
+
+**交付状态（已落地 CPU/数据侧，真实 OS 探测待接线）**：`pkg/prism_platform/src/topology/`（`mod`/`qos`/`power` 三子模块，纯 `core`+`alloc`、`#![forbid(unsafe_code)]`、全平台可测）落地了「拓扑即数据」的可移植内核：`CpuTopology` + `TopologyBuilder` 把 P/E-core 类别（`CoreKind`）、SMT 兄弟（`physical_id` 共享）、NUMA 节点、LLC 缓存域建模为一次性校验的只读数据，供 `prism_tasks` §24.6 的 `TopologyDescriptor` 直接消费；`CpuTopology::detect()` 在 `std` 下给出诚实的 best-effort（真实逻辑核数 + 单一扁平节点 + `CoreKind::Unknown`），并用 `is_probed()==false` 显式标注「这不是真正的 P/E/NUMA/缓存读数」，杜绝把回退当真值。`qos::qos_hint(os, lane)` 把引擎车道（`EngineQos` Critical…Background）映射到各 OS 的 QoS 类（Apple `QOS_CLASS_*`、Windows QoS 档、Linux `nice`），纯数据、无 syscall，供线程后端照单执行。`power::PowerState::policy()` 由电源/热/低电量状态推导出可测的 `PowerPolicy`（背景负载配额、是否偏好能效核、帧率上限），接 `prism_time` 帧节流与调度器背景降载。覆盖 `src/tests_topology.rs` 13 项手算 oracle 测试，`cargo test -p prism_platform` 全绿、`cargo clippy -p prism_platform --all-targets` 零告警、无桩实现。
+
+**仍属 PLANNED（需真实 OS 接线）**：从 `/sys`/`GetLogicalProcessorInformationEx`/`sysctl` 真实读取 P/E 拓扑与缓存几何来填充 `TopologyBuilder`；订阅 Apple `thermalState`/Android `thermalStatus`/电源事件来驱动 `PowerState`；在线程后端真正调用 `pthread_set_qos_class_self_np`/`SetThreadInformation`/`setpriority`。本波只落地其中与具体 OS 无关、可移植且可测的数据模型与策略层。
 
 ### 24.4 高级崩溃观测（跨进程 Crashpad / 稳定堆栈哈希分桶）
 
@@ -401,4 +405,4 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 
 ### 24.8 诚实边界
 
-本章全部为 PLANNED 设计目标，无代码。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；24.3 调度钩子随 `prism_tasks` M5 落地；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固随发行加固落地；24.6 能力数据库**已交付**（见 `capability` 模块，贯穿始终、降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章全部为 PLANNED 设计目标，无代码。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；24.3 调度钩子的**可移植数据模型 / QoS 映射 / 能耗热策略已交付**（见 `topology` 模块），真实 OS 探测与 syscall 接线仍 PLANNED；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固随发行加固落地；24.6 能力数据库**已交付**（见 `capability` 模块，贯穿始终、降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

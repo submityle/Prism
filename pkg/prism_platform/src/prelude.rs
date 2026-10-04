@@ -7,6 +7,9 @@ pub use crate::platform::{Os, Platform, PlatformCaps};
 pub use crate::capability::{
     Capability, CapabilityDatabase, Category, Selection, Support, SupportLevel,
 };
+pub use crate::topology::power::{PowerPolicy, PowerSource, PowerState, ThermalState};
+pub use crate::topology::qos::{qos_hint, EngineQos, OsQosHint};
+pub use crate::topology::{CoreKind, CpuTopology, TopologyBuilder, TopologyCore};
 #[cfg(feature = "std")]
 pub use crate::wallclock::{self, now as wall_now, WallClock, WallClockSample, WallTime};
 

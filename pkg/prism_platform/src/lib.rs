@@ -139,6 +139,12 @@ pub mod vm;
 #[cfg(feature = "dynlib")]
 pub mod dynlib;
 
+/// Hybrid-core / NUMA / cache topology data model, QoS lane mapping, and
+/// energy/thermal scheduler hints (design §24.3).
+///
+/// Pure `core`+`alloc`; available in every build configuration.
+pub mod topology;
+
 pub use clock::{now, MonotonicNanos};
 pub use cpu::CpuInfo;
 pub use capability::{
@@ -156,6 +162,9 @@ pub use fs::{mmap_supported, FsError, Mmap, MmapError, MmapMut, Result as FsResu
 #[cfg(feature = "watch")]
 pub use fs::{Event, EventKind, WatchBackend, WatchError, Watcher};
 pub use platform::{Os, Platform, PlatformCaps};
+pub use topology::power::{PowerPolicy, PowerSource, PowerState, ThermalState};
+pub use topology::qos::{qos_hint, EngineQos, OsQosHint};
+pub use topology::{CoreKind, CpuTopology, TopologyBuilder, TopologyCore, TopologyError};
 #[cfg(feature = "std")]
 pub use process::{Child, Command, ExitStatus, Output, Stdio};
 #[cfg(feature = "std")]
@@ -183,3 +192,6 @@ mod tests_m6_crash;
 
 #[cfg(test)]
 mod tests_capability;
+
+#[cfg(test)]
+mod tests_topology;
