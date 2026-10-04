@@ -464,6 +464,8 @@ pub mod rotational_boundary_resolver;
 pub use rotational_boundary_resolver::{
     BoundaryContactResolution, BoundaryContactResolver, BoundaryPairContact,
 };
+pub mod granular_pile_integrator;
+pub use granular_pile_integrator::{GranularPileBody, GranularPileStepReport};
 
 /// A handle into a [`ShapeRegistry`].
 ///
