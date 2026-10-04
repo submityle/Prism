@@ -582,6 +582,8 @@ pub mod stress_strainrate_coaxiality;
 pub use stress_strainrate_coaxiality::StressStrainRateCoaxiality;
 pub mod capillary_number;
 pub use capillary_number::{CapillaryNumber, CapillaryRegime};
+pub mod weber_number;
+pub use weber_number::{WeberNumber, WeberRegime};
 
 /// A handle into a [`ShapeRegistry`].
 ///
