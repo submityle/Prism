@@ -476,6 +476,8 @@ pub mod wet_granular_pile;
 pub use wet_granular_pile::{WetGranularPileBody, WetGranularPileStepReport};
 pub mod uniform_grid_broadphase;
 pub use uniform_grid_broadphase::UniformGridBroadphase;
+pub mod capillary_liquid_distribution;
+pub use capillary_liquid_distribution::LiquidDistribution;
 
 /// A handle into a [`ShapeRegistry`].
 ///
