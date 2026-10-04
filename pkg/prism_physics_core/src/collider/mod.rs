@@ -460,6 +460,10 @@ pub mod rotational_contact_integrator;
 pub use rotational_contact_integrator::{RotationalContactBody, RotationalContactStepReport};
 pub mod rotational_boundary_contact;
 pub use rotational_boundary_contact::{grain_boundary_contact, BoundaryContact, HalfSpace};
+pub mod rotational_boundary_resolver;
+pub use rotational_boundary_resolver::{
+    BoundaryContactResolution, BoundaryContactResolver, BoundaryPairContact,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
