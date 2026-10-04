@@ -11,6 +11,7 @@ default = ["std"]
 std = []
 
 [dependencies]
+bevy_math = { path = "../../crates/bevy_math", version = "0.20.0-dev", default-features = false, features = ["nostd-libm"] }
 bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_render_material = { path = "../prism_render_material" }

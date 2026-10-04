@@ -25,6 +25,10 @@ mod output;
 mod raster_phase;
 mod two_phase;
 mod two_phase_resolve;
+mod vbuffer;
+mod vbuffer_attributes;
+mod vbuffer_barycentric;
+mod vbuffer_material_bins;
 mod view;
 mod work;
 
@@ -52,6 +56,15 @@ pub use output::{BufferRange, ViewVisibilityOutput, VisibilityFrame};
 pub use raster_phase::{plan_two_phase_raster, raster_phase_of, RasterPhase, TwoPhaseRasterPlan};
 pub use two_phase::{classify_early_hzb, resolve_current_hzb};
 pub use two_phase_resolve::{resolve_two_phase_occlusion, TwoPhaseHzbInput, TwoPhaseOcclusion};
+pub use vbuffer::{VisibilityBuffer, VisibilitySample, EMPTY_SAMPLE};
+pub use vbuffer_attributes::{
+    interpolate_scalar, interpolate_vec2, interpolate_vec3, texture_anisotropy, texture_lod,
+    InterpolatedScalar, InterpolatedVec2, InterpolatedVec3,
+};
+pub use vbuffer_barycentric::{
+    barycentric_derivatives, BarycentricDerivatives, ClipVertex, Viewport,
+};
+pub use vbuffer_material_bins::{bin_pixels_by_material, MaterialBinning};
 pub use view::{GpuViewRecord, HistoryPolicy, ViewFlags, ViewHandle};
 pub use work::{GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey};
 
