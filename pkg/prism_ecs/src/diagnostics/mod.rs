@@ -60,6 +60,12 @@
 //!   per-component closure size (insert blast radius) and fan-in (hot
 //!   shared dependency), ranked hottest-dependency first (design §16.6 /
 //!   §16.1).
+//! * [`hook_coverage`] — component lifecycle-hook coverage (design §12):
+//!   which of `on_add` / `on_insert` / `on_replace` / `on_remove` each
+//!   component registers, flagging acquire/release asymmetries (acquire
+//!   on add with no teardown; teardown only in `on_remove`, which an
+//!   in-place overwrite skips) as concrete resource-leak smells
+//!   (design §16.6 / §12).
 //! * [`time_travel`] — frame-indexed world snapshot record/seek (`std` only).
 //!
 //! All occupancy and change-volume figures describe the chunked Table-backed
@@ -72,6 +78,7 @@ pub mod churn_cost;
 pub mod component_distribution;
 pub mod component_memory;
 pub mod frame_profile;
+pub mod hook_coverage;
 pub mod inspector;
 pub mod memory_footprint;
 pub mod profiler;
@@ -92,6 +99,7 @@ pub use churn_cost::{ChurnCostEntry, ChurnCostProfile};
 pub use component_distribution::{ComponentDistributionEntry, ComponentDistributionReport};
 pub use component_memory::{ComponentMemoryEntry, ComponentMemoryReport};
 pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
+pub use hook_coverage::{HookCoverageEntry, HookCoverageReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
 pub use memory_footprint::{ArchetypeMemoryEntry, MemoryFootprintReport};
 pub use relation_graph::{RelationGraphReport, RelationKindReport};
