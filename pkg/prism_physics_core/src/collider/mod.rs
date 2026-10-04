@@ -378,6 +378,8 @@ pub mod tet_fem_perzyna_viscoplasticity;
 pub use tet_fem_perzyna_viscoplasticity::{
     return_map_perzyna, PerzynaModel, PerzynaState, PerzynaStep,
 };
+pub mod tet_fem_damage;
+pub use tet_fem_damage::{equivalent_strain, update_damage, DamageModel, DamageState, DamageStep};
 
 /// A handle into a [`ShapeRegistry`].
 ///
