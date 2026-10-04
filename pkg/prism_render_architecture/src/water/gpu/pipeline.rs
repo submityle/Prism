@@ -118,7 +118,10 @@ impl WaterGpuExtract {
         }
         match kernel.descriptor().domain {
             DispatchDomain::Grid2d => self.grid2d_texels,
-            DispatchDomain::Grid3d => self.grid3d_voxels,
+            // The counting-sort scan sweeps the flat pressure-cell list, whose
+            // cardinality is exactly the 3-D voxel count, so `Cells` shares the
+            // `Grid3d` extent here.
+            DispatchDomain::Grid3d | DispatchDomain::Cells => self.grid3d_voxels,
             DispatchDomain::Faces => self.face_count,
             DispatchDomain::Particle => self.particle_count,
             DispatchDomain::Screen => self.screen_pixels,
@@ -130,6 +133,13 @@ impl WaterGpuExtract {
     /// against this body's extents and the kernel's workgroup tile.
     #[must_use]
     fn groups(&self, kernel: WaterKernel) -> u32 {
+        // The counting-sort scan is a single-workgroup prefix sum: one group
+        // grid-strides over the whole flat cell list, carrying the running
+        // block offset in workgroup memory, so it always launches exactly one
+        // group (zero when there is nothing to scan).
+        if matches!(kernel, WaterKernel::FlipCellScan) {
+            return u32::from(self.grid3d_voxels > 0);
+        }
         let descriptor = kernel.descriptor();
         linear_group_count(
             self.invocations(kernel),

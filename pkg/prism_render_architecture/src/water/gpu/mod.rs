@@ -38,6 +38,7 @@ pub mod fft_normalize_kernel;
 pub mod fft_plan;
 pub mod fft_stage_kernel;
 pub mod flip_cell_histogram_kernel;
+pub mod flip_cell_scan_kernel;
 pub mod flip_mac_divergence_kernel;
 pub mod flip_mac_faces_normalize_kernel;
 pub mod flip_mac_g2p_kernel;
@@ -171,6 +172,10 @@ pub use fft_stage_kernel::{dispatch_fft_stage, FftStageParams, WATER_FFT_STAGE_W
 pub use flip_cell_histogram_kernel::{
     dispatch_flip_cell_histogram, FlipHistogramParams, FLIP_HISTOGRAM_POSITION_FLOATS,
     WATER_FLIP_CELL_HISTOGRAM_WESL,
+};
+
+pub use flip_cell_scan_kernel::{
+    dispatch_flip_cell_scan, FlipScanParams, WATER_FLIP_CELL_SCAN_WESL,
 };
 
 pub use flip_mac_divergence_kernel::{

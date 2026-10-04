@@ -132,6 +132,13 @@ pub enum DispatchDomain {
     /// projected-grid / clipmap lattice the surface meshing pass samples the
     /// cascade displacement/normal textures into (one invocation per vertex).
     Vertices,
+    /// The flat row-major pressure-cell list of a `FLIP`/`APIC` `MAC` domain
+    /// (same cardinality as the [`Grid3d`](Self::Grid3d) voxels, but swept as a
+    /// 1-D buffer): the counting-sort scan reads one count and writes one `CSR`
+    /// offset per cell. Linear like [`Particle`](Self::Particle), not 3-D
+    /// tiled, because a prefix sum is a sequential sweep over the flattened
+    /// cell array rather than a per-voxel stencil.
+    Cells,
 }
 
 /// A fully described `GPU` compute dispatch for one water pass.
@@ -197,6 +204,12 @@ pub enum WaterKernel {
     /// particles into cell-major order so the `P2G`/`G2P` transfer touches a
     /// compact face neighbourhood instead of chasing spawn-order scatter.
     FlipCellHistogram,
+    /// Exclusive prefix sum of the cell histogram into `CSR` cell offsets.
+    /// Pass 2 of 3 in the counting-sort chain: one single-workgroup scan over
+    /// the flat row-major pressure-cell list turns the per-cell counts into the
+    /// `offsets[cell]` write cursors (length `cells + 1`, `offsets[last]` is the
+    /// in-grid particle total) the scatter pass seeds its per-cell cursor from.
+    FlipCellScan,
     /// Reconstruct a renderable surface from the particle set (screen-space,
     /// anisotropic marching cubes, or narrow-band `SDF`).
     SurfaceReconstruct,
@@ -236,7 +249,7 @@ pub enum WaterKernel {
 impl WaterKernel {
     /// Every kernel, in a stable order, for descriptor-table iteration and
     /// exhaustiveness tests.
-    pub const ALL: [WaterKernel; 27] = [
+    pub const ALL: [WaterKernel; 28] = [
         WaterKernel::SpectrumIfft,
         WaterKernel::GerstnerDisplace,
         WaterKernel::SweStep,
@@ -249,6 +262,7 @@ impl WaterKernel {
         WaterKernel::FlipMacProject,
         WaterKernel::FlipMacG2P,
         WaterKernel::FlipCellHistogram,
+        WaterKernel::FlipCellScan,
         WaterKernel::SurfaceReconstruct,
         WaterKernel::CausticsProject,
         WaterKernel::FoamAdvect,
@@ -286,6 +300,7 @@ impl WaterKernel {
             WaterKernel::FlipMacProject => "mac_project",
             WaterKernel::FlipMacG2P => "water_flip_mac_g2p",
             WaterKernel::FlipCellHistogram => "water_flip_cell_histogram",
+            WaterKernel::FlipCellScan => "water_flip_cell_scan",
             WaterKernel::SurfaceReconstruct => "water_surface_reconstruct",
             WaterKernel::CausticsProject => "water_caustics_project",
             WaterKernel::FoamAdvect => "water_foam_advect",
@@ -438,6 +453,20 @@ impl WaterKernel {
             // the counting-sort histogram (`positions_in` + atomic `counts`),
             // the crest-spray emit (particle pool + append cursor), and the
             // coupling read-back (body queries + force field).
+            // The counting-sort scan: read the per-cell histogram, write the
+            // `CSR` offsets (`cells + 1`), one uniform grid description. A
+            // single-workgroup 256-lane sweep over the flat cell list, so it is
+            // a `Cells`-domain pass, not a particle pass.
+            WaterKernel::FlipCellScan => (
+                BindGroupLayout {
+                    storage_buffers: 2,
+                    uniform_buffers: 1,
+                    storage_textures: 0,
+                    sampled_textures: 0,
+                },
+                WorkgroupSize { x: 256, y: 1, z: 1 },
+                DispatchDomain::Cells,
+            ),
             WaterKernel::FlipCellHistogram
             | WaterKernel::SprayEmit
             | WaterKernel::CouplingReadback => (
@@ -610,7 +639,10 @@ mod tests {
         for kernel in WaterKernel::ALL {
             let d = kernel.descriptor();
             match d.domain {
-                DispatchDomain::Particle | DispatchDomain::Faces | DispatchDomain::Vertices => {
+                DispatchDomain::Particle
+                | DispatchDomain::Faces
+                | DispatchDomain::Vertices
+                | DispatchDomain::Cells => {
                     assert_eq!(d.workgroup.y, 1);
                     assert_eq!(d.workgroup.z, 1);
                     assert!(d.workgroup.x > 1);
