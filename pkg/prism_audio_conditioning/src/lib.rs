@@ -16,6 +16,8 @@
 //! - [`config`] holds the per-stage configuration records.
 //! - [`content_hash`] computes a deterministic content hash and keys the
 //!   conditioning cache.
+//! - [`dc_block`] scrubs source hygiene: exact DC-offset removal and a
+//!   zero-phase sub-sonic high-pass, before the analysis stages run.
 //! - [`decode`] orchestrates the import/decode matrix over
 //!   [`prism_audio_assets::codec`] into unified f32 PCM.
 //! - [`delay_trim`] turns recorded encoder pre-roll/padding into concrete
@@ -65,6 +67,7 @@ pub mod bank;
 pub mod codec_tier;
 pub mod config;
 pub mod content_hash;
+pub mod dc_block;
 pub mod decode;
 pub mod delay_trim;
 pub mod finalize;

@@ -19,6 +19,7 @@ use prism_audio_assets::codec::PcmSampleFormat;
 use prism_audio_core::math::Sample;
 
 use crate::codec_tier::UsageClass;
+use crate::dc_block::DcBlockConfig;
 use crate::finalize::FinalizeConfig;
 use crate::loudness_normalize::LoudnessNormalizeConfig;
 use crate::loop_point::LoopMode;
@@ -225,6 +226,10 @@ pub struct ConditioningConfig {
     pub tempo: TempoConfig,
     /// Resampling parameters.
     pub resample: ResampleConfig,
+    /// Source-hygiene parameters: exact DC-offset removal and a zero-phase
+    /// sub-sonic high-pass. Both default to off, so the conditioned program
+    /// is unchanged unless a caller opts in.
+    pub dc_block: DcBlockConfig,
     /// `HRIR` conditioning parameters.
     pub hrtf: HrtfConditionConfig,
     /// Bank-authoring parameters.
@@ -253,6 +258,7 @@ impl Default for ConditioningConfig {
             transient: TransientConfig::default(),
             tempo: TempoConfig::default(),
             resample: ResampleConfig::default(),
+            dc_block: DcBlockConfig::default(),
             hrtf: HrtfConditionConfig::default(),
             bank: BankConfig::default(),
             lipsync: LipsyncConfig::default(),

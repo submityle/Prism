@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 use crate::codec_tier::{self, CodecRecommendation};
 use crate::config::ConditioningConfig;
 use crate::content_hash::{ContentHash, Hasher};
+use crate::dc_block;
 use crate::decode::{self, DecodeError, SourceFormat};
 use crate::finalize::{self, FinalizeError};
 use crate::loop_point::{self, LoopPoints};
@@ -64,6 +65,9 @@ pub struct ConditionedArtifact {
     pub pcm: ConditionedPcm,
     /// Encoder pre-roll/padding recorded at decode time.
     pub encoder_delay: EncoderDelay,
+    /// DC offset removed per channel by the source-hygiene stage (`0`
+    /// per channel when DC removal is disabled).
+    pub removed_dc: Vec<Sample>,
     /// Loudness statistics (`BS.1770`).
     pub loudness: LoudnessStats,
     /// Detected seamless loop, when one was found.
@@ -150,6 +154,12 @@ pub fn run(
     let (decoded, encoder_delay) = decode::decode(bytes, format, &config.decode)?;
     let pcm = resample_offline::resample_to(&decoded, config.project_sample_rate, &config.resample);
 
+    // Source hygiene runs before analysis so loudness, loop, transient, and
+    // tempo all describe the DC-scrubbed program the engine will play.
+    let dc_blocked = dc_block::apply(&pcm, &config.dc_block);
+    let pcm = dc_blocked.pcm;
+    let removed_dc = dc_blocked.removed_dc;
+
     let loudness = loudness_offline::analyze(&pcm);
 
     let analysis_channel = pcm.channel(0).unwrap_or(&[]);
@@ -192,6 +202,7 @@ pub fn run(
     Ok(ConditionedArtifact {
         pcm,
         encoder_delay,
+        removed_dc,
         loudness,
         loop_points,
         tempo,
@@ -311,6 +322,45 @@ mod tests {
         let config = ConditioningConfig::default();
         let err = run(&[0u8; 8], SourceFormat::Wav, &config);
         assert!(matches!(err, Err(PipelineError::Decode(_))));
+    }
+
+    #[test]
+    fn dc_block_disabled_reports_zero_offset() {
+        let wav = tone_wav(48_000, 440.0, 8_000);
+        let out = run(&wav, SourceFormat::Wav, &ConditioningConfig::default()).unwrap();
+        // Default source hygiene is off: one zero per channel, program intact.
+        assert_eq!(out.removed_dc, alloc::vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn dc_block_removal_moves_hash_and_reports_offset() {
+        // Bias every sample by +0.1 so the stage has real DC to subtract.
+        let frames = 48_000usize;
+        let mut data = Vec::new();
+        for n in 0..frames {
+            let x = 0.1 + 0.4 * ops::sin(TAU * 440.0 * n as Sample / 48_000.0);
+            let q = (x * 32_767.0) as i16;
+            data.extend_from_slice(&q.to_le_bytes());
+            data.extend_from_slice(&q.to_le_bytes());
+        }
+        let wav = build_wav(48_000, &data);
+
+        let raw = run(&wav, SourceFormat::Wav, &ConditioningConfig::default()).unwrap();
+        assert_eq!(raw.removed_dc, alloc::vec![0.0, 0.0]);
+
+        let mut config = ConditioningConfig::default();
+        config.dc_block.remove_dc_offset = true;
+        let scrubbed = run(&wav, SourceFormat::Wav, &config).unwrap();
+
+        // A positive DC offset near +0.1 was detected and removed per channel.
+        assert!((scrubbed.removed_dc[0] - 0.1).abs() < 5.0e-3, "{}", scrubbed.removed_dc[0]);
+        // Scrubbing the delivered program moves the content hash.
+        assert_ne!(raw.hash, scrubbed.hash);
+        assert_eq!(raw.pcm.frames(), scrubbed.pcm.frames());
+
+        // Deterministic.
+        let again = run(&wav, SourceFormat::Wav, &config).unwrap();
+        assert_eq!(scrubbed.hash, again.hash);
     }
 
     #[test]
