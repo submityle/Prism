@@ -522,6 +522,8 @@ pub mod angle_of_repose;
 pub use angle_of_repose::AngleOfRepose;
 pub mod porosity_profile;
 pub use porosity_profile::PorosityProfile;
+pub mod hopper_discharge;
+pub use hopper_discharge::{mass_flow_between, BeverlooSlot, DischargeCensus};
 
 /// A handle into a [`ShapeRegistry`].
 ///
