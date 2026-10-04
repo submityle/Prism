@@ -9,4 +9,5 @@ pub mod driver;
 pub mod dormant;
 pub mod floating_origin;
 pub mod lod;
+pub mod processor;
 pub mod streaming;

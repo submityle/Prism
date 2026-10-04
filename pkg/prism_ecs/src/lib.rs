@@ -103,6 +103,8 @@ pub mod prelude {
         distance_sq, LodBand, LodDecision, LodLevel, LodSchedule, OutOfRange,
     };
     #[cfg(feature = "partition")]
+    pub use crate::partition::processor::{EntityLodProcessor, LodTickResult, PhasePolicy};
+    #[cfg(feature = "partition")]
     pub use crate::partition::streaming::{CellEntityIndex, WeakEntity, WeakRefs};
     pub use crate::prefab::IsA;
     pub use crate::query::{Added, Changed, Or, With, Without};
