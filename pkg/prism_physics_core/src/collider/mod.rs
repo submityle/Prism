@@ -484,6 +484,8 @@ pub use finite_liquid_capillary_forces::{
 };
 pub mod wet_bridge_hysteresis;
 pub use wet_bridge_hysteresis::{WetBridgeHysteresis, WetBridgeReport};
+pub mod wet_cohesion_driver;
+pub use wet_cohesion_driver::{WetCohesionDriver, WetCohesionReport};
 
 /// A handle into a [`ShapeRegistry`].
 ///
