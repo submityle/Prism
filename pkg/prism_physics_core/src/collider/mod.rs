@@ -596,6 +596,8 @@ pub mod principal_strain_energy_density;
 pub use principal_strain_energy_density::PrincipalStrainEnergyDensity;
 pub mod lade_duncan_invariant;
 pub use lade_duncan_invariant::LadeDuncanInvariant;
+pub mod second_order_work;
+pub use second_order_work::SecondOrderWork;
 
 /// A handle into a [`ShapeRegistry`].
 ///
