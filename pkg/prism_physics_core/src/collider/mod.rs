@@ -514,6 +514,8 @@ pub mod packing_diagnostics;
 pub use packing_diagnostics::PackingDiagnostics;
 pub mod gravity_settle;
 pub use gravity_settle::{GravitySettleParams, GravitySettleReport, GravitySettler};
+pub mod granular_scene;
+pub use granular_scene::{ContainerKind, GranularScene, GranularSceneParams};
 
 /// A handle into a [`ShapeRegistry`].
 ///
