@@ -20,6 +20,7 @@ mod rng;
 
 pub mod automix;
 pub mod modulation;
+pub mod pages;
 pub mod patch;
 
 pub use rng::Rng;
