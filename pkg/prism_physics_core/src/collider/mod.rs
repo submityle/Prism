@@ -458,6 +458,8 @@ pub use rotational_contact_resolver::{
 
 pub mod rotational_contact_integrator;
 pub use rotational_contact_integrator::{RotationalContactBody, RotationalContactStepReport};
+pub mod rotational_boundary_contact;
+pub use rotational_boundary_contact::{grain_boundary_contact, BoundaryContact, HalfSpace};
 
 /// A handle into a [`ShapeRegistry`].
 ///
