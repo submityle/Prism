@@ -58,6 +58,17 @@ pub struct GpuResidentColumn {
     /// Monotonically increasing counter bumped each time a non-empty upload is
     /// taken.
     upload_version: u64,
+    /// Number of blocks the renderer currently has allocated on the GPU (its
+    /// acknowledged buffer capacity, in blocks). Grows via
+    /// [`take_upload_plan`](Self::take_upload_plan) when the live block count
+    /// exceeds it, and is only reset to refit the live extent when the caller
+    /// explicitly requests it with
+    /// [`force_reallocation`](Self::force_reallocation).
+    gpu_capacity_blocks: usize,
+    /// Monotonically increasing identity of the current GPU buffer allocation.
+    /// Bumped whenever a reallocation is produced, signalling the renderer to
+    /// drop its old buffer and treat the next upload as a full re-upload.
+    buffer_generation: u64,
 }
 
 impl GpuResidentColumn {
@@ -78,6 +89,8 @@ impl GpuResidentColumn {
             len: 0,
             dirty: Vec::new(),
             upload_version: 0,
+            gpu_capacity_blocks: 0,
+            buffer_generation: 0,
         }
     }
 
@@ -269,6 +282,196 @@ impl GpuResidentColumn {
     #[inline]
     pub fn upload_version(&self) -> u64 {
         self.upload_version
+    }
+
+    /// Blocks the renderer currently has allocated for this column on the GPU
+    /// (its acknowledged buffer capacity). Zero until the first
+    /// [`take_upload_plan`](Self::take_upload_plan) that produces a
+    /// [`GpuReallocation`].
+    #[inline]
+    pub fn gpu_capacity_blocks(&self) -> usize {
+        self.gpu_capacity_blocks
+    }
+
+    /// Byte capacity the renderer currently has allocated on the GPU
+    /// (`gpu_capacity_blocks * block_byte_len`).
+    #[inline]
+    pub fn gpu_capacity_bytes(&self) -> usize {
+        self.gpu_capacity_blocks * self.block_byte_len()
+    }
+
+    /// Identity of the current GPU buffer allocation. Bumped each time a
+    /// reallocation is produced, so the renderer can detect that its buffer
+    /// handle is stale and must be recreated.
+    #[inline]
+    pub fn buffer_generation(&self) -> u64 {
+        self.buffer_generation
+    }
+
+    /// Whether the live block count currently exceeds the acknowledged GPU
+    /// capacity, so the next [`take_upload_plan`](Self::take_upload_plan) will
+    /// reallocate the GPU buffer and re-upload the whole live extent.
+    #[inline]
+    pub fn needs_reallocation(&self) -> bool {
+        self.block_count() > self.gpu_capacity_blocks
+    }
+
+    /// Grow-only capacity (in blocks) that covers `required_blocks`, doubling
+    /// the current capacity to amortise reallocations the way persistent
+    /// GPU-driven buffers do (Horizon / Insomniac style, design §15). Always
+    /// returns at least `required_blocks`.
+    #[inline]
+    fn grown_capacity(&self, required_blocks: usize) -> usize {
+        if required_blocks == 0 {
+            return 0;
+        }
+        let mut cap = self.gpu_capacity_blocks.max(1);
+        while cap < required_blocks {
+            cap *= 2;
+        }
+        cap
+    }
+
+    /// Shrink the logical length to `element_count`, dropping trailing elements
+    /// (e.g. after entities are removed from the tail). Growing is not
+    /// performed here — use [`ensure_len`](Self::ensure_len). The dirty bits of
+    /// dropped blocks are discarded, so stale tail bytes already on the GPU are
+    /// simply no longer part of the live extent and are never re-uploaded.
+    ///
+    /// The GPU buffer capacity is intentionally left at its high-water mark (a
+    /// persistent GPU buffer is rarely shrunk); call
+    /// [`force_reallocation`](Self::force_reallocation) to actually reclaim it.
+    pub fn truncate(&mut self, element_count: usize) {
+        if element_count < self.len {
+            self.len = element_count;
+            self.resize_bitmap();
+        }
+    }
+
+    /// Force the next [`take_upload_plan`](Self::take_upload_plan) to reallocate
+    /// the GPU buffer to fit the current live extent and re-upload everything,
+    /// even if the existing capacity would otherwise suffice.
+    ///
+    /// Use to reclaim GPU memory after a large [`truncate`](Self::truncate), or
+    /// to recover after a lost device invalidated the buffer.
+    #[inline]
+    pub fn force_reallocation(&mut self) {
+        self.gpu_capacity_blocks = 0;
+    }
+
+    /// The full GPU upload plan for this frame: an optional buffer
+    /// (re)allocation plus the minimal byte spans to copy, clearing the dirty
+    /// state (design §15).
+    ///
+    /// Two cases:
+    /// * **Capacity sufficient** (`block_count <= gpu_capacity_blocks`): behaves
+    ///   like [`take_upload`](Self::take_upload) — coalesced dirty spans, no
+    ///   reallocation, buffer generation unchanged.
+    /// * **Capacity exceeded** (the column grew, or
+    ///   [`force_reallocation`](Self::force_reallocation) was requested): grows
+    ///   `gpu_capacity_blocks` to cover the live extent, bumps
+    ///   [`buffer_generation`](Self::buffer_generation), and returns a single
+    ///   span covering the entire live extent — because a freshly allocated GPU
+    ///   buffer holds no valid bytes and must be fully re-uploaded.
+    ///
+    /// In both non-empty cases [`upload_version`](Self::upload_version) is
+    /// bumped and all dirty bits are cleared.
+    pub fn take_upload_plan(&mut self) -> GpuUpload {
+        let required = self.block_count();
+        if required > self.gpu_capacity_blocks {
+            // Reallocation path: the new (larger) buffer is empty, so the whole
+            // live extent must be uploaded regardless of which blocks were dirty.
+            let new_capacity = self.grown_capacity(required);
+            self.gpu_capacity_blocks = new_capacity;
+            self.buffer_generation += 1;
+
+            let spans = if self.len == 0 {
+                Vec::new()
+            } else {
+                alloc::vec![DirtyBlock {
+                    block_index: 0,
+                    byte_offset: 0,
+                    byte_len: self.live_byte_len(),
+                }]
+            };
+            for d in &mut self.dirty {
+                *d = false;
+            }
+            if !spans.is_empty() {
+                self.upload_version += 1;
+            }
+            return GpuUpload {
+                reallocate: Some(GpuReallocation {
+                    capacity_blocks: new_capacity,
+                    capacity_bytes: new_capacity * self.block_byte_len(),
+                    buffer_generation: self.buffer_generation,
+                }),
+                spans,
+                buffer_generation: self.buffer_generation,
+            };
+        }
+
+        // Incremental path: existing capacity is sufficient.
+        let spans = self.take_upload();
+        GpuUpload {
+            reallocate: None,
+            spans,
+            buffer_generation: self.buffer_generation,
+        }
+    }
+}
+
+/// A GPU buffer (re)allocation request emitted by
+/// [`GpuResidentColumn::take_upload_plan`] when the live extent outgrows the
+/// renderer's current buffer (design §15).
+///
+/// The renderer must (re)create its GPU buffer at `capacity_bytes`, record the
+/// new `buffer_generation`, and treat the accompanying upload spans as a full
+/// re-upload of the live extent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GpuReallocation {
+    /// New buffer capacity, in blocks.
+    pub capacity_blocks: usize,
+    /// New buffer capacity, in bytes (`capacity_blocks * block_byte_len`).
+    pub capacity_bytes: usize,
+    /// The buffer generation this allocation establishes.
+    pub buffer_generation: u64,
+}
+
+/// The complete GPU upload plan for one column for one frame (design §15):
+/// an optional buffer [`GpuReallocation`] plus the minimal byte `spans` to copy.
+///
+/// Produced by [`GpuResidentColumn::take_upload_plan`]. When `reallocate` is
+/// `Some`, the renderer first (re)allocates the buffer, then copies `spans`
+/// (which cover the whole live extent). When it is `None`, `spans` are the
+/// incremental coalesced dirty spans against the existing buffer.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct GpuUpload {
+    /// Set when the GPU buffer must be (re)allocated before copying `spans`.
+    pub reallocate: Option<GpuReallocation>,
+    /// Minimal, coalesced byte spans to copy into the GPU buffer this frame.
+    pub spans: Vec<DirtyBlock>,
+    /// The buffer generation these spans apply to.
+    pub buffer_generation: u64,
+}
+
+impl GpuUpload {
+    /// Whether this plan requests neither a reallocation nor any copy.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.reallocate.is_none() && self.spans.is_empty()
+    }
+
+    /// Whether this plan reallocates the GPU buffer this frame.
+    #[inline]
+    pub fn is_reallocation(&self) -> bool {
+        self.reallocate.is_some()
+    }
+
+    /// Total number of bytes this plan copies into the GPU buffer.
+    #[inline]
+    pub fn total_upload_bytes(&self) -> usize {
+        self.spans.iter().map(|d| d.byte_len).sum()
     }
 }
 
@@ -545,5 +748,177 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].byte_offset, 0);
         assert_eq!(blocks[0].byte_len, 0);
+    }
+
+    #[test]
+    fn fresh_column_has_no_gpu_capacity() {
+        let col = GpuResidentColumn::new(8, 4);
+        assert_eq!(col.gpu_capacity_blocks(), 0);
+        assert_eq!(col.gpu_capacity_bytes(), 0);
+        assert_eq!(col.buffer_generation(), 0);
+        assert!(!col.needs_reallocation());
+    }
+
+    #[test]
+    fn first_growth_triggers_full_reupload_reallocation() {
+        let mut col = GpuResidentColumn::new(8, 4);
+        // 10 elements -> ceil(10/4) = 3 blocks, capacity starts at 0.
+        col.mark_range(0, 10);
+        assert_eq!(col.block_count(), 3);
+        assert!(col.needs_reallocation());
+
+        let plan = col.take_upload_plan();
+        assert!(plan.is_reallocation());
+        let realloc = plan.reallocate.expect("reallocation expected");
+        // grown_capacity(3): 1 -> 2 -> 4 (geometric doubling, >= required).
+        assert_eq!(realloc.capacity_blocks, 4);
+        assert_eq!(realloc.capacity_bytes, 4 * 4 * 8);
+        assert_eq!(realloc.buffer_generation, 1);
+        assert_eq!(plan.buffer_generation, 1);
+
+        // A freshly allocated buffer is empty: the whole live extent uploads as
+        // a single span regardless of which blocks were dirtied.
+        assert_eq!(plan.spans.len(), 1);
+        assert_eq!(plan.spans[0].block_index, 0);
+        assert_eq!(plan.spans[0].byte_offset, 0);
+        assert_eq!(plan.spans[0].byte_len, 10 * 8);
+        assert_eq!(plan.total_upload_bytes(), 10 * 8);
+
+        // State after the plan: capacity recorded, generation bumped, clean.
+        assert_eq!(col.gpu_capacity_blocks(), 4);
+        assert_eq!(col.gpu_capacity_bytes(), 4 * 4 * 8);
+        assert_eq!(col.buffer_generation(), 1);
+        assert_eq!(col.upload_version(), 1);
+        assert!(col.is_clean());
+        assert!(!col.needs_reallocation());
+    }
+
+    #[test]
+    fn sufficient_capacity_takes_incremental_spans() {
+        let mut col = GpuResidentColumn::new(8, 4);
+        col.mark_range(0, 10);
+        // Reallocate once so capacity (4 blocks) comfortably exceeds the 3 live
+        // blocks.
+        let _ = col.take_upload_plan();
+        assert_eq!(col.buffer_generation(), 1);
+
+        // Dirty one element inside the existing extent (block 1).
+        col.mark_dirty(5);
+        assert!(!col.needs_reallocation());
+
+        let plan = col.take_upload_plan();
+        assert!(!plan.is_reallocation());
+        assert!(plan.reallocate.is_none());
+        // Only block 1 is re-uploaded, buffer generation unchanged.
+        assert_eq!(plan.spans.len(), 1);
+        assert_eq!(plan.spans[0].block_index, 1);
+        // Block 1 begins after one full block of 4 elements * 8 bytes.
+        assert_eq!(plan.spans[0].byte_offset, 32);
+        assert_eq!(plan.spans[0].byte_len, 4 * 8);
+        assert_eq!(plan.buffer_generation, 1);
+        assert_eq!(col.buffer_generation(), 1);
+        assert_eq!(col.upload_version(), 2);
+
+        // A follow-up plan with nothing dirty is a true no-op.
+        let empty = col.take_upload_plan();
+        assert!(empty.is_empty());
+        assert_eq!(col.buffer_generation(), 1);
+        assert_eq!(col.upload_version(), 2);
+    }
+
+    #[test]
+    fn zero_length_plan_is_empty_without_reallocation() {
+        let mut col = GpuResidentColumn::new(8, 4);
+        let plan = col.take_upload_plan();
+        assert!(plan.is_empty());
+        assert!(!plan.is_reallocation());
+        assert_eq!(plan.total_upload_bytes(), 0);
+        assert_eq!(col.gpu_capacity_blocks(), 0);
+        assert_eq!(col.buffer_generation(), 0);
+        assert_eq!(col.upload_version(), 0);
+    }
+
+    #[test]
+    fn truncate_drops_tail_blocks_and_their_dirty_bits() {
+        let mut col = GpuResidentColumn::new(8, 4);
+        // 12 elements -> 3 blocks, all dirtied.
+        col.mark_range(0, 12);
+        assert_eq!(col.block_count(), 3);
+        assert_eq!(col.dirty_block_count(), 3);
+
+        // Shrink to 5 elements -> 2 blocks; block 2's dirty bit is discarded.
+        col.truncate(5);
+        assert_eq!(col.len(), 5);
+        assert_eq!(col.block_count(), 2);
+        assert_eq!(col.dirty_block_count(), 2);
+
+        // Live extent shrinks: the trailing partial block clamps to 5*8 = 40.
+        let spans = col.coalesced_dirty_blocks();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].byte_offset, 0);
+        assert_eq!(spans[0].byte_len, 5 * 8);
+
+        // truncate never grows.
+        col.truncate(99);
+        assert_eq!(col.len(), 5);
+
+        // GPU capacity (high-water mark) is untouched by truncate alone.
+        assert_eq!(col.gpu_capacity_blocks(), 0);
+    }
+
+    #[test]
+    fn force_reallocation_forces_full_reupload_next_plan() {
+        let mut col = GpuResidentColumn::new(8, 4);
+        col.mark_range(0, 8); // 2 blocks
+        let first = col.take_upload_plan();
+        assert!(first.is_reallocation());
+        assert_eq!(col.gpu_capacity_blocks(), 2);
+        assert_eq!(col.buffer_generation(), 1);
+
+        // Reclaim/recover: force the next plan to reallocate even though the
+        // existing capacity would suffice.
+        col.force_reallocation();
+        assert_eq!(col.gpu_capacity_blocks(), 0);
+        assert!(col.needs_reallocation());
+
+        let plan = col.take_upload_plan();
+        assert!(plan.is_reallocation());
+        assert_eq!(col.buffer_generation(), 2);
+        assert_eq!(col.gpu_capacity_blocks(), 2);
+        // Full live extent re-uploaded against the new buffer.
+        assert_eq!(plan.spans.len(), 1);
+        assert_eq!(plan.total_upload_bytes(), 8 * 8);
+    }
+
+    #[test]
+    fn gpu_upload_default_is_empty() {
+        let plan = GpuUpload::default();
+        assert!(plan.is_empty());
+        assert!(!plan.is_reallocation());
+        assert_eq!(plan.total_upload_bytes(), 0);
+        assert_eq!(plan.buffer_generation, 0);
+    }
+
+    #[test]
+    fn gpu_upload_total_bytes_sums_all_spans() {
+        let plan = GpuUpload {
+            reallocate: None,
+            spans: alloc::vec![
+                DirtyBlock {
+                    block_index: 0,
+                    byte_offset: 0,
+                    byte_len: 32,
+                },
+                DirtyBlock {
+                    block_index: 3,
+                    byte_offset: 96,
+                    byte_len: 16,
+                },
+            ],
+            buffer_generation: 7,
+        };
+        assert!(!plan.is_empty());
+        assert!(!plan.is_reallocation());
+        assert_eq!(plan.total_upload_bytes(), 48);
     }
 }

@@ -84,7 +84,9 @@ pub mod prelude {
     pub use crate::entity::Entity;
     pub use crate::event::{Event, EventCursor, EventId, Events};
     #[cfg(feature = "gpu_resident")]
-    pub use crate::gpu_resident::{DirtyBlock, GpuResidentColumn, GpuResidentColumns};
+    pub use crate::gpu_resident::{
+        DirtyBlock, GpuReallocation, GpuResidentColumn, GpuResidentColumns, GpuUpload,
+    };
     pub use crate::observer::{
         EventContext, LifecycleEvent, ObserverContext, ObserverId, Observers,
     };
