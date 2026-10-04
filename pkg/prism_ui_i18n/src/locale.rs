@@ -52,6 +52,15 @@ struct LocaleData {
     rules: PluralRules,
 }
 
+/// How a plural message's category should be selected for a lookup.
+#[derive(Clone, Copy, Debug)]
+enum Select {
+    /// Cardinal selection ("1 file" / "2 files") for an integer count.
+    Cardinal(u64),
+    /// Ordinal selection ("1st" / "2nd" / "3rd") for an integer position.
+    Ordinal(u64),
+}
+
 /// Shared interior state behind an [`I18n`] handle.
 struct Inner {
     runtime: Runtime,
@@ -64,13 +73,13 @@ impl Inner {
     /// Resolve `key` against the current locale, falling back to the default
     /// locale and finally to the key string itself. Reads the current-locale
     /// signal, recording a reactive dependency.
-    fn render(&self, key: &str, count: Option<u64>, args: &Args) -> String {
+    fn render(&self, key: &str, select: Option<Select>, args: &Args) -> String {
         let locale = self.current.get();
-        if let Some(text) = self.try_locale(&locale, key, count, args) {
+        if let Some(text) = self.try_locale(&locale, key, select, args) {
             return text;
         }
         if locale != self.default_locale
-            && let Some(text) = self.try_locale(&self.default_locale, key, count, args)
+            && let Some(text) = self.try_locale(&self.default_locale, key, select, args)
         {
             return text;
         }
@@ -82,7 +91,7 @@ impl Inner {
         &self,
         locale: &LocaleId,
         key: &str,
-        count: Option<u64>,
+        select: Option<Select>,
         args: &Args,
     ) -> Option<String> {
         let locales = self.locales.borrow();
@@ -91,7 +100,19 @@ impl Inner {
         match message {
             Message::Simple(template) => Some(interpolate(template, args)),
             Message::Plural(variants) => {
-                let category = data.rules.select(count.unwrap_or(0));
+                let category = match select {
+                    // Cardinal selection uses the locale's registered rules.
+                    Some(Select::Cardinal(n)) => data.rules.select(n),
+                    // Ordinal selection resolves the ordinal family from the
+                    // locale identifier (ordinals are language-wide, not tied
+                    // to the catalog's cardinal rules).
+                    Some(Select::Ordinal(n)) => {
+                        PluralRules::ordinal(locale.as_str()).select(n)
+                    }
+                    // A non-plural lookup against a plural message: pick the
+                    // zero-count cardinal category as a stable fallback.
+                    None => data.rules.select(0),
+                };
                 let template = variants
                     .get(&category)
                     .or_else(|| variants.get(&crate::plural::PluralCategory::Other))
@@ -185,7 +206,24 @@ impl I18n {
                 Value::Num(i64::try_from(count).unwrap_or(i64::MAX)),
             );
         }
-        self.inner.render(key, Some(count), &full)
+        self.inner.render(key, Some(Select::Cardinal(count)), &full)
+    }
+
+    /// Translate an ordinal `key`, selecting a category from `count`.
+    ///
+    /// Ordinal categories ("1st", "2nd", "3rd", "4th") are resolved from the
+    /// current locale's ordinal rules, independent of the catalog's cardinal
+    /// rules. The `count` is exposed to the template as an implicit `{count}`
+    /// argument unless `args` already binds `count`.
+    pub fn t_ordinal(&self, key: &str, count: u64, args: &Args) -> String {
+        let mut full = args.clone();
+        if full.get("count").is_none() {
+            full.set(
+                "count",
+                Value::Num(i64::try_from(count).unwrap_or(i64::MAX)),
+            );
+        }
+        self.inner.render(key, Some(Select::Ordinal(count)), &full)
     }
 
     /// Build a reactive [`Memo`] translating a fixed `key` with fixed `args`.

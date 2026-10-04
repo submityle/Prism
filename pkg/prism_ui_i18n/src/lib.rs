@@ -53,7 +53,9 @@ pub mod plural;
 pub use catalog::{Catalog, Message};
 pub use format::{interpolate, Args, Value};
 pub use locale::{I18n, LocaleId};
-pub use plural::{PluralCategory, PluralRules};
+pub use plural::{
+    CardinalFamily, OrdinalFamily, PluralCategory, PluralOperands, PluralRules, PluralType,
+};
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
@@ -221,5 +223,38 @@ mod tests {
         assert_eq!(zero, "0");
         let min = interpolate("{n}", &Args::new().with("n", i64::MIN));
         assert_eq!(min, "-9223372036854775808");
+    }
+
+    #[test]
+    fn english_ordinal_selection_end_to_end() {
+        let rt = Runtime::new();
+        let mut i18n = I18n::new(&rt, "en");
+        i18n.register(
+            "en",
+            Catalog::new().with_plural(
+                "place",
+                [
+                    (PluralCategory::One, "{count}st"),
+                    (PluralCategory::Two, "{count}nd"),
+                    (PluralCategory::Few, "{count}rd"),
+                    (PluralCategory::Other, "{count}th"),
+                ],
+            ),
+            false,
+            // Catalog's cardinal rules are irrelevant to ordinal selection;
+            // `t_ordinal` resolves the ordinal family from the locale ("en").
+            PluralRules::English,
+        );
+
+        assert_eq!(i18n.t_ordinal("place", 1, &Args::new()), "1st");
+        assert_eq!(i18n.t_ordinal("place", 2, &Args::new()), "2nd");
+        assert_eq!(i18n.t_ordinal("place", 3, &Args::new()), "3rd");
+        assert_eq!(i18n.t_ordinal("place", 4, &Args::new()), "4th");
+        assert_eq!(i18n.t_ordinal("place", 11, &Args::new()), "11th");
+        assert_eq!(i18n.t_ordinal("place", 12, &Args::new()), "12th");
+        assert_eq!(i18n.t_ordinal("place", 13, &Args::new()), "13th");
+        assert_eq!(i18n.t_ordinal("place", 21, &Args::new()), "21st");
+        assert_eq!(i18n.t_ordinal("place", 22, &Args::new()), "22nd");
+        assert_eq!(i18n.t_ordinal("place", 23, &Args::new()), "23rd");
     }
 }
