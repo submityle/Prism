@@ -60,12 +60,14 @@ extern crate alloc;
 
 mod escape;
 
+pub mod apply;
 pub mod compare;
 pub mod diff;
 pub mod hunk;
 pub mod layout_snapshot;
 pub mod serialize;
 
+pub use apply::{apply_hunks, ApplyError};
 pub use compare::{Comparison, Snapshot};
 pub use diff::diff;
 pub use hunk::{diff_hunks, format_unified, Hunk, HunkLine};
