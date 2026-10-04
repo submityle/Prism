@@ -1384,6 +1384,34 @@ impl App {
             .collect()
     }
 
+    /// Snapshot every registered cvar whose resolved cascade value differs from
+    /// its registered [default](Cvar::default_value), in ascending-name order —
+    /// the "show changed settings" / settings-diff view over the config cascade
+    /// `默认 → 平台 → 用户 → 命令行 → 运行时` (design §24.6 / §14).
+    ///
+    /// This is the diff complement to [`list_cvars`](App::list_cvars): where
+    /// that renders the full table, this surfaces only the cvars a platform
+    /// tier, user config, launch override, or console command has actually
+    /// moved off their engine default — exactly what a `cvarlist modified`
+    /// command, a settings-diff export, or a "reset to defaults" confirmation
+    /// prompt needs. Each returned [`CvarListing`] carries the
+    /// [`source`](CvarListing::source) layer that won the cascade, so the caller
+    /// can show *where* each override came from. Returns an empty vector when no
+    /// cvar has ever been registered or when every cvar still resolves to its
+    /// default.
+    #[must_use]
+    pub fn list_modified_cvars(&self) -> Vec<CvarListing> {
+        let Some(registry) = self.world().get_resource::<CvarRegistry>() else {
+            return Vec::new();
+        };
+        let settings = self.world().get_resource::<Settings>();
+        registry
+            .iter()
+            .map(|(name, cvar)| build_cvar_listing(name, cvar, settings))
+            .filter(|listing| listing.value != listing.default)
+            .collect()
+    }
+
     /// Clear the cvar `name`'s [`Runtime`](crate::settings::SettingsLayer::Runtime)
     /// override, letting it fall back to a lower cascade layer (design §24.6).
     ///

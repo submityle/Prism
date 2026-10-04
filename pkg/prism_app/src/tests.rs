@@ -7034,4 +7034,135 @@ mod cvar_tests {
         // The newline-bearing value is skipped rather than corrupting the file.
         assert!(config.lines().all(|line| line.starts_with("//")));
     }
+
+    #[test]
+    fn list_modified_cvars_returns_only_diverged_cvars() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+        app.register_cvar(
+            CvarSpec::new("r.vsync", true).category(CvarCategory::Render),
+        )
+        .unwrap();
+        // Only one cvar is moved off its default.
+        app.set_cvar("r.shadows", 4_i64).unwrap();
+
+        let modified = app.list_modified_cvars();
+        assert_eq!(modified.len(), 1);
+        assert_eq!(modified[0].name, "r.shadows");
+        assert_eq!(modified[0].value, SettingValue::Int(4));
+        assert_eq!(modified[0].default, SettingValue::Int(2));
+    }
+
+    #[test]
+    fn list_modified_cvars_is_empty_when_all_at_default() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+        app.register_cvar(
+            CvarSpec::new("net.rate", 60_i64).category(CvarCategory::Network),
+        )
+        .unwrap();
+
+        assert!(app.list_modified_cvars().is_empty());
+    }
+
+    #[test]
+    fn list_modified_cvars_is_empty_before_any_registration() {
+        let app = App::new();
+        assert!(app.list_modified_cvars().is_empty());
+    }
+
+    #[test]
+    fn list_modified_cvars_is_ascending_by_name() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+        app.register_cvar(
+            CvarSpec::new("net.rate", 60_i64)
+                .category(CvarCategory::Network)
+                .bounds(CvarBounds::Int(1, 240)),
+        )
+        .unwrap();
+        app.register_cvar(
+            CvarSpec::new("snd.volume", 50_i64)
+                .category(CvarCategory::Audio)
+                .bounds(CvarBounds::Int(0, 100)),
+        )
+        .unwrap();
+        app.set_cvar("snd.volume", 80_i64).unwrap();
+        app.set_cvar("net.rate", 128_i64).unwrap();
+        app.set_cvar("r.shadows", 1_i64).unwrap();
+
+        let names: Vec<String> = app
+            .list_modified_cvars()
+            .into_iter()
+            .map(|listing| listing.name)
+            .collect();
+        assert_eq!(names, ["net.rate", "r.shadows", "snd.volume"]);
+    }
+
+    #[test]
+    fn list_modified_cvars_reports_source_layer() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("sys.lang", "en").category(CvarCategory::System),
+        )
+        .unwrap();
+        // Override only on the User layer (no Runtime write).
+        app.set_cvar_at(SettingsLayer::User, "sys.lang", "fr")
+            .unwrap();
+
+        let modified = app.list_modified_cvars();
+        assert_eq!(modified.len(), 1);
+        assert_eq!(modified[0].name, "sys.lang");
+        assert_eq!(modified[0].value, SettingValue::Str("fr".to_owned()));
+        assert_eq!(modified[0].source, Some(SettingsLayer::User));
+    }
+
+    #[test]
+    fn list_modified_cvars_excludes_value_reset_back_to_default() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+        app.set_cvar("r.shadows", 4_i64).unwrap();
+        assert_eq!(app.list_modified_cvars().len(), 1);
+
+        // A runtime override back to the default value is no longer "modified".
+        app.set_cvar("r.shadows", 2_i64).unwrap();
+        assert!(app.list_modified_cvars().is_empty());
+    }
+
+    #[test]
+    fn list_modified_cvars_excludes_cvar_after_runtime_reset() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 2_i64)
+                .category(CvarCategory::Render)
+                .bounds(CvarBounds::Int(0, 4)),
+        )
+        .unwrap();
+        app.set_cvar("r.shadows", 4_i64).unwrap();
+        assert_eq!(app.list_modified_cvars().len(), 1);
+
+        // Clearing the only override drops it from the diff.
+        app.reset_cvar("r.shadows").unwrap();
+        assert!(app.list_modified_cvars().is_empty());
+    }
 }
