@@ -1217,3 +1217,150 @@ fn prism_perlin_get3(x: f32, y: f32, z: f32) -> f32 {\n\
     let y2 = prism_perlin_lerp(x3, x4, v);\n\
     return prism_perlin_lerp(y1, y2, w) * 1.0;\n\
 }\n";
+
+/// Single-sourced Simplex gradient-noise fragment (2D/3D), mirroring the CPU
+/// reference [`crate::noise::Simplex::get2`]/[`get3`](crate::noise::Simplex::get3)
+/// (Gustavson's public-domain formulation).
+///
+/// Like [`WGSL_PERLIN`], the seeded 512-entry permutation table is **uploaded,
+/// not rebuilt** on the device at `@binding(1)`, so the integer hash path
+/// (including the `% 12` gradient index) is bit-exact and both sides pick the
+/// identical corner gradient. The 12 edge gradients are a fixed constant table
+/// embedded in the shader. Only the skew/unskew, the `(0.5 - r^2)^4` corner
+/// falloff, and the dot products are floating point.
+///
+/// # Parity note (branch sensitivity)
+///
+/// Which simplex (triangle/tetrahedron) a sample falls in is chosen by
+/// floating-point comparisons (`x0 > y0`, the 3D cascade) and by `floor` of the
+/// skewed coordinate. Exactly on a simplex boundary a last-ULP fast-math
+/// difference could flip the branch and change the value by more than a
+/// tolerance, but that boundary set is measure-zero; ordinary samples agree
+/// within a small tolerance. Parity tests therefore sample off the boundaries.
+///
+/// The fragment declares the perm storage binding (needed by
+/// `prism_perm_hash`); the compute wrapper supplies the count uniform
+/// (`@binding(0)`), the sample input (`@binding(2)`), the output
+/// (`@binding(3)`), and `main`. Both the get2 and get3 kernels share this
+/// fragment verbatim.
+pub const WGSL_SIMPLEX: &str = "\
+@group(0) @binding(1) var<storage, read> prism_perm: array<u32>;\n\
+\n\
+fn prism_perm_hash(i: i32) -> u32 {\n\
+    return prism_perm[u32(i & 511)];\n\
+}\n\
+\n\
+fn prism_simplex_grad(idx: u32) -> vec3<f32> {\n\
+    switch (idx) {\n\
+        case 0u: { return vec3<f32>(1.0, 1.0, 0.0); }\n\
+        case 1u: { return vec3<f32>(-1.0, 1.0, 0.0); }\n\
+        case 2u: { return vec3<f32>(1.0, -1.0, 0.0); }\n\
+        case 3u: { return vec3<f32>(-1.0, -1.0, 0.0); }\n\
+        case 4u: { return vec3<f32>(1.0, 0.0, 1.0); }\n\
+        case 5u: { return vec3<f32>(-1.0, 0.0, 1.0); }\n\
+        case 6u: { return vec3<f32>(1.0, 0.0, -1.0); }\n\
+        case 7u: { return vec3<f32>(-1.0, 0.0, -1.0); }\n\
+        case 8u: { return vec3<f32>(0.0, 1.0, 1.0); }\n\
+        case 9u: { return vec3<f32>(0.0, -1.0, 1.0); }\n\
+        case 10u: { return vec3<f32>(0.0, 1.0, -1.0); }\n\
+        default: { return vec3<f32>(0.0, -1.0, -1.0); }\n\
+    }\n\
+}\n\
+\n\
+fn prism_simplex_grad_index(i: i32) -> u32 {\n\
+    return prism_perm_hash(i) % 12u;\n\
+}\n\
+\n\
+fn prism_simplex_corner2(x: f32, y: f32, g: vec3<f32>) -> f32 {\n\
+    let t = 0.5 - x * x - y * y;\n\
+    if (t < 0.0) { return 0.0; }\n\
+    let t2 = t * t;\n\
+    return t2 * t2 * (g.x * x + g.y * y);\n\
+}\n\
+\n\
+fn prism_simplex_corner3(x: f32, y: f32, z: f32, g: vec3<f32>) -> f32 {\n\
+    let t = 0.6 - x * x - y * y - z * z;\n\
+    if (t < 0.0) { return 0.0; }\n\
+    let t2 = t * t;\n\
+    return t2 * t2 * (g.x * x + g.y * y + g.z * z);\n\
+}\n\
+\n\
+fn prism_simplex_hash3(a: i32, b: i32, c: i32) -> u32 {\n\
+    return prism_perm_hash(a + i32(prism_perm_hash(b + i32(prism_perm_hash(c)))));\n\
+}\n\
+\n\
+fn prism_simplex_get2(xin: f32, yin: f32) -> f32 {\n\
+    let F2 = 0.36602542;\n\
+    let G2 = 0.21132487;\n\
+    let s = (xin + yin) * F2;\n\
+    let i = floor(xin + s);\n\
+    let j = floor(yin + s);\n\
+    let t = (i + j) * G2;\n\
+    let x0 = xin - (i - t);\n\
+    let y0 = yin - (j - t);\n\
+    var i1 = 0;\n\
+    var j1 = 1;\n\
+    if (x0 > y0) { i1 = 1; j1 = 0; }\n\
+    let x1 = x0 - f32(i1) + G2;\n\
+    let y1 = y0 - f32(j1) + G2;\n\
+    let x2 = x0 - 1.0 + 2.0 * G2;\n\
+    let y2 = y0 - 1.0 + 2.0 * G2;\n\
+    let ii = i32(i);\n\
+    let jj = i32(j);\n\
+    let gi0 = prism_simplex_grad_index(ii + i32(prism_perm_hash(jj)));\n\
+    let gi1 = prism_simplex_grad_index(ii + i1 + i32(prism_perm_hash(jj + j1)));\n\
+    let gi2 = prism_simplex_grad_index(ii + 1 + i32(prism_perm_hash(jj + 1)));\n\
+    let n0 = prism_simplex_corner2(x0, y0, prism_simplex_grad(gi0));\n\
+    let n1 = prism_simplex_corner2(x1, y1, prism_simplex_grad(gi1));\n\
+    let n2 = prism_simplex_corner2(x2, y2, prism_simplex_grad(gi2));\n\
+    return 70.0 * (n0 + n1 + n2);\n\
+}\n\
+\n\
+fn prism_simplex_get3(xin: f32, yin: f32, zin: f32) -> f32 {\n\
+    let F3 = 1.0 / 3.0;\n\
+    let G3 = 1.0 / 6.0;\n\
+    let s = (xin + yin + zin) * F3;\n\
+    let i = floor(xin + s);\n\
+    let j = floor(yin + s);\n\
+    let k = floor(zin + s);\n\
+    let t = (i + j + k) * G3;\n\
+    let x0 = xin - (i - t);\n\
+    let y0 = yin - (j - t);\n\
+    let z0 = zin - (k - t);\n\
+    var i1 = 0;\n\
+    var j1 = 0;\n\
+    var k1 = 0;\n\
+    var i2 = 0;\n\
+    var j2 = 0;\n\
+    var k2 = 0;\n\
+    if (x0 >= y0) {\n\
+        if (y0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }\n\
+        else if (x0 >= z0) { i1 = 1; j1 = 0; k1 = 0; i2 = 1; j2 = 0; k2 = 1; }\n\
+        else { i1 = 0; j1 = 0; k1 = 1; i2 = 1; j2 = 0; k2 = 1; }\n\
+    } else {\n\
+        if (y0 < z0) { i1 = 0; j1 = 0; k1 = 1; i2 = 0; j2 = 1; k2 = 1; }\n\
+        else if (x0 < z0) { i1 = 0; j1 = 1; k1 = 0; i2 = 0; j2 = 1; k2 = 1; }\n\
+        else { i1 = 0; j1 = 1; k1 = 0; i2 = 1; j2 = 1; k2 = 0; }\n\
+    }\n\
+    let x1 = x0 - f32(i1) + G3;\n\
+    let y1 = y0 - f32(j1) + G3;\n\
+    let z1 = z0 - f32(k1) + G3;\n\
+    let x2 = x0 - f32(i2) + 2.0 * G3;\n\
+    let y2 = y0 - f32(j2) + 2.0 * G3;\n\
+    let z2 = z0 - f32(k2) + 2.0 * G3;\n\
+    let x3 = x0 - 1.0 + 3.0 * G3;\n\
+    let y3 = y0 - 1.0 + 3.0 * G3;\n\
+    let z3 = z0 - 1.0 + 3.0 * G3;\n\
+    let ii = i32(i);\n\
+    let jj = i32(j);\n\
+    let kk = i32(k);\n\
+    let gi0 = prism_simplex_hash3(ii, jj, kk) % 12u;\n\
+    let gi1 = prism_simplex_hash3(ii + i1, jj + j1, kk + k1) % 12u;\n\
+    let gi2 = prism_simplex_hash3(ii + i2, jj + j2, kk + k2) % 12u;\n\
+    let gi3 = prism_simplex_hash3(ii + 1, jj + 1, kk + 1) % 12u;\n\
+    let n0 = prism_simplex_corner3(x0, y0, z0, prism_simplex_grad(gi0));\n\
+    let n1 = prism_simplex_corner3(x1, y1, z1, prism_simplex_grad(gi1));\n\
+    let n2 = prism_simplex_corner3(x2, y2, z2, prism_simplex_grad(gi2));\n\
+    let n3 = prism_simplex_corner3(x3, y3, z3, prism_simplex_grad(gi3));\n\
+    return 32.0 * (n0 + n1 + n2 + n3);\n\
+}\n";

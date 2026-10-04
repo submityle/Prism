@@ -43,7 +43,20 @@ impl Simplex {
     /// Create a generator from a seed.
     #[inline]
     pub fn new(seed: u64) -> Self {
-        Self { perm: Permutation::new(seed) }
+        Self {
+            perm: Permutation::new(seed),
+        }
+    }
+
+    /// Expose the raw 512-entry permutation table backing this generator.
+    ///
+    /// A GPU twin uploads the identical table so its integer hashing selects
+    /// the exact same gradients as this CPU reference; only the simplex
+    /// floating-point arithmetic then differs within a small tolerance.
+    #[inline]
+    #[must_use]
+    pub fn permutation_table(&self) -> [u8; 512] {
+        self.perm.table_bytes()
     }
 
     #[inline]
@@ -142,7 +155,12 @@ impl Simplex {
         let jj = j as i32;
         let kk = k as i32;
 
-        let h = |a: i32, b: i32, c: i32| i32::from(self.perm.hash(a + i32::from(self.perm.hash(b + i32::from(self.perm.hash(c))))));
+        let h = |a: i32, b: i32, c: i32| {
+            i32::from(
+                self.perm
+                    .hash(a + i32::from(self.perm.hash(b + i32::from(self.perm.hash(c))))),
+            )
+        };
         let gi0 = (h(ii, jj, kk) as usize) % 12;
         let gi1 = (h(ii + i1, jj + j1, kk + k1) as usize) % 12;
         let gi2 = (h(ii + i2, jj + j2, kk + k2) as usize) % 12;
