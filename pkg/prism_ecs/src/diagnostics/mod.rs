@@ -22,6 +22,11 @@
 //!   (design §16.6 "系统火焰图").
 //! * [`step_inspector`] — per-system structural / change-volume observation
 //!   while single-stepping a schedule (design §23.4 / §16.6).
+//! * [`structural_churn`] — dual, *gross* lens over a [`step_inspector`]
+//!   trace: per-system absolute entity / archetype movement so opposing
+//!   spawns and despawns add instead of cancelling, surfacing the
+//!   oscillation (thrash) that net accounting hides and that command
+//!   batching targets (design §16.6 / §9 / §10).
 //! * [`relation_graph`] — read-only relation-kind and edge-topology summary
 //!   (design §16.6 "关系图谱").
 //! * [`relation_cycles`] — per-relation directed-cycle detection over the
@@ -46,6 +51,7 @@ pub mod relation_graph;
 pub mod relation_cycles;
 pub mod relation_topology;
 pub mod step_inspector;
+pub mod structural_churn;
 #[cfg(feature = "std")]
 pub mod time_travel;
 
@@ -58,6 +64,7 @@ pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
 pub use step_inspector::{StepObservation, SteppingInspector};
+pub use structural_churn::{StructuralChurnProfile, SystemChurnEntry};
 #[cfg(feature = "std")]
 pub use profiler::SpanRecorder;
 pub use profiler::{FlameGraph, SpanNode, SystemInstrument};
