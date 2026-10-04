@@ -10,6 +10,8 @@
 //! * [`inspector`] — archetype / chunk occupancy snapshots.
 //! * [`change_volume`] — dirty-chunk and changed/added-cell accounting that
 //!   quantifies the design headline "成本 ∝ 变化量".
+//! * [`frame_profile`] — per-system change-volume ranking folded from a
+//!   [`step_inspector`] frame trace (design §16.6 "帧级变更量").
 //! * [`profiler`] — nested system-span timing and flame-graph export
 //!   (design §16.6 "系统火焰图").
 //! * [`step_inspector`] — per-system structural / change-volume observation
@@ -23,6 +25,7 @@
 //! chunks and are therefore outside these reports.
 
 pub mod change_volume;
+pub mod frame_profile;
 pub mod inspector;
 pub mod profiler;
 pub mod relation_graph;
@@ -31,6 +34,7 @@ pub mod step_inspector;
 pub mod time_travel;
 
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
+pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
 pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use step_inspector::{StepObservation, SteppingInspector};
