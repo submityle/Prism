@@ -11,8 +11,8 @@
 //!   state, and aggregates [`ValidationError`]s. [`Form::errors_memo`] exposes a
 //!   reactive view that recomputes whenever any field changes.
 //! * [`Validator`] — the rule trait, with ready-made rules [`required`],
-//!   [`min_len`], [`max_len`], [`int_range`], [`email`], [`pattern`], and
-//!   [`custom`].
+//!   [`min_len`], [`max_len`], [`int_range`], [`email`], [`luhn`],
+//!   [`pattern`], and [`custom`].
 //! * [`FieldId`] — an opaque, cheaply clonable field key.
 //!
 //! # Example
@@ -42,10 +42,12 @@ mod email;
 mod error;
 mod field;
 mod form;
+mod luhn;
 mod validator;
 
 pub use email::{email, is_valid_email};
 pub use error::ValidationError;
+pub use luhn::{luhn, passes_luhn};
 pub use field::{parse_i64, FieldId};
 pub use form::Form;
 pub use validator::{
