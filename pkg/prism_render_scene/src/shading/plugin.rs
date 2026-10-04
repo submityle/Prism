@@ -230,12 +230,13 @@ use super::{
         volumetrics_pass, PrismVolumetricsSettings, VolumetricsTextureCache,
     },
     world_restir::{
-        init_world_restir_pipeline, init_world_restir_visible_points_pipeline,
-        prepare_world_restir_bind_groups, prepare_world_restir_lights,
-        prepare_world_restir_reservoirs, prepare_world_restir_visible_points,
+        init_world_restir_pipeline, init_world_restir_resolve_pipeline,
+        init_world_restir_visible_points_pipeline, prepare_world_restir_bind_groups,
+        prepare_world_restir_lights, prepare_world_restir_reservoirs, prepare_world_restir_resolve,
+        prepare_world_restir_resolve_bind_groups, prepare_world_restir_visible_points,
         prepare_world_restir_visible_points_bind_groups, world_restir_fill_pass,
-        world_restir_inject_pass, world_restir_seed_pass, world_restir_visible_points_pass,
-        PrismWorldRestirSettings, WorldRestirLights,
+        world_restir_inject_pass, world_restir_resolve_pass, world_restir_seed_pass,
+        world_restir_visible_points_pass, PrismWorldRestirSettings, WorldRestirLights,
     },
     world_space_gi::{
         init_world_space_gi_composite_pipeline, init_world_space_gi_pipeline,
@@ -333,6 +334,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/world_restir_fill.wesl");
         embedded_asset!(app, "../shaders/world_restir_inject.wesl");
         embedded_asset!(app, "../shaders/world_restir_visible_points.wesl");
+        embedded_asset!(app, "../shaders/world_restir_resolve.wesl");
         register_shadow_depth_shader(app);
         register_vsm_caster_depth_shader(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -1099,6 +1101,7 @@ impl Plugin for PrismShadingPlugin {
         // default renderer allocates and dispatches nothing.
         render_app.add_systems(RenderStartup, init_world_restir_pipeline);
         render_app.add_systems(RenderStartup, init_world_restir_visible_points_pipeline);
+        render_app.add_systems(RenderStartup, init_world_restir_resolve_pipeline);
         // Area-light `LTC` render-world systems. The `GpuAreaLight` storage
         // buffer, the per-frame extract from the main world, and the
         // rebuild/upload pair each live in their own `add_systems` call so the
@@ -1134,6 +1137,15 @@ impl Plugin for PrismShadingPlugin {
                     .after(prepare_world_restir_reservoirs)
                     .after(prepare_world_restir_visible_points)
                     .in_set(RenderSystems::PrepareBindGroups),
+                // The resolve export is sized to the camera viewport in
+                // PrepareResources; its screen-space consumer group reads the
+                // SSR prepass views + the finalised reservoir table in
+                // PrepareBindGroups.
+                prepare_world_restir_resolve.in_set(RenderSystems::PrepareResources),
+                prepare_world_restir_resolve_bind_groups
+                    .after(prepare_world_restir_resolve)
+                    .after(prepare_world_restir_reservoirs)
+                    .in_set(RenderSystems::PrepareBindGroups),
             ),
         );
         render_app.add_systems(
@@ -1150,7 +1162,12 @@ impl Plugin for PrismShadingPlugin {
                 world_restir_visible_points_pass.before(world_restir_inject_pass),
                 world_restir_inject_pass.before(world_restir_seed_pass),
                 world_restir_seed_pass.before(world_restir_fill_pass),
-                world_restir_fill_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
+                world_restir_fill_pass.before(world_restir_resolve_pass),
+                // The resolve pass consumes the finalised reservoir table and
+                // the SSR prepass, writing the direct-illumination export a
+                // downstream composite folds into scene_color, so it runs last
+                // in the chain and still finishes before the main pass.
+                world_restir_resolve_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
             ),
         );
         render_app.add_systems(

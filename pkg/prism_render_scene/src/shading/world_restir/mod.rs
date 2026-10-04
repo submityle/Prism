@@ -48,6 +48,7 @@ mod bind_groups;
 mod dispatch;
 mod lights;
 mod pipeline;
+mod resolve;
 mod resources;
 mod settings;
 mod visible_points;
@@ -58,6 +59,10 @@ pub(crate) use dispatch::world_restir_inject_pass;
 pub(crate) use dispatch::world_restir_seed_pass;
 pub(crate) use lights::{prepare_world_restir_lights, WorldRestirLights};
 pub(crate) use pipeline::init_world_restir_pipeline;
+pub(crate) use resolve::{
+    init_world_restir_resolve_pipeline, prepare_world_restir_resolve,
+    prepare_world_restir_resolve_bind_groups, world_restir_resolve_pass,
+};
 pub(crate) use resources::prepare_world_restir_reservoirs;
 pub(crate) use settings::PrismWorldRestirSettings;
 pub(crate) use visible_points::{
