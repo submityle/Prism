@@ -510,6 +510,8 @@ pub mod grid_sphere_packing;
 pub use grid_sphere_packing::pack_spheres_grid;
 pub mod distribution_packing;
 pub use distribution_packing::{pack_spheres_from_distribution, DistributionPackingParams};
+pub mod packing_diagnostics;
+pub use packing_diagnostics::PackingDiagnostics;
 
 /// A handle into a [`ShapeRegistry`].
 ///
