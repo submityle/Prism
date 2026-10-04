@@ -191,6 +191,12 @@ pub enum WaterKernel {
     /// Face-centered `MAC` grid-to-particle gather (`G2P`): interpolate the
     /// projected face velocities back to particles (`FLIP` delta + `APIC`).
     FlipMacG2P,
+    /// Cell histogram for the `FLIP`/`APIC` counting sort: one invocation per
+    /// particle adds one to its pressure-cell bin (`atomic` sum). Pass 1 of 3
+    /// in the chain (histogram -> exclusive scan -> scatter) that reorders
+    /// particles into cell-major order so the `P2G`/`G2P` transfer touches a
+    /// compact face neighbourhood instead of chasing spawn-order scatter.
+    FlipCellHistogram,
     /// Reconstruct a renderable surface from the particle set (screen-space,
     /// anisotropic marching cubes, or narrow-band `SDF`).
     SurfaceReconstruct,
@@ -230,7 +236,7 @@ pub enum WaterKernel {
 impl WaterKernel {
     /// Every kernel, in a stable order, for descriptor-table iteration and
     /// exhaustiveness tests.
-    pub const ALL: [WaterKernel; 26] = [
+    pub const ALL: [WaterKernel; 27] = [
         WaterKernel::SpectrumIfft,
         WaterKernel::GerstnerDisplace,
         WaterKernel::SweStep,
@@ -242,6 +248,7 @@ impl WaterKernel {
         WaterKernel::FlipMacPressure,
         WaterKernel::FlipMacProject,
         WaterKernel::FlipMacG2P,
+        WaterKernel::FlipCellHistogram,
         WaterKernel::SurfaceReconstruct,
         WaterKernel::CausticsProject,
         WaterKernel::FoamAdvect,
@@ -278,6 +285,7 @@ impl WaterKernel {
             WaterKernel::FlipMacPressure => "mac_pressure",
             WaterKernel::FlipMacProject => "mac_project",
             WaterKernel::FlipMacG2P => "water_flip_mac_g2p",
+            WaterKernel::FlipCellHistogram => "water_flip_cell_histogram",
             WaterKernel::SurfaceReconstruct => "water_surface_reconstruct",
             WaterKernel::CausticsProject => "water_caustics_project",
             WaterKernel::FoamAdvect => "water_foam_advect",
@@ -426,7 +434,13 @@ impl WaterKernel {
                 WorkgroupSize { x: 8, y: 8, z: 1 },
                 DispatchDomain::Grid2d,
             ),
-            WaterKernel::SprayEmit | WaterKernel::CouplingReadback => (
+            // Two storage buffers + one uniform over a 64-lane particle group:
+            // the counting-sort histogram (`positions_in` + atomic `counts`),
+            // the crest-spray emit (particle pool + append cursor), and the
+            // coupling read-back (body queries + force field).
+            WaterKernel::FlipCellHistogram
+            | WaterKernel::SprayEmit
+            | WaterKernel::CouplingReadback => (
                 BindGroupLayout {
                     storage_buffers: 2,
                     uniform_buffers: 1,
