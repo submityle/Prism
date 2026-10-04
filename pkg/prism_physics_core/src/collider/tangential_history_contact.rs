@@ -373,7 +373,7 @@ mod tests {
         let overlap = 0.5;
         let dt = 1.0e-4;
         for _ in 0..3 {
-            evaluate_tangential_history(
+            let _ = evaluate_tangential_history(
                 &m,
                 normal,
                 overlap,
@@ -384,7 +384,7 @@ mod tests {
         }
         let loaded = spring.length();
         for _ in 0..2 {
-            evaluate_tangential_history(
+            let _ = evaluate_tangential_history(
                 &m,
                 normal,
                 overlap,
