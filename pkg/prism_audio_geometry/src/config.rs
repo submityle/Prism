@@ -75,6 +75,24 @@ pub const DEFAULT_MAX_DIFFRACTION_ORDER: usize = 1;
 /// the pure-reflection and pure-diffraction budgets.
 pub const DEFAULT_MAX_COUPLED_PATHS: usize = 8;
 
+/// Hard ceiling on the coupled interaction *order* (the total number of
+/// reflect-plus-diffract interactions along one route) the backend will trace.
+/// Each extra interaction in an interleaved sequence multiplies the number of
+/// candidate orderings and adds another attenuating factor, so the
+/// arbitrary-order resolver in [`crate::coupled_sequence`] is clamped to this
+/// depth regardless of the configured [`GeometricConfig::max_coupled_order`].
+/// Steam Audio's path tracer likewise keeps real-time mixed reflection and
+/// diffraction routes to a low single-digit order.
+pub const MAX_SUPPORTED_COUPLED_ORDER: usize = 4;
+
+/// Default coupled interaction order: order `2`, the single-bounce-plus-single-
+/// bend coupling owned by [`crate::coupled_path`]. Longer interleaved
+/// reflect/diffract sequences (order `3` and up, as when a wave glances off a
+/// wall and then bends around two successive corners) are opt-in through
+/// [`GeometricConfig::with_max_coupled_order`] so existing callers keep the
+/// original order-2 coupling.
+pub const DEFAULT_MAX_COUPLED_ORDER: usize = 2;
+
 /// Which edge-diffraction model the backend evaluates for shadowed arrivals.
 ///
 /// Both models consume the same resolved detour geometry (the least-detour
@@ -140,6 +158,11 @@ pub struct GeometricConfig {
     /// Maximum coupled reflection-and-diffraction arrivals retained per query
     /// (strongest kept), evaluated only when [`Self::coupled_enabled`] is set.
     pub max_coupled_paths: usize,
+    /// Maximum coupled interaction order traced (`2` = the single-bounce/single-
+    /// bend coupling of [`crate::coupled_path`] only; `3` or more enables the
+    /// arbitrary-order interleaved reflect/diffract sequences from
+    /// [`crate::coupled_sequence`], clamped to [`MAX_SUPPORTED_COUPLED_ORDER`]).
+    pub max_coupled_order: usize,
 }
 
 impl GeometricConfig {
@@ -163,6 +186,7 @@ impl GeometricConfig {
             diffraction_model: DiffractionModel::Maekawa,
             coupled_enabled: false,
             max_coupled_paths: DEFAULT_MAX_COUPLED_PATHS,
+            max_coupled_order: DEFAULT_MAX_COUPLED_ORDER,
         }
     }
 
@@ -258,6 +282,23 @@ impl GeometricConfig {
     #[must_use]
     pub fn with_max_coupled_paths(mut self, max: usize) -> Self {
         self.max_coupled_paths = max;
+        self
+    }
+
+    /// Returns a copy that traces interleaved reflect-and-diffract sequences up
+    /// to `order` total interactions and enables coupled tracing.
+    ///
+    /// `order` is clamped to `[2, MAX_SUPPORTED_COUPLED_ORDER]`. Order `2` keeps
+    /// only the single-bounce/single-bend coupling of [`crate::coupled_path`];
+    /// `3` or more additionally enables the arbitrary-order interleaved
+    /// sequences of [`crate::coupled_sequence`] (a glancing bounce followed by
+    /// two successive corner bends, and the like). Raising the order implies
+    /// coupling, so this also sets [`Self::coupled_enabled`].
+    #[inline]
+    #[must_use]
+    pub fn with_max_coupled_order(mut self, order: usize) -> Self {
+        self.max_coupled_order = order.clamp(2, MAX_SUPPORTED_COUPLED_ORDER);
+        self.coupled_enabled = true;
         self
     }
 
@@ -362,5 +403,27 @@ mod tests {
     fn coupled_budget_is_settable() {
         let cfg = GeometricConfig::new(48_000).with_max_coupled_paths(3);
         assert_eq!(cfg.max_coupled_paths, 3);
+    }
+
+    #[test]
+    fn coupled_order_defaults_to_two() {
+        assert_eq!(
+            GeometricConfig::new(48_000).max_coupled_order,
+            super::DEFAULT_MAX_COUPLED_ORDER
+        );
+    }
+
+    #[test]
+    fn coupled_order_builder_clamps_and_enables_coupling() {
+        // Above the ceiling clamps down to the supported maximum and turns
+        // coupling on.
+        let high = GeometricConfig::new(48_000).with_max_coupled_order(99);
+        assert_eq!(high.max_coupled_order, super::MAX_SUPPORTED_COUPLED_ORDER);
+        assert!(high.coupled_enabled);
+        // Below the order-2 floor clamps up to 2 (order 2 is the lowest coupling
+        // that means anything; it is owned by `coupled_path`).
+        let low = GeometricConfig::new(48_000).with_max_coupled_order(0);
+        assert_eq!(low.max_coupled_order, 2);
+        assert!(low.coupled_enabled);
     }
 }

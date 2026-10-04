@@ -53,6 +53,11 @@
 //!   and least-detour primitives so it stays consistent with the lone bounce and
 //!   lone bend it extends; enabled by
 //!   [`config::GeometricConfig::with_coupled_paths`].
+//! - [`coupled_sequence`] traces the arbitrary-order mixed chains that
+//!   interleave three or more reflections and diffractions, extending
+//!   [`coupled_path`] past the order-2 coupling without re-tracing the pure
+//!   reflection or diffraction sets; enabled by
+//!   [`config::GeometricConfig::with_max_coupled_order`].
 //! - [`backend`] assembles the above into [`backend::GeometricBackend`], the
 //!   [`PropagationBackend`](prism_audio_spatial::propagation::PropagationBackend)
 //!   implementation that fills the caller's bounded path buffer.
@@ -86,6 +91,7 @@ extern crate alloc;
 pub mod backend;
 pub mod config;
 pub mod coupled_path;
+pub mod coupled_sequence;
 pub mod diffraction_edges;
 pub mod diffraction_path;
 pub mod direct_path;
