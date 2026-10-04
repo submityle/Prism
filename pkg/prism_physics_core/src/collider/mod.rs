@@ -548,6 +548,8 @@ pub mod contact_stress;
 pub use contact_stress::ContactStress;
 pub mod mohr_coulomb_yield;
 pub use mohr_coulomb_yield::{MohrCoulombCriterion, MohrCoulombYieldState};
+pub mod velocity_gradient;
+pub use velocity_gradient::VelocityGradientField;
 
 /// A handle into a [`ShapeRegistry`].
 ///
