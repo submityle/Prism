@@ -70,6 +70,7 @@ pub mod interval;
 pub mod octahedral;
 pub mod soa;
 pub mod spatial;
+pub mod spherical;
 mod swizzle;
 
 #[cfg(feature = "compat-bevy")]
@@ -114,6 +115,7 @@ pub use self::spatial::{
     hilbert_decode3, hilbert_encode3, morton_decode2, morton_decode3, morton_encode2,
     morton_encode3,
 };
+pub use self::spherical::{Sh2, Sh3, basis2, basis3};
 
 /// Mathematical constant helpers (`f32`).
 pub mod consts {

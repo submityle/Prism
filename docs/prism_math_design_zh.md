@@ -426,13 +426,15 @@ pkg/prism_math/
 
 **交付状态**：已落地 `pkg/prism_math/src/dual.rs`（`no_std`）。`Dual{re,du}` 携值+一阶导，含 `new/constant/variable/recip/sqrt/squared/powf/exp/ln/sin/cos/tan/abs` 与 `Neg/Add/Sub/Mul/Div/Mul<f32>`；`DualVec3{value,deriv}` 随单参数变化的 3-向量，含 `new/constant/from_components/dot/cross/length` 与 `Add/Sub/Mul<Dual>`。超越函数走 `crate::float`（libm，确定性）。8 单测绿：多项式/商法则/超越链式法则/sqrt/recip/曲线切线与速度/点叉积法则/`DualVec3::length` 导数，均以中心有限差分作独立 oracle 校验。IK/物理雅可比待消费方接入。
 
-### 24.6 球谐函数（Spherical Harmonics，GI 数值）
+### 24.6 球谐函数（Spherical Harmonics，GI 数值）—— ✅ 已交付（`spherical` 模块）
 
 环境光照探针/辐照度用球谐压缩方向光照：
 
 - `Sh2`/`Sh3`（L2/L3 阶系数）：方向函数投影/重建、辐照度卷积、旋转（SH 旋转矩阵）、相加/缩放。
 - 供 `prism_gi`（Lumen 形态 GI）的辐照度探针、天光、球谐光照烘焙；与 §11 线性颜色空间协同（SH 存线性光）。
 - 纯经典球谐数学（实数基、Condon–Shortley 约定明确），CPU 烘焙 + GPU 求值共享（接 §24.1 shader 镜像）。
+
+**交付状态**：已落地 `pkg/prism_math/src/spherical.rs`（`no_std`，无超越函数、跨平台位级一致）。实数 `SH` 基 `basis2`（9 项，bands 0..=2）/`basis3`（16 项，bands 0..=3），Condon–Shortley 相位折入常数；`Sh2`/`Sh3` 标量系数容器含 `ZERO/from_coeffs/add_sample（投影累加）/eval（重建）/convolve_cosine（钳位余弦卷积得漫反射辐照度，band≥3 归零）/scaled` + `Add/Sub/Mul<f32>`，`Sh3::to_sh2` 截断。`RGB` 光照每通道存一份实例。5 单测绿：40 万样本蒙特卡洛验证 16×16 基正交归一（Gram≈单位阵）、低阶场投影-重建、delta 光卷积与半球钳位余弦积分对拍、线性性、截断一致。SH 旋转与 `prism_gi` 探针接入待消费方驱动。
 
 ### 24.7 空间编码（Morton / Hilbert 曲线）—— ✅ 已交付（`spatial` 模块）
 
@@ -461,4 +463,4 @@ pkg/prism_math/
 
 ### 24.10 诚实边界
 
-本章全部 PLANNED，无代码。落地优先级建议：**24.4 补偿求和**（直接服务确定归并，随 tasks M4）与 **24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）优先；24.3 区间算术 **已交付**（`interval`）；24.6 SH 随 `prism_gi`；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数 **已交付**（`dual`，供 IK/物理雅可比接入）；24.8 曲面随地形；24.9 大世界定点随联机开放世界。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章全部 PLANNED，无代码。落地优先级建议：**24.4 补偿求和**（直接服务确定归并，随 tasks M4）与 **24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）优先；24.3 区间算术 **已交付**（`interval`）；24.6 SH **已交付**（`spherical`，SH 旋转/探针随 `prism_gi` 接入）；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数 **已交付**（`dual`，供 IK/物理雅可比接入）；24.8 曲面随地形；24.9 大世界定点随联机开放世界。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
