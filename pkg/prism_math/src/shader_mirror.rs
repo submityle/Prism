@@ -792,3 +792,32 @@ fn prism_linear_to_srgb(c: f32) -> f32 {\n\
     }\n\
     return 1.055 * pow(c, 1.0 / 2.4) - 0.055;\n\
 }\n";
+
+/// Single-sourced WGSL for 8-bit-per-channel vertex-attribute packing,
+/// mirroring the CPU codec [`crate::pack8`].
+///
+/// `prism_pack_unorm4x8` / `prism_pack_snorm4x8` fold a `vec4<f32>` into one
+/// `u32` of four 8-bit channels (component 0 in the low byte) and the `unpack`
+/// inverses widen them back, wrapping the WGSL built-ins `pack4x8unorm` /
+/// `pack4x8snorm` / `unpack4x8unorm` / `unpack4x8snorm`. The WGSL spec defines
+/// the quantizers as `⌊0.5 + N·clamp(c)⌋` (`N` = 255 unorm / 127 snorm), the
+/// same rounding the CPU reference uses, so for exactly-representable quantized
+/// inputs the packed bytes match the CPU path **byte-for-byte**; arbitrary
+/// inputs may differ by at most one code at a rounding tie (a documented honest
+/// boundary). The widening (`unpack`) direction is exact on both sides.
+pub const WGSL_PACK8: &str = "\
+fn prism_pack_unorm4x8(v: vec4<f32>) -> u32 {\n\
+    return pack4x8unorm(v);\n\
+}\n\
+\n\
+fn prism_unpack_unorm4x8(bits: u32) -> vec4<f32> {\n\
+    return unpack4x8unorm(bits);\n\
+}\n\
+\n\
+fn prism_pack_snorm4x8(v: vec4<f32>) -> u32 {\n\
+    return pack4x8snorm(v);\n\
+}\n\
+\n\
+fn prism_unpack_snorm4x8(bits: u32) -> vec4<f32> {\n\
+    return unpack4x8snorm(bits);\n\
+}\n";
