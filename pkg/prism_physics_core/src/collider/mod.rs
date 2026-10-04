@@ -365,6 +365,10 @@ pub mod tet_fem_hoek_brown_plasticity;
 pub use tet_fem_hoek_brown_plasticity::{
     return_map_hoek_brown, HoekBrownModel, HoekBrownState, HoekBrownStep, HoekBrownYield,
 };
+pub mod tet_fem_hoek_brown_force;
+pub use tet_fem_hoek_brown_force::{
+    element_hoek_brown_force, hoek_brown_elastic_potential_energy, HoekBrownForce,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
