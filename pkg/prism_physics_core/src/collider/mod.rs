@@ -384,6 +384,10 @@ pub mod tet_fem_damage_force;
 pub use tet_fem_damage_force::{
     damaged_elastic_potential_energy, element_damaged_force, DamagedForce,
 };
+pub mod tet_fem_damage_force_assembly;
+pub use tet_fem_damage_force_assembly::{
+    assemble_damaged_forces, total_degraded_potential_energy, DamageAssembly,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
