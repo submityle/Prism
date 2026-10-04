@@ -482,6 +482,8 @@ pub mod finite_liquid_capillary_forces;
 pub use finite_liquid_capillary_forces::{
     FiniteLiquidBridge, FiniteLiquidCapillary, FiniteLiquidResolution,
 };
+pub mod wet_bridge_hysteresis;
+pub use wet_bridge_hysteresis::{WetBridgeHysteresis, WetBridgeReport};
 
 /// A handle into a [`ShapeRegistry`].
 ///
