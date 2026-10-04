@@ -498,6 +498,8 @@ pub mod sphere_dem_friction_integrator;
 pub use sphere_dem_friction_integrator::{
     SphereDemFrictionIntegrator, SphereDemFrictionStepReport,
 };
+pub mod sphere_boundary_driver;
+pub use sphere_boundary_driver::{SphereBoundaryDriver, SphereBoundaryResolution};
 
 /// A handle into a [`ShapeRegistry`].
 ///
