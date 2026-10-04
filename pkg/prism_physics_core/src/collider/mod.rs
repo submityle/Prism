@@ -590,6 +590,8 @@ pub mod deborah_number;
 pub use deborah_number::{DeborahNumber, DeborahRegime};
 pub mod richardson_number;
 pub use richardson_number::{RichardsonNumber, RichardsonRegime};
+pub mod matsuoka_nakai_invariant;
+pub use matsuoka_nakai_invariant::MatsuokaNakaiInvariant;
 
 /// A handle into a [`ShapeRegistry`].
 ///
