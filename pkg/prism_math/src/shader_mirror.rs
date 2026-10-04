@@ -938,3 +938,118 @@ fn prism_xyz_to_linear(c: vec4<f32>) -> vec4<f32> {\n\
         c.w,\n\
     );\n\
 }\n";
+
+/// Single-sourced WGSL for the non-linear sRGB <-> HSL / HSV cylindrical color
+/// conversions.
+///
+/// These mirror the CPU reference
+/// [`Hsla`](crate::color::Hsla) / [`Hsva`](crate::color::Hsva): both models are
+/// defined over **non-linear** sRGB components (the usual color-picker
+/// convention), so the kernels operate directly on the stored sRGB quad with no
+/// gamma step. Hue is carried in degrees `[0, 360)`.
+///
+/// WGSL has no `rem_euclid` built-in, so `prism_rem_euclid` reconstructs it as
+/// `a - b*floor(a/b)` (equal to Rust `f32::rem_euclid` for the positive moduli
+/// used here). The hue decomposition selects its branch on `max == r` /
+/// `max == g`, and because `max`/`min` return one of their operands bit-for-bit
+/// the GPU and CPU pick the same branch. The sector index uses `u32(h)` to
+/// match the CPU's `h as u32` truncation. Everything else is ordinary FMA
+/// arithmetic, so parity is a tight tolerance (hue is numerically unstable near
+/// gray where chroma -> 0, hence round-trip is the strong check), not
+/// bit-exact. The fourth lane (alpha) is carried through unchanged.
+pub const WGSL_HSL: &str = "\
+fn prism_rem_euclid(a: f32, b: f32) -> f32 {\n\
+    return a - b * floor(a / b);\n\
+}\n\
+\n\
+fn prism_rgb_to_hue(c: vec4<f32>) -> vec4<f32> {\n\
+    let r = c.x;\n\
+    let g = c.y;\n\
+    let b = c.z;\n\
+    let mx = max(max(r, g), b);\n\
+    let mn = min(min(r, g), b);\n\
+    let chroma = mx - mn;\n\
+    var hue = 0.0;\n\
+    if (chroma == 0.0) {\n\
+        hue = 0.0;\n\
+    } else if (mx == r) {\n\
+        hue = 60.0 * prism_rem_euclid((g - b) / chroma, 6.0);\n\
+    } else if (mx == g) {\n\
+        hue = 60.0 * ((b - r) / chroma + 2.0);\n\
+    } else {\n\
+        hue = 60.0 * ((r - g) / chroma + 4.0);\n\
+    }\n\
+    return vec4<f32>(mx, mn, chroma, hue);\n\
+}\n\
+\n\
+fn prism_hue_to_rgb(hue: f32, chroma: f32, m: f32, alpha: f32) -> vec4<f32> {\n\
+    let h = prism_rem_euclid(hue, 360.0) / 60.0;\n\
+    let x = chroma * (1.0 - abs(prism_rem_euclid(h, 2.0) - 1.0));\n\
+    let sector = u32(h);\n\
+    var r1 = 0.0;\n\
+    var g1 = 0.0;\n\
+    var b1 = 0.0;\n\
+    if (sector == 0u) {\n\
+        r1 = chroma; g1 = x; b1 = 0.0;\n\
+    } else if (sector == 1u) {\n\
+        r1 = x; g1 = chroma; b1 = 0.0;\n\
+    } else if (sector == 2u) {\n\
+        r1 = 0.0; g1 = chroma; b1 = x;\n\
+    } else if (sector == 3u) {\n\
+        r1 = 0.0; g1 = x; b1 = chroma;\n\
+    } else if (sector == 4u) {\n\
+        r1 = x; g1 = 0.0; b1 = chroma;\n\
+    } else {\n\
+        r1 = chroma; g1 = 0.0; b1 = x;\n\
+    }\n\
+    return vec4<f32>(r1 + m, g1 + m, b1 + m, alpha);\n\
+}\n\
+\n\
+fn prism_hsl_from_srgb(c: vec4<f32>) -> vec4<f32> {\n\
+    let d = prism_rgb_to_hue(c);\n\
+    let mx = d.x;\n\
+    let mn = d.y;\n\
+    let chroma = d.z;\n\
+    let hue = d.w;\n\
+    let lightness = 0.5 * (mx + mn);\n\
+    var saturation = 0.0;\n\
+    if (lightness <= 0.0 || lightness >= 1.0) {\n\
+        saturation = 0.0;\n\
+    } else {\n\
+        saturation = chroma / (1.0 - abs(2.0 * lightness - 1.0));\n\
+    }\n\
+    return vec4<f32>(hue, saturation, lightness, c.w);\n\
+}\n\
+\n\
+fn prism_hsl_to_srgb(c: vec4<f32>) -> vec4<f32> {\n\
+    let hue = c.x;\n\
+    let saturation = c.y;\n\
+    let lightness = c.z;\n\
+    let chroma = (1.0 - abs(2.0 * lightness - 1.0)) * saturation;\n\
+    let m = lightness - 0.5 * chroma;\n\
+    return prism_hue_to_rgb(hue, chroma, m, c.w);\n\
+}\n\
+\n\
+fn prism_hsv_from_srgb(c: vec4<f32>) -> vec4<f32> {\n\
+    let d = prism_rgb_to_hue(c);\n\
+    let mx = d.x;\n\
+    let chroma = d.z;\n\
+    let hue = d.w;\n\
+    let value = mx;\n\
+    var saturation = 0.0;\n\
+    if (value <= 0.0) {\n\
+        saturation = 0.0;\n\
+    } else {\n\
+        saturation = chroma / value;\n\
+    }\n\
+    return vec4<f32>(hue, saturation, value, c.w);\n\
+}\n\
+\n\
+fn prism_hsv_to_srgb(c: vec4<f32>) -> vec4<f32> {\n\
+    let hue = c.x;\n\
+    let saturation = c.y;\n\
+    let value = c.z;\n\
+    let chroma = value * saturation;\n\
+    let m = value - chroma;\n\
+    return prism_hue_to_rgb(hue, chroma, m, c.w);\n\
+}\n";
