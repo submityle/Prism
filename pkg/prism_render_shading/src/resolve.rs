@@ -16,6 +16,8 @@ use crate::{
     SurfaceReconstructionError, SurfaceReconstructionFlags, SurfaceReconstructionInput,
     SurfaceSample, TangentBasis, VisibilityPixel,
 };
+use crate::gi::area_light::ltc_lut::LtcLut;
+use crate::gi::area_light::resolve::{accumulate_area_lights, AreaLightRect};
 
 /// Identity `world_from_local` (row-major affine) used when an instance carries
 /// no transform; lifting a local-space surface through it is a no-op.
@@ -126,6 +128,12 @@ pub struct LightingEnvironment<'a> {
     /// Stylized (NPR) front-end controls used by the `MaterialShadingClass::Npr`
     /// path. The default reproduces the historical four-band toon lobe.
     pub stylized: StylizedParams,
+    /// Resident polygonal rectangle area lights (LTC). Evaluated only by the
+    /// physically based lobes (Principled/Cloth/Subsurface/ClearCoat/Custom).
+    pub area: &'a [AreaLightRect],
+    /// Baked LTC coefficient LUT shared by every area light. `None` collapses
+    /// the area specular lobe to the diffuse-only clamped-cosine term.
+    pub ltc_lut: Option<&'a LtcLut>,
 }
 
 impl Default for LightingEnvironment<'_> {
@@ -136,6 +144,8 @@ impl Default for LightingEnvironment<'_> {
             image_based: None,
             ambient: [0.0; 3],
             stylized: StylizedParams::with_bands(4),
+            area: &[],
+            ltc_lut: None,
         }
     }
 }
@@ -348,6 +358,13 @@ pub fn resolve_pixel(
         None => ambient_term(base_color, ambient_occlusion, lights.ambient, metallic),
     };
 
+    // Analytic rectangle area lights (LTC): the specular + diffuse polygon
+    // response added once per physically based lobe, mirroring
+    // `accumulate_area_lights` in `shading_resolve.wesl`. The default
+    // `area: &[]` keeps every existing golden bit-for-bit stable.
+    let area_light_term =
+        accumulate_area_lights(&lit_surface, frame, geometry.position, lights.area, lights.ltc_lut);
+
     // Integrates the principled GGX lobe over every analytic light, then adds
     // the shared indirect + emissive terms once.  Shared by the physically
     // based classes (Principled and, until their specialized lobes land,
@@ -368,7 +385,7 @@ pub fn resolve_pixel(
                 );
             }
         }
-        add(add(accumulated, indirect), emissive)
+        add(add(add(accumulated, area_light_term), indirect), emissive)
     };
 
     // Integrates the stylized (NPR) front end over every analytic light, then
@@ -417,7 +434,7 @@ pub fn resolve_pixel(
                 );
             }
         }
-        add(add(accumulated, indirect), emissive)
+        add(add(add(accumulated, area_light_term), indirect), emissive)
     };
 
     // Integrates the subsurface (SSS) lobe over every analytic light, then
@@ -440,7 +457,7 @@ pub fn resolve_pixel(
                 );
             }
         }
-        add(add(accumulated, indirect), emissive)
+        add(add(add(accumulated, area_light_term), indirect), emissive)
     };
 
     // Integrates the hair (strand) lobe over every analytic light, then adds
@@ -510,7 +527,7 @@ pub fn resolve_pixel(
                 );
             }
         }
-        add(add(accumulated, indirect), emissive)
+        add(add(add(accumulated, area_light_term), indirect), emissive)
     };
 
     // Every class is handled explicitly so this branch stays byte-for-byte in
@@ -682,6 +699,8 @@ mod tests {
                 image_based: None,
                 ambient: [5.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap();
@@ -711,6 +730,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap()
@@ -723,6 +744,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap()
@@ -791,6 +814,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap();
@@ -821,6 +846,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap();
@@ -840,6 +867,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap();
@@ -877,6 +906,8 @@ mod tests {
                 image_based: Some(probe),
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap();
@@ -920,6 +951,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap();
@@ -961,6 +994,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap()
@@ -983,6 +1018,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap()
@@ -1017,6 +1054,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap()
@@ -1044,6 +1083,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap()
@@ -1083,6 +1124,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.5; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap()
@@ -1116,6 +1159,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.5; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap()
@@ -1143,6 +1188,8 @@ mod tests {
             image_based: None,
             ambient: [0.6; 3],
             stylized: StylizedParams::with_bands(4),
+            area: &[],
+            ltc_lut: None,
         };
 
         let full = resolve_pixel(
@@ -1198,6 +1245,8 @@ mod tests {
             image_based: None,
             ambient: [0.0; 3],
             stylized: StylizedParams::with_bands(4),
+            area: &[],
+            ltc_lut: None,
         };
         let lit_full = resolve_pixel(
             ResolveInput {
@@ -1291,6 +1340,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap()
@@ -1319,6 +1370,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap()
@@ -1347,6 +1400,8 @@ mod tests {
                 image_based: None,
                 ambient: [0.0; 3],
                 stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
             },
         )
         .unwrap()
@@ -1369,5 +1424,86 @@ mod tests {
         // Mirror the camera position `base_input` bakes in so the invariance
         // test shifts by the exact same origin.
         [0.0, 0.0, 4.0]
+    }
+
+    #[test]
+    fn area_light_adds_energy_to_a_principled_pixel_and_empty_slice_is_stable() {
+        use crate::gi::area_light::ltc_lut::bake_ltc_lut_default;
+
+        // A principled surface with no ambient / directional / punctual light
+        // resolves to zero; a facing rectangle area light sampled through the
+        // baked LTC LUT must inject strictly positive radiance, while an empty
+        // `area` slice must leave the baseline bit-for-bit unchanged (the
+        // default-stable contract the GPU resolve relies on).
+        let (primitives, vertices) = unit_triangle();
+        let header = principled_header();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.8, 0.6, 0.4, 1.0],
+            metallic: 0.0,
+            ..Default::default()
+        };
+
+        let dark = LightingEnvironment {
+            directional: &[],
+            punctual: &[],
+            image_based: None,
+            ambient: [0.0; 3],
+            stylized: StylizedParams::with_bands(4),
+            area: &[],
+            ltc_lut: None,
+        };
+        let baseline = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            dark,
+        )
+        .unwrap()
+        .color;
+        for c in 0..3 {
+            assert!(
+                baseline[c].abs() < 1.0e-6,
+                "unlit principled pixel must resolve to zero: {baseline:?}",
+            );
+        }
+
+        let lut = bake_ltc_lut_default();
+        let lights = [AreaLightRect {
+            center: [0.3, 0.5, 2.0],
+            axis_u: [1.0, 0.0, 0.0],
+            axis_v: [0.0, 1.0, 0.0],
+            half_width: 0.5,
+            half_height: 0.5,
+            color: [1.0, 1.0, 1.0],
+            intensity: 4.0,
+            range: 0.0,
+            two_sided: true,
+        }];
+        let lit = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            LightingEnvironment {
+                area: &lights,
+                ltc_lut: Some(&lut),
+                ..dark
+            },
+        )
+        .unwrap()
+        .color;
+        for c in 0..3 {
+            assert!(
+                lit[c] > baseline[c] + 1.0e-5,
+                "a facing area light must add positive radiance: {lit:?} vs {baseline:?}",
+            );
+        }
+
+        let empty = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            LightingEnvironment {
+                area: &[],
+                ltc_lut: Some(&lut),
+                ..dark
+            },
+        )
+        .unwrap()
+        .color;
+        assert_eq!(empty, baseline, "empty area slice must stay bit-stable");
     }
 }

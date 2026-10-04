@@ -1126,7 +1126,24 @@ fn al_to_frame(w: vec3<f32>, t1: vec3<f32>, t2: vec3<f32>, n: vec3<f32>) -> vec3
 // Returns `vec2(specular_form_factor, diffuse_form_factor)` for one rectangle
 // light at shaded point `p` with normal `n`, view `v` and sampled coefficients.
 fn al_evaluate(n: vec3<f32>, v: vec3<f32>, p: vec3<f32>, light: AreaLight, coeffs: AlCoeffs) -> vec2<f32> {
-    let t1 = normalize(v - n * dot(n, v));
+    // The usual tangent `normalize(v - n * dot(n, v))` degenerates to zero when
+    // the view is parallel to the normal (perpendicular viewing), collapsing
+    // every quad corner onto `+Z` and yielding a spurious zero form factor.
+    // Fall back to any stable axis perpendicular to the normal: at normal
+    // incidence the lobe is rotationally symmetric about `+Z`, so the in-plane
+    // choice is immaterial. Byte-exact twin of the CPU golden
+    // `principled_area_contribution`.
+    let projected = v - n * dot(n, v);
+    var t1: vec3<f32>;
+    if (dot(projected, projected) > 1.0e-12) {
+        t1 = normalize(projected);
+    } else {
+        var helper = vec3<f32>(0.0, 1.0, 0.0);
+        if (abs(n.y) >= 0.999) {
+            helper = vec3<f32>(1.0, 0.0, 0.0);
+        }
+        t1 = normalize(cross(helper, n));
+    }
     let t2 = cross(n, t1);
     let center = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
     let axis_u = vec3<f32>(light.axis_u_x, light.axis_u_y, light.axis_u_z);
