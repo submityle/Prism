@@ -748,6 +748,7 @@ pub mod indexed_bilinear_patch_mesh;
 pub mod indexed_bilinear_patch_mesh_gpu_layout;
 pub mod lbvh;
 pub mod dynamic_blas;
+pub mod dynamic_tlas;
 pub mod mesh_border_detection;
 pub mod mesh_bounding_sphere;
 pub mod mesh_closest_point;
