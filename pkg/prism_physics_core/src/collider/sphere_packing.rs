@@ -108,6 +108,26 @@ impl SpherePacking {
         }
         smallest
     }
+
+    /// Builds a packing directly from parallel `positions` and `radii` arrays,
+    /// for example the output of an alternative packer such as
+    /// [`pack_spheres_grid`](super::grid_sphere_packing::pack_spheres_grid).
+    ///
+    /// Returns `None` unless the two arrays share the same length and every
+    /// value is finite with a strictly positive radius.
+    #[must_use]
+    pub fn from_parts(positions: Vec<Vec3>, radii: Vec<f32>) -> Option<Self> {
+        if positions.len() != radii.len() {
+            return None;
+        }
+        if positions.iter().any(|p| !p.is_finite()) {
+            return None;
+        }
+        if radii.iter().any(|r| !r.is_finite() || *r <= 0.0) {
+            return None;
+        }
+        Some(Self { positions, radii })
+    }
 }
 
 /// Generates a non-overlapping polydisperse sphere packing.
