@@ -80,6 +80,7 @@ pub mod segment;
 pub mod simplify;
 pub mod sdf;
 pub mod triangulate;
+pub mod width;
 
 pub use batch::{batch, instance_count, Batch, GlyphInstance, RectInstance, ShadowInstance};
 pub use calipers::{convex_diameter, convex_diameter_pair};
@@ -101,3 +102,4 @@ pub use scene::RetainedScene;
 pub use segment::segment_intersection;
 pub use simplify::simplify;
 pub use triangulate::triangulate;
+pub use width::convex_width;
