@@ -319,6 +319,10 @@ pub mod tet_fem_snow_force_assembly;
 pub use tet_fem_snow_force_assembly::{
     assemble_snow_forces, rest_snow_states, total_snow_elastic_potential_energy, SnowAssembly,
 };
+pub mod tet_fem_sand_force_assembly;
+pub use tet_fem_sand_force_assembly::{
+    assemble_sand_forces, rest_sand_states, total_sand_elastic_potential_energy, SandAssembly,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
