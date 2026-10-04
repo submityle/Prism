@@ -20,6 +20,7 @@ use prism_audio_core::math::Sample;
 
 use crate::codec_tier::UsageClass;
 use crate::finalize::FinalizeConfig;
+use crate::loudness_normalize::LoudnessNormalizeConfig;
 use crate::loop_point::LoopMode;
 
 /// Hints that disambiguate headerless or ambiguous source bytes.
@@ -237,6 +238,10 @@ pub struct ConditioningConfig {
     /// delivered program matches the raw conditioned program unless a
     /// caller opts in.
     pub finalize: FinalizeConfig,
+    /// Loudness-normalization parameters. Disabled by default, so the
+    /// delivered program keeps its measured loudness unless a caller
+    /// opts in to normalize toward a target.
+    pub loudness_normalize: LoudnessNormalizeConfig,
 }
 
 impl Default for ConditioningConfig {
@@ -253,6 +258,7 @@ impl Default for ConditioningConfig {
             lipsync: LipsyncConfig::default(),
             usage: UsageClass::default(),
             finalize: FinalizeConfig::default(),
+            loudness_normalize: LoudnessNormalizeConfig::default(),
         }
     }
 }

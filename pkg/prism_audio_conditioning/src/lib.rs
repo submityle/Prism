@@ -30,6 +30,8 @@
 //!   PCM so a detected forward loop plays click-free with no runtime work.
 //! - [`loop_point`] detects seamless forward/ping-pong loop points via
 //!   zero-crossing alignment and autocorrelation.
+//! - [`loudness_normalize`] bakes a single peak-limited gain into the program
+//!   to reach a target integrated loudness under a true-peak ceiling.
 //! - [`loudness_offline`] computes BS.1770 integrated LUFS, true-peak, and
 //!   loudness range.
 //! - [`marker`] assembles a labeled transient/beat/bar marker timeline.
@@ -70,6 +72,7 @@ pub mod hrtf_condition;
 pub mod lipsync;
 pub mod loop_crossfade;
 pub mod loop_point;
+pub mod loudness_normalize;
 pub mod loudness_offline;
 pub mod marker;
 pub mod pcm;

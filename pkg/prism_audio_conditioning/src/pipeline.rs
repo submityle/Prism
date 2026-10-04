@@ -25,8 +25,10 @@ use crate::decode::{self, DecodeError, SourceFormat};
 use crate::finalize::{self, FinalizeError};
 use crate::loop_point::{self, LoopPoints};
 use crate::loudness_offline::{self, LoudnessStats};
+use crate::loudness_normalize;
 use crate::marker::MarkerTimeline;
 use crate::pcm::{ConditionedPcm, EncoderDelay};
+use prism_audio_core::math::Sample;
 use crate::resample_offline;
 use crate::tempo::{self, TempoEstimate};
 use crate::transient;
@@ -74,6 +76,9 @@ pub struct ConditionedArtifact {
     pub codec: CodecRecommendation,
     /// Deterministic content hash of the conditioned audio and configuration.
     pub hash: ContentHash,
+    /// Scalar gain applied by loudness normalization, in dB (`0` when the
+    /// stage is disabled or the program is silent).
+    pub applied_loudness_gain_db: Sample,
 }
 
 /// A reusable description of one conditioning job.
@@ -170,6 +175,18 @@ pub fn run(
         (pcm, loop_points)
     };
 
+    // Loudness normalization scales the delivered program toward a target under
+    // a true-peak ceiling. It uses the loudness measured on the pre-finalize
+    // program (encoder-delay trim and loop-seam crossfade are near-neutral in
+    // integrated loudness), while enforcing the ceiling against the finalized
+    // program's own peak so the no-clip guarantee always holds.
+    let (pcm, applied_loudness_gain_db) = if config.loudness_normalize.is_enabled() {
+        let normalized = loudness_normalize::normalize(&pcm, loudness, &config.loudness_normalize);
+        (normalized.pcm, normalized.applied_gain_db)
+    } else {
+        (pcm, 0.0)
+    };
+
     let hash = hash_artifact(&pcm, config);
 
     Ok(ConditionedArtifact {
@@ -181,6 +198,7 @@ pub fn run(
         markers,
         codec,
         hash,
+        applied_loudness_gain_db,
     })
 }
 
@@ -293,5 +311,36 @@ mod tests {
         let config = ConditioningConfig::default();
         let err = run(&[0u8; 8], SourceFormat::Wav, &config);
         assert!(matches!(err, Err(PipelineError::Decode(_))));
+    }
+
+    #[test]
+    fn loudness_normalize_disabled_keeps_gain_zero() {
+        let wav = tone_wav(48_000, 440.0, 8_000);
+        let config = ConditioningConfig::default();
+        let out = run(&wav, SourceFormat::Wav, &config).unwrap();
+        // Default normalization is off: no gain and the raw program survives.
+        assert_eq!(out.applied_loudness_gain_db, 0.0);
+    }
+
+    #[test]
+    fn loudness_normalize_scales_program_when_enabled() {
+        let wav = tone_wav(48_000, 440.0, 48_000);
+        let raw = run(&wav, SourceFormat::Wav, &ConditioningConfig::default()).unwrap();
+
+        let mut config = ConditioningConfig::default();
+        config.loudness_normalize.enabled = true;
+        // A very low target forces a clear attenuation (ceiling never binds).
+        config.loudness_normalize.target_lufs = -40.0;
+        let normalized = run(&wav, SourceFormat::Wav, &config).unwrap();
+
+        // A gain was applied and the delivered bytes (and hash) moved.
+        assert!(normalized.applied_loudness_gain_db < 0.0);
+        assert_ne!(raw.hash, normalized.hash);
+        assert_eq!(raw.pcm.frames(), normalized.pcm.frames());
+
+        // Normalization is deterministic.
+        let again = run(&wav, SourceFormat::Wav, &config).unwrap();
+        assert_eq!(normalized.hash, again.hash);
+        assert_eq!(normalized.applied_loudness_gain_db, again.applied_loudness_gain_db);
     }
 }
