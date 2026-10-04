@@ -42,6 +42,7 @@
 //!   compile time (see [`crate::query::slice`]).
 
 use crate::query::{Access, ArchetypalFilter, ColumnSliceData, QueryData, QueryFilter, ReadOnlyQueryData};
+use crate::system::job_dag::JobDag;
 use crate::resource::{Resource, ResourceId};
 use crate::system::param::SystemParam;
 use crate::system::query_param::Query;
@@ -97,6 +98,42 @@ impl<'w> JobGraph<'w> {
     #[inline]
     pub fn pool(&self) -> &TaskPool {
         self.pool
+    }
+
+    /// Build and run a heterogeneous sub-job **dependency DAG** over the shared
+    /// pool (design §8.3 "fiber 作业图：原子计数依赖 + 工作窃取").
+    ///
+    /// Unlike the `par_for_each*` / `par_chunks*` helpers, which fan **one**
+    /// query's rows out homogeneously, this splits a heavy system into named,
+    /// heterogeneous sub-jobs wired by dependency edges. Inside `build`, add
+    /// nodes with [`JobDag::add`] / [`JobDag::add_after`]; each node is
+    /// dispatched the instant its last predecessor finishes (dataflow
+    /// scheduling, no false phase barriers), and the call returns once every
+    /// node has run.
+    ///
+    /// ```ignore
+    /// fn step(mut q: Query<&mut Body>, jobs: JobGraph) {
+    ///     let shared = SharedState::default();
+    ///     jobs.dag(|dag| {
+    ///         let broad = dag.add(|| shared.broadphase());
+    ///         let integ = dag.add(|| shared.integrate());
+    ///         dag.add_after(&[broad, integ], || shared.resolve());
+    ///     });
+    /// }
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the declared edges contain a cycle, or re-raises a panic from
+    /// any sub-job after the graph joins. See [`JobDag`].
+    #[inline]
+    pub fn dag<'env, B>(&self, build: B)
+    where
+        B: FnOnce(&mut JobDag<'env>),
+    {
+        let mut dag = JobDag::new();
+        build(&mut dag);
+        dag.dispatch(self.pool);
     }
 
     /// Fan `q`'s matched rows out across the pool with shared access, in
