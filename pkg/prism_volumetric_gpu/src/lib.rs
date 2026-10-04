@@ -121,7 +121,12 @@ pub mod cloth_collision_project;
 pub mod cloth_half_space_toi;
 pub mod cloth_lod;
 pub mod cloth_mesh_volume;
+pub mod cloth_painted_backstop;
+pub mod cloth_plastic_rest_length;
 pub mod cloth_pressure_project;
+pub mod cloth_sleep_update;
+pub mod cloth_tear_flag;
+pub mod cloth_tensile_strain;
 pub mod cloth_vertex_normals;
 pub mod cloth_wind_force;
 pub mod cloud_coverage_remap;
@@ -229,6 +234,7 @@ pub mod hair_melanin_absorption;
 pub mod hair_orthonormal_basis;
 pub mod hair_reactive_mask;
 pub mod hair_scatter_lod;
+pub mod hair_sleep_update;
 pub mod hair_spectral_absorption;
 pub mod hair_wetness_response;
 pub mod half_float_f16;
@@ -677,8 +683,19 @@ pub use cloth_half_space_toi::{
 };
 pub use cloth_lod::{ClothLodQuery, ClothLodResult, GpuClothLod};
 pub use cloth_mesh_volume::{ClothMeshVolumeQuery, ClothMeshVolumeResult, GpuClothMeshVolume};
+pub use cloth_painted_backstop::{
+    ClothPaintedBackstopQuery, ClothPaintedBackstopResult, GpuClothPaintedBackstop,
+};
+pub use cloth_plastic_rest_length::{
+    ClothPlasticRestLengthQuery, ClothPlasticRestLengthResult, GpuClothPlasticRestLength,
+};
 pub use cloth_pressure_project::{
     ClothPressureProjectQuery, ClothPressureProjectResult, GpuClothPressureProject,
+};
+pub use cloth_sleep_update::{ClothSleepUpdateQuery, ClothSleepUpdateResult, GpuClothSleepUpdate};
+pub use cloth_tear_flag::{ClothTearFlagQuery, ClothTearFlagResult, GpuClothTearFlag};
+pub use cloth_tensile_strain::{
+    ClothTensileStrainQuery, ClothTensileStrainResult, GpuClothTensileStrain,
 };
 pub use cloth_vertex_normals::{
     ClothVertexNormalsQuery, ClothVertexNormalsResult, GpuClothVertexNormals,
@@ -848,6 +865,7 @@ pub use hair_orthonormal_basis::{
 };
 pub use hair_reactive_mask::{GpuHairReactiveMask, HairReactiveMaskQuery, HairReactiveMaskResult};
 pub use hair_scatter_lod::{GpuHairScatterLod, HairScatterLodQuery, HairScatterLodResult};
+pub use hair_sleep_update::{GpuHairSleepUpdate, HairSleepUpdateQuery, HairSleepUpdateResult};
 pub use hair_spectral_absorption::{
     GpuHairSpectralAbsorption, HairSpectralAbsorptionQuery, HairSpectralAbsorptionResult,
 };
