@@ -538,6 +538,8 @@ pub mod kinetic_theory;
 pub use kinetic_theory::GranularKineticState;
 pub mod flowability;
 pub use flowability::{FlowCharacter, PowderFlowability};
+pub mod haff_cooling;
+pub use haff_cooling::HaffCooling;
 
 /// A handle into a [`ShapeRegistry`].
 ///
