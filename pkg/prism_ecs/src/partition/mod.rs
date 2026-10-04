@@ -9,6 +9,7 @@ pub mod data_layer;
 pub mod driver;
 pub mod dormant;
 pub mod floating_origin;
+pub mod hlod;
 pub mod interest;
 pub mod lod;
 pub mod processor;

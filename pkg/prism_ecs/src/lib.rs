@@ -101,6 +101,8 @@ pub mod prelude {
     #[cfg(feature = "partition")]
     pub use crate::partition::floating_origin::{FloatingOrigin, GridCell, LocalPos, WorldPos};
     #[cfg(feature = "partition")]
+    pub use crate::partition::hlod::{Hlod, HlodDelta, HlodFootprint, HlodLayer, HlodProxyId};
+    #[cfg(feature = "partition")]
     pub use crate::partition::interest::InterestGrid;
     #[cfg(feature = "partition")]
     pub use crate::partition::lod::{

@@ -47,6 +47,7 @@ use crate::partition::cell::{CellCoord, CellStreamer};
 use crate::partition::data_layer::DataLayers;
 use crate::partition::driver::{StreamDriver, StreamResult};
 use crate::partition::floating_origin::{FloatingOrigin, GridCell, LocalPos, WorldPos};
+use crate::partition::hlod::{Hlod, HlodDelta};
 use crate::partition::interest::InterestGrid;
 use crate::partition::streaming::{CellEntityIndex, WeakRefs};
 use crate::world::World;
@@ -66,6 +67,7 @@ pub struct WorldPartition {
     interest: InterestGrid,
     driver: StreamDriver,
     data_layers: DataLayers,
+    hlod: Hlod,
 }
 
 impl WorldPartition {
@@ -89,6 +91,7 @@ impl WorldPartition {
             interest,
             driver: StreamDriver::new(load_radius, unload_radius),
             data_layers: DataLayers::new(),
+            hlod: Hlod::new(),
         }
     }
 
@@ -105,6 +108,7 @@ impl WorldPartition {
             interest,
             driver: StreamDriver::with_streamer(streamer),
             data_layers: DataLayers::new(),
+            hlod: Hlod::new(),
         }
     }
 
@@ -149,6 +153,55 @@ impl WorldPartition {
     #[inline]
     pub fn data_layers_mut(&mut self) -> &mut DataLayers {
         &mut self.data_layers
+    }
+
+    /// The HLOD proxy scheduler (shared ref). Empty by default, in which case
+    /// [`resolve_hlod`](Self::resolve_hlod) is a no-op and no proxies are ever
+    /// shown (design §13.1).
+    #[inline]
+    pub fn hlod(&self) -> &Hlod {
+        &self.hlod
+    }
+
+    /// The HLOD proxy scheduler (mutable ref): register the hierarchy's
+    /// [layers](crate::partition::hlod::HlodLayer) with
+    /// [`Hlod::push_layer`](crate::partition::hlod::Hlod::push_layer). The
+    /// configured layers take effect on the next
+    /// [`resolve_hlod`](Self::resolve_hlod) (design §13.1).
+    #[inline]
+    pub fn hlod_mut(&mut self) -> &mut Hlod {
+        &mut self.hlod
+    }
+
+    /// Recomputes HLOD proxy visibility for the frame and returns the proxy
+    /// show/hide [`HlodDelta`] (design §13.1).
+    ///
+    /// The viewpoint is `camera` projected onto the shared streaming lattice
+    /// (the same cell [`advance`](Self::advance) streams around), and residency
+    /// is read straight from the [`StreamDriver`]'s streamer: a proxy is shown
+    /// only where its covered source cells are *not* loaded. Call this after
+    /// [`advance`](Self::advance) each frame so proxies reflect the residency
+    /// that frame's streaming settled. With no HLOD layers registered the
+    /// returned delta is always empty.
+    ///
+    /// Note that residency reflects cells the streamer currently considers
+    /// loaded; cells still [`Loading`](crate::partition::cell::CellState::Loading)
+    /// count as resident so their proxy is suppressed as soon as the load is
+    /// requested, avoiding a one-frame impostor flash over cells about to pop in.
+    pub fn resolve_hlod(&mut self, camera: WorldPos) -> HlodDelta {
+        // Split the borrow so the residency closure can read the streamer while
+        // `hlod` is mutated.
+        let Self {
+            interest,
+            driver,
+            hlod,
+            ..
+        } = self;
+        let viewpoint = interest.cell_of(camera);
+        let streamer = driver.streamer();
+        hlod.resolve(viewpoint, |cell| {
+            !matches!(streamer.state(cell), crate::partition::cell::CellState::Unloaded)
+        })
     }
 
     /// Advances streaming for one frame.
@@ -407,5 +460,53 @@ mod tests {
         let mut p = WorldPartition::new(100.0, 1, 2);
         let result = p.advance(&mut world, WorldPos::new(50.0, 50.0, 50.0), &[]);
         assert_eq!(result.to_load.len(), 27);
+    }
+
+    #[test]
+    fn hlod_empty_by_default_is_noop() {
+        let mut p = WorldPartition::new(100.0, 1, 2);
+        assert_eq!(p.hlod().layer_count(), 0);
+        let delta = p.resolve_hlod(WorldPos::new(50.0, 50.0, 50.0));
+        assert!(delta.is_empty());
+        assert_eq!(p.hlod().shown_count(), 0);
+    }
+
+    #[test]
+    fn hlod_shows_proxies_over_unstreamed_region() {
+        let mut p = WorldPartition::new(100.0, 1, 2);
+        // One HLOD layer: 2-cell blocks drawn out to 4 source cells.
+        p.hlod_mut().push_layer(2, 4);
+
+        // No advance yet -> nothing is tracked/resident, so proxies in the band
+        // around the camera cell are shown.
+        let delta = p.resolve_hlod(WorldPos::new(50.0, 50.0, 50.0)); // cell (0,0,0)
+        assert!(!delta.to_show.is_empty());
+        assert!(delta.to_hide.is_empty());
+        assert_eq!(p.hlod().shown_count(), delta.to_show.len());
+    }
+
+    #[test]
+    fn hlod_suppresses_proxy_over_streamed_cells() {
+        use crate::partition::hlod::HlodProxyId;
+
+        let mut world = World::new();
+        let mut p = WorldPartition::new(100.0, 1, 2);
+        p.hlod_mut().push_layer(2, 6);
+
+        let camera = WorldPos::new(50.0, 50.0, 50.0); // cell (0,0,0)
+        let self_proxy = HlodProxyId::new(0, CellCoord::new(0, 0, 0));
+
+        // Before streaming: the proxy over the camera's own block is shown.
+        let delta = p.resolve_hlod(camera);
+        assert!(delta.to_show.contains(&self_proxy));
+        assert!(p.hlod().is_shown(self_proxy));
+
+        // Advance loads the radius-1 ball around the camera cell; those cells
+        // become `Loading` (tracked -> treated resident). The camera-block
+        // proxy must now be suppressed.
+        p.advance(&mut world, camera, &[]);
+        let delta = p.resolve_hlod(camera);
+        assert!(delta.to_hide.contains(&self_proxy));
+        assert!(!p.hlod().is_shown(self_proxy));
     }
 }
