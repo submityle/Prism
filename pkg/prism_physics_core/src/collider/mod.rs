@@ -540,6 +540,8 @@ pub mod flowability;
 pub use flowability::{FlowCharacter, PowderFlowability};
 pub mod haff_cooling;
 pub use haff_cooling::HaffCooling;
+pub mod nonaffine_displacement;
+pub use nonaffine_displacement::NonaffineField;
 
 /// A handle into a [`ShapeRegistry`].
 ///
