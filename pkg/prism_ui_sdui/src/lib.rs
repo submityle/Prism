@@ -68,6 +68,7 @@
 
 extern crate alloc;
 
+pub mod budget;
 pub mod capability;
 pub mod decode;
 pub mod pipeline;
@@ -75,9 +76,12 @@ pub mod sandbox;
 pub mod schema;
 pub mod version;
 
+pub use budget::NodeBudget;
 pub use capability::CapabilitySet;
 pub use decode::{decode, fallback_element, DEFAULT_FALLBACK_MESSAGE, FALLBACK_CLASS};
 pub use pipeline::{render, RenderOutcome};
-pub use sandbox::{Diagnostic, DiagnosticKind, Sandbox, SanitizeResult, DEFAULT_MAX_DEPTH};
+pub use sandbox::{
+    Diagnostic, DiagnosticKind, Sandbox, SanitizeResult, DEFAULT_MAX_DEPTH, DEFAULT_MAX_NODES,
+};
 pub use schema::{RemoteDocument, RemoteNode, KIND_BOX, KIND_FALLBACK, KIND_TEXT};
 pub use version::{negotiate, Resolution, Version, VersionSet};
