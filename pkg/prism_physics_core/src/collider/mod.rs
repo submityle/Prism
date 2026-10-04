@@ -323,6 +323,8 @@ pub mod tet_fem_sand_force_assembly;
 pub use tet_fem_sand_force_assembly::{
     assemble_sand_forces, rest_sand_states, total_sand_elastic_potential_energy, SandAssembly,
 };
+pub mod tet_fem_camclay_plasticity;
+pub use tet_fem_camclay_plasticity::{return_map_camclay, CamClayModel, CamClayState, CamClayStep};
 
 /// A handle into a [`ShapeRegistry`].
 ///
