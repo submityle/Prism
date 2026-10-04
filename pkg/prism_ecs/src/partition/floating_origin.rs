@@ -206,6 +206,19 @@ impl FloatingOrigin {
         self.origin = origin;
     }
 
+    /// Moves the active origin onto the cell containing `pos` and returns the
+    /// camera's resulting `(cell, local)` split (design §13.3).
+    ///
+    /// Call this each frame with the camera's absolute [`WorldPos`] so the
+    /// origin tracks the camera; because the origin only moves when the camera
+    /// crosses a cell boundary, the cell size itself provides the recenter
+    /// hysteresis and avoids per-frame thrash.
+    pub fn recenter_to(&mut self, pos: WorldPos) -> (GridCell, LocalPos) {
+        let (cell, local) = self.quantize(pos);
+        self.origin = cell;
+        (cell, local)
+    }
+
     /// Splits an absolute [`WorldPos`] into its coarse [`GridCell`] and fine
     /// [`LocalPos`] on this grid.
     ///
@@ -253,6 +266,17 @@ impl FloatingOrigin {
     /// (design §13.2 + §13.3).
     pub fn rebase_array(&self, cell: GridCell, local: LocalPos) -> [f32; 3] {
         self.rebase(cell, local).to_array()
+    }
+
+    /// Quantizes an absolute [`WorldPos`] and rebases it into the active
+    /// origin's local `[f32; 3]` space in one step (design §13.3).
+    ///
+    /// The direct path from a double-precision world point (camera, interest
+    /// source, ad-hoc query) to the jitter-free local coordinate the LOD/stream
+    /// processors measure in.
+    pub fn rebase_world(&self, pos: WorldPos) -> [f32; 3] {
+        let (cell, local) = self.quantize(pos);
+        self.rebase_array(cell, local)
     }
 
     /// Re-canonicalises a possibly-drifted `(cell, local)` so the local offset
@@ -407,6 +431,31 @@ mod tests {
         let a = GridCell::new(10, 5, -3);
         let b = GridCell::new(4, 7, -3);
         assert_eq!(a.offset_from(b), (6, -2, 0));
+    }
+
+    #[test]
+    fn recenter_to_tracks_the_camera_cell() {
+        let mut grid = FloatingOrigin::new(1000.0);
+        // Camera at absolute 3025 m lands in cell 3; origin follows it and the
+        // returned split is the camera's own (cell, local).
+        let (cell, local) = grid.recenter_to(WorldPos::new(3025.0, 0.0, 0.0));
+        assert_eq!(cell, GridCell::new(3, 0, 0));
+        assert!((local.x - 25.0).abs() < 1.0e-3);
+        assert_eq!(grid.origin(), GridCell::new(3, 0, 0));
+        // After recentering, the camera itself rebases near the local origin.
+        assert!(grid.rebase_world(WorldPos::new(3025.0, 0.0, 0.0))[0].abs() < 26.0);
+    }
+
+    #[test]
+    fn rebase_world_matches_quantize_then_rebase() {
+        let grid = FloatingOrigin::new(1000.0).with_origin(GridCell::new(10, 0, 0));
+        let pos = WorldPos::new(11_025.0, 0.0, 0.0); // cell 11, local 25
+        let direct = grid.rebase_world(pos);
+        let (cell, local) = grid.quantize(pos);
+        let staged = grid.rebase_array(cell, local);
+        assert_eq!(direct, staged);
+        // One cell east of the origin (1000 m) + 25 m local.
+        assert!((direct[0] - 1025.0).abs() < 1.0e-2);
     }
 
     #[test]

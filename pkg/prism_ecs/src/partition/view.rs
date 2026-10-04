@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use crate::entity::Entity;
 use crate::partition::dormant::DormancySet;
-use crate::partition::floating_origin::{FloatingOrigin, GridCell, LocalPos};
+use crate::partition::floating_origin::{FloatingOrigin, GridCell, LocalPos, WorldPos};
 use crate::partition::processor::{EntityLodProcessor, LodTickResult};
 
 /// A rebasing view over a [`FloatingOrigin`] that converts big-world
@@ -61,6 +61,15 @@ impl<'a> OriginView<'a> {
         Self { origin, viewpoint }
     }
 
+    /// Builds a view whose viewpoint is the camera at an absolute
+    /// [`WorldPos`], quantized and rebased against `origin` (design §13.3).
+    pub fn from_world(origin: &'a FloatingOrigin, camera: WorldPos) -> Self {
+        Self {
+            origin,
+            viewpoint: origin.rebase_world(camera),
+        }
+    }
+
     /// The grid this view rebases against.
     #[inline]
     pub fn origin(&self) -> &FloatingOrigin {
@@ -78,6 +87,13 @@ impl<'a> OriginView<'a> {
     #[inline]
     pub fn sample(&self, cell: GridCell, local: LocalPos) -> [f32; 3] {
         self.origin.rebase_array(cell, local)
+    }
+
+    /// Rebases one absolute [`WorldPos`] sample into the active origin's local
+    /// `[f32; 3]` space (design §13.3).
+    #[inline]
+    pub fn sample_world(&self, pos: WorldPos) -> [f32; 3] {
+        self.origin.rebase_world(pos)
     }
 
     /// Rebases a whole `(entity, cell, local)` batch into the
@@ -109,11 +125,32 @@ impl<'a> OriginView<'a> {
         let rebased = self.rebase_population(population);
         processor.drive(self.viewpoint, &rebased, frame, dormancy)
     }
+
+    /// Rebases an absolute `(entity, WorldPos)` batch and drives it through
+    /// `processor` for `frame` (design §13.2 + §13.3).
+    ///
+    /// The absolute-coordinate twin of [`drive`](Self::drive): callers that
+    /// keep positions as double-precision [`WorldPos`] (rather than a
+    /// pre-split `(cell, local)`) hand them in directly.
+    pub fn drive_world(
+        &self,
+        processor: &EntityLodProcessor,
+        population: &[(Entity, WorldPos)],
+        frame: u64,
+        dormancy: &mut DormancySet,
+    ) -> LodTickResult {
+        let rebased: Vec<(Entity, [f32; 3])> = population
+            .iter()
+            .map(|&(entity, pos)| (entity, self.sample_world(pos)))
+            .collect();
+        processor.drive(self.viewpoint, &rebased, frame, dormancy)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::partition::floating_origin::WorldPos;
     use crate::partition::lod::{LodLevel, LodSchedule, OutOfRange};
 
     fn ent(index: u32, generation: u32) -> Entity {
@@ -206,4 +243,38 @@ mod tests {
         assert_eq!(r_lo.to_tick, r_hi.to_tick);
         assert_eq!(r_lo.slept, r_hi.slept);
     }
+    #[test]
+    fn from_world_matches_split_construction() {
+        let grid = FloatingOrigin::new(1000.0).with_origin(GridCell::new(3, 0, 0));
+        // Camera at absolute 3025 m → cell 3, local 25 m.
+        let via_world = OriginView::from_world(&grid, WorldPos::new(3025.0, 0.0, 0.0));
+        let via_split =
+            OriginView::new(&grid, GridCell::new(3, 0, 0), LocalPos::new(25.0, 0.0, 0.0));
+        assert_eq!(via_world.viewpoint(), via_split.viewpoint());
+        assert_eq!(via_world.viewpoint(), [25.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn drive_world_bands_absolute_positions() {
+        let mut grid = FloatingOrigin::new(1000.0);
+        // Follow the camera: recenter onto its absolute world position.
+        let camera = WorldPos::new(10_000.5, 0.0, 0.0);
+        grid.recenter_to(camera);
+        let view = OriginView::from_world(&grid, camera);
+        let processor = EntityLodProcessor::new(schedule());
+        let mut dormancy = DormancySet::new();
+
+        let near = ent(1, 1); // ~5 m from camera → band 0
+        let far = ent(2, 1); // ~1 km from camera → dormant
+        let population = [
+            (near, WorldPos::new(10_005.5, 0.0, 0.0)),
+            (far, WorldPos::new(11_000.5, 0.0, 0.0)),
+        ];
+
+        let r = view.drive_world(&processor, &population, 0, &mut dormancy);
+        assert_eq!(r.to_tick, alloc::vec![near]);
+        assert_eq!(r.slept, alloc::vec![far]);
+        assert!(dormancy.is_dormant(far));
+    }
+
 }
