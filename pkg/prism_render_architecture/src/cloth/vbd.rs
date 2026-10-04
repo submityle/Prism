@@ -31,7 +31,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{physics_bridge, ClothParticle, Compliance, Constraint, Vec3};
+use super::{physics_bridge, ClothParticle, Constraint, Vec3};
 
 use prism_physics_core::soft::vbd_sweep;
 
@@ -376,7 +376,7 @@ fn relax_vertex(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cloth::ConstraintKind;
+    use crate::cloth::{Compliance, ConstraintKind};
     use alloc::vec;
     use alloc::vec::Vec;
 

@@ -3,7 +3,7 @@
 //!
 //! This module is the single authoritative home for the per-vertex VBD Newton
 //! step used by the render cloth solver and its `cloth_vbd_sweep_color` GPU
-//! kernel. The render crate keeps only guards, SoA packing, adjacency, and
+//! kernel. The render crate keeps only guards, `SoA` packing, adjacency, and
 //! sweep orchestration; the actual gradient / PSD-Hessian accumulation and the
 //! `3x3` solve live here so there is a single source of truth.
 //!
@@ -103,6 +103,10 @@ impl SweepHessian {
 
     /// Component-wise matrix sum `self + rhs`.
     #[must_use]
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "inherent matrix-sum helper kept for explicit fold-style accumulation; not an operator-overload surface"
+    )]
     pub fn add(self, rhs: Self) -> Self {
         let mut m = [0.0; 9];
         for (out, (a, b)) in m.iter_mut().zip(self.m.iter().zip(rhs.m.iter())) {
