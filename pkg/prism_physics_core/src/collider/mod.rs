@@ -399,6 +399,8 @@ pub use cohesive_zone_assembly::{
 };
 pub mod bonded_particle;
 pub use bonded_particle::{update_bond, BondModel, BondState, BondStep};
+pub mod cohesive_interface_builder;
+pub use cohesive_interface_builder::{insert_cohesive_interfaces, CohesiveMesh};
 
 /// A handle into a [`ShapeRegistry`].
 ///
