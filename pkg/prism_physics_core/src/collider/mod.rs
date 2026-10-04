@@ -526,6 +526,8 @@ pub mod hopper_discharge;
 pub use hopper_discharge::{mass_flow_between, BeverlooSlot, DischargeCensus};
 pub mod janssen_pressure;
 pub use janssen_pressure::{JanssenProfile, SiloCrossSection, StressSample};
+pub mod fabric_tensor;
+pub use fabric_tensor::FabricTensor;
 
 /// A handle into a [`ShapeRegistry`].
 ///
