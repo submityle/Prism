@@ -60,6 +60,7 @@
 extern crate alloc;
 
 pub mod batch;
+pub mod curve;
 pub mod draw;
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -70,6 +71,7 @@ pub mod scene;
 pub mod sdf;
 
 pub use batch::{batch, instance_count, Batch, GlyphInstance, RectInstance, ShadowInstance};
+pub use curve::CubicBezier;
 pub use draw::{DrawCommand, DrawList, GlyphCmd, LayerCmd, RectCmd, ShadowCmd};
 #[cfg(feature = "gpu")]
 pub use gpu::GpuRasterizer;
