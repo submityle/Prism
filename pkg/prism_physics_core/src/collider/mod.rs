@@ -433,6 +433,11 @@ pub use hertz_contact_resolver::{resolve_hertz_contacts, HertzContact, HertzCont
 pub mod hertz_contact_integrator;
 pub use hertz_contact_integrator::{HertzContactBody, HertzContactStepReport};
 
+pub mod tangential_history_contact;
+pub use tangential_history_contact::{
+    evaluate_tangential_history, tangential_history_between, CundallStrackModel,
+};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
