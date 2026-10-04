@@ -594,6 +594,8 @@ pub mod matsuoka_nakai_invariant;
 pub use matsuoka_nakai_invariant::MatsuokaNakaiInvariant;
 pub mod principal_strain_energy_density;
 pub use principal_strain_energy_density::PrincipalStrainEnergyDensity;
+pub mod lade_duncan_invariant;
+pub use lade_duncan_invariant::LadeDuncanInvariant;
 
 /// A handle into a [`ShapeRegistry`].
 ///
