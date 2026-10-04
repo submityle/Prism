@@ -45,6 +45,9 @@ pub mod indirection;
 pub mod pool;
 pub mod residency;
 pub mod scheduler;
+pub mod streamer;
+pub mod streamer_config;
+pub mod streamer_frame;
 
 pub use atlas::{
     plan_atlas_copies, AtlasCopy, AtlasCopyPlan, AtlasGeometry, AtlasTileFormat, SlotPlacement,
@@ -56,6 +59,9 @@ pub use indirection::{GpuPageTable, PAGE_TABLE_ENTRY_WORDS};
 pub use pool::{PageUpload, PhysicalPagePool};
 pub use residency::{PageRecord, PageResidency, TextureResidencyTable};
 pub use scheduler::{schedule, schedule_and_apply, StreamingPlan};
+pub use streamer::{FeedbackInput, VirtualTextureStreamer};
+pub use streamer_config::StreamerConfig;
+pub use streamer_frame::StreamerFrame;
 
 /// Address of one streamed texture tile: a mip level of a layer, at a page grid
 /// coordinate, within a texture. Ordered so residency containers iterate
