@@ -43,6 +43,18 @@ mod dispatch;
 // early-returns under the same gate so `env_specular` is swapped exactly once.
 mod composite;
 
+// Spatial reuse: the second screen-space glossy-ReSTIR dispatch. Behind a
+// render-graph barrier it reads the completed post-temporal reservoir table
+// read-only, pools a frame-jittered Fibonacci-spiral disc of neighbour
+// reservoirs onto each pixel's GGX lobe through the golden `merge_glossy` and
+// overwrites only the resolved specular+confidence target (the reservoir
+// history is left pure, the standard screen-space ReSTIR temporal/spatial
+// split). Compute pipeline + layout, per-view bind group and the `Core3d`
+// dispatch node, mirroring the reuse slices above.
+mod spatial_bind_groups;
+mod spatial_dispatch;
+mod spatial_pipeline;
+
 // Plugin-facing wiring surface for the reuse pass. Re-exported `pub(crate)`
 // so `shading::plugin` can register the `RenderStartup` pipeline init, the
 // `PrepareResources`/`PrepareBindGroups` systems and the `Core3d` dispatch
@@ -54,6 +66,11 @@ pub(crate) use composite::{
 pub(crate) use dispatch::spec_gi_reuse_pass;
 pub(crate) use pipeline::init_spec_gi_reuse_pipeline;
 pub(crate) use resources::prepare_spec_gi_reuse_resources;
+// Spatial reuse wiring surface: `RenderStartup` pipeline init, the
+// `PrepareBindGroups` per-view group and the `Core3d` dispatch node.
+pub(crate) use spatial_bind_groups::prepare_spec_gi_spatial_bind_groups;
+pub(crate) use spatial_dispatch::spec_gi_spatial_pass;
+pub(crate) use spatial_pipeline::init_spec_gi_spatial_pipeline;
 // Re-exported so the `spec_denoise` spatial pass can read the resolved
 // specular estimate this pass produces (its filter input).
 pub(crate) use resources::ViewSpecGiReuse;
@@ -72,3 +89,6 @@ mod reuse_tests;
 
 #[cfg(test)]
 mod composite_tests;
+
+#[cfg(test)]
+mod spatial_tests;

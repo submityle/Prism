@@ -129,6 +129,15 @@ impl ViewSpecGiReuse {
     pub(crate) fn resolved_view(&self) -> &TextureView {
         &self.resolved.default_view
     }
+
+    /// This view's monotonic frame counter (advanced in
+    /// [`prepare_spec_gi_reuse_resources`]). The spatial reuse pass salts its
+    /// per-frame Fibonacci-spiral angular jitter with it so the neighbour
+    /// pattern decorrelates across frames (the temporal reuse + `spec_denoise`
+    /// filter resolve the residual).
+    pub(crate) fn frame(&self) -> u32 {
+        self.frame
+    }
 }
 
 /// (Re)allocates [`ViewSpecGiReuse`] for every view that has a resident

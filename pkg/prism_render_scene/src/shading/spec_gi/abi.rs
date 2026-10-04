@@ -164,6 +164,78 @@ impl GpuSpecGiCompositeParams {
     }
 }
 
+/// Immediate (push-constant) block driving one glossy-specular ReSTIR
+/// **spatial** reuse dispatch (`shaders/spec_gi_spatial.wesl`).
+///
+/// Mirrors the shader's `SpatialParams`: the `mat4x4` inverse projection (used
+/// to rebuild the view-space glossy point from the SSR prepass reverse-Z depth)
+/// forces 16-byte struct alignment, so the eight trailing scalars pack into the
+/// two 16-byte rows after the matrix with no extra padding (96 bytes total).
+///
+/// Unlike the reuse pass (which reads its config from a bound uniform), the
+/// spatial pass carries this in an immediate block like the SSGI / composite
+/// dispatches, because it binds no uniform buffer — only the read-only
+/// reservoir snapshot, the two G-buffer reads and the resolved write target.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuSpecGiSpatialParams {
+    /// Clip -> view (inverse projection); rebuilds the view-space glossy point
+    /// from the SSR prepass reverse-Z depth. Uploaded column-major.
+    pub view_from_clip: [f32; 16],
+    /// Framebuffer width in texels (invocations round up / bounds-check).
+    pub width: u32,
+    /// Framebuffer height in texels.
+    pub height: u32,
+    /// Neighbour-sampling disc radius in framebuffer texels.
+    pub radius: f32,
+    /// Number of spatial neighbour taps pooled per pixel this dispatch.
+    pub sample_count: u32,
+    /// Monotonic frame counter driving the per-frame angular jitter of the
+    /// Fibonacci-spiral neighbour pattern (decorrelates taps across frames).
+    pub frame: u32,
+    /// Global confidence cap `M` bounding the pooled spatial confidence (the
+    /// ReSTIR history clamp, shared with the temporal pass's `m_cap`).
+    pub m_cap: f32,
+    /// Base confidence cap fed to `specr_roughness_confidence_cap`, tightened
+    /// for sharp (low-roughness) surfaces so a dense neighbourhood cannot
+    /// over-trust one estimate on a crisp reflection.
+    pub roughness_cap_base: f32,
+    /// Normal/roughness reuse sigma gating the golden `merge_glossy` neighbour
+    /// acceptance (shared with the temporal pass's `sigma_roughness`).
+    pub sigma_roughness: f32,
+}
+
+impl GpuSpecGiSpatialParams {
+    /// Builds the spatial params from the inverse projection, framebuffer
+    /// extent, frame counter and reuse tunables. `view_from_clip` is uploaded
+    /// column-major (via [`Mat4::to_cols_array`]) so the WGSL `mat4x4<f32>`
+    /// multiply agrees byte-for-byte with the reuse pass's reconstruction.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        view_from_clip: Mat4,
+        width: u32,
+        height: u32,
+        radius: f32,
+        sample_count: u32,
+        frame: u32,
+        m_cap: f32,
+        roughness_cap_base: f32,
+        sigma_roughness: f32,
+    ) -> Self {
+        Self {
+            view_from_clip: view_from_clip.to_cols_array(),
+            width,
+            height,
+            radius,
+            sample_count,
+            frame,
+            m_cap,
+            roughness_cap_base,
+            sigma_roughness,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +280,40 @@ mod tests {
         assert_eq!(cfg.view_from_clip, m.to_cols_array());
         assert_eq!((cfg.width, cfg.height), (1920, 1080));
         assert_eq!((cfg.temporal_enabled, cfg.spatial_enabled), (1, 0));
+    }
+
+    #[test]
+    fn gpu_spec_gi_spatial_params_layout_matches_wgsl() {
+        // mat4 (64) + 8 scalars (32) = 96, matrix forces 16-byte struct align;
+        // byte-for-byte identical layout to the reuse config, mirroring
+        // `spec_gi_spatial.wesl::SpatialParams`.
+        assert_eq!(size_of::<GpuSpecGiSpatialParams>(), 96);
+        assert_eq!(align_of::<GpuSpecGiSpatialParams>(), 4);
+        assert_eq!(offset_of!(GpuSpecGiSpatialParams, view_from_clip), 0);
+        assert_eq!(offset_of!(GpuSpecGiSpatialParams, width), 64);
+        assert_eq!(offset_of!(GpuSpecGiSpatialParams, height), 68);
+        assert_eq!(offset_of!(GpuSpecGiSpatialParams, radius), 72);
+        assert_eq!(offset_of!(GpuSpecGiSpatialParams, sample_count), 76);
+        assert_eq!(offset_of!(GpuSpecGiSpatialParams, frame), 80);
+        assert_eq!(offset_of!(GpuSpecGiSpatialParams, m_cap), 84);
+        assert_eq!(offset_of!(GpuSpecGiSpatialParams, roughness_cap_base), 88);
+        assert_eq!(offset_of!(GpuSpecGiSpatialParams, sigma_roughness), 92);
+    }
+
+    #[test]
+    fn spatial_params_uploads_matrix_column_major() {
+        let m = Mat4::from_cols_array(&[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        ]);
+        let p = GpuSpecGiSpatialParams::new(m, 1920, 1080, 16.0, 4, 7, 32.0, 32.0, 0.25);
+        assert_eq!(p.view_from_clip, m.to_cols_array());
+        assert_eq!((p.width, p.height), (1920, 1080));
+        assert_eq!(p.radius, 16.0);
+        assert_eq!((p.sample_count, p.frame), (4, 7));
+        assert_eq!(
+            (p.m_cap, p.roughness_cap_base, p.sigma_roughness),
+            (32.0, 32.0, 0.25)
+        );
     }
 
     #[test]

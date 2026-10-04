@@ -156,8 +156,10 @@ use super::{
     },
     spec_gi::{
         init_spec_gi_composite_pipeline, init_spec_gi_reuse_pipeline,
-        prepare_spec_gi_composite_bind_groups, prepare_spec_gi_reuse_bind_groups,
-        prepare_spec_gi_reuse_resources, spec_gi_composite_pass, spec_gi_reuse_pass,
+        init_spec_gi_spatial_pipeline, prepare_spec_gi_composite_bind_groups,
+        prepare_spec_gi_reuse_bind_groups, prepare_spec_gi_reuse_resources,
+        prepare_spec_gi_spatial_bind_groups, spec_gi_composite_pass, spec_gi_reuse_pass,
+        spec_gi_spatial_pass,
     },
     ssgi::{
         init_ssgi_composite_pipeline, init_ssgi_denoise_pipeline, init_ssgi_trace_pipeline,
@@ -272,6 +274,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/ssr_composite.wesl");
         embedded_asset!(app, "../shaders/spec_gi_reservoir.wesl");
         embedded_asset!(app, "../shaders/spec_gi_reuse.wesl");
+        embedded_asset!(app, "../shaders/spec_gi_spatial.wesl");
         embedded_asset!(app, "../shaders/spec_gi_composite.wesl");
         embedded_asset!(app, "../shaders/spec_denoise_spatial.wesl");
         embedded_asset!(app, "../shaders/spec_denoise_reproject.wesl");
@@ -535,6 +538,7 @@ impl Plugin for PrismShadingPlugin {
                 RenderStartup,
                 (
                     init_spec_gi_reuse_pipeline,
+                    init_spec_gi_spatial_pipeline,
                     init_spec_gi_composite_pipeline,
                     init_spec_denoise_spatial_pipeline,
                     init_spec_denoise_reproject_pipeline,
@@ -720,6 +724,14 @@ impl Plugin for PrismShadingPlugin {
                             .in_set(RenderSystems::PrepareResources),
                         prepare_spec_gi_reuse_bind_groups
                             .after(prepare_spec_gi_reuse_resources)
+                            .in_set(RenderSystems::PrepareBindGroups),
+                        // The spatial reuse group binds this frame's post-temporal
+                        // reservoir table (the reuse pass's `dst`) read-only plus
+                        // the SSR reads and the resolved write; it orders after the
+                        // reuse group so the bound `dst` agrees with this frame's
+                        // ping-pong flip.
+                        prepare_spec_gi_spatial_bind_groups
+                            .after(prepare_spec_gi_reuse_bind_groups)
                             .in_set(RenderSystems::PrepareBindGroups),
                         // The spatial denoiser's filtered target allocates right
                         // after the reuse resolve it reads (same gate), and its
@@ -1227,11 +1239,22 @@ impl Plugin for PrismShadingPlugin {
                     // specular blur). No-op unless `enable_spec_gi` + the
                     // SSR/visibility gate held in resource prep.
                     (
+                        // Spatial reuse: pools a frame-jittered disc of neighbour
+                        // reservoirs from the completed post-temporal table onto
+                        // each pixel's GGX lobe and overwrites the resolved target
+                        // with the lower-variance estimate (reservoir history left
+                        // pure). Runs after the reuse resolve it refines and before
+                        // the denoise/composite that consume the pooled resolve.
+                        spec_gi_spatial_pass
+                            .after(spec_gi_reuse_pass)
+                            .before(bevy_core_pipeline::Core3dSystems::MainPass),
                         // Temporal reproject: stages this frame's SSR depth for
                         // next frame and reprojects last frame's converged
-                        // specular history. Runs right after the reuse resolve.
+                        // specular history. Runs right after the spatially pooled
+                        // resolve it fuses with the history.
                         spec_denoise_reproject_pass
                             .after(spec_gi_reuse_pass)
+                            .after(spec_gi_spatial_pass)
                             .before(bevy_core_pipeline::Core3dSystems::MainPass),
                         // History-clamp: fuses the reprojected history with this
                         // frame's noisy resolve under an AABB colour clamp and
@@ -1247,6 +1270,7 @@ impl Plugin for PrismShadingPlugin {
                             .before(bevy_core_pipeline::Core3dSystems::MainPass),
                         spec_gi_composite_pass
                             .after(spec_gi_reuse_pass)
+                            .after(spec_gi_spatial_pass)
                             .after(spec_denoise_spatial_pass)
                             .after(ssr_color_mips_pass)
                             .after(ssr_composite_pass)

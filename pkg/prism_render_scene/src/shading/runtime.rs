@@ -94,6 +94,29 @@ pub struct PrismShadingSettings {
     /// across a wider roughness band (smoother, risks over-blur). Feeds
     /// `GpuSpecGiReuseConfig::sigma_roughness`.
     pub spec_gi_sigma_roughness: f32,
+    /// Enables the glossy-specular ReSTIR **spatial** reuse pass. When the
+    /// `spec_gi` subsystem is on, this second screen-space dispatch reads the
+    /// completed post-temporal reservoir table (read-only snapshot behind a
+    /// render-graph barrier) and pools a frame-jittered disc of neighbour
+    /// reservoirs onto each pixel's GGX lobe through the golden
+    /// `merge_glossy`, overwriting only the resolved specular+confidence target
+    /// (the reservoir history is left pure so spatial correlation never feeds
+    /// back into next frame's temporal reuse). This is the standard
+    /// screen-space ReSTIR temporal/spatial split (matches UE); it drives the
+    /// resolve towards its low-variance estimate before the `spec_denoise`
+    /// passes run. On by default whenever `enable_spec_gi` holds.
+    pub enable_spec_gi_spatial: bool,
+    /// Neighbour-sampling disc radius (framebuffer texels) for the spatial reuse
+    /// pass. Taps are drawn on a Fibonacci spiral of this radius; larger values
+    /// pool a wider neighbourhood (lower variance, risks cross-surface bleed the
+    /// roughness/normal gate must reject), smaller values stay local (sharper,
+    /// noisier). Feeds `GpuSpecGiSpatialParams::radius`.
+    pub spec_gi_spatial_radius: f32,
+    /// Number of spatial neighbour taps pooled per pixel each frame. More taps
+    /// converge faster per frame at linear cost; the temporal pass and the
+    /// `spec_denoise` filter resolve the residual of a small count across
+    /// frames. Feeds `GpuSpecGiSpatialParams::sample_count`.
+    pub spec_gi_spatial_sample_count: u32,
     /// Enables the temporal anti-aliasing (TAA) resolve compute pass. Requires
     /// the visibility buffer (for the composited `scene_color` and the
     /// motion-vector G-buffer); the pass motion-reprojects and YCoCg-variance
@@ -236,6 +259,9 @@ impl Default for PrismShadingSettings {
             spec_gi_temporal_m_cap: 32.0,
             spec_gi_roughness_cap_base: 32.0,
             spec_gi_sigma_roughness: 0.25,
+            enable_spec_gi_spatial: true,
+            spec_gi_spatial_radius: 16.0,
+            spec_gi_spatial_sample_count: 4,
             enable_taa: false,
             enable_virtual_shadow: false,
             enable_ssgi: false,
