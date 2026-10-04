@@ -504,6 +504,8 @@ pub mod sphere_packing;
 pub use sphere_packing::{pack_spheres, SpherePacking, SpherePackingParams};
 pub mod boundary_container;
 pub use boundary_container::{closed_box, open_top_box, wedge_hopper};
+pub mod grain_size_distribution;
+pub use grain_size_distribution::{GrainSizeDistribution, SieveBin};
 
 /// A handle into a [`ShapeRegistry`].
 ///
