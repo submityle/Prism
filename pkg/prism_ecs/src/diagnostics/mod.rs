@@ -78,6 +78,13 @@
 //!   density, flagging declared-but-empty or low-density groups that pay
 //!   registration / maintenance cost without earning branch-free iteration
 //!   (design §16.6 / §6 / §17).
+//! * [`partition_occupancy`] — world-partition cell occupancy / streaming
+//!   census (design §13.1): joins the cell streamer with the entity index
+//!   per cell to report per-cell [`CellState`](crate::partition::cell::CellState)
+//!   and entity counts, empty-loaded cells (resident but carrying nothing),
+//!   plus the two streaming consistency gaps the join exposes — entities in
+//!   non-resident cells and entities stranded in untracked cells
+//!   (design §16.6 / §13.1 / §17; `partition` feature).
 //! * [`prefab_inheritance`] — prefab / `IsA` inheritance shape
 //!   (design §16.3): per-instance chain depth and resolved-component
 //!   census (overridden vs. inherited vs. own), per-template fan-in for
@@ -101,6 +108,8 @@ pub mod hook_coverage;
 pub mod inspector;
 pub mod memory_footprint;
 pub mod owning_group_packing;
+#[cfg(feature = "partition")]
+pub mod partition_occupancy;
 pub mod prefab_inheritance;
 pub mod profiler;
 pub mod relation_graph;
@@ -127,6 +136,8 @@ pub use hook_coverage::{HookCoverageEntry, HookCoverageReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
 pub use memory_footprint::{ArchetypeMemoryEntry, MemoryFootprintReport};
 pub use owning_group_packing::{OwningGroupPackingEntry, OwningGroupPackingReport};
+#[cfg(feature = "partition")]
+pub use partition_occupancy::{CellOccupancyEntry, PartitionOccupancyReport};
 pub use prefab_inheritance::{PrefabInheritanceReport, PrefabInstanceEntry, PrefabTemplateEntry};
 pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
