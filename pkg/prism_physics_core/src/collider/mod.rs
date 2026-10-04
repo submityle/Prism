@@ -302,6 +302,8 @@ pub mod tet_fem_elastoplastic_force;
 pub use tet_fem_elastoplastic_force::{
     elastic_potential_energy, element_elastoplastic_force, ElastoplasticForce,
 };
+pub mod tet_fem_sand_plasticity;
+pub use tet_fem_sand_plasticity::{return_map_sand, SandModel, SandState, SandStep, SandYield};
 
 /// A handle into a [`ShapeRegistry`].
 ///
