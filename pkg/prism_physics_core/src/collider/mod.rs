@@ -488,6 +488,8 @@ pub mod wet_cohesion_driver;
 pub use wet_cohesion_driver::{WetCohesionDriver, WetCohesionReport};
 pub mod sphere_narrow_phase;
 pub use sphere_narrow_phase::{SphereContact, SphereNarrowPhase};
+pub mod sphere_contact_forces;
+pub use sphere_contact_forces::{resolve_sphere_contact_forces, SphereContactForceResolution};
 
 /// A handle into a [`ShapeRegistry`].
 ///
