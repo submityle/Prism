@@ -530,6 +530,8 @@ pub mod fabric_tensor;
 pub use fabric_tensor::FabricTensor;
 pub mod granular_temperature;
 pub use granular_temperature::GranularTemperature;
+pub mod size_segregation;
+pub use size_segregation::SizeSegregation;
 
 /// A handle into a [`ShapeRegistry`].
 ///
