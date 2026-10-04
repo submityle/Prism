@@ -430,6 +430,9 @@ pub use hertz_contact::{evaluate_hertz_contact, hertz_contact_between, HertzMode
 pub mod hertz_contact_resolver;
 pub use hertz_contact_resolver::{resolve_hertz_contacts, HertzContact, HertzContactResolution};
 
+pub mod hertz_contact_integrator;
+pub use hertz_contact_integrator::{HertzContactBody, HertzContactStepReport};
+
 /// A handle into a [`ShapeRegistry`].
 ///
 /// This is a plain index handle; shapes are immutable once inserted, so no
