@@ -24,8 +24,30 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let body = match storage {
         Some(storage) => {
             let variant = storage.variant_path();
+            // Shared components additionally override `install_storage_glue` to
+            // register their value-boxing glue (design §6). The call to
+            // `shared_box_of::<Self>()` carries an `Eq + Hash` bound, so a
+            // shared component that is not `Eq + Hash` fails to compile with a
+            // message pointing at this derive.
+            let glue = if storage.needs_install_glue() {
+                quote! {
+                    #[inline]
+                    fn install_storage_glue(
+                        components: &mut prism_ecs::component::Components,
+                        id: prism_ecs::component::ComponentId,
+                    ) {
+                        components.set_shared_box(
+                            id,
+                            prism_ecs::component::shared_box_of::<Self>(),
+                        );
+                    }
+                }
+            } else {
+                TokenStream::new()
+            };
             quote! {
                 const STORAGE: prism_ecs::component::StorageType = #variant;
+                #glue
             }
         }
         None => TokenStream::new(),
@@ -65,6 +87,19 @@ mod tests {
         let out = expand_str(di);
         assert!(out.contains("const STORAGE"));
         assert!(out.contains("StorageType :: SparseSet"));
+    }
+
+    #[test]
+    fn storage_shared_emits_const_and_glue() {
+        let di: DeriveInput = parse_quote! {
+            #[component(storage = "shared")]
+            struct Batch;
+        };
+        let out = expand_str(di);
+        assert!(out.contains("StorageType :: Shared"));
+        assert!(out.contains("install_storage_glue"));
+        assert!(out.contains("set_shared_box"));
+        assert!(out.contains("shared_box_of :: < Self >"));
     }
 
     #[test]

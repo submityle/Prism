@@ -96,7 +96,12 @@ impl SnapshotDelta {
     pub fn reused_cell_count(&self) -> usize {
         self.columns
             .iter()
-            .map(|c| c.source.iter().filter(|s| matches!(s, CellSource::Base(_))).count())
+            .map(|c| {
+                c.source
+                    .iter()
+                    .filter(|s| matches!(s, CellSource::Base(_)))
+                    .count()
+            })
             .sum()
     }
 
@@ -114,8 +119,14 @@ impl SnapshotDelta {
         let mut columns = Vec::with_capacity(self.columns.len());
         for cd in &self.columns {
             let base_col = base.columns.iter().find(|c| c.component == cd.component);
-            let mut col =
-                SnapshotColumn::new(cd.component, cd.storage, cd.layout, cd.clone, cd.drop, cd.hash);
+            let mut col = SnapshotColumn::new(
+                cd.component,
+                cd.storage,
+                cd.layout,
+                cd.clone,
+                cd.drop,
+                cd.hash,
+            );
             for (i, &target_row) in cd.target_rows.iter().enumerate() {
                 match cd.source[i] {
                     CellSource::Base(bs) => {
@@ -184,9 +195,10 @@ impl WorldSnapshot {
             for (tslot, &trow) in tc.rows.iter().enumerate() {
                 let ent_bits = target.entities[trow as usize].to_bits();
                 let reuse = base_slot_of.get(&ent_bits).copied().filter(|&bslot| {
-                    let bc = base_col.expect("base_slot_of is only populated when base_col is Some");
-                    let ticks_eq =
-                        bc.added[bslot] == tc.added[tslot] && bc.changed[bslot] == tc.changed[tslot];
+                    let bc =
+                        base_col.expect("base_slot_of is only populated when base_col is Some");
+                    let ticks_eq = bc.added[bslot] == tc.added[tslot]
+                        && bc.changed[bslot] == tc.changed[tslot];
                     // SAFETY: `bslot < bc.len()` and `tslot < tc.len()`.
                     let bytes_eq = unsafe { bc.value_bytes(bslot) == tc.value_bytes(tslot) };
                     ticks_eq && bytes_eq

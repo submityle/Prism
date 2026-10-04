@@ -174,13 +174,26 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
             // SAFETY: `arch_id` came from the matched list, so the archetype
             // satisfies `D::matches` for `data_state` — the contract of
             // `init_fetch`.
-            self.current_fetch =
-                Some(unsafe { D::init_fetch(self.data_state, archetype, sparse_sets, self.last_run, self.this_run) });
+            self.current_fetch = Some(unsafe {
+                D::init_fetch(
+                    self.data_state,
+                    archetype,
+                    sparse_sets,
+                    self.last_run,
+                    self.this_run,
+                )
+            });
             // SAFETY: the same `arch_id` also satisfies `F::matches` for
             // `filter_state` (guaranteed by `matched_archetypes`), the contract
             // of `F::init_fetch`.
             self.current_filter_fetch = Some(unsafe {
-                F::init_fetch(self.filter_state, archetype, sparse_sets, self.last_run, self.this_run)
+                F::init_fetch(
+                    self.filter_state,
+                    archetype,
+                    sparse_sets,
+                    self.last_run,
+                    self.this_run,
+                )
             });
         }
     }

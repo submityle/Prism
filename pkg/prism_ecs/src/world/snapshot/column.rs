@@ -117,7 +117,13 @@ impl SnapshotColumn {
     /// # Safety
     /// `src` points at a valid, initialized value of this column's component
     /// type (the live world's copy, which is left untouched).
-    pub(super) unsafe fn push_cloned(&mut self, src: *const u8, added: Tick, changed: Tick, row: u32) {
+    pub(super) unsafe fn push_cloned(
+        &mut self,
+        src: *const u8,
+        added: Tick,
+        changed: Tick,
+        row: u32,
+    ) {
         // SAFETY: scratch is a single `layout`-sized, aligned slot.
         let tmp = unsafe { alloc_scratch(self.layout) };
         // SAFETY: `src` is a valid value (contract); `tmp` is uninitialized,
@@ -144,7 +150,12 @@ impl SnapshotColumn {
     /// `src_slot < src.len()`, and `src` must share this column's component
     /// layout and clone/drop glue (same [`ComponentId`]). Callers must push in
     /// ascending `row` order to keep the column deterministic.
-    pub(super) unsafe fn push_cloned_from(&mut self, src: &SnapshotColumn, src_slot: usize, row: u32) {
+    pub(super) unsafe fn push_cloned_from(
+        &mut self,
+        src: &SnapshotColumn,
+        src_slot: usize,
+        row: u32,
+    ) {
         // SAFETY: scratch is a single `layout`-sized aligned slot.
         let tmp = unsafe { alloc_scratch(self.layout) };
         // SAFETY: `src_slot < src.len()` (contract); `tmp` is uninitialized,
@@ -221,7 +232,11 @@ impl SnapshotColumn {
     ///
     /// # Safety
     /// `slot < len()`.
-    pub(super) unsafe fn hash_value(&self, slot: usize, hasher: &mut dyn core::hash::Hasher) -> bool {
+    pub(super) unsafe fn hash_value(
+        &self,
+        slot: usize,
+        hasher: &mut dyn core::hash::Hasher,
+    ) -> bool {
         match self.hash {
             Some(hash) => {
                 // SAFETY: `slot < len()` (contract) so the pointer is valid.

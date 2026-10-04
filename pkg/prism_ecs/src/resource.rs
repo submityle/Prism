@@ -20,7 +20,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::any::{Any, TypeId, type_name};
+use core::any::{type_name, Any, TypeId};
 
 use crate::collections::HashMap;
 

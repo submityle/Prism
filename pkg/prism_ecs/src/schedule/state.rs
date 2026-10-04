@@ -128,7 +128,10 @@ pub fn apply_state_transition<S: States>(world: &mut World) {
         return;
     };
 
-    match world.get_resource::<State<S>>().map(|state| state.0.clone()) {
+    match world
+        .get_resource::<State<S>>()
+        .map(|state| state.0.clone())
+    {
         Some(current) if current == next => {
             // Redundant request: already in this mode. Consumed, no edges run.
         }
@@ -243,8 +246,7 @@ mod tests {
         let mut world = World::new();
         let mut schedule = Schedule::new();
         schedule.add_systems(
-            (|mut count: ResMut<Trace>| count.0.push("ran"))
-                .run_if(in_state(Mode::Game)),
+            (|mut count: ResMut<Trace>| count.0.push("ran")).run_if(in_state(Mode::Game)),
         );
         world.init_resource::<Trace>();
 
@@ -289,11 +291,13 @@ mod tests {
         world.init_resource::<Trace>();
         let mut schedules = Schedules::new();
         let mut sched = Schedule::new();
-        sched.add_systems((
-            |mut t: ResMut<Trace>| t.0.push("outer"),
-            |w: &mut World| w.run_schedule(SelfLabel),
-        )
-            .chain());
+        sched.add_systems(
+            (
+                |mut t: ResMut<Trace>| t.0.push("outer"),
+                |w: &mut World| w.run_schedule(SelfLabel),
+            )
+                .chain(),
+        );
         schedules.insert(SelfLabel, sched);
         world.insert_resource(schedules);
 

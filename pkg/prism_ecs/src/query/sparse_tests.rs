@@ -73,7 +73,10 @@ fn mut_sparse_mutates_in_place_and_stamps_changed() {
         c.0 += 100;
         count += 1;
     }
-    assert_eq!(count, 1, "only the entity with the sparse component is visited");
+    assert_eq!(
+        count, 1,
+        "only the entity with the sparse component is visited"
+    );
     assert_eq!(w.get::<Charge>(a), Some(&Charge(105)));
 
     // The DerefMut stamped changed = this_run, so `Changed<Charge>` sees it.
@@ -178,7 +181,11 @@ fn changed_sparse_fires_on_mut_then_goes_stale() {
     }
 
     let state = w.query_filtered::<Entity, Changed<Charge>>();
-    assert_eq!(state.iter(&w).collect::<Vec<_>>(), [a], "the written row is Changed");
+    assert_eq!(
+        state.iter(&w).collect::<Vec<_>>(),
+        [a],
+        "the written row is Changed"
+    );
 
     advance_frame(&mut w);
     let state = w.query_filtered::<Entity, Changed<Charge>>();

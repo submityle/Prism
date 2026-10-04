@@ -359,7 +359,11 @@ mod tests {
         let graph = FlameGraph::from_roots(vec![node(
             "update",
             100,
-            vec![node("physics", 40, vec![node("broadphase", 10, Vec::new())])],
+            vec![node(
+                "physics",
+                40,
+                vec![node("broadphase", 10, Vec::new())],
+            )],
         )]);
         let folded = graph.folded();
         assert_eq!(

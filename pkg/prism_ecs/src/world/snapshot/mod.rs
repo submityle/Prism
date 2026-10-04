@@ -46,7 +46,7 @@ use alloc::vec::Vec;
 
 use crate::change::Tick;
 use crate::component::{Component, ComponentId};
-use crate::entity::{Entity, EntitiesState};
+use crate::entity::{EntitiesState, Entity};
 use crate::world::World;
 
 use column::SnapshotColumn;
@@ -228,7 +228,6 @@ impl World {
         restore::restore(self, snapshot);
     }
 }
-
 
 #[cfg(test)]
 mod tests;

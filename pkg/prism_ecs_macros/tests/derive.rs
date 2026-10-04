@@ -9,11 +9,17 @@
 //! resolve to this local shim, letting us exercise the generated impls at
 //! runtime.
 
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "the local prism_ecs shim mirrors the full public surface; not every mirrored item is exercised by every test"
+)]
 // The shim below mirrors `prism_ecs`'s genuinely-`unsafe` `Bundle` trait so the
 // derive expansions resolve against the real signatures. The proc-macro crate
 // itself contains no unsafe; only this fixture does.
-#![allow(unsafe_code)]
+#![allow(
+    unsafe_code,
+    reason = "the shim mirrors the kernel's genuinely-unsafe `Bundle` trait so derive expansions resolve against the real signatures; only this fixture is unsafe"
+)]
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -91,6 +97,9 @@ mod prism_ecs {
 
         // Blanket impl mirroring the real kernel: every component is a
         // one-element bundle.
+        // SAFETY: `get_components` yields exactly one pointer to a live,
+        // owned `C` and wraps `self` in `ManuallyDrop`, so the single value is
+        // moved out through the callback exactly once and never double-dropped.
         unsafe impl<C: Component> Bundle for C {
             fn component_ids(components: &mut Components, out: &mut Vec<ComponentId>) {
                 out.push(components.register::<C>());
@@ -98,7 +107,7 @@ mod prism_ecs {
 
             unsafe fn get_components(self, func: &mut dyn FnMut(*mut u8)) {
                 let mut value = ManuallyDrop::new(self);
-                func((&mut *value as *mut C).cast::<u8>());
+                func(std::ptr::from_mut::<C>(&mut *value).cast::<u8>());
             }
         }
     }
@@ -116,11 +125,19 @@ mod prism_ecs {
 
         impl SystemSetId {
             pub fn of<T: 'static>() -> Self {
-                Self { type_id: TypeId::of::<T>(), discriminant: 0, name: type_name::<T>() }
+                Self {
+                    type_id: TypeId::of::<T>(),
+                    discriminant: 0,
+                    name: type_name::<T>(),
+                }
             }
 
             pub fn with<T: 'static>(discriminant: u64) -> Self {
-                Self { type_id: TypeId::of::<T>(), discriminant, name: type_name::<T>() }
+                Self {
+                    type_id: TypeId::of::<T>(),
+                    discriminant,
+                    name: type_name::<T>(),
+                }
             }
 
             pub fn discriminant(&self) -> u64 {
@@ -248,6 +265,8 @@ fn empty_bundle_registers_nothing_and_yields_nothing() {
     assert!(components.is_empty());
 
     // get_components must not invoke the callback.
+    // SAFETY: `EmptyBundle` has no fields, so the callback is never invoked and
+    // no pointer is ever read; the call simply consumes `self`.
     unsafe {
         EmptyBundle.get_components(&mut |_ptr| unreachable!("no fields to yield"));
     }
@@ -259,6 +278,9 @@ fn tuple_bundle_yields_values_in_declaration_order() {
     let mut idx = 0usize;
     let mut pos: Option<Position> = None;
     let mut vel: Option<Velocity> = None;
+    // SAFETY: each yielded `ptr` points to a live, owned field value of the
+    // matching type; `ptr::read` moves it out exactly once per invocation and
+    // the bundle yields each field a single time.
     unsafe {
         bundle.get_components(&mut |ptr| {
             match idx {
@@ -283,6 +305,9 @@ fn get_components_moves_each_field_once_without_double_drop() {
         second: Tracked(20),
     };
     let mut seen = Vec::new();
+    // SAFETY: each yielded `ptr` points to a live, owned `Tracked`; the callback
+    // `ptr::read`s it exactly once and drops the resulting owned value, so every
+    // field is moved out and dropped exactly once with no double free.
     unsafe {
         bundle.get_components(&mut |ptr| {
             // The callback takes ownership of each value exactly once.
@@ -306,7 +331,6 @@ fn generic_bundle_wraps_inner_bundle() {
     Wrap::<Position>::component_ids(&mut components, &mut out);
     assert_eq!(out.len(), 1);
 }
-
 
 // ---- SystemSet derive targets -----------------------------------------------
 

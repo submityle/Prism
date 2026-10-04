@@ -444,7 +444,11 @@ mod tests {
     fn new_dedups_owned_set() {
         let g = OwningGroup::new(
             OwningGroupId::new(7),
-            &[ComponentId::new(3), ComponentId::new(3), ComponentId::new(4)],
+            &[
+                ComponentId::new(3),
+                ComponentId::new(3),
+                ComponentId::new(4),
+            ],
         );
         assert_eq!(g.id(), OwningGroupId::new(7));
         assert_eq!(g.owned(), &[ComponentId::new(3), ComponentId::new(4)]);

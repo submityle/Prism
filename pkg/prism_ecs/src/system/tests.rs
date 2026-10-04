@@ -4,10 +4,10 @@
 
 use alloc::vec::Vec;
 
+use crate::command::Commands;
 use crate::component::Component;
 use crate::query::Access;
 use crate::resource::Resource;
-use crate::command::Commands;
 use crate::system::{IntoSystem, Local, Query, Res, ResMut, System};
 use crate::world::World;
 
@@ -38,7 +38,12 @@ fn function_system_runs_with_mixed_params() {
     world.spawn(Health(1));
     world.spawn(Health(2));
 
-    fn tick(cfg: Res<Config>, mut tally: ResMut<Tally>, mut q: Query<&mut Health>, mut cmd: Commands) {
+    fn tick(
+        cfg: Res<Config>,
+        mut tally: ResMut<Tally>,
+        mut q: Query<&mut Health>,
+        mut cmd: Commands,
+    ) {
         for mut h in q.iter_mut() {
             h.0 += cfg.0;
             tally.0 += 1;

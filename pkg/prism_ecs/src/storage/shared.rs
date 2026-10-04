@@ -28,6 +28,7 @@
 //! released.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::any::Any;
 use core::hash::{BuildHasher, Hash, Hasher};
@@ -77,6 +78,13 @@ pub trait SharedValue: Send + Sync {
     /// Upcast for the concrete-type downcast used by [`SharedValue::dyn_eq`]
     /// and [`SharedComponents::get`].
     fn as_any(&self) -> &dyn Any;
+    /// Raw pointer to the concrete value's first byte, for type-erased
+    /// byte-level reads (snapshot capture clones through the component's
+    /// [`CloneFn`](crate::component::CloneFn) glue, which needs a `*const u8`
+    /// into the live value behind the shared [`Arc`]). The pointer is valid for
+    /// `Layout::for_value(self).size()` initialized bytes and must not be used
+    /// to mutate or move the value.
+    fn value_ptr(&self) -> *const u8;
 }
 
 impl<T: Send + Sync + Eq + Hash + 'static> SharedValue for T {
@@ -94,11 +102,16 @@ impl<T: Send + Sync + Eq + Hash + 'static> SharedValue for T {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    #[inline]
+    fn value_ptr(&self) -> *const u8 {
+        (self as *const T).cast::<u8>()
+    }
 }
 
 /// One interned value plus its live reference count and cached hash.
 struct Slot {
-    value: Box<dyn SharedValue>,
+    value: Arc<dyn SharedValue>,
     hash: u64,
     refcount: u32,
 }
@@ -153,8 +166,10 @@ impl SharedValuePool {
     /// If an equal value is already interned, its reference count is bumped and
     /// its existing id returned (no second copy is stored). Otherwise a fresh
     /// slot — recycled from the free list when possible — is allocated with a
-    /// reference count of one.
-    pub fn insert(&mut self, value: Box<dyn SharedValue>) -> SharedValueId {
+    /// reference count of one. Either way the returned [`Arc`] is a handle to
+    /// the single canonical value, so the archetype layer can tag entities and
+    /// read the value back without a pool round-trip (design §6 批次键去重).
+    pub fn insert(&mut self, value: Box<dyn SharedValue>) -> (SharedValueId, Arc<dyn SharedValue>) {
         let hash = self.hash_of(value.as_ref());
         if let Some(ids) = self.buckets.get(&hash) {
             for &id in ids {
@@ -163,10 +178,14 @@ impl SharedValuePool {
                 {
                     let slot = self.slots[id as usize].as_mut().expect("live slot");
                     slot.refcount += 1;
-                    return SharedValueId(id);
+                    return (SharedValueId(id), Arc::clone(&slot.value));
                 }
             }
         }
+        // First occurrence of this value: adopt the incoming box as the single
+        // authoritative `Arc` and hand back a clone of that same allocation.
+        let value: Arc<dyn SharedValue> = Arc::from(value);
+        let arc = Arc::clone(&value);
         let slot = Slot {
             value,
             hash,
@@ -181,7 +200,7 @@ impl SharedValuePool {
             id
         };
         self.buckets.entry(hash).or_default().push(id);
-        SharedValueId(id)
+        (SharedValueId(id), arc)
     }
 
     /// Add one reference to an already-interned id. No-op for a stale id.
@@ -266,17 +285,31 @@ impl SharedComponents {
     }
 
     /// Intern `value` for shared component `component`, returning the stable id
-    /// of its content within that component's pool. Equal values collapse to
-    /// one id with a shared reference count (design §6 批次键去重).
+    /// of its content within that component's pool plus a canonical [`Arc`]
+    /// handle. Equal values collapse to one id with a shared reference count
+    /// (design §6 批次键去重).
     pub fn insert<T: Send + Sync + Eq + Hash + 'static>(
         &mut self,
         component: ComponentId,
         value: T,
-    ) -> SharedValueId {
+    ) -> (SharedValueId, Arc<dyn SharedValue>) {
         self.pools
             .entry(component)
             .or_default()
             .insert(Box::new(value))
+    }
+
+    /// Intern an already-boxed, type-erased `value` for shared component
+    /// `component`. This is the glue path used by the structural code: a bundle
+    /// pointer is boxed into `Box<dyn SharedValue>` by the component's shared
+    /// box glue and handed here. Returns the stable id and a canonical [`Arc`]
+    /// handle (design §6).
+    pub fn insert_boxed(
+        &mut self,
+        component: ComponentId,
+        value: Box<dyn SharedValue>,
+    ) -> (SharedValueId, Arc<dyn SharedValue>) {
+        self.pools.entry(component).or_default().insert(value)
     }
 
     /// Add one reference to `id` in `component`'s pool. No-op if the pool or id
@@ -341,8 +374,24 @@ mod tests {
     fn equal_values_dedupe_to_one_id_and_refcount() {
         let mut shared = SharedComponents::new();
         let c = comp(0);
-        let a = shared.insert(c, BatchKey { mesh: 1, material: 2 });
-        let b = shared.insert(c, BatchKey { mesh: 1, material: 2 });
+        let a = shared
+            .insert(
+                c,
+                BatchKey {
+                    mesh: 1,
+                    material: 2,
+                },
+            )
+            .0;
+        let b = shared
+            .insert(
+                c,
+                BatchKey {
+                    mesh: 1,
+                    material: 2,
+                },
+            )
+            .0;
         assert_eq!(a, b);
         assert_eq!(shared.refcount(c, a), 2);
         assert_eq!(shared.pool(c).unwrap().len(), 1);
@@ -352,19 +401,47 @@ mod tests {
     fn distinct_values_get_distinct_ids() {
         let mut shared = SharedComponents::new();
         let c = comp(0);
-        let a = shared.insert(c, BatchKey { mesh: 1, material: 2 });
-        let b = shared.insert(c, BatchKey { mesh: 1, material: 3 });
+        let a = shared
+            .insert(
+                c,
+                BatchKey {
+                    mesh: 1,
+                    material: 2,
+                },
+            )
+            .0;
+        let b = shared
+            .insert(
+                c,
+                BatchKey {
+                    mesh: 1,
+                    material: 3,
+                },
+            )
+            .0;
         assert_ne!(a, b);
         assert_eq!(shared.pool(c).unwrap().len(), 2);
-        assert_eq!(shared.get::<BatchKey>(c, a), Some(&BatchKey { mesh: 1, material: 2 }));
-        assert_eq!(shared.get::<BatchKey>(c, b), Some(&BatchKey { mesh: 1, material: 3 }));
+        assert_eq!(
+            shared.get::<BatchKey>(c, a),
+            Some(&BatchKey {
+                mesh: 1,
+                material: 2
+            })
+        );
+        assert_eq!(
+            shared.get::<BatchKey>(c, b),
+            Some(&BatchKey {
+                mesh: 1,
+                material: 3
+            })
+        );
     }
 
     #[test]
     fn release_frees_on_last_reference() {
         let mut shared = SharedComponents::new();
         let c = comp(0);
-        let a = shared.insert(c, Layer(7));
+        let a = shared.insert(c, Layer(7)).0;
         shared.insert(c, Layer(7)); // refcount 2
         assert!(!shared.release(c, a));
         assert_eq!(shared.refcount(c, a), 1);
@@ -378,10 +455,10 @@ mod tests {
     fn freed_slot_is_recycled() {
         let mut shared = SharedComponents::new();
         let c = comp(0);
-        let a = shared.insert(c, Layer(1));
+        let a = shared.insert(c, Layer(1)).0;
         assert!(shared.release(c, a));
         // A later distinct value should reuse the freed slot index.
-        let b = shared.insert(c, Layer(2));
+        let b = shared.insert(c, Layer(2)).0;
         assert_eq!(a.index(), b.index());
         assert_eq!(shared.get::<Layer>(c, b), Some(&Layer(2)));
     }
@@ -391,8 +468,8 @@ mod tests {
         let mut shared = SharedComponents::new();
         let c0 = comp(0);
         let c1 = comp(1);
-        let a = shared.insert(c0, Layer(5));
-        let b = shared.insert(c1, Layer(5));
+        let a = shared.insert(c0, Layer(5)).0;
+        let b = shared.insert(c1, Layer(5)).0;
         // Same value, different components => independent pools and ids.
         assert_eq!(a.index(), 0);
         assert_eq!(b.index(), 0);
@@ -406,7 +483,7 @@ mod tests {
     fn wrong_type_downcast_returns_none() {
         let mut shared = SharedComponents::new();
         let c = comp(0);
-        let a = shared.insert(c, Layer(9));
+        let a = shared.insert(c, Layer(9)).0;
         assert!(shared.get::<BatchKey>(c, a).is_none());
     }
 
@@ -414,7 +491,7 @@ mod tests {
     fn increment_tracks_external_references() {
         let mut shared = SharedComponents::new();
         let c = comp(0);
-        let a = shared.insert(c, Layer(3));
+        let a = shared.insert(c, Layer(3)).0;
         shared.increment(c, a);
         assert_eq!(shared.refcount(c, a), 2);
         assert!(!shared.release(c, a));
@@ -426,7 +503,7 @@ mod tests {
     fn stale_id_operations_are_safe() {
         let mut shared = SharedComponents::new();
         let c = comp(0);
-        let a = shared.insert(c, Layer(1));
+        let a = shared.insert(c, Layer(1)).0;
         assert!(shared.release(c, a));
         // All operations on the now-stale id are no-ops / defined.
         assert_eq!(shared.refcount(c, a), 0);

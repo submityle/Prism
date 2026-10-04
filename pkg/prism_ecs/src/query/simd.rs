@@ -327,7 +327,9 @@ mod tests {
     // A small deterministic LCG so the dual-run uses varied-but-reproducible
     // inputs without pulling in an RNG dependency.
     fn lcg(seed: &mut u64) -> f32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let bits = (*seed >> 33) as u32;
         // Map to a signed value in roughly [-128, 128).
         (bits as f32 / u32::MAX as f32) * 256.0 - 128.0
@@ -348,9 +350,11 @@ mod tests {
             let mut scalar_dst = a.clone();
             add_assign(&mut simd_dst, &b);
             scalar::add_assign(&mut scalar_dst, &b);
-            assert_eq!(simd_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
-                       scalar_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
-                       "add_assign diverged at n={n}");
+            assert_eq!(
+                simd_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                scalar_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                "add_assign diverged at n={n}"
+            );
         }
     }
 
@@ -364,9 +368,11 @@ mod tests {
             let mut scalar_dst = a.clone();
             scale_assign(&mut simd_dst, k);
             scalar::scale_assign(&mut scalar_dst, k);
-            assert_eq!(simd_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
-                       scalar_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
-                       "scale_assign diverged at n={n}");
+            assert_eq!(
+                simd_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                scalar_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                "scale_assign diverged at n={n}"
+            );
         }
     }
 
@@ -381,9 +387,11 @@ mod tests {
             let mut scalar_dst = a.clone();
             axpy_assign(&mut simd_dst, &b, k);
             scalar::axpy_assign(&mut scalar_dst, &b, k);
-            assert_eq!(simd_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
-                       scalar_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
-                       "axpy_assign diverged at n={n}");
+            assert_eq!(
+                simd_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                scalar_dst.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+                "axpy_assign diverged at n={n}"
+            );
         }
     }
 
@@ -406,7 +414,10 @@ mod tests {
             let got = sum(&a);
             let want = scalar::sum(&a);
             let tol = 1e-2 * (n as f32).max(1.0);
-            assert!((got - want).abs() <= tol, "sum diverged at n={n}: {got} vs {want}");
+            assert!(
+                (got - want).abs() <= tol,
+                "sum diverged at n={n}: {got} vs {want}"
+            );
         }
     }
 }

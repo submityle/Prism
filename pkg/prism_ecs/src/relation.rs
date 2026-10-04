@@ -173,7 +173,10 @@ impl Pair {
     /// Encode this pair into its compact [`PairKey`].
     #[inline]
     pub const fn key(self) -> PairKey {
-        PairKey::encode(RelationId::from_component(self.relation), self.target.target_id())
+        PairKey::encode(
+            RelationId::from_component(self.relation),
+            self.target.target_id(),
+        )
     }
 }
 
@@ -393,13 +396,19 @@ pub struct RelationIndex {
 /// Build the forward key for `(relation, source)`.
 #[inline]
 fn forward_key(relation: ComponentId, source: Entity) -> PairKey {
-    PairKey::encode(RelationId::from_component(relation), TargetId::from_entity(source))
+    PairKey::encode(
+        RelationId::from_component(relation),
+        TargetId::from_entity(source),
+    )
 }
 
 /// Build the reverse key for `(relation, target)`.
 #[inline]
 fn reverse_key(relation: ComponentId, target: Entity) -> PairKey {
-    PairKey::encode(RelationId::from_component(relation), TargetId::from_entity(target))
+    PairKey::encode(
+        RelationId::from_component(relation),
+        TargetId::from_entity(target),
+    )
 }
 
 /// Push `edge` into `edges` only if an identical edge is not already present,
@@ -505,7 +514,11 @@ impl RelationIndex {
             if let Some((_, targets)) = self.forward.remove(&fkey) {
                 let relation = fkey.relation().component_id();
                 for target in targets {
-                    affected.push(CascadeEdge { relation, source: entity, target });
+                    affected.push(CascadeEdge {
+                        relation,
+                        source: entity,
+                        target,
+                    });
                     self.remove_from_reverse(relation, entity, target);
                 }
             }
@@ -522,7 +535,11 @@ impl RelationIndex {
             if let Some((_, sources)) = self.reverse.remove(&rkey) {
                 let relation = rkey.relation().component_id();
                 for source in sources {
-                    affected.push(CascadeEdge { relation, source, target: entity });
+                    affected.push(CascadeEdge {
+                        relation,
+                        source,
+                        target: entity,
+                    });
                     self.remove_from_forward(relation, source, entity);
                 }
             }
@@ -637,7 +654,12 @@ impl RelationIndex {
 
     /// Remove `target` from the forward adjacency of `(relation, source)`,
     /// pruning the bucket when it empties. Returns whether an edge was removed.
-    fn remove_from_forward(&mut self, relation: ComponentId, source: Entity, target: Entity) -> bool {
+    fn remove_from_forward(
+        &mut self,
+        relation: ComponentId,
+        source: Entity,
+        target: Entity,
+    ) -> bool {
         let fkey = forward_key(relation, source);
         let Some((_, targets)) = self.forward.get_mut(&fkey) else {
             return false;
@@ -654,7 +676,12 @@ impl RelationIndex {
 
     /// Remove `source` from the reverse adjacency of `(relation, target)`,
     /// pruning the bucket when it empties. Returns whether an edge was removed.
-    fn remove_from_reverse(&mut self, relation: ComponentId, source: Entity, target: Entity) -> bool {
+    fn remove_from_reverse(
+        &mut self,
+        relation: ComponentId,
+        source: Entity,
+        target: Entity,
+    ) -> bool {
         let rkey = reverse_key(relation, target);
         let Some((_, sources)) = self.reverse.get_mut(&rkey) else {
             return false;
@@ -778,7 +805,14 @@ impl Relations {
         while let Some(entity) = queue.pop() {
             // Outgoing edges vanish with the deleted holder.
             for (relation, target) in self.index.outgoing_edges(entity) {
-                push_unique(&mut plan.removals, CascadeEdge { relation, source: entity, target });
+                push_unique(
+                    &mut plan.removals,
+                    CascadeEdge {
+                        relation,
+                        source: entity,
+                        target,
+                    },
+                );
             }
 
             // Incoming edges are governed by the target-deletion policy.
@@ -788,7 +822,11 @@ impl Relations {
                     .get(&relation)
                     .map(|k| k.on_delete_target)
                     .unwrap_or_default();
-                let edge = CascadeEdge { relation, source, target: entity };
+                let edge = CascadeEdge {
+                    relation,
+                    source,
+                    target: entity,
+                };
                 match policy {
                     CleanupPolicy::Remove => push_unique(&mut plan.removals, edge),
                     CleanupPolicy::Delete => {
@@ -950,8 +988,16 @@ mod tests {
 
         let affected = idx.remove_all_for_entity(a);
         assert_eq!(affected.len(), 2);
-        assert!(affected.contains(&CascadeEdge { relation: r, source: a, target: b }));
-        assert!(affected.contains(&CascadeEdge { relation: r, source: c, target: a }));
+        assert!(affected.contains(&CascadeEdge {
+            relation: r,
+            source: a,
+            target: b
+        }));
+        assert!(affected.contains(&CascadeEdge {
+            relation: r,
+            source: c,
+            target: a
+        }));
 
         // Both maps are fully cleaned.
         assert!(idx.is_empty());
@@ -970,9 +1016,11 @@ mod tests {
         let plan = relations.plan_cascade(parent);
         assert!(plan.deletions.is_empty());
         assert!(plan.panics.is_empty());
-        assert!(plan
-            .removals
-            .contains(&CascadeEdge { relation: r, source: child, target: parent }));
+        assert!(plan.removals.contains(&CascadeEdge {
+            relation: r,
+            source: child,
+            target: parent
+        }));
     }
 
     #[test]
@@ -1027,9 +1075,11 @@ mod tests {
 
         let plan = relations.plan_cascade(target);
         assert!(plan.deletions.is_empty());
-        assert!(plan
-            .panics
-            .contains(&CascadeEdge { relation: r, source: holder, target }));
+        assert!(plan.panics.contains(&CascadeEdge {
+            relation: r,
+            source: holder,
+            target
+        }));
     }
 
     #[test]
@@ -1056,7 +1106,12 @@ mod tests {
         assert!(!relations.is_registered(r));
         assert!(!relations.is_exclusive(r));
         assert!(!relations.is_transitive(r));
-        relations.register(r, RelationKind::new().with_exclusive(true).with_transitive(true));
+        relations.register(
+            r,
+            RelationKind::new()
+                .with_exclusive(true)
+                .with_transitive(true),
+        );
         assert!(relations.is_registered(r));
         assert!(relations.is_exclusive(r));
         assert!(relations.is_transitive(r));

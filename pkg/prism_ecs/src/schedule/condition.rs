@@ -13,10 +13,10 @@
 
 use alloc::boxed::Box;
 
+use crate::query::Access;
 use crate::resource::Resource;
 use crate::system::function::{IntoSystem, System};
 use crate::system::world_cell::UnsafeWorldCell;
-use crate::query::Access;
 use crate::world::World;
 
 /// A type-erased, owned run condition.
@@ -50,8 +50,7 @@ pub fn run_once() -> impl FnMut(crate::system::Local<bool>) -> bool {
 
 /// Returns a condition that is `true` while resource `R` exists in the world.
 #[inline]
-pub fn resource_exists<R: Resource>()
--> impl FnMut(Option<crate::system::Res<R>>) -> bool {
+pub fn resource_exists<R: Resource>() -> impl FnMut(Option<crate::system::Res<R>>) -> bool {
     |res: Option<crate::system::Res<R>>| res.is_some()
 }
 
@@ -62,9 +61,7 @@ pub fn resource_equals<R>(value: R) -> impl FnMut(Option<crate::system::Res<R>>)
 where
     R: Resource + PartialEq,
 {
-    move |res: Option<crate::system::Res<R>>| {
-        res.map(|r| *r == value).unwrap_or(false)
-    }
+    move |res: Option<crate::system::Res<R>>| res.map(|r| *r == value).unwrap_or(false)
 }
 
 /// A condition that inverts another condition.

@@ -272,7 +272,8 @@ impl World {
     {
         let event = self.components_mut().register::<E>();
         let id = self.alloc_observer_id();
-        self.observers_mut().add_event(id, event, Box::new(callback))
+        self.observers_mut()
+            .add_event(id, event, Box::new(callback))
     }
 
     /// Remove a previously registered observer (lifecycle or custom-event).
@@ -469,7 +470,9 @@ mod tests {
         w.init_resource::<Log>();
         w.observe::<Watched, _>(LifecycleEvent::Add, |ctx| log_push(ctx.world, "add"));
         w.observe::<Watched, _>(LifecycleEvent::Insert, |ctx| log_push(ctx.world, "insert"));
-        w.observe::<Watched, _>(LifecycleEvent::Replace, |ctx| log_push(ctx.world, "replace"));
+        w.observe::<Watched, _>(LifecycleEvent::Replace, |ctx| {
+            log_push(ctx.world, "replace");
+        });
         w.observe::<Watched, _>(LifecycleEvent::Remove, |ctx| log_push(ctx.world, "remove"));
 
         w.spawn(Watched(1));
@@ -483,8 +486,15 @@ mod tests {
         // The callback reads the just-written value to prove the world is
         // fully consistent when the Insert observer fires.
         w.observe::<Watched, _>(LifecycleEvent::Insert, |ctx| {
-            let v = ctx.world.get::<Watched>(ctx.entity).map(|c| c.0).unwrap_or(-1);
-            ctx.world.resource_mut::<Log>().events.push(if v == 7 { "seven" } else { "other" });
+            let v = ctx
+                .world
+                .get::<Watched>(ctx.entity)
+                .map(|c| c.0)
+                .unwrap_or(-1);
+            ctx.world
+                .resource_mut::<Log>()
+                .events
+                .push(if v == 7 { "seven" } else { "other" });
         });
         w.spawn(Watched(7));
         assert_eq!(w.resource::<Log>().events, ["seven"]);
@@ -496,7 +506,9 @@ mod tests {
         w.init_resource::<Log>();
         w.observe::<Watched, _>(LifecycleEvent::Add, |ctx| log_push(ctx.world, "add"));
         w.observe::<Watched, _>(LifecycleEvent::Insert, |ctx| log_push(ctx.world, "insert"));
-        w.observe::<Watched, _>(LifecycleEvent::Replace, |ctx| log_push(ctx.world, "replace"));
+        w.observe::<Watched, _>(LifecycleEvent::Replace, |ctx| {
+            log_push(ctx.world, "replace");
+        });
 
         let e = w.spawn(Watched(1));
         w.resource_mut::<Log>().events.clear();
@@ -510,7 +522,9 @@ mod tests {
     fn remove_fires_replace_then_remove() {
         let mut w = World::new();
         w.init_resource::<Log>();
-        w.observe::<Watched, _>(LifecycleEvent::Replace, |ctx| log_push(ctx.world, "replace"));
+        w.observe::<Watched, _>(LifecycleEvent::Replace, |ctx| {
+            log_push(ctx.world, "replace");
+        });
         w.observe::<Watched, _>(LifecycleEvent::Remove, |ctx| log_push(ctx.world, "remove"));
 
         let e = w.spawn(Watched(1));
@@ -523,7 +537,9 @@ mod tests {
     fn despawn_fires_replace_then_remove() {
         let mut w = World::new();
         w.init_resource::<Log>();
-        w.observe::<Watched, _>(LifecycleEvent::Replace, |ctx| log_push(ctx.world, "replace"));
+        w.observe::<Watched, _>(LifecycleEvent::Replace, |ctx| {
+            log_push(ctx.world, "replace");
+        });
         w.observe::<Watched, _>(LifecycleEvent::Remove, |ctx| log_push(ctx.world, "remove"));
 
         let e = w.spawn(Watched(1));
@@ -609,10 +625,11 @@ mod tests {
         // One observer records which entity it was delivered to.
         w.observe_event::<Ping, _>(|ctx| {
             let is_target = ctx.entity == ctx.target;
-            ctx.world
-                .resource_mut::<Log>()
-                .events
-                .push(if is_target { "target" } else { "ancestor" });
+            ctx.world.resource_mut::<Log>().events.push(if is_target {
+                "target"
+            } else {
+                "ancestor"
+            });
         });
 
         w.trigger::<Ping, ChildOf>(child, true);

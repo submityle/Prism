@@ -389,7 +389,11 @@ mod tests {
         let s = sched();
         let expected = [true, false, false, false, true, false, false, false, true];
         for (frame, &want) in expected.iter().enumerate() {
-            assert_eq!(s.should_tick(LodLevel(1), frame as u64), want, "frame {frame}");
+            assert_eq!(
+                s.should_tick(LodLevel(1), frame as u64),
+                want,
+                "frame {frame}"
+            );
         }
     }
 
@@ -401,10 +405,15 @@ mod tests {
         assert!(!s.should_tick_phased(LodLevel(1), 0, 1));
         assert!(s.should_tick_phased(LodLevel(1), 3, 1)); // (3+1)%4==0
         assert!(s.should_tick_phased(LodLevel(1), 2, 2)); // (2+2)%4==0
-        // Four distinct phases cover four consecutive frames exactly once each.
+                                                          // Four distinct phases cover four consecutive frames exactly once each.
         for frame in 0u64..4 {
-            let hits = (0u64..4).filter(|&p| s.should_tick_phased(LodLevel(1), frame, p)).count();
-            assert_eq!(hits, 1, "frame {frame} should be covered by exactly one phase");
+            let hits = (0u64..4)
+                .filter(|&p| s.should_tick_phased(LodLevel(1), frame, p))
+                .count();
+            assert_eq!(
+                hits, 1,
+                "frame {frame} should be covered by exactly one phase"
+            );
         }
     }
 

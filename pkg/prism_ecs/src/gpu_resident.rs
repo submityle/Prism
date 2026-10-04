@@ -299,8 +299,10 @@ impl GpuResidentColumns {
         element_stride_bytes: usize,
         block_len_elements: usize,
     ) {
-        self.columns
-            .insert(id, GpuResidentColumn::new(element_stride_bytes, block_len_elements));
+        self.columns.insert(
+            id,
+            GpuResidentColumn::new(element_stride_bytes, block_len_elements),
+        );
     }
 
     /// Borrow the resident column for `id`, if any.
@@ -511,7 +513,7 @@ mod tests {
         assert!(!reg.is_resident(unregistered));
 
         reg.mark_dirty(a, 5); // block 1 of column a
-        // No-op for unregistered id.
+                              // No-op for unregistered id.
         reg.mark_dirty(unregistered, 0);
 
         let col_a = reg.get(a).unwrap();

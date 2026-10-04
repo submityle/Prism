@@ -28,7 +28,7 @@
 //! and non-`Send` singletons are a `std`-world concept.
 
 use alloc::boxed::Box;
-use core::any::{Any, TypeId, type_name};
+use core::any::{type_name, Any, TypeId};
 use std::thread::ThreadId;
 
 use crate::collections::HashMap;
@@ -107,9 +107,9 @@ impl NonSendResources {
         self.assert_origin();
         let prev = self.map.insert(TypeId::of::<T>(), Box::new(value));
         prev.map(|boxed| {
-            *boxed
-                .downcast::<T>()
-                .unwrap_or_else(|_| panic!("non-send slot for {} held the wrong type", type_name::<T>()))
+            *boxed.downcast::<T>().unwrap_or_else(|_| {
+                panic!("non-send slot for {} held the wrong type", type_name::<T>())
+            })
         })
     }
 
@@ -117,9 +117,9 @@ impl NonSendResources {
     pub(crate) fn get<T: 'static>(&self) -> Option<&T> {
         self.assert_origin_shared();
         self.map.get(&TypeId::of::<T>()).map(|boxed| {
-            boxed
-                .downcast_ref::<T>()
-                .unwrap_or_else(|| panic!("non-send slot for {} held the wrong type", type_name::<T>()))
+            boxed.downcast_ref::<T>().unwrap_or_else(|| {
+                panic!("non-send slot for {} held the wrong type", type_name::<T>())
+            })
         })
     }
 
@@ -127,9 +127,9 @@ impl NonSendResources {
     pub(crate) fn get_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.assert_origin();
         self.map.get_mut(&TypeId::of::<T>()).map(|boxed| {
-            boxed
-                .downcast_mut::<T>()
-                .unwrap_or_else(|| panic!("non-send slot for {} held the wrong type", type_name::<T>()))
+            boxed.downcast_mut::<T>().unwrap_or_else(|| {
+                panic!("non-send slot for {} held the wrong type", type_name::<T>())
+            })
         })
     }
 
@@ -137,9 +137,9 @@ impl NonSendResources {
     pub(crate) fn remove<T: 'static>(&mut self) -> Option<T> {
         self.assert_origin();
         self.map.remove(&TypeId::of::<T>()).map(|boxed| {
-            *boxed
-                .downcast::<T>()
-                .unwrap_or_else(|_| panic!("non-send slot for {} held the wrong type", type_name::<T>()))
+            *boxed.downcast::<T>().unwrap_or_else(|_| {
+                panic!("non-send slot for {} held the wrong type", type_name::<T>())
+            })
         })
     }
 

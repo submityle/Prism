@@ -30,7 +30,7 @@ mod component;
 mod systemset;
 
 use proc_macro::TokenStream;
-use syn::{DeriveInput, parse_macro_input};
+use syn::{parse_macro_input, DeriveInput};
 
 /// Derive [`prism_ecs::component::Component`] for a `Send + Sync + 'static`
 /// data type.
@@ -127,7 +127,6 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
-
 
 /// Derive [`prism_ecs::schedule::SystemSet`] for a label type used to group and
 /// order systems (design §8.2).

@@ -11,11 +11,13 @@
 //! cache that turns this into an O(1) pointer-follow is an M2 refinement
 //! (design §5.3, §9).
 
+use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::collections::HashMap;
 use crate::component::{ComponentId, ComponentSet, Components};
-use crate::storage::Table;
+use crate::storage::{SharedValue, SharedValueId, Table};
 
 /// A stable, dense identifier for an [`Archetype`] within a world.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -42,10 +44,21 @@ impl ArchetypeId {
     }
 }
 
-/// One archetype: a component set plus the table storing its entities.
+/// A single shared-component binding carried by an archetype: the shared
+/// [`ComponentId`], the interned [`SharedValueId`] every entity here shares,
+/// and a canonical [`Arc`] handle keeping the value alive for the archetype's
+/// lifetime (design §6 SharedComponent). Bindings are stored sorted by
+/// [`ComponentId`] so lookup is a binary search and the derived archetype key
+/// is canonical.
+pub type SharedBinding = (ComponentId, SharedValueId, Arc<dyn SharedValue>);
+
+/// One archetype: a (non-shared) component set plus the table storing its
+/// entities, together with the shared-component value bindings that split it
+/// from otherwise-identical archetypes (design §6).
 pub struct Archetype {
     id: ArchetypeId,
     components: ComponentSet,
+    shared: Box<[SharedBinding]>,
     table: Table,
 }
 
@@ -62,10 +75,43 @@ impl Archetype {
         &self.components
     }
 
-    /// Whether entities here have component `id`.
+    /// Whether entities here have the table/sparse component `id`. Shared
+    /// bindings are *not* reported here (they are archetype-level batch keys,
+    /// not table columns); query [`Archetype::shared_binding`] for those.
     #[inline]
     pub fn contains(&self, id: ComponentId) -> bool {
         self.components.contains(id)
+    }
+
+    /// The interned [`SharedValueId`] bound to shared component `id` in this
+    /// archetype, or `None` if this archetype has no binding for `id` (design
+    /// §6). This is the precise, per-archetype membership test for a shared
+    /// component.
+    #[inline]
+    pub fn shared_binding(&self, id: ComponentId) -> Option<SharedValueId> {
+        self.shared
+            .binary_search_by_key(&id, |&(cid, _, _)| cid)
+            .ok()
+            .map(|i| self.shared[i].1)
+    }
+
+    /// A canonical [`Arc`] handle to the interned value bound to shared
+    /// component `id` in this archetype, or `None` if unbound (design §6). The
+    /// value is immutable; downcast via
+    /// [`SharedValue::as_any`](crate::storage::SharedValue::as_any) to read it.
+    #[inline]
+    pub fn shared_arc(&self, id: ComponentId) -> Option<&Arc<dyn SharedValue>> {
+        self.shared
+            .binary_search_by_key(&id, |&(cid, _, _)| cid)
+            .ok()
+            .map(|i| &self.shared[i].2)
+    }
+
+    /// All shared-component bindings on this archetype, sorted by
+    /// [`ComponentId`] (design §6).
+    #[inline]
+    pub fn shared_bindings(&self) -> &[SharedBinding] {
+        &self.shared
     }
 
     /// Number of entities in this archetype.
@@ -93,10 +139,42 @@ impl Archetype {
     }
 }
 
+/// The canonical identity of an archetype: its non-shared [`ComponentSet`]
+/// plus its sorted shared-value bindings. Two archetypes with the same table
+/// component set but different shared values have distinct keys, which is how
+/// a shared component splits an archetype by value (design §6). Shared bindings
+/// are reduced to `(ComponentId, SharedValueId)` here (the [`Arc`] handle is
+/// identity-irrelevant and lives on the [`Archetype`]).
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
+struct ArchetypeKey {
+    set: ComponentSet,
+    shared: Box<[(ComponentId, SharedValueId)]>,
+}
+
+impl ArchetypeKey {
+    /// Build a canonical key, sorting the shared bindings by [`ComponentId`].
+    fn new(set: ComponentSet, mut shared: Vec<(ComponentId, SharedValueId)>) -> Self {
+        shared.sort_unstable_by_key(|&(cid, _)| cid);
+        Self {
+            set,
+            shared: shared.into_boxed_slice(),
+        }
+    }
+
+    /// Derive the key for an archetype's table set and (already-materialized)
+    /// shared bindings.
+    fn from_bindings(set: &ComponentSet, shared: &[SharedBinding]) -> Self {
+        Self::new(
+            set.clone(),
+            shared.iter().map(|&(cid, sid, _)| (cid, sid)).collect(),
+        )
+    }
+}
+
 /// The per-world registry of archetypes.
 pub struct Archetypes {
     archetypes: Vec<Archetype>,
-    by_set: HashMap<ComponentSet, ArchetypeId>,
+    by_key: HashMap<ArchetypeKey, ArchetypeId>,
 }
 
 impl Archetypes {
@@ -105,10 +183,10 @@ impl Archetypes {
     pub fn new() -> Self {
         let mut this = Self {
             archetypes: Vec::new(),
-            by_set: HashMap::default(),
+            by_key: HashMap::default(),
         };
         let empty = ComponentSet::default();
-        let id = this.insert(empty, &Components::new());
+        let id = this.insert(empty, &[], &Components::new());
         debug_assert_eq!(id, ArchetypeId::EMPTY);
         this
     }
@@ -174,13 +252,67 @@ impl Archetypes {
     /// does not yet exist. `components` supplies the layout/drop metadata needed
     /// to build the table columns.
     pub fn get_or_create(&mut self, set: &ComponentSet, components: &Components) -> ArchetypeId {
-        if let Some(&id) = self.by_set.get(set) {
-            return id;
-        }
-        self.insert(set.clone(), components)
+        self.get_or_create_shared(set, &[], components)
     }
 
-    fn insert(&mut self, set: ComponentSet, components: &Components) -> ArchetypeId {
+    /// Get the id for the archetype identified by table component `set` *and*
+    /// the given shared-value `bindings`, creating it (and its empty table) if
+    /// it does not yet exist (design §6 SharedComponent archetype split).
+    ///
+    /// `bindings` need not be sorted; the derived key is canonicalized. The
+    /// supplied [`Arc`] handles are retained on the created archetype to keep
+    /// each interned value alive for the archetype's lifetime (shared values
+    /// are immortal once an archetype binds them). `components` supplies the
+    /// layout/drop metadata for the table columns of `set`.
+    pub fn get_or_create_shared(
+        &mut self,
+        set: &ComponentSet,
+        bindings: &[SharedBinding],
+        components: &Components,
+    ) -> ArchetypeId {
+        let key = ArchetypeKey::from_bindings(set, bindings);
+        if let Some(&id) = self.by_key.get(&key) {
+            return id;
+        }
+        self.insert(set.clone(), bindings, components)
+    }
+
+    /// Drop the `by_key` lookup entry of every **empty** archetype whose shared
+    /// bindings include `(cid, sid)`, after that `(cid, sid)` has had its last
+    /// reference released from its value pool (design §6 SharedComponent 生命周期).
+    ///
+    /// A freed [`SharedValueId`] may be recycled by the pool to name a *different*
+    /// value. If a now-stale empty archetype keyed on the old `(cid, sid)` stayed
+    /// in `by_key`, a later spawn of that different value with the same table set
+    /// would collide with it in [`Archetypes::get_or_create_shared`] and route the
+    /// entity into an archetype still holding the *old* value's [`Arc`] — a silent
+    /// wrong-value read. Evicting the lookup entry closes that aliasing window.
+    ///
+    /// The [`Archetype`] struct is left tombstoned in the `archetypes` vec so
+    /// existing [`ArchetypeId`]s (dense vec indices) stay stable; only the
+    /// `by_key` entry is removed, so the tombstone can never again be returned by
+    /// a lookup and a fresh archetype is minted on demand instead. This is safe
+    /// because `refcount(cid, sid) == 0` implies no live entity binds `(cid, sid)`,
+    /// so every archetype binding it is empty and unreferenced by any
+    /// [`EntityLocation`](crate::entity::EntityLocation).
+    pub fn evict_shared_binding(&mut self, cid: ComponentId, sid: SharedValueId) {
+        let Self { archetypes, by_key } = self;
+        by_key.retain(|_key, id| {
+            let arch = &archetypes[id.index() as usize];
+            !(arch.is_empty()
+                && arch
+                    .shared_bindings()
+                    .iter()
+                    .any(|&(c, s, _)| c == cid && s == sid))
+        });
+    }
+
+    fn insert(
+        &mut self,
+        set: ComponentSet,
+        bindings: &[SharedBinding],
+        components: &Components,
+    ) -> ArchetypeId {
         let id = ArchetypeId(self.archetypes.len() as u32);
         let columns = set.ids().iter().map(|&cid| {
             let info = components
@@ -189,12 +321,17 @@ impl Archetypes {
             (cid, info.layout(), info.drop_fn())
         });
         let table = Table::new(columns);
+        let mut shared: Vec<SharedBinding> = bindings.to_vec();
+        shared.sort_unstable_by_key(|&(cid, _, _)| cid);
+        let shared = shared.into_boxed_slice();
+        let key = ArchetypeKey::from_bindings(&set, &shared);
         self.archetypes.push(Archetype {
             id,
-            components: set.clone(),
+            components: set,
+            shared,
             table,
         });
-        self.by_set.insert(set, id);
+        self.by_key.insert(key, id);
         id
     }
 }

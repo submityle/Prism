@@ -59,8 +59,16 @@ pub fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     } else {
         quote!(_components)
     };
-    let out_param = if has_fields { quote!(out) } else { quote!(_out) };
-    let func_param = if has_fields { quote!(func) } else { quote!(_func) };
+    let out_param = if has_fields {
+        quote!(out)
+    } else {
+        quote!(_out)
+    };
+    let func_param = if has_fields {
+        quote!(func)
+    } else {
+        quote!(_func)
+    };
 
     // `get_components` body: destructure, then forward each field once. The
     // `unsafe` block is only emitted when there is at least one forwarding call
@@ -199,7 +207,9 @@ mod tests {
             struct Pair<A, B> { a: A, b: B }
         };
         let out = expand_str(di);
-        assert!(out.contains("unsafe impl < A , B > prism_ecs :: bundle :: Bundle for Pair < A , B >"));
+        assert!(
+            out.contains("unsafe impl < A , B > prism_ecs :: bundle :: Bundle for Pair < A , B >")
+        );
         assert!(out.contains("A : prism_ecs :: bundle :: Bundle"));
         assert!(out.contains("B : prism_ecs :: bundle :: Bundle"));
     }
@@ -208,7 +218,11 @@ mod tests {
     fn duplicate_field_types_bound_once() {
         let di: DeriveInput = parse_quote! { struct Two { a: Tracked, b: Tracked } };
         let out = expand_str(di);
-        assert_eq!(out.matches("Tracked : prism_ecs :: bundle :: Bundle").count(), 1);
+        assert_eq!(
+            out.matches("Tracked : prism_ecs :: bundle :: Bundle")
+                .count(),
+            1
+        );
     }
 
     #[test]

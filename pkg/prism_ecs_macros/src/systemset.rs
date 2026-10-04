@@ -90,8 +90,12 @@ mod tests {
         };
         let out = expand_str(di);
         assert!(out.contains("match self"));
-        assert!(out.contains("Self :: Pull => prism_ecs :: schedule :: SystemSetId :: with :: < Self > (0u64)"));
-        assert!(out.contains("Self :: Push => prism_ecs :: schedule :: SystemSetId :: with :: < Self > (1u64)"));
+        assert!(out.contains(
+            "Self :: Pull => prism_ecs :: schedule :: SystemSetId :: with :: < Self > (0u64)"
+        ));
+        assert!(out.contains(
+            "Self :: Push => prism_ecs :: schedule :: SystemSetId :: with :: < Self > (1u64)"
+        ));
     }
 
     #[test]

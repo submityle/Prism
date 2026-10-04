@@ -264,9 +264,11 @@ impl<'w, 's> ParallelCommands<'w, 's> {
     /// exist until the buffers are [applied](ParallelCommandBuffers::apply).
     pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
         let entity = self.entities.reserve_entity();
-        self.buffer.commands.push(Box::new(move |world: &mut World| {
-            world.spawn_at(entity, bundle);
-        }));
+        self.buffer
+            .commands
+            .push(Box::new(move |world: &mut World| {
+                world.spawn_at(entity, bundle);
+            }));
         entity
     }
 
@@ -418,9 +420,7 @@ mod tests {
             let seq = next[p];
             assert!(seq < totals[p], "touch_order over-records producer {p}");
             next[p] += 1;
-            buffers
-                .producer(p, entities)
-                .spawn(Tag(p as u32, seq));
+            buffers.producer(p, entities).spawn(Tag(p as u32, seq));
         }
         for p in 0..3 {
             assert_eq!(next[p], totals[p], "touch_order under-records producer {p}");
@@ -459,12 +459,30 @@ mod tests {
         // The deterministic plan is the full (producer, seq) total order and is
         // identical regardless of recording interleaving.
         let expected_plan = [
-            CommandKey { producer: 0, seq: 0 },
-            CommandKey { producer: 0, seq: 1 },
-            CommandKey { producer: 1, seq: 0 },
-            CommandKey { producer: 2, seq: 0 },
-            CommandKey { producer: 2, seq: 1 },
-            CommandKey { producer: 2, seq: 2 },
+            CommandKey {
+                producer: 0,
+                seq: 0,
+            },
+            CommandKey {
+                producer: 0,
+                seq: 1,
+            },
+            CommandKey {
+                producer: 1,
+                seq: 0,
+            },
+            CommandKey {
+                producer: 2,
+                seq: 0,
+            },
+            CommandKey {
+                producer: 2,
+                seq: 1,
+            },
+            CommandKey {
+                producer: 2,
+                seq: 2,
+            },
         ];
         assert_eq!(plan_a, expected_plan);
         assert_eq!(plan_a, plan_b);

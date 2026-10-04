@@ -2,7 +2,7 @@
 //! `where`-clause synthesis.
 
 use proc_macro2::TokenStream;
-use quote::{ToTokens, quote};
+use quote::{quote, ToTokens};
 use syn::{Attribute, Generics, LitStr, Type};
 
 /// The storage strategy requested via `#[component(storage = "...")]`.
@@ -16,6 +16,11 @@ pub enum Storage {
     Table,
     /// Sparse-set storage (`StorageType::SparseSet`).
     SparseSet,
+    /// Unity-style shared storage (`StorageType::Shared`): the value is
+    /// de-duplicated and used as a per-archetype batch key (design §6). The
+    /// derive additionally overrides `install_storage_glue` to register the
+    /// value-boxing glue, and the component must therefore be `Eq + Hash`.
+    Shared,
 }
 
 impl Storage {
@@ -25,12 +30,22 @@ impl Storage {
         match self {
             Storage::Table => quote!(prism_ecs::component::StorageType::Table),
             Storage::SparseSet => quote!(prism_ecs::component::StorageType::SparseSet),
+            Storage::Shared => quote!(prism_ecs::component::StorageType::Shared),
         }
+    }
+
+    /// Whether this storage strategy needs `install_storage_glue` to be
+    /// overridden by the derive. Only [`Storage::Shared`] does: it must register
+    /// its [`shared_box_of`](prism_ecs::component::shared_box_of) value-boxing
+    /// glue so the structural code can intern the component's values.
+    pub fn needs_install_glue(self) -> bool {
+        matches!(self, Storage::Shared)
     }
 }
 
-/// Parse the optional `#[component(storage = "Table" | "SparseSet")]`
-/// attribute.
+/// Parse the optional `#[component(storage = "Table" | "SparseSet" | "Shared")]`
+/// attribute (the lowercase short forms `"table"`, `"sparse"`, `"shared"`
+/// used by design §6 are also accepted).
 ///
 /// Returns:
 /// - `Ok(None)` when no `#[component(...)]` attribute is present (or none set
@@ -48,11 +63,12 @@ pub fn parse_storage_attr(attrs: &[Attribute]) -> syn::Result<Option<Storage>> {
             if meta.path.is_ident("storage") {
                 let lit: LitStr = meta.value()?.parse()?;
                 let storage = match lit.value().as_str() {
-                    "Table" => Storage::Table,
-                    "SparseSet" => Storage::SparseSet,
+                    "Table" | "table" => Storage::Table,
+                    "SparseSet" | "sparse" | "sparse_set" => Storage::SparseSet,
+                    "Shared" | "shared" => Storage::Shared,
                     other => {
                         return Err(meta.error(format!(
-                            "unknown storage type `{other}`; expected \"Table\" or \"SparseSet\""
+                            "unknown storage type `{other}`; expected \"Table\", \"SparseSet\" (or \"sparse\"), or \"Shared\" (or \"shared\")"
                         )));
                     }
                 };
@@ -102,7 +118,7 @@ pub fn bundle_where_clause(generics: &Generics, field_types: &[&Type]) -> TokenS
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syn::{DeriveInput, parse_quote};
+    use syn::{parse_quote, DeriveInput};
 
     fn attrs_of(input: DeriveInput) -> Vec<Attribute> {
         input.attrs
@@ -120,7 +136,10 @@ mod tests {
             #[component(storage = "Table")]
             struct Foo;
         };
-        assert_eq!(parse_storage_attr(&attrs_of(di)).unwrap(), Some(Storage::Table));
+        assert_eq!(
+            parse_storage_attr(&attrs_of(di)).unwrap(),
+            Some(Storage::Table)
+        );
 
         let di: DeriveInput = parse_quote! {
             #[component(storage = "SparseSet")]
@@ -130,6 +149,45 @@ mod tests {
             parse_storage_attr(&attrs_of(di)).unwrap(),
             Some(Storage::SparseSet)
         );
+    }
+
+    #[test]
+    fn storage_shared_and_lowercase_forms() {
+        for src in ["Shared", "shared"] {
+            let di: DeriveInput = syn::parse_str::<DeriveInput>(&format!(
+                "#[component(storage = \"{src}\")] struct Foo;"
+            ))
+            .unwrap();
+            assert_eq!(
+                parse_storage_attr(&attrs_of(di)).unwrap(),
+                Some(Storage::Shared),
+                "storage = {src}"
+            );
+        }
+        // Lowercase short forms from design §6 are accepted too.
+        let di: DeriveInput = parse_quote! {
+            #[component(storage = "sparse")]
+            struct Foo;
+        };
+        assert_eq!(
+            parse_storage_attr(&attrs_of(di)).unwrap(),
+            Some(Storage::SparseSet)
+        );
+        let di: DeriveInput = parse_quote! {
+            #[component(storage = "table")]
+            struct Foo;
+        };
+        assert_eq!(
+            parse_storage_attr(&attrs_of(di)).unwrap(),
+            Some(Storage::Table)
+        );
+    }
+
+    #[test]
+    fn shared_needs_install_glue_others_do_not() {
+        assert!(Storage::Shared.needs_install_glue());
+        assert!(!Storage::Table.needs_install_glue());
+        assert!(!Storage::SparseSet.needs_install_glue());
     }
 
     #[test]

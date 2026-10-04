@@ -154,7 +154,11 @@ pub(crate) fn reachability(edges: &[(usize, usize)], n: usize) -> Vec<Vec<bool>>
 /// resolved ordering edges `(from, to)`, report every conflicting unordered
 /// pair. The graph is assumed acyclic (the caller computes the order first,
 /// which panics on a cycle).
-pub(crate) fn detect(accesses: &[&Access], names: &[String], edges: &[(usize, usize)]) -> Ambiguities {
+pub(crate) fn detect(
+    accesses: &[&Access],
+    names: &[String],
+    edges: &[(usize, usize)],
+) -> Ambiguities {
     let n = accesses.len();
     debug_assert_eq!(n, names.len());
 

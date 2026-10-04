@@ -109,8 +109,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
             return;
         }
         for archetype in world.archetypes().iter().skip(cache.checked) {
-            if D::matches(&self.data_state, archetype)
-                && F::matches(&self.filter_state, archetype)
+            if D::matches(&self.data_state, archetype) && F::matches(&self.filter_state, archetype)
             {
                 cache.ids.push(archetype.id());
             }

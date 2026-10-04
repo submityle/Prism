@@ -159,7 +159,9 @@ mod tests {
         let world = World::new();
         let a = crate::entity::Entity::from_bits(((1u64) << 32) | 1).unwrap();
         assert!(world.relation_targets::<ChildOf>(a).is_empty());
-        assert!(world.query_pair::<ChildOf>(RelationTarget::Wildcard).is_empty());
+        assert!(world
+            .query_pair::<ChildOf>(RelationTarget::Wildcard)
+            .is_empty());
         assert!(world.query_transitive::<ChildOf>(a).is_empty());
     }
 

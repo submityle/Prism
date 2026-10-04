@@ -16,7 +16,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::archetype::Archetypes;
+use crate::archetype::{ArchetypeId, Archetypes, SharedBinding};
 use crate::bundle::Bundle;
 use crate::change::{Mut, Ref, Tick};
 use crate::component::{
@@ -24,11 +24,11 @@ use crate::component::{
 };
 use crate::component_hooks::{ComponentHook, HookContext};
 use crate::entity::{Entities, Entity, EntityLocation};
-use crate::query::{QueryData, QueryFilter, QueryState, ReadOnlyQueryData};
-use crate::storage::{OwningGroupId, SparseSets};
-use crate::relation::Relations;
 use crate::observer::{LifecycleEvent, Observers};
+use crate::query::{QueryData, QueryFilter, QueryState, ReadOnlyQueryData};
+use crate::relation::Relations;
 use crate::resource::{Resource, Resources};
+use crate::storage::{OwningGroupId, SharedComponents, SharedValueId, SparseSets};
 
 /// The authoritative container of all ECS state.
 pub struct World {
@@ -38,6 +38,16 @@ pub struct World {
     /// Out-of-band columns for sparse-declared components (design §6); keyed
     /// by [`Entity`], never fragmenting the archetype graph.
     sparse_sets: SparseSets,
+    /// Interned, value-deduplicated store for shared-declared components
+    /// (design §6 SharedComponent). Each distinct value is stored once and
+    /// referenced by a [`SharedValueId`](crate::storage::SharedValueId) batch
+    /// key that splits the archetype graph; the bound value lives while any
+    /// archetype references it (archetypes hold an `Arc` to it). The structural
+    /// paths maintain a reference count per distinct value: spawn/insert intern
+    /// it, and despawn / shared-value change / shared removal / snapshot restore
+    /// release it, freeing (and recycling) the id when its last holder goes away
+    /// (design §6 生命周期). Empty on worlds that never spawn a shared component.
+    shared_components: SharedComponents,
     resources: Resources,
     /// The flecs-style relation registry (design §11): relation-kind metadata
     /// plus the non-fragmenting bidirectional edge index. High-cardinality
@@ -87,6 +97,7 @@ impl World {
             components: Components::new(),
             archetypes: Archetypes::new(),
             sparse_sets: SparseSets::new(),
+            shared_components: SharedComponents::new(),
             resources: Resources::new(),
             relations: Relations::new(),
             observers: Observers::new(),
@@ -346,7 +357,10 @@ impl World {
             out((&mut *value as *mut R).cast::<u8>());
         });
         let ok = self.components.register_required(t, r, ctor);
-        debug_assert!(ok, "distinct registered components must accept a required edge");
+        debug_assert!(
+            ok,
+            "distinct registered components must accept a required edge"
+        );
     }
 
     /// Like [`World::register_required_component`] but supplies a custom
@@ -362,7 +376,10 @@ impl World {
             out((&mut *value as *mut R).cast::<u8>());
         });
         let ok = self.components.register_required(t, r, ctor);
-        debug_assert!(ok, "distinct registered components must accept a required edge");
+        debug_assert!(
+            ok,
+            "distinct registered components must accept a required edge"
+        );
     }
 
     /// Collect the required-component additions implied by inserting the
@@ -460,76 +477,104 @@ impl World {
         self.ensure_sparse_sets(&all_ids, &storages);
 
         // Only table components fragment the archetype; sparse ones are routed
-        // out of band (design §6).
-        let table_set = ComponentSet::from_ids(
-            all_ids
-                .iter()
-                .zip(&storages)
-                .filter(|(_, s)| **s == StorageType::Table)
-                .map(|(id, _)| *id),
-        );
-        let archetype_id = self.archetypes.get_or_create(&table_set, &self.components);
+        // out of band and shared ones split the archetype by interned value
+        // (design §6). The shared path needs every interned batch key *before*
+        // the archetype and row exist, so it is handled by a dedicated staged
+        // helper; the common shared-free spawn keeps the direct fill below.
+        let has_shared = storages.iter().any(|s| matches!(s, StorageType::Shared));
 
-        let row = {
-            let World {
-                archetypes,
-                sparse_sets,
-                ..
-            } = &mut *self;
-            let table = archetypes
-                .get_mut(archetype_id)
-                .expect("archetype just created")
-                .table_mut();
-            let row = table.allocate(entity);
-            let mut i = 0usize;
-            // SAFETY: `get_components` yields one pointer per explicit id in
-            // `all_ids[..explicit_len]` order, each a valid owned component
-            // value routed exactly once into its matching table column or
-            // sparse set, restoring both invariants.
-            unsafe {
-                bundle.get_components(&mut |ptr| {
-                    let id = all_ids[i];
-                    let storage = storages[i];
-                    i += 1;
-                    match storage {
-                        StorageType::Table => {
-                            table.column_for_fill(id).push(ptr, change_tick);
-                        }
-                        StorageType::SparseSet => {
-                            sparse_sets
-                                .get_mut(id)
-                                .expect("sparse set pre-created")
-                                .insert(entity, ptr, change_tick);
-                        }
-                    }
-                });
-            }
-            debug_assert_eq!(i, explicit_len);
-            // Required default values occupy the tail of `all_ids`.
-            for (k, (rid, ctor)) in required.iter().enumerate() {
-                let storage = storages[explicit_len + k];
-                let ctor_fn: &(dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync) = &**ctor;
-                ctor_fn(&mut |ptr| {
-                    // SAFETY: the ctor hands back one freshly constructed `rid`
-                    // value, moved exactly once into its (empty) table column at
-                    // the just-allocated row or its pre-created sparse set, and
-                    // never dropped by the ctor itself.
-                    unsafe {
+        let (archetype_id, row) = if has_shared {
+            self.place_new_entity_shared(
+                entity,
+                bundle,
+                &all_ids,
+                &storages,
+                explicit_len,
+                &required,
+                change_tick,
+            )
+        } else {
+            let table_set = ComponentSet::from_ids(
+                all_ids
+                    .iter()
+                    .zip(&storages)
+                    .filter(|(_, s)| **s == StorageType::Table)
+                    .map(|(id, _)| *id),
+            );
+            let archetype_id = self.archetypes.get_or_create(&table_set, &self.components);
+
+            let row = {
+                let World {
+                    archetypes,
+                    sparse_sets,
+                    ..
+                } = &mut *self;
+                let table = archetypes
+                    .get_mut(archetype_id)
+                    .expect("archetype just created")
+                    .table_mut();
+                let row = table.allocate(entity);
+                let mut i = 0usize;
+                // SAFETY: `get_components` yields one pointer per explicit id in
+                // `all_ids[..explicit_len]` order, each a valid owned component
+                // value routed exactly once into its matching table column or
+                // sparse set, restoring both invariants.
+                unsafe {
+                    bundle.get_components(&mut |ptr| {
+                        let id = all_ids[i];
+                        let storage = storages[i];
+                        i += 1;
                         match storage {
                             StorageType::Table => {
-                                table.column_for_fill(*rid).push(ptr, change_tick);
+                                table.column_for_fill(id).push(ptr, change_tick);
                             }
                             StorageType::SparseSet => {
                                 sparse_sets
-                                    .get_mut(*rid)
+                                    .get_mut(id)
                                     .expect("sparse set pre-created")
                                     .insert(entity, ptr, change_tick);
                             }
+                            // Unreachable: this branch runs only when no id
+                            // classifies as `Shared`; shared spawns take the
+                            // staged helper above.
+                            StorageType::Shared => {
+                                unreachable!("shared component routed through staged spawn")
+                            }
                         }
-                    }
-                });
-            }
-            row
+                    });
+                }
+                debug_assert_eq!(i, explicit_len);
+                // Required default values occupy the tail of `all_ids`.
+                for (k, (rid, ctor)) in required.iter().enumerate() {
+                    let storage = storages[explicit_len + k];
+                    let ctor_fn: &(dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync) = &**ctor;
+                    ctor_fn(&mut |ptr| {
+                        // SAFETY: the ctor hands back one freshly constructed `rid`
+                        // value, moved exactly once into its (empty) table column at
+                        // the just-allocated row or its pre-created sparse set, and
+                        // never dropped by the ctor itself.
+                        unsafe {
+                            match storage {
+                                StorageType::Table => {
+                                    table.column_for_fill(*rid).push(ptr, change_tick);
+                                }
+                                StorageType::SparseSet => {
+                                    sparse_sets
+                                        .get_mut(*rid)
+                                        .expect("sparse set pre-created")
+                                        .insert(entity, ptr, change_tick);
+                                }
+                                // Unreachable: see the explicit-fill arm above.
+                                StorageType::Shared => {
+                                    unreachable!("shared component routed through staged spawn")
+                                }
+                            }
+                        }
+                    });
+                }
+                row
+            };
+            (archetype_id, row)
         };
 
         self.entities.set_location(
@@ -565,6 +610,363 @@ impl World {
         if !self.owning_groups.is_empty() {
             self.update_owning_groups(entity, &all_ids);
         }
+    }
+
+    /// Staged spawn core for bundles with >=1 shared component (design §6).
+    /// Shared value interning must complete before the archetype (and thus the
+    /// destination column) can be resolved, so this runs in two phases:
+    ///
+    /// 1. walk bundle+required once: intern shared, write sparse directly,
+    ///    byte-copy table values into scratch buffers;
+    /// 2. resolve the archetype from the table set + shared bindings, allocate
+    ///    a row, and flush the scratch table bytes into their columns.
+    ///
+    /// The archetype keeps an `Arc` to each bound value and each intern bumps
+    /// the value's pool reference count (balanced by a release on despawn /
+    /// shared-value change / removal / restore). Returns `(archetype_id, row)`.
+    fn place_new_entity_shared<B: Bundle>(
+        &mut self,
+        entity: Entity,
+        bundle: B,
+        all_ids: &[ComponentId],
+        storages: &[StorageType],
+        explicit_len: usize,
+        required: &[(ComponentId, RequiredCtor)],
+        change_tick: Tick,
+    ) -> (ArchetypeId, usize) {
+        let mut bindings: Vec<SharedBinding> = Vec::new();
+        let mut staged: Vec<(ComponentId, Vec<u8>)> = Vec::new();
+        {
+            let World {
+                components,
+                shared_components,
+                sparse_sets,
+                ..
+            } = &mut *self;
+            let mut i = 0usize;
+            // SAFETY: `get_components` yields one owned pointer per explicit id
+            // in `all_ids[..explicit_len]` order; `stage_component` consumes
+            // each exactly once (interned / written to its set / byte-copied).
+            unsafe {
+                bundle.get_components(&mut |ptr| {
+                    let id = all_ids[i];
+                    let storage = storages[i];
+                    i += 1;
+                    Self::stage_component(
+                        components,
+                        shared_components,
+                        sparse_sets,
+                        entity,
+                        id,
+                        storage,
+                        ptr,
+                        change_tick,
+                        &mut bindings,
+                        &mut staged,
+                    );
+                });
+            }
+            debug_assert_eq!(i, explicit_len);
+            for (k, (rid, ctor)) in required.iter().enumerate() {
+                let storage = storages[explicit_len + k];
+                let rid = *rid;
+                let ctor_fn: &(dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync) = &**ctor;
+                ctor_fn(&mut |ptr| {
+                    // SAFETY: the ctor hands back one fresh `rid` value, which
+                    // `stage_component` consumes exactly once.
+                    unsafe {
+                        Self::stage_component(
+                            components,
+                            shared_components,
+                            sparse_sets,
+                            entity,
+                            rid,
+                            storage,
+                            ptr,
+                            change_tick,
+                            &mut bindings,
+                            &mut staged,
+                        );
+                    }
+                });
+            }
+        }
+        let table_set = ComponentSet::from_ids(
+            all_ids
+                .iter()
+                .zip(storages)
+                .filter(|(_, s)| **s == StorageType::Table)
+                .map(|(id, _)| *id),
+        );
+        let archetype_id =
+            self.archetypes
+                .get_or_create_shared(&table_set, &bindings, &self.components);
+        let table = self
+            .archetypes
+            .get_mut(archetype_id)
+            .expect("archetype just created")
+            .table_mut();
+        let row = table.allocate(entity);
+        for (id, buf) in &staged {
+            // SAFETY: `buf` holds exactly one table value's bytes for `id`;
+            // `push` byte-moves them into `id`'s column at the just-allocated
+            // row, after which `buf` is dropped as plain `u8` only.
+            unsafe {
+                table.column_for_fill(*id).push(buf.as_ptr(), change_tick);
+            }
+        }
+        (archetype_id, row)
+    }
+
+    /// Route one freshly produced value during a staged shared spawn: table
+    /// values are byte-copied into `staged`, sparse values are inserted into
+    /// their set immediately, and shared values are interned (recording the
+    /// resulting `(id, SharedValueId, Arc)` binding in `bindings`).
+    ///
+    /// # Safety
+    /// `ptr` is a valid owned value of `id`'s component type; ownership
+    /// transfers into this call and is consumed exactly once.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn stage_component(
+        components: &Components,
+        shared_components: &mut SharedComponents,
+        sparse_sets: &mut SparseSets,
+        entity: Entity,
+        id: ComponentId,
+        storage: StorageType,
+        ptr: *mut u8,
+        change_tick: Tick,
+        bindings: &mut Vec<SharedBinding>,
+        staged: &mut Vec<(ComponentId, Vec<u8>)>,
+    ) {
+        let info = components.info(id).expect("registered component");
+        match storage {
+            StorageType::Table => {
+                let size = info.layout().size();
+                let mut buf = alloc::vec![0u8; size];
+                // SAFETY: `ptr` is valid for `size` reads and `buf` for `size`
+                // writes; the regions do not overlap, and the source value is
+                // treated as moved-from afterwards (its bytes now live in `buf`).
+                unsafe {
+                    core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr(), size);
+                }
+                staged.push((id, buf));
+            }
+            StorageType::SparseSet => {
+                // SAFETY: ownership of one `id` value is forwarded into its set.
+                unsafe {
+                    sparse_sets
+                        .get_mut(id)
+                        .expect("sparse set pre-created")
+                        .insert(entity, ptr, change_tick);
+                }
+            }
+            StorageType::Shared => {
+                let box_fn = info.shared_box_fn().expect("shared box glue installed");
+                // SAFETY: `box_fn` is `id`'s installed glue; `ptr` is a valid
+                // owned value moved out of exactly once into the boxed value.
+                let boxed = unsafe { box_fn(ptr) };
+                let (sid, arc) = shared_components.insert_boxed(id, boxed);
+                bindings.push((id, sid, arc));
+            }
+        }
+    }
+
+    /// Staged write for an [`World::insert`] whose bundle (or required
+    /// additions) include >=1 shared component (design SS6).
+    ///
+    /// Shared values are interned batch keys that split the archetype by value,
+    /// so this mirrors the staged spawn: phase 1 walks the bundle (and required
+    /// ctors) once, interning shared values, writing sparse immediately, and
+    /// byte-copying table values into scratch buffers; phase 2 resolves the
+    /// destination archetype from `current`'s table set plus the merged shared
+    /// bindings, then either overwrites in place (when the archetype is
+    /// unchanged) or relocates to the destination archetype. A changed shared
+    /// value forces a move even when the table set is identical.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_write_shared<B: Bundle>(
+        &mut self,
+        entity: Entity,
+        bundle: B,
+        ids: &[ComponentId],
+        storages: &[StorageType],
+        current: &ComponentSet,
+        required: &[(ComponentId, RequiredCtor, StorageType)],
+        loc: EntityLocation,
+        src_id: ArchetypeId,
+        change_tick: Tick,
+    ) {
+        // Phase 1: stage table bytes, write sparse, intern shared bindings.
+        let mut staged: Vec<(ComponentId, Vec<u8>)> = Vec::new();
+        let mut new_bindings: Vec<SharedBinding> = Vec::new();
+        {
+            let World {
+                components,
+                shared_components,
+                sparse_sets,
+                ..
+            } = &mut *self;
+            let mut i = 0usize;
+            // SAFETY: `get_components` yields one owned pointer per id in `ids`
+            // order; `stage_component` consumes each exactly once.
+            unsafe {
+                bundle.get_components(&mut |ptr| {
+                    let id = ids[i];
+                    let storage = storages[i];
+                    i += 1;
+                    Self::stage_component(
+                        components,
+                        shared_components,
+                        sparse_sets,
+                        entity,
+                        id,
+                        storage,
+                        ptr,
+                        change_tick,
+                        &mut new_bindings,
+                        &mut staged,
+                    );
+                });
+            }
+            debug_assert_eq!(i, ids.len());
+            for (rid, ctor, storage) in required {
+                let rid = *rid;
+                let storage = *storage;
+                let ctor_fn: &(dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync) = &**ctor;
+                ctor_fn(&mut |ptr| {
+                    // SAFETY: the ctor hands back one fresh `rid` value consumed
+                    // exactly once by `stage_component`.
+                    unsafe {
+                        Self::stage_component(
+                            components,
+                            shared_components,
+                            sparse_sets,
+                            entity,
+                            rid,
+                            storage,
+                            ptr,
+                            change_tick,
+                            &mut new_bindings,
+                            &mut staged,
+                        );
+                    }
+                });
+            }
+        }
+
+        // Phase 2: resolve the destination archetype. Its table set is the
+        // current table set plus any genuinely new table columns; its shared
+        // bindings are the current archetype's bindings with each binding
+        // produced by this insert replaced (same cid) or appended (new cid).
+        let mut table_set = current.clone();
+        for (id, _) in &staged {
+            table_set = table_set.with(*id);
+        }
+        let mut dst_bindings: Vec<SharedBinding> = self
+            .archetypes
+            .get(src_id)
+            .expect("live entity archetype")
+            .shared_bindings()
+            .to_vec();
+        for (cid, sid, arc) in &new_bindings {
+            if let Some(slot) = dst_bindings.iter_mut().find(|(c, _, _)| c == cid) {
+                *slot = (*cid, *sid, arc.clone());
+            } else {
+                dst_bindings.push((*cid, *sid, arc.clone()));
+            }
+        }
+        let dst_id =
+            self.archetypes
+                .get_or_create_shared(&table_set, &dst_bindings, &self.components);
+
+        // The shared cids this insert (re-)interned in phase 1 (+1 each). Their
+        // prior src-archetype binding must be released after the write to
+        // balance that intern (design §6 SharedComponent 生命周期).
+        let bundle_cids: Vec<ComponentId> = new_bindings.iter().map(|(cid, _, _)| *cid).collect();
+
+        if dst_id == src_id {
+            // Identical table set and identical shared bindings: no move. Every
+            // staged table id already exists as a column; overwrite it in place
+            // at the entity's current row. Shared bindings are unchanged, so no
+            // table write is needed for the shared ids themselves.
+            let row = loc.row as usize;
+            let table = self
+                .archetypes
+                .get_mut(src_id)
+                .expect("live entity archetype")
+                .table_mut();
+            for (id, buf) in &staged {
+                // SAFETY: `buf` holds exactly one `id` value's bytes; `replace`
+                // drops the resident value and byte-moves these in at the
+                // in-bounds `row`. `buf` is then dropped as plain `u8` only.
+                unsafe {
+                    table.column_mut(*id).expect("existing column").replace(
+                        row,
+                        buf.as_ptr(),
+                        change_tick,
+                    );
+                }
+            }
+            // Same table set and identical shared values (an unchanged
+            // archetype): phase 1 re-interned each bundle cid (+1), so release
+            // the identical prior binding to net zero (design §6).
+            self.release_entity_shared_bindings(src_id, Some(&bundle_cids));
+            return;
+        }
+
+        // The archetype changed (new table column and/or a different bound
+        // shared value): relocate `entity` to `dst_id`.
+        let dst_row = self
+            .archetypes
+            .get_mut(dst_id)
+            .expect("dst archetype")
+            .table_mut()
+            .allocate(entity);
+        {
+            let (src_arch, dst_arch) = self.archetypes.get_pair_mut(src_id, dst_id);
+            // SAFETY: both tables derive from the same registry (identical
+            // column layouts for shared ids) and `loc.row` is in-bounds in the
+            // source table. The destination table set is a superset of the
+            // source table set, so every source column is relocated.
+            unsafe {
+                dst_arch
+                    .table_mut()
+                    .move_shared_columns_from(src_arch.table_mut(), loc.row as usize);
+            }
+        }
+        {
+            let table = self
+                .archetypes
+                .get_mut(dst_id)
+                .expect("dst archetype")
+                .table_mut();
+            for (id, buf) in &staged {
+                // SAFETY: `buf` holds exactly one `id` value's bytes. Columns
+                // present in `current` were relocated to `dst_row` and are
+                // overwritten there; genuinely new columns fill their empty slot
+                // at `dst_row`. Each consumes `buf`'s bytes once.
+                unsafe {
+                    if current.contains(*id) {
+                        table.column_mut(*id).expect("relocated column").replace(
+                            dst_row,
+                            buf.as_ptr(),
+                            change_tick,
+                        );
+                    } else {
+                        table.column_for_fill(*id).push(buf.as_ptr(), change_tick);
+                    }
+                }
+            }
+        }
+        self.finish_move(entity, loc, src_id, current.ids(), dst_id, dst_row);
+
+        // `entity` left `src_id`. Phase 1 re-interned the new binding for each
+        // bundle cid (+1); release the src archetype's prior binding for those
+        // cids (-1). A changed value frees the old id (evicting any now-empty
+        // archetype keyed on it); a same-value move nets zero. Carried-over
+        // non-bundle bindings are untouched — the entity still binds them in
+        // `dst_id` (design §6 SharedComponent 生命周期).
+        self.release_entity_shared_bindings(src_id, Some(&bundle_cids));
     }
 
     /// Gather the `(id, hook)` pairs for every id in `ids` whose component has
@@ -649,6 +1051,17 @@ impl World {
                                 .is_some_and(|a| a.contains(id))
                     }),
                     StorageType::SparseSet => self.sparse_sets.contains(id, entity),
+                    // A shared component is "present" when the entity's current
+                    // archetype binds that component to some interned value
+                    // (design §6); shared bindings live on the archetype, not
+                    // in a table column or sparse set.
+                    StorageType::Shared => loc.is_some_and(|l| {
+                        !l.is_empty()
+                            && self
+                                .archetypes
+                                .get(l.archetype_id)
+                                .is_some_and(|a| a.shared_binding(id).is_some())
+                    }),
                 };
                 present.then_some(id)
             })
@@ -762,6 +1175,14 @@ impl World {
                     let present = match storage {
                         StorageType::Table => current.contains(rid),
                         StorageType::SparseSet => self.sparse_sets.contains(rid, entity),
+                        // A required shared component is already satisfied when
+                        // the current archetype binds it to any value (§6); the
+                        // explicit bundle still wins for an explicit shared id
+                        // because those are excluded from `collect_required`.
+                        StorageType::Shared => self
+                            .archetypes
+                            .get(src_id)
+                            .is_some_and(|a| a.shared_binding(rid).is_some()),
                     };
                     if !present {
                         out.push((rid, ctor, storage));
@@ -774,7 +1195,10 @@ impl World {
 
         // Pre-create backing sets for any sparse required additions so the
         // write closures can assume the set exists (mirrors the explicit path).
-        if required.iter().any(|(_, _, s)| *s == StorageType::SparseSet) {
+        if required
+            .iter()
+            .any(|(_, _, s)| *s == StorageType::SparseSet)
+        {
             let req_sparse: Vec<ComponentId> = required
                 .iter()
                 .filter(|(_, _, s)| *s == StorageType::SparseSet)
@@ -801,7 +1225,27 @@ impl World {
             }
         }
 
-        if add_ids.is_empty() {
+        let has_shared = storages.contains(&StorageType::Shared)
+            || required.iter().any(|(_, _, s)| *s == StorageType::Shared);
+        if has_shared {
+            // At least one explicit or required shared component is involved.
+            // Shared values are interned batch keys that split the archetype by
+            // value (design §6), so the destination archetype can only be known
+            // after interning; the staged helper performs that two-phase write
+            // (and the archetype move it may force even when the table set is
+            // unchanged but a bound value differs).
+            self.insert_write_shared(
+                entity,
+                bundle,
+                &ids,
+                &storages,
+                &current,
+                &required,
+                loc,
+                src_id,
+                change_tick,
+            );
+        } else if add_ids.is_empty() {
             // No new table column: overwrite existing table columns in place
             // and insert/overwrite sparse components out of band — no move.
             let World {
@@ -837,6 +1281,10 @@ impl World {
                                 .expect("sparse set pre-created")
                                 .insert(entity, ptr, change_tick);
                         }
+                        // Unreachable: shared bundles take `insert_write_shared`.
+                        StorageType::Shared => {
+                            unreachable!("shared component routed through staged insert")
+                        }
                     }
                 });
                 // Required components (§16.1): in the no-move branch every
@@ -859,91 +1307,100 @@ impl World {
             }
         } else {
             // At least one new table component: move into `current ∪ table add_ids`.
-        let mut new_set = current.clone();
-        for &id in &add_ids {
-            new_set = new_set.with(id);
-        }
-        let dst_id = self.archetypes.get_or_create(&new_set, &self.components);
-
-        let dst_row = self
-            .archetypes
-            .get_mut(dst_id)
-            .expect("dst archetype")
-            .table_mut()
-            .allocate(entity);
-
-        {
-            let (src_arch, dst_arch) = self.archetypes.get_pair_mut(src_id, dst_id);
-            // SAFETY: both tables derive from the same registry (identical shared
-            // layouts) and `loc.row` is in-bounds in the source table.
-            unsafe {
-                dst_arch
-                    .table_mut()
-                    .move_shared_columns_from(src_arch.table_mut(), loc.row as usize);
+            let mut new_set = current.clone();
+            for &id in &add_ids {
+                new_set = new_set.with(id);
             }
-        }
+            let dst_id = self.archetypes.get_or_create(&new_set, &self.components);
 
-        {
-            let World {
-                archetypes,
-                sparse_sets,
-                ..
-            } = &mut *self;
-            let table = archetypes
+            let dst_row = self
+                .archetypes
                 .get_mut(dst_id)
                 .expect("dst archetype")
-                .table_mut();
-            let mut i = 0usize;
-            // SAFETY: sparse ids move into their pre-created set; table ids in
-            // `current` were relocated to `dst_row` and are overwritten in place;
-            // genuinely new table ids fill their (empty) column at `dst_row`.
-            // Each owned value is consumed exactly once.
-            unsafe {
-                bundle.get_components(&mut |ptr| {
-                    let id = ids[i];
-                    let storage = storages[i];
-                    i += 1;
-                    match storage {
-                        StorageType::SparseSet => {
-                            sparse_sets
-                                .get_mut(id)
-                                .expect("sparse set pre-created")
-                                .insert(entity, ptr, change_tick);
-                        }
-                        StorageType::Table if current.contains(id) => {
-                            table
-                                .column_mut(id)
-                                .expect("moved column exists")
-                                .replace(dst_row, ptr, change_tick);
-                        }
-                        StorageType::Table => {
-                            table.column_for_fill(id).push(ptr, change_tick);
-                        }
-                    }
-                });
-                // Required components (§16.1): write each absent required
-                // addition after the explicit values. New table columns fill
-                // their (empty) slot at `dst_row`; sparse ids go to their set.
-                // SAFETY (inherits the enclosing block): the ctor hands back
-                // one freshly constructed `rid` value, moved exactly once. A new
-                // table column fills its empty slot at `dst_row`; a sparse id
-                // inserts into its pre-created set. The ctor never drops it.
-                for (rid, ctor, storage) in &required {
-                    let ctor_fn: &(dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync) = &**ctor;
-                    ctor_fn(&mut |ptr| match storage {
-                        StorageType::Table => {
-                            table.column_for_fill(*rid).push(ptr, change_tick);
-                        }
-                        StorageType::SparseSet => {
-                            sparse_sets
-                                .get_mut(*rid)
-                                .expect("required sparse set pre-created")
-                                .insert(entity, ptr, change_tick);
-                        }
-                    });
+                .table_mut()
+                .allocate(entity);
+
+            {
+                let (src_arch, dst_arch) = self.archetypes.get_pair_mut(src_id, dst_id);
+                // SAFETY: both tables derive from the same registry (identical shared
+                // layouts) and `loc.row` is in-bounds in the source table.
+                unsafe {
+                    dst_arch
+                        .table_mut()
+                        .move_shared_columns_from(src_arch.table_mut(), loc.row as usize);
                 }
             }
-        }
+
+            {
+                let World {
+                    archetypes,
+                    sparse_sets,
+                    ..
+                } = &mut *self;
+                let table = archetypes
+                    .get_mut(dst_id)
+                    .expect("dst archetype")
+                    .table_mut();
+                let mut i = 0usize;
+                // SAFETY: sparse ids move into their pre-created set; table ids in
+                // `current` were relocated to `dst_row` and are overwritten in place;
+                // genuinely new table ids fill their (empty) column at `dst_row`.
+                // Each owned value is consumed exactly once.
+                unsafe {
+                    bundle.get_components(&mut |ptr| {
+                        let id = ids[i];
+                        let storage = storages[i];
+                        i += 1;
+                        match storage {
+                            StorageType::SparseSet => {
+                                sparse_sets
+                                    .get_mut(id)
+                                    .expect("sparse set pre-created")
+                                    .insert(entity, ptr, change_tick);
+                            }
+                            StorageType::Table if current.contains(id) => {
+                                table.column_mut(id).expect("moved column exists").replace(
+                                    dst_row,
+                                    ptr,
+                                    change_tick,
+                                );
+                            }
+                            StorageType::Table => {
+                                table.column_for_fill(id).push(ptr, change_tick);
+                            }
+                            // Unreachable: shared bundles take `insert_write_shared`.
+                            StorageType::Shared => {
+                                unreachable!("shared component routed through staged insert")
+                            }
+                        }
+                    });
+                    // Required components (§16.1): write each absent required
+                    // addition after the explicit values. New table columns fill
+                    // their (empty) slot at `dst_row`; sparse ids go to their set.
+                    // SAFETY (inherits the enclosing block): the ctor hands back
+                    // one freshly constructed `rid` value, moved exactly once. A new
+                    // table column fills its empty slot at `dst_row`; a sparse id
+                    // inserts into its pre-created set. The ctor never drops it.
+                    for (rid, ctor, storage) in &required {
+                        let ctor_fn: &(dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync) = &**ctor;
+                        ctor_fn(&mut |ptr| match storage {
+                            StorageType::Table => {
+                                table.column_for_fill(*rid).push(ptr, change_tick);
+                            }
+                            StorageType::SparseSet => {
+                                sparse_sets
+                                    .get_mut(*rid)
+                                    .expect("required sparse set pre-created")
+                                    .insert(entity, ptr, change_tick);
+                            }
+                            // Unreachable: shared bundles take `insert_write_shared`.
+                            StorageType::Shared => {
+                                unreachable!("shared component routed through staged insert")
+                            }
+                        });
+                    }
+                }
+            }
 
             self.finish_move(entity, loc, src_id, current.ids(), dst_id, dst_row);
         }
@@ -1041,12 +1498,10 @@ impl World {
         }
 
         let src_id = loc.archetype_id;
-        let current = self
-            .archetypes
-            .get(src_id)
-            .expect("live entity archetype")
-            .components()
-            .clone();
+        let (current, src_bindings) = {
+            let arch = self.archetypes.get(src_id).expect("live entity archetype");
+            (arch.components().clone(), arch.shared_bindings().to_vec())
+        };
 
         // Only *table* components present in the current archetype move it.
         let to_remove: Vec<ComponentId> = ids
@@ -1056,7 +1511,20 @@ impl World {
             .filter(|(id, s)| **s == StorageType::Table && current.contains(*id))
             .map(|(id, _)| id)
             .collect();
-        if to_remove.is_empty() {
+        // Shared components are NOT in the archetype's `ComponentSet` (design
+        // §6); presence is recorded as a per-archetype binding. Removing one
+        // means dropping its binding, which also moves the entity to the
+        // archetype keyed by the reduced binding set.
+        let shared_to_remove: Vec<ComponentId> = ids
+            .iter()
+            .copied()
+            .zip(&storages)
+            .filter(|(id, s)| {
+                **s == StorageType::Shared && src_bindings.iter().any(|(cid, _, _)| cid == id)
+            })
+            .map(|(id, _)| id)
+            .collect();
+        if to_remove.is_empty() && shared_to_remove.is_empty() {
             // No archetype move; success iff a sparse component was removed.
             // A removed sparse component can still break an owning group.
             if removed_any && !self.owning_groups.is_empty() {
@@ -1069,7 +1537,19 @@ impl World {
         for &id in &to_remove {
             new_set = new_set.without(id);
         }
-        let dst_id = self.archetypes.get_or_create(&new_set, &self.components);
+        // Preserve every shared binding except the ones being removed, so
+        // dropping a *table* component keeps the entity's shared values intact
+        // (design §6: carried-over bindings keep their reference as the entity
+        // re-keys into the destination archetype; removed bindings are released
+        // below).
+        let dst_bindings: Vec<SharedBinding> = src_bindings
+            .iter()
+            .filter(|(cid, _, _)| !shared_to_remove.contains(cid))
+            .cloned()
+            .collect();
+        let dst_id =
+            self.archetypes
+                .get_or_create_shared(&new_set, &dst_bindings, &self.components);
 
         let dst_row = self
             .archetypes
@@ -1092,6 +1572,14 @@ impl World {
         // Columns kept (new_set) were moved out of src; removed columns remain
         // and are dropped by `swap_remove_row`.
         self.finish_move(entity, loc, src_id, new_set.ids(), dst_id, dst_row);
+
+        // The removed shared bindings are no longer carried by `entity`'s
+        // destination archetype; release each so its pool reference count tracks
+        // only live holders (design §6). Carried-over bindings keep their
+        // reference (the entity still binds them in `dst_id`).
+        if !shared_to_remove.is_empty() {
+            self.release_entity_shared_bindings(src_id, Some(&shared_to_remove));
+        }
 
         // Owning-group maintenance (design §6 / §17): losing any owned
         // component drops `entity` out of that group's packed prefix.
@@ -1157,8 +1645,8 @@ impl World {
             let ids = self.entity_component_ids(entity, loc);
             let obs_active = self.observers.watches_any_lifecycle(&ids);
             if self.any_hooks(&ids) || obs_active {
-                let replace = self
-                    .collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_replace);
+                let replace =
+                    self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_replace);
                 let remove =
                     self.collect_hooks(&ids, crate::component_hooks::ComponentHooks::on_remove);
                 self.run_hooks(entity, &replace);
@@ -1207,6 +1695,10 @@ impl World {
         if let Some(moved_entity) = moved {
             self.entities.set_location(moved_entity, loc);
         }
+        // The despawned entity has left its archetype; drop its shared-value
+        // references so each pool reference count tracks only live holders, and
+        // free/recycle any value whose last holder just left (design §6).
+        self.release_entity_shared_bindings(loc.archetype_id, None);
         true
     }
 
@@ -1217,9 +1709,9 @@ impl World {
         &mut self,
         entity: Entity,
         src_loc: EntityLocation,
-        src_id: crate::archetype::ArchetypeId,
+        src_id: ArchetypeId,
         moved_ids: &[ComponentId],
-        dst_id: crate::archetype::ArchetypeId,
+        dst_id: ArchetypeId,
         dst_row: usize,
     ) {
         let moved = {
@@ -1245,6 +1737,45 @@ impl World {
         );
     }
 
+    /// Release `entity`'s shared-value references for the bindings of
+    /// `archetype_id`, keeping the per-pool invariant that each `(cid, sid)`
+    /// reference count equals the number of live entities whose *current*
+    /// archetype binds it (design §6 SharedComponent 生命周期).
+    ///
+    /// With `only_cids = Some(cids)` only bindings whose component is in `cids`
+    /// are released — the insert / remove paths that re-intern or drop exactly
+    /// those cids and carry the rest over unchanged. With `None` every binding is
+    /// released (the despawn path).
+    ///
+    /// Call this **after** `entity`'s row has left `archetype_id`, so an
+    /// archetype that becomes empty is observable as empty. Any `(cid, sid)`
+    /// whose last reference drops frees its pool slot and evicts every now-empty
+    /// archetype still keyed on it, so a recycled [`SharedValueId`] can never
+    /// alias a tombstoned archetype.
+    fn release_entity_shared_bindings(
+        &mut self,
+        archetype_id: ArchetypeId,
+        only_cids: Option<&[ComponentId]>,
+    ) {
+        // Snapshot the `(cid, sid)` pairs first so the pool releases below do not
+        // alias the `&self.archetypes` borrow this read needs.
+        let to_release: Vec<(ComponentId, SharedValueId)> = match self.archetypes.get(archetype_id)
+        {
+            Some(arch) => arch
+                .shared_bindings()
+                .iter()
+                .filter(|(cid, _, _)| only_cids.is_none_or(|cids| cids.contains(cid)))
+                .map(|&(cid, sid, _)| (cid, sid))
+                .collect(),
+            None => return,
+        };
+        for (cid, sid) in to_release {
+            if self.shared_components.release(cid, sid) {
+                self.archetypes.evict_shared_binding(cid, sid);
+            }
+        }
+    }
+
     /// Return a borrowed read handle to `entity`, or `Err(entity)` if it is
     /// not currently live.
     ///
@@ -1266,9 +1797,19 @@ impl World {
     pub fn get<T: Component>(&self, entity: Entity) -> Option<&T> {
         let id = self.components.id_of::<T>()?;
         let loc = self.entities.location(entity)?;
-        if self.components.info(id)?.storage() == StorageType::SparseSet {
-            // SAFETY: `T` is exactly the type registered for `id`.
-            return unsafe { self.sparse_sets.get(id)?.get::<T>(entity) };
+        match self.components.info(id)?.storage() {
+            StorageType::SparseSet => {
+                // SAFETY: `T` is exactly the type registered for `id`.
+                return unsafe { self.sparse_sets.get(id)?.get::<T>(entity) };
+            }
+            StorageType::Shared => {
+                // A shared component's value lives once per archetype binding
+                // (design §6), not per row; borrow it from this entity's
+                // archetype and downcast to the registered type.
+                let arch = self.archetypes.get(loc.archetype_id)?;
+                return arch.shared_arc(id)?.as_any().downcast_ref::<T>();
+            }
+            StorageType::Table => {}
         }
         let arch = self.archetypes.get(loc.archetype_id)?;
         let col = arch.table().column(id)?;
@@ -1307,6 +1848,13 @@ impl World {
                 last_run,
                 this_run,
             ));
+        }
+        if self.components.info(id)?.storage() == StorageType::Shared {
+            // A shared component is an archetype-wide, immutable value with no
+            // per-entity change ticks (design §6); change detection is not
+            // defined for it, so report an honest `None` rather than fabricate
+            // a tick window.
+            return None;
         }
         let arch = self.archetypes.get(loc.archetype_id)?;
         let col = arch.table().column(id)?;
@@ -1356,6 +1904,12 @@ impl World {
             let changed = unsafe { &mut *set.changed_tick_ptr(entity)? };
             return Some(Mut::new(value, changed, None, added, last_run, this_run));
         }
+        if self.components.info(id)?.storage() == StorageType::Shared {
+            // Shared values are immutable once bound to an archetype (design
+            // §6): there is no in-place `&mut` to hand out, so mutation through
+            // the direct world accessor is unsupported and yields `None`.
+            return None;
+        }
         let arch = self.archetypes.get(loc.archetype_id)?;
         let col = arch.table().column(id)?;
         let row = loc.row as usize;
@@ -1390,6 +1944,10 @@ impl World {
         let loc = self.entities.location(entity)?;
         if self.components.info(id)?.storage() == StorageType::SparseSet {
             return self.sparse_sets.get(id)?.component_ticks(entity);
+        }
+        if self.components.info(id)?.storage() == StorageType::Shared {
+            // Shared components carry no per-entity ticks (design §6).
+            return None;
         }
         let arch = self.archetypes.get(loc.archetype_id)?;
         let col = arch.table().column(id)?;
@@ -1492,10 +2050,7 @@ impl World {
     /// set of live entities that own every component of the group, with no gaps
     /// — the fastest possible iteration order for a super-hot query (design
     /// §17).
-    pub fn owning_group(
-        &self,
-        id: OwningGroupId,
-    ) -> Option<&crate::storage::OwningGroup> {
+    pub fn owning_group(&self, id: OwningGroupId) -> Option<&crate::storage::OwningGroup> {
         self.owning_groups.get(id)
     }
 
@@ -1522,7 +2077,12 @@ impl World {
         }
         self.archetypes
             .get(loc.archetype_id)
-            .is_some_and(|archetype| archetype.contains(id))
+            .is_some_and(|archetype| {
+                // A table/sparse component lives in the archetype's component set;
+                // a shared component is NOT in that set but is recorded as a
+                // per-archetype binding (design §6), so presence is the union.
+                archetype.contains(id) || archetype.shared_binding(id).is_some()
+            })
     }
 
     /// Re-evaluate owning-group membership for `entity` after a structural
@@ -1571,7 +2131,7 @@ impl World {
         }
         self.archetypes
             .get(loc.archetype_id)
-            .is_some_and(|a| a.contains(id))
+            .is_some_and(|a| a.contains(id) || a.shared_binding(id).is_some())
     }
 
     /// Materialise every entity handed out by
@@ -1630,6 +2190,10 @@ use owning_groups::OwningGroupRegistry;
 
 /// Structured, differential world snapshots (design §14 / §16.5).
 pub mod snapshot;
+
+/// SharedComponent end-to-end behavioural regression tests (design §6).
+#[cfg(test)]
+mod shared_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1758,13 +2322,21 @@ mod tests {
         let mut w = World::new();
         let e = w.spawn(Position(1.0, 1.0)); // Position added=changed=1
         w.increment_change_tick(); // -> 2
-        // Structural move: Velocity is new, Position is relocated unchanged.
+                                   // Structural move: Velocity is new, Position is relocated unchanged.
         assert!(w.insert(e, Velocity(5.0, 5.0)));
         let pos = w.get_ticks::<Position>(e).unwrap();
-        assert_eq!(pos.added, Tick::new(1), "relocation preserves Position ticks");
+        assert_eq!(
+            pos.added,
+            Tick::new(1),
+            "relocation preserves Position ticks"
+        );
         assert_eq!(pos.changed, Tick::new(1));
         let vel = w.get_ticks::<Velocity>(e).unwrap();
-        assert_eq!(vel.added, Tick::new(2), "new component added at current tick");
+        assert_eq!(
+            vel.added,
+            Tick::new(2),
+            "new component added at current tick"
+        );
         assert_eq!(vel.changed, Tick::new(2));
     }
 
@@ -1788,7 +2360,11 @@ mod tests {
         w.increment_change_tick(); // -> 2
         assert!(w.remove::<Velocity>(e));
         let p = w.get_ticks::<Position>(e).unwrap();
-        assert_eq!(p.added, Tick::new(1), "kept component ticks survive the move");
+        assert_eq!(
+            p.added,
+            Tick::new(1),
+            "kept component ticks survive the move"
+        );
         assert_eq!(p.changed, Tick::new(1));
     }
 
@@ -1797,14 +2373,17 @@ mod tests {
         use crate::change::Tick;
         let mut w = World::new();
         let e = w.spawn(Position(1.0, 1.0)); // added=changed=1
-        // Fast-forward the world tick far past MAX_CHANGE_AGE.
+                                             // Fast-forward the world tick far past MAX_CHANGE_AGE.
         w.set_last_change_tick(Tick::new(1));
         w.change_tick = Tick::new(Tick::MAX_CHANGE_AGE.wrapping_add(100));
         w.check_change_ticks();
         let ticks = w.get_ticks::<Position>(e).unwrap();
         // The stale added/changed ticks are clamped to exactly MAX_CHANGE_AGE old.
         assert_eq!(ticks.added.age_since(w.change_tick()), Tick::MAX_CHANGE_AGE);
-        assert_eq!(ticks.changed.age_since(w.change_tick()), Tick::MAX_CHANGE_AGE);
+        assert_eq!(
+            ticks.changed.age_since(w.change_tick()),
+            Tick::MAX_CHANGE_AGE
+        );
     }
 
     #[test]
@@ -1849,7 +2428,7 @@ mod tests {
     }
 
     /// The archetype id the entity currently lives in.
-    fn arch_of(w: &World, e: Entity) -> crate::archetype::ArchetypeId {
+    fn arch_of(w: &World, e: Entity) -> ArchetypeId {
         w.entities.location(e).unwrap().archetype_id
     }
 
@@ -1979,7 +2558,10 @@ mod tests {
         w.check_change_ticks();
         let ticks = w.get_ticks::<Charge>(e).unwrap();
         assert_eq!(ticks.added.age_since(w.change_tick()), Tick::MAX_CHANGE_AGE);
-        assert_eq!(ticks.changed.age_since(w.change_tick()), Tick::MAX_CHANGE_AGE);
+        assert_eq!(
+            ticks.changed.age_since(w.change_tick()),
+            Tick::MAX_CHANGE_AGE
+        );
     }
 
     // ----- Required components (design §16.1) --------------------------------

@@ -17,10 +17,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::archetype::Archetypes;
+use crate::archetype::{Archetypes, SharedBinding};
 use crate::component::{ComponentId, ComponentSet, StorageType};
 use crate::entity::EntityLocation;
-use crate::storage::SparseSets;
+use crate::storage::{SharedComponents, SparseSets};
 use crate::world::World;
 
 use super::WorldSnapshot;
@@ -32,6 +32,10 @@ pub(super) fn restore(world: &mut World, snapshot: &WorldSnapshot) {
     //    re-seeded by `Archetypes::new`.
     world.archetypes = Archetypes::new();
     world.sparse_sets = SparseSets::new();
+    // Reset the shared-value pools too: restore re-interns every captured shared
+    // value below (`insert_boxed`), so a stale pool would compound reference
+    // counts across restores and leave them wrong afterwards (design §6 生命周期).
+    world.shared_components = SharedComponents::new();
 
     // 2. Reinstate the allocator: exact generations, liveness, and free list.
     //    Every live slot's location is reset to `EMPTY` and re-stamped below.
@@ -64,7 +68,36 @@ pub(super) fn restore(world: &mut World, snapshot: &WorldSnapshot) {
                 .filter(|col| col.storage == StorageType::Table)
                 .map(|col| col.component),
         );
-        let archetype_id = world.archetypes.get_or_create(&table_set, &world.components);
+
+        // Shared components do not fragment the table set (design §6); instead
+        // each captured value is re-interned into this world's shared pools and
+        // the resulting binding re-fragments the archetype. Re-interning equal
+        // values collapses them to one id, so entities that shared a value
+        // before capture land in the same restored archetype.
+        let mut bindings: Vec<SharedBinding> = Vec::new();
+        for &(ci, slot) in plan {
+            let col = &snapshot.columns[ci];
+            if col.storage != StorageType::Shared {
+                continue;
+            }
+            let shared_box = world
+                .components
+                .info(col.component)
+                .expect("registered component")
+                .shared_box_fn()
+                .expect("a shared component has value-boxing glue installed");
+            // SAFETY: `slot < col.len()`; `with_cloned_value` hands a pointer to
+            // a fresh clone of the captured value, and `shared_box` moves that
+            // value out exactly once into the returned box (its contract).
+            let boxed = unsafe { col.with_cloned_value(slot, |ptr| shared_box(ptr as *mut u8)) };
+            let (sid, arc) = world.shared_components.insert_boxed(col.component, boxed);
+            bindings.push((col.component, sid, arc));
+        }
+
+        let archetype_id =
+            world
+                .archetypes
+                .get_or_create_shared(&table_set, &bindings, &world.components);
 
         // Allocate the row, then fill each table column with a fresh clone and
         // its exact ticks.

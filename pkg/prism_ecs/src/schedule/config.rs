@@ -89,13 +89,7 @@ impl SystemConfigs {
     #[inline]
     #[must_use]
     pub fn chained(&self) -> bool {
-        matches!(
-            self,
-            SystemConfigs::Group {
-                chained: true,
-                ..
-            }
-        )
+        matches!(self, SystemConfigs::Group { chained: true, .. })
     }
 
     /// Gate on `condition`. On a leaf this is a per-system condition; on a group
@@ -257,33 +251,89 @@ impl_into_configs_tuple!((C0, M0, v0));
 impl_into_configs_tuple!((C0, M0, v0), (C1, M1, v1));
 impl_into_configs_tuple!((C0, M0, v0), (C1, M1, v1), (C2, M2, v2));
 impl_into_configs_tuple!((C0, M0, v0), (C1, M1, v1), (C2, M2, v2), (C3, M3, v3));
-impl_into_configs_tuple!((C0, M0, v0), (C1, M1, v1), (C2, M2, v2), (C3, M3, v3), (C4, M4, v4));
 impl_into_configs_tuple!(
-    (C0, M0, v0), (C1, M1, v1), (C2, M2, v2), (C3, M3, v3), (C4, M4, v4), (C5, M5, v5)
+    (C0, M0, v0),
+    (C1, M1, v1),
+    (C2, M2, v2),
+    (C3, M3, v3),
+    (C4, M4, v4)
 );
 impl_into_configs_tuple!(
-    (C0, M0, v0), (C1, M1, v1), (C2, M2, v2), (C3, M3, v3), (C4, M4, v4), (C5, M5, v5),
+    (C0, M0, v0),
+    (C1, M1, v1),
+    (C2, M2, v2),
+    (C3, M3, v3),
+    (C4, M4, v4),
+    (C5, M5, v5)
+);
+impl_into_configs_tuple!(
+    (C0, M0, v0),
+    (C1, M1, v1),
+    (C2, M2, v2),
+    (C3, M3, v3),
+    (C4, M4, v4),
+    (C5, M5, v5),
     (C6, M6, v6)
 );
 impl_into_configs_tuple!(
-    (C0, M0, v0), (C1, M1, v1), (C2, M2, v2), (C3, M3, v3), (C4, M4, v4), (C5, M5, v5),
-    (C6, M6, v6), (C7, M7, v7)
+    (C0, M0, v0),
+    (C1, M1, v1),
+    (C2, M2, v2),
+    (C3, M3, v3),
+    (C4, M4, v4),
+    (C5, M5, v5),
+    (C6, M6, v6),
+    (C7, M7, v7)
 );
 impl_into_configs_tuple!(
-    (C0, M0, v0), (C1, M1, v1), (C2, M2, v2), (C3, M3, v3), (C4, M4, v4), (C5, M5, v5),
-    (C6, M6, v6), (C7, M7, v7), (C8, M8, v8)
+    (C0, M0, v0),
+    (C1, M1, v1),
+    (C2, M2, v2),
+    (C3, M3, v3),
+    (C4, M4, v4),
+    (C5, M5, v5),
+    (C6, M6, v6),
+    (C7, M7, v7),
+    (C8, M8, v8)
 );
 impl_into_configs_tuple!(
-    (C0, M0, v0), (C1, M1, v1), (C2, M2, v2), (C3, M3, v3), (C4, M4, v4), (C5, M5, v5),
-    (C6, M6, v6), (C7, M7, v7), (C8, M8, v8), (C9, M9, v9)
+    (C0, M0, v0),
+    (C1, M1, v1),
+    (C2, M2, v2),
+    (C3, M3, v3),
+    (C4, M4, v4),
+    (C5, M5, v5),
+    (C6, M6, v6),
+    (C7, M7, v7),
+    (C8, M8, v8),
+    (C9, M9, v9)
 );
 impl_into_configs_tuple!(
-    (C0, M0, v0), (C1, M1, v1), (C2, M2, v2), (C3, M3, v3), (C4, M4, v4), (C5, M5, v5),
-    (C6, M6, v6), (C7, M7, v7), (C8, M8, v8), (C9, M9, v9), (C10, M10, v10)
+    (C0, M0, v0),
+    (C1, M1, v1),
+    (C2, M2, v2),
+    (C3, M3, v3),
+    (C4, M4, v4),
+    (C5, M5, v5),
+    (C6, M6, v6),
+    (C7, M7, v7),
+    (C8, M8, v8),
+    (C9, M9, v9),
+    (C10, M10, v10)
 );
 impl_into_configs_tuple!(
-    (C0, M0, v0), (C1, M1, v1), (C2, M2, v2), (C3, M3, v3), (C4, M4, v4), (C5, M5, v5),
-    (C6, M6, v6), (C7, M7, v7), (C8, M8, v8), (C9, M9, v9), (C10, M10, v10), (C11, M11, v11)
+    (C0, M0, v0),
+    (C1, M1, v1),
+    (C2, M2, v2),
+    (C3, M3, v3),
+    (C4, M4, v4),
+    (C5, M5, v5),
+    (C6, M6, v6),
+    (C7, M7, v7),
+    (C8, M8, v8),
+    (C9, M9, v9),
+    (C10, M10, v10),
+    (C11, M11, v11)
 );
 
 /// Shared ordering/condition metadata for a [`SystemSet`], registered via

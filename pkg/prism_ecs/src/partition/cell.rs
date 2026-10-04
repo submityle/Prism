@@ -80,7 +80,11 @@ impl CellCoord {
         let dy = (self.y - other.y).abs();
         let dz = (self.z - other.z).abs();
         let m = if dx > dy { dx } else { dy };
-        if m > dz { m } else { dz }
+        if m > dz {
+            m
+        } else {
+            dz
+        }
     }
 
     /// Manhattan (taxicab) distance to `other`: the sum of the per-axis
@@ -239,11 +243,8 @@ impl CellStreamer {
             for dz in -load_r..=load_r {
                 for dy in -load_r..=load_r {
                     for dx in -load_r..=load_r {
-                        let coord = CellCoord::new(
-                            interest.x + dx,
-                            interest.y + dy,
-                            interest.z + dz,
-                        );
+                        let coord =
+                            CellCoord::new(interest.x + dx, interest.y + dy, interest.z + dz);
                         desired.insert(coord, ());
                     }
                 }
@@ -269,9 +270,7 @@ impl CellStreamer {
             if state == CellState::Unloading {
                 continue; // already in flight; don't re-emit.
             }
-            let kept = interests
-                .iter()
-                .any(|i| i.ring_distance(coord) <= unload_r);
+            let kept = interests.iter().any(|i| i.ring_distance(coord) <= unload_r);
             if !kept {
                 evicting.push(coord);
             }
@@ -343,11 +342,7 @@ impl CellStreamer {
 /// Sorts a coordinate list by `(x, y, z)` for deterministic deltas.
 #[inline]
 fn sort_coords(coords: &mut [CellCoord]) {
-    coords.sort_unstable_by(|a, b| {
-        a.x.cmp(&b.x)
-            .then(a.y.cmp(&b.y))
-            .then(a.z.cmp(&b.z))
-    });
+    coords.sort_unstable_by(|a, b| a.x.cmp(&b.x).then(a.y.cmp(&b.y)).then(a.z.cmp(&b.z)));
 }
 
 #[cfg(test)]
@@ -555,9 +550,7 @@ mod tests {
         assert_eq!(delta2.to_load.len(), 36);
         // No coordinate appears twice.
         let mut seen = delta2.to_load.clone();
-        seen.sort_unstable_by(|p, q| {
-            p.x.cmp(&q.x).then(p.y.cmp(&q.y)).then(p.z.cmp(&q.z))
-        });
+        seen.sort_unstable_by(|p, q| p.x.cmp(&q.x).then(p.y.cmp(&q.y)).then(p.z.cmp(&q.z)));
         seen.dedup();
         assert_eq!(seen.len(), delta2.to_load.len());
     }

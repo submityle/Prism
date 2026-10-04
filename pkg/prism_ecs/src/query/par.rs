@@ -94,7 +94,11 @@ fn build_batches(world: &World, archetypes: &[ArchetypeId], batch_size: usize) -
         let mut start = 0;
         while start < len {
             let end = (start + batch_size).min(len);
-            batches.push(Batch { archetype, start, end });
+            batches.push(Batch {
+                archetype,
+                start,
+                end,
+            });
             start = end;
         }
     }

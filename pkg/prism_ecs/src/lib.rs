@@ -75,9 +75,7 @@ pub mod world;
 pub mod prelude {
     pub use crate::blob::{BlobHandle, BlobStore};
     pub use crate::bundle::Bundle;
-    pub use crate::change::{
-        ComponentTicks, DetectChanges, DetectChangesMut, Mut, Ref, Tick,
-    };
+    pub use crate::change::{ComponentTicks, DetectChanges, DetectChangesMut, Mut, Ref, Tick};
     pub use crate::command::{CommandQueue, Commands};
     pub use crate::component::Component;
     pub use crate::component_hooks::{ComponentHook, ComponentHooks, HookContext};
@@ -90,30 +88,26 @@ pub mod prelude {
     pub use crate::partition::cell::{
         CellCoord, CellState, CellStreamer, StreamingDelta, WorldPartitionCell,
     };
-    pub use crate::partition::dormant::{Dormant, DormancySet};
-    pub use crate::partition::floating_origin::{
-        FloatingOrigin, GridCell, LocalPos, WorldPos,
-    };
+    pub use crate::partition::dormant::{DormancySet, Dormant};
+    pub use crate::partition::floating_origin::{FloatingOrigin, GridCell, LocalPos, WorldPos};
     pub use crate::partition::lod::{
         distance_sq, LodBand, LodDecision, LodLevel, LodSchedule, OutOfRange,
     };
     pub use crate::prefab::IsA;
-    pub use crate::reaction::{NodeId, ReactionGraph};
-    pub use crate::resource::{Resource, ResourceId, Resources};
     pub use crate::query::{Added, Changed, Or, With, Without};
+    pub use crate::reaction::{NodeId, ReactionGraph};
     pub use crate::relation::{
         CascadeEdge, CascadePlan, CleanupPolicy, Pair, PairKey, RelationId, RelationIndex,
         RelationKind, RelationTarget, Relations, TargetId,
     };
+    pub use crate::resource::{Resource, ResourceId, Resources};
     pub use crate::schedule::{
         apply_state_transition, in_state, resource_equals, resource_exists, run_once,
         IntoSystemConfigs, IntoSystemConfigs as IntoScheduleConfigs, NextState, OnEnter, OnExit,
-        Phase, Schedule, ScheduleLabel, Schedules,
-        SetConfig, State, States, SystemConfigs, SystemSet,
+        Phase, Schedule, ScheduleLabel, Schedules, SetConfig, State, States, SystemConfigs,
+        SystemSet,
     };
-    pub use crate::system::{
-        IntoSystem, Local, Query, Res, ResMut, System, SystemParam,
-    };
+    pub use crate::system::{IntoSystem, Local, Query, Res, ResMut, System, SystemParam};
     pub use crate::world::snapshot::{FnvHasher, SnapshotDelta, SnapshotRing, WorldSnapshot};
     pub use crate::world::{EntityRef, World};
     // Derive macros. These live in the macro namespace and coexist with the

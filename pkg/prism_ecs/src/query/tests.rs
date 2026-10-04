@@ -179,7 +179,11 @@ fn incremental_cache_sees_archetypes_created_after_first_iter() {
     // New archetype {Position, Velocity} did not exist at the first refresh.
     w.spawn((Position(2, 0), Velocity(0, 0)));
     w.spawn((Position(3, 0), Velocity(0, 0)));
-    assert_eq!(state.iter(&w).count(), 3, "cache picks up the new archetype");
+    assert_eq!(
+        state.iter(&w).count(),
+        3,
+        "cache picks up the new archetype"
+    );
 
     // Another new archetype {Position, Tag}.
     w.spawn((Position(4, 0), Tag));

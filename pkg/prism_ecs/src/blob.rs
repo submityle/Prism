@@ -207,7 +207,10 @@ impl BlobStore {
                     && entry.bytes() == bytes
                 {
                     entry.refcount += 1;
-                    return BlobHandle { index, generation: slot.generation };
+                    return BlobHandle {
+                        index,
+                        generation: slot.generation,
+                    };
                 }
             }
         }
@@ -224,15 +227,21 @@ impl BlobStore {
             slot.entry = Some(entry);
             index
         } else {
-            let index = u32::try_from(self.slots.len())
-                .expect("BlobStore slot count exceeds u32::MAX");
-            self.slots.push(Slot { entry: Some(entry), generation: 0 });
+            let index =
+                u32::try_from(self.slots.len()).expect("BlobStore slot count exceeds u32::MAX");
+            self.slots.push(Slot {
+                entry: Some(entry),
+                generation: 0,
+            });
             index
         };
 
         self.by_hash.entry(hash).or_default().push(index);
         self.live += 1;
-        BlobHandle { index, generation: self.slots[index as usize].generation }
+        BlobHandle {
+            index,
+            generation: self.slots[index as usize].generation,
+        }
     }
 
     /// Insert the raw bytes of a plain `Copy` value `T`, deduplicated by
@@ -280,7 +289,11 @@ impl BlobStore {
     /// handle, mirroring an `Rc::clone`-style call site. Returns `None` if the
     /// handle is stale/invalid.
     pub fn clone_handle(&mut self, handle: BlobHandle) -> Option<BlobHandle> {
-        if self.retain(handle) { Some(handle) } else { None }
+        if self.retain(handle) {
+            Some(handle)
+        } else {
+            None
+        }
     }
 
     /// Remove one reference to a blob.
@@ -525,7 +538,11 @@ mod tests {
         }
 
         let mut store = BlobStore::new();
-        let value = Pod { a: 7, b: 42, c: 0x0123_4567_89ab_cdef };
+        let value = Pod {
+            a: 7,
+            b: 42,
+            c: 0x0123_4567_89ab_cdef,
+        };
         let h = store.insert_pod(&value);
         assert_eq!(store.get_pod::<Pod>(h), Some(&value));
         assert_eq!(store.len(h), Some(size_of::<Pod>()));

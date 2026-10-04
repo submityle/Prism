@@ -13,10 +13,11 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Layout;
-use core::any::{TypeId, type_name};
+use core::any::{type_name, TypeId};
 
 use crate::collections::HashMap;
 use crate::component_hooks::ComponentHooks;
+use crate::storage::SharedValue;
 
 /// A type that can be stored on entities as a component.
 ///
@@ -29,6 +30,16 @@ pub trait Component: Send + Sync + 'static {
     /// [`StorageType::Table`]; override to [`StorageType::SparseSet`] for
     /// components that are added/removed extremely frequently (design §6).
     const STORAGE: StorageType = StorageType::Table;
+
+    /// Install any storage-specific glue for this component into `components`
+    /// immediately after it is first registered under `id` (design §6). The
+    /// default is a no-op; shared components (whose `STORAGE` is
+    /// [`StorageType::Shared`]) override this to register their
+    /// [`SharedBoxFn`] value-boxing glue via [`Components::set_shared_box`] so
+    /// the structural code can intern their values. Called exactly once, in the
+    /// new-id branch of [`Components::register`].
+    #[inline]
+    fn install_storage_glue(_components: &mut Components, _id: ComponentId) {}
 }
 
 /// How a component type is physically stored.
@@ -46,6 +57,16 @@ pub enum StorageType {
     /// `contains`, change detection, and every query path (fetch, iter, filter,
     /// `par_iter`) route sparse components through that registry.
     SparseSet,
+    /// Unity-style shared component: the value is de-duplicated into a single
+    /// interned copy and used as a *batch key* that splits the archetype, so
+    /// every entity sharing one value is grouped into the same archetype
+    /// variant (design §6, §15 GPU 批次键). The value is immutable through
+    /// queries — it is a key, not per-entity data — so only shared `&T` /
+    /// `Option<&T>` reads and `With`/`Without` membership are available;
+    /// mutable or change-tracked access (`&mut T`, `Ref`, `Added`, `Changed`)
+    /// is rejected at query construction. Changing an entity's shared value is
+    /// a structural move to the archetype variant for the new value.
+    Shared,
 }
 
 /// A dense, stable identifier for a registered component type within one
@@ -111,6 +132,20 @@ pub type SnapshotHashFn = unsafe fn(ptr: *const u8, hasher: &mut dyn core::hash:
 /// cheaply clone it into flattened closures.
 pub type RequiredCtor = Arc<dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync>;
 
+/// Type-erased glue that moves a shared component value out of a bundle pointer
+/// and boxes it as a [`SharedValue`] for interning (design §6 SharedComponent).
+///
+/// Built by [`shared_box_of`] and installed on a component's
+/// [`ComponentInfo`] via [`Components::set_shared_box`]; the structural spawn /
+/// insert paths call it to turn a just-written bundle pointer into an owned,
+/// de-duplicatable value for the shared value pool.
+///
+/// # Safety
+/// `ptr` must point at a valid, initialized value of the component type this
+/// glue was created for; the value is moved out (read by value), so the source
+/// must be treated as moved-from and never dropped again by the caller.
+pub type SharedBoxFn = unsafe fn(ptr: *mut u8) -> Box<dyn SharedValue>;
+
 /// One entry in a component's required-components set (design §16.1): the id of
 /// a component to auto-insert whenever the requiring component is inserted, and
 /// the constructor that supplies its default value.
@@ -151,6 +186,9 @@ pub struct ComponentInfo {
     hooks: ComponentHooks,
     /// Flattened (transitive, first-wins) required components (design §16.1).
     required: Vec<RequiredComponent>,
+    /// Type-erased shared-value box glue, present once a shared component
+    /// installs it (design §6 SharedComponent), otherwise `None`.
+    shared_box: Option<SharedBoxFn>,
 }
 
 impl ComponentInfo {
@@ -225,6 +263,14 @@ impl ComponentInfo {
     pub fn required(&self) -> &[RequiredComponent] {
         &self.required
     }
+
+    /// The type-erased shared-value box glue, present once a shared component
+    /// has installed it via [`Component::install_storage_glue`] /
+    /// [`Components::set_shared_box`] (design §6), otherwise `None`.
+    #[inline]
+    pub fn shared_box_fn(&self) -> Option<SharedBoxFn> {
+        self.shared_box
+    }
 }
 
 /// Build an [`unsafe`] drop function for `T`, or `None` if `T` needs no drop.
@@ -276,6 +322,27 @@ fn snapshot_hash_fn_of<T: core::hash::Hash>() -> SnapshotHashFn {
         value.hash(&mut HasherShim(hasher));
     }
     hash_ptr::<T>
+}
+
+/// Build type-erased [`SharedBoxFn`] glue for a shared component `T` (design
+/// §6). Used by `#[derive(Component)]` with `storage = "shared"` and by manual
+/// shared-component impls from [`Component::install_storage_glue`].
+pub fn shared_box_of<T: Send + Sync + Eq + core::hash::Hash + 'static>() -> SharedBoxFn {
+    /// Move the `T` at `ptr` out by value and box it as a `dyn SharedValue`.
+    ///
+    /// # Safety
+    /// Honors the [`SharedBoxFn`] contract: `ptr` points at a valid,
+    /// initialized `T` that is moved out and must not be used afterwards.
+    unsafe fn box_ptr<T: Send + Sync + Eq + core::hash::Hash + 'static>(
+        ptr: *mut u8,
+    ) -> Box<dyn SharedValue> {
+        // SAFETY: `ptr` points at a valid, initialized `T` (caller contract);
+        // we read it out by value, taking ownership, and the caller treats the
+        // source bytes as moved-from.
+        let value: T = unsafe { ptr.cast::<T>().read() };
+        Box::new(value)
+    }
+    box_ptr::<T>
 }
 
 /// Adapts a `&mut dyn Hasher` so `Hash::hash` (generic over `H: Hasher`) can
@@ -357,8 +424,10 @@ impl Components {
             snapshot_hash: None,
             hooks: ComponentHooks::new(),
             required: Vec::new(),
+            shared_box: None,
         });
         self.by_type.insert(type_id, id);
+        T::install_storage_glue(self, id);
         id
     }
 
@@ -378,9 +447,7 @@ impl Components {
     /// [`state_hash`](crate::world::snapshot::WorldSnapshot::state_hash) (design
     /// §14). Re-calling is idempotent and refreshes the glue. Returns the
     /// component id.
-    pub fn register_hashable<T: Component + Clone + core::hash::Hash>(
-        &mut self,
-    ) -> ComponentId {
+    pub fn register_hashable<T: Component + Clone + core::hash::Hash>(&mut self) -> ComponentId {
         let id = self.register_cloneable::<T>();
         let info = &mut self.infos[id.index() as usize];
         info.snapshot_hash = Some(snapshot_hash_fn_of::<T>());
@@ -395,6 +462,22 @@ impl Components {
         match self.infos.get_mut(id.index() as usize) {
             Some(info) => {
                 info.clone = Some(clone);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Attach the type-erased shared-value box glue to an already-registered
+    /// component `id` (design §6 SharedComponent). Returns `false` if `id` is
+    /// not registered. Normally called from
+    /// [`Component::install_storage_glue`] for components whose `STORAGE` is
+    /// [`StorageType::Shared`], via [`shared_box_of`]; also usable for
+    /// dynamically-registered shared components (design §16.2).
+    pub fn set_shared_box(&mut self, id: ComponentId, shared_box: SharedBoxFn) -> bool {
+        match self.infos.get_mut(id.index() as usize) {
+            Some(info) => {
+                info.shared_box = Some(shared_box);
                 true
             }
             None => false,
@@ -426,6 +509,7 @@ impl Components {
             snapshot_hash: None,
             hooks: ComponentHooks::new(),
             required: Vec::new(),
+            shared_box: None,
         });
         id
     }
@@ -477,10 +561,7 @@ impl Components {
         if let Some(existing) = edges.iter_mut().find(|e| e.id == required) {
             existing.ctor = ctor;
         } else {
-            edges.push(RequiredComponent {
-                id: required,
-                ctor,
-            });
+            edges.push(RequiredComponent { id: required, ctor });
         }
         self.required_registered = true;
         self.recompute_required_closures();
@@ -673,7 +754,11 @@ mod tests {
         let added = base.with(ComponentId::new(2));
         assert_eq!(
             added.ids(),
-            &[ComponentId::new(1), ComponentId::new(2), ComponentId::new(3)]
+            &[
+                ComponentId::new(1),
+                ComponentId::new(2),
+                ComponentId::new(3)
+            ]
         );
         let removed = added.without(ComponentId::new(3));
         assert_eq!(removed.ids(), &[ComponentId::new(1), ComponentId::new(2)]);

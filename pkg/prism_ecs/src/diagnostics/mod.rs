@@ -26,8 +26,8 @@ pub mod time_travel;
 
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
-pub use profiler::{FlameGraph, SpanNode, SystemInstrument};
 #[cfg(feature = "std")]
 pub use profiler::SpanRecorder;
+pub use profiler::{FlameGraph, SpanNode, SystemInstrument};
 #[cfg(feature = "std")]
 pub use time_travel::TimeTravel;

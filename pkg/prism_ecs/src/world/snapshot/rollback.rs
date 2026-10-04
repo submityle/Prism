@@ -69,7 +69,10 @@ impl SnapshotRing {
 
     /// Borrow the snapshot stored for `frame`, if still retained.
     pub fn get(&self, frame: u64) -> Option<&WorldSnapshot> {
-        self.frames.iter().find(|(f, _)| *f == frame).map(|(_, s)| s)
+        self.frames
+            .iter()
+            .find(|(f, _)| *f == frame)
+            .map(|(_, s)| s)
     }
 
     /// Whether `frame` is still retained.

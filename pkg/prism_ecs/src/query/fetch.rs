@@ -40,7 +40,9 @@ use crate::change::{Mut, Ref, Tick};
 use crate::component::{Component, ComponentId, Components, StorageType};
 use crate::entity::Entity;
 use crate::query::access::Access;
-use crate::storage::{Column, ComponentSparseSet, SparseSets};
+use alloc::sync::Arc;
+
+use crate::storage::{Column, ComponentSparseSet, SharedValue, SparseSets};
 
 /// Resolved per-archetype storage cursor for one component term, abstracting
 /// over table-backed and sparse-backed storage (design §6).
@@ -54,6 +56,12 @@ pub enum StorageFetch<'w> {
     /// (its set was never allocated); otherwise membership is still resolved
     /// per entity by [`QueryData::filter_fetch`].
     Sparse(Option<&'w ComponentSparseSet>),
+    /// Shared-backed binding (design §6 SharedComponent): the archetype-level
+    /// canonical [`Arc`] every entity here shares, or `None` for an
+    /// `Option<&T>` term in an archetype that lacks the binding. A shared
+    /// component is immutable and archetype-wide, so there is no per-row
+    /// cursor — [`QueryData::fetch`] downcasts the same handle for every row.
+    Shared(Option<&'w Arc<dyn SharedValue>>),
 }
 
 /// A query term describing the typed data read from each matched row.
@@ -163,6 +171,9 @@ unsafe impl<T: Component> QueryData for &T {
             // entities that have one; membership is resolved per row below.
             StorageType::SparseSet => true,
             StorageType::Table => archetype.contains(*state),
+            // A shared component splits archetypes by value (design §6); its
+            // presence is the per-archetype binding, resolved once here.
+            StorageType::Shared => archetype.shared_binding(*state).is_some(),
         }
     }
 
@@ -185,6 +196,11 @@ unsafe impl<T: Component> QueryData for &T {
                     .expect("matches() guaranteed the column exists"),
             )),
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
+            StorageType::Shared => StorageFetch::Shared(Some(
+                archetype
+                    .shared_arc(*state)
+                    .expect("matches() guaranteed the shared binding exists"),
+            )),
         }
     }
 
@@ -194,6 +210,8 @@ unsafe impl<T: Component> QueryData for &T {
             StorageFetch::Table(_) => true,
             // Sparse term is present only where the entity has a dense row.
             StorageFetch::Sparse(set) => set.is_some_and(|s| s.contains(entity)),
+            // Shared presence is archetype-wide (`matches` already decided it).
+            StorageFetch::Shared(_) => true,
         }
     }
 
@@ -209,7 +227,13 @@ unsafe impl<T: Component> QueryData for &T {
             // access cannot alias a mutable borrow.
             StorageFetch::Sparse(Some(set)) => unsafe { set.get::<T>(entity) }
                 .expect("filter_fetch gate guaranteed the sparse component is present"),
-            StorageFetch::Table(None) | StorageFetch::Sparse(None) => {
+            // The shared value is interned once and immutable; downcast the
+            // archetype-wide handle to the registered type `T`.
+            StorageFetch::Shared(Some(arc)) => arc
+                .as_any()
+                .downcast_ref::<T>()
+                .expect("shared binding stores the registered component type"),
+            StorageFetch::Table(None) | StorageFetch::Sparse(None) | StorageFetch::Shared(None) => {
                 unreachable!("required `&T` fetched a row without the component")
             }
         }
@@ -228,6 +252,10 @@ unsafe impl<T: Component> QueryData for &mut T {
     type Fetch<'w> = (StorageFetch<'w>, Tick, Tick);
 
     fn init_state(components: &mut Components) -> Self::State {
+        assert!(
+            T::STORAGE != StorageType::Shared,
+            "a shared component (design §6) is immutable and archetype-wide; it supports only `&T`/`Option<&T>`/`With`/`Without`, not mutable or change-detecting access"
+        );
         components.register::<T>()
     }
 
@@ -235,6 +263,8 @@ unsafe impl<T: Component> QueryData for &mut T {
         match T::STORAGE {
             StorageType::SparseSet => true,
             StorageType::Table => archetype.contains(*state),
+            // `init_state` already rejected a shared component for this term.
+            StorageType::Shared => unreachable!("shared storage rejected at init_state"),
         }
     }
 
@@ -257,6 +287,8 @@ unsafe impl<T: Component> QueryData for &mut T {
                     .expect("matches() guaranteed the column exists"),
             )),
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
+            // `init_state` already rejected a shared component for this term.
+            StorageType::Shared => unreachable!("shared storage rejected at init_state"),
         };
         (storage, last_run, this_run)
     }
@@ -265,6 +297,8 @@ unsafe impl<T: Component> QueryData for &mut T {
         match fetch.0 {
             StorageFetch::Table(_) => true,
             StorageFetch::Sparse(set) => set.is_some_and(|s| s.contains(entity)),
+            // `init_state` already rejected a shared component for this term.
+            StorageFetch::Shared(_) => unreachable!("shared storage rejected at init_state"),
         }
     }
 
@@ -287,7 +321,14 @@ unsafe impl<T: Component> QueryData for &mut T {
                 // written (with `this_run`) by `Mut`, never turned into an
                 // aliasing `&mut`.
                 let chunk_changed = unsafe { col.chunk_changed_ptr(row) };
-                Mut::new(value, changed, Some(chunk_changed), added, last_run, this_run)
+                Mut::new(
+                    value,
+                    changed,
+                    Some(chunk_changed),
+                    added,
+                    last_run,
+                    this_run,
+                )
             }
             StorageFetch::Sparse(Some(set)) => {
                 // SAFETY: `filter_fetch` admitted this row only when the set
@@ -314,6 +355,8 @@ unsafe impl<T: Component> QueryData for &mut T {
             StorageFetch::Table(None) | StorageFetch::Sparse(None) => {
                 unreachable!("required `&mut T` fetched a row without the component")
             }
+            // `init_state` already rejected a shared component for this term.
+            StorageFetch::Shared(_) => unreachable!("shared storage rejected at init_state"),
         }
     }
 }
@@ -381,6 +424,7 @@ unsafe impl<T: Component> QueryData for Option<&T> {
         match T::STORAGE {
             StorageType::Table => StorageFetch::Table(archetype.table().column(*state)),
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
+            StorageType::Shared => StorageFetch::Shared(archetype.shared_arc(*state)),
         }
     }
 
@@ -393,6 +437,13 @@ unsafe impl<T: Component> QueryData for Option<&T> {
             // `None` for an absent entity. Shared access cannot alias a mutable
             // borrow.
             StorageFetch::Sparse(opt) => opt.and_then(|set| unsafe { set.get::<T>(entity) }),
+            // Absence surfaces as `None`; a present binding downcasts the
+            // immutable archetype-wide handle to `T` (design §6).
+            StorageFetch::Shared(opt) => opt.map(|arc| {
+                arc.as_any()
+                    .downcast_ref::<T>()
+                    .expect("shared binding stores the registered component type")
+            }),
         }
     }
 }
@@ -405,6 +456,10 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
     type Fetch<'w> = (StorageFetch<'w>, Tick, Tick);
 
     fn init_state(components: &mut Components) -> Self::State {
+        assert!(
+            T::STORAGE != StorageType::Shared,
+            "a shared component (design §6) is immutable and archetype-wide; it supports only `&T`/`Option<&T>`/`With`/`Without`, not mutable or change-detecting access"
+        );
         components.register::<T>()
     }
 
@@ -426,6 +481,8 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
         let storage = match T::STORAGE {
             StorageType::Table => StorageFetch::Table(archetype.table().column(*state)),
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
+            // `init_state` already rejected a shared component for this term.
+            StorageType::Shared => unreachable!("shared storage rejected at init_state"),
         };
         (storage, last_run, this_run)
     }
@@ -447,7 +504,14 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
                 // written (with `this_run`) by `Mut`, never turned into an
                 // aliasing `&mut`.
                 let chunk_changed = unsafe { col.chunk_changed_ptr(row) };
-                Mut::new(value, changed, Some(chunk_changed), added, last_run, this_run)
+                Mut::new(
+                    value,
+                    changed,
+                    Some(chunk_changed),
+                    added,
+                    last_run,
+                    this_run,
+                )
             }),
             StorageFetch::Sparse(opt) => opt.and_then(|set| {
                 // SAFETY: `get_ptr` validates membership and returns `None` for
@@ -470,6 +534,8 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
                 // A sparse set has no coarse chunk-version layer (design §6).
                 Some(Mut::new(value, changed, None, added, last_run, this_run))
             }),
+            // `init_state` already rejected a shared component for this term.
+            StorageFetch::Shared(_) => unreachable!("shared storage rejected at init_state"),
         }
     }
 }
@@ -486,6 +552,10 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
     type Fetch<'w> = (StorageFetch<'w>, Tick, Tick);
 
     fn init_state(components: &mut Components) -> Self::State {
+        assert!(
+            T::STORAGE != StorageType::Shared,
+            "a shared component (design §6) is immutable and archetype-wide; it supports only `&T`/`Option<&T>`/`With`/`Without`, not mutable or change-detecting access"
+        );
         components.register::<T>()
     }
 
@@ -493,6 +563,8 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
         match T::STORAGE {
             StorageType::SparseSet => true,
             StorageType::Table => archetype.contains(*state),
+            // `init_state` already rejected a shared component for this term.
+            StorageType::Shared => unreachable!("shared storage rejected at init_state"),
         }
     }
 
@@ -515,6 +587,8 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
                     .expect("matches() guaranteed the column exists"),
             )),
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
+            // `init_state` already rejected a shared component for this term.
+            StorageType::Shared => unreachable!("shared storage rejected at init_state"),
         };
         (storage, last_run, this_run)
     }
@@ -523,6 +597,8 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
         match fetch.0 {
             StorageFetch::Table(_) => true,
             StorageFetch::Sparse(set) => set.is_some_and(|s| s.contains(entity)),
+            // `init_state` already rejected a shared component for this term.
+            StorageFetch::Shared(_) => unreachable!("shared storage rejected at init_state"),
         }
     }
 
@@ -561,6 +637,8 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
             StorageFetch::Table(None) | StorageFetch::Sparse(None) => {
                 unreachable!("required `Ref<T>` fetched a row without the component")
             }
+            // `init_state` already rejected a shared component for this term.
+            StorageFetch::Shared(_) => unreachable!("shared storage rejected at init_state"),
         }
     }
 }

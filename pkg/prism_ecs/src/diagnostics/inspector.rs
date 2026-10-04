@@ -139,12 +139,18 @@ impl WorldReport {
 
     /// Total allocated-but-unoccupied rows across every archetype.
     pub fn total_free_slots(&self) -> usize {
-        self.archetypes.iter().map(|a| a.occupancy.free_slots()).sum()
+        self.archetypes
+            .iter()
+            .map(|a| a.occupancy.free_slots())
+            .sum()
     }
 
     /// Total allocated chunks across every archetype.
     pub fn total_chunks(&self) -> usize {
-        self.archetypes.iter().map(|a| a.occupancy.chunk_count).sum()
+        self.archetypes
+            .iter()
+            .map(|a| a.occupancy.chunk_count)
+            .sum()
     }
 
     /// Fraction of allocated row capacity that is live across the whole world,

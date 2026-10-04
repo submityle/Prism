@@ -43,7 +43,10 @@ fn fresh() -> World {
 fn systems_run_in_insertion_order() {
     let mut world = fresh();
     let mut schedule = Schedule::new();
-    schedule.add_systems(push_a).add_systems(push_b).add_systems(push_c);
+    schedule
+        .add_systems(push_a)
+        .add_systems(push_b)
+        .add_systems(push_c);
     schedule.run(&mut world);
     assert_eq!(world.resource::<Log>().0, alloc::vec![1, 2, 3]);
 }
@@ -113,7 +116,6 @@ fn run_once_fires_exactly_once() {
         "run_once must gate every run after the first"
     );
 }
-
 
 /// A user-defined [`SystemSet`] label for ordering/condition tests.
 struct Physics;
@@ -199,14 +201,21 @@ fn conflicting_writers_without_order_are_ambiguous() {
     schedule.add_systems(push_b);
 
     let ambiguities = schedule.ambiguities(&mut world);
-    assert_eq!(ambiguities.len(), 1, "one unordered write/write pair expected");
+    assert_eq!(
+        ambiguities.len(),
+        1,
+        "one unordered write/write pair expected"
+    );
     let pair = &ambiguities.pairs()[0];
     assert!(!pair.whole_world, "neither system is exclusive");
     assert!(
         !pair.resources.is_empty(),
         "the conflict must name the shared Log resource"
     );
-    assert!(pair.components.is_empty(), "the systems touch no components");
+    assert!(
+        pair.components.is_empty(),
+        "the systems touch no components"
+    );
 }
 
 #[test]

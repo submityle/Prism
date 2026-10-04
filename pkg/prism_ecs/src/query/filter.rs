@@ -164,6 +164,9 @@ unsafe impl<T: Component> QueryFilter for With<T> {
             // per-entity: admit the archetype and resolve membership per row.
             StorageType::SparseSet => true,
             StorageType::Table => archetype.contains(*state),
+            // A shared component splits archetypes by value (design §6); its
+            // presence is the archetype-level binding.
+            StorageType::Shared => archetype.shared_binding(*state).is_some(),
         }
     }
 
@@ -179,6 +182,10 @@ unsafe impl<T: Component> QueryFilter for With<T> {
         match T::STORAGE {
             StorageType::Table => MembershipFetch::Table(archetype.contains(*state)),
             StorageType::SparseSet => MembershipFetch::Sparse(sparse_sets.get(*state)),
+            // Shared presence is archetype-wide: resolve the verdict once.
+            StorageType::Shared => {
+                MembershipFetch::Table(archetype.shared_binding(*state).is_some())
+            }
         }
     }
 
@@ -208,6 +215,9 @@ unsafe impl<T: Component> QueryFilter for Without<T> {
             // archetype, so admit it and resolve the negation per row.
             StorageType::SparseSet => true,
             StorageType::Table => !archetype.contains(*state),
+            // A shared component splits archetypes by value (design §6); absence
+            // is the archetype-level lack of a binding.
+            StorageType::Shared => archetype.shared_binding(*state).is_none(),
         }
     }
 
@@ -223,6 +233,10 @@ unsafe impl<T: Component> QueryFilter for Without<T> {
         match T::STORAGE {
             StorageType::Table => MembershipFetch::Table(!archetype.contains(*state)),
             StorageType::SparseSet => MembershipFetch::Sparse(sparse_sets.get(*state)),
+            // Shared absence is archetype-wide: resolve the verdict once.
+            StorageType::Shared => {
+                MembershipFetch::Table(archetype.shared_binding(*state).is_none())
+            }
         }
     }
 
@@ -244,6 +258,10 @@ unsafe impl<T: Component> QueryFilter for Added<T> {
     type Fetch<'w> = ChangeFilterFetch<'w>;
 
     fn init_state(components: &mut Components) -> Self::State {
+        assert!(
+            T::STORAGE != StorageType::Shared,
+            "a shared component (design §6) is immutable and archetype-wide, so it is never `added` or `changed` per entity; change-detection filters do not support shared storage"
+        );
         components.register::<T>()
     }
 
@@ -251,6 +269,8 @@ unsafe impl<T: Component> QueryFilter for Added<T> {
         match T::STORAGE {
             StorageType::SparseSet => true,
             StorageType::Table => archetype.contains(*state),
+            // `init_state` already rejected a shared component for this filter.
+            StorageType::Shared => unreachable!("shared storage rejected at init_state"),
         }
     }
 
@@ -275,6 +295,8 @@ unsafe impl<T: Component> QueryFilter for Added<T> {
             StorageType::SparseSet => {
                 ChangeFilterFetch::Sparse(sparse_sets.get(*state), last_run, this_run)
             }
+            // `init_state` already rejected a shared component for this filter.
+            StorageType::Shared => unreachable!("shared storage rejected at init_state"),
         }
     }
 
@@ -301,6 +323,10 @@ unsafe impl<T: Component> QueryFilter for Changed<T> {
     type Fetch<'w> = ChangeFilterFetch<'w>;
 
     fn init_state(components: &mut Components) -> Self::State {
+        assert!(
+            T::STORAGE != StorageType::Shared,
+            "a shared component (design §6) is immutable and archetype-wide, so it is never `added` or `changed` per entity; change-detection filters do not support shared storage"
+        );
         components.register::<T>()
     }
 
@@ -308,6 +334,8 @@ unsafe impl<T: Component> QueryFilter for Changed<T> {
         match T::STORAGE {
             StorageType::SparseSet => true,
             StorageType::Table => archetype.contains(*state),
+            // `init_state` already rejected a shared component for this filter.
+            StorageType::Shared => unreachable!("shared storage rejected at init_state"),
         }
     }
 
@@ -332,6 +360,8 @@ unsafe impl<T: Component> QueryFilter for Changed<T> {
             StorageType::SparseSet => {
                 ChangeFilterFetch::Sparse(sparse_sets.get(*state), last_run, this_run)
             }
+            // `init_state` already rejected a shared component for this filter.
+            StorageType::Shared => unreachable!("shared storage rejected at init_state"),
         }
     }
 

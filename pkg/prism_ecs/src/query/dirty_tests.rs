@@ -116,7 +116,11 @@ fn dirty_chunks_superset_of_per_row_changed() {
         let covered = dirty
             .iter()
             .any(|d| d.archetype == loc.archetype_id && row_is_covered(&[*d], loc.row as usize));
-        assert!(covered, "changed entity {e:?} at row {} not covered", loc.row);
+        assert!(
+            covered,
+            "changed entity {e:?} at row {} not covered",
+            loc.row
+        );
     }
 }
 
@@ -134,7 +138,11 @@ fn spawn_frame_marks_every_chunk_dirty() {
     let dirty = state.dirty_chunks(&w, last_run, this_run);
 
     // All three chunks (two full + one partial) are freshly written.
-    assert_eq!(dirty.len(), 3, "every chunk is dirty on the spawn frame: {dirty:?}");
+    assert_eq!(
+        dirty.len(),
+        3,
+        "every chunk is dirty on the spawn frame: {dirty:?}"
+    );
     let total: usize = dirty.iter().map(DirtyChunk::len).sum();
     assert_eq!(total, 10, "windows cover all 10 rows exactly");
     assert!(dirty.iter().all(|d| !d.is_empty()));
@@ -154,7 +162,10 @@ fn no_writes_reports_no_dirty_chunks() {
 
     let state = w.query::<&Big>();
     let dirty = state.dirty_chunks(&w, last_run, this_run);
-    assert!(dirty.is_empty(), "a quiescent frame reports no dirty chunks: {dirty:?}");
+    assert!(
+        dirty.is_empty(),
+        "a quiescent frame reports no dirty chunks: {dirty:?}"
+    );
 }
 
 #[test]
@@ -188,7 +199,11 @@ fn write_set_component_marks_chunk_dirty_for_read_query() {
     // A query that reads Marker does see it.
     let marker_only = w.query::<&Marker>();
     let dirty_marker = marker_only.dirty_chunks(&w, last_run, this_run);
-    assert_eq!(dirty_marker.len(), 1, "Marker write flags its chunk: {dirty_marker:?}");
+    assert_eq!(
+        dirty_marker.len(),
+        1,
+        "Marker write flags its chunk: {dirty_marker:?}"
+    );
     // {Big, Marker} share one rpc from the summed row bytes
     // (4096 + 4 = 4100 => 16 KiB / 4100 = 3 rows per chunk), so chunk 0 is [0,3).
     assert_eq!((dirty_marker[0].start, dirty_marker[0].end), (0, 3));

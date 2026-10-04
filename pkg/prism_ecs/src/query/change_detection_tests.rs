@@ -168,7 +168,11 @@ fn mut_set_changed_marks_without_write() {
     }
 
     let state = w.query_filtered::<crate::entity::Entity, Changed<Position>>();
-    assert_eq!(state.iter(&w).count(), 1, "set_changed marks the row Changed");
+    assert_eq!(
+        state.iter(&w).count(),
+        1,
+        "set_changed marks the row Changed"
+    );
 }
 
 #[test]
@@ -200,7 +204,8 @@ fn added_or_changed_matches_either() {
     // Spawn a brand-new Velocity entity this frame -> Added<Velocity>.
     let c = w.spawn(Velocity(9));
 
-    let state = w.query_filtered::<crate::entity::Entity, Or<(Changed<Position>, Added<Velocity>)>>();
+    let state =
+        w.query_filtered::<crate::entity::Entity, Or<(Changed<Position>, Added<Velocity>)>>();
     let mut seen: alloc::vec::Vec<_> = state.iter(&w).collect();
     seen.sort();
     let mut expected = alloc::vec![a, c];
