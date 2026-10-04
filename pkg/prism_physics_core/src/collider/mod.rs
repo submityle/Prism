@@ -554,6 +554,8 @@ pub mod granular_eos;
 pub use granular_eos::GranularEquationOfState;
 pub mod granular_transport;
 pub use granular_transport::GranularTransport;
+pub mod granular_self_diffusion;
+pub use granular_self_diffusion::SelfDiffusionAnalysis;
 
 /// A handle into a [`ShapeRegistry`].
 ///
