@@ -67,6 +67,7 @@ pub mod clip;
 pub mod convexity;
 pub mod curve;
 pub mod draw;
+pub mod ellipse;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod hull;
@@ -95,6 +96,7 @@ pub use clip::clip_polygon;
 pub use convexity::is_convex;
 pub use curve::CubicBezier;
 pub use draw::{DrawCommand, DrawList, GlyphCmd, LayerCmd, RectCmd, ShadowCmd};
+pub use ellipse::flatten_ellipse;
 #[cfg(feature = "gpu")]
 pub use gpu::GpuRasterizer;
 pub use hull::convex_hull;
