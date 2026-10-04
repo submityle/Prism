@@ -46,12 +46,14 @@ use core::ptr::NonNull;
 pub mod boxed;
 pub mod buddy;
 pub mod frame;
+pub mod guard;
 pub mod pool;
 pub mod tlsf;
 
 pub use boxed::AllocBox;
 pub use buddy::BuddyAllocator;
 pub use frame::FrameAllocator;
+pub use guard::{GuardConfig, GuardedAllocator};
 pub use pool::Pool;
 pub use tlsf::TlsfAllocator;
 
