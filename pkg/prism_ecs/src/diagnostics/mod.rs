@@ -12,6 +12,10 @@
 //!   quantifies the design headline "成本 ∝ 变化量".
 //! * [`profiler`] — nested system-span timing and flame-graph export
 //!   (design §16.6 "系统火焰图").
+//! * [`step_inspector`] — per-system structural / change-volume observation
+//!   while single-stepping a schedule (design §23.4 / §16.6).
+//! * [`relation_graph`] — read-only relation-kind and edge-topology summary
+//!   (design §16.6 "关系图谱").
 //! * [`time_travel`] — frame-indexed world snapshot record/seek (`std` only).
 //!
 //! All occupancy and change-volume figures describe the chunked Table-backed
@@ -21,12 +25,14 @@
 pub mod change_volume;
 pub mod inspector;
 pub mod profiler;
+pub mod relation_graph;
 pub mod step_inspector;
 #[cfg(feature = "std")]
 pub mod time_travel;
 
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
+pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use step_inspector::{StepObservation, SteppingInspector};
 #[cfg(feature = "std")]
 pub use profiler::SpanRecorder;

@@ -439,6 +439,31 @@ impl RelationIndex {
         self.forward.len()
     }
 
+    /// Total number of directed edges held in the forward index.
+    ///
+    /// Equal to the sum of every source bucket's target count. This is the
+    /// `(relation, source) -> target` edge total, mirroring what
+    /// [`iter_edges`](Self::iter_edges) yields, and is used by the relation
+    /// graph diagnostics (design §16.6).
+    #[inline]
+    pub fn edge_count(&self) -> usize {
+        self.forward.values().map(|(_, targets)| targets.len()).sum()
+    }
+
+    /// Iterate every directed edge as `(relation, source, target)`.
+    ///
+    /// Walks the forward adjacency, expanding each `(relation, source)` bucket
+    /// into one tuple per target. Iteration order follows the underlying hash
+    /// map and is therefore unspecified; callers that need determinism must
+    /// sort. Read-only; powers the relation graph diagnostics (design §16.6).
+    pub fn iter_edges(&self) -> impl Iterator<Item = (ComponentId, Entity, Entity)> + '_ {
+        self.forward.iter().flat_map(|(key, (source, targets))| {
+            let relation = key.relation().component_id();
+            let source = *source;
+            targets.iter().map(move |&target| (relation, source, target))
+        })
+    }
+
     /// Add the edge `source --relation--> target`.
     ///
     /// When `exclusive` is set the source keeps at most one target: any prior
@@ -749,6 +774,21 @@ impl Relations {
     #[inline]
     pub fn is_transitive(&self, relation: ComponentId) -> bool {
         self.kinds.get(&relation).is_some_and(|k| k.transitive)
+    }
+
+    /// Number of registered relation kinds.
+    #[inline]
+    pub fn kind_count(&self) -> usize {
+        self.kinds.len()
+    }
+
+    /// Iterate every registered relation kind as `(relation, &metadata)`.
+    ///
+    /// Iteration order follows the underlying hash map and is unspecified;
+    /// callers that need determinism must sort. Read-only; powers the relation
+    /// graph diagnostics (design §16.6).
+    pub fn iter_kinds(&self) -> impl Iterator<Item = (ComponentId, &RelationKind)> + '_ {
+        self.kinds.iter().map(|(&id, kind)| (id, kind))
     }
 
     /// Shared access to the underlying index.
