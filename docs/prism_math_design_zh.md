@@ -9,7 +9,7 @@
 > - **曲线 / 噪声**：经典 Bezier/Hermite/Catmull-Rom、Perlin/Simplex（Ken Perlin 经典算法）
 > 本文为纯经典线性代数 / 数值计算 / 经典噪声路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：CPU/GPU 数学一致性契约(shader 镜像)/编译期 const 数学/区间算术保守剔除/补偿求和(Kahan/double-double)扩展精度/经典前向自动微分(dual number)/球谐光照探针/Morton·Hilbert 空间编码/高阶样条曲面(Bezier patch)/大世界定点分层；24.2–24.10 已随核心路线落地，24.1 CPU/GPU 一致性契约的**可移植 shader 镜像层**（`shader_mirror`：std140 字节布局契约 + CPU 参考 op + 单源 WGSL 片段）本次已交付，仅剩真实 GPU dispatch/回读 parity 待 `prism_render_driver` 接线）
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：CPU/GPU 数学一致性契约(shader 镜像)/编译期 const 数学/区间算术保守剔除/补偿求和(Kahan/double-double)扩展精度/经典前向自动微分(dual number)/球谐光照探针/Morton·Hilbert 空间编码/高阶样条曲面(Bezier patch)/大世界定点分层；24.2–24.10 已随核心路线落地，24.1 CPU/GPU 一致性契约**已完整交付**：可移植 `shader_mirror`（std140 布局契约 + CPU 参考 op + 单源 WGSL 片段）+ 真实 GPU twin crate `prism_math_gpu`（真实 wgpu dispatch/回读，与 CPU 参考容差对拍，真机 parity 全绿））
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: **无 Prism 上游依赖**（本 crate 是依赖图的根）；仅经典 crate 级 `libm`（`no_std` 超越函数）、可选 `bytemuck`（POD/GPU 直传）、`rand_core` 形态的自有 PRNG trait；SIMD 走 `core::arch` 内在函数，不引第三方 SIMD 框架
 - 层级定位: L0 地基（被 `prism_ecs` / `prism_transform` / `prism_tasks`(确定归并数值) / `prism_time`(定点步长) / 渲染 / 物理 / 动画 / 音频空间化 全体依赖）
@@ -381,7 +381,7 @@ pkg/prism_math/
 
 本章在 §17（双四元数 / SoA / f16 / octahedral / 精确谓词 / 弧长表）之外，补齐**跨 CPU-GPU 一致性、保守数值、扩展精度、经典微分、空间编码、GI 数值**等 AAA 引擎真正吃到的高级数学能力。所有条目均为 PLANNED，无代码，纯经典数值路线、不含任何 AI/ML。
 
-### 24.1 CPU/GPU 数学一致性契约（Shader 镜像）—— ✅ 可移植层已交付（`shader_mirror` 模块）
+### 24.1 CPU/GPU 数学一致性契约（Shader 镜像）—— ✅ 已交付（`shader_mirror` 可移植层 + `prism_math_gpu` 真实 GPU twin）
 
 现代引擎同一份几何/剔除/变换逻辑既在 CPU（空间查询、宽相位、CPU 剔除）跑、又在 GPU（compute 剔除、GPU 驱动渲染、蒙皮）跑。两侧结果不一致 = 画面闪烁、剔除错删、物理与渲染错位。
 
@@ -397,6 +397,7 @@ pkg/prism_math/
 - **镜像 CPU 参考 op**：`quat_rotate_vec3(q, v)`，与 `Quat::mul_vec3` 跨多轴位对位 parity（oracle 测试覆盖）。
 - **单源 WGSL 片段**：`WGSL_QUAT_ROTATE` 常量，与 CPU 参考同算法同常量，供渲染侧直接拼入 shader，杜绝双份实现漂移。
 - `octahedral`/`spherical`（SH）编解码既有模块复用，不重复实现；投影矩阵镜像不在本层范围（math 无 perspective/ortho 构造，见 §24.10 诚实边界）。
+- **真实 GPU twin（新建 `prism_math_gpu` crate）**：`GpuQuatRotate` 在真实 wgpu 设备上批量旋转 `vec3`，compute kernel 的旋转函数**运行时拼接自** `WGSL_QUAT_ROTATE` 常量（不重打一遍，杜绝漂移）；上传→dispatch→回读后与 CPU 参考 `quat_rotate_vec3` 做**容差对拍**（Metal 以 fast-math 编译 WGSL，允许 FMA 收缩/重结合，故契约为容差而非位对位，`1e-5` 绝对+相对容差既纳 FMA 末位舍入、又能拒绝真实算法/算子序/布局漂移）。`GpuContext::try_headless()->Option` 在无 adapter 时优雅跳过。4 个真机 parity 测试（identity passthrough / 轴旋转对 CPU / 跨多 workgroup 大批量 4133 元素 / 空输入）在真实 GPU 上全绿。目录结构 `context`/`buffer`/`quat` 分模块，不堆单文件。
 
 ### 24.2 编译期 / const 数学（Const Evaluation）—— ✅ 已交付（`const_math` 模块）
 
@@ -477,4 +478,4 @@ pkg/prism_math/
 
 ### 24.10 诚实边界
 
-落地优先级建议：**24.1 CPU/GPU 一致性**的**可移植层已交付**（`shader_mirror`：std140 字节布局契约 + CPU 参考 op `quat_rotate_vec3` + 单源 `WGSL_QUAT_ROTATE` 片段），仅剩真实 WGSL dispatch 与 GPU 回读 parity 待 `prism_render_driver` 消费方接线（本层只拥有字节布局 + CPU 参考 + 单源 shader 文本，不含 adapter/queue）；投影矩阵镜像待 math 补 perspective/ortho 构造后随附；24.2 编译期 const 数学 **已交付**（`const_math`）；24.4 补偿求和/扩展精度 **已交付**（`fixed` 的 Kahan/Neumaier 与 `double_double::DoubleDouble`）；24.3 区间算术 **已交付**（`interval`）；24.6 SH **已交付**（`spherical`，SH 旋转/探针随 `prism_gi` 接入）；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数 **已交付**（`dual`，供 IK/物理雅可比接入）；24.8 曲面 **已交付**（`curve::surface`，LOD 细分随 `prism_terrain` 接入）；24.9 大世界定点 **已交付**（`bigworld::hierfixed`，`FixedGridPosition`：纯整数/Q32.32 cell+local，canonical/translated/rebased_offset/distance_squared 全程无浮点，供联机开放世界位级一致）。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+落地优先级建议：**24.1 CPU/GPU 一致性 已交付**——可移植层 `shader_mirror`（std140 字节布局契约 + CPU 参考 op `quat_rotate_vec3` + 单源 `WGSL_QUAT_ROTATE` 片段）**加**真实 GPU twin `prism_math_gpu`（`GpuQuatRotate`：真实 wgpu 设备 dispatch + 回读，kernel 旋转函数运行时拼接自单源常量，与 CPU 参考容差对拍，真机 parity 测试全绿）。诚实边界：parity 为**容差**而非位对位（Metal fast-math 允许 FMA 收缩）；投影矩阵镜像待 math 补 perspective/ortho 构造后随附；24.2 编译期 const 数学 **已交付**（`const_math`）；24.4 补偿求和/扩展精度 **已交付**（`fixed` 的 Kahan/Neumaier 与 `double_double::DoubleDouble`）；24.3 区间算术 **已交付**（`interval`）；24.6 SH **已交付**（`spherical`，SH 旋转/探针随 `prism_gi` 接入）；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数 **已交付**（`dual`，供 IK/物理雅可比接入）；24.8 曲面 **已交付**（`curve::surface`，LOD 细分随 `prism_terrain` 接入）；24.9 大世界定点 **已交付**（`bigworld::hierfixed`，`FixedGridPosition`：纯整数/Q32.32 cell+local，canonical/translated/rebased_offset/distance_squared 全程无浮点，供联机开放世界位级一致）。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

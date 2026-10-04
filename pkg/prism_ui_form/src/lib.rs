@@ -12,7 +12,7 @@
 //!   reactive view that recomputes whenever any field changes.
 //! * [`Validator`] — the rule trait, with ready-made rules [`required`],
 //!   [`min_len`], [`max_len`], [`int_range`], [`int_step`], [`email`],
-//!   [`luhn`], [`pattern`], and [`custom`].
+//!   [`luhn`], [`iban`], [`pattern`], and [`custom`].
 //! * [`FieldId`] — an opaque, cheaply clonable field key.
 //!
 //! # Example
@@ -42,11 +42,13 @@ mod email;
 mod error;
 mod field;
 mod form;
+mod iban;
 mod luhn;
 mod validator;
 
 pub use email::{email, is_valid_email};
 pub use error::ValidationError;
+pub use iban::{iban, is_valid_iban};
 pub use luhn::{luhn, passes_luhn};
 pub use field::{parse_i64, FieldId};
 pub use form::Form;

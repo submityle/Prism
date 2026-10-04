@@ -1,0 +1,16 @@
+[package]
+name = "prism_math_gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Optional wgpu compute twin for Prism's §24.1 CPU/GPU math consistency contract. A real-device half of prism_math::shader_mirror: a compute kernel rotates a batch of vec3 by a unit quaternion using the single-sourced WGSL fragment prism_math::shader_mirror::WGSL_QUAT_ROTATE, and parity tests diff the GPU readback against the CPU reference quat_rotate_vec3 within a float tolerance (Metal compiles WGSL under fast-math, so FMA contraction forbids a bit-exact claim). The WGSL rotation function is composed at runtime from the shader-mirror constant so the GPU twin cannot drift from the CPU reference. Contains no Unreal Engine or Unity source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_math = { path = "../prism_math" }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+bytemuck = { version = "1.5", features = ["derive"] }
+futures-lite = "2"
+
+[lints]
+workspace = true
