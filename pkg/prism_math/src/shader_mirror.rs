@@ -1441,3 +1441,119 @@ fn prism_ridged2(x: f32, y: f32, octaves: u32, lacunarity: f32, gain: f32, frequ
     return sum / norm;\n\
 }\n\
 ";
+
+/// Single-sourced WGSL for the scalar easing-function family, mirroring the
+/// CPU reference [`crate::curve::easing`].
+///
+/// Each `prism_ease_*` helper remaps a scalar parameter `t` and the
+/// `prism_ease(op, t)` dispatcher selects one by op code (the same ordering as
+/// the host `Ease` enum). The polynomial easings (smooth/smoother/quad/cubic)
+/// are bare multiply/add arithmetic and match the CPU path to a tight FMA
+/// tolerance; the sinusoidal and exponential easings call the WGSL `cos`/`sin`
+/// / `pow` builtins, which Metal compiles under fast-math, whereas the CPU
+/// reference uses deterministic `libm`. The §24.1 contract on those is
+/// therefore a small absolute+relative tolerance rather than a bit contract.
+/// The clamp and the `t <= 0`/`t >= 1`/`t < 0.5` branch literals are identical
+/// on both sides, so a given input takes the same branch.
+pub const WGSL_EASING: &str = "\
+fn prism_ease_smoothstep(t0: f32) -> f32 {\n\
+    let t = clamp(t0, 0.0, 1.0);\n\
+    return t * t * (3.0 - 2.0 * t);\n\
+}\n\
+\n\
+fn prism_ease_smootherstep(t0: f32) -> f32 {\n\
+    let t = clamp(t0, 0.0, 1.0);\n\
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);\n\
+}\n\
+\n\
+fn prism_ease_quad_in(t: f32) -> f32 {\n\
+    return t * t;\n\
+}\n\
+\n\
+fn prism_ease_quad_out(t: f32) -> f32 {\n\
+    return t * (2.0 - t);\n\
+}\n\
+\n\
+fn prism_ease_quad_in_out(t: f32) -> f32 {\n\
+    if (t < 0.5) {\n\
+        return 2.0 * t * t;\n\
+    }\n\
+    let u = -2.0 * t + 2.0;\n\
+    return 1.0 - u * u * 0.5;\n\
+}\n\
+\n\
+fn prism_ease_cubic_in(t: f32) -> f32 {\n\
+    return t * t * t;\n\
+}\n\
+\n\
+fn prism_ease_cubic_out(t: f32) -> f32 {\n\
+    let u = 1.0 - t;\n\
+    return 1.0 - u * u * u;\n\
+}\n\
+\n\
+fn prism_ease_cubic_in_out(t: f32) -> f32 {\n\
+    if (t < 0.5) {\n\
+        return 4.0 * t * t * t;\n\
+    }\n\
+    let u = -2.0 * t + 2.0;\n\
+    return 1.0 - u * u * u * 0.5;\n\
+}\n\
+\n\
+fn prism_ease_sine_in(t: f32) -> f32 {\n\
+    return 1.0 - cos(t * 1.5707964);\n\
+}\n\
+\n\
+fn prism_ease_sine_out(t: f32) -> f32 {\n\
+    return sin(t * 1.5707964);\n\
+}\n\
+\n\
+fn prism_ease_sine_in_out(t: f32) -> f32 {\n\
+    return -0.5 * (cos(3.1415927 * t) - 1.0);\n\
+}\n\
+\n\
+fn prism_ease_expo_in(t: f32) -> f32 {\n\
+    if (t <= 0.0) {\n\
+        return 0.0;\n\
+    }\n\
+    return pow(2.0, 10.0 * (t - 1.0));\n\
+}\n\
+\n\
+fn prism_ease_expo_out(t: f32) -> f32 {\n\
+    if (t >= 1.0) {\n\
+        return 1.0;\n\
+    }\n\
+    return 1.0 - pow(2.0, -10.0 * t);\n\
+}\n\
+\n\
+fn prism_ease_expo_in_out(t: f32) -> f32 {\n\
+    if (t <= 0.0) {\n\
+        return 0.0;\n\
+    }\n\
+    if (t >= 1.0) {\n\
+        return 1.0;\n\
+    }\n\
+    if (t < 0.5) {\n\
+        return 0.5 * pow(2.0, 20.0 * t - 10.0);\n\
+    }\n\
+    return 1.0 - 0.5 * pow(2.0, -20.0 * t + 10.0);\n\
+}\n\
+\n\
+fn prism_ease(op: u32, t: f32) -> f32 {\n\
+    switch (op) {\n\
+        case 0u: { return prism_ease_smoothstep(t); }\n\
+        case 1u: { return prism_ease_smootherstep(t); }\n\
+        case 2u: { return prism_ease_quad_in(t); }\n\
+        case 3u: { return prism_ease_quad_out(t); }\n\
+        case 4u: { return prism_ease_quad_in_out(t); }\n\
+        case 5u: { return prism_ease_cubic_in(t); }\n\
+        case 6u: { return prism_ease_cubic_out(t); }\n\
+        case 7u: { return prism_ease_cubic_in_out(t); }\n\
+        case 8u: { return prism_ease_sine_in(t); }\n\
+        case 9u: { return prism_ease_sine_out(t); }\n\
+        case 10u: { return prism_ease_sine_in_out(t); }\n\
+        case 11u: { return prism_ease_expo_in(t); }\n\
+        case 12u: { return prism_ease_expo_out(t); }\n\
+        case 13u: { return prism_ease_expo_in_out(t); }\n\
+        default: { return t; }\n\
+    }\n\
+}\n";

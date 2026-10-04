@@ -35,6 +35,7 @@ extern crate alloc;
 
 pub mod buffer;
 pub mod context;
+pub mod easing;
 pub mod f16;
 pub mod fractal;
 pub mod frustum_cull;
@@ -59,6 +60,7 @@ pub mod view;
 pub mod xyz;
 
 pub use context::{GpuContext, block_on};
+pub use easing::{Ease, GpuEasing};
 pub use f16::GpuF16Pack;
 pub use fractal::{GpuFractal, NoiseSource};
 pub use frustum_cull::GpuFrustumCull;
