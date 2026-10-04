@@ -361,6 +361,10 @@ pub use tet_fem_mohr_coulomb_force_assembly::{
     assemble_mohr_coulomb_forces, rest_mohr_coulomb_states,
     total_mohr_coulomb_elastic_potential_energy, MohrCoulombAssembly,
 };
+pub mod tet_fem_hoek_brown_plasticity;
+pub use tet_fem_hoek_brown_plasticity::{
+    return_map_hoek_brown, HoekBrownModel, HoekBrownState, HoekBrownStep, HoekBrownYield,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
