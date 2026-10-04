@@ -598,6 +598,8 @@ pub mod lade_duncan_invariant;
 pub use lade_duncan_invariant::LadeDuncanInvariant;
 pub mod second_order_work;
 pub use second_order_work::SecondOrderWork;
+pub mod fabric_reorientation;
+pub use fabric_reorientation::FabricReorientation;
 
 /// A handle into a [`ShapeRegistry`].
 ///
