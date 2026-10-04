@@ -681,3 +681,57 @@ fn prism_quat_slerp(a: vec4<f32>, b_in: vec4<f32>, t: f32) -> vec4<f32> {\n\
     let s1 = sin(t * theta) / sin_theta;\n\
     return a * s0 + b * s1;\n\
 }\n";
+
+/// Single-sourced WGSL for ray-triangle intersection (Möller-Trumbore).
+///
+/// Mirrors the CPU reference [`prism_math::intersect::ray_triangle_bary`] step
+/// for step: the `edge1`/`edge2`/`pvec`/`det` setup, the `|det| < 1e-8`
+/// degenerate/parallel reject (the CPU `EPS`), the `u`/`v` barycentric
+/// in-triangle tests, and the `t >= 0` forward reject. Both faces are hittable.
+/// `prism_ray_triangle` additionally returns a geometric normal oriented
+/// against the ray, matching [`prism_math::intersect::ray_triangle`].
+///
+/// Parity, not bit-exactness: the barycentric divides, cross/dot products, and
+/// the normal `normalize` are evaluated under Metal fast-math (FMA contraction
+/// and reassociation), so `t`/`u`/`v`/point/normal agree within a small
+/// tolerance while the discrete hit flag matches for geometry with a
+/// comfortable margin from the triangle edges / a grazing (near-parallel) ray.
+pub const WGSL_RAYTRI: &str = "\
+struct PrismTriHit {\n\
+    hit: f32,\n\
+    t: f32,\n\
+    u: f32,\n\
+    v: f32,\n\
+    normal: vec3<f32>,\n\
+};\n\
+\n\
+fn prism_ray_triangle(origin: vec3<f32>, dir: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> PrismTriHit {\n\
+    var out: PrismTriHit;\n\
+    out.hit = 0.0;\n\
+    out.t = 0.0;\n\
+    out.u = 0.0;\n\
+    out.v = 0.0;\n\
+    out.normal = vec3<f32>(0.0, 0.0, 0.0);\n\
+    let edge1 = b - a;\n\
+    let edge2 = c - a;\n\
+    let pvec = cross(dir, edge2);\n\
+    let det = dot(edge1, pvec);\n\
+    if (abs(det) < 1.0e-8) { return out; }\n\
+    let inv_det = 1.0 / det;\n\
+    let tvec = origin - a;\n\
+    let u = dot(tvec, pvec) * inv_det;\n\
+    if (u < 0.0 || u > 1.0) { return out; }\n\
+    let qvec = cross(tvec, edge1);\n\
+    let v = dot(dir, qvec) * inv_det;\n\
+    if (v < 0.0 || u + v > 1.0) { return out; }\n\
+    let t = dot(edge2, qvec) * inv_det;\n\
+    if (t < 0.0) { return out; }\n\
+    var normal = normalize(cross(edge1, edge2));\n\
+    if (dot(normal, dir) > 0.0) { normal = -normal; }\n\
+    out.hit = 1.0;\n\
+    out.t = t;\n\
+    out.u = u;\n\
+    out.v = v;\n\
+    out.normal = normal;\n\
+    return out;\n\
+}\n";
