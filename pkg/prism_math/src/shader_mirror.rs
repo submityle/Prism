@@ -147,3 +147,52 @@ fn write_f32s(vals: &[f32], out: &mut [u8]) {
         chunk.copy_from_slice(&v.to_le_bytes());
     }
 }
+
+/// The authoritative WGSL source for the right-handed projection-matrix
+/// builders, mirroring [`crate::projection::perspective_rh`],
+/// [`crate::projection::perspective_reverse_z_rh`], and
+/// [`crate::projection::orthographic_rh`] **term for term**.
+///
+/// A consumer embeds this verbatim so a GPU-built projection matrix cannot
+/// drift from the CPU constructors: the formulas, operand order, and the
+/// column-major `mat4x4<f32>` layout are identical to the Rust source. The
+/// clip-space depth range is [`NDC_DEPTH_RANGE`] (`z in [0, 1]`), matching the
+/// reverse-Z and `[0, 1]` perspective constructors used across Prism.
+///
+/// Each function returns a `mat4x4<f32>` whose four constructor arguments are
+/// the matrix **columns** `x_axis, y_axis, z_axis, w_axis`, exactly as
+/// [`crate::mat::Mat4::from_cols`] expects.
+pub const WGSL_PROJECTION_RH: &str = "\
+fn prism_perspective_rh(fovy: f32, aspect: f32, z_near: f32, z_far: f32) -> mat4x4<f32> {\n\
+    let f = 1.0 / tan(fovy * 0.5);\n\
+    let r = z_far / (z_near - z_far);\n\
+    return mat4x4<f32>(\n\
+        vec4<f32>(f / aspect, 0.0, 0.0, 0.0),\n\
+        vec4<f32>(0.0, f, 0.0, 0.0),\n\
+        vec4<f32>(0.0, 0.0, r, -1.0),\n\
+        vec4<f32>(0.0, 0.0, r * z_near, 0.0)\n\
+    );\n\
+}\n\
+\n\
+fn prism_perspective_reverse_z_rh(fovy: f32, aspect: f32, z_near: f32, z_far: f32) -> mat4x4<f32> {\n\
+    let f = 1.0 / tan(fovy * 0.5);\n\
+    let inv = 1.0 / (z_far - z_near);\n\
+    return mat4x4<f32>(\n\
+        vec4<f32>(f / aspect, 0.0, 0.0, 0.0),\n\
+        vec4<f32>(0.0, f, 0.0, 0.0),\n\
+        vec4<f32>(0.0, 0.0, z_near * inv, -1.0),\n\
+        vec4<f32>(0.0, 0.0, z_far * z_near * inv, 0.0)\n\
+    );\n\
+}\n\
+\n\
+fn prism_orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, z_near: f32, z_far: f32) -> mat4x4<f32> {\n\
+    let rcp_w = 1.0 / (right - left);\n\
+    let rcp_h = 1.0 / (top - bottom);\n\
+    let rcp_d = 1.0 / (z_near - z_far);\n\
+    return mat4x4<f32>(\n\
+        vec4<f32>(2.0 * rcp_w, 0.0, 0.0, 0.0),\n\
+        vec4<f32>(0.0, 2.0 * rcp_h, 0.0, 0.0),\n\
+        vec4<f32>(0.0, 0.0, rcp_d, 0.0),\n\
+        vec4<f32>(-(right + left) * rcp_w, -(top + bottom) * rcp_h, z_near * rcp_d, 1.0)\n\
+    );\n\
+}\n";

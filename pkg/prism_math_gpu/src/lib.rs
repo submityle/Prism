@@ -35,7 +35,9 @@ extern crate alloc;
 
 pub mod buffer;
 pub mod context;
+pub mod projection;
 pub mod quat;
 
 pub use context::{GpuContext, block_on};
+pub use projection::{GpuProjection, ProjectionKind};
 pub use quat::GpuQuatRotate;
