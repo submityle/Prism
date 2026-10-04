@@ -264,6 +264,7 @@ pub mod heap_sort_u32;
 pub mod heat_distortion;
 pub mod height_fog;
 pub mod heightfield_cell;
+pub mod hertz_contact_force;
 pub mod hertz_effective_modulus;
 pub mod hertz_elastic_force;
 pub mod hertz_reduced_radius;
@@ -280,6 +281,8 @@ pub mod integer_gcd_lcm;
 pub mod integrate_segment;
 pub mod interval_overlap_1d;
 pub mod interval_tree_1d;
+pub mod janssen_cross_section;
+pub mod janssen_stress_state;
 pub mod kawase_blur;
 pub mod kawase_dual_blur;
 pub mod lens_distortion;
@@ -455,6 +458,7 @@ pub mod rigid_apply_velocity_impulse;
 pub mod rigid_generalized_inverse_mass;
 pub mod rigid_inv_inertia_world;
 pub mod ritter_bounding_sphere;
+pub mod rotational_contact_force;
 pub mod rough_dielectric_bsdf;
 pub mod sat_collision_2d;
 pub mod scanline_polygon_fill;
@@ -504,6 +508,7 @@ pub mod sim_pass_buffers;
 pub mod sim_space;
 pub mod single_scatter_reference;
 pub mod sky_state_transition;
+pub mod snow_hardened_lame;
 pub mod soft_apply_backstop;
 pub mod soft_attachment_project;
 pub mod soft_bending_project;
@@ -572,6 +577,7 @@ pub mod transparency_route_select;
 pub mod tri_tri_intersect;
 pub mod triangle_aabb_overlap;
 pub mod triangle_circumcircle;
+pub mod triangle_solid_angle;
 pub mod trig_approx;
 pub mod trilinear;
 pub mod triplanar_blend;
@@ -997,6 +1003,9 @@ pub use heap_sort_u32::{GpuHeapSort, GpuHeapSortU32, HeapSortU32Query};
 pub use heat_distortion::{GpuHeatDistortion, HeatQuery, HeatResult};
 pub use height_fog::{GpuHeightFog, HeightFogQuery};
 pub use heightfield_cell::{GpuHeightfieldCell, HeightfieldCellQuery, HeightfieldCellResult};
+pub use hertz_contact_force::{
+    GpuHertzContactForce, HertzContactForceQuery, HertzContactForceResult,
+};
 pub use hertz_effective_modulus::{
     GpuHertzEffectiveModulus, HertzEffectiveModulusQuery, HertzEffectiveModulusResult,
 };
@@ -1023,6 +1032,12 @@ pub use integer_gcd_lcm::{GpuIntegerGcdLcm, IntegerGcdLcmQuery, IntegerGcdLcmRes
 pub use integrate_segment::{GpuIntegrateSegment, IntegrateSegmentQuery};
 pub use interval_overlap_1d::{GpuIntervalOverlap1d, IntervalOverlapQuery, IntervalOverlapResult};
 pub use interval_tree_1d::{GpuIntervalTree1d, IntervalTree1dQuery, IntervalTree1dResult};
+pub use janssen_cross_section::{
+    GpuJanssenCrossSection, JanssenCrossSectionQuery, JanssenCrossSectionResult,
+};
+pub use janssen_stress_state::{
+    GpuJanssenStressState, JanssenStressStateQuery, JanssenStressStateResult,
+};
 pub use kawase_blur::{GpuKawaseBlur, KawaseBlurQuery};
 pub use kawase_dual_blur::{GpuKawaseDualBlur, GpuKawaseDualBlurQuery, GpuKawaseDualBlurResult};
 pub use lens_distortion::GpuLensDistortion;
@@ -1316,6 +1331,9 @@ pub use rigid_inv_inertia_world::{
     GpuRigidInvInertiaWorld, RigidInvInertiaWorldQuery, RigidInvInertiaWorldResult,
 };
 pub use ritter_bounding_sphere::{GpuRitterBoundingSphere, GpuRitterSphere, RitterQuery};
+pub use rotational_contact_force::{
+    GpuRotationalContactForce, RotationalContactForceQuery, RotationalContactForceResult,
+};
 pub use rough_dielectric_bsdf::{GpuRoughDielectric, RoughDielectricQuery, RoughDielectricResult};
 pub use sat_collision_2d::{GpuSatCollision2d, SatCollision2dQuery, SatCollision2dResult};
 pub use scanline_polygon_fill::{GpuScanlineFill, GpuScanlinePolygonFill, GpuSpan};
@@ -1377,6 +1395,7 @@ pub use sim_pass_buffers::{GpuSimPassBuffers, GpuSimPassBuffersQuery, GpuSimPass
 pub use sim_space::{GpuSimSpace, GpuSimSpaceQuery, GpuSimSpaceResult};
 pub use single_scatter_reference::{GpuSingleScatterReference, SingleScatterReferenceQuery};
 pub use sky_state_transition::{GpuSkyStateTransition, SkyStateTransition};
+pub use snow_hardened_lame::{GpuSnowHardenedLame, SnowHardenedLameQuery, SnowHardenedLameResult};
 pub use soft_apply_backstop::{
     GpuSoftApplyBackstop, SoftApplyBackstopQuery, SoftApplyBackstopResult,
 };
@@ -1515,6 +1534,9 @@ pub use transparency_route_select::{
 pub use tri_tri_intersect::{GpuTriTriIntersect, TriTriQuery};
 pub use triangle_aabb_overlap::{GpuTriangleAabbOverlap, TriangleAabbQuery};
 pub use triangle_circumcircle::{GpuTriangleCircumcircle, TriangleCircumcircleResult};
+pub use triangle_solid_angle::{
+    GpuTriangleSolidAngle, TriangleSolidAngleQuery, TriangleSolidAngleResult,
+};
 pub use trig_approx::{GpuTrigApprox, TrigApproxQuery, TrigApproxResult};
 pub use trilinear::{GpuTrilinear, TrilinearQuery};
 pub use triplanar_blend::{GpuTriplanarBlend, TriplanarBlendQuery, TriplanarBlendResult};
