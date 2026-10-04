@@ -40,6 +40,7 @@
 extern crate alloc;
 
 pub mod format;
+pub mod query;
 pub mod snapshot;
 pub mod trace;
 
