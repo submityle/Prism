@@ -546,6 +546,8 @@ pub mod force_chain_network;
 pub use force_chain_network::ForceChainNetwork;
 pub mod contact_stress;
 pub use contact_stress::ContactStress;
+pub mod mohr_coulomb_yield;
+pub use mohr_coulomb_yield::{MohrCoulombCriterion, MohrCoulombYieldState};
 
 /// A handle into a [`ShapeRegistry`].
 ///
