@@ -19,6 +19,7 @@ use prism_audio_assets::codec::PcmSampleFormat;
 use prism_audio_core::math::Sample;
 
 use crate::codec_tier::UsageClass;
+use crate::finalize::FinalizeConfig;
 use crate::loop_point::LoopMode;
 
 /// Hints that disambiguate headerless or ambiguous source bytes.
@@ -231,6 +232,11 @@ pub struct ConditioningConfig {
     pub lipsync: LipsyncConfig,
     /// Intended usage class, used to bias codec-tier recommendation.
     pub usage: UsageClass,
+    /// Program-finalization steps (encoder-delay trim, loop rebase, and
+    /// loop-seam crossfade bake). Both steps default to off, so the
+    /// delivered program matches the raw conditioned program unless a
+    /// caller opts in.
+    pub finalize: FinalizeConfig,
 }
 
 impl Default for ConditioningConfig {
@@ -246,6 +252,7 @@ impl Default for ConditioningConfig {
             bank: BankConfig::default(),
             lipsync: LipsyncConfig::default(),
             usage: UsageClass::default(),
+            finalize: FinalizeConfig::default(),
         }
     }
 }

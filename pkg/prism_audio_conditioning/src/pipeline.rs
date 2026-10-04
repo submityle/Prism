@@ -22,6 +22,7 @@ use crate::codec_tier::{self, CodecRecommendation};
 use crate::config::ConditioningConfig;
 use crate::content_hash::{ContentHash, Hasher};
 use crate::decode::{self, DecodeError, SourceFormat};
+use crate::finalize::{self, FinalizeError};
 use crate::loop_point::{self, LoopPoints};
 use crate::loudness_offline::{self, LoudnessStats};
 use crate::marker::MarkerTimeline;
@@ -37,11 +38,19 @@ use crate::transient;
 pub enum PipelineError {
     /// The decode/import stage failed.
     Decode(DecodeError),
+    /// The program-finalization stage failed.
+    Finalize(FinalizeError),
 }
 
 impl From<DecodeError> for PipelineError {
     fn from(error: DecodeError) -> Self {
         PipelineError::Decode(error)
+    }
+}
+
+impl From<FinalizeError> for PipelineError {
+    fn from(error: FinalizeError) -> Self {
+        PipelineError::Finalize(error)
     }
 }
 
@@ -119,7 +128,11 @@ fn hash_artifact(pcm: &ConditionedPcm, config: &ConditioningConfig) -> ContentHa
 ///
 /// Stages: decode -> resample to the project rate -> loudness analysis ->
 /// loop/transient/tempo/marker extraction -> codec-tier recommendation ->
-/// content hash. The result is deterministic for a fixed `bytes` and `config`.
+/// optional program finalization -> content hash. Analysis stages describe
+/// the decoded program; the config-gated finalization stage (see
+/// [`crate::finalize`], default off) then produces the delivered `PCM` and
+/// rebased loop points that the content hash keys. The result is
+/// deterministic for a fixed `bytes` and `config`.
 ///
 /// # Errors
 ///
@@ -148,6 +161,14 @@ pub fn run(
 
     let profile = codec_tier::profile(&pcm);
     let codec = codec_tier::recommend(&profile, config.usage);
+
+    let (pcm, loop_points) = if config.finalize.is_enabled() {
+        let finalized =
+            finalize::finalize(&pcm, encoder_delay, loop_points, &config.finalize)?;
+        (finalized.pcm, finalized.loop_points)
+    } else {
+        (pcm, loop_points)
+    };
 
     let hash = hash_artifact(&pcm, config);
 
@@ -230,6 +251,41 @@ mod tests {
         let a = run(&tone_wav(48_000, 440.0, 4_000), SourceFormat::Wav, &config).unwrap();
         let b = run(&tone_wav(48_000, 660.0, 4_000), SourceFormat::Wav, &config).unwrap();
         assert_ne!(a.hash, b.hash);
+    }
+
+    #[test]
+    fn finalize_trims_program_when_enabled() {
+        let frames = 48_000;
+        let wav = tone_wav(48_000, 440.0, frames);
+        let mut config = ConditioningConfig::default();
+        config.decode.preroll_frames = 100;
+        config.decode.padding_frames = 50;
+
+        let raw = run(&wav, SourceFormat::Wav, &config).unwrap();
+        assert_eq!(raw.pcm.frames(), frames);
+        assert_eq!(raw.encoder_delay.preroll_frames, 100);
+
+        config.finalize.trim_encoder_delay = true;
+        let trimmed = run(&wav, SourceFormat::Wav, &config).unwrap();
+        assert_eq!(trimmed.pcm.frames(), frames - 150);
+        // Trimming changes the delivered program, so the content hash moves.
+        assert_ne!(raw.hash, trimmed.hash);
+        // Finalization is deterministic.
+        let again = run(&wav, SourceFormat::Wav, &config).unwrap();
+        assert_eq!(trimmed.hash, again.hash);
+        assert_eq!(trimmed.pcm.frames(), again.pcm.frames());
+    }
+
+    #[test]
+    fn finalize_disabled_matches_raw_program() {
+        let wav = tone_wav(48_000, 440.0, 8_000);
+        let mut config = ConditioningConfig::default();
+        config.decode.preroll_frames = 32;
+        config.decode.padding_frames = 16;
+
+        let a = run(&wav, SourceFormat::Wav, &config).unwrap();
+        // Default finalize is off, so the delivered program keeps every frame.
+        assert_eq!(a.pcm.frames(), 8_000);
     }
 
     #[test]

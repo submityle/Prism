@@ -21,6 +21,8 @@
 //! - [`delay_trim`] turns recorded encoder pre-roll/padding into concrete
 //!   timeline math: program trimming, raw<->program frame mapping,
 //!   loop-point rebasing, and sample-accurate seek planning.
+//! - [`finalize`] folds optional encoder-delay trim, loop-point rebasing,
+//!   and loop-seam crossfade baking into one config-gated delivery stage.
 //! - [`hrtf_condition`] conditions a SOFA HRIR dataset: resample to the target
 //!   rate, diffuse-field equalization, ITD extraction, and minimum-phasing.
 //! - [`lipsync`] exports an offline viseme/energy-envelope timeline.
@@ -63,6 +65,7 @@ pub mod config;
 pub mod content_hash;
 pub mod decode;
 pub mod delay_trim;
+pub mod finalize;
 pub mod hrtf_condition;
 pub mod lipsync;
 pub mod loop_crossfade;
