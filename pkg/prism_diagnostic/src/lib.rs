@@ -116,6 +116,7 @@ pub mod gpu;
 pub mod hitch;
 pub mod instrument;
 pub mod macros;
+pub mod mem;
 pub mod metrics;
 pub mod model;
 pub mod prelude;
@@ -142,6 +143,10 @@ pub use crash::{
 pub use budget::{
     hotspot_diff, Baseline, BudgetRegistry, BudgetStatus, FrameBudget, FrameBudgetReport,
     Hotspot, HotspotDelta, RegressionAlert, RegressionConfig, RegressionTracker,
+};
+pub use mem::{
+    analyze_fragmentation, occupancy_map, FragmentationReport, LeakCheckpoint, LeakReport,
+    MemBudget, MemBudgetRegistry, MemBudgetReport, MemBudgetStatus, Span,
 };
 pub use filter::{max_level, set_max_level};
 #[cfg(feature = "gpu")]
@@ -199,6 +204,8 @@ mod tests_m6_alloc;
 mod tests_m6_crash;
 #[cfg(test)]
 mod tests_budget;
+#[cfg(test)]
+mod tests_mem;
 #[cfg(test)]
 mod tests_m6_hitch;
 #[cfg(test)]

@@ -145,6 +145,14 @@ impl ViewSsrTextures {
         &self.scene_depth.default_view
     }
 
+    /// The reverse-Z device-depth prepass *texture* (not a view), so the
+    /// specular temporal denoiser can `copy_texture_to_texture` it into its
+    /// persistent previous-frame depth plane each frame. `COPY_SRC` is declared
+    /// on the descriptor above.
+    pub(crate) fn scene_depth_texture(&self) -> &bevy_render::render_resource::Texture {
+        &self.scene_depth.texture
+    }
+
     /// Multi-mip sampling view spanning the whole Hi-Z pyramid, bound by the
     /// trace so `textureLoad(hzb, cell, level)` climbs every level.
     pub(crate) fn hzb_view(&self) -> &TextureView {
@@ -278,8 +286,12 @@ pub(crate) fn prepare_ssr_textures(
                 sample_count: 1,
                 dimension: TextureDimension::D2,
                 format: SSR_DEPTH_FORMAT,
-                // Written by the prepass, sampled by the HZB build + trace.
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                // Written by the prepass, sampled by the HZB build + trace, and
+                // copied (COPY_SRC) into the specular denoiser's persistent
+                // previous-frame depth plane for its disocclusion guard.
+                usage: TextureUsages::STORAGE_BINDING
+                    | TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::COPY_SRC,
                 view_formats: &[],
             },
         );

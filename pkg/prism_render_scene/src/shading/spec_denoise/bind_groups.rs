@@ -36,6 +36,7 @@ use super::super::ssr::ViewSsrTextures;
 use super::abi::GpuSpecDenoiseSpatialConfig;
 use super::pipeline::SpecDenoiseSpatialPipeline;
 use super::resources::ViewSpecDenoise;
+use super::temporal_resources::ViewSpecDenoiseTemporal;
 
 /// Spatial filter parameters, mirroring `prism_render_shading::gi::spec_denoise`
 /// `SpatialParams::default()`. Hardcoded here because there is no per-view
@@ -121,9 +122,10 @@ pub(crate) fn prepare_spec_denoise_bind_groups(
         &ViewSpecGiReuse,
         &ViewSpecDenoise,
         &ExtractedView,
+        Option<&ViewSpecDenoiseTemporal>,
     )>,
 ) {
-    for (entity, ssr, spec_gi, denoise, extracted) in &views {
+    for (entity, ssr, spec_gi, denoise, extracted, temporal) in &views {
         let config = spatial_config(extracted.clip_from_view, denoise.size);
 
         // Per-view config uniform. `COPY_DST` so the queue write below lands;
@@ -136,6 +138,15 @@ pub(crate) fn prepare_spec_denoise_bind_groups(
         });
         queue.write_buffer(&config_buffer, 0, bytemuck::bytes_of(&config));
 
+        // Binding 1 is the specular estimate the spatial filter cleans. When the
+        // temporal accumulator ran (its denoised plane is resident), filter its
+        // anti-ghosted output; otherwise fall back to the raw `spec_gi` resolve
+        // so the spatial pass still runs standalone before the temporal path is
+        // gated in.
+        let filter_input = temporal
+            .map(|t| t.denoised_view())
+            .unwrap_or_else(|| spec_gi.resolved_view());
+
         // Sequential group 0: config uniform (0), the `spec_gi` resolved
         // specular+confidence estimate (1), the SSR trace's per-pixel world-space
         // hit distance (2), the packed normal/roughness G-buffer (3), the SSR
@@ -145,7 +156,7 @@ pub(crate) fn prepare_spec_denoise_bind_groups(
             pipeline.layout(),
             &BindGroupEntries::sequential((
                 config_buffer.as_entire_binding(),
-                spec_gi.resolved_view(),
+                filter_input,
                 ssr.ssr_hit_view(),
                 ssr.normal_roughness_view(),
                 ssr.scene_depth_sampled(),

@@ -363,12 +363,18 @@ AAA 项目的帧时间是**契约**（60/120Hz 必达），不能靠事后看 tr
 - **跨队列关联 ID**：一次 draw/dispatch 带关联 token，串起 CPU 录制 → 队列提交 → GPU 执行 → 呈现（present），端到端延迟一屏可见。
 - **PIX/RenderDoc/Tracy 对齐**：导出格式与主流 GPU 剖析器时间基对齐，便于交叉验证（接 RHI 的 debug marker）。
 
-### 24.3 内存分配追踪与泄漏/碎片可视化
+### 24.3 内存分配追踪与泄漏/碎片可视化 —— ✅ 已交付（`alloc_track` + `mem` 模块：泄漏对账/碎片/预算守卫）
 
 - **带标签分配**：接 `prism_utils` 分配器埋点（utils §10 alloc-track），每次分配记录调用栈 + 类别标签（资产/渲染/gameplay），按类别出内存占用树。
 - **泄漏检测**：作用域/帧边界对账未释放分配，关卡切换后应归零的池若残留即报泄漏 + 分配栈。
 - **碎片可视化**：虚拟内存/池占用图谱，暴露碎片与大块空洞，指导分配器调参（接 platform §9 内存信息）。
 - **预算守卫**：类别内存超预算触发事件，防发行版 OOM。
+
+**交付状态**：热路径核心 `alloc_track`（带标签 `GlobalAlloc`、精确 live/peak 字节、per-tag 累计）已交付；本次在其之上补齐帧/作用域边界的对账与守卫层，置于独立 `mem` 子模块（`src/mem/`，纯 `core`/`alloc` 算术、无 `unsafe`、与 `alloc-track` feature 无关，始终编译）：
+- 泄漏检测（`mem::leak`）：`LeakCheckpoint` 在作用域/帧开闭边界各取一次 live 字节/分配快照，`reconcile` 出带符号残差 `LeakReport`（正=泄漏、负=过度释放、零=归零平衡）；`alloc-track` 开启时可直接从 `AllocSnapshot` 构造。
+- 预算守卫（`mem::budget`）：`MemBudgetRegistry` 按类别（资产/渲染/gameplay）声明 live 字节上限，`evaluate`/`evaluate_all` 出 `MemBudgetReport`（逐类别红标 `over_budget`、超额字节、聚合与 `offenders()`），声明顺序稳定以便 diff/HUD；类别名可与 `alloc_track::tag_report` 的标签名对应取实测。
+- 碎片可视化（`mem::fragmentation`）：`analyze_fragmentation(capacity, &[Span])` 归一化（排序/合并/钳位）占用区间后，出 `FragmentationReport`（used/free 字节、空闲 run 数、最大连续空闲 run、`fragmentation_ratio`、`can_fit`）；`occupancy_map(capacity, occupied, buckets)` 出每桶 0..=100 占用百分比热条。
+专项测试 `tests_mem.rs`（12 用例，手算 oracle 对拍）全绿，`cargo clippy -p prism_diagnostic --all-targets` 零告警。
 
 ### 24.4 确定性回放与 trace 对拍（反 desync）
 
@@ -402,4 +408,4 @@ AAA 项目的帧时间是**契约**（60/120Hz 必达），不能靠事后看 tr
 
 ### 24.8 诚实边界
 
-**24.1 性能预算 + 自动回归告警已交付**（`budget` 模块：预算声明/帧级红标/调度余量/p50-p99 回归告警/热点 diff 归因）；其余为 PLANNED 设计目标，无代码。**24.3 内存追踪**是其他 crate 最先依赖的能力，建议随 M2/M3 优先落地；24.2 CPU·GPU 时间线随 RHI/render 接线落地；24.4 确定性对拍随 ECS/replication 确定性落地；24.5 采样剖析随 platform 栈回溯落地；24.6 分布式聚合、24.7 发行版遥测随联网/发行阶段落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+**24.1 性能预算 + 自动回归告警已交付**（`budget` 模块：预算声明/帧级红标/调度余量/p50-p99 回归告警/热点 diff 归因）。**24.3 内存追踪已交付**（`alloc_track` 热路径核心 + `mem` 对账/守卫层：泄漏带符号残差对账、per-类别预算红标、碎片 run/占用图谱分析）；已知边界：per-tag 统计为累计分配字节而非 live（per-tag live 为后续 follow-up），泄漏/碎片层的输入快照与占用列表由调用方在边界处采集。其余为 PLANNED 设计目标，无代码。24.2 CPU·GPU 时间线随 RHI/render 接线落地；24.4 确定性对拍随 ECS/replication 确定性落地；24.5 采样剖析随 platform 栈回溯落地；24.6 分布式聚合、24.7 发行版遥测随联网/发行阶段落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

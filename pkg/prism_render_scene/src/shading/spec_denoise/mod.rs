@@ -14,11 +14,24 @@ mod bind_groups;
 mod dispatch;
 mod pipeline;
 mod resources;
+mod temporal_abi;
+mod temporal_bind_groups;
+mod temporal_dispatch;
+mod temporal_pipeline;
+mod temporal_resources;
 
 pub(crate) use bind_groups::prepare_spec_denoise_bind_groups;
 pub(crate) use dispatch::spec_denoise_spatial_pass;
 pub(crate) use pipeline::init_spec_denoise_spatial_pipeline;
 pub(crate) use resources::{prepare_spec_denoise_resources, ViewSpecDenoise};
+pub(crate) use temporal_bind_groups::{
+    prepare_spec_denoise_history_clamp_bind_groups, prepare_spec_denoise_reproject_bind_groups,
+};
+pub(crate) use temporal_dispatch::{spec_denoise_history_clamp_pass, spec_denoise_reproject_pass};
+pub(crate) use temporal_pipeline::{
+    init_spec_denoise_history_clamp_pipeline, init_spec_denoise_reproject_pipeline,
+};
+pub(crate) use temporal_resources::prepare_spec_denoise_temporal_resources;
 
 #[cfg(test)]
 mod reproject_tests;

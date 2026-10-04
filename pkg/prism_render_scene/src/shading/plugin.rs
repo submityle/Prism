@@ -148,8 +148,11 @@ use super::{
         prepare_sky_transmittance_bind_group, sky_transmittance_lut_pass,
     },
     spec_denoise::{
+        init_spec_denoise_history_clamp_pipeline, init_spec_denoise_reproject_pipeline,
         init_spec_denoise_spatial_pipeline, prepare_spec_denoise_bind_groups,
-        prepare_spec_denoise_resources, spec_denoise_spatial_pass,
+        prepare_spec_denoise_history_clamp_bind_groups, prepare_spec_denoise_reproject_bind_groups,
+        prepare_spec_denoise_resources, prepare_spec_denoise_temporal_resources,
+        spec_denoise_history_clamp_pass, spec_denoise_reproject_pass, spec_denoise_spatial_pass,
     },
     spec_gi::{
         init_spec_gi_composite_pipeline, init_spec_gi_reuse_pipeline,
@@ -271,6 +274,8 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/spec_gi_reuse.wesl");
         embedded_asset!(app, "../shaders/spec_gi_composite.wesl");
         embedded_asset!(app, "../shaders/spec_denoise_spatial.wesl");
+        embedded_asset!(app, "../shaders/spec_denoise_reproject.wesl");
+        embedded_asset!(app, "../shaders/spec_denoise_history_clamp.wesl");
         embedded_asset!(app, "../shaders/ssgi.wesl");
         embedded_asset!(app, "../shaders/sky_multiscatter_lut.wesl");
         embedded_asset!(app, "../shaders/sky_transmittance_lut.wesl");
@@ -532,6 +537,8 @@ impl Plugin for PrismShadingPlugin {
                     init_spec_gi_reuse_pipeline,
                     init_spec_gi_composite_pipeline,
                     init_spec_denoise_spatial_pipeline,
+                    init_spec_denoise_reproject_pipeline,
+                    init_spec_denoise_history_clamp_pipeline,
                 ),
             )
             // Volumetric-cloud domain + per-view resource and bind-group
@@ -721,8 +728,33 @@ impl Plugin for PrismShadingPlugin {
                         prepare_spec_denoise_resources
                             .after(prepare_spec_gi_reuse_resources)
                             .in_set(RenderSystems::PrepareResources),
+                        // The temporal accumulator's persistent ping-pong planes
+                        // allocate alongside the spatial target (same gate),
+                        // right after the reuse resolve they clamp against; the
+                        // cache is keyed by `RetainedViewEntity` so it survives
+                        // across frames.
+                        prepare_spec_denoise_temporal_resources
+                            .after(prepare_spec_gi_reuse_resources)
+                            .in_set(RenderSystems::PrepareResources),
+                        // Temporal bind groups: reproject binds this frame's SSR
+                        // reads + last frame's history, then history-clamp binds
+                        // the reprojected planes + the reuse resolve. Both order
+                        // after the temporal planes allocate; clamp orders after
+                        // reproject so its reprojected inputs are this frame's.
+                        prepare_spec_denoise_reproject_bind_groups
+                            .after(prepare_spec_denoise_temporal_resources)
+                            .after(prepare_spec_gi_reuse_bind_groups)
+                            .in_set(RenderSystems::PrepareBindGroups),
+                        prepare_spec_denoise_history_clamp_bind_groups
+                            .after(prepare_spec_denoise_reproject_bind_groups)
+                            .after(prepare_spec_gi_reuse_bind_groups)
+                            .in_set(RenderSystems::PrepareBindGroups),
+                        // The spatial filter binds the temporal denoised plane
+                        // (when resident) instead of the raw resolve, so it must
+                        // order after the temporal planes allocate as well.
                         prepare_spec_denoise_bind_groups
                             .after(prepare_spec_denoise_resources)
+                            .after(prepare_spec_denoise_temporal_resources)
                             .after(prepare_spec_gi_reuse_bind_groups)
                             .in_set(RenderSystems::PrepareBindGroups),
                         // The energy-conserving composite's per-view group binds
@@ -1195,8 +1227,23 @@ impl Plugin for PrismShadingPlugin {
                     // specular blur). No-op unless `enable_spec_gi` + the
                     // SSR/visibility gate held in resource prep.
                     (
-                        spec_denoise_spatial_pass
+                        // Temporal reproject: stages this frame's SSR depth for
+                        // next frame and reprojects last frame's converged
+                        // specular history. Runs right after the reuse resolve.
+                        spec_denoise_reproject_pass
                             .after(spec_gi_reuse_pass)
+                            .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                        // History-clamp: fuses the reprojected history with this
+                        // frame's noisy resolve under an AABB colour clamp and
+                        // writes the `denoised` plane the spatial pass filters.
+                        spec_denoise_history_clamp_pass
+                            .after(spec_denoise_reproject_pass)
+                            .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                        // Spatial filter: now cleans the temporally accumulated
+                        // (anti-ghosted) specular rather than the raw resolve, so
+                        // it orders after the history-clamp pass.
+                        spec_denoise_spatial_pass
+                            .after(spec_denoise_history_clamp_pass)
                             .before(bevy_core_pipeline::Core3dSystems::MainPass),
                         spec_gi_composite_pass
                             .after(spec_gi_reuse_pass)
