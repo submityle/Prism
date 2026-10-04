@@ -606,6 +606,8 @@ pub mod skempton_pore_pressure;
 pub use skempton_pore_pressure::SkemptonPorePressure;
 pub mod bishop_effective_stress;
 pub use bishop_effective_stress::BishopEffectiveStress;
+pub mod lode_shape_factor;
+pub use lode_shape_factor::LodeShapeFactor;
 
 /// A handle into a [`ShapeRegistry`].
 ///
