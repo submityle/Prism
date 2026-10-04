@@ -614,6 +614,8 @@ pub mod bolton_dilatancy_index;
 pub use bolton_dilatancy_index::BoltonDilatancyIndex;
 pub mod critical_state_friction_ratio;
 pub use critical_state_friction_ratio::CriticalStateFrictionRatio;
+pub mod overconsolidation_ratio;
+pub use overconsolidation_ratio::OverconsolidationRatio;
 
 /// A handle into a [`ShapeRegistry`].
 ///
