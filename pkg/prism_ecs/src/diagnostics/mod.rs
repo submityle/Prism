@@ -116,6 +116,15 @@
 //!   plus a registry-wide roll-up — surfacing frames where incremental upload
 //!   degenerates into a full re-upload (design §16.6 / §15 / §1;
 //!   `gpu_resident` feature).
+//! * [`lod_schedule_audit`] — LOD schedule band-table well-formedness
+//!   audit (design §13.2 / §23.7): a pure read of a
+//!   [`LodSchedule`](crate::partition::lod::LodSchedule) that flags the
+//!   semantic smells its constructor does not enforce — unreachable bands
+//!   whose upper edge does not exceed the nearer band, cadence regressions
+//!   (a farther band ticking more often than a nearer one), and quality
+//!   regressions (a farther band more precise than a nearer one) — per band
+//!   plus schedule-wide roll-ups for a tuning tool or CI gate
+//!   (design §16.6 / §13.2 / §23.7; `partition` feature).
 //! * [`partition_occupancy`] — world-partition cell occupancy / streaming
 //!   census (design §13.1): joins the cell streamer with the entity index
 //!   per cell to report per-cell [`CellState`](crate::partition::cell::CellState)
@@ -157,6 +166,8 @@ pub mod gpu_batch_efficiency;
 pub mod gpu_resident_upload;
 pub mod hook_coverage;
 pub mod inspector;
+#[cfg(feature = "partition")]
+pub mod lod_schedule_audit;
 pub mod memory_footprint;
 pub mod owning_group_packing;
 #[cfg(feature = "partition")]
@@ -194,6 +205,8 @@ pub use gpu_batch_efficiency::{BatchEntry, GpuBatchEfficiencyReport};
 pub use gpu_resident_upload::{ColumnUploadEntry, GpuUploadReport};
 pub use hook_coverage::{HookCoverageEntry, HookCoverageReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
+#[cfg(feature = "partition")]
+pub use lod_schedule_audit::{LodBandAudit, LodScheduleAudit};
 pub use memory_footprint::{ArchetypeMemoryEntry, MemoryFootprintReport};
 pub use owning_group_packing::{OwningGroupPackingEntry, OwningGroupPackingReport};
 #[cfg(feature = "partition")]
