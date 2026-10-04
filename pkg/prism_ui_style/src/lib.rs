@@ -62,6 +62,7 @@ extern crate alloc;
 pub mod cascade;
 pub mod class;
 pub mod calc;
+pub mod color;
 pub mod error;
 pub mod selector;
 pub mod theme;
