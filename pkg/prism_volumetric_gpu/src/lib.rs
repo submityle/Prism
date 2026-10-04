@@ -552,6 +552,7 @@ pub mod water_underwater_transmittance;
 pub mod water_wake_amplitude;
 pub mod water_waterline_weight;
 pub mod water_wetness_response;
+pub mod water_wetness_step;
 pub mod welzl_min_sphere;
 pub mod wind_field;
 pub mod worley;
@@ -1329,6 +1330,7 @@ pub use water_waterline_weight::{
 pub use water_wetness_response::{
     GpuWaterWetnessResponse, WaterWetnessResponseQuery, WaterWetnessResponseResult,
 };
+pub use water_wetness_step::{GpuWaterWetnessStep, WaterWetnessStep};
 pub use welzl_min_sphere::{GpuWelzlMinSphere, WelzlMinSphereQuery, WelzlMinSphereResult};
 pub use wind_field::{GpuWindField, WindFieldQuery, WindFieldResult};
 pub use worley::{GpuWorley, WorleyQuery};
