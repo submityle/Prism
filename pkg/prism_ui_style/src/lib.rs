@@ -21,6 +21,9 @@
 //! * [`theme`] bundles a [`TokenStore`] with the breakpoint scale and ships a
 //!   small default palette.
 //!
+//! * [`angle`] models the CSS `<angle>` value type (`deg`/`grad`/`rad`/
+//!   `turn`) with unit-preserving conversions and modular normalization.
+//!
 //! Resolution never panics; failures are reported as a [`StyleError`].
 //!
 //! # Example
@@ -59,6 +62,7 @@
 
 extern crate alloc;
 
+pub mod angle;
 pub mod cascade;
 pub mod class;
 pub mod calc;
@@ -69,6 +73,7 @@ pub mod theme;
 pub mod token;
 pub mod value;
 
+pub use angle::{Angle, AngleUnit};
 pub use cascade::{resolve, Cascade, ComputedStyle};
 pub use class::{Class, PropMap, StyleSheet};
 pub use error::StyleError;
