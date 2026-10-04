@@ -151,6 +151,77 @@ pub fn lambert_weight(cos_in: Sample, cos_out: Sample) -> Sample {
     ops::sqrt(a * b)
 }
 
+/// Computes one surface's Lambert-weighted diffuse contribution for a source
+/// and listener, or `None` when the surface cannot scatter source energy toward
+/// the listener.
+///
+/// Shared by [`resolve_diffuse_reflections`] and
+/// [`resolve_diffuse_energy_response`] so the aggregate send and the energy-time
+/// response see identical per-surface geometry, visibility, and gain. Returns
+/// the surface's diffuse reflection coefficient already scaled by the
+/// `base_distance / path_length` spreading ratio and the Lambertian radiation
+/// weight, paired with the total source-to-surface-to-listener path length in
+/// metres.
+///
+/// Returns `None` when the triangle is degenerate, the source or listener sits
+/// on the surface, the geometry is grazing or back-facing on either leg, or
+/// either leg of the scattering path is obstructed.
+fn scattered_contribution(
+    scene: &AcousticScene,
+    listener: &Listener,
+    emitter: &Emitter,
+    eps: Sample,
+    triangle: usize,
+    base_distance: Sample,
+) -> Option<(BandGains, Sample)> {
+    let [a, b, c] = scene.triangle(triangle)?;
+    let normal = scene.triangle_normal(triangle)?;
+
+    // Both legs of the scattering path meet at the surface centroid, the
+    // representative point for a first-order diffuse bounce off the face.
+    let centroid = (a + b + c) / 3.0;
+    let to_source = emitter.position - centroid;
+    let to_listener = listener.position - centroid;
+    let d_source = distance(emitter.position, centroid);
+    let d_listener = distance(listener.position, centroid);
+    if d_source <= 0.0 || d_listener <= 0.0 {
+        return None;
+    }
+
+    // Incidence and exitance cosines against the surface normal. The mesh normal
+    // has an arbitrary winding-defined sign, so orient it toward the source:
+    // once the source sits on the positive side, the listener must too for the
+    // surface to scatter source energy toward it.
+    let unit_source = to_source / d_source;
+    let unit_listener = to_listener / d_listener;
+    let mut cos_in = unit_source.dot(normal);
+    let mut cos_out = unit_listener.dot(normal);
+    if cos_in < 0.0 {
+        cos_in = -cos_in;
+        cos_out = -cos_out;
+    }
+    if cos_in <= 0.0 || cos_out <= 0.0 {
+        return None;
+    }
+
+    // Both legs must be unobstructed for the surface to be mutually visible to
+    // source and listener.
+    if scene.segment_blocked(listener.position, centroid, eps)
+        || scene.segment_blocked(centroid, emitter.position, eps)
+    {
+        return None;
+    }
+
+    let path_length = d_source + d_listener;
+    let spreading = (base_distance / path_length).clamp(0.0, 1.0);
+    let lambert = lambert_weight(cos_in, cos_out);
+    let diffuse = scene
+        .material(triangle)
+        .diffuse_reflection()
+        .scaled(spreading * lambert);
+    Some((diffuse, path_length))
+}
+
 /// Resolves the aggregate diffuse (scattered) first-order reflection field for
 /// a source and listener in a scene.
 ///
@@ -190,55 +261,11 @@ pub fn resolve_diffuse_reflections(
     let mut surfaces: usize = 0;
 
     for triangle in 0..scene.triangle_count() {
-        let Some([a, b, c]) = scene.triangle(triangle) else {
+        let Some((diffuse, path_length)) =
+            scattered_contribution(scene, listener, emitter, eps, triangle, base_distance)
+        else {
             continue;
         };
-        let Some(normal) = scene.triangle_normal(triangle) else {
-            continue;
-        };
-
-        // Both legs of the scattering path meet at the surface centroid, the
-        // representative point for a first-order diffuse bounce off the face.
-        let centroid = (a + b + c) / 3.0;
-        let to_source = emitter.position - centroid;
-        let to_listener = listener.position - centroid;
-        let d_source = distance(emitter.position, centroid);
-        let d_listener = distance(listener.position, centroid);
-        if d_source <= 0.0 || d_listener <= 0.0 {
-            continue;
-        }
-
-        // Incidence and exitance cosines against the surface normal. The mesh
-        // normal has an arbitrary winding-defined sign, so orient it toward the
-        // source: once the source sits on the positive side, the listener must
-        // too for the surface to scatter source energy toward it.
-        let unit_source = to_source / d_source;
-        let unit_listener = to_listener / d_listener;
-        let mut cos_in = unit_source.dot(normal);
-        let mut cos_out = unit_listener.dot(normal);
-        if cos_in < 0.0 {
-            cos_in = -cos_in;
-            cos_out = -cos_out;
-        }
-        if cos_in <= 0.0 || cos_out <= 0.0 {
-            continue;
-        }
-
-        // Both legs must be unobstructed for the surface to be mutually
-        // visible to source and listener.
-        if scene.segment_blocked(listener.position, centroid, eps)
-            || scene.segment_blocked(centroid, emitter.position, eps)
-        {
-            continue;
-        }
-
-        let path_length = d_source + d_listener;
-        let spreading = (base_distance / path_length).clamp(0.0, 1.0);
-        let lambert = lambert_weight(cos_in, cos_out);
-        let diffuse = scene
-            .material(triangle)
-            .diffuse_reflection()
-            .scaled(spreading * lambert);
         let bands = diffuse.bands();
 
         let mut surface_energy: Sample = 0.0;
@@ -278,6 +305,203 @@ pub fn resolve_diffuse_reflections(
         mean_delay_seconds,
         contributing_surfaces: surfaces,
     }
+}
+
+/// Number of fixed-width time bins the diffuse energy-time response spans.
+pub const DIFFUSE_RESPONSE_BINS: usize = 16;
+
+/// Width of each [`DiffuseEnergyResponse`] time bin, in seconds. Sixteen 10 ms
+/// bins cover the first 160 ms — the early-reflection window a downstream late
+/// stage uses to shape the onset of its decay.
+pub const DIFFUSE_RESPONSE_BIN_SECONDS: Sample = 0.010;
+
+/// The geometric diffuse (scattered) first-order energy arriving at the
+/// listener, resolved as an early energy-time response rather than a single
+/// aggregated send.
+///
+/// Where [`DiffuseReflectionField`] collapses every scattering surface into one
+/// send with a single energy-weighted mean delay, this response preserves *when*
+/// the scattered energy arrives: it histograms each surface's per-band energy
+/// into [`DIFFUSE_RESPONSE_BINS`] fixed-width time bins by arrival delay. That
+/// early energy-time curve is what a downstream late/diffuse stage (design
+/// sections 14 and 17) feeds into its reverberator to shape the build-up of the
+/// early diffuse field, instead of smearing all scattered energy to one instant.
+///
+/// All energies are linear power (`gain * gain`) in the same relative scale as
+/// [`DiffuseReflectionField::send`]: referenced to the free-field direct
+/// arrival at the query's `base_distance`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DiffuseEnergyResponse {
+    /// Per-bin, per-band diffuse energy (linear power, `gain * gain`). Index by
+    /// `[bin][band]`: `bin` is the arrival-delay bucket of width
+    /// [`DIFFUSE_RESPONSE_BIN_SECONDS`] and `band` indexes the
+    /// [`PROPAGATION_BAND_COUNT`] propagation bands. Only energy arriving inside
+    /// the [`window_seconds`](Self::window_seconds) early window is binned here;
+    /// later energy accumulates in [`tail_energy`](Self::tail_energy).
+    pub energy: [[Sample; PROPAGATION_BAND_COUNT]; DIFFUSE_RESPONSE_BINS],
+    /// Broadband diffuse energy arriving *after* the binned early window, summed
+    /// across all bands. Retained rather than silently discarded so the response
+    /// conserves total scattered energy and remains auditable.
+    pub tail_energy: Sample,
+    /// Arrival delay of the earliest contributing surface, in seconds; `0.0`
+    /// when no surface contributes.
+    pub onset_seconds: Sample,
+    /// Total diffuse energy across every band and surface, including the tail:
+    /// the sum of all binned energy plus [`tail_energy`](Self::tail_energy).
+    pub total_energy: Sample,
+    /// Number of scattering surfaces that contributed audible diffuse energy to
+    /// this response.
+    pub contributing_surfaces: usize,
+}
+
+impl DiffuseEnergyResponse {
+    /// A response with no diffuse energy: every bin zero, no tail, no onset, no
+    /// contributing surfaces. Returned when scattering is disabled, the scene is
+    /// empty, or no surface scatters audible energy toward the listener.
+    pub const SILENT: Self = Self {
+        energy: [[0.0; PROPAGATION_BAND_COUNT]; DIFFUSE_RESPONSE_BINS],
+        tail_energy: 0.0,
+        onset_seconds: 0.0,
+        total_energy: 0.0,
+        contributing_surfaces: 0,
+    };
+
+    /// Total duration of the binned early window, in seconds:
+    /// [`DIFFUSE_RESPONSE_BINS`] times [`DIFFUSE_RESPONSE_BIN_SECONDS`].
+    pub fn window_seconds(&self) -> Sample {
+        DIFFUSE_RESPONSE_BINS as Sample * DIFFUSE_RESPONSE_BIN_SECONDS
+    }
+
+    /// Linear *amplitude* (the square root of the stored power) in one bin and
+    /// band of the response.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bin >= DIFFUSE_RESPONSE_BINS` or
+    /// `band >= PROPAGATION_BAND_COUNT`.
+    pub fn band_amplitude(&self, bin: usize, band: usize) -> Sample {
+        ops::sqrt(self.energy[bin][band])
+    }
+
+    /// The aggregate per-band diffuse send implied by the binned early window:
+    /// for each band, the square root of its energy summed across every in-window
+    /// bin, clamped to `0.0..=1.0`. This is the same quantity
+    /// [`DiffuseReflectionField::send`] carries, recovered from the
+    /// time-resolved response, so the two resolvers agree on audibility.
+    pub fn in_window_send(&self) -> BandGains {
+        let mut bands = [0.0 as Sample; PROPAGATION_BAND_COUNT];
+        for bin in &self.energy {
+            for (slot, &e) in bands.iter_mut().zip(bin.iter()) {
+                *slot += e;
+            }
+        }
+        for slot in &mut bands {
+            *slot = ops::sqrt(*slot).clamp(0.0, 1.0);
+        }
+        BandGains::new(bands)
+    }
+
+    /// Returns `true` when the broadband magnitude of
+    /// [`in_window_send`](Self::in_window_send) exceeds the supplied audibility
+    /// `floor`, matching [`DiffuseReflectionField::is_audible`] so both resolvers
+    /// agree on whether the diffuse field is worth rendering.
+    pub fn is_audible(&self, floor: Sample) -> bool {
+        self.in_window_send().broadband_rms() > floor
+    }
+}
+
+impl Default for DiffuseEnergyResponse {
+    fn default() -> Self {
+        Self::SILENT
+    }
+}
+
+/// Resolves the geometric diffuse (scattered) first-order **energy-time
+/// response** for a source and listener in a scene.
+///
+/// Shares [`scattered_contribution`]'s per-surface geometry, visibility, and
+/// gain with [`resolve_diffuse_reflections`], but instead of collapsing every
+/// surface into one send with a single mean delay, it histograms each surface's
+/// per-band scattered energy into [`DIFFUSE_RESPONSE_BINS`] fixed-width time bins
+/// by arrival delay. Energy arriving past the early window accumulates in
+/// [`DiffuseEnergyResponse::tail_energy`]. `base_distance` is the free-field
+/// direct distance each surface's gain is referenced against.
+///
+/// Returns [`DiffuseEnergyResponse::SILENT`] under the same conditions as
+/// [`resolve_diffuse_reflections`]: reflections disabled, empty scene, no
+/// surface scattering toward the listener, or an aggregate in-window send that
+/// does not clear [`GeometricConfig::min_gain`]. The audibility gate uses the
+/// same quantity as [`resolve_diffuse_reflections`], so the two resolvers never
+/// disagree on whether the diffuse field is audible.
+///
+/// Runs at control rate, allocates nothing on the heap, never panics, and is
+/// deterministic: surfaces are visited in ascending triangle index order and all
+/// arithmetic flows through [`bevy_math::ops`](bevy_math::ops).
+pub fn resolve_diffuse_energy_response(
+    scene: &AcousticScene,
+    listener: &Listener,
+    emitter: &Emitter,
+    config: &GeometricConfig,
+    base_distance: Sample,
+) -> DiffuseEnergyResponse {
+    if !config.reflections_enabled || config.max_reflections == 0 || scene.is_empty() {
+        return DiffuseEnergyResponse::SILENT;
+    }
+
+    let eps = config.surface_epsilon_m.max(0.0);
+    let mut energy = [[0.0 as Sample; PROPAGATION_BAND_COUNT]; DIFFUSE_RESPONSE_BINS];
+    let mut tail_energy: Sample = 0.0;
+    let mut total_energy: Sample = 0.0;
+    let mut onset_seconds = Sample::MAX;
+    let mut surfaces: usize = 0;
+
+    for triangle in 0..scene.triangle_count() {
+        let Some((diffuse, path_length)) =
+            scattered_contribution(scene, listener, emitter, eps, triangle, base_distance)
+        else {
+            continue;
+        };
+        let bands = diffuse.bands();
+
+        let delay = path_length / SPEED_OF_SOUND_MPS;
+        let bin = (delay / DIFFUSE_RESPONSE_BIN_SECONDS) as usize;
+
+        let mut surface_energy: Sample = 0.0;
+        for (band, &gain) in bands.iter().enumerate() {
+            let e = gain * gain;
+            surface_energy += e;
+            total_energy += e;
+            if bin < DIFFUSE_RESPONSE_BINS {
+                energy[bin][band] += e;
+            } else {
+                tail_energy += e;
+            }
+        }
+        if surface_energy <= 0.0 {
+            continue;
+        }
+
+        if delay < onset_seconds {
+            onset_seconds = delay;
+        }
+        surfaces += 1;
+    }
+
+    if surfaces == 0 || total_energy <= 0.0 {
+        return DiffuseEnergyResponse::SILENT;
+    }
+
+    let response = DiffuseEnergyResponse {
+        energy,
+        tail_energy,
+        onset_seconds,
+        total_energy,
+        contributing_surfaces: surfaces,
+    };
+    if !response.is_audible(config.min_gain) {
+        return DiffuseEnergyResponse::SILENT;
+    }
+    response
 }
 
 #[cfg(test)]
@@ -507,5 +731,185 @@ mod tests {
             + emitter.position.distance(centroid))
             / SPEED_OF_SOUND_MPS;
         assert!((field.mean_delay_seconds - expected).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn energy_response_silent_when_disabled_or_empty() {
+        let listener = listener_at(Vec3::new(-4.0, 2.0, 0.0));
+        let emitter = emitter_at(Vec3::new(4.0, 2.0, 0.0));
+
+        let empty = resolve_diffuse_energy_response(
+            &empty_scene(),
+            &listener,
+            &emitter,
+            &GeometricConfig::new(48_000),
+            8.0,
+        );
+        assert_eq!(empty, DiffuseEnergyResponse::SILENT);
+
+        let disabled = resolve_diffuse_energy_response(
+            &rough_floor(0.9, 0.5),
+            &listener,
+            &emitter,
+            &GeometricConfig::new(48_000).without_reflections(),
+            8.0,
+        );
+        assert_eq!(disabled, DiffuseEnergyResponse::SILENT);
+
+        let no_bounces = resolve_diffuse_energy_response(
+            &rough_floor(0.9, 0.5),
+            &listener,
+            &emitter,
+            &GeometricConfig::new(48_000).with_max_reflections(0),
+            8.0,
+        );
+        assert_eq!(no_bounces, DiffuseEnergyResponse::SILENT);
+
+        // No scattering coefficient means no diffuse energy to histogram.
+        let smooth = resolve_diffuse_energy_response(
+            &rough_floor(0.9, 0.0),
+            &listener,
+            &emitter,
+            &GeometricConfig::new(48_000),
+            8.0,
+        );
+        assert_eq!(smooth, DiffuseEnergyResponse::SILENT);
+    }
+
+    #[test]
+    fn energy_response_bins_rough_floor() {
+        let response = resolve_diffuse_energy_response(
+            &rough_floor(0.9, 0.5),
+            &listener_at(Vec3::new(-4.0, 2.0, 0.0)),
+            &emitter_at(Vec3::new(4.0, 2.0, 0.0)),
+            &GeometricConfig::new(48_000),
+            8.0,
+        );
+        assert_eq!(response.contributing_surfaces, 2);
+        assert!(response.total_energy > 0.0);
+        assert!(response.onset_seconds > 0.0);
+        // At least one bin in the early window carries energy.
+        let occupied: usize = response
+            .energy
+            .iter()
+            .filter(|bin| bin.iter().any(|&e| e > 0.0))
+            .count();
+        assert!(occupied >= 1);
+    }
+
+    #[test]
+    fn energy_response_conserves_energy() {
+        let response = resolve_diffuse_energy_response(
+            &rough_floor(0.9, 0.5),
+            &listener_at(Vec3::new(-4.0, 2.0, 0.0)),
+            &emitter_at(Vec3::new(4.0, 2.0, 0.0)),
+            &GeometricConfig::new(48_000),
+            8.0,
+        );
+        let binned: Sample = response
+            .energy
+            .iter()
+            .map(|bin| bin.iter().sum::<Sample>())
+            .sum();
+        assert!((binned + response.tail_energy - response.total_energy).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn energy_response_onset_matches_single_surface_geometry() {
+        let listener = listener_at(Vec3::new(-4.0, 2.0, 0.0));
+        let emitter = emitter_at(Vec3::new(4.0, 2.0, 0.0));
+        let response = resolve_diffuse_energy_response(
+            &half_floor(0.9, 0.5),
+            &listener,
+            &emitter,
+            &GeometricConfig::new(48_000),
+            8.0,
+        );
+        assert_eq!(response.contributing_surfaces, 1);
+        let centroid = (Vec3::new(-10.0, 0.0, -10.0)
+            + Vec3::new(-10.0, 0.0, 10.0)
+            + Vec3::new(10.0, 0.0, 10.0))
+            / 3.0;
+        let expected = (listener.position.distance(centroid)
+            + emitter.position.distance(centroid))
+            / SPEED_OF_SOUND_MPS;
+        assert!((response.onset_seconds - expected).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn energy_response_opposite_sides_is_silent() {
+        let response = resolve_diffuse_energy_response(
+            &rough_floor(0.9, 0.5),
+            &listener_at(Vec3::new(-4.0, 2.0, 0.0)),
+            &emitter_at(Vec3::new(4.0, -2.0, 0.0)),
+            &GeometricConfig::new(48_000),
+            8.0,
+        );
+        assert_eq!(response, DiffuseEnergyResponse::SILENT);
+    }
+
+    #[test]
+    fn energy_response_default_is_silent() {
+        assert_eq!(
+            DiffuseEnergyResponse::default(),
+            DiffuseEnergyResponse::SILENT
+        );
+        assert!(!DiffuseEnergyResponse::default().is_audible(0.0));
+    }
+
+    #[test]
+    fn energy_response_window_and_band_amplitude() {
+        let response = resolve_diffuse_energy_response(
+            &rough_floor(0.9, 0.5),
+            &listener_at(Vec3::new(-4.0, 2.0, 0.0)),
+            &emitter_at(Vec3::new(4.0, 2.0, 0.0)),
+            &GeometricConfig::new(48_000),
+            8.0,
+        );
+        let expected_window = DIFFUSE_RESPONSE_BINS as Sample * DIFFUSE_RESPONSE_BIN_SECONDS;
+        assert!((response.window_seconds() - expected_window).abs() < EPS);
+        for (bin_index, bin) in response.energy.iter().enumerate() {
+            for (band, &e) in bin.iter().enumerate() {
+                let amp = response.band_amplitude(bin_index, band);
+                assert!((amp - ops::sqrt(e)).abs() < EPS);
+            }
+        }
+    }
+
+    #[test]
+    fn energy_response_agrees_with_field_audibility() {
+        let config = GeometricConfig::new(48_000);
+        let listener = listener_at(Vec3::new(-4.0, 2.0, 0.0));
+        let emitter = emitter_at(Vec3::new(4.0, 2.0, 0.0));
+
+        let audible_scene = rough_floor(0.9, 0.5);
+        let field = resolve_diffuse_reflections(&audible_scene, &listener, &emitter, &config, 8.0);
+        let response =
+            resolve_diffuse_energy_response(&audible_scene, &listener, &emitter, &config, 8.0);
+        assert_eq!(
+            field.is_audible(config.min_gain),
+            response.is_audible(config.min_gain)
+        );
+
+        // The in-window aggregate send recovered from the response equals the
+        // field's send on an in-window scene.
+        for (recovered, direct) in response
+            .in_window_send()
+            .bands()
+            .iter()
+            .zip(field.send.bands().iter())
+        {
+            assert!((recovered - direct).abs() < 1.0e-5);
+        }
+
+        let silent_scene = empty_scene();
+        let silent_field =
+            resolve_diffuse_reflections(&silent_scene, &listener, &emitter, &config, 8.0);
+        let silent_response =
+            resolve_diffuse_energy_response(&silent_scene, &listener, &emitter, &config, 8.0);
+        assert_eq!(
+            silent_field.is_audible(config.min_gain),
+            silent_response.is_audible(config.min_gain)
+        );
     }
 }
