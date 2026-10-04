@@ -10,5 +10,9 @@ publish = false
 default = ["std"]
 std = []
 
+[[bench]]
+name = "layout_solve"
+harness = false
+
 [lints]
 workspace = true
