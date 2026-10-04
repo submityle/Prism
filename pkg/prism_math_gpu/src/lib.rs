@@ -51,6 +51,7 @@ pub mod sh;
 pub mod skinning;
 pub mod srgb;
 pub mod view;
+pub mod xyz;
 
 pub use context::{GpuContext, block_on};
 pub use f16::GpuF16Pack;
@@ -69,3 +70,4 @@ pub use sh::{GpuSh3Eval, SH3_COEFFS};
 pub use skinning::{GpuDualQuatSkin, Influence, MAX_INFLUENCES};
 pub use srgb::GpuSrgbTransfer;
 pub use view::{GpuView, ViewKind};
+pub use xyz::GpuXyz;

@@ -903,3 +903,38 @@ fn prism_oklab_to_linear(c: vec4<f32>) -> vec4<f32> {\n\
         c.w,\n\
     );\n\
 }\n";
+
+/// Single-sourced WGSL for the linear-sRGB <-> CIE 1931 XYZ (D65) conversion.
+///
+/// `prism_linear_to_xyz` applies the sRGB-primaries-to-XYZ matrix and
+/// `prism_xyz_to_linear` its inverse; both carry the fourth lane (alpha)
+/// through unchanged. The 3x3 matrix literals match the CPU reference
+/// [`LinearRgba::to_xyz`](crate::color::LinearRgba::to_xyz) /
+/// [`LinearRgba::from_xyz`](crate::color::LinearRgba::from_xyz)
+/// component-for-component. This path is ordinary FMA arithmetic (no
+/// transcendental), so parity is verified with a tight tolerance that only
+/// absorbs Metal fast-math last-ULP rounding, not bit-exactly.
+pub const WGSL_XYZ: &str = "\
+fn prism_linear_to_xyz(c: vec4<f32>) -> vec4<f32> {\n\
+    let r = c.x;\n\
+    let g = c.y;\n\
+    let b = c.z;\n\
+    return vec4<f32>(\n\
+        0.4124564 * r + 0.3575761 * g + 0.1804375 * b,\n\
+        0.2126729 * r + 0.7151522 * g + 0.072175 * b,\n\
+        0.0193339 * r + 0.119192 * g + 0.9503041 * b,\n\
+        c.w,\n\
+    );\n\
+}\n\
+\n\
+fn prism_xyz_to_linear(c: vec4<f32>) -> vec4<f32> {\n\
+    let x = c.x;\n\
+    let y = c.y;\n\
+    let z = c.z;\n\
+    return vec4<f32>(\n\
+        3.2404542 * x - 1.5371385 * y - 0.4985314 * z,\n\
+        -0.969266 * x + 1.8760108 * y + 0.041556 * z,\n\
+        0.0556434 * x - 0.2040259 * y + 1.0572252 * z,\n\
+        c.w,\n\
+    );\n\
+}\n";
