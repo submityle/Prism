@@ -70,11 +70,13 @@
 extern crate alloc;
 
 pub mod controls;
+pub mod fuzzy;
 pub mod harness;
 pub mod registry;
 pub mod story;
 
 pub use controls::{ArgSet, ControlError, ControlKind, ControlValue};
+pub use fuzzy::{fuzzy_filter, fuzzy_match, FuzzyMatch, StoryHit};
 pub use harness::{render_story, render_story_default, render_story_with_context, RenderResult};
 pub use registry::Workbench;
 pub use story::{Story, StoryBuilder, StoryContext};
