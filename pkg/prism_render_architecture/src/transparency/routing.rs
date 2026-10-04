@@ -71,6 +71,10 @@ impl TransparentSurface {
 pub struct TransparencyCapability {
     /// `true` when the backend can run the moment-based OIT resolve.
     pub moment_oit: bool,
+    /// `true` when the backend can run the adaptive-transparency resolve
+    /// (a bounded per-pixel visibility curve). Preferred over weighted OIT for
+    /// high-fidelity order-independent surfaces when moment OIT is unavailable.
+    pub adaptive_oit: bool,
 }
 
 /// Selects the transparency path for a surface given backend capabilities.
@@ -78,8 +82,8 @@ pub struct TransparencyCapability {
 /// Water, hair, and volumes always take their dedicated paths. Glass sorts when
 /// it is a single layer and uses the layered resolve otherwise. A general
 /// surface that can be depth-sorted takes the cheap sorted path; when it cannot,
-/// it uses moment OIT if the surface asks for fidelity and the backend supports
-/// it, and otherwise falls back to weighted-blended OIT.
+/// a high-fidelity request prefers moment OIT, then adaptive transparency, as
+/// the backend supports them, and otherwise falls back to weighted-blended OIT.
 #[must_use]
 pub fn select_transparency_path(
     surface: TransparentSurface,
@@ -100,6 +104,8 @@ pub fn select_transparency_path(
             if surface.order_independent {
                 if surface.high_fidelity && capability.moment_oit {
                     TransparencyPath::MomentOit
+                } else if surface.high_fidelity && capability.adaptive_oit {
+                    TransparencyPath::Adaptive
                 } else {
                     TransparencyPath::WeightedOit
                 }
@@ -128,7 +134,9 @@ pub fn outputs_for(path: TransparencyPath) -> TransparencyOutputs {
             contributes_to_ray_scene: false,
         },
         // Order-independent resolves cannot produce coherent motion vectors.
-        TransparencyPath::WeightedOit | TransparencyPath::MomentOit => TransparencyOutputs {
+        TransparencyPath::WeightedOit
+        | TransparencyPath::MomentOit
+        | TransparencyPath::Adaptive => TransparencyOutputs {
             writes_reactive_mask: true,
             writes_motion: false,
             contributes_to_ray_scene: false,
@@ -163,6 +171,8 @@ pub struct TransparencyBins {
     pub weighted_oit: Vec<u32>,
     /// Moment-based order-independent draws.
     pub moment_oit: Vec<u32>,
+    /// Adaptive-transparency order-independent draws.
+    pub adaptive_oit: Vec<u32>,
     /// Multi-layer refractive glass draws.
     pub layered_glass: Vec<u32>,
     /// Single-layer water draws.
@@ -180,6 +190,7 @@ impl TransparencyBins {
         self.sorted.len()
             + self.weighted_oit.len()
             + self.moment_oit.len()
+            + self.adaptive_oit.len()
             + self.layered_glass.len()
             + self.single_layer_water.len()
             + self.hair_visibility.len()
@@ -199,6 +210,7 @@ impl TransparencyBins {
             TransparencyPath::Sorted => &self.sorted,
             TransparencyPath::WeightedOit => &self.weighted_oit,
             TransparencyPath::MomentOit => &self.moment_oit,
+            TransparencyPath::Adaptive => &self.adaptive_oit,
             TransparencyPath::LayeredGlass => &self.layered_glass,
             TransparencyPath::SingleLayerWater => &self.single_layer_water,
             TransparencyPath::HairVisibility => &self.hair_visibility,
@@ -212,6 +224,7 @@ impl TransparencyBins {
             TransparencyPath::Sorted => self.sorted.push(draw),
             TransparencyPath::WeightedOit => self.weighted_oit.push(draw),
             TransparencyPath::MomentOit => self.moment_oit.push(draw),
+            TransparencyPath::Adaptive => self.adaptive_oit.push(draw),
             TransparencyPath::LayeredGlass => self.layered_glass.push(draw),
             TransparencyPath::SingleLayerWater => self.single_layer_water.push(draw),
             TransparencyPath::HairVisibility => self.hair_visibility.push(draw),
@@ -245,8 +258,18 @@ pub fn bin_transparent_draws(
 mod tests {
     use super::*;
 
-    const NO_MOMENT: TransparencyCapability = TransparencyCapability { moment_oit: false };
-    const WITH_MOMENT: TransparencyCapability = TransparencyCapability { moment_oit: true };
+    const NO_MOMENT: TransparencyCapability = TransparencyCapability {
+        moment_oit: false,
+        adaptive_oit: false,
+    };
+    const WITH_MOMENT: TransparencyCapability = TransparencyCapability {
+        moment_oit: true,
+        adaptive_oit: false,
+    };
+    const WITH_ADAPTIVE: TransparencyCapability = TransparencyCapability {
+        moment_oit: false,
+        adaptive_oit: true,
+    };
 
     fn kind(kind: TransparentKind) -> TransparentSurface {
         TransparentSurface {
@@ -325,6 +348,57 @@ mod tests {
             select_transparency_path(hi, WITH_MOMENT),
             TransparencyPath::MomentOit
         );
+    }
+
+    #[test]
+    fn adaptive_is_the_high_fidelity_fallback_without_moment() {
+        let hi = TransparentSurface {
+            order_independent: true,
+            high_fidelity: true,
+            ..TransparentSurface::general()
+        };
+        // No moment OIT, but adaptive available -> adaptive (not weighted).
+        assert_eq!(
+            select_transparency_path(hi, WITH_ADAPTIVE),
+            TransparencyPath::Adaptive
+        );
+        // Moment OIT wins over adaptive when both are available.
+        let both = TransparencyCapability {
+            moment_oit: true,
+            adaptive_oit: true,
+        };
+        assert_eq!(
+            select_transparency_path(hi, both),
+            TransparencyPath::MomentOit
+        );
+        // Adaptive requires the fidelity request; a plain OIT surface still
+        // takes the cheap weighted path even when adaptive is available.
+        let lo = TransparentSurface {
+            order_independent: true,
+            ..TransparentSurface::general()
+        };
+        assert_eq!(
+            select_transparency_path(lo, WITH_ADAPTIVE),
+            TransparencyPath::WeightedOit
+        );
+    }
+
+    #[test]
+    fn adaptive_is_an_oit_output_and_bins_route_to_it() {
+        let out = outputs_for(TransparencyPath::Adaptive);
+        assert!(out.writes_reactive_mask);
+        assert!(!out.writes_motion);
+        assert!(!out.contributes_to_ray_scene);
+
+        let hi = TransparentSurface {
+            order_independent: true,
+            high_fidelity: true,
+            ..TransparentSurface::general()
+        };
+        let bins = bin_transparent_draws(&[7], &[hi], WITH_ADAPTIVE);
+        assert_eq!(bins.adaptive_oit, [7]);
+        assert_eq!(bins.bucket(TransparencyPath::Adaptive), [7]);
+        assert_eq!(bins.total(), 1);
     }
 
     #[test]
