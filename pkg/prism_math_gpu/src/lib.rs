@@ -35,6 +35,7 @@ extern crate alloc;
 
 pub mod buffer;
 pub mod context;
+pub mod morton;
 pub mod projection;
 pub mod quat;
 pub mod sh;
@@ -42,6 +43,7 @@ pub mod skinning;
 pub mod view;
 
 pub use context::{GpuContext, block_on};
+pub use morton::GpuMorton;
 pub use projection::{GpuProjection, ProjectionKind};
 pub use quat::GpuQuatRotate;
 pub use sh::{GpuSh3Eval, SH3_COEFFS};

@@ -338,3 +338,69 @@ fn prism_sh3_eval(coeffs: array<f32, 16>, dir: vec3<f32>) -> f32 {\n\
     }\n\
     return acc;\n\
 }\n";
+/// Single-sourced WGSL for Morton (Z-order) spatial-locality keys, the GPU
+/// radix-sort primitive mirrored from [`crate::spatial`].
+///
+/// WGSL has no 64-bit integer type, so these kernels operate at the
+/// GPU-representable key widths whose results still fit a `u32`: the 2D encoder
+/// consumes 16 bits per axis (32-bit key) and the 3D encoder 10 bits per axis
+/// (30-bit key). Those are exactly the widths used for on-device BVH/radix-sort
+/// keys. The bit-spread/compact masks are the standard 16-bit (`part1by1`) and
+/// 10-bit (`part1by2`) sequences, and because interleaving is bit-local they
+/// reproduce the *low bits* of the wider CPU encoders
+/// ([`morton_encode2`](crate::spatial::morton_encode2) /
+/// [`morton_encode3`](crate::spatial::morton_encode3)) exactly: for inputs
+/// masked to the respective axis width the GPU key equals the CPU key
+/// bit-for-bit (integer math, so the parity here is exact, not a tolerance).
+pub const WGSL_MORTON: &str = "\
+fn prism_morton_part1by1(value: u32) -> u32 {\n\
+    var x = value & 0x0000ffffu;\n\
+    x = (x | (x << 8u)) & 0x00ff00ffu;\n\
+    x = (x | (x << 4u)) & 0x0f0f0f0fu;\n\
+    x = (x | (x << 2u)) & 0x33333333u;\n\
+    x = (x | (x << 1u)) & 0x55555555u;\n\
+    return x;\n\
+}\n\
+\n\
+fn prism_morton_compact1by1(value: u32) -> u32 {\n\
+    var x = value & 0x55555555u;\n\
+    x = (x ^ (x >> 1u)) & 0x33333333u;\n\
+    x = (x ^ (x >> 2u)) & 0x0f0f0f0fu;\n\
+    x = (x ^ (x >> 4u)) & 0x00ff00ffu;\n\
+    x = (x ^ (x >> 8u)) & 0x0000ffffu;\n\
+    return x;\n\
+}\n\
+\n\
+fn prism_morton_part1by2(value: u32) -> u32 {\n\
+    var x = value & 0x000003ffu;\n\
+    x = (x | (x << 16u)) & 0x030000ffu;\n\
+    x = (x | (x << 8u)) & 0x0300f00fu;\n\
+    x = (x | (x << 4u)) & 0x030c30c3u;\n\
+    x = (x | (x << 2u)) & 0x09249249u;\n\
+    return x;\n\
+}\n\
+\n\
+fn prism_morton_compact1by2(value: u32) -> u32 {\n\
+    var x = value & 0x09249249u;\n\
+    x = (x ^ (x >> 2u)) & 0x030c30c3u;\n\
+    x = (x ^ (x >> 4u)) & 0x0300f00fu;\n\
+    x = (x ^ (x >> 8u)) & 0x030000ffu;\n\
+    x = (x ^ (x >> 16u)) & 0x000003ffu;\n\
+    return x;\n\
+}\n\
+\n\
+fn prism_morton_encode2(x: u32, y: u32) -> u32 {\n\
+    return prism_morton_part1by1(x) | (prism_morton_part1by1(y) << 1u);\n\
+}\n\
+\n\
+fn prism_morton_decode2(code: u32) -> vec2<u32> {\n\
+    return vec2<u32>(prism_morton_compact1by1(code), prism_morton_compact1by1(code >> 1u));\n\
+}\n\
+\n\
+fn prism_morton_encode3(x: u32, y: u32, z: u32) -> u32 {\n\
+    return prism_morton_part1by2(x) | (prism_morton_part1by2(y) << 1u) | (prism_morton_part1by2(z) << 2u);\n\
+}\n\
+\n\
+fn prism_morton_decode3(code: u32) -> vec3<u32> {\n\
+    return vec3<u32>(prism_morton_compact1by2(code), prism_morton_compact1by2(code >> 1u), prism_morton_compact1by2(code >> 2u));\n\
+}\n";
