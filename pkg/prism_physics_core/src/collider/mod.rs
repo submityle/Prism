@@ -608,6 +608,8 @@ pub mod bishop_effective_stress;
 pub use bishop_effective_stress::BishopEffectiveStress;
 pub mod lode_shape_factor;
 pub use lode_shape_factor::LodeShapeFactor;
+pub mod rowe_stress_dilatancy;
+pub use rowe_stress_dilatancy::RoweStressDilatancy;
 
 /// A handle into a [`ShapeRegistry`].
 ///
