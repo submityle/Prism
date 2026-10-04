@@ -558,6 +558,8 @@ pub mod granular_self_diffusion;
 pub use granular_self_diffusion::SelfDiffusionAnalysis;
 pub mod stress_invariants;
 pub use stress_invariants::StressInvariants;
+pub mod granular_flow_regime;
+pub use granular_flow_regime::{FlowRegime, GranularFlowRegime};
 
 /// A handle into a [`ShapeRegistry`].
 ///
