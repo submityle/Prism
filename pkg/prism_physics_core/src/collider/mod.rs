@@ -516,6 +516,8 @@ pub mod gravity_settle;
 pub use gravity_settle::{GravitySettleParams, GravitySettleReport, GravitySettler};
 pub mod granular_scene;
 pub use granular_scene::{ContainerKind, GranularScene, GranularSceneParams};
+pub mod radial_distribution;
+pub use radial_distribution::RadialDistribution;
 
 /// A handle into a [`ShapeRegistry`].
 ///
