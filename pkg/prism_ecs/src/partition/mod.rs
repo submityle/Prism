@@ -11,3 +11,4 @@ pub mod floating_origin;
 pub mod lod;
 pub mod processor;
 pub mod streaming;
+pub mod view;

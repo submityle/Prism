@@ -122,6 +122,35 @@ impl LocalPos {
     pub const fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
     }
+
+    /// Creates a local offset from an `[x, y, z]` array.
+    pub const fn from_array(a: [f32; 3]) -> Self {
+        Self {
+            x: a[0],
+            y: a[1],
+            z: a[2],
+        }
+    }
+
+    /// Returns this offset as an `[x, y, z]` array — the `[f32; 3]` shape the
+    /// LOD/stream processors consume (design §13.2).
+    pub const fn to_array(self) -> [f32; 3] {
+        [self.x, self.y, self.z]
+    }
+}
+
+impl From<LocalPos> for [f32; 3] {
+    #[inline]
+    fn from(p: LocalPos) -> Self {
+        p.to_array()
+    }
+}
+
+impl From<[f32; 3]> for LocalPos {
+    #[inline]
+    fn from(a: [f32; 3]) -> Self {
+        LocalPos::from_array(a)
+    }
 }
 
 /// The floating-origin grid (design §13.3): a uniform cell size plus the
@@ -216,6 +245,14 @@ impl FloatingOrigin {
             (dy as f64 * self.cell_size + local.y as f64) as f32,
             (dz as f64 * self.cell_size + local.z as f64) as f32,
         )
+    }
+
+    /// Rebases `(cell, local)` into the active origin's local space and returns
+    /// it as an `[x, y, z]` array — the direct bridge from a big-world position
+    /// to the `[f32; 3]` the LOD/stream processors measure distance in
+    /// (design §13.2 + §13.3).
+    pub fn rebase_array(&self, cell: GridCell, local: LocalPos) -> [f32; 3] {
+        self.rebase(cell, local).to_array()
     }
 
     /// Re-canonicalises a possibly-drifted `(cell, local)` so the local offset
