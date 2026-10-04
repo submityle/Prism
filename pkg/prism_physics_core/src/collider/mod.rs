@@ -298,6 +298,10 @@ pub use tet_fem_anisotropic::{
 };
 pub mod tet_fem_plasticity;
 pub use tet_fem_plasticity::{return_map, PlasticModel, PlasticState, PlasticStep};
+pub mod tet_fem_elastoplastic_force;
+pub use tet_fem_elastoplastic_force::{
+    elastic_potential_energy, element_elastoplastic_force, ElastoplasticForce,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
