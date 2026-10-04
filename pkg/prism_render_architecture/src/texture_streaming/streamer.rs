@@ -58,9 +58,15 @@ use super::residency::TextureResidencyTable;
 use super::scheduler::schedule;
 use super::streamer_config::StreamerConfig;
 use super::streamer_frame::StreamerFrame;
-use super::{atlas::plan_atlas_copies, TexturePageKey};
+use super::{atlas::plan_atlas_copies, mip_tail::mip_tail_covers, TexturePageKey};
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
+
+/// Priority stamped on a mip-tail floor page so it outranks ordinary demands
+/// and the scheduler always admits (and never evicts) it under budget. Half of
+/// [`u64::MAX`] leaves ample headroom for the protection bonus added later
+/// without risking saturation.
+const MIP_TAIL_PRIORITY: u64 = u64::MAX >> 1;
 
 /// One texture's feedback grid for a single frame.
 ///
@@ -256,6 +262,34 @@ impl VirtualTextureStreamer {
             track.last_demand_frame = frame;
             track.byte_cost = demand.byte_cost;
             track.effective_priority = priority;
+        }
+
+        // (2b) Mip-tail residency floor: when configured, force the covering
+        // floor-mip page of every page demanded this frame to be resident at top
+        // priority. This is a correctness floor, not a demand: it bypasses the
+        // load debounce and outranks ordinary pages so the scheduler never
+        // evicts it under budget, guaranteeing `GpuPageTable::resolve` can always
+        // fall back to at least the floor mip and never returns a hole. A cover
+        // page that coincides with a real demand simply has its priority lifted;
+        // one never demanded is minted here with a representative byte cost (the
+        // largest demanded this frame, a safe upper bound for budgeting). With no
+        // floor configured this stage is skipped and the schedule is unchanged.
+        if let Some(floor) = self.config.mip_tail_floor {
+            let cover_byte_cost = demands.iter().map(|demand| demand.byte_cost).max();
+            if let Some(byte_cost) = cover_byte_cost {
+                for cover in mip_tail_covers(demands.iter().map(|demand| demand.key), floor) {
+                    let track = self.tracks.entry(cover).or_insert(PageTrack {
+                        effective_priority: 0,
+                        byte_cost,
+                        last_demand_frame: 0,
+                        demand_streak: 0,
+                        resident_since: None,
+                    });
+                    track.last_demand_frame = frame;
+                    track.demand_streak = track.demand_streak.max(self.config.min_demand_frames);
+                    track.effective_priority = track.effective_priority.max(MIP_TAIL_PRIORITY);
+                }
+            }
         }
 
         // (3) Assemble this frame's scheduler input: every resident page is a
@@ -826,5 +860,87 @@ mod tests {
         assert!(f2.plan.evicts.contains(&key(0)), "the pending page is evicted");
         assert!(!streamer.pool().contains(key(0)));
         assert!(f2.uploads.iter().all(|u| u.key != key(0)), "no stale upload for an evicted page");
+    }
+
+    fn page(mip: u8, x: u16) -> TexturePageKey {
+        TexturePageKey {
+            texture: 1,
+            mip,
+            layer: 0,
+            x,
+            y: 0,
+        }
+    }
+
+    #[test]
+    fn mip_tail_floor_pins_uncovered_page_before_fine_page_streams() {
+        // A floor at mip 3 under a default two-frame debounce: the fine page is
+        // still debounced on frame 1, but its covering floor page must already
+        // be resident so the resolver has a fallback instead of a hole.
+        let floor = 3u8;
+        let fine = page(0, 5);
+        let cover = page(floor, 5 >> 3); // (mip 3, x 0)
+        let mut streamer = VirtualTextureStreamer::new(
+            StreamerConfig::new(100 * PAGE_BYTES).with_mip_tail_floor(Some(floor)),
+            64,
+        );
+        let f = streamer.stream_demands(&[demand(fine, 500)]);
+        // The fine page itself is debounced on its first sighting.
+        assert!(!streamer.pool().contains(fine), "fine page is still debounced");
+        assert_eq!(f.deferred_loads, 1);
+        // The covering floor page, though never demanded, is forced resident.
+        assert!(streamer.pool().contains(cover), "floor cover is pinned resident");
+        // The resolver therefore never holes: it falls back to the floor cover.
+        let resolved = streamer
+            .page_table()
+            .resolve(fine, floor)
+            .expect("floor guarantees a resident cover");
+        assert_eq!(resolved.key, cover);
+        assert_eq!(resolved.mip_bias, floor);
+    }
+
+    #[test]
+    fn mip_tail_floor_cover_survives_byte_contention() {
+        // One-page byte budget with the finest pages churning: the floor cover
+        // outranks them and stays resident, so the resolver always succeeds.
+        let floor = 2u8;
+        let fine = page(0, 9);
+        let cover = page(floor, 9 >> 2); // (mip 2, x 2)
+        let mut streamer = VirtualTextureStreamer::new(
+            StreamerConfig::new(PAGE_BYTES)
+                .with_min_demand_frames(1)
+                .with_mip_tail_floor(Some(floor)),
+            64,
+        );
+        for _ in 0..4 {
+            streamer.stream_demands(&[demand(fine, 900)]);
+        }
+        assert!(streamer.pool().contains(cover), "cover held under contention");
+        assert!(streamer.page_table().resolve(fine, floor).is_some());
+    }
+
+    #[test]
+    fn mip_tail_floor_none_matches_unset_floor() {
+        // `with_mip_tail_floor(None)` must be byte-identical to never setting it.
+        let mut with_none = VirtualTextureStreamer::new(
+            StreamerConfig::new(2 * PAGE_BYTES)
+                .with_min_demand_frames(1)
+                .with_mip_tail_floor(None),
+            64,
+        );
+        let mut unset = VirtualTextureStreamer::new(
+            StreamerConfig::new(2 * PAGE_BYTES).with_min_demand_frames(1),
+            64,
+        );
+        for frame in 0..6u16 {
+            let d = [demand(key(frame % 3), 400 + frame)];
+            let a = with_none.stream_demands(&d);
+            let b = unset.stream_demands(&d);
+            assert_eq!(a.loaded(), b.loaded());
+            assert_eq!(a.evicted(), b.evicted());
+            assert_eq!(a.resident_count, b.resident_count);
+            assert_eq!(a.resident_bytes, b.resident_bytes);
+            assert_eq!(with_none.page_table().words(), unset.page_table().words());
+        }
     }
 }

@@ -82,6 +82,12 @@ pub struct StreamerConfig {
     /// page table until its upload completes. `None` uploads every admitted page
     /// the frame it is seated, matching an unbounded upload path.
     pub upload_budget_bytes: Option<u64>,
+    /// Optional mip-tail residency floor. When `Some(floor)`, the streamer forces
+    /// the `floor`-level page covering every demanded page to stay resident, so
+    /// [`GpuPageTable::resolve`](super::indirection::GpuPageTable::resolve) can
+    /// always fall back to at least that page and never returns a hole. `None`
+    /// pins no tail, leaving coarse-page residency entirely to demand.
+    pub mip_tail_floor: Option<u8>,
 }
 
 impl StreamerConfig {
@@ -104,6 +110,7 @@ impl StreamerConfig {
             protection_bonus: super::feedback::MIP_URGENCY,
             atlas: None,
             upload_budget_bytes: None,
+            mip_tail_floor: None,
         }
     }
 
@@ -163,6 +170,19 @@ impl StreamerConfig {
         self
     }
 
+    /// Pins the mip-tail residency floor to `floor_mip`, or clears it with
+    /// `None`.
+    ///
+    /// With a floor set, the covering page at `floor_mip` of every demanded page
+    /// is forced resident at top priority, guaranteeing the resolver always has
+    /// a fallback. `None` restores pure demand-driven residency and is
+    /// behaviourally identical to leaving the floor unset.
+    #[must_use]
+    pub const fn with_mip_tail_floor(mut self, floor_mip: Option<u8>) -> Self {
+        self.mip_tail_floor = floor_mip;
+        self
+    }
+
     /// Returns a copy with degenerate knobs clamped to values that keep the
     /// streaming loop live.
     ///
@@ -202,6 +222,7 @@ mod tests {
         assert_eq!(cfg.protection_bonus, super::super::feedback::MIP_URGENCY);
         assert_eq!(cfg.atlas, None);
         assert_eq!(cfg.upload_budget_bytes, None);
+        assert_eq!(cfg.mip_tail_floor, None);
         assert_eq!(cfg.semantic_weights, SemanticWeights::DEFAULT);
     }
 
@@ -226,6 +247,14 @@ mod tests {
         assert_eq!(cfg.upload_budget_bytes, Some(4096));
         let cleared = cfg.with_upload_budget(None);
         assert_eq!(cleared.upload_budget_bytes, None);
+    }
+
+    #[test]
+    fn mip_tail_floor_setter_round_trips() {
+        let cfg = StreamerConfig::new(100).with_mip_tail_floor(Some(3));
+        assert_eq!(cfg.mip_tail_floor, Some(3));
+        let cleared = cfg.with_mip_tail_floor(None);
+        assert_eq!(cleared.mip_tail_floor, None);
     }
 
     #[test]
