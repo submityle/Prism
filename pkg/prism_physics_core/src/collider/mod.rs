@@ -588,6 +588,8 @@ pub mod ohnesorge_number;
 pub use ohnesorge_number::OhnesorgeNumber;
 pub mod deborah_number;
 pub use deborah_number::{DeborahNumber, DeborahRegime};
+pub mod richardson_number;
+pub use richardson_number::{RichardsonNumber, RichardsonRegime};
 
 /// A handle into a [`ShapeRegistry`].
 ///
