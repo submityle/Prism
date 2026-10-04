@@ -131,7 +131,7 @@ pub use affinity::{
     CoreClassPolicy, WorkerCorePlan,
 };
 pub use arena::{FrameArena, FrameArenas, DEFAULT_ARENA_CAPACITY};
-pub use async_exec::{CounterFuture, Task};
+pub use async_exec::{AioReadFuture, CounterFuture, IoError as AioIoError, IoReactor, ReadBuf, Task};
 pub use cancel::{CancelOutcome, CancelToken, Cancelled};
 #[cfg(feature = "compat-bevy")]
 pub use compat_bevy::{
