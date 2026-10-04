@@ -60,6 +60,7 @@ mod effect;
 pub mod introspect;
 mod memo;
 mod node;
+pub mod order;
 pub mod runtime;
 mod signal;
 
