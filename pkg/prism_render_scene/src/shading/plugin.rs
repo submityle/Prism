@@ -230,13 +230,16 @@ use super::{
         volumetrics_pass, PrismVolumetricsSettings, VolumetricsTextureCache,
     },
     world_restir::{
-        init_world_restir_pipeline, init_world_restir_resolve_pipeline,
-        init_world_restir_visible_points_pipeline, prepare_world_restir_bind_groups,
-        prepare_world_restir_lights, prepare_world_restir_reservoirs, prepare_world_restir_resolve,
+        init_world_restir_composite_pipeline, init_world_restir_pipeline,
+        init_world_restir_resolve_pipeline, init_world_restir_visible_points_pipeline,
+        prepare_world_restir_bind_groups, prepare_world_restir_composite,
+        prepare_world_restir_composite_bind_groups, prepare_world_restir_lights,
+        prepare_world_restir_reservoirs, prepare_world_restir_resolve,
         prepare_world_restir_resolve_bind_groups, prepare_world_restir_visible_points,
-        prepare_world_restir_visible_points_bind_groups, world_restir_fill_pass,
-        world_restir_inject_pass, world_restir_resolve_pass, world_restir_seed_pass,
-        world_restir_visible_points_pass, PrismWorldRestirSettings, WorldRestirLights,
+        prepare_world_restir_visible_points_bind_groups, world_restir_composite_pass,
+        world_restir_fill_pass, world_restir_inject_pass, world_restir_resolve_pass,
+        world_restir_seed_pass, world_restir_visible_points_pass, PrismWorldRestirSettings,
+        WorldRestirLights,
     },
     world_space_gi::{
         init_world_space_gi_composite_pipeline, init_world_space_gi_pipeline,
@@ -335,6 +338,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/world_restir_inject.wesl");
         embedded_asset!(app, "../shaders/world_restir_visible_points.wesl");
         embedded_asset!(app, "../shaders/world_restir_resolve.wesl");
+        embedded_asset!(app, "../shaders/world_restir_composite.wesl");
         register_shadow_depth_shader(app);
         register_vsm_caster_depth_shader(app);
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -1102,6 +1106,7 @@ impl Plugin for PrismShadingPlugin {
         render_app.add_systems(RenderStartup, init_world_restir_pipeline);
         render_app.add_systems(RenderStartup, init_world_restir_visible_points_pipeline);
         render_app.add_systems(RenderStartup, init_world_restir_resolve_pipeline);
+        render_app.add_systems(RenderStartup, init_world_restir_composite_pipeline);
         // Area-light `LTC` render-world systems. The `GpuAreaLight` storage
         // buffer, the per-frame extract from the main world, and the
         // rebuild/upload pair each live in their own `add_systems` call so the
@@ -1146,6 +1151,18 @@ impl Plugin for PrismShadingPlugin {
                     .after(prepare_world_restir_resolve)
                     .after(prepare_world_restir_reservoirs)
                     .in_set(RenderSystems::PrepareBindGroups),
+                // The composite scratch is sized to the resolve export in
+                // PrepareResources; its copy + fold groups read the visibility
+                // buffer (scene_color / ssgi_albedo / world_restir_direct) and
+                // the resolve export in PrepareBindGroups, so they build after
+                // the resolve group that produces gi_out.
+                prepare_world_restir_composite
+                    .after(prepare_world_restir_resolve)
+                    .in_set(RenderSystems::PrepareResources),
+                prepare_world_restir_composite_bind_groups
+                    .after(prepare_world_restir_composite)
+                    .after(prepare_world_restir_resolve_bind_groups)
+                    .in_set(RenderSystems::PrepareBindGroups),
             ),
         );
         render_app.add_systems(
@@ -1164,10 +1181,21 @@ impl Plugin for PrismShadingPlugin {
                 world_restir_seed_pass.before(world_restir_fill_pass),
                 world_restir_fill_pass.before(world_restir_resolve_pass),
                 // The resolve pass consumes the finalised reservoir table and
-                // the SSR prepass, writing the direct-illumination export a
-                // downstream composite folds into scene_color, so it runs last
-                // in the chain and still finishes before the main pass.
-                world_restir_resolve_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
+                // the SSR prepass, writing the direct-illumination export the
+                // composite folds into scene_color, so it runs before the
+                // composite and still finishes before the main pass.
+                world_restir_resolve_pass.before(world_restir_composite_pass),
+                // The composite folds the resolve's direct-illumination export
+                // back over scene_color (energy-conserving substitution of the
+                // clustered punctual diffuse). It reads gi_out + scene_color +
+                // the shading-resolve albedo / clustered-direct exports, so it
+                // runs after the resolve and, being a scene_color writer, after
+                // the last peer GI composite (surface cache) in the
+                // scene_color-writer chain, and before the main pass.
+                world_restir_composite_pass
+                    .after(world_restir_resolve_pass)
+                    .after(surface_cache_composite_pass)
+                    .before(bevy_core_pipeline::Core3dSystems::MainPass),
             ),
         );
         render_app.add_systems(
@@ -1380,6 +1408,10 @@ impl Plugin for PrismShadingPlugin {
                         .after(world_space_gi_composite_pass)
                         .after(ddgi_composite_pass)
                         .after(surface_cache_composite_pass)
+                        // TAA resolves the fully composited HDR scene_color, so
+                        // it must also run after the world_restir composite
+                        // folds its direct-illumination substitution in.
+                        .after(world_restir_composite_pass)
                         .before(bevy_core_pipeline::Core3dSystems::MainPass),
                 ),
                 // Nested to keep the Core3d tuple within Bevy's 20-element

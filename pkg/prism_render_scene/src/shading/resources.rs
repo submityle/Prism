@@ -57,6 +57,13 @@ pub(crate) struct ViewVisibilityBuffer {
     /// (1 - metallic)`) the SSGI composite multiplies the gathered pre-albedo
     /// radiance by before blending it over the IBL diffuse under confidence.
     ssgi_albedo: CachedTexture,
+    /// World-space ReSTIR direct export: the raw cosine-weighted punctual
+    /// *irradiance* the resolve evaluated per pixel (no 1/pi, Fresnel or
+    /// albedo), in the same units as the ReSTIR resolve's `gi_out`. The
+    /// world_restir composite subtracts the clustered punctual diffuse this
+    /// reconstructs before folding in the reservoir estimate, so the
+    /// substitution never double-counts the direct lighting the cache reused.
+    world_restir_direct: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -105,6 +112,12 @@ impl ViewVisibilityBuffer {
     /// Storage/sampling view of the SSGI Lambertian-albedo export.
     pub(crate) fn ssgi_albedo_view(&self) -> &bevy_render::render_resource::TextureView {
         &self.ssgi_albedo.default_view
+    }
+
+    /// Storage/sampling view of the world-space ReSTIR direct-light export
+    /// (raw cosine-weighted punctual irradiance).
+    pub(crate) fn world_restir_direct_view(&self) -> &bevy_render::render_resource::TextureView {
+        &self.world_restir_direct.default_view
     }
 }
 
@@ -359,6 +372,24 @@ pub(crate) fn prepare_visibility_buffers(
                 view_formats: &[],
             },
         );
+        // World-space ReSTIR direct export written alongside `scene_color` by
+        // the resolve pass. STORAGE_BINDING: written by the resolve compute
+        // pass; TEXTURE_BINDING: sampled by the world_restir composite fold.
+        // Allocated unconditionally so the resolve bind group is always valid;
+        // the composite reads it only when world_restir is active.
+        let world_restir_direct = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism world-space ReSTIR direct export"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SCENE_COLOR_FORMAT,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
         commands.entity(entity).insert(ViewVisibilityBuffer {
             ids,
             metadata,
@@ -368,6 +399,7 @@ pub(crate) fn prepare_visibility_buffers(
             motion_vectors,
             ssgi_ambient,
             ssgi_albedo,
+            world_restir_direct,
             size,
         });
     }

@@ -45,6 +45,7 @@
 
 mod abi;
 mod bind_groups;
+mod composite;
 mod dispatch;
 mod lights;
 mod pipeline;
@@ -54,6 +55,10 @@ mod settings;
 mod visible_points;
 
 pub(crate) use bind_groups::prepare_world_restir_bind_groups;
+pub(crate) use composite::{
+    init_world_restir_composite_pipeline, prepare_world_restir_composite,
+    prepare_world_restir_composite_bind_groups, world_restir_composite_pass,
+};
 pub(crate) use dispatch::world_restir_fill_pass;
 pub(crate) use dispatch::world_restir_inject_pass;
 pub(crate) use dispatch::world_restir_seed_pass;

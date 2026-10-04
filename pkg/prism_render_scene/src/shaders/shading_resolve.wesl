@@ -212,6 +212,14 @@ struct MotionMatrices {
 // the IBL diffuse under the pass's confidence.
 @group(0) @binding(12) var ssgi_ambient: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(13) var ssgi_albedo: texture_storage_2d<rgba16float, write>;
+// 14: world-space ReSTIR direct-light export (write-only rgba16float). The
+// raw cosine-weighted punctual *irradiance* this pixel received from its
+// froxel's clustered punctual lights (no 1/pi, Fresnel or albedo), in the
+// same units as the ReSTIR resolve's `gi_out`. The world_restir composite
+// SUBTRACTS it before folding in the reservoir estimate, an
+// energy-conserving substitution rather than a double-counting add. Always
+// bound because the resolve writes it every pixel.
+@group(0) @binding(14) var world_restir_direct: texture_storage_2d<rgba16float, write>;
 
 // --- group 1: material tables (shared MaterialBindGroup layout) ---
 @group(1) @binding(0) var<storage, read> material_headers: array<PrismMaterialHeader>;
@@ -673,6 +681,46 @@ fn sample_punctual_shadowed(index: u32, frame: ShadingFrame, world_position: vec
         sample.visibility = sample.visibility * visibility;
     }
     return sample;
+}
+
+// World-space ReSTIR direct-light export helper: the raw cosine-weighted
+// punctual *irradiance* this pixel receives from its froxel's clustered
+// punctual lights, `sum max(dot(n, l), 0) * illuminance * visibility`,
+// *without* the 1/pi, Fresnel `(1 - f)` or Lambert albedo the shading
+// already folded into scene_color. It mirrors the punctual arm of every
+// `shade_*` integrator (same cluster walk, same `sample_punctual_shadowed`
+// gate) so the world_restir composite can subtract exactly the clustered
+// punctual *diffuse* already in scene_color (up to the dropped Fresnel the
+// engine's GI substitution standard omits) before adding the reservoir
+// estimate `gi_out`, which carries the same cosine-weighted-irradiance
+// units. Directional and area lights stay in scene_color untouched; the
+// ReSTIR cache seeds punctual lights only.
+fn clustered_punctual_direct_irradiance(
+    frame: ShadingFrame,
+    world_position: vec3<f32>,
+    slice: ClusterSlice,
+    env: LightEnvironment,
+) -> vec3<f32> {
+    var irradiance = vec3<f32>(0.0);
+    let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
+    let punctual_loop = select(punctual_total, slice.count, slice.use_clusters != 0u);
+    for (var s = 0u; s < punctual_loop; s = s + 1u) {
+        var punctual_i = s;
+        if slice.use_clusters != 0u {
+            let idx_pos = slice.offset + s;
+            if idx_pos >= arrayLength(&cluster_indices) { break; }
+            punctual_i = cluster_indices[idx_pos];
+        }
+        if punctual_i >= arrayLength(&punctual_lights) { continue; }
+        let sample = sample_punctual_shadowed(punctual_i, frame, world_position);
+        if sample.valid == 0.0 {
+            continue;
+        }
+        let n_dot_l = max(dot(frame.normal, sample.direction), 0.0);
+        irradiance = irradiance
+            + sample.illuminance * (n_dot_l * clamp(sample.visibility, 0.0, 1.0));
+    }
+    return irradiance;
 }
 
 // Constant-ambient indirect fallback used when no image-based probe is bound.
@@ -1818,4 +1866,19 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let ssgi_lambert_albedo = lit.base_color * ssgi_diffuse_weight;
     textureStore(ssgi_albedo, coord, vec4<f32>(ssgi_lambert_albedo, 0.0));
     textureStore(ssgi_ambient, coord, vec4<f32>(indirect_result.ambient_irradiance, 0.0));
+
+    // World-space ReSTIR direct export: the raw cosine-weighted punctual
+    // irradiance this pixel received (no 1/pi, Fresnel or albedo), in the
+    // same units as the ReSTIR resolve's `gi_out`. The world_restir composite
+    // subtracts `ssgi_albedo * INV_PI * world_restir_direct` (the clustered
+    // punctual diffuse already folded into scene_color) before adding the
+    // reservoir estimate under confidence, so the substitution never
+    // double-counts the direct lighting the cache reused.
+    let world_restir_direct_irradiance =
+        clustered_punctual_direct_irradiance(frame, geometry.position, slice, env);
+    textureStore(
+        world_restir_direct,
+        coord,
+        vec4<f32>(world_restir_direct_irradiance, 0.0),
+    );
 }

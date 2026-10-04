@@ -129,8 +129,10 @@ pub(crate) struct ShadingResolvePipeline {
 /// always bound because the resolve writes a motion vector for every pixel.
 ///
 /// Entries 12-13 are the write-only SSGI exports (`ssgi_ambient`,
-/// `ssgi_albedo`); always bound because the resolve writes them every pixel.
-fn view_layout_entries() -> BindGroupLayoutEntries<14> {
+/// `ssgi_albedo`); entry 14 is the write-only world-space ReSTIR direct
+/// export (`world_restir_direct`); all always bound because the resolve
+/// writes them every pixel.
+fn view_layout_entries() -> BindGroupLayoutEntries<15> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -154,6 +156,11 @@ fn view_layout_entries() -> BindGroupLayoutEntries<14> {
             // Lambertian albedo), write-only storage the SSGI trace/composite
             // sample; always bound because the resolve writes them every pixel.
             texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
+            texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
+            // 14: world-space ReSTIR direct export (raw cosine-weighted punctual
+            // irradiance), write-only storage the world_restir composite reads to
+            // subtract the clustered punctual diffuse before folding in the
+            // reservoir estimate; always bound because the resolve writes it.
             texture_storage_2d(SCENE_COLOR_FORMAT, StorageTextureAccess::WriteOnly),
         ),
     )

@@ -36,4 +36,4 @@ mod shader_tests;
 pub(crate) use bind_groups::prepare_world_restir_resolve_bind_groups;
 pub(crate) use dispatch::world_restir_resolve_pass;
 pub(crate) use pipeline::init_world_restir_resolve_pipeline;
-pub(crate) use resources::prepare_world_restir_resolve;
+pub(crate) use resources::{prepare_world_restir_resolve, ViewWorldRestirResolve};
