@@ -18,6 +18,9 @@
 //!   conditioning cache.
 //! - [`decode`] orchestrates the import/decode matrix over
 //!   [`prism_audio_assets::codec`] into unified f32 PCM.
+//! - [`delay_trim`] turns recorded encoder pre-roll/padding into concrete
+//!   timeline math: program trimming, raw<->program frame mapping,
+//!   loop-point rebasing, and sample-accurate seek planning.
 //! - [`hrtf_condition`] conditions a SOFA HRIR dataset: resample to the target
 //!   rate, diffuse-field equalization, ITD extraction, and minimum-phasing.
 //! - [`lipsync`] exports an offline viseme/energy-envelope timeline.
@@ -57,6 +60,7 @@ pub mod codec_tier;
 pub mod config;
 pub mod content_hash;
 pub mod decode;
+pub mod delay_trim;
 pub mod hrtf_condition;
 pub mod lipsync;
 pub mod loop_point;
