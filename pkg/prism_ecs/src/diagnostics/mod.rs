@@ -8,6 +8,10 @@
 //! during capture, so they are safe to drive from a diagnostics system.
 //!
 //! * [`inspector`] — archetype / chunk occupancy snapshots.
+//! * [`memory_footprint`] — byte-level resident-memory accounting:
+//!   per-archetype reserved / live / wasted column payload derived from
+//!   row width and chunk geometry, ranked most-wasted-first for reclamation
+//!   (design §16.6 / §5.3 / §17).
 //! * [`archetype_fragmentation`] — archetype-explosion and chunk
 //!   internal-fragmentation accounting with a worst-occupancy-first
 //!   ranking (design §16.6 / §22 risk #5).
@@ -50,6 +54,7 @@ pub mod change_volume;
 pub mod component_distribution;
 pub mod frame_profile;
 pub mod inspector;
+pub mod memory_footprint;
 pub mod profiler;
 pub mod relation_graph;
 pub mod relation_cycles;
@@ -65,6 +70,7 @@ pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use component_distribution::{ComponentDistributionEntry, ComponentDistributionReport};
 pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
+pub use memory_footprint::{ArchetypeMemoryEntry, MemoryFootprintReport};
 pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
