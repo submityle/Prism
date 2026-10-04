@@ -508,6 +508,7 @@ pub mod water_breaking_classify;
 pub mod water_caustics_intensity;
 pub mod water_caustics_select;
 pub mod water_coastline_downsample;
+pub mod water_coastline_flood_depth;
 pub mod water_coupling_forces;
 pub mod water_coupling_frame;
 pub mod water_coupling_plan;
@@ -1241,6 +1242,7 @@ pub use water_caustics_select::{
     GpuWaterCausticsSelect, WaterCausticsSelectQuery, WaterCausticsSelectResult,
 };
 pub use water_coastline_downsample::{GpuWaterCoastlineDownsample, WaterCoastlineDownsample};
+pub use water_coastline_flood_depth::{GpuWaterCoastlineFloodDepth, WaterCoastlineFloodDepth};
 pub use water_coupling_forces::{
     GpuWaterCouplingForces, WaterCouplingForcesQuery, WaterCouplingForcesResult,
 };
