@@ -388,6 +388,10 @@ pub mod tet_fem_damage_force_assembly;
 pub use tet_fem_damage_force_assembly::{
     assemble_damaged_forces, total_degraded_potential_energy, DamageAssembly,
 };
+pub mod cohesive_zone;
+pub use cohesive_zone::{
+    cohesive_traction, dissipated_energy, CohesiveModel, CohesiveState, CohesiveStep,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
