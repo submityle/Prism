@@ -114,7 +114,11 @@ pub mod closest_point_obb;
 pub mod cloth_aero_gather;
 pub mod cloth_bending_apply;
 pub mod cloth_bending_project;
+pub mod cloth_blend_to_skin;
+pub mod cloth_capsule_toi;
+pub mod cloth_clamp_max_distance;
 pub mod cloth_collision_project;
+pub mod cloth_half_space_toi;
 pub mod cloth_lod;
 pub mod cloth_mesh_volume;
 pub mod cloth_pressure_project;
@@ -660,8 +664,16 @@ pub use cloth_bending_apply::{
 pub use cloth_bending_project::{
     ClothBendingProjectQuery, ClothBendingProjectResult, GpuClothBendingProject,
 };
+pub use cloth_blend_to_skin::{ClothBlendToSkinQuery, ClothBlendToSkinResult, GpuClothBlendToSkin};
+pub use cloth_capsule_toi::{ClothCapsuleToiQuery, ClothCapsuleToiResult, GpuClothCapsuleToi};
+pub use cloth_clamp_max_distance::{
+    ClothClampMaxDistanceQuery, ClothClampMaxDistanceResult, GpuClothClampMaxDistance,
+};
 pub use cloth_collision_project::{
     ClothCollisionProjectQuery, ClothCollisionProjectResult, GpuClothCollisionProject,
+};
+pub use cloth_half_space_toi::{
+    ClothHalfSpaceToiQuery, ClothHalfSpaceToiResult, GpuClothHalfSpaceToi,
 };
 pub use cloth_lod::{ClothLodQuery, ClothLodResult, GpuClothLod};
 pub use cloth_mesh_volume::{ClothMeshVolumeQuery, ClothMeshVolumeResult, GpuClothMeshVolume};
