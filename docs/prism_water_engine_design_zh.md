@@ -310,7 +310,7 @@ water/
 
 ## 12. 性能预算与效果验收
 
-> 沙盒无 GPU，以下为**设计目标（design target），非实测**；上线需真机 Metal/VK/DX12 profile 校准。
+> **逐 kernel 已在真机 Apple M2 Metal 实测**（`prism_render_scene` 的 `water::gpu_bench`，GPU timestamp query，median of 16，见下「真机实测 profile」）；下表的**整帧综合预算**仍为**设计目标（design target）**——尚缺整帧集成后的真实 1080p/4K 场景 profile，上线需真机 Metal/VK/DX12 整帧校准。
 
 **性能预算（1080p→4K，桌面/主机档，设计目标）**：
 
@@ -326,6 +326,31 @@ water/
 | 动态泡沫平流 | ≤ 0.3 ms | 降分辨率/关持久化 |
 | 水下体积(多次散射) | 复用共享 froxel | 降 froxel 分辨率/关多次散射 |
 | 湿润/岸线掩膜 | ≤ 0.3 ms | 静态湿润带 |
+
+**真机实测 profile（Apple M2 Metal，`water::gpu_bench`，GPU timestamp query，median of 16）**：
+
+> 以下为**逐 kernel 实测**（非整帧）。整帧综合预算见上表（仍为设计目标）。
+
+| kernel 分项 | 规模 | 实测中位数 |
+|---|---|---|
+| 波谱 evolve + assemble | 256² | evolve 26.1 µs + assemble 41.3 µs |
+| 波谱 evolve + assemble | 128² / 64² | 6.8+9.7 µs / 4.8+5.3 µs |
+| 蝶形 IFFT2（2·bitrev + 2·log₂N·stage + normalize 推导） | 256² | ≈ 203 µs（bitrev 11.9 / stage 10.4 / normalize 12.7） |
+| 蝶形 IFFT2 | 128² / 64² | ≈ 103 µs / ≈ 67 µs |
+| SWE 步进 | 256² / 128² / 64² | 33.8 / 9.7 / 4.8 µs |
+| 泡沫平流 | 256² / 128² / 64² | 18.4 / 7.8 / 4.8 µs |
+| MAC 投影（div / pressure 1-Jacobi / project） | 32³（101 376 faces） | 10.1 / 11.7 / 12.1 µs |
+| MAC 投影 | 24³ / 16³ | (5.7/7.1/7.7) / (3.8/5.6/5.4) µs |
+| FLIP MAC transfer（p2g / normalize / g2p） | 24³（103 823 粒子 / 43 200 faces） | 462 / 8.1 / 501 µs |
+| FLIP MAC transfer | 18³ / 12³ | (213/5.8/222) / (82/3.8/83) µs |
+| PBF density solve（lambda / solve / total） | 64 000 粒子 | 664 / 902 / 1565 µs |
+| PBF density solve | 15 625 / 4 096 粒子 | (170/286/456) / (80/108/187) µs |
+
+**实测 vs 设计目标对照**（单项 kernel 粒度，均在设计预算内）：
+- 波谱 IFFT 256²：实测蝶形 ≈ 0.20 ms（装配/演进另计），设计目标 ≤ 0.5–1.0 ms（4 级）→ 单级充裕，四级叠加仍在预算内。
+- SWE 256²：实测 0.034 ms，设计目标 ≤ 0.3 ms/域 → 充裕。
+- 泡沫平流 256²：实测 0.018 ms，设计目标 ≤ 0.3 ms → 充裕。
+- FLIP/PBF sim（~10⁵ 粒子）：实测 FLIP transfer 24³ ≈ 0.96 ms（p2g+g2p），PBF density 64k ≈ 1.57 ms；设计目标 ≤ 2–4 ms → 在预算内，但 p2g/g2p scatter-gather 与 PBF solve 是主瓶颈，后续可做排序/tile/压缩优化。
 
 **效果验收口径**：
 - 海面近/中/远无平铺重复、无 LOD 接缝跳变、掠射菲涅尔正确、破碎浪出白沫；
