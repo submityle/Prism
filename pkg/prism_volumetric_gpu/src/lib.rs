@@ -94,6 +94,7 @@ pub mod blend_with_atmosphere;
 pub mod bloom_threshold;
 pub mod bloom_upsample;
 pub mod boids;
+pub mod bonded_particle_section;
 pub mod bounding_capsule_axis;
 pub mod bounding_capsule_contains;
 pub mod bounding_capsule_volume;
@@ -260,6 +261,8 @@ pub mod heat_distortion;
 pub mod height_fog;
 pub mod heightfield_cell;
 pub mod hertz_effective_modulus;
+pub mod hertz_elastic_force;
+pub mod hertz_reduced_radius;
 pub mod hilbert_curve;
 pub mod histogram_equalize;
 pub mod hue_shift;
@@ -288,6 +291,7 @@ pub mod luminance_hist;
 pub mod marching_cubes;
 pub mod marching_squares;
 pub mod mask;
+pub mod material_combine;
 pub mod material_registry_resolve;
 pub mod material_resolve_bin;
 pub mod matrix_decompose;
@@ -389,6 +393,8 @@ pub mod polyline_sdf_2d;
 pub mod popcount_hamming;
 pub mod powder;
 pub mod premultiply_alpha;
+pub mod principal_curvature_gaussian;
+pub mod principal_curvature_mean;
 pub mod probe_grid_sample;
 pub mod pyrocumulus_buoyancy;
 pub mod quadric_add;
@@ -690,6 +696,9 @@ pub use blend_with_atmosphere::{BlendQuery, BlendedColor, GpuBlendWithAtmosphere
 pub use bloom_threshold::{BloomThresholdQuery, GpuBloomThreshold};
 pub use bloom_upsample::{BloomUpsampleQuery, GpuBloomUpsample};
 pub use boids::{BoidsQuery, BoidsResult, GpuBoids, MAX_NEIGHBORS};
+pub use bonded_particle_section::{
+    BondedParticleSectionQuery, BondedParticleSectionResult, GpuBondedParticleSection,
+};
 pub use bounding_capsule_axis::{
     BoundingCapsuleAxisQuery, BoundingCapsuleAxisResult, GpuBoundingCapsuleAxis,
 };
@@ -971,6 +980,12 @@ pub use heightfield_cell::{GpuHeightfieldCell, HeightfieldCellQuery, Heightfield
 pub use hertz_effective_modulus::{
     GpuHertzEffectiveModulus, HertzEffectiveModulusQuery, HertzEffectiveModulusResult,
 };
+pub use hertz_elastic_force::{
+    GpuHertzElasticForce, HertzElasticForceQuery, HertzElasticForceResult,
+};
+pub use hertz_reduced_radius::{
+    GpuHertzReducedRadius, HertzReducedRadiusQuery, HertzReducedRadiusResult,
+};
 pub use hilbert_curve::{GpuHilbertCurve, MAX_ORDER};
 pub use histogram_equalize::{
     GpuHistogramEqualize, HistogramEqualizeQuery, HistogramEqualizeResult,
@@ -1009,6 +1024,7 @@ pub use luminance_hist::{GpuLuminanceHist, LuminanceHistQuery};
 pub use marching_cubes::{GpuMarchingCubes, MarchingCubesCellQuery, MarchingCubesCellResult};
 pub use marching_squares::{GpuMarchingSquares, MarchingSquaresQuery, MarchingSquaresResult};
 pub use mask::{GpuScatteringMask, MaskQuery};
+pub use material_combine::{GpuMaterialCombine, MaterialCombineQuery, MaterialCombineResult};
 pub use material_registry_resolve::{
     GpuMaterialRegistryResolve, MaterialRegistryResolveQuery, MaterialRegistryResolveResult,
 };
@@ -1180,6 +1196,13 @@ pub use polyline_sdf_2d::{GpuPolylineSdf, GpuPolylineSdf2d, PolylineSdf2dQuery};
 pub use popcount_hamming::GpuPopcountHamming;
 pub use powder::{GpuPowder, PowderQuery};
 pub use premultiply_alpha::GpuPremultiplyAlpha;
+pub use principal_curvature_gaussian::{
+    GpuPrincipalCurvatureGaussian, PrincipalCurvatureGaussianQuery,
+    PrincipalCurvatureGaussianResult,
+};
+pub use principal_curvature_mean::{
+    GpuPrincipalCurvatureMean, PrincipalCurvatureMeanQuery, PrincipalCurvatureMeanResult,
+};
 pub use probe_grid_sample::{GpuProbeGridSample, ProbeSampleQuery, PROBE_BANDS};
 pub use pyrocumulus_buoyancy::{GpuPyrocumulusBuoyancy, PyrocumulusBuoyancyQuery};
 pub use quadric_add::{GpuQuadricAdd, QuadricAddQuery, QuadricAddResult};
