@@ -492,6 +492,8 @@ pub mod sphere_contact_forces;
 pub use sphere_contact_forces::{resolve_sphere_contact_forces, SphereContactForceResolution};
 pub mod sphere_dem_integrator;
 pub use sphere_dem_integrator::{SphereDemIntegrator, SphereDemState, SphereDemStepReport};
+pub mod sphere_cundall_strack_driver;
+pub use sphere_cundall_strack_driver::{SphereCundallStrackDriver, SphereCundallStrackResolution};
 
 /// A handle into a [`ShapeRegistry`].
 ///
