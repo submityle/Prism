@@ -19,6 +19,8 @@
 //! * [`budget_split`] -- Atmos-style top-K discrete plus overflow-to-bed split.
 //! * [`clustering`] -- energy-preserving object clustering fallback.
 //! * [`pan`] -- VBAP panning onto a bed's speakers.
+//! * [`platform`] -- platform spatial backend bridge: capability, channel
+//!   order, presets, delivery negotiation, and the backend trait.
 //! * [`fold`] -- object-to-bed downmix matrices and object-to-binaural params.
 //! * [`ambisonics`] -- object/bed to `AmbiX` encoding (reuses `prism_audio_spatial`).
 //! * [`render`] -- the unified scene render entry point.
@@ -46,5 +48,6 @@ pub mod fold;
 pub mod metadata;
 pub mod object;
 pub mod pan;
+pub mod platform;
 pub mod render;
 pub mod scene;
