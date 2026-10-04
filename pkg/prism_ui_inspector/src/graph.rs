@@ -180,6 +180,63 @@ impl DependencyGraph {
         }
     }
 
+    /// Returns the transitive dependents of `id` in propagation order: the
+    /// order in which they must be recomputed when `id` changes so that each
+    /// node runs only after every dependency it shares with the affected set.
+    ///
+    /// The result is exactly the set returned by
+    /// [`DependencyGraph::dependents_of`], reordered into a topological order of
+    /// the subgraph induced on those dependents; `id` itself is excluded. Only
+    /// edges whose source is also a dependent constrain the order, because `id`
+    /// and any unaffected sources already hold their final values when
+    /// propagation begins. Ties are broken by ascending [`NodeId`], so the
+    /// order is deterministic. Returns `None` when that induced subgraph
+    /// contains a cycle, mirroring [`DependencyGraph::topo_order`].
+    #[must_use]
+    pub fn propagation_order(&self, id: NodeId) -> Option<Vec<NodeId>> {
+        let affected: BTreeSet<NodeId> = self.dependents_of(id).into_iter().collect();
+        if affected.is_empty() {
+            return Some(Vec::new());
+        }
+        // Kahn's algorithm restricted to `affected`: a node's in-degree counts
+        // only its sources that are themselves affected.
+        let mut in_degree: BTreeMap<NodeId, usize> = BTreeMap::new();
+        for &nid in &affected {
+            let count = self.nodes.get(&nid).map_or(0, |node| {
+                node.sources
+                    .iter()
+                    .filter(|source| affected.contains(source))
+                    .count()
+            });
+            in_degree.insert(nid, count);
+        }
+        let mut ready: BTreeSet<NodeId> = in_degree
+            .iter()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(nid, _)| *nid)
+            .collect();
+        let mut order = Vec::with_capacity(affected.len());
+        while let Some(&next) = ready.iter().next() {
+            ready.remove(&next);
+            order.push(next);
+            if let Some(node) = self.nodes.get(&next) {
+                for observer in &node.observers {
+                    if let Some(degree) = in_degree.get_mut(observer) {
+                        *degree -= 1;
+                        if *degree == 0 {
+                            ready.insert(*observer);
+                        }
+                    }
+                }
+            }
+        }
+        if order.len() == affected.len() {
+            Some(order)
+        } else {
+            None
+        }
+    }
+
     /// Renders the graph as Graphviz DOT text.
     ///
     /// Nodes are labelled with their id and kind; edges run from each source to
@@ -457,5 +514,138 @@ mod tests {
         assert!(graph.dependents_of(9999).is_empty());
         assert!(graph.dependencies_of(9999).is_empty());
         assert!(!graph.contains(9999));
+    }
+
+    #[test]
+    fn propagation_order_of_chain_source() {
+        let (graph, signal_id, memo_id, effect_id) = chain();
+        // From the signal, the memo recomputes before the effect re-runs.
+        assert_eq!(
+            graph.propagation_order(signal_id),
+            Some(alloc::vec![memo_id, effect_id])
+        );
+        // A leaf has no dependents.
+        assert_eq!(graph.propagation_order(effect_id), Some(Vec::new()));
+        // An absent node propagates to nothing.
+        assert_eq!(graph.propagation_order(9999), Some(Vec::new()));
+    }
+
+    #[test]
+    fn propagation_order_of_diamond_join_last() {
+        let rt = Runtime::new();
+        let a = rt.signal(1i32);
+        let left = rt.memo({
+            let a = a.clone();
+            move || a.get() + 1
+        });
+        let right = rt.memo({
+            let a = a.clone();
+            move || a.get() + 2
+        });
+        let sum = rt.memo({
+            let left = left.clone();
+            let right = right.clone();
+            move || left.get() + right.get()
+        });
+        let _ = sum.get();
+
+        let snap = rt.graph_snapshot();
+        let graph = DependencyGraph::from(&snap);
+        let a_id = snap.signals()[0].id;
+        let sum_id = snap.memos().iter().map(|n| n.id).max().expect("has memos");
+
+        let order = graph.propagation_order(a_id).expect("acyclic");
+        // The affected set is exactly the signal's transitive dependents.
+        let mut as_set = order.clone();
+        as_set.sort_unstable();
+        assert_eq!(as_set, graph.dependents_of(a_id));
+        // The join memo recomputes last, after both branches.
+        assert_eq!(order.last().copied(), Some(sum_id));
+    }
+
+    // SplitMix64 for deterministic random DAG shapes.
+    fn next_rand(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    #[test]
+    fn propagation_order_matches_independent_oracle() {
+        use alloc::collections::BTreeSet;
+
+        use prism_ui_reactive::{GraphSnapshot, NodeInfo, NodeKindInfo};
+
+        let mut state = 0x1234_5678_9ABC_DEF0u64;
+        for _ in 0..200 {
+            let n = 1 + (next_rand(&mut state) % 10) as usize;
+
+            // A DAG by construction: node i may depend only on earlier nodes.
+            let mut sources: Vec<Vec<usize>> = Vec::new();
+            for i in 0..n {
+                let mut src = Vec::new();
+                for j in 0..i {
+                    if next_rand(&mut state).is_multiple_of(3) {
+                        src.push(j);
+                    }
+                }
+                sources.push(src);
+            }
+            let mut observers: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
+            for (i, src) in sources.iter().enumerate() {
+                for &j in src {
+                    observers[j].push(i);
+                }
+            }
+
+            let mut nodes = Vec::new();
+            for (i, (src, obs)) in sources.iter().zip(observers.iter()).enumerate() {
+                let mut s = src.clone();
+                s.sort_unstable();
+                let mut o = obs.clone();
+                o.sort_unstable();
+                let kind = if src.is_empty() {
+                    NodeKindInfo::Signal
+                } else {
+                    NodeKindInfo::Memo
+                };
+                nodes.push(NodeInfo {
+                    id: i,
+                    kind,
+                    sources: s,
+                    observers: o,
+                });
+            }
+            let graph = DependencyGraph::from(&GraphSnapshot { nodes });
+
+            for start in 0..n {
+                let order = graph.propagation_order(start).expect("DAG is acyclic");
+
+                // 1) Set equals the transitive dependents, with no duplicates.
+                let mut as_set = order.clone();
+                as_set.sort_unstable();
+                let unique_len = as_set.len();
+                as_set.dedup();
+                assert_eq!(as_set.len(), unique_len);
+                assert_eq!(as_set, graph.dependents_of(start));
+
+                // 2) Valid topological order over the induced subgraph: every
+                //    edge u -> v with both endpoints affected runs u first.
+                let affected: BTreeSet<usize> = order.iter().copied().collect();
+                for (rank, &v) in order.iter().enumerate() {
+                    for &u in &sources[v] {
+                        if affected.contains(&u) {
+                            let u_rank = order.iter().position(|y| *y == u).expect("u present");
+                            assert!(u_rank < rank);
+                        }
+                    }
+                }
+
+                // 3) Deterministic.
+                assert_eq!(graph.propagation_order(start), Some(order));
+            }
+        }
     }
 }
