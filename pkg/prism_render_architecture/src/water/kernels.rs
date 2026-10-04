@@ -217,6 +217,13 @@ pub enum WaterKernel {
     /// index into the cell-major `sorted_indices` the transfer kernels gather
     /// through.
     FlipCellScatter,
+    /// Reorder (gather) the packed particle records into the cell-major order
+    /// the scatter pass produced. Integration pass that pays off the
+    /// counting-sort chain: one invocation per output slot copies its source
+    /// record (via `sorted_indices`) into a compact pool, so the real-machine
+    /// `FLIP`/`APIC` `MAC` transfer kernels (`P2G`/`G2P`) read a coherent face
+    /// neighbourhood without touching their validated `ABI`.
+    FlipParticleReorder,
     /// Reconstruct a renderable surface from the particle set (screen-space,
     /// anisotropic marching cubes, or narrow-band `SDF`).
     SurfaceReconstruct,
@@ -256,7 +263,7 @@ pub enum WaterKernel {
 impl WaterKernel {
     /// Every kernel, in a stable order, for descriptor-table iteration and
     /// exhaustiveness tests.
-    pub const ALL: [WaterKernel; 29] = [
+    pub const ALL: [WaterKernel; 30] = [
         WaterKernel::SpectrumIfft,
         WaterKernel::GerstnerDisplace,
         WaterKernel::SweStep,
@@ -271,6 +278,7 @@ impl WaterKernel {
         WaterKernel::FlipCellHistogram,
         WaterKernel::FlipCellScan,
         WaterKernel::FlipCellScatter,
+        WaterKernel::FlipParticleReorder,
         WaterKernel::SurfaceReconstruct,
         WaterKernel::CausticsProject,
         WaterKernel::FoamAdvect,
@@ -310,6 +318,7 @@ impl WaterKernel {
             WaterKernel::FlipCellHistogram => "water_flip_cell_histogram",
             WaterKernel::FlipCellScan => "water_flip_cell_scan",
             WaterKernel::FlipCellScatter => "water_flip_cell_scatter",
+            WaterKernel::FlipParticleReorder => "water_flip_particle_reorder",
             WaterKernel::SurfaceReconstruct => "water_surface_reconstruct",
             WaterKernel::CausticsProject => "water_caustics_project",
             WaterKernel::FoamAdvect => "water_foam_advect",
@@ -381,10 +390,14 @@ impl WaterKernel {
                 WorkgroupSize { x: 64, y: 1, z: 1 },
                 DispatchDomain::Particle,
             ),
-            // The scatter pass shares the three-storage/64-lane particle ABI
-            // of the `MAC` transfers: `positions_in`, an atomic cursor, and
-            // the `sorted_indices` output, plus one uniform grid description.
-            WaterKernel::FlipMacP2G | WaterKernel::FlipMacG2P | WaterKernel::FlipCellScatter => (
+            // The scatter and reorder passes share the three-storage/64-lane
+            // particle ABI of the `MAC` transfers: `positions_in`, an atomic
+            // cursor (scatter) or `sorted_indices` (reorder), and the output
+            // buffer, plus one uniform grid/param description.
+            WaterKernel::FlipMacP2G
+            | WaterKernel::FlipMacG2P
+            | WaterKernel::FlipCellScatter
+            | WaterKernel::FlipParticleReorder => (
                 BindGroupLayout {
                     storage_buffers: 3,
                     uniform_buffers: 1,

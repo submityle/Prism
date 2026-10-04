@@ -46,6 +46,7 @@ pub mod flip_mac_g2p_kernel;
 pub mod flip_mac_p2g_kernel;
 pub mod flip_mac_pressure_kernel;
 pub mod flip_mac_project_kernel;
+pub mod flip_particle_reorder_kernel;
 pub mod gerstner_displace_kernel;
 pub mod pbf_density_kernel;
 pub mod pipeline;
@@ -204,6 +205,10 @@ pub use flip_mac_pressure_kernel::{
 
 pub use flip_mac_project_kernel::{
     dispatch_mac_project, MacProjectParams, WATER_FLIP_MAC_PROJECT_WESL,
+};
+
+pub use flip_particle_reorder_kernel::{
+    dispatch_flip_particle_reorder, FlipReorderParams, WATER_FLIP_PARTICLE_REORDER_WESL,
 };
 
 pub use gerstner_displace_kernel::{
