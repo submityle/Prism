@@ -42,6 +42,8 @@
 
 use alloc::vec::Vec;
 
+use glam::Vec3 as GlamVec3;
+
 /// Squared lengths below this treat a vector as numerically zero, so
 /// normalization never divides by (almost) zero.
 const EPS_LEN_SQ: f32 = 1.0e-24;
@@ -645,43 +647,64 @@ fn predict(particles: &mut [RodParticle], prev: &mut [Vec3], sub_dt: f32) {
 }
 
 /// Projects the compliant edge-length (stretch) constraint over every segment
-/// once. The correction is split between endpoints by inverse mass, so a pinned
-/// endpoint absorbs none of it. Missing rest lengths and degenerate segments
-/// are skipped.
+/// once by delegating to the authoritative physics-engine XPBD distance step
+/// rather than re-deriving the arithmetic here.
+///
+/// The edge-length (stretch) projection is a *general* XPBD distance constraint
+/// shared with cloth and the guide-strand solver, so it lives in one place:
+/// [`prism_physics_core::soft::constraint::project_distance_constraint`]. Only
+/// the surrounding discrete-elastic-rod machinery (the quaternion bend-twist
+/// `Darboux` projection in [`solve_bend_twist`], prediction, and finalization)
+/// is `Cosserat`-specific and stays rod-side.
+///
+/// `alpha` is already the substep-normalized compliance (`compliance /
+/// sub_dt^2`), so the engine re-forms the identical `alpha_tilde` when driven
+/// with `dt = 1`. Each sweep runs a fresh (unwarmed) multiplier, so every
+/// projection is driven with `lambda = 0` and the returned multiplier is
+/// discarded. The sweep stays sequential (Gauss-Seidel): segment `i` sees the
+/// updates of the segments before it, exactly as before. The correction is
+/// split between endpoints by inverse mass, so a pinned endpoint (zero inverse
+/// mass) absorbs none of it; a missing or non-finite rest length and a
+/// degenerate segment are skipped by the shared primitive.
 fn solve_stretch(particles: &mut [RodParticle], rest_lengths: &[f32], alpha: f32) {
     let count = particles.len();
+    if count < 2 {
+        return;
+    }
+    // Convert the rod particles into the structure-of-arrays the physics
+    // engine consumes. Pinned particles map to a zero inverse mass so the
+    // shared projection leaves them fixed, matching the rod convention that a
+    // non-positive inverse mass pins a particle.
+    let mut positions: Vec<GlamVec3> = Vec::with_capacity(count);
+    let mut inverse_masses: Vec<f32> = Vec::with_capacity(count);
+    for particle in particles.iter() {
+        positions.push(GlamVec3::new(
+            particle.position.x,
+            particle.position.y,
+            particle.position.z,
+        ));
+        inverse_masses.push(particle.inverse_mass.max(0.0));
+    }
     let mut i = 0;
     while i + 1 < count {
-        let Some(&rest) = rest_lengths.get(i) else {
-            i += 1;
-            continue;
-        };
-        if !rest.is_finite() {
-            i += 1;
-            continue;
+        if let Some(&rest) = rest_lengths.get(i)
+            && rest.is_finite()
+        {
+            let _ = prism_physics_core::soft::constraint::project_distance_constraint(
+                &mut positions,
+                &inverse_masses,
+                i,
+                i + 1,
+                rest,
+                alpha,
+                0.0,
+                1.0,
+            );
         }
-        let (head, tail) = particles.split_at_mut(i + 1);
-        let a = &mut head[i];
-        let b = &mut tail[0];
-        let w_a = a.inverse_mass.max(0.0);
-        let w_b = b.inverse_mass.max(0.0);
-        let w_sum = w_a + w_b;
-        if w_sum <= 0.0 {
-            i += 1;
-            continue;
-        }
-        let delta = b.position.sub(a.position);
-        let len = delta.length();
-        if len <= EPS_LEN {
-            i += 1;
-            continue;
-        }
-        let dir = delta.scale(1.0 / len);
-        let constraint = len - rest;
-        let lambda = constraint / (w_sum + alpha);
-        a.position = a.position.add(dir.scale(w_a * lambda));
-        b.position = b.position.sub(dir.scale(w_b * lambda));
         i += 1;
+    }
+    for (particle, position) in particles.iter_mut().zip(positions.iter()) {
+        particle.position = Vec3::new(position.x, position.y, position.z);
     }
 }
 
