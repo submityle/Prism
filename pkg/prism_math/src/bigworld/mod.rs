@@ -39,5 +39,7 @@
 //! own.
 
 mod grid;
+mod hierfixed;
 
 pub use grid::{GridCell, GridPosition};
+pub use hierfixed::FixedGridPosition;

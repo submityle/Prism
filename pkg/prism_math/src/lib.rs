@@ -94,7 +94,7 @@ pub use vec::{Vec2, Vec3, Vec3A, Vec4, vec2, vec3, vec3a, vec4};
 pub use geom::{Aabb3, BoundingSphere, Frustum, Plane, Ray3, Segment3};
 pub use intersect::{Containment, RayHit};
 
-pub use self::bigworld::{GridCell, GridPosition};
+pub use self::bigworld::{FixedGridPosition, GridCell, GridPosition};
 pub use self::f64::{
     DAffine3, DMat2, DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, dvec2, dvec3, dvec4,
 };
@@ -214,8 +214,8 @@ fn detect_wasm_simd() -> bool {
 pub mod prelude {
     pub use crate::{
         Aabb3, Affine3, Backend, BoundingSphere, CompensableFloat, Containment, DAffine3, DMat2,
-        DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, Fixed, Frustum, FxVec2, FxVec3, FxVec4, GridCell,
-        GridPosition, I16F16, KahanSum, Mat2, Mat3, Mat4, MathCaps, NeumaierSum, Plane, Quat, Ray3,
+        DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, Fixed, FixedGridPosition, Frustum, FxVec2, FxVec3,
+        FxVec4, GridCell, GridPosition, I16F16, KahanSum, Mat2, Mat3, Mat4, MathCaps, NeumaierSum, Plane, Quat, Ray3,
         RayHit, Segment3, StateHasher, Vec2, Vec3, Vec3A, Vec4, consts, curve, dvec2, dvec3, dvec4,
         fxvec2, fxvec3, fxvec4, geom, intersect, kahan_sum, lerp, neumaier_sum, to_degrees,
         to_radians, vec2, vec3, vec3a, vec4,

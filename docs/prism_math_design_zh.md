@@ -455,7 +455,7 @@ pkg/prism_math/
 
 **交付状态**：已落地 `pkg/prism_math/src/curve/surface.rs`（`no_std`，复用 §10 `bezier_cubic`/`bezier_cubic_tangent` 做张量积，B-spline 另置均匀三次基）。`BezierPatch`（4×4 控制网，插值四角）与 `BSplineSurface`（均匀三次，C2 连续、落在控制点凸包、供无缝拼贴地形）各含 `new/sample(u,v)/tangent_u/tangent_v/normal`（切线叉积归一）。6 单测绿：角点插值、平面网格精确重建（含常法线）、切线与中心有限差分对拍、B-spline 基单位分解（权和=1、常量导数=0）、凸包内平面重建、抬中控制点验证曲率隆起。LOD 自适应细分参数与 GPU tessellation 控制点随 `prism_terrain`/`prism_render` 接入。
 
-### 24.9 大世界定点分层（Hierarchical Fixed-Point）
+### 24.9 大世界定点分层（Hierarchical Fixed-Point）✅ 已交付（hierfixed）
 
 把 §13 定点与 §6 大世界结合，供**既要大世界又要确定性**的联机开放世界：
 
@@ -463,6 +463,8 @@ pkg/prism_math/
 - 跨 cell 运算显式 rebase（格差转定点偏移），加减在格内精确、跨格走整数格差，**全程无浮点**。
 - 与 transform §9 大世界 rebasing 共用 cell 划分约定；与 `prism_replication` 快照格式对齐——联机大世界的位级一致坐标底座。
 
+**交付状态**：`FixedGridPosition{cell:[i32;3], local:FxVec3}`，`CELL_SIZE=1024` m（2 的幂，`cell*CELL_SIZE` 为精确定点积）。`canonical` 用原始位 `div_euclid`/`rem_euclid` 把整格溢出进位到 `cell`（负偏移精确借位，local 恒落 `[0,CELL_SIZE)`）；`translated` 位级 `wrapping_add` 后 canonical；`rebased_offset`/`axis_offset` 用 `i128` 中间积并饱和回 Q32.32，格差精确、跨格无浮点；`distance_squared` 走 rebase 后 `dot`。6 单测绿（canonical 落格/幂等、跨格 rebase 精确、translate↔rebase 往返、反对称位级一致、距离平方对拍）。
+
 ### 24.10 诚实边界
 
-本章全部 PLANNED，无代码。落地优先级建议：**24.4 补偿求和**（直接服务确定归并，随 tasks M4）与 **24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）优先；24.3 区间算术 **已交付**（`interval`）；24.6 SH **已交付**（`spherical`，SH 旋转/探针随 `prism_gi` 接入）；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数 **已交付**（`dual`，供 IK/物理雅可比接入）；24.8 曲面 **已交付**（`curve::surface`，LOD 细分随 `prism_terrain` 接入）；24.9 大世界定点随联机开放世界。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章全部 PLANNED，无代码。落地优先级建议：**24.4 补偿求和**（直接服务确定归并，随 tasks M4）与 **24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）优先；24.3 区间算术 **已交付**（`interval`）；24.6 SH **已交付**（`spherical`，SH 旋转/探针随 `prism_gi` 接入）；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数 **已交付**（`dual`，供 IK/物理雅可比接入）；24.8 曲面 **已交付**（`curve::surface`，LOD 细分随 `prism_terrain` 接入）；24.9 大世界定点 **已交付**（`bigworld::hierfixed`，`FixedGridPosition`：纯整数/Q32.32 cell+local，canonical/translated/rebased_offset/distance_squared 全程无浮点，供联机开放世界位级一致）。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
