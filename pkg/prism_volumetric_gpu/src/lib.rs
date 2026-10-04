@@ -98,13 +98,17 @@ pub mod bounding_capsule_axis;
 pub mod bounding_capsule_contains;
 pub mod bounding_capsule_volume;
 pub mod bounding_sphere_contains;
+pub mod bounding_sphere_overlaps;
+pub mod bounding_sphere_volume;
 pub mod bounds;
 pub mod bresenham_line;
 pub mod bspline_patch;
 pub mod bspline_surface;
 pub mod bvh;
 pub mod camera;
+pub mod capillary_max_force;
 pub mod capillary_reduced_radius;
+pub mod capillary_rupture_distance;
 pub mod capsule_capsule_closest;
 pub mod capsule_plane_contact;
 pub mod capsule_sdf;
@@ -381,10 +385,12 @@ pub mod powder;
 pub mod premultiply_alpha;
 pub mod probe_grid_sample;
 pub mod pyrocumulus_buoyancy;
+pub mod quadric_add;
 pub mod quadric_error;
 pub mod quadric_from_plane;
 pub mod quadric_from_triangle;
 pub mod quadric_optimal_point;
+pub mod quadric_scaled;
 pub mod quality_decision;
 pub mod quaternion_nlerp;
 pub mod quaternion_rotate;
@@ -690,14 +696,26 @@ pub use bounding_capsule_volume::{
 pub use bounding_sphere_contains::{
     BoundingSphereContainsQuery, BoundingSphereContainsResult, GpuBoundingSphereContains,
 };
+pub use bounding_sphere_overlaps::{
+    BoundingSphereOverlapsQuery, BoundingSphereOverlapsResult, GpuBoundingSphereOverlaps,
+};
+pub use bounding_sphere_volume::{
+    BoundingSphereVolumeQuery, BoundingSphereVolumeResult, GpuBoundingSphereVolume,
+};
 pub use bounds::{GpuBounds, GpuBoundsQuery, GpuBoundsResult, AXIS_X, AXIS_Y, AXIS_Z};
 pub use bresenham_line::{GpuBresenhamLine, GpuBresenhamQuery, GpuBresenhamResult};
 pub use bspline_patch::{BsplinePatchQuery, BsplinePatchResult, GpuBsplinePatch};
 pub use bspline_surface::{BsplineSurfaceQuery, BsplineSurfaceResult, GpuBsplineSurface};
 pub use bvh::{BvhQuery, BvhResult, GpuBvh};
 pub use camera::{CameraQuery, CameraResult, GpuCamera};
+pub use capillary_max_force::{
+    CapillaryMaxForceQuery, CapillaryMaxForceResult, GpuCapillaryMaxForce,
+};
 pub use capillary_reduced_radius::{
     CapillaryReducedRadiusQuery, CapillaryReducedRadiusResult, GpuCapillaryReducedRadius,
+};
+pub use capillary_rupture_distance::{
+    CapillaryRuptureDistanceQuery, CapillaryRuptureDistanceResult, GpuCapillaryRuptureDistance,
 };
 pub use capsule_capsule_closest::{
     CapsuleClosestQuery, CapsuleClosestResult, GpuCapsuleCapsuleClosest,
@@ -1144,6 +1162,7 @@ pub use powder::{GpuPowder, PowderQuery};
 pub use premultiply_alpha::GpuPremultiplyAlpha;
 pub use probe_grid_sample::{GpuProbeGridSample, ProbeSampleQuery, PROBE_BANDS};
 pub use pyrocumulus_buoyancy::{GpuPyrocumulusBuoyancy, PyrocumulusBuoyancyQuery};
+pub use quadric_add::{GpuQuadricAdd, QuadricAddQuery, QuadricAddResult};
 pub use quadric_error::{GpuQuadricError, QuadricErrorQuery, QuadricErrorResult};
 pub use quadric_from_plane::{GpuQuadricFromPlane, QuadricFromPlaneQuery, QuadricFromPlaneResult};
 pub use quadric_from_triangle::{
@@ -1152,6 +1171,7 @@ pub use quadric_from_triangle::{
 pub use quadric_optimal_point::{
     GpuQuadricOptimalPoint, QuadricOptimalPointQuery, QuadricOptimalPointResult,
 };
+pub use quadric_scaled::{GpuQuadricScaled, QuadricScaledQuery, QuadricScaledResult};
 pub use quality_decision::{GpuQualityDecision, QualityDecisionQuery, QualityDecisionResult};
 pub use quaternion_nlerp::{GpuQuaternionNlerp, QuaternionNlerpQuery, QuaternionNlerpResult};
 pub use quaternion_rotate::{GpuQuaternionRotate, QuatRotateQuery, QuatRotateResult};
