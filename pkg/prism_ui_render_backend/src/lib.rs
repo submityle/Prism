@@ -64,6 +64,7 @@ pub mod batch;
 pub mod calipers;
 pub mod circle;
 pub mod clip;
+pub mod convexity;
 pub mod curve;
 pub mod draw;
 #[cfg(feature = "gpu")]
@@ -91,6 +92,7 @@ pub use batch::{batch, instance_count, Batch, GlyphInstance, RectInstance, Shado
 pub use calipers::{convex_diameter, convex_diameter_pair};
 pub use circle::{min_enclosing_circle, Circle};
 pub use clip::clip_polygon;
+pub use convexity::is_convex;
 pub use curve::CubicBezier;
 pub use draw::{DrawCommand, DrawList, GlyphCmd, LayerCmd, RectCmd, ShadowCmd};
 #[cfg(feature = "gpu")]
