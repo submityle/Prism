@@ -51,6 +51,7 @@ pub mod raytri;
 pub mod sh;
 pub mod skinning;
 pub mod srgb;
+pub mod temperature;
 pub mod view;
 pub mod xyz;
 
@@ -71,5 +72,6 @@ pub use raytri::{GpuRayTri, GpuTri, GpuTriHit};
 pub use sh::{GpuSh3Eval, SH3_COEFFS};
 pub use skinning::{GpuDualQuatSkin, Influence, MAX_INFLUENCES};
 pub use srgb::GpuSrgbTransfer;
+pub use temperature::GpuTemperature;
 pub use view::{GpuView, ViewKind};
 pub use xyz::GpuXyz;

@@ -1053,3 +1053,57 @@ fn prism_hsv_to_srgb(c: vec4<f32>) -> vec4<f32> {\n\
     let m = value - chroma;\n\
     return prism_hue_to_rgb(hue, chroma, m, c.w);\n\
 }\n";
+
+/// Single-sourced WGSL for the correlated-color-temperature -> linear-sRGB
+/// conversion (Planckian locus).
+///
+/// `prism_temperature_to_linear` mirrors the CPU reference
+/// [`LinearRgba::from_temperature`](crate::color::LinearRgba::from_temperature):
+/// it clamps the Kelvin input to `[1667, 25000]`, evaluates the Kim et al.
+/// (2002) piecewise-cubic chromaticity `(x, y)` on the Planckian locus, lifts it
+/// to XYZ at unit luminance (`X = x/y`, `Y = 1`, `Z = (1-x-y)/y`), applies the
+/// XYZ->linear-sRGB matrix (identical literals to
+/// [`WGSL_XYZ`]'s `prism_xyz_to_linear`), and clamps negative out-of-gamut
+/// components to `0`. The branch cutoffs (`t <= 2222`, `t <= 4000`) are on the
+/// exact clamped input, so the GPU and CPU always select the same spline
+/// segment. This is ordinary FMA plus two divides and clamps (no
+/// transcendental), so parity is verified with a tight tolerance that only
+/// absorbs Metal fast-math last-ULP rounding, not bit-exactly. The output alpha
+/// is a constant `1.0` matching the CPU.
+pub const WGSL_TEMPERATURE: &str = "\
+fn prism_planckian_locus_xy(kelvin: f32) -> vec2<f32> {\n\
+    let t = clamp(kelvin, 1667.0, 25000.0);\n\
+    let inv = 1.0 / t;\n\
+    let inv2 = inv * inv;\n\
+    let inv3 = inv2 * inv;\n\
+    var x = 0.0;\n\
+    if (t <= 4000.0) {\n\
+        x = -0.2661239e9 * inv3 - 0.2343589e6 * inv2 + 0.8776956e3 * inv + 0.179910;\n\
+    } else {\n\
+        x = -3.0258469e9 * inv3 + 2.107038e6 * inv2 + 0.2226347e3 * inv + 0.240390;\n\
+    }\n\
+    let x2 = x * x;\n\
+    let x3 = x2 * x;\n\
+    var y = 0.0;\n\
+    if (t <= 2222.0) {\n\
+        y = -1.1063814 * x3 - 1.3481102 * x2 + 2.1855583 * x - 0.20219683;\n\
+    } else if (t <= 4000.0) {\n\
+        y = -0.9549476 * x3 - 1.3741859 * x2 + 2.09137 * x - 0.16748867;\n\
+    } else {\n\
+        y = 3.081758 * x3 - 5.873387 * x2 + 3.7511299 * x - 0.37001483;\n\
+    }\n\
+    return vec2<f32>(x, y);\n\
+}\n\
+\n\
+fn prism_temperature_to_linear(kelvin: f32) -> vec4<f32> {\n\
+    let xy = prism_planckian_locus_xy(kelvin);\n\
+    let x = xy.x;\n\
+    let y = xy.y;\n\
+    let big_x = x / y;\n\
+    let big_y = 1.0;\n\
+    let big_z = (1.0 - x - y) / y;\n\
+    let r = 3.2404542 * big_x - 1.5371385 * big_y - 0.4985314 * big_z;\n\
+    let g = -0.969266 * big_x + 1.8760108 * big_y + 0.041556 * big_z;\n\
+    let b = 0.0556434 * big_x - 0.2040259 * big_y + 1.0572252 * big_z;\n\
+    return vec4<f32>(max(r, 0.0), max(g, 0.0), max(b, 0.0), 1.0);\n\
+}\n";
