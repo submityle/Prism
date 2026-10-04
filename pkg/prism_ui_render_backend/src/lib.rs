@@ -64,6 +64,7 @@ pub mod curve;
 pub mod draw;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod hull;
 pub mod layer;
 pub mod polygon;
 pub mod raster;
@@ -75,6 +76,7 @@ pub use curve::CubicBezier;
 pub use draw::{DrawCommand, DrawList, GlyphCmd, LayerCmd, RectCmd, ShadowCmd};
 #[cfg(feature = "gpu")]
 pub use gpu::GpuRasterizer;
+pub use hull::convex_hull;
 pub use layer::{Layer, LayerTree};
 pub use polygon::{sd_polygon, sd_triangle};
 pub use raster::{rasterize, Framebuffer};
