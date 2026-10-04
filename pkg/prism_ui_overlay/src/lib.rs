@@ -48,12 +48,14 @@
 
 extern crate alloc;
 
+mod arrow;
 mod focus;
 mod id;
 mod kind;
 mod manager;
 mod position;
 
+pub use arrow::{arrow, ArrowConfig, ArrowPosition};
 pub use focus::FocusTrap;
 pub use id::OverlayId;
 pub use kind::OverlayKind;
