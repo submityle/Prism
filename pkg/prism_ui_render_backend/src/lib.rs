@@ -75,6 +75,7 @@ pub mod scene;
 pub mod segment;
 pub mod simplify;
 pub mod sdf;
+pub mod triangulate;
 
 pub use batch::{batch, instance_count, Batch, GlyphInstance, RectInstance, ShadowInstance};
 pub use clip::clip_polygon;
@@ -91,3 +92,4 @@ pub use raster::{rasterize, Framebuffer};
 pub use scene::RetainedScene;
 pub use segment::segment_intersection;
 pub use simplify::simplify;
+pub use triangulate::triangulate;
