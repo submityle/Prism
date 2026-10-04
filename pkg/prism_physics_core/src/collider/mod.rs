@@ -586,6 +586,8 @@ pub mod weber_number;
 pub use weber_number::{WeberNumber, WeberRegime};
 pub mod ohnesorge_number;
 pub use ohnesorge_number::OhnesorgeNumber;
+pub mod deborah_number;
+pub use deborah_number::{DeborahNumber, DeborahRegime};
 
 /// A handle into a [`ShapeRegistry`].
 ///
