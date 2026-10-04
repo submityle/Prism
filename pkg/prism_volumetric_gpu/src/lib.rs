@@ -152,6 +152,7 @@ pub mod cohesive_mixed_mode_traction;
 pub mod cohesive_onset_final_separation;
 pub mod cohesive_zone_damage;
 pub mod collision;
+pub mod color_from_temperature;
 pub mod color_grade_lut;
 pub mod color_gradient;
 pub mod color_temperature;
@@ -294,6 +295,7 @@ pub mod integer_gcd;
 pub mod integer_gcd_lcm;
 pub mod integrate_segment;
 pub mod interval_overlap_1d;
+pub mod interval_rounded;
 pub mod interval_tree_1d;
 pub mod janssen_cross_section;
 pub mod janssen_pressure_profile;
@@ -314,6 +316,7 @@ pub mod luminance_hist;
 pub mod marching_cubes;
 pub mod marching_squares;
 pub mod mask;
+pub mod mat2;
 pub mod material_combine;
 pub mod material_registry_resolve;
 pub mod material_resolve_bin;
@@ -424,6 +427,7 @@ pub mod principal_curvature_gaussian;
 pub mod principal_curvature_mean;
 pub mod probe_grid_sample;
 pub mod projection;
+pub mod projection_view;
 pub mod pyrocumulus_buoyancy;
 pub mod quadric_add;
 pub mod quadric_error;
@@ -432,6 +436,8 @@ pub mod quadric_from_triangle;
 pub mod quadric_optimal_point;
 pub mod quadric_scaled;
 pub mod quality_decision;
+pub mod quat_construct;
+pub mod quat_slerp;
 pub mod quaternion_nlerp;
 pub mod quaternion_rotate;
 pub mod quickselect_u32;
@@ -857,6 +863,9 @@ pub use cohesive_zone_damage::{
     CohesiveZoneDamageQuery, CohesiveZoneDamageResult, GpuCohesiveZoneDamage,
 };
 pub use collision::{CollisionQuery, CollisionResult, GpuCollision};
+pub use color_from_temperature::{
+    ColorFromTemperatureQuery, ColorFromTemperatureResult, GpuColorFromTemperature,
+};
 pub use color_grade_lut::{ColorGradeLutQuery, ColorGradeLutResult, GpuColorGradeLut};
 pub use color_gradient::{ColorGradientQuery, ColorGradientSample, GpuColorGradient};
 pub use color_temperature::{ColorTemperatureQuery, ColorTemperatureResult, GpuColorTemperature};
@@ -1084,6 +1093,7 @@ pub use integer_gcd::{GpuGcdOp, GpuGcdQuery, GpuIntegerGcd};
 pub use integer_gcd_lcm::{GpuIntegerGcdLcm, IntegerGcdLcmQuery, IntegerGcdLcmResult};
 pub use integrate_segment::{GpuIntegrateSegment, IntegrateSegmentQuery};
 pub use interval_overlap_1d::{GpuIntervalOverlap1d, IntervalOverlapQuery, IntervalOverlapResult};
+pub use interval_rounded::{GpuIntervalRounded, IntervalRoundedQuery, IntervalRoundedResult};
 pub use interval_tree_1d::{GpuIntervalTree1d, IntervalTree1dQuery, IntervalTree1dResult};
 pub use janssen_cross_section::{
     GpuJanssenCrossSection, JanssenCrossSectionQuery, JanssenCrossSectionResult,
@@ -1118,6 +1128,7 @@ pub use luminance_hist::{GpuLuminanceHist, LuminanceHistQuery};
 pub use marching_cubes::{GpuMarchingCubes, MarchingCubesCellQuery, MarchingCubesCellResult};
 pub use marching_squares::{GpuMarchingSquares, MarchingSquaresQuery, MarchingSquaresResult};
 pub use mask::{GpuScatteringMask, MaskQuery};
+pub use mat2::{GpuMat2, Mat2Query, Mat2Result};
 pub use material_combine::{GpuMaterialCombine, MaterialCombineQuery, MaterialCombineResult};
 pub use material_registry_resolve::{
     GpuMaterialRegistryResolve, MaterialRegistryResolveQuery, MaterialRegistryResolveResult,
@@ -1310,6 +1321,7 @@ pub use principal_curvature_mean::{
 };
 pub use probe_grid_sample::{GpuProbeGridSample, ProbeSampleQuery, PROBE_BANDS};
 pub use projection::{GpuProjection, ProjectionQuery, ProjectionResult};
+pub use projection_view::{GpuProjectionView, ProjectionViewQuery, ProjectionViewResult};
 pub use pyrocumulus_buoyancy::{GpuPyrocumulusBuoyancy, PyrocumulusBuoyancyQuery};
 pub use quadric_add::{GpuQuadricAdd, QuadricAddQuery, QuadricAddResult};
 pub use quadric_error::{GpuQuadricError, QuadricErrorQuery, QuadricErrorResult};
@@ -1322,6 +1334,8 @@ pub use quadric_optimal_point::{
 };
 pub use quadric_scaled::{GpuQuadricScaled, QuadricScaledQuery, QuadricScaledResult};
 pub use quality_decision::{GpuQualityDecision, QualityDecisionQuery, QualityDecisionResult};
+pub use quat_construct::{GpuQuatConstruct, QuatConstructQuery, QuatConstructResult};
+pub use quat_slerp::{GpuQuatSlerp, QuatSlerpQuery, QuatSlerpResult};
 pub use quaternion_nlerp::{GpuQuaternionNlerp, QuaternionNlerpQuery, QuaternionNlerpResult};
 pub use quaternion_rotate::{GpuQuaternionRotate, QuatRotateQuery, QuatRotateResult};
 pub use quickselect_u32::{GpuQuickselect, GpuQuickselectU32, QuickselectQuery};
