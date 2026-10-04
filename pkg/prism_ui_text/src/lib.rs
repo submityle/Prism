@@ -17,6 +17,7 @@
 //!
 //! * [`segmentation`] — grapheme-cluster and word segmentation.
 //! * [`line_break`] — UAX#14 break opportunities and greedy width wrapping.
+//! * [`optimal_break`] — minimum-raggedness (Knuth–Plass style) wrapping.
 //! * [`rich_text`] — span-level styling and paragraph properties.
 //! * [`shaper`] — the [`shaper::Shaper`] trait and its deterministic default.
 //! * [`cursor`] — caret / selection model and glyph hit-testing.
@@ -52,6 +53,7 @@ pub mod bidi;
 pub mod cache;
 pub mod cursor;
 pub mod line_break;
+pub mod optimal_break;
 pub mod rich_text;
 pub mod segmentation;
 pub mod shaper;
@@ -60,6 +62,7 @@ pub use bidi::{base_direction, char_direction, resolve_levels, BidiInfo, Directi
 pub use cache::{CacheKey, ShapeCache};
 pub use cursor::{caret_positions, hit_test, x_for_offset, Caret, Composition, Selection};
 pub use line_break::{break_opportunities, wrap_by_width, BreakKind, BreakPoint, WrappedLine};
+pub use optimal_break::{raggedness, wrap_optimal};
 pub use rich_text::{
     Align, Color, FontWeight, ParagraphStyle, RichText, Span, TextStyle, Truncate,
 };
