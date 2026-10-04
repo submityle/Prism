@@ -25,12 +25,14 @@
 //!   versioned payload round-trips and an old-version payload migrates
 //!   correctly.
 
+pub mod clamp;
 pub mod metadata;
 pub mod migration;
 pub mod serde_integration;
 pub mod validate;
 pub mod version;
 
+pub use clamp::{clamp, Clamped};
 pub use metadata::{AttributeValue, FieldMetadata, TypeMetadata};
 pub use migration::{MigrateError, Migration, MigrationFn};
 pub use serde_integration::{
