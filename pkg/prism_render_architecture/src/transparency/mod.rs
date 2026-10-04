@@ -1,5 +1,6 @@
 //! Content-specific transparency strategies.
 
+pub mod moment_oit;
 pub mod routing;
 pub mod sorted_oit;
 pub mod weighted_oit;
