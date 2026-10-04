@@ -329,6 +329,11 @@ pub mod tet_fem_camclay_force;
 pub use tet_fem_camclay_force::{
     camclay_elastic_potential_energy, element_camclay_force, CamClayForce,
 };
+pub mod tet_fem_camclay_force_assembly;
+pub use tet_fem_camclay_force_assembly::{
+    assemble_camclay_forces, rest_camclay_states, total_camclay_elastic_potential_energy,
+    CamClayAssembly,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
