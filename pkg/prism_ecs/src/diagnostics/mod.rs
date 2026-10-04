@@ -18,6 +18,9 @@
 //!   while single-stepping a schedule (design §23.4 / §16.6).
 //! * [`relation_graph`] — read-only relation-kind and edge-topology summary
 //!   (design §16.6 "关系图谱").
+//! * [`relation_cycles`] — per-relation directed-cycle detection over the
+//!   relation index, flagging suspicious hierarchy / closure cycles
+//!   (design §16.6 / §11 / §23.2).
 //! * [`time_travel`] — frame-indexed world snapshot record/seek (`std` only).
 //!
 //! All occupancy and change-volume figures describe the chunked Table-backed
@@ -29,6 +32,7 @@ pub mod frame_profile;
 pub mod inspector;
 pub mod profiler;
 pub mod relation_graph;
+pub mod relation_cycles;
 pub mod step_inspector;
 #[cfg(feature = "std")]
 pub mod time_travel;
@@ -37,6 +41,7 @@ pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
 pub use relation_graph::{RelationGraphReport, RelationKindReport};
+pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use step_inspector::{StepObservation, SteppingInspector};
 #[cfg(feature = "std")]
 pub use profiler::SpanRecorder;
