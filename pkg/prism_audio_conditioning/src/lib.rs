@@ -24,6 +24,8 @@
 //! - [`hrtf_condition`] conditions a SOFA HRIR dataset: resample to the target
 //!   rate, diffuse-field equalization, ITD extraction, and minimum-phasing.
 //! - [`lipsync`] exports an offline viseme/energy-envelope timeline.
+//! - [`loop_crossfade`] bakes an equal-power/linear seam crossfade into the
+//!   PCM so a detected forward loop plays click-free with no runtime work.
 //! - [`loop_point`] detects seamless forward/ping-pong loop points via
 //!   zero-crossing alignment and autocorrelation.
 //! - [`loudness_offline`] computes BS.1770 integrated LUFS, true-peak, and
@@ -63,6 +65,7 @@ pub mod decode;
 pub mod delay_trim;
 pub mod hrtf_condition;
 pub mod lipsync;
+pub mod loop_crossfade;
 pub mod loop_point;
 pub mod loudness_offline;
 pub mod marker;
