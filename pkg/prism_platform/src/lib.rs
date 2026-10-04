@@ -83,6 +83,10 @@
 extern crate alloc;
 
 pub mod atomics;
+/// Platform capability database and declarative degradation (design doc §24.6).
+///
+/// Pure `core`+`alloc`; available in every build configuration.
+pub mod capability;
 pub mod clock;
 pub mod cpu;
 /// Crash capture: async-signal-safe `POSIX` signal handlers, an in-process
@@ -137,24 +141,31 @@ pub mod dynlib;
 
 pub use clock::{now, MonotonicNanos};
 pub use cpu::CpuInfo;
+pub use capability::{
+    Capability, CapabilityDatabase, Category, Selection, Support, SupportLevel,
+};
+pub use crash::{
+    install as install_crash_handler, last_context as last_crash_context,
+    supported as crash_capture_supported, uninstall as uninstall_crash_handler, Backtrace,
+    BuildMetadata, CrashContext, CrashError, Signal,
+};
+#[cfg(feature = "dynlib")]
+pub use dynlib::{supported as dynlib_supported, DynlibError, Library, Symbol};
 #[cfg(feature = "std")]
 pub use fs::{mmap_supported, FsError, Mmap, MmapError, MmapMut, Result as FsResult};
 #[cfg(feature = "watch")]
 pub use fs::{Event, EventKind, WatchBackend, WatchError, Watcher};
 pub use platform::{Os, Platform, PlatformCaps};
-pub use crash::{
-    install as install_crash_handler, last_context as last_crash_context,
-    supported as crash_capture_supported, uninstall as uninstall_crash_handler,
-    Backtrace, BuildMetadata, CrashContext, CrashError, Signal,
-};
 #[cfg(feature = "std")]
-pub use wallclock::{now as wall_now, sample as wall_sample, WallClock, WallClockSample, WallTime};
+pub use process::{Child, Command, ExitStatus, Output, Stdio};
+#[cfg(feature = "std")]
+pub use stdio::{StandardError, StandardInput, StandardOutput, Stream};
 #[cfg(feature = "std")]
 pub use thread::{
     affinity_supported, current_id, hardware_concurrency, set_current_thread_affinity,
     set_current_thread_affinity_mask, sleep as thread_sleep, spawn, yield_now, AffinityError,
-    Backoff, Builder as ThreadBuilder, JoinHandle, Once, Parker, SpinLock, SpinLockGuard,
-    ThreadId, ThreadLocal, Unparker,
+    Backoff, Builder as ThreadBuilder, JoinHandle, Once, Parker, SpinLock, SpinLockGuard, ThreadId,
+    ThreadLocal, Unparker,
 };
 #[cfg(feature = "std")]
 pub use vm::{
@@ -162,14 +173,13 @@ pub use vm::{
     MemoryInfo, Protection, Reservation, VmError,
 };
 #[cfg(feature = "std")]
-pub use process::{Child, Command, ExitStatus, Output, Stdio};
-#[cfg(feature = "std")]
-pub use stdio::{Stream, StandardError, StandardInput, StandardOutput};
-#[cfg(feature = "dynlib")]
-pub use dynlib::{supported as dynlib_supported, DynlibError, Library, Symbol};
+pub use wallclock::{now as wall_now, sample as wall_sample, WallClock, WallClockSample, WallTime};
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod tests_m6_crash;
+
+#[cfg(test)]
+mod tests_capability;

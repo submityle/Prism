@@ -9,7 +9,7 @@
 > - **C++ 反射**：RTTR（类型注册 + 动态属性/方法调用）
 > 本文为纯经典类型系统/序列化路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：derive 期静态 TypeInfo 零注册成本/热路径访问器代码生成/二进制零拷贝序列化/部分 patch 与反射 diff/反射驱动字段级网络增量/脚本与编辑器属性桥/自定义特性属性/不可信反序列化安全边界；均为 PLANNED，无代码）
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补已落地 24.1/24.2/24.3/24.4/24.5/24.6/24.7/24.8；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：derive 期静态 TypeInfo 零注册成本/热路径访问器代码生成/二进制零拷贝序列化/部分 patch 与反射 diff/反射驱动字段级网络增量/脚本与编辑器属性桥/自定义特性属性/不可信反序列化安全边界；其中 §24.1 静态 TypeInfo/§24.2 访问器 codegen/§24.3/§24.4/§24.5 字段级网络增量/§24.6 脚本编辑器属性桥/§24.7/§24.8 已交付并验证，仅剩 §24.8 流式超时与背压、§24.7 derive 宏侧属性解析为 PLANNED）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_utils`（稳定哈希/句柄/小容器）、`prism_math`（为数学类型实现反射），可选 `prism_diagnostic`
 - 层级定位: ECS 文档 L1 地基；服务 ECS（动态组件/快照）、场景、编辑器、脚本、网络
@@ -333,7 +333,7 @@ pkg/prism_reflect_macros/      # #[derive(Reflect)] + #[reflect_trait] + 属性�
 
 ## 23. 诚实边界与风险
 
-- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（113 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」仍为 PLANNED，按本文优先级随消费方接线落地。
+- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（113 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」已落地 §24.1（静态 `TypeInfo`）/§24.2（访问器 codegen）/§24.3/§24.4/§24.7（运行时承载层）/§24.8，其余项按本文优先级随消费方接线落地。
 - **高风险项**：
   1. **StableTypeId 稳定性（M3）**：跨构建/平台/网络必须一致；哈希算法与类型路径规范化要定死，一旦发行就不能变（变则旧存档失效），须早定早冻结。
   2. **schema 版本化迁移（M4）**：存档/网络向后兼容是长期负债；迁移链须有测试覆盖「每旧版 → 当前」读回等价，漏一环就是玩家存档损坏。
@@ -349,7 +349,7 @@ pkg/prism_reflect_macros/      # #[derive(Reflect)] + #[reflect_trait] + 属性�
 
 本章补齐顶级反射系统常被忽视、却在真实 AAA 项目里缺一不可的能力。均 feature/档位门控，默认不付成本；与前文静态+动态反射、反射驱动序列化、StableTypeId、schema 迁移、函数反射互补。
 
-### 24.1 derive 期静态 TypeInfo（零运行时注册成本）
+### 24.1 derive 期静态 TypeInfo（零运行时注册成本） ✅ 已交付（`static_info`）
 
 反射信息在 `#[derive(Reflect)]` 编译期生成为 `const`/`static` 的 `TypeInfo`，而非运行时逐字段 push 注册：
 
@@ -357,12 +357,18 @@ pkg/prism_reflect_macros/      # #[derive(Reflect)] + #[reflect_trait] + 属性�
 - 类型注册表仅做「StableTypeId → &'static TypeInfo」映射登记，不构造数据。
 - 对标 Rust 零成本抽象理念,规避 Bevy 早期运行期注册的启动开销。
 
-### 24.2 热路径访问器代码生成
+**交付状态**：`#[derive(StaticTyped)]`（`prism_reflect_macros`）为命名字段结构体生成一个**真 `const`** 的 `StaticTypeInfo`（`pkg/prism_reflect/src/static_info.rs`），字段名为字符串字面量、偏移取自 `core::mem::offset_of!`（`const`）、`type_name`/`StableTypeId` 以 `fn` 指针承载（`core::any::type_name` 尚非稳定 `const fn`），故整个描述符在 `const` 上下文求值、随二进制只读数据常驻。`StaticTyped::STATIC_TYPE_INFO` 是关联 `const`，`static_type_info()` 经 const promotion 直接交出 `&'static`——**无 `OnceLock`、无锁、无分配、无 lazy init**，注册表若建于其上只「记指针」而非「构造数据」，落实设计「`StableTypeId` → `&'static TypeInfo`」零注册语义。`StaticTypeInfo` 提供 `kind`/`type_name`/`stable_type_id`/`fields`/`field`/`field_index` 查询。覆盖 8 项新单测（`tests_typeinfo.rs`，对 `offset_of!`/`type_name`/`StableTypeId::of_type` 三路 oracle 对拍 + 指针稳定性）。
+
+### 24.2 热路径访问器代码生成 ✅ 已交付（`accessor`）
 
 动态字段访问若每次走「名字查哈希 → 偏移 → 类型擦除指针」会慢。为热路径生成直达访问器：
 
 - derive 期为每字段生成 `offset_of` 常量 + 类型化 getter/setter，动态路径（如 `"transform.translation.x"`）首次解析后**缓存成偏移链**，后续 O(1) 直取。
 - 序列化/网络/编辑器批量访问同一类型时复用缓存访问计划，避免重复解析。
+
+**交付状态**：`#[derive(Accessors)]`（`prism_reflect_macros`）为命名字段结构体生成一张 `const` 的 `&'static [FieldAccessor<Self>]` 表（`pkg/prism_reflect/src/accessor.rs`），每项含字段 `offset_of` 常量 + 单态化的 `fn(&T)->&dyn Reflect` / `fn(&mut T)->&mut dyn Reflect` getter；`FieldAccess` trait 再包出 `accessors`/`accessor`/`accessor_index`/`field`/`field_mut`/`get_field`/`set_field` 人体工学方法，按名访问至多一次线性扫描（小字段表），无逐次哈希。点路径（如 `"transform.translation.x"`）由 `AccessPlan::compile` **一次性**解析成**字段索引链**缓存，`get`/`get_mut`/`set` 回放索引（纯 `field_at`/`field_at_mut`，无字符串比较、无哈希），即设计所述「偏移链」复用。覆盖 16 项新单测（`tests_accessor.rs`：accessor 名/序/offset 对拍、读写/类型错配/未知字段、嵌套路径 get/get_mut/set、计划跨实例复用、空路径/未知字段/降入非结构体错误、异型回放返回 `None`）。
+
+**诚实边界**：两个 derive 仅支持**命名字段结构体**（tuple/unit 结构体、enum、union 返回清晰 `compile_error!`），这正是 §24.1/§24.2 点路径导航的目标形态；暂不支持泛型类型（impl 未带泛型参数）。工作区 `#![forbid(unsafe_code)]`，`offset` 仅为**描述性元数据**（布局检视/对标「`offset_of` 常量」），**不**用于裸指针算术——getter 走安全引用 `&value.field`（编译器仍降为单次 offset load）；`AccessPlan` 的「偏移链」实为**字段索引链**，绑定编译时 shape，异型回放返回 `None` 而非误读内存。
 
 ### 24.3 二进制零拷贝序列化 ✅ 已交付（定长数值整块编码；非指针级 memcpy）
 
@@ -408,7 +414,7 @@ struct/tuple-struct/enum（同变体）/list（`modified`+`appended`）/array/ma
 就地回写，kind/字段/键缺失或容器拒收追加项时返回 `DiffError`。tests_m6 的
 `replicated_diff_*` 用例覆盖「仅变化字段参与、非结构体被拒、无变化报 Unchanged」。
 
-### 24.5 反射驱动的字段级网络增量
+### 24.5 反射驱动的字段级网络增量 —— ✅ 已交付（`net_delta`）
 
 复制系统（`prism_replication`）借反射自动算「哪些字段脏了」并只发增量：
 
@@ -416,7 +422,13 @@ struct/tuple-struct/enum（同变体）/list（`modified`+`appended`）/array/ma
 - `#[reflect(replicate)]` 标注哪些字段参与复制，`#[reflect(no_replicate)]` 排除。
 - 与 ECS 变更检测、`prism_tasks` 确定性并行协同,量化压缩交给 `prism_transform` §24.2 式编码。
 
-### 24.6 脚本与编辑器属性桥
+**交付状态（✅ 已交付，`net_delta`）**：字段级脏跟踪 + 最小增量编解码 + 远端幂等应用已在 `prism_reflect` 内落地，可被 `prism_replication` 直接驱动。
+- `DirtyMask`：按结构体位置字段索引的可增长位集（每 64 个索引一个 `u64` 字），支持显式 `mark`/`unmark` 与基于 §24.4 `diff` 的 `changed`/`changed_in_plan`（后者按 `ReplicationPlan` 过滤 `replicate`/`no_replicate` 意图）。
+- `encode_delta`/`decode_delta`/`apply_delta`：紧凑 `varint(字段ID) + varint(字节长) + 值` 线格式；字段值复用既有反射序列化器（`to_binary`/`from_binary`），继承 `StableTypeId` 标签与 §24.8 不可信输入加固；解码器自带 LEB128 溢出/截断/trailing 字节校验，越界字段索引报 `DeltaError::FieldIndexOutOfRange`。
+- `ReplicationState`：持有 baseline 快照、逐 tick 产出增量，并可 `commit` 推进基线。
+- oracle 对拍（`tests_net_delta`，14 个用例）：增量应用后与全量快照相等、重复应用幂等、plan 过滤、`FieldDelta` 线格式往返、malformed 字节拒绝。
+
+### 24.6 脚本与编辑器属性桥 —— ✅ 已交付（`property_bridge`）
 
 反射是脚本/编辑器通用访问的唯一门面：
 
@@ -424,9 +436,14 @@ struct/tuple-struct/enum（同变体）/list（`modified`+`appended`）/array/ma
 - **脚本**(Lua/WASM):经反射安全读写组件字段、调用反射注册的函数(接前文函数反射),脚本无需编译期知道 Rust 类型。
 - 属性元数据(范围/步进/工具提示)由 §24.7 自定义特性携带。
 
-### 24.7 自定义特性属性（Attributes）
+**交付状态（✅ 已交付，`property_bridge`）**：基于 `Reflect`/`ParsedPath`/注册表 `TypeMetadata` 的运行期属性桥已落地，供脚本与编辑器 inspector 复用。
+- `PropertyBridge`：按路径（如 `volume.master`）类型安全读写属性，`get_as::<T>` 具体类型下取，`read_scalar`/`set_scalar` 以 `AttributeValue` 作动态标量载体；写入遵循元数据——只读字段拒绝（`PropertyError::ReadOnly`），range 字段写后复用 §24.7 `schema::clamp` 钳入边界；float→整数、越界整数拒绝而非静默截断。
+- `properties`/`PropertyDescriptor`/`PropertyKind`：枚举结构体顶层可编辑属性及其元数据（kind、只读、range、docs、category、default），隐藏字段过滤；深层递归属性树仍由 `integration::inspect` 承担，按名调用仍由 `ScriptBridge` 承担。
+- oracle 对拍（`tests_property_bridge`，14 个用例）：get/set 回路一致、只读拒绝、range 钳制、嵌套路径读写、标量回路、float→int 与越界 int 拒绝、属性枚举元数据校验。
 
-derive 支持字段/类型级特性,驱动序列化、UI、校验:
+### 24.7 自定义特性属性（Attributes） —— ✅ 部分已交付（`schema` 元数据 + `clamp`）
+
+derive 支持字段/类型级特性,驱动序列化、UI、校验。运行时承载层已交付：`schema::TypeMetadata`/`FieldMetadata`/`AttributeValue`（docs/category/range/readonly/hidden/required/default/自定义 key-value）+ `schema::validate`（范围/必填校验）+ **`schema::clamp`（本次新增：`#[reflect(clamp(min..=max))]` 的运行时范围钳制，整数向区间内侧取整，返回 `Vec<Clamped>` 且幂等）**。下表为 derive 属性语法（宏侧解析随 `prism_reflect_macros`/编辑器接线落地）：
 
 | 特性 | 作用 |
 |---|---|
@@ -448,5 +465,5 @@ derive 支持字段/类型级特性,驱动序列化、UI、校验:
 
 ### 24.9 诚实边界
 
-**已交付**:§24.3 二进制零拷贝序列化(定长数值整块编码)、§24.4 Diff/Patch(M5 core)、§24.8 不可信反序列化安全边界(读取器核心防御)。**仍为 PLANNED**:**24.1 静态 TypeInfo + 24.2 访问器代码生成**是性能地基,建议随 M0/M1 优先落地;§24.8 的流式超时/背压随 `prism_asset` 存档流式加载落地;24.5 网络增量随 `prism_replication` 落地;24.6 属性桥、24.7 特性随编辑器(`prism_editor`)落地。反射的误用易成性能黑洞(热路径走动态查名),§24.2 缓存与 lint 必须兜底。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
+**已交付**:§24.1 derive 期静态 `TypeInfo`（`static_info`，真 `const`、零注册）、§24.2 热路径访问器代码生成（`accessor` + `#[derive(StaticTyped)]`/`#[derive(Accessors)]`，`const` 访问器表 + `AccessPlan` 索引链缓存）、§24.3 二进制零拷贝序列化(定长数值整块编码)、§24.4 Diff/Patch(M5 core)、**§24.5 反射驱动字段级网络增量（`net_delta`：`DirtyMask` 位集 + `varint` 字段增量编解码 + 幂等远端应用 + `ReplicationState` baseline 跟踪，复用 §24.4 `diff` 与 §24.3 序列化器）**、**§24.6 脚本/编辑器属性桥（`property_bridge`：`PropertyBridge` 按路径类型安全 get/set + `AttributeValue` 动态标量、`properties`/`PropertyDescriptor` 元数据枚举，复用注册表 `TypeMetadata` 与 §24.7 `clamp`）**、§24.8 不可信反序列化安全边界(读取器核心防御)。**仍为 PLANNED**:§24.8 的流式超时/背压随 `prism_asset` 存档流式加载落地;**24.7 特性的运行时承载层（元数据/校验/`clamp` 钳制）已交付**，仅 derive 宏侧属性解析随编辑器接线落地。§24.5/§24.6 的落地边界：**未新增 derive 宏**，`replicate`/`no_replicate`/只读/隐藏/range 等意图经运行期 `TypeMetadata` 承载（与既定方向一致）；网络增量「每脏字段发整值」，继承 `Reflect::apply` 的集合只增/映射不删等边界，不可应用的字段报 `DeltaError::Apply` 而非静默分歧；属性桥枚举结构体顶层属性（深层递归树仍走 `integration::inspect`、按名调用仍走 `ScriptBridge`），标量交换用 `AttributeValue`，float→整数与越界整数拒绝而非静默截断。§24.1/§24.2 的 derive 仅覆盖命名字段结构体（其余 shape 报 `compile_error!`、暂不支持泛型）；`offset` 为描述性元数据而非裸指针算术（工作区 `forbid(unsafe_code)`），`AccessPlan` 走安全动态图的字段索引链（异型回放返回 `None`）。反射的误用易成性能黑洞(热路径走动态查名),§24.2 缓存与 lint 必须兜底。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
 

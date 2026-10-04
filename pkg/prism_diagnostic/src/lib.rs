@@ -104,11 +104,13 @@
 // single unsafe module then carries an `#[expect(unsafe_code, reason = ...)]`.
 #![cfg_attr(not(feature = "alloc-track"), forbid(unsafe_code))]
 
+pub mod aggregate;
 #[cfg(feature = "alloc-track")]
 pub mod alloc_track;
 pub mod budget;
 #[cfg(feature = "crash")]
 pub mod crash;
+pub mod determinism;
 pub mod filter;
 pub mod fmt;
 #[cfg(feature = "gpu")]
@@ -124,6 +126,7 @@ pub mod profiler;
 #[cfg(feature = "remote")]
 pub mod remote;
 pub mod replay;
+pub mod sampling;
 pub mod sink;
 pub mod span;
 pub mod trace;
@@ -140,9 +143,19 @@ pub use crash::{
     CrashContext, CrashReason, CrashReport, ModuleEntry, RegisterSnapshot, StackFrame,
     ThreadContext, CRASH_REPORT_MAGIC, CRASH_REPORT_VERSION,
 };
+pub use aggregate::{
+    estimate_fleet_reports, AnomalyConfig, AssembledTrace, ClusterAggregator,
+    ClusterFrametimeReport, CriticalPath, DistributedSpan, InstanceAnomaly, InstanceFrameReport,
+    InstanceSummary, SampleRate, SampleReason, SamplingController, SamplingDecision,
+    SamplingPolicy, ServiceLatency, SpanId, SpanKind, TraceAssembler, TraceId, TraceNode,
+};
 pub use budget::{
     hotspot_diff, Baseline, BudgetRegistry, BudgetStatus, FrameBudget, FrameBudgetReport,
     Hotspot, HotspotDelta, RegressionAlert, RegressionConfig, RegressionTracker,
+};
+pub use determinism::{
+    compare as compare_traces, fnv1a_64 as determinism_fnv1a_64, DeterminismTrace, FrameHash,
+    FrameInput, InputRecorder, InputReplay, StateHasher, TraceDiff,
 };
 pub use mem::{
     analyze_fragmentation, occupancy_map, FragmentationReport, LeakCheckpoint, LeakReport,
@@ -176,6 +189,12 @@ pub use remote::{
     RemoteServerHandle, RuntimeControls,
 };
 pub use replay::{compare_timelines, fnv1a_64, ReplayDivergence, ReplayMarker, ReplayTimeline};
+pub use sampling::{
+    call_tree, collapsed_stacks, facet_by_lane, facet_by_thread, flat_profile, fuse, CallNode,
+    CallTree, CollapsedStack, FlatProfile, FoldDirection, FrameId, FrameStat, FusedEntry,
+    FusedProfile, FusionSource, InstrumentedSpan, LaneKind, LaneProfile, SamplingProfiler,
+    StackSample, SymbolTable, ThreadProfile,
+};
 pub use sink::{clear_sink, set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
 pub use span::Scope;
 #[cfg(feature = "gpu")]
@@ -203,9 +222,15 @@ mod tests_m6_alloc;
 #[cfg(all(test, feature = "crash"))]
 mod tests_m6_crash;
 #[cfg(test)]
+mod tests_aggregate;
+#[cfg(test)]
 mod tests_budget;
 #[cfg(test)]
+mod tests_determinism;
+#[cfg(test)]
 mod tests_mem;
+#[cfg(test)]
+mod tests_sampling;
 #[cfg(test)]
 mod tests_m6_hitch;
 #[cfg(test)]

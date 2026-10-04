@@ -58,6 +58,10 @@
 //!   epoch-based reclamation for safe memory reclamation of the lock-free
 //!   structures (defeats use-after-free and `ABA`), demonstrated by the
 //!   lock-free [`TreiberStack`](concurrent::TreiberStack).
+//! - [`Rcu`](concurrent::Rcu): a read-copy-update cell for read-mostly shared
+//!   state (type registry / asset index / config snapshot). Readers never lock
+//!   or spin; writers publish a fresh copy and reclaim the old version through
+//!   the epoch reclaimer. This is the §24.2 `RCU` form.
 //!
 //! See the [`concurrent`] module for the full correctness posture. The whole
 //! tier is gated behind the `concurrent` feature so a single-threaded build
@@ -71,6 +75,11 @@
 //! - [`SoaVec`](soa::SoaVec): derive-free structure-of-arrays columnar storage
 //!   (one contiguous column per tuple field) for cache-friendly, vectorisable
 //!   batch passes.
+//! - [`HotCold`](layout::HotCold): a hot/cold field-separated container that
+//!   stores a type's hot fields and cold fields in two separate `SoA` halves
+//!   so a hot batch pass never loads cold memory, plus the
+//!   [`LayoutPlan`](layout::LayoutPlan) `SoA` auto-layout maths (per-column
+//!   alignment/stride, hot/cold group description). See the [`layout`] module.
 //! - [`Cow`](cow::Cow): an `Arc`-backed copy-on-write container that is cheap
 //!   to clone and only deep-copies on first mutation of a shared value.
 //! - [`BuddyAllocator`](alloc_::BuddyAllocator)/[`TlsfAllocator`](alloc_::TlsfAllocator):
@@ -79,6 +88,22 @@
 //! - [`compat_bevy`]: `bevy_utils`-shaped container aliases (the `compat-bevy`
 //!   feature) so porting a Bevy codebase onto Prism is mostly a `use`-path
 //!   change.
+//!
+//! ## M7 scope (this build): hardening + content-addressed dedup
+//! - [`GuardedBuffer`](guard::GuardedBuffer)/[`GuardedPool`](guard::GuardedPool):
+//!   pure-safe, debug-tier memory-safety hardening (design doc §24.3). The
+//!   buffer flanks its payload with canary redzones and poisons it on free to
+//!   turn overflows, underflows, use-after-free and double-free into reported
+//!   [`GuardError`](guard::GuardError)s; the pool adds generational handles so a
+//!   stale [`GuardHandle`](guard::GuardHandle) is rejected rather than silently
+//!   aliasing a recycled slot. They are the zero-`unsafe` container complement
+//!   to the raw-memory [`GuardedAllocator`](alloc_::GuardedAllocator).
+//! - [`InternCache`](intern::InternCache)/[`Interned`](intern::Interned):
+//!   content-addressed deduplication (design doc §24.6). Each distinct
+//!   `Hash + Eq` value is stored once, keyed by the crate's non-cryptographic
+//!   [`stable_hash`](hash::stable_hash) (FNV-1a), and addressed by a cheap,
+//!   domain-tagged `Copy` handle, collapsing content equality to an `O(1)`
+//!   handle compare for asset / mesh / texture dedup.
 //!
 //! The crate contains no Unreal Engine source or derived code and depends on
 //! no `bevy_*` crate.
@@ -92,8 +117,8 @@
 //! justification.
 
 pub mod alloc_;
-pub mod array_vec;
 pub mod arena;
+pub mod array_vec;
 pub mod bit_set;
 #[cfg(feature = "compat-bevy")]
 pub mod compat_bevy;
@@ -101,9 +126,11 @@ pub mod compat_bevy;
 pub mod concurrent;
 pub mod cow;
 pub mod determinism;
+pub mod guard;
 pub mod hash;
 pub mod hbitset;
 pub mod intern;
+pub mod layout;
 pub mod prelude;
 pub mod slot_map;
 pub mod small_vec;
@@ -113,28 +140,35 @@ pub mod sparse_set;
 pub use alloc_::{
     AllocBox, AllocError, Allocator, BuddyAllocator, FrameAllocator, Global, Pool, TlsfAllocator,
 };
-pub use array_vec::ArrayVec;
 pub use arena::{Arena, ArenaIndex};
+pub use array_vec::ArrayVec;
 pub use bit_set::BitSet;
-pub use cow::Cow;
-pub use hbitset::HierarchicalBitSet;
-pub use soa::{Soa, SoaVec};
 #[cfg(feature = "concurrent")]
 pub use concurrent::{
-    Collector, ConcurrentHashMap, Guard, LocalHandle, MpmcQueue, SpscConsumer, SpscProducer,
-    SpscQueue, TreiberStack,
+    Collector, ConcurrentHashMap, Guard, LocalHandle, MpmcQueue, Rcu, RcuGuard, SpscConsumer,
+    SpscProducer, SpscQueue, TreiberStack,
 };
+pub use cow::Cow;
 pub use determinism::{OrderedMap, OrderedSet};
+pub use guard::{GuardConfig, GuardError, GuardHandle, GuardedBuffer, GuardedPool};
 pub use hash::{
-    stable_hash, stable_hash_bytes, stable_hash_str, ContentHash, FxBuildHasher, FxHasher,
-    HashMap, HashSet, StableBuildHasher, StableHasher,
+    stable_hash, stable_hash_bytes, stable_hash_str, ContentHash, FxBuildHasher, FxHasher, HashMap,
+    HashSet, StableBuildHasher, StableHasher,
 };
-pub use intern::{domain, FName, Interner, Istr};
+pub use hbitset::HierarchicalBitSet;
+pub use intern::{domain, FName, InternCache, Interned, Interner, Istr};
+pub use layout::{
+    align_up, ColumnPlan, ColumnShape, ColumnShapes, GroupLayout, HotCold, LayoutPlan,
+    Temperature, CACHE_LINE,
+};
 pub use slot_map::{SlotKey, SlotMap};
 pub use small_vec::SmallVec;
+pub use soa::{Soa, SoaVec};
 pub use sparse_set::SparseSet;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_hotcold;
 #[cfg(test)]
 mod tests_m6;

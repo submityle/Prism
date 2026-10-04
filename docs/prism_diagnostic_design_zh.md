@@ -9,7 +9,7 @@
 > - **帧统计/HUD**：Unreal `stat` 命令族、Unity Profiler 计数器
 > 本文为纯经典可观测性 / 计时 / 日志路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：实时性能预算与自动回归告警/CPU·GPU 统一时间线跨队列关联/内存分配追踪与泄漏碎片可视化/确定性回放与 trace 对拍(反 desync)/统计采样剖析器(低开销)/分布式多实例聚合观测/发行版遥测与隐私脱敏；均为 PLANNED，无代码）
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：实时性能预算与自动回归告警/CPU·GPU 统一时间线跨队列关联/内存分配追踪与泄漏碎片可视化/确定性回放与 trace 对拍(反 desync)/统计采样剖析器(低开销)/分布式多实例聚合观测/发行版遥测与隐私脱敏；其中 24.1/24.3/24.4/24.5/24.6 已交付代码+单测，余项为 PLANNED）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_utils`（无锁环形缓冲 / 字符串驻留 / 位集）、`prism_platform`（高精度时钟 / 线程 ID / 文件写出 / minidump）、`prism_time`（帧序号 / 时间线对齐）；可选 `prism_render_driver`（GPU timestamp query）、`prism_tasks`（job 时间线）
 - 层级定位: L1 地基（被所有上层 crate 以「埋点」方式依赖；是横切关注点，不反向依赖业务 crate）
@@ -328,7 +328,7 @@ pkg/prism_diagnostic/
 
 ## 23. 诚实边界与风险
 
-- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（55 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」仍为 PLANNED，按本文优先级随消费方接线落地。
+- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（55 项 lib 测试全绿）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」中 24.1/24.3/24.4/24.5/24.6 已交付（见 §24.8），余项仍为 PLANNED，按本文优先级随消费方接线落地。
 - **高风险项**：
   1. **埋点开销失控（M1/M2）**：埋点太细（每顶点/每实体）会反噬帧预算，观测拖垮被观测；必须严守「仅作用域/帧级埋点 + 热路径零 I/O」，并由 §16 自观测兜底。
   2. **CPU/GPU 时间对齐（M4）**：GPU 时间戳域与 CPU 不同、读回有延迟、驱动差异大；标定不准则火焰图误导人；需多驱动验证。
@@ -376,7 +376,7 @@ AAA 项目的帧时间是**契约**（60/120Hz 必达），不能靠事后看 tr
 - 碎片可视化（`mem::fragmentation`）：`analyze_fragmentation(capacity, &[Span])` 归一化（排序/合并/钳位）占用区间后，出 `FragmentationReport`（used/free 字节、空闲 run 数、最大连续空闲 run、`fragmentation_ratio`、`can_fit`）；`occupancy_map(capacity, occupied, buckets)` 出每桶 0..=100 占用百分比热条。
 专项测试 `tests_mem.rs`（12 用例，手算 oracle 对拍）全绿，`cargo clippy -p prism_diagnostic --all-targets` 零告警。
 
-### 24.4 确定性回放与 trace 对拍（反 desync）
+### 24.4 确定性回放与 trace 对拍（反 desync）✅ 已交付（`determinism` 模块）
 
 回滚网络/录像/确定性模拟最难调的就是「两次运行结果不一样」：
 
@@ -384,7 +384,14 @@ AAA 项目的帧时间是**契约**（60/120Hz 必达），不能靠事后看 tr
 - **输入+随机种子录制**：录制输入流 + 种子，支持精确回放复现偶发 bug（对标 Overwatch/格斗游戏的回放调试）。
 - **跨平台位对拍**：Win/macOS/Linux 三端跑同输入，对拍世界哈希，验证四方确定性（接 ECS 序/tasks 归并/time 定点/transform 定点）。
 
-### 24.5 统计采样剖析器（低开销）
+**交付状态**：§24.4 三要素已交付，置于独立 `determinism` 子模块（`src/determinism/`，纯 `core`/`alloc` 定点整数运算、无 `unsafe`、`no_std`+`alloc`，始终编译）：
+- 确定性 trace（`determinism::hash` + `determinism::trace`）：稳定 64 位 `FNV`-1a 哈希器 `StateHasher`（固定字段顺序折叠、整数小端、浮点按位、无 per-process 种子，附 `const` 的 `fnv1a_64`），`DeterminismTrace` 逐帧记录 `FrameHash`（帧号+状态哈希）。
+- 输入+随机种子录制流（`determinism::record`）：`InputRecorder` 逐帧录制 `FrameInput`（帧号+输入哈希+种子），`to_trace`/`digest` 把录制流折叠成可对拍的 trace/摘要，`InputReplay` 游标把同一输入+种子序列精确回放复现（偶发 bug 重放）。
+- 两条 trace 逐帧对拍（`determinism::compare`）：返回首个分叉帧 `TraceDiff`——`Identical`/`Diverged{frame,left,right}`/`LengthMismatch{matched,left_len,right_len}`，按位置且按值匹配（丢帧/改帧号不会被静默重对齐）。
+与 `prism_time` 的 `multiworld::audit` 审计器概念对齐（同一 `FNV`-1a 常量、同一 identical/diverged/length-mismatch 对拍形态）但**不产生依赖边**：这是 diagnostic 层面向任意子系统的通用 trace 对拍，与已有 `replay` 标签标记流互补（后者是带标签的标记流，本模块是逐帧状态哈希流）。专项测试 `tests_determinism.rs`（25 用例，含 `FNV`-1a 官方向量钉死 + 手算结构 oracle）全绿，`cargo clippy -p prism_diagnostic --all-targets` 零告警。
+已知边界：各帧的「关键状态哈希」内容（ECS 世界/物理状态怎么折叠）由调用方在边界处用 `StateHasher` 喂入；跨 Win/macOS/Linux 三端位对拍需上层接 ECS 序/time 定点后对接本模块，本层只提供确定性整数对拍原语，不自带模拟或 RNG。
+
+### 24.5 统计采样剖析器（低开销）—— ✅ 已交付（`sampling` 模块）
 
 插桩 Span 覆盖不到第三方库与未插桩热点：
 
@@ -392,13 +399,34 @@ AAA 项目的帧时间是**契约**（60/120Hz 必达），不能靠事后看 tr
 - **插桩 + 采样融合**：插桩给精确关键 Span，采样补全全局分布，两者在同一火焰图叠加。
 - **按线程/车道分面**：区分 compute/I-O/主线程（接 tasks §24.2 线程类分离）的热点分布。
 
-### 24.6 分布式 / 多实例聚合观测
+**交付状态**：`sampling` 模块（`symbol`/`sample`/`fold`/`facet`/`fusion` 五个子文件 + `mod`）落地确定性采样数据模型与离线统计还原：
+
+- 符号驻留（`symbol`）：`SymbolTable` 首见即稳定 `FrameId` 驻留栈帧名，`?<id>` 兜底未解析帧。
+- 采样缓冲（`sample`）：`StackSample`（车道 `LaneKind`/线程 id/时间戳/权重/栈帧序列）+ `SamplingProfiler`（采样间隔钳为 `>=1`，`record_named`/加权记录/总权重）。
+- 热点折叠（`fold`）：`flat_profile` 自身命中（叶）/包含（每样本去重）折叠、`call_tree` 自顶向下（`TopDown`）/自底向上（`BottomUp`）调用树（合成根 + 子节点按包含降序再按 `FrameId` 定序）、`collapsed_stacks` 输出 Brendan Gregg 折叠格式（`BTreeMap` 字典序）。
+- 车道/线程分面（`facet`）：`facet_by_lane`（规范车道序）/ `facet_by_thread`（线程 id 升序）统计热点分布。
+- 插桩 + 采样融合（`fusion`）：`fuse` 把 `flat_profile` 与 `InstrumentedSpan` 叠加成 `FusedProfile`，`agreement_ratio`（采样包含 / 插桩包含）+ `disagreements(tol)` 定位两源背离的作用域。
+
+纯 `core`/`alloc` 整数、无 `unsafe`、始终编译。专项测试 `tests_sampling.rs`（14 用例，固定四样本缓冲手算 oracle 对拍：驻留稳定性、flat 自身/包含计数与行序、折叠栈渲染、调用树结构与深度、车道/线程分面、融合比与背离集）全绿，`cargo clippy -p prism_diagnostic --all-targets` 零告警。
+已知边界：真实的定时中断采样 + 调用栈回溯 + `<1%` 运行时开销由上层 `prism_platform`（高精度时钟 + 栈回溯）接线触发，本层只拥有确定性的采样数据模型与离线统计还原（flat/tree/collapsed/分面/融合），全部 oracle 对拍、不自带时钟或中断。
+
+### 24.6 分布式 / 多实例聚合观测 —— ✅ 已交付（`aggregate` 模块）
 
 专用服务器/大世界多进程需要**集群级**视角：
 
 - **多实例聚合**：N 个服务器实例/客户端的指标汇聚到一处，出集群帧时间分布、异常实例定位。
 - **分布式 trace 关联**：一次跨进程请求（客户端→服务器→DB）用关联 ID 串成分布式 span（OpenTelemetry 形态）。
 - **抽样上报**：高频指标按采样率上报，控制带宽；异常实例自动提采样。
+
+**交付状态**：`aggregate` 模块（`instance`/`cluster`/`dtrace`/`sampling_rate` 四个子文件 + `mod`）落地确定性集群聚合、分布式关联与采样率策略：
+
+- 单实例汇总（`instance`）：`InstanceFrameReport` 收原始帧时间，`InstanceSummary::from_samples` 用全 crate 一致的最近秩分位（`percentile_nearest_rank`）压成 count/min/max/sum/p50/p90/p99/p999 紧凑摘要；实例可报原始样本或边缘预压摘要。
+- 集群聚合 + 异常定位（`cluster`）：`ClusterAggregator` 把 N 份报告池化成 `ClusterFrametimeReport`（全舰队 p50/p99/p999 分布），用**中位 p99 x 因子 + 中位绝对偏差（MAD）次级门**鲁棒定位异常实例——用中位数（非均值）避免一台已坏实例抬高基线掩盖第二台，`min_median_nanos` 地板避免健康快舰队误报，异常按最坏优先排序。
+- 分布式 trace 关联（`dtrace`）：`TraceAssembler` 按 `TraceId` 分组、按 `SpanId` 父子链接把任意乱序到达的 `DistributedSpan` 装成 `AssembledTrace` 森林（OpenTelemetry 形态），导出 `CriticalPath`（最长时长根到叶链）与 per-service 延迟归因（`ServiceLatency`）；父未到达的 span 升为 orphan 根而非丢弃，重复 `SpanId` 保留首个。
+- 自适应采样上报（`sampling_rate`）：`SampleRate`（`1/N` 上报，`should_report(seq)`/`expected_reports(captured)` 确定性带宽估计）+ `SamplingController` 把集群报告转成 per-instance `SamplingDecision`——健康实例走基线稀疏率、被判异常实例自动提到满分辨率（boost 永不低于基线），`estimate_fleet_reports` 估全舰队带宽。
+
+纯 `core`/`alloc` 整数、无 `unsafe`、始终编译。专项测试 `tests_aggregate.rs`（23 用例，独立 oracle 对拍：最近秩分位、池化分布、MAD 单/双异常与误报抑制、trace 树/关键路径/服务归因/orphan/去重、采样率上报模式与计数、boost 与基线覆盖）全绿，`cargo clippy -p prism_diagnostic --all-targets` 零告警。
+已知边界：网络传输 / RPC（把报告与 span 在进程间搬运）属上层接线，本层只拥有确定性的集群聚合（池化分位、鲁棒中位 + MAD 异常定位）、分布式 trace 关联/树装配、采样率策略数据结构，全部离线 oracle 对拍。
 
 ### 24.7 发行版遥测与隐私脱敏
 
@@ -408,4 +436,4 @@ AAA 项目的帧时间是**契约**（60/120Hz 必达），不能靠事后看 tr
 
 ### 24.8 诚实边界
 
-**24.1 性能预算 + 自动回归告警已交付**（`budget` 模块：预算声明/帧级红标/调度余量/p50-p99 回归告警/热点 diff 归因）。**24.3 内存追踪已交付**（`alloc_track` 热路径核心 + `mem` 对账/守卫层：泄漏带符号残差对账、per-类别预算红标、碎片 run/占用图谱分析）；已知边界：per-tag 统计为累计分配字节而非 live（per-tag live 为后续 follow-up），泄漏/碎片层的输入快照与占用列表由调用方在边界处采集。其余为 PLANNED 设计目标，无代码。24.2 CPU·GPU 时间线随 RHI/render 接线落地；24.4 确定性对拍随 ECS/replication 确定性落地；24.5 采样剖析随 platform 栈回溯落地；24.6 分布式聚合、24.7 发行版遥测随联网/发行阶段落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+**24.1 性能预算 + 自动回归告警已交付**（`budget` 模块：预算声明/帧级红标/调度余量/p50-p99 回归告警/热点 diff 归因）。**24.3 内存追踪已交付**（`alloc_track` 热路径核心 + `mem` 对账/守卫层：泄漏带符号残差对账、per-类别预算红标、碎片 run/占用图谱分析）；已知边界：per-tag 统计为累计分配字节而非 live（per-tag live 为后续 follow-up），泄漏/碎片层的输入快照与占用列表由调用方在边界处采集。**24.4 确定性回放与 trace 对拍已交付**（`determinism` 模块：稳定 `FNV`-1a `StateHasher`、`DeterminismTrace` 逐帧状态哈希、`InputRecorder`/`InputReplay` 输入+种子录制回放、`compare` 返回首个分叉帧 `Identical`/`Diverged`/`LengthMismatch`；纯 `core`/`alloc` 整数、无 `unsafe`、始终编译）；已知边界：各帧关键状态哈希的内容由调用方用 `StateHasher` 折叠喂入，跨三端位对拍需上层接 ECS 序/time 定点后对接，本层只提供确定性整数对拍原语、不自带模拟或 RNG，与 `prism_time::multiworld::audit` 概念对齐但无依赖边。**24.5 统计采样剖析器已交付**（`sampling` 模块：符号驻留、`StackSample`/`SamplingProfiler` 采样数据模型、`flat_profile` 自身/包含折叠、`call_tree` 自顶向下/自底向上调用树、`collapsed_stacks` 折叠格式、车道/线程分面、插桩 + 采样融合与背离定位；纯 `core`/`alloc` 整数、无 `unsafe`、始终编译）；已知边界：真实定时中断采样 + 栈回溯 + `<1%` 开销由上层 `prism_platform` 接线触发，本层只拥有确定性采样数据模型与离线统计还原、不自带时钟或中断。**24.6 分布式 / 多实例聚合观测已交付**（`aggregate` 模块：`InstanceSummary` 单实例汇总、`ClusterAggregator` 池化分布 + 中位 p99 x 因子 + MAD 鲁棒异常定位、`TraceAssembler` 分布式 span 树装配/关键路径/服务归因/orphan 处理、`SampleRate`/`SamplingController` 自适应采样上报与异常自动提采样；纯 `core`/`alloc` 整数、无 `unsafe`、始终编译）；已知边界：网络传输 / RPC 属上层接线，本层只拥有确定性集群聚合、分布式 trace 关联/树装配、采样率策略数据结构。其余为 PLANNED 设计目标，无代码。24.2 CPU·GPU 时间线随 RHI/render 接线落地；24.7 发行版遥测随发行阶段落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

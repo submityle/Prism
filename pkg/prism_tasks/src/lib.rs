@@ -49,6 +49,14 @@
 //!   lanes with priority inheritance on joins to avoid priority inversion.
 //! - [`CancelToken`] / [`TaskPool::par_for_each_cancellable`]: cooperative,
 //!   tree-structured cancellation that propagates through children.
+//! - [`FrameScheduler`] / [`LaneQueues`] ([`TaskPool::frame_scheduler`]):
+//!   priority / `QoS` lanes with frame-budget-driven scheduling that defers
+//!   [`Priority::Background`] work when the frame's `remaining_background_nanos`
+//!   headroom runs out (design §24.1).
+//! - [`ThreadClassPool`] / [`ClassRouter`] ([`TaskPool::thread_class_pool`]):
+//!   thread-class separation that routes compute work to the work-stealing
+//!   pool, blocking I/O to an off-pool lane, and main-thread-only work to the
+//!   main pump, so blocking I/O never starves compute (design §24.2).
 //! - [`Throttle`] / [`TaskPool::spawn_throttled`]: concurrency/rate throttling
 //!   of job submission.
 //! - [`JobHandle`] / [`TaskPool::spawn_catch`]: panic propagation — a panicking
@@ -92,6 +100,7 @@ mod compat_bevy;
 mod counter;
 #[cfg(feature = "fibers")]
 mod fiber;
+mod health;
 mod job;
 mod named;
 mod numa;
@@ -102,11 +111,14 @@ mod parallel;
 mod partition;
 mod pipeline;
 mod priority;
+mod qos;
 mod reduce;
 mod replay;
 mod scheduler;
 mod scope;
+mod scope_concurrency;
 mod throttle;
+mod thread_class;
 mod trace;
 
 use alloc::sync::Arc;
@@ -125,6 +137,11 @@ pub use compat_bevy::{
     IoTaskPool, TaskPoolBuilder,
 };
 pub use counter::Counter;
+pub use health::{
+    Admission, BackpressureLimits, BackpressureQueue, BackpressureRunReport, DeadlockError,
+    HealthProbe, HealthReport, LatencyHistogram, PoolHealthMonitor, QueueBackpressure,
+    StarvationDetector, StealStats, WaitGraph, WaitNodeId,
+};
 pub use named::{NamedThreads, NamedThreadsConfig, ThreadCategory};
 pub use numa::{
     steal_order, steal_penalty, CoreClass, CoreInfo, NumaNodeId, Topology, CROSS_NODE_STEAL_PENALTY,
@@ -135,11 +152,20 @@ pub use par_iter::{ParRange, ParSlice, ParSliceMut, DEFAULT_MIN_LEN};
 pub use partition::{FixedPartition, DEFAULT_TARGET_CHUNKS};
 pub use pipeline::{Pipeline, Stage};
 pub use priority::{Priority, PriorityCell, PriorityGroup};
+pub use qos::{
+    admits_background, BudgetedItem, FrameRunReport, FrameScheduler, FrameStep, LanePlan,
+    LaneQueues, LANE_COUNT,
+};
+pub use thread_class::{
+    admits, route, ClassRouter, DispatchReport, ExecLane, LaneBudget, RoutePlan, RouteStep,
+    ThreadClassPool, WorkClass, CLASS_COUNT,
+};
 pub use prism_platform::AffinityError;
 pub use reduce::tree_combine;
 pub use replay::{DeterministicSession, ReplayError, ReplayRecord, SplitEvent};
 use scheduler::Shared;
 pub use scope::Scope;
+pub use scope_concurrency::{Node, NodeId, NodeState, ScopeOutcome, ScopeTree, StructuredScope};
 pub use throttle::{Permit, Throttle};
 pub use trace::{JobTrace, Span};
 
@@ -428,3 +454,11 @@ mod tests_m6_par_iter;
 mod tests_m6_pipeline;
 #[cfg(test)]
 mod tests_m6_trace;
+#[cfg(test)]
+mod tests_health;
+#[cfg(test)]
+mod tests_qos;
+#[cfg(test)]
+mod tests_scope_concurrency;
+#[cfg(test)]
+mod tests_thread_class;

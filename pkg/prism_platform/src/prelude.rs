@@ -4,6 +4,9 @@ pub use crate::atomics::{full_fence, spin_hint, Ordering};
 pub use crate::clock::{now as clock_now, MonotonicNanos};
 pub use crate::cpu::CpuInfo;
 pub use crate::platform::{Os, Platform, PlatformCaps};
+pub use crate::capability::{
+    Capability, CapabilityDatabase, Category, Selection, Support, SupportLevel,
+};
 #[cfg(feature = "std")]
 pub use crate::wallclock::{self, now as wall_now, WallClock, WallClockSample, WallTime};
 
@@ -12,8 +15,8 @@ pub use crate::fs::{self, DirEntry, FsError, Metadata, OpenOptions, Result as Fs
 
 #[cfg(feature = "std")]
 pub use crate::thread::{
-    self, affinity_supported, hardware_concurrency, set_current_thread_affinity, spawn,
-    yield_now, AffinityError, Backoff, JoinHandle, Once, Parker, SpinLock, ThreadLocal, Unparker,
+    self, affinity_supported, hardware_concurrency, set_current_thread_affinity, spawn, yield_now,
+    AffinityError, Backoff, JoinHandle, Once, Parker, SpinLock, ThreadLocal, Unparker,
 };
 
 #[cfg(feature = "std")]
@@ -23,7 +26,9 @@ pub use crate::vm::{
 };
 
 #[cfg(feature = "std")]
-pub use crate::process::{self, args as process_args, env as process_env, Child, Command, ExitStatus, Output, Stdio};
+pub use crate::process::{
+    self, args as process_args, env as process_env, Child, Command, ExitStatus, Output, Stdio,
+};
 
 #[cfg(feature = "std")]
 pub use crate::stdio::{self, Stream};

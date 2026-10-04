@@ -10,7 +10,7 @@
 > - **异步**：Rust `futures` / async executor（与作业图共存，统一一个线程池）
 > 本文为纯经典并发/调度路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：优先级/QoS 车道/帧预算调度/主线程亲和与线程类分离/结构化并发与取消/并行原语(parallel_for/reduce/scan)/异步 I/O 桥/NUMA 与混合核拓扑感知/确定性并行/背压与死锁预防；均为 PLANNED，无代码）
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：优先级/QoS 车道/帧预算调度/主线程亲和与线程类分离/结构化并发与取消/并行原语(parallel_for/reduce/scan)/异步 I/O 桥/NUMA 与混合核拓扑感知/确定性并行/背压与死锁预防；其中 24.1/24.2/24.3/24.4/24.8 已落地，余为 PLANNED）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_math`（可选 SIMD 并行原语）、`prism_platform`（线程/亲和/NUMA/高精度计时）、`prism_diagnostic`（可选 trace）
 - 层级定位: ECS 文档 L4「Schedule/Executor/Fiber 作业图」的执行底座；App 文档 L3「运行时服务」
@@ -391,7 +391,7 @@ pkg/prism_tasks/
 
 本章补齐顶级作业系统常被忽视、却在真实 AAA 项目里缺一不可的能力。均 feature/档位门控，默认不付成本；与前文的 work-stealing + fiber 内核互补。
 
-### 24.1 优先级 / QoS 车道与帧预算调度
+### 24.1 优先级 / QoS 车道与帧预算调度 —— ✅ 已交付（`qos` 模块）
 
 单一队列无法区分「必须本帧完成」与「可拖到空闲」的作业。引入**优先级车道**：
 
@@ -404,7 +404,9 @@ pkg/prism_tasks/
 
 配合 `prism_time` 帧预算（见 time §24.5）：调度器感知「本帧剩余毫秒」，预算耗尽时把未开工的 `Background` 顺延下帧，杜绝背景作业挤爆帧时间。
 
-### 24.2 主线程亲和与线程类分离
+**交付状态**：`pkg/prism_tasks/src/qos/`（`lane.rs` 纯决策核心 + `mod.rs` 线程池门面）已落地。核心 `LaneQueues<T>`（五条 FIFO 车道按 `Priority` 判别子索引，`core::array::from_fn` 初始化）给出**纯确定性、无时钟、无线程**的调度决策：四条前台车道（`Low`..=`Critical`）为本帧必跑的承诺工作，按车道从高到低、车道内 FIFO 依次放行；唯一的 `Background` 车道按**帧预算**门控——`next_step(&mut remaining_nanos)` 仅当背景队头估算成本 `est_nanos` 仍能装进剩余余量时放行并扣减，否则返回 `DeferredBackground` 把未开工的背景作业**顺延下帧**。门控用的 `remaining_nanos` 正是 `prism_diagnostic` 帧预算台账导出的 `remaining_background_nanos`（本帧前台实测后、帧目标下的背景余量），两侧语义严格对齐：帧紧时背景让路。门面 `FrameScheduler`（`TaskPool::frame_scheduler`）薄封装既有 `TaskPool`：被放行的作业经 `spawn`/`wait` 扇出到真实工作窃取池（含 help-on-wait 不死锁与单线程内联回退），`run_frame` 返回确定性的 `FrameRunReport`（前台跑数/背景跑数/顺延数/消耗纳秒/剩余余量），其数值只取决于队列内容与预算、与 worker 完成先后无关。`no_std`+`alloc` 兼容（核心仅用 `core`+`alloc::collections::VecDeque`）。**9 单测绿**：车道优先级+车道内 FIFO 对拍独立串行 oracle、预算耗尽背景顺延（队头阻塞式）、预算充足全放行、零预算放行零成本背景而顺延有成本者、零预算不阻塞前台、空队列 `Idle`、`peek_plan` 预测 `next_step`、`FrameScheduler` 多线程下前台必跑+背景门控+顺延作业跨帧补跑、单线程回退内联执行；`cargo clippy -p prism_tasks --all-targets` 零告警（含 `doc_markdown`）。诚实边界：单个估算成本大于整帧余量的背景作业会一直顺延到余量足够的帧（队头阻塞，不拆分、不抢跑），这是刻意的「不炸帧时间」契约；`est_nanos` 为调用方估算，非实测。
+
+### 24.2 主线程亲和与线程类分离 —— ✅ 已交付（`thread_class` 模块）
 
 部分工作**只能在特定线程**跑（GPU 提交、窗口/输入事件、某些平台 API）：
 
@@ -412,7 +414,9 @@ pkg/prism_tasks/
 - **线程类分离**：compute 池（吃满 CPU）与 I/O 池（多为阻塞等待）分开，避免阻塞 I/O 饿死计算 worker（对标 Unreal `TaskGraph` 的命名线程 + 独立 I/O 线程）。
 - fiber 等待（见前文）解决「compute 作业内部等依赖」；线程类分离解决「阻塞型工作不占 compute 核」。
 
-### 24.3 结构化并发与取消
+**交付状态**：`pkg/prism_tasks/src/thread_class/`（`route.rs` 纯决策核心 + `mod.rs` 执行门面）已落地。核心 `ClassRouter<T>`（三条 FIFO 车道按 `WorkClass` 判别子索引，`core::array::from_fn` 初始化）给出**纯确定性、无时钟、无线程**的分类路由：`route(WorkClass)->ExecLane` 是唯一路由表（`Compute→ComputePool`、`Io→IoPool`、`MainThread→MainQueue`），`next_step(&mut LaneBudget)` 按固定服务序（compute→io→main，车道内 FIFO）放行，compute/I-O 按 `LaneBudget` 的每波额度准入（`usize::MAX` 为无界）、main 车道恒准入（入队无并发成本），额度耗尽的 compute/I-O 原地**顺延下一波**并由 `Idle` 报回 `compute_deferred`/`io_deferred`。三类车道彼此独立，故作业绝不跨类：把 `io_slots` 设为 `0`（I-O 车道饱和/停滞）时 **compute 与 main 仍全量放行、零 I-O**——这正是「阻塞 I-O 不饿死 compute」的确定性表达。门面 `ThreadClassPool`（`TaskPool::thread_class_pool`）薄封装既有设施**复用而非重写**：`submit_compute`/`submit_io`/`submit_main` 入队，`dispatch` 按核心决策把 compute 作业 `spawn` 到既有工作窃取 `TaskPool`、I-O 作业投递到既有 `NamedThreads` 的 `Io` 阻塞线程（不占 compute worker）、main 作业入 `NamedThreads` 主队列仅由 `pump_main` 在主线程抽水执行；`wait` 经 `TaskPool::wait`（help-on-wait 不死锁）阻塞至本波 compute+I-O 完成，`DispatchReport` 的计数只取决于队列内容与预算、与执行先后无关。单线程回退 `ThreadClassPool::inline`（单线程池经 `thread_class_pool` 自动选用）compute+I-O 按 `dispatch` 内联、依车道抽干序执行，main 仍入内部队列候 `pump_main`，无任何 OS 线程、完全确定。`no_std`+`alloc` 兼容（核心仅用 `core`+`alloc::collections::VecDeque`）。**12 单测绿**：路由表全覆盖+索引序、无界抽干三类 FIFO 对拍独立串行 oracle、I-O 饱和不饿死 compute/main（隔离）、compute 额度精确/超额顺延（边界）、空路由 `Idle`、`admits` 额度语义+main 恒准入、`peek_plan` 预测 `next_step`、顺延作业跨波补跑、门面多线程 compute 入池·I-O 离池·main 候泵+`wait` 同步、门面 `io_slots=0` 隔离（compute 跑而 I-O 顺延再放行）、门面每波额度钳位三波抽干、单线程回退内联按序执行；`cargo clippy -p prism_tasks --all-targets` 零告警（含 `doc_markdown`）。诚实边界：`LaneBudget` 的每波额度是准入计数（面向帧级分波投递的背压），非实时并发信号量，门面不感知 I-O/compute 执行线程的实时空闲度；真正的平台异步 I-O（io_uring/IOCP/kqueue）事件唤醒属 §24.5，随 `prism_asset` 落地；主线程抽水 `pump_main` 需调用方在主线程按帧驱动。
+
+### 24.3 结构化并发与取消 —— ✅ 已交付（`scope_concurrency` 模块）
 
 作用域任务：父作用域退出前自动 join 所有子作业，杜绝悬挂/泄漏（对标 Rust `std::thread::scope`、Kotlin structured concurrency）：
 
@@ -425,6 +429,8 @@ scope(|s| {
 
 - **取消令牌**：长作业（寻路、烘焙）可携带 `CancelToken`，关卡切换/玩家离开时协作式取消，释放资源。
 - 取消是**协作式**（作业在检查点自查），非强杀，保证状态一致。
+
+**交付状态**：`pkg/prism_tasks/src/scope_concurrency/`（`tree.rs` 纯决策核心 + `mod.rs` 执行门面）已落地。核心 `ScopeTree`（根 `NodeId(0)`，节点状态 `Pending`/`Running`/`Joined`/`Cancelled` 带 `is_terminal`）给出**纯确定性、无时钟、无线程**的作用域任务树语义：`spawn_child` 建父子边（父已取消则子**出生即取消**）、`set_running`/`set_joined` 尊重终态不回退、`cancel_subtree` 以**前序遍历**返回被取消的节点集合（跳过已 `Joined`/`Cancelled` 的分支），`depth`/`pending_descendants`/`subtree_preorder` 等查询均为纯函数，直接对拍独立串行镜像 oracle（取消传播的集合与顺序、出生即取消、兄弟隔离、终态单调）。门面 `StructuredScope`/`TaskPool::structured_scope` 薄封装既有 `TaskPool::scope`**复用而非重写**其生命周期擦除与 join 栅栏（本模块**不引入任何新 `unsafe`**），只叠加 `CancelToken` 树与「准入/跳过/完成」记账：作用域从父 `CancelToken` 派生子令牌（父取消级联子、父已取消则子出生即取消），每个 `spawn` 的子任务领到作用域令牌、在自身检查点协作式自查；若任务将启动时令牌已取消则**整体跳过**（计入 `ScopeOutcome::skipped`）而非跑起来再退出，否则跑到完成（计入 `completed`），两种情形都在作用域返回前被 join。`ScopeOutcome` 的 `spawned == completed + skipped` 恒成立，与 worker 完成先后无关。继承 `TaskPool::scope` 的 help-on-wait（不死锁）与单线程内联回退。`no_std`+`alloc` 兼容（核心仅用 `core`+`alloc`，门面用 `alloc::sync::Arc` 共享记账计数）。**10 单测绿**：取消子树集合+前序顺序对拍 oracle、出生即取消、终态不回退、兄弟隔离、`spawn` 形状对镜像、作用域 join 全部并计数、预取消作用域跳过每个任务、`cancel` 级联子令牌、父令牌取消抵达作用域（协作式跳过）、单线程回退内联执行；`cargo clippy -p prism_tasks --all-targets` 零告警（含 `doc_markdown`）。诚实边界：取消是**协作式**——已在飞行中的任务只在其下一个检查点（`is_cancelled`/`check`）观察到取消并自愿退出，本模块不强杀线程；取消的*传播*与跳过记账是确定的，但真实 OS 线程何时抵达检查点取决于调度，不由确定性核心感知。
 
 ### 24.4 数据并行原语（parallel_for / reduce / scan / join）—— ✅ 已交付（`par_cost` 模块）
 
@@ -462,13 +468,15 @@ tasks.join(|| left(), || right());                 // 分治二叉 join
 - 结果写回按实体/索引有序，不依赖 worker 完成先后。
 - 与 ECS §确定性、`prism_replication` 契约一致：同输入 → 同输出（位等价），无论几核。
 
-### 24.8 背压、死锁预防与健康监测
+### 24.8 背压、死锁预防与健康监测 —— ✅ 已交付（`health` 模块）
 
 - **背压**：队列深度超阈值时拒绝/降级 `Background` 投递，防内存爆。
 - **死锁预防**：作业图在提交时静态检测环依赖；fiber 等待链深度限幅，防栈耗尽。
 - **健康监测**：worker 饥饿/长作业/窃取失败率导出到 `prism_diagnostic`，`trace` 档出每作业 span（tracy/chrome-trace）与依赖图可视化。
 
+**交付状态**：`pkg/prism_tasks/src/health/`（`backpressure.rs`/`wait_graph.rs`/`monitor.rs` 三个纯决策核心 + `mod.rs` 执行门面）已落地。**背压**：`QueueBackpressure`（`BackpressureLimits::new` 钳位 `low ≤ high ≤ cap`、`cap ≥ 1`）以**双水位滞回**给出纯确定性准入——深度达 `high` 起进入 shedding、降到 `low` 才解除（滞回防抖），shedding 期降级丢弃 `Background` 投递（`Deferred`），满 `cap` 一律 `Rejected`，前台优先级不受降级影响；`offer`/`complete`/`complete_many`/`headroom`/`peek` 均为纯函数，对拍逐步重放 oracle（含 LCG 随机流多配置）。**死锁预防**：`WaitGraph`（任务/资源等待图）在**提交依赖时**用可达性检测**成环即拒绝**（`try_add_dependency` 先 `creates_cycle` 探测、确认加边才落图），`find_cycle` 用三色迭代 DFS 还原具体环，`longest_chain`/`resulting_chain_depth` 对等待链**深度限幅**（防 fiber 等待链栈耗尽），错误以 `DeadlockError::{Cycle, ChainTooDeep}` 精确报出；对拍暴力可达性 oracle、自环、链限、删边。**健康监测**：`LatencyHistogram`（升序去重桶 + 溢出桶，`percentile_nanos` 用 nearest-rank + ceil 整数除、`max_nanos`）给确定性延迟分位、`StarvationDetector`（每 worker 连续空闲计数 vs 阈值）检测**饥饿**、`StealStats`（`failure_per_mille`）给**窃取失败率**，`PoolHealthMonitor` 聚合为确定性 `HealthReport`（峰值队列深度/饥饿 worker 数/窃取失败千分比/p50·p99·最长作业延迟/样本计数）；分位单调、样本计数等对拍 nearest-rank oracle（含随机流）。门面 `BackpressureQueue`（`TaskPool::backpressure_queue`）把准入决策接到真实 `TaskPool`：`offer` 经背压门控准入后入队、`run` 扇出 `dispatch`+`wait`+drain；`HealthProbe`（`Arc<Mutex<PoolHealthMonitor>>`，`Clone`）在 worker 上以 `std::time::Instant` 采**真实**作业墙钟延迟喂进直方图。`no_std`+`alloc` 兼容（三个核心仅用 `core`+`alloc`；`HealthProbe`/`BackpressureQueue` 门面合理使用 `std`）。**16 单测绿**：背压准入/滞回/逐步重放 oracle（含随机）、满 cap 拒绝、等待图成环拒绝对拍暴力可达性、`find_cycle` 还原环、自环、链深限幅、删边、直方图分位对拍 nearest-rank（含随机）、空·乱序桶、饥饿检测、窃取失败率、`backpressure_queue` 与 `health_probe` 门面；`cargo clippy -p prism_tasks --all-targets` 零告警（含 `doc_markdown`）。诚实边界：死锁*预防*是**提交期静态环检测 + 链深限幅**（确定性），不等于运行期无锁争用的实时死锁消解；`QueueBackpressure` 的水位是队列深度账（面向内存爆与过载的准入背压），非实时并发信号量；`HealthProbe::measure` 采的墙钟延迟取决于真实 OS 调度（唯一的非确定输入），但其后一切派生指标（分位、最长作业、饥饿计数、窃取率）全是确定函数；worker 的真实空闲须由调用方喂 `record_idle`/`record_busy`，确定性核心不自行感知线程实时空闲。
+
 ### 24.9 诚实边界
 
-本章全部为 PLANNED 设计目标，无代码。**24.1 优先级车道 + 24.4 并行原语**是其他 crate（transform/ECS/物理）最先依赖的能力，建议随 M2/M3 优先落地；24.2 线程类分离随渲染/平台接线落地；24.5 异步 I/O 随 `prism_asset` 落地；24.6 NUMA/混合核、24.7 确定性并行随 M5 落地；24.3 结构化并发贯穿始终。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+**24.1 优先级 / QoS 车道 + 帧预算调度**（`qos` 模块）、**24.2 主线程亲和与线程类分离**（`thread_class` 模块）、**24.3 结构化并发与取消**（`scope_concurrency` 模块）、**24.4 并行原语标定**（`par_cost` 模块）与 **24.8 背压、死锁预防与健康监测**（`health` 模块）已落地（见各节「交付状态」），是其他 crate（transform/ECS/物理）最先依赖的能力；本章其余小节（24.5 异步 I/O、24.6 NUMA/混合核、24.7 确定性并行）仍为 PLANNED 设计目标。24.1 的帧预算门控与 `prism_diagnostic` 的 `remaining_background_nanos` 严格对齐（背景作业据可用余量决定是否本帧执行）；24.2 线程类分离（`thread_class` 模块：compute 入工作窃取池、I-O 走 `NamedThreads` 离池阻塞线程、main-only 候 `pump_main` 主线程抽水，`io_slots=0` 时 compute/main 不受阻）已落地，纯 `ClassRouter` 决策核心对拍独立 oracle、门面复用既有 `TaskPool`/`NamedThreads`；真正的平台异步 I-O 唤醒属 §24.5 随 `prism_asset`；24.5 异步 I/O 随 `prism_asset` 落地；24.6 NUMA/混合核、24.7 确定性并行随 M5 落地。24.3 结构化并发（`scope_concurrency` 模块：纯 `ScopeTree` 决策核心对拍独立 oracle、`StructuredScope` 门面复用 `TaskPool::scope` 的 join 栅栏 + `CancelToken` 树做协作式取消与跳过记账）已落地，诚实边界为协作式取消依赖真实线程何时抵达检查点。24.8 背压/死锁预防/健康监测（`health` 模块：`QueueBackpressure` 双水位滞回准入、`WaitGraph` 提交期环检测 + 链深限幅、`PoolHealthMonitor` 确定性指标）已落地，诚实边界为 `HealthProbe` 墙钟延迟采样取决于真实 OS 调度（唯一非确定输入，其后派生指标全确定）、死锁预防为提交期静态检测而非运行期实时消解。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
 

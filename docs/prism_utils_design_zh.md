@@ -359,29 +359,35 @@ pkg/prism_utils/
 - **分配器注入**：容器泛型携带分配器参数，同一 `Vec` 可绑帧/池/全局分配器，调用点决定内存域。
 - 供 `prism_tasks` 每 worker 帧分配器、ECS 命令缓冲、渲染每帧瞬态数据。
 
-### 24.2 无锁进阶：hazard pointer / RCU / 分片并发哈希
+### 24.2 无锁进阶：hazard pointer / RCU / 分片并发哈希 —— ✅ 已交付（`concurrent::Rcu` / `concurrent::Collector` / `concurrent::ConcurrentHashMap`）
 
 §11 并发容器之上的高并发工业级实现：
 
-- **hazard pointer / epoch 回收**：安全回收被并发读者引用的节点，解决 ABA 与 use-after-free（crossbeam-epoch 形态）。
-- **RCU（读多写少）**：读者零锁零等待，写者复制更新，供全局只读表（类型注册、资产索引）的高频读。
-- **分片并发哈希**：按 key 哈希分片降争用（Java `ConcurrentHashMap`/folly F14 形态），供资产缓存、实体映射的多线程访问。
+- **hazard pointer / epoch 回收**：安全回收被并发读者引用的节点，解决 ABA 与 use-after-free（crossbeam-epoch 形态）。 **（✅ 已交付：`concurrent::Collector`/`Guard`——三桶 epoch 回收，`defer` 延迟释放、全局 epoch 推进后才真正回收，`concurrent::TreiberStack` 为无锁对拍样例。）**
+- **RCU（读多写少）**：读者零锁零等待，写者复制更新，供全局只读表（类型注册、资产索引）的高频读。 **（✅ 已交付：`concurrent::Rcu<T>` + `RcuGuard`——`read()` 单次 `AtomicPtr` 原子载入 + epoch pin，无 CAS 无自旋；`store()`/`update(f)` 复制整值后原子交换发布，旧版本经 epoch `defer` 在无读者可见后回收；读者持有的快照跨写入保持一致。）**
+- **分片并发哈希**：按 key 哈希分片降争用（Java `ConcurrentHashMap`/folly F14 形态），供资产缓存、实体映射的多线程访问。 **（✅ 已交付：`concurrent::ConcurrentHashMap`——按 key 哈希分片、每分片读写锁，不相交 key 跨核扩展。）**
 - **保守默认**：默认单线程/加锁实现，无锁仅在 `concurrent` 档 + 实测需要时启用（见 §23 风险）。
 
-### 24.3 内存安全加固（canary / poison / debug 校验）
+**交付状态**：§24.2 的三件套随 M5 `concurrent` 档交付，位于 `prism_utils` 的独立 `concurrent` 模块（`concurrent/epoch.rs` 的 epoch 回收、`concurrent/hash.rs` 的分片并发哈希随 M5 先行落地；本次补齐 `concurrent/rcu.rs` 的 `Rcu<T>`/`RcuGuard`）。`lib.rs` 以 `pub mod concurrent` + `pub use concurrent::{Rcu, RcuGuard, …}` 导出并进 `prelude`。`Rcu` 复用本章 §24.2 的 epoch 回收域（`pin_with`/`Guard::defer`）保证读者借出的 `&T` 在 pin 期间不被回收——读路径只有一次 `AtomicPtr` acquire 载入，写路径 `store`/`update` 用整值复制 + `swap`/`compare_exchange` 发布、旧版本延迟释放；全程保守内存序，`unsafe` 仅限原子指针 `Box::into_raw`/`from_raw` 搬运与跨线程回收，每处均带 `#[expect(unsafe_code, reason=…)]` + `// SAFETY:` 注释，与 `TreiberStack`/`epoch` 既有做法一致。专项单测覆盖初值读取、`store`/`update` 发布、`load_cloned`、持有快照跨写入一致（RCU 语义）、`Default`/`Debug`、空/单元素边界，以及多线程：读者永不观测撕裂/被回收值、并发 `update` 串行化无丢失、超版本「恰好回收一次」无泄漏无双重释放、共享回收域跨 cell（见 `src/concurrent/rcu_tests.rs`，11 项）。
 
-- **分配 canary**：debug 档在分配块前后插哨兵字节，释放时校验，捕获缓冲区溢出写。
-- **释放毒化（poison）**：释放后填充特征字节 + 可选保护页（接 platform §9），把 use-after-free 变成即时崩溃。
-- **双重释放 / 越界检测**：池/slotmap 校验代数与状态，双释放/悬垂句柄即断言（接 `prism_diagnostic` §11）。
-- **分配栈追踪**：接 `alloc-track`，每分配记调用栈，供 diagnostic §24.3 泄漏/碎片可视化。
+### 24.3 内存安全加固（canary / poison / debug 校验） —— ✅ 已交付（`guard`）
 
-### 24.4 热 / 冷数据分离与 SoA 自动布局
+- **分配 canary**：debug 档在分配块前后插哨兵字节，释放时校验，捕获缓冲区溢出写。 **（✅ 已交付：`guard::GuardedBuffer` 在 payload 前后各插一段 canary redzone（默认 16 字节/侧、特征字节 `0xFD`），`write_at`/`read_at` 对 payload 做边界检查，`validate()`/`free()` 复校前后 canary——前段被改报 `Underflow`、后段被改报 `Overflow`；另有 `unsafe` 分配层 `alloc_::guard::GuardedAllocator` 做等价检查。）**
+- **释放毒化（poison）**：释放后填充特征字节 + 可选保护页（接 platform §9），把 use-after-free 变成即时崩溃。 **（✅ 已交付：`guard::GuardedBuffer::free()` 先校 canary 再用毒化字节（默认 `0xDD`）覆写整个 payload 并置「已释放」位，之后任何 `payload`/`write_at`/`read_at`/`validate` 均返回 `UseAfterFree`。保护页需真实 `MMU` 系统调用，属 platform §9，纯安全容器无法 fault，故改为「下次校验即报告」语义。）**
+- **双重释放 / 越界检测**：池/slotmap 校验代数与状态，双释放/悬垂句柄即断言（接 `prism_diagnostic` §11）。 **（✅ 已交付：`guard::GuardedPool<T, D>` 为分代 slab——每槽带 generation，复用时自增（跳 0）；`try_get`/`try_remove` 区分出悬垂句柄 `DanglingHandle`（槽从未分配）、`DoubleFree`（本句柄已释放该槽）、`UseAfterFree`（槽已被回收复用）；`get`/`remove` 为断言版，panic 文案含 `use-after-free`/`double free`/`dangling handle` 便于定位。）**
+- **分配栈追踪**：接 `alloc-track`，每分配记调用栈，供 diagnostic §24.3 泄漏/碎片可视化。 **（PLANNED：调用栈捕获需 `alloc-track` 后端，属 `prism_diagnostic`，不在本内核 crate 实现。）**
+
+**交付状态**：canary / poison / 双重释放 / 悬垂句柄 / use-after-free 检测已随本构建交付，位于 `prism_utils` 的独立 `guard` 模块（`guard/canary.rs` 的 `GuardedBuffer` + `guard/pool.rs` 的 `GuardedPool`/`GuardHandle`，共享 `guard/mod.rs` 的 `GuardError`/`GuardConfig`）。两者为**纯安全**实现：全部检测用安全的边界检查、canary 字节比较、代数比较与存活标志完成，**零 `unsafe`**、无一处本地 lint 覆盖，满足工作区 `unsafe_code` deny；它们是裸内存版 `alloc_::guard::GuardedAllocator`（分配层、含 `unsafe` 指针算术）在容器层的安全互补物。no_std+alloc 兼容（`extern crate alloc`）。`lib.rs` 以 `pub mod guard` + `pub use guard::{GuardConfig, GuardError, GuardHandle, GuardedBuffer, GuardedPool}` 导出并进 `prelude`。专项单测以影子 `Vec<u8>`（buffer）与影子存活句柄表（pool）对拍，覆盖越界读写、canary 上/下溢、释放毒化、双重释放、use-after-free、悬垂句柄、分代复用、空/单元素边界，以及伪随机生命周期对拍与断言版 `#[should_panic]`（见 `src/guard/tests.rs`，21 项）。保护页属 platform §9、分配栈追踪属 `prism_diagnostic` §24.3，仍为 PLANNED。
+
+### 24.4 热 / 冷数据分离与 SoA 自动布局 —— ✅ 已交付（`layout`）
 
 缓存效率的关键是「只把热字段塞进缓存行」：
 
-- **热冷分离容器**：常访问字段（位置/变换）与冷字段（名称/调试信息）分列存储，遍历热路径不污染缓存。
-- **SoA 自动布局**：`SoaVec<(A,B,C)>`（§17）编译期拆列 + SIMD 对齐（接 `prism_math` SoA、platform 缓存行探测），供 ECS 列存与批处理。
-- **AoSoA 混合**：块内 SoA、块间 AoS，兼顾 SIMD 与局部性，供粒子/物理大批量。
+- **热冷分离容器**：常访问字段（位置/变换）与冷字段（名称/调试信息）分列存储，遍历热路径不污染缓存。 **（✅ 已交付：`layout::HotCold<H, C>`——热字段元组 `H` 与冷字段元组 `C` 各存一套独立 `SoaVec`，按行索引锁步；`push`/`swap_remove`/`clear` 两半严格等长，热批处理 `hot_columns()` 只触热内存、绝不载入冷字节，冷字段仍 O(1) 可取。）**
+- **SoA 自动布局**：`SoaVec<(A,B,C)>`（§17）编译期拆列 + SIMD 对齐（接 `prism_math` SoA、platform 缓存行探测），供 ECS 列存与批处理。 **（✅ 已交付：`layout::LayoutPlan`/`GroupLayout`/`ColumnShape` + `ColumnShapes` trait——确定性计算每列尺寸/对齐/步长、分组推荐缓存对齐、热工作集宽度与 `fits_cache_line`，`stride_for(lane_align)` 给出 SIMD 车道对齐步长；`align_up` 为纯 const 对齐取整，全程安全无 `unsafe`。）**
+- **AoSoA 混合**：块内 SoA、块间 AoS，兼顾 SIMD 与局部性，供粒子/物理大批量。 **（PLANNED：当前 `LayoutPlan::lane_bytes_for` 已给出 AoSoA 块尺寸所需的车道步长，块内 SoA/块间 AoS 的物理块容器待粒子/物理批量落地。）**
+
+**交付状态**：热冷分离容器与 SoA 自动布局已随本构建交付，位于 `prism_utils` 的独立 `layout` 模块（`layout/hotcold.rs` + `layout/plan.rs`，`lib.rs` 以 `pub mod layout` + `pub use` 导出，并进 `prelude`）。`HotCold` 复用 §24.4/§17 的 derive-free `Soa` 列存，纯安全代码、零 `unsafe`、no_std+alloc 兼容（`extern crate alloc`，与既有模块一致）；`LayoutPlan` 为纯确定性布局描述，不分配被存数据。专项单测覆盖热/冷列独立增删一致、索引访问、切片迭代顺序、布局对齐/步长、空/单元素边界（见 `src/tests_hotcold.rs`，15 项）。AoSoA 混合物理块仍为 PLANNED。
 
 ### 24.5 可重定位 / 内存映射友好容器（offset 指针）
 
@@ -391,11 +397,13 @@ pkg/prism_utils/
 - **可重定位容器**：`RelocVec`/`RelocMap` 支持「烘焙成连续 blob → 运行期 mmap 零解析直接用」（接 platform §6 mmap、`prism_asset` 烘焙）。
 - **POD 布局版本化**：接 §14 bytemuck，blob 布局版本化，GPU/磁盘直传。
 
-### 24.6 内容寻址与去重缓存
+### 24.6 内容寻址与去重缓存 —— ✅ 已交付（`intern::InternCache`）
 
-- **内容寻址驻留**：对数据块算经典内容哈希（xxHash/BLAKE 形态，非 ML）做 key，相同内容只存一份，供资产/网格/纹理去重（接烘焙）。
-- **去重缓存门面**：`InternCache<T>` 自动合并等价对象，返回稳定句柄，省内存 + 使相等比较降为句柄比较（O(1)）。
-- **分域驻留**：字符串/类型/资产 ID 分域驻留，避免全局表无界增长（见 §23 风险），生命周期按域回收。
+- **内容寻址驻留**：对数据块算经典内容哈希（xxHash/BLAKE 形态，非 ML）做 key，相同内容只存一份，供资产/网格/纹理去重（接烘焙）。 **（✅ 已交付：`InternCache<T, D>` 以本 crate 的 `hash::stable_hash`（FNV-1a，非加密、非 ML）做桶 key，哈希仅选桶、再以完整 `Eq` 确认，碰撞绝不别名；相同内容只 `push` 一份。）**
+- **去重缓存门面**：`InternCache<T>` 自动合并等价对象，返回稳定句柄，省内存 + 使相等比较降为句柄比较（O(1)）。 **（✅ 已交付：`intern(value)` 幂等——等价内容恒返回同一个 `Interned<T, D>` 句柄；句柄是域标记的 `u32`，`Copy`、`size_of == size_of::<u32>()`，两句柄相等当且仅当寻址同一份内容，相等比较由深比较降为 `u32` 比较；另有 `get`/`contains` 不插入、`intern_ref` 缺失才克隆、`resolve`/`try_resolve` 回解。）**
+- **分域驻留**：字符串/类型/资产 ID 分域驻留，避免全局表无界增长（见 §23 风险），生命周期按域回收。 **（✅ 已交付：`D` 为不可居住域标记（`domain::{Tag,Path,Debug,Type,Asset,Mesh,Texture}`），不同域句柄是不同类型、编译期拒绝混用；每域一张独立缓存，`clear()` 整域回收、使旧句柄失效、索引从 0 重新开始——无全局无界表。）**
+
+**交付状态**：内容寻址去重缓存已随本构建交付，位于 `prism_utils` 的独立 `intern` 模块（原字符串驻留 `intern.rs` 重构为 `intern/string.rs`，新增 `intern/cache.rs` 的 `InternCache`/`Interned`、与字符串驻留共享 `intern/domain.rs` 的域标记，`intern/mod.rs` 汇总）。纯安全代码、零 `unsafe`、no_std+alloc 兼容（`extern crate alloc`），底层复用 `Vec<T>` + `HashMap<u64, Vec<u32>>` 桶索引。`lib.rs` 以 `pub use intern::{InternCache, Interned, …}` 导出并进 `prelude`。专项单测以线性扫描 `Vec<T>` 为 oracle 对拍，覆盖去重、句柄等价⇔内容等价、`resolve` 往返、`get`/`contains` 不插入、`intern_ref`、4000 次伪随机混合序对拍、插入序迭代、`clear` 回收、`content_hash` 稳定、域类型隔离、句柄 `u32` 大小与 `Copy`（见 `src/intern/cache_tests.rs`，11 项）。
 
 ### 24.7 确定性进阶（有序并发 / 可复现哈希）
 
@@ -405,4 +413,4 @@ pkg/prism_utils/
 
 ### 24.8 诚实边界
 
-**24.1 作用域分配器已交付**（`alloc_::scope::ScopeStack`），**24.3 内存安全加固已交付**（`alloc_::guard::GuardedAllocator`）；其余为 PLANNED。**24.1 作用域分配器 + 24.4 热冷/SoA 布局**是 ECS/tasks/渲染最先依赖的能力，建议随 M2/M3 优先落地；24.5 可重定位容器随 `prism_asset` 烘焙落地；24.6 内容寻址随烘焙/去重落地；24.2 无锁进阶、24.7 确定性进阶随 M5 落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+**24.1 作用域分配器已交付**（`alloc_::scope::ScopeStack`），**24.2 无锁进阶已交付**（`concurrent::Collector`/`Guard` epoch 回收 + `concurrent::Rcu` 读多写少 RCU + `concurrent::ConcurrentHashMap` 分片并发哈希；均在 `concurrent` 档下，默认关闭），**24.3 内存安全加固已交付**（纯安全容器层 `guard::GuardedBuffer`/`guard::GuardedPool` + 既有裸内存分配层 `alloc_::guard::GuardedAllocator`；保护页属 platform §9、分配栈追踪属 `prism_diagnostic` §24.3，仍为 PLANNED），**24.4 热冷分离 + SoA 自动布局已交付**（`layout::HotCold` + `layout::LayoutPlan`；其中 AoSoA 混合物理块仍为 PLANNED）；其余为 PLANNED。**24.1 作用域分配器 + 24.4 热冷/SoA 布局**是 ECS/tasks/渲染最先依赖的能力，建议随 M2/M3 优先落地；24.5 可重定位容器随 `prism_asset` 烘焙落地；24.6 内容寻址去重已交付（`intern::InternCache`）；24.2 无锁进阶已随 M5 落地（RCU 本次补齐），24.7 确定性进阶随 M5 落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

@@ -384,12 +384,14 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 - **沙箱能力探测**：探测平台沙箱/权限模型（移动/主机/Web），上层据能力位调整文件/网络访问。
 - **安全约束**：本层只做防御性加固与探测，不含任何绕过/攻击/反调试对抗代码。
 
-### 24.6 平台能力数据库与降级矩阵
+### 24.6 平台能力数据库与降级矩阵 ✅ 已交付（`capability` 模块）
 
 - **能力数据库**：把 §3 `PlatformCaps` 扩展成「能力 → 平台 → 支持度/替代路径」结构化数据，上层查询即得降级方案。
 - **声明式降级**：`require(HUGEPAGES).or_fallback(normal_alloc)` 式 API，缺能力自动走回退，杜绝「某平台漏判直接崩」。
 - **特性门控报告**：启动期输出本平台能力报告（接 `prism_diagnostic`），一眼看清哪些 AAA 路径在当前平台降级。
 
+
+**交付状态（已落地）**：`pkg/prism_platform/src/capability/`（`catalog`/`support`/`database`/`require`/`report` 子模块）把 §3 `PlatformCaps` 提升为「能力 → 平台 → 支持度/替代路径」的结构化数据库：`CapabilityDatabase::from_platform(os, caps)` 可在编译期 const 构造、全平台可测；`require(cap).select(native, fallback)` 提供惰性声明式降级 API；`report()` 产出字节稳定的启动期能力报告（供 `prism_diagnostic` 消费）。纯 `core`+`alloc`、`#![forbid(unsafe_code)]`，不含任何真实 OS 探测以外的平台相关代码。覆盖 `src/tests_capability.rs` 12 项测试，`cargo test -p prism_platform` 全绿、`cargo clippy -p prism_platform --all-targets` 零告警。
 ### 24.7 Web / 主机后端进阶
 
 - **Web 多线程**：基于 SharedArrayBuffer + Web Worker 的线程池（接 §8），wasm 原子，使 `prism_tasks` 在浏览器可并行；无 SAB 时退单线程。
@@ -399,4 +401,4 @@ AAA 的开放世界靠高吞吐流送喂饱 GPU，同步读文件远远不够：
 
 ### 24.8 诚实边界
 
-本章全部为 PLANNED 设计目标，无代码。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；24.3 调度钩子随 `prism_tasks` M5 落地；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固随发行加固落地；24.6 能力数据库贯穿始终（降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章全部为 PLANNED 设计目标，无代码。**24.1 异步 I/O + 24.2 虚存进阶**是 `prism_asset` 流送与 RHI 最先依赖的能力，建议随 M3/M4 优先落地；24.3 调度钩子随 `prism_tasks` M5 落地；24.4 跨进程崩溃随 M6 崩溃闭环落地；24.5 安全加固随发行加固落地；24.6 能力数据库**已交付**（见 `capability` 模块，贯穿始终、降级正确性的保证）；24.7 Web/主机后端随对应平台接线落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
