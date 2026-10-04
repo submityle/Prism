@@ -51,6 +51,11 @@ struct SsrConfig {
 // Output: rgb = reflected radiance, a = blend confidence.
 @group(0) @binding(5) var ssr_out: texture_storage_2d<rgba16float, write>;
 
+// Per-pixel world-space hit distance (view units) of the resolved reflection,
+// consumed by the specular denoiser's spatial filter to drive contact-hardening
+// and anisotropic blur-radius selection. Misses / background write 0.
+@group(0) @binding(6) var ssr_hit: texture_storage_2d<r16float, write>;
+
 var<immediate> config: SsrConfig;
 
 fn saturate(x: f32) -> f32 {
@@ -318,6 +323,7 @@ fn march_hierarchical(
 struct RayHit {
     reflected: vec3<f32>,
     confidence: f32,
+    hit_distance: f32,
 }
 
 // March one reflected ray and fold the confidence fades (golden
@@ -333,6 +339,7 @@ fn trace_reflection(
     var out: RayHit;
     out.reflected = vec3<f32>(0.0);
     out.confidence = 0.0;
+    out.hit_distance = 0.0;
 
     // Build the screen-space ray, clipping the far endpoint to the near plane.
     var travel = max(config.max_distance, 1.0e-3);
@@ -361,6 +368,9 @@ fn trace_reflection(
     let march = march_hierarchical(start.uv, start.device_depth, end.uv, end.device_depth);
     if march.hit {
         let travel_norm = clamp(march.travel * clipped_fraction, 0.0, 1.0);
+        // World-space (view-unit) hit distance: the clipped ray length scaled by
+        // the fraction of the ray actually marched before the intersection.
+        out.hit_distance = travel * march.travel;
         let edge = edge_fade(march.uv, config.edge_fade_start);
         let facing = facing_fade(reflection, incident);
         let rough = roughness_fade(roughness, config.full_roughness, config.max_roughness);
@@ -386,6 +396,7 @@ fn trace_ssr(@builtin(global_invocation_id) id: vec3<u32>) {
     // Reverse-Z: device depth 0 is the far plane / cleared background.
     if device_depth <= 0.0 {
         textureStore(ssr_out, pixel, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        textureStore(ssr_hit, pixel, vec4<f32>(0.0, 0.0, 0.0, 0.0));
         return;
     }
 
@@ -406,6 +417,7 @@ fn trace_ssr(@builtin(global_invocation_id) id: vec3<u32>) {
     let sample_count = max(config.sample_count, 1u);
     var color_accum = vec3<f32>(0.0);
     var confidence_accum = 0.0;
+    var hit_accum = 0.0;
     var weight_sum = 0.0;
 
     for (var i = 0u; i < sample_count; i = i + 1u) {
@@ -428,15 +440,19 @@ fn trace_ssr(@builtin(global_invocation_id) id: vec3<u32>) {
         let hit = trace_reflection(position_view, incident, l, roughness);
         color_accum = color_accum + hit.reflected * weight;
         confidence_accum = confidence_accum + hit.confidence * weight;
+        hit_accum = hit_accum + hit.hit_distance * weight;
         weight_sum = weight_sum + weight;
     }
 
     var reflected = vec3<f32>(0.0);
     var confidence = 0.0;
+    var hit_dist = 0.0;
     if weight_sum > 0.0 {
         reflected = color_accum / weight_sum;
         confidence = saturate(confidence_accum / weight_sum);
+        hit_dist = hit_accum / weight_sum;
     }
 
     textureStore(ssr_out, pixel, vec4<f32>(reflected, confidence));
+    textureStore(ssr_hit, pixel, vec4<f32>(hit_dist, 0.0, 0.0, 0.0));
 }

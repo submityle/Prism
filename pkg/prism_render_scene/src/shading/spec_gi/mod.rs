@@ -54,6 +54,9 @@ pub(crate) use composite::{
 pub(crate) use dispatch::spec_gi_reuse_pass;
 pub(crate) use pipeline::init_spec_gi_reuse_pipeline;
 pub(crate) use resources::prepare_spec_gi_reuse_resources;
+// Re-exported so the `spec_denoise` spatial pass can read the resolved
+// specular estimate this pass produces (its filter input).
+pub(crate) use resources::ViewSpecGiReuse;
 
 #[cfg(test)]
 mod shader_tests;

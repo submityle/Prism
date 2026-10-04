@@ -136,9 +136,14 @@ pub(crate) fn prepare_spec_gi_composite_bind_groups(
         &ViewVisibilityBuffer,
         &ViewSsrTextures,
         &ViewSpecGiReuse,
+        // The spatial denoiser's filtered specular target, present only while
+        // the denoise pass is enabled (same gate as the reuse resolve). When
+        // resident the composite reads the denoised specular instead of the
+        // raw reuse resolve; otherwise it falls back to the resolve directly.
+        Option<&super::super::spec_denoise::ViewSpecDenoise>,
     )>,
 ) {
-    for (entity, visibility, textures, spec_gi) in &views {
+    for (entity, visibility, textures, spec_gi, denoise) in &views {
         let Some(color_l0) = textures.color_mip_view(0) else {
             commands
                 .entity(entity)
@@ -150,7 +155,13 @@ pub(crate) fn prepare_spec_gi_composite_bind_groups(
             &pipeline.layout,
             &BindGroupEntries::sequential((
                 color_l0,
-                spec_gi.resolved_view(),
+                // Prefer the spatially denoised specular when the denoise pass
+                // is resident; fall back to the raw reuse resolve otherwise.
+                // Both carry the ReSTIR confidence in `.a`, so the composite's
+                // confidence read is valid either way.
+                denoise
+                    .map(|d| d.filtered_view())
+                    .unwrap_or_else(|| spec_gi.resolved_view()),
                 visibility.scene_color_view(),
                 visibility.ssr_env_specular_view(),
             )),

@@ -253,7 +253,9 @@ struct SdsProbe {
     value: vec4<f32>,
 }
 
-@group(0) @binding(0) var<storage, read_write> sds_probe: SdsProbe;
+// Probe lives in a disjoint group so it never collides with the real
+// kernel's group-0 resource interface below (same module, two entries).
+@group(1) @binding(0) var<storage, read_write> sds_probe: SdsProbe;
 
 @compute @workgroup_size(1, 1, 1)
 fn spec_denoise_spatial_probe(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -285,4 +287,178 @@ fn spec_denoise_spatial_probe(@builtin(global_invocation_id) id: vec3<u32>) {
     let sw = sds_spatial_weight(center, neighbours[0], params);
 
     sds_probe.value = vec4<f32>(res.color, res.normalized_hit + nh + dh + aniso.x + aniso.y + sw);
+}
+
+
+// --- spatial-denoise compute entry -------------------------------------------
+//
+// One invocation per framebuffer texel. Reconstructs the shading point's view
+// position from the SSR prepass reverse-Z depth, selects an anisotropic,
+// contact-hardened blur footprint from the surface roughness and the SSR hit
+// distance, then runs the edge-aware cross-bilateral gather over a fixed
+// unit-disk neighbourhood (gated on depth, normal and roughness) matching the
+// CPU golden's `spatial_filter`. The ReSTIR confidence (the `spec_gi` resolve
+// alpha) is passed through unchanged so the energy-conserving composite reads
+// every GI source uniformly.
+
+struct SpecDenoiseSpatialConfig {
+    view_from_clip: mat4x4<f32>,
+    width: u32,
+    height: u32,
+    max_radius: f32,
+    phi_depth: f32,
+    phi_normal: f32,
+    phi_roughness: f32,
+    contact_hardening: f32,
+    max_anisotropy: f32,
+    near: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
+@group(0) @binding(0) var<uniform> sds_config: SpecDenoiseSpatialConfig;
+// `spec_gi` resolve: rgb = resolved glossy specular, a = ReSTIR confidence.
+@group(0) @binding(1) var sds_resolved: texture_2d<f32>;
+// SSR trace per-pixel hit distance (view-space units) in the red channel.
+@group(0) @binding(2) var sds_hit: texture_2d<f32>;
+// Packed G-buffer: rgb = view normal * 2 - 1, a = perceptual roughness.
+@group(0) @binding(3) var sds_nr: texture_2d<f32>;
+// SSR prepass reverse-Z device depth (depth 1.0 = near, 0.0 = background/sky).
+@group(0) @binding(4) var sds_depth: texture_2d<f32>;
+// Write-only filtered specular + passthrough confidence.
+@group(0) @binding(5) var sds_filtered: texture_storage_2d<rgba16float, write>;
+
+const SDS_TAP_COUNT: u32 = 8u;
+
+// Fixed two-ring unit-disk neighbourhood (four axis + four diagonal taps),
+// scaled by the anisotropic footprint at dispatch time. A static distribution
+// keeps the gather deterministic and bounded (<= `SDS_MAX_TAPS`).
+fn sds_tap_offset(i: u32) -> vec2<f32> {
+    switch i {
+        case 0u: {
+            return vec2<f32>(1.0, 0.0);
+        }
+        case 1u: {
+            return vec2<f32>(-1.0, 0.0);
+        }
+        case 2u: {
+            return vec2<f32>(0.0, 1.0);
+        }
+        case 3u: {
+            return vec2<f32>(0.0, -1.0);
+        }
+        case 4u: {
+            return vec2<f32>(0.5, 0.5);
+        }
+        case 5u: {
+            return vec2<f32>(-0.5, 0.5);
+        }
+        case 6u: {
+            return vec2<f32>(0.5, -0.5);
+        }
+        default: {
+            return vec2<f32>(-0.5, -0.5);
+        }
+    }
+}
+
+fn sds_params_from_config() -> SdsParams {
+    var params: SdsParams;
+    params.max_radius = sds_config.max_radius;
+    params.phi_depth = sds_config.phi_depth;
+    params.phi_normal = sds_config.phi_normal;
+    params.phi_roughness = sds_config.phi_roughness;
+    params.contact_hardening = sds_config.contact_hardening;
+    params.max_anisotropy = sds_config.max_anisotropy;
+    return params;
+}
+
+// Reconstruct the view-space position from framebuffer UV + reverse-Z depth,
+// identical to `spec_gi_reuse.wesl::sgr_reconstruct_view_position` so both
+// passes rebuild positions from the shared SSR depth consistently.
+fn sds_reconstruct_view_position(uv: vec2<f32>, device_depth: f32) -> vec3<f32> {
+    let ndc = vec3<f32>(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, device_depth);
+    let clip = vec4<f32>(ndc, 1.0);
+    let view = sds_config.view_from_clip * clip;
+    return view.xyz / view.w;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn spec_denoise_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= sds_config.width || id.y >= sds_config.height {
+        return;
+    }
+    let pixel = vec2<i32>(i32(id.x), i32(id.y));
+    let extent = vec2<f32>(f32(sds_config.width), f32(sds_config.height));
+    let max_coord = vec2<i32>(i32(sds_config.width) - 1, i32(sds_config.height) - 1);
+
+    let center_resolved = textureLoad(sds_resolved, pixel, 0);
+    let center_device_depth = textureLoad(sds_depth, pixel, 0).x;
+    if center_device_depth <= 0.0 {
+        // Background / sky: nothing to filter, pass the resolve through.
+        textureStore(sds_filtered, pixel, center_resolved);
+        return;
+    }
+
+    let params = sds_params_from_config();
+
+    let center_uv = (vec2<f32>(pixel) + vec2<f32>(0.5)) / extent;
+    let center_pos = sds_reconstruct_view_position(center_uv, center_device_depth);
+    let center_nr = textureLoad(sds_nr, pixel, 0);
+    let center_normal = sds_safe_normalize(center_nr.xyz * 2.0 - 1.0);
+    let center_roughness = clamp(center_nr.w, 0.0, 1.0);
+    let center_hit = textureLoad(sds_hit, pixel, 0).x;
+    let center_norm_hit = sds_normalize_hit_distance(center_hit, center_pos.z, center_roughness);
+    let center_tap = sds_make_tap(
+        center_resolved.xyz,
+        center_pos,
+        center_normal,
+        center_roughness,
+        center_norm_hit,
+    );
+
+    // Anisotropic, contact-hardened footprint. The major axis follows the
+    // surface normal's screen projection (the reflection footprint stretches
+    // along it at grazing angles); the minor axis is perpendicular.
+    let view_dir = sds_safe_normalize(-center_pos);
+    let n_dot_v = max(dot(center_normal, view_dir), 1.0e-3);
+    let radius = sds_blur_radius(center_roughness, center_norm_hit, params);
+    let aniso = sds_anisotropic_radii(radius, n_dot_v, params);
+
+    var major_dir = vec2<f32>(1.0, 0.0);
+    let nxy = center_normal.xy;
+    if dot(nxy, nxy) > 1.0e-12 {
+        major_dir = normalize(nxy);
+    }
+    let minor_dir = vec2<f32>(-major_dir.y, major_dir.x);
+
+    var neighbours: array<SdsTap, 8>;
+    var kernels: array<f32, 8>;
+    for (var i = 0u; i < SDS_TAP_COUNT; i = i + 1u) {
+        let o = sds_tap_offset(i);
+        let offset_px = major_dir * (o.x * aniso.x) + minor_dir * (o.y * aniso.y);
+        let raw = pixel + vec2<i32>(i32(round(offset_px.x)), i32(round(offset_px.y)));
+        let coord = clamp(raw, vec2<i32>(0, 0), max_coord);
+
+        let s_resolved = textureLoad(sds_resolved, coord, 0);
+        let s_depth = textureLoad(sds_depth, coord, 0).x;
+        let s_nr = textureLoad(sds_nr, coord, 0);
+        let s_normal = sds_safe_normalize(s_nr.xyz * 2.0 - 1.0);
+        let s_roughness = clamp(s_nr.w, 0.0, 1.0);
+        let s_uv = (vec2<f32>(coord) + vec2<f32>(0.5)) / extent;
+        var s_pos = center_pos;
+        if s_depth > 0.0 {
+            s_pos = sds_reconstruct_view_position(s_uv, s_depth);
+        }
+        let s_hit = textureLoad(sds_hit, coord, 0).x;
+        let s_norm_hit = sds_normalize_hit_distance(s_hit, s_pos.z, s_roughness);
+        neighbours[i] = sds_make_tap(s_resolved.xyz, s_pos, s_normal, s_roughness, s_norm_hit);
+        // Spatial Gaussian over the unit-disk offset; the bilateral edge-stops
+        // (depth/normal/roughness) are applied inside `sds_spatial_filter`.
+        kernels[i] = exp(-2.0 * dot(o, o));
+    }
+
+    let res = sds_spatial_filter(center_tap, 1.0, neighbours, kernels, SDS_TAP_COUNT, params);
+    textureStore(sds_filtered, pixel, vec4<f32>(res.color, center_resolved.w));
 }

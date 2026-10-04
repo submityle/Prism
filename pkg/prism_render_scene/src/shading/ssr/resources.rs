@@ -66,6 +66,11 @@ pub(crate) const SSR_COLOR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// so the reflected radiance keeps its range up to the composite.
 pub(crate) const SSR_OUT_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
+/// Per-pixel world-space hit distance (view units) the trace emits alongside
+/// `ssr_out`, consumed by the specular denoiser's spatial filter. A single
+/// scalar channel is enough; R16F keeps the bandwidth low.
+pub(crate) const SSR_HIT_FORMAT: TextureFormat = TextureFormat::R16Float;
+
 /// The two per-view SSR prepass textures, present only while SSR is enabled and
 /// the viewport size is known.
 #[derive(Component)]
@@ -110,6 +115,9 @@ pub(crate) struct ViewSsrTextures {
     /// composite reads instead of the raw noisy trace. Same single-mip,
     /// full-resolution wide-HDR layout as `ssr_out`.
     ssr_resolved: CachedTexture,
+    /// Per-pixel reflection hit distance (view units); R16F. The trace writes
+    /// it (storage) and the specular denoiser's spatial filter reads it.
+    ssr_hit: CachedTexture,
     pub(crate) size: bevy_math::UVec2,
 }
 
@@ -194,6 +202,12 @@ impl ViewSsrTextures {
     /// resolve pass writes it (storage) and the composite reads it (sampled).
     pub(crate) fn ssr_resolved_view(&self) -> &TextureView {
         &self.ssr_resolved.default_view
+    }
+
+    /// Storage/sampling view of the per-pixel reflection hit distance. The trace
+    /// writes it (storage) and the specular denoiser reads it (sampled).
+    pub(crate) fn ssr_hit_view(&self) -> &TextureView {
+        &self.ssr_hit.default_view
     }
 }
 
@@ -398,6 +412,23 @@ pub(crate) fn prepare_ssr_textures(
             },
         );
 
+        // Per-pixel reflection hit distance (view units): single-mip, full
+        // resolution, scalar R16F. The trace writes it (storage) and the
+        // specular denoiser's spatial filter reads it (sampled).
+        let ssr_hit = texture_cache.get(
+            &device,
+            TextureDescriptor {
+                label: Some("prism SSR hit distance"),
+                size: size.to_extents(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: SSR_HIT_FORMAT,
+                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        );
+
         commands.entity(entity).insert(ViewSsrTextures {
             scene_depth,
             view_normal,
@@ -410,6 +441,7 @@ pub(crate) fn prepare_ssr_textures(
             color_mip_count: mip_count,
             ssr_out,
             ssr_resolved,
+            ssr_hit,
             size,
         });
     }
@@ -432,6 +464,8 @@ mod tests {
         // The pyramid shares the device-depth encoding so a coarse cell's
         // stored maximum compares directly against reconstructed depth.
         assert_eq!(SSR_HZB_FORMAT, TextureFormat::R32Float);
+        // The reflection hit distance is a single scalar channel in view units.
+        assert_eq!(SSR_HIT_FORMAT, TextureFormat::R16Float);
     }
 
     #[test]

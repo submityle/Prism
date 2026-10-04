@@ -147,6 +147,10 @@ use super::{
         init_sky_transmittance_lut, init_sky_transmittance_pipeline,
         prepare_sky_transmittance_bind_group, sky_transmittance_lut_pass,
     },
+    spec_denoise::{
+        init_spec_denoise_spatial_pipeline, prepare_spec_denoise_bind_groups,
+        prepare_spec_denoise_resources, spec_denoise_spatial_pass,
+    },
     spec_gi::{
         init_spec_gi_composite_pipeline, init_spec_gi_reuse_pipeline,
         prepare_spec_gi_composite_bind_groups, prepare_spec_gi_reuse_bind_groups,
@@ -266,6 +270,7 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/spec_gi_reservoir.wesl");
         embedded_asset!(app, "../shaders/spec_gi_reuse.wesl");
         embedded_asset!(app, "../shaders/spec_gi_composite.wesl");
+        embedded_asset!(app, "../shaders/spec_denoise_spatial.wesl");
         embedded_asset!(app, "../shaders/ssgi.wesl");
         embedded_asset!(app, "../shaders/sky_multiscatter_lut.wesl");
         embedded_asset!(app, "../shaders/sky_transmittance_lut.wesl");
@@ -523,7 +528,11 @@ impl Plugin for PrismShadingPlugin {
             // prerequisites in resource prep.
             .add_systems(
                 RenderStartup,
-                (init_spec_gi_reuse_pipeline, init_spec_gi_composite_pipeline),
+                (
+                    init_spec_gi_reuse_pipeline,
+                    init_spec_gi_composite_pipeline,
+                    init_spec_denoise_spatial_pipeline,
+                ),
             )
             // Volumetric-cloud domain + per-view resource and bind-group
             // preparation. Self-contained (its own resident textures + view
@@ -705,13 +714,27 @@ impl Plugin for PrismShadingPlugin {
                         prepare_spec_gi_reuse_bind_groups
                             .after(prepare_spec_gi_reuse_resources)
                             .in_set(RenderSystems::PrepareBindGroups),
+                        // The spatial denoiser's filtered target allocates right
+                        // after the reuse resolve it reads (same gate), and its
+                        // per-view bind group binds after the reuse group so it
+                        // sees this frame's resolve.
+                        prepare_spec_denoise_resources
+                            .after(prepare_spec_gi_reuse_resources)
+                            .in_set(RenderSystems::PrepareResources),
+                        prepare_spec_denoise_bind_groups
+                            .after(prepare_spec_denoise_resources)
+                            .after(prepare_spec_gi_reuse_bind_groups)
+                            .in_set(RenderSystems::PrepareBindGroups),
                         // The energy-conserving composite's per-view group binds
-                        // the resolved specular target (after the reuse flip)
-                        // plus the colour-pyramid base copy and IBL specular; it
-                        // folds the glossy reflection into scene_color in the
-                        // Core3d node below under `enable_spec_gi`.
+                        // the denoised specular target (falling back to the raw
+                        // reuse resolve when the denoiser is disabled) plus the
+                        // colour-pyramid base copy and IBL specular; it folds the
+                        // glossy reflection into scene_color in the Core3d node
+                        // below under `enable_spec_gi`. Orders after the denoise
+                        // resources so the filtered view it may bind exists.
                         prepare_spec_gi_composite_bind_groups
                             .after(prepare_spec_gi_reuse_resources)
+                            .after(prepare_spec_denoise_resources)
                             .in_set(RenderSystems::PrepareBindGroups),
                     ),
                     // Nested to keep this Render tuple within Bevy's 20-element
@@ -1164,11 +1187,24 @@ impl Plugin for PrismShadingPlugin {
                     // `ssr_color_mips_pass`) and the resolved reuse target, so
                     // it orders after both; the SSR composite ordering keeps the
                     // two mutually-exclusive scene_color writers serialised.
-                    spec_gi_composite_pass
-                        .after(spec_gi_reuse_pass)
-                        .after(ssr_color_mips_pass)
-                        .after(ssr_composite_pass)
-                        .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    // Nested with the composite to keep this Core3d tuple
+                    // within Bevy's 20-element limit. The spatial denoiser runs
+                    // between the reuse resolve it filters and the composite that
+                    // consumes its filtered output: one screen-space dispatch
+                    // (ReBLUR-style anisotropic, contact-hardened, edge-aware
+                    // specular blur). No-op unless `enable_spec_gi` + the
+                    // SSR/visibility gate held in resource prep.
+                    (
+                        spec_denoise_spatial_pass
+                            .after(spec_gi_reuse_pass)
+                            .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                        spec_gi_composite_pass
+                            .after(spec_gi_reuse_pass)
+                            .after(spec_denoise_spatial_pass)
+                            .after(ssr_color_mips_pass)
+                            .after(ssr_composite_pass)
+                            .before(bevy_core_pipeline::Core3dSystems::MainPass),
+                    ),
                     ssgi_trace_pass
                         .after(ssr_color_mips_pass)
                         .after(ssr_hzb_pass)

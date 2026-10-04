@@ -47,7 +47,7 @@ use bevy_render::{
 use bevy_shader::Shader;
 
 use super::abi::{GpuSsrConfig, SSR_WORKGROUP_SIZE};
-use super::resources::{ViewSsrTextures, SSR_OUT_FORMAT};
+use super::resources::{ViewSsrTextures, SSR_HIT_FORMAT, SSR_OUT_FORMAT};
 
 /// GGX importance-sampled reflection rays traced per pixel.
 ///
@@ -77,7 +77,7 @@ pub(crate) struct SsrTracePipeline {
 /// Hi-Z pyramid, device depth and packed normal/roughness, all `textureLoad`ed),
 /// the *filterable* colour pyramid + its filtering sampler (sampled with an
 /// explicit LOD), then the write-only `rgba16float` reflection output.
-fn layout_entries() -> BindGroupLayoutEntries<6> {
+fn layout_entries() -> BindGroupLayoutEntries<7> {
     BindGroupLayoutEntries::sequential(
         ShaderStages::COMPUTE,
         (
@@ -87,6 +87,7 @@ fn layout_entries() -> BindGroupLayoutEntries<6> {
             texture_2d(TextureSampleType::Float { filterable: true }),
             sampler(SamplerBindingType::Filtering),
             texture_storage_2d(SSR_OUT_FORMAT, StorageTextureAccess::WriteOnly),
+            texture_storage_2d(SSR_HIT_FORMAT, StorageTextureAccess::WriteOnly),
         ),
     )
 }
@@ -160,6 +161,7 @@ pub(crate) fn prepare_ssr_trace_bind_groups(
                 textures.color_sampled_view(),
                 &pipeline.sampler,
                 textures.ssr_out_view(),
+                textures.ssr_hit_view(),
             )),
         );
         commands

@@ -9,6 +9,17 @@
 //! WESL transcription matches the golden `reproject` numerically rather than
 //! merely compiling. The spatial filter and history-clamp blocks arrive next.
 
+mod abi;
+mod bind_groups;
+mod dispatch;
+mod pipeline;
+mod resources;
+
+pub(crate) use bind_groups::prepare_spec_denoise_bind_groups;
+pub(crate) use dispatch::spec_denoise_spatial_pass;
+pub(crate) use pipeline::init_spec_denoise_spatial_pipeline;
+pub(crate) use resources::{prepare_spec_denoise_resources, ViewSpecDenoise};
+
 #[cfg(test)]
 mod reproject_tests;
 
