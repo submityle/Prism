@@ -600,6 +600,8 @@ pub mod second_order_work;
 pub use second_order_work::SecondOrderWork;
 pub mod fabric_reorientation;
 pub use fabric_reorientation::FabricReorientation;
+pub mod state_parameter;
+pub use state_parameter::StateParameter;
 
 /// A handle into a [`ShapeRegistry`].
 ///
