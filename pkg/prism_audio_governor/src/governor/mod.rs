@@ -45,6 +45,7 @@ pub mod hysteresis;
 pub mod importance;
 pub mod lod;
 pub mod power;
+pub mod resample_lod;
 pub mod report;
 
 use prism_audio_core::math::Sample;
