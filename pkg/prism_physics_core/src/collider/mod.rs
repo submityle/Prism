@@ -520,6 +520,8 @@ pub mod radial_distribution;
 pub use radial_distribution::RadialDistribution;
 pub mod angle_of_repose;
 pub use angle_of_repose::AngleOfRepose;
+pub mod porosity_profile;
+pub use porosity_profile::PorosityProfile;
 
 /// A handle into a [`ShapeRegistry`].
 ///
