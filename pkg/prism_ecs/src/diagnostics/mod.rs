@@ -72,6 +72,12 @@
 //!   on add with no teardown; teardown only in `on_remove`, which an
 //!   in-place overwrite skips) as concrete resource-leak smells
 //!   (design §16.6 / §12).
+//! * [`owning_group_packing`] — per owning group packing efficiency
+//!   (design §6 / §17): packed members vs. tracked entities, the
+//!   tracked-but-unpacked overhead between them, and a per-mille packing
+//!   density, flagging declared-but-empty or low-density groups that pay
+//!   registration / maintenance cost without earning branch-free iteration
+//!   (design §16.6 / §6 / §17).
 //! * [`time_travel`] — frame-indexed world snapshot record/seek (`std` only).
 //!
 //! All occupancy and change-volume figures describe the chunked Table-backed
@@ -88,6 +94,7 @@ pub mod frame_profile;
 pub mod hook_coverage;
 pub mod inspector;
 pub mod memory_footprint;
+pub mod owning_group_packing;
 pub mod profiler;
 pub mod relation_graph;
 pub mod relation_cycles;
@@ -112,6 +119,7 @@ pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
 pub use hook_coverage::{HookCoverageEntry, HookCoverageReport};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
 pub use memory_footprint::{ArchetypeMemoryEntry, MemoryFootprintReport};
+pub use owning_group_packing::{OwningGroupPackingEntry, OwningGroupPackingReport};
 pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
