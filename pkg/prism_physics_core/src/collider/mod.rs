@@ -544,6 +544,8 @@ pub mod nonaffine_displacement;
 pub use nonaffine_displacement::NonaffineField;
 pub mod force_chain_network;
 pub use force_chain_network::ForceChainNetwork;
+pub mod contact_stress;
+pub use contact_stress::ContactStress;
 
 /// A handle into a [`ShapeRegistry`].
 ///
