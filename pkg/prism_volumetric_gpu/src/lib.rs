@@ -157,6 +157,7 @@ pub mod color_gradient;
 pub mod color_temperature;
 pub mod composite_motion_vector;
 pub mod compression;
+pub mod concentric_disk;
 pub mod conductor_fresnel;
 pub mod conductor_multiscatter_bsdf;
 pub mod conservative_raster;
@@ -248,6 +249,8 @@ pub mod gpu_stream_append;
 pub mod gpu_timer_query;
 pub mod granular_dilatancy_law;
 pub mod granular_equation_of_state;
+pub mod granular_flow_regime;
+pub mod granular_froude;
 pub mod granular_mu_i_rheology;
 pub mod granular_transport_closure;
 pub mod gravity_wave;
@@ -473,6 +476,7 @@ pub mod ritter_bounding_sphere;
 pub mod rotational_contact_force;
 pub mod rough_dielectric_bsdf;
 pub mod sat_collision_2d;
+pub mod savage_number;
 pub mod scanline_polygon_fill;
 pub mod screen_space_reflection;
 pub mod sdf;
@@ -555,6 +559,7 @@ pub mod stability;
 pub mod stats_overlay;
 pub mod stencil_op;
 pub mod storm_vertical_profile;
+pub mod stress_invariants;
 pub mod subframe_spawn;
 pub mod sunset_inscatter_tint;
 pub mod sunset_reddening;
@@ -853,6 +858,7 @@ pub use composite_motion_vector::{
     CompositeMotionVectorQuery, GpuCompositeMotionVector, MotionVector,
 };
 pub use compression::{CompressionQuery, CompressionResult, GpuCompression};
+pub use concentric_disk::{ConcentricDiskQuery, ConcentricDiskResult, GpuConcentricDisk};
 pub use conductor_fresnel::{ConductorFresnelQuery, ConductorFresnelResult, GpuConductorFresnel};
 pub use conductor_multiscatter_bsdf::{
     ConductorMultiscatterBsdfQuery, ConductorMultiscatterBsdfResult, GpuConductorMultiscatterBsdf,
@@ -997,6 +1003,10 @@ pub use granular_dilatancy_law::{
 pub use granular_equation_of_state::{
     GpuGranularEquationOfState, GranularEquationOfStateQuery, GranularEquationOfStateResult,
 };
+pub use granular_flow_regime::{
+    GpuGranularFlowRegime, GranularFlowRegimeQuery, GranularFlowRegimeResult,
+};
+pub use granular_froude::{GpuGranularFroude, GranularFroudeQuery, GranularFroudeResult};
 pub use granular_mu_i_rheology::{
     GpuGranularMuIRheology, GranularMuIRheologyQuery, GranularMuIRheologyResult,
 };
@@ -1383,6 +1393,7 @@ pub use rotational_contact_force::{
 };
 pub use rough_dielectric_bsdf::{GpuRoughDielectric, RoughDielectricQuery, RoughDielectricResult};
 pub use sat_collision_2d::{GpuSatCollision2d, SatCollision2dQuery, SatCollision2dResult};
+pub use savage_number::{GpuSavageNumber, SavageNumberQuery, SavageNumberResult};
 pub use scanline_polygon_fill::{GpuScanlineFill, GpuScanlinePolygonFill, GpuSpan};
 pub use screen_space_reflection::{
     GpuScreenSpaceReflection, ScreenSpaceReflectionQuery, ScreenSpaceReflectionResult,
@@ -1515,6 +1526,7 @@ pub use stability::{GpuStability, GpuStabilityQuery, GpuStabilityResult};
 pub use stats_overlay::{GpuStatsOverlay, StatsOverlayQuery, StatsOverlayResult};
 pub use stencil_op::{GpuStencilOp, StencilOpQuery, StencilOpResult};
 pub use storm_vertical_profile::{GpuStormVerticalProfile, StormVerticalProfileQuery};
+pub use stress_invariants::{GpuStressInvariants, StressInvariantsQuery, StressInvariantsResult};
 pub use subframe_spawn::{GpuSubframeSpawn, SubframeSpawnQuery, SubframeSpawnResult};
 pub use sunset_inscatter_tint::{GpuSunsetInscatterTint, InscatterTint, SunsetInscatterTintQuery};
 pub use sunset_reddening::{GpuSunsetReddening, SunsetReddeningQuery};
