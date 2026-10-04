@@ -12,6 +12,8 @@
 //!   that converges for under-, critically- and over-damped regimes.
 //! - [`Timeline`] / [`Keyframe`]: a sorted keyframe timeline with per-segment
 //!   easing.
+//! - [`HermiteCurve`] / [`FloatKeyframe`]: a smooth float curve that passes
+//!   through every key with Catmull-Rom auto-tangents (C1 continuous).
 //! - [`Tween`] / [`Transition`]: a time-driven tween and an enter/exit
 //!   transition helper.
 //!
@@ -29,6 +31,7 @@ pub mod choreography;
 pub mod driver;
 pub mod easing;
 pub mod lerp;
+pub mod spline;
 pub(crate) mod math;
 pub mod spring;
 pub mod timeline;
@@ -37,5 +40,6 @@ pub use choreography::{Choreography, Track};
 pub use driver::{Transition, TransitionPhase, Tween};
 pub use easing::{Easing, StepPosition};
 pub use lerp::Lerp;
+pub use spline::{FloatKeyframe, HermiteCurve};
 pub use spring::{Spring, SpringState};
 pub use timeline::{Keyframe, Timeline};
