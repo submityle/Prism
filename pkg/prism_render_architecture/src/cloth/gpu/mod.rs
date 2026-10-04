@@ -22,8 +22,31 @@
 //!
 //! Everything here is pure integer bookkeeping with no `GPU` handles, no floats
 //! and no wall clock, so the whole `GPU` schedule is deterministic and
-//! `CPU`-testable. The numerical passes themselves are authored in `WESL` and
-//! mirror the `CPU` golden reference byte-for-byte.
+//! `CPU`-testable.
+//!
+//! # Single source of truth (no double-implementation)
+//!
+//! This module never re-derives any cloth-solver math. The one authoritative
+//! algorithm lives in [`prism_physics_core`]`::soft`; the sibling `CPU` cloth
+//! modules ([`super::dynamics`], [`super::constraints`], [`super::collision`],
+//! [`super::bending`], …) are thin render-side façades that delegate every
+//! numeric step to it. The `WESL` numerical passes this schedule dispatches
+//! (authored in `prism_render_scene`'s `shaders/cloth_*.wesl`) are a *verified
+//! binding* of that same golden, not an independent implementation: each pass
+//! is pinned to the `CPU` golden by a parity test in
+//! `prism_render_scene::cloth` (`*_parity`). Integer bookkeeping — cell
+//! assignment, buffer strides, dispatch order — is held exact; the float
+//! projection/collision passes match within a tight tolerance (`GPU` fused
+//! multiply-add and div/sqrt rounding), the same parity model the physics
+//! engine's own GPU backend uses.
+//!
+//! The render frame-graph `WESL` path here and the physics engine's standalone
+//! `wgpu` compute backend (`prism_physics_gpu::cloth`, authored in `WGSL`)
+//! are therefore two runtime bindings of the one `prism_physics_core` golden —
+//! one driven inside the renderer's GPU scene, one for headless/physics-only
+//! simulation — rather than two competing solvers. New GPU cloth passes must be
+//! added by binding to that golden (and its parity harness), never by hand-
+//! porting fresh solver arithmetic into either shader language.
 
 pub mod buffers;
 pub mod kernels;
