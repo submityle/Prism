@@ -106,6 +106,7 @@ pub mod bspline_patch;
 pub mod bspline_surface;
 pub mod bvh;
 pub mod camera;
+pub mod capillary_force_at_gap;
 pub mod capillary_max_force;
 pub mod capillary_reduced_radius;
 pub mod capillary_rupture_distance;
@@ -142,6 +143,8 @@ pub mod cloth_wind_force;
 pub mod cloud_coverage_remap;
 pub mod cloud_shadow_modulation;
 pub mod cohen_sutherland_clip;
+pub mod cohesive_envelope_traction;
+pub mod cohesive_zone_damage;
 pub mod collision;
 pub mod color_grade_lut;
 pub mod color_gradient;
@@ -172,6 +175,8 @@ pub mod density_delta;
 pub mod depth_downsample;
 pub mod depth_linearize;
 pub mod depth_of_field;
+pub mod diameter_midpoint;
+pub mod diameter_radius;
 pub mod dielectric_energy_compensation;
 pub mod display_tonemap_target;
 pub mod distance_field_shadow;
@@ -254,6 +259,7 @@ pub mod heap_sort_u32;
 pub mod heat_distortion;
 pub mod height_fog;
 pub mod heightfield_cell;
+pub mod hertz_effective_modulus;
 pub mod hilbert_curve;
 pub mod histogram_equalize;
 pub mod hue_shift;
@@ -708,6 +714,9 @@ pub use bspline_patch::{BsplinePatchQuery, BsplinePatchResult, GpuBsplinePatch};
 pub use bspline_surface::{BsplineSurfaceQuery, BsplineSurfaceResult, GpuBsplineSurface};
 pub use bvh::{BvhQuery, BvhResult, GpuBvh};
 pub use camera::{CameraQuery, CameraResult, GpuCamera};
+pub use capillary_force_at_gap::{
+    CapillaryForceAtGapQuery, CapillaryForceAtGapResult, GpuCapillaryForceAtGap,
+};
 pub use capillary_max_force::{
     CapillaryMaxForceQuery, CapillaryMaxForceResult, GpuCapillaryMaxForce,
 };
@@ -781,6 +790,12 @@ pub use cohen_sutherland_clip::{
     ClipSegmentQuery, ClipSegmentResult, GpuCohenSutherlandClip, OUTCODE_BOTTOM, OUTCODE_INSIDE,
     OUTCODE_LEFT, OUTCODE_RIGHT, OUTCODE_TOP,
 };
+pub use cohesive_envelope_traction::{
+    CohesiveEnvelopeTractionQuery, CohesiveEnvelopeTractionResult, GpuCohesiveEnvelopeTraction,
+};
+pub use cohesive_zone_damage::{
+    CohesiveZoneDamageQuery, CohesiveZoneDamageResult, GpuCohesiveZoneDamage,
+};
 pub use collision::{CollisionQuery, CollisionResult, GpuCollision};
 pub use color_grade_lut::{ColorGradeLutQuery, ColorGradeLutResult, GpuColorGradeLut};
 pub use color_gradient::{ColorGradientQuery, ColorGradientSample, GpuColorGradient};
@@ -823,6 +838,8 @@ pub use density_delta::{CarveBrush, DensityDeltaQuery, GpuDensityDelta};
 pub use depth_downsample::{DepthDownsampleQuery, GpuDepthDownsample};
 pub use depth_linearize::{DepthLinearizeQuery, DepthLinearizeResult, GpuDepthLinearize};
 pub use depth_of_field::{DepthOfFieldQuery, DepthOfFieldSample, GpuDepthOfField};
+pub use diameter_midpoint::{DiameterMidpointQuery, DiameterMidpointResult, GpuDiameterMidpoint};
+pub use diameter_radius::{DiameterRadiusQuery, DiameterRadiusResult, GpuDiameterRadius};
 pub use dielectric_energy_compensation::{
     DielectricEnergyQuery, DielectricEnergyResult, GpuDielectricEnergy,
 };
@@ -951,6 +968,9 @@ pub use heap_sort_u32::{GpuHeapSort, GpuHeapSortU32, HeapSortU32Query};
 pub use heat_distortion::{GpuHeatDistortion, HeatQuery, HeatResult};
 pub use height_fog::{GpuHeightFog, HeightFogQuery};
 pub use heightfield_cell::{GpuHeightfieldCell, HeightfieldCellQuery, HeightfieldCellResult};
+pub use hertz_effective_modulus::{
+    GpuHertzEffectiveModulus, HertzEffectiveModulusQuery, HertzEffectiveModulusResult,
+};
 pub use hilbert_curve::{GpuHilbertCurve, MAX_ORDER};
 pub use histogram_equalize::{
     GpuHistogramEqualize, HistogramEqualizeQuery, HistogramEqualizeResult,
