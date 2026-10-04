@@ -334,6 +334,11 @@ pub use tet_fem_camclay_force_assembly::{
     assemble_camclay_forces, rest_camclay_states, total_camclay_elastic_potential_energy,
     CamClayAssembly,
 };
+pub mod tet_fem_drucker_prager_plasticity;
+pub use tet_fem_drucker_prager_plasticity::{
+    return_map_drucker_prager, DruckerPragerModel, DruckerPragerState, DruckerPragerStep,
+    DruckerPragerYield,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
