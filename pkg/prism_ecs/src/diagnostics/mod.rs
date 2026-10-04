@@ -141,6 +141,15 @@
 //!   plus the two streaming consistency gaps the join exposes — entities in
 //!   non-resident cells and entities stranded in untracked cells
 //!   (design §16.6 / §13.1 / §17; `partition` feature).
+//! * [`floating_origin_precision`] — 64-bit floating-origin rebase
+//!   precision budget audit (design §13.3): a power-of-two ring ladder
+//!   reporting the exact `f32` ULP available at each distance from the
+//!   active origin (flagging the first ring that no longer resolves a
+//!   caller-supplied target), an analytic safe radius (`target × 2^23`) in
+//!   metres and cells, and an optional per-entity rebase census that
+//!   measures each `(cell, local)` sample's rebased magnitude, resolution
+//!   and whether its local offset has drifted out of its cell
+//!   (design §16.6 / §13.3; `partition` feature).
 //! * [`prefab_inheritance`] — prefab / `IsA` inheritance shape
 //!   (design §16.3): per-instance chain depth and resolved-component
 //!   census (overridden vs. inherited vs. own), per-template fan-in for
@@ -168,6 +177,8 @@ pub mod churn_cost;
 pub mod component_distribution;
 pub mod component_memory;
 pub mod determinism_readiness;
+#[cfg(feature = "partition")]
+pub mod floating_origin_precision;
 pub mod frame_profile;
 #[cfg(feature = "gpu_resident")]
 pub mod gpu_batch_efficiency;
@@ -208,6 +219,10 @@ pub use component_distribution::{ComponentDistributionEntry, ComponentDistributi
 pub use component_memory::{ComponentMemoryEntry, ComponentMemoryReport};
 pub use determinism_readiness::{
     DeterminismClass, DeterminismReadinessEntry, DeterminismReadinessReport,
+};
+#[cfg(feature = "partition")]
+pub use floating_origin_precision::{
+    FloatingOriginPrecisionAudit, PrecisionRingEntry, RebaseSampleAudit,
 };
 pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
 #[cfg(feature = "gpu_resident")]
