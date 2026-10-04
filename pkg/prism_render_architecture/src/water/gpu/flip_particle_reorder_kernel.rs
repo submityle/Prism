@@ -93,7 +93,8 @@ pub fn dispatch_flip_particle_reorder(
 mod tests {
     use super::super::super::flip_sort::{counting_sort_particles, MacCellGrid};
     use super::super::super::kernels::{DispatchDomain, WaterKernel};
-    use super::super::super::Vec3;
+    use super::super::super::{Vec3, EPS};
+    use super::super::flip_mac_p2g_kernel::{dispatch_mac_p2g, FlipP2GParams};
     use super::*;
 
     const F: usize = FLIP_REORDER_PARTICLE_FLOATS;
@@ -242,5 +243,170 @@ mod tests {
         let b = dispatch_flip_particle_reorder(&pool, &[], params);
         assert!(a.is_empty());
         assert_eq!(a, b);
+    }
+
+    /// Packs `positions`/`velocities` and the three `APIC` affine rows into the
+    /// 20-lane `FLIP`/`APIC` record layout the `MAC` P2G kernel reads, marking
+    /// every record active. Lane map: 0-2 position, 3 active flag, 4-6 velocity,
+    /// 8-10 / 12-14 / 16-18 the three affine rows (7/11/15/19 stay padding).
+    fn packed_flip_pool(positions: &[Vec3], velocities: &[Vec3], affine: &[[Vec3; 3]]) -> Vec<f32> {
+        let n = positions.len();
+        let mut pool = vec![0.0f32; n * F];
+        for i in 0..n {
+            let base = i * F;
+            pool[base] = positions[i].x;
+            pool[base + 1] = positions[i].y;
+            pool[base + 2] = positions[i].z;
+            pool[base + 3] = 1.0; // active
+            pool[base + 4] = velocities[i].x;
+            pool[base + 5] = velocities[i].y;
+            pool[base + 6] = velocities[i].z;
+            let rows = affine[i];
+            pool[base + 8] = rows[0].x;
+            pool[base + 9] = rows[0].y;
+            pool[base + 10] = rows[0].z;
+            pool[base + 12] = rows[1].x;
+            pool[base + 13] = rows[1].y;
+            pool[base + 14] = rows[1].z;
+            pool[base + 16] = rows[2].x;
+            pool[base + 17] = rows[2].y;
+            pool[base + 18] = rows[2].z;
+        }
+        pool
+    }
+
+    #[test]
+    fn p2g_scatter_is_invariant_under_cell_sort_reorder() {
+        // Payoff proof (`CPU` twin): running `MAC` P2G over the cell-sorted pool
+        // must deposit the same momentum/mass grid as running it over the
+        // original pool. Scatter is an unordered sum, so a verbatim gather into
+        // cell-major order can only change float summation order, never the
+        // physical result. This is the sandbox-verifiable equivalence that
+        // justifies feeding the reordered pool into P2G for memory locality
+        // (the gather-side G2P payoff needs a de-permutation and is deliberately
+        // left out, as it is not verifiable without a device).
+        let sort_grid = MacCellGrid {
+            origin: Vec3::new(0.0, 0.0, 0.0),
+            dx: 1.0,
+            nx: 4,
+            ny: 4,
+            nz: 4,
+        };
+        // Eight distinct in-grid particles (every one inside `[0, 4)^3`, so the
+        // counting sort keeps all of them and `sorted_indices` is a true
+        // permutation of `0..n`), with varied velocities and affine rows.
+        let positions = [
+            Vec3::new(0.3, 0.7, 1.2),
+            Vec3::new(3.6, 3.1, 0.4),
+            Vec3::new(1.9, 2.4, 3.3),
+            Vec3::new(2.2, 0.1, 2.8),
+            Vec3::new(0.8, 3.9, 1.5),
+            Vec3::new(3.3, 1.6, 2.1),
+            Vec3::new(1.1, 1.1, 1.1),
+            Vec3::new(2.7, 2.9, 0.9),
+        ];
+        let velocities = [
+            Vec3::new(1.0, -0.5, 0.25),
+            Vec3::new(-0.75, 0.5, 1.5),
+            Vec3::new(0.5, 2.0, -1.0),
+            Vec3::new(-1.25, -0.25, 0.75),
+            Vec3::new(2.0, 1.0, -0.5),
+            Vec3::new(-0.5, -1.5, 0.5),
+            Vec3::new(0.25, 0.75, 1.25),
+            Vec3::new(1.5, -1.0, -0.75),
+        ];
+        let affine = [
+            [
+                Vec3::new(0.1, 0.0, 0.0),
+                Vec3::new(0.0, 0.2, 0.0),
+                Vec3::new(0.0, 0.0, 0.3),
+            ],
+            [
+                Vec3::new(0.0, 0.1, 0.0),
+                Vec3::new(0.2, 0.0, 0.0),
+                Vec3::new(0.0, 0.3, 0.0),
+            ],
+            [
+                Vec3::new(0.0, 0.0, 0.1),
+                Vec3::new(0.0, 0.2, 0.0),
+                Vec3::new(0.3, 0.0, 0.0),
+            ],
+            [
+                Vec3::new(-0.1, 0.0, 0.0),
+                Vec3::new(0.0, -0.2, 0.0),
+                Vec3::new(0.0, 0.0, -0.3),
+            ],
+            [
+                Vec3::new(0.15, 0.0, 0.0),
+                Vec3::new(0.0, 0.25, 0.0),
+                Vec3::new(0.0, 0.0, 0.35),
+            ],
+            [
+                Vec3::new(0.0, 0.15, 0.0),
+                Vec3::new(0.25, 0.0, 0.0),
+                Vec3::new(0.0, 0.35, 0.0),
+            ],
+            [
+                Vec3::new(0.05, 0.05, 0.05),
+                Vec3::new(0.05, 0.05, 0.05),
+                Vec3::new(0.05, 0.05, 0.05),
+            ],
+            [
+                Vec3::new(-0.15, 0.0, 0.0),
+                Vec3::new(0.0, 0.25, 0.0),
+                Vec3::new(0.0, 0.0, -0.35),
+            ],
+        ];
+        let n = positions.len();
+        let pool = packed_flip_pool(&positions, &velocities, &affine);
+
+        // Golden cell-sort order; all particles are in-grid, so this is a
+        // bijection and `sorted_count == n`.
+        let order = counting_sort_particles(sort_grid, &positions);
+        assert_eq!(order.sorted_indices.len(), n);
+        // The permutation is genuinely a reordering (not an identity no-op), so
+        // the invariance below is a meaningful test.
+        let identity: Vec<u32> = (0..n as u32).collect();
+        assert_ne!(order.sorted_indices, identity);
+        let mut as_set = order.sorted_indices.clone();
+        as_set.sort_unstable();
+        assert_eq!(as_set, identity, "order must be a permutation of 0..n");
+
+        let reordered = dispatch_flip_particle_reorder(
+            &pool,
+            &order.sorted_indices,
+            FlipReorderParams {
+                sorted_count: n as u32,
+                src_count: n as u32,
+            },
+        );
+        assert_eq!(reordered.len(), n * F);
+
+        let p2g_params = FlipP2GParams {
+            grid_nx: 4,
+            grid_ny: 4,
+            grid_nz: 4,
+            particle_count: n as u32,
+            dx: 1.0,
+            use_affine: true,
+        };
+        let grid_original = dispatch_mac_p2g(&pool, p2g_params);
+        let grid_reordered = dispatch_mac_p2g(&reordered, p2g_params);
+        assert_eq!(grid_original.len(), grid_reordered.len());
+        assert!(!grid_original.is_empty());
+        // A reordered pool must actually deposit something, else the invariance
+        // would hold trivially over an all-zero grid.
+        assert!(grid_reordered.iter().any(|&v| v.abs() > EPS));
+
+        // Equivalence up to float reassociation. A wrong permutation would
+        // diverge by `O(deposited magnitude)`, orders of magnitude above this
+        // drift bound; summation-reorder noise stays far below it.
+        const MAX_SCATTER_DRIFT: f32 = 1e-4;
+        for (face, (&a, &b)) in grid_original.iter().zip(grid_reordered.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < MAX_SCATTER_DRIFT,
+                "face accumulator {face} diverged: original {a}, reordered {b}"
+            );
+        }
     }
 }
