@@ -8,6 +8,9 @@
 //! during capture, so they are safe to drive from a diagnostics system.
 //!
 //! * [`inspector`] — archetype / chunk occupancy snapshots.
+//! * [`archetype_fragmentation`] — archetype-explosion and chunk
+//!   internal-fragmentation accounting with a worst-occupancy-first
+//!   ranking (design §16.6 / §22 risk #5).
 //! * [`change_volume`] — dirty-chunk and changed/added-cell accounting that
 //!   quantifies the design headline "成本 ∝ 变化量".
 //! * [`frame_profile`] — per-system change-volume ranking folded from a
@@ -27,6 +30,7 @@
 //! storage (design §6); `SparseSet` components are not laid out in archetype
 //! chunks and are therefore outside these reports.
 
+pub mod archetype_fragmentation;
 pub mod change_volume;
 pub mod frame_profile;
 pub mod inspector;
@@ -37,6 +41,7 @@ pub mod step_inspector;
 #[cfg(feature = "std")]
 pub mod time_travel;
 
+pub use archetype_fragmentation::{ArchetypeFragmentEntry, ArchetypeFragmentationReport};
 pub use change_volume::{ArchetypeChangeReport, ChangeReport};
 pub use frame_profile::{FrameChangeProfile, SystemChangeEntry};
 pub use inspector::{ArchetypeReport, OccupancyStats, WorldReport};
