@@ -1107,3 +1107,113 @@ fn prism_temperature_to_linear(kelvin: f32) -> vec4<f32> {\n\
     let b = 0.0556434 * big_x - 0.2040259 * big_y + 1.0572252 * big_z;\n\
     return vec4<f32>(max(r, 0.0), max(g, 0.0), max(b, 0.0), 1.0);\n\
 }\n";
+
+/// Single-sourced Perlin "improved" gradient-noise fragment (2D/3D), mirroring
+/// the CPU reference [`crate::noise::Perlin::get2`]/[`get3`](crate::noise::Perlin::get3).
+///
+/// The permutation table is **uploaded, not rebuilt** on the device: the twin
+/// binds the exact `[u32; 512]` from
+/// [`Perlin::permutation_table`](crate::noise::Perlin::permutation_table) at
+/// `@binding(1)`, so every integer hash lookup is bit-exact and the two sides
+/// always dot the identical gradient. Only the quintic fade, the gradient dot
+/// products, and the lerps are floating point, so parity is a small tolerance
+/// (fast-math last-ULP), not bit-exact.
+///
+/// The fragment declares the perm storage binding (needed by
+/// `prism_perm_hash`); the compute wrapper supplies the count uniform
+/// (`@binding(0)`), the sample input (`@binding(2)`), the output
+/// (`@binding(3)`), and `main`. Both the get2 and get3 kernels share this
+/// fragment verbatim.
+pub const WGSL_PERLIN: &str = "\
+@group(0) @binding(1) var<storage, read> prism_perm: array<u32>;\n\
+\n\
+fn prism_perm_hash(i: i32) -> u32 {\n\
+    return prism_perm[u32(i & 511)];\n\
+}\n\
+\n\
+fn prism_perlin_fade(t: f32) -> f32 {\n\
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);\n\
+}\n\
+\n\
+fn prism_perlin_lerp(a: f32, b: f32, t: f32) -> f32 {\n\
+    return a + t * (b - a);\n\
+}\n\
+\n\
+fn prism_perlin_grad2(hash: u32, x: f32, y: f32) -> f32 {\n\
+    let h = hash & 7u;\n\
+    let d = 0.7071067811865476;\n\
+    var gx = -d;\n\
+    var gy = -d;\n\
+    switch (h) {\n\
+        case 0u: { gx = 1.0; gy = 0.0; }\n\
+        case 1u: { gx = -1.0; gy = 0.0; }\n\
+        case 2u: { gx = 0.0; gy = 1.0; }\n\
+        case 3u: { gx = 0.0; gy = -1.0; }\n\
+        case 4u: { gx = d; gy = d; }\n\
+        case 5u: { gx = -d; gy = d; }\n\
+        case 6u: { gx = d; gy = -d; }\n\
+        default: { gx = -d; gy = -d; }\n\
+    }\n\
+    return gx * x + gy * y;\n\
+}\n\
+\n\
+fn prism_perlin_grad3(hash: u32, x: f32, y: f32, z: f32) -> f32 {\n\
+    let h = hash & 15u;\n\
+    var u = y;\n\
+    if (h < 8u) { u = x; }\n\
+    var v = z;\n\
+    if (h < 4u) { v = y; } else if (h == 12u || h == 14u) { v = x; }\n\
+    var uu = u;\n\
+    if ((h & 1u) != 0u) { uu = -u; }\n\
+    var vv = v;\n\
+    if ((h & 2u) != 0u) { vv = -v; }\n\
+    return uu + vv;\n\
+}\n\
+\n\
+fn prism_perlin_get2(x: f32, y: f32) -> f32 {\n\
+    let xi_f = floor(x);\n\
+    let yi_f = floor(y);\n\
+    let xf = x - xi_f;\n\
+    let yf = y - yi_f;\n\
+    let xi = i32(xi_f);\n\
+    let yi = i32(yi_f);\n\
+    let a = i32(prism_perm_hash(xi)) + yi;\n\
+    let b = i32(prism_perm_hash(xi + 1)) + yi;\n\
+    let u = prism_perlin_fade(xf);\n\
+    let v = prism_perlin_fade(yf);\n\
+    let aa = prism_perm_hash(a);\n\
+    let ab = prism_perm_hash(a + 1);\n\
+    let ba = prism_perm_hash(b);\n\
+    let bb = prism_perm_hash(b + 1);\n\
+    let x1 = prism_perlin_lerp(prism_perlin_grad2(aa, xf, yf), prism_perlin_grad2(ba, xf - 1.0, yf), u);\n\
+    let x2 = prism_perlin_lerp(prism_perlin_grad2(ab, xf, yf - 1.0), prism_perlin_grad2(bb, xf - 1.0, yf - 1.0), u);\n\
+    return prism_perlin_lerp(x1, x2, v) * 1.4142135623730951;\n\
+}\n\
+\n\
+fn prism_perlin_get3(x: f32, y: f32, z: f32) -> f32 {\n\
+    let xi_f = floor(x);\n\
+    let yi_f = floor(y);\n\
+    let zi_f = floor(z);\n\
+    let xf = x - xi_f;\n\
+    let yf = y - yi_f;\n\
+    let zf = z - zi_f;\n\
+    let xi = i32(xi_f);\n\
+    let yi = i32(yi_f);\n\
+    let zi = i32(zi_f);\n\
+    let u = prism_perlin_fade(xf);\n\
+    let v = prism_perlin_fade(yf);\n\
+    let w = prism_perlin_fade(zf);\n\
+    let a = i32(prism_perm_hash(xi)) + yi;\n\
+    let b = i32(prism_perm_hash(xi + 1)) + yi;\n\
+    let aa = i32(prism_perm_hash(a)) + zi;\n\
+    let ab = i32(prism_perm_hash(a + 1)) + zi;\n\
+    let ba = i32(prism_perm_hash(b)) + zi;\n\
+    let bb = i32(prism_perm_hash(b + 1)) + zi;\n\
+    let x1 = prism_perlin_lerp(prism_perlin_grad3(prism_perm_hash(aa), xf, yf, zf), prism_perlin_grad3(prism_perm_hash(ba), xf - 1.0, yf, zf), u);\n\
+    let x2 = prism_perlin_lerp(prism_perlin_grad3(prism_perm_hash(ab), xf, yf - 1.0, zf), prism_perlin_grad3(prism_perm_hash(bb), xf - 1.0, yf - 1.0, zf), u);\n\
+    let y1 = prism_perlin_lerp(x1, x2, v);\n\
+    let x3 = prism_perlin_lerp(prism_perlin_grad3(prism_perm_hash(aa + 1), xf, yf, zf - 1.0), prism_perlin_grad3(prism_perm_hash(ba + 1), xf - 1.0, yf, zf - 1.0), u);\n\
+    let x4 = prism_perlin_lerp(prism_perlin_grad3(prism_perm_hash(ab + 1), xf, yf - 1.0, zf - 1.0), prism_perlin_grad3(prism_perm_hash(bb + 1), xf - 1.0, yf - 1.0, zf - 1.0), u);\n\
+    let y2 = prism_perlin_lerp(x3, x4, v);\n\
+    return prism_perlin_lerp(y1, y2, w) * 1.0;\n\
+}\n";

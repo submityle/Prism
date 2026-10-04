@@ -69,7 +69,20 @@ impl Perlin {
     /// Create a generator from a seed.
     #[inline]
     pub fn new(seed: u64) -> Self {
-        Self { perm: Permutation::new(seed) }
+        Self {
+            perm: Permutation::new(seed),
+        }
+    }
+
+    /// Returns this generator's 512-entry permutation table.
+    ///
+    /// A GPU twin uploads the identical table so its integer hashing selects
+    /// the exact same gradients as this CPU reference; only the fade/gradient
+    /// floating-point arithmetic then differs within a small tolerance.
+    #[inline]
+    #[must_use]
+    pub fn permutation_table(&self) -> [u8; 512] {
+        self.perm.table_bytes()
     }
 
     /// Sample 2D noise at `(x, y)`.
@@ -127,9 +140,16 @@ impl Perlin {
         let x2 = lerp(g(ab, xf, yf - 1.0, zf), g(bb, xf - 1.0, yf - 1.0, zf), u);
         let y1 = lerp(x1, x2, v);
 
-        let x3 = lerp(g(aa + 1, xf, yf, zf - 1.0), g(ba + 1, xf - 1.0, yf, zf - 1.0), u);
-        let x4 =
-            lerp(g(ab + 1, xf, yf - 1.0, zf - 1.0), g(bb + 1, xf - 1.0, yf - 1.0, zf - 1.0), u);
+        let x3 = lerp(
+            g(aa + 1, xf, yf, zf - 1.0),
+            g(ba + 1, xf - 1.0, yf, zf - 1.0),
+            u,
+        );
+        let x4 = lerp(
+            g(ab + 1, xf, yf - 1.0, zf - 1.0),
+            g(bb + 1, xf - 1.0, yf - 1.0, zf - 1.0),
+            u,
+        );
         let y2 = lerp(x3, x4, v);
 
         lerp(y1, y2, w) * Self::SCALE3

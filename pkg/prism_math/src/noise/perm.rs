@@ -43,4 +43,13 @@ impl Permutation {
     pub fn hash(&self, i: i32) -> u8 {
         self.table[(i & 511) as usize]
     }
+
+    /// Returns a copy of the full 512-entry table so a GPU twin can upload the
+    /// identical permutation and keep its integer lookups bit-exact with this
+    /// CPU reference (only the fade/gradient floating-point math then needs a
+    /// tolerance).
+    #[inline]
+    pub(crate) fn table_bytes(&self) -> [u8; 512] {
+        self.table
+    }
 }
