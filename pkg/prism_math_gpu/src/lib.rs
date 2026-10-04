@@ -35,6 +35,7 @@ extern crate alloc;
 
 pub mod buffer;
 pub mod context;
+pub mod f16;
 pub mod frustum_cull;
 pub mod morton;
 pub mod octahedral;
@@ -48,6 +49,7 @@ pub mod skinning;
 pub mod view;
 
 pub use context::{GpuContext, block_on};
+pub use f16::GpuF16Pack;
 pub use frustum_cull::GpuFrustumCull;
 pub use morton::GpuMorton;
 pub use octahedral::GpuOctahedral;

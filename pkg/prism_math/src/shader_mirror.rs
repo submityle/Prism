@@ -735,3 +735,33 @@ fn prism_ray_triangle(origin: vec3<f32>, dir: vec3<f32>, a: vec3<f32>, b: vec3<f
     out.normal = normal;\n\
     return out;\n\
 }\n";
+
+/// Single-sourced WGSL for the half-precision (`binary16`) pack/unpack twin
+/// (§24.1 / §24.3 f16 bandwidth path).
+///
+/// `prism_f16_pack2` folds two `f32` lanes into one `u32` holding two
+/// `binary16` values (low half = `a`, high half = `b`), and `prism_f16_unpack2`
+/// widens that `u32` back to two `f32`s. The body is the WGSL builtins
+/// `pack2x16float` / `unpack2x16float`, which the spec defines as
+/// round-to-nearest-even — the same rounding as the CPU reference
+/// [`prism_math::f16::F16::from_f32`]. Wrapping them in named helpers keeps the
+/// device entry point identical in shape to the other twins and gives the host
+/// a single call site to compose.
+///
+/// Parity contract (honest boundary): for finite values inside the `f16`
+/// **normal** range (`|x|` in `[2^-14, 65504]`) the packed 16 bits match the
+/// CPU `F16::from_f32` bit-for-bit, because both round to nearest even. Two
+/// cases are deliberately *not* asserted bit-exact: **subnormals** (`|x| <
+/// 2^-14`), which Metal and other GPUs may flush to zero, and **overflow**
+/// (`|x| > 65504`) plus `NaN`, which the WGSL spec leaves implementation-defined
+/// for `pack2x16float`. Those are documented as a reconstruction-tolerance
+/// boundary rather than a bit contract. The `f16 -> f32` unpack direction is
+/// exact on both sides.
+pub const WGSL_F16: &str = "\
+fn prism_f16_pack2(a: f32, b: f32) -> u32 {\n\
+    return pack2x16float(vec2<f32>(a, b));\n\
+}\n\
+\n\
+fn prism_f16_unpack2(bits: u32) -> vec2<f32> {\n\
+    return unpack2x16float(bits);\n\
+}\n";
