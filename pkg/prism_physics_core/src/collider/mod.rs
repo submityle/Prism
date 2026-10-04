@@ -592,6 +592,8 @@ pub mod richardson_number;
 pub use richardson_number::{RichardsonNumber, RichardsonRegime};
 pub mod matsuoka_nakai_invariant;
 pub use matsuoka_nakai_invariant::MatsuokaNakaiInvariant;
+pub mod principal_strain_energy_density;
+pub use principal_strain_energy_density::PrincipalStrainEnergyDensity;
 
 /// A handle into a [`ShapeRegistry`].
 ///
