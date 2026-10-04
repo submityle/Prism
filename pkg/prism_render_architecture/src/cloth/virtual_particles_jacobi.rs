@@ -19,7 +19,7 @@
 //! lives once in
 //! [`prism_physics_core::soft::collision::resolve_self_collision_virtual_jacobi`]
 //! and its augment twin. The render-facing [`ClothParticle`]-based entry points
-//! below convert to the physics SoA layout, delegate, and write the solved
+//! below convert to the physics `SoA` layout, delegate, and write the solved
 //! positions back, so the CPU golden the `WESL` twin mirrors is byte-for-byte
 //! the physics solver's output.
 
@@ -35,7 +35,7 @@ use prism_physics_core::soft::collision as physics_collision;
 /// then apply); repeated calls converge to the same separated state the
 /// Gauss-Seidel core reaches, without ever depending on evaluation order.
 ///
-/// The particles are converted to the physics SoA layout (pinned particles map
+/// The particles are converted to the physics `SoA` layout (pinned particles map
 /// to inverse mass `0`), resolved by
 /// [`prism_physics_core::soft::collision::resolve_self_collision_virtual_jacobi`],
 /// and the solved positions are written back. A non-positive `cell_size` or
@@ -69,7 +69,7 @@ pub fn resolve_self_collision_virtual_jacobi(
 ///
 /// Delegates to
 /// [`prism_physics_core::soft::collision::resolve_self_collision_virtual_augment_jacobi`]
-/// after the same SoA conversion as [`resolve_self_collision_virtual_jacobi`].
+/// after the same `SoA` conversion as [`resolve_self_collision_virtual_jacobi`].
 pub fn resolve_self_collision_virtual_augment_jacobi(
     particles: &mut [ClothParticle],
     virtuals: &[VirtualParticle],
@@ -128,7 +128,10 @@ mod tests {
         let mut b = base;
         resolve_self_collision_virtual_jacobi(&mut b, &virtuals, 1.0, 0.2);
         for i in 0..base.len() {
-            assert_eq!(a[i].position, b[i].position, "Jacobi pass must be deterministic");
+            assert_eq!(
+                a[i].position, b[i].position,
+                "Jacobi pass must be deterministic"
+            );
         }
     }
 

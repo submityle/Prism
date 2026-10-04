@@ -24,7 +24,7 @@
 //! [`prism_physics_core::soft::collision`]. The [`VirtualParticle`] and
 //! [`VirtualParticlePattern`] data types are re-exported from physics so there
 //! is a single definition, and the render-facing [`ClothParticle`]-based
-//! entry points below simply convert to the physics SoA layout, delegate, and
+//! entry points below simply convert to the physics `SoA` layout, delegate, and
 //! write the solved positions back.
 //!
 //! Passing an empty virtual-particle slice makes
@@ -75,7 +75,7 @@ pub fn generate_virtual_particles(
 /// self-collision pass; use [`resolve_self_collision_virtual_augment`] to layer
 /// it on top of the friction point-to-point pass.
 ///
-/// The particles are converted to the physics SoA layout (pinned particles map
+/// The particles are converted to the physics `SoA` layout (pinned particles map
 /// to inverse mass `0`), resolved by
 /// [`prism_physics_core::soft::collision::resolve_self_collision_virtual`], and
 /// the solved positions are written back. A non-positive `cell_size` or
@@ -113,7 +113,7 @@ pub fn resolve_self_collision_virtual(
 ///
 /// Delegates to
 /// [`prism_physics_core::soft::collision::resolve_self_collision_virtual_augment`]
-/// after the same SoA conversion as [`resolve_self_collision_virtual`].
+/// after the same `SoA` conversion as [`resolve_self_collision_virtual`].
 pub fn resolve_self_collision_virtual_augment(
     particles: &mut [ClothParticle],
     virtuals: &[VirtualParticle],
@@ -136,8 +136,8 @@ pub fn resolve_self_collision_virtual_augment(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::Vec3;
+    use super::*;
 
     fn particle(x: f32, y: f32, z: f32, inverse_mass: f32) -> ClothParticle {
         ClothParticle::new(Vec3::new(x, y, z), inverse_mass)
