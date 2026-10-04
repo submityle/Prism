@@ -47,8 +47,6 @@ use glam::Vec3 as GlamVec3;
 /// Squared lengths below this treat a vector as numerically zero, so
 /// normalization never divides by (almost) zero.
 const EPS_LEN_SQ: f32 = 1.0e-24;
-/// Segment lengths below this are skipped to avoid dividing by (almost) zero.
-const EPS_LEN: f32 = 1.0e-12;
 /// Threshold on `dot(a, b)` of two unit vectors below which
 /// [`Quat::from_min_rotation`] treats the inputs as antiparallel and uses the
 /// orthogonal-axis fallback instead of the half-vector formula.
