@@ -496,3 +496,143 @@ fn prism_oct_unpack_snorm(bits: u32) -> vec3<f32> {\n\
     let y = prism_oct_unsnorm16((bits >> 16u) & 0xffffu);\n\
     return prism_oct_decode(vec2<f32>(x, y));\n\
 }\n";
+/// Single-sourced WGSL for ray/primitive intersection, mirroring the CPU
+/// queries [`crate::intersect::ray_sphere`] / [`crate::intersect::ray_aabb`].
+/// Each kernel returns a [`PrismRayHit`]-shaped result (hit flag, ray parameter
+/// `t`, world hit point, and surface normal oriented against the ray) — the
+/// GPU side of picking / spatial queries / batched sphere-casts feeding
+/// GPU-driven selection and collision pre-passes. The analytic quadratic
+/// (sphere) and slab method (AABB) are reproduced exactly, so the device
+/// agrees with the CPU within fast-math rounding on `t`/point and matches the
+/// discrete hit flag and axis-aligned normal for geometry with a comfortable
+/// margin from a tangent/edge grazing case (the standard conservative caveat;
+/// the AABB slab bounds use a large finite sentinel in place of CPU infinity,
+/// identical for finite well-separated geometry).
+pub const WGSL_RAYCAST: &str = "\
+struct PrismRayHit {\n\
+    hit: f32,\n\
+    t: f32,\n\
+    point: vec3<f32>,\n\
+    normal: vec3<f32>,\n\
+};\n\
+\n\
+fn prism_ray_sphere(origin: vec3<f32>, dir: vec3<f32>, center: vec3<f32>, radius: f32) -> PrismRayHit {\n\
+    var out: PrismRayHit;\n\
+    out.hit = 0.0;\n\
+    out.t = 0.0;\n\
+    out.point = vec3<f32>(0.0, 0.0, 0.0);\n\
+    out.normal = vec3<f32>(0.0, 0.0, 0.0);\n\
+    let oc = origin - center;\n\
+    let a = dot(dir, dir);\n\
+    if (a <= 0.0) { return out; }\n\
+    let b = 2.0 * dot(oc, dir);\n\
+    let c = dot(oc, oc) - radius * radius;\n\
+    let disc = b * b - 4.0 * a * c;\n\
+    if (disc < 0.0) { return out; }\n\
+    let sqrt_disc = sqrt(disc);\n\
+    let inv2a = 1.0 / (2.0 * a);\n\
+    let t0 = (-b - sqrt_disc) * inv2a;\n\
+    let t1 = (-b + sqrt_disc) * inv2a;\n\
+    var t = 0.0;\n\
+    var inside = false;\n\
+    if (t0 >= 0.0) {\n\
+        t = t0;\n\
+        inside = false;\n\
+    } else if (t1 >= 0.0) {\n\
+        t = t1;\n\
+        inside = true;\n\
+    } else {\n\
+        return out;\n\
+    }\n\
+    let point = origin + dir * t;\n\
+    var normal = (point - center) * (1.0 / radius);\n\
+    if (inside) { normal = -normal; }\n\
+    out.hit = 1.0;\n\
+    out.t = t;\n\
+    out.point = point;\n\
+    out.normal = normal;\n\
+    return out;\n\
+}\n\
+\n\
+fn prism_ray_aabb(origin: vec3<f32>, dir: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> PrismRayHit {\n\
+    var out: PrismRayHit;\n\
+    out.hit = 0.0;\n\
+    out.t = 0.0;\n\
+    out.point = vec3<f32>(0.0, 0.0, 0.0);\n\
+    out.normal = vec3<f32>(0.0, 0.0, 0.0);\n\
+    var t_enter = -1e30;\n\
+    var t_exit = 1e30;\n\
+    var enter_axis = 0u;\n\
+    var enter_sign = 1.0;\n\
+    for (var axis = 0u; axis < 3u; axis = axis + 1u) {\n\
+        let d = dir[axis];\n\
+        if (abs(d) <= 1.0e-20) {\n\
+            if (origin[axis] < lo[axis] || origin[axis] > hi[axis]) { return out; }\n\
+            continue;\n\
+        }\n\
+        let inv = 1.0 / d;\n\
+        var ta = (lo[axis] - origin[axis]) * inv;\n\
+        var tb = (hi[axis] - origin[axis]) * inv;\n\
+        var sign = -1.0;\n\
+        if (ta > tb) {\n\
+            let tmp = ta;\n\
+            ta = tb;\n\
+            tb = tmp;\n\
+            sign = 1.0;\n\
+        }\n\
+        if (ta > t_enter) {\n\
+            t_enter = ta;\n\
+            enter_axis = axis;\n\
+            enter_sign = sign;\n\
+        }\n\
+        if (tb < t_exit) { t_exit = tb; }\n\
+        if (t_enter > t_exit) { return out; }\n\
+    }\n\
+    if (t_exit < 0.0) { return out; }\n\
+    var t = 0.0;\n\
+    var axis_out = 0u;\n\
+    var sign_out = 1.0;\n\
+    if (t_enter >= 0.0) {\n\
+        t = t_enter;\n\
+        axis_out = enter_axis;\n\
+        sign_out = enter_sign;\n\
+    } else {\n\
+        var exit_axis = 0u;\n\
+        var exit_t = 1e30;\n\
+        var exit_sign = 1.0;\n\
+        for (var axis = 0u; axis < 3u; axis = axis + 1u) {\n\
+            let d = dir[axis];\n\
+            if (abs(d) <= 1.0e-20) { continue; }\n\
+            let inv = 1.0 / d;\n\
+            let ta = (lo[axis] - origin[axis]) * inv;\n\
+            let tb = (hi[axis] - origin[axis]) * inv;\n\
+            var far = tb;\n\
+            var s = 1.0;\n\
+            if (ta > tb) {\n\
+                far = ta;\n\
+                s = -1.0;\n\
+            }\n\
+            if (far < exit_t) {\n\
+                exit_t = far;\n\
+                exit_axis = axis;\n\
+                exit_sign = s;\n\
+            }\n\
+        }\n\
+        t = exit_t;\n\
+        axis_out = exit_axis;\n\
+        sign_out = exit_sign;\n\
+    }\n\
+    var normal = vec3<f32>(0.0, 0.0, 0.0);\n\
+    if (axis_out == 0u) {\n\
+        normal.x = sign_out;\n\
+    } else if (axis_out == 1u) {\n\
+        normal.y = sign_out;\n\
+    } else {\n\
+        normal.z = sign_out;\n\
+    }\n\
+    out.hit = 1.0;\n\
+    out.t = t;\n\
+    out.point = origin + dir * t;\n\
+    out.normal = normal;\n\
+    return out;\n\
+}\n";
