@@ -50,6 +50,7 @@ pub mod protocol;
 pub mod result;
 pub mod stack;
 pub mod style;
+pub mod track_sizing;
 pub mod tree;
 pub mod wrap;
 
@@ -65,6 +66,9 @@ pub use stack::StackProtocol;
 pub use style::{
     AlignContent, AlignItems, Display, FlexDirection, FlexWrap, JustifyContent, LayoutStyle,
     Position,
+};
+pub use track_sizing::{
+    repeat, resolve_track_sizes, TrackBreadth, TrackContent, TrackSizingFunction,
 };
 pub use tree::{LayoutTree, NodeId};
 pub use wrap::WrapProtocol;
