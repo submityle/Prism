@@ -191,8 +191,10 @@ pub mod draine_phase_blend;
 pub mod draw_pass_buffers;
 pub mod drucker_prager_friction_alpha;
 pub mod dual_lobe_phase;
+pub mod dual_number;
 pub mod dual_quaternion;
 pub mod ear_clip_triangulate;
+pub mod easing;
 pub mod edge_detect;
 pub mod emitter;
 pub mod emitter_pass_buffers;
@@ -281,6 +283,7 @@ pub mod hertz_reduced_radius;
 pub mod hilbert_curve;
 pub mod histogram_equalize;
 pub mod hoek_brown_yield_surface;
+pub mod hsl_hsv;
 pub mod hue_shift;
 pub mod imposter_fade;
 pub mod indirect_dispatch;
@@ -401,6 +404,7 @@ pub mod phase;
 pub mod philox_counter;
 pub mod pipeline_layout;
 pub mod pixel_reconstruction_filter;
+pub mod planckian_locus;
 pub mod plane_aabb_classify;
 pub mod plane_clip;
 pub mod plane_line_intersect;
@@ -419,6 +423,7 @@ pub mod premultiply_alpha;
 pub mod principal_curvature_gaussian;
 pub mod principal_curvature_mean;
 pub mod probe_grid_sample;
+pub mod projection;
 pub mod pyrocumulus_buoyancy;
 pub mod quadric_add;
 pub mod quadric_error;
@@ -554,6 +559,7 @@ pub mod sphere_sweep;
 pub mod spherical_harmonics_rotate;
 pub mod spline;
 pub mod sprite_stretch;
+pub mod srgb_transfer;
 pub mod sss_wrap;
 pub mod stability;
 pub mod stats_overlay;
@@ -909,8 +915,10 @@ pub use drucker_prager_friction_alpha::{
     GpuDruckerPragerFrictionAlpha,
 };
 pub use dual_lobe_phase::{DualLobePhaseQuery, GpuDualLobePhase};
+pub use dual_number::{DualQuery, DualResult, GpuDual};
 pub use dual_quaternion::{DualQuatTransformQuery, GpuDualQuaternion};
 pub use ear_clip_triangulate::{EarClipAnswer, EarClipQuery, GpuEarClipTriangulate};
+pub use easing::{EasingQuery, EasingResult, GpuEasing};
 pub use edge_detect::{EdgeDetectOutput, EdgeDetectQuery, EdgeFrame, EdgeResponse, GpuEdgeDetect};
 pub use emitter::{EmitterQuery, EmitterResult, GpuEmitter};
 pub use emitter_pass_buffers::{
@@ -1063,6 +1071,7 @@ pub use histogram_equalize::{
 pub use hoek_brown_yield_surface::{
     GpuHoekBrownYieldSurface, HoekBrownYieldSurfaceQuery, HoekBrownYieldSurfaceResult,
 };
+pub use hsl_hsv::{GpuHslHsv, HslHsvQuery, HslHsvResult};
 pub use hue_shift::{GpuHueShift, HueShiftQuery, HueShiftResult};
 pub use imposter_fade::{GpuImposterFade, ImposterFadeQuery};
 pub use indirect_dispatch::{
@@ -1267,6 +1276,7 @@ pub use phase::{GpuPhaseEvaluator, PhaseQuery};
 pub use philox_counter::{GpuPhiloxCounter, PhiloxCounterQuery, PhiloxCounterResult};
 pub use pipeline_layout::{GpuPipelineLayout, GpuPipelineLayoutQuery, GpuPipelineLayoutResult};
 pub use pixel_reconstruction_filter::{GpuPixelFilter, PixelFilterQuery, PixelFilterResult};
+pub use planckian_locus::{GpuPlanckianLocus, PlanckianLocusQuery, PlanckianLocusResult};
 pub use plane_aabb_classify::{GpuPlaneAabbClassify, PlaneAabbClassifyQuery};
 pub use plane_clip::{
     GpuPlaneClip, PlaneClipQuery, PlaneClipResult, SIDE_INSIDE, SIDE_ON, SIDE_OUTSIDE,
@@ -1299,6 +1309,7 @@ pub use principal_curvature_mean::{
     GpuPrincipalCurvatureMean, PrincipalCurvatureMeanQuery, PrincipalCurvatureMeanResult,
 };
 pub use probe_grid_sample::{GpuProbeGridSample, ProbeSampleQuery, PROBE_BANDS};
+pub use projection::{GpuProjection, ProjectionQuery, ProjectionResult};
 pub use pyrocumulus_buoyancy::{GpuPyrocumulusBuoyancy, PyrocumulusBuoyancyQuery};
 pub use quadric_add::{GpuQuadricAdd, QuadricAddQuery, QuadricAddResult};
 pub use quadric_error::{GpuQuadricError, QuadricErrorQuery, QuadricErrorResult};
@@ -1521,6 +1532,7 @@ pub use spherical_harmonics_rotate::{
 };
 pub use spline::{GpuSpline, SplineEvalQuery, SplineEvalResult};
 pub use sprite_stretch::{GpuSpriteStretch, SpriteStretchQuery, SpriteStretchResult};
+pub use srgb_transfer::{GpuSrgbTransfer, SrgbTransferQuery, SrgbTransferResult};
 pub use sss_wrap::{GpuSssWrap, SssWrapQuery, SssWrapSample};
 pub use stability::{GpuStability, GpuStabilityQuery, GpuStabilityResult};
 pub use stats_overlay::{GpuStatsOverlay, StatsOverlayQuery, StatsOverlayResult};
