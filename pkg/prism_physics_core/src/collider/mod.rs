@@ -534,6 +534,8 @@ pub mod size_segregation;
 pub use size_segregation::SizeSegregation;
 pub mod granular_rheology;
 pub use granular_rheology::{DilatancyLaw, GranularRheology};
+pub mod kinetic_theory;
+pub use kinetic_theory::GranularKineticState;
 
 /// A handle into a [`ShapeRegistry`].
 ///
