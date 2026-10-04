@@ -21,9 +21,9 @@
 //! # Relationship
 //!
 //! Implements [`prism_audio_spatial::propagation::PropagationBackend`] by
-//! composing [`crate::direct_path`], [`crate::reflection_path`], and
-//! [`crate::diffraction_path`] over a [`crate::scene::AcousticScene`] and a
-//! [`crate::config::GeometricConfig`].
+//! composing [`crate::direct_path`], [`crate::reflection_path`],
+//! [`crate::diffraction_path`], and [`crate::coupled_path`] over a
+//! [`crate::scene::AcousticScene`] and a [`crate::config::GeometricConfig`].
 
 use alloc::vec::Vec;
 use core::cmp::Ordering;
@@ -33,6 +33,7 @@ use prism_audio_spatial::occlusion::OcclusionFactors;
 use prism_audio_spatial::propagation::{PropagationBackend, PropagationPath, PropagationSummary};
 
 use crate::config::GeometricConfig;
+use crate::coupled_path::resolve_coupled_paths;
 use crate::diffraction_path::resolve_diffraction;
 use crate::direct_path::resolve_direct;
 use crate::higher_order_diffraction::resolve_higher_order_diffraction;
@@ -126,6 +127,18 @@ impl PropagationBackend for GeometricBackend {
             ));
             if self.config.max_diffraction_order >= 2 {
                 secondary.extend(resolve_higher_order_diffraction(
+                    &self.scene,
+                    listener,
+                    emitter,
+                    &self.config,
+                    base_distance,
+                ));
+            }
+            // A coupled reflect-and-bend arrival needs the direct line at least
+            // partly shadowed (same gate as the pure bend) and both mechanisms
+            // enabled; it is the second-order rung above the lone bounce/bend.
+            if self.config.coupled_enabled {
+                secondary.extend(resolve_coupled_paths(
                     &self.scene,
                     listener,
                     emitter,

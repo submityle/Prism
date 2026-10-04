@@ -69,6 +69,12 @@ pub const MAX_SUPPORTED_DIFFRACTION_ORDER: usize = 3;
 /// keep the original single-edge behaviour.
 pub const DEFAULT_MAX_DIFFRACTION_ORDER: usize = 1;
 
+/// Default budget for coupled reflection-and-diffraction arrivals retained per
+/// query (strongest kept). Each coupled arrival pairs one specular bounce with
+/// one shadow-edge bend, so the combinatorial cost is bounded independently of
+/// the pure-reflection and pure-diffraction budgets.
+pub const DEFAULT_MAX_COUPLED_PATHS: usize = 8;
+
 /// Which edge-diffraction model the backend evaluates for shadowed arrivals.
 ///
 /// Both models consume the same resolved detour geometry (the least-detour
@@ -126,6 +132,14 @@ pub struct GeometricConfig {
     pub diffraction_freq_hz: Sample,
     /// Which diffraction model to evaluate for shadowed arrivals.
     pub diffraction_model: DiffractionModel,
+    /// Whether to trace coupled reflection-and-diffraction arrivals (a specular
+    /// bounce followed by an edge bend, or an edge bend followed by a bounce).
+    /// Opt-in through [`GeometricConfig::with_coupled_paths`]; defaults to
+    /// `false` so existing callers keep the original reflection/diffraction set.
+    pub coupled_enabled: bool,
+    /// Maximum coupled reflection-and-diffraction arrivals retained per query
+    /// (strongest kept), evaluated only when [`Self::coupled_enabled`] is set.
+    pub max_coupled_paths: usize,
 }
 
 impl GeometricConfig {
@@ -147,6 +161,8 @@ impl GeometricConfig {
             sample_rate,
             diffraction_freq_hz: DEFAULT_DIFFRACTION_FREQ_HZ,
             diffraction_model: DiffractionModel::Maekawa,
+            coupled_enabled: false,
+            max_coupled_paths: DEFAULT_MAX_COUPLED_PATHS,
         }
     }
 
@@ -211,6 +227,37 @@ impl GeometricConfig {
     #[must_use]
     pub fn with_diffraction_model(mut self, model: DiffractionModel) -> Self {
         self.diffraction_model = model;
+        self
+    }
+
+    /// Returns a copy with coupled reflection-and-diffraction tracing enabled.
+    ///
+    /// A coupled arrival reflects off one face and bends over one diffracting
+    /// edge (in either order), the next-order route beyond a lone bounce or a
+    /// lone bend. Enabling this complements, and never duplicates, the pure
+    /// reflections from [`crate::reflection_path`] and the pure diffractions
+    /// from [`crate::diffraction_path`].
+    #[inline]
+    #[must_use]
+    pub fn with_coupled_paths(mut self) -> Self {
+        self.coupled_enabled = true;
+        self
+    }
+
+    /// Returns a copy with coupled reflection-and-diffraction tracing disabled.
+    #[inline]
+    #[must_use]
+    pub fn without_coupled_paths(mut self) -> Self {
+        self.coupled_enabled = false;
+        self
+    }
+
+    /// Returns a copy with the coupled-arrival budget set to `max` (`0` disables
+    /// coupled arrivals even when [`Self::coupled_enabled`] is set).
+    #[inline]
+    #[must_use]
+    pub fn with_max_coupled_paths(mut self, max: usize) -> Self {
+        self.max_coupled_paths = max;
         self
     }
 
@@ -299,5 +346,21 @@ mod tests {
         );
         let cfg = GeometricConfig::new(48_000).with_max_diffraction_order(2);
         assert_eq!(cfg.max_diffraction_order, 2);
+    }
+
+    #[test]
+    fn coupled_paths_default_off_and_are_opt_in() {
+        let cfg = GeometricConfig::new(48_000);
+        assert!(!cfg.coupled_enabled);
+        assert_eq!(cfg.max_coupled_paths, super::DEFAULT_MAX_COUPLED_PATHS);
+        let on = cfg.with_coupled_paths();
+        assert!(on.coupled_enabled);
+        assert!(!on.without_coupled_paths().coupled_enabled);
+    }
+
+    #[test]
+    fn coupled_budget_is_settable() {
+        let cfg = GeometricConfig::new(48_000).with_max_coupled_paths(3);
+        assert_eq!(cfg.max_coupled_paths, 3);
     }
 }

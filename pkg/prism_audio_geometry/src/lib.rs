@@ -48,6 +48,11 @@
 //!   bends with taut-path relaxation, complementing (never duplicating) the
 //!   single-edge bend; enabled by
 //!   [`config::GeometricConfig::with_max_diffraction_order`].
+//! - [`coupled_path`] resolves the second-order arrival that reflects off one
+//!   face **and** bends over one edge, in either order, reusing the image-source
+//!   and least-detour primitives so it stays consistent with the lone bounce and
+//!   lone bend it extends; enabled by
+//!   [`config::GeometricConfig::with_coupled_paths`].
 //! - [`backend`] assembles the above into [`backend::GeometricBackend`], the
 //!   [`PropagationBackend`](prism_audio_spatial::propagation::PropagationBackend)
 //!   implementation that fills the caller's bounded path buffer.
@@ -80,6 +85,7 @@ extern crate alloc;
 
 pub mod backend;
 pub mod config;
+pub mod coupled_path;
 pub mod diffraction_edges;
 pub mod diffraction_path;
 pub mod direct_path;

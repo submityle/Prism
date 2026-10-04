@@ -148,8 +148,11 @@ pub fn resolve_reflections(
 
 /// Whether `p` lies within triangle `a`, `b`, `c` (coplanar barycentric test
 /// with a small positive slack so shared edges belong to both faces).
+///
+/// Shared with [`crate::coupled_path`], which validates that a coupled bounce's
+/// reflection point lands on its reflecting face with the identical test.
 #[must_use]
-fn point_in_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
+pub(crate) fn point_in_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
     let v0 = c - a;
     let v1 = b - a;
     let v2 = p - a;
