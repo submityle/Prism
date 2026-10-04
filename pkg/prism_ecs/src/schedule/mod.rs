@@ -47,6 +47,7 @@ pub mod phase;
 pub mod schedules;
 pub mod set;
 pub mod state;
+pub mod stepping;
 
 pub use ambiguity::{Ambiguities, Ambiguity};
 pub use condition::{
@@ -63,9 +64,13 @@ pub use phase::Phase;
 pub use schedules::Schedules;
 pub use set::{SystemSet, SystemSetId};
 pub use state::{apply_state_transition, in_state, NextState, OnEnter, OnExit, State, States};
+pub use stepping::{ContinueReport, ContinueStop, StepReport, Stepping};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod stepping_tests;
 
 #[cfg(all(test, feature = "multi_thread"))]
 mod parallel_tests;
