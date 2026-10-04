@@ -564,6 +564,8 @@ pub mod finite_strain;
 pub use finite_strain::FiniteStrain;
 pub mod savage_number;
 pub use savage_number::{SavageNumber, SavageRegime};
+pub mod granular_froude;
+pub use granular_froude::{FroudeRegime, GranularFroude};
 
 /// A handle into a [`ShapeRegistry`].
 ///
