@@ -536,6 +536,8 @@ pub mod granular_rheology;
 pub use granular_rheology::{DilatancyLaw, GranularRheology};
 pub mod kinetic_theory;
 pub use kinetic_theory::GranularKineticState;
+pub mod flowability;
+pub use flowability::{FlowCharacter, PowderFlowability};
 
 /// A handle into a [`ShapeRegistry`].
 ///
