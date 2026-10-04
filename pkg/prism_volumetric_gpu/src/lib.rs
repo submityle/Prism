@@ -95,6 +95,7 @@ pub mod bloom_threshold;
 pub mod bloom_upsample;
 pub mod boids;
 pub mod bounding_capsule_axis;
+pub mod bounding_capsule_contains;
 pub mod bounding_capsule_volume;
 pub mod bounding_sphere_contains;
 pub mod bounds;
@@ -103,6 +104,7 @@ pub mod bspline_patch;
 pub mod bspline_surface;
 pub mod bvh;
 pub mod camera;
+pub mod capillary_reduced_radius;
 pub mod capsule_capsule_closest;
 pub mod capsule_plane_contact;
 pub mod capsule_sdf;
@@ -379,6 +381,10 @@ pub mod powder;
 pub mod premultiply_alpha;
 pub mod probe_grid_sample;
 pub mod pyrocumulus_buoyancy;
+pub mod quadric_error;
+pub mod quadric_from_plane;
+pub mod quadric_from_triangle;
+pub mod quadric_optimal_point;
 pub mod quality_decision;
 pub mod quaternion_nlerp;
 pub mod quaternion_rotate;
@@ -675,6 +681,9 @@ pub use boids::{BoidsQuery, BoidsResult, GpuBoids, MAX_NEIGHBORS};
 pub use bounding_capsule_axis::{
     BoundingCapsuleAxisQuery, BoundingCapsuleAxisResult, GpuBoundingCapsuleAxis,
 };
+pub use bounding_capsule_contains::{
+    BoundingCapsuleContainsQuery, BoundingCapsuleContainsResult, GpuBoundingCapsuleContains,
+};
 pub use bounding_capsule_volume::{
     BoundingCapsuleVolumeQuery, BoundingCapsuleVolumeResult, GpuBoundingCapsuleVolume,
 };
@@ -687,6 +696,9 @@ pub use bspline_patch::{BsplinePatchQuery, BsplinePatchResult, GpuBsplinePatch};
 pub use bspline_surface::{BsplineSurfaceQuery, BsplineSurfaceResult, GpuBsplineSurface};
 pub use bvh::{BvhQuery, BvhResult, GpuBvh};
 pub use camera::{CameraQuery, CameraResult, GpuCamera};
+pub use capillary_reduced_radius::{
+    CapillaryReducedRadiusQuery, CapillaryReducedRadiusResult, GpuCapillaryReducedRadius,
+};
 pub use capsule_capsule_closest::{
     CapsuleClosestQuery, CapsuleClosestResult, GpuCapsuleCapsuleClosest,
 };
@@ -1132,6 +1144,14 @@ pub use powder::{GpuPowder, PowderQuery};
 pub use premultiply_alpha::GpuPremultiplyAlpha;
 pub use probe_grid_sample::{GpuProbeGridSample, ProbeSampleQuery, PROBE_BANDS};
 pub use pyrocumulus_buoyancy::{GpuPyrocumulusBuoyancy, PyrocumulusBuoyancyQuery};
+pub use quadric_error::{GpuQuadricError, QuadricErrorQuery, QuadricErrorResult};
+pub use quadric_from_plane::{GpuQuadricFromPlane, QuadricFromPlaneQuery, QuadricFromPlaneResult};
+pub use quadric_from_triangle::{
+    GpuQuadricFromTriangle, QuadricFromTriangleQuery, QuadricFromTriangleResult,
+};
+pub use quadric_optimal_point::{
+    GpuQuadricOptimalPoint, QuadricOptimalPointQuery, QuadricOptimalPointResult,
+};
 pub use quality_decision::{GpuQualityDecision, QualityDecisionQuery, QualityDecisionResult};
 pub use quaternion_nlerp::{GpuQuaternionNlerp, QuaternionNlerpQuery, QuaternionNlerpResult};
 pub use quaternion_rotate::{GpuQuaternionRotate, QuatRotateQuery, QuatRotateResult};
