@@ -344,7 +344,7 @@ pkg/prism_utils/
 
 本章补齐顶级数据结构 / 内存库在真实 AAA 项目里缺一不可的能力。均 feature/档位门控，默认不付成本；与前文的 SmallVec/竞技场/slotmap/SwissTable 内核互补。
 
-### 24.1 作用域分配器栈与竞技场组合
+### 24.1 作用域分配器栈与竞技场组合 —— ✅ 部分已交付（`alloc_::scope::ScopeStack`）
 
 单一帧分配器不够：引擎需要**嵌套生命周期**的内存域：
 
@@ -355,7 +355,7 @@ pkg/prism_utils/
 | 持久池（Pool） | 跨帧，显式释放 | 对象实例、组件 |
 | 双缓冲（DoubleBuffer） | 跨 2 帧 | 需被下帧读的数据 |
 
-- **分配器栈**：进入作用域 push 一个 bump 竞技场，退出 pop 整体 reset（零逐对象析构开销），嵌套安全。
+- **分配器栈**：进入作用域 push 一个 bump 竞技场，退出 pop 整体 reset（零逐对象析构开销），嵌套安全。 **（✅ 已交付：`alloc_::scope::ScopeStack` + RAII `Scope` guard + `ScopeMark`——`scope()` 捕获游标、guard drop/`rewind` O(1) 回退、`high_water` 水位、rewind 永不前移游标；实现 `Allocator` trait，可注入任意容器。）**
 - **分配器注入**：容器泛型携带分配器参数，同一 `Vec` 可绑帧/池/全局分配器，调用点决定内存域。
 - 供 `prism_tasks` 每 worker 帧分配器、ECS 命令缓冲、渲染每帧瞬态数据。
 
@@ -405,4 +405,4 @@ pkg/prism_utils/
 
 ### 24.8 诚实边界
 
-本章全部为 PLANNED 设计目标，无代码。**24.1 作用域分配器 + 24.4 热冷/SoA 布局**是 ECS/tasks/渲染最先依赖的能力，建议随 M2/M3 优先落地；24.3 安全加固随 debug 工具链落地；24.5 可重定位容器随 `prism_asset` 烘焙落地；24.6 内容寻址随烘焙/去重落地；24.2 无锁进阶、24.7 确定性进阶随 M5 落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+**24.1 作用域分配器已交付**（`alloc_::scope::ScopeStack`），**24.3 内存安全加固已交付**（`alloc_::guard::GuardedAllocator`）；其余为 PLANNED。**24.1 作用域分配器 + 24.4 热冷/SoA 布局**是 ECS/tasks/渲染最先依赖的能力，建议随 M2/M3 优先落地；24.5 可重定位容器随 `prism_asset` 烘焙落地；24.6 内容寻址随烘焙/去重落地；24.2 无锁进阶、24.7 确定性进阶随 M5 落地。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
