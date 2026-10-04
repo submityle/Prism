@@ -70,6 +70,7 @@ pub mod f16;
 pub mod interval;
 pub mod octahedral;
 pub mod shader_mirror;
+pub mod projection;
 pub mod soa;
 pub mod spatial;
 pub mod spherical;
@@ -90,6 +91,12 @@ pub mod intersect;
 pub use affine::Affine3;
 pub use backend::Backend;
 pub use mat::{Mat2, Mat3, Mat4};
+pub use projection::{
+    look_at_lh, look_at_rh, look_to_lh, look_to_rh, orthographic_lh, orthographic_rh,
+    orthographic_rh_gl, perspective_infinite_reverse_z_rh, perspective_infinite_rh,
+    perspective_lh, perspective_lh_gl, perspective_reverse_z_rh, perspective_rh,
+    perspective_rh_gl,
+};
 pub use quat::Quat;
 pub use vec::{vec2, vec3, vec3a, vec4, Vec2, Vec3, Vec3A, Vec4};
 
