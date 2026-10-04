@@ -52,7 +52,7 @@
 
 use super::feedback::PageDemand;
 use super::feedback_decode::{decode_feedback, FeedbackTextureDesc};
-use super::indirection::GpuPageTable;
+use super::indirection::{GpuPageTable, PageResolution};
 use super::pool::{PageUpload, PhysicalPagePool};
 use super::residency::TextureResidencyTable;
 use super::scheduler::schedule;
@@ -164,6 +164,24 @@ impl VirtualTextureStreamer {
     #[must_use]
     pub const fn page_table(&self) -> &GpuPageTable {
         &self.page_table
+    }
+
+    /// Resolves `key` against the current page table using the configured
+    /// [`mip_tail_floor`](StreamerConfig::mip_tail_floor) as the coarsest
+    /// fallback, so a caller samples with the exact floor this streamer pinned.
+    ///
+    /// When a mip-tail floor is configured, every demanded page's covering floor
+    /// page is forced resident (see the per-frame pipeline), so this returns
+    /// [`Some`] for any page demanded since the covers converged — the floor is
+    /// the guaranteed fallback and the result never holes. With no floor
+    /// configured the coarsest probe is `key.mip` itself, so this resolves only
+    /// the exact page and returns [`None`] until it streams in, matching plain
+    /// demand-driven residency. This threads the pinned floor automatically so a
+    /// caller cannot pass a coarser bound than was actually guaranteed resident.
+    #[must_use]
+    pub fn resolve(&self, key: TexturePageKey) -> Option<PageResolution> {
+        let coarsest = self.config.mip_tail_floor.unwrap_or(key.mip);
+        self.page_table.resolve(key, coarsest)
     }
 
     /// The number of frames streamed so far.
@@ -897,6 +915,30 @@ mod tests {
             .expect("floor guarantees a resident cover");
         assert_eq!(resolved.key, cover);
         assert_eq!(resolved.mip_bias, floor);
+    }
+
+    #[test]
+    fn streamer_resolve_threads_configured_floor() {
+        // With a floor, streamer.resolve() uses it automatically and never holes
+        // once the covers converge; without a floor it only resolves the exact
+        // page and holes until that page itself streams in.
+        let floor = 3u8;
+        let fine = page(0, 5);
+        let cover = page(floor, 5 >> 3);
+        let mut pinned = VirtualTextureStreamer::new(
+            StreamerConfig::new(100 * PAGE_BYTES).with_mip_tail_floor(Some(floor)),
+            64,
+        );
+        pinned.stream_demands(&[demand(fine, 500)]);
+        let r = pinned.resolve(fine).expect("floor guarantees a cover");
+        assert_eq!(r.key, cover);
+        assert_eq!(r.mip_bias, floor);
+
+        let mut unpinned =
+            VirtualTextureStreamer::new(StreamerConfig::new(100 * PAGE_BYTES), 64);
+        unpinned.stream_demands(&[demand(fine, 500)]);
+        // No floor and the fine page is still debounced: resolve finds nothing.
+        assert!(unpinned.resolve(fine).is_none());
     }
 
     #[test]
