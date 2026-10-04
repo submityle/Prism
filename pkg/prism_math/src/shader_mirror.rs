@@ -438,3 +438,61 @@ fn prism_frustum_classify_aabb(planes: array<vec4<f32>, 6>, center: vec3<f32>, e
     }\n\
     return result;\n\
 }\n";
+
+/// Single-sourced WGSL for octahedral unit-normal (de)compression, mirroring
+/// the CPU codec [`crate::octahedral::encode`] / [`decode`] / [`pack_snorm`] /
+/// [`unpack_snorm`]. Octahedral mapping is the standard compact `GBuffer` normal
+/// encoding: it stores a unit direction in two numbers (or, snorm-packed, one
+/// `u32`) with negligible angular error. The folding/sign convention and the
+/// `round(c * 32767)`-ties-away snorm quantization are reproduced exactly, so
+/// the GPU g-buffer write/read agrees with the CPU codec within fast-math
+/// rounding (the encode L1-normalize divide is the only fast-math-sensitive
+/// step, hence a tolerance rather than bit-exactness).
+pub const WGSL_OCTAHEDRAL: &str = "\
+fn prism_oct_sign_nonzero(v: f32) -> f32 {\n\
+    if (v >= 0.0) { return 1.0; }\n\
+    return -1.0;\n\
+}\n\
+\n\
+fn prism_oct_encode(n: vec3<f32>) -> vec2<f32> {\n\
+    let inv_l1 = 1.0 / (abs(n.x) + abs(n.y) + abs(n.z));\n\
+    let p = vec2<f32>(n.x * inv_l1, n.y * inv_l1);\n\
+    if (n.z >= 0.0) { return p; }\n\
+    return vec2<f32>(\n\
+        (1.0 - abs(p.y)) * prism_oct_sign_nonzero(p.x),\n\
+        (1.0 - abs(p.x)) * prism_oct_sign_nonzero(p.y)\n\
+    );\n\
+}\n\
+\n\
+fn prism_oct_decode(e: vec2<f32>) -> vec3<f32> {\n\
+    var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));\n\
+    let t = max(-n.z, 0.0);\n\
+    if (n.x >= 0.0) { n.x = n.x - t; } else { n.x = n.x + t; }\n\
+    if (n.y >= 0.0) { n.y = n.y - t; } else { n.y = n.y + t; }\n\
+    return normalize(n);\n\
+}\n\
+\n\
+fn prism_oct_snorm16(v: f32) -> u32 {\n\
+    let c = clamp(v, -1.0, 1.0);\n\
+    let scaled = c * 32767.0;\n\
+    let r = i32(floor(abs(scaled) + 0.5));\n\
+    let signed = select(r, -r, scaled < 0.0);\n\
+    return bitcast<u32>(signed) & 0xffffu;\n\
+}\n\
+\n\
+fn prism_oct_pack_snorm(n: vec3<f32>) -> u32 {\n\
+    let e = prism_oct_encode(n);\n\
+    return prism_oct_snorm16(e.x) | (prism_oct_snorm16(e.y) << 16u);\n\
+}\n\
+\n\
+fn prism_oct_unsnorm16(bits: u32) -> f32 {\n\
+    let lo = i32(bits & 0xffffu);\n\
+    let signed = select(lo, lo - 65536, lo >= 32768);\n\
+    return clamp(f32(signed) / 32767.0, -1.0, 1.0);\n\
+}\n\
+\n\
+fn prism_oct_unpack_snorm(bits: u32) -> vec3<f32> {\n\
+    let x = prism_oct_unsnorm16(bits & 0xffffu);\n\
+    let y = prism_oct_unsnorm16((bits >> 16u) & 0xffffu);\n\
+    return prism_oct_decode(vec2<f32>(x, y));\n\
+}\n";
