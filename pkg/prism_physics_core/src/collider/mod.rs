@@ -580,6 +580,8 @@ pub mod stress_path;
 pub use stress_path::StressPath;
 pub mod stress_strainrate_coaxiality;
 pub use stress_strainrate_coaxiality::StressStrainRateCoaxiality;
+pub mod capillary_number;
+pub use capillary_number::{CapillaryNumber, CapillaryRegime};
 
 /// A handle into a [`ShapeRegistry`].
 ///
