@@ -390,13 +390,15 @@ pkg/prism_math/
 - 剔除谓词（frustum-aabb，§9）CPU/GPU 两份实现共享同一平面提取与符号约定，杜绝「CPU 判可见、GPU 判剔除」。
 - 与 `prism_render_driver` RHI、ECS §15 GPU 驱动、transform §24.7 GPU 层级传播契约一致。
 
-### 24.2 编译期 / const 数学（Const Evaluation）
+### 24.2 编译期 / const 数学（Const Evaluation）—— ✅ 已交付（`const_math` 模块）
 
 把能在编译期算的常量矩阵/向量算到编译期，运行时零成本：
 
 - `const fn` 构造与运算：`const VIEW: Mat4 = Mat4::from_cols(...)`、单位阵/投影阵/旋转常量编译期折叠。
 - 查找表（缓动曲线采样、定点超越函数表、噪声梯度表）`const` 生成，烧进只读段，免运行时初始化与堆分配。
 - 坐标系转换矩阵（Y-up↔Z-up、右手↔左手）作为 `const` 提供，上层做互操作零运行时成本。
+
+**交付状态**：已落地 `pkg/prism_math/src/const_math.rs`（`no_std`、无超越函数、跨平台位级一致）。坐标系互操作矩阵全 `const`：`Y_UP_TO_Z_UP`（绕 X +90°，glTF Y-up→Blender/CAD Z-up，`(x,y,z)↦(x,-z,y)`，det=+1 保手性）、`Z_UP_TO_Y_UP`（精确逆/转置）、`FLIP_HANDEDNESS_Z`（`diag(1,1,-1,1)`，右手↔左手，det=-1）；条目仅 `0`/`±1` 故编译期精确折叠。`convert_point` 为 `const fn` 仿射变换包装（可在 `const` 上下文折叠变换后坐标，避开非 `const` 的 `Mat4::transform_point3`）。`LookupTable<N>`：`const fn new` 构造的均匀采样查找表（`N` 样本等距铺满 `[min,max]`，烧进只读段零初始化），`sample` 做钳位线性插值（域外饱和到端点、无超ental）、附 `len/is_empty/domain`。6 单测绿：轴映射/往返求逆/行列式手性/`const` 折叠点对拍/LUT 端点·插值·钳位/非线性缓动曲线采样。定点超越表与噪声梯度表随各消费方（`fixed::transcendental`/`noise`）就地提供。
 
 ### 24.3 区间算术 / 误差界（Interval Arithmetic，保守剔除/CCD）—— ✅ 已交付（`interval` 模块）
 
@@ -467,4 +469,4 @@ pkg/prism_math/
 
 ### 24.10 诚实边界
 
-本章全部 PLANNED，无代码。落地优先级建议：**24.4 补偿求和**（直接服务确定归并，随 tasks M4）与 **24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）优先；24.3 区间算术 **已交付**（`interval`）；24.6 SH **已交付**（`spherical`，SH 旋转/探针随 `prism_gi` 接入）；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数 **已交付**（`dual`，供 IK/物理雅可比接入）；24.8 曲面 **已交付**（`curve::surface`，LOD 细分随 `prism_terrain` 接入）；24.9 大世界定点 **已交付**（`bigworld::hierfixed`，`FixedGridPosition`：纯整数/Q32.32 cell+local，canonical/translated/rebased_offset/distance_squared 全程无浮点，供联机开放世界位级一致）。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+落地优先级建议：**24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）为唯一消费方驱动后置项；24.2 编译期 const 数学 **已交付**（`const_math`）；24.4 补偿求和 **已交付**（`fixed` 的 Kahan/Neumaier）；24.3 区间算术 **已交付**（`interval`）；24.6 SH **已交付**（`spherical`，SH 旋转/探针随 `prism_gi` 接入）；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数 **已交付**（`dual`，供 IK/物理雅可比接入）；24.8 曲面 **已交付**（`curve::surface`，LOD 细分随 `prism_terrain` 接入）；24.9 大世界定点 **已交付**（`bigworld::hierfixed`，`FixedGridPosition`：纯整数/Q32.32 cell+local，canonical/translated/rebased_offset/distance_squared 全程无浮点，供联机开放世界位级一致）。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

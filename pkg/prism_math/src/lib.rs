@@ -63,6 +63,7 @@ mod mat;
 mod quat;
 mod vec;
 
+pub mod const_math;
 pub mod dual_quat;
 pub mod f16;
 pub mod dual;
@@ -116,6 +117,9 @@ pub use self::spatial::{
     morton_encode3,
 };
 pub use self::spherical::{Sh2, Sh3, basis2, basis3};
+pub use self::const_math::{
+    FLIP_HANDEDNESS_Z, LookupTable, Y_UP_TO_Z_UP, Z_UP_TO_Y_UP, convert_point,
+};
 
 /// Mathematical constant helpers (`f32`).
 pub mod consts {
