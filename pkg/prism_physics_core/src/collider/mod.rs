@@ -512,6 +512,8 @@ pub mod distribution_packing;
 pub use distribution_packing::{pack_spheres_from_distribution, DistributionPackingParams};
 pub mod packing_diagnostics;
 pub use packing_diagnostics::PackingDiagnostics;
+pub mod gravity_settle;
+pub use gravity_settle::{GravitySettleParams, GravitySettleReport, GravitySettler};
 
 /// A handle into a [`ShapeRegistry`].
 ///
