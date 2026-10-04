@@ -48,11 +48,13 @@ extern crate alloc;
 pub mod catalog;
 pub mod format;
 pub mod locale;
+pub mod message;
 pub mod plural;
 
 pub use catalog::{Catalog, Message};
 pub use format::{interpolate, Args, Value};
 pub use locale::{I18n, LocaleId};
+pub use message::{MessageParseError, MessagePattern, ParseErrorKind};
 pub use plural::{
     CardinalFamily, OrdinalFamily, PluralCategory, PluralOperands, PluralRules, PluralType,
 };
@@ -256,5 +258,45 @@ mod tests {
         assert_eq!(i18n.t_ordinal("place", 21, &Args::new()), "21st");
         assert_eq!(i18n.t_ordinal("place", 22, &Args::new()), "22nd");
         assert_eq!(i18n.t_ordinal("place", 23, &Args::new()), "23rd");
+    }
+
+    #[test]
+    fn message_format_select_plural_end_to_end() {
+        let rt = Runtime::new();
+        let mut i18n = I18n::new(&rt, "en");
+        let notify = MessagePattern::parse(
+            "{gender, select, male {He} female {She} other {They}} liked {count, plural, =0 {none of your posts} one {# of your posts} other {# of your posts}}.",
+        )
+        .expect("pattern should compile");
+        i18n.register(
+            "en",
+            Catalog::new().with_message("notify", notify),
+            false,
+            PluralRules::English,
+        );
+
+        let out = i18n.t(
+            "notify",
+            &Args::new().with("gender", "female").with("count", 3),
+        );
+        assert_eq!(out, "She liked 3 of your posts.");
+
+        let out = i18n.t(
+            "notify",
+            &Args::new().with("gender", "male").with("count", 1),
+        );
+        assert_eq!(out, "He liked 1 of your posts.");
+
+        let out = i18n.t(
+            "notify",
+            &Args::new().with("count", 0),
+        );
+        assert_eq!(out, "They liked none of your posts.");
+    }
+
+    #[test]
+    fn message_format_parse_error_surfaces() {
+        let err = MessagePattern::parse("{count, plural, one {# file}}").unwrap_err();
+        assert_eq!(err.reason, ParseErrorKind::MissingOther);
     }
 }

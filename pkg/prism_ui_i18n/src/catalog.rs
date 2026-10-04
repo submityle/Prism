@@ -6,6 +6,7 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 
+use crate::message::MessagePattern;
 use crate::plural::PluralCategory;
 
 /// A single catalog entry.
@@ -15,6 +16,9 @@ pub enum Message {
     Simple(String),
     /// Per-category plural variants, selected by a count at call time.
     Plural(BTreeMap<PluralCategory, String>),
+    /// A compiled `ICU`-style message with inline `select`/`plural`/
+    /// `selectordinal` arguments (see [`MessagePattern`]).
+    Format(MessagePattern),
 }
 
 /// A collection of messages for one locale.
@@ -72,6 +76,29 @@ impl Catalog {
             .map(|(category, template)| (category, template.into()))
             .collect();
         self.messages.insert(key.into(), Message::Plural(map));
+        self
+    }
+
+    /// Insert a compiled `ICU`-style message pattern, returning `self` for
+    /// chaining.
+    ///
+    /// Callers compile the pattern themselves with
+    /// [`MessagePattern::parse`](crate::message::MessagePattern::parse) so that
+    /// parse errors surface at the call site rather than panicking here.
+    #[must_use]
+    pub fn with_message(mut self, key: impl Into<String>, pattern: MessagePattern) -> Self {
+        self.insert_message(key, pattern);
+        self
+    }
+
+    /// Insert or replace a compiled `ICU`-style message pattern in place.
+    pub fn insert_message(
+        &mut self,
+        key: impl Into<String>,
+        pattern: MessagePattern,
+    ) -> &mut Self {
+        self.messages
+            .insert(key.into(), Message::Format(pattern));
         self
     }
 

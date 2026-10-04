@@ -99,6 +99,12 @@ impl Inner {
         let message = data.catalog.message(key)?;
         match message {
             Message::Simple(template) => Some(interpolate(template, args)),
+            // Compiled ICU-style patterns select their own arms per
+            // argument, so the outer cardinal/ordinal `select` is unused
+            // here; `#` resolves against each inline plural internally.
+            Message::Format(pattern) => {
+                Some(pattern.format(args, data.rules, locale.as_str()))
+            }
             Message::Plural(variants) => {
                 let category = match select {
                     // Cardinal selection uses the locale's registered rules.
