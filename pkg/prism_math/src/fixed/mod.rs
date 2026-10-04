@@ -31,6 +31,7 @@
 //! [`Fixed::from_int`].
 
 pub mod compensated;
+pub mod double_double;
 pub mod hash;
 pub mod i16f16;
 pub mod scalar;
@@ -39,6 +40,7 @@ pub mod trig;
 pub mod vec;
 
 pub use compensated::{CompensableFloat, KahanSum, NeumaierSum, kahan_sum, neumaier_sum};
+pub use double_double::DoubleDouble;
 pub use hash::StateHasher;
 pub use i16f16::I16F16;
 pub use scalar::Fixed;
