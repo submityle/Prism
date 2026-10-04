@@ -524,6 +524,8 @@ pub mod porosity_profile;
 pub use porosity_profile::PorosityProfile;
 pub mod hopper_discharge;
 pub use hopper_discharge::{mass_flow_between, BeverlooSlot, DischargeCensus};
+pub mod janssen_pressure;
+pub use janssen_pressure::{JanssenProfile, SiloCrossSection, StressSample};
 
 /// A handle into a [`ShapeRegistry`].
 ///
