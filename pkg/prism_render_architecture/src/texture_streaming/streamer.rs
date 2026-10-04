@@ -792,7 +792,7 @@ mod tests {
         assert_eq!(f.loaded(), 3);
         assert_eq!(f.pending_uploads, 0);
         assert_eq!(f.uploaded_bytes, 3 * PAGE_BYTES);
-        assert!(f.is_steady() == false || f.plan.evicts.is_empty());
+        assert!(!f.is_steady() || f.plan.evicts.is_empty());
     }
 
     #[test]

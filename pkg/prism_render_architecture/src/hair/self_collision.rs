@@ -44,9 +44,6 @@ pub struct SelfCollisionParams {
     pub cell_size: f32,
 }
 
-/// Vectors shorter than the square root of this are treated as zero-length.
-const EPS_LEN_SQ: f32 = 1.0e-24;
-
 /// Integer grid cell coordinate.
 type Cell = (i32, i32, i32);
 
@@ -84,7 +81,6 @@ pub fn resolve_self_collision(particles: &mut [StrandParticle], params: SelfColl
     }
 
     let min_sep = 2.0 * params.particle_radius;
-    let min_sep_sq = min_sep * min_sep;
     let stiffness = params.stiffness.clamp(0.0, 1.0);
 
     // Bucket every finite particle into its grid cell, in index order so each
@@ -132,28 +128,21 @@ pub fn resolve_self_collision(particles: &mut [StrandParticle], params: SelfColl
         candidates.sort_unstable();
 
         for &j in &candidates {
-            let a = particles[i].position;
-            let b = particles[j].position;
-            let d = a.sub(b);
-            let dist_sq = d.length_squared();
-            if dist_sq >= min_sep_sq || dist_sq < EPS_LEN_SQ {
-                // Far enough apart, or coincident (no separating direction).
-                continue;
+            // The per-pair push-out arithmetic (inverse-mass split, `+normal`
+            // geometry, fractional `stiffness` relaxation, and coincident-pair
+            // skip) is delegated to the authoritative physics engine; this
+            // module keeps only the deterministic strand grid traversal.
+            if let Some((new_i, new_j)) = super::physics_bridge::solve_self_collision_pair(
+                particles[i].position,
+                particles[j].position,
+                particles[i].inverse_mass,
+                particles[j].inverse_mass,
+                min_sep,
+                stiffness,
+            ) {
+                particles[i].position = new_i;
+                particles[j].position = new_j;
             }
-            let wi = particles[i].inverse_mass.max(0.0);
-            let wj = particles[j].inverse_mass.max(0.0);
-            let w = wi + wj;
-            if w <= 0.0 {
-                continue; // both pinned: nothing to move.
-            }
-            let dist = dist_sq.sqrt();
-            let overlap = min_sep - dist;
-            let normal = d.scale(1.0 / dist);
-            let correction = normal.scale(overlap * stiffness);
-            // Split the push by inverse mass: the lighter (freer) particle moves
-            // more; a pinned partner (weight 0) does not move at all.
-            particles[i].position = particles[i].position.add(correction.scale(wi / w));
-            particles[j].position = particles[j].position.sub(correction.scale(wj / w));
         }
     }
 }

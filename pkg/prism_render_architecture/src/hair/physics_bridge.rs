@@ -194,6 +194,36 @@ pub(crate) fn solve_lra_tether(
     write_positions_back(particles, &positions);
 }
 
+/// Projects one self-collision particle pair apart by delegating to the
+/// authoritative physics-engine relaxed pairwise separation.
+///
+/// Two particles closer than `min_separation` are pushed apart along their
+/// center line, split by inverse mass and scaled by `stiffness` (a fraction in
+/// `0..=1`), so a pinned partner stays put. Returns the corrected
+/// `(position_i, position_j)` or [`None`] when the pair needs no move (already
+/// separated, coincident, or both pinned). The raw stored `inverse_mass` values
+/// are forwarded (the primitive floors them at zero), matching the strand
+/// self-collision convention. The single, shared arithmetic lives in
+/// [`prism_physics_core::soft::collision::project_relaxed_pair_separation`].
+pub(crate) fn solve_self_collision_pair(
+    position_i: Vec3,
+    position_j: Vec3,
+    inverse_mass_i: f32,
+    inverse_mass_j: f32,
+    min_separation: f32,
+    stiffness: f32,
+) -> Option<(Vec3, Vec3)> {
+    let (new_i, new_j) = prism_physics_core::soft::collision::project_relaxed_pair_separation(
+        to_glam(position_i),
+        to_glam(position_j),
+        inverse_mass_i,
+        inverse_mass_j,
+        min_separation,
+        stiffness,
+    )?;
+    Some((from_glam(new_i), from_glam(new_j)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

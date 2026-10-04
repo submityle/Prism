@@ -41,6 +41,7 @@ mod coupling;
 mod friction;
 mod layers;
 mod layers_jacobi;
+mod relaxed_separation;
 mod self_ccd;
 mod self_ccd_jacobi;
 mod self_collision;
@@ -61,6 +62,7 @@ pub use coupling::{
 };
 pub use layers::{accumulate_vertex_normals, resolve_layer_coupling, LayerParams};
 pub use layers_jacobi::resolve_layer_coupling_jacobi;
+pub use relaxed_separation::project_relaxed_pair_separation;
 pub use self_ccd::{resolve_self_ccd, swept_pair_toi, SelfCcdParams};
 pub use self_ccd_jacobi::resolve_self_ccd_jacobi;
 pub use self_collision::{resolve_self_collision, resolve_self_collision_with_friction};
