@@ -171,6 +171,7 @@ impl StreamingDelta {
 /// The streamer is pure and `World`-independent: it only shuffles
 /// [`CellCoord`]/[`CellState`] bookkeeping, which makes it fully CPU-testable
 /// and deterministic.
+#[derive(Clone, Debug)]
 pub struct CellStreamer {
     /// All cells currently in a non-`Unloaded` state, keyed by coordinate.
     cells: HashMap<CellCoord, CellState>,
@@ -296,6 +297,20 @@ impl CellStreamer {
         }
     }
 
+    /// Declares `coord` fully resident ([`CellState::Loaded`]) regardless of its
+    /// prior state, inserting it if untracked (design §13.1).
+    ///
+    /// Unlike [`mark_loaded`](Self::mark_loaded) — which only settles a cell
+    /// already mid-load — this is for owners that place a cell's entities
+    /// outside the request/settle cycle, e.g. the initial world population that
+    /// is resident before the first streaming tick. Returns the cell's previous
+    /// state.
+    pub fn mark_resident(&mut self, coord: CellCoord) -> CellState {
+        let prev = self.state(coord);
+        self.cells.insert(coord, CellState::Loaded);
+        prev
+    }
+
     /// Settles a cell whose eviction I/O just finished: [`CellState::Unloading`]
     /// -> removed from the map (returning to [`CellState::Unloaded`]). A no-op
     /// for cells in any other state.
@@ -303,6 +318,17 @@ impl CellStreamer {
         if matches!(self.cells.get(&coord), Some(CellState::Unloading)) {
             self.cells.remove(&coord);
         }
+    }
+
+    /// Immediately drops `coord` from tracking regardless of its current state,
+    /// settling it back to [`CellState::Unloaded`] (design §13.1).
+    ///
+    /// Unlike [`mark_unloaded`](Self::mark_unloaded) — which only settles a cell
+    /// already mid-eviction — this is the out-of-band teardown path for forced
+    /// evictions (level unload, editor operations) where the owner has decided
+    /// the cell must go now. Returns whether the cell was previously tracked.
+    pub fn force_unload(&mut self, coord: CellCoord) -> bool {
+        self.cells.remove(&coord).is_some()
     }
 
     /// The current [`CellState`] of `coord`. Untracked cells report
