@@ -191,13 +191,6 @@ impl GpuWorldRestirFillParams {
 /// dispatch rounds the reservoir-table capacity up to a multiple of this and
 /// the shader bounds-checks every invocation against the live capacity, exactly
 /// as the fill pass does.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "seed dispatch extent constant; consumed once the seed pipeline is wired in a                   follow-up slice, so no host path reads it yet"
-    )
-)]
 pub(crate) const WORLD_RESTIR_SEED_WORKGROUP_SIZE: u32 = 64;
 
 /// Per-light candidate storage stride in bytes: two `vec4<f32>` lanes (a `vec3`
@@ -284,13 +277,6 @@ impl GpuWorldRestirSeedParams {
     /// Builds the seed immediate block from the per-frame light count + frame
     /// index and the live settings (capacity floored at `1`, the candidate
     /// budget / artistic gain / `M`-cap forwarded verbatim).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "seed immediate builder; called once the seed dispatch is wired in a                       follow-up slice, so no host path constructs it yet"
-        )
-    )]
     pub(crate) fn from_settings(
         light_count: u32,
         frame: u32,

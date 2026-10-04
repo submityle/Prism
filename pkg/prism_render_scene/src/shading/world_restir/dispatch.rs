@@ -24,10 +24,12 @@ use bevy_render::{
 };
 
 use super::abi::{
-    GpuWorldRestirFillParams, GpuWorldRestirInjectParams, WORLD_RESTIR_INJECT_WORKGROUP_SIZE,
+    GpuWorldRestirFillParams, GpuWorldRestirInjectParams, GpuWorldRestirSeedParams,
+    WORLD_RESTIR_INJECT_WORKGROUP_SIZE, WORLD_RESTIR_SEED_WORKGROUP_SIZE,
     WORLD_RESTIR_WORKGROUP_SIZE,
 };
 use super::bind_groups::ViewWorldRestirBindGroups;
+use super::lights::WorldRestirLights;
 use super::pipeline::WorldRestirPipeline;
 use super::resources::ViewWorldRestir;
 use super::settings::PrismWorldRestirSettings;
@@ -82,6 +84,68 @@ pub(crate) fn world_restir_fill_pass(
     });
     pass.set_pipeline(fill_pipeline);
     pass.set_bind_group(0, groups.fill_group(), &[]);
+    pass.set_immediates(0, bytemuck::bytes_of(&params));
+    pass.dispatch_workgroups(groups_x, 1, 1);
+}
+
+/// Number of 1-D workgroups the seed dispatch records for a resident table of
+/// `capacity` slots: one workgroup per [`WORLD_RESTIR_SEED_WORKGROUP_SIZE`]
+/// slots, rounded up, with a floor of one so a degenerate `capacity == 0` still
+/// issues a single (fully bounds-checked, no-op) workgroup rather than an empty
+/// dispatch.
+fn seed_workgroups(capacity: u32) -> u32 {
+    capacity.max(1).div_ceil(WORLD_RESTIR_SEED_WORKGROUP_SIZE)
+}
+
+/// `Core3d` scheduling system recording the `seed_main` dispatch for every view
+/// whose resident reservoir table, seed bind group and candidate light buffer
+/// are live.
+///
+/// Scheduled between inject and fill: inject writes the per-cell visible-point
+/// geometry into `src`, the seed pass then streams `candidate_count` light
+/// candidates per occupied slot through its `RIS` reservoir (golden
+/// `insert_candidate` + `finalize_all`) and writes the finalised reservoirs
+/// into `dst`, and the fill pass runs GRIS spatial reuse over `dst`. The seed
+/// bind group is present only when the candidate light buffer is resident, so
+/// an unlit view (no uploaded lights) auto-skips and the fill pass still runs
+/// its (empty) spatial reuse over the injected geometry.
+pub(crate) fn world_restir_seed_pass(
+    settings: Res<PrismWorldRestirSettings>,
+    view: ViewQuery<(&ViewWorldRestir, &ViewWorldRestirBindGroups)>,
+    lights: Res<WorldRestirLights>,
+    pipeline: Res<WorldRestirPipeline>,
+    cache: Res<PipelineCache>,
+    mut ctx: RenderContext,
+) {
+    if !settings.enabled {
+        return;
+    }
+    let (restir, groups) = view.into_inner();
+
+    // The seed bind group is present only when the candidate light buffer is
+    // resident; absence (unlit scene, no uploaded lights) skips the pass.
+    let Some(seed_group) = groups.seed_group() else {
+        return;
+    };
+    // The seed pipeline must be resident before the pass runs.
+    let Some(seed_pipeline) = cache.get_compute_pipeline(pipeline.seed()) else {
+        return;
+    };
+
+    // The seed block carries no camera position (cell geometry is already baked
+    // into the injected slots): only the live light count, frame seed and the
+    // artistic/RIS tunables drive the per-slot streaming.
+    let params = GpuWorldRestirSeedParams::from_settings(lights.count(), restir.frame(), &settings);
+
+    let groups_x = seed_workgroups(restir.capacity);
+
+    let encoder = ctx.command_encoder();
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("prism world-space ReSTIR seed"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(seed_pipeline);
+    pass.set_bind_group(0, seed_group, &[]);
     pass.set_immediates(0, bytemuck::bytes_of(&params));
     pass.dispatch_workgroups(groups_x, 1, 1);
 }
@@ -178,5 +242,26 @@ mod tests {
         // rather than an empty dispatch.
         assert_eq!(fill_workgroups(0), 1);
         assert_eq!(fill_workgroups(1), 1);
+    }
+
+    #[test]
+    fn seed_workgroups_rounds_capacity_up_to_the_workgroup_size() {
+        // Exact multiples map one-to-one; partial tails round up so the last
+        // slots are still covered.
+        assert_eq!(seed_workgroups(WORLD_RESTIR_SEED_WORKGROUP_SIZE), 1);
+        assert_eq!(seed_workgroups(WORLD_RESTIR_SEED_WORKGROUP_SIZE + 1), 2);
+        assert_eq!(seed_workgroups(2 * WORLD_RESTIR_SEED_WORKGROUP_SIZE), 2);
+        assert_eq!(
+            seed_workgroups(131_072),
+            131_072 / WORLD_RESTIR_SEED_WORKGROUP_SIZE
+        );
+    }
+
+    #[test]
+    fn seed_workgroups_floors_degenerate_capacity_at_one() {
+        // `capacity == 0` still issues one (bounds-checked, no-op) workgroup
+        // rather than an empty dispatch.
+        assert_eq!(seed_workgroups(0), 1);
+        assert_eq!(seed_workgroups(1), 1);
     }
 }

@@ -69,20 +69,12 @@ pub(crate) struct WorldRestirPipeline {
 impl WorldRestirPipeline {
     /// The `seed_main` compute pipeline id. Recorded by the seed dispatch in a
     /// follow-up slice.
-    #[expect(
-        dead_code,
-        reason = "the seed dispatch records this pipeline in a follow-up slice;                   no render-graph node reads it yet"
-    )]
     pub(crate) fn seed(&self) -> CachedComputePipelineId {
         self.seed
     }
 
     /// group-0 layout for the `seed_main` dispatch. The seed bind group builds
     /// against it in a follow-up slice.
-    #[expect(
-        dead_code,
-        reason = "the seed bind group builds against this layout in a follow-up                   slice; no host path reads it yet"
-    )]
     pub(crate) fn seed_layout(&self) -> &BindGroupLayout {
         &self.seed_layout
     }

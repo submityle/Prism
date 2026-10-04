@@ -15,6 +15,7 @@ use bevy_render::{
     renderer::RenderDevice,
 };
 
+use super::lights::WorldRestirLights;
 use super::pipeline::WorldRestirPipeline;
 use super::resources::ViewWorldRestir;
 use super::visible_points::ViewWorldRestirVisiblePoints;
@@ -31,6 +32,13 @@ pub(crate) struct ViewWorldRestirBindGroups {
     /// claim-guard array read-write (2). Present only when the view carries a
     /// resident visible-point list (i.e. the producer pass ran this frame).
     inject: Option<BindGroup>,
+    /// group 0 for `seed_main`: the injected reservoir table read-only (0, the
+    /// per-frame `src` the inject pass wrote cell geometry into), the seeded
+    /// reservoir table read-write (1, this frame's `dst`) and the per-frame
+    /// candidate light list read-only (2). Present only when the candidate
+    /// light buffer is resident (i.e. `prepare_world_restir_lights` uploaded at
+    /// least once); an unlit scene with no buffer skips the seed dispatch.
+    seed: Option<BindGroup>,
 }
 
 impl ViewWorldRestirBindGroups {
@@ -44,6 +52,12 @@ impl ViewWorldRestirBindGroups {
     pub(crate) fn inject_group(&self) -> Option<&BindGroup> {
         self.inject.as_ref()
     }
+
+    /// group-0 bind group for the `seed_main` dispatch, present only when the
+    /// view's candidate light buffer is resident this frame.
+    pub(crate) fn seed_group(&self) -> Option<&BindGroup> {
+        self.seed.as_ref()
+    }
 }
 
 /// `PrepareBindGroups` system building [`ViewWorldRestirBindGroups`] for every
@@ -56,6 +70,7 @@ pub(crate) fn prepare_world_restir_bind_groups(
     mut commands: Commands,
     pipeline: Res<WorldRestirPipeline>,
     device: Res<RenderDevice>,
+    lights: Res<WorldRestirLights>,
     views: Query<(
         Entity,
         &ViewWorldRestir,
@@ -63,14 +78,17 @@ pub(crate) fn prepare_world_restir_bind_groups(
     )>,
 ) {
     for (entity, restir, visible_points) in &views {
-        // fill group: previous reservoir table read-only (0), next reservoir
-        // table read-write (1). Both follow this frame's ping-pong selection.
+        // fill group: the seeded reservoir table read-only (0, this frame's
+        // `dst` the seed pass finalised) and the pooled-output table read-write
+        // (1, this frame's `src`). The GRIS spatial pool reads center+neighbour
+        // reservoirs from @0 and writes the re-finalised pool to @1; `src` is
+        // safe to overwrite because the seed pass already consumed it.
         let fill = device.create_bind_group(
             "prism world-space ReSTIR fill",
             pipeline.fill_layout(),
             &BindGroupEntries::sequential((
-                restir.src_buffer().as_entire_binding(),
                 restir.dst_buffer().as_entire_binding(),
+                restir.src_buffer().as_entire_binding(),
             )),
         );
 
@@ -91,8 +109,25 @@ pub(crate) fn prepare_world_restir_bind_groups(
             )
         });
 
+        // seed group: the injected reservoir table read-only (0, this frame's
+        // `src` the inject pass wrote cell geometry into), the seeded reservoir
+        // table read-write (1, this frame's `dst`) and the per-frame candidate
+        // light list read-only (2). Built only when the candidate light buffer
+        // is resident, so the seed pass auto-skips an unlit view.
+        let seed = lights.buffer().map(|light_buffer| {
+            device.create_bind_group(
+                "prism world-space ReSTIR seed",
+                pipeline.seed_layout(),
+                &BindGroupEntries::sequential((
+                    restir.src_buffer().as_entire_binding(),
+                    restir.dst_buffer().as_entire_binding(),
+                    light_buffer.as_entire_binding(),
+                )),
+            )
+        });
+
         commands
             .entity(entity)
-            .insert(ViewWorldRestirBindGroups { fill, inject });
+            .insert(ViewWorldRestirBindGroups { fill, inject, seed });
     }
 }

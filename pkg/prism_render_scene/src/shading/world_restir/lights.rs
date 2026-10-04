@@ -120,14 +120,6 @@ impl WorldRestirLights {
 
     /// The resident candidate storage buffer, once it has been uploaded at least
     /// once. Bound at the seed group's `@binding(2)` by a follow-up slice.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "seed bind group binds this candidate buffer at @binding(2) in a follow-up \
-                      slice, so no host path reads it yet"
-        )
-    )]
     pub(crate) fn buffer(&self) -> Option<&Buffer> {
         self.lights.buffer()
     }
@@ -135,14 +127,6 @@ impl WorldRestirLights {
     /// Count of active candidates, the authoritative `light_count` for the seed
     /// immediate block (`0` in an unlit scene, independent of the padded buffer
     /// length).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "seed dispatch forwards this into GpuWorldRestirSeedParams::from_settings in \
-                      a follow-up slice, so no host path reads it yet"
-        )
-    )]
     pub(crate) fn count(&self) -> u32 {
         self.count
     }

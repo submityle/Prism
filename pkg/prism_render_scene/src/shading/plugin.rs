@@ -234,8 +234,8 @@ use super::{
         prepare_world_restir_bind_groups, prepare_world_restir_lights,
         prepare_world_restir_reservoirs, prepare_world_restir_visible_points,
         prepare_world_restir_visible_points_bind_groups, world_restir_fill_pass,
-        world_restir_inject_pass, world_restir_visible_points_pass, PrismWorldRestirSettings,
-        WorldRestirLights,
+        world_restir_inject_pass, world_restir_seed_pass, world_restir_visible_points_pass,
+        PrismWorldRestirSettings, WorldRestirLights,
     },
     world_space_gi::{
         init_world_space_gi_composite_pipeline, init_world_space_gi_pipeline,
@@ -1138,15 +1138,18 @@ impl Plugin for PrismShadingPlugin {
         );
         render_app.add_systems(
             bevy_core_pipeline::Core3d,
-            // World-space ReSTIR runs producer -> inject -> fill each frame: the
-            // producer turns the SSR prepass into a visible-point list, inject
-            // open-address claims one SHARC cell per point, and fill streams
-            // spatial reuse over the claimed cells. All three touch no screen
-            // targets, so the chain only has to finish before the main pass
-            // samples the resident table.
+            // World-space ReSTIR runs producer -> inject -> seed -> fill each
+            // frame: the producer turns the SSR prepass into a visible-point
+            // list, inject open-address claims one SHARC cell per point and
+            // writes the slot geometry, seed streams light candidates through
+            // each occupied slot's RIS reservoir, and fill streams GRIS spatial
+            // reuse over the seeded cells. All four touch no screen targets, so
+            // the chain only has to finish before the main pass samples the
+            // resident table.
             (
                 world_restir_visible_points_pass.before(world_restir_inject_pass),
-                world_restir_inject_pass.before(world_restir_fill_pass),
+                world_restir_inject_pass.before(world_restir_seed_pass),
+                world_restir_seed_pass.before(world_restir_fill_pass),
                 world_restir_fill_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
             ),
         );
