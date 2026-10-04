@@ -11,6 +11,7 @@ use core::ops::{Add, Mul, Sub};
 
 pub mod easing;
 pub mod spline;
+pub mod surface;
 
 pub use easing::{
     cubic_in, cubic_in_out, cubic_out, expo_in, expo_in_out, expo_out, quad_in, quad_in_out,
@@ -19,6 +20,7 @@ pub use easing::{
 pub use spline::{
     bezier_cubic, bezier_cubic_tangent, catmull_rom, catmull_rom_tangent, hermite, hermite_tangent,
 };
+pub use surface::{BSplineSurface, BezierPatch};
 
 /// A value that supports affine combinations: componentwise add/subtract and
 /// scaling by an `f32`. Blanket-implemented for `f32` and every `f32` vector
