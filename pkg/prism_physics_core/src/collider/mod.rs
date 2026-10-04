@@ -532,6 +532,8 @@ pub mod granular_temperature;
 pub use granular_temperature::GranularTemperature;
 pub mod size_segregation;
 pub use size_segregation::SizeSegregation;
+pub mod granular_rheology;
+pub use granular_rheology::{DilatancyLaw, GranularRheology};
 
 /// A handle into a [`ShapeRegistry`].
 ///
