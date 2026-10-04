@@ -325,6 +325,10 @@ pub use tet_fem_sand_force_assembly::{
 };
 pub mod tet_fem_camclay_plasticity;
 pub use tet_fem_camclay_plasticity::{return_map_camclay, CamClayModel, CamClayState, CamClayStep};
+pub mod tet_fem_camclay_force;
+pub use tet_fem_camclay_force::{
+    camclay_elastic_potential_energy, element_camclay_force, CamClayForce,
+};
 
 /// A handle into a [`ShapeRegistry`].
 ///
