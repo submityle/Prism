@@ -466,6 +466,8 @@ pub use rotational_boundary_resolver::{
 };
 pub mod granular_pile_integrator;
 pub use granular_pile_integrator::{GranularPileBody, GranularPileStepReport};
+pub mod capillary_bridge;
+pub use capillary_bridge::{CapillaryBridge, CapillaryBridgeModel};
 
 /// A handle into a [`ShapeRegistry`].
 ///
