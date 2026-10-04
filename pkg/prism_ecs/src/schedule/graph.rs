@@ -39,6 +39,7 @@ use crate::query::Access;
 use crate::schedule::ambiguity::{self, Ambiguities};
 use crate::schedule::condition::BoxedCondition;
 use crate::schedule::config::{IntoSystemConfigs, SetConfig, SystemConfig, SystemConfigs};
+use crate::schedule::lane::SystemLane;
 use crate::schedule::phase::Phase;
 use crate::schedule::set::{SystemSet, SystemSetId};
 use crate::system::function::BoxedSystem;
@@ -52,6 +53,12 @@ pub(crate) struct Node {
     pub(crate) after: Vec<SystemSetId>,
     pub(crate) conditions: Vec<BoxedCondition>,
     pub(crate) chain_after: Vec<usize>,
+    /// QoS lane the multi-threaded executor dispatches this system on
+    /// (design §24.1). Only the `multi_thread` executor reads it; without that
+    /// feature it is still recorded (so lane metadata is available to custom
+    /// executors / diagnostics) but inert.
+    #[cfg_attr(not(feature = "multi_thread"), allow(dead_code))]
+    pub(crate) lane: SystemLane,
 }
 
 /// A set of systems with ordering constraints, run as one unit against a
@@ -189,6 +196,7 @@ impl Schedule {
             after,
             conditions,
             phase,
+            lane,
         } = config;
         // Every system is a member of its phase set.
         sets.push(phase.set_id());
@@ -200,6 +208,7 @@ impl Schedule {
             after,
             conditions,
             chain_after: Vec::new(),
+            lane,
         });
         idx
     }

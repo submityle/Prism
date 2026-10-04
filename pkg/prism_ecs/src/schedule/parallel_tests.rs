@@ -15,7 +15,7 @@ use crate::command::Commands;
 use crate::component::Component;
 use crate::resource::Resource;
 use crate::schedule::parallel_executor::{compute_waves, effective_accesses};
-use crate::schedule::{ambiguity, resource_exists, IntoSystemConfigs, Schedule};
+use crate::schedule::{ambiguity, resource_exists, IntoSystemConfigs, Schedule, SystemLane};
 use crate::system::ResMut;
 use crate::world::World;
 
@@ -32,6 +32,10 @@ impl Resource for CounterA {}
 #[derive(Debug, Default)]
 struct CounterB(u32);
 impl Resource for CounterB {}
+
+#[derive(Debug, Default)]
+struct CounterC(u32);
+impl Resource for CounterC {}
 
 /// Presence toggles a run condition.
 #[derive(Debug, Default, PartialEq)]
@@ -59,6 +63,9 @@ fn bump_a(mut a: ResMut<CounterA>) {
 fn bump_b(mut b: ResMut<CounterB>) {
     b.0 += 1;
 }
+fn bump_c(mut c: ResMut<CounterC>) {
+    c.0 += 1;
+}
 
 fn fresh() -> World {
     let mut world = World::new();
@@ -70,6 +77,12 @@ fn fresh_counters() -> World {
     let mut world = World::new();
     world.insert_resource(CounterA::default());
     world.insert_resource(CounterB::default());
+    world
+}
+
+fn fresh_three_counters() -> World {
+    let mut world = fresh_counters();
+    world.insert_resource(CounterC::default());
     world
 }
 
@@ -306,4 +319,112 @@ fn parallel_change_detection_matches_sequential() {
         alloc::vec![2, 0, 0],
         "writer's mutation seen once, then stale"
     );
+}
+
+
+// --- §24.1 QoS lane annotation ----------------------------------------------
+//
+// A system declares *how urgent* it is with [`SystemLane`]; the multi-threaded
+// executor maps that onto a `prism_tasks` priority group when it dispatches the
+// wave. These tests prove the annotation is actually honoured end-to-end (not a
+// no-op): lane-annotated bodies really run, the observable result is identical
+// to an unannotated / single-threaded run, and a panic on any lane still
+// propagates through the join.
+
+#[test]
+fn lane_annotated_systems_all_execute_in_one_wave() {
+    // Three disjoint-access writers share a single wave, each pinned to a
+    // different QoS lane. This drives all three branches of `lane_rank`, the
+    // lazy per-lane `PriorityGroup` creation, and the reverse join loop in one
+    // dispatch block.
+    let pool = TaskPool::with_threads(4);
+    let mut world = fresh_three_counters();
+    let mut schedule = Schedule::new();
+    schedule.add_systems((
+        bump_a.lane(SystemLane::Critical),
+        bump_b.lane(SystemLane::Normal),
+        bump_c.lane(SystemLane::Background),
+    ));
+    // Still one wave: lane annotation is a dispatch hint, not an ordering edge.
+    let mut probe = Schedule::new();
+    probe.add_systems((
+        bump_a.lane(SystemLane::Critical),
+        bump_b.lane(SystemLane::Normal),
+        bump_c.lane(SystemLane::Background),
+    ));
+    assert_eq!(
+        waves_of(&mut probe, &mut fresh_three_counters()).len(),
+        1,
+        "lane annotation must not introduce ordering edges"
+    );
+
+    schedule.run_parallel(&pool, &mut world);
+    assert_eq!(world.resource::<CounterA>().0, 1, "Critical lane ran");
+    assert_eq!(world.resource::<CounterB>().0, 1, "Normal lane ran");
+    assert_eq!(world.resource::<CounterC>().0, 1, "Background lane ran");
+}
+
+#[test]
+fn lane_annotation_does_not_change_result() {
+    // The same chained schedule, once unannotated and once fully lane-tagged,
+    // must produce byte-identical output: lanes affect *dispatch priority*, not
+    // semantics or order.
+    let pool = TaskPool::with_threads(4);
+
+    let mut plain_world = fresh();
+    let mut plain = Schedule::new();
+    plain.add_systems((push_a, push_b, push_c).chain());
+    plain.run_parallel(&pool, &mut plain_world);
+
+    let mut tagged_world = fresh();
+    let mut tagged = Schedule::new();
+    tagged.add_systems(
+        (
+            push_a.lane(SystemLane::Critical),
+            push_b.lane(SystemLane::Background),
+            push_c.lane(SystemLane::Normal),
+        )
+            .chain(),
+    );
+    tagged.run_parallel(&pool, &mut tagged_world);
+
+    assert_eq!(
+        plain_world.resource::<Log>().0,
+        tagged_world.resource::<Log>().0,
+        "QoS lane is a dispatch hint, not a semantic change"
+    );
+    assert_eq!(tagged_world.resource::<Log>().0, alloc::vec![1, 2, 3]);
+}
+
+#[test]
+fn chained_lane_shorthand_tags_every_leaf() {
+    // `.lane(..)` applied to a tuple/chain must reach every leaf config, so a
+    // whole group can be dispatched on one lane with a single call.
+    let pool = TaskPool::with_threads(2);
+    let mut world = fresh_three_counters();
+    let mut schedule = Schedule::new();
+    schedule.add_systems((bump_a, bump_b, bump_c).lane(SystemLane::Background));
+    schedule.run_parallel(&pool, &mut world);
+    assert_eq!(world.resource::<CounterA>().0, 1);
+    assert_eq!(world.resource::<CounterB>().0, 1);
+    assert_eq!(world.resource::<CounterC>().0, 1);
+}
+
+#[test]
+fn panic_on_a_lane_propagates_through_join() {
+    // A panicking body on any lane must be caught per-task and re-raised on the
+    // calling thread (matching `TaskPool::scope`), never aborting a pool worker.
+    fn boom(_a: ResMut<CounterA>) {
+        panic!("lane body panicked");
+    }
+
+    let pool = TaskPool::with_threads(4);
+    let mut world = fresh_counters();
+    let mut schedule = Schedule::new();
+    schedule.add_systems(boom.lane(SystemLane::Critical));
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        schedule.run_parallel(&pool, &mut world);
+    }));
+    assert!(result.is_err(), "a panicking lane body must propagate");
 }

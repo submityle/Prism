@@ -40,6 +40,7 @@ pub mod config;
 pub mod executor;
 pub mod graph;
 pub mod label;
+pub mod lane;
 #[cfg(feature = "multi_thread")]
 pub mod parallel_executor;
 pub mod phase;
@@ -55,6 +56,7 @@ pub use config::{IntoSystemConfigs, SetConfig, SystemConfig, SystemConfigs};
 pub use executor::SingleThreadedExecutor;
 pub use graph::Schedule;
 pub use label::{BoxedScheduleLabel, ScheduleLabel};
+pub use lane::SystemLane;
 #[cfg(feature = "multi_thread")]
 pub use parallel_executor::MultiThreadedExecutor;
 pub use phase::Phase;

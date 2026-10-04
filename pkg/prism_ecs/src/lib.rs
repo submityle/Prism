@@ -136,7 +136,7 @@ pub mod prelude {
         apply_state_transition, in_state, resource_equals, resource_exists, run_once,
         IntoSystemConfigs, IntoSystemConfigs as IntoScheduleConfigs, NextState, OnEnter, OnExit,
         Phase, Schedule, ScheduleLabel, Schedules, SetConfig, State, States, SystemConfigs,
-        SystemSet,
+        SystemLane, SystemSet,
     };
     pub use crate::system::{IntoSystem, Local, Query, Res, ResMut, System, SystemParam};
     pub use crate::world::snapshot::{FnvHasher, SnapshotDelta, SnapshotRing, WorldSnapshot};

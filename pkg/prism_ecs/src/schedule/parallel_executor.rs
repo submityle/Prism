@@ -42,15 +42,20 @@
 //! spawned task before returning, so all raw pointers stay valid for the whole
 //! dispatch and the `&mut World` borrow is released before the next sync point.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::any::Any;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::Mutex;
 
 use hashbrown::HashMap;
-use prism_tasks::TaskPool;
+use prism_tasks::{PriorityGroup, TaskPool};
 
 use crate::change::Tick;
 use crate::query::Access;
 use crate::schedule::ambiguity;
 use crate::schedule::graph::Schedule;
+use crate::schedule::lane::SystemLane;
 use crate::schedule::set::SystemSetId;
 use crate::system::function::{BoxedSystem, System};
 use crate::system::world_cell::UnsafeWorldCell;
@@ -141,14 +146,15 @@ impl MultiThreadedExecutor {
             // Collect a raw pointer to each wave member's system. Distinct
             // indices make the pointers non-aliasing; we only ever hold the raw
             // pointers (not references) across the dispatch.
-            let mut tasks: Vec<(SendSystem, bool, Tick, Tick)> = Vec::with_capacity(wave.len());
+            let mut tasks: Vec<(SendSystem, bool, Tick, Tick, SystemLane)> = Vec::with_capacity(wave.len());
             for (slot, &idx) in wave.iter().enumerate() {
                 let system: *mut (dyn System<Out = ()> + 'static) = {
                     let boxed: &mut BoxedSystem = &mut schedule.nodes[idx].system;
                     &mut **boxed
                 };
                 let (last_run, this_run) = windows[slot];
-                tasks.push((SendSystem(system), should_run[slot], last_run, this_run));
+                let lane = schedule.nodes[idx].lane;
+                tasks.push((SendSystem(system), should_run[slot], last_run, this_run, lane));
             }
 
             // --- Dispatch the passing bodies in parallel. The `&mut World`
@@ -156,34 +162,90 @@ impl MultiThreadedExecutor {
             // deferred-command flush below.
             {
                 let cell = UnsafeWorldCell::new_mutable(world);
-                pool.scope(|scope| {
-                    for (system, run, last_run, this_run) in &tasks {
-                        if !*run {
-                            continue;
-                        }
-                        // Retarget the shared base cell to this system's own
-                        // change window before wrapping it for the task.
-                        let cell = SendCell(cell.with_ticks(*last_run, *this_run));
-                        let system = SendSystem(system.0);
-                        scope.spawn(move || {
-                            // Re-bind the whole wrappers so the closure captures
-                            // the `Send` `SendCell`/`SendSystem` values rather
-                            // than their non-`Send` `.0` fields (edition-2024
-                            // closures capture precise paths otherwise).
-                            let cell = cell;
-                            let system = system;
-                            // SAFETY: `system.0` is the unique pointer to this
-                            // wave member's system, and `cell.0` grants access to
-                            // a world region disjoint from every other task in
-                            // the wave (pairwise-compatible access; exclusive
-                            // systems run alone). No conflicting borrow is live,
-                            // so running the body is sound.
-                            unsafe {
-                                (*system.0).run_unsafe(cell.0);
-                            }
-                        });
+
+                // Dispatch each passing system onto its declared QoS lane
+                // (design §24.1): the ECS does not own a priority policy, it
+                // just maps the system's [`SystemLane`] onto a `prism_tasks`
+                // priority group so a saturated pool drains Critical ahead of
+                // Normal ahead of Background. One group is created lazily per
+                // distinct lane, indexed by `lane_rank`.
+                //
+                // We reproduce `TaskPool::scope`'s soundness contract by hand
+                // here, because the priority inbox (`spawn_in_group`) is a
+                // `'static` fire-and-forget path rather than a borrowed scope:
+                //   * every group is joined below before `cell` is dropped, so
+                //     no job (and none of its borrows) outlives the `&mut World`
+                //     borrow the cell stands for; and
+                //   * each body is `catch_unwind`-guarded and the first panic is
+                //     re-raised on this thread after the join, so a panicking
+                //     system never aborts a pool worker.
+                let panic_slot: Mutex<Option<Box<dyn Any + Send + 'static>>> = Mutex::new(None);
+                let mut groups: [Option<PriorityGroup>; 3] = [None, None, None];
+
+                for (system, run, last_run, this_run, lane) in &tasks {
+                    if !*run {
+                        continue;
                     }
-                });
+                    let rank = lane_rank(*lane);
+                    let group = groups[rank]
+                        .get_or_insert_with(|| pool.priority_group(lane.to_priority()));
+
+                    // Retarget the shared base cell to this system's own change
+                    // window before wrapping it for the task.
+                    let cell = SendCell(cell.with_ticks(*last_run, *this_run));
+                    let system = SendSystem(system.0);
+                    let panic_ref = &panic_slot;
+
+                    // Build the borrowed body, then erase its lifetime so it can
+                    // ride the pool's `'static` priority inbox.
+                    let body: Box<dyn FnOnce() + Send + '_> = Box::new(move || {
+                        // Re-bind the whole wrappers so the closure captures the
+                        // `Send` `SendCell`/`SendSystem` values rather than their
+                        // non-`Send` `.0` fields (edition-2024 closures capture
+                        // precise paths otherwise).
+                        let cell = cell;
+                        let system = system;
+                        // SAFETY: `system.0` is the unique pointer to this wave
+                        // member's system, and `cell.0` grants access to a world
+                        // region disjoint from every other task in the wave
+                        // (pairwise-compatible access; exclusive systems run
+                        // alone). No conflicting borrow is live, so running the
+                        // body is sound.
+                        let result = panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+                            (*system.0).run_unsafe(cell.0);
+                        }));
+                        if let Err(payload) = result {
+                            let mut slot = panic_ref.lock().unwrap();
+                            if slot.is_none() {
+                                *slot = Some(payload);
+                            }
+                        }
+                    });
+                    // SAFETY: the body only borrows `cell` (valid for the whole
+                    // dispatch) and `panic_ref` (this block's `panic_slot`). We
+                    // join every group below before either goes out of scope, so
+                    // erasing the borrow lifetime to `'static` for transport
+                    // through the inbox never lets a borrow outlive its referent
+                    // — the same contract `TaskPool::scope` upholds internally.
+                    let body: Box<dyn FnOnce() + Send + 'static> =
+                        unsafe { core::mem::transmute(body) };
+                    pool.spawn_in_group(group, body);
+                }
+
+                // Join every lane. `wait` drives the pool from this thread, so
+                // all bodies complete before `cell` (and the `&mut World` borrow
+                // it stands for) is released. We wait highest-priority-first and
+                // do not boost, preserving the lanes' relative urgency.
+                for rank in (0..groups.len()).rev() {
+                    if let Some(group) = &groups[rank] {
+                        pool.wait(group.counter());
+                    }
+                }
+
+                // Re-raise the first captured panic, matching `scope` semantics.
+                if let Some(payload) = panic_slot.lock().unwrap().take() {
+                    panic::resume_unwind(payload);
+                }
             }
 
             // --- Sync point: record each ran system's new `last_run` and flush
@@ -301,4 +363,19 @@ fn eval_should_run(
     }
 
     should_run
+}
+
+
+/// Dense `0..3` index for the three QoS lanes, in ascending urgency.
+///
+/// Used to key the per-wave `[Option<PriorityGroup>; 3]` so each lane gets at
+/// most one [`PriorityGroup`], and so the join loop can walk highest-urgency
+/// lane first by iterating the array in reverse.
+#[inline]
+fn lane_rank(lane: SystemLane) -> usize {
+    match lane {
+        SystemLane::Background => 0,
+        SystemLane::Normal => 1,
+        SystemLane::Critical => 2,
+    }
 }

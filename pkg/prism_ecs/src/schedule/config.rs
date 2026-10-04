@@ -21,6 +21,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::schedule::condition::{BoxedCondition, Condition};
+use crate::schedule::lane::SystemLane;
 use crate::schedule::phase::Phase;
 use crate::schedule::set::{SystemSet, SystemSetId};
 use crate::system::function::{BoxedSystem, IntoSystem};
@@ -34,6 +35,7 @@ pub struct SystemConfig {
     pub(crate) after: Vec<SystemSetId>,
     pub(crate) conditions: Vec<BoxedCondition>,
     pub(crate) phase: Phase,
+    pub(crate) lane: SystemLane,
 }
 
 impl SystemConfig {
@@ -45,6 +47,7 @@ impl SystemConfig {
             after: Vec::new(),
             conditions: Vec::new(),
             phase: Phase::Update,
+            lane: SystemLane::Normal,
         }
     }
 }
@@ -138,6 +141,16 @@ impl SystemConfigs {
         self
     }
 
+    /// Dispatch every leaf on the given QoS [`SystemLane`] (design §24.1),
+    /// overriding the default [`SystemLane::Normal`]. The multi-threaded
+    /// executor maps the lane onto a `prism_tasks` priority when it dispatches
+    /// the body; the single-threaded executor ignores it.
+    #[must_use]
+    pub fn lane(mut self, lane: SystemLane) -> Self {
+        self.for_each_leaf(&mut |config| config.lane = lane);
+        self
+    }
+
     pub(crate) fn for_each_leaf(&mut self, f: &mut impl FnMut(&mut SystemConfig)) {
         match self {
             SystemConfigs::Node(config) => f(config),
@@ -190,6 +203,12 @@ pub trait IntoSystemConfigs<Marker>: Sized {
     #[must_use]
     fn in_phase(self, phase: Phase) -> SystemConfigs {
         self.into_configs().in_phase(phase)
+    }
+
+    /// Dispatch on `lane` (see [`SystemConfigs::lane`]).
+    #[must_use]
+    fn lane(self, lane: SystemLane) -> SystemConfigs {
+        self.into_configs().lane(lane)
     }
 }
 
