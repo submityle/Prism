@@ -462,10 +462,16 @@ pub mod sim_pass_buffers;
 pub mod sim_space;
 pub mod single_scatter_reference;
 pub mod sky_state_transition;
+pub mod soft_apply_backstop;
 pub mod soft_attachment_project;
 pub mod soft_bending_project;
+pub mod soft_closest_point_on_segment;
+pub mod soft_distance_project;
 pub mod soft_long_range_project;
 pub mod soft_particle;
+pub mod soft_project_out_of_half_space;
+pub mod soft_project_out_of_obb;
+pub mod soft_project_out_of_sphere;
 pub mod soft_pull_to_target;
 pub mod soft_strain_limit_project;
 pub mod soft_tetra_volume_project;
@@ -1215,16 +1221,34 @@ pub use sim_pass_buffers::{GpuSimPassBuffers, GpuSimPassBuffersQuery, GpuSimPass
 pub use sim_space::{GpuSimSpace, GpuSimSpaceQuery, GpuSimSpaceResult};
 pub use single_scatter_reference::{GpuSingleScatterReference, SingleScatterReferenceQuery};
 pub use sky_state_transition::{GpuSkyStateTransition, SkyStateTransition};
+pub use soft_apply_backstop::{
+    GpuSoftApplyBackstop, SoftApplyBackstopQuery, SoftApplyBackstopResult,
+};
 pub use soft_attachment_project::{
     GpuSoftAttachmentProject, SoftAttachmentProjectQuery, SoftAttachmentProjectResult,
 };
 pub use soft_bending_project::{
     GpuSoftBendingProject, SoftBendingProjectQuery, SoftBendingProjectResult,
 };
+pub use soft_closest_point_on_segment::{
+    GpuSoftClosestPointOnSegment, SoftClosestPointOnSegmentQuery, SoftClosestPointOnSegmentResult,
+};
+pub use soft_distance_project::{
+    GpuSoftDistanceProject, SoftDistanceProjectQuery, SoftDistanceProjectResult,
+};
 pub use soft_long_range_project::{
     GpuSoftLongRangeProject, SoftLongRangeProjectQuery, SoftLongRangeProjectResult,
 };
 pub use soft_particle::{GpuSoftParticle, LinearizeQuery, SoftParticleQuery, SoftParticleSample};
+pub use soft_project_out_of_half_space::{
+    GpuSoftProjectOutOfHalfSpace, SoftProjectOutOfHalfSpaceQuery, SoftProjectOutOfHalfSpaceResult,
+};
+pub use soft_project_out_of_obb::{
+    GpuSoftProjectOutOfObb, SoftProjectOutOfObbQuery, SoftProjectOutOfObbResult,
+};
+pub use soft_project_out_of_sphere::{
+    GpuSoftProjectOutOfSphere, SoftProjectOutOfSphereQuery, SoftProjectOutOfSphereResult,
+};
 pub use soft_pull_to_target::{GpuSoftPullToTarget, SoftPullToTargetQuery, SoftPullToTargetResult};
 pub use soft_strain_limit_project::{
     GpuSoftStrainLimitProject, SoftStrainLimitProjectQuery, SoftStrainLimitProjectResult,
