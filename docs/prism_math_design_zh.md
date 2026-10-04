@@ -415,7 +415,7 @@ pkg/prism_math/
 - `double-double`（两个 f64 表 ~106 bit 尾数）：极端大世界坐标/高精度离线烘焙的扩展精度路径，无需上 f128。
 - 与 §13 定点档并列：定点保「跨平台位级一致」，补偿求和保「单平台高精度低漂移」，按场景选。
 
-### 24.5 经典前向自动微分（Dual Number，非 ML）
+### 24.5 经典前向自动微分（Dual Number，非 ML）—— ✅ 已交付（`dual` 模块）
 
 用对偶数（dual number）做**前向模式自动微分**，纯经典数值、与机器学习无关：
 
@@ -423,6 +423,8 @@ pkg/prism_math/
 - 供 **IK 雅可比**（`prism_anim_runtime` 解析雅可比替代有限差分）、物理约束雅可比、程序曲面法线、相机聚焦测距的解析梯度。
 - `DualVec3`/`DualQuat`：向量/旋转的微分传播；比有限差分精确且无步长选择难题。
 - 明确边界：仅前向模式一阶/二阶导数，**不是神经网络、无反向传播训练**，纯解析微分工具。
+
+**交付状态**：已落地 `pkg/prism_math/src/dual.rs`（`no_std`）。`Dual{re,du}` 携值+一阶导，含 `new/constant/variable/recip/sqrt/squared/powf/exp/ln/sin/cos/tan/abs` 与 `Neg/Add/Sub/Mul/Div/Mul<f32>`；`DualVec3{value,deriv}` 随单参数变化的 3-向量，含 `new/constant/from_components/dot/cross/length` 与 `Add/Sub/Mul<Dual>`。超越函数走 `crate::float`（libm，确定性）。8 单测绿：多项式/商法则/超越链式法则/sqrt/recip/曲线切线与速度/点叉积法则/`DualVec3::length` 导数，均以中心有限差分作独立 oracle 校验。IK/物理雅可比待消费方接入。
 
 ### 24.6 球谐函数（Spherical Harmonics，GI 数值）
 
@@ -459,4 +461,4 @@ pkg/prism_math/
 
 ### 24.10 诚实边界
 
-本章全部 PLANNED，无代码。落地优先级建议：**24.4 补偿求和**（直接服务确定归并，随 tasks M4）与 **24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）优先；24.3 区间算术 **已交付**（`interval`）；24.6 SH 随 `prism_gi`；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数随 IK/物理雅可比；24.8 曲面随地形；24.9 大世界定点随联机开放世界。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章全部 PLANNED，无代码。落地优先级建议：**24.4 补偿求和**（直接服务确定归并，随 tasks M4）与 **24.1 CPU/GPU 一致性**（随渲染 GPU 驱动，防闪烁）优先；24.3 区间算术 **已交付**（`interval`）；24.6 SH 随 `prism_gi`；24.7 Morton/Hilbert **已交付**（`spatial`）；24.5 对偶数 **已交付**（`dual`，供 IK/物理雅可比接入）；24.8 曲面随地形；24.9 大世界定点随联机开放世界。各条均纯经典数值，**无任何 AI/ML**。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

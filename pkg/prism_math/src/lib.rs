@@ -65,6 +65,7 @@ mod vec;
 
 pub mod dual_quat;
 pub mod f16;
+pub mod dual;
 pub mod interval;
 pub mod octahedral;
 pub mod soa;
@@ -107,6 +108,7 @@ pub use self::rng::{Pcg32, Rng, SplitMix64, Xoshiro256StarStar};
 pub use self::dual_quat::DualQuat;
 pub use self::f16::{F16, F16Vec2, F16Vec3, F16Vec4};
 pub use self::soa::SoaVec3;
+pub use self::dual::{Dual, DualVec3};
 pub use self::interval::{Interval, IntervalVec3};
 pub use self::spatial::{
     hilbert_decode3, hilbert_encode3, morton_decode2, morton_decode3, morton_encode2,
