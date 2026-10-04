@@ -207,4 +207,7 @@ mod tests_accessor;
 mod tests_net_delta;
 
 #[cfg(test)]
+mod tests_schema_derive;
+
+#[cfg(test)]
 mod tests_property_bridge;

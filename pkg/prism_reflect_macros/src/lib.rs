@@ -8,6 +8,20 @@
 //! - tuple structs (`TupleStruct` kind), and
 //! - enums with unit, tuple, and struct variants (`Enum` kind).
 //!
+//! Two companion derives target the AAA advanced-feature increments:
+//!
+//! - `#[derive(StaticTyped)]` (design §24.1) emits a `const`-constructed
+//!   `StaticTypeInfo` — a zero-allocation, zero-lazy-init type descriptor baked
+//!   into the binary's static data.
+//! - `#[derive(Accessors)]` (design §24.2) emits a `const` table of typed
+//!   `FieldAccessor`s (field `offset_of` constant + direct getter/setter `fn`
+//!   pointers) backing the `FieldAccess` ergonomic helpers and `AccessPlan`
+//!   path cache.
+//!
+//! Both companion derives support named-field structs (the shape the dotted
+//! field paths in §24.1/§24.2 navigate) and report a clear compile error for
+//! tuple structs, unit structs, enums, and unions.
+//!
 //! All generated code refers to the kernel through the absolute
 //! `::prism_reflect::` path, so it works both inside the kernel crate (which
 //! aliases `extern crate self as prism_reflect;`) and in downstream crates.
@@ -15,19 +29,26 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Fields, Index, parse_macro_input};
+use syn::{parse_macro_input, Data, DeriveInput, Fields, Index};
+
+mod attrs;
 
 /// Derive `Reflect` (and its companion traits) for a struct, tuple struct, or
 /// enum.
-#[proc_macro_derive(Reflect)]
+#[proc_macro_derive(Reflect, attributes(reflect))]
 pub fn derive_reflect(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let ident = input.ident.clone();
 
+    let metadata = match attrs::type_metadata_tokens(&input) {
+        Ok(metadata) => metadata,
+        Err(error) => return error.to_compile_error().into(),
+    };
+
     let expanded = match &input.data {
         Data::Struct(data) => match &data.fields {
-            Fields::Named(_) => derive_named_struct(&ident, &data.fields),
-            Fields::Unnamed(_) => derive_tuple_struct(&ident, &data.fields),
+            Fields::Named(_) => derive_named_struct(&ident, &data.fields, metadata),
+            Fields::Unnamed(_) => derive_tuple_struct(&ident, &data.fields, metadata),
             Fields::Unit => {
                 return syn::Error::new_spanned(
                     &input.ident,
@@ -37,7 +58,7 @@ pub fn derive_reflect(input: TokenStream) -> TokenStream {
                 .into();
             }
         },
-        Data::Enum(data) => derive_enum(&ident, data),
+        Data::Enum(data) => derive_enum(&ident, data, metadata),
         Data::Union(_) => {
             return syn::Error::new_spanned(
                 &input.ident,
@@ -52,18 +73,33 @@ pub fn derive_reflect(input: TokenStream) -> TokenStream {
 }
 
 /// Emit the `GetTypeRegistration` impl shared by every derived kind.
-fn get_type_registration(ident: &syn::Ident) -> TokenStream2 {
+fn get_type_registration(
+    ident: &syn::Ident,
+    metadata: Option<TokenStream2>,
+) -> TokenStream2 {
+    let body = match metadata {
+        Some(metadata) => quote! {
+            let mut __registration = ::prism_reflect::TypeRegistration::of::<#ident>();
+            __registration.insert(#metadata);
+            __registration
+        },
+        None => quote! { ::prism_reflect::TypeRegistration::of::<#ident>() },
+    };
     quote! {
         impl ::prism_reflect::GetTypeRegistration for #ident {
             fn get_type_registration() -> ::prism_reflect::TypeRegistration {
-                ::prism_reflect::TypeRegistration::of::<#ident>()
+                #body
             }
         }
     }
 }
 
 /// Generate impls for a named-field struct.
-fn derive_named_struct(ident: &syn::Ident, fields: &Fields) -> TokenStream2 {
+fn derive_named_struct(
+    ident: &syn::Ident,
+    fields: &Fields,
+    metadata: Option<TokenStream2>,
+) -> TokenStream2 {
     let Fields::Named(named) = fields else {
         unreachable!("derive_named_struct called with non-named fields");
     };
@@ -76,7 +112,7 @@ fn derive_named_struct(ident: &syn::Ident, fields: &Fields) -> TokenStream2 {
     let types: Vec<_> = named.named.iter().map(|f| f.ty.clone()).collect();
     let count = names.len();
     let indices: Vec<usize> = (0..count).collect();
-    let registration = get_type_registration(ident);
+    let registration = get_type_registration(ident, metadata);
 
     quote! {
         impl ::prism_reflect::Reflect for #ident {
@@ -178,7 +214,11 @@ fn derive_named_struct(ident: &syn::Ident, fields: &Fields) -> TokenStream2 {
 }
 
 /// Generate impls for a tuple struct.
-fn derive_tuple_struct(ident: &syn::Ident, fields: &Fields) -> TokenStream2 {
+fn derive_tuple_struct(
+    ident: &syn::Ident,
+    fields: &Fields,
+    metadata: Option<TokenStream2>,
+) -> TokenStream2 {
     let Fields::Unnamed(unnamed) = fields else {
         unreachable!("derive_tuple_struct called with non-unnamed fields");
     };
@@ -186,7 +226,7 @@ fn derive_tuple_struct(ident: &syn::Ident, fields: &Fields) -> TokenStream2 {
     let types: Vec<_> = unnamed.unnamed.iter().map(|f| f.ty.clone()).collect();
     let indices: Vec<usize> = (0..count).collect();
     let tuple_indices: Vec<Index> = (0..count).map(Index::from).collect();
-    let registration = get_type_registration(ident);
+    let registration = get_type_registration(ident, metadata);
 
     quote! {
         impl ::prism_reflect::Reflect for #ident {
@@ -275,7 +315,11 @@ fn derive_tuple_struct(ident: &syn::Ident, fields: &Fields) -> TokenStream2 {
 }
 
 /// Generate impls for an enum (unit/tuple/struct variants).
-fn derive_enum(ident: &syn::Ident, data: &syn::DataEnum) -> TokenStream2 {
+fn derive_enum(
+    ident: &syn::Ident,
+    data: &syn::DataEnum,
+    metadata: Option<TokenStream2>,
+) -> TokenStream2 {
     // Per-method match arms, assembled variant by variant.
     let mut name_arms = Vec::new();
     let mut index_arms = Vec::new();
@@ -328,7 +372,8 @@ fn derive_enum(ident: &syn::Ident, data: &syn::DataEnum) -> TokenStream2 {
                 let idxs: Vec<usize> = (0..fcount).collect();
                 let types: Vec<_> = unnamed.unnamed.iter().map(|f| f.ty.clone()).collect();
 
-                type_arms.push(quote! { Self::#vident(..) => ::prism_reflect::VariantType::Tuple, });
+                type_arms
+                    .push(quote! { Self::#vident(..) => ::prism_reflect::VariantType::Tuple, });
                 field_arms.push(quote! { Self::#vident(..) => ::core::option::Option::None, });
                 field_mut_arms.push(quote! { Self::#vident(..) => ::core::option::Option::None, });
                 field_at_arms.push(quote! {
@@ -384,7 +429,8 @@ fn derive_enum(ident: &syn::Ident, data: &syn::DataEnum) -> TokenStream2 {
                 let fcount = fidents.len();
                 let types: Vec<_> = named.named.iter().map(|f| f.ty.clone()).collect();
 
-                type_arms.push(quote! { Self::#vident { .. } => ::prism_reflect::VariantType::Struct, });
+                type_arms
+                    .push(quote! { Self::#vident { .. } => ::prism_reflect::VariantType::Struct, });
                 field_arms.push(quote! {
                     Self::#vident { #( #fidents ),* } => match name {
                         #( #fnames => ::core::option::Option::Some(#fidents as &dyn ::prism_reflect::Reflect), )*
@@ -442,7 +488,7 @@ fn derive_enum(ident: &syn::Ident, data: &syn::DataEnum) -> TokenStream2 {
         }
     }
 
-    let registration = get_type_registration(ident);
+    let registration = get_type_registration(ident, metadata);
 
     quote! {
         impl ::prism_reflect::Reflect for #ident {
@@ -526,4 +572,106 @@ fn derive_enum(ident: &syn::Ident, data: &syn::DataEnum) -> TokenStream2 {
 
         #registration
     }
+}
+
+
+/// Derive [`StaticTyped`] for a named-field struct — design §24.1.
+///
+/// Emits a `const`-constructed `StaticTypeInfo` (field names, `offset_of`
+/// constants, and `type_name`/`StableTypeId` accessors) with no `OnceLock`, no
+/// allocation, and no runtime registration cost.
+#[proc_macro_derive(StaticTyped)]
+pub fn derive_static_typed(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let ident = input.ident.clone();
+
+    let named = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(named) => named,
+            _ => return companion_unsupported(&input.ident, "StaticTyped"),
+        },
+        _ => return companion_unsupported(&input.ident, "StaticTyped"),
+    };
+
+    let names: Vec<_> = named
+        .named
+        .iter()
+        .map(|f| f.ident.clone().expect("named field has an identifier"))
+        .collect();
+    let name_strs: Vec<String> = names.iter().map(ToString::to_string).collect();
+    let types: Vec<_> = named.named.iter().map(|f| f.ty.clone()).collect();
+
+    quote! {
+        impl ::prism_reflect::StaticTyped for #ident {
+            const STATIC_TYPE_INFO: ::prism_reflect::StaticTypeInfo =
+                ::prism_reflect::StaticTypeInfo::new_struct(
+                    ::core::any::type_name::<#ident>,
+                    ::prism_reflect::StableTypeId::of_type::<#ident>,
+                    &[
+                        #(
+                            ::prism_reflect::StaticField::new(
+                                #name_strs,
+                                ::core::mem::offset_of!(#ident, #names),
+                                ::core::any::type_name::<#types>,
+                                ::prism_reflect::StableTypeId::of_type::<#types>,
+                            ),
+                        )*
+                    ],
+                );
+        }
+    }
+    .into()
+}
+
+/// Derive [`FieldAccess`] for a named-field struct — design §24.2.
+///
+/// Emits a `const` table of typed `FieldAccessor`s (each a field `offset_of`
+/// constant plus direct `&value.field` getter/setter `fn` pointers) so hot-path
+/// field access skips per-touch name hashing.
+#[proc_macro_derive(Accessors)]
+pub fn derive_accessors(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let ident = input.ident.clone();
+
+    let named = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(named) => named,
+            _ => return companion_unsupported(&input.ident, "Accessors"),
+        },
+        _ => return companion_unsupported(&input.ident, "Accessors"),
+    };
+
+    let names: Vec<_> = named
+        .named
+        .iter()
+        .map(|f| f.ident.clone().expect("named field has an identifier"))
+        .collect();
+    let name_strs: Vec<String> = names.iter().map(ToString::to_string).collect();
+
+    quote! {
+        impl ::prism_reflect::FieldAccess for #ident {
+            const ACCESSORS: &'static [::prism_reflect::FieldAccessor<Self>] = &[
+                #(
+                    ::prism_reflect::FieldAccessor::new(
+                        #name_strs,
+                        ::core::mem::offset_of!(#ident, #names),
+                        |__value: &#ident| &__value.#names as &dyn ::prism_reflect::Reflect,
+                        |__value: &mut #ident| &mut __value.#names as &mut dyn ::prism_reflect::Reflect,
+                    ),
+                )*
+            ];
+        }
+    }
+    .into()
+}
+
+/// Shared compile error for the companion derives when applied to an
+/// unsupported shape (tuple/unit struct, enum, or union).
+fn companion_unsupported(ident: &syn::Ident, derive: &str) -> TokenStream {
+    syn::Error::new_spanned(
+        ident,
+        format!("#[derive({derive})] only supports named-field structs"),
+    )
+    .to_compile_error()
+    .into()
 }
