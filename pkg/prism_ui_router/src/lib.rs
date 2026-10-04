@@ -11,6 +11,9 @@
 //!
 //! * [`Location`] — a parsed path with segments, query parameters, and
 //!   fragment.
+//! * [`QueryString`] / [`serialize_query_pairs`] / [`parse_query_pairs`] —
+//!   order-preserving query-string building and parsing with duplicate-key
+//!   (`getAll`) support.
 //! * [`RoutePattern`] / [`RouteMatch`] — a compiled pattern (static segments,
 //!   `:name` params, trailing `*name` wildcard) and the captures it produces.
 //! * [`RouteTable`] / [`RouteId`] — an ordered, first-match-wins set of routes.
@@ -55,6 +58,7 @@ mod guard;
 mod matcher;
 mod param;
 mod path;
+mod query;
 mod route;
 mod router;
 
@@ -65,5 +69,6 @@ pub use guard::{
 pub use matcher::{RouteId, RouteTable};
 pub use param::{parse_param, parse_param_or, FromParam};
 pub use path::Location;
+pub use query::{parse_query_pairs, serialize_query_pairs, QueryString};
 pub use route::{RouteMatch, RoutePattern};
 pub use router::Router;
