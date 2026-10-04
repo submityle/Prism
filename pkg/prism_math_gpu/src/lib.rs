@@ -37,9 +37,11 @@ pub mod buffer;
 pub mod context;
 pub mod projection;
 pub mod quat;
+pub mod skinning;
 pub mod view;
 
 pub use context::{GpuContext, block_on};
 pub use projection::{GpuProjection, ProjectionKind};
 pub use quat::GpuQuatRotate;
+pub use skinning::{GpuDualQuatSkin, Influence, MAX_INFLUENCES};
 pub use view::{GpuView, ViewKind};

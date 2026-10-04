@@ -225,3 +225,68 @@ fn prism_look_to_rh(eye: vec3<f32>, dir: vec3<f32>, up: vec3<f32>) -> mat4x4<f32
 fn prism_look_at_rh(eye: vec3<f32>, focus: vec3<f32>, up: vec3<f32>) -> mat4x4<f32> {\n\
     return prism_look_to_rh(eye, focus - eye, up);\n\
 }\n";
+/// The authoritative WGSL source for a 4-influence **dual-quaternion skinning**
+/// (`DLB` / dual-quaternion linear blend) vertex transform, mirroring the CPU
+/// path [`crate::DualQuat::blend_weighted`] followed by
+/// [`crate::DualQuat::transform_point3`] **step for step**: the first
+/// non-zero-weight bone fixes the hemisphere pivot, later bones are flipped into
+/// it before the weighted accumulation, the sum is renormalized to the unit
+/// invariants (`|real| = 1`, `dot(real, dual) = 0`), and the point is finally
+/// mapped by `rotation * p + translation`.
+///
+/// `prism_dq_skin4` depends on `prism_quat_rotate` from [`WGSL_QUAT_ROTATE`];
+/// a consumer composes the two fragments (and never re-types them) so the GPU
+/// skinning twin cannot drift from the CPU reference. Four bone influences is
+/// the standard AAA skinning fan-in; a zero weight contributes nothing (matching
+/// the CPU `w == 0` skip), so narrower fan-ins pad with zero weights.
+pub const WGSL_DUAL_QUAT_SKIN: &str = "\
+fn prism_quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {\n\
+    return vec4<f32>(\n\
+        a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,\n\
+        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,\n\
+        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,\n\
+        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z\n\
+    );\n\
+}\n\
+\n\
+fn prism_quat_conj(q: vec4<f32>) -> vec4<f32> {\n\
+    return vec4<f32>(-q.x, -q.y, -q.z, q.w);\n\
+}\n\
+\n\
+fn prism_dq_skin4(\n\
+    r0: vec4<f32>, d0: vec4<f32>,\n\
+    r1: vec4<f32>, d1: vec4<f32>,\n\
+    r2: vec4<f32>, d2: vec4<f32>,\n\
+    r3: vec4<f32>, d3: vec4<f32>,\n\
+    w: vec4<f32>, p: vec3<f32>) -> vec3<f32> {\n\
+    var reals = array<vec4<f32>, 4>(r0, r1, r2, r3);\n\
+    var duals = array<vec4<f32>, 4>(d0, d1, d2, d3);\n\
+    var acc_real = vec4<f32>(0.0, 0.0, 0.0, 0.0);\n\
+    var acc_dual = vec4<f32>(0.0, 0.0, 0.0, 0.0);\n\
+    var has_pivot = false;\n\
+    var pivot = vec4<f32>(0.0, 0.0, 0.0, 0.0);\n\
+    for (var i = 0u; i < 4u; i = i + 1u) {\n\
+        let wi = w[i];\n\
+        if (wi == 0.0) { continue; }\n\
+        var r = reals[i];\n\
+        var d = duals[i];\n\
+        if (has_pivot) {\n\
+            if (dot(pivot, r) < 0.0) {\n\
+                r = -r;\n\
+                d = -d;\n\
+            }\n\
+        } else {\n\
+            pivot = r;\n\
+            has_pivot = true;\n\
+        }\n\
+        acc_real = acc_real + r * wi;\n\
+        acc_dual = acc_dual + d * wi;\n\
+    }\n\
+    let inv = 1.0 / length(acc_real);\n\
+    let real = acc_real * inv;\n\
+    var dual = acc_dual * inv;\n\
+    let dd = dot(real, dual);\n\
+    dual = dual - real * dd;\n\
+    let t4 = 2.0 * prism_quat_mul(dual, prism_quat_conj(real));\n\
+    return prism_quat_rotate(real, p) + t4.xyz;\n\
+}\n";
