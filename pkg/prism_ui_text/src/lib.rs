@@ -15,6 +15,7 @@
 //!
 //! # Modules
 //!
+//! * [`align`] — line alignment, justification and ellipsis truncation.
 //! * [`segmentation`] — grapheme-cluster and word segmentation.
 //! * [`line_break`] — UAX#14 break opportunities and greedy width wrapping.
 //! * [`optimal_break`] — minimum-raggedness (Knuth–Plass style) wrapping.
@@ -49,6 +50,7 @@
 
 extern crate alloc;
 
+pub mod align;
 pub mod bidi;
 pub mod cache;
 pub mod cursor;
@@ -58,6 +60,10 @@ pub mod rich_text;
 pub mod segmentation;
 pub mod shaper;
 
+pub use align::{
+    align_offset, is_word_separator, justification_opportunities, line_width, place_line,
+    truncate_to_width, JustifyMode, PlacedLine,
+};
 pub use bidi::{base_direction, char_direction, resolve_levels, BidiInfo, Direction, Run};
 pub use cache::{CacheKey, ShapeCache};
 pub use cursor::{caret_positions, hit_test, x_for_offset, Caret, Composition, Selection};
