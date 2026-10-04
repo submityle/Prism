@@ -249,8 +249,19 @@ struct SpecDenoiseReprojectConfig {
 @group(0) @binding(4) var sdr_prev_history: texture_2d<f32>;
 // Previous frame's reverse-Z device depth, for the disocclusion guard.
 @group(0) @binding(5) var sdr_prev_depth: texture_2d<f32>;
+// Previous frame's history-clamp meta plane: xyz = view normal * 0.5 + 0.5,
+// w = perceptual roughness. Reprojected forward to feed the clamp's normal
+// consistency guard (NRD reprojects every history plane together).
+@group(0) @binding(6) var sdr_prev_meta: texture_2d<f32>;
+// Previous frame's history-clamp luminance plane: r = fast EMA, g = slow EMA.
+@group(0) @binding(7) var sdr_prev_luma: texture_2d<f32>;
 // Write-only reprojected history (rgb) + reprojection confidence (a).
-@group(0) @binding(6) var sdr_reprojected: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(8) var sdr_reprojected: texture_storage_2d<rgba16float, write>;
+// Write-only reprojected meta: xyz = prior view normal * 0.5 + 0.5 (from the
+// prev meta plane), w = prior accumulation age (from the prev history alpha).
+@group(0) @binding(9) var sdr_reprojected_meta: texture_storage_2d<rgba16float, write>;
+// Write-only reprojected luminance EMAs: r = fast, g = slow.
+@group(0) @binding(10) var sdr_reprojected_luma: texture_storage_2d<rgba16float, write>;
 
 fn sdr_params_from_config() -> SdrParams {
     var p: SdrParams;
@@ -300,8 +311,11 @@ fn spec_denoise_reproject(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let device_depth = textureLoad(sdr_depth, pixel, 0).x;
     if device_depth <= 0.0 {
-        // Background / sky: no reflection history to reproject.
+        // Background / sky: no reflection history to reproject. Clear every
+        // reprojected plane so the clamp pass seeds cleanly from the resolve.
         textureStore(sdr_reprojected, pixel, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        textureStore(sdr_reprojected_meta, pixel, vec4<f32>(0.5, 0.5, 0.5, 0.0));
+        textureStore(sdr_reprojected_luma, pixel, vec4<f32>(0.0, 0.0, 0.0, 0.0));
         return;
     }
 
@@ -338,6 +352,12 @@ fn spec_denoise_reproject(@builtin(global_invocation_id) id: vec3<u32>) {
 
     var history = vec3<f32>(0.0, 0.0, 0.0);
     var confidence = 0.0;
+    // Companion history planes, defaulted to a clean seed (identity-ish normal,
+    // age 0, zero luma) so a reprojection miss restarts accumulation cleanly.
+    var prior_normal = vec3<f32>(0.5, 0.5, 0.5);
+    var prior_age = 0.0;
+    var prior_fast = 0.0;
+    var prior_slow = 0.0;
     if in_bounds {
         let prev_px = clamp(
             vec2<i32>(i32(prev.x * extent.x), i32(prev.y * extent.y)),
@@ -355,11 +375,26 @@ fn spec_denoise_reproject(@builtin(global_invocation_id) id: vec3<u32>) {
                 let ph = textureLoad(sdr_prev_history, prev_px, 0);
                 history = sdr_sanitize_vec(ph.xyz);
                 confidence = reproj.confidence;
+                // Reproject the companion planes from the same accepted tap so
+                // the clamp reads normal/age/luma registered to this pixel. The
+                // accumulation age rides in the history alpha; the stored normal
+                // and the luma EMAs ride in their own planes.
+                prior_normal = clamp(
+                    textureLoad(sdr_prev_meta, prev_px, 0).xyz,
+                    vec3<f32>(0.0, 0.0, 0.0),
+                    vec3<f32>(1.0, 1.0, 1.0),
+                );
+                prior_age = max(sdr_sanitize_scalar(ph.w), 0.0);
+                let pl = textureLoad(sdr_prev_luma, prev_px, 0);
+                prior_fast = max(sdr_sanitize_scalar(pl.x), 0.0);
+                prior_slow = max(sdr_sanitize_scalar(pl.y), 0.0);
             }
         }
     }
 
     textureStore(sdr_reprojected, pixel, vec4<f32>(history, confidence));
+    textureStore(sdr_reprojected_meta, pixel, vec4<f32>(prior_normal, prior_age));
+    textureStore(sdr_reprojected_luma, pixel, vec4<f32>(prior_fast, prior_slow, 0.0, 0.0));
 }
 
 // --- compile-coverage harness -------------------------------------------------
