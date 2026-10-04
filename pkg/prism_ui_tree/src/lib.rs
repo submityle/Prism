@@ -37,11 +37,13 @@ extern crate alloc;
 
 pub mod arena;
 pub mod node;
+pub mod query;
 pub mod reconcile;
 pub mod tree;
 
 pub use arena::{Arena, NodeId};
 pub use node::Node;
+pub use query::Ancestors;
 pub use reconcile::{diff_keyed, Diff, DiffOp};
 pub use tree::Tree;
 
