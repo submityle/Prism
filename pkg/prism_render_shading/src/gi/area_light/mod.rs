@@ -12,5 +12,6 @@
 
 pub mod ltc_lut;
 pub mod polygon;
+pub mod representative;
 pub mod resolve;
 pub mod shapes;

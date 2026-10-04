@@ -1218,6 +1218,101 @@ fn accumulate_area_lights(lit: SurfaceSample, frame: ShadingFrame, world_positio
     return total;
 }
 
+// Converts a rectangle area light into an equivalent `DirectLightSample` for
+// the specialized toon / hair / water lobes using the Most-Representative-Point
+// technique (Karis 2013). The GGX-family closures take the full LTC
+// `accumulate_area_lights` term instead; these lobes use specialized BRDFs for
+// which the raw LTC specular transform is meaningless. `visibility < 0` signals
+// a non-contributing light the caller must skip. Byte-exact twin of the CPU
+// golden `prism_render_shading::gi::area_light::representative`.
+fn rect_representative_sample(world_position: vec3<f32>, normal_in: vec3<f32>, light: AreaLight) -> DirectLightSample {
+    var out: DirectLightSample;
+    out.direction = vec3<f32>(0.0, 1.0, 0.0);
+    out.illuminance = vec3<f32>(0.0, 0.0, 0.0);
+    out.visibility = -1.0;
+
+    // Non-rect shapes and degenerate / disabled records contribute nothing.
+    if (light.shape != AL_SHAPE_RECT) {
+        return out;
+    }
+    if (light.half_width <= 0.0 || light.half_height <= 0.0) {
+        return out;
+    }
+
+    let center = vec3<f32>(light.pos_x, light.pos_y, light.pos_z);
+    let axis_u = vec3<f32>(light.axis_u_x, light.axis_u_y, light.axis_u_z);
+    let axis_v = vec3<f32>(light.axis_v_x, light.axis_v_y, light.axis_v_z);
+
+    // One-sided emitters cull receivers strictly behind the emitter plane.
+    if (light.two_sided == 0u) {
+        let lnormal = normalize(cross(axis_u, axis_v));
+        if (dot(world_position - center, lnormal) < 0.0) {
+            return out;
+        }
+    }
+
+    // Optional smooth range window (`range <= 0` disables it).
+    var atten = 1.0;
+    if (light.range > 0.0) {
+        let dist = length(center - world_position);
+        if (dist >= light.range) {
+            return out;
+        }
+        let x = clamp(1.0 - dist / light.range, 0.0, 1.0);
+        atten = x * x;
+    }
+
+    let n = brdf_normalize_or(normal_in, vec3<f32>(0.0, 1.0, 0.0));
+
+    // Clamped-cosine form factor in an orthonormal LTC frame about the normal.
+    // The clamped cosine only reads the +Z (normal) component, so any stable
+    // in-plane axis works; this is view-independent.
+    var helper = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(n.y) >= 0.999) {
+        helper = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    let tangent = normalize(cross(helper, n));
+    let bitangent = cross(n, tangent);
+    let eu = axis_u * light.half_width;
+    let ev = axis_v * light.half_height;
+    // Counter-clockwise corners: c-u-v, c+u-v, c+u+v, c-u+v.
+    var corners: array<vec3<f32>, 4>;
+    corners[0] = al_to_frame(center - eu - ev - world_position, tangent, bitangent, n);
+    corners[1] = al_to_frame(center + eu - ev - world_position, tangent, bitangent, n);
+    corners[2] = al_to_frame(center + eu + ev - world_position, tangent, bitangent, n);
+    corners[3] = al_to_frame(center - eu + ev - world_position, tangent, bitangent, n);
+    let form_factor = al_polygon_form_factor_quad(corners);
+    if (form_factor <= 0.0 || !al_is_finite(form_factor)) {
+        return out;
+    }
+
+    // Representative direction: toward the point on the rectangle nearest the
+    // receiver (places the specialized specular highlight). Axes are
+    // renormalized defensively so a mildly non-unit axis still clamps against
+    // true world distances.
+    let au = brdf_normalize_or(axis_u, vec3<f32>(1.0, 0.0, 0.0));
+    let av = brdf_normalize_or(axis_v, vec3<f32>(0.0, 1.0, 0.0));
+    let d = world_position - center;
+    let cu = clamp(dot(d, au), -light.half_width, light.half_width);
+    let cv = clamp(dot(d, av), -light.half_height, light.half_height);
+    let closest = center + au * cu + av * cv;
+    let direction = brdf_normalize_or(closest - world_position, n);
+    let n_dot_l = max(dot(n, direction), 1.0e-3);
+
+    // `illuminance = radiance * F_diff / NdotL * atten`, so a lobe's own
+    // trailing `* NdotL` reproduces the analytic Lambert area result.
+    let radiance = vec3<f32>(light.color_x, light.color_y, light.color_z) * light.intensity;
+    let illuminance = radiance * (form_factor / n_dot_l * atten);
+    if (!al_vec_is_finite(illuminance)) {
+        return out;
+    }
+
+    out.direction = direction;
+    out.illuminance = illuminance;
+    out.visibility = 1.0;
+    return out;
+}
+
 // Physically based integrator shared by every lit closure. Accumulates the
 // principled GGX lobe over all analytic lights, then adds the indirect and
 // emissive terms exactly once. Mirrors the CPU `_ =>` principled branch.
@@ -1359,6 +1454,15 @@ fn shade_toon(
         accumulated = accumulated + stylized_direct(lit, frame, to_direct_sample(sample), stylized);
     }
 
+    let area_count = arrayLength(&area_lights);
+    for (var a = 0u; a < area_count; a = a + 1u) {
+        let area_sample = rect_representative_sample(world_position, frame.normal, area_lights[a]);
+        if (area_sample.visibility < 0.0) {
+            continue;
+        }
+        accumulated = accumulated + stylized_direct(lit, frame, area_sample, stylized);
+    }
+
     return accumulated + indirect + emissive;
 }
 
@@ -1481,6 +1585,15 @@ fn shade_hair(
         accumulated = accumulated + hair_direct(lit, frame, to_direct_sample(sample));
     }
 
+    let area_count = arrayLength(&area_lights);
+    for (var a = 0u; a < area_count; a = a + 1u) {
+        let area_sample = rect_representative_sample(world_position, frame.normal, area_lights[a]);
+        if (area_sample.visibility < 0.0) {
+            continue;
+        }
+        accumulated = accumulated + hair_direct(lit, frame, area_sample);
+    }
+
     return accumulated + indirect + emissive;
 }
 
@@ -1520,6 +1633,15 @@ fn shade_water(
             continue;
         }
         accumulated = accumulated + water_direct(lit, frame, to_direct_sample(sample));
+    }
+
+    let area_count = arrayLength(&area_lights);
+    for (var a = 0u; a < area_count; a = a + 1u) {
+        let area_sample = rect_representative_sample(world_position, frame.normal, area_lights[a]);
+        if (area_sample.visibility < 0.0) {
+            continue;
+        }
+        accumulated = accumulated + water_direct(lit, frame, area_sample);
     }
 
     return accumulated + indirect + emissive;

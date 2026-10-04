@@ -18,6 +18,7 @@ use crate::{
 };
 use crate::gi::area_light::ltc_lut::LtcLut;
 use crate::gi::area_light::resolve::{accumulate_area_lights, AreaLightRect};
+use crate::gi::area_light::representative::rect_representative_sample;
 
 /// Identity `world_from_local` (row-major affine) used when an instance carries
 /// no transform; lifting a local-space surface through it is a no-op.
@@ -128,8 +129,11 @@ pub struct LightingEnvironment<'a> {
     /// Stylized (NPR) front-end controls used by the `MaterialShadingClass::Npr`
     /// path. The default reproduces the historical four-band toon lobe.
     pub stylized: StylizedParams,
-    /// Resident polygonal rectangle area lights (LTC). Evaluated only by the
-    /// physically based lobes (Principled/Cloth/Subsurface/ClearCoat/Custom).
+    /// Resident polygonal rectangle area lights (LTC). The physically based
+    /// lobes (Principled/Cloth/Subsurface/ClearCoat/Custom) integrate the full
+    /// Linearly-Transformed-Cosine term; the specialized Toon/Hair/Water lobes
+    /// integrate each rectangle via the Most-Representative-Point conversion in
+    /// [`crate::gi::area_light::representative`].
     pub area: &'a [AreaLightRect],
     /// Baked LTC coefficient LUT shared by every area light. `None` collapses
     /// the area specular lobe to the diffuse-only clamped-cosine term.
@@ -413,6 +417,16 @@ pub fn resolve_pixel(
                 );
             }
         }
+        for light in lights.area {
+            if let Some(sample) =
+                rect_representative_sample(geometry.position, frame.normal, light)
+            {
+                accumulated = add(
+                    accumulated,
+                    crate::evaluate_stylized_direct(lit_surface, frame, sample, &lights.stylized),
+                );
+            }
+        }
         add(add(accumulated, indirect), emissive)
     };
 
@@ -480,6 +494,16 @@ pub fn resolve_pixel(
                 );
             }
         }
+        for light in lights.area {
+            if let Some(sample) =
+                rect_representative_sample(geometry.position, frame.normal, light)
+            {
+                accumulated = add(
+                    accumulated,
+                    crate::evaluate_hair_direct(lit_surface, frame, sample),
+                );
+            }
+        }
         add(add(accumulated, indirect), emissive)
     };
 
@@ -497,6 +521,16 @@ pub fn resolve_pixel(
         }
         for light in lights.punctual {
             if let Some(sample) = light.sample(geometry.position) {
+                accumulated = add(
+                    accumulated,
+                    crate::evaluate_water_direct(lit_surface, frame, sample),
+                );
+            }
+        }
+        for light in lights.area {
+            if let Some(sample) =
+                rect_representative_sample(geometry.position, frame.normal, light)
+            {
                 accumulated = add(
                     accumulated,
                     crate::evaluate_water_direct(lit_surface, frame, sample),
