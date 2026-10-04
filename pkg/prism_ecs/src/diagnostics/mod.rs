@@ -190,6 +190,11 @@
 //!   hot reused templates, and `IsA` cycle detection — surfacing deep
 //!   resolution chains, authoring hubs, and modelling bugs
 //!   (design §16.6 / §16.3 / §11).
+//! * [`shared_batch_keys`] — live shared-component batch-key census
+//!   (design §6 / §15): folds the archetype graph's shared bindings into
+//!   per-`(component, value)` batch keys and per-component roll-ups,
+//!   surfacing instancing fan-out vs. archetype-fragmentation pressure
+//!   (design §22 risk #5).
 //! * [`sparse_set_occupancy`] — sparse-set storage occupancy / keyspace-
 //!   fragmentation census (design §6 四态存储): the out-of-band counterpart
 //!   to the Table-path reports above — per sparse-set component and
@@ -250,6 +255,7 @@ pub mod relation_cycles;
 pub mod relation_topology;
 pub mod required_closure;
 pub mod schedule_ambiguity_audit;
+pub mod shared_batch_keys;
 pub mod sparse_set_occupancy;
 pub mod step_inspector;
 pub mod storage_distribution;
@@ -305,6 +311,9 @@ pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
 pub use required_closure::{RequiredClosureEntry, RequiredClosureReport};
 pub use schedule_ambiguity_audit::{
     AmbiguousSystemEntry, ContendedComponentEntry, ContendedResourceEntry, ScheduleAmbiguityAudit,
+};
+pub use shared_batch_keys::{
+    SharedBatchKeyEntry, SharedComponentBatchEntry, SharedComponentBatchReport,
 };
 pub use sparse_set_occupancy::{SparseSetOccupancyEntry, SparseSetOccupancyReport};
 pub use step_inspector::{StepObservation, SteppingInspector};
