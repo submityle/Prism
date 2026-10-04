@@ -60,6 +60,7 @@ pub mod coupling_frame;
 pub mod dispersion;
 pub mod fft;
 pub mod flip;
+pub mod flip_sort;
 pub mod foam;
 pub mod gpu;
 pub mod initial_spectrum;
