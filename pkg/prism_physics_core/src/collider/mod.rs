@@ -552,6 +552,8 @@ pub mod velocity_gradient;
 pub use velocity_gradient::VelocityGradientField;
 pub mod granular_eos;
 pub use granular_eos::GranularEquationOfState;
+pub mod granular_transport;
+pub use granular_transport::GranularTransport;
 
 /// A handle into a [`ShapeRegistry`].
 ///
