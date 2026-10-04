@@ -58,6 +58,7 @@ pub mod focus;
 pub mod geometry;
 pub mod gesture;
 pub mod hit_test;
+pub mod velocity;
 
 pub use dispatch::{DispatchOutcome, Dispatcher, EventContext};
 pub use event::{
@@ -70,3 +71,4 @@ pub use gesture::{
     PinchRecognizer, TapRecognizer,
 };
 pub use hit_test::{hit_test, HitNode, PointerEvents};
+pub use velocity::VelocityTracker;
