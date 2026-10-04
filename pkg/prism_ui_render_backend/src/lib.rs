@@ -71,6 +71,7 @@ pub mod measure;
 pub mod polygon;
 pub mod raster;
 pub mod scene;
+pub mod segment;
 pub mod simplify;
 pub mod sdf;
 
@@ -86,4 +87,5 @@ pub use measure::{area, centroid, signed_area};
 pub use polygon::{sd_polygon, sd_triangle};
 pub use raster::{rasterize, Framebuffer};
 pub use scene::RetainedScene;
+pub use segment::segment_intersection;
 pub use simplify::simplify;
