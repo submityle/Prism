@@ -46,6 +46,13 @@
 //!   `prism_render_architecture::ray_scene::footprint::RayFootprint`
 //!   math ray-for-ray, skipping gracefully when no adapter is present.
 //!
+//! * [`scene`] - the render-world bridge that turns the stable per-geometry
+//!   surface table and the per-instance object→world transforms into a packed
+//!   `GpuBlasPool` / `GpuTlasBuffers` pair, the one input the upload path
+//!   needs that the golden layout could not synthesize on its own. It is a
+//!   pure, device-free `CPU` transform verified against the golden
+//!   `GpuTlasBuffers::closest_hit` walk.
+//!
 //! * [`resources`] / [`pipeline`] / [`bind_groups`] / [`dispatch`] - the
 //!   production service that promotes the proven parity harness into a
 //!   reusable, consumer-callable object. [`GpuRayTraversal`] compiles the three
@@ -66,6 +73,7 @@ mod bind_groups;
 mod dispatch;
 mod pipeline;
 mod resources;
+mod scene;
 
 #[cfg(test)]
 mod footprint_gpu_tests;
