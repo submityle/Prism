@@ -61,6 +61,11 @@
 //!   deletes, how many edges unlink, and how many trip a panic guard;
 //!   the operational dual of [`relation_graph`]'s shape view
 //!   (design §16.6 / §23.2 / §13.1).
+//! * [`relation_closure`] — transitive-closure amplification census
+//!   (design §11 / §16.6): for every relation kind registered as
+//!   transitive, how large its reachability closure grows versus
+//!   its direct edges, quantifying the cost of not caching the
+//!   closure (design §16.6 / §11).
 //! * [`relation_graph`] — read-only relation-kind and edge-topology summary
 //!   (design §16.6 "关系图谱").
 //! * [`relation_cycles`] — per-relation directed-cycle detection over the
@@ -154,6 +159,7 @@ pub mod partition_occupancy;
 pub mod prefab_inheritance;
 pub mod profiler;
 pub mod relation_cascade;
+pub mod relation_closure;
 pub mod relation_graph;
 pub mod relation_cycles;
 pub mod relation_topology;
@@ -188,6 +194,7 @@ pub use owning_group_packing::{OwningGroupPackingEntry, OwningGroupPackingReport
 pub use partition_occupancy::{CellOccupancyEntry, PartitionOccupancyReport};
 pub use prefab_inheritance::{PrefabInheritanceReport, PrefabInstanceEntry, PrefabTemplateEntry};
 pub use relation_cascade::{CascadeBlastEntry, RelationCascadeReport, RelationPolicyEntry};
+pub use relation_closure::{RelationClosureReport, TransitiveClosureEntry};
 pub use relation_graph::{RelationGraphReport, RelationKindReport};
 pub use relation_cycles::{RelationCycleEntry, RelationCycleReport};
 pub use relation_topology::{RelationTopologyEntry, RelationTopologyReport};
