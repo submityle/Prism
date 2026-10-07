@@ -9,7 +9,7 @@
 > - **网络时间**：GGPO/Quantum 的 tick 对齐、NTP 式时钟同步、插值延迟缓冲
 > 本文为纯经典时间/积分路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补：24.1 录制回放 + 24.4 帧预算自适应质量 + 24.5 长会话漂移修正 + 24.6 游戏内定时调度器 + 24.8 多世界/确定性审计已落地，24.7 挂起/恢复已落地纯 CPU 可做部分（时间戳层确定性修正，OS 信号接线仍 PLANNED），余项（24.2/24.3）仍为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：输入+时间录制回放/帧节奏与低延迟(VRR/Reflex 形态)/帧预算驱动自适应质量/长会话高精度与漂移修正/游戏内定时调度器/挂起恢复与后台暂停/多世界时间域隔离/确定性时间审计）
+- 版本: v0.2（核心 M0–M6 已落地并验证；§24 高级增补：24.1 录制回放 + 24.4 帧预算自适应质量 + 24.5 长会话漂移修正 + 24.6 游戏内定时调度器 + 24.8 多世界/确定性审计已落地，24.7 挂起/恢复已落地纯 CPU 可做部分（时间戳层确定性修正，OS 信号接线仍 PLANNED），24.2 帧节奏与低延迟 + 24.3 VRR 已落地纯 CPU 调度数据模型（`pacing`）；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：输入+时间录制回放/帧节奏与低延迟(VRR/Reflex 形态)/帧预算驱动自适应质量/长会话高精度与漂移修正/游戏内定时调度器/挂起恢复与后台暂停/多世界时间域隔离/确定性时间审计）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_platform`（单调高精度时钟），可选 `prism_math`（有理/定点时间）、`prism_diagnostic`
 - 层级定位: ECS 文档 L3「运行时服务」；App 文档 §8 固定步长的时钟供给方
@@ -315,7 +315,7 @@ pkg/prism_time/
 
 ## 23. 诚实边界与风险
 
-- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（lib 测试全绿，含 §24.1/§24.8 新增 20 项）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」中 24.1/24.4/24.5/24.6/24.8 已落地、24.7 已落地纯 CPU 可做部分（OS 挂起信号接线仍 PLANNED），余项（24.2/24.3）仍为 PLANNED，按本文优先级随消费方接线落地。
+- M0–M6 核心路线图**已全部落地并通过验证**：实现 + 单测（lib 测试全绿，含 §24.1/§24.8 新增 20 项）+ 基准，`cargo clippy --all-targets` 零告警、`cargo test` 零失败。状态随代码演进；§24「AAA 高级功能增补」中 24.1/24.4/24.5/24.6/24.8 已落地、24.7 已落地纯 CPU 可做部分（OS 挂起信号接线仍 PLANNED），24.2 帧节奏/低延迟 + 24.3 VRR 已落地纯 CPU 调度数据模型（`pacing`，真实 present 时间戳采集与 RHI 提交/显示 VRR 范围读取属 `prism_app`/平台接线）。
 - **高风险项**：
   1. **死亡螺旋熔断参数（M2）**：`max_delta`/`max_substeps` 错配会在卡顿时表现为慢放或穿墙；须按内容压测标定，并与 App §8 保持单一真相（避免两处各算一套累加器）。
   2. **确定性步长（M4）**：`f32` 的 1/60 不精确会长时程漂移；必须有理/定点 + 整数 tick，且跨平台一致要定点数学路径验证。
@@ -345,7 +345,7 @@ pkg/prism_time/
 - **严格复现**：回放用录制 delta 驱动 `TickClock`，与原跑逐帧 tick/累加器位等价；同种子经确定性 PRNG 复现同一随机流；配合 `multiworld` 审计可录一段玩法、CI 回放断言状态哈希逐帧一致（闭环）。
 - 纯整数/`Duration` 运算，`no_std + alloc`（时间线用 `alloc::Vec`，热路径无额外分配）。单测见 `tests_record_replay.rs`（录→放逐帧一致、种子复现、时钟逐帧对齐、拖拽、空录制与边界、闭环哈希一致）。
 
-### 24.2 帧节奏与低延迟（Frame Pacing / Reflex 形态）
+### 24.2 帧节奏与低延迟（Frame Pacing / Reflex 形态） ✅ 已交付（`pacing`）
 
 稳定帧时间比高平均帧率更重要（抖动比低帧率更伤手感）：
 
@@ -353,12 +353,25 @@ pkg/prism_time/
 - **低延迟渲染提交**:延迟采样输入到尽可能靠近模拟开始(late-latching),压缩 input-to-photon 延迟(对标 NVIDIA Reflex / AMD Anti-Lag 的「按需开工」理念——不提前排队过多帧)。
 - 与 `prism_app` 主循环、RHI present 协同:时间系统提供「下一 present 预估时刻」供提交对齐。
 
-### 24.3 可变刷新率（VRR）感知
+**交付状态（已落地）**：`pkg/prism_time/src/pacing/`（`mod.rs` 共享整数 EMA + `pacer.rs` 帧节奏/低延迟 + `vrr.rs` VRR）。均为纯 CPU、确定性、整数运算的**调度数据模型**，不读墙钟、不碰 OS/显示/RHI。
+- **帧节奏锁相（`FramePacer`，§24.2）**：喂入调用方给的 present 时间戳流，维持一条按 `target_interval_ns` 稳步推进的**预测 present 时刻**（`next_present_ns`）。小抖动被吸收（预测不随单帧抖动漂移，杜绝微卡顿外溢到提交时序），仅当偏差超过 `resync_threshold_ns`（默认半帧）或时间戳非单调才**硬重锚**到真实时刻；另有独立整数 EMA 跟踪观测间隔（`smoothed_interval_ns`）供诊断/动态节奏。导出 `jitter_ns`/`max_jitter_ns`/`resyncs` 统计。对标主机 frame pacing。
+- **低延迟开工门（`ReflexGate`，§24.2）**：编码「按需开工、不预排过多帧」（NVIDIA Reflex / AMD Anti-Lag **形态**）。给定 present 截止、CPU+GPU 工作量估计、在飞帧数，决策 `Begin`（已到 just-in-time）/`Wait{wait_ns}`（late-latch，推迟开工使输入采样尽量贴近模拟开始，压缩 input-to-photon）/`QueueFull`（队列已满，等 present 排空）。`latest_begin_ns = deadline − work − safety_margin`（饱和）。
+- **「下一 present 预估时刻」**：由 `FramePacer::next_present_ns()` 提供，供 `prism_app` 主循环与 RHI present 提交对齐（§24.2 协同点）。
+- 纯整数、确定性：同一输入序列跨运行产出位相同调度，可从确定性回放驱动。`no_std + alloc`、无 `unsafe`。单测见 `tests_pacing.rs`（首帧只锚定、稳态零抖动零重锚、小抖动吸收不动预测、大偏差/非单调硬重锚、`from_hz`、`reset`、双跑一致；Reflex 队列满/late-latch 等待/紧截止立即开工/零上限钳 1）。
+
+### 24.3 可变刷新率（VRR）感知 ✅ 已交付（`pacing`）
 
 G-Sync/FreeSync/VRR 下显示刷新非固定:
 
 - 时间系统感知显示器可变刷新窗口,把 present 调度到最优时刻,配合帧节奏(§24.2)。
 - 固定步仿真(§7)与可变显示解耦,表现层插值 alpha(§12)吸收刷新抖动。
+
+**交付状态（已落地）**：同 §24.2 的 `pacing` 模块（`vrr.rs`）。
+- **刷新窗口模型（`VrrWindow`）**：以最快/最慢允许 present 间隔表示 G-Sync/FreeSync/Adaptive-Sync 窗口，`from_hz(min_hz,max_hz)` 构造（最快刷新→最短间隔），构造器钳制使窗口恒非空且有序。
+- **`classify(desired)` 把目标间隔映射进窗口**：窗口内 → `InRange`（原样可变显示）；快于窗口 → `ClampedFast`（钳到最短间隔，不能快过面板最大刷新）；慢于窗口 → `Lfc{multiplier,sub_interval}`（低帧率补偿 LFC：取最小整数倍 ≥2 使子间隔回落窗口内，复制帧维持显示刷新）。
+- **`earliest_present_ns(ready,last)`**：present 不得快于面板最大刷新，故钳到 `last + min_interval`；配合 §24.2 帧节奏把 present 调度到最优时刻。
+- **仿真/显示解耦**：固定步仿真（§7）按确定性步长推进，VRR 只影响表现层 present 时刻，表现层插值 alpha（§12）吸收刷新抖动。
+- 纯整数、确定性、`no_std + alloc`、无 `unsafe`。单测见 `tests_pacing.rs`（Hz 边界与排序、窗口内透传、过快钳制、慢帧 LFC x2/极慢 x3 且子间隔回落窗口、`earliest_present` 强制最大刷新、退化窗口钳制、`effective_interval` 访问器）。
 
 ### 24.4 帧预算驱动的自适应质量 ✅ 已交付（`adaptive_quality`）
 
@@ -439,7 +452,7 @@ time.schedule_every(Duration::from_millis(500), |w| tick_regen(w));
 
 ### 24.9 诚实边界
 
-本章 **24.1 录制回放、24.4 帧预算自适应质量、24.5 长会话漂移修正、24.6 游戏内定时调度器、24.8 多世界时间域隔离/确定性审计已落地，24.7 挂起/恢复已落地纯 CPU 可做部分**（见各节「交付状态」，`recording` / `adaptive_quality` / `drift` / `scheduler` / `multiworld` / `suspend` 六模块，`cargo test -p prism_time` 全绿、`cargo clippy --all-targets` 零告警）；其余小节（24.2 帧节奏、24.3 VRR）仍为 PLANNED 设计目标、无代码。**24.1 录制回放 + 24.8 确定性审计**是确定性系统(物理/网络)的调试基石,已随 M4 确定性路线落地;**24.4 自适应质量**已交付纯 CPU 控制器（档位决策），真实 per-stage 耗时采集(`prism_profiler`/§16)与档位→渲染设置映射属消费方接线;**24.7 挂起/恢复**已交付时间戳层确定性修正（挂起期不计入 elapsed/tick、可选最大追帧钳制），真实 OS 挂起/恢复信号接线仍为 PLANNED,随平台接线落地;24.2 帧节奏 + 24.3 VRR 随 M2 主循环/平台接线落地。
+本章 **24.1 录制回放、24.4 帧预算自适应质量、24.5 长会话漂移修正、24.6 游戏内定时调度器、24.8 多世界时间域隔离/确定性审计已落地，24.7 挂起/恢复已落地纯 CPU 可做部分**（见各节「交付状态」，`recording` / `adaptive_quality` / `drift` / `scheduler` / `multiworld` / `suspend` 六模块，`cargo test -p prism_time` 全绿、`cargo clippy --all-targets` 零告警）；24.2 帧节奏 + 24.3 VRR 已落地纯 CPU 调度数据模型（`pacing`）。**24.1 录制回放 + 24.8 确定性审计**是确定性系统(物理/网络)的调试基石,已随 M4 确定性路线落地;**24.4 自适应质量**已交付纯 CPU 控制器（档位决策），真实 per-stage 耗时采集(`prism_profiler`/§16)与档位→渲染设置映射属消费方接线;**24.7 挂起/恢复**已交付时间戳层确定性修正（挂起期不计入 elapsed/tick、可选最大追帧钳制），真实 OS 挂起/恢复信号接线仍为 PLANNED,随平台接线落地;24.2 帧节奏 + 24.3 VRR 已交付纯 CPU 调度模型（`FramePacer`/`ReflexGate`/`VrrWindow`），真实 present 时间戳采集、显示 VRR 范围查询与 RHI 提交属 M2 主循环/平台接线。
 
 **24.4 / 24.5 / 24.6 / 24.7 的诚实边界（硬件 / 接线归属）**：本层只提供**确定性算法 / 控制决策数据模型**,不碰任何真实硬件、渲染或墙钟。
 - **24.4 自适应质量**：`AdaptiveQualityController` 只产出整数质量档位与升降决策；真实 per-stage 帧耗时采集(`prism_profiler`/§16 可观测性)与把档位映射到动态分辨率/LOD/阴影级联/粒子上限等渲染设置,属渲染/gameplay 层接线,控制器自身不分配、不读时钟。

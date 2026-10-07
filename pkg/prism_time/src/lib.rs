@@ -57,21 +57,22 @@
 
 extern crate alloc;
 
-mod clock;
 pub mod adaptive_quality;
+mod clock;
 #[cfg(feature = "compat-bevy")]
 pub mod compat_bevy;
 pub mod determinism;
 pub mod diagnostics;
 mod domain;
-pub mod driver;
 pub mod drift;
+pub mod driver;
 mod easing;
 mod fixed;
 pub mod frame_step;
 mod instant;
 pub mod multiworld;
 pub mod net;
+pub mod pacing;
 pub mod recording;
 pub mod scheduler;
 pub mod suspend;
@@ -87,19 +88,20 @@ pub use core::time::Duration;
 pub use determinism::{RationalStep, TickClock, TickSnapshot};
 pub use diagnostics::{FrameBudget, FrameStats};
 pub use domain::{composite_scale, TimeScaleDomain};
-pub use driver::{FrameReport, TimeDriver};
 pub use drift::{DriftCorrector, MonotonicBaseline};
+pub use driver::{FrameReport, TimeDriver};
 pub use easing::{Easing, ScaleTransition};
 pub use fixed::Fixed;
 pub use frame_step::{FrameStepper, StepState};
 pub use instant::Instant;
-pub use net::{
-    ClockOffsetEstimator, ClockSync, InterpolationBuffer, Lerp, OffsetSample, Sampled, ServerTick,
-};
 pub use multiworld::{
     compare_trails, fnv1a_64, AuditDiff, AuditTrail, StateHasher, WorldSet, WorldTimeDomain,
 };
-pub use recording::{Player, Recorder, RecordedFrame, Recording};
+pub use net::{
+    ClockOffsetEstimator, ClockSync, InterpolationBuffer, Lerp, OffsetSample, Sampled, ServerTick,
+};
+pub use pacing::{BeginDecision, FramePacer, PresentInfo, ReflexGate, VrrPresent, VrrWindow};
+pub use recording::{Player, RecordedFrame, Recorder, Recording};
 pub use scheduler::{Fired, Scheduler, TimerHandle, TimerKind};
 pub use suspend::SuspendableClock;
 pub use timeline::{
@@ -251,30 +253,34 @@ impl Time<Real> {
 pub mod prelude {
     pub use crate::{
         compare_trails, composite_scale, fnv1a_64, utilization_ppm, AdaptiveQualityConfig,
-        AdaptiveQualityController, AuditDiff, AuditTrail, ClockOffsetEstimator, ClockSync, Clocks,
-        Cooldown, DefaultSource, DriftCorrector, Duration, Easing, Fired, Fixed, FrameBudget,
-        FrameReport, FrameStats, FrameStepper, Instant, InterpolationBuffer, Lerp, MonotonicBaseline,
-        OffsetSample, PlaybackMode, Player, QualityAdjustment, RationalStep, Real, RecordedFrame,
-        Recorder, Recording, Sampled, ScaleTransition, Scheduler, Sequencer, ServerTick,
-        SmoothedDelta, StateHasher, StepState, Stopwatch, SuspendableClock, Throttle, TickClock,
-        TickSnapshot, Time, TimeDriver, TimeScaleDomain, Timeline, TimelineMarker, TimelineTick,
-        Timer, TimerHandle, TimerKind, TimerMode, Virtual, WorldSet, WorldTimeDomain,
+        AdaptiveQualityController, AuditDiff, AuditTrail, BeginDecision, ClockOffsetEstimator,
+        ClockSync, Clocks, Cooldown, DefaultSource, DriftCorrector, Duration, Easing, Fired, Fixed,
+        FrameBudget, FramePacer, FrameReport, FrameStats, FrameStepper, Instant,
+        InterpolationBuffer, Lerp, MonotonicBaseline, OffsetSample, PlaybackMode, Player,
+        PresentInfo, QualityAdjustment, RationalStep, Real, RecordedFrame, Recorder, Recording,
+        ReflexGate, Sampled, ScaleTransition, Scheduler, Sequencer, ServerTick, SmoothedDelta,
+        StateHasher, StepState, Stopwatch, SuspendableClock, Throttle, TickClock, TickSnapshot,
+        Time, TimeDriver, TimeScaleDomain, Timeline, TimelineMarker, TimelineTick, Timer,
+        TimerHandle, TimerKind, TimerMode, Virtual, VrrPresent, VrrWindow, WorldSet,
+        WorldTimeDomain,
     };
 }
 
 #[cfg(all(test, feature = "std"))]
 mod tests;
 #[cfg(test)]
-mod tests_m6;
+mod tests_adaptive_quality;
 #[cfg(test)]
 mod tests_drift;
 #[cfg(test)]
+mod tests_m6;
+#[cfg(test)]
 mod tests_multiworld;
+#[cfg(test)]
+mod tests_pacing;
 #[cfg(test)]
 mod tests_record_replay;
 #[cfg(test)]
 mod tests_scheduler;
-#[cfg(test)]
-mod tests_adaptive_quality;
 #[cfg(test)]
 mod tests_suspend;
