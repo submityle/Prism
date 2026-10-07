@@ -195,3 +195,125 @@ fn dropping_a_future_before_completion_is_safe() {
     drop(file);
     let _ = fs::remove_file(&path);
 }
+
+#[test]
+fn write_then_read_back() {
+    if !IoReactor::supported() {
+        return;
+    }
+    let len = 4096usize;
+    let data: Vec<u8> = (0..len).map(pattern_byte).collect();
+
+    // A fresh writable temp file.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let mut path = std::env::temp_dir();
+    path.push(format!("prism_io_bridge_w_{pid}_{id}.bin"));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .expect("create writable temp file");
+    let fd = file.as_raw_fd();
+
+    let reactor = IoReactor::new().expect("start reactor");
+    let pool = TaskPool::new();
+
+    let written = pool
+        .block_on(reactor.write(fd, 0, &data, IoPriority::Normal))
+        .expect("write completes");
+    assert_eq!(written, len, "wrote the whole buffer");
+
+    file.sync_all().expect("sync");
+    let readback = fs::read(&path).expect("read back");
+    assert_eq!(readback.len(), len);
+    for (i, &b) in readback.iter().enumerate() {
+        assert_eq!(b, pattern_byte(i), "byte {i} mismatch");
+    }
+
+    drop(file);
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn write_at_offset_then_read_back_via_bridge() {
+    if !IoReactor::supported() {
+        return;
+    }
+    // Pre-size the file, then write a region at an offset and read it back
+    // through the bridge's own read path.
+    let total = 8192usize;
+    let region = 2000usize;
+    let offset = 1000usize;
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let mut path = std::env::temp_dir();
+    path.push(format!("prism_io_bridge_wo_{pid}_{id}.bin"));
+    fs::write(&path, vec![0u8; total]).expect("presize");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("open rw");
+    let fd = file.as_raw_fd();
+
+    let reactor = IoReactor::new().expect("start reactor");
+    let pool = TaskPool::new();
+
+    let payload: Vec<u8> = (0..region).map(|i| pattern_byte(offset + i)).collect();
+    let written = pool
+        .block_on(reactor.write(fd, offset as u64, &payload, IoPriority::High))
+        .expect("write completes");
+    assert_eq!(written, region);
+    file.sync_all().expect("sync");
+
+    let buf = pool
+        .block_on(reactor.read(fd, offset as u64, region, IoPriority::High))
+        .expect("read completes");
+    assert_eq!(buf.bytes, region);
+    for (i, &b) in buf.filled().iter().enumerate() {
+        assert_eq!(b, pattern_byte(offset + i), "byte {i} mismatch");
+    }
+
+    drop(file);
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn dropping_a_write_future_before_completion_is_safe() {
+    if !IoReactor::supported() {
+        return;
+    }
+    let len = 16384usize;
+    let data = vec![7u8; len];
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    let mut path = std::env::temp_dir();
+    path.push(format!("prism_io_bridge_wd_{pid}_{id}.bin"));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .expect("create writable temp file");
+    let fd = file.as_raw_fd();
+
+    let reactor = IoReactor::new().expect("start reactor");
+    // Submit a write and immediately drop the future without polling it. The
+    // reactor still owns the source buffer, so draining it on reactor drop must
+    // not touch freed memory.
+    let fut = reactor.write(fd, 0, &data, IoPriority::Normal);
+    drop(fut);
+    drop(reactor); // joins the thread; must not crash or leak unsafely.
+
+    drop(file);
+    let _ = fs::remove_file(&path);
+}

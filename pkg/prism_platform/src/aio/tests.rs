@@ -11,7 +11,7 @@
     reason = "exercising the unsafe batch-submit API against a real temp file"
 )]
 
-use super::{AioError, AioQueue, IoPriority, ReadOp};
+use super::{AioError, AioQueue, IoPriority, ReadOp, WriteOp};
 
 #[cfg(any(
     target_vendor = "apple",
@@ -64,6 +64,41 @@ mod posix {
         }
     }
 
+    /// A writable temp file (created empty, opened read+write) for write tests.
+    struct WritableTempFile {
+        path: std::path::PathBuf,
+        file: std::fs::File,
+    }
+
+    impl WritableTempFile {
+        fn new() -> Self {
+            let mut path = std::env::temp_dir();
+            let unique = format!(
+                "prism_aio_w_{}_{}.bin",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            path.push(unique);
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .expect("create writable temp file");
+            Self { path, file }
+        }
+    }
+
+    impl Drop for WritableTempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
     #[test]
     fn supported_on_apple_bsd() {
         assert!(AioQueue::supported());
@@ -101,10 +136,11 @@ mod posix {
 
         let mut seen = alloc::collections::BTreeMap::new();
         while seen.len() < N {
-            let batch = queue
-                .wait(N, Some(Duration::from_secs(5)))
-                .expect("wait");
-            assert!(!batch.is_empty(), "wait returned no completions before timeout");
+            let batch = queue.wait(N, Some(Duration::from_secs(5))).expect("wait");
+            assert!(
+                !batch.is_empty(),
+                "wait returned no completions before timeout"
+            );
             for c in batch {
                 let bytes = c.result.expect("read ok");
                 assert_eq!(bytes, PAGE);
@@ -205,6 +241,146 @@ mod posix {
             .wait(8, Some(Duration::from_millis(10)))
             .expect("wait");
         assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn batch_writes_round_trip() {
+        const PAGE: usize = 4096;
+        const N: usize = 3;
+        let tmp = WritableTempFile::new();
+        let fd = tmp.file.as_raw_fd();
+
+        // Distinct source buffers at distinct offsets.
+        let sources: Vec<Vec<u8>> = (0..N)
+            .map(|i| (0..PAGE).map(|j| pattern(i * PAGE + j)).collect())
+            .collect();
+
+        let mut queue = AioQueue::new().expect("queue");
+        let ops: Vec<WriteOp> = sources
+            .iter()
+            .enumerate()
+            .map(|(i, src)| WriteOp {
+                fd,
+                offset: (i * PAGE) as u64,
+                buf: src.as_ptr(),
+                len: PAGE,
+                user_data: 0xB000 + i as u64,
+                priority: IoPriority::Normal,
+            })
+            .collect();
+
+        // SAFETY: `tmp.file` (hence `fd`) and `sources` outlive every reaped
+        // completion below; the source buffers are not mutated until reaped.
+        let submitted = unsafe { queue.submit_write(&ops) }.expect("submit_write");
+        assert_eq!(submitted, N);
+
+        let mut seen = alloc::collections::BTreeMap::new();
+        while seen.len() < N {
+            let batch = queue.wait(N, Some(Duration::from_secs(5))).expect("wait");
+            assert!(
+                !batch.is_empty(),
+                "wait returned no completions before timeout"
+            );
+            for c in batch {
+                let bytes = c.result.expect("write ok");
+                assert_eq!(bytes, PAGE);
+                seen.insert(c.user_data, bytes);
+            }
+        }
+        assert_eq!(queue.pending(), 0);
+
+        // Read the file back with ordinary std I/O and verify the bytes landed.
+        tmp.file.sync_all().expect("sync");
+        let readback = std::fs::read(&tmp.path).expect("read back");
+        assert_eq!(readback.len(), PAGE * N);
+        for (i, &b) in readback.iter().enumerate() {
+            assert_eq!(b, pattern(i), "mismatch at byte {i}");
+        }
+        for i in 0..N {
+            assert!(seen.contains_key(&(0xB000 + i as u64)));
+        }
+    }
+
+    #[test]
+    fn empty_submit_write_is_noop() {
+        let mut queue = AioQueue::new().expect("queue");
+        // SAFETY: no ops, no buffers involved.
+        assert_eq!(unsafe { queue.submit_write(&[]) }.expect("submit_write"), 0);
+        assert_eq!(queue.pending(), 0);
+    }
+
+    #[test]
+    fn negative_fd_write_is_rejected() {
+        let mut queue = AioQueue::new().expect("queue");
+        let op = WriteOp {
+            fd: -1,
+            offset: 0,
+            buf: core::ptr::null(),
+            len: 0,
+            user_data: 0,
+            priority: IoPriority::Normal,
+        };
+        // SAFETY: validated and rejected before any buffer is dereferenced.
+        let r = unsafe { queue.submit_write(core::slice::from_ref(&op)) };
+        assert_eq!(r, Err(AioError::InvalidArgument));
+    }
+
+    #[test]
+    fn write_then_read_back_via_aio() {
+        // Round-trip entirely through the AIO backend: write a pattern, then
+        // read it back into a fresh buffer with the same queue.
+        const LEN: usize = 2048;
+        let tmp = WritableTempFile::new();
+        let fd = tmp.file.as_raw_fd();
+        let src: Vec<u8> = (0..LEN).map(pattern).collect();
+
+        let mut queue = AioQueue::new().expect("queue");
+        let wop = WriteOp {
+            fd,
+            offset: 0,
+            buf: src.as_ptr(),
+            len: LEN,
+            user_data: 1,
+            priority: IoPriority::High,
+        };
+        // SAFETY: `tmp.file` and `src` outlive the completion reaped below.
+        assert_eq!(
+            unsafe { queue.submit_write(core::slice::from_ref(&wop)) }.expect("w"),
+            1
+        );
+        loop {
+            let batch = queue.wait(1, Some(Duration::from_secs(5))).expect("wait");
+            if let Some(c) = batch.into_iter().next() {
+                assert_eq!(c.result.expect("write ok"), LEN);
+                break;
+            }
+        }
+        tmp.file.sync_all().expect("sync");
+
+        let mut dst = vec![0u8; LEN];
+        let rop = ReadOp {
+            fd,
+            offset: 0,
+            buf: dst.as_mut_ptr(),
+            len: LEN,
+            user_data: 2,
+            priority: IoPriority::High,
+        };
+        // SAFETY: `tmp.file` and `dst` outlive the completion reaped below.
+        assert_eq!(
+            unsafe { queue.submit(core::slice::from_ref(&rop)) }.expect("r"),
+            1
+        );
+        loop {
+            let batch = queue.wait(1, Some(Duration::from_secs(5))).expect("wait");
+            if let Some(c) = batch.into_iter().next() {
+                assert_eq!(c.result.expect("read ok"), LEN);
+                break;
+            }
+        }
+        for (i, &b) in dst.iter().enumerate() {
+            assert_eq!(b, pattern(i), "mismatch at byte {i}");
+        }
     }
 }
 

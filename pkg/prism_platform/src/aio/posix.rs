@@ -19,7 +19,7 @@
 use core::ffi::{c_int, c_long, c_void};
 use core::time::Duration;
 
-use super::{AioError, Completion, IoPriority, ReadOp, Result};
+use super::{AioError, Completion, IoPriority, ReadOp, Result, WriteOp};
 
 /// This build has a real POSIX AIO backend.
 pub(super) const SUPPORTED: bool = true;
@@ -27,6 +27,7 @@ pub(super) const SUPPORTED: bool = true;
 // POSIX AIO constants (stable across the Darwin / BSD ABIs we target).
 const LIO_NOWAIT: c_int = 1;
 const LIO_READ: c_int = 1;
+const LIO_WRITE: c_int = 2;
 const EINTR: c_int = 4;
 const EAGAIN: c_int = 35;
 const EINPROGRESS: c_int = 36;
@@ -100,6 +101,18 @@ struct InFlight {
     user_data: u64,
 }
 
+/// A normalized control-block descriptor shared by the read and write submit
+/// paths. `buf` is the kernel's destination (reads) or source (writes) pointer;
+/// `offset` is already the signed `aio_offset` value.
+struct RawDesc {
+    fd: c_int,
+    offset: i64,
+    buf: *mut c_void,
+    len: usize,
+    priority: IoPriority,
+    user_data: u64,
+}
+
 /// POSIX-AIO-backed submission/completion queue.
 pub(super) struct Queue {
     inflight: Vec<InFlight>,
@@ -112,38 +125,107 @@ impl Queue {
         })
     }
 
-    /// Batch-submit reads via `lio_listio`.
+    /// Batch-submit reads via `lio_listio` (opcode `LIO_READ`).
     ///
     /// # Safety
     /// Each [`ReadOp`]'s `fd` and `buf`/`len` region must stay valid until the
     /// matching completion is reaped (see the facade's module-level contract).
     pub(super) unsafe fn submit(&mut self, ops: &[ReadOp]) -> Result<usize> {
-        if ops.is_empty() {
+        // SAFETY: forwarded under the caller's module-level read contract; each
+        // descriptor points at an `op.buf` destination that outlives its
+        // completion.
+        unsafe {
+            self.submit_opcode(ops.len(), LIO_READ, |i| {
+                let op = &ops[i];
+                RawDesc {
+                    fd: op.fd,
+                    offset: op.offset as i64,
+                    buf: op.buf.cast::<c_void>(),
+                    len: op.len,
+                    priority: op.priority,
+                    user_data: op.user_data,
+                }
+            })
+        }
+    }
+
+    /// Batch-submit writes via `lio_listio` (opcode `LIO_WRITE`).
+    ///
+    /// # Safety
+    /// Each [`WriteOp`]'s `fd` must stay open and its `buf`/`len` *source*
+    /// region must stay valid **and unmodified** until the matching completion
+    /// is reaped (see the facade's module-level contract).
+    pub(super) unsafe fn submit_write(&mut self, ops: &[WriteOp]) -> Result<usize> {
+        // SAFETY: forwarded under the caller's module-level write contract; each
+        // descriptor points at an `op.buf` source that stays valid/unmodified
+        // until its completion. The source is logically const; the `aiocb`
+        // field is typed `*mut c_void`, so we cast away const for the ABI only
+        // and the kernel never writes through it for `LIO_WRITE`.
+        unsafe {
+            self.submit_opcode(ops.len(), LIO_WRITE, |i| {
+                let op = &ops[i];
+                RawDesc {
+                    fd: op.fd,
+                    offset: op.offset as i64,
+                    buf: op.buf.cast::<c_void>().cast_mut(),
+                    len: op.len,
+                    priority: op.priority,
+                    user_data: op.user_data,
+                }
+            })
+        }
+    }
+
+    /// Batch-submit `count` control blocks built by `get`, each tagged with
+    /// `opcode` (`LIO_READ` or `LIO_WRITE`), in as few `lio_listio` syscalls as
+    /// `AIO_LISTIO_MAX` allows.
+    ///
+    /// Returns the number of requests accepted into the in-flight set; fewer
+    /// than `count` means the kernel applied back-pressure and the caller should
+    /// retry the tail. This is the shared engine behind [`Self::submit`] and
+    /// [`Self::submit_write`]; the read and write paths differ only in the
+    /// opcode and the direction of the `buf` transfer.
+    ///
+    /// # Safety
+    /// Every descriptor returned by `get` must carry an `fd` and `buf`/`len`
+    /// region that stays valid until its completion is reaped (see the facade's
+    /// module-level contract). For `LIO_WRITE` the source region must also stay
+    /// unmodified for that window.
+    unsafe fn submit_opcode(
+        &mut self,
+        count: usize,
+        opcode: c_int,
+        get: impl Fn(usize) -> RawDesc,
+    ) -> Result<usize> {
+        if count == 0 {
             return Ok(0);
         }
-        for op in ops {
-            if op.fd < 0 {
+        for i in 0..count {
+            if get(i).fd < 0 {
                 return Err(AioError::InvalidArgument);
             }
         }
 
         let mut accepted = 0usize;
-        for chunk in ops.chunks(AIO_LISTIO_MAX) {
+        let mut base = 0usize;
+        while base < count {
+            let chunk_len = (count - base).min(AIO_LISTIO_MAX);
             let start = self.inflight.len();
-            for op in chunk {
+            for off in 0..chunk_len {
+                let desc = get(base + off);
                 // SAFETY: `Aiocb` is plain data (ints + raw pointers); an
                 // all-zero bit pattern is a valid, inert control block (null
                 // pointers, `SIGEV_NONE`).
                 let mut cb: Box<Aiocb> = Box::new(unsafe { core::mem::zeroed() });
-                cb.aio_fildes = op.fd;
-                cb.aio_offset = op.offset as i64;
-                cb.aio_buf = op.buf.cast::<c_void>();
-                cb.aio_nbytes = op.len;
-                cb.aio_reqprio = reqprio(op.priority);
-                cb.aio_lio_opcode = LIO_READ;
+                cb.aio_fildes = desc.fd;
+                cb.aio_offset = desc.offset;
+                cb.aio_buf = desc.buf;
+                cb.aio_nbytes = desc.len;
+                cb.aio_reqprio = reqprio(desc.priority);
+                cb.aio_lio_opcode = opcode;
                 self.inflight.push(InFlight {
                     cb,
-                    user_data: op.user_data,
+                    user_data: desc.user_data,
                 });
             }
 
@@ -152,7 +234,7 @@ impl Queue {
                 .map(|f| core::ptr::from_mut::<Aiocb>(f.cb.as_mut()))
                 .collect();
 
-            // SAFETY: `list` points to `chunk.len()` live, boxed control blocks
+            // SAFETY: `list` points to `chunk_len` live, boxed control blocks
             // owned by `self.inflight`; the heap allocations outlive the kernel's
             // use of them (reaped in `wait`, drained in `Drop`). A null `sig`
             // requests no notification (we poll), matching the zeroed sigevent.
@@ -166,7 +248,8 @@ impl Queue {
             };
 
             if rc == 0 {
-                accepted += chunk.len();
+                accepted += chunk_len;
+                base += chunk_len;
                 continue;
             }
 
@@ -289,8 +372,7 @@ impl Drop for Queue {
             // stopped touching the caller's buffer, then reap exactly once.
             loop {
                 // SAFETY: `cb` is a live control block owned here.
-                let status =
-                    unsafe { aio_error(core::ptr::from_ref::<Aiocb>(f.cb.as_ref())) };
+                let status = unsafe { aio_error(core::ptr::from_ref::<Aiocb>(f.cb.as_ref())) };
                 if status != EINPROGRESS {
                     break;
                 }

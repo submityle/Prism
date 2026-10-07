@@ -4,9 +4,10 @@
 //! Open-world AAA streaming cannot feed the GPU with synchronous `read`s: it
 //! needs to hand the kernel a *batch* of read requests in a single syscall and
 //! later reap their completions out of order. This module exposes exactly that
-//! shape — [`AioQueue::submit`] enqueues N [`ReadOp`]s at once and
-//! [`AioQueue::wait`] drains the ready [`Completion`]s — on top of whichever
-//! real OS primitive the target platform offers.
+//! shape — [`AioQueue::submit`] enqueues N [`ReadOp`]s (and [`AioQueue::submit_write`]
+//! N [`WriteOp`]s) at once and [`AioQueue::wait`] drains the ready
+//! [`Completion`]s — on top of whichever real OS primitive the target platform
+//! offers.
 //!
 //! ## Backends
 //! - **Apple (macOS/iOS) & BSD**: real POSIX AIO (`lio_listio` for one-syscall
@@ -20,13 +21,16 @@
 //!   Query [`AioQueue::supported`] first.
 //!
 //! ## Safety contract
-//! [`AioQueue::submit`] is `unsafe`: each [`ReadOp`] carries a raw `fd`,
-//! destination `buf`, and `len`. The caller must keep both the file descriptor
-//! open and the destination buffer valid and exclusively borrowed until the
-//! matching [`Completion`] has been reaped by [`AioQueue::wait`] (or the queue
-//! has been dropped, which cancels and drains every outstanding request before
-//! freeing its control blocks). The kernel writes into `buf` asynchronously, so
-//! releasing it early is undefined behavior.
+//! [`AioQueue::submit`] / [`AioQueue::submit_write`] are `unsafe`: each
+//! [`ReadOp`] / [`WriteOp`] carries a raw `fd`, a `buf` pointer, and a `len`.
+//! The caller must keep the file descriptor open and the `buf`/`len` region
+//! valid until the matching [`Completion`] has been reaped by
+//! [`AioQueue::wait`] (or the queue has been dropped, which cancels and drains
+//! every outstanding request before freeing its control blocks). For a read the
+//! kernel *writes into* the destination `buf`, so it must be exclusively
+//! borrowed; for a write the kernel *reads from* the source `buf`, so it must
+//! stay valid **and unmodified** for the same window. Releasing or mutating the
+//! region early is undefined behavior.
 
 use core::fmt;
 use core::time::Duration;
@@ -58,7 +62,7 @@ mod backend {
     //! up yet (Linux `io_uring`, Windows IOCP, Web). Every entry point honestly
     //! reports [`super::AioError::Unsupported`] rather than faking a read.
 
-    use super::{AioError, Completion, ReadOp, Result};
+    use super::{AioError, Completion, ReadOp, Result, WriteOp};
     use core::time::Duration;
 
     /// This build has no real async-I/O backend.
@@ -78,6 +82,15 @@ mod backend {
         /// # Safety
         /// Unreachable: no `Queue` can be constructed on this platform.
         pub(super) unsafe fn submit(&mut self, _ops: &[ReadOp]) -> Result<usize> {
+            Err(AioError::Unsupported)
+        }
+
+        /// Write submit is unreachable (no instance can exist); honest
+        /// `Unsupported`.
+        ///
+        /// # Safety
+        /// Unreachable: no `Queue` can be constructed on this platform.
+        pub(super) unsafe fn submit_write(&mut self, _ops: &[WriteOp]) -> Result<usize> {
             Err(AioError::Unsupported)
         }
 
@@ -162,6 +175,29 @@ pub struct ReadOp {
     pub priority: IoPriority,
 }
 
+/// A single batched write request.
+///
+/// `buf`/`len` describe the *source* bytes the kernel drains asynchronously;
+/// unlike [`ReadOp`] the buffer is read-only to the kernel, so `buf` is a
+/// `*const u8`. The caller must keep that source region valid and unmodified
+/// until the matching [`Completion`] is reaped (see the module-level contract).
+/// `user_data` is an opaque token echoed back on the [`Completion`].
+#[derive(Debug, Clone, Copy)]
+pub struct WriteOp {
+    /// Destination file descriptor (must stay open until reaped).
+    pub fd: RawFd,
+    /// Byte offset within the file to write to.
+    pub offset: u64,
+    /// Source buffer (must stay valid and unmodified until reaped).
+    pub buf: *const u8,
+    /// Number of bytes to write.
+    pub len: usize,
+    /// Opaque correlation token echoed on the [`Completion`].
+    pub user_data: u64,
+    /// Best-effort scheduling hint.
+    pub priority: IoPriority,
+}
+
 /// A reaped async-read result.
 #[derive(Debug, Clone)]
 pub struct Completion {
@@ -214,6 +250,29 @@ impl AioQueue {
         // SAFETY: forwarded to the backend under the caller's module-level
         // promise that each op's fd and buffer outlive its completion.
         unsafe { self.inner.submit(ops) }
+    }
+
+    /// Submit a batch of writes in as few syscalls as the backend allows.
+    ///
+    /// Returns the number of requests accepted into the in-flight set (normally
+    /// `ops.len()`); fewer indicates the kernel applied back-pressure and the
+    /// caller should retry the tail later. Empty input is a no-op (`Ok(0)`).
+    /// Completions are reaped by [`AioQueue::wait`] exactly like reads;
+    /// correlate them via [`Completion::user_data`].
+    ///
+    /// # Safety
+    /// Every [`WriteOp`]'s `fd` must stay open and its `buf`/`len` source region
+    /// must stay valid and unmodified until the matching [`Completion`] is
+    /// reaped (or this queue is dropped). See the module-level contract.
+    #[expect(
+        unsafe_code,
+        reason = "forwarding the unsafe batch-submit to the platform backend"
+    )]
+    pub unsafe fn submit_write(&mut self, ops: &[WriteOp]) -> Result<usize> {
+        // SAFETY: forwarded to the backend under the caller's module-level
+        // promise that each op's fd and source buffer outlive its completion
+        // and stay unmodified until it is reaped.
+        unsafe { self.inner.submit_write(ops) }
     }
 
     /// Block until at least one request completes (or `timeout` elapses), then

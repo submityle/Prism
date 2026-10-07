@@ -118,8 +118,8 @@ mod replay;
 mod scheduler;
 mod scope;
 mod scope_concurrency;
-mod throttle;
 mod thread_class;
+mod throttle;
 mod topology;
 mod trace;
 
@@ -131,7 +131,9 @@ pub use affinity::{
     CoreClassPolicy, WorkerCorePlan,
 };
 pub use arena::{FrameArena, FrameArenas, DEFAULT_ARENA_CAPACITY};
-pub use async_exec::{AioReadFuture, CounterFuture, IoError as AioIoError, IoReactor, ReadBuf, Task};
+pub use async_exec::{
+    AioReadFuture, AioWriteFuture, CounterFuture, IoError as AioIoError, IoReactor, ReadBuf, Task,
+};
 pub use cancel::{CancelOutcome, CancelToken, Cancelled};
 #[cfg(feature = "compat-bevy")]
 pub use compat_bevy::{
@@ -157,24 +159,27 @@ pub use par_iter::{ParRange, ParSlice, ParSliceMut, DEFAULT_MIN_LEN};
 pub use partition::{FixedPartition, DEFAULT_TARGET_CHUNKS};
 pub use pipeline::{Pipeline, Stage};
 pub use priority::{Priority, PriorityCell, PriorityGroup};
+pub use prism_platform::AffinityError;
 pub use qos::{
     admits_background, BudgetedItem, FrameRunReport, FrameScheduler, FrameStep, LanePlan,
     LaneQueues, LANE_COUNT,
-};
-pub use thread_class::{
-    admits, route, ClassRouter, DispatchReport, ExecLane, LaneBudget, RoutePlan, RouteStep,
-    ThreadClassPool, WorkClass, CLASS_COUNT,
-};
-pub use prism_platform::AffinityError;
-pub use topology::{
-    choose_balanced_node, nearest_node, plan_partitioned, plan_placement, rank_nodes_by_distance, shared_l3, CacheInfo, CacheLevel, CacheTopology, DistanceError, NumaDistanceMatrix, PlacementPlan, TopologyDescriptor, TopologyError, WorkerPlacement, WorkloadClass, LOCAL_DISTANCE,
 };
 pub use reduce::tree_combine;
 pub use replay::{DeterministicSession, ReplayError, ReplayRecord, SplitEvent};
 use scheduler::Shared;
 pub use scope::Scope;
 pub use scope_concurrency::{Node, NodeId, NodeState, ScopeOutcome, ScopeTree, StructuredScope};
+pub use thread_class::{
+    admits, route, ClassRouter, DispatchReport, ExecLane, LaneBudget, RoutePlan, RouteStep,
+    ThreadClassPool, WorkClass, CLASS_COUNT,
+};
 pub use throttle::{Permit, Throttle};
+pub use topology::{
+    choose_balanced_node, nearest_node, plan_partitioned, plan_placement, rank_nodes_by_distance,
+    shared_l3, CacheInfo, CacheLevel, CacheTopology, DistanceError, NumaDistanceMatrix,
+    PlacementPlan, TopologyDescriptor, TopologyError, WorkerPlacement, WorkloadClass,
+    LOCAL_DISTANCE,
+};
 pub use trace::{JobTrace, Span};
 
 /// Configuration for a [`TaskPool`].
@@ -454,6 +459,10 @@ impl Drop for TaskPool {
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod tests_deterministic_replay;
+#[cfg(test)]
+mod tests_health;
 #[cfg(all(test, feature = "compat-bevy"))]
 mod tests_m6_compat;
 #[cfg(test)]
@@ -463,13 +472,9 @@ mod tests_m6_pipeline;
 #[cfg(test)]
 mod tests_m6_trace;
 #[cfg(test)]
-mod tests_health;
-#[cfg(test)]
 mod tests_qos;
 #[cfg(test)]
 mod tests_scope_concurrency;
-#[cfg(test)]
-mod tests_deterministic_replay;
 #[cfg(test)]
 mod tests_thread_class;
 #[cfg(test)]

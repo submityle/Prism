@@ -33,14 +33,17 @@
 //! ## Honest platform scope
 //! This bridge is only as capable as [`AioQueue`]: it has a real backend solely
 //! on Apple/BSD today (POSIX AIO). On every other platform [`IoReactor::new`]
-//! returns [`IoError::Unsupported`] and spawns no thread. Only read requests
-//! are supported; batched writes and other opcodes are PLANNED.
+//! returns [`IoError::Unsupported`] and spawns no thread. Both batched reads
+//! ([`IoReactor::read`]) and batched writes ([`IoReactor::write`]) are
+//! supported; other opcodes (e.g. `fsync`) are PLANNED.
 //!
 //! ## Caller contract
-//! As with [`AioQueue::submit`], the caller must keep the source file
-//! descriptor open until the read's [`AioReadFuture`] resolves (or the reactor
-//! is dropped). The destination buffer is owned by the bridge, so it is always
-//! handled correctly here.
+//! As with [`AioQueue::submit`], the caller must keep the file descriptor open
+//! until the request's future resolves (or the reactor is dropped). The read
+//! destination buffer and the write source buffer are both owned by the bridge
+//! (an [`IoSlot`] kept alive until the completion is reaped), so buffer
+//! lifetime is always handled correctly here regardless of what the caller does
+//! with the future.
 
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -56,7 +59,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 
-use prism_platform::aio::{AioError, AioQueue, IoPriority, ReadOp};
+use prism_platform::aio::{AioError, AioQueue, IoPriority, ReadOp, WriteOp};
 
 /// How long the reactor blocks in a single reap before looping back to pick up
 /// newly submitted or back-pressured requests. Bounds the latency with which a
@@ -127,13 +130,25 @@ fn complete_slot(slot: &IoSlot, result: Result<usize>) {
     }
 }
 
-/// A read request handed to the reactor thread. Every field is `Send`.
+/// Which POSIX AIO opcode a [`Submission`] carries. The kernel either fills the
+/// slot buffer (`Read`) or drains it (`Write`); the reactor branches on this to
+/// pick the matching [`AioQueue`] entry point.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpKind {
+    /// Kernel reads from the file into the slot buffer.
+    Read,
+    /// Kernel writes the slot buffer out to the file.
+    Write,
+}
+
+/// An I/O request handed to the reactor thread. Every field is `Send`.
 struct Submission {
     fd: RawFd,
     offset: u64,
     len: usize,
     priority: IoPriority,
     user_data: u64,
+    kind: OpKind,
     slot: Arc<IoSlot>,
 }
 
@@ -212,7 +227,12 @@ impl IoReactor {
     /// resolved [`ReadBuf`]. The caller must keep `fd` open until the future
     /// resolves.
     pub fn read(&self, fd: RawFd, offset: u64, len: usize, priority: IoPriority) -> AioReadFuture {
-        self.read_into(fd, offset, priority, alloc::vec![0u8; len].into_boxed_slice())
+        self.read_into(
+            fd,
+            offset,
+            priority,
+            alloc::vec![0u8; len].into_boxed_slice(),
+        )
     }
 
     /// Like [`IoReactor::read`], but reads into a caller-provided buffer (reused
@@ -241,6 +261,7 @@ impl IoReactor {
             len,
             priority,
             user_data,
+            kind: OpKind::Read,
             slot: Arc::clone(&slot),
         };
 
@@ -252,6 +273,62 @@ impl IoReactor {
         }
 
         AioReadFuture { slot, done: false }
+    }
+
+    /// Queue a write of `data` to `fd` at `offset`, returning a future that
+    /// resolves to the number of bytes the kernel actually drained.
+    ///
+    /// The source bytes are copied into a bridge-owned buffer, so the caller may
+    /// reuse or drop `data` immediately. The caller must keep `fd` open until
+    /// the future resolves.
+    pub fn write(
+        &self,
+        fd: RawFd,
+        offset: u64,
+        data: &[u8],
+        priority: IoPriority,
+    ) -> AioWriteFuture {
+        self.write_from(fd, offset, priority, data.to_vec().into_boxed_slice())
+    }
+
+    /// Like [`IoReactor::write`], but takes ownership of `buf` as the source
+    /// without copying. The number of bytes written equals `buf.len()`. `buf` is
+    /// held by the bridge until the completion is reaped and then dropped.
+    pub fn write_from(
+        &self,
+        fd: RawFd,
+        offset: u64,
+        priority: IoPriority,
+        buf: Box<[u8]>,
+    ) -> AioWriteFuture {
+        let len = buf.len();
+        let user_data = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let slot = Arc::new(IoSlot {
+            inner: Mutex::new(SlotInner {
+                buf: Some(buf),
+                result: None,
+                waker: None,
+            }),
+        });
+
+        let submission = Submission {
+            fd,
+            offset,
+            len,
+            priority,
+            user_data,
+            kind: OpKind::Write,
+            slot: Arc::clone(&slot),
+        };
+
+        match &self.tx {
+            Some(tx) if tx.send(submission).is_ok() => {}
+            // The reactor thread has exited: resolve immediately with an error
+            // (the un-sent `Submission` is dropped, releasing its slot clone).
+            _ => complete_slot(&slot, Err(IoError::ReactorGone)),
+        }
+
+        AioWriteFuture { slot, done: false }
     }
 }
 
@@ -331,6 +408,41 @@ impl Future for AioReadFuture {
     }
 }
 
+/// The future returned by [`IoReactor::write`] / [`IoReactor::write_from`].
+///
+/// Resolves to the number of bytes the kernel drained from the source buffer on
+/// success. Dropping it before completion is safe: the reactor keeps the source
+/// buffer alive until the kernel write is reaped.
+#[must_use = "an AioWriteFuture does nothing unless awaited or blocked on"]
+pub struct AioWriteFuture {
+    slot: Arc<IoSlot>,
+    done: bool,
+}
+
+impl Future for AioWriteFuture {
+    type Output = Result<usize>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.done {
+            // The single result was already yielded by an earlier poll.
+            return Poll::Pending;
+        }
+        let mut inner = self.slot.inner.lock().unwrap();
+        if let Some(result) = inner.result.take() {
+            // The kernel is done with the source buffer; release it now.
+            inner.buf.take();
+            drop(inner);
+            self.done = true;
+            return Poll::Ready(result);
+        }
+        match &mut inner.waker {
+            Some(existing) if existing.will_wake(cx.waker()) => {}
+            slot => *slot = Some(cx.waker().clone()),
+        }
+        Poll::Pending
+    }
+}
+
 /// The reactor thread's body: own the queue, submit pending reads one at a time,
 /// reap completions, and shut down cleanly when the channel disconnects.
 fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
@@ -352,32 +464,64 @@ fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
             }
         }
 
-        // 2. Submit queued reads one at a time, honoring kernel back-pressure.
+        // 2. Submit queued requests one at a time, honoring back-pressure.
         while let Some(sub) = pending.front() {
-            let op = {
+            // The slot buffer has a stable heap address; capture its pointer
+            // under the lock, then submit without holding it.
+            let ptr = {
                 let mut inner = sub.slot.inner.lock().unwrap();
-                let buf = inner
+                inner
                     .buf
                     .as_mut()
-                    .expect("submission buffer present before submit");
-                ReadOp {
-                    fd: sub.fd,
-                    offset: sub.offset,
-                    buf: buf.as_mut_ptr(),
-                    len: sub.len,
-                    user_data: sub.user_data,
-                    priority: sub.priority,
+                    .expect("submission buffer present before submit")
+                    .as_mut_ptr()
+            };
+            // SAFETY (both arms): `ptr` points into the slot's `Box<[u8]>`,
+            // which stays allocated (and at a stable address) because the
+            // reactor holds an `Arc<IoSlot>` in `inflight` until the completion
+            // is reaped; the caller's contract keeps `fd` open for the same
+            // window. For a write the source bytes are owned by the slot and are
+            // never mutated while in flight.
+            let accepted = match sub.kind {
+                OpKind::Read => {
+                    let op = ReadOp {
+                        fd: sub.fd,
+                        offset: sub.offset,
+                        buf: ptr,
+                        len: sub.len,
+                        user_data: sub.user_data,
+                        priority: sub.priority,
+                    };
+                    #[expect(unsafe_code, reason = "forward one read op to the platform aio queue")]
+                    // SAFETY: see the block comment above; `ptr` is the slot's
+                    // stable buffer, kept alive via `inflight`, and `fd` stays
+                    // open per the caller's contract.
+                    unsafe {
+                        queue.submit(core::slice::from_ref(&op))
+                    }
+                }
+                OpKind::Write => {
+                    let op = WriteOp {
+                        fd: sub.fd,
+                        offset: sub.offset,
+                        buf: ptr.cast_const(),
+                        len: sub.len,
+                        user_data: sub.user_data,
+                        priority: sub.priority,
+                    };
+                    #[expect(
+                        unsafe_code,
+                        reason = "forward one write op to the platform aio queue"
+                    )]
+                    // SAFETY: see the block comment above; `ptr` is the slot's
+                    // stable source buffer, kept alive via `inflight` and never
+                    // mutated in flight, and `fd` stays open per the caller's
+                    // contract.
+                    unsafe {
+                        queue.submit_write(core::slice::from_ref(&op))
+                    }
                 }
             };
-            #[expect(
-                unsafe_code,
-                reason = "forward one read op to the platform aio queue"
-            )]
-            // SAFETY: `op.buf` points into the slot's `Box<[u8]>`, which stays
-            // allocated (and at a stable address) because the reactor holds an
-            // `Arc<IoSlot>` in `inflight` until the completion is reaped; the
-            // caller's contract keeps `fd` open for the same window.
-            let accepted = unsafe { queue.submit(core::slice::from_ref(&op)) };
             match accepted {
                 Ok(0) => break, // kernel back-pressure; retry after a reap
                 Ok(_) => {
@@ -426,8 +570,8 @@ fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
     }
 
     // Shutdown. Drop the queue first so the kernel cancels and drains every
-    // outstanding write while the destination buffers (kept alive by the slot
-    // Arcs in `inflight`) are still valid; only then fail the waiting futures.
+    // outstanding request while the slot buffers (kept alive by the slot Arcs
+    // in `inflight`) are still valid; only then fail the waiting futures.
     drop(queue);
     let shutdown_err = fatal.unwrap_or(IoError::ReactorGone);
     for (_, slot) in inflight.drain() {
