@@ -1627,3 +1627,113 @@ fn prism_spline(op: u32, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>,
         default: { return a; }\n\
     }\n\
 }\n";
+
+/// Tensor-product spline **surface** evaluators mirroring
+/// [`crate::curve::surface`], acting on a 4x4 grid of `vec3<f32>` control
+/// points (packed as 16 `vec4` with the value in `xyz`), indexed
+/// `g[row*4 + col]` for `[u_row][v_col]`. Provides bicubic Bézier and uniform
+/// cubic B-spline patches, each with `sample`, `tangent_u`, `tangent_v`, and
+/// `normal`. The Bézier basis reuses `prism_spline_bezier_cubic`/`*_tangent`
+/// from [`WGSL_SPLINE`] (compose both fragments), exactly as the CPU surface
+/// reuses `curve::spline`; the B-spline basis is defined here. Pure
+/// multiply/add polynomials (the `normal` query additionally normalizes with
+/// the same `length > 1e-20` guard as the CPU `normalize_or_zero`), so the
+/// parity contract is a tight FMA tolerance.
+pub const WGSL_SURFACE: &str = "\
+fn prism_bspline_cubic(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, p3: vec3<f32>, t: f32) -> vec3<f32> {\n\
+    let t2 = t * t;\n\
+    let t3 = t2 * t;\n\
+    let b0 = (1.0 - 3.0 * t + 3.0 * t2 - t3) / 6.0;\n\
+    let b1 = (4.0 - 6.0 * t2 + 3.0 * t3) / 6.0;\n\
+    let b2 = (1.0 + 3.0 * t + 3.0 * t2 - 3.0 * t3) / 6.0;\n\
+    let b3 = t3 / 6.0;\n\
+    return p0 * b0 + p1 * b1 + p2 * b2 + p3 * b3;\n\
+}\n\
+\n\
+fn prism_bspline_cubic_tangent(p0: vec3<f32>, p1: vec3<f32>, p2: vec3<f32>, p3: vec3<f32>, t: f32) -> vec3<f32> {\n\
+    let t2 = t * t;\n\
+    let b0 = (-3.0 + 6.0 * t - 3.0 * t2) / 6.0;\n\
+    let b1 = (-12.0 * t + 9.0 * t2) / 6.0;\n\
+    let b2 = (3.0 + 6.0 * t - 9.0 * t2) / 6.0;\n\
+    let b3 = (3.0 * t2) / 6.0;\n\
+    return p0 * b0 + p1 * b1 + p2 * b2 + p3 * b3;\n\
+}\n\
+\n\
+fn prism_surface_normal_from(tu: vec3<f32>, tv: vec3<f32>) -> vec3<f32> {\n\
+    let c = cross(tu, tv);\n\
+    let len = length(c);\n\
+    if (len > 1.0e-20) {\n\
+        return c * (1.0 / len);\n\
+    }\n\
+    return vec3<f32>(0.0, 0.0, 0.0);\n\
+}\n\
+\n\
+fn prism_bezier_patch_sample(g: array<vec4<f32>, 16>, u: f32, v: f32) -> vec3<f32> {\n\
+    let q0 = prism_spline_bezier_cubic(g[0].xyz, g[1].xyz, g[2].xyz, g[3].xyz, v);\n\
+    let q1 = prism_spline_bezier_cubic(g[4].xyz, g[5].xyz, g[6].xyz, g[7].xyz, v);\n\
+    let q2 = prism_spline_bezier_cubic(g[8].xyz, g[9].xyz, g[10].xyz, g[11].xyz, v);\n\
+    let q3 = prism_spline_bezier_cubic(g[12].xyz, g[13].xyz, g[14].xyz, g[15].xyz, v);\n\
+    return prism_spline_bezier_cubic(q0, q1, q2, q3, u);\n\
+}\n\
+\n\
+fn prism_bezier_patch_tangent_u(g: array<vec4<f32>, 16>, u: f32, v: f32) -> vec3<f32> {\n\
+    let q0 = prism_spline_bezier_cubic(g[0].xyz, g[1].xyz, g[2].xyz, g[3].xyz, v);\n\
+    let q1 = prism_spline_bezier_cubic(g[4].xyz, g[5].xyz, g[6].xyz, g[7].xyz, v);\n\
+    let q2 = prism_spline_bezier_cubic(g[8].xyz, g[9].xyz, g[10].xyz, g[11].xyz, v);\n\
+    let q3 = prism_spline_bezier_cubic(g[12].xyz, g[13].xyz, g[14].xyz, g[15].xyz, v);\n\
+    return prism_spline_bezier_cubic_tangent(q0, q1, q2, q3, u);\n\
+}\n\
+\n\
+fn prism_bezier_patch_tangent_v(g: array<vec4<f32>, 16>, u: f32, v: f32) -> vec3<f32> {\n\
+    let q0 = prism_spline_bezier_cubic_tangent(g[0].xyz, g[1].xyz, g[2].xyz, g[3].xyz, v);\n\
+    let q1 = prism_spline_bezier_cubic_tangent(g[4].xyz, g[5].xyz, g[6].xyz, g[7].xyz, v);\n\
+    let q2 = prism_spline_bezier_cubic_tangent(g[8].xyz, g[9].xyz, g[10].xyz, g[11].xyz, v);\n\
+    let q3 = prism_spline_bezier_cubic_tangent(g[12].xyz, g[13].xyz, g[14].xyz, g[15].xyz, v);\n\
+    return prism_spline_bezier_cubic(q0, q1, q2, q3, u);\n\
+}\n\
+\n\
+fn prism_bezier_patch_normal(g: array<vec4<f32>, 16>, u: f32, v: f32) -> vec3<f32> {\n\
+    return prism_surface_normal_from(prism_bezier_patch_tangent_u(g, u, v), prism_bezier_patch_tangent_v(g, u, v));\n\
+}\n\
+\n\
+fn prism_bspline_patch_sample(g: array<vec4<f32>, 16>, u: f32, v: f32) -> vec3<f32> {\n\
+    let q0 = prism_bspline_cubic(g[0].xyz, g[1].xyz, g[2].xyz, g[3].xyz, v);\n\
+    let q1 = prism_bspline_cubic(g[4].xyz, g[5].xyz, g[6].xyz, g[7].xyz, v);\n\
+    let q2 = prism_bspline_cubic(g[8].xyz, g[9].xyz, g[10].xyz, g[11].xyz, v);\n\
+    let q3 = prism_bspline_cubic(g[12].xyz, g[13].xyz, g[14].xyz, g[15].xyz, v);\n\
+    return prism_bspline_cubic(q0, q1, q2, q3, u);\n\
+}\n\
+\n\
+fn prism_bspline_patch_tangent_u(g: array<vec4<f32>, 16>, u: f32, v: f32) -> vec3<f32> {\n\
+    let q0 = prism_bspline_cubic(g[0].xyz, g[1].xyz, g[2].xyz, g[3].xyz, v);\n\
+    let q1 = prism_bspline_cubic(g[4].xyz, g[5].xyz, g[6].xyz, g[7].xyz, v);\n\
+    let q2 = prism_bspline_cubic(g[8].xyz, g[9].xyz, g[10].xyz, g[11].xyz, v);\n\
+    let q3 = prism_bspline_cubic(g[12].xyz, g[13].xyz, g[14].xyz, g[15].xyz, v);\n\
+    return prism_bspline_cubic_tangent(q0, q1, q2, q3, u);\n\
+}\n\
+\n\
+fn prism_bspline_patch_tangent_v(g: array<vec4<f32>, 16>, u: f32, v: f32) -> vec3<f32> {\n\
+    let q0 = prism_bspline_cubic_tangent(g[0].xyz, g[1].xyz, g[2].xyz, g[3].xyz, v);\n\
+    let q1 = prism_bspline_cubic_tangent(g[4].xyz, g[5].xyz, g[6].xyz, g[7].xyz, v);\n\
+    let q2 = prism_bspline_cubic_tangent(g[8].xyz, g[9].xyz, g[10].xyz, g[11].xyz, v);\n\
+    let q3 = prism_bspline_cubic_tangent(g[12].xyz, g[13].xyz, g[14].xyz, g[15].xyz, v);\n\
+    return prism_bspline_cubic(q0, q1, q2, q3, u);\n\
+}\n\
+\n\
+fn prism_bspline_patch_normal(g: array<vec4<f32>, 16>, u: f32, v: f32) -> vec3<f32> {\n\
+    return prism_surface_normal_from(prism_bspline_patch_tangent_u(g, u, v), prism_bspline_patch_tangent_v(g, u, v));\n\
+}\n\
+\n\
+fn prism_surface(op: u32, g: array<vec4<f32>, 16>, u: f32, v: f32) -> vec3<f32> {\n\
+    switch (op) {\n\
+        case 0u: { return prism_bezier_patch_sample(g, u, v); }\n\
+        case 1u: { return prism_bezier_patch_tangent_u(g, u, v); }\n\
+        case 2u: { return prism_bezier_patch_tangent_v(g, u, v); }\n\
+        case 3u: { return prism_bezier_patch_normal(g, u, v); }\n\
+        case 4u: { return prism_bspline_patch_sample(g, u, v); }\n\
+        case 5u: { return prism_bspline_patch_tangent_u(g, u, v); }\n\
+        case 6u: { return prism_bspline_patch_tangent_v(g, u, v); }\n\
+        case 7u: { return prism_bspline_patch_normal(g, u, v); }\n\
+        default: { return vec3<f32>(0.0, 0.0, 0.0); }\n\
+    }\n\
+}\n";
