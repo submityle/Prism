@@ -22,6 +22,11 @@ pub mod segmented;
 pub mod steps;
 pub mod tab_bar;
 pub mod toolbar;
+pub mod affix;
+pub mod anchor;
+pub mod back_top;
+pub mod sidebar;
+pub mod status_bar;
 
 pub use breadcrumb::{Breadcrumb, BreadcrumbItem, BreadcrumbProps};
 pub use drawer::{Drawer, DrawerProps, DrawerSide};
@@ -32,6 +37,11 @@ pub use segmented::{SegmentedControl, SegmentedControlProps};
 pub use steps::{StepItem, Steps, StepsProps};
 pub use tab_bar::{TabBar, TabBarItem, TabBarProps};
 pub use toolbar::{Toolbar, ToolbarProps};
+pub use affix::{Affix, AffixProps};
+pub use anchor::{Anchor, AnchorLink, AnchorProps, ScrollSpy};
+pub use back_top::{BackTop, BackTopProps};
+pub use sidebar::{NavRail, Sidebar, SidebarItem, SidebarProps};
+pub use status_bar::{StatusBar, StatusBarProps};
 
 /// Registers every `nav/` control's token-backed classes into `sheet`.
 pub fn register_styles(sheet: &mut StyleSheet) {
@@ -44,4 +54,9 @@ pub fn register_styles(sheet: &mut StyleSheet) {
     steps::register_styles(sheet);
     menu::register_styles(sheet);
     segmented::register_styles(sheet);
+    status_bar::register_styles(sheet);
+    sidebar::register_styles(sheet);
+    anchor::register_styles(sheet);
+    affix::register_styles(sheet);
+    back_top::register_styles(sheet);
 }
