@@ -15,6 +15,7 @@
 use crate::preset::StyleSheet;
 
 pub mod badge;
+pub mod calendar;
 pub mod descriptions;
 pub mod empty_state;
 pub mod list;
@@ -22,8 +23,15 @@ pub mod rating;
 pub mod section;
 pub mod stat;
 pub mod timeline;
+pub mod carousel;
+pub mod data_grid;
+pub mod image_list;
+pub mod number_ticker;
+pub mod table;
+pub mod tree_view;
 
 pub use badge::{Badge, BadgeProps};
+pub use calendar::{Calendar, CalendarProps};
 pub use descriptions::{Descriptions, DescriptionsProps};
 pub use empty_state::{EmptyState, EmptyStateProps};
 pub use list::{List, ListProps, ListRow, ListRowProps};
@@ -31,10 +39,17 @@ pub use rating::{Rating, RatingProps};
 pub use section::{Section, SectionProps};
 pub use stat::{Stat, StatProps};
 pub use timeline::{Timeline, TimelineItem, TimelineProps};
+pub use carousel::{Carousel, CarouselProps};
+pub use data_grid::{DataColumn, DataGrid, DataGridProps};
+pub use image_list::{ImageItem, ImageList, ImageListProps};
+pub use number_ticker::{NumberTicker, NumberTickerProps};
+pub use table::{Table, TableProps};
+pub use tree_view::{TreeNode, TreeView, TreeViewProps};
 
 /// Registers every `display/` control's token-backed classes into `sheet`.
 pub fn register_styles(sheet: &mut StyleSheet) {
     badge::register_styles(sheet);
+    calendar::register_styles(sheet);
     stat::register_styles(sheet);
     section::register_styles(sheet);
     empty_state::register_styles(sheet);
@@ -42,4 +57,10 @@ pub fn register_styles(sheet: &mut StyleSheet) {
     timeline::register_styles(sheet);
     rating::register_styles(sheet);
     descriptions::register_styles(sheet);
+    table::register_styles(sheet);
+    data_grid::register_styles(sheet);
+    tree_view::register_styles(sheet);
+    carousel::register_styles(sheet);
+    image_list::register_styles(sheet);
+    number_ticker::register_styles(sheet);
 }
