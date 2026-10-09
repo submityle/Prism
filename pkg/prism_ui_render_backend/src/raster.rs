@@ -221,11 +221,23 @@ fn raster_glyph(fb: &mut Framebuffer, cmd: GlyphCmd, text: &str) {
     }
     #[cfg(feature = "std")]
     {
+        // Opt-in signed-distance-field text path (tier C). Gated behind an env
+        // flag so the default build keeps the analytic vector tier (B); this
+        // lets the SDF reconstruction be eyeballed and diffed at any scale.
+        if sdf_text_enabled() && raster_glyph_sdf(fb, cmd, text) {
+            return;
+        }
         if raster_glyph_vector(fb, cmd, text) {
             return;
         }
     }
     raster_glyph_bitmap(fb, cmd, text);
+}
+
+/// Whether the opt-in SDF text tier is requested via `PRISM_TEXT_SDF`.
+#[cfg(feature = "std")]
+fn sdf_text_enabled() -> bool {
+    std::env::var_os("PRISM_TEXT_SDF").is_some_and(|v| v != "0" && !v.is_empty())
 }
 
 /// Rasterises a non-empty run via real glyph outlines (`prism_ui_font::vector`).
@@ -305,6 +317,131 @@ fn raster_glyph_vector(fb: &mut Framebuffer, cmd: GlyphCmd, text: &str) -> bool 
                 let x = ox + col as i32;
                 let y = oy + row as i32;
                 if x < 0 || y < 0 {
+                    continue;
+                }
+                fb.blend(
+                    x as u32,
+                    y as u32,
+                    [cmd.color.r, cmd.color.g, cmd.color.b, c * alpha],
+                );
+            }
+        }
+    }
+    true
+}
+
+/// Rasterises a non-empty run via the single-channel SDF atlas
+/// (`prism_ui_font::sdf`, tier C).
+///
+/// The atlas is baked once (lazily, ASCII only) and cached for the process.
+/// Layout mirrors [`raster_glyph_vector`] exactly — monospace at `cmd.size`,
+/// uniform fit into the box, vertically centred — so only the glyph *fill*
+/// differs: each device pixel samples the signed distance (bilinear) and maps
+/// it to coverage with the standard `screenPxRange` rule, which stays crisp at
+/// any scale from one baked atlas. Returns `false` when the atlas is
+/// unavailable so the caller can fall back to the vector tier.
+#[cfg(feature = "std")]
+fn raster_glyph_sdf(fb: &mut Framebuffer, cmd: GlyphCmd, text: &str) -> bool {
+    use prism_ui_font::{sdf, vector};
+    use std::sync::OnceLock;
+
+    static ATLAS: OnceLock<Option<sdf::SdfAtlas>> = OnceLock::new();
+    let atlas = ATLAS.get_or_init(|| sdf::bake_ascii(48.0, 6, 12.0));
+    let Some(atlas) = atlas.as_ref() else {
+        return false;
+    };
+
+    let box_w = cmd.rect.size.width.max(0.0);
+    let box_h = cmd.rect.size.height.max(0.0);
+    if box_w <= 0.0 || box_h <= 0.0 {
+        return true;
+    }
+
+    let base_px = cmd.size.max(1.0);
+    let Some(m) = vector::metrics(base_px) else {
+        return false;
+    };
+
+    let chars: alloc::vec::Vec<char> = text.chars().collect();
+    let n = chars.len() as f32;
+    if n <= 0.0 {
+        return true;
+    }
+
+    let adv = m.advance.max(0.0);
+    let line_h = m.line_height().max(1.0);
+
+    // Uniform fit, identical to the vector tier.
+    let mut scale = 1.0f32;
+    if line_h > box_h {
+        scale = scale.min(box_h / line_h);
+    }
+    let run_w = n * adv;
+    if run_w * scale > box_w && run_w > 0.0 {
+        scale = scale.min(box_w / run_w);
+    }
+    if scale <= 0.0 {
+        return true;
+    }
+
+    let px = base_px * scale; // on-screen em in device px
+    let adv_s = adv * scale;
+    let ascent_s = m.ascent * scale;
+    let text_w = n * adv_s;
+    let text_h = line_h * scale;
+    let origin_x = cmd.rect.left() + ((box_w - text_w) * 0.5).max(0.0);
+    let top_y = cmd.rect.top() + ((box_h - text_h) * 0.5).max(0.0);
+    let baseline_y = top_y + ascent_s;
+
+    let alpha = cmd.opacity * cmd.color.a;
+    if alpha <= 0.0 {
+        return true;
+    }
+
+    let em = atlas.bake_em.max(1.0);
+    // screenPxRange = px_range * on_screen_glyph_px / baked_glyph_px.
+    let screen_px_range = atlas.px_range * (px / em);
+    // Device px per atlas texel (cells were baked at `em`, drawn at `px`).
+    let dev_per_texel = px / em;
+    if dev_per_texel <= 0.0 {
+        return true;
+    }
+
+    for (i, ch) in chars.iter().enumerate() {
+        let pen_x = origin_x + i as f32 * adv_s;
+        let Some(g) = atlas.glyph(*ch) else {
+            continue; // space / unbaked: no ink
+        };
+        // Cell top-left in device space (bearing already folds in the pad).
+        let cell_left = pen_x + g.bearing_em.0 * px;
+        let cell_top = baseline_y + g.bearing_em.1 * px;
+        let cell_w_dev = g.size_em.0 * px;
+        let cell_h_dev = g.size_em.1 * px;
+        if cell_w_dev <= 0.0 || cell_h_dev <= 0.0 {
+            continue;
+        }
+
+        let x0 = (cell_left.floor()) as i32;
+        let y0 = (cell_top.floor()) as i32;
+        let x1 = ((cell_left + cell_w_dev).ceil()) as i32;
+        let y1 = ((cell_top + cell_h_dev).ceil()) as i32;
+
+        for y in y0..y1 {
+            if y < 0 {
+                continue;
+            }
+            for x in x0..x1 {
+                if x < 0 {
+                    continue;
+                }
+                // Device pixel centre -> atlas texel coordinate.
+                let local_x = (x as f32 + 0.5) - cell_left;
+                let local_y = (y as f32 + 0.5) - cell_top;
+                let u = g.px_min.0 as f32 + local_x / dev_per_texel;
+                let v = g.px_min.1 as f32 + local_y / dev_per_texel;
+                let d = atlas.sample_distance(u, v);
+                let c = sdf::coverage(d, screen_px_range);
+                if c <= 0.0 {
                     continue;
                 }
                 fb.blend(
