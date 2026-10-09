@@ -23,6 +23,7 @@ pub mod link;
 pub mod spacer;
 pub mod tag;
 pub mod text;
+pub mod video;
 
 pub use async_image::{AsyncImage, AsyncImageProps, LoadPhase};
 pub use avatar::{Avatar, AvatarContent, AvatarProps};
@@ -40,6 +41,7 @@ pub use link::{Link, LinkProps};
 pub use spacer::{Spacer, SpacerProps};
 pub use tag::{Tag, TagProps};
 pub use text::{Text, TextProps, TextRole, TextTone};
+pub use video::{MediaPlayer, Video, VideoProps};
 
 /// Registers every `basics/` control's token-backed classes into `sheet`.
 pub fn register_styles(sheet: &mut StyleSheet) {
@@ -59,4 +61,5 @@ pub fn register_styles(sheet: &mut StyleSheet) {
     async_image::register_styles(sheet);
     blockquote::register_styles(sheet);
     highlight::register_styles(sheet);
+    video::register_styles(sheet);
 }
