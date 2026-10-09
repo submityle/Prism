@@ -33,7 +33,7 @@ pub mod tour;
 pub mod float_button;
 
 pub use alert::{Alert, AlertProps};
-pub use banner::{Banner, BannerProps};
+pub use banner::{Banner, BannerProps, InlineAlert};
 pub use callout::{Callout, CalloutProps};
 pub use dialog::{Dialog, DialogProps};
 pub use popover::{Placement, Popover, PopoverProps};

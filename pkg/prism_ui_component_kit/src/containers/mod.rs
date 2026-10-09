@@ -26,7 +26,7 @@ pub mod infinite_scroll;
 pub mod scroll_area;
 pub mod split_view;
 
-pub use accordion::{Accordion, AccordionItem, AccordionProps};
+pub use accordion::{Accordion, AccordionItem, AccordionProps, Disclosure};
 pub use aspect_ratio::{AspectRatio, AspectRatioProps};
 pub use card::{Card, CardProps};
 pub use grid::{Grid, GridProps};
@@ -37,7 +37,7 @@ pub use stack::{Stack, StackAlign, StackDirection, StackProps};
 pub use tabs::{TabItem, TabList, TabListProps, TabPanel, TabPanelProps, Tabs, TabsProps};
 pub use infinite_scroll::{InfiniteScroll, InfiniteScrollProps, LoadMore};
 pub use scroll_area::{ScrollArea, ScrollAreaProps};
-pub use split_view::{SplitOrientation, SplitView, SplitViewProps};
+pub use split_view::{Resizable, SplitOrientation, SplitView, SplitViewProps};
 
 /// Registers every `containers/` control's token-backed classes into `sheet`.
 pub fn register_styles(sheet: &mut StyleSheet) {

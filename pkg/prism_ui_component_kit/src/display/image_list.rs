@@ -188,6 +188,9 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 }
 
+/// Alias: a masonry wall is an image list layout.
+pub type Masonry = ImageList;
+
 #[cfg(test)]
 mod tests {
     use super::*;

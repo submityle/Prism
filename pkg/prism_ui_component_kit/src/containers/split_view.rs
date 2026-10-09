@@ -178,6 +178,9 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 }
 
+/// Alias: a resizable pane pair is a split view.
+pub type Resizable = SplitView;
+
 #[cfg(test)]
 mod tests {
     use super::*;

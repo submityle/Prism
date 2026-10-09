@@ -109,6 +109,9 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 }
 
+/// Alias: `Clipboard` names the copy-to-clipboard affordance.
+pub type Clipboard = CopyButton;
+
 #[cfg(test)]
 mod tests {
     use super::*;

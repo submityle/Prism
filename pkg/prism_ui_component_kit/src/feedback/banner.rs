@@ -136,6 +136,9 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 }
 
+/// Alias: an inline alert is a banner-style notice.
+pub type InlineAlert = Banner;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -32,14 +32,14 @@ pub use button::{Button, ButtonProps};
 pub use code::{Code, CodeProps};
 pub use divider::{Divider, DividerOrientation, DividerProps};
 pub use heading::{Heading, HeadingLevel, HeadingProps};
-pub use highlight::{Highlight, HighlightProps};
+pub use highlight::{Highlight, HighlightProps, Mark};
 pub use icon::{Icon, IconProps};
 pub use image::{Image, ImageFit, ImageProps};
 pub use kbd::{Kbd, KbdProps};
 pub use label::{Label, LabelProps};
 pub use link::{Link, LinkProps};
 pub use spacer::{Spacer, SpacerProps};
-pub use tag::{Tag, TagProps};
+pub use tag::{Chip, Tag, TagProps};
 pub use text::{Text, TextProps, TextRole, TextTone};
 pub use video::{MediaPlayer, Video, VideoProps};
 

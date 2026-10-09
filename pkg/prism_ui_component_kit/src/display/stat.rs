@@ -130,6 +130,9 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     }
 }
 
+/// Alias: a KPI card is a stat.
+pub type Kpi = Stat;
+
 #[cfg(test)]
 mod tests {
     use super::*;

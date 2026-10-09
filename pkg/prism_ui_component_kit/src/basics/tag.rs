@@ -97,6 +97,9 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     sheet.insert(Class::new("pk-tag__remove").with(StyleProp::Color, tok("color.label.secondary")));
 }
 
+/// Alias: a chip is another name for a tag.
+pub type Chip = Tag;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -77,6 +77,9 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     }
 }
 
+/// Alias: `Mark` mirrors the HTML element name for highlighted text.
+pub type Mark = Highlight;
+
 #[cfg(test)]
 mod tests {
     use super::*;

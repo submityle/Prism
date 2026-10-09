@@ -155,6 +155,9 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 }
 
+/// Alias: a disclosure is a single-item accordion idiom.
+pub type Disclosure = Accordion;
+
 #[cfg(test)]
 mod tests {
     use super::*;

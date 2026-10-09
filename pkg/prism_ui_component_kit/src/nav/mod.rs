@@ -34,7 +34,7 @@ pub use menu::{Menu, MenuEntry, MenuProps};
 pub use nav_bar::{NavBar, NavBarProps};
 pub use pagination::{Pagination, PaginationProps};
 pub use segmented::{SegmentedControl, SegmentedControlProps};
-pub use steps::{StepItem, Steps, StepsProps};
+pub use steps::{StepItem, Steps, StepsProps, Wizard};
 pub use tab_bar::{TabBar, TabBarItem, TabBarProps};
 pub use toolbar::{Toolbar, ToolbarProps};
 pub use affix::{Affix, AffixProps};

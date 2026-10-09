@@ -20,7 +20,7 @@ pub mod qr_code;
 pub mod visually_hidden;
 pub mod watermark;
 
-pub use copy_button::{CopyButton, CopyButtonProps};
+pub use copy_button::{Clipboard, CopyButton, CopyButtonProps};
 pub use portal::{Portal, PortalProps};
 pub use qr_code::{QrCode, QrCodeProps, DEFAULT_QR_SIZE_PX};
 pub use visually_hidden::{VisuallyHidden, VisuallyHiddenProps};

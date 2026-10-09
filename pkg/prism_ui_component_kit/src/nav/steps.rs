@@ -150,6 +150,9 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
     );
 }
 
+/// Alias: a wizard is a stepped flow.
+pub type Wizard = Steps;
+
 #[cfg(test)]
 mod tests {
     use super::*;
