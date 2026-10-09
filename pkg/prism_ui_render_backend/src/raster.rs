@@ -200,6 +200,124 @@ fn raster_shadow(fb: &mut Framebuffer, cmd: ShadowCmd) {
     }
 }
 
+/// Rasterises a text run, preferring the crisp vector (TrueType outline) path
+/// and falling back to the embedded 5x7 bitmap when the vector face is
+/// unavailable (e.g. `no_std` builds) or declines a glyph. An empty run paints
+/// the legacy solid coverage box so non-text callers are unaffected.
+fn raster_glyph(fb: &mut Framebuffer, cmd: GlyphCmd, text: &str) {
+    if text.is_empty() {
+        raster_rect(
+            fb,
+            RectCmd {
+                rect: cmd.rect,
+                fill: Some(cmd.color),
+                radius: 0.0,
+                border_width: 0.0,
+                border_color: None,
+                opacity: cmd.opacity,
+            },
+        );
+        return;
+    }
+    #[cfg(feature = "std")]
+    {
+        if raster_glyph_vector(fb, cmd, text) {
+            return;
+        }
+    }
+    raster_glyph_bitmap(fb, cmd, text);
+}
+
+/// Rasterises a non-empty run via real glyph outlines (`prism_ui_font::vector`).
+///
+/// The run is laid out monospace at `cmd.size`, shrunk uniformly to fit the box
+/// (both height and width), vertically centred, and each glyph's analytic
+/// coverage mask is alpha-blended with the inherited text colour. Returns
+/// `false` when the embedded vector face is unavailable so the caller can fall
+/// back to the bitmap table; returns `true` once it has taken ownership of the
+/// run (even if some glyphs, like spaces, contribute no ink).
+#[cfg(feature = "std")]
+fn raster_glyph_vector(fb: &mut Framebuffer, cmd: GlyphCmd, text: &str) -> bool {
+    use prism_ui_font::vector;
+
+    let box_w = cmd.rect.size.width.max(0.0);
+    let box_h = cmd.rect.size.height.max(0.0);
+    if box_w <= 0.0 || box_h <= 0.0 {
+        return true;
+    }
+
+    let base_px = cmd.size.max(1.0);
+    let Some(m) = vector::metrics(base_px) else {
+        return false;
+    };
+
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len() as f32;
+    if n <= 0.0 {
+        return true;
+    }
+
+    let adv = m.advance.max(0.0);
+    let line_h = m.line_height().max(1.0);
+
+    // Uniform fit: cap by the box height, then shrink to the box width.
+    let mut scale = 1.0f32;
+    if line_h > box_h {
+        scale = scale.min(box_h / line_h);
+    }
+    let run_w = n * adv;
+    if run_w * scale > box_w && run_w > 0.0 {
+        scale = scale.min(box_w / run_w);
+    }
+    if scale <= 0.0 {
+        return true;
+    }
+
+    let px = base_px * scale;
+    let adv_s = adv * scale;
+    let ascent_s = m.ascent * scale;
+    let text_w = n * adv_s;
+    let text_h = line_h * scale;
+    let origin_x = cmd.rect.left() + ((box_w - text_w) * 0.5).max(0.0);
+    let top_y = cmd.rect.top() + ((box_h - text_h) * 0.5).max(0.0);
+    let baseline_y = top_y + ascent_s;
+
+    let alpha = cmd.opacity * cmd.color.a;
+    if alpha <= 0.0 {
+        return true;
+    }
+
+    for (i, ch) in chars.iter().enumerate() {
+        let pen_x = origin_x + i as f32 * adv_s;
+        let Some(cov) = vector::glyph_coverage(*ch, px) else {
+            continue;
+        };
+        // Snap the glyph box origin to the pixel grid; the mask already carries
+        // analytic edge coverage, so integer placement stays crisp.
+        let ox = (pen_x + cov.left).round() as i32;
+        let oy = (baseline_y + cov.top).round() as i32;
+        for row in 0..cov.height {
+            for col in 0..cov.width {
+                let c = cov.data[row * cov.width + col];
+                if c <= 0.0 {
+                    continue;
+                }
+                let x = ox + col as i32;
+                let y = oy + row as i32;
+                if x < 0 || y < 0 {
+                    continue;
+                }
+                fb.blend(
+                    x as u32,
+                    y as u32,
+                    [cmd.color.r, cmd.color.g, cmd.color.b, c * alpha],
+                );
+            }
+        }
+    }
+    true
+}
+
 /// Rasterises a text run through the embedded [`prism_ui_font`] bitmap.
 ///
 /// The run is laid out monospace and left-to-right, vertically centred in its
@@ -212,7 +330,7 @@ fn raster_shadow(fb: &mut Framebuffer, cmd: ShadowCmd) {
 /// callers and older snapshots are unaffected.
 ///
 /// [`TextRef`]: crate::draw::TextRef
-fn raster_glyph(fb: &mut Framebuffer, cmd: GlyphCmd, text: &str) {
+fn raster_glyph_bitmap(fb: &mut Framebuffer, cmd: GlyphCmd, text: &str) {
     if text.is_empty() {
         raster_rect(
             fb,

@@ -9,9 +9,10 @@
 //! answer to "are the components empty?": they are not — the earlier single-box
 //! swatch sheet simply could not show visuals that live in child elements.
 //!
-//! The reference glyph rasterizer paints text as solid coverage blocks (not
-//! real font outlines), so labels appear as filled bars; the tiles are about
-//! surface/shape/color fidelity, not typography.
+//! The reference glyph rasterizer now paints real font outlines (via
+//! `prism_ui_font`'s embedded `FiraMono` vector tier), so labels render as
+//! crisp, legible text at any size; the tiles exercise both typography and
+//! surface/shape/color fidelity.
 
 #![allow(
     clippy::print_stdout,

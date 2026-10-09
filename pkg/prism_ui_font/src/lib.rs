@@ -1,12 +1,15 @@
 //! A self-contained 5x7 bitmap font for printable ASCII (`0x20..=0x7E`).
 //!
-//! Loom's reference rasteriser needs to turn text runs into *readable* pixels
-//! without pulling in a full OpenType stack (`swash`, `ab_glyph`, …) or shipping
-//! font files. This crate embeds a compact, hand-authored 5-wide / 7-tall glyph
-//! table and exposes nearest-neighbour sampling plus simple metrics. It is the
-//! `P0` ("make text legible") stage of the text-rendering roadmap documented in
-//! `docs/prism_loom_text_rendering_design_zh.md`; the `MSDF` atlas path layered
-//! on top of it is future work and lives behind that design.
+//! Loom's reference rasteriser turns text runs into *readable* pixels in two
+//! tiers. The always-available base tier embeds a compact, hand-authored
+//! 5-wide / 7-tall glyph table (this module) and exposes nearest-neighbour
+//! sampling plus simple metrics — it needs no font files and works in
+//! `no_std`. The optional [`vector`] tier (behind the `vector` feature) parses
+//! a real embedded OpenType face with `ab_glyph` and rasterises Bézier
+//! outlines for crisp text at any size. Together they are the `P0`
+//! ("make text legible") and `B` ("CPU vector") stages of the roadmap in
+//! `docs/prism_loom_text_rendering_design_zh.md`; the GPU `MSDF` atlas path
+//! layered on top is future work and lives behind that design.
 //!
 //! Row encoding: each glyph is `[u8; GLYPH_H]`, one byte per scanline from top
 //! to bottom. Only the low [`GLYPH_W`] bits are used; bit `GLYPH_W - 1` is the
@@ -17,6 +20,13 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
+
+#[cfg(feature = "vector")]
+extern crate alloc;
+
+/// Real vector (TrueType outline) glyph rasterisation (the crisp-text tier).
+#[cfg(feature = "vector")]
+pub mod vector;
 
 /// Glyph cell width in source pixels (columns).
 pub const GLYPH_W: usize = 5;
