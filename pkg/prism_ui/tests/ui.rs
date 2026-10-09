@@ -261,3 +261,34 @@ fn keyed_insert_and_remove() {
     assert_eq!(creates, 1, "one node added: {ops:?}");
     assert_eq!(removes, 1, "one node removed: {ops:?}");
 }
+
+/// `color` inherits down the tree: a text child with no foreground of its own
+/// picks up the color declared on an ancestor, mirroring CSS semantics. This
+/// is what lets component labels (declared on the control, not the text node)
+/// actually paint.
+#[test]
+fn color_inherits_to_text_children() {
+    let sheet = StyleSheet::new().with_class(
+        Class::new("fg").with(StyleProp::Color, StyleValue::rgba8(10, 20, 30, 255)),
+    );
+
+    let mut ui = Ui::new(RecordingBackend::new()).with_stylesheet(sheet);
+    // Parent declares the color; the text child declares none.
+    ui.mount(&Element::box_().class("fg").child(Element::text("hi")));
+
+    // Collect the final paint per node id from the emitted SetPaint ops.
+    let paints: Vec<_> = ui
+        .backend()
+        .ops()
+        .iter()
+        .filter_map(|op| match op {
+            BackendOp::SetPaint { id, paint } => Some((*id, paint.color)),
+            _ => None,
+        })
+        .collect();
+
+    let want = Some(prism_ui::style::Color::rgba8(10, 20, 30, 255));
+    // Root (id 0) and inherited text child (id 1) both resolve to the color.
+    assert_eq!(paints[0], (BackendId(0), want), "root keeps its own color");
+    assert_eq!(paints[1], (BackendId(1), want), "text child inherits color");
+}

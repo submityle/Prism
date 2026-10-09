@@ -27,7 +27,7 @@ use alloc::vec::Vec;
 
 use prism_ui_layout::{AvailableSpace, Layout, LayoutTree, Measure, NodeId as LayoutId, Size};
 use prism_ui_style::{
-    resolve, ComputedStyle, MatchContext, StyleProp, StyleSheet, StyleValue, Theme,
+    resolve, Color, ComputedStyle, MatchContext, StyleProp, StyleSheet, StyleValue, Theme,
 };
 use prism_ui_tree::reactive::Runtime;
 use prism_ui_tree::{diff_keyed, DiffOp, NodeId, Tree};
@@ -154,7 +154,7 @@ impl<B: Backend> Ui<B> {
             self.emit_remove_subtree(root);
             self.tree.remove_subtree(root);
         }
-        let root = self.build_node(element, None, 0);
+        let root = self.build_node(element, None, 0, None);
         self.root = Some(root);
     }
 
@@ -229,9 +229,16 @@ impl<B: Backend> Ui<B> {
         element: &Element,
         parent_backend: Option<BackendId>,
         index: usize,
+        inherited_color: Option<Color>,
     ) -> NodeId {
         let backend_id = self.alloc_id();
-        let (layout_style, paint) = self.compute_styles(element);
+        let (layout_style, mut paint) = self.compute_styles(element);
+        // `color` inherits down the tree (CSS semantics), so a text run can
+        // pick up a foreground set on an ancestor (e.g. a button's label color
+        // declared on the button, not on the label node itself). Only text
+        // nodes consume `paint.color`; applying it to boxes is inert.
+        let effective_color = paint.color.or(inherited_color);
+        paint.color = effective_color;
         let key = element.resolved_key(index);
         let realized = Realized {
             backend_id,
@@ -263,7 +270,7 @@ impl<B: Backend> Ui<B> {
         });
 
         for (i, child) in element.child_elements().iter().enumerate() {
-            let child_node = self.build_node(child, Some(backend_id), i);
+            let child_node = self.build_node(child, Some(backend_id), i, effective_color);
             self.tree.append_child(node, child_node);
         }
         node
@@ -320,6 +327,9 @@ impl<B: Backend> Ui<B> {
             .get(parent)
             .expect("parent must be live")
             .backend_id;
+        // Freshly built children inherit the parent's resolved foreground so
+        // text runs match the mount-time inheritance path.
+        let parent_color = self.tree.get(parent).and_then(|r| r.paint.color);
 
         let old_children: Vec<NodeId> = self.tree.children(parent).to_vec();
         let old_keys: Vec<Key> = old_children
@@ -360,12 +370,18 @@ impl<B: Backend> Ui<B> {
                         new_child_ids.push((child, true));
                     } else {
                         to_remove.push(child);
-                        let fresh = self.build_node(&new_elements[i], Some(parent_backend), i);
+                        let fresh =
+                            self.build_node(&new_elements[i], Some(parent_backend), i, parent_color);
                         new_child_ids.push((fresh, false));
                     }
                 }
                 DiffOp::Create { new_index } => {
-                    let fresh = self.build_node(&new_elements[new_index], Some(parent_backend), i);
+                    let fresh = self.build_node(
+                        &new_elements[new_index],
+                        Some(parent_backend),
+                        i,
+                        parent_color,
+                    );
                     new_child_ids.push((fresh, false));
                 }
             }
