@@ -15,6 +15,7 @@ prism_ui_a11y = { path = "../prism_ui_a11y" }
 
 [dev-dependencies]
 prism_ui_workbench = { path = "../prism_ui_workbench" }
+prism_ui_render_backend = { path = "../prism_ui_render_backend" }
 
 [features]
 default = ["std"]
