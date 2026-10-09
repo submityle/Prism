@@ -161,6 +161,7 @@ members = [
   "pkg/prism_ui_input",
   "pkg/prism_ui_theme",
   "pkg/prism_ui_sdui",
+  "pkg/prism_ui_font",
   "pkg/prism_ui_text",
   "pkg/prism_ui_render_backend",
   "pkg/prism_ui_component_kit",

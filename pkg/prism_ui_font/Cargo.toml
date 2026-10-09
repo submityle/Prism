@@ -1,0 +1,16 @@
+[package]
+name = "prism_ui_font"
+version = "0.1.0"
+edition = "2024"
+description = "Loom embedded bitmap font: a self-contained 5x7 printable-ASCII glyph table plus metrics, used by the reference rasteriser to turn text runs into readable pixels without any external font files or heavy dependencies. Contains no Unreal Engine source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[features]
+default = ["std"]
+std = []
+
+[lints]
+workspace = true
