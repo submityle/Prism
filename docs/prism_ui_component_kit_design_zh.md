@@ -8,7 +8,7 @@
 > 本文为**设计规格**,严格区分「已交付」(SHIPPED)与「规划中」(PLANNED),
 > 不把未落地能力描述为已落地。
 
-- 版本: v0.4(设计阶段;底层基础设施已交付,控件层尚未开工)
+- 版本: v0.5(**控件层已交付 SHIPPED**;§5 全部清单落地,141 个控件文件,585 测试全绿,Clippy 零告警,`--no-default-features` no_std 通过)
 - crate 名: **`prism_ui_component_kit`**(单一控件库 crate,内部按目录分模块)
 - 适用引擎: Prism / Bevy ECS 生态,Loom 声明式 UI
 - 铁律: `#![forbid(unsafe_code)]`、`no_std` 友好(`extern crate alloc`)、每控件配测试、Clippy 零告警、三层解耦
