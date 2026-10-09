@@ -24,6 +24,13 @@ pub mod skeleton;
 pub mod spinner;
 pub mod toast;
 pub mod tooltip;
+pub mod hover_card;
+pub mod context_menu;
+pub mod command_palette;
+pub mod popconfirm;
+pub mod result;
+pub mod tour;
+pub mod float_button;
 
 pub use alert::{Alert, AlertProps};
 pub use banner::{Banner, BannerProps};
@@ -35,6 +42,13 @@ pub use skeleton::{Skeleton, SkeletonProps};
 pub use spinner::{Spinner, SpinnerProps};
 pub use toast::{Toast, ToastProps};
 pub use tooltip::{Tooltip, TooltipProps};
+pub use hover_card::{HoverCard, HoverCardProps};
+pub use context_menu::{ContextMenu, ContextMenuItem, ContextMenuProps};
+pub use command_palette::{CommandItem, CommandPalette, CommandPaletteProps};
+pub use popconfirm::{Popconfirm, PopconfirmProps};
+pub use result::{Result as ResultView, ResultProps, StatusPage};
+pub use tour::{Coachmark, Tour, TourProps, TourStep};
+pub use float_button::{FloatButton, FloatButtonProps, SpeedDial};
 
 /// Registers every `feedback/` control's token-backed classes into `sheet`.
 ///
@@ -51,4 +65,11 @@ pub fn register_styles(sheet: &mut StyleSheet) {
     skeleton::register_styles(sheet);
     banner::register_styles(sheet);
     callout::register_styles(sheet);
+    hover_card::register_styles(sheet);
+    context_menu::register_styles(sheet);
+    command_palette::register_styles(sheet);
+    popconfirm::register_styles(sheet);
+    result::register_styles(sheet);
+    tour::register_styles(sheet);
+    float_button::register_styles(sheet);
 }
