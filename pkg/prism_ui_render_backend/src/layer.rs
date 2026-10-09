@@ -6,9 +6,12 @@
 //! in a [`DrawList`] into a nested structure, exposing the effective opacity of
 //! every layer (the product of its ancestors) and the primitives it owns.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::draw::{DrawCommand, DrawList};
+#[cfg(doc)]
+use crate::draw::TextRef;
 
 /// A node in the compositing tree. The implicit root layer has `opacity == 1`
 /// and `bounds == None` (unbounded).
@@ -48,6 +51,10 @@ impl Layer {
 pub struct LayerTree {
     root: Layer,
     balanced: bool,
+    /// A clone of the source list's text pool, carried so [`LayerTree::flatten`]
+    /// can hand it back to the reconstructed list and keep every [`TextRef`]
+    /// index valid.
+    text_pool: String,
 }
 
 impl LayerTree {
@@ -93,7 +100,11 @@ impl LayerTree {
                 .push(done);
         }
         let root = stack.pop().expect("root always present");
-        Self { root, balanced }
+        Self {
+            root,
+            balanced,
+            text_pool: String::from(list.text_pool()),
+        }
     }
 
     /// The implicit root layer.
@@ -128,6 +139,9 @@ impl LayerTree {
     pub fn flatten(&self) -> DrawList {
         let mut out = DrawList::new();
         flatten_layer(&self.root, 1.0, &mut out);
+        // Reconstruction preserves every `TextRef` index, so the pool carries
+        // over unchanged and glyph lookups keep resolving after flattening.
+        out.set_text_pool(String::from(self.text_pool.as_str()));
         out
     }
 }

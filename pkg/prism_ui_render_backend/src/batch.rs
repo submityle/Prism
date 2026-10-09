@@ -215,6 +215,7 @@ mod tests {
             color: white(),
             size: 16.0,
             opacity: 1.0,
+            text: Default::default(),
         }));
         dl.push_rect(rect_cmd(20.0));
         let b = batch(&dl);

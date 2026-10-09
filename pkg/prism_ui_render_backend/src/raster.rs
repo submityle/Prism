@@ -126,7 +126,10 @@ pub fn rasterize(list: &DrawList, width: u32, height: u32) -> Framebuffer {
         match *cmd {
             DrawCommand::Shadow(s) => raster_shadow(&mut fb, s),
             DrawCommand::Rect(r) => raster_rect(&mut fb, r),
-            DrawCommand::Glyph(g) => raster_glyph(&mut fb, g),
+            DrawCommand::Glyph(g) => {
+                let text = flat.text(g.text);
+                raster_glyph(&mut fb, g, text);
+            }
             DrawCommand::PushLayer(_) | DrawCommand::PopLayer => {}
         }
     }
@@ -197,23 +200,101 @@ fn raster_shadow(fb: &mut Framebuffer, cmd: ShadowCmd) {
     }
 }
 
-/// Glyph runs are rendered as a solid coverage block in the reference backend:
-/// real glyph atlases live in `prism_ui_text`, but the reference only needs to
-/// prove the run's box, colour and opacity reach the target. This is an honest
-/// placeholder for shaping, not a stub for the compositing path it exercises.
-fn raster_glyph(fb: &mut Framebuffer, cmd: GlyphCmd) {
-    let fill = Color::rgba(cmd.color.r, cmd.color.g, cmd.color.b, cmd.color.a);
-    raster_rect(
-        fb,
-        RectCmd {
-            rect: cmd.rect,
-            fill: Some(fill),
-            radius: 0.0,
-            border_width: 0.0,
-            border_color: None,
-            opacity: cmd.opacity,
-        },
-    );
+/// Rasterises a text run through the embedded [`prism_ui_font`] bitmap.
+///
+/// The run is laid out monospace and left-to-right, vertically centred in its
+/// box. A glyph cell is scaled to `size` device pixels tall (its 5x7 aspect
+/// preserved) and the whole run is shrunk further if it would overflow the box
+/// width, so labels never spill. Every inked source pixel is painted as an
+/// axis-aligned box with analytic edge coverage (see [`blend_box`]), which
+/// keeps text crisp and seam-free without a glyph atlas. An empty [`TextRef`]
+/// (`text == ""`) falls back to the legacy solid coverage block so non-text
+/// callers and older snapshots are unaffected.
+///
+/// [`TextRef`]: crate::draw::TextRef
+fn raster_glyph(fb: &mut Framebuffer, cmd: GlyphCmd, text: &str) {
+    if text.is_empty() {
+        raster_rect(
+            fb,
+            RectCmd {
+                rect: cmd.rect,
+                fill: Some(cmd.color),
+                radius: 0.0,
+                border_width: 0.0,
+                border_color: None,
+                opacity: cmd.opacity,
+            },
+        );
+        return;
+    }
+
+    let box_w = cmd.rect.size.width.max(0.0);
+    let box_h = cmd.rect.size.height.max(0.0);
+    if box_w <= 0.0 || box_h <= 0.0 {
+        return;
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len() as f32;
+    let adv = prism_ui_font::GLYPH_ADVANCE as f32;
+    let gh = prism_ui_font::GLYPH_H as f32;
+
+    // Device pixels per source font pixel: start from the em (cell height),
+    // cap at the box height, then clamp so the whole run fits the box width.
+    let mut scale = (cmd.size.max(1.0) / gh).min(box_h / gh);
+    let run_w = n * adv * scale;
+    if run_w > box_w && run_w > 0.0 {
+        scale *= box_w / run_w;
+    }
+    if scale <= 0.0 {
+        return;
+    }
+
+    // Centre the laid-out run inside its box.
+    let text_w = n * adv * scale;
+    let text_h = gh * scale;
+    let origin_x = cmd.rect.left() + ((box_w - text_w) * 0.5).max(0.0);
+    let origin_y = cmd.rect.top() + ((box_h - text_h) * 0.5).max(0.0);
+
+    let alpha = cmd.opacity * cmd.color.a;
+    if alpha <= 0.0 {
+        return;
+    }
+
+    for (i, ch) in chars.iter().enumerate() {
+        let glyph = prism_ui_font::glyph(*ch);
+        let cell_x = origin_x + i as f32 * adv * scale;
+        for row in 0..prism_ui_font::GLYPH_H {
+            for col in 0..prism_ui_font::GLYPH_W {
+                if !prism_ui_font::pixel(glyph, row, col) {
+                    continue;
+                }
+                let x0 = cell_x + col as f32 * scale;
+                let y0 = origin_y + row as f32 * scale;
+                blend_box(fb, x0, y0, x0 + scale, y0 + scale, cmd.color, alpha);
+            }
+        }
+    }
+}
+
+/// Blends an axis-aligned box `[x0, x1) x [y0, y1)` into `fb` using per-pixel
+/// analytic coverage (the overlapped area fraction). Adjacent boxes therefore
+/// meet without a seam and outer edges stay anti-aliased.
+fn blend_box(fb: &mut Framebuffer, x0: f32, y0: f32, x1: f32, y1: f32, color: Color, alpha: f32) {
+    let px0 = x0.floor().max(0.0) as u32;
+    let py0 = y0.floor().max(0.0) as u32;
+    let px1 = (x1.ceil().max(0.0) as u32).min(fb.width);
+    let py1 = (y1.ceil().max(0.0) as u32).min(fb.height);
+    for py in py0..py1 {
+        for px in px0..px1 {
+            let ox = (x1.min(px as f32 + 1.0) - x0.max(px as f32)).clamp(0.0, 1.0);
+            let oy = (y1.min(py as f32 + 1.0) - y0.max(py as f32)).clamp(0.0, 1.0);
+            let cov = ox * oy * alpha;
+            if cov > 0.0 {
+                fb.blend(px, py, [color.r, color.g, color.b, cov]);
+            }
+        }
+    }
 }
 
 /// Bounding box union helper exposed for tooling/tests.

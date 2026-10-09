@@ -6,10 +6,43 @@
 //! it belongs to. Both the headless rasteriser and the GPU backend consume the
 //! exact same list, which is what makes the two verifiable against each other.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use prism_ui_layout::{Point, Rect, Size};
 use prism_ui_style::Color;
+
+/// A compact, `Copy` handle into a [`DrawList`]'s text pool.
+///
+/// Glyph commands do not own their characters; they borrow a `[start, start +
+/// len)` byte slice of the owning list's pooled UTF-8 so the command itself
+/// stays small and `Copy`. [`TextRef::EMPTY`] (the `Default`) marks "no text",
+/// which the reference rasteriser renders as the legacy solid coverage block so
+/// older paths never regress.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextRef {
+    start: u32,
+    len: u32,
+}
+
+impl TextRef {
+    /// The empty run: no pooled bytes.
+    pub const EMPTY: Self = Self { start: 0, len: 0 };
+
+    /// Whether this reference points at zero bytes.
+    #[must_use]
+    #[inline]
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// Byte length of the referenced run.
+    #[must_use]
+    #[inline]
+    pub fn len(self) -> usize {
+        self.len as usize
+    }
+}
 
 /// A single resolved drawing instruction in absolute device coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,6 +107,9 @@ pub struct GlyphCmd {
     pub size: f32,
     /// Effective opacity in `0.0..=1.0`.
     pub opacity: f32,
+    /// Handle to the run's UTF-8 in the owning [`DrawList`]'s text pool. When
+    /// [`TextRef::is_empty`] the rasteriser falls back to a solid coverage box.
+    pub text: TextRef,
 }
 
 /// Parameters for a compositing layer.
@@ -90,6 +126,9 @@ pub struct LayerCmd {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DrawList {
     commands: Vec<DrawCommand>,
+    /// Pooled UTF-8 for every [`GlyphCmd`] in `commands`, addressed by
+    /// [`TextRef`]. Kept out-of-line so [`DrawCommand`] stays `Copy` and small.
+    text_pool: String,
 }
 
 impl DrawList {
@@ -98,6 +137,7 @@ impl DrawList {
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
+            text_pool: String::new(),
         }
     }
 
@@ -114,6 +154,50 @@ impl DrawList {
     /// Appends a shadow convenience command.
     pub fn push_shadow(&mut self, cmd: ShadowCmd) {
         self.commands.push(DrawCommand::Shadow(cmd));
+    }
+
+    /// Interns `s` into the text pool and returns a [`TextRef`] addressing it.
+    ///
+    /// Empty input returns [`TextRef::EMPTY`] without touching the pool. Runs
+    /// are appended, never deduplicated: interning is O(len) and callers are
+    /// expected to intern each run once as they lower it.
+    pub fn intern(&mut self, s: &str) -> TextRef {
+        if s.is_empty() {
+            return TextRef::EMPTY;
+        }
+        let start = self.text_pool.len() as u32;
+        self.text_pool.push_str(s);
+        TextRef {
+            start,
+            len: s.len() as u32,
+        }
+    }
+
+    /// Resolves a [`TextRef`] back to its pooled string slice.
+    ///
+    /// Returns `""` for [`TextRef::EMPTY`] or any reference that does not land
+    /// on a UTF-8 boundary of this list's pool, so lookup never panics.
+    #[must_use]
+    pub fn text(&self, r: TextRef) -> &str {
+        if r.is_empty() {
+            return "";
+        }
+        let start = r.start as usize;
+        let end = start.saturating_add(r.len as usize);
+        self.text_pool.get(start..end).unwrap_or("")
+    }
+
+    /// The raw text pool, exposed so compositing passes can carry it across a
+    /// rebuilt list without re-interning (see [`crate::layer::LayerTree`]).
+    #[must_use]
+    pub fn text_pool(&self) -> &str {
+        &self.text_pool
+    }
+
+    /// Replaces the text pool wholesale. Used by passes that reconstruct a list
+    /// while preserving every [`TextRef`] index (e.g. layer flattening).
+    pub fn set_text_pool(&mut self, pool: String) {
+        self.text_pool = pool;
     }
 
     /// The commands in paint order.

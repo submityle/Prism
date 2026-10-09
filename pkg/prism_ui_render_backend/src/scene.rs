@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 use prism_ui::{Backend, BackendId, BackendOp, ElementKind, PaintStyle};
 use prism_ui_layout::{Point, Rect, Size};
 
-use crate::draw::{DrawCommand, DrawList, GlyphCmd, RectCmd};
+use crate::draw::{DrawCommand, DrawList, GlyphCmd, RectCmd, ShadowCmd};
 
 /// One materialised node in the retained scene.
 #[derive(Clone, Debug, PartialEq)]
@@ -110,30 +110,97 @@ impl RetainedScene {
                 if let Some(color) = node.paint.color
                     && !node.text.is_empty()
                 {
+                    // Intern the run's characters so the rasteriser can draw the
+                    // real glyphs; the command keeps only a compact handle.
+                    let text = list.intern(&node.text);
                     list.push(DrawCommand::Glyph(GlyphCmd {
                         rect,
                         color,
                         size: node.paint.font_size,
                         opacity,
+                        text,
                     }));
                 }
             }
             ElementKind::Box | ElementKind::Custom(_) => {
-                let has_fill = node.paint.background_color.is_some();
-                let has_border = node.paint.border_width > 0.0 && node.paint.border_color.is_some();
-                if has_fill || has_border {
-                    list.push(DrawCommand::Rect(RectCmd {
+                let radius = node.paint.border_radius;
+                let has_border =
+                    node.paint.border_width > 0.0 && node.paint.border_color.is_some();
+
+                // Outer drop shadow first, so it sits behind the box. Inset
+                // shadows are a hint the reference backend does not render.
+                if let Some(sh) = node.paint.shadow
+                    && !sh.inset
+                {
+                    list.push(DrawCommand::Shadow(ShadowCmd {
                         rect,
-                        fill: node.paint.background_color,
-                        radius: node.paint.border_radius,
-                        border_width: if has_border {
-                            node.paint.border_width
-                        } else {
-                            0.0
-                        },
-                        border_color: node.paint.border_color,
+                        radius,
+                        blur: sh.blur,
+                        offset: Point::new(sh.offset_x, sh.offset_y),
+                        color: sh.color,
                         opacity,
                     }));
+                }
+
+                if let Some(glass) = node.paint.glass {
+                    // Approximate frosted glass: an optional opaque base keeps
+                    // the content behind from fully bleeding through, then a
+                    // translucent tint reads as frost, then an optional bright
+                    // rim as the lit glass edge. `glass.blur` is a GPU hint and
+                    // is ignored by the reference rasteriser.
+                    if let Some(base) = node.paint.background_color {
+                        list.push(DrawCommand::Rect(RectCmd {
+                            rect,
+                            fill: Some(base),
+                            radius,
+                            border_width: 0.0,
+                            border_color: None,
+                            opacity,
+                        }));
+                    }
+                    list.push(DrawCommand::Rect(RectCmd {
+                        rect,
+                        fill: Some(glass.tint),
+                        radius,
+                        border_width: 0.0,
+                        border_color: None,
+                        opacity,
+                    }));
+                    if let Some(highlight) = glass.highlight {
+                        list.push(DrawCommand::Rect(RectCmd {
+                            rect,
+                            fill: None,
+                            radius,
+                            border_width: node.paint.border_width.max(1.0),
+                            border_color: Some(highlight),
+                            opacity,
+                        }));
+                    } else if has_border {
+                        list.push(DrawCommand::Rect(RectCmd {
+                            rect,
+                            fill: None,
+                            radius,
+                            border_width: node.paint.border_width,
+                            border_color: node.paint.border_color,
+                            opacity,
+                        }));
+                    }
+                } else {
+                    let has_fill = node.paint.background_color.is_some();
+                    if has_fill || has_border {
+                        list.push(DrawCommand::Rect(RectCmd {
+                            rect,
+                            fill: node.paint.background_color,
+                            radius,
+                            border_width: if has_border {
+                                node.paint.border_width
+                            } else {
+                                0.0
+                            },
+                            border_color: node.paint.border_color,
+                            opacity,
+                        }));
+                    }
                 }
             }
         }
@@ -399,5 +466,140 @@ mod tests {
             size: Size::new(10.0, 10.0),
         });
         assert_eq!(s.to_draw_list().primitive_count(), 0);
+    }
+
+    #[test]
+    fn shadow_is_emitted_behind_fill() {
+        use prism_ui::Shadow;
+        let mut s = RetainedScene::new();
+        create(&mut s, 0, ElementKind::Box, None, 0);
+        s.apply(BackendOp::SetLayout {
+            id: BackendId(0),
+            location: Point::ZERO,
+            size: Size::new(40.0, 20.0),
+        });
+        let paint = PaintStyle {
+            background_color: Some(Color::rgba(1.0, 1.0, 1.0, 1.0)),
+            shadow: Some(Shadow::drop(0.0, 8.0, 24.0, Color::rgba(0.0, 0.0, 0.0, 0.3))),
+            ..PaintStyle::default()
+        };
+        s.apply(BackendOp::SetPaint {
+            id: BackendId(0),
+            paint,
+        });
+        let dl = s.to_draw_list();
+        assert_eq!(dl.primitive_count(), 2);
+        // Shadow must come first (painted behind the fill).
+        assert!(matches!(dl.commands()[0], DrawCommand::Shadow(_)));
+        assert!(matches!(dl.commands()[1], DrawCommand::Rect(_)));
+    }
+
+    #[test]
+    fn inset_shadow_is_not_rendered_by_reference_backend() {
+        use prism_ui::Shadow;
+        let mut s = RetainedScene::new();
+        create(&mut s, 0, ElementKind::Box, None, 0);
+        s.apply(BackendOp::SetLayout {
+            id: BackendId(0),
+            location: Point::ZERO,
+            size: Size::new(40.0, 20.0),
+        });
+        let paint = PaintStyle {
+            background_color: Some(Color::rgba(1.0, 1.0, 1.0, 1.0)),
+            shadow: Some(Shadow::drop(0.0, 4.0, 8.0, Color::rgba(0.0, 0.0, 0.0, 0.3)).inset()),
+            ..PaintStyle::default()
+        };
+        s.apply(BackendOp::SetPaint {
+            id: BackendId(0),
+            paint,
+        });
+        let dl = s.to_draw_list();
+        // Only the fill rect, no shadow command.
+        assert_eq!(dl.primitive_count(), 1);
+        assert!(matches!(dl.commands()[0], DrawCommand::Rect(_)));
+    }
+
+    #[test]
+    fn glass_lowers_to_shadow_tint_and_highlight() {
+        use prism_ui::{Glass, Shadow};
+        let mut s = RetainedScene::new();
+        create(&mut s, 0, ElementKind::Box, None, 0);
+        s.apply(BackendOp::SetLayout {
+            id: BackendId(0),
+            location: Point::ZERO,
+            size: Size::new(60.0, 30.0),
+        });
+        let tint = Color::rgba8(255, 255, 255, 160);
+        let highlight = Color::rgba8(255, 255, 255, 115);
+        let paint = PaintStyle::glass_surface(
+            18.0,
+            20.0,
+            tint,
+            highlight,
+            Shadow::drop(0.0, 8.0, 24.0, Color::rgba8(0, 0, 0, 38)),
+        );
+        let _ = Glass::new(20.0, tint); // smoke
+        s.apply(BackendOp::SetPaint {
+            id: BackendId(0),
+            paint,
+        });
+        let dl = s.to_draw_list();
+        // shadow + translucent tint rect + highlight rim rect = 3 primitives.
+        assert_eq!(dl.primitive_count(), 3);
+        assert!(matches!(dl.commands()[0], DrawCommand::Shadow(_)));
+
+        // The tint fill must be translucent (0 < a < 1) after lowering.
+        match dl.commands()[1] {
+            DrawCommand::Rect(r) => {
+                let fill = r.fill.expect("glass tint fill present");
+                assert!(fill.a > 0.0 && fill.a < 1.0, "glass tint is translucent");
+                assert_eq!(r.border_width, 0.0, "tint layer has no border");
+            }
+            _ => panic!("expected tint rect second"),
+        }
+        // The highlight rim is a border-only rect.
+        match dl.commands()[2] {
+            DrawCommand::Rect(r) => {
+                assert!(r.fill.is_none(), "highlight rim has no fill");
+                assert!(r.border_width >= 1.0, "highlight rim is stroked");
+                assert!(r.border_color.is_some());
+            }
+            _ => panic!("expected highlight rim third"),
+        }
+    }
+
+    #[test]
+    fn glass_over_opaque_base_adds_base_layer() {
+        use prism_ui::{Glass, Shadow};
+        let mut s = RetainedScene::new();
+        create(&mut s, 0, ElementKind::Box, None, 0);
+        s.apply(BackendOp::SetLayout {
+            id: BackendId(0),
+            location: Point::ZERO,
+            size: Size::new(60.0, 30.0),
+        });
+        let paint = PaintStyle {
+            background_color: Some(Color::rgba8(10, 10, 10, 255)),
+            shadow: Some(Shadow::drop(0.0, 8.0, 24.0, Color::rgba8(0, 0, 0, 60))),
+            glass: Some(
+                Glass::new(20.0, Color::rgba8(255, 255, 255, 140))
+                    .with_highlight(Color::rgba8(255, 255, 255, 90)),
+            ),
+            ..PaintStyle::default()
+        };
+        s.apply(BackendOp::SetPaint {
+            id: BackendId(0),
+            paint,
+        });
+        let dl = s.to_draw_list();
+        // shadow + opaque base + translucent tint + highlight rim = 4.
+        assert_eq!(dl.primitive_count(), 4);
+        assert!(matches!(dl.commands()[0], DrawCommand::Shadow(_)));
+        match dl.commands()[1] {
+            DrawCommand::Rect(r) => {
+                assert_eq!(r.fill.unwrap().a, 1.0, "opaque base first");
+            }
+            _ => panic!("expected opaque base rect"),
+        }
     }
 }
