@@ -28,6 +28,10 @@ extern crate alloc;
 #[cfg(feature = "vector")]
 pub mod vector;
 
+/// Single-channel SDF glyph atlas (any-scale sharp tier, GPU-friendly).
+#[cfg(feature = "vector")]
+pub mod sdf;
+
 /// Glyph cell width in source pixels (columns).
 pub const GLYPH_W: usize = 5;
 /// Glyph cell height in source pixels (rows).
