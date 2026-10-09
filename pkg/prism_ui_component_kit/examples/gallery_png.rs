@@ -60,58 +60,121 @@ fn kit_theme(mode: &ThemeMode) -> (Theme, Color) {
     (theme, background)
 }
 
-/// Picks one representative, registered class per control family.
+/// Builds, per control family, the stack of classes that makes it render as a
+/// real component rather than an empty structural frame.
 ///
 /// A "family" is the base name before any `--modifier` / `__element` suffix.
-/// We prefer the bare family class when it exists, else the first registered
-/// `family--*` modifier in sorted order, so every family shows its primary
-/// surface.
-fn representative_classes() -> Vec<String> {
+/// The bare base class usually only sets layout/typography (e.g. `pk-button`
+/// has no fill); the visible surface lives in a variant such as
+/// `pk-button--filled` or a glass variant. So for each family we stack:
+///   `[base, surface-variant]`
+/// where the surface variant is the modifier that actually paints a
+/// `BackgroundColor` or glass tint (preferring the primary/filled look). When
+/// the base class already paints a surface, it is used on its own.
+fn family_stacks() -> Vec<(String, Vec<String>)> {
     let sheet = stylesheet();
-    let mut names: Vec<String> = sheet.iter().map(|(n, _)| n.clone()).collect();
+    let mut names: Vec<String> = sheet
+        .iter()
+        .map(|(n, _)| n.clone())
+        .filter(|n| n.starts_with("pk-"))
+        .collect();
     names.sort();
 
-    let mut families: BTreeMap<String, String> = BTreeMap::new();
+    // Group full class names by family base.
+    let mut by_family: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for name in &names {
         let base = name.split("--").next().unwrap_or(name);
         let base = base.split("__").next().unwrap_or(base);
-        // Skip pure element parts (e.g. `pk-button__label`): represent the
-        // family by a box-level class, never a `__element` fragment.
-        if name.contains("__") {
-            families.entry(base.to_string()).or_insert_with(|| base.to_string());
-            continue;
-        }
-        let entry = families.entry(base.to_string()).or_insert_with(|| name.clone());
-        // Prefer the bare base class if we later see it.
-        if name == base {
-            *entry = name.clone();
-        }
+        by_family.entry(base.to_string()).or_default().push(name.clone());
     }
-    families.into_values().collect()
+
+    // Suffixes that typically carry the component's primary visible surface,
+    // in preference order.
+    const SURFACE_PRIORITY: &[&str] = &[
+        "--filled", "--primary", "--solid", "--accent", "--brand", "--success",
+        "--info", "--default", "--glass", "--tinted", "--gray", "--neutral",
+        "--on", "--selected", "--active", "--elevated", "--surface",
+    ];
+
+    let paints_surface = |class_name: &str| -> bool {
+        sheet.get(class_name).is_some_and(|c| {
+            c.base.contains_key(&StyleProp::BackgroundColor)
+                || c.base.contains_key(&StyleProp::GlassTint)
+                || c.base.contains_key(&StyleProp::BorderColor)
+        })
+    };
+
+    let mut out = Vec::new();
+    for (family, members) in by_family {
+        let mut stack = Vec::new();
+
+        // Structural base: the bare family class if it exists, else the first
+        // non-`__element` member, else the first member.
+        let base_class = if members.iter().any(|m| m == &family) {
+            family.clone()
+        } else {
+            members
+                .iter()
+                .find(|m| !m.contains("__"))
+                .or_else(|| members.first())
+                .cloned()
+                .unwrap_or_else(|| family.clone())
+        };
+        stack.push(base_class.clone());
+
+        // Surface variant: honor the priority list first, then any modifier
+        // that paints a surface. Skip if the base already paints one.
+        if !paints_surface(&base_class) {
+            let mut surface: Option<String> = None;
+            for suffix in SURFACE_PRIORITY {
+                let candidate = format!("{family}{suffix}");
+                if members.iter().any(|m| m == &candidate) && paints_surface(&candidate) {
+                    surface = Some(candidate);
+                    break;
+                }
+            }
+            if surface.is_none() {
+                surface = members
+                    .iter()
+                    .find(|m| m.contains("--") && paints_surface(m))
+                    .cloned();
+            }
+            if let Some(variant) = surface {
+                stack.push(variant);
+            }
+        }
+
+        out.push((family, stack));
+    }
+    out
 }
+
 
 fn len(px: f32) -> StyleValue {
     StyleValue::Length(Length::Px(px))
 }
 
-/// A single swatch cell: a demo box carrying the family's representative class,
-/// on a framed baseline so even layout-only families remain visible.
-fn cell(class: &str) -> Element {
+/// A single swatch cell: a demo box carrying the family's composed class stack
+/// (base + surface variant). Classes are attached base-first so the surface
+/// variant layers on top, matching how a real component mounts them.
+fn cell(classes: &[String]) -> Element {
+    let mut demo = Element::box_()
+        .style(StyleProp::Width, len(CELL_W))
+        .style(StyleProp::Height, len(CELL_H))
+        .style(StyleProp::MinWidth, len(CELL_W))
+        .style(StyleProp::MinHeight, len(CELL_H));
+    for class in classes {
+        demo = demo.class(class.clone());
+    }
     Element::box_()
         .style(StyleProp::Width, len(CELL_W))
         .style(StyleProp::Height, len(CELL_H))
-        .child(
-            Element::box_()
-                .class(class.to_string())
-                .style(StyleProp::Width, len(CELL_W))
-                .style(StyleProp::Height, len(CELL_H))
-                .style(StyleProp::MinWidth, len(CELL_W))
-                .style(StyleProp::MinHeight, len(CELL_H)),
-        )
+        .child(demo)
 }
 
-/// Builds the full gallery element tree (a column of fixed rows) for `classes`.
-fn gallery(classes: &[String], background: Color, width: f32, height: f32) -> Element {
+/// Builds the full gallery element tree (a column of fixed rows) from each
+/// family's composed class stack.
+fn gallery(stacks: &[Vec<String>], background: Color, width: f32, height: f32) -> Element {
     let mut root = Element::box_()
         .style(StyleProp::Width, len(width))
         .style(StyleProp::Height, len(height))
@@ -124,14 +187,14 @@ fn gallery(classes: &[String], background: Color, width: f32, height: f32) -> El
         .style(StyleProp::RowGap, len(GAP))
         .style(StyleProp::BackgroundColor, StyleValue::Color(background));
 
-    for chunk in classes.chunks(COLS) {
+    for chunk in stacks.chunks(COLS) {
         let mut row = Element::box_()
             .style(StyleProp::Display, StyleValue::Keyword(Keyword::Flex))
             .style(StyleProp::FlexDirection, StyleValue::Keyword(Keyword::Row))
             .style(StyleProp::ColumnGap, len(GAP))
             .style(StyleProp::Height, len(CELL_H));
-        for class in chunk {
-            row = row.child(cell(class));
+        for stack in chunk {
+            row = row.child(cell(stack));
         }
         root = root.child(row);
     }
@@ -274,13 +337,34 @@ fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) {
 }
 
 fn main() {
-    let classes = representative_classes();
-    let rows = classes.len().div_ceil(COLS);
+    let families = family_stacks();
+    let stacks: Vec<Vec<String>> = families.iter().map(|(_, s)| s.clone()).collect();
+
+    // Report families that still render surface-less (pure layout utilities, or
+    // components whose visuals live in child sub-elements a single swatch box
+    // can't show). This keeps the preview honest about what it can represent.
+    let sheet = stylesheet();
+    let paints = |n: &str| {
+        sheet.get(n).is_some_and(|c| {
+            c.base.contains_key(&StyleProp::BackgroundColor)
+                || c.base.contains_key(&StyleProp::GlassTint)
+                || c.base.contains_key(&StyleProp::BorderColor)
+        })
+    };
+    let flat: Vec<&(String, Vec<String>)> = families
+        .iter()
+        .filter(|(_, st)| !st.iter().any(|c| paints(c)))
+        .collect();
+    println!("surface-less families ({}):", flat.len());
+    for (fam, _) in &flat {
+        println!("  {fam}");
+    }
+    let rows = stacks.len().div_ceil(COLS);
     let width = PAD * 2.0 + COLS as f32 * CELL_W + (COLS as f32 - 1.0) * GAP;
     let height = PAD * 2.0 + rows as f32 * CELL_H + (rows as f32 - 1.0) * GAP;
     println!(
         "{} families -> {} cols x {} rows, {:.0}x{:.0}px per theme",
-        classes.len(),
+        stacks.len(),
         COLS,
         rows,
         width,
@@ -295,8 +379,8 @@ fn main() {
     let (light_theme, light_bg) = kit_theme(&ThemeMode::Light);
     let (dark_theme, dark_bg) = kit_theme(&ThemeMode::Dark);
 
-    let light_el = gallery(&classes, light_bg, width, height);
-    let dark_el = gallery(&classes, dark_bg, width, height);
+    let light_el = gallery(&stacks, light_bg, width, height);
+    let dark_el = gallery(&stacks, dark_bg, width, height);
 
     let light_fb = render(&light_el, light_theme, width, height);
     let dark_fb = render(&dark_el, dark_theme, width, height);
