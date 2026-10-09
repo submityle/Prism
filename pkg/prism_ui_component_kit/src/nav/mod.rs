@@ -1,15 +1,47 @@
-//! `nav/` controls. See the kit design doc, section 5.
+//! `nav/` controls — navigation chrome and wayfinding. See the kit design doc,
+//! section 5.
 //!
 //! Each control emits a data-only [`Element`](prism_ui::Element) carrying only
 //! kit class names; this module's [`register_styles`] owns the token-backed
 //! [`Class`](prism_ui_style::Class) rules for those names. Controls stay plain
 //! [`Component`](prism_ui_component::Component)s so they compose and unit-test
 //! without a running runtime.
+//!
+//! This family ships the navigation controls: [`NavBar`], [`TabBar`],
+//! [`Toolbar`], [`Breadcrumb`], [`Pagination`], [`Drawer`], [`Steps`],
+//! [`Menu`] and [`SegmentedControl`].
 
 use crate::preset::StyleSheet;
 
+pub mod breadcrumb;
+pub mod drawer;
+pub mod menu;
+pub mod nav_bar;
+pub mod pagination;
+pub mod segmented;
+pub mod steps;
+pub mod tab_bar;
+pub mod toolbar;
+
+pub use breadcrumb::{Breadcrumb, BreadcrumbItem, BreadcrumbProps};
+pub use drawer::{Drawer, DrawerProps, DrawerSide};
+pub use menu::{Menu, MenuEntry, MenuProps};
+pub use nav_bar::{NavBar, NavBarProps};
+pub use pagination::{Pagination, PaginationProps};
+pub use segmented::{SegmentedControl, SegmentedControlProps};
+pub use steps::{StepItem, Steps, StepsProps};
+pub use tab_bar::{TabBar, TabBarItem, TabBarProps};
+pub use toolbar::{Toolbar, ToolbarProps};
+
 /// Registers every `nav/` control's token-backed classes into `sheet`.
-///
-/// Currently a no-op placeholder; control submodules append their registrars
-/// here as they land.
-pub fn register_styles(_sheet: &mut StyleSheet) {}
+pub fn register_styles(sheet: &mut StyleSheet) {
+    nav_bar::register_styles(sheet);
+    tab_bar::register_styles(sheet);
+    toolbar::register_styles(sheet);
+    breadcrumb::register_styles(sheet);
+    pagination::register_styles(sheet);
+    drawer::register_styles(sheet);
+    steps::register_styles(sheet);
+    menu::register_styles(sheet);
+    segmented::register_styles(sheet);
+}
