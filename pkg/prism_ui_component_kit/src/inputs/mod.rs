@@ -43,6 +43,12 @@ pub mod password_field;
 pub mod toggle_group;
 pub mod transfer;
 pub mod tree_select;
+pub mod combobox;
+pub mod file_field;
+pub mod number_field;
+pub mod pin_input;
+pub mod range_slider;
+pub mod tag_input;
 
 pub use checkbox::{Checkbox, CheckboxProps};
 pub use radio::{Radio, RadioProps};
@@ -68,6 +74,12 @@ pub use password_field::{PasswordField, PasswordFieldProps};
 pub use toggle_group::{ToggleGroup, ToggleGroupProps};
 pub use transfer::{Transfer, TransferProps};
 pub use tree_select::{TreeSelect, TreeSelectNode, TreeSelectProps};
+pub use combobox::{Autocomplete, Combobox, ComboboxOption, ComboboxProps};
+pub use file_field::{FileField, FileFieldProps};
+pub use number_field::{NumberField, NumberFieldProps};
+pub use pin_input::{OtpInput, PinInput, PinInputProps};
+pub use range_slider::{RangeSlider, RangeSliderProps};
+pub use tag_input::{TagInput, TagInputProps, TokenField};
 
 /// Registers every `inputs/` control's token-backed classes into `sheet`.
 pub fn register_styles(sheet: &mut StyleSheet) {
@@ -95,4 +107,10 @@ pub fn register_styles(sheet: &mut StyleSheet) {
     toggle_group::register_styles(sheet);
     transfer::register_styles(sheet);
     tree_select::register_styles(sheet);
+    combobox::register_styles(sheet);
+    file_field::register_styles(sheet);
+    number_field::register_styles(sheet);
+    pin_input::register_styles(sheet);
+    range_slider::register_styles(sheet);
+    tag_input::register_styles(sheet);
 }
