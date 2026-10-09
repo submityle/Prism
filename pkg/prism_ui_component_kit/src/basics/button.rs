@@ -12,6 +12,8 @@ use prism_ui::Element;
 use prism_ui_a11y::Role;
 use prism_ui_component::Component;
 
+use crate::preset::StyleSheet;
+
 use crate::kit::{classes, ButtonVariant, ControlSize};
 
 /// Props for [`Button`].
@@ -121,6 +123,103 @@ impl Component for Button {
         }
         el
     }
+}
+
+
+/// Registers the `pk-button` class family: one base, five variants, three
+/// sizes. The cascade applies `base -> variant -> size` in attachment order,
+/// so a control emits `["pk-button", "pk-button--filled", "pk-button--md"]`
+/// and gets layout from the base, surface from the variant, density from size.
+pub(crate) fn register_styles(sheet: &mut StyleSheet) {
+    use prism_ui_style::{Class, InteractionState, Keyword, StyleProp, StyleValue};
+
+    use crate::preset::{kw, tok, transparent};
+
+    // Base: a centered flex row, capsule radius, body typography. Disabled
+    // dims via opacity (cheap, reads on any surface).
+    sheet.insert(
+        Class::new("pk-button")
+            .with(StyleProp::Display, kw(Keyword::Flex))
+            .with(StyleProp::FlexDirection, kw(Keyword::Row))
+            .with(StyleProp::AlignItems, kw(Keyword::Center))
+            .with(StyleProp::JustifyContent, kw(Keyword::Center))
+            .with(StyleProp::Gap, tok("space.xs"))
+            .with(StyleProp::BorderRadius, tok("radius.capsule"))
+            .with(StyleProp::BorderWidth, StyleValue::px(0.0))
+            .with(StyleProp::FontSize, tok("font.size.body"))
+            .with(StyleProp::FontWeight, tok("font.weight.semibold"))
+            .with_state(InteractionState::Disabled, StyleProp::Opacity, StyleValue::number(0.4)),
+    );
+
+    // Sizes map density to the spacing scale and shared control height.
+    sheet.insert(
+        Class::new("pk-button--sm")
+            .with_padding_x(tok("space.sm"))
+            .with_padding_y(tok("space.xs"))
+            .with(StyleProp::Height, StyleValue::px(28.0))
+            .with(StyleProp::FontSize, tok("font.size.subheadline")),
+    );
+    sheet.insert(
+        Class::new("pk-button--md")
+            .with_padding_x(tok("space.lg"))
+            .with_padding_y(tok("space.sm"))
+            .with(StyleProp::Height, tok("size.control.height"))
+            .with(StyleProp::FontSize, tok("font.size.body")),
+    );
+    sheet.insert(
+        Class::new("pk-button--lg")
+            .with_padding_x(tok("space.xl"))
+            .with_padding_y(tok("space.md"))
+            .with(StyleProp::Height, StyleValue::px(44.0))
+            .with(StyleProp::FontSize, tok("font.size.headline")),
+    );
+
+    // Filled: solid accent, white label, soft drop shadow.
+    sheet.insert(
+        Class::new("pk-button--filled")
+            .with(StyleProp::BackgroundColor, tok("color.tint"))
+            .with(StyleProp::Color, StyleValue::rgba8(255, 255, 255, 255))
+            .with_shadow(0.0, 4.0, 12.0, tok("glass.shadow"))
+            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.92))
+            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.82)),
+    );
+
+    // Tinted: translucent accent wash over glass, accent-colored label.
+    sheet.insert(
+        Class::new("pk-button--tinted")
+            .with_glass(0.0, tok("color.fill.secondary"), Some(tok("glass.highlight")))
+            .with(StyleProp::Color, tok("color.tint"))
+            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.9))
+            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.78)),
+    );
+
+    // Gray: neutral glass surface, primary label.
+    sheet.insert(
+        Class::new("pk-button--gray")
+            .with_glass(0.0, tok("color.fill"), Some(tok("glass.highlight")))
+            .with(StyleProp::Color, tok("color.label"))
+            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.9))
+            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.78)),
+    );
+
+    // Glass: the hero chrome surface — frosted tint, lit rim, drop shadow.
+    sheet.insert(
+        Class::new("pk-button--glass")
+            .with_glass(0.0, tok("glass.tint"), Some(tok("glass.highlight")))
+            .with(StyleProp::Color, tok("color.label"))
+            .with_shadow(0.0, 8.0, 24.0, tok("glass.shadow"))
+            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.94))
+            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.84)),
+    );
+
+    // Plain: no surface, accent label only.
+    sheet.insert(
+        Class::new("pk-button--plain")
+            .with(StyleProp::BackgroundColor, transparent())
+            .with(StyleProp::Color, tok("color.tint"))
+            .with_state(InteractionState::Hover, StyleProp::Opacity, StyleValue::number(0.7))
+            .with_state(InteractionState::Pressed, StyleProp::Opacity, StyleValue::number(0.55)),
+    );
 }
 
 #[cfg(test)]

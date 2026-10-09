@@ -44,7 +44,18 @@ extern crate alloc;
 pub mod kit;
 pub mod preset;
 
+// Control families (one directory per family; see the design doc, section 5).
 pub mod basics;
+pub mod containers;
+pub mod display;
+pub mod editor;
+pub mod feedback;
+pub mod inputs;
+pub mod motion;
+pub mod nav;
+pub mod node_editor;
+pub mod pickers;
+pub mod utils;
 
 pub use kit::{ButtonVariant, ControlSize, Tone};
 pub use preset::{stylesheet, StyleSheet};
