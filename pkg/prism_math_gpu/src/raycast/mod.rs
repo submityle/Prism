@@ -2,9 +2,10 @@
 //! (§24.1 twin: the GPU side of picking / spatial queries / batched casts).
 //!
 //! [`GpuRayCast`] element-wise intersects a batch of rays against a batch of
-//! spheres or axis-aligned boxes **on a real device**, mirroring the CPU
-//! queries [`prism_math::intersect::ray_sphere`] /
-//! [`prism_math::intersect::ray_aabb`]. The intersection math is **not**
+//! spheres, axis-aligned boxes, or planes **on a real device**, mirroring the
+//! CPU queries [`prism_math::intersect::ray_sphere`] /
+//! [`prism_math::intersect::ray_aabb`] /
+//! [`prism_math::intersect::ray_plane`]. The intersection math is **not**
 //! duplicated here: each kernel is composed at runtime by prefixing the
 //! single-sourced fragment
 //! [`WGSL_RAYCAST`](prism_math::shader_mirror::WGSL_RAYCAST) ahead of a thin
@@ -176,12 +177,38 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     hits[i] = o;\n\
 }\n";
 
-/// A real-device batched ray-intersection kernel pair (sphere + AABB), each
-/// composed from the single-sourced [`WGSL_RAYCAST`] fragment.
+/// Compute wrapper for batched ray/plane intersection. Each plane is one
+/// `vec4` (`.xyz` unit normal, `.w` plane offset `d` so that
+/// `signed_distance(p) = dot(normal, p) + d`).
+const WRAP_PLANE: &str = "\
+struct Params { count: u32 };\n\
+struct RayIn { origin: vec4<f32>, dir: vec4<f32> };\n\
+struct HitOut { header: vec4<f32>, point: vec4<f32>, normal: vec4<f32> };\n\
+@group(0) @binding(0) var<uniform> params: Params;\n\
+@group(0) @binding(1) var<storage, read> rays: array<RayIn>;\n\
+@group(0) @binding(2) var<storage, read> planes: array<vec4<f32>>;\n\
+@group(0) @binding(3) var<storage, read_write> hits: array<HitOut>;\n\
+@compute @workgroup_size(64)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.x;\n\
+    if (i >= params.count) { return; }\n\
+    let r = rays[i];\n\
+    let p = planes[i];\n\
+    let h = prism_ray_plane(r.origin.xyz, r.dir.xyz, p.xyz, p.w);\n\
+    var o: HitOut;\n\
+    o.header = vec4<f32>(h.hit, h.t, 0.0, 0.0);\n\
+    o.point = vec4<f32>(h.point, 0.0);\n\
+    o.normal = vec4<f32>(h.normal, 0.0);\n\
+    hits[i] = o;\n\
+}\n";
+
+/// A real-device batched ray-intersection kernel set (sphere + AABB + plane),
+/// each composed from the single-sourced [`WGSL_RAYCAST`] fragment.
 pub struct GpuRayCast {
     layout: BindGroupLayout,
     sphere: ComputePipeline,
     aabb: ComputePipeline,
+    plane: ComputePipeline,
 }
 
 impl GpuRayCast {
@@ -253,6 +280,7 @@ impl GpuRayCast {
         GpuRayCast {
             sphere: build("prism_math_raycast_sphere", WRAP_SPHERE),
             aabb: build("prism_math_raycast_aabb", WRAP_AABB),
+            plane: build("prism_math_raycast_plane", WRAP_PLANE),
             layout,
         }
     }
@@ -287,6 +315,24 @@ impl GpuRayCast {
     ) -> Vec<GpuRayHit> {
         assert_eq!(rays.len(), boxes.len(), "rays and boxes must align");
         self.run(ctx, &self.aabb, rays, boxes)
+    }
+
+    /// Element-wise intersects `rays[i]` against `planes[i]` (each `vec4`:
+    /// `[nx, ny, nz, d]` with a unit normal and offset `d` so that
+    /// `signed_distance(p) = dot(normal, p) + d`), mirroring
+    /// [`prism_math::intersect::ray_plane`].
+    ///
+    /// # Panics
+    /// Panics if `rays.len() != planes.len()`.
+    #[must_use]
+    pub fn cast_planes(
+        &self,
+        ctx: &GpuContext,
+        rays: &[GpuRay],
+        planes: &[[f32; 4]],
+    ) -> Vec<GpuRayHit> {
+        assert_eq!(rays.len(), planes.len(), "rays and planes must align");
+        self.run(ctx, &self.plane, rays, planes)
     }
 
     /// Uploads the count uniform + the ray batch + a `T` primitive batch,
@@ -367,7 +413,12 @@ impl GpuRayCast {
 
 /// Records a 1D batch dispatch covering `n` elements at [`WORKGROUP`] threads
 /// per group.
-fn dispatch(enc: &mut CommandEncoder, pipeline: &ComputePipeline, bind_group: &BindGroup, n: usize) {
+fn dispatch(
+    enc: &mut CommandEncoder,
+    pipeline: &ComputePipeline,
+    bind_group: &BindGroup,
+    n: usize,
+) {
     let groups = (n as u32).div_ceil(WORKGROUP);
     let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
         label: Some("prism_math_raycast_pass"),

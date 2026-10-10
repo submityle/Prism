@@ -2,7 +2,8 @@
 //! mirror.
 //!
 //! Each test builds a batch of rays and primitives, intersects them on the CPU
-//! with [`prism_math::intersect::ray_sphere`] / [`ray_aabb`], runs the same
+//! with [`prism_math::intersect::ray_sphere`] / [`ray_aabb`] / [`ray_plane`],
+//! runs the same
 //! query on a real `GPU` from the single-sourced
 //! [`WGSL_RAYCAST`](prism_math::shader_mirror::WGSL_RAYCAST) fragment, and
 //! asserts the per-element hit flag matches exactly and the ray parameter `t`,
@@ -16,11 +17,12 @@
 //! it still passes on a device-less CI image while running the full dispatch on
 //! a real `GPU`.
 
-use prism_math::Vec3;
 use prism_math::geom::aabb::Aabb3;
+use prism_math::geom::plane::Plane;
 use prism_math::geom::ray::Ray3;
 use prism_math::geom::sphere::BoundingSphere;
-use prism_math::intersect::{RayHit, ray_aabb, ray_sphere};
+use prism_math::intersect::{ray_aabb, ray_plane, ray_sphere, RayHit};
+use prism_math::Vec3;
 use prism_math_gpu::{GpuAabb, GpuContext, GpuRay, GpuRayCast, GpuRayHit};
 
 /// Acquires a device, or prints a skip note and returns `None` on hosts without
@@ -63,7 +65,10 @@ fn assert_hit(gpu: GpuRayHit, cpu: Option<RayHit>, tag: &str) {
                 .zip([hit.point.x, hit.point.y, hit.point.z])
                 .enumerate()
             {
-                assert!(close(*g, c), "{tag}: point[{axis}] mismatch gpu={g} cpu={c}");
+                assert!(
+                    close(*g, c),
+                    "{tag}: point[{axis}] mismatch gpu={g} cpu={c}"
+                );
             }
             for (axis, (g, c)) in gpu
                 .normal
@@ -115,10 +120,7 @@ fn ray_sphere_matches_cpu() {
         .iter()
         .map(|(o, d)| GpuRay::new([o.x, o.y, o.z], [d.x, d.y, d.z]))
         .collect();
-    let gpu_spheres: Vec<[f32; 4]> = spheres
-        .iter()
-        .map(|(c, r)| [c.x, c.y, c.z, *r])
-        .collect();
+    let gpu_spheres: Vec<[f32; 4]> = spheres.iter().map(|(c, r)| [c.x, c.y, c.z, *r]).collect();
 
     let got = caster.cast_spheres(&ctx, &gpu_rays, &gpu_spheres);
     assert_eq!(got.len(), rays.len());
@@ -166,6 +168,51 @@ fn ray_aabb_matches_cpu() {
 }
 
 #[test]
+fn ray_plane_matches_cpu() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let caster = GpuRayCast::new(&ctx);
+
+    let rays = ray_batch();
+    // One plane per ray: frontal hits, a back-facing normal flip, a parallel
+    // miss, and oblique hits. Normals are unit length and `d` is the raw
+    // offset so `signed_distance(p) = dot(normal, p) + d`.
+    let planes = [
+        // z = 0 plane facing +z; ray from z=5 heading -z hits at t=5.
+        Plane::new(Vec3::new(0.0, 0.0, 1.0), 0.0),
+        // z = 2 plane facing +z; ray from z=5 heading -z hits at t=3.
+        Plane::new(Vec3::new(0.0, 0.0, 1.0), -2.0),
+        // z = -3 plane facing -z; ray from origin heading -z hits, normal flips.
+        Plane::new(Vec3::new(0.0, 0.0, -1.0), -3.0),
+        // Oblique plane through origin; ray (3,2,6) dir (-1,-1,-3) crosses it.
+        Plane::new(Vec3::new(0.0, 0.0, 1.0), -1.0),
+        // Plane parallel to the ray direction (2,-1,-2): normal perpendicular
+        // to it -> a clean miss (denominator zero).
+        Plane::new(Vec3::new(1.0, 2.0, 0.0).normalize(), 10.0),
+        // y = 0 plane facing +y; ray from y=-6 heading +y hits, normal flips.
+        Plane::new(Vec3::new(0.0, 1.0, 0.0), 0.0),
+    ];
+
+    let gpu_rays: Vec<GpuRay> = rays
+        .iter()
+        .map(|(o, d)| GpuRay::new([o.x, o.y, o.z], [d.x, d.y, d.z]))
+        .collect();
+    let gpu_planes: Vec<[f32; 4]> = planes
+        .iter()
+        .map(|pl| [pl.normal.x, pl.normal.y, pl.normal.z, pl.d])
+        .collect();
+
+    let got = caster.cast_planes(&ctx, &gpu_rays, &gpu_planes);
+    assert_eq!(got.len(), rays.len());
+
+    for (i, ((o, d), pl)) in rays.iter().zip(planes.iter()).enumerate() {
+        let cpu = ray_plane(Ray3::new(*o, *d), *pl);
+        assert_hit(got[i], cpu, &alloc_tag("plane", i));
+    }
+}
+
+#[test]
 fn empty_batches_return_empty() {
     let Some(ctx) = with_gpu() else {
         return;
@@ -173,6 +220,7 @@ fn empty_batches_return_empty() {
     let caster = GpuRayCast::new(&ctx);
     assert!(caster.cast_spheres(&ctx, &[], &[]).is_empty());
     assert!(caster.cast_aabbs(&ctx, &[], &[]).is_empty());
+    assert!(caster.cast_planes(&ctx, &[], &[]).is_empty());
 }
 
 /// Small heap tag so panic messages identify the failing element.

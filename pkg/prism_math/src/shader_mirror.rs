@@ -563,7 +563,8 @@ fn prism_oct_unpack_snorm(bits: u32) -> vec3<f32> {\n\
     return prism_oct_decode(vec2<f32>(x, y));\n\
 }\n";
 /// Single-sourced WGSL for ray/primitive intersection, mirroring the CPU
-/// queries [`crate::intersect::ray_sphere`] / [`crate::intersect::ray_aabb`].
+/// queries [`crate::intersect::ray_sphere`] / [`crate::intersect::ray_aabb`] /
+/// [`crate::intersect::ray_plane`].
 /// Each kernel returns a [`PrismRayHit`]-shaped result (hit flag, ray parameter
 /// `t`, world hit point, and surface normal oriented against the ray) — the
 /// GPU side of picking / spatial queries / batched sphere-casts feeding
@@ -696,6 +697,26 @@ fn prism_ray_aabb(origin: vec3<f32>, dir: vec3<f32>, lo: vec3<f32>, hi: vec3<f32
     } else {\n\
         normal.z = sign_out;\n\
     }\n\
+    out.hit = 1.0;\n\
+    out.t = t;\n\
+    out.point = origin + dir * t;\n\
+    out.normal = normal;\n\
+    return out;\n\
+}\n\
+\n\
+fn prism_ray_plane(origin: vec3<f32>, dir: vec3<f32>, plane_normal: vec3<f32>, plane_d: f32) -> PrismRayHit {\n\
+    var out: PrismRayHit;\n\
+    out.hit = 0.0;\n\
+    out.t = 0.0;\n\
+    out.point = vec3<f32>(0.0, 0.0, 0.0);\n\
+    out.normal = vec3<f32>(0.0, 0.0, 0.0);\n\
+    let denom = dot(plane_normal, dir);\n\
+    if (abs(denom) <= 1.0e-20) { return out; }\n\
+    let signed_dist = dot(plane_normal, origin) + plane_d;\n\
+    let t = -signed_dist / denom;\n\
+    if (t < 0.0) { return out; }\n\
+    var normal = plane_normal;\n\
+    if (denom > 0.0) { normal = -plane_normal; }\n\
     out.hit = 1.0;\n\
     out.t = t;\n\
     out.point = origin + dir * t;\n\
