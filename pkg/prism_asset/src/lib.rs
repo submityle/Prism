@@ -17,8 +17,11 @@
 //!   keeps an asset alive; [`Assets::remove_unused`] reclaims slots whose last
 //!   strong handle has dropped. Counting uses [`alloc::sync::Arc`], so it is
 //!   `no_std + alloc` and lock-free.
-//! - [`Assets`]: a generational dense arena mapping [`AssetId`] to values,
-//!   emitting [`AssetEvent`]s on insert/modify/remove.
+//! - [`Assets`]: a generational dense arena mapping [`AssetId`] to values. It
+//!   supports eager [`Assets::insert`] and ahead-of-time [`Assets::reserve`]
+//!   (a stable id/handle before an async load resolves via
+//!   [`Assets::fulfill`]/[`Assets::fail`]), emitting [`AssetEvent`]s on
+//!   add/modify/remove/fail.
 //! - [`DependencyGraph`]: directed asset→dependency edges with Kahn
 //!   topological ordering and cycle detection, used to order recursive loads.
 //! - [`LoadState`] / [`RecursiveDependencyLoadState`]: per-asset load progress.

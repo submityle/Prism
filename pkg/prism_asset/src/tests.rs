@@ -208,6 +208,109 @@ fn untyped_handle_round_trips() {
 }
 
 #[test]
+fn reserve_is_pending_then_fulfill_makes_ready() {
+    let mut assets = Assets::<Mesh>::new();
+    let handle = assets.reserve();
+    let id = handle.id();
+    // Reserved: occupied and counted, but not readable and not loaded.
+    assert!(assets.contains(id));
+    assert_eq!(assets.len(), 1);
+    assert!(!assets.is_ready(id));
+    assert!(assets.get(id).is_none());
+    assert_eq!(assets.load_state(id), LoadState::Loading);
+    // Reserve emits no event.
+    assert_eq!(assets.pending_event_count(), 0);
+
+    assert!(assets.fulfill(id, Mesh { verts: 7 }));
+    assert!(assets.is_ready(id));
+    assert_eq!(assets.get(id).map(|m| m.verts), Some(7));
+    assert_eq!(assets.load_state(id), LoadState::Loaded);
+    // Fulfilling a pending slot surfaces as Added (the asset became present).
+    assert_eq!(assets.drain_events(), vec![AssetEvent::Added { id }]);
+}
+
+#[test]
+fn fulfill_existing_ready_slot_emits_modified() {
+    let mut assets = Assets::<Mesh>::new();
+    let handle = assets.insert(Mesh { verts: 1 });
+    let id = handle.id();
+    let _ = assets.drain_events();
+    // Re-fulfilling an already-ready slot is a reload: Modified, new value.
+    assert!(assets.fulfill(id, Mesh { verts: 2 }));
+    assert_eq!(assets.get(id).map(|m| m.verts), Some(2));
+    assert_eq!(assets.drain_events(), vec![AssetEvent::Modified { id }]);
+}
+
+#[test]
+fn fail_marks_slot_failed_and_emits_failed() {
+    let mut assets = Assets::<Mesh>::new();
+    let mut reg = ErrorRegistry::new();
+    let err = reg.record(AssetError::new("mesh/a.bin", "truncated"));
+
+    let handle = assets.reserve();
+    let id = handle.id();
+    let _ = assets.drain_events();
+
+    assert!(assets.fail(id, err));
+    // Failed slots stay occupied but are not readable.
+    assert!(assets.contains(id));
+    assert!(!assets.is_ready(id));
+    assert!(assets.get(id).is_none());
+    assert_eq!(assets.load_state(id), LoadState::Failed(err));
+    assert_eq!(
+        assets.drain_events(),
+        vec![AssetEvent::Failed { id, error: err }]
+    );
+
+    // A failed load can still recover via fulfill.
+    assert!(assets.fulfill(id, Mesh { verts: 3 }));
+    assert_eq!(assets.get(id).map(|m| m.verts), Some(3));
+    assert_eq!(assets.load_state(id), LoadState::Loaded);
+    assert_eq!(assets.drain_events(), vec![AssetEvent::Added { id }]);
+}
+
+#[test]
+fn fulfill_and_fail_reject_stale_ids() {
+    let mut assets = Assets::<Mesh>::new();
+    let mut reg = ErrorRegistry::new();
+    let err = reg.record(AssetError::new("x", "y"));
+    let handle = assets.insert(Mesh { verts: 1 });
+    let stale = handle.id();
+    assets.remove(stale);
+    assert!(!assets.fulfill(stale, Mesh { verts: 9 }));
+    assert!(!assets.fail(stale, err));
+    assert_eq!(assets.load_state(stale), LoadState::NotLoaded);
+}
+
+#[test]
+fn pending_and_failed_slots_are_skipped_by_iter() {
+    let mut assets = Assets::<Mesh>::new();
+    let mut reg = ErrorRegistry::new();
+    let err = reg.record(AssetError::new("x", "y"));
+    let ready = assets.insert(Mesh { verts: 5 });
+    let pending = assets.reserve();
+    let failing = assets.reserve();
+    assets.fail(failing.id(), err);
+
+    let ids: Vec<_> = assets.iter().map(|(id, _)| id).collect();
+    assert_eq!(ids, vec![ready.id()]);
+    // All three slots are occupied even though only one is ready.
+    assert_eq!(assets.len(), 3);
+    let _ = (pending, failing);
+}
+
+#[test]
+fn remove_unused_reclaims_abandoned_pending_slot() {
+    let mut assets = Assets::<Mesh>::new();
+    let pending = assets.reserve();
+    let id = pending.id();
+    drop(pending);
+    assert_eq!(assets.remove_unused(), 1);
+    assert!(!assets.contains(id));
+    assert!(assets.is_empty());
+}
+
+#[test]
 fn load_state_is_copy_and_small() {
     // `LoadState` must stay `Copy` so it can live by value in components and
     // cross the main/render split without cloning. A `Failed` id costs 4 bytes.
