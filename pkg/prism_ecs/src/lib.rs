@@ -128,8 +128,8 @@ pub mod prelude {
     pub use crate::query::{Added, Changed, Or, With, Without};
     pub use crate::reaction::{NodeId, ReactionGraph};
     pub use crate::relation::{
-        CascadeEdge, CascadePlan, CleanupPolicy, Pair, PairKey, RelationId, RelationIndex,
-        RelationKind, RelationTarget, Relations, TargetId,
+        CascadeEdge, CascadePlan, CleanupPolicy, Pair, PairKey, Relation, RelationId,
+        RelationIndex, RelationKind, RelationTarget, Relations, TargetId,
     };
     pub use crate::resource::{Resource, ResourceId, Resources};
     pub use crate::schedule::{
@@ -143,7 +143,7 @@ pub mod prelude {
     pub use crate::world::{EntityRef, World};
     // Derive macros. These live in the macro namespace and coexist with the
     // same-named traits (`Component`, `Bundle`) re-exported above.
-    pub use prism_ecs_macros::{Bundle, Component, Event, Resource, SystemParam, SystemSet};
+    pub use prism_ecs_macros::{Bundle, Component, Event, Relation, Resource, SystemParam, SystemSet};
 }
 
 /// Internal type aliases for the hash maps/sets used throughout the kernel.

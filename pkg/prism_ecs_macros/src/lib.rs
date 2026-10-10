@@ -12,6 +12,7 @@
 //! | [`Resource`]           | `impl prism_ecs::resource::Resource`         |
 //! | [`Event`]              | `impl prism_ecs::event::Event`               |
 //! | [`SystemParam`]        | `unsafe impl prism_ecs::system::SystemParam` |
+//! | [`Relation`]          | `impl prism_ecs::relation::Relation`         |
 //!
 //! All generated code refers to the target traits and types through the
 //! **absolute path** `prism_ecs::...`, so the derives can be invoked from any
@@ -29,11 +30,13 @@
 //! [`Resource`]: macro@Resource
 //! [`Event`]: macro@Event
 //! [`SystemParam`]: macro@SystemParam
+//! [`Relation`]: macro@Relation
 
 mod bundle;
 mod common;
 mod component;
 mod event;
+mod relation;
 mod resource;
 mod system_param;
 mod systemset;
@@ -269,6 +272,58 @@ pub fn derive_event(input: TokenStream) -> TokenStream {
 pub fn derive_system_param(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     system_param::expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derive [`prism_ecs::relation::Relation`] for a marker type, pinning its
+/// per-kind [`RelationKind`] metadata as a compile-time associated constant
+/// (design §11 / §23.2 / §23.3).
+///
+/// A relation kind is also a [`Component`](macro@Component), so pair it with
+/// `#[derive(Component)]` (relation kinds are typically zero-sized markers).
+/// Deriving `Relation` lets
+/// [`World::register_relation_type`](prism_ecs::world::World::register_relation_type)
+/// install the metadata without the caller restating it.
+///
+/// # `#[relation(...)]` attribute
+///
+/// Every key is optional; omitted keys take the [`RelationKind`] defaults
+/// (non-fragmenting, non-transitive, non-exclusive, [`CleanupPolicy::Remove`]
+/// on both deletion slots):
+///
+/// - `fragmenting` / `transitive` / `exclusive` — boolean flags. A bare flag
+///   means `true`; an explicit `flag = true` / `flag = false` is also accepted.
+/// - `on_delete = "Remove" | "Delete" | "Panic"` — policy applied to existing
+///   edges when the relation *kind* is removed from a holder.
+/// - `on_delete_target = "Remove" | "Delete" | "Panic"` — policy applied to a
+///   holder when the *target* it points at is destroyed (drives cascade
+///   planning). Lowercase short forms (`"delete"`, ...) are accepted.
+///
+/// Any other key, an unrecognised policy string, or a `union` target is a
+/// compile error. Generics and `where`-clauses are preserved.
+///
+/// # Examples
+///
+/// ```ignore
+/// use prism_ecs::prelude::*;
+///
+/// // `ChildOf`: exclusive hierarchy edge whose target deletion cascades.
+/// #[derive(Component, Relation)]
+/// #[relation(fragmenting, exclusive, on_delete_target = "Delete")]
+/// struct ChildOf;
+///
+/// // `EquippedBy`: non-exclusive, equipment survives the wielder's death.
+/// #[derive(Component, Relation)]
+/// struct EquippedBy;
+/// ```
+///
+/// [`RelationKind`]: prism_ecs::relation::RelationKind
+/// [`CleanupPolicy::Remove`]: prism_ecs::relation::CleanupPolicy::Remove
+#[proc_macro_derive(Relation, attributes(relation))]
+pub fn derive_relation(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    relation::expand(&input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

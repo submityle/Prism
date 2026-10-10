@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 use super::World;
 use crate::component::Component;
 use crate::entity::Entity;
-use crate::relation::{RelationKind, RelationTarget, Relations};
+use crate::relation::{Relation, RelationKind, RelationTarget, Relations};
 
 impl World {
     /// Shared access to the relation registry (design §11).
@@ -45,6 +45,18 @@ impl World {
     pub fn register_relation<R: Component>(&mut self, kind: RelationKind) {
         let id = self.components.register::<R>();
         self.relations.register(id, kind);
+    }
+
+    /// Register a statically-typed [`Relation`] kind using the metadata pinned
+    /// by its [`Relation::KIND`] associated constant (design §11, §23.2/§23.3).
+    ///
+    /// This is the type-driven companion to [`World::register_relation`]: where
+    /// the latter takes an explicit [`RelationKind`], this reads the kind from
+    /// the type itself, so a `#[derive(Relation)]` type registers with a single
+    /// turbofish and no restated metadata. Re-registering overwrites the
+    /// previous metadata, matching [`World::register_relation`].
+    pub fn register_relation_type<R: Relation>(&mut self) {
+        self.register_relation::<R>(R::KIND);
     }
 
     /// Add the edge `source --R--> target` (design §11).

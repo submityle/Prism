@@ -338,6 +338,35 @@ impl RelationKind {
     }
 }
 
+/// A statically-typed relation kind whose per-kind [`RelationKind`] metadata is
+/// fixed at compile time (design §11 / §23.2 / §23.3).
+///
+/// Every relation kind is first a [`Component`](crate::component::Component):
+/// its [`ComponentId`] keys both the kind metadata in [`Relations`] and the
+/// edges in the bypass [`RelationIndex`]. Implementing `Relation` additionally
+/// pins the kind's fragmenting / transitive / exclusive flags and
+/// [`CleanupPolicy`] rules as the associated constant [`KIND`](Relation::KIND),
+/// so [`World::register_relation_type`](crate::world::World::register_relation_type)
+/// can install them without the caller restating the metadata at every call
+/// site.
+///
+/// Prefer `#[derive(Relation)]` (re-exported from the crate prelude) over a
+/// hand-written impl; the derive maps `#[relation(...)]` attributes onto the
+/// fields of [`RelationKind`].
+///
+/// ```ignore
+/// use prism_ecs::prelude::*;
+///
+/// #[derive(Component, Relation)]
+/// #[relation(fragmenting, exclusive, on_delete_target = "Delete")]
+/// struct ChildOf;
+/// ```
+pub trait Relation: crate::component::Component {
+    /// The compile-time relation metadata installed by
+    /// [`World::register_relation_type`](crate::world::World::register_relation_type).
+    const KIND: RelationKind;
+}
+
 /// A single directed relation edge `source --relation--> target`, produced by
 /// index removal and cascade planning.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
