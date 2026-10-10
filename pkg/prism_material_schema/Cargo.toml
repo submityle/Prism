@@ -1,0 +1,14 @@
+[package]
+name = "prism_material_schema"
+version = "0.1.0"
+edition = "2024"
+description = "Self-describing PCM lobe/field schema: single source of truth for material layout, specialization keys, defaults and compliance (design doc §17.5)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = { version = "1.1" }
+
+[lints]
+workspace = true

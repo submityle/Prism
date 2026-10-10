@@ -1,0 +1,439 @@
+# Prism PCM self-describing surface schema — the single declarative source of
+# truth for the über-BSDF parameter layout (design doc §17.5).
+#
+# Today the field layout, bit masks, specialization keys, defaults and valid
+# ranges are hand-written in six places (Rust `surface.rs`/`record.rs`, the WESL
+# `material_unpack`/`classification`/`sample` twins, the CPU golden in
+# `prism_render_shading`, the doc field tables §4.4, and the compliance enum
+# §4.5). This file reverse-declares that hidden contract so a single codegen can
+# later emit all six and byte-parity becomes a constructive result (§17.5.3)
+# rather than a test-maintained invariant.
+#
+# Landing stage S1 (doc §17.5.8): the schema is *declared and parity-checked*
+# against the hand-written layout — it does not yet generate anything. Any drift
+# between this file and `surface.rs`/`material_unpack.wesl` fails the S1 parity
+# gate in `prism_render_material`.
+
+schema_version = 1
+# Tracks `MATERIAL_ABI_VERSION`. S1 declares the current v4 layout; the P1 ABI
+# v5 bump will land as a schema diff (doc §17.5.7).
+abi_version = 4
+
+# ---------------------------------------------------------------------------
+# Core: the always-present OpenPBR-anchored base every lit/stylized/unlit
+# surface carries (doc §3.3). SURFACE_CORE_WORDS = 12.
+# ---------------------------------------------------------------------------
+[core]
+words = 12
+
+[[core.field]]
+name = "base_color"
+type = "vec4f"
+bit_region = "KHR"
+pack_slot = 0
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = [1.0, 1.0, 1.0, 1.0]
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[core.field]]
+name = "metallic"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 4
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[core.field]]
+name = "perceptual_roughness"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 5
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = 0.5
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[core.field]]
+name = "reflectance"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 6
+consumed_by = ["unpack", "sample", "golden"]
+default = 0.5
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[core.field]]
+name = "ambient_occlusion"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 7
+consumed_by = ["unpack", "sample", "golden"]
+default = 1.0
+valid = "0.0..=1.0"
+energy_policy = "independent"
+view = "invariant"
+
+[[core.field]]
+name = "normal_scale"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 8
+consumed_by = ["unpack", "sample"]
+default = 1.0
+valid = "0.0..=2.0"
+energy_policy = "none"
+view = "invariant"
+
+[[core.field]]
+name = "alpha_cutoff"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 9
+consumed_by = ["unpack", "classify", "sample"]
+default = 0.5
+valid = "0.0..=1.0"
+energy_policy = "none"
+view = "invariant"
+
+[[core.field]]
+name = "_pad0"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 10
+consumed_by = []
+default = 0.0
+
+[[core.field]]
+name = "_pad1"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 11
+consumed_by = []
+default = 0.0
+
+# ---------------------------------------------------------------------------
+# Optional lobes. Each is a uniform 4-word (16-byte) quantum; `registry_slot`
+# is the immutable LobeMask bit index (never recycled, doc §5.4) and also the
+# canonical low-bit-first pack order. OpenPBR core lobes are namespace `KHR`;
+# the stylized face-shadow lobe is Prism-private `PRISM`.
+# ---------------------------------------------------------------------------
+
+[[lobe]]
+id = "emission"
+uid = "org.khronos.openpbr.emission"
+registry_slot = 0
+mask_const = "EMISSION"
+namespace = "KHR"
+vendor = "khronos"
+stability = "stable"
+words = 4
+
+[[lobe.field]]
+name = "emissive"
+type = "vec4f"
+bit_region = "KHR"
+pack_slot = 0
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = [0.0, 0.0, 0.0, 0.0]
+valid = "0.0..=inf"
+energy_policy = "independent"
+view = "invariant"
+
+[[lobe]]
+id = "clearcoat"
+uid = "org.khronos.openpbr.coat"
+registry_slot = 1
+mask_const = "CLEARCOAT"
+namespace = "KHR"
+vendor = "khronos"
+stability = "stable"
+words = 4
+
+[[lobe.field]]
+name = "clearcoat"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 0
+spec_subfield = "closure_mask"
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[lobe.field]]
+name = "clearcoat_roughness"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 1
+consumed_by = ["unpack", "sample", "golden"]
+default = 0.5
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[lobe.field]]
+name = "_pad0"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 2
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad1"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 3
+consumed_by = []
+default = 0.0
+
+[[lobe]]
+id = "anisotropy"
+uid = "org.khronos.openpbr.specular_anisotropy"
+registry_slot = 2
+mask_const = "ANISOTROPY"
+namespace = "KHR"
+vendor = "khronos"
+stability = "stable"
+words = 4
+
+[[lobe.field]]
+name = "anisotropy"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 0
+spec_subfield = "closure_mask"
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "dependent"
+
+[[lobe.field]]
+name = "anisotropy_rotation"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 1
+consumed_by = ["unpack", "sample", "golden"]
+default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "none"
+view = "dependent"
+
+[[lobe.field]]
+name = "_pad0"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 2
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad1"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 3
+consumed_by = []
+default = 0.0
+
+[[lobe]]
+id = "sheen"
+uid = "org.khronos.openpbr.fuzz"
+registry_slot = 3
+mask_const = "SHEEN"
+namespace = "KHR"
+vendor = "khronos"
+stability = "stable"
+words = 4
+
+[[lobe.field]]
+name = "sheen"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 0
+spec_subfield = "closure_mask"
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[lobe.field]]
+name = "_pad0"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 1
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad1"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 2
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad2"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 3
+consumed_by = []
+default = 0.0
+
+[[lobe]]
+id = "subsurface"
+uid = "org.khronos.openpbr.subsurface"
+registry_slot = 4
+mask_const = "SUBSURFACE"
+namespace = "KHR"
+vendor = "khronos"
+stability = "stable"
+words = 4
+
+[[lobe.field]]
+name = "subsurface"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 0
+spec_subfield = "closure_mask"
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[lobe.field]]
+name = "_pad0"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 1
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad1"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 2
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad2"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 3
+consumed_by = []
+default = 0.0
+
+[[lobe]]
+id = "transmission"
+uid = "org.khronos.openpbr.transmission"
+registry_slot = 5
+mask_const = "TRANSMISSION"
+namespace = "KHR"
+vendor = "khronos"
+stability = "stable"
+words = 4
+
+[[lobe.field]]
+name = "transmission"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 0
+spec_subfield = "closure_mask"
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[lobe.field]]
+name = "thickness"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 1
+consumed_by = ["unpack", "sample", "golden"]
+default = 0.0
+valid = "0.0..=inf"
+energy_policy = "none"
+view = "invariant"
+
+[[lobe.field]]
+name = "index_of_refraction"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 2
+consumed_by = ["unpack", "sample", "golden"]
+default = 1.5
+valid = "1.0..=3.0"
+energy_policy = "coupled"
+view = "dependent"
+
+[[lobe.field]]
+name = "dispersion"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 3
+consumed_by = ["unpack", "sample", "golden"]
+default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "none"
+view = "dependent"
+
+[[lobe]]
+id = "face"
+uid = "studio.prism.face_shadow"
+registry_slot = 6
+mask_const = "FACE"
+namespace = "PRISM"
+vendor = "prism"
+stability = "experimental"
+words = 4
+
+[[lobe.field]]
+name = "softness"
+type = "f32"
+bit_region = "PRISM"
+pack_slot = 0
+spec_subfield = "closure_mask"
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = 0.1
+valid = "0.0..=1.0"
+energy_policy = "none"
+view = "invariant"
+
+[[lobe.field]]
+name = "_pad0"
+type = "pad"
+bit_region = "PRISM"
+pack_slot = 1
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad1"
+type = "pad"
+bit_region = "PRISM"
+pack_slot = 2
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad2"
+type = "pad"
+bit_region = "PRISM"
+pack_slot = 3
+consumed_by = []
+default = 0.0

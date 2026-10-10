@@ -47,3 +47,6 @@ optional = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+prism_material_schema = { path = "../prism_material_schema" }
