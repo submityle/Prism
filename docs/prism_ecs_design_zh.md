@@ -177,6 +177,7 @@ struct RenderBatchKey { mesh: AssetId, material: AssetId }         // Shared：�
 
 ```rust
 Query<&T> / Query<&mut T> / Query<Option<&T>>
+Query<(Entity, Has<T>)>                     // 在场探针：yield bool，不排除原型、不读值、不注册 access
 Query<(Entity, &A, &B)>
 Query<&A, (With<B>, Without<C>)>
 Query<&A, Or<(Changed<B>, Added<C>)>>
@@ -184,6 +185,7 @@ Query<Relations<ChildOf>>                 // §11
 ```
 
 - **archetype 匹配缓存**：首次构建匹配列表；archetype 新增时增量更新，杜绝每帧全表扫描。
+- **`Has<T>` 在场探针**：yield `bool`——实体是否持有 `T`，不排除任何 archetype、不读组件值、**不注册任何 access**（故可与同组件 `&mut T` 共存，`Query<(&mut T, Has<T>)>` 可靠无别名冲突）。统一覆盖 table / sparse / shared 三态存储（§6）；是 `Option<&T>` 的只测在场版（后者借值，前者只报在场）。
 - **脏块访问器**（核心）：`q.dirty_chunks()` 仅遍历 `chunk.change_version > last_run` 的块，把提取/剔除/宽相从 O(匹配实体) 降到 O(脏块)。
 - **SIMD 迭代**：`q.simd_iter::<8>()` 按 chunk 分块向量化（`simd` feature，基于 `core::simd`），标量路径作为 golden 对拍。
 - **par_iter**：按 chunk 切分投递到 `prism_tasks`（见 §8），work-stealing 负载均衡。

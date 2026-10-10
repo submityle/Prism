@@ -12,6 +12,9 @@
 //! - [`Ref<T>`](crate::change::Ref) — shared access plus per-value change
 //!   detection (`is_added`/`is_changed`), the read-only companion of the
 //!   change-detecting [`Mut<T>`](crate::change::Mut) yielded by `&mut T`.
+//! - [`Has<T>`] — a `bool` reporting whether the entity has `T`, without
+//!   excluding any archetype and without reading the value (registers no
+//!   access).
 //! - tuples of the above, up to 12 elements.
 //!
 //! Each term exposes four cooperating pieces: a world-static `State` (resolved
@@ -34,6 +37,8 @@
 //!
 //! [`StorageFetch`] carries whichever cursor the term resolved for the current
 //! archetype so a single `Fetch` type covers both paths.
+
+use core::marker::PhantomData;
 
 use crate::archetype::Archetype;
 use crate::change::{Mut, Ref, Tick};
@@ -643,6 +648,96 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
     }
 }
 
+// --- Has<T> -----------------------------------------------------------------
+
+/// A [`QueryData`] term yielding `bool`: whether the current row's entity has
+/// component `T`, **without** excluding any archetype and **without** reading
+/// the component's value.
+///
+/// `Has<T>` is the presence-probe companion of `Option<&T>`: where
+/// `Option<&T>` borrows the value when present, `Has<T>` reports only presence.
+/// Because it inspects presence metadata (an archetype's column set, or a
+/// sparse set's per-entity membership) and never dereferences the stored value,
+/// it registers **no** component access — so it never conflicts with a mutable
+/// term on the same component, and `Query<(&mut T, Has<T>)>` is sound. It works
+/// uniformly across all three storage states (design §6): table, sparse, and
+/// shared.
+///
+/// ```
+/// use prism_ecs::prelude::*;
+///
+/// #[derive(Debug)]
+/// struct Shield(u32);
+/// impl Component for Shield {}
+/// #[derive(Debug)]
+/// struct Unit;
+/// impl Component for Unit {}
+///
+/// let mut world = World::new();
+/// world.spawn((Unit, Shield(50)));
+/// world.spawn(Unit); // no Shield
+///
+/// let state = world.query::<(Has<Shield>, &Unit)>();
+/// let mut shielded = 0usize;
+/// for (has_shield, _unit) in state.iter(&world) {
+///     if has_shield {
+///         shielded += 1;
+///     }
+/// }
+/// assert_eq!(shielded, 1);
+/// ```
+pub struct Has<T>(PhantomData<fn() -> T>);
+
+// SAFETY: `Has<T>` registers no access and forms no reference into component
+// storage — it reads only presence metadata (archetype column membership for a
+// table/shared component, or the sparse set's per-entity membership bit). It
+// admits every archetype (`matches` is always `true`) and never gates a row
+// (`filter_fetch` keeps the default `true`), yielding `bool` for every row.
+unsafe impl<T: Component> QueryData for Has<T> {
+    type Item<'w> = bool;
+    type State = ComponentId;
+    type Fetch<'w> = StorageFetch<'w>;
+
+    fn init_state(components: &mut Components) -> Self::State {
+        components.register::<T>()
+    }
+
+    fn matches(_state: &Self::State, _archetype: &Archetype) -> bool {
+        true
+    }
+
+    fn update_access(_state: &Self::State, _access: &mut Access) {
+        // Presence probing is not a data read: register nothing so `Has<T>`
+        // never conflicts with another term's `&mut T`.
+    }
+
+    unsafe fn init_fetch<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
+        _last_run: Tick,
+        _this_run: Tick,
+    ) -> Self::Fetch<'w> {
+        match T::STORAGE {
+            StorageType::Table => StorageFetch::Table(archetype.table().column(*state)),
+            StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
+            StorageType::Shared => StorageFetch::Shared(archetype.shared_arc(*state)),
+        }
+    }
+
+    unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, _row: usize) -> Self::Item<'w> {
+        match fetch {
+            // Table/shared presence is archetype-wide: the cursor is `Some`
+            // exactly when the archetype carries the column/binding.
+            StorageFetch::Table(opt) => opt.is_some(),
+            StorageFetch::Shared(opt) => opt.is_some(),
+            // Sparse presence is per entity: the set may exist yet not hold this
+            // row's entity, and may be absent entirely before first insertion.
+            StorageFetch::Sparse(opt) => opt.is_some_and(|set| set.contains(entity)),
+        }
+    }
+}
+
 // --- Tuples -----------------------------------------------------------------
 
 macro_rules! impl_query_data_tuple {
@@ -738,6 +833,10 @@ unsafe impl<T: Component> ReadOnlyQueryData for Option<&T> {}
 // SAFETY: `Ref<T>` reads a single component immutably (plus its ticks); it
 // forms no `&mut` into storage and registers only a read.
 unsafe impl<T: Component> ReadOnlyQueryData for Ref<'_, T> {}
+
+// SAFETY: `Has<T>` probes presence only — it registers no access and forms
+// no reference into component storage, so it is trivially read-only.
+unsafe impl<T: Component> ReadOnlyQueryData for Has<T> {}
 
 macro_rules! impl_read_only_query_data_tuple {
     ($($T:ident),+) => {

@@ -125,7 +125,7 @@ pub mod prelude {
     #[cfg(feature = "partition")]
     pub use crate::partition::world_partition::WorldPartition;
     pub use crate::prefab::IsA;
-    pub use crate::query::{Added, Changed, Or, With, Without};
+    pub use crate::query::{Added, Changed, Has, Or, With, Without};
     pub use crate::reaction::{NodeId, ReactionGraph};
     pub use crate::relation::{
         CascadeEdge, CascadePlan, CleanupPolicy, Pair, PairKey, Relation, RelationId,

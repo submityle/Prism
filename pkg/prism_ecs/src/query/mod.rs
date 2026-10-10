@@ -32,7 +32,7 @@ mod state;
 
 pub use access::Access;
 pub use dirty::DirtyChunk;
-pub use fetch::{QueryData, ReadOnlyQueryData};
+pub use fetch::{Has, QueryData, ReadOnlyQueryData};
 pub use filter::{Added, Changed, Or, QueryFilter, With, Without};
 pub use iter::QueryIter;
 #[cfg(feature = "simd")]
@@ -45,6 +45,8 @@ pub use state::QueryState;
 mod change_detection_tests;
 #[cfg(test)]
 mod dirty_tests;
+#[cfg(test)]
+mod has_tests;
 #[cfg(all(test, feature = "multi_thread"))]
 mod par_tests;
 #[cfg(all(test, feature = "multi_thread"))]
