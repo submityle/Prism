@@ -592,7 +592,18 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 门禁：白炉 furnace 测试（无色全反射 `单散射 E(μo) + 多散射瓣方向反照率 = 1`，各 roughness/视角 ≤2e-2）、近镜面消失、彩色金属保色/有限/非负、`E_avg` 有界且随 roughness 单调下降；WESL 侧经 `shading::resolve::shader_tests`（48 个 shader 编译/类型检查）覆盖。
   - 验证：`cargo test -p prism_render_shading --lib multiscatter`（21 通过）、`--lib lighting`（21 通过）、`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过）；touched 文件 clippy 干净、已 rustfmt。
 
-**⬜ 未开始（见上表）**：P0-b（高光抗锯齿 Toksvig/LEAN）、P1-a~P1-f、P1-h（PCM 地基）、P2-a~P2-j、P3-a~P3-e、开放瓣（glint / 测量 BRDF）。
+- **P0-b 高光抗锯齿（Toksvig / Kaplanyan-Tokuyoshi / LEAN）接入 über**（§13 表 P0-b）
+  - 范围：把已落地的高光抗锯齿核（Toksvig mip 法线长度、Kaplanyan/Tokuyoshi 屏幕空间法线方差、LEAN）从"独立核"接入 über 原理化直接光瓣。ABI 中性——法线方差是**着色期量**（GGX `alpha^2` 域的 `sigma^2`），由子像素/纹素足迹推导，**不进 GPU 材质 ABI**。
+  - 设计：`SurfaceSample` 新增 `normal_variance: f32`（CPU 与 WESL twin 同步），直接光把基准 `alpha^2` 经 `filter_alpha_sq`/`spec_aa_filter_alpha_sq` 加上 `min(2·variance, kappa_max)` 的核方差再开方回 `alpha`。`normal_variance == 0` 为**逐位恒等**（钳位地板 `MIN_ALPHA^2` 远低于任何 `alpha >= MIN_ROUGHNESS^2`），既有 golden 全部保持不变；`kappa_max`（`DEFAULT_KAPPA_MAX = SPEC_AA_KAPPA_MAX = 0.18`）封顶，极大方差饱和到同一钳位 `alpha`。
+  - 代码：
+    - CPU 金标准 `pkg/prism_render_shading/src/lighting.rs`：`SurfaceSample.normal_variance` 字段 + `Default`；`evaluate_principled_direct` 用 `gi::specular_aa::normal_variance::filter_alpha_sq` 过滤 `alpha`。
+    - 构造点同步：`resolve.rs::surface_sample_from_parameters`、`cloth_advanced.rs` 测试基面（其余均走 `..Default::default()`）。
+    - WESL twin `pkg/prism_render_scene/src/shaders/brdf.wesl`：`SurfaceSample.normal_variance` + `principled_direct` 调 `prism_render_scene::shaders::specular_aa::spec_aa_filter_alpha_sq`（与 CPU 逐位同算术、同常量、同参序）。
+    - 核本体（本阶段前已落地、本阶段接入）：CPU `gi/specular_aa/{mod,toksvig,normal_variance,lean}.rs` + WESL `shaders/specular_aa.wesl` + 对拍 `shading/specular_aa/{mod,shader_tests}.rs`。
+  - 诚实边界：`normal_variance` 当前恒为 `0.0`（恒等旁路），**待 P1-a 纹理足迹 / P1-f 烘焙法线方差图接入后被真实喂数**才激活抗锯齿；这是分阶段诚实接线，不是假实现。编辑器 MaterialX 作者前端（P2-a）仍按 goal 保持 TODO。
+  - 门禁：`cargo test -p prism_render_shading --lib lighting`（22 通过，含 `specular_aa_variance_is_identity_at_zero_and_coarsens_the_peak`：恒等 + 单调粗化 + κ 饱和）、`--lib gi::specular_aa`；`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过，编译 brdf.wesl + specular_aa.wesl 全链路）、`--lib shading::specular_aa`；touched 文件 clippy 干净、已 rustfmt。
+
+**⬜ 未开始（见上表）**：P1-a~P1-f、P1-h（PCM 地基）、P2-a~P2-j、P3-a~P3-e、开放瓣（glint / 测量 BRDF）。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 

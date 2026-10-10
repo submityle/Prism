@@ -233,6 +233,11 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         thickness: parameters.thickness,
         anisotropy: parameters.anisotropy,
         anisotropy_rotation: parameters.anisotropy_rotation,
+        // Specular-AA normal variance is a shade-time quantity (screen-space
+        // normal derivatives / footprint mip / baked map), not a stable GPU
+        // surface parameter, so the CPU golden mirrors the GPU resolve and
+        // leaves it at the identity `0.0`.
+        normal_variance: 0.0,
     }
 }
 

@@ -334,7 +334,7 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 15] = [
+    let deps: [(u128, &str, &str); 16] = [
         (
             0x5052_4953_4d5f_5441_4e47_454e_5400_0002,
             include_str!("../../shaders/tangent.wesl"),
@@ -404,6 +404,14 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             0x5052_4953_4d5f_5348_4144_4f57_0000_0002,
             include_str!("../../shaders/shadow.wesl"),
             "embedded://prism_render_scene/shaders/shadow.wesl",
+        ),
+        // `brdf.wesl` imports the specular-AA kernels for the principled
+        // lobe's normal-variance widening, so the resolve importer needs
+        // `specular_aa.wesl` registered under its canonical module path.
+        (
+            0x5052_4953_4d5f_5350_4543_4141_0001,
+            include_str!("../../shaders/specular_aa.wesl"),
+            "embedded://prism_render_scene/shaders/specular_aa.wesl",
         ),
         // Minimal stand-in for Bevy's `bevy_render::maths`: the resolve shader
         // imports `affine3_to_square` from it exactly like `opaque.wesl` and

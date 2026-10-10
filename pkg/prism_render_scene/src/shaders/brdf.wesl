@@ -25,6 +25,12 @@ import prism_render_scene::shaders::tangent::{
     tangent_orthonormal_basis,
 };
 
+// Specular anti-aliasing kernels: GPU twins of `gi/specular_aa/{normal_variance,toksvig}.rs`.
+import prism_render_scene::shaders::specular_aa::{
+    spec_aa_filter_alpha_sq,
+    SPEC_AA_KAPPA_MAX,
+};
+
 // Clamp floors mirroring `lighting.rs` (`MIN_ROUGHNESS`, `MIN_N_DOT`).
 const MIN_ROUGHNESS: f32 = 0.045;
 const MIN_N_DOT: f32 = 1.0e-5;
@@ -56,6 +62,11 @@ struct SurfaceSample {
     anisotropy: f32,
     // Rotation of the anisotropy axes around the normal, in radians.
     anisotropy_rotation: f32,
+    // Specular-AA normal variance in the GGX `alpha^2` domain (`sigma^2`),
+    // derived shade-time from the sub-pixel / texel footprint of the shading
+    // normal. NOT part of the GPU material ABI; `0` is an exact identity.
+    // Mirrors `SurfaceSample::normal_variance` in `lighting.rs`.
+    normal_variance: f32,
 }
 
 // World-space shading basis. Mirrors `ShadingFrame` in `lighting.rs`.
@@ -249,7 +260,14 @@ fn principled_direct(
 
     let metallic = clamp(surface.metallic, 0.0, 1.0);
     let roughness = clamp(surface.perceptual_roughness, MIN_ROUGHNESS, 1.0);
-    let alpha = roughness * roughness;
+    // Specular anti-aliasing: widen the GGX width by the surface normal
+    // variance (already in the `alpha^2` domain), capped at the
+    // Tokuyoshi-Kaplanyan `kappa_max`. `spec_aa_filter_alpha_sq` takes and
+    // returns `alpha^2`; `sqrt` returns to the `alpha` the lobe consumes.
+    // Byte-identical to `evaluate_principled_direct` in `lighting.rs`; with
+    // `normal_variance == 0` it is an exact identity.
+    let base_alpha = roughness * roughness;
+    let alpha = sqrt(spec_aa_filter_alpha_sq(base_alpha * base_alpha, surface.normal_variance, SPEC_AA_KAPPA_MAX));
     let reflectance = clamp(surface.reflectance, 0.0, 1.0);
     let f0_dielectric = 0.16 * reflectance * reflectance;
     let f0 = mix(vec3<f32>(f0_dielectric), surface.base_color, metallic);

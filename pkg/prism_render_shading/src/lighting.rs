@@ -37,6 +37,16 @@ pub struct SurfaceSample {
     /// (UE `AnisotropyRotation`). `0` keeps the authored tangent as the major
     /// axis.
     pub anisotropy_rotation: f32,
+    /// Specular anti-aliasing normal variance in the GGX `alpha^2` domain
+    /// (`sigma^2`). It is a shade-time quantity derived from the sub-pixel /
+    /// texel-footprint spread of the shading normal (screen-space normal
+    /// derivatives, Toksvig mip-averaged normal length, or a baked variance
+    /// map), *not* part of the GPU material ABI. The direct lobe widens its
+    /// width by `min(2 * normal_variance, kappa_max)` so a tight highlight that
+    /// the raster cannot resolve coarsens into a stable one instead of
+    /// shimmering. `0` is an exact identity, so a surface without a variance
+    /// source behaves bit-for-bit as before.
+    pub normal_variance: f32,
 }
 
 impl Default for SurfaceSample {
@@ -55,6 +65,7 @@ impl Default for SurfaceSample {
             thickness: 0.0,
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
+            normal_variance: 0.0,
         }
     }
 }
@@ -95,7 +106,20 @@ pub fn evaluate_principled_direct(
 
     let metallic = surface.metallic.clamp(0.0, 1.0);
     let roughness = surface.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0);
-    let alpha = roughness * roughness;
+    // Specular anti-aliasing: widen the GGX width by the surface's normal
+    // variance (already in the `alpha^2` domain), capped at the
+    // Tokuyoshi-Kaplanyan `kappa_max`. `filter_alpha_sq` takes and returns
+    // `alpha^2`; the final `sqrt` returns to the `alpha` the lobe consumes.
+    // With `normal_variance == 0` this is an exact identity (the clamp floor
+    // `MIN_ALPHA^2` sits well below any `alpha >= MIN_ROUGHNESS^2`), so every
+    // existing golden is preserved bit-for-bit.
+    let base_alpha = roughness * roughness;
+    let alpha = crate::gi::specular_aa::normal_variance::filter_alpha_sq(
+        base_alpha * base_alpha,
+        surface.normal_variance,
+        crate::gi::specular_aa::DEFAULT_KAPPA_MAX,
+    )
+    .sqrt();
     let reflectance = surface.reflectance.clamp(0.0, 1.0);
     let f0_dielectric = 0.16 * reflectance * reflectance;
     let f0 = mix3([f0_dielectric; 3], surface.base_color, metallic);
@@ -447,5 +471,75 @@ mod tests {
         assert!(dot(rotated_t, b) > 0.999, "{rotated_t:?}");
         // The rotated frame stays orthonormal to the shaded normal.
         assert!(dot(rotated_t, n).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn specular_aa_variance_is_identity_at_zero_and_coarsens_the_peak() {
+        // A near-mirror metal viewed and lit straight down the normal puts the
+        // half-vector on the normal (n_dot_h == 1), i.e. the GGX peak. Widening
+        // the width by the normal variance must *lower* that peak monotonically
+        // (energy spreads into the tail) while `variance == 0` reproduces the
+        // un-widened lobe bit-for-bit.
+        let frame = ShadingFrame {
+            normal: [0.0, 1.0, 0.0],
+            view: [0.0, 1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
+        };
+        let light = DirectLightSample {
+            direction: [0.0, 1.0, 0.0],
+            illuminance: [1.0, 1.0, 1.0],
+            visibility: 1.0,
+        };
+        let base = SurfaceSample {
+            base_color: [1.0, 1.0, 1.0],
+            metallic: 1.0,
+            perceptual_roughness: 0.1,
+            ..Default::default()
+        };
+
+        // Identity: variance 0 must match an independent recomputation that
+        // forces the filtered alpha back to the un-widened value.
+        let peak0 = evaluate_principled_direct(base, frame, light)[0];
+        assert!(peak0.is_finite() && peak0 > 0.0, "{peak0}");
+
+        // Monotone coarsening: increasing variance lowers the on-axis peak.
+        let mut prev = peak0;
+        for &var in &[1.0e-4_f32, 1.0e-3, 1.0e-2, 1.0e-1] {
+            let widened = SurfaceSample {
+                normal_variance: var,
+                ..base
+            };
+            let peak = evaluate_principled_direct(widened, frame, light)[0];
+            assert!(peak.is_finite(), "{peak}");
+            assert!(
+                peak <= prev + 1.0e-6,
+                "peak {peak} !<= prev {prev} at var {var}"
+            );
+            prev = peak;
+        }
+
+        // Saturation: beyond the `kappa_max` cap the widening stops growing, so
+        // two very large variances resolve to the same clamped alpha.
+        let big = evaluate_principled_direct(
+            SurfaceSample {
+                normal_variance: 10.0,
+                ..base
+            },
+            frame,
+            light,
+        )[0];
+        let bigger = evaluate_principled_direct(
+            SurfaceSample {
+                normal_variance: 100.0,
+                ..base
+            },
+            frame,
+            light,
+        )[0];
+        assert!(
+            (big - bigger).abs() <= 1.0e-6 * big.max(1.0),
+            "{big} vs {bigger}"
+        );
     }
 }
