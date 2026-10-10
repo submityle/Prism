@@ -280,6 +280,77 @@ pub fn iridescent_reflectance_rgb(
     )
 }
 
+/// Substrate index of refraction implied by a Schlick `f0` normal-incidence
+/// reflectance, inverting the dielectric Fresnel relation
+/// `f0 = ((n - 1) / (n + 1))^2` for an outer medium of air (`n_outer = 1`):
+///
+/// ```text
+/// n = (1 + sqrt(f0)) / (1 - sqrt(f0))
+/// ```
+///
+/// This is the per-channel mapping glTF `KHR_materials_iridescence` uses to
+/// recover the substrate IOR from the material `f0`, so a coloured metal `f0`
+/// yields three distinct base IORs and the Airy interference is tinted
+/// correctly. `f0` is clamped into `[0, 1)` so `sqrt(f0) < 1` keeps the
+/// denominator strictly positive and the IOR finite.
+#[inline]
+pub fn base_ior_from_f0(f0: f32) -> f32 {
+    // `1 - 1e-4` keeps `(1 - s) >= 1e-4` so the IOR stays below ~2e4 even for a
+    // perfect mirror `f0 == 1`, well inside f32 range and far above any real
+    // conductor's effective IOR.
+    let s = ops::sqrt(f0.clamp(0.0, 1.0 - MIN_ALPHA));
+    (1.0 + s) / (1.0 - s)
+}
+
+/// Iridescent RGB Fresnel reflectance for a substrate whose per-channel
+/// normal-incidence reflectance is `f0`.
+///
+/// Unlike [`iridescent_reflectance_rgb`], which takes one achromatic base IOR,
+/// this recovers a *per-channel* substrate IOR from `f0` via
+/// [`base_ior_from_f0`] and evaluates [`airy_reflectance`] on each RGB primary
+/// against its own base IOR, matching glTF `KHR_materials_iridescence`. A
+/// coloured conductor `f0` therefore tints the thin-film interference the same
+/// way its uncoated reflectance would tint a plain specular highlight.
+///
+/// With `thickness_nm == 0` every channel collapses to the bare dielectric
+/// Fresnel reflectance of its own substrate at `cos_outer`, i.e. the uncoated
+/// surface with no interference colour.
+#[inline]
+pub fn iridescent_fresnel_rgb(
+    outer_ior: f32,
+    film_ior: f32,
+    f0: [f32; 3],
+    cos_outer: f32,
+    thickness_nm: f32,
+) -> [f32; 3] {
+    [
+        airy_reflectance(
+            outer_ior,
+            film_ior,
+            base_ior_from_f0(f0[0]),
+            cos_outer,
+            thickness_nm,
+            RGB_WAVELENGTHS_NM[0],
+        ),
+        airy_reflectance(
+            outer_ior,
+            film_ior,
+            base_ior_from_f0(f0[1]),
+            cos_outer,
+            thickness_nm,
+            RGB_WAVELENGTHS_NM[1],
+        ),
+        airy_reflectance(
+            outer_ior,
+            film_ior,
+            base_ior_from_f0(f0[2]),
+            cos_outer,
+            thickness_nm,
+            RGB_WAVELENGTHS_NM[2],
+        ),
+    ]
+}
+
 /// Disney anisotropic roughness remap to the GGX `(alpha_t, alpha_b)` pair.
 ///
 /// Given a perceptual `roughness` in `[0, 1]` and `anisotropy` in `[-1, 1]`
@@ -598,5 +669,85 @@ mod tests {
         for c in [rgb.x, rgb.y, rgb.z] {
             assert!(c.is_finite() && (0.0..=1.0).contains(&c), "c={c}");
         }
+    }
+
+    #[test]
+    fn base_ior_from_f0_inverts_dielectric_fresnel() {
+        // f0 = ((n - 1)/(n + 1))^2 must round-trip through `base_ior_from_f0`.
+        for &n in &[1.1_f32, 1.33, 1.5, 1.7, 2.0, 2.4] {
+            let f0 = ((n - 1.0) / (n + 1.0)).powi(2);
+            let recovered = base_ior_from_f0(f0);
+            assert!(
+                (recovered - n).abs() < 1.0e-3,
+                "n={n} f0={f0} recovered={recovered}"
+            );
+        }
+    }
+
+    #[test]
+    fn base_ior_from_f0_is_bounded_at_extremes() {
+        // f0 == 0 => air (n == 1); f0 == 1 is clamped so the IOR stays finite.
+        assert!((base_ior_from_f0(0.0) - 1.0).abs() < EPS);
+        let n_mirror = base_ior_from_f0(1.0);
+        assert!(
+            n_mirror.is_finite() && n_mirror > 1.0,
+            "n_mirror={n_mirror}"
+        );
+    }
+
+    #[test]
+    fn iridescent_fresnel_zero_thickness_matches_per_channel_base_fresnel() {
+        // With no film each channel must equal the bare dielectric Fresnel of
+        // the IOR implied by that channel's f0 — the uncoated conductor.
+        let f0 = [0.95_f32, 0.64, 0.54]; // gold-ish coloured f0
+        for &cos in &[1.0_f32, 0.8, 0.5, 0.2] {
+            let rgb = iridescent_fresnel_rgb(1.0, 1.3, f0, cos, 0.0);
+            for ch in 0..3 {
+                let n = base_ior_from_f0(f0[ch]);
+                let base = fresnel_dielectric_unpolarized(cos, 1.0, n);
+                assert!(
+                    (rgb[ch] - base).abs() < 1.0e-4,
+                    "ch={ch} cos={cos}: got={} base={base}",
+                    rgb[ch]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn iridescent_fresnel_zero_thickness_at_normal_recovers_f0() {
+        // At normal incidence the bare dielectric Fresnel equals f0 exactly, so
+        // the zero-thickness film reproduces the authored reflectance.
+        let f0 = [0.04_f32, 0.25, 0.80];
+        let rgb = iridescent_fresnel_rgb(1.0, 1.3, f0, 1.0, 0.0);
+        for ch in 0..3 {
+            assert!(
+                (rgb[ch] - f0[ch]).abs() < 1.0e-3,
+                "ch={ch}: got={} f0={}",
+                rgb[ch],
+                f0[ch]
+            );
+        }
+    }
+
+    #[test]
+    fn iridescent_fresnel_nonzero_thickness_tints_and_stays_bounded() {
+        // A real film must shift at least one channel away from the uncoated
+        // reflectance while every channel stays energy conserving.
+        let f0 = [0.56_f32, 0.57, 0.58];
+        let base = iridescent_fresnel_rgb(1.0, 1.3, f0, 0.7, 0.0);
+        let tinted = iridescent_fresnel_rgb(1.0, 1.3, f0, 0.7, 450.0);
+        let mut shifted = false;
+        for ch in 0..3 {
+            assert!(
+                tinted[ch].is_finite() && (0.0..=1.0).contains(&tinted[ch]),
+                "ch={ch} v={}",
+                tinted[ch]
+            );
+            if (tinted[ch] - base[ch]).abs() > 1.0e-3 {
+                shifted = true;
+            }
+        }
+        assert!(shifted, "a 450nm film must tint the reflectance");
     }
 }

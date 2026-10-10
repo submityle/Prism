@@ -238,6 +238,13 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         // surface parameter, so the CPU golden mirrors the GPU resolve and
         // leaves it at the identity `0.0`.
         normal_variance: 0.0,
+        // Thin-film iridescence is likewise a shade-time quantity (authored
+        // factor / iridescence map), not a stable GPU surface parameter, so
+        // the CPU golden mirrors the GPU resolve at the identity weight `0.0`
+        // (thickness / IOR carry the glTF defaults but are inert at weight 0).
+        iridescence: 0.0,
+        iridescence_thickness_nm: 0.0,
+        iridescence_ior: 1.3,
     }
 }
 

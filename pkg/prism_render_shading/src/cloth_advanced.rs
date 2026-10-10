@@ -348,6 +348,9 @@ mod tests {
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
             normal_variance: 0.0,
+            iridescence: 0.0,
+            iridescence_thickness_nm: 0.0,
+            iridescence_ior: 1.3,
         }
     }
 

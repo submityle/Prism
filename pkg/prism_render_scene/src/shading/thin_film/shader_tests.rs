@@ -42,6 +42,8 @@ import prism_render_scene::shaders::thin_film::{
     tf_airy_one,
     tf_airy_reflectance,
     tf_iridescent_reflectance_rgb,
+    tf_base_ior_from_f0,
+    tf_iridescent_fresnel_rgb,
     tf_normalize_or,
     tf_anisotropic_alphas,
     tf_ggx_aniso_ndf,
@@ -70,6 +72,8 @@ fn thin_film_link_test(@builtin(global_invocation_id) id: vec3<u32>) {
     let airy = tf_airy_one(amps.x, amps.y, cos(phi));
     let r = tf_airy_reflectance(TF_MIN_IOR, ior, 1.7, c, 300.0, TF_WAVELENGTH_R_NM);
     let rgb = tf_iridescent_reflectance_rgb(TF_MIN_IOR, ior, 1.7, c, 300.0);
+    let base_ior = tf_base_ior_from_f0(0.04);
+    let irid_f = tf_iridescent_fresnel_rgb(TF_MIN_IOR, ior, vec3<f32>(0.95, 0.64, 0.54), c, 300.0);
     let alphas = tf_anisotropic_alphas(0.4, 0.3);
     let ndf = tf_ggx_aniso_ndf(h, t, b, n, alphas.x, alphas.y);
     let g1 = tf_smith_g1_aniso(h, t, b, n, alphas.x, alphas.y);
@@ -94,6 +98,8 @@ fn thin_film_link_test(@builtin(global_invocation_id) id: vec3<u32>) {
     output[17] = TF_MIN_POSITIVE;
     output[18] = TF_PI;
     output[19] = TF_WAVELENGTH_B_NM;
+    output[20] = base_ior;
+    output[21] = irid_f.x + irid_f.y + irid_f.z;
 }
 "#;
 

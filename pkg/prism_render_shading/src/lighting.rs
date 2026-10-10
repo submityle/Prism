@@ -47,6 +47,22 @@ pub struct SurfaceSample {
     /// shimmering. `0` is an exact identity, so a surface without a variance
     /// source behaves bit-for-bit as before.
     pub normal_variance: f32,
+    /// Thin-film iridescence weight in `[0, 1]` blending the principled
+    /// specular Fresnel toward the Airy interference reflectance of a dielectric
+    /// film over the substrate (glTF `KHR_materials_iridescence`). It is a
+    /// shade-time quantity (authored factor optionally modulated by an
+    /// iridescence map), *not* part of the GPU material ABI. `0` is an exact
+    /// identity: the specular `mix` returns the Schlick Fresnel unchanged, so
+    /// every existing golden is preserved bit-for-bit regardless of the
+    /// thickness / IOR fields below.
+    pub iridescence: f32,
+    /// Physical thickness of the iridescent film in nanometres driving the Airy
+    /// phase. Ignored when `iridescence == 0`. Typical authored range is
+    /// `100..=1000` nm; the glTF default base is `100` nm.
+    pub iridescence_thickness_nm: f32,
+    /// Refractive index of the iridescent film (glTF default `1.3`). Ignored
+    /// when `iridescence == 0`.
+    pub iridescence_ior: f32,
 }
 
 impl Default for SurfaceSample {
@@ -66,6 +82,9 @@ impl Default for SurfaceSample {
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
             normal_variance: 0.0,
+            iridescence: 0.0,
+            iridescence_thickness_nm: 0.0,
+            iridescence_ior: 1.3,
         }
     }
 }
@@ -123,7 +142,25 @@ pub fn evaluate_principled_direct(
     let reflectance = surface.reflectance.clamp(0.0, 1.0);
     let f0_dielectric = 0.16 * reflectance * reflectance;
     let f0 = mix3([f0_dielectric; 3], surface.base_color, metallic);
-    let f = fresnel_schlick(f0, v_dot_h);
+    // Thin-film iridescence: blend the Schlick Fresnel toward the Airy
+    // interference reflectance of a dielectric film over the substrate
+    // (glTF `KHR_materials_iridescence`), evaluated at the same `v_dot_h`
+    // cosine so the two agree where thickness -> 0. With `iridescence == 0`
+    // the `mix3` returns the Schlick term unchanged, an exact identity.
+    let f_schlick = fresnel_schlick(f0, v_dot_h);
+    let iridescence = surface.iridescence.clamp(0.0, 1.0);
+    let f = if iridescence > 0.0 {
+        let f_irid = crate::gi::material::thin_film::iridescent_fresnel_rgb(
+            1.0,
+            surface.iridescence_ior,
+            f0,
+            v_dot_h,
+            surface.iridescence_thickness_nm,
+        );
+        mix3(f_schlick, f_irid, iridescence)
+    } else {
+        f_schlick
+    };
 
     // Anisotropic axes. The tangent frame is re-orthonormalized against the
     // shaded normal (interpolation drifts it) and rotated around the normal by

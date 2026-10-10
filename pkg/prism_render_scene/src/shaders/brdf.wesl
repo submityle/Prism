@@ -30,6 +30,10 @@ import prism_render_scene::shaders::specular_aa::{
     spec_aa_filter_alpha_sq,
     SPEC_AA_KAPPA_MAX,
 };
+// Thin-film iridescence: GPU twin of `gi/material/thin_film.rs`.
+import prism_render_scene::shaders::thin_film::{
+    tf_iridescent_fresnel_rgb,
+};
 
 // Clamp floors mirroring `lighting.rs` (`MIN_ROUGHNESS`, `MIN_N_DOT`).
 const MIN_ROUGHNESS: f32 = 0.045;
@@ -67,6 +71,15 @@ struct SurfaceSample {
     // normal. NOT part of the GPU material ABI; `0` is an exact identity.
     // Mirrors `SurfaceSample::normal_variance` in `lighting.rs`.
     normal_variance: f32,
+    // Thin-film iridescence weight in [0, 1] blending the specular Fresnel
+    // toward the Airy interference reflectance (glTF KHR_materials_iridescence).
+    // Shade-time, NOT part of the GPU material ABI; `0` is an exact identity.
+    // Mirrors `SurfaceSample::iridescence` in `lighting.rs`.
+    iridescence: f32,
+    // Film thickness in nm driving the Airy phase; inert at weight 0.
+    iridescence_thickness_nm: f32,
+    // Film refractive index (glTF default 1.3); inert at weight 0.
+    iridescence_ior: f32,
 }
 
 // World-space shading basis. Mirrors `ShadingFrame` in `lighting.rs`.
@@ -271,7 +284,23 @@ fn principled_direct(
     let reflectance = clamp(surface.reflectance, 0.0, 1.0);
     let f0_dielectric = 0.16 * reflectance * reflectance;
     let f0 = mix(vec3<f32>(f0_dielectric), surface.base_color, metallic);
-    let f = fresnel_schlick(f0, v_dot_h);
+    // Thin-film iridescence: blend the Schlick Fresnel toward the Airy
+    // interference reflectance at the same `v_dot_h`. Byte-identical to
+    // `evaluate_principled_direct` in `lighting.rs`; `iridescence == 0` is an
+    // exact identity because `mix` returns the Schlick term unchanged.
+    let f_schlick = fresnel_schlick(f0, v_dot_h);
+    let iridescence = clamp(surface.iridescence, 0.0, 1.0);
+    var f = f_schlick;
+    if iridescence > 0.0 {
+        let f_irid = tf_iridescent_fresnel_rgb(
+            1.0,
+            surface.iridescence_ior,
+            f0,
+            v_dot_h,
+            surface.iridescence_thickness_nm,
+        );
+        f = mix(f_schlick, f_irid, iridescence);
+    }
 
     // Anisotropic axes: re-orthonormalize + rotate the interpolated tangent
     // frame, then split `alpha` onto the two axes via Burley's aspect ratio.

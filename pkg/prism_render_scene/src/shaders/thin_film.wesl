@@ -178,6 +178,32 @@ fn tf_iridescent_reflectance_rgb(
     );
 }
 
+// Substrate IOR implied by a Schlick `f0`, inverting `f0 = ((n-1)/(n+1))^2`
+// for an air outer medium. Mirrors `base_ior_from_f0` in `thin_film.rs`.
+fn tf_base_ior_from_f0(f0: f32) -> f32 {
+    let s = sqrt(clamp(f0, 0.0, 1.0 - TF_MIN_ALPHA));
+    return (1.0 + s) / (1.0 - s);
+}
+
+// Per-channel iridescent Fresnel for a substrate whose RGB normal-incidence
+// reflectance is `f0`. Recovers a distinct base IOR per channel from `f0` and
+// evaluates the Airy stack on each primary (glTF `KHR_materials_iridescence`).
+// Mirrors `iridescent_fresnel_rgb` in `thin_film.rs`.
+fn tf_iridescent_fresnel_rgb(
+    outer_ior: f32,
+    film_ior: f32,
+    f0: vec3<f32>,
+    cos_outer: f32,
+    thickness_nm: f32,
+) -> vec3<f32> {
+    return vec3<f32>(
+        tf_airy_reflectance(outer_ior, film_ior, tf_base_ior_from_f0(f0.x), cos_outer, thickness_nm, TF_WAVELENGTH_R_NM),
+        tf_airy_reflectance(outer_ior, film_ior, tf_base_ior_from_f0(f0.y), cos_outer, thickness_nm, TF_WAVELENGTH_G_NM),
+        tf_airy_reflectance(outer_ior, film_ior, tf_base_ior_from_f0(f0.z), cos_outer, thickness_nm, TF_WAVELENGTH_B_NM),
+    );
+}
+
+
 /// Normalises `v`, returning `fallback` for a degenerate (near-zero) input.
 fn tf_normalize_or(v: vec3<f32>, fallback: vec3<f32>) -> vec3<f32> {
     let len_sq = dot(v, v);
