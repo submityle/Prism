@@ -32,7 +32,7 @@ mod state;
 
 pub use access::Access;
 pub use dirty::DirtyChunk;
-pub use fetch::{Has, QueryData, ReadOnlyQueryData};
+pub use fetch::{AnyOf, Has, QueryData, ReadOnlyQueryData};
 pub use filter::{Added, Changed, Or, QueryFilter, With, Without};
 pub use iter::QueryIter;
 #[cfg(feature = "simd")]
@@ -41,6 +41,8 @@ pub use simd::{active, add_assign, axpy_assign, scale_assign, sum, Backend};
 pub use slice::{ArchetypalFilter, ColumnSliceData};
 pub use state::QueryState;
 
+#[cfg(test)]
+mod any_of_tests;
 #[cfg(test)]
 mod change_detection_tests;
 #[cfg(test)]

@@ -15,6 +15,9 @@
 //! - [`Has<T>`] — a `bool` reporting whether the entity has `T`, without
 //!   excluding any archetype and without reading the value (registers no
 //!   access).
+//! - [`AnyOf<(..)>`] — matches an archetype when *at least one* element is
+//!   present, yielding each element as an `Option` (the `||` dual of a
+//!   tuple's `&&`).
 //! - tuples of the above, up to 12 elements.
 //!
 //! Each term exposes four cooperating pieces: a world-static `State` (resolved
@@ -810,6 +813,153 @@ impl_query_data_tuple!(A, B, C, D, E, F, G, H, I, J);
 impl_query_data_tuple!(A, B, C, D, E, F, G, H, I, J, K);
 impl_query_data_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
 
+// --- AnyOf<(..)> ------------------------------------------------------------
+
+/// A [`QueryData`] term matching an archetype when **at least one** of its
+/// element terms is present, yielding each element as an `Option`.
+///
+/// Where a plain tuple `(A, B)` requires *every* element and excludes an
+/// archetype that lacks any of them, `AnyOf<(A, B)>` includes an archetype that
+/// carries *A or B (or both)* and yields `(Option<A::Item>, Option<B::Item>)`,
+/// with `None` for the elements this row happens to lack. A row is visited only
+/// when at least one element is actually present for it (so you never iterate
+/// an all-`None` row), which makes `AnyOf` the natural term for "components that
+/// play the same role but are stored under distinct types" (design §6/§7).
+///
+/// Each element is a full [`QueryData`] term, so `&T`, `&mut T`, and `Ref<T>`
+/// all compose. `AnyOf` registers the **union** of its elements' accesses — the
+/// same conservative rule as `Option<&T>` — so it still conflicts with another
+/// term that writes a component it reads, and a self-conflicting set (such as
+/// `AnyOf<(&mut T, &T)>`) is rejected by the access-conflict check.
+///
+/// ```
+/// use prism_ecs::prelude::*;
+///
+/// #[derive(Debug)]
+/// struct Melee(u32);
+/// impl Component for Melee {}
+/// #[derive(Debug)]
+/// struct Ranged(u32);
+/// impl Component for Ranged {}
+///
+/// let mut world = World::new();
+/// world.spawn(Melee(10));           // only melee
+/// world.spawn(Ranged(7));           // only ranged
+/// world.spawn((Melee(3), Ranged(5))); // both
+///
+/// let state = world.query::<AnyOf<(&Melee, &Ranged)>>();
+/// let mut armed = 0usize;
+/// for (melee, ranged) in state.iter(&world) {
+///     // At least one is always `Some` — all-`None` rows are never visited.
+///     assert!(melee.is_some() || ranged.is_some());
+///     armed += 1;
+/// }
+/// assert_eq!(armed, 3);
+/// ```
+pub struct AnyOf<T>(PhantomData<fn() -> T>);
+
+macro_rules! impl_any_of {
+    ($($T:ident),+) => {
+        // SAFETY: each element is a `QueryData` upholding the trait contract.
+        // `update_access` registers the union of element accesses (so a present
+        // element is always covered); `matches` admits an archetype when *any*
+        // element matches, and `init_fetch` builds a per-element fetch only for
+        // the elements that matched (storing `None` otherwise), so no element's
+        // `init_fetch` runs on an archetype it does not match. `filter_fetch`
+        // admits a row only when some element is present for it, and `fetch`
+        // re-checks each element's per-row gate before fetching — so every
+        // `Some` item is backed by a real present component at this exact row,
+        // and the per-element soundness arguments compose.
+        #[allow(non_snake_case)]
+        unsafe impl<$($T: QueryData),+> QueryData for AnyOf<($($T,)+)> {
+            type Item<'w> = ($(Option<$T::Item<'w>>,)+);
+            type State = ($($T::State,)+);
+            type Fetch<'w> = ($(Option<$T::Fetch<'w>>,)+);
+
+            fn init_state(components: &mut Components) -> Self::State {
+                ($($T::init_state(components),)+)
+            }
+
+            fn matches(state: &Self::State, archetype: &Archetype) -> bool {
+                let ($($T,)+) = state;
+                // OR, unlike the tuple's AND: one present element suffices.
+                $($T::matches($T, archetype))||+
+            }
+
+            fn update_access(state: &Self::State, access: &mut Access) {
+                let ($($T,)+) = state;
+                $($T::update_access($T, access);)+
+            }
+
+            unsafe fn init_fetch<'w>(
+                state: &Self::State,
+                archetype: &'w Archetype,
+                sparse_sets: &'w SparseSets,
+                last_run: Tick,
+                this_run: Tick,
+            ) -> Self::Fetch<'w> {
+                let ($($T,)+) = state;
+                // SAFETY: an element's `init_fetch` runs only when its `matches`
+                // held for this archetype — the per-element contract.
+                unsafe {
+                    ($(
+                        if $T::matches($T, archetype) {
+                            Some($T::init_fetch($T, archetype, sparse_sets, last_run, this_run))
+                        } else {
+                            None
+                        },
+                    )+)
+                }
+            }
+
+            unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> bool {
+                let ($($T,)+) = fetch;
+                // SAFETY: forwarded per element at the same row; a `None`
+                // element (archetype did not match it) contributes `false`.
+                unsafe {
+                    $(
+                        (match $T {
+                            Some(f) => $T::filter_fetch(f, entity, row),
+                            None => false,
+                        })
+                    )||+
+                }
+            }
+
+            unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
+                let ($($T,)+) = fetch;
+                // SAFETY: forwarded per element at the same row; distinct
+                // components mean the `&mut` elements never alias each other,
+                // and the per-row gate is re-checked so a `Some` item is always
+                // backed by a present component at this row.
+                unsafe {
+                    ($(
+                        match $T {
+                            Some(f) if $T::filter_fetch(f, entity, row) => {
+                                Some($T::fetch(f, entity, row))
+                            }
+                            _ => None,
+                        },
+                    )+)
+                }
+            }
+        }
+    };
+}
+
+impl_any_of!(A);
+impl_any_of!(A, B);
+impl_any_of!(A, B, C);
+impl_any_of!(A, B, C, D);
+impl_any_of!(A, B, C, D, E);
+impl_any_of!(A, B, C, D, E, F);
+impl_any_of!(A, B, C, D, E, F, G);
+impl_any_of!(A, B, C, D, E, F, G, H);
+impl_any_of!(A, B, C, D, E, F, G, H, I);
+impl_any_of!(A, B, C, D, E, F, G, H, I, J);
+impl_any_of!(A, B, C, D, E, F, G, H, I, J, K);
+impl_any_of!(A, B, C, D, E, F, G, H, I, J, K, L);
+
 // --- Read-only marker -------------------------------------------------------
 
 /// Marker for [`QueryData`] terms that borrow component data only *immutably*.
@@ -858,3 +1008,25 @@ impl_read_only_query_data_tuple!(A, B, C, D, E, F, G, H, I);
 impl_read_only_query_data_tuple!(A, B, C, D, E, F, G, H, I, J);
 impl_read_only_query_data_tuple!(A, B, C, D, E, F, G, H, I, J, K);
 impl_read_only_query_data_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
+
+macro_rules! impl_any_of_read_only {
+    ($($T:ident),+) => {
+        // SAFETY: `AnyOf` only ever fetches its elements, so when every element
+        // is read-only the composed term performs only immutable reads and
+        // registers no write access.
+        unsafe impl<$($T: ReadOnlyQueryData),+> ReadOnlyQueryData for AnyOf<($($T,)+)> {}
+    };
+}
+
+impl_any_of_read_only!(A);
+impl_any_of_read_only!(A, B);
+impl_any_of_read_only!(A, B, C);
+impl_any_of_read_only!(A, B, C, D);
+impl_any_of_read_only!(A, B, C, D, E);
+impl_any_of_read_only!(A, B, C, D, E, F);
+impl_any_of_read_only!(A, B, C, D, E, F, G);
+impl_any_of_read_only!(A, B, C, D, E, F, G, H);
+impl_any_of_read_only!(A, B, C, D, E, F, G, H, I);
+impl_any_of_read_only!(A, B, C, D, E, F, G, H, I, J);
+impl_any_of_read_only!(A, B, C, D, E, F, G, H, I, J, K);
+impl_any_of_read_only!(A, B, C, D, E, F, G, H, I, J, K, L);
