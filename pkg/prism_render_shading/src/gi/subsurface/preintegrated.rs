@@ -161,13 +161,26 @@ pub fn curvature_from_radius(radius: f32) -> f32 {
 /// the per-channel normalized average in `[0, 1]`; a degenerate (near-zero)
 /// total weight falls back to `saturate(N·L)`.
 pub fn preintegrated_diffuse(ndotl: f32, curvature: f32) -> Vec3 {
+    preintegrated_diffuse_with_steps(ndotl, curvature, INTEGRATION_STEPS)
+}
+
+/// Penner pre-integrated skin lookup with an explicit quadrature step count.
+///
+/// Generalizes [`preintegrated_diffuse`] (which fixes the midpoint-rule step
+/// count at the built-in [`INTEGRATION_STEPS`]) so the per-frame shading
+/// quality budget can scale the curvature integral's cost. `steps` is forced
+/// `>= 1`; passing [`INTEGRATION_STEPS`] reproduces [`preintegrated_diffuse`]
+/// bit-for-bit. Fewer steps trade a little low-curvature accuracy for speed;
+/// the result stays a per-channel value in `[0, 1]` with the `saturate(N·L)`
+/// fallback on a degenerate weight.
+pub fn preintegrated_diffuse_with_steps(ndotl: f32, curvature: f32, steps: usize) -> Vec3 {
     let cos_theta = clamp_finite(ndotl, -1.0, 1.0);
     let theta = ops::acos(cos_theta);
     let radius = radius_from_curvature(curvature);
 
     let a0 = -PI * 0.5;
     let a1 = PI * 0.5;
-    let n = INTEGRATION_STEPS;
+    let n = steps.max(1);
     let da = (a1 - a0) / n as f32;
 
     let mut total_light = Vec3::ZERO;
@@ -185,6 +198,23 @@ pub fn preintegrated_diffuse(ndotl: f32, curvature: f32) -> Vec3 {
 
     let fallback = cos_theta.max(0.0);
     channel_ratio(total_light, total_weight, fallback)
+}
+
+/// Penner pre-integrated skin lookup driven by a [`LobeSampleBudget`].
+///
+/// Convenience adapter over [`preintegrated_diffuse_with_steps`] that sources
+/// the quadrature step count from the per-frame shading quality budget (see
+/// [`crate::quality`]).
+pub fn preintegrated_diffuse_for_budget(
+    ndotl: f32,
+    curvature: f32,
+    budget: &crate::LobeSampleBudget,
+) -> Vec3 {
+    preintegrated_diffuse_with_steps(
+        ndotl,
+        curvature,
+        budget.sss_preintegration_steps as usize,
+    )
 }
 
 /// Scalar Penner pre-integrated diffuse lookup using [`skin_profile_scalar`].

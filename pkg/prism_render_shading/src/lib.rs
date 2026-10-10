@@ -24,6 +24,7 @@ mod exposure;
 mod face_shadow;
 mod film_grain;
 mod gamut_map;
+mod glint;
 mod hair;
 mod hair_angel_ring;
 mod hair_chiang;
@@ -36,12 +37,14 @@ mod kuwahara;
 mod lens_flare;
 mod light_routing;
 mod lighting;
+mod measured_brdf;
 mod motion_blur;
 mod oit;
 mod ordered_dither;
 mod outline;
 mod posterize;
 mod punctual;
+mod quality;
 mod resolve;
 mod screen_space;
 mod shadow;
@@ -122,6 +125,18 @@ pub use gamut_map::{
     distance_from_achromatic, luminance as gamut_map_luminance, max_channel, min_channel,
     GamutMapParams, GAMUT_MAP_LUMA_WEIGHTS,
 };
+pub use glint::{
+    fresnel_schlick_scalar as glint_fresnel_schlick, ggx_ndf as glint_ggx_ndf,
+    glint_bin_solid_angle, glint_half_slope, glint_is_finite, glint_microfacet_count,
+    glint_ndf, glint_ndf_blended, glint_seed, glint_specular_brdf,
+    hash_combine as glint_hash_combine, hash_u32 as glint_hash_u32,
+    poisson_gaussian as glint_poisson_gaussian, poisson_knuth as glint_poisson_knuth,
+    poisson_sample as glint_poisson_sample, quantize_axis as glint_quantize_axis,
+    smith_g1 as glint_smith_g1, smith_g2_height_correlated as glint_smith_g2,
+    uniform_at as glint_uniform_at, uniform_from_hash as glint_uniform_from_hash,
+    GLINT_PI, GLINT_SEED_SALT, MIN_ALPHA as GLINT_MIN_ALPHA, MIN_COS as GLINT_MIN_COS,
+    MIN_POSITIVE as GLINT_MIN_POSITIVE, POISSON_KNUTH_MAX_LAMBDA, POISSON_MAX_ITERS,
+};
 pub use hair::evaluate_hair_direct;
 pub use hair_angel_ring::{accumulate_angel_rings, angel_ring_band, AngelRing, MAX_ANGEL_RINGS};
 pub use hair_chiang::{evaluate_hair_chiang_direct, HairChiangParams};
@@ -155,6 +170,12 @@ pub use lighting::{
     evaluate_principled_direct, linear_furnace_response, DirectLightSample, ShadingFrame,
     SurfaceSample,
 };
+pub use measured_brdf::{
+    directions_to_rusinkiewicz, half_vector, is_non_negative, reciprocity_error,
+    rusinkiewicz_to_directions, theta_h_to_unit, unit_to_theta_h, MeasuredBrdf, MeasuredBrdfDims,
+    MeasuredBrdfError, MeasuredBrdfSample, MeasuredBrdfSampler, RusinkiewiczCoords,
+    SyntheticBrdfParams, MB_DEFAULT_PHI_D, MB_DEFAULT_THETA_D, MB_DEFAULT_THETA_H,
+};
 pub use motion_blur::{
     clamp_velocity, cone, cylinder, neighbor_max, sample_weight, shutter_velocity,
     soft_depth_compare, tile_max, velocity_length, MotionBlurParams,
@@ -174,6 +195,14 @@ pub use posterize::{
     POSTERIZE_LUMA_WEIGHTS,
 };
 pub use punctual::PunctualLight;
+pub use quality::{LobeSampleBudget, ShadingQuality};
+
+// Crate-root re-exports of the expensive-lobe `*_for_budget` adapters, so a
+// host driving `ShadingQuality`/`LobeSampleBudget` can reach every tier-scaled
+// entry point from one place (and the `quality` module's doc links resolve).
+pub use gi::sky_lut::multiscatter_lut::bake_multiscatter_lut_for_budget;
+pub use gi::subsurface::preintegrated::preintegrated_diffuse_for_budget;
+pub use gi::translucency::diffusion::profile_radial_energy_for_budget as diffusion_profile_radial_energy_for_budget;
 pub use resolve::{
     resolve_pixel, surface_sample_from_parameters, DirectionalLight, LightingEnvironment,
     ResolveError, ResolveInput, ResolvedPixel, IDENTITY_WORLD_FROM_LOCAL,

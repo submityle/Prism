@@ -247,6 +247,32 @@ pub fn bake_multiscatter_lut(
     }
 }
 
+/// Bakes the multiple-scattering LUT with sample counts sourced from a
+/// [`LobeSampleBudget`](crate::LobeSampleBudget).
+///
+/// Forwards `multiscatter_dir_samples` as the Fibonacci-sphere direction count
+/// and `multiscatter_march_samples` as the per-direction ray-march step count
+/// to [`bake_multiscatter_lut`], so the LUT bake cost scales with the shading
+/// quality tier (see [`crate::ShadingQuality`]). The default (High) tier
+/// reproduces the renderer's historical direction/march counts, leaving the
+/// baked LUT numerically unchanged out of the box.
+pub fn bake_multiscatter_lut_for_budget(
+    atmosphere: &Atmosphere,
+    sun_irradiance: Vec3,
+    width: usize,
+    height: usize,
+    budget: &crate::LobeSampleBudget,
+) -> MultiscatterLut {
+    bake_multiscatter_lut(
+        atmosphere,
+        sun_irradiance,
+        width,
+        height,
+        budget.multiscatter_dir_samples,
+        budget.multiscatter_march_samples,
+    )
+}
+
 /// Samples the baked multiple-scattering factor for physical `(r, μ_sun)`.
 ///
 /// Encodes through [`r_mu_sun_to_uv`] and samples `lut` with clamp-to-edge
@@ -363,5 +389,25 @@ mod tests {
         assert!(s.is_finite());
         let (ru, rv) = uv_to_r_mu_sun(&a, f32::INFINITY, f32::NAN);
         assert!(ru.is_finite() && rv.is_finite());
+    }
+
+    #[test]
+    fn budget_bake_matches_tier_sample_counts() {
+        // The budget adapter must forward exactly the tier's dir/march counts,
+        // producing a byte-identical LUT to the explicit-count bake.
+        let a = earth();
+        let budget = crate::ShadingQuality::High.budget();
+        let via_budget = bake_multiscatter_lut_for_budget(&a, Vec3::splat(8.0), 20, 20, &budget);
+        let direct = bake_multiscatter_lut(
+            &a,
+            Vec3::splat(8.0),
+            20,
+            20,
+            budget.multiscatter_dir_samples,
+            budget.multiscatter_march_samples,
+        );
+        assert_eq!(via_budget.width(), direct.width());
+        assert_eq!(via_budget.height(), direct.height());
+        assert_eq!(via_budget.texels(), direct.texels());
     }
 }

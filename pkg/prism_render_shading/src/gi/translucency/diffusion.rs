@@ -225,6 +225,61 @@ pub fn sample_radius_2d(d: f32, uv: (f32, f32)) -> f32 {
     sample_radius(d, uv.0, uv.1)
 }
 
+/// Radially integrated reflected energy of the Burley diffusion profile.
+///
+/// Evaluates `∫_0^{r_max} 2π r · A · R(r) dr` by the midpoint rule with
+/// `samples` equal sub-intervals over `[0, r_max]`, where `r_max = 48 d`
+/// captures the profile's effective support. The slower `e^{-r/(3 d)}` term
+/// dominates the tail, so the domain is sized against it: the truncated energy
+/// is `0.75·e^{-r_max/(3 d)}`, which at `r_max = 48 d` is below `1e-7` of the
+/// total (a `16 d` domain would drop ~`3.6e-3`). The integrand equals
+/// `A · p(r)` where `p(r) = 2π r R(r)` is the unit-integral [`radius_pdf`], so
+/// the quadrature converges to the diffuse `albedo` as `samples → ∞`.
+///
+/// This is both the energy-conservation diagnostic for the diffusion profile
+/// and the shade-time normalization constant the screen-space translucency
+/// blur divides by, so a lower sample budget trades a small normalization
+/// bias for fewer taps without ever changing the profile shape.
+///
+/// `d` is clamped finite and strictly positive, `albedo` to `[0, 1]`, and
+/// `samples` to at least one so the quadrature is always well-defined and the
+/// result is finite and non-negative.
+#[inline]
+pub fn profile_radial_energy(d: f32, albedo: f32, samples: u32) -> f32 {
+    let d = clamp_scaling(d);
+    let a = clamp_finite(albedo, 0.0, 1.0);
+    let samples = samples.max(1);
+    let r_max = 48.0 * d;
+    let step = r_max / samples as f32;
+    let mut acc = 0.0f32;
+    for i in 0..samples {
+        let r = (i as f32 + 0.5) * step;
+        acc += radius_pdf(r, d) * step;
+    }
+    let energy = a * acc;
+    if energy.is_finite() {
+        energy.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+/// [`profile_radial_energy`] with the sample count sourced from a
+/// [`LobeSampleBudget`](crate::LobeSampleBudget).
+///
+/// The per-quality `translucency_profile_samples` count drives the radial
+/// quadrature, so the translucency normalization scales with the shading
+/// quality tier (see [`crate::ShadingQuality`]) without any shader
+/// recompilation.
+#[inline]
+pub fn profile_radial_energy_for_budget(
+    d: f32,
+    albedo: f32,
+    budget: &crate::LobeSampleBudget,
+) -> f32 {
+    profile_radial_energy(d, albedo, budget.translucency_profile_samples)
+}
+
 /// Clamps `value` into `[lo, hi]`, mapping non-finite inputs to `lo`.
 #[inline]
 fn clamp_finite(value: f32, lo: f32, hi: f32) -> f32 {
@@ -418,5 +473,43 @@ mod tests {
         assert!(sample_radius(0.0, f32::NAN, f32::NAN).is_finite());
         assert!(profile_rgb(f32::NAN, Vec3::ZERO, Vec3::splat(f32::NAN)).is_finite());
         assert!(burley_scaling(f32::NAN, f32::NAN).is_finite());
+    }
+
+    #[test]
+    fn radial_energy_converges_to_albedo() {
+        // The radial integral of A·R(r) is the diffuse albedo; the midpoint
+        // quadrature must approach it as the sample budget grows, and tighten
+        // monotonically in error for a well-behaved integrand.
+        for &(d, albedo) in &[(0.5f32, 1.0f32), (1.0, 0.8), (2.5, 0.35)] {
+            let coarse = (profile_radial_energy(d, albedo, 16) - albedo).abs();
+            let fine = (profile_radial_energy(d, albedo, 4096) - albedo).abs();
+            assert!(fine < 2.0e-3, "fine error {fine} too large (d={d}, A={albedo})");
+            assert!(fine <= coarse + 1e-6, "refining budget worsened the estimate");
+        }
+    }
+
+    #[test]
+    fn radial_energy_scales_linearly_in_albedo() {
+        // The integrand is linear in albedo, so the energy must be too.
+        let full = profile_radial_energy(1.3, 1.0, 512);
+        let half = profile_radial_energy(1.3, 0.5, 512);
+        assert!((half - 0.5 * full).abs() < 1e-6, "full={full}, half={half}");
+        assert_eq!(profile_radial_energy(1.3, 0.0, 512), 0.0);
+    }
+
+    #[test]
+    fn radial_energy_for_budget_tracks_tier_sample_count() {
+        // The adapter must forward exactly the tier's translucency sample count.
+        let budget = crate::ShadingQuality::High.budget();
+        let via_budget = profile_radial_energy_for_budget(1.0, 0.7, &budget);
+        let direct = profile_radial_energy(1.0, 0.7, budget.translucency_profile_samples);
+        assert_eq!(via_budget, direct);
+    }
+
+    #[test]
+    fn radial_energy_is_finite_on_degenerate_inputs() {
+        assert!(profile_radial_energy(f32::NAN, f32::NAN, 0).is_finite());
+        assert!(profile_radial_energy(0.0, 2.0, 1).is_finite());
+        assert!(profile_radial_energy(-1.0, -1.0, 1).is_finite());
     }
 }

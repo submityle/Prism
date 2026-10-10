@@ -613,6 +613,16 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 门禁：`cargo test -p prism_render_shading --lib`（3192 通过，含新增 `clearcoat_two_pass_coupling_identity_and_grazing_darkening`：coat=0 恒等 + 掠射压暗强于正入射，及回绿的 `zero_clearcoat_matches_principled_base`）、`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过，编译 brdf.wesl 两程路径）；touched 文件 clippy 干净、已 rustfmt。
   - 诚实边界：OpenPBR `coat_darkening`（内反射回收项）**未**纳入——该公式不确定，拒绝臆造并冠名 OpenPBR；本项只落地无歧义、可引用的「两程透射」能量耦合半边，`coat_darkening` 留待有可靠 `R_i` 推导（Weidlich–Wilkie 几何级数）时再加，届时同样保持 coat=0 恒等、不新增 ABI 字段。
 
+- **P1-e 贵瓣采样数按画质档缩放（SSS / 透射 / 多次散射，ABI 中性 pass uniform）**（§7.2 / §13 表 P1-e）
+  - 范围：把 SSS 预积分 / 可分离卷积、屏幕空间透射扩散归一、天空多次散射 LUT 的**采样数**统一由画质档驱动，模型/布局/置换 key 全部不变，采样数以**普通 pass uniform** 上传（非 PSO 置换键），档间切换平滑、无弹跳/瓣塌缩。High 档 = 历史内置采样数，**无视觉回归**。
+  - 代码：
+    - 画质模型 `pkg/prism_render_shading/src/quality.rs`：`ShadingQuality {Low,Medium,High,Ultra}`（`Default = High`）→ `LobeSampleBudget`（5 个 u32 采样数：SSS 预积分 / 可分离卷积 / 透射剖面 / 多散射方向 / 多散射行进），含钳位（最小值 / 强制奇数不小于三）与总采样数聚合。
+    - 贵瓣 `*_for_budget` 适配器：`gi::subsurface::{preintegrated,separable}`、`gi::translucency::diffusion::profile_radial_energy[_for_budget]`（径向能量以中点积分，`r_max = 48 d` 使 `e^{-r/(3d)}` 尾部截断 < 1e-7）、`gi::sky_lut::multiscatter_lut::bake_multiscatter_lut_for_budget`；crate 根再导出统一入口。
+    - WESL 孪生 `pkg/prism_render_scene/src/shaders/lobe_budget.wesl`：`struct LobeSampleBudget`（字段序与 Rust 逐一对应）+ `LB_MIN_*` 常量 + `lb_clamp_min` / `lb_force_odd_at_least_three` / `lb_clamped` / `lb_total_samples`，与 thin_film.wesl 头部范式一致。
+    - 对拍门禁 `pkg/prism_render_scene/src/shading/lobe_budget/{mod,shader_tests}.rs`：一个真实 `@compute` link-test 引用 WESL 全部导出（含结构体），覆盖编译 / 可见性 / 签名。
+  - 门禁：`cargo test -p prism_render_shading --lib`（全量 **3257 通过**，含 quality 11 + diffusion/multiscatter 新增用例，老金标准零回归）、`cargo test -p prism_render_scene --lib shading::lobe_budget`（link 1 通过）。
+  - 诚实边界：本项为纯 shading 域、ABI 中性落地（采样数走 pass uniform，不进 GPU 材质 ABI）；画质档的 UI/配置接线随各贵瓣调用点真实喂入 budget 后生效，High 档恒等于历史采样数。
+
 **🟡 部分完成**
 
 - **P2-d thin_film 虹彩瓣：Airy 反射率 GPU twin + 原理化高光 Fresnel 接线（shade-time，ABI 中性）**（§10 / §13 表 P2-d）
@@ -627,7 +637,13 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 诚实边界：über GPU 材质 ABI 打包（`LobeMask::THIN_FILM` 新位 + 3-word 块、`prism_unpack_surface` 低位优先聚集）属跨 crate ABI 改动、碰撞高发，仍留待基础设施线统一推进。本阶段落地的是 **shading 域内、ABI 中性的 shade-time 接线**——与 P0-b 高光抗锯齿同范式，权重由作者因子 / 虹彩图在 shade 期喂入，权重 0 恒等旁路。编辑器 MaterialX 作者前端（P2-a）仍按 goal 保持 TODO。
 
 
-**⬜ 未开始（见上表）**：P1-a~P1-f、P1-h（PCM 地基）、P2-a~P2-c、P2-e~P2-g、P2-i、P2-j、P3-a~P3-e、开放瓣（glint / 测量 BRDF）。
+- **开放瓣 CPU 金标准 + WESL 孪生：程序化 glint / 实测·表格化 BRDF（§17.6，shading 域内落地）**（§13 表 开放瓣）
+  - 范围：两类开放词汇表瓣的**着色数学**先行落地为独立带测试模块——① 程序化 glint（闪烁微表面）BRDF：GGX NDF + hash/uniform + 轴量化 + Poisson（Knuth/Gaussian 两档）+ 无偏估计 `E[D_glint]=D` + 能量守恒 + strength=0 恒等旁路；② 实测/表格化 BRDF：Rusinkiewicz 坐标变换 + sqrt 轴 warp + 三线性插值 + BRDF 加权重要性采样 + pdf + 合成表（GGX+Lambert）+ 能量/互易/非负诊断。两者均配 WESL 孪生并以 `@compute` link-test 验证全导出符号编译/链接。
+  - 代码：`pkg/prism_render_shading/src/{glint,measured_brdf}.rs`（CPU 金标准）+ `pkg/prism_render_scene/src/shaders/{glint,measured_brdf}.wesl`（孪生）+ `pkg/prism_render_scene/src/shading/{glint,measured_brdf}/{mod,shader_tests}.rs`（对拍）。提交 `d95bd3844`（measured BRDF）、`32017808f`（glint）。
+  - 门禁：`cargo test -p prism_render_shading --lib glint`（glint CPU 全绿）、`--lib measured_brdf`（18 通过）、`cargo test -p prism_render_scene --lib shading::glint` / `shading::measured_brdf`（link 各 1 通过）；全量 `-p prism_render_shading --lib` 3257 通过。
+  - 诚实边界：本阶段落地的是 shading 域内、ABI 中性的瓣**数学核 + GPU 孪生**，尚**未**接入 über 开放词汇表 ABI（新 `LobeMask` 位 + 变长字段打包 + 静态置换、`prism_unpack_surface` 聚集），该 ABI 一等成员接入属 P2-c，随基础设施线统一推进。
+
+**⬜ 未开始（见上表）**：P1-a~P1-d、P1-f、P1-h（PCM 地基）、P2-a~P2-c、P2-e~P2-g、P2-i、P2-j、P3-a~P3-e。开放瓣（glint / 测量 BRDF）的 CPU 金标准 + WESL 孪生已落地（见上「部分完成」），仅余其 über 开放词汇表 ABI 接入（归 P2-c）。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 

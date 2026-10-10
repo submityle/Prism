@@ -186,6 +186,29 @@ impl SeparableKernel {
         Self { offsets, weights }
     }
 
+    /// Build the three-Gaussian skin kernel using a [`LobeSampleBudget`].
+    ///
+    /// Convenience adapter that drives the tap count from the per-frame shading
+    /// quality budget (see [`crate::quality`]) instead of a hard-coded literal,
+    /// so lowering [`crate::ShadingQuality`] shrinks the SSS blur footprint
+    /// together with the other expensive lobes. The budget's tap count is
+    /// already odd and `>= 3`, so the kernel's symmetry contract holds.
+    pub fn skin_for_budget(
+        budget: &crate::LobeSampleBudget,
+        radius_texels: f32,
+        scale: f32,
+    ) -> Self {
+        Self::skin(budget.sss_separable_taps as usize, radius_texels, scale)
+    }
+
+    /// Build a single-Gaussian kernel using a [`LobeSampleBudget`].
+    ///
+    /// The quality-driven companion to [`SeparableKernel::gaussian`]; the tap
+    /// count comes from [`crate::LobeSampleBudget::sss_separable_taps`].
+    pub fn gaussian_for_budget(budget: &crate::LobeSampleBudget, sigma: f32) -> Self {
+        Self::gaussian(budget.sss_separable_taps as usize, sigma)
+    }
+
     /// Number of taps in the kernel.
     #[inline]
     pub fn len(&self) -> usize {
