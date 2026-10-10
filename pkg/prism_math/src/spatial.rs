@@ -35,6 +35,11 @@ pub const MAX_COORD_3D: u32 = (1 << BITS_3D) - 1;
 /// pack into the full 64 bits of a [`u64`] key.
 pub const BITS_2D: u32 = 32;
 
+/// Number of bits per axis consumed by the 2D Hilbert encoder. Two axes of 32
+/// bits map onto the full 64-bit [`u64`] Hilbert index, matching the 2D Morton
+/// domain so the two space-filling curves are interchangeable on the same grid.
+pub const BITS_HILBERT_2D: u32 = 32;
+
 // ---------------------------------------------------------------------------
 // Morton (Z-order)
 // ---------------------------------------------------------------------------
@@ -243,11 +248,7 @@ fn index_to_transpose(index: u64) -> [u32; 3] {
 #[inline]
 #[must_use]
 pub fn hilbert_encode3(x: u32, y: u32, z: u32) -> u64 {
-    let mut axes = [
-        x & MAX_COORD_3D,
-        y & MAX_COORD_3D,
-        z & MAX_COORD_3D,
-    ];
+    let mut axes = [x & MAX_COORD_3D, y & MAX_COORD_3D, z & MAX_COORD_3D];
     axes_to_transpose(&mut axes);
     transpose_to_index(&axes)
 }
@@ -260,6 +261,78 @@ pub fn hilbert_decode3(index: u64) -> (u32, u32, u32) {
     let mut axes = index_to_transpose(index);
     transpose_to_axes(&mut axes);
     (axes[0], axes[1], axes[2])
+}
+
+// ---------------------------------------------------------------------------
+// Hilbert (2D, iterative quadrant rotation)
+// ---------------------------------------------------------------------------
+
+/// Rotate / reflect a quadrant so the 2D Hilbert recursion stays oriented.
+///
+/// `n` is the side length of the (sub)square being processed. When `ry == 0`
+/// the quadrant is reflected (`rx == 1`) and the axes are swapped, which is the
+/// transform that turns four Hilbert sub-curves into one continuous curve.
+#[inline]
+fn hilbert_rot2(n: u64, x: &mut u64, y: &mut u64, rx: u64, ry: u64) {
+    if ry == 0 {
+        if rx == 1 {
+            *x = (n - 1).wrapping_sub(*x);
+            *y = (n - 1).wrapping_sub(*y);
+        }
+        core::mem::swap(x, y);
+    }
+}
+
+/// Map a 2D lattice point to its position along the 32-bit-per-axis Hilbert
+/// curve. Like [`hilbert_encode3`], consecutive indices always map to lattice
+/// neighbours (they differ by one unit along exactly one axis), which is the
+/// property that makes 2D Hilbert order preferable to Morton for tiled virtual
+/// textures, quadtree traversal, and cache-coherent 2D streaming.
+///
+/// The full 32-bit-per-axis domain is accepted, so this is the exact 2D
+/// companion to [`morton_encode2`] on the same `u64` key space.
+#[inline]
+#[must_use]
+pub fn hilbert_encode2(x: u32, y: u32) -> u64 {
+    let n: u64 = 1u64 << BITS_HILBERT_2D;
+    let mut x = x as u64;
+    let mut y = y as u64;
+    let mut d: u64 = 0;
+    let mut s = n >> 1;
+    while s > 0 {
+        let rx = u64::from((x & s) > 0);
+        let ry = u64::from((y & s) > 0);
+        // Each level contributes the index of the sub-quadrant (0..=3) scaled by
+        // the number of cells it spans. The sum over all levels is < 2^64, so it
+        // fits the u64 key exactly without overflow.
+        d += s * s * ((3 * rx) ^ ry);
+        hilbert_rot2(n, &mut x, &mut y, rx, ry);
+        s >>= 1;
+    }
+    d
+}
+
+/// Recover the `(x, y)` coordinates from a Hilbert index produced by
+/// [`hilbert_encode2`]. Exact inverse of [`hilbert_encode2`] over the whole
+/// 64-bit index space.
+#[inline]
+#[must_use]
+pub fn hilbert_decode2(index: u64) -> (u32, u32) {
+    let n: u64 = 1u64 << BITS_HILBERT_2D;
+    let mut t = index;
+    let mut x: u64 = 0;
+    let mut y: u64 = 0;
+    let mut s: u64 = 1;
+    while s < n {
+        let rx = 1 & (t >> 1);
+        let ry = 1 & (t ^ rx);
+        hilbert_rot2(s, &mut x, &mut y, rx, ry);
+        x += s * rx;
+        y += s * ry;
+        t >>= 2;
+        s <<= 1;
+    }
+    (x as u32, y as u32)
 }
 
 #[cfg(test)]
@@ -362,5 +435,61 @@ mod tests {
     fn encoders_are_deterministic() {
         assert_eq!(morton_encode3(5, 9, 17), morton_encode3(5, 9, 17));
         assert_eq!(hilbert_encode3(5, 9, 17), hilbert_encode3(5, 9, 17));
+        assert_eq!(hilbert_encode2(5, 9), hilbert_encode2(5, 9));
+    }
+
+    #[test]
+    fn hilbert2_round_trip_random() {
+        let mut rng = SplitMix64::new(0x5fd0_9c4e);
+        for _ in 0..10_000 {
+            let x = rng.next_u32();
+            let y = rng.next_u32();
+            let index = hilbert_encode2(x, y);
+            assert_eq!(hilbert_decode2(index), (x, y));
+        }
+    }
+
+    #[test]
+    fn hilbert2_is_a_bijection_on_a_small_square() {
+        // Over an 8x8 square the 64 Hilbert indices must be exactly the
+        // permutation 0..64, i.e. the curve visits every cell once.
+        let side = 8_u32;
+        let count = (side * side) as usize;
+        let mut seen = alloc::vec![false; count];
+        for y in 0..side {
+            for x in 0..side {
+                let h = hilbert_encode2(x, y) as usize;
+                assert!(h < count, "index {h} out of range for 8x8");
+                assert!(!seen[h], "index {h} produced twice");
+                seen[h] = true;
+            }
+        }
+        assert!(seen.into_iter().all(|v| v), "not every index was hit");
+    }
+
+    #[test]
+    fn hilbert2_consecutive_indices_are_neighbours() {
+        // The defining Hilbert property in 2D: stepping the index by one moves
+        // to an adjacent lattice cell (Manhattan distance exactly 1).
+        let side = 16_u32;
+        let count = side * side;
+        for h in 0..count - 1 {
+            let (x0, y0) = hilbert_decode2(u64::from(h));
+            let (x1, y1) = hilbert_decode2(u64::from(h + 1));
+            let dist = x0.abs_diff(x1) + y0.abs_diff(y1);
+            assert_eq!(dist, 1, "indices {h} and {} are not neighbours", h + 1);
+        }
+    }
+
+    #[test]
+    fn hilbert2_known_corners() {
+        // The 2D Hilbert curve starts at the origin, and the full 32-bit-per-axis
+        // domain extremes round-trip exactly.
+        assert_eq!(hilbert_encode2(0, 0), 0);
+        assert_eq!(hilbert_decode2(0), (0, 0));
+        // Full-domain extremes round-trip through the 32-bit-per-axis mapping.
+        let max = u32::MAX;
+        let idx = hilbert_encode2(max, max);
+        assert_eq!(hilbert_decode2(idx), (max, max));
     }
 }

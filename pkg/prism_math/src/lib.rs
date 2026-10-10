@@ -126,8 +126,8 @@ pub use self::f16::{F16Vec2, F16Vec3, F16Vec4, F16};
 pub use self::interval::{Interval, IntervalVec3};
 pub use self::soa::SoaVec3;
 pub use self::spatial::{
-    hilbert_decode3, hilbert_encode3, morton_decode2, morton_decode3, morton_encode2,
-    morton_encode3,
+    hilbert_decode2, hilbert_decode3, hilbert_encode2, hilbert_encode3, morton_decode2,
+    morton_decode3, morton_encode2, morton_encode3,
 };
 pub use self::spherical::{basis2, basis3, Sh2, Sh3};
 pub use self::shader_mirror::{
