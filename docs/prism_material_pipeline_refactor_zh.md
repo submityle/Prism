@@ -613,7 +613,17 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 门禁：`cargo test -p prism_render_shading --lib`（3192 通过，含新增 `clearcoat_two_pass_coupling_identity_and_grazing_darkening`：coat=0 恒等 + 掠射压暗强于正入射，及回绿的 `zero_clearcoat_matches_principled_base`）、`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过，编译 brdf.wesl 两程路径）；touched 文件 clippy 干净、已 rustfmt。
   - 诚实边界：OpenPBR `coat_darkening`（内反射回收项）**未**纳入——该公式不确定，拒绝臆造并冠名 OpenPBR；本项只落地无歧义、可引用的「两程透射」能量耦合半边，`coat_darkening` 留待有可靠 `R_i` 推导（Weidlich–Wilkie 几何级数）时再加，届时同样保持 coat=0 恒等、不新增 ABI 字段。
 
-**⬜ 未开始（见上表）**：P1-a~P1-f、P1-h（PCM 地基）、P2-a~P2-g、P2-i、P2-j、P3-a~P3-e、开放瓣（glint / 测量 BRDF）。
+**🟡 部分完成**
+
+- **P2-d thin_film 虹彩瓣：Airy 反射率 GPU twin + 对拍/link 门禁**（§10 / §13 表 P2-d）
+  - 范围：薄膜干涉（Belcour–Barla 2017 单膜 Airy 反射率）已有完整带测试的 CPU 金标准 `pkg/prism_render_shading/src/gi/material/thin_film.rs`；本阶段落地其 **WESL 孪生** 并建立独立 link/类型检查门禁。ABI 中性——未触碰 über 参数块。
+  - 代码：
+    - WESL twin `pkg/prism_render_scene/src/shaders/thin_film.wesl`：与 CPU 逐位同算术/钳位/地板的 `tf_transmitted_cos`（Rust `Option<cos_t>` 的 TIR 以负哨兵 `< 0` 编码，仅控制流不同、算术顺序不变）、`tf_fresnel_amplitudes`、`tf_fresnel_dielectric_unpolarized`、`tf_optical_phase`、`tf_airy_one`、`tf_airy_reflectance`、`tf_iridescent_reflectance_rgb`，以及配套各向异性 GGX 辅助（`tf_anisotropic_alphas` / `tf_ggx_aniso_ndf` / `tf_smith_g1_aniso` / `tf_normalize_or`）与常量（`TF_MIN_COS/MIN_IOR/MIN_ALPHA/MIN_POSITIVE/PI`、三原色波长 630/532/465 nm）。无 bindings/entry point。
+    - 对拍门禁 `pkg/prism_render_scene/src/shading/thin_film/{mod,shader_tests}.rs`：仿 `shading/specular_aa/` 以一个真实 `@compute` link-test 入口引用全部导出符号，覆盖 import 可见性/签名/类型检查；数值保真由「CPU 算术顺序逐位镜像」论证保证。`shading/mod.rs` 注册 `pub mod thin_film;`。
+  - 门禁：`cargo test -p prism_render_scene --lib shading::thin_film`（1 通过）、`--lib shading::resolve::shader_tests`（48 通过，未受影响）、`cargo test -p prism_render_shading --lib thin_film`（CPU 金标准 19 通过）；已 rustfmt。
+  - 诚实边界：**尚未**接入 über——`LobeMask::THIN_FILM` 新位 + 3-word 参数块打包（§4.4/§10 的「新位 + 3-word 块」）属 ABI 改动、碰撞高发，留待基础设施线统一推进；metal 的逐通道基底 IOR（`ior=(1+√f0)/(1-√f0)`，当前 `iridescent_reflectance_rgb` 只收标量 base_ior）需先补逐通道 CPU 变体 + WESL twin 再接金属。本阶段只落地可独立验证的 Airy twin + 门禁，不冠名未实现的接线。
+
+**⬜ 未开始（见上表）**：P1-a~P1-f、P1-h（PCM 地基）、P2-a~P2-c、P2-e~P2-g、P2-i、P2-j、P3-a~P3-e、开放瓣（glint / 测量 BRDF）。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 
