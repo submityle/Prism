@@ -1,11 +1,13 @@
 //! [`CurveEditor`] — an easing/animation curve canvas with control points.
 //!
 //! The editor renders a `pk-curve-editor` canvas holding one
-//! `pk-curve-editor__point` knob per control point. Each point is an `(x, y)`
-//! pair in the unit square `0.0..=1.0`: `x` maps to an inline left offset and
-//! `y` to an inline top offset, with `y` inverted so a higher value sits
-//! visually higher on the canvas (data-derived, like the slider's fill width).
-//! No color or offset literal is hard-coded in `render`.
+//! `pk-curve-editor__point` knob per control point. Each knob is absolutely
+//! positioned within the canvas: a point is an `(x, y)` pair in the unit
+//! square `0.0..=1.0` where `x` maps to an inline `left` percentage and `y` to
+//! an inline `top` percentage, with `y` inverted so a higher value sits
+//! visually higher on the canvas. The knob's static class carries symmetric
+//! negative margins so the anchor lands on the knob's center rather than its
+//! top-left corner. No color or offset literal is hard-coded in `render`.
 
 use alloc::vec::Vec;
 
@@ -84,8 +86,8 @@ impl Component for CurveEditor {
             let top = (1.0 - clamp01(point.1)) * 100.0;
             let knob = Element::box_()
                 .class("pk-curve-editor__point")
-                .style(StyleProp::MarginLeft, StyleValue::percent(left))
-                .style(StyleProp::MarginTop, StyleValue::percent(top));
+                .style(StyleProp::Left, StyleValue::percent(left))
+                .style(StyleProp::Top, StyleValue::percent(top));
             canvas = canvas.child(knob);
         }
         canvas
@@ -95,7 +97,7 @@ impl Component for CurveEditor {
 /// Registers the `pk-curve-editor` class family: the canvas frame and a
 /// control-point knob.
 pub(crate) fn register_styles(sheet: &mut StyleSheet) {
-    use prism_ui_style::{Class, StyleProp, StyleValue};
+    use prism_ui_style::{Class, Keyword, StyleProp, StyleValue};
 
     use crate::preset::tok;
 
@@ -110,13 +112,17 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderColor, tok("color.separator")),
     );
 
-    // Point: a small round handle (offsets set inline per point).
+    // Point: a small round handle absolutely positioned on the canvas. The
+    // `left`/`top` anchors are set inline per point; the symmetric -6px margins
+    // (half the 12px knob) recenter the anchor on the knob instead of its
+    // top-left corner.
     sheet.insert(
         Class::new("pk-curve-editor__point")
+            .with(StyleProp::Position, StyleValue::keyword(Keyword::Absolute))
             .with(StyleProp::Width, StyleValue::px(12.0))
             .with(StyleProp::Height, StyleValue::px(12.0))
-            .with(StyleProp::MinWidth, StyleValue::px(12.0))
-            .with(StyleProp::FlexShrink, StyleValue::number(0.0))
+            .with(StyleProp::MarginLeft, StyleValue::px(-6.0))
+            .with(StyleProp::MarginTop, StyleValue::px(-6.0))
             .with(StyleProp::BackgroundColor, tok("color.tint"))
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
             .with(StyleProp::BorderWidth, StyleValue::px(2.0))
@@ -158,20 +164,20 @@ mod tests {
             .all(|k| k.class_names().iter().any(|c| c == "pk-curve-editor__point")));
         // First point: x=0 -> left 0%, y=1 -> top 0% (top edge).
         assert_eq!(
-            inline(&knobs[0], StyleProp::MarginLeft),
+            inline(&knobs[0], StyleProp::Left),
             Some(StyleValue::Length(Length::Percent(0.0)))
         );
         assert_eq!(
-            inline(&knobs[0], StyleProp::MarginTop),
+            inline(&knobs[0], StyleProp::Top),
             Some(StyleValue::Length(Length::Percent(0.0)))
         );
         // Second point: x=1 -> left 100%, y=0 -> top 100% (bottom edge).
         assert_eq!(
-            inline(&knobs[1], StyleProp::MarginLeft),
+            inline(&knobs[1], StyleProp::Left),
             Some(StyleValue::Length(Length::Percent(100.0)))
         );
         assert_eq!(
-            inline(&knobs[1], StyleProp::MarginTop),
+            inline(&knobs[1], StyleProp::Top),
             Some(StyleValue::Length(Length::Percent(100.0)))
         );
     }
@@ -181,12 +187,12 @@ mod tests {
         let el = render(CurveEditorProps::new().point(4.0, -2.0));
         let knob = &el.child_elements()[0];
         assert_eq!(
-            inline(knob, StyleProp::MarginLeft),
+            inline(knob, StyleProp::Left),
             Some(StyleValue::Length(Length::Percent(100.0)))
         );
         // y clamps to 0 -> top 100%.
         assert_eq!(
-            inline(knob, StyleProp::MarginTop),
+            inline(knob, StyleProp::Top),
             Some(StyleValue::Length(Length::Percent(100.0)))
         );
     }

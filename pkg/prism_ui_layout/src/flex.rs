@@ -798,15 +798,19 @@ fn place_absolute(
     let width = clamp_f(width, cmin.width, cmax.width);
     let height = clamp_f(height, cmin.height, cmax.height);
 
+    // Margins shift an absolutely positioned box after inset resolution, which
+    // lets a caller center a fixed-size box on an anchor with symmetric
+    // negative margins (CSS applies margins to abs-positioned boxes too).
+    let margin = resolve_edges(cs.margin, Some(inner_w), Some(inner_h));
     let x = match (left, right) {
-        (Some(l), _) => l,
-        (None, Some(r)) => inner_w - width - r,
-        (None, None) => 0.0,
+        (Some(l), _) => l + margin.left,
+        (None, Some(r)) => inner_w - width - r - margin.right,
+        (None, None) => margin.left,
     };
     let y = match (top, bottom) {
-        (Some(t), _) => t,
-        (None, Some(b)) => inner_h - height - b,
-        (None, None) => 0.0,
+        (Some(t), _) => t + margin.top,
+        (None, Some(b)) => inner_h - height - b - margin.bottom,
+        (None, None) => margin.top,
     };
 
     compute_node(

@@ -82,6 +82,39 @@ pub enum StyleProp {
     JustifyContent,
     /// Cross-axis item alignment.
     AlignItems,
+    /// Positioning scheme: in normal flex flow (`relative`) or taken out of
+    /// flow and placed against the containing box via the inset longhands
+    /// (`absolute`).
+    Position,
+    /// Distance of the box's top edge from its containing box (`absolute`
+    /// positioning only; ignored in normal flow).
+    Top,
+    /// Distance of the box's right edge from its containing box.
+    Right,
+    /// Distance of the box's bottom edge from its containing box.
+    Bottom,
+    /// Distance of the box's left edge from its containing box.
+    Left,
+    /// Drop/inner shadow horizontal offset, in logical pixels.
+    ShadowOffsetX,
+    /// Drop/inner shadow vertical offset, in logical pixels.
+    ShadowOffsetY,
+    /// Shadow blur radius, in logical pixels.
+    ShadowBlur,
+    /// Shadow spread (caster inflation), in logical pixels.
+    ShadowSpread,
+    /// Shadow color.
+    ShadowColor,
+    /// Whether the shadow is inset (inner) rather than a drop shadow.
+    ShadowInset,
+    /// Backdrop-blur radius hint for a frosted-glass surface, in logical
+    /// pixels. The reference backend approximates glass without a true blur.
+    GlassBlur,
+    /// Translucent tint composited over content behind a glass surface. Its
+    /// presence is what turns a box into glass during lowering.
+    GlassTint,
+    /// Optional bright rim highlight color for a glass surface's lit edge.
+    GlassHighlight,
 }
 
 /// A length value, as used by box metrics such as width, padding and gaps.
@@ -182,6 +215,15 @@ pub enum Keyword {
     Stretch,
     /// Align items to their text baseline.
     Baseline,
+    // Position.
+    /// `position: relative` — the box stays in normal flex flow.
+    Relative,
+    /// `position: absolute` — the box is taken out of flow and placed against
+    /// its containing box using the inset longhands.
+    Absolute,
+    // Shadow.
+    /// Marks a shadow as inset (inner) rather than a drop shadow.
+    Inset,
 }
 
 /// A concrete style value.

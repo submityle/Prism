@@ -322,6 +322,45 @@ fn absolute_child_positioned_by_inset() {
 }
 
 #[test]
+fn absolute_child_margin_recenters_on_anchor() {
+    // A fixed-size box anchored by a percentage inset, recentered on the anchor
+    // with symmetric negative margins (half the box size) — the pattern the
+    // curve editor uses to place a 12px knob on a unit-square control point.
+    let mut tree = LayoutTree::new();
+    let knob = tree.new_leaf(LayoutStyle {
+        position: Position::Absolute,
+        // Edges::new(left, right, top, bottom).
+        inset: Edges::new(
+            Dimension::Percent(0.25),
+            Dimension::Auto,
+            Dimension::Percent(0.5),
+            Dimension::Auto,
+        ),
+        margin: Edges::new(
+            Dimension::Points(-6.0),
+            Dimension::Points(0.0),
+            Dimension::Points(-6.0),
+            Dimension::Points(0.0),
+        ),
+        size: Size::new(Dimension::Points(12.0), Dimension::Points(12.0)),
+        ..LayoutStyle::default()
+    });
+    let root = tree.new_node(
+        LayoutStyle {
+            display: Display::Flex,
+            ..LayoutStyle::default()
+        },
+        &[knob],
+    );
+    tree.compute_layout(root, space(200.0, 160.0));
+
+    // left: 25% of 200 = 50, minus 6 margin -> 44; top: 50% of 160 = 80, minus
+    // 6 -> 74. The knob's center lands on (50, 80).
+    approx(tree.layout(knob).location.x, 44.0);
+    approx(tree.layout(knob).location.y, 74.0);
+}
+
+#[test]
 fn reverse_row_places_from_end() {
     let mut tree = LayoutTree::new();
     let a = tree.new_leaf(fixed(40.0, 10.0));
