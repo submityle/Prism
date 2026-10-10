@@ -976,3 +976,149 @@ fn asset_path_scheme_optional_and_robust() {
     assert_eq!(built.clone().without_scheme().to_string(), "a/b.png#Lod0");
     assert_eq!(built.without_label().to_string(), "dlc://a/b.png");
 }
+
+// --- M1: deterministic loader-selection policy (design §9.1) ---
+
+use crate::{LoaderRegistry, SuffixConflict};
+
+#[test]
+fn loader_one_loader_many_extensions() {
+    let mut reg = LoaderRegistry::new();
+    let (id, conflicts) = reg.register(AssetTypeId::of::<Image>(), ["png", "ktx2", "basis"], 0);
+    assert!(conflicts.is_empty());
+    for ext in ["img.png", "img.ktx2", "img.basis"] {
+        assert_eq!(reg.resolve_untyped(&AssetPath::parse(ext)), Some(id));
+    }
+    // Unknown suffix matches nothing.
+    assert_eq!(reg.resolve_untyped(&AssetPath::parse("img.exr")), None);
+}
+
+#[test]
+fn loader_longest_suffix_wins() {
+    let mut reg = LoaderRegistry::new();
+    // A generic `.zst` loader and a specific `.tar.zst` loader.
+    let (zst, _) = reg.register(AssetTypeId::of::<Mesh>(), ["zst"], 0);
+    let (tarzst, _) = reg.register(AssetTypeId::of::<Image>(), ["tar.zst"], 0);
+    // The compound suffix must beat the shorter tail.
+    assert_eq!(
+        reg.resolve_untyped(&AssetPath::parse("archive.tar.zst")),
+        Some(tarzst)
+    );
+    // A plain `.zst` still goes to the generic loader.
+    assert_eq!(
+        reg.resolve_untyped(&AssetPath::parse("blob.zst")),
+        Some(zst)
+    );
+}
+
+#[test]
+fn loader_case_insensitive() {
+    let mut reg = LoaderRegistry::new();
+    let (id, _) = reg.register(AssetTypeId::of::<Image>(), ["png"], 0);
+    assert_eq!(reg.resolve_untyped(&AssetPath::parse("HERO.PNG")), Some(id));
+    // Registering an upper-cased suffix normalizes to the same canonical form.
+    let mut reg2 = LoaderRegistry::new();
+    let (id2, _) = reg2.register(AssetTypeId::of::<Image>(), [".PNG"], 0);
+    assert_eq!(reg2.resolve_untyped(&AssetPath::parse("a.png")), Some(id2));
+}
+
+#[test]
+fn loader_alias_remaps_to_canonical() {
+    let mut reg = LoaderRegistry::new();
+    let (jpg, _) = reg.register(AssetTypeId::of::<Image>(), ["jpg"], 0);
+    reg.add_alias("jpeg", "jpg");
+    // A `.jpeg` filename resolves to the `jpg` loader via the alias.
+    assert_eq!(
+        reg.resolve_untyped(&AssetPath::parse("photo.jpeg")),
+        Some(jpg)
+    );
+    // The longer alias beats a shorter real suffix.
+    reg.add_alias("JPE", "jpg");
+    assert_eq!(
+        reg.resolve_untyped(&AssetPath::parse("photo.jpe")),
+        Some(jpg)
+    );
+}
+
+#[test]
+fn loader_typed_disambiguation() {
+    let mut reg = LoaderRegistry::new();
+    // Two loaders claim `.asset` but produce different types.
+    let (as_image, _) = reg.register(AssetTypeId::of::<Image>(), ["asset"], 0);
+    let (as_mesh, _) = reg.register(AssetTypeId::of::<Mesh>(), ["asset"], 0);
+    assert_eq!(
+        reg.resolve_for_type(&AssetPath::parse("x.asset"), AssetTypeId::of::<Image>()),
+        Some(as_image)
+    );
+    assert_eq!(
+        reg.resolve_for_type(&AssetPath::parse("x.asset"), AssetTypeId::of::<Mesh>()),
+        Some(as_mesh)
+    );
+    // A type nobody produces resolves to nothing even though the suffix matches.
+    assert_eq!(
+        reg.resolve_for_type(&AssetPath::parse("x.asset"), AssetTypeId::of::<Material>()),
+        None
+    );
+}
+
+#[test]
+fn loader_untyped_priority_and_override() {
+    let mut reg = LoaderRegistry::new();
+    let (_low, _) = reg.register(AssetTypeId::of::<Image>(), ["png"], 0);
+    let (high, conflicts) = reg.register(AssetTypeId::of::<Mesh>(), ["png"], 10);
+    // The second registration conflicts with the first on `png`.
+    assert_eq!(
+        conflicts,
+        vec![SuffixConflict {
+            suffix: "png".into(),
+            existing: _low,
+            incoming: high,
+        }]
+    );
+    // Higher priority wins the untyped resolution.
+    assert_eq!(reg.resolve_untyped(&AssetPath::parse("a.png")), Some(high));
+
+    // Equal priority: the later registration (higher seq) wins the tie.
+    let mut reg2 = LoaderRegistry::new();
+    let (_first, _) = reg2.register(AssetTypeId::of::<Image>(), ["dds"], 5);
+    let (second, _) = reg2.register(AssetTypeId::of::<Mesh>(), ["dds"], 5);
+    assert_eq!(
+        reg2.resolve_untyped(&AssetPath::parse("a.dds")),
+        Some(second)
+    );
+}
+
+#[test]
+fn loader_dotfile_without_stem_does_not_match() {
+    let mut reg = LoaderRegistry::new();
+    reg.register(AssetTypeId::of::<Image>(), ["png"], 0);
+    // A bare dotfile `.png` has no stem and must not resolve.
+    assert_eq!(reg.resolve_untyped(&AssetPath::parse(".png")), None);
+    // But `a.png` (stem `a`) does.
+    assert!(reg.resolve_untyped(&AssetPath::parse("a.png")).is_some());
+}
+
+#[test]
+fn loader_ignores_scheme_and_label() {
+    let mut reg = LoaderRegistry::new();
+    let (id, _) = reg.register(AssetTypeId::of::<Image>(), ["png"], 0);
+    // Scheme and `#label` are identity, not suffix hints — the suffix of the
+    // path segment still resolves.
+    let p = AssetPath::parse("source://textures/hero.png#Lod0");
+    assert_eq!(reg.resolve_untyped(&p), Some(id));
+}
+
+#[test]
+fn loader_registry_bookkeeping() {
+    let mut reg = LoaderRegistry::new();
+    assert!(reg.is_empty());
+    let (id, _) = reg.register(AssetTypeId::of::<Image>(), ["png"], 0);
+    assert_eq!(reg.len(), 1);
+    assert!(!reg.is_empty());
+    assert_eq!(reg.produced_type(id), Some(AssetTypeId::of::<Image>()));
+    // Deeper path segments: directories are ignored, only the filename counts.
+    assert_eq!(
+        reg.resolve_untyped(&AssetPath::parse("a/b/c/hero.png")),
+        Some(id)
+    );
+}

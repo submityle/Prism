@@ -39,8 +39,14 @@
 //!   [`Assets::remove_unused`], [`DependencyGraph`] (topo order + cycle
 //!   detection), and [`LoadState`]. Fully unit-tested, `no_std + alloc`, no
 //!   unsafe.
-//! - **M1 (planned):** `AssetServer`, `AssetLoader` trait, load handle hand-out
-//!   and path→id interning.
+//! - **M1 (kernel recast, done):** three-tier identity ([`StableGuid`]/
+//!   [`AssetTypeId`]), [`SoftHandle`], the [`Asset`] trait with
+//!   `visit_dependencies`, `reserve`/`fulfill`/`fail` with deferred reclaim,
+//!   incremental recursive readiness + invalidation on [`DependencyGraph`],
+//!   [`ErrorRegistry`], and the deterministic [`LoaderRegistry`] selection
+//!   policy (design §9.1). Fully unit-tested, `no_std + alloc`, no unsafe.
+//! - **M2 (planned):** `AssetServer` + `AssetLoader` execution and load
+//!   dedup/path→id interning (needs `std`, lives in `prism_asset_import`).
 //! - **M2 (planned):** async IO backends and the dependency-aware load
 //!   scheduler driving [`DependencyGraph`].
 //! - **M3 (planned):** filesystem watch + hot-reload re-emitting
@@ -62,6 +68,7 @@ mod handle;
 mod hash;
 mod id;
 mod load_state;
+mod loader;
 mod path;
 mod storage;
 mod type_id;
@@ -77,6 +84,7 @@ pub use guid::{normalize_path, StableGuid};
 pub use handle::{Handle, HandleId, SoftHandle, UntypedHandle, WeakHandle};
 pub use id::{AssetId, AssetIndex, UntypedAssetId};
 pub use load_state::{LoadState, RecursiveDependencyLoadState};
+pub use loader::{LoaderId, LoaderRegistry, SuffixConflict};
 pub use path::AssetPath;
 pub use storage::Assets;
 pub use type_id::AssetTypeId;
@@ -85,7 +93,7 @@ pub use type_id::AssetTypeId;
 pub mod prelude {
     pub use crate::{
         Asset, AssetError, AssetErrorId, AssetEvent, AssetId, AssetIndex, AssetPath, AssetTypeId,
-        Assets, DependencyGraph, ErrorRegistry, Handle, LoadState, SoftHandle, StableGuid,
-        UntypedAssetId, UntypedHandle, WeakHandle,
+        Assets, DependencyGraph, ErrorRegistry, Handle, LoadState, LoaderId, LoaderRegistry,
+        SoftHandle, StableGuid, SuffixConflict, UntypedAssetId, UntypedHandle, WeakHandle,
     };
 }
