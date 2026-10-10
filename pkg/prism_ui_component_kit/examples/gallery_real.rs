@@ -29,23 +29,18 @@ use std::path::Path;
 
 use prism_ui::layout::{AvailableSpace, Size};
 use prism_ui::{Element, Ui};
-use prism_ui_component::mount_component;
-use prism_ui_component_kit::basics::{Avatar, AvatarProps, Button, ButtonProps, Tag, TagProps};
-use prism_ui_component_kit::containers::{Card, CardProps};
-use prism_ui_component_kit::feedback::{Alert, AlertProps, ProgressBar, ProgressBarProps};
-use prism_ui_component_kit::inputs::{
-    Checkbox, CheckboxProps, Slider, SliderProps, Toggle, ToggleProps,
-};
-use prism_ui_component_kit::{stylesheet, ButtonVariant, ControlSize, Tone};
+use prism_ui_component_kit::gallery::{self, Showcase};
+use prism_ui_component_kit::stylesheet;
 use prism_ui_render_backend::raster::{rasterize, Framebuffer};
 use prism_ui_render_backend::scene::RetainedScene;
 use prism_ui_style::{Breakpoint, Color, Keyword, Length, StyleProp, StyleValue, Theme, TokenStore};
 use prism_ui_theme::{compile_theme, ThemeDefinition, ThemeMode};
 
 // --- gallery geometry (logical px) -----------------------------------------
-const COLS: usize = 5;
+const COLS: usize = 8;
 const CELL_W: f32 = 220.0;
 const CELL_H: f32 = 120.0;
+const CAPTION_H: f32 = 22.0;
 const GAP: f32 = 16.0;
 const PAD: f32 = 28.0;
 
@@ -77,65 +72,33 @@ fn kit_theme(mode: &ThemeMode) -> (Theme, Color) {
     )
 }
 
-/// The curated set of real component instances to showcase. Each entry is a
-/// fully built [`Element`] subtree produced by a real component's `render`.
-fn instances() -> Vec<Element> {
-    let btn = |variant: ButtonVariant| {
-        mount_component(
-            &Button,
-            ButtonProps::new("Button")
-                .variant(variant)
-                .size(ControlSize::Medium),
-        )
-    };
-    vec![
-        btn(ButtonVariant::Filled),
-        btn(ButtonVariant::Tinted),
-        btn(ButtonVariant::Gray),
-        btn(ButtonVariant::Glass),
-        btn(ButtonVariant::Plain),
-        mount_component(&Tag, TagProps::new("Accent").tone(Tone::Accent)),
-        mount_component(&Tag, TagProps::new("Success").tone(Tone::Success)),
-        mount_component(&Tag, TagProps::new("Danger").tone(Tone::Danger)),
-        mount_component(&Avatar, AvatarProps::new().initials("AB")),
-        mount_component(&Toggle, ToggleProps::new().on(true)),
-        mount_component(&Toggle, ToggleProps::new().on(false)),
-        mount_component(&Checkbox, CheckboxProps::new().checked(true).label("Checked")),
-        mount_component(&Slider, SliderProps::new().value(0.35)),
-        mount_component(&Slider, SliderProps::new().value(0.7)),
-        mount_component(&ProgressBar, ProgressBarProps::new(0.6)),
-        mount_component(
-            &ProgressBar,
-            ProgressBarProps::new(0.9).tone(Tone::Success),
-        ),
-        mount_component(
-            &Alert,
-            AlertProps::new("Saved successfully")
-                .title("Success")
-                .tone(Tone::Success),
-        ),
-        mount_component(
-            &Alert,
-            AlertProps::new("Check your input").title("Warning").tone(Tone::Warning),
-        ),
-        mount_component(
-            &Card,
-            CardProps::new()
-                .header(Element::box_().child(Element::text("Card")))
-                .child(Element::text("Body content")),
-        ),
-        mount_component(
-            &Card,
-            CardProps::new()
-                .glass(true)
-                .child(Element::text("Glass card")),
-        ),
-    ]
+/// Every kit control as a real, named instance, sourced from the kit's
+/// dev-only `gallery` module so the sheet always reflects the full library.
+fn instances() -> Vec<Showcase> {
+    gallery::all()
 }
 
 /// Wraps a real instance in a fixed-size, centered tile so the sheet reads as a
 /// grid regardless of each component's intrinsic size.
-fn tile(instance: Element) -> Element {
+fn tile(entry: Showcase) -> Element {
+    let caption = Element::box_()
+        .style(StyleProp::Height, len(CAPTION_H))
+        .style(StyleProp::Display, StyleValue::Keyword(Keyword::Flex))
+        .style(StyleProp::AlignItems, StyleValue::Keyword(Keyword::Center))
+        .style(StyleProp::JustifyContent, StyleValue::Keyword(Keyword::Center))
+        .child(Element::text(entry.name).style(StyleProp::FontSize, len(11.0)));
+    let body = Element::box_()
+        .style(StyleProp::Width, len(CELL_W))
+        .style(StyleProp::Height, len(CELL_H - CAPTION_H))
+        .style(StyleProp::Display, StyleValue::Keyword(Keyword::Flex))
+        .style(StyleProp::FlexDirection, StyleValue::Keyword(Keyword::Column))
+        .style(StyleProp::AlignItems, StyleValue::Keyword(Keyword::Center))
+        .style(StyleProp::JustifyContent, StyleValue::Keyword(Keyword::Center))
+        .style(StyleProp::PaddingTop, len(10.0))
+        .style(StyleProp::PaddingBottom, len(6.0))
+        .style(StyleProp::PaddingLeft, len(10.0))
+        .style(StyleProp::PaddingRight, len(10.0))
+        .child(entry.element);
     Element::box_()
         .style(StyleProp::Width, len(CELL_W))
         .style(StyleProp::Height, len(CELL_H))
@@ -143,17 +106,12 @@ fn tile(instance: Element) -> Element {
         .style(StyleProp::MinHeight, len(CELL_H))
         .style(StyleProp::Display, StyleValue::Keyword(Keyword::Flex))
         .style(StyleProp::FlexDirection, StyleValue::Keyword(Keyword::Column))
-        .style(StyleProp::AlignItems, StyleValue::Keyword(Keyword::Center))
-        .style(StyleProp::JustifyContent, StyleValue::Keyword(Keyword::Center))
-        .style(StyleProp::PaddingTop, len(12.0))
-        .style(StyleProp::PaddingBottom, len(12.0))
-        .style(StyleProp::PaddingLeft, len(12.0))
-        .style(StyleProp::PaddingRight, len(12.0))
-        .child(instance)
+        .child(body)
+        .child(caption)
 }
 
 /// Builds the gallery element tree: a padded column of fixed rows of tiles.
-fn gallery(instances: Vec<Element>, background: Color, width: f32, height: f32) -> Element {
+fn gallery(instances: Vec<Showcase>, background: Color, width: f32, height: f32) -> Element {
     let mut root = Element::box_()
         .style(StyleProp::Width, len(width))
         .style(StyleProp::Height, len(height))
@@ -175,7 +133,7 @@ fn gallery(instances: Vec<Element>, background: Color, width: f32, height: f32) 
             .style(StyleProp::Height, len(CELL_H));
         for _ in 0..COLS {
             match iter.next() {
-                Some(instance) => row = row.child(tile(instance)),
+                Some(entry) => row = row.child(tile(entry)),
                 None => break,
             }
         }

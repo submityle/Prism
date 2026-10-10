@@ -57,5 +57,9 @@ pub mod node_editor;
 pub mod pickers;
 pub mod utils;
 
+// Dev-only showcase: mounts every control for the real-instance gallery.
+#[cfg(feature = "gallery")]
+pub mod gallery;
+
 pub use kit::{ButtonVariant, ControlSize, Tone};
 pub use preset::{stylesheet, StyleSheet};

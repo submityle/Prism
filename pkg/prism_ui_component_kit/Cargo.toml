@@ -19,6 +19,8 @@ prism_ui_render_backend = { path = "../prism_ui_render_backend" }
 
 [features]
 default = ["std"]
+# Dev-only: mounts every control for the real-instance gallery example.
+gallery = []
 std = [
   "prism_ui/std",
   "prism_ui_component/std",
@@ -29,3 +31,7 @@ std = [
 
 [lints]
 workspace = true
+
+[[example]]
+name = "gallery_real"
+required-features = ["gallery"]
