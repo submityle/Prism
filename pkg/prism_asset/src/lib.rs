@@ -73,6 +73,8 @@ mod loader;
 mod loader_exec;
 mod path;
 #[cfg(feature = "std")]
+mod server;
+#[cfg(feature = "std")]
 mod source;
 mod storage;
 mod stores;
@@ -86,7 +88,7 @@ pub use dependency::{DependencyError, DependencyGraph};
 pub use error::{AssetError, AssetErrorId, ErrorRegistry};
 pub use event::AssetEvent;
 pub use guid::{normalize_path, StableGuid};
-pub use handle::{Handle, HandleId, SoftHandle, UntypedHandle, WeakHandle};
+pub use handle::{Handle, HandleId, SoftHandle, UntypedHandle, UntypedWeakHandle, WeakHandle};
 pub use id::{AssetId, AssetIndex, UntypedAssetId};
 pub use load_state::{LoadState, RecursiveDependencyLoadState};
 pub use loader::{LoaderId, LoaderRegistry, SuffixConflict};
@@ -97,6 +99,8 @@ pub use loader_exec::{
 };
 pub use path::AssetPath;
 #[cfg(feature = "std")]
+pub use server::AssetServer;
+#[cfg(feature = "std")]
 pub use source::{AssetMeta, AssetReader, AssetSources, FsSource, MemSource, ReadError};
 pub use storage::Assets;
 pub use stores::{AssetStores, ErasedAssetStore, StoreError};
@@ -104,10 +108,12 @@ pub use type_id::AssetTypeId;
 
 /// Convenient re-exports for downstream crates.
 pub mod prelude {
+    #[cfg(feature = "std")]
+    pub use crate::AssetServer;
     pub use crate::{
         Asset, AssetError, AssetErrorId, AssetEvent, AssetId, AssetIndex, AssetPath, AssetStores,
         AssetTypeId, Assets, DependencyGraph, ErrorRegistry, Handle, LoadState, LoaderId,
         LoaderRegistry, SoftHandle, StableGuid, SuffixConflict, UntypedAssetId, UntypedHandle,
-        WeakHandle,
+        UntypedWeakHandle, WeakHandle,
     };
 }

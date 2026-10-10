@@ -31,8 +31,9 @@
 #![cfg(feature = "std")]
 
 use crate::path::AssetPath;
+use crate::stores::ErasedAssetStore;
 use crate::type_id::AssetTypeId;
-use crate::{Asset, LoaderId, LoaderRegistry, SuffixConflict};
+use crate::{Asset, Assets, LoaderId, LoaderRegistry, SuffixConflict};
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -120,6 +121,15 @@ pub struct ErasedLoadedAsset {
     /// A stable, loader-chosen name for this value when it is a labeled
     /// sub-asset (the `#label` of its identity). Empty for the primary asset.
     pub label: String,
+    /// A constructor for an empty arena of this asset's concrete type.
+    ///
+    /// A labeled sub-asset may be of a type that has no standalone loader (a
+    /// `Mesh` extracted from a glTF scene, a mip level of a texture), so its
+    /// [`Assets`] arena may not have been registered up front. The erased layer
+    /// captures the concrete type here as a non-capturing constructor so the
+    /// server can lazily register the arena before routing the value into it,
+    /// without the server ever needing to name the type (design §7/§9.2).
+    pub make_store: fn() -> Box<dyn ErasedAssetStore>,
 }
 
 impl fmt::Debug for ErasedLoadedAsset {
@@ -194,6 +204,7 @@ impl<'a> LoadContext<'a> {
             value: Box::new(value),
             dependencies: Vec::new(),
             label: label.into(),
+            make_store: || -> Box<dyn ErasedAssetStore> { Box::new(Assets::<B>::new()) },
         });
     }
 
@@ -209,6 +220,7 @@ impl<'a> LoadContext<'a> {
             value: Box::new(value),
             dependencies,
             label: label.into(),
+            make_store: || -> Box<dyn ErasedAssetStore> { Box::new(Assets::<B>::new()) },
         });
     }
 
@@ -293,6 +305,7 @@ impl<L: AssetLoader> ErasedAssetLoader for L {
             value: Box::new(value),
             dependencies,
             label: String::new(),
+            make_store: || -> Box<dyn ErasedAssetStore> { Box::new(Assets::<L::Asset>::new()) },
         };
         Ok(FullLoadOutput { primary, labeled })
     }

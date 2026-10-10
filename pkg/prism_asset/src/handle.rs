@@ -289,6 +289,56 @@ impl UntypedHandle {
     pub fn typed_unchecked<A: ?Sized>(&self) -> Handle<A> {
         Handle::from_arc(Arc::clone(&self.inner))
     }
+
+    /// Downgrades to a type-erased [`UntypedWeakHandle`] that observes the slot
+    /// without keeping it alive.
+    ///
+    /// The load pipeline interns `path -> UntypedWeakHandle` so an in-flight or
+    /// resident load can be deduplicated by path without the intern table
+    /// itself pinning assets in memory: once every strong handle drops, the
+    /// weak entry fails to upgrade and the arena reclaims the slot (design
+    /// §6.2, §9.2 dedup).
+    #[must_use]
+    pub fn downgrade(&self) -> UntypedWeakHandle {
+        UntypedWeakHandle {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+}
+
+/// A type-erased, non-owning handle that does not keep its asset alive.
+///
+/// The untyped counterpart to [`WeakHandle`]: it stores a `Weak<HandleInner>`
+/// and can be upgraded back to a strong [`UntypedHandle`] only while at least
+/// one strong handle still exists. The [`AssetServer`](crate::AssetServer) uses
+/// it as the value type of its `path -> handle` intern table so deduplication
+/// does not leak assets (design §9.2).
+#[derive(Clone)]
+pub struct UntypedWeakHandle {
+    inner: Weak<HandleInner>,
+}
+
+impl UntypedWeakHandle {
+    /// Attempts to upgrade to a strong [`UntypedHandle`], succeeding only while
+    /// at least one strong handle still exists.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<UntypedHandle> {
+        self.inner.upgrade().map(|inner| UntypedHandle { inner })
+    }
+
+    /// The number of live strong handles (0 once the asset is reclaimable).
+    #[must_use]
+    pub fn strong_count(&self) -> usize {
+        self.inner.strong_count()
+    }
+}
+
+impl fmt::Debug for UntypedWeakHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UntypedWeakHandle")
+            .field("strong_count", &self.strong_count())
+            .finish()
+    }
 }
 
 impl PartialEq for UntypedHandle {

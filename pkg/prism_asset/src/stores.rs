@@ -226,6 +226,31 @@ impl AssetStores {
         true
     }
 
+    /// Registers an arena for a runtime `type_id`, constructing it through the
+    /// type-erased `make` factory (as captured by the loader for a labeled
+    /// sub-asset). Returns `true` if newly created, `false` if an arena for
+    /// `type_id` already existed (left intact).
+    ///
+    /// This is the untyped counterpart to [`AssetStores::register`]: a labeled
+    /// sub-asset's concrete type is not nameable by the server, so the loader
+    /// hands over a `fn() -> Box<dyn ErasedAssetStore>` the registry can call to
+    /// mint the arena before routing the decoded value into it (design §9.2).
+    /// The caller is responsible for passing a factory that builds an arena of
+    /// exactly `type_id`; [`AssetStores::insert_erased`] still type-checks the
+    /// value against the arena, so a wrong factory surfaces as
+    /// [`StoreError::TypeMismatch`] rather than silent corruption.
+    pub fn register_erased(
+        &mut self,
+        type_id: AssetTypeId,
+        make: fn() -> Box<dyn ErasedAssetStore>,
+    ) -> bool {
+        if self.stores.contains_key(&type_id) {
+            return false;
+        }
+        self.stores.insert(type_id, make());
+        true
+    }
+
     /// Whether an arena is registered for asset type `A`.
     #[must_use]
     pub fn contains_type_of<A: Asset>(&self) -> bool {
@@ -298,6 +323,24 @@ impl AssetStores {
             .get_mut(&AssetTypeId::of::<A>())
             .expect("arena registered above")
             .reserve_erased()
+    }
+
+    /// Reserves an ahead-of-time slot in the arena for the runtime `type_id`,
+    /// returning a strong [`UntypedHandle`], or `None` if no arena is
+    /// registered for that type.
+    ///
+    /// This is the untyped counterpart to [`AssetStores::reserve`]: the load
+    /// pipeline resolves a path to its produced [`AssetTypeId`] via loader
+    /// selection and must reserve a slot in that arena *before* reading or
+    /// decoding bytes, so a dependency that cycles back to the same path finds
+    /// an in-flight handle instead of recursing forever (design §9.2). Unlike
+    /// the typed `reserve`, it does **not** auto-register: an untyped load can
+    /// only target a type whose loader (and therefore arena) was registered up
+    /// front, so a missing arena is a real routing error the caller surfaces
+    /// rather than silently papering over.
+    #[must_use]
+    pub fn reserve_by_type(&mut self, type_id: AssetTypeId) -> Option<UntypedHandle> {
+        self.stores.get_mut(&type_id).map(|s| s.reserve_erased())
     }
 
     /// Inserts a ready, type-erased value, routing it to its arena by

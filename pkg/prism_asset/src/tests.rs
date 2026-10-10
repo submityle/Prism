@@ -1632,3 +1632,229 @@ mod loader_exec {
         assert_eq!(loaded.labeled_assets[0].label, "mesh0");
     }
 }
+
+// --- std AssetServer: synchronous load pipeline (§9.2) ---
+#[cfg(feature = "std")]
+mod server {
+    use crate::{
+        Asset, AssetLoader, AssetPath, AssetServer, AssetTypeId, LoadContext, LoadError, LoadState,
+        MemSource, SoftHandle,
+    };
+    use alloc::string::ToString;
+    use alloc::sync::Arc;
+
+    /// Primary asset: a mesh produced from a `scene` or `cyc` source.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Mesh {
+        verts: u32,
+    }
+    impl Asset for Mesh {
+        const TYPE_NAME: &'static str = "prism_asset::tests::server::Mesh";
+    }
+
+    /// A leaf dependency asset produced from an `img` source.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Image;
+    impl Asset for Image {
+        const TYPE_NAME: &'static str = "prism_asset::tests::server::Image";
+    }
+
+    /// A labeled sub-asset type with no standalone loader, to exercise lazy
+    /// arena registration through the erased `make_store` factory.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Chunk {
+        tag: u8,
+    }
+    impl Asset for Chunk {
+        const TYPE_NAME: &'static str = "prism_asset::tests::server::Chunk";
+    }
+
+    /// Produces a [`Mesh`], declaring one typed dependency on `tex.img` and
+    /// emitting one labeled [`Chunk`] sub-asset. Empty input is malformed.
+    struct SceneLoader;
+    impl AssetLoader for SceneLoader {
+        type Asset = Mesh;
+        fn extensions(&self) -> &'static [&'static str] {
+            &["scene"]
+        }
+        fn load(&self, bytes: &[u8], ctx: &mut LoadContext) -> Result<Mesh, LoadError> {
+            if bytes.is_empty() {
+                return Err(LoadError::Malformed("empty scene".to_string()));
+            }
+            ctx.add_typed_dependency(AssetPath::parse("tex.img"), AssetTypeId::of::<Image>());
+            ctx.add_labeled_asset("chunk0", Chunk { tag: bytes[0] });
+            Ok(Mesh {
+                verts: bytes.len() as u32,
+            })
+        }
+    }
+
+    /// Produces an [`Image`] leaf with no dependencies.
+    struct ImageLoader;
+    impl AssetLoader for ImageLoader {
+        type Asset = Image;
+        fn extensions(&self) -> &'static [&'static str] {
+            &["img"]
+        }
+        fn load(&self, _bytes: &[u8], _ctx: &mut LoadContext) -> Result<Image, LoadError> {
+            Ok(Image)
+        }
+    }
+
+    /// Produces a [`Mesh`], declaring a typed dependency on the `Mesh` path
+    /// encoded in its own bytes, so two files can reference each other and form
+    /// a cycle the server must reject without recursing forever.
+    struct CycleLoader;
+    impl AssetLoader for CycleLoader {
+        type Asset = Mesh;
+        fn extensions(&self) -> &'static [&'static str] {
+            &["cyc"]
+        }
+        fn load(&self, bytes: &[u8], ctx: &mut LoadContext) -> Result<Mesh, LoadError> {
+            let dep = core::str::from_utf8(bytes)
+                .map_err(|_| LoadError::Malformed("non-utf8 cycle path".to_string()))?;
+            ctx.add_typed_dependency(AssetPath::parse(dep), AssetTypeId::of::<Mesh>());
+            Ok(Mesh { verts: 0 })
+        }
+    }
+
+    fn source() -> MemSource {
+        let mut m = MemSource::new();
+        m.insert("hero.scene", b"ABCD".to_vec());
+        m.insert("tex.img", b"img".to_vec());
+        m.insert("a.cyc", b"b.cyc".to_vec());
+        m.insert("b.cyc", b"a.cyc".to_vec());
+        m
+    }
+
+    fn server() -> AssetServer {
+        let server = AssetServer::new();
+        server.register_loader(SceneLoader);
+        server.register_loader(ImageLoader);
+        server.register_loader(CycleLoader);
+        server.mount("mem", Arc::new(source()), 0);
+        server
+    }
+
+    #[test]
+    fn load_reaches_loaded_with_decoded_value() {
+        let server = server();
+        let mesh = server.load::<Mesh>("hero.scene");
+        assert_eq!(server.load_state(mesh.untyped_id()), LoadState::Loaded);
+        let verts = server
+            .with_asset::<Mesh, _>(mesh.id(), |m| m.verts)
+            .expect("mesh resident");
+        assert_eq!(verts, 4);
+    }
+
+    #[test]
+    fn repeated_load_dedups_to_same_slot() {
+        let server = server();
+        let a = server.load::<Mesh>("hero.scene");
+        let b = server.load::<Mesh>("hero.scene");
+        assert_eq!(a.id(), b.id());
+        // Primary mesh + image dependency + labeled chunk = three slots total.
+        assert_eq!(server.total_assets(), 3);
+    }
+
+    #[test]
+    fn dependency_is_wired_and_recursively_loaded() {
+        let server = server();
+        let mesh = server.load::<Mesh>("hero.scene");
+        assert!(server.recursive_state(mesh.untyped_id()).is_loaded());
+        // The dependency is resident and deduplicates on direct load.
+        let img = server.load::<Image>("tex.img");
+        assert_eq!(server.load_state(img.untyped_id()), LoadState::Loaded);
+    }
+
+    #[test]
+    fn labeled_subasset_interned_under_label() {
+        let server = server();
+        let _mesh = server.load::<Mesh>("hero.scene");
+        let chunk = server
+            .load_untyped("hero.scene#chunk0")
+            .expect("sub-asset interned under its label");
+        assert_eq!(server.load_state(chunk.id()), LoadState::Loaded);
+        assert!(chunk.id().is::<Chunk>());
+    }
+
+    #[test]
+    fn missing_file_fails_gracefully() {
+        let server = server();
+        let mesh = server.load::<Mesh>("ghost.scene");
+        assert!(matches!(
+            server.load_state(mesh.untyped_id()),
+            LoadState::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn cyclic_dependency_terminates_and_is_rejected() {
+        let server = server();
+        // a.cyc -> b.cyc -> a.cyc. Must not hang or overflow the stack.
+        let a = server.load::<Mesh>("a.cyc");
+        // Both ends are resident (the cycle edge is dropped, not the asset).
+        assert_eq!(server.load_state(a.untyped_id()), LoadState::Loaded);
+        let b = server.load_untyped("b.cyc").expect("b.cyc interned");
+        assert_eq!(server.load_state(b.id()), LoadState::Loaded);
+    }
+
+    #[test]
+    fn reload_redecodes_in_place() {
+        let server = server();
+        let mesh = server.load::<Mesh>("hero.scene");
+        let before = mesh.id();
+        let handle = server.reload("hero.scene").expect("resident path reloads");
+        assert_eq!(handle.id(), before.untyped());
+        assert_eq!(server.load_state(mesh.untyped_id()), LoadState::Loaded);
+    }
+
+    #[test]
+    fn load_soft_resolves_via_catalog() {
+        let server = server();
+        // Catalog is populated by loading the path once.
+        let _mesh = server.load::<Mesh>("hero.scene");
+        let soft = SoftHandle::<Mesh>::from_path("hero.scene");
+        let resolved = server.load_soft::<Mesh>(&soft);
+        assert_eq!(server.load_state(resolved.untyped_id()), LoadState::Loaded);
+    }
+
+    #[test]
+    fn load_soft_unknown_guid_fails() {
+        let server = server();
+        let soft = SoftHandle::<Mesh>::from_path("never-loaded.scene");
+        let resolved = server.load_soft::<Mesh>(&soft);
+        assert!(matches!(
+            server.load_state(resolved.untyped_id()),
+            LoadState::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn load_soft_null_fails() {
+        let server = server();
+        let soft = SoftHandle::<Mesh>::null(AssetTypeId::of::<Mesh>());
+        let resolved = server.load_soft::<Mesh>(&soft);
+        assert!(matches!(
+            server.load_state(resolved.untyped_id()),
+            LoadState::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn collect_releases_reclaims_whole_closure() {
+        let server = server();
+        let mesh = server.load::<Mesh>("hero.scene");
+        assert_eq!(server.total_assets(), 3);
+        drop(mesh);
+        let reclaimed = server.collect_releases();
+        assert_eq!(reclaimed, 3);
+        assert_eq!(server.total_assets(), 0);
+    }
+
+    #[test]
+    fn unresolved_untyped_load_returns_none() {
+        let server = server();
+        assert!(server.load_untyped("mystery.unknown").is_none());
+    }
+}

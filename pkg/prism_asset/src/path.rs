@@ -157,3 +157,9 @@ impl From<String> for AssetPath {
         Self::parse(&text)
     }
 }
+
+impl From<&AssetPath> for AssetPath {
+    fn from(path: &AssetPath) -> Self {
+        path.clone()
+    }
+}
