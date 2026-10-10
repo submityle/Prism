@@ -1,11 +1,14 @@
-//! [`TimePicker`] — three scrollable hour/minute/second columns.
+//! [`TimePicker`] — three hour/minute/second wheel columns.
 //!
 //! A time picker renders a `pk-time-picker` row of `pk-time-picker__column`s,
-//! each a vertical list of selectable `pk-time-picker__cell`s. The chosen value
-//! in a column adds `pk-time-picker__cell--selected`. The seconds column is
-//! optional. Hours run `0..24`, minutes and seconds `0..60`.
+//! each a short vertical *window* of `pk-time-picker__cell`s centred on the
+//! chosen value and wrapping like a physical drum. Only [`WHEEL_RADIUS`] values
+//! are shown on each side of the centre, so a column never overflows its cell
+//! regardless of range (hours wrap `0..24`, minutes/seconds `0..60`). The
+//! centre cell carries `pk-time-picker__cell--selected`; its neighbours fade
+//! with `--near` / `--far`. The seconds column is optional.
 
-use alloc::string::ToString;
+use alloc::format;
 
 use prism_ui::Element;
 use prism_ui_a11y::Role;
@@ -63,16 +66,32 @@ impl TimePickerProps {
     }
 }
 
-/// Builds one column of `count` selectable cells, highlighting `selected`.
+/// How many values are shown on each side of the selection in a wheel column.
+///
+/// A column therefore renders `2 * WHEEL_RADIUS + 1` cells — a compact window
+/// that fits the control without relying on overflow clipping.
+pub const WHEEL_RADIUS: i32 = 2;
+
+/// Builds one wheel column: a short window of `count` values centred on
+/// `selected`, wrapping modulo `count` like a physical drum. The centre cell is
+/// marked selected; cells one step away fade (`--near`) and further ones fade
+/// more (`--far`), mirroring the curved iOS picker. Values are zero-padded to
+/// two digits (e.g. `09`, `05`).
 fn column(count: u8, selected: Option<u8>) -> Element {
+    let count_i = i32::from(count);
+    let center = i32::from(selected.unwrap_or(0));
     let mut col = Element::box_().class("pk-time-picker__column");
-    for value in 0..count {
-        let mut cell = Element::box_()
+    for offset in -WHEEL_RADIUS..=WHEEL_RADIUS {
+        let value = (center + offset).rem_euclid(count_i);
+        let modifier = match offset.abs() {
+            0 => "pk-time-picker__cell--selected",
+            1 => "pk-time-picker__cell--near",
+            _ => "pk-time-picker__cell--far",
+        };
+        let cell = Element::box_()
             .class("pk-time-picker__cell")
-            .child(Element::text(value.to_string()));
-        if selected == Some(value) {
-            cell = cell.class("pk-time-picker__cell--selected");
-        }
+            .class(modifier)
+            .child(Element::text(format!("{value:02}")));
         col = col.child(cell);
     }
     col
@@ -144,11 +163,26 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::Color, tok("color.label")),
     );
 
-    // Selected: solid accent fill with a white numeral.
+    // Selected (centre of the drum): a neutral selection band with a full
+    // label-coloured, semibold numeral, matching the iOS wheel picker where the
+    // centre row sits behind a tinted lozenge rather than an accent fill.
     sheet.insert(
         Class::new("pk-time-picker__cell--selected")
-            .with(StyleProp::BackgroundColor, tok("color.tint"))
-            .with(StyleProp::Color, StyleValue::rgba8(255, 255, 255, 255)),
+            .with(StyleProp::BackgroundColor, tok("color.fill.secondary"))
+            .with(StyleProp::Color, tok("color.label"))
+            .with(StyleProp::FontWeight, StyleValue::number(600.0)),
+    );
+
+    // Near neighbours (one step from centre): dimmed to the secondary label so
+    // the drum reads as receding away from the selection.
+    sheet.insert(
+        Class::new("pk-time-picker__cell--near").with(StyleProp::Color, tok("color.label.secondary")),
+    );
+
+    // Far neighbours (edges of the window): dimmed further to the tertiary
+    // label for the strongest sense of curvature.
+    sheet.insert(
+        Class::new("pk-time-picker__cell--far").with(StyleProp::Color, tok("color.label.tertiary")),
     );
 }
 
@@ -156,14 +190,17 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
 mod tests {
     use super::*;
 
+    /// Each wheel column renders a fixed window of `2 * WHEEL_RADIUS + 1` cells.
+    const WINDOW: usize = (2 * WHEEL_RADIUS + 1) as usize;
+
     #[test]
     fn two_columns_by_default() {
         let el = TimePicker.render(&TimePickerProps::new());
         assert_eq!(el.class_names(), ["pk-time-picker"]);
         let cols = el.child_elements();
         assert_eq!(cols.len(), 2);
-        assert_eq!(cols[0].child_elements().len(), 24); // hours
-        assert_eq!(cols[1].child_elements().len(), 60); // minutes
+        assert_eq!(cols[0].child_elements().len(), WINDOW); // hours
+        assert_eq!(cols[1].child_elements().len(), WINDOW); // minutes
     }
 
     #[test]
@@ -171,7 +208,7 @@ mod tests {
         let el = TimePicker.render(&TimePickerProps::new().show_seconds(true));
         let cols = el.child_elements();
         assert_eq!(cols.len(), 3);
-        assert_eq!(cols[2].child_elements().len(), 60);
+        assert_eq!(cols[2].child_elements().len(), WINDOW);
     }
 
     #[test]
@@ -190,7 +227,21 @@ mod tests {
             .filter(|c| c.class_names().iter().any(|n| n == "pk-time-picker__cell--selected"))
             .collect();
         assert_eq!(marked.len(), 1);
-        assert_eq!(marked[0].child_elements()[0].text_content(), Some("9"));
+        // The centre cell is the selection, zero-padded to two digits.
+        assert_eq!(marked[0].child_elements()[0].text_content(), Some("09"));
+    }
+
+    #[test]
+    fn window_wraps_around_the_bottom() {
+        // Selecting hour 0 wraps the leading neighbours to 22, 23.
+        let el = TimePicker.render(&TimePickerProps::new().hour(0));
+        let hours = &el.child_elements()[0];
+        let values: Vec<_> = hours
+            .child_elements()
+            .iter()
+            .map(|c| c.child_elements()[0].text_content().unwrap())
+            .collect();
+        assert_eq!(values, ["22", "23", "00", "01", "02"]);
     }
 
     #[test]
