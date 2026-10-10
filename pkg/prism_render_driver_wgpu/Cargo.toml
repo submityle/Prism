@@ -1,0 +1,29 @@
+[package]
+name = "prism_render_driver_wgpu"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "wgpu 30 backend for Prism's render hardware interface (prism_render_driver). Implements RenderDevice/RenderQueue/CommandEncoder against wgpu: instance/adapter/device/queue/surface bring-up, resource creation (buffers/textures/views/samplers/shaders/bind-group layouts+groups/pipeline layouts/render+compute pipelines) behind generational ids, and translation of the backend-agnostic CommandBuffer (render/compute passes, draws, dispatches, indirect) into wgpu command encoders. Threads through the driver's slotmap/content caches/state tracker under locks for Send+Sync. Standard WebGPU semantics with manual-barrier/multi-queue escape hatches degraded to wgpu's automatic tracking in phase 1."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+futures-lite = "2"
+raw-window-handle = "0.6"
+
+[dev-dependencies]
+prism_render_driver_wgpu = { path = "." }
+
+[features]
+default = []
+# Forward extra wgpu backends when building on platforms that support them.
+vulkan = ["wgpu/vulkan"]
+dx12 = ["wgpu/dx12"]
+gles = ["wgpu/gles"]
+# Surface/window integration (pulls raw-window-handle paths in wgpu).
+surface = []
+
+[lints]
+workspace = true
