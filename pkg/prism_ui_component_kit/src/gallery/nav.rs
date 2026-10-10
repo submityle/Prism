@@ -11,13 +11,27 @@ use crate::nav::{
     BreadcrumbItem, BreadcrumbProps, Drawer, DrawerProps, DrawerSide, Menu, MenuEntry, MenuProps,
     NavBar, NavBarProps, Pagination, PaginationProps, SegmentedControl, SegmentedControlProps,
     Sidebar, SidebarItem, SidebarProps, StatusBar, StatusBarProps, StepItem, Steps, StepsProps,
-    TabBar, TabBarItem, TabBarProps, Toolbar, ToolbarProps,
+    EditMenu, EditMenuItem, EditMenuProps, TabBar, TabBarItem, TabBarProps, Toolbar, ToolbarProps,
 };
 
 /// Real, named instances of every `nav` control.
 #[must_use]
 pub fn instances() -> Vec<Showcase> {
     alloc::vec![
+        Showcase::new(
+            "EditMenu / Selection",
+            mount_component(
+                &EditMenu,
+                EditMenuProps::new()
+                    .items([
+                        EditMenuItem::new("Cut"),
+                        EditMenuItem::new("Copy"),
+                        EditMenuItem::new("Paste"),
+                        EditMenuItem::new("Delete").destructive(true),
+                    ])
+                    .overflow(true),
+            ),
+        ),
         Showcase::new(
             "NavBar / Title",
             mount_component(

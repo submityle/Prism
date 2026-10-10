@@ -15,6 +15,7 @@ use crate::preset::StyleSheet;
 
 pub mod breadcrumb;
 pub mod drawer;
+pub mod edit_menu;
 pub mod menu;
 pub mod nav_bar;
 pub mod pagination;
@@ -30,6 +31,7 @@ pub mod status_bar;
 
 pub use breadcrumb::{Breadcrumb, BreadcrumbItem, BreadcrumbProps};
 pub use drawer::{Drawer, DrawerProps, DrawerSide};
+pub use edit_menu::{EditMenu, EditMenuItem, EditMenuProps};
 pub use menu::{Menu, MenuEntry, MenuProps};
 pub use nav_bar::{NavBar, NavBarProps};
 pub use pagination::{Pagination, PaginationProps};
@@ -51,6 +53,7 @@ pub fn register_styles(sheet: &mut StyleSheet) {
     breadcrumb::register_styles(sheet);
     pagination::register_styles(sheet);
     drawer::register_styles(sheet);
+    edit_menu::register_styles(sheet);
     steps::register_styles(sheet);
     menu::register_styles(sheet);
     segmented::register_styles(sheet);
