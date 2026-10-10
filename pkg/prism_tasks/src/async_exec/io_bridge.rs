@@ -24,11 +24,14 @@
 //! ## Back-pressure
 //! macOS POSIX AIO caps the number of simultaneously in-flight requests
 //! (`AIO_MAX`), and a batched `lio_listio` can accept an arbitrary subset of a
-//! batch (the accepted set is not guaranteed to be a prefix). To keep the
-//! correlation unambiguous the reactor submits **one op at a time**: a submit
-//! that reports zero accepted is treated as back-pressure and retried after the
-//! next completion is reaped. This trades a little batching for a simple,
-//! correct accounting of which request is in flight.
+//! batch (the accepted set is not guaranteed to be a prefix). The reactor
+//! submits the maximal front run of same-opcode requests in a single
+//! [`AioQueue::submit`] / [`AioQueue::submit_write`] call, then uses the
+//! returned rejected set (`SubmitOutcome::rejected`, correlated by `user_data`)
+//! to separate accepted ops — moved into the in-flight map — from rejected
+//! ones, which are requeued at the front and retried after the next completion
+//! is reaped. This delivers true batch submission while still accounting for
+//! exactly which request is in flight, without cancelling any already accepted.
 //!
 //! ## Honest platform scope
 //! This bridge is only as capable as [`AioQueue`]: it has a real backend solely
@@ -53,7 +56,7 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 use core::time::Duration;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::fd::RawFd;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Mutex;
@@ -443,8 +446,9 @@ impl Future for AioWriteFuture {
     }
 }
 
-/// The reactor thread's body: own the queue, submit pending reads one at a time,
-/// reap completions, and shut down cleanly when the channel disconnects.
+/// The reactor thread's body: own the queue, batch-submit same-opcode runs of
+/// pending requests (requeuing any the kernel rejects), reap completions, and
+/// shut down cleanly when the channel disconnects.
 fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
     let mut inflight: HashMap<u64, Arc<IoSlot>> = HashMap::new();
     let mut pending: VecDeque<Submission> = VecDeque::new();
@@ -464,73 +468,107 @@ fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
             }
         }
 
-        // 2. Submit queued requests one at a time, honoring back-pressure.
-        while let Some(sub) = pending.front() {
-            // The slot buffer has a stable heap address; capture its pointer
-            // under the lock, then submit without holding it.
-            let ptr = {
-                let mut inner = sub.slot.inner.lock().unwrap();
-                inner
-                    .buf
-                    .as_mut()
-                    .expect("submission buffer present before submit")
-                    .as_mut_ptr()
-            };
-            // SAFETY (both arms): `ptr` points into the slot's `Box<[u8]>`,
-            // which stays allocated (and at a stable address) because the
-            // reactor holds an `Arc<IoSlot>` in `inflight` until the completion
-            // is reaped; the caller's contract keeps `fd` open for the same
-            // window. For a write the source bytes are owned by the slot and are
-            // never mutated while in flight.
-            let accepted = match sub.kind {
-                OpKind::Read => {
-                    let op = ReadOp {
+        // 2. Submit queued requests, batching the maximal front run of the
+        //    same opcode into one `lio_listio`. The platform reports which ops
+        //    it rejected (by `user_data`); accepted ops move into `inflight`,
+        //    rejected ones are requeued at the front and retried after a reap.
+        while let Some(front) = pending.front() {
+            let kind = front.kind;
+            // Length of the maximal front run sharing this opcode (reads and
+            // writes use different `AioQueue` entry points, so a batch is
+            // single-opcode).
+            let batch_len = pending.iter().take_while(|s| s.kind == kind).count();
+
+            // Build the op batch, capturing each slot's stable buffer pointer
+            // under a brief per-slot lock (released before the submit syscall).
+            let mut read_ops: Vec<ReadOp> = Vec::new();
+            let mut write_ops: Vec<WriteOp> = Vec::new();
+            for sub in pending.iter().take(batch_len) {
+                let ptr = {
+                    let mut inner = sub.slot.inner.lock().unwrap();
+                    inner
+                        .buf
+                        .as_mut()
+                        .expect("submission buffer present before submit")
+                        .as_mut_ptr()
+                };
+                match kind {
+                    OpKind::Read => read_ops.push(ReadOp {
                         fd: sub.fd,
                         offset: sub.offset,
                         buf: ptr,
                         len: sub.len,
                         user_data: sub.user_data,
                         priority: sub.priority,
-                    };
-                    #[expect(unsafe_code, reason = "forward one read op to the platform aio queue")]
-                    // SAFETY: see the block comment above; `ptr` is the slot's
-                    // stable buffer, kept alive via `inflight`, and `fd` stays
-                    // open per the caller's contract.
-                    unsafe {
-                        queue.submit(core::slice::from_ref(&op))
-                    }
-                }
-                OpKind::Write => {
-                    let op = WriteOp {
+                    }),
+                    OpKind::Write => write_ops.push(WriteOp {
                         fd: sub.fd,
                         offset: sub.offset,
                         buf: ptr.cast_const(),
                         len: sub.len,
                         user_data: sub.user_data,
                         priority: sub.priority,
-                    };
+                    }),
+                }
+            }
+
+            // SAFETY (both arms): every `ptr` points into a slot's `Box<[u8]>`,
+            // which stays allocated at a stable address because the reactor
+            // holds an `Arc<IoSlot>` in `inflight` until the completion is
+            // reaped; the caller's contract keeps each `fd` open for the same
+            // window. For a write the source bytes are owned by the slot and are
+            // never mutated while in flight.
+            let outcome = match kind {
+                OpKind::Read => {
                     #[expect(
                         unsafe_code,
-                        reason = "forward one write op to the platform aio queue"
+                        reason = "forward a read batch to the platform aio queue"
                     )]
-                    // SAFETY: see the block comment above; `ptr` is the slot's
-                    // stable source buffer, kept alive via `inflight` and never
-                    // mutated in flight, and `fd` stays open per the caller's
-                    // contract.
+                    // SAFETY: see the block comment above.
                     unsafe {
-                        queue.submit_write(core::slice::from_ref(&op))
+                        queue.submit(&read_ops)
+                    }
+                }
+                OpKind::Write => {
+                    #[expect(
+                        unsafe_code,
+                        reason = "forward a write batch to the platform aio queue"
+                    )]
+                    // SAFETY: see the block comment above.
+                    unsafe {
+                        queue.submit_write(&write_ops)
                     }
                 }
             };
-            match accepted {
-                Ok(0) => break, // kernel back-pressure; retry after a reap
-                Ok(_) => {
-                    let sub = pending.pop_front().expect("front checked above");
-                    inflight.insert(sub.user_data, Arc::clone(&sub.slot));
+
+            match outcome {
+                Ok(outcome) => {
+                    let rejected: HashSet<u64> = outcome.rejected.into_iter().collect();
+                    let mut requeue: Vec<Submission> = Vec::new();
+                    for _ in 0..batch_len {
+                        let sub = pending.pop_front().expect("front run counted above");
+                        if rejected.contains(&sub.user_data) {
+                            requeue.push(sub);
+                        } else {
+                            inflight.insert(sub.user_data, Arc::clone(&sub.slot));
+                        }
+                    }
+                    if !requeue.is_empty() {
+                        // Kernel back-pressure: restore the rejected ops to the
+                        // front in submission order and stop submitting until a
+                        // completion frees capacity.
+                        for sub in requeue.into_iter().rev() {
+                            pending.push_front(sub);
+                        }
+                        break;
+                    }
                 }
                 Err(err) => {
-                    let sub = pending.pop_front().expect("front checked above");
-                    complete_slot(&sub.slot, Err(IoError::Platform(err)));
+                    // The whole batch failed to enqueue; fail every op in it.
+                    for _ in 0..batch_len {
+                        let sub = pending.pop_front().expect("front run counted above");
+                        complete_slot(&sub.slot, Err(IoError::Platform(err)));
+                    }
                 }
             }
         }
