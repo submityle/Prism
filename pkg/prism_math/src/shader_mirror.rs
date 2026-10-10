@@ -404,6 +404,72 @@ fn prism_morton_encode3(x: u32, y: u32, z: u32) -> u32 {\n\
 fn prism_morton_decode3(code: u32) -> vec3<u32> {\n\
     return vec3<u32>(prism_morton_compact1by2(code), prism_morton_compact1by2(code >> 1u), prism_morton_compact1by2(code >> 2u));\n\
 }\n";
+
+/// Single-sourced WGSL for GPU 2D Hilbert-curve encode/decode, mirroring the
+/// CPU path [`crate::spatial::hilbert_encode2`] / [`crate::spatial::hilbert_decode2`].
+///
+/// WGSL has no 64-bit integer type, so the kernel runs the 16-bit-per-axis
+/// Hilbert order (a 32-bit `u32` key) — exactly the width used for on-device
+/// 2D tile / quadtree sort keys. Because the top 16 levels of the CPU's
+/// 32-bit-per-axis curve are pure no-ops for inputs masked to 16 bits (they
+/// contribute `0` to the index and apply an even number of axis swaps that
+/// cancel), the CPU `hilbert_encode2` output for any `(x, y)` with
+/// `x, y < 2^16` equals this order-16 key bit-for-bit, so the §24.1 parity
+/// here is **exact integer equality**, not a floating-point tolerance.
+pub const WGSL_HILBERT2: &str = "\
+const PRISM_HILBERT2_N: u32 = 65536u;\n\
+\n\
+fn prism_hilbert_encode2(ix: u32, iy: u32) -> u32 {\n\
+    var x = ix;\n\
+    var y = iy;\n\
+    var d: u32 = 0u;\n\
+    var s: u32 = PRISM_HILBERT2_N >> 1u;\n\
+    loop {\n\
+        if (s == 0u) { break; }\n\
+        var rx: u32 = 0u;\n\
+        if ((x & s) > 0u) { rx = 1u; }\n\
+        var ry: u32 = 0u;\n\
+        if ((y & s) > 0u) { ry = 1u; }\n\
+        d = d + s * s * ((3u * rx) ^ ry);\n\
+        if (ry == 0u) {\n\
+            if (rx == 1u) {\n\
+                x = (PRISM_HILBERT2_N - 1u) - x;\n\
+                y = (PRISM_HILBERT2_N - 1u) - y;\n\
+            }\n\
+            let t = x;\n\
+            x = y;\n\
+            y = t;\n\
+        }\n\
+        s = s >> 1u;\n\
+    }\n\
+    return d;\n\
+}\n\
+\n\
+fn prism_hilbert_decode2(index: u32) -> vec2<u32> {\n\
+    var t = index;\n\
+    var x: u32 = 0u;\n\
+    var y: u32 = 0u;\n\
+    var s: u32 = 1u;\n\
+    loop {\n\
+        if (s >= PRISM_HILBERT2_N) { break; }\n\
+        let rx = 1u & (t >> 1u);\n\
+        let ry = 1u & (t ^ rx);\n\
+        if (ry == 0u) {\n\
+            if (rx == 1u) {\n\
+                x = (s - 1u) - x;\n\
+                y = (s - 1u) - y;\n\
+            }\n\
+            let tmp = x;\n\
+            x = y;\n\
+            y = tmp;\n\
+        }\n\
+        x = x + s * rx;\n\
+        y = y + s * ry;\n\
+        t = t >> 2u;\n\
+        s = s << 1u;\n\
+    }\n\
+    return vec2<u32>(x, y);\n\
+}\n";
 /// Single-sourced WGSL for GPU-driven view-frustum culling, mirroring the CPU
 /// classifiers [`crate::intersect::frustum_sphere`] /
 /// [`crate::intersect::frustum_aabb`]. Each plane is passed as a `vec4<f32>`
