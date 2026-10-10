@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
+prism_render_driver = { path = "../../pkg/prism_render_driver", features = ["std"] }
 wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
 futures-lite = "2"
 raw-window-handle = "0.6"

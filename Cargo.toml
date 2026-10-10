@@ -29,7 +29,7 @@ members = [
   "pkg/prism_platform_os",
   "pkg/prism_asset",
   "pkg/prism_render_driver",
-  "pkg/prism_render_driver_wgpu",
+  "os-backends/prism_render_driver_wgpu",
   "pkg/prism_render_graph",
   "pkg/prism_input",
   "pkg/prism_shader",
