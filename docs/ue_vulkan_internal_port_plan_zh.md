@@ -411,11 +411,11 @@ previous/current HZB 已完成 GPU classification 主体：work ABI 有 early/la
 
 same-frame late command 已不再复用 early atomic：代码现有独立 late headers/counters/indexed/non-indexed streams，current-HZB 后按 per-view candidate/bin range dispatch，并从统一 Geometry ABI 解析 resident LOD，校验 generation、primitive class 和边界后生成完整 draw arguments；FrameGraph 声明也已拆出 late compact pass 及其 geometry/read-output/write hazard。
 
-Two-phase HZB 已形成完整代码闭环：opaque indirect consumer 在 `hzb_occlusion` 开启时按 bin 依次消费互斥的 early/late streams；精确 stage mask 保证不重不漏，late counter、capacity、indexed/non-indexed 总数与 overflow 均进入异步 readback。CR 已消除一个关键调度竞争：统一 visibility compaction 从根 `RenderGraphSystems::Begin` 移入 per-view `Core3d`，顺序固定为 `previous-HZB → visibility compaction → early prepass → current-HZB → late compact`，并使用该视图的 retained identity 解析 output、bin 和 HZB offsets。这样 previous-HZB 的 deferred candidate 不会同时残留在 early stream，又在 late stream 重复绘制。这里的“完成”只指代码路径、静态契约和可观测性闭环；本轮按要求没有运行真实 GPU 项目，因此图像 parity、快速相机和性能门槛仍未取得证据。`hzb_occlusion` 与 opaque indirect 继续默认关闭，只有运行时验收通过后才毕业为生产路径。
+Two-phase HZB 已形成完整代码闭环：opaque indirect consumer 在 `hzb_occlusion` 开启时按 bin 依次消费互斥的 early/late streams；精确 stage mask 保证不重不漏，late counter、capacity、indexed/non-indexed 总数与 overflow 均进入异步 readback。CR 已消除一个关键调度竞争：统一 visibility compaction 从根 `RenderGraphSystems::Begin` 移入 per-view `Core3d`，顺序固定为 `previous-HZB → visibility compaction → early prepass → current-HZB → late compact`，并使用该视图的 retained identity 解析 output、bin 和 HZB offsets。这样 previous-HZB 的 deferred candidate 不会同时残留在 early stream，又在 late stream 重复绘制。这里的“完成”只指代码路径、静态契约和可观测性闭环；本轮按最新口径只做静态验收（CPU golden + WESL 编译层 + `cargo check` 无 dead-code 告警），不再依赖真实 GPU 运行取证；跨平台 GPU 图像 parity（同一 WESL 由 wgpu 下译到各后端：Metal/Vulkan/DX12/WebGPU）作为后续可选门槛。`hzb_occlusion` 与 opaque indirect 继续默认关闭，待静态契约齐备后毕业为生产路径。
 
-标准 Mesh Visibility Raster 已形成首个真实 graphics pass：独立 `Visibility3d` phase 在主 opaque pass 前写两个 `Rgba32Uint` target，ABI 覆盖 scene/material generational handle、primitive、LOD/cluster、coverage/flags 与 packed barycentrics。整数 attachment 以 invalid sentinel 清除，per-view queue 会剔除 stale/queue-failed entity；当前 direct fallback 消费统一 visibility 的 CPU reference work。ID buffer 固定 single-sample，MSAA view 会显式禁用该路径，未来以 TAA/TSR 抗锯齿。下一阶段仍是 GPU Material Classification、PBR/NPR compute resolve、HDR scene color 和 custom shading registry；在这些 consumer 与真实 Vulkan 图像/性能验收完成前，不声明 UE 画质等价。
+标准 Mesh Visibility Raster 已形成首个真实 graphics pass：独立 `Visibility3d` phase 在主 opaque pass 前写两个 `Rgba32Uint` target，ABI 覆盖 scene/material generational handle、primitive、LOD/cluster、coverage/flags 与 packed barycentrics。整数 attachment 以 invalid sentinel 清除，per-view queue 会剔除 stale/queue-failed entity；当前 direct fallback 消费统一 visibility 的 CPU reference work。ID buffer 固定 single-sample，MSAA view 会显式禁用该路径，未来以 TAA/TSR 抗锯齿。下一阶段仍是 GPU Material Classification、PBR/NPR compute resolve、HDR scene color 和 custom shading registry；在这些 consumer 落地、且静态验收（CPU golden + WESL 编译层 + 无 dead-code 告警）通过前，不声明 UE 画质等价；跨平台 GPU 图像/性能 parity（同一 WESL 经 wgpu 下译到各后端）为后续可选证据。
 
-GPU Material Classification 已接通三段 compute：per-view 资源以 viewport pixel count 定容，count pass 从 Visibility IDs/Metadata 读取 material 分代 handle 并校验 sentinel/index/generation/active/surface class，固定 9 类 prefix pass 生成 contiguous offsets 和逐类 indirect dispatch，scatter pass 写 `ShadingWorkItem`。多视图不共享 atomic/cursor，背景/空像素、stale、unsupported、overflow 有独立 GPU diagnostics buffer；该 buffer 尚未接 CPU 异步回读或工具 UI。FrameGraph 相应拆为 count/prefix/scatter 节点并精确声明 attachment→sampled、count→prefix、offset/cursor→scatter、work→resolve hazard；资源仍由 per-view RenderApp 代码分配，transient descriptor 的 size 尚未回接 FrameGraph allocator，因而当前不具备可宣称的 transient alias 执行能力。该阶段没有修改 Bevy 源码，也没有复制 UE 代码；实现只依赖公开 RenderApp/API 和既有统一 Material ABI。当前结论仅为代码与静态 shader 契约完成，尚未按本轮约束运行 Vulkan 图形项目，真实 dispatch parity、GPU readback、性能与最终图像未验收；下一优先级是让 PBR/NPR compute resolve 和 HDR Scene Color 真正消费按类 worklist。
+GPU Material Classification 已接通三段 compute：per-view 资源以 viewport pixel count 定容，count pass 从 Visibility IDs/Metadata 读取 material 分代 handle 并校验 sentinel/index/generation/active/surface class，固定 9 类 prefix pass 生成 contiguous offsets 和逐类 indirect dispatch，scatter pass 写 `ShadingWorkItem`。多视图不共享 atomic/cursor，背景/空像素、stale、unsupported、overflow 有独立 GPU diagnostics buffer；该 buffer 尚未接 CPU 异步回读或工具 UI。FrameGraph 相应拆为 count/prefix/scatter 节点并精确声明 attachment→sampled、count→prefix、offset/cursor→scatter、work→resolve hazard；资源仍由 per-view RenderApp 代码分配，transient descriptor 的 size 尚未回接 FrameGraph allocator，因而当前不具备可宣称的 transient alias 执行能力。该阶段没有修改 Bevy 源码，也没有复制 UE 代码；实现只依赖公开 RenderApp/API 和既有统一 Material ABI。当前结论为代码与静态 shader 契约完成，按最新口径以静态验收（CPU golden + WESL 编译层 + 无 dead-code 告警）为准，不再运行真实 GPU 图形项目取证；跨平台 dispatch parity、GPU readback、性能与最终图像（同一 WESL 经 wgpu 下译到各后端）为后续可选证据；下一优先级是让 PBR/NPR compute resolve 和 HDR Scene Color 真正消费按类 worklist。
 
 标准 opaque bootstrap 已从统一 work stream 取 opaque work，并绑定 Material ABI 三表；Bevy visibility list 只负责清理被移出的旧 phase item。该路径已验证 instance/material generation fallback，按 mesh layout 读取 world normal/UV，并消费 base color、emissive、metallic、roughness、reflectance、AO 形成最小 direct BRDF 骨架；相机向量来自真实 view uniform，法线采用逆转置矩阵以支持非均匀缩放。GPU indirect draw 的代码链路已经存在，但默认关闭并等待真实运行 parity；完整 clustered lights、IBL、阴影、纹理/法线、clearcoat/transmission、masked/NPR/custom 分类管线仍是下一层实现。
 
@@ -899,7 +899,9 @@ TSR、VSM 和 virtual geometry 可在 GPU Scene/Toolchain 稳定后并行。Lume
 
 结合当前 Prism 代码和已确认的 UE 5.8.2 目录，原方案需要做以下升级。它们不是附加功能，而是减少返工、避免双后端失控并真正达到 UE 画质的结构性调整。
 
-### 25.1 从“双层后端”升级为“单一资源所有者 + Vulkan 扩展接口”
+### 25.1 从“双层后端”升级为“单一资源所有者（单一 wgpu 层）”
+
+> 按第 0 章修正：本节原以 “Vulkan-first / 原生 Vulkan 后端为唯一 owner” 为推荐主模式，现更正为 **单一 `wgpu + WESL` 层为唯一资源与提交所有者**（Vulkan 只是 wgpu 在桌面平台的后端之一，Metal/DX12/WebGPU 同等）。下文保留的 “Vulkan-first” 字样按此口径读作 “单一 wgpu 层”。核心工程结论——**同一运行模式只能有一个资源与提交所有者**——不变。
 
 原方案中的 `WgpuDevicePath + VulkanAdvancedPath` 如果各自创建和管理 Buffer、Image、Descriptor、Command Buffer，会形成两个资源管理器。当前 `raw_vulkan_init.rs` 只提供 Vulkan instance/device 创建回调和额外 feature 标记，并不是成熟的资源互操作层。直接扩展成两套后端会带来：
 
@@ -912,22 +914,20 @@ TSR、VSM 和 virtual geometry 可在 GPU Scene/Toolchain 稳定后并行。Lume
 升级决策：**同一运行模式只能有一个资源与提交所有者**。
 
 ```text
-推荐主模式：Vulkan-first
+推荐主模式：单一 wgpu 层（唯一 owner）
 Prism Render API
-  → Prism Vulkan Backend（唯一 owner）
+  → wgpu Backend（唯一 owner；由 wgpu 映射到 Metal/Vulkan/DX12/WebGPU）
      ├─ Buffer/Image/AS/Descriptor
-     ├─ Command/Barrier/Queue/Timeline
-     ├─ Pipeline/Shader package
-     └─ Swapchain
+     ├─ Command/Barrier/Queue（wgpu 自动同步）
+     ├─ Pipeline/WESL Shader package
+     └─ Swapchain/Surface
 
-兼容模式：Wgpu
-Prism Render API
-  → 现有 wgpu Backend（独立运行，不与 Vulkan 资源互操作）
+（不再提供绕过 wgpu 的原生后端私有资源互操作层）
 ```
 
-如果初期必须继续使用 wgpu，则高级功能只能使用 wgpu 已安全暴露的 Vulkan 能力；不要在同一帧绕过 wgpu 操作其私有资源。仅在验证一个完整 buffer/image acquire-release 原型、通过 validation 和多帧销毁测试后，才允许极少量显式 interop。
+高级能力只使用 wgpu 已安全暴露的特性（`wgpu::Features`/`Limits`）；不要在同一帧绕过 wgpu 操作其私有资源。仅在验证一个完整 buffer/image acquire-release 原型、通过 validation 和多帧销毁测试后，才允许极少量显式 interop（且须以 wgpu 抽象重新暴露）。
 
-这会增加约 2–4 个月底层工作，但能显著减少 VSM、Nanite、Lumen 阶段的同步返工。对于 Vulkan-only、长期追求顶级性能的目标，建议尽早确定 Vulkan-first，而不是逐步堆积 escape hatch。
+同一所有者模型能显著减少 VSM、Nanite、Lumen 阶段的同步返工。跨平台目标下建议尽早锁定 **单一 wgpu 层为唯一资源/提交所有者**，用 `wgpu::Features`/`Limits` 实测启用高级能力，而不是逐步堆积绕过 wgpu 的 escape hatch。
 
 ### 25.2 保留 ECS 驱动，将当前 RenderGraph 明确定义为调度表，并新增真正的 Frame Graph
 
