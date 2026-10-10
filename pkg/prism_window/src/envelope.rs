@@ -83,7 +83,7 @@ impl PlatformEventSequence {
 ///
 /// Used only for routing/diagnostics and consumer fast-filtering; it never
 /// participates in ordering (ordering is `(timestamp, sequence)` only).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub enum EventSource {
     /// A window-level event (resize, focus, close, scale change, ...).
     #[default]
@@ -99,7 +99,7 @@ pub enum EventSource {
 }
 
 /// The stamp every platform event carries as it crosses the ABI boundary.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub struct PlatformEventStamp {
     /// When the engine received the event (monotonic, non-decreasing).
     pub timestamp: MonotonicTimestamp,
@@ -129,19 +129,6 @@ impl PlatformEventStamp {
     #[must_use]
     pub const fn order_key(self) -> (u64, u64) {
         (self.timestamp.0, self.sequence.0)
-    }
-}
-
-impl PartialOrd for PlatformEventStamp {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for PlatformEventStamp {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        // Order by (timestamp, sequence) only; `source` must not affect order.
-        self.order_key().cmp(&other.order_key())
     }
 }
 
@@ -221,10 +208,14 @@ mod tests {
 
     #[test]
     fn stamp_source_does_not_affect_order() {
+        // The kernel orders strictly by the `(timestamp, sequence)` key, which
+        // excludes `source`; `sequence` is globally unique so `source` never
+        // actually participates in the sort. (The derived `Ord` keeps `source`
+        // as a final tiebreak purely so `Ord` stays consistent with `Eq`.)
         let key = (MonotonicTimestamp::from_nanos(42), PlatformEventSequence(7));
         let a = PlatformEventStamp::new(key.0, key.1, EventSource::Window);
         let b = PlatformEventStamp::new(key.0, key.1, EventSource::Backend);
-        assert_eq!(a.cmp(&b), core::cmp::Ordering::Equal);
+        assert_eq!(a.order_key(), b.order_key());
     }
 
     #[test]
