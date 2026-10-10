@@ -12,7 +12,7 @@
 > - **反应式/数据真相**：Our Machinery（The Truth）+ SolidJS（细粒度无毛刺反应）
 > 本文为纯经典数据结构 + 调度路线，不含任何 AI/ML 内容。
 
-- 版本: v0.4（设计阶段，未进入编码；v0.2→v0.3 新增第 23 章「AAA 高级功能增补」：实体禁用/关系删除策略/排他关系/调度歧义检测与单步/渲染提取管线/作用域命令/层级 despawn/处理器 LOD；v0.3→v0.4 新增第 24 章「跨 crate 契约对齐」：调度执行底座对齐 tasks QoS 车道+time 帧预算 / Observer 作为空间派生更新总线 / 反射驱动动态组件·快照·网络增量 / 确定性链路四方对齐）
+- 版本: v0.4（核心内核 M0–M5 与第 23 章增补已在 `pkg/prism_ecs/` 落地实现，第 24 章跨 crate 对齐、M6 迁移与大规模/硬件验证仍为 PLANNED；v0.2→v0.3 新增第 23 章「AAA 高级功能增补」：实体禁用/关系删除策略/排他关系/调度歧义检测与单步/渲染提取管线/作用域命令/层级 despawn/处理器 LOD；v0.3→v0.4 新增第 24 章「跨 crate 契约对齐」：调度执行底座对齐 tasks QoS 车道+time 帧预算 / Observer 作为空间派生更新总线 / 反射驱动动态组件·快照·网络增量 / 确定性链路四方对齐）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_math`（glam SIMD）、`prism_tasks`（work-stealing + fiber 作业图，`std`/`multi_thread`）、`prism_reflect`（可选，序列化/反射/脚本桥）
 - 明确约束: 核心 `no_std + alloc`；`std` / `multi_thread` / `serialize` / `reflect` / `trace` / `determinism` / `simd` / `partition` 为 feature；**不依赖任何 `bevy_*` crate**
@@ -125,7 +125,7 @@ pub struct Entity { index: u32, generation: NonZeroU32 }
 
 - 分配器维护 `free-list` + `meta: Vec<EntityMeta>`；`EntityMeta = { generation, location: {ArchetypeId, ChunkIndex, Row} }`。
 - 回收后 generation 自增，悬垂访问因 generation 不匹配安全返回 `None`（流送卸载依赖此语义，见 §13）。
-- index 0 保留；确定性档位下分配走稳定序（见 §14）。
+- generation 0 保留（`NonZeroU32` 不变量）：回收时 generation `wrapping_add(1)` 并跳过 0；entity **index 0 为正常可用槽**（分配器不保留 index 0）。确定性档位下分配走稳定序（见 §14）。
 
 ### 5.2 Component 注册表
 
@@ -414,7 +414,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/Resource/Event/Sys
 
 - **下游 API 契约优先**：对接层公共 API 是红线；内部实现随便改，公共 API 改动必须同步迁移依赖方，保持全仓绿。
 - **版本化新增契约**：`ChunkMeta`、`ChunkDirtyIndex`、`EcsSnapshot`/`EcsDelta`、`OwningGroupId`、`WorldPartitionCell`、`GridCell`/`FloatingOrigin`、`ReactionHandle`、`JobHandle`、`StateHash`、`GpuResidentColumn`。
-- **不变量**：owning group 单一拥有者；chunk 版本单调递增；确定性稳定键；快照 roundtrip 等价；子世界实体迁移保 generation；Entity index 0 保留、generation 严格递增。
+- **不变量**：owning group 单一拥有者；chunk 版本单调递增；确定性稳定键；快照 roundtrip 等价；子世界实体迁移保 generation；Entity generation 为 `NonZeroU32`（保留 0、回收自增、回绕跳 0），index 0 为正常可用槽。
 
 ---
 
@@ -434,7 +434,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/Resource/Event/Sys
 
 ## 22. 诚实边界与风险
 
-- 本文为设计规格，**当前无代码**；M0–M6 均为 PLANNED。
+- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 / 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 快照+回滚 / 分区流送 / GPU 常驻列 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`）、§23.5 渲染提取管线，以及百万级实体 / 多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标。
 - 规模与多核扩展性、NUMA、GPU 常驻指标依赖真实硬件压测，单测不能替代。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。
@@ -494,7 +494,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/Resource/Event/Sys
 
 ### 23.8 诚实边界
 
-本章全部为 PLANNED 设计目标，无代码。23.4 歧义检测与 23.5 提取管线对正确性/解耦收益最高，建议随 M1（调度）与 M3（渲染重接前置）优先落地；23.1/23.2/23.3/23.6 随 M4 关系层落地；23.7 随 M5 规模层落地。
+本章 23.1/23.2/23.3（实体禁用 / 关系删除策略 / 排他关系，见 `relation.rs`）、23.4（歧义检测与单步，见 `schedule/{ambiguity,stepping}.rs`）、23.6（作用域命令 / 层级 despawn，见 `command/`）、23.7（处理器 LOD，见 `partition/processor.rs`）均已落地实现并带测试；**仅 23.5 渲染提取管线仍为 PLANNED**（随 M3 渲染重接前置落地，对解耦收益最高）。
 
 ---
 
@@ -540,5 +540,5 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 
 ### 24.5 诚实边界
 
-本章全部为 PLANNED 对齐说明，无代码；不改变 ECS 已有机制，仅固定跨 crate 职责边界与引用。落地时序：24.1 随 M1（调度）与 tasks/time 同步落地；24.2 随 M4 关系/Observer 层；24.3 随 reflect/M2 资产；24.4 随 M5 确定性/网络。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章为跨 crate 职责对齐说明：**§24.1 调度执行底座已部分接入**（冲突图执行器把并行波次派发到 `prism_tasks::TaskPool`、lane→优先级映射见 `schedule/{graph,config,lane}.rs`）；**§24.2 / §24.3 / §24.4 仍为 PLANNED**（分别随 M4 Observer 层、reflect/M2 资产、M5 确定性/网络落地）。本章不引入 ECS 新机制，仅固定跨 crate 职责边界与引用。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
 
