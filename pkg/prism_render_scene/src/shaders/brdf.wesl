@@ -175,6 +175,58 @@ fn vis_smith_anisotropic(
     return 0.5 / max(lambda_v + lambda_l, MIN_N_DOT);
 }
 
+// Lower bound on `1 - E_avg` keeping the `f_ms` denominator finite as the
+// single-scattering lobe approaches a mirror. Mirrors `MIN_ENERGY_DEFICIT`.
+const MS_MIN_ENERGY_DEFICIT: f32 = 1.0e-4;
+
+// Single-scattering directional albedo `E(mu, alpha) = scale + bias` of the
+// analytic environment BRDF. Mirrors `multiscatter::directional_albedo`.
+fn ms_directional_albedo(n_dot: f32, perceptual_roughness: f32) -> f32 {
+    let dfg = env_brdf_approx(n_dot, perceptual_roughness);
+    return clamp(dfg.x + dfg.y, 0.0, 1.0);
+}
+
+// Cosine-weighted hemispherical average albedo
+// `E_avg = 2 * integral_0^1 E(mu) mu d mu` via a fixed 8-node Gauss-Legendre
+// rule whose nodes/weights are shared verbatim with the CPU golden. Mirrors
+// `multiscatter::average_albedo`.
+fn ms_average_albedo(perceptual_roughness: f32) -> f32 {
+    let nodes = array<f32, 8>(
+        -0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498,
+        0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363,
+    );
+    let weights = array<f32, 8>(
+        0.1012285362903763, 0.2223810344533745, 0.3137066458778873, 0.3626837833783620,
+        0.3626837833783620, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763,
+    );
+    var sum = 0.0;
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        let mu = 0.5 * (nodes[i] + 1.0);
+        sum = sum + weights[i] * ms_directional_albedo(mu, perceptual_roughness) * mu;
+    }
+    return clamp(sum, 0.0, 1.0 - MS_MIN_ENERGY_DEFICIT);
+}
+
+// Added multiple-scattering specular BRDF value `f_ms * F_ms` (Kulla-Conty
+// achromatic lobe scaled by Turquin's colored multiple-bounce Fresnel), to be
+// added to the single-scattering specular before the `N.L` weight. Mirrors
+// `multiscatter::multiscatter_direct`.
+fn multiscatter_direct(
+    f0: vec3<f32>,
+    n_dot_v: f32,
+    n_dot_l: f32,
+    perceptual_roughness: f32,
+) -> vec3<f32> {
+    let e_o = ms_directional_albedo(n_dot_v, perceptual_roughness);
+    let e_i = ms_directional_albedo(n_dot_l, perceptual_roughness);
+    let e_avg = ms_average_albedo(perceptual_roughness);
+    let f_ms = (1.0 - e_o) * (1.0 - e_i) * INV_PI / (1.0 - e_avg);
+    let f_avg = f0 + (vec3<f32>(1.0) - f0) * (1.0 / 21.0);
+    let f_ms_color =
+        f_avg * f_avg * e_avg / max(vec3<f32>(1.0) - f_avg * (1.0 - e_avg), vec3<f32>(MS_MIN_ENERGY_DEFICIT));
+    return f_ms * f_ms_color;
+}
+
 // Physically based direct lighting for one analytic light, including a
 // Kulla-Conty energy-compensation term and a clearcoat lobe. Mirrors
 // `evaluate_principled_direct`.
@@ -225,10 +277,11 @@ fn principled_direct(
     );
     let single_scatter = f * (d * g);
 
-    // Kulla-Conty-style bounded compensation returning energy lost to
-    // unresolved multiple scattering while preserving the primary lobe.
-    let energy = 1.0 - 0.28 * roughness * roughness;
-    let compensation = f0 * min((1.0 / max(energy, 0.25)) - 1.0, 1.0);
+    // Multiple-scattering energy compensation (Kulla-Conty 2017 achromatic lobe
+    // + Turquin 2019 colored multiple-bounce Fresnel). Byte-for-byte twin of
+    // `multiscatter::multiscatter_direct`; restores the energy the single-
+    // scattering GGX lobe loses to unresolved microfacet inter-reflections.
+    let compensation = multiscatter_direct(f0, n_dot_v, n_dot_l, roughness);
     let specular = single_scatter + compensation;
 
     let diffuse_weight = (vec3<f32>(1.0) - f) * (1.0 - metallic);

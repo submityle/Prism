@@ -115,7 +115,11 @@ pub fn kulla_conty_ms(e_o: f32, e_i: f32, e_avg: f32) -> f32 {
         return 0.0;
     }
     let v = (1.0 - eo) * (1.0 - ei) / denom;
-    if v.is_finite() { v.max(0.0) } else { 0.0 }
+    if v.is_finite() {
+        v.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Fernández-Agüera multiple-scattering reflectance `F_ms·E_ms` for RGB `f0`.
@@ -143,7 +147,11 @@ pub fn multiscatter_compensation(f0: Vec3, scale: f32, bias: f32) -> Vec3 {
         safe_recip(denom.z),
     );
     let comp = fss_ess * favg * ems * inv;
-    if comp.is_finite() { comp.max(Vec3::ZERO) } else { Vec3::ZERO }
+    if comp.is_finite() {
+        comp.max(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// Full energy-compensated specular environment reflectance for RGB `f0`:
@@ -172,7 +180,124 @@ pub fn multiscatter_specular(f0: Vec3, scale: f32, bias: f32) -> Vec3 {
 fn safe_recip(x: f32) -> f32 {
     let d = if x.abs() < 1.0e-6 { 1.0e-6 } else { x };
     let r = 1.0 / d;
-    if r.is_finite() { r } else { 0.0 }
+    if r.is_finite() {
+        r
+    } else {
+        0.0
+    }
+}
+
+/// Lower bound keeping `1 - E_avg` strictly positive in the analytic
+/// direct-lighting path so the Kulla-Conty denominator and the colored-Fresnel
+/// scale stay finite as the single-scatter lobe approaches a mirror. At that
+/// limit `1 - E(µ)` also tends to zero, so the clamp never injects energy.
+pub const MIN_ENERGY_DEFICIT: f32 = 1.0e-4;
+
+/// Eight-node Gauss-Legendre abscissae on `[-1, 1]` (symmetric pairs), shared
+/// verbatim with the `brdf.wesl` twin so the two shading lines agree.
+#[expect(
+    clippy::excessive_precision,
+    reason = "canonical Gauss-Legendre literals kept digit-for-digit identical to the brdf.wesl twin; extra mantissa digits round to the same f32 both sides"
+)]
+const GL8_NODES: [f32; 8] = [
+    -0.9602898564975363,
+    -0.7966664774136267,
+    -0.5255324099163290,
+    -0.1834346424956498,
+    0.1834346424956498,
+    0.5255324099163290,
+    0.7966664774136267,
+    0.9602898564975363,
+];
+
+/// Weights paired with [`GL8_NODES`].
+#[expect(
+    clippy::excessive_precision,
+    reason = "canonical Gauss-Legendre literals kept digit-for-digit identical to the brdf.wesl twin; extra mantissa digits round to the same f32 both sides"
+)]
+const GL8_WEIGHTS: [f32; 8] = [
+    0.1012285362903763,
+    0.2223810344533745,
+    0.3137066458778873,
+    0.3626837833783620,
+    0.3626837833783620,
+    0.3137066458778873,
+    0.2223810344533745,
+    0.1012285362903763,
+];
+
+/// Analytic single-scattering directional albedo `E(µ)` from the closed-form
+/// Karis environment-BRDF fit ([`crate::environment::env_brdf_approx`]).
+///
+/// This is the per-pixel-cheap sibling of the Monte-Carlo [`directional_albedo`]
+/// above: the latter is the bake-time ground truth, this one is the analytic
+/// approximation used on the hot direct-lighting path so no DFG LUT binding is
+/// needed and the CPU golden stays numerically identical to the `brdf.wesl`
+/// twin (`ms_directional_albedo`). Clamped to `[0, 1]`.
+#[inline]
+pub fn directional_albedo_analytic(n_dot: f32, perceptual_roughness: f32) -> f32 {
+    let [scale, bias] = crate::environment::env_brdf_approx(n_dot, perceptual_roughness);
+    (scale + bias).clamp(0.0, 1.0)
+}
+
+/// Cosine-weighted hemispherical average `E_avg = 2 ∫₀¹ E(µ) µ dµ` of the
+/// analytic directional albedo, evaluated with a fixed 8-node Gauss-Legendre
+/// rule whose nodes/weights are shared verbatim with the shader twin
+/// (`ms_average_albedo`).
+///
+/// Clamped to `[0, 1 - MIN_ENERGY_DEFICIT]` so downstream `1 - E_avg`
+/// denominators stay strictly positive.
+#[inline]
+pub fn average_albedo_analytic(perceptual_roughness: f32) -> f32 {
+    // ∫₀¹ g(µ) dµ = 0.5 · Σ w_i g(0.5(x_i + 1)); folding the factor-2 of E_avg
+    // with that 0.5 leaves exactly Σ w_i E(µ_i) µ_i.
+    let mut sum = 0.0f32;
+    let mut i = 0;
+    while i < GL8_NODES.len() {
+        let mu = 0.5 * (GL8_NODES[i] + 1.0);
+        sum += GL8_WEIGHTS[i] * directional_albedo_analytic(mu, perceptual_roughness) * mu;
+        i += 1;
+    }
+    sum.clamp(0.0, 1.0 - MIN_ENERGY_DEFICIT)
+}
+
+/// Added multiple-scattering specular BRDF value `f_ms · F_ms` for one analytic
+/// light.
+///
+/// Composes the achromatic Kulla-Conty kernel ([`kulla_conty_ms`]) with
+/// Turquin's (2019) colored multiple-bounce Fresnel scale
+/// `F_avg² E_avg / (1 - F_avg (1 - E_avg))` (per channel). The returned value is
+/// a BRDF (per steradian) to be added to the single-scattering specular *before*
+/// the `N·L` cosine weight, so it participates in the rendering equation exactly
+/// like the primary lobe.
+///
+/// For a lossless white conductor (`f0 = 1`) the colored scale collapses to `1`
+/// and the lobe's directional albedo is exactly `1 - E(µ_o)`, so single + multi
+/// scatter reflects all incident energy at every roughness (white furnace). The
+/// result is finite and non-negative per channel. This is the backend-neutral
+/// golden for the `brdf.wesl` `multiscatter_direct` twin.
+#[inline]
+pub fn multiscatter_direct(
+    f0: Vec3,
+    n_dot_v: f32,
+    n_dot_l: f32,
+    perceptual_roughness: f32,
+) -> Vec3 {
+    let e_o = directional_albedo_analytic(n_dot_v, perceptual_roughness);
+    let e_i = directional_albedo_analytic(n_dot_l, perceptual_roughness);
+    let e_avg = average_albedo_analytic(perceptual_roughness);
+    // Achromatic Kulla-Conty two-point lobe (already carries the 1/π).
+    let f_ms = kulla_conty_ms(e_o, e_i, e_avg);
+    // Turquin colored multiple-bounce Fresnel scale, per channel.
+    let favg = f_avg(f0);
+    let denom = (Vec3::ONE - favg * (1.0 - e_avg)).max(Vec3::splat(MIN_ENERGY_DEFICIT));
+    let color = favg * favg * e_avg / denom;
+    let out = color * f_ms;
+    if out.is_finite() {
+        out.max(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// `1 / π`, re-exported for callers normalising a diffuse-like multiscatter
@@ -203,7 +328,11 @@ mod tests {
         let r = (row as f32 + 0.5) / 32.0;
         let sb = lut.sample(mu, r);
         let e = directional_albedo(mu, r, 1024);
-        assert!((e - (sb.x + sb.y)).abs() < 1.0e-6, "E={e} vs {}", sb.x + sb.y);
+        assert!(
+            (e - (sb.x + sb.y)).abs() < 1.0e-6,
+            "E={e} vs {}",
+            sb.x + sb.y
+        );
     }
 
     #[test]
@@ -302,5 +431,71 @@ mod tests {
         let s = multiscatter_specular(Vec3::splat(2.0), 2.0, 2.0);
         assert!(s.is_finite() && s.x <= 1.0 + 1.0e-6);
         assert!(average_albedo(0.5, 0, 0).is_finite());
+    }
+
+    #[test]
+    fn direct_white_furnace_single_plus_multi_is_one() {
+        // For a lossless white conductor the single-scattering directional
+        // albedo E(mu_o) plus the multiple-scattering lobe's directional albedo
+        // must reflect all incident energy at every roughness and view angle.
+        // E(mu_o) is taken analytically; only the smooth `f_ms` lobe is
+        // integrated numerically (A_ms = 2*PI * integral_0^1 f_ms * mu_i d mu_i)
+        // so the test never suffers the narrow-peak under-integration that
+        // plagues a direct GGX quadrature at low roughness.
+        let n = 256usize;
+        for &r in &[0.1f32, 0.25, 0.5, 0.75, 1.0] {
+            for &mu_o in &[0.15f32, 0.5, 0.85, 1.0] {
+                let mut acc = 0.0f64;
+                for k in 0..n {
+                    let mu_i = (k as f32 + 0.5) / n as f32;
+                    let f_ms = multiscatter_direct(Vec3::ONE, mu_o, mu_i, r).x;
+                    acc += (f_ms * mu_i) as f64;
+                }
+                let a_ms = (2.0 * PI as f64 * acc / n as f64) as f32;
+                let e_o = directional_albedo_analytic(mu_o, r);
+                let total = e_o + a_ms;
+                assert!(
+                    (total - 1.0).abs() < 2.0e-2,
+                    "white furnace total={total} r={r} mu_o={mu_o} (E={e_o}, A_ms={a_ms})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direct_multiscatter_vanishes_for_near_mirror() {
+        // As roughness -> 0 the single-scattering lobe captures nearly all the
+        // energy, so 1 - E(mu) -> 0 and the multiple-scattering lobe vanishes.
+        for &mu in &[0.2f32, 0.5, 0.9] {
+            let v = multiscatter_direct(Vec3::ONE, mu, mu, 0.02);
+            assert!(v.is_finite(), "near-mirror ms not finite: {v:?}");
+            assert!(v.x >= 0.0, "near-mirror ms negative: {v:?}");
+            assert!(v.x < 3.0e-2, "near-mirror ms should vanish: {}", v.x);
+        }
+    }
+
+    #[test]
+    fn direct_colored_metal_preserves_hue_and_is_finite() {
+        // Copper-ish f0: the colored multiple-bounce Fresnel keeps the
+        // red >= green >= blue ordering, stays finite and never goes negative.
+        let f0 = Vec3::new(0.95, 0.64, 0.54);
+        for &r in &[0.2f32, 0.5, 0.9] {
+            let v = multiscatter_direct(f0, 0.6, 0.6, r);
+            assert!(v.is_finite(), "colored ms not finite: {v:?}");
+            assert!(v.min_element() >= 0.0, "colored ms negative: {v:?}");
+            assert!(
+                v.x >= v.y && v.y >= v.z,
+                "colored ms broke hue ordering: {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn analytic_average_albedo_bounded_and_decreases_with_roughness() {
+        let smooth = average_albedo_analytic(0.1);
+        let rough = average_albedo_analytic(0.95);
+        assert!((0.0..=1.0).contains(&smooth), "E_avg(smooth)={smooth}");
+        assert!((0.0..=1.0).contains(&rough), "E_avg(rough)={rough}");
+        assert!(rough < smooth, "rough E_avg={rough} should be < {smooth}");
     }
 }

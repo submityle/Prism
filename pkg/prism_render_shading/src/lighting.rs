@@ -129,10 +129,19 @@ pub fn evaluate_principled_direct(
     );
     let single_scatter = mul_scalar(f, d * g);
 
-    // Kulla-Conty-style bounded compensation. This preserves the primary GGX
-    // lobe while returning some energy lost to unresolved multiple scattering.
-    let energy = 1.0 - 0.28 * roughness * roughness;
-    let compensation = mul_scalar(f0, ((1.0 / energy.max(0.25)) - 1.0).min(1.0));
+    // Multiple-scattering energy compensation (Kulla-Conty 2017 achromatic
+    // lobe + Turquin 2019 colored multiple-bounce Fresnel). Restores the energy
+    // the single-scattering GGX lobe loses to unresolved microfacet
+    // inter-reflections instead of the former crude `1 - 0.28*rough^2` scalar;
+    // see `crate::gi::env_brdf::multiscatter` for the derivation and the
+    // white-furnace conservation proof.
+    let compensation = crate::gi::env_brdf::multiscatter::multiscatter_direct(
+        bevy_math::Vec3::from_array(f0),
+        n_dot_v,
+        n_dot_l,
+        roughness,
+    )
+    .to_array();
     let specular = add(single_scatter, compensation);
     let diffuse_weight = mul_scalar(sub([1.0; 3], f), 1.0 - metallic);
     let diffuse = mul(mul_scalar(surface.base_color, 1.0 / PI), diffuse_weight);
