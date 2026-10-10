@@ -317,7 +317,17 @@ fn principled_direct(
             * distribution_ggx(n_dot_h, coat_alpha)
             * vis_smith(n_dot_v, n_dot_l, coat_alpha)
             * n_dot_l);
-    let coat_attenuation = 1.0 - coat * clamp(coat_f.x, 0.0, 1.0);
+    // Two-pass macro-angle coat transmission (Weidlich-Wilkie 2007 / Burley
+    // 2015): the dielectric coat Fresnel-filters radiance on BOTH the view and
+    // light crossings, so the base is attenuated by
+    // `(1 - coat*Fc(n·v))·(1 - coat*Fc(n·l))` at the macro angles rather than the
+    // former single `v·h` pass. Coat specular stays at `v·h`. Byte-identical to
+    // `evaluate_principled_direct` in `lighting.rs`; `clearcoat == 0` is an exact
+    // identity.
+    let coat_f_view = fresnel_schlick(vec3<f32>(0.04), n_dot_v);
+    let coat_f_light = fresnel_schlick(vec3<f32>(0.04), n_dot_l);
+    let coat_attenuation = (1.0 - coat * clamp(coat_f_view.x, 0.0, 1.0))
+        * (1.0 - coat * clamp(coat_f_light.x, 0.0, 1.0));
     let reflected = base * coat_attenuation + coat_specular;
 
     let radiance = reflected * light.illuminance;

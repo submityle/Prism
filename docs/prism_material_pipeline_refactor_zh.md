@@ -603,7 +603,17 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 诚实边界：`normal_variance` 当前恒为 `0.0`（恒等旁路），**待 P1-a 纹理足迹 / P1-f 烘焙法线方差图接入后被真实喂数**才激活抗锯齿；这是分阶段诚实接线，不是假实现。编辑器 MaterialX 作者前端（P2-a）仍按 goal 保持 TODO。
   - 门禁：`cargo test -p prism_render_shading --lib lighting`（22 通过，含 `specular_aa_variance_is_identity_at_zero_and_coarsens_the_peak`：恒等 + 单调粗化 + κ 饱和）、`--lib gi::specular_aa`；`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过，编译 brdf.wesl + specular_aa.wesl 全链路）、`--lib shading::specular_aa`；touched 文件 clippy 干净、已 rustfmt。
 
-**⬜ 未开始（见上表）**：P1-a~P1-f、P1-h（PCM 地基）、P2-a~P2-j、P3-a~P3-e、开放瓣（glint / 测量 BRDF）。
+- **P2-h 原理化分层：coat/base 两程能量耦合**（§17.2 / §13 表 P2-h）
+  - 范围：把运行时 über 原理化回退瓣（`evaluate_principled_direct`）里 coat 对 base 的衰减，从原先**单程**微表面半向量 `(1 - coat·Fc(v·h))` 升级为**物理两程宏观角透射** `(1 - coat·Fc(n·v))·(1 - coat·Fc(n·l))`——radiance 进（视线）出（光线）各穿一次电介质 coat，各被 coat Fresnel 过滤一次。coat SPECULAR 高光仍取 `v·h`（微表面反射正确角）。ABI 中性（只改 BSDF + 测试）。依据 Weidlich–Wilkie 2007 §4 / Burley 2015 clearcoat 层叠。
+  - 恒等性：`Fc` 复用与主瓣同一份 `fresnel_schlick`，`clearcoat == 0 ⇒ (1-0)·(1-0) = 1` 为**逐位恒等**，既有 golden 全部保持；原单程在掠射（`v≈l ⇒ v·h≈1 ⇒ Fc≈0.04`）几乎不压暗 base，两程在掠射按宏观角 `Fc` 显著变暗，修正了漏光。
+  - 代码：
+    - CPU 金标准 `pkg/prism_render_shading/src/lighting.rs::evaluate_principled_direct`（两程衰减）。
+    - WESL twin `pkg/prism_render_scene/src/shaders/brdf.wesl::principled_direct`（与 CPU 逐位同算术、同常量、同参序）。
+    - 顺带修复：专用 clearcoat 瓣 `pkg/prism_render_shading/src/clearcoat.rs::evaluate_clearcoat_direct` 的 base 多散射补偿此前仍是 P0-a 之前的粗糙 `1 - 0.28·rough²` 标量，与升级后的主瓣脱钩；现统一改走 `multiscatter::multiscatter_direct`，恢复「无 coat 时 base == 原理化瓣」不变量（`zero_clearcoat_matches_principled_base` 对拍）。
+  - 门禁：`cargo test -p prism_render_shading --lib`（3192 通过，含新增 `clearcoat_two_pass_coupling_identity_and_grazing_darkening`：coat=0 恒等 + 掠射压暗强于正入射，及回绿的 `zero_clearcoat_matches_principled_base`）、`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过，编译 brdf.wesl 两程路径）；touched 文件 clippy 干净、已 rustfmt。
+  - 诚实边界：OpenPBR `coat_darkening`（内反射回收项）**未**纳入——该公式不确定，拒绝臆造并冠名 OpenPBR；本项只落地无歧义、可引用的「两程透射」能量耦合半边，`coat_darkening` 留待有可靠 `R_i` 推导（Weidlich–Wilkie 几何级数）时再加，届时同样保持 coat=0 恒等、不新增 ABI 字段。
+
+**⬜ 未开始（见上表）**：P1-a~P1-f、P1-h（PCM 地基）、P2-a~P2-g、P2-i、P2-j、P3-a~P3-e、开放瓣（glint / 测量 BRDF）。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 

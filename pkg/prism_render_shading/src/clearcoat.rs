@@ -80,10 +80,19 @@ pub fn evaluate_clearcoat_direct(
     let g = visibility_smith_ggx_correlated(n_dot_v, n_dot_l, alpha);
     let single_scatter = mul_scalar(f, d * g);
 
-    // Kulla-Conty-style bounded compensation, identical to the principled lobe
-    // so the base matches it exactly when the coat is absent.
-    let energy = 1.0 - 0.28 * roughness * roughness;
-    let compensation = mul_scalar(f0, ((1.0 / energy.max(0.25)) - 1.0).min(1.0));
+    // Multiple-scattering energy compensation (Kulla-Conty 2017 + Turquin 2019),
+    // byte-identical to `evaluate_principled_direct` so the base reduces to the
+    // principled lobe exactly when the coat is absent (pinned by
+    // `zero_clearcoat_matches_principled_base`). This replaces the former crude
+    // `1 - 0.28*rough^2` scalar, which drifted out of sync when the principled
+    // base adopted the analytic multiscatter model in P0-a.
+    let compensation = crate::gi::env_brdf::multiscatter::multiscatter_direct(
+        bevy_math::Vec3::from_array(f0),
+        n_dot_v,
+        n_dot_l,
+        roughness,
+    )
+    .to_array();
     let specular = add(single_scatter, compensation);
     let diffuse_weight = mul_scalar(sub([1.0; 3], f), 1.0 - metallic);
     let diffuse = mul(mul_scalar(surface.base_color, INV_PI), diffuse_weight);

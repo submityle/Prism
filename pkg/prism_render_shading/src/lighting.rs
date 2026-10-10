@@ -181,7 +181,20 @@ pub fn evaluate_principled_direct(
             * visibility_smith_ggx_correlated(n_dot_v, n_dot_l, coat_alpha)
             * n_dot_l,
     );
-    let coat_attenuation = 1.0 - coat * coat_f[0].clamp(0.0, 1.0);
+    // Two-pass macro-angle coat transmission (Weidlich-Wilkie 2007 §4 / Burley
+    // 2015 clearcoat): radiance crossing the dielectric coat is Fresnel-filtered
+    // on BOTH the entry (view) and exit (light) paths, so the base is attenuated
+    // by `(1 - coat*Fc(n·v))·(1 - coat*Fc(n·l))` at the macro normal angles,
+    // not the former single microfacet-half-vector pass `(1 - coat*Fc(v·h))`
+    // which under-darkened the base at grazing light. The coat SPECULAR highlight
+    // stays at `v·h` (correct for the coat microfacet reflection). `Fc` reuses the
+    // byte-identical `fresnel_schlick` already driving the base `f`, so the WESL
+    // twin matches to the bit. `clearcoat == 0` ⇒ `(1-0)·(1-0) = 1`, an exact
+    // identity, so every existing golden is preserved.
+    let coat_f_view = fresnel_schlick([0.04; 3], n_dot_v);
+    let coat_f_light = fresnel_schlick([0.04; 3], n_dot_l);
+    let coat_attenuation = (1.0 - coat * coat_f_view[0].clamp(0.0, 1.0))
+        * (1.0 - coat * coat_f_light[0].clamp(0.0, 1.0));
     let reflected = add(mul_scalar(base, coat_attenuation), coat_specular);
     let radiance = mul(reflected, light.illuminance);
     add(
@@ -369,6 +382,74 @@ mod tests {
             },
         );
         assert_eq!(shadowed, [0.0; 3]);
+    }
+
+    #[test]
+    fn clearcoat_two_pass_coupling_identity_and_grazing_darkening() {
+        let total = |v: [f32; 3]| v[0] + v[1] + v[2];
+
+        // `clearcoat == 0` must be an exact identity: the two-pass attenuation
+        // collapses to `(1-0)·(1-0) = 1`, so a zero-strength coat changes
+        // nothing and every pre-existing golden is preserved bit-for-bit.
+        let bare = SurfaceSample {
+            perceptual_roughness: 1.0,
+            metallic: 0.0,
+            clearcoat: 0.0,
+            clearcoat_roughness: 1.0,
+            ..Default::default()
+        };
+        let coated = SurfaceSample {
+            clearcoat: 1.0,
+            ..bare
+        };
+        let zero_a = evaluate_principled_direct(bare, frame(), light());
+        let zero_b = evaluate_principled_direct(
+            SurfaceSample {
+                clearcoat: 0.0,
+                ..coated
+            },
+            frame(),
+            light(),
+        );
+        assert_eq!(zero_a, zero_b, "clearcoat == 0 is not an identity");
+
+        // The two-sided macro-angle transmission must darken the base MORE at
+        // grazing light than at normal incidence: `Fc` climbs toward grazing and
+        // the base is now attenuated on BOTH the view and light crossings. The
+        // former single `v·h` pass left grazing almost un-darkened (`v·h ≈ 1`
+        // when `v ≈ l`), so this ratio pins the physical fix.
+        let g = (0.985_f32, 0.173_f32); // ~80 deg from the normal
+        let grazing_frame = ShadingFrame {
+            normal: [0.0, 1.0, 0.0],
+            view: [g.0, g.1, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
+        };
+        let grazing_light = DirectLightSample {
+            direction: [g.0, g.1, 0.0],
+            ..light()
+        };
+
+        let ratio_normal = total(evaluate_principled_direct(coated, frame(), light()))
+            / total(evaluate_principled_direct(bare, frame(), light()));
+        let ratio_grazing = total(evaluate_principled_direct(
+            coated,
+            grazing_frame,
+            grazing_light,
+        )) / total(evaluate_principled_direct(
+            bare,
+            grazing_frame,
+            grazing_light,
+        ));
+
+        assert!(
+            ratio_normal < 1.0,
+            "coat must remove net energy at normal incidence: ratio = {ratio_normal}"
+        );
+        assert!(
+            ratio_grazing < ratio_normal,
+            "grazing must darken more than normal: grazing {ratio_grazing} >= normal {ratio_normal}"
+        );
     }
 
     #[test]
