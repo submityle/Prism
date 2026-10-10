@@ -3,9 +3,12 @@
 //! Unlike [`super::color_picker`]'s discrete swatch grid, the wheel is a
 //! continuous hue/saturation surface. It renders a `pk-color-wheel` box holding
 //! a `pk-color-wheel__ring` and a draggable `pk-color-wheel__thumb`; an optional
-//! `pk-color-wheel__alpha` track appears when alpha editing is enabled. Concrete
-//! thumb placement on the ring is a backend concern — the control only emits the
-//! classed boxes and paints the thumb with the current value as *data*.
+//! `pk-color-wheel__alpha` track appears when alpha editing is enabled. The ring
+//! approximates a conic hue sweep with a necklace of absolutely-positioned
+//! `pk-color-wheel__hue` dots (the renderer has no real conic gradient).
+//! Concrete thumb placement on the ring is a backend concern — the control only
+//! emits the classed boxes and paints the thumb with the current value as
+//! *data*.
 
 use prism_ui::Element;
 use prism_ui_a11y::Role;
@@ -62,9 +65,30 @@ impl Component for ColorWheel {
     type Props = ColorWheelProps;
 
     fn render(&self, props: &Self::Props) -> Element {
-        use prism_ui_style::StyleProp;
+        use prism_ui_style::{StyleProp, StyleValue};
 
-        let ring = Element::box_().class("pk-color-wheel__ring");
+        // Hue necklace: `HUE_DOTS` dots evenly spaced around the ring, each
+        // painted with its angle's fully-saturated hue, approximate a conic
+        // sweep. The ring is 200px, so its centre sits at (100, 100); dots are
+        // anchored in px and recentred by the class's negative margins.
+        const HUE_DOTS: usize = 36;
+        const CENTER: f32 = 100.0;
+        const RADIUS: f32 = 90.0;
+        let mut ring = Element::box_().class("pk-color-wheel__ring");
+        for i in 0..HUE_DOTS {
+            let turns = i as f32 / HUE_DOTS as f32;
+            let (cos, sin) = cos_sin_turns(turns);
+            let left = CENTER + RADIUS * cos;
+            // Top-origin space: a positive sine points up, so subtract it.
+            let top = CENTER - RADIUS * sin;
+            let (r, g, b) = hue_to_rgb(turns);
+            let dot = Element::box_()
+                .class("pk-color-wheel__hue")
+                .style(StyleProp::Left, StyleValue::px(left))
+                .style(StyleProp::Top, StyleValue::px(top))
+                .style(StyleProp::BackgroundColor, StyleValue::rgba8(r, g, b, 255));
+            ring = ring.child(dot);
+        }
         let mut thumb = Element::box_().class("pk-color-wheel__thumb");
         if let Some(value) = &props.value {
             thumb = thumb.style(StyleProp::BackgroundColor, value.clone());
@@ -110,6 +134,20 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BackgroundColor, tok("color.fill.secondary")),
     );
 
+    // Hue dot: a small round swatch absolutely positioned on the ring. The
+    // `left`/`top` anchors and the hue fill are set inline per dot; the
+    // symmetric -7px margins (half the 14px dot) recentre the anchor on the dot
+    // instead of its top-left corner.
+    sheet.insert(
+        Class::new("pk-color-wheel__hue")
+            .with(StyleProp::Position, StyleValue::keyword(Keyword::Absolute))
+            .with(StyleProp::Width, StyleValue::px(14.0))
+            .with(StyleProp::Height, StyleValue::px(14.0))
+            .with(StyleProp::MarginLeft, StyleValue::px(-7.0))
+            .with(StyleProp::MarginTop, StyleValue::px(-7.0))
+            .with(StyleProp::BorderRadius, tok("radius.capsule")),
+    );
+
     // Thumb: a small white knob with a soft shadow (fill overridden inline).
     sheet.insert(
         Class::new("pk-color-wheel__thumb")
@@ -132,6 +170,50 @@ pub(crate) fn register_styles(sheet: &mut StyleSheet) {
             .with(StyleProp::BorderRadius, tok("radius.capsule"))
             .with(StyleProp::BackgroundColor, tok("color.fill.secondary")),
     );
+}
+
+/// Returns `(cos, sin)` of an angle expressed in turns (1 turn = 2π rad).
+///
+/// This is a `no_std` substitute for `f32::sin_cos`: it uses the Bhaskara I
+/// sine approximation (max absolute error ≈ 1.6e-3) over a half-turn and
+/// mirrors it for the other half, so only multiplies and divides are needed.
+fn cos_sin_turns(turns: f32) -> (f32, f32) {
+    (sin_turns(turns + 0.25), sin_turns(turns))
+}
+
+/// Bhaskara I sine approximation, with `turns` measured in turns (1 turn = 2π rad).
+fn sin_turns(turns: f32) -> f32 {
+    use core::f32::consts::PI;
+
+    let t = turns.rem_euclid(1.0);
+    // Fold onto the positive lobe: the first half-turn maps straight through,
+    // the second half-turn reuses it with a flipped sign.
+    let (sign, x) = if t < 0.5 {
+        (1.0, t * 2.0 * PI)
+    } else {
+        (-1.0, (t - 0.5) * 2.0 * PI)
+    };
+    let g = x * (PI - x);
+    sign * (16.0 * g) / (5.0 * PI * PI - 4.0 * g)
+}
+
+/// Converts a hue (in turns) at full saturation and value to an 8-bit RGB
+/// triple. This is the `S = V = 1` slice of HSV, which is all the hue ring
+/// needs.
+fn hue_to_rgb(turns: f32) -> (u8, u8, u8) {
+    let h = turns.rem_euclid(1.0) * 6.0;
+    let sector = h as usize;
+    let f = h - sector as f32;
+    let q = 1.0 - f;
+    let (r, g, b) = match sector {
+        0 => (1.0, f, 0.0),
+        1 => (q, 1.0, 0.0),
+        2 => (0.0, 1.0, f),
+        3 => (0.0, q, 1.0),
+        4 => (f, 0.0, 1.0),
+        _ => (1.0, 0.0, q),
+    };
+    ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
 #[cfg(test)]
@@ -179,5 +261,41 @@ mod tests {
     #[test]
     fn role_is_group() {
         assert_eq!(ColorWheel::role(), Role::Group);
+    }
+
+    #[test]
+    fn ring_carries_a_hue_necklace() {
+        let el = render(ColorWheelProps::new());
+        let ring = &el.child_elements()[0];
+        let dots = ring.child_elements();
+        assert_eq!(dots.len(), 36);
+        for dot in dots {
+            assert!(dot.class_names().iter().any(|c| c == "pk-color-wheel__hue"));
+            let pairs = dot.inline_pairs();
+            assert!(pairs.iter().any(|(p, _)| *p == StyleProp::BackgroundColor));
+            assert!(pairs.iter().any(|(p, _)| *p == StyleProp::Left));
+            assert!(pairs.iter().any(|(p, _)| *p == StyleProp::Top));
+        }
+    }
+
+    #[test]
+    fn trig_matches_cardinal_turns() {
+        for (turns, want_cos, want_sin) in [
+            (0.0_f32, 1.0_f32, 0.0_f32),
+            (0.25, 0.0, 1.0),
+            (0.5, -1.0, 0.0),
+            (0.75, 0.0, -1.0),
+        ] {
+            let (cos, sin) = cos_sin_turns(turns);
+            assert!((cos - want_cos).abs() < 0.02, "cos({turns}) = {cos}");
+            assert!((sin - want_sin).abs() < 0.02, "sin({turns}) = {sin}");
+        }
+    }
+
+    #[test]
+    fn hue_primaries_are_correct() {
+        assert_eq!(hue_to_rgb(0.0), (255, 0, 0));
+        assert_eq!(hue_to_rgb(1.0 / 3.0), (0, 255, 0));
+        assert_eq!(hue_to_rgb(2.0 / 3.0), (0, 0, 255));
     }
 }
