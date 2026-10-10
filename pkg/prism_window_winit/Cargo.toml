@@ -1,0 +1,18 @@
+[package]
+name = "prism_window_winit"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism window backend built on winit 0.30. Owns the OS event loop on the main thread, translates platform messages into the kernel's Copy WindowEventEnvelope stream, applies WindowCommand envelopes via a three-state Desired/Applied/Realized model, bridges raw-window-handle 0.6 for the renderer, and coalesces high-frequency events per frame. The deterministic model lives in prism_window; this crate holds the platform-specific, std-only dirty work."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_window = { path = "../prism_window" }
+# winit's default features already include rwh_06 (raw-window-handle 0.6) plus
+# the x11/wayland Linux backends; macOS/Windows backends are target-gated.
+winit = "0.30"
+raw-window-handle = "0.6"
+
+[lints]
+workspace = true
