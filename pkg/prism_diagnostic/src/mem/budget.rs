@@ -145,7 +145,11 @@ impl MemBudgetRegistry {
     #[must_use]
     pub fn evaluate(&self, category: &str, measured_bytes: u64) -> Option<MemBudgetStatus> {
         let budget = self.budgets.iter().find(|b| b.category == category)?;
-        Some(status(&budget.category, measured_bytes, budget.budget_bytes))
+        Some(status(
+            &budget.category,
+            measured_bytes,
+            budget.budget_bytes,
+        ))
     }
 
     /// Evaluate every declared category against a lookup of measured live bytes.
@@ -178,6 +182,33 @@ impl MemBudgetRegistry {
             any_over_budget,
         }
     }
+
+    /// Evaluate every declared category against the per-tag **live** bytes
+    /// reported by [`crate::alloc_track::tag_report`], matching each budget
+    /// category label to the allocation tag of the same name.
+    ///
+    /// This is the turn-key path for the per-tag live signal produced by
+    /// [`LiveTrackingAllocator`]: instead of hand-rolling the category-to-tag
+    /// name match at the call site, declare budgets whose labels equal the tag
+    /// names (`"assets"`/`"render"`/`"gameplay"`) and read the measured live
+    /// residency straight from the allocator. A category with no matching tag
+    /// (or whose tag has no live bytes, e.g. under the header-free
+    /// [`TrackingAllocator`]) is treated as `0` live bytes. Only available with
+    /// the `alloc-track` feature.
+    ///
+    /// [`LiveTrackingAllocator`]: crate::alloc_track::LiveTrackingAllocator
+    /// [`TrackingAllocator`]: crate::alloc_track::TrackingAllocator
+    #[cfg(feature = "alloc-track")]
+    #[must_use]
+    pub fn evaluate_from_live_tags(&self) -> MemBudgetReport {
+        let report = crate::alloc_track::tag_report();
+        self.evaluate_all(|category| {
+            report
+                .iter()
+                .find(|stat| stat.name == category)
+                .map_or(0, |stat| stat.live_bytes)
+        })
+    }
 }
 
 /// Build a [`MemBudgetStatus`] from a measured/budget pair.
@@ -189,5 +220,93 @@ fn status(category: &str, measured_bytes: u64, budget_bytes: u64) -> MemBudgetSt
         budget_bytes,
         over_budget: overspend_bytes > 0,
         overspend_bytes,
+    }
+}
+
+#[cfg(all(test, feature = "alloc-track"))]
+#[expect(
+    unsafe_code,
+    reason = "driving GlobalAlloc::alloc/dealloc directly to exercise per-tag \
+              live-byte budgeting; every block is freed with its own layout"
+)]
+mod live_tag_tests {
+    use super::*;
+    use crate::alloc_track::{register_tag, tag_scope, LiveTrackingAllocator};
+    use core::alloc::{GlobalAlloc, Layout};
+    use std::alloc::System;
+
+    // Drive a tagged allocation through the live allocator so the budget guard
+    // can read real per-tag live residency, then free it and re-check.
+    #[test]
+    fn evaluate_from_live_tags_reads_allocator_residency() {
+        let category = "prism::test::budget::live_render";
+        let tag = register_tag(category).expect("tag slot");
+        let alloc = LiveTrackingAllocator::new(System);
+
+        let mut registry = MemBudgetRegistry::new();
+        registry.declare(category, 4096);
+
+        // No live bytes yet: within budget.
+        let before = registry.evaluate_from_live_tags();
+        let st_before = before
+            .statuses
+            .iter()
+            .find(|s| s.category == category)
+            .expect("declared category present");
+        let baseline = st_before.measured_bytes;
+        assert!(!st_before.over_budget, "baseline must be within budget");
+
+        // Allocate 8192 bytes under the tag -> over the 4096 budget.
+        let layout = Layout::from_size_align(8192, 16).unwrap();
+        let ptr = {
+            let _scope = tag_scope(tag);
+            // SAFETY: non-zero layout; freed below with the same layout.
+            unsafe { alloc.alloc(layout) }
+        };
+        assert!(!ptr.is_null());
+
+        let over = registry.evaluate_from_live_tags();
+        let st_over = over
+            .statuses
+            .iter()
+            .find(|s| s.category == category)
+            .expect("category present");
+        assert_eq!(st_over.measured_bytes, baseline + 8192);
+        assert!(st_over.over_budget, "8192 live must exceed the 4096 budget");
+        assert_eq!(
+            st_over.overspend_bytes,
+            (baseline + 8192).saturating_sub(4096)
+        );
+        assert!(over.any_over_budget);
+
+        // Free it: live residency returns to baseline, back within budget.
+        // SAFETY: same block/layout as the allocation above.
+        unsafe { alloc.dealloc(ptr, layout) };
+        let after = registry.evaluate_from_live_tags();
+        let st_after = after
+            .statuses
+            .iter()
+            .find(|s| s.category == category)
+            .expect("category present");
+        assert_eq!(st_after.measured_bytes, baseline);
+        assert!(
+            !st_after.over_budget,
+            "after free must be within budget again"
+        );
+    }
+
+    // A declared category with no matching allocation tag reads as 0 live bytes.
+    #[test]
+    fn undeclared_tag_category_reads_zero() {
+        let mut registry = MemBudgetRegistry::new();
+        registry.declare("prism::test::budget::no_such_tag", 1024);
+        let report = registry.evaluate_from_live_tags();
+        let st = report
+            .statuses
+            .iter()
+            .find(|s| s.category == "prism::test::budget::no_such_tag")
+            .expect("declared category present");
+        assert_eq!(st.measured_bytes, 0);
+        assert!(!st.over_budget);
     }
 }

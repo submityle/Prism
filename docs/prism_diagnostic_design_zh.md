@@ -380,7 +380,7 @@ AAA 项目的帧时间是**契约**（60/120Hz 必达），不能靠事后看 tr
 
 **交付状态**：热路径核心 `alloc_track`（带标签 `GlobalAlloc`、精确 live/peak 字节、per-tag 累计）已交付，并新增 `LiveTrackingAllocator`——在零开销无头部 `TrackingAllocator` 之外附加 opt-in 的 per-allocation 头部，按分配基址盖上归属标签，`dealloc` 读头部回减对应标签的 live 计数，交付精确 per-tag **live** 字节（§24.3 泄漏归属信号；`TagStat::live_bytes` 填充）；无头部分配器仍是默认零成本路径、其 `live_bytes` 恒为 0；本次在其之上补齐帧/作用域边界的对账与守卫层，置于独立 `mem` 子模块（`src/mem/`，纯 `core`/`alloc` 算术、无 `unsafe`、与 `alloc-track` feature 无关，始终编译）：
 - 泄漏检测（`mem::leak`）：`LeakCheckpoint` 在作用域/帧开闭边界各取一次 live 字节/分配快照，`reconcile` 出带符号残差 `LeakReport`（正=泄漏、负=过度释放、零=归零平衡）；`alloc-track` 开启时可直接从 `AllocSnapshot` 构造。
-- 预算守卫（`mem::budget`）：`MemBudgetRegistry` 按类别（资产/渲染/gameplay）声明 live 字节上限，`evaluate`/`evaluate_all` 出 `MemBudgetReport`（逐类别红标 `over_budget`、超额字节、聚合与 `offenders()`），声明顺序稳定以便 diff/HUD；类别名可与 `alloc_track::tag_report` 的标签名对应取实测。
+- 预算守卫（`mem::budget`）：`MemBudgetRegistry` 按类别（资产/渲染/gameplay）声明 live 字节上限，`evaluate`/`evaluate_all` 出 `MemBudgetReport`（逐类别红标 `over_budget`、超额字节、聚合与 `offenders()`），声明顺序稳定以便 diff/HUD；类别名可与 `alloc_track::tag_report` 的标签名对应取实测，并提供 turn-key 的 `evaluate_from_live_tags()`（`alloc-track` feature 下）直接从 `LiveTrackingAllocator` 的 per-tag **live** 字节求值，免调用方手写类别→标签名匹配，无匹配标签的类别记 0。
 - 碎片可视化（`mem::fragmentation`）：`analyze_fragmentation(capacity, &[Span])` 归一化（排序/合并/钳位）占用区间后，出 `FragmentationReport`（used/free 字节、空闲 run 数、最大连续空闲 run、`fragmentation_ratio`、`can_fit`）；`occupancy_map(capacity, occupied, buckets)` 出每桶 0..=100 占用百分比热条。
 专项测试 `tests_mem.rs`（12 用例，手算 oracle 对拍）全绿；`LiveTrackingAllocator` 另有 5 个 inline 单元测试（对齐/边界、per-tag live 往返、无标签不污染、交错标签独立、realloc 调整 live）直接驱动 `alloc`/`dealloc`（无需装为 `#[global_allocator]`，爆炸半径受限）全绿，`cargo clippy -p prism_diagnostic --features alloc-track --all-targets` 与默认 features 均零告警。
 
