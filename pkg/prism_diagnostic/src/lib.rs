@@ -134,33 +134,29 @@ pub mod trace;
 #[cfg(any(feature = "tracy", feature = "remote", feature = "crash"))]
 pub mod wire;
 
-#[cfg(feature = "alloc-track")]
-pub use alloc_track::{
-    register_tag, reset_all, reset_peak, set_enabled, snapshot as alloc_snapshot, tag_report,
-    tag_scope, AllocSnapshot, TagId, TagScope, TagStat, TrackingAllocator,
-};
-#[cfg(feature = "crash")]
-pub use crash::{
-    CrashContext, CrashReason, CrashReport, ModuleEntry, RegisterSnapshot, StackFrame,
-    ThreadContext, CRASH_REPORT_MAGIC, CRASH_REPORT_VERSION,
-};
 pub use aggregate::{
     estimate_fleet_reports, AnomalyConfig, AssembledTrace, ClusterAggregator,
     ClusterFrametimeReport, CriticalPath, DistributedSpan, InstanceAnomaly, InstanceFrameReport,
     InstanceSummary, SampleRate, SampleReason, SamplingController, SamplingDecision,
     SamplingPolicy, ServiceLatency, SpanId, SpanKind, TraceAssembler, TraceId, TraceNode,
 };
+#[cfg(feature = "alloc-track")]
+pub use alloc_track::{
+    register_tag, reset_all, reset_peak, set_enabled, snapshot as alloc_snapshot, tag_report,
+    tag_scope, AllocSnapshot, LiveTrackingAllocator, TagId, TagScope, TagStat, TrackingAllocator,
+};
 pub use budget::{
-    hotspot_diff, Baseline, BudgetRegistry, BudgetStatus, FrameBudget, FrameBudgetReport,
-    Hotspot, HotspotDelta, RegressionAlert, RegressionConfig, RegressionTracker,
+    hotspot_diff, Baseline, BudgetRegistry, BudgetStatus, FrameBudget, FrameBudgetReport, Hotspot,
+    HotspotDelta, RegressionAlert, RegressionConfig, RegressionTracker,
+};
+#[cfg(feature = "crash")]
+pub use crash::{
+    CrashContext, CrashReason, CrashReport, ModuleEntry, RegisterSnapshot, StackFrame,
+    ThreadContext, CRASH_REPORT_MAGIC, CRASH_REPORT_VERSION,
 };
 pub use determinism::{
     compare as compare_traces, fnv1a_64 as determinism_fnv1a_64, DeterminismTrace, FrameHash,
     FrameInput, InputRecorder, InputReplay, StateHasher, TraceDiff,
-};
-pub use mem::{
-    analyze_fragmentation, occupancy_map, FragmentationReport, LeakCheckpoint, LeakReport,
-    MemBudget, MemBudgetRegistry, MemBudgetReport, MemBudgetStatus, Span,
 };
 pub use filter::{max_level, set_max_level};
 #[cfg(feature = "gpu")]
@@ -173,6 +169,10 @@ pub use hitch::{HitchConfig, HitchDetector, HitchEvent};
 pub use instrument::{
     async_begin, async_end, flow_finish, flow_start, flow_step, instrument, instrument_system,
     next_flow_id, FlowId, Instrumentable, JobFlow, JobScope, SystemScope,
+};
+pub use mem::{
+    analyze_fragmentation, occupancy_map, FragmentationReport, LeakCheckpoint, LeakReport,
+    MemBudget, MemBudgetRegistry, MemBudgetReport, MemBudgetStatus, Span,
 };
 pub use metrics::{
     hud_lines, Counter, FrameStatsSnapshot, FrameTimer, Gauge, Histogram, HistogramSnapshot, Hud,
@@ -224,25 +224,25 @@ extern crate alloc;
 
 #[cfg(test)]
 mod tests;
-#[cfg(all(test, feature = "alloc-track"))]
-mod tests_m6_alloc;
-#[cfg(all(test, feature = "crash"))]
-mod tests_m6_crash;
 #[cfg(test)]
 mod tests_aggregate;
 #[cfg(test)]
 mod tests_budget;
 #[cfg(test)]
 mod tests_determinism;
+#[cfg(all(test, feature = "gpu"))]
+mod tests_gpu_timeline;
+#[cfg(all(test, feature = "alloc-track"))]
+mod tests_m6_alloc;
+#[cfg(all(test, feature = "crash"))]
+mod tests_m6_crash;
+#[cfg(test)]
+mod tests_m6_hitch;
+#[cfg(test)]
+mod tests_m6_replay;
 #[cfg(test)]
 mod tests_mem;
 #[cfg(test)]
 mod tests_sampling;
 #[cfg(test)]
 mod tests_telemetry;
-#[cfg(all(test, feature = "gpu"))]
-mod tests_gpu_timeline;
-#[cfg(test)]
-mod tests_m6_hitch;
-#[cfg(test)]
-mod tests_m6_replay;

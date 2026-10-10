@@ -1,47 +1,50 @@
 //! Allocation tracking (`alloc-track` feature, design §17 / §24.3, M6).
 //!
-//! [`TrackingAllocator`] wraps any [`GlobalAlloc`] and accounts every
-//! allocation and deallocation into process-global atomic counters: live bytes,
-//! peak live bytes, cumulative allocated/freed bytes, and alloc/free counts.
-//! Because [`GlobalAlloc::dealloc`] is handed the original [`Layout`], the byte
-//! accounting is *exact and symmetric* — not an estimate.
+//! This module owns the process-global allocation accounting used by the
+//! `mem` reconciliation layer. It is split into:
 //!
-//! It additionally supports optional per-callsite tagging: register a tag with
-//! [`register_tag`], scope it with [`tag_scope`], and every allocation made on
-//! that thread while the scope is live is attributed to the tag. Tag accounting
-//! is cumulative (allocated bytes + allocation count per tag); correct per-tag
-//! *live* bytes would require a per-allocation header and is a documented
-//! follow-up (see the crate `README`/design §24.3).
+//! - shared counters + tag bookkeeping (this file),
+//! - [`TrackingAllocator`](tracking::TrackingAllocator): a zero-overhead,
+//!   header-free [`GlobalAlloc`] wrapper that accounts live/peak/cumulative
+//!   bytes exactly and attributes *cumulative* bytes to per-callsite tags, and
+//! - [`LiveTrackingAllocator`](live::LiveTrackingAllocator): a header-based
+//!   wrapper that additionally delivers exact per-tag **live** bytes by
+//!   stamping each allocation with the tag that owned it, so a later free (on
+//!   any thread, under any scope) decrements the correct tag.
+//!
+//! Both allocators feed the same shared counters. The header-free allocator is
+//! the zero-cost default; the live allocator trades a small per-allocation
+//! header (and copy-based `realloc`) for precise per-tag residency, which is
+//! the §24.3 leak-attribution signal.
 //!
 //! The hot path performs only relaxed atomic adds and a thread-local read, and
 //! never allocates, locks, or recurses into the allocator — a hard requirement
 //! for a type installed as `#[global_allocator]`.
 //!
-//! This is the only module in the crate that uses `unsafe`, as implementing
-//! [`GlobalAlloc`] inherently requires it. The crate-level
+//! Allocation tracking is the only area in the crate that uses `unsafe`, as
+//! implementing [`GlobalAlloc`] inherently requires it. The crate-level
 //! `#![forbid(unsafe_code)]` is relaxed to `deny` only when this feature is on
-//! (see `lib.rs`); every `unsafe` site below carries a `SAFETY` justification.
-
-#![expect(
-    unsafe_code,
-    reason = "implementing GlobalAlloc requires unsafe; this is the single \
-              audited unsafe module, gated behind the alloc-track feature"
-)]
+//! (see `lib.rs`); every `unsafe` site carries a `SAFETY` justification and
+//! lives in the `tracking`/`live` submodules.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::alloc::{GlobalAlloc, Layout};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::alloc::System;
 use std::sync::Mutex;
+
+mod live;
+mod tracking;
+
+pub use live::LiveTrackingAllocator;
+pub use tracking::TrackingAllocator;
 
 /// Maximum number of distinct allocation tags.
 pub const MAX_TAGS: usize = 32;
 
 /// A no-op sentinel meaning "no tag is active on this thread".
-const UNTAGGED: usize = usize::MAX;
+pub(crate) const UNTAGGED: usize = usize::MAX;
 
 static LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
 static PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -53,6 +56,8 @@ static ENABLED: AtomicBool = AtomicBool::new(true);
 
 static TAG_BYTES: [AtomicU64; MAX_TAGS] = [const { AtomicU64::new(0) }; MAX_TAGS];
 static TAG_ALLOCS: [AtomicU64; MAX_TAGS] = [const { AtomicU64::new(0) }; MAX_TAGS];
+/// Per-tag bytes currently live, maintained only by [`LiveTrackingAllocator`].
+static TAG_LIVE_BYTES: [AtomicU64; MAX_TAGS] = [const { AtomicU64::new(0) }; MAX_TAGS];
 
 /// Registered tag names, keyed by [`TagId`] index. Touched only off the hot
 /// path (registration + reporting), never from inside an allocation.
@@ -93,7 +98,9 @@ impl TagId {
 /// Registration is idempotent: the same name always maps to the same [`TagId`].
 /// Returns `None` once [`MAX_TAGS`] distinct tags have been registered.
 pub fn register_tag(name: &'static str) -> Option<TagId> {
-    let mut guard = TAG_NAMES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = TAG_NAMES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (index, slot) in guard.names.iter().enumerate().take(guard.len) {
         if *slot == Some(name) {
             return Some(TagId(index));
@@ -144,8 +151,18 @@ fn current_tag() -> Option<usize> {
     }
 }
 
+/// The current thread's raw active tag index, or [`UNTAGGED`] when none is set
+/// (or the thread-local is unavailable during teardown).
 #[inline]
-fn record_alloc(size: usize) {
+pub(crate) fn current_tag_raw() -> usize {
+    match CURRENT_TAG.try_with(Cell::get) {
+        Ok(id) if id < MAX_TAGS => id,
+        _ => UNTAGGED,
+    }
+}
+
+#[inline]
+pub(crate) fn record_alloc(size: usize) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
@@ -157,12 +174,7 @@ fn record_alloc(size: usize) {
     // Bump the running peak to `live` if it is a new high-water mark.
     let mut peak = PEAK_BYTES.load(Ordering::Relaxed);
     while live > peak {
-        match PEAK_BYTES.compare_exchange_weak(
-            peak,
-            live,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match PEAK_BYTES.compare_exchange_weak(peak, live, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => break,
             Err(observed) => peak = observed,
         }
@@ -175,7 +187,7 @@ fn record_alloc(size: usize) {
 }
 
 #[inline]
-fn record_free(size: usize) {
+pub(crate) fn record_free(size: usize) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
@@ -188,93 +200,40 @@ fn record_free(size: usize) {
     let mut current = LIVE_BYTES.load(Ordering::Relaxed);
     loop {
         let next = current.saturating_sub(size);
-        match LIVE_BYTES.compare_exchange_weak(
-            current,
-            next,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match LIVE_BYTES.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+        {
             Ok(_) => break,
             Err(observed) => current = observed,
         }
     }
 }
 
-/// A [`GlobalAlloc`] wrapper that accounts allocations into process-global
-/// counters while delegating the actual memory work to an inner allocator
-/// (defaulting to the system allocator).
-///
-/// Install it as the program allocator:
-///
-/// ```ignore
-/// use prism_diagnostic::alloc_track::TrackingAllocator;
-/// use std::alloc::System;
-///
-/// #[global_allocator]
-/// static GLOBAL: TrackingAllocator<System> = TrackingAllocator::new(System);
-/// ```
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TrackingAllocator<A: GlobalAlloc = System> {
-    inner: A,
-}
-
-impl<A: GlobalAlloc> TrackingAllocator<A> {
-    /// Wrap `inner`, accounting all traffic routed through it.
-    pub const fn new(inner: A) -> Self {
-        Self { inner }
-    }
-
-    /// Borrow the wrapped allocator.
-    pub fn inner(&self) -> &A {
-        &self.inner
+/// Add `size` to the per-tag live residency for `tag` (no-op when untagged or
+/// out of range). Called by [`LiveTrackingAllocator`] on allocation.
+#[inline]
+pub(crate) fn record_tag_live_alloc(tag: usize, size: usize) {
+    if tag < MAX_TAGS {
+        TAG_LIVE_BYTES[tag].fetch_add(size as u64, Ordering::Relaxed);
     }
 }
 
-// SAFETY: `TrackingAllocator` forwards every method to `self.inner`, a correct
-// `GlobalAlloc`, with identical pointers and layouts. The accounting around the
-// delegate calls only touches atomics and a thread-local `Cell` — it never
-// allocates, deallocates, or reenters the allocator — so it cannot violate the
-// `GlobalAlloc` contract. Returned pointers and alignment are exactly those the
-// inner allocator produced.
-unsafe impl<A: GlobalAlloc> GlobalAlloc for TrackingAllocator<A> {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: `layout` is a valid non-zero layout per the caller contract;
-        // forwarded unchanged to the inner allocator.
-        let ptr = unsafe { self.inner.alloc(layout) };
-        if !ptr.is_null() {
-            record_alloc(layout.size());
-        }
-        ptr
+/// Subtract `size` from the per-tag live residency for `tag`, saturating at
+/// zero (no-op when untagged or out of range). Called by
+/// [`LiveTrackingAllocator`] on deallocation of a block stamped with `tag`.
+#[inline]
+pub(crate) fn record_tag_live_free(tag: usize, size: usize) {
+    if tag >= MAX_TAGS {
+        return;
     }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: same contract as `alloc`; forwarded unchanged.
-        let ptr = unsafe { self.inner.alloc_zeroed(layout) };
-        if !ptr.is_null() {
-            record_alloc(layout.size());
+    let slot = &TAG_LIVE_BYTES[tag];
+    let mut current = slot.load(Ordering::Relaxed);
+    let size = size as u64;
+    loop {
+        let next = current.saturating_sub(size);
+        match slot.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
         }
-        ptr
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: `ptr` was returned by a previous `alloc`/`realloc` of this
-        // allocator with this exact `layout`; forwarded unchanged to free it.
-        unsafe { self.inner.dealloc(ptr, layout) };
-        record_free(layout.size());
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: `ptr`/`layout` describe a current allocation of this
-        // allocator and `new_size` is a valid size per the caller contract;
-        // forwarded unchanged.
-        let new_ptr = unsafe { self.inner.realloc(ptr, layout, new_size) };
-        if !new_ptr.is_null() {
-            // On success the old block (of `layout.size()`) is released and a
-            // `new_size` block is live.
-            record_free(layout.size());
-            record_alloc(new_size);
-        }
-        new_ptr
     }
 }
 
@@ -317,7 +276,12 @@ pub fn snapshot() -> AllocSnapshot {
     }
 }
 
-/// Cumulative accounting for one registered tag.
+/// Per-tag accounting for one registered tag.
+///
+/// `allocated_bytes`/`alloc_count` are cumulative and maintained by both
+/// allocators. `live_bytes` is the exact bytes currently outstanding under the
+/// tag; it is maintained only by [`LiveTrackingAllocator`] and stays `0` under
+/// the header-free [`TrackingAllocator`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TagStat {
     /// Tag identifier.
@@ -328,12 +292,16 @@ pub struct TagStat {
     pub allocated_bytes: u64,
     /// Cumulative allocations under this tag.
     pub alloc_count: u64,
+    /// Bytes currently live under this tag (0 unless the live allocator is in
+    /// use).
+    pub live_bytes: u64,
 }
 
-/// Report cumulative per-tag accounting for every registered tag, in
-/// registration order.
+/// Report per-tag accounting for every registered tag, in registration order.
 pub fn tag_report() -> Vec<TagStat> {
-    let guard = TAG_NAMES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = TAG_NAMES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut out = Vec::with_capacity(guard.len);
     for (index, slot) in guard.names.iter().enumerate().take(guard.len) {
         if let Some(name) = *slot {
@@ -342,6 +310,7 @@ pub fn tag_report() -> Vec<TagStat> {
                 name,
                 allocated_bytes: TAG_BYTES[index].load(Ordering::Relaxed),
                 alloc_count: TAG_ALLOCS[index].load(Ordering::Relaxed),
+                live_bytes: TAG_LIVE_BYTES[index].load(Ordering::Relaxed),
             });
         }
     }
@@ -381,6 +350,9 @@ pub fn reset_all() {
         slot.store(0, Ordering::Relaxed);
     }
     for slot in &TAG_ALLOCS {
+        slot.store(0, Ordering::Relaxed);
+    }
+    for slot in &TAG_LIVE_BYTES {
         slot.store(0, Ordering::Relaxed);
     }
 }
