@@ -70,6 +70,8 @@ mod id;
 mod load_state;
 mod loader;
 mod path;
+#[cfg(feature = "std")]
+mod source;
 mod storage;
 mod type_id;
 
@@ -86,6 +88,8 @@ pub use id::{AssetId, AssetIndex, UntypedAssetId};
 pub use load_state::{LoadState, RecursiveDependencyLoadState};
 pub use loader::{LoaderId, LoaderRegistry, SuffixConflict};
 pub use path::AssetPath;
+#[cfg(feature = "std")]
+pub use source::{AssetMeta, AssetReader, AssetSources, FsSource, MemSource, ReadError};
 pub use storage::Assets;
 pub use type_id::AssetTypeId;
 

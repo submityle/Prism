@@ -1122,3 +1122,159 @@ fn loader_registry_bookkeeping() {
         Some(id)
     );
 }
+
+// --- std VFS: AssetReader / MemSource / FsSource / AssetSources (§10) ---
+
+#[cfg(feature = "std")]
+mod vfs {
+    use crate::{AssetPath, AssetReader, AssetSources, FsSource, MemSource, ReadError};
+    use alloc::string::ToString;
+    use alloc::sync::Arc;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn mem() -> MemSource {
+        let mut m = MemSource::new();
+        m.insert("textures/hero.png", vec![1u8, 2, 3, 4, 5]);
+        m.insert("textures/sky.png", vec![9u8, 8, 7]);
+        m.insert("meshes/hero.gltf", vec![0u8; 16]);
+        m
+    }
+
+    #[test]
+    fn mem_read_and_range() {
+        let m = mem();
+        assert_eq!(m.read("textures/hero.png").unwrap(), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            m.read_range("textures/hero.png", 1, 3).unwrap(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(
+            m.read_range("textures/hero.png", 3, 10),
+            Err(ReadError::OutOfRange {
+                offset: 3,
+                len: 10,
+                size: 5
+            })
+        );
+        assert_eq!(m.read("nope.png"), Err(ReadError::NotFound));
+    }
+
+    #[test]
+    fn mem_metadata_and_list() {
+        let m = mem();
+        let meta = m.metadata("textures/hero.png").unwrap();
+        assert_eq!(meta.size, 5);
+        assert!(!meta.is_dir);
+        assert!(m.metadata("textures").unwrap().is_dir);
+        let mut top = m.list("").unwrap();
+        top.sort();
+        assert_eq!(top, vec!["meshes".to_string(), "textures".to_string()]);
+        let mut tex = m.list("textures").unwrap();
+        tex.sort();
+        assert_eq!(tex, vec!["hero.png".to_string(), "sky.png".to_string()]);
+    }
+
+    #[test]
+    fn path_traversal_is_rejected() {
+        let m = mem();
+        assert_eq!(m.read("../secret"), Err(ReadError::InvalidPath));
+        assert_eq!(m.read("/etc/passwd"), Err(ReadError::InvalidPath));
+        assert_eq!(m.read("a/../../b"), Err(ReadError::InvalidPath));
+    }
+
+    #[test]
+    fn overlay_priority_and_scheme_targeting() {
+        let mut base = MemSource::new();
+        base.insert("config.txt", vec![0u8]);
+        base.insert("only_base.txt", vec![42u8]);
+        let mut patch = MemSource::new();
+        patch.insert("config.txt", vec![1u8]); // shadows base
+
+        let mut sources = AssetSources::new();
+        sources.mount("base", Arc::new(base), 0);
+        sources.mount("patch", Arc::new(patch), 10); // higher priority wins
+
+        // No scheme: overlay order means the patch shadows the base.
+        assert_eq!(
+            sources.read(&AssetPath::parse("config.txt")).unwrap(),
+            vec![1]
+        );
+        // Falls through to base for assets the patch lacks.
+        assert_eq!(
+            sources.read(&AssetPath::parse("only_base.txt")).unwrap(),
+            vec![42]
+        );
+        // Explicit scheme targets exactly one mount (even the shadowed one).
+        assert_eq!(
+            sources
+                .read(&AssetPath::parse("base://config.txt"))
+                .unwrap(),
+            vec![0]
+        );
+        // Unknown mount name resolves to NotFound.
+        assert_eq!(
+            sources.read(&AssetPath::parse("ghost://x.txt")),
+            Err(ReadError::NotFound)
+        );
+        assert_eq!(sources.overlay_order(), vec!["patch", "base"]);
+    }
+
+    #[test]
+    fn hard_error_not_masked_by_lower_mount() {
+        // A mount that returns a hard error must not be silently skipped in
+        // favor of a lower mount; only NotFound falls through.
+        struct Corrupt;
+        impl AssetReader for Corrupt {
+            fn read(&self, _path: &str) -> Result<Vec<u8>, ReadError> {
+                Err(ReadError::Io("disk fault".into()))
+            }
+            fn metadata(&self, _path: &str) -> Result<crate::AssetMeta, ReadError> {
+                Err(ReadError::Io("disk fault".into()))
+            }
+        }
+        let mut base = MemSource::new();
+        base.insert("x.txt", vec![7u8]);
+        let mut sources = AssetSources::new();
+        sources.mount("base", Arc::new(base), 0);
+        sources.mount("corrupt", Arc::new(Corrupt), 10);
+        assert_eq!(
+            sources.read(&AssetPath::parse("x.txt")),
+            Err(ReadError::Io("disk fault".into()))
+        );
+    }
+
+    #[test]
+    fn fs_source_reads_and_confines_to_root() {
+        let dir = std::env::temp_dir().join(alloc::format!(
+            "prism_asset_fs_{}_{}",
+            std::process::id(),
+            now_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"hello").unwrap();
+        std::fs::write(dir.join("sub/b.txt"), b"world!!").unwrap();
+
+        let src = FsSource::new(&dir);
+        assert_eq!(src.read("a.txt").unwrap(), b"hello");
+        assert_eq!(src.read_range("sub/b.txt", 1, 4).unwrap(), b"orld");
+        assert_eq!(src.metadata("a.txt").unwrap().size, 5);
+        assert!(src.metadata("sub").unwrap().is_dir);
+        let mut listed = src.list("").unwrap();
+        listed.sort();
+        assert_eq!(listed, vec!["a.txt".to_string(), "sub".to_string()]);
+        // Traversal is refused before any syscall.
+        assert_eq!(src.read("../a.txt"), Err(ReadError::InvalidPath));
+        assert_eq!(src.read("/etc/hosts"), Err(ReadError::InvalidPath));
+        assert_eq!(src.read("missing.txt"), Err(ReadError::NotFound));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn now_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    }
+}
