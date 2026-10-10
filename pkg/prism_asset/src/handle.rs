@@ -1,6 +1,9 @@
 //! Reference-counted asset handles.
 
+use crate::asset::Asset;
+use crate::guid::StableGuid;
 use crate::id::{AssetId, UntypedAssetId};
+use crate::type_id::AssetTypeId;
 use alloc::sync::{Arc, Weak};
 use core::cmp::Ordering;
 use core::fmt;
@@ -232,6 +235,101 @@ impl fmt::Debug for UntypedHandle {
         f.debug_struct("UntypedHandle")
             .field("id", &self.inner.id)
             .field("handle_id", &self.inner.handle_id)
+            .finish()
+    }
+}
+
+/// A persistent, non-owning reference to an asset by its [`StableGuid`].
+///
+/// Where [`Handle`] is a *runtime* strong reference (it keeps the asset alive
+/// and knows its live [`AssetIndex`](crate::AssetIndex)), a `SoftHandle` is a
+/// *persistent* reference that stores only the asset's stable identity. It does
+/// **not** force the target to load and does **not** keep it resident, so a
+/// scene can hold millions of soft references (per design §23.2) at the cost of
+/// a 16-byte guid plus an 8-byte type tag, resolving them to real handles lazily
+/// through the loader (a later milestone) only when something is actually used.
+///
+/// Carrying the [`AssetTypeId`] alongside the guid lets a resolver reject a
+/// cross-type reference (a `SoftHandle<Mesh>` pointed at a texture guid) instead
+/// of silently loading the wrong store.
+pub struct SoftHandle<A: ?Sized> {
+    guid: StableGuid,
+    type_id: AssetTypeId,
+    marker: PhantomData<fn() -> A>,
+}
+
+impl<A: ?Sized> SoftHandle<A> {
+    /// Creates a soft reference to the asset with the given stable identity and
+    /// type tag.
+    #[must_use]
+    pub const fn new(guid: StableGuid, type_id: AssetTypeId) -> Self {
+        Self {
+            guid,
+            type_id,
+            marker: PhantomData,
+        }
+    }
+
+    /// The reserved null soft handle, referring to no asset.
+    #[must_use]
+    pub const fn null(type_id: AssetTypeId) -> Self {
+        Self::new(StableGuid::NIL, type_id)
+    }
+
+    /// The persistent identity this soft handle points at.
+    #[must_use]
+    pub const fn guid(&self) -> StableGuid {
+        self.guid
+    }
+
+    /// The declared asset type of the target.
+    #[must_use]
+    pub const fn type_id(&self) -> AssetTypeId {
+        self.type_id
+    }
+
+    /// Whether this soft handle refers to no asset
+    /// ([`StableGuid::NIL`](crate::StableGuid::NIL)).
+    #[must_use]
+    pub const fn is_null(&self) -> bool {
+        self.guid.is_nil()
+    }
+}
+
+impl<A: Asset> SoftHandle<A> {
+    /// Creates a soft reference to the asset at `path`, deriving both its stable
+    /// guid and its type tag from the typed target `A`.
+    #[must_use]
+    pub fn from_path(path: &str) -> Self {
+        Self::new(StableGuid::from_path(path), AssetTypeId::of::<A>())
+    }
+}
+
+// Manual impls: `PhantomData<fn() -> A>` means these never actually need `A` to
+// implement the trait, but `derive` would wrongly add that bound.
+impl<A: ?Sized> Clone for SoftHandle<A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<A: ?Sized> Copy for SoftHandle<A> {}
+impl<A: ?Sized> PartialEq for SoftHandle<A> {
+    fn eq(&self, other: &Self) -> bool {
+        self.guid == other.guid && self.type_id == other.type_id
+    }
+}
+impl<A: ?Sized> Eq for SoftHandle<A> {}
+impl<A: ?Sized> Hash for SoftHandle<A> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.guid.hash(state);
+        self.type_id.hash(state);
+    }
+}
+impl<A: ?Sized> fmt::Debug for SoftHandle<A> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SoftHandle")
+            .field("guid", &self.guid)
+            .field("type_id", &self.type_id)
             .finish()
     }
 }

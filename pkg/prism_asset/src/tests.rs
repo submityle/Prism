@@ -147,7 +147,10 @@ fn remove_unused_reclaims_only_abandoned_assets() {
     drop(kept);
     assert_eq!(assets.remove_unused(), 1);
     assert!(assets.is_empty());
-    assert_eq!(assets.drain_events(), vec![AssetEvent::Removed { id: kept_id }]);
+    assert_eq!(
+        assets.drain_events(),
+        vec![AssetEvent::Removed { id: kept_id }]
+    );
 }
 
 #[test]
@@ -216,9 +219,7 @@ fn load_state_helpers() {
 fn recursive_load_state_combine_precedence() {
     use RecursiveDependencyLoadState as R;
     // Failed dominates everything.
-    assert!(R::Loaded
-        .combine(R::Failed("x".to_string()))
-        .is_failed());
+    assert!(R::Loaded.combine(R::Failed("x".to_string())).is_failed());
     assert!(R::Failed("x".to_string()).combine(R::Loading).is_failed());
     // Then Loading beats NotLoaded and Loaded.
     assert_eq!(R::Loaded.combine(R::Loading), R::Loading);
@@ -326,4 +327,251 @@ fn dependency_error_display_is_readable() {
     };
     let text: String = err.to_string();
     assert!(text.contains('2'));
+}
+
+// --- M1: stable identity, type ids, assets, errors, soft handles, schemes ---
+
+use crate::{
+    direct_dependencies, normalize_path, Asset, AssetError, AssetTypeId, ErrorRegistry, SoftHandle,
+    StableGuid,
+};
+
+/// A leaf asset with no dependencies, for identity/type tests.
+struct Image;
+impl Asset for Image {
+    const TYPE_NAME: &'static str = "prism_asset::tests::Image";
+}
+
+/// A composite asset that references other assets, to exercise dependency
+/// disclosure.
+struct Material {
+    textures: Vec<UntypedAssetId>,
+}
+impl Asset for Material {
+    const TYPE_NAME: &'static str = "prism_asset::tests::Material";
+    fn visit_dependencies(&self, visit: &mut dyn FnMut(UntypedAssetId)) {
+        for id in &self.textures {
+            visit(*id);
+        }
+    }
+}
+
+#[test]
+fn stable_guid_from_path_is_deterministic() {
+    assert_eq!(
+        StableGuid::from_path("models/hero.gltf"),
+        StableGuid::from_path("models/hero.gltf")
+    );
+}
+
+#[test]
+fn stable_guid_normalizes_before_hashing() {
+    // Redundant separators, `.` and `..` segments, and backslashes all
+    // collapse to the same canonical form, so these are the *same* asset.
+    assert_eq!(
+        StableGuid::from_path("a//b/../c.png"),
+        StableGuid::from_path("a/c.png")
+    );
+    assert_eq!(
+        StableGuid::from_path("a\\b\\c.png"),
+        StableGuid::from_path("a/b/c.png")
+    );
+    assert_eq!(
+        StableGuid::from_path("./a/./c.png"),
+        StableGuid::from_path("a/c.png")
+    );
+}
+
+#[test]
+fn stable_guid_distinguishes_distinct_paths_and_domains() {
+    assert_ne!(
+        StableGuid::from_path("a/b.png"),
+        StableGuid::from_path("a/c.png")
+    );
+    // A path guid and a content guid of the same bytes live in disjoint
+    // domains, so they must differ.
+    assert_ne!(
+        StableGuid::from_path("abc"),
+        StableGuid::from_content(b"abc")
+    );
+    // Case is preserved (not folded), so these stay distinct.
+    assert_ne!(
+        StableGuid::from_path("Hero.png"),
+        StableGuid::from_path("hero.png")
+    );
+}
+
+#[test]
+fn stable_guid_round_trips_u128_and_nil() {
+    let g = StableGuid::from_path("a/b/c.png");
+    assert_eq!(StableGuid::from_u128(g.to_u128()), g);
+    assert!(StableGuid::NIL.is_nil());
+    assert!(!g.is_nil());
+    assert_eq!(StableGuid::from_u128(0), StableGuid::NIL);
+}
+
+#[test]
+fn stable_guid_sub_assets_are_stable_and_distinct() {
+    let parent = StableGuid::from_path("scene.gltf");
+    let mesh0 = StableGuid::derive_sub(parent, "Mesh0");
+    let mesh1 = StableGuid::derive_sub(parent, "Mesh1");
+    // Reproducible for the same (parent, label).
+    assert_eq!(mesh0, StableGuid::derive_sub(parent, "Mesh0"));
+    // Siblings differ, and a child differs from its parent.
+    assert_ne!(mesh0, mesh1);
+    assert_ne!(mesh0, parent);
+    // The same label under a different parent is a different sub-asset.
+    let other_parent = StableGuid::from_path("other.gltf");
+    assert_ne!(mesh0, StableGuid::derive_sub(other_parent, "Mesh0"));
+}
+
+#[test]
+fn stable_guid_display_is_32_hex_digits() {
+    use alloc::format;
+    let g = StableGuid::from_u128(0x1234);
+    assert_eq!(format!("{g}"), "00000000000000000000000000001234");
+}
+
+#[test]
+fn normalize_path_edge_cases() {
+    assert_eq!(normalize_path("a/b/c"), "a/b/c");
+    assert_eq!(normalize_path("a//b///c"), "a/b/c");
+    assert_eq!(normalize_path("a/b/"), "a/b");
+    assert_eq!(normalize_path("/abs/path/"), "/abs/path");
+    assert_eq!(normalize_path("/"), "/");
+    assert_eq!(normalize_path(""), "");
+    assert_eq!(normalize_path("a/./b"), "a/b");
+    assert_eq!(normalize_path("a/b/../c"), "a/c");
+    // Relative `..` that cannot pop is preserved; absolute `..` is dropped.
+    assert_eq!(normalize_path("../a"), "../a");
+    assert_eq!(normalize_path("a/../../b"), "../b");
+    assert_eq!(normalize_path("/../a"), "/a");
+}
+
+#[test]
+fn fnv_primitives_match_reference_vectors() {
+    // Canonical FNV-1a reference: hashing the empty input yields the offset
+    // basis unchanged; this guards against an accidental constant drift.
+    assert_eq!(StableGuid::from_content(b"").to_u128(), {
+        // offset, then fold the content-domain tag byte 0x02.
+        let mut h = crate::hash::FNV128_OFFSET;
+        h ^= 0x02u128;
+        h = h.wrapping_mul(crate::hash::FNV128_PRIME);
+        h
+    });
+    assert_eq!(crate::hash::fnv1a_64(b""), crate::hash::FNV64_OFFSET);
+    assert_eq!(crate::hash::fnv1a_128(b""), crate::hash::FNV128_OFFSET);
+}
+
+#[test]
+fn asset_type_id_is_stable_and_type_specific() {
+    assert_eq!(Image::asset_type(), AssetTypeId::of::<Image>());
+    assert_eq!(
+        AssetTypeId::of::<Image>(),
+        AssetTypeId::of_name("prism_asset::tests::Image")
+    );
+    assert_ne!(AssetTypeId::of::<Image>(), AssetTypeId::of::<Material>());
+    let id = AssetTypeId::of::<Material>();
+    assert_eq!(AssetTypeId::from_u64(id.to_u64()), id);
+}
+
+#[test]
+fn asset_visit_dependencies_reports_every_reference() {
+    let a = UntypedAssetId::new(AssetIndex::from_parts(1, 0));
+    let b = UntypedAssetId::new(AssetIndex::from_parts(2, 0));
+    let material = Material {
+        textures: vec![a, b],
+    };
+    assert_eq!(direct_dependencies(&material), vec![a, b]);
+    // A leaf asset reports nothing by default.
+    assert!(direct_dependencies(&Image).is_empty());
+}
+
+#[test]
+fn error_registry_records_and_resolves() {
+    let mut registry = ErrorRegistry::new();
+    assert!(registry.is_empty());
+    let dependent = UntypedAssetId::new(AssetIndex::from_parts(9, 1));
+    let id0 = registry.record(AssetError::new("a.png", "file not found"));
+    let id1 = registry.record(AssetError::new("b.png", "decode failed").with_dependent(dependent));
+    assert_eq!(registry.len(), 2);
+    assert_ne!(id0, id1);
+
+    let e0 = registry.get(id0).expect("id0 resolves");
+    assert_eq!(e0.path, "a.png");
+    assert_eq!(e0.reason, "file not found");
+    assert_eq!(e0.dependent, None);
+
+    let e1 = registry.get(id1).expect("id1 resolves");
+    assert_eq!(e1.dependent, Some(dependent));
+
+    // An id minted by a *different*, larger registry is out of range here and
+    // resolves to None rather than silently aliasing another record.
+    let mut scratch = ErrorRegistry::new();
+    let mut high = id0;
+    for _ in 0..8 {
+        high = scratch.record(AssetError::new("scratch", "overshoot"));
+    }
+    assert!(registry.get(high).is_none());
+
+    let collected: Vec<_> = registry.iter().map(|(_, e)| e.path.clone()).collect();
+    assert_eq!(collected, vec!["a.png".to_string(), "b.png".to_string()]);
+}
+
+#[test]
+fn soft_handle_is_copy_identity_only() {
+    let h: SoftHandle<Image> = SoftHandle::from_path("textures/albedo.png");
+    assert_eq!(h.guid(), StableGuid::from_path("textures/albedo.png"));
+    assert_eq!(h.type_id(), AssetTypeId::of::<Image>());
+    assert!(!h.is_null());
+
+    // Copy semantics: a soft handle is a plain value, not an owning ref.
+    let copy = h;
+    assert_eq!(h, copy);
+
+    // Null soft handle.
+    let null: SoftHandle<Image> = SoftHandle::null(AssetTypeId::of::<Image>());
+    assert!(null.is_null());
+    assert_ne!(h, null);
+
+    // Same guid but different type tag compares unequal (cross-type guard).
+    let as_material = SoftHandle::<Material>::new(h.guid(), AssetTypeId::of::<Material>());
+    assert_ne!(h.guid(), StableGuid::NIL);
+    assert_ne!(as_material.type_id(), h.type_id());
+}
+
+#[test]
+fn asset_path_parses_scheme_and_label() {
+    let p = AssetPath::parse("source://models/hero.gltf#Mesh0");
+    assert_eq!(p.scheme(), Some("source"));
+    assert_eq!(p.path(), "models/hero.gltf");
+    assert_eq!(p.label(), Some("Mesh0"));
+    assert!(p.has_scheme() && p.has_label());
+    // Round-trips through Display.
+    assert_eq!(p.to_string(), "source://models/hero.gltf#Mesh0");
+}
+
+#[test]
+fn asset_path_scheme_optional_and_robust() {
+    let plain = AssetPath::parse("models/hero.gltf");
+    assert_eq!(plain.scheme(), None);
+    assert_eq!(plain.path(), "models/hero.gltf");
+
+    // Empty scheme is not recognised; `://` stays part of the path.
+    let weird = AssetPath::parse("://thing");
+    assert_eq!(weird.scheme(), None);
+    assert_eq!(weird.path(), "://thing");
+
+    // A `#` with empty remainder yields no label.
+    let no_label = AssetPath::parse("a.gltf#");
+    assert_eq!(no_label.label(), None);
+    assert_eq!(no_label.path(), "a.gltf");
+
+    // Builder round-trip.
+    let built = AssetPath::new("a/b.png")
+        .with_scheme("dlc")
+        .with_label("Lod0");
+    assert_eq!(built.to_string(), "dlc://a/b.png#Lod0");
+    assert_eq!(built.clone().without_scheme().to_string(), "a/b.png#Lod0");
+    assert_eq!(built.without_label().to_string(), "dlc://a/b.png");
 }

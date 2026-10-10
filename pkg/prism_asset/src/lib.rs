@@ -50,29 +50,39 @@
 
 extern crate alloc;
 
+mod asset;
 mod dependency;
+mod error;
 mod event;
+mod guid;
 mod handle;
+mod hash;
 mod id;
 mod load_state;
 mod path;
 mod storage;
+mod type_id;
 
 #[cfg(test)]
 mod tests;
 
+pub use asset::{direct_dependencies, Asset};
 pub use dependency::{DependencyError, DependencyGraph};
+pub use error::{AssetError, AssetErrorId, ErrorRegistry};
 pub use event::AssetEvent;
-pub use handle::{Handle, HandleId, UntypedHandle, WeakHandle};
+pub use guid::{normalize_path, StableGuid};
+pub use handle::{Handle, HandleId, SoftHandle, UntypedHandle, WeakHandle};
 pub use id::{AssetId, AssetIndex, UntypedAssetId};
 pub use load_state::{LoadState, RecursiveDependencyLoadState};
 pub use path::AssetPath;
 pub use storage::Assets;
+pub use type_id::AssetTypeId;
 
 /// Convenient re-exports for downstream crates.
 pub mod prelude {
     pub use crate::{
-        AssetEvent, AssetId, AssetIndex, AssetPath, Assets, DependencyGraph, Handle, LoadState,
+        Asset, AssetError, AssetErrorId, AssetEvent, AssetId, AssetIndex, AssetPath, AssetTypeId,
+        Assets, DependencyGraph, ErrorRegistry, Handle, LoadState, SoftHandle, StableGuid,
         UntypedAssetId, UntypedHandle, WeakHandle,
     };
 }
