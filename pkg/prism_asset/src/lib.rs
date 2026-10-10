@@ -69,6 +69,8 @@ mod hash;
 mod id;
 mod load_state;
 mod loader;
+#[cfg(feature = "std")]
+mod loader_exec;
 mod path;
 #[cfg(feature = "std")]
 mod source;
@@ -87,6 +89,11 @@ pub use handle::{Handle, HandleId, SoftHandle, UntypedHandle, WeakHandle};
 pub use id::{AssetId, AssetIndex, UntypedAssetId};
 pub use load_state::{LoadState, RecursiveDependencyLoadState};
 pub use loader::{LoaderId, LoaderRegistry, SuffixConflict};
+#[cfg(feature = "std")]
+pub use loader_exec::{
+    AssetLoader, AssetLoaders, DepRequest, ErasedLoadedAsset, FullLoadOutput, LoadContext,
+    LoadError, LoadedAsset,
+};
 pub use path::AssetPath;
 #[cfg(feature = "std")]
 pub use source::{AssetMeta, AssetReader, AssetSources, FsSource, MemSource, ReadError};

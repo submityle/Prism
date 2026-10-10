@@ -1278,3 +1278,198 @@ mod vfs {
             .unwrap_or(0)
     }
 }
+
+#[cfg(feature = "std")]
+mod loader_exec {
+    use crate::{
+        Asset, AssetLoader, AssetLoaders, AssetPath, AssetTypeId, DepRequest, LoadContext,
+        LoadError, LoadedAsset,
+    };
+    use alloc::string::ToString;
+
+    /// Primary fixture asset produced by [`BlobLoader`]. Not a real format —
+    /// just enough structure to exercise the execution protocol.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Blob {
+        len: usize,
+    }
+    impl Asset for Blob {
+        const TYPE_NAME: &'static str = "prism_asset::tests::Blob";
+    }
+
+    /// Labeled sub-asset fixture emitted alongside the primary [`Blob`].
+    #[derive(Debug, PartialEq, Eq)]
+    struct Chunk {
+        tag: u8,
+    }
+    impl Asset for Chunk {
+        const TYPE_NAME: &'static str = "prism_asset::tests::Chunk";
+    }
+
+    /// A loader that decodes a non-empty byte string into a [`Blob`], declaring
+    /// one dependency and emitting one labeled [`Chunk`] sub-asset. Empty input
+    /// is treated as malformed to exercise error propagation.
+    struct BlobLoader;
+    impl AssetLoader for BlobLoader {
+        type Asset = Blob;
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &["blob"]
+        }
+
+        fn load(&self, bytes: &[u8], ctx: &mut LoadContext) -> Result<Blob, LoadError> {
+            if bytes.is_empty() {
+                return Err(LoadError::Malformed("empty blob".to_string()));
+            }
+            // Declare a typed dependency and a labeled sub-asset so the test can
+            // assert both survive the erased round-trip.
+            ctx.add_typed_dependency(AssetPath::parse("dep.img"), AssetTypeId::of::<Chunk>());
+            ctx.add_labeled_asset("chunk0", Chunk { tag: bytes[0] });
+            Ok(Blob { len: bytes.len() })
+        }
+    }
+
+    /// A loader that always rejects its input, to exercise `Unsupported`.
+    struct BadLoader;
+    impl AssetLoader for BadLoader {
+        type Asset = Blob;
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &["bad"]
+        }
+
+        fn load(&self, _bytes: &[u8], _ctx: &mut LoadContext) -> Result<Blob, LoadError> {
+            Err(LoadError::Unsupported(
+                "bad loader always fails".to_string(),
+            ))
+        }
+    }
+
+    fn registry() -> AssetLoaders {
+        let mut loaders = AssetLoaders::new();
+        let (_id, conflicts) = loaders.register(BlobLoader);
+        assert!(conflicts.is_empty());
+        let (_id, conflicts) = loaders.register(BadLoader);
+        assert!(conflicts.is_empty());
+        loaders
+    }
+
+    #[test]
+    fn register_assigns_ids_and_tracks_len() {
+        let loaders = registry();
+        assert_eq!(loaders.len(), 2);
+        assert!(!loaders.is_empty());
+    }
+
+    #[test]
+    fn untyped_load_roundtrips_primary_deps_and_subassets() {
+        let loaders = registry();
+        let out = loaders
+            .load_untyped(&AssetPath::parse("hero.blob"), b"ABC")
+            .expect("blob should load");
+
+        // Primary is a Blob of the right length and type.
+        assert_eq!(out.primary.type_id, AssetTypeId::of::<Blob>());
+        assert!(out.primary.label.is_empty());
+        let blob = out
+            .primary
+            .value
+            .downcast_ref::<Blob>()
+            .expect("primary downcasts to Blob");
+        assert_eq!(blob, &Blob { len: 3 });
+
+        // The declared dependency survived.
+        assert_eq!(out.primary.dependencies.len(), 1);
+        assert_eq!(
+            out.primary.dependencies[0],
+            DepRequest::typed(AssetPath::parse("dep.img"), AssetTypeId::of::<Chunk>())
+        );
+
+        // Regression (bug: labeled sub-assets were silently dropped): the
+        // labeled Chunk must be present and downcast correctly.
+        assert_eq!(out.labeled.len(), 1);
+        let sub = &out.labeled[0];
+        assert_eq!(sub.label, "chunk0");
+        assert_eq!(sub.type_id, AssetTypeId::of::<Chunk>());
+        let chunk = sub
+            .value
+            .downcast_ref::<Chunk>()
+            .expect("sub-asset downcasts to Chunk");
+        assert_eq!(chunk, &Chunk { tag: b'A' });
+    }
+
+    #[test]
+    fn load_for_type_matches_producer_and_rejects_mismatch() {
+        let loaders = registry();
+        // Correct producer type resolves and loads.
+        let out = loaders
+            .load_for_type(
+                &AssetPath::parse("hero.blob"),
+                AssetTypeId::of::<Blob>(),
+                b"XY",
+            )
+            .expect("typed load should succeed");
+        assert_eq!(out.primary.type_id, AssetTypeId::of::<Blob>());
+
+        // A requested type no loader produces for this suffix is Unsupported.
+        let err = loaders
+            .load_for_type(
+                &AssetPath::parse("hero.blob"),
+                AssetTypeId::of::<Chunk>(),
+                b"XY",
+            )
+            .unwrap_err();
+        assert!(matches!(err, LoadError::Unsupported(_)));
+    }
+
+    #[test]
+    fn unknown_suffix_is_unsupported() {
+        let loaders = registry();
+        let err = loaders
+            .load_untyped(&AssetPath::parse("hero.unknown"), b"XY")
+            .unwrap_err();
+        assert!(matches!(err, LoadError::Unsupported(_)));
+    }
+
+    #[test]
+    fn loader_errors_propagate() {
+        let loaders = registry();
+        // Malformed from the primary loader.
+        let err = loaders
+            .load_untyped(&AssetPath::parse("hero.blob"), b"")
+            .unwrap_err();
+        assert_eq!(err, LoadError::Malformed("empty blob".to_string()));
+
+        // Unsupported from the always-failing loader.
+        let err = loaders
+            .load_untyped(&AssetPath::parse("hero.bad"), b"anything")
+            .unwrap_err();
+        assert!(matches!(err, LoadError::Unsupported(_)));
+    }
+
+    #[test]
+    fn load_error_display_is_readable() {
+        assert_eq!(
+            LoadError::Malformed("truncated".to_string()).to_string(),
+            "malformed asset: truncated"
+        );
+        assert_eq!(
+            LoadError::LimitExceeded("bomb".to_string()).to_string(),
+            "decode limit exceeded: bomb"
+        );
+    }
+
+    #[test]
+    fn load_context_finish_builds_typed_loaded_asset() {
+        let path = AssetPath::parse("scene.blob");
+        let mut ctx = LoadContext::new(&path);
+        assert_eq!(ctx.path(), &path);
+        ctx.add_dependency(AssetPath::parse("a.img"));
+        ctx.add_labeled_asset("mesh0", Chunk { tag: 7 });
+        let loaded: LoadedAsset<Blob> = ctx.finish(Blob { len: 42 });
+        assert_eq!(loaded.value, Blob { len: 42 });
+        assert_eq!(loaded.dependencies.len(), 1);
+        assert_eq!(loaded.labeled_assets.len(), 1);
+        assert_eq!(loaded.labeled_assets[0].label, "mesh0");
+    }
+}
