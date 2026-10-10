@@ -174,6 +174,8 @@ pub use mem::{
     analyze_fragmentation, occupancy_map, FragmentationReport, LeakCheckpoint, LeakReport,
     MemBudget, MemBudgetRegistry, MemBudgetReport, MemBudgetStatus, Span,
 };
+#[cfg(feature = "alloc-track")]
+pub use mem::{TagLeakCheckpoint, TagLeakReport, TagLeakResidual};
 pub use metrics::{
     hud_lines, Counter, FrameStatsSnapshot, FrameTimer, Gauge, Histogram, HistogramSnapshot, Hud,
     HudSnapshot, LoadProfile, MetricRegistry, RegistrySnapshot, Sum, SystemLoad, ThreadLoad,

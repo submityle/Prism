@@ -31,3 +31,5 @@ pub mod leak;
 pub use budget::{MemBudget, MemBudgetRegistry, MemBudgetReport, MemBudgetStatus};
 pub use fragmentation::{analyze_fragmentation, occupancy_map, FragmentationReport, Span};
 pub use leak::{LeakCheckpoint, LeakReport};
+#[cfg(feature = "alloc-track")]
+pub use leak::{TagLeakCheckpoint, TagLeakReport, TagLeakResidual};
