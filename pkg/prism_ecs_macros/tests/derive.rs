@@ -150,12 +150,24 @@ mod prism_ecs {
             fn set_id(&self) -> SystemSetId;
         }
     }
+
+    pub mod resource {
+        /// Mirror of `prism_ecs::resource::Resource` (bare marker trait).
+        pub trait Resource: Send + Sync + 'static {}
+    }
+
+    pub mod event {
+        /// Mirror of `prism_ecs::event::Event` (bare marker trait).
+        pub trait Event: Send + Sync + 'static {}
+    }
 }
 
 use prism_ecs::bundle::Bundle;
 use prism_ecs::component::{Component, Components, StorageType};
+use prism_ecs::event::Event;
+use prism_ecs::resource::Resource;
 use prism_ecs::schedule::{SystemSet, SystemSetId};
-use prism_ecs_macros::{Bundle, Component, SystemSet};
+use prism_ecs_macros::{Bundle, Component, Event, Resource, SystemSet};
 
 // ---- Component derive targets ------------------------------------------------
 
@@ -356,4 +368,52 @@ fn system_set_enum_variants_are_distinct() {
     assert_ne!(SyncSet::Pull.set_id(), SyncSet::Push.set_id());
     // Same variant => same id (stable identity).
     assert_eq!(SyncSet::Pull.set_id(), SyncSet::Pull.set_id());
+}
+
+// ---- Resource derive targets -------------------------------------------------
+
+#[derive(Resource)]
+struct FrameClock {
+    tick: u64,
+}
+
+#[derive(Resource)]
+struct Paused;
+
+#[derive(Resource)]
+struct Lookup<T: Send + Sync + 'static>(core::marker::PhantomData<T>);
+
+#[test]
+fn resource_derive_satisfies_marker_bound() {
+    // A `fn` bounded by the real `Resource` trait only accepts a type if the
+    // derive produced a genuine `impl Resource`.
+    fn assert_resource<R: Resource>() {}
+    assert_resource::<FrameClock>();
+    assert_resource::<Paused>();
+    assert_resource::<Lookup<u32>>();
+}
+
+// ---- Event derive targets ----------------------------------------------------
+
+#[derive(Event)]
+struct Collision {
+    a: u32,
+    b: u32,
+}
+
+#[derive(Event)]
+struct AppExit;
+
+#[derive(Event)]
+enum Input {
+    Key(u32),
+    Click { x: f32, y: f32 },
+}
+
+#[test]
+fn event_derive_satisfies_marker_bound() {
+    fn assert_event<E: Event>() {}
+    assert_event::<Collision>();
+    assert_event::<AppExit>();
+    assert_event::<Input>();
 }

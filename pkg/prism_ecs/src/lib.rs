@@ -143,7 +143,7 @@ pub mod prelude {
     pub use crate::world::{EntityRef, World};
     // Derive macros. These live in the macro namespace and coexist with the
     // same-named traits (`Component`, `Bundle`) re-exported above.
-    pub use prism_ecs_macros::{Bundle, Component, SystemSet};
+    pub use prism_ecs_macros::{Bundle, Component, Event, Resource, SystemSet};
 }
 
 /// Internal type aliases for the hash maps/sets used throughout the kernel.

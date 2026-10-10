@@ -403,7 +403,7 @@ pkg/prism_ecs/                     # no_std + alloc 内核
     gpu_resident.rs diagnostics.rs reflect_bridge.rs
   features = ["std","multi_thread","simd","serialize","reflect","trace","determinism","partition","gpu_resident"]
 
-pkg/prism_ecs_macros/              # derive: Component/Bundle/Resource/Event/SystemParam/Relation
+pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource/Event 已实现；SystemParam/Relation PLANNED
 ```
 
 依赖：仅 `prism_math`、`prism_tasks`（std）、`prism_reflect`（可选）。**不碰任何 `bevy_*`。**

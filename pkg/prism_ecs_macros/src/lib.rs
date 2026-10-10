@@ -9,6 +9,8 @@
 //! |------------------------|---------------------------------------------|
 //! | [`Component`]          | `impl prism_ecs::component::Component`       |
 //! | [`Bundle`]             | `unsafe impl prism_ecs::bundle::Bundle`      |
+//! | [`Resource`]           | `impl prism_ecs::resource::Resource`         |
+//! | [`Event`]              | `impl prism_ecs::event::Event`               |
 //!
 //! All generated code refers to the target traits and types through the
 //! **absolute path** `prism_ecs::...`, so the derives can be invoked from any
@@ -23,10 +25,14 @@
 //! [`prism_ecs`]: https://docs.rs/prism_ecs
 //! [`Component`]: macro@Component
 //! [`Bundle`]: macro@Bundle
+//! [`Resource`]: macro@Resource
+//! [`Event`]: macro@Event
 
 mod bundle;
 mod common;
 mod component;
+mod event;
+mod resource;
 mod systemset;
 
 use proc_macro::TokenStream;
@@ -161,6 +167,65 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
 pub fn derive_system_set(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     systemset::expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derive [`prism_ecs::resource::Resource`] for a `Send + Sync + 'static`
+/// singleton value stored once per [`World`](prism_ecs::world::World).
+///
+/// `Resource` is a marker trait, so the generated `impl` is empty. Where a
+/// [`Component`](macro@Component) is stored *per entity*, a resource is stored
+/// *once per world* (a clock, an asset server, the active input map, ...), and
+/// is accessed from systems via `Res<T>` / `ResMut<T>` (design §8.1, §18).
+///
+/// There is no storage attribute: a resource has no per-entity storage
+/// strategy to select. Generics and `where`-clauses on the type are preserved.
+///
+/// # Examples
+///
+/// ```ignore
+/// use prism_ecs_macros::Resource;
+///
+/// #[derive(Resource)]
+/// struct FrameClock { tick: u64 }
+///
+/// #[derive(Resource)]
+/// struct Paused;
+/// ```
+#[proc_macro_derive(Resource)]
+pub fn derive_resource(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    resource::expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derive [`prism_ecs::event::Event`] for a `Send + Sync + 'static` type that
+/// can be sent through the double-buffered [`Events<E>`] queue (design §16.7).
+///
+/// `Event` is a marker trait, so the generated `impl` is empty; the only
+/// requirement is that the type is thread-shareable and owns all of its data
+/// (`'static`) so the scheduler can carry it across frames and worker threads.
+/// Generics and `where`-clauses on the type are preserved.
+///
+/// # Examples
+///
+/// ```ignore
+/// use prism_ecs_macros::Event;
+///
+/// #[derive(Event)]
+/// struct Collision { a: u32, b: u32 }
+///
+/// #[derive(Event)]
+/// struct AppExit;
+/// ```
+///
+/// [`Events<E>`]: prism_ecs::event::Events
+#[proc_macro_derive(Event)]
+pub fn derive_event(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    event::expand(&input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
