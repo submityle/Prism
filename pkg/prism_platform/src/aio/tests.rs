@@ -130,8 +130,12 @@ mod posix {
 
         // SAFETY: `tmp.file` (hence `fd`) and `buffers` outlive every reaped
         // completion below; buffers are not touched until reaped.
-        let submitted = unsafe { queue.submit(&ops) }.expect("submit");
-        assert_eq!(submitted, N);
+        let outcome = unsafe { queue.submit(&ops) }.expect("submit");
+        assert_eq!(outcome.accepted, N);
+        assert!(
+            outcome.all_accepted(),
+            "full accept leaves nothing rejected"
+        );
         assert_eq!(queue.pending(), N);
 
         let mut seen = alloc::collections::BTreeMap::new();
@@ -188,8 +192,10 @@ mod posix {
             if next < N {
                 // SAFETY: `tmp.file` and `buffers` outlive every completion
                 // reaped in this loop; buffers are untouched until reaped.
-                let accepted = unsafe { queue.submit(&ops[next..]) }.expect("submit");
-                next += accepted;
+                let outcome = unsafe { queue.submit(&ops[next..]) }.expect("submit");
+                // macOS enqueues a prefix of the batch, so advancing by the
+                // accepted count resubmits exactly the untaken tail.
+                next += outcome.accepted;
             }
             if queue.pending() > 0 {
                 let batch = queue.wait(N, Some(Duration::from_secs(5))).expect("wait");
@@ -214,7 +220,9 @@ mod posix {
     fn empty_submit_is_noop() {
         let mut queue = AioQueue::new().expect("queue");
         // SAFETY: no ops, no buffers involved.
-        assert_eq!(unsafe { queue.submit(&[]) }.expect("submit"), 0);
+        let outcome = unsafe { queue.submit(&[]) }.expect("submit");
+        assert_eq!(outcome.accepted, 0);
+        assert!(outcome.rejected.is_empty());
         assert_eq!(queue.pending(), 0);
     }
 
@@ -271,8 +279,12 @@ mod posix {
 
         // SAFETY: `tmp.file` (hence `fd`) and `sources` outlive every reaped
         // completion below; the source buffers are not mutated until reaped.
-        let submitted = unsafe { queue.submit_write(&ops) }.expect("submit_write");
-        assert_eq!(submitted, N);
+        let outcome = unsafe { queue.submit_write(&ops) }.expect("submit_write");
+        assert_eq!(outcome.accepted, N);
+        assert!(
+            outcome.all_accepted(),
+            "full accept leaves nothing rejected"
+        );
 
         let mut seen = alloc::collections::BTreeMap::new();
         while seen.len() < N {
@@ -305,7 +317,9 @@ mod posix {
     fn empty_submit_write_is_noop() {
         let mut queue = AioQueue::new().expect("queue");
         // SAFETY: no ops, no buffers involved.
-        assert_eq!(unsafe { queue.submit_write(&[]) }.expect("submit_write"), 0);
+        let outcome = unsafe { queue.submit_write(&[]) }.expect("submit_write");
+        assert_eq!(outcome.accepted, 0);
+        assert!(outcome.rejected.is_empty());
         assert_eq!(queue.pending(), 0);
     }
 
@@ -344,10 +358,8 @@ mod posix {
             priority: IoPriority::High,
         };
         // SAFETY: `tmp.file` and `src` outlive the completion reaped below.
-        assert_eq!(
-            unsafe { queue.submit_write(core::slice::from_ref(&wop)) }.expect("w"),
-            1
-        );
+        let wrote = unsafe { queue.submit_write(core::slice::from_ref(&wop)) }.expect("w");
+        assert_eq!(wrote.accepted, 1);
         loop {
             let batch = queue.wait(1, Some(Duration::from_secs(5))).expect("wait");
             if let Some(c) = batch.into_iter().next() {
@@ -367,10 +379,8 @@ mod posix {
             priority: IoPriority::High,
         };
         // SAFETY: `tmp.file` and `dst` outlive the completion reaped below.
-        assert_eq!(
-            unsafe { queue.submit(core::slice::from_ref(&rop)) }.expect("r"),
-            1
-        );
+        let got = unsafe { queue.submit(core::slice::from_ref(&rop)) }.expect("r");
+        assert_eq!(got.accepted, 1);
         loop {
             let batch = queue.wait(1, Some(Duration::from_secs(5))).expect("wait");
             if let Some(c) = batch.into_iter().next() {

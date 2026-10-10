@@ -62,7 +62,7 @@ mod backend {
     //! up yet (Linux `io_uring`, Windows IOCP, Web). Every entry point honestly
     //! reports [`super::AioError::Unsupported`] rather than faking a read.
 
-    use super::{AioError, Completion, ReadOp, Result, WriteOp};
+    use super::{AioError, Completion, ReadOp, Result, SubmitOutcome, WriteOp};
     use core::time::Duration;
 
     /// This build has no real async-I/O backend.
@@ -81,7 +81,7 @@ mod backend {
         ///
         /// # Safety
         /// Unreachable: no `Queue` can be constructed on this platform.
-        pub(super) unsafe fn submit(&mut self, _ops: &[ReadOp]) -> Result<usize> {
+        pub(super) unsafe fn submit(&mut self, _ops: &[ReadOp]) -> Result<SubmitOutcome> {
             Err(AioError::Unsupported)
         }
 
@@ -90,7 +90,7 @@ mod backend {
         ///
         /// # Safety
         /// Unreachable: no `Queue` can be constructed on this platform.
-        pub(super) unsafe fn submit_write(&mut self, _ops: &[WriteOp]) -> Result<usize> {
+        pub(super) unsafe fn submit_write(&mut self, _ops: &[WriteOp]) -> Result<SubmitOutcome> {
             Err(AioError::Unsupported)
         }
 
@@ -136,6 +136,33 @@ impl std::error::Error for AioError {}
 
 /// Result alias for the async-I/O facade.
 pub type Result<T> = core::result::Result<T, AioError>;
+
+/// The outcome of a batch [`AioQueue::submit`] / [`AioQueue::submit_write`].
+///
+/// A single `lio_listio` can accept only part of a batch, and on macOS the
+/// accepted set is an **arbitrary subset** rather than a guaranteed prefix. A
+/// bare accepted count would therefore force the caller to guess which ops are
+/// in flight; instead `rejected` names (by [`ReadOp::user_data`] /
+/// [`WriteOp::user_data`], in submission order) exactly the ops the kernel did
+/// not take, so the caller requeues precisely those without disturbing the ones
+/// already in flight. On a full accept `rejected` is empty and `accepted`
+/// equals the batch length.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubmitOutcome {
+    /// Number of requests the kernel took into its in-flight set.
+    pub accepted: usize,
+    /// `user_data` of every op the kernel did **not** accept, in submission
+    /// order. These must be resubmitted; everything else is now in flight.
+    pub rejected: Vec<u64>,
+}
+
+impl SubmitOutcome {
+    /// Whether the whole batch was accepted (no op needs resubmitting).
+    #[must_use]
+    pub fn all_accepted(&self) -> bool {
+        self.rejected.is_empty()
+    }
+}
 
 /// Relative scheduling hint for a read request.
 ///
@@ -234,9 +261,10 @@ impl AioQueue {
 
     /// Submit a batch of reads in as few syscalls as the backend allows.
     ///
-    /// Returns the number of requests accepted into the in-flight set (normally
-    /// `ops.len()`); fewer indicates the kernel applied back-pressure and the
-    /// caller should retry the tail later. Empty input is a no-op (`Ok(0)`).
+    /// Returns a [`SubmitOutcome`]: `accepted` is how many ops the kernel took
+    /// in flight (normally `ops.len()`), and `rejected` names any ops that must
+    /// be resubmitted because the kernel applied back-pressure (empty on a full
+    /// accept). Empty input is a no-op (`SubmitOutcome::default()`).
     ///
     /// # Safety
     /// Every [`ReadOp`]'s `fd` must stay open and its `buf`/`len` region must
@@ -246,7 +274,7 @@ impl AioQueue {
         unsafe_code,
         reason = "forwarding the unsafe batch-submit to the platform backend"
     )]
-    pub unsafe fn submit(&mut self, ops: &[ReadOp]) -> Result<usize> {
+    pub unsafe fn submit(&mut self, ops: &[ReadOp]) -> Result<SubmitOutcome> {
         // SAFETY: forwarded to the backend under the caller's module-level
         // promise that each op's fd and buffer outlive its completion.
         unsafe { self.inner.submit(ops) }
@@ -254,11 +282,12 @@ impl AioQueue {
 
     /// Submit a batch of writes in as few syscalls as the backend allows.
     ///
-    /// Returns the number of requests accepted into the in-flight set (normally
-    /// `ops.len()`); fewer indicates the kernel applied back-pressure and the
-    /// caller should retry the tail later. Empty input is a no-op (`Ok(0)`).
-    /// Completions are reaped by [`AioQueue::wait`] exactly like reads;
-    /// correlate them via [`Completion::user_data`].
+    /// Returns a [`SubmitOutcome`] (see [`AioQueue::submit`]): `accepted` is how
+    /// many ops are now in flight and `rejected` names any ops that must be
+    /// resubmitted under back-pressure (empty on a full accept). Empty input is
+    /// a no-op (`SubmitOutcome::default()`). Completions are reaped by
+    /// [`AioQueue::wait`] exactly like reads; correlate them via
+    /// [`Completion::user_data`].
     ///
     /// # Safety
     /// Every [`WriteOp`]'s `fd` must stay open and its `buf`/`len` source region
@@ -268,7 +297,7 @@ impl AioQueue {
         unsafe_code,
         reason = "forwarding the unsafe batch-submit to the platform backend"
     )]
-    pub unsafe fn submit_write(&mut self, ops: &[WriteOp]) -> Result<usize> {
+    pub unsafe fn submit_write(&mut self, ops: &[WriteOp]) -> Result<SubmitOutcome> {
         // SAFETY: forwarded to the backend under the caller's module-level
         // promise that each op's fd and source buffer outlive its completion
         // and stay unmodified until it is reaped.

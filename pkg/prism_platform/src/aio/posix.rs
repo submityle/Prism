@@ -19,7 +19,7 @@
 use core::ffi::{c_int, c_long, c_void};
 use core::time::Duration;
 
-use super::{AioError, Completion, IoPriority, ReadOp, Result, WriteOp};
+use super::{AioError, Completion, IoPriority, ReadOp, Result, SubmitOutcome, WriteOp};
 
 /// This build has a real POSIX AIO backend.
 pub(super) const SUPPORTED: bool = true;
@@ -130,7 +130,7 @@ impl Queue {
     /// # Safety
     /// Each [`ReadOp`]'s `fd` and `buf`/`len` region must stay valid until the
     /// matching completion is reaped (see the facade's module-level contract).
-    pub(super) unsafe fn submit(&mut self, ops: &[ReadOp]) -> Result<usize> {
+    pub(super) unsafe fn submit(&mut self, ops: &[ReadOp]) -> Result<SubmitOutcome> {
         // SAFETY: forwarded under the caller's module-level read contract; each
         // descriptor points at an `op.buf` destination that outlives its
         // completion.
@@ -155,7 +155,7 @@ impl Queue {
     /// Each [`WriteOp`]'s `fd` must stay open and its `buf`/`len` *source*
     /// region must stay valid **and unmodified** until the matching completion
     /// is reaped (see the facade's module-level contract).
-    pub(super) unsafe fn submit_write(&mut self, ops: &[WriteOp]) -> Result<usize> {
+    pub(super) unsafe fn submit_write(&mut self, ops: &[WriteOp]) -> Result<SubmitOutcome> {
         // SAFETY: forwarded under the caller's module-level write contract; each
         // descriptor points at an `op.buf` source that stays valid/unmodified
         // until its completion. The source is logically const; the `aiocb`
@@ -180,11 +180,15 @@ impl Queue {
     /// `opcode` (`LIO_READ` or `LIO_WRITE`), in as few `lio_listio` syscalls as
     /// `AIO_LISTIO_MAX` allows.
     ///
-    /// Returns the number of requests accepted into the in-flight set; fewer
-    /// than `count` means the kernel applied back-pressure and the caller should
-    /// retry the tail. This is the shared engine behind [`Self::submit`] and
-    /// [`Self::submit_write`]; the read and write paths differ only in the
-    /// opcode and the direction of the `buf` transfer.
+    /// Returns a [`SubmitOutcome`] reporting how many requests the kernel took
+    /// in flight and the `user_data` of every op it did **not** accept (in
+    /// submission order), covering both ops a partial `lio_listio` rejected and
+    /// the unattempted tail after back-pressure. Because macOS accepts an
+    /// arbitrary subset of a batch rather than a guaranteed prefix, the explicit
+    /// rejected set lets the caller requeue exactly the right ops without
+    /// cancelling any already in flight. This is the shared engine behind
+    /// [`Self::submit`] and [`Self::submit_write`]; the read and write paths
+    /// differ only in the opcode and the direction of the `buf` transfer.
     ///
     /// # Safety
     /// Every descriptor returned by `get` must carry an `fd` and `buf`/`len`
@@ -196,9 +200,9 @@ impl Queue {
         count: usize,
         opcode: c_int,
         get: impl Fn(usize) -> RawDesc,
-    ) -> Result<usize> {
+    ) -> Result<SubmitOutcome> {
         if count == 0 {
-            return Ok(0);
+            return Ok(SubmitOutcome::default());
         }
         for i in 0..count {
             if get(i).fd < 0 {
@@ -207,6 +211,7 @@ impl Queue {
         }
 
         let mut accepted = 0usize;
+        let mut rejected: Vec<u64> = Vec::new();
         let mut base = 0usize;
         while base < count {
             let chunk_len = (count - base).min(AIO_LISTIO_MAX);
@@ -269,6 +274,10 @@ impl Queue {
                     idx += 1;
                 } else {
                     let mut f = self.inflight.remove(idx);
+                    // The kernel refused this op: record its correlation token
+                    // so the caller requeues exactly it (submission order
+                    // preserved because we walk `inflight[start..]` in order).
+                    rejected.push(f.user_data);
                     // SAFETY: a completed/failed control block must be returned
                     // exactly once to release kernel resources; its result is
                     // irrelevant here.
@@ -283,11 +292,15 @@ impl Queue {
             if accepted == 0 && e != EAGAIN {
                 return Err(AioError::Io(e));
             }
-            // Back-pressure: stop submitting further chunks; caller retries tail.
+            // Back-pressure: stop submitting further chunks. The tail after this
+            // chunk was never attempted, so report it as rejected too.
+            for i in (base + chunk_len)..count {
+                rejected.push(get(i).user_data);
+            }
             break;
         }
 
-        Ok(accepted)
+        Ok(SubmitOutcome { accepted, rejected })
     }
 
     pub(super) fn wait(
