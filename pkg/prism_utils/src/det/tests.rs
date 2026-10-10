@@ -101,7 +101,10 @@ fn ordered_combiner_incremental_matches_free_fn() {
 fn unordered_hash_known_vectors() {
     assert_eq!(reproducible_hash_unordered([]), 0x4821_8226_ff3c_d4bf);
     assert_eq!(reproducible_hash_unordered([1]), 0x92f4_ba17_16f6_94f1);
-    assert_eq!(reproducible_hash_unordered([1, 2, 3]), 0xb8c1_90a9_4743_4478);
+    assert_eq!(
+        reproducible_hash_unordered([1, 2, 3]),
+        0xb8c1_90a9_4743_4478
+    );
 }
 
 #[test]
@@ -231,8 +234,16 @@ fn merge_result_feeds_reproducible_hash() {
     b.contribute(5, 50);
     b.contribute(1, 10);
 
-    let lanes_a: Vec<u64> = a.into_sorted().into_iter().flat_map(|(k, v)| [k, v]).collect();
-    let lanes_b: Vec<u64> = b.into_sorted().into_iter().flat_map(|(k, v)| [k, v]).collect();
+    let lanes_a: Vec<u64> = a
+        .into_sorted()
+        .into_iter()
+        .flat_map(|(k, v)| [k, v])
+        .collect();
+    let lanes_b: Vec<u64> = b
+        .into_sorted()
+        .into_iter()
+        .flat_map(|(k, v)| [k, v])
+        .collect();
     assert_eq!(
         reproducible_hash_ordered(lanes_a),
         reproducible_hash_ordered(lanes_b)
@@ -318,4 +329,132 @@ fn concurrent_merge_reduce_sums() {
         .into_reduced(|a, b| a + b);
     // key 0: 4*1000*1 = 4000; key 1: 4*1000*2 = 8000.
     assert_eq!(reduced, alloc::vec![(0, 4000), (1, 8000)]);
+}
+
+// ---------------------------------------------------------------------------
+// Address-independent deterministic ID allocator (§24.7).
+// ---------------------------------------------------------------------------
+
+use super::id_alloc::{DetId, DetIdError, DeterministicIdAllocator};
+
+#[test]
+fn alloc_hands_out_dense_indices_from_zero() {
+    let mut a = DeterministicIdAllocator::new();
+    let ids: Vec<DetId> = (0..4).map(|_| a.alloc()).collect();
+    assert_eq!(
+        ids.iter().copied().map(DetId::index).collect::<Vec<_>>(),
+        [0, 1, 2, 3]
+    );
+    assert!(ids.iter().all(|i| i.generation() == 1));
+    assert_eq!(a.len(), 4);
+    assert_eq!(a.slot_count(), 4);
+}
+
+#[test]
+fn free_bumps_generation_and_recycles_lowest_index() {
+    let mut a = DeterministicIdAllocator::new();
+    let ids: Vec<DetId> = (0..4).map(|_| a.alloc()).collect();
+    // Free in a scrambled order; lowest index must still come back first.
+    a.free(ids[2]).unwrap();
+    a.free(ids[0]).unwrap();
+    a.free(ids[3]).unwrap();
+    let r0 = a.alloc();
+    assert_eq!(r0.index(), 0, "lowest free index reused first");
+    assert_eq!(r0.generation(), 2, "slot 0 freed once -> generation 2");
+    let r1 = a.alloc();
+    assert_eq!(r1.index(), 2);
+    let r2 = a.alloc();
+    assert_eq!(r2.index(), 3);
+}
+
+#[test]
+fn handle_stream_is_independent_of_free_order() {
+    // Two runs allocate the same way and free the *same set* in different
+    // orders; the subsequent realloc stream must be bit-identical.
+    fn run(free_order: &[usize]) -> Vec<u64> {
+        let mut a = DeterministicIdAllocator::new();
+        let ids: Vec<DetId> = (0..6).map(|_| a.alloc()).collect();
+        for &k in free_order {
+            a.free(ids[k]).unwrap();
+        }
+        // Reallocate everything we freed and record the handle bits.
+        (0..free_order.len()).map(|_| a.alloc().to_bits()).collect()
+    }
+    let forward = run(&[1, 3, 5]);
+    let backward = run(&[5, 3, 1]);
+    let scrambled = run(&[3, 5, 1]);
+    assert_eq!(forward, backward);
+    assert_eq!(forward, scrambled);
+}
+
+#[test]
+fn is_live_tracks_generation() {
+    let mut a = DeterministicIdAllocator::new();
+    let id = a.alloc();
+    assert!(a.is_live(id));
+    a.free(id).unwrap();
+    assert!(!a.is_live(id), "freed handle is dead");
+    let reused = a.alloc();
+    assert_eq!(reused.index(), id.index());
+    assert!(a.is_live(reused));
+    assert!(!a.is_live(id), "stale handle to recycled slot stays dead");
+}
+
+#[test]
+fn free_errors_distinguish_lifetime_bugs() {
+    let mut a = DeterministicIdAllocator::new();
+    let id = a.alloc();
+    // Dangling: an index past the end was never minted here.
+    let bogus = DetId::from_bits((1u64 << 32) | 100);
+    assert_eq!(a.free(bogus), Err(DetIdError::Dangling));
+    a.free(id).unwrap();
+    // Double free: slot already free.
+    assert_eq!(a.free(id), Err(DetIdError::DoubleFree));
+    // Stale: slot live again under a newer generation.
+    let reused = a.alloc();
+    assert_eq!(a.free(id), Err(DetIdError::Stale));
+    assert!(a.is_live(reused));
+}
+
+#[test]
+fn iter_yields_live_handles_in_index_order() {
+    let mut a = DeterministicIdAllocator::new();
+    let ids: Vec<DetId> = (0..5).map(|_| a.alloc()).collect();
+    a.free(ids[1]).unwrap();
+    a.free(ids[3]).unwrap();
+    let live: Vec<u32> = a.iter().map(DetId::index).collect();
+    assert_eq!(live, [0, 2, 4]);
+}
+
+#[test]
+fn to_bits_round_trips() {
+    let id = DetId::from_bits(0x0000_0007_0000_002a);
+    assert_eq!(id.index(), 0x2a);
+    assert_eq!(id.generation(), 7);
+    assert_eq!(DetId::from_bits(id.to_bits()), id);
+}
+
+#[test]
+fn clear_resets_to_empty() {
+    let mut a = DeterministicIdAllocator::new();
+    let _ = a.alloc();
+    let _ = a.alloc();
+    a.clear();
+    assert!(a.is_empty());
+    assert_eq!(a.slot_count(), 0);
+    let fresh = a.alloc();
+    assert_eq!(fresh.index(), 0);
+    assert_eq!(fresh.generation(), 1);
+}
+
+#[test]
+fn generation_zero_is_never_live() {
+    let mut a = DeterministicIdAllocator::new();
+    let id = a.alloc();
+    let zero = DetId::from_bits(u64::from(id.index()));
+    assert_eq!(zero.generation(), 0);
+    assert!(
+        !a.is_live(zero),
+        "a default/zeroed handle never matches a slot"
+    );
 }

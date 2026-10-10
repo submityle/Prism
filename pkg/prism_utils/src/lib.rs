@@ -152,8 +152,8 @@ pub use concurrent::{
 };
 pub use cow::Cow;
 pub use det::{
-    mix64, reproducible_hash_ordered, reproducible_hash_unordered, DeterministicMerge,
-    OrderedHashCombiner, UnorderedHashCombiner,
+    mix64, reproducible_hash_ordered, reproducible_hash_unordered, DetId, DetIdError,
+    DeterministicIdAllocator, DeterministicMerge, OrderedHashCombiner, UnorderedHashCombiner,
 };
 #[cfg(feature = "concurrent")]
 pub use det::ConcurrentMerge;

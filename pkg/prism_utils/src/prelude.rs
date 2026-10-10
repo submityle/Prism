@@ -13,8 +13,8 @@ pub use crate::concurrent::{
 };
 pub use crate::cow::Cow;
 pub use crate::det::{
-    mix64, reproducible_hash_ordered, reproducible_hash_unordered, DeterministicMerge,
-    OrderedHashCombiner, UnorderedHashCombiner,
+    mix64, reproducible_hash_ordered, reproducible_hash_unordered, DetId, DetIdError,
+    DeterministicIdAllocator, DeterministicMerge, OrderedHashCombiner, UnorderedHashCombiner,
 };
 #[cfg(feature = "concurrent")]
 pub use crate::det::ConcurrentMerge;

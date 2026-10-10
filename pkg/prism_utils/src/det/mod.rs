@@ -52,14 +52,15 @@
 
 #![forbid(unsafe_code)]
 
-
 pub mod hash;
+pub mod id_alloc;
 pub mod merge;
 
 pub use hash::{
     mix64, reproducible_hash_ordered, reproducible_hash_unordered, OrderedHashCombiner,
     UnorderedHashCombiner,
 };
+pub use id_alloc::{DetId, DetIdError, DeterministicIdAllocator};
 pub use merge::DeterministicMerge;
 
 #[cfg(feature = "concurrent")]
