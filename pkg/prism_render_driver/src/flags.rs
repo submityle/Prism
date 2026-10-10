@@ -171,7 +171,6 @@ macro_rules! bitflags {
 /// (e.g. `capabilities`) can invoke it as `crate::flags::bitflags`.
 pub(crate) use bitflags;
 
-
 bitflags! {
     /// How a texture may be used by the GPU. The validator rejects textures
     /// used in ways their creation flags did not permit.

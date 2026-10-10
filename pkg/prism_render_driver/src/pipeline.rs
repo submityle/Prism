@@ -111,9 +111,9 @@ impl RenderPipelineDescriptor {
     /// The number of color targets this pipeline writes (0 when depth-only).
     #[must_use]
     pub fn color_target_count(&self) -> usize {
-        self.fragment
-            .as_ref()
-            .map_or(0, |frag| frag.targets.iter().filter(|t| t.is_some()).count())
+        self.fragment.as_ref().map_or(0, |frag| {
+            frag.targets.iter().filter(|t| t.is_some()).count()
+        })
     }
 
     /// Whether the pipeline's declared state is internally consistent: the

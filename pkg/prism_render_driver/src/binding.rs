@@ -1,8 +1,8 @@
 //! Bind group layout description: how shader resources are grouped and typed.
 
-use crate::resource::{BindGroupLayoutId, BufferId, SamplerId, TextureViewId};
 use crate::flags::ShaderStages;
 use crate::format::{TextureFormat, TextureSampleType};
+use crate::resource::{BindGroupLayoutId, BufferId, SamplerId, TextureViewId};
 use crate::texture::TextureViewDimension;
 use alloc::string::String;
 use alloc::vec::Vec;

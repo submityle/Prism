@@ -131,7 +131,10 @@ impl TextureFormat {
     /// Whether the format has a depth plane.
     #[must_use]
     pub const fn has_depth(self) -> bool {
-        matches!(self.aspects(), FormatAspects::Depth | FormatAspects::DepthStencil)
+        matches!(
+            self.aspects(),
+            FormatAspects::Depth | FormatAspects::DepthStencil
+        )
     }
 
     /// Whether the format has a stencil plane.

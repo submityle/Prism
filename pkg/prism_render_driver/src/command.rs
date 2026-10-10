@@ -1,9 +1,7 @@
 //! Render-pass attachments and the recorded draw/dispatch command model.
 
 use crate::color::Color;
-use crate::resource::{
-    BindGroupId, BufferId, ComputePipelineId, RenderPipelineId, TextureViewId,
-};
+use crate::resource::{BindGroupId, BufferId, ComputePipelineId, RenderPipelineId, TextureViewId};
 use crate::state::IndexFormat;
 use alloc::string::String;
 use alloc::vec::Vec;

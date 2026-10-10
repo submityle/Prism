@@ -79,10 +79,8 @@ pub trait RenderDevice {
     /// Compiles a shader module.
     fn create_shader_module(&self, descriptor: &ShaderModuleDescriptor) -> ShaderModuleId;
     /// Creates a bind group layout.
-    fn create_bind_group_layout(
-        &self,
-        descriptor: &BindGroupLayoutDescriptor,
-    ) -> BindGroupLayoutId;
+    fn create_bind_group_layout(&self, descriptor: &BindGroupLayoutDescriptor)
+        -> BindGroupLayoutId;
     /// Creates a bind group binding concrete resources to a layout.
     fn create_bind_group(&self, descriptor: &BindGroupDescriptor) -> BindGroupId;
     /// Creates a pipeline layout.
@@ -90,10 +88,7 @@ pub trait RenderDevice {
     /// Creates a render pipeline.
     fn create_render_pipeline(&self, descriptor: &RenderPipelineDescriptor) -> RenderPipelineId;
     /// Creates a compute pipeline.
-    fn create_compute_pipeline(
-        &self,
-        descriptor: &ComputePipelineDescriptor,
-    ) -> ComputePipelineId;
+    fn create_compute_pipeline(&self, descriptor: &ComputePipelineDescriptor) -> ComputePipelineId;
 
     /// Releases a buffer. Using its id afterwards is a stale-id error.
     fn destroy_buffer(&self, id: BufferId);

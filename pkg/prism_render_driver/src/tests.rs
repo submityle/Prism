@@ -13,8 +13,14 @@ fn flag_set_algebra() {
     assert!(rw.contains(BufferUsages::COPY_SRC));
     assert!(rw.contains(BufferUsages::COPY_DST));
     assert!(!rw.contains(BufferUsages::VERTEX));
-    assert_eq!(rw.intersection(BufferUsages::COPY_SRC), BufferUsages::COPY_SRC);
-    assert_eq!(rw.difference(BufferUsages::COPY_SRC), BufferUsages::COPY_DST);
+    assert_eq!(
+        rw.intersection(BufferUsages::COPY_SRC),
+        BufferUsages::COPY_SRC
+    );
+    assert_eq!(
+        rw.difference(BufferUsages::COPY_SRC),
+        BufferUsages::COPY_DST
+    );
     assert!(rw.intersects(BufferUsages::COPY_DST));
 
     let mut m = BufferUsages::NONE;

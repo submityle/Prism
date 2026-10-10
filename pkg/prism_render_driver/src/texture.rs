@@ -63,14 +63,22 @@ impl Extent3d {
 
 /// `const`-friendly `max` for `u32` (`core::cmp::max` is not `const`).
 const fn max_u32(a: u32, b: u32) -> u32 {
-    if a > b { a } else { b }
+    if a > b {
+        a
+    } else {
+        b
+    }
 }
 
 /// `const`-friendly right shift that saturates to `0` once `shift` reaches the
 /// bit width, avoiding the shift-overflow panic for mip levels beyond the
 /// smallest extent.
 const fn shr_or_zero(value: u32, shift: u32) -> u32 {
-    if shift >= u32::BITS { 0 } else { value >> shift }
+    if shift >= u32::BITS {
+        0
+    } else {
+        value >> shift
+    }
 }
 
 /// The dimensionality of a texture's storage.
@@ -137,11 +145,7 @@ pub struct TextureDescriptor {
 impl TextureDescriptor {
     /// Creates a single-mip, non-multisampled 2D texture descriptor.
     #[must_use]
-    pub fn new_2d(
-        size: Extent3d,
-        format: TextureFormat,
-        usage: TextureUsages,
-    ) -> Self {
+    pub fn new_2d(size: Extent3d, format: TextureFormat, usage: TextureUsages) -> Self {
         Self {
             label: None,
             size,
