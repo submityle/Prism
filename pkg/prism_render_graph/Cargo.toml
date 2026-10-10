@@ -1,0 +1,17 @@
+[package]
+name = "prism_render_graph"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism's frame render graph: a declarative, backend-agnostic dependency graph that compiles a frame's passes into an immutable execution plan over prism_render_driver. Phase-1 core delivers setup/execute pass construction, virtual resource registration (transient/imported/persistent), SSA write-versioned dependency derivation with dead-pass culling, resource lifetime analysis and transient memory aliasing, automatic barrier planning via the driver state tracker, topological scheduling, and lowering to driver CommandBuffers. Advanced multi-queue/subpass-merge/history passes are gated as extensible stages, never stubbed."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
+
+[features]
+default = []
+
+[lints]
+workspace = true
