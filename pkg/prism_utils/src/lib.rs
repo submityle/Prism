@@ -166,7 +166,7 @@ pub use hash::{
 pub use hbitset::HierarchicalBitSet;
 pub use intern::{domain, FName, InternCache, Interned, Interner, Istr};
 pub use layout::{
-    align_up, ColumnPlan, ColumnShape, ColumnShapes, GroupLayout, HotCold, LayoutPlan,
+    align_up, AoSoa, ColumnPlan, ColumnShape, ColumnShapes, GroupLayout, HotCold, LayoutPlan,
     Temperature, CACHE_LINE,
 };
 pub use reloc::{
@@ -179,6 +179,8 @@ pub use sparse_set::SparseSet;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_aosoa;
 #[cfg(test)]
 mod tests_hotcold;
 #[cfg(test)]

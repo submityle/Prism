@@ -63,6 +63,9 @@ pub trait Soa: Sized {
     fn len(cols: &Self::Columns) -> usize;
     /// Drop every row, leaving the columns empty.
     fn clear(cols: &mut Self::Columns);
+    /// Overwrite row `index` in every column with `value`, returning the
+    /// previous row. The caller guarantees `index` is in bounds.
+    fn set(cols: &mut Self::Columns, index: usize, value: Self) -> Self;
 }
 
 /// A growable structure-of-arrays vector: a logical sequence of `T` tuples
@@ -141,6 +144,15 @@ impl<T: Soa> SoaVec<T> {
     /// Remove every row.
     pub fn clear(&mut self) {
         T::clear(&mut self.columns);
+    }
+
+    /// Overwrite row `index` with `value`, returning the previous row, or
+    /// `None` if `index` is out of bounds.
+    pub fn replace(&mut self, index: usize, value: T) -> Option<T> {
+        if index >= self.len() {
+            return None;
+        }
+        Some(T::set(&mut self.columns, index, value))
     }
 
     /// Borrow the raw column storage (a tuple of `&[Field]` slices via the
@@ -227,6 +239,11 @@ macro_rules! impl_soa_tuple {
             #[inline]
             fn clear(cols: &mut Self::Columns) {
                 $( cols.$idx.clear(); )+
+            }
+
+            #[inline]
+            fn set(cols: &mut Self::Columns, index: usize, value: Self) -> Self {
+                ($( core::mem::replace(&mut cols.$idx[index], value.$idx), )+)
             }
         }
     };

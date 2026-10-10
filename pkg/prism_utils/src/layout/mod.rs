@@ -19,9 +19,11 @@
 //! single tuple, this module adds the *temperature split* and the layout
 //! description the ECS column store and `prism_math` batch kernels want on top.
 
+pub mod aosoa;
 pub mod hotcold;
 pub mod plan;
 
+pub use aosoa::AoSoa;
 pub use hotcold::HotCold;
 pub use plan::{
     align_up, ColumnPlan, ColumnShape, ColumnShapes, GroupLayout, LayoutPlan, Temperature,

@@ -26,7 +26,7 @@ pub use crate::hash::{
 };
 pub use crate::hbitset::HierarchicalBitSet;
 pub use crate::layout::{
-    ColumnPlan, ColumnShape, ColumnShapes, GroupLayout, HotCold, LayoutPlan, Temperature,
+    AoSoa, ColumnPlan, ColumnShape, ColumnShapes, GroupLayout, HotCold, LayoutPlan, Temperature,
 };
 pub use crate::intern::{FName, InternCache, Interned, Interner, Istr};
 pub use crate::reloc::{
