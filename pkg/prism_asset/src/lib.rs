@@ -75,6 +75,7 @@ mod path;
 #[cfg(feature = "std")]
 mod source;
 mod storage;
+mod stores;
 mod type_id;
 
 #[cfg(test)]
@@ -98,13 +99,15 @@ pub use path::AssetPath;
 #[cfg(feature = "std")]
 pub use source::{AssetMeta, AssetReader, AssetSources, FsSource, MemSource, ReadError};
 pub use storage::Assets;
+pub use stores::{AssetStores, ErasedAssetStore, StoreError};
 pub use type_id::AssetTypeId;
 
 /// Convenient re-exports for downstream crates.
 pub mod prelude {
     pub use crate::{
-        Asset, AssetError, AssetErrorId, AssetEvent, AssetId, AssetIndex, AssetPath, AssetTypeId,
-        Assets, DependencyGraph, ErrorRegistry, Handle, LoadState, LoaderId, LoaderRegistry,
-        SoftHandle, StableGuid, SuffixConflict, UntypedAssetId, UntypedHandle, WeakHandle,
+        Asset, AssetError, AssetErrorId, AssetEvent, AssetId, AssetIndex, AssetPath, AssetStores,
+        AssetTypeId, Assets, DependencyGraph, ErrorRegistry, Handle, LoadState, LoaderId,
+        LoaderRegistry, SoftHandle, StableGuid, SuffixConflict, UntypedAssetId, UntypedHandle,
+        WeakHandle,
     };
 }

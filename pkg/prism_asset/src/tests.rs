@@ -1123,6 +1123,165 @@ fn loader_registry_bookkeeping() {
     );
 }
 
+// --- Type-erased store registry: AssetStores (§7) ---
+
+#[test]
+fn stores_register_is_idempotent_and_counts() {
+    use crate::AssetStores;
+    let mut stores = AssetStores::new();
+    assert!(stores.is_empty());
+    assert!(stores.register::<Mesh>());
+    assert!(!stores.register::<Mesh>()); // already present, left intact
+    assert!(stores.register::<Image>());
+    assert_eq!(stores.len(), 2);
+    assert!(stores.contains_type_of::<Mesh>());
+    assert!(stores.contains_type(AssetTypeId::of::<Image>()));
+    assert!(!stores.contains_type_of::<Material>());
+    assert_eq!(stores.total_assets(), 0);
+}
+
+#[test]
+fn stores_insert_erased_routes_and_reads_back() {
+    use crate::AssetStores;
+    use core::any::Any;
+    let mut stores = AssetStores::new();
+    stores.register::<Mesh>();
+    let handle = stores
+        .insert_erased(
+            AssetTypeId::of::<Mesh>(),
+            Box::new(Mesh { verts: 12 }) as Box<dyn Any + Send>,
+        )
+        .expect("mesh value routes to the mesh arena");
+    let id: AssetId<Mesh> = handle.id().typed().expect("mesh handle is a mesh id");
+    assert_eq!(stores.get::<Mesh>(id).map(|m| m.verts), Some(12));
+    assert_eq!(stores.total_assets(), 1);
+    assert!(stores.contains(handle.id()));
+}
+
+#[test]
+fn stores_insert_erased_wrong_boxed_type_is_type_mismatch() {
+    use crate::{AssetStores, StoreError};
+    use core::any::Any;
+    let mut stores = AssetStores::new();
+    stores.register::<Mesh>();
+    let err = stores
+        .insert_erased(
+            AssetTypeId::of::<Mesh>(),
+            Box::new(Image) as Box<dyn Any + Send>,
+        )
+        .unwrap_err();
+    assert_eq!(
+        err,
+        StoreError::TypeMismatch {
+            expected: AssetTypeId::of::<Mesh>()
+        }
+    );
+    assert_eq!(stores.total_assets(), 0);
+}
+
+#[test]
+fn stores_insert_erased_unknown_type_is_reported() {
+    use crate::{AssetStores, StoreError};
+    use core::any::Any;
+    let mut stores = AssetStores::new();
+    // No arena registered for Mesh.
+    let err = stores
+        .insert_erased(
+            AssetTypeId::of::<Mesh>(),
+            Box::new(Mesh { verts: 1 }) as Box<dyn Any + Send>,
+        )
+        .unwrap_err();
+    assert_eq!(err, StoreError::UnknownType(AssetTypeId::of::<Mesh>()));
+}
+
+#[test]
+fn stores_reserve_then_fulfill_transitions_load_state() {
+    use crate::AssetStores;
+    use core::any::Any;
+    let mut stores = AssetStores::new();
+    // reserve auto-registers the arena.
+    let handle = stores.reserve::<Mesh>();
+    let id = handle.id();
+    assert!(stores.contains_type_of::<Mesh>());
+    // A reserved-but-unfulfilled slot is in flight.
+    assert_eq!(stores.load_state(id), LoadState::Loading);
+    assert!(stores.contains(id));
+
+    let filled = stores
+        .fulfill_erased(id, Box::new(Mesh { verts: 7 }) as Box<dyn Any + Send>)
+        .expect("mesh value matches the reserved slot type");
+    assert!(filled);
+    assert_eq!(stores.load_state(id), LoadState::Loaded);
+    let typed: AssetId<Mesh> = id.typed().expect("mesh id");
+    assert_eq!(stores.get::<Mesh>(typed).map(|m| m.verts), Some(7));
+}
+
+#[test]
+fn stores_fulfill_wrong_value_type_is_type_mismatch() {
+    use crate::{AssetStores, StoreError};
+    use core::any::Any;
+    let mut stores = AssetStores::new();
+    let handle = stores.reserve::<Mesh>();
+    let err = stores
+        .fulfill_erased(handle.id(), Box::new(Image) as Box<dyn Any + Send>)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        StoreError::TypeMismatch {
+            expected: AssetTypeId::of::<Mesh>()
+        }
+    );
+    // Slot is untouched and still pending (reserved → Loading).
+    assert_eq!(stores.load_state(handle.id()), LoadState::Loading);
+}
+
+#[test]
+fn stores_fail_marks_slot_failed() {
+    use crate::{AssetStores, ErrorRegistry};
+    let mut stores = AssetStores::new();
+    let handle = stores.reserve::<Mesh>();
+    let mut errors = ErrorRegistry::new();
+    let eid = errors.record(AssetError::new("mesh.bin", "decode failed"));
+    assert!(stores.fail_erased(handle.id(), eid));
+    assert_eq!(stores.load_state(handle.id()), LoadState::Failed(eid));
+}
+
+#[test]
+fn stores_remove_unused_reclaims_dropped_handles() {
+    use crate::AssetStores;
+    use core::any::Any;
+    let mut stores = AssetStores::new();
+    stores.register::<Mesh>();
+    let handle = stores
+        .insert_erased(
+            AssetTypeId::of::<Mesh>(),
+            Box::new(Mesh { verts: 3 }) as Box<dyn Any + Send>,
+        )
+        .expect("insert");
+    assert_eq!(stores.total_assets(), 1);
+    drop(handle);
+    assert_eq!(stores.remove_unused(), 1);
+    assert_eq!(stores.total_assets(), 0);
+}
+
+#[test]
+fn stores_route_by_embedded_type_across_arenas() {
+    use crate::AssetStores;
+    let mut stores = AssetStores::new();
+    let mesh_h = stores.insert::<Mesh>(Mesh { verts: 1 });
+    let img_h = stores.insert::<Image>(Image);
+    // Each id routes to its own arena purely by its embedded type.
+    assert!(stores.contains(mesh_h.id()));
+    assert!(stores.contains(img_h.id()));
+    assert_eq!(stores.total_assets(), 2);
+    assert_eq!(stores.len(), 2);
+    // The mesh id reads back from the mesh arena.
+    let mesh_id: AssetId<Mesh> = mesh_h.id().typed().expect("mesh id");
+    assert_eq!(stores.get::<Mesh>(mesh_id).map(|m| m.verts), Some(1));
+    // The image id does not resolve to a mesh (wrong embedded type → None).
+    assert!(img_h.id().typed::<Mesh>().is_none());
+}
+
 // --- std VFS: AssetReader / MemSource / FsSource / AssetSources (§10) ---
 
 #[cfg(feature = "std")]
