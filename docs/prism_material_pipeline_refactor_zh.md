@@ -615,13 +615,17 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 **🟡 部分完成**
 
-- **P2-d thin_film 虹彩瓣：Airy 反射率 GPU twin + 对拍/link 门禁**（§10 / §13 表 P2-d）
-  - 范围：薄膜干涉（Belcour–Barla 2017 单膜 Airy 反射率）已有完整带测试的 CPU 金标准 `pkg/prism_render_shading/src/gi/material/thin_film.rs`；本阶段落地其 **WESL 孪生** 并建立独立 link/类型检查门禁。ABI 中性——未触碰 über 参数块。
+- **P2-d thin_film 虹彩瓣：Airy 反射率 GPU twin + 原理化高光 Fresnel 接线（shade-time，ABI 中性）**（§10 / §13 表 P2-d）
+  - 范围：薄膜干涉（Belcour–Barla 2017 单膜 Airy 反射率）已有完整带测试的 CPU 金标准 `pkg/prism_render_shading/src/gi/material/thin_film.rs`。本阶段在其基础上：①补齐 metal 逐通道基底 IOR 变体；②落地 WESL 孪生；③把虹彩**真实混入原理化高光 Fresnel**（CPU + brdf.wesl 逐位孪生），以 **shade-time `SurfaceSample` 字段**驱动（照搬 P0-b `normal_variance` 恒等旁路范式），权重 0 时逐位恒等。此接线**不碰** über GPU 材质 ABI 打包（`LobeMask::THIN_FILM` 新位 + 3-word 块），属 shading 域内、与基础设施线不冲突。
   - 代码：
-    - WESL twin `pkg/prism_render_scene/src/shaders/thin_film.wesl`：与 CPU 逐位同算术/钳位/地板的 `tf_transmitted_cos`（Rust `Option<cos_t>` 的 TIR 以负哨兵 `< 0` 编码，仅控制流不同、算术顺序不变）、`tf_fresnel_amplitudes`、`tf_fresnel_dielectric_unpolarized`、`tf_optical_phase`、`tf_airy_one`、`tf_airy_reflectance`、`tf_iridescent_reflectance_rgb`，以及配套各向异性 GGX 辅助（`tf_anisotropic_alphas` / `tf_ggx_aniso_ndf` / `tf_smith_g1_aniso` / `tf_normalize_or`）与常量（`TF_MIN_COS/MIN_IOR/MIN_ALPHA/MIN_POSITIVE/PI`、三原色波长 630/532/465 nm）。无 bindings/entry point。
-    - 对拍门禁 `pkg/prism_render_scene/src/shading/thin_film/{mod,shader_tests}.rs`：仿 `shading/specular_aa/` 以一个真实 `@compute` link-test 入口引用全部导出符号，覆盖 import 可见性/签名/类型检查；数值保真由「CPU 算术顺序逐位镜像」论证保证。`shading/mod.rs` 注册 `pub mod thin_film;`。
-  - 门禁：`cargo test -p prism_render_scene --lib shading::thin_film`（1 通过）、`--lib shading::resolve::shader_tests`（48 通过，未受影响）、`cargo test -p prism_render_shading --lib thin_film`（CPU 金标准 19 通过）；已 rustfmt。
-  - 诚实边界：**尚未**接入 über——`LobeMask::THIN_FILM` 新位 + 3-word 参数块打包（§4.4/§10 的「新位 + 3-word 块」）属 ABI 改动、碰撞高发，留待基础设施线统一推进；metal 的逐通道基底 IOR（`ior=(1+√f0)/(1-√f0)`，当前 `iridescent_reflectance_rgb` 只收标量 base_ior）需先补逐通道 CPU 变体 + WESL twin 再接金属。本阶段只落地可独立验证的 Airy twin + 门禁，不冠名未实现的接线。
+    - 逐通道基底 IOR：`thin_film.rs` 新增 `base_ior_from_f0`（反解 `f0=((n-1)/(n+1))²` ⇒ `n=(1+√f0)/(1-√f0)`，glTF `KHR_materials_iridescence` 口径）与 `iridescent_fresnel_rgb`（按 RGB 三原色逐通道从 `f0` 还原基底 IOR 再评 Airy，使有色金属 `f0` 正确着色薄膜干涉）；厚度 0 时逐通道回落到各自基底的裸介质 Fresnel。配套 WESL twin `tf_base_ior_from_f0` / `tf_iridescent_fresnel_rgb`。
+    - WESL twin `pkg/prism_render_scene/src/shaders/thin_film.wesl`：与 CPU 逐位同算术/钳位/地板的 `tf_transmitted_cos`（Rust `Option<cos_t>` 的 TIR 以负哨兵 `< 0` 编码，仅控制流不同、算术顺序不变）、`tf_fresnel_amplitudes`、`tf_fresnel_dielectric_unpolarized`、`tf_optical_phase`、`tf_airy_one`、`tf_airy_reflectance`、`tf_iridescent_reflectance_rgb`、`tf_base_ior_from_f0`、`tf_iridescent_fresnel_rgb`，以及配套各向异性 GGX 辅助（`tf_anisotropic_alphas` / `tf_ggx_aniso_ndf` / `tf_smith_g1_aniso` / `tf_normalize_or`）与常量（`TF_MIN_COS/MIN_IOR/MIN_ALPHA/MIN_POSITIVE/PI`、三原色波长 630/532/465 nm）。
+    - shade-time 字段：`SurfaceSample`（`lighting.rs` 结构体 + `Default` + brdf.wesl 孪生结构体）新增 `iridescence`（权重，默认 0）/ `iridescence_thickness_nm`（默认 0）/ `iridescence_ior`（默认 1.3，glTF 口径）三字段。默认权重 0 ⇒ 高光 `mix3`/`mix` 原样返回 Schlick 项，老金标准逐位不变；WESL `SurfaceSample` 以 `var` + 字段赋值构造、WGSL 零初始化，新字段天然为 0（恒等）。CPU 侧非 `..Default` 全字段字面量站点（`resolve.rs::surface_sample_from_parameters`、`cloth_advanced.rs::base_surface`）同步补三字段。
+    - 高光混入：`lighting.rs::evaluate_principled_direct` 与 `brdf.wesl::principled_direct` 在同一 `v_dot_h` 余弦下把 Schlick Fresnel 向 `iridescent_fresnel_rgb` 按 `iridescence` 权重 `mix`；`iridescence==0` 走原路径（恒等），`>0` 才评薄膜。两侧逐位同序。
+    - 对拍门禁 `pkg/prism_render_scene/src/shading/thin_film/{mod,shader_tests}.rs`：仿 `shading/specular_aa/` 以一个真实 `@compute` link-test 入口引用全部导出符号（含新 `tf_base_ior_from_f0`/`tf_iridescent_fresnel_rgb`），覆盖 import 可见性/签名/类型检查。`brdf.wesl` 现 import `thin_film.wesl`，`shading::resolve::shader_tests` 的 deps 数组已登记 `thin_film.wesl` 并把定长 `[...; 16]` 升为 `[...; 17]`。
+  - 门禁：`cargo test -p prism_render_shading --lib thin_film`（CPU 金标准 24 通过，含逐通道 IOR 往返 / 厚度 0 回落 / 有色膜着色 5 项新金标准）、`-p prism_render_shading --lib` 全量 **3197 通过**（权重 0 恒等，老金标准零回归）、`-p prism_render_scene --lib shading::thin_film`（link 1 通过）、`--lib shading::resolve::shader_tests`（brdf→thin_film 全链 48 通过）；已 rustfmt。
+  - 诚实边界：über GPU 材质 ABI 打包（`LobeMask::THIN_FILM` 新位 + 3-word 块、`prism_unpack_surface` 低位优先聚集）属跨 crate ABI 改动、碰撞高发，仍留待基础设施线统一推进。本阶段落地的是 **shading 域内、ABI 中性的 shade-time 接线**——与 P0-b 高光抗锯齿同范式，权重由作者因子 / 虹彩图在 shade 期喂入，权重 0 恒等旁路。编辑器 MaterialX 作者前端（P2-a）仍按 goal 保持 TODO。
+
 
 **⬜ 未开始（见上表）**：P1-a~P1-f、P1-h（PCM 地基）、P2-a~P2-c、P2-e~P2-g、P2-i、P2-j、P3-a~P3-e、开放瓣（glint / 测量 BRDF）。
 

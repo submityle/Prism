@@ -13,20 +13,21 @@
 > **Figma·Zed**(GPU 驱动画布 / CRDT 协同 / 瓦片重绘)、
 > **RenderDoc·PIX·Tracy**(帧捕获 / GPU 计时 / 性能回放)、**Perforce·Git**(大二进制资产版本控制)。
 >
-> 本文为**设计规格**。地基层(Loom 25 crate + 相关 Bevy crate)为**已交付**(SHIPPED);
+> 本文为**设计规格**。地基层(Loom `prism_ui*` 全家桶 + 已 pkg 化的 `prism_reflect`/`prism_asset`/`prism_diagnostic`/`prism_app`/`prism_ui_devtools`)为**已交付**(SHIPPED);部分运行时前置能力(BRP prism 封装/拾取/Gizmo)**尚无 prism 等价、列为前置待建**(见 §17、§19 依赖闸门);
 > 编辑器专有层(E 系列)为**规划项**(PLANNED);**域编辑器**的成熟度受对应引擎子系统成熟度约束,文中显式标注。
 > 全文严格区分「已实现并通过测试」与「规划中」,不把未落地能力描述为已落地。
 >
 > **非目标(与引擎文档一致)**:纯经典数值与确定性工具链,**不含 AI / ML / 神经网络 / LLM** 功能;
 > 不以替代专业 DCC(Maya/Houdini/Substance)为目标,而以**无缝往返 + 引擎内权威编辑**为目标。
 
-- 版本: v2.0(AAA 高级特性设计阶段;v1 内核/面板设计已立)
+- 版本: v2.1(修订:地基就绪度与 `pkg/prism_*` 真相源对齐、补前置依赖闸门;v2.0 AAA 高级特性设计;v1 内核/面板设计)
 - 适用引擎: Prism / Bevy ECS 生态
-- 关键地基(SHIPPED): `prism_ui*`(响应/树/布局/样式/后端/调度/虚拟化/输入)、`prism_ui_inspector`、
+- 关键地基 — 已就绪(SHIPPED,`pkg/prism_*`): `prism_ui*`(响应/树/布局/样式/后端/调度/虚拟化/输入)、`prism_ui_inspector`、
   `prism_ui_timetravel`、`prism_ui_workbench`、`prism_ui_hotreload`、`prism_ui_ecs`、`prism_ui_overlay`、
   `prism_ui_form`、`prism_ui_router`、`prism_ui_i18n`、`prism_ui_a11y`、`prism_ui_sdui`、
-  `prism_ui_render_backend`;`bevy_reflect`、`bevy_remote`(BRP)、`bevy_picking`、`bevy_gizmos`、
-  `bevy_scene`、`bevy_asset`、`bevy_state`、`bevy_diagnostic`、`bevy_dev_tools`、`bevy_input_focus`
+  `prism_ui_render_backend`、`prism_ui_devtools`;`prism_reflect`、`prism_asset`、`prism_diagnostic`、`prism_app`
+- 关键地基 — 保留 Bevy 机制底座(按 `prism_bevy_refactor_plan_zh.md` 暂留/永久保留,非重写): `bevy_scene`(ECS 场景 serde,与 `prism_render_scene` 概念不同)、`bevy_state`、`bevy_remote`(BRP,可与 `prism_ui_devtools` 协同)、`bevy_input`(原始事件源)
+- 关键地基 — 前置待建(需 pkg 化后编辑器方可挂接,当前仅计划,见 §17/§19): 运行时桥 BRP 的 prism 侧封装、拾取/焦点(迁 `prism_ui_input`,S13 计划中)、Gizmo 调试绘制(暂无 pkg 等价)
 - 域子系统(编辑器挂接对象,成熟度各异): 材质/WESL 管线、`Ember` 粒子、`Animation` 动画、
   `Resonance` 音频、Lumen GI、物理、地形/世界系统、虚拟几何/体积/毛发 GPU 孪生
 - 核心契约: 继承 Loom「**成本 ∝ 变化量**」;编辑器一切编辑走**命令**,一切状态可**内省/回放**,一切长任务**异步可取消**。
@@ -64,7 +65,7 @@
 
 - **D1 一切编辑皆命令**:任何文档修改都是可执行、可撤销、可序列化的 `Command`。UI 不直接改模型。
   撤销/重做、宏录制、协同同步、脚本自动化、CI 回放全部复用这一通路。
-- **D2 反射驱动 UI**:面板由 `bevy_reflect` 类型信息**自动生成**检查器,自定义仅作覆盖。
+- **D2 反射驱动 UI**:面板由 `prism_reflect` 类型信息**自动生成**检查器(过渡期可经 `bevy_reflect` 桥接),自定义仅作覆盖。
 - **D3 贡献点而非硬编码**:面板/命令/菜单/键位/Gizmo/Inspector 控件/importer/profiler 轨道都经注册表贡献。
 - **D4 运行时解耦**:编辑器与运行时边界清晰、可跨进程(BRP);编辑态与播放态(PIE)互不污染。
 - **D5 成本 ∝ 变化量**:继承 Loom 契约;大场景按脏传播,长列表虚拟化,编辑器**可测试性能**。
@@ -121,10 +122,10 @@ UI 与模型混写 → 命令强制单向;整文档撤销快照(大世界爆内�
 │ L1 内核 Kernel:Document/World · Command/Transaction/Undo · Selection ·      │
 │   Reflection桥 · Service/Contribution 注册表 · 异步任务/诊断 · 分层/覆盖        │
 ├────────────────────────────────────────────────────────────────────────┤
-│ L0 地基 Loom(SHIPPED,复用不改):reactive/tree/layout/style/render_backend/    │
-│   scheduler/virtual/input/inspector/timetravel/workbench/hotreload/overlay/   │
-│   form/router/i18n/a11y/sdui/ecs · bevy_reflect/remote/picking/gizmos/scene/   │
-│   asset/state/diagnostic/dev_tools/input_focus                               │
+│ L0 地基 Loom(SHIPPED,`pkg/prism_*` 复用不改):reactive/tree/layout/style/     │
+│   render_backend/scheduler/virtual/input/inspector/timetravel/workbench/      │
+│   hotreload/overlay/form/router/i18n/a11y/sdui/ecs/devtools ·                 │
+│   prism_reflect/asset/diagnostic/app(保留 bevy_scene/state/remote 机制底座)    │
 └────────────────────────────────────────────────────────────────────────┘
         ↕ BRP(进程内快路径 / 跨进程 / PIE)        ↕ 协同通道(命令广播 / CRDT)
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -133,6 +134,8 @@ UI 与模型混写 → 命令强制单向;整文档撤销快照(大世界爆内�
 ```
 
 每层一个或多个独立 crate,可单独编译/测试/演进。L0 完全复用,L1–L4 新建。
+
+> **地基就绪度(与 `prism_bevy_refactor_plan_zh.md` 对齐)**:L0 的 `prism_ui*` 全家桶及 `prism_reflect`/`prism_asset`/`prism_diagnostic`/`prism_app`/`prism_ui_devtools` 已 pkg 化、SHIPPED;`bevy_scene`/`bevy_state`/`bevy_remote`(BRP)/`bevy_input` 作为机制底座按重构方案暂留/保留;**运行时桥 BRP 的 prism 封装、拾取/焦点(迁 `prism_ui_input`)、Gizmo 调试绘制尚无 pkg 等价,属前置待建**——相应编辑器阶段(E5/E6)须等前置就绪或以桥接过渡(见 §19 依赖闸门)。
 
 ---
 
@@ -167,7 +170,7 @@ pub trait Command: Send {
 
 ### 4.4 反射驱动 Inspector(D2)
 > crate: `prism_editor_reflect`
-- 输入 `bevy_reflect` `TypeInfo`/`ReflectRef`,输出 Loom `Element` 控件树;`WidgetResolver` 按类型/标注选控件。
+- 输入 `prism_reflect` `TypeInfo`/`ReflectRef`(过渡期经 `bevy_reflect` 桥接),输出 Loom `Element` 控件树;`WidgetResolver` 按类型/标注选控件。
 - 字段读写统一经**命令**(`SetReflectField`,可撤销可合并);多选显示交集/差异。
 - 覆盖:贡献 `InspectorOverride<T>`(Godot `EditorInspectorPlugin` / Unity `PropertyDrawer`)。
 - 协作:`prism_ui_form`(校验/错误)、`prism_ui_ecs`(字段级双向绑定,空闲实体零成本)。
@@ -181,7 +184,7 @@ pub trait Command: Send {
 - `EditorModule` trait:一个模块 = 一组贡献 + 生命周期;卸载时 `Disposables` 自动回收,防泄漏。
 
 ### 4.6 运行时协议(D4,详见随文各处)
-- `prism_editor_remote` 封装 BRP(`bevy_remote`,SHIPPED,JSON-RPC 2.0),三拓扑同协议:**进程内快路径 / 跨进程 / PIE**。
+- `prism_editor_remote` 封装 BRP(JSON-RPC 2.0;底层 `bevy_remote` 为保留机制,**prism 侧封装属前置待建,计划与 `prism_ui_devtools` 协同**),三拓扑同协议:**进程内快路径 / 跨进程 / PIE**。
 - Inspector 直接吃 BRP 的反射数据,**本地无需链接游戏逻辑 crate**;变更回传经命令→BRP。
 
 ---
@@ -192,7 +195,7 @@ pub trait Command: Send {
   (Blender/Unity workspaces)。Flexbox 排布(SHIPPED)、手势拖拽(`prism_ui_input`)、浮动(`prism_ui_overlay`)。
 - **命令面板**:全局模糊搜索所有注册命令并执行,显示键位(贡献点红利)。
 - **菜单/工具栏/状态栏/活动栏**:全部贡献点聚合,`when` 上下文控制可见/启用,不硬编码。
-- **键位系统**:keymap + 上下文(焦点面板/编辑模式),冲突检测,多套预设;焦点复用 `bevy_input_focus`。
+- **键位系统**:keymap + 上下文(焦点面板/编辑模式),冲突检测,多套预设;焦点复用 `prism_ui_input`(焦点由 `bevy_input_focus` 迁入,S13 计划中)。
 - **主题/i18n/a11y**:复用 Loom 样式 token/`@media`、`prism_ui_i18n`、`prism_ui_a11y`(SHIPPED)。
 
 ---
@@ -214,16 +217,16 @@ pub trait Command: Send {
 ---
 
 ## 7. GPU 驱动视口(D5/D8)
-> crate: `prism_editor_viewport`;挂接 `bevy_picking`/`bevy_gizmos`/虚拟几何 GPU
+> crate: `prism_editor_viewport`;挂接拾取(目标 `prism_ui_input`,前置待建)/Gizmo(暂无 pkg,前置待建)/`prism_virtual_geometry_gpu`
 
 - **多视口**:透视 + 正交(顶/前/侧)+ 可同步相机 + 独立显示模式(线框/光照/光照复杂度/overdraw/LOD 着色)。
-- **GPU 拾取(D8)**:十万实体下走 GPU id-buffer 拾取而非 CPU 射线逐个测,`bevy_picking`(SHIPPED)为基线,
+- **GPU 拾取(D8)**:十万实体下走 GPU id-buffer 拾取而非 CPU 射线逐个测,拾取能力(`bevy_picking` 迁 `prism_ui_input`,**前置待建**)为基线,
   大场景扩展 GPU 路径;框选/刷选同理。
 - **虚拟几何预览**:对接 `prism_virtual_geometry_gpu`(SHIPPED 实验孪生),编辑态预览细分几何不爆显存。
 - **实时 GI 预览**:对接 Lumen GI 子系统,编辑移动光源/物体实时反馈间接光(可切「预览质量/最终质量」)。
 - **高级 Gizmo(借鉴 Unreal/Blender)**:移动/旋转/缩放 + **吸附**(网格/顶点/表面/角度/增量)、
   **轴心模式**(中心/各自/游标)、**坐标系**(世界/局部/视图/自定义)、就地数值输入、测量尺、
-  多物体公共轴心。交互产出变换**命令**(可撤销、拖拽合并)。绘制走 `bevy_gizmos`(SHIPPED)。
+  多物体公共轴心。交互产出变换**命令**(可撤销、拖拽合并)。绘制走 Gizmo 调试绘制(`bevy_gizmos` 暂无 pkg 等价,**前置待建**)。
 - **软选择(soft/proportional)**:衰减半径内的加权变换(Blender proportional edit)。
 - **视口叠加贡献点**:导航网格、碰撞体、光照探针、流送网格、调试箭头等由模块贡献,可独立开关。
 - **瓦片/脏矩形重绘(§14)**:画布只重绘变化区域(Figma 式),走 `prism_ui_render_backend` 保留绘制 + 批合并。
@@ -254,11 +257,11 @@ pub trait Command: Send {
 ---
 
 ## 9. 分析与诊断(D7)
-> crate: `prism_editor_profiler`;挂接 `bevy_diagnostic`/`bevy_dev_tools`/Tracy/帧图
+> crate: `prism_editor_profiler`;挂接 `prism_diagnostic`/`prism_ui_devtools`/Tracy/帧图
 
 借鉴 Unreal Insights / Unity Profiler / RenderDoc / Tracy:
 
-- **帧分析器**:CPU/GPU 时间轴火焰图 + 调用树 + 统计数值(FPS/draw calls/三角数/内存),数据源 `bevy_diagnostic`
+- **帧分析器**:CPU/GPU 时间轴火焰图 + 调用树 + 统计数值(FPS/draw calls/三角数/内存),数据源 `prism_diagnostic`
   (SHIPPED)+ Tracy span(见 `docs/profiling.md`,SHIPPED);轨道可由模块**贡献**(§4.5)。
 - **帧图调试器(Frame Graph / 渲染调试,RenderDoc 式)**:对接 `prism_render_architecture`(SHIPPED)的帧图,
   列出 pass / 资源 / 依赖 / 读写,逐 pass 预览中间缓冲(颜色/深度/GBuffer/阴影);离线捕获可回放。
@@ -266,7 +269,7 @@ pub trait Command: Send {
   (借鉴主机平台 memory budget 守门)。
 - **Gameplay Debugger**:运行态按实体叠加逻辑可视化(AI 状态/感知/路径/黑板),贡献点扩展类目。
 - **可视日志(Visual Logger)**:时间轴记录「某时刻某实体画了什么调试图元」,可回放定位偶发 bug(UE 式)。
-- **Stat HUD / 诊断叠层**:视口角标实时统计,复用 `bevy_dev_tools`(SHIPPED)。
+- **Stat HUD / 诊断叠层**:视口角标实时统计,复用 `prism_ui_devtools`(SHIPPED)。
 
 ---
 
@@ -280,7 +283,7 @@ pub trait Command: Send {
 ---
 
 ## 11. 内容与资产管线(D7/D8/D10)
-> crate: `prism_editor_content`;挂接 `bevy_asset`(SHIPPED)
+> crate: `prism_editor_content`;挂接 `prism_asset`(SHIPPED)
 - **内容浏览器**:缩略图网格(虚拟化,`prism_ui_virtual`)+ 集合(Collections)+ 标签/过滤/搜索 + 收藏/固定。
 - **资产依赖/引用图**:谁引用谁、反向引用、循环检测;复用通用节点图内核(§8)+ `prism_ui_inspector` 的
   依赖图分析(SHIPPED)渲染。删除前提示引用者,避免悬空引用。
@@ -324,7 +327,7 @@ pub trait Command: Send {
 | 增量布局 RelayoutBoundary | 局部变化不触发全局重排 | `prism_ui_layout`(SHIPPED) |
 | 字段相等性守卫 | ECS 回写值未变不置脏,掐断振荡 | `prism_ui_ecs`(SHIPPED) |
 | World Partition 流送 | 公里级世界不整载,延迟与规模解耦 | 新增 `prism_editor_world` |
-| GPU 拾取 | 十万实体拾取不随数量线性恶化 | `bevy_picking` + GPU 扩展 |
+| GPU 拾取 | 十万实体拾取不随数量线性恶化 | 拾取(`bevy_picking`→`prism_ui_input`,前置待建)+ GPU 扩展 |
 | 视口瓦片/脏矩形重绘 | 画布只重绘变化区域 | 新增 `prism_editor_viewport` |
 | GPU 保留绘制 + 批合并 | 面板与画布走保留绘制流 | `prism_ui_render_backend`(SHIPPED,GPU parity 待验证) |
 | BRP 增量同步 | 只拉变化组件,不整表轮询 | 新增 `prism_editor_remote` |
@@ -362,7 +365,7 @@ pub trait Command: Send {
 | crate | 职责 | 状态 |
 |---|---|---|
 | `prism_editor_core` | Document/Layer、Command/Transaction/Undo、Selection、Service/Contribution、异步任务/诊断 | 🔜 规划 |
-| `prism_editor_reflect` | `bevy_reflect` ↔ Loom 控件;WidgetResolver;字段命令 | 🔜 规划 |
+| `prism_editor_reflect` | `prism_reflect`(过渡经 `bevy_reflect`) ↔ Loom 控件;WidgetResolver;字段命令 | 🔜 规划 |
 | `prism_editor_dock` | 嵌套 split/tab/浮动停靠 + 持久化 + 工作区 | 🔜 规划 |
 | `prism_editor_shell` | 外壳装配:活动栏/侧栏/命令面板/菜单/工具栏/状态栏/键位/主题 | 🔜 规划 |
 | `prism_editor_panels` | Inspector / Outliner / Content / Console 等通用面板 | 🔜 规划 |
@@ -373,10 +376,12 @@ pub trait Command: Send {
 | `prism_editor_domains` | 各域编辑器装配(挂接子系统) | 🔜 规划 |
 | `prism_editor_profiler` | 帧分析器、帧图调试、内存预算、Gameplay Debugger、可视日志 | 🔜 规划 |
 | `prism_editor_content` | 内容浏览器、依赖图、校验、导入导出、cook/构建、版本控制 | 🔜 规划 |
-| `prism_editor_remote` | BRP 客户端、PIE、增量同步、安全 | 🔜 规划 |
+| `prism_editor_remote` | BRP 客户端、PIE、增量同步、安全(前置:BRP prism 封装待建) | 🔜 规划 |
 | `prism_editor_collab` | 命令广播 / CRDT 协同 / 在场锁(可选) | 🔜 规划(可选) |
-| `prism_editor_app` | 二进制:装配模块、窗口、与 `bevy_app` 集成 | 🔜 规划 |
-| — 复用地基 — | `prism_ui*` 全家桶 + `bevy_reflect/remote/picking/gizmos/scene/asset/state/diagnostic/dev_tools/input_focus` | ✅ 已交付 |
+| `prism_editor_app` | 二进制:装配模块、窗口、与 `prism_app` 集成 | 🔜 规划 |
+| — 复用地基(已 pkg 化) — | `prism_ui*` 全家桶 + `prism_ui_devtools` + `prism_reflect`/`prism_asset`/`prism_diagnostic`/`prism_app` | ✅ 已交付 |
+| — 保留 Bevy 机制底座 — | `bevy_scene`(serde)/`bevy_state`/`bevy_remote`(BRP)/`bevy_input`(事件源) | ✅ 保留(重构方案) |
+| — 前置待建(pkg 化中) — | BRP prism 封装 · 拾取/焦点→`prism_ui_input`(S13 计划) · Gizmo 调试绘制(暂无 pkg) | 🔜 前置 |
 
 > 原则:每个新 crate 以「crate + 测试 + 文档」三件套闭环交付,不堆半成品;域编辑器成熟度受子系统约束;
 > 未落地并本地提交前不计入「已胜出」。
@@ -386,6 +391,7 @@ pub trait Command: Send {
 ## 18. 与 Bevy / BSN / Loom / 子系统的关系
 - **Loom 是唯一 UI 地基**:全部界面用 `loom!` 构建,享受成本契约与工具链。
 - **与 BSN 共存**:`.bsn`/`.scn` 作为场景资产格式(数据驱动、可分层),编辑器 UI 用 Loom;定位不冲突。
+- **与重构方案对齐(真相源)**:凡 `pkg/prism_*` 已覆盖的能力一律以 prism 为唯一真相源(反射/资产/诊断/应用/devtools 等),`crates/` 下 `bevy_*` 重复实现按 `prism_bevy_refactor_plan_zh.md` 退役;编辑器仅挂接 prism 侧真相源,未 pkg 化的前置(BRP 封装/拾取/Gizmo)以桥接过渡并显式标注。
 - **与 ECS 解耦**:经 BRP + 反射访问运行时 World,本地不链接游戏逻辑,崩溃隔离。
 - **与子系统分工**:编辑器**不实现**渲染/物理/动画/音频算法,只提供其**权威编辑 + 预览 + 调试**界面;
   域编辑器随子系统成熟逐步点亮。
@@ -399,8 +405,8 @@ pub trait Command: Send {
 - **E2 反射 Inspector**:`prism_editor_reflect`——反射→控件、WidgetResolver、字段命令、覆盖机制、多选差异。
 - **E3 外壳 + 停靠**:`prism_editor_dock` + `prism_editor_shell`——停靠/命令面板/菜单键位/主题/工作区持久化。
 - **E4 核心面板**:`prism_editor_panels`——Inspector + Outliner(虚拟化)+ Console。打通「选择→检查→改字段→撤销」。
-- **E5 运行时桥 + PIE**:`prism_editor_remote`——BRP 进程内快路径 + 增量同步 + PIE 隔离;文档接 World。
-- **E6 GPU 视口 + Gizmo**:`prism_editor_viewport`——多视口、`bevy_picking` 拾取、高级 Gizmo(命令化)、相机/网格。
+- **E5 运行时桥 + PIE**:`prism_editor_remote`——BRP 进程内快路径 + 增量同步 + PIE 隔离;文档接 World。**前置依赖:BRP 的 prism 侧封装(当前仅 `bevy_remote` 保留机制)须先就绪或以桥接过渡。**
+- **E6 GPU 视口 + Gizmo**:`prism_editor_viewport`——多视口、拾取(`prism_ui_input`,**前置待建**)、高级 Gizmo(命令化,Gizmo 绘制**暂无 pkg、前置待建**)、相机/网格。
 - **E7 内容与管线**:`prism_editor_content`——内容浏览器 + 依赖图 + 校验 + 导入导出 + 版本控制贡献点。
 - **E8 大世界编辑**:`prism_editor_world`——World Partition 流送 + 数据层 + OFPA + 层级实例 + HLOD 预览。
 - **E9 分析诊断**:`prism_editor_profiler`——帧分析器 + 帧图调试 + 内存预算 + Gameplay Debugger + 可视日志。
@@ -410,6 +416,8 @@ pub trait Command: Send {
 
 **建议优先级**:E1→E2→E4 = 可用属性编辑器最短路径;E3 外壳并行;E5/E6 = 能动场景的分水岭;
 E7/E8 = AAA 规模前提;E9/E10/E11 = 高级生产力;E12 为增量。
+
+> **依赖闸门**:E5 卡在 BRP 的 prism 封装;E6 卡在拾取(`prism_ui_input`)与 Gizmo 绘制的 pkg 化。此三项为前置待建,未就绪前相应阶段只能以 `bevy_*` 桥接做实验,不计入「已胜出」(见 §17)。
 
 ---
 
@@ -424,6 +432,7 @@ E7/E8 = AAA 规模前提;E9/E10/E11 = 高级生产力;E12 为增量。
 8. **版本控制大二进制**:LFS/Perforce 适配面大;先 Git-LFS + OFPA 文本化分片,Perforce 增量。
 9. **范围蔓延**:覆盖面极大;严格按 E1→E12 分批,每批三件套闭环,不堆半成品。
 10. **确定性守恒**:全链路整数/排序优先,避免浮点非确定,保证 CI 黄金测试可复现(D6)。
+11. **前置 pkg 化未就绪**:BRP 的 prism 封装、拾取/焦点(迁 `prism_ui_input`)、Gizmo 绘制尚无 pkg 等价;E5/E6 须等前置就绪或桥接过渡,路线图已加依赖闸门(§19),避免在未落地地基上承诺能动场景。
 
 ---
 
@@ -436,7 +445,7 @@ E7/E8 = AAA 规模前提;E9/E10/E11 = 高级生产力;E12 为增量。
 - **HLOD**:分层 LOD 代理,远景用代理近景用全量。
 - **OFPA(One-File-Per-Actor)**:实体细粒度落盘,最小化多人编辑/版本控制冲突面。
 - **PIE(Play-In-Editor)**:编辑器内隔离运行游戏逻辑,编辑态不被污染。
-- **BRP(Bevy Remote Protocol)**:基于 JSON-RPC 2.0 的运行时远程检查/变更协议(`bevy_remote`)。
+- **BRP(Bevy Remote Protocol)**:基于 JSON-RPC 2.0 的运行时远程检查/变更协议(底层 `bevy_remote` 保留;prism 侧封装前置待建,计划与 `prism_ui_devtools` 协同)。
 - **GPU 拾取**:用 GPU id-buffer 做大规模场景拾取,延迟与实体数解耦。
 - **帧图调试器**:列出渲染 pass/资源/依赖并逐 pass 预览中间缓冲(RenderDoc 式)。
 - **Gameplay Debugger / 可视日志**:运行态逻辑可视化 / 时间轴记录调试图元可回放。
@@ -445,6 +454,6 @@ E7/E8 = AAA 规模前提;E9/E10/E11 = 高级生产力;E12 为增量。
 
 ---
 
-> 本文为设计规格。L0 地基项均已实现并通过测试(Loom 25 crate / 600+ 测试,Clippy 零告警;
-> 相关 Bevy crate 随引擎交付);编辑器专有层(E1–E12)与域编辑器在落地并本地提交前不计入「已胜出」,
+> 本文为设计规格。L0 地基项(`pkg/prism_*`:`prism_ui*` 全家桶 + `prism_reflect`/`prism_asset`/`prism_diagnostic`/`prism_app`/`prism_ui_devtools`)均已实现并通过测试(600+ 测试,Clippy 零告警);
+> 保留的 Bevy 机制底座(`bevy_scene`/`bevy_state`/`bevy_remote`/`bevy_input`)随引擎交付;**运行时桥 BRP 的 prism 封装、拾取/焦点、Gizmo 绘制为前置待建**;编辑器专有层(E1–E12)与域编辑器在落地并本地提交前不计入「已胜出」,
 > 且域编辑器成熟度显式受对应子系统成熟度约束。本框架为**纯经典数值 / 确定性**工具链,不含 AI/ML/LLM 功能。
