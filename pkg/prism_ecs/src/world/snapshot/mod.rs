@@ -42,6 +42,8 @@ mod hash;
 mod resource;
 mod restore;
 mod rollback;
+#[cfg(feature = "determinism")]
+mod determinism;
 
 use alloc::vec::Vec;
 
@@ -53,6 +55,10 @@ use crate::world::World;
 use column::SnapshotColumn;
 use resource::SnapshotResource;
 
+#[cfg(feature = "determinism")]
+pub use determinism::{
+    FrameHash, FrameHashLog, SnapshotDivergence, TickDivergence, locate_divergence,
+};
 pub use delta::SnapshotDelta;
 pub use hash::FnvHasher;
 pub use rollback::SnapshotRing;

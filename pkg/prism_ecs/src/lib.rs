@@ -140,6 +140,10 @@ pub mod prelude {
     };
     pub use crate::system::{IntoSystem, Local, Query, Res, ResMut, System, SystemParam};
     pub use crate::world::snapshot::{FnvHasher, SnapshotDelta, SnapshotRing, WorldSnapshot};
+    #[cfg(feature = "determinism")]
+    pub use crate::world::snapshot::{
+        FrameHash, FrameHashLog, SnapshotDivergence, TickDivergence, locate_divergence,
+    };
     pub use crate::world::{EntityRef, World};
     // Derive macros. These live in the macro namespace and coexist with the
     // same-named traits (`Component`, `Bundle`) re-exported above.

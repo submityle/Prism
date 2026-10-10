@@ -309,6 +309,7 @@ world.observe::<OnRemove, RelationFilter<ChildOf>>(|t| { /* 级联清理 */ });
 - **确定性世界**：冻结迭代序（稳定键）+ 可选定点数运算路径；同输入→同输出。
 - **快照/增量**：世界快照 + delta（EnTT snapshot 形态，chunk 增量编码控内存），支撑回滚到任意已确认帧并重放输入。
 - **预测-回滚**（Quantum/GGPO）：客户端预测本地输入，收权威帧后回滚重放；**逐帧状态哈希校验去同步**。
+- **双跑发散定位**（`determinism` feature，见 `world/snapshot/determinism.rs`）：逐帧哈希只告诉你*发散了*，不告诉*何时/何处*。审计器两段式定位——`FrameHashLog::first_divergence` 比对两次运行的逐帧状态哈希，返回**首个发散 tick**（哈希不符 / tick 节奏漂移 / 一方提前结束）；拿到坏帧后对两次运行各`snapshot()` 并调 `locate_divergence`，按与 `state_hash` 相同的确定性折叠序（tick 游标→分配器存活→实体表→各列 holder/变更 tick/值字节→资源）返回**首个发散的 `(entity, component)` 坐标**。它是 `structurally_eq` 的定位版：`locate_divergence(a,b).is_none() == a.structurally_eq(b)`。
 - 多 World：主仿真 World + 预测 World 并存，回滚时从权威快照重放输入。
 - `determinism` feature + 固定步长；对接后续 `prism_net` 网络模块。
 - 验证：同输入双跑逐帧哈希一致；回滚 N 帧后状态与无回滚一致。**浮点跨平台一致为高风险，需定点路径或严格 flag。**
@@ -405,6 +406,8 @@ pkg/prism_ecs/                     # no_std + alloc 内核
 
 pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource/Event/SystemParam/Relation 已实现
 ```
+
+> **feature 现状诚实注记**：上方 feature 清单为**目标形态**。`pkg/prism_ecs/Cargo.toml` 当前**已落地**的 feature 为 `std` / `multi_thread` / `simd` / `partition` / `gpu_resident` / `determinism`（均有真实 `cfg` 门控代码与测试，`determinism` 见 `world/snapshot/determinism.rs`）。`serialize` / `reflect` / `trace` 仍为 **PLANNED feature 名**（尚未在 Cargo.toml 落地）：`serialize`/`reflect` 待 `prism_reflect` 跨 crate 桥接（§16.5 / §24.3）就绪后接入，`trace` 的结构化 span 面需与既有 `diagnostics/` profiler 区分后再新增，避免薄壳。`reflect_bridge.rs` 同为 PLANNED（源码树暂未落地，随反射桥一并补）。
 
 依赖：仅 `prism_math`、`prism_tasks`（std）、`prism_reflect`（可选）。**不碰任何 `bevy_*`。**
 

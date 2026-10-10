@@ -44,6 +44,15 @@ partition = []
 # pays nothing. no_std + alloc clean; does not require `std`.
 gpu_resident = []
 
+# Dual-run determinism auditing (design §14 / §24.4). The per-frame state
+# hash (§14 "逐帧状态哈希去同步") is always-on infrastructure; this tier adds
+# the debugging layer that turns a mismatched hash into a coordinate:
+# `FrameHashLog` locates the first diverging tick between two runs, and
+# `locate_divergence` pinpoints the first diverging (entity, component) cell
+# within a frame. Opt-in: lockstep/rollback titles enable it to debug
+# desync, while the base build pays nothing. no_std + alloc clean.
+determinism = []
+
 # NOTE: this crate intentionally does NOT inherit `[lints] workspace = true`.
 # A type-erased columnar ECS fundamentally requires `unsafe` for component
 # storage, so the workspace-wide `unsafe_code = "deny"` cannot apply here.
