@@ -18,12 +18,12 @@
 //! reads, so a plain dielectric costs 12 words instead of 24.
 
 use crate::GpuSurfaceParameters;
-
-/// Number of `u32` words in the always-present [`GpuSurfaceCore`].
-pub const SURFACE_CORE_WORDS: usize = 12;
-/// Number of `u32` words in every per-lobe blob. All lobes are a uniform
-/// 16-byte quantum so packing/unpacking is a fixed stride per set bit.
-pub const SURFACE_LOBE_WORDS: usize = 4;
+// The word-count facts are generated from `schema/surface.toml` (design doc
+// §17.5, S2) and live in `surface_layout.rs`. Re-exporting them here keeps the
+// long-standing public path `prism_render_material::SURFACE_CORE_WORDS` stable
+// while making the schema the single source of truth; the typed structs below
+// are checked against this layout by `layout_matches_generated_table`.
+pub use crate::surface_layout::{SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS};
 
 /// The compact über-BSDF core carried by every surface.
 ///
@@ -441,6 +441,27 @@ mod tests {
             _pad_face1: 0.0,
             _pad_face2: 0.0,
         }
+    }
+
+    #[test]
+    fn layout_matches_generated_table() {
+        use crate::surface_layout::{SURFACE_LOBES, SURFACE_LOBE_COUNT};
+
+        // The hand-written typed enum must agree with the schema-generated
+        // table in count, bit order, and per-lobe stride — this is the S2
+        // guard that keeps `surface.rs` from drifting away from the schema.
+        assert_eq!(LobeMask::COUNT, SURFACE_LOBE_COUNT);
+        assert_eq!(LobeMask::canonical().len(), SURFACE_LOBES.len());
+        for (mask, lobe) in LobeMask::canonical().iter().zip(SURFACE_LOBES.iter()) {
+            // Canonical ordering is low-bit-first, so bit index == pack slot.
+            assert_eq!(mask.bits(), 1 << lobe.registry_slot);
+            assert_eq!(lobe.words, SURFACE_LOBE_WORDS);
+        }
+        // The all-lobes mask is exactly the OR of every generated slot.
+        let generated_all = SURFACE_LOBES
+            .iter()
+            .fold(0u32, |acc, l| acc | (1 << l.registry_slot));
+        assert_eq!(LobeMask::all().bits(), generated_all);
     }
 
     #[test]

@@ -9,10 +9,11 @@
 # later emit all six and byte-parity becomes a constructive result (§17.5.3)
 # rather than a test-maintained invariant.
 #
-# Landing stage S1 (doc §17.5.8): the schema is *declared and parity-checked*
-# against the hand-written layout — it does not yet generate anything. Any drift
-# between this file and `surface.rs`/`material_unpack.wesl` fails the S1 parity
-# gate in `prism_render_material`.
+# Landing stages (doc §17.5.8): S1 declares and parity-checks this schema
+# against the hand-written layout; S2 (current) makes it a generator — the WESL
+# `material_unpack` twin and the Rust `surface_layout` constants are emitted
+# from this file by `prism-material-codegen`, and `codegen_freshness` tests fail
+# on any drift. Byte parity vs `surface.rs` is still guarded by the S1 gate.
 
 schema_version = 1
 # Tracks `MATERIAL_ABI_VERSION`. S1 declares the current v4 layout; the P1 ABI
@@ -404,6 +405,7 @@ words = 4
 
 [[lobe.field]]
 name = "softness"
+surface_field = "face_softness"
 type = "f32"
 bit_region = "PRISM"
 pack_slot = 0

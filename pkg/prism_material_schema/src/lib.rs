@@ -35,6 +35,8 @@ use core::fmt;
 
 use serde::Deserialize;
 
+pub mod codegen;
+
 /// The canonical surface schema, embedded at build time from
 /// `schema/surface.toml`. This is the committed single source of truth.
 pub const SURFACE_SCHEMA_TOML: &str = include_str!("../schema/surface.toml");
@@ -143,6 +145,22 @@ pub struct Field {
     /// Optional debug-view binding name (§4.6).
     #[serde(default)]
     pub debug_view: Option<String>,
+    /// Target field name in the decoded `PrismSurfaceParameters` /
+    /// `GpuSurfaceParameters` fat struct, when it differs from [`Self::name`].
+    /// Lobe-local names are terse (e.g. the face lobe's `softness`), but the
+    /// fat struct namespaces them (`face_softness`); codegen (§17.5 S2) uses
+    /// this to emit the correct assignment target. Defaults to `name`.
+    #[serde(default)]
+    pub surface_field: Option<String>,
+}
+
+impl Field {
+    /// Target field name in the decoded fat surface struct. Falls back to
+    /// [`Self::name`] when no explicit [`Self::surface_field`] override is set.
+    #[must_use]
+    pub fn surface_field(&self) -> &str {
+        self.surface_field.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// Storage type of a field; fixes its word footprint.

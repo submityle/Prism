@@ -15,6 +15,7 @@ mod record;
 mod registry;
 mod resources;
 mod surface;
+mod surface_layout;
 mod texture_addressing;
 mod texture_blend;
 mod texture_blur;
@@ -66,6 +67,7 @@ pub use surface::{
     GpuSurfaceCore, GpuTransmissionLobe, LobeMask, SurfaceParameterBlock, SurfaceUnpackError,
     SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
 };
+pub use surface_layout::{LobeLayout, SURFACE_LOBES, SURFACE_LOBE_COUNT, SURFACE_MAX_WORDS};
 pub use texture_addressing::{address_uv, wrap_coord, AddressResult, WrapMode};
 pub use texture_blend::{
     blend_channel, blend_nonseparable, blend_nonseparable_rgba8, blend_rgba8, BlendMode,
