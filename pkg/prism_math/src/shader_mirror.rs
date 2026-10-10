@@ -1803,3 +1803,39 @@ fn prism_surface(op: u32, g: array<vec4<f32>, 16>, u: f32, v: f32) -> vec3<f32> 
         default: { return vec3<f32>(0.0, 0.0, 0.0); }\n\
     }\n\
 }\n";
+
+/// Single-sourced WGSL for broad-phase primitive overlap tests, mirroring the
+/// CPU boolean queries [`crate::intersect::aabb_aabb`] /
+/// [`sphere_sphere`](crate::intersect::sphere_sphere) /
+/// [`sphere_aabb`](crate::intersect::sphere_aabb). These are the classic
+/// collision/culling broad-phase predicates — the GPU twin lets a compute pass
+/// prefilter candidate pairs before a narrow phase. Each predicate returns
+/// `1u` on overlap and `0u` on disjoint. The math is pure comparisons and dot
+/// products on the identical inputs (no transcendental, no normalize), so away
+/// from the exact tangency boundary the discrete result agrees with the CPU
+/// reference exactly; only a pair whose separation lies within fast-math
+/// rounding of touching could flip, which is the standard broad-phase
+/// conservative tolerance real engines accept.
+pub const WGSL_OVERLAP: &str = "\
+fn prism_overlap_aabb_aabb(a_min: vec3<f32>, a_max: vec3<f32>, b_min: vec3<f32>, b_max: vec3<f32>) -> u32 {\n\
+    if (a_min.x <= b_max.x && a_max.x >= b_min.x &&\n\
+        a_min.y <= b_max.y && a_max.y >= b_min.y &&\n\
+        a_min.z <= b_max.z && a_max.z >= b_min.z) {\n\
+        return 1u;\n\
+    }\n\
+    return 0u;\n\
+}\n\
+\n\
+fn prism_overlap_sphere_sphere(a_center: vec3<f32>, a_radius: f32, b_center: vec3<f32>, b_radius: f32) -> u32 {\n\
+    let r = a_radius + b_radius;\n\
+    let d = a_center - b_center;\n\
+    if (dot(d, d) <= r * r) { return 1u; }\n\
+    return 0u;\n\
+}\n\
+\n\
+fn prism_overlap_sphere_aabb(center: vec3<f32>, radius: f32, b_min: vec3<f32>, b_max: vec3<f32>) -> u32 {\n\
+    let closest = min(max(center, b_min), b_max);\n\
+    let d = center - closest;\n\
+    if (dot(d, d) <= radius * radius) { return 1u; }\n\
+    return 0u;\n\
+}\n";
