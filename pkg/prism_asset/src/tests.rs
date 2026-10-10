@@ -569,6 +569,170 @@ fn dependency_error_display_is_readable() {
     assert!(text.contains('2'));
 }
 
+#[test]
+fn incremental_readiness_marks_dependent_loaded() {
+    // material -> {texture, shader}: material is recursive-Loaded only once
+    // both of its dependencies finish.
+    let mut graph = DependencyGraph::new();
+    let (material, texture, shader) = (node(0), node(1), node(2));
+    graph.add_dependency(material, texture);
+    graph.add_dependency(material, shader);
+
+    // Nothing loaded yet.
+    assert_eq!(
+        graph.recursive_state(material),
+        RecursiveDependencyLoadState::NotLoaded
+    );
+
+    // Both dependencies are in flight; material's own data has loaded. The
+    // closure is still Loading until every dependency finishes.
+    graph.set_self_state(material, LoadState::Loaded);
+    graph.set_self_state(texture, LoadState::Loading);
+    graph.set_self_state(shader, LoadState::Loading);
+    assert_eq!(
+        graph.recursive_state(material),
+        RecursiveDependencyLoadState::Loading
+    );
+
+    // Finishing one dependency keeps material Loading (worst-wins over the
+    // other still-loading dependency).
+    let after_tex = graph.set_self_state(texture, LoadState::Loaded);
+    assert!(after_tex.contains(&texture));
+    assert_eq!(
+        graph.recursive_state(material),
+        RecursiveDependencyLoadState::Loading
+    );
+
+    let after_shader = graph.set_self_state(shader, LoadState::Loaded);
+    // Finishing the last dependency flips both shader and material to Loaded.
+    assert!(after_shader.contains(&shader));
+    assert!(after_shader.contains(&material));
+    assert_eq!(
+        graph.recursive_state(material),
+        RecursiveDependencyLoadState::Loaded
+    );
+    assert_eq!(graph.self_state(material), LoadState::Loaded);
+}
+
+#[test]
+fn incremental_readiness_is_worst_wins() {
+    // One failed dependency makes the whole closure Failed, carrying its id.
+    let mut graph = DependencyGraph::new();
+    let (material, texture, shader) = (node(0), node(1), node(2));
+    graph.add_dependency(material, texture);
+    graph.add_dependency(material, shader);
+
+    let err = mk_error();
+    graph.set_self_state(material, LoadState::Loaded);
+    graph.set_self_state(texture, LoadState::Loaded);
+    let changed = graph.set_self_state(shader, LoadState::Failed(err));
+
+    assert!(changed.contains(&material));
+    assert_eq!(
+        graph.recursive_state(material),
+        RecursiveDependencyLoadState::Failed(err)
+    );
+}
+
+#[test]
+fn incremental_readiness_propagates_through_chain() {
+    // a -> b -> c: readiness ripples all the way up as leaves complete.
+    let mut graph = DependencyGraph::new();
+    let (a, b, c) = (node(0), node(1), node(2));
+    graph.add_dependency(a, b);
+    graph.add_dependency(b, c);
+
+    graph.set_self_state(a, LoadState::Loaded);
+    graph.set_self_state(b, LoadState::Loaded);
+    assert_eq!(
+        graph.recursive_state(a),
+        RecursiveDependencyLoadState::NotLoaded
+    );
+
+    let changed = graph.set_self_state(c, LoadState::Loaded);
+    // Completing the deepest leaf readies c, then b, then a.
+    assert_eq!(changed, [a, b, c].into_iter().collect());
+    assert_eq!(
+        graph.recursive_state(a),
+        RecursiveDependencyLoadState::Loaded
+    );
+}
+
+#[test]
+fn try_add_dependency_rejects_cycle_with_participants() {
+    let mut graph = DependencyGraph::new();
+    let (a, b, c) = (node(0), node(1), node(2));
+    graph.try_add_dependency(a, b).expect("acyclic");
+    graph.try_add_dependency(b, c).expect("acyclic");
+    // Closing c -> a would form a cycle a->b->c->a.
+    match graph.try_add_dependency(c, a) {
+        Err(DependencyError::Cycle { participants }) => {
+            assert_eq!(participants, vec![a, b, c]);
+        }
+        other => panic!("expected cycle rejection, got {other:?}"),
+    }
+    // The rejected edge must not have been added.
+    assert!(graph.dependencies(c).is_empty());
+    assert!(graph.topological_order().is_ok());
+}
+
+#[test]
+fn invalidate_marks_asset_and_transitive_dependents() {
+    // c is depended on by b, which is depended on by a. Changing c should mark
+    // c, b and a stale (their derived data depended on c).
+    let mut graph = DependencyGraph::new();
+    let (a, b, c, unrelated) = (node(0), node(1), node(2), node(3));
+    graph.add_dependency(a, b);
+    graph.add_dependency(b, c);
+    graph.add_asset(unrelated);
+
+    let affected = graph.invalidate(c);
+    assert_eq!(affected, vec![a, b, c]);
+    assert!(graph.is_stale(a));
+    assert!(graph.is_stale(b));
+    assert!(graph.is_stale(c));
+    assert!(!graph.is_stale(unrelated));
+    assert_eq!(graph.stale_count(), 3);
+}
+
+#[test]
+fn take_stale_drains_sorted_and_clear_stale_works() {
+    let mut graph = DependencyGraph::new();
+    let (a, b) = (node(5), node(2));
+    graph.add_asset(a);
+    graph.add_asset(b);
+    graph.invalidate(a);
+    graph.invalidate(b);
+    assert!(graph.clear_stale(a));
+    assert!(!graph.clear_stale(a)); // already cleared
+    assert_eq!(graph.take_stale(), vec![b]);
+    assert_eq!(graph.stale_count(), 0);
+    assert!(graph.take_stale().is_empty());
+}
+
+#[test]
+fn remove_asset_repairs_dependent_readiness() {
+    // material depends on texture (Loading) and shader (Loaded). Removing the
+    // still-loading texture should let material's closure become Loaded.
+    let mut graph = DependencyGraph::new();
+    let (material, texture, shader) = (node(0), node(1), node(2));
+    graph.add_dependency(material, texture);
+    graph.add_dependency(material, shader);
+    graph.set_self_state(material, LoadState::Loaded);
+    graph.set_self_state(shader, LoadState::Loaded);
+    graph.set_self_state(texture, LoadState::Loading);
+    assert_eq!(
+        graph.recursive_state(material),
+        RecursiveDependencyLoadState::Loading
+    );
+
+    graph.remove_asset(texture);
+    assert_eq!(
+        graph.recursive_state(material),
+        RecursiveDependencyLoadState::Loaded
+    );
+}
+
 // --- M1: stable identity, type ids, assets, errors, soft handles, schemes ---
 
 use crate::{direct_dependencies, normalize_path, Asset, AssetTypeId, SoftHandle, StableGuid};
