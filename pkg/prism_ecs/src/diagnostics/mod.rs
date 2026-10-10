@@ -271,6 +271,8 @@ pub mod structural_churn;
 pub mod system_cost;
 #[cfg(feature = "std")]
 pub mod time_travel;
+#[cfg(feature = "trace")]
+pub mod trace;
 #[cfg(feature = "partition")]
 pub mod weak_reference_health;
 
@@ -334,5 +336,11 @@ pub use profiler::SpanRecorder;
 pub use profiler::{FlameGraph, SpanNode, SystemInstrument};
 #[cfg(feature = "std")]
 pub use time_travel::TimeTravel;
+#[cfg(feature = "trace")]
+pub use trace::{
+    EventPhase, TraceArg, TraceArgValue, TraceBuffer, TraceEvent, TrackId, to_chrome_json,
+};
+#[cfg(all(feature = "trace", feature = "std"))]
+pub use trace::TraceRecorder;
 #[cfg(feature = "partition")]
 pub use weak_reference_health::{WeakReferenceHealth, WeakTargetEntry};

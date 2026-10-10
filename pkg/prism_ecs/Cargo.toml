@@ -53,6 +53,17 @@ gpu_resident = []
 # desync, while the base build pays nothing. no_std + alloc clean.
 determinism = []
 
+# Structured trace event stream + Chrome/Perfetto timeline export (design
+# §16.6 / §19). This is the dual of the §16.6 flame-graph profiler: the
+# profiler folds spans into a self-time tree, while `trace` keeps the ordered
+# event stream (explicit timestamps + parallel tracks) and serialises it to
+# Chrome Trace Event Format JSON for offline inspection in `chrome://tracing`
+# / Perfetto. The core (`event`/`buffer`/`chrome`) is no_std + alloc clean and
+# shares the `SystemInstrument` capture hook; the `TraceRecorder` live capture
+# layer additionally needs `std` (wall-clock origin) and is `std`-gated.
+
+trace = []
+
 # NOTE: this crate intentionally does NOT inherit `[lints] workspace = true`.
 # A type-erased columnar ECS fundamentally requires `unsafe` for component
 # storage, so the workspace-wide `unsafe_code = "deny"` cannot apply here.

@@ -356,6 +356,8 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 
 内核暴露诊断接口（原型/chunk 占用、system 耗时、变更量、关系图谱），供编辑器检视器 + 火焰图 + 时间旅行调试（对接 `prism_ui_devtools` / `prism_ui_inspector` / 远程协议）。
 
+火焰图有两条互补的诊断面：`diagnostics/profiler.rs` 把 span 折叠成**自时间树**（flame graph）；`trace` feature（`diagnostics/trace/`）是其**对偶**——保留**有序事件流**（显式时间戳 + 并行 track），经 `to_chrome_json` 导出 Chrome Trace Event Format JSON，可在 `chrome://tracing` / Perfetto 离线查看。两者共用 `SystemInstrument` 捕获钩子，`TraceRecorder` 实时捕获层 `std` 门控。
+
 ### 16.7 Events
 
 双缓冲事件（`EventReader/EventWriter`，跨帧）+ observer 式即时事件（同帧响应）两套并存。
@@ -407,7 +409,7 @@ pkg/prism_ecs/                     # no_std + alloc 内核
 pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource/Event/SystemParam/Relation 已实现
 ```
 
-> **feature 现状诚实注记**：上方 feature 清单为**目标形态**。`pkg/prism_ecs/Cargo.toml` 当前**已落地**的 feature 为 `std` / `multi_thread` / `simd` / `partition` / `gpu_resident` / `determinism`（均有真实 `cfg` 门控代码与测试，`determinism` 见 `world/snapshot/determinism.rs`）。`serialize` / `reflect` / `trace` 仍为 **PLANNED feature 名**（尚未在 Cargo.toml 落地）：`serialize`/`reflect` 待 `prism_reflect` 跨 crate 桥接（§16.5 / §24.3）就绪后接入，`trace` 的结构化 span 面需与既有 `diagnostics/` profiler 区分后再新增，避免薄壳。`reflect_bridge.rs` 同为 PLANNED（源码树暂未落地，随反射桥一并补）。
+> **feature 现状诚实注记**：上方 feature 清单为**目标形态**。`pkg/prism_ecs/Cargo.toml` 当前**已落地**的 feature 为 `std` / `multi_thread` / `simd` / `partition` / `gpu_resident` / `determinism` / `trace`（均有真实 `cfg` 门控代码与测试，`determinism` 见 `world/snapshot/determinism.rs`，`trace` 见 `diagnostics/trace/`）。`serialize` / `reflect` 仍为 **PLANNED feature 名**（尚未在 Cargo.toml 落地）：待 `prism_reflect` 跨 crate 桥接（§16.5 / §24.3）就绪后接入。`trace` 已落地为「结构化事件流 + Chrome/Perfetto 时间线导出」——作为 §16.6 火焰图 profiler 的对偶（profiler 折叠自时间树，trace 保留有序事件流），共用 `SystemInstrument` 捕获钩子、core `no_std + alloc`、`TraceRecorder` 实时捕获层 `std` 门控，非薄壳。`reflect_bridge.rs` 同为 PLANNED（源码树暂未落地，随反射桥一并补）。
 
 依赖：仅 `prism_math`、`prism_tasks`（std）、`prism_reflect`（可选）。**不碰任何 `bevy_*`。**
 
