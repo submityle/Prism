@@ -30,17 +30,74 @@ impl HandleId {
     }
 }
 
+/// A thread-safe abandonment signal shared between an [`Assets`](crate::Assets)
+/// arena and every strong handle it mints.
+///
+/// Deferred reclaim (design §6.2) must never touch arena storage from a
+/// handle's `Drop`: the handle may drop on any thread (for example a render
+/// world releasing a GPU-resident asset) while the arena is owned by another.
+/// Instead, the last strong handle to drop bumps a monotonic counter here, and
+/// the arena consults it at a deterministic reclaim point
+/// ([`Assets::collect_releases`](crate::Assets::collect_releases)) to decide
+/// whether a reclaim scan is even needed.
+///
+/// This is a `no_std`, allocation-free, lock-free, and `unsafe`-free design: a
+/// single [`AtomicU64`] epoch replaces the lock-based MPSC queue a `std` build
+/// could use, trading per-id delivery for a coalesced "something was abandoned
+/// since you last looked" edge that the arena turns into one batched scan.
+pub(crate) struct ReleaseSignal {
+    dropped: AtomicU64,
+}
+
+impl ReleaseSignal {
+    /// Creates a signal with a zero drop count.
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            dropped: AtomicU64::new(0),
+        })
+    }
+
+    /// Records that one strong handle's last reference was dropped. Called from
+    /// [`HandleInner`]'s `Drop`; uses `Release` so a later `Acquire` load in the
+    /// arena observes every preceding handle mutation.
+    fn mark_dropped(&self) {
+        self.dropped.fetch_add(1, AtomicOrdering::Release);
+    }
+
+    /// The monotonic count of abandoned strong handles observed so far.
+    pub(crate) fn dropped_count(&self) -> u64 {
+        self.dropped.load(AtomicOrdering::Acquire)
+    }
+}
+
 /// Shared payload behind every strong, weak, and untyped handle to one asset.
 pub(crate) struct HandleInner {
     id: UntypedAssetId,
     handle_id: HandleId,
+    release: Arc<ReleaseSignal>,
 }
 
 impl HandleInner {
-    /// Allocates a fresh shared payload with a unique [`HandleId`].
-    pub(crate) fn new_arc(id: UntypedAssetId) -> Arc<Self> {
+    /// Allocates a fresh shared payload with a unique [`HandleId`], wired to the
+    /// minting arena's [`ReleaseSignal`] so its drop is observable.
+    pub(crate) fn new_arc(id: UntypedAssetId, release: Arc<ReleaseSignal>) -> Arc<Self> {
         let handle_id = HandleId(NEXT_HANDLE_ID.fetch_add(1, AtomicOrdering::Relaxed));
-        Arc::new(Self { id, handle_id })
+        Arc::new(Self {
+            id,
+            handle_id,
+            release,
+        })
+    }
+}
+
+impl Drop for HandleInner {
+    fn drop(&mut self) {
+        // Runs when the last *strong* handle drops: the arena and any weak
+        // handles hold only `Weak<HandleInner>`, so `Arc` runs this destructor
+        // as soon as the strong count hits zero (the allocation itself lingers
+        // until the weak count also drains). We only signal; the arena reclaims
+        // the slot later at its own deterministic point (design §6.2).
+        self.release.mark_dropped();
     }
 }
 

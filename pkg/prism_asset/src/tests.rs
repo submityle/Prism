@@ -315,6 +315,85 @@ fn remove_unused_reclaims_abandoned_pending_slot() {
 }
 
 #[test]
+fn collect_releases_fast_path_skips_scan_without_drops() {
+    let mut assets = Assets::<Mesh>::new();
+    let _kept = assets.insert(Mesh { verts: 1 });
+    let _ = assets.drain_events();
+    // No handle has been abandoned, so each reclaim point is a no-op and the
+    // frame counter still advances.
+    assert_eq!(assets.collect_releases(), 0);
+    assert_eq!(assets.collect_releases(), 0);
+    assert_eq!(assets.frame(), 2);
+    assert!(assets.drain_events().is_empty());
+    assert_eq!(assets.len(), 1);
+}
+
+#[test]
+fn collect_releases_emits_unused_then_removed_at_zero_grace() {
+    let mut assets = Assets::<Mesh>::new();
+    let handle = assets.insert(Mesh { verts: 7 });
+    let id = handle.id();
+    let _ = assets.drain_events();
+
+    drop(handle);
+    // With the default zero grace window, the first reclaim point both marks
+    // the slot unused and frees it, in that order.
+    assert_eq!(assets.collect_releases(), 1);
+    assert!(assets.is_empty());
+    assert_eq!(
+        assets.drain_events(),
+        vec![AssetEvent::Unused { id }, AssetEvent::Removed { id },]
+    );
+    // Nothing left to do: the signal fast path reports zero afterwards.
+    assert_eq!(assets.collect_releases(), 0);
+}
+
+#[test]
+fn collect_releases_honors_grace_window() {
+    let mut assets = Assets::<Mesh>::with_grace_frames(2);
+    assert_eq!(assets.grace_frames(), 2);
+    let handle = assets.insert(Mesh { verts: 9 });
+    let id = handle.id();
+    let _ = assets.drain_events();
+
+    drop(handle);
+    // Frame 1: observed abandoned -> Unused, but not yet matured.
+    assert_eq!(assets.collect_releases(), 0);
+    assert_eq!(assets.drain_events(), vec![AssetEvent::Unused { id }]);
+    assert!(assets.contains(id));
+    // Frame 2: still inside the window (2 - 1 = 1 < 2).
+    assert_eq!(assets.collect_releases(), 0);
+    assert!(assets.contains(id));
+    assert!(assets.drain_events().is_empty());
+    // Frame 3: 3 - 1 = 2 >= 2 -> freed.
+    assert_eq!(assets.collect_releases(), 1);
+    assert!(!assets.contains(id));
+    assert_eq!(assets.drain_events(), vec![AssetEvent::Removed { id }]);
+}
+
+#[test]
+fn collect_releases_defers_abandoned_in_flight_load() {
+    let mut assets = Assets::<Mesh>::new();
+    let pending = assets.reserve();
+    let id = pending.id();
+    let _ = assets.drain_events();
+
+    drop(pending);
+    // The handle is gone but the load is still pending: the slot is marked
+    // unused yet never freed while in flight, so the loader can still land.
+    assert_eq!(assets.collect_releases(), 0);
+    assert!(assets.contains(id));
+    assert_eq!(assets.drain_events(), vec![AssetEvent::Unused { id }]);
+    // A later resolve succeeds against the still-valid id...
+    assert!(assets.fail(id, mk_error()));
+    let _ = assets.drain_events();
+    // ...and now the resolved-but-abandoned slot is reclaimed.
+    assert_eq!(assets.collect_releases(), 1);
+    assert!(!assets.contains(id));
+    assert_eq!(assets.drain_events(), vec![AssetEvent::Removed { id }]);
+}
+
+#[test]
 fn load_state_is_copy_and_small() {
     // `LoadState` must stay `Copy` so it can live by value in components and
     // cross the main/render split without cloning. A `Failed` id costs 4 bytes.

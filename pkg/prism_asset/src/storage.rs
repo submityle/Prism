@@ -3,7 +3,7 @@
 use crate::asset::Asset;
 use crate::error::AssetErrorId;
 use crate::event::AssetEvent;
-use crate::handle::{Handle, HandleInner};
+use crate::handle::{Handle, HandleInner, ReleaseSignal};
 use crate::id::{AssetId, AssetIndex, UntypedAssetId};
 use crate::load_state::LoadState;
 use crate::type_id::AssetTypeId;
@@ -29,12 +29,29 @@ pub struct Assets<A> {
     free: Vec<u32>,
     len: usize,
     events: Vec<AssetEvent<A>>,
+    /// Shared abandonment signal every minted handle bumps on its last drop.
+    release: Arc<ReleaseSignal>,
+    /// The drop count already reacted to, so [`Assets::collect_releases`] can
+    /// skip the scan entirely when nothing has been abandoned since last time.
+    seen_dropped: u64,
+    /// Monotonic reclaim-point counter advanced once per `collect_releases`.
+    frame: u64,
+    /// How many reclaim points an abandoned slot must survive before it is
+    /// actually freed (design §6.2 grace window); `0` reclaims eagerly.
+    grace_frames: u64,
+    /// Whether at least one slot is mid-grace (or an abandoned load is still
+    /// in flight), forcing the next `collect_releases` to scan even if no new
+    /// drops arrived.
+    has_pending_grace: bool,
 }
 
 /// One arena slot: a reuse counter plus an optional live entry.
 struct Slot<A> {
     generation: u32,
     entry: Option<Entry<A>>,
+    /// The reclaim point at which this slot was first observed abandoned, used
+    /// to measure its grace window; `None` while strongly referenced.
+    unused_since: Option<u64>,
 }
 
 /// A live arena entry: its current payload plus the weak reference used to
@@ -64,7 +81,41 @@ impl<A: Asset> Assets<A> {
             free: Vec::new(),
             len: 0,
             events: Vec::new(),
+            release: ReleaseSignal::new(),
+            seen_dropped: 0,
+            frame: 0,
+            grace_frames: 0,
+            has_pending_grace: false,
         }
+    }
+
+    /// Creates an empty arena whose abandoned slots survive `grace_frames`
+    /// reclaim points before being freed (design §6.2). A non-zero grace gives
+    /// cross-world consumers (for example a render world holding a GPU handle)
+    /// time to release before the slot and its id are recycled.
+    #[must_use]
+    pub fn with_grace_frames(grace_frames: u64) -> Self {
+        let mut assets = Self::new();
+        assets.grace_frames = grace_frames;
+        assets
+    }
+
+    /// The configured grace window, in reclaim points.
+    #[must_use]
+    pub fn grace_frames(&self) -> u64 {
+        self.grace_frames
+    }
+
+    /// Sets the grace window applied by future [`collect_releases`](Assets::collect_releases) calls.
+    pub fn set_grace_frames(&mut self, grace_frames: u64) {
+        self.grace_frames = grace_frames;
+    }
+
+    /// The number of reclaim points that have elapsed (one per
+    /// [`collect_releases`](Assets::collect_releases) call).
+    #[must_use]
+    pub fn frame(&self) -> u64 {
+        self.frame
     }
 
     /// Inserts `value`, returning a strong [`Handle`] that keeps it alive and
@@ -91,15 +142,17 @@ impl<A: Asset> Assets<A> {
                 self.slots.push(Slot {
                     generation: 0,
                     entry: None,
+                    unused_since: None,
                 });
                 index
             }
         };
 
         let slot = &mut self.slots[index as usize];
+        slot.unused_since = None;
         let asset_index = AssetIndex::from_parts(index, slot.generation);
         let untyped = UntypedAssetId::new(asset_index, AssetTypeId::of::<A>());
-        let arc = HandleInner::new_arc(untyped);
+        let arc = HandleInner::new_arc(untyped, Arc::clone(&self.release));
         slot.entry = Some(Entry {
             payload,
             handle: Arc::downgrade(&arc),
@@ -258,6 +311,74 @@ impl<A: Asset> Assets<A> {
         reclaimed
     }
 
+    /// The deferred-reclaim point (design §6.2). Advances one reclaim frame,
+    /// then — only if a strong handle has been abandoned since the last call or
+    /// a slot is still inside its grace window — scans for slots whose last
+    /// strong [`Handle`] has dropped. Each newly abandoned slot emits
+    /// [`AssetEvent::Unused`] (the retention hook) and, once it has survived
+    /// [`grace_frames`](Assets::grace_frames) reclaim points, is freed with an
+    /// [`AssetEvent::Removed`]. Slots whose load is still in flight
+    /// ([`Payload::Pending`]) are never freed here — a loader may still intend
+    /// to [`fulfill`](Assets::fulfill) them — but are revisited next frame.
+    ///
+    /// Returns how many slots were actually freed this call. Unlike
+    /// [`remove_unused`](Assets::remove_unused), this honors the grace window
+    /// and the drop-signal fast path, making it the per-frame reclaim entry
+    /// point; `remove_unused` remains the eager, grace-ignoring sweep.
+    pub fn collect_releases(&mut self) -> usize {
+        self.frame = self.frame.wrapping_add(1);
+        let current = self.release.dropped_count();
+        if current == self.seen_dropped && !self.has_pending_grace {
+            // Nothing abandoned since last time and nothing mid-grace: the
+            // common steady-state path costs a single atomic load and no scan.
+            return 0;
+        }
+        self.seen_dropped = current;
+
+        let mut reclaimed = 0;
+        let mut pending_grace = false;
+        for index in 0..self.slots.len() {
+            let Some(entry) = self.slots[index].entry.as_ref() else {
+                continue;
+            };
+            if entry.handle.strong_count() != 0 {
+                continue;
+            }
+            let is_pending = matches!(entry.payload, Payload::Pending);
+
+            let slot_index = u32::try_from(index).expect("slot index fits u32");
+            let generation = self.slots[index].generation;
+            let id = AssetId::new(AssetIndex::from_parts(slot_index, generation));
+
+            if self.slots[index].unused_since.is_none() {
+                self.slots[index].unused_since = Some(self.frame);
+                self.events.push(AssetEvent::Unused { id });
+            }
+            // SAFETY of unwrap: just ensured `Some` above.
+            let since = self.slots[index]
+                .unused_since
+                .expect("unused_since set this frame");
+            let matured = self.frame.wrapping_sub(since) >= self.grace_frames;
+
+            if is_pending {
+                // Abandoned but still loading: keep the slot so the loader's
+                // eventual fulfill/fail lands on a valid id. Revisit next frame.
+                pending_grace = true;
+                continue;
+            }
+            if matured {
+                if self.take_slot(index).is_some() {
+                    self.events.push(AssetEvent::Removed { id });
+                    reclaimed += 1;
+                }
+            } else {
+                pending_grace = true;
+            }
+        }
+        self.has_pending_grace = pending_grace;
+        reclaimed
+    }
+
     /// The number of occupied slots (pending, ready, and failed combined).
     #[must_use]
     pub fn len(&self) -> usize {
@@ -312,6 +433,7 @@ impl<A: Asset> Assets<A> {
     fn take_slot(&mut self, slot_index: usize) -> Option<Payload<A>> {
         let slot = self.slots.get_mut(slot_index)?;
         let entry = slot.entry.take()?;
+        slot.unused_since = None;
         slot.generation = slot.generation.wrapping_add(1);
         self.free
             .push(u32::try_from(slot_index).expect("slot index fits u32"));

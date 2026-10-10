@@ -18,6 +18,14 @@ pub enum AssetEvent<A: ?Sized> {
         /// The id of the mutated asset.
         id: AssetId<A>,
     },
+    /// The last strong [`Handle`](crate::Handle) to an asset dropped, so it is
+    /// now a candidate for reclamation. This is the retention hook (design
+    /// §6.2/§6.4): a retention cache may pin the asset here to keep it alive
+    /// through its grace window, or let it proceed to [`Removed`](Self::Removed).
+    Unused {
+        /// The id of the now-unreferenced asset.
+        id: AssetId<A>,
+    },
     /// An asset was removed and its slot freed.
     Removed {
         /// The id of the removed asset.
@@ -45,6 +53,7 @@ impl<A: ?Sized> AssetEvent<A> {
         match self {
             Self::Added { id }
             | Self::Modified { id }
+            | Self::Unused { id }
             | Self::Removed { id }
             | Self::Failed { id, .. }
             | Self::LoadedWithDependencies { id } => *id,
@@ -70,6 +79,12 @@ impl<A: ?Sized> AssetEvent<A> {
     #[must_use]
     pub fn is_modified(&self) -> bool {
         matches!(self, Self::Modified { .. })
+    }
+
+    /// Whether this is an [`AssetEvent::Unused`].
+    #[must_use]
+    pub fn is_unused(&self) -> bool {
+        matches!(self, Self::Unused { .. })
     }
 
     /// Whether this is an [`AssetEvent::Removed`].
@@ -124,6 +139,7 @@ impl<A: ?Sized> fmt::Debug for AssetEvent<A> {
                 let name = match other {
                     Self::Added { .. } => "Added",
                     Self::Modified { .. } => "Modified",
+                    Self::Unused { .. } => "Unused",
                     Self::Removed { .. } => "Removed",
                     Self::LoadedWithDependencies { .. } => "LoadedWithDependencies",
                     Self::Failed { .. } => unreachable!("handled above"),
