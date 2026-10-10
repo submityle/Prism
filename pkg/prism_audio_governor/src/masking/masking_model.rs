@@ -65,7 +65,9 @@ impl VoiceSpectrum {
     /// Creates a zero spectrum with `band_count` bands.
     #[must_use]
     pub fn zeros(band_count: usize) -> Self {
-        Self { bands: vec![0.0; band_count] }
+        Self {
+            bands: vec![0.0; band_count],
+        }
     }
 
     /// Builds a single-band spectrum: all energy concentrated in the band that
@@ -128,7 +130,11 @@ impl Default for MaskingModel {
     /// A reasonable default: upward spread of `0.5` per band, steeper downward
     /// spread of `0.25` per band, reaching three bands each way.
     fn default() -> Self {
-        Self { spread_up: 0.5, spread_down: 0.25, reach: 3 }
+        Self {
+            spread_up: 0.5,
+            spread_down: 0.25,
+            reach: 3,
+        }
     }
 }
 
@@ -147,7 +153,11 @@ impl MaskingModel {
         let up = clamp_unit_pos(self.spread_up);
         let down = clamp_unit_pos(self.spread_down);
         for (j, &src_raw) in maskers.iter().enumerate().take(n) {
-            let src = if src_raw.is_finite() && src_raw > 0.0 { src_raw } else { 0.0 };
+            let src = if src_raw.is_finite() && src_raw > 0.0 {
+                src_raw
+            } else {
+                0.0
+            };
             if src == 0.0 {
                 continue;
             }
@@ -197,10 +207,22 @@ impl MaskingModel {
 pub fn is_masked(probe: &VoiceSpectrum, profile: &[Sample], margin: Sample) -> bool {
     let band = probe.peak_band();
     let probe_e = probe.bands.get(band).copied().unwrap_or(0.0);
-    let probe_e = if probe_e.is_finite() { probe_e.max(0.0) } else { 0.0 };
+    let probe_e = if probe_e.is_finite() {
+        probe_e.max(0.0)
+    } else {
+        0.0
+    };
     let masker_e = profile.get(band).copied().unwrap_or(0.0);
-    let masker_e = if masker_e.is_finite() { masker_e.max(0.0) } else { 0.0 };
-    let m = if margin.is_finite() { margin.max(0.0) } else { DEFAULT_MARGIN };
+    let masker_e = if masker_e.is_finite() {
+        masker_e.max(0.0)
+    } else {
+        0.0
+    };
+    let m = if margin.is_finite() {
+        margin.max(0.0)
+    } else {
+        DEFAULT_MARGIN
+    };
     // A silent probe is trivially inaudible; a zero masker never masks.
     if probe_e <= 0.0 {
         return masker_e > 0.0;
@@ -225,7 +247,10 @@ impl MaskingAnalyzer {
     /// Creates an analyser for a given band count and spreading model.
     #[must_use]
     pub fn new(model: MaskingModel, band_count: usize) -> Self {
-        Self { model, band_count: band_count.max(1) }
+        Self {
+            model,
+            band_count: band_count.max(1),
+        }
     }
 
     /// Returns the band count the analyser expects.
@@ -261,7 +286,11 @@ impl MaskingAnalyzer {
         for (idx, probe) in voices.iter().enumerate() {
             for i in 0..self.band_count {
                 let own = probe.bands.get(i).copied().unwrap_or(0.0);
-                let own = if own.is_finite() && own > 0.0 { own } else { 0.0 };
+                let own = if own.is_finite() && own > 0.0 {
+                    own
+                } else {
+                    0.0
+                };
                 others[i] = (total[i] - own).max(0.0);
             }
             self.model.spread(&others, &mut profile);
@@ -275,7 +304,11 @@ impl MaskingAnalyzer {
 /// input to a tiny positive value so the power stays well-defined.
 #[inline]
 fn clamp_unit_pos(x: Sample) -> Sample {
-    if x.is_finite() && x > 0.0 { x.min(1.0) } else { Sample::MIN_POSITIVE }
+    if x.is_finite() && x > 0.0 {
+        x.min(1.0)
+    } else {
+        Sample::MIN_POSITIVE
+    }
 }
 
 #[cfg(test)]
@@ -287,19 +320,25 @@ mod tests {
 
     #[test]
     fn total_energy_sums_bands() {
-        let s = VoiceSpectrum { bands: vec![1.0, 2.0, 3.0] };
+        let s = VoiceSpectrum {
+            bands: vec![1.0, 2.0, 3.0],
+        };
         assert!((s.total_energy() - 6.0).abs() < EPS);
     }
 
     #[test]
     fn total_energy_ignores_non_finite() {
-        let s = VoiceSpectrum { bands: vec![1.0, Sample::NAN, -5.0, 2.0] };
+        let s = VoiceSpectrum {
+            bands: vec![1.0, Sample::NAN, -5.0, 2.0],
+        };
         assert!((s.total_energy() - 3.0).abs() < EPS);
     }
 
     #[test]
     fn peak_band_finds_max() {
-        let s = VoiceSpectrum { bands: vec![0.1, 0.9, 0.3] };
+        let s = VoiceSpectrum {
+            bands: vec![0.1, 0.9, 0.3],
+        };
         assert_eq!(s.peak_band(), 1);
     }
 
@@ -317,7 +356,11 @@ mod tests {
 
     #[test]
     fn spread_is_asymmetric() {
-        let model = MaskingModel { spread_up: 0.6, spread_down: 0.2, reach: 2 };
+        let model = MaskingModel {
+            spread_up: 0.6,
+            spread_down: 0.2,
+            reach: 2,
+        };
         let maskers = vec![0.0, 0.0, 1.0, 0.0, 0.0];
         let mut out = vec![0.0; 5];
         model.spread(&maskers, &mut out);
@@ -353,7 +396,11 @@ mod tests {
         let n = bands.band_count();
         let masker = VoiceSpectrum::tonal(&bands, 200.0, 1.0);
         let probe = VoiceSpectrum::tonal(&bands, 12_000.0, 0.05);
-        let model = MaskingModel { spread_up: 0.5, spread_down: 0.25, reach: 2 };
+        let model = MaskingModel {
+            spread_up: 0.5,
+            spread_down: 0.25,
+            reach: 2,
+        };
         let profile = model.masking_profile(&[&masker], n);
         assert!(!is_masked(&probe, &profile, DEFAULT_MARGIN));
     }

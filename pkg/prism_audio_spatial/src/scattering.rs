@@ -47,8 +47,8 @@
 //! Steam Audio, or Google Resonance Audio source or derived code**; it is
 //! implemented purely from that publicly documented acoustics knowledge.
 
-use bevy_math::Vec3;
 use bevy_math::ops;
+use bevy_math::Vec3;
 use core::f32::consts::PI;
 
 use prism_audio_core::math::Sample;
@@ -65,28 +65,22 @@ const MIN_DIR_LEN_SQ: Sample = 1e-12;
 // rounded to convenient reference values.
 
 /// A smooth flat surface (glass, polished plaster): almost specular.
-const FLAT: [Sample; OCTAVE_BAND_COUNT] =
-    [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.12];
+const FLAT: [Sample; OCTAVE_BAND_COUNT] = [0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.12];
 
 /// Painted or sealed brick: shallow relief, low-to-moderate scattering.
-const PAINTED_BRICK: [Sample; OCTAVE_BAND_COUNT] =
-    [0.05, 0.08, 0.12, 0.18, 0.25, 0.32, 0.40, 0.45];
+const PAINTED_BRICK: [Sample; OCTAVE_BAND_COUNT] = [0.05, 0.08, 0.12, 0.18, 0.25, 0.32, 0.40, 0.45];
 
 /// Bare rough brickwork: pronounced mortar relief, moderate-to-high scattering.
-const ROUGH_BRICK: [Sample; OCTAVE_BAND_COUNT] =
-    [0.10, 0.15, 0.22, 0.32, 0.42, 0.52, 0.60, 0.65];
+const ROUGH_BRICK: [Sample; OCTAVE_BAND_COUNT] = [0.10, 0.15, 0.22, 0.32, 0.42, 0.52, 0.60, 0.65];
 
 /// A filled bookshelf: deep irregular relief, strong broadband scattering.
-const BOOKSHELF: [Sample; OCTAVE_BAND_COUNT] =
-    [0.15, 0.25, 0.40, 0.55, 0.65, 0.72, 0.78, 0.80];
+const BOOKSHELF: [Sample; OCTAVE_BAND_COUNT] = [0.15, 0.25, 0.40, 0.55, 0.65, 0.72, 0.78, 0.80];
 
 /// A dedicated acoustic diffuser (Schroeder/QRD type): very high scattering.
-const DIFFUSER: [Sample; OCTAVE_BAND_COUNT] =
-    [0.20, 0.35, 0.55, 0.75, 0.88, 0.92, 0.94, 0.95];
+const DIFFUSER: [Sample; OCTAVE_BAND_COUNT] = [0.20, 0.35, 0.55, 0.75, 0.88, 0.92, 0.94, 0.95];
 
 /// A hanging curtain in folds: soft irregular surface, moderate scattering.
-const CURTAIN: [Sample; OCTAVE_BAND_COUNT] =
-    [0.08, 0.14, 0.22, 0.30, 0.38, 0.44, 0.48, 0.50];
+const CURTAIN: [Sample; OCTAVE_BAND_COUNT] = [0.08, 0.14, 0.22, 0.30, 0.38, 0.44, 0.48, 0.50];
 
 /// A per-octave-band scattering-coefficient spectrum.
 ///
@@ -144,7 +138,11 @@ impl ScatteringSpectrum {
                 let log_lo = ops::ln(c_lo);
                 let log_hi = ops::ln(c_hi);
                 let span = log_hi - log_lo;
-                let t = if span > 0.0 { (log_f - log_lo) / span } else { 0.0 };
+                let t = if span > 0.0 {
+                    (log_f - log_lo) / span
+                } else {
+                    0.0
+                };
                 let v = values[0] + (values[1] - values[0]) * t;
                 return v.clamp(0.0, 1.0);
             }
@@ -308,7 +306,10 @@ mod tests {
             SurfaceScatter::Curtain,
         ] {
             let b = surface.scattering().bands();
-            assert!(b[OCTAVE_BAND_COUNT - 1] > b[0], "not rising for {surface:?}");
+            assert!(
+                b[OCTAVE_BAND_COUNT - 1] > b[0],
+                "not rising for {surface:?}"
+            );
         }
     }
 
@@ -376,8 +377,16 @@ mod tests {
             assert!((0.0..=1.0).contains(&diff));
         }
         // Out-of-range input is clamped, still partitions to one.
-        assert!(approx(specular_fraction(2.0) + diffuse_fraction(2.0), 1.0, 1e-6));
-        assert!(approx(specular_fraction(-1.0) + diffuse_fraction(-1.0), 1.0, 1e-6));
+        assert!(approx(
+            specular_fraction(2.0) + diffuse_fraction(2.0),
+            1.0,
+            1e-6
+        ));
+        assert!(approx(
+            specular_fraction(-1.0) + diffuse_fraction(-1.0),
+            1.0,
+            1e-6
+        ));
     }
 
     #[test]

@@ -240,22 +240,34 @@ fn clamp_non_negative(value: f32) -> f32 {
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.max(0.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.max(0.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.max(0.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
 /// Sanitises `rgb` and clamps every channel into `[0, ceiling]`.
 #[inline]
 fn clamp_rgb_ceiling(rgb: Vec3, ceiling: f32) -> Vec3 {
-    let ceiling = if ceiling.is_finite() { ceiling.max(0.0) } else { 0.0 };
+    let ceiling = if ceiling.is_finite() {
+        ceiling.max(0.0)
+    } else {
+        0.0
+    };
     let rgb = sanitize_rgb(rgb);
-    Vec3::new(
-        rgb.x.min(ceiling),
-        rgb.y.min(ceiling),
-        rgb.z.min(ceiling),
-    )
+    Vec3::new(rgb.x.min(ceiling), rgb.y.min(ceiling), rgb.z.min(ceiling))
 }
 
 #[cfg(test)]
@@ -298,10 +310,16 @@ mod tests {
             max_radiance: 16.0,
         };
         let back = inscatter.fog_tint(-1.0);
-        assert!((back - inscatter.fog_color).length() < 1e-6, "back={back:?}");
+        assert!(
+            (back - inscatter.fog_color).length() < 1e-6,
+            "back={back:?}"
+        );
         let front = inscatter.fog_tint(1.0);
         // Facing the sun adds energy on top of the ambient fog colour.
-        assert!(front.length() > back.length(), "front={front:?} back={back:?}");
+        assert!(
+            front.length() > back.length(),
+            "front={front:?} back={back:?}"
+        );
     }
 
     #[test]
@@ -392,7 +410,12 @@ mod tests {
             },
         };
         for &(view, sun, h, d) in &[
-            (Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 0.0, 50.0),
+            (
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                0.0,
+                50.0,
+            ),
             (Vec3::ZERO, Vec3::ZERO, f32::NAN, f32::INFINITY),
             (
                 Vec3::splat(f32::NAN),

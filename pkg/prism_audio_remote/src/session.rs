@@ -133,10 +133,7 @@ impl RemoteSession {
     /// # Errors
     ///
     /// Returns [`SessionError::InvalidTransition`] from any other state.
-    pub fn complete_handshake(
-        &mut self,
-        negotiated: Capabilities,
-    ) -> Result<(), SessionError> {
+    pub fn complete_handshake(&mut self, negotiated: Capabilities) -> Result<(), SessionError> {
         match self.state {
             SessionState::Handshaking => {
                 self.capabilities = Some(negotiated);
@@ -154,9 +151,9 @@ impl RemoteSession {
     /// Returns [`SessionError::InvalidTransition`] if already closed.
     pub fn close(&mut self) -> Result<(), SessionError> {
         match self.state {
-            SessionState::Closed => {
-                Err(SessionError::InvalidTransition { from: SessionState::Closed })
-            }
+            SessionState::Closed => Err(SessionError::InvalidTransition {
+                from: SessionState::Closed,
+            }),
             _ => {
                 self.state = SessionState::Closed;
                 Ok(())

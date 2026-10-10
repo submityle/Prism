@@ -8,7 +8,9 @@
 
 extern crate alloc;
 
-use super::{OffsetPtr, OffsetSlice, Reloc, RelocError, RelocMap, RelocMapView, RelocVec, RelocVecView};
+use super::{
+    OffsetPtr, OffsetSlice, Reloc, RelocError, RelocMap, RelocMapView, RelocVec, RelocVecView,
+};
 use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------

@@ -189,8 +189,11 @@ impl GpuTrimeshCapsuleSweep {
             dir_pad: [sweep.direction.x, sweep.direction.y, sweep.direction.z, 0.0],
             counts: [u32::try_from(n).unwrap_or(u32::MAX), 0, 0, 0],
         };
-        let params_buf =
-            buffer::uniform(device, "prism_collider_trimesh_capsule_sweep_params", &params);
+        let params_buf = buffer::uniform(
+            device,
+            "prism_collider_trimesh_capsule_sweep_params",
+            &params,
+        );
         let vertices_buf = buffer::storage_read(
             device,
             "prism_collider_trimesh_capsule_sweep_vertices",

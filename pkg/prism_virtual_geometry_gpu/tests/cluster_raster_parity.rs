@@ -92,7 +92,11 @@ fn cpu_cluster_vis(
 /// barycentric depth blend is subject to sub-`ULP` reassociation between the
 /// two backends). Returns the number of covered texels.
 fn assert_vis_parity(gpu: &[u64], cpu: &[u64], label: &str) -> usize {
-    assert_eq!(gpu.len(), cpu.len(), "vis-buffer length must match ({label})");
+    assert_eq!(
+        gpu.len(),
+        cpu.len(),
+        "vis-buffer length must match ({label})"
+    );
     let mut covered = 0usize;
     for y in 0..HEIGHT {
         for x in 0..WIDTH {

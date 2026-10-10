@@ -208,7 +208,11 @@ where
     F: Fn(Vec2) -> f32,
 {
     let h = height_at(uv);
-    let h = if h.is_finite() { h.clamp(0.0, 1.0) } else { 1.0 };
+    let h = if h.is_finite() {
+        h.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
     (1.0 - h).clamp(0.0, 1.0)
 }
 
@@ -219,7 +223,11 @@ fn sanitize_vec2(v: Vec2) -> Vec2 {
 
 /// Replaces any non-finite component of a `Vec3` with `0`.
 fn sanitize_vec3(v: Vec3) -> Vec3 {
-    Vec3::new(finite_or_zero(v.x), finite_or_zero(v.y), finite_or_zero(v.z))
+    Vec3::new(
+        finite_or_zero(v.x),
+        finite_or_zero(v.y),
+        finite_or_zero(v.z),
+    )
 }
 
 /// Returns `x` when finite, otherwise `0`.
@@ -259,7 +267,12 @@ mod tests {
 
     #[test]
     fn flat_top_surface_hits_at_plane() {
-        let s = relief_map(Vec2::new(0.3, 0.4), view_from_angle(40.0), ReliefConfig::DEFAULT, flat(1.0));
+        let s = relief_map(
+            Vec2::new(0.3, 0.4),
+            view_from_angle(40.0),
+            ReliefConfig::DEFAULT,
+            flat(1.0),
+        );
         assert!(s.hit);
         assert!(s.depth.abs() < 1e-6, "depth {}", s.depth);
         assert!((s.uv - Vec2::new(0.3, 0.4)).length() < 1e-6);
@@ -274,9 +287,19 @@ mod tests {
         let px = (view.x / view.z) * ReliefConfig::DEFAULT.height_scale;
         let expected = analytic_depth(slope, x0, px);
 
-        let s = relief_map(Vec2::new(x0, 0.5), view, ReliefConfig::new(16, 16, 1.0), ramp(slope));
+        let s = relief_map(
+            Vec2::new(x0, 0.5),
+            view,
+            ReliefConfig::new(16, 16, 1.0),
+            ramp(slope),
+        );
         assert!(s.hit);
-        assert!((s.depth - expected).abs() < 1e-3, "got {} expected {}", s.depth, expected);
+        assert!(
+            (s.depth - expected).abs() < 1e-3,
+            "got {} expected {}",
+            s.depth,
+            expected
+        );
     }
 
     #[test]
@@ -288,11 +311,26 @@ mod tests {
         let px = (view.x / view.z) * 1.0;
         let expected = analytic_depth(slope, x0, px);
 
-        let coarse = relief_map(Vec2::new(x0, 0.5), view, ReliefConfig::new(8, 1, 1.0), ramp(slope));
-        let fine = relief_map(Vec2::new(x0, 0.5), view, ReliefConfig::new(8, 20, 1.0), ramp(slope));
+        let coarse = relief_map(
+            Vec2::new(x0, 0.5),
+            view,
+            ReliefConfig::new(8, 1, 1.0),
+            ramp(slope),
+        );
+        let fine = relief_map(
+            Vec2::new(x0, 0.5),
+            view,
+            ReliefConfig::new(8, 20, 1.0),
+            ramp(slope),
+        );
         let e_coarse = (coarse.depth - expected).abs();
         let e_fine = (fine.depth - expected).abs();
-        assert!(e_fine <= e_coarse, "fine {} should beat coarse {}", e_fine, e_coarse);
+        assert!(
+            e_fine <= e_coarse,
+            "fine {} should beat coarse {}",
+            e_fine,
+            e_coarse
+        );
         assert!(e_fine < 2e-4, "fine error too large: {}", e_fine);
     }
 
@@ -309,13 +347,24 @@ mod tests {
         let a = shift(10.0);
         let b = shift(35.0);
         let c = shift(60.0);
-        assert!(a < b && b < c, "displacements not monotone: {} {} {}", a, b, c);
+        assert!(
+            a < b && b < c,
+            "displacements not monotone: {} {} {}",
+            a,
+            b,
+            c
+        );
     }
 
     #[test]
     fn displaces_toward_minus_view_x() {
         let base = Vec2::new(0.5, 0.5);
-        let s = relief_map(base, view_from_angle(55.0), ReliefConfig::DEFAULT, ramp(0.7));
+        let s = relief_map(
+            base,
+            view_from_angle(55.0),
+            ReliefConfig::DEFAULT,
+            ramp(0.7),
+        );
         assert!(s.hit);
         assert!(s.uv.x < base.x, "expected shift toward -x: {}", s.uv.x);
         assert!((s.uv.y - base.y).abs() < 1e-6);
@@ -325,7 +374,12 @@ mod tests {
     fn degenerate_view_retreats() {
         let base = Vec2::new(0.2, 0.8);
         let a = relief_map(base, Vec3::ZERO, ReliefConfig::DEFAULT, ramp(0.6));
-        let b = relief_map(base, Vec3::new(1.0, 0.0, 0.0), ReliefConfig::DEFAULT, ramp(0.6));
+        let b = relief_map(
+            base,
+            Vec3::new(1.0, 0.0, 0.0),
+            ReliefConfig::DEFAULT,
+            ramp(0.6),
+        );
         assert!(!a.hit && a.uv == base);
         assert!(!b.hit && b.uv == base);
     }
@@ -333,7 +387,12 @@ mod tests {
     #[test]
     fn results_are_finite_and_bounded() {
         for deg in [5.0f32, 25.0, 45.0, 65.0, 85.0] {
-            let s = relief_map(Vec2::new(0.5, 0.5), view_from_angle(deg), ReliefConfig::DEFAULT, ramp(0.8));
+            let s = relief_map(
+                Vec2::new(0.5, 0.5),
+                view_from_angle(deg),
+                ReliefConfig::DEFAULT,
+                ramp(0.8),
+            );
             assert!(s.uv.is_finite());
             assert!(s.depth.is_finite() && (0.0..=1.0).contains(&s.depth));
         }

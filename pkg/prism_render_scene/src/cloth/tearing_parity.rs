@@ -25,8 +25,8 @@
 #![cfg(test)]
 
 use prism_render_architecture::cloth::tearing::{tear_flags, TearingParams};
-use prism_render_architecture::cloth::{ClothParticle, Constraint, ConstraintKind, Vec3};
 use prism_render_architecture::cloth::Compliance;
+use prism_render_architecture::cloth::{ClothParticle, Constraint, ConstraintKind, Vec3};
 
 /// `cloth_tearing.wesl` 里 `CLOTH_TEARING_KIND_LRA`：单边长程约束 kind 的 u32
 /// 码，撕裂恒跳过。
@@ -97,11 +97,7 @@ fn wesl_tear_flag(
 }
 
 /// 对一组约束断言：WESL 转写的逐边 flag 与黄金 [`tear_flags`] **逐位一致**。
-fn assert_bit_exact(
-    particles: &[ClothParticle],
-    constraints: &[Constraint],
-    break_strain: f32,
-) {
+fn assert_bit_exact(particles: &[ClothParticle], constraints: &[Constraint], break_strain: f32) {
     let params = TearingParams { break_strain };
     let golden = tear_flags(constraints, particles, params);
 

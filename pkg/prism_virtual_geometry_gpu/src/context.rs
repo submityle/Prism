@@ -44,7 +44,10 @@ fn u64_atomic_features() -> Features {
 /// The long-lived `wgpu` handles shared by the rasterizer dispatch.
 pub struct GpuContext {
     /// The `wgpu` instance the adapter was requested from.
-    #[expect(dead_code, reason = "kept alive so the adapter it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the adapter it produced stays valid"
+    )]
     instance: Instance,
     /// The physical adapter backing [`GpuContext::device`].
     #[expect(dead_code, reason = "kept alive so the device it produced stays valid")]

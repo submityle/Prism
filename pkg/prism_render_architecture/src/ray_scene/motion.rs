@@ -288,12 +288,7 @@ impl MotionTlas {
 
     /// Watertight nearest intersection at shutter `time`.
     #[must_use]
-    pub fn closest_hit_watertight(
-        &self,
-        ray: &Ray,
-        time: f32,
-        blases: &[Bvh],
-    ) -> Option<TlasHit> {
+    pub fn closest_hit_watertight(&self, ray: &Ray, time: f32, blases: &[Bvh]) -> Option<TlasHit> {
         self.walk_closest(ray, time, blases, MotionInstance::MASK_ALL, true)
     }
 
@@ -687,10 +682,16 @@ mod tests {
         // build reorders identically: instance_index must match too.
         for &time in &[0.0f32, 0.25, 0.5, 0.75, 1.0] {
             for _ in 0..1500 {
-                let origin =
-                    [rng.range(-6.0, 6.0), rng.range(-6.0, 6.0), rng.range(-6.0, 6.0)];
-                let target =
-                    [rng.range(-2.0, 2.0), rng.range(-2.0, 2.0), rng.range(-2.0, 2.0)];
+                let origin = [
+                    rng.range(-6.0, 6.0),
+                    rng.range(-6.0, 6.0),
+                    rng.range(-6.0, 6.0),
+                ];
+                let target = [
+                    rng.range(-2.0, 2.0),
+                    rng.range(-2.0, 2.0),
+                    rng.range(-2.0, 2.0),
+                ];
                 let dir = [
                     target[0] - origin[0],
                     target[1] - origin[1],
@@ -733,19 +734,35 @@ mod tests {
         // Swept bounds differ from single-pose bounds, so instance_index can be
         // reordered; compare the stable (instance_id, primitive, t) tuple only.
         for _ in 0..3000 {
-            let origin = [rng.range(-6.0, 6.0), rng.range(-6.0, 6.0), rng.range(-6.0, 6.0)];
-            let target = [rng.range(-2.0, 2.0), rng.range(-2.0, 2.0), rng.range(-2.0, 2.0)];
+            let origin = [
+                rng.range(-6.0, 6.0),
+                rng.range(-6.0, 6.0),
+                rng.range(-6.0, 6.0),
+            ];
+            let target = [
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+            ];
             let dir = [
                 target[0] - origin[0],
                 target[1] - origin[1],
                 target[2] - origin[2],
             ];
             let ray = Ray::infinite(origin, dir);
-            let at0 = mtlas.closest_hit(&ray, 0.0, &blases).map(|h| (h.instance_id, h.primitive));
-            let s0 = from_tlas.closest_hit(&ray, &blases).map(|h| (h.instance_id, h.primitive));
+            let at0 = mtlas
+                .closest_hit(&ray, 0.0, &blases)
+                .map(|h| (h.instance_id, h.primitive));
+            let s0 = from_tlas
+                .closest_hit(&ray, &blases)
+                .map(|h| (h.instance_id, h.primitive));
             assert_eq!(at0, s0, "time=0 should match the from-pose TLAS");
-            let at1 = mtlas.closest_hit(&ray, 1.0, &blases).map(|h| (h.instance_id, h.primitive));
-            let s1 = to_tlas.closest_hit(&ray, &blases).map(|h| (h.instance_id, h.primitive));
+            let at1 = mtlas
+                .closest_hit(&ray, 1.0, &blases)
+                .map(|h| (h.instance_id, h.primitive));
+            let s1 = to_tlas
+                .closest_hit(&ray, &blases)
+                .map(|h| (h.instance_id, h.primitive));
             assert_eq!(at1, s1, "time=1 should match the to-pose TLAS");
         }
     }
@@ -787,10 +804,14 @@ mod tests {
         assert!(tlas.closest_hit_masked(&ray, 0.5, &blases, 0x00).is_none());
         assert!(!tlas.any_hit_masked(&ray, 0.5, &blases, 0x00));
         // A ray mask overlapping only instance 1 hits instance 1.
-        let hit = tlas.closest_hit_masked(&ray, 0.5, &blases, 0x01).expect("hit");
+        let hit = tlas
+            .closest_hit_masked(&ray, 0.5, &blases, 0x01)
+            .expect("hit");
         assert_eq!(hit.instance_id, 1);
         // Overlapping only instance 2 hits instance 2 (same geometry, id differs).
-        let hit = tlas.closest_hit_masked(&ray, 0.5, &blases, 0x02).expect("hit");
+        let hit = tlas
+            .closest_hit_masked(&ray, 0.5, &blases, 0x02)
+            .expect("hit");
         assert_eq!(hit.instance_id, 2);
         // MASK_ALL is equivalent to the unmasked entry point.
         let full = tlas.closest_hit_masked(&ray, 0.5, &blases, MotionInstance::MASK_ALL);
@@ -815,8 +836,16 @@ mod tests {
         for _ in 0..5000 {
             let time = rng.range(-0.2, 1.2); // exercise the clamp too
             let ray_mask = rng.next_u32() as u8;
-            let origin = [rng.range(-7.0, 7.0), rng.range(-7.0, 7.0), rng.range(-7.0, 7.0)];
-            let target = [rng.range(-2.0, 2.0), rng.range(-2.0, 2.0), rng.range(-2.0, 2.0)];
+            let origin = [
+                rng.range(-7.0, 7.0),
+                rng.range(-7.0, 7.0),
+                rng.range(-7.0, 7.0),
+            ];
+            let target = [
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+            ];
             let dir = [
                 target[0] - origin[0],
                 target[1] - origin[1],
@@ -867,8 +896,16 @@ mod tests {
         assert_eq!(a, b);
         for _ in 0..2000 {
             let time = rng.range(0.0, 1.0);
-            let origin = [rng.range(-6.0, 6.0), rng.range(-6.0, 6.0), rng.range(-6.0, 6.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-6.0, 6.0),
+                rng.range(-6.0, 6.0),
+                rng.range(-6.0, 6.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             let ray = Ray::infinite(origin, dir);
             let h1 = a.closest_hit(&ray, time, &blases);
             let h2 = b.closest_hit(&ray, time, &blases);

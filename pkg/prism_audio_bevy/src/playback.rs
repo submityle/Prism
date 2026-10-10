@@ -229,14 +229,24 @@ mod tests {
 
     #[test]
     fn loop_mode_keeps_voice_advancing() {
-        assert_eq!(PlaybackMode::Loop.virtual_behavior(), VirtualBehavior::ContinueVirtual);
+        assert_eq!(
+            PlaybackMode::Loop.virtual_behavior(),
+            VirtualBehavior::ContinueVirtual
+        );
         assert!(PlaybackMode::Loop.loops());
     }
 
     #[test]
     fn one_shot_modes_restart_on_revival() {
-        for mode in [PlaybackMode::Once, PlaybackMode::Despawn, PlaybackMode::Remove] {
-            assert_eq!(mode.virtual_behavior(), VirtualBehavior::RestartFromBeginning);
+        for mode in [
+            PlaybackMode::Once,
+            PlaybackMode::Despawn,
+            PlaybackMode::Remove,
+        ] {
+            assert_eq!(
+                mode.virtual_behavior(),
+                VirtualBehavior::RestartFromBeginning
+            );
             assert!(!mode.loops());
         }
     }
@@ -253,8 +263,14 @@ mod tests {
 
     #[test]
     fn paused_or_muted_forces_silence() {
-        assert!(PlaybackSettings::ONCE.paused().effective_volume().is_silent());
-        assert!(PlaybackSettings::ONCE.muted().effective_volume().is_silent());
+        assert!(PlaybackSettings::ONCE
+            .paused()
+            .effective_volume()
+            .is_silent());
+        assert!(PlaybackSettings::ONCE
+            .muted()
+            .effective_volume()
+            .is_silent());
         assert!(!PlaybackSettings::ONCE.effective_volume().is_silent());
     }
 

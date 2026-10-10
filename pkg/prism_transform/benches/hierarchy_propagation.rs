@@ -30,11 +30,11 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use prism_math::{Quat, Vec3};
+use prism_tasks::TaskPool;
 use prism_transform::hierarchy::Hierarchy;
-use prism_transform::parallel::{LevelPlan, propagate_parallel_with_plan};
+use prism_transform::parallel::{propagate_parallel_with_plan, LevelPlan};
 use prism_transform::propagation::propagate_in_order;
 use prism_transform::{GlobalTransform, Transform};
-use prism_tasks::TaskPool;
 
 /// Roots in the forest (the widest level).
 const ROOTS: usize = 2048;
@@ -63,7 +63,11 @@ fn build_forest() -> (Hierarchy, Vec<Transform>) {
     let push_local = |locals: &mut Vec<Transform>, i: usize| {
         let f = i as f32;
         // Trig-free deterministic spread so each node differs in every lane.
-        let t = Vec3::new((f * 0.013) % 7.0 - 3.5, (f * 0.021) % 5.0 - 2.5, (f * 0.017) % 9.0 - 4.5);
+        let t = Vec3::new(
+            (f * 0.013) % 7.0 - 3.5,
+            (f * 0.021) % 5.0 - 2.5,
+            (f * 0.017) % 9.0 - 4.5,
+        );
         let s = 0.8 + ((i % 5) as f32) * 0.1;
         locals.push(
             Transform::from_translation(t)
@@ -171,7 +175,13 @@ fn main() {
     println!("prism_transform hierarchy_propagation (M3 parallel scaling)");
     println!("  nodes/pass    : {nodes}  (levels {})", plan.level_count());
     println!("  worker threads: {cores}");
-    println!("  serial        : {:.3} ms  ({serial_mps:.1} Mnodes/s)", serial_s * 1e3);
-    println!("  parallel      : {:.3} ms  ({parallel_mps:.1} Mnodes/s)", parallel_s * 1e3);
+    println!(
+        "  serial        : {:.3} ms  ({serial_mps:.1} Mnodes/s)",
+        serial_s * 1e3
+    );
+    println!(
+        "  parallel      : {:.3} ms  ({parallel_mps:.1} Mnodes/s)",
+        parallel_s * 1e3
+    );
     println!("  speedup       : {speedup:.2}x  ({efficiency:.0}% parallel efficiency)");
 }

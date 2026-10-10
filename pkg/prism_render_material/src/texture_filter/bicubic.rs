@@ -42,7 +42,11 @@ use super::texel_wrap::{wrap_texel, TexelAddr};
 
 #[inline]
 fn finite_or_zero(x: f32) -> f32 {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// The four Catmull-Rom (Keys a = -1/2) weights for a fractional offset `t` in
@@ -104,7 +108,10 @@ pub fn bicubic_catmull_rom<S: TexelSource>(
     let wy = catmull_rom_weights(ty);
 
     let fetch = |ox: i64, oy: i64| -> [f32; 4] {
-        match (wrap_texel(ix + ox, w, wrap_u), wrap_texel(iy + oy, h, wrap_v)) {
+        match (
+            wrap_texel(ix + ox, w, wrap_u),
+            wrap_texel(iy + oy, h, wrap_v),
+        ) {
             (TexelAddr::In(cx), TexelAddr::In(cy)) => src.texel(mip, cx, cy),
             _ => border_color,
         }
@@ -153,7 +160,10 @@ mod tests {
         let mut out = [0.0_f32; 4];
         for (i, &oy) in OFFS.iter().enumerate() {
             for (j, &ox) in OFFS.iter().enumerate() {
-                let c = match (wrap_texel(ix + ox, w, wrap_u), wrap_texel(iy + oy, h, wrap_v)) {
+                let c = match (
+                    wrap_texel(ix + ox, w, wrap_u),
+                    wrap_texel(iy + oy, h, wrap_v),
+                ) {
                     (TexelAddr::In(cx), TexelAddr::In(cy)) => src.texel(mip, cx, cy),
                     _ => border_color,
                 };
@@ -175,7 +185,12 @@ mod tests {
             (64, 64)
         }
         fn texel(&self, _mip: u32, x: u32, y: u32) -> [f32; 4] {
-            [self.a + self.bx * x as f32 + self.by * y as f32, 0.0, 0.0, 1.0]
+            [
+                self.a + self.bx * x as f32 + self.by * y as f32,
+                0.0,
+                0.0,
+                1.0,
+            ]
         }
     }
 
@@ -236,21 +251,47 @@ mod tests {
     #[test]
     fn interpolates_at_texel_centers() {
         // uv = (k + 0.5)/dim lands tx = 0 -> center-tap weight picks texel k.
-        let p = Plane { a: 2.0, bx: 0.5, by: -0.25 };
+        let p = Plane {
+            a: 2.0,
+            bx: 0.5,
+            by: -0.25,
+        };
         for (kx, ky) in [(10u32, 12u32), (30, 5), (40, 40)] {
             let uv = [(kx as f32 + 0.5) / 64.0, (ky as f32 + 0.5) / 64.0];
-            let c = bicubic_catmull_rom(&p, 0, uv, WrapMode::ClampToEdge, WrapMode::ClampToEdge, [0.0; 4]);
+            let c = bicubic_catmull_rom(
+                &p,
+                0,
+                uv,
+                WrapMode::ClampToEdge,
+                WrapMode::ClampToEdge,
+                [0.0; 4],
+            );
             let want = p.texel(0, kx, ky)[0];
-            assert!((c[0] - want).abs() < 1.0e-4, "centre ({kx},{ky}) got {} want {want}", c[0]);
+            assert!(
+                (c[0] - want).abs() < 1.0e-4,
+                "centre ({kx},{ky}) got {} want {want}",
+                c[0]
+            );
         }
     }
 
     #[test]
     fn reproduces_linear_ramp_between_centers() {
         // Interior fractional UV: the continuous plane value is reproduced.
-        let p = Plane { a: 1.0, bx: 0.75, by: 0.3 };
+        let p = Plane {
+            a: 1.0,
+            bx: 0.75,
+            by: 0.3,
+        };
         let uv = [(20.37 + 0.5) / 64.0, (18.62 + 0.5) / 64.0];
-        let c = bicubic_catmull_rom(&p, 0, uv, WrapMode::ClampToEdge, WrapMode::ClampToEdge, [0.0; 4]);
+        let c = bicubic_catmull_rom(
+            &p,
+            0,
+            uv,
+            WrapMode::ClampToEdge,
+            WrapMode::ClampToEdge,
+            [0.0; 4],
+        );
         let want = p.a + p.bx * 20.37 + p.by * 18.62;
         assert!((c[0] - want).abs() < 1.0e-3, "got {} want {want}", c[0]);
     }
@@ -278,7 +319,10 @@ mod tests {
                 let a = bicubic_catmull_rom(&Noise, 0, uv, wu, wv, border);
                 let b = bicubic_direct(&Noise, 0, uv, wu, wv, border);
                 for k in 0..4 {
-                    assert!((a[k] - b[k]).abs() < 1.0e-5, "uv={uv:?} {wu:?}/{wv:?} {a:?} vs {b:?}");
+                    assert!(
+                        (a[k] - b[k]).abs() < 1.0e-5,
+                        "uv={uv:?} {wu:?}/{wv:?} {a:?} vs {b:?}"
+                    );
                 }
             }
         }

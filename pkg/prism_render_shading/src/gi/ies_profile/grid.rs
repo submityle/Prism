@@ -66,7 +66,11 @@ pub struct PhotometricGrid {
 #[inline]
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     let value = a + (b - a) * t;
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 /// Locates a clamped interpolation bracket `(i0, i1, t)` for `x` in `axis`.
@@ -94,7 +98,11 @@ fn locate(axis: &[f32], x: f32) -> (usize, usize, f32) {
     let a0 = axis[i0];
     let a1 = axis[hi];
     let span = a1 - a0;
-    let t = if span > MIN_SPAN { (x - a0) / span } else { 0.0 };
+    let t = if span > MIN_SPAN {
+        (x - a0) / span
+    } else {
+        0.0
+    };
     (i0, hi, t.clamp(0.0, 1.0))
 }
 
@@ -278,7 +286,10 @@ mod tests {
 
     #[test]
     fn new_rejects_dimension_mismatch() {
-        assert!(PhotometricGrid::new(alloc::vec![0.0, 90.0], alloc::vec![0.0], alloc::vec![1.0]).is_none());
+        assert!(
+            PhotometricGrid::new(alloc::vec![0.0, 90.0], alloc::vec![0.0], alloc::vec![1.0])
+                .is_none()
+        );
         assert!(PhotometricGrid::new(Vec::new(), alloc::vec![0.0], Vec::new()).is_none());
     }
 

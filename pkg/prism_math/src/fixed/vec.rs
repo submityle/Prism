@@ -105,7 +105,11 @@ impl FxVec2 {
     #[inline]
     pub fn normalize_or_zero(self, min_len: Fixed) -> Self {
         let len = self.length();
-        if len > min_len { self * len.recip() } else { Self::ZERO }
+        if len > min_len {
+            self * len.recip()
+        } else {
+            Self::ZERO
+        }
     }
     /// As an array of raw Q32.32 integers (for hashing / serialization).
     #[inline]
@@ -169,7 +173,11 @@ impl FxVec3 {
     #[inline]
     pub fn normalize_or_zero(self, min_len: Fixed) -> Self {
         let len = self.length();
-        if len > min_len { self * len.recip() } else { Self::ZERO }
+        if len > min_len {
+            self * len.recip()
+        } else {
+            Self::ZERO
+        }
     }
     /// As an array of raw Q32.32 integers (for hashing / serialization).
     #[inline]
@@ -192,7 +200,12 @@ impl FxVec4 {
     /// Broadcast a scalar to every component.
     #[inline]
     pub const fn splat(v: Fixed) -> Self {
-        Self { x: v, y: v, z: v, w: v }
+        Self {
+            x: v,
+            y: v,
+            z: v,
+            w: v,
+        }
     }
     /// Dot product.
     #[inline]
@@ -217,7 +230,12 @@ impl FxVec4 {
     /// As an array of raw Q32.32 integers (for hashing / serialization).
     #[inline]
     pub const fn to_bits(self) -> [i64; 4] {
-        [self.x.to_bits(), self.y.to_bits(), self.z.to_bits(), self.w.to_bits()]
+        [
+            self.x.to_bits(),
+            self.y.to_bits(),
+            self.z.to_bits(),
+            self.w.to_bits(),
+        ]
     }
 }
 

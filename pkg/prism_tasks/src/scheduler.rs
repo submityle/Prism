@@ -15,10 +15,10 @@
 //! jobs and resumes the fiber once its counter reaches zero. With the feature
 //! off, `wait` keeps the help-on-wait busy loop unchanged.
 
-use std::cell::Cell;
 use alloc::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use alloc::sync::Arc;
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -244,10 +244,7 @@ impl Shared {
                 break;
             }
             let guard = self.park.lock().unwrap();
-            if self.has_queued()
-                || !self.wait_set.resume_is_empty()
-                || self.is_shutdown()
-            {
+            if self.has_queued() || !self.wait_set.resume_is_empty() || self.is_shutdown() {
                 drop(guard);
                 continue;
             }

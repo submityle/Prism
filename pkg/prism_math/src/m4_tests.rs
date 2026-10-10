@@ -31,7 +31,16 @@ fn approx(a: f64, b: f64, eps: f64) -> bool {
 
 #[test]
 fn fixed_bits_round_trip() {
-    for &raw in &[0i64, 1, -1, i64::MAX, i64::MIN, 1 << 32, -(1 << 32), 123_456_789] {
+    for &raw in &[
+        0i64,
+        1,
+        -1,
+        i64::MAX,
+        i64::MIN,
+        1 << 32,
+        -(1 << 32),
+        123_456_789,
+    ] {
         assert_eq!(Fixed::from_bits(raw).to_bits(), raw);
     }
 }
@@ -66,7 +75,11 @@ fn fixed_constants_have_expected_bits() {
     // Mathematical constants match f64 to sub-ulp.
     assert!(approx(ref_f64(Fixed::PI), core::f64::consts::PI, 1e-9));
     assert!(approx(ref_f64(Fixed::TAU), core::f64::consts::TAU, 1e-9));
-    assert!(approx(ref_f64(Fixed::FRAC_PI_2), core::f64::consts::FRAC_PI_2, 1e-9));
+    assert!(approx(
+        ref_f64(Fixed::FRAC_PI_2),
+        core::f64::consts::FRAC_PI_2,
+        1e-9
+    ));
     assert!(approx(ref_f64(Fixed::LN_2), core::f64::consts::LN_2, 1e-9));
     assert!(approx(ref_f64(Fixed::E), core::f64::consts::E, 1e-9));
 }
@@ -104,7 +117,13 @@ fn ref_mul(a: i64, b: i64) -> i64 {
 /// Exact Q32.32 divide truncating toward zero, saturating.
 fn ref_div(a: i64, b: i64) -> i64 {
     if b == 0 {
-        return if a > 0 { i64::MAX } else if a < 0 { i64::MIN } else { 0 };
+        return if a > 0 {
+            i64::MAX
+        } else if a < 0 {
+            i64::MIN
+        } else {
+            0
+        };
     }
     (((a as i128) << 32) / b as i128).clamp(i64::MIN as i128, i64::MAX as i128) as i64
 }
@@ -136,7 +155,15 @@ fn operators_match_rational_reference() {
 
 #[test]
 fn sub_neg_match_reference() {
-    let samples = [0i64, Fixed::ONE_BITS, -Fixed::ONE_BITS, 1_234_567_890, -987_654_321, i64::MAX, i64::MIN];
+    let samples = [
+        0i64,
+        Fixed::ONE_BITS,
+        -Fixed::ONE_BITS,
+        1_234_567_890,
+        -987_654_321,
+        i64::MAX,
+        i64::MIN,
+    ];
     for &ar in &samples {
         for &br in &samples {
             let a = Fixed::from_bits(ar);
@@ -237,7 +264,11 @@ fn atan2_accuracy_all_quadrants() {
     ];
     for &(y, x) in &pts {
         let got = ref_f64(Fixed::from_f64(y).atan2(Fixed::from_f64(x)));
-        assert!(approx(got, y.atan2(x), 3e-4), "atan2({y},{x}) = {got} vs {}", y.atan2(x));
+        assert!(
+            approx(got, y.atan2(x), 3e-4),
+            "atan2({y},{x}) = {got} vs {}",
+            y.atan2(x)
+        );
     }
     assert_eq!(Fixed::ZERO.atan2(Fixed::ZERO), Fixed::ZERO);
 }
@@ -248,7 +279,10 @@ fn exp_accuracy() {
     while x <= 10.0 {
         let got = ref_f64(Fixed::from_f64(x).exp());
         let want = x.exp();
-        assert!((got - want).abs() <= want.abs() * 1e-4 + 1e-9, "exp({x}) = {got} vs {want}");
+        assert!(
+            (got - want).abs() <= want.abs() * 1e-4 + 1e-9,
+            "exp({x}) = {got} vs {want}"
+        );
         x += 0.11;
     }
     assert!(approx(ref_f64(Fixed::ZERO.exp()), 1.0, 1e-9));
@@ -277,11 +311,20 @@ fn ln_accuracy() {
 fn fxvec_algebra() {
     let a = fxvec3(Fixed::from_int(1), Fixed::from_int(2), Fixed::from_int(3));
     let b = fxvec3(Fixed::from_int(4), Fixed::from_int(5), Fixed::from_int(6));
-    assert_eq!(a + b, fxvec3(Fixed::from_int(5), Fixed::from_int(7), Fixed::from_int(9)));
-    assert_eq!(b - a, fxvec3(Fixed::from_int(3), Fixed::from_int(3), Fixed::from_int(3)));
+    assert_eq!(
+        a + b,
+        fxvec3(Fixed::from_int(5), Fixed::from_int(7), Fixed::from_int(9))
+    );
+    assert_eq!(
+        b - a,
+        fxvec3(Fixed::from_int(3), Fixed::from_int(3), Fixed::from_int(3))
+    );
     assert_eq!(a.dot(b), Fixed::from_int(32));
     assert_eq!(FxVec3::X.cross(FxVec3::Y), FxVec3::Z);
-    assert_eq!(a * Fixed::TWO, fxvec3(Fixed::from_int(2), Fixed::from_int(4), Fixed::from_int(6)));
+    assert_eq!(
+        a * Fixed::TWO,
+        fxvec3(Fixed::from_int(2), Fixed::from_int(4), Fixed::from_int(6))
+    );
     assert_eq!(Fixed::TWO * a, a * Fixed::TWO);
 }
 
@@ -322,9 +365,18 @@ fn compensated_sum_beats_naive() {
     let kahan_err = (kahan - exact).abs();
     let neumaier_err = (neumaier - exact).abs();
 
-    assert!(kahan_err <= naive_err, "kahan {kahan_err} should beat naive {naive_err}");
-    assert!(neumaier_err <= naive_err, "neumaier {neumaier_err} should beat naive {naive_err}");
-    assert!(neumaier_err <= 1.0, "neumaier error {neumaier_err} too large");
+    assert!(
+        kahan_err <= naive_err,
+        "kahan {kahan_err} should beat naive {naive_err}"
+    );
+    assert!(
+        neumaier_err <= naive_err,
+        "neumaier {neumaier_err} should beat naive {naive_err}"
+    );
+    assert!(
+        neumaier_err <= 1.0,
+        "neumaier error {neumaier_err} too large"
+    );
 }
 
 #[test]
@@ -410,4 +462,3 @@ fn double_run_agreement() {
     h2.write_fixed(Fixed::ONE);
     assert_ne!(h1.finish(), h2.finish());
 }
-

@@ -56,15 +56,13 @@ impl Monitor {
     /// monitor reports no video modes.
     #[must_use]
     pub fn best_video_mode(&self, target: PhysicalSize) -> Option<VideoMode> {
-        self.video_modes
-            .iter()
-            .copied()
-            .max_by_key(|mode| {
-                let exact = u8::from(mode.size == target);
-                // Prefer modes that fit within the target, larger area first.
-                let fits = u8::from(mode.size.width <= target.width && mode.size.height <= target.height);
-                let area = u64::from(mode.size.width) * u64::from(mode.size.height);
-                (exact, fits, area, mode.refresh_rate_millihertz)
-            })
+        self.video_modes.iter().copied().max_by_key(|mode| {
+            let exact = u8::from(mode.size == target);
+            // Prefer modes that fit within the target, larger area first.
+            let fits =
+                u8::from(mode.size.width <= target.width && mode.size.height <= target.height);
+            let area = u64::from(mode.size.width) * u64::from(mode.size.height);
+            (exact, fits, area, mode.refresh_rate_millihertz)
+        })
     }
 }

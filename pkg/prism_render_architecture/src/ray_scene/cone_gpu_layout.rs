@@ -161,7 +161,10 @@ impl GpuConeBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -216,7 +219,10 @@ impl GpuConeBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -288,7 +294,13 @@ mod tests {
             base[1] + rng.range(-3.0, 3.0),
             base[2] + rng.range(0.5, 3.0),
         ];
-        Cone::new(base, top, rng.range(0.3, 1.5), rng.range(0.0, 1.2), primitive)
+        Cone::new(
+            base,
+            top,
+            rng.range(0.3, 1.5),
+            rng.range(0.0, 1.2),
+            primitive,
+        )
     }
 
     fn random_scene(rng: &mut Rng, count: u32) -> Vec<Cone> {

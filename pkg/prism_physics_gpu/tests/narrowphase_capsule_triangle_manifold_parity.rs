@@ -24,8 +24,8 @@
 
 use glam::Vec3;
 use prism_physics_gpu::{
-    cpu_capsule_triangle_manifold, Capsule, CapsuleTrianglePair, ContactManifold, GpuContext,
-    GpuCapsuleTriangleManifoldNarrowphase, Triangle,
+    cpu_capsule_triangle_manifold, Capsule, CapsuleTrianglePair, ContactManifold,
+    GpuCapsuleTriangleManifoldNarrowphase, GpuContext, Triangle,
 };
 
 /// Tolerance on the normal, positions, and depths; the only inexact steps are
@@ -188,7 +188,11 @@ fn gpu_capsule_triangle_manifold_empty_batch_matches_cpu_golden() {
 
     // An empty couple batch must return an empty vector without touching the
     // device, matching the twin.
-    let capsules = [cap(Vec3::new(-2.0, 0.0, 0.4), Vec3::new(2.0, 0.0, 0.4), 0.5)];
+    let capsules = [cap(
+        Vec3::new(-2.0, 0.0, 0.4),
+        Vec3::new(2.0, 0.0, 0.4),
+        0.5,
+    )];
     let triangles = [big_floor()];
     let pairs: [CapsuleTrianglePair; 0] = [];
     run_parity(&ctx, &gpu, &capsules, &triangles, &pairs);

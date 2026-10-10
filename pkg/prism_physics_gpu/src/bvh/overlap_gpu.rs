@@ -228,7 +228,8 @@ impl GpuBvhOverlap {
         let query_max_buf = buffer::storage_read(device, "prism_bvh_overlap_query_max", &query_max);
 
         let counts_bytes = u64::from(num_queries) * 4;
-        let counts_buf = buffer::storage_rw_zeroed(device, "prism_bvh_overlap_counts", counts_bytes);
+        let counts_buf =
+            buffer::storage_rw_zeroed(device, "prism_bvh_overlap_counts", counts_bytes);
         let hits_bytes = u64::from(num_queries) * u64::from(capacity_per_query) * 4;
         // capacity_per_query may legitimately be zero (overflow-probe); keep the
         // buffer non-empty so the bind group is valid even then.
@@ -361,11 +362,8 @@ impl GpuBvhOverlap {
         let hits_bytes = u64::from(num_queries) * u64::from(capacity_per_query) * 4;
         // capacity_per_query may legitimately be zero (overflow-probe); keep the
         // buffer non-empty so the bind group is valid even then.
-        let hits_buf = buffer::storage_rw_zeroed(
-            device,
-            "prism_bvh_overlap_resident_hits",
-            hits_bytes.max(4),
-        );
+        let hits_buf =
+            buffer::storage_rw_zeroed(device, "prism_bvh_overlap_resident_hits", hits_bytes.max(4));
 
         let bind = device.create_bind_group(&BindGroupDescriptor {
             label: Some("prism_bvh_overlap_resident_bind"),
@@ -387,8 +385,11 @@ impl GpuBvhOverlap {
             ],
         });
 
-        let counts_stage =
-            buffer::staging(device, "prism_bvh_overlap_resident_counts_stage", counts_bytes);
+        let counts_stage = buffer::staging(
+            device,
+            "prism_bvh_overlap_resident_counts_stage",
+            counts_bytes,
+        );
         let hits_stage = buffer::staging(
             device,
             "prism_bvh_overlap_resident_hits_stage",

@@ -142,7 +142,12 @@ impl CriticalBands {
     /// Returns `None` if `band_count` is zero or the range is non-finite or
     /// non-increasing, so callers always get a usable partition or nothing.
     #[must_use]
-    pub fn new(scale: BandScale, low_hz: Sample, high_hz: Sample, band_count: usize) -> Option<Self> {
+    pub fn new(
+        scale: BandScale,
+        low_hz: Sample,
+        high_hz: Sample,
+        band_count: usize,
+    ) -> Option<Self> {
         if band_count == 0
             || !low_hz.is_finite()
             || !high_hz.is_finite()
@@ -182,7 +187,9 @@ impl CriticalBands {
         // avoid `unwrap` to keep the panic-free contract explicit.
         match Self::new(BandScale::Bark, 20.0, 20_000.0, 24) {
             Some(bands) => bands,
-            None => Self { edges: alloc_fallback_edges() },
+            None => Self {
+                edges: alloc_fallback_edges(),
+            },
         }
     }
 

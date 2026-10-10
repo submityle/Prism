@@ -148,7 +148,9 @@ fn regression_fires_only_past_threshold_and_above_floor() {
     assert!((alert.p99_ratio - 1.06).abs() < 1e-9);
 
     // Unknown key: no baseline, no alert.
-    assert!(tracker.check("unknown", 9_999_999, 9_999_999, None).is_none());
+    assert!(tracker
+        .check("unknown", 9_999_999, 9_999_999, None)
+        .is_none());
 }
 
 #[test]

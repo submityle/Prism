@@ -31,7 +31,10 @@ impl Plane {
     #[inline]
     pub fn from_point_normal(point: Vec3, normal: Vec3) -> Self {
         let n = normal.normalize();
-        Self { normal: n, d: -n.dot(point) }
+        Self {
+            normal: n,
+            d: -n.dot(point),
+        }
     }
 
     /// Create a plane through three points, wound counter-clockwise so the
@@ -45,7 +48,10 @@ impl Plane {
             return None;
         }
         let normal = n * (1.0 / len);
-        Some(Self { normal, d: -normal.dot(a) })
+        Some(Self {
+            normal,
+            d: -normal.dot(a),
+        })
     }
 
     /// Return a copy with a unit-length `normal` (and `d` scaled to match).
@@ -53,7 +59,10 @@ impl Plane {
     pub fn normalized(self) -> Self {
         let len = self.normal.length();
         let inv = 1.0 / len;
-        Self { normal: self.normal * inv, d: self.d * inv }
+        Self {
+            normal: self.normal * inv,
+            d: self.d * inv,
+        }
     }
 
     /// Signed distance from `p` to the plane. Positive values lie in the
@@ -73,7 +82,10 @@ impl Plane {
     /// Flip the plane to face the opposite half-space.
     #[inline]
     pub fn flipped(self) -> Self {
-        Self { normal: -self.normal, d: -self.d }
+        Self {
+            normal: -self.normal,
+            d: -self.d,
+        }
     }
 
     /// True if the normal and offset are finite.

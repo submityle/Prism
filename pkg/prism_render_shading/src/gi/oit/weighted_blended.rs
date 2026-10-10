@@ -72,7 +72,11 @@ pub enum WeightScheme {
 /// Sanitises a scalar to a finite value, substituting `fallback` otherwise.
 #[inline]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Evaluates the depth weight `w(z, a)` for the given [`WeightScheme`].
@@ -298,7 +302,10 @@ mod tests {
         let r = t.resolve(EPS);
         assert!((r.coverage - 1.0).abs() < 1e-6, "coverage={}", r.coverage);
         let out = r.over_background(Vec3::ZERO);
-        assert!((out - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5, "out={out:?}");
+        assert!(
+            (out - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5,
+            "out={out:?}"
+        );
     }
 
     #[test]
@@ -351,6 +358,10 @@ mod tests {
         t.accumulate(WeightScheme::Equation8, Vec3::ONE, 0.5, 2.0);
         t.accumulate(WeightScheme::Equation8, Vec3::ZERO, 0.5, 300.0);
         let r = t.resolve(EPS);
-        assert!(r.color.x > 0.5, "near colour should dominate: {}", r.color.x);
+        assert!(
+            r.color.x > 0.5,
+            "near colour should dominate: {}",
+            r.color.x
+        );
     }
 }

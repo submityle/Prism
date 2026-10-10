@@ -288,7 +288,7 @@ mod tests {
     fn bent_normal_occlusion_cone() {
         let bn = Vec3::Z;
         let cos_ap = ops::cos(core::f32::consts::FRAC_PI_4); // 45-degree cone.
-        // Light along the axis is fully visible (scaled by visibility).
+                                                             // Light along the axis is fully visible (scaled by visibility).
         approx(bent_normal_occlusion(bn, cos_ap, 1.0, Vec3::Z), 1.0);
         // Light perpendicular (outside the cone) is occluded.
         approx(bent_normal_occlusion(bn, cos_ap, 1.0, Vec3::X), 0.0);
@@ -334,7 +334,7 @@ mod tests {
     fn clamp_output_handles_non_finite() {
         let out = clamp_output([f32::NAN, f32::INFINITY, -5.0], 10.0);
         approx3(out, [0.0, 10.0, 0.0]); // NaN->0, +inf->ceiling, -5->0
-        // Bad ceiling falls back to the HDR default.
+                                        // Bad ceiling falls back to the HDR default.
         let big = clamp_output([1.0e9, 0.0, 0.0], -1.0);
         approx(big[0], DEFAULT_HDR_CEILING);
     }

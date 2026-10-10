@@ -38,13 +38,13 @@ mod context_aarch64;
 
 use std::any::Any;
 use std::cell::Cell;
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 use context::Context;
 
-use crate::Counter;
 use crate::job::Job;
 use crate::scheduler::Shared;
+use crate::Counter;
 
 thread_local! {
     /// The fiber currently executing on this worker thread, or null when the
@@ -95,7 +95,10 @@ pub(crate) struct FiberInner {
 pub(crate) struct FiberPtr(pub(crate) *mut FiberInner);
 
 // SAFETY: see the type docs — exactly one owner touches the pointee at a time.
-#[expect(unsafe_code, reason = "single-owner fiber handoff across worker threads")]
+#[expect(
+    unsafe_code,
+    reason = "single-owner fiber handoff across worker threads"
+)]
 unsafe impl Send for FiberPtr {}
 
 /// Whether the calling thread is currently executing inside a fiber.
@@ -231,7 +234,10 @@ pub(crate) extern "C" fn fiber_enter(fiber: *mut FiberInner) -> ! {
 
     // SAFETY: still exclusively owned. Record any panic, mark done, then switch
     // back to the worker's scheduler context, which is live and awaiting us.
-    #[expect(unsafe_code, reason = "finalize the fiber and switch back to the worker")]
+    #[expect(
+        unsafe_code,
+        reason = "finalize the fiber and switch back to the worker"
+    )]
     unsafe {
         if let Err(payload) = result {
             (*fiber).panic = Some(payload);

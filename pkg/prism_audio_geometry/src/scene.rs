@@ -141,7 +141,11 @@ impl AcousticScene {
         let [a, b, c] = self.mesh.triangle(index)?;
         let n = (b - a).cross(c - a);
         let n = n.normalize_or_zero();
-        if n == Vec3::ZERO { None } else { Some(n) }
+        if n == Vec3::ZERO {
+            None
+        } else {
+            Some(n)
+        }
     }
 
     /// The acoustic material of triangle `index` (default when unassigned).
@@ -300,11 +304,7 @@ mod tests {
         let scene = wall_at_x0(AcousticMaterial::OPEN);
         assert!(scene.segment_blocked(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), 1e-3));
         // A segment that stays on one side is clear.
-        assert!(!scene.segment_blocked(
-            Vec3::new(-2.0, 0.0, 0.0),
-            Vec3::new(-1.0, 0.0, 0.0),
-            1e-3
-        ));
+        assert!(!scene.segment_blocked(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0), 1e-3));
     }
 
     #[test]

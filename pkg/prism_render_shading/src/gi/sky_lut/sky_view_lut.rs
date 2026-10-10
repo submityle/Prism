@@ -168,9 +168,21 @@ fn clamp_finite(value: f32, lo: f32, hi: f32) -> f32 {
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.max(0.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.max(0.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.max(0.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -198,7 +210,11 @@ fn channel_exp_neg(tau: f32) -> f32 {
 #[inline]
 fn horizon_angle(atmosphere: &Atmosphere, r: f32) -> (f32, f32) {
     let bottom = atmosphere.bottom_radius.max(0.0);
-    let r = if r.is_finite() { r.max(bottom.max(EPSILON)) } else { bottom.max(EPSILON) };
+    let r = if r.is_finite() {
+        r.max(bottom.max(EPSILON))
+    } else {
+        bottom.max(EPSILON)
+    };
     let v_horizon = (r * r - bottom * bottom).max(0.0).sqrt();
     let cos_beta = clamp_finite(v_horizon / r, -1.0, 1.0);
     let beta = ops::acos(cos_beta);
@@ -355,7 +371,11 @@ fn march_sky_radiance(
         // Multiple scattering (isotropic, from the LUT).
         let total_scatter = atmosphere.scattering(altitude);
         let r_local = pos.length();
-        let up = if r_local > EPSILON { pos / r_local } else { Vec3::Y };
+        let up = if r_local > EPSILON {
+            pos / r_local
+        } else {
+            Vec3::Y
+        };
         let mu_sun_local = clamp_finite(up.dot(sun), -1.0, 1.0);
         let psi_ms = sample_multiscatter_lut(ms_lut, atmosphere, r_local, mu_sun_local);
         radiance += t_view * total_scatter * psi_ms * ds;
@@ -385,7 +405,11 @@ pub fn bake_sky_view_lut(
 ) -> SkyViewLut {
     let bottom = atmosphere.bottom_radius.max(0.0);
     let top = atmosphere.top_radius.max(bottom);
-    let view_radius = if r.is_finite() { r.clamp(bottom, top) } else { bottom };
+    let view_radius = if r.is_finite() {
+        r.clamp(bottom, top)
+    } else {
+        bottom
+    };
     if width == 0 || height == 0 {
         return SkyViewLut {
             width: 0,
@@ -549,9 +573,22 @@ mod tests {
     fn radiance_is_non_negative_and_finite() {
         let a = earth();
         let ms = zero_ms();
-        let lut = bake_sky_view_lut(&a, a.bottom_radius + 1.0, 0.3, Vec3::splat(15.0), &ms, 16, 16, 24, 8);
+        let lut = bake_sky_view_lut(
+            &a,
+            a.bottom_radius + 1.0,
+            0.3,
+            Vec3::splat(15.0),
+            &ms,
+            16,
+            16,
+            24,
+            8,
+        );
         for texel in lut.texels() {
-            assert!(texel.is_finite() && texel.min_element() >= 0.0, "texel={texel:?}");
+            assert!(
+                texel.is_finite() && texel.min_element() >= 0.0,
+                "texel={texel:?}"
+            );
         }
     }
 
@@ -559,9 +596,29 @@ mod tests {
     fn degenerate_inputs_never_produce_nan() {
         let a = earth();
         let ms = zero_ms();
-        let empty = bake_sky_view_lut(&a, a.bottom_radius + 1.0, 0.5, Vec3::splat(1.0), &ms, 0, 0, 8, 4);
+        let empty = bake_sky_view_lut(
+            &a,
+            a.bottom_radius + 1.0,
+            0.5,
+            Vec3::splat(1.0),
+            &ms,
+            0,
+            0,
+            8,
+            4,
+        );
         assert_eq!(sample_sky_view(&empty, &a, Vec3::Y, Vec3::Y), Vec3::ZERO);
-        let lut = bake_sky_view_lut(&a, a.bottom_radius + 1.0, 0.5, Vec3::splat(1.0), &ms, 8, 8, 8, 4);
+        let lut = bake_sky_view_lut(
+            &a,
+            a.bottom_radius + 1.0,
+            0.5,
+            Vec3::splat(1.0),
+            &ms,
+            8,
+            8,
+            8,
+            4,
+        );
         // Zero view direction -> zero radiance, no NaN.
         assert_eq!(sample_sky_view(&lut, &a, Vec3::ZERO, Vec3::Y), Vec3::ZERO);
         // NaN directions stay finite.

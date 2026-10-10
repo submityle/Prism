@@ -19,11 +19,11 @@ use prism_audio_core::graph::AudioNode;
 use prism_audio_core::Sample;
 
 use super::description::PatchDescription;
+use super::library::oscillator::OscWaveform;
 use super::library::{
     AdsrAmpNode, ConstantNode, GainNode, NoiseNode, OnePoleLowpassNode, OscillatorNode,
     ProductNode, SumNode,
 };
-use super::library::oscillator::OscWaveform;
 use super::param::ParamCell;
 use super::port::PortCount;
 use super::trigger::GateCell;
@@ -144,9 +144,7 @@ impl NodeKind {
         gate_cells: &[GateCell],
     ) -> Option<Box<dyn AudioNode>> {
         match self {
-            NodeKind::Constant => {
-                Some(Box::new(ConstantNode::new(param_cells[0].clone())))
-            }
+            NodeKind::Constant => Some(Box::new(ConstantNode::new(param_cells[0].clone()))),
             NodeKind::Oscillator { waveform } => Some(Box::new(OscillatorNode::new(
                 sample_rate,
                 *waveform,
@@ -182,7 +180,10 @@ mod tests {
         assert_eq!(NodeKind::Constant.port_count(), PortCount::new(0, 1));
         assert_eq!(NodeKind::Gain.port_count(), PortCount::new(1, 1));
         assert_eq!(NodeKind::Product.port_count(), PortCount::new(2, 1));
-        assert_eq!(NodeKind::Sum { inputs: 3 }.port_count(), PortCount::new(3, 1));
+        assert_eq!(
+            NodeKind::Sum { inputs: 3 }.port_count(),
+            PortCount::new(3, 1)
+        );
     }
 
     #[test]

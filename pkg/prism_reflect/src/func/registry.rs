@@ -91,9 +91,7 @@ impl FunctionRegistry {
     pub fn call(&self, name: &str, args: ArgList) -> Result<Box<dyn Reflect>, FunctionError> {
         match self.functions.get(name) {
             Some(function) => function.call(&args),
-            None => Err(FunctionError::UnknownFunction {
-                name: name.into(),
-            }),
+            None => Err(FunctionError::UnknownFunction { name: name.into() }),
         }
     }
 }

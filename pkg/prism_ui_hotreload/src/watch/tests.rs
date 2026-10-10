@@ -10,7 +10,7 @@ use std::io::Write as _;
 
 use prism_platform::{Event, EventKind, WatchBackend};
 
-use super::{ChangeKind, Coalescer, ReloadTarget, classify};
+use super::{classify, ChangeKind, Coalescer, ReloadTarget};
 
 fn event(path: &str, kind: EventKind) -> Event {
     Event {
@@ -163,11 +163,9 @@ fn loom_watcher_poll_backend_sees_loom_change_and_filters_noise() {
     let requests = watcher.pump(deadline).expect("pump");
 
     assert!(
-        requests
-            .iter()
-            .any(|r| r.path.ends_with("hud.loom")
-                && r.target == ReloadTarget::View
-                && r.change == ChangeKind::Upserted),
+        requests.iter().any(|r| r.path.ends_with("hud.loom")
+            && r.target == ReloadTarget::View
+            && r.change == ChangeKind::Upserted),
         "expected an upserted View request for hud.loom, got {requests:?}"
     );
     assert!(

@@ -21,9 +21,7 @@ pub fn resolve_current_hzb(
     if stages.contains(VisibilityStageMask::EARLY) {
         return stages | VisibilityStageMask::LATE_VISIBLE;
     }
-    if stages.contains(VisibilityStageMask::LATE_RETEST)
-        && current_hzb_occluded != Some(true)
-    {
+    if stages.contains(VisibilityStageMask::LATE_RETEST) && current_hzb_occluded != Some(true) {
         return stages | VisibilityStageMask::LATE_VISIBLE;
     }
     stages
@@ -53,9 +51,11 @@ mod tests {
     fn previous_occlusion_is_retested_against_current_hzb() {
         let deferred = classify_early_hzb(HistoryPolicy::Reuse, Some(true));
         assert_eq!(deferred, VisibilityStageMask::LATE_RETEST);
-        assert!(resolve_current_hzb(deferred, Some(false))
-            .contains(VisibilityStageMask::LATE_VISIBLE));
-        assert!(!resolve_current_hzb(deferred, Some(true))
-            .contains(VisibilityStageMask::LATE_VISIBLE));
+        assert!(
+            resolve_current_hzb(deferred, Some(false)).contains(VisibilityStageMask::LATE_VISIBLE)
+        );
+        assert!(
+            !resolve_current_hzb(deferred, Some(true)).contains(VisibilityStageMask::LATE_VISIBLE)
+        );
     }
 }

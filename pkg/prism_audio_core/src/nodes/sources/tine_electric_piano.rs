@@ -461,8 +461,8 @@ impl TineElectricPianoNode {
                 self.enabled[m] = false;
                 continue;
             }
-            let t60 = (self.decay_s / ops::powf(ratio, DECAY_RATIO_EXP))
-                .clamp(MIN_DECAY_S, MAX_DECAY_S);
+            let t60 =
+                (self.decay_s / ops::powf(ratio, DECAY_RATIO_EXP)).clamp(MIN_DECAY_S, MAX_DECAY_S);
             let radius = ops::exp(-LN_1000 / (t60 * sr));
             let theta = TAU * f_m / sr;
             let (sin_t, cos_t) = (ops::sin(theta), ops::cos(theta));
@@ -499,8 +499,7 @@ impl TineElectricPianoNode {
         let drive = if self.pulse_pos < self.pulse_len {
             let n = self.pulse_pos as Sample;
             self.pulse_pos += 1;
-            let window =
-                0.5 - 0.5 * ops::cos(TAU * (n + 1.0) / (self.pulse_len as Sample + 1.0));
+            let window = 0.5 - 0.5 * ops::cos(TAU * (n + 1.0) / (self.pulse_len as Sample + 1.0));
             window * self.pulse_scale * self.velocity
         } else {
             0.0
@@ -774,7 +773,10 @@ mod tests {
         let f0 = DEFAULT_FREQUENCY_HZ;
         let fund = goertzel(&out, f0);
         let off = goertzel(&out, f0 * 1.37);
-        assert!(fund > off * 2.0, "fundamental should dominate: {fund} vs {off}");
+        assert!(
+            fund > off * 2.0,
+            "fundamental should dominate: {fund} vs {off}"
+        );
     }
 
     #[test]

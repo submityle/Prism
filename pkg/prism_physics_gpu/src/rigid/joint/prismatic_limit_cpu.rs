@@ -361,10 +361,10 @@ mod tests {
         state.push(Vec3::ZERO, Quat::IDENTITY, 1.0, Vec3::splat(1.0)); // 1: slider
                                                                        // Axis +Y; anchors coincident at the origin so the initial slide
                                                                        // position is zero, inside any range that straddles zero.
-        // Body `a` is the dynamic slider (index 1), body `b` the static pivot
-        // (index 0), so the signed slide position `s = (p_slider - p_pivot) .
-        // axis` runs negative as the slider descends the +Y axis under gravity —
-        // the natural "lower stop" direction the tests below assert against.
+                                                                       // Body `a` is the dynamic slider (index 1), body `b` the static pivot
+                                                                       // (index 0), so the signed slide position `s = (p_slider - p_pivot) .
+                                                                       // axis` runs negative as the slider descends the +Y axis under gravity —
+                                                                       // the natural "lower stop" direction the tests below assert against.
         let joint = PrismaticLimitJoint::new(
             1,
             0,

@@ -22,13 +22,13 @@
 //! Provenance: standard `Stam` stable-fluids implicit viscous diffusion; no
 //! Unreal Engine source or derived code.
 
-use prism_render_architecture::particle::Vec3;
 use prism_render_architecture::particle::fluid::GridResolution;
 use prism_render_architecture::particle::fluid_diffusion::{
-    DiffusionBoundary, DiffusionParams, viscous_diffuse,
+    viscous_diffuse, DiffusionBoundary, DiffusionParams,
 };
-use prism_volumetric_gpu::GpuContext;
+use prism_render_architecture::particle::Vec3;
 use prism_volumetric_gpu::fluid_diffusion::GpuFluidDiffusion;
+use prism_volumetric_gpu::GpuContext;
 
 /// Absolute parity tolerance. Chosen a decade above the single-sweep
 /// multiply-add rounding so the iterated `GPU` fused multiply-add stays inside
@@ -54,7 +54,10 @@ impl Lcg {
     /// Advances the generator and returns the next raw word.
     fn next_u32(&mut self) -> u32 {
         // Numerical Recipes constants; wrapping arithmetic keeps it in range.
-        self.state = self.state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        self.state = self
+            .state
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
         self.state
     }
 
@@ -142,11 +145,31 @@ fn gpu_matches_cpu_across_random_fields() {
     // A spread of resolutions, viscosities, iteration counts and wall models,
     // each on its own reproducible random field.
     let cases = [
-        (GridResolution::uniform(4), 0.5, 4u32, DiffusionBoundary::Fixed),
+        (
+            GridResolution::uniform(4),
+            0.5,
+            4u32,
+            DiffusionBoundary::Fixed,
+        ),
         (GridResolution::uniform(5), 1.0, 10, DiffusionBoundary::Free),
-        (GridResolution::new(6, 3, 2), 0.25, 8, DiffusionBoundary::Fixed),
-        (GridResolution::new(2, 7, 3), 2.0, 6, DiffusionBoundary::Free),
-        (GridResolution::uniform(8), 0.75, 16, DiffusionBoundary::Fixed),
+        (
+            GridResolution::new(6, 3, 2),
+            0.25,
+            8,
+            DiffusionBoundary::Fixed,
+        ),
+        (
+            GridResolution::new(2, 7, 3),
+            2.0,
+            6,
+            DiffusionBoundary::Free,
+        ),
+        (
+            GridResolution::uniform(8),
+            0.75,
+            16,
+            DiffusionBoundary::Fixed,
+        ),
     ];
     for (seed, (res, viscosity, iterations, boundary)) in cases.into_iter().enumerate() {
         let mut rng = Lcg::new(0x51ED_u32.wrapping_add(seed as u32));
@@ -155,7 +178,14 @@ fn gpu_matches_cpu_across_random_fields() {
             "random case {seed} ({}x{}x{}, nu={viscosity}, it={iterations}, {boundary:?})",
             res.nx, res.ny, res.nz
         );
-        check_scenario(&label, &engine, &ctx, &source, res, params(viscosity, iterations, boundary));
+        check_scenario(
+            &label,
+            &engine,
+            &ctx,
+            &source,
+            res,
+            params(viscosity, iterations, boundary),
+        );
     }
 }
 
@@ -284,7 +314,10 @@ fn gpu_handles_degenerate_grids() {
     // A zero-extent grid: empty result, zero iterations, no dispatch.
     let empty_res = GridResolution::new(0, 4, 4);
     let empty = engine.diffuse(&ctx, &[], empty_res, p);
-    assert!(empty.velocity.is_empty(), "zero-extent grid yields no field");
+    assert!(
+        empty.velocity.is_empty(),
+        "zero-extent grid yields no field"
+    );
     assert_eq!(empty.iterations_run, 0);
 
     // A too-short source: the guard returns empty rather than reading past it.

@@ -48,13 +48,21 @@ const MAX_OCTAVES: u32 = 8;
 /// Clamps `value` into `[lo, hi]`, mapping non-finite inputs to `lo`.
 #[inline]
 fn clamp_finite(value: f32, lo: f32, hi: f32) -> f32 {
-    if value.is_finite() { value.clamp(lo, hi) } else { lo }
+    if value.is_finite() {
+        value.clamp(lo, hi)
+    } else {
+        lo
+    }
 }
 
 /// Clamps a value non-negative, mapping non-finite inputs to `0`.
 #[inline]
 fn clamp_non_negative(value: f32) -> f32 {
-    if value.is_finite() { value.max(0.0) } else { 0.0 }
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Optical depth `tau = sigma_t * d` (dimensionless), clamped non-negative.
@@ -126,7 +134,11 @@ pub fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
     let g = clamp_finite(g, -MAX_G, MAX_G);
     let denom = (1.0 + g * g - 2.0 * g * cos_theta).max(1.0e-12);
     let value = (1.0 - g * g) * INV_4PI / ops::powf(denom, 1.5);
-    if value.is_finite() { value.max(0.0) } else { INV_4PI }
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        INV_4PI
+    }
 }
 
 /// Dual-lobe Henyey-Greenstein phase: a forward/backward blend.
@@ -142,7 +154,11 @@ pub fn dual_lobe_hg(cos_theta: f32, g_forward: f32, g_backward: f32, blend: f32)
     let fwd = henyey_greenstein(cos_theta, g_forward);
     let bwd = henyey_greenstein(cos_theta, g_backward);
     let value = (1.0 - blend) * fwd + blend * bwd;
-    if value.is_finite() { value.max(0.0) } else { INV_4PI }
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        INV_4PI
+    }
 }
 
 /// Clamps an octave count into `[1, MAX_OCTAVES]`.
@@ -212,7 +228,11 @@ pub fn multiple_scattering_phase(
     }
     if norm > 0.0 {
         let value = sum / norm;
-        if value.is_finite() { value.max(0.0) } else { INV_4PI }
+        if value.is_finite() {
+            value.max(0.0)
+        } else {
+            INV_4PI
+        }
     } else {
         henyey_greenstein(cos_theta, g)
     }
@@ -308,7 +328,10 @@ mod tests {
     fn dual_lobe_integrates_to_unity() {
         for blend in [0.0f32, 0.25, 0.5, 0.75, 1.0] {
             let integral = sphere_integral(|mu| dual_lobe_hg(mu, 0.8, -0.3, blend));
-            assert!((integral - 1.0).abs() < 3e-3, "blend={blend} integral={integral}");
+            assert!(
+                (integral - 1.0).abs() < 3e-3,
+                "blend={blend} integral={integral}"
+            );
         }
     }
 
@@ -336,8 +359,14 @@ mod tests {
         for i in 0..=200 {
             let tau = i as f32 * 0.1;
             let t = multiple_scattering_transmittance(tau, 5, 0.5);
-            assert!((0.0..=1.0).contains(&t), "MS transmittance out of range: {t}");
-            assert!(t <= prev + 1e-6, "MS transmittance not monotone at tau={tau}");
+            assert!(
+                (0.0..=1.0).contains(&t),
+                "MS transmittance out of range: {t}"
+            );
+            assert!(
+                t <= prev + 1e-6,
+                "MS transmittance not monotone at tau={tau}"
+            );
             prev = t;
         }
     }
@@ -356,7 +385,10 @@ mod tests {
         for octaves in [1u32, 3, 5] {
             let integral =
                 sphere_integral(|mu| multiple_scattering_phase(mu, 0.8, octaves, 0.5, 0.5));
-            assert!((integral - 1.0).abs() < 3e-3, "octaves={octaves} integral={integral}");
+            assert!(
+                (integral - 1.0).abs() < 3e-3,
+                "octaves={octaves} integral={integral}"
+            );
         }
     }
 

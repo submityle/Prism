@@ -197,8 +197,7 @@ pub(crate) fn closer_hit(candidate: &ObbSweepHit, best: &Option<ObbSweepHit>) ->
         // index-order brute sweep, the BVH-order LBVH sweep, and the GPU host
         // reduction all converge on the identical triangle.
         Some(b) => {
-            candidate.toi < b.toi
-                || (candidate.toi == b.toi && candidate.triangle < b.triangle)
+            candidate.toi < b.toi || (candidate.toi == b.toi && candidate.triangle < b.triangle)
         }
         None => true,
     }
@@ -338,9 +337,7 @@ pub fn cpu_trimesh_obb_sweep_built(mesh: &Trimesh, sweep: &ObbSweep) -> Option<O
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        cpu_trimesh_obb_sweep, cpu_trimesh_obb_sweep_built, ObbSweep, ObbSweepHit,
-    };
+    use super::{cpu_trimesh_obb_sweep, cpu_trimesh_obb_sweep_built, ObbSweep, ObbSweepHit};
     use crate::collider::Trimesh;
     use glam::{Quat, Vec3};
 
@@ -378,7 +375,10 @@ mod tests {
         // solver's final step is the intersecting branch, whose witness is the
         // box centre rather than a surface point; the physically meaningful
         // quantities are the time of impact and the push-out normal.
-        assert!((hit.normal - Vec3::Z).length() < 1e-3, "normal points up at the box");
+        assert!(
+            (hit.normal - Vec3::Z).length() < 1e-3,
+            "normal points up at the box"
+        );
     }
 
     #[test]
@@ -396,10 +396,18 @@ mod tests {
         );
         let hit = cpu_trimesh_obb_sweep(&mesh, &sweep).expect("lands on the quad");
         let expected = 5.0 - 0.5 * 2.0_f32.sqrt();
-        assert!((hit.toi - expected).abs() < 1e-3, "toi was {} expected {}", hit.toi, expected);
+        assert!(
+            (hit.toi - expected).abs() < 1e-3,
+            "toi was {} expected {}",
+            hit.toi,
+            expected
+        );
         // Intersecting-branch contact (see the flat-landing test); assert the
         // time of impact and the upward normal only.
-        assert!((hit.normal - Vec3::Z).length() < 1e-3, "normal points up at the box");
+        assert!(
+            (hit.normal - Vec3::Z).length() < 1e-3,
+            "normal points up at the box"
+        );
     }
 
     #[test]
@@ -470,7 +478,10 @@ mod tests {
         // The box face meets the quad edge sharply (intersecting branch), so the
         // reported witness is the box centre; the time of impact and the +x
         // push-out normal are the invariants under test.
-        assert!((hit.normal - Vec3::X).length() < 1e-3, "normal points back along +x");
+        assert!(
+            (hit.normal - Vec3::X).length() < 1e-3,
+            "normal points back along +x"
+        );
     }
 
     #[test]
@@ -504,7 +515,12 @@ mod tests {
         let bvh = cpu_trimesh_obb_sweep_built(&mesh, &sweep).expect("hits");
         assert_eq!(brute.triangle, bvh.triangle, "same winning triangle");
         assert_eq!(brute.triangle, 14, "nearest lower-right triangle wins");
-        assert!((brute.toi - bvh.toi).abs() < 1e-4, "toi brute {} bvh {}", brute.toi, bvh.toi);
+        assert!(
+            (brute.toi - bvh.toi).abs() < 1e-4,
+            "toi brute {} bvh {}",
+            brute.toi,
+            bvh.toi
+        );
         // Nearest quad is z = 7; the underside stops one half-extent early, so
         // toi = 20 - 7 - 0.25 = 12.75.
         assert!((brute.toi - 12.75).abs() < 1e-3, "toi was {}", brute.toi);

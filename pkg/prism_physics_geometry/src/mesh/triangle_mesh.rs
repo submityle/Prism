@@ -205,35 +205,36 @@ impl TriangleMesh {
     /// `[0, ray.tmax]`, or `None` when the ray misses every triangle.
     pub fn ray_cast(&self, ray: &Ray) -> Option<MeshRayHit> {
         let mut best: Option<MeshRayHit> = None;
-        self.bvh.ray_cast_ordered(ray, &mut |data, _aabb, box_entry| {
-            // Leaves arrive in nearest-box-first order, so once a candidate box
-            // starts beyond the closest confirmed hit nothing further can win.
-            if best.as_ref().is_some_and(|h| box_entry > h.t) {
-                return false;
-            }
-            let tri_index = data as usize;
-            let [ia, ib, ic] = self.indices[tri_index];
-            let a = self.vertices[ia as usize];
-            let b = self.vertices[ib as usize];
-            let c = self.vertices[ic as usize];
-            if let Some(hit) = ray_triangle(ray, a, b, c) {
-                let closer = match &best {
-                    Some(h) => hit.t < h.t,
-                    None => true,
-                };
-                if closer {
-                    best = Some(MeshRayHit {
-                        triangle: data as u32,
-                        t: hit.t,
-                        point: ray.at(hit.t),
-                        u: hit.u,
-                        v: hit.v,
-                        normal: (b - a).cross(c - a).normalize_or_zero(),
-                    });
+        self.bvh
+            .ray_cast_ordered(ray, &mut |data, _aabb, box_entry| {
+                // Leaves arrive in nearest-box-first order, so once a candidate box
+                // starts beyond the closest confirmed hit nothing further can win.
+                if best.as_ref().is_some_and(|h| box_entry > h.t) {
+                    return false;
                 }
-            }
-            true
-        });
+                let tri_index = data as usize;
+                let [ia, ib, ic] = self.indices[tri_index];
+                let a = self.vertices[ia as usize];
+                let b = self.vertices[ib as usize];
+                let c = self.vertices[ic as usize];
+                if let Some(hit) = ray_triangle(ray, a, b, c) {
+                    let closer = match &best {
+                        Some(h) => hit.t < h.t,
+                        None => true,
+                    };
+                    if closer {
+                        best = Some(MeshRayHit {
+                            triangle: data as u32,
+                            t: hit.t,
+                            point: ray.at(hit.t),
+                            u: hit.u,
+                            v: hit.v,
+                            normal: (b - a).cross(c - a).normalize_or_zero(),
+                        });
+                    }
+                }
+                true
+            });
         best
     }
 
@@ -498,9 +499,7 @@ impl TriangleMesh {
             let la = to_obb_local(wa, obb.center, &axes);
             let lb = to_obb_local(wb, obb.center, &axes);
             let lc = to_obb_local(wc, obb.center, &axes);
-            if let Some((local_normal, depth)) =
-                triangle_aabb_penetration(la, lb, lc, &local_box)
-            {
+            if let Some((local_normal, depth)) = triangle_aabb_penetration(la, lb, lc, &local_box) {
                 // Rotate the box-local normal back into world space; `axes` is
                 // orthonormal so the mapped vector stays unit length.
                 let normal =
@@ -629,12 +628,7 @@ mod tests {
             Vec3::new(1.0, 1.0, 6.0),
             Vec3::new(-1.0, 1.0, 6.0),
         ];
-        let indices = alloc::vec![
-            [0, 1, 2],
-            [0, 2, 3],
-            [4, 5, 6],
-            [4, 6, 7],
-        ];
+        let indices = alloc::vec![[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7],];
         TriangleMesh::new(vertices, indices)
     }
 
@@ -683,9 +677,15 @@ mod tests {
     fn closest_point_on_near_quad() {
         let mesh = two_quads();
         // Point just in front of quad A (z = 2) along the ray.
-        let hit = mesh.closest_point(Vec3::new(0.0, 0.0, 1.0)).expect("closest");
+        let hit = mesh
+            .closest_point(Vec3::new(0.0, 0.0, 1.0))
+            .expect("closest");
         assert!(hit.point.abs_diff_eq(Vec3::new(0.0, 0.0, 2.0), 1e-5));
-        assert!((hit.distance - 1.0).abs() < 1e-5, "distance = {}", hit.distance);
+        assert!(
+            (hit.distance - 1.0).abs() < 1e-5,
+            "distance = {}",
+            hit.distance
+        );
         assert!(hit.triangle < 2, "front triangle, got {}", hit.triangle);
     }
 
@@ -693,7 +693,9 @@ mod tests {
     fn closest_point_prefers_true_nearest_triangle() {
         let mesh = two_quads();
         // Closer to the far quad (z = 6): point at z = 5.
-        let hit = mesh.closest_point(Vec3::new(0.0, 0.0, 5.0)).expect("closest");
+        let hit = mesh
+            .closest_point(Vec3::new(0.0, 0.0, 5.0))
+            .expect("closest");
         assert!(hit.point.abs_diff_eq(Vec3::new(0.0, 0.0, 6.0), 1e-5));
         assert!(hit.triangle >= 2, "back triangle, got {}", hit.triangle);
     }
@@ -702,9 +704,15 @@ mod tests {
     fn closest_point_clamps_to_edge() {
         let mesh = two_quads();
         // Query off the +x side of quad A projects onto its edge at x = 1.
-        let hit = mesh.closest_point(Vec3::new(3.0, 0.0, 2.0)).expect("closest");
+        let hit = mesh
+            .closest_point(Vec3::new(3.0, 0.0, 2.0))
+            .expect("closest");
         assert!((hit.point.x - 1.0).abs() < 1e-5, "x = {}", hit.point.x);
-        assert!((hit.distance - 2.0).abs() < 1e-5, "distance = {}", hit.distance);
+        assert!(
+            (hit.distance - 2.0).abs() < 1e-5,
+            "distance = {}",
+            hit.distance
+        );
     }
 
     #[test]
@@ -739,10 +747,7 @@ mod tests {
     fn overlap_aabb_selects_crossing_triangles() {
         let mesh = two_quads();
         // A thin box straddling quad A's plane (z = 2) over the unit square.
-        let box_ = crate::bounding::Aabb::new(
-            Vec3::new(-2.0, -2.0, 1.9),
-            Vec3::new(2.0, 2.0, 2.1),
-        );
+        let box_ = crate::bounding::Aabb::new(Vec3::new(-2.0, -2.0, 1.9), Vec3::new(2.0, 2.0, 2.1));
         let tris = mesh.overlap_aabb(&box_);
         assert_eq!(tris.len(), 2, "both front triangles: {tris:?}");
         assert!(tris.iter().all(|&t| t < 2));
@@ -752,10 +757,7 @@ mod tests {
     fn overlap_aabb_rejects_boxes_between_quads() {
         let mesh = two_quads();
         // Box in the gap between the quads (z in [3, 4]) touches neither.
-        let box_ = crate::bounding::Aabb::new(
-            Vec3::new(-2.0, -2.0, 3.0),
-            Vec3::new(2.0, 2.0, 4.0),
-        );
+        let box_ = crate::bounding::Aabb::new(Vec3::new(-2.0, -2.0, 3.0), Vec3::new(2.0, 2.0, 4.0));
         assert!(mesh.overlap_aabb(&box_).is_empty());
     }
 
@@ -820,11 +822,7 @@ mod tests {
     #[test]
     fn overlap_obb_empty_mesh_is_empty() {
         let mesh = TriangleMesh::new(alloc::vec![], alloc::vec![]);
-        let obb = crate::bounding::Obb::new(
-            Vec3::ZERO,
-            Vec3::splat(1.0),
-            glam::Quat::IDENTITY,
-        );
+        let obb = crate::bounding::Obb::new(Vec3::ZERO, Vec3::splat(1.0), glam::Quat::IDENTITY);
         assert!(mesh.overlap_obb(&obb).is_empty());
     }
 
@@ -896,7 +894,11 @@ mod tests {
         // Surface at z = 2, sphere stops with centre at z = 1.5.
         assert!((hit.t - 1.5).abs() < 1e-3, "t = {}", hit.t);
         assert!(hit.triangle < 2, "front triangle, got {}", hit.triangle);
-        assert!(hit.normal.z < -0.99, "normal faces the ray: {:?}", hit.normal);
+        assert!(
+            hit.normal.z < -0.99,
+            "normal faces the ray: {:?}",
+            hit.normal
+        );
     }
 
     #[test]
@@ -958,7 +960,11 @@ mod tests {
         let expected = 0.6 - (dx * dx + dz * dz).sqrt();
         assert!((c.depth - expected).abs() < 1e-4, "depth = {}", c.depth);
         // Normal points from the edge toward the centre (outward +x / +z-ish).
-        assert!(c.normal.x > 0.0 && c.normal.z > 0.0, "normal = {:?}", c.normal);
+        assert!(
+            c.normal.x > 0.0 && c.normal.z > 0.0,
+            "normal = {:?}",
+            c.normal
+        );
     }
 
     #[test]
@@ -969,8 +975,16 @@ mod tests {
         let contacts = mesh.sphere_contacts(Vec3::new(0.0, 0.0, 2.0), 0.5);
         assert!(!contacts.is_empty());
         for c in &contacts {
-            assert!((c.depth - 0.5).abs() < 1e-5, "full-radius depth: {}", c.depth);
-            assert!(c.normal.z.abs() > 0.99, "face normal fallback: {:?}", c.normal);
+            assert!(
+                (c.depth - 0.5).abs() < 1e-5,
+                "full-radius depth: {}",
+                c.depth
+            );
+            assert!(
+                c.normal.z.abs() > 0.99,
+                "face normal fallback: {:?}",
+                c.normal
+            );
         }
     }
 
@@ -978,7 +992,9 @@ mod tests {
     fn sphere_contacts_reject_when_out_of_range() {
         let mesh = two_quads();
         // Radius 0.5 at z = 1 falls short of quad A at z = 2.
-        assert!(mesh.sphere_contacts(Vec3::new(0.0, 0.0, 1.0), 0.5).is_empty());
+        assert!(mesh
+            .sphere_contacts(Vec3::new(0.0, 0.0, 1.0), 0.5)
+            .is_empty());
         // Negative radius never contacts.
         assert!(mesh.sphere_contacts(Vec3::ZERO, -1.0).is_empty());
         // Empty mesh never contacts.
@@ -991,16 +1007,16 @@ mod tests {
         let mesh = two_quads();
         // Capsule axis lies in the plane z = 1.4 (0.6 below quad A at z = 2),
         // spanning x in [-0.5, 0.5]; radius 1.0 reaches the face.
-        let capsule = Capsule::new(
-            Vec3::new(-0.5, 0.0, 1.4),
-            Vec3::new(0.5, 0.0, 1.4),
-            1.0,
-        );
+        let capsule = Capsule::new(Vec3::new(-0.5, 0.0, 1.4), Vec3::new(0.5, 0.0, 1.4), 1.0);
         let contacts = mesh.capsule_contacts(&capsule);
         assert_eq!(contacts.len(), 2, "both front triangles: {contacts:?}");
         for c in &contacts {
             assert!(c.triangle < 2, "front triangle, got {}", c.triangle);
-            assert!(c.point.z > 1.99 && c.point.z < 2.01, "on face: {:?}", c.point);
+            assert!(
+                c.point.z > 1.99 && c.point.z < 2.01,
+                "on face: {:?}",
+                c.point
+            );
             assert!(c.normal.z < -0.99, "push toward axis (-z): {:?}", c.normal);
             assert!((c.depth - 0.4).abs() < 1e-4, "depth = {}", c.depth);
         }
@@ -1010,11 +1026,7 @@ mod tests {
     fn capsule_contacts_endpoint_reaches_face() {
         let mesh = two_quads();
         // Vertical capsule whose top end-cap pokes into quad A at z = 2.
-        let capsule = Capsule::new(
-            Vec3::new(0.0, 0.0, 1.6),
-            Vec3::new(0.0, 0.0, 0.0),
-            0.6,
-        );
+        let capsule = Capsule::new(Vec3::new(0.0, 0.0, 1.6), Vec3::new(0.0, 0.0, 0.0), 0.6);
         let contacts = mesh.capsule_contacts(&capsule);
         assert!(!contacts.is_empty(), "end-cap should touch the face");
         for c in &contacts {
@@ -1043,15 +1055,14 @@ mod tests {
     fn capsule_contacts_axis_pierces_face() {
         let mesh = two_quads();
         // Axis crosses quad A (z = 2): penetration depth equals the full radius.
-        let capsule = Capsule::new(
-            Vec3::new(0.0, 0.0, 1.0),
-            Vec3::new(0.0, 0.0, 3.0),
-            0.4,
-        );
+        let capsule = Capsule::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 3.0), 0.4);
         let contacts = mesh.capsule_contacts(&capsule);
         assert!(!contacts.is_empty());
         let pierced = contacts.iter().any(|c| (c.depth - 0.4).abs() < 1e-4);
-        assert!(pierced, "piercing axis gives full-radius depth: {contacts:?}");
+        assert!(
+            pierced,
+            "piercing axis gives full-radius depth: {contacts:?}"
+        );
     }
 
     #[test]
@@ -1059,27 +1070,25 @@ mod tests {
         let mesh = two_quads();
         // Horizontal capsule (axis along X) at z = 0 swept +Z toward quad A at
         // z = 2. Radius 0.5 so the surface meets the face at t = 1.5.
-        let capsule = Capsule::new(
-            Vec3::new(-0.3, 0.0, 0.0),
-            Vec3::new(0.3, 0.0, 0.0),
-            0.5,
-        );
+        let capsule = Capsule::new(Vec3::new(-0.3, 0.0, 0.0), Vec3::new(0.3, 0.0, 0.0), 0.5);
         let ray = Ray::new(Vec3::ZERO, Vec3::Z);
-        let hit = mesh.capsule_cast(&capsule, &ray).expect("capsule sweep hit");
+        let hit = mesh
+            .capsule_cast(&capsule, &ray)
+            .expect("capsule sweep hit");
         assert!((hit.t - 1.5).abs() < 1e-2, "t = {}", hit.t);
         assert!(hit.triangle < 2, "front triangle, got {}", hit.triangle);
-        assert!(hit.normal.z < -0.99, "normal faces the ray: {:?}", hit.normal);
+        assert!(
+            hit.normal.z < -0.99,
+            "normal faces the ray: {:?}",
+            hit.normal
+        );
     }
 
     #[test]
     fn capsule_cast_misses_when_offset_far() {
         let mesh = two_quads();
         // Axis path well off the +x side of the unit quads for radius 0.3.
-        let capsule = Capsule::new(
-            Vec3::new(5.0, 0.0, 0.0),
-            Vec3::new(5.6, 0.0, 0.0),
-            0.3,
-        );
+        let capsule = Capsule::new(Vec3::new(5.0, 0.0, 0.0), Vec3::new(5.6, 0.0, 0.0), 0.3);
         let ray = Ray::new(Vec3::new(0.0, 0.0, 0.0), Vec3::Z);
         assert!(mesh.capsule_cast(&capsule, &ray).is_none());
     }
@@ -1087,11 +1096,7 @@ mod tests {
     #[test]
     fn capsule_cast_respects_tmax() {
         let mesh = two_quads();
-        let capsule = Capsule::new(
-            Vec3::new(-0.3, 0.0, 0.0),
-            Vec3::new(0.3, 0.0, 0.0),
-            0.5,
-        );
+        let capsule = Capsule::new(Vec3::new(-0.3, 0.0, 0.0), Vec3::new(0.3, 0.0, 0.0), 0.5);
         // Contact needs t = 1.5 but tmax is 1.0.
         let ray = Ray::with_tmax(Vec3::ZERO, Vec3::Z, 1.0);
         assert!(mesh.capsule_cast(&capsule, &ray).is_none());

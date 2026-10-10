@@ -308,11 +308,7 @@ impl GpuWideBvh {
     }
 
     /// Packed any-hit walk mirroring [`WideBvh`].
-    fn walk_any(
-        &self,
-        ray: &Ray,
-        test: fn(&Ray, &Triangle) -> Option<(f32, f32, f32)>,
-    ) -> bool {
+    fn walk_any(&self, ray: &Ray, test: fn(&Ray, &Triangle) -> Option<(f32, f32, f32)>) -> bool {
         if self.nodes.is_empty() {
             return false;
         }
@@ -507,7 +503,10 @@ mod tests {
                 rng.range(-1.0, 1.0),
             ];
             let ray = Ray::infinite(origin, dir);
-            match (wide.closest_hit_watertight(&ray), gpu.closest_hit_watertight(&ray)) {
+            match (
+                wide.closest_hit_watertight(&ray),
+                gpu.closest_hit_watertight(&ray),
+            ) {
                 (None, None) => {}
                 (Some(a), Some(b)) => {
                     assert_eq!(a.t.to_bits(), b.t.to_bits());

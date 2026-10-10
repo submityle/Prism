@@ -56,12 +56,7 @@ const BAYER_BASE: [[u32; 2]; 2] = [[0, 2], [3, 1]];
 pub const BAYER_2: [[u32; 2]; 2] = [[0, 2], [3, 1]];
 
 /// Canonical `4×4` Bayer matrix (`M₄`), row-major `[y][x]`.
-pub const BAYER_4: [[u32; 4]; 4] = [
-    [0, 8, 2, 10],
-    [12, 4, 14, 6],
-    [3, 11, 1, 9],
-    [15, 7, 13, 5],
-];
+pub const BAYER_4: [[u32; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
 /// Canonical `8×8` Bayer matrix (`M₈`), row-major `[y][x]`.
 pub const BAYER_8: [[u32; 8]; 8] = [

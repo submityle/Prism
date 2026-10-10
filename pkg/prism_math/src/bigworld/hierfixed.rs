@@ -222,8 +222,8 @@ mod tests {
     #[test]
     fn distance_squared_matches_manual() {
         let a = FixedGridPosition::new([0, 0, 0], FxVec3::new(fx(0.0), fx(0.0), fx(0.0)));
-        let b = FixedGridPosition::new([1, 0, 0], FxVec3::new(fx(76.0), fx(3.0), fx(0.0)))
-            .canonical();
+        let b =
+            FixedGridPosition::new([1, 0, 0], FxVec3::new(fx(76.0), fx(3.0), fx(0.0))).canonical();
         // offset = (1024 + 76, 3, 0) = (1100, 3, 0); |.|^2 = 1210009.
         let d2 = a.distance_squared(b).to_f64();
         assert!((d2 - 1_210_009.0).abs() < 1.0, "d2 ={d2}");

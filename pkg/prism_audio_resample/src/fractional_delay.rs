@@ -61,7 +61,11 @@ pub fn close(a: Sample, b: Sample) -> bool {
 #[inline]
 #[must_use]
 pub fn sanitize(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Linearly interpolates between `a` (at fraction `0.0`) and `b` (at `1.0`).

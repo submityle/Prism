@@ -69,7 +69,11 @@ pub enum Kernel {
 /// `max` is treated as `>= min`.
 #[inline]
 pub fn clamp_radius(radius: f32, min: f32, max: f32) -> f32 {
-    let lo = if min.is_finite() { min.max(MIN_RADIUS) } else { MIN_RADIUS };
+    let lo = if min.is_finite() {
+        min.max(MIN_RADIUS)
+    } else {
+        MIN_RADIUS
+    };
     let hi = if max.is_finite() { max.max(lo) } else { lo };
     if radius.is_finite() {
         radius.clamp(lo, hi)
@@ -86,7 +90,11 @@ pub fn clamp_radius(radius: f32, min: f32, max: f32) -> f32 {
 /// be multiplied by a photon's flux to obtain an energy-conserving splat.
 #[inline]
 pub fn kernel_density(r: f32, radius: f32, kernel: Kernel) -> f32 {
-    let h = if radius.is_finite() { radius.max(MIN_RADIUS) } else { MIN_RADIUS };
+    let h = if radius.is_finite() {
+        radius.max(MIN_RADIUS)
+    } else {
+        MIN_RADIUS
+    };
     let r = if r.is_finite() { r.abs() } else { h };
     if r >= h {
         return 0.0;
@@ -121,9 +129,21 @@ pub fn kernel_density(r: f32, radius: f32, kernel: Kernel) -> f32 {
 #[inline]
 pub fn splat_flux(flux: Vec3, r: f32, radius: f32, kernel: Kernel) -> Vec3 {
     let flux = Vec3::new(
-        if flux.x.is_finite() { flux.x.max(0.0) } else { 0.0 },
-        if flux.y.is_finite() { flux.y.max(0.0) } else { 0.0 },
-        if flux.z.is_finite() { flux.z.max(0.0) } else { 0.0 },
+        if flux.x.is_finite() {
+            flux.x.max(0.0)
+        } else {
+            0.0
+        },
+        if flux.y.is_finite() {
+            flux.y.max(0.0)
+        } else {
+            0.0
+        },
+        if flux.z.is_finite() {
+            flux.z.max(0.0)
+        } else {
+            0.0
+        },
     );
     flux * kernel_density(r, radius, kernel)
 }
@@ -148,7 +168,11 @@ pub fn estimate_irradiance(
     radius: f32,
     kernel: Kernel,
 ) -> Vec3 {
-    let h = if radius.is_finite() { radius.max(MIN_RADIUS) } else { MIN_RADIUS };
+    let h = if radius.is_finite() {
+        radius.max(MIN_RADIUS)
+    } else {
+        MIN_RADIUS
+    };
     let n = {
         let len_sq = normal.length_squared();
         if len_sq > f32::MIN_POSITIVE {
@@ -287,7 +311,12 @@ mod tests {
     #[test]
     fn degenerate_inputs_do_not_nan() {
         assert!(kernel_density(f32::NAN, f32::NAN, Kernel::Gaussian).is_finite());
-        let s = splat_flux(Vec3::new(f32::NAN, 1.0, -1.0), 0.1, 0.0, Kernel::Epanechnikov);
+        let s = splat_flux(
+            Vec3::new(f32::NAN, 1.0, -1.0),
+            0.1,
+            0.0,
+            Kernel::Epanechnikov,
+        );
         assert!(s.is_finite());
         let p = Photon::new(Vec3::new(f32::INFINITY, 0.0, 0.0), Vec3::NEG_Y, Vec3::ONE);
         let e = estimate_irradiance(Vec3::ZERO, Vec3::Y, &[p], 0.5, Kernel::Gaussian);

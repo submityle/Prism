@@ -136,7 +136,11 @@ pub fn echo_criterion(ir: &[Sample], sample_rate: u32, mode: EchoMode) -> Sample
     let mut moment = 0.0_f64; // sum t_i * |p_i|^n
     let mut weight = 0.0_f64; // sum |p_i|^n
     for (i, &sample) in ir.iter().enumerate() {
-        let magnitude = if sample.is_finite() { sample.abs() } else { 0.0 };
+        let magnitude = if sample.is_finite() {
+            sample.abs()
+        } else {
+            0.0
+        };
         let w = f64::from(ops::powf(magnitude, exponent));
         moment += (i as f64 * inv_sr) * w;
         weight += w;
@@ -280,7 +284,10 @@ mod tests {
         let speech = echo_criterion(&ir, SR, EchoMode::Speech);
         let music = echo_criterion(&ir, SR, EchoMode::Music);
         assert!(speech > 0.0 && music > 0.0);
-        assert!(!approx(speech, music, 1e-4), "speech {speech} music {music}");
+        assert!(
+            !approx(speech, music, 1e-4),
+            "speech {speech} music {music}"
+        );
     }
 
     #[test]
@@ -355,7 +362,11 @@ mod tests {
     fn from_ir_matches_free_function() {
         let ir = direct_plus_echo(70.0, 0.6, 9_600);
         let c = EchoCriterion::from_ir(&ir, SR, EchoMode::Speech);
-        assert!(approx(c.ek, echo_criterion(&ir, SR, EchoMode::Speech), 1e-6));
+        assert!(approx(
+            c.ek,
+            echo_criterion(&ir, SR, EchoMode::Speech),
+            1e-6
+        ));
         assert_eq!(c.mode, EchoMode::Speech);
     }
 

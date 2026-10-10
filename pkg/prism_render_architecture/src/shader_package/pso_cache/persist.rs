@@ -377,8 +377,14 @@ impl<'a> Reader<'a> {
     }
 
     fn read_slice(&mut self, len: usize) -> Result<&'a [u8], PersistError> {
-        let end = self.pos.checked_add(len).ok_or(PersistError::UnexpectedEof)?;
-        let slice = self.bytes.get(self.pos..end).ok_or(PersistError::UnexpectedEof)?;
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or(PersistError::UnexpectedEof)?;
+        let slice = self
+            .bytes
+            .get(self.pos..end)
+            .ok_or(PersistError::UnexpectedEof)?;
         self.pos = end;
         Ok(slice)
     }
@@ -389,12 +395,16 @@ impl<'a> Reader<'a> {
 
     fn read_u32(&mut self) -> Result<u32, PersistError> {
         let s = self.read_slice(4)?;
-        Ok(u32::from_le_bytes(s.try_into().expect("read_slice(4) yields 4 bytes")))
+        Ok(u32::from_le_bytes(
+            s.try_into().expect("read_slice(4) yields 4 bytes"),
+        ))
     }
 
     fn read_u64(&mut self) -> Result<u64, PersistError> {
         let s = self.read_slice(8)?;
-        Ok(u64::from_le_bytes(s.try_into().expect("read_slice(8) yields 8 bytes")))
+        Ok(u64::from_le_bytes(
+            s.try_into().expect("read_slice(8) yields 8 bytes"),
+        ))
     }
 
     fn read_array4(&mut self) -> Result<[u8; 4], PersistError> {
@@ -414,7 +424,13 @@ mod tests {
     use alloc::vec;
 
     fn fp() -> DeviceFingerprint {
-        DeviceFingerprint::new(GraphicsBackend::Vulkan, 0x10DE, 0x2204, 42, AbiHash([7u8; 32]))
+        DeviceFingerprint::new(
+            GraphicsBackend::Vulkan,
+            0x10DE,
+            0x2204,
+            42,
+            AbiHash([7u8; 32]),
+        )
     }
 
     fn key(pkg: &str, perm: u64, state: u64) -> PsoCacheKey {
@@ -440,7 +456,11 @@ mod tests {
         let keys: Vec<_> = decoded.entries().iter().map(|e| e.key.clone()).collect();
         assert_eq!(
             keys,
-            vec![key("gbuffer", 1, 0x00), key("gbuffer", 3, 0x11), key("shadow", 0, 0x22)]
+            vec![
+                key("gbuffer", 1, 0x00),
+                key("gbuffer", 3, 0x11),
+                key("shadow", 0, 0x22)
+            ]
         );
         // Blobs survive, including the empty one.
         assert_eq!(decoded.entries()[0].blob, Vec::<u8>::new());
@@ -492,7 +512,10 @@ mod tests {
         let mut bytes = sample().encode();
         bytes[0] = b'X';
         // Corrupting a byte also breaks the checksum; checksum is verified first.
-        assert_eq!(PersistedPsoCache::decode(&bytes), Err(PersistError::ChecksumMismatch));
+        assert_eq!(
+            PersistedPsoCache::decode(&bytes),
+            Err(PersistError::ChecksumMismatch)
+        );
     }
 
     #[test]
@@ -504,7 +527,10 @@ mod tests {
         payload[0] = b'X';
         let checksum = fnv1a64(&payload);
         payload.extend_from_slice(&checksum.to_le_bytes());
-        assert_eq!(PersistedPsoCache::decode(&payload), Err(PersistError::BadMagic));
+        assert_eq!(
+            PersistedPsoCache::decode(&payload),
+            Err(PersistError::BadMagic)
+        );
     }
 
     #[test]
@@ -525,7 +551,10 @@ mod tests {
         let mut bytes = sample().encode();
         let last = bytes.len() - 1;
         bytes[last] ^= 0xFF;
-        assert_eq!(PersistedPsoCache::decode(&bytes), Err(PersistError::ChecksumMismatch));
+        assert_eq!(
+            PersistedPsoCache::decode(&bytes),
+            Err(PersistError::ChecksumMismatch)
+        );
     }
 
     #[test]
@@ -541,7 +570,10 @@ mod tests {
 
     #[test]
     fn decode_rejects_short_input() {
-        assert_eq!(PersistedPsoCache::decode(&[0u8; 4]), Err(PersistError::UnexpectedEof));
+        assert_eq!(
+            PersistedPsoCache::decode(&[0u8; 4]),
+            Err(PersistError::UnexpectedEof)
+        );
     }
 
     #[test]

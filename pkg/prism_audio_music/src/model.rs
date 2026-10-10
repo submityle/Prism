@@ -111,7 +111,6 @@ impl MusicModel {
         self.layer_sets.values()
     }
 
-
     /// Looks up a clip graph by id.
     #[must_use]
     pub fn graph(&self, id: GraphId) -> Option<&ClipGraph> {
@@ -179,10 +178,12 @@ mod tests {
             Playlist::new(PlaylistId::new(1), PlaylistMode::Loop)
                 .with_item(PlaylistItem::once(SegmentId::new(1))),
         );
-        model.add_layer_set(
-            LayerSet::new(LayerSetId::new(1))
-                .with_layer(Layer::new(LayerId::new(1), SoundId::new(9), 0.5, 0.4)),
-        );
+        model.add_layer_set(LayerSet::new(LayerSetId::new(1)).with_layer(Layer::new(
+            LayerId::new(1),
+            SoundId::new(9),
+            0.5,
+            0.4,
+        )));
         model.add_stinger(Stinger::new(
             StingerId::new(1),
             SoundId::new(8),
@@ -213,7 +214,10 @@ mod tests {
         replacement.body = 48_000;
         model.add_segment(replacement);
         assert_eq!(model.segment_count(), 1);
-        assert_eq!(model.segment(SegmentId::new(1)).map(|s| s.body), Some(48_000));
+        assert_eq!(
+            model.segment(SegmentId::new(1)).map(|s| s.body),
+            Some(48_000)
+        );
     }
 
     #[test]

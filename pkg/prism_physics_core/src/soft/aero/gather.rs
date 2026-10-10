@@ -351,12 +351,27 @@ mod tests {
 
         let mut scatter = [Vec3::ZERO; 6];
         super::super::apply::apply_aero_forces(
-            &positions, &mut scatter, &inv, &triangles, &wind, aero, dt,
+            &positions,
+            &mut scatter,
+            &inv,
+            &triangles,
+            &wind,
+            aero,
+            dt,
         );
 
         let adj = VertexTriangleAdjacency::build(6, &triangles);
         let mut gather = [Vec3::ZERO; 6];
-        accumulate_aero_gather(&positions, &mut gather, &inv, &triangles, &adj, &wind, aero, dt);
+        accumulate_aero_gather(
+            &positions,
+            &mut gather,
+            &inv,
+            &triangles,
+            &adj,
+            &wind,
+            aero,
+            dt,
+        );
 
         for (a, b) in scatter.iter().zip(gather.iter()) {
             assert!((*a - *b).length() < EPS, "scatter {a:?} gather {b:?}");
@@ -384,7 +399,11 @@ mod tests {
             AeroParams::new(1.0, 0.0),
             1.0,
         );
-        assert!(velocities[0].length() < EPS, "pinned moved: {:?}", velocities[0]);
+        assert!(
+            velocities[0].length() < EPS,
+            "pinned moved: {:?}",
+            velocities[0]
+        );
         assert!(velocities[1].z > 0.0);
     }
 

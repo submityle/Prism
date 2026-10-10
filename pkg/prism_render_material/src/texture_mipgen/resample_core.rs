@@ -59,9 +59,12 @@ fn to_working(img: &Rgba8Image, space: ColorSpace) -> Vec<[f32; 4]> {
                     f32::from(t[2]) / 255.0,
                     a,
                 ],
-                ColorSpace::Srgb => {
-                    [srgb_to_linear(t[0]), srgb_to_linear(t[1]), srgb_to_linear(t[2]), a]
-                }
+                ColorSpace::Srgb => [
+                    srgb_to_linear(t[0]),
+                    srgb_to_linear(t[1]),
+                    srgb_to_linear(t[2]),
+                    a,
+                ],
             }
         })
         .collect()
@@ -79,9 +82,12 @@ fn from_working(buf: &[[f32; 4]], w: u32, h: u32, space: ColorSpace) -> Option<R
             let a = round_u8(p[3]);
             match space {
                 ColorSpace::Linear => [round_u8(p[0]), round_u8(p[1]), round_u8(p[2]), a],
-                ColorSpace::Srgb => {
-                    [linear_to_srgb(p[0]), linear_to_srgb(p[1]), linear_to_srgb(p[2]), a]
-                }
+                ColorSpace::Srgb => [
+                    linear_to_srgb(p[0]),
+                    linear_to_srgb(p[1]),
+                    linear_to_srgb(p[2]),
+                    a,
+                ],
             }
         })
         .collect();
@@ -120,7 +126,11 @@ fn downsample_x<K: Fn(f32) -> f32>(
                 }
                 wsum += wt;
             }
-            let inv = if wsum.abs() > 1.0e-12 { 1.0 / wsum } else { 0.0 };
+            let inv = if wsum.abs() > 1.0e-12 {
+                1.0 / wsum
+            } else {
+                0.0
+            };
             let o = (y as usize) * (out_w as usize) + ox as usize;
             out[o] = [acc[0] * inv, acc[1] * inv, acc[2] * inv, acc[3] * inv];
         }
@@ -159,7 +169,11 @@ fn downsample_y<K: Fn(f32) -> f32>(
                 }
                 wsum += wt;
             }
-            let inv = if wsum.abs() > 1.0e-12 { 1.0 / wsum } else { 0.0 };
+            let inv = if wsum.abs() > 1.0e-12 {
+                1.0 / wsum
+            } else {
+                0.0
+            };
             let o = (oy as usize) * (w as usize) + x as usize;
             out[o] = [acc[0] * inv, acc[1] * inv, acc[2] * inv, acc[3] * inv];
         }

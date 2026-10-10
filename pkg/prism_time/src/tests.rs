@@ -185,7 +185,9 @@ fn default_switch_returns_expected_delta() {
 
     // Variable phase: default mirrors Virtual.
     clocks.virtual_time_mut().set_relative_speed(2.0);
-    clocks.virtual_time_mut().advance_by(Duration::from_millis(10));
+    clocks
+        .virtual_time_mut()
+        .advance_by(Duration::from_millis(10));
     clocks.sync_default();
     assert_eq!(clocks.default_time().delta(), Duration::from_millis(20));
     assert!((clocks.delta_secs() - 0.02).abs() < 1e-6);

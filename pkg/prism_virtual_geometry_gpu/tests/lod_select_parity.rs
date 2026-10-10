@@ -115,12 +115,12 @@ fn gpu_lod_select_matches_cpu_golden_across_all_levels() {
         ..Default::default()
     };
     let clusters: Vec<LodQuery> = vec![
-        (4.0, 0.0, None),    // finest 0 fits, L1 (5px) does not
-        (12.0, 0.0, None),   // coarsest 1 (1.67px) fits, L2 (6.67px) does not
-        (50.0, 0.0, None),   // coarsest 2 (1.6px) fits, L3 (6.4px) does not
-        (200.0, 0.0, None),  // coarsest 3 (1.6px) fits
-        (50.0, 0.0, Some(3)),// prev too coarse (6.4px > 2px) -> refine to 2
-        (12.0, 0.0, Some(0)),// prev too fine, fresh 1 sits under budget -> coarsen to 1
+        (4.0, 0.0, None),     // finest 0 fits, L1 (5px) does not
+        (12.0, 0.0, None),    // coarsest 1 (1.67px) fits, L2 (6.67px) does not
+        (50.0, 0.0, None),    // coarsest 2 (1.6px) fits, L3 (6.4px) does not
+        (200.0, 0.0, None),   // coarsest 3 (1.6px) fits
+        (50.0, 0.0, Some(3)), // prev too coarse (6.4px > 2px) -> refine to 2
+        (12.0, 0.0, Some(0)), // prev too fine, fresh 1 sits under budget -> coarsen to 1
     ];
     let seen = assert_parity(&ctx, policy, &clusters);
     assert_eq!(

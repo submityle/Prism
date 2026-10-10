@@ -62,9 +62,15 @@ fn trace_counters_are_consistent() {
     assert_eq!(per_bucket, total);
 
     // Migration count cannot exceed the total, and the steal rate is a fraction.
-    assert!(trace.migrated_jobs() <= total, "migrated must not exceed total");
+    assert!(
+        trace.migrated_jobs() <= total,
+        "migrated must not exceed total"
+    );
     let rate = trace.steal_rate();
-    assert!((0.0..=1.0).contains(&rate), "steal_rate out of range: {rate}");
+    assert!(
+        (0.0..=1.0).contains(&rate),
+        "steal_rate out of range: {rate}"
+    );
 
     // Occupancy of every bucket is a clamped fraction.
     for b in 0..trace.bucket_count() {
@@ -126,7 +132,10 @@ mod chrome {
 
     impl<'a> Parser<'a> {
         fn new(s: &'a str) -> Self {
-            Self { bytes: s.as_bytes(), pos: 0 }
+            Self {
+                bytes: s.as_bytes(),
+                pos: 0,
+            }
         }
 
         fn skip_ws(&mut self) {
@@ -178,7 +187,13 @@ mod chrome {
         fn parse_number(&mut self) -> Option<Json> {
             let start = self.pos;
             while let Some(b) = self.peek() {
-                if b.is_ascii_digit() || b == b'-' || b == b'+' || b == b'.' || b == b'e' || b == b'E' {
+                if b.is_ascii_digit()
+                    || b == b'-'
+                    || b == b'+'
+                    || b == b'.'
+                    || b == b'e'
+                    || b == b'E'
+                {
                     self.pos += 1;
                 } else {
                     break;
@@ -325,15 +340,25 @@ mod chrome {
         assert_eq!(events.len(), n, "one event per span");
 
         for ev in &events {
-            assert_eq!(get(ev, "ph"), Some(&Json::Str(String::from("X"))), "complete event");
-            assert_eq!(get(ev, "name"), Some(&Json::Str(String::from("ecs_system"))));
+            assert_eq!(
+                get(ev, "ph"),
+                Some(&Json::Str(String::from("X"))),
+                "complete event"
+            );
+            assert_eq!(
+                get(ev, "name"),
+                Some(&Json::Str(String::from("ecs_system")))
+            );
             assert_eq!(get(ev, "pid"), Some(&Json::Num(1.0)));
             assert!(matches!(get(ev, "tid"), Some(Json::Num(_))), "tid present");
             assert!(matches!(get(ev, "ts"), Some(Json::Num(_))), "ts present");
             assert!(matches!(get(ev, "dur"), Some(Json::Num(_))), "dur present");
             // args.id must be present and parseable.
             let args = get(ev, "args").expect("args object");
-            assert!(matches!(get(args, "id"), Some(Json::Num(_))), "args.id present");
+            assert!(
+                matches!(get(args, "id"), Some(Json::Num(_))),
+                "args.id present"
+            );
         }
     }
 

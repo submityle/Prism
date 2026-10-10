@@ -122,12 +122,9 @@ fn pressure_solve_cpu(
         let p1 = xyz(positions[i1 as usize]);
         let p2 = xyz(positions[i2 as usize]);
         volume += v_dot(p0, v_cross(p1, p2));
-        gradients[i0 as usize] =
-            v_add(gradients[i0 as usize], v_scale(v_cross(p1, p2), INV_SIX));
-        gradients[i1 as usize] =
-            v_add(gradients[i1 as usize], v_scale(v_cross(p2, p0), INV_SIX));
-        gradients[i2 as usize] =
-            v_add(gradients[i2 as usize], v_scale(v_cross(p0, p1), INV_SIX));
+        gradients[i0 as usize] = v_add(gradients[i0 as usize], v_scale(v_cross(p1, p2), INV_SIX));
+        gradients[i1 as usize] = v_add(gradients[i1 as usize], v_scale(v_cross(p2, p0), INV_SIX));
+        gradients[i2 as usize] = v_add(gradients[i2 as usize], v_scale(v_cross(p0, p1), INV_SIX));
     }
     volume *= INV_SIX;
 

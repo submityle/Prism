@@ -79,7 +79,10 @@ fn gpu_page_storage_matches_cpu_golden() {
     let cpu = cpu_round_trip(page_words, capacity, uploads, fetches);
 
     assert_eq!(gpu.len(), fetches.len(), "one word per fetch");
-    assert_eq!(gpu, cpu, "gpu gathered words must match cpu golden bit-exact");
+    assert_eq!(
+        gpu, cpu,
+        "gpu gathered words must match cpu golden bit-exact"
+    );
 
     // The scene must genuinely read both written and unwritten slots so a
     // degenerate all-zero result cannot pass vacuously.

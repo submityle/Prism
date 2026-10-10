@@ -263,11 +263,7 @@ impl ShadedBilinearPatch {
         let inv_len = 1.0 / len2.sqrt();
         let outward = scale(g, inv_len);
         let front_face = dot(rd, outward) < 0.0;
-        let normal = if front_face {
-            outward
-        } else {
-            negate(outward)
-        };
+        let normal = if front_face { outward } else { negate(outward) };
         Some((normal, front_face))
     }
 
@@ -758,7 +754,11 @@ mod tests {
                 rng.range(-8.0, 8.0),
                 rng.range(-8.0, 8.0),
             ];
-            let target = [rng.range(-5.0, 5.0), rng.range(-5.0, 5.0), rng.range(-5.0, 5.0)];
+            let target = [
+                rng.range(-5.0, 5.0),
+                rng.range(-5.0, 5.0),
+                rng.range(-5.0, 5.0),
+            ];
             let dir = [
                 target[0] - origin[0],
                 target[1] - origin[1],

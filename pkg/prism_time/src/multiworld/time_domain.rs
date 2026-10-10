@@ -9,8 +9,8 @@
 //! double-run comparison (see the [`audit`](crate::multiworld) tooling).
 
 use super::audit::StateHasher;
-use alloc::vec::Vec;
 use crate::{Duration, RationalStep, TickClock};
+use alloc::vec::Vec;
 
 /// An independent time context for one World.
 ///
@@ -223,9 +223,7 @@ impl WorldSet {
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            worlds: Vec::new(),
-        }
+        Self { worlds: Vec::new() }
     }
 
     /// Add a world and return its index (its stable world id).

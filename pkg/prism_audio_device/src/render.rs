@@ -16,8 +16,8 @@
 
 use prism_audio_core::buffer::{AudioBuffer, ChannelLayout};
 use prism_audio_core::math::Sample;
-use prism_audio_rt::AudioRuntime;
 use prism_audio_rt::telemetry::TelemetryFrame;
+use prism_audio_rt::AudioRuntime;
 
 /// Pulls fixed engine blocks from an [`AudioRuntime`] and serves them into
 /// arbitrarily sized interleaved output buffers.

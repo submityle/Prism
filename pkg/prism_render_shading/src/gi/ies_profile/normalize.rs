@@ -123,7 +123,11 @@ fn row_theta_integral(vertical: &[f32], row: &[f32]) -> f32 {
 /// Clamps a candela value to a finite, non-negative number.
 #[inline]
 fn sanitize(c: f32) -> f32 {
-    if c.is_finite() && c >= 0.0 { c } else { 0.0 }
+    if c.is_finite() && c >= 0.0 {
+        c
+    } else {
+        0.0
+    }
 }
 
 /// Builds a borrowed view of one horizontal row of the candela buffer.
@@ -151,7 +155,11 @@ pub fn luminous_flux(grid: &PhotometricGrid) -> f32 {
 
     if nh == 1 {
         let flux = row_theta_integral(vertical, row_slice(grid, 0)) * TAU;
-        return if flux.is_finite() && flux >= 0.0 { flux } else { 0.0 };
+        return if flux.is_finite() && flux >= 0.0 {
+            flux
+        } else {
+            0.0
+        };
     }
 
     let mut flux = 0.0_f32;
@@ -169,7 +177,11 @@ pub fn luminous_flux(grid: &PhotometricGrid) -> f32 {
         }
         prev = next;
     }
-    if flux.is_finite() && flux >= 0.0 { flux } else { 0.0 }
+    if flux.is_finite() && flux >= 0.0 {
+        flux
+    } else {
+        0.0
+    }
 }
 
 /// Measured solid angle of the grid: the same integral as [`luminous_flux`] but
@@ -220,7 +232,11 @@ pub fn measured_solid_angle(grid: &PhotometricGrid) -> f32 {
             sa += unit_row * dp;
         }
     }
-    if sa.is_finite() && sa >= 0.0 { sa } else { 0.0 }
+    if sa.is_finite() && sa >= 0.0 {
+        sa
+    } else {
+        0.0
+    }
 }
 
 /// Mean intensity over the measured solid angle (`flux / solid_angle`).
@@ -367,7 +383,11 @@ mod tests {
         // Single polar sample -> no theta interval -> solid angle 0.
         let g = PhotometricGrid::uniform_single(77.0);
         assert!(approx(mean_intensity(&g), 77.0, 1e-6));
-        assert!(approx(reference_intensity(&g, NormalizeMode::MeanFlux), 77.0, 1e-6));
+        assert!(approx(
+            reference_intensity(&g, NormalizeMode::MeanFlux),
+            77.0,
+            1e-6
+        ));
     }
 
     #[test]

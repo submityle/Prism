@@ -28,8 +28,8 @@
 //!   infinity.
 //! * Mirrored arm-for-arm by the GPU twin; all maths stays in `f32`.
 
-use bevy_math::Vec3;
 use bevy_math::ops;
+use bevy_math::Vec3;
 
 /// Smallest magnitude a `gamma` divisor is allowed to take before the midtone
 /// power `1 / gamma` is formed, so a zero or near-zero gamma cannot explode the
@@ -63,7 +63,11 @@ fn safe_powf(base: f32, exponent: f32) -> f32 {
     let b = if base.is_finite() { base.max(0.0) } else { 0.0 };
     let e = sanitize_exponent(exponent);
     let r = ops::powf(b, e);
-    if r.is_finite() { r.max(0.0) } else { 0.0 }
+    if r.is_finite() {
+        r.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 // --- ASC CDL --------------------------------------------------------------
@@ -107,7 +111,12 @@ pub fn asc_cdl(color: Vec3, slope: Vec3, offset: Vec3, power: Vec3) -> Vec3 {
 /// Equivalent to [`asc_cdl`] with each parameter broadcast to all channels.
 #[must_use]
 pub fn asc_cdl_uniform(color: Vec3, slope: f32, offset: f32, power: f32) -> Vec3 {
-    asc_cdl(color, Vec3::splat(slope), Vec3::splat(offset), Vec3::splat(power))
+    asc_cdl(
+        color,
+        Vec3::splat(slope),
+        Vec3::splat(offset),
+        Vec3::splat(power),
+    )
 }
 
 /// ASC CDL saturation stage applied *after* the SOP transfer.
@@ -118,7 +127,11 @@ pub fn asc_cdl_uniform(color: Vec3, slope: f32, offset: f32, power: f32) -> Vec3
 /// clamped to `0` and the result is clamped to `>= 0`.
 #[must_use]
 pub fn asc_cdl_saturation(color: Vec3, saturation: f32) -> Vec3 {
-    let sat = if saturation.is_finite() { saturation.max(0.0) } else { 1.0 };
+    let sat = if saturation.is_finite() {
+        saturation.max(0.0)
+    } else {
+        1.0
+    };
     let luma = rec709_luma(color);
     let out = Vec3::splat(luma) + (color - Vec3::splat(luma)) * sat;
     Vec3::new(out.x.max(0.0), out.y.max(0.0), out.z.max(0.0))
@@ -127,13 +140,7 @@ pub fn asc_cdl_saturation(color: Vec3, saturation: f32) -> Vec3 {
 /// Full ASC CDL node: SOP transfer followed by the scalar saturation stage, in
 /// the canonical ASC order.
 #[must_use]
-pub fn asc_cdl_full(
-    color: Vec3,
-    slope: Vec3,
-    offset: Vec3,
-    power: Vec3,
-    saturation: f32,
-) -> Vec3 {
+pub fn asc_cdl_full(color: Vec3, slope: Vec3, offset: Vec3, power: Vec3, saturation: f32) -> Vec3 {
     asc_cdl_saturation(asc_cdl(color, slope, offset, power), saturation)
 }
 
@@ -166,7 +173,11 @@ pub fn lift_gamma_gain_channel(color: f32, lift: f32, gamma: f32, gain: f32) -> 
     let c = if color.is_finite() { color } else { 0.0 };
     let lift = if lift.is_finite() { lift } else { 0.0 };
     let gain = if gain.is_finite() { gain } else { 1.0 };
-    let gamma = if gamma.is_finite() { gamma.max(MIN_GAMMA) } else { 1.0 };
+    let gamma = if gamma.is_finite() {
+        gamma.max(MIN_GAMMA)
+    } else {
+        1.0
+    };
 
     let lifted = c + lift * (1.0 - c);
     let gained = lifted * gain;
@@ -289,12 +300,7 @@ mod tests {
     fn asc_cdl_uniform_matches_broadcast() {
         let color = Vec3::new(0.1, 0.4, 0.8);
         let a = asc_cdl_uniform(color, 1.2, 0.03, 1.4);
-        let b = asc_cdl(
-            color,
-            Vec3::splat(1.2),
-            Vec3::splat(0.03),
-            Vec3::splat(1.4),
-        );
+        let b = asc_cdl(color, Vec3::splat(1.2), Vec3::splat(0.03), Vec3::splat(1.4));
         approx3(a, b);
     }
 
@@ -367,12 +373,7 @@ mod tests {
     fn lgg_uniform_matches_broadcast() {
         let color = Vec3::new(0.2, 0.5, 0.8);
         let a = lift_gamma_gain_uniform(color, 0.05, 1.3, 1.1);
-        let b = lift_gamma_gain(
-            color,
-            Vec3::splat(0.05),
-            Vec3::splat(1.3),
-            Vec3::splat(1.1),
-        );
+        let b = lift_gamma_gain(color, Vec3::splat(0.05), Vec3::splat(1.3), Vec3::splat(1.1));
         approx3(a, b);
     }
 }

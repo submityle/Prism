@@ -157,12 +157,7 @@ impl PatchGrid {
     ///
     /// Interior edges take the maximum demand of both adjacent cells so the two
     /// sides agree; boundary edges use the cell's own demand.
-    fn resolved_outer<S: ParametricSurface>(
-        &self,
-        surface: &S,
-        col: u32,
-        row: u32,
-    ) -> [u32; 4] {
+    fn resolved_outer<S: ParametricSurface>(&self, surface: &S, col: u32, row: u32) -> [u32; 4] {
         let u0 = col as f32 / self.cols as f32;
         let u1 = (col + 1) as f32 / self.cols as f32;
         let v0 = row as f32 / self.rows as f32;
@@ -598,6 +593,9 @@ mod tests {
             .tessellate_bvh(&Plane)
             .expect("bvh");
         let ray = Ray::new([0.53, 0.47, 10.0], [0.0, 0.0, -1.0], 0.0, 100.0);
-        assert!(bvh.closest_hit(&ray).is_some(), "ray should strike the plane");
+        assert!(
+            bvh.closest_hit(&ray).is_some(),
+            "ray should strike the plane"
+        );
     }
 }

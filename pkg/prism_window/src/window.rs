@@ -77,7 +77,8 @@ impl WindowAttributes {
     /// Sets the requested physical size (builder style).
     #[must_use]
     pub fn with_size(mut self, width: u32, height: u32) -> Self {
-        self.resolution.set_physical_size(PhysicalSize::new(width, height));
+        self.resolution
+            .set_physical_size(PhysicalSize::new(width, height));
         self
     }
 

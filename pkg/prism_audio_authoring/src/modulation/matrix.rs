@@ -361,9 +361,7 @@ mod tests {
         let b = m.add_bus("b", 0.0);
         // b <- a (unipolar, depth 1). First tick reads a's previous value (its
         // initial 1.0 snapshot), so b should approach 1.0 over ticks.
-        m.add_route(
-            ModRoute::new(RouteInput::Bus(a), b, 1.0).with_polarity(Polarity::Unipolar),
-        );
+        m.add_route(ModRoute::new(RouteInput::Bus(a), b, 1.0).with_polarity(Polarity::Unipolar));
         let ctx = ModContext::new(SR, 8);
         for _ in 0..10 {
             m.tick(&ctx);
@@ -388,7 +386,11 @@ mod tests {
             m.tick(&ctx);
         }
         m.reset();
-        assert!((m.bus_value(bus) - 0.3).abs() < EPS, "x={}", m.bus_value(bus));
+        assert!(
+            (m.bus_value(bus) - 0.3).abs() < EPS,
+            "x={}",
+            m.bus_value(bus)
+        );
     }
 
     #[test]

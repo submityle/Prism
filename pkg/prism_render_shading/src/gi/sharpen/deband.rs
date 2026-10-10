@@ -60,7 +60,11 @@ pub const BAYER_8X8: [[u8; 8]; 8] = [
 /// Replaces a non-finite scalar with `fallback`.
 #[inline]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Fractional part `x - floor(x)` in `[0, 1)` for finite `x`.
@@ -268,11 +272,17 @@ mod tests {
     fn degenerate_input_is_sanitized() {
         let color = Vec3::new(f32::NAN, 0.5, f32::INFINITY);
         let out = deband(color, IVec2::new(3, 4), 0, f32::NAN);
-        assert!(out.x.is_finite() && out.y.is_finite() && out.z.is_finite(), "out={out:?}");
+        assert!(
+            out.x.is_finite() && out.y.is_finite() && out.z.is_finite(),
+            "out={out:?}"
+        );
         assert!(out.x >= 0.0 && out.y >= 0.0 && out.z >= 0.0, "out={out:?}");
 
         let big = deband(Vec3::splat(0.5), IVec2::new(1, 1), 4, 5.0);
         let step = 1.0 / 4.0;
-        assert!((big - Vec3::splat(0.5)).x.abs() <= step + 1.0e-6, "big={big:?}");
+        assert!(
+            (big - Vec3::splat(0.5)).x.abs() <= step + 1.0e-6,
+            "big={big:?}"
+        );
     }
 }

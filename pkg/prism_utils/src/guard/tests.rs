@@ -12,9 +12,9 @@ use super::pool::{GuardHandle, GuardedPool};
 use super::{GuardConfig, GuardError};
 
 extern crate alloc;
+use crate::hash::HashMap;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::hash::HashMap;
 
 // ----- GuardedBuffer -------------------------------------------------------
 
@@ -96,7 +96,9 @@ fn free_poisons_and_blocks_further_use() {
     assert!(buf.is_freed());
     // Payload is poisoned with the configured byte.
     let poison = GuardConfig::DEFAULT_POISON_BYTE;
-    assert!(buf.block()[buf.payload_range()].iter().all(|&b| b == poison));
+    assert!(buf.block()[buf.payload_range()]
+        .iter()
+        .all(|&b| b == poison));
     // Any use after free is reported.
     assert_eq!(buf.payload(), Err(GuardError::UseAfterFree));
     assert_eq!(buf.payload_mut(), Err(GuardError::UseAfterFree));

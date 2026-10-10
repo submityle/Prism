@@ -263,11 +263,7 @@ mod tests {
     /// reference modes.
     #[test]
     fn clamp_leaves_in_range_samples_unchanged() {
-        let neighborhood = [
-            [0.20, 0.10, 0.05],
-            [0.22, 0.11, 0.06],
-            [0.18, 0.09, 0.04],
-        ];
+        let neighborhood = [[0.20, 0.10, 0.05], [0.22, 0.11, 0.06], [0.18, 0.09, 0.04]];
         let center = [0.25, 0.12, 0.06];
         assert_eq!(
             clamp_firefly(center, &neighborhood, 8.0, NeighborhoodReference::Mean),
@@ -300,7 +296,12 @@ mod tests {
         );
         // Black center.
         assert_eq!(
-            clamp_firefly([0.0, 0.0, 0.0], &neighborhood, 4.0, NeighborhoodReference::Mean),
+            clamp_firefly(
+                [0.0, 0.0, 0.0],
+                &neighborhood,
+                4.0,
+                NeighborhoodReference::Mean
+            ),
             [0.0, 0.0, 0.0]
         );
     }
@@ -309,11 +310,7 @@ mod tests {
     /// it clamps to a higher (or equal) threshold.
     #[test]
     fn max_reference_is_more_conservative_than_mean() {
-        let neighborhood = [
-            [0.1, 0.1, 0.1],
-            [0.1, 0.1, 0.1],
-            [1.0, 1.0, 1.0],
-        ];
+        let neighborhood = [[0.1, 0.1, 0.1], [0.1, 0.1, 0.1], [1.0, 1.0, 1.0]];
         let firefly = [100.0, 100.0, 100.0];
         let by_mean = luminance(clamp_firefly(
             firefly,
@@ -333,11 +330,7 @@ mod tests {
     /// Repeated evaluation is bit-for-bit identical (determinism).
     #[test]
     fn firefly_helpers_are_deterministic() {
-        let samples = [
-            [0.3, 0.1, 0.7],
-            [12.0, 3.0, 0.5],
-            [0.05, 0.9, 0.2],
-        ];
+        let samples = [[0.3, 0.1, 0.7], [12.0, 3.0, 0.5], [0.05, 0.9, 0.2]];
         let a = karis_weighted_mean(&samples);
         let b = karis_weighted_mean(&samples);
         assert_eq!(a, b);

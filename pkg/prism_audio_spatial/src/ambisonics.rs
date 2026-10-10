@@ -327,7 +327,11 @@ mod tests {
         // Bevy forward is -Z.
         let g = encode_foa_gains(Vec3::new(0.0, 0.0, -1.0));
         assert!(approx(g[IDX_W], 1.0));
-        assert!(g[IDX_X] > 0.5, "front should give positive X, got {}", g[IDX_X]);
+        assert!(
+            g[IDX_X] > 0.5,
+            "front should give positive X, got {}",
+            g[IDX_X]
+        );
         assert!(approx(g[IDX_Y], 0.0));
         assert!(approx(g[IDX_Z], 0.0));
     }
@@ -336,7 +340,11 @@ mod tests {
     fn encode_left_excites_y() {
         // Bevy right is +X, so "left" is -X.
         let g = encode_foa_gains(Vec3::new(-1.0, 0.0, 0.0));
-        assert!(g[IDX_Y] > 0.5, "left should give positive Y, got {}", g[IDX_Y]);
+        assert!(
+            g[IDX_Y] > 0.5,
+            "left should give positive Y, got {}",
+            g[IDX_Y]
+        );
         assert!(approx(g[IDX_W], 1.0));
         assert!(approx(g[IDX_X], 0.0));
         assert!(approx(g[IDX_Z], 0.0));
@@ -345,7 +353,11 @@ mod tests {
     #[test]
     fn encode_up_excites_z() {
         let g = encode_foa_gains(Vec3::new(0.0, 1.0, 0.0));
-        assert!(g[IDX_Z] > 0.5, "up should give positive Z, got {}", g[IDX_Z]);
+        assert!(
+            g[IDX_Z] > 0.5,
+            "up should give positive Z, got {}",
+            g[IDX_Z]
+        );
         assert!(approx(g[IDX_W], 1.0));
         assert!(approx(g[IDX_X], 0.0));
         assert!(approx(g[IDX_Y], 0.0));
@@ -404,8 +416,16 @@ mod tests {
 
         // W untouched, front energy has moved onto the Y (left/right) axis.
         assert!(approx(wxyz[IDX_W], 1.0));
-        assert!(wxyz[IDX_X].abs() < 1.0e-3, "X should vanish, got {}", wxyz[IDX_X]);
-        assert!(wxyz[IDX_Y].abs() > 0.5, "energy should move to Y, got {}", wxyz[IDX_Y]);
+        assert!(
+            wxyz[IDX_X].abs() < 1.0e-3,
+            "X should vanish, got {}",
+            wxyz[IDX_X]
+        );
+        assert!(
+            wxyz[IDX_Y].abs() > 0.5,
+            "energy should move to Y, got {}",
+            wxyz[IDX_Y]
+        );
 
         let energy_after =
             wxyz[IDX_X] * wxyz[IDX_X] + wxyz[IDX_Y] * wxyz[IDX_Y] + wxyz[IDX_Z] * wxyz[IDX_Z];
@@ -440,7 +460,11 @@ mod tests {
         input.channel_mut(0).copy_from_slice(&[1.0; 8]);
         let mut output = AudioBuffer::new(ChannelLayout::AmbisonicFoa, 8);
 
-        let ctx = RenderContext { sample_rate: 48_000, frames: 8, playhead: 0 };
+        let ctx = RenderContext {
+            sample_rate: 48_000,
+            frames: 8,
+            playhead: 0,
+        };
         let inputs = [input];
         let mut outputs = [output];
         {
@@ -461,13 +485,17 @@ mod tests {
     fn node_glides_smoothly_between_directions() {
         let mut node = FoaEncoderNode::new();
         node.set_direction_immediate(Vec3::new(0.0, 0.0, -1.0)); // front: X = 1
-        // Move to the left over 8 samples: X -> 0, Y -> 1.
+                                                                 // Move to the left over 8 samples: X -> 0, Y -> 1.
         node.set_direction(Vec3::new(-1.0, 0.0, 0.0), Ramp::Linear { samples: 8 });
 
         let mut input = AudioBuffer::new(ChannelLayout::Mono, 8);
         input.channel_mut(0).copy_from_slice(&[1.0; 8]);
         let mut outputs = [AudioBuffer::new(ChannelLayout::AmbisonicFoa, 8)];
-        let ctx = RenderContext { sample_rate: 48_000, frames: 8, playhead: 0 };
+        let ctx = RenderContext {
+            sample_rate: 48_000,
+            frames: 8,
+            playhead: 0,
+        };
         let inputs = [input];
         {
             let mut io = ProcessIo::new(&inputs, &mut outputs);
@@ -478,8 +506,18 @@ mod tests {
         // X should be monotonically (weakly) decreasing, Y increasing: a glide.
         let x = out.channel(IDX_X);
         let y = out.channel(IDX_Y);
-        assert!(x[0] > x[7], "X should fall across the block: {} -> {}", x[0], x[7]);
-        assert!(y[7] > y[0], "Y should rise across the block: {} -> {}", y[0], y[7]);
+        assert!(
+            x[0] > x[7],
+            "X should fall across the block: {} -> {}",
+            x[0],
+            x[7]
+        );
+        assert!(
+            y[7] > y[0],
+            "Y should rise across the block: {} -> {}",
+            y[0],
+            y[7]
+        );
         // No zipper jumps larger than a single linear step (~1/8 here).
         for w in x.windows(2) {
             assert!((w[1] - w[0]).abs() < 0.2);
@@ -495,7 +533,11 @@ mod tests {
         let mut input = AudioBuffer::new(ChannelLayout::Mono, 4);
         input.channel_mut(0).copy_from_slice(&[1.0; 4]);
         let mut outputs = [AudioBuffer::new(ChannelLayout::AmbisonicFoa, 4)];
-        let ctx = RenderContext { sample_rate: 48_000, frames: 4, playhead: 0 };
+        let ctx = RenderContext {
+            sample_rate: 48_000,
+            frames: 4,
+            playhead: 0,
+        };
         let inputs = [input];
         {
             let mut io = ProcessIo::new(&inputs, &mut outputs);
@@ -507,7 +549,12 @@ mod tests {
         let g = node.current_gains();
         let target = encode_foa_gains(Vec3::new(-1.0, 0.0, 0.0));
         for k in 0..FOA_CHANNELS {
-            assert!(approx(g[k], target[k]), "channel {k}: {} vs {}", g[k], target[k]);
+            assert!(
+                approx(g[k], target[k]),
+                "channel {k}: {} vs {}",
+                g[k],
+                target[k]
+            );
         }
     }
 
@@ -520,7 +567,11 @@ mod tests {
         let mut input = AudioBuffer::new(ChannelLayout::Mono, 4);
         input.channel_mut(0).copy_from_slice(&[1.0; 4]);
         let mut outputs = [AudioBuffer::new(ChannelLayout::Mono, 4)];
-        let ctx = RenderContext { sample_rate: 48_000, frames: 4, playhead: 0 };
+        let ctx = RenderContext {
+            sample_rate: 48_000,
+            frames: 4,
+            playhead: 0,
+        };
         let inputs = [input];
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx, &mut io);

@@ -141,7 +141,7 @@ fn reset_restores_initial_state_keeping_clamp() {
     assert_eq!(c.total_suspended(), ms(0));
     assert_eq!(c.total_clamped(), ms(0));
     assert_eq!(c.max_delta(), Some(ms(100))); // clamp preserved
-    // Baseline re-established cleanly after reset.
+                                              // Baseline re-established cleanly after reset.
     assert_eq!(c.advance_to(ms(1000)), ms(0));
     assert_eq!(c.advance_to(ms(1010)), ms(10));
 }

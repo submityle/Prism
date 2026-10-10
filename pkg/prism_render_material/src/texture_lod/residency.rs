@@ -161,7 +161,11 @@ impl VirtualTexture {
 
         let page_x = (tx / self.page_size).min(pages_x - 1);
         let page_y = (ty / self.page_size).min(pages_y - 1);
-        PageRequest { mip, page_x, page_y }
+        PageRequest {
+            mip,
+            page_x,
+            page_y,
+        }
     }
 
     /// Resolve the trilinear page set for a shaded texel at continuous `lod`.
@@ -215,24 +219,59 @@ mod tests {
         // 256x256, 128-texel pages -> 2x2 page grid at mip 0.
         let vt = VirtualTexture::new(256, 256, 128);
         let p = vt.page_at([0.5, 0.5], 0);
-        assert_eq!(p, PageRequest { mip: 0, page_x: 1, page_y: 1 });
+        assert_eq!(
+            p,
+            PageRequest {
+                mip: 0,
+                page_x: 1,
+                page_y: 1
+            }
+        );
     }
 
     #[test]
     fn corners_clamp_to_edge_pages() {
         let vt = VirtualTexture::new(256, 256, 128);
-        assert_eq!(vt.page_at([0.0, 0.0], 0), PageRequest { mip: 0, page_x: 0, page_y: 0 });
+        assert_eq!(
+            vt.page_at([0.0, 0.0], 0),
+            PageRequest {
+                mip: 0,
+                page_x: 0,
+                page_y: 0
+            }
+        );
         // u=v=1.0 must land on the last page, not one past the grid.
-        assert_eq!(vt.page_at([1.0, 1.0], 0), PageRequest { mip: 0, page_x: 1, page_y: 1 });
+        assert_eq!(
+            vt.page_at([1.0, 1.0], 0),
+            PageRequest {
+                mip: 0,
+                page_x: 1,
+                page_y: 1
+            }
+        );
         // Out-of-range UV clamps instead of overflowing.
-        assert_eq!(vt.page_at([5.0, -5.0], 0), PageRequest { mip: 0, page_x: 1, page_y: 0 });
+        assert_eq!(
+            vt.page_at([5.0, -5.0], 0),
+            PageRequest {
+                mip: 0,
+                page_x: 1,
+                page_y: 0
+            }
+        );
     }
 
     #[test]
     fn coarser_mip_has_fewer_pages() {
         // At mip 1 a 256-wide texture is 128 texels -> a single 128 page.
         let vt = VirtualTexture::new(256, 256, 128);
-        assert_eq!(vt.page_at([0.9, 0.9], 1), PageRequest { mip: 1, page_x: 0, page_y: 0 });
+        assert_eq!(
+            vt.page_at([0.9, 0.9], 1),
+            PageRequest {
+                mip: 1,
+                page_x: 0,
+                page_y: 0
+            }
+        );
     }
 
     #[test]

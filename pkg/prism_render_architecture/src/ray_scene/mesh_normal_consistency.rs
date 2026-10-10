@@ -174,7 +174,11 @@ fn undirected_edges(tri: &[u32; 3]) -> [(u32, u32); 3] {
 
 /// Returns the sorted `(min, max)` endpoint pair keying a shared edge.
 fn sorted_pair(a: u32, b: u32) -> (u32, u32) {
-    if a < b { (a, b) } else { (b, a) }
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 /// Returns the directed edge (ordered as stored) that triangle `tri` uses for
@@ -314,7 +318,10 @@ mod tests {
             vec![[0, 1, 2], [1, 2, 3]],
         )
         .unwrap();
-        assert!(!all_edges_consistent(&mesh), "fixture should be inconsistent");
+        assert!(
+            !all_edges_consistent(&mesh),
+            "fixture should be inconsistent"
+        );
         let fix = make_winding_consistent(&mesh).unwrap();
         assert!(fix.flipped() >= 1);
         assert!(all_edges_consistent(fix.mesh()));
@@ -426,13 +433,8 @@ mod tests {
 
     #[test]
     fn empty_mesh_has_no_patches() {
-        let mesh = TriangleMesh::new(
-            vec![[0.0, 0.0, 0.0]],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-        .unwrap();
+        let mesh =
+            TriangleMesh::new(vec![[0.0, 0.0, 0.0]], Vec::new(), Vec::new(), Vec::new()).unwrap();
         let fix = make_winding_consistent(&mesh).unwrap();
         assert_eq!(fix.patches(), 0);
         assert_eq!(fix.flipped(), 0);

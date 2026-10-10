@@ -45,7 +45,5 @@ pub use model::{
     AdmDocument, AdmError, AdmPosition, AudioBlockFormat, AudioChannelFormat, AudioContent,
     AudioObject, AudioPackFormat, AudioProgramme, AudioTrackUid, ObjectSize, TypeDefinition,
 };
-pub use sadm::{
-    FrameType, SadmError, SadmFrame, SadmFrameFormat, SadmObjectUpdate, SadmSequence,
-};
+pub use sadm::{FrameType, SadmError, SadmFrame, SadmFrameFormat, SadmObjectUpdate, SadmSequence};
 pub use xml::{from_axml_bytes, to_axml_bytes, XmlElement, XmlError, XmlNode};

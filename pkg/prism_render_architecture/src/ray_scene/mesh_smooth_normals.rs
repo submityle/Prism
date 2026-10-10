@@ -145,10 +145,7 @@ mod tests {
     #[test]
     fn count_matches_vertices() {
         let mesh = flat_quad();
-        assert_eq!(
-            compute_smooth_normals(&mesh).len(),
-            mesh.vertex_count()
-        );
+        assert_eq!(compute_smooth_normals(&mesh).len(), mesh.vertex_count());
     }
 
     #[test]
@@ -167,12 +164,7 @@ mod tests {
         ];
         // Top quad in z=0 plane (normal +Z): 0,1,2,3
         // Side quad in y=0 plane (normal +Y): 0,1,4,5 wound so its normal is +Y
-        let indices = vec![
-            [0, 1, 2],
-            [0, 2, 3],
-            [0, 4, 1],
-            [0, 5, 4],
-        ];
+        let indices = vec![[0, 1, 2], [0, 2, 3], [0, 4, 1], [0, 5, 4]];
         let mesh = TriangleMesh::new(positions, vec![], vec![], indices).expect("mesh");
         let normals = compute_smooth_normals(&mesh);
         // Shared-edge vertices 0 and 1 blend +Z and +Y → normalized (0, √½, √½).
@@ -180,10 +172,22 @@ mod tests {
         assert!(close(normals[0], [0.0, s, s]), "vertex 0: {:?}", normals[0]);
         assert!(close(normals[1], [0.0, s, s]), "vertex 1: {:?}", normals[1]);
         // Outer top vertices keep +Z.
-        assert!(close(normals[2], [0.0, 0.0, 1.0]), "vertex 2: {:?}", normals[2]);
-        assert!(close(normals[3], [0.0, 0.0, 1.0]), "vertex 3: {:?}", normals[3]);
+        assert!(
+            close(normals[2], [0.0, 0.0, 1.0]),
+            "vertex 2: {:?}",
+            normals[2]
+        );
+        assert!(
+            close(normals[3], [0.0, 0.0, 1.0]),
+            "vertex 3: {:?}",
+            normals[3]
+        );
         // Outer side vertices keep +Y.
-        assert!(close(normals[4], [0.0, 1.0, 0.0]), "vertex 4: {:?}", normals[4]);
+        assert!(
+            close(normals[4], [0.0, 1.0, 0.0]),
+            "vertex 4: {:?}",
+            normals[4]
+        );
     }
 
     #[test]
@@ -224,7 +228,11 @@ mod tests {
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
             assert!((len - 1.0).abs() < 1e-5, "normal not unit: {n:?}");
         }
-        assert!(close(normals[3], [0.0, 0.0, 1.0]), "vertex 3: {:?}", normals[3]);
+        assert!(
+            close(normals[3], [0.0, 0.0, 1.0]),
+            "vertex 3: {:?}",
+            normals[3]
+        );
     }
 
     #[test]
@@ -240,7 +248,11 @@ mod tests {
         let indices = vec![[0, 1, 2]];
         let mesh = TriangleMesh::new(positions, vec![], vec![], indices).expect("mesh");
         let normals = compute_smooth_normals(&mesh);
-        assert!(close(normals[3], [0.0, 0.0, 1.0]), "isolated: {:?}", normals[3]);
+        assert!(
+            close(normals[3], [0.0, 0.0, 1.0]),
+            "isolated: {:?}",
+            normals[3]
+        );
     }
 
     #[test]
@@ -259,7 +271,8 @@ mod tests {
     fn with_smooth_normals_preserves_uvs() {
         let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         let uvs = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
-        let mesh = TriangleMesh::new(positions, vec![], uvs.clone(), vec![[0, 1, 2]]).expect("mesh");
+        let mesh =
+            TriangleMesh::new(positions, vec![], uvs.clone(), vec![[0, 1, 2]]).expect("mesh");
         let shaded = with_smooth_normals(&mesh).expect("rebuilt");
         assert_eq!(shaded.uvs(), uvs.as_slice());
     }

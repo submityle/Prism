@@ -83,13 +83,21 @@ pub const NO_MIXING_TIME_MS: Sample = -1.0;
 /// Returns a sample, mapping non-finite values to `0`.
 #[inline]
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Returns the magnitude of a sample, mapping non-finite values to `0`.
 #[inline]
 fn finite_abs(x: Sample) -> Sample {
-    if x.is_finite() { x.abs() } else { 0.0 }
+    if x.is_finite() {
+        x.abs()
+    } else {
+        0.0
+    }
 }
 
 /// Reports whether the inputs are degenerate (empty response or a non-finite or
@@ -142,7 +150,11 @@ fn eta_at(ir: &[Sample], center: usize, w: usize) -> Sample {
     }
 
     let eta = (exceed as Sample) / (GAUSSIAN_EXCEEDANCE * (count as Sample));
-    if eta.is_finite() { eta } else { 0.0 }
+    if eta.is_finite() {
+        eta
+    } else {
+        0.0
+    }
 }
 
 /// Writes the normalized echo density profile into `out`.
@@ -377,7 +389,11 @@ mod tests {
     fn from_impulse_response_matches_free_function() {
         let ir = noisy_ir(6_000);
         let profile = EchoDensityProfile::from_impulse_response(&ir, SR);
-        assert!(approx(profile.mixing_time_ms, mixing_time_ms(&ir, SR), 1e-6));
+        assert!(approx(
+            profile.mixing_time_ms,
+            mixing_time_ms(&ir, SR),
+            1e-6
+        ));
     }
 
     #[test]

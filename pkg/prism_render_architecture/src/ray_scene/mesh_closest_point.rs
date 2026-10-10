@@ -80,19 +80,18 @@ fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 
 /// Returns `base + t * dir` componentwise.
 fn mul_add(base: [f64; 3], dir: [f64; 3], t: f64) -> [f64; 3] {
-    [base[0] + dir[0] * t, base[1] + dir[1] * t, base[2] + dir[2] * t]
+    [
+        base[0] + dir[0] * t,
+        base[1] + dir[1] * t,
+        base[2] + dir[2] * t,
+    ]
 }
 
 /// Closest point on triangle `(a, b, c)` to `p`, with barycentric weights, via
 /// Ericson's Voronoi-region classification. Handles degenerate triangles
 /// gracefully because every branch is a comparison, never a division by a
 /// quantity that can be zero in that branch.
-fn closest_point_on_triangle(
-    p: [f64; 3],
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
-) -> TrianglePoint {
+fn closest_point_on_triangle(p: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> TrianglePoint {
     let ab = sub(b, a);
     let ac = sub(c, a);
     let ap = sub(p, a);
@@ -100,7 +99,10 @@ fn closest_point_on_triangle(
     let d2 = dot(ac, ap);
     // Vertex region A.
     if d1 <= 0.0 && d2 <= 0.0 {
-        return TrianglePoint { point: a, barycentric: [1.0, 0.0, 0.0] };
+        return TrianglePoint {
+            point: a,
+            barycentric: [1.0, 0.0, 0.0],
+        };
     }
 
     let bp = sub(p, b);
@@ -108,7 +110,10 @@ fn closest_point_on_triangle(
     let d4 = dot(ac, bp);
     // Vertex region B.
     if d3 >= 0.0 && d4 <= d3 {
-        return TrianglePoint { point: b, barycentric: [0.0, 1.0, 0.0] };
+        return TrianglePoint {
+            point: b,
+            barycentric: [0.0, 1.0, 0.0],
+        };
     }
 
     // Edge region AB.
@@ -126,7 +131,10 @@ fn closest_point_on_triangle(
     let d6 = dot(ac, cp);
     // Vertex region C.
     if d6 >= 0.0 && d5 <= d6 {
-        return TrianglePoint { point: c, barycentric: [0.0, 0.0, 1.0] };
+        return TrianglePoint {
+            point: c,
+            barycentric: [0.0, 0.0, 1.0],
+        };
     }
 
     // Edge region AC.
@@ -155,7 +163,10 @@ fn closest_point_on_triangle(
     let v = vb * denom;
     let w = vc * denom;
     let point = mul_add(mul_add(a, ab, v), ac, w);
-    TrianglePoint { point, barycentric: [1.0 - v - w, v, w] }
+    TrianglePoint {
+        point,
+        barycentric: [1.0 - v - w, v, w],
+    }
 }
 
 /// Finds the closest point on the mesh surface to `query`.
@@ -163,17 +174,18 @@ fn closest_point_on_triangle(
 /// Iterates every triangle in index order, keeping the one with the smallest
 /// squared distance (ties resolve to the lower triangle index for
 /// determinism). Returns [`None`] when the mesh has no triangles.
-pub fn closest_point_on_mesh(
-    mesh: &TriangleMesh,
-    query: [f32; 3],
-) -> Option<MeshClosestPoint> {
+pub fn closest_point_on_mesh(mesh: &TriangleMesh, query: [f32; 3]) -> Option<MeshClosestPoint> {
     let positions = mesh.positions();
     let indices = mesh.indices();
     if indices.is_empty() {
         return None;
     }
 
-    let p = [f64::from(query[0]), f64::from(query[1]), f64::from(query[2])];
+    let p = [
+        f64::from(query[0]),
+        f64::from(query[1]),
+        f64::from(query[2]),
+    ];
     let vertex = |i: u32| -> [f64; 3] {
         let v = positions[i as usize];
         [f64::from(v[0]), f64::from(v[1]), f64::from(v[2])]
@@ -220,7 +232,10 @@ mod tests {
 
     /// Unit right triangle in the z=0 plane: a=(0,0,0), b=(1,0,0), c=(0,1,0).
     fn unit_triangle() -> TriangleMesh {
-        mesh(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], vec![[0, 1, 2]])
+        mesh(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
     }
 
     #[test]

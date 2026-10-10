@@ -23,7 +23,12 @@ use prism_render_architecture::cloth::{ClothParticle, Vec3, EPS_LEN_SQ};
 /// 法线无定义平面，原样返回；否则把法线按 `1/sqrt(len_sq)` 归一化（镜像黄金
 /// `Vec3::normalize_or_zero`），当带符号距离落到 `-distance` 之后时沿单位法线推回
 /// 限制面。
-fn wesl_apply_backstop(pos: [f32; 3], origin: [f32; 3], normal: [f32; 3], distance: f32) -> [f32; 3] {
+fn wesl_apply_backstop(
+    pos: [f32; 3],
+    origin: [f32; 3],
+    normal: [f32; 3],
+    distance: f32,
+) -> [f32; 3] {
     let len_sq = normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2];
     if len_sq <= EPS_LEN_SQ {
         return pos;
@@ -49,7 +54,11 @@ fn wesl_resolve_backstops(particles: &[ClothParticle], backstops: &[Backstop]) -
         .iter()
         .zip(backstops.iter())
         .map(|(particle, backstop)| {
-            let pos = [particle.position.x, particle.position.y, particle.position.z];
+            let pos = [
+                particle.position.x,
+                particle.position.y,
+                particle.position.z,
+            ];
             if particle.inverse_mass <= 0.0 {
                 return pos;
             }
@@ -215,10 +224,10 @@ fn deep_penetration_large_push_bit_for_bit() {
 #[test]
 fn multiple_particles_each_own_backstop_bit_for_bit() {
     let particles = [
-        free(0.0, 3.0, 0.0),            // 前方，不动
-        free(0.0, -2.0, 0.0),           // 后方，推回
+        free(0.0, 3.0, 0.0),                              // 前方，不动
+        free(0.0, -2.0, 0.0),                             // 后方，推回
         ClothParticle::pinned(Vec3::new(0.0, -9.0, 0.0)), // 钉住，不动
-        free(-1.0, -0.6, 0.7),          // 斜法线推回
+        free(-1.0, -0.6, 0.7),                            // 斜法线推回
     ];
     let backstops = [
         plane_up(0.5),

@@ -18,8 +18,8 @@
 //! - **Batch:** AVX2-vs-scalar parity (exact on this scalar-only host),
 //!   odd-length tails, and agreement with the per-element `Mat4` reference.
 
-use crate::prelude::*;
 use crate::color::transfer::{linear_to_srgb, srgb_to_linear};
+use crate::prelude::*;
 
 // --------------------------------------------------------------------------
 // helpers
@@ -178,7 +178,11 @@ fn white_black_anchors() {
 
 #[test]
 fn srgb_u8_round_trip() {
-    for &(r, g, b, a) in &[(0u8, 0u8, 0u8, 255u8), (255, 128, 64, 32), (12, 200, 90, 255)] {
+    for &(r, g, b, a) in &[
+        (0u8, 0u8, 0u8, 255u8),
+        (255, 128, 64, 32),
+        (12, 200, 90, 255),
+    ] {
         let c = Srgba::from_u8a(r, g, b, a);
         assert_eq!(c.to_u8_array(), [r, g, b, a]);
     }
@@ -423,11 +427,27 @@ fn noise_range_bounds() {
         for j in 0..200 {
             let x = i as f32 * 0.113 - 7.0;
             let y = j as f32 * 0.091 + 4.0;
-            assert!(perlin.get2(x, y).abs() <= 1.0 + tol, "perlin2 {}", perlin.get2(x, y));
-            assert!(simplex.get2(x, y).abs() <= 1.0 + tol, "simplex2 {}", simplex.get2(x, y));
+            assert!(
+                perlin.get2(x, y).abs() <= 1.0 + tol,
+                "perlin2 {}",
+                perlin.get2(x, y)
+            );
+            assert!(
+                simplex.get2(x, y).abs() <= 1.0 + tol,
+                "simplex2 {}",
+                simplex.get2(x, y)
+            );
             let z = (i + j) as f32 * 0.037 - 3.0;
-            assert!(perlin.get3(x, y, z).abs() <= 1.0 + tol, "perlin3 {}", perlin.get3(x, y, z));
-            assert!(simplex.get3(x, y, z).abs() <= 1.0 + tol, "simplex3 {}", simplex.get3(x, y, z));
+            assert!(
+                perlin.get3(x, y, z).abs() <= 1.0 + tol,
+                "perlin3 {}",
+                perlin.get3(x, y, z)
+            );
+            assert!(
+                simplex.get3(x, y, z).abs() <= 1.0 + tol,
+                "simplex3 {}",
+                simplex.get3(x, y, z)
+            );
         }
     }
 }
@@ -518,7 +538,11 @@ fn batch_vec4_parity() {
 #[test]
 fn batch_points_and_vectors() {
     let m = sample_matrix();
-    let src = [Vec3::new(1.0, 1.0, 1.0), Vec3::new(-2.0, 0.5, 3.0), Vec3::new(0.0, 0.0, 0.0)];
+    let src = [
+        Vec3::new(1.0, 1.0, 1.0),
+        Vec3::new(-2.0, 0.5, 3.0),
+        Vec3::new(0.0, 0.0, 0.0),
+    ];
 
     let mut pts = [Vec3::ZERO; 3];
     batch::transform_points3(&m, &src, &mut pts);

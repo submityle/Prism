@@ -116,7 +116,7 @@ fn gpu_coverage_priority_matches_cpu_golden() {
             center: [11.0, 3.0, 4.0], // (11-8)^2 + 9 + 16 = 9 + 9 + ... see origin
             radius: 3.0,
             view_origin: [8.0, 0.0, 2.0], // dx=3,dy=3,dz=2 -> 9+9+4 = 22
-            focal_length_pixels: 2.0, // extent = 6, extent^2 = 36
+            focal_length_pixels: 2.0,     // extent = 6, extent^2 = 36
         },
     ];
     assert_parity(&ctx, &queries);

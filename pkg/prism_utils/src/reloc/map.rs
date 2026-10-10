@@ -245,13 +245,19 @@ impl<'a, K: Reloc + Ord, V: Reloc> RelocMapView<'a, K, V> {
     /// The key at sorted position `index` (debug/iteration helper).
     #[inline]
     fn key_at(self, index: usize) -> Option<K> {
-        self.keys.get(self.blob, KEYS_FIELD_POS, index).ok().flatten()
+        self.keys
+            .get(self.blob, KEYS_FIELD_POS, index)
+            .ok()
+            .flatten()
     }
 
     /// The value at sorted position `index`.
     #[inline]
     fn val_at(self, index: usize) -> Option<V> {
-        self.vals.get(self.blob, VALS_FIELD_POS, index).ok().flatten()
+        self.vals
+            .get(self.blob, VALS_FIELD_POS, index)
+            .ok()
+            .flatten()
     }
 
     /// Look up `key`, returning its decoded value if present.
@@ -302,8 +308,14 @@ impl<K: Reloc, V: Reloc> Iterator for RelocMapIter<'_, K, V> {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<(K, V)> {
-        let k = self.keys.get(self.blob, KEYS_FIELD_POS, self.index).ok()??;
-        let v = self.vals.get(self.blob, VALS_FIELD_POS, self.index).ok()??;
+        let k = self
+            .keys
+            .get(self.blob, KEYS_FIELD_POS, self.index)
+            .ok()??;
+        let v = self
+            .vals
+            .get(self.blob, VALS_FIELD_POS, self.index)
+            .ok()??;
         self.index += 1;
         Some((k, v))
     }

@@ -29,7 +29,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use prism_reflect::{ParsedPath, Reflect, reflect_path};
+use prism_reflect::{reflect_path, ParsedPath, Reflect};
 
 #[derive(Reflect)]
 struct Stats {
@@ -53,7 +53,10 @@ const PASSES: usize = 24;
 fn build_batch() -> Vec<Entity> {
     (0..BATCH)
         .map(|i| Entity {
-            stats: Stats { health: i as i32, speed: (i as i32) * 2 - 7 },
+            stats: Stats {
+                health: i as i32,
+                speed: (i as i32) * 2 - 7,
+            },
             level: i as i32 % 60,
         })
         .collect()
@@ -97,7 +100,10 @@ fn bench_native(batch: &[Entity]) -> (f64, i64) {
 }
 
 fn main() {
-    assert!(BATCH.is_power_of_two(), "BATCH must be a power of two for the index mask");
+    assert!(
+        BATCH.is_power_of_two(),
+        "BATCH must be a power of two for the index mask"
+    );
     let batch = build_batch();
     let path = ParsedPath::parse(".stats.health").expect("valid access path");
 
@@ -114,7 +120,10 @@ fn main() {
         reflect_sum, native_sum,
         "reflected path checksum diverged from native field read: {reflect_sum} != {native_sum}"
     );
-    assert_ne!(reflect_sum, 0, "checksum is zero — no useful work was measured");
+    assert_ne!(
+        reflect_sum, 0,
+        "checksum is zero — no useful work was measured"
+    );
 
     let reflect_mps = RESOLUTIONS as f64 / reflect_s / 1e6;
     let reflect_ns = reflect_s * 1e9 / RESOLUTIONS as f64;
@@ -123,7 +132,10 @@ fn main() {
     println!("prism_reflect path_access (ParsedPath resolve + downcast)");
     println!("  path          : .stats.health  (2 segments)");
     println!("  resolutions   : {RESOLUTIONS}  over a {BATCH}-value batch");
-    println!("  reflective    : {:.3} ms  ({reflect_mps:.1} Mresolve/s, {reflect_ns:.1} ns each)", reflect_s * 1e3);
+    println!(
+        "  reflective    : {:.3} ms  ({reflect_mps:.1} Mresolve/s, {reflect_ns:.1} ns each)",
+        reflect_s * 1e3
+    );
     println!("  native field  : {:.3} ms", native_s * 1e3);
     println!("  overhead      : {overhead:.1}x native  (checksum {reflect_sum})");
 }

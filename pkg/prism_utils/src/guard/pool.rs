@@ -280,7 +280,9 @@ impl<T, D> GuardedPool<T, D> {
                 self.live -= 1;
                 Ok(value)
             }
-            SlotState::Free { next_free: original } => {
+            SlotState::Free {
+                next_free: original,
+            } => {
                 // `classify` already proved the slot was live, so this branch is
                 // unreachable in practice. Restore the slot rather than panic,
                 // keeping the pool consistent even under an impossible state.

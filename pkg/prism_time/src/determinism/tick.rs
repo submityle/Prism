@@ -360,7 +360,7 @@ mod tests {
         // One 1/60 s step consumed from a 20 ms frame; leftover is exact.
         let mut clock = TickClock::from_hz(60);
         clock.accumulate(Duration::from_millis(20)); // 20_000_000 ns
-        // sub-units = 20_000_000 * 3 = 60_000_000; one tick costs 50_000_000.
+                                                     // sub-units = 20_000_000 * 3 = 60_000_000; one tick costs 50_000_000.
         assert!(clock.expend());
         assert!(!clock.expend());
         assert_eq!(clock.tick(), 1);

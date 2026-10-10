@@ -182,7 +182,11 @@ const BP_INIT: Sample = 1.0e-4;
 /// Replaces a non-finite value with `fallback`, otherwise returns the input.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Clamps `frequency_hz` to `[MIN_FREQUENCY_HZ, min(MAX_FREQUENCY_HZ, sr/2)]`,
@@ -203,7 +207,9 @@ struct Xorshift64 {
 impl Xorshift64 {
     #[inline]
     fn new(seed: u64) -> Self {
-        Self { state: seed_to_state(seed) }
+        Self {
+            state: seed_to_state(seed),
+        }
     }
 
     #[inline]
@@ -226,7 +232,11 @@ fn seed_to_state(seed: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^= z >> 31;
-    if z == 0 { 0x9E37_79B9_7F4A_7C15 } else { z }
+    if z == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        z
+    }
 }
 
 /// Construction parameters for a [`HelmholtzResonatorNode`].
@@ -341,7 +351,8 @@ impl HelmholtzResonatorNode {
         let resonance = finite_or(params.resonance, DEFAULT_RESONANCE).clamp(0.0, 1.0);
         let brightness = finite_or(params.brightness, DEFAULT_BRIGHTNESS).clamp(0.0, 1.0);
         let breath_noise = finite_or(params.breath_noise, DEFAULT_BREATH_NOISE).clamp(0.0, 1.0);
-        let breath_pressure = finite_or(params.breath_pressure, DEFAULT_BREATH_PRESSURE).clamp(0.0, 1.0);
+        let breath_pressure =
+            finite_or(params.breath_pressure, DEFAULT_BREATH_PRESSURE).clamp(0.0, 1.0);
         let amplitude = finite_or(params.amplitude, DEFAULT_AMPLITUDE);
 
         let mut node = Self {

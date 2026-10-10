@@ -9,9 +9,9 @@
 //! real multi-threaded [`TaskPool`](crate::TaskPool) to prove foreground always
 //! runs, background is gated, and deferred background carries to a later frame.
 
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::qos::{admits_background, FrameStep, LanePlan, LaneQueues};

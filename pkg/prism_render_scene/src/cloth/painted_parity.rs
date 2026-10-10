@@ -118,7 +118,11 @@ fn pack_weights(painted: &[PaintedConstraint]) -> Vec<[f32; 4]> {
 }
 
 /// `vertex_count`：位置/锚点/权重三者最短长度，镜像内核 uniform 与黄金 `zip`。
-fn vertex_count(particles: &[ClothParticle], anchors: &[SkinnedAnchor], painted: &[PaintedConstraint]) -> u32 {
+fn vertex_count(
+    particles: &[ClothParticle],
+    anchors: &[SkinnedAnchor],
+    painted: &[PaintedConstraint],
+) -> u32 {
     particles.len().min(anchors.len()).min(painted.len()) as u32
 }
 
@@ -363,7 +367,13 @@ fn assert_backstop_bit_exact(
     let anchor_positions = pack_anchor_positions(anchors);
     let anchor_normals = pack_anchor_normals(anchors);
     let weights = pack_weights(painted);
-    wesl_backstop(&mut positions, &anchor_positions, &anchor_normals, &weights, count);
+    wesl_backstop(
+        &mut positions,
+        &anchor_positions,
+        &anchor_normals,
+        &weights,
+        count,
+    );
     assert_positions_bit_exact(&golden, &positions, None);
 }
 
@@ -419,7 +429,13 @@ fn assert_all_passes_bit_exact(
         );
     }
     wesl_clamp_max_distance(&mut positions, &anchor_positions, &weights, count);
-    wesl_backstop(&mut positions, &anchor_positions, &anchor_normals, &weights, count);
+    wesl_backstop(
+        &mut positions,
+        &anchor_positions,
+        &anchor_normals,
+        &weights,
+        count,
+    );
     wesl_blend_to_skin(&mut positions, &anchor_positions, &weights, count);
     assert_positions_bit_exact(&golden, &positions, Some(&velocities));
 }
@@ -456,7 +472,10 @@ const DT: f32 = 1.0 / 60.0;
 
 #[test]
 fn anim_drive_pulls_free_vertex_and_updates_velocity_bit_for_bit() {
-    let particles = [moving_particle(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.1, -0.2, 0.3))];
+    let particles = [moving_particle(
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.1, -0.2, 0.3),
+    )];
     let anchors = [anchor(Vec3::new(2.0, 1.0, -1.0), Vec3::ZERO)];
     let painted = [PaintedConstraint::new(f32::INFINITY, 0.0, 1.0, 0.8)];
     assert_anim_drive_bit_exact(&particles, &anchors, &painted, drive_params(), DT);
@@ -464,7 +483,10 @@ fn anim_drive_pulls_free_vertex_and_updates_velocity_bit_for_bit() {
 
 #[test]
 fn anim_drive_disabled_is_noop_bit_for_bit() {
-    let particles = [moving_particle(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.1, 0.2, 0.3))];
+    let particles = [moving_particle(
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.1, 0.2, 0.3),
+    )];
     let anchors = [anchor(Vec3::new(2.0, 1.0, -1.0), Vec3::ZERO)];
     let painted = [PaintedConstraint::new(f32::INFINITY, 0.0, 1.0, 1.0)];
     let params = AnimDriveParams {
@@ -476,7 +498,10 @@ fn anim_drive_disabled_is_noop_bit_for_bit() {
 
 #[test]
 fn anim_drive_zero_follow_is_noop_bit_for_bit() {
-    let particles = [moving_particle(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.1, 0.2, 0.3))];
+    let particles = [moving_particle(
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.1, 0.2, 0.3),
+    )];
     let anchors = [anchor(Vec3::new(2.0, 1.0, -1.0), Vec3::ZERO)];
     // anim_drive = 0 → follow = 0，整顶点跳过。
     let painted = [PaintedConstraint::new(f32::INFINITY, 0.0, 1.0, 0.0)];
@@ -485,7 +510,10 @@ fn anim_drive_zero_follow_is_noop_bit_for_bit() {
 
 #[test]
 fn anim_drive_non_positive_dt_is_noop_bit_for_bit() {
-    let particles = [moving_particle(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.1, 0.2, 0.3))];
+    let particles = [moving_particle(
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.1, 0.2, 0.3),
+    )];
     let anchors = [anchor(Vec3::new(2.0, 1.0, -1.0), Vec3::ZERO)];
     let painted = [PaintedConstraint::new(f32::INFINITY, 0.0, 1.0, 1.0)];
     assert_anim_drive_bit_exact(&particles, &anchors, &painted, drive_params(), 0.0);
@@ -651,11 +679,18 @@ fn mixed_grid_across_workgroups_matches_golden_bit_for_bit() {
     let mut painted = Vec::new();
     for i in 0..96u32 {
         let f = i as f32;
-        let position = Vec3::new((f * 0.21).sin() * 2.0, (f * 0.13).cos() * 2.0, (f * 0.07).sin());
+        let position = Vec3::new(
+            (f * 0.21).sin() * 2.0,
+            (f * 0.13).cos() * 2.0,
+            (f * 0.07).sin(),
+        );
         if i % 11 == 0 {
             particles.push(ClothParticle::pinned(position));
         } else {
-            particles.push(moving_particle(position, Vec3::new((f * 0.05).sin() * 0.3, 0.1, -0.1)));
+            particles.push(moving_particle(
+                position,
+                Vec3::new((f * 0.05).sin() * 0.3, 0.1, -0.1),
+            ));
         }
         let anchor_pos = Vec3::new((f * 0.17).cos(), (f * 0.09).sin(), (f * 0.11).cos());
         let normal = if i % 7 == 0 {
@@ -664,7 +699,11 @@ fn mixed_grid_across_workgroups_matches_golden_bit_for_bit() {
             Vec3::new((f * 0.3).sin(), 1.0, (f * 0.2).cos())
         };
         anchors.push(anchor(anchor_pos, normal));
-        let max_distance = if i % 5 == 0 { f32::INFINITY } else { 0.1 + (i % 4) as f32 * 0.25 };
+        let max_distance = if i % 5 == 0 {
+            f32::INFINITY
+        } else {
+            0.1 + (i % 4) as f32 * 0.25
+        };
         let backstop = (i % 3) as f32 * 0.4;
         let blend = ((i % 6) as f32) / 5.0;
         let anim = ((i % 4) as f32) / 3.0;
@@ -681,9 +720,18 @@ fn mixed_grid_across_workgroups_matches_golden_bit_for_bit() {
 fn jittered_positions_match_golden_bit_for_bit() {
     // 非轴对齐 3D 抖动位型，验证 distance / normalize 的平方和开方逐位复刻黄金。
     let particles = [
-        moving_particle(Vec3::new(0.013, -0.047, 0.021), Vec3::new(0.03, -0.02, 0.05)),
-        moving_particle(Vec3::new(1.737, 0.902, -0.613), Vec3::new(-0.01, 0.04, 0.02)),
-        moving_particle(Vec3::new(-0.411, 1.228, 0.774), Vec3::new(0.02, 0.01, -0.03)),
+        moving_particle(
+            Vec3::new(0.013, -0.047, 0.021),
+            Vec3::new(0.03, -0.02, 0.05),
+        ),
+        moving_particle(
+            Vec3::new(1.737, 0.902, -0.613),
+            Vec3::new(-0.01, 0.04, 0.02),
+        ),
+        moving_particle(
+            Vec3::new(-0.411, 1.228, 0.774),
+            Vec3::new(0.02, 0.01, -0.03),
+        ),
     ];
     let anchors = [
         anchor(Vec3::new(0.1, 0.2, -0.1), Vec3::new(0.3, 0.9, 0.2)),

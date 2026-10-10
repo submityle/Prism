@@ -151,7 +151,10 @@ mod tests {
         let sr = 2000.0_f32;
         let slow = rt60(&exp_decay_ir(sr, 2000, 0.005), 0);
         let fast = rt60(&exp_decay_ir(sr, 2000, 0.02), 0);
-        assert!(fast < slow, "fast {fast} should be shorter than slow {slow}");
+        assert!(
+            fast < slow,
+            "fast {fast} should be shorter than slow {slow}"
+        );
     }
 
     #[test]

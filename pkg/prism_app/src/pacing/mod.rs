@@ -86,9 +86,9 @@ impl FrameLimit {
     pub fn period(self) -> Option<Duration> {
         match self {
             FrameLimit::Off => None,
-            FrameLimit::Fps(fps) => {
-                Some(Duration::from_nanos(1_000_000_000u64 / u64::from(fps.get())))
-            }
+            FrameLimit::Fps(fps) => Some(Duration::from_nanos(
+                1_000_000_000u64 / u64::from(fps.get()),
+            )),
             FrameLimit::Period(p) if p.is_zero() => None,
             FrameLimit::Period(p) => Some(p),
         }
@@ -281,8 +281,7 @@ impl FramePacer {
             return Duration::ZERO;
         };
 
-        let (sleep, next) =
-            Self::next_boundary(self.next_deadline, now, period, self.max_catch_up);
+        let (sleep, next) = Self::next_boundary(self.next_deadline, now, period, self.max_catch_up);
         self.next_deadline = Some(next);
         if !sleep.is_zero() {
             std::thread::sleep(sleep);
@@ -354,7 +353,8 @@ mod tests {
     fn first_limited_frame_anchors_without_sleeping() {
         let base = Instant::now();
         let period = Duration::from_millis(10);
-        let (sleep, next) = FramePacer::next_boundary(None, base, period, Duration::from_millis(100));
+        let (sleep, next) =
+            FramePacer::next_boundary(None, base, period, Duration::from_millis(100));
         assert_eq!(sleep, Duration::ZERO);
         assert_eq!(next.saturating_duration_since(base), period);
     }
@@ -369,7 +369,10 @@ mod tests {
             FramePacer::next_boundary(Some(deadline), now, period, Duration::from_millis(100));
         // Sleep the remaining 6ms, then the cadence moves to 20ms (drift-free).
         assert_eq!(sleep, Duration::from_millis(6));
-        assert_eq!(next.saturating_duration_since(base), Duration::from_millis(20));
+        assert_eq!(
+            next.saturating_duration_since(base),
+            Duration::from_millis(20)
+        );
     }
 
     #[test]
@@ -383,7 +386,10 @@ mod tests {
         let (sleep, next) =
             FramePacer::next_boundary(Some(deadline), now, period, Duration::from_millis(100));
         assert_eq!(sleep, Duration::ZERO);
-        assert_eq!(next.saturating_duration_since(base), Duration::from_millis(20));
+        assert_eq!(
+            next.saturating_duration_since(base),
+            Duration::from_millis(20)
+        );
     }
 
     #[test]
@@ -397,7 +403,10 @@ mod tests {
         let (sleep, next) =
             FramePacer::next_boundary(Some(deadline), now, period, Duration::from_millis(100));
         assert_eq!(sleep, Duration::ZERO);
-        assert_eq!(next.saturating_duration_since(base), Duration::from_millis(520));
+        assert_eq!(
+            next.saturating_duration_since(base),
+            Duration::from_millis(520)
+        );
     }
 
     #[test]

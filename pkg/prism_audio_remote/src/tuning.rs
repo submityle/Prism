@@ -56,9 +56,7 @@ impl Smoothing {
     fn to_ramp(self, sample_rate: u32) -> Ramp {
         match self {
             Smoothing::Immediate => Ramp::Immediate,
-            Smoothing::LinearSeconds(seconds) => {
-                Ramp::linear_seconds(seconds, sample_rate)
-            }
+            Smoothing::LinearSeconds(seconds) => Ramp::linear_seconds(seconds, sample_rate),
             Smoothing::ExponentialSeconds(seconds) => {
                 let tau = (seconds.max(0.0) * sample_rate as f32).max(1.0);
                 Ramp::Exponential { tau_samples: tau }
@@ -185,7 +183,11 @@ mod tests {
     fn second_edit_glides_without_jumping() {
         let mut tuner = LiveTuner::new(48_000);
         tuner.tune(TuningTarget::BusGain(2), 0.0, Smoothing::Immediate);
-        tuner.tune(TuningTarget::BusGain(2), 1.0, Smoothing::LinearSeconds(0.01));
+        tuner.tune(
+            TuningTarget::BusGain(2),
+            1.0,
+            Smoothing::LinearSeconds(0.01),
+        );
         // One frame in, the audible value should have moved but not arrived.
         tuner.advance(1);
         let mid = tuner.current(TuningTarget::BusGain(2)).unwrap();

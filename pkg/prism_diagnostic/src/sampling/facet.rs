@@ -59,11 +59,7 @@ pub fn facet_by_lane(samples: &[StackSample], interval_nanos: u64) -> Vec<LanePr
     let interval_nanos = interval_nanos.max(1);
     let mut out: Vec<LaneProfile> = Vec::new();
     for lane in LaneKind::all() {
-        let facet: Vec<StackSample> = samples
-            .iter()
-            .filter(|s| s.lane == lane)
-            .cloned()
-            .collect();
+        let facet: Vec<StackSample> = samples.iter().filter(|s| s.lane == lane).cloned().collect();
         if facet.is_empty() {
             continue;
         }

@@ -40,8 +40,8 @@ use wgpu::{
 };
 
 use crate::buffer;
-use crate::context::GpuContext;
 use crate::bvh::layout::{buffer_entry, entry};
+use crate::context::GpuContext;
 
 use super::trimesh_raycast::{closer_hit, finalize_hit, MeshRay, TrimeshRayHit};
 use super::Trimesh;
@@ -134,7 +134,12 @@ impl GpuTrimeshRayCast {
     /// The result matches [`cpu_trimesh_raycast`](super::cpu_trimesh_raycast)
     /// including the lowest-index rule on a distance tie.
     #[must_use]
-    pub fn raycast(&self, ctx: &GpuContext, mesh: &Trimesh, ray: &MeshRay) -> Option<TrimeshRayHit> {
+    pub fn raycast(
+        &self,
+        ctx: &GpuContext,
+        mesh: &Trimesh,
+        ray: &MeshRay,
+    ) -> Option<TrimeshRayHit> {
         let n = mesh.triangle_count();
         if n == 0 {
             return None;
@@ -179,8 +184,7 @@ impl GpuTrimeshRayCast {
             ],
         });
 
-        let out_stage =
-            buffer::staging(device, "prism_collider_trimesh_raycast_stage", out_bytes);
+        let out_stage = buffer::staging(device, "prism_collider_trimesh_raycast_stage", out_bytes);
         let groups = u32::try_from(n.div_ceil(WORKGROUP)).unwrap_or(u32::MAX);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {

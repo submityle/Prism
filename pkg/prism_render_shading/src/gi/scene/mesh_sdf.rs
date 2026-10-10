@@ -325,11 +325,7 @@ impl MeshSdf {
     #[inline]
     pub fn sample_distance(&self, world: Vec3) -> f32 {
         let res = self.resolution;
-        let max_coord = Vec3::new(
-            (res.x - 1) as f32,
-            (res.y - 1) as f32,
-            (res.z - 1) as f32,
-        );
+        let max_coord = Vec3::new((res.x - 1) as f32, (res.y - 1) as f32, (res.z - 1) as f32);
         let g = self.world_to_grid(world).clamp(Vec3::ZERO, max_coord);
         let base = g.floor();
         let frac = (g - base).clamp(Vec3::ZERO, Vec3::ONE);
@@ -447,7 +443,12 @@ mod tests {
     #[test]
     fn new_enforces_buffer_length_invariant() {
         // Too-short buffer is padded; resolution is clamped to >= 1.
-        let sdf = MeshSdf::new(UVec3::new(2, 2, 2), Vec3::ZERO, Vec3::splat(1.0), Vec::new());
+        let sdf = MeshSdf::new(
+            UVec3::new(2, 2, 2),
+            Vec3::ZERO,
+            Vec3::splat(1.0),
+            Vec::new(),
+        );
         assert_eq!(sdf.node_count(), 8);
         assert!(sdf.distances().iter().all(|&d| d == MeshSdf::FAR_DISTANCE));
 
@@ -458,7 +459,12 @@ mod tests {
 
     #[test]
     fn new_orders_bounds() {
-        let sdf = MeshSdf::new(UVec3::splat(2), Vec3::splat(2.0), Vec3::splat(-2.0), Vec::new());
+        let sdf = MeshSdf::new(
+            UVec3::splat(2),
+            Vec3::splat(2.0),
+            Vec3::splat(-2.0),
+            Vec::new(),
+        );
         assert_eq!(sdf.bounds_min(), Vec3::splat(-2.0));
         assert_eq!(sdf.bounds_max(), Vec3::splat(2.0));
     }
@@ -482,11 +488,7 @@ mod tests {
     fn grid_corners_map_to_bounds() {
         let sdf = sphere_field();
         let res = sdf.resolution();
-        let last = Vec3::new(
-            (res.x - 1) as f32,
-            (res.y - 1) as f32,
-            (res.z - 1) as f32,
-        );
+        let last = Vec3::new((res.x - 1) as f32, (res.y - 1) as f32, (res.z - 1) as f32);
         assert!((sdf.grid_to_world(Vec3::ZERO) - sdf.bounds_min()).length() < 1.0e-4);
         assert!((sdf.grid_to_world(last) - sdf.bounds_max()).length() < 1.0e-4);
     }

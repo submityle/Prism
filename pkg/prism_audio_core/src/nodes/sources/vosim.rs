@@ -230,7 +230,13 @@ impl VosimNode {
     #[must_use]
     pub fn from_params(params: VosimParams) -> Self {
         let p = params.sanitised();
-        Self::new(p.frequency_hz, p.formant_hz, p.pulse_count, p.decay, p.amplitude)
+        Self::new(
+            p.frequency_hz,
+            p.formant_hz,
+            p.pulse_count,
+            p.decay,
+            p.amplitude,
+        )
     }
 
     /// Sets the fundamental frequency in hertz (clamped to `[MIN, MAX]`).
@@ -510,7 +516,10 @@ mod tests {
         let high_out = render(&mut high, SR, 16_384);
         let upper_low = band_energy(&low_out, f0, 3_000.0, 20_000.0);
         let upper_high = band_energy(&high_out, f0, 3_000.0, 20_000.0);
-        assert!(upper_high > upper_low * 2.0, "low={upper_low} high={upper_high}");
+        assert!(
+            upper_high > upper_low * 2.0,
+            "low={upper_low} high={upper_high}"
+        );
     }
 
     #[test]
@@ -521,12 +530,15 @@ mod tests {
         let formant = 2_400.0;
         let mut node = VosimNode::new(f0, formant, 4, 0.0, 1.0);
         let out = render(&mut node, SR, 400); // one full period at 120 Hz
-        // Pulse width in samples: T = 1 / formant -> sr / formant samples.
+                                              // Pulse width in samples: T = 1 / formant -> sr / formant samples.
         let pulse_len = (SR as Sample / formant) as usize; // 20 samples
         let samples = out.channel(0);
         // Beyond the first pulse the output must be silent for this period.
         for (n, &s) in samples.iter().enumerate().skip(pulse_len + 2) {
-            assert!(s.abs() < 1e-4, "n={n} s={s} should be silent after one pulse");
+            assert!(
+                s.abs() < 1e-4,
+                "n={n} s={s} should be silent after one pulse"
+            );
         }
         // The first pulse carries energy.
         let first: Sample = samples[..pulse_len].iter().map(|s| s * s).sum();
@@ -575,7 +587,11 @@ mod tests {
         let out = render(&mut node, SR, 8_192);
         let s = out.channel(0);
         for n in 1..s.len() {
-            assert!((s[n] - s[n - 1]).abs() < 0.1, "n={n} jump={}", s[n] - s[n - 1]);
+            assert!(
+                (s[n] - s[n - 1]).abs() < 0.1,
+                "n={n} jump={}",
+                s[n] - s[n - 1]
+            );
         }
     }
 
@@ -675,7 +691,10 @@ mod tests {
         };
         let mut a = VosimNode::from_params(p);
         let mut b = VosimNode::new(140.0, 2_100.0, 4, 0.5, 0.7);
-        assert_eq!(render(&mut a, SR, 512).channel(0), render(&mut b, SR, 512).channel(0));
+        assert_eq!(
+            render(&mut a, SR, 512).channel(0),
+            render(&mut b, SR, 512).channel(0)
+        );
     }
 
     #[test]
@@ -689,15 +708,12 @@ mod tests {
 
     #[test]
     fn non_finite_inputs_fall_back() {
-        let node = VosimNode::new(
-            Sample::NAN,
-            Sample::INFINITY,
-            3,
-            Sample::NAN,
-            Sample::NAN,
-        );
+        let node = VosimNode::new(Sample::NAN, Sample::INFINITY, 3, Sample::NAN, Sample::NAN);
         assert_eq!(node.frequency_hz(), DEFAULT_FREQUENCY_HZ);
-        assert_eq!(node.formant_hz(), DEFAULT_FORMANT_HZ.clamp(MIN_FORMANT_HZ, MAX_FORMANT_HZ));
+        assert_eq!(
+            node.formant_hz(),
+            DEFAULT_FORMANT_HZ.clamp(MIN_FORMANT_HZ, MAX_FORMANT_HZ)
+        );
         assert_eq!(node.decay(), DEFAULT_DECAY);
         assert_eq!(node.amplitude(), DEFAULT_AMPLITUDE);
     }

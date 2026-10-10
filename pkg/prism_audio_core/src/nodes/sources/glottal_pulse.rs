@@ -513,7 +513,11 @@ mod tests {
         (re * re + im * im).sqrt()
     }
 
-    fn params(frequency_hz: Sample, open_quotient: Sample, speed_quotient: Sample) -> GlottalPulseParams {
+    fn params(
+        frequency_hz: Sample,
+        open_quotient: Sample,
+        speed_quotient: Sample,
+    ) -> GlottalPulseParams {
         GlottalPulseParams {
             frequency_hz,
             open_quotient,
@@ -529,16 +533,35 @@ mod tests {
         let out = render(&mut node, SR as usize);
         let p = peak(&out);
         assert!(p > 0.0 && p < 1.0, "expected a bounded, audible peak: {p}");
-        assert!(out.iter().all(|s| s.is_finite()), "all samples must be finite");
+        assert!(
+            out.iter().all(|s| s.is_finite()),
+            "all samples must be finite"
+        );
     }
 
     #[test]
     fn peak_grid_stays_below_full_scale() {
         // Worst-case headroom check across the shape grid at amplitude 1.
         let mut worst = 0.0_f32;
-        for &freq in &[MIN_FREQUENCY_HZ, 55.0, DEFAULT_FREQUENCY_HZ, 220.0, 440.0, MAX_FREQUENCY_HZ] {
-            for &oq in &[MIN_OPEN_QUOTIENT, 0.4, DEFAULT_OPEN_QUOTIENT, MAX_OPEN_QUOTIENT] {
-                for &sq in &[MIN_SPEED_QUOTIENT, DEFAULT_SPEED_QUOTIENT, MAX_SPEED_QUOTIENT] {
+        for &freq in &[
+            MIN_FREQUENCY_HZ,
+            55.0,
+            DEFAULT_FREQUENCY_HZ,
+            220.0,
+            440.0,
+            MAX_FREQUENCY_HZ,
+        ] {
+            for &oq in &[
+                MIN_OPEN_QUOTIENT,
+                0.4,
+                DEFAULT_OPEN_QUOTIENT,
+                MAX_OPEN_QUOTIENT,
+            ] {
+                for &sq in &[
+                    MIN_SPEED_QUOTIENT,
+                    DEFAULT_SPEED_QUOTIENT,
+                    MAX_SPEED_QUOTIENT,
+                ] {
                     for &output in &[GlottalOutput::FlowDerivative, GlottalOutput::Flow] {
                         let mut p = params(freq, oq, sq);
                         p.output = output;
@@ -549,14 +572,21 @@ mod tests {
                 }
             }
         }
-        assert!(worst < 1.0, "grid peak should stay below full scale: {worst}");
+        assert!(
+            worst < 1.0,
+            "grid peak should stay below full scale: {worst}"
+        );
         assert!(worst > 0.4, "grid peak should use the headroom: {worst}");
     }
 
     #[test]
     fn flow_mode_is_unipolar() {
         // Raw glottal flow is a volume velocity: it never goes negative.
-        let mut p = params(DEFAULT_FREQUENCY_HZ, DEFAULT_OPEN_QUOTIENT, DEFAULT_SPEED_QUOTIENT);
+        let mut p = params(
+            DEFAULT_FREQUENCY_HZ,
+            DEFAULT_OPEN_QUOTIENT,
+            DEFAULT_SPEED_QUOTIENT,
+        );
         p.output = GlottalOutput::Flow;
         let mut node = GlottalPulseNode::new(SR, p);
         let out = render(&mut node, SR as usize);
@@ -575,7 +605,10 @@ mod tests {
         let out = render(&mut node, SR as usize);
         let mean = (out.iter().map(|&s| s as f64).sum::<f64>() / out.len() as f64).abs();
         let p = peak(&out) as f64;
-        assert!(mean < 0.02 * p, "derivative mean {mean} should be << peak {p}");
+        assert!(
+            mean < 0.02 * p,
+            "derivative mean {mean} should be << peak {p}"
+        );
         // And it genuinely swings both ways.
         assert!(out.iter().any(|&s| s > 0.0) && out.iter().any(|&s| s < 0.0));
     }
@@ -594,7 +627,10 @@ mod tests {
         };
         let dull = brightness(MIN_SPEED_QUOTIENT);
         let sharp = brightness(MAX_SPEED_QUOTIENT);
-        assert!(sharp > dull, "larger speed quotient should be brighter: {sharp} vs {dull}");
+        assert!(
+            sharp > dull,
+            "larger speed quotient should be brighter: {sharp} vs {dull}"
+        );
     }
 
     #[test]
@@ -608,28 +644,43 @@ mod tests {
         let tight = harmonic(MIN_OPEN_QUOTIENT);
         let wide = harmonic(MAX_OPEN_QUOTIENT);
         let rel = (tight - wide).abs() / tight.max(wide).max(1e-9);
-        assert!(rel > 0.05, "open quotient should reshape the spectrum: {tight} vs {wide}");
+        assert!(
+            rel > 0.05,
+            "open quotient should reshape the spectrum: {tight} vs {wide}"
+        );
     }
 
     #[test]
     fn fundamental_present() {
         let f0 = DEFAULT_FREQUENCY_HZ;
-        let mut node = GlottalPulseNode::new(SR, params(f0, DEFAULT_OPEN_QUOTIENT, DEFAULT_SPEED_QUOTIENT));
+        let mut node = GlottalPulseNode::new(
+            SR,
+            params(f0, DEFAULT_OPEN_QUOTIENT, DEFAULT_SPEED_QUOTIENT),
+        );
         let out = render(&mut node, SR as usize);
         let fund = goertzel(&out, f0);
         let off = goertzel(&out, f0 * 1.5);
-        assert!(fund > off * 4.0, "fundamental {fund} should dominate off-harmonic {off}");
+        assert!(
+            fund > off * 4.0,
+            "fundamental {fund} should dominate off-harmonic {off}"
+        );
     }
 
     #[test]
     fn frequency_change_shifts_spectrum() {
-        let mut node = GlottalPulseNode::new(SR, params(120.0, DEFAULT_OPEN_QUOTIENT, DEFAULT_SPEED_QUOTIENT));
+        let mut node = GlottalPulseNode::new(
+            SR,
+            params(120.0, DEFAULT_OPEN_QUOTIENT, DEFAULT_SPEED_QUOTIENT),
+        );
         let _ = render(&mut node, SR as usize);
         node.set_frequency(240.0, Ramp::Immediate);
         let out = render(&mut node, SR as usize);
         let old = goertzel(&out, 120.0);
         let new = goertzel(&out, 240.0);
-        assert!(new > old, "spectrum should follow the new fundamental: {new} vs {old}");
+        assert!(
+            new > old,
+            "spectrum should follow the new fundamental: {new} vs {old}"
+        );
     }
 
     #[test]
@@ -656,7 +707,10 @@ mod tests {
         };
         let mut node = GlottalPulseNode::new(SR, p);
         let out = render(&mut node, 2048);
-        assert!(out.iter().all(|&s| s == 0.0), "zero amplitude must be silent");
+        assert!(
+            out.iter().all(|&s| s == 0.0),
+            "zero amplitude must be silent"
+        );
     }
 
     #[test]
@@ -678,7 +732,10 @@ mod tests {
             energy(&render(&mut node, SR as usize))
         };
         let ratio = loud / quiet.max(1e-12);
-        assert!((ratio - 4.0).abs() < 0.05, "doubling amplitude should quadruple energy: {ratio}");
+        assert!(
+            (ratio - 4.0).abs() < 0.05,
+            "doubling amplitude should quadruple energy: {ratio}"
+        );
     }
 
     #[test]
@@ -687,7 +744,10 @@ mod tests {
         let chans = render_layout(&mut node, 2048, ChannelLayout::Quad);
         assert_eq!(chans.len(), 4);
         for ch in 1..chans.len() {
-            assert_eq!(chans[0], chans[ch], "every channel should mirror the mono core");
+            assert_eq!(
+                chans[0], chans[ch],
+                "every channel should mirror the mono core"
+            );
         }
     }
 
@@ -770,19 +830,29 @@ mod tests {
         node.set_output(GlottalOutput::Flow);
         assert_eq!(node.output(), GlottalOutput::Flow);
         let out = render(&mut node, SR as usize);
-        assert!(out.iter().all(|&s| s >= -1e-6), "flow output must be unipolar");
+        assert!(
+            out.iter().all(|&s| s >= -1e-6),
+            "flow output must be unipolar"
+        );
     }
 
     #[test]
     fn muted_above_nyquist_guard() {
         // A low sample rate pushes the tunable fundamental past the guard.
         let low_sr = 2_000;
-        let mut node = GlottalPulseNode::new(low_sr, params(990.0, DEFAULT_OPEN_QUOTIENT, DEFAULT_SPEED_QUOTIENT));
+        let mut node = GlottalPulseNode::new(
+            low_sr,
+            params(990.0, DEFAULT_OPEN_QUOTIENT, DEFAULT_SPEED_QUOTIENT),
+        );
         let inputs: [AudioBuffer; 0] = [];
         let mut out = AudioBuffer::new(ChannelLayout::Mono, 1024);
         out.set_active_frames(1024);
         let mut outputs = [out];
-        let ctx = RenderContext { sample_rate: low_sr, frames: 1024, playhead: 0 };
+        let ctx = RenderContext {
+            sample_rate: low_sr,
+            frames: 1024,
+            playhead: 0,
+        };
         let mut io = ProcessIo::new(&inputs, &mut outputs);
         node.process(&ctx, &mut io);
         assert!(

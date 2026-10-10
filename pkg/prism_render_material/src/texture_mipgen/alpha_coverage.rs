@@ -147,7 +147,10 @@ mod tests {
         let mut s = 0.0f32;
         while s <= 8.0 {
             let c = alpha_test_coverage(&g, 128, s);
-            assert!(c + 1e-6 >= prev, "coverage dropped at scale {s}: {c} < {prev}");
+            assert!(
+                c + 1e-6 >= prev,
+                "coverage dropped at scale {s}: {c} < {prev}"
+            );
             prev = c;
             s += 0.25;
         }
@@ -155,7 +158,11 @@ mod tests {
 
     #[test]
     fn scale_one_is_identity() {
-        let src = img(2, 2, vec![[1, 2, 3, 40], [4, 5, 6, 200], [7, 8, 9, 0], [1, 1, 1, 255]]);
+        let src = img(
+            2,
+            2,
+            vec![[1, 2, 3, 40], [4, 5, 6, 200], [7, 8, 9, 0], [1, 1, 1, 255]],
+        );
         let out = apply_alpha_scale(&src, 1.0);
         assert_eq!(out.as_slice(), src.as_slice());
     }
@@ -184,7 +191,10 @@ mod tests {
         for &target in &[0.25f32, 0.5, 0.75] {
             let scale = solve_alpha_scale(&g, 128, target);
             let got = alpha_test_coverage(&g, 128, scale);
-            assert!((got - target).abs() <= gran + 1e-6, "target {target}: got {got}");
+            assert!(
+                (got - target).abs() <= gran + 1e-6,
+                "target {target}: got {got}"
+            );
         }
     }
 

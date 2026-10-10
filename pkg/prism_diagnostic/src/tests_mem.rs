@@ -83,9 +83,9 @@ fn mem_budget_evaluate_all_aggregates_and_reports_offenders() {
 
     let measured = |cat: &str| -> u64 {
         match cat {
-            "assets" => 1_200,   // over by 200
-            "render" => 1_500,   // within
-            "gameplay" => 900,   // over by 400
+            "assets" => 1_200, // over by 200
+            "render" => 1_500, // within
+            "gameplay" => 900, // over by 400
             _ => 0,
         }
     };

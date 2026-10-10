@@ -62,8 +62,16 @@ fn subdivide_once(mesh: &TriangleMesh) -> Result<TriangleMesh, TriangleMeshError
     let has_uvs = mesh.has_uvs();
 
     let mut positions = mesh.positions().to_vec();
-    let mut normals = if has_normals { mesh.normals().to_vec() } else { Vec::new() };
-    let mut uvs = if has_uvs { mesh.uvs().to_vec() } else { Vec::new() };
+    let mut normals = if has_normals {
+        mesh.normals().to_vec()
+    } else {
+        Vec::new()
+    };
+    let mut uvs = if has_uvs {
+        mesh.uvs().to_vec()
+    } else {
+        Vec::new()
+    };
     let mut indices: Vec<[u32; 3]> = Vec::with_capacity(mesh.indices().len() * 4);
 
     // Shared edge-midpoint cache keyed by the sorted endpoint index pair.
@@ -74,9 +82,36 @@ fn subdivide_once(mesh: &TriangleMesh) -> Result<TriangleMesh, TriangleMeshError
         let b = tri[1];
         let c = tri[2];
         // Midpoints of edges AB, BC, CA (shared with the neighbour across each).
-        let ab = edge_midpoint(a, b, &mut positions, &mut normals, &mut uvs, &mut midpoints, has_normals, has_uvs);
-        let bc = edge_midpoint(b, c, &mut positions, &mut normals, &mut uvs, &mut midpoints, has_normals, has_uvs);
-        let ca = edge_midpoint(c, a, &mut positions, &mut normals, &mut uvs, &mut midpoints, has_normals, has_uvs);
+        let ab = edge_midpoint(
+            a,
+            b,
+            &mut positions,
+            &mut normals,
+            &mut uvs,
+            &mut midpoints,
+            has_normals,
+            has_uvs,
+        );
+        let bc = edge_midpoint(
+            b,
+            c,
+            &mut positions,
+            &mut normals,
+            &mut uvs,
+            &mut midpoints,
+            has_normals,
+            has_uvs,
+        );
+        let ca = edge_midpoint(
+            c,
+            a,
+            &mut positions,
+            &mut normals,
+            &mut uvs,
+            &mut midpoints,
+            has_normals,
+            has_uvs,
+        );
         // Four children: three corners plus the central triangle. Winding is
         // preserved so front faces stay front faces.
         indices.push([a, ab, ca]);
@@ -128,7 +163,11 @@ fn edge_midpoint(
 
 /// Component-wise midpoint of two 3-vectors.
 fn midpoint3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2])]
+    [
+        0.5 * (a[0] + b[0]),
+        0.5 * (a[1] + b[1]),
+        0.5 * (a[2] + b[2]),
+    ]
 }
 
 /// Normalizes `v`, returning `fallback` when `v` is too short to normalize.
@@ -196,7 +235,11 @@ mod tests {
         // CD,DA) = 9 vertices; 2 triangles become 8.
         let out = subdivide(&quad(), 1).expect("subdivide");
         assert_eq!(out.triangle_count(), 8);
-        assert_eq!(out.vertex_count(), 9, "shared diagonal midpoint must be reused");
+        assert_eq!(
+            out.vertex_count(),
+            9,
+            "shared diagonal midpoint must be reused"
+        );
     }
 
     #[test]
@@ -240,7 +283,10 @@ mod tests {
         let out = subdivide(&mesh, 1).expect("subdivide");
         assert!(out.has_uvs());
         // Midpoint of UV (0,0)-(1,0) must be (0.5, 0).
-        assert!(out.uvs().iter().any(|uv| (uv[0] - 0.5).abs() < 1e-6 && uv[1].abs() < 1e-6));
+        assert!(out
+            .uvs()
+            .iter()
+            .any(|uv| (uv[0] - 0.5).abs() < 1e-6 && uv[1].abs() < 1e-6));
     }
 
     #[test]

@@ -15,9 +15,7 @@
 //! source or derived code.
 
 use glam::Vec3;
-use prism_physics_gpu::{
-    cpu_build_lbvh, cpu_refit_lbvh, Aabb, GpuBvhRefit, GpuContext, GpuLbvh,
-};
+use prism_physics_gpu::{cpu_build_lbvh, cpu_refit_lbvh, Aabb, GpuBvhRefit, GpuContext, GpuLbvh};
 
 /// A small xorshift generator so the tests are deterministic.
 struct Rng {
@@ -92,7 +90,6 @@ fn run_refit_parity(ctx: &GpuContext, original: &[Aabb], moved: &[Aabb]) {
         assert_eq!(g.min, c.min, "re-refit node {i} min");
         assert_eq!(g.max, c.max, "re-refit node {i} max");
     }
-
 }
 
 #[test]
@@ -168,6 +165,10 @@ fn refit_trivial_tree_is_noop() {
 
     // One-leaf tree has no internal nodes; refit is a no-op and reads back empty.
     let tree = builder.build_resident(&ctx, &[Aabb::new(Vec3::ZERO, Vec3::ONE)]);
-    refitter.refit(&ctx, &tree, &[Aabb::new(Vec3::splat(4.0), Vec3::splat(5.0))]);
+    refitter.refit(
+        &ctx,
+        &tree,
+        &[Aabb::new(Vec3::splat(4.0), Vec3::splat(5.0))],
+    );
     assert!(refitter.read_internal_aabb(&ctx, &tree).is_empty());
 }

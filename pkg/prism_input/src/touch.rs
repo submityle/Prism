@@ -7,7 +7,7 @@
 //! folds them into queryable per-point state with begin/end edges, mirroring
 //! the `ButtonInput` edge model but keyed by touch id and carrying position.
 
-use alloc::collections::{BTreeMap, BTreeSet, btree_map};
+use alloc::collections::{btree_map, BTreeMap, BTreeSet};
 
 /// The lifecycle stage a [`TouchInput`] event reports for one contact point.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

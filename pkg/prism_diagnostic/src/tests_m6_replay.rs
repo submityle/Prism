@@ -1,6 +1,6 @@
 //! M6 tests for deterministic replay markers.
 
-use crate::replay::{ReplayDivergence, ReplayMarker, ReplayTimeline, compare_timelines, fnv1a_64};
+use crate::replay::{compare_timelines, fnv1a_64, ReplayDivergence, ReplayMarker, ReplayTimeline};
 
 fn timeline(entries: &[(u64, &'static str, u64)]) -> ReplayTimeline {
     let mut t = ReplayTimeline::new();

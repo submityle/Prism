@@ -34,8 +34,14 @@
 //!
 //! Reliably detecting an attached display without a window backend is a
 //! platform-specific operation that properly belongs to `prism_window` (absent
-#![cfg_attr(feature = "std", doc = "today). Rather than pretend otherwise, [`Capabilities::detect`] uses a")]
-#![cfg_attr(not(feature = "std"), doc = "today). Rather than pretend otherwise, `Capabilities::detect` uses a")]
+#![cfg_attr(
+    feature = "std",
+    doc = "today). Rather than pretend otherwise, [`Capabilities::detect`] uses a"
+)]
+#![cfg_attr(
+    not(feature = "std"),
+    doc = "today). Rather than pretend otherwise, `Capabilities::detect` uses a"
+)]
 //! conservative, documented heuristic (environment-variable probe on X11 /
 //! Wayland, an assume-present default on Windows / macOS, always present on
 //! mobile) and honors an explicit `PRISM_HEADLESS` override. Callers that know
@@ -47,8 +53,14 @@
 /// Observable hardware / environment facts the engine scales against
 /// (design §3 `capability`).
 ///
-#[cfg_attr(feature = "std", doc = "Produced by [`detect`](Capabilities::detect) at runtime (std) or by the")]
-#[cfg_attr(not(feature = "std"), doc = "Produced by `detect` at runtime (std) or by the")]
+#[cfg_attr(
+    feature = "std",
+    doc = "Produced by [`detect`](Capabilities::detect) at runtime (std) or by the"
+)]
+#[cfg_attr(
+    not(feature = "std"),
+    doc = "Produced by `detect` at runtime (std) or by the"
+)]
 /// conservative [`headless`](Capabilities::headless) constant (no-std / tests).
 /// Stored as a main-world resource by [`App::new`](crate::App::new); read it to
 /// gate assembly on real hardware facts rather than compile-time guesses.
@@ -74,8 +86,14 @@ pub struct Capabilities {
     /// Whether a high-resolution monotonic timer is available (design §3
     /// "是否支持高精度计时器").
     ///
-    #[cfg_attr(feature = "std", doc = "Measured by [`probe_timer_resolution`](Capabilities::probe_timer_resolution) on std; a frame pacer (§13) needs this to be `true` to pace reliably.")]
-    #[cfg_attr(not(feature = "std"), doc = "Measured by `probe_timer_resolution` on std; a frame pacer (§13) needs this to be `true` to pace reliably.")]
+    #[cfg_attr(
+        feature = "std",
+        doc = "Measured by [`probe_timer_resolution`](Capabilities::probe_timer_resolution) on std; a frame pacer (§13) needs this to be `true` to pace reliably."
+    )]
+    #[cfg_attr(
+        not(feature = "std"),
+        doc = "Measured by `probe_timer_resolution` on std; a frame pacer (§13) needs this to be `true` to pace reliably."
+    )]
     pub high_resolution_timer: bool,
 }
 
@@ -111,7 +129,8 @@ impl Capabilities {
             logical_cores,
             has_display: Self::probe_display(),
             is_mobile: cfg!(any(target_os = "android", target_os = "ios")),
-            high_resolution_timer: Self::probe_timer_resolution() <= core::time::Duration::from_micros(1),
+            high_resolution_timer: Self::probe_timer_resolution()
+                <= core::time::Duration::from_micros(1),
         }
     }
 
@@ -195,8 +214,14 @@ impl Capabilities {
 }
 
 impl Default for Capabilities {
-    #[cfg_attr(feature = "std", doc = "The real [`detect`](Capabilities::detect) probe on std, the conservative")]
-    #[cfg_attr(not(feature = "std"), doc = "The real `detect` probe on std, the conservative")]
+    #[cfg_attr(
+        feature = "std",
+        doc = "The real [`detect`](Capabilities::detect) probe on std, the conservative"
+    )]
+    #[cfg_attr(
+        not(feature = "std"),
+        doc = "The real `detect` probe on std, the conservative"
+    )]
     /// [`headless`](Capabilities::headless) constant otherwise.
     fn default() -> Self {
         #[cfg(feature = "std")]

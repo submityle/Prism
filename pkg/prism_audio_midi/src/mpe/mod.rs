@@ -25,4 +25,4 @@ pub mod allocator;
 pub mod zone;
 
 pub use allocator::MpeAllocator;
-pub use zone::{CHANNELS_PER_PORT, MpeZone, ZoneKind};
+pub use zone::{MpeZone, ZoneKind, CHANNELS_PER_PORT};

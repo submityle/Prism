@@ -45,7 +45,9 @@ const STEP_NANOS: u64 = 8_333_333;
 #[inline]
 fn jitter_nanos(state: &mut u64) -> u64 {
     // Numerical Recipes LCG constants.
-    *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
     // Map the high bits into [STEP/2, STEP*3/2].
     let span = STEP_NANOS; // width of the jitter window
     let frac = (*state >> 40) % (span + 1); // 0..=span
@@ -95,7 +97,10 @@ fn main() {
     // delta sequence must reproduce the exact same tick count and a
     // byte-identical serialized snapshot.
     let (clock_b, ticks_b) = run_clock(SEED);
-    assert_eq!(ticks_a, ticks_b, "tick count diverged across identical runs");
+    assert_eq!(
+        ticks_a, ticks_b,
+        "tick count diverged across identical runs"
+    );
     assert_eq!(
         clock_a.snapshot().to_bytes(),
         clock_b.snapshot().to_bytes(),
@@ -110,14 +115,20 @@ fn main() {
         "tick total {ticks_a} outside the expected jitter band for {FRAMES} frames"
     );
     let alpha = clock_a.overstep_fraction_f64();
-    assert!((0.0..1.0).contains(&alpha), "overstep fraction {alpha} not in [0, 1)");
+    assert!(
+        (0.0..1.0).contains(&alpha),
+        "overstep fraction {alpha} not in [0, 1)"
+    );
 
     let frames_per_s = FRAMES as f64 / secs;
     let ns_per_frame = secs * 1e9 / FRAMES as f64;
 
     println!("prism_time fixed_step_determinism (deterministic fixed-step)");
     println!("  frames/pass   : {FRAMES}");
-    println!("  timestep      : {STEP_NANOS} ns  (~{:.1} Hz)", 1e9 / STEP_NANOS as f64);
+    println!(
+        "  timestep      : {STEP_NANOS} ns  (~{:.1} Hz)",
+        1e9 / STEP_NANOS as f64
+    );
     println!("  wall time     : {:.3} ms", secs * 1e3);
     println!("  throughput    : {frames_per_s:.3e} frames/s  ({ns_per_frame:.2} ns/frame)");
     println!("  ticks drained : {ticks_a}  (final alpha {alpha:.4}, bit-identical re-run)");

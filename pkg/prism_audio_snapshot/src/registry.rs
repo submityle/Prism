@@ -13,8 +13,8 @@
 //! resolving blends and by [`crate::mixer::SnapshotMixer`] when starting a
 //! transition.
 
-use alloc::collections::BTreeMap;
 use alloc::collections::btree_map::Keys;
+use alloc::collections::BTreeMap;
 
 use crate::snapshot::{Snapshot, SnapshotId};
 
@@ -30,7 +30,9 @@ impl SnapshotRegistry {
     /// Creates an empty registry.
     #[must_use]
     pub fn new() -> Self {
-        Self { snapshots: BTreeMap::new() }
+        Self {
+            snapshots: BTreeMap::new(),
+        }
     }
 
     /// Registers (or replaces) a snapshot under its own id, returning any

@@ -19,8 +19,8 @@
 
 use crate::kinds::VariantType;
 use crate::reflect::Reflect;
-use crate::ser::de::{Schema, resolve, root_schema};
-use crate::ser::encode::{Encoder, serialize_value};
+use crate::ser::de::{resolve, root_schema, Schema};
+use crate::ser::encode::{serialize_value, Encoder};
 use crate::ser::error::{DeserializeError, SerializeError};
 use crate::ser::primitive::Primitive;
 use crate::type_info::{TypeInfo, VariantKind};
@@ -51,13 +51,19 @@ struct RonEncoder {
 
 impl RonEncoder {
     fn new() -> Self {
-        Self { out: String::new(), stack: Vec::new() }
+        Self {
+            out: String::new(),
+            stack: Vec::new(),
+        }
     }
 
     /// Open a composite scope with the given opening delimiter.
     fn open(&mut self, delimiter: char) {
         self.out.push(delimiter);
-        self.stack.push(Frame { first: true, delimited: true });
+        self.stack.push(Frame {
+            first: true,
+            delimited: true,
+        });
     }
 
     /// Close the current composite scope with the given closing delimiter.
@@ -83,9 +89,8 @@ impl RonEncoder {
     /// Append a floating-point literal, forcing a fractional form for integers.
     fn push_float(&mut self, text: &str) {
         self.out.push_str(text);
-        let fractional = text.contains(['.', 'e', 'E'])
-            || text.contains("inf")
-            || text.contains("NaN");
+        let fractional =
+            text.contains(['.', 'e', 'E']) || text.contains("inf") || text.contains("NaN");
         if !fractional {
             self.out.push_str(".0");
         }
@@ -212,7 +217,10 @@ impl Encoder for RonEncoder {
         if matches!(variant_type, VariantType::Unit) {
             // A unit variant has no payload bracket; push a non-delimited frame
             // so the matching `end_enum` is still balanced.
-            self.stack.push(Frame { first: true, delimited: false });
+            self.stack.push(Frame {
+                first: true,
+                delimited: false,
+            });
         } else {
             self.open('(');
         }
@@ -325,7 +333,11 @@ struct RonParser<'a> {
 
 impl<'a> RonParser<'a> {
     fn new(text: &str, registry: &'a TypeRegistry) -> Self {
-        Self { chars: text.chars().collect(), pos: 0, registry }
+        Self {
+            chars: text.chars().collect(),
+            pos: 0,
+            registry,
+        }
     }
 
     /// Whether all input characters have been consumed.
@@ -499,8 +511,7 @@ impl<'a> RonParser<'a> {
                                     .find(|f| f.name() == name)
                                     .ok_or(DeserializeError::UnknownField(name.clone()))?;
                                 self.expect(':')?;
-                                let child_schema =
-                                    resolve(self.registry, field.type_name())?;
+                                let child_schema = resolve(self.registry, field.type_name())?;
                                 let child = self.parse_value(&child_schema)?;
                                 values.push((field.name(), child));
                                 if !self.consume_list_separator(')')? {

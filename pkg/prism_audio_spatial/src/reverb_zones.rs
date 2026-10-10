@@ -61,9 +61,9 @@
 //! game-audio routing concepts (game-defined auxiliary sends, submix sends,
 //! and snapshot-style reverb regions).
 
-use prism_audio_core::math::{MIN_AUDIBLE_GAIN, Sample};
+use prism_audio_core::math::{Sample, MIN_AUDIBLE_GAIN};
 
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 
 /// Identifier of an auxiliary return bus (a reverb or effect return in the
 /// mixer graph). Opaque; the mixer owns the mapping to an actual bus.
@@ -434,7 +434,10 @@ mod tests {
     fn resolve_single_zone() {
         let zones = [ReverbZone::sphere_zone(bus(7), Vec3::ZERO, 5.0, 0.8, 2.0)];
         let field = ReverbZoneField::new(&zones);
-        let mut out = [AuxSend { bus: bus(0), level: 0.0 }; MAX_AUX_SENDS];
+        let mut out = [AuxSend {
+            bus: bus(0),
+            level: 0.0,
+        }; MAX_AUX_SENDS];
         let n = field.resolve(Vec3::ZERO, &mut out);
         assert_eq!(n, 1);
         assert_eq!(out[0].bus, bus(7));
@@ -445,7 +448,10 @@ mod tests {
     fn resolve_outside_all_zones_is_empty() {
         let zones = [ReverbZone::sphere_zone(bus(7), Vec3::ZERO, 1.0, 0.8, 1.0)];
         let field = ReverbZoneField::new(&zones);
-        let mut out = [AuxSend { bus: bus(0), level: 0.0 }; MAX_AUX_SENDS];
+        let mut out = [AuxSend {
+            bus: bus(0),
+            level: 0.0,
+        }; MAX_AUX_SENDS];
         assert_eq!(field.resolve(Vec3::new(50.0, 0.0, 0.0), &mut out), 0);
     }
 
@@ -456,7 +462,10 @@ mod tests {
             ReverbZone::sphere_zone(bus(3), Vec3::ZERO, 10.0, 0.9, 1.0),
         ];
         let field = ReverbZoneField::new(&zones);
-        let mut out = [AuxSend { bus: bus(0), level: 0.0 }; MAX_AUX_SENDS];
+        let mut out = [AuxSend {
+            bus: bus(0),
+            level: 0.0,
+        }; MAX_AUX_SENDS];
         let n = field.resolve(Vec3::ZERO, &mut out);
         assert_eq!(n, 1);
         assert_eq!(out[0].bus, bus(3));
@@ -470,7 +479,10 @@ mod tests {
             ReverbZone::sphere_zone(bus(2), Vec3::ZERO, 10.0, 0.7, 1.0),
         ];
         let field = ReverbZoneField::new(&zones);
-        let mut out = [AuxSend { bus: bus(0), level: 0.0 }; MAX_AUX_SENDS];
+        let mut out = [AuxSend {
+            bus: bus(0),
+            level: 0.0,
+        }; MAX_AUX_SENDS];
         let n = field.resolve(Vec3::ZERO, &mut out);
         assert_eq!(n, 2);
         let mut buses = [out[0].bus, out[1].bus];
@@ -490,7 +502,10 @@ mod tests {
             ReverbZone::sphere_zone(bus(5), Vec3::ZERO, 10.0, 0.5, 1.0),
         ];
         let field = ReverbZoneField::new(&zones);
-        let mut out = [AuxSend { bus: bus(0), level: 0.0 }; MAX_AUX_SENDS];
+        let mut out = [AuxSend {
+            bus: bus(0),
+            level: 0.0,
+        }; MAX_AUX_SENDS];
         let n = field.resolve(Vec3::ZERO, &mut out);
         assert_eq!(n, MAX_AUX_SENDS);
         // Bus 1 (level 0.1) must have been dropped.

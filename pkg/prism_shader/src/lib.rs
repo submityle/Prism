@@ -43,19 +43,19 @@ pub mod preprocess;
 
 pub use compose::{ComposeError, ShaderComposer};
 pub use def::{ShaderDefValue, ShaderDefs};
-pub use expr::{ExprError, evaluate};
+pub use expr::{evaluate, ExprError};
 pub use module::ShaderModule;
 pub use permutation::PermutationId;
-pub use preprocess::{PreprocessError, preprocess};
+pub use preprocess::{preprocess, PreprocessError};
 
 /// The crate's most common exports, for a single glob import.
 pub mod prelude {
     pub use crate::compose::{ComposeError, ShaderComposer};
     pub use crate::def::{ShaderDefValue, ShaderDefs};
-    pub use crate::expr::{ExprError, evaluate};
+    pub use crate::expr::{evaluate, ExprError};
     pub use crate::module::ShaderModule;
     pub use crate::permutation::PermutationId;
-    pub use crate::preprocess::{PreprocessError, preprocess};
+    pub use crate::preprocess::{preprocess, PreprocessError};
 }
 
 #[cfg(test)]

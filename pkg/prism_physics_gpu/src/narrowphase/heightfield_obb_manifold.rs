@@ -107,10 +107,8 @@ fn manifold_peak_depth(manifold: &ContactManifold) -> f32 {
 fn obb_xz_footprint(obb: &Obb) -> XzAabb {
     let he = obb.half_extents;
     let ax = obb.axes;
-    let span_x =
-        he.x * ax[0].x.abs() + he.y * ax[1].x.abs() + he.z * ax[2].x.abs();
-    let span_z =
-        he.x * ax[0].z.abs() + he.y * ax[1].z.abs() + he.z * ax[2].z.abs();
+    let span_x = he.x * ax[0].x.abs() + he.y * ax[1].x.abs() + he.z * ax[2].x.abs();
+    let span_z = he.x * ax[0].z.abs() + he.y * ax[1].z.abs() + he.z * ax[2].z.abs();
     XzAabb {
         min_x: obb.center.x - span_x,
         max_x: obb.center.x + span_x,
@@ -222,7 +220,13 @@ mod tests {
     /// A flat `rows x cols` field at `y = 0` with unit spacing, origin at the
     /// world origin.
     fn flat_field(rows: u32, cols: u32) -> Heightfield {
-        Heightfield::new(rows, cols, 1.0, Vec3::ZERO, vec![0.0; (rows * cols) as usize])
+        Heightfield::new(
+            rows,
+            cols,
+            1.0,
+            Vec3::ZERO,
+            vec![0.0; (rows * cols) as usize],
+        )
     }
 
     /// An axis-aligned box at `center` with half extents `he`.
@@ -242,7 +246,11 @@ mod tests {
             .expect("box resting on terrain must contact");
         assert_eq!(m.a, 0);
         assert_eq!(m.b, 0);
-        assert!((m.normal - Vec3::Y).length() < 1.0e-5, "normal {:?}", m.normal);
+        assert!(
+            (m.normal - Vec3::Y).length() < 1.0e-5,
+            "normal {:?}",
+            m.normal
+        );
         assert_eq!(m.count, 4, "a flat box should rest on four corners");
         for point in m.points.iter().take(m.count as usize) {
             assert!((point.depth - 0.1).abs() < 1.0e-5, "depth {}", point.depth);
@@ -282,9 +290,20 @@ mod tests {
         let pairs = [HeightfieldObbPair::new(0, 0)];
         let m = cpu_obb_heightfield_manifold(&boxes, &[field], &pairs)[0]
             .expect("box on the incline must contact");
-        assert!((m.normal.length() - 1.0).abs() < 1.0e-5, "normal must be unit");
-        assert!(m.normal.dot(Vec3::Y) > 0.0, "terrain normal points up: {:?}", m.normal);
-        assert!((1..=4).contains(&m.count), "count in range, got {}", m.count);
+        assert!(
+            (m.normal.length() - 1.0).abs() < 1.0e-5,
+            "normal must be unit"
+        );
+        assert!(
+            m.normal.dot(Vec3::Y) > 0.0,
+            "terrain normal points up: {:?}",
+            m.normal
+        );
+        assert!(
+            (1..=4).contains(&m.count),
+            "count in range, got {}",
+            m.count
+        );
     }
 
     #[test]
@@ -295,10 +314,7 @@ mod tests {
             axis_box(Vec3::new(1.0, 0.4, 1.0), Vec3::splat(0.5)),
             axis_box(Vec3::new(50.0, 0.4, 50.0), Vec3::splat(0.5)),
         ];
-        let pairs = [
-            HeightfieldObbPair::new(0, 0),
-            HeightfieldObbPair::new(1, 0),
-        ];
+        let pairs = [HeightfieldObbPair::new(0, 0), HeightfieldObbPair::new(1, 0)];
         let out = cpu_obb_heightfield_manifold(&boxes, &[field], &pairs);
         assert!(out[0].is_some(), "first box contacts");
         assert!(out[1].is_none(), "second box misses");

@@ -154,12 +154,16 @@ pub fn mass_properties(mesh: &TriangleMesh) -> MeshMassProperties {
     }
 
     let watertight = !mesh.indices().is_empty()
-        && directed.iter().all(|(&(u, v), &count)| {
-            count == 1 && directed.get(&(v, u)).copied() == Some(1)
-        });
+        && directed
+            .iter()
+            .all(|(&(u, v), &count)| count == 1 && directed.get(&(v, u)).copied() == Some(1));
 
     let centroid = if volume.abs() > 0.0 {
-        [moment1[0] / volume, moment1[1] / volume, moment1[2] / volume]
+        [
+            moment1[0] / volume,
+            moment1[1] / volume,
+            moment1[2] / volume,
+        ]
     } else {
         [0.0; 3]
     };
@@ -222,12 +226,7 @@ fn determinant(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
 
 /// Returns `det * A * Ccanon * A^T`, the tetrahedron's second-moment
 /// contribution, where `A` has columns `a`, `b`, `c`.
-fn covariance_contribution(
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
-    det: f64,
-) -> [[f64; 3]; 3] {
+fn covariance_contribution(a: [f64; 3], b: [f64; 3], c: [f64; 3], det: f64) -> [[f64; 3]; 3] {
     // Columns of A.
     let col = [a, b, c];
     // First compute Ccanon * A^T, a 3x3 matrix whose (k, j) entry is
@@ -297,8 +296,15 @@ mod tests {
         let m = mass_properties(&axis_box(1.0, 1.0, 1.0));
         assert!(m.is_watertight());
         assert!((m.volume() - 1.0).abs() < 1e-9, "vol {}", m.volume());
-        assert!(m.signed_volume() > 0.0, "outward winding should be positive");
-        assert!((m.surface_area() - 6.0).abs() < 1e-9, "area {}", m.surface_area());
+        assert!(
+            m.signed_volume() > 0.0,
+            "outward winding should be positive"
+        );
+        assert!(
+            (m.surface_area() - 6.0).abs() < 1e-9,
+            "area {}",
+            m.surface_area()
+        );
         for (i, &axis) in m.centroid().iter().enumerate() {
             assert!((axis - 0.5).abs() < 1e-9, "centroid[{i}] = {axis}");
         }
@@ -309,7 +315,11 @@ mod tests {
         let m = mass_properties(&axis_box(1.0, 1.0, 1.0));
         let i = m.inertia_about_centroid();
         for (axis, row) in i.iter().enumerate() {
-            assert!((row[axis] - 1.0 / 6.0).abs() < 1e-9, "I[{axis}] = {}", row[axis]);
+            assert!(
+                (row[axis] - 1.0 / 6.0).abs() < 1e-9,
+                "I[{axis}] = {}",
+                row[axis]
+            );
         }
         // Off-diagonal products of inertia vanish for a centred box.
         assert!(i[0][1].abs() < 1e-9 && i[0][2].abs() < 1e-9 && i[1][2].abs() < 1e-9);
@@ -335,7 +345,11 @@ mod tests {
     fn surface_area_scales_with_face_sizes() {
         let m = mass_properties(&axis_box(2.0, 1.0, 1.0));
         // Faces: 2*(2*1) + 2*(2*1) + 2*(1*1) = 4 + 4 + 2 = 10.
-        assert!((m.surface_area() - 10.0).abs() < 1e-9, "area {}", m.surface_area());
+        assert!(
+            (m.surface_area() - 10.0).abs() < 1e-9,
+            "area {}",
+            m.surface_area()
+        );
     }
 
     #[test]
@@ -375,8 +389,7 @@ mod tests {
     #[test]
     fn inverted_winding_flips_volume_sign() {
         let base = axis_box(1.0, 1.0, 1.0);
-        let flipped: Vec<[u32; 3]> =
-            base.indices().iter().map(|t| [t[0], t[2], t[1]]).collect();
+        let flipped: Vec<[u32; 3]> = base.indices().iter().map(|t| [t[0], t[2], t[1]]).collect();
         let m = mass_properties(
             &TriangleMesh::new(base.positions().to_vec(), Vec::new(), Vec::new(), flipped)
                 .expect("valid flipped box"),

@@ -82,9 +82,7 @@ impl MeshTopology {
     /// Returns whether the surface is a closed manifold: no boundary edges and
     /// no non-manifold edges, with at least one face.
     pub fn is_closed_manifold(&self) -> bool {
-        self.face_count > 0
-            && self.boundary_edge_count == 0
-            && self.nonmanifold_edge_count == 0
+        self.face_count > 0 && self.boundary_edge_count == 0 && self.nonmanifold_edge_count == 0
     }
 
     /// Returns the genus (handle count) for a single closed orientable manifold
@@ -106,7 +104,11 @@ impl MeshTopology {
 
 /// Orders two vertex indices into a canonical `(min, max)` undirected key.
 fn sorted_pair(a: u32, b: u32) -> (u32, u32) {
-    if a <= b { (a, b) } else { (b, a) }
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 /// Minimal union-find over `u32` keys for grouping boundary vertices and faces.
@@ -118,7 +120,9 @@ struct UnionFind {
 impl UnionFind {
     /// Creates a forest of `n` singletons.
     fn new(n: usize) -> Self {
-        Self { parent: (0..n).collect() }
+        Self {
+            parent: (0..n).collect(),
+        }
     }
 
     /// Returns the representative root of `x`, with path halving.
@@ -223,7 +227,10 @@ fn count_components(indices: &[[u32; 3]], edge_faces: &HashMap<(u32, u32), usize
         HashMap::with_capacity(edge_faces.len());
     for (face_index, tri) in indices.iter().enumerate() {
         for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
-            edge_to_faces.entry(sorted_pair(a, b)).or_default().push(face_index);
+            edge_to_faces
+                .entry(sorted_pair(a, b))
+                .or_default()
+                .push(face_index);
         }
     }
     let mut uf = UnionFind::new(face_count);
@@ -275,12 +282,18 @@ mod tests {
             Vec::new(),
             Vec::new(),
             vec![
-                [0, 2, 1], [0, 3, 2],
-                [4, 5, 6], [4, 6, 7],
-                [0, 1, 5], [0, 5, 4],
-                [2, 3, 7], [2, 7, 6],
-                [1, 2, 6], [1, 6, 5],
-                [0, 4, 7], [0, 7, 3],
+                [0, 2, 1],
+                [0, 3, 2],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [2, 3, 7],
+                [2, 7, 6],
+                [1, 2, 6],
+                [1, 6, 5],
+                [0, 4, 7],
+                [0, 7, 3],
             ],
         )
         .expect("valid box")
@@ -296,7 +309,10 @@ mod tests {
         )
         .expect("valid triangle");
         let t = mesh_topology(&mesh);
-        assert_eq!((t.vertex_count(), t.edge_count(), t.face_count()), (3, 3, 1));
+        assert_eq!(
+            (t.vertex_count(), t.edge_count(), t.face_count()),
+            (3, 3, 1)
+        );
         assert_eq!(t.euler_characteristic(), 1);
         assert_eq!(t.boundary_edge_count(), 3);
         assert_eq!(t.boundary_loop_count(), 1);
@@ -308,7 +324,10 @@ mod tests {
     #[test]
     fn tetrahedron_is_genus_zero_sphere() {
         let t = mesh_topology(&tetrahedron());
-        assert_eq!((t.vertex_count(), t.edge_count(), t.face_count()), (4, 6, 4));
+        assert_eq!(
+            (t.vertex_count(), t.edge_count(), t.face_count()),
+            (4, 6, 4)
+        );
         assert_eq!(t.euler_characteristic(), 2);
         assert_eq!(t.boundary_edge_count(), 0);
         assert_eq!(t.boundary_loop_count(), 0);
@@ -320,7 +339,10 @@ mod tests {
     #[test]
     fn box_is_genus_zero_sphere() {
         let t = mesh_topology(&unit_box());
-        assert_eq!((t.vertex_count(), t.edge_count(), t.face_count()), (8, 18, 12));
+        assert_eq!(
+            (t.vertex_count(), t.edge_count(), t.face_count()),
+            (8, 18, 12)
+        );
         assert_eq!(t.euler_characteristic(), 2);
         assert!(t.is_closed_manifold());
         assert_eq!(t.component_count(), 1);
@@ -330,14 +352,22 @@ mod tests {
     #[test]
     fn open_quad_has_one_boundary_loop() {
         let mesh = TriangleMesh::new(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
             Vec::new(),
             Vec::new(),
             vec![[0, 1, 2], [0, 2, 3]],
         )
         .expect("valid quad");
         let t = mesh_topology(&mesh);
-        assert_eq!((t.vertex_count(), t.edge_count(), t.face_count()), (4, 5, 2));
+        assert_eq!(
+            (t.vertex_count(), t.edge_count(), t.face_count()),
+            (4, 5, 2)
+        );
         assert_eq!(t.euler_characteristic(), 1);
         assert_eq!(t.boundary_loop_count(), 1);
         assert_eq!(t.boundary_edge_count(), 4);
@@ -348,8 +378,12 @@ mod tests {
     fn two_disjoint_triangles_have_two_components_and_loops() {
         let mesh = TriangleMesh::new(
             vec![
-                [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
-                [5.0, 0.0, 0.0], [6.0, 0.0, 0.0], [5.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [5.0, 0.0, 0.0],
+                [6.0, 0.0, 0.0],
+                [5.0, 1.0, 0.0],
             ],
             Vec::new(),
             Vec::new(),
@@ -367,8 +401,11 @@ mod tests {
     fn nonmanifold_fan_is_flagged() {
         let mesh = TriangleMesh::new(
             vec![
-                [0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
-                [0.5, 1.0, 0.0], [0.5, -1.0, 0.0], [0.5, 0.0, 1.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.5, 1.0, 0.0],
+                [0.5, -1.0, 0.0],
+                [0.5, 0.0, 1.0],
             ],
             Vec::new(),
             Vec::new(),
@@ -386,13 +423,8 @@ mod tests {
         // Unit box minus its two bottom triangles: a 10-triangle open shell.
         let full = unit_box();
         let kept: Vec<[u32; 3]> = full.indices()[2..].to_vec();
-        let mesh = TriangleMesh::new(
-            full.positions().to_vec(),
-            Vec::new(),
-            Vec::new(),
-            kept,
-        )
-        .expect("valid open box");
+        let mesh = TriangleMesh::new(full.positions().to_vec(), Vec::new(), Vec::new(), kept)
+            .expect("valid open box");
         let t = mesh_topology(&mesh);
         assert_eq!(t.face_count(), 10);
         assert_eq!(t.boundary_loop_count(), 1);
@@ -441,7 +473,10 @@ mod tests {
         // Four positions, but the triangle uses only three.
         let mesh = TriangleMesh::new(
             vec![
-                [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [9.0, 9.0, 9.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [9.0, 9.0, 9.0],
             ],
             Vec::new(),
             Vec::new(),

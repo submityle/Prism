@@ -196,7 +196,12 @@ impl GpuTemperature {
 
 /// Records a 1D batch dispatch covering `n` elements at [`WORKGROUP`] threads
 /// per group.
-fn dispatch(enc: &mut CommandEncoder, pipeline: &ComputePipeline, bind_group: &BindGroup, n: usize) {
+fn dispatch(
+    enc: &mut CommandEncoder,
+    pipeline: &ComputePipeline,
+    bind_group: &BindGroup,
+    n: usize,
+) {
     let groups = (n as u32).div_ceil(WORKGROUP);
     let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
         label: Some("prism_math_temperature_pass"),

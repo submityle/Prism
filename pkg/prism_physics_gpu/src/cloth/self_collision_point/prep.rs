@@ -189,8 +189,7 @@ pub fn build(
         vert_offsets.push(u32::try_from(vert_entries.len()).unwrap_or(u32::MAX));
     }
 
-    let positions_packed: Vec<[f32; 4]> =
-        positions.iter().map(|p| [p.x, p.y, p.z, 0.0]).collect();
+    let positions_packed: Vec<[f32; 4]> = positions.iter().map(|p| [p.x, p.y, p.z, 0.0]).collect();
     let prev_packed: Vec<[f32; 4]> = (0..count)
         .map(|i| {
             let p = prev_positions.get(i).copied().unwrap_or(positions[i]);

@@ -189,7 +189,11 @@ fn sanitize_vec2(v: Vec2) -> Vec2 {
 
 /// Replaces any non-finite component of a `Vec3` with `0`.
 fn sanitize_vec3(v: Vec3) -> Vec3 {
-    Vec3::new(finite_or_zero(v.x), finite_or_zero(v.y), finite_or_zero(v.z))
+    Vec3::new(
+        finite_or_zero(v.x),
+        finite_or_zero(v.y),
+        finite_or_zero(v.z),
+    )
 }
 
 /// Returns `x` when finite, otherwise `0`.
@@ -225,13 +229,23 @@ mod tests {
     #[test]
     fn flat_surface_is_fully_lit() {
         // Nothing rises above the climbing ray on a flat field.
-        let s = self_shadow(Vec2::new(0.3, 0.3), light_from_angle(40.0), SelfShadowConfig::DEFAULT, flat(0.5));
+        let s = self_shadow(
+            Vec2::new(0.3, 0.3),
+            light_from_angle(40.0),
+            SelfShadowConfig::DEFAULT,
+            flat(0.5),
+        );
         assert!((s - 1.0).abs() < 1e-6, "expected full light, got {}", s);
     }
 
     #[test]
     fn point_on_ceiling_is_fully_lit() {
-        let s = self_shadow(Vec2::new(0.5, 0.5), light_from_angle(30.0), SelfShadowConfig::DEFAULT, flat(1.0));
+        let s = self_shadow(
+            Vec2::new(0.5, 0.5),
+            light_from_angle(30.0),
+            SelfShadowConfig::DEFAULT,
+            flat(1.0),
+        );
         assert!((s - 1.0).abs() < 1e-6, "got {}", s);
     }
 
@@ -259,18 +273,41 @@ mod tests {
         let steep = f(20.0);
         let mid = f(45.0);
         let grazing = f(70.0);
-        assert!(grazing <= mid, "grazing {} should be <= mid {}", grazing, mid);
+        assert!(
+            grazing <= mid,
+            "grazing {} should be <= mid {}",
+            grazing,
+            mid
+        );
         assert!(mid <= steep, "mid {} should be <= steep {}", mid, steep);
-        assert!(grazing < steep, "expected a real difference: {} vs {}", grazing, steep);
+        assert!(
+            grazing < steep,
+            "expected a real difference: {} vs {}",
+            grazing,
+            steep
+        );
     }
 
     #[test]
     fn light_below_horizon_is_fully_shadowed() {
         let below = Vec3::new(1.0, 0.0, -0.2);
-        let s = self_shadow(Vec2::new(0.4, 0.5), below, SelfShadowConfig::DEFAULT, wall(0.5, 0.0));
+        let s = self_shadow(
+            Vec2::new(0.4, 0.5),
+            below,
+            SelfShadowConfig::DEFAULT,
+            wall(0.5, 0.0),
+        );
         assert_eq!(s, 0.0);
         let flat_light = Vec3::new(1.0, 0.0, 0.0);
-        assert_eq!(self_shadow(Vec2::new(0.4, 0.5), flat_light, SelfShadowConfig::DEFAULT, wall(0.5, 0.0)), 0.0);
+        assert_eq!(
+            self_shadow(
+                Vec2::new(0.4, 0.5),
+                flat_light,
+                SelfShadowConfig::DEFAULT,
+                wall(0.5, 0.0)
+            ),
+            0.0
+        );
     }
 
     #[test]
@@ -283,7 +320,13 @@ mod tests {
                     SelfShadowConfig::DEFAULT,
                     wall(0.5, floor),
                 );
-                assert!(s.is_finite() && (0.0..=1.0).contains(&s), "deg {} floor {} -> {}", deg, floor, s);
+                assert!(
+                    s.is_finite() && (0.0..=1.0).contains(&s),
+                    "deg {} floor {} -> {}",
+                    deg,
+                    floor,
+                    s
+                );
             }
         }
     }
@@ -302,8 +345,18 @@ mod tests {
     #[test]
     fn results_are_deterministic() {
         let l = light_from_angle(50.0);
-        let a = self_shadow(Vec2::new(0.42, 0.5), l, SelfShadowConfig::DEFAULT, wall(0.5, 0.1));
-        let b = self_shadow(Vec2::new(0.42, 0.5), l, SelfShadowConfig::DEFAULT, wall(0.5, 0.1));
+        let a = self_shadow(
+            Vec2::new(0.42, 0.5),
+            l,
+            SelfShadowConfig::DEFAULT,
+            wall(0.5, 0.1),
+        );
+        let b = self_shadow(
+            Vec2::new(0.42, 0.5),
+            l,
+            SelfShadowConfig::DEFAULT,
+            wall(0.5, 0.1),
+        );
         assert_eq!(a, b);
     }
 }

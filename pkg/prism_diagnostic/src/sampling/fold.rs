@@ -116,8 +116,9 @@ impl FlatProfile {
         if self.total_samples == 0 {
             return 0.0;
         }
-        self.get(frame)
-            .map_or(0.0, |row| row.self_samples as f64 / self.total_samples as f64)
+        self.get(frame).map_or(0.0, |row| {
+            row.self_samples as f64 / self.total_samples as f64
+        })
     }
 }
 
@@ -340,8 +341,7 @@ pub fn call_tree(
             nodes[child].inclusive_samples =
                 nodes[child].inclusive_samples.saturating_add(sample.weight);
             if depth == last {
-                nodes[child].self_samples =
-                    nodes[child].self_samples.saturating_add(sample.weight);
+                nodes[child].self_samples = nodes[child].self_samples.saturating_add(sample.weight);
             }
             current = child;
         }

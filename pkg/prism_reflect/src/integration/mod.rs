@@ -13,10 +13,10 @@ pub mod replication;
 pub mod scene;
 pub mod script;
 
-pub use inspector::{InspectorHints, InspectorKind, InspectorNode, inspect};
+pub use inspector::{inspect, InspectorHints, InspectorKind, InspectorNode};
 pub use replication::{
-    NO_REPLICATE_KEY, REPLICATE_KEY, ReplicationError, ReplicationPlan, ReplicationPolicy,
-    apply_replicated, replicated_diff,
+    apply_replicated, replicated_diff, ReplicationError, ReplicationPlan, ReplicationPolicy,
+    NO_REPLICATE_KEY, REPLICATE_KEY,
 };
 pub use scene::{DynamicScene, SceneEntry, SceneError};
 pub use script::{ScriptBridge, ScriptError};

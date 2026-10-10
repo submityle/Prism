@@ -305,20 +305,20 @@ pub use bitcrusher::{BitcrusherNode, BitcrusherParams, MAX_BIT_DEPTH, MIN_BIT_DE
 pub use chebyshev_shaper::{ChebyshevShaperNode, ChebyshevShaperParams, MAX_HARMONICS};
 pub use chorus::{ChorusNode, ChorusParams};
 pub use clipper::{
-    ClipperMode, ClipperNode, ClipperParams, DEFAULT_CLIPPER_CEILING_DB, DEFAULT_CLIPPER_KNEE,
-    MAX_CLIPPER_GAIN_DB, clip_sample,
+    clip_sample, ClipperMode, ClipperNode, ClipperParams, DEFAULT_CLIPPER_CEILING_DB,
+    DEFAULT_CLIPPER_KNEE, MAX_CLIPPER_GAIN_DB,
 };
 pub use comb_filter::{CombFilterNode, CombFilterParams};
 pub use comb_resonator::{CombResonatorNode, CombResonatorParams, MAX_FEEDBACK, MIN_FREQUENCY_HZ};
 pub use dc_blocker::{
-    DEFAULT_DC_BLOCKER_CUTOFF_HZ, DcBlockerNode, DcBlockerParams, MAX_DC_BLOCKER_CUTOFF_HZ,
+    DcBlockerNode, DcBlockerParams, DEFAULT_DC_BLOCKER_CUTOFF_HZ, MAX_DC_BLOCKER_CUTOFF_HZ,
     MIN_DC_BLOCKER_CUTOFF_HZ,
 };
 pub use delay::DelayNode;
 pub use diode_clipper::{DiodeClipper, DiodeClipperNode, DiodeClipperParams};
 pub use envelope_follower::{
-    DEFAULT_ENVELOPE_ATTACK_MS, DEFAULT_ENVELOPE_RELEASE_MS, DEFAULT_ENVELOPE_RMS_WINDOW_MS,
-    EnvelopeFollowerNode, EnvelopeFollowerParams, MAX_ENVELOPE_TIME_MS,
+    EnvelopeFollowerNode, EnvelopeFollowerParams, DEFAULT_ENVELOPE_ATTACK_MS,
+    DEFAULT_ENVELOPE_RELEASE_MS, DEFAULT_ENVELOPE_RMS_WINDOW_MS, MAX_ENVELOPE_TIME_MS,
 };
 pub use exciter::{Exciter, ExciterNode, ExciterParams, HarmonicMode};
 pub use flanger::{FlangerNode, FlangerParams};
@@ -327,50 +327,50 @@ pub use formant_filter::{
 };
 pub use frequency_shifter::{FrequencyShifterNode, FrequencyShifterParams};
 pub use granular::{
-    DEFAULT_CAPTURE_SECONDS, DEFAULT_SEED, GranularNode, GranularParams, MAX_DENSITY_HZ,
-    MAX_GRAIN_MS, MAX_GRAINS, MAX_SPREAD, MIN_DENSITY_HZ, MIN_GRAIN_MS,
+    GranularNode, GranularParams, DEFAULT_CAPTURE_SECONDS, DEFAULT_SEED, MAX_DENSITY_HZ,
+    MAX_GRAINS, MAX_GRAIN_MS, MAX_SPREAD, MIN_DENSITY_HZ, MIN_GRAIN_MS,
 };
 pub use graphic_eq::{GraphicEqNode, GraphicEqSpacing};
 pub use haas_widener::{HaasWidenerNode, HaasWidenerParams};
 pub use ladder_filter::{
-    DEFAULT_CUTOFF_HZ, DEFAULT_DRIVE, DEFAULT_RESONANCE, LadderFilterNode, LadderFilterParams,
-    LadderSlope, MAX_CUTOFF_HZ, MAX_DRIVE, MAX_RESONANCE_K, MIN_CUTOFF_HZ, MIN_DRIVE, NYQUIST_GUARD,
+    LadderFilterNode, LadderFilterParams, LadderSlope, DEFAULT_CUTOFF_HZ, DEFAULT_DRIVE,
+    DEFAULT_RESONANCE, MAX_CUTOFF_HZ, MAX_DRIVE, MAX_RESONANCE_K, MIN_CUTOFF_HZ, MIN_DRIVE,
+    NYQUIST_GUARD,
 };
 pub use leslie::{
-    DEFAULT_CROSSOVER_HZ, DRUM_ACCEL_SECONDS, DRUM_DECEL_SECONDS, DRUM_FAST_HZ, DRUM_SLOW_HZ,
-    HORN_ACCEL_SECONDS, HORN_DECEL_SECONDS, HORN_FAST_HZ, HORN_SLOW_HZ, LeslieNode, LeslieParams,
-    LeslieSpeed, MAX_AM_DEPTH, MAX_DOPPLER_DEPTH,
+    LeslieNode, LeslieParams, LeslieSpeed, DEFAULT_CROSSOVER_HZ, DRUM_ACCEL_SECONDS,
+    DRUM_DECEL_SECONDS, DRUM_FAST_HZ, DRUM_SLOW_HZ, HORN_ACCEL_SECONDS, HORN_DECEL_SECONDS,
+    HORN_FAST_HZ, HORN_SLOW_HZ, MAX_AM_DEPTH, MAX_DOPPLER_DEPTH,
 };
 pub use mid_side_matrix::{MidSideMatrixNode, MidSideMatrixParams, MidSideMode};
 pub use modal_resonator::{
-    DEFAULT_MODAL_MIX, MAX_DECAY_S, MAX_MODES, MAX_MODE_Q, MIN_MODE_Q, ModalMode,
-    ModalResonatorNode, ModalResonatorParams,
+    ModalMode, ModalResonatorNode, ModalResonatorParams, DEFAULT_MODAL_MIX, MAX_DECAY_S, MAX_MODES,
+    MAX_MODE_Q, MIN_MODE_Q,
 };
-pub use multi_tap_delay::{MAX_TAPS, MultiTapDelayNode, MultiTapDelayParams, TapSpec};
+pub use multi_tap_delay::{MultiTapDelayNode, MultiTapDelayParams, TapSpec, MAX_TAPS};
 pub use octave_divider::{OctaveDividerNode, OctaveDividerParams};
 pub use parametric_eq::{EqBand, ParametricEqNode};
 pub use phaser::{PhaserNode, PhaserParams};
 pub use ping_pong_delay::{
-    DEFAULT_LEFT_DELAY_MS, DEFAULT_PING_PONG_DAMPING, DEFAULT_PING_PONG_FEEDBACK,
-    DEFAULT_PING_PONG_MIX, DEFAULT_RIGHT_DELAY_MS, MAX_PING_PONG_DELAY_MS,
-    MAX_PING_PONG_FEEDBACK, PingPongDelayNode, PingPongDelayParams,
+    PingPongDelayNode, PingPongDelayParams, DEFAULT_LEFT_DELAY_MS, DEFAULT_PING_PONG_DAMPING,
+    DEFAULT_PING_PONG_FEEDBACK, DEFAULT_PING_PONG_MIX, DEFAULT_RIGHT_DELAY_MS,
+    MAX_PING_PONG_DELAY_MS, MAX_PING_PONG_FEEDBACK,
 };
 pub use pitch_delay::{
-    DEFAULT_PITCH_DELAY_FEEDBACK, DEFAULT_PITCH_DELAY_MIX, DEFAULT_PITCH_DELAY_MS,
-    DEFAULT_PITCH_DELAY_SEMITONES, MAX_PITCH_DELAY_FEEDBACK, MAX_PITCH_DELAY_MS,
-    MAX_PITCH_DELAY_SEMITONES, MIN_PITCH_DELAY_MS, PITCH_DELAY_FFT_SIZE, PitchDelayNode,
-    PitchDelayParams,
+    PitchDelayNode, PitchDelayParams, DEFAULT_PITCH_DELAY_FEEDBACK, DEFAULT_PITCH_DELAY_MIX,
+    DEFAULT_PITCH_DELAY_MS, DEFAULT_PITCH_DELAY_SEMITONES, MAX_PITCH_DELAY_FEEDBACK,
+    MAX_PITCH_DELAY_MS, MAX_PITCH_DELAY_SEMITONES, MIN_PITCH_DELAY_MS, PITCH_DELAY_FFT_SIZE,
 };
 pub use pitch_shifter::{
-    MAX_PITCH_RATIO, MIN_PITCH_RATIO, PitchShifterNode, PitchShifterParams, semitones_to_ratio,
+    semitones_to_ratio, PitchShifterNode, PitchShifterParams, MAX_PITCH_RATIO, MIN_PITCH_RATIO,
 };
 pub use reverse_delay::{
-    DEFAULT_REVERSE_FEEDBACK, DEFAULT_REVERSE_MIX, DEFAULT_REVERSE_SEGMENT_MS,
-    MAX_REVERSE_FEEDBACK, MAX_REVERSE_SEGMENT_MS, MIN_REVERSE_SEGMENT_MS,
-    ReverseDelayNode, ReverseDelayParams,
+    ReverseDelayNode, ReverseDelayParams, DEFAULT_REVERSE_FEEDBACK, DEFAULT_REVERSE_MIX,
+    DEFAULT_REVERSE_SEGMENT_MS, MAX_REVERSE_FEEDBACK, MAX_REVERSE_SEGMENT_MS,
+    MIN_REVERSE_SEGMENT_MS,
 };
 pub use ring_modulator::{RingModulatorNode, RingModulatorParams};
-pub use saturation::{DEFAULT_DC_BLOCK_COEFF, SaturationCurve, SaturationNode, SaturationParams};
+pub use saturation::{SaturationCurve, SaturationNode, SaturationParams, DEFAULT_DC_BLOCK_COEFF};
 pub use slew_limiter::{SlewLimiterNode, SlewLimiterParams};
 pub use spectral_compressor::{
     SpectralCompressorNode, SpectralCompressorParams, COMPRESSOR_OVERLAP_FACTOR,
@@ -381,24 +381,23 @@ pub use spectral_compressor::{
     MAX_COMPRESSOR_TIME_MS, MIN_COMPRESSOR_FFT_SIZE, MIN_COMPRESSOR_THRESHOLD_DB,
 };
 pub use spectral_delay::{
-    DEFAULT_FEEDBACK, DEFAULT_HIGH_DELAY_MS, DEFAULT_LOW_DELAY_MS, DEFAULT_MIX,
-    DEFAULT_SPECTRAL_DELAY_FFT_SIZE, MAX_DELAY_MS, MAX_SPECTRAL_DELAY_FEEDBACK,
-    MIN_SPECTRAL_DELAY_FFT_SIZE, SPECTRAL_DELAY_OVERLAP_FACTOR, SpectralDelayNode,
-    SpectralDelayParams,
+    SpectralDelayNode, SpectralDelayParams, DEFAULT_FEEDBACK, DEFAULT_HIGH_DELAY_MS,
+    DEFAULT_LOW_DELAY_MS, DEFAULT_MIX, DEFAULT_SPECTRAL_DELAY_FFT_SIZE, MAX_DELAY_MS,
+    MAX_SPECTRAL_DELAY_FEEDBACK, MIN_SPECTRAL_DELAY_FFT_SIZE, SPECTRAL_DELAY_OVERLAP_FACTOR,
 };
 pub use spectral_freeze::{
-    FREEZE_RAMP_SECONDS, MAX_DIFFUSION, MIN_FREEZE_FFT_SIZE, SpectralFreezeNode,
-    SpectralFreezeParams,
+    SpectralFreezeNode, SpectralFreezeParams, FREEZE_RAMP_SECONDS, MAX_DIFFUSION,
+    MIN_FREEZE_FFT_SIZE,
 };
 pub use spectral_gate::{
-    DEFAULT_ATTACK_MS, DEFAULT_FFT_SIZE, DEFAULT_RELEASE_MS, DEFAULT_REDUCTION_DB,
-    DEFAULT_THRESHOLD_DB, MIN_FFT_SIZE, OVERLAP_FACTOR, SpectralGateNode, SpectralGateParams,
+    SpectralGateNode, SpectralGateParams, DEFAULT_ATTACK_MS, DEFAULT_FFT_SIZE,
+    DEFAULT_REDUCTION_DB, DEFAULT_RELEASE_MS, DEFAULT_THRESHOLD_DB, MIN_FFT_SIZE, OVERLAP_FACTOR,
 };
-pub use stereo_width::{MAX_WIDTH, StereoWidthNode, StereoWidthParams};
+pub use stereo_width::{StereoWidthNode, StereoWidthParams, MAX_WIDTH};
 pub use stutter::{
-    DEFAULT_STUTTER_FADE_MS, DEFAULT_STUTTER_MIX, DEFAULT_STUTTER_REPEATS,
-    DEFAULT_STUTTER_SLICE_MS, MAX_STUTTER_FADE_MS, MAX_STUTTER_REPEATS,
-    MAX_STUTTER_SLICE_MS, MIN_STUTTER_SLICE_MS, StutterNode, StutterParams,
+    StutterNode, StutterParams, DEFAULT_STUTTER_FADE_MS, DEFAULT_STUTTER_MIX,
+    DEFAULT_STUTTER_REPEATS, DEFAULT_STUTTER_SLICE_MS, MAX_STUTTER_FADE_MS, MAX_STUTTER_REPEATS,
+    MAX_STUTTER_SLICE_MS, MIN_STUTTER_SLICE_MS,
 };
 pub use tape::{Tape, TapeNode, TapeParams};
 pub use tilt_eq::{TiltEq, TiltEqNode, TiltEqParams};
@@ -407,7 +406,5 @@ pub use tremolo::{TremoloMode, TremoloNode, TremoloParams};
 pub use tube::{Tube, TubeNode, TubeParams};
 pub use vibrato::{VibratoNode, VibratoParams};
 pub use vocoder::{Vocoder, VocoderNode, VocoderParams};
-pub use wavefolder::{
-    FoldShape, Oversample as FolderOversample, WavefolderNode, WavefolderParams,
-};
+pub use wavefolder::{FoldShape, Oversample as FolderOversample, WavefolderNode, WavefolderParams};
 pub use waveshaper::{Oversample, WaveshaperNode};

@@ -128,7 +128,10 @@ mod tests {
         let near = offset_ray_origin([0.0, 0.0, 1.0], n)[2] - 1.0;
         let far = offset_ray_origin([0.0, 0.0, 65_536.0], n)[2] - 65_536.0;
         assert!(near > 0.0 && far > 0.0);
-        assert!(far > near, "far-field ULP step must exceed the near-field one");
+        assert!(
+            far > near,
+            "far-field ULP step must exceed the near-field one"
+        );
     }
 
     #[test]

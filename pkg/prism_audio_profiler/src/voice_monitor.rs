@@ -232,7 +232,11 @@ impl VoiceMonitor {
     pub fn silent_voices(&self, floor_db: Sample) -> Vec<(u64, SilenceReason)> {
         self.voices
             .iter()
-            .filter_map(|voice| voice.silence_reason(floor_db).map(|reason| (voice.id, reason)))
+            .filter_map(|voice| {
+                voice
+                    .silence_reason(floor_db)
+                    .map(|reason| (voice.id, reason))
+            })
             .collect()
     }
 }

@@ -41,7 +41,11 @@ pub const REFERENCE_IMPULSE: Sample = 4.0;
 #[inline]
 #[must_use]
 pub fn impulse_to_energy(impulse: Sample) -> Sample {
-    let x = if impulse.is_finite() { impulse.max(0.0) } else { 0.0 };
+    let x = if impulse.is_finite() {
+        impulse.max(0.0)
+    } else {
+        0.0
+    };
     ops::ln_1p(x / REFERENCE_IMPULSE)
 }
 
@@ -65,7 +69,11 @@ pub fn impulse_to_amplitude(impulse: Sample) -> Sample {
 #[inline]
 #[must_use]
 pub fn normal_tangential_brightness(normal: Sample, tangential: Sample) -> Sample {
-    let n = if normal.is_finite() { normal.max(0.0) } else { 0.0 };
+    let n = if normal.is_finite() {
+        normal.max(0.0)
+    } else {
+        0.0
+    };
     let t = if tangential.is_finite() {
         tangential.max(0.0)
     } else {

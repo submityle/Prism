@@ -110,8 +110,8 @@ impl FrameAllocator {
 impl Allocator for FrameAllocator {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         if layout.size() == 0 {
-            let ptr =
-                NonNull::new(core::ptr::without_provenance_mut(layout.align())).ok_or(AllocError)?;
+            let ptr = NonNull::new(core::ptr::without_provenance_mut(layout.align()))
+                .ok_or(AllocError)?;
             return Ok(NonNull::slice_from_raw_parts(ptr, 0));
         }
 
@@ -122,10 +122,7 @@ impl Allocator for FrameAllocator {
         // Align the *absolute* address of the next block so correctness does
         // not depend on the backing buffer's own alignment exceeding `align`.
         let current_addr = base_addr.checked_add(cursor).ok_or(AllocError)?;
-        let aligned_addr = current_addr
-            .checked_add(align - 1)
-            .ok_or(AllocError)?
-            & !(align - 1);
+        let aligned_addr = current_addr.checked_add(align - 1).ok_or(AllocError)? & !(align - 1);
         let padding = aligned_addr - current_addr;
 
         let new_cursor = cursor

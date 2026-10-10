@@ -76,7 +76,10 @@ fn device_matches_reference_over_many_workgroups() {
         assert_eq!(gpu.len(), interleaved.len());
         assert_eq!(gpu, cpu, "device de-interleave must equal the host oracle");
         // Anti-vacuous: a non-trivial permutation actually reorders the bytes.
-        assert_ne!(gpu, interleaved, "20-round transpose must permute the words");
+        assert_ne!(
+            gpu, interleaved,
+            "20-round transpose must permute the words"
+        );
     });
 }
 
@@ -133,9 +136,15 @@ fn device_deinterleave_feeds_golden_inflate() {
         deflated.truncate(compressed_size);
 
         let recovered = inflate(&deflated).expect("golden inflate must succeed");
-        assert_eq!(recovered, tile, "device-deinterleaved tile must inflate exactly");
+        assert_eq!(
+            recovered, tile,
+            "device-deinterleaved tile must inflate exactly"
+        );
 
         // Cross-check: the device de-interleave equals the host oracle here too.
-        assert_eq!(kernel.deinterleave(ctx, chunk), reference_deinterleave(chunk));
+        assert_eq!(
+            kernel.deinterleave(ctx, chunk),
+            reference_deinterleave(chunk)
+        );
     });
 }

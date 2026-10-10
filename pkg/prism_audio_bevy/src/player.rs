@@ -106,7 +106,11 @@ pub fn derive_emitter(player: &AudioPlayer, settings: &PlaybackSettings) -> Audi
 /// ([`voice`](AudioEmitter::voice), [`sent_importance`](AudioEmitter::sent_importance),
 /// [`playing`](AudioEmitter::playing), and
 /// [`stop_requested`](AudioEmitter::stop_requested)).
-pub fn apply_to_emitter(player: &AudioPlayer, settings: &PlaybackSettings, emitter: &mut AudioEmitter) {
+pub fn apply_to_emitter(
+    player: &AudioPlayer,
+    settings: &PlaybackSettings,
+    emitter: &mut AudioEmitter,
+) {
     emitter.group = player.group;
     emitter.priority = player.priority;
     emitter.importance = settings.effective_volume().to_linear();
@@ -142,7 +146,11 @@ mod tests {
         let player = AudioPlayer::new(VoiceGroup(3));
         let settings = PlaybackSettings::ONCE.with_volume(Volume::Linear(0.5));
         let emitter = derive_emitter(&player, &settings);
-        assert!(close(emitter.importance, 0.5), "importance was {}", emitter.importance);
+        assert!(
+            close(emitter.importance, 0.5),
+            "importance was {}",
+            emitter.importance
+        );
         assert_eq!(emitter.group, VoiceGroup(3));
     }
 
@@ -190,7 +198,11 @@ mod tests {
 
         assert!(close(emitter.importance, 0.25));
         assert_eq!(emitter.behavior, VirtualBehavior::ContinueVirtual);
-        assert_eq!(emitter.sent_importance, Some(0.9), "bookkeeping must survive");
+        assert_eq!(
+            emitter.sent_importance,
+            Some(0.9),
+            "bookkeeping must survive"
+        );
         assert!(emitter.playing);
     }
 

@@ -87,7 +87,10 @@ impl WeightedChild {
     /// Builds a child with unit weight.
     #[must_use]
     pub fn uniform(playable: Playable) -> Self {
-        Self { playable, weight: 1.0 }
+        Self {
+            playable,
+            weight: 1.0,
+        }
     }
 }
 
@@ -213,7 +216,10 @@ impl ContainerPick {
     /// Builds a pick at unity gain.
     #[must_use]
     pub fn unity(playable: Playable) -> Self {
-        Self { playable, gain_db: 0.0 }
+        Self {
+            playable,
+            gain_db: 0.0,
+        }
     }
 }
 
@@ -244,7 +250,12 @@ impl ContainerState {
     /// Creates a fresh state (cursor at the start, ascending, empty history).
     #[must_use]
     pub fn new() -> Self {
-        Self { cursor: 0, ascending: true, exhausted: false, history: Vec::new() }
+        Self {
+            cursor: 0,
+            ascending: true,
+            exhausted: false,
+            history: Vec::new(),
+        }
     }
 
     /// Resets the state to its initial condition.
@@ -306,7 +317,9 @@ impl ContainerKind {
                     out.push(layer.playable);
                 }
             }
-            Self::Switch { branches, default, .. } => {
+            Self::Switch {
+                branches, default, ..
+            } => {
                 for branch in branches {
                     out.push(branch.playable);
                 }
@@ -334,7 +347,11 @@ impl ContainerKind {
         out: &mut Vec<ContainerPick>,
     ) {
         match self {
-            Self::Random { children, mode, avoid_repeat } => {
+            Self::Random {
+                children,
+                mode,
+                avoid_repeat,
+            } => {
                 Self::resolve_random(children, *mode, *avoid_repeat, state, rng, out);
             }
             Self::Sequence { children, mode } => {
@@ -343,10 +360,16 @@ impl ContainerKind {
             Self::Blend { layers, .. } => {
                 Self::resolve_blend(layers, blend_position, out);
             }
-            Self::Switch { branches, default, .. } => {
+            Self::Switch {
+                branches, default, ..
+            } => {
                 Self::resolve_switch(branches, *default, active_switch, out);
             }
-            Self::Scatter { children, min_count, max_count } => {
+            Self::Scatter {
+                children,
+                min_count,
+                max_count,
+            } => {
                 Self::resolve_scatter(children, *min_count, *max_count, rng, out);
             }
         }
@@ -369,9 +392,7 @@ impl ContainerKind {
         }
         let index = match mode {
             RandomMode::Shuffle => Self::draw_shuffle(children.len(), state, rng),
-            RandomMode::Standard => {
-                Self::draw_weighted(children, avoid_repeat, state, rng)
-            }
+            RandomMode::Standard => Self::draw_weighted(children, avoid_repeat, state, rng),
         };
         out.push(ContainerPick::unity(children[index].playable));
     }
@@ -401,7 +422,11 @@ impl ContainerKind {
         // Candidate weight sum, excluding indices inside the no-repeat window.
         let mut total = 0.0f32;
         for (i, child) in children.iter().enumerate() {
-            let w = if child.weight > 0.0 { child.weight } else { 0.0 };
+            let w = if child.weight > 0.0 {
+                child.weight
+            } else {
+                0.0
+            };
             if !Self::in_recent(&state.history, window, i) {
                 total += w;
             }
@@ -413,7 +438,11 @@ impl ContainerKind {
                 if Self::in_recent(&state.history, window, i) {
                     continue;
                 }
-                let w = if child.weight > 0.0 { child.weight } else { 0.0 };
+                let w = if child.weight > 0.0 {
+                    child.weight
+                } else {
+                    0.0
+                };
                 if target < w {
                     chosen = i;
                     break;
@@ -495,7 +524,10 @@ impl ContainerKind {
             let gain_db = layer.gain_db.sample(pos);
             // Skip effectively-silent layers so the resolved stream stays lean.
             if gain_db > -120.0 {
-                out.push(ContainerPick { playable: layer.playable, gain_db });
+                out.push(ContainerPick {
+                    playable: layer.playable,
+                    gain_db,
+                });
             }
         }
     }
@@ -529,7 +561,11 @@ impl ContainerKind {
         }
         let lo = min_count.min(children.len()).max(1);
         let hi = max_count.min(children.len()).max(lo);
-        let count = if hi > lo { lo + rng.next_index(hi - lo + 1) } else { lo };
+        let count = if hi > lo {
+            lo + rng.next_index(hi - lo + 1)
+        } else {
+            lo
+        };
         // Partial Fisher-Yates over a scratch index list to pick `count`
         // distinct children without replacement.
         let mut indices: Vec<usize> = (0..children.len()).collect();
@@ -748,7 +784,10 @@ mod tests {
     #[test]
     fn collect_children_enumerates_full_static_subtree() {
         let random = ContainerKind::Random {
-            children: alloc::vec![WeightedChild::uniform(snd(1)), WeightedChild::uniform(snd(2))],
+            children: alloc::vec![
+                WeightedChild::uniform(snd(1)),
+                WeightedChild::uniform(snd(2))
+            ],
             mode: RandomMode::Standard,
             avoid_repeat: 0,
         };
@@ -775,7 +814,10 @@ mod tests {
         };
         assert_eq!(switch.switch_group(), Some(SwitchGroupId::new(5)));
         assert_eq!(switch.blend_rtpc(), None);
-        let blend = ContainerKind::Blend { rtpc: RtpcId::new(7), layers: Vec::new() };
+        let blend = ContainerKind::Blend {
+            rtpc: RtpcId::new(7),
+            layers: Vec::new(),
+        };
         assert_eq!(blend.blend_rtpc(), Some(RtpcId::new(7)));
         assert_eq!(blend.switch_group(), None);
     }

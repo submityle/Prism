@@ -33,7 +33,7 @@ use core::any::TypeId;
 use std::collections::HashMap;
 
 use crate::plugin::Plugin;
-use crate::plugin_graph::{Node, PluginGraphError, topological_order};
+use crate::plugin_graph::{topological_order, Node, PluginGraphError};
 use crate::run_mode::RunMode;
 
 /// One member of a [`PluginGroupBuilder`]: a boxed plugin plus whether it is

@@ -3,10 +3,10 @@
 use crate::reflect::{Reflect, Struct};
 use crate::type_info::{StructInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef};
-use core::any::Any;
 use alloc::boxed::Box;
-use std::sync::OnceLock;
 use alloc::vec::Vec;
+use core::any::Any;
+use std::sync::OnceLock;
 
 /// A named-field struct assembled at runtime without a concrete Rust type.
 ///
@@ -104,7 +104,9 @@ impl Reflect for DynamicStruct {
 
     fn type_info(&self) -> &'static TypeInfo {
         static CELL: OnceLock<TypeInfo> = OnceLock::new();
-        CELL.get_or_init(|| TypeInfo::Struct(StructInfo::new("prism_reflect::DynamicStruct", Vec::new())))
+        CELL.get_or_init(|| {
+            TypeInfo::Struct(StructInfo::new("prism_reflect::DynamicStruct", Vec::new()))
+        })
     }
 
     fn as_any(&self) -> &dyn Any {

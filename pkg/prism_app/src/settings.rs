@@ -57,8 +57,8 @@
 //! [`Event`]: prism_ecs::event::Event
 //! [`BTreeMap`]: std::collections::BTreeMap
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
 
 use prism_ecs::event::Event;
 use prism_ecs::resource::Resource;
@@ -371,7 +371,10 @@ impl Settings {
         let key = key.into();
         let value = value.into();
         let previous = self.get(&key).cloned();
-        self.layers.entry(key.clone()).or_default().insert(layer, value);
+        self.layers
+            .entry(key.clone())
+            .or_default()
+            .insert(layer, value);
         let current = self.get(&key).cloned();
         if previous == current {
             None

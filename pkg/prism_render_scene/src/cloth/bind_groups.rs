@@ -205,16 +205,9 @@ impl ClothPieceGpuBuffers {
 
         // The hash table and the per-particle `next` links are produced by the
         // build pass every frame, so they start zeroed rather than uploaded.
-        let hash_cells = zeroed_storage(
-            device,
-            "prism cloth hash cells",
-            plan.hash_cell_bytes(),
-        );
-        let particle_next = zeroed_storage(
-            device,
-            "prism cloth particle next",
-            plan.hash_next_bytes(),
-        );
+        let hash_cells = zeroed_storage(device, "prism cloth hash cells", plan.hash_cell_bytes());
+        let particle_next =
+            zeroed_storage(device, "prism cloth particle next", plan.hash_next_bytes());
         // The embed pass writes the skinned render vertices; the pool starts
         // zeroed and is fully overwritten on the first skinning dispatch.
         let render_positions = zeroed_storage(
@@ -281,15 +274,31 @@ impl ClothPieceGpuBuffers {
     /// solver reads the updated inputs against last frame's evolved state.
     pub(crate) fn write_dynamic(&self, queue: &RenderQueue, upload: &ClothPieceUpload<'_>) {
         queue.write_buffer(&self.sim_params, 0, bytemuck::bytes_of(&upload.sim_params));
-        queue.write_buffer(&self.body_params, 0, bytemuck::bytes_of(&upload.body_params));
-        queue.write_buffer(&self.self_params, 0, bytemuck::bytes_of(&upload.self_params));
+        queue.write_buffer(
+            &self.body_params,
+            0,
+            bytemuck::bytes_of(&upload.body_params),
+        );
+        queue.write_buffer(
+            &self.self_params,
+            0,
+            bytemuck::bytes_of(&upload.self_params),
+        );
         queue.write_buffer(
             &self.backstop_params,
             0,
             bytemuck::bytes_of(&upload.backstop_params),
         );
-        queue.write_buffer(&self.embed_params, 0, bytemuck::bytes_of(&upload.embed_params));
-        queue.write_buffer(&self.aero_params, 0, bytemuck::bytes_of(&upload.aero_params));
+        queue.write_buffer(
+            &self.embed_params,
+            0,
+            bytemuck::bytes_of(&upload.embed_params),
+        );
+        queue.write_buffer(
+            &self.aero_params,
+            0,
+            bytemuck::bytes_of(&upload.aero_params),
+        );
         // Colliders are kinematic inputs that track the animated body. Restream
         // them only when present: an empty list left the buffer as the single
         // zeroed placeholder, and the owning pass's collider count is zero so it

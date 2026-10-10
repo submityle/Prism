@@ -7,7 +7,7 @@
 //! test to avoid races on the shared statics.
 
 use crate::alloc_track::{
-    self, AllocSnapshot, TrackingAllocator, register_tag, snapshot, tag_report, tag_scope,
+    self, register_tag, snapshot, tag_report, tag_scope, AllocSnapshot, TrackingAllocator,
 };
 use core::alloc::{GlobalAlloc, Layout};
 use std::alloc::System;

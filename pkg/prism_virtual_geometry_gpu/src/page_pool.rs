@@ -91,7 +91,10 @@ impl core::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ResolveError::EntriesNotSorted { index } => {
-                write!(f, "resident entry table is not sorted ascending at index {index}")
+                write!(
+                    f,
+                    "resident entry table is not sorted ascending at index {index}"
+                )
             }
         }
     }

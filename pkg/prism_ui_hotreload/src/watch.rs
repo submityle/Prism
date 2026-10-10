@@ -66,10 +66,9 @@ impl ChangeKind {
     pub fn from_event_kind(kind: EventKind) -> Self {
         match kind {
             EventKind::Removed => ChangeKind::Removed,
-            EventKind::Created
-            | EventKind::Modified
-            | EventKind::Renamed
-            | EventKind::Other => ChangeKind::Upserted,
+            EventKind::Created | EventKind::Modified | EventKind::Renamed | EventKind::Other => {
+                ChangeKind::Upserted
+            }
         }
     }
 }
@@ -118,7 +117,9 @@ impl Coalescer {
     /// Creates an empty coalescer.
     #[must_use]
     pub fn new() -> Self {
-        Self { pending: Vec::new() }
+        Self {
+            pending: Vec::new(),
+        }
     }
 
     /// Returns `true` if no requests are currently buffered.
@@ -245,11 +246,7 @@ impl LoomWatcher {
     /// # Errors
     ///
     /// Returns a [`WatchError`] if the path cannot be watched.
-    pub fn watch_dir<P: AsRef<Path>>(
-        &mut self,
-        dir: P,
-        recursive: bool,
-    ) -> Result<(), WatchError> {
+    pub fn watch_dir<P: AsRef<Path>>(&mut self, dir: P, recursive: bool) -> Result<(), WatchError> {
         self.inner.watch(dir, recursive)
     }
 

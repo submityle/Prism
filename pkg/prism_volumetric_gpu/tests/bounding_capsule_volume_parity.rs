@@ -72,11 +72,7 @@ fn close(got: f32, want: f32) -> bool {
 
 /// Asserts one GPU result matches the oracle: the volume is continuous
 /// (tolerance); `valid` is discrete (exact).
-fn assert_result(
-    got: BoundingCapsuleVolumeResult,
-    want: BoundingCapsuleVolumeResult,
-    label: &str,
-) {
+fn assert_result(got: BoundingCapsuleVolumeResult, want: BoundingCapsuleVolumeResult, label: &str) {
     assert_eq!(got.valid, want.valid, "valid mismatch: {label}");
     assert!(
         close(got.volume, want.volume),

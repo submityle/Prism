@@ -35,7 +35,12 @@ impl Default for DQuat {
 
 impl DQuat {
     /// The identity rotation.
-    pub const IDENTITY: Self = Self { x: 0.0, y: 0.0, z: 0.0, w: 1.0 };
+    pub const IDENTITY: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        w: 1.0,
+    };
 
     /// Raw constructor from components.
     #[inline]
@@ -47,25 +52,45 @@ impl DQuat {
     pub fn from_axis_angle(axis: DVec3, angle: f64) -> Self {
         let (s, c) = mf::sin_cos(angle * 0.5);
         let a = axis * s;
-        Self { x: a.x, y: a.y, z: a.z, w: c }
+        Self {
+            x: a.x,
+            y: a.y,
+            z: a.z,
+            w: c,
+        }
     }
     /// Rotation about the X axis.
     #[inline]
     pub fn from_rotation_x(angle: f64) -> Self {
         let (s, c) = mf::sin_cos(angle * 0.5);
-        Self { x: s, y: 0.0, z: 0.0, w: c }
+        Self {
+            x: s,
+            y: 0.0,
+            z: 0.0,
+            w: c,
+        }
     }
     /// Rotation about the Y axis.
     #[inline]
     pub fn from_rotation_y(angle: f64) -> Self {
         let (s, c) = mf::sin_cos(angle * 0.5);
-        Self { x: 0.0, y: s, z: 0.0, w: c }
+        Self {
+            x: 0.0,
+            y: s,
+            z: 0.0,
+            w: c,
+        }
     }
     /// Rotation about the Z axis.
     #[inline]
     pub fn from_rotation_z(angle: f64) -> Self {
         let (s, c) = mf::sin_cos(angle * 0.5);
-        Self { x: 0.0, y: 0.0, z: s, w: c }
+        Self {
+            x: 0.0,
+            y: 0.0,
+            z: s,
+            w: c,
+        }
     }
     /// Dot product (treating the quaternion as a 4-vector).
     #[inline]
@@ -86,12 +111,22 @@ impl DQuat {
     #[inline]
     pub fn normalize(self) -> Self {
         let inv = 1.0 / self.length();
-        Self { x: self.x * inv, y: self.y * inv, z: self.z * inv, w: self.w * inv }
+        Self {
+            x: self.x * inv,
+            y: self.y * inv,
+            z: self.z * inv,
+            w: self.w * inv,
+        }
     }
     /// Conjugate (inverse for a unit quaternion).
     #[inline]
     pub fn conjugate(self) -> Self {
-        Self { x: -self.x, y: -self.y, z: -self.z, w: self.w }
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: self.w,
+        }
     }
     /// Inverse. For unit quaternions this equals [`DQuat::conjugate`].
     #[inline]
@@ -183,20 +218,40 @@ impl DQuat {
         let trace = m00 + m11 + m22;
         if trace > 0.0 {
             let s = mf::sqrt(trace + 1.0) * 2.0; // s = 4w
-            Self { w: 0.25 * s, x: (m21 - m12) / s, y: (m02 - m20) / s, z: (m10 - m01) / s }
-                .normalize()
+            Self {
+                w: 0.25 * s,
+                x: (m21 - m12) / s,
+                y: (m02 - m20) / s,
+                z: (m10 - m01) / s,
+            }
+            .normalize()
         } else if m00 > m11 && m00 > m22 {
             let s = mf::sqrt(1.0 + m00 - m11 - m22) * 2.0; // s = 4x
-            Self { w: (m21 - m12) / s, x: 0.25 * s, y: (m01 + m10) / s, z: (m02 + m20) / s }
-                .normalize()
+            Self {
+                w: (m21 - m12) / s,
+                x: 0.25 * s,
+                y: (m01 + m10) / s,
+                z: (m02 + m20) / s,
+            }
+            .normalize()
         } else if m11 > m22 {
             let s = mf::sqrt(1.0 + m11 - m00 - m22) * 2.0; // s = 4y
-            Self { w: (m02 - m20) / s, x: (m01 + m10) / s, y: 0.25 * s, z: (m12 + m21) / s }
-                .normalize()
+            Self {
+                w: (m02 - m20) / s,
+                x: (m01 + m10) / s,
+                y: 0.25 * s,
+                z: (m12 + m21) / s,
+            }
+            .normalize()
         } else {
             let s = mf::sqrt(1.0 + m22 - m00 - m11) * 2.0; // s = 4z
-            Self { w: (m10 - m01) / s, x: (m02 + m20) / s, y: (m12 + m21) / s, z: 0.25 * s }
-                .normalize()
+            Self {
+                w: (m10 - m01) / s,
+                x: (m02 + m20) / s,
+                y: (m12 + m21) / s,
+                z: 0.25 * s,
+            }
+            .normalize()
         }
     }
     /// Lossy conversion to the `f32` [`Quat`].
@@ -246,7 +301,12 @@ impl Neg for DQuat {
     type Output = DQuat;
     #[inline]
     fn neg(self) -> DQuat {
-        DQuat { x: -self.x, y: -self.y, z: -self.z, w: -self.w }
+        DQuat {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: -self.w,
+        }
     }
 }
 

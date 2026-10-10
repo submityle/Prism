@@ -286,7 +286,12 @@ mod tests {
     fn direct_and_reflection_track_cpu() {
         let listener = Listener::new(Vec3::new(-4.0, 2.0, 0.0), Quat::IDENTITY, Vec3::ZERO);
         let emitter = Emitter::point(Vec3::new(4.0, 2.0, 0.0), Vec3::ZERO);
-        assert_tracks_cpu(floor_scene(), GeometricConfig::new(48_000), &listener, &emitter);
+        assert_tracks_cpu(
+            floor_scene(),
+            GeometricConfig::new(48_000),
+            &listener,
+            &emitter,
+        );
     }
 
     #[test]

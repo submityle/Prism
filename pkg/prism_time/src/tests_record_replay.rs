@@ -2,7 +2,9 @@
 //! reproduction, player scrubbing, and closed-loop determinism with an audit
 //! trail driven by a deterministic clock + seeded RNG.
 
-use crate::{AuditTrail, Duration, Player, RecordedFrame, Recorder, Recording, StateHasher, TickClock};
+use crate::{
+    AuditTrail, Duration, Player, RecordedFrame, Recorder, Recording, StateHasher, TickClock,
+};
 use alloc::vec::Vec;
 
 /// A tiny deterministic input snapshot used by the tests.
@@ -161,7 +163,10 @@ fn closed_loop_record_then_replay_hashes_identically() {
     let trail_a = run(&recording);
     let trail_b = run(&recording);
     assert_eq!(trail_a.len(), recording.len());
-    assert_eq!(crate::compare_trails(&trail_a, &trail_b), crate::AuditDiff::Identical);
+    assert_eq!(
+        crate::compare_trails(&trail_a, &trail_b),
+        crate::AuditDiff::Identical
+    );
 }
 
 #[test]

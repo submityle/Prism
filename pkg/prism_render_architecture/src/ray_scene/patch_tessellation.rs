@@ -432,7 +432,9 @@ mod tests {
     #[test]
     fn degenerate_interior_block_fans_to_centre() {
         // inner clamps to 2 -> single centre node, all strips fan to it.
-        let mesh = PatchTessellation::new(1, [3, 3, 3, 3]).tessellate(&Plane).unwrap();
+        let mesh = PatchTessellation::new(1, [3, 3, 3, 3])
+            .tessellate(&Plane)
+            .unwrap();
         for (_, count) in edge_counts(&mesh) {
             assert!(count == 1 || count == 2, "edge used {count} times");
         }
@@ -459,7 +461,11 @@ mod tests {
             .collect();
         bottom_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
         bottom_us.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-        assert_eq!(bottom_us.len(), 7, "bottom edge should have outer+1 vertices");
+        assert_eq!(
+            bottom_us.len(),
+            7,
+            "bottom edge should have outer+1 vertices"
+        );
         for (k, u) in bottom_us.iter().enumerate() {
             assert!((u - k as f32 / 6.0).abs() < 1e-5);
         }
@@ -547,7 +553,9 @@ mod tests {
 
     #[test]
     fn bvh_hits_the_patch() {
-        let bvh = PatchTessellation::uniform(5).tessellate_bvh(&Plane).unwrap();
+        let bvh = PatchTessellation::uniform(5)
+            .tessellate_bvh(&Plane)
+            .unwrap();
         // Shoot down the +z axis at an off-seam point onto the z=0 plane.
         let ray = Ray::infinite([0.53, 0.47, 1.0], [0.0, 0.0, -1.0]);
         let hit = bvh.closest_hit(&ray).expect("ray should hit the plane");

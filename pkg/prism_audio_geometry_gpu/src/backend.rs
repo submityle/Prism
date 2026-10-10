@@ -42,13 +42,13 @@ use core::cmp::Ordering;
 
 use bevy_math::Vec3;
 use prism_audio_geometry::GeometricConfig;
-use prism_audio_spatial::BandGains;
 use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
 use prism_audio_spatial::geometry::{Emitter, Listener};
 use prism_audio_spatial::occlusion::OcclusionFactors;
 use prism_audio_spatial::propagation::{
     PathKind, PropagationPath, FULL_BAND_CUTOFF_HZ, MAX_PROPAGATION_PATHS,
 };
+use prism_audio_spatial::BandGains;
 
 use crate::context::GpuContext;
 use crate::direct::{cpu_direct, DirectKernel};
@@ -147,7 +147,13 @@ impl GpuGeometryBackend {
             self.reflection.dispatch(ctx, scene, &params, &gpu_queries)
         };
 
-        assemble(&directs, &candidates, triangle_count, config, reflections_disabled)
+        assemble(
+            &directs,
+            &candidates,
+            triangle_count,
+            config,
+            reflections_disabled,
+        )
     }
 
     /// Resolves every query entirely on the host, using the kernels' `CPU`
@@ -198,7 +204,13 @@ impl GpuGeometryBackend {
             }
         }
 
-        assemble(&directs, &candidates, triangle_count, config, reflections_disabled)
+        assemble(
+            &directs,
+            &candidates,
+            triangle_count,
+            config,
+            reflections_disabled,
+        )
     }
 }
 
@@ -471,11 +483,7 @@ mod tests {
                 delay_seconds: candidate.delay_seconds,
                 gain: candidate.gain,
                 cutoff_hz: FULL_BAND_CUTOFF_HZ,
-                bands: BandGains::new([
-                    candidate.bands[0],
-                    candidate.bands[1],
-                    candidate.bands[2],
-                ]),
+                bands: BandGains::new([candidate.bands[0], candidate.bands[1], candidate.bands[2]]),
                 direction: Vec3::new(
                     candidate.direction[0],
                     candidate.direction[1],

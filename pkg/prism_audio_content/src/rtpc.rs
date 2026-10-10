@@ -50,7 +50,12 @@ impl RtpcDefinition {
     #[must_use]
     pub fn new(id: RtpcId, min: Sample, max: Sample, default: Sample) -> Self {
         let (lo, hi) = if max < min { (max, min) } else { (min, max) };
-        Self { id, min: lo, max: hi, default: default.clamp(lo, hi) }
+        Self {
+            id,
+            min: lo,
+            max: hi,
+            default: default.clamp(lo, hi),
+        }
     }
 
     /// Clamps `value` into this parameter's declared range, neutralising
@@ -81,7 +86,11 @@ impl RtpcBinding {
     /// Builds a binding.
     #[must_use]
     pub fn new(rtpc: RtpcId, target: ParameterTarget, curve: ParameterCurve) -> Self {
-        Self { rtpc, target, curve }
+        Self {
+            rtpc,
+            target,
+            curve,
+        }
     }
 
     /// Evaluates the binding at a game `value`, returning the resolved setting.
@@ -105,7 +114,10 @@ impl RtpcRegistry {
     /// Creates an empty registry.
     #[must_use]
     pub fn new() -> Self {
-        Self { definitions: BTreeMap::new(), bindings: BTreeMap::new() }
+        Self {
+            definitions: BTreeMap::new(),
+            bindings: BTreeMap::new(),
+        }
     }
 
     /// Registers (or replaces) an RTPC definition.

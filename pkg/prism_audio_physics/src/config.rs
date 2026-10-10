@@ -17,8 +17,8 @@
 //! [`crate::translator::ContactAudioTranslator`] to drive impulse estimation,
 //! merging, clustering, and budgeting.
 
-use prism_audio_procedural::contact::MergeConfig;
 use prism_audio_core::math::Sample;
+use prism_audio_procedural::contact::MergeConfig;
 
 use crate::cluster::ClusterConfig;
 

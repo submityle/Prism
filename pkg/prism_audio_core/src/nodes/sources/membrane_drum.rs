@@ -107,7 +107,6 @@
 //! derived code**; only the widely documented membrane-mode ratios, Bessel
 //! series, resonator, and window formulas are used.
 
-
 use bevy_math::ops;
 use core::f32::consts::TAU;
 
@@ -163,13 +162,11 @@ const MODE_AZIMUTHAL: [usize; NUM_MODES] = [0, 1, 2, 0, 3, 1, 4, 2];
 /// Positive Bessel-function zeros `alpha_{m,n}` for each modelled mode, ordered
 /// by ascending frequency: `(0,1) (1,1) (2,1) (0,2) (3,1) (1,2) (4,1) (2,2)`.
 const BESSEL_ZEROS: [Sample; NUM_MODES] = [
-    2.404_826, 3.831_706, 5.135_622, 5.520_078, 6.380_162, 7.015_587, 7.588_342,
-    8.417_244,
+    2.404_826, 3.831_706, 5.135_622, 5.520_078, 6.380_162, 7.015_587, 7.588_342, 8.417_244,
 ];
 
 /// Air-loaded (near-harmonic) kettledrum mode ratios for the same modes.
-const TUNED_DRUM_RATIOS: [Sample; NUM_MODES] =
-    [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5];
+const TUNED_DRUM_RATIOS: [Sample; NUM_MODES] = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5];
 
 /// `ln(1000) == 3 * ln(10)`, used by the `t60`-to-pole-radius mapping.
 const LN_1000: Sample = 6.907_755;
@@ -481,8 +478,8 @@ impl MembraneDrumNode {
                 self.enabled[m] = false;
                 continue;
             }
-            let t60 = (self.decay_s / ops::powf(ratio, DECAY_RATIO_EXP))
-                .clamp(MIN_DECAY_S, MAX_DECAY_S);
+            let t60 =
+                (self.decay_s / ops::powf(ratio, DECAY_RATIO_EXP)).clamp(MIN_DECAY_S, MAX_DECAY_S);
             let radius = ops::exp(-LN_1000 / (t60 * sr));
             let theta = TAU * f_m / sr;
             let (sin_t, cos_t) = (ops::sin(theta), ops::cos(theta));
@@ -572,8 +569,8 @@ impl AudioNode for MembraneDrumNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
     use crate::buffer::{AudioBuffer, ChannelLayout};
+    use alloc::vec::Vec;
 
     const SR: u32 = 48_000;
 
@@ -796,7 +793,10 @@ mod tests {
         // energy, so it clears that leakage floor by a comfortable margin.
         let hc = goertzel(&render(&mut centre, SR as usize / 2), f0 * 2.136);
         let he = goertzel(&render(&mut edge, SR as usize / 2), f0 * 2.136);
-        assert!(he > hc * 2.0, "edge strike should be brighter: centre = {hc}, edge = {he}");
+        assert!(
+            he > hc * 2.0,
+            "edge strike should be brighter: centre = {hc}, edge = {he}"
+        );
     }
 
     #[test]

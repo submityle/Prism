@@ -94,8 +94,8 @@ impl ServerTick {
     #[must_use]
     pub fn time_of_tick(&self, tick: u64) -> Duration {
         let step = self.clock.step();
-        let nanos = (tick as u128).saturating_mul(step.nanos_num() as u128)
-            / (step.nanos_den() as u128);
+        let nanos =
+            (tick as u128).saturating_mul(step.nanos_num() as u128) / (step.nanos_den() as u128);
         let secs = (nanos / 1_000_000_000).min(u64::MAX as u128) as u64;
         let sub = (nanos % 1_000_000_000) as u32;
         Duration::new(secs, sub)

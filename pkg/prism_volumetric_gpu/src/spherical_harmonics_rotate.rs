@@ -476,7 +476,11 @@ impl GpuProbeOut {
         ShRotationResult {
             l1: ShL1Rgb {
                 l0: drop_pad(self.l0),
-                l1: [drop_pad(self.l1_0), drop_pad(self.l1_1), drop_pad(self.l1_2)],
+                l1: [
+                    drop_pad(self.l1_0),
+                    drop_pad(self.l1_1),
+                    drop_pad(self.l1_2),
+                ],
             },
             l2: [
                 drop_pad(self.l2_0),
@@ -641,7 +645,10 @@ impl GpuSphericalHarmonicsRotate {
         results_stage.unmap();
         debug_assert_eq!(gpu_results.len(), count);
 
-        gpu_results.into_iter().map(GpuProbeOut::to_result).collect()
+        gpu_results
+            .into_iter()
+            .map(GpuProbeOut::to_result)
+            .collect()
     }
 }
 

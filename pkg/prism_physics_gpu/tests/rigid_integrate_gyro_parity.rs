@@ -107,12 +107,7 @@ fn gyroscopic_scene() -> (RigidBodyState, Vec<Vec3>, Vec<Vec3>) {
     let mut state = RigidBodyState::new();
 
     // 0: intermediate-axis (tennis-racket) spin, inertia 1, 2, 4.
-    state.push(
-        Vec3::ZERO,
-        Quat::IDENTITY,
-        1.0,
-        Vec3::new(1.0, 0.5, 0.25),
-    );
+    state.push(Vec3::ZERO, Quat::IDENTITY, 1.0, Vec3::new(1.0, 0.5, 0.25));
     state.angular_velocities[0] = Vec3::new(0.03, 1.0, 0.03);
 
     // 1: general asymmetric tumbler, inertia 1.5, 0.8, 0.4.
@@ -125,21 +120,11 @@ fn gyroscopic_scene() -> (RigidBodyState, Vec<Vec3>, Vec<Vec3>) {
     state.angular_velocities[1] = Vec3::new(0.6, 0.3, -0.4);
 
     // 2: locked z axis (inverse inertia z = 0) -> explicit fallback on both.
-    state.push(
-        Vec3::ZERO,
-        Quat::IDENTITY,
-        1.0,
-        Vec3::new(1.0, 0.5, 0.0),
-    );
+    state.push(Vec3::ZERO, Quat::IDENTITY, 1.0, Vec3::new(1.0, 0.5, 0.0));
     state.angular_velocities[2] = Vec3::new(0.4, 0.5, 0.8);
 
     // 3: asymmetric body driven by a constant torque, inertia 2, 1, 0.5.
-    state.push(
-        Vec3::ZERO,
-        Quat::IDENTITY,
-        1.0,
-        Vec3::new(0.5, 1.0, 2.0),
-    );
+    state.push(Vec3::ZERO, Quat::IDENTITY, 1.0, Vec3::new(0.5, 1.0, 2.0));
 
     let forces = vec![Vec3::ZERO; state.len()];
     let mut torques = vec![Vec3::ZERO; state.len()];
@@ -249,5 +234,4 @@ fn gpu_implicit_gyroscopic_matches_cpu_golden() {
         200,
         "explicit_through_gyro_entry",
     );
-
 }

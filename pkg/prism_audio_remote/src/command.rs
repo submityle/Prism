@@ -266,9 +266,7 @@ mod tests {
     #[test]
     fn denied_set_refuses_everything() {
         let caps = CapabilitySet::denied();
-        let cmd = AuthoringCommand::TriggerEvent {
-            event: EventId(7),
-        };
+        let cmd = AuthoringCommand::TriggerEvent { event: EventId(7) };
         assert_eq!(cmd.validate(&caps), Err(CommandError::WritesDisabled));
     }
 
@@ -279,9 +277,7 @@ mod tests {
             trigger_event: true,
             ..CapabilitySet::denied()
         };
-        let allowed = AuthoringCommand::TriggerEvent {
-            event: EventId(1),
-        };
+        let allowed = AuthoringCommand::TriggerEvent { event: EventId(1) };
         assert_eq!(allowed.validate(&caps), Ok(()));
 
         let blocked = AuthoringCommand::SwapSnapshot {

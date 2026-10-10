@@ -164,7 +164,10 @@ fn empty_query_batch_yields_empty_outer() {
         .query_resident(&ctx, &resident, &[], 8)
         .expect("empty-batch resident query within capacity");
     ctx.wait();
-    assert!(got.is_empty(), "empty query batch yields an empty outer vector");
+    assert!(
+        got.is_empty(),
+        "empty query batch yields an empty outer vector"
+    );
 }
 
 #[test]

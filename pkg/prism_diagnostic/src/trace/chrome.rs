@@ -370,7 +370,10 @@ mod tests {
         // flow phases.
         let needle_id = format!("\"id\":{id}");
         let matches = json.matches(needle_id.as_str()).count();
-        assert!(matches >= 2, "expected >=2 flow events with id {id}, got {matches}");
+        assert!(
+            matches >= 2,
+            "expected >=2 flow events with id {id}, got {matches}"
+        );
         assert!(json.contains("\"ph\":\"s\""), "missing flow start phase");
         assert!(json.contains("\"ph\":\"f\""), "missing flow finish phase");
         assert!(json.contains("job_hop"));
@@ -400,25 +403,29 @@ mod tests {
         {
             let _s = Scope::new("cpu_work").with_category("render");
         }
-        let gpu = [
-            ProjectedGpuSpan {
-                label: String::from("ShadowPass"),
-                queue: GpuQueueId::GRAPHICS,
-                cpu_start_nanos: 2_000_000,
-                cpu_duration_nanos: 500_000,
-                correlation: Some(CorrelationId(7)),
-                frame: 3,
-                depth: 0,
-            },
-        ];
+        let gpu = [ProjectedGpuSpan {
+            label: String::from("ShadowPass"),
+            queue: GpuQueueId::GRAPHICS,
+            cpu_start_nanos: 2_000_000,
+            cpu_duration_nanos: 500_000,
+            correlation: Some(CorrelationId(7)),
+            frame: 3,
+            depth: 0,
+        }];
         let json = super::export_string_with_gpu(&gpu);
         assert!(is_balanced_json(&json), "unbalanced JSON: {json}");
         assert!(json.contains("cpu_work"), "missing CPU span");
         assert!(json.contains("ShadowPass"), "missing GPU span");
         assert!(json.contains("\"cat\":\"gpu\""), "missing gpu category");
         assert!(json.contains("GPU Queue 0"), "missing GPU track name");
-        assert!(json.contains("\"correlation\":7"), "missing correlation arg");
+        assert!(
+            json.contains("\"correlation\":7"),
+            "missing correlation arg"
+        );
         // GPU span starts at 2_000_000 ns == 2000 us.
-        assert!(json.contains("\"ts\":2000.000"), "GPU ts not aligned to CPU us base");
+        assert!(
+            json.contains("\"ts\":2000.000"),
+            "GPU ts not aligned to CPU us base"
+        );
     }
 }

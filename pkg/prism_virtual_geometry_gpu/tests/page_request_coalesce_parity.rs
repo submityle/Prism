@@ -27,7 +27,7 @@ use alloc::collections::BTreeSet;
 
 use prism_render_architecture::gpu_scene::SceneBounds;
 use prism_render_architecture::virtual_geometry::{
-    plan_frame, ClusterHierarchy, ClusterNode, ClusterRasterStats, Frustum, FrameView,
+    plan_frame, ClusterHierarchy, ClusterNode, ClusterRasterStats, FrameView, Frustum,
     GeometryPageKey, LodProjection, Plane, RasterCapability, RasterConfig,
 };
 use prism_virtual_geometry_gpu::{GpuContext, GpuPageRequestCoalescer, PageReference};
@@ -293,6 +293,9 @@ fn gpu_coalesce_empty_references_is_empty_batch() {
     };
     let coalescer = GpuPageRequestCoalescer::new(&ctx);
     let batch = coalescer.coalesce(&ctx, [0.0, 0.0, 0.0], projection(), &[]);
-    assert!(batch.is_empty(), "empty references must yield an empty batch");
+    assert!(
+        batch.is_empty(),
+        "empty references must yield an empty batch"
+    );
     assert_eq!(batch.len(), 0);
 }

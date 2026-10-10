@@ -68,9 +68,15 @@ impl Default for DMat4 {
 
 impl DMat2 {
     /// The zero matrix.
-    pub const ZERO: Self = Self { x_axis: DVec2::ZERO, y_axis: DVec2::ZERO };
+    pub const ZERO: Self = Self {
+        x_axis: DVec2::ZERO,
+        y_axis: DVec2::ZERO,
+    };
     /// The identity matrix.
-    pub const IDENTITY: Self = Self { x_axis: DVec2::X, y_axis: DVec2::Y };
+    pub const IDENTITY: Self = Self {
+        x_axis: DVec2::X,
+        y_axis: DVec2::Y,
+    };
 
     /// Build from column vectors.
     #[inline]
@@ -115,14 +121,26 @@ impl DMat2 {
 
 impl DMat3 {
     /// The zero matrix.
-    pub const ZERO: Self = Self { x_axis: DVec3::ZERO, y_axis: DVec3::ZERO, z_axis: DVec3::ZERO };
+    pub const ZERO: Self = Self {
+        x_axis: DVec3::ZERO,
+        y_axis: DVec3::ZERO,
+        z_axis: DVec3::ZERO,
+    };
     /// The identity matrix.
-    pub const IDENTITY: Self = Self { x_axis: DVec3::X, y_axis: DVec3::Y, z_axis: DVec3::Z };
+    pub const IDENTITY: Self = Self {
+        x_axis: DVec3::X,
+        y_axis: DVec3::Y,
+        z_axis: DVec3::Z,
+    };
 
     /// Build from column vectors.
     #[inline]
     pub const fn from_cols(x_axis: DVec3, y_axis: DVec3, z_axis: DVec3) -> Self {
-        Self { x_axis, y_axis, z_axis }
+        Self {
+            x_axis,
+            y_axis,
+            z_axis,
+        }
     }
     /// Diagonal matrix from a scale vector.
     #[inline]
@@ -193,22 +211,39 @@ impl DMat3 {
     /// Lossy conversion to the `f32` [`Mat3`].
     #[inline]
     pub fn as_mat3(self) -> Mat3 {
-        Mat3::from_cols(self.x_axis.as_vec3(), self.y_axis.as_vec3(), self.z_axis.as_vec3())
+        Mat3::from_cols(
+            self.x_axis.as_vec3(),
+            self.y_axis.as_vec3(),
+            self.z_axis.as_vec3(),
+        )
     }
 }
 
 impl DMat4 {
     /// The zero matrix.
-    pub const ZERO: Self =
-        Self { x_axis: DVec4::ZERO, y_axis: DVec4::ZERO, z_axis: DVec4::ZERO, w_axis: DVec4::ZERO };
+    pub const ZERO: Self = Self {
+        x_axis: DVec4::ZERO,
+        y_axis: DVec4::ZERO,
+        z_axis: DVec4::ZERO,
+        w_axis: DVec4::ZERO,
+    };
     /// The identity matrix.
-    pub const IDENTITY: Self =
-        Self { x_axis: DVec4::X, y_axis: DVec4::Y, z_axis: DVec4::Z, w_axis: DVec4::W };
+    pub const IDENTITY: Self = Self {
+        x_axis: DVec4::X,
+        y_axis: DVec4::Y,
+        z_axis: DVec4::Z,
+        w_axis: DVec4::W,
+    };
 
     /// Build from column vectors.
     #[inline]
     pub const fn from_cols(x_axis: DVec4, y_axis: DVec4, z_axis: DVec4, w_axis: DVec4) -> Self {
-        Self { x_axis, y_axis, z_axis, w_axis }
+        Self {
+            x_axis,
+            y_axis,
+            z_axis,
+            w_axis,
+        }
     }
     /// Translation matrix.
     #[inline]
@@ -242,7 +277,11 @@ impl DMat4 {
     }
     /// Compose scale, then rotation, then translation.
     #[inline]
-    pub fn from_scale_rotation_translation(scale: DVec3, rotation: DQuat, translation: DVec3) -> Self {
+    pub fn from_scale_rotation_translation(
+        scale: DVec3,
+        rotation: DQuat,
+        translation: DVec3,
+    ) -> Self {
         let r = DMat3::from_quat(rotation);
         Self::from_cols(
             (r.x_axis * scale.x).extend(0.0),
@@ -254,7 +293,11 @@ impl DMat4 {
     /// Extract the upper-left 3x3 submatrix.
     #[inline]
     pub fn to_mat3(self) -> DMat3 {
-        DMat3::from_cols(self.x_axis.truncate(), self.y_axis.truncate(), self.z_axis.truncate())
+        DMat3::from_cols(
+            self.x_axis.truncate(),
+            self.y_axis.truncate(),
+            self.z_axis.truncate(),
+        )
     }
     /// Transpose.
     #[inline]
@@ -352,12 +395,7 @@ impl DMat4 {
         let sign_a = DVec4::new(1.0, -1.0, 1.0, -1.0);
         let sign_b = DVec4::new(-1.0, 1.0, -1.0, 1.0);
 
-        let inverse = DMat4::from_cols(
-            inv0 * sign_a,
-            inv1 * sign_b,
-            inv2 * sign_a,
-            inv3 * sign_b,
-        );
+        let inverse = DMat4::from_cols(inv0 * sign_a, inv1 * sign_b, inv2 * sign_a, inv3 * sign_b);
 
         let col0 = DVec4::new(
             inverse.x_axis.x,
@@ -400,7 +438,11 @@ impl Mat3 {
     /// Widen to the `f64` [`DMat3`].
     #[inline]
     pub fn as_dmat3(self) -> DMat3 {
-        DMat3::from_cols(self.x_axis.as_dvec3(), self.y_axis.as_dvec3(), self.z_axis.as_dvec3())
+        DMat3::from_cols(
+            self.x_axis.as_dvec3(),
+            self.y_axis.as_dvec3(),
+            self.z_axis.as_dvec3(),
+        )
     }
 }
 impl Mat4 {
@@ -504,7 +546,11 @@ impl core::fmt::Debug for DMat2 {
 }
 impl core::fmt::Debug for DMat3 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "DMat3[{:?}, {:?}, {:?}]", self.x_axis, self.y_axis, self.z_axis)
+        write!(
+            f,
+            "DMat3[{:?}, {:?}, {:?}]",
+            self.x_axis, self.y_axis, self.z_axis
+        )
     }
 }
 impl core::fmt::Debug for DMat4 {

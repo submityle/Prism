@@ -150,9 +150,7 @@ impl UnifiedTimeline {
     /// Insert `entry`, keeping [`entries`](Self::entries) sorted.
     fn push(&mut self, entry: TimelineEntry) {
         let key = Self::sort_key(&entry);
-        let pos = self
-            .entries
-            .partition_point(|e| Self::sort_key(e) <= key);
+        let pos = self.entries.partition_point(|e| Self::sort_key(e) <= key);
         self.entries.insert(pos, entry);
     }
 
@@ -235,7 +233,13 @@ mod tests {
         }
     }
 
-    fn gpu_span(name: &str, queue: u32, start: u64, dur: u64, corr: Option<u64>) -> ProjectedGpuSpan {
+    fn gpu_span(
+        name: &str,
+        queue: u32,
+        start: u64,
+        dur: u64,
+        corr: Option<u64>,
+    ) -> ProjectedGpuSpan {
         ProjectedGpuSpan {
             label: String::from(name),
             queue: GpuQueueId(queue),

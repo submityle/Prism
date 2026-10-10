@@ -20,8 +20,8 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use crate::job::Job;
 use crate::{Counter, TaskPool};
@@ -298,10 +298,7 @@ mod tests {
         let push = |p: Priority, tag: u32| {
             let cell = Arc::new(PriorityCell::new(p));
             let order = Arc::clone(&order);
-            inbox.push(
-                cell,
-                Box::new(move || order.lock().unwrap().push(tag)),
-            );
+            inbox.push(cell, Box::new(move || order.lock().unwrap().push(tag)));
         };
         push(Priority::Low, 1);
         push(Priority::Critical, 2);

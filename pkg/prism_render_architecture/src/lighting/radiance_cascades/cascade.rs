@@ -99,11 +99,7 @@ impl Cascade {
     /// Gather cascade `level`: for every probe and direction, ask `sampler` for
     /// the radiance interval over this cascade's radial shell.
     #[must_use]
-    pub fn gather<S: SceneSampler>(
-        hierarchy: &CascadeHierarchy,
-        level: u32,
-        sampler: &S,
-    ) -> Self {
+    pub fn gather<S: SceneSampler>(hierarchy: &CascadeHierarchy, level: u32, sampler: &S) -> Self {
         let mut cascade = Self::cleared(hierarchy, level);
         let t0 = hierarchy.interval_start(level);
         let t1 = hierarchy.interval_end(level);

@@ -94,8 +94,12 @@ impl AudioNode for OscillatorNode {
         let frames = out.active_frames();
         let freq = self.frequency.get().max(0.0);
         let increment = freq / self.sample_rate as Sample;
-        self.amp_smoothed
-            .set_target(self.amplitude.get(), Ramp::Linear { samples: frames.max(1) as u32 });
+        self.amp_smoothed.set_target(
+            self.amplitude.get(),
+            Ramp::Linear {
+                samples: frames.max(1) as u32,
+            },
+        );
         let dst = out.channel_mut(0);
         for d in dst.iter_mut() {
             let amp = self.amp_smoothed.next_sample();

@@ -148,18 +148,12 @@ impl<T> SparseSet<T> {
 
     /// Iterate over `(id, &value)` pairs in dense order.
     pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> {
-        self.dense_ids
-            .iter()
-            .copied()
-            .zip(self.values.iter())
+        self.dense_ids.iter().copied().zip(self.values.iter())
     }
 
     /// Iterate over `(id, &mut value)` pairs in dense order.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> {
-        self.dense_ids
-            .iter()
-            .copied()
-            .zip(self.values.iter_mut())
+        self.dense_ids.iter().copied().zip(self.values.iter_mut())
     }
 }
 

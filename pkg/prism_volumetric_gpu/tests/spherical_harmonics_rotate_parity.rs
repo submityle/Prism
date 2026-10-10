@@ -118,11 +118,7 @@ fn lcg(state: &mut u64) -> f32 {
 fn sample_l1() -> ShL1Rgb {
     ShL1Rgb {
         l0: [0.2, 0.4, 0.6],
-        l1: [
-            [0.1, -0.2, 0.3],
-            [0.4, 0.5, -0.6],
-            [-0.7, 0.8, 0.9],
-        ],
+        l1: [[0.1, -0.2, 0.3], [0.4, 0.5, -0.6], [-0.7, 0.8, 0.9]],
     }
 }
 
@@ -254,7 +250,12 @@ fn random_quaternions_match_cpu() {
     let mut probes = Vec::new();
     for _ in 0..24 {
         // Non-unit quaternions on purpose; the robust conversion normalizes.
-        let quat = [lcg(&mut state), lcg(&mut state), lcg(&mut state), lcg(&mut state)];
+        let quat = [
+            lcg(&mut state),
+            lcg(&mut state),
+            lcg(&mut state),
+            lcg(&mut state),
+        ];
         let mut l1 = sample_l1();
         for k in 0..3 {
             for ch in 0..3 {

@@ -71,12 +71,7 @@ fn tetrahedron(s: f32) -> ConvexHull {
         Vec3::new(-s, s, -s),
         Vec3::new(-s, -s, s),
     ];
-    let loops = vec![
-        vec![0, 1, 2],
-        vec![0, 1, 3],
-        vec![0, 2, 3],
-        vec![1, 2, 3],
-    ];
+    let loops = vec![vec![0, 1, 2], vec![0, 1, 3], vec![0, 2, 3], vec![1, 2, 3]];
     oriented_hull(verts, loops)
 }
 

@@ -2,14 +2,14 @@
 
 pub mod culling;
 pub mod radiance_cascades;
-pub mod stochastic;
-pub mod restir_di;
-pub mod restir_temporal;
-pub mod restir_gi;
-pub mod restir_gi_resolve;
 pub mod regir;
 pub mod regir_resolve;
+pub mod restir_di;
+pub mod restir_gi;
+pub mod restir_gi_resolve;
 pub mod restir_spatial;
+pub mod restir_temporal;
+pub mod stochastic;
 
 use crate::ray_scene::TraceBackend;
 

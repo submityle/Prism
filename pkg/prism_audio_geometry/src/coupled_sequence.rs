@@ -81,7 +81,9 @@ use prism_audio_spatial::propagation::{
 use prism_audio_spatial::BandGains;
 
 use crate::config::{DiffractionModel, GeometricConfig, MAX_SUPPORTED_COUPLED_ORDER};
-use crate::diffraction_edges::{diffracting_edges, distance, least_detour_point, utd_wedge, EdgeData};
+use crate::diffraction_edges::{
+    diffracting_edges, distance, least_detour_point, utd_wedge, EdgeData,
+};
 use crate::reflection_path::point_in_triangle;
 use crate::scene::AcousticScene;
 
@@ -387,7 +389,10 @@ impl SequenceSolver<'_> {
         let Some(&first) = points.first() else {
             return false;
         };
-        if self.scene.segment_blocked(self.emitter.position, first, self.eps) {
+        if self
+            .scene
+            .segment_blocked(self.emitter.position, first, self.eps)
+        {
             return false;
         }
         for leg in points.windows(2) {
@@ -446,7 +451,8 @@ impl SequenceSolver<'_> {
                     match self.config.diffraction_model {
                         DiffractionModel::Maekawa => {
                             scalar *= diffraction_gain(delta, self.config.diffraction_freq_hz);
-                            spectrum = spectrum.combine(BandGains::from_lowpass_cutoff(edge_cutoff));
+                            spectrum =
+                                spectrum.combine(BandGains::from_lowpass_cutoff(edge_cutoff));
                         }
                         DiffractionModel::Utd => {
                             let wedge = utd_wedge(&self.edges[edge], corner, prev, next);
@@ -464,7 +470,12 @@ impl SequenceSolver<'_> {
 /// The points flanking the interaction at `slot` along the route: the emitter
 /// before the first interaction and the listener after the last.
 #[must_use]
-fn neighbours(emitter: &Emitter, listener: &Listener, points: &[Vec3], slot: usize) -> (Vec3, Vec3) {
+fn neighbours(
+    emitter: &Emitter,
+    listener: &Listener,
+    points: &[Vec3],
+    slot: usize,
+) -> (Vec3, Vec3) {
     let prev = if slot == 0 {
         emitter.position
     } else {

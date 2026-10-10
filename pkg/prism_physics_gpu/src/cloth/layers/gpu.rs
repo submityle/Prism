@@ -163,8 +163,7 @@ impl GpuClothLayerCoupling {
         };
         let params_buf = buffer::uniform(device, "prism_cloth_layers_params", &uniform);
 
-        let positions_buf =
-            buffer::storage_read(device, "prism_cloth_layers_pos", &prep.positions);
+        let positions_buf = buffer::storage_read(device, "prism_cloth_layers_pos", &prep.positions);
         let normals_buf = buffer::storage_read(device, "prism_cloth_layers_normals", &prep.normals);
         let inv_mass_buf =
             buffer::storage_read(device, "prism_cloth_layers_invmass", &prep.inverse_masses);

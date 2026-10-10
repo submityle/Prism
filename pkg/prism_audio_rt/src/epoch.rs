@@ -18,8 +18,8 @@
 //! audio engines, but is built entirely on the safe, bounded
 //! [`crossbeam_queue::ArrayQueue`]; this crate contains no `unsafe` code.
 
-use std::any::Any;
 use alloc::sync::Arc;
+use std::any::Any;
 
 use crossbeam_queue::ArrayQueue;
 use prism_audio_core::graph::AudioGraph;
@@ -227,7 +227,9 @@ mod tests {
     fn graph_handoff_publishes_newest_and_displaces_stale() {
         let (producer, consumer) = GraphHandoff::new();
         assert!(consumer.take().is_none());
-        assert!(producer.publish(Box::new(AudioGraph::new(48_000, 512))).is_none());
+        assert!(producer
+            .publish(Box::new(AudioGraph::new(48_000, 512)))
+            .is_none());
         // A second publish before the consumer takes displaces the stale graph.
         let displaced = producer.publish(Box::new(AudioGraph::new(44_100, 256)));
         let displaced = displaced.expect("stale graph handed back");

@@ -92,7 +92,10 @@ fn stop_container_dedups_leaves_across_whole_subtree() {
     let child = Container::new(
         ContainerId::new(2),
         ContainerKind::Sequence {
-            children: vec![Playable::Sound(SoundId::new(1)), Playable::Sound(SoundId::new(2))],
+            children: vec![
+                Playable::Sound(SoundId::new(1)),
+                Playable::Sound(SoundId::new(2)),
+            ],
             mode: SequenceMode::Loop,
         },
     );
@@ -124,7 +127,10 @@ fn stop_container_dedups_leaves_across_whole_subtree() {
             ref other => panic!("expected StopSound, got {other:?}"),
         })
         .collect();
-    assert_eq!(stopped, vec![SoundId::new(1), SoundId::new(2), SoundId::new(3)]);
+    assert_eq!(
+        stopped,
+        vec![SoundId::new(1), SoundId::new(2), SoundId::new(3)]
+    );
 }
 
 /// A switch container selects the branch matching the active switch, and falls
@@ -159,19 +165,25 @@ fn switch_container_selects_branch_then_falls_back_to_default() {
     // Default active switch 10 -> sound 100.
     let mut out = Vec::new();
     assert!(system.post_event(&model, EventId::new(1), obj, &mut out));
-    assert!(matches!(out[0], ResolvedAction::PlaySound { sound, .. } if sound == SoundId::new(100)));
+    assert!(
+        matches!(out[0], ResolvedAction::PlaySound { sound, .. } if sound == SoundId::new(100))
+    );
 
     // Switch to 11 -> sound 101.
     assert!(system.set_switch(obj, SwitchGroupId::new(1), SwitchId::new(11)));
     out.clear();
     assert!(system.post_event(&model, EventId::new(1), obj, &mut out));
-    assert!(matches!(out[0], ResolvedAction::PlaySound { sound, .. } if sound == SoundId::new(101)));
+    assert!(
+        matches!(out[0], ResolvedAction::PlaySound { sound, .. } if sound == SoundId::new(101))
+    );
 
     // Switch to 12 (no branch) -> default sound 999.
     assert!(system.set_switch(obj, SwitchGroupId::new(1), SwitchId::new(12)));
     out.clear();
     assert!(system.post_event(&model, EventId::new(1), obj, &mut out));
-    assert!(matches!(out[0], ResolvedAction::PlaySound { sound, .. } if sound == SoundId::new(999)));
+    assert!(
+        matches!(out[0], ResolvedAction::PlaySound { sound, .. } if sound == SoundId::new(999))
+    );
 }
 
 /// Driving an RTPC through an event fans out to every bound parameter target
@@ -190,9 +202,10 @@ fn rtpc_event_fans_out_to_all_bindings() {
         ParameterTarget::Pan,
         ParameterCurve::line(0.0, -1.0, 100.0, 1.0),
     ));
-    model.add_event(
-        Event::new(EventId::new(1)).with(Action::SetRtpc { rtpc: RtpcId::new(1), value: 150.0 }),
-    );
+    model.add_event(Event::new(EventId::new(1)).with(Action::SetRtpc {
+        rtpc: RtpcId::new(1),
+        value: 150.0,
+    }));
 
     let obj = GameObjectId::new(2);
     let mut system = EventSystem::new(&model, 1);
@@ -225,7 +238,10 @@ fn state_switch_and_stop_all_mutations() {
     ));
     model.add_event(
         Event::new(EventId::new(1))
-            .with(Action::SetState { group: StateGroupId::new(1), state: StateId::new(2) })
+            .with(Action::SetState {
+                group: StateGroupId::new(1),
+                state: StateId::new(2),
+            })
             .with(Action::StopAll),
     );
 
@@ -233,7 +249,10 @@ fn state_switch_and_stop_all_mutations() {
     let mut system = EventSystem::new(&model, 1);
     let mut out = Vec::new();
     assert!(system.post_event(&model, EventId::new(1), obj, &mut out));
-    assert_eq!(system.active_state(StateGroupId::new(1)), Some(StateId::new(2)));
+    assert_eq!(
+        system.active_state(StateGroupId::new(1)),
+        Some(StateId::new(2))
+    );
     assert_eq!(out.len(), 1);
     assert!(matches!(out[0], ResolvedAction::StopAll { object } if object == obj));
 }
@@ -244,7 +263,9 @@ fn cyclic_container_is_depth_guarded() {
     let container = Container::new(
         ContainerId::new(1),
         ContainerKind::Random {
-            children: vec![WeightedChild::uniform(Playable::Container(ContainerId::new(1)))],
+            children: vec![WeightedChild::uniform(Playable::Container(
+                ContainerId::new(1),
+            ))],
             mode: RandomMode::Standard,
             avoid_repeat: 0,
         },

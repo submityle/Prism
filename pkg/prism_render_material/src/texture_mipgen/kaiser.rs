@@ -46,13 +46,19 @@ pub struct KaiserFilter {
 
 impl KaiserFilter {
     /// `DirectXTex`-style default: 3-tap half-support, `beta = 4.0`.
-    pub const DEFAULT: Self = Self { radius: 3.0, beta: 4.0 };
+    pub const DEFAULT: Self = Self {
+        radius: 3.0,
+        beta: 4.0,
+    };
 
     /// Construct a filter, clamping `radius` to a sane positive minimum and
     /// `beta` to non-negative so the kernel is always well formed.
     #[must_use]
     pub fn new(radius: f32, beta: f32) -> Self {
-        Self { radius: radius.max(1.0), beta: beta.max(0.0) }
+        Self {
+            radius: radius.max(1.0),
+            beta: beta.max(0.0),
+        }
     }
 }
 
@@ -169,7 +175,10 @@ mod tests {
         let mut t = 0.1f32;
         while t <= r {
             let cur = kaiser_window(t, r, b);
-            assert!(cur <= prev + 1e-6, "window not monotone at t={t}: {cur} > {prev}");
+            assert!(
+                cur <= prev + 1e-6,
+                "window not monotone at t={t}: {cur} > {prev}"
+            );
             prev = cur;
             t += 0.1;
         }
@@ -276,9 +285,14 @@ mod tests {
             }
         }
         let img = Rgba8Image::new(8, 8, sharp_texels).unwrap();
-        let sharp = kaiser_downsample(&img, ColorSpace::Linear, KaiserFilter::new(3.0, 2.0)).unwrap();
-        let wide = kaiser_downsample(&img, ColorSpace::Linear, KaiserFilter::new(3.0, 10.0)).unwrap();
+        let sharp =
+            kaiser_downsample(&img, ColorSpace::Linear, KaiserFilter::new(3.0, 2.0)).unwrap();
+        let wide =
+            kaiser_downsample(&img, ColorSpace::Linear, KaiserFilter::new(3.0, 10.0)).unwrap();
         let peak = |m: &Rgba8Image| m.as_slice().iter().map(|t| t[0]).max().unwrap();
-        assert!(peak(&wide) <= peak(&sharp), "wider window should not sharpen the peak");
+        assert!(
+            peak(&wide) <= peak(&sharp),
+            "wider window should not sharpen the peak"
+        );
     }
 }

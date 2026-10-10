@@ -120,7 +120,13 @@ fn all_keys_collapse_to_a_single_bucket() {
     let gpu = GpuRadixHistogram::new(&ctx);
     // All keys share pass-0 4-bit digit 0x5 (low nibble), so every one counts
     // into bucket 5 and all other buckets stay empty.
-    let keys = [0x0000_0005u32, 0x0000_0015, 0x0000_00A5, 0x0000_0FF5, 0x1234_5675];
+    let keys = [
+        0x0000_0005u32,
+        0x0000_0015,
+        0x0000_00A5,
+        0x0000_0FF5,
+        0x1234_5675,
+    ];
     let got = check(&ctx, &gpu, &keys, 0, 4);
     assert_eq!(got[5], keys.len() as u32, "every key lands in bucket 5");
     for (bucket, &count) in got.iter().enumerate() {
@@ -199,7 +205,11 @@ fn high_pass_sees_zero_padded_digits() {
     let mut lcg = Lcg::new(0x0BAD_F00D_FEED_BEEF);
     let keys = lcg.fill(300);
     let got = check(&ctx, &gpu, &keys, 4, 8);
-    assert_eq!(got[0], keys.len() as u32, "the zero-padded pass counts into bucket 0");
+    assert_eq!(
+        got[0],
+        keys.len() as u32,
+        "the zero-padded pass counts into bucket 0"
+    );
     assert!(
         got.iter().skip(1).all(|&c| c == 0),
         "no key escapes bucket 0 on a fully zero-padded pass"

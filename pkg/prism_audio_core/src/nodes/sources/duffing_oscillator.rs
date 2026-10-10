@@ -383,20 +383,10 @@ impl DuffingOscillatorNode {
         let (x, v, p) = (self.x, self.v, self.phase);
         let (k1x, k1v, k1p) = duffing_derivative(x, v, p, drive, damping);
         let h2 = h * 0.5;
-        let (k2x, k2v, k2p) = duffing_derivative(
-            x + h2 * k1x,
-            v + h2 * k1v,
-            p + h2 * k1p,
-            drive,
-            damping,
-        );
-        let (k3x, k3v, k3p) = duffing_derivative(
-            x + h2 * k2x,
-            v + h2 * k2v,
-            p + h2 * k2p,
-            drive,
-            damping,
-        );
+        let (k2x, k2v, k2p) =
+            duffing_derivative(x + h2 * k1x, v + h2 * k1v, p + h2 * k1p, drive, damping);
+        let (k3x, k3v, k3p) =
+            duffing_derivative(x + h2 * k2x, v + h2 * k2v, p + h2 * k2p, drive, damping);
         let (k4x, k4v, k4p) =
             duffing_derivative(x + h * k3x, v + h * k3v, p + h * k3p, drive, damping);
         let sixth = h / 6.0;

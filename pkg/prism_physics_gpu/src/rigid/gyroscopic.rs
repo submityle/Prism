@@ -232,12 +232,12 @@ fn solve_3x3(m: &[f32; 9], bx: f32, by: f32, bz: f32) -> Vec3 {
     let inv_det = 1.0 / det;
     // x = (adjugate(m) * b) / det, where adjugate is the transpose of the
     // cofactor matrix.
-    let x = (c0 * bx + (m[2] * m[7] - m[1] * m[8]) * by + (m[1] * m[5] - m[2] * m[4]) * bz)
-        * inv_det;
-    let y = (c1 * bx + (m[0] * m[8] - m[2] * m[6]) * by + (m[2] * m[3] - m[0] * m[5]) * bz)
-        * inv_det;
-    let z = (c2 * bx + (m[1] * m[6] - m[0] * m[7]) * by + (m[0] * m[4] - m[1] * m[3]) * bz)
-        * inv_det;
+    let x =
+        (c0 * bx + (m[2] * m[7] - m[1] * m[8]) * by + (m[1] * m[5] - m[2] * m[4]) * bz) * inv_det;
+    let y =
+        (c1 * bx + (m[0] * m[8] - m[2] * m[6]) * by + (m[2] * m[3] - m[0] * m[5]) * bz) * inv_det;
+    let z =
+        (c2 * bx + (m[1] * m[6] - m[0] * m[7]) * by + (m[0] * m[4] - m[1] * m[3]) * bz) * inv_det;
     Vec3::new(x, y, z)
 }
 

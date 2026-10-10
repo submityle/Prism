@@ -113,8 +113,16 @@ fn convex_cast_nearest_hit_matches_cpu_golden() {
     };
     let gpu = GpuSceneConvexCast::new(&ctx);
     let swept = box_hull(Vec3::splat(0.5));
-    let hulls = [box_hull(Vec3::splat(0.5)), box_hull(Vec3::splat(0.5)), box_hull(Vec3::splat(0.5))];
-    let poses = [at(Vec3::new(3.0, 0.0, 0.0)), at(Vec3::new(6.0, 0.03, 0.0)), at(Vec3::new(9.0, -0.02, 0.0))];
+    let hulls = [
+        box_hull(Vec3::splat(0.5)),
+        box_hull(Vec3::splat(0.5)),
+        box_hull(Vec3::splat(0.5)),
+    ];
+    let poses = [
+        at(Vec3::new(3.0, 0.0, 0.0)),
+        at(Vec3::new(6.0, 0.03, 0.0)),
+        at(Vec3::new(9.0, -0.02, 0.0)),
+    ];
     let radii = [0.0_f32, 0.0, 0.0];
     run_parity(&ctx, &gpu, &swept, &hulls, &poses, &radii, |h| {
         SceneConvexCast::new(h, Vec3::ZERO, Vec3::X, Quat::IDENTITY, 0.0, 20.0)
@@ -163,9 +171,20 @@ fn convex_cast_oriented_hull_matches_cpu_golden() {
     // giving an unambiguous witness point; an axis-aligned rotation would leave
     // an edge- or face-contact whose witness point is non-unique.
     let axis = Vec3::new(1.0, 1.0, 1.0).normalize();
-    for angle in [core::f32::consts::FRAC_PI_4, core::f32::consts::FRAC_PI_6, core::f32::consts::FRAC_PI_3] {
+    for angle in [
+        core::f32::consts::FRAC_PI_4,
+        core::f32::consts::FRAC_PI_6,
+        core::f32::consts::FRAC_PI_3,
+    ] {
         run_parity(&ctx, &gpu, &swept, &hulls, &poses, &radii, move |h| {
-            SceneConvexCast::new(h, Vec3::ZERO, Vec3::X, Quat::from_axis_angle(axis, angle), 0.05, 20.0)
+            SceneConvexCast::new(
+                h,
+                Vec3::ZERO,
+                Vec3::X,
+                Quat::from_axis_angle(axis, angle),
+                0.05,
+                20.0,
+            )
         });
     }
 }
@@ -183,7 +202,10 @@ fn convex_cast_clean_miss_matches_cpu_golden() {
     let gpu = GpuSceneConvexCast::new(&ctx);
     let swept = box_hull(Vec3::splat(0.5));
     let hulls = [box_hull(Vec3::splat(0.5)), box_hull(Vec3::splat(0.5))];
-    let poses = [at(Vec3::new(0.0, 20.0, 0.0)), at(Vec3::new(0.0, -20.0, 0.0))];
+    let poses = [
+        at(Vec3::new(0.0, 20.0, 0.0)),
+        at(Vec3::new(0.0, -20.0, 0.0)),
+    ];
     let radii = [0.0_f32, 0.0];
     run_parity(&ctx, &gpu, &swept, &hulls, &poses, &radii, |h| {
         SceneConvexCast::new(h, Vec3::ZERO, Vec3::X, Quat::IDENTITY, 0.0, 20.0)
@@ -227,7 +249,11 @@ fn convex_cast_large_scene_prunes_and_matches_cpu_golden() {
     let mut radii = Vec::new();
     for k in 0..6 {
         hulls.push(box_hull(Vec3::splat(0.5)));
-        poses.push(at(Vec3::new(3.0 + 2.0 * (k as f32), 0.01 * (k as f32), 0.0)));
+        poses.push(at(Vec3::new(
+            3.0 + 2.0 * (k as f32),
+            0.01 * (k as f32),
+            0.0,
+        )));
         radii.push(0.0_f32);
     }
     for k in 0..30 {

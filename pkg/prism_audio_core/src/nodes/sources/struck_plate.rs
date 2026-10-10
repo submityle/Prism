@@ -257,8 +257,8 @@ impl StruckPlateParams {
             clamp_frequency(finite_or(self.frequency_hz, d.frequency_hz), sample_rate);
         let decay_s = finite_or(self.decay_s, d.decay_s).clamp(MIN_DECAY_S, MAX_DECAY_S);
         let brightness = finite_or(self.brightness, d.brightness).clamp(0.0, 1.0);
-        let aspect_ratio = finite_or(self.aspect_ratio, d.aspect_ratio)
-            .clamp(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO);
+        let aspect_ratio =
+            finite_or(self.aspect_ratio, d.aspect_ratio).clamp(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO);
         let amplitude = finite_or(self.amplitude, d.amplitude);
         Self {
             frequency_hz,
@@ -399,8 +399,8 @@ impl StruckPlateNode {
 
     /// Sets the plate aspect ratio, clamped to `[1, 3]`.
     pub fn set_aspect_ratio(&mut self, aspect_ratio: Sample) {
-        self.aspect_ratio = finite_or(aspect_ratio, self.aspect_ratio)
-            .clamp(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO);
+        self.aspect_ratio =
+            finite_or(aspect_ratio, self.aspect_ratio).clamp(MIN_ASPECT_RATIO, MAX_ASPECT_RATIO);
         self.recompute();
     }
 
@@ -437,8 +437,8 @@ impl StruckPlateNode {
                 self.enabled[m] = false;
                 continue;
             }
-            let t60 = (self.decay_s / ops::powf(ratio, DECAY_RATIO_EXP))
-                .clamp(MIN_DECAY_S, MAX_DECAY_S);
+            let t60 =
+                (self.decay_s / ops::powf(ratio, DECAY_RATIO_EXP)).clamp(MIN_DECAY_S, MAX_DECAY_S);
             let radius = ops::exp(-LN_1000 / (t60 * sr));
             let theta = TAU * f_m / sr;
             let (sin_t, cos_t) = (ops::sin(theta), ops::cos(theta));

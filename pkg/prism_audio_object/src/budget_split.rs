@@ -272,8 +272,10 @@ mod tests {
         let split = split_to_budget(&objects, bed, ObjectBudget::new(2));
         // Retained are ids 0 and 1 (priorities 5, 4); overflow are ids 2 and 3.
         let overflow = [objects[2], objects[3]];
-        let expected =
-            fold::sum_bed_matrix(&fold::fold_objects_to_bed(&overflow, bed), bed.channel_count());
+        let expected = fold::sum_bed_matrix(
+            &fold::fold_objects_to_bed(&overflow, bed),
+            bed.channel_count(),
+        );
         assert_eq!(split.bed_overflow.len(), expected.len());
         for (a, b) in split.bed_overflow.iter().zip(expected.iter()) {
             assert!(close(*a, *b));

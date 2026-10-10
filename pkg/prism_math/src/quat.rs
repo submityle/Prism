@@ -31,7 +31,12 @@ impl Default for Quat {
 
 impl Quat {
     /// The identity rotation.
-    pub const IDENTITY: Self = Self { x: 0.0, y: 0.0, z: 0.0, w: 1.0 };
+    pub const IDENTITY: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        w: 1.0,
+    };
 
     /// Raw constructor from components.
     #[inline]
@@ -44,26 +49,46 @@ impl Quat {
     pub fn from_axis_angle(axis: Vec3, angle: f32) -> Self {
         let (s, c) = mf::sin_cos(angle * 0.5);
         let a = axis * s;
-        Self { x: a.x, y: a.y, z: a.z, w: c }
+        Self {
+            x: a.x,
+            y: a.y,
+            z: a.z,
+            w: c,
+        }
     }
 
     /// Rotation about the X axis.
     #[inline]
     pub fn from_rotation_x(angle: f32) -> Self {
         let (s, c) = mf::sin_cos(angle * 0.5);
-        Self { x: s, y: 0.0, z: 0.0, w: c }
+        Self {
+            x: s,
+            y: 0.0,
+            z: 0.0,
+            w: c,
+        }
     }
     /// Rotation about the Y axis.
     #[inline]
     pub fn from_rotation_y(angle: f32) -> Self {
         let (s, c) = mf::sin_cos(angle * 0.5);
-        Self { x: 0.0, y: s, z: 0.0, w: c }
+        Self {
+            x: 0.0,
+            y: s,
+            z: 0.0,
+            w: c,
+        }
     }
     /// Rotation about the Z axis.
     #[inline]
     pub fn from_rotation_z(angle: f32) -> Self {
         let (s, c) = mf::sin_cos(angle * 0.5);
-        Self { x: 0.0, y: 0.0, z: s, w: c }
+        Self {
+            x: 0.0,
+            y: 0.0,
+            z: s,
+            w: c,
+        }
     }
 
     /// Dot product (treating the quaternion as a 4-vector).
@@ -85,12 +110,22 @@ impl Quat {
     #[inline]
     pub fn normalize(self) -> Self {
         let inv = 1.0 / self.length();
-        Self { x: self.x * inv, y: self.y * inv, z: self.z * inv, w: self.w * inv }
+        Self {
+            x: self.x * inv,
+            y: self.y * inv,
+            z: self.z * inv,
+            w: self.w * inv,
+        }
     }
     /// Conjugate (inverse for a unit quaternion).
     #[inline]
     pub fn conjugate(self) -> Self {
-        Self { x: -self.x, y: -self.y, z: -self.z, w: self.w }
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: self.w,
+        }
     }
     /// Inverse. For unit quaternions this equals [`Quat::conjugate`].
     #[inline]
@@ -197,7 +232,12 @@ impl Neg for Quat {
     type Output = Quat;
     #[inline]
     fn neg(self) -> Quat {
-        Quat { x: -self.x, y: -self.y, z: -self.z, w: -self.w }
+        Quat {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: -self.w,
+        }
     }
 }
 

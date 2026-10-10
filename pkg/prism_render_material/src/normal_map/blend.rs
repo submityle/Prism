@@ -44,7 +44,11 @@ fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
 #[must_use]
 pub fn blend_linear(base: [f32; 3], detail: [f32; 3]) -> [f32; 3] {
     normalize_or_base(
-        [base[0] + detail[0], base[1] + detail[1], base[2] + detail[2]],
+        [
+            base[0] + detail[0],
+            base[1] + detail[1],
+            base[2] + detail[2],
+        ],
         base,
     )
 }

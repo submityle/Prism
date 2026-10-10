@@ -347,7 +347,9 @@ impl Drop for Guard {
 
 impl fmt::Debug for Guard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Guard").field("epoch", &self.epoch()).finish()
+        f.debug_struct("Guard")
+            .field("epoch", &self.epoch())
+            .finish()
     }
 }
 

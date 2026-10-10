@@ -233,8 +233,13 @@ pub fn encode_perceptual(
     let reverberant = energy::reverberant_energy(ir, onset, early_win);
 
     let direct_gain = energy::occlusion_gain(direct, reference_energy);
-    let direct_cutoff_hz =
-        energy::direct_cutoff(ir, onset, direct_win, config.min_cutoff_hz, config.max_cutoff_hz);
+    let direct_cutoff_hz = energy::direct_cutoff(
+        ir,
+        onset,
+        direct_win,
+        config.min_cutoff_hz,
+        config.max_cutoff_hz,
+    );
     let rt60_s = decay::rt60(ir, onset);
     let drr = wet_dry::drr_db(direct, reverberant);
     let wet_gain = wet_dry::wet_gain_from_drr(drr, config.drr_range_db);
@@ -274,7 +279,11 @@ mod tests {
         p[0] = 1.0;
         let ir = ImpulseResponse::new(8_000.0, p);
         let params = encode_perceptual(&ir, None, ir.total_energy(), &EncodeConfig::default());
-        assert!(params.direct_gain > 0.9, "direct_gain {}", params.direct_gain);
+        assert!(
+            params.direct_gain > 0.9,
+            "direct_gain {}",
+            params.direct_gain
+        );
         assert!(params.wet_gain < 0.1, "wet_gain {}", params.wet_gain);
     }
 

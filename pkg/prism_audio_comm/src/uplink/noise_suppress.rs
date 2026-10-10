@@ -339,8 +339,7 @@ mod tests {
         let mut tail_rms = 0.0;
         let mut first_rms = 0.0;
         for b in 0..60 {
-            let mut block: Vec<Sample> =
-                (0..frame).map(|_| rng.next_bipolar() * 0.3).collect();
+            let mut block: Vec<Sample> = (0..frame).map(|_| rng.next_bipolar() * 0.3).collect();
             let before = rms(&block);
             ns.process_block(&mut block);
             if b == 2 {
@@ -351,7 +350,10 @@ mod tests {
             }
         }
         // After the floor is learned, broadband noise is clearly attenuated.
-        assert!(tail_rms < first_rms * 0.6, "tail={tail_rms} first={first_rms}");
+        assert!(
+            tail_rms < first_rms * 0.6,
+            "tail={tail_rms} first={first_rms}"
+        );
     }
 
     #[test]

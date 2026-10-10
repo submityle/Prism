@@ -131,7 +131,7 @@ impl FixedPartition {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_TARGET_CHUNKS, FixedPartition};
+    use super::{FixedPartition, DEFAULT_TARGET_CHUNKS};
 
     #[test]
     fn grain_split_is_exact_with_remainder() {

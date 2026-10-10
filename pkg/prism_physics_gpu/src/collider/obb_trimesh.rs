@@ -130,11 +130,7 @@ mod tests {
         let lbvh = cpu_build_lbvh(&mesh.triangle_aabbs());
         // Axis-aligned half-unit box centred 0.4 above triangle 0's interior:
         // the box bottom at z = 0.4 - 0.5 = -0.1 dips 0.1 below the face.
-        let boxes = vec![Obb::new(
-            Vec3::new(1.5, 0.5, 0.4),
-            axes(),
-            Vec3::splat(0.5),
-        )];
+        let boxes = vec![Obb::new(Vec3::new(1.5, 0.5, 0.4), axes(), Vec3::splat(0.5))];
         let out = cpu_obb_trimesh_collide(&mesh, &lbvh, &boxes, 16).unwrap();
         let c = out[0].expect("box above the face must contact");
         assert_eq!(c.a, 0);
@@ -146,11 +142,7 @@ mod tests {
     fn box_far_away_reports_none() {
         let mesh = quad();
         let lbvh = cpu_build_lbvh(&mesh.triangle_aabbs());
-        let boxes = vec![Obb::new(
-            Vec3::new(1.0, 1.0, 5.0),
-            axes(),
-            Vec3::splat(0.5),
-        )];
+        let boxes = vec![Obb::new(Vec3::new(1.0, 1.0, 5.0), axes(), Vec3::splat(0.5))];
         let out = cpu_obb_trimesh_collide(&mesh, &lbvh, &boxes, 16).unwrap();
         assert!(out[0].is_none());
     }
@@ -161,11 +153,7 @@ mod tests {
         let lbvh = cpu_build_lbvh(&mesh.triangle_aabbs());
         // Box straddling the shared diagonal (0,0,0)->(2,2,0): both triangles
         // are penetrated equally, so the tie must award triangle 0.
-        let boxes = vec![Obb::new(
-            Vec3::new(1.0, 1.0, 0.4),
-            axes(),
-            Vec3::splat(0.5),
-        )];
+        let boxes = vec![Obb::new(Vec3::new(1.0, 1.0, 0.4), axes(), Vec3::splat(0.5))];
         let out = cpu_obb_trimesh_collide(&mesh, &lbvh, &boxes, 16).unwrap();
         let c = out[0].expect("box on the shared edge must contact");
         assert_eq!(c.b, 0, "tie must resolve to the smallest triangle index");
@@ -183,7 +171,11 @@ mod tests {
             Vec3::new(-s, s, 0.0),
             Vec3::new(0.0, 0.0, 1.0),
         ];
-        let boxes = vec![Obb::new(Vec3::new(1.0, 1.0, 0.4), rotated, Vec3::splat(0.5))];
+        let boxes = vec![Obb::new(
+            Vec3::new(1.0, 1.0, 0.4),
+            rotated,
+            Vec3::splat(0.5),
+        )];
         let out = cpu_obb_trimesh_collide(&mesh, &lbvh, &boxes, 16).unwrap();
         assert!(out[0].is_some(), "rotated box over the face must contact");
     }

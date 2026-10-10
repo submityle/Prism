@@ -29,7 +29,7 @@
 //! * Khronos `KHR_materials_sheen` / `KHR_materials_clearcoat`.
 
 use alloc::vec::Vec;
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 use core::f32::consts::{PI, TAU};
 
 use crate::gi::env_brdf::dfg_lut::integrate_dfg;
@@ -63,9 +63,17 @@ pub fn charlie_ndf(n_dot_h: f32, roughness: f32) -> f32 {
     let sin2 = (1.0 - cos_h * cos_h).max(0.0);
     let sin_h = sin2.sqrt();
     // sinθ^{1/α}; guard the base so `powf(0, …)` stays 0 (not NaN).
-    let pow = if sin_h <= 0.0 { 0.0 } else { ops::powf(sin_h, inv_alpha) };
+    let pow = if sin_h <= 0.0 {
+        0.0
+    } else {
+        ops::powf(sin_h, inv_alpha)
+    };
     let d = (2.0 + inv_alpha) * pow / TAU;
-    if d.is_finite() { d.max(0.0) } else { 0.0 }
+    if d.is_finite() {
+        d.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Fitted helper for the Estevez-Kulla Charlie soft-shadowing `Λ` term.
@@ -83,7 +91,11 @@ fn lambda_sheen_helper(x: f32, alpha: f32) -> f32 {
     let e = lerp(-4.320_54, -4.859_67, t);
     let xc = ops::powf(x.max(0.0), c);
     let v = a / (1.0 + b * xc) + d * x + e;
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
 }
 
 /// Estevez-Kulla Charlie soft-shadowing `Λ(cosθ)` with the published
@@ -96,7 +108,11 @@ fn lambda_sheen(cos_theta: f32, alpha: f32) -> f32 {
     } else {
         ops::exp(2.0 * lambda_sheen_helper(0.5, alpha) - lambda_sheen_helper(1.0 - c, alpha))
     };
-    if l.is_finite() { l.max(0.0) } else { 0.0 }
+    if l.is_finite() {
+        l.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Estevez-Kulla Charlie visibility term
@@ -120,7 +136,11 @@ pub fn charlie_visibility(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
         return 0.0;
     }
     let v = 1.0 / denom;
-    if v.is_finite() { v.max(0.0) } else { 0.0 }
+    if v.is_finite() {
+        v.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Fresnel-free Charlie sheen BRDF value `D·V` for local `wo`, `wi`.
@@ -139,7 +159,11 @@ pub fn sheen_brdf(wo: Vec3, wi: Vec3, roughness: f32) -> f32 {
     let d = charlie_ndf(h.z, roughness);
     let v = charlie_visibility(wo.z, wi.z, roughness);
     let f = d * v;
-    if f.is_finite() { f.max(0.0) } else { 0.0 }
+    if f.is_finite() {
+        f.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Single-scattering sheen directional albedo
@@ -305,7 +329,11 @@ fn pow5(x: f32) -> f32 {
 #[inline]
 fn floor_u32(x: f32) -> u32 {
     let f = ops::floor(x.max(0.0));
-    if f.is_finite() { f as u32 } else { 0 }
+    if f.is_finite() {
+        f as u32
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -407,7 +435,10 @@ mod tests {
     fn degenerate_inputs_never_nan() {
         assert_eq!(charlie_ndf(f32::NAN, 0.5), 0.0);
         assert_eq!(sheen_brdf(Vec3::NEG_Z, Vec3::Z, 0.5), 0.0);
-        let empty = SheenLut { size: 0, texels: Vec::new() };
+        let empty = SheenLut {
+            size: 0,
+            texels: Vec::new(),
+        };
         assert_eq!(empty.sample(0.5, 0.5), 0.0);
         assert!(sheen_directional_albedo(0.0, 0.0, 0).is_finite());
         assert!(clearcoat_env_brdf(0.0, 0.0, 0).is_finite());

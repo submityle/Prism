@@ -117,12 +117,18 @@ mod tests {
             [0.0, 1.0, 1.0],
         ];
         let i = vec![
-            [0, 1, 2], [0, 2, 3],
-            [4, 5, 6], [4, 6, 7],
-            [0, 1, 5], [0, 5, 4],
-            [3, 2, 6], [3, 6, 7],
-            [0, 3, 7], [0, 7, 4],
-            [1, 2, 6], [1, 6, 5],
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 2, 6],
+            [3, 6, 7],
+            [0, 3, 7],
+            [0, 7, 4],
+            [1, 2, 6],
+            [1, 6, 5],
         ];
         mesh(p, i)
     }
@@ -151,8 +157,8 @@ mod tests {
         // An asymmetric interior point has a well-defined gradient to follow.
         let point = grid_point(&field, 0.45, 0.4, 0.42);
         let tolerance = field.voxel_size() * 1.0;
-        let projection = project_to_surface(&field, point, 64, tolerance)
-            .expect("projection must orient");
+        let projection =
+            project_to_surface(&field, point, 64, tolerance).expect("projection must orient");
         assert!(projection.residual() <= tolerance);
     }
 
@@ -180,8 +186,8 @@ mod tests {
         let field = cube_field();
         let point = grid_point(&field, 0.45, 0.4, 0.42);
         let before = sample_signed_distance(&field, point).abs();
-        let projection = project_to_surface(&field, point, 64, 1e-4)
-            .expect("projection must orient");
+        let projection =
+            project_to_surface(&field, point, 64, 1e-4).expect("projection must orient");
         assert!(
             projection.residual() < before,
             "residual {} should be below the initial {before}",
@@ -195,8 +201,8 @@ mod tests {
         // Any point already within tolerance reports zero Newton steps.
         let point = grid_point(&field, 0.45, 0.4, 0.42);
         let huge_tolerance = 10.0;
-        let projection = project_to_surface(&field, point, 32, huge_tolerance)
-            .expect("projection must orient");
+        let projection =
+            project_to_surface(&field, point, 32, huge_tolerance).expect("projection must orient");
         assert_eq!(projection.iterations(), 0);
         assert_eq!(projection.point(), point);
     }
@@ -216,8 +222,8 @@ mod tests {
     fn projected_point_moves_from_input() {
         let field = cube_field();
         let input = grid_point(&field, 0.45, 0.4, 0.42);
-        let projection = project_to_surface(&field, input, 64, 1e-4)
-            .expect("projection must orient");
+        let projection =
+            project_to_surface(&field, input, 64, 1e-4).expect("projection must orient");
         let moved = projection.point();
         let delta_squared = (moved[0] - input[0]) * (moved[0] - input[0])
             + (moved[1] - input[1]) * (moved[1] - input[1])

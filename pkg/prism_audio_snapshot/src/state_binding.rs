@@ -37,7 +37,9 @@ impl StateSnapshotBindings {
     /// Creates an empty set of bindings.
     #[must_use]
     pub fn new() -> Self {
-        Self { map: BTreeMap::new() }
+        Self {
+            map: BTreeMap::new(),
+        }
     }
 
     /// Binds `(group, state)` to `snapshot`, replacing any prior binding.
@@ -48,7 +50,9 @@ impl StateSnapshotBindings {
     /// Returns the snapshot bound to `(group, state)`, if any.
     #[must_use]
     pub fn snapshot_for(&self, group: StateGroupId, state: StateId) -> Option<SnapshotId> {
-        self.map.get(&group).and_then(|states| states.get(&state).copied())
+        self.map
+            .get(&group)
+            .and_then(|states| states.get(&state).copied())
     }
 
     /// Resolves the snapshots activated by the current active states.
@@ -83,7 +87,11 @@ mod tests {
     fn manager_with(group: u32, members: &[u32], default: u32) -> StateManager {
         let mut mgr = StateManager::new();
         let states: Vec<StateId> = members.iter().map(|&s| StateId::new(s)).collect();
-        mgr.register(StateGroup::new(StateGroupId::new(group), states, StateId::new(default)));
+        mgr.register(StateGroup::new(
+            StateGroupId::new(group),
+            states,
+            StateId::new(default),
+        ));
         mgr
     }
 
@@ -95,7 +103,9 @@ mod tests {
             b.snapshot_for(StateGroupId::new(1), StateId::new(10)),
             Some(SnapshotId::new(100))
         );
-        assert!(b.snapshot_for(StateGroupId::new(1), StateId::new(11)).is_none());
+        assert!(b
+            .snapshot_for(StateGroupId::new(1), StateId::new(11))
+            .is_none());
     }
 
     #[test]

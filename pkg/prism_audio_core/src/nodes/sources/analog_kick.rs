@@ -207,8 +207,8 @@ impl AnalogKickParams {
         let d = Self::default();
         let frequency_hz =
             clamp_frequency(finite_or(self.frequency_hz, d.frequency_hz), sample_rate);
-        let pitch_env_hz = finite_or(self.pitch_env_hz, d.pitch_env_hz)
-            .clamp(MIN_PITCH_ENV_HZ, MAX_PITCH_ENV_HZ);
+        let pitch_env_hz =
+            finite_or(self.pitch_env_hz, d.pitch_env_hz).clamp(MIN_PITCH_ENV_HZ, MAX_PITCH_ENV_HZ);
         let pitch_decay_s = finite_or(self.pitch_decay_s, d.pitch_decay_s)
             .clamp(MIN_PITCH_DECAY_S, MAX_PITCH_DECAY_S);
         let amp_decay_s =
@@ -683,7 +683,10 @@ mod tests {
         let early_hf = hf_energy(&block[0..w]) / energy(&block[0..w]).max(1e-12);
         let late_hf =
             hf_energy(&block[block.len() - w..]) / energy(&block[block.len() - w..]).max(1e-12);
-        assert!(early_hf > late_hf * 2.0, "early = {early_hf}, late = {late_hf}");
+        assert!(
+            early_hf > late_hf * 2.0,
+            "early = {early_hf}, late = {late_hf}"
+        );
     }
 
     #[test]

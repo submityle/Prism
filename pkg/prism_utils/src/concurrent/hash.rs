@@ -242,7 +242,8 @@ where
 fn read<K, V, S>(
     lock: &RwLock<StdHashMap<K, V, S>>,
 ) -> std::sync::RwLockReadGuard<'_, StdHashMap<K, V, S>> {
-    lock.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Acquires a shard's write lock, recovering transparently from poisoning.
@@ -250,7 +251,8 @@ fn read<K, V, S>(
 fn write<K, V, S>(
     lock: &RwLock<StdHashMap<K, V, S>>,
 ) -> std::sync::RwLockWriteGuard<'_, StdHashMap<K, V, S>> {
-    lock.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+    lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl<K, V> Default for ConcurrentHashMap<K, V, FxBuildHasher> {

@@ -37,8 +37,12 @@ impl AudioNode for GainNode {
     fn process(&mut self, _ctx: &RenderContext, io: &mut ProcessIo<'_>) {
         let (input, output) = io.io(0, 0);
         let frames = output.active_frames();
-        self.smoothed
-            .set_target(self.gain.get(), Ramp::Linear { samples: frames.max(1) as u32 });
+        self.smoothed.set_target(
+            self.gain.get(),
+            Ramp::Linear {
+                samples: frames.max(1) as u32,
+            },
+        );
         let src = input.channel(0);
         let dst = output.channel_mut(0);
         for (d, s) in dst.iter_mut().zip(src) {

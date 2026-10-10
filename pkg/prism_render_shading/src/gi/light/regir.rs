@@ -106,11 +106,7 @@ impl GridConfig {
     /// The per-axis cell count, with each component forced to at least `1`.
     #[inline]
     pub fn clamped_dims(&self) -> UVec3 {
-        UVec3::new(
-            self.dims.x.max(1),
-            self.dims.y.max(1),
-            self.dims.z.max(1),
-        )
+        UVec3::new(self.dims.x.max(1), self.dims.y.max(1), self.dims.z.max(1))
     }
 
     /// Total number of cells in the grid (always at least `1`).
@@ -169,7 +165,12 @@ impl GridConfig {
         let cx = coord.x.min(dims.x - 1) as f32;
         let cy = coord.y.min(dims.y - 1) as f32;
         let cz = coord.z.min(dims.z - 1) as f32;
-        self.origin + Vec3::new((cx + 0.5) * size.x, (cy + 0.5) * size.y, (cz + 0.5) * size.z)
+        self.origin
+            + Vec3::new(
+                (cx + 0.5) * size.x,
+                (cy + 0.5) * size.y,
+                (cz + 0.5) * size.z,
+            )
     }
 }
 
@@ -191,7 +192,11 @@ pub fn cell_target(light: &GridLight, cell_center: Vec3, min_dist: f32) -> f32 {
         .max(md * md)
         .max(MIN_DIST2_FLOOR);
     let t = power / dist2;
-    if t.is_finite() { t } else { 0.0 }
+    if t.is_finite() {
+        t
+    } else {
+        0.0
+    }
 }
 
 /// Fills a cell's reservoir by streaming RIS over a candidate light list.
@@ -335,10 +340,17 @@ mod tests {
 
     #[test]
     fn cell_coord_handles_origin_offset() {
-        let grid = GridConfig::new(Vec3::new(10.0, 10.0, 10.0), Vec3::splat(2.0), UVec3::splat(5));
+        let grid = GridConfig::new(
+            Vec3::new(10.0, 10.0, 10.0),
+            Vec3::splat(2.0),
+            UVec3::splat(5),
+        );
         // (10,10,10) is the min corner of cell 0; (13,10,10) lands in cell x=1.
         assert_eq!(grid.cell_coord(Vec3::new(10.5, 10.5, 10.5)), UVec3::ZERO);
-        assert_eq!(grid.cell_coord(Vec3::new(13.0, 10.5, 10.5)), UVec3::new(1, 0, 0));
+        assert_eq!(
+            grid.cell_coord(Vec3::new(13.0, 10.5, 10.5)),
+            UVec3::new(1, 0, 0)
+        );
     }
 
     #[test]
@@ -400,7 +412,11 @@ mod tests {
         let p1 = cell_target(&lights[1], center, 0.01);
         let p_sel = cell_target(&lights[q.light_index as usize], center, 0.01);
         let expected = (p0 + p1) / p_sel;
-        assert!((q.weight - expected).abs() < 1e-4, "w={} exp={expected}", q.weight);
+        assert!(
+            (q.weight - expected).abs() < 1e-4,
+            "w={} exp={expected}",
+            q.weight
+        );
     }
 
     #[test]

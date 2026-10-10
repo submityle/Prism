@@ -45,10 +45,7 @@ pub fn mirrored_view_projection(clip_from_world: &Mat4, plane: &Plane) -> Mat4 {
 /// oblique clip is applied to the mirrored projection; pass the mirrored
 /// projection matrix (not the full world VP) as `mirror_proj`.
 #[inline]
-pub fn mirrored_projection_with_clip(
-    mirror_proj: &Mat4,
-    plane_view: bevy_math::Vec4,
-) -> Mat4 {
+pub fn mirrored_projection_with_clip(mirror_proj: &Mat4, plane_view: bevy_math::Vec4) -> Mat4 {
     oblique_near_clip(*mirror_proj, plane_view)
 }
 
@@ -201,7 +198,10 @@ mod tests {
         let mut prev = -1.0;
         for r in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] {
             let tap = resolve_planar_tap(&plane, &vp, Vec3::new(0.0, 3.0, 0.0), r, &p);
-            assert!(tap.sample.lod >= prev - 1e-6, "lod not monotonic in roughness");
+            assert!(
+                tap.sample.lod >= prev - 1e-6,
+                "lod not monotonic in roughness"
+            );
             prev = tap.sample.lod;
         }
     }

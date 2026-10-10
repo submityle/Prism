@@ -14,7 +14,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::ser::{DeserializeError, SerializeError, StableTypeId, from_binary, from_ron, to_binary, to_ron};
+use crate::ser::{
+    from_binary, from_ron, to_binary, to_ron, DeserializeError, SerializeError, StableTypeId,
+};
 use crate::{Reflect, TypeRegistry};
 
 /// A single reflected entry inside a [`DynamicScene`].
@@ -89,20 +91,28 @@ impl DynamicScene {
     /// Create an empty scene.
     #[must_use]
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Create an empty scene with room for `capacity` entries.
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { entries: Vec::with_capacity(capacity) }
+        Self {
+            entries: Vec::with_capacity(capacity),
+        }
     }
 
     /// Append a reflected value, tagging it with its type name and id.
     pub fn push(&mut self, value: Box<dyn Reflect>) {
         let type_name = value.type_name().to_string();
         let stable_id = StableTypeId::of_path(value.type_name());
-        self.entries.push(SceneEntry { type_name, stable_id, value });
+        self.entries.push(SceneEntry {
+            type_name,
+            stable_id,
+            value,
+        });
     }
 
     /// Append a concrete reflected value by value.
@@ -159,7 +169,8 @@ impl DynamicScene {
             out.extend_from_slice(&name_len.to_le_bytes());
             out.extend_from_slice(name);
             let payload = to_binary(&*entry.value).map_err(SceneError::Serialize)?;
-            let payload_len = u32::try_from(payload.len()).map_err(|_| SceneError::TooManyEntries)?;
+            let payload_len =
+                u32::try_from(payload.len()).map_err(|_| SceneError::TooManyEntries)?;
             out.extend_from_slice(&payload_len.to_le_bytes());
             out.extend_from_slice(&payload);
         }
@@ -193,7 +204,11 @@ impl DynamicScene {
             let payload = reader.take(payload_len)?;
             let value = decode_entry(&type_name, payload, registry, Payload::Binary)?;
             let stable_id = StableTypeId::of_path(value.type_name());
-            scene.entries.push(SceneEntry { type_name, stable_id, value });
+            scene.entries.push(SceneEntry {
+                type_name,
+                stable_id,
+                value,
+            });
         }
         if !reader.is_empty() {
             return Err(SceneError::TrailingData);
@@ -273,12 +288,14 @@ impl DynamicScene {
             if end > body.len() {
                 return Err(SceneError::Truncated);
             }
-            let payload = body
-                .get(cursor..end)
-                .ok_or(SceneError::Truncated)?;
+            let payload = body.get(cursor..end).ok_or(SceneError::Truncated)?;
             let value = decode_entry(&type_name, payload.as_bytes(), registry, Payload::Text)?;
             let stable_id = StableTypeId::of_path(value.type_name());
-            scene.entries.push(SceneEntry { type_name, stable_id, value });
+            scene.entries.push(SceneEntry {
+                type_name,
+                stable_id,
+                value,
+            });
             cursor = end;
         }
         Ok(scene)

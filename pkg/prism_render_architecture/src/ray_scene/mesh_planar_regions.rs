@@ -113,7 +113,11 @@ fn face_geometry(mesh: &TriangleMesh, tri: [u32; 3]) -> FaceGeometry {
         (a[2] + b[2] + c[2]) / 3.0,
     ];
     if len <= 1e-12 {
-        FaceGeometry { normal: [0.0, 0.0, 0.0], centroid, degenerate: true }
+        FaceGeometry {
+            normal: [0.0, 0.0, 0.0],
+            centroid,
+            degenerate: true,
+        }
     } else {
         FaceGeometry {
             normal: [cross[0] / len, cross[1] / len, cross[2] / len],
@@ -177,14 +181,21 @@ pub fn planar_regions(
 ) -> PlanarRegions {
     let face_count = mesh.indices().len();
     if face_count == 0 {
-        return PlanarRegions { face_region: Vec::new(), region_count: 0, planes: Vec::new() };
+        return PlanarRegions {
+            face_region: Vec::new(),
+            region_count: 0,
+            planes: Vec::new(),
+        };
     }
 
     let cos_min = f64::from(cos_threshold).clamp(-1.0, 1.0);
     let dist_tol = f64::from(distance_tolerance).max(0.0);
 
-    let geometry: Vec<FaceGeometry> =
-        mesh.indices().iter().map(|&tri| face_geometry(mesh, tri)).collect();
+    let geometry: Vec<FaceGeometry> = mesh
+        .indices()
+        .iter()
+        .map(|&tri| face_geometry(mesh, tri))
+        .collect();
     let adjacency = build_adjacency(mesh);
 
     let unassigned = u32::MAX;
@@ -201,7 +212,11 @@ pub fn planar_regions(
         let seed_normal = seed_geo.normal;
         let seed_offset = dot(seed_normal, seed_geo.centroid);
         planes.push(RegionPlane {
-            normal: [seed_normal[0] as f32, seed_normal[1] as f32, seed_normal[2] as f32],
+            normal: [
+                seed_normal[0] as f32,
+                seed_normal[1] as f32,
+                seed_normal[2] as f32,
+            ],
             offset: seed_offset as f32,
         });
 
@@ -237,7 +252,11 @@ pub fn planar_regions(
     }
 
     let region_count = planes.len() as u32;
-    PlanarRegions { face_region, region_count, planes }
+    PlanarRegions {
+        face_region,
+        region_count,
+        planes,
+    }
 }
 
 #[cfg(test)]
@@ -263,7 +282,12 @@ mod tests {
     fn two_coplanar_triangles_form_one_region() {
         // Unit quad split into two triangles sharing the diagonal edge.
         let m = mesh(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
             vec![[0, 1, 2], [0, 2, 3]],
         );
         let r = planar_regions(&m, 0.999, 1e-4);

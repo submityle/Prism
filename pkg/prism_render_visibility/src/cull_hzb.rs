@@ -74,8 +74,14 @@ pub fn cull_view_with_hzb(
     base_query: OcclusionQuery,
     inputs: HzbCullScene<'_>,
 ) -> (Vec<GpuRenderWorkItem>, VisibilityDiagnostics) {
-    let occluded =
-        resolve_occluded_set(view, pyramid, inputs.scene, inputs.handles, phase, base_query);
+    let occluded = resolve_occluded_set(
+        view,
+        pyramid,
+        inputs.scene,
+        inputs.handles,
+        phase,
+        base_query,
+    );
     cull_view(
         view,
         VisibilityInput {
@@ -99,7 +105,9 @@ mod tests {
     use prism_render_architecture::gpu_scene::{
         InstanceRecord, SceneBounds, SceneOperation, SceneTransaction,
     };
-    use prism_render_material::{Illumination, MaterialDomain, MaterialRecord, MaterialRenderClass};
+    use prism_render_material::{
+        Illumination, MaterialDomain, MaterialRecord, MaterialRenderClass,
+    };
 
     /// Reversed-Z clip matrix (column-major): `clip.w = z`, `clip.z = 1`, so
     /// `ndc.z = 1 / z` — nearer points read a larger reversed-Z depth.

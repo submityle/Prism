@@ -111,12 +111,14 @@ impl LoadProfile {
                 window_start = Some(window_start.map_or(start, |w| w.min(start)));
                 window_end = Some(window_end.map_or(end, |w| w.max(end)));
 
-                let entry = systems.entry(span.name.clone()).or_insert_with(|| SystemLoad {
-                    name: span.name.clone(),
-                    total_nanos: 0,
-                    call_count: 0,
-                    max_nanos: 0,
-                });
+                let entry = systems
+                    .entry(span.name.clone())
+                    .or_insert_with(|| SystemLoad {
+                        name: span.name.clone(),
+                        total_nanos: 0,
+                        call_count: 0,
+                        max_nanos: 0,
+                    });
                 entry.total_nanos = entry.total_nanos.saturating_add(span.duration_nanos);
                 entry.call_count += 1;
                 entry.max_nanos = entry.max_nanos.max(span.duration_nanos);
@@ -147,7 +149,8 @@ impl LoadProfile {
 
     /// Window length in nanoseconds (`0` when empty).
     pub fn window_nanos(&self) -> u64 {
-        self.window_end_nanos.saturating_sub(self.window_start_nanos)
+        self.window_end_nanos
+            .saturating_sub(self.window_start_nanos)
     }
 
     /// Number of threads represented in the profile.
@@ -166,7 +169,9 @@ impl LoadProfile {
     /// thread-time (`window × thread count`). Returns `0.0` when the window or
     /// thread count is zero.
     pub fn utilization(&self) -> f64 {
-        let available = self.window_nanos().saturating_mul(self.thread_count() as u64);
+        let available = self
+            .window_nanos()
+            .saturating_mul(self.thread_count() as u64);
         if available == 0 {
             0.0
         } else {

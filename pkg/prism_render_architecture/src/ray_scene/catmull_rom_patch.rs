@@ -110,12 +110,7 @@ impl CatmullRomPatch {
         // Pass 2: convert each column along v into Bézier control points.
         let mut out = [[0.0f32; 3]; 16];
         for col in 0..4 {
-            let span = span_to_bezier(
-                tmp[col],
-                tmp[4 + col],
-                tmp[8 + col],
-                tmp[12 + col],
-            );
+            let span = span_to_bezier(tmp[col], tmp[4 + col], tmp[8 + col], tmp[12 + col]);
             out[col] = span[0];
             out[4 + col] = span[1];
             out[8 + col] = span[2];

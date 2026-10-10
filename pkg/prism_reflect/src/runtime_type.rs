@@ -97,7 +97,10 @@ impl StructTypeBuilder {
     /// Finish the builder into a leaked `&'static` [`TypeInfo`].
     #[must_use]
     pub fn build_info(self) -> &'static TypeInfo {
-        leak_info(TypeInfo::Struct(StructInfo::new(self.type_name, self.fields)))
+        leak_info(TypeInfo::Struct(StructInfo::new(
+            self.type_name,
+            self.fields,
+        )))
     }
 
     /// Build the [`TypeInfo`] and register it by name as a runtime type.
@@ -150,7 +153,11 @@ impl EnumTypeBuilder {
     /// Append a tuple variant whose positional fields have the given type
     /// names.
     #[must_use]
-    pub fn with_tuple_variant(mut self, name: &'static str, field_types: Vec<&'static str>) -> Self {
+    pub fn with_tuple_variant(
+        mut self,
+        name: &'static str,
+        field_types: Vec<&'static str>,
+    ) -> Self {
         let index = self.variants.len();
         let fields = field_types
             .into_iter()

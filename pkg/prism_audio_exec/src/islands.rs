@@ -117,10 +117,7 @@ pub fn partition_islands(desc: &GraphDesc) -> IslandPartition {
     }
 
     let island_of = root.iter().map(|&r| island_index[r]).collect();
-    IslandPartition {
-        island_of,
-        members,
-    }
+    IslandPartition { island_of, members }
 }
 
 #[cfg(test)]

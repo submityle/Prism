@@ -83,13 +83,21 @@ const ENERGY_FLOOR: Sample = 1e-20;
 /// Returns a sample, mapping non-finite values to `0`.
 #[inline]
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Returns the magnitude of a sample, mapping non-finite values to `0`.
 #[inline]
 fn finite_abs(x: Sample) -> Sample {
-    if x.is_finite() { x.abs() } else { 0.0 }
+    if x.is_finite() {
+        x.abs()
+    } else {
+        0.0
+    }
 }
 
 /// Accumulates the energy `sum p[n]^2` over a slice as an `f64` accumulator,
@@ -338,7 +346,11 @@ mod tests {
     fn from_impulse_response_matches_free_function() {
         let ir = ir_with_reverb(1.0, 0.4, 20_000);
         let d = DirectToReverberantRatio::from_impulse_response(&ir, SR);
-        assert!(approx(d.drr_db, direct_to_reverberant_ratio_db(&ir, SR), 1e-6));
+        assert!(approx(
+            d.drr_db,
+            direct_to_reverberant_ratio_db(&ir, SR),
+            1e-6
+        ));
     }
 
     #[test]

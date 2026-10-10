@@ -191,7 +191,9 @@ pub fn recompute_computed_state<C: ComputedStates>(world: &mut World) {
     let next = world
         .get_resource::<State<C::SourceStates>>()
         .and_then(|source| C::compute(source.get()));
-    let current = world.get_resource::<State<C>>().map(|state| state.0.clone());
+    let current = world
+        .get_resource::<State<C>>()
+        .map(|state| state.0.clone());
 
     match (current, next) {
         (None, None) => {}

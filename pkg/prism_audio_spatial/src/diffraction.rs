@@ -60,11 +60,10 @@
 //! Audio source or derived code**; it is implemented purely from that publicly
 //! documented acoustics knowledge.
 
-use bevy_math::Vec3;
 use bevy_math::ops;
+use bevy_math::Vec3;
 
-
-use prism_audio_core::math::{Sample, db_to_linear};
+use prism_audio_core::math::{db_to_linear, Sample};
 
 use crate::early_reflections::DEFAULT_SOUND_SPEED;
 use crate::material_library::{OCTAVE_BAND_CENTERS, OCTAVE_BAND_COUNT};
@@ -138,12 +137,7 @@ impl Diffraction {
     /// which is non-negative by the triangle inequality and is zero when the
     /// edge lies on the straight line.
     #[must_use]
-    pub fn from_geometry(
-        source: Vec3,
-        edge: Vec3,
-        receiver: Vec3,
-        sound_speed: Sample,
-    ) -> Self {
+    pub fn from_geometry(source: Vec3, edge: Vec3, receiver: Vec3, sound_speed: Sample) -> Self {
         let over = length(source - edge) + length(edge - receiver);
         let direct = length(source - receiver);
         Self::from_path_difference(over - direct, sound_speed)
@@ -366,7 +360,11 @@ mod tests {
         let low = d.broadband_loss_db(20.0);
         let high = d.broadband_loss_db(20_000.0);
         assert!(approx(low, d.insertion_loss_db(0), 1e-3));
-        assert!(approx(high, d.insertion_loss_db(OCTAVE_BAND_COUNT - 1), 1e-3));
+        assert!(approx(
+            high,
+            d.insertion_loss_db(OCTAVE_BAND_COUNT - 1),
+            1e-3
+        ));
     }
 
     #[test]

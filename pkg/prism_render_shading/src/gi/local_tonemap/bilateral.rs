@@ -142,7 +142,11 @@ pub fn gaussian(x: f32, sigma: f32) -> f32 {
     };
     let e = -(x * x) / (2.0 * s * s);
     // Guard against -inf exponent for pathological inputs.
-    if e.is_finite() { ops::exp(e) } else { 0.0 }
+    if e.is_finite() {
+        ops::exp(e)
+    } else {
+        0.0
+    }
 }
 
 /// Edge-preserving bilateral estimate of the centre cell from its window.
@@ -185,7 +189,11 @@ pub fn bilateral_filter_window(
     }
     if weight_sum > 0.0 {
         let out = weighted_sum / weight_sum;
-        if out.is_finite() { out } else { center }
+        if out.is_finite() {
+            out
+        } else {
+            center
+        }
     } else {
         center
     }
@@ -217,7 +225,11 @@ impl BaseDetail {
             1.0
         };
         let v = self.base + self.detail * gain;
-        if v.is_finite() { v } else { self.base }
+        if v.is_finite() {
+            v
+        } else {
+            self.base
+        }
     }
 }
 
@@ -253,7 +265,11 @@ pub fn decompose_base_detail(
 /// Replace non-finite samples with zero and leave finite ones untouched.
 #[inline]
 fn sanitize(v: f32) -> f32 {
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -287,7 +303,10 @@ mod tests {
     fn constant_window_returns_constant() {
         let w = [5.0_f32; 25];
         let geom = BilateralWindow::centered(5, 5);
-        approx(bilateral_filter_window(&w, geom, BilateralParams::default()), 5.0);
+        approx(
+            bilateral_filter_window(&w, geom, BilateralParams::default()),
+            5.0,
+        );
     }
 
     #[test]
@@ -299,7 +318,10 @@ mod tests {
             cx: 0,
             cy: 0,
         };
-        approx(bilateral_filter_window(&w, geom, BilateralParams::default()), 3.0);
+        approx(
+            bilateral_filter_window(&w, geom, BilateralParams::default()),
+            3.0,
+        );
     }
 
     #[test]

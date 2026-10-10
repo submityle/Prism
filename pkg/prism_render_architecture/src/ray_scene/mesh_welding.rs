@@ -98,7 +98,13 @@ pub fn weld_vertices(mesh: &TriangleMesh, tolerance: f32) -> Result<TriangleMesh
     let mut rep_uvs: Vec<[f32; 2]> = Vec::new();
 
     if tolerance == 0.0 {
-        weld_exact(mesh, &mut remap, &mut rep_positions, &mut rep_normals, &mut rep_uvs);
+        weld_exact(
+            mesh,
+            &mut remap,
+            &mut rep_positions,
+            &mut rep_normals,
+            &mut rep_uvs,
+        );
     } else {
         weld_tolerant(
             mesh,
@@ -152,7 +158,11 @@ fn weld_exact(
     let positions = mesh.positions();
     let mut seen: HashMap<[u32; 3], u32> = HashMap::with_capacity(positions.len());
     for (v, &p) in positions.iter().enumerate() {
-        let key = [canonical_bits(p[0]), canonical_bits(p[1]), canonical_bits(p[2])];
+        let key = [
+            canonical_bits(p[0]),
+            canonical_bits(p[1]),
+            canonical_bits(p[2]),
+        ];
         let rep = *seen.entry(key).or_insert_with(|| {
             let idx = rep_positions.len() as u32;
             push_representative(mesh, v, rep_positions, rep_normals, rep_uvs);
@@ -258,8 +268,16 @@ fn compact_unreferenced(
     let has_normals = !normals.is_empty();
     let has_uvs = !uvs.is_empty();
     let mut new_positions = vec![[0.0f32; 3]; new_len];
-    let mut new_normals = if has_normals { vec![[0.0f32; 3]; new_len] } else { Vec::new() };
-    let mut new_uvs = if has_uvs { vec![[0.0f32; 2]; new_len] } else { Vec::new() };
+    let mut new_normals = if has_normals {
+        vec![[0.0f32; 3]; new_len]
+    } else {
+        Vec::new()
+    };
+    let mut new_uvs = if has_uvs {
+        vec![[0.0f32; 2]; new_len]
+    } else {
+        Vec::new()
+    };
     for (old, &new) in old_to_new.iter().enumerate() {
         if new != u32::MAX {
             let slot = new as usize;
@@ -287,7 +305,11 @@ fn compact_unreferenced(
 /// Packs a coordinate's bits for exact hashing, mapping `-0.0` to `+0.0` so the
 /// two zero encodings weld together.
 fn canonical_bits(x: f32) -> u32 {
-    if x == 0.0 { 0.0f32.to_bits() } else { x.to_bits() }
+    if x == 0.0 {
+        0.0f32.to_bits()
+    } else {
+        x.to_bits()
+    }
 }
 
 /// The integer grid cell a position occupies for a given inverse cell size.
@@ -418,7 +440,11 @@ mod tests {
         let indices = vec![[0, 1, 2], [3, 4, 5]];
         let mesh = TriangleMesh::new(positions, vec![], vec![], indices).expect("mesh");
         let welded = weld_vertices(&mesh, 1e-3).expect("weld");
-        assert_eq!(welded.vertex_count(), 3, "boundary-straddling pair must weld");
+        assert_eq!(
+            welded.vertex_count(),
+            3,
+            "boundary-straddling pair must weld"
+        );
     }
 
     #[test]
@@ -454,12 +480,21 @@ mod tests {
         let indices = vec![[0, 1, 2], [3, 4, 5]];
         let mesh = TriangleMesh::new(positions, vec![], vec![], indices).expect("mesh");
         let welded = weld_vertices(&mesh, 0.0).expect("weld");
-        assert_eq!(welded.vertex_count(), 3, "only the surviving triangle's corners remain");
+        assert_eq!(
+            welded.vertex_count(),
+            3,
+            "only the surviving triangle's corners remain"
+        );
     }
 
     #[test]
     fn attributes_follow_the_first_representative() {
-        let positions = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]];
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ];
         let normals = vec![
             [0.0, 0.0, 1.0],
             [0.0, 0.0, 1.0],
@@ -485,8 +520,14 @@ mod tests {
 
     #[test]
     fn invalid_tolerance_is_rejected() {
-        assert_eq!(weld_vertices(&split_quad(), -1.0), Err(WeldError::InvalidTolerance));
-        assert_eq!(weld_vertices(&split_quad(), f32::NAN), Err(WeldError::InvalidTolerance));
+        assert_eq!(
+            weld_vertices(&split_quad(), -1.0),
+            Err(WeldError::InvalidTolerance)
+        );
+        assert_eq!(
+            weld_vertices(&split_quad(), f32::NAN),
+            Err(WeldError::InvalidTolerance)
+        );
         assert_eq!(
             weld_vertices(&split_quad(), f32::INFINITY),
             Err(WeldError::InvalidTolerance)

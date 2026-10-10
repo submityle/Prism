@@ -12,7 +12,9 @@
 
 use crate::float::f64 as mf;
 use crate::{Vec2, Vec3, Vec4};
-use core::ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
+use core::ops::{
+    Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign,
+};
 
 /// A 2-component `f64` vector.
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -118,7 +120,11 @@ impl DVec2 {
     #[inline]
     pub fn normalize_or_zero(self) -> Self {
         let len = self.length();
-        if len > 1.0e-200 { self * (1.0 / len) } else { Self::ZERO }
+        if len > 1.0e-200 {
+            self * (1.0 / len)
+        } else {
+            Self::ZERO
+        }
     }
     /// True if both components are finite.
     #[inline]
@@ -256,7 +262,11 @@ impl DVec3 {
     #[inline]
     pub fn normalize_or_zero(self) -> Self {
         let len = self.length();
-        if len > 1.0e-200 { self * (1.0 / len) } else { Self::ZERO }
+        if len > 1.0e-200 {
+            self * (1.0 / len)
+        } else {
+            Self::ZERO
+        }
     }
     /// True if all components are finite.
     #[inline]
@@ -369,7 +379,12 @@ impl DVec4 {
     /// Broadcast a scalar to every component.
     #[inline]
     pub const fn splat(v: f64) -> Self {
-        Self { x: v, y: v, z: v, w: v }
+        Self {
+            x: v,
+            y: v,
+            z: v,
+            w: v,
+        }
     }
     /// Dot product.
     #[inline]

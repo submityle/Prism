@@ -97,9 +97,7 @@ impl GpuRasterClassifier {
         let device = ctx.device();
         let module = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("prism_raster_path_classify"),
-            source: ShaderSource::Wgsl(
-                include_str!("../shaders/raster_path_classify.wesl").into(),
-            ),
+            source: ShaderSource::Wgsl(include_str!("../shaders/raster_path_classify.wesl").into()),
         });
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("prism_raster_path_classify_layout"),

@@ -25,7 +25,10 @@ impl Ray3 {
     /// Create a ray whose `direction` is normalized to unit length.
     #[inline]
     pub fn new_normalized(origin: Vec3, direction: Vec3) -> Self {
-        Self { origin, direction: direction.normalize() }
+        Self {
+            origin,
+            direction: direction.normalize(),
+        }
     }
 
     /// Evaluate the point at parameter `t`: `origin + direction * t`.
@@ -37,6 +40,9 @@ impl Ray3 {
     /// Return a copy with a unit-length `direction`.
     #[inline]
     pub fn normalized(self) -> Self {
-        Self { origin: self.origin, direction: self.direction.normalize() }
+        Self {
+            origin: self.origin,
+            direction: self.direction.normalize(),
+        }
     }
 }

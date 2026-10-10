@@ -495,7 +495,11 @@ mod tests {
         assert!(approx(hit.t, 4.0, 1e-4), "t = {}", hit.t);
         assert!(hit.front_face);
         // Outward normal points toward +z where the ray entered.
-        assert!(approx(hit.normal[2], 1.0, 1e-4), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[2], 1.0, 1e-4),
+            "normal = {:?}",
+            hit.normal
+        );
     }
 
     #[test]
@@ -523,7 +527,11 @@ mod tests {
         assert_eq!(hit.primitive, 7);
         assert!(approx(hit.t, 3.0, 1e-4), "t = {}", hit.t);
         assert!(hit.front_face);
-        assert!(approx(hit.normal[1], 1.0, 1e-4), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[1], 1.0, 1e-4),
+            "normal = {:?}",
+            hit.normal
+        );
     }
 
     #[test]
@@ -535,7 +543,11 @@ mod tests {
         assert!(approx(hit.t, 1.0, 1e-4), "t = {}", hit.t);
         assert!(!hit.front_face);
         // Inward-flipped normal opposes the outward +z surface normal.
-        assert!(approx(hit.normal[2], -1.0, 1e-4), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[2], -1.0, 1e-4),
+            "normal = {:?}",
+            hit.normal
+        );
     }
 
     #[test]

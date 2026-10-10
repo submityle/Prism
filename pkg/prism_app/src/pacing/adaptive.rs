@@ -65,8 +65,10 @@ impl FrameRateLadder {
     /// `None` when no limited rung remains.
     #[must_use]
     pub fn new(limits: impl IntoIterator<Item = FrameLimit>) -> Option<Self> {
-        let mut steps: Vec<FrameLimit> =
-            limits.into_iter().filter(|l| l.period().is_some()).collect();
+        let mut steps: Vec<FrameLimit> = limits
+            .into_iter()
+            .filter(|l| l.period().is_some())
+            .collect();
         if steps.is_empty() {
             return None;
         }
@@ -281,9 +283,7 @@ impl AdaptiveFrameLimiter {
         // Room to try a more demanding rung?
         if let Some(next) = self.ladder.get(self.index + 1) {
             let next_period = period_nanos(next);
-            let budget = next_period
-                .saturating_mul(u128::from(100 - self.headroom_percent))
-                / 100;
+            let budget = next_period.saturating_mul(u128::from(100 - self.headroom_percent)) / 100;
             if worst_nanos(&self.samples) <= budget {
                 return AdaptiveAction::StepUp;
             }
@@ -373,8 +373,8 @@ mod tests {
         let mut a = AdaptiveFrameLimiter::new(ladder())
             .with_window(4)
             .with_start_index(0); // start at 30fps
-        // 60fps period is ~16.6ms; with 10% headroom the budget is ~15ms.
-        // 2ms work is far inside it → climb.
+                                  // 60fps period is ~16.6ms; with 10% headroom the budget is ~15ms.
+                                  // 2ms work is far inside it → climb.
         let mut moved = None;
         for _ in 0..4 {
             if let Some(l) = a.record(Duration::from_millis(2)) {
@@ -392,8 +392,8 @@ mod tests {
         let mut a = AdaptiveFrameLimiter::new(ladder())
             .with_window(4)
             .with_start_index(1); // 60fps, period ~16.6ms
-        // 120fps budget with 10% headroom is ~7.5ms; 12ms exceeds it but is
-        // under the current 16.6ms period, so hold.
+                                  // 120fps budget with 10% headroom is ~7.5ms; 12ms exceeds it but is
+                                  // under the current 16.6ms period, so hold.
         for _ in 0..4 {
             assert_eq!(a.record(Duration::from_millis(12)), None);
         }
@@ -415,9 +415,8 @@ mod tests {
 
     #[test]
     fn single_rung_ladder_never_moves() {
-        let mut a =
-            AdaptiveFrameLimiter::new(FrameRateLadder::from_fps([60]).expect("non-empty"))
-                .with_window(2);
+        let mut a = AdaptiveFrameLimiter::new(FrameRateLadder::from_fps([60]).expect("non-empty"))
+            .with_window(2);
         assert_eq!(a.record(Duration::from_millis(100)), None);
         assert_eq!(a.record(Duration::from_millis(100)), None);
         assert_eq!(a.index(), 0);
@@ -429,7 +428,7 @@ mod tests {
         let mut a = AdaptiveFrameLimiter::new(ladder())
             .with_window(2)
             .with_start_index(0); // already at the most permissive rung
-        // Missing even 30fps (33ms): nowhere lower to go → hold.
+                                  // Missing even 30fps (33ms): nowhere lower to go → hold.
         a.record(Duration::from_millis(50));
         assert_eq!(a.record(Duration::from_millis(50)), None);
         assert_eq!(a.index(), 0);
@@ -438,7 +437,7 @@ mod tests {
     #[test]
     fn does_not_step_above_the_ceiling() {
         let mut a = AdaptiveFrameLimiter::new(ladder()).with_window(2); // starts at 120fps (top)
-        // Trivial work, but already at the most demanding rung → hold.
+                                                                        // Trivial work, but already at the most demanding rung → hold.
         a.record(Duration::from_micros(10));
         assert_eq!(a.record(Duration::from_micros(10)), None);
         assert_eq!(a.index(), 2);

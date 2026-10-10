@@ -24,8 +24,8 @@ use alloc::vec::Vec;
 
 use bevy_math::Vec3;
 
-use prism_audio_procedural::contact::{cluster_to_group, ImpactEvent};
 use prism_audio_core::math::Sample;
+use prism_audio_procedural::contact::{cluster_to_group, ImpactEvent};
 
 /// Configuration for far-field impact clustering.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -150,11 +150,7 @@ mod tests {
 
     #[test]
     fn far_tight_cluster_collapses() {
-        let mut impacts = alloc::vec![
-            impact(1, 1.0, 10),
-            impact(2, 2.0, 20),
-            impact(3, 1.0, 30),
-        ];
+        let mut impacts = alloc::vec![impact(1, 1.0, 10), impact(2, 2.0, 20), impact(3, 1.0, 30),];
         let positions = alloc::vec![
             Vec3::new(100.0, 0.0, 0.0),
             Vec3::new(101.0, 0.0, 0.0),
@@ -177,10 +173,7 @@ mod tests {
     #[test]
     fn far_apart_impacts_survive() {
         let mut impacts = alloc::vec![impact(1, 1.0, 10), impact(2, 1.0, 20)];
-        let positions = alloc::vec![
-            Vec3::new(100.0, 0.0, 0.0),
-            Vec3::new(100.0, 500.0, 0.0),
-        ];
+        let positions = alloc::vec![Vec3::new(100.0, 0.0, 0.0), Vec3::new(100.0, 500.0, 0.0),];
         let config = ClusterConfig {
             listener: Vec3::ZERO,
             cluster_radius: 20.0,
@@ -192,11 +185,7 @@ mod tests {
 
     #[test]
     fn near_impacts_are_not_clustered() {
-        let mut impacts = alloc::vec![
-            impact(1, 1.0, 10),
-            impact(2, 1.0, 20),
-            impact(3, 1.0, 30),
-        ];
+        let mut impacts = alloc::vec![impact(1, 1.0, 10), impact(2, 1.0, 20), impact(3, 1.0, 30),];
         let positions = alloc::vec![
             Vec3::new(1.0, 0.0, 0.0),
             Vec3::new(1.5, 0.0, 0.0),
@@ -214,10 +203,7 @@ mod tests {
     #[test]
     fn undersized_far_group_survives() {
         let mut impacts = alloc::vec![impact(1, 1.0, 10), impact(2, 1.0, 20)];
-        let positions = alloc::vec![
-            Vec3::new(100.0, 0.0, 0.0),
-            Vec3::new(101.0, 0.0, 0.0),
-        ];
+        let positions = alloc::vec![Vec3::new(100.0, 0.0, 0.0), Vec3::new(101.0, 0.0, 0.0),];
         let config = ClusterConfig {
             listener: Vec3::ZERO,
             cluster_radius: 20.0,

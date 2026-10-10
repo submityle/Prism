@@ -42,7 +42,7 @@
 //! * Heitz 2018, *Sampling the GGX Distribution of Visible Normals* (JCGT) —
 //!   the VNDF sampling routine and its pdf.
 
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 use core::f32::consts::{FRAC_1_PI, PI, TAU};
 
 /// Minimum GGX `alpha`.  A perfectly smooth mirror would make `alpha = 0`, which
@@ -92,7 +92,11 @@ pub fn ndf_ggx(n_dot_h: f32, alpha: f32) -> f32 {
     let cos2 = n_dot_h * n_dot_h;
     let denom = cos2 * (a2 - 1.0) + 1.0;
     let d = a2 * FRAC_1_PI / (denom * denom).max(1.0e-20);
-    if d.is_finite() { d.max(0.0) } else { 0.0 }
+    if d.is_finite() {
+        d.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Anisotropic GGX normal-distribution function for a local half vector `h`.
@@ -111,7 +115,11 @@ pub fn ndf_ggx_anisotropic(h: Vec3, alpha_x: f32, alpha_y: f32) -> f32 {
     let b = h.y / ay;
     let s = t * t + b * b + h.z * h.z;
     let d = 1.0 / (PI * ax * ay * (s * s).max(1.0e-20));
-    if d.is_finite() { d.max(0.0) } else { 0.0 }
+    if d.is_finite() {
+        d.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Smith `Lambda` for an isotropic GGX surface and a direction with cosine
@@ -126,7 +134,11 @@ pub fn smith_lambda(cos_theta: f32, alpha: f32) -> f32 {
     let cos2 = c * c;
     let tan2 = (1.0 - cos2) / cos2;
     let lambda = 0.5 * (-1.0 + (1.0 + a * a * tan2).max(0.0).sqrt());
-    if lambda.is_finite() { lambda.max(0.0) } else { 0.0 }
+    if lambda.is_finite() {
+        lambda.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Smith `Lambda` for an anisotropic GGX surface and a local direction `w`.
@@ -138,7 +150,11 @@ pub fn smith_lambda_anisotropic(w: Vec3, alpha_x: f32, alpha_y: f32) -> f32 {
     let num = (ax * w.x) * (ax * w.x) + (ay * w.y) * (ay * w.y);
     let tan2 = num / (cz * cz);
     let lambda = 0.5 * (-1.0 + (1.0 + tan2).max(0.0).sqrt());
-    if lambda.is_finite() { lambda.max(0.0) } else { 0.0 }
+    if lambda.is_finite() {
+        lambda.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Smith single-direction masking term `G1 = 1 / (1 + Lambda)` (isotropic).
@@ -183,7 +199,11 @@ pub fn fresnel_schlick(f0: Vec3, cos_theta: f32) -> Vec3 {
     let c = (1.0 - cos_theta.clamp(0.0, 1.0)).max(0.0);
     let c5 = (c * c) * (c * c) * c;
     let f = f0 + (Vec3::ONE - f0) * c5;
-    Vec3::new(f.x.clamp(0.0, 1.0), f.y.clamp(0.0, 1.0), f.z.clamp(0.0, 1.0))
+    Vec3::new(
+        f.x.clamp(0.0, 1.0),
+        f.y.clamp(0.0, 1.0),
+        f.z.clamp(0.0, 1.0),
+    )
 }
 
 /// Scalar Schlick Fresnel for a single reflectance `f0`.
@@ -216,7 +236,11 @@ pub fn sample_ggx_vndf(wo: Vec3, alpha_x: f32, alpha_y: f32, u1: f32, u2: f32) -
     }
     // Stretch the view direction into the hemisphere configuration (alpha = 1).
     let vh = Vec3::new(ax * wo.x, ay * wo.y, wo.z).normalize_or_zero();
-    let vh = if vh.length_squared() > 0.0 { vh } else { Vec3::Z };
+    let vh = if vh.length_squared() > 0.0 {
+        vh
+    } else {
+        Vec3::Z
+    };
 
     // Orthonormal basis of the stretched view (Heitz's robust construction).
     let lensq = vh.x * vh.x + vh.y * vh.y;
@@ -240,7 +264,11 @@ pub fn sample_ggx_vndf(wo: Vec3, alpha_x: f32, alpha_y: f32, u1: f32, u2: f32) -
     let pz = (1.0 - p1 * p1 - p2 * p2).max(0.0).sqrt();
     let nh = p1 * t1 + p2 * t2 + pz * vh;
     let h = Vec3::new(ax * nh.x, ay * nh.y, nh.z.max(0.0)).normalize_or_zero();
-    if h.length_squared() > 0.0 { h } else { Vec3::Z }
+    if h.length_squared() > 0.0 {
+        h
+    } else {
+        Vec3::Z
+    }
 }
 
 /// Solid-angle pdf of the VNDF *half vector* `h` for local view `wo`.
@@ -259,7 +287,11 @@ pub fn vndf_pdf_h(wo: Vec3, h: Vec3, alpha_x: f32, alpha_y: f32) -> f32 {
     let g1 = 1.0 / (1.0 + smith_lambda_anisotropic(wo, alpha_x, alpha_y));
     let d = ndf_ggx_anisotropic(h, alpha_x, alpha_y);
     let pdf = g1 * v_dot_h * d / wo.z.max(1.0e-6);
-    if pdf.is_finite() { pdf.max(0.0) } else { 0.0 }
+    if pdf.is_finite() {
+        pdf.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Solid-angle pdf of a reflected direction `wi` produced by VNDF sampling.
@@ -280,7 +312,11 @@ pub fn vndf_pdf_reflect(wo: Vec3, wi: Vec3, alpha_x: f32, alpha_y: f32) -> f32 {
         return 0.0;
     }
     let pdf = vndf_pdf_h(wo, h, alpha_x, alpha_y) / (4.0 * v_dot_h);
-    if pdf.is_finite() { pdf.max(0.0) } else { 0.0 }
+    if pdf.is_finite() {
+        pdf.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Evaluates the anisotropic GGX specular BRDF (times nothing — the pure BRDF
@@ -303,7 +339,11 @@ pub fn ggx_brdf(wo: Vec3, wi: Vec3, alpha_x: f32, alpha_y: f32, f0: Vec3) -> Vec
     let denom = (4.0 * wo.z * wi.z).max(1.0e-6);
     let scale = d * g / denom;
     let v = f * scale;
-    if v.is_finite() { v.max(Vec3::ZERO) } else { Vec3::ZERO }
+    if v.is_finite() {
+        v.max(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// Scalar GGX specular BRDF (uses a scalar `f0`), convenient for a directional
@@ -322,7 +362,11 @@ pub fn ggx_brdf_scalar(wo: Vec3, wi: Vec3, alpha_x: f32, alpha_y: f32, f0: f32) 
     let f = fresnel_schlick_scalar(f0, wo.dot(h).max(0.0));
     let denom = (4.0 * wo.z * wi.z).max(1.0e-6);
     let v = d * g * f / denom;
-    if v.is_finite() { v.max(0.0) } else { 0.0 }
+    if v.is_finite() {
+        v.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -497,7 +541,10 @@ mod tests {
     #[test]
     fn degenerate_inputs_never_nan() {
         assert_eq!(ndf_ggx(-0.5, 0.3), 0.0);
-        assert_eq!(ggx_brdf(Vec3::NEG_Z, Vec3::Z, 0.3, 0.3, Vec3::ONE), Vec3::ZERO);
+        assert_eq!(
+            ggx_brdf(Vec3::NEG_Z, Vec3::Z, 0.3, 0.3, Vec3::ONE),
+            Vec3::ZERO
+        );
         let h = sample_ggx_vndf(Vec3::NEG_Z, 0.3, 0.3, 0.5, 0.5);
         assert!(h.is_finite());
         assert_eq!(vndf_pdf_reflect(Vec3::Z, Vec3::NEG_Z, 0.3, 0.3), 0.0);

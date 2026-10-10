@@ -93,8 +93,11 @@ mod tests {
         // A capsule between a +Y receiver and the light both shadows the light
         // and occludes the hemisphere.
         let light = DiskLight::new(Vec3::new(0.0, 0.0, 12.0), 0.4);
-        let shadow_caps =
-            [Capsule::new(Vec3::new(0.0, -3.0, 3.0), Vec3::new(0.0, 3.0, 3.0), 0.8)];
+        let shadow_caps = [Capsule::new(
+            Vec3::new(0.0, -3.0, 3.0),
+            Vec3::new(0.0, 3.0, 3.0),
+            0.8,
+        )];
         let occ = capsule_soft_shadow(Vec3::ZERO, light, &shadow_caps);
         assert!(occ > 0.0 && occ <= 1.0, "occ = {occ}");
 

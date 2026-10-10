@@ -216,9 +216,21 @@ fn clamp_non_negative(value: f32) -> f32 {
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.max(0.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.max(0.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.max(0.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -326,7 +338,10 @@ mod tests {
         let dt = distance / steps as f32;
         let factor = (acc * dt as f64) as f32;
         let numeric = radiance * factor;
-        assert!((analytic - numeric).abs().max_element() < 2e-3, "a={analytic} n={numeric}");
+        assert!(
+            (analytic - numeric).abs().max_element() < 2e-3,
+            "a={analytic} n={numeric}"
+        );
     }
 
     #[test]

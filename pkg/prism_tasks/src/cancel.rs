@@ -15,8 +15,8 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use crate::TaskPool;
 

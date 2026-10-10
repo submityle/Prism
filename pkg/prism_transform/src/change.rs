@@ -64,7 +64,11 @@ impl ChangeTicks {
     /// reported as changed (its world transform has never been computed).
     #[inline]
     pub const fn new() -> Self {
-        Self { changed: Vec::new(), current: Tick(1), last_pass: Tick::ZERO }
+        Self {
+            changed: Vec::new(),
+            current: Tick(1),
+            last_pass: Tick::ZERO,
+        }
     }
 
     /// Number of tracked nodes.

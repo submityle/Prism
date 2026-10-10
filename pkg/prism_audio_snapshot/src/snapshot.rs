@@ -14,8 +14,8 @@
 //! [`crate::parameter::ParameterId`]. Stored in [`crate::registry`], resolved
 //! by [`crate::resolved`] and [`crate::stack`].
 
-use alloc::collections::BTreeMap;
 use alloc::collections::btree_map::Values;
+use alloc::collections::BTreeMap;
 
 use crate::parameter::{ParameterId, ParameterKind};
 use crate::target::ParameterTarget;
@@ -67,7 +67,10 @@ impl Snapshot {
     /// Creates an empty snapshot with the given identity.
     #[must_use]
     pub fn new(id: SnapshotId) -> Self {
-        Self { id, targets: BTreeMap::new() }
+        Self {
+            id,
+            targets: BTreeMap::new(),
+        }
     }
 
     /// Inserts or replaces a target and returns the snapshot, for chaining.
@@ -79,7 +82,8 @@ impl Snapshot {
 
     /// Inserts or replaces the target for `id` with domain `kind` and `value`.
     pub fn set(&mut self, id: ParameterId, kind: ParameterKind, value: Sample) {
-        self.targets.insert(id, ParameterTarget::new(id, kind, value));
+        self.targets
+            .insert(id, ParameterTarget::new(id, kind, value));
     }
 
     /// Returns the target for `id`, if present.

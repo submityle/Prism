@@ -228,7 +228,11 @@ impl MultibandLayout {
     pub fn band_bounds(&self, index: usize) -> (Sample, Sample) {
         let last = self.band_count() - 1;
         let i = index.min(last);
-        let lo = if i == 0 { self.low_hz } else { self.edges[i - 1] };
+        let lo = if i == 0 {
+            self.low_hz
+        } else {
+            self.edges[i - 1]
+        };
         let hi = if i == last {
             self.high_hz
         } else {
@@ -292,10 +296,7 @@ impl MultibandGains {
             last = clamped;
             out.push(clamped);
         }
-        Self {
-            layout,
-            gains: out,
-        }
+        Self { layout, gains: out }
     }
 
     /// Builds a flat spectrum with the same gain in every band.
@@ -856,7 +857,9 @@ mod tests {
     fn reflection_from_absorption_tracks_energy_balance() {
         let layout = MultibandLayout::log_spaced(63.0, 8000.0, 8);
         let mirror = MaterialAbsorption::new([0.0; OCTAVE_BAND_COUNT]);
-        assert!(MultibandGains::reflection_from_absorption(layout.clone(), &mirror).is_full_band(1e-6));
+        assert!(
+            MultibandGains::reflection_from_absorption(layout.clone(), &mirror).is_full_band(1e-6)
+        );
         let sink = MaterialAbsorption::new([1.0; OCTAVE_BAND_COUNT]);
         assert!(MultibandGains::reflection_from_absorption(layout, &sink).is_silent(1e-6));
     }

@@ -19,16 +19,16 @@
 //! ready queue and fails fast if a future can make no progress, so it can never
 //! hang.
 
+use alloc::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
-use alloc::sync::Arc;
 use std::sync::{Condvar, Mutex};
 use std::task::{Context, Poll};
 
 use super::task::{ResultCell, Task};
-use super::waker::{WakeTask, waker_of};
-use crate::TaskPool;
+use super::waker::{waker_of, WakeTask};
 use crate::scheduler::Shared;
+use crate::TaskPool;
 
 /// A type-erased, re-schedulable unit the scheduler can run without knowing the
 /// future's output type.

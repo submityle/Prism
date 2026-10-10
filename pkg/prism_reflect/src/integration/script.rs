@@ -16,8 +16,8 @@ use core::fmt;
 
 use crate::path::ParsePathError;
 use crate::{
-    ApplyError, ArgList, FunctionError, FunctionRegistry, ParsedPath, Reflect, reflect_path,
-    reflect_path_mut,
+    reflect_path, reflect_path_mut, ApplyError, ArgList, FunctionError, FunctionRegistry,
+    ParsedPath, Reflect,
 };
 
 /// A reflection-backed façade exposing path access and call-by-name to a
@@ -48,7 +48,11 @@ impl<'a> ScriptBridge<'a> {
     /// # Errors
     /// Returns [`ScriptError::Path`] if `path` does not parse, or
     /// [`ScriptError::NoSuchPath`] if it does not resolve within `root`.
-    pub fn get<'r>(&self, root: &'r dyn Reflect, path: &str) -> Result<&'r dyn Reflect, ScriptError> {
+    pub fn get<'r>(
+        &self,
+        root: &'r dyn Reflect,
+        path: &str,
+    ) -> Result<&'r dyn Reflect, ScriptError> {
         let parsed = ParsedPath::parse(path).map_err(ScriptError::Path)?;
         reflect_path(root, &parsed).ok_or_else(|| ScriptError::NoSuchPath(path.into()))
     }
@@ -90,7 +94,9 @@ impl<'a> ScriptBridge<'a> {
     /// Returns [`ScriptError::Function`] for an unknown name, an arity
     /// mismatch, an argument-type mismatch, or a callee-reported failure.
     pub fn call(&self, name: &str, args: ArgList) -> Result<Box<dyn Reflect>, ScriptError> {
-        self.functions.call(name, args).map_err(ScriptError::Function)
+        self.functions
+            .call(name, args)
+            .map_err(ScriptError::Function)
     }
 
     /// Whether a function named `name` is registered.

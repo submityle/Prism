@@ -197,10 +197,8 @@ impl WaveSolver {
                         let fx = kx as f32 / lx;
                         let fy = ky as f32 / ly;
                         let fz = kz as f32 / lz;
-                        let w2 = sound_speed * sound_speed
-                            * PI
-                            * PI
-                            * (fx * fx + fy * fy + fz * fz);
+                        let w2 =
+                            sound_speed * sound_speed * PI * PI * (fx * fx + fy * fy + fz * fz);
                         let w = ops::sqrt(w2);
                         let cos_wdt = ops::cos(w * dt);
                         two_cos[m] = 2.0 * g * cos_wdt;
@@ -334,7 +332,11 @@ impl WaveSolver {
     /// that probe. The solve is a pure function of the scene, configuration,
     /// and cell arguments.
     #[must_use]
-    pub fn solve(&mut self, source_cell: [u32; 3], probe_cells: &[[u32; 3]]) -> Vec<ImpulseResponse> {
+    pub fn solve(
+        &mut self,
+        source_cell: [u32; 3],
+        probe_cells: &[[u32; 3]],
+    ) -> Vec<ImpulseResponse> {
         let dims = self.dims;
         let sr = self.sample_rate();
         let mut out: Vec<ImpulseResponse> = probe_cells
@@ -403,8 +405,8 @@ impl WaveSolver {
                 );
                 // Mode update.
                 for m in 0..p.modes_cur.len() {
-                    let next =
-                        p.two_cos[m] * p.modes_cur[m] - g2 * p.modes_prev[m] + p.fscale[m] * p.force[m];
+                    let next = p.two_cos[m] * p.modes_cur[m] - g2 * p.modes_prev[m]
+                        + p.fscale[m] * p.force[m];
                     p.modes_prev[m] = p.modes_cur[m];
                     p.modes_cur[m] = next;
                 }

@@ -97,7 +97,11 @@ impl Breakpoint {
     /// Creates a breakpoint with an explicit interpolation toward the next.
     #[must_use]
     pub fn new(x: Sample, y: Sample, interpolation: Interpolation) -> Self {
-        Self { x, y, interpolation }
+        Self {
+            x,
+            y,
+            interpolation,
+        }
     }
 
     /// Creates a linearly-interpolated breakpoint.
@@ -130,7 +134,9 @@ impl ParameterCurve {
     /// Builds a curve from an iterator of breakpoints, sorting by `x`.
     #[must_use]
     pub fn from_points<I: IntoIterator<Item = Breakpoint>>(points: I) -> Self {
-        let mut curve = Self { points: points.into_iter().collect() };
+        let mut curve = Self {
+            points: points.into_iter().collect(),
+        };
         curve.sort();
         curve
     }

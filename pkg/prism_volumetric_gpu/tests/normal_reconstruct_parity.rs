@@ -242,11 +242,7 @@ fn gpu_matches_cpu_on_random_depth_field() {
         let far = center + 15.0 + lcg_unit(&mut state) * 5.0;
         let flip_x = lcg_unit(&mut state) < 0.5;
         let flip_y = lcg_unit(&mut state) < 0.5;
-        let (left, right) = if flip_x {
-            (near_x, far)
-        } else {
-            (far, near_x)
-        };
+        let (left, right) = if flip_x { (near_x, far) } else { (far, near_x) };
         let (down, up) = if flip_y { (near_y, far) } else { (far, near_y) };
         queries.push(NormalQuery {
             uv,
@@ -261,7 +257,10 @@ fn gpu_matches_cpu_on_random_depth_field() {
         let n = r.improved;
         (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) > 0.5
     });
-    assert!(any_nontrivial, "random field should yield non-trivial normals");
+    assert!(
+        any_nontrivial,
+        "random field should yield non-trivial normals"
+    );
 }
 
 #[test]
@@ -281,7 +280,12 @@ fn gpu_matches_cpu_on_degenerate_depth_collapses_to_zero() {
         taps: DepthTaps::new(4.0, 4.0, 4.0, 4.0, 4.0),
     }];
     let results = check_queries(&ctx, &gpu, params, &queries);
-    close_vec(results[0].improved, [0.0, 0.0, 0.0], "degenerate improved", 0);
+    close_vec(
+        results[0].improved,
+        [0.0, 0.0, 0.0],
+        "degenerate improved",
+        0,
+    );
     close_vec(results[0].naive, [0.0, 0.0, 0.0], "degenerate naive", 0);
     for component in results[0].improved {
         assert!(component.is_finite(), "degenerate output must stay finite");

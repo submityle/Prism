@@ -44,7 +44,7 @@
 //! [`inertia_tensor`](prism_render_architecture::particle::inertia_tensor); no
 //! third-party engine source or derived code.
 
-use prism_render_architecture::particle::inertia_tensor::{Mat3, MassProperties, Vec3};
+use prism_render_architecture::particle::inertia_tensor::{MassProperties, Mat3, Vec3};
 use prism_volumetric_gpu::inertia_tensor::{BodyOpQuery, BodyOpResult, GpuInertiaTensor};
 use prism_volumetric_gpu::GpuContext;
 
@@ -182,12 +182,20 @@ fn pin_reduction(idx: usize, ctx: &GpuContext, gpu: &GpuInertiaTensor, points: &
     ) {
         (Some(want), Some(got)) => pin_vec("center_of_mass", idx, got, want, REDUCE_EPS),
         (None, None) => {}
-        (want, got) => panic!("query {idx} center_of_mass guard mismatch: cpu {want:?} gpu {got:?}"),
+        (want, got) => {
+            panic!("query {idx} center_of_mass guard mismatch: cpu {want:?} gpu {got:?}")
+        }
     }
 
     match (MassProperties::of(points), gpu.mass_properties(ctx, points)) {
         (Some(want), Some(got)) => {
-            pin_scalar("of.total_mass", idx, got.total_mass, want.total_mass, REDUCE_EPS);
+            pin_scalar(
+                "of.total_mass",
+                idx,
+                got.total_mass,
+                want.total_mass,
+                REDUCE_EPS,
+            );
             pin_vec("of.com", idx, got.com, want.com, REDUCE_EPS);
             pin_mat("of.inertia", idx, got.inertia, want.inertia, REDUCE_EPS);
         }
@@ -214,7 +222,13 @@ fn pin_body(idx: usize, query: &BodyOpQuery, got: &BodyOpResult) {
         EPS,
     );
     pin_vec("merged.com", idx, got.merged.com, want_merged.com, EPS);
-    pin_mat("merged.inertia", idx, got.merged.inertia, want_merged.inertia, EPS);
+    pin_mat(
+        "merged.inertia",
+        idx,
+        got.merged.inertia,
+        want_merged.inertia,
+        EPS,
+    );
 }
 
 /// Dispatches `queries` on the `GPU` and pins every per-body result against the
@@ -233,7 +247,12 @@ fn check_body(ctx: &GpuContext, gpu: &GpuInertiaTensor, queries: &[BodyOpQuery])
 
 /// Runs a single two-system merge on the `GPU` and returns the merged system
 /// (the reference point is irrelevant to the merge, so the origin is used).
-fn gpu_merge(ctx: &GpuContext, gpu: &GpuInertiaTensor, a: MassProperties, b: MassProperties) -> MassProperties {
+fn gpu_merge(
+    ctx: &GpuContext,
+    gpu: &GpuInertiaTensor,
+    a: MassProperties,
+    b: MassProperties,
+) -> MassProperties {
     let got = gpu.body_ops(ctx, &[BodyOpQuery::new(a, b, Vec3::ZERO)]);
     got[0].merged
 }
@@ -274,7 +293,9 @@ fn single_point_cloud_matches_reference() {
     // mass.
     let points = [(Vec3::new(5.0, -7.0, 2.0), 3.0)];
     pin_reduction(0, &ctx, &gpu, &points);
-    let got = gpu.mass_properties(&ctx, &points).expect("single point has mass");
+    let got = gpu
+        .mass_properties(&ctx, &points)
+        .expect("single point has mass");
     pin_mat("single.inertia", 0, got.inertia, Mat3::ZERO, REDUCE_EPS);
 }
 
@@ -296,7 +317,9 @@ fn symmetric_cloud_centres_on_origin() {
         (Vec3::new(0.0, 0.0, 4.0), 1.0),
     ];
     pin_reduction(0, &ctx, &gpu, &points);
-    let got = gpu.center_of_mass(&ctx, &points).expect("symmetric cloud has mass");
+    let got = gpu
+        .center_of_mass(&ctx, &points)
+        .expect("symmetric cloud has mass");
     pin_vec("symmetric.com", 0, got, Vec3::ZERO, REDUCE_EPS);
 }
 
@@ -369,12 +392,21 @@ fn merge_associates_within_tolerance() {
         return;
     };
     let gpu = GpuInertiaTensor::new(&ctx);
-    let a = MassProperties::of(&[(Vec3::new(0.0, 0.0, 0.0), 1.0), (Vec3::new(2.0, 0.0, 0.0), 1.0)])
-        .expect("system a has mass");
-    let b = MassProperties::of(&[(Vec3::new(0.0, 3.0, 0.0), 2.0), (Vec3::new(1.0, 1.0, 1.0), 0.5)])
-        .expect("system b has mass");
-    let c = MassProperties::of(&[(Vec3::new(-2.0, -1.0, 4.0), 1.5), (Vec3::new(3.0, 3.0, 3.0), 1.0)])
-        .expect("system c has mass");
+    let a = MassProperties::of(&[
+        (Vec3::new(0.0, 0.0, 0.0), 1.0),
+        (Vec3::new(2.0, 0.0, 0.0), 1.0),
+    ])
+    .expect("system a has mass");
+    let b = MassProperties::of(&[
+        (Vec3::new(0.0, 3.0, 0.0), 2.0),
+        (Vec3::new(1.0, 1.0, 1.0), 0.5),
+    ])
+    .expect("system b has mass");
+    let c = MassProperties::of(&[
+        (Vec3::new(-2.0, -1.0, 4.0), 1.5),
+        (Vec3::new(3.0, 3.0, 3.0), 1.0),
+    ])
+    .expect("system c has mass");
 
     // Each individual GPU merge matches the reference's closed form tightly.
     let gpu_ab = gpu_merge(&ctx, &gpu, a, b);
@@ -388,7 +420,13 @@ fn merge_associates_within_tolerance() {
     // the reference's documented "associative up to float rounding" contract.
     let left = gpu_merge(&ctx, &gpu, gpu_ab, c);
     let right = gpu_merge(&ctx, &gpu, a, gpu_bc);
-    pin_scalar("assoc.total_mass", 0, left.total_mass, right.total_mass, EPS);
+    pin_scalar(
+        "assoc.total_mass",
+        0,
+        left.total_mass,
+        right.total_mass,
+        EPS,
+    );
     pin_vec("assoc.com", 0, left.com, right.com, EPS);
     pin_mat("assoc.inertia", 0, left.inertia, right.inertia, REDUCE_EPS);
 
@@ -396,7 +434,13 @@ fn merge_associates_within_tolerance() {
     let cpu_left = MassProperties::merge(cpu_ab, c);
     let cpu_right = MassProperties::merge(a, cpu_bc);
     pin_mat("assoc.left.inertia", 0, left.inertia, cpu_left.inertia, EPS);
-    pin_mat("assoc.right.inertia", 0, right.inertia, cpu_right.inertia, EPS);
+    pin_mat(
+        "assoc.right.inertia",
+        0,
+        right.inertia,
+        cpu_right.inertia,
+        EPS,
+    );
 }
 
 #[test]

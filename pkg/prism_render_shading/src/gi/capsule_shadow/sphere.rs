@@ -326,11 +326,8 @@ mod tests {
     fn ao_is_non_negative_and_bounded() {
         let n = Vec3::Y;
         for d in [1.0f32, 2.0, 4.0, 8.0] {
-            let ao = sphere_ambient_occlusion(
-                Vec3::ZERO,
-                n,
-                Sphere::new(Vec3::new(0.0, d, 0.0), 0.5),
-            );
+            let ao =
+                sphere_ambient_occlusion(Vec3::ZERO, n, Sphere::new(Vec3::new(0.0, d, 0.0), 0.5));
             assert!((0.0..=1.0).contains(&ao) && ao.is_finite(), "ao = {ao}");
         }
     }
@@ -363,11 +360,8 @@ mod tests {
         let r = 1.0f32;
         let d = 3.0f32;
         let expected = 1.0 - (1.0 - (r / d) * (r / d)).sqrt();
-        let ao = sphere_ambient_occlusion(
-            Vec3::ZERO,
-            Vec3::Y,
-            Sphere::new(Vec3::new(0.0, d, 0.0), r),
-        );
+        let ao =
+            sphere_ambient_occlusion(Vec3::ZERO, Vec3::Y, Sphere::new(Vec3::new(0.0, d, 0.0), r));
         assert!((ao - expected).abs() < TOL, "ao {ao} expected {expected}");
     }
 
@@ -382,8 +376,7 @@ mod tests {
             sphere_ambient_occlusion(Vec3::ZERO, Vec3::Y, Sphere::new(Vec3::Y, 0.0)),
             0.0
         );
-        let at_center =
-            sphere_ambient_occlusion(Vec3::ZERO, Vec3::Y, Sphere::new(Vec3::ZERO, 1.0));
+        let at_center = sphere_ambient_occlusion(Vec3::ZERO, Vec3::Y, Sphere::new(Vec3::ZERO, 1.0));
         assert!(at_center.is_finite() && (0.0..=1.0).contains(&at_center));
     }
 }

@@ -263,17 +263,29 @@ mod tests {
     fn full_visibility_recovers_the_normal() {
         let n = Vec3::new(0.2, 0.3, 1.0).normalize();
         let dirs = hemisphere_dirs(n, 256);
-        let samples: Vec<(Vec3, f32)> =
-            dirs.iter().map(|&d| (d, 1.0)).collect();
+        let samples: Vec<(Vec3, f32)> = dirs.iter().map(|&d| (d, 1.0)).collect();
         let cone = accumulate_bent_normal(&samples);
         // Bent normal aligns with the geometric normal...
-        assert!(cone.direction.dot(n) > 0.99, "dir {:?} n {:?}", cone.direction, n);
+        assert!(
+            cone.direction.dot(n) > 0.99,
+            "dir {:?} n {:?}",
+            cone.direction,
+            n
+        );
         // ...it is unit length...
         assert!((cone.direction.length() - 1.0).abs() < 1e-5);
         // ...AO is ~1 (everything visible)...
-        assert!((cone.visibility - 1.0).abs() < 1e-6, "vis {}", cone.visibility);
+        assert!(
+            (cone.visibility - 1.0).abs() < 1e-6,
+            "vis {}",
+            cone.visibility
+        );
         // ...and a uniformly-sampled open hemisphere has a ~PI/2 aperture.
-        assert!((cone.aperture - FRAC_PI_2).abs() < 0.1, "ap {}", cone.aperture);
+        assert!(
+            (cone.aperture - FRAC_PI_2).abs() < 0.1,
+            "ap {}",
+            cone.aperture
+        );
     }
 
     #[test]
@@ -292,7 +304,11 @@ mod tests {
         assert!(cone.direction.z > 0.0, "dir {:?}", cone.direction);
         assert!((cone.direction.length() - 1.0).abs() < 1e-5);
         // Roughly half the hemisphere is blocked.
-        assert!((cone.visibility - 0.5).abs() < 0.1, "vis {}", cone.visibility);
+        assert!(
+            (cone.visibility - 0.5).abs() < 0.1,
+            "vis {}",
+            cone.visibility
+        );
         // Narrower than the fully-open hemisphere (directions less spread out).
         assert!(cone.aperture < FRAC_PI_2, "ap {}", cone.aperture);
     }
@@ -330,7 +346,11 @@ mod tests {
         // A zero-length direction contributes to the mean visibility only.
         let samples = [(Vec3::Z, 1.0), (Vec3::ZERO, 1.0)];
         let cone = accumulate_bent_normal(&samples);
-        assert!(cone.direction.dot(Vec3::Z) > 0.999, "dir {:?}", cone.direction);
+        assert!(
+            cone.direction.dot(Vec3::Z) > 0.999,
+            "dir {:?}",
+            cone.direction
+        );
         // Mean of two unit visibilities.
         assert!((cone.visibility - 1.0).abs() < 1e-6);
     }
@@ -339,12 +359,20 @@ mod tests {
     fn cosine_hemisphere_all_visible_matches_normal() {
         let n = Vec3::new(-0.3, 0.7, 0.5).normalize();
         let dirs = hemisphere_dirs(n, 300);
-        let samples: Vec<(Vec3, bool)> =
-            dirs.iter().map(|&d| (d, false)).collect();
+        let samples: Vec<(Vec3, bool)> = dirs.iter().map(|&d| (d, false)).collect();
         let cone = bent_normal_from_cosine_hemisphere(n, &samples);
-        assert!(cone.direction.dot(n) > 0.99, "dir {:?} n {:?}", cone.direction, n);
+        assert!(
+            cone.direction.dot(n) > 0.99,
+            "dir {:?} n {:?}",
+            cone.direction,
+            n
+        );
         assert!((cone.direction.length() - 1.0).abs() < 1e-5);
-        assert!((cone.visibility - 1.0).abs() < 1e-6, "vis {}", cone.visibility);
+        assert!(
+            (cone.visibility - 1.0).abs() < 1e-6,
+            "vis {}",
+            cone.visibility
+        );
     }
 
     #[test]
@@ -352,20 +380,22 @@ mod tests {
         let n = Vec3::Z;
         let dirs = hemisphere_dirs(n, 400);
         // Occlude the y < 0 half.
-        let samples: Vec<(Vec3, bool)> =
-            dirs.iter().map(|&d| (d, d.y < 0.0)).collect();
+        let samples: Vec<(Vec3, bool)> = dirs.iter().map(|&d| (d, d.y < 0.0)).collect();
         let cone = bent_normal_from_cosine_hemisphere(n, &samples);
         assert!(cone.direction.y > 0.05, "dir {:?}", cone.direction);
         assert!(cone.direction.z > 0.0, "dir {:?}", cone.direction);
-        assert!(cone.visibility > 0.3 && cone.visibility < 0.7, "vis {}", cone.visibility);
+        assert!(
+            cone.visibility > 0.3 && cone.visibility < 0.7,
+            "vis {}",
+            cone.visibility
+        );
     }
 
     #[test]
     fn cosine_hemisphere_fully_occluded_closes_on_normal() {
         let n = Vec3::Y;
         let dirs = hemisphere_dirs(n, 128);
-        let samples: Vec<(Vec3, bool)> =
-            dirs.iter().map(|&d| (d, true)).collect();
+        let samples: Vec<(Vec3, bool)> = dirs.iter().map(|&d| (d, true)).collect();
         let cone = bent_normal_from_cosine_hemisphere(n, &samples);
         assert_eq!(cone.direction, n);
         assert_eq!(cone.aperture, 0.0);
@@ -376,7 +406,12 @@ mod tests {
     fn cosine_hemisphere_empty_defaults_to_open_sky() {
         let n = Vec3::new(1.0, 1.0, 1.0).normalize();
         let cone = bent_normal_from_cosine_hemisphere(n, &[]);
-        assert!(cone.direction.dot(n) > 0.9999, "dir {:?} n {:?}", cone.direction, n);
+        assert!(
+            cone.direction.dot(n) > 0.9999,
+            "dir {:?} n {:?}",
+            cone.direction,
+            n
+        );
         assert!((cone.aperture - FRAC_PI_2).abs() < 1e-6);
         assert!((cone.visibility - 1.0).abs() < 1e-6);
     }

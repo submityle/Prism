@@ -41,8 +41,8 @@ use bevy_math::ops;
 
 use prism_audio_core::math::Sample;
 
-use crate::fractional_delay::{EPS, sanitize, windowed_sinc};
-use crate::resampler::{ResampleProgress, ResampleQuality, Resampler, clamp_ratio};
+use crate::fractional_delay::{sanitize, windowed_sinc, EPS};
+use crate::resampler::{clamp_ratio, ResampleProgress, ResampleQuality, Resampler};
 
 /// Returns the ceiling of `x` using only [`bevy_math::ops`] (`ceil(x) ==
 /// -floor(-x)`), so no `f32` intrinsic method is used.
@@ -218,7 +218,11 @@ impl PolyphaseSincResampler {
             norm += w;
             i += 1;
         }
-        if ops::abs(norm) > EPS { acc / norm } else { 0.0 }
+        if ops::abs(norm) > EPS {
+            acc / norm
+        } else {
+            0.0
+        }
     }
 
     /// Rebases the history so that, for the next call, `input[0]` corresponds to

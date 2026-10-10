@@ -107,7 +107,11 @@ impl BandGains {
     pub fn new(bands: [Sample; PROPAGATION_BAND_COUNT]) -> Self {
         let mut clamped = bands;
         for b in &mut clamped {
-            *b = if b.is_finite() { b.clamp(0.0, 1.0) } else { 0.0 };
+            *b = if b.is_finite() {
+                b.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
         }
         Self { bands: clamped }
     }

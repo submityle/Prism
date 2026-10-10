@@ -115,7 +115,10 @@ impl AcousticFormat {
     #[inline]
     #[must_use]
     pub fn delay_samples(&self, distance_metres: Sample) -> usize {
-        seconds_to_samples(distance_metres / self.effective_sound_speed(), self.sample_rate)
+        seconds_to_samples(
+            distance_metres / self.effective_sound_speed(),
+            self.sample_rate,
+        )
     }
 }
 

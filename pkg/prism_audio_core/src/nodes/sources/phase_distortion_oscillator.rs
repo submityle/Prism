@@ -72,10 +72,10 @@
 //! (STK), or any other audio engine or toolkit; only the shared mathematical
 //! ideas are used. There is no AI or machine learning of any kind.
 
-use bevy_math::ops;
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
 use crate::math::Sample;
 use crate::param::{Ramp, Smoothed};
+use bevy_math::ops;
 
 const TAU: Sample = core::f32::consts::TAU;
 
@@ -626,11 +626,7 @@ mod tests {
 
     #[test]
     fn non_finite_inputs_fall_back() {
-        let node = PhaseDistortionOscillatorNode::new(
-            Sample::NAN,
-            Sample::INFINITY,
-            Sample::NAN,
-        );
+        let node = PhaseDistortionOscillatorNode::new(Sample::NAN, Sample::INFINITY, Sample::NAN);
         assert_eq!(node.frequency_hz(), DEFAULT_FREQUENCY_HZ);
         assert_eq!(node.amount(), DEFAULT_AMOUNT);
         assert_eq!(node.amplitude(), DEFAULT_AMPLITUDE);

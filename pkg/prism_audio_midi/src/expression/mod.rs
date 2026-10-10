@@ -22,12 +22,10 @@ pub mod channel_state;
 pub mod controller;
 pub mod per_note;
 
-pub use channel_state::{ChannelState, DEFAULT_PITCH_BEND_RANGE, normalized_bend};
-pub use controller::{
-    HighResCc, ParamKind, ParameterUpdate, PerNoteController, RpnNrpnParser,
-};
+pub use channel_state::{normalized_bend, ChannelState, DEFAULT_PITCH_BEND_RANGE};
+pub use controller::{HighResCc, ParamKind, ParameterUpdate, PerNoteController, RpnNrpnParser};
 pub use per_note::{
-    MAX_ACTIVE_NOTES, MAX_PER_NOTE_CONTROLLERS, PerNoteExpression, PerNoteKey, PerNoteState,
+    PerNoteExpression, PerNoteKey, PerNoteState, MAX_ACTIVE_NOTES, MAX_PER_NOTE_CONTROLLERS,
 };
 
 /// Re-export so `crate::expression::HighResController` names the 14-bit pair

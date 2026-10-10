@@ -25,8 +25,8 @@
 use alloc::string::String;
 
 use bytemuck::{Pod, Zeroable};
-use prism_math::Vec3;
 use prism_math::shader_mirror::WGSL_SH3_EVAL;
+use prism_math::Vec3;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BufferBindingType, CommandEncoderDescriptor,

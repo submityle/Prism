@@ -229,8 +229,14 @@ pub fn reproject_specular(
     curr_cam_pos: Vec3,
     params: &ReprojectParams,
 ) -> Reprojection {
-    let virtual_point =
-        virtual_reflection_point(surface_pos, view_dir, normal, hit_distance, roughness, params);
+    let virtual_point = virtual_reflection_point(
+        surface_pos,
+        view_dir,
+        normal,
+        hit_distance,
+        roughness,
+        params,
+    );
     let parallax = view_parallax(prev_cam_pos, curr_cam_pos, virtual_point);
     let confidence = reprojection_confidence(roughness, parallax, params);
     let sample_position =
@@ -270,7 +276,11 @@ fn safe_normalize(v: Vec3) -> Vec3 {
 /// Replace any non-finite component of a position with `0`.
 #[must_use]
 fn sanitize_vec(v: Vec3) -> Vec3 {
-    Vec3::new(finite_or_zero(v.x), finite_or_zero(v.y), finite_or_zero(v.z))
+    Vec3::new(
+        finite_or_zero(v.x),
+        finite_or_zero(v.y),
+        finite_or_zero(v.z),
+    )
 }
 
 /// Replace a non-finite scalar with `0`.

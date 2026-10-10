@@ -164,7 +164,11 @@ impl NlmsEchoCanceller {
             self.energy = 0.0;
         }
         self.history[self.pos] = x;
-        self.pos = if self.pos + 1 == taps { 0 } else { self.pos + 1 };
+        self.pos = if self.pos + 1 == taps {
+            0
+        } else {
+            self.pos + 1
+        };
         let mag = ops::abs(x);
         // Sliding-peak estimate: instantaneous rise, slow exponential decay.
         self.ref_peak = if mag > self.ref_peak {
@@ -181,7 +185,11 @@ impl NlmsEchoCanceller {
         let taps = self.config.taps;
         let mut acc = 0.0;
         // history[pos-1] is the newest sample; weights[0] aligns to it.
-        let mut idx = if self.pos == 0 { taps - 1 } else { self.pos - 1 };
+        let mut idx = if self.pos == 0 {
+            taps - 1
+        } else {
+            self.pos - 1
+        };
         for &w in &self.weights {
             acc += w * self.history[idx];
             idx = if idx == 0 { taps - 1 } else { idx - 1 };
@@ -195,7 +203,11 @@ impl NlmsEchoCanceller {
         let taps = self.config.taps;
         let norm = self.energy + self.config.regularization;
         let scale = self.config.step_size * error / norm;
-        let mut idx = if self.pos == 0 { taps - 1 } else { self.pos - 1 };
+        let mut idx = if self.pos == 0 {
+            taps - 1
+        } else {
+            self.pos - 1
+        };
         for w in &mut self.weights {
             *w = flush_denormal(*w + scale * self.history[idx]);
             idx = if idx == 0 { taps - 1 } else { idx - 1 };
@@ -216,8 +228,8 @@ impl EchoCanceller for NlmsEchoCanceller {
 
             // Geigel double-talk detector: near-end dominates the reference.
             let near_mag = ops::abs(near);
-            let triggered = near_mag > self.config.dtd_threshold * self.ref_peak
-                && self.ref_peak > 1.0e-4;
+            let triggered =
+                near_mag > self.config.dtd_threshold * self.ref_peak && self.ref_peak > 1.0e-4;
             if triggered {
                 self.hangover = self.config.dtd_hangover;
             } else if self.hangover > 0 {

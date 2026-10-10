@@ -272,7 +272,9 @@ impl TlsfAllocator {
     /// successor's slot. The successor must already be unlinked from any free
     /// list.
     fn merge_next(&mut self, bi: usize) {
-        let next = self.blocks[bi].next_phys.expect("merge_next without successor");
+        let next = self.blocks[bi]
+            .next_phys
+            .expect("merge_next without successor");
         self.blocks[bi].size += self.blocks[next].size;
         let after = self.blocks[next].next_phys;
         self.blocks[bi].next_phys = after;

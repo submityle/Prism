@@ -114,7 +114,12 @@ impl Oklcha {
     /// Construct from components.
     #[inline]
     pub const fn new(l: f32, chroma: f32, hue: f32, alpha: f32) -> Self {
-        Self { l, chroma, hue, alpha }
+        Self {
+            l,
+            chroma,
+            hue,
+            alpha,
+        }
     }
 
     /// Convert to the Cartesian [`Oklaba`] form.

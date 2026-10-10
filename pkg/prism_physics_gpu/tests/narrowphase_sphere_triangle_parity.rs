@@ -114,11 +114,11 @@ fn axis_aligned_cases_agree_slot_for_slot() {
     // validity flag is unambiguous.
     let tri = unit_triangle();
     let spheres = [
-        Particle::new(Vec3::new(0.25, 0.25, 0.4), 0.5),  // face overlap (+z normal)
-        Particle::new(Vec3::new(0.5, -0.3, 0.0), 0.5),   // edge AB overlap
-        Particle::new(Vec3::new(-0.3, -0.4, 0.0), 0.6),  // vertex A overlap
-        Particle::new(Vec3::new(0.25, 0.25, 0.0), 0.5),  // centre on face: fallback
-        Particle::new(Vec3::new(0.25, 0.25, 2.0), 0.5),  // clear gap above
+        Particle::new(Vec3::new(0.25, 0.25, 0.4), 0.5), // face overlap (+z normal)
+        Particle::new(Vec3::new(0.5, -0.3, 0.0), 0.5),  // edge AB overlap
+        Particle::new(Vec3::new(-0.3, -0.4, 0.0), 0.6), // vertex A overlap
+        Particle::new(Vec3::new(0.25, 0.25, 0.0), 0.5), // centre on face: fallback
+        Particle::new(Vec3::new(0.25, 0.25, 2.0), 0.5), // clear gap above
     ];
     let triangles = [tri];
     let pairs = [

@@ -177,7 +177,10 @@ mod tests {
     #[test]
     fn mesh_without_indices_has_no_sphere() {
         // Positions present but no triangle references them.
-        let m = mesh(vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], Vec::new());
+        let m = mesh(
+            vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+            Vec::new(),
+        );
         assert!(bounding_sphere(&m).is_none());
     }
 
@@ -220,8 +223,16 @@ mod tests {
         // The exact minimal sphere for a unit cube has radius sqrt(3)/2 ~ 0.866;
         // Ritter stays close to that and never below it.
         let exact = (3.0f64).sqrt() / 2.0;
-        assert!(f64::from(s.radius()) >= exact - 1e-4, "radius {}", s.radius());
-        assert!(f64::from(s.radius()) <= exact * 1.15, "radius {}", s.radius());
+        assert!(
+            f64::from(s.radius()) >= exact - 1e-4,
+            "radius {}",
+            s.radius()
+        );
+        assert!(
+            f64::from(s.radius()) <= exact * 1.15,
+            "radius {}",
+            s.radius()
+        );
     }
 
     #[test]
@@ -242,7 +253,10 @@ mod tests {
 
     #[test]
     fn contains_rejects_far_exterior_point() {
-        let m = mesh(vec![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], vec![[0, 1, 2]]);
+        let m = mesh(
+            vec![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        );
         let s = bounding_sphere(&m).unwrap();
         assert!(!s.contains([100.0, 0.0, 0.0]));
         assert!(s.contains(s.center()));

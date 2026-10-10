@@ -76,7 +76,11 @@ pub fn conservative_advancement<A: SupportMap, B: SupportMap>(
                 // last approach direction and the near support point.
                 None => (moved.support_point(last_normal), last_normal),
             };
-            return Some(TimeOfImpact { toi: t, point, normal });
+            return Some(TimeOfImpact {
+                toi: t,
+                point,
+                normal,
+            });
         };
 
         if cp.distance <= tolerance {
@@ -169,7 +173,11 @@ pub fn rotational_conservative_advancement<A: SupportMap, B: SupportMap>(
                 Some(c) => (c.point_a, c.normal),
                 None => (moved.support_point(last_normal), last_normal),
             };
-            return Some(TimeOfImpact { toi: t, point, normal });
+            return Some(TimeOfImpact {
+                toi: t,
+                point,
+                normal,
+            });
         };
 
         if cp.distance <= tolerance {
@@ -222,10 +230,14 @@ mod tests {
         let b = Aabb::from_center_half_extents(Vec3::new(5.0, 0.0, 0.0), Vec3::splat(0.5));
         // Move `a` +X by 10 over the interval; faces meet when centres are 1
         // apart, i.e. a travels 4 units => toi = 0.4.
-        let toi = conservative_advancement(&a, &b, Vec3::new(10.0, 0.0, 0.0), 1e-3)
-            .expect("impact");
+        let toi =
+            conservative_advancement(&a, &b, Vec3::new(10.0, 0.0, 0.0), 1e-3).expect("impact");
         assert!((toi.toi - 0.4).abs() < 2e-2, "toi = {}", toi.toi);
-        assert!(toi.normal.x > 0.9, "normal points toward b: {:?}", toi.normal);
+        assert!(
+            toi.normal.x > 0.9,
+            "normal points toward b: {:?}",
+            toi.normal
+        );
     }
 
     #[test]
@@ -271,7 +283,13 @@ mod tests {
         let rot = Quat::from_rotation_z(FRAC_PI_2);
         let radius_a = half.length();
         let hit = rotational_conservative_advancement(
-            &a, &b, Vec3::ZERO, Vec3::ZERO, rot, radius_a, 1e-3,
+            &a,
+            &b,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            rot,
+            radius_a,
+            1e-3,
         )
         .expect("rotation should bring the bar into contact");
         assert!(hit.toi > 0.0 && hit.toi <= 1.0, "toi = {}", hit.toi);
@@ -291,7 +309,13 @@ mod tests {
         let rot = Quat::from_rotation_z(0.1);
         let radius_a = Vec3::splat(0.3).length();
         assert!(rotational_conservative_advancement(
-            &a, &b, Vec3::ZERO, Vec3::ZERO, rot, radius_a, 1e-3,
+            &a,
+            &b,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            rot,
+            radius_a,
+            1e-3,
         )
         .is_none());
     }
@@ -301,7 +325,13 @@ mod tests {
         let a = Obb::new(Vec3::ZERO, Vec3::splat(0.5), Quat::IDENTITY);
         let b = Obb::new(Vec3::ZERO, Vec3::splat(0.5), Quat::IDENTITY);
         let hit = rotational_conservative_advancement(
-            &a, &b, Vec3::ZERO, Vec3::ZERO, Quat::IDENTITY, 0.87, 1e-3,
+            &a,
+            &b,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            0.87,
+            1e-3,
         )
         .expect("already overlapping");
         assert_eq!(hit.toi, 0.0);

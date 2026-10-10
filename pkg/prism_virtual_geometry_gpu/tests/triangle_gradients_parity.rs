@@ -59,17 +59,9 @@ fn gpu_triangle_gradients_match_cpu_golden() {
     // collinear degenerate one, both of which the reference culls to `None`.
     let tris = vec![
         // area = 16 * 16 = 256; dyadic depths.
-        (
-            sv(0.0, 0.0, 0.25),
-            sv(16.0, 0.0, 0.5),
-            sv(0.0, 16.0, 0.75),
-        ),
+        (sv(0.0, 0.0, 0.25), sv(16.0, 0.0, 0.5), sv(0.0, 16.0, 0.75)),
         // area = 32 * 8 = 256; different shape, dyadic depths.
-        (
-            sv(0.0, 0.0, 0.5),
-            sv(32.0, 0.0, 0.25),
-            sv(0.0, 8.0, 0.125),
-        ),
+        (sv(0.0, 0.0, 0.5), sv(32.0, 0.0, 0.25), sv(0.0, 8.0, 0.125)),
         // Clockwise winding in y-down space -> non-positive area -> None.
         (sv(0.0, 0.0, 0.1), sv(0.0, 4.0, 0.2), sv(4.0, 0.0, 0.3)),
         // Collinear vertices -> zero area -> None.
@@ -105,7 +97,10 @@ fn gpu_triangle_gradients_depth_plane_is_dyadic_exact() {
     assert_eq!(g.z_y, expected.z_y, "z_y must match the reference exactly");
     assert_eq!(g.w_x, expected.w_x, "per-column edge steps must match");
     assert_eq!(g.w_y, expected.w_y, "per-row edge steps must match");
-    assert_eq!(g.vertices_z, expected.vertices_z, "depth weights must match");
+    assert_eq!(
+        g.vertices_z, expected.vertices_z,
+        "depth weights must match"
+    );
 }
 
 #[test]
@@ -119,11 +114,7 @@ fn gpu_triangle_gradients_handles_many_triangles() {
     for k in 0..200u32 {
         if k % 3 == 0 {
             // Front-facing, dyadic area 256.
-            tris.push((
-                sv(0.0, 0.0, 0.25),
-                sv(16.0, 0.0, 0.5),
-                sv(0.0, 16.0, 0.75),
-            ));
+            tris.push((sv(0.0, 0.0, 0.25), sv(16.0, 0.0, 0.5), sv(0.0, 16.0, 0.75)));
         } else if k % 3 == 1 {
             // Back-facing -> culled.
             tris.push((sv(0.0, 0.0, 0.1), sv(0.0, 4.0, 0.2), sv(4.0, 0.0, 0.3)));

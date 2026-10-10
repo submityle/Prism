@@ -171,9 +171,7 @@ impl SdfObject {
     /// is non-finite or too short to normalise.
     #[inline]
     fn safe_rotation(&self) -> Quat {
-        if self.rotation.is_finite()
-            && self.rotation.length_squared() > f32::MIN_POSITIVE
-        {
+        if self.rotation.is_finite() && self.rotation.length_squared() > f32::MIN_POSITIVE {
             self.rotation.normalize()
         } else {
             Quat::IDENTITY
@@ -312,8 +310,7 @@ mod tests {
     #[test]
     fn scale_grows_the_shape() {
         // A unit sphere scaled by 2 behaves like a radius-2 sphere.
-        let obj = SdfObject::new(SdfPrimitive::Sphere { radius: 1.0 }, Vec3::ZERO)
-            .with_scale(2.0);
+        let obj = SdfObject::new(SdfPrimitive::Sphere { radius: 1.0 }, Vec3::ZERO).with_scale(2.0);
         let p = Vec3::new(3.0, 0.0, 0.0);
         let got = obj.distance(p);
         let truth = sphere_sdf(p, Vec3::ZERO, 2.0);
@@ -322,8 +319,14 @@ mod tests {
 
     #[test]
     fn union_takes_the_minimum() {
-        let a = SdfObject::new(SdfPrimitive::Sphere { radius: 1.0 }, Vec3::new(-2.0, 0.0, 0.0));
-        let b = SdfObject::new(SdfPrimitive::Sphere { radius: 1.0 }, Vec3::new(2.0, 0.0, 0.0));
+        let a = SdfObject::new(
+            SdfPrimitive::Sphere { radius: 1.0 },
+            Vec3::new(-2.0, 0.0, 0.0),
+        );
+        let b = SdfObject::new(
+            SdfPrimitive::Sphere { radius: 1.0 },
+            Vec3::new(2.0, 0.0, 0.0),
+        );
         let objs = [a, b];
         // A point near sphere b should report b's (smaller) distance.
         let p = Vec3::new(2.5, 0.0, 0.0);
@@ -356,8 +359,14 @@ mod tests {
     #[test]
     fn bake_merged_matches_merge_distance() {
         let objs = [
-            SdfObject::new(SdfPrimitive::Sphere { radius: 0.8 }, Vec3::new(-0.6, 0.0, 0.0)),
-            SdfObject::new(SdfPrimitive::Sphere { radius: 0.8 }, Vec3::new(0.6, 0.0, 0.0)),
+            SdfObject::new(
+                SdfPrimitive::Sphere { radius: 0.8 },
+                Vec3::new(-0.6, 0.0, 0.0),
+            ),
+            SdfObject::new(
+                SdfPrimitive::Sphere { radius: 0.8 },
+                Vec3::new(0.6, 0.0, 0.0),
+            ),
         ];
         let grid = bake_merged(
             &objs,
@@ -377,9 +386,12 @@ mod tests {
 
     #[test]
     fn merge_is_deterministic() {
-        let objs = [
-            SdfObject::new(SdfPrimitive::Box { half_extents: Vec3::splat(0.5) }, Vec3::ZERO),
-        ];
+        let objs = [SdfObject::new(
+            SdfPrimitive::Box {
+                half_extents: Vec3::splat(0.5),
+            },
+            Vec3::ZERO,
+        )];
         let p = Vec3::new(0.7, 0.2, -0.3);
         assert_eq!(merge_distance(&objs, p), merge_distance(&objs, p));
     }

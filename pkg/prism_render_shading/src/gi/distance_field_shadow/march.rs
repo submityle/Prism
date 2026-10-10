@@ -238,9 +238,14 @@ mod tests {
     #[test]
     fn improved_agrees_with_plain_on_clear_cases() {
         let lit = sphere_scene(Vec3::new(100.0, 0.0, 0.0), 1.0);
-        assert!((soft_shadow_improved(Vec3::ZERO, Vec3::Y, 0.01, 10.0, 8.0, &lit) - 1.0).abs() < 1.0e-4);
+        assert!(
+            (soft_shadow_improved(Vec3::ZERO, Vec3::Y, 0.01, 10.0, 8.0, &lit) - 1.0).abs() < 1.0e-4
+        );
         let blocked = sphere_scene(Vec3::new(0.0, 5.0, 0.0), 1.0);
-        assert_eq!(soft_shadow_improved(Vec3::ZERO, Vec3::Y, 0.01, 20.0, 8.0, &blocked), 0.0);
+        assert_eq!(
+            soft_shadow_improved(Vec3::ZERO, Vec3::Y, 0.01, 20.0, 8.0, &blocked),
+            0.0
+        );
     }
 
     #[test]
@@ -253,7 +258,10 @@ mod tests {
     #[test]
     fn degenerate_direction_is_lit() {
         let scene = sphere_scene(Vec3::new(0.0, 5.0, 0.0), 1.0);
-        assert_eq!(soft_shadow(Vec3::ZERO, Vec3::ZERO, 0.01, 20.0, 8.0, &scene), 1.0);
+        assert_eq!(
+            soft_shadow(Vec3::ZERO, Vec3::ZERO, 0.01, 20.0, 8.0, &scene),
+            1.0
+        );
         assert_eq!(
             soft_shadow_improved(Vec3::ZERO, Vec3::ZERO, 0.01, 20.0, 8.0, &scene),
             1.0

@@ -247,7 +247,11 @@ pub fn env_brdf(f0: Vec3, scale_bias: Vec2) -> Vec3 {
     let sb = sanitize_scale_bias(scale_bias.x, scale_bias.y);
     let f0 = f0.clamp(Vec3::ZERO, Vec3::ONE);
     let v = f0 * sb.x + Vec3::splat(sb.y);
-    if v.is_finite() { v.max(Vec3::ZERO) } else { Vec3::ZERO }
+    if v.is_finite() {
+        v.max(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// Clamps a `(scale, bias)` pair so both lie in `[0, 1]`, `scale + bias ≤ 1`
@@ -255,8 +259,16 @@ pub fn env_brdf(f0: Vec3, scale_bias: Vec2) -> Vec3 {
 /// is `NaN`/infinite.
 #[inline]
 fn sanitize_scale_bias(scale: f32, bias: f32) -> Vec2 {
-    let s = if scale.is_finite() { scale.clamp(0.0, 1.0) } else { 0.0 };
-    let b = if bias.is_finite() { bias.clamp(0.0, 1.0) } else { 0.0 };
+    let s = if scale.is_finite() {
+        scale.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let b = if bias.is_finite() {
+        bias.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     // The white-Fresnel directional albedo scale + bias cannot exceed 1; trim
     // the bias first so a lossless mirror (scale → 1) is preserved.
     let b = b.min((1.0 - s).max(0.0));
@@ -275,7 +287,11 @@ fn pow5(x: f32) -> f32 {
 #[inline]
 fn ops_floor_u32(x: f32) -> u32 {
     let f = bevy_math::ops::floor(x.max(0.0));
-    if f.is_finite() { f as u32 } else { 0 }
+    if f.is_finite() {
+        f as u32
+    } else {
+        0
+    }
 }
 
 /// Integer square root of `n` (largest `r` with `r² ≤ n`).
@@ -416,7 +432,10 @@ mod tests {
     fn degenerate_inputs_never_nan() {
         let sb = integrate_dfg(0.0, 0.0, 0);
         assert!(sb.x.is_finite() && sb.y.is_finite());
-        let empty = DfgLut { size: 0, texels: Vec::new() };
+        let empty = DfgLut {
+            size: 0,
+            texels: Vec::new(),
+        };
         let sb = empty.sample(0.5, 0.5);
         assert_eq!(sb, Vec2::new(1.0, 0.0));
         let v = env_brdf(Vec3::splat(f32::NAN), Vec2::new(f32::INFINITY, -1.0));

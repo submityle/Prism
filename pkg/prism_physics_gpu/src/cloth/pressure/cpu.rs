@@ -127,7 +127,10 @@ mod tests {
     fn empty_or_zero_iterations_is_noop() {
         let pos = unit_cube_positions();
         let inv = vec![1.0; 8];
-        assert_eq!(cpu_cloth_pressure(&pos, &inv, &[], 2.0, 0.0, 1.0 / 60.0, 8), pos);
+        assert_eq!(
+            cpu_cloth_pressure(&pos, &inv, &[], 2.0, 0.0, 1.0 / 60.0, 8),
+            pos
+        );
         assert_eq!(
             cpu_cloth_pressure(&pos, &inv, &unit_cube_triangles(), 2.0, 0.0, 1.0 / 60.0, 0),
             pos

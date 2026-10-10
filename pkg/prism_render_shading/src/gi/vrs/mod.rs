@@ -34,8 +34,8 @@
 
 use bevy_math::Vec2;
 
-pub mod luma;
 pub mod edge;
+pub mod luma;
 pub mod motion;
 
 /// Tier-2 variable-rate-shading lattice.
@@ -139,13 +139,21 @@ impl ShadingRate {
     /// classifier demands the most detail wins.  Ties resolve to `self`.
     #[inline]
     pub const fn finer_of(self, other: Self) -> Self {
-        if self.rank() <= other.rank() { self } else { other }
+        if self.rank() <= other.rank() {
+            self
+        } else {
+            other
+        }
     }
 
     /// Returns the **coarser** (higher-rank) of `self` and `other`.
     #[inline]
     pub const fn coarser_of(self, other: Self) -> Self {
-        if self.rank() >= other.rank() { self } else { other }
+        if self.rank() >= other.rank() {
+            self
+        } else {
+            other
+        }
     }
 
     /// Snaps an arbitrary per-axis coarsening factor to the nearest legal
@@ -299,11 +307,23 @@ mod tests {
 
     #[test]
     fn finer_and_coarser_pick_the_right_side() {
-        assert_eq!(ShadingRate::X1x1.finer_of(ShadingRate::X4x4), ShadingRate::X1x1);
-        assert_eq!(ShadingRate::X4x4.finer_of(ShadingRate::X2x2), ShadingRate::X2x2);
-        assert_eq!(ShadingRate::X1x1.coarser_of(ShadingRate::X4x4), ShadingRate::X4x4);
+        assert_eq!(
+            ShadingRate::X1x1.finer_of(ShadingRate::X4x4),
+            ShadingRate::X1x1
+        );
+        assert_eq!(
+            ShadingRate::X4x4.finer_of(ShadingRate::X2x2),
+            ShadingRate::X2x2
+        );
+        assert_eq!(
+            ShadingRate::X1x1.coarser_of(ShadingRate::X4x4),
+            ShadingRate::X4x4
+        );
         // Equal rank resolves to `self`.
-        assert_eq!(ShadingRate::X2x4.finer_of(ShadingRate::X2x4), ShadingRate::X2x4);
+        assert_eq!(
+            ShadingRate::X2x4.finer_of(ShadingRate::X2x4),
+            ShadingRate::X2x4
+        );
     }
 
     #[test]
@@ -337,10 +357,7 @@ mod tests {
         // A strong internal edge must keep the tile fine regardless of motion:
         // edge detail is not masked across the silhouette.
         let edged = [
-            0.0, 0.0, 1.0, 1.0,
-            0.0, 0.0, 1.0, 1.0,
-            0.0, 0.0, 1.0, 1.0,
-            0.0, 0.0, 1.0, 1.0_f32,
+            0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0_f32,
         ];
         let edged_rate = classify_tile(&edged, 4, 4, fast, &cfg);
         assert_eq!(edged_rate, ShadingRate::X1x1);
@@ -349,7 +366,10 @@ mod tests {
     #[test]
     fn classify_tile_degenerate_input_is_full_rate() {
         let cfg = VrsConfig::default();
-        assert_eq!(classify_tile(&[], 0, 0, Vec2::ZERO, &cfg), ShadingRate::X1x1);
+        assert_eq!(
+            classify_tile(&[], 0, 0, Vec2::ZERO, &cfg),
+            ShadingRate::X1x1
+        );
         let nan = [f32::NAN; 16];
         assert_eq!(
             classify_tile(&nan, 4, 4, Vec2::ZERO, &cfg),

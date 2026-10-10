@@ -43,7 +43,7 @@
 //! Steam Audio, or Google Resonance Audio source or derived code**; it is
 //! implemented purely from that publicly documented acoustic criterion.
 
-use prism_audio_core::math::{Sample, db_to_linear};
+use prism_audio_core::math::{db_to_linear, Sample};
 
 /// Default detection threshold, in decibels, for the first reflection peak
 /// relative to the direct-sound peak.
@@ -52,7 +52,11 @@ pub const DEFAULT_REFLECTION_THRESHOLD_DB: Sample = -10.0;
 /// Returns the magnitude of a sample, mapping non-finite values to `0`.
 #[inline]
 fn finite_abs(x: Sample) -> Sample {
-    if x.is_finite() { x.abs() } else { 0.0 }
+    if x.is_finite() {
+        x.abs()
+    } else {
+        0.0
+    }
 }
 
 /// Computes the initial time delay gap, in milliseconds, between the direct

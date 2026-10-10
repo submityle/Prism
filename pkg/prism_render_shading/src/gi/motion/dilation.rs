@@ -66,13 +66,29 @@ impl DepthOrdering {
     fn is_nearer(self, candidate: f32, incumbent: f32) -> bool {
         match self {
             DepthOrdering::SmallerIsNearer => {
-                let c = if candidate.is_finite() { candidate } else { f32::INFINITY };
-                let i = if incumbent.is_finite() { incumbent } else { f32::INFINITY };
+                let c = if candidate.is_finite() {
+                    candidate
+                } else {
+                    f32::INFINITY
+                };
+                let i = if incumbent.is_finite() {
+                    incumbent
+                } else {
+                    f32::INFINITY
+                };
                 c < i
             }
             DepthOrdering::LargerIsNearer => {
-                let c = if candidate.is_finite() { candidate } else { f32::NEG_INFINITY };
-                let i = if incumbent.is_finite() { incumbent } else { f32::NEG_INFINITY };
+                let c = if candidate.is_finite() {
+                    candidate
+                } else {
+                    f32::NEG_INFINITY
+                };
+                let i = if incumbent.is_finite() {
+                    incumbent
+                } else {
+                    f32::NEG_INFINITY
+                };
                 c > i
             }
         }
@@ -106,7 +122,10 @@ impl VelocityDepth {
 /// replaces the incumbent only when strictly nearer under `ordering`.  The
 /// returned velocity is always finite.
 #[inline]
-pub fn closest_depth_velocity(samples: &[VelocityDepth; 9], ordering: DepthOrdering) -> VelocityDepth {
+pub fn closest_depth_velocity(
+    samples: &[VelocityDepth; 9],
+    ordering: DepthOrdering,
+) -> VelocityDepth {
     let mut best = VelocityDepth {
         velocity: sanitize_velocity(samples[CENTER_INDEX].velocity),
         depth: samples[CENTER_INDEX].depth,
@@ -160,7 +179,11 @@ fn clamp_coord(c: i32, extent: usize) -> usize {
         0
     } else {
         let c = c as usize;
-        if c >= extent { extent - 1 } else { c }
+        if c >= extent {
+            extent - 1
+        } else {
+            c
+        }
     }
 }
 

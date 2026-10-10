@@ -25,8 +25,8 @@
 //! reproducible. [`sdf_ambient_occlusion`] returns a visibility factor in
 //! `0..=1` (one fully open, zero fully occluded).
 
-use super::mesh_signed_distance_field::SignedDistanceField;
 use super::mesh_sdf_raymarch::sample_signed_distance;
+use super::mesh_signed_distance_field::SignedDistanceField;
 
 /// Estimates ambient occlusion at `position` with surface `normal`, returning
 /// a visibility factor in `0..=1` (one fully open, zero fully occluded).
@@ -85,7 +85,9 @@ fn normalize(vector: [f32; 3]) -> Option<[f32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::sdf_ambient_occlusion;
-    use crate::ray_scene::mesh_signed_distance_field::{signed_distance_field, SignedDistanceField};
+    use crate::ray_scene::mesh_signed_distance_field::{
+        signed_distance_field, SignedDistanceField,
+    };
     use crate::ray_scene::mesh_voxel_padding::pad_voxel_grid;
     use crate::ray_scene::mesh_voxelize::voxelize_surface;
     use crate::ray_scene::triangle_mesh::TriangleMesh;
@@ -135,8 +137,16 @@ mod tests {
     fn degenerate_normal_returns_none() {
         let field = padded_cube_field();
         assert!(
-            sdf_ambient_occlusion(&field, [0.5, 0.5, 1.05], [0.0, 0.0, 0.0], 5, 0.05, 0.95, 3.0)
-                .is_none(),
+            sdf_ambient_occlusion(
+                &field,
+                [0.5, 0.5, 1.05],
+                [0.0, 0.0, 0.0],
+                5,
+                0.05,
+                0.95,
+                3.0
+            )
+            .is_none(),
             "a zero-length normal cannot be normalized",
         );
     }
@@ -155,9 +165,16 @@ mod tests {
     fn geometry_in_the_cone_darkens_occlusion() {
         let field = padded_cube_field();
         // Just above the top face, sampling back down toward the solid cube.
-        let ao =
-            sdf_ambient_occlusion(&field, [0.5, 0.5, 1.05], [0.0, 0.0, -1.0], 5, 0.05, 0.95, 3.0)
-                .unwrap();
+        let ao = sdf_ambient_occlusion(
+            &field,
+            [0.5, 0.5, 1.05],
+            [0.0, 0.0, -1.0],
+            5,
+            0.05,
+            0.95,
+            3.0,
+        )
+        .unwrap();
         assert!(ao < 1.0, "nearby geometry occludes the cone (ao = {ao})");
         assert!((0.0..=1.0).contains(&ao), "visibility stays in range");
     }
@@ -165,12 +182,26 @@ mod tests {
     #[test]
     fn facing_away_is_brighter_than_facing_into_geometry() {
         let field = padded_cube_field();
-        let away =
-            sdf_ambient_occlusion(&field, [0.5, 0.5, 1.05], [0.0, 0.0, 1.0], 5, 0.05, 0.95, 3.0)
-                .unwrap();
-        let into =
-            sdf_ambient_occlusion(&field, [0.5, 0.5, 1.05], [0.0, 0.0, -1.0], 5, 0.05, 0.95, 3.0)
-                .unwrap();
+        let away = sdf_ambient_occlusion(
+            &field,
+            [0.5, 0.5, 1.05],
+            [0.0, 0.0, 1.0],
+            5,
+            0.05,
+            0.95,
+            3.0,
+        )
+        .unwrap();
+        let into = sdf_ambient_occlusion(
+            &field,
+            [0.5, 0.5, 1.05],
+            [0.0, 0.0, -1.0],
+            5,
+            0.05,
+            0.95,
+            3.0,
+        )
+        .unwrap();
         assert!(
             away > into,
             "sampling away from the surface is less occluded ({away} vs {into})",
@@ -180,12 +211,26 @@ mod tests {
     #[test]
     fn stronger_strength_darkens_occlusion() {
         let field = padded_cube_field();
-        let soft =
-            sdf_ambient_occlusion(&field, [0.5, 0.5, 1.05], [0.0, 0.0, -1.0], 5, 0.05, 0.95, 2.0)
-                .unwrap();
-        let hard =
-            sdf_ambient_occlusion(&field, [0.5, 0.5, 1.05], [0.0, 0.0, -1.0], 5, 0.05, 0.95, 6.0)
-                .unwrap();
+        let soft = sdf_ambient_occlusion(
+            &field,
+            [0.5, 0.5, 1.05],
+            [0.0, 0.0, -1.0],
+            5,
+            0.05,
+            0.95,
+            2.0,
+        )
+        .unwrap();
+        let hard = sdf_ambient_occlusion(
+            &field,
+            [0.5, 0.5, 1.05],
+            [0.0, 0.0, -1.0],
+            5,
+            0.05,
+            0.95,
+            6.0,
+        )
+        .unwrap();
         assert!(
             hard <= soft,
             "a larger strength is at least as dark ({hard} vs {soft})",
@@ -195,9 +240,16 @@ mod tests {
     #[test]
     fn zero_samples_is_fully_visible() {
         let field = padded_cube_field();
-        let ao =
-            sdf_ambient_occlusion(&field, [0.5, 0.5, 1.05], [0.0, 0.0, -1.0], 0, 0.05, 0.95, 3.0)
-                .unwrap();
+        let ao = sdf_ambient_occlusion(
+            &field,
+            [0.5, 0.5, 1.05],
+            [0.0, 0.0, -1.0],
+            0,
+            0.05,
+            0.95,
+            3.0,
+        )
+        .unwrap();
         assert_eq!(ao, 1.0, "no taps means no accumulated occlusion");
     }
 }

@@ -90,7 +90,10 @@ impl LogicalSize {
     #[must_use]
     pub fn to_physical(self, scale_factor: f32) -> PhysicalSize {
         let scale = sane_scale(scale_factor);
-        PhysicalSize::new(round_to_u32(self.width * scale), round_to_u32(self.height * scale))
+        PhysicalSize::new(
+            round_to_u32(self.width * scale),
+            round_to_u32(self.height * scale),
+        )
     }
 }
 

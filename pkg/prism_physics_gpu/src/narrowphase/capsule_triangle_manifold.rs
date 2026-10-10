@@ -270,8 +270,8 @@ pub fn cpu_capsule_triangle_manifold(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::sphere_triangle::Triangle;
+    use super::*;
 
     /// A capsule from two endpoints and a radius.
     fn cap(p0: Vec3, p1: Vec3, radius: f32) -> Capsule {
@@ -293,22 +293,44 @@ mod tests {
         // (x = -2 and x = +2, well inside the triangle footprint) sit 0.4 above
         // the face, so depth = 0.5 - 0.4 = 0.1 at each clipped corner.
         let triangles = [floor()];
-        let capsules = [cap(Vec3::new(-2.0, 0.0, 0.4), Vec3::new(2.0, 0.0, 0.4), 0.5)];
+        let capsules = [cap(
+            Vec3::new(-2.0, 0.0, 0.4),
+            Vec3::new(2.0, 0.0, 0.4),
+            0.5,
+        )];
         let pairs = [CapsuleTrianglePair::new(0, 0)];
-        let m = cpu_capsule_triangle_manifold(&capsules, &triangles, &pairs)[0]
-            .expect("flat overlap");
+        let m =
+            cpu_capsule_triangle_manifold(&capsules, &triangles, &pairs)[0].expect("flat overlap");
         assert_eq!(m.a, 0);
         assert_eq!(m.b, 0);
         assert_eq!(m.count, 2);
-        assert!((m.normal - Vec3::Z).length() < 1.0e-6, "normal {:?}", m.normal);
-        assert!((m.points[0].depth - 0.1).abs() < 1.0e-5, "d0 {}", m.points[0].depth);
-        assert!((m.points[1].depth - 0.1).abs() < 1.0e-5, "d1 {}", m.points[1].depth);
+        assert!(
+            (m.normal - Vec3::Z).length() < 1.0e-6,
+            "normal {:?}",
+            m.normal
+        );
+        assert!(
+            (m.points[0].depth - 0.1).abs() < 1.0e-5,
+            "d0 {}",
+            m.points[0].depth
+        );
+        assert!(
+            (m.points[1].depth - 0.1).abs() < 1.0e-5,
+            "d1 {}",
+            m.points[1].depth
+        );
         // Both corners project onto the face plane z = 0 at the clipped ends.
         assert!(m.points[0].position.z.abs() < 1.0e-5);
         assert!(m.points[1].position.z.abs() < 1.0e-5);
         let xs = [m.points[0].position.x, m.points[1].position.x];
-        assert!(xs.iter().any(|&x| (x + 2.0).abs() < 1.0e-5), "no x=-2 corner: {xs:?}");
-        assert!(xs.iter().any(|&x| (x - 2.0).abs() < 1.0e-5), "no x=+2 corner: {xs:?}");
+        assert!(
+            xs.iter().any(|&x| (x + 2.0).abs() < 1.0e-5),
+            "no x=-2 corner: {xs:?}"
+        );
+        assert!(
+            xs.iter().any(|&x| (x - 2.0).abs() < 1.0e-5),
+            "no x=+2 corner: {xs:?}"
+        );
     }
 
     #[test]
@@ -317,7 +339,11 @@ mod tests {
         // point: only the lower end clears the plane, so the manifold honestly
         // reports one point rather than inventing a second.
         let triangles = [floor()];
-        let capsules = [cap(Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 1.0), 0.5)];
+        let capsules = [cap(
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            0.5,
+        )];
         let pairs = [CapsuleTrianglePair::new(0, 0)];
         let m = cpu_capsule_triangle_manifold(&capsules, &triangles, &pairs)[0]
             .expect("piercing overlap");
@@ -341,7 +367,11 @@ mod tests {
     fn separated_capsule_reports_none() {
         // A capsule hovering well above the face never penetrates.
         let triangles = [floor()];
-        let capsules = [cap(Vec3::new(-2.0, 0.0, 5.0), Vec3::new(2.0, 0.0, 5.0), 0.5)];
+        let capsules = [cap(
+            Vec3::new(-2.0, 0.0, 5.0),
+            Vec3::new(2.0, 0.0, 5.0),
+            0.5,
+        )];
         let pairs = [CapsuleTrianglePair::new(0, 0)];
         assert!(cpu_capsule_triangle_manifold(&capsules, &triangles, &pairs)[0].is_none());
     }
@@ -365,7 +395,11 @@ mod tests {
     #[test]
     fn empty_batch_yields_no_manifolds() {
         let triangles = [floor()];
-        let capsules = [cap(Vec3::new(-2.0, 0.0, 0.4), Vec3::new(2.0, 0.0, 0.4), 0.5)];
+        let capsules = [cap(
+            Vec3::new(-2.0, 0.0, 0.4),
+            Vec3::new(2.0, 0.0, 0.4),
+            0.5,
+        )];
         let pairs: [CapsuleTrianglePair; 0] = [];
         assert!(cpu_capsule_triangle_manifold(&capsules, &triangles, &pairs).is_empty());
     }

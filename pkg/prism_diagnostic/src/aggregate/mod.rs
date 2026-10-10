@@ -40,12 +40,10 @@ pub mod dtrace;
 pub mod instance;
 pub mod sampling_rate;
 
-pub use cluster::{
-    AnomalyConfig, ClusterAggregator, ClusterFrametimeReport, InstanceAnomaly,
-};
+pub use cluster::{AnomalyConfig, ClusterAggregator, ClusterFrametimeReport, InstanceAnomaly};
 pub use dtrace::{
-    AssembledTrace, CriticalPath, DistributedSpan, ServiceLatency, SpanId, SpanKind, TraceAssembler,
-    TraceId, TraceNode,
+    AssembledTrace, CriticalPath, DistributedSpan, ServiceLatency, SpanId, SpanKind,
+    TraceAssembler, TraceId, TraceNode,
 };
 pub use instance::{InstanceFrameReport, InstanceSummary};
 pub use sampling_rate::{

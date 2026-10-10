@@ -73,10 +73,7 @@ impl PlaylistItem {
     /// Builds an item that plays `segment` exactly once.
     #[must_use]
     pub fn once(segment: SegmentId) -> Self {
-        Self {
-            segment,
-            repeat: 1,
-        }
+        Self { segment, repeat: 1 }
     }
 
     /// The effective play count, never less than one.

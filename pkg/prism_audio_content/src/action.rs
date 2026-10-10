@@ -27,8 +27,7 @@
 use prism_audio_core::math::Sample;
 
 use crate::id::{
-    BusId, GameObjectId, Playable, RtpcId, SoundId, StateGroupId, StateId, SwitchGroupId,
-    SwitchId,
+    BusId, GameObjectId, Playable, RtpcId, SoundId, StateGroupId, StateId, SwitchGroupId, SwitchId,
 };
 use crate::parameter::ParameterSetting;
 
@@ -127,14 +126,20 @@ mod tests {
         let a = Action::Play(Playable::Sound(SoundId::new(1)));
         let b = a; // Copy
         assert_eq!(a, b);
-        let c = Action::SetState { group: StateGroupId::new(1), state: StateId::new(2) };
+        let c = Action::SetState {
+            group: StateGroupId::new(1),
+            state: StateId::new(2),
+        };
         assert_ne!(a, c);
     }
 
     #[test]
     fn resolved_actions_carry_object_and_payload() {
         let setting = ParameterSetting::new(crate::parameter::ParameterTarget::VolumeDb, -6.0);
-        let r = ResolvedAction::SetParameter { object: GameObjectId::new(7), setting };
+        let r = ResolvedAction::SetParameter {
+            object: GameObjectId::new(7),
+            setting,
+        };
         match r {
             ResolvedAction::SetParameter { object, setting } => {
                 assert_eq!(object, GameObjectId::new(7));
@@ -146,7 +151,10 @@ mod tests {
 
     #[test]
     fn bus_volume_action_roundtrips() {
-        let a = Action::SetBusVolumeDb { bus: BusId::new(3), volume_db: -3.0 };
+        let a = Action::SetBusVolumeDb {
+            bus: BusId::new(3),
+            volume_db: -3.0,
+        };
         match a {
             Action::SetBusVolumeDb { bus, .. } => assert_eq!(bus, BusId::new(3)),
             _ => panic!("wrong variant"),

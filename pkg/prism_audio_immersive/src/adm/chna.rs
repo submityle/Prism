@@ -194,8 +194,18 @@ mod tests {
 
     fn sample() -> ChnaChunk {
         let mut chna = ChnaChunk::new();
-        chna.push(AudioId::new(1, "ATU_00000001", "AC_00031001", "AP_00031001"));
-        chna.push(AudioId::new(2, "ATU_00000002", "AC_00031002", "AP_00031001"));
+        chna.push(AudioId::new(
+            1,
+            "ATU_00000001",
+            "AC_00031001",
+            "AP_00031001",
+        ));
+        chna.push(AudioId::new(
+            2,
+            "ATU_00000002",
+            "AC_00031002",
+            "AP_00031001",
+        ));
         chna
     }
 

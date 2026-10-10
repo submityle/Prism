@@ -66,7 +66,10 @@ fn row_major_strides_matches_reference() {
     };
     let gpu = GpuNdStridesIndex::new(&ctx);
     let shapes = nonzero_shapes();
-    let queries: Vec<NdStridesQuery> = shapes.iter().map(|s| NdStridesQuery::from_shape(s)).collect();
+    let queries: Vec<NdStridesQuery> = shapes
+        .iter()
+        .map(|s| NdStridesQuery::from_shape(s))
+        .collect();
     let got = gpu.row_major_strides(&ctx, &queries);
     assert_eq!(got.len(), shapes.len());
     for (idx, shape) in shapes.iter().enumerate() {
@@ -84,7 +87,10 @@ fn col_major_strides_matches_reference() {
     };
     let gpu = GpuNdStridesIndex::new(&ctx);
     let shapes = nonzero_shapes();
-    let queries: Vec<NdStridesQuery> = shapes.iter().map(|s| NdStridesQuery::from_shape(s)).collect();
+    let queries: Vec<NdStridesQuery> = shapes
+        .iter()
+        .map(|s| NdStridesQuery::from_shape(s))
+        .collect();
     let got = gpu.col_major_strides(&ctx, &queries);
     assert_eq!(got.len(), shapes.len());
     for (idx, shape) in shapes.iter().enumerate() {
@@ -111,7 +117,10 @@ fn total_elements_matches_reference() {
         vec![2, 3, 4, 5],
         vec![2, 2, 2, 2, 2, 2, 2, 2],
     ];
-    let queries: Vec<NdStridesQuery> = shapes.iter().map(|s| NdStridesQuery::from_shape(s)).collect();
+    let queries: Vec<NdStridesQuery> = shapes
+        .iter()
+        .map(|s| NdStridesQuery::from_shape(s))
+        .collect();
     let got = gpu.total_elements(&ctx, &queries);
     assert_eq!(got.len(), shapes.len());
     for (idx, shape) in shapes.iter().enumerate() {
@@ -275,8 +284,15 @@ fn full_max_rank_round_trip() {
         .collect();
     let coords = gpu.coords_from_linear(&ctx, &inverse_queries);
     for linear in 0..total {
-        let want = to_u32(&coords_from_linear(linear as usize, &to_usize(&shape), true));
-        assert_eq!(coords[linear as usize], want, "full-rank coords at {linear}");
+        let want = to_u32(&coords_from_linear(
+            linear as usize,
+            &to_usize(&shape),
+            true,
+        ));
+        assert_eq!(
+            coords[linear as usize], want,
+            "full-rank coords at {linear}"
+        );
     }
 
     let forward_queries: Vec<NdStridesQuery> = coords
@@ -285,7 +301,10 @@ fn full_max_rank_round_trip() {
         .collect();
     let back = gpu.linear_from_coords(&ctx, &forward_queries);
     for linear in 0..total {
-        assert_eq!(back[linear as usize], linear, "full-rank round trip at {linear}");
+        assert_eq!(
+            back[linear as usize], linear,
+            "full-rank round trip at {linear}"
+        );
     }
 }
 

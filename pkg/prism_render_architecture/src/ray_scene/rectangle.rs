@@ -454,12 +454,7 @@ mod tests {
     /// Axis-aligned unit square at the origin whose normal faces `+z`
     /// (half-edges of length 1 along `+x` and `+y`, so a 2×2 square).
     fn unit_square(primitive: u32) -> Rectangle {
-        Rectangle::new(
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            primitive,
-        )
+        Rectangle::new([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], primitive)
     }
 
     #[test]
@@ -470,7 +465,11 @@ mod tests {
         assert_eq!(hit.primitive, 3);
         assert!(approx(hit.t, 5.0, 1e-4), "t = {}", hit.t);
         assert!(hit.front_face);
-        assert!(approx(hit.normal[2], 1.0, 1e-4), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[2], 1.0, 1e-4),
+            "normal = {:?}",
+            hit.normal
+        );
     }
 
     #[test]
@@ -480,7 +479,11 @@ mod tests {
         let hit = rect.intersect(&ray).expect("back hit");
         assert!(approx(hit.t, 5.0, 1e-4), "t = {}", hit.t);
         assert!(!hit.front_face);
-        assert!(approx(hit.normal[2], -1.0, 1e-4), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[2], -1.0, 1e-4),
+            "normal = {:?}",
+            hit.normal
+        );
     }
 
     #[test]
@@ -536,12 +539,7 @@ mod tests {
         // Sheared parallelogram: axis_v leans into +x, so a simple per-axis
         // projection would misclassify points; the reciprocal-basis solve must
         // still accept only the true parallelogram interior.
-        let rect = Rectangle::new(
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [1.0, 1.0, 0.0],
-            7,
-        );
+        let rect = Rectangle::new([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], 7);
         // Corner point center + axis_u + axis_v = (2, 1, 0): a == b == 1 exactly.
         let ray = Ray::infinite([2.0, 1.0, 5.0], [0.0, 0.0, -1.0]);
         assert!(rect.intersect(&ray).is_some());
@@ -672,7 +670,10 @@ mod tests {
                 continue;
             }
             let ray = Ray::infinite(origin, dir);
-            assert_eq!(bvh.any_hit(&ray), brute_closest(&rectangles, &ray).is_some());
+            assert_eq!(
+                bvh.any_hit(&ray),
+                brute_closest(&rectangles, &ray).is_some()
+            );
         }
     }
 }

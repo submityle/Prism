@@ -143,11 +143,7 @@ fn check_grid(
     epsilon: f32,
 ) -> Vec<VorticityResult> {
     let results = gpu.eval(ctx, grid, epsilon);
-    assert_eq!(
-        results.len(),
-        grid.cell_count(),
-        "one result per grid cell"
-    );
+    assert_eq!(results.len(), grid.cell_count(), "one result per grid cell");
     let cpu_mag = vorticity_magnitude_field(grid);
     assert_eq!(cpu_mag.len(), grid.cell_count(), "one magnitude per cell");
 
@@ -183,7 +179,10 @@ fn check_grid(
 fn assert_non_trivial(results: &[VorticityResult]) {
     let any_curl = results.iter().any(|r| r.curl.length() > 1.0e-3);
     let any_force = results.iter().any(|r| r.force.length() > 1.0e-3);
-    assert!(any_curl, "scene should produce a non-zero vorticity somewhere");
+    assert!(
+        any_curl,
+        "scene should produce a non-zero vorticity somewhere"
+    );
     assert!(
         any_force,
         "scene should produce a non-zero confinement force somewhere"

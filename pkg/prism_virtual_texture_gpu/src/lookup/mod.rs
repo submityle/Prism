@@ -61,26 +61,38 @@ impl GpuPageLookup {
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("prism_vt_lookup_layout"),
             entries: &[
-                buffer_layout(0, BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
-                buffer_layout(1, BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
-                buffer_layout(2, BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
-                buffer_layout(3, BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
+                buffer_layout(
+                    0,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                buffer_layout(
+                    1,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                buffer_layout(
+                    2,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                buffer_layout(
+                    3,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -105,7 +117,12 @@ impl GpuPageLookup {
     /// golden `GpuPageTable::lookup(keys[i])` would return, or [`MISS`] for a
     /// page coordinate with no resident entry.
     #[must_use]
-    pub fn lookup(&self, ctx: &GpuContext, table: &GpuPageTable, keys: &[TexturePageKey]) -> Vec<u32> {
+    pub fn lookup(
+        &self,
+        ctx: &GpuContext,
+        table: &GpuPageTable,
+        keys: &[TexturePageKey],
+    ) -> Vec<u32> {
         let device = ctx.device();
 
         // Pre-reduce each query to its three compare words via the golden

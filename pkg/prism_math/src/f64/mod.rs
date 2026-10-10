@@ -25,4 +25,4 @@ pub mod dvec;
 pub use daffine::DAffine3;
 pub use dmat::{DMat2, DMat3, DMat4};
 pub use dquat::DQuat;
-pub use dvec::{DVec2, DVec3, DVec4, dvec2, dvec3, dvec4};
+pub use dvec::{dvec2, dvec3, dvec4, DVec2, DVec3, DVec4};

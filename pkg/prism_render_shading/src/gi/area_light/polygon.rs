@@ -29,7 +29,7 @@
 //!   Use of Analytically Determined Form-Factors* — the edge form factor.
 
 use alloc::vec::Vec;
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 use core::f32::consts::PI;
 
 use super::ltc_lut::LtcCoeffs;
@@ -59,7 +59,11 @@ pub fn integrate_edge_vec(v1: Vec3, v2: Vec3) -> Vec3 {
     }
     let scale = theta / sin_theta;
     let result = cross * scale;
-    if result.is_finite() { result } else { Vec3::ZERO }
+    if result.is_finite() {
+        result
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// Scalar `z`-component of [`integrate_edge_vec`], i.e. the edge's contribution
@@ -117,7 +121,11 @@ fn intersect_horizon(a: Vec3, b: Vec3) -> Option<Vec3> {
         return None;
     }
     let p = a + (b - a) * t;
-    if p.is_finite() { Some(p) } else { None }
+    if p.is_finite() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 /// Normalised clamped-cosine form factor `F ∈ [0, 1]` of a polygon.
@@ -154,7 +162,11 @@ pub fn polygon_form_factor(points: &[Vec3]) -> f32 {
         sum += integrate_edge(v1, v2);
     }
     let f = sum / (2.0 * PI);
-    if f.is_finite() { f.clamp(0.0, 1.0) } else { 0.0 }
+    if f.is_finite() {
+        f.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Diffuse (Lambertian) irradiance per unit radiance `E / L = π · F` of an
@@ -186,7 +198,11 @@ pub fn ltc_evaluate(points: &[Vec3], coeffs: &LtcCoeffs) -> f32 {
     }
     let f = polygon_form_factor(&transformed);
     let r = coeffs.amplitude.clamp(0.0, 1.0) * f;
-    if r.is_finite() { r.max(0.0) } else { 0.0 }
+    if r.is_finite() {
+        r.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Convenience diffuse form factor for a quad given its four corner positions
@@ -234,13 +250,7 @@ mod tests {
     /// A large rectangle directly overhead that nearly fills the upper
     /// hemisphere.
     fn big_overhead() -> [Vec3; 4] {
-        rectangle_points(
-            Vec3::new(0.0, 0.0, 0.02),
-            Vec3::X,
-            Vec3::Y,
-            2000.0,
-            2000.0,
-        )
+        rectangle_points(Vec3::new(0.0, 0.0, 0.02), Vec3::X, Vec3::Y, 2000.0, 2000.0)
     }
 
     #[test]
@@ -311,13 +321,7 @@ mod tests {
     fn ltc_identity_matches_diffuse_form_factor() {
         // With the identity transform the LTC evaluation is the clamped-cosine
         // form factor (amplitude 1).
-        let quad = rectangle_points(
-            Vec3::new(0.4, 0.0, 1.0),
-            Vec3::X,
-            Vec3::Y,
-            0.5,
-            0.5,
-        );
+        let quad = rectangle_points(Vec3::new(0.4, 0.0, 1.0), Vec3::X, Vec3::Y, 0.5, 0.5);
         let ltc = ltc_evaluate(&quad, &LtcCoeffs::IDENTITY);
         let ff = polygon_form_factor(&quad);
         assert!((ltc - ff).abs() < 1e-6, "ltc={ltc} ff={ff}");
@@ -326,13 +330,7 @@ mod tests {
     #[test]
     fn ltc_evaluate_is_finite_nonnegative() {
         let coeffs = fit_ltc_default(0.5, 0.4);
-        let quad = rectangle_points(
-            Vec3::new(0.3, 0.1, 0.8),
-            Vec3::X,
-            Vec3::Y,
-            0.4,
-            0.6,
-        );
+        let quad = rectangle_points(Vec3::new(0.3, 0.1, 0.8), Vec3::X, Vec3::Y, 0.4, 0.6);
         let r = ltc_evaluate(&quad, &coeffs);
         assert!(r.is_finite() && r >= 0.0, "r={r}");
     }

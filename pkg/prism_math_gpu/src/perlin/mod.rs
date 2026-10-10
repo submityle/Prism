@@ -152,13 +152,19 @@ impl GpuPerlin {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let get2 = compile(device, &pipeline_layout, WRAP_GET2, "prism_math_perlin_get2");
-        let get3 = compile(device, &pipeline_layout, WRAP_GET3, "prism_math_perlin_get3");
-        GpuPerlin {
-            get2,
-            get3,
-            layout,
-        }
+        let get2 = compile(
+            device,
+            &pipeline_layout,
+            WRAP_GET2,
+            "prism_math_perlin_get2",
+        );
+        let get3 = compile(
+            device,
+            &pipeline_layout,
+            WRAP_GET3,
+            "prism_math_perlin_get3",
+        );
+        GpuPerlin { get2, get3, layout }
     }
 
     /// Batch-samples 2D Perlin noise at each `[x, y]` on the device for the
@@ -301,7 +307,12 @@ fn compile(
 
 /// Records a 1D batch dispatch covering `n` elements at [`WORKGROUP`] threads
 /// per group.
-fn dispatch(enc: &mut CommandEncoder, pipeline: &ComputePipeline, bind_group: &BindGroup, n: usize) {
+fn dispatch(
+    enc: &mut CommandEncoder,
+    pipeline: &ComputePipeline,
+    bind_group: &BindGroup,
+    n: usize,
+) {
     let groups = (n as u32).div_ceil(WORKGROUP);
     let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
         label: Some("prism_math_perlin_pass"),

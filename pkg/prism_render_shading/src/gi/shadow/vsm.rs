@@ -571,7 +571,10 @@ mod tests {
     fn page_table_request_map_residency() {
         let c = clip();
         let mut table = VsmPageTable::new(&c);
-        assert_eq!(table.len(), (c.level_count() * c.pages_per_level()) as usize);
+        assert_eq!(
+            table.len(),
+            (c.level_count() * c.pages_per_level()) as usize
+        );
         assert!(!table.is_empty());
 
         let p = IVec2::new(1, 2);

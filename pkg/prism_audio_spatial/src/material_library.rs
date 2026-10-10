@@ -110,16 +110,18 @@ impl MaterialAbsorption {
             return self.bands[last];
         }
         let log_f = ops::ln(freq_hz);
-        for (centres, values) in
-            OCTAVE_BAND_CENTERS.windows(2).zip(self.bands.windows(2))
-        {
+        for (centres, values) in OCTAVE_BAND_CENTERS.windows(2).zip(self.bands.windows(2)) {
             let c_lo = centres[0];
             let c_hi = centres[1];
             if freq_hz <= c_hi {
                 let log_lo = ops::ln(c_lo);
                 let log_hi = ops::ln(c_hi);
                 let span = log_hi - log_lo;
-                let t = if span > 0.0 { (log_f - log_lo) / span } else { 0.0 };
+                let t = if span > 0.0 {
+                    (log_f - log_lo) / span
+                } else {
+                    0.0
+                };
                 let v = values[0] + (values[1] - values[0]) * t;
                 return v.clamp(0.0, 1.0);
             }
@@ -195,26 +197,17 @@ pub enum Material {
 // Octave-band energy-absorption spectra, aligned with `OCTAVE_BAND_CENTERS`
 // (63, 125, 250, 500, 1000, 2000, 4000, 8000 Hz). Representative textbook
 // figures for each material class (see module Provenance).
-const CONCRETE: [Sample; OCTAVE_BAND_COUNT] =
-    [0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.03, 0.03];
+const CONCRETE: [Sample; OCTAVE_BAND_COUNT] = [0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.03, 0.03];
 const PAINTED_CONCRETE: [Sample; OCTAVE_BAND_COUNT] =
     [0.01, 0.01, 0.01, 0.01, 0.02, 0.02, 0.02, 0.02];
-const BRICK: [Sample; OCTAVE_BAND_COUNT] =
-    [0.02, 0.03, 0.03, 0.03, 0.04, 0.05, 0.07, 0.07];
-const PLASTER: [Sample; OCTAVE_BAND_COUNT] =
-    [0.01, 0.013, 0.015, 0.02, 0.03, 0.04, 0.05, 0.05];
-const WOOD: [Sample; OCTAVE_BAND_COUNT] =
-    [0.10, 0.15, 0.11, 0.10, 0.07, 0.06, 0.07, 0.07];
-const GLASS: [Sample; OCTAVE_BAND_COUNT] =
-    [0.02, 0.03, 0.03, 0.03, 0.02, 0.02, 0.02, 0.02];
-const CARPET: [Sample; OCTAVE_BAND_COUNT] =
-    [0.02, 0.02, 0.06, 0.14, 0.37, 0.60, 0.65, 0.65];
-const HEAVY_CURTAIN: [Sample; OCTAVE_BAND_COUNT] =
-    [0.05, 0.07, 0.31, 0.49, 0.75, 0.70, 0.60, 0.60];
-const ACOUSTIC_TILE: [Sample; OCTAVE_BAND_COUNT] =
-    [0.25, 0.29, 0.55, 0.75, 0.85, 0.80, 0.75, 0.75];
-const WATER: [Sample; OCTAVE_BAND_COUNT] =
-    [0.008, 0.008, 0.01, 0.013, 0.015, 0.02, 0.025, 0.025];
+const BRICK: [Sample; OCTAVE_BAND_COUNT] = [0.02, 0.03, 0.03, 0.03, 0.04, 0.05, 0.07, 0.07];
+const PLASTER: [Sample; OCTAVE_BAND_COUNT] = [0.01, 0.013, 0.015, 0.02, 0.03, 0.04, 0.05, 0.05];
+const WOOD: [Sample; OCTAVE_BAND_COUNT] = [0.10, 0.15, 0.11, 0.10, 0.07, 0.06, 0.07, 0.07];
+const GLASS: [Sample; OCTAVE_BAND_COUNT] = [0.02, 0.03, 0.03, 0.03, 0.02, 0.02, 0.02, 0.02];
+const CARPET: [Sample; OCTAVE_BAND_COUNT] = [0.02, 0.02, 0.06, 0.14, 0.37, 0.60, 0.65, 0.65];
+const HEAVY_CURTAIN: [Sample; OCTAVE_BAND_COUNT] = [0.05, 0.07, 0.31, 0.49, 0.75, 0.70, 0.60, 0.60];
+const ACOUSTIC_TILE: [Sample; OCTAVE_BAND_COUNT] = [0.25, 0.29, 0.55, 0.75, 0.85, 0.80, 0.75, 0.75];
+const WATER: [Sample; OCTAVE_BAND_COUNT] = [0.008, 0.008, 0.01, 0.013, 0.015, 0.02, 0.025, 0.025];
 
 impl Material {
     /// The stock octave-band absorption spectrum for this material.

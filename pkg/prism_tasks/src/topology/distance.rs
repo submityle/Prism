@@ -79,12 +79,14 @@ impl fmt::Display for DistanceError {
                 "distance matrix is not square: row {row} has {cols} entries, expected {rows}"
             ),
             DistanceError::ZeroDistance { from, to } => {
-                write!(f, "distance {from}->{to} is zero; distances must be positive")
+                write!(
+                    f,
+                    "distance {from}->{to} is zero; distances must be positive"
+                )
             }
-            DistanceError::DiagonalNotMinimal { node } => write!(
-                f,
-                "node {node} self-distance is not the minimum of its row"
-            ),
+            DistanceError::DiagonalNotMinimal { node } => {
+                write!(f, "node {node} self-distance is not the minimum of its row")
+            }
         }
     }
 }

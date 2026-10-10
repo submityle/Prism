@@ -424,11 +424,7 @@ impl<S: ParametricSurface> MeshBuilder<'_, S> {
 /// strictly narrows the bracket each step. The two endpoints and their inside
 /// flags are fixed per grid edge, so both cells sharing the edge compute an
 /// identical crossing — the key to a watertight seam.
-fn bisect_crossing(
-    a: (f32, f32),
-    b: (f32, f32),
-    inside: &impl Fn(f32, f32) -> bool,
-) -> (f32, f32) {
+fn bisect_crossing(a: (f32, f32), b: (f32, f32), inside: &impl Fn(f32, f32) -> bool) -> (f32, f32) {
     let (mut lo, mut hi) = if inside(a.0, a.1) { (a, b) } else { (b, a) };
     for _ in 0..BISECT_ITERS {
         let mid = (0.5 * (lo.0 + hi.0), 0.5 * (lo.1 + hi.1));
@@ -590,7 +586,10 @@ mod tests {
         let surf = TrimmedSurface::new(xy_plane(), vec![cover]).unwrap();
         let mesh = surf.tessellate(4, 4);
         assert_eq!(mesh.triangle_count(), 2 * 4 * 4);
-        assert!(mesh.positions().iter().all(|p| p.iter().all(|c| c.is_finite())));
+        assert!(mesh
+            .positions()
+            .iter()
+            .all(|p| p.iter().all(|c| c.is_finite())));
     }
 
     #[test]
@@ -622,7 +621,9 @@ mod tests {
         let cover = rect(-0.2, -0.2, 1.2, 1.2);
         let surf = TrimmedSurface::new(xy_plane(), vec![cover]).unwrap();
         let bvh = surf.tessellate_bvh(8, 8);
-        let hit = bvh.closest_hit(&down_ray(0.37, 0.61)).expect("interior hit");
+        let hit = bvh
+            .closest_hit(&down_ray(0.37, 0.61))
+            .expect("interior hit");
         // Plane sits at z = 0 and the ray starts at z = 1 going -Z.
         assert!((hit.t - 1.0).abs() < 1e-4);
         // Flat plane: interpolated normal is +Z (sign may flip for front/back).
@@ -640,7 +641,11 @@ mod tests {
         let mesh = surf.tessellate(16, 16);
         for p in mesh.uvs() {
             // Allow a small tolerance for bisected boundary vertices.
-            assert!(p[0] + p[1] <= 0.8 + 1e-3, "uv {:?} escaped the trim loop", p);
+            assert!(
+                p[0] + p[1] <= 0.8 + 1e-3,
+                "uv {:?} escaped the trim loop",
+                p
+            );
         }
         assert!(mesh.triangle_count() > 0);
     }
@@ -680,7 +685,11 @@ mod tests {
         let surf = TrimmedSurface::new(xy_plane(), vec![keep]).unwrap();
         let mesh = surf.tessellate(8, 8);
         // Naive (no dedup) would push 3-6 verts per non-empty cell (>= 150).
-        assert!(mesh.vertex_count() < 120, "vertices {}", mesh.vertex_count());
+        assert!(
+            mesh.vertex_count() < 120,
+            "vertices {}",
+            mesh.vertex_count()
+        );
         assert!(mesh.triangle_count() > 0);
     }
 

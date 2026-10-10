@@ -38,7 +38,11 @@ pub fn clamp_alpha(alpha: f32) -> f32 {
     // Written as nested min/max (not `f32::clamp`) so a NaN collapses to 0.0
     // rather than propagating; a NaN display pose would be far worse than snap.
     let a = if alpha > 1.0 { 1.0 } else { alpha };
-    if a > 0.0 { a } else { 0.0 }
+    if a > 0.0 {
+        a
+    } else {
+        0.0
+    }
 }
 
 impl Transform {
@@ -132,7 +136,12 @@ impl InterpolationBuffer {
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
-        Self { previous: Vec::new(), current: Vec::new(), teleport: Vec::new(), len: 0 }
+        Self {
+            previous: Vec::new(),
+            current: Vec::new(),
+            teleport: Vec::new(),
+            len: 0,
+        }
     }
 
     /// A buffer sized for `len` nodes, every pose seeded to identity and no

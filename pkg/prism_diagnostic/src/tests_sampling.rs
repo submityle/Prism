@@ -5,8 +5,8 @@
 //! refactor cannot silently change an aggregation result.
 
 use crate::sampling::{
-    call_tree, collapsed_stacks, facet_by_lane, facet_by_thread, fuse, FoldDirection,
-    FusionSource, InstrumentedSpan, LaneKind, SamplingProfiler, SymbolTable,
+    call_tree, collapsed_stacks, facet_by_lane, facet_by_thread, fuse, FoldDirection, FusionSource,
+    InstrumentedSpan, LaneKind, SamplingProfiler, SymbolTable,
 };
 
 /// The 1 ms interval used throughout, so one sample tick is worth `1_000_000` ns.
@@ -121,14 +121,23 @@ fn collapsed_stacks_fold_and_render() {
     // Distinct stacks lexicographically by frame-id path:
     // [0,1,2]=2, [0,1,3]=1, [0,3]=1.
     assert_eq!(collapsed.len(), 3);
-    assert_eq!(collapsed[0].frames.iter().map(|f| f.0).collect::<Vec<_>>(), alloc::vec![0, 1, 2]);
+    assert_eq!(
+        collapsed[0].frames.iter().map(|f| f.0).collect::<Vec<_>>(),
+        alloc::vec![0, 1, 2]
+    );
     assert_eq!(collapsed[0].samples, 2);
     assert_eq!(collapsed[1].samples, 1);
     assert_eq!(collapsed[2].samples, 1);
 
     let symbols = profiler.symbols();
-    assert_eq!(collapsed[0].to_folded_string(symbols), "main;update;physics 2");
-    assert_eq!(collapsed[1].to_folded_string(symbols), "main;update;render 1");
+    assert_eq!(
+        collapsed[0].to_folded_string(symbols),
+        "main;update;physics 2"
+    );
+    assert_eq!(
+        collapsed[1].to_folded_string(symbols),
+        "main;update;render 1"
+    );
     assert_eq!(collapsed[2].to_folded_string(symbols), "main;render 1");
 }
 
@@ -259,9 +268,15 @@ fn fuse_overlays_instrumented_and_sampled() {
     assert_eq!(render.source, FusionSource::Both);
     assert_eq!(render.agreement_ratio, Some(0.5));
 
-    assert_eq!(fused.get("audio_mix").unwrap().source, FusionSource::InstrumentedOnly);
+    assert_eq!(
+        fused.get("audio_mix").unwrap().source,
+        FusionSource::InstrumentedOnly
+    );
     assert_eq!(fused.get("main").unwrap().source, FusionSource::SampledOnly);
-    assert_eq!(fused.get("update").unwrap().source, FusionSource::SampledOnly);
+    assert_eq!(
+        fused.get("update").unwrap().source,
+        FusionSource::SampledOnly
+    );
 
     // Only render disagrees beyond +/-25%.
     let disagreements = fused.disagreements(0.25);
@@ -282,7 +297,10 @@ fn fuse_entry_ordering_by_effective_inclusive() {
     // Effective inclusive: main 4ms, render 4ms, update 3ms, physics 2ms,
     // audio_mix 0.5ms. Ties by name ascending => main before render.
     let names: Vec<&str> = fused.entries().iter().map(|e| e.name.as_str()).collect();
-    assert_eq!(names, alloc::vec!["main", "render", "update", "physics", "audio_mix"]);
+    assert_eq!(
+        names,
+        alloc::vec!["main", "render", "update", "physics", "audio_mix"]
+    );
 }
 
 #[test]

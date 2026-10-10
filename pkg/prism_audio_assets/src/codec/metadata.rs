@@ -81,9 +81,7 @@ impl PcmSampleFormat {
                 let raw = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 raw as Sample / 2_147_483_648.0
             }
-            PcmSampleFormat::F32Le => {
-                f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-            }
+            PcmSampleFormat::F32Le => f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             PcmSampleFormat::F64Le => f64::from_le_bytes([
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ]) as Sample,
@@ -160,12 +158,7 @@ impl AudioStreamInfo {
     /// Creates a new descriptor.
     #[inline]
     #[must_use]
-    pub fn new(
-        channels: u16,
-        sample_rate: u32,
-        frame_count: Option<u64>,
-        codec: CodecTag,
-    ) -> Self {
+    pub fn new(channels: u16, sample_rate: u32, frame_count: Option<u64>, codec: CodecTag) -> Self {
         Self {
             channels,
             sample_rate,

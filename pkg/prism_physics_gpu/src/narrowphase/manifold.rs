@@ -218,7 +218,11 @@ mod tests {
         let out = reduce_to_four(&pts, Vec3::Z);
         assert_eq!(out.len(), 4);
         // The deepest corner (2, 0) and the farthest from it (-2, 0) survive.
-        assert!(out.iter().any(|p| (p.position - Vec3::new(2.0, 0.0, 0.0)).length() < EPS));
-        assert!(out.iter().any(|p| (p.position - Vec3::new(-2.0, 0.0, 0.0)).length() < EPS));
+        assert!(out
+            .iter()
+            .any(|p| (p.position - Vec3::new(2.0, 0.0, 0.0)).length() < EPS));
+        assert!(out
+            .iter()
+            .any(|p| (p.position - Vec3::new(-2.0, 0.0, 0.0)).length() < EPS));
     }
 }

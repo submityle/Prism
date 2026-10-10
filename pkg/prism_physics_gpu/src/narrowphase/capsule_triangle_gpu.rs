@@ -51,9 +51,9 @@ use crate::context::GpuContext;
 
 use super::capsule::Capsule;
 use super::capsule_triangle::CapsuleTrianglePair;
-use super::sphere_triangle::Triangle;
 use super::contact::Contact;
 use super::layout::{buffer_entry, entry};
+use super::sphere_triangle::Triangle;
 
 /// Lanes per workgroup; must match `@workgroup_size` in the kernel.
 const WORKGROUP: usize = 64;

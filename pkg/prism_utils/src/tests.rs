@@ -90,7 +90,11 @@ fn slot_map_generational_invalidation() {
     assert_eq!(c.index(), a.index(), "freed slot should be recycled");
     assert_ne!(c.generation(), a.generation(), "generation must advance");
     assert_eq!(m.get(c), Some(&"c"));
-    assert_eq!(m.get(a), None, "old key must not resurface as the new value");
+    assert_eq!(
+        m.get(a),
+        None,
+        "old key must not resurface as the new value"
+    );
 
     *m.get_mut(c).unwrap() = "c2";
     assert_eq!(m.get(c), Some(&"c2"));
@@ -213,7 +217,10 @@ fn global_allocator_round_trip_varied_layouts() {
         assert!(block.len() >= layout.size());
         let addr = block.as_ptr().cast::<u8>() as usize;
         assert_eq!(addr % layout.align(), 0, "returned block must be aligned");
-        #[expect(unsafe_code, reason = "test exercises the raw allocator deallocation path")]
+        #[expect(
+            unsafe_code,
+            reason = "test exercises the raw allocator deallocation path"
+        )]
         // SAFETY: `block` was just produced by `global.allocate(layout)` and is
         // handed straight back with the same layout, used nowhere else.
         unsafe {
@@ -230,7 +237,10 @@ fn pool_recycles_the_same_block() {
 
     let a = pool.allocate_block().unwrap();
     assert_eq!(pool.live(), 1);
-    #[expect(unsafe_code, reason = "test exercises the raw allocator deallocation path")]
+    #[expect(
+        unsafe_code,
+        reason = "test exercises the raw allocator deallocation path"
+    )]
     // SAFETY: `a` is a live block from this pool, freed exactly once.
     unsafe {
         pool.deallocate_block(a);
@@ -240,7 +250,10 @@ fn pool_recycles_the_same_block() {
     // The very next allocation must reuse the block we just freed.
     let b = pool.allocate_block().unwrap();
     assert_eq!(a, b, "freed block should be recycled");
-    #[expect(unsafe_code, reason = "test exercises the raw allocator deallocation path")]
+    #[expect(
+        unsafe_code,
+        reason = "test exercises the raw allocator deallocation path"
+    )]
     // SAFETY: `b` is live and freed exactly once.
     unsafe {
         pool.deallocate_block(b);
@@ -265,7 +278,10 @@ fn pool_grows_across_chunks() {
     assert_eq!(addrs.len(), 5, "blocks must not alias");
 
     for b in blocks {
-        #[expect(unsafe_code, reason = "test exercises the raw allocator deallocation path")]
+        #[expect(
+            unsafe_code,
+            reason = "test exercises the raw allocator deallocation path"
+        )]
         // SAFETY: each block is live and freed exactly once here.
         unsafe {
             pool.deallocate_block(b);
@@ -283,7 +299,9 @@ fn frame_allocator_alignment_and_reset() {
 
     // A 1-byte allocation, then an over-aligned one: the second must be padded
     // up to its alignment.
-    let one = frame.allocate(Layout::from_size_align(1, 1).unwrap()).unwrap();
+    let one = frame
+        .allocate(Layout::from_size_align(1, 1).unwrap())
+        .unwrap();
     assert_eq!(one.len(), 1);
 
     let aligned = frame
@@ -298,7 +316,9 @@ fn frame_allocator_alignment_and_reset() {
     assert_eq!(frame.used(), 0);
 
     // After reset the cursor restarts, so the first block address repeats.
-    let again = frame.allocate(Layout::from_size_align(1, 1).unwrap()).unwrap();
+    let again = frame
+        .allocate(Layout::from_size_align(1, 1).unwrap())
+        .unwrap();
     assert_eq!(
         again.as_ptr().cast::<u8>() as usize,
         one.as_ptr().cast::<u8>() as usize,
@@ -359,5 +379,9 @@ fn alloc_box_runs_destructors() {
     let boxed = AllocBox::new_in(Dropper(&counter), Global);
     assert_eq!(counter.get(), 0);
     drop(boxed);
-    assert_eq!(counter.get(), 1, "AllocBox must run the value's destructor once");
+    assert_eq!(
+        counter.get(),
+        1,
+        "AllocBox must run the value's destructor once"
+    );
 }

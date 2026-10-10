@@ -364,8 +364,12 @@ pub fn temporal_accumulate(
         return TemporalState::from_sample(sample);
     };
 
-    let clamped_history =
-        clamp_to_neighbourhood(prev.color, neighbourhood_mean, neighbourhood_std, params.clamp_gamma);
+    let clamped_history = clamp_to_neighbourhood(
+        prev.color,
+        neighbourhood_mean,
+        neighbourhood_std,
+        params.clamp_gamma,
+    );
     let alpha = temporal_alpha(prev.age, params.max_frames);
     let color = clamped_history.lerp(sample, alpha);
 
@@ -434,13 +438,22 @@ fn safe_normalize(v: Vec3) -> Vec3 {
 /// Replace any non-finite component of an RGB triple with `0`.
 #[must_use]
 fn sanitize_rgb(c: Vec3) -> Vec3 {
-    Vec3::new(finite_or_zero(c.x), finite_or_zero(c.y), finite_or_zero(c.z)).max(Vec3::ZERO)
+    Vec3::new(
+        finite_or_zero(c.x),
+        finite_or_zero(c.y),
+        finite_or_zero(c.z),
+    )
+    .max(Vec3::ZERO)
 }
 
 /// Replace any non-finite component of a position with `0`.
 #[must_use]
 fn sanitize_vec(v: Vec3) -> Vec3 {
-    Vec3::new(finite_or_zero(v.x), finite_or_zero(v.y), finite_or_zero(v.z))
+    Vec3::new(
+        finite_or_zero(v.x),
+        finite_or_zero(v.y),
+        finite_or_zero(v.z),
+    )
 }
 
 #[must_use]
@@ -541,10 +554,22 @@ mod tests {
         // All taps share geometry; only colour differs -> should average.
         let center = s(Vec3::splat(1.0), Vec3::ZERO, Vec3::Z, 0.5);
         let neighbours = [
-            (s(Vec3::splat(0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::Z, 0.5), 1.0),
-            (s(Vec3::splat(2.0), Vec3::new(-1.0, 0.0, 0.0), Vec3::Z, 0.5), 1.0),
+            (
+                s(Vec3::splat(0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::Z, 0.5),
+                1.0,
+            ),
+            (
+                s(Vec3::splat(2.0), Vec3::new(-1.0, 0.0, 0.0), Vec3::Z, 0.5),
+                1.0,
+            ),
         ];
-        let out = atrous_filter(&center, 1.0, &neighbours, 1.0, &EdgeStoppingParams::default());
+        let out = atrous_filter(
+            &center,
+            1.0,
+            &neighbours,
+            1.0,
+            &EdgeStoppingParams::default(),
+        );
         // Weighted mean of {1,0,2} with near-equal weights ~ 1.
         assert!((out.x - 1.0).abs() < 0.25);
     }
@@ -600,7 +625,13 @@ mod tests {
 
     #[test]
     fn temporal_accumulate_seeds_on_disocclusion() {
-        let st = temporal_accumulate(None, Vec3::splat(2.0), Vec3::ZERO, Vec3::ZERO, &TemporalParams::default());
+        let st = temporal_accumulate(
+            None,
+            Vec3::splat(2.0),
+            Vec3::ZERO,
+            Vec3::ZERO,
+            &TemporalParams::default(),
+        );
         assert_eq!(st.age, 1);
         assert!((st.color - Vec3::splat(2.0)).length() < 1e-6);
     }
@@ -622,12 +653,8 @@ mod tests {
     #[test]
     fn history_clamp_rejects_stale_history() {
         // Stale bright history, current neighbourhood is dark & tight.
-        let clamped = clamp_to_neighbourhood(
-            Vec3::splat(10.0),
-            Vec3::splat(0.2),
-            Vec3::splat(0.05),
-            2.0,
-        );
+        let clamped =
+            clamp_to_neighbourhood(Vec3::splat(10.0), Vec3::splat(0.2), Vec3::splat(0.05), 2.0);
         assert!(clamped.x <= 0.2 + 2.0 * 0.05 + 1e-6);
         assert!(clamped.x >= 0.2 - 2.0 * 0.05 - 1e-6);
     }
@@ -669,7 +696,12 @@ mod tests {
     fn weights_are_finite_on_degenerate_inputs() {
         let w = edge_stopping_weight(
             &DenoiseSample::new(Vec3::splat(f32::NAN), Vec3::ZERO, Vec3::ZERO, 2.0),
-            &DenoiseSample::new(Vec3::splat(f32::INFINITY), Vec3::splat(f32::NAN), Vec3::ZERO, -1.0),
+            &DenoiseSample::new(
+                Vec3::splat(f32::INFINITY),
+                Vec3::splat(f32::NAN),
+                Vec3::ZERO,
+                -1.0,
+            ),
             f32::NAN,
             &EdgeStoppingParams::default(),
         );
@@ -680,7 +712,10 @@ mod tests {
     #[test]
     fn determinism() {
         let center = s(Vec3::new(0.5, 0.5, 0.5), Vec3::ZERO, Vec3::Z, 0.3);
-        let nb = [(s(Vec3::splat(0.7), Vec3::new(0.5, 0.0, 0.0), Vec3::Z, 0.3), 0.25)];
+        let nb = [(
+            s(Vec3::splat(0.7), Vec3::new(0.5, 0.0, 0.0), Vec3::Z, 0.3),
+            0.25,
+        )];
         let a = atrous_filter(&center, 1.0, &nb, 0.2, &EdgeStoppingParams::default());
         let b = atrous_filter(&center, 1.0, &nb, 0.2, &EdgeStoppingParams::default());
         assert_eq!(a, b);

@@ -386,10 +386,7 @@ impl GpuClusterDecider {
         drop(view);
         decisions_stage.unmap();
         debug_assert_eq!(gpu_decisions.len(), clusters.len());
-        gpu_decisions
-            .into_iter()
-            .map(rebuild_decision)
-            .collect()
+        gpu_decisions.into_iter().map(rebuild_decision).collect()
     }
 }
 

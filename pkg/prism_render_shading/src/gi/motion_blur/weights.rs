@@ -43,7 +43,11 @@ const DEGENERATE_EPSILON: f32 = 1.0e-6;
 /// Replaces a non-finite scalar with `0.0`, otherwise returns it unchanged.
 #[inline]
 fn finite_or_zero(x: f32) -> f32 {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Sanitizes a radius/extent: non-finite becomes `0.0`, negatives are clamped
@@ -150,7 +154,11 @@ pub fn soft_z_compare(za: f32, zb: f32, extent: f32) -> f32 {
 pub fn velocity_magnitude(velocity: Vec2) -> f32 {
     let v = Vec2::new(finite_or_zero(velocity.x), finite_or_zero(velocity.y));
     let len = v.length();
-    if len.is_finite() { len.max(0.0) } else { 0.0 }
+    if len.is_finite() {
+        len.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Half of a velocity vector — the signed extent the blur spans on each side of
@@ -288,6 +296,9 @@ mod tests {
         assert!(cylinder(f32::NAN, f32::NAN, f32::NAN).is_finite());
         assert!(soft_depth_compare(f32::NAN, f32::INFINITY, f32::NAN).is_finite());
         assert_eq!(velocity_magnitude(Vec2::new(f32::NAN, 4.0)), 4.0);
-        assert_eq!(half_velocity(Vec2::new(f32::INFINITY, 2.0)), Vec2::new(0.0, 1.0));
+        assert_eq!(
+            half_velocity(Vec2::new(f32::INFINITY, 2.0)),
+            Vec2::new(0.0, 1.0)
+        );
     }
 }

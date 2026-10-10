@@ -11,7 +11,6 @@
 //! Implements box/clip-space decal projection, angle-based edge fade,
 //! G-buffer attribute blending, and clustered froxel binning.
 
-
 pub mod blend;
 pub mod cluster;
 pub mod projection;

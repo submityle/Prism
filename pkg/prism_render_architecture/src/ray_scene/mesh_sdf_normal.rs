@@ -84,12 +84,18 @@ mod tests {
             [0.0, 1.0, 1.0],
         ];
         let i = vec![
-            [0, 1, 2], [0, 2, 3],
-            [4, 5, 6], [4, 6, 7],
-            [0, 1, 5], [0, 5, 4],
-            [3, 2, 6], [3, 6, 7],
-            [0, 3, 7], [0, 7, 4],
-            [1, 2, 6], [1, 6, 5],
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 2, 6],
+            [3, 6, 7],
+            [0, 3, 7],
+            [0, 7, 4],
+            [1, 2, 6],
+            [1, 6, 5],
         ];
         mesh(p, i)
     }
@@ -118,7 +124,10 @@ mod tests {
         let point = grid_point(&field, 0.8, 0.5, 0.5);
         let gradient = sdf_gradient(&field, point);
         // Outward near the +x face means a positive, dominant x component.
-        assert!(gradient[0] > 0.0, "x gradient must be positive: {gradient:?}");
+        assert!(
+            gradient[0] > 0.0,
+            "x gradient must be positive: {gradient:?}"
+        );
         assert!(gradient[0].abs() > gradient[1].abs());
         assert!(gradient[0].abs() > gradient[2].abs());
     }
@@ -138,8 +147,7 @@ mod tests {
         let field = cube_field();
         let normal = sdf_normal(&field, grid_point(&field, 0.8, 0.5, 0.5))
             .expect("gradient near a face must orient");
-        let length =
-            (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+        let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
         assert!((length - 1.0).abs() <= 1e-5, "normal length {length}");
     }
 

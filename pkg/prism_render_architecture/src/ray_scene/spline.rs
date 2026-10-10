@@ -99,12 +99,7 @@ fn cardinal_bezier(
 /// The standard blossom of the uniform cubic B-spline basis:
 /// `b0 = (p0 + 4p1 + p2)/6`, `b1 = (2p1 + p2)/3`, `b2 = (p1 + 2p2)/3`,
 /// `b3 = (p1 + 4p2 + p3)/6`.
-fn bspline_bezier(
-    p0: [f32; 3],
-    p1: [f32; 3],
-    p2: [f32; 3],
-    p3: [f32; 3],
-) -> [[f32; 3]; 4] {
+fn bspline_bezier(p0: [f32; 3], p1: [f32; 3], p2: [f32; 3], p3: [f32; 3]) -> [[f32; 3]; 4] {
     let b0 = scale(add(add(p0, scale(p1, 4.0)), p2), 1.0 / 6.0);
     let b1 = scale(add(scale(p1, 2.0), p2), 1.0 / 3.0);
     let b2 = scale(add(p1, scale(p2, 2.0)), 1.0 / 3.0);

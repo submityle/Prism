@@ -299,7 +299,10 @@ fn rotated_frame_clamp() {
     // projections clamp to opposite faces, so the nearest point is (sqrt 2, 0, 0)
     // and the point is clearly outside.
     let got = check(&ctx, &gpu, &[query(Vec3::new(3.0, 0.0, 0.5), rot45())]);
-    assert!(!got[0].inside, "point outside a rotated box must read outside");
+    assert!(
+        !got[0].inside,
+        "point outside a rotated box must read outside"
+    );
     assert!(
         close_vec(got[0].point, Vec3::new(core::f32::consts::SQRT_2, 0.0, 0.5)),
         "nearest {:?}",

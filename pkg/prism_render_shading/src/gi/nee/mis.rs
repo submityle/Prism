@@ -149,7 +149,11 @@ pub fn area_to_solid_angle_pdf(area_pdf: f32, distance: f32, cos_light: f32) -> 
         return 0.0;
     }
     let pdf = area_pdf * distance * distance / cos_light;
-    if pdf.is_finite() { pdf.max(0.0) } else { 0.0 }
+    if pdf.is_finite() {
+        pdf.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Converts a **solid-angle** pdf back to an **area** pdf: the inverse of
@@ -167,7 +171,11 @@ pub fn solid_angle_to_area_pdf(solid_angle_pdf: f32, distance: f32, cos_light: f
         return 0.0;
     }
     let pdf = solid_angle_pdf * cos_light / (distance * distance);
-    if pdf.is_finite() { pdf.max(0.0) } else { 0.0 }
+    if pdf.is_finite() {
+        pdf.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Brings a light's area pdf and a BSDF solid-angle pdf into the **same**

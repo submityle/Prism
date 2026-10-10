@@ -401,12 +401,9 @@ mod tests {
         // nearest point is directly below on the face, so the normal is +z and
         // depth = rc - dist = 0.5 - 0.3 = 0.2.
         let tri = unit_triangle();
-        let cap = Capsule::new(
-            Vec3::new(0.2, 0.3, 0.3),
-            Vec3::new(0.4, 0.3, 0.3),
-            0.5,
-        );
-        let c = capsule_triangle_contact(2, 7, &cap, &tri).expect("capsule above face must contact");
+        let cap = Capsule::new(Vec3::new(0.2, 0.3, 0.3), Vec3::new(0.4, 0.3, 0.3), 0.5);
+        let c =
+            capsule_triangle_contact(2, 7, &cap, &tri).expect("capsule above face must contact");
         assert_eq!(c.a, 2);
         assert_eq!(c.b, 7);
         assert!((c.normal - Vec3::Z).length() < 1.0e-6);
@@ -419,12 +416,9 @@ mod tests {
         // Capsule parallel to and below edge AB (the y = 0 edge) at y = -0.3:
         // nearest feature is the edge, normal -y, depth 0.5 - 0.3 = 0.2.
         let tri = unit_triangle();
-        let cap = Capsule::new(
-            Vec3::new(0.3, -0.3, 0.0),
-            Vec3::new(0.7, -0.3, 0.0),
-            0.5,
-        );
-        let c = capsule_triangle_contact(0, 0, &cap, &tri).expect("capsule off edge AB must contact");
+        let cap = Capsule::new(Vec3::new(0.3, -0.3, 0.0), Vec3::new(0.7, -0.3, 0.0), 0.5);
+        let c =
+            capsule_triangle_contact(0, 0, &cap, &tri).expect("capsule off edge AB must contact");
         assert!((c.normal - Vec3::new(0.0, -1.0, 0.0)).length() < 1.0e-6);
         assert!((c.depth - 0.2).abs() < 1.0e-6);
         assert!((c.point.y).abs() < 1.0e-6);
@@ -435,12 +429,9 @@ mod tests {
         // Capsule endpoint sits off vertex A along -x/-y, the other endpoint is
         // farther away, so the nearest feature is the vertex (0, 0, 0).
         let tri = unit_triangle();
-        let cap = Capsule::new(
-            Vec3::new(-0.3, -0.4, 0.0),
-            Vec3::new(-0.9, -1.0, 0.0),
-            0.6,
-        );
-        let c = capsule_triangle_contact(0, 0, &cap, &tri).expect("capsule off vertex A must contact");
+        let cap = Capsule::new(Vec3::new(-0.3, -0.4, 0.0), Vec3::new(-0.9, -1.0, 0.0), 0.6);
+        let c =
+            capsule_triangle_contact(0, 0, &cap, &tri).expect("capsule off vertex A must contact");
         assert!((c.point - Vec3::ZERO).length() < 1.0e-6);
         let diff = Vec3::new(-0.3, -0.4, 0.0);
         let dist = diff.length();
@@ -454,11 +445,7 @@ mod tests {
         // segment pierces, so the fallback face normal (oriented toward the
         // segment midpoint on the +z side) is used with depth = rc.
         let tri = unit_triangle();
-        let cap = Capsule::new(
-            Vec3::new(0.25, 0.25, 0.5),
-            Vec3::new(0.25, 0.25, -0.3),
-            0.4,
-        );
+        let cap = Capsule::new(Vec3::new(0.25, 0.25, 0.5), Vec3::new(0.25, 0.25, -0.3), 0.4);
         let c = capsule_triangle_contact(0, 0, &cap, &tri).expect("piercing capsule must contact");
         // Midpoint z = 0.1 > 0, so the +z face normal is kept.
         assert!((c.normal - Vec3::Z).length() < 1.0e-6);
@@ -470,11 +457,7 @@ mod tests {
         // Capsule crosses the face but its midpoint sits on the -z side, so the
         // oriented face normal flips to -z (push the capsule further down).
         let tri = unit_triangle();
-        let cap = Capsule::new(
-            Vec3::new(0.25, 0.25, 0.3),
-            Vec3::new(0.25, 0.25, -0.5),
-            0.4,
-        );
+        let cap = Capsule::new(Vec3::new(0.25, 0.25, 0.3), Vec3::new(0.25, 0.25, -0.5), 0.4);
         let c = capsule_triangle_contact(0, 0, &cap, &tri).expect("piercing capsule must contact");
         // Midpoint z = -0.1 < 0, so the normal flips to -z.
         assert!((c.normal + Vec3::Z).length() < 1.0e-6);
@@ -487,11 +470,7 @@ mod tests {
         // distance is zero, so the degenerate fallback runs with the +z normal
         // and depth = rc.
         let tri = unit_triangle();
-        let cap = Capsule::new(
-            Vec3::new(0.2, 0.3, 0.0),
-            Vec3::new(0.4, 0.3, 0.0),
-            0.5,
-        );
+        let cap = Capsule::new(Vec3::new(0.2, 0.3, 0.0), Vec3::new(0.4, 0.3, 0.0), 0.5);
         let c = capsule_triangle_contact(4, 9, &cap, &tri).expect("axis on face always contacts");
         assert!((c.normal - Vec3::Z).length() < 1.0e-6);
         assert!((c.depth - 0.5).abs() < 1.0e-6);
@@ -501,11 +480,7 @@ mod tests {
     fn clear_separation_reports_no_contact() {
         // Capsule far above the face: dist 2, radius 0.5, no overlap.
         let tri = unit_triangle();
-        let cap = Capsule::new(
-            Vec3::new(0.2, 0.3, 2.0),
-            Vec3::new(0.4, 0.3, 2.0),
-            0.5,
-        );
+        let cap = Capsule::new(Vec3::new(0.2, 0.3, 2.0), Vec3::new(0.4, 0.3, 2.0), 0.5);
         assert!(capsule_triangle_contact(0, 0, &cap, &tri).is_none());
     }
 
@@ -513,11 +488,7 @@ mod tests {
     fn exactly_touching_reports_no_contact() {
         // Capsule exactly grazing the face at dist == rc: strict test rejects.
         let tri = unit_triangle();
-        let cap = Capsule::new(
-            Vec3::new(0.2, 0.3, 0.5),
-            Vec3::new(0.4, 0.3, 0.5),
-            0.5,
-        );
+        let cap = Capsule::new(Vec3::new(0.2, 0.3, 0.5), Vec3::new(0.4, 0.3, 0.5), 0.5);
         assert!(capsule_triangle_contact(0, 0, &cap, &tri).is_none());
     }
 
@@ -530,11 +501,7 @@ mod tests {
             Vec3::new(1.0, 0.0, 0.0),
             Vec3::new(2.0, 0.0, 0.0),
         );
-        let cap = Capsule::new(
-            Vec3::new(0.4, 0.0, 0.0),
-            Vec3::new(0.6, 0.0, 0.0),
-            0.5,
-        );
+        let cap = Capsule::new(Vec3::new(0.4, 0.0, 0.0), Vec3::new(0.6, 0.0, 0.0), 0.5);
         let c = capsule_triangle_contact(0, 0, &cap, &degenerate)
             .expect("axis on degenerate triangle still contacts");
         assert_eq!(c.normal, Vec3::X);

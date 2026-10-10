@@ -120,7 +120,13 @@ impl Heightfield {
     /// Panics if `heights.len()` is not exactly `rows * cols`, which would make
     /// the sample indexing ill-defined.
     #[must_use]
-    pub fn new(rows: u32, cols: u32, cell_size: f32, origin: Vec3, heights: Vec<f32>) -> Heightfield {
+    pub fn new(
+        rows: u32,
+        cols: u32,
+        cell_size: f32,
+        origin: Vec3,
+        heights: Vec<f32>,
+    ) -> Heightfield {
         assert_eq!(
             heights.len(),
             rows as usize * cols as usize,

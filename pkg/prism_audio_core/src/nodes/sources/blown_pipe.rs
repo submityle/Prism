@@ -451,8 +451,8 @@ impl BlownPipeNode {
             let gain = ops::powf(ratio, -tilt);
             // Constant-peak-gain reson normalization: the resonator's
             // frequency-response peak equals `gain` for any pole radius.
-            let norm =
-                (1.0 - radius) * ops::sqrt(1.0 - 2.0 * radius * ops::cos(2.0 * theta) + radius * radius);
+            let norm = (1.0 - radius)
+                * ops::sqrt(1.0 - 2.0 * radius * ops::cos(2.0 * theta) + radius * radius);
             self.a1[h] = 2.0 * radius * cos_t;
             self.a2[h] = -(radius * radius);
             self.b0[h] = gain * norm;
@@ -640,7 +640,10 @@ mod tests {
         let mut node = BlownPipeNode::new(SR, BlownPipeParams::default());
         let out = render(&mut node, 10 * SR as usize);
         let p = peak(&out);
-        assert!(p < 1.0 && p.is_finite(), "ten-second run peak {p} must stay bounded");
+        assert!(
+            p < 1.0 && p.is_finite(),
+            "ten-second run peak {p} must stay bounded"
+        );
     }
 
     #[test]
@@ -686,7 +689,10 @@ mod tests {
         let mut b = BlownPipeNode::new(SR, BlownPipeParams::default());
         let out_a = render(&mut a, SR as usize);
         let out_b = render(&mut b, SR as usize);
-        assert_eq!(out_a, out_b, "equal params must produce bit-identical audio");
+        assert_eq!(
+            out_a, out_b,
+            "equal params must produce bit-identical audio"
+        );
     }
 
     #[test]
@@ -836,7 +842,10 @@ mod tests {
         high.set_frequency(1500.0);
         let low_out = render(&mut low, SR as usize / 4);
         let high_out = render(&mut high, SR as usize / 4);
-        assert_ne!(low_out, high_out, "retuning the pipe must change its output");
+        assert_ne!(
+            low_out, high_out,
+            "retuning the pipe must change its output"
+        );
     }
 
     #[test]
@@ -992,7 +1001,10 @@ mod tests {
         assert!(!open.stopped());
         let open_out = render(&mut open, SR as usize / 4);
         let stopped_out = render(&mut stopped, SR as usize / 4);
-        assert_ne!(open_out, stopped_out, "stopping the pipe must change its spectrum");
+        assert_ne!(
+            open_out, stopped_out,
+            "stopping the pipe must change its spectrum"
+        );
     }
 
     #[test]

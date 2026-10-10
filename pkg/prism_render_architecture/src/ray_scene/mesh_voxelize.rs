@@ -137,7 +137,11 @@ fn is_separating(axis: [f64; 3], v: [[f64; 3]; 3], half: [f64; 3]) -> bool {
 /// `center`/`half` describe the box; `tri` is the world-space triangle. Overlap
 /// holds when no candidate axis separates the two convex shapes.
 pub fn triangle_box_overlap(center: [f64; 3], half: [f64; 3], tri: [[f64; 3]; 3]) -> bool {
-    let v = [sub(tri[0], center), sub(tri[1], center), sub(tri[2], center)];
+    let v = [
+        sub(tri[0], center),
+        sub(tri[1], center),
+        sub(tri[2], center),
+    ];
     let e = [sub(v[1], v[0]), sub(v[2], v[1]), sub(v[0], v[2])];
 
     let unit = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -304,7 +308,12 @@ mod tests {
         // A unit quad in the z=0 plane voxelized at resolution 4 should occupy
         // exactly one layer of cells (all at iz == 0) and cover the plane.
         let m = mesh(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
             vec![[0, 1, 2], [0, 2, 3]],
         );
         let grid = voxelize_surface(&m, 4).unwrap();
@@ -332,7 +341,10 @@ mod tests {
         assert!(grid.occupied_count() > 0);
         // The occupancy set must be a strict subset of the full grid volume.
         let total = (grid.dims()[0] * grid.dims()[1] * grid.dims()[2]) as usize;
-        assert!(grid.occupied_count() < total, "surface should not fill volume");
+        assert!(
+            grid.occupied_count() < total,
+            "surface should not fill volume"
+        );
     }
 
     #[test]

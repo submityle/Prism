@@ -20,7 +20,11 @@ use crate::vec::{Vec2, Vec3};
 /// zero components must not collapse the encoded coordinate to zero.
 #[inline]
 fn sign_nonzero(v: f32) -> f32 {
-    if v >= 0.0 { 1.0 } else { -1.0 }
+    if v >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    }
 }
 
 /// Encode a (not necessarily normalized) direction to octahedral coordinates

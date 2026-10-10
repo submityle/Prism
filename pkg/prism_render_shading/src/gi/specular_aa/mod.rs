@@ -47,11 +47,11 @@ pub mod normal_variance;
 pub mod toksvig;
 
 pub use lean::{
-    LeanMoments, clamp_psd, covariance_to_anisotropic_roughness, normal_to_slope, principal_axes,
+    clamp_psd, covariance_to_anisotropic_roughness, normal_to_slope, principal_axes, LeanMoments,
 };
 pub use normal_variance::{
-    DEFAULT_KAPPA_MAX, DEFAULT_SIGMA2, delta_alpha_sq_from_derivatives,
-    geometric_specular_aa_roughness, kernel_roughness_sq, screen_space_variance,
+    delta_alpha_sq_from_derivatives, geometric_specular_aa_roughness, kernel_roughness_sq,
+    screen_space_variance, DEFAULT_KAPPA_MAX, DEFAULT_SIGMA2,
 };
 pub use toksvig::{
     combine_roughness, effective_shininess, toksvig_delta_alpha_sq, toksvig_factor,
@@ -150,7 +150,11 @@ impl AnisoRoughness {
 /// Clamps a roughness to `[0, 1]`, mapping non-finite inputs to `0`.
 #[inline]
 fn sanitize_roughness(r: f32) -> f32 {
-    if r.is_finite() { r.clamp(0.0, 1.0) } else { 0.0 }
+    if r.is_finite() {
+        r.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Applies derivative-based geometric specular anti-aliasing to a base

@@ -63,10 +63,7 @@ impl Candidate {
     /// Creates a candidate from its target `p̂` and source density `p`.
     #[inline]
     pub fn new(target: f32, source_pdf: f32) -> Self {
-        Self {
-            target,
-            source_pdf,
-        }
+        Self { target, source_pdf }
     }
 
     /// The RIS resampling weight `w = p̂ / p`.
@@ -83,7 +80,11 @@ impl Candidate {
             return 0.0;
         }
         let w = self.target / self.source_pdf;
-        if w.is_finite() { w.max(0.0) } else { 0.0 }
+        if w.is_finite() {
+            w.max(0.0)
+        } else {
+            0.0
+        }
     }
 }
 
@@ -146,7 +147,11 @@ pub fn ris_contribution_weight(selected_target: f32, weights: &[f32]) -> f32 {
         return 0.0;
     }
     let w = (sum / m as f32) / selected_target;
-    if w.is_finite() && w >= 0.0 { w } else { 0.0 }
+    if w.is_finite() && w >= 0.0 {
+        w
+    } else {
+        0.0
+    }
 }
 
 /// The result of resampling a candidate set: the chosen survivor plus the
@@ -227,7 +232,11 @@ pub fn resample(candidates: &[Candidate], u: f32) -> RisResult {
     // W = (1 / p̂(y)) · (1/M · Σ wᵢ); reuse the running sum rather than re-summing.
     let contribution_weight = if selected_target > 0.0 && selected_target.is_finite() {
         let cw = (sum / m as f32) / selected_target;
-        if cw.is_finite() && cw >= 0.0 { cw } else { 0.0 }
+        if cw.is_finite() && cw >= 0.0 {
+            cw
+        } else {
+            0.0
+        }
     } else {
         0.0
     };
@@ -420,13 +429,13 @@ mod tests {
     #[test]
     fn wrs_selects_proportionally_across_the_cdf() {
         let weights = [1.0, 3.0, 0.0, 2.0]; // total 6
-        // u in each sub-interval selects the matching index.
+                                            // u in each sub-interval selects the matching index.
         assert_eq!(weighted_reservoir_sample(&weights, 0.0), Some(0)); // (0, 1]
         assert_eq!(weighted_reservoir_sample(&weights, 0.1), Some(0));
         assert_eq!(weighted_reservoir_sample(&weights, 0.3), Some(1)); // (1, 4]
         assert_eq!(weighted_reservoir_sample(&weights, 0.6), Some(1));
         assert_eq!(weighted_reservoir_sample(&weights, 0.8), Some(3)); // (4, 6]
-        // Zero-weight index 2 is never selected.
+                                                                       // Zero-weight index 2 is never selected.
         for k in 0..100 {
             let u = k as f32 / 100.0;
             assert_ne!(weighted_reservoir_sample(&weights, u), Some(2));
@@ -513,7 +522,10 @@ mod tests {
             let r = resample(&candidates, u);
             let idx = r.selected.expect("survivor");
             let estimator = candidates[idx].target * r.contribution_weight;
-            assert!((estimator as f64 - mean).abs() < 1.0e-4, "u={u} est={estimator}");
+            assert!(
+                (estimator as f64 - mean).abs() < 1.0e-4,
+                "u={u} est={estimator}"
+            );
         }
     }
 
@@ -530,7 +542,10 @@ mod tests {
         // The invariant p̂(y)·W == w_sum/m holds for the streaming form too.
         let product = r.selected_target() * r.contribution_weight();
         let mean_w = r.weight_sum() / r.confidence();
-        assert!((product - mean_w).abs() < 1.0e-5, "product={product} mean={mean_w}");
+        assert!(
+            (product - mean_w).abs() < 1.0e-5,
+            "product={product} mean={mean_w}"
+        );
     }
 
     #[test]

@@ -35,8 +35,8 @@
 use alloc::vec::Vec;
 
 use bytemuck::{Pod, Zeroable};
-use prism_render_architecture::motion::Vec2;
 use prism_render_architecture::motion::dilation::VelocityField;
+use prism_render_architecture::motion::Vec2;
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, CommandEncoderDescriptor,
@@ -333,21 +333,30 @@ fn rw_reduction_layout(device: &wgpu::Device, label: &str) -> BindGroupLayout {
     device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some(label),
         entries: &[
-            buffer_layout(0, BindingType::Buffer {
-                ty: BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            }),
-            buffer_layout(1, BindingType::Buffer {
-                ty: BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            }),
-            buffer_layout(2, BindingType::Buffer {
-                ty: BufferBindingType::Storage { read_only: false },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            }),
+            buffer_layout(
+                0,
+                BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            ),
+            buffer_layout(
+                1,
+                BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            ),
+            buffer_layout(
+                2,
+                BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            ),
         ],
     })
 }

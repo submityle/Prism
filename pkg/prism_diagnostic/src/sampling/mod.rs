@@ -37,9 +37,9 @@
 
 pub mod facet;
 pub mod fold;
+pub mod fusion;
 pub mod sample;
 pub mod symbol;
-pub mod fusion;
 
 pub use facet::{facet_by_lane, facet_by_thread, LaneProfile, ThreadProfile};
 pub use fold::{

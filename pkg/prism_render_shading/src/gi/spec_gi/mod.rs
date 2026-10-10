@@ -6,6 +6,6 @@
 //!   neighbour's radiance is re-targeted to the current view/roughness.
 //! * All helpers are deterministic CPU golden pure functions (no RNG/IO/GPU/unsafe).
 
+pub mod brdf_mis;
 pub mod ggx_lobe;
 pub mod glossy_reservoir;
-pub mod brdf_mis;

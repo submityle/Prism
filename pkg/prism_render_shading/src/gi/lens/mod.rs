@@ -14,6 +14,6 @@ pub mod chromatic;
 pub mod flare;
 pub mod vignette;
 
-pub use chromatic::{ChromaticAberration, chromatic_offsets, resample_rgb};
-pub use flare::{FlareConfig, GhostSample, prefilter, synthesize_ghosts};
-pub use vignette::{BrownConrady, Vignette, distort, undistort};
+pub use chromatic::{chromatic_offsets, resample_rgb, ChromaticAberration};
+pub use flare::{prefilter, synthesize_ghosts, FlareConfig, GhostSample};
+pub use vignette::{distort, undistort, BrownConrady, Vignette};

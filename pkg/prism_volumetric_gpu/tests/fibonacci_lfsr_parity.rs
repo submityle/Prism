@@ -236,7 +236,11 @@ fn next_array_matches_reference() {
         let got = gpu.next_u32_at(&ctx, &seeds, &indices);
         let mut rng = FibonacciLfsr::from_state(seed);
         let expected: [u32; N] = rng.next_array();
-        assert_eq!(got, expected.to_vec(), "next_array mismatch for seed {seed:#010x}");
+        assert_eq!(
+            got,
+            expected.to_vec(),
+            "next_array mismatch for seed {seed:#010x}"
+        );
     }
 }
 

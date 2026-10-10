@@ -54,11 +54,7 @@ fn scene() -> Vec<[ScreenVertex; 3]> {
             sv(26.0, 14.0, 0.125),
         ],
         // Overlaps the first, nearer -> wins the composite where they overlap.
-        [
-            sv(6.0, 6.0, 0.5),
-            sv(6.0, 22.0, 0.5),
-            sv(24.0, 14.0, 0.5),
-        ],
+        [sv(6.0, 6.0, 0.5), sv(6.0, 22.0, 0.5), sv(24.0, 14.0, 0.5)],
         // Clockwise winding (negative raw area) -> exercises the vertex swap.
         [
             sv(10.0, 4.0, 0.25),

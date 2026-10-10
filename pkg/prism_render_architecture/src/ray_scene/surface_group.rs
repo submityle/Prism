@@ -322,13 +322,14 @@ mod tests {
 
     /// A quad with no normals/uvs (geometric shading only).
     fn bare_quad(x0: f32, x1: f32, y0: f32, y1: f32) -> TriangleMesh {
-        let positions = vec![
-            [x0, y0, 0.0],
-            [x1, y0, 0.0],
-            [x1, y1, 0.0],
-            [x0, y1, 0.0],
-        ];
-        TriangleMesh::new(positions, Vec::new(), Vec::new(), vec![[0, 1, 2], [0, 2, 3]]).unwrap()
+        let positions = vec![[x0, y0, 0.0], [x1, y0, 0.0], [x1, y1, 0.0], [x0, y1, 0.0]];
+        TriangleMesh::new(
+            positions,
+            Vec::new(),
+            Vec::new(),
+            vec![[0, 1, 2], [0, 2, 3]],
+        )
+        .unwrap()
     }
 
     /// A ray straight down `-Z` at world `(x, y)`.
@@ -390,7 +391,7 @@ mod tests {
         let group = SurfaceGroup::new(vec![a, empty, c]).unwrap();
         assert_eq!(group.part_count(), 3);
         assert_eq!(group.part_triangle_range(1), Some((2, 2))); // empty
-        // Triangle 2 belongs to the third part, never the empty middle one.
+                                                                // Triangle 2 belongs to the third part, never the empty middle one.
         assert_eq!(group.source_of(2), Some(2));
         assert_eq!(group.source_of(3), Some(2));
     }

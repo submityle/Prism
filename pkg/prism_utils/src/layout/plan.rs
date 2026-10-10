@@ -171,7 +171,10 @@ impl GroupLayout {
     /// (a `SIMD` lane width); useful for sizing an `AoSoA` block.
     #[must_use]
     pub fn lane_bytes_for(&self, lane_align: usize) -> usize {
-        self.columns.iter().map(|c| c.shape.stride_for(lane_align)).sum()
+        self.columns
+            .iter()
+            .map(|c| c.shape.stride_for(lane_align))
+            .sum()
     }
 
     /// Whether a whole row of this group fits inside a single [`CACHE_LINE`].

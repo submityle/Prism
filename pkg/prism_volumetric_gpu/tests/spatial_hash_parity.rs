@@ -53,7 +53,11 @@ fn check_hash(
     table_size: u32,
 ) -> Vec<u32> {
     let got = gpu.hash_cells(ctx, cells, table_size);
-    assert_eq!(got.len(), cells.len(), "hash output length must match input");
+    assert_eq!(
+        got.len(),
+        cells.len(),
+        "hash output length must match input"
+    );
     for (i, (&g, cell)) in got.iter().zip(cells.iter()).enumerate() {
         let want = hash_cell(*cell, table_size);
         assert_eq!(
@@ -74,7 +78,11 @@ fn check_count(
 ) -> Vec<u32> {
     let got = gpu.count_cells(ctx, indices, cell_count);
     let want = count_cells(indices, cell_count);
-    assert_eq!(got.len(), want.len(), "count output length must match cell_count");
+    assert_eq!(
+        got.len(),
+        want.len(),
+        "count output length must match cell_count"
+    );
     for (cell, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
         assert_eq!(
             g, w,
@@ -103,7 +111,10 @@ fn hash_zero_table_is_all_zero() {
     // A zero-sized table matches the golden early return of 0 for every cell.
     let cells = [[9, 9, 9], [-3, 7, -12], [0, 0, 0], [i32::MIN, 0, i32::MAX]];
     let got = check_hash(&ctx, &gpu, &cells, 0);
-    assert!(got.iter().all(|&h| h == 0), "a zero table hashes to all zero");
+    assert!(
+        got.iter().all(|&h| h == 0),
+        "a zero table hashes to all zero"
+    );
 }
 
 #[test]
@@ -123,7 +134,10 @@ fn hash_negative_and_extreme_coordinates_wrap_identically() {
         [-2_147_483_648, 123_456, -987_654],
     ];
     let got = check_hash(&ctx, &gpu, &cells, 97);
-    assert!(got.iter().all(|&h| h < 97), "every slot is inside the table");
+    assert!(
+        got.iter().all(|&h| h < 97),
+        "every slot is inside the table"
+    );
 }
 
 #[test]
@@ -141,7 +155,10 @@ fn hash_collisions_concentrate_into_a_tiny_table() {
         }
     }
     let got = check_hash(&ctx, &gpu, &cells, 4);
-    assert!(got.iter().all(|&h| h < 4), "every slot is inside the tiny table");
+    assert!(
+        got.iter().all(|&h| h < 4),
+        "every slot is inside the tiny table"
+    );
 }
 
 #[test]
@@ -160,7 +177,10 @@ fn hash_uniform_scatter_matches_reference() {
         }
     }
     let got = check_hash(&ctx, &gpu, &cells, 1024);
-    assert!(got.iter().all(|&h| h < 1024), "every slot is inside the table");
+    assert!(
+        got.iter().all(|&h| h < 1024),
+        "every slot is inside the table"
+    );
 }
 
 #[test]
@@ -223,7 +243,11 @@ fn count_distributes_hits() {
     };
     let gpu = GpuSpatialHash::new(&ctx);
     let got = check_count(&ctx, &gpu, &[0, 2, 2, 5], 6);
-    assert_eq!(got, vec![1, 0, 2, 0, 0, 1], "hits land in the hand-checked cells");
+    assert_eq!(
+        got,
+        vec![1, 0, 2, 0, 0, 1],
+        "hits land in the hand-checked cells"
+    );
 }
 
 #[test]
@@ -247,5 +271,8 @@ fn count_large_random_batch_conserves_totals() {
         in_range,
         "every in-range entry is counted exactly once"
     );
-    assert!(got.iter().any(|&c| c > 0), "the histogram is not vacuously empty");
+    assert!(
+        got.iter().any(|&c| c > 0),
+        "the histogram is not vacuously empty"
+    );
 }

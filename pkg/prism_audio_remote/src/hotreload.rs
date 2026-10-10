@@ -86,12 +86,7 @@ pub struct HotReloadEvent {
 impl HotReloadEvent {
     /// Builds a reload event.
     #[must_use]
-    pub const fn new(
-        asset: AssetId,
-        kind: AssetKind,
-        change: ChangeKind,
-        revision: u64,
-    ) -> Self {
+    pub const fn new(asset: AssetId, kind: AssetKind, change: ChangeKind, revision: u64) -> Self {
         Self {
             asset,
             kind,

@@ -121,7 +121,7 @@ impl Default for RationalStep {
 
 #[cfg(test)]
 mod tests {
-    use super::{NANOS_PER_SEC, RationalStep};
+    use super::{RationalStep, NANOS_PER_SEC};
 
     #[test]
     fn from_hz_is_reduced_and_exact() {

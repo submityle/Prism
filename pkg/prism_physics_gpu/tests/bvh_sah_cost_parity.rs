@@ -76,12 +76,7 @@ fn box_at(x: f32, y: f32, z: f32) -> Aabb {
 /// Asserts the resident `GPU` cost of `boxes` matches the `CPU` twin within a
 /// relative tolerance, reporting both values on failure.
 #[expect(clippy::print_stderr, reason = "surface both costs on parity failure")]
-fn assert_cost_matches(
-    builder: &GpuLbvh,
-    sah: &GpuBvhSahCost,
-    ctx: &GpuContext,
-    boxes: &[Aabb],
-) {
+fn assert_cost_matches(builder: &GpuLbvh, sah: &GpuBvhSahCost, ctx: &GpuContext, boxes: &[Aabb]) {
     let want = lbvh_sah_cost(&cpu_build_lbvh(boxes));
     let resident = builder.build_resident(ctx, boxes);
     let got = sah.sah_cost(ctx, &resident);

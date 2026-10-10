@@ -122,7 +122,11 @@ pub fn jitter_offset_phased(frame: u32, length: u32) -> Vec2 {
 #[inline]
 pub fn jitter_to_ndc(jitter_px: Vec2, width: u32, height: u32) -> Vec2 {
     let sx = if width == 0 { 0.0 } else { 2.0 / width as f32 };
-    let sy = if height == 0 { 0.0 } else { 2.0 / height as f32 };
+    let sy = if height == 0 {
+        0.0
+    } else {
+        2.0 / height as f32
+    };
     sanitize_offset(Vec2::new(jitter_px.x * sx, jitter_px.y * sy))
 }
 
@@ -145,8 +149,16 @@ pub fn sequence_mean(length: u32) -> Vec2 {
 /// Replaces any non-finite component with `0.0` and clamps to `[-0.5, 0.5]`.
 #[inline]
 fn sanitize_offset(v: Vec2) -> Vec2 {
-    let x = if v.x.is_finite() { v.x.clamp(-0.5, 0.5) } else { 0.0 };
-    let y = if v.y.is_finite() { v.y.clamp(-0.5, 0.5) } else { 0.0 };
+    let x = if v.x.is_finite() {
+        v.x.clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
+    let y = if v.y.is_finite() {
+        v.y.clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
     Vec2::new(x, y)
 }
 

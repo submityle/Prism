@@ -119,9 +119,22 @@ fn in_frustum_entity_is_marked_visible_and_behind_is_culled() {
 
     app.update();
 
-    assert!(app.world().get::<PrismViewVisibility>(front).unwrap().visible);
-    assert!(!app.world().get::<PrismViewVisibility>(behind).unwrap().visible);
-    assert_eq!(app.world().resource::<PrismRenderScene>().instance_count(), 2);
+    assert!(
+        app.world()
+            .get::<PrismViewVisibility>(front)
+            .unwrap()
+            .visible
+    );
+    assert!(
+        !app.world()
+            .get::<PrismViewVisibility>(behind)
+            .unwrap()
+            .visible
+    );
+    assert_eq!(
+        app.world().resource::<PrismRenderScene>().instance_count(),
+        2
+    );
 }
 
 #[test]
@@ -144,13 +157,23 @@ fn moving_an_entity_into_the_frustum_flips_visibility() {
         .id();
 
     app.update();
-    assert!(!app.world().get::<PrismViewVisibility>(entity).unwrap().visible);
+    assert!(
+        !app.world()
+            .get::<PrismViewVisibility>(entity)
+            .unwrap()
+            .visible
+    );
 
     // Move it in front of the camera.
     *app.world_mut().get_mut::<GlobalTransform>(entity).unwrap() =
         GlobalTransform::from_translation(Vec3::new(0.0, 0.0, -5.0));
     app.update();
-    assert!(app.world().get::<PrismViewVisibility>(entity).unwrap().visible);
+    assert!(
+        app.world()
+            .get::<PrismViewVisibility>(entity)
+            .unwrap()
+            .visible
+    );
 }
 
 #[test]
@@ -173,9 +196,15 @@ fn despawning_an_entity_removes_it_from_the_scene() {
         .id();
 
     app.update();
-    assert_eq!(app.world().resource::<PrismRenderScene>().instance_count(), 1);
+    assert_eq!(
+        app.world().resource::<PrismRenderScene>().instance_count(),
+        1
+    );
 
     app.world_mut().despawn(entity);
     app.update();
-    assert_eq!(app.world().resource::<PrismRenderScene>().instance_count(), 0);
+    assert_eq!(
+        app.world().resource::<PrismRenderScene>().instance_count(),
+        0
+    );
 }

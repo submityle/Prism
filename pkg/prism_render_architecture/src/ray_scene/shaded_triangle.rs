@@ -515,12 +515,36 @@ mod tests {
         let mut rng = Rng::new(0x1234_ABCD);
         let mut checked = 0u32;
         for _ in 0..60_000 {
-            let p0 = [rng.range(-3.0, 3.0), rng.range(-3.0, 3.0), rng.range(-3.0, 3.0)];
-            let p1 = [rng.range(-3.0, 3.0), rng.range(-3.0, 3.0), rng.range(-3.0, 3.0)];
-            let p2 = [rng.range(-3.0, 3.0), rng.range(-3.0, 3.0), rng.range(-3.0, 3.0)];
-            let n0 = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(0.2, 1.0)];
-            let n1 = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(0.2, 1.0)];
-            let n2 = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(0.2, 1.0)];
+            let p0 = [
+                rng.range(-3.0, 3.0),
+                rng.range(-3.0, 3.0),
+                rng.range(-3.0, 3.0),
+            ];
+            let p1 = [
+                rng.range(-3.0, 3.0),
+                rng.range(-3.0, 3.0),
+                rng.range(-3.0, 3.0),
+            ];
+            let p2 = [
+                rng.range(-3.0, 3.0),
+                rng.range(-3.0, 3.0),
+                rng.range(-3.0, 3.0),
+            ];
+            let n0 = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(0.2, 1.0),
+            ];
+            let n1 = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(0.2, 1.0),
+            ];
+            let n2 = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(0.2, 1.0),
+            ];
             let tri = ShadedTriangle::new([p0, p1, p2], [n0, n1, n2], 0);
 
             // Skip near-degenerate triangles (tiny area).
@@ -617,9 +641,21 @@ mod tests {
                     [base[0] + o2[0], base[1] + o2[1], base[2] + o2[2]],
                 ];
                 let normals = [
-                    [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(0.3, 1.0)],
-                    [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(0.3, 1.0)],
-                    [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(0.3, 1.0)],
+                    [
+                        rng.range(-1.0, 1.0),
+                        rng.range(-1.0, 1.0),
+                        rng.range(0.3, 1.0),
+                    ],
+                    [
+                        rng.range(-1.0, 1.0),
+                        rng.range(-1.0, 1.0),
+                        rng.range(0.3, 1.0),
+                    ],
+                    [
+                        rng.range(-1.0, 1.0),
+                        rng.range(-1.0, 1.0),
+                        rng.range(0.3, 1.0),
+                    ],
                 ];
                 ShadedTriangle::new(positions, normals, i)
             })
@@ -681,7 +717,10 @@ mod tests {
                 }
                 (a, b) => panic!("hit disagreement: {a:?} vs {b:?}"),
             }
-            assert_eq!(bvh.any_hit(&ray), brute_closest(&bvh.triangles, &ray).is_some());
+            assert_eq!(
+                bvh.any_hit(&ray),
+                brute_closest(&bvh.triangles, &ray).is_some()
+            );
         }
     }
 }

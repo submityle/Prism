@@ -558,7 +558,11 @@ pub fn capsule_capsule_manifold(a: &Capsule, b: &Capsule) -> Option<ContactManif
         let dist = gap.length();
         let depth = sum - dist;
         if depth > 0.0 {
-            let n = if dist > 1.0e-6 { gap * dist.recip() } else { normal };
+            let n = if dist > 1.0e-6 {
+                gap * dist.recip()
+            } else {
+                normal
+            };
             let surf_a = pa + n * a.radius;
             let surf_b = pb - n * b.radius;
             points.push(ManifoldPoint {
@@ -605,9 +609,9 @@ fn single_point_fallback(
 
 #[cfg(test)]
 mod tests {
+    use super::{capsule_box_manifold, capsule_capsule_manifold};
     use super::{contact_manifold, ClipShape};
     use crate::bounding::{Aabb, Capsule, Obb};
-    use super::{capsule_box_manifold, capsule_capsule_manifold};
     use glam::{Quat, Vec3};
 
     #[test]
@@ -629,7 +633,11 @@ mod tests {
         let upper = Aabb::new(Vec3::new(-1.0, -0.1, -1.0), Vec3::new(1.0, 0.9, 1.0));
         let m = contact_manifold(&lower, &upper).expect("boxes overlap");
         // Normal from lower toward upper is +Y.
-        assert!(m.normal.y.abs() > 0.9, "normal mostly vertical: {:?}", m.normal);
+        assert!(
+            m.normal.y.abs() > 0.9,
+            "normal mostly vertical: {:?}",
+            m.normal
+        );
         assert_eq!(m.points.len(), 4, "flat face-face contact yields 4 points");
         for p in &m.points {
             assert!(p.depth > 0.0, "each point penetrates");
@@ -707,11 +715,7 @@ mod tests {
         // world X just above it, pressed down so its lower surface sinks 0.1
         // into the face.
         let obb = Obb::new(Vec3::ZERO, Vec3::splat(1.0), Quat::IDENTITY);
-        let capsule = Capsule::new(
-            Vec3::new(-0.5, 1.4, 0.0),
-            Vec3::new(0.5, 1.4, 0.0),
-            0.5,
-        );
+        let capsule = Capsule::new(Vec3::new(-0.5, 1.4, 0.0), Vec3::new(0.5, 1.4, 0.0), 0.5);
         let m = capsule_box_manifold(&capsule, &obb).expect("resting contact");
         // Normal points capsule -> box, i.e. downward.
         assert!(m.normal.y < -0.9, "normal points down: {:?}", m.normal);
@@ -733,11 +737,7 @@ mod tests {
     fn vertical_capsule_on_box_is_single_point() {
         // Capsule standing end-on above the box: only the lower cap touches.
         let obb = Obb::new(Vec3::ZERO, Vec3::splat(1.0), Quat::IDENTITY);
-        let capsule = Capsule::new(
-            Vec3::new(0.0, 1.4, 0.0),
-            Vec3::new(0.0, 3.4, 0.0),
-            0.5,
-        );
+        let capsule = Capsule::new(Vec3::new(0.0, 1.4, 0.0), Vec3::new(0.0, 3.4, 0.0), 0.5);
         let m = capsule_box_manifold(&capsule, &obb).expect("end-on contact");
         assert_eq!(m.points.len(), 1, "end-on contact is a single point");
         assert!(m.normal.y < -0.9);
@@ -750,11 +750,7 @@ mod tests {
         // edge. The clipped span should drop the unsupported end, yielding a
         // single contact where the capsule still rests on the face.
         let obb = Obb::new(Vec3::ZERO, Vec3::splat(1.0), Quat::IDENTITY);
-        let capsule = Capsule::new(
-            Vec3::new(0.5, 1.4, 0.0),
-            Vec3::new(3.0, 1.4, 0.0),
-            0.5,
-        );
+        let capsule = Capsule::new(Vec3::new(0.5, 1.4, 0.0), Vec3::new(3.0, 1.4, 0.0), 0.5);
         let m = capsule_box_manifold(&capsule, &obb).expect("overhang contact");
         assert!(m.normal.y < -0.9);
         for p in &m.points {

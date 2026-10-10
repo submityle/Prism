@@ -3,7 +3,7 @@
 //! chain, and the parallel grain equals the dirty-root count.
 
 use crate::hierarchy::Hierarchy;
-use crate::stats::{PropagationStats, depth_levels};
+use crate::stats::{depth_levels, PropagationStats};
 use crate::{Transform, TransformGraph};
 
 /// Build root(0) -> child(1) -> grandchild(2), plus root(3) -> child(4).
@@ -42,7 +42,10 @@ fn static_frame_visits_nothing() {
     assert_eq!(s.dirty_skipped, 5);
     assert_eq!(s.dirty_roots, 0);
     assert_eq!(s.parallel_chunks, 0);
-    assert_eq!(s.levels, 3, "topology still reports its depth on a static frame");
+    assert_eq!(
+        s.levels, 3,
+        "topology still reports its depth on a static frame"
+    );
 }
 
 #[test]

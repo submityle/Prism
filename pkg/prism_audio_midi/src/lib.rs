@@ -53,6 +53,6 @@ pub use mapping::{
 };
 pub use mpe::{MpeAllocator, MpeZone, ZoneKind};
 pub use ump::{
-    ChannelVoice, MessageType, MidiMessage, NoteAttribute, SystemMessage, UmpDecoder, UmpWord,
-    UtilityMessage, scale_down, scale_up,
+    scale_down, scale_up, ChannelVoice, MessageType, MidiMessage, NoteAttribute, SystemMessage,
+    UmpDecoder, UmpWord, UtilityMessage,
 };

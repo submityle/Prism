@@ -30,7 +30,7 @@ use prism_ecs::world::World;
 use crate::time::{EngineClocks, TimeUpdateStrategy};
 
 use crate::schedule::{
-    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, StateTransition, Startup, Update,
+    First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Startup, StateTransition, Update,
 };
 use crate::sub_app_label::{BoxedSubAppLabel, SubAppLabel};
 

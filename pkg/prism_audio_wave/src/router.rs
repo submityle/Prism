@@ -93,7 +93,11 @@ pub fn weights_for_tier(tier: PropagationTier) -> HybridWeights {
 /// assert!((w.pitch_ratio - 1.5).abs() < 1e-6);
 /// ```
 #[must_use]
-pub fn route(tier: PropagationTier, geometric: SpatialParams, wave: SpatialParams) -> SpatialParams {
+pub fn route(
+    tier: PropagationTier,
+    geometric: SpatialParams,
+    wave: SpatialParams,
+) -> SpatialParams {
     blend_spatial(geometric, wave, weights_for_tier(tier))
 }
 

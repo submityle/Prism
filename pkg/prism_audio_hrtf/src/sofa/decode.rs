@@ -102,9 +102,7 @@ impl core::fmt::Display for DecodeError {
                 f,
                 "measurement count mismatch: Data.IR has {ir}, SourcePosition has {source_position}"
             ),
-            Self::InvalidSamplingRate => {
-                f.write_str("Data.SamplingRate is empty or non-positive")
-            }
+            Self::InvalidSamplingRate => f.write_str("Data.SamplingRate is empty or non-positive"),
         }
     }
 }
@@ -244,7 +242,10 @@ fn check_convention(file: &H5File) -> Result<(), DecodeError> {
 /// Reads a strictly positive sampling rate from a scalar / single-element
 /// dataset, rounding to the nearest hertz.
 fn read_sampling_rate(dataset: &crate::sofa::hdf5::Dataset) -> Result<u32, DecodeError> {
-    let value = *dataset.data.first().ok_or(DecodeError::InvalidSamplingRate)?;
+    let value = *dataset
+        .data
+        .first()
+        .ok_or(DecodeError::InvalidSamplingRate)?;
     if !(value.is_finite() && value > 0.0) {
         return Err(DecodeError::InvalidSamplingRate);
     }
@@ -373,10 +374,7 @@ mod tests {
         let mut file = fixture_file(false);
         file.set_attribute(ATTR_SOFA_CONVENTIONS, "GeneralTF");
         let err = decode_file(&file).unwrap_err();
-        assert_eq!(
-            err,
-            DecodeError::UnsupportedConvention("GeneralTF".into())
-        );
+        assert_eq!(err, DecodeError::UnsupportedConvention("GeneralTF".into()));
     }
 
     #[test]

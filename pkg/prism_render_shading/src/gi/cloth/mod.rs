@@ -100,7 +100,11 @@ mod tests {
     fn shade_is_well_behaved_across_params() {
         let n = Vec3::Z;
         let wo = Vec3::new(0.25, 0.0, 0.968).normalize();
-        for model in [SheenModel::Charlie, SheenModel::CharlieSoft, SheenModel::Velvet] {
+        for model in [
+            SheenModel::Charlie,
+            SheenModel::CharlieSoft,
+            SheenModel::Velvet,
+        ] {
             for &wrap in &[0.0f32, 0.5, 1.0] {
                 for &rough in &[0.05f32, 0.5, 1.0] {
                     let p = ClothParams {

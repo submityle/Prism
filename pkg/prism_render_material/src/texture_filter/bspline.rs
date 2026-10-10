@@ -44,7 +44,11 @@ use super::texel_wrap::{wrap_texel, TexelAddr};
 
 #[inline]
 fn finite_or_zero(x: f32) -> f32 {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// The four uniform cubic B-spline weights for a fractional offset `t` in
@@ -105,7 +109,10 @@ pub fn bspline_cubic<S: TexelSource>(
     let wy = bspline_cubic_weights(fy - y1);
 
     let fetch = |ox: i64, oy: i64| -> [f32; 4] {
-        match (wrap_texel(ix + ox, w, wrap_u), wrap_texel(iy + oy, h, wrap_v)) {
+        match (
+            wrap_texel(ix + ox, w, wrap_u),
+            wrap_texel(iy + oy, h, wrap_v),
+        ) {
             (TexelAddr::In(cx), TexelAddr::In(cy)) => src.texel(mip, cx, cy),
             _ => border_color,
         }
@@ -205,7 +212,12 @@ mod tests {
             (64, 64)
         }
         fn texel(&self, _mip: u32, x: u32, y: u32) -> [f32; 4] {
-            [self.a + self.bx * x as f32 + self.by * y as f32, 0.0, 0.0, 1.0]
+            [
+                self.a + self.bx * x as f32 + self.by * y as f32,
+                0.0,
+                0.0,
+                1.0,
+            ]
         }
     }
 
@@ -293,11 +305,22 @@ mod tests {
     fn reproduces_linear_ramp() {
         // B-spline reproduces linear polynomials, so a planar ramp is returned
         // as the continuous plane at an interior UV.
-        let p = Plane { a: 1.0, bx: 0.5, by: 0.3 };
+        let p = Plane {
+            a: 1.0,
+            bx: 0.5,
+            by: 0.3,
+        };
         let fx = 24.37_f32;
         let fy = 19.62_f32;
         let uv = [(fx + 0.5) / 64.0, (fy + 0.5) / 64.0];
-        let c = bspline_cubic(&p, 0, uv, WrapMode::ClampToEdge, WrapMode::ClampToEdge, [0.0; 4]);
+        let c = bspline_cubic(
+            &p,
+            0,
+            uv,
+            WrapMode::ClampToEdge,
+            WrapMode::ClampToEdge,
+            [0.0; 4],
+        );
         let want = p.a + p.bx * fx + p.by * fy;
         assert!((c[0] - want).abs() < 1.0e-3, "got {} want {want}", c[0]);
     }
@@ -309,15 +332,32 @@ mod tests {
         for i in 0..=40 {
             for j in 0..=40 {
                 let uv = [i as f32 / 40.0, j as f32 / 40.0];
-                let c = bspline_cubic(&Step, 0, uv, WrapMode::ClampToEdge, WrapMode::ClampToEdge, [0.0; 4]);
-                assert!(c[0] >= -1.0e-6 && c[0] <= 1.0 + 1.0e-6, "uv={uv:?} r={}", c[0]);
+                let c = bspline_cubic(
+                    &Step,
+                    0,
+                    uv,
+                    WrapMode::ClampToEdge,
+                    WrapMode::ClampToEdge,
+                    [0.0; 4],
+                );
+                assert!(
+                    c[0] >= -1.0e-6 && c[0] <= 1.0 + 1.0e-6,
+                    "uv={uv:?} r={}",
+                    c[0]
+                );
             }
         }
     }
 
     #[test]
     fn fast_matches_direct() {
-        for &uv in &[[0.137, 0.482], [0.5, 0.5], [0.91, 0.04], [0.26, 0.73], [0.03, 0.97]] {
+        for &uv in &[
+            [0.137, 0.482],
+            [0.5, 0.5],
+            [0.91, 0.04],
+            [0.26, 0.73],
+            [0.03, 0.97],
+        ] {
             for (wu, wv) in [
                 (WrapMode::Repeat, WrapMode::Repeat),
                 (WrapMode::ClampToEdge, WrapMode::ClampToEdge),
@@ -328,7 +368,10 @@ mod tests {
                 let a = bspline_cubic(&Noise, 0, uv, wu, wv, border);
                 let b = bspline_cubic_fast(&Noise, 0, uv, wu, wv, border);
                 for k in 0..4 {
-                    assert!((a[k] - b[k]).abs() < 1.0e-4, "uv={uv:?} {wu:?}/{wv:?} {a:?} vs {b:?}");
+                    assert!(
+                        (a[k] - b[k]).abs() < 1.0e-4,
+                        "uv={uv:?} {wu:?}/{wv:?} {a:?} vs {b:?}"
+                    );
                 }
             }
         }
@@ -336,8 +379,22 @@ mod tests {
 
     #[test]
     fn non_finite_uv_is_safe() {
-        let a = bspline_cubic(&Flat([0.5, 0.5, 0.5, 1.0]), 0, [f32::NAN, f32::INFINITY], WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
-        let b = bspline_cubic_fast(&Flat([0.5, 0.5, 0.5, 1.0]), 0, [f32::NAN, f32::INFINITY], WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+        let a = bspline_cubic(
+            &Flat([0.5, 0.5, 0.5, 1.0]),
+            0,
+            [f32::NAN, f32::INFINITY],
+            WrapMode::Repeat,
+            WrapMode::Repeat,
+            [0.0; 4],
+        );
+        let b = bspline_cubic_fast(
+            &Flat([0.5, 0.5, 0.5, 1.0]),
+            0,
+            [f32::NAN, f32::INFINITY],
+            WrapMode::Repeat,
+            WrapMode::Repeat,
+            [0.0; 4],
+        );
         assert!(a.iter().all(|v| v.is_finite()), "{a:?}");
         assert!(b.iter().all(|v| v.is_finite()), "{b:?}");
     }

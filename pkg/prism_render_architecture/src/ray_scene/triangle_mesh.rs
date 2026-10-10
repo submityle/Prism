@@ -822,7 +822,9 @@ mod tests {
             let Some((ray, target)) = ray_at_bary(&mut rng, pos, w0, b1, b2) else {
                 continue;
             };
-            let hit = mesh.intersect_triangle(0, &ray).expect("aimed ray must hit");
+            let hit = mesh
+                .intersect_triangle(0, &ray)
+                .expect("aimed ray must hit");
             let [p0, p1, p2] = pos;
             let ng = o_norm(o_cross(o_sub(p1, p0), o_sub(p2, p0)));
             // Plane residual: hit point distance to the triangle's plane.
@@ -848,10 +850,7 @@ mod tests {
         let mut rng = Rng::new(0x2468_ACE0);
         let mut hits = 0usize;
         for _ in 0..60_000 {
-            let Some(TriCase {
-                mesh, pos, nrm, ..
-            }) = random_triangle(&mut rng)
-            else {
+            let Some(TriCase { mesh, pos, nrm, .. }) = random_triangle(&mut rng) else {
                 continue;
             };
             let b1 = rng.range(0.05, 0.9);
@@ -863,7 +862,9 @@ mod tests {
             let Some((ray, _)) = ray_at_bary(&mut rng, pos, w0, b1, b2) else {
                 continue;
             };
-            let hit = mesh.intersect_triangle(0, &ray).expect("aimed ray must hit");
+            let hit = mesh
+                .intersect_triangle(0, &ray)
+                .expect("aimed ray must hit");
             // Oracle: blend the vertex normals, orient into the geometric
             // hemisphere, re-normalize — independently of the primitive.
             let [p0, p1, p2] = pos;
@@ -913,7 +914,9 @@ mod tests {
             let Some((ray, _)) = ray_at_bary(&mut rng, pos, w0, b1, b2) else {
                 continue;
             };
-            let hit = mesh.intersect_triangle(0, &ray).expect("aimed ray must hit");
+            let hit = mesh
+                .intersect_triangle(0, &ray)
+                .expect("aimed ray must hit");
             let [t0, t1, t2] = uv;
             let expected = [
                 w0 * t0[0] + b1 * t1[0] + b2 * t2[0],

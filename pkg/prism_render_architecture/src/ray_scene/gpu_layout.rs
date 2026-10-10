@@ -161,7 +161,10 @@ impl GpuBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -221,7 +224,10 @@ impl GpuBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -277,7 +283,10 @@ impl GpuBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -339,7 +348,10 @@ impl GpuBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -459,9 +471,9 @@ impl GpuBlasPool {
                 nodes[b + 6] -= tri_base as u32;
             }
         }
-        let triangles =
-            self.triangles[tri_base * TRIANGLE_WORDS..(tri_base + tri_count) * TRIANGLE_WORDS]
-                .to_vec();
+        let triangles = self.triangles
+            [tri_base * TRIANGLE_WORDS..(tri_base + tri_count) * TRIANGLE_WORDS]
+            .to_vec();
         GpuBvhBuffers { nodes, triangles }
     }
 
@@ -491,8 +503,14 @@ impl GpuBlasPool {
         let mut node_index = 0u32;
         loop {
             let base = (node_base + node_index as usize) * NODE_WORDS;
-            let bounds = Aabb::new(read_vec3(&self.nodes, base), read_vec3(&self.nodes, base + 3));
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            let bounds = Aabb::new(
+                read_vec3(&self.nodes, base),
+                read_vec3(&self.nodes, base + 3),
+            );
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
                     // Leaf `first_primitive` is a global pool triangle index.
@@ -563,8 +581,14 @@ impl GpuBlasPool {
         let mut node_index = 0u32;
         loop {
             let base = (node_base + node_index as usize) * NODE_WORDS;
-            let bounds = Aabb::new(read_vec3(&self.nodes, base), read_vec3(&self.nodes, base + 3));
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            let bounds = Aabb::new(
+                read_vec3(&self.nodes, base),
+                read_vec3(&self.nodes, base + 3),
+            );
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
                     let start = self.nodes[base + 6] as usize;
@@ -628,8 +652,14 @@ impl GpuBlasPool {
         let mut node_index = 0u32;
         loop {
             let base = (node_base + node_index as usize) * NODE_WORDS;
-            let bounds = Aabb::new(read_vec3(&self.nodes, base), read_vec3(&self.nodes, base + 3));
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            let bounds = Aabb::new(
+                read_vec3(&self.nodes, base),
+                read_vec3(&self.nodes, base + 3),
+            );
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
                     // Leaf `first_primitive` is a global pool triangle index.
@@ -701,8 +731,14 @@ impl GpuBlasPool {
         let mut node_index = 0u32;
         loop {
             let base = (node_base + node_index as usize) * NODE_WORDS;
-            let bounds = Aabb::new(read_vec3(&self.nodes, base), read_vec3(&self.nodes, base + 3));
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            let bounds = Aabb::new(
+                read_vec3(&self.nodes, base),
+                read_vec3(&self.nodes, base + 3),
+            );
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
                     let start = self.nodes[base + 6] as usize;
@@ -1326,12 +1362,19 @@ mod tests {
             // must be indistinguishable from the in-memory walk.
             assert_eq!(reference, via_packed, "closest-hit divergence");
             // any_hit must agree with closest_hit existence on the same buffers.
-            assert_eq!(reference.is_some(), packed.any_hit(&ray), "any-hit divergence");
+            assert_eq!(
+                reference.is_some(),
+                packed.any_hit(&ray),
+                "any-hit divergence"
+            );
             if reference.is_some() {
                 hits += 1;
             }
         }
-        assert!(hits > 100, "scene too sparse to be a meaningful test: {hits}");
+        assert!(
+            hits > 100,
+            "scene too sparse to be a meaningful test: {hits}"
+        );
     }
 
     #[test]
@@ -1410,7 +1453,11 @@ mod tests {
                 assert_eq!(direct, bvh.closest_hit(&ray), "pool vs Bvh golden");
                 // any-hit parity across all three paths.
                 let direct_any = pool.any_hit(blas, &ray);
-                assert_eq!(direct_any, view.any_hit(&ray), "pool-direct any-hit divergence");
+                assert_eq!(
+                    direct_any,
+                    view.any_hit(&ray),
+                    "pool-direct any-hit divergence"
+                );
                 assert_eq!(direct_any, direct.is_some(), "any-hit vs closest existence");
                 if direct.is_some() {
                     closest_hits += 1;
@@ -1539,7 +1586,10 @@ mod tests {
                 }
             }
         }
-        assert!(occluded > 100, "scene too sparse to be a meaningful test: {occluded}");
+        assert!(
+            occluded > 100,
+            "scene too sparse to be a meaningful test: {occluded}"
+        );
     }
 
     #[test]
@@ -1598,7 +1648,10 @@ mod tests {
                 hits += 1;
             }
         }
-        assert!(hits > 100, "scene too sparse to be a meaningful test: {hits}");
+        assert!(
+            hits > 100,
+            "scene too sparse to be a meaningful test: {hits}"
+        );
     }
 
     #[test]
@@ -1736,9 +1789,8 @@ mod tests {
         for id in 0..count {
             let blas = (rng.next_u32() as usize) % blases.len();
             let mask = (rng.next_u32() & 0xFF) as u8;
-            instances.push(
-                Instance::with_mask(random_affine(&mut rng), blas, id as u32, mask).unwrap(),
-            );
+            instances
+                .push(Instance::with_mask(random_affine(&mut rng), blas, id as u32, mask).unwrap());
         }
         let tlas = Tlas::build(&instances, &blases);
         let packed = GpuTlasBuffers::from_tlas(&tlas);
@@ -1796,7 +1848,10 @@ mod tests {
                         assert_eq!(r.instance_id, v.instance_id, "instance mismatch");
                         assert_eq!(r.primitive, v.primitive, "primitive mismatch");
                         assert_eq!(r.t.to_bits(), v.t.to_bits(), "t mismatch");
-                        assert_eq!(r.instance_index, v.instance_index, "instance_index mismatch");
+                        assert_eq!(
+                            r.instance_index, v.instance_index,
+                            "instance_index mismatch"
+                        );
                         checked_hits += 1;
                     }
                     (r, v) => panic!("masked existence mismatch: {r:?} vs {v:?}"),
@@ -1846,8 +1901,16 @@ mod tests {
             assert_eq!(packed.instance_mask(i), 0xFF);
         }
         for _ in 0..400 {
-            let origin = [rng.range(-9.0, 9.0), rng.range(-9.0, 9.0), rng.range(-9.0, 9.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-9.0, 9.0),
+                rng.range(-9.0, 9.0),
+                rng.range(-9.0, 9.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             let ray = Ray::new(origin, dir, 1.0e-4, 50.0);
             let a = packed.closest_hit(&ray, &pool);
             let b = packed.closest_hit_masked(&ray, &pool, 0xFF);
@@ -1855,7 +1918,10 @@ mod tests {
                 a.map(|h| (h.instance_id, h.primitive, h.t.to_bits())),
                 b.map(|h| (h.instance_id, h.primitive, h.t.to_bits()))
             );
-            assert_eq!(packed.any_hit(&ray, &pool), packed.any_hit_masked(&ray, &pool, 0xFF));
+            assert_eq!(
+                packed.any_hit(&ray, &pool),
+                packed.any_hit_masked(&ray, &pool, 0xFF)
+            );
         }
     }
 }

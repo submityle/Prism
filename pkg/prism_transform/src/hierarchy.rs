@@ -75,7 +75,10 @@ impl Hierarchy {
     /// Create an empty hierarchy.
     #[inline]
     pub const fn new() -> Self {
-        Self { parents: Vec::new(), children: Vec::new() }
+        Self {
+            parents: Vec::new(),
+            children: Vec::new(),
+        }
     }
 
     /// Number of nodes in the hierarchy.
@@ -112,7 +115,10 @@ impl Hierarchy {
     /// an existing node can never create a cycle, so this operation is
     /// otherwise infallible.)
     pub fn spawn_child(&mut self, parent: NodeId) -> NodeId {
-        assert!(self.contains(parent), "spawn_child: parent id is out of bounds");
+        assert!(
+            self.contains(parent),
+            "spawn_child: parent id is out of bounds"
+        );
         let id = NodeId::from_index(self.parents.len());
         self.parents.push(Some(parent));
         self.children.push(Vec::new());

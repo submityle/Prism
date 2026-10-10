@@ -255,8 +255,7 @@ mod tests {
     fn constant_field_blends_to_constant_irradiance() {
         // All eight probes identical => any blend reproduces that irradiance.
         let corners = uniform_corners([1.0, 0.5, 0.25]);
-        let expected = ShL1Irradiance::from_constant([1.0, 0.5, 0.25])
-            .eval_irradiance(Vec3::Y);
+        let expected = ShL1Irradiance::from_constant([1.0, 0.5, 0.25]).eval_irradiance(Vec3::Y);
         for &frac in &[
             Vec3::new(0.5, 0.5, 0.5),
             Vec3::new(0.1, 0.8, 0.3),
@@ -332,7 +331,10 @@ mod tests {
         let blended = blend_probe_sh(&corners, frac, point, Vec3::Z);
         let via_sh = blended.eval_irradiance(Vec3::Z);
         let direct = sample_probe_grid(&corners, frac, point, Vec3::Z);
-        assert!((via_sh - direct).length() < 1e-4, "{via_sh:?} vs {direct:?}");
+        assert!(
+            (via_sh - direct).length() < 1e-4,
+            "{via_sh:?} vs {direct:?}"
+        );
     }
 
     #[test]

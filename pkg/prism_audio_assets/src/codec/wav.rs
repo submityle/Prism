@@ -289,10 +289,7 @@ impl SourceDecoder for FrameLimited {
         info
     }
 
-    fn decode(
-        &mut self,
-        out: &mut [Sample],
-    ) -> Result<usize, DecodeError> {
+    fn decode(&mut self, out: &mut [Sample]) -> Result<usize, DecodeError> {
         let channels = self.inner.info().channels.max(1) as usize;
         let remaining = self.limit.saturating_sub(self.inner.position()) as usize;
         if remaining == 0 {

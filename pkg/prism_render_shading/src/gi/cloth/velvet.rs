@@ -38,7 +38,7 @@
 //! * Neubelt & Pettineo 2013, *Crafting a Next-Gen Material Pipeline for
 //!   The Order: 1886*.
 
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 use core::f32::consts::FRAC_1_PI;
 
 use super::charlie::v_neubelt;
@@ -245,7 +245,10 @@ mod tests {
         let r = 0.45;
         let via_vec = velvet_brdf(wo, wi, r);
         let via_cos = velvet_lobe(wo.z, wi.z, h.z, r);
-        assert!((via_vec - via_cos).abs() < 1.0e-6, "vec={via_vec} cos={via_cos}");
+        assert!(
+            (via_vec - via_cos).abs() < 1.0e-6,
+            "vec={via_vec} cos={via_cos}"
+        );
     }
 
     /// The cosine-weighted hemispherical integral of the NDF is finite and

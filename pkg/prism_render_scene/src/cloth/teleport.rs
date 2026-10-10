@@ -110,7 +110,10 @@ mod tests {
     #[test]
     fn teleport_and_reset_restreams_both_pools() {
         let r = ClothTeleportMode::TeleportAndReset.restream();
-        assert!(r.positions, "reset must snap positions to the authored pose");
+        assert!(
+            r.positions,
+            "reset must snap positions to the authored pose"
+        );
         assert!(
             r.velocities,
             "reset must drop inherited motion so the garment settles",

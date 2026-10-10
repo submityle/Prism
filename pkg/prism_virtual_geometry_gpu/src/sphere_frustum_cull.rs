@@ -103,9 +103,7 @@ impl GpuSphereFrustumCull {
         let device = ctx.device();
         let module = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("prism_sphere_frustum_cull"),
-            source: ShaderSource::Wgsl(
-                include_str!("../shaders/sphere_frustum_cull.wesl").into(),
-            ),
+            source: ShaderSource::Wgsl(include_str!("../shaders/sphere_frustum_cull.wesl").into()),
         });
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("prism_sphere_frustum_cull_layout"),

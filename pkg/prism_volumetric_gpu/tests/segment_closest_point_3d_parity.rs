@@ -180,7 +180,12 @@ fn pin(idx: usize, query: &SegmentClosestQuery, got: &SegmentClosestResult) {
         got.t,
         want.t
     );
-    close_vec("point_on_first", idx, got.point_on_first, want.point_on_first);
+    close_vec(
+        "point_on_first",
+        idx,
+        got.point_on_first,
+        want.point_on_first,
+    );
     close_vec(
         "point_on_second",
         idx,

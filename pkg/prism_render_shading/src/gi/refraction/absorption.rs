@@ -142,7 +142,11 @@ pub fn absorption_from_tint(tint: Vec3, ref_dist: f32) -> Vec3 {
     const MIN_DIST: f32 = 1.0e-4;
     let d = sanitize_nonneg(ref_dist).max(MIN_DIST);
     let channel = |c: f32| -> f32 {
-        let c = if c.is_finite() { c.clamp(MIN_TINT, 1.0) } else { MIN_TINT };
+        let c = if c.is_finite() {
+            c.clamp(MIN_TINT, 1.0)
+        } else {
+            MIN_TINT
+        };
         -ops::ln(c) / d
     };
     Vec3::new(channel(tint.x), channel(tint.y), channel(tint.z))
@@ -294,7 +298,10 @@ mod tests {
     const GLASS: f32 = 1.5;
 
     fn assert_finite(v: Vec3) {
-        assert!(v.x.is_finite() && v.y.is_finite() && v.z.is_finite(), "{v:?}");
+        assert!(
+            v.x.is_finite() && v.y.is_finite() && v.z.is_finite(),
+            "{v:?}"
+        );
     }
 
     #[test]

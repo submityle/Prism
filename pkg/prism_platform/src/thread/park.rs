@@ -12,8 +12,8 @@
 //! same thread must be the one that calls [`Parker::park`]. The paired
 //! [`Unparker`] is cloneable and `Send`, so any thread may wake the parked one.
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use alloc::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread::Thread;
 use std::time::Duration;
 
@@ -79,12 +79,11 @@ impl Parker {
         // checks shows up here as `Err(NOTIFIED)`: consume it and return. Any
         // other outcome (we installed PARKED, or a spurious state) proceeds to
         // block.
-        if let Err(NOTIFIED) = self.inner.state.compare_exchange(
-            EMPTY,
-            PARKED,
-            Ordering::Acquire,
-            Ordering::Acquire,
-        ) {
+        if let Err(NOTIFIED) =
+            self.inner
+                .state
+                .compare_exchange(EMPTY, PARKED, Ordering::Acquire, Ordering::Acquire)
+        {
             self.inner.state.store(EMPTY, Ordering::Release);
             return;
         }
@@ -119,12 +118,11 @@ impl Parker {
         }
         // As above: a late token surfaces as `Err(NOTIFIED)`; consume it and
         // report success. Otherwise fall through and block.
-        if let Err(NOTIFIED) = self.inner.state.compare_exchange(
-            EMPTY,
-            PARKED,
-            Ordering::Acquire,
-            Ordering::Acquire,
-        ) {
+        if let Err(NOTIFIED) =
+            self.inner
+                .state
+                .compare_exchange(EMPTY, PARKED, Ordering::Acquire, Ordering::Acquire)
+        {
             self.inner.state.store(EMPTY, Ordering::Release);
             return true;
         }

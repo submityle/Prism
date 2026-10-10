@@ -1,5 +1,5 @@
-use alloc::{collections::BTreeMap, vec::Vec};
 use crate::ViewHandle;
+use alloc::{collections::BTreeMap, vec::Vec};
 use prism_render_architecture::{
     geometry::GeometryPrimitiveKind,
     gpu_scene::{GeometryHandle, SceneHandle},
@@ -214,7 +214,9 @@ impl ViewDrawBins {
     pub fn gpu_headers(&self) -> Vec<GpuDrawBinHeader> {
         self.bins
             .iter()
-            .map(|&range| GpuDrawBinHeader::from_range_at(self.view, range, self.command_buffer_start))
+            .map(|&range| {
+                GpuDrawBinHeader::from_range_at(self.view, range, self.command_buffer_start)
+            })
             .collect()
     }
 }
@@ -250,8 +252,7 @@ where
         stream.global_candidate_start = candidate_cursor;
         bin_cursor = bin_cursor.saturating_add(stream.bins.len() as u32);
         command_cursor = command_cursor.saturating_add(stream.command_count);
-        candidate_cursor =
-            candidate_cursor.saturating_add(stream.candidate_bins.len() as u32);
+        candidate_cursor = candidate_cursor.saturating_add(stream.candidate_bins.len() as u32);
     }
 }
 
@@ -261,7 +262,10 @@ mod tests {
     use prism_render_architecture::abi::GenerationalHandle;
 
     fn handle(index: u32) -> GenerationalHandle {
-        GenerationalHandle { index, generation: 1 }
+        GenerationalHandle {
+            index,
+            generation: 1,
+        }
     }
 
     #[test]
@@ -325,7 +329,8 @@ mod tests {
             primitive_kind: GeometryPrimitiveKind::Indexed,
             pass_mask: crate::RenderPassMask::OPAQUE.0,
         };
-        let late = crate::VisibilityStageMask::LATE_RETEST | crate::VisibilityStageMask::LATE_VISIBLE;
+        let late =
+            crate::VisibilityStageMask::LATE_RETEST | crate::VisibilityStageMask::LATE_VISIBLE;
         let bins = build_two_phase_view_draw_bins(
             handle(9),
             8,
@@ -365,10 +370,7 @@ mod tests {
         assert_eq!(bins.late.command_count, 1);
         assert_eq!(bins.late.bins[0].representative_scene, handle(2));
         // The bare LATE_RETEST candidate is routed to neither phase.
-        assert_eq!(
-            bins.early.command_count + bins.late.command_count,
-            3
-        );
+        assert_eq!(bins.early.command_count + bins.late.command_count, 3);
     }
 
     #[test]
@@ -473,9 +475,30 @@ mod tests {
         let mut b = make(2, &[(1, 1)], 8); // 1 bin, 1 command, cap 8
         let mut c = make(3, &[(1, 1), (2, 1), (3, 2)], 16); // 2 bins, 3 commands, cap 16
         pack_draw_bin_streams([&mut a, &mut b, &mut c]);
-        assert_eq!((a.global_bin_start, a.command_buffer_start, a.global_candidate_start), (0, 0, 0));
-        assert_eq!((b.global_bin_start, b.command_buffer_start, b.global_candidate_start), (2, 2, 4));
-        assert_eq!((c.global_bin_start, c.command_buffer_start, c.global_candidate_start), (3, 3, 12));
+        assert_eq!(
+            (
+                a.global_bin_start,
+                a.command_buffer_start,
+                a.global_candidate_start
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            (
+                b.global_bin_start,
+                b.command_buffer_start,
+                b.global_candidate_start
+            ),
+            (2, 2, 4)
+        );
+        assert_eq!(
+            (
+                c.global_bin_start,
+                c.command_buffer_start,
+                c.global_candidate_start
+            ),
+            (3, 3, 12)
+        );
     }
 
     #[test]
@@ -551,7 +574,10 @@ mod tests {
             GpuDrawBinHeader::from_range_at(handle(9), range, 0)
         );
         // Non-zero base shifts the slot; overflow saturates instead of wrapping.
-        assert_eq!(GpuDrawBinHeader::from_range_at(handle(9), range, 10).command_start, 15);
+        assert_eq!(
+            GpuDrawBinHeader::from_range_at(handle(9), range, 10).command_start,
+            15
+        );
         assert_eq!(
             GpuDrawBinHeader::from_range_at(handle(9), range, u32::MAX).command_start,
             u32::MAX

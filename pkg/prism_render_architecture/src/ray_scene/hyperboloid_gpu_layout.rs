@@ -103,7 +103,10 @@ impl GpuHyperboloidBvhBuffers {
             hyperboloids[b + 7] = hyperboloid.flare().to_bits();
             hyperboloids[b + 8] = hyperboloid.primitive();
         }
-        Self { nodes, hyperboloids }
+        Self {
+            nodes,
+            hyperboloids,
+        }
     }
 
     /// Number of packed nodes.
@@ -166,7 +169,10 @@ impl GpuHyperboloidBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -222,7 +228,10 @@ impl GpuHyperboloidBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -302,7 +311,13 @@ mod tests {
             center[1] + rng.range(-3.0, 3.0),
             center[2] + rng.range(0.5, 3.0),
         ];
-        Hyperboloid::new(center, top, rng.range(0.3, 1.5), rng.range(0.0, 1.2), primitive)
+        Hyperboloid::new(
+            center,
+            top,
+            rng.range(0.3, 1.5),
+            rng.range(0.0, 1.2),
+            primitive,
+        )
     }
 
     fn random_scene(rng: &mut Rng, count: u32) -> Vec<Hyperboloid> {
@@ -323,7 +338,10 @@ mod tests {
         assert_eq!(gpu.node_count(), bvh.node_count());
         assert_eq!(gpu.hyperboloid_count(), bvh.primitive_count());
         assert_eq!(gpu.nodes.len(), gpu.node_count() * NODE_WORDS);
-        assert_eq!(gpu.hyperboloids.len(), gpu.hyperboloid_count() * HYPERBOLOID_WORDS);
+        assert_eq!(
+            gpu.hyperboloids.len(),
+            gpu.hyperboloid_count() * HYPERBOLOID_WORDS
+        );
     }
 
     #[test]

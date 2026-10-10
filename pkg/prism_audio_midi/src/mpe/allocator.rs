@@ -21,7 +21,7 @@
 //! on [`crate::mpe::zone::MpeZone`]; the channel it returns is the one a note's
 //! [`crate::expression`] state and [`crate::mapping`] writes are attributed to.
 
-use crate::mpe::zone::{CHANNELS_PER_PORT, MpeZone};
+use crate::mpe::zone::{MpeZone, CHANNELS_PER_PORT};
 
 /// A deterministic allocator of MPE member channels for one zone.
 #[derive(Clone, Debug, PartialEq, Eq)]

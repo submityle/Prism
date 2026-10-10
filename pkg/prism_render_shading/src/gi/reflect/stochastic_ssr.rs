@@ -382,10 +382,7 @@ pub fn hiz_trace(
         let lvl = level as u32;
         let size = pyramid.mip_size_f(lvl);
         let old_cell = cell_of(Vec2::new(ray.x, ray.y), size);
-        let fetch_cell = UVec2::new(
-            old_cell.x.max(0.0) as u32,
-            old_cell.y.max(0.0) as u32,
-        );
+        let fetch_cell = UVec2::new(old_cell.x.max(0.0) as u32, old_cell.y.max(0.0) as u32);
         let min_z = pyramid.hiz_fetch(lvl, fetch_cell);
 
         // Candidate: slide to this cell's minimum-depth plane.
@@ -719,8 +716,20 @@ mod tests {
         let base = UVec2::new(32, 32);
         let depth = flat_wall(base, 0.7);
         let pyr = HiZPyramid::from_base(base, &depth, HiZReduce::Min, 6);
-        let a = hiz_trace(&pyr, Vec2::new(0.1, 0.4), 0.1, Vec3::new(0.6, 0.1, 0.5), 128);
-        let b = hiz_trace(&pyr, Vec2::new(0.1, 0.4), 0.1, Vec3::new(0.6, 0.1, 0.5), 128);
+        let a = hiz_trace(
+            &pyr,
+            Vec2::new(0.1, 0.4),
+            0.1,
+            Vec3::new(0.6, 0.1, 0.5),
+            128,
+        );
+        let b = hiz_trace(
+            &pyr,
+            Vec2::new(0.1, 0.4),
+            0.1,
+            Vec3::new(0.6, 0.1, 0.5),
+            128,
+        );
         assert_eq!(a, b);
     }
 

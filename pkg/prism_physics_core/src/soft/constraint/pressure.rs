@@ -541,6 +541,10 @@ mod tests {
         for (a, b) in via_method.iter().zip(via_free.iter()) {
             assert!((*a - *b).length() < 1.0e-6, "method {a} free {b}");
         }
-        assert!((lambda - c.lambda()).abs() < 1.0e-6, "lambda {lambda} vs {}", c.lambda());
+        assert!(
+            (lambda - c.lambda()).abs() < 1.0e-6,
+            "lambda {lambda} vs {}",
+            c.lambda()
+        );
     }
 }

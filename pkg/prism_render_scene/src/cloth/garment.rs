@@ -24,8 +24,8 @@ use prism_render_architecture::cloth::{ClothLodTier, Constraint};
 use super::abi::{GpuClothBackstop, GpuClothCollider, GpuClothEmbedBinding};
 use super::lod::garment_cloth_piece;
 use super::lod_mesh::ClothReducedMesh;
-use super::teleport::ClothTeleportMode;
 use super::solve_plan::ClothSolveInput;
+use super::teleport::ClothTeleportMode;
 
 /// The authored `CPU` state of one cloth garment, spawned on a main-world
 /// entity.

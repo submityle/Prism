@@ -49,10 +49,16 @@ fn parse_import(line: &str) -> Option<&str> {
 
 /// Strips a single matching pair of `"..."` or `<...>` delimiters from `path`.
 fn strip_delimiters(path: &str) -> &str {
-    if let Some(inner) = path.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+    if let Some(inner) = path
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
         return inner;
     }
-    if let Some(inner) = path.strip_prefix('<').and_then(|rest| rest.strip_suffix('>')) {
+    if let Some(inner) = path
+        .strip_prefix('<')
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
         return inner;
     }
     path
@@ -74,7 +80,11 @@ impl ShaderModule {
                 imports.push(path.to_string());
             }
         }
-        Self { name, source, imports }
+        Self {
+            name,
+            source,
+            imports,
+        }
     }
 
     /// The module's registry name.

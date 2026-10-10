@@ -1,7 +1,7 @@
 //! M0 tests: TRS/affine round-trips and composition associativity.
 
 use crate::{GlobalTransform, Transform};
-use prism_math::{Quat, Vec3, vec3};
+use prism_math::{vec3, Quat, Vec3};
 
 fn v_approx(a: Vec3, b: Vec3, eps: f32) -> bool {
     (a.x - b.x).abs() <= eps && (a.y - b.y).abs() <= eps && (a.z - b.z).abs() <= eps
@@ -22,7 +22,11 @@ fn transform_point_matches_affine() {
         scale: vec3(2.0, 0.5, 1.5),
     };
     let p = vec3(1.0, 2.0, 3.0);
-    assert!(v_approx(t.transform_point(p), t.to_affine().transform_point3(p), 1e-5));
+    assert!(v_approx(
+        t.transform_point(p),
+        t.to_affine().transform_point3(p),
+        1e-5
+    ));
 }
 
 #[test]
@@ -60,7 +64,11 @@ fn composition_associates() {
     let lhs = (a.mul_transform(&b)).mul_transform(&c);
     let rhs = a.mul_transform(&b.mul_transform(&c));
     let p = vec3(1.0, 1.0, 1.0);
-    assert!(v_approx(lhs.transform_point(p), rhs.transform_point(p), 1e-4));
+    assert!(v_approx(
+        lhs.transform_point(p),
+        rhs.transform_point(p),
+        1e-4
+    ));
 }
 
 #[test]

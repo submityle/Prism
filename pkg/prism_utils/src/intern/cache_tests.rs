@@ -51,7 +51,10 @@ fn handle_equality_is_content_equality() {
     // comparing the deep content.
     let mut cache: InternCache<String> = InternCache::new();
     let samples = ["alpha", "beta", "alpha", "gamma", "beta"];
-    let handles: Vec<_> = samples.iter().map(|s| cache.intern(s.to_string())).collect();
+    let handles: Vec<_> = samples
+        .iter()
+        .map(|s| cache.intern(s.to_string()))
+        .collect();
     for i in 0..samples.len() {
         for j in 0..samples.len() {
             assert_eq!(
@@ -68,7 +71,10 @@ fn resolve_round_trips() {
     let mut cache: InternCache<String> = InternCache::new();
     let h = cache.intern("prism::Transform".to_string());
     assert_eq!(cache.resolve(h), "prism::Transform");
-    assert_eq!(cache.try_resolve(h).map(String::as_str), Some("prism::Transform"));
+    assert_eq!(
+        cache.try_resolve(h).map(String::as_str),
+        Some("prism::Transform")
+    );
     assert_eq!(cache.try_resolve(Interned::from_index(999)), None);
 }
 
@@ -109,13 +115,22 @@ fn matches_oracle_over_a_long_mixed_sequence() {
         state ^= state >> 7;
         state ^= state << 17;
         let len = (state % 4) as usize;
-        let value: Vec<u8> = (0..len).map(|k| ((state >> (k * 8)) & 0x07) as u8).collect();
+        let value: Vec<u8> = (0..len)
+            .map(|k| ((state >> (k * 8)) & 0x07) as u8)
+            .collect();
 
         let got = cache.intern(value.clone());
         let want = oracle.intern(&value);
         assert_eq!(got.index(), want, "handle index must match the oracle");
-        assert_eq!(cache.resolve(got), &value, "resolve must return the content");
-        assert_eq!(cache.get(&value), oracle.get(&value).map(Interned::from_index));
+        assert_eq!(
+            cache.resolve(got),
+            &value,
+            "resolve must return the content"
+        );
+        assert_eq!(
+            cache.get(&value),
+            oracle.get(&value).map(Interned::from_index)
+        );
         handles.push((got, value));
     }
     assert_eq!(cache.len(), oracle.items.len());

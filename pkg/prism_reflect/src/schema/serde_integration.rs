@@ -117,7 +117,9 @@ pub fn from_versioned_ron(
     schema: &SchemaRegistry,
     logical: &str,
 ) -> Result<Box<dyn Reflect>, MigrateError> {
-    let rest = text.strip_prefix(RON_PREFIX).ok_or(MigrateError::BadEnvelope)?;
+    let rest = text
+        .strip_prefix(RON_PREFIX)
+        .ok_or(MigrateError::BadEnvelope)?;
     let newline = rest.find('\n').ok_or(MigrateError::BadEnvelope)?;
     let version: u32 = rest[..newline]
         .trim()

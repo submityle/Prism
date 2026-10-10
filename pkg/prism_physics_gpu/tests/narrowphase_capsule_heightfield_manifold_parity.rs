@@ -25,8 +25,8 @@
 //! triangulation is textbook. No Unreal Engine source or derived code.
 
 use prism_physics_gpu::{
-    cpu_capsule_heightfield_manifold, Capsule, ContactManifold, GpuCapsuleHeightfieldManifoldNarrowphase,
-    GpuContext, Heightfield, HeightfieldCapsulePair,
+    cpu_capsule_heightfield_manifold, Capsule, ContactManifold,
+    GpuCapsuleHeightfieldManifoldNarrowphase, GpuContext, Heightfield, HeightfieldCapsulePair,
 };
 
 /// Tolerance on the normal, positions, and depths; the only inexact steps are

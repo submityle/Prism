@@ -120,10 +120,7 @@ impl ImpulseResponse {
     /// silent response.
     #[must_use]
     pub fn onset_index(&self, threshold: f32) -> usize {
-        let peak = self
-            .pressure
-            .iter()
-            .fold(0.0_f32, |m, p| m.max(p.abs()));
+        let peak = self.pressure.iter().fold(0.0_f32, |m, p| m.max(p.abs()));
         if peak <= 0.0 {
             return 0;
         }

@@ -68,14 +68,20 @@ pub struct FrameArena {
     node: NumaNodeId,
 }
 
-#[expect(unsafe_code, reason = "arena owns a unique region; alloc is atomic/disjoint")]
+#[expect(
+    unsafe_code,
+    reason = "arena owns a unique region; alloc is atomic/disjoint"
+)]
 // SAFETY: `FrameArena` uniquely owns its backing allocation via `base`; the
 // pointer is never aliased by another `FrameArena`. All mutation of the shared
 // region goes through the atomic `offset`/`high_water` with a CAS loop that
 // hands out strictly disjoint byte ranges, so concurrent `alloc` calls never
 // overlap. Hence it is safe to share a `&FrameArena` across threads.
 unsafe impl Send for FrameArena {}
-#[expect(unsafe_code, reason = "arena owns a unique region; alloc is atomic/disjoint")]
+#[expect(
+    unsafe_code,
+    reason = "arena owns a unique region; alloc is atomic/disjoint"
+)]
 // SAFETY: see the `Send` impl above — concurrent allocation is race-free.
 unsafe impl Sync for FrameArena {}
 
@@ -166,12 +172,10 @@ impl FrameArena {
             if end > self.capacity {
                 return None;
             }
-            match self.offset.compare_exchange_weak(
-                cur,
-                end,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
+            match self
+                .offset
+                .compare_exchange_weak(cur, end, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => {
                     self.high_water.fetch_max(end, Ordering::AcqRel);
                     // SAFETY: `aligned + size <= capacity == layout.size()`, so
@@ -180,9 +184,7 @@ impl FrameArena {
                     // winner of this CAS. `base` is non-null and the add stays
                     // in-bounds, so the offset pointer is non-null.
                     #[expect(unsafe_code, reason = "offset into the owned arena region")]
-                    let ptr = unsafe {
-                        NonNull::new_unchecked(self.base.as_ptr().add(aligned))
-                    };
+                    let ptr = unsafe { NonNull::new_unchecked(self.base.as_ptr().add(aligned)) };
                     return Some(ptr);
                 }
                 Err(actual) => cur = actual,
@@ -404,7 +406,10 @@ mod tests {
                 })
             })
             .collect();
-        let mut all: Vec<usize> = threads.into_iter().flat_map(|t| t.join().unwrap()).collect();
+        let mut all: Vec<usize> = threads
+            .into_iter()
+            .flat_map(|t| t.join().unwrap())
+            .collect();
         let total = all.len();
         all.sort_unstable();
         all.dedup();

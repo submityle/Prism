@@ -70,7 +70,6 @@ pub fn smooth_subtraction(a: f32, b: f32, k: f32) -> f32 {
     smooth_intersection(a, -b, k)
 }
 
-
 /// Smooth union with fillet radius `k` that additionally reports the material
 /// blend factor at the seam, for interpolating per-solid shading attributes
 /// (albedo, roughness, and so on) across the rounded join.
@@ -190,8 +189,14 @@ mod tests {
         let k = 0.5;
         for &(a, b) in &[(1.0f32, 3.0f32), (-2.0, 0.5), (4.0, 4.1), (1.0, 1.0)] {
             assert_eq!(smooth_union_blend(a, b, k).0, smooth_union(a, b, k));
-            assert_eq!(smooth_intersection_blend(a, b, k).0, smooth_intersection(a, b, k));
-            assert_eq!(smooth_subtraction_blend(a, b, k).0, smooth_subtraction(a, b, k));
+            assert_eq!(
+                smooth_intersection_blend(a, b, k).0,
+                smooth_intersection(a, b, k)
+            );
+            assert_eq!(
+                smooth_subtraction_blend(a, b, k).0,
+                smooth_subtraction(a, b, k)
+            );
         }
     }
 
@@ -234,6 +239,9 @@ mod tests {
         // Hard union picks a, so blend weight of b is 0.
         assert_eq!(smooth_union_blend(1.0, 3.0, 0.0), (union(1.0, 3.0), 0.0));
         // Hard intersection picks a (farther), so blend weight of b is 0.
-        assert_eq!(smooth_intersection_blend(3.0, 1.0, 0.0), (intersection(3.0, 1.0), 0.0));
+        assert_eq!(
+            smooth_intersection_blend(3.0, 1.0, 0.0),
+            (intersection(3.0, 1.0), 0.0)
+        );
     }
 }

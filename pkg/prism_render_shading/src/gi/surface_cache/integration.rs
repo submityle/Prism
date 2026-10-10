@@ -217,7 +217,12 @@ mod tests {
 
     #[test]
     fn first_sight_seeds_entry() {
-        let e = integrate_radiance(None, &surfel(), Vec3::splat(2.0), &TemporalParams::default());
+        let e = integrate_radiance(
+            None,
+            &surfel(),
+            Vec3::splat(2.0),
+            &TemporalParams::default(),
+        );
         assert_eq!(e.sample_count, 1);
         assert!((e.radiance - Vec3::splat(2.0)).length() < 1e-6);
     }
@@ -232,7 +237,11 @@ mod tests {
         for _ in 0..256 {
             entry = integrate_radiance(Some((entry, s)), &s, target, &params);
         }
-        assert!((entry.radiance - target).length() < 1e-2, "{:?}", entry.radiance);
+        assert!(
+            (entry.radiance - target).length() < 1e-2,
+            "{:?}",
+            entry.radiance
+        );
         assert_eq!(entry.sample_count, params.max_samples);
     }
 
@@ -302,7 +311,10 @@ mod tests {
         let center = surfel();
         let c = Vec3::splat(1.0);
         // Far away + opposed normal => zero weight, output unchanged.
-        let far = (Surfel::new(Vec3::new(10.0, 0.0, 0.0), Vec3::NEG_Z, 1.0), Vec3::splat(50.0));
+        let far = (
+            Surfel::new(Vec3::new(10.0, 0.0, 0.0), Vec3::NEG_Z, 1.0),
+            Vec3::splat(50.0),
+        );
         let out = spatial_filter(&center, c, &[far], &CoverageParams::default());
         assert!((out - c).length() < 1e-6);
     }
@@ -311,7 +323,10 @@ mod tests {
     fn spatial_filter_pulls_toward_neighbour() {
         let center = surfel();
         let params = CoverageParams::default();
-        let neighbours = [(Surfel::new(Vec3::new(0.05, 0.0, 0.0), Vec3::Z, 1.0), Vec3::splat(2.0))];
+        let neighbours = [(
+            Surfel::new(Vec3::new(0.05, 0.0, 0.0), Vec3::Z, 1.0),
+            Vec3::splat(2.0),
+        )];
         let out = spatial_filter(&center, Vec3::ZERO, &neighbours, &params);
         // Weighted mean of 0 and 2 with positive neighbour weight lies in (0, 2).
         assert!(out.x > 0.0 && out.x < 2.0, "{out:?}");
@@ -328,7 +343,10 @@ mod tests {
     #[test]
     fn spatial_filter_sanitizes_nan() {
         let center = surfel();
-        let n = [(Surfel::new(Vec3::new(0.05, 0.0, 0.0), Vec3::Z, 1.0), Vec3::splat(f32::NAN))];
+        let n = [(
+            Surfel::new(Vec3::new(0.05, 0.0, 0.0), Vec3::Z, 1.0),
+            Vec3::splat(f32::NAN),
+        )];
         let out = spatial_filter(&center, Vec3::splat(1.0), &n, &CoverageParams::default());
         assert!(out.is_finite());
     }

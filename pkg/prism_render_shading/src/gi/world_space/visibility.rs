@@ -366,7 +366,10 @@ mod tests {
         ] {
             let [mean, mean_sq] = map.sample(dir);
             assert!((mean - 3.0).abs() < 1e-5, "mean {mean} for {dir:?}");
-            assert!((mean_sq - 10.0).abs() < 1e-5, "mean_sq {mean_sq} for {dir:?}");
+            assert!(
+                (mean_sq - 10.0).abs() < 1e-5,
+                "mean_sq {mean_sq} for {dir:?}"
+            );
         }
     }
 

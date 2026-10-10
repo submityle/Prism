@@ -70,7 +70,9 @@ mod tests {
     #[test]
     fn instrument_opens_scope_from_descriptor() {
         ring::clear_current_thread();
-        let sys = FakeSystem { name: "spawn_waves" };
+        let sys = FakeSystem {
+            name: "spawn_waves",
+        };
         {
             let scope = instrument(&sys);
             assert_eq!(scope.depth(), 0);

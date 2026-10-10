@@ -66,4 +66,4 @@ pub use insights::{InsightsReport, VoiceRollup};
 pub use meters::{MeterProbe, MeterSnapshot};
 pub use session::{EventKind, EventTimeline, ProfilerSession, TimelineEvent};
 pub use spectrum::{BandScale, SpectrumSnapshot};
-pub use voice_monitor::{SilenceReason, VoiceMonitor, VoiceStatus, VoiceState};
+pub use voice_monitor::{SilenceReason, VoiceMonitor, VoiceState, VoiceStatus};

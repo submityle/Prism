@@ -35,7 +35,10 @@ fn state_hasher_write_bytes_equals_free_function() {
 fn state_hasher_integer_folds_are_little_endian() {
     let mut hasher = StateHasher::new();
     hasher.write_u64(0x0102_0304_0506_0708);
-    assert_eq!(hasher.finish(), fnv1a_64(&0x0102_0304_0506_0708u64.to_le_bytes()));
+    assert_eq!(
+        hasher.finish(),
+        fnv1a_64(&0x0102_0304_0506_0708u64.to_le_bytes())
+    );
 
     let mut h32 = StateHasher::new();
     h32.write_u32(0x0a0b_0c0d);
@@ -275,8 +278,14 @@ fn recorder_auto_numbers_frames_and_hashes_input() {
     assert_eq!(rec.next_frame(), 0);
     let f0 = rec.record(b"jump", 11);
     let f1 = rec.record(b"left", 22);
-    assert_eq!(f0, FrameInput::new(0, InputRecorder::hash_input(b"jump"), 11));
-    assert_eq!(f1, FrameInput::new(1, InputRecorder::hash_input(b"left"), 22));
+    assert_eq!(
+        f0,
+        FrameInput::new(0, InputRecorder::hash_input(b"jump"), 11)
+    );
+    assert_eq!(
+        f1,
+        FrameInput::new(1, InputRecorder::hash_input(b"left"), 22)
+    );
     assert_eq!(f0.input_hash, fnv1a_64(b"jump"));
     assert_eq!(rec.len(), 2);
     assert_eq!(rec.next_frame(), 2);
@@ -295,12 +304,7 @@ fn recorder_push_sets_explicit_frame_and_advances_cursor() {
 fn same_inputs_two_runs_produce_identical_per_frame_hashes() {
     // Two independent runs fed the identical input + seed stream must produce
     // byte-identical per-frame digests and compare Identical.
-    let inputs: [(&[u8], u64); 4] = [
-        (b"up", 1),
-        (b"down", 2),
-        (b"left", 3),
-        (b"right", 4),
-    ];
+    let inputs: [(&[u8], u64); 4] = [(b"up", 1), (b"down", 2), (b"left", 3), (b"right", 4)];
     let mut run_a = InputRecorder::new();
     let mut run_b = InputRecorder::new();
     for (input, seed) in inputs {
@@ -333,8 +337,14 @@ fn injected_seed_divergence_is_localized() {
     match diff {
         TraceDiff::Diverged { frame, left, right } => {
             assert_eq!(frame, 2);
-            assert_eq!(left, FrameHash::new(2, FrameInput::new(2, 2, 1002).digest()));
-            assert_eq!(right, FrameHash::new(2, FrameInput::new(2, 2, 7777).digest()));
+            assert_eq!(
+                left,
+                FrameHash::new(2, FrameInput::new(2, 2, 1002).digest())
+            );
+            assert_eq!(
+                right,
+                FrameHash::new(2, FrameInput::new(2, 2, 7777).digest())
+            );
         }
         other => panic!("expected divergence, got {other:?}"),
     }

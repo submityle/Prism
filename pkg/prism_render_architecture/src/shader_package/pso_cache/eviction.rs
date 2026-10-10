@@ -164,11 +164,7 @@ impl LruPsoCache {
     fn least_recently_used(&self) -> Option<PsoCacheKey> {
         self.entries
             .iter()
-            .min_by(|a, b| {
-                a.1.last_used
-                    .cmp(&b.1.last_used)
-                    .then_with(|| a.0.cmp(b.0))
-            })
+            .min_by(|a, b| a.1.last_used.cmp(&b.1.last_used).then_with(|| a.0.cmp(b.0)))
             .map(|(key, _)| key.clone())
     }
 }

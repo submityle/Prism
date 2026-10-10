@@ -64,7 +64,10 @@ pub fn resolve_layer_coupling_jacobi(
     }
 
     let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
-    let glam_normals: Vec<GlamVec3> = normals.iter().map(|n| physics_bridge::to_glam(*n)).collect();
+    let glam_normals: Vec<GlamVec3> = normals
+        .iter()
+        .map(|n| physics_bridge::to_glam(*n))
+        .collect();
     physics_collision::resolve_layer_coupling_jacobi(
         &mut positions,
         &inverse_masses,
@@ -217,8 +220,14 @@ mod tests {
         // Equal mass: inner pushed down by half the penetration, outer up by half.
         let d_inner = jac[0].position.y - base[0].position.y;
         let d_outer = jac[1].position.y - base[1].position.y;
-        assert!(d_inner < 0.0, "inner half should be negative, got {d_inner}");
-        assert!(d_outer > 0.0, "outer half should be positive, got {d_outer}");
+        assert!(
+            d_inner < 0.0,
+            "inner half should be negative, got {d_inner}"
+        );
+        assert!(
+            d_outer > 0.0,
+            "outer half should be positive, got {d_outer}"
+        );
         assert!((d_inner + d_outer).abs() < 1e-6, "equal-mass halves cancel");
     }
 }

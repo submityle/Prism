@@ -296,10 +296,26 @@ fn assert_pair_resolution_bit_exact(p: Pair) {
     );
 
     // apply 相位对 pinned 粒子跳过写入 => 有效增量取零。
-    let eff_pos_a = if a_pinned { [0.0, 0.0, 0.0] } else { pos_delta_a };
-    let eff_vel_a = if a_pinned { [0.0, 0.0, 0.0] } else { vel_delta_a };
-    let eff_pos_b = if b_pinned { [0.0, 0.0, 0.0] } else { pos_delta_b };
-    let eff_vel_b = if b_pinned { [0.0, 0.0, 0.0] } else { vel_delta_b };
+    let eff_pos_a = if a_pinned {
+        [0.0, 0.0, 0.0]
+    } else {
+        pos_delta_a
+    };
+    let eff_vel_a = if a_pinned {
+        [0.0, 0.0, 0.0]
+    } else {
+        vel_delta_a
+    };
+    let eff_pos_b = if b_pinned {
+        [0.0, 0.0, 0.0]
+    } else {
+        pos_delta_b
+    };
+    let eff_vel_b = if b_pinned {
+        [0.0, 0.0, 0.0]
+    } else {
+        vel_delta_b
+    };
 
     // 黄金净变化：final - 输入快照（pinned 未写 => 恒为零）。
     let golden_net_pos_a = v_sub(arr(golden[0].position), p.a_curr);
@@ -580,8 +596,16 @@ fn jittered_mixed_single_pairs() {
         let a_curr = [next(), next(), next()];
         let b_prev = [next(), next(), next()];
         let b_curr = [next(), next(), next()];
-        let a_vel = [(next() - 0.50) * 2.0, (next() - 0.50) * 2.0, (next() - 0.50) * 2.0];
-        let b_vel = [(next() - 0.50) * 2.0, (next() - 0.50) * 2.0, (next() - 0.50) * 2.0];
+        let a_vel = [
+            (next() - 0.50) * 2.0,
+            (next() - 0.50) * 2.0,
+            (next() - 0.50) * 2.0,
+        ];
+        let b_vel = [
+            (next() - 0.50) * 2.0,
+            (next() - 0.50) * 2.0,
+            (next() - 0.50) * 2.0,
+        ];
         // 质量/pinned 布局在三种组合间轮换。
         let (a_w, b_w) = match round % 3 {
             0 => (1.0, 1.0),

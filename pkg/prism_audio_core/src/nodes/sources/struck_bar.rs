@@ -87,7 +87,6 @@
 //! derived code**; only the widely documented beam-mode ratios, resonator, and
 //! window formulas are used.
 
-
 use bevy_math::ops;
 use core::f32::consts::TAU;
 
@@ -129,8 +128,7 @@ pub const DEFAULT_AMPLITUDE: Sample = 0.5;
 pub const DEFAULT_STRIKE_VELOCITY: Sample = 1.0;
 
 /// Ideal free-free (Euler-Bernoulli) bar bending-mode ratios.
-const IDEAL_BAR_RATIOS: [Sample; NUM_MODES] =
-    [1.0, 2.756, 5.404, 8.933, 13.344, 18.638];
+const IDEAL_BAR_RATIOS: [Sample; NUM_MODES] = [1.0, 2.756, 5.404, 8.933, 13.344, 18.638];
 
 /// Octave-tuned (marimba / vibraphone undercut) bending-mode ratios.
 const TUNED_BAR_RATIOS: [Sample; NUM_MODES] = [1.0, 4.0, 10.0, 20.0, 33.0, 50.0];
@@ -387,8 +385,8 @@ impl StruckBarNode {
                 self.enabled[m] = false;
                 continue;
             }
-            let t60 = (self.decay_s / ops::powf(ratio, DECAY_RATIO_EXP))
-                .clamp(MIN_DECAY_S, MAX_DECAY_S);
+            let t60 =
+                (self.decay_s / ops::powf(ratio, DECAY_RATIO_EXP)).clamp(MIN_DECAY_S, MAX_DECAY_S);
             let radius = ops::exp(-LN_1000 / (t60 * sr));
             let theta = TAU * f_m / sr;
             let (sin_t, cos_t) = (ops::sin(theta), ops::cos(theta));
@@ -424,7 +422,9 @@ impl StruckBarNode {
             if !self.enabled[m] {
                 continue;
             }
-            let y = flush_denormal(self.b0[m] * drive + self.a1[m] * self.y1[m] + self.a2[m] * self.y2[m]);
+            let y = flush_denormal(
+                self.b0[m] * drive + self.a1[m] * self.y1[m] + self.a2[m] * self.y2[m],
+            );
             self.y2[m] = self.y1[m];
             self.y1[m] = y;
             acc += y;
@@ -474,8 +474,8 @@ impl AudioNode for StruckBarNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
     use crate::buffer::{AudioBuffer, ChannelLayout};
+    use alloc::vec::Vec;
 
     const SR: u32 = 48_000;
 

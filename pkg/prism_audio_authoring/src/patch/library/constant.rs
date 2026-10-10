@@ -38,8 +38,12 @@ impl AudioNode for ConstantNode {
         let out = io.output(0);
         let frames = out.active_frames();
         let target = self.value.get();
-        self.smoothed
-            .set_target(target, Ramp::Linear { samples: frames.max(1) as u32 });
+        self.smoothed.set_target(
+            target,
+            Ramp::Linear {
+                samples: frames.max(1) as u32,
+            },
+        );
         let dst = out.channel_mut(0);
         for d in dst.iter_mut() {
             *d = self.smoothed.next_sample();

@@ -54,7 +54,7 @@
 //! [`Material`]: crate::material_library::Material
 
 use bevy_math::ops;
-use prism_audio_core::math::{Sample, db_to_linear, linear_to_db, MIN_AUDIBLE_GAIN};
+use prism_audio_core::math::{db_to_linear, linear_to_db, Sample, MIN_AUDIBLE_GAIN};
 
 use crate::band_spectrum::{BandGains, PROPAGATION_BAND_COUNT};
 use crate::material_library::{Material, MaterialAbsorption};
@@ -193,7 +193,8 @@ impl BandedAcousticMaterial {
     #[inline]
     #[must_use]
     pub fn specular_reflection(&self) -> BandGains {
-        self.reflection.scaled(ops::sqrt((1.0 - self.scattering).max(0.0)))
+        self.reflection
+            .scaled(ops::sqrt((1.0 - self.scattering).max(0.0)))
     }
 
     /// The diffuse share of the reflection, i.e. the part scattered off the
@@ -312,7 +313,10 @@ mod tests {
 
     #[test]
     fn default_is_open() {
-        assert_eq!(BandedAcousticMaterial::default(), BandedAcousticMaterial::OPEN);
+        assert_eq!(
+            BandedAcousticMaterial::default(),
+            BandedAcousticMaterial::OPEN
+        );
     }
 
     #[test]
@@ -332,8 +336,8 @@ mod tests {
         let diffuse = m.diffuse_reflection();
         for i in 0..PROPAGATION_BAND_COUNT {
             let total_energy = m.reflection().band(i) * m.reflection().band(i);
-            let split_energy = specular.band(i) * specular.band(i)
-                + diffuse.band(i) * diffuse.band(i);
+            let split_energy =
+                specular.band(i) * specular.band(i) + diffuse.band(i) * diffuse.band(i);
             assert!(approx(total_energy, split_energy, 1e-5));
         }
     }
@@ -383,7 +387,11 @@ mod tests {
         let scalar = AcousticMaterial::new(12.0, 0.6);
         let banded = BandedAcousticMaterial::from_scalar(&scalar);
         let back = banded.to_scalar();
-        assert!(approx(back.reflection_gain(), scalar.reflection_gain(), 1e-4));
+        assert!(approx(
+            back.reflection_gain(),
+            scalar.reflection_gain(),
+            1e-4
+        ));
         assert!(approx(
             back.transmission_gain(),
             scalar.transmission_gain(),

@@ -35,13 +35,21 @@ use bevy_math::{Vec3, Vec4};
 /// Sanitises a scalar to a finite value, substituting `fallback` otherwise.
 #[inline]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Sanitises a colour component-wise, replacing non-finite channels with `0`.
 #[inline]
 fn finite_vec3(v: Vec3) -> Vec3 {
-    Vec3::new(finite_or(v.x, 0.0), finite_or(v.y, 0.0), finite_or(v.z, 0.0))
+    Vec3::new(
+        finite_or(v.x, 0.0),
+        finite_or(v.y, 0.0),
+        finite_or(v.z, 0.0),
+    )
 }
 
 /// Premultiplies a straight `color`/`alpha` pair into a premultiplied `Vec4`.
@@ -97,7 +105,12 @@ pub fn over_premultiplied(src: Vec4, dst: Vec4) -> Vec4 {
 /// Internally premultiplies, applies [`over_premultiplied`], and converts back
 /// to straight `(color, alpha)`.
 #[inline]
-pub fn over_straight(src_color: Vec3, src_alpha: f32, dst_color: Vec3, dst_alpha: f32) -> (Vec3, f32) {
+pub fn over_straight(
+    src_color: Vec3,
+    src_alpha: f32,
+    dst_color: Vec3,
+    dst_alpha: f32,
+) -> (Vec3, f32) {
     let out = over_premultiplied(
         premultiply(src_color, src_alpha),
         premultiply(dst_color, dst_alpha),
@@ -300,19 +313,13 @@ mod tests {
             &[Vec3::splat(0.5), Vec3::splat(0.5 + 1e-7)],
             1e-6
         ));
-        assert!(!is_order_independent(
-            &[Vec3::ZERO, Vec3::splat(0.5)],
-            1e-6
-        ));
+        assert!(!is_order_independent(&[Vec3::ZERO, Vec3::splat(0.5)], 1e-6));
     }
 
     #[test]
     fn degenerate_inputs_never_nan() {
-        let out = composite_over_opaque(
-            Vec4::splat(f32::NAN),
-            f32::NAN,
-            Vec3::splat(f32::INFINITY),
-        );
+        let out =
+            composite_over_opaque(Vec4::splat(f32::NAN), f32::NAN, Vec3::splat(f32::INFINITY));
         assert!(out.is_finite());
         let (c, a) = unpremultiply(Vec4::new(f32::NAN, 0.0, 0.0, 0.0));
         assert!(c.is_finite() && a.is_finite());

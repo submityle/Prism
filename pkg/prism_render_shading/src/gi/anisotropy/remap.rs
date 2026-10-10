@@ -33,7 +33,7 @@
 //! * Duff et al. 2017, *Building an Orthonormal Basis, Revisited* (JCGT) — the
 //!   branchless normal-only frame used as the degenerate fallback.
 
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 
 /// Minimum GGX `alpha`, shared with [`crate::gi::anisotropy::ndf::MIN_ALPHA`].
 pub use crate::gi::anisotropy::ndf::MIN_ALPHA;
@@ -134,8 +134,16 @@ pub fn orthonormal_tangent_frame(normal: Vec3, tangent: Vec3) -> TangentFrame {
         // Re-derive the tangent from bitangent × normal to guarantee exact
         // orthogonality against both axes.
         let tangent = bitangent.cross(n).normalize_or_zero();
-        let tangent = if tangent.length_squared() > 0.0 { tangent } else { t };
-        TangentFrame { tangent, bitangent, normal: n }
+        let tangent = if tangent.length_squared() > 0.0 {
+            tangent
+        } else {
+            t
+        };
+        TangentFrame {
+            tangent,
+            bitangent,
+            normal: n,
+        }
     } else {
         frame_from_normal(n)
     }
@@ -151,10 +159,22 @@ fn frame_from_normal(normal: Vec3) -> TangentFrame {
     let b = n.x * n.y * a;
     let tangent = Vec3::new(1.0 + sign * n.x * n.x * a, sign * b, -sign * n.x);
     let tangent = tangent.normalize_or_zero();
-    let tangent = if tangent.length_squared() > 0.0 { tangent } else { Vec3::X };
+    let tangent = if tangent.length_squared() > 0.0 {
+        tangent
+    } else {
+        Vec3::X
+    };
     let bitangent = n.cross(tangent).normalize_or_zero();
-    let bitangent = if bitangent.length_squared() > 0.0 { bitangent } else { Vec3::Y };
-    TangentFrame { tangent, bitangent, normal: n }
+    let bitangent = if bitangent.length_squared() > 0.0 {
+        bitangent
+    } else {
+        Vec3::Y
+    };
+    TangentFrame {
+        tangent,
+        bitangent,
+        normal: n,
+    }
 }
 
 /// Rotates the `tangent` of a frame about its `normal` by `angle` radians,
@@ -235,7 +255,10 @@ mod tests {
             assert!(f.tangent.dot(f.bitangent).abs() < 1e-5, "t·b");
             assert!(f.bitangent.dot(f.normal).abs() < 1e-5, "b·n");
             // Right-handed: t × b == n.
-            assert!(f.tangent.cross(f.bitangent).dot(f.normal) > 0.99, "handedness");
+            assert!(
+                f.tangent.cross(f.bitangent).dot(f.normal) > 0.99,
+                "handedness"
+            );
         }
     }
 
@@ -246,16 +269,23 @@ mod tests {
         let n = Vec3::Z;
         let t_in = Vec3::new(0.6, 0.8, 0.0).normalize();
         let f = orthonormal_tangent_frame(n, t_in);
-        assert!(f.tangent.dot(t_in) > 0.999, "tangent drifted: {:?}", f.tangent);
+        assert!(
+            f.tangent.dot(t_in) > 0.999,
+            "tangent drifted: {:?}",
+            f.tangent
+        );
     }
-
 
     #[test]
     fn rotating_tangent_by_half_pi_lands_on_bitangent() {
         let base = orthonormal_tangent_frame(Vec3::Z, Vec3::X);
         let rot = rotate_tangent_frame(base, core::f32::consts::FRAC_PI_2);
         // A quarter turn maps the tangent onto the original bitangent.
-        assert!(rot.tangent.dot(base.bitangent) > 0.999, "t={:?}", rot.tangent);
+        assert!(
+            rot.tangent.dot(base.bitangent) > 0.999,
+            "t={:?}",
+            rot.tangent
+        );
         assert!(rot.tangent.dot(base.normal).abs() < 1e-5);
         assert!((rot.tangent.length() - 1.0).abs() < 1e-5);
     }
@@ -267,7 +297,10 @@ mod tests {
         for &(n, t) in &[
             (Vec3::Z, Vec3::Z),
             (Vec3::new(0.0, 0.0, 1.0), Vec3::ZERO),
-            (Vec3::new(0.1, 0.2, 0.97).normalize(), Vec3::new(0.1, 0.2, 0.97)),
+            (
+                Vec3::new(0.1, 0.2, 0.97).normalize(),
+                Vec3::new(0.1, 0.2, 0.97),
+            ),
         ] {
             let f = orthonormal_tangent_frame(n, t);
             assert!(f.tangent.is_finite() && f.bitangent.is_finite() && f.normal.is_finite());

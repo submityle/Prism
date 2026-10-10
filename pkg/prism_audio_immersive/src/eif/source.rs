@@ -224,7 +224,11 @@ impl EifSource {
     #[must_use]
     pub fn facing(&self) -> Vec3 {
         let f = self.forward.normalize_or_zero();
-        if f == Vec3::ZERO { Vec3::NEG_Z } else { f }
+        if f == Vec3::ZERO {
+            Vec3::NEG_Z
+        } else {
+            f
+        }
     }
 
     /// The Ambisonic order for an HOA source, clamped to the engine's supported
@@ -285,7 +289,8 @@ mod tests {
     fn facing_falls_back_to_forward_axis() {
         let s = EifSource::object(EifSourceId(6), Vec3::ZERO).with_forward(Vec3::ZERO);
         assert_eq!(s.facing(), Vec3::NEG_Z);
-        let s2 = EifSource::object(EifSourceId(7), Vec3::ZERO).with_forward(Vec3::new(0.0, 0.0, 2.0));
+        let s2 =
+            EifSource::object(EifSourceId(7), Vec3::ZERO).with_forward(Vec3::new(0.0, 0.0, 2.0));
         assert!(close(s2.facing().z, 1.0));
     }
 

@@ -1,7 +1,7 @@
 //! Unit tests for the M2 threading layer.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use alloc::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::thread::affinity::{self, AffinityError};
@@ -91,7 +91,10 @@ fn spinlock_provides_mutual_exclusion_under_contention() {
 fn spinlock_try_lock_reports_contention() {
     let lock = SpinLock::new(7);
     let guard = lock.lock();
-    assert!(lock.try_lock().is_none(), "held lock must not be re-acquired");
+    assert!(
+        lock.try_lock().is_none(),
+        "held lock must not be re-acquired"
+    );
     drop(guard);
     assert_eq!(*lock.try_lock().expect("lock is free now"), 7);
 }

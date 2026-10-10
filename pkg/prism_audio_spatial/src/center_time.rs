@@ -45,7 +45,11 @@ use prism_audio_core::math::Sample;
 /// Sanitises a sample, mapping non-finite values to `0`.
 #[inline]
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Accumulates the centre-time numerator `sum t_n * p^2` and denominator
@@ -78,7 +82,11 @@ pub fn center_time_seconds(response: &[Sample], sample_rate: u32) -> Sample {
         return 0.0;
     }
     let ts = numerator / denominator;
-    if ts.is_finite() { ts as Sample } else { 0.0 }
+    if ts.is_finite() {
+        ts as Sample
+    } else {
+        0.0
+    }
 }
 
 /// Computes the centre time `Ts` in milliseconds (seconds times `1000`).

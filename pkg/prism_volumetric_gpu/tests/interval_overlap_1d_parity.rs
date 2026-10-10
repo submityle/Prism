@@ -241,13 +241,8 @@ fn empty_interval_matches_reference() {
     let gpu = GpuIntervalOverlap1d::new(&ctx);
     // The empty sentinel [+inf, -inf]: is_empty true, length 0, a NaN centre, a
     // +inf clamp_value, and intersect / expand / translate all return empty.
-    let query = IntervalOverlapQuery::new(
-        Interval::empty(),
-        Interval::new(1.0, 2.0),
-        0.5,
-        1.0,
-        3.0,
-    );
+    let query =
+        IntervalOverlapQuery::new(Interval::empty(), Interval::new(1.0, 2.0), 0.5, 1.0, 3.0);
     check(&ctx, &gpu, &[query]);
 }
 
@@ -409,8 +404,20 @@ fn mixed_batch_matches_reference() {
     // element-for-element.
     let mut queries = vec![
         IntervalOverlapQuery::new(Interval::empty(), Interval::new(1.0, 2.0), 0.5, 1.0, 3.0),
-        IntervalOverlapQuery::new(Interval::point(3.0), Interval::new(0.0, 6.0), 3.0, 2.0, -1.0),
-        IntervalOverlapQuery::new(Interval::new(0.0, 2.0), Interval::new(2.0, 4.0), 1.0, 1.0, 0.5),
+        IntervalOverlapQuery::new(
+            Interval::point(3.0),
+            Interval::new(0.0, 6.0),
+            3.0,
+            2.0,
+            -1.0,
+        ),
+        IntervalOverlapQuery::new(
+            Interval::new(0.0, 2.0),
+            Interval::new(2.0, 4.0),
+            1.0,
+            1.0,
+            0.5,
+        ),
         IntervalOverlapQuery::new(
             Interval::everything(),
             Interval::new(-3.0, 7.0),

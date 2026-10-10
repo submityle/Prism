@@ -59,7 +59,7 @@ use prism_audio_core::math::Sample;
 use crate::early_reflections::ShoeboxRoom;
 use crate::material_library::{MaterialAbsorption, OCTAVE_BAND_COUNT};
 use crate::octave_reverb::OctaveReverb;
-use crate::scattering::{ScatteringSpectrum, diffuse_fraction};
+use crate::scattering::{diffuse_fraction, ScatteringSpectrum};
 
 /// The speed of sound in dry air at room temperature, in metres per second.
 pub const DEFAULT_SOUND_SPEED: Sample = 343.0;
@@ -352,14 +352,30 @@ mod tests {
     #[test]
     fn echo_density_degenerate_inputs_are_safe() {
         let field = DiffusionField::new(&room(10.0, 4.0, 8.0));
-        assert!(approx(field.echo_density(0.0, DEFAULT_SOUND_SPEED), 0.0, 1e-9));
-        assert!(approx(field.echo_density(-1.0, DEFAULT_SOUND_SPEED), 0.0, 1e-9));
-        assert!(approx(field.echo_density(Sample::NAN, DEFAULT_SOUND_SPEED), 0.0, 1e-9));
+        assert!(approx(
+            field.echo_density(0.0, DEFAULT_SOUND_SPEED),
+            0.0,
+            1e-9
+        ));
+        assert!(approx(
+            field.echo_density(-1.0, DEFAULT_SOUND_SPEED),
+            0.0,
+            1e-9
+        ));
+        assert!(approx(
+            field.echo_density(Sample::NAN, DEFAULT_SOUND_SPEED),
+            0.0,
+            1e-9
+        ));
         // Non-positive sound speed falls back to the default (finite result).
         assert!(field.echo_density(0.05, -5.0).is_finite());
         // Zero-volume room -> zero density.
         let flat = DiffusionField::new(&room(0.0, 0.0, 0.0));
-        assert!(approx(flat.echo_density(0.05, DEFAULT_SOUND_SPEED), 0.0, 1e-9));
+        assert!(approx(
+            flat.echo_density(0.05, DEFAULT_SOUND_SPEED),
+            0.0,
+            1e-9
+        ));
     }
 
     #[test]
@@ -367,7 +383,8 @@ mod tests {
         let r = room(10.0, 4.0, 8.0);
         let scat = SurfaceScatter::RoughBrick.scattering();
         let soft = DiffusionField::from_uniform_shoebox(&r, &scat, &Material::Carpet.absorption());
-        let hard = DiffusionField::from_uniform_shoebox(&r, &scat, &Material::Concrete.absorption());
+        let hard =
+            DiffusionField::from_uniform_shoebox(&r, &scat, &Material::Concrete.absorption());
         // Concrete reflects far more energy than carpet, so more of it scatters.
         assert!(hard.broadband_energy() > soft.broadband_energy());
     }
@@ -376,16 +393,10 @@ mod tests {
     fn high_scattering_raises_diffuse_energy() {
         let r = room(10.0, 4.0, 8.0);
         let abs = Material::Concrete.absorption();
-        let flat = DiffusionField::from_uniform_shoebox(
-            &r,
-            &SurfaceScatter::Flat.scattering(),
-            &abs,
-        );
-        let diffuser = DiffusionField::from_uniform_shoebox(
-            &r,
-            &SurfaceScatter::Diffuser.scattering(),
-            &abs,
-        );
+        let flat =
+            DiffusionField::from_uniform_shoebox(&r, &SurfaceScatter::Flat.scattering(), &abs);
+        let diffuser =
+            DiffusionField::from_uniform_shoebox(&r, &SurfaceScatter::Diffuser.scattering(), &abs);
         assert!(diffuser.broadband_energy() > flat.broadband_energy());
     }
 
@@ -425,17 +436,14 @@ mod tests {
     fn diffusion_coefficient_in_unit_range_and_tracks_scattering() {
         let r = room(10.0, 4.0, 8.0);
         let abs = Material::Concrete.absorption();
-        let flat = DiffusionField::from_uniform_shoebox(
-            &r,
-            &SurfaceScatter::Flat.scattering(),
-            &abs,
-        );
-        let diffuser = DiffusionField::from_uniform_shoebox(
-            &r,
-            &SurfaceScatter::Diffuser.scattering(),
-            &abs,
-        );
-        for c in [flat.diffusion_coefficient(), diffuser.diffusion_coefficient()] {
+        let flat =
+            DiffusionField::from_uniform_shoebox(&r, &SurfaceScatter::Flat.scattering(), &abs);
+        let diffuser =
+            DiffusionField::from_uniform_shoebox(&r, &SurfaceScatter::Diffuser.scattering(), &abs);
+        for c in [
+            flat.diffusion_coefficient(),
+            diffuser.diffusion_coefficient(),
+        ] {
             assert!((0.0..=1.0).contains(&c), "coeff out of range {c}");
         }
         assert!(diffuser.diffusion_coefficient() > flat.diffusion_coefficient());

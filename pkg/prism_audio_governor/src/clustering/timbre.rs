@@ -72,7 +72,11 @@ impl Timbre {
     /// nothing in particular and never dominates a cluster centroid.
     #[must_use]
     pub const fn neutral() -> Self {
-        Self { brightness: 0.5, width: 0.0, flatness: 0.0 }
+        Self {
+            brightness: 0.5,
+            width: 0.0,
+            flatness: 0.0,
+        }
     }
 
     /// Derives a descriptor from a per-band energy spectrum and the band
@@ -99,7 +103,11 @@ impl Timbre {
         let mut weighted_log = 0.0;
         let mut peak = 0.0;
         for (i, &raw) in spectrum.bands.iter().take(usable).enumerate() {
-            let e = if raw.is_finite() && raw > 0.0 { raw } else { 0.0 };
+            let e = if raw.is_finite() && raw > 0.0 {
+                raw
+            } else {
+                0.0
+            };
             if e <= 0.0 {
                 continue;
             }
@@ -127,7 +135,11 @@ impl Timbre {
         let mut var = 0.0;
         let mut ln_sum = 0.0;
         for (i, &raw) in spectrum.bands.iter().take(usable).enumerate() {
-            let e = if raw.is_finite() && raw > 0.0 { raw } else { 0.0 };
+            let e = if raw.is_finite() && raw > 0.0 {
+                raw
+            } else {
+                0.0
+            };
             if e > 0.0 {
                 let center = bands.band_center(i).max(MIN_HZ);
                 let d = ops::log10(center) - centroid_log;
@@ -141,9 +153,17 @@ impl Timbre {
         let n = usable as Sample;
         let geo = ops::exp(ln_sum / n);
         let arith = total / n;
-        let flatness = if arith > 0.0 { (geo / arith).clamp(0.0, 1.0) } else { 0.0 };
+        let flatness = if arith > 0.0 {
+            (geo / arith).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
-        Self { brightness, width, flatness }
+        Self {
+            brightness,
+            width,
+            flatness,
+        }
     }
 
     /// Euclidean distance to another descriptor in `[0, sqrt(3)]`.

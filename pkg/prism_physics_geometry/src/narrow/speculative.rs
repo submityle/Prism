@@ -101,8 +101,16 @@ mod tests {
         assert!((c.separation - 2.0).abs() < 1e-4, "sep = {}", c.separation);
         assert!(c.normal.x > 0.999, "normal = {:?}", c.normal);
         // Witness on a's shell: core radius 1 plus 0.5 margin along +x.
-        assert!(c.point_a.abs_diff_eq(Vec3::new(1.5, 0.0, 0.0), 1e-4), "pa = {:?}", c.point_a);
-        assert!(c.point_b.abs_diff_eq(Vec3::new(3.5, 0.0, 0.0), 1e-4), "pb = {:?}", c.point_b);
+        assert!(
+            c.point_a.abs_diff_eq(Vec3::new(1.5, 0.0, 0.0), 1e-4),
+            "pa = {:?}",
+            c.point_a
+        );
+        assert!(
+            c.point_b.abs_diff_eq(Vec3::new(3.5, 0.0, 0.0), 1e-4),
+            "pb = {:?}",
+            c.point_b
+        );
     }
 
     #[test]

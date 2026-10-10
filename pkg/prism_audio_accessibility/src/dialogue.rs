@@ -159,8 +159,12 @@ mod tests {
         assert!(low < medium);
         assert!(medium < high);
         // Threshold offsets become more negative as strength increases.
-        assert!(BoostStrength::Low.threshold_offset_db() > BoostStrength::Medium.threshold_offset_db());
-        assert!(BoostStrength::Medium.threshold_offset_db() > BoostStrength::High.threshold_offset_db());
+        assert!(
+            BoostStrength::Low.threshold_offset_db() > BoostStrength::Medium.threshold_offset_db()
+        );
+        assert!(
+            BoostStrength::Medium.threshold_offset_db() > BoostStrength::High.threshold_offset_db()
+        );
     }
 
     #[test]

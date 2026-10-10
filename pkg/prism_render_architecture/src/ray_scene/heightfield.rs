@@ -21,7 +21,7 @@
 //! domain header to the shared `BVH` node layout, so it lives in a sibling
 //! `heightfield_gpu_layout` module.
 
-use super::bvh::{Aabb, BvhBuildConfig, LinearBvhNode, build_linear_bvh};
+use super::bvh::{build_linear_bvh, Aabb, BvhBuildConfig, LinearBvhNode};
 use super::traversal::Ray;
 
 /// Why [`Heightfield::new`] rejected its inputs.
@@ -225,17 +225,9 @@ impl Heightfield {
             (self.vertex(cx, cz), [u, v])
         };
         if tri == 0 {
-            [
-                corner(ix, iz),
-                corner(ix + 1, iz),
-                corner(ix + 1, iz + 1),
-            ]
+            [corner(ix, iz), corner(ix + 1, iz), corner(ix + 1, iz + 1)]
         } else {
-            [
-                corner(ix, iz),
-                corner(ix + 1, iz + 1),
-                corner(ix, iz + 1),
-            ]
+            [corner(ix, iz), corner(ix + 1, iz + 1), corner(ix, iz + 1)]
         }
     }
 
@@ -838,14 +830,8 @@ mod tests {
 
     #[test]
     fn ray_that_misses_reports_nothing() {
-        let field = Heightfield::new(
-            2,
-            2,
-            vec![0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-            [1.0, 1.0],
-        )
-        .unwrap();
+        let field =
+            Heightfield::new(2, 2, vec![0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0]).unwrap();
         let bvh = HeightfieldBvh::build(field.clone());
         assert_eq!(bvh.primitive_count(), 1);
         // Ray parallel to the flat sheet, well above it, never meets the plane.

@@ -149,7 +149,10 @@ pub fn detect_feature_edges(
     for (triangle, tri) in mesh.indices().iter().enumerate() {
         let [a, b, c] = *tri;
         for &(u, v) in &[(a, b), (b, c), (c, a)] {
-            edge_faces.entry(sorted_pair(u, v)).or_default().push(triangle);
+            edge_faces
+                .entry(sorted_pair(u, v))
+                .or_default()
+                .push(triangle);
         }
     }
 
@@ -202,7 +205,11 @@ pub fn detect_feature_edges(
 
 /// Returns the sorted `(min, max)` endpoint pair keying a shared edge.
 fn sorted_pair(a: u32, b: u32) -> (u32, u32) {
-    if a < b { (a, b) } else { (b, a) }
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 /// Returns the unit geometric normal of a triangle, or a zero vector for a
@@ -348,13 +355,8 @@ mod tests {
 
     #[test]
     fn empty_mesh_has_no_edges() {
-        let mesh = TriangleMesh::new(
-            vec![[0.0, 0.0, 0.0]],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-        .unwrap();
+        let mesh =
+            TriangleMesh::new(vec![[0.0, 0.0, 0.0]], Vec::new(), Vec::new(), Vec::new()).unwrap();
         let fe = detect_feature_edges(&mesh, 0.5).unwrap();
         assert!(fe.feature_edges().is_empty());
         assert!(fe.crease_edges().is_empty());

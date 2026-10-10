@@ -95,7 +95,11 @@ impl MotionThresholds {
 /// Replaces a non-finite scalar with `0.0`, otherwise returns it unchanged.
 #[inline]
 fn finite_or_zero(x: f32) -> f32 {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Sanitizes a speed/threshold: non-finite becomes `0.0`, negatives clamp to
@@ -260,7 +264,10 @@ mod tests {
         let mut s = 0.0_f32;
         while s <= 64.0 {
             let rank = classify_motion(s, &t).rank();
-            assert!(rank >= prev_rank, "coarseness decreased as speed rose at {s}");
+            assert!(
+                rank >= prev_rank,
+                "coarseness decreased as speed rose at {s}"
+            );
             prev_rank = rank;
             s += 0.5;
         }

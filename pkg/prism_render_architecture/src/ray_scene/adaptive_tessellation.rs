@@ -482,12 +482,18 @@ mod tests {
         let mesh = AdaptiveTessellation::new(2, 2, 0.05, 16)
             .tessellate(&Bowl)
             .unwrap();
-        let has_origin = mesh.uvs().iter().any(|uv| uv[0].abs() < 1e-5 && uv[1].abs() < 1e-5);
+        let has_origin = mesh
+            .uvs()
+            .iter()
+            .any(|uv| uv[0].abs() < 1e-5 && uv[1].abs() < 1e-5);
         let has_far = mesh
             .uvs()
             .iter()
             .any(|uv| (uv[0] - 1.0).abs() < 1e-5 && (uv[1] - 1.0).abs() < 1e-5);
-        assert!(has_origin && has_far, "uvs should span the full [0,1]^2 domain");
+        assert!(
+            has_origin && has_far,
+            "uvs should span the full [0,1]^2 domain"
+        );
     }
 
     #[test]
@@ -498,7 +504,10 @@ mod tests {
         for (pos, uv) in mesh.positions().iter().zip(mesh.uvs().iter()) {
             let expected = [uv[0], uv[1], 4.0 * (uv[0] * uv[0] + uv[1] * uv[1])];
             for c in 0..3 {
-                assert!((pos[c] - expected[c]).abs() < 1e-4, "{pos:?} vs {expected:?}");
+                assert!(
+                    (pos[c] - expected[c]).abs() < 1e-4,
+                    "{pos:?} vs {expected:?}"
+                );
             }
         }
     }
@@ -529,7 +538,10 @@ mod tests {
         assert_eq!(tess.patches_u(), 1);
         assert_eq!(tess.patches_v(), 1);
         assert!(tess.tolerance() > 0.0);
-        assert_eq!(tess.max_factor(), super::super::patch_tessellation::MAX_FACTOR);
+        assert_eq!(
+            tess.max_factor(),
+            super::super::patch_tessellation::MAX_FACTOR
+        );
     }
 
     #[test]
@@ -537,6 +549,9 @@ mod tests {
         let d = point_segment_distance_sq([0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
         assert!((d - 1.0).abs() < 1e-6);
         let d0 = point_segment_distance_sq([-2.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
-        assert!((d0 - 1.0).abs() < 1e-6, "beyond the start clamps to the endpoint");
+        assert!(
+            (d0 - 1.0).abs() < 1e-6,
+            "beyond the start clamps to the endpoint"
+        );
     }
 }

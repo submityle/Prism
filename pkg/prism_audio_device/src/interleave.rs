@@ -110,14 +110,13 @@ mod tests {
     fn planar_stereo_round_trips_through_interleaved() {
         let mut planar = AudioBuffer::new(ChannelLayout::Stereo, 4);
         planar.channel_mut(0).copy_from_slice(&[0.1, 0.2, 0.3, 0.4]);
-        planar.channel_mut(1).copy_from_slice(&[-0.1, -0.2, -0.3, -0.4]);
+        planar
+            .channel_mut(1)
+            .copy_from_slice(&[-0.1, -0.2, -0.3, -0.4]);
 
         let mut interleaved = [0.0f32; 8];
         planar_to_interleaved(&planar, 4, &mut interleaved);
-        assert_eq!(
-            interleaved,
-            [0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -0.4]
-        );
+        assert_eq!(interleaved, [0.1, -0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -0.4]);
 
         let mut restored = AudioBuffer::new(ChannelLayout::Stereo, 4);
         interleaved_to_planar(&interleaved, 4, &mut restored);

@@ -22,20 +22,20 @@ use crate::abi::{AbiHash, AbiVersion};
 
 mod manifest;
 mod permutation;
+mod pso_cache;
 mod registry;
 mod state;
-mod pso_cache;
 
 pub use manifest::{ManifestExpectation, RejectionReason, ValidationOutcome};
 pub use permutation::{PermutationKey, PermutationSelector, PermutationSpace};
-pub use registry::{RegisterError, RegistryEntry, ShaderPackageRegistry};
-pub use state::TransitionError;
 pub use pso_cache::{
     AdmitOutcome, DeviceFingerprint, DrawDecision, FingerprintMismatch, GraphicsBackend,
     LruPsoCache, PackageWarmSpec, PersistError, PersistLoadError, PersistedPipeline,
     PersistedPsoCache, PipelineReadiness, PipelineStateHash, PsoCacheKey, WarmCounters,
     WarmEnumerationError, WarmPriority, WarmRequest, WarmRuntime, WarmSetPlan, WarmSetPlanner,
 };
+pub use registry::{RegisterError, RegistryEntry, ShaderPackageRegistry};
+pub use state::TransitionError;
 
 /// Stable, human-readable identifier for a shader package.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

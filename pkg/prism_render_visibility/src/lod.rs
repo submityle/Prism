@@ -64,11 +64,29 @@ mod tests {
 
     fn chain() -> GeometryLodChain {
         GeometryLodChain {
-            geometry: GenerationalHandle { index: 1, generation: 1 },
+            geometry: GenerationalHandle {
+                index: 1,
+                generation: 1,
+            },
             lods: vec![
-                GeometryLod { level: 0, screen_error: 0.1, resident: true, fallback: true },
-                GeometryLod { level: 1, screen_error: 0.5, resident: true, fallback: false },
-                GeometryLod { level: 2, screen_error: 1.0, resident: true, fallback: false },
+                GeometryLod {
+                    level: 0,
+                    screen_error: 0.1,
+                    resident: true,
+                    fallback: true,
+                },
+                GeometryLod {
+                    level: 1,
+                    screen_error: 0.5,
+                    resident: true,
+                    fallback: false,
+                },
+                GeometryLod {
+                    level: 2,
+                    screen_error: 1.0,
+                    resident: true,
+                    fallback: false,
+                },
             ],
         }
     }

@@ -26,7 +26,7 @@
 //!   and tube light representative-point approximations.
 
 use alloc::vec::Vec;
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 use core::f32::consts::PI;
 
 use super::ltc_lut::LtcCoeffs;
@@ -58,9 +58,20 @@ impl ShapeContribution {
     /// finite, falling back to zero for non-finite inputs.
     #[inline]
     pub fn sanitized(self) -> Self {
-        let d = if self.diffuse.is_finite() { self.diffuse.max(0.0) } else { 0.0 };
-        let s = if self.specular.is_finite() { self.specular.max(0.0) } else { 0.0 };
-        Self { diffuse: d, specular: s }
+        let d = if self.diffuse.is_finite() {
+            self.diffuse.max(0.0)
+        } else {
+            0.0
+        };
+        let s = if self.specular.is_finite() {
+            self.specular.max(0.0)
+        } else {
+            0.0
+        };
+        Self {
+            diffuse: d,
+            specular: s,
+        }
     }
 }
 
@@ -160,7 +171,11 @@ pub fn sphere_diffuse_irradiance(center: Vec3, radius: f32) -> f32 {
     let sin2 = (r * r) / (d * d);
     let cos_theta = (center.z / d).max(0.0);
     let e = PI * sin2 * cos_theta;
-    if e.is_finite() { e.clamp(0.0, PI) } else { 0.0 }
+    if e.is_finite() {
+        e.clamp(0.0, PI)
+    } else {
+        0.0
+    }
 }
 
 /// Karis representative point on a sphere for the reflection ray.
@@ -198,7 +213,11 @@ pub fn sphere_contribution(
     let diffuse = sphere_diffuse_irradiance(center, radius);
     let d = center.length();
     if d < MIN_LEN {
-        return ShapeContribution { diffuse, specular: 0.0 }.sanitized();
+        return ShapeContribution {
+            diffuse,
+            specular: 0.0,
+        }
+        .sanitized();
     }
     // Billboard the sphere: a disk facing the shaded point at the centre.
     let n = center / d;
@@ -227,7 +246,11 @@ pub fn closest_point_on_segment_to_ray(p0: Vec3, p1: Vec3, reflect_dir: Vec3) ->
     let denom = ld_len2 - r_dot_ld * r_dot_ld;
     if denom.abs() < 1.0e-12 {
         // Segment parallel to the ray: clamp to the nearer endpoint.
-        return if p0.length_squared() <= p1.length_squared() { p0 } else { p1 };
+        return if p0.length_squared() <= p1.length_squared() {
+            p0
+        } else {
+            p1
+        };
     }
     let t = ((r.dot(p0) * r_dot_ld) - p0.dot(ld)) / denom;
     let t = t.clamp(0.0, 1.0);
@@ -239,7 +262,11 @@ pub fn closest_point_on_segment_to_ray(p0: Vec3, p1: Vec3, reflect_dir: Vec3) ->
 fn tube_quad(p0: Vec3, p1: Vec3, radius: f32) -> [Vec3; 4] {
     let mid = (p0 + p1) * 0.5;
     let axis = (p1 - p0).normalize_or_zero();
-    let axis = if axis.length_squared() < 0.5 { Vec3::X } else { axis };
+    let axis = if axis.length_squared() < 0.5 {
+        Vec3::X
+    } else {
+        axis
+    };
     // Offset perpendicular to the tube axis and to the view direction (toward
     // the midpoint), so the strip faces the shaded point.
     let mut off = axis.cross(mid).normalize_or_zero();
@@ -345,7 +372,10 @@ mod tests {
         let poly = disk_polygon(center, Vec3::X, Vec3::Y, radius, 128);
         let numeric = diffuse_polygon_irradiance(&poly);
         let analytic = disk_diffuse_axial(radius, dist);
-        assert!((numeric - analytic).abs() < 2e-2, "num={numeric} ana={analytic}");
+        assert!(
+            (numeric - analytic).abs() < 2e-2,
+            "num={numeric} ana={analytic}"
+        );
     }
 
     #[test]
@@ -391,7 +421,10 @@ mod tests {
         // The representative point lies within one radius of the centre.
         assert!((rep - center).length() <= radius + 1e-5, "rep={rep:?}");
         // Degenerate reflect direction falls back to the centre.
-        assert_eq!(sphere_representative_point(center, radius, Vec3::ZERO), center);
+        assert_eq!(
+            sphere_representative_point(center, radius, Vec3::ZERO),
+            center
+        );
     }
 
     #[test]

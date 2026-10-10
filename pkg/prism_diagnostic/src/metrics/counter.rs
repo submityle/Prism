@@ -99,12 +99,8 @@ fn fetch_min_f64(atom: &AtomicU64, value: f64) {
         if value >= f64::from_bits(cur) {
             break;
         }
-        match atom.compare_exchange_weak(
-            cur,
-            value.to_bits(),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match atom.compare_exchange_weak(cur, value.to_bits(), Ordering::Relaxed, Ordering::Relaxed)
+        {
             Ok(_) => break,
             Err(actual) => cur = actual,
         }
@@ -119,12 +115,8 @@ fn fetch_max_f64(atom: &AtomicU64, value: f64) {
         if value <= f64::from_bits(cur) {
             break;
         }
-        match atom.compare_exchange_weak(
-            cur,
-            value.to_bits(),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match atom.compare_exchange_weak(cur, value.to_bits(), Ordering::Relaxed, Ordering::Relaxed)
+        {
             Ok(_) => break,
             Err(actual) => cur = actual,
         }
@@ -136,12 +128,8 @@ fn fetch_add_f64(atom: &AtomicU64, value: f64) {
     let mut cur = atom.load(Ordering::Relaxed);
     loop {
         let next = f64::from_bits(cur) + value;
-        match atom.compare_exchange_weak(
-            cur,
-            next.to_bits(),
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match atom.compare_exchange_weak(cur, next.to_bits(), Ordering::Relaxed, Ordering::Relaxed)
+        {
             Ok(_) => break,
             Err(actual) => cur = actual,
         }
@@ -283,9 +271,17 @@ impl HistogramSnapshot {
                     return self.max;
                 }
                 if bucket == 0 {
-                    return if idx == 0 { self.min } else { self.bounds[idx - 1] };
+                    return if idx == 0 {
+                        self.min
+                    } else {
+                        self.bounds[idx - 1]
+                    };
                 }
-                let lower = if idx == 0 { self.min } else { self.bounds[idx - 1] };
+                let lower = if idx == 0 {
+                    self.min
+                } else {
+                    self.bounds[idx - 1]
+                };
                 let upper = self.bounds[idx];
                 let pos = ((target - cum_before as f64) / bucket as f64).clamp(0.0, 1.0);
                 return lower + (upper - lower) * pos;

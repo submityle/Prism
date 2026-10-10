@@ -183,7 +183,6 @@ fn write_waits_for_all_prior_readers_and_aliases_disjoint_transients() {
     assert_eq!(compiled.transient_bytes, 2048);
 }
 
-
 #[test]
 fn transient_plan_aliases_disjoint_transients_into_one_group() {
     // Two same-size transients written by two passes running back to back.
@@ -226,8 +225,14 @@ fn transient_plan_aliases_disjoint_transients_into_one_group() {
 
     // Derived legacy views agree with the plan.
     assert_eq!(compiled.transient_bytes, 1024);
-    assert_eq!(compiled.transient_offsets[a.0 as usize], Some(region_a.offset));
-    assert_eq!(compiled.transient_offsets[b.0 as usize], Some(region_b.offset));
+    assert_eq!(
+        compiled.transient_offsets[a.0 as usize],
+        Some(region_a.offset)
+    );
+    assert_eq!(
+        compiled.transient_offsets[b.0 as usize],
+        Some(region_b.offset)
+    );
 }
 
 #[test]

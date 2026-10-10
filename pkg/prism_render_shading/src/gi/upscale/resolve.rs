@@ -52,9 +52,21 @@ pub fn is_rendered(x: u32, y: u32, frame_parity: u32) -> bool {
 #[inline]
 pub fn sanitize(color: Vec3) -> Vec3 {
     Vec3::new(
-        if color.x.is_finite() { color.x.max(0.0) } else { 0.0 },
-        if color.y.is_finite() { color.y.max(0.0) } else { 0.0 },
-        if color.z.is_finite() { color.z.max(0.0) } else { 0.0 },
+        if color.x.is_finite() {
+            color.x.max(0.0)
+        } else {
+            0.0
+        },
+        if color.y.is_finite() {
+            color.y.max(0.0)
+        } else {
+            0.0
+        },
+        if color.z.is_finite() {
+            color.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -78,13 +90,19 @@ impl Neighbor {
     /// A usable neighbour with the given colour.
     #[inline]
     pub fn present(color: Vec3) -> Self {
-        Self { color: sanitize(color), valid: true }
+        Self {
+            color: sanitize(color),
+            valid: true,
+        }
     }
 
     /// A missing / off-screen neighbour (ignored by the reconstruction).
     #[inline]
     pub fn missing() -> Self {
-        Self { color: Vec3::ZERO, valid: false }
+        Self {
+            color: Vec3::ZERO,
+            valid: false,
+        }
     }
 }
 
@@ -284,7 +302,11 @@ fn unweighted_mean(neighbors: &[Neighbor]) -> Vec3 {
 /// Returns `v` when finite, else the `fallback`.
 #[inline]
 fn finite_or(v: f32, fallback: f32) -> f32 {
-    if v.is_finite() { v } else { fallback }
+    if v.is_finite() {
+        v
+    } else {
+        fallback
+    }
 }
 
 /// Clamps `v` to `[a, b]`, swapping inverted bounds.
@@ -401,7 +423,12 @@ mod tests {
 
     #[test]
     fn catmull_rom_rgb_matches_scalar() {
-        let s = [Vec3::splat(1.0), Vec3::splat(2.0), Vec3::splat(5.0), Vec3::splat(9.0)];
+        let s = [
+            Vec3::splat(1.0),
+            Vec3::splat(2.0),
+            Vec3::splat(5.0),
+            Vec3::splat(9.0),
+        ];
         let v = catmull_rom_rgb(s, 0.5);
         let scalar = catmull_rom_1d([1.0, 2.0, 5.0, 9.0], 0.5);
         assert!((v.x - scalar).abs() < 1e-6, "{v:?} vs {scalar}");

@@ -94,7 +94,11 @@ const MIN_DIVISOR: Sample = 1.0e-9;
 /// factor, or any non-finite input. Unlike
 /// [`crate::room_acoustics::critical_distance`] this variant includes the
 /// directivity factor `Q`.
-fn peutz_critical_distance_m(volume_m3: Sample, reverberation_time_s: Sample, directivity_q: Sample) -> Sample {
+fn peutz_critical_distance_m(
+    volume_m3: Sample,
+    reverberation_time_s: Sample,
+    directivity_q: Sample,
+) -> Sample {
     if !volume_m3.is_finite()
         || !reverberation_time_s.is_finite()
         || !directivity_q.is_finite()
@@ -109,7 +113,12 @@ fn peutz_critical_distance_m(volume_m3: Sample, reverberation_time_s: Sample, di
 
 /// Reports whether every input is finite and physically valid.
 #[inline]
-fn inputs_valid(distance_m: Sample, volume_m3: Sample, reverberation_time_s: Sample, directivity_q: Sample) -> bool {
+fn inputs_valid(
+    distance_m: Sample,
+    volume_m3: Sample,
+    reverberation_time_s: Sample,
+    directivity_q: Sample,
+) -> bool {
     distance_m.is_finite()
         && volume_m3.is_finite()
         && reverberation_time_s.is_finite()
@@ -122,7 +131,12 @@ fn inputs_valid(distance_m: Sample, volume_m3: Sample, reverberation_time_s: Sam
 
 /// Computes the articulation loss percentage and whether the prediction is in
 /// the distance-dominated regime. Degenerate inputs return `(MAX_ALCONS, false)`.
-fn compute(distance_m: Sample, volume_m3: Sample, reverberation_time_s: Sample, directivity_q: Sample) -> (Sample, bool) {
+fn compute(
+    distance_m: Sample,
+    volume_m3: Sample,
+    reverberation_time_s: Sample,
+    directivity_q: Sample,
+) -> (Sample, bool) {
     if !inputs_valid(distance_m, volume_m3, reverberation_time_s, directivity_q) {
         return (MAX_ALCONS, false);
     }
@@ -160,7 +174,12 @@ fn compute(distance_m: Sample, volume_m3: Sample, reverberation_time_s: Sample, 
 /// factor (`1` for an omnidirectional source). Degenerate inputs return
 /// [`MAX_ALCONS`].
 #[must_use]
-pub fn articulation_loss_percent(distance_m: Sample, volume_m3: Sample, reverberation_time_s: Sample, directivity_q: Sample) -> Sample {
+pub fn articulation_loss_percent(
+    distance_m: Sample,
+    volume_m3: Sample,
+    reverberation_time_s: Sample,
+    directivity_q: Sample,
+) -> Sample {
     compute(distance_m, volume_m3, reverberation_time_s, directivity_q).0
 }
 
@@ -177,7 +196,11 @@ pub fn alcons_to_sti(alcons_percent: Sample) -> Sample {
     }
     // ln via ops; the published relation is expressed in natural logarithm.
     let sti = 0.9482 - 0.1845 * ops::ln(alcons_percent);
-    if sti.is_finite() { sti.clamp(0.0, 1.0) } else { 0.0 }
+    if sti.is_finite() {
+        sti.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Peutz articulation-loss prediction with its derived intelligibility index.
@@ -210,7 +233,12 @@ impl ArticulationLoss {
     /// assert!(loss.equivalent_sti > 0.0 && loss.equivalent_sti < 1.0);
     /// ```
     #[must_use]
-    pub fn from_room(distance_m: Sample, volume_m3: Sample, reverberation_time_s: Sample, directivity_q: Sample) -> Self {
+    pub fn from_room(
+        distance_m: Sample,
+        volume_m3: Sample,
+        reverberation_time_s: Sample,
+        directivity_q: Sample,
+    ) -> Self {
         let (alcons_percent, is_distance_limited) =
             compute(distance_m, volume_m3, reverberation_time_s, directivity_q);
         Self {
@@ -280,7 +308,10 @@ mod tests {
     #[test]
     fn non_positive_rt_is_sentinel() {
         assert_eq!(articulation_loss_percent(5.0, 1000.0, 0.0, 1.0), MAX_ALCONS);
-        assert_eq!(articulation_loss_percent(5.0, 1000.0, -1.0, 1.0), MAX_ALCONS);
+        assert_eq!(
+            articulation_loss_percent(5.0, 1000.0, -1.0, 1.0),
+            MAX_ALCONS
+        );
     }
 
     #[test]
@@ -290,7 +321,10 @@ mod tests {
 
     #[test]
     fn negative_distance_is_sentinel() {
-        assert_eq!(articulation_loss_percent(-1.0, 1000.0, 1.0, 1.0), MAX_ALCONS);
+        assert_eq!(
+            articulation_loss_percent(-1.0, 1000.0, 1.0, 1.0),
+            MAX_ALCONS
+        );
     }
 
     #[test]

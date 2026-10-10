@@ -52,12 +52,7 @@ pub struct MediaFormat {
 impl MediaFormat {
     /// Creates a new format descriptor.
     #[must_use]
-    pub fn new(
-        codec: CodecTag,
-        channels: u16,
-        sample_rate: u32,
-        frame_count: Option<u64>,
-    ) -> Self {
+    pub fn new(codec: CodecTag, channels: u16, sample_rate: u32, frame_count: Option<u64>) -> Self {
         Self {
             codec,
             channels,
@@ -71,9 +66,7 @@ impl MediaFormat {
     #[must_use]
     pub fn decoded_bytes(&self) -> Option<u64> {
         self.frame_count.map(|frames| {
-            frames
-                * u64::from(self.channels)
-                * size_of::<prism_audio_core::math::Sample>() as u64
+            frames * u64::from(self.channels) * size_of::<prism_audio_core::math::Sample>() as u64
         })
     }
 

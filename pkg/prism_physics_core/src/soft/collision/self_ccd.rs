@@ -257,8 +257,13 @@ pub fn resolve_self_ccd(
 
     // Broad phase: enumerate the deterministic candidate-pair set shared by
     // the Gauss-Seidel core and its parallel-safe Jacobi twin.
-    let pairs =
-        collect_self_ccd_candidate_pairs(positions, prev_positions, count, params.cell_size, params.thickness);
+    let pairs = collect_self_ccd_candidate_pairs(
+        positions,
+        prev_positions,
+        count,
+        params.cell_size,
+        params.thickness,
+    );
 
     let inv_dt = if dt.abs() <= EPS_REL_MOTION {
         0.0

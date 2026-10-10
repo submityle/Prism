@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use crate::axis::Axis;
 use crate::button::ButtonInput;
-use crate::gamepad::{AxisSettings, ButtonSettings, GamepadAxis, GamepadSettings, radial_deadzone};
+use crate::gamepad::{radial_deadzone, AxisSettings, ButtonSettings, GamepadAxis, GamepadSettings};
 use crate::keyboard::{KeyCode, ModifiersState};
 use crate::mouse::MouseButton;
 use crate::touch::{TouchInput, TouchPhase, Touches};
@@ -101,7 +101,10 @@ fn pressed_iteration_is_deterministic() {
 fn axis_get_clamps_but_unclamped_does_not() {
     let mut axis = Axis::<GamepadAxis>::new();
     axis.set(GamepadAxis::LeftStickX, 2.5);
-    assert_eq!(axis.get(GamepadAxis::LeftStickX), Some(Axis::<GamepadAxis>::MAX));
+    assert_eq!(
+        axis.get(GamepadAxis::LeftStickX),
+        Some(Axis::<GamepadAxis>::MAX)
+    );
     assert_eq!(axis.get_unclamped(GamepadAxis::LeftStickX), Some(2.5));
 }
 
@@ -185,7 +188,10 @@ fn gamepad_settings_override_vs_default() {
     settings.set_axis(GamepadAxis::LeftStickX, tight);
     assert_eq!(settings.axis(GamepadAxis::LeftStickX), tight);
     // An un-overridden axis falls back to the default curve.
-    assert_eq!(settings.axis(GamepadAxis::RightStickX), settings.default_axis);
+    assert_eq!(
+        settings.axis(GamepadAxis::RightStickX),
+        settings.default_axis
+    );
 }
 
 // --- radial_deadzone -------------------------------------------------------

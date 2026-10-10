@@ -8,8 +8,8 @@
 //! type purely through reflection.
 
 use crate::reflect::Reflect;
-use core::any::Any;
 use alloc::boxed::Box;
+use core::any::Any;
 
 /// A cloneable, type-erased payload attached to a registered type.
 pub trait TypeData: Any + Send + Sync {

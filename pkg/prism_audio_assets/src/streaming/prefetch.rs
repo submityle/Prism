@@ -62,12 +62,13 @@ impl PrefetchStream {
 
     fn fill_resident(&mut self) -> Result<(), DecodeError> {
         self.resident.clear();
-        self.resident
-            .reserve(self.prefetch_frames * self.channels);
+        self.resident.reserve(self.prefetch_frames * self.channels);
         let mut remaining = self.prefetch_frames;
         while remaining > 0 {
             let want = remaining.min(self.scratch.len() / self.channels);
-            let produced = self.decoder.decode(&mut self.scratch[..want * self.channels])?;
+            let produced = self
+                .decoder
+                .decode(&mut self.scratch[..want * self.channels])?;
             if produced == 0 {
                 self.decoder_exhausted = true;
                 break;
@@ -113,7 +114,9 @@ impl PrefetchStream {
             let want = space
                 .min(max_frames - pushed)
                 .min(self.scratch.len() / self.channels);
-            let produced = self.decoder.decode(&mut self.scratch[..want * self.channels])?;
+            let produced = self
+                .decoder
+                .decode(&mut self.scratch[..want * self.channels])?;
             if produced == 0 {
                 self.decoder_exhausted = true;
                 break;
@@ -165,7 +168,8 @@ impl PrefetchStream {
     /// pump continues from the correct position.
     pub fn restart(&mut self) -> Result<(), DecodeError> {
         self.ring.clear();
-        self.decoder.seek(self.resident.len() as u64 / self.channels as u64)?;
+        self.decoder
+            .seek(self.resident.len() as u64 / self.channels as u64)?;
         self.decoder_exhausted = self.decoder.is_exhausted() && self.resident.is_empty();
         self.ring.write_interleaved(&self.resident);
         Ok(())

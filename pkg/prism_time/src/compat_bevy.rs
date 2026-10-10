@@ -15,9 +15,7 @@
 /// The [`Fixed`](crate::Fixed) accumulator here is driven explicitly rather
 /// than by a Bevy schedule, but the clock-reading surface matches.
 pub mod prelude {
-    pub use crate::{
-        Fixed, Real, Stopwatch, Time, Timer, TimerMode, Virtual,
-    };
+    pub use crate::{Fixed, Real, Stopwatch, Time, Timer, TimerMode, Virtual};
 }
 
 pub use crate::{Fixed, Real, Stopwatch, Time, Timer, TimerMode, Virtual};

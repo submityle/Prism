@@ -107,7 +107,10 @@ fn bytes_round_trip() {
 
 #[test]
 fn malformed_text_is_rejected() {
-    assert_eq!(ExecutionOrder::from_text(""), Err(ReplayOrderError::Truncated));
+    assert_eq!(
+        ExecutionOrder::from_text(""),
+        Err(ReplayOrderError::Truncated)
+    );
     assert_eq!(
         ExecutionOrder::from_text("not-a-header\n"),
         Err(ReplayOrderError::BadHeader)
@@ -138,7 +141,10 @@ fn malformed_text_is_rejected() {
 
 #[test]
 fn malformed_bytes_are_rejected() {
-    assert_eq!(ExecutionOrder::from_bytes(&[]), Err(ReplayOrderError::Truncated));
+    assert_eq!(
+        ExecutionOrder::from_bytes(&[]),
+        Err(ReplayOrderError::Truncated)
+    );
     let mut good = ExecutionOrder::new(1, vec![1, 0]).unwrap().to_bytes();
     good[0] = b'X';
     assert_eq!(
@@ -224,9 +230,12 @@ fn replay_reproduces_recorded_value_on_every_pool() {
     // Replaying the captured order reproduces the value bit-for-bit regardless
     // of how many workers the replay pool has.
     for pool in pools() {
-        let replayed = pool.replay_ordered(&out.order, compute, FNV_OFFSET, mix).unwrap();
+        let replayed = pool
+            .replay_ordered(&out.order, compute, FNV_OFFSET, mix)
+            .unwrap();
         assert_eq!(
-            replayed, out.value,
+            replayed,
+            out.value,
             "replay diverged on a {}-worker pool",
             pool.worker_count()
         );
@@ -250,11 +259,15 @@ fn replay_survives_serialization_round_trip() {
 
     let replay_pool = TaskPool::with_threads(2);
     assert_eq!(
-        replay_pool.replay_ordered(&via_text, compute, FNV_OFFSET, mix).unwrap(),
+        replay_pool
+            .replay_ordered(&via_text, compute, FNV_OFFSET, mix)
+            .unwrap(),
         out.value
     );
     assert_eq!(
-        replay_pool.replay_ordered(&via_bytes, compute, FNV_OFFSET, mix).unwrap(),
+        replay_pool
+            .replay_ordered(&via_bytes, compute, FNV_OFFSET, mix)
+            .unwrap(),
         out.value
     );
 }
@@ -298,7 +311,9 @@ fn deterministic_differs_from_a_scrambled_replay_order() {
     // A deliberately reversed order (a valid permutation) folds differently.
     let reversed: Vec<u32> = (0..len as u32).rev().collect();
     let order = ExecutionOrder::new(seed, reversed).unwrap();
-    let scrambled = pool.replay_ordered(&order, compute, FNV_OFFSET, mix).unwrap();
+    let scrambled = pool
+        .replay_ordered(&order, compute, FNV_OFFSET, mix)
+        .unwrap();
 
     assert_ne!(canonical, scrambled);
 }
@@ -330,7 +345,8 @@ fn repeated_records_are_each_internally_faithful() {
         );
         // And replaying it reproduces the same value.
         assert_eq!(
-            pool.replay_ordered(&out.order, compute, FNV_OFFSET, mix).unwrap(),
+            pool.replay_ordered(&out.order, compute, FNV_OFFSET, mix)
+                .unwrap(),
             out.value
         );
     }
@@ -343,7 +359,8 @@ fn empty_workload_round_trips() {
     assert!(out.order.is_empty());
     assert_eq!(out.value, FNV_OFFSET); // nothing folded
     assert_eq!(
-        pool.replay_ordered(&out.order, |i| task_value(7, i), FNV_OFFSET, mix).unwrap(),
+        pool.replay_ordered(&out.order, |i| task_value(7, i), FNV_OFFSET, mix)
+            .unwrap(),
         FNV_OFFSET
     );
     assert_eq!(

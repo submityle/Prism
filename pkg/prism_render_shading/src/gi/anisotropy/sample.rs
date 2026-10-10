@@ -39,11 +39,11 @@
 //!   VNDF routine and its pdf.
 //! * Walter et al. 2007 — the GGX `D` and the reflection Jacobian `1/(4 wo·h)`.
 
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 use core::f32::consts::TAU;
 
 use crate::gi::anisotropy::ndf::{
-    MIN_ALPHA, ndf_anisotropic_local, smith_lambda_local, to_tangent_space,
+    ndf_anisotropic_local, smith_lambda_local, to_tangent_space, MIN_ALPHA,
 };
 use crate::gi::anisotropy::remap::TangentFrame;
 
@@ -81,7 +81,11 @@ pub fn sample_vndf_local(wo: Vec3, alpha_t: f32, alpha_b: f32, u1: f32, u2: f32)
 
     // Stretch the view direction into the isotropic (alpha = 1) hemisphere.
     let vh = Vec3::new(at * wo.x, ab * wo.y, wo.z).normalize_or_zero();
-    let vh = if vh.length_squared() > 0.0 { vh } else { Vec3::Z };
+    let vh = if vh.length_squared() > 0.0 {
+        vh
+    } else {
+        Vec3::Z
+    };
 
     // Robust orthonormal basis around the stretched view (Heitz 2018).
     let lensq = vh.x * vh.x + vh.y * vh.y;
@@ -105,7 +109,11 @@ pub fn sample_vndf_local(wo: Vec3, alpha_t: f32, alpha_b: f32, u1: f32, u2: f32)
     let pz = (1.0 - p1 * p1 - p2 * p2).max(0.0).sqrt();
     let nh = p1 * t1 + p2 * t2 + pz * vh;
     let h = Vec3::new(at * nh.x, ab * nh.y, nh.z.max(0.0)).normalize_or_zero();
-    if h.length_squared() > 0.0 { h } else { Vec3::Z }
+    if h.length_squared() > 0.0 {
+        h
+    } else {
+        Vec3::Z
+    }
 }
 
 /// Solid-angle pdf of the VNDF *half vector* `h` for a tangent-space view `wo`.
@@ -124,7 +132,11 @@ pub fn vndf_pdf_h_local(wo: Vec3, h: Vec3, alpha_t: f32, alpha_b: f32) -> f32 {
     let g1 = 1.0 / (1.0 + smith_lambda_local(wo, alpha_t, alpha_b));
     let d = ndf_anisotropic_local(h, alpha_t, alpha_b);
     let pdf = g1 * v_dot_h * d / wo.z.max(MIN_COS);
-    if pdf.is_finite() { pdf.max(0.0) } else { 0.0 }
+    if pdf.is_finite() {
+        pdf.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Solid-angle pdf of a reflected direction `wi` produced by VNDF sampling, in
@@ -146,7 +158,11 @@ pub fn vndf_pdf_reflect_local(wo: Vec3, wi: Vec3, alpha_t: f32, alpha_b: f32) ->
         return 0.0;
     }
     let pdf = vndf_pdf_h_local(wo, h, alpha_t, alpha_b) / (4.0 * v_dot_h);
-    if pdf.is_finite() { pdf.max(0.0) } else { 0.0 }
+    if pdf.is_finite() {
+        pdf.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Rotates a tangent-space direction back into world space using `frame`.
@@ -193,7 +209,11 @@ pub fn sample_anisotropic_direction(
     let h_l = sample_vndf_local(wo_l, alpha_t, alpha_b, u1, u2);
     let wi_l = reflect_about(wo_l, h_l);
     let wi_l = wi_l.normalize_or_zero();
-    let wi_l = if wi_l.length_squared() > 0.0 { wi_l } else { Vec3::Z };
+    let wi_l = if wi_l.length_squared() > 0.0 {
+        wi_l
+    } else {
+        Vec3::Z
+    };
     to_world(wi_l, frame)
 }
 
@@ -299,7 +319,10 @@ mod tests {
                 let pdf = vndf_pdf_reflect_local(wo, wi, at, ab);
                 assert!(pdf > 0.0 && pdf.is_finite(), "pdf={pdf}");
                 let direct = vndf_pdf_h_local(wo, h, at, ab) / (4.0 * wo.dot(h).max(1e-8));
-                assert!((pdf - direct).abs() <= 1e-3 * direct.max(1.0), "pdf={pdf} direct={direct}");
+                assert!(
+                    (pdf - direct).abs() <= 1e-3 * direct.max(1.0),
+                    "pdf={pdf} direct={direct}"
+                );
             }
         }
     }
@@ -308,10 +331,7 @@ mod tests {
     fn world_wrappers_round_trip_through_frame() {
         // A sample taken through the world-space wrapper must have a matching
         // world-space pdf equal to the tangent-space pdf of the same direction.
-        let frame = orthonormal_tangent_frame(
-            Vec3::new(0.1, 0.2, 0.97),
-            Vec3::new(1.0, 0.0, 0.0),
-        );
+        let frame = orthonormal_tangent_frame(Vec3::new(0.1, 0.2, 0.97), Vec3::new(1.0, 0.0, 0.0));
         let wo = (frame.normal * 0.9 + frame.tangent * 0.3).normalize();
         let (at, ab) = (0.3f32, 0.45f32);
         let wi = sample_anisotropic_direction(wo, &frame, at, ab, 0.37, 0.61);
@@ -320,7 +340,10 @@ mod tests {
         let wo_l = to_tangent_space(wo, frame.tangent, frame.bitangent, frame.normal);
         let wi_l = to_tangent_space(wi, frame.tangent, frame.bitangent, frame.normal);
         let p_local = vndf_pdf_reflect_local(wo_l, wi_l, at, ab);
-        assert!((p_world - p_local).abs() < 1e-4, "world={p_world} local={p_local}");
+        assert!(
+            (p_world - p_local).abs() < 1e-4,
+            "world={p_world} local={p_local}"
+        );
     }
 
     #[test]

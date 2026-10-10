@@ -283,10 +283,10 @@ impl PerNoteExpression {
 /// since serde does not implement its array traits for arrays this large.
 #[cfg(feature = "serialize")]
 mod slot_serde {
-    use super::{MAX_ACTIVE_NOTES, Slot};
-    use serde::{Deserialize, Deserializer, Serializer};
+    use super::{Slot, MAX_ACTIVE_NOTES};
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub(super) fn serialize<S: Serializer>(
         value: &[Slot; MAX_ACTIVE_NOTES],
@@ -313,10 +313,9 @@ mod slot_serde {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{MAX_ACTIVE_NOTES, PerNoteExpression};
+    use super::{PerNoteExpression, MAX_ACTIVE_NOTES};
     use crate::expression::controller::PerNoteController;
     use crate::ump::message::PITCH_BEND_CENTER_32;
 
@@ -330,7 +329,10 @@ mod tests {
         let state = table.get(1, 60).expect("active");
         assert_eq!(state.pitch_bend, 0xC000_0000);
         assert_eq!(state.pressure, 0x4000_0000);
-        assert_eq!(state.named_controller(PerNoteController::Brightness), Some(0x1234));
+        assert_eq!(
+            state.named_controller(PerNoteController::Brightness),
+            Some(0x1234)
+        );
     }
 
     #[test]

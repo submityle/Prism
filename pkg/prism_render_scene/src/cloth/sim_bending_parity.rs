@@ -51,12 +51,7 @@ struct Hinge {
 
 /// `cloth_sim.wesl` `cloth_project_bending_batch` 的逐位 CPU 转写（原生数组）。
 /// 就地更新 `positions`，`inv_masses` 为每粒子已 clamp 的逆质量快照。
-fn wesl_project_bending(
-    positions: &mut [[f32; 3]],
-    inv_masses: &[f32],
-    hinge: Hinge,
-    dt_sub: f32,
-) {
+fn wesl_project_bending(positions: &mut [[f32; 3]], inv_masses: &[f32], hinge: Hinge, dt_sub: f32) {
     if dt_sub <= 0.0 {
         // 黄金 project_bending 对 dt_sub <= 0 早退不改位置。
         return;
@@ -363,7 +358,11 @@ fn jittered_dense_hinges() {
         .map(|i| {
             let f = i as f32;
             (
-                [f.mul_add(0.21, -1.0), (f * 0.5).sin(), (f * 0.3).cos() * 0.4],
+                [
+                    f.mul_add(0.21, -1.0),
+                    (f * 0.5).sin(),
+                    (f * 0.3).cos() * 0.4,
+                ],
                 0.5 + f * 0.1,
             )
         })

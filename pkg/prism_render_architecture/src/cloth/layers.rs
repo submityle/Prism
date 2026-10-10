@@ -116,7 +116,10 @@ pub fn resolve_layer_coupling(
     }
 
     let (mut positions, inverse_masses) = physics_bridge::to_soa(particles);
-    let glam_normals: Vec<GlamVec3> = normals.iter().map(|n| physics_bridge::to_glam(*n)).collect();
+    let glam_normals: Vec<GlamVec3> = normals
+        .iter()
+        .map(|n| physics_bridge::to_glam(*n))
+        .collect();
     physics_collision::resolve_layer_coupling(
         &mut positions,
         &inverse_masses,
@@ -145,8 +148,10 @@ pub fn resolve_layer_coupling(
 /// [`prism_physics_core::soft::collision::accumulate_vertex_normals`]; this
 /// wrapper only bridges the compact and `glam` vector layouts.
 pub fn accumulate_vertex_normals(positions: &[Vec3], triangles: &[[u32; 3]], out: &mut Vec<Vec3>) {
-    let glam_positions: Vec<GlamVec3> =
-        positions.iter().map(|p| physics_bridge::to_glam(*p)).collect();
+    let glam_positions: Vec<GlamVec3> = positions
+        .iter()
+        .map(|p| physics_bridge::to_glam(*p))
+        .collect();
     let mut glam_out: Vec<GlamVec3> = Vec::new();
     physics_collision::accumulate_vertex_normals(&glam_positions, triangles, &mut glam_out);
     out.clear();

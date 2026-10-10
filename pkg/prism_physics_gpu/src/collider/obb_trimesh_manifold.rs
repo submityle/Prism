@@ -262,7 +262,11 @@ mod tests {
         let mesh = quad();
         let lbvh = cpu_build_lbvh(&mesh.triangle_aabbs());
         // Box low over triangle 0's corner (origin), just grazing triangle 1.
-        let boxes = vec![Obb::new(Vec3::new(0.4, 0.4, 0.35), axes(), Vec3::splat(0.4))];
+        let boxes = vec![Obb::new(
+            Vec3::new(0.4, 0.4, 0.35),
+            axes(),
+            Vec3::splat(0.4),
+        )];
         let out = cpu_obb_trimesh_manifold_collide(&mesh, &lbvh, &boxes, 16).unwrap();
         let m = out[0].expect("contact");
         assert_eq!(m.b, 0, "triangle 0 holds the deepest corner");

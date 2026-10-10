@@ -120,7 +120,11 @@ impl HitchDetector {
     /// The baseline is computed over the frames observed *before* this one, so a
     /// slow frame cannot mask itself by inflating its own baseline. The sample
     /// is then folded into the rolling window.
-    pub fn record_frame_at(&mut self, duration_nanos: u64, timestamp_nanos: u64) -> Option<HitchEvent> {
+    pub fn record_frame_at(
+        &mut self,
+        duration_nanos: u64,
+        timestamp_nanos: u64,
+    ) -> Option<HitchEvent> {
         let baseline = self.baseline_nanos();
 
         let over_budget = self.config.budget_nanos > 0 && duration_nanos > self.config.budget_nanos;

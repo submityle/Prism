@@ -83,7 +83,8 @@ fn assert_parity(gpu: &BoundingSphereContainsResult, q: &BoundingSphereContainsQ
     let (contains, valid) = oracle(q);
     assert_eq!(gpu.valid, valid, "{label}: valid flag mismatch");
     assert_eq!(
-        gpu.contains, contains,
+        gpu.contains,
+        contains,
         "{label}: contains flag mismatch (margin={})",
         boundary_margin(q)
     );

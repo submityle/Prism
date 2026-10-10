@@ -130,7 +130,14 @@ fn closest_point_inside_matches_cpu_golden() {
     let hulls = [box_hull(Vec3::splat(1.0))];
     let poses = [at(Vec3::ZERO)];
     let radii = [0.0_f32];
-    run_parity(&ctx, &gpu, &hulls, &poses, &radii, Vec3::new(0.2, -0.1, 0.3));
+    run_parity(
+        &ctx,
+        &gpu,
+        &hulls,
+        &poses,
+        &radii,
+        Vec3::new(0.2, -0.1, 0.3),
+    );
 }
 
 #[test]
@@ -144,8 +151,16 @@ fn closest_point_nearest_of_many_matches_cpu_golden() {
         return;
     };
     let gpu = GpuSceneClosestPoint::new(&ctx);
-    let hulls = [box_hull(Vec3::splat(1.0)), box_hull(Vec3::splat(1.0)), box_hull(Vec3::splat(1.0))];
-    let poses = [at(Vec3::new(0.0, 0.0, 0.0)), at(Vec3::new(8.0, 0.0, 0.0)), at(Vec3::new(16.0, 0.0, 0.0))];
+    let hulls = [
+        box_hull(Vec3::splat(1.0)),
+        box_hull(Vec3::splat(1.0)),
+        box_hull(Vec3::splat(1.0)),
+    ];
+    let poses = [
+        at(Vec3::new(0.0, 0.0, 0.0)),
+        at(Vec3::new(8.0, 0.0, 0.0)),
+        at(Vec3::new(16.0, 0.0, 0.0)),
+    ];
     let radii = [0.0_f32, 0.0, 0.0];
     run_parity(&ctx, &gpu, &hulls, &poses, &radii, Vec3::new(9.0, 0.0, 0.0));
 }

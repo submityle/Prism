@@ -217,7 +217,11 @@ impl Hyperboloid {
                 continue;
             }
             // Point relative to the waist center.
-            let p = [a[0] + t * direction[0], a[1] + t * direction[1], a[2] + t * direction[2]];
+            let p = [
+                a[0] + t * direction[0],
+                a[1] + t * direction[1],
+                a[2] + t * direction[2],
+            ];
             // Outward gradient of `F`: `2·p − 2·g·z·n̂`.
             let gz = g * z;
             let grad = [
@@ -313,7 +317,10 @@ impl HyperboloidBvh {
         let bounds: Vec<Aabb> = hyperboloids.iter().map(Hyperboloid::aabb).collect();
         let (nodes, order) = build_linear_bvh(&bounds, config);
         let hyperboloids = order.iter().map(|&i| hyperboloids[i as usize]).collect();
-        Self { nodes, hyperboloids }
+        Self {
+            nodes,
+            hyperboloids,
+        }
     }
 
     /// Number of flattened `BVH` nodes.
@@ -520,7 +527,11 @@ mod tests {
         assert!(approx(hit.t, 4.0, 1e-3), "t = {}", hit.t);
         // Outward normal at the waist points along +x (radially), opposed to the
         // −x ray, so it stays +x.
-        assert!(approx(hit.normal[0], 1.0, 1e-3), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[0], 1.0, 1e-3),
+            "normal = {:?}",
+            hit.normal
+        );
         assert!(hit.front_face);
     }
 
@@ -593,7 +604,11 @@ mod tests {
     fn reported_hit_lies_on_the_quadric() {
         let mut rng = Rng::new(0xB0DE_1234);
         for _ in 0..4_000 {
-            let center = [rng.range(-4.0, 4.0), rng.range(-4.0, 4.0), rng.range(-4.0, 4.0)];
+            let center = [
+                rng.range(-4.0, 4.0),
+                rng.range(-4.0, 4.0),
+                rng.range(-4.0, 4.0),
+            ];
             let top = [
                 center[0] + rng.range(-3.0, 3.0),
                 center[1] + rng.range(-3.0, 3.0),
@@ -603,8 +618,16 @@ mod tests {
             let flare = rng.range(0.0, 1.2);
             let hyp = Hyperboloid::new(center, top, waist, flare, 0);
 
-            let origin = [rng.range(-9.0, 9.0), rng.range(-9.0, 9.0), rng.range(-9.0, 9.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-9.0, 9.0),
+                rng.range(-9.0, 9.0),
+                rng.range(-9.0, 9.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             if dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] < 1e-6 {
                 continue;
             }
@@ -628,18 +651,31 @@ mod tests {
                 "off-surface residual {residual} (scaled {})",
                 residual.abs() / scale_ref
             );
-            assert!(z >= -h - 1e-3 && z <= h + 1e-3, "axial z = {z} out of band h = {h}");
+            assert!(
+                z >= -h - 1e-3 && z <= h + 1e-3,
+                "axial z = {z} out of band h = {h}"
+            );
         }
     }
 
     fn random_hyperboloid(rng: &mut Rng, primitive: u32) -> Hyperboloid {
-        let center = [rng.range(-5.0, 5.0), rng.range(-5.0, 5.0), rng.range(-5.0, 5.0)];
+        let center = [
+            rng.range(-5.0, 5.0),
+            rng.range(-5.0, 5.0),
+            rng.range(-5.0, 5.0),
+        ];
         let top = [
             center[0] + rng.range(-3.0, 3.0),
             center[1] + rng.range(-3.0, 3.0),
             center[2] + rng.range(0.5, 3.0),
         ];
-        Hyperboloid::new(center, top, rng.range(0.3, 1.5), rng.range(0.0, 1.2), primitive)
+        Hyperboloid::new(
+            center,
+            top,
+            rng.range(0.3, 1.5),
+            rng.range(0.0, 1.2),
+            primitive,
+        )
     }
 
     fn random_scene(rng: &mut Rng, count: u32) -> Vec<Hyperboloid> {
@@ -665,8 +701,16 @@ mod tests {
         let ordered = bvh.hyperboloids().to_vec();
 
         for _ in 0..3_000 {
-            let origin = [rng.range(-10.0, 10.0), rng.range(-10.0, 10.0), rng.range(-10.0, 10.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             if dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] < 1e-6 {
                 continue;
             }
@@ -704,8 +748,16 @@ mod tests {
         let ordered = bvh.hyperboloids().to_vec();
 
         for _ in 0..3_000 {
-            let origin = [rng.range(-10.0, 10.0), rng.range(-10.0, 10.0), rng.range(-10.0, 10.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             if dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] < 1e-6 {
                 continue;
             }

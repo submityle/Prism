@@ -22,13 +22,13 @@ mod hsl;
 mod linear;
 mod oklab;
 mod srgb;
-pub mod transfer;
 mod temperature;
+pub mod transfer;
 mod xyz;
 
 pub use hsl::{Hsla, Hsva};
 pub use linear::LinearRgba;
 pub use oklab::{Oklaba, Oklcha};
 pub use srgb::Srgba;
-pub use temperature::{MAX_KELVIN, MIN_KELVIN, planckian_locus_xy};
+pub use temperature::{planckian_locus_xy, MAX_KELVIN, MIN_KELVIN};
 pub use xyz::Xyza;

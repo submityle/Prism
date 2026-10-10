@@ -386,12 +386,7 @@ mod tests {
     }
 
     /// Runs GJK then EPA, requiring overlap, and returns the penetration.
-    fn penetrate(
-        a: &ConvexHull,
-        pa: &ConvexPose,
-        b: &ConvexHull,
-        pb: &ConvexPose,
-    ) -> Penetration {
+    fn penetrate(a: &ConvexHull, pa: &ConvexPose, b: &ConvexHull, pb: &ConvexPose) -> Penetration {
         let simplex = match gjk(a, pa, b, pb) {
             GjkStatus::Intersecting(s) => s,
             GjkStatus::Separated { .. } => panic!("expected overlap"),
@@ -407,10 +402,22 @@ mod tests {
         let pen = penetrate(&a, &pa, &b, &pb);
         assert!((pen.depth - 0.5).abs() < 1.0e-3, "depth {}", pen.depth);
         // Normal points from B toward A: +x.
-        assert!((pen.normal - Vec3::X).length() < 1.0e-3, "normal {:?}", pen.normal);
+        assert!(
+            (pen.normal - Vec3::X).length() < 1.0e-3,
+            "normal {:?}",
+            pen.normal
+        );
         // Witness on A sits on its -x face (x = 0.5); on B on its +x face (x = 1).
-        assert!((pen.point_a.x - 0.5).abs() < 1.0e-3, "point_a {:?}", pen.point_a);
-        assert!((pen.point_b.x - 1.0).abs() < 1.0e-3, "point_b {:?}", pen.point_b);
+        assert!(
+            (pen.point_a.x - 0.5).abs() < 1.0e-3,
+            "point_a {:?}",
+            pen.point_a
+        );
+        assert!(
+            (pen.point_b.x - 1.0).abs() < 1.0e-3,
+            "point_b {:?}",
+            pen.point_b
+        );
     }
 
     #[test]
@@ -419,7 +426,11 @@ mod tests {
         let (b, pb) = unit_box_at(0.0, 0.0, 0.0);
         let pen = penetrate(&a, &pa, &b, &pb);
         assert!((pen.depth - 0.5).abs() < 1.0e-3, "depth {}", pen.depth);
-        assert!((pen.normal - Vec3::Y).length() < 1.0e-3, "normal {:?}", pen.normal);
+        assert!(
+            (pen.normal - Vec3::Y).length() < 1.0e-3,
+            "normal {:?}",
+            pen.normal
+        );
     }
 
     #[test]
@@ -430,8 +441,17 @@ mod tests {
         let pen = penetrate(&a, &pa, &b, &pb);
         assert!((pen.depth - 2.0).abs() < 1.0e-3, "depth {}", pen.depth);
         // The chosen normal is axis-aligned and unit length.
-        assert!((pen.normal.length() - 1.0).abs() < 1.0e-3, "normal {:?}", pen.normal);
-        let m = pen.normal.x.abs().max(pen.normal.y.abs()).max(pen.normal.z.abs());
+        assert!(
+            (pen.normal.length() - 1.0).abs() < 1.0e-3,
+            "normal {:?}",
+            pen.normal
+        );
+        let m = pen
+            .normal
+            .x
+            .abs()
+            .max(pen.normal.y.abs())
+            .max(pen.normal.z.abs());
         assert!((m - 1.0).abs() < 1.0e-3, "normal {:?}", pen.normal);
     }
 
@@ -460,7 +480,11 @@ mod tests {
         let (b, pb) = unit_box_at(0.0, 0.0, 0.0);
         let pen = penetrate(&a, &pa, &b, &pb);
         assert!(pen.depth > 0.0, "depth {}", pen.depth);
-        assert!((pen.normal.length() - 1.0).abs() < 1.0e-3, "normal {:?}", pen.normal);
+        assert!(
+            (pen.normal.length() - 1.0).abs() < 1.0e-3,
+            "normal {:?}",
+            pen.normal
+        );
         // A sits to the +x of B, so the push-out has a positive x component.
         assert!(pen.normal.x > 0.0, "normal {:?}", pen.normal);
     }

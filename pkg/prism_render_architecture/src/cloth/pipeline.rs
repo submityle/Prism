@@ -1398,7 +1398,10 @@ mod tests {
         let calm_z = calm.particles[idx].position.z;
         let linear_drift = linear.particles[idx].position.z - calm_z;
         let quad_drift = quadratic.particles[idx].position.z - calm_z;
-        assert!(linear_drift > 0.0, "linear drift not downwind: {linear_drift}");
+        assert!(
+            linear_drift > 0.0,
+            "linear drift not downwind: {linear_drift}"
+        );
         assert!(
             quad_drift > linear_drift + 0.01,
             "quadratic drift {quad_drift} did not exceed linear {linear_drift}"

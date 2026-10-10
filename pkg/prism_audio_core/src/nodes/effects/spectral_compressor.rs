@@ -235,7 +235,12 @@ fn frame_coeff(ms: Sample, sample_rate: u32, hop: usize) -> Sample {
 /// apply before makeup gain. `slope` is `1 / ratio`; `knee_db` is the width of
 /// the quadratic soft knee (`0` collapses to a hard knee). The three regions
 /// below the knee, inside the knee, and above the knee join continuously.
-fn compress_gain_db(level_db: Sample, threshold_db: Sample, slope: Sample, knee_db: Sample) -> Sample {
+fn compress_gain_db(
+    level_db: Sample,
+    threshold_db: Sample,
+    slope: Sample,
+    knee_db: Sample,
+) -> Sample {
     let over = level_db - threshold_db;
     let half_knee = knee_db * 0.5;
     if knee_db > 0.0 && over > -half_knee && over < half_knee {
@@ -999,14 +1004,18 @@ mod tests {
         let probe = sine(1_000.0, 0.5, 4_096);
         let after_reset = run_mono(&mut node, &probe);
 
-        let mut fresh = SpectralCompressorNode::new(SR, 1, 256, SpectralCompressorParams::default());
+        let mut fresh =
+            SpectralCompressorNode::new(SR, 1, 256, SpectralCompressorParams::default());
         let baseline = run_mono(&mut fresh, &probe);
 
         let mut max_err = 0.0f32;
         for (a, b) in after_reset.iter().zip(baseline.iter()) {
             max_err = max_err.max((a - b).abs());
         }
-        assert!(max_err < 1.0e-6, "state leaked past reset: max_err {max_err}");
+        assert!(
+            max_err < 1.0e-6,
+            "state leaked past reset: max_err {max_err}"
+        );
     }
 
     #[test]
@@ -1064,7 +1073,7 @@ mod tests {
     #[test]
     fn compress_gain_db_regions() {
         let slope = 0.5; // ratio 2.
-        // Below threshold: unity (zero reduction).
+                         // Below threshold: unity (zero reduction).
         assert_eq!(compress_gain_db(-50.0, -20.0, slope, 0.0), 0.0);
         // Above knee (hard knee): linear reduction.
         let g = compress_gain_db(0.0, -20.0, slope, 0.0);

@@ -54,12 +54,18 @@ impl Default for Affine2 {
 
 impl Affine2 {
     /// The identity affine (no rotation/scale, zero translation).
-    pub const IDENTITY: Self = Self { matrix2: Mat2::IDENTITY, translation: Vec2::ZERO };
+    pub const IDENTITY: Self = Self {
+        matrix2: Mat2::IDENTITY,
+        translation: Vec2::ZERO,
+    };
 
     /// Build from a linear part and translation.
     #[inline]
     pub const fn from_mat2_translation(matrix2: Mat2, translation: Vec2) -> Self {
-        Self { matrix2, translation }
+        Self {
+            matrix2,
+            translation,
+        }
     }
 
     /// Transform a point: apply the linear part, then translate.
@@ -133,28 +139,47 @@ impl Default for Transform2d {
 
 impl Transform2d {
     /// The identity transform (no translation, no rotation, unit scale).
-    pub const IDENTITY: Self =
-        Self { translation: Vec2::ZERO, rotation: 0.0, scale: Vec2::ONE };
+    pub const IDENTITY: Self = Self {
+        translation: Vec2::ZERO,
+        rotation: 0.0,
+        scale: Vec2::ONE,
+    };
 
     /// Translation-only transform from components.
     #[inline]
     pub const fn from_xy(x: f32, y: f32) -> Self {
-        Self { translation: Vec2::new(x, y), rotation: 0.0, scale: Vec2::ONE }
+        Self {
+            translation: Vec2::new(x, y),
+            rotation: 0.0,
+            scale: Vec2::ONE,
+        }
     }
     /// Translation-only transform.
     #[inline]
     pub const fn from_translation(translation: Vec2) -> Self {
-        Self { translation, rotation: 0.0, scale: Vec2::ONE }
+        Self {
+            translation,
+            rotation: 0.0,
+            scale: Vec2::ONE,
+        }
     }
     /// Rotation-only transform (radians).
     #[inline]
     pub const fn from_angle(rotation: f32) -> Self {
-        Self { translation: Vec2::ZERO, rotation, scale: Vec2::ONE }
+        Self {
+            translation: Vec2::ZERO,
+            rotation,
+            scale: Vec2::ONE,
+        }
     }
     /// Scale-only transform.
     #[inline]
     pub const fn from_scale(scale: Vec2) -> Self {
-        Self { translation: Vec2::ZERO, rotation: 0.0, scale }
+        Self {
+            translation: Vec2::ZERO,
+            rotation: 0.0,
+            scale,
+        }
     }
 
     /// Builder: set translation.
@@ -181,7 +206,10 @@ impl Transform2d {
     pub fn to_affine2(&self) -> Affine2 {
         let r = rotation_mat2(self.rotation);
         let matrix2 = Mat2::from_cols(r.x_axis * self.scale.x, r.y_axis * self.scale.y);
-        Affine2 { matrix2, translation: self.translation }
+        Affine2 {
+            matrix2,
+            translation: self.translation,
+        }
     }
 
     /// Transform a point from local space into parent space.

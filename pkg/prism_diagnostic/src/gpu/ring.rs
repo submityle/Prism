@@ -233,7 +233,11 @@ mod tests {
         assert_eq!(ring.pending_len(), 2);
         assert!(ring.resolve(c, GpuTick(0), GpuTick(7)).is_some());
         assert!(ring.resolve(a, GpuTick(0), GpuTick(3)).is_some());
-        let labels: Vec<_> = ring.resolved_snapshot().into_iter().map(|s| s.label).collect();
+        let labels: Vec<_> = ring
+            .resolved_snapshot()
+            .into_iter()
+            .map(|s| s.label)
+            .collect();
         assert_eq!(labels, ["B", "C", "A"]);
     }
 
@@ -245,7 +249,9 @@ mod tests {
         // Already resolved.
         assert!(ring.resolve(a, GpuTick(0), GpuTick(1)).is_none());
         // Never issued.
-        assert!(ring.resolve(GpuQueryId(9999), GpuTick(0), GpuTick(1)).is_none());
+        assert!(ring
+            .resolve(GpuQueryId(9999), GpuTick(0), GpuTick(1))
+            .is_none());
     }
 
     #[test]

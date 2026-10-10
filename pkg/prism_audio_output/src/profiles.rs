@@ -206,7 +206,10 @@ mod tests {
             OutputProfile::Tv,
             OutputProfile::Night,
         ] {
-            assert!(!profile.params().binaural, "{profile:?} must not be binaural");
+            assert!(
+                !profile.params().binaural,
+                "{profile:?} must not be binaural"
+            );
         }
         assert!(OutputProfile::Headphone.params().binaural);
     }

@@ -128,8 +128,13 @@ pub fn render_light_shaft(
     }
 
     // Stage 1: emission mask at half resolution.
-    let emission =
-        build_emission_buffer(half_depth, half_color, half_width, half_height, &config.occlusion);
+    let emission = build_emission_buffer(
+        half_depth,
+        half_color,
+        half_width,
+        half_height,
+        &config.occlusion,
+    );
     if emission.len() < half_len {
         return Vec::new();
     }
@@ -150,12 +155,21 @@ pub fn render_light_shaft(
     }
 
     // Stage 3: bilateral upsample + composite.
-    let Some(half_res_shaft) = HalfResShaft::new(half_width, half_height, shaft, half_depth[..half_len].to_vec())
-    else {
+    let Some(half_res_shaft) = HalfResShaft::new(
+        half_width,
+        half_height,
+        shaft,
+        half_depth[..half_len].to_vec(),
+    ) else {
         return Vec::new();
     };
-    let full_shaft =
-        upsample_buffer(&half_res_shaft, full_depth, full_width, full_height, config.sigma_z);
+    let full_shaft = upsample_buffer(
+        &half_res_shaft,
+        full_depth,
+        full_width,
+        full_height,
+        config.sigma_z,
+    );
     if full_shaft.len() < full_len {
         return Vec::new();
     }
@@ -164,12 +178,18 @@ pub fn render_light_shaft(
     for i in 0..full_len {
         let shaft_v = full_shaft[i];
         out[i] = match config.blend {
-            BlendMode::Screen => {
-                composite_screen(scene_color[i], shaft_v, config.shaft_color, config.intensity)
-            }
-            BlendMode::Additive => {
-                composite_additive(scene_color[i], shaft_v, config.shaft_color, config.intensity)
-            }
+            BlendMode::Screen => composite_screen(
+                scene_color[i],
+                shaft_v,
+                config.shaft_color,
+                config.intensity,
+            ),
+            BlendMode::Additive => composite_additive(
+                scene_color[i],
+                shaft_v,
+                config.shaft_color,
+                config.intensity,
+            ),
         };
     }
     out
@@ -216,7 +236,15 @@ mod tests {
         let full_depth = alloc::vec![1.0_f32; fw * fh];
         let cfg = LightShaftConfig::default();
         let out = render_light_shaft(
-            &scene, &full_depth, fw, fh, &half_depth, &half_color, hw, hh, &cfg,
+            &scene,
+            &full_depth,
+            fw,
+            fh,
+            &half_depth,
+            &half_color,
+            hw,
+            hh,
+            &cfg,
         );
         assert_eq!(out.len(), fw * fh);
         for c in &out {
@@ -234,7 +262,15 @@ mod tests {
         let full_depth = alloc::vec![1.0_f32; fw * fh];
         let cfg = LightShaftConfig::default();
         let out = render_light_shaft(
-            &scene, &full_depth, fw, fh, &half_depth, &half_color, hw, hh, &cfg,
+            &scene,
+            &full_depth,
+            fw,
+            fh,
+            &half_depth,
+            &half_color,
+            hw,
+            hh,
+            &cfg,
         );
         for c in &out {
             // Additive screen blend can only brighten a positive scene.
@@ -257,7 +293,15 @@ mod tests {
         cfg.occlusion.sun_uv = Vec2::new(0.5, 0.06);
         cfg.blend = BlendMode::Additive;
         let out = render_light_shaft(
-            &scene, &full_depth, fw, fh, &half_depth, &half_color, hw, hh, &cfg,
+            &scene,
+            &full_depth,
+            fw,
+            fh,
+            &half_depth,
+            &half_color,
+            hw,
+            hh,
+            &cfg,
         );
         // Near-sun pixel (top centre).
         let near = out[2 * fw + fw / 2].x;
@@ -274,8 +318,17 @@ mod tests {
         let full_depth = alloc::vec![1.0_f32; 16];
         let half_depth = alloc::vec![1.0_f32; 2];
         let half_color = alloc::vec![Vec3::splat(0.3); 2];
-        let out =
-            render_light_shaft(&scene, &full_depth, 4, 4, &half_depth, &half_color, 4, 4, &cfg);
+        let out = render_light_shaft(
+            &scene,
+            &full_depth,
+            4,
+            4,
+            &half_depth,
+            &half_color,
+            4,
+            4,
+            &cfg,
+        );
         assert!(out.is_empty());
     }
 }

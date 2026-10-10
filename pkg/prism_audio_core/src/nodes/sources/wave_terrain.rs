@@ -267,9 +267,7 @@ impl WaveTerrainNode {
                 finite_or(frequency_hz, DEFAULT_FREQUENCY_HZ)
                     .clamp(MIN_FREQUENCY_HZ, MAX_FREQUENCY_HZ),
             ),
-            radius: Smoothed::new(
-                finite_or(radius, DEFAULT_RADIUS).clamp(MIN_RADIUS, MAX_RADIUS),
-            ),
+            radius: Smoothed::new(finite_or(radius, DEFAULT_RADIUS).clamp(MIN_RADIUS, MAX_RADIUS)),
             warp: Smoothed::new(finite_or(warp, DEFAULT_WARP).clamp(MIN_WARP, MAX_WARP)),
             ratio: finite_or(ratio, DEFAULT_RATIO).clamp(MIN_RATIO, MAX_RATIO),
             amplitude: Smoothed::new(finite_or(amplitude, DEFAULT_AMPLITUDE)),
@@ -778,6 +776,10 @@ mod tests {
         let second = render(&mut node, SR, 4_096);
         let last = *first.channel(0).last().unwrap();
         let next = second.channel(0)[0];
-        assert!((next - last).abs() < 0.2, "join step {}", (next - last).abs());
+        assert!(
+            (next - last).abs() < 0.2,
+            "join step {}",
+            (next - last).abs()
+        );
     }
 }

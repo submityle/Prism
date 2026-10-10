@@ -21,8 +21,8 @@ use prism_audio_assets::codec::metadata::{AudioStreamInfo, CodecTag, CustomCodec
 use prism_audio_core::math::Sample;
 use symphonia::core::audio::{Channels, SampleBuffer};
 use symphonia::core::codecs::{
-    CODEC_TYPE_AAC, CODEC_TYPE_FLAC, CODEC_TYPE_MP3, CODEC_TYPE_VORBIS, CodecType, Decoder,
-    DecoderOptions,
+    CodecType, Decoder, DecoderOptions, CODEC_TYPE_AAC, CODEC_TYPE_FLAC, CODEC_TYPE_MP3,
+    CODEC_TYPE_VORBIS,
 };
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
@@ -319,9 +319,7 @@ fn map_codec_tag(codec: CodecType) -> CodecTag {
 /// Maps a Symphonia error onto the engine's codec-neutral [`DecodeError`].
 fn map_error(err: SymphoniaError) -> DecodeError {
     match err {
-        SymphoniaError::IoError(ref inner)
-            if inner.kind() == std::io::ErrorKind::UnexpectedEof =>
-        {
+        SymphoniaError::IoError(ref inner) if inner.kind() == std::io::ErrorKind::UnexpectedEof => {
             DecodeError::UnexpectedEof
         }
         SymphoniaError::IoError(_) => DecodeError::UnexpectedEof,
@@ -373,10 +371,22 @@ mod tests {
         assert_eq!(map_error(eof), DecodeError::UnexpectedEof);
         let other_io = SymphoniaError::IoError(std::io::Error::from(std::io::ErrorKind::Other));
         assert_eq!(map_error(other_io), DecodeError::UnexpectedEof);
-        assert_eq!(map_error(SymphoniaError::DecodeError("x")), DecodeError::MalformedHeader);
-        assert_eq!(map_error(SymphoniaError::LimitError("x")), DecodeError::MalformedHeader);
-        assert_eq!(map_error(SymphoniaError::ResetRequired), DecodeError::MalformedHeader);
-        assert_eq!(map_error(SymphoniaError::Unsupported("x")), DecodeError::UnsupportedFormat);
+        assert_eq!(
+            map_error(SymphoniaError::DecodeError("x")),
+            DecodeError::MalformedHeader
+        );
+        assert_eq!(
+            map_error(SymphoniaError::LimitError("x")),
+            DecodeError::MalformedHeader
+        );
+        assert_eq!(
+            map_error(SymphoniaError::ResetRequired),
+            DecodeError::MalformedHeader
+        );
+        assert_eq!(
+            map_error(SymphoniaError::Unsupported("x")),
+            DecodeError::UnsupportedFormat
+        );
         assert_eq!(
             map_error(SymphoniaError::SeekError(SeekErrorKind::OutOfRange)),
             DecodeError::SeekOutOfRange

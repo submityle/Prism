@@ -24,7 +24,10 @@ fn physical_to_logical_roundtrip() {
 #[test]
 fn to_physical_rounds_half_up() {
     // 1.5 * 1.0 = 1.5 -> rounds to 2; 1.49 -> 1.
-    assert_eq!(LogicalSize::new(1.5, 1.49).to_physical(1.0), PhysicalSize::new(2, 1));
+    assert_eq!(
+        LogicalSize::new(1.5, 1.49).to_physical(1.0),
+        PhysicalSize::new(2, 1)
+    );
 }
 
 #[test]
@@ -38,13 +41,22 @@ fn invalid_scale_factor_folds_to_one() {
 #[test]
 fn to_physical_saturates_and_never_panics() {
     // Non-finite / negative collapse to 0 rather than panicking.
-    assert_eq!(LogicalSize::new(-5.0, 10.0).to_physical(1.0), PhysicalSize::new(0, 10));
-    assert_eq!(LogicalSize::new(f32::INFINITY, 10.0).to_physical(1.0).width, u32::MAX);
+    assert_eq!(
+        LogicalSize::new(-5.0, 10.0).to_physical(1.0),
+        PhysicalSize::new(0, 10)
+    );
+    assert_eq!(
+        LogicalSize::new(f32::INFINITY, 10.0).to_physical(1.0).width,
+        u32::MAX
+    );
 }
 
 #[test]
 fn aspect_ratio_guards_zero_height() {
-    assert_eq!(PhysicalSize::new(1920, 1080).aspect_ratio(), 1920.0 / 1080.0);
+    assert_eq!(
+        PhysicalSize::new(1920, 1080).aspect_ratio(),
+        1920.0 / 1080.0
+    );
     assert_eq!(PhysicalSize::new(100, 0).aspect_ratio(), 0.0);
 }
 
@@ -67,9 +79,18 @@ fn resolution_logical_size_uses_scale() {
 #[test]
 fn constraints_clamp_both_dimensions() {
     let c = WindowResizeConstraints::new(640, 480, 1920, 1080);
-    assert_eq!(c.clamp(PhysicalSize::new(100, 100)), PhysicalSize::new(640, 480));
-    assert_eq!(c.clamp(PhysicalSize::new(4000, 4000)), PhysicalSize::new(1920, 1080));
-    assert_eq!(c.clamp(PhysicalSize::new(800, 600)), PhysicalSize::new(800, 600));
+    assert_eq!(
+        c.clamp(PhysicalSize::new(100, 100)),
+        PhysicalSize::new(640, 480)
+    );
+    assert_eq!(
+        c.clamp(PhysicalSize::new(4000, 4000)),
+        PhysicalSize::new(1920, 1080)
+    );
+    assert_eq!(
+        c.clamp(PhysicalSize::new(800, 600)),
+        PhysicalSize::new(800, 600)
+    );
 }
 
 #[test]
@@ -95,12 +116,26 @@ fn best_video_mode_prefers_exact_then_refresh() {
         scale_factor: 1.0,
         refresh_rate_millihertz: Some(60_000),
         video_modes: vec![
-            VideoMode { size: PhysicalSize::new(1280, 720), bit_depth: 32, refresh_rate_millihertz: 60_000 },
-            VideoMode { size: PhysicalSize::new(1920, 1080), bit_depth: 32, refresh_rate_millihertz: 60_000 },
-            VideoMode { size: PhysicalSize::new(1920, 1080), bit_depth: 32, refresh_rate_millihertz: 144_000 },
+            VideoMode {
+                size: PhysicalSize::new(1280, 720),
+                bit_depth: 32,
+                refresh_rate_millihertz: 60_000,
+            },
+            VideoMode {
+                size: PhysicalSize::new(1920, 1080),
+                bit_depth: 32,
+                refresh_rate_millihertz: 60_000,
+            },
+            VideoMode {
+                size: PhysicalSize::new(1920, 1080),
+                bit_depth: 32,
+                refresh_rate_millihertz: 144_000,
+            },
         ],
     };
-    let best = monitor.best_video_mode(PhysicalSize::new(1920, 1080)).expect("has modes");
+    let best = monitor
+        .best_video_mode(PhysicalSize::new(1920, 1080))
+        .expect("has modes");
     assert_eq!(best.size, PhysicalSize::new(1920, 1080));
     assert_eq!(best.refresh_rate_millihertz, 144_000);
     assert_eq!(best.refresh_rate_hz(), 144.0);
@@ -117,7 +152,9 @@ fn best_video_mode_none_when_empty() {
         refresh_rate_millihertz: None,
         video_modes: vec![],
     };
-    assert!(monitor.best_video_mode(PhysicalSize::new(800, 600)).is_none());
+    assert!(monitor
+        .best_video_mode(PhysicalSize::new(800, 600))
+        .is_none());
 }
 
 // --- window state & events -------------------------------------------------
@@ -177,8 +214,13 @@ fn cursor_enter_move_leave() {
     let mut window = Window::new(WindowAttributes::default());
     window.apply(WindowEvent::CursorEntered);
     assert!(window.cursor_inside());
-    window.apply(WindowEvent::CursorMoved { position: PhysicalPosition::new(10, 20) });
-    assert_eq!(window.physical_cursor_position(), Some(PhysicalPosition::new(10, 20)));
+    window.apply(WindowEvent::CursorMoved {
+        position: PhysicalPosition::new(10, 20),
+    });
+    assert_eq!(
+        window.physical_cursor_position(),
+        Some(PhysicalPosition::new(10, 20))
+    );
     window.apply(WindowEvent::CursorLeft);
     assert!(!window.cursor_inside());
     assert_eq!(window.physical_cursor_position(), None);

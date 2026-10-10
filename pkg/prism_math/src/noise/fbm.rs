@@ -60,7 +60,12 @@ pub struct Fractal {
 impl Default for Fractal {
     #[inline]
     fn default() -> Self {
-        Self { octaves: 4, lacunarity: 2.0, gain: 0.5, frequency: 1.0 }
+        Self {
+            octaves: 4,
+            lacunarity: 2.0,
+            gain: 0.5,
+            frequency: 1.0,
+        }
     }
 }
 

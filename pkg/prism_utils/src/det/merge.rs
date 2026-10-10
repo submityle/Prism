@@ -181,7 +181,10 @@ impl<K, V> ConcurrentMerge<K, V> {
     /// Panics if the internal lock was poisoned.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.lock().expect("ConcurrentMerge lock poisoned").len()
+        self.inner
+            .lock()
+            .expect("ConcurrentMerge lock poisoned")
+            .len()
     }
 
     /// Whether no contribution has been recorded.
@@ -202,7 +205,9 @@ impl<K, V> ConcurrentMerge<K, V> {
     /// Panics if the internal lock was poisoned.
     #[must_use]
     pub fn into_inner(self) -> DeterministicMerge<K, V> {
-        self.inner.into_inner().expect("ConcurrentMerge lock poisoned")
+        self.inner
+            .into_inner()
+            .expect("ConcurrentMerge lock poisoned")
     }
 }
 

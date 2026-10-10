@@ -48,7 +48,10 @@ impl core::fmt::Display for PageStorageError {
                 write!(f, "slot {slot} is out of range for a {capacity}-slot pool")
             }
             PageStorageError::PageSizeMismatch { got, expected } => {
-                write!(f, "uploaded page has {got} words but the pool page size is {expected}")
+                write!(
+                    f,
+                    "uploaded page has {got} words but the pool page size is {expected}"
+                )
             }
         }
     }

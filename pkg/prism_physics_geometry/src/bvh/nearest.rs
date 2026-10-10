@@ -40,7 +40,10 @@ impl DynamicBvh {
         let root_d2 = self.nodes[self.root as usize]
             .aabb
             .distance_squared_to_point(p);
-        frontier.push(PointCandidate { d2: root_d2, node: self.root });
+        frontier.push(PointCandidate {
+            d2: root_d2,
+            node: self.root,
+        });
         while let Some(PointCandidate { d2, node }) = frontier.pop() {
             let node = self.nodes[node as usize];
             if node.is_leaf() {
@@ -49,10 +52,11 @@ impl DynamicBvh {
                 return Some((node.data, node.aabb, d2));
             }
             for child in [node.child1, node.child2] {
-                let cd2 = self.nodes[child as usize]
-                    .aabb
-                    .distance_squared_to_point(p);
-                frontier.push(PointCandidate { d2: cd2, node: child });
+                let cd2 = self.nodes[child as usize].aabb.distance_squared_to_point(p);
+                frontier.push(PointCandidate {
+                    d2: cd2,
+                    node: child,
+                });
             }
         }
         None
@@ -77,7 +81,10 @@ impl DynamicBvh {
         let root_d2 = self.nodes[self.root as usize]
             .aabb
             .distance_squared_to_point(p);
-        frontier.push(PointCandidate { d2: root_d2, node: self.root });
+        frontier.push(PointCandidate {
+            d2: root_d2,
+            node: self.root,
+        });
         while let Some(PointCandidate { d2, node }) = frontier.pop() {
             let node = self.nodes[node as usize];
             if node.is_leaf() {
@@ -87,10 +94,11 @@ impl DynamicBvh {
                 }
             } else {
                 for child in [node.child1, node.child2] {
-                    let cd2 = self.nodes[child as usize]
-                        .aabb
-                        .distance_squared_to_point(p);
-                    frontier.push(PointCandidate { d2: cd2, node: child });
+                    let cd2 = self.nodes[child as usize].aabb.distance_squared_to_point(p);
+                    frontier.push(PointCandidate {
+                        d2: cd2,
+                        node: child,
+                    });
                 }
             }
         }
@@ -119,7 +127,10 @@ impl DynamicBvh {
         let root_d2 = self.nodes[self.root as usize]
             .aabb
             .distance_squared_to_point(p);
-        frontier.push(PointCandidate { d2: root_d2, node: self.root });
+        frontier.push(PointCandidate {
+            d2: root_d2,
+            node: self.root,
+        });
         let mut best: Option<(u64, f32)> = None;
         while let Some(PointCandidate { d2, node }) = frontier.pop() {
             // Box lower bound already beyond the best hit: nothing nearer left.
@@ -135,10 +146,11 @@ impl DynamicBvh {
                 }
             } else {
                 for child in [node.child1, node.child2] {
-                    let cd2 = self.nodes[child as usize]
-                        .aabb
-                        .distance_squared_to_point(p);
-                    frontier.push(PointCandidate { d2: cd2, node: child });
+                    let cd2 = self.nodes[child as usize].aabb.distance_squared_to_point(p);
+                    frontier.push(PointCandidate {
+                        d2: cd2,
+                        node: child,
+                    });
                 }
             }
         }
@@ -230,7 +242,10 @@ mod tests {
             .nearest_leaf_to_point(Vec3::new(5.5, 0.0, 0.0))
             .expect("non-empty tree");
         assert_eq!(data, 1);
-        assert!((d2 - 0.0).abs() < 1e-6, "point inside box should be 0, got {d2}");
+        assert!(
+            (d2 - 0.0).abs() < 1e-6,
+            "point inside box should be 0, got {d2}"
+        );
     }
 
     #[test]

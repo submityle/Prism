@@ -189,9 +189,16 @@ pub fn anisotropic_radii(radius: f32, n_dot_v: f32, params: &SpatialParams) -> (
 /// `center_pos`/`center_normal`, normalised by `phi_depth`:
 /// `exp(-|plane_distance| / phi_depth)`.
 #[must_use]
-pub fn depth_weight(center_pos: Vec3, center_normal: Vec3, sample_pos: Vec3, phi_depth: f32) -> f32 {
+pub fn depth_weight(
+    center_pos: Vec3,
+    center_normal: Vec3,
+    sample_pos: Vec3,
+    phi_depth: f32,
+) -> f32 {
     let n = safe_normalize(center_normal);
-    let plane = (sanitize_vec(sample_pos) - sanitize_vec(center_pos)).dot(n).abs();
+    let plane = (sanitize_vec(sample_pos) - sanitize_vec(center_pos))
+        .dot(n)
+        .abs();
     let phi = phi_depth.max(1.0e-6);
     stable_exp(-plane / phi)
 }
@@ -221,7 +228,12 @@ pub fn roughness_weight(r0: f32, r1: f32, phi_roughness: f32) -> f32 {
 /// defeat the blur.)
 #[must_use]
 pub fn spatial_weight(center: &SpecularTap, sample: &SpecularTap, params: &SpatialParams) -> f32 {
-    let w_depth = depth_weight(center.position, center.normal, sample.position, params.phi_depth);
+    let w_depth = depth_weight(
+        center.position,
+        center.normal,
+        sample.position,
+        params.phi_depth,
+    );
     let w_normal = normal_weight(center.normal, sample.normal, params.phi_normal);
     let w_rough = roughness_weight(center.roughness, sample.roughness, params.phi_roughness);
     (w_depth * w_normal * w_rough).clamp(0.0, 1.0)
@@ -321,13 +333,22 @@ fn safe_normalize(v: Vec3) -> Vec3 {
 /// Replace any non-finite component of an RGB triple with `0`, clamped `≥ 0`.
 #[must_use]
 fn sanitize_rgb(c: Vec3) -> Vec3 {
-    Vec3::new(finite_or_zero(c.x), finite_or_zero(c.y), finite_or_zero(c.z)).max(Vec3::ZERO)
+    Vec3::new(
+        finite_or_zero(c.x),
+        finite_or_zero(c.y),
+        finite_or_zero(c.z),
+    )
+    .max(Vec3::ZERO)
 }
 
 /// Replace any non-finite component of a position with `0`.
 #[must_use]
 fn sanitize_vec(v: Vec3) -> Vec3 {
-    Vec3::new(finite_or_zero(v.x), finite_or_zero(v.y), finite_or_zero(v.z))
+    Vec3::new(
+        finite_or_zero(v.x),
+        finite_or_zero(v.y),
+        finite_or_zero(v.z),
+    )
 }
 
 /// Replace a non-finite scalar with `0`.
@@ -464,7 +485,13 @@ mod tests {
         let p = params();
         let c = tap(Vec3::splat(1.0), Vec3::ZERO, Vec3::Z, 0.1, 0.5);
         // Opposite normal -> weight ~0 -> output stays at centre.
-        let bad = tap(Vec3::splat(100.0), Vec3::new(0.0, 0.0, 50.0), Vec3::NEG_Z, 0.9, 1.0);
+        let bad = tap(
+            Vec3::splat(100.0),
+            Vec3::new(0.0, 0.0, 50.0),
+            Vec3::NEG_Z,
+            0.9,
+            1.0,
+        );
         let out = spatial_filter(&c, 1.0, &[(bad, 1.0)], &p);
         assert!((out.color - c.color).length() < 1e-2);
     }
@@ -473,7 +500,13 @@ mod tests {
     fn filter_averages_matching_neighbour() {
         let p = params();
         let c = tap(Vec3::splat(0.0), Vec3::ZERO, Vec3::Z, 0.5, 0.2);
-        let nb = tap(Vec3::splat(1.0), Vec3::new(0.1, 0.0, 0.0), Vec3::Z, 0.5, 0.8);
+        let nb = tap(
+            Vec3::splat(1.0),
+            Vec3::new(0.1, 0.0, 0.0),
+            Vec3::Z,
+            0.5,
+            0.8,
+        );
         let out = spatial_filter(&c, 1.0, &[(nb, 1.0)], &p);
         // Equal weights -> midpoint for both colour and hit distance.
         assert!((out.color - Vec3::splat(0.5)).length() < 1e-2);
@@ -507,7 +540,16 @@ mod tests {
     fn determinism() {
         let p = params();
         let c = tap(Vec3::splat(0.5), Vec3::ZERO, Vec3::Z, 0.3, 0.4);
-        let nb = [(tap(Vec3::splat(0.7), Vec3::new(0.2, 0.0, 0.0), Vec3::Z, 0.3, 0.5), 0.5)];
+        let nb = [(
+            tap(
+                Vec3::splat(0.7),
+                Vec3::new(0.2, 0.0, 0.0),
+                Vec3::Z,
+                0.3,
+                0.5,
+            ),
+            0.5,
+        )];
         let a = spatial_filter(&c, 1.0, &nb, &p);
         let b = spatial_filter(&c, 1.0, &nb, &p);
         assert_eq!(a, b);

@@ -31,7 +31,10 @@ pub enum RunMode {
     Client,
     /// Headless authoritative server: simulation plus networking, no
     /// rendering / audio / window (design §24.4 `DedicatedServer`). Pairs with
-    #[cfg_attr(feature = "std", doc = "[`DedicatedServerRunner`](crate::runner::DedicatedServerRunner).")]
+    #[cfg_attr(
+        feature = "std",
+        doc = "[`DedicatedServerRunner`](crate::runner::DedicatedServerRunner)."
+    )]
     #[cfg_attr(not(feature = "std"), doc = "`DedicatedServerRunner`.")]
     DedicatedServer,
     /// Embedded in an editor window and driven (paused / stepped) by the editor

@@ -168,7 +168,11 @@ impl GridPosition {
 
 impl core::fmt::Debug for GridPosition {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "GridPosition {{ cell: {:?}, offset: {:?} }}", self.cell, self.offset)
+        write!(
+            f,
+            "GridPosition {{ cell: {:?}, offset: {:?} }}",
+            self.cell, self.offset
+        )
     }
 }
 

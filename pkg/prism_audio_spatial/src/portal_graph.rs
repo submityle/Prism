@@ -90,7 +90,6 @@ pub const MAX_ROUTED_PATHS: usize = 32;
 
 pub use crate::acoustic_format::DEFAULT_SOUND_SPEED;
 
-
 /// Distances below this (metres) are clamped before the spreading division to
 /// avoid a blow-up when waypoints coincide.
 const MIN_DISTANCE_METRES: Sample = 0.1;
@@ -791,7 +790,15 @@ mod tests {
         };
         let e2 = Emitter::point(Vec3::new(9.0, 0.0, 0.0), Vec3::ZERO);
         let mut out2 = [RoutedPath::SILENT; 8];
-        let n2 = route_portals(&rooms, &portals, &l2, &e2, 4, AcousticFormat::new(0.0, 0.0), &mut out2);
+        let n2 = route_portals(
+            &rooms,
+            &portals,
+            &l2,
+            &e2,
+            4,
+            AcousticFormat::new(0.0, 0.0),
+            &mut out2,
+        );
         assert_eq!(n2, 1);
     }
 

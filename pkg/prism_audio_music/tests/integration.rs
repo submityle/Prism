@@ -17,12 +17,12 @@
 
 use prism_audio_core::time::TimeSignature;
 use prism_audio_music::{
-    Clip, ClipEdge, ClipGraph, Fade, Layer, LayerSet, MusicAction, MusicModel,
-    MusicSystem, Playlist, PlaylistItem, PlaylistMode, Segment, Stinger, Transition,
-    TransitionContext, TransitionType, TriggerCondition,
+    BranchId, ClipId, GraphId, LayerId, LayerSetId, PlaylistId, SegmentId, SoundId, StingerId,
 };
 use prism_audio_music::{
-    BranchId, ClipId, GraphId, LayerId, LayerSetId, PlaylistId, SegmentId, SoundId, StingerId,
+    Clip, ClipEdge, ClipGraph, Fade, Layer, LayerSet, MusicAction, MusicModel, MusicSystem,
+    Playlist, PlaylistItem, PlaylistMode, Segment, Stinger, Transition, TransitionContext,
+    TransitionType, TriggerCondition,
 };
 
 const SR: u32 = 48_000;
@@ -120,7 +120,11 @@ fn playlist_drives_sample_accurate_action_stream_across_blocks() {
             break;
         }
     }
-    assert_eq!(handoff_at, Some(BAR), "segment 2 must enter at the exit cue");
+    assert_eq!(
+        handoff_at,
+        Some(BAR),
+        "segment 2 must enter at the exit cue"
+    );
     assert_eq!(sys.playing_segment(), Some(SegmentId::new(2)));
 }
 
@@ -303,7 +307,10 @@ fn replay(seed: u64) -> Vec<MusicAction> {
 fn same_seed_and_requests_produce_identical_action_streams() {
     let a = replay(0x1234_5678);
     let b = replay(0x1234_5678);
-    assert_eq!(a, b, "identical seed + model + requests must be deterministic");
+    assert_eq!(
+        a, b,
+        "identical seed + model + requests must be deterministic"
+    );
     assert!(!a.is_empty());
 }
 

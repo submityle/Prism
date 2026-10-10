@@ -210,7 +210,11 @@ impl JobTrace {
     /// Total jobs executed (across all buckets).
     #[must_use]
     pub fn total_jobs(&self) -> u64 {
-        self.inner.executed.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+        self.inner
+            .executed
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .sum()
     }
 
     /// Jobs executed on `bucket` (use [`JobTrace::bucket_count`] for bounds; the
@@ -227,7 +231,11 @@ impl JobTrace {
     /// the one that enqueued them).
     #[must_use]
     pub fn migrated_jobs(&self) -> u64 {
-        self.inner.migrated.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+        self.inner
+            .migrated
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .sum()
     }
 
     /// Fraction of executed jobs that migrated, in `0.0..=1.0`. Returns `0.0`

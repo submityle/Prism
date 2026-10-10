@@ -504,8 +504,8 @@ pub fn decode_midi2(word0: UmpWord, word1: u32) -> Option<MidiMessage> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChannelVoice, MidiMessage, NoteAttribute, PITCH_BEND_CENTER_32, SystemMessage,
-        UtilityMessage, decode_midi1, decode_midi2, decode_system, decode_utility,
+        decode_midi1, decode_midi2, decode_system, decode_utility, ChannelVoice, MidiMessage,
+        NoteAttribute, SystemMessage, UtilityMessage, PITCH_BEND_CENTER_32,
     };
     use crate::ump::word::UmpWord;
 

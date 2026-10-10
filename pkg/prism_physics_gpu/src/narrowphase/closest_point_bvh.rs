@@ -135,7 +135,12 @@ fn point_pose(position: Vec3) -> ConvexPose {
 /// [`closest_hit_from_core`] — the single surface-and-inside rule the `GPU`
 /// twin also applies to its device `GJK` output, so the two queries agree
 /// exactly.
-fn evaluate(point_hull: &ConvexHull, position: Vec3, target: &RoundedConvex, index: u32) -> ClosestPointHit {
+fn evaluate(
+    point_hull: &ConvexHull,
+    position: Vec3,
+    target: &RoundedConvex,
+    index: u32,
+) -> ClosestPointHit {
     let pose = point_pose(position);
     match gjk(point_hull, &pose, target.hull, &target.pose) {
         GjkStatus::Separated {
@@ -143,10 +148,24 @@ fn evaluate(point_hull: &ConvexHull, position: Vec3, target: &RoundedConvex, ind
             point_b,
             normal,
             ..
-        } => closest_hit_from_core(index, target.radius, false, distance, point_b, normal, position),
-        GjkStatus::Intersecting(_) => {
-            closest_hit_from_core(index, target.radius, true, 0.0, position, Vec3::ZERO, position)
-        }
+        } => closest_hit_from_core(
+            index,
+            target.radius,
+            false,
+            distance,
+            point_b,
+            normal,
+            position,
+        ),
+        GjkStatus::Intersecting(_) => closest_hit_from_core(
+            index,
+            target.radius,
+            true,
+            0.0,
+            position,
+            Vec3::ZERO,
+            position,
+        ),
     }
 }
 
@@ -215,7 +234,10 @@ pub(crate) fn better(candidate: &ClosestPointHit, best: &ClosestPointHit) -> boo
 /// surface distance, ties broken by ascending target index. Returns `None` only
 /// when there are no targets.
 #[must_use]
-pub fn closest_point(targets: &[RoundedConvex], query: &SceneClosestPoint) -> Option<ClosestPointHit> {
+pub fn closest_point(
+    targets: &[RoundedConvex],
+    query: &SceneClosestPoint,
+) -> Option<ClosestPointHit> {
     let point_hull = ConvexHull::from_point();
     let mut best: Option<ClosestPointHit> = None;
     for (i, target) in targets.iter().enumerate() {
@@ -269,7 +291,10 @@ fn node_aabb(tree: &Lbvh, encoded: u32) -> Aabb {
 /// exactly, including the lower-index rule on an exact distance tie. Returns
 /// `None` only when there are no targets.
 #[must_use]
-pub fn closest_point_bvh(targets: &[RoundedConvex], query: &SceneClosestPoint) -> Option<ClosestPointHit> {
+pub fn closest_point_bvh(
+    targets: &[RoundedConvex],
+    query: &SceneClosestPoint,
+) -> Option<ClosestPointHit> {
     if targets.is_empty() {
         return None;
     }
@@ -327,10 +352,26 @@ mod tests {
         let hit = closest_point(&targets, &query).expect("one target is always nearest");
         assert_eq!(hit.target, 0);
         assert!(!hit.inside, "the point is outside the box");
-        assert!((hit.distance - 2.0).abs() < 1e-4, "distance was {}", hit.distance);
-        assert!((hit.point - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-4, "point was {:?}", hit.point);
-        assert!((hit.normal - Vec3::X).length() < 1e-4, "normal was {:?}", hit.normal);
-        assert_eq!(closest_point_bvh(&targets, &query), Some(hit), "BVH must equal brute force");
+        assert!(
+            (hit.distance - 2.0).abs() < 1e-4,
+            "distance was {}",
+            hit.distance
+        );
+        assert!(
+            (hit.point - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-4,
+            "point was {:?}",
+            hit.point
+        );
+        assert!(
+            (hit.normal - Vec3::X).length() < 1e-4,
+            "normal was {:?}",
+            hit.normal
+        );
+        assert_eq!(
+            closest_point_bvh(&targets, &query),
+            Some(hit),
+            "BVH must equal brute force"
+        );
     }
 
     #[test]
@@ -343,9 +384,21 @@ mod tests {
         let query = SceneClosestPoint::new(Vec3::new(3.0, 0.0, 0.0));
         let hit = closest_point(&targets, &query).expect("one target is always nearest");
         assert!(!hit.inside, "the point is still outside the rounded box");
-        assert!((hit.distance - 1.5).abs() < 1e-4, "distance was {}", hit.distance);
-        assert!((hit.point - Vec3::new(1.5, 0.0, 0.0)).length() < 1e-4, "point was {:?}", hit.point);
-        assert_eq!(closest_point_bvh(&targets, &query), Some(hit), "BVH must equal brute force");
+        assert!(
+            (hit.distance - 1.5).abs() < 1e-4,
+            "distance was {}",
+            hit.distance
+        );
+        assert!(
+            (hit.point - Vec3::new(1.5, 0.0, 0.0)).length() < 1e-4,
+            "point was {:?}",
+            hit.point
+        );
+        assert_eq!(
+            closest_point_bvh(&targets, &query),
+            Some(hit),
+            "BVH must equal brute force"
+        );
     }
 
     #[test]
@@ -357,9 +410,19 @@ mod tests {
         let query = SceneClosestPoint::new(Vec3::new(0.2, -0.1, 0.3));
         let hit = closest_point(&targets, &query).expect("one target is always nearest");
         assert!(hit.inside, "the point is inside the box");
-        assert_eq!(hit.distance, 0.0, "an interior point has zero surface distance");
-        assert!((hit.point - query.position).length() < 1e-6, "interior point is the query point");
-        assert_eq!(closest_point_bvh(&targets, &query), Some(hit), "BVH must equal brute force");
+        assert_eq!(
+            hit.distance, 0.0,
+            "an interior point has zero surface distance"
+        );
+        assert!(
+            (hit.point - query.position).length() < 1e-6,
+            "interior point is the query point"
+        );
+        assert_eq!(
+            closest_point_bvh(&targets, &query),
+            Some(hit),
+            "BVH must equal brute force"
+        );
     }
 
     #[test]
@@ -374,7 +437,11 @@ mod tests {
         let query = SceneClosestPoint::new(Vec3::new(9.0, 0.0, 0.0));
         let brute = closest_point(&targets, &query).expect("a nearest target exists");
         assert_eq!(brute.target, 1, "the middle box is nearest");
-        assert_eq!(closest_point_bvh(&targets, &query), Some(brute), "BVH must equal brute force");
+        assert_eq!(
+            closest_point_bvh(&targets, &query),
+            Some(brute),
+            "BVH must equal brute force"
+        );
     }
 
     #[test]

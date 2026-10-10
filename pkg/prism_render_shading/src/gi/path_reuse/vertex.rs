@@ -308,7 +308,10 @@ mod tests {
     fn results_are_deterministic() {
         let build = || {
             let v = PathVertex::new(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 1.0, 0.0));
-            (v.cos_toward(Vec3::new(2.0, 2.0, 3.0)), v.dist_sq_to(Vec3::ZERO))
+            (
+                v.cos_toward(Vec3::new(2.0, 2.0, 3.0)),
+                v.dist_sq_to(Vec3::ZERO),
+            )
         };
         assert_eq!(build(), build());
     }

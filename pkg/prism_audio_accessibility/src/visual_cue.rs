@@ -55,7 +55,12 @@ pub struct VisualCue {
 impl VisualCue {
     /// Creates a cue, clamping `intensity` into `[0, 1]`.
     #[must_use]
-    pub fn new(kind: CueKind, azimuth_rad: Sample, elevation_rad: Sample, intensity: Sample) -> Self {
+    pub fn new(
+        kind: CueKind,
+        azimuth_rad: Sample,
+        elevation_rad: Sample,
+        intensity: Sample,
+    ) -> Self {
         Self {
             kind,
             azimuth_rad,

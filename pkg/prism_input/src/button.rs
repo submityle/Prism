@@ -9,8 +9,8 @@
 //! The sets are ordered ([`BTreeSet`]) so iteration is deterministic across
 //! runs and platforms, which matters for replay and lockstep networking.
 
-use alloc::collections::BTreeSet;
 use alloc::collections::btree_set;
+use alloc::collections::BTreeSet;
 
 /// Tracks the pressed/released state of a set of buttons of type `T`.
 ///

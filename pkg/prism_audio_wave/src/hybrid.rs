@@ -119,7 +119,11 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 /// assert!(mixed.direct_cutoff_hz < 600.0);
 /// ```
 #[must_use]
-pub fn blend_spatial(geo: SpatialParams, wave: SpatialParams, weights: HybridWeights) -> SpatialParams {
+pub fn blend_spatial(
+    geo: SpatialParams,
+    wave: SpatialParams,
+    weights: HybridWeights,
+) -> SpatialParams {
     let tighter = geo.direct_cutoff_hz.min(wave.direct_cutoff_hz);
     SpatialParams {
         direct_gain: lerp(geo.direct_gain, wave.direct_gain, weights.direct),

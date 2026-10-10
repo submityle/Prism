@@ -127,13 +127,22 @@ fn directions_for(hierarchy: &CascadeHierarchy, level: u32) -> Vec<[f32; 2]> {
 /// A compiled, reusable Radiance Cascades `GPU` pipeline set.
 pub struct GpuRadianceCascades {
     /// Kept alive so the gather pipeline it produced stays valid.
-    #[expect(dead_code, reason = "kept alive so the pipeline it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline it produced stays valid"
+    )]
     gather_module: ShaderModule,
     /// Kept alive so the merge pipeline it produced stays valid.
-    #[expect(dead_code, reason = "kept alive so the pipeline it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline it produced stays valid"
+    )]
     merge_module: ShaderModule,
     /// Kept alive so the resolve pipeline it produced stays valid.
-    #[expect(dead_code, reason = "kept alive so the pipeline it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline it produced stays valid"
+    )]
     resolve_module: ShaderModule,
     /// Shared `[uniform, storage-read, storage-rw]` layout for all three.
     layout: BindGroupLayout,
@@ -274,7 +283,13 @@ impl GpuRadianceCascades {
         let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_rc_resolve_encoder"),
         });
-        dispatch(&mut enc, "prism_rc_resolve_pass", &self.resolve, &bind, groups(probes));
+        dispatch(
+            &mut enc,
+            "prism_rc_resolve_pass",
+            &self.resolve,
+            &bind,
+            groups(probes),
+        );
         let bytes = u64::from(probes) * size_of::<GpuMean>() as u64;
         let stage = buffer::staging(device, "prism_rc_resolve_stage", bytes);
         buffer::copy(&mut enc, &out, &stage, bytes);
@@ -286,12 +301,7 @@ impl GpuRadianceCascades {
     }
 
     /// Gathers cascade `level` into a fresh device storage buffer.
-    fn gather_buffer(
-        &self,
-        ctx: &GpuContext,
-        hierarchy: &CascadeHierarchy,
-        level: u32,
-    ) -> Buffer {
+    fn gather_buffer(&self, ctx: &GpuContext, hierarchy: &CascadeHierarchy, level: u32) -> Buffer {
         let device = ctx.device();
         let (cols, rows) = hierarchy.probe_dims(level);
         let angular = hierarchy.angular_count(level);
@@ -326,7 +336,13 @@ impl GpuRadianceCascades {
         let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_rc_gather_encoder"),
         });
-        dispatch(&mut enc, "prism_rc_gather_pass", &self.gather, &bind, groups(rays));
+        dispatch(
+            &mut enc,
+            "prism_rc_gather_pass",
+            &self.gather,
+            &bind,
+            groups(rays),
+        );
         ctx.queue().submit([enc.finish()]);
         out
     }
@@ -387,7 +403,13 @@ impl GpuRadianceCascades {
         let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_rc_merge_encoder"),
         });
-        dispatch(&mut enc, "prism_rc_merge_pass", &self.merge, &bind, groups(rays));
+        dispatch(
+            &mut enc,
+            "prism_rc_merge_pass",
+            &self.merge,
+            &bind,
+            groups(rays),
+        );
         ctx.queue().submit([enc.finish()]);
     }
 
@@ -455,9 +477,9 @@ fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prism_render_architecture::lighting::radiance_cascades::{Cascade, SceneSampler};
-    use prism_render_architecture::lighting::radiance_cascades::RadianceInterval;
     use glam::Vec3;
+    use prism_render_architecture::lighting::radiance_cascades::RadianceInterval;
+    use prism_render_architecture::lighting::radiance_cascades::{Cascade, SceneSampler};
 
     /// CPU twin of the WGSL `sample_interval`: the exact same pure-rational
     /// arithmetic in the exact same operation order, so a device gather can be

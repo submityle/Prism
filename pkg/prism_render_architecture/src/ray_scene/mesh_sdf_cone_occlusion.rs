@@ -328,9 +328,17 @@ mod tests {
         let field = padded_cube_field();
         // Far above the cube: the whole hemisphere is empty.
         let r = sdf_cone_occlusion(&field, [0.5, 0.5, 2.0], [0.0, 0.0, 1.0], 0.5, 1.0, 32).unwrap();
-        assert!(r.visibility() > 0.95, "open hemisphere (vis = {})", r.visibility());
+        assert!(
+            r.visibility() > 0.95,
+            "open hemisphere (vis = {})",
+            r.visibility()
+        );
         // With nothing to deflect it, the bent normal stays near the normal.
-        assert!(r.bent_normal()[2] > 0.95, "bent normal ~ +z: {:?}", r.bent_normal());
+        assert!(
+            r.bent_normal()[2] > 0.95,
+            "bent normal ~ +z: {:?}",
+            r.bent_normal()
+        );
     }
 
     #[test]
@@ -355,7 +363,10 @@ mod tests {
             sdf_cone_occlusion(&field, [0.5, 0.5, 1.05], [0.0, 0.0, 1.0], 0.5, 1.0, 48).unwrap();
         let bn = r.bent_normal();
         let len_sq = bn[0] * bn[0] + bn[1] * bn[1] + bn[2] * bn[2];
-        assert!((len_sq - 1.0).abs() < 1e-4, "bent normal unit length ({len_sq})");
+        assert!(
+            (len_sq - 1.0).abs() < 1e-4,
+            "bent normal unit length ({len_sq})"
+        );
         assert!((0.0..=1.0).contains(&r.visibility()), "visibility in range");
     }
 

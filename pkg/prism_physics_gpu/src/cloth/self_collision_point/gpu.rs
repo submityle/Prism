@@ -133,8 +133,14 @@ impl GpuClothSelfCollisionPoint {
                 cache: None,
             })
         };
-        let phase1 = make("phase1_pairs", "prism_cloth_self_collision_point_phase1_pipeline");
-        let phase2 = make("phase2_apply", "prism_cloth_self_collision_point_phase2_pipeline");
+        let phase1 = make(
+            "phase1_pairs",
+            "prism_cloth_self_collision_point_phase1_pipeline",
+        );
+        let phase2 = make(
+            "phase2_apply",
+            "prism_cloth_self_collision_point_phase2_pipeline",
+        );
         GpuClothSelfCollisionPoint {
             module,
             layout,
@@ -192,10 +198,14 @@ impl GpuClothSelfCollisionPoint {
             thickness: prep.thickness,
             friction: prep.friction,
         };
-        let params_buf = buffer::uniform(device, "prism_cloth_self_collision_point_params", &uniform);
+        let params_buf =
+            buffer::uniform(device, "prism_cloth_self_collision_point_params", &uniform);
 
-        let positions_buf =
-            buffer::storage_read(device, "prism_cloth_self_collision_point_pos", &prep.positions);
+        let positions_buf = buffer::storage_read(
+            device,
+            "prism_cloth_self_collision_point_pos",
+            &prep.positions,
+        );
         let prev_buf = buffer::storage_read(
             device,
             "prism_cloth_self_collision_point_prev",
@@ -206,8 +216,11 @@ impl GpuClothSelfCollisionPoint {
             "prism_cloth_self_collision_point_invmass",
             &prep.inverse_masses,
         );
-        let pairs_buf =
-            buffer::storage_read(device, "prism_cloth_self_collision_point_pairs", &prep.pairs);
+        let pairs_buf = buffer::storage_read(
+            device,
+            "prism_cloth_self_collision_point_pairs",
+            &prep.pairs,
+        );
         let voff_buf = buffer::storage_read(
             device,
             "prism_cloth_self_collision_point_vert_off",
@@ -250,8 +263,11 @@ impl GpuClothSelfCollisionPoint {
 
         let pair_groups = u32::try_from(pair_count.div_ceil(WORKGROUP)).unwrap_or(u32::MAX);
         let vertex_groups = u32::try_from(particle_count.div_ceil(WORKGROUP)).unwrap_or(u32::MAX);
-        let pos_stage =
-            buffer::staging(device, "prism_cloth_self_collision_point_pos_stage", out_bytes);
+        let pos_stage = buffer::staging(
+            device,
+            "prism_cloth_self_collision_point_pos_stage",
+            out_bytes,
+        );
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_cloth_self_collision_point_encoder"),

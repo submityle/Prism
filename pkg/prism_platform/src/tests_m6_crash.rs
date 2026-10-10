@@ -48,7 +48,10 @@ fn build_metadata_empty_and_default_agree() {
 
 #[test]
 fn supported_mirrors_the_compiled_backend_and_caps_bit() {
-    let expected = cfg!(all(unix, not(any(target_os = "android", target_os = "ios"))));
+    let expected = cfg!(all(
+        unix,
+        not(any(target_os = "android", target_os = "ios"))
+    ));
     assert_eq!(crash::SUPPORTED, expected);
     assert_eq!(crash::supported(), expected);
 
@@ -142,7 +145,13 @@ fn real_posix_handlers_install_and_restore() {
 
     // Every captured signal's disposition now points at our trampoline.
     let trampoline = crash::trampoline_addr();
-    for sig in [Signal::Segv, Signal::Abort, Signal::Bus, Signal::Ill, Signal::Fpe] {
+    for sig in [
+        Signal::Segv,
+        Signal::Abort,
+        Signal::Bus,
+        Signal::Ill,
+        Signal::Fpe,
+    ] {
         assert_eq!(
             crash::disposition(sig.raw()),
             trampoline,

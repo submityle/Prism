@@ -26,9 +26,9 @@ use glam::Vec3;
 use crate::math::scalar::Real;
 use crate::soft::particle::ParticleStorage;
 
+use super::coloring::VbdColoring;
 use super::config::VbdConfig;
 use super::element::SpringSet;
-use super::coloring::VbdColoring;
 use super::system::VertexSystem;
 
 /// A stateless Vertex Block Descent solver for springs, cloth, and rope.
@@ -516,7 +516,10 @@ mod tests {
         for i in 0..natural.len() {
             let a = natural.positions()[i];
             let b = colored.positions()[i];
-            assert!((a - b).length() < 1e-2, "vertex {i} diverged: {a:?} vs {b:?}");
+            assert!(
+                (a - b).length() < 1e-2,
+                "vertex {i} diverged: {a:?} vs {b:?}"
+            );
         }
     }
 

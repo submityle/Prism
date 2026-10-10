@@ -67,11 +67,7 @@ impl VisemeTimeline {
 /// smoothed with a one-pole filter (coefficient `envelope_smoothing`) and the
 /// resulting envelope is peak-normalised into `openness`.
 #[must_use]
-pub fn analyze(
-    channel: &[Sample],
-    sample_rate: u32,
-    config: &LipsyncConfig,
-) -> VisemeTimeline {
+pub fn analyze(channel: &[Sample], sample_rate: u32, config: &LipsyncConfig) -> VisemeTimeline {
     let hop = config.hop.max(1);
     let mut analyzer = SpectrumAnalyzer::new(config.fft_size, hop, Window::Hann);
     let mut last_frame = 0u64;

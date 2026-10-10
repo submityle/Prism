@@ -98,7 +98,11 @@ pub fn v_kelemen(v_dot_h: f32) -> f32 {
     let voh = v_dot_h.abs();
     let denom = (4.0 * voh * voh).max(MIN_DENOM);
     let v = 1.0 / denom;
-    if v.is_finite() { v.max(0.0) } else { 0.0 }
+    if v.is_finite() {
+        v.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Height-correlated Smith visibility `V = G2 / (4 · NoL · NoV)` for the
@@ -114,7 +118,11 @@ pub fn v_smith(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
     let g2 = smith_g2(n_dot_v, n_dot_l, alpha);
     let denom = (4.0 * n_dot_v * n_dot_l).max(MIN_DENOM);
     let v = g2 / denom;
-    if v.is_finite() { v.max(0.0) } else { 0.0 }
+    if v.is_finite() {
+        v.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Evaluates the clearcoat specular lobe `D · V_Kelemen · F` (the default).
@@ -145,7 +153,11 @@ pub fn clearcoat_lobe(
     let v = v_kelemen(v_dot_h);
     let f = clearcoat_fresnel(v_dot_h);
     let r = d * v * f;
-    if r.is_finite() { r.max(0.0) } else { 0.0 }
+    if r.is_finite() {
+        r.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Evaluates the clearcoat specular lobe `D · V_Smith · F` using the fuller
@@ -169,7 +181,11 @@ pub fn clearcoat_lobe_smith(
     let v = v_smith(n_dot_v, n_dot_l, alpha);
     let f = clearcoat_fresnel(v_dot_h);
     let r = d * v * f;
-    if r.is_finite() { r.max(0.0) } else { 0.0 }
+    if r.is_finite() {
+        r.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Cosine-weighted clearcoat lobe `clearcoat_lobe · NoL`.
@@ -190,7 +206,11 @@ pub fn clearcoat_lobe_weighted(
     let lobe = clearcoat_lobe(n_dot_h, n_dot_l, n_dot_v, v_dot_h, roughness);
     let nl = n_dot_l.clamp(0.0, 1.0);
     let r = lobe * nl;
-    if r.is_finite() { r.max(0.0) } else { 0.0 }
+    if r.is_finite() {
+        r.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]

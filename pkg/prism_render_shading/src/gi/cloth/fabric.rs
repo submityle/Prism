@@ -204,8 +204,7 @@ pub fn cloth_shade(wi: Vec3, wo: Vec3, n: Vec3, params: &ClothParams) -> Vec3 {
     // Diffuse: wrap foreshortening lets a little light past the terminator even
     // when n·l is slightly negative, so it is evaluated before the mu_l gate.
     let wrap_cos = cloth_diffuse_wrap(mu_l, params.wrap);
-    let diffuse =
-        params.tinted_albedo() * (FRAC_1_PI * wrap_energy_norm(params.wrap) * wrap_cos);
+    let diffuse = params.tinted_albedo() * (FRAC_1_PI * wrap_energy_norm(params.wrap) * wrap_cos);
 
     // Sheen only contributes for an above-horizon light.
     let sheen = if mu_l > 0.0 {
@@ -265,7 +264,11 @@ mod tests {
         let n = Vec3::Z;
         let wi = Vec3::new(0.2, 0.1, 0.974).normalize();
         let wo = Vec3::new(-0.3, 0.25, 0.92).normalize();
-        for model in [SheenModel::Charlie, SheenModel::CharlieSoft, SheenModel::Velvet] {
+        for model in [
+            SheenModel::Charlie,
+            SheenModel::CharlieSoft,
+            SheenModel::Velvet,
+        ] {
             let mut p = basic_params();
             p.model = model;
             let a = cloth_brdf(wi, wo, n, &p);
@@ -352,7 +355,11 @@ mod tests {
         let wo = Vec3::new(0.2, 0.1, 0.974).normalize();
         let mut p = basic_params();
         p.wrap = 0.3;
-        for model in [SheenModel::Charlie, SheenModel::CharlieSoft, SheenModel::Velvet] {
+        for model in [
+            SheenModel::Charlie,
+            SheenModel::CharlieSoft,
+            SheenModel::Velvet,
+        ] {
             p.model = model;
             for i in 0..32 {
                 let a = i as f32 / 32.0 * core::f32::consts::PI;

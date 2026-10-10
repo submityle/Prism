@@ -96,12 +96,8 @@ impl DirectivityPreset {
             // 63  125  250  500  1k   2k   4k   8k
             DirectivityPreset::Omni => [0.0; OCTAVE_BAND_COUNT],
             DirectivityPreset::Cardioid => [1.0; OCTAVE_BAND_COUNT],
-            DirectivityPreset::Voice => {
-                [0.05, 0.10, 0.20, 0.35, 0.50, 0.65, 0.75, 0.85]
-            }
-            DirectivityPreset::Trumpet => {
-                [0.10, 0.20, 0.35, 0.55, 0.70, 0.85, 0.95, 1.00]
-            }
+            DirectivityPreset::Voice => [0.05, 0.10, 0.20, 0.35, 0.50, 0.65, 0.75, 0.85],
+            DirectivityPreset::Trumpet => [0.10, 0.20, 0.35, 0.55, 0.70, 0.85, 0.95, 1.00],
         }
     }
 }
@@ -129,7 +125,11 @@ impl SourceDirectivity {
     pub fn from_sharpness(sharpness: [Sample; OCTAVE_BAND_COUNT]) -> Self {
         let mut clamped = [0.0; OCTAVE_BAND_COUNT];
         for (out, &s) in clamped.iter_mut().zip(sharpness.iter()) {
-            *out = if s.is_finite() { s.clamp(0.0, 1.0) } else { 0.0 };
+            *out = if s.is_finite() {
+                s.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
         }
         Self { sharpness: clamped }
     }
@@ -208,7 +208,11 @@ impl SourceDirectivity {
         let s = self.sharpness[idx];
         let one_minus = 1.0 - s;
         let denom = one_minus * one_minus + s * s / 3.0;
-        if denom > MIN_DIVISOR { 1.0 / denom } else { 1.0 / MIN_DIVISOR }
+        if denom > MIN_DIVISOR {
+            1.0 / denom
+        } else {
+            1.0 / MIN_DIVISOR
+        }
     }
 
     /// The directivity index `DI = 10 * log10(Q)` in decibels for band
@@ -236,8 +240,9 @@ impl SourceDirectivity {
             return self.sharpness[last];
         }
         let log_f = ops::ln(freq_hz);
-        for (centres, values) in
-            OCTAVE_BAND_CENTERS.windows(2).zip(self.sharpness.windows(2))
+        for (centres, values) in OCTAVE_BAND_CENTERS
+            .windows(2)
+            .zip(self.sharpness.windows(2))
         {
             let c_lo = centres[0];
             let c_hi = centres[1];
@@ -245,7 +250,11 @@ impl SourceDirectivity {
                 let log_lo = ops::ln(c_lo);
                 let log_hi = ops::ln(c_hi);
                 let span = log_hi - log_lo;
-                let t = if span > 0.0 { (log_f - log_lo) / span } else { 0.0 };
+                let t = if span > 0.0 {
+                    (log_f - log_lo) / span
+                } else {
+                    0.0
+                };
                 let v = values[0] + (values[1] - values[0]) * t;
                 return v.clamp(0.0, 1.0);
             }
@@ -262,7 +271,11 @@ fn weighted_cardioid(s: Sample, cos_theta: Sample) -> Sample {
 
 /// Clamps a cosine to `[-1, 1]`, mapping non-finite input to the on-axis value.
 fn clamp_cos(cos_theta: Sample) -> Sample {
-    if cos_theta.is_finite() { cos_theta.clamp(-1.0, 1.0) } else { 1.0 }
+    if cos_theta.is_finite() {
+        cos_theta.clamp(-1.0, 1.0)
+    } else {
+        1.0
+    }
 }
 
 #[cfg(test)]

@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use std::sync::Mutex;
 
-use crate::partition::{DEFAULT_TARGET_CHUNKS, FixedPartition};
+use crate::partition::{FixedPartition, DEFAULT_TARGET_CHUNKS};
 
 /// A single recorded split decision: an operation over `len` elements chose
 /// chunks of `grain` elements.
@@ -202,7 +202,10 @@ impl fmt::Display for ReplayError {
             Self::BadVersion => f.write_str("replay record has an unsupported version"),
             Self::BadEvent => f.write_str("replay record has a malformed event"),
             Self::LengthMismatch { expected, found } => {
-                write!(f, "replay length mismatch: expected {expected}, found {found}")
+                write!(
+                    f,
+                    "replay length mismatch: expected {expected}, found {found}"
+                )
             }
             Self::Exhausted => f.write_str("replay record ran out of events"),
         }
@@ -289,13 +292,10 @@ impl DeterministicSession {
             Mode::Record(events) => {
                 let grain = derive_grain(self.seed, len);
                 let partition = FixedPartition::with_grain(len, grain);
-                events
-                    .lock()
-                    .unwrap()
-                    .push(SplitEvent {
-                        len,
-                        grain: partition.grain(),
-                    });
+                events.lock().unwrap().push(SplitEvent {
+                    len,
+                    grain: partition.grain(),
+                });
                 Ok(partition)
             }
             Mode::Replay { record, cursor } => {

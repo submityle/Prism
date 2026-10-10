@@ -126,7 +126,10 @@ impl GpuRoundConeBvhBuffers {
     /// Decodes the `BVH` bounds stored at packed node `i`.
     fn node_bounds(&self, i: usize) -> Aabb {
         let base = i * NODE_WORDS;
-        Aabb::new(read_vec3(&self.nodes, base), read_vec3(&self.nodes, base + 3))
+        Aabb::new(
+            read_vec3(&self.nodes, base),
+            read_vec3(&self.nodes, base + 3),
+        )
     }
 
     /// Decoded round cone `i`.
@@ -165,7 +168,10 @@ impl GpuRoundConeBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -221,7 +227,10 @@ impl GpuRoundConeBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {

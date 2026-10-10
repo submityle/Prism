@@ -18,7 +18,7 @@
 use glam::{Vec2, Vec3};
 use prism_radiance_cascades_gpu::{GpuContext, GpuInterval, GpuRadianceCascades};
 use prism_render_architecture::lighting::radiance_cascades::{
-    Cascade, CascadeHierarchy, RadianceInterval, SceneSampler, resolve, solve,
+    resolve, solve, Cascade, CascadeHierarchy, RadianceInterval, SceneSampler,
 };
 
 /// CPU twin of the WGSL `sample_interval` — identical arithmetic and order.

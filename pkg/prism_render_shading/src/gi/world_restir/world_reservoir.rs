@@ -216,7 +216,10 @@ impl WorldHashGrid {
         for _ in 0..cap {
             cells.push(WorldCell::EMPTY);
         }
-        Self { cells, capacity: cap }
+        Self {
+            cells,
+            capacity: cap,
+        }
     }
 
     /// Number of slots in the table.
@@ -449,7 +452,13 @@ mod tests {
         let mut canonical = Reservoir::<GiSample>::new();
         stream_candidate(&mut canonical, facing_sample(Vec3::ONE), 1.0, 0.0);
         let empty = Reservoir::<GiSample>::new();
-        assert!(!merge_spatial(&mut canonical, Vec3::ZERO, Vec3::Z, &empty, 0.0));
+        assert!(!merge_spatial(
+            &mut canonical,
+            Vec3::ZERO,
+            Vec3::Z,
+            &empty,
+            0.0
+        ));
         assert_eq!(canonical.confidence(), 1.0);
     }
 

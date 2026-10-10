@@ -43,7 +43,7 @@
 //! * Hill, Heitz 2016, *LTC Fitting* reference implementation (BRDF-LTC fit).
 
 use alloc::vec::Vec;
-use bevy_math::{Mat3, Vec3, ops};
+use bevy_math::{ops, Mat3, Vec3};
 use core::f32::consts::PI;
 
 use crate::gi::spec_gi::ggx_lobe::{ggx_brdf_scalar, roughness_to_alpha};
@@ -110,7 +110,14 @@ impl LtcCoeffs {
     /// identity whenever any entry is non-finite.
     #[inline]
     pub fn sanitized(self) -> Self {
-        let fields = [self.a00, self.a02, self.a11, self.a20, self.a22, self.amplitude];
+        let fields = [
+            self.a00,
+            self.a02,
+            self.a11,
+            self.a20,
+            self.a22,
+            self.amplitude,
+        ];
         if fields.iter().any(|f| !f.is_finite()) {
             return Self::IDENTITY;
         }
@@ -188,7 +195,11 @@ pub fn ltc_pdf(coeffs: &LtcCoeffs, wi: Vec3) -> f32 {
     let cos_dist = clamped_cosine_pdf(transformed / len);
     let jacobian = coeffs.determinant().abs() / (len * len * len).max(1.0e-20);
     let d = cos_dist * jacobian;
-    if d.is_finite() { d.max(0.0) } else { 0.0 }
+    if d.is_finite() {
+        d.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// A baked `size × size` table of LTC inverse-matrix coefficients.
@@ -258,12 +269,7 @@ impl LtcLut {
         let c01 = self.fetch(x0, y1);
         let c11 = self.fetch(x1, y1);
 
-        lerp_coeffs(
-            lerp_coeffs(c00, c10, tx),
-            lerp_coeffs(c01, c11, tx),
-            ty,
-        )
-        .sanitized()
+        lerp_coeffs(lerp_coeffs(c00, c10, tx), lerp_coeffs(c01, c11, tx), ty).sanitized()
     }
 }
 
@@ -286,7 +292,11 @@ fn lerp_coeffs(a: LtcCoeffs, b: LtcCoeffs, t: f32) -> LtcCoeffs {
 #[inline]
 fn floor_u32(x: f32) -> u32 {
     let f = ops::floor(x.max(0.0));
-    if f.is_finite() { f as u32 } else { 0 }
+    if f.is_finite() {
+        f as u32
+    } else {
+        0
+    }
 }
 
 /// Fits the LTC inverse-matrix coefficients for a `(n_dot_v, roughness)` pair.
@@ -349,7 +359,11 @@ pub fn fit_ltc(n_dot_v: f32, roughness: f32, grid: u32) -> LtcCoeffs {
     // is `±Y` and `t1` is the in-plane perpendicular.
     let t2 = Vec3::Y;
     let t1 = avg_dir.cross(t2).normalize_or_zero();
-    let t1 = if t1.length_squared() < 0.5 { Vec3::X } else { t1 };
+    let t1 = if t1.length_squared() < 0.5 {
+        Vec3::X
+    } else {
+        t1
+    };
 
     // Pass 2: tangential second moments around the mean direction.
     let mut var1 = 0.0f32;
@@ -454,7 +468,11 @@ mod tests {
         let d = Vec3::new(0.2, -0.3, 0.9);
         assert!((id.apply(d) - d).length() < 1e-6);
         let m = id.to_mat3();
-        assert!((m - Mat3::IDENTITY).abs().to_cols_array().iter().all(|x| *x < 1e-6));
+        assert!((m - Mat3::IDENTITY)
+            .abs()
+            .to_cols_array()
+            .iter()
+            .all(|x| *x < 1e-6));
     }
 
     #[test]
@@ -463,7 +481,10 @@ mod tests {
         let d = Vec3::new(0.3, 0.5, 0.8);
         let via_apply = c.apply(d);
         let via_mat = c.to_mat3() * d;
-        assert!((via_apply - via_mat).length() < 1e-5, "{via_apply:?} {via_mat:?}");
+        assert!(
+            (via_apply - via_mat).length() < 1e-5,
+            "{via_apply:?} {via_mat:?}"
+        );
     }
 
     #[test]
@@ -507,7 +528,10 @@ mod tests {
         // At grazing angles the mean reflected direction tilts off the normal,
         // introducing non-zero off-diagonal shear.
         let c = fit_ltc_default(0.2, 0.6);
-        assert!(c.a02.abs() + c.a20.abs() > 1e-3, "expected shear, got {c:?}");
+        assert!(
+            c.a02.abs() + c.a20.abs() > 1e-3,
+            "expected shear, got {c:?}"
+        );
     }
 
     #[test]
@@ -540,7 +564,10 @@ mod tests {
 
     #[test]
     fn empty_lut_returns_identity() {
-        let lut = LtcLut { size: 0, texels: Vec::new() };
+        let lut = LtcLut {
+            size: 0,
+            texels: Vec::new(),
+        };
         assert_eq!(lut.sample(0.5, 0.5), LtcCoeffs::IDENTITY);
     }
 
@@ -561,7 +588,10 @@ mod tests {
         for &ndv in &[0.15f32, 0.5, 0.95] {
             for &r in &[0.4f32, 0.8, 1.0] {
                 let a = fit_ltc_default(ndv, r).amplitude;
-                assert!(a.is_finite() && (0.0..=1.0).contains(&a), "ndv={ndv} r={r} a={a}");
+                assert!(
+                    a.is_finite() && (0.0..=1.0).contains(&a),
+                    "ndv={ndv} r={r} a={a}"
+                );
             }
         }
         assert!(fit_ltc_default(0.5, 0.8).amplitude > 0.1);

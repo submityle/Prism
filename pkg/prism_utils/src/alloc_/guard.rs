@@ -165,7 +165,11 @@ impl Geometry {
 
 /// Return the larger of two power-of-two alignments.
 const fn max_align(a: usize, b: usize) -> usize {
-    if a >= b { a } else { b }
+    if a >= b {
+        a
+    } else {
+        b
+    }
 }
 
 /// An [`Allocator`] decorator that adds canary redzones, free poisoning, and
@@ -509,7 +513,10 @@ mod tests {
         let a = GuardedAllocator::with_config(Global, GuardConfig::new(0));
         let layout = Layout::from_size_align(8, 8).unwrap();
         let ptr = alloc_and_fill(&a, layout);
-        #[expect(unsafe_code, reason = "frees once validly with redzone checks disabled")]
+        #[expect(
+            unsafe_code,
+            reason = "frees once validly with redzone checks disabled"
+        )]
         // SAFETY: `ptr`/`layout` came from this allocator's `allocate`.
         unsafe {
             a.deallocate(ptr, layout);

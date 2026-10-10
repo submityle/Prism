@@ -88,13 +88,21 @@ pub fn sine_in_out(t: f32) -> f32 {
 /// Exponential ease-in (base-2), with `f(0) == 0` enforced exactly.
 #[inline]
 pub fn expo_in(t: f32) -> f32 {
-    if t <= 0.0 { 0.0 } else { mf::powf(2.0, 10.0 * (t - 1.0)) }
+    if t <= 0.0 {
+        0.0
+    } else {
+        mf::powf(2.0, 10.0 * (t - 1.0))
+    }
 }
 
 /// Exponential ease-out (base-2), with `f(1) == 1` enforced exactly.
 #[inline]
 pub fn expo_out(t: f32) -> f32 {
-    if t >= 1.0 { 1.0 } else { 1.0 - mf::powf(2.0, -10.0 * t) }
+    if t >= 1.0 {
+        1.0
+    } else {
+        1.0 - mf::powf(2.0, -10.0 * t)
+    }
 }
 
 /// Exponential ease-in-out (base-2), with the endpoints enforced exactly.

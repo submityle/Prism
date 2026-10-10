@@ -103,7 +103,10 @@ fn main() {
     println!("  elements/pass : {N}");
     println!("  worker threads: {cores}");
     println!("  1 thread      : {:.3} ms", single_s * 1e3);
-    println!("  {cores} threads : {:.3} ms  ({melems:.1} Melems/s)", multi_s * 1e3);
+    println!(
+        "  {cores} threads : {:.3} ms  ({melems:.1} Melems/s)",
+        multi_s * 1e3
+    );
     println!("  speedup       : {speedup:.2}x  ({efficiency:.0}% parallel efficiency)");
     println!("  checksum      : {sum1:#018x}  (thread-count invariant)");
 }

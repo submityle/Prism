@@ -143,8 +143,18 @@ mod tests {
         let r = resolve_differential(vt(), &req, rd);
         assert!(r.taps.len() >= 8, "taps={}", r.taps.len());
         // Taps spread along U (the major axis here).
-        let min_u = r.taps.uvs().iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
-        let max_u = r.taps.uvs().iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+        let min_u = r
+            .taps
+            .uvs()
+            .iter()
+            .map(|p| p[0])
+            .fold(f32::INFINITY, f32::min);
+        let max_u = r
+            .taps
+            .uvs()
+            .iter()
+            .map(|p| p[0])
+            .fold(f32::NEG_INFINITY, f32::max);
         assert!(max_u - min_u > 0.0);
     }
 
@@ -203,7 +213,12 @@ mod tests {
         let req = SampleRequest::isotropic([0.5, 0.5], WrapMode::ClampToEdge);
         let narrow = resolve_cone(vt(), &req, tri, 0.001, 1.0);
         let wide = resolve_cone(vt(), &req, tri, 0.1, 1.0);
-        assert!(wide.lod >= narrow.lod, "wide={} narrow={}", wide.lod, narrow.lod);
+        assert!(
+            wide.lod >= narrow.lod,
+            "wide={} narrow={}",
+            wide.lod,
+            narrow.lod
+        );
     }
 
     #[test]

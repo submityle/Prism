@@ -77,9 +77,7 @@ impl<'p, 'env> Pipeline<'p, 'env> {
             name: name.into(),
             jobs: Vec::new(),
         });
-        self.stages
-            .last_mut()
-            .expect("a stage was just pushed")
+        self.stages.last_mut().expect("a stage was just pushed")
     }
 
     /// Number of stages.

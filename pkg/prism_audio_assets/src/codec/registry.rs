@@ -25,8 +25,7 @@ use crate::codec::wav::decode_wav;
 pub type BoxedDecoder = Box<dyn SourceDecoder + Send>;
 
 /// A factory that turns encoded bytes into a boxed decoder.
-pub type DecoderFactory =
-    Box<dyn Fn(&[u8]) -> Result<BoxedDecoder, DecodeError> + Send + Sync>;
+pub type DecoderFactory = Box<dyn Fn(&[u8]) -> Result<BoxedDecoder, DecodeError> + Send + Sync>;
 
 /// A container entry: a leading-byte magic signature and its factory.
 struct ContainerEntry {

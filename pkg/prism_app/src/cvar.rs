@@ -835,7 +835,8 @@ impl CvarRegistry {
 
     /// Iterate registered cvars in `category`, ascending-name order.
     pub fn iter_category(&self, category: CvarCategory) -> impl Iterator<Item = (&str, &Cvar)> {
-        self.iter().filter(move |(_, cvar)| cvar.category == category)
+        self.iter()
+            .filter(move |(_, cvar)| cvar.category == category)
     }
 
     /// The names of every [`ARCHIVE`](CvarFlags::ARCHIVE) cvar, ascending.
@@ -876,7 +877,11 @@ impl CvarRegistry {
     /// 4. the value is of (or coercible to) the declared type, and not a
     ///    non-finite float ([`TypeMismatch`](CvarError::TypeMismatch));
     /// 5. the value is clamped into the declared [bounds](CvarBounds).
-    pub fn validate_set(&self, name: &str, value: SettingValue) -> Result<ValidatedWrite, CvarError> {
+    pub fn validate_set(
+        &self,
+        name: &str,
+        value: SettingValue,
+    ) -> Result<ValidatedWrite, CvarError> {
         let cvar = self
             .cvars
             .get(name)
@@ -937,11 +942,15 @@ impl App {
     /// iff seeding the default changed the key's resolved value.
     pub fn register_cvar(&mut self, spec: CvarSpec) -> Result<(), CvarError> {
         self.init_cvars();
-        let (name, default) = self.world_mut().resource_mut::<CvarRegistry>().register(spec)?;
-        let change = self
+        let (name, default) = self
             .world_mut()
-            .resource_mut::<Settings>()
-            .set(SettingsLayer::EngineDefault, name, default);
+            .resource_mut::<CvarRegistry>()
+            .register(spec)?;
+        let change = self.world_mut().resource_mut::<Settings>().set(
+            SettingsLayer::EngineDefault,
+            name,
+            default,
+        );
         if let Some(change) = change {
             self.send_event(change);
         }
@@ -986,10 +995,11 @@ impl App {
             .is_some_and(|cvar| cvar.flags.contains(CvarFlags::NOTIFY));
         let category = registry.get(name).map(Cvar::category).unwrap_or_default();
 
-        let change = self
-            .world_mut()
-            .resource_mut::<Settings>()
-            .set(layer, name.to_owned(), clamped_value.clone());
+        let change = self.world_mut().resource_mut::<Settings>().set(
+            layer,
+            name.to_owned(),
+            clamped_value.clone(),
+        );
 
         let resolved = self
             .world()
@@ -1530,9 +1540,8 @@ impl App {
     /// string to disk themselves.
     #[must_use]
     pub fn write_user_config(&self) -> String {
-        let mut out = String::from(
-            "// Prism user cvars — generated config; reload via load_user_config.\n",
-        );
+        let mut out =
+            String::from("// Prism user cvars — generated config; reload via load_user_config.\n");
         let Some(registry) = self.world().get_resource::<CvarRegistry>() else {
             return out;
         };
@@ -1894,12 +1903,7 @@ impl App {
     /// rejected on error); any other key is written verbatim as an ordinary
     /// setting and its [`SettingChanged`](crate::settings::SettingChanged) event
     /// broadcast.
-    fn fold_launch_override(
-        &mut self,
-        key: &str,
-        value: SettingValue,
-        report: &mut CvarCliReport,
-    ) {
+    fn fold_launch_override(&mut self, key: &str, value: SettingValue, report: &mut CvarCliReport) {
         let is_cvar = self.world().resource::<CvarRegistry>().contains(key);
         if is_cvar {
             match self.set_cvar_at(SettingsLayer::CommandLine, key, value) {
@@ -1913,10 +1917,11 @@ impl App {
                 }),
             }
         } else {
-            let change = self
-                .world_mut()
-                .resource_mut::<Settings>()
-                .set(SettingsLayer::CommandLine, key.to_owned(), value);
+            let change = self.world_mut().resource_mut::<Settings>().set(
+                SettingsLayer::CommandLine,
+                key.to_owned(),
+                value,
+            );
             if let Some(change) = change {
                 self.send_event(change.clone());
                 report.settings.push(change);

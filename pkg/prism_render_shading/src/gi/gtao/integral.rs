@@ -83,7 +83,11 @@ pub struct VisibilityIntegral {
 #[inline]
 pub fn arc_integral(h: f32, gamma: f32) -> f32 {
     let value = -ops::cos(2.0 * h - gamma) + ops::cos(gamma) + 2.0 * h * ops::sin(gamma);
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 /// Clamps the signed horizons into the hemisphere around the projected normal.
@@ -327,7 +331,11 @@ mod tests {
             let h = FRAC_PI_2 * k as f32 / 10.0;
             let slices = uniform_slices(h, h, 12);
             let r = integrate(Vec3::Z, Vec3::Z, &slices);
-            assert!(r.ao >= prev - 1.0e-5, "not monotonic at k={k}: {} < {prev}", r.ao);
+            assert!(
+                r.ao >= prev - 1.0e-5,
+                "not monotonic at k={k}: {} < {prev}",
+                r.ao
+            );
             prev = r.ao;
         }
     }
@@ -338,7 +346,12 @@ mod tests {
         let h = 0.6_f32;
         let coarse = integrate(Vec3::Z, Vec3::Z, &uniform_slices(h, h, 4));
         let fine = integrate(Vec3::Z, Vec3::Z, &uniform_slices(h, h, 64));
-        assert!(approx(coarse.ao, fine.ao, 5.0e-2), "{} vs {}", coarse.ao, fine.ao);
+        assert!(
+            approx(coarse.ao, fine.ao, 5.0e-2),
+            "{} vs {}",
+            coarse.ao,
+            fine.ao
+        );
     }
 
     #[test]

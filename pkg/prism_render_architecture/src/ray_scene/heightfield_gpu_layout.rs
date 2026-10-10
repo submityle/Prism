@@ -162,7 +162,10 @@ impl GpuHeightfieldBvhBuffers {
         let height = self.height();
         let heights: Vec<f32> = self.heights.iter().map(|&w| f32::from_bits(w)).collect();
         let origin = read_vec3(&self.header, 2);
-        let extent = [f32::from_bits(self.header[5]), f32::from_bits(self.header[6])];
+        let extent = [
+            f32::from_bits(self.header[5]),
+            f32::from_bits(self.header[6]),
+        ];
         Heightfield::new(width, height, heights, origin, extent)
             .expect("packed buffers encode a valid heightfield")
     }
@@ -189,7 +192,10 @@ impl GpuHeightfieldBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -249,7 +255,10 @@ impl GpuHeightfieldBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -257,7 +266,10 @@ impl GpuHeightfieldBvhBuffers {
                     let end = start + primitive_count as usize;
                     for &slot in &self.order[start..end] {
                         for tri in 0..2u8 {
-                            if field.intersect_cell_triangle(slot as usize, tri, ray).is_some() {
+                            if field
+                                .intersect_cell_triangle(slot as usize, tri, ray)
+                                .is_some()
+                            {
                                 return true;
                             }
                         }
@@ -442,7 +454,10 @@ mod tests {
                     assert_eq!(gpu.any_hit(&ray), bvh.any_hit(&ray));
                 }
             }
-            assert!(shared > 100, "too few shared hits for seed {seed:#x}: {shared}");
+            assert!(
+                shared > 100,
+                "too few shared hits for seed {seed:#x}: {shared}"
+            );
         }
     }
 }

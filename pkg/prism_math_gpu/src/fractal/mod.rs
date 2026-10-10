@@ -219,8 +219,20 @@ impl GpuFractal {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let fbm2 = compile(device, &pipeline_layout, source, WRAP_FBM2, "prism_math_fractal_fbm2");
-        let fbm3 = compile(device, &pipeline_layout, source, WRAP_FBM3, "prism_math_fractal_fbm3");
+        let fbm2 = compile(
+            device,
+            &pipeline_layout,
+            source,
+            WRAP_FBM2,
+            "prism_math_fractal_fbm2",
+        );
+        let fbm3 = compile(
+            device,
+            &pipeline_layout,
+            source,
+            WRAP_FBM3,
+            "prism_math_fractal_fbm3",
+        );
         let turbulence2 = compile(
             device,
             &pipeline_layout,
@@ -458,7 +470,12 @@ fn compile(
 
 /// Records a 1D batch dispatch covering `n` elements at [`WORKGROUP`] threads
 /// per group.
-fn dispatch(enc: &mut CommandEncoder, pipeline: &ComputePipeline, bind_group: &BindGroup, n: usize) {
+fn dispatch(
+    enc: &mut CommandEncoder,
+    pipeline: &ComputePipeline,
+    bind_group: &BindGroup,
+    n: usize,
+) {
     let groups = (n as u32).div_ceil(WORKGROUP);
     let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
         label: Some("prism_math_fractal_pass"),

@@ -7,9 +7,9 @@
 
 use crate::TaskPool;
 use alloc::vec::Vec;
-use std::sync::Mutex;
-use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Barrier;
+use std::sync::Mutex;
 
 /// Tiny deterministic xorshift64 PRNG so tests seed data without a dependency.
 struct Rng(u64);
@@ -39,11 +39,9 @@ fn par_iter_range_for_each_sums_equal_serial() {
     for &n in SIZES {
         let serial: usize = (0..n).sum();
         let acc = AtomicUsize::new(0);
-        pool.par_iter_range(0..n)
-            .with_min_len(4)
-            .for_each(|i| {
-                acc.fetch_add(i, Ordering::Relaxed);
-            });
+        pool.par_iter_range(0..n).with_min_len(4).for_each(|i| {
+            acc.fetch_add(i, Ordering::Relaxed);
+        });
         assert_eq!(acc.load(Ordering::Relaxed), serial, "range sum, n={n}");
     }
 }
@@ -74,7 +72,11 @@ fn par_iter_slice_for_each_and_enumerate_equal_serial() {
         pool.par_iter(&data).with_min_len(4).for_each(|&x| {
             acc.fetch_add(x as usize, Ordering::Relaxed);
         });
-        assert_eq!(acc.load(Ordering::Relaxed) as u128, serial_sum, "slice for_each, n={n}");
+        assert_eq!(
+            acc.load(Ordering::Relaxed) as u128,
+            serial_sum,
+            "slice for_each, n={n}"
+        );
 
         // enumerate_for_each must observe the correct (index, value) pairs.
         let seen: Mutex<Vec<Option<u64>>> = Mutex::new((0..n).map(|_| None).collect());
@@ -95,7 +97,10 @@ fn par_iter_slice_map_collect_is_ordered_and_equal_serial() {
     for (seed, &n) in SIZES.iter().enumerate() {
         let mut rng = Rng::new(seed as u64 + 100);
         let data: Vec<u64> = (0..n).map(|_| rng.next_u64() % 1000).collect();
-        let serial: Vec<u64> = data.iter().map(|&x| x.wrapping_mul(7).wrapping_add(5)).collect();
+        let serial: Vec<u64> = data
+            .iter()
+            .map(|&x| x.wrapping_mul(7).wrapping_add(5))
+            .collect();
         let parallel = pool
             .par_iter(&data)
             .with_min_len(4)
@@ -116,7 +121,10 @@ fn par_iter_mut_for_each_and_enumerate_equal_serial() {
         pool.par_iter_mut(&mut parallel)
             .with_min_len(4)
             .for_each(|x| *x = x.wrapping_mul(3).wrapping_add(1));
-        let serial: Vec<u64> = base.iter().map(|&x| x.wrapping_mul(3).wrapping_add(1)).collect();
+        let serial: Vec<u64> = base
+            .iter()
+            .map(|&x| x.wrapping_mul(3).wrapping_add(1))
+            .collect();
         assert_eq!(parallel, serial, "mut for_each, n={n}");
 
         // enumerate_for_each writes index-dependent values.
@@ -124,7 +132,11 @@ fn par_iter_mut_for_each_and_enumerate_equal_serial() {
         pool.par_iter_mut(&mut parallel2)
             .with_min_len(4)
             .enumerate_for_each(|i, x| *x = x.wrapping_add(i as u64));
-        let serial2: Vec<u64> = base.iter().enumerate().map(|(i, &x)| x.wrapping_add(i as u64)).collect();
+        let serial2: Vec<u64> = base
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| x.wrapping_add(i as u64))
+            .collect();
         assert_eq!(parallel2, serial2, "mut enumerate_for_each, n={n}");
     }
 }
@@ -171,8 +183,14 @@ fn par_iter_spreads_across_multiple_workers() {
 
     let total: usize = buckets.iter().map(|b| b.load(Ordering::Relaxed)).sum();
     assert_eq!(total, n, "every element visited exactly once");
-    let active = buckets.iter().filter(|b| b.load(Ordering::Relaxed) > 0).count();
-    assert!(active >= 2, "work must spread across >= 2 workers, saw {active}");
+    let active = buckets
+        .iter()
+        .filter(|b| b.load(Ordering::Relaxed) > 0)
+        .count();
+    assert!(
+        active >= 2,
+        "work must spread across >= 2 workers, saw {active}"
+    );
 }
 
 #[test]

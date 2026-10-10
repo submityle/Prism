@@ -880,7 +880,11 @@ mod tests {
         assert!(peak(&quiet) < 1e-2, "quiet peak={}", peak(&quiet));
         node.trigger(1.0);
         let loud = render(&mut node, SR, 256);
-        assert!(peak(&loud) > peak(&quiet) * 10.0, "loud peak={}", peak(&loud));
+        assert!(
+            peak(&loud) > peak(&quiet) * 10.0,
+            "loud peak={}",
+            peak(&loud)
+        );
     }
 
     #[test]
@@ -942,7 +946,10 @@ mod tests {
         let hi = render(&mut high, SR, 8_192);
         let lo_ratio = hf_energy(&lo) / (energy(&lo) + 1e-12);
         let hi_ratio = hf_energy(&hi) / (energy(&hi) + 1e-12);
-        assert!(hi_ratio > lo_ratio, "lo_ratio={lo_ratio} hi_ratio={hi_ratio}");
+        assert!(
+            hi_ratio > lo_ratio,
+            "lo_ratio={lo_ratio} hi_ratio={hi_ratio}"
+        );
     }
 
     #[test]

@@ -249,7 +249,13 @@ mod tests {
         let mut canonical = Reservoir::<GiSample>::new();
         stream_path(&mut canonical, facing_suffix(1.0), 1.0, 0.0);
         let empty = Reservoir::<GiSample>::new();
-        assert!(!merge_path(&mut canonical, Vec3::ZERO, Vec3::Z, &empty, 0.0));
+        assert!(!merge_path(
+            &mut canonical,
+            Vec3::ZERO,
+            Vec3::Z,
+            &empty,
+            0.0
+        ));
         assert_eq!(canonical.confidence(), 1.0);
     }
 
@@ -316,7 +322,13 @@ mod tests {
             neighbor.cap_confidence(8.0);
             finalize_path(&mut neighbor);
 
-            merge_path(&mut canonical, Vec3::new(0.1, 0.0, 0.0), Vec3::Z, &neighbor, 0.7);
+            merge_path(
+                &mut canonical,
+                Vec3::new(0.1, 0.0, 0.0),
+                Vec3::Z,
+                &neighbor,
+                0.7,
+            );
             finalize_path(&mut canonical);
             canonical.contribution_weight()
         };

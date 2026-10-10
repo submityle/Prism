@@ -676,9 +676,7 @@ mod tests {
             // The single-scatter integrand is identical, so the full radiance is
             // never smaller per channel ...
             assert!(
-                full.x >= single.x - 1e-6
-                    && full.y >= single.y - 1e-6
-                    && full.z >= single.z - 1e-6,
+                full.x >= single.x - 1e-6 && full.y >= single.y - 1e-6 && full.z >= single.z - 1e-6,
                 "full={full:?} single={single:?}"
             );
             // ... and the multiscatter term strictly adds energy.
@@ -695,7 +693,17 @@ mod tests {
         let origin = ground_origin(&a);
         // Zero view direction -> zero radiance, no NaN.
         assert_eq!(
-            sky_view_radiance(&a, origin, Vec3::ZERO, Vec3::Y, Vec3::splat(20.0), 16, 8, 32, 8),
+            sky_view_radiance(
+                &a,
+                origin,
+                Vec3::ZERO,
+                Vec3::Y,
+                Vec3::splat(20.0),
+                16,
+                8,
+                32,
+                8
+            ),
             Vec3::ZERO
         );
         // Non-finite irradiance / sun stay finite.

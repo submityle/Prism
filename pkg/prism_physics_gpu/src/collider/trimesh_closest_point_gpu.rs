@@ -161,8 +161,11 @@ impl GpuTrimeshClosestPoint {
             query: [point.x, point.y, point.z, 0.0],
             counts: [u32::try_from(n).unwrap_or(u32::MAX), 0, 0, 0],
         };
-        let params_buf =
-            buffer::uniform(device, "prism_collider_trimesh_closest_point_params", &params);
+        let params_buf = buffer::uniform(
+            device,
+            "prism_collider_trimesh_closest_point_params",
+            &params,
+        );
         let vertices_buf = buffer::storage_read(
             device,
             "prism_collider_trimesh_closest_point_vertices",
@@ -192,8 +195,11 @@ impl GpuTrimeshClosestPoint {
             ],
         });
 
-        let out_stage =
-            buffer::staging(device, "prism_collider_trimesh_closest_point_stage", out_bytes);
+        let out_stage = buffer::staging(
+            device,
+            "prism_collider_trimesh_closest_point_stage",
+            out_bytes,
+        );
         let groups = u32::try_from(n.div_ceil(WORKGROUP)).unwrap_or(u32::MAX);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {

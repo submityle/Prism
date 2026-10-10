@@ -31,7 +31,11 @@ pub fn transform_vec4_one(m: &Mat4, v: Vec4) -> Vec4 {
 /// Panics if `src.len() != dst.len()`.
 #[inline]
 pub fn transform_vec4(m: &Mat4, src: &[Vec4], dst: &mut [Vec4]) {
-    assert_eq!(src.len(), dst.len(), "transform_vec4: src/dst length mismatch");
+    assert_eq!(
+        src.len(),
+        dst.len(),
+        "transform_vec4: src/dst length mismatch"
+    );
 
     #[cfg(target_arch = "x86_64")]
     {
@@ -61,7 +65,11 @@ pub(crate) fn transform_vec4_scalar(m: &Mat4, src: &[Vec4], dst: &mut [Vec4]) {
 /// Panics if `src.len() != dst.len()`.
 #[inline]
 pub fn transform_points3(m: &Mat4, src: &[Vec3], dst: &mut [Vec3]) {
-    assert_eq!(src.len(), dst.len(), "transform_points3: src/dst length mismatch");
+    assert_eq!(
+        src.len(),
+        dst.len(),
+        "transform_points3: src/dst length mismatch"
+    );
     for (o, &p) in dst.iter_mut().zip(src.iter()) {
         *o = m.transform_point3(p);
     }
@@ -74,7 +82,11 @@ pub fn transform_points3(m: &Mat4, src: &[Vec3], dst: &mut [Vec3]) {
 /// Panics if `src.len() != dst.len()`.
 #[inline]
 pub fn transform_vectors3(m: &Mat4, src: &[Vec3], dst: &mut [Vec3]) {
-    assert_eq!(src.len(), dst.len(), "transform_vectors3: src/dst length mismatch");
+    assert_eq!(
+        src.len(),
+        dst.len(),
+        "transform_vectors3: src/dst length mismatch"
+    );
     for (o, &v) in dst.iter_mut().zip(src.iter()) {
         *o = m.transform_vector3(v);
     }

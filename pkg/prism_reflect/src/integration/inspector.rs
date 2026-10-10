@@ -90,7 +90,12 @@ pub struct InspectorNode {
 /// owning type's [`TypeMetadata`] are omitted from the tree.
 #[must_use]
 pub fn inspect(root: &dyn Reflect, registry: &TypeRegistry) -> InspectorNode {
-    build(root, "root".to_string(), InspectorHints::default(), registry)
+    build(
+        root,
+        "root".to_string(),
+        InspectorHints::default(),
+        registry,
+    )
 }
 
 fn type_metadata<'r>(value: &dyn Reflect, registry: &'r TypeRegistry) -> Option<&'r TypeMetadata> {
@@ -117,7 +122,9 @@ fn build(
                 if field_meta.is_some_and(FieldMetadata::is_hidden) {
                     continue;
                 }
-                let field_hints = field_meta.map(InspectorHints::from_metadata).unwrap_or_default();
+                let field_hints = field_meta
+                    .map(InspectorHints::from_metadata)
+                    .unwrap_or_default();
                 children.push(build(field, name.to_string(), field_hints, registry));
             }
             InspectorNode {
@@ -134,7 +141,12 @@ fn build(
             let mut children = Vec::new();
             for i in 0..ts.field_count() {
                 if let Some(field) = ts.field(i) {
-                    children.push(build(field, i.to_string(), InspectorHints::default(), registry));
+                    children.push(build(
+                        field,
+                        i.to_string(),
+                        InspectorHints::default(),
+                        registry,
+                    ));
                 }
             }
             InspectorNode {
@@ -151,7 +163,12 @@ fn build(
             let mut children = Vec::new();
             for i in 0..e.field_count() {
                 if let Some(field) = e.field_at(i) {
-                    children.push(build(field, i.to_string(), InspectorHints::default(), registry));
+                    children.push(build(
+                        field,
+                        i.to_string(),
+                        InspectorHints::default(),
+                        registry,
+                    ));
                 }
             }
             InspectorNode {
@@ -260,7 +277,10 @@ impl core::fmt::Debug for DebugLeaf<'_> {
                 }
             )*};
         }
-        try_render!(bool, char, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64, String);
+        try_render!(
+            bool, char, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64,
+            String
+        );
         if let Some(v) = any.downcast_ref::<&'static str>() {
             return write!(f, "{v:?}");
         }

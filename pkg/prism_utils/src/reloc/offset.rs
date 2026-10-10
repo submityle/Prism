@@ -134,12 +134,7 @@ impl<T: Reloc> OffsetSlice<T> {
     ///
     /// Returns `Ok(None)` when `index` is out of range, and a [`RelocError`]
     /// when the computed region runs outside `blob`.
-    pub fn get(
-        self,
-        blob: &[u8],
-        field_pos: usize,
-        index: usize,
-    ) -> Result<Option<T>, RelocError> {
+    pub fn get(self, blob: &[u8], field_pos: usize, index: usize) -> Result<Option<T>, RelocError> {
         if index >= self.len() {
             return Ok(None);
         }

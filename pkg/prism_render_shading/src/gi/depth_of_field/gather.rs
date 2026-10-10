@@ -68,8 +68,16 @@ impl GatherSample {
     pub fn new(color: Vec3, offset: Vec2, coc_radius: f32) -> Self {
         Self {
             color: sanitize_color(color),
-            offset: if offset.is_finite() { offset } else { Vec2::ZERO },
-            coc_radius: if coc_radius.is_finite() { coc_radius } else { 0.0 },
+            offset: if offset.is_finite() {
+                offset
+            } else {
+                Vec2::ZERO
+            },
+            coc_radius: if coc_radius.is_finite() {
+                coc_radius
+            } else {
+                0.0
+            },
         }
     }
 }
@@ -310,7 +318,11 @@ mod tests {
             samples.push(GatherSample::new(Vec3::new(0.0, 0.0, 1.0), p, 0.0));
         }
         let r = gather(center, &samples, GatherParams::default());
-        assert!(approx_vec(r.color, center, 1.0e-4), "focus leaked: {:?}", r.color);
+        assert!(
+            approx_vec(r.color, center, 1.0e-4),
+            "focus leaked: {:?}",
+            r.color
+        );
     }
 
     #[test]
@@ -338,7 +350,11 @@ mod tests {
             GatherSample::new(Vec3::splat(9.0), Vec2::new(10.0, 0.0), 3.0),
         ];
         let r = gather(center, &samples, GatherParams::default());
-        assert!(approx_vec(r.color, center, 1.0e-4), "unreachable sample leaked: {:?}", r.color);
+        assert!(
+            approx_vec(r.color, center, 1.0e-4),
+            "unreachable sample leaked: {:?}",
+            r.color
+        );
     }
 
     #[test]
@@ -357,7 +373,10 @@ mod tests {
         let far = alloc::vec![GatherSample::new(Vec3::ONE, Vec2::ZERO, 16.0)];
         let wn = gather(Vec3::ZERO, &near, GatherParams::default()).weight;
         let wf = gather(Vec3::ZERO, &far, GatherParams::default()).weight;
-        assert!(wn > wf, "small disk {wn} should weigh more than large disk {wf}");
+        assert!(
+            wn > wf,
+            "small disk {wn} should weigh more than large disk {wf}"
+        );
     }
 
     #[test]
@@ -365,19 +384,41 @@ mod tests {
         // A neighbour whose centre-distance is near its rim should gain weight
         // when rim brightening is enabled.
         let s = alloc::vec![GatherSample::new(Vec3::ONE, Vec2::new(9.5, 0.0), 10.0)];
-        let flat = gather(Vec3::ZERO, &s, GatherParams { edge_softness: 0.0, edge_boost: 0.0 });
-        let rim = gather(Vec3::ZERO, &s, GatherParams { edge_softness: 0.0, edge_boost: 2.0 });
+        let flat = gather(
+            Vec3::ZERO,
+            &s,
+            GatherParams {
+                edge_softness: 0.0,
+                edge_boost: 0.0,
+            },
+        );
+        let rim = gather(
+            Vec3::ZERO,
+            &s,
+            GatherParams {
+                edge_softness: 0.0,
+                edge_boost: 2.0,
+            },
+        );
         assert!(rim.weight > flat.weight, "rim boost should raise weight");
     }
 
     #[test]
     fn results_are_finite_for_adversarial_input() {
         let samples = alloc::vec![
-            GatherSample::new(Vec3::new(f32::NAN, 1.0, 2.0), Vec2::new(f32::INFINITY, 0.0), 5.0),
+            GatherSample::new(
+                Vec3::new(f32::NAN, 1.0, 2.0),
+                Vec2::new(f32::INFINITY, 0.0),
+                5.0
+            ),
             GatherSample::new(Vec3::splat(1.0), Vec2::new(1.0, 1.0), f32::NAN),
             GatherSample::new(Vec3::splat(1.0), Vec2::ZERO, -8.0),
         ];
-        let r = gather(Vec3::new(f32::NAN, 0.0, 0.0), &samples, GatherParams::default());
+        let r = gather(
+            Vec3::new(f32::NAN, 0.0, 0.0),
+            &samples,
+            GatherParams::default(),
+        );
         assert!(r.color.is_finite(), "color not finite: {:?}", r.color);
         assert!(r.weight.is_finite() && r.weight > 0.0);
     }

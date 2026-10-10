@@ -126,7 +126,13 @@ mod tests {
     use super::*;
 
     fn fp() -> DeviceFingerprint {
-        DeviceFingerprint::new(GraphicsBackend::Vulkan, 0x10DE, 0x2204, 42, AbiHash([7u8; 32]))
+        DeviceFingerprint::new(
+            GraphicsBackend::Vulkan,
+            0x10DE,
+            0x2204,
+            42,
+            AbiHash([7u8; 32]),
+        )
     }
 
     #[test]
@@ -140,7 +146,10 @@ mod tests {
         let mut other = fp();
         other.backend = GraphicsBackend::Metal;
         other.vendor_id = 0; // also differs, but backend is checked first
-        assert_eq!(fp().check_against(&other), Err(FingerprintMismatch::Backend));
+        assert_eq!(
+            fp().check_against(&other),
+            Err(FingerprintMismatch::Backend)
+        );
         assert!(!fp().is_compatible_with(&other));
     }
 

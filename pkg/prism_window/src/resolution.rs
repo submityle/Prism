@@ -1,7 +1,7 @@
 //! Window resolution: physical size paired with a scale factor, plus the
 //! resize constraints that bound it.
 
-use crate::geometry::{LogicalSize, PhysicalSize, sane_scale};
+use crate::geometry::{sane_scale, LogicalSize, PhysicalSize};
 
 /// Inclusive bounds on a window's physical size, used to clamp OS-driven
 /// resizes. Defaults allow any size from `1×1` up to `u32::MAX`.

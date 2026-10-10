@@ -54,7 +54,7 @@
 //! * Han et al. 2007, *Frequency Domain Normal Map Filtering* — the variance
 //!   interpretation that justifies the additive-`alpha²` closed form.
 
-use crate::gi::spec_gi::ggx_lobe::{MIN_ALPHA, roughness_to_alpha};
+use crate::gi::spec_gi::ggx_lobe::{roughness_to_alpha, MIN_ALPHA};
 
 /// Smallest averaged-normal length considered.  `len → 0` means a fully
 /// decorrelated sub-texel normal field; flooring keeps `(1 − len)/len` finite.
@@ -100,7 +100,11 @@ pub fn toksvig_factor(avg_normal_len: f32, shininess: f32) -> f32 {
     let s = sanitize_shininess(shininess);
     let denom = (len + s * (1.0 - len)).max(MIN_LEN);
     let ft = len / denom;
-    if ft.is_finite() { ft.clamp(0.0, 1.0) } else { 1.0 }
+    if ft.is_finite() {
+        ft.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
 }
 
 /// Effective (reduced) Blinn–Phong shininess `s_eff = ft · s` after Toksvig
@@ -122,7 +126,11 @@ pub fn effective_shininess(base_shininess: f32, avg_normal_len: f32) -> f32 {
 pub fn shininess_from_alpha(alpha: f32) -> f32 {
     let a = alpha.max(MIN_ALPHA);
     let s = 2.0 / (a * a) - 2.0;
-    if s.is_finite() { s.clamp(0.0, MAX_SHININESS) } else { MAX_SHININESS }
+    if s.is_finite() {
+        s.clamp(0.0, MAX_SHININESS)
+    } else {
+        MAX_SHININESS
+    }
 }
 
 /// Inverse of [`shininess_from_alpha`]: `alpha = sqrt(2/(s + 2))`, floored at
@@ -145,7 +153,11 @@ pub fn alpha_from_shininess(shininess: f32) -> f32 {
 pub fn toksvig_delta_alpha_sq(avg_normal_len: f32) -> f32 {
     let len = sanitize_len(avg_normal_len);
     let delta = 2.0 * (1.0 - len) / len;
-    if delta.is_finite() { delta.max(0.0) } else { 0.0 }
+    if delta.is_finite() {
+        delta.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Combines a base GGX variance `alpha²` with the (high-gloss approximate)
@@ -161,7 +173,11 @@ pub fn effective_alpha_sq_from_len(base_alpha: f32, avg_normal_len: f32) -> f32 
     let base_sq = a * a;
     let eff = base_sq + toksvig_delta_alpha_sq(avg_normal_len);
     let floor = MIN_ALPHA * MIN_ALPHA;
-    if eff.is_finite() { eff.clamp(floor, 1.0) } else { base_sq }
+    if eff.is_finite() {
+        eff.clamp(floor, 1.0)
+    } else {
+        base_sq
+    }
 }
 
 /// High-level helper: filters a perceptual `base_roughness` with the exact
@@ -190,8 +206,16 @@ pub fn toksvig_roughness(base_roughness: f32, avg_normal_len: f32) -> f32 {
 /// treated as `0` (fully smooth) before the comparison.
 #[inline]
 pub fn combine_roughness(a: f32, b: f32) -> f32 {
-    let ca = if a.is_finite() { a.clamp(0.0, 1.0) } else { 0.0 };
-    let cb = if b.is_finite() { b.clamp(0.0, 1.0) } else { 0.0 };
+    let ca = if a.is_finite() {
+        a.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let cb = if b.is_finite() {
+        b.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     ca.max(cb)
 }
 
@@ -280,8 +304,14 @@ mod tests {
         let alpha = roughness_to_alpha(base);
         let additive = effective_alpha_sq_from_len(alpha, len).sqrt().sqrt();
         assert!(exact >= base - 1.0e-4, "exact {exact} < base {base}");
-        assert!(additive >= base - 1.0e-4, "additive {additive} < base {base}");
-        assert!(additive >= exact - 1.0e-4, "additive {additive} < exact {exact}");
+        assert!(
+            additive >= base - 1.0e-4,
+            "additive {additive} < base {base}"
+        );
+        assert!(
+            additive >= exact - 1.0e-4,
+            "additive {additive} < exact {exact}"
+        );
     }
 
     #[test]

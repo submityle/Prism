@@ -38,7 +38,11 @@ pub const MITCHELL_C: f32 = 1.0 / 3.0;
 
 #[inline]
 fn finite_or_zero(x: f32) -> f32 {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 #[inline]
@@ -57,9 +61,14 @@ pub(crate) fn mn_kernel(x: f32, b: f32, c: f32) -> f32 {
     let x2 = x * x;
     let x3 = x2 * x;
     if x < 1.0 {
-        ((12.0 - 9.0 * b - 6.0 * c) * x3 + (-18.0 + 12.0 * b + 6.0 * c) * x2 + (6.0 - 2.0 * b)) / 6.0
+        ((12.0 - 9.0 * b - 6.0 * c) * x3 + (-18.0 + 12.0 * b + 6.0 * c) * x2 + (6.0 - 2.0 * b))
+            / 6.0
     } else if x < 2.0 {
-        ((-b - 6.0 * c) * x3 + (6.0 * b + 30.0 * c) * x2 + (-12.0 * b - 48.0 * c) * x + (8.0 * b + 24.0 * c)) / 6.0
+        ((-b - 6.0 * c) * x3
+            + (6.0 * b + 30.0 * c) * x2
+            + (-12.0 * b - 48.0 * c) * x
+            + (8.0 * b + 24.0 * c))
+            / 6.0
     } else {
         0.0
     }
@@ -110,7 +119,10 @@ pub fn cubic_mitchell<S: TexelSource>(
     let wy = mitchell_netravali_weights(b, c, fy - y1);
 
     let fetch = |ox: i64, oy: i64| -> [f32; 4] {
-        match (wrap_texel(ix + ox, w, wrap_u), wrap_texel(iy + oy, h, wrap_v)) {
+        match (
+            wrap_texel(ix + ox, w, wrap_u),
+            wrap_texel(iy + oy, h, wrap_v),
+        ) {
             (TexelAddr::In(cx), TexelAddr::In(cy)) => src.texel(mip, cx, cy),
             _ => border_color,
         }
@@ -131,7 +143,7 @@ pub fn cubic_mitchell<S: TexelSource>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{bicubic_catmull_rom, bspline_cubic, catmull_rom_weights, bspline_cubic_weights};
+    use crate::{bicubic_catmull_rom, bspline_cubic, bspline_cubic_weights, catmull_rom_weights};
 
     struct Flat([f32; 4]);
     impl TexelSource for Flat {
@@ -157,7 +169,13 @@ mod tests {
 
     #[test]
     fn partition_of_unity_for_many_bc() {
-        for &(b, c) in &[(1.0 / 3.0, 1.0 / 3.0), (0.0, 0.5), (1.0, 0.0), (0.0, 0.0), (0.0, 0.75)] {
+        for &(b, c) in &[
+            (1.0 / 3.0, 1.0 / 3.0),
+            (0.0, 0.5),
+            (1.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 0.75),
+        ] {
             for i in 0..=10 {
                 let t = i as f32 / 10.0;
                 let s: f32 = mitchell_netravali_weights(b, c, t).iter().sum();
@@ -173,7 +191,10 @@ mod tests {
             let mn = mitchell_netravali_weights(0.0, 0.5, t);
             let cr = catmull_rom_weights(t);
             for k in 0..4 {
-                assert!((mn[k] - cr[k]).abs() < 1.0e-6, "t={t} k={k} {mn:?} vs {cr:?}");
+                assert!(
+                    (mn[k] - cr[k]).abs() < 1.0e-6,
+                    "t={t} k={k} {mn:?} vs {cr:?}"
+                );
             }
         }
     }
@@ -185,7 +206,10 @@ mod tests {
             let mn = mitchell_netravali_weights(1.0, 0.0, t);
             let bs = bspline_cubic_weights(t);
             for k in 0..4 {
-                assert!((mn[k] - bs[k]).abs() < 1.0e-6, "t={t} k={k} {mn:?} vs {bs:?}");
+                assert!(
+                    (mn[k] - bs[k]).abs() < 1.0e-6,
+                    "t={t} k={k} {mn:?} vs {bs:?}"
+                );
             }
         }
     }
@@ -193,8 +217,18 @@ mod tests {
     #[test]
     fn sampler_matches_catmull_rom_at_0_half() {
         for &uv in &[[0.137, 0.482], [0.5, 0.5], [0.91, 0.04]] {
-            let a = cubic_mitchell(&Noise, 0, uv, 0.0, 0.5, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
-            let b = bicubic_catmull_rom(&Noise, 0, uv, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+            let a = cubic_mitchell(
+                &Noise,
+                0,
+                uv,
+                0.0,
+                0.5,
+                WrapMode::Repeat,
+                WrapMode::Repeat,
+                [0.0; 4],
+            );
+            let b =
+                bicubic_catmull_rom(&Noise, 0, uv, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
             for k in 0..4 {
                 assert!((a[k] - b[k]).abs() < 1.0e-5, "uv={uv:?} {a:?} vs {b:?}");
             }
@@ -204,8 +238,24 @@ mod tests {
     #[test]
     fn sampler_matches_bspline_at_1_zero() {
         for &uv in &[[0.137, 0.482], [0.5, 0.5], [0.91, 0.04]] {
-            let a = cubic_mitchell(&Noise, 0, uv, 1.0, 0.0, WrapMode::ClampToEdge, WrapMode::ClampToEdge, [0.0; 4]);
-            let b = bspline_cubic(&Noise, 0, uv, WrapMode::ClampToEdge, WrapMode::ClampToEdge, [0.0; 4]);
+            let a = cubic_mitchell(
+                &Noise,
+                0,
+                uv,
+                1.0,
+                0.0,
+                WrapMode::ClampToEdge,
+                WrapMode::ClampToEdge,
+                [0.0; 4],
+            );
+            let b = bspline_cubic(
+                &Noise,
+                0,
+                uv,
+                WrapMode::ClampToEdge,
+                WrapMode::ClampToEdge,
+                [0.0; 4],
+            );
             for k in 0..4 {
                 assert!((a[k] - b[k]).abs() < 1.0e-5, "uv={uv:?} {a:?} vs {b:?}");
             }
@@ -216,7 +266,16 @@ mod tests {
     fn recommended_constant_is_preserved() {
         let flat = Flat([0.3, 0.6, 0.9, 1.0]);
         for &uv in &[[0.123, 0.777], [0.5, 0.5], [0.9, 0.1]] {
-            let c = cubic_mitchell(&flat, 0, uv, MITCHELL_B, MITCHELL_C, WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+            let c = cubic_mitchell(
+                &flat,
+                0,
+                uv,
+                MITCHELL_B,
+                MITCHELL_C,
+                WrapMode::Repeat,
+                WrapMode::Repeat,
+                [0.0; 4],
+            );
             for k in 0..4 {
                 assert!((c[k] - flat.0[k]).abs() < 1.0e-6, "uv={uv:?} {c:?}");
             }

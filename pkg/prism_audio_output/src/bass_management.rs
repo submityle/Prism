@@ -285,7 +285,10 @@ mod tests {
         // 30 Hz tone, well below the 80 Hz crossover, into the front-left main.
         fill_sine(&mut buf, 0, 30.0);
         let main_in = rms(buf.channel(0));
-        assert!(buf.channel(3).iter().all(|&s| s == 0.0), "LFE starts silent");
+        assert!(
+            buf.channel(3).iter().all(|&s| s == 0.0),
+            "LFE starts silent"
+        );
 
         bm.process(&mut buf);
 
@@ -307,8 +310,12 @@ mod tests {
     #[test]
     fn high_frequency_stays_on_mains() {
         let frames = 4096;
-        let mut bm =
-            BassManager::new(SR, ChannelLayout::Surround5_1, frames, &BassManagerParams::default());
+        let mut bm = BassManager::new(
+            SR,
+            ChannelLayout::Surround5_1,
+            frames,
+            &BassManagerParams::default(),
+        );
         let mut buf = AudioBuffer::new(ChannelLayout::Surround5_1, frames);
         // 1 kHz tone, far above the crossover, into the front-right main.
         fill_sine(&mut buf, 1, 1_000.0);
@@ -331,8 +338,12 @@ mod tests {
     #[test]
     fn layout_without_lfe_is_noop() {
         let frames = 256;
-        let mut bm =
-            BassManager::new(SR, ChannelLayout::Stereo, frames, &BassManagerParams::default());
+        let mut bm = BassManager::new(
+            SR,
+            ChannelLayout::Stereo,
+            frames,
+            &BassManagerParams::default(),
+        );
         assert!(!bm.has_lfe());
         let mut buf = AudioBuffer::new(ChannelLayout::Stereo, frames);
         fill_sine(&mut buf, 0, 50.0);

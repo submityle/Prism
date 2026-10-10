@@ -30,10 +30,8 @@ pub trait Interpolatable:
 {
 }
 
-impl<T> Interpolatable for T where
-    T: Copy + Add<Output = T> + Sub<Output = T> + Mul<f32, Output = T>
-{
-}
+impl<T> Interpolatable for T where T: Copy + Add<Output = T> + Sub<Output = T> + Mul<f32, Output = T>
+{}
 
 /// Generic linear interpolation: `a` at `t = 0`, `b` at `t = 1`.
 ///
@@ -48,7 +46,11 @@ pub fn lerp<T: Interpolatable>(a: T, b: T, t: f32) -> T {
 #[inline]
 pub fn inverse_lerp(a: f32, b: f32, value: f32) -> f32 {
     let denom = b - a;
-    if denom == 0.0 { 0.0 } else { (value - a) / denom }
+    if denom == 0.0 {
+        0.0
+    } else {
+        (value - a) / denom
+    }
 }
 
 /// Remap `value` from the input range `[in_min, in_max]` to the output range

@@ -145,9 +145,24 @@ impl Plane {
         let n = self.normal;
         let d = self.d;
         // Column j holds entries (δ_ij - 2 n_i n_j) for i = 0..3 and a w term.
-        let col0 = Vec4::new(1.0 - 2.0 * n.x * n.x, -2.0 * n.y * n.x, -2.0 * n.z * n.x, 0.0);
-        let col1 = Vec4::new(-2.0 * n.x * n.y, 1.0 - 2.0 * n.y * n.y, -2.0 * n.z * n.y, 0.0);
-        let col2 = Vec4::new(-2.0 * n.x * n.z, -2.0 * n.y * n.z, 1.0 - 2.0 * n.z * n.z, 0.0);
+        let col0 = Vec4::new(
+            1.0 - 2.0 * n.x * n.x,
+            -2.0 * n.y * n.x,
+            -2.0 * n.z * n.x,
+            0.0,
+        );
+        let col1 = Vec4::new(
+            -2.0 * n.x * n.y,
+            1.0 - 2.0 * n.y * n.y,
+            -2.0 * n.z * n.y,
+            0.0,
+        );
+        let col2 = Vec4::new(
+            -2.0 * n.x * n.z,
+            -2.0 * n.y * n.z,
+            1.0 - 2.0 * n.z * n.z,
+            0.0,
+        );
         let col3 = Vec4::new(-2.0 * d * n.x, -2.0 * d * n.y, -2.0 * d * n.z, 1.0);
         Mat4::from_cols(col0, col1, col2, col3)
     }
@@ -373,7 +388,10 @@ mod tests {
         ] {
             let via_matrix = m.mul_vec4(q.extend(1.0)).truncate();
             let via_fn = p.reflect_point(q);
-            assert!((via_matrix - via_fn).length() < 1e-4, "matrix != reflect_point");
+            assert!(
+                (via_matrix - via_fn).length() < 1e-4,
+                "matrix != reflect_point"
+            );
         }
         // The matrix applied to a direction (w = 0) matches reflect_vector.
         let v = Vec3::new(3.0, -2.0, 5.0);

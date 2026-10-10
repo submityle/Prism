@@ -49,11 +49,11 @@ pub mod render;
 #[cfg(feature = "cpal-backend")]
 pub mod cpal_backend;
 
-pub use capture::{CaptureConsumer, CaptureSink, capture_ring};
+pub use capture::{capture_ring, CaptureConsumer, CaptureSink};
 pub use error::DeviceError;
 pub use file_sink::render_to_wav;
 pub use interleave::{interleaved_to_planar, planar_to_interleaved};
 pub use render::BlockRenderer;
 
 #[cfg(feature = "cpal-backend")]
-pub use cpal_backend::{CpalOutput, OutputStreamInfo, layout_for_channels, open_default_output};
+pub use cpal_backend::{layout_for_channels, open_default_output, CpalOutput, OutputStreamInfo};

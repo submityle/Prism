@@ -198,7 +198,10 @@ mod tests {
 
     #[test]
     fn non_finite_sample_aborts_cleanly() {
-        assert_eq!(hard_shadow(Vec3::ZERO, Vec3::Y, 0.01, 20.0, |_| f32::NAN), 1.0);
+        assert_eq!(
+            hard_shadow(Vec3::ZERO, Vec3::Y, 0.01, 20.0, |_| f32::NAN),
+            1.0
+        );
         assert!(nearest_hit(Vec3::ZERO, Vec3::Y, 0.01, 20.0, |_| f32::NAN).is_none());
     }
 
@@ -206,7 +209,10 @@ mod tests {
     fn k_decreases_with_light_size() {
         let small = soft_shadow_k(0.01);
         let large = soft_shadow_k(0.3);
-        assert!(small > large, "smaller light should be sharper: {small} vs {large}");
+        assert!(
+            small > large,
+            "smaller light should be sharper: {small} vs {large}"
+        );
         assert!(small.is_finite() && large.is_finite());
     }
 

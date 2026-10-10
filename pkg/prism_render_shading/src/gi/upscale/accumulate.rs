@@ -51,9 +51,21 @@ pub fn luma(color: Vec3) -> f32 {
 #[inline]
 pub fn sanitize(color: Vec3) -> Vec3 {
     Vec3::new(
-        if color.x.is_finite() { color.x.max(0.0) } else { 0.0 },
-        if color.y.is_finite() { color.y.max(0.0) } else { 0.0 },
-        if color.z.is_finite() { color.z.max(0.0) } else { 0.0 },
+        if color.x.is_finite() {
+            color.x.max(0.0)
+        } else {
+            0.0
+        },
+        if color.y.is_finite() {
+            color.y.max(0.0)
+        } else {
+            0.0
+        },
+        if color.z.is_finite() {
+            color.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -65,8 +77,16 @@ pub fn sanitize(color: Vec3) -> Vec3 {
 /// is clamped to `[0, 1]` so out-of-range inputs degrade gracefully.
 #[inline]
 pub fn bilinear_splat_weights(frac: Vec2) -> [f32; 4] {
-    let fx = if frac.x.is_finite() { frac.x.clamp(0.0, 1.0) } else { 0.0 };
-    let fy = if frac.y.is_finite() { frac.y.clamp(0.0, 1.0) } else { 0.0 };
+    let fx = if frac.x.is_finite() {
+        frac.x.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let fy = if frac.y.is_finite() {
+        frac.y.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let (ix, iy) = (1.0 - fx, 1.0 - fy);
     [ix * iy, fx * iy, ix * fy, fx * fy]
 }
@@ -132,7 +152,10 @@ pub fn resolve_disocclusion(
     if disoccluded {
         (sanitize(current), 1.0)
     } else {
-        (sanitize(history), advance_sample_count(sample_count, max_samples))
+        (
+            sanitize(history),
+            advance_sample_count(sample_count, max_samples),
+        )
     }
 }
 
@@ -309,14 +332,22 @@ impl HighResAccumulator {
 #[inline]
 fn clamp_count(n: f32, max: f32) -> f32 {
     let v = finite_or(n, 1.0);
-    let hi = if max.is_finite() { max.max(1.0) } else { f32::INFINITY };
+    let hi = if max.is_finite() {
+        max.max(1.0)
+    } else {
+        f32::INFINITY
+    };
     v.clamp(1.0, hi)
 }
 
 /// Returns `v` when finite, else the `fallback`.
 #[inline]
 fn finite_or(v: f32, fallback: f32) -> f32 {
-    if v.is_finite() { v } else { fallback }
+    if v.is_finite() {
+        v
+    } else {
+        fallback
+    }
 }
 
 /// Clamps `v` to `[a, b]`, swapping the bounds if they are inverted.
@@ -437,7 +468,10 @@ mod tests {
     #[test]
     fn luma_clip_box_brackets_mean() {
         let (lo, hi) = luma_clip_box(Vec3::splat(0.5), Vec3::splat(0.1), 2.0);
-        assert!(lo.x <= 0.3 + 1e-6 && hi.x >= 0.7 - 1e-6, "lo {lo:?} hi {hi:?}");
+        assert!(
+            lo.x <= 0.3 + 1e-6 && hi.x >= 0.7 - 1e-6,
+            "lo {lo:?} hi {hi:?}"
+        );
     }
 
     #[test]
@@ -466,7 +500,11 @@ mod tests {
         let (colors, filled) = acc.resolve();
         for (i, &f) in filled.iter().enumerate() {
             if f {
-                assert!((colors[i] - col).length() < 1e-5, "texel {i} {:?}", colors[i]);
+                assert!(
+                    (colors[i] - col).length() < 1e-5,
+                    "texel {i} {:?}",
+                    colors[i]
+                );
             }
         }
     }
@@ -490,7 +528,11 @@ mod tests {
         // A sample at the exact centre of a texel deposits its full weight there.
         let mut acc = HighResAccumulator::new(3, 3);
         acc.splat(Vec2::new(1.0, 1.0), Vec3::ONE, 1.0);
-        assert!((acc.weight_at(1, 1) - 1.0).abs() < 1e-6, "{}", acc.weight_at(1, 1));
+        assert!(
+            (acc.weight_at(1, 1) - 1.0).abs() < 1e-6,
+            "{}",
+            acc.weight_at(1, 1)
+        );
     }
 
     #[test]

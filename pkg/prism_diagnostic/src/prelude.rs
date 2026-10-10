@@ -1,20 +1,15 @@
 //! Common imports: `use prism_diagnostic::prelude::*;`.
 
-pub use crate::filter::{max_level, set_max_level};
 pub use crate::aggregate::{
     AnomalyConfig, AssembledTrace, ClusterAggregator, ClusterFrametimeReport, CriticalPath,
     DistributedSpan, InstanceFrameReport, InstanceSummary, SampleRate, SamplingController,
     SamplingDecision, SpanId, SpanKind, TraceAssembler, TraceId,
 };
-pub use crate::sampling::{
-    call_tree, collapsed_stacks, facet_by_lane, facet_by_thread, flat_profile, fuse, CallTree,
-    CollapsedStack, FlatProfile, FoldDirection, FrameId, FusedProfile, FusionSource,
-    InstrumentedSpan, LaneKind, SamplingProfiler, StackSample, SymbolTable,
-};
 pub use crate::determinism::{
     compare, DeterminismTrace, FrameHash, FrameInput, InputRecorder, InputReplay, StateHasher,
     TraceDiff,
 };
+pub use crate::filter::{max_level, set_max_level};
 pub use crate::instrument::{
     instrument, next_flow_id, FlowId, Instrumentable, JobFlow, JobScope, SystemScope,
 };
@@ -26,6 +21,11 @@ pub use crate::model::{Event, Field, FieldValue, Level};
 pub use crate::profiler::{
     frame_mark, gpu_zone, message, plot, set_profiler, FrameMark, GpuZone, NoopProfiler, PlotValue,
     ProfiledZone, Profiler, Zone,
+};
+pub use crate::sampling::{
+    call_tree, collapsed_stacks, facet_by_lane, facet_by_thread, flat_profile, fuse, CallTree,
+    CollapsedStack, FlatProfile, FoldDirection, FrameId, FusedProfile, FusionSource,
+    InstrumentedSpan, LaneKind, SamplingProfiler, StackSample, SymbolTable,
 };
 pub use crate::sink::{set_sink, CaptureSink, ConsoleSink, FileSink, Sink};
 pub use crate::span::Scope;
@@ -42,8 +42,8 @@ pub use crate::{debug, error, event, info, instrument_system, profiled_zone, spa
 #[cfg(feature = "gpu")]
 pub use crate::gpu::{
     next_correlation_id, CorrelationBreakdown, CorrelationId, GpuBubble, GpuClockCalibration,
-    GpuQueueId, GpuReadbackRing, GpuSpan, GpuTick, ProjectedGpuSpan, TimelineEntry,
-    TimelineTrack, UnifiedTimeline,
+    GpuQueueId, GpuReadbackRing, GpuSpan, GpuTick, ProjectedGpuSpan, TimelineEntry, TimelineTrack,
+    UnifiedTimeline,
 };
 
 #[cfg(feature = "remote")]

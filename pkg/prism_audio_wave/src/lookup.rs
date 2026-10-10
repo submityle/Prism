@@ -208,7 +208,11 @@ mod tests {
         let lookup = ParameterLookup::new(&field);
         // Mid-grid should land between the occluded origin and open far corner.
         let mid = lookup.sample(Vec3::splat(1.0));
-        assert!(mid.direct_gain > 0.0 && mid.direct_gain < 1.0, "{}", mid.direct_gain);
+        assert!(
+            mid.direct_gain > 0.0 && mid.direct_gain < 1.0,
+            "{}",
+            mid.direct_gain
+        );
     }
 
     #[test]

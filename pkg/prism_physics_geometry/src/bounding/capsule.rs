@@ -70,7 +70,11 @@ impl Capsule {
         } else {
             let cross = (self.b - self.a).cross(other.b - other.a);
             let n = cross.normalize_or_zero();
-            if n == Vec3::ZERO { Vec3::Y } else { n }
+            if n == Vec3::ZERO {
+                Vec3::Y
+            } else {
+                n
+            }
         };
         let depth = sum - dist;
         let surface_self = near.c1 + normal * self.radius;

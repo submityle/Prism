@@ -193,8 +193,9 @@ impl ConditionedPcm {
             return Err(PcmError::PartialFrame);
         }
         let frames = interleaved.len() / channel_count;
-        let mut channels: Vec<Vec<Sample>> =
-            (0..channel_count).map(|_| Vec::with_capacity(frames)).collect();
+        let mut channels: Vec<Vec<Sample>> = (0..channel_count)
+            .map(|_| Vec::with_capacity(frames))
+            .collect();
         for frame in interleaved.chunks_exact(channel_count) {
             for (ch, &sample) in frame.iter().enumerate() {
                 channels[ch].push(sample);
@@ -286,7 +287,10 @@ mod tests {
         let err = ConditionedPcm::new(48_000, ChannelLayout::Stereo, vec![vec![0.0, 0.0]]);
         assert!(matches!(
             err,
-            Err(PcmError::ChannelCountMismatch { expected: 2, actual: 1 })
+            Err(PcmError::ChannelCountMismatch {
+                expected: 2,
+                actual: 1
+            })
         ));
     }
 
@@ -330,7 +334,10 @@ mod tests {
     fn layout_mapping_covers_canonical_counts() {
         assert_eq!(layout_for_channel_count(1), Some(ChannelLayout::Mono));
         assert_eq!(layout_for_channel_count(2), Some(ChannelLayout::Stereo));
-        assert_eq!(layout_for_channel_count(6), Some(ChannelLayout::Surround5_1));
+        assert_eq!(
+            layout_for_channel_count(6),
+            Some(ChannelLayout::Surround5_1)
+        );
         assert_eq!(layout_for_channel_count(3), None);
     }
 

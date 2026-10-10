@@ -140,11 +140,7 @@ pub fn curvature_masks_from_principals(
 /// A thin convenience over [`curvature_masks_from_principals`] that reads the
 /// principal curvatures off the curvature probe.
 pub fn curvature_masks(curvature: &SdfCurvature, params: &CurvatureMaskParams) -> CurvatureMasks {
-    curvature_masks_from_principals(
-        curvature.principal_max(),
-        curvature.principal_min(),
-        params,
-    )
+    curvature_masks_from_principals(curvature.principal_max(), curvature.principal_min(), params)
 }
 
 /// Samples the field's curvature at `point` and reduces it to weathering
@@ -163,7 +159,9 @@ mod tests {
     use super::{
         curvature_masks_from_principals, sdf_curvature_masks, CurvatureMaskParams, CurvatureMasks,
     };
-    use crate::ray_scene::mesh_signed_distance_field::{signed_distance_field, SignedDistanceField};
+    use crate::ray_scene::mesh_signed_distance_field::{
+        signed_distance_field, SignedDistanceField,
+    };
     use crate::ray_scene::mesh_voxel_padding::pad_voxel_grid;
     use crate::ray_scene::mesh_voxelize::voxelize_surface;
     use crate::ray_scene::triangle_mesh::TriangleMesh;
@@ -186,12 +184,18 @@ mod tests {
             [0.0, 1.0, 1.0],
         ];
         let i = vec![
-            [0, 1, 2], [0, 2, 3],
-            [4, 5, 6], [4, 6, 7],
-            [0, 1, 5], [0, 5, 4],
-            [3, 2, 6], [3, 6, 7],
-            [0, 3, 7], [0, 7, 4],
-            [1, 2, 6], [1, 6, 5],
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 2, 6],
+            [3, 6, 7],
+            [0, 3, 7],
+            [0, 7, 4],
+            [1, 2, 6],
+            [1, 6, 5],
         ];
         mesh(p, i)
     }
@@ -249,10 +253,12 @@ mod tests {
             threshold: 0.5,
         };
         // 0.4 < 0.5 knee -> clean; 1.0 >= saturation -> fully worn.
-        assert!(curvature_masks_from_principals(0.4, 0.0, &params)
-            .edge_wear()
-            .abs()
-            < 1e-6);
+        assert!(
+            curvature_masks_from_principals(0.4, 0.0, &params)
+                .edge_wear()
+                .abs()
+                < 1e-6
+        );
         assert!(
             (curvature_masks_from_principals(1.0, 0.0, &params).edge_wear() - 1.0).abs() < 1e-6
         );

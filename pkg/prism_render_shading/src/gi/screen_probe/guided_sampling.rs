@@ -248,7 +248,11 @@ impl GuidingDistribution {
         let cos_theta = ((band as f32 + residual) / self.nz as f32).clamp(0.0, 1.0);
         let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
         let phi = (sector as f32 + v) / self.nphi as f32 * TAU;
-        let dir = Vec3::new(sin_theta * ops::cos(phi), sin_theta * ops::sin(phi), cos_theta);
+        let dir = Vec3::new(
+            sin_theta * ops::cos(phi),
+            sin_theta * ops::sin(phi),
+            cos_theta,
+        );
 
         let prob = self.weights[chosen] / self.total;
         let pdf = (prob / self.cell_solid_angle()).max(0.0);
@@ -308,7 +312,11 @@ mod tests {
             let cos_theta = (i as f32 + 0.5) / n as f32;
             let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
             let phi = TAU * ((i as f32 * 0.618_034).fract());
-            let dir = Vec3::new(sin_theta * ops::cos(phi), sin_theta * ops::sin(phi), cos_theta);
+            let dir = Vec3::new(
+                sin_theta * ops::cos(phi),
+                sin_theta * ops::sin(phi),
+                cos_theta,
+            );
             sum += dist.pdf(dir);
         }
         // Each sample carries solid angle 2*pi / n.
@@ -431,7 +439,11 @@ mod tests {
             }
         }
         // All weight is in the top band, so (nearly) every sample lands there.
-        assert!(near as f32 / n as f32 > 0.95, "near frac={}", near as f32 / n as f32);
+        assert!(
+            near as f32 / n as f32 > 0.95,
+            "near frac={}",
+            near as f32 / n as f32
+        );
     }
 
     #[test]

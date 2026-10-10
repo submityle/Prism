@@ -217,10 +217,10 @@ impl Timer {
                     let period = self.duration.as_nanos();
                     let total = elapsed.as_nanos();
                     let periods = total / period;
-                    self.times_finished_this_tick =
-                        u32::try_from(periods).unwrap_or(u32::MAX);
+                    self.times_finished_this_tick = u32::try_from(periods).unwrap_or(u32::MAX);
                     let remainder_nanos = total % period;
-                    self.stopwatch.set_elapsed(nanos_to_duration(remainder_nanos));
+                    self.stopwatch
+                        .set_elapsed(nanos_to_duration(remainder_nanos));
                 }
             }
         }

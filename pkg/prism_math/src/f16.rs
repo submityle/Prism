@@ -319,7 +319,10 @@ impl F16Vec2 {
     #[inline]
     #[must_use]
     pub const fn from_vec2(v: Vec2) -> Self {
-        Self { x: F16::from_f32(v.x), y: F16::from_f32(v.y) }
+        Self {
+            x: F16::from_f32(v.x),
+            y: F16::from_f32(v.y),
+        }
     }
     /// Widen back to an `f32` [`Vec2`].
     #[inline]
@@ -340,7 +343,11 @@ impl F16Vec3 {
     #[inline]
     #[must_use]
     pub const fn from_vec3(v: Vec3) -> Self {
-        Self { x: F16::from_f32(v.x), y: F16::from_f32(v.y), z: F16::from_f32(v.z) }
+        Self {
+            x: F16::from_f32(v.x),
+            y: F16::from_f32(v.y),
+            z: F16::from_f32(v.z),
+        }
     }
     /// Widen back to an `f32` [`Vec3`].
     #[inline]
@@ -372,7 +379,12 @@ impl F16Vec4 {
     #[inline]
     #[must_use]
     pub const fn to_vec4(self) -> Vec4 {
-        Vec4::new(self.x.to_f32(), self.y.to_f32(), self.z.to_f32(), self.w.to_f32())
+        Vec4::new(
+            self.x.to_f32(),
+            self.y.to_f32(),
+            self.z.to_f32(),
+            self.w.to_f32(),
+        )
     }
 }
 

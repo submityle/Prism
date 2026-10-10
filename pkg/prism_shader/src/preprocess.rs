@@ -111,7 +111,10 @@ fn parse_directive(line: &str) -> Option<Directive<'_>> {
     let rest = rest.trim_start();
     let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
     let (keyword, argument) = rest.split_at(end);
-    Some(Directive { keyword, argument: argument.trim() })
+    Some(Directive {
+        keyword,
+        argument: argument.trim(),
+    })
 }
 
 /// Returns the first whitespace-delimited identifier of `argument`, if any.
@@ -143,7 +146,11 @@ pub fn preprocess(source: &str, defs: &ShaderDefs) -> Result<String, PreprocessE
                 let name = first_token(directive.argument)
                     .ok_or(PreprocessError::MissingDefineName { line: line_no })?;
                 let defined = defs.contains(name);
-                let cond = if directive.keyword == "ifdef" { defined } else { !defined };
+                let cond = if directive.keyword == "ifdef" {
+                    defined
+                } else {
+                    !defined
+                };
                 let parent_emitting = stack.last().is_none_or(|frame| frame.active);
                 let active = parent_emitting && cond;
                 stack.push(Frame {
@@ -210,7 +217,9 @@ pub fn preprocess(source: &str, defs: &ShaderDefs) -> Result<String, PreprocessE
     }
 
     if let Some(frame) = stack.last() {
-        return Err(PreprocessError::UnterminatedConditional { line: frame.open_line });
+        return Err(PreprocessError::UnterminatedConditional {
+            line: frame.open_line,
+        });
     }
 
     Ok(output.join("\n"))
@@ -244,4 +253,3 @@ impl PreprocessError {
         }
     }
 }
-

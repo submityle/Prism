@@ -441,7 +441,11 @@ mod tests {
         assert_eq!(hit.primitive, 3);
         assert!(approx(hit.t, 5.0, 1e-4), "t = {}", hit.t);
         assert!(hit.front_face);
-        assert!(approx(hit.normal[2], 1.0, 1e-4), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[2], 1.0, 1e-4),
+            "normal = {:?}",
+            hit.normal
+        );
     }
 
     #[test]
@@ -453,7 +457,11 @@ mod tests {
         assert!(approx(hit.t, 5.0, 1e-4), "t = {}", hit.t);
         assert!(!hit.front_face);
         // Normal is flipped to oppose the incident ray.
-        assert!(approx(hit.normal[2], -1.0, 1e-4), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[2], -1.0, 1e-4),
+            "normal = {:?}",
+            hit.normal
+        );
     }
 
     #[test]

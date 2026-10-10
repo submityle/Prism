@@ -155,12 +155,20 @@ pub fn vertex_valence(mesh: &TriangleMesh) -> VertexValence {
         }
     }
 
-    VertexValence { valences, degrees, boundary }
+    VertexValence {
+        valences,
+        degrees,
+        boundary,
+    }
 }
 
 /// Returns the sorted `(min, max)` endpoint pair keying a shared edge.
 fn sorted_pair(a: u32, b: u32) -> (u32, u32) {
-    if a < b { (a, b) } else { (b, a) }
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 #[cfg(test)]
@@ -303,13 +311,8 @@ mod tests {
 
     #[test]
     fn empty_mesh_has_no_stats() {
-        let mesh = TriangleMesh::new(
-            vec![[0.0, 0.0, 0.0]],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-        .unwrap();
+        let mesh =
+            TriangleMesh::new(vec![[0.0, 0.0, 0.0]], Vec::new(), Vec::new(), Vec::new()).unwrap();
         let vv = vertex_valence(&mesh);
         assert!(!vv.is_empty());
         assert_eq!(vv.len(), 1);

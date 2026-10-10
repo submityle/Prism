@@ -44,13 +44,15 @@ pub mod operator;
 
 pub use bilateral::{BaseDetail, BilateralParams, BilateralWindow};
 pub use luminance::{
-    LogHistogramRange, ZoneStats, apply_luminance_ratio, luminance as pixel_luminance,
+    apply_luminance_ratio, luminance as pixel_luminance, LogHistogramRange, ZoneStats,
 };
 pub use operator::{compress_base_detail, fusion_weight, reinhard_local};
 
 use bevy_math::ops;
 
-use luminance::{LUMINANCE_EPSILON, apply_luminance_ratio as apply_ratio, log_luminance, luminance};
+use luminance::{
+    apply_luminance_ratio as apply_ratio, log_luminance, luminance, LUMINANCE_EPSILON,
+};
 
 /// Tunable parameters for [`local_tonemap_pixel`].
 ///
@@ -91,7 +93,11 @@ impl LocalTonemapParams {
     #[must_use]
     fn sanitized(self) -> Self {
         let fix = |v: f32, default: f32, lo: f32, hi: f32| -> f32 {
-            if v.is_finite() { v.clamp(lo, hi) } else { default }
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                default
+            }
         };
         Self {
             exposure: fix(self.exposure, 1.0, 0.0, 1.0e6),
@@ -145,7 +151,8 @@ pub fn local_tonemap_pixel(
     } else {
         l_in
     };
-    let effective_adapt = (p.contrast * adapt_raw + (1.0 - p.contrast) * l_in).max(LUMINANCE_EPSILON);
+    let effective_adapt =
+        (p.contrast * adapt_raw + (1.0 - p.contrast) * l_in).max(LUMINANCE_EPSILON);
 
     // 3. Detail boost in the log domain: amplify the pixel's deviation from its
     //    local adaptation. At a flat region (`l_in == effective_adapt`) the
@@ -155,7 +162,11 @@ pub fn local_tonemap_pixel(
     let boosted_log = log_adapt + (log_in - log_adapt) * p.detail_gain;
     let boosted = {
         let v = ops::exp(boosted_log);
-        if v.is_finite() { v.max(0.0) } else { l_in }
+        if v.is_finite() {
+            v.max(0.0)
+        } else {
+            l_in
+        }
     };
 
     // 4. Reinhard dodge-and-burn with white point, in the key-scaled domain.
@@ -166,7 +177,11 @@ pub fn local_tonemap_pixel(
     let denom = 1.0 + v_scaled;
     let l_out = {
         let v = numerator / denom;
-        if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+        if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     };
 
     // 5. Colour-preserving re-application.
@@ -251,7 +266,10 @@ mod tests {
         let p = LocalTonemapParams::default();
         let dark_surround = pixel_luminance(local_tonemap_pixel([1.0, 1.0, 1.0], 0.1, p));
         let bright_surround = pixel_luminance(local_tonemap_pixel([1.0, 1.0, 1.0], 10.0, p));
-        assert!(bright_surround < dark_surround, "{bright_surround} !< {dark_surround}");
+        assert!(
+            bright_surround < dark_surround,
+            "{bright_surround} !< {dark_surround}"
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@
 //! **no Unreal Engine, Unity, Godot, Wwise, or FMOD source or derived code**;
 //! only publicly documented acoustics knowledge is used.
 
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 use prism_audio_core::math::Sample;
 
 use core::f32::consts::TAU;
@@ -73,7 +73,11 @@ impl Cone {
         let inner_angle = inner_angle.clamp(0.0, TAU);
         let outer_angle = outer_angle.clamp(0.0, TAU).max(inner_angle);
         let outer_gain = outer_gain.clamp(0.0, 1.0);
-        Self { inner_angle, outer_angle, outer_gain }
+        Self {
+            inner_angle,
+            outer_angle,
+            outer_gain,
+        }
     }
 
     /// Computes the cone gain for a precomputed off-axis `angle` in radians.
@@ -254,8 +258,16 @@ mod tests {
     #[test]
     fn gain_zero_vectors_are_full_gain_and_finite() {
         let c = sample_cone();
-        assert!(approx(c.gain(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)), 1.0, 1e-6));
-        assert!(approx(c.gain(Vec3::new(0.0, 0.0, -1.0), Vec3::ZERO), 1.0, 1e-6));
+        assert!(approx(
+            c.gain(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)),
+            1.0,
+            1e-6
+        ));
+        assert!(approx(
+            c.gain(Vec3::new(0.0, 0.0, -1.0), Vec3::ZERO),
+            1.0,
+            1e-6
+        ));
         assert!(c.gain(Vec3::ZERO, Vec3::ZERO).is_finite());
     }
 

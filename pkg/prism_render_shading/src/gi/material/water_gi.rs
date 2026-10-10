@@ -66,7 +66,7 @@ fn clamp_cos(cos: f32) -> f32 {
     if cos.is_finite() {
         cos.clamp(0.0, 1.0)
     } else {
-         0.0
+        0.0
     }
 }
 
@@ -231,9 +231,7 @@ pub fn wet_modulate(dry_roughness: f32, dry_albedo: Vec3, wetness: f32) -> WetMo
 
     // Darker: albedo^(1 + wetness), per channel, with albedo clamped to [0,1].
     let exponent = 1.0 + w;
-    let a = dry_albedo
-        .max(Vec3::ZERO)
-        .min(Vec3::ONE);
+    let a = dry_albedo.max(Vec3::ZERO).min(Vec3::ONE);
     let albedo = Vec3::new(
         ops::powf(a.x, exponent).clamp(0.0, 1.0),
         ops::powf(a.y, exponent).clamp(0.0, 1.0),

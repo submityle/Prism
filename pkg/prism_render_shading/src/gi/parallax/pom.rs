@@ -142,7 +142,12 @@ impl PomSample {
 /// The march uses a view-adaptive layer count, compares the ray depth against
 /// the sampled surface depth layer by layer, and linearly interpolates between
 /// the last two layers once the ray crosses under the surface.
-pub fn parallax_occlusion<F>(base_uv: Vec2, view_ts: Vec3, cfg: PomConfig, height_at: F) -> PomSample
+pub fn parallax_occlusion<F>(
+    base_uv: Vec2,
+    view_ts: Vec3,
+    cfg: PomConfig,
+    height_at: F,
+) -> PomSample
 where
     F: Fn(Vec2) -> f32,
 {
@@ -234,7 +239,11 @@ where
     F: Fn(Vec2) -> f32,
 {
     let h = height_at(uv);
-    let h = if h.is_finite() { h.clamp(0.0, 1.0) } else { 1.0 };
+    let h = if h.is_finite() {
+        h.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
     (1.0 - h).clamp(0.0, 1.0)
 }
 
@@ -254,7 +263,11 @@ fn sanitize_vec2(v: Vec2) -> Vec2 {
 
 /// Replaces any non-finite component of a `Vec3` with `0`.
 fn sanitize_vec3(v: Vec3) -> Vec3 {
-    Vec3::new(finite_or_zero(v.x), finite_or_zero(v.y), finite_or_zero(v.z))
+    Vec3::new(
+        finite_or_zero(v.x),
+        finite_or_zero(v.y),
+        finite_or_zero(v.z),
+    )
 }
 
 /// Returns `x` when finite, otherwise `0`.
@@ -291,8 +304,17 @@ mod tests {
     #[test]
     fn flat_top_surface_has_no_displacement() {
         // Height 1 everywhere == the whole plane sits at depth 0.
-        let s = parallax_occlusion(Vec2::new(0.3, 0.7), view_from_angle(45.0), PomConfig::DEFAULT, flat(1.0));
-        assert!((s.uv - Vec2::new(0.3, 0.7)).length() < 1e-6, "uv {:?}", s.uv);
+        let s = parallax_occlusion(
+            Vec2::new(0.3, 0.7),
+            view_from_angle(45.0),
+            PomConfig::DEFAULT,
+            flat(1.0),
+        );
+        assert!(
+            (s.uv - Vec2::new(0.3, 0.7)).length() < 1e-6,
+            "uv {:?}",
+            s.uv
+        );
         assert!(s.depth.abs() < 1e-6, "depth {}", s.depth);
         assert!(s.hit, "a plane at depth 0 is an immediate hit");
     }
@@ -300,7 +322,12 @@ mod tests {
     #[test]
     fn constant_depth_surface_is_finite_and_bounded() {
         // A flat but *sunken* surface (height 0.5) still resolves cleanly.
-        let s = parallax_occlusion(Vec2::ZERO, view_from_angle(30.0), PomConfig::DEFAULT, flat(0.5));
+        let s = parallax_occlusion(
+            Vec2::ZERO,
+            view_from_angle(30.0),
+            PomConfig::DEFAULT,
+            flat(0.5),
+        );
         assert!(s.uv.is_finite());
         assert!(s.depth.is_finite() && (0.0..=1.0).contains(&s.depth));
     }
@@ -309,10 +336,19 @@ mod tests {
     fn ramp_displaces_along_minus_view_x() {
         // View leans toward +x, so the parallax vector is +x and the sampled
         // coordinate shifts toward -x.
-        let s = parallax_occlusion(Vec2::new(0.5, 0.5), view_from_angle(50.0), PomConfig::DEFAULT, ramp(0.8));
+        let s = parallax_occlusion(
+            Vec2::new(0.5, 0.5),
+            view_from_angle(50.0),
+            PomConfig::DEFAULT,
+            ramp(0.8),
+        );
         assert!(s.hit);
         assert!(s.uv.x < 0.5, "expected shift toward -x, got {}", s.uv.x);
-        assert!((s.uv.y - 0.5).abs() < 1e-6, "y should be untouched: {}", s.uv.y);
+        assert!(
+            (s.uv.y - 0.5).abs() < 1e-6,
+            "y should be untouched: {}",
+            s.uv.y
+        );
     }
 
     #[test]
@@ -333,7 +369,11 @@ mod tests {
     fn near_vertical_view_barely_displaces() {
         let base = Vec2::new(0.5, 0.5);
         let s = parallax_occlusion(base, view_from_angle(0.5), PomConfig::DEFAULT, ramp(0.6));
-        assert!((base.x - s.uv.x).abs() < 5e-3, "near-vertical shift too large: {}", s.uv.x);
+        assert!(
+            (base.x - s.uv.x).abs() < 5e-3,
+            "near-vertical shift too large: {}",
+            s.uv.x
+        );
     }
 
     #[test]
@@ -341,7 +381,12 @@ mod tests {
         let base = Vec2::new(0.2, 0.9);
         // Zero vector and a grazing (z ~ 0) vector both bail out.
         let a = parallax_occlusion(base, Vec3::ZERO, PomConfig::DEFAULT, ramp(0.6));
-        let b = parallax_occlusion(base, Vec3::new(1.0, 0.0, 0.0), PomConfig::DEFAULT, ramp(0.6));
+        let b = parallax_occlusion(
+            base,
+            Vec3::new(1.0, 0.0, 0.0),
+            PomConfig::DEFAULT,
+            ramp(0.6),
+        );
         assert_eq!(a.uv, base);
         assert!(!a.hit);
         assert_eq!(b.uv, base);
@@ -352,16 +397,36 @@ mod tests {
     fn non_finite_inputs_never_produce_nan() {
         let base = Vec2::new(f32::NAN, 0.5);
         let view = Vec3::new(f32::INFINITY, 0.0, 1.0);
-        let s = parallax_occlusion(base, view, PomConfig::new(f32::NAN, -3.0, f32::NAN), flat(0.5));
+        let s = parallax_occlusion(
+            base,
+            view,
+            PomConfig::new(f32::NAN, -3.0, f32::NAN),
+            flat(0.5),
+        );
         assert!(s.uv.is_finite());
         assert!(s.depth.is_finite());
     }
 
     #[test]
     fn adaptive_layer_count_tracks_view_angle() {
-        let head_on = parallax_occlusion(Vec2::ZERO, view_from_angle(1.0), PomConfig::DEFAULT, ramp(0.5));
-        let grazing = parallax_occlusion(Vec2::ZERO, view_from_angle(80.0), PomConfig::DEFAULT, ramp(0.5));
-        assert!(head_on.layers <= grazing.layers, "head-on {} grazing {}", head_on.layers, grazing.layers);
+        let head_on = parallax_occlusion(
+            Vec2::ZERO,
+            view_from_angle(1.0),
+            PomConfig::DEFAULT,
+            ramp(0.5),
+        );
+        let grazing = parallax_occlusion(
+            Vec2::ZERO,
+            view_from_angle(80.0),
+            PomConfig::DEFAULT,
+            ramp(0.5),
+        );
+        assert!(
+            head_on.layers <= grazing.layers,
+            "head-on {} grazing {}",
+            head_on.layers,
+            grazing.layers
+        );
         assert!(head_on.layers >= 8 && grazing.layers <= 32);
     }
 

@@ -70,6 +70,6 @@ pub mod telemetry;
 
 pub use command::AudioCommand;
 pub use epoch::{Collector, GraphConsumer, GraphHandoff, GraphProducer, RetireQueue, Retirer};
-pub use ring::{RingConsumer, RingProducer, ring};
-pub use runtime::{AudioRuntime, AudioRuntimeClient, AudioRuntimeConfig, runtime};
+pub use ring::{ring, RingConsumer, RingProducer};
+pub use runtime::{runtime, AudioRuntime, AudioRuntimeClient, AudioRuntimeConfig};
 pub use telemetry::TelemetryFrame;

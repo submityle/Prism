@@ -227,7 +227,8 @@ impl OmmBuilder {
         let index = if let Some(&existing) = self.dedup.get(&key) {
             existing
         } else {
-            let new_index = u32::try_from(self.micromaps.len()).expect("micromap count exceeds u32");
+            let new_index =
+                u32::try_from(self.micromaps.len()).expect("micromap count exceeds u32");
             self.micromaps.push(baked);
             self.dedup.insert(key, new_index);
             new_index

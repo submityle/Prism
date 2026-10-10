@@ -40,7 +40,11 @@ pub const ISO_MAX: f32 = 12_800.0;
 #[inline]
 #[must_use]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Sanitizes a scalar to `[0, 1]`, mapping non-finite input to `0`.
@@ -158,7 +162,10 @@ mod tests {
     fn overlay_neutral_endpoints_and_range() {
         for i in 0..=20 {
             let b = i as f32 / 20.0;
-            assert!((overlay(b, 0.5) - b).abs() < 1.0e-6, "neutral failed at b={b}");
+            assert!(
+                (overlay(b, 0.5) - b).abs() < 1.0e-6,
+                "neutral failed at b={b}"
+            );
         }
         for i in 0..=20 {
             let g = i as f32 / 20.0;
@@ -179,9 +186,15 @@ mod tests {
     fn apply_grain_identities() {
         let color = Vec3::new(0.2, 0.5, 0.8);
         let id_grain = apply_grain(color, 0.0, 1.0);
-        assert!((id_grain - color).abs().max_element() < 1.0e-6, "grain=0 not identity: {id_grain:?}");
+        assert!(
+            (id_grain - color).abs().max_element() < 1.0e-6,
+            "grain=0 not identity: {id_grain:?}"
+        );
         let id_strength = apply_grain(color, 0.7, 0.0);
-        assert!((id_strength - color).abs().max_element() < 1.0e-6, "strength=0 not identity: {id_strength:?}");
+        assert!(
+            (id_strength - color).abs().max_element() < 1.0e-6,
+            "strength=0 not identity: {id_strength:?}"
+        );
     }
 
     /// Grained output never leaves `[0, 1]`, even for out-of-range inputs and
@@ -219,7 +232,10 @@ mod tests {
         for i in 0..=10 {
             let s = i as f32 / 10.0;
             let dev = (overlay_grain(base, grain, s) - base).abs();
-            assert!(dev + 1.0e-6 >= prev, "non-monotone: s={s} dev={dev} prev={prev}");
+            assert!(
+                dev + 1.0e-6 >= prev,
+                "non-monotone: s={s} dev={dev} prev={prev}"
+            );
             assert!(s > prev_s);
             prev = dev;
             prev_s = s;
@@ -234,7 +250,10 @@ mod tests {
         // Brighter signal takes a larger absolute grain for the same grain/strength.
         let dim = (gain_blend(0.2, 1.0, 0.5) - 0.2).abs();
         let bright = (gain_blend(0.8, 1.0, 0.5) - 0.8).abs();
-        assert!(bright > dim, "signal dependence failed: dim={dim} bright={bright}");
+        assert!(
+            bright > dim,
+            "signal dependence failed: dim={dim} bright={bright}"
+        );
         // Range + strength monotonicity.
         let mut prev = 0.0_f32;
         for i in 0..=10 {
@@ -266,7 +285,11 @@ mod tests {
         assert_eq!(iso_to_strength(ISO_MIN), 0.0);
         assert_eq!(iso_to_strength(50.0), 0.0, "sub-min ISO clamps to zero");
         assert!((iso_to_strength(ISO_MAX) - 1.0).abs() < 1.0e-6);
-        assert_eq!(iso_to_strength(25_600.0), 1.0, "above-max ISO clamps to one");
+        assert_eq!(
+            iso_to_strength(25_600.0),
+            1.0,
+            "above-max ISO clamps to one"
+        );
         assert_eq!(iso_to_strength(f32::NAN), 0.0);
 
         let mut prev = -1.0_f32;
@@ -274,7 +297,10 @@ mod tests {
         while iso <= ISO_MAX {
             let s = iso_to_strength(iso);
             assert!((0.0..=1.0).contains(&s), "s={s} iso={iso}");
-            assert!(s + 1.0e-7 >= prev, "non-monotone s={s} prev={prev} iso={iso}");
+            assert!(
+                s + 1.0e-7 >= prev,
+                "non-monotone s={s} prev={prev} iso={iso}"
+            );
             prev = s;
             iso *= 1.4142;
         }

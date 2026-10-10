@@ -164,8 +164,8 @@ pub fn generate_mip_chain_premultiplied(base: Rgba8Image, space: ColorSpace) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::box_downsample;
+    use super::*;
     use alloc::vec;
 
     fn solid(w: u32, h: u32, c: [u8; 4]) -> Rgba8Image {
@@ -200,15 +200,12 @@ mod tests {
         let img = Rgba8Image::new(
             2,
             2,
-            vec![
-                [255, 0, 0, 255],
-                [0, 0, 0, 0],
-                [0, 0, 0, 0],
-                [0, 0, 0, 0],
-            ],
+            vec![[255, 0, 0, 255], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
         )
         .unwrap();
-        let out = premultiplied_box_downsample(&img, ColorSpace::Linear).unwrap().as_slice()[0];
+        let out = premultiplied_box_downsample(&img, ColorSpace::Linear)
+            .unwrap()
+            .as_slice()[0];
         assert_eq!([out[0], out[1], out[2]], [255, 0, 0], "colour preserved");
         // Coverage is still the box average: 255/4 -> 64 (round half-up).
         assert_eq!(out[3], 64);
@@ -219,23 +216,27 @@ mod tests {
         let img = Rgba8Image::new(
             2,
             2,
-            vec![
-                [255, 0, 0, 255],
-                [0, 0, 0, 0],
-                [0, 0, 0, 0],
-                [0, 0, 0, 0],
-            ],
+            vec![[255, 0, 0, 255], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
         )
         .unwrap();
         let straight = box_downsample(&img, ColorSpace::Linear).unwrap().as_slice()[0];
-        let premul = premultiplied_box_downsample(&img, ColorSpace::Linear).unwrap().as_slice()[0];
-        assert!(premul[0] > straight[0], "premul red {} > straight {}", premul[0], straight[0]);
+        let premul = premultiplied_box_downsample(&img, ColorSpace::Linear)
+            .unwrap()
+            .as_slice()[0];
+        assert!(
+            premul[0] > straight[0],
+            "premul red {} > straight {}",
+            premul[0],
+            straight[0]
+        );
     }
 
     #[test]
     fn fully_transparent_footprint_is_finite_and_zero_alpha() {
         let img = solid(2, 2, [123, 45, 67, 0]);
-        let out = premultiplied_box_downsample(&img, ColorSpace::Linear).unwrap().as_slice()[0];
+        let out = premultiplied_box_downsample(&img, ColorSpace::Linear)
+            .unwrap()
+            .as_slice()[0];
         assert_eq!(out[3], 0, "coverage stays zero");
         // Colour falls back to the plain mean (no NaN / no divide-by-zero).
         assert_eq!([out[0], out[1], out[2]], [123, 45, 67]);
@@ -256,8 +257,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let out = premultiplied_box_downsample(&img, ColorSpace::Srgb).unwrap().as_slice()[0];
-        assert_eq!([out[0], out[1], out[2]], [255, 255, 255], "white edge survives");
+        let out = premultiplied_box_downsample(&img, ColorSpace::Srgb)
+            .unwrap()
+            .as_slice()[0];
+        assert_eq!(
+            [out[0], out[1], out[2]],
+            [255, 255, 255],
+            "white edge survives"
+        );
         assert_eq!(out[3], 128, "half coverage");
     }
 
@@ -265,13 +272,10 @@ mod tests {
     fn partial_coverage_weights_colour_toward_more_opaque_texel() {
         // One texel at a=255 red, one at a=85 (1/3) green; the weighted colour
         // should lean strongly red, unlike a straight 50/50 blend.
-        let img = Rgba8Image::new(
-            2,
-            1,
-            vec![[255, 0, 0, 255], [0, 255, 0, 85]],
-        )
-        .unwrap();
-        let out = premultiplied_box_downsample(&img, ColorSpace::Linear).unwrap().as_slice()[0];
+        let img = Rgba8Image::new(2, 1, vec![[255, 0, 0, 255], [0, 255, 0, 85]]).unwrap();
+        let out = premultiplied_box_downsample(&img, ColorSpace::Linear)
+            .unwrap()
+            .as_slice()[0];
         assert!(out[0] > out[1], "red {} dominates green {}", out[0], out[1]);
         // Weight 1.0 vs ~0.333: red fraction = 1/(1+1/3) = 0.75.
         assert!(out[0] >= 185 && out[0] <= 196, "red = {}", out[0]);
@@ -293,11 +297,15 @@ mod tests {
 
     #[test]
     fn odd_dimension_is_not_reducible() {
-        assert!(premultiplied_box_downsample(&solid(3, 2, [1, 2, 3, 4]), ColorSpace::Linear).is_none());
+        assert!(
+            premultiplied_box_downsample(&solid(3, 2, [1, 2, 3, 4]), ColorSpace::Linear).is_none()
+        );
     }
 
     #[test]
     fn one_by_one_does_not_reduce() {
-        assert!(premultiplied_box_downsample(&solid(1, 1, [9, 9, 9, 9]), ColorSpace::Linear).is_none());
+        assert!(
+            premultiplied_box_downsample(&solid(1, 1, [9, 9, 9, 9]), ColorSpace::Linear).is_none()
+        );
     }
 }

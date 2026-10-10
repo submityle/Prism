@@ -13,8 +13,8 @@
 //! [`BSplineSurface`] trades interpolation for `C2` continuity across tiled
 //! patches, which is what large procedural surfaces usually want.
 
-use crate::curve::Interpolatable;
 use crate::curve::spline::{bezier_cubic, bezier_cubic_tangent};
+use crate::curve::Interpolatable;
 use crate::vec::Vec3;
 
 /// Uniform cubic B-spline basis evaluation for four control points.
@@ -93,7 +93,9 @@ impl BezierPatch {
     #[inline]
     #[must_use]
     pub fn normal(&self, u: f32, v: f32) -> Vec3 {
-        self.tangent_u(u, v).cross(self.tangent_v(u, v)).normalize_or_zero()
+        self.tangent_u(u, v)
+            .cross(self.tangent_v(u, v))
+            .normalize_or_zero()
     }
 
     /// Collapse each `u`-row to one point by applying `basis` along `v`.
@@ -156,7 +158,9 @@ impl BSplineSurface {
     #[inline]
     #[must_use]
     pub fn normal(&self, u: f32, v: f32) -> Vec3 {
-        self.tangent_u(u, v).cross(self.tangent_v(u, v)).normalize_or_zero()
+        self.tangent_u(u, v)
+            .cross(self.tangent_v(u, v))
+            .normalize_or_zero()
     }
 
     /// Collapse each `u`-row to one point by applying `basis` along `v`.

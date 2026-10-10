@@ -446,9 +446,7 @@ fn resolve_core(
                                 continue;
                             }
                             let bi = b as usize;
-                            if scope == PairScope::VirtualOnly
-                                && ai < real_count
-                                && bi < real_count
+                            if scope == PairScope::VirtualOnly && ai < real_count && bi < real_count
                             {
                                 // Both samples are real vertices; the friction
                                 // point-to-point tier already resolved this
@@ -751,7 +749,13 @@ mod tests {
         let mut particles = positions.clone();
         let virtuals =
             generate_virtual_particles(&[[0, 1, 2]], &VirtualParticlePattern::nvcloth_default());
-        resolve_self_collision_virtual_augment(&mut particles, &inverse_masses, &virtuals, 1.0, 0.2);
+        resolve_self_collision_virtual_augment(
+            &mut particles,
+            &inverse_masses,
+            &virtuals,
+            1.0,
+            0.2,
+        );
 
         // Face penetration resolved: the intruder is pushed out along +z.
         assert!(particles[3].z > positions[3].z + 1e-4);

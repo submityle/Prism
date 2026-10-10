@@ -364,8 +364,7 @@ impl BrickGrid {
                         for j in 0..n {
                             for i in 0..n {
                                 let node = brick_origin
-                                    + Vec3::new(i as f32, j as f32, k as f32)
-                                        * grid.voxel_size;
+                                    + Vec3::new(i as f32, j as f32, k as f32) * grid.voxel_size;
                                 let d = f(node);
                                 let d = if d.is_finite() { d } else { FAR_DISTANCE };
                                 let a = if d < 0.0 { -d } else { d };

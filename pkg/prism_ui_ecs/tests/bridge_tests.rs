@@ -18,12 +18,10 @@ struct Name {
 #[test]
 fn one_way_pull_propagates_component_to_signal() {
     let mut world = World::new();
-    let entity = world
-        .spawn(Health {
-            current: 30,
-            max: 100,
-        })
-        ;
+    let entity = world.spawn(Health {
+        current: 30,
+        max: 100,
+    });
     let rt = Runtime::new();
     let current = rt.signal(0i32);
 
@@ -37,12 +35,10 @@ fn one_way_pull_propagates_component_to_signal() {
 #[test]
 fn unchanged_component_does_not_repropagate() {
     let mut world = World::new();
-    let entity = world
-        .spawn(Health {
-            current: 50,
-            max: 100,
-        })
-        ;
+    let entity = world.spawn(Health {
+        current: 50,
+        max: 100,
+    });
     let rt = Runtime::new();
     let current = rt.signal(0i32);
 
@@ -59,12 +55,10 @@ fn unchanged_component_does_not_repropagate() {
 #[test]
 fn two_way_push_writes_back_to_component() {
     let mut world = World::new();
-    let entity = world
-        .spawn(Health {
-            current: 0,
-            max: 100,
-        })
-        ;
+    let entity = world.spawn(Health {
+        current: 0,
+        max: 100,
+    });
     let rt = Runtime::new();
     let current = rt.signal(80i32);
 
@@ -83,12 +77,10 @@ fn two_way_push_writes_back_to_component() {
 #[test]
 fn round_trip_does_not_oscillate() {
     let mut world = World::new();
-    let entity = world
-        .spawn(Health {
-            current: 10,
-            max: 100,
-        })
-        ;
+    let entity = world.spawn(Health {
+        current: 10,
+        max: 100,
+    });
     let rt = Runtime::new();
     let current = rt.signal(0i32);
 
@@ -154,12 +146,10 @@ fn missing_component_is_safe() {
 #[test]
 fn direct_entity_binding_without_bridge() {
     let mut world = World::new();
-    let entity = world
-        .spawn(Health {
-            current: 42,
-            max: 50,
-        })
-        ;
+    let entity = world.spawn(Health {
+        current: 42,
+        max: 50,
+    });
     let rt = Runtime::new();
     let current = rt.signal(0i32);
 

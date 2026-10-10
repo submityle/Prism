@@ -119,7 +119,10 @@ mod tests {
             snap(2, &[(1, ParameterKind::Linear, 8.0)]),
         ]);
         // Weights 1 and 3 -> 0.75 toward 8 = 6.0.
-        let r = resolve_blend(&reg, &[(SnapshotId::new(1), 1.0), (SnapshotId::new(2), 3.0)]);
+        let r = resolve_blend(
+            &reg,
+            &[(SnapshotId::new(1), 1.0), (SnapshotId::new(2), 3.0)],
+        );
         assert!((r.get(ParameterId::new(1)).expect("present") - 6.0).abs() < EPS);
     }
 
@@ -129,7 +132,10 @@ mod tests {
             snap(1, &[(1, ParameterKind::Linear, 2.0)]),
             snap(2, &[(2, ParameterKind::Linear, 5.0)]),
         ]);
-        let r = resolve_blend(&reg, &[(SnapshotId::new(1), 1.0), (SnapshotId::new(2), 1.0)]);
+        let r = resolve_blend(
+            &reg,
+            &[(SnapshotId::new(1), 1.0), (SnapshotId::new(2), 1.0)],
+        );
         assert!((r.get(ParameterId::new(1)).expect("present") - 2.0).abs() < EPS);
         assert!((r.get(ParameterId::new(2)).expect("present") - 5.0).abs() < EPS);
     }
@@ -137,7 +143,10 @@ mod tests {
     #[test]
     fn missing_snapshot_is_skipped() {
         let reg = registry_with(&[snap(1, &[(1, ParameterKind::Linear, 3.0)])]);
-        let r = resolve_blend(&reg, &[(SnapshotId::new(1), 1.0), (SnapshotId::new(99), 1.0)]);
+        let r = resolve_blend(
+            &reg,
+            &[(SnapshotId::new(1), 1.0), (SnapshotId::new(99), 1.0)],
+        );
         assert!((r.get(ParameterId::new(1)).expect("present") - 3.0).abs() < EPS);
     }
 
@@ -148,9 +157,15 @@ mod tests {
             snap(2, &[(1, ParameterKind::Linear, 400.0)]),
         ]);
         let kinds = blend_kinds(&reg, &[SnapshotId::new(2), SnapshotId::new(1)]);
-        assert_eq!(kinds.get(&ParameterId::new(1)).copied(), Some(ParameterKind::Hertz));
+        assert_eq!(
+            kinds.get(&ParameterId::new(1)).copied(),
+            Some(ParameterKind::Hertz)
+        );
         // Hertz domain -> geometric mean of 100 and 400 is 200.
-        let r = resolve_blend(&reg, &[(SnapshotId::new(1), 1.0), (SnapshotId::new(2), 1.0)]);
+        let r = resolve_blend(
+            &reg,
+            &[(SnapshotId::new(1), 1.0), (SnapshotId::new(2), 1.0)],
+        );
         assert!((r.get(ParameterId::new(1)).expect("present") - 200.0).abs() < 1e-2);
     }
 

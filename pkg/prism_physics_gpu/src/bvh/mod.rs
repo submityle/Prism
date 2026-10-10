@@ -36,10 +36,10 @@ pub mod overlap_gpu;
 pub mod quality;
 pub mod query;
 pub mod query_gpu;
-pub mod refit;
-pub mod refit_gpu;
 pub mod ray;
 pub mod ray_gpu;
+pub mod refit;
+pub mod refit_gpu;
 pub mod resident;
 pub mod resident_driver;
 pub mod sah_cost_gpu;
@@ -49,17 +49,17 @@ pub use cpu::{cpu_build_lbvh, Lbvh, NO_PARENT};
 pub use gpu::GpuLbvh;
 pub use overlap::{cpu_bvh_aabb_overlap, OverlapQueryError};
 pub use overlap_gpu::GpuBvhOverlap;
-pub use query::{cpu_bvh_pairs, BvhQueryError};
-pub use refit::cpu_refit_lbvh;
 pub use quality::{
     lbvh_sah_cost, lbvh_sah_cost_weighted, surface_area, RebuildDecision, RefitQualityTracker,
     DEFAULT_INTERSECTION_COST, DEFAULT_MAX_REFITS_BETWEEN_REBUILDS, DEFAULT_REBUILD_COST_FACTOR,
     DEFAULT_TRAVERSAL_COST,
 };
-pub use refit_gpu::GpuBvhRefit;
-pub use sah_cost_gpu::GpuBvhSahCost;
+pub use query::{cpu_bvh_pairs, BvhQueryError};
 pub use query_gpu::GpuBvhQuery;
 pub use ray::{cpu_bvh_raycast_any, cpu_bvh_raycast_closest, Ray, RayHit};
 pub use ray_gpu::GpuBvhRaycast;
+pub use refit::cpu_refit_lbvh;
+pub use refit_gpu::GpuBvhRefit;
 pub use resident::GpuResidentLbvh;
 pub use resident_driver::{FrameUpdate, ResidentBvhDriver, UpdateAction};
+pub use sah_cost_gpu::GpuBvhSahCost;

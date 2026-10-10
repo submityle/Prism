@@ -180,7 +180,12 @@ mod tests {
 
     fn quad() -> TriangleMesh {
         mesh(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
             vec![[0, 1, 2], [0, 2, 3]],
         )
     }
@@ -199,12 +204,18 @@ mod tests {
             [0.0, 1.0, 1.0],
         ];
         let i = vec![
-            [0, 1, 2], [0, 2, 3], // z = 0
-            [4, 5, 6], [4, 6, 7], // z = 1
-            [0, 1, 5], [0, 5, 4], // y = 0
-            [3, 2, 6], [3, 6, 7], // y = 1
-            [0, 3, 7], [0, 7, 4], // x = 0
-            [1, 2, 6], [1, 6, 5], // x = 1
+            [0, 1, 2],
+            [0, 2, 3], // z = 0
+            [4, 5, 6],
+            [4, 6, 7], // z = 1
+            [0, 1, 5],
+            [0, 5, 4], // y = 0
+            [3, 2, 6],
+            [3, 6, 7], // y = 1
+            [0, 3, 7],
+            [0, 7, 4], // x = 0
+            [1, 2, 6],
+            [1, 6, 5], // x = 1
         ];
         mesh(p, i)
     }
@@ -240,9 +251,8 @@ mod tests {
     fn classes_partition_every_cell() {
         let grid = voxelize_surface(&cube(), 5).unwrap();
         let solid = solidify(&grid);
-        let total = (solid.dims()[0] as usize)
-            * (solid.dims()[1] as usize)
-            * (solid.dims()[2] as usize);
+        let total =
+            (solid.dims()[0] as usize) * (solid.dims()[1] as usize) * (solid.dims()[2] as usize);
         assert_eq!(solid.classes().len(), total);
         assert_eq!(
             solid.surface_count() + solid.interior_count() + solid.outside_count(),
@@ -259,9 +269,7 @@ mod tests {
             for y in 0..dims[1] {
                 for x in 0..dims[0] {
                     let coord = [x, y, z];
-                    if is_boundary(coord, dims)
-                        && solid.classify(coord) != CellClass::Surface
-                    {
+                    if is_boundary(coord, dims) && solid.classify(coord) != CellClass::Surface {
                         assert_eq!(
                             solid.classify(coord),
                             CellClass::Outside,

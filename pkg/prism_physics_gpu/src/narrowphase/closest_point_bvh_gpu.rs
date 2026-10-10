@@ -248,16 +248,17 @@ impl GpuSceneClosestPoint {
         let point_hull = ConvexHull::from_point();
         let mut headers: Vec<GpuHullHeader> = Vec::with_capacity(n + 1);
         let mut packed_vertices: Vec<[f32; 4]> = Vec::new();
-        let push_hull = |hull: &ConvexHull, headers: &mut Vec<GpuHullHeader>, verts: &mut Vec<[f32; 4]>| {
-            let vert_offset = u32::try_from(verts.len()).unwrap_or(u32::MAX);
-            for v in hull.vertices() {
-                verts.push([v.x, v.y, v.z, 0.0]);
-            }
-            let vert_count = u32::try_from(hull.vertices().len()).unwrap_or(u32::MAX);
-            headers.push(GpuHullHeader {
-                data: [vert_offset, vert_count, 0, 0],
-            });
-        };
+        let push_hull =
+            |hull: &ConvexHull, headers: &mut Vec<GpuHullHeader>, verts: &mut Vec<[f32; 4]>| {
+                let vert_offset = u32::try_from(verts.len()).unwrap_or(u32::MAX);
+                for v in hull.vertices() {
+                    verts.push([v.x, v.y, v.z, 0.0]);
+                }
+                let vert_count = u32::try_from(hull.vertices().len()).unwrap_or(u32::MAX);
+                headers.push(GpuHullHeader {
+                    data: [vert_offset, vert_count, 0, 0],
+                });
+            };
         push_hull(&point_hull, &mut headers, &mut packed_vertices);
         for hull in target_hulls {
             push_hull(hull, &mut headers, &mut packed_vertices);
@@ -285,15 +286,21 @@ impl GpuSceneClosestPoint {
         for pose in target_poses {
             push_pose(pose, &mut packed_poses);
         }
-        let poses_buf =
-            buffer::storage_read(device, "prism_narrowphase_closest_point_poses", &packed_poses);
+        let poses_buf = buffer::storage_read(
+            device,
+            "prism_narrowphase_closest_point_poses",
+            &packed_poses,
+        );
 
         // Pairs: lane i solves (query body 0, target body i + 1).
         let packed_pairs: Vec<[u32; 2]> = (0..n)
             .map(|i| [0_u32, u32::try_from(i + 1).unwrap_or(u32::MAX)])
             .collect();
-        let pairs_buf =
-            buffer::storage_read(device, "prism_narrowphase_closest_point_pairs", &packed_pairs);
+        let pairs_buf = buffer::storage_read(
+            device,
+            "prism_narrowphase_closest_point_pairs",
+            &packed_pairs,
+        );
 
         let out_bytes = OUT_BYTES * n as u64;
         let out_buf =
@@ -312,8 +319,7 @@ impl GpuSceneClosestPoint {
             ],
         });
 
-        let out_stage =
-            buffer::staging(device, "prism_narrowphase_closest_point_stage", out_bytes);
+        let out_stage = buffer::staging(device, "prism_narrowphase_closest_point_stage", out_bytes);
 
         let groups = u32::try_from(n.div_ceil(WORKGROUP)).unwrap_or(u32::MAX);
 
@@ -341,7 +347,11 @@ impl GpuSceneClosestPoint {
             let intersecting = slot.normal_flag[3] == INTERSECTING_FLAG;
             let core_distance = slot.point_dist[3];
             let point_b = Vec3::new(slot.point_dist[0], slot.point_dist[1], slot.point_dist[2]);
-            let normal = Vec3::new(slot.normal_flag[0], slot.normal_flag[1], slot.normal_flag[2]);
+            let normal = Vec3::new(
+                slot.normal_flag[0],
+                slot.normal_flag[1],
+                slot.normal_flag[2],
+            );
             let hit = closest_hit_from_core(
                 u32::try_from(i).unwrap_or(u32::MAX),
                 target_radii[i],

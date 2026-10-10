@@ -27,8 +27,8 @@
 
 use glam::Vec3;
 use prism_physics_gpu::{
-    cpu_capsule_triangle_narrowphase, Capsule, CapsuleTrianglePair, Contact, GpuContext,
-    GpuCapsuleTriangleNarrowphase, Triangle,
+    cpu_capsule_triangle_narrowphase, Capsule, CapsuleTrianglePair, Contact,
+    GpuCapsuleTriangleNarrowphase, GpuContext, Triangle,
 };
 
 /// Tolerance on the normal, depth, and point; the only inexact steps are the

@@ -66,9 +66,15 @@ impl Default for Mat4 {
 
 impl Mat2 {
     /// The zero matrix.
-    pub const ZERO: Self = Self { x_axis: Vec2::ZERO, y_axis: Vec2::ZERO };
+    pub const ZERO: Self = Self {
+        x_axis: Vec2::ZERO,
+        y_axis: Vec2::ZERO,
+    };
     /// The identity matrix.
-    pub const IDENTITY: Self = Self { x_axis: Vec2::X, y_axis: Vec2::Y };
+    pub const IDENTITY: Self = Self {
+        x_axis: Vec2::X,
+        y_axis: Vec2::Y,
+    };
 
     /// Build from column vectors.
     #[inline]
@@ -108,14 +114,26 @@ impl Mat2 {
 
 impl Mat3 {
     /// The zero matrix.
-    pub const ZERO: Self = Self { x_axis: Vec3::ZERO, y_axis: Vec3::ZERO, z_axis: Vec3::ZERO };
+    pub const ZERO: Self = Self {
+        x_axis: Vec3::ZERO,
+        y_axis: Vec3::ZERO,
+        z_axis: Vec3::ZERO,
+    };
     /// The identity matrix.
-    pub const IDENTITY: Self = Self { x_axis: Vec3::X, y_axis: Vec3::Y, z_axis: Vec3::Z };
+    pub const IDENTITY: Self = Self {
+        x_axis: Vec3::X,
+        y_axis: Vec3::Y,
+        z_axis: Vec3::Z,
+    };
 
     /// Build from column vectors.
     #[inline]
     pub const fn from_cols(x_axis: Vec3, y_axis: Vec3, z_axis: Vec3) -> Self {
-        Self { x_axis, y_axis, z_axis }
+        Self {
+            x_axis,
+            y_axis,
+            z_axis,
+        }
     }
     /// Diagonal matrix from a scale vector.
     #[inline]
@@ -187,16 +205,29 @@ impl Mat3 {
 
 impl Mat4 {
     /// The zero matrix.
-    pub const ZERO: Self =
-        Self { x_axis: Vec4::ZERO, y_axis: Vec4::ZERO, z_axis: Vec4::ZERO, w_axis: Vec4::ZERO };
+    pub const ZERO: Self = Self {
+        x_axis: Vec4::ZERO,
+        y_axis: Vec4::ZERO,
+        z_axis: Vec4::ZERO,
+        w_axis: Vec4::ZERO,
+    };
     /// The identity matrix.
-    pub const IDENTITY: Self =
-        Self { x_axis: Vec4::X, y_axis: Vec4::Y, z_axis: Vec4::Z, w_axis: Vec4::W };
+    pub const IDENTITY: Self = Self {
+        x_axis: Vec4::X,
+        y_axis: Vec4::Y,
+        z_axis: Vec4::Z,
+        w_axis: Vec4::W,
+    };
 
     /// Build from column vectors.
     #[inline]
     pub const fn from_cols(x_axis: Vec4, y_axis: Vec4, z_axis: Vec4, w_axis: Vec4) -> Self {
-        Self { x_axis, y_axis, z_axis, w_axis }
+        Self {
+            x_axis,
+            y_axis,
+            z_axis,
+            w_axis,
+        }
     }
     /// Translation matrix.
     #[inline]
@@ -242,7 +273,11 @@ impl Mat4 {
     /// Extract the upper-left 3x3 submatrix.
     #[inline]
     pub fn to_mat3(self) -> Mat3 {
-        Mat3::from_cols(self.x_axis.truncate(), self.y_axis.truncate(), self.z_axis.truncate())
+        Mat3::from_cols(
+            self.x_axis.truncate(),
+            self.y_axis.truncate(),
+            self.z_axis.truncate(),
+        )
     }
     /// Transpose.
     #[inline]
@@ -348,12 +383,7 @@ impl Mat4 {
         let sign_a = Vec4::new(1.0, -1.0, 1.0, -1.0);
         let sign_b = Vec4::new(-1.0, 1.0, -1.0, 1.0);
 
-        let inverse = Mat4::from_cols(
-            inv0 * sign_a,
-            inv1 * sign_b,
-            inv2 * sign_a,
-            inv3 * sign_b,
-        );
+        let inverse = Mat4::from_cols(inv0 * sign_a, inv1 * sign_b, inv2 * sign_a, inv3 * sign_b);
 
         let col0 = Vec4::new(
             inverse.x_axis.x,
@@ -467,7 +497,11 @@ impl Sub for Mat4 {
 
 impl core::fmt::Debug for Mat3 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Mat3[{:?}, {:?}, {:?}]", self.x_axis, self.y_axis, self.z_axis)
+        write!(
+            f,
+            "Mat3[{:?}, {:?}, {:?}]",
+            self.x_axis, self.y_axis, self.z_axis
+        )
     }
 }
 impl core::fmt::Debug for Mat4 {

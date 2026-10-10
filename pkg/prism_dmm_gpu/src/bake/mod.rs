@@ -38,9 +38,7 @@ use wgpu::{
     PipelineLayoutDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages,
 };
 
-use prism_dmm::{
-    packed_len, DmmSubdivisionLevel, ScaleBiasMode, TextureDisplacementMap, WrapMode,
-};
+use prism_dmm::{packed_len, DmmSubdivisionLevel, ScaleBiasMode, TextureDisplacementMap, WrapMode};
 
 use crate::buffer;
 use crate::context::GpuContext;
@@ -114,16 +112,28 @@ pub struct GpuBakedDmm {
 /// A compiled, reusable `GPU` displaced-micro-map pipeline set.
 pub struct GpuDmmBaker {
     /// Kept alive so the sample pipeline it produced stays valid.
-    #[expect(dead_code, reason = "kept alive so the pipeline it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline it produced stays valid"
+    )]
     sample_module: ShaderModule,
     /// Kept alive so the reduce pipeline it produced stays valid.
-    #[expect(dead_code, reason = "kept alive so the pipeline it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline it produced stays valid"
+    )]
     reduce_module: ShaderModule,
     /// Kept alive so the quantize pipeline it produced stays valid.
-    #[expect(dead_code, reason = "kept alive so the pipeline it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline it produced stays valid"
+    )]
     quantize_module: ShaderModule,
     /// Kept alive so the pack pipeline it produced stays valid.
-    #[expect(dead_code, reason = "kept alive so the pipeline it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline it produced stays valid"
+    )]
     pack_module: ShaderModule,
     /// Layout wiring params, the height texture, and the sampled heights.
     sample_layout: BindGroupLayout,
@@ -412,8 +422,20 @@ impl GpuDmmBaker {
         let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_dmm_bake_encoder"),
         });
-        dispatch(&mut enc, "prism_dmm_sample_pass", &self.sample, &sample_bind, vertex_groups);
-        dispatch(&mut enc, "prism_dmm_reduce_pass", &self.reduce, &reduce_bind, 1);
+        dispatch(
+            &mut enc,
+            "prism_dmm_sample_pass",
+            &self.sample,
+            &sample_bind,
+            vertex_groups,
+        );
+        dispatch(
+            &mut enc,
+            "prism_dmm_reduce_pass",
+            &self.reduce,
+            &reduce_bind,
+            1,
+        );
         dispatch(
             &mut enc,
             "prism_dmm_quantize_pass",
@@ -421,8 +443,19 @@ impl GpuDmmBaker {
             &quantize_bind,
             vertex_groups,
         );
-        dispatch(&mut enc, "prism_dmm_pack_pass", &self.pack, &pack_bind, pack_groups);
-        buffer::copy(&mut enc, &codes_buf, &codes_stage, u64::from(vertex_count) * 4);
+        dispatch(
+            &mut enc,
+            "prism_dmm_pack_pass",
+            &self.pack,
+            &pack_bind,
+            pack_groups,
+        );
+        buffer::copy(
+            &mut enc,
+            &codes_buf,
+            &codes_stage,
+            u64::from(vertex_count) * 4,
+        );
         buffer::copy(&mut enc, &out_buf, &out_stage, u64::from(word_count) * 4);
         ctx.queue().submit([enc.finish()]);
 

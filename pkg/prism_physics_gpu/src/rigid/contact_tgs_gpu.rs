@@ -316,7 +316,11 @@ impl GpuRigidTgsContactSolver {
 
         let soft = SoftParams::from_hertz(tgs.contact_hertz, tgs.contact_damping_ratio, h);
         let params = Params {
-            gravity: [integrator.gravity.x, integrator.gravity.y, integrator.gravity.z],
+            gravity: [
+                integrator.gravity.x,
+                integrator.gravity.y,
+                integrator.gravity.z,
+            ],
             h,
             inv_h: 1.0 / h,
             linear_damping_scale: (1.0 - integrator.linear_damping * h).max(0.0),
@@ -346,8 +350,10 @@ impl GpuRigidTgsContactSolver {
         // Per-contact uploads in colour-reordered order, matching the device
         // contact buffer and the host `cpu_solve_contacts_tgs` snapshot.
         let gpu_contacts: Vec<GpuRigidContact> = ordered.iter().map(|c| c.to_gpu()).collect();
-        let initial_arm_a: Vec<[f32; 4]> = ordered.iter().map(|c| vec3_to_vec4(&c.anchor_a)).collect();
-        let initial_arm_b: Vec<[f32; 4]> = ordered.iter().map(|c| vec3_to_vec4(&c.anchor_b)).collect();
+        let initial_arm_a: Vec<[f32; 4]> =
+            ordered.iter().map(|c| vec3_to_vec4(&c.anchor_a)).collect();
+        let initial_arm_b: Vec<[f32; 4]> =
+            ordered.iter().map(|c| vec3_to_vec4(&c.anchor_b)).collect();
         let base_separation: Vec<f32> = ordered.iter().map(|c| -c.penetration).collect();
         let approach_speed: Vec<f32> = ordered
             .iter()
@@ -369,8 +375,11 @@ impl GpuRigidTgsContactSolver {
             buffer::storage_rw_init(device, "rigid_contact_tgs_positions", &positions);
         let orientations_buf =
             buffer::storage_rw_init(device, "rigid_contact_tgs_orientations", &orientations);
-        let inverse_mass_buf =
-            buffer::storage_read(device, "rigid_contact_tgs_inverse_masses", &state.inverse_masses);
+        let inverse_mass_buf = buffer::storage_read(
+            device,
+            "rigid_contact_tgs_inverse_masses",
+            &state.inverse_masses,
+        );
         let inverse_inertia_buf = buffer::storage_read(
             device,
             "rigid_contact_tgs_inverse_inertias",
@@ -469,7 +478,14 @@ impl GpuRigidTgsContactSolver {
             );
             // 2. Warm start: re-apply the accumulated impulse, one dispatch per
             //    batch over disjoint movable bodies.
-            self.each_batch(&mut encoder, "warm_start", &self.warm_start, plan, colouring, &colour_binds);
+            self.each_batch(
+                &mut encoder,
+                "warm_start",
+                &self.warm_start,
+                plan,
+                colouring,
+                &colour_binds,
+            );
             // 3. Re-linearise every contact against the moved geometry.
             self.pass(
                 &mut encoder,
@@ -480,7 +496,14 @@ impl GpuRigidTgsContactSolver {
                 None,
             );
             // 4. One biased Gauss-Seidel sweep, per batch.
-            self.each_batch(&mut encoder, "solve_biased", &self.solve_biased, plan, colouring, &colour_binds);
+            self.each_batch(
+                &mut encoder,
+                "solve_biased",
+                &self.solve_biased,
+                plan,
+                colouring,
+                &colour_binds,
+            );
             // 5. Integrate positions and orientations.
             self.pass(
                 &mut encoder,
@@ -492,7 +515,14 @@ impl GpuRigidTgsContactSolver {
             );
             // 6. Bias-free relaxation sweeps, per batch.
             for _ in 0..relax_iterations {
-                self.each_batch(&mut encoder, "solve_relax", &self.solve_relax, plan, colouring, &colour_binds);
+                self.each_batch(
+                    &mut encoder,
+                    "solve_relax",
+                    &self.solve_relax,
+                    plan,
+                    colouring,
+                    &colour_binds,
+                );
             }
         }
 
@@ -512,15 +542,28 @@ impl GpuRigidTgsContactSolver {
             buffer::staging(device, "rigid_contact_tgs_angular_stage", plan.body_bytes);
         let positions_stage =
             buffer::staging(device, "rigid_contact_tgs_positions_stage", plan.body_bytes);
-        let orientations_stage =
-            buffer::staging(device, "rigid_contact_tgs_orientations_stage", plan.body_bytes);
+        let orientations_stage = buffer::staging(
+            device,
+            "rigid_contact_tgs_orientations_stage",
+            plan.body_bytes,
+        );
         let contact_stage = buffer::staging(
             device,
             "rigid_contact_tgs_contact_stage",
             plan.contact_bytes.max(CONTACT_BYTES),
         );
-        buffer::copy(&mut encoder, &plan.linear_buf, &linear_stage, plan.body_bytes);
-        buffer::copy(&mut encoder, &plan.angular_buf, &angular_stage, plan.body_bytes);
+        buffer::copy(
+            &mut encoder,
+            &plan.linear_buf,
+            &linear_stage,
+            plan.body_bytes,
+        );
+        buffer::copy(
+            &mut encoder,
+            &plan.angular_buf,
+            &angular_stage,
+            plan.body_bytes,
+        );
         buffer::copy(
             &mut encoder,
             &plan.positions_buf,
@@ -594,7 +637,14 @@ impl GpuRigidTgsContactSolver {
     ) {
         for (c, &(start, end)) in colouring.ranges().iter().enumerate() {
             let groups = (end - start).div_ceil(64).max(1);
-            self.pass(encoder, label, pipeline, plan, groups, Some(&colour_binds[c]));
+            self.pass(
+                encoder,
+                label,
+                pipeline,
+                plan,
+                groups,
+                Some(&colour_binds[c]),
+            );
         }
     }
 

@@ -513,7 +513,10 @@ mod tests {
         let peak = goertzel(&out, SR, 1_200.0); // 10th harmonic == center
         let low = goertzel(&out, SR, 240.0); // 2nd harmonic, far below
         let high = goertzel(&out, SR, 3_600.0); // 30th harmonic, far above
-        assert!(peak > low * 4.0 && peak > high * 4.0, "peak={peak} low={low} high={high}");
+        assert!(
+            peak > low * 4.0 && peak > high * 4.0,
+            "peak={peak} low={low} high={high}"
+        );
     }
 
     #[test]
@@ -526,7 +529,10 @@ mod tests {
         // Harmonics 30..60 (3600..7200 Hz).
         let upper_low = harmonic_band(&low_out, f0, 30, 60, &[]);
         let upper_high = harmonic_band(&high_out, f0, 30, 60, &[]);
-        assert!(upper_high > upper_low * 2.0, "low={upper_low} high={upper_high}");
+        assert!(
+            upper_high > upper_low * 2.0,
+            "low={upper_low} high={upper_high}"
+        );
     }
 
     #[test]
@@ -542,7 +548,10 @@ mod tests {
         // only fills in as the window narrows in time, i.e. as bandwidth grows.
         let far_narrow = harmonic_band(&narrow_out, f0, 20, 40, &[]);
         let far_wide = harmonic_band(&wide_out, f0, 20, 40, &[]);
-        assert!(far_wide > far_narrow * 4.0, "narrow={far_narrow} wide={far_wide}");
+        assert!(
+            far_wide > far_narrow * 4.0,
+            "narrow={far_narrow} wide={far_wide}"
+        );
     }
 
     #[test]
@@ -599,7 +608,10 @@ mod tests {
     fn deterministic_across_instances() {
         let mut a = PafNode::new(130.0, 1_300.0, 220.0, 0.7);
         let mut b = PafNode::new(130.0, 1_300.0, 220.0, 0.7);
-        assert_eq!(render(&mut a, SR, 1_024).channel(0), render(&mut b, SR, 1_024).channel(0));
+        assert_eq!(
+            render(&mut a, SR, 1_024).channel(0),
+            render(&mut b, SR, 1_024).channel(0)
+        );
     }
 
     #[test]
@@ -680,7 +692,10 @@ mod tests {
         };
         let mut a = PafNode::from_params(p);
         let mut b = PafNode::new(140.0, 2_100.0, 300.0, 0.7);
-        assert_eq!(render(&mut a, SR, 512).channel(0), render(&mut b, SR, 512).channel(0));
+        assert_eq!(
+            render(&mut a, SR, 512).channel(0),
+            render(&mut b, SR, 512).channel(0)
+        );
     }
 
     #[test]

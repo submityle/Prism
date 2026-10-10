@@ -18,7 +18,7 @@ use core::fmt;
 
 use crate::diff::DiffError;
 use crate::schema::{AttributeValue, FieldMetadata};
-use crate::{Patch, Reflect, ReflectMut, ReflectRef, TypeInfo, TypeMetadata, diff};
+use crate::{diff, Patch, Reflect, ReflectMut, ReflectRef, TypeInfo, TypeMetadata};
 
 /// Custom field-metadata key marking a field as opted into replication.
 pub const REPLICATE_KEY: &str = "replicate";
@@ -49,7 +49,9 @@ impl ReplicationPlan {
     /// Build a plan from an explicit list of field names.
     #[must_use]
     pub fn new(fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        Self { fields: fields.into_iter().map(Into::into).collect() }
+        Self {
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
     }
 
     /// Derive a plan from a struct [`TypeInfo`] and its [`TypeMetadata`] under
@@ -62,7 +64,11 @@ impl ReplicationPlan {
     /// struct's declared field order. Non-struct type info yields an empty
     /// plan.
     #[must_use]
-    pub fn from_type(info: &TypeInfo, meta: Option<&TypeMetadata>, policy: ReplicationPolicy) -> Self {
+    pub fn from_type(
+        info: &TypeInfo,
+        meta: Option<&TypeMetadata>,
+        policy: ReplicationPolicy,
+    ) -> Self {
         let TypeInfo::Struct(struct_info) = info else {
             return Self::default();
         };
@@ -114,7 +120,8 @@ pub fn replicated_diff(
     new: &dyn Reflect,
     plan: &ReplicationPlan,
 ) -> Result<Patch, ReplicationError> {
-    let (ReflectRef::Struct(old_s), ReflectRef::Struct(new_s)) = (old.reflect_ref(), new.reflect_ref())
+    let (ReflectRef::Struct(old_s), ReflectRef::Struct(new_s)) =
+        (old.reflect_ref(), new.reflect_ref())
     else {
         return Err(ReplicationError::NotAStruct);
     };
@@ -167,7 +174,9 @@ impl fmt::Display for ReplicationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ReplicationError::NotAStruct => f.write_str("replicated diff requires struct values"),
-            ReplicationError::MissingField(name) => write!(f, "replicated field `{name}` is missing"),
+            ReplicationError::MissingField(name) => {
+                write!(f, "replicated field `{name}` is missing")
+            }
         }
     }
 }

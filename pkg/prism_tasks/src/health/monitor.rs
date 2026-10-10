@@ -259,7 +259,9 @@ impl StealStats {
     /// attempts). Integer `failures * 1000 / attempts`, so it is deterministic.
     #[must_use]
     pub fn failure_per_mille(self) -> u64 {
-        (self.failures * 1000).checked_div(self.attempts).unwrap_or(0)
+        (self.failures * 1000)
+            .checked_div(self.attempts)
+            .unwrap_or(0)
     }
 }
 

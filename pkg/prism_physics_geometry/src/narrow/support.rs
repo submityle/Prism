@@ -36,7 +36,11 @@ impl SupportMap for Aabb {
 impl SupportMap for Obb {
     fn support_point(&self, dir: Vec3) -> Vec3 {
         let axes = self.axes();
-        let e = [self.half_extents.x, self.half_extents.y, self.half_extents.z];
+        let e = [
+            self.half_extents.x,
+            self.half_extents.y,
+            self.half_extents.z,
+        ];
         let mut point = self.center;
         for i in 0..3 {
             let sign = if dir.dot(axes[i]) >= 0.0 { e[i] } else { -e[i] };

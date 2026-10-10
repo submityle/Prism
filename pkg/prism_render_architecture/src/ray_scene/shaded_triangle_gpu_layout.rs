@@ -173,7 +173,10 @@ impl GpuShadedTriangleBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -229,7 +232,10 @@ impl GpuShadedTriangleBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -314,9 +320,21 @@ mod tests {
                     [base[0] + o2[0], base[1] + o2[1], base[2] + o2[2]],
                 ];
                 let normals = [
-                    [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(0.3, 1.0)],
-                    [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(0.3, 1.0)],
-                    [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(0.3, 1.0)],
+                    [
+                        rng.range(-1.0, 1.0),
+                        rng.range(-1.0, 1.0),
+                        rng.range(0.3, 1.0),
+                    ],
+                    [
+                        rng.range(-1.0, 1.0),
+                        rng.range(-1.0, 1.0),
+                        rng.range(0.3, 1.0),
+                    ],
+                    [
+                        rng.range(-1.0, 1.0),
+                        rng.range(-1.0, 1.0),
+                        rng.range(0.3, 1.0),
+                    ],
                 ];
                 ShadedTriangle::new(positions, normals, i)
             })

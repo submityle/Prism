@@ -9,8 +9,8 @@
 //! so thread-count assertions below branch on `cfg!(feature = "single")` to
 //! stay correct in every feature combo while still verifying the mapping.
 
-use crate::TaskPool;
 use crate::bevy_prelude::{CompatTaskPool, ComputeTaskPool, TaskPoolBuilder};
+use crate::TaskPool;
 use alloc::vec::Vec;
 
 /// Worker count a request of `n` threads resolves to, accounting for the

@@ -75,8 +75,8 @@ use bevy_math::Vec3;
 
 use prism_audio_core::math::Sample;
 
-use crate::hoa::{MAX_HOA_CHANNELS, MAX_HOA_ORDER, acn_index, encode_hoa, hoa_channel_count};
-use crate::hoa_decode::{MAX_ORDER_WEIGHTS, max_re_gains};
+use crate::hoa::{acn_index, encode_hoa, hoa_channel_count, MAX_HOA_CHANNELS, MAX_HOA_ORDER};
+use crate::hoa_decode::{max_re_gains, MAX_ORDER_WEIGHTS};
 
 /// Guard threshold below which the beam normalisation is treated as zero and
 /// replaced by `1.0`, keeping [`Beamformer::beam`] panic and NaN free.
@@ -157,7 +157,11 @@ pub fn beam_gains(pattern: BeamPattern, order: usize) -> [Sample; MAX_ORDER_WEIG
             let numer = lfact * lfact;
             for (n, w) in g.iter_mut().take(order + 1).enumerate() {
                 let denom = factorial(l + n) * factorial(l - n);
-                *w = if denom.abs() > NORM_EPSILON { numer / denom } else { 0.0 };
+                *w = if denom.abs() > NORM_EPSILON {
+                    numer / denom
+                } else {
+                    0.0
+                };
             }
         }
     }
@@ -204,7 +208,11 @@ impl Beamformer {
                 m += 1;
             }
         }
-        Self { order, per_channel_gains, norm }
+        Self {
+            order,
+            per_channel_gains,
+            norm,
+        }
     }
 
     /// The beamformer's Ambisonic order.
@@ -239,7 +247,11 @@ impl Beamformer {
         for i in 0..n {
             acc += coeffs[i] * enc[i] * self.per_channel_gains[i];
         }
-        let denom = if self.norm.abs() > NORM_EPSILON { self.norm } else { 1.0 };
+        let denom = if self.norm.abs() > NORM_EPSILON {
+            self.norm
+        } else {
+            1.0
+        };
         acc / denom
     }
 }
@@ -394,7 +406,10 @@ mod tests {
             while i <= 180 {
                 let gamma = core::f32::consts::PI * (i as Sample) / 180.0;
                 let out = bf.beam(&field, dir_at_angle(gamma));
-                assert!(out >= -1.0e-4, "InPhase order {order}: negative lobe {out} at i={i}");
+                assert!(
+                    out >= -1.0e-4,
+                    "InPhase order {order}: negative lobe {out} at i={i}"
+                );
                 i += 1;
             }
         }
@@ -418,7 +433,10 @@ mod tests {
                 }
                 i += 1;
             }
-            assert!(min < -1.0e-3, "MaxDi order {order}: expected negative lobe, min={min}");
+            assert!(
+                min < -1.0e-3,
+                "MaxDi order {order}: expected negative lobe, min={min}"
+            );
         }
     }
 
@@ -437,7 +455,10 @@ mod tests {
         for order in 1..=MAX_HOA_ORDER {
             let di_maxdi = directivity_index(&beam_gains(BeamPattern::MaxDi, order), order);
             let di_basic = directivity_index(&beam_gains(BeamPattern::Basic, order), order);
-            assert!(di_maxdi > di_basic, "order {order}: maxdi {di_maxdi} !> basic {di_basic}");
+            assert!(
+                di_maxdi > di_basic,
+                "order {order}: maxdi {di_maxdi} !> basic {di_basic}"
+            );
         }
     }
 
@@ -446,7 +467,10 @@ mod tests {
         for order in 1..=MAX_HOA_ORDER {
             let re_maxre = energy_vector_radius(&beam_gains(BeamPattern::MaxRe, order), order);
             let re_basic = energy_vector_radius(&beam_gains(BeamPattern::Basic, order), order);
-            assert!(re_maxre > re_basic, "order {order}: maxre {re_maxre} !> basic {re_basic}");
+            assert!(
+                re_maxre > re_basic,
+                "order {order}: maxre {re_maxre} !> basic {re_basic}"
+            );
             // The optimised radius should track the design radius closely.
             let target = max_re_radius(order);
             assert!(
@@ -478,6 +502,9 @@ mod tests {
         assert_eq!(bf.order(), MAX_HOA_ORDER);
         assert_eq!(bf.per_channel_gains().len(), MAX_HOA_CHANNELS);
         let g = beam_gains(BeamPattern::MaxDi, 99);
-        assert!(approx(g[MAX_HOA_ORDER], 2.0 * MAX_HOA_ORDER as Sample + 1.0));
+        assert!(approx(
+            g[MAX_HOA_ORDER],
+            2.0 * MAX_HOA_ORDER as Sample + 1.0
+        ));
     }
 }

@@ -194,13 +194,7 @@ impl TaskPool {
     /// parallel into its own slot, then fold the slots into `init` following
     /// `order` on the calling thread. `order` must be a permutation of
     /// `0..order.len()` (the callers guarantee it).
-    fn fold_values_in_order<V, A, F, C>(
-        &self,
-        order: &[u32],
-        compute: F,
-        init: A,
-        combine: C,
-    ) -> A
+    fn fold_values_in_order<V, A, F, C>(&self, order: &[u32], compute: F, init: A, combine: C) -> A
     where
         V: Send,
         F: Fn(usize) -> V + Sync,

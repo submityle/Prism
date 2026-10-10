@@ -91,12 +91,12 @@ mod tests {
     /// built from six explicit inward-facing planes.
     fn box_frustum() -> Frustum {
         Frustum::new([
-            Plane::new(Vec3::X, 1.0),      // left:   x >= -1
-            Plane::new(Vec3::NEG_X, 1.0),  // right:  x <=  1
-            Plane::new(Vec3::Y, 1.0),      // bottom: y >= -1
-            Plane::new(Vec3::NEG_Y, 1.0),  // top:    y <=  1
-            Plane::new(Vec3::Z, 1.0),      // near:   z >= -1
-            Plane::new(Vec3::NEG_Z, 1.0),  // far:    z <=  1
+            Plane::new(Vec3::X, 1.0),     // left:   x >= -1
+            Plane::new(Vec3::NEG_X, 1.0), // right:  x <=  1
+            Plane::new(Vec3::Y, 1.0),     // bottom: y >= -1
+            Plane::new(Vec3::NEG_Y, 1.0), // top:    y <=  1
+            Plane::new(Vec3::Z, 1.0),     // near:   z >= -1
+            Plane::new(Vec3::NEG_Z, 1.0), // far:    z <=  1
         ])
     }
 
@@ -114,7 +114,10 @@ mod tests {
         let f = box_frustum();
         assert!(f.intersects_aabb(&Aabb::new(Vec3::splat(-0.5), Vec3::splat(0.5))));
         // Overlapping one face is kept.
-        assert!(f.intersects_aabb(&Aabb::new(Vec3::new(0.5, -0.5, -0.5), Vec3::new(2.0, 0.5, 0.5))));
+        assert!(f.intersects_aabb(&Aabb::new(
+            Vec3::new(0.5, -0.5, -0.5),
+            Vec3::new(2.0, 0.5, 0.5)
+        )));
         // Entirely to the right of the frustum is culled.
         assert!(!f.intersects_aabb(&Aabb::new(Vec3::splat(2.0), Vec3::splat(3.0))));
     }
@@ -155,8 +158,8 @@ mod tests {
         let samples = [
             Vec3::new(0.0, 0.0, -5.0),
             Vec3::new(1.9, 0.9, -2.0),
-            Vec3::new(0.0, 0.0, -0.5), // in front of the near plane
-            Vec3::new(3.0, 0.0, -5.0), // beyond the right plane
+            Vec3::new(0.0, 0.0, -0.5),  // in front of the near plane
+            Vec3::new(3.0, 0.0, -5.0),  // beyond the right plane
             Vec3::new(0.0, 0.0, -20.0), // beyond the far plane
         ];
         for p in samples {

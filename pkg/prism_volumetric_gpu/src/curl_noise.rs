@@ -417,7 +417,12 @@ impl GpuCurlNoise {
     /// slice yields an empty result — storage buffers cannot be zero-sized, so
     /// it is handled by an early return.
     #[must_use]
-    pub fn eval(&self, ctx: &GpuContext, field: &CurlNoiseField, points: &[Vec3]) -> Vec<CurlNoiseSample> {
+    pub fn eval(
+        &self,
+        ctx: &GpuContext,
+        field: &CurlNoiseField,
+        points: &[Vec3],
+    ) -> Vec<CurlNoiseSample> {
         if points.is_empty() {
             return Vec::new();
         }

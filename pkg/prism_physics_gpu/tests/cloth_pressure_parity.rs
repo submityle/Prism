@@ -248,15 +248,7 @@ fn gpu_matches_cpu_with_pinned_vertices() {
         dt,
         32,
     );
-    let cpu = cpu_cloth_pressure(
-        &positions,
-        &inverse_masses,
-        &triangles,
-        target,
-        0.0,
-        dt,
-        32,
-    );
+    let cpu = cpu_cloth_pressure(&positions, &inverse_masses, &triangles, target, 0.0, dt, 32);
     assert_parity("pinned", &gpu, &cpu);
     for p in 0..4 {
         assert!(close(gpu[p], positions[p]), "pinned vertex {p} moved");
@@ -280,12 +272,16 @@ fn gpu_matches_cpu_on_jittered_shell() {
     // reduction order sensitivity is exercised.
     let positions: Vec<Vec3> = unit_cube_positions()
         .into_iter()
-        .map(|p| p + Vec3::new(rng.range(-0.3, 0.3), rng.range(-0.3, 0.3), rng.range(-0.3, 0.3)))
+        .map(|p| {
+            p + Vec3::new(
+                rng.range(-0.3, 0.3),
+                rng.range(-0.3, 0.3),
+                rng.range(-0.3, 0.3),
+            )
+        })
         .collect();
     let rest = brute_force_volume(&positions, &triangles);
-    let inverse_masses: Vec<f32> = (0..positions.len())
-        .map(|_| rng.range(0.5, 2.0))
-        .collect();
+    let inverse_masses: Vec<f32> = (0..positions.len()).map(|_| rng.range(0.5, 2.0)).collect();
     let dt = 1.0 / 90.0;
     let target = 1.6 * rest;
     for iterations in [1_u32, 6, 24] {

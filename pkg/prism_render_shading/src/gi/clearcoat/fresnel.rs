@@ -89,13 +89,21 @@ pub fn weidlich_wilkie_cosine(cos_outside: f32) -> f32 {
 /// to `[0, 1]`.
 #[inline]
 pub fn fresnel_schlick_roughened(f0: f32, cos_theta: f32, roughness: f32) -> f32 {
-    let f0 = if f0.is_finite() { f0.clamp(0.0, 1.0) } else { 0.0 };
+    let f0 = if f0.is_finite() {
+        f0.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let r = roughness.clamp(0.0, 1.0);
     let c = (1.0 - cos_theta.clamp(0.0, 1.0)).max(0.0);
     let c5 = (c * c) * (c * c) * c;
     let f_max = (1.0 - r).max(f0);
     let f = f0 + (f_max - f0) * c5;
-    if f.is_finite() { f.clamp(0.0, 1.0) } else { f0 }
+    if f.is_finite() {
+        f.clamp(0.0, 1.0)
+    } else {
+        f0
+    }
 }
 
 /// Plain scalar Schlick Fresnel of the clearcoat at the fixed [`CLEARCOAT_F0`].
@@ -147,7 +155,11 @@ pub fn f0_from_ior(ior: f32) -> f32 {
     }
     let r = (ior - 1.0) / (ior + 1.0);
     let f0 = r * r;
-    if f0.is_finite() { f0.clamp(0.0, 1.0) } else { CLEARCOAT_F0 }
+    if f0.is_finite() {
+        f0.clamp(0.0, 1.0)
+    } else {
+        CLEARCOAT_F0
+    }
 }
 
 /// Schlick Fresnel for an arbitrary dielectric `ior`, deriving `F0` via
@@ -174,7 +186,11 @@ pub fn coat_transmittance(absorption: f32, thickness: f32, cos_theta_t: f32) -> 
     }
     let c = cos_theta_t.clamp(0.0, 1.0).max(1.0e-4);
     let tau = ops::exp(-a * t / c);
-    if tau.is_finite() { tau.clamp(0.0, 1.0) } else { 1.0 }
+    if tau.is_finite() {
+        tau.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
 }
 
 #[cfg(test)]

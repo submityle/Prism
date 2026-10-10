@@ -160,7 +160,10 @@ impl GpuCurveBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -215,7 +218,10 @@ impl GpuCurveBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -338,7 +344,10 @@ mod tests {
         let gpu = GpuCurveBvhBuffers::from_bvh(&bvh);
         let decoded = gpu.curve(0);
         assert_eq!(decoded.control(), curve.control());
-        assert_eq!(decoded.width_start().to_bits(), curve.width_start().to_bits());
+        assert_eq!(
+            decoded.width_start().to_bits(),
+            curve.width_start().to_bits()
+        );
         assert_eq!(decoded.width_end().to_bits(), curve.width_end().to_bits());
         assert_eq!(decoded.primitive(), curve.primitive());
     }

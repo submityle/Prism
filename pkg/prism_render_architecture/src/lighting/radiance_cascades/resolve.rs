@@ -110,7 +110,10 @@ mod tests {
         let ratio = s0 / s1;
         let expected = m.emission * ((s0 / a) * (1.0 - ratio));
         for r in mean_radiance(&merged) {
-            assert!((r - expected).abs().max_element() <= 1.0e-3, "{r:?} vs {expected:?}");
+            assert!(
+                (r - expected).abs().max_element() <= 1.0e-3,
+                "{r:?} vs {expected:?}"
+            );
         }
     }
 

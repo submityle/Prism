@@ -100,7 +100,10 @@ mod tests {
         let got = shade_skin(input);
         let d = preintegrated::preintegrated_diffuse(0.6, 2.0);
         let expect = input.albedo * input.light_color * d;
-        assert!((got - expect).length() < 1e-6, "got={got:?} expect={expect:?}");
+        assert!(
+            (got - expect).length() < 1e-6,
+            "got={got:?} expect={expect:?}"
+        );
     }
 
     #[test]

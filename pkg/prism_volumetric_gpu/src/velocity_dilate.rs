@@ -508,10 +508,7 @@ impl GpuVelocityDilate {
         dst_stage.unmap();
         debug_assert_eq!(gpu_out.len(), num_out);
 
-        gpu_out
-            .into_iter()
-            .map(|v| Vel2::new(v.x, v.y))
-            .collect()
+        gpu_out.into_iter().map(|v| Vel2::new(v.x, v.y)).collect()
     }
 }
 

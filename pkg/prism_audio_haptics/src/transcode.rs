@@ -121,8 +121,22 @@ impl HapticTranscoder {
     pub fn new(sample_rate: u32, config: TranscodeConfig) -> Self {
         let sr = sample_rate.max(1);
         let config = config.sanitised();
-        let low = Biquad::from_params(BiquadKind::LowPass, sr, config.crossover_hz, CROSSOVER_Q, 0.0, 1);
-        let high = Biquad::from_params(BiquadKind::HighPass, sr, config.crossover_hz, CROSSOVER_Q, 0.0, 1);
+        let low = Biquad::from_params(
+            BiquadKind::LowPass,
+            sr,
+            config.crossover_hz,
+            CROSSOVER_Q,
+            0.0,
+            1,
+        );
+        let high = Biquad::from_params(
+            BiquadKind::HighPass,
+            sr,
+            config.crossover_hz,
+            CROSSOVER_Q,
+            0.0,
+            1,
+        );
         Self {
             sample_rate: sr,
             config,

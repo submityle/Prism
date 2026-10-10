@@ -102,7 +102,11 @@ pub fn multi_bounce_rgb(ao: f32, albedo: Vec3) -> Vec3 {
 #[inline]
 pub fn power_intensity(ao: f32, power: f32, intensity: f32) -> f32 {
     let x = visibility_to_ao(ao);
-    let power = if power.is_finite() { power.max(0.0) } else { 1.0 };
+    let power = if power.is_finite() {
+        power.max(0.0)
+    } else {
+        1.0
+    };
     let intensity = if intensity.is_finite() {
         intensity.clamp(0.0, 1.0)
     } else {
@@ -182,7 +186,10 @@ mod tests {
         for k in 0..=20 {
             let ao = k as f32 / 20.0;
             let lit = multi_bounce(ao, albedo);
-            assert!(lit >= prev - 1.0e-6, "not monotonic at ao={ao}: {lit} < {prev}");
+            assert!(
+                lit >= prev - 1.0e-6,
+                "not monotonic at ao={ao}: {lit} < {prev}"
+            );
             prev = lit;
         }
     }
@@ -255,6 +262,10 @@ mod tests {
     #[test]
     fn unoccluded_constant_is_fully_lit() {
         assert_eq!(GtaoResult::UNOCCLUDED.visibility, 1.0);
-        assert!(approx(GtaoResult::UNOCCLUDED.bent_normal.length(), 1.0, 1.0e-6));
+        assert!(approx(
+            GtaoResult::UNOCCLUDED.bent_normal.length(),
+            1.0,
+            1.0e-6
+        ));
     }
 }

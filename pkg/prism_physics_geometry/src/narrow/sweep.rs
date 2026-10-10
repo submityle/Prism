@@ -60,7 +60,11 @@ pub fn sweep_sphere_triangle(
     let gap0 = origin - cp0;
     if gap0.length_squared() <= radius * radius {
         let normal = fallback_normal(gap0, a, b, c);
-        return Some(SphereSweepHit { t: 0.0, point: cp0, normal });
+        return Some(SphereSweepHit {
+            t: 0.0,
+            point: cp0,
+            normal,
+        });
     }
 
     let mut best: Option<SphereSweepHit> = None;
@@ -98,8 +102,16 @@ pub fn sweep_sphere_triangle(
             let contact_center = ray.at(t);
             let cp = closest_point_on_segment(contact_center, e0, e1);
             let normal = (contact_center - cp).normalize_or_zero();
-            let normal = if normal == Vec3::ZERO { face_normal } else { normal };
-            best = Some(SphereSweepHit { t, point: cp, normal });
+            let normal = if normal == Vec3::ZERO {
+                face_normal
+            } else {
+                normal
+            };
+            best = Some(SphereSweepHit {
+                t,
+                point: cp,
+                normal,
+            });
         }
     }
 
@@ -290,11 +302,7 @@ mod tests {
     #[test]
     fn respects_tmax_short_of_contact() {
         let (a, b, c) = tri();
-        let ray = Ray::with_tmax(
-            Vec3::new(0.0, -0.2, 3.0),
-            Vec3::new(0.0, 0.0, -1.0),
-            1.0,
-        );
+        let ray = Ray::with_tmax(Vec3::new(0.0, -0.2, 3.0), Vec3::new(0.0, 0.0, -1.0), 1.0);
         // Contact needs t = 2.5 but tmax is 1.0.
         assert!(sweep_sphere_triangle(&ray, 0.5, a, b, c).is_none());
     }
@@ -326,8 +334,16 @@ mod tests {
         )
         .expect("capsule contact");
         assert!((hit.t - 2.5).abs() < 1e-3, "t = {}", hit.t);
-        assert!(hit.normal.z > 0.99, "normal points toward axis (+z): {:?}", hit.normal);
-        assert!(hit.point.z.abs() < 1e-3, "contact on the face: {:?}", hit.point);
+        assert!(
+            hit.normal.z > 0.99,
+            "normal points toward axis (+z): {:?}",
+            hit.normal
+        );
+        assert!(
+            hit.point.z.abs() < 1e-3,
+            "contact on the face: {:?}",
+            hit.point
+        );
     }
 
     #[test]

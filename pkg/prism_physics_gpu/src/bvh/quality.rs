@@ -324,7 +324,10 @@ mod tests {
             .collect();
         let c0 = lbvh_sah_cost(&cpu_build_lbvh(&base));
         let c1 = lbvh_sah_cost(&cpu_build_lbvh(&scaled));
-        assert!((c0 - c1).abs() <= 1e-3 * c0, "scale changed cost: {c0} vs {c1}");
+        assert!(
+            (c0 - c1).abs() <= 1e-3 * c0,
+            "scale changed cost: {c0} vs {c1}"
+        );
     }
 
     #[test]
@@ -337,7 +340,10 @@ mod tests {
             .collect();
         let c0 = lbvh_sah_cost(&cpu_build_lbvh(&base));
         let c1 = lbvh_sah_cost(&cpu_build_lbvh(&moved));
-        assert!((c0 - c1).abs() <= 1e-3 * c0, "translation changed cost: {c0} vs {c1}");
+        assert!(
+            (c0 - c1).abs() <= 1e-3 * c0,
+            "translation changed cost: {c0} vs {c1}"
+        );
     }
 
     #[test]
@@ -410,7 +416,7 @@ mod tests {
     fn evaluate_ignores_staleness() {
         let mut t = RefitQualityTracker::new(10.0, 2.0, 1);
         let _ = t.observe_refit(10.0); // now stale by the observe path
-        // The read-only probe only looks at cost growth, not the counter.
+                                       // The read-only probe only looks at cost growth, not the counter.
         assert_eq!(t.evaluate(10.0), RebuildDecision::Refit);
         assert_eq!(t.evaluate(20.01), RebuildDecision::Rebuild);
     }

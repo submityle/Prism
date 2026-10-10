@@ -50,12 +50,7 @@ impl Obb {
     /// (`[u, v, w]`, assumed orthonormal), per-axis `half` extents (folded to
     /// their magnitude), and stable id `primitive`.
     #[must_use]
-    pub fn new(
-        center: [f32; 3],
-        axes: [[f32; 3]; 3],
-        half: [f32; 3],
-        primitive: u32,
-    ) -> Self {
+    pub fn new(center: [f32; 3], axes: [[f32; 3]; 3], half: [f32; 3], primitive: u32) -> Self {
         Self {
             center,
             half: [half[0].abs(), half[1].abs(), half[2].abs()],
@@ -192,7 +187,11 @@ impl Obb {
         // Rotate the local axis normal back to world space (orthonormal frame
         // ⇒ unit length). Orient against the incident ray.
         let a = self.axes[axis];
-        let outward = [a[0] * outward_sign, a[1] * outward_sign, a[2] * outward_sign];
+        let outward = [
+            a[0] * outward_sign,
+            a[1] * outward_sign,
+            a[2] * outward_sign,
+        ];
         let normal = if front_face {
             outward
         } else {
@@ -500,9 +499,10 @@ mod tests {
         assert!(hit.front_face);
         // Normal is unit and perpendicular to the local v/w plane: its x
         // component equals c (the +u axis x), facing the −x ray (positive x).
-        let nlen =
-            (hit.normal[0] * hit.normal[0] + hit.normal[1] * hit.normal[1] + hit.normal[2] * hit.normal[2])
-                .sqrt();
+        let nlen = (hit.normal[0] * hit.normal[0]
+            + hit.normal[1] * hit.normal[1]
+            + hit.normal[2] * hit.normal[2])
+            .sqrt();
         assert!(approx(nlen, 1.0, 1e-5), "normal not unit: {nlen}");
         assert!(hit.normal[0] > 0.0, "normal must face the −x ray");
     }
@@ -536,8 +536,16 @@ mod tests {
         let mut rng = Rng::new(0x0B_B123);
         let mut hits = 0u32;
         for _ in 0..6_000 {
-            let center = [rng.range(-4.0, 4.0), rng.range(-4.0, 4.0), rng.range(-4.0, 4.0)];
-            let half = [rng.range(0.3, 2.0), rng.range(0.3, 2.0), rng.range(0.3, 2.0)];
+            let center = [
+                rng.range(-4.0, 4.0),
+                rng.range(-4.0, 4.0),
+                rng.range(-4.0, 4.0),
+            ];
+            let half = [
+                rng.range(0.3, 2.0),
+                rng.range(0.3, 2.0),
+                rng.range(0.3, 2.0),
+            ];
             // Random orthonormal frame: rotate the identity about +z then about
             // the resulting +x by rational half-angle maps (no transcendentals).
             let (cz, sz) = unit_pair(rng.range(-2.0, 2.0));
@@ -562,7 +570,11 @@ mod tests {
                 center[1] + lx * axes[0][1] + ly * axes[1][1] + lz * axes[2][1],
                 center[2] + lx * axes[0][2] + ly * axes[1][2] + lz * axes[2][2],
             ];
-            let dir = [target[0] - origin[0], target[1] - origin[1], target[2] - origin[2]];
+            let dir = [
+                target[0] - origin[0],
+                target[1] - origin[1],
+                target[2] - origin[2],
+            ];
             if dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] < 1e-6 {
                 continue;
             }
@@ -584,7 +596,10 @@ mod tests {
                 if (local[k].abs() - m).abs() < 2e-3 * (1.0 + m) {
                     on_face += 1;
                 } else {
-                    assert!(local[k].abs() <= m + 2e-3 * (1.0 + m), "point outside slab {k}");
+                    assert!(
+                        local[k].abs() <= m + 2e-3 * (1.0 + m),
+                        "point outside slab {k}"
+                    );
                 }
             }
             assert!(on_face >= 1, "hit point not on any face: {local:?}");
@@ -596,7 +611,10 @@ mod tests {
             assert!(approx(nlen, 1.0, 2e-3), "normal not unit: {nlen}");
 
             let facing = hit.normal[0] * dir[0] + hit.normal[1] * dir[1] + hit.normal[2] * dir[2];
-            assert!(facing <= 1e-3, "normal not oriented against the ray: {facing}");
+            assert!(
+                facing <= 1e-3,
+                "normal not oriented against the ray: {facing}"
+            );
         }
         assert!(hits > 2_000, "too few surface hits accumulated: {hits}");
     }
@@ -618,8 +636,16 @@ mod tests {
         let mut rng = Rng::new(0xB0_FACE);
         let boxes: Vec<Obb> = (0..48)
             .map(|i| {
-                let center = [rng.range(-6.0, 6.0), rng.range(-6.0, 6.0), rng.range(-6.0, 6.0)];
-                let half = [rng.range(0.3, 1.2), rng.range(0.3, 1.2), rng.range(0.3, 1.2)];
+                let center = [
+                    rng.range(-6.0, 6.0),
+                    rng.range(-6.0, 6.0),
+                    rng.range(-6.0, 6.0),
+                ];
+                let half = [
+                    rng.range(0.3, 1.2),
+                    rng.range(0.3, 1.2),
+                    rng.range(0.3, 1.2),
+                ];
                 let (cz, sz) = unit_pair(rng.range(-2.0, 2.0));
                 let axes = frame_z(cz, sz);
                 Obb::new(center, axes, half, i)
@@ -629,8 +655,16 @@ mod tests {
         assert_eq!(bvh.primitive_count(), boxes.len());
 
         for _ in 0..3_000 {
-            let origin = [rng.range(-10.0, 10.0), rng.range(-10.0, 10.0), rng.range(-10.0, 10.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             if dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] < 1e-6 {
                 continue;
             }

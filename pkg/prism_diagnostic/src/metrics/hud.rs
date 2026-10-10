@@ -73,11 +73,7 @@ impl Hud {
     }
 
     /// Build a [`HudSnapshot`] from frame stats and registered metrics.
-    pub fn snapshot(
-        &self,
-        frame: &FrameStatsSnapshot,
-        metrics: &RegistrySnapshot,
-    ) -> HudSnapshot {
+    pub fn snapshot(&self, frame: &FrameStatsSnapshot, metrics: &RegistrySnapshot) -> HudSnapshot {
         let mut lines = Vec::new();
         lines.push(self.title.clone());
         lines.extend(frame_and_metric_lines(frame, metrics));
@@ -93,10 +89,7 @@ pub fn hud_lines(frame: &FrameStatsSnapshot, metrics: &RegistrySnapshot) -> Vec<
     frame_and_metric_lines(frame, metrics)
 }
 
-fn frame_and_metric_lines(
-    frame: &FrameStatsSnapshot,
-    metrics: &RegistrySnapshot,
-) -> Vec<String> {
+fn frame_and_metric_lines(frame: &FrameStatsSnapshot, metrics: &RegistrySnapshot) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!(
         "FPS {:.1} (min {:.1} / max {:.1})",
@@ -154,7 +147,10 @@ mod tests {
         assert!(text.contains("FPS 62.5"), "missing fps line: {text}");
         assert!(text.contains("mem_mb: 512.000"), "missing gauge: {text}");
         assert!(text.contains("entities: 128"), "missing counter: {text}");
-        assert!(text.contains("latency_ms: n=2"), "missing histogram: {text}");
+        assert!(
+            text.contains("latency_ms: n=2"),
+            "missing histogram: {text}"
+        );
     }
 
     #[test]

@@ -46,12 +46,7 @@ impl EnvelopeFollower {
     }
 
     /// Recomputes the attack/release coefficients for new time constants.
-    pub fn set_times(
-        &mut self,
-        sample_rate: u32,
-        attack_seconds: Sample,
-        release_seconds: Sample,
-    ) {
+    pub fn set_times(&mut self, sample_rate: u32, attack_seconds: Sample, release_seconds: Sample) {
         self.attack_coef = one_pole_coef(sample_rate, attack_seconds);
         self.release_coef = one_pole_coef(sample_rate, release_seconds);
     }

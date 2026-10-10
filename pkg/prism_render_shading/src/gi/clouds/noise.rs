@@ -73,7 +73,11 @@ fn hash_to_unit(h: u32) -> f32 {
 /// `[0, 1]`.
 #[inline]
 fn fade(t: f32) -> f32 {
-    let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+    let t = if t.is_finite() {
+        t.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
@@ -333,7 +337,11 @@ mod tests {
 
     #[test]
     fn value_noise_matches_corner_hashes_at_integers() {
-        for cell in [IVec3::new(0, 0, 0), IVec3::new(2, -3, 5), IVec3::new(-7, 11, 4)] {
+        for cell in [
+            IVec3::new(0, 0, 0),
+            IVec3::new(2, -3, 5),
+            IVec3::new(-7, 11, 4),
+        ] {
             let p = Vec3::new(cell.x as f32, cell.y as f32, cell.z as f32);
             let expected = corner_value(cell);
             assert!((value_noise_3d(p) - expected).abs() < 1e-6);
@@ -386,7 +394,10 @@ mod tests {
             hash_to_unit(mix_u32(h ^ 0x68bc_21eb)),
             hash_to_unit(mix_u32(h ^ 0x02e5_be93)),
         );
-        assert!(worley_3d(feature) < 1e-3, "expected near-zero at feature point");
+        assert!(
+            worley_3d(feature) < 1e-3,
+            "expected near-zero at feature point"
+        );
     }
 
     #[test]

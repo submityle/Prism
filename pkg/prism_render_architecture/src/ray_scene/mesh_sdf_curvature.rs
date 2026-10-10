@@ -128,16 +128,13 @@ fn central_hessian(field: &SignedDistanceField, point: [f32; 3], h: f32) -> [[f3
     let inv_quad = 1.0 / (4.0 * h * h);
 
     // Diagonal: f(+) - 2 f0 + f(-).
-    let fxx = (offset_sample(field, point, 1.0, 0.0, 0.0, h)
-        - 2.0 * centre
+    let fxx = (offset_sample(field, point, 1.0, 0.0, 0.0, h) - 2.0 * centre
         + offset_sample(field, point, -1.0, 0.0, 0.0, h))
         * inv_sq;
-    let fyy = (offset_sample(field, point, 0.0, 1.0, 0.0, h)
-        - 2.0 * centre
+    let fyy = (offset_sample(field, point, 0.0, 1.0, 0.0, h) - 2.0 * centre
         + offset_sample(field, point, 0.0, -1.0, 0.0, h))
         * inv_sq;
-    let fzz = (offset_sample(field, point, 0.0, 0.0, 1.0, h)
-        - 2.0 * centre
+    let fzz = (offset_sample(field, point, 0.0, 0.0, 1.0, h) - 2.0 * centre
         + offset_sample(field, point, 0.0, 0.0, -1.0, h))
         * inv_sq;
 
@@ -170,10 +167,7 @@ fn central_hessian(field: &SignedDistanceField, point: [f32; 3], h: f32) -> [[f3
 /// Hessian. The principal curvatures are recovered as `mean +/- sqrt(mean^2 -
 /// K)`, with the discriminant clamped to zero so discretization noise can
 /// never produce a `NaN`.
-fn curvature_from_derivatives(
-    gradient: [f32; 3],
-    hessian: [[f32; 3]; 3],
-) -> Option<SdfCurvature> {
+fn curvature_from_derivatives(gradient: [f32; 3], hessian: [[f32; 3]; 3]) -> Option<SdfCurvature> {
     let [gx, gy, gz] = gradient;
     let g2 = gx * gx + gy * gy + gz * gz;
     if g2 <= f32::MIN_POSITIVE {
@@ -193,10 +187,8 @@ fn curvature_from_derivatives(
 
     let trace = a + d + f;
     // Quadratic form g^T H g.
-    let ghg = gx * gx * a
-        + gy * gy * d
-        + gz * gz * f
-        + 2.0 * (gx * gy * b + gx * gz * c + gy * gz * e);
+    let ghg =
+        gx * gx * a + gy * gy * d + gz * gz * f + 2.0 * (gx * gy * b + gx * gz * c + gy * gz * e);
     let mean = (trace * g2 - ghg) / (2.0 * g_len3);
 
     // Adjugate of the symmetric Hessian (itself symmetric).
@@ -227,7 +219,9 @@ fn curvature_from_derivatives(
 #[cfg(test)]
 mod tests {
     use super::{curvature_from_derivatives, sdf_curvature, SdfCurvature};
-    use crate::ray_scene::mesh_signed_distance_field::{signed_distance_field, SignedDistanceField};
+    use crate::ray_scene::mesh_signed_distance_field::{
+        signed_distance_field, SignedDistanceField,
+    };
     use crate::ray_scene::mesh_voxel_padding::pad_voxel_grid;
     use crate::ray_scene::mesh_voxelize::voxelize_surface;
     use crate::ray_scene::triangle_mesh::TriangleMesh;
@@ -250,12 +244,18 @@ mod tests {
             [0.0, 1.0, 1.0],
         ];
         let i = vec![
-            [0, 1, 2], [0, 2, 3],
-            [4, 5, 6], [4, 6, 7],
-            [0, 1, 5], [0, 5, 4],
-            [3, 2, 6], [3, 6, 7],
-            [0, 3, 7], [0, 7, 4],
-            [1, 2, 6], [1, 6, 5],
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 2, 6],
+            [3, 6, 7],
+            [0, 3, 7],
+            [0, 7, 4],
+            [1, 2, 6],
+            [1, 6, 5],
         ];
         mesh(p, i)
     }

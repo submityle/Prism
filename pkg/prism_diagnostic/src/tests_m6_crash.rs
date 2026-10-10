@@ -1,8 +1,8 @@
 //! M6 tests for the crash-report format + binary writer/reader.
 
 use crate::crash::{
-    CRASH_REPORT_MAGIC, CRASH_REPORT_VERSION, CrashContext, CrashReason, CrashReport, ModuleEntry,
-    RegisterSnapshot, StackFrame, ThreadContext,
+    CrashContext, CrashReason, CrashReport, ModuleEntry, RegisterSnapshot, StackFrame,
+    ThreadContext, CRASH_REPORT_MAGIC, CRASH_REPORT_VERSION,
 };
 
 fn sample_context() -> CrashContext {

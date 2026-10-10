@@ -322,7 +322,9 @@ mod tests {
             tx.send(()).unwrap();
         });
         // The second acquire cannot complete while the first permit is held.
-        assert!(rx.recv_timeout(std::time::Duration::from_millis(50)).is_err());
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
         drop(held);
         rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
         handle.join().unwrap();

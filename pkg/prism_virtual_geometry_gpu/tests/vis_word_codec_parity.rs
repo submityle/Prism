@@ -153,7 +153,12 @@ fn multi_workgroup_dispatch_matches_golden() {
     // 130 pairs span three workgroups (workgroup_size 64); vary both fields so
     // tiling and per-thread indexing are both exercised.
     let inputs: Vec<VisWordInput> = (0..130u32)
-        .map(|i| input(i.wrapping_mul(2_654_435_761), i.wrapping_mul(40_503).wrapping_add(7)))
+        .map(|i| {
+            input(
+                i.wrapping_mul(2_654_435_761),
+                i.wrapping_mul(40_503).wrapping_add(7),
+            )
+        })
         .collect();
     let gpu = codec.encode(&ctx, &inputs);
     let want: Vec<VisWordCodec> = inputs.iter().map(expected).collect();

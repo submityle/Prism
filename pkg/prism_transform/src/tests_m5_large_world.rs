@@ -4,7 +4,7 @@ use prism_math::{DVec3, GridCell, Quat, Vec3};
 
 use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
 use crate::large_world::{
-    FloatingOrigin, GlobalTransformHp, TransformHp, identity_globals_hp, propagate_hp,
+    identity_globals_hp, propagate_hp, FloatingOrigin, GlobalTransformHp, TransformHp,
 };
 use crate::{Transform, TransformGraph};
 
@@ -55,7 +55,10 @@ fn hp_propagation_matches_f32_near_origin() {
 
     let f32_child = graph.global(child).translation();
     let hp_child = globals[1].translation().as_vec3();
-    assert!(approx_vec(f32_child, hp_child, 1e-5), "{f32_child:?} vs {hp_child:?}");
+    assert!(
+        approx_vec(f32_child, hp_child, 1e-5),
+        "{f32_child:?} vs {hp_child:?}"
+    );
     // Known expected world position.
     assert_eq!(globals[1].translation(), DVec3::new(5.0, 1.0, 3.5));
 }
@@ -105,14 +108,20 @@ fn camera_relative_beats_naive_f32_at_100km() {
     let a_rel = a.camera_relative(camera).translation;
     let b_rel = b.camera_relative(camera).translation;
     let gap = f64::from((b_rel.x - a_rel.x).abs());
-    assert!((gap - gap_m).abs() < 1e-5, "camera-relative gap drifted: {gap}");
+    assert!(
+        (gap - gap_m).abs() < 1e-5,
+        "camera-relative gap drifted: {gap}"
+    );
 
     // Naive single-precision: the 1 mm difference is well below the ~7.8 mm
     // ULP at 100 km, so casting collapses the gap to zero.
     let a_naive = a_world.x as f32;
     let b_naive = b_world.x as f32;
     let naive_gap = f64::from((b_naive - a_naive).abs());
-    assert!((naive_gap - gap_m).abs() > 1e-4, "naive f32 unexpectedly accurate: {naive_gap}");
+    assert!(
+        (naive_gap - gap_m).abs() > 1e-4,
+        "naive f32 unexpectedly accurate: {naive_gap}"
+    );
 }
 
 #[test]
@@ -154,8 +163,14 @@ fn rebase_is_render_equivalent_across_origins() {
     // Origin A (near camera) is the accurate reference; both should agree with
     // the true camera-relative delta to sub-millimetre, and with each other.
     let truth = g.camera_relative(camera).translation;
-    assert!(approx_vec(rel_a, truth, 1e-2), "near-origin: {rel_a:?} vs {truth:?}");
-    assert!(approx_vec(rel_a, rel_b, 5e-2), "cross-origin mismatch: {rel_a:?} vs {rel_b:?}");
+    assert!(
+        approx_vec(rel_a, truth, 1e-2),
+        "near-origin: {rel_a:?} vs {truth:?}"
+    );
+    assert!(
+        approx_vec(rel_a, rel_b, 5e-2),
+        "cross-origin mismatch: {rel_a:?} vs {rel_b:?}"
+    );
 }
 
 #[test]

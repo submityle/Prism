@@ -125,9 +125,21 @@ pub fn hair_bsdf(theta_i: f32, theta_r: f32, phi: f32, params: &HairParams) -> V
     }
 
     Vec3::new(
-        if sum.x.is_finite() { sum.x.max(0.0) } else { 0.0 },
-        if sum.y.is_finite() { sum.y.max(0.0) } else { 0.0 },
-        if sum.z.is_finite() { sum.z.max(0.0) } else { 0.0 },
+        if sum.x.is_finite() {
+            sum.x.max(0.0)
+        } else {
+            0.0
+        },
+        if sum.y.is_finite() {
+            sum.y.max(0.0)
+        } else {
+            0.0
+        },
+        if sum.z.is_finite() {
+            sum.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -155,8 +167,8 @@ mod tests {
             for tr in -5..=5 {
                 let theta_r = tr as f32 * 0.25;
                 for pk in 0..8 {
-                    let phi = -core::f32::consts::PI
-                        + pk as f32 * (2.0 * core::f32::consts::PI / 8.0);
+                    let phi =
+                        -core::f32::consts::PI + pk as f32 * (2.0 * core::f32::consts::PI / 8.0);
                     let f = hair_bsdf(theta_i, theta_r, phi, &params);
                     assert!(f.x >= 0.0 && f.x.is_finite(), "f={f:?}");
                     assert!(f.y >= 0.0 && f.y.is_finite(), "f={f:?}");
@@ -198,7 +210,10 @@ mod tests {
         }
         assert!(total.x.is_finite() && total.y.is_finite() && total.z.is_finite());
         // Reflectance (dimensionless albedo) must not exceed unity by much.
-        assert!(total.x <= 1.5 && total.y <= 1.5 && total.z <= 1.5, "total={total:?}");
+        assert!(
+            total.x <= 1.5 && total.y <= 1.5 && total.z <= 1.5,
+            "total={total:?}"
+        );
     }
 
     #[test]
@@ -216,8 +231,7 @@ mod tests {
         let acc = |p: &HairParams| -> f32 {
             let mut s = 0.0;
             for pk in 0..16 {
-                let phi = -core::f32::consts::PI
-                    + pk as f32 * (2.0 * core::f32::consts::PI / 16.0);
+                let phi = -core::f32::consts::PI + pk as f32 * (2.0 * core::f32::consts::PI / 16.0);
                 s += hair_bsdf(0.1, -0.1, phi, p).x;
             }
             s

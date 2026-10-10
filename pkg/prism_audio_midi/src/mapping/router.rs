@@ -22,9 +22,9 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use crate::expression::channel_state::{DEFAULT_PITCH_BEND_RANGE, normalized_bend};
+use crate::expression::channel_state::{normalized_bend, DEFAULT_PITCH_BEND_RANGE};
 use crate::mapping::target::{
-    ExpressionDimension, ModulationTarget, TargetMapping, normalize_u16, normalize_u32,
+    normalize_u16, normalize_u32, ExpressionDimension, ModulationTarget, TargetMapping,
 };
 use crate::ump::message::PITCH_BEND_CENTER_32;
 use prism_audio_core::math::Sample;
@@ -109,16 +109,15 @@ impl VoiceExpression {
     /// Returns the combined channel-plus-per-note pitch bend in semitones.
     #[must_use]
     pub fn pitch_bend_semitones(&self) -> Sample {
-        let combined = normalized_bend(self.channel_pitch_bend)
-            + normalized_bend(self.per_note_pitch_bend);
+        let combined =
+            normalized_bend(self.channel_pitch_bend) + normalized_bend(self.per_note_pitch_bend);
         combined * self.pitch_bend_range_semitones
     }
 
     /// Returns the combined pressure in the unipolar `[0, 1]` range.
     #[must_use]
     pub fn pressure_unipolar(&self) -> Sample {
-        let combined =
-            normalize_u32(self.channel_pressure) + normalize_u32(self.per_note_pressure);
+        let combined = normalize_u32(self.channel_pressure) + normalize_u32(self.per_note_pressure);
         combined.clamp(0.0, 1.0)
     }
 
@@ -190,7 +189,12 @@ impl ExpressionRouter {
     /// Appends one modulation write per mapping for `voice` at `sample_offset`
     /// to `out`. The relative order of writes matches the mapping order, so the
     /// output is deterministic.
-    pub fn route(&self, voice: &VoiceExpression, sample_offset: u32, out: &mut Vec<ModulationWrite>) {
+    pub fn route(
+        &self,
+        voice: &VoiceExpression,
+        sample_offset: u32,
+        out: &mut Vec<ModulationWrite>,
+    ) {
         for mapping in &self.mappings {
             let raw = voice.dimension_value(mapping.dimension);
             out.push(ModulationWrite {
@@ -209,9 +213,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::{ExpressionRouter, ModulationWrite, VoiceExpression};
-    use crate::mapping::target::{
-        Curve, ExpressionDimension, ModulationTarget, TargetMapping,
-    };
+    use crate::mapping::target::{Curve, ExpressionDimension, ModulationTarget, TargetMapping};
     use crate::ump::message::PITCH_BEND_CENTER_32;
 
     const EPS: f32 = 1.0e-4;

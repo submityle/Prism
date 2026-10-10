@@ -325,8 +325,8 @@ mod tests {
     #[test]
     fn mono_correlation_is_unity() {
         let rate = 48_000;
-        let pcm =
-            ConditionedPcm::new(rate, ChannelLayout::Mono, vec![tone(1_000.0, rate, 2_048)]).unwrap();
+        let pcm = ConditionedPcm::new(rate, ChannelLayout::Mono, vec![tone(1_000.0, rate, 2_048)])
+            .unwrap();
         let p = profile(&pcm);
         assert!((p.channel_correlation - 1.0).abs() < 1.0e-6);
     }

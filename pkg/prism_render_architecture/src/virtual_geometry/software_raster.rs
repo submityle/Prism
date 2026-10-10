@@ -124,7 +124,10 @@ pub fn project_vertex(
     // `ndc_to_uv`: flips y so uv is y-down, then scales into the viewport.
     let u = ndc[0] * 0.5 + 0.5;
     let v = ndc[1] * -0.5 + 0.5;
-    Some(ScreenVertex::new([u * viewport[0], v * viewport[1]], ndc[2]))
+    Some(ScreenVertex::new(
+        [u * viewport[0], v * viewport[1]],
+        ndc[2],
+    ))
 }
 
 /// Packs a depth key and payload into one vis-buffer word.
@@ -548,7 +551,10 @@ mod tests {
 
         let mut culled = VisBuffer::new(4, 4);
         rasterize_triangle(&mut culled, cw, 5, true);
-        assert!(culled.pixels().iter().all(|&p| p == 0), "back face must be culled");
+        assert!(
+            culled.pixels().iter().all(|&p| p == 0),
+            "back face must be culled"
+        );
 
         // Without culling the same winding still rasterizes (after reorder).
         let mut kept = VisBuffer::new(4, 4);
@@ -568,11 +574,7 @@ mod tests {
     fn offscreen_vertices_do_not_panic_and_clamp() {
         let mut buffer = VisBuffer::new(4, 4);
         // Triangle mostly off the top-left, only clipping into the buffer.
-        let tri = [
-            sv(-8.0, -8.0, 0.5),
-            sv(6.0, -2.0, 0.5),
-            sv(-2.0, 6.0, 0.5),
-        ];
+        let tri = [sv(-8.0, -8.0, 0.5), sv(6.0, -2.0, 0.5), sv(-2.0, 6.0, 0.5)];
         rasterize_triangle(&mut buffer, tri, 4, false);
         // Out-of-range queries return the cleared value rather than panicking.
         assert_eq!(buffer.at(99, 99), 0);
@@ -592,7 +594,10 @@ mod tests {
         // slightly different bit patterns, so compare the depth keys within a
         // few ULPs rather than exactly.
         let diff = key.abs_diff(expected);
-        assert!(diff <= 16, "centroid depth key {key} vs expected {expected}");
+        assert!(
+            diff <= 16,
+            "centroid depth key {key} vs expected {expected}"
+        );
     }
 
     #[test]
@@ -632,7 +637,11 @@ mod tests {
 
         let mut by_hand = VisBuffer::new(8, 8);
         for (i, t) in tris.iter().enumerate() {
-            let tri = [verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]];
+            let tri = [
+                verts[t[0] as usize],
+                verts[t[1] as usize],
+                verts[t[2] as usize],
+            ];
             rasterize_triangle(&mut by_hand, tri, pack_cluster_triangle(7, i as u32), false);
         }
         assert_eq!(via_cluster.pixels(), by_hand.pixels());
@@ -732,7 +741,10 @@ mod tests {
         rasterize_cluster(&mut buffer, &verts, &[[0, 1, 2]], 3, false);
         // The center pixel is inside the triangle and decodes to cluster 3 / tri 0.
         let center = buffer.at(4, 4);
-        assert_ne!(center, 0, "center pixel must be covered by the projected triangle");
+        assert_ne!(
+            center, 0,
+            "center pixel must be covered by the projected triangle"
+        );
         assert_eq!(cluster_of(vis_payload(center)), 3);
         assert_eq!(triangle_of(vis_payload(center)), 0);
     }

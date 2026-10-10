@@ -252,15 +252,7 @@ impl UtdWedge {
         let phi_i = azimuth(src_perp, face0, face_tangent);
         let phi_d = azimuth(rcv_perp, face0, face_tangent);
 
-        Self::new(
-            wedge_index,
-            beta0,
-            phi_i,
-            phi_d,
-            s_src,
-            s_rcv,
-            sound_speed,
-        )
+        Self::new(wedge_index, beta0, phi_i, phi_d, s_src, s_rcv, sound_speed)
     }
 
     /// The wavenumber `k = 2 pi f / c` at `freq_hz`.
@@ -475,7 +467,11 @@ fn azimuth(perp: Vec3, face0: Vec3, face_tangent: Vec3) -> Sample {
 
 /// Returns an arbitrary unit vector perpendicular to `axis`.
 fn any_perpendicular(axis: Vec3) -> Vec3 {
-    let candidate = if ops::abs(axis.x) < 0.9 { Vec3::X } else { Vec3::Y };
+    let candidate = if ops::abs(axis.x) < 0.9 {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
     let perp = (candidate - axis * candidate.dot(axis)).normalize_or_zero();
     if perp == Vec3::ZERO {
         Vec3::Y
@@ -545,7 +541,10 @@ mod tests {
         let phi_i = PI / 4.0;
         let wedge = UtdWedge::new(2.0, PI / 2.0, phi_i, phi_i + PI + 0.02, 5.0, 5.0, C);
         let g = wedge.relative_gain(1_000.0);
-        assert!((g - 0.5).abs() < 0.2, "boundary gain {g} should be near 0.5");
+        assert!(
+            (g - 0.5).abs() < 0.2,
+            "boundary gain {g} should be near 0.5"
+        );
     }
 
     #[test]
@@ -561,7 +560,11 @@ mod tests {
             let mag = wedge.coefficient(1_000.0).magnitude();
             assert!(mag.is_finite(), "mag not finite at delta {delta}");
             if let Some(p) = prev {
-                assert!((mag - p).abs() < 0.5, "jump {} at delta {delta}", (mag - p).abs());
+                assert!(
+                    (mag - p).abs() < 0.5,
+                    "jump {} at delta {delta}",
+                    (mag - p).abs()
+                );
             }
             prev = Some(mag);
         }
@@ -576,7 +579,10 @@ mod tests {
         for &f in &[200.0, 2_000.0, 10_000.0] {
             let ga = a.relative_gain(f);
             let gb = b.relative_gain(f);
-            assert!((ga - gb).abs() < 1e-4 * (1.0 + ga.abs()), "f={f} {ga} vs {gb}");
+            assert!(
+                (ga - gb).abs() < 1e-4 * (1.0 + ga.abs()),
+                "f={f} {ga} vs {gb}"
+            );
         }
     }
 
@@ -613,15 +619,7 @@ mod tests {
 
     #[test]
     fn new_clamps_degenerate_inputs() {
-        let wedge = UtdWedge::new(
-            Sample::NAN,
-            -1.0,
-            10.0 * PI,
-            -3.0 * PI,
-            -1.0,
-            0.0,
-            -5.0,
-        );
+        let wedge = UtdWedge::new(Sample::NAN, -1.0, 10.0 * PI, -3.0 * PI, -1.0, 0.0, -5.0);
         // Everything resolved to a finite, usable configuration.
         let d = wedge.coefficient(1_000.0);
         assert!(d.re.is_finite() && d.im.is_finite());

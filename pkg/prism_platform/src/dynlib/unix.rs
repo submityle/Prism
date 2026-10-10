@@ -10,9 +10,9 @@
 //! the C runtime that `std` already links (no `libc` crate), mirroring
 //! [`crate::fs::mmap`] and [`crate::vm`].
 
+use alloc::ffi::CString;
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr::NonNull;
-use alloc::ffi::CString;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 
@@ -65,7 +65,10 @@ fn take_dlerror() -> String {
 }
 
 /// `dlopen(path, RTLD_NOW | RTLD_LOCAL)`.
-#[expect(unsafe_code, reason = "dlopen loads the shared object and runs its initializers")]
+#[expect(
+    unsafe_code,
+    reason = "dlopen loads the shared object and runs its initializers"
+)]
 pub(super) fn open(path: &Path) -> Result<Handle> {
     let c_path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| DynlibError::InvalidName(path.display().to_string()))?;
@@ -89,7 +92,10 @@ pub(super) fn open(path: &Path) -> Result<Handle> {
 }
 
 /// `dlsym(handle, name)`.
-#[expect(unsafe_code, reason = "dlsym resolves a symbol address within the loaded object")]
+#[expect(
+    unsafe_code,
+    reason = "dlsym resolves a symbol address within the loaded object"
+)]
 pub(super) fn symbol(handle: &Handle, name: &str) -> Result<NonNull<c_void>> {
     let c_name = CString::new(name).map_err(|_| DynlibError::InvalidName(name.to_string()))?;
     let _ = take_dlerror();

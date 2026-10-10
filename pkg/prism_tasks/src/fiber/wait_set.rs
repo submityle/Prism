@@ -99,5 +99,4 @@ impl WaitSet {
     pub(crate) fn resume_is_empty(&self) -> bool {
         self.resume.lock().unwrap().is_empty()
     }
-
 }

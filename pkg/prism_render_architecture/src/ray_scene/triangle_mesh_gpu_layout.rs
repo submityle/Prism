@@ -238,7 +238,10 @@ impl GpuTriangleMeshBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -294,7 +297,10 @@ impl GpuTriangleMeshBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -494,7 +500,10 @@ mod tests {
                 }
                 assert_eq!(gpu.any_hit(&ray), bvh.any_hit(&ray));
             }
-            assert!(shared > 100, "too few shared hits for seed {seed:#x}: {shared}");
+            assert!(
+                shared > 100,
+                "too few shared hits for seed {seed:#x}: {shared}"
+            );
         }
     }
 }

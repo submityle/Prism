@@ -764,9 +764,10 @@ mod tests {
     #[test]
     fn marker_transition_aligns_to_marker() {
         let mut m = MusicModel::new();
-        m.add_segment(
-            seg(1, 96_000).with_marker(crate::segment::Marker::new(crate::id::MarkerId::new(1), 48_000)),
-        );
+        m.add_segment(seg(1, 96_000).with_marker(crate::segment::Marker::new(
+            crate::id::MarkerId::new(1),
+            48_000,
+        )));
         m.add_segment(seg(2, 96_000));
         let mut sys = MusicSystem::new(SR, 1);
         let mut out = Vec::new();
@@ -776,7 +777,10 @@ mod tests {
             .request_transition(
                 &m,
                 SegmentId::new(2),
-                Transition::new(TransitionType::Marker(crate::id::MarkerId::new(1)), Fade::cut()),
+                Transition::new(
+                    TransitionType::Marker(crate::id::MarkerId::new(1)),
+                    Fade::cut(),
+                ),
                 1_000,
                 &mut out,
             )
@@ -792,7 +796,13 @@ mod tests {
         sys.play_segment(&m, SegmentId::new(1), 0, 0, 0, &mut out);
         out.clear();
         let point = sys
-            .request_transition(&m, SegmentId::new(2), Transition::immediate(), 12_345, &mut out)
+            .request_transition(
+                &m,
+                SegmentId::new(2),
+                Transition::immediate(),
+                12_345,
+                &mut out,
+            )
             .unwrap();
         assert_eq!(point, 12_345);
     }
@@ -825,12 +835,18 @@ mod tests {
     #[test]
     fn stinger_aligns_and_leaves_playing_untouched() {
         let mut m = model_with_segments();
-        m.add_stinger(Stinger::new(StingerId::new(1), SoundId::new(500), TransitionType::NextBar));
+        m.add_stinger(Stinger::new(
+            StingerId::new(1),
+            SoundId::new(500),
+            TransitionType::NextBar,
+        ));
         let mut sys = MusicSystem::new(SR, 1);
         let mut out = Vec::new();
         sys.play_segment(&m, SegmentId::new(1), 0, 0, 0, &mut out);
         out.clear();
-        let point = sys.trigger_stinger(&m, StingerId::new(1), 5_000, &mut out).unwrap();
+        let point = sys
+            .trigger_stinger(&m, StingerId::new(1), 5_000, &mut out)
+            .unwrap();
         assert_eq!(point, 96_000);
         assert_eq!(out.len(), 1);
         assert_eq!(sys.playing_segment(), Some(SegmentId::new(1)));
@@ -861,7 +877,13 @@ mod tests {
         out.clear();
         sys.advance_to(&m, 300_000, &mut out);
         assert_eq!(out.len(), 1);
-        assert!(matches!(out[0], MusicAction::StopSegment { at_sample: 192_000, .. }));
+        assert!(matches!(
+            out[0],
+            MusicAction::StopSegment {
+                at_sample: 192_000,
+                ..
+            }
+        ));
         assert_eq!(sys.playing_segment(), None);
     }
 
@@ -931,7 +953,9 @@ mod tests {
 
         // Branch 7 -> edge to clip 2.
         let ctx = TransitionContext::new(Some(BranchId::new(7)), 0.0);
-        let landed = sys.clip_graph_event(&m, GraphId::new(1), ctx, 1_000, &mut out).unwrap();
+        let landed = sys
+            .clip_graph_event(&m, GraphId::new(1), ctx, 1_000, &mut out)
+            .unwrap();
         assert_eq!(landed, ClipId::new(2));
         assert_eq!(sys.playing_segment(), Some(SegmentId::new(2)));
     }

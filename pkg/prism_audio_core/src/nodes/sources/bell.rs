@@ -130,9 +130,8 @@ const PARTIAL_RATIOS: [Sample; NUM_PARTIALS] = [
 /// Relative linear strike strength of each partial, shaping the bell timbre so
 /// the prime, nominal, hum, and tierce dominate the strike while the high shell
 /// modes stay faint. Modulated further by the `brightness` tilt.
-const PARTIAL_GAINS: [Sample; NUM_PARTIALS] = [
-    0.8, 1.0, 0.6, 0.4, 0.9, 0.3, 0.25, 0.4, 0.3, 0.15, 0.1, 0.1,
-];
+const PARTIAL_GAINS: [Sample; NUM_PARTIALS] =
+    [0.8, 1.0, 0.6, 0.4, 0.9, 0.3, 0.25, 0.4, 0.3, 0.15, 0.1, 0.1];
 
 /// Lowest tunable prime (strike pitch) in hertz.
 pub const MIN_FREQUENCY_HZ: Sample = 20.0;
@@ -540,7 +539,11 @@ mod tests {
     }
 
     /// Renders `frames` into every channel of `layout`.
-    fn render_layout(node: &mut BellNode, frames: usize, layout: ChannelLayout) -> Vec<Vec<Sample>> {
+    fn render_layout(
+        node: &mut BellNode,
+        frames: usize,
+        layout: ChannelLayout,
+    ) -> Vec<Vec<Sample>> {
         let inputs: [AudioBuffer; 0] = [];
         let mut out = AudioBuffer::new(layout, frames.max(1));
         out.set_active_frames(frames);
@@ -829,7 +832,10 @@ mod tests {
         );
         let hb = hf_energy(&render(&mut bright, SR as usize / 3));
         let hd = hf_energy(&render(&mut dull, SR as usize / 3));
-        assert!(hb > hd * 1.5, "hard clapper should be brighter: {hb} vs {hd}");
+        assert!(
+            hb > hd * 1.5,
+            "hard clapper should be brighter: {hb} vs {hd}"
+        );
     }
 
     #[test]

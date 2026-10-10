@@ -76,10 +76,7 @@ fn close_vertex(label: &str, i: usize, got: RibbonStripVertex, want: RibbonStrip
         ("right.z", (got.right.z, want.right.z)),
         ("uv_v", (got.uv_v, want.uv_v)),
     ] {
-        assert!(
-            close(g, w),
-            "{label} vertex {i} {axis}: gpu {g} vs cpu {w}"
-        );
+        assert!(close(g, w), "{label} vertex {i} {axis}: gpu {g} vs cpu {w}");
     }
 }
 
@@ -243,7 +240,15 @@ fn width_policies_match_reference() {
     let axis = Vec3::new(1.5, 0.0, 6.0);
     // Exact-length, short (reuses last), long (ignores tail), empty (unit) and
     // negative (clamped to zero) width policies all resolve the same on device.
-    check_strip(&ctx, &gpu, "w-exact", &centerline, &[0.5, 1.0, 1.5, 2.0], axis, true);
+    check_strip(
+        &ctx,
+        &gpu,
+        "w-exact",
+        &centerline,
+        &[0.5, 1.0, 1.5, 2.0],
+        axis,
+        true,
+    );
     check_strip(&ctx, &gpu, "w-short", &centerline, &[1.0, 3.0], axis, true);
     check_strip(
         &ctx,
@@ -287,9 +292,25 @@ fn random_polylines_match_reference() {
             lcg(&mut state) * 4.0 - 2.0,
             8.0 + lcg(&mut state) * 4.0,
         );
-        check_strip(&ctx, &gpu, "random-camera", &centerline, &widths, camera, true);
+        check_strip(
+            &ctx,
+            &gpu,
+            "random-camera",
+            &centerline,
+            &widths,
+            camera,
+            true,
+        );
         let normal = Vec3::new(0.0, 0.0, 1.0);
-        check_strip(&ctx, &gpu, "random-flat", &centerline, &widths, normal, false);
+        check_strip(
+            &ctx,
+            &gpu,
+            "random-flat",
+            &centerline,
+            &widths,
+            normal,
+            false,
+        );
     }
 }
 

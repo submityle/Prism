@@ -119,8 +119,10 @@ pub fn split_hard_normals(
     let vertex_count = mesh.vertex_count();
 
     // Precompute the raw (area-weighted) face normal of every triangle.
-    let face_normals: Vec<[f32; 3]> =
-        indices.iter().map(|tri| raw_face_normal(positions, tri)).collect();
+    let face_normals: Vec<[f32; 3]> = indices
+        .iter()
+        .map(|tri| raw_face_normal(positions, tri))
+        .collect();
 
     // For each vertex, record the triangles incident to it (in triangle order).
     let mut incident: Vec<Vec<usize>> = vec![Vec::new(); vertex_count];
@@ -135,7 +137,10 @@ pub fn split_hard_normals(
     for (triangle, tri) in indices.iter().enumerate() {
         let [a, b, c] = *tri;
         for &(u, v) in &[(a, b), (b, c), (c, a)] {
-            edge_faces.entry(sorted_pair(u, v)).or_default().push(triangle);
+            edge_faces
+                .entry(sorted_pair(u, v))
+                .or_default()
+                .push(triangle);
         }
     }
 
@@ -158,8 +163,11 @@ pub fn split_hard_normals(
         // Local union-find over this vertex's incident triangles.
         let count = tris.len();
         let mut parent: Vec<usize> = (0..count).collect();
-        let local_of: HashMap<usize, usize> =
-            tris.iter().enumerate().map(|(local, &tri)| (tri, local)).collect();
+        let local_of: HashMap<usize, usize> = tris
+            .iter()
+            .enumerate()
+            .map(|(local, &tri)| (tri, local))
+            .collect();
 
         for (local, &triangle) in tris.iter().enumerate() {
             let [a, b, c] = indices[triangle];
@@ -234,12 +242,19 @@ pub fn split_hard_normals(
     let mesh = TriangleMesh::new(new_positions, new_normals, uvs_out, new_indices)
         .map_err(HardNormalError::Rebuild)?;
 
-    Ok(HardNormalSplit { mesh, split_vertices })
+    Ok(HardNormalSplit {
+        mesh,
+        split_vertices,
+    })
 }
 
 /// Returns the sorted `(min, max)` endpoint pair keying a shared edge.
 fn sorted_pair(a: u32, b: u32) -> (u32, u32) {
-    if a < b { (a, b) } else { (b, a) }
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 /// Returns the raw (un-normalized, area-weighted) geometric normal of a
@@ -450,13 +465,8 @@ mod tests {
 
     #[test]
     fn empty_mesh_round_trips() {
-        let mesh = TriangleMesh::new(
-            vec![[0.0, 0.0, 0.0]],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
-        .unwrap();
+        let mesh =
+            TriangleMesh::new(vec![[0.0, 0.0, 0.0]], Vec::new(), Vec::new(), Vec::new()).unwrap();
         let split = split_hard_normals(&mesh, 0.5).unwrap();
         assert_eq!(split.mesh().vertex_count(), 0);
         assert_eq!(split.mesh().triangle_count(), 0);

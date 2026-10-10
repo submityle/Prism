@@ -329,7 +329,9 @@ impl fmt::Debug for MmapMut {
 fn validate_range(file: &File, offset: u64, len: usize) -> Result<()> {
     let file_len = file.metadata()?.len();
     let len_u64 = len as u64;
-    let end = offset.checked_add(len_u64).ok_or(MmapError::InvalidArgument)?;
+    let end = offset
+        .checked_add(len_u64)
+        .ok_or(MmapError::InvalidArgument)?;
     if end > file_len {
         return Err(MmapError::InvalidArgument);
     }

@@ -15,8 +15,8 @@
 )]
 
 use core::arch::x86_64::{
-    __m128, __m256, _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set_m128,
-    _mm256_storeu_ps, _mm_loadu_ps, _mm_shuffle_ps,
+    __m128, __m256, _mm256_fmadd_ps, _mm256_mul_ps, _mm256_set_m128, _mm256_storeu_ps,
+    _mm_loadu_ps, _mm_shuffle_ps,
 };
 
 use crate::{Mat4, Vec4};

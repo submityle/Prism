@@ -109,7 +109,11 @@ fn orthonormal_basis(normal: Vec3) -> (Vec3, Vec3) {
     let sign = if normal.z >= 0.0 { 1.0 } else { -1.0 };
     let a = -1.0 / (sign + normal.z);
     let b = normal.x * normal.y * a;
-    let tangent = Vec3::new(1.0 + sign * normal.x * normal.x * a, sign * b, -sign * normal.x);
+    let tangent = Vec3::new(
+        1.0 + sign * normal.x * normal.x * a,
+        sign * b,
+        -sign * normal.x,
+    );
     let bitangent = Vec3::new(b, sign + normal.y * normal.y * a, -normal.y);
     (tangent, bitangent)
 }

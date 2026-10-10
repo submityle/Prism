@@ -16,8 +16,8 @@ use crate::kinds::{Array, Enum, List, Map, Set, VariantType};
 use crate::reflect::{Reflect, Struct, TupleStruct};
 use crate::type_info::{TypeInfo, VariantKind};
 use crate::{ReflectMut, ReflectRef};
-use core::fmt;
 use alloc::vec::Vec;
+use core::fmt;
 
 /// An error produced while [`apply`](crate::Reflect::apply)-ing one reflected
 /// value onto another.

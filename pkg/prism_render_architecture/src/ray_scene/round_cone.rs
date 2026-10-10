@@ -325,7 +325,10 @@ impl RoundCone {
             if disc >= 0.0 {
                 let sqrt_disc = disc.sqrt();
                 let inv_a = 1.0 / coeff_a;
-                for t in [(-coeff_b - sqrt_disc) * inv_a, (-coeff_b + sqrt_disc) * inv_a] {
+                for t in [
+                    (-coeff_b - sqrt_disc) * inv_a,
+                    (-coeff_b + sqrt_disc) * inv_a,
+                ] {
                     let axial = za + t * zd;
                     if !(axial >= band_lo && axial <= band_hi) {
                         continue;
@@ -775,7 +778,11 @@ mod tests {
         let hit = cone.intersect(&ray).expect("body hit");
         assert_eq!(hit.primitive, 7);
         assert!(approx(hit.t, 4.0, 1e-3), "t = {}", hit.t);
-        assert!(approx(hit.normal[0], 1.0, 1e-3), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[0], 1.0, 1e-3),
+            "normal = {:?}",
+            hit.normal
+        );
         assert!(hit.front_face);
     }
 
@@ -791,7 +798,10 @@ mod tests {
         // +z axial component (matches the IQ round-cone SDF gradient). The ray
         // travels −x, so the ray-facing normal keeps the +x, +z outward sense.
         assert!(hit.normal[0] > 0.0, "normal = {:?}", hit.normal);
-        assert!(hit.normal[2] > 0.0, "normal should tilt toward narrow end (+z)");
+        assert!(
+            hit.normal[2] > 0.0,
+            "normal should tilt toward narrow end (+z)"
+        );
         let len = (hit.normal[0] * hit.normal[0]
             + hit.normal[1] * hit.normal[1]
             + hit.normal[2] * hit.normal[2])
@@ -806,7 +816,11 @@ mod tests {
         let ray = Ray::infinite([0.0, 0.0, -10.0], [0.0, 0.0, 1.0]);
         let hit = cone.intersect(&ray).expect("cap hit");
         assert!(approx(hit.t, 8.0, 1e-3), "t = {}", hit.t);
-        assert!(approx(hit.normal[2], -1.0, 1e-3), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[2], -1.0, 1e-3),
+            "normal = {:?}",
+            hit.normal
+        );
     }
 
     #[test]
@@ -843,7 +857,11 @@ mod tests {
         let mut rng = Rng::new(0xC0FF_EE42);
         let mut checked = 0u32;
         for _ in 0..8_000 {
-            let a = [rng.range(-4.0, 4.0), rng.range(-4.0, 4.0), rng.range(-4.0, 4.0)];
+            let a = [
+                rng.range(-4.0, 4.0),
+                rng.range(-4.0, 4.0),
+                rng.range(-4.0, 4.0),
+            ];
             // Keep the axis comfortably longer than the radius gap so this stays
             // a proper (non-engulfed) round cone the SDF oracle also models.
             let b = [
@@ -866,7 +884,11 @@ mod tests {
             // exceeds the fattest end, so rays sweep across the body, both
             // caps, and the empty space just outside — covering hits and misses
             // alike while keeping a high surface-hit yield.
-            let mid = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2])];
+            let mid = [
+                0.5 * (a[0] + b[0]),
+                0.5 * (a[1] + b[1]),
+                0.5 * (a[2] + b[2]),
+            ];
             let jitter = r1.max(r2) + 0.5 * l + 0.6;
             let target = [
                 mid[0] + rng.range(-jitter, jitter),
@@ -917,7 +939,11 @@ mod tests {
     }
 
     fn random_cone(rng: &mut Rng, primitive: u32) -> RoundCone {
-        let a = [rng.range(-5.0, 5.0), rng.range(-5.0, 5.0), rng.range(-5.0, 5.0)];
+        let a = [
+            rng.range(-5.0, 5.0),
+            rng.range(-5.0, 5.0),
+            rng.range(-5.0, 5.0),
+        ];
         let b = [
             a[0] + rng.range(-3.0, 3.0),
             a[1] + rng.range(-3.0, 3.0),
@@ -949,8 +975,16 @@ mod tests {
         let ordered = bvh.cones().to_vec();
 
         for _ in 0..3_000 {
-            let origin = [rng.range(-10.0, 10.0), rng.range(-10.0, 10.0), rng.range(-10.0, 10.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             if dot(dir, dir) < 1e-6 {
                 continue;
             }
@@ -988,8 +1022,16 @@ mod tests {
         let ordered = bvh.cones().to_vec();
 
         for _ in 0..3_000 {
-            let origin = [rng.range(-10.0, 10.0), rng.range(-10.0, 10.0), rng.range(-10.0, 10.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             if dot(dir, dir) < 1e-6 {
                 continue;
             }

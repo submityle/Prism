@@ -203,8 +203,7 @@ pub(crate) fn closer_hit(candidate: &CapsuleSweepHit, best: &Option<CapsuleSweep
         // index-order brute sweep, the BVH-order LBVH sweep, and the GPU host
         // reduction all converge on the identical triangle.
         Some(b) => {
-            candidate.toi < b.toi
-                || (candidate.toi == b.toi && candidate.triangle < b.triangle)
+            candidate.toi < b.toi || (candidate.toi == b.toi && candidate.triangle < b.triangle)
         }
         None => true,
     }
@@ -386,10 +385,20 @@ mod tests {
             0.5,
         );
         let hit = cpu_trimesh_capsule_sweep(&mesh, &sweep).expect("hits the quad");
-        assert_eq!(hit.triangle, 0, "segment sits over the lower-right triangle");
+        assert_eq!(
+            hit.triangle, 0,
+            "segment sits over the lower-right triangle"
+        );
         assert!((hit.toi - 4.5).abs() < 1e-3, "toi was {}", hit.toi);
-        assert!(hit.point.z.abs() < 1e-3, "contact on the z = 0 plane, was {}", hit.point.z);
-        assert!((hit.normal - Vec3::Z).length() < 1e-3, "normal points up at the capsule");
+        assert!(
+            hit.point.z.abs() < 1e-3,
+            "contact on the z = 0 plane, was {}",
+            hit.point.z
+        );
+        assert!(
+            (hit.normal - Vec3::Z).length() < 1e-3,
+            "normal points up at the capsule"
+        );
     }
 
     #[test]
@@ -456,14 +465,20 @@ mod tests {
             0.3,
         );
         let hit = cpu_trimesh_capsule_sweep(&mesh, &sweep).expect("hits the right edge");
-        assert_eq!(hit.triangle, 0, "the right edge belongs to the lower-right triangle");
+        assert_eq!(
+            hit.triangle, 0,
+            "the right edge belongs to the lower-right triangle"
+        );
         assert!((hit.toi - 0.2).abs() < 1e-3, "toi was {}", hit.toi);
         assert!(
             (hit.point - Vec3::new(1.0, 0.5, 0.0)).length() < 1e-3,
             "contact on the edge midpoint, was {:?}",
             hit.point
         );
-        assert!((hit.normal - Vec3::X).length() < 1e-3, "normal points back along +x");
+        assert!(
+            (hit.normal - Vec3::X).length() < 1e-3,
+            "normal points back along +x"
+        );
     }
 
     #[test]
@@ -494,7 +509,12 @@ mod tests {
         let brute = cpu_trimesh_capsule_sweep(&mesh, &sweep).expect("hits");
         let bvh = cpu_trimesh_capsule_sweep_built(&mesh, &sweep).expect("hits");
         assert_eq!(brute.triangle, bvh.triangle, "same winning triangle");
-        assert!((brute.toi - bvh.toi).abs() < 1e-4, "toi brute {} bvh {}", brute.toi, bvh.toi);
+        assert!(
+            (brute.toi - bvh.toi).abs() < 1e-4,
+            "toi brute {} bvh {}",
+            brute.toi,
+            bvh.toi
+        );
         // Nearest quad is z = 7; the underside stops one radius early, so
         // toi = 20 - 7 - 0.25 = 12.75.
         assert!((brute.toi - 12.75).abs() < 1e-3, "toi was {}", brute.toi);

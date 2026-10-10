@@ -84,7 +84,10 @@ impl core::fmt::Display for StreamError {
                 write!(f, "no physical slot available and nothing evictable")
             }
             StreamError::BadPageSize { got, expected } => {
-                write!(f, "page source returned {got} words but the pool page size is {expected}")
+                write!(
+                    f,
+                    "page source returned {got} words but the pool page size is {expected}"
+                )
             }
         }
     }
@@ -113,7 +116,11 @@ impl<K> Default for ReconcileReport<K> {
     /// Hand-written rather than derived so the empty report exists for every
     /// key type `K`, without the spurious `K: Default` bound a derive adds.
     fn default() -> Self {
-        Self { streamed_in: Vec::new(), evicted: Vec::new(), deferred: Vec::new() }
+        Self {
+            streamed_in: Vec::new(),
+            evicted: Vec::new(),
+            deferred: Vec::new(),
+        }
     }
 }
 
@@ -298,7 +305,9 @@ impl<K: Copy + Ord> PageStreamManager<K> {
         };
         match self.storage.upload(slot, &page) {
             Ok(()) => {}
-            Err(PageStorageError::SlotOutOfRange { .. } | PageStorageError::PageSizeMismatch { .. }) => {
+            Err(
+                PageStorageError::SlotOutOfRange { .. } | PageStorageError::PageSizeMismatch { .. },
+            ) => {
                 // The slot came from the pool and the size was validated above,
                 // so this is unreachable; roll the slot back defensively rather
                 // than leaving an allocated-but-empty slot.

@@ -207,13 +207,12 @@ const fn is_ident_byte(byte: u8) -> bool {
 /// Lexes a decimal or `0x`-prefixed hexadecimal literal starting at `start`.
 fn lex_number(bytes: &[u8], start: usize) -> Result<(Token, usize), ExprError> {
     let mut index = start;
-    let (radix, digits_start) = if bytes[index] == b'0'
-        && matches!(bytes.get(index + 1), Some(b'x' | b'X'))
-    {
-        (16u32, index + 2)
-    } else {
-        (10u32, index)
-    };
+    let (radix, digits_start) =
+        if bytes[index] == b'0' && matches!(bytes.get(index + 1), Some(b'x' | b'X')) {
+            (16u32, index + 2)
+        } else {
+            (10u32, index)
+        };
     index = digits_start;
     let mut value: i64 = 0;
     let mut saw_digit = false;
@@ -291,12 +290,7 @@ impl<'a> Evaluator<'a> {
     fn parse_cmp(&mut self) -> Result<i64, ExprError> {
         let mut value = self.parse_add()?;
         while let Some(
-            token @ (Token::EqEq
-            | Token::NotEq
-            | Token::Lt
-            | Token::Gt
-            | Token::Le
-            | Token::Ge),
+            token @ (Token::EqEq | Token::NotEq | Token::Lt | Token::Gt | Token::Le | Token::Ge),
         ) = self.peek()
         {
             let op = token.clone();
@@ -344,18 +338,24 @@ impl<'a> Evaluator<'a> {
             self.cursor += 1;
             let rhs = self.parse_unary()?;
             value = match op {
-                Token::Star => value.checked_mul(rhs).ok_or(ExprError::ArithmeticOverflow)?,
+                Token::Star => value
+                    .checked_mul(rhs)
+                    .ok_or(ExprError::ArithmeticOverflow)?,
                 Token::Slash => {
                     if rhs == 0 {
                         return Err(ExprError::DivideByZero);
                     }
-                    value.checked_div(rhs).ok_or(ExprError::ArithmeticOverflow)?
+                    value
+                        .checked_div(rhs)
+                        .ok_or(ExprError::ArithmeticOverflow)?
                 }
                 Token::Percent => {
                     if rhs == 0 {
                         return Err(ExprError::DivideByZero);
                     }
-                    value.checked_rem(rhs).ok_or(ExprError::ArithmeticOverflow)?
+                    value
+                        .checked_rem(rhs)
+                        .ok_or(ExprError::ArithmeticOverflow)?
                 }
                 _ => unreachable!("peek restricted the op set"),
             };

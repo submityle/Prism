@@ -407,7 +407,10 @@ mod tests {
     #[test]
     fn geometric_term_degenerate_and_backfacing_are_zero() {
         // Coincident points.
-        assert_eq!(geometric_term(Vec3::ZERO, Vec3::Z, Vec3::ZERO, Vec3::Z), 0.0);
+        assert_eq!(
+            geometric_term(Vec3::ZERO, Vec3::Z, Vec3::ZERO, Vec3::Z),
+            0.0
+        );
         // Visible normal points away from the sample point.
         assert_eq!(
             geometric_term(Vec3::ZERO, Vec3::NEG_Z, Vec3::Z, Vec3::NEG_Z),

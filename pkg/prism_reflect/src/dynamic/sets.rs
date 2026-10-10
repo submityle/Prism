@@ -5,10 +5,10 @@ use crate::kinds::{Set, SetIter};
 use crate::reflect::Reflect;
 use crate::type_info::{SetInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef};
-use core::any::Any;
 use alloc::boxed::Box;
-use std::sync::OnceLock;
 use alloc::vec::Vec;
+use core::any::Any;
+use std::sync::OnceLock;
 
 /// A unique-value set assembled at runtime without a concrete value type.
 ///

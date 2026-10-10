@@ -136,7 +136,12 @@ mod tests {
             TriplanarSampleConfig::DEFAULT,
             |_uv| col,
         );
-        assert!((out - col).length() < 1e-5, "constant drift: {:?} vs {:?}", out, col);
+        assert!(
+            (out - col).length() < 1e-5,
+            "constant drift: {:?} vs {:?}",
+            out,
+            col
+        );
     }
 
     /// An axis-aligned normal makes the sampler read essentially only that

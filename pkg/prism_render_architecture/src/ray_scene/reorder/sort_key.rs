@@ -287,7 +287,10 @@ fn octahedral_unit(dir: [f32; 3]) -> [f32; 2] {
         px = ox;
         py = oy;
     }
-    [(px * 0.5 + 0.5).clamp(0.0, 1.0), (py * 0.5 + 0.5).clamp(0.0, 1.0)]
+    [
+        (px * 0.5 + 0.5).clamp(0.0, 1.0),
+        (py * 0.5 + 0.5).clamp(0.0, 1.0),
+    ]
 }
 
 /// Quantises `t ∈ [0, 1]` to an integer in `[0, 2^bits)`.
@@ -393,12 +396,16 @@ mod tests {
     fn zero_direction_is_centre_without_nan() {
         let l = layout();
         let k = l.encode(0, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
-        let centre = l.encode(0, {
-            // Reconstruct the exact direction the centre maps from: the oct
-            // centre is produced by the guarded zero path, so just compare the
-            // encoded key is finite and stable.
-            [0.0, 0.0, 0.0]
-        }, [0.0, 0.0, 0.0]);
+        let centre = l.encode(
+            0,
+            {
+                // Reconstruct the exact direction the centre maps from: the oct
+                // centre is produced by the guarded zero path, so just compare the
+                // encoded key is finite and stable.
+                [0.0, 0.0, 0.0]
+            },
+            [0.0, 0.0, 0.0],
+        );
         assert_eq!(k, centre);
     }
 

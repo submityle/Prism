@@ -157,11 +157,7 @@ impl FusedProfile {
 /// same name merge into one [`FusionSource::Both`] entry; unmatched frames
 /// become [`FusionSource::SampledOnly`] or [`FusionSource::InstrumentedOnly`].
 #[must_use]
-pub fn fuse(
-    flat: &FlatProfile,
-    symbols: &SymbolTable,
-    spans: &[InstrumentedSpan],
-) -> FusedProfile {
+pub fn fuse(flat: &FlatProfile, symbols: &SymbolTable, spans: &[InstrumentedSpan]) -> FusedProfile {
     let interval = flat.interval_nanos();
     // Name-keyed accumulator so sampled + instrumented sides merge cleanly, in
     // deterministic (lexicographic) order before the final sort.

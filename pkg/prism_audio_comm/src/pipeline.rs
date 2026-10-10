@@ -94,8 +94,11 @@ pub trait VoiceCommPipeline {
 
     /// Produces one downlink playout block into `out`, draining `transport`
     /// into the jitter buffer and decoding or concealing as needed.
-    fn playout<T: VoiceTransport>(&mut self, out: &mut [Sample], transport: &mut T)
-    -> PlayoutStatus;
+    fn playout<T: VoiceTransport>(
+        &mut self,
+        out: &mut [Sample],
+        transport: &mut T,
+    ) -> PlayoutStatus;
 
     /// Resets both directions to their initial state.
     fn reset(&mut self);

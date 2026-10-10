@@ -147,7 +147,11 @@ fn wesl_apply_plasticity(
 
 /// 对一组约束断言：WESL 转写蠕变后的逐边 rest 长度与黄金 [`apply_plasticity`]
 /// **逐位一致**。
-fn assert_bit_exact(particles: &[ClothParticle], constraints: &[Constraint], params: PlasticParams) {
+fn assert_bit_exact(
+    particles: &[ClothParticle],
+    constraints: &[Constraint],
+    params: PlasticParams,
+) {
     let mut golden = constraints.to_vec();
     apply_plasticity(&mut golden, particles, params);
 
@@ -371,7 +375,11 @@ fn mixed_graph_across_workgroups_matches_golden_bit_for_bit() {
             _ => ConstraintKind::Tether,
         };
         // rest 刻意偏离实际距离以制造超屈服应变；个别设成退化/越界。
-        let rest = if i % 13 == 0 { 1.0e-12 } else { 0.2 + (i % 3) as f32 * 0.15 };
+        let rest = if i % 13 == 0 {
+            1.0e-12
+        } else {
+            0.2 + (i % 3) as f32 * 0.15
+        };
         let b = if i % 17 == 0 { 999 } else { i + 1 };
         constraints.push(edge(i, b, rest, kind));
     }
@@ -386,10 +394,6 @@ fn jittered_positions_match_golden_bit_for_bit() {
         particle_at(Vec3::new(1.737, 0.902, -0.613)),
         particle_at(Vec3::new(-0.411, 1.228, 0.774)),
     ];
-    let constraints = [
-        stretch(0, 1, 0.5),
-        stretch(1, 2, 0.7),
-        stretch(2, 0, 1.3),
-    ];
+    let constraints = [stretch(0, 1, 0.5), stretch(1, 2, 0.7), stretch(2, 0, 1.3)];
     assert_bit_exact(&particles, &constraints, moderate());
 }

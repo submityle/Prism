@@ -67,7 +67,10 @@ fn vtable<W: WakeTask>() -> &'static RawWakerVTable {
 /// # Safety
 /// `data` must be a pointer produced by `Arc::into_raw::<W>` that is still
 /// owned by the waker being cloned (the standard [`RawWaker`] contract).
-#[expect(unsafe_code, reason = "RawWaker clone: recover the Arc, clone it, re-leak the original")]
+#[expect(
+    unsafe_code,
+    reason = "RawWaker clone: recover the Arc, clone it, re-leak the original"
+)]
 unsafe fn clone_raw<W: WakeTask>(data: *const ()) -> RawWaker {
     // SAFETY: `data` is a pointer previously produced by `Arc::into_raw::<W>`
     // and still owned by the waker being cloned.
@@ -96,7 +99,10 @@ unsafe fn wake_raw<W: WakeTask>(data: *const ()) {
 /// # Safety
 /// `data` must be a pointer produced by `Arc::into_raw::<W>` that remains owned
 /// by the live waker across the call (the standard [`RawWaker`] contract).
-#[expect(unsafe_code, reason = "RawWaker wake_by_ref: borrow the Arc, then re-leak it")]
+#[expect(
+    unsafe_code,
+    reason = "RawWaker wake_by_ref: borrow the Arc, then re-leak it"
+)]
 unsafe fn wake_by_ref_raw<W: WakeTask>(data: *const ()) {
     // SAFETY: `data` came from `Arc::into_raw::<W>`; we temporarily reconstruct
     // the `Arc` to borrow it, then re-leak it so the refcount is unchanged.

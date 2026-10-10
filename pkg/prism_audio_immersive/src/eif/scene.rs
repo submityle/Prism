@@ -323,7 +323,11 @@ mod tests {
     #[test]
     fn dangling_portal_region_is_rejected() {
         let mut scene = room();
-        scene.add_portal(EifPortal::new(0, 5, Aabb::from_corners(Vec3::ZERO, Vec3::ONE)));
+        scene.add_portal(EifPortal::new(
+            0,
+            5,
+            Aabb::from_corners(Vec3::ZERO, Vec3::ONE),
+        ));
         assert_eq!(
             scene.validate(),
             Err(SceneError::PortalRegionOutOfRange {

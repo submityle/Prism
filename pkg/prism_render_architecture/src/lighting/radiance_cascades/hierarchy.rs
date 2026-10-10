@@ -210,7 +210,10 @@ mod tests {
         for level in 0..h.levels - 1 {
             let end = h.interval_end(level);
             let next = h.interval_start(level + 1);
-            assert!((end - next).abs() <= 1.0e-4, "level {level}: {end} vs {next}");
+            assert!(
+                (end - next).abs() <= 1.0e-4,
+                "level {level}: {end} vs {next}"
+            );
         }
     }
 

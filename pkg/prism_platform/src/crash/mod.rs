@@ -59,7 +59,10 @@ mod backend;
 /// `true` on desktop `POSIX` hosts (Linux and macOS), `false` on Web, Android,
 /// iOS, and any other target without the real signal backend. Mirrored by
 /// [`crate::PlatformCaps::has_crash_capture`].
-pub const SUPPORTED: bool = cfg!(all(unix, not(any(target_os = "android", target_os = "ios"))));
+pub const SUPPORTED: bool = cfg!(all(
+    unix,
+    not(any(target_os = "android", target_os = "ios"))
+));
 
 /// The signature of a user crash handler.
 ///
@@ -267,13 +270,23 @@ pub fn uninstall() -> Result<()> {
 }
 
 /// Current `OS` disposition pointer for `sig` (test-only, real backend only).
-#[cfg(all(test, unix, not(any(target_os = "android", target_os = "ios")), not(feature = "mock")))]
+#[cfg(all(
+    test,
+    unix,
+    not(any(target_os = "android", target_os = "ios")),
+    not(feature = "mock")
+))]
 pub(crate) fn disposition(sig: i32) -> usize {
     backend::disposition(sig)
 }
 
 /// Address of the real signal trampoline (test-only, real backend only).
-#[cfg(all(test, unix, not(any(target_os = "android", target_os = "ios")), not(feature = "mock")))]
+#[cfg(all(
+    test,
+    unix,
+    not(any(target_os = "android", target_os = "ios")),
+    not(feature = "mock")
+))]
 pub(crate) fn trampoline_addr() -> usize {
     backend::trampoline_addr()
 }

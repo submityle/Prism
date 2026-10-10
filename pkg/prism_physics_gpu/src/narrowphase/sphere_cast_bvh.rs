@@ -243,7 +243,10 @@ mod tests {
         let targets = [target_at(&h[0], Vec3::new(0.0, 20.0, 0.0))];
         let cast = SceneSphereCast::new(Vec3::ZERO, Vec3::X, 0.5, 20.0);
         assert!(sphere_cast(&targets, &cast).is_none());
-        assert_eq!(sphere_cast_bvh(&targets, &cast), sphere_cast(&targets, &cast));
+        assert_eq!(
+            sphere_cast_bvh(&targets, &cast),
+            sphere_cast(&targets, &cast)
+        );
     }
 
     #[test]
@@ -254,7 +257,10 @@ mod tests {
         let targets = [target_at(&h[0], Vec3::new(10.0, 0.0, 0.0))];
         let cast = SceneSphereCast::new(Vec3::ZERO, Vec3::X, 0.5, 5.0);
         assert!(sphere_cast(&targets, &cast).is_none());
-        assert_eq!(sphere_cast_bvh(&targets, &cast), sphere_cast(&targets, &cast));
+        assert_eq!(
+            sphere_cast_bvh(&targets, &cast),
+            sphere_cast(&targets, &cast)
+        );
     }
 
     #[test]
@@ -289,12 +295,18 @@ mod tests {
         }
         let mut targets = vec![target_at(&hulls[0], Vec3::new(5.0, 0.0, 0.0))];
         for k in 0..40 {
-            targets.push(target_at(&hulls[k + 1], Vec3::new(1.0 + 1.5 * (k as f32), 60.0, 0.0)));
+            targets.push(target_at(
+                &hulls[k + 1],
+                Vec3::new(1.0 + 1.5 * (k as f32), 60.0, 0.0),
+            ));
         }
         let cast = SceneSphereCast::new(Vec3::ZERO, Vec3::X, 0.5, 50.0);
         let brute = sphere_cast(&targets, &cast);
         let bvh = sphere_cast_bvh(&targets, &cast);
-        assert_eq!(brute, bvh, "BVH sphere cast must equal brute force on a large scene");
+        assert_eq!(
+            brute, bvh,
+            "BVH sphere cast must equal brute force on a large scene"
+        );
         assert_eq!(bvh.expect("the on-path box is struck").target, 0);
     }
 

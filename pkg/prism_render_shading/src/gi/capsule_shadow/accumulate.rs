@@ -32,9 +32,7 @@
 //! * Every function is a deterministic pure function: no RNG, no I/O, no GPU,
 //!   no allocation, no global state.
 
-use crate::gi::capsule_shadow::capsule::{
-    capsule_ambient_occlusion, capsule_soft_shadow, Capsule,
-};
+use crate::gi::capsule_shadow::capsule::{capsule_ambient_occlusion, capsule_soft_shadow, Capsule};
 use crate::gi::capsule_shadow::sphere::DiskLight;
 use bevy_math::{ops, Vec3};
 use core::f32::consts::FRAC_PI_2;
@@ -86,11 +84,7 @@ pub fn accumulate_soft_shadow_conservative(
 /// Returns `1 - prod_i (1 - ao_i)` where `ao_i` is each capsule's
 /// [`capsule_ambient_occlusion`].  An empty slice returns `0` (fully open),
 /// and the result is monotonically non-decreasing as capsules are added.
-pub fn accumulate_ambient_occlusion(
-    receiver: Vec3,
-    normal: Vec3,
-    capsules: &[Capsule],
-) -> f32 {
+pub fn accumulate_ambient_occlusion(receiver: Vec3, normal: Vec3, capsules: &[Capsule]) -> f32 {
     let mut visibility = 1.0f32;
     for &capsule in capsules {
         let ao = capsule_ambient_occlusion(receiver, normal, capsule).clamp(0.0, 1.0);
@@ -119,8 +113,8 @@ pub fn penumbra_angular_width(light_radius: f32, distance: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gi::capsule_shadow::capsule::capsule_soft_shadow as single_shadow;
     use crate::gi::capsule_shadow::capsule::capsule_ambient_occlusion as single_ao;
+    use crate::gi::capsule_shadow::capsule::capsule_soft_shadow as single_shadow;
 
     const TOL: f32 = 1.0e-5;
 
@@ -129,11 +123,7 @@ mod tests {
     }
 
     fn blocker(x: f32) -> Capsule {
-        Capsule::new(
-            Vec3::new(x, -4.0, 3.0),
-            Vec3::new(x, 4.0, 3.0),
-            0.7,
-        )
+        Capsule::new(Vec3::new(x, -4.0, 3.0), Vec3::new(x, 4.0, 3.0), 0.7)
     }
 
     #[test]
@@ -191,16 +181,8 @@ mod tests {
 
     #[test]
     fn more_proxies_never_brighten_ao() {
-        let near = Capsule::new(
-            Vec3::new(-2.0, 2.0, 0.0),
-            Vec3::new(2.0, 2.0, 0.0),
-            0.8,
-        );
-        let extra = Capsule::new(
-            Vec3::new(-2.0, 2.5, 1.0),
-            Vec3::new(2.0, 2.5, 1.0),
-            0.6,
-        );
+        let near = Capsule::new(Vec3::new(-2.0, 2.0, 0.0), Vec3::new(2.0, 2.0, 0.0), 0.8);
+        let extra = Capsule::new(Vec3::new(-2.0, 2.5, 1.0), Vec3::new(2.0, 2.5, 1.0), 0.6);
         let a = accumulate_ambient_occlusion(Vec3::ZERO, Vec3::Y, &[near]);
         let b = accumulate_ambient_occlusion(Vec3::ZERO, Vec3::Y, &[near, extra]);
         assert!(b >= a - TOL, "{a} {b}");
@@ -256,7 +238,10 @@ mod tests {
             .iter()
             .map(|&c| single_shadow(Vec3::ZERO, light(), c))
             .fold(0.0f32, f32::max);
-        assert!((conservative - strongest).abs() < TOL, "{conservative} {strongest}");
+        assert!(
+            (conservative - strongest).abs() < TOL,
+            "{conservative} {strongest}"
+        );
     }
 
     #[test]

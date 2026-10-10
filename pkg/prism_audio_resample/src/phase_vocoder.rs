@@ -46,11 +46,11 @@ use core::f32::consts::TAU;
 use prism_audio_core::fft::Fft;
 use prism_audio_core::math::Sample;
 
-use crate::fractional_delay::{EPS, close, sanitize};
+use crate::fractional_delay::{close, sanitize, EPS};
 use crate::polyphase_sinc::PolyphaseSincResampler;
 use crate::resampler::Resampler;
 use crate::time_stretcher::{
-    SampleFifo, StretchProgress, TimeStretcher, clamp_pitch, clamp_stretch,
+    clamp_pitch, clamp_stretch, SampleFifo, StretchProgress, TimeStretcher,
 };
 
 /// STFT analysis / synthesis frame length in samples (a power of two).

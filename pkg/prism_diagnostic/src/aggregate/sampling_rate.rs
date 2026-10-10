@@ -279,10 +279,7 @@ impl SamplingController {
 /// summed [`SampleRate::expected_reports`] — the deterministic bandwidth
 /// estimate the operator uses to size the collection path.
 #[must_use]
-pub fn estimate_fleet_reports(
-    decisions: &[SamplingDecision],
-    captured: &[(&str, u64)],
-) -> u64 {
+pub fn estimate_fleet_reports(decisions: &[SamplingDecision], captured: &[(&str, u64)]) -> u64 {
     let mut total = 0u64;
     for decision in decisions {
         let count = captured

@@ -284,9 +284,8 @@ pub fn analytic_sphere_occlusion(
     let t1 = -b + sqrt_d;
     let lo = start_offset.max(0.0);
     // A hit lies in (lo, max_distance) for either root, or the ray starts inside.
-    let hit = (t0 > lo && t0 < max_distance)
-        || (t1 > lo && t1 < max_distance)
-        || (t0 <= lo && t1 >= lo);
+    let hit =
+        (t0 > lo && t0 < max_distance) || (t1 > lo && t1 < max_distance) || (t0 <= lo && t1 >= lo);
     if hit {
         1.0
     } else {
@@ -429,7 +428,9 @@ mod tests {
     fn screen_space_non_finite_inputs_are_lit() {
         let p = ContactShadowParams::default();
         assert_eq!(
-            screen_space_contact(p, Vec2::splat(0.5), f32::NAN, Vec2::splat(0.6), 1.0, |_| 0.9),
+            screen_space_contact(p, Vec2::splat(0.5), f32::NAN, Vec2::splat(0.6), 1.0, |_| {
+                0.9
+            }),
             0.0
         );
     }
@@ -437,45 +438,30 @@ mod tests {
     #[test]
     fn sdf_hits_solid_occluder() {
         // A disc of radius 0.3 centred ahead of the ray fully occludes.
-        let occ = sdf_soft_contact(
-            Vec2::ZERO,
-            Vec2::new(1.0, 0.0),
-            5.0,
-            0.01,
-            8.0,
-            64,
-            |p| (p - Vec2::new(2.0, 0.0)).length() - 0.3,
+        let occ = sdf_soft_contact(Vec2::ZERO, Vec2::new(1.0, 0.0), 5.0, 0.01, 8.0, 64, |p| {
+            (p - Vec2::new(2.0, 0.0)).length() - 0.3
+        });
+        assert!(
+            (occ - 1.0).abs() < 1e-6,
+            "expected full occlusion, got {occ}"
         );
-        assert!((occ - 1.0).abs() < 1e-6, "expected full occlusion, got {occ}");
     }
 
     #[test]
     fn sdf_misses_distant_occluder() {
         // Disc far off the ray's path -> essentially lit.
-        let occ = sdf_soft_contact(
-            Vec2::ZERO,
-            Vec2::new(1.0, 0.0),
-            5.0,
-            0.01,
-            8.0,
-            64,
-            |p| (p - Vec2::new(2.0, 10.0)).length() - 0.3,
-        );
+        let occ = sdf_soft_contact(Vec2::ZERO, Vec2::new(1.0, 0.0), 5.0, 0.01, 8.0, 64, |p| {
+            (p - Vec2::new(2.0, 10.0)).length() - 0.3
+        });
         assert!(occ < 0.05, "expected lit, got {occ}");
     }
 
     #[test]
     fn sdf_grazing_occluder_is_soft() {
         // Disc that just grazes the ray path yields a partial (soft) occlusion.
-        let near = sdf_soft_contact(
-            Vec2::ZERO,
-            Vec2::new(1.0, 0.0),
-            5.0,
-            0.01,
-            8.0,
-            128,
-            |p| (p - Vec2::new(2.0, 0.35)).length() - 0.3,
-        );
+        let near = sdf_soft_contact(Vec2::ZERO, Vec2::new(1.0, 0.0), 5.0, 0.01, 8.0, 128, |p| {
+            (p - Vec2::new(2.0, 0.35)).length() - 0.3
+        });
         assert!(near > 0.0 && near < 1.0, "expected soft edge, got {near}");
     }
 
@@ -501,18 +487,11 @@ mod tests {
 
     #[test]
     fn project_march_end_scales_linearly() {
-        let (uv, d) = project_march_end(
-            Vec2::new(0.5, 0.5),
-            1.0,
-            Vec2::new(0.1, 0.0),
-            0.2,
-            2.0,
-        );
+        let (uv, d) = project_march_end(Vec2::new(0.5, 0.5), 1.0, Vec2::new(0.1, 0.0), 0.2, 2.0);
         assert!((uv.x - 0.7).abs() < 1e-6);
         assert!((d - 1.4).abs() < 1e-6);
         // Degenerate length returns the start.
-        let (uv0, d0) =
-            project_march_end(Vec2::new(0.5, 0.5), 1.0, Vec2::new(0.1, 0.0), 0.2, -1.0);
+        let (uv0, d0) = project_march_end(Vec2::new(0.5, 0.5), 1.0, Vec2::new(0.1, 0.0), 0.2, -1.0);
         assert_eq!((uv0, d0), (Vec2::new(0.5, 0.5), 1.0));
     }
 

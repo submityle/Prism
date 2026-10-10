@@ -14,7 +14,9 @@ use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criteri
 use std::hint::black_box;
 
 use glam::Vec3;
-use prism_physics_core::{BodyDesc, BodyStorage, CpuBackend, Integrator, PhysicsBackend, PhysicsWorld};
+use prism_physics_core::{
+    BodyDesc, BodyStorage, CpuBackend, Integrator, PhysicsBackend, PhysicsWorld,
+};
 use prism_physics_geometry::{generate_pairs, Aabb, DynamicBvh, Ray};
 
 /// Deterministic xorshift64* RNG, used only to lay out reproducible scenes.

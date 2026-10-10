@@ -122,9 +122,7 @@ impl LoadedMedia {
     #[must_use]
     pub fn resident_pcm_bytes(&self) -> u64 {
         match self {
-            LoadedMedia::Resident { pcm, .. } => {
-                (pcm.len() * size_of::<Sample>()) as u64
-            }
+            LoadedMedia::Resident { pcm, .. } => (pcm.len() * size_of::<Sample>()) as u64,
             LoadedMedia::Streaming { .. } => 0,
         }
     }
@@ -202,28 +200,32 @@ impl LoadedBank {
         let bytes = &blob[start..end];
         match entry.residency {
             Residency::Memory => {
-                let mut decoder = registry.decode_bytes(bytes).map_err(|error| {
-                    BankLoadError::Decode {
+                let mut decoder =
+                    registry
+                        .decode_bytes(bytes)
+                        .map_err(|error| BankLoadError::Decode {
+                            entry: entry.id,
+                            error,
+                        })?;
+                let info = decoder.info();
+                let pcm = decoder
+                    .decode_to_end()
+                    .map_err(|error| BankLoadError::Decode {
                         entry: entry.id,
                         error,
-                    }
-                })?;
-                let info = decoder.info();
-                let pcm = decoder.decode_to_end().map_err(|error| BankLoadError::Decode {
-                    entry: entry.id,
-                    error,
-                })?;
+                    })?;
                 Ok(LoadedMedia::Resident { pcm, info })
             }
             Residency::Streaming { prefetch_frames } => {
                 // Probe the stream so the retained info matches the decoder's
                 // own report rather than only the authored metadata.
-                let decoder = registry.decode_bytes(bytes).map_err(|error| {
-                    BankLoadError::Decode {
-                        entry: entry.id,
-                        error,
-                    }
-                })?;
+                let decoder =
+                    registry
+                        .decode_bytes(bytes)
+                        .map_err(|error| BankLoadError::Decode {
+                            entry: entry.id,
+                            error,
+                        })?;
                 let info = decoder.info();
                 drop(decoder);
                 let mut encoded = Vec::with_capacity(bytes.len());

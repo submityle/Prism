@@ -238,8 +238,17 @@ mod tests {
             for j in 0..13 {
                 let uv = Vec2::new(i as f32 * 0.137, j as f32 * 0.211);
                 let t = stochastic_tiling(uv, cfg);
-                assert!((t.weight_sum() - 1.0).abs() < 1e-5, "sum {} at {:?}", t.weight_sum(), uv);
-                assert!(t.weight.iter().all(|&w| w >= 0.0), "negative weight {:?}", t.weight);
+                assert!(
+                    (t.weight_sum() - 1.0).abs() < 1e-5,
+                    "sum {} at {:?}",
+                    t.weight_sum(),
+                    uv
+                );
+                assert!(
+                    t.weight.iter().all(|&w| w >= 0.0),
+                    "negative weight {:?}",
+                    t.weight
+                );
             }
         }
     }
@@ -279,11 +288,25 @@ mod tests {
         let a = hash_offset(IVec2::new(0, 0));
         let b = hash_offset(IVec2::new(1, 0));
         let c = hash_offset(IVec2::new(0, 1));
-        assert!((a - b).length() > 1e-3, "neighbours should differ: {:?} {:?}", a, b);
-        assert!((a - c).length() > 1e-3, "neighbours should differ: {:?} {:?}", a, c);
+        assert!(
+            (a - b).length() > 1e-3,
+            "neighbours should differ: {:?} {:?}",
+            a,
+            b
+        );
+        assert!(
+            (a - c).length() > 1e-3,
+            "neighbours should differ: {:?} {:?}",
+            a,
+            c
+        );
         // Every offset stays in the unit square.
         for v in [a, b, c] {
-            assert!((0.0..1.0).contains(&v.x) && (0.0..1.0).contains(&v.y), "offset range {:?}", v);
+            assert!(
+                (0.0..1.0).contains(&v.x) && (0.0..1.0).contains(&v.y),
+                "offset range {:?}",
+                v
+            );
         }
     }
 
@@ -296,7 +319,12 @@ mod tests {
             let uv = Vec2::new(i as f32 * 0.33, i as f32 * 0.19);
             let t = stochastic_tiling(uv, cfg);
             let blended = t.blend_scalar([0.6, 0.6, 0.6]);
-            assert!((blended - 0.6).abs() < 1e-5, "constant drift {} at {:?}", blended, uv);
+            assert!(
+                (blended - 0.6).abs() < 1e-5,
+                "constant drift {} at {:?}",
+                blended,
+                uv
+            );
         }
     }
 
@@ -314,7 +342,10 @@ mod tests {
     /// Non-finite UVs are sanitised to a finite, valid result.
     #[test]
     fn non_finite_uv_is_safe() {
-        let t = stochastic_tiling(Vec2::new(f32::NAN, f32::INFINITY), StochasticConfig::DEFAULT);
+        let t = stochastic_tiling(
+            Vec2::new(f32::NAN, f32::INFINITY),
+            StochasticConfig::DEFAULT,
+        );
         assert!((t.weight_sum() - 1.0).abs() < 1e-5);
         for uv in t.uv {
             assert!(uv.is_finite(), "sample uv finite: {:?}", uv);

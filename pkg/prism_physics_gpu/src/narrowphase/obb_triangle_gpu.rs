@@ -211,8 +211,7 @@ impl GpuObbTriangleNarrowphase {
             pad1: 0,
             pad2: 0,
         };
-        let params_buf =
-            buffer::uniform(device, "prism_narrowphase_obb_triangle_params", &params);
+        let params_buf = buffer::uniform(device, "prism_narrowphase_obb_triangle_params", &params);
 
         // Boxes pack to four vec4 each: centre then axis rows carrying the half
         // extents in their w lanes.
@@ -225,8 +224,11 @@ impl GpuObbTriangleNarrowphase {
                 axis2: [b.axes[2].x, b.axes[2].y, b.axes[2].z, b.half_extents.z],
             })
             .collect();
-        let boxes_buf =
-            buffer::storage_read(device, "prism_narrowphase_obb_triangle_boxes", &packed_boxes);
+        let boxes_buf = buffer::storage_read(
+            device,
+            "prism_narrowphase_obb_triangle_boxes",
+            &packed_boxes,
+        );
 
         // Triangles pack to three vec4 each: one vertex per row, w unused.
         let packed_triangles: Vec<GpuTriangle> = triangles
@@ -246,8 +248,11 @@ impl GpuObbTriangleNarrowphase {
         // Pairs pack to a vec2<u32> each: the box index then the triangle index.
         let packed_pairs: Vec<[u32; 2]> =
             pairs.iter().map(|pair| [pair.obb, pair.triangle]).collect();
-        let pairs_buf =
-            buffer::storage_read(device, "prism_narrowphase_obb_triangle_pairs", &packed_pairs);
+        let pairs_buf = buffer::storage_read(
+            device,
+            "prism_narrowphase_obb_triangle_pairs",
+            &packed_pairs,
+        );
 
         let contacts_bytes = CONTACT_BYTES * num_pairs as u64;
         let contacts_buf = buffer::storage_rw_zeroed(

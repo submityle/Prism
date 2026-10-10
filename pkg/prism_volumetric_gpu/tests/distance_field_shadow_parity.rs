@@ -64,12 +64,7 @@ fn sphere_sdf(p: [f32; 3], center: [f32; 3], radius: f32) -> f32 {
 }
 
 /// Bakes a sphere `SDF` into a `dims` grid over the `[0, extent]` cube.
-fn bake_sphere_grid(
-    dims: [usize; 3],
-    extent: f32,
-    center: [f32; 3],
-    radius: f32,
-) -> Vec<f32> {
+fn bake_sphere_grid(dims: [usize; 3], extent: f32, center: [f32; 3], radius: f32) -> Vec<f32> {
     let [nx, ny, nz] = dims;
     let mut data = vec![0.0f32; nx * ny * nz];
     for k in 0..nz {
@@ -210,7 +205,11 @@ fn hard_shadow_on_direct_hit() {
         &sphere_params(),
         &rays,
     );
-    assert!(got[0] <= EPS, "a direct hit should be fully shadowed, got {}", got[0]);
+    assert!(
+        got[0] <= EPS,
+        "a direct hit should be fully shadowed, got {}",
+        got[0]
+    );
 }
 
 #[test]
@@ -237,16 +236,7 @@ fn penumbra_soft_transition() {
             dir: [0.0, 1.0, 0.0],
         });
     }
-    let got = check(
-        &ctx,
-        &gpu,
-        dims,
-        [0.0; 3],
-        [4.0; 3],
-        &data,
-        &params,
-        &rays,
-    );
+    let got = check(&ctx, &gpu, dims, [0.0; 3], [4.0; 3], &data, &params, &rays);
     let has_soft = got.iter().any(|&v| v > 0.05 && v < 0.95);
     assert!(
         has_soft,
@@ -353,11 +343,29 @@ fn degenerate_steps_and_direction() {
         },
     ];
 
-    let lit_zero = check(&ctx, &gpu, dims, [0.0; 3], [4.0; 3], &data, &zero_steps, &rays);
+    let lit_zero = check(
+        &ctx,
+        &gpu,
+        dims,
+        [0.0; 3],
+        [4.0; 3],
+        &data,
+        &zero_steps,
+        &rays,
+    );
     for v in &lit_zero {
         assert!((v - 1.0).abs() <= EPS, "zero step budget stays fully lit");
     }
-    let lit_past = check(&ctx, &gpu, dims, [0.0; 3], [4.0; 3], &data, &past_reach, &rays);
+    let lit_past = check(
+        &ctx,
+        &gpu,
+        dims,
+        [0.0; 3],
+        [4.0; 3],
+        &data,
+        &past_reach,
+        &rays,
+    );
     for v in &lit_past {
         assert!((v - 1.0).abs() <= EPS, "start past reach stays fully lit");
     }
@@ -374,7 +382,10 @@ fn degenerate_steps_and_direction() {
         &sphere_params(),
         &rays,
     );
-    assert!((normal[0] - 1.0).abs() <= EPS, "zero direction stays fully lit");
+    assert!(
+        (normal[0] - 1.0).abs() <= EPS,
+        "zero direction stays fully lit"
+    );
 }
 
 #[test]

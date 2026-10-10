@@ -15,9 +15,9 @@
 use crate::schema::migration::{MigrateError, Migration};
 use crate::type_info::TypeInfo;
 use alloc::collections::BTreeMap;
-use std::collections::HashMap;
 use alloc::string::String;
 use alloc::vec::Vec;
+use std::collections::HashMap;
 
 /// A schema version number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -168,7 +168,9 @@ impl SchemaRegistry {
     /// The current (newest registered) version of `logical`, if any.
     #[must_use]
     pub fn current_version(&self, logical: &str) -> Option<SchemaVersion> {
-        self.types.get(logical).map(|t| SchemaVersion::new(t.current))
+        self.types
+            .get(logical)
+            .map(|t| SchemaVersion::new(t.current))
     }
 
     /// The schema shape for a specific version of `logical`.

@@ -259,9 +259,21 @@ fn clamp_non_negative(value: f32) -> f32 {
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.max(0.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.max(0.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.max(0.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -305,7 +317,10 @@ mod tests {
         let sigma = extinction_from_color(color, reference);
         // A slab of the reference thickness transmits the authored colour.
         let t = beer_lambert_rgb(sigma, reference);
-        assert!((t - color).abs().max_element() < 1e-4, "t={t} color={color}");
+        assert!(
+            (t - color).abs().max_element() < 1e-4,
+            "t={t} color={color}"
+        );
     }
 
     #[test]
@@ -313,9 +328,15 @@ mod tests {
         let color = Vec3::new(0.9, 0.5, 0.2);
         let reference = 2.0;
         let at_ref = transmittance_from_color(color, reference, reference);
-        assert!((at_ref - color).abs().max_element() < 1e-4, "at_ref={at_ref}");
+        assert!(
+            (at_ref - color).abs().max_element() < 1e-4,
+            "at_ref={at_ref}"
+        );
         let at_zero = transmittance_from_color(color, 0.0, reference);
-        assert!((at_zero - Vec3::ONE).abs().max_element() < 1e-6, "at_zero={at_zero}");
+        assert!(
+            (at_zero - Vec3::ONE).abs().max_element() < 1e-6,
+            "at_zero={at_zero}"
+        );
         // Doubling the thickness squares the transmission colour.
         let at_double = transmittance_from_color(color, 2.0 * reference, reference);
         assert!((at_double - color * color).abs().max_element() < 1e-4);
@@ -367,13 +388,30 @@ mod tests {
         let out = back_transmission_colored(-1.0, reference, ss, reference, Vec3::ONE, 1.0);
         // L = light(1) * ss * exp(-sigma*ref)=ss * ss = ss^2.
         let expected = ss * ss;
-        assert!((out - expected).abs().max_element() < 2e-3, "out={out} exp={expected}");
+        assert!(
+            (out - expected).abs().max_element() < 2e-3,
+            "out={out} exp={expected}"
+        );
     }
 
     #[test]
     fn is_deterministic() {
-        let a = back_transmission(-0.4, 1.1, Vec3::splat(0.6), Vec3::ONE, Vec3::splat(0.5), 0.3);
-        let b = back_transmission(-0.4, 1.1, Vec3::splat(0.6), Vec3::ONE, Vec3::splat(0.5), 0.3);
+        let a = back_transmission(
+            -0.4,
+            1.1,
+            Vec3::splat(0.6),
+            Vec3::ONE,
+            Vec3::splat(0.5),
+            0.3,
+        );
+        let b = back_transmission(
+            -0.4,
+            1.1,
+            Vec3::splat(0.6),
+            Vec3::ONE,
+            Vec3::splat(0.5),
+            0.3,
+        );
         assert_eq!(a, b);
         assert_eq!(wrap_diffuse(0.2, 0.4), wrap_diffuse(0.2, 0.4));
     }

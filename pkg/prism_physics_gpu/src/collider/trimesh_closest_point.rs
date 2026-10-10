@@ -301,29 +301,54 @@ mod tests {
     fn face_projection_from_above() {
         let mesh = unit_quad();
         // A point above the lower-right triangle projects straight down.
-        let hit = cpu_trimesh_closest_point(&mesh, Vec3::new(0.6, 0.2, 3.0)).expect("has a surface");
+        let hit =
+            cpu_trimesh_closest_point(&mesh, Vec3::new(0.6, 0.2, 3.0)).expect("has a surface");
         assert_eq!(hit.triangle, 0, "lower-right triangle owns (0.6, 0.2)");
-        assert!((hit.distance - 3.0).abs() < 1e-5, "distance was {}", hit.distance);
+        assert!(
+            (hit.distance - 3.0).abs() < 1e-5,
+            "distance was {}",
+            hit.distance
+        );
         assert!((hit.point - Vec3::new(0.6, 0.2, 0.0)).length() < 1e-5);
-        assert!((hit.normal - Vec3::Z).length() < 1e-5, "normal points up at the query");
+        assert!(
+            (hit.normal - Vec3::Z).length() < 1e-5,
+            "normal points up at the query"
+        );
     }
 
     #[test]
     fn clamps_to_edge_outside_face() {
         let mesh = unit_quad();
         // A point beyond the +x edge clamps onto that edge, not the interior.
-        let hit = cpu_trimesh_closest_point(&mesh, Vec3::new(2.0, 0.5, 0.0)).expect("has a surface");
-        assert!((hit.point - Vec3::new(1.0, 0.5, 0.0)).length() < 1e-5, "point was {:?}", hit.point);
-        assert!((hit.distance - 1.0).abs() < 1e-5, "distance was {}", hit.distance);
-        assert!((hit.normal - Vec3::X).length() < 1e-5, "normal points out along +x");
+        let hit =
+            cpu_trimesh_closest_point(&mesh, Vec3::new(2.0, 0.5, 0.0)).expect("has a surface");
+        assert!(
+            (hit.point - Vec3::new(1.0, 0.5, 0.0)).length() < 1e-5,
+            "point was {:?}",
+            hit.point
+        );
+        assert!(
+            (hit.distance - 1.0).abs() < 1e-5,
+            "distance was {}",
+            hit.distance
+        );
+        assert!(
+            (hit.normal - Vec3::X).length() < 1e-5,
+            "normal points out along +x"
+        );
     }
 
     #[test]
     fn clamps_to_shared_vertex() {
         let mesh = unit_quad();
         // Beyond the far corner the nearest feature is the (1, 1) vertex.
-        let hit = cpu_trimesh_closest_point(&mesh, Vec3::new(3.0, 3.0, 0.0)).expect("has a surface");
-        assert!((hit.point - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-5, "point was {:?}", hit.point);
+        let hit =
+            cpu_trimesh_closest_point(&mesh, Vec3::new(3.0, 3.0, 0.0)).expect("has a surface");
+        assert!(
+            (hit.point - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-5,
+            "point was {:?}",
+            hit.point
+        );
     }
 
     #[test]
@@ -349,7 +374,11 @@ mod tests {
         let bvh = cpu_trimesh_closest_point_built(&mesh, point).expect("has a surface");
         assert_eq!(brute, bvh, "pruned walk must equal brute golden");
         // Nearest quad is at z = 7 (distance 3 from z = 10).
-        assert!((brute.distance - 3.0).abs() < 1e-5, "distance was {}", brute.distance);
+        assert!(
+            (brute.distance - 3.0).abs() < 1e-5,
+            "distance was {}",
+            brute.distance
+        );
         assert_eq!(brute.triangle, 14, "nearest lower-right triangle wins");
     }
 

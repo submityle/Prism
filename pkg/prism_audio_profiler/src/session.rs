@@ -299,7 +299,10 @@ impl ProfilerSession {
     /// Count of retained frames whose CPU load indicates an overrun.
     #[must_use]
     pub fn overrun_count(&self) -> usize {
-        self.frames.iter().filter(|frame| frame.is_overrun()).count()
+        self.frames
+            .iter()
+            .filter(|frame| frame.is_overrun())
+            .count()
     }
 
     /// Peak physical voice count observed across all retained frames.

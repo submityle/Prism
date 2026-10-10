@@ -403,7 +403,8 @@ mod tests {
         // is pushed up by depth 0.1.
         let tri = unit_triangle();
         let box_ = axis_box(Vec3::new(0.25, 0.25, 0.4), Vec3::splat(0.5));
-        let c = obb_triangle_contact(0, 0, &box_, &tri).expect("box dipping into the face contacts");
+        let c =
+            obb_triangle_contact(0, 0, &box_, &tri).expect("box dipping into the face contacts");
         assert_eq!(c.a, 0);
         assert_eq!(c.b, 0);
         assert!((c.normal - Vec3::Z).length() < 1.0e-6);

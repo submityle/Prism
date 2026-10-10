@@ -26,8 +26,8 @@
 //! shadowed) together with the step count and whether the ray struck the
 //! surface.
 
-use super::mesh_signed_distance_field::SignedDistanceField;
 use super::mesh_sdf_raymarch::sample_signed_distance;
+use super::mesh_signed_distance_field::SignedDistanceField;
 
 /// Result of a distance-field soft-shadow trace.
 ///
@@ -157,7 +157,9 @@ fn normalize(direction: [f32; 3]) -> Option<[f32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::sdf_soft_shadow;
-    use crate::ray_scene::mesh_signed_distance_field::{signed_distance_field, SignedDistanceField};
+    use crate::ray_scene::mesh_signed_distance_field::{
+        signed_distance_field, SignedDistanceField,
+    };
     use crate::ray_scene::mesh_voxel_padding::pad_voxel_grid;
     use crate::ray_scene::mesh_voxelize::voxelize_surface;
     use crate::ray_scene::triangle_mesh::TriangleMesh;
@@ -207,8 +209,17 @@ mod tests {
     fn degenerate_direction_returns_none() {
         let field = padded_cube_field();
         assert!(
-            sdf_soft_shadow(&field, [0.5, 0.5, -0.3], [0.0, 0.0, 0.0], 0.05, 2.0, 8.0, 0.01, 128)
-                .is_none(),
+            sdf_soft_shadow(
+                &field,
+                [0.5, 0.5, -0.3],
+                [0.0, 0.0, 0.0],
+                0.05,
+                2.0,
+                8.0,
+                0.01,
+                128
+            )
+            .is_none(),
             "a zero-length direction cannot be normalized",
         );
     }

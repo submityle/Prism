@@ -161,7 +161,10 @@ impl<'a> ByteReader<'a> {
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], WireError> {
         let end = self.pos.checked_add(n).ok_or(WireError::UnexpectedEof)?;
-        let slice = self.buf.get(self.pos..end).ok_or(WireError::UnexpectedEof)?;
+        let slice = self
+            .buf
+            .get(self.pos..end)
+            .ok_or(WireError::UnexpectedEof)?;
         self.pos = end;
         Ok(slice)
     }

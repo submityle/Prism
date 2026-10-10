@@ -140,8 +140,14 @@ pub fn mat4_mul_vec4(m: &[[f32; 4]; 4], v: [f32; 4]) -> [f32; 4] {
         let c2 = load(m[2]);
         let c3 = load(m[3]);
         let acc = _mm_add_ps(
-            _mm_add_ps(_mm_mul_ps(c0, _mm_set1_ps(v[0])), _mm_mul_ps(c1, _mm_set1_ps(v[1]))),
-            _mm_add_ps(_mm_mul_ps(c2, _mm_set1_ps(v[2])), _mm_mul_ps(c3, _mm_set1_ps(v[3]))),
+            _mm_add_ps(
+                _mm_mul_ps(c0, _mm_set1_ps(v[0])),
+                _mm_mul_ps(c1, _mm_set1_ps(v[1])),
+            ),
+            _mm_add_ps(
+                _mm_mul_ps(c2, _mm_set1_ps(v[2])),
+                _mm_mul_ps(c3, _mm_set1_ps(v[3])),
+            ),
         );
         store(acc)
     }

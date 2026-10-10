@@ -113,7 +113,9 @@ impl AuditTrail {
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
-        Self { digests: Vec::new() }
+        Self {
+            digests: Vec::new(),
+        }
     }
 
     /// Append one frame's digest.

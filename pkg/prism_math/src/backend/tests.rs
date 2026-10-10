@@ -15,13 +15,21 @@ impl Lcg {
     /// Next `f32` uniformly in `[-1, 1)`.
     fn next_f32(&mut self) -> f32 {
         // Numerical Recipes LCG constants.
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let bits = (self.0 >> 40) as u32; // 24 high-quality bits
         let unit = (bits as f32) / ((1u32 << 24) as f32); // [0, 1)
         unit * 2.0 - 1.0
     }
     fn vec4(&mut self) -> [f32; 4] {
-        [self.next_f32(), self.next_f32(), self.next_f32(), self.next_f32()]
+        [
+            self.next_f32(),
+            self.next_f32(),
+            self.next_f32(),
+            self.next_f32(),
+        ]
     }
 }
 
@@ -125,7 +133,10 @@ fn mat4_mul_matches_scalar() {
             assert!(close4(got[i], want[i]));
         }
         let v = r.vec4();
-        assert!(close4(super::mat4_mul_vec4(&a, v), scalar::mat4_mul_vec4(&a, v)));
+        assert!(close4(
+            super::mat4_mul_vec4(&a, v),
+            scalar::mat4_mul_vec4(&a, v)
+        ));
     }
 }
 
@@ -147,6 +158,9 @@ fn quat_mul_vec3_matches_scalar() {
         let q = unit4(r.vec4());
         let v = r.vec4();
         let v = [v[0], v[1], v[2], 0.0];
-        assert!(close4(super::quat_mul_vec3(q, v), scalar::quat_mul_vec3(q, v)));
+        assert!(close4(
+            super::quat_mul_vec3(q, v),
+            scalar::quat_mul_vec3(q, v)
+        ));
     }
 }

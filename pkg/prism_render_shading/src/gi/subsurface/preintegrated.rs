@@ -294,8 +294,8 @@ impl Lut {
         } else {
             1.0
         };
-        let v = (clamp_finite(curvature, 0.0, self.max_curvature) / denom)
-            * (self.height - 1) as f32;
+        let v =
+            (clamp_finite(curvature, 0.0, self.max_curvature) / denom) * (self.height - 1) as f32;
 
         let x0 = (u.floor() as usize).min(self.width - 1);
         let y0 = (v.floor() as usize).min(self.height - 1);
@@ -414,13 +414,19 @@ mod tests {
         for &(ndotl, k) in &[(-0.3f32, 1.0f32), (0.2, 3.0), (0.7, 5.0)] {
             let direct = preintegrated_diffuse(ndotl, k);
             let baked = lut.sample(ndotl, k);
-            assert!((direct - baked).length() < 3e-2, "direct={direct:?} baked={baked:?}");
+            assert!(
+                (direct - baked).length() < 3e-2,
+                "direct={direct:?} baked={baked:?}"
+            );
         }
     }
 
     #[test]
     fn is_deterministic() {
-        assert_eq!(preintegrated_diffuse(0.3, 2.0), preintegrated_diffuse(0.3, 2.0));
+        assert_eq!(
+            preintegrated_diffuse(0.3, 2.0),
+            preintegrated_diffuse(0.3, 2.0)
+        );
         assert_eq!(skin_profile(0.4), skin_profile(0.4));
     }
 

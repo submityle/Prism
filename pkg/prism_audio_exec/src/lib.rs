@@ -50,16 +50,16 @@ pub mod topo;
 
 pub use exec_plan::ExecPlan;
 pub use graph_desc::{EdgeDesc, ExecError, GraphDesc, NodeDesc, NodeId};
-pub use islands::{IslandPartition, partition_islands};
-pub use levels::{LevelAssignment, assign_levels};
-pub use liveness::{BufferId, BufferLiveness, SlotAllocation, allocate_slots};
-pub use pdc::{PdcPlan, compute_pdc};
-pub use schedule::{ParallelSchedule, build_schedule};
+pub use islands::{partition_islands, IslandPartition};
+pub use levels::{assign_levels, LevelAssignment};
+pub use liveness::{allocate_slots, BufferId, BufferLiveness, SlotAllocation};
+pub use pdc::{compute_pdc, PdcPlan};
+pub use schedule::{build_schedule, ParallelSchedule};
 pub use topo::{position_map, topological_order};
 
 #[cfg(test)]
 mod tests {
-    use crate::{ExecPlan, EdgeDesc, GraphDesc, NodeDesc};
+    use crate::{EdgeDesc, ExecPlan, GraphDesc, NodeDesc};
 
     /// End-to-end smoke test: a realistic small submix graph compiles and every
     /// derived view agrees on node counts.

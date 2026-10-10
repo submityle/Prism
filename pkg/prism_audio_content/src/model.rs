@@ -198,7 +198,10 @@ mod tests {
     fn add_replaces_existing_entry_by_id() {
         let mut model = ContentModel::new();
         model.add_event(Event::new(EventId::new(1)));
-        model.add_event(Event::with_actions(EventId::new(1), alloc::vec![Action::StopAll]));
+        model.add_event(Event::with_actions(
+            EventId::new(1),
+            alloc::vec![Action::StopAll],
+        ));
         assert_eq!(model.event_count(), 1);
         assert_eq!(model.event(EventId::new(1)).map(Event::len), Some(1));
     }

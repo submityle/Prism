@@ -127,15 +127,14 @@ fn candidates(
 /// comparison goes through `partial_cmp` so it never performs a direct float
 /// equality test.
 pub(super) fn consider(best: &mut Option<ShapeCastHit>, candidate: ShapeCastHit) {
-    let replace = best.is_none_or(|current| match candidate
-        .toi
-        .time
-        .partial_cmp(&current.toi.time)
-    {
-        Some(core::cmp::Ordering::Less) => true,
-        Some(core::cmp::Ordering::Equal) => candidate.target < current.target,
-        _ => false,
-    });
+    let replace =
+        best.is_none_or(
+            |current| match candidate.toi.time.partial_cmp(&current.toi.time) {
+                Some(core::cmp::Ordering::Less) => true,
+                Some(core::cmp::Ordering::Equal) => candidate.target < current.target,
+                _ => false,
+            },
+        );
     if replace {
         *best = Some(candidate);
     }
@@ -238,11 +237,18 @@ mod tests {
         let sphere = ConvexHull::from_point();
         let shape = mover(&sphere, 10.0, 0.5);
         let box_hull = unit_box();
-        let near =
-            RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
-        let far =
-            RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(8.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
-        let hit = cast_shape_bvh(&shape, &[near, far], 1.0, 0.0).expect("the cast must hit the near box");
+        let near = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
+        let far = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(8.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
+        let hit =
+            cast_shape_bvh(&shape, &[near, far], 1.0, 0.0).expect("the cast must hit the near box");
         assert_eq!(hit.target, 0, "the nearer box index 0 must win");
         assert!((hit.toi.time - 0.3).abs() < 0.02, "time {}", hit.toi.time);
         assert!(hit.toi.normal.x < -0.5, "normal {:?}", hit.toi.normal);
@@ -253,8 +259,11 @@ mod tests {
         let sphere = ConvexHull::from_point();
         let shape = mover(&sphere, 10.0, 0.5);
         let box_hull = unit_box();
-        let aside =
-            RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 20.0, 0.0), Quat::IDENTITY), 0.0);
+        let aside = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(4.0, 20.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
         assert!(
             cast_shape_bvh(&shape, &[aside], 1.0, 0.0).is_none(),
             "an off-path target must not be hit"
@@ -280,12 +289,22 @@ mod tests {
         let sphere = ConvexHull::from_point();
         let shape = mover(&sphere, 10.0, 0.5);
         let box_hull = unit_box();
-        let first =
-            RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
-        let second =
-            RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
-        let hit = cast_shape_bvh(&shape, &[first, second], 1.0, 0.0).expect("the stacked boxes must be hit");
-        assert_eq!(hit.target, 0, "an exact time tie resolves to the lower index");
+        let first = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
+        let second = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
+        let hit = cast_shape_bvh(&shape, &[first, second], 1.0, 0.0)
+            .expect("the stacked boxes must be hit");
+        assert_eq!(
+            hit.target, 0,
+            "an exact time tie resolves to the lower index"
+        );
     }
 
     #[test]
@@ -293,10 +312,16 @@ mod tests {
         let sphere = ConvexHull::from_point();
         let shape = mover(&sphere, 10.0, 0.5);
         let box_hull = unit_box();
-        let far =
-            RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(8.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
-        let near =
-            RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
+        let far = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(8.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
+        let near = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
         let hits = cast_shape_all_bvh(&shape, &[far, near], 1.0, 0.0);
         assert_eq!(hits.len(), 2, "both boxes lie on the path");
         assert_eq!(hits[0].target, 1, "nearest hit first");
@@ -319,9 +344,21 @@ mod tests {
             (
                 mover(&point, 10.0, 0.5),
                 vec![
-                    RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0),
-                    RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(8.0, 0.0, 0.0), Quat::IDENTITY), 0.1),
-                    RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(6.0, 30.0, 0.0), Quat::IDENTITY), 0.0),
+                    RoundedConvex::still(
+                        &box_hull,
+                        ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+                        0.0,
+                    ),
+                    RoundedConvex::still(
+                        &box_hull,
+                        ConvexPose::new(Vec3::new(8.0, 0.0, 0.0), Quat::IDENTITY),
+                        0.1,
+                    ),
+                    RoundedConvex::still(
+                        &box_hull,
+                        ConvexPose::new(Vec3::new(6.0, 30.0, 0.0), Quat::IDENTITY),
+                        0.0,
+                    ),
                 ],
             ),
             (
@@ -332,23 +369,51 @@ mod tests {
                     0.3,
                 ),
                 vec![
-                    RoundedConvex::still(&point, ConvexPose::new(Vec3::new(6.0, 0.0, 0.0), Quat::IDENTITY), 0.4),
-                    RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(3.0, 0.0, 0.0), Quat::IDENTITY), 0.1),
-                    RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(5.0, 40.0, 0.0), Quat::IDENTITY), 0.0),
+                    RoundedConvex::still(
+                        &point,
+                        ConvexPose::new(Vec3::new(6.0, 0.0, 0.0), Quat::IDENTITY),
+                        0.4,
+                    ),
+                    RoundedConvex::still(
+                        &box_hull,
+                        ConvexPose::new(Vec3::new(3.0, 0.0, 0.0), Quat::IDENTITY),
+                        0.1,
+                    ),
+                    RoundedConvex::still(
+                        &box_hull,
+                        ConvexPose::new(Vec3::new(5.0, 40.0, 0.0), Quat::IDENTITY),
+                        0.0,
+                    ),
                 ],
             ),
             (
                 mover(&point, 10.0, 0.5),
                 vec![
-                    RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0),
-                    RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0),
+                    RoundedConvex::still(
+                        &box_hull,
+                        ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+                        0.0,
+                    ),
+                    RoundedConvex::still(
+                        &box_hull,
+                        ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+                        0.0,
+                    ),
                 ],
             ),
             (
                 mover(&point, 10.0, 0.5),
                 vec![
-                    RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 25.0, 0.0), Quat::IDENTITY), 0.0),
-                    RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(8.0, -25.0, 0.0), Quat::IDENTITY), 0.0),
+                    RoundedConvex::still(
+                        &box_hull,
+                        ConvexPose::new(Vec3::new(4.0, 25.0, 0.0), Quat::IDENTITY),
+                        0.0,
+                    ),
+                    RoundedConvex::still(
+                        &box_hull,
+                        ConvexPose::new(Vec3::new(8.0, -25.0, 0.0), Quat::IDENTITY),
+                        0.0,
+                    ),
                 ],
             ),
             (mover(&point, 5.0, 0.5), vec![]),

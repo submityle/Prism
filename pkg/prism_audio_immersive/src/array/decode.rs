@@ -188,9 +188,7 @@ impl ArrayRenderer {
         let decision = choose_mode(capabilities, requested);
         let panner = match decision {
             RenderDecision::Array(_) => VbapArrayPanner::new(layout),
-            RenderDecision::FallbackBed(bed) => {
-                VbapArrayPanner::new(&ArrayLayout::from_bed(bed))
-            }
+            RenderDecision::FallbackBed(bed) => VbapArrayPanner::new(&ArrayLayout::from_bed(bed)),
             RenderDecision::FallbackBinaural => {
                 VbapArrayPanner::new(&ArrayLayout::from_bed(BedLayout::Stereo))
             }

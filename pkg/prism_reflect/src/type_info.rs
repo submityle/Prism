@@ -194,7 +194,10 @@ impl EnumInfo {
     /// Build an enum descriptor from its type name and ordered variants.
     #[must_use]
     pub fn new(type_name: &'static str, variants: Vec<VariantInfo>) -> Self {
-        Self { type_name, variants }
+        Self {
+            type_name,
+            variants,
+        }
     }
 
     /// The fully-qualified type name.
@@ -295,7 +298,10 @@ impl ListInfo {
     /// Build a list descriptor from the list type name and item type name.
     #[must_use]
     pub fn new(type_name: &'static str, item_type_name: &'static str) -> Self {
-        Self { type_name, item_type_name }
+        Self {
+            type_name,
+            item_type_name,
+        }
     }
 
     /// The fully-qualified list type name.
@@ -323,7 +329,11 @@ impl ArrayInfo {
     /// Build an array descriptor from the array/element type names and length.
     #[must_use]
     pub fn new(type_name: &'static str, item_type_name: &'static str, capacity: usize) -> Self {
-        Self { type_name, item_type_name, capacity }
+        Self {
+            type_name,
+            item_type_name,
+            capacity,
+        }
     }
 
     /// The fully-qualified array type name.
@@ -361,7 +371,11 @@ impl MapInfo {
         key_type_name: &'static str,
         value_type_name: &'static str,
     ) -> Self {
-        Self { type_name, key_type_name, value_type_name }
+        Self {
+            type_name,
+            key_type_name,
+            value_type_name,
+        }
     }
 
     /// The fully-qualified map type name.
@@ -394,7 +408,10 @@ impl SetInfo {
     /// Build a set descriptor from the set and value type names.
     #[must_use]
     pub fn new(type_name: &'static str, value_type_name: &'static str) -> Self {
-        Self { type_name, value_type_name }
+        Self {
+            type_name,
+            value_type_name,
+        }
     }
 
     /// The fully-qualified set type name.

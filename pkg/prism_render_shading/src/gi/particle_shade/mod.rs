@@ -53,8 +53,7 @@ pub use lighting::{
     self_shadow_transmittance, wrap_diffuse, ParticleLight,
 };
 pub use soft_depth::{
-    camera_fade, depth_opacity, linearize_depth01, linearize_depth_ndc, soft_fade,
-    soft_fade_linear,
+    camera_fade, depth_opacity, linearize_depth01, linearize_depth_ndc, soft_fade, soft_fade_linear,
 };
 
 use bevy_math::{Vec2, Vec3};
@@ -117,15 +116,17 @@ pub struct ParticleShadeResult {
 /// `view_dir` falls back to the world axes.
 #[inline]
 fn basis_from_view_dir(view_dir: Vec3) -> (Vec3, Vec3, Vec3) {
-    let forward = if view_dir.length_squared().is_finite()
-        && view_dir.length_squared() > 1.0e-12
-    {
+    let forward = if view_dir.length_squared().is_finite() && view_dir.length_squared() > 1.0e-12 {
         view_dir.normalize()
     } else {
         return (Vec3::X, Vec3::Y, Vec3::Z);
     };
     // Pick a world-up reference not parallel to `forward`.
-    let up_ref = if forward.y.abs() < 0.999 { Vec3::Y } else { Vec3::X };
+    let up_ref = if forward.y.abs() < 0.999 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
     let right = up_ref.cross(forward);
     // `camera_facing_basis` re-derives `forward = right × up` and
     // orthonormalises, matching the `+Z toward camera` convention.
@@ -259,14 +260,7 @@ mod tests {
         let params = ParticleShadeParams::default();
         let light = ParticleLight::new(Vec3::Z, Vec3::ONE);
         // Depth below camera_fade_end -> transparent even if clear of scene.
-        let r = shade_particle(
-            Vec2::new(0.5, 0.5),
-            Vec3::Z,
-            light,
-            100.0,
-            0.05,
-            &params,
-        );
+        let r = shade_particle(Vec2::new(0.5, 0.5), Vec3::Z, light, 100.0, 0.05, &params);
         assert!(r.alpha.abs() < TOL);
     }
 

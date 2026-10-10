@@ -1,10 +1,10 @@
 //! Linear-light RGBA ([`LinearRgba`]) — the rendering/blending hub color.
 
-use crate::Vec4;
 use crate::color::oklab::Oklaba;
 use crate::color::srgb::Srgba;
 use crate::color::transfer::{linear_to_srgb, srgb_to_linear};
 use crate::color::xyz::Xyza;
+use crate::Vec4;
 
 /// A color in **linear-light** sRGB primaries with a straight (non-premultiplied)
 /// alpha. This is the correct space for adding, averaging, and lighting colors;
@@ -33,7 +33,12 @@ impl LinearRgba {
     /// Construct from components.
     #[inline]
     pub const fn new(red: f32, green: f32, blue: f32, alpha: f32) -> Self {
-        Self { red, green, blue, alpha }
+        Self {
+            red,
+            green,
+            blue,
+            alpha,
+        }
     }
 
     /// Construct an opaque color (`alpha = 1`).

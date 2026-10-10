@@ -7,8 +7,8 @@ use crate::curve::{
     quad_in_out, quad_out, sine_in, sine_in_out, sine_out, smootherstep, smoothstep,
 };
 use crate::intersect::{
-    Containment, aabb_aabb, frustum_aabb, frustum_sphere, ray_aabb, ray_plane, ray_sphere,
-    ray_triangle, ray_triangle_bary, sphere_aabb, sphere_sphere,
+    aabb_aabb, frustum_aabb, frustum_sphere, ray_aabb, ray_plane, ray_sphere, ray_triangle,
+    ray_triangle_bary, sphere_aabb, sphere_sphere, Containment,
 };
 use crate::prelude::*;
 
@@ -37,7 +37,11 @@ fn aabb_basics() {
 #[test]
 fn aabb_closest_and_distance() {
     let bb = Aabb3::new(vec3(-1.0, -1.0, -1.0), vec3(1.0, 1.0, 1.0));
-    assert!(v_approx(bb.closest_point(vec3(5.0, 0.0, 0.0)), vec3(1.0, 0.0, 0.0), 1e-6));
+    assert!(v_approx(
+        bb.closest_point(vec3(5.0, 0.0, 0.0)),
+        vec3(1.0, 0.0, 0.0),
+        1e-6
+    ));
     assert!(approx(bb.distance_squared(vec3(4.0, 0.0, 0.0)), 9.0, 1e-5));
     assert!(approx(bb.distance_squared(vec3(0.0, 0.0, 0.0)), 0.0, 1e-6));
 }
@@ -163,8 +167,14 @@ fn sphere_overlaps() {
     assert!(!sphere_sphere(a, c));
 
     let bb = Aabb3::new(vec3(2.0, -1.0, -1.0), vec3(4.0, 1.0, 1.0));
-    assert!(sphere_aabb(BoundingSphere::new(vec3(1.5, 0.0, 0.0), 1.0), bb));
-    assert!(!sphere_aabb(BoundingSphere::new(vec3(0.0, 0.0, 0.0), 1.0), bb));
+    assert!(sphere_aabb(
+        BoundingSphere::new(vec3(1.5, 0.0, 0.0), 1.0),
+        bb
+    ));
+    assert!(!sphere_aabb(
+        BoundingSphere::new(vec3(0.0, 0.0, 0.0), 1.0),
+        bb
+    ));
 }
 
 // --- frustum culling -----------------------------------------------------
@@ -206,7 +216,10 @@ fn frustum_cull_in_and_out() {
 
     // A box straddling the near plane should be classified as intersecting.
     let bb_straddle = Aabb3::from_center_half_extents(vec3(0.0, 0.0, -1.0), Vec3::splat(2.0));
-    assert_eq!(frustum_aabb(&frustum, bb_straddle), Containment::Intersecting);
+    assert_eq!(
+        frustum_aabb(&frustum, bb_straddle),
+        Containment::Intersecting
+    );
 }
 
 // --- interpolation / splines --------------------------------------------
@@ -259,8 +272,16 @@ fn bezier_endpoints_and_tangents() {
     let p3 = vec3(1.0, 0.0, 0.0);
     assert!(v_approx(bezier_cubic(p0, p1, p2, p3, 0.0), p0, 1e-6));
     assert!(v_approx(bezier_cubic(p0, p1, p2, p3, 1.0), p3, 1e-6));
-    assert!(v_approx(bezier_cubic_tangent(p0, p1, p2, p3, 0.0), (p1 - p0) * 3.0, 1e-5));
-    assert!(v_approx(bezier_cubic_tangent(p0, p1, p2, p3, 1.0), (p3 - p2) * 3.0, 1e-5));
+    assert!(v_approx(
+        bezier_cubic_tangent(p0, p1, p2, p3, 0.0),
+        (p1 - p0) * 3.0,
+        1e-5
+    ));
+    assert!(v_approx(
+        bezier_cubic_tangent(p0, p1, p2, p3, 1.0),
+        (p3 - p2) * 3.0,
+        1e-5
+    ));
 }
 
 // --- easing boundary values ----------------------------------------------

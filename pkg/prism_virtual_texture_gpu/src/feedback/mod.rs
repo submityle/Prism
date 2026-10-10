@@ -107,21 +107,30 @@ impl GpuFeedbackDecode {
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("prism_vt_feedback_layout"),
             entries: &[
-                buffer_layout(0, BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
-                buffer_layout(1, BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
-                buffer_layout(2, BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
+                buffer_layout(
+                    0,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                buffer_layout(
+                    1,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                buffer_layout(
+                    2,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -147,7 +156,12 @@ impl GpuFeedbackDecode {
     /// match `desc.grid_len()`, a zero `mip_count`, or an empty grid yields an
     /// empty vector, mirroring the golden `decode_feedback` early-out.
     #[must_use]
-    pub fn map_cells(&self, ctx: &GpuContext, desc: &FeedbackTextureDesc, grid: &[u8]) -> Vec<CellMap> {
+    pub fn map_cells(
+        &self,
+        ctx: &GpuContext,
+        desc: &FeedbackTextureDesc,
+        grid: &[u8],
+    ) -> Vec<CellMap> {
         if grid.len() != desc.grid_len() || desc.mip_count == 0 || grid.is_empty() {
             return Vec::new();
         }
@@ -181,9 +195,18 @@ impl GpuFeedbackDecode {
             label: Some("prism_vt_feedback_bind"),
             layout: &self.layout,
             entries: &[
-                BindGroupEntry { binding: 0, resource: params.as_entire_binding() },
-                BindGroupEntry { binding: 1, resource: grid_buf.as_entire_binding() },
-                BindGroupEntry { binding: 2, resource: out_buf.as_entire_binding() },
+                BindGroupEntry {
+                    binding: 0,
+                    resource: params.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: grid_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: out_buf.as_entire_binding(),
+                },
             ],
         });
 
@@ -208,7 +231,12 @@ impl GpuFeedbackDecode {
         words
             .chunks_exact(OUT_WORDS)
             .take(cell_count as usize)
-            .map(|c| CellMap { w0: c[0], w1: c[1], w2: c[2], desired: c[3] })
+            .map(|c| CellMap {
+                w0: c[0],
+                w1: c[1],
+                w2: c[2],
+                desired: c[3],
+            })
             .collect()
     }
 
@@ -269,7 +297,12 @@ pub fn reference_map(desc: &FeedbackTextureDesc, grid: &[u8]) -> Vec<CellMap> {
         .map(|i| {
             let cell = grid[i];
             if cell == NOT_REQUESTED {
-                return CellMap { w0: 0, w1: 0, w2: 0, desired: REQ_NONE };
+                return CellMap {
+                    w0: 0,
+                    w1: 0,
+                    w2: 0,
+                    desired: REQ_NONE,
+                };
             }
             let desired = cell.clamp(base, max_mip);
             let shift = desired - base;
@@ -283,7 +316,12 @@ pub fn reference_map(desc: &FeedbackTextureDesc, grid: &[u8]) -> Vec<CellMap> {
                 y: y >> shift,
             };
             let [w0, w1, w2] = GpuPageTable::compare_words(key);
-            CellMap { w0, w1, w2, desired: u32::from(desired) }
+            CellMap {
+                w0,
+                w1,
+                w2,
+                desired: u32::from(desired),
+            }
         })
         .collect()
 }
@@ -381,8 +419,14 @@ mod tests {
 
             // Anti-vacuous guards: the fixture must exercise every branch so a
             // kernel that only ever emits REQ_NONE cannot pass.
-            assert!(got.iter().any(|c| !c.is_requested()), "has a not-requested cell");
-            assert!(got.iter().any(CellMap::is_requested), "has a requested cell");
+            assert!(
+                got.iter().any(|c| !c.is_requested()),
+                "has a not-requested cell"
+            );
+            assert!(
+                got.iter().any(CellMap::is_requested),
+                "has a requested cell"
+            );
             assert!(
                 got[cell(3, 3)].desired == 3,
                 "coarse request clamps to max streamable mip"

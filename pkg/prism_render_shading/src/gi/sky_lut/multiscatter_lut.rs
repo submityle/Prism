@@ -138,9 +138,21 @@ fn clamp01(value: f32) -> f32 {
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.max(0.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.max(0.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.max(0.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -279,7 +291,10 @@ mod tests {
                 let u = (x as f32 + 0.5) / 8.0;
                 let v = (y as f32 + 0.5) / 8.0;
                 let (r, mu) = uv_to_r_mu_sun(&a, u, v);
-                assert!(r >= a.bottom_radius - 1e-3 && r <= a.top_radius + 1e-3, "r={r}");
+                assert!(
+                    r >= a.bottom_radius - 1e-3 && r <= a.top_radius + 1e-3,
+                    "r={r}"
+                );
                 assert!((-1.0..=1.0).contains(&mu), "mu={mu}");
             }
         }
@@ -322,7 +337,10 @@ mod tests {
         let a = earth();
         let lut = bake_multiscatter_lut(&a, Vec3::splat(10.0), 24, 24, 24, 12);
         for texel in lut.texels() {
-            assert!(texel.is_finite() && texel.min_element() >= 0.0, "texel={texel:?}");
+            assert!(
+                texel.is_finite() && texel.min_element() >= 0.0,
+                "texel={texel:?}"
+            );
         }
     }
 
@@ -330,7 +348,10 @@ mod tests {
     fn degenerate_inputs_never_produce_nan() {
         let a = earth();
         let empty = bake_multiscatter_lut(&a, Vec3::splat(1.0), 0, 0, 8, 4);
-        assert_eq!(sample_multiscatter_lut(&empty, &a, a.bottom_radius, 0.0), Vec3::ZERO);
+        assert_eq!(
+            sample_multiscatter_lut(&empty, &a, a.bottom_radius, 0.0),
+            Vec3::ZERO
+        );
         let mut flat = a;
         flat.top_radius = flat.bottom_radius;
         let (r, mu) = uv_to_r_mu_sun(&flat, 0.5, 0.5);

@@ -110,7 +110,11 @@ pub fn color_to_sigma_a(reflectance: Vec3, beta_n: f32) -> Vec3 {
         let s = ops::ln(c) / d;
         clamp_sigma(s * s)
     };
-    Vec3::new(channel(reflectance.x), channel(reflectance.y), channel(reflectance.z))
+    Vec3::new(
+        channel(reflectance.x),
+        channel(reflectance.y),
+        channel(reflectance.z),
+    )
 }
 
 /// Forward map: the multiple-scattering reflectance produced by a given
@@ -136,8 +140,16 @@ pub fn sigma_a_to_color(sigma_a: Vec3, beta_n: f32) -> Vec3 {
 /// A pure-eumelanin fiber trends brown-black, pure pheomelanin trends red.
 #[inline]
 pub fn melanin_to_sigma_a(eumelanin: f32, pheomelanin: f32) -> Vec3 {
-    let ce = if eumelanin.is_finite() { eumelanin.max(0.0) } else { 0.0 };
-    let cp = if pheomelanin.is_finite() { pheomelanin.max(0.0) } else { 0.0 };
+    let ce = if eumelanin.is_finite() {
+        eumelanin.max(0.0)
+    } else {
+        0.0
+    };
+    let cp = if pheomelanin.is_finite() {
+        pheomelanin.max(0.0)
+    } else {
+        0.0
+    };
     Vec3::new(
         clamp_sigma(ce * EUMELANIN_SIGMA_A[0] + cp * PHEOMELANIN_SIGMA_A[0]),
         clamp_sigma(ce * EUMELANIN_SIGMA_A[1] + cp * PHEOMELANIN_SIGMA_A[1]),
@@ -152,8 +164,16 @@ pub fn melanin_to_sigma_a(eumelanin: f32, pheomelanin: f32) -> Vec3 {
 /// (`r = 0`, brown-black) / pheomelanin (`r = 1`, red) split.
 #[inline]
 pub fn pigment_to_sigma_a(melanin: f32, redness: f32) -> Vec3 {
-    let m = if melanin.is_finite() { melanin.max(0.0) } else { 0.0 };
-    let r = if redness.is_finite() { redness.clamp(0.0, 1.0) } else { 0.0 };
+    let m = if melanin.is_finite() {
+        melanin.max(0.0)
+    } else {
+        0.0
+    };
+    let r = if redness.is_finite() {
+        redness.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     melanin_to_sigma_a(m * (1.0 - r), m * r)
 }
 
@@ -200,7 +220,10 @@ mod tests {
             let sigma = Vec3::new(sx, sx * 1.2, sx * 1.5);
             let color = sigma_a_to_color(sigma, 0.3);
             let back = color_to_sigma_a(color, 0.3);
-            assert!((back - sigma).length() < 1.0e-2, "sigma={sigma:?} back={back:?}");
+            assert!(
+                (back - sigma).length() < 1.0e-2,
+                "sigma={sigma:?} back={back:?}"
+            );
         }
     }
 
@@ -210,7 +233,10 @@ mod tests {
             let color = Vec3::new(c, c * 0.8, c * 0.5);
             let sigma = color_to_sigma_a(color, 0.4);
             let back = sigma_a_to_color(sigma, 0.4);
-            assert!((back - color).length() < 1.0e-3, "color={color:?} back={back:?}");
+            assert!(
+                (back - color).length() < 1.0e-3,
+                "color={color:?} back={back:?}"
+            );
         }
     }
 

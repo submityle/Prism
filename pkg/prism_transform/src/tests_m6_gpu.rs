@@ -4,7 +4,7 @@
 
 use crate::gpu_upload::{GpuColumnBuffer, MatrixLayout, UploadRange};
 use crate::{GlobalTransform, Transform, TransformGraph};
-use prism_math::{Vec3, vec3};
+use prism_math::{vec3, Vec3};
 
 /// Little-endian bytes of a `f32` slice, the independent "expected" packing.
 fn le_bytes(floats: &[f32]) -> Vec<u8> {
@@ -86,7 +86,10 @@ fn incremental_emits_exactly_the_dirty_subtree_range() {
     // Consecutive indices 1,2 collapse to a single span starting at entry 1.
     assert_eq!(
         plan,
-        vec![UploadRange { offset: stride, len: 2 * stride }],
+        vec![UploadRange {
+            offset: stride,
+            len: 2 * stride
+        }],
     );
 
     // The repacked entry-1 bytes equal a fresh pack of its new world matrix.
@@ -98,7 +101,10 @@ fn incremental_emits_exactly_the_dirty_subtree_range() {
     let mut all = GpuColumnBuffer::new(MatrixLayout::RowMajor3x4);
     all.pack_all(g.globals());
     assert_eq!(&buf.as_bytes()[0..stride], &all.as_bytes()[0..stride]);
-    assert_eq!(&buf.as_bytes()[3 * stride..4 * stride], &all.as_bytes()[3 * stride..4 * stride]);
+    assert_eq!(
+        &buf.as_bytes()[3 * stride..4 * stride],
+        &all.as_bytes()[3 * stride..4 * stride]
+    );
 }
 
 #[test]
@@ -115,7 +121,11 @@ fn static_frame_uploads_nothing() {
     // No edits -> no recomputed entries -> empty plan, buffer unchanged.
     g.propagate_incremental_stats();
     assert!(g.recomputed_entries().is_empty());
-    let dirty: Vec<u32> = g.recomputed_entries().iter().map(|n| n.index() as u32).collect();
+    let dirty: Vec<u32> = g
+        .recomputed_entries()
+        .iter()
+        .map(|n| n.index() as u32)
+        .collect();
     let plan = buf.pack_dirty(g.globals(), &dirty);
     assert!(plan.is_empty());
     assert_eq!(buf.as_bytes(), before.as_slice());
@@ -124,7 +134,9 @@ fn static_frame_uploads_nothing() {
 #[test]
 fn pack_dirty_merges_runs_and_sorts_input() {
     let globals: Vec<GlobalTransform> = (0..6)
-        .map(|i| GlobalTransform::from_transform(&Transform::from_translation(Vec3::splat(i as f32))))
+        .map(|i| {
+            GlobalTransform::from_transform(&Transform::from_translation(Vec3::splat(i as f32)))
+        })
         .collect();
     let mut buf = GpuColumnBuffer::new(MatrixLayout::RowMajor4x4);
     buf.pack_all(&globals);
@@ -135,26 +147,42 @@ fn pack_dirty_merges_runs_and_sorts_input() {
     assert_eq!(
         plan,
         vec![
-            UploadRange { offset: stride, len: 3 * stride },
-            UploadRange { offset: 5 * stride, len: stride },
+            UploadRange {
+                offset: stride,
+                len: 3 * stride
+            },
+            UploadRange {
+                offset: 5 * stride,
+                len: stride
+            },
         ],
     );
 }
 
 #[test]
 fn out_of_range_dirty_indices_are_ignored() {
-    let globals: Vec<GlobalTransform> = (0..3)
-        .map(|_| GlobalTransform::IDENTITY)
-        .collect();
+    let globals: Vec<GlobalTransform> = (0..3).map(|_| GlobalTransform::IDENTITY).collect();
     let mut buf = GpuColumnBuffer::new(MatrixLayout::RowMajor3x4);
     buf.pack_all(&globals);
     // Index 7 does not exist; only entry 0 is valid here.
     let plan = buf.pack_dirty(&globals, &[7, 0]);
-    assert_eq!(plan, vec![UploadRange { offset: 0, len: buf.stride() }]);
+    assert_eq!(
+        plan,
+        vec![UploadRange {
+            offset: 0,
+            len: buf.stride()
+        }]
+    );
 }
 
 #[test]
 fn entry_range_is_stride_aligned() {
     let buf = GpuColumnBuffer::new(MatrixLayout::RowMajor3x4);
-    assert_eq!(buf.entry_range(2), UploadRange { offset: 96, len: 48 });
+    assert_eq!(
+        buf.entry_range(2),
+        UploadRange {
+            offset: 96,
+            len: 48
+        }
+    );
 }

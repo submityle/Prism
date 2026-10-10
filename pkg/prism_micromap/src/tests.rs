@@ -40,7 +40,9 @@ fn bake(mask: &TextureAlphaMask, level: u8, format: OmmFormat) -> crate::omm::Ba
         uv: BASE_TRI,
         level: SubdivisionLevel::new(level).unwrap(),
         format,
-        strategy: SampleStrategy::Uniform { samples_per_edge: 4 },
+        strategy: SampleStrategy::Uniform {
+            samples_per_edge: 4,
+        },
     };
     bake_triangle(&input, mask)
 }
@@ -119,7 +121,10 @@ fn pack_unpack_round_trips_four_state() {
         OpacityState::Opaque,
     ];
     let bytes = pack(&states, OmmFormat::FourState);
-    assert_eq!(bytes.len(), packed_len(states.len() as u32, OmmFormat::FourState));
+    assert_eq!(
+        bytes.len(),
+        packed_len(states.len() as u32, OmmFormat::FourState)
+    );
     let back = unpack(&bytes, states.len() as u32, OmmFormat::FourState).unwrap();
     assert_eq!(back.as_slice(), states.as_slice());
 }
@@ -134,7 +139,10 @@ fn pack_unpack_round_trips_two_state() {
         OpacityState::UnknownOpaque,
     ];
     let bytes = pack(&states, OmmFormat::TwoState);
-    assert_eq!(bytes.len(), packed_len(states.len() as u32, OmmFormat::TwoState));
+    assert_eq!(
+        bytes.len(),
+        packed_len(states.len() as u32, OmmFormat::TwoState)
+    );
     let back = unpack(&bytes, states.len() as u32, OmmFormat::TwoState).unwrap();
     assert_eq!(
         back,
@@ -151,10 +159,10 @@ fn pack_unpack_round_trips_two_state() {
 fn pack_uses_little_endian_within_byte() {
     // Four-state: entries 0..=3 pack into one byte, low bits first.
     let states = [
-        OpacityState::Opaque,            // 0b01 at shift 0
+        OpacityState::Opaque,             // 0b01 at shift 0
         OpacityState::UnknownTransparent, // 0b10 at shift 2
-        OpacityState::UnknownOpaque,     // 0b11 at shift 4
-        OpacityState::Transparent,       // 0b00 at shift 6
+        OpacityState::UnknownOpaque,      // 0b11 at shift 4
+        OpacityState::Transparent,        // 0b00 at shift 6
     ];
     let bytes = pack(&states, OmmFormat::FourState);
     assert_eq!(bytes.len(), 1);

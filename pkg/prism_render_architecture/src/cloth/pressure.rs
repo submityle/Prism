@@ -66,8 +66,10 @@ use super::{physics_bridge, ClothParticle, Compliance, Vec3};
 /// engine-wide.
 #[must_use]
 pub fn mesh_volume(positions: &[Vec3], triangles: &[[u32; 3]]) -> f32 {
-    let glam_positions: Vec<glam::Vec3> =
-        positions.iter().map(|p| physics_bridge::to_glam(*p)).collect();
+    let glam_positions: Vec<glam::Vec3> = positions
+        .iter()
+        .map(|p| physics_bridge::to_glam(*p))
+        .collect();
     prism_physics_core::soft::constraint::mesh_volume(&glam_positions, triangles)
 }
 

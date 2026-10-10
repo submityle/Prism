@@ -71,7 +71,11 @@ mod tests {
     #[test]
     fn reverse_z_rejects_only_strictly_behind_bounds() {
         assert!(test().is_occluded(HzbPhase::Previous));
-        assert!(!HzbTest { nearest_depth: 0.8, ..test() }.is_occluded(HzbPhase::Current));
+        assert!(!HzbTest {
+            nearest_depth: 0.8,
+            ..test()
+        }
+        .is_occluded(HzbPhase::Current));
     }
 
     #[test]
@@ -81,8 +85,20 @@ mod tests {
             ..test()
         }
         .is_occluded(HzbPhase::Previous));
-        assert!(!HzbTest { history_epoch: 2, ..test() }.is_occluded(HzbPhase::Previous));
-        assert!(!HzbTest { projected_velocity: 0.6, ..test() }.is_occluded(HzbPhase::Previous));
-        assert!(HzbTest { history_epoch: 2, ..test() }.is_occluded(HzbPhase::Current));
+        assert!(!HzbTest {
+            history_epoch: 2,
+            ..test()
+        }
+        .is_occluded(HzbPhase::Previous));
+        assert!(!HzbTest {
+            projected_velocity: 0.6,
+            ..test()
+        }
+        .is_occluded(HzbPhase::Previous));
+        assert!(HzbTest {
+            history_epoch: 2,
+            ..test()
+        }
+        .is_occluded(HzbPhase::Current));
     }
 }

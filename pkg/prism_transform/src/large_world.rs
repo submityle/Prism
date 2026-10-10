@@ -31,8 +31,8 @@ use alloc::vec::Vec;
 
 use prism_math::{Affine3, DAffine3, DVec3, GridCell, GridPosition, Mat3, Quat, Vec3};
 
-use crate::Transform;
 use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
+use crate::Transform;
 
 /// A **local** high-precision transform: an `f64` translation with `f32`
 /// rotation and scale.
@@ -60,26 +60,41 @@ impl Default for TransformHp {
 
 impl TransformHp {
     /// The identity transform.
-    pub const IDENTITY: Self =
-        Self { translation: DVec3::ZERO, rotation: Quat::IDENTITY, scale: Vec3::ONE };
+    pub const IDENTITY: Self = Self {
+        translation: DVec3::ZERO,
+        rotation: Quat::IDENTITY,
+        scale: Vec3::ONE,
+    };
 
     /// Translation-only transform.
     #[inline]
     pub const fn from_translation(translation: DVec3) -> Self {
-        Self { translation, rotation: Quat::IDENTITY, scale: Vec3::ONE }
+        Self {
+            translation,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
     }
 
     /// Rotation-only transform.
     #[inline]
     pub const fn from_rotation(rotation: Quat) -> Self {
-        Self { translation: DVec3::ZERO, rotation, scale: Vec3::ONE }
+        Self {
+            translation: DVec3::ZERO,
+            rotation,
+            scale: Vec3::ONE,
+        }
     }
 
     /// Build from a grid position: the cell origin plus local offset becomes
     /// the exact `f64` translation, with the given rotation and scale.
     #[inline]
     pub fn from_grid_position(pos: GridPosition, rotation: Quat, scale: Vec3) -> Self {
-        Self { translation: pos.to_dvec3(), rotation, scale }
+        Self {
+            translation: pos.to_dvec3(),
+            rotation,
+            scale,
+        }
     }
 
     /// Widen a single-precision [`Transform`] into high precision.
@@ -89,7 +104,11 @@ impl TransformHp {
     /// big-world path.
     #[inline]
     pub fn from_transform(t: &Transform) -> Self {
-        Self { translation: t.translation.as_dvec3(), rotation: t.rotation, scale: t.scale }
+        Self {
+            translation: t.translation.as_dvec3(),
+            rotation: t.rotation,
+            scale: t.scale,
+        }
     }
 
     /// The exact `f64` affine of this local transform.
@@ -126,7 +145,9 @@ impl Default for GlobalTransformHp {
 
 impl GlobalTransformHp {
     /// The identity world transform.
-    pub const IDENTITY: Self = Self { affine: DAffine3::IDENTITY };
+    pub const IDENTITY: Self = Self {
+        affine: DAffine3::IDENTITY,
+    };
 
     /// Wrap an existing `f64` affine.
     #[inline]
@@ -137,7 +158,9 @@ impl GlobalTransformHp {
     /// Build from a local [`TransformHp`] as if it had no parent (a root).
     #[inline]
     pub fn from_transform_hp(t: &TransformHp) -> Self {
-        Self { affine: t.to_daffine() }
+        Self {
+            affine: t.to_daffine(),
+        }
     }
 
     /// The underlying exact `f64` affine.
@@ -170,7 +193,9 @@ impl GlobalTransformHp {
     /// Mirrors [`crate::GlobalTransform::mul_transform`] exactly, but in `f64`.
     #[inline]
     pub fn mul_transform(&self, local: &TransformHp) -> GlobalTransformHp {
-        GlobalTransformHp { affine: self.affine * local.to_daffine() }
+        GlobalTransformHp {
+            affine: self.affine * local.to_daffine(),
+        }
     }
 
     /// The **camera-relative** single-precision affine for GPU upload (UE5 LWC
@@ -292,7 +317,10 @@ impl FloatingOrigin {
     /// A floating origin at `origin` with a one-cell rebase threshold.
     #[inline]
     pub const fn new(origin: GridCell) -> Self {
-        Self { origin, threshold_cells: 1 }
+        Self {
+            origin,
+            threshold_cells: 1,
+        }
     }
 
     /// A floating origin with an explicit rebase threshold (in cells). The
@@ -300,8 +328,15 @@ impl FloatingOrigin {
     /// camera sitting exactly on a cell boundary.
     #[inline]
     pub const fn with_threshold(origin: GridCell, threshold_cells: i32) -> Self {
-        let threshold_cells = if threshold_cells < 1 { 1 } else { threshold_cells };
-        Self { origin, threshold_cells }
+        let threshold_cells = if threshold_cells < 1 {
+            1
+        } else {
+            threshold_cells
+        };
+        Self {
+            origin,
+            threshold_cells,
+        }
     }
 
     /// The current origin cell.

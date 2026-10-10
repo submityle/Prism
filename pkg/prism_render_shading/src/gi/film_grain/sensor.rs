@@ -49,7 +49,11 @@ const MIN_U: f32 = 1.0e-7;
 #[inline]
 #[must_use]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Relative analog gain for an ISO value: `iso / ISO_BASE`, clamped `>= 1`.
@@ -168,7 +172,10 @@ mod tests {
         assert!((s1 - s2).abs() < 1.0e-6, "slope not constant: {s1} vs {s2}");
         // Intercept at signal 0 is the read-noise floor only, and positive.
         let intercept = noise_variance(0.0, iso, read);
-        assert!(intercept > 0.0, "read floor should be positive: {intercept}");
+        assert!(
+            intercept > 0.0,
+            "read floor should be positive: {intercept}"
+        );
     }
 
     /// The shot slope and read floor both scale with ISO, so variance grows
@@ -192,7 +199,10 @@ mod tests {
         for &s in &[0.0_f32, 0.25, 0.5, 1.0] {
             let var = noise_variance(s, 800.0, 0.03);
             let std = noise_std(s, 800.0, 0.03);
-            assert!((std - var.sqrt()).abs() < 1.0e-6, "s={s} std={std} var={var}");
+            assert!(
+                (std - var.sqrt()).abs() < 1.0e-6,
+                "s={s} std={std} var={var}"
+            );
         }
     }
 
@@ -209,7 +219,10 @@ mod tests {
     /// zero-mean with unit variance over a large grid.
     #[test]
     fn boxmuller_is_standard_normal() {
-        assert_eq!(gaussian_boxmuller(UVec2::new(3, 4), 1), gaussian_boxmuller(UVec2::new(3, 4), 1));
+        assert_eq!(
+            gaussian_boxmuller(UVec2::new(3, 4), 1),
+            gaussian_boxmuller(UVec2::new(3, 4), 1)
+        );
         let mut sum = 0.0_f64;
         let mut sq = 0.0_f64;
         let mut n = 0.0_f64;
@@ -269,14 +282,20 @@ mod tests {
         let mean = sum / n;
         let var = sq / n - mean * mean;
         // Within 15% of the analytic variance.
-        assert!((var - expected).abs() <= 0.15 * expected + 1.0e-6, "var={var} expected={expected}");
+        assert!(
+            (var - expected).abs() <= 0.15 * expected + 1.0e-6,
+            "var={var} expected={expected}"
+        );
     }
 
     /// `apply_sensor_noise` is deterministic and stays within `[0, 1]`.
     #[test]
     fn apply_is_deterministic_and_clamped() {
         let a = apply_sensor_noise(0.5, 1600.0, 0.05, UVec2::new(9, 2), 3);
-        assert_eq!(a, apply_sensor_noise(0.5, 1600.0, 0.05, UVec2::new(9, 2), 3));
+        assert_eq!(
+            a,
+            apply_sensor_noise(0.5, 1600.0, 0.05, UVec2::new(9, 2), 3)
+        );
         for y in 0..32u32 {
             for x in 0..32u32 {
                 let v = apply_sensor_noise(1.0, 3200.0, 0.1, UVec2::new(x, y), 1);

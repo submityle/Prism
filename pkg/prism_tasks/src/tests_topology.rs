@@ -12,10 +12,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::{
-    choose_balanced_node, nearest_node, plan_partitioned, plan_placement,
-    rank_nodes_by_distance, shared_l3, CacheInfo, CacheLevel, CacheTopology, CoreClass, CoreInfo,
-    DistanceError, NumaDistanceMatrix, NumaNodeId, Topology, TopologyDescriptor, TopologyError,
-    WorkloadClass, LOCAL_DISTANCE,
+    choose_balanced_node, nearest_node, plan_partitioned, plan_placement, rank_nodes_by_distance,
+    shared_l3, CacheInfo, CacheLevel, CacheTopology, CoreClass, CoreInfo, DistanceError,
+    NumaDistanceMatrix, NumaNodeId, Topology, TopologyDescriptor, TopologyError, WorkloadClass,
+    LOCAL_DISTANCE,
 };
 
 fn node(index: u16) -> NumaNodeId {
@@ -72,12 +72,9 @@ fn uniform_matrix_clamps_remote_below_local() {
 
 #[test]
 fn from_rows_builds_asymmetric_matrix() {
-    let m = NumaDistanceMatrix::from_rows(vec![
-        vec![10, 20, 30],
-        vec![20, 10, 25],
-        vec![30, 24, 10],
-    ])
-    .unwrap();
+    let m =
+        NumaDistanceMatrix::from_rows(vec![vec![10, 20, 30], vec![20, 10, 25], vec![30, 24, 10]])
+            .unwrap();
     assert_eq!(m.node_count(), 3);
     assert_eq!(m.distance(node(0), node(2)), 30);
     assert_eq!(m.distance(node(2), node(1)), 24);
@@ -88,7 +85,10 @@ fn from_rows_builds_asymmetric_matrix() {
 
 #[test]
 fn from_rows_rejects_bad_input() {
-    assert_eq!(NumaDistanceMatrix::from_rows(vec![]), Err(DistanceError::Empty));
+    assert_eq!(
+        NumaDistanceMatrix::from_rows(vec![]),
+        Err(DistanceError::Empty)
+    );
     assert_eq!(
         NumaDistanceMatrix::from_rows(vec![vec![10, 20], vec![20]]),
         Err(DistanceError::NotSquare {
@@ -120,12 +120,8 @@ fn distance_panics_out_of_range() {
 // ---------------------------------------------------------------------------
 
 fn asym_3() -> NumaDistanceMatrix {
-    NumaDistanceMatrix::from_rows(vec![
-        vec![10, 20, 30],
-        vec![20, 10, 25],
-        vec![30, 25, 10],
-    ])
-    .unwrap()
+    NumaDistanceMatrix::from_rows(vec![vec![10, 20, 30], vec![20, 10, 25], vec![30, 25, 10]])
+        .unwrap()
 }
 
 #[test]
@@ -148,12 +144,9 @@ fn rank_nodes_orders_by_distance() {
 #[test]
 fn rank_nodes_breaks_ties_by_index() {
     // From node 0, nodes 1 and 2 are both distance 20; index decides.
-    let m = NumaDistanceMatrix::from_rows(vec![
-        vec![10, 20, 20],
-        vec![20, 10, 20],
-        vec![20, 20, 10],
-    ])
-    .unwrap();
+    let m =
+        NumaDistanceMatrix::from_rows(vec![vec![10, 20, 20], vec![20, 10, 20], vec![20, 20, 10]])
+            .unwrap();
     assert_eq!(
         rank_nodes_by_distance(&m, node(0)),
         vec![node(0), node(1), node(2)]
@@ -180,27 +173,15 @@ fn nearest_node_picks_closest_candidate() {
 #[test]
 fn choose_balanced_node_prefers_distance_then_load_then_index() {
     // From node 0, nodes 0 and 1 are both distance 10 (local tie); node 2 is 20.
-    let m = NumaDistanceMatrix::from_rows(vec![
-        vec![10, 10, 20],
-        vec![10, 10, 20],
-        vec![20, 20, 10],
-    ])
-    .unwrap();
+    let m =
+        NumaDistanceMatrix::from_rows(vec![vec![10, 10, 20], vec![10, 10, 20], vec![20, 20, 10]])
+            .unwrap();
     // Distance ties between nodes 0 and 1 -> least loaded (node 1, load 2) wins.
-    assert_eq!(
-        choose_balanced_node(&m, node(0), &[5, 2, 9]),
-        Some(node(1))
-    );
+    assert_eq!(choose_balanced_node(&m, node(0), &[5, 2, 9]), Some(node(1)));
     // Equal distance AND equal load -> lowest index (node 0) wins.
-    assert_eq!(
-        choose_balanced_node(&m, node(0), &[3, 3, 0]),
-        Some(node(0))
-    );
+    assert_eq!(choose_balanced_node(&m, node(0), &[3, 3, 0]), Some(node(0)));
     // Node 2 is farther; even at zero load it loses to the nearer nodes.
-    assert_eq!(
-        choose_balanced_node(&m, node(0), &[7, 7, 0]),
-        Some(node(0))
-    );
+    assert_eq!(choose_balanced_node(&m, node(0), &[7, 7, 0]), Some(node(0)));
 }
 
 #[test]
@@ -242,7 +223,10 @@ fn latency_sensitive_fills_pcores_first() {
     assert_eq!(plan.placement(1).unwrap().class, CoreClass::Performance);
     assert_eq!(plan.placement(2).unwrap().class, CoreClass::Efficiency);
     // Memory node equals the assigned core's node.
-    assert_eq!(plan.worker_nodes(), vec![node(0), node(1), node(0), node(1)]);
+    assert_eq!(
+        plan.worker_nodes(),
+        vec![node(0), node(1), node(0), node(1)]
+    );
     assert_eq!(plan.memory_nodes(), plan.worker_nodes());
 }
 
@@ -383,12 +367,8 @@ fn descriptor_accessors_and_hybrid() {
 #[test]
 fn descriptor_new_rejects_bad_input() {
     assert_eq!(
-        TopologyDescriptor::new(
-            vec![],
-            NumaDistanceMatrix::single(),
-            CacheTopology::empty()
-        )
-        .unwrap_err(),
+        TopologyDescriptor::new(vec![], NumaDistanceMatrix::single(), CacheTopology::empty())
+            .unwrap_err(),
         TopologyError::NoCores
     );
     assert_eq!(

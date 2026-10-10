@@ -68,20 +68,36 @@ impl Cross {
     /// Builds a cross from the five taps in reading order.
     #[must_use]
     pub fn new(top: Vec3, left: Vec3, center: Vec3, right: Vec3, bottom: Vec3) -> Self {
-        Self { top, left, center, right, bottom }
+        Self {
+            top,
+            left,
+            center,
+            right,
+            bottom,
+        }
     }
 
     /// Builds a flat cross (all taps equal) — handy for tests and borders.
     #[must_use]
     pub fn uniform(color: Vec3) -> Self {
-        Self { top: color, left: color, center: color, right: color, bottom: color }
+        Self {
+            top: color,
+            left: color,
+            center: color,
+            right: color,
+            bottom: color,
+        }
     }
 }
 
 /// Replaces a non-finite scalar with `fallback`.
 #[inline]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Clamps a colour to be finite and non-negative component-wise.
@@ -228,7 +244,10 @@ mod tests {
             let cross = Cross::uniform(Vec3::splat(lvl));
             for &s in &[0.0_f32, 0.4, 1.0] {
                 let out = rcas(cross, s);
-                assert!(approx(out, Vec3::splat(lvl), 1.0e-6), "lvl={lvl} s={s} out={out:?}");
+                assert!(
+                    approx(out, Vec3::splat(lvl), 1.0e-6),
+                    "lvl={lvl} s={s} out={out:?}"
+                );
             }
         }
     }
@@ -262,7 +281,10 @@ mod tests {
             Vec3::splat(0.3), // bottom
         );
         let out = rcas(cross, 1.0);
-        assert!(out.x > center.x + 1.0e-3, "expected sharpening, out={out:?}");
+        assert!(
+            out.x > center.x + 1.0e-3,
+            "expected sharpening, out={out:?}"
+        );
     }
 
     /// The limiter keeps the output inside the cross `[min, max]` even at full
@@ -279,9 +301,18 @@ mod tests {
         let (lo, hi) = cross_min_max(&cross);
         for &s in &[0.0_f32, 0.3, 0.6, 1.0] {
             let out = rcas(cross, s);
-            assert!(out.x >= lo.x - 1.0e-6 && out.x <= hi.x + 1.0e-6, "x s={s} out={out:?}");
-            assert!(out.y >= lo.y - 1.0e-6 && out.y <= hi.y + 1.0e-6, "y s={s} out={out:?}");
-            assert!(out.z >= lo.z - 1.0e-6 && out.z <= hi.z + 1.0e-6, "z s={s} out={out:?}");
+            assert!(
+                out.x >= lo.x - 1.0e-6 && out.x <= hi.x + 1.0e-6,
+                "x s={s} out={out:?}"
+            );
+            assert!(
+                out.y >= lo.y - 1.0e-6 && out.y <= hi.y + 1.0e-6,
+                "y s={s} out={out:?}"
+            );
+            assert!(
+                out.z >= lo.z - 1.0e-6 && out.z <= hi.z + 1.0e-6,
+                "z s={s} out={out:?}"
+            );
         }
     }
 

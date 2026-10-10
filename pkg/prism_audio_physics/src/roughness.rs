@@ -20,9 +20,9 @@
 
 use bevy_math::Vec3;
 
+use prism_audio_core::math::Sample;
 use prism_audio_procedural::contact::ContactPoint;
 use prism_audio_procedural::material::MaterialPairId;
-use prism_audio_core::math::Sample;
 
 /// Projects a contact onto the body's dominant axis as a `[0, 1]` strike point.
 ///

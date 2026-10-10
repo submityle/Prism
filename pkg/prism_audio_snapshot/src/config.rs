@@ -30,13 +30,19 @@ impl SnapshotConfig {
     /// Builds a config from an explicit duration and curve.
     #[must_use]
     pub const fn new(default_transition_secs: f32, default_interpolation: Interpolation) -> Self {
-        Self { default_transition_secs, default_interpolation }
+        Self {
+            default_transition_secs,
+            default_interpolation,
+        }
     }
 }
 
 impl Default for SnapshotConfig {
     fn default() -> Self {
-        Self { default_transition_secs: 0.5, default_interpolation: Interpolation::SCurve }
+        Self {
+            default_transition_secs: 0.5,
+            default_interpolation: Interpolation::SCurve,
+        }
     }
 }
 

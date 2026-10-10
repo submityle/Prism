@@ -90,8 +90,7 @@ impl ParticleLight {
     /// the colour to non-negative.
     #[inline]
     pub fn new(direction: Vec3, color: Vec3) -> Self {
-        let dir = if direction.length_squared().is_finite()
-            && direction.length_squared() > 1.0e-12
+        let dir = if direction.length_squared().is_finite() && direction.length_squared() > 1.0e-12
         {
             direction.normalize()
         } else {
@@ -211,12 +210,7 @@ pub fn composite_over(src: Vec3, src_alpha: f32, dst: Vec3) -> Vec3 {
 /// fragment contributes nothing).  Returns `(premultiplied_rgb, alpha)` ready
 /// for [`composite_over`].
 #[inline]
-pub fn integrate(
-    albedo: Vec3,
-    radiance: Vec3,
-    emissive: Vec3,
-    alpha: f32,
-) -> (Vec3, f32) {
+pub fn integrate(albedo: Vec3, radiance: Vec3, emissive: Vec3, alpha: f32) -> (Vec3, f32) {
     let a = saturate(alpha);
     let lit = sanitize_rgb(albedo) * sanitize_rgb(radiance);
     let rgb = (lit + sanitize_rgb(emissive)) * a;

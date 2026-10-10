@@ -200,10 +200,16 @@ mod tests {
     #[test]
     fn nearer_box_reads_a_larger_reverse_z_depth() {
         let v = view(reverse_z_clip());
-        let near = project_world_aabb(&v, WorldAabb::from_center_half_extents([0.0, 0.0, 1.0], [0.1; 3]))
-            .expect("in front");
-        let far = project_world_aabb(&v, WorldAabb::from_center_half_extents([0.0, 0.0, 4.0], [0.1; 3]))
-            .expect("in front");
+        let near = project_world_aabb(
+            &v,
+            WorldAabb::from_center_half_extents([0.0, 0.0, 1.0], [0.1; 3]),
+        )
+        .expect("in front");
+        let far = project_world_aabb(
+            &v,
+            WorldAabb::from_center_half_extents([0.0, 0.0, 4.0], [0.1; 3]),
+        )
+        .expect("in front");
         // The nearer box (z spanning ~0.9..1.1) reads a larger reversed-Z
         // nearest depth than the far box (z ~3.9..4.1).
         assert!(near.nearest_depth > far.nearest_depth);
@@ -253,7 +259,10 @@ mod tests {
             expected_history_epoch: 1,
             view_flags: ViewFlags::REVERSE_Z,
         };
-        assert!(test.nearest_depth < occluder, "candidate is behind the occluder");
+        assert!(
+            test.nearest_depth < occluder,
+            "candidate is behind the occluder"
+        );
         assert!(test.is_occluded(HzbPhase::Current));
     }
 }

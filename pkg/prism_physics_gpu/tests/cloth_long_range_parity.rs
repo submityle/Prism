@@ -87,7 +87,12 @@ fn cloth_grid(
             // Alternate rigid and slightly compliant leashes to exercise both
             // denominators.
             let compliance = if (r + c) % 2 == 0 { 0.0 } else { 1.0e-4 };
-            constraints.push(ClothLongRangeConstraint::new(i, rest, max_distance, compliance));
+            constraints.push(ClothLongRangeConstraint::new(
+                i,
+                rest,
+                max_distance,
+                compliance,
+            ));
         }
     }
     let inverse_masses = vec![1.0_f32; positions.len()];
@@ -145,7 +150,12 @@ fn gpu_matches_cpu_with_pinned_particles() {
     let (positions, mut inverse_masses, constraints) = cloth_grid(5, 5, 0xabcd_0001);
     // Pin the four corners.
     let cols = 5;
-    let pins = [0_usize, cols - 1, inverse_masses.len() - cols, inverse_masses.len() - 1];
+    let pins = [
+        0_usize,
+        cols - 1,
+        inverse_masses.len() - cols,
+        inverse_masses.len() - 1,
+    ];
     for &p in &pins {
         inverse_masses[p] = 0.0;
     }

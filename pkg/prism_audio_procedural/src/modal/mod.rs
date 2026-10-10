@@ -19,7 +19,7 @@ pub mod excitation;
 pub mod resonator;
 pub mod synth;
 
-pub use bank::{Mode, ModalBank, MAX_MODES};
+pub use bank::{ModalBank, Mode, MAX_MODES};
 pub use excitation::{SpectralTilt, TransientBurst};
 pub use resonator::ModeResonator;
 pub use synth::ModalSynth;

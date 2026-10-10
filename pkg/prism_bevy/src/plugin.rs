@@ -4,15 +4,15 @@
 use alloc::collections::BTreeSet;
 
 use bevy_app::prelude::*;
-use bevy_ecs::prelude::*;
 use bevy_camera::primitives::{Aabb, Frustum};
+use bevy_ecs::prelude::*;
 use bevy_transform::components::GlobalTransform;
 
 use prism_render_architecture::gpu_scene::{SceneHandle, SceneOperation, SceneTransactionBuilder};
 use prism_render_visibility::bevy_bridge::{
-    BevyViewParams, instance_record, scene_bounds, scene_transform, view_record,
+    instance_record, scene_bounds, scene_transform, view_record, BevyViewParams,
 };
-use prism_render_visibility::{VisibilityInput, cull_view};
+use prism_render_visibility::{cull_view, VisibilityInput};
 
 use crate::components::{PrismCamera, PrismRenderable, PrismViewVisibility};
 use crate::scene::{PrismRenderScene, ViewState};

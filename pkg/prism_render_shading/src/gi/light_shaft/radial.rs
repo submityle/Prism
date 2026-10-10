@@ -198,7 +198,11 @@ pub fn sample_mask_bilinear(mask: &[f32], width: usize, height: usize, uv: Vec2)
 #[inline]
 fn fetch(mask: &[f32], width: usize, x: usize, y: usize) -> f32 {
     let v = mask[y * width + x];
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
 }
 
 /// Samples the user mask and sanitizes the return to a finite, non-negative
@@ -209,7 +213,11 @@ where
     F: Fn(Vec2) -> f32,
 {
     let v = mask(uv);
-    if v.is_finite() { v.max(0.0) } else { 0.0 }
+    if v.is_finite() {
+        v.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Clamps the sample count to `[1, MAX_SAMPLES]`.
@@ -221,13 +229,21 @@ fn clamp_sample_count(n: u32) -> u32 {
 /// Clamps a scalar to be finite and non-negative (non-finite -> `0`).
 #[inline]
 fn clamp_non_negative(v: f32) -> f32 {
-    if v.is_finite() { v.max(0.0) } else { 0.0 }
+    if v.is_finite() {
+        v.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Clamps a scalar to the unit interval `[0, 1]` (non-finite -> `0`).
 #[inline]
 fn clamp_unit(v: f32) -> f32 {
-    if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Returns `true` when both components of `v` are finite.
@@ -239,7 +255,11 @@ fn is_finite_vec2(v: Vec2) -> bool {
 /// Sanitizes a colour to be finite and non-negative per channel.
 #[inline]
 fn sanitize_color(c: Vec3) -> Vec3 {
-    Vec3::new(clamp_non_negative(c.x), clamp_non_negative(c.y), clamp_non_negative(c.z))
+    Vec3::new(
+        clamp_non_negative(c.x),
+        clamp_non_negative(c.y),
+        clamp_non_negative(c.z),
+    )
 }
 
 #[cfg(test)]
@@ -260,7 +280,12 @@ mod tests {
 
     #[test]
     fn constant_mask_matches_closed_form() {
-        let p = RadialScatterParams { density: 1.0, weight: 0.5, decay: 0.9, exposure: 0.7 };
+        let p = RadialScatterParams {
+            density: 1.0,
+            weight: 0.5,
+            decay: 0.9,
+            exposure: 0.7,
+        };
         let got = radial_scatter(Vec2::new(0.8, 0.8), Vec2::new(0.5, 0.5), 32, p, |_| 0.4);
         let want = expected_constant(0.4, 32, p);
         assert!((got - want).abs() < 1e-4, "got={got} want={want}");
@@ -290,7 +315,13 @@ mod tests {
         let light = Vec2::new(0.5, 0.05);
         let uv = Vec2::new(0.5, 0.95);
         let lit = radial_scatter(uv, light, 64, p, |_| 1.0);
-        let occluded = radial_scatter(uv, light, 64, p, |s| if s.y > 0.4 && s.y < 0.6 { 0.0 } else { 1.0 });
+        let occluded = radial_scatter(uv, light, 64, p, |s| {
+            if s.y > 0.4 && s.y < 0.6 {
+                0.0
+            } else {
+                1.0
+            }
+        });
         assert!(occluded < lit, "occluded={occluded} lit={lit}");
     }
 
@@ -298,8 +329,16 @@ mod tests {
     fn higher_decay_accumulates_more() {
         // With a constant mask, a decay closer to 1 retains more of the tail and
         // therefore accumulates a brighter shaft.
-        let base = RadialScatterParams { density: 1.0, weight: 0.8, decay: 0.5, exposure: 1.0 };
-        let hi = RadialScatterParams { decay: 0.95, ..base };
+        let base = RadialScatterParams {
+            density: 1.0,
+            weight: 0.8,
+            decay: 0.5,
+            exposure: 1.0,
+        };
+        let hi = RadialScatterParams {
+            decay: 0.95,
+            ..base
+        };
         let lo = radial_scatter(Vec2::new(0.9, 0.9), Vec2::new(0.1, 0.1), 64, base, |_| 0.5);
         let hi = radial_scatter(Vec2::new(0.9, 0.9), Vec2::new(0.1, 0.1), 64, hi, |_| 0.5);
         assert!(hi > lo, "hi={hi} lo={lo}");
@@ -309,7 +348,12 @@ mod tests {
     fn decay_zero_keeps_only_first_marched_tap() {
         // decay = 0 => decay_i is 1 for the first step then 0, so illum =
         // centre + weight * first_tap.
-        let p = RadialScatterParams { density: 1.0, weight: 1.0, decay: 0.0, exposure: 1.0 };
+        let p = RadialScatterParams {
+            density: 1.0,
+            weight: 1.0,
+            decay: 0.0,
+            exposure: 1.0,
+        };
         let got = radial_scatter(Vec2::new(0.5, 0.5), Vec2::new(0.5, 0.5), 10, p, |_| 0.3);
         assert!((got - (0.3 + 0.3)).abs() < 1e-5, "got={got}");
     }
@@ -317,7 +361,12 @@ mod tests {
     #[test]
     fn zero_distance_light_is_a_bright_core() {
         // When the pixel sits on the light, every tap re-samples the same point.
-        let p = RadialScatterParams { density: 1.0, weight: 1.0, decay: 1.0, exposure: 1.0 };
+        let p = RadialScatterParams {
+            density: 1.0,
+            weight: 1.0,
+            decay: 1.0,
+            exposure: 1.0,
+        };
         let got = radial_scatter(Vec2::new(0.5, 0.5), Vec2::new(0.5, 0.5), 8, p, |_| 1.0);
         // centre (1) + 8 taps * weight(1) * decay(1) = 9.
         assert!((got - 9.0).abs() < 1e-5, "got={got}");
@@ -326,16 +375,30 @@ mod tests {
     #[test]
     fn non_finite_inputs_fall_back_to_zero() {
         let p = RadialScatterParams::default();
-        assert_eq!(radial_scatter(Vec2::new(f32::NAN, 0.0), Vec2::ZERO, 16, p, |_| 1.0), 0.0);
-        assert_eq!(radial_scatter(Vec2::ZERO, Vec2::new(f32::INFINITY, 0.0), 16, p, |_| 1.0), 0.0);
+        assert_eq!(
+            radial_scatter(Vec2::new(f32::NAN, 0.0), Vec2::ZERO, 16, p, |_| 1.0),
+            0.0
+        );
+        assert_eq!(
+            radial_scatter(Vec2::ZERO, Vec2::new(f32::INFINITY, 0.0), 16, p, |_| 1.0),
+            0.0
+        );
         // A NaN-producing sampler is sanitized to zero contribution.
-        let got = radial_scatter(Vec2::new(0.6, 0.6), Vec2::new(0.5, 0.5), 16, p, |_| f32::NAN);
+        let got = radial_scatter(Vec2::new(0.6, 0.6), Vec2::new(0.5, 0.5), 16, p, |_| {
+            f32::NAN
+        });
         assert_eq!(got, 0.0);
     }
 
     #[test]
     fn params_sanitize_out_of_range_fields() {
-        let p = RadialScatterParams { density: -1.0, weight: f32::NAN, decay: 5.0, exposure: -3.0 }.sanitized();
+        let p = RadialScatterParams {
+            density: -1.0,
+            weight: f32::NAN,
+            decay: 5.0,
+            exposure: -3.0,
+        }
+        .sanitized();
         assert_eq!(p.density, 0.0);
         assert_eq!(p.weight, 0.0);
         assert_eq!(p.decay, 1.0);
@@ -364,10 +427,22 @@ mod tests {
 
     #[test]
     fn color_tint_scales_scalar_intensity() {
-        let p = RadialScatterParams { density: 1.0, weight: 0.5, decay: 0.9, exposure: 1.0 };
+        let p = RadialScatterParams {
+            density: 1.0,
+            weight: 0.5,
+            decay: 0.9,
+            exposure: 1.0,
+        };
         let scalar = radial_scatter(Vec2::new(0.8, 0.8), Vec2::new(0.5, 0.5), 24, p, |_| 0.6);
         let tint = Vec3::new(1.0, 0.5, 0.25);
-        let col = radial_scatter_color(Vec2::new(0.8, 0.8), Vec2::new(0.5, 0.5), 24, p, tint, |_| 0.6);
+        let col = radial_scatter_color(
+            Vec2::new(0.8, 0.8),
+            Vec2::new(0.5, 0.5),
+            24,
+            p,
+            tint,
+            |_| 0.6,
+        );
         assert!((col.x - scalar).abs() < 1e-5);
         assert!((col.y - scalar * 0.5).abs() < 1e-5);
         assert!((col.z - scalar * 0.25).abs() < 1e-5);
@@ -376,7 +451,14 @@ mod tests {
     #[test]
     fn negative_light_color_is_sanitized() {
         let p = RadialScatterParams::default();
-        let col = radial_scatter_color(Vec2::new(0.8, 0.8), Vec2::new(0.5, 0.5), 16, p, Vec3::new(-1.0, f32::NAN, 2.0), |_| 1.0);
+        let col = radial_scatter_color(
+            Vec2::new(0.8, 0.8),
+            Vec2::new(0.5, 0.5),
+            16,
+            p,
+            Vec3::new(-1.0, f32::NAN, 2.0),
+            |_| 1.0,
+        );
         assert!(col.x >= 0.0 && col.y >= 0.0 && col.z >= 0.0);
         assert!(col.is_finite());
     }

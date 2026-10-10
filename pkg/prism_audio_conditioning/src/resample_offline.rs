@@ -90,8 +90,9 @@ pub fn resample_to(
         }
     }
 
-    ConditionedPcm::new(target_rate, pcm.layout(), channels)
-        .unwrap_or_else(|_| ConditionedPcm::silence(target_rate, pcm.layout(), 0).unwrap_or_else(|_| pcm.clone()))
+    ConditionedPcm::new(target_rate, pcm.layout(), channels).unwrap_or_else(|_| {
+        ConditionedPcm::silence(target_rate, pcm.layout(), 0).unwrap_or_else(|_| pcm.clone())
+    })
 }
 
 #[cfg(test)]
@@ -118,9 +119,12 @@ mod tests {
 
     #[test]
     fn same_rate_is_cloned() {
-        let pcm =
-            ConditionedPcm::new(48_000, ChannelLayout::Mono, vec![sine(1_000.0, 48_000, 1_000)])
-                .unwrap();
+        let pcm = ConditionedPcm::new(
+            48_000,
+            ChannelLayout::Mono,
+            vec![sine(1_000.0, 48_000, 1_000)],
+        )
+        .unwrap();
         let out = resample_to(&pcm, 48_000, &ResampleConfig::default());
         assert_eq!(out, pcm);
     }
@@ -146,9 +150,8 @@ mod tests {
     fn round_trip_preserves_energy() {
         let rate = 48_000;
         let frames = 8_000;
-        let pcm =
-            ConditionedPcm::new(rate, ChannelLayout::Mono, vec![sine(1_000.0, rate, frames)])
-                .unwrap();
+        let pcm = ConditionedPcm::new(rate, ChannelLayout::Mono, vec![sine(1_000.0, rate, frames)])
+            .unwrap();
         let down = resample_to(&pcm, 24_000, &ResampleConfig::default());
         let up = resample_to(&down, rate, &ResampleConfig::default());
 
@@ -160,12 +163,11 @@ mod tests {
         assert!(common > 2 * guard);
         let a = &original[guard..common - guard];
         let b = &restored[guard..common - guard];
-        let rms_err = rms(
-            &a.iter()
-                .zip(b.iter())
-                .map(|(&x, &y)| x - y)
-                .collect::<Vec<Sample>>(),
-        );
+        let rms_err = rms(&a
+            .iter()
+            .zip(b.iter())
+            .map(|(&x, &y)| x - y)
+            .collect::<Vec<Sample>>());
         assert!(rms_err < 0.1, "round-trip RMS error {rms_err}");
     }
 }

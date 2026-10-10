@@ -235,7 +235,10 @@ mod tests {
             let mut last = -1.0;
             for i in 0..=100 {
                 let v = e.apply(i as f64 / 100.0);
-                assert!(v + 1e-12 >= last, "{e:?} not monotonic at {i}: {v} < {last}");
+                assert!(
+                    v + 1e-12 >= last,
+                    "{e:?} not monotonic at {i}: {v} < {last}"
+                );
                 last = v;
             }
         }

@@ -123,9 +123,9 @@ impl GpuBvhShapeCast {
             .iter()
             .map(|&c| ConvexConvexSweepPair::new(0, c + 1))
             .collect();
-        let results: Vec<Option<Toi>> =
-            self.toi
-                .query(ctx, hulls, poses, motions, radii, &pairs, dt, target_sep);
+        let results: Vec<Option<Toi>> = self
+            .toi
+            .query(ctx, hulls, poses, motions, radii, &pairs, dt, target_sep);
         candidates
             .iter()
             .zip(results)
@@ -170,7 +170,16 @@ impl GpuBvhShapeCast {
         }
         let (shape, targets) = Self::views(hulls, poses, motions, radii);
         let candidates = self.gather(ctx, &shape, &targets, dt, target_sep);
-        let hits = self.sweep_candidates(ctx, hulls, poses, motions, radii, &candidates, dt, target_sep);
+        let hits = self.sweep_candidates(
+            ctx,
+            hulls,
+            poses,
+            motions,
+            radii,
+            &candidates,
+            dt,
+            target_sep,
+        );
         let mut best: Option<ShapeCastHit> = None;
         for hit in hits {
             consider(&mut best, hit);
@@ -198,8 +207,16 @@ impl GpuBvhShapeCast {
         }
         let (shape, targets) = Self::views(hulls, poses, motions, radii);
         let candidates = self.gather(ctx, &shape, &targets, dt, target_sep);
-        let mut hits =
-            self.sweep_candidates(ctx, hulls, poses, motions, radii, &candidates, dt, target_sep);
+        let mut hits = self.sweep_candidates(
+            ctx,
+            hulls,
+            poses,
+            motions,
+            radii,
+            &candidates,
+            dt,
+            target_sep,
+        );
         sort_hits(&mut hits);
         hits
     }
@@ -306,8 +323,16 @@ impl GpuBvhShapeCast {
         }
         let shape = RoundedConvex::new(&hulls[0], poses[0], motions[0], radii[0]);
         let candidates = self.gather_resident(ctx, lbvh, &shape, dt, target_sep);
-        let hits =
-            self.sweep_candidates(ctx, hulls, poses, motions, radii, &candidates, dt, target_sep);
+        let hits = self.sweep_candidates(
+            ctx,
+            hulls,
+            poses,
+            motions,
+            radii,
+            &candidates,
+            dt,
+            target_sep,
+        );
         let mut best: Option<ShapeCastHit> = None;
         for hit in hits {
             consider(&mut best, hit);
@@ -343,8 +368,16 @@ impl GpuBvhShapeCast {
         }
         let shape = RoundedConvex::new(&hulls[0], poses[0], motions[0], radii[0]);
         let candidates = self.gather_resident(ctx, lbvh, &shape, dt, target_sep);
-        let mut hits =
-            self.sweep_candidates(ctx, hulls, poses, motions, radii, &candidates, dt, target_sep);
+        let mut hits = self.sweep_candidates(
+            ctx,
+            hulls,
+            poses,
+            motions,
+            radii,
+            &candidates,
+            dt,
+            target_sep,
+        );
         sort_hits(&mut hits);
         hits
     }

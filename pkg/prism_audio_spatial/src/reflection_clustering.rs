@@ -63,8 +63,8 @@
 //! Steam Audio, or Google Resonance Audio source or derived code**; it is a
 //! plain energy-preserving bucketing of this crate's own reflection taps.
 
-use bevy_math::Vec3;
 use bevy_math::ops;
+use bevy_math::Vec3;
 
 use prism_audio_core::math::Sample;
 
@@ -372,7 +372,11 @@ mod tests {
             tap(1.0, Vec3::new(1.0, 0.3, 0.0), 10),
             tap(0.6, Vec3::new(1.0, -0.2, 0.1), 12),
         ]);
-        assert!(approx(clusters.cluster(0).unwrap().direction.length(), 1.0, 1e-5));
+        assert!(approx(
+            clusters.cluster(0).unwrap().direction.length(),
+            1.0,
+            1e-5
+        ));
     }
 
     #[test]

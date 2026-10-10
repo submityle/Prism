@@ -48,7 +48,6 @@
 
 #![forbid(unsafe_code)]
 
-
 use core::fmt;
 
 pub mod map;
@@ -188,7 +187,6 @@ pub(crate) fn read_u32(blob: &[u8], pos: usize) -> Result<u32, RelocError> {
     buf.copy_from_slice(bytes);
     Ok(u32::from_le_bytes(buf))
 }
-
 
 #[cfg(test)]
 mod tests;

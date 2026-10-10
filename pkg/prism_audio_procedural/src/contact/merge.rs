@@ -80,8 +80,8 @@ pub fn merge_impacts(impacts: &mut Vec<ImpactEvent>, config: MergeConfig) -> usi
         let current = impacts[read];
         let head = impacts[write];
         let same_contact = head.contact == current.contact;
-        let within_window = current.sample_offset.saturating_sub(head.sample_offset)
-            <= config.window_samples;
+        let within_window =
+            current.sample_offset.saturating_sub(head.sample_offset) <= config.window_samples;
         if same_contact && within_window {
             let mut merged = head;
             absorb(&mut merged, &current);

@@ -168,11 +168,7 @@ pub fn base_variance(beta_m: f32) -> f32 {
 #[inline]
 pub fn lobe_variances(beta_m: f32) -> [f32; LOBE_COUNT] {
     let v_r = base_variance(beta_m);
-    [
-        v_r,
-        clamp_variance(0.25 * v_r),
-        clamp_variance(4.0 * v_r),
-    ]
+    [v_r, clamp_variance(0.25 * v_r), clamp_variance(4.0 * v_r)]
 }
 
 /// Energy-conserving longitudinal scattering term `M_p` of d'Eon et al. (2011).
@@ -376,7 +372,10 @@ mod tests {
         for ti in 0..=6 {
             let theta_i = ti as f32 * 0.15;
             let total = integrate_over_theta_o(theta_i, v);
-            assert!(total.is_finite() && total >= 1.0 - 3.0e-2, "integral={total}");
+            assert!(
+                total.is_finite() && total >= 1.0 - 3.0e-2,
+                "integral={total}"
+            );
             assert!(total >= prev - 1.0e-3, "non-monotone: {total} < {prev}");
             prev = total;
         }

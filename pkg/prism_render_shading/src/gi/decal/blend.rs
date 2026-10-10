@@ -274,10 +274,18 @@ mod tests {
     #[test]
     fn degenerate_normals_fall_back() {
         // Zero base normal -> +Z fallback.
-        assert!(approx_vec(blend_normal(Vec3::ZERO, Vec3::Z, 1.0), Vec3::Z, 1.0e-6));
+        assert!(approx_vec(
+            blend_normal(Vec3::ZERO, Vec3::Z, 1.0),
+            Vec3::Z,
+            1.0e-6
+        ));
         // Zero decal normal -> base retained.
         let base = Vec3::new(0.0, 0.0, 1.0);
-        assert!(approx_vec(blend_normal(base, Vec3::ZERO, 1.0), base, 1.0e-6));
+        assert!(approx_vec(
+            blend_normal(base, Vec3::ZERO, 1.0),
+            base,
+            1.0e-6
+        ));
     }
 
     #[test]

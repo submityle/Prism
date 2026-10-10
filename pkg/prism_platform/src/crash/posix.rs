@@ -212,12 +212,7 @@ extern "C" fn trampoline(sig: i32, info: *mut c_void, _ucontext: *mut c_void) {
         unsafe { *info.cast::<u8>().add(SI_ADDR_OFFSET).cast::<usize>() }
     };
 
-    let ctx = context::build(
-        Signal::from_raw(sig),
-        sig,
-        fault_address,
-        super::metadata(),
-    );
+    let ctx = context::build(Signal::from_raw(sig), sig, fault_address, super::metadata());
     super::dispatch(ctx);
 
     // Restore the default disposition and re-raise. `signal` and `raise` are

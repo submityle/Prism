@@ -128,10 +128,16 @@ impl Fixed {
         let msb = 63 - (raw as u64).leading_zeros() as i64;
         let e = msb - 32;
         // m_raw = raw / 2^e, landing m in [1, 2) ⇔ m_raw in [2^32, 2^33).
-        let m_raw: i64 = if e >= 0 { raw >> (e as u32) } else { raw << ((-e) as u32) };
+        let m_raw: i64 = if e >= 0 {
+            raw >> (e as u32)
+        } else {
+            raw << ((-e) as u32)
+        };
         let m = Self::from_bits(m_raw);
         // u = (m - 1) / (m + 1), ln(m) = 2·(u + u³/3 + u⁵/5 + u⁷/7).
-        let u = m.saturating_sub(Self::ONE).saturating_div(m.saturating_add(Self::ONE));
+        let u = m
+            .saturating_sub(Self::ONE)
+            .saturating_div(m.saturating_add(Self::ONE));
         let u2 = u.saturating_mul(u);
         let u3 = u2.saturating_mul(u);
         let u5 = u3.saturating_mul(u2);
@@ -141,6 +147,8 @@ impl Fixed {
             .saturating_add(u5.saturating_mul(INV_5))
             .saturating_add(u7.saturating_mul(INV_7));
         let ln_m = series.saturating_mul(Self::TWO);
-        Fixed::from_int(e).saturating_mul(Self::LN_2).saturating_add(ln_m)
+        Fixed::from_int(e)
+            .saturating_mul(Self::LN_2)
+            .saturating_add(ln_m)
     }
 }

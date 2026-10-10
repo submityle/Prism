@@ -218,7 +218,11 @@ impl GpuXpbdSolver {
         if state.is_empty() || dt <= 0.0 {
             return Ok(());
         }
-        debug_assert_eq!(awake.len(), state.len(), "awake mask must cover every particle");
+        debug_assert_eq!(
+            awake.len(),
+            state.len(),
+            "awake mask must cover every particle"
+        );
 
         let particle_count = state.len() as u32;
         let colouring = Colouring::build(constraints, particle_count)?;

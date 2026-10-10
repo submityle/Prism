@@ -434,10 +434,8 @@ mod enum_kind {
 }
 
 mod registry_roundtrip {
-    use crate::{
-        GetTypeRegistration, Reflect, ReflectDefault, TypeInfo, TypeRegistry,
-    };
-    use core::any::{TypeId, type_name};
+    use crate::{GetTypeRegistration, Reflect, ReflectDefault, TypeInfo, TypeRegistry};
+    use core::any::{type_name, TypeId};
 
     #[derive(Reflect, Default)]
     struct Config {
@@ -463,9 +461,9 @@ mod registry_roundtrip {
         assert_eq!(by_name.type_name(), type_name::<Config>());
 
         // Attach ReflectDefault type data and default-construct through it.
-        assert!(registry.register_type_data::<Config, ReflectDefault>(
-            ReflectDefault::new::<Config>()
-        ));
+        assert!(
+            registry.register_type_data::<Config, ReflectDefault>(ReflectDefault::new::<Config>())
+        );
         let reg = registry.get(TypeId::of::<Config>()).unwrap();
         let default = reg.data::<ReflectDefault>().unwrap();
         let value = default.default_value();
@@ -518,10 +516,22 @@ mod math_kind {
 
     #[test]
     fn all_math_types_reflect() {
-        assert_eq!(<Vec2 as Typed>::type_info().type_name(), ::core::any::type_name::<Vec2>());
-        assert_eq!(<Vec3A as Typed>::type_info().type_name(), ::core::any::type_name::<Vec3A>());
-        assert_eq!(<Vec4 as Typed>::type_info().type_name(), ::core::any::type_name::<Vec4>());
-        assert_eq!(<Quat as Typed>::type_info().type_name(), ::core::any::type_name::<Quat>());
+        assert_eq!(
+            <Vec2 as Typed>::type_info().type_name(),
+            ::core::any::type_name::<Vec2>()
+        );
+        assert_eq!(
+            <Vec3A as Typed>::type_info().type_name(),
+            ::core::any::type_name::<Vec3A>()
+        );
+        assert_eq!(
+            <Vec4 as Typed>::type_info().type_name(),
+            ::core::any::type_name::<Vec4>()
+        );
+        assert_eq!(
+            <Quat as Typed>::type_info().type_name(),
+            ::core::any::type_name::<Quat>()
+        );
 
         let m = Mat4::default();
         match m.type_info() {
@@ -546,9 +556,9 @@ mod math_kind {
 
 mod m2_dynamic {
     use crate::prelude::*;
+    use alloc::boxed::Box;
     #[cfg(feature = "math")]
     use prism_math::Vec3;
-    use alloc::boxed::Box;
     use std::collections::HashMap;
 
     #[derive(Reflect, Debug, PartialEq, Clone)]
@@ -652,7 +662,10 @@ mod m2_dynamic {
     #[test]
     fn from_reflect_round_trips_collections_and_math() {
         let list = vec![1, 2, 3, 4];
-        assert_eq!(Vec::<i32>::from_reflect(&list as &dyn Reflect).unwrap(), list);
+        assert_eq!(
+            Vec::<i32>::from_reflect(&list as &dyn Reflect).unwrap(),
+            list
+        );
 
         let mut map = HashMap::new();
         map.insert("x".to_string(), 10);
@@ -688,7 +701,9 @@ mod m2_dynamic {
                 ("height", Box::new(6.0f32) as Box<dyn Reflect>),
             ]),
         );
-        shape.apply(&patch).expect("same-variant enum patch applies");
+        shape
+            .apply(&patch)
+            .expect("same-variant enum patch applies");
         assert_eq!(
             shape,
             Shape::Rect {
@@ -712,7 +727,10 @@ mod m2_dynamic {
             .apply(&circle)
             .expect("DynamicEnum switches to the source variant");
         assert_eq!(dynamic.variant_name(), "Circle");
-        assert_eq!(dynamic.field_at(0).unwrap().downcast_ref::<f32>(), Some(&3.5));
+        assert_eq!(
+            dynamic.field_at(0).unwrap().downcast_ref::<f32>(),
+            Some(&3.5)
+        );
 
         let rebuilt = Shape::from_reflect(&dynamic).expect("rebuild concrete from switched enum");
         assert_eq!(rebuilt, Shape::Circle(3.5));
@@ -742,15 +760,18 @@ mod m2_dynamic {
     fn parsed_path_mut_mutates_through_nested_shapes() {
         let mut world = sample_world();
 
-        let cell = reflect_path_mut(&mut world, &ParsedPath::parse(".grid[1][0]").unwrap()).unwrap();
+        let cell =
+            reflect_path_mut(&mut world, &ParsedPath::parse(".grid[1][0]").unwrap()).unwrap();
         *cell.downcast_mut::<i32>().unwrap() = 400;
         assert_eq!(world.grid[1][0], 400);
 
-        let speed = reflect_path_mut(&mut world, &ParsedPath::parse(".player.speed").unwrap()).unwrap();
+        let speed =
+            reflect_path_mut(&mut world, &ParsedPath::parse(".player.speed").unwrap()).unwrap();
         *speed.downcast_mut::<f32>().unwrap() = 9.0;
         assert_eq!(world.player.speed, 9.0);
 
-        let entry = reflect_path_mut(&mut world, &ParsedPath::parse(r#".lookup["a"]"#).unwrap()).unwrap();
+        let entry =
+            reflect_path_mut(&mut world, &ParsedPath::parse(r#".lookup["a"]"#).unwrap()).unwrap();
         *entry.downcast_mut::<i32>().unwrap() = 111;
         assert_eq!(world.lookup["a"], 111);
     }
@@ -875,7 +896,11 @@ mod serialization {
     where
         T: Reflect + Typed + FromReflect + PartialEq + Debug + Clone,
     {
-        assert_eq!(binary_roundtrip(&value, registry), value, "binary round-trip");
+        assert_eq!(
+            binary_roundtrip(&value, registry),
+            value,
+            "binary round-trip"
+        );
         assert_eq!(ron_roundtrip(&value, registry), value, "RON round-trip");
     }
 
@@ -1078,14 +1103,23 @@ mod serialization {
     #[test]
     fn stable_type_id_is_deterministic_and_path_based() {
         // Same path hashes identically; `of_type` matches `of_path`.
-        assert_eq!(StableTypeId::of_path("foo::Bar"), StableTypeId::of_path("foo::Bar"));
+        assert_eq!(
+            StableTypeId::of_path("foo::Bar"),
+            StableTypeId::of_path("foo::Bar")
+        );
         assert_eq!(
             StableTypeId::of_type::<i32>(),
             StableTypeId::of_path(core::any::type_name::<i32>())
         );
         // Distinct paths differ.
-        assert_ne!(StableTypeId::of_path("foo::Bar"), StableTypeId::of_path("foo::Baz"));
-        assert_ne!(StableTypeId::of_type::<i32>(), StableTypeId::of_type::<u32>());
+        assert_ne!(
+            StableTypeId::of_path("foo::Bar"),
+            StableTypeId::of_path("foo::Baz")
+        );
+        assert_ne!(
+            StableTypeId::of_type::<i32>(),
+            StableTypeId::of_type::<u32>()
+        );
         // Raw value round-trips.
         let id = StableTypeId::of_type::<Stats>();
         assert_eq!(StableTypeId::from_raw(id.value()), id);
@@ -1095,7 +1129,8 @@ mod serialization {
     fn binary_rejects_bad_magic() {
         let registry = TypeRegistry::new();
         let err = from_binary(&[0, 1, 2, 3, 4], &registry, <i32 as Typed>::type_info())
-            .err().unwrap();
+            .err()
+            .unwrap();
         assert_eq!(err, DeserializeError::BadMagic);
     }
 
@@ -1104,7 +1139,9 @@ mod serialization {
         let registry = TypeRegistry::new();
         let bytes = to_binary(&5_i32).unwrap();
         // Decode the same bytes against a different target type.
-        let err = from_binary(&bytes, &registry, <u32 as Typed>::type_info()).err().unwrap();
+        let err = from_binary(&bytes, &registry, <u32 as Typed>::type_info())
+            .err()
+            .unwrap();
         assert!(matches!(err, DeserializeError::StableIdMismatch { .. }));
     }
 
@@ -1114,7 +1151,9 @@ mod serialization {
         // `Shape`, ... are not registered here.
         let registry = TypeRegistry::new();
         let bytes = to_binary(&sample_world()).unwrap();
-        let err = from_binary(&bytes, &registry, <World as Typed>::type_info()).err().unwrap();
+        let err = from_binary(&bytes, &registry, <World as Typed>::type_info())
+            .err()
+            .unwrap();
         assert!(matches!(err, DeserializeError::UnregisteredType(_)));
     }
 
@@ -1125,13 +1164,17 @@ mod serialization {
         // Layout: MAGIC(4) VERSION(1) id(8) VALUE_TAG(1) PRIM_TAG(1) payload.
         // Flip the primitive tag to `bool` (0): a valid tag, wrong type.
         bytes[14] = 0;
-        let err = from_binary(&bytes, &registry, <i32 as Typed>::type_info()).err().unwrap();
+        let err = from_binary(&bytes, &registry, <i32 as Typed>::type_info())
+            .err()
+            .unwrap();
         assert!(matches!(err, DeserializeError::LeafTypeMismatch { .. }));
 
         // An out-of-range primitive tag is reported distinctly.
         let mut bytes = to_binary(&7_i32).unwrap();
         bytes[14] = 200;
-        let err = from_binary(&bytes, &registry, <i32 as Typed>::type_info()).err().unwrap();
+        let err = from_binary(&bytes, &registry, <i32 as Typed>::type_info())
+            .err()
+            .unwrap();
         assert_eq!(err, DeserializeError::UnknownPrimitiveTag(200));
     }
 
@@ -1140,7 +1183,9 @@ mod serialization {
         let registry = TypeRegistry::new();
         let mut bytes = to_binary(&7_i32).unwrap();
         bytes.push(0xff);
-        let err = from_binary(&bytes, &registry, <i32 as Typed>::type_info()).err().unwrap();
+        let err = from_binary(&bytes, &registry, <i32 as Typed>::type_info())
+            .err()
+            .unwrap();
         assert_eq!(err, DeserializeError::TrailingData);
     }
 
@@ -1148,7 +1193,9 @@ mod serialization {
     fn ron_reports_syntax_and_schema_errors() {
         let registry = registry();
         // Not a struct opening.
-        let err = from_ron("nonsense", &registry, <Stats as Typed>::type_info()).err().unwrap();
+        let err = from_ron("nonsense", &registry, <Stats as Typed>::type_info())
+            .err()
+            .unwrap();
         assert!(matches!(err, DeserializeError::RonSyntax(_)));
         // Unknown field name.
         let err = from_ron(
@@ -1156,15 +1203,18 @@ mod serialization {
             &registry,
             <Stats as Typed>::type_info(),
         )
-        .err().unwrap();
+        .err()
+        .unwrap();
         assert!(matches!(err, DeserializeError::UnknownField(_)));
         // Unknown enum variant.
-        let err =
-            from_ron("Triangle(1.0)", &registry, <Shape as Typed>::type_info()).err().unwrap();
+        let err = from_ron("Triangle(1.0)", &registry, <Shape as Typed>::type_info())
+            .err()
+            .unwrap();
         assert_eq!(err, DeserializeError::UnknownVariant);
         // Trailing text after the root value.
         let err = from_ron("[1,2,3] extra", &registry, <Vec<i32> as Typed>::type_info())
-            .err().unwrap();
+            .err()
+            .unwrap();
         assert_eq!(err, DeserializeError::TrailingData);
     }
 
@@ -1303,7 +1353,10 @@ mod m4_schema {
             .expect("metadata attached to Monster");
 
         assert_eq!(meta.docs(), Some("A hostile creature."));
-        assert_eq!(meta.custom("icon"), Some(&AttributeValue::Text("skull".into())));
+        assert_eq!(
+            meta.custom("icon"),
+            Some(&AttributeValue::Text("skull".into()))
+        );
         let health = meta.field("health").expect("health metadata");
         assert_eq!(health.docs(), Some("Current hit points."));
         assert_eq!(health.category(), Some("Combat"));
@@ -1318,9 +1371,15 @@ mod m4_schema {
     fn schema_registry_tracks_versions_and_chains() {
         let schema = schema_registry();
 
-        assert_eq!(schema.current_version("Monster"), Some(SchemaVersion::new(3)));
+        assert_eq!(
+            schema.current_version("Monster"),
+            Some(SchemaVersion::new(3))
+        );
         assert_eq!(schema.current_version("Ghost"), None);
-        assert_eq!(schema.locate(type_name::<MonsterV1>()), Some(("Monster", 1)));
+        assert_eq!(
+            schema.locate(type_name::<MonsterV1>()),
+            Some(("Monster", 1))
+        );
         assert_eq!(schema.locate(type_name::<Monster>()), Some(("Monster", 3)));
         assert_eq!(
             schema.current_schema("Monster").map(TypeSchema::version),
@@ -1334,7 +1393,10 @@ mod m4_schema {
         assert_eq!(chain[0].to_version(), 2);
         assert_eq!(chain[1].from_version(), 2);
         assert_eq!(chain[1].to_version(), 3);
-        assert!(schema.chain("Monster", 3).expect("chain from v3").is_empty());
+        assert!(schema
+            .chain("Monster", 3)
+            .expect("chain from v3")
+            .is_empty());
 
         // Unknown type and too-new version are reported distinctly.
         assert!(matches!(
@@ -1343,7 +1405,10 @@ mod m4_schema {
         ));
         assert!(matches!(
             schema.chain("Monster", 9),
-            Err(MigrateError::VersionTooNew { found: 9, current: 3 })
+            Err(MigrateError::VersionTooNew {
+                found: 9,
+                current: 3
+            })
         ));
     }
 
@@ -1357,9 +1422,8 @@ mod m4_schema {
 
     #[test]
     fn validation_success_and_failures() {
-        let schema =
-            TypeSchema::new(type_name::<Monster>(), 3, <Monster as Typed>::type_info())
-                .with_required_fields(&["health", "name"]);
+        let schema = TypeSchema::new(type_name::<Monster>(), 3, <Monster as Typed>::type_info())
+            .with_required_fields(&["health", "name"]);
         let meta = TypeMetadata::new()
             .with_field(FieldMetadata::new("health").with_range(0.0, 1000.0))
             .with_field(FieldMetadata::new("name").required(true));
@@ -1408,7 +1472,10 @@ mod m4_schema {
         assert!(validate_version(3, &schema, "Monster").is_ok());
         assert!(matches!(
             validate_version(9, &schema, "Monster"),
-            Err(ValidationError::VersionTooNew { found: 9, current: 3 })
+            Err(ValidationError::VersionTooNew {
+                found: 9,
+                current: 3
+            })
         ));
     }
 
@@ -1426,7 +1493,10 @@ mod m4_schema {
         let bytes = to_versioned_binary(&monster, &schema).expect("versioned serialize");
         // Envelope stamps the current version (3) ahead of the M3 body.
         assert_eq!(&bytes[..4], b"PRVB");
-        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 3);
+        assert_eq!(
+            u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            3
+        );
 
         let decoded = from_versioned_binary(&bytes, &registry, &schema, "Monster")
             .expect("versioned deserialize");
@@ -1465,7 +1535,10 @@ mod m4_schema {
             name: "goblin".into(),
         };
         let bytes = to_versioned_binary(&legacy, &schema).expect("serialize v1 payload");
-        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 1);
+        assert_eq!(
+            u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            1
+        );
 
         // Reading as the logical "Monster" walks v1 -> v2 -> v3 before rebuild.
         let decoded = from_versioned_binary(&bytes, &registry, &schema, "Monster")
@@ -1474,10 +1547,10 @@ mod m4_schema {
         assert_eq!(
             migrated,
             Monster {
-                health: 42,          // renamed from hp
+                health: 42, // renamed from hp
                 name: "goblin".into(),
-                armor: 0,            // added by v1 -> v2
-                mana: 100,           // added by v2 -> v3
+                armor: 0,  // added by v1 -> v2
+                mana: 100, // added by v2 -> v3
             }
         );
 
@@ -1503,7 +1576,10 @@ mod m4_schema {
             armor: 3,
         };
         let bytes = to_versioned_binary(&mid, &schema).expect("serialize v2 payload");
-        assert_eq!(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]), 2);
+        assert_eq!(
+            u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            2
+        );
 
         let decoded = from_versioned_binary(&bytes, &registry, &schema, "Monster")
             .expect("migrate v2 payload");
@@ -1580,7 +1656,10 @@ mod function_reflection {
         let greeting = registry
             .call("greet", ArgList::new())
             .expect("greet call succeeds");
-        assert_eq!(greeting.downcast_ref::<String>().map(String::as_str), Some("hi"));
+        assert_eq!(
+            greeting.downcast_ref::<String>().map(String::as_str),
+            Some("hi")
+        );
 
         let nothing = registry
             .call("noop", ArgList::new().push(7_i32))
@@ -1606,7 +1685,12 @@ mod function_reflection {
             .call("missing", ArgList::new())
             .err()
             .expect("unknown function errors");
-        assert_eq!(err, FunctionError::UnknownFunction { name: "missing".into() });
+        assert_eq!(
+            err,
+            FunctionError::UnknownFunction {
+                name: "missing".into()
+            }
+        );
     }
 
     #[test]
@@ -1650,7 +1734,10 @@ mod function_reflection {
         let function = add.into_function().with_name("add");
         assert_eq!(function.name(), Some("add"));
         assert_eq!(function.info().arg_count(), 2);
-        assert_eq!(function.info().arg_types(), &[type_name::<i32>(), type_name::<i32>()]);
+        assert_eq!(
+            function.info().arg_types(),
+            &[type_name::<i32>(), type_name::<i32>()]
+        );
         assert_eq!(function.info().return_type(), type_name::<i32>());
         let result = function
             .call(&ArgList::new().push(3_i32).push(4_i32))
@@ -1675,7 +1762,7 @@ mod function_reflection {
 }
 
 mod reflect_trait_dispatch {
-    use crate::{Reflect, TypeRegistry, reflect_trait};
+    use crate::{reflect_trait, Reflect, TypeRegistry};
 
     trait Area: Reflect {
         fn area(&self) -> f32;
@@ -1706,7 +1793,9 @@ mod reflect_trait_dispatch {
     fn dispatch_shared_and_mut() {
         let mut registry = TypeRegistry::new();
         registry.register::<Circle>();
-        assert!(registry.register_type_data::<Circle, ReflectArea>(ReflectArea::from_type::<Circle>()));
+        assert!(
+            registry.register_type_data::<Circle, ReflectArea>(ReflectArea::from_type::<Circle>())
+        );
 
         let mut value = Circle { radius: 2.0 };
         let type_id = value.as_any().type_id();
@@ -1719,7 +1808,10 @@ mod reflect_trait_dispatch {
         let area = accessor.get(&value).expect("shared downcast").area();
         assert!((area - core::f32::consts::PI * 4.0).abs() < 1e-5);
 
-        accessor.get_mut(&mut value).expect("mutable downcast").scale(3.0);
+        accessor
+            .get_mut(&mut value)
+            .expect("mutable downcast")
+            .scale(3.0);
         assert!((value.radius - 6.0).abs() < 1e-6);
     }
 
@@ -1732,11 +1824,11 @@ mod reflect_trait_dispatch {
 }
 
 mod runtime_types {
-    use crate::{
-        DynamicStruct, DynamicVariant, EnumTypeBuilder, Reflect, ReflectRef, StructTypeBuilder,
-        TypeInfo, TypeRegistry, from_binary, to_binary,
-    };
     use crate::DynamicEnum;
+    use crate::{
+        from_binary, to_binary, DynamicStruct, DynamicVariant, EnumTypeBuilder, Reflect,
+        ReflectRef, StructTypeBuilder, TypeInfo, TypeRegistry,
+    };
 
     #[test]
     fn struct_builder_registers_and_round_trips() {
@@ -1759,7 +1851,9 @@ mod runtime_types {
             panic!("decoded value is not a struct");
         };
         assert_eq!(
-            decoded.field("current").and_then(|f| f.downcast_ref::<i32>()),
+            decoded
+                .field("current")
+                .and_then(|f| f.downcast_ref::<i32>()),
             Some(&7)
         );
         assert_eq!(
@@ -1796,7 +1890,9 @@ mod runtime_types {
             panic!("decoded value is not a struct");
         };
         assert_eq!(
-            decoded.field("rotation").and_then(|f| f.downcast_ref::<f32>()),
+            decoded
+                .field("rotation")
+                .and_then(|f| f.downcast_ref::<f32>()),
             Some(&0.25)
         );
         let ReflectRef::Struct(inner) = decoded
@@ -1806,8 +1902,14 @@ mod runtime_types {
         else {
             panic!("nested position is not a struct");
         };
-        assert_eq!(inner.field("x").and_then(|f| f.downcast_ref::<f32>()), Some(&1.5));
-        assert_eq!(inner.field("y").and_then(|f| f.downcast_ref::<f32>()), Some(&-2.5));
+        assert_eq!(
+            inner.field("x").and_then(|f| f.downcast_ref::<f32>()),
+            Some(&1.5)
+        );
+        assert_eq!(
+            inner.field("y").and_then(|f| f.downcast_ref::<f32>()),
+            Some(&-2.5)
+        );
     }
 
     #[test]
@@ -1843,7 +1945,7 @@ mod runtime_types {
 }
 
 mod diff_merge {
-    use crate::{DiffError, DynamicEnum, DynamicVariant, Patch, Reflect, diff, merge};
+    use crate::{diff, merge, DiffError, DynamicEnum, DynamicVariant, Patch, Reflect};
     use std::collections::{HashMap, HashSet};
 
     #[derive(Reflect, Clone, PartialEq, Debug)]
@@ -1948,7 +2050,9 @@ mod diff_merge {
         let a = Choice::B { v: 1 };
         let b = Choice::B { v: 42 };
         let mut merged = a.clone();
-        diff(&a, &b).apply(&mut merged).expect("apply struct-variant patch");
+        diff(&a, &b)
+            .apply(&mut merged)
+            .expect("apply struct-variant patch");
         assert_eq!(merged, b);
     }
 
@@ -1975,12 +2079,26 @@ mod diff_merge {
 
     #[test]
     fn dynamic_enum_variant_switch_via_replace() {
-        let a = DynamicEnum::new(0, "A", DynamicVariant::Tuple(vec![Box::new(1_i32) as Box<dyn Reflect>]));
-        let b = DynamicEnum::new(1, "B", DynamicVariant::Tuple(vec![Box::new(2_i32) as Box<dyn Reflect>]));
+        let a = DynamicEnum::new(
+            0,
+            "A",
+            DynamicVariant::Tuple(vec![Box::new(1_i32) as Box<dyn Reflect>]),
+        );
+        let b = DynamicEnum::new(
+            1,
+            "B",
+            DynamicVariant::Tuple(vec![Box::new(2_i32) as Box<dyn Reflect>]),
+        );
         let patch = diff(&a, &b);
         assert!(matches!(patch, Patch::Replace(_)));
-        let mut merged = DynamicEnum::new(0, "A", DynamicVariant::Tuple(vec![Box::new(1_i32) as Box<dyn Reflect>]));
-        patch.apply(&mut merged).expect("apply replace onto dynamic enum");
+        let mut merged = DynamicEnum::new(
+            0,
+            "A",
+            DynamicVariant::Tuple(vec![Box::new(1_i32) as Box<dyn Reflect>]),
+        );
+        patch
+            .apply(&mut merged)
+            .expect("apply replace onto dynamic enum");
         assert_eq!(crate::Enum::variant_name(&merged), "B");
     }
 }

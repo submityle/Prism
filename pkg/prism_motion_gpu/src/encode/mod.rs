@@ -22,10 +22,10 @@
 use alloc::vec::Vec;
 
 use bytemuck::{Pod, Zeroable};
-use prism_render_architecture::motion::MotionSample;
 use prism_render_architecture::motion::encode::{
-    EncodedMotion, PackedMasks, VelocityEncoding, flags,
+    flags, EncodedMotion, PackedMasks, VelocityEncoding,
 };
+use prism_render_architecture::motion::MotionSample;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BufferBindingType, CommandEncoderDescriptor,
@@ -111,19 +111,25 @@ impl GpuEncodeMotion {
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("prism_motion_encode_layout"),
             entries: &[
-                buffer_layout(0, BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
+                buffer_layout(
+                    0,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
                 buffer_layout(1, storage_read_ty()),
                 buffer_layout(2, storage_read_ty()),
                 buffer_layout(3, storage_read_ty()),
-                buffer_layout(4, BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
+                buffer_layout(
+                    4,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -276,5 +282,8 @@ fn buffer_layout(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
 
 // Pull `flags` into scope for documentation links above; the module constant
 // `flags::TRANSPARENT` is mirrored in the shader as `FLAG_TRANSPARENT`.
-#[expect(unused_imports, reason = "imported for the rustdoc link to flags::TRANSPARENT")]
+#[expect(
+    unused_imports,
+    reason = "imported for the rustdoc link to flags::TRANSPARENT"
+)]
 use flags as _flags_doc_anchor;

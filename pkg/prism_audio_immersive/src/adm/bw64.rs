@@ -217,8 +217,12 @@ impl Bw64File {
                 bytes[cursor + 2],
                 bytes[cursor + 3],
             ];
-            let declared =
-                u32::from_le_bytes([bytes[cursor + 4], bytes[cursor + 5], bytes[cursor + 6], bytes[cursor + 7]]);
+            let declared = u32::from_le_bytes([
+                bytes[cursor + 4],
+                bytes[cursor + 5],
+                bytes[cursor + 6],
+                bytes[cursor + 7],
+            ]);
             cursor += 8;
 
             let size = if &id == b"data" && declared == SENTINEL_32 {
@@ -305,7 +309,12 @@ mod tests {
         let format = WaveFormat::new(1, 2, 48_000, 24);
         let data = (0..18u8).collect::<Vec<u8>>();
         let mut chna = ChnaChunk::new();
-        chna.push(AudioId::new(1, "ATU_00000001", "AC_00031001", "AP_00031001"));
+        chna.push(AudioId::new(
+            1,
+            "ATU_00000001",
+            "AC_00031001",
+            "AP_00031001",
+        ));
         let axml = b"<audioFormatExtended/>".to_vec();
         Bw64File::new(format, data, chna, axml)
     }

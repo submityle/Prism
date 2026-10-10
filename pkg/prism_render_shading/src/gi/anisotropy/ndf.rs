@@ -109,7 +109,11 @@ pub fn ndf_anisotropic_local(h: Vec3, alpha_t: f32, alpha_b: f32) -> f32 {
     let s = xt * xt + yb * yb + h.z * h.z;
     let denom = PI * at * ab * (s * s).max(DENOM_FLOOR);
     let d = 1.0 / denom;
-    if d.is_finite() { d.max(0.0) } else { 0.0 }
+    if d.is_finite() {
+        d.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Smith `Lambda` for an anisotropic GGX surface and a *world-space* direction
@@ -140,7 +144,11 @@ pub fn smith_lambda_local(w: Vec3, alpha_t: f32, alpha_b: f32) -> f32 {
     let num = (at * w.x) * (at * w.x) + (ab * w.y) * (ab * w.y);
     let tan2 = num / (cz * cz);
     let lambda = 0.5 * (-1.0 + (1.0 + tan2).max(0.0).sqrt());
-    if lambda.is_finite() { lambda.max(0.0) } else { 0.0 }
+    if lambda.is_finite() {
+        lambda.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Smith single-direction masking term `G1 = 1 / (1 + Lambda(w))` (world-space).
@@ -202,7 +210,9 @@ pub fn smith_g2_local(wo: Vec3, wi: Vec3, alpha_t: f32, alpha_b: f32) -> f32 {
         return 0.0;
     }
     let g = 1.0
-        / (1.0 + smith_lambda_local(wo, alpha_t, alpha_b) + smith_lambda_local(wi, alpha_t, alpha_b));
+        / (1.0
+            + smith_lambda_local(wo, alpha_t, alpha_b)
+            + smith_lambda_local(wi, alpha_t, alpha_b));
     g.clamp(0.0, 1.0)
 }
 
@@ -236,7 +246,10 @@ mod tests {
             }
         }
         // A back-facing half vector carries no energy.
-        assert_eq!(ndf_anisotropic(Vec3::new(0.0, 0.0, -1.0), t, b, n, 0.3, 0.5), 0.0);
+        assert_eq!(
+            ndf_anisotropic(Vec3::new(0.0, 0.0, -1.0), t, b, n, 0.3, 0.5),
+            0.0
+        );
     }
 
     #[test]
@@ -320,7 +333,10 @@ mod tests {
         }
         // Below-horizon directions kill the shadowing term.
         let (t, b, n) = identity_frame();
-        assert_eq!(smith_g2(Vec3::new(0.0, 0.0, -0.5), Vec3::Z, t, b, n, 0.4, 0.4), 0.0);
+        assert_eq!(
+            smith_g2(Vec3::new(0.0, 0.0, -0.5), Vec3::Z, t, b, n, 0.4, 0.4),
+            0.0
+        );
     }
 
     #[test]

@@ -16,6 +16,6 @@
 //! * [`path_reservoir`] — reconnection-shift GRIS resampling: streaming RIS
 //!   fill, finalize, and Jacobian-weighted neighbour reuse `m·p̂·W·|J|`.
 
-pub mod vertex;
-pub mod shift_map;
 pub mod path_reservoir;
+pub mod shift_map;
+pub mod vertex;

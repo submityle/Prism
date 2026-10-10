@@ -62,10 +62,7 @@ impl<T, A: Allocator> AllocBox<T, A> {
 
     /// Borrow the owned value.
     pub fn get(&self) -> &T {
-        #[expect(
-            unsafe_code,
-            reason = "dereferencing the owned, initialized value"
-        )]
+        #[expect(unsafe_code, reason = "dereferencing the owned, initialized value")]
         // SAFETY: `ptr` points to a value initialized in `try_new_in` and not
         // yet dropped, and the borrow is tied to `&self`.
         unsafe {
@@ -75,10 +72,7 @@ impl<T, A: Allocator> AllocBox<T, A> {
 
     /// Mutably borrow the owned value.
     pub fn get_mut(&mut self) -> &mut T {
-        #[expect(
-            unsafe_code,
-            reason = "dereferencing the owned, initialized value"
-        )]
+        #[expect(unsafe_code, reason = "dereferencing the owned, initialized value")]
         // SAFETY: `ptr` points to a live value and the exclusive borrow is tied
         // to `&mut self`, so no other reference can alias it.
         unsafe {

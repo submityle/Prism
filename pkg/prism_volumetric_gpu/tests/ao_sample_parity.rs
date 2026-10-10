@@ -127,10 +127,25 @@ fn no_occlusion_field_is_fully_lit() {
         2.0, 2.5, 3.0, 10.0, // pixel 1: equal / farther
         9.0, 9.0, 9.0, 9.0, // pixel 2: all equal
     ];
-    let gpu = twin.eval_ao(&ctx, params, samples_per_pixel, &center_depths, &sampled_depths);
-    assert_ao_parity(params, samples_per_pixel, &center_depths, &sampled_depths, &gpu);
+    let gpu = twin.eval_ao(
+        &ctx,
+        params,
+        samples_per_pixel,
+        &center_depths,
+        &sampled_depths,
+    );
+    assert_ao_parity(
+        params,
+        samples_per_pixel,
+        &center_depths,
+        &sampled_depths,
+        &gpu,
+    );
     for v in &gpu {
-        assert!(close(*v, 1.0), "unoccluded pixel should be fully lit, got {v}");
+        assert!(
+            close(*v, 1.0),
+            "unoccluded pixel should be fully lit, got {v}"
+        );
     }
 }
 
@@ -150,10 +165,25 @@ fn full_occlusion_field_darkens() {
         4.2f32, 4.3, 4.4, 4.5, // pixel 0: nearer occluders
         7.1, 7.2, 7.3, 7.4, // pixel 1: nearer occluders
     ];
-    let gpu = twin.eval_ao(&ctx, params, samples_per_pixel, &center_depths, &sampled_depths);
-    assert_ao_parity(params, samples_per_pixel, &center_depths, &sampled_depths, &gpu);
+    let gpu = twin.eval_ao(
+        &ctx,
+        params,
+        samples_per_pixel,
+        &center_depths,
+        &sampled_depths,
+    );
+    assert_ao_parity(
+        params,
+        samples_per_pixel,
+        &center_depths,
+        &sampled_depths,
+        &gpu,
+    );
     for v in &gpu {
-        assert!(*v >= 0.0 && *v < 1.0, "occluded pixel should darken, got {v}");
+        assert!(
+            *v >= 0.0 && *v < 1.0,
+            "occluded pixel should darken, got {v}"
+        );
     }
 }
 
@@ -180,8 +210,20 @@ fn varied_parameters_match_reference() {
         AoParams::new(2.0, 0.25, 1.0, 3, 6),
         AoParams::new(0.8, 0.05, 0.5, 4, 6),
     ] {
-        let gpu = twin.eval_ao(&ctx, params, samples_per_pixel, &center_depths, &sampled_depths);
-        assert_ao_parity(params, samples_per_pixel, &center_depths, &sampled_depths, &gpu);
+        let gpu = twin.eval_ao(
+            &ctx,
+            params,
+            samples_per_pixel,
+            &center_depths,
+            &sampled_depths,
+        );
+        assert_ao_parity(
+            params,
+            samples_per_pixel,
+            &center_depths,
+            &sampled_depths,
+            &gpu,
+        );
     }
 }
 
@@ -209,8 +251,20 @@ fn random_lcg_depth_field_matches_reference() {
         .map(|_| next_depth())
         .collect();
 
-    let gpu = twin.eval_ao(&ctx, params, samples_per_pixel, &center_depths, &sampled_depths);
-    assert_ao_parity(params, samples_per_pixel, &center_depths, &sampled_depths, &gpu);
+    let gpu = twin.eval_ao(
+        &ctx,
+        params,
+        samples_per_pixel,
+        &center_depths,
+        &sampled_depths,
+    );
+    assert_ao_parity(
+        params,
+        samples_per_pixel,
+        &center_depths,
+        &sampled_depths,
+        &gpu,
+    );
 }
 
 #[test]
@@ -230,7 +284,10 @@ fn degenerate_inputs_match_reference() {
     let gpu = twin.eval_ao(&ctx, params, 0, &center_depths, &[]);
     assert_ao_parity(params, 0, &center_depths, &[], &gpu);
     for v in &gpu {
-        assert!(close(*v, 1.0), "zero-sample pixel should be fully lit, got {v}");
+        assert!(
+            close(*v, 1.0),
+            "zero-sample pixel should be fully lit, got {v}"
+        );
     }
 
     // Zero intensity leaves near occluders fully lit regardless of the fold.
@@ -239,15 +296,24 @@ fn degenerate_inputs_match_reference() {
     let centers = [5.0f32];
     let gpu_unlit = twin.eval_ao(&ctx, unlit, 4, &centers, &near);
     assert_ao_parity(unlit, 4, &centers, &near, &gpu_unlit);
-    assert!(close(gpu_unlit[0], 1.0), "zero intensity should stay fully lit");
+    assert!(
+        close(gpu_unlit[0], 1.0),
+        "zero intensity should stay fully lit"
+    );
 
     // A zero contrast exponent collapses the term to 1.0 before the intensity
     // blend, matching `ao_power(_, 0) == 1`.
     let flat = AoParams::new(1.0, 0.0, 1.0, 0, 4);
     let gpu_flat = twin.eval_ao(&ctx, flat, 4, &centers, &near);
     assert_ao_parity(flat, 4, &centers, &near, &gpu_flat);
-    assert!(close(gpu_flat[0], 1.0), "zero exponent should stay fully lit");
+    assert!(
+        close(gpu_flat[0], 1.0),
+        "zero exponent should stay fully lit"
+    );
 
     // An empty kernel is empty.
-    assert!(twin.eval_kernel(&ctx, 0, 1).is_empty(), "n=0 yields an empty kernel");
+    assert!(
+        twin.eval_kernel(&ctx, 0, 1).is_empty(),
+        "n=0 yields an empty kernel"
+    );
 }

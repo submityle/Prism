@@ -55,7 +55,7 @@ pub use coupling::{
     clearcoat_fresnel_reflectance_two_sided, coat_transmission, combine_layers, LayerCosines,
 };
 pub use fresnel::{
-    coat_transmittance, facing_weight, f0_from_ior, fresnel_coat, fresnel_from_ior,
+    coat_transmittance, f0_from_ior, facing_weight, fresnel_coat, fresnel_from_ior,
     fresnel_schlick_roughened, refracted_cosine, visibility_clamp, weidlich_wilkie_cosine,
     CLEARCOAT_IOR,
 };
@@ -135,7 +135,11 @@ fn base_specular(
     let f = fresnel_schlick_scalar(f0.clamp(0.0, 1.0), v_dot_h.max(0.0));
     let denom = (4.0 * n_dot_v * n_dot_l).max(MIN_DENOM);
     let r = d * g * f / denom;
-    if r.is_finite() { r.max(0.0) } else { 0.0 }
+    if r.is_finite() {
+        r.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Evaluates the full layered clearcoat BRDF for a light/view pair.
@@ -260,15 +264,11 @@ mod tests {
 
         // Reconstruct the bare base lobe through the same primitives.
         let h = (wi + wo).normalize();
-        let base = base_specular(
-            n.dot(h),
-            n.dot(wo),
-            n.dot(wi),
-            wo.dot(h),
-            0.04,
-            0.3,
+        let base = base_specular(n.dot(h), n.dot(wo), n.dot(wi), wo.dot(h), 0.04, 0.3);
+        assert!(
+            (with_coat - base).abs() < 1e-6,
+            "coat={with_coat} base={base}"
         );
-        assert!((with_coat - base).abs() < 1e-6, "coat={with_coat} base={base}");
     }
 
     #[test]
@@ -327,7 +327,16 @@ mod tests {
 
     #[test]
     fn degenerate_inputs_never_nan() {
-        let f = clearcoat_brdf(Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, 0.5, 0.3, 1.0, 0.1);
+        let f = clearcoat_brdf(
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::ZERO,
+            0.5,
+            0.3,
+            1.0,
+            0.1,
+        );
         assert!(f.is_finite() && f >= 0.0, "f={f}");
         let g = clearcoat_brdf(
             Vec3::splat(f32::NAN),

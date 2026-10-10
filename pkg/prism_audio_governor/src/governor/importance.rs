@@ -156,13 +156,21 @@ pub fn inverse_distance_attenuation(
 /// Clamps a value into `[0, 1]`, mapping non-finite input to `0.0`.
 #[inline]
 fn sanitize_unit(x: Sample) -> Sample {
-    if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }
+    if x.is_finite() {
+        x.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Floors a value at `0.0`, mapping non-finite input to `0.0`.
 #[inline]
 fn sanitize_nonneg(x: Sample) -> Sample {
-    if x.is_finite() { x.max(0.0) } else { 0.0 }
+    if x.is_finite() {
+        x.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -186,7 +194,10 @@ mod tests {
     #[test]
     fn masking_reduces_importance() {
         let base = ImportanceInputs::audible(1.0, 0.8);
-        let masked = ImportanceInputs { masked: true, ..base };
+        let masked = ImportanceInputs {
+            masked: true,
+            ..base
+        };
         let i_base = effective_importance(base);
         let i_masked = effective_importance(masked);
         assert!(i_masked < i_base);
@@ -195,7 +206,10 @@ mod tests {
 
     #[test]
     fn tighter_penalty_demotes_further() {
-        let masked = ImportanceInputs { masked: true, ..ImportanceInputs::audible(1.0, 0.8) };
+        let masked = ImportanceInputs {
+            masked: true,
+            ..ImportanceInputs::audible(1.0, 0.8)
+        };
         let loose = effective_importance_with_penalty(masked, 0.5);
         let tight = effective_importance_with_penalty(masked, 0.05);
         assert!(tight < loose);

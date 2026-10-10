@@ -20,7 +20,7 @@ fn utilization_is_exact_fraction_of_budget() {
     assert_eq!(utilization_ppm(ms(12), ms(16)), 750_000); // 75%
     assert_eq!(utilization_ppm(ms(24), ms(16)), 1_500_000); // 150%
     assert_eq!(utilization_ppm(ms(32), ms(16)), 2_000_000); // 200%
-    // 13 ms = 812_500 ppm, inside the default 80%..100% dead-band.
+                                                            // 13 ms = 812_500 ppm, inside the default 80%..100% dead-band.
     assert_eq!(utilization_ppm(ms(13), ms(16)), 812_500);
 }
 
@@ -54,7 +54,9 @@ fn fast_downgrade_after_patience() {
 
 #[test]
 fn dead_band_frames_hold_and_reset_streaks() {
-    let cfg = AdaptiveQualityConfig::new(0, 4).with_patience(2, 4).with_cooldown(0);
+    let cfg = AdaptiveQualityConfig::new(0, 4)
+        .with_patience(2, 4)
+        .with_cooldown(0);
     let mut ctl = AdaptiveQualityController::new(cfg, 2);
 
     // 13 ms @ 16 ms budget = 812_500 ppm: neutral, nothing moves.
@@ -68,7 +70,9 @@ fn dead_band_frames_hold_and_reset_streaks() {
 
 #[test]
 fn slow_upgrade_requires_full_patience() {
-    let cfg = AdaptiveQualityConfig::new(0, 4).with_patience(2, 4).with_cooldown(0);
+    let cfg = AdaptiveQualityConfig::new(0, 4)
+        .with_patience(2, 4)
+        .with_cooldown(0);
     let mut ctl = AdaptiveQualityController::new(cfg, 1);
 
     // 8 ms @ 16 ms = 500_000 ppm: comfortably under budget.
@@ -85,11 +89,13 @@ fn slow_upgrade_requires_full_patience() {
 
 #[test]
 fn neutral_frame_breaks_upgrade_streak() {
-    let cfg = AdaptiveQualityConfig::new(0, 4).with_patience(2, 3).with_cooldown(0);
+    let cfg = AdaptiveQualityConfig::new(0, 4)
+        .with_patience(2, 3)
+        .with_cooldown(0);
     let mut ctl = AdaptiveQualityController::new(cfg, 1);
     assert_eq!(ctl.observe(ms(8), ms(16)), QualityAdjustment::Hold); // under 1
     assert_eq!(ctl.observe(ms(8), ms(16)), QualityAdjustment::Hold); // under 2
-    // A neutral frame resets the under streak.
+                                                                     // A neutral frame resets the under streak.
     assert_eq!(ctl.observe(ms(13), ms(16)), QualityAdjustment::Hold);
     assert_eq!(ctl.under_streak(), 0);
     // Must build the full streak again.
@@ -143,7 +149,9 @@ fn severe_clamps_at_min_level() {
 
 #[test]
 fn cooldown_suppresses_normal_adjustments_for_exact_window() {
-    let cfg = AdaptiveQualityConfig::new(0, 4).with_patience(1, 1).with_cooldown(3);
+    let cfg = AdaptiveQualityConfig::new(0, 4)
+        .with_patience(1, 1)
+        .with_cooldown(3);
     let mut ctl = AdaptiveQualityController::at_max(cfg);
 
     // Patience 1: first over frame downgrades, arming a 3-frame cooldown.
@@ -193,7 +201,9 @@ fn config_is_reclamped_into_consistent_state() {
 
 #[test]
 fn set_level_and_reset_clear_state() {
-    let cfg = AdaptiveQualityConfig::new(0, 4).with_patience(2, 2).with_cooldown(5);
+    let cfg = AdaptiveQualityConfig::new(0, 4)
+        .with_patience(2, 2)
+        .with_cooldown(5);
     let mut ctl = AdaptiveQualityController::at_max(cfg);
     assert_eq!(ctl.observe(ms(16), ms(16)), QualityAdjustment::Hold);
     ctl.set_level(2);
@@ -247,7 +257,9 @@ fn two_runs_produce_identical_trajectories() {
         (32, 16),
         (16, 16),
     ];
-    let cfg = AdaptiveQualityConfig::new(0, 4).with_patience(2, 3).with_cooldown(2);
+    let cfg = AdaptiveQualityConfig::new(0, 4)
+        .with_patience(2, 3)
+        .with_cooldown(2);
     let mut a = AdaptiveQualityController::at_max(cfg);
     let mut b = AdaptiveQualityController::at_max(cfg);
     for &(f, bud) in &seq {

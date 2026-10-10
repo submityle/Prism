@@ -128,15 +128,19 @@ fn check(ctx: &GpuContext, gpu: &GpuFrustumAabbCull, queries: &[FrustumAabbCullQ
 
     for (idx, (query, &verdict)) in queries.iter().zip(got.iter()).enumerate() {
         let (want, want_visible) = match query.primitive {
-            FrustumAabbCullPrimitive::Aabb(aabb) => {
-                (cull_aabb(&query.planes, &aabb), is_visible_aabb(&query.planes, &aabb))
-            }
+            FrustumAabbCullPrimitive::Aabb(aabb) => (
+                cull_aabb(&query.planes, &aabb),
+                is_visible_aabb(&query.planes, &aabb),
+            ),
             FrustumAabbCullPrimitive::Sphere(sphere) => (
                 cull_sphere(&query.planes, &sphere),
                 is_visible_sphere(&query.planes, &sphere),
             ),
         };
-        assert_eq!(verdict, want, "query {idx}: gpu verdict must match the reference");
+        assert_eq!(
+            verdict, want,
+            "query {idx}: gpu verdict must match the reference"
+        );
         assert_eq!(
             verdict.is_visible(),
             want_visible,
@@ -226,7 +230,10 @@ fn hand_placed_cases_match_reference() {
     // Confirm the batch is not vacuously one-sided: it must span all three
     // verdicts so the kernel's full decision fold is exercised.
     let verdicts = gpu.eval(&ctx, &queries);
-    assert!(verdicts.contains(&Visibility::Inside), "batch covers Inside");
+    assert!(
+        verdicts.contains(&Visibility::Inside),
+        "batch covers Inside"
+    );
     assert!(
         verdicts.contains(&Visibility::Outside),
         "batch covers Outside"

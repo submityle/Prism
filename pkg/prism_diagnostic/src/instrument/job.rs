@@ -118,8 +118,10 @@ mod tests {
             let job = flow.execute();
             assert_eq!(job.thread_id(), ring::current_thread_id());
         }
-        let mine: Vec<_> =
-            flow_records().into_iter().filter(|r| r.id == id.get()).collect();
+        let mine: Vec<_> = flow_records()
+            .into_iter()
+            .filter(|r| r.id == id.get())
+            .collect();
         assert_eq!(mine.len(), 2);
         assert_eq!(mine[0].phase, FlowPhase::Start);
         assert_eq!(mine[1].phase, FlowPhase::Finish);
@@ -156,8 +158,10 @@ mod tests {
         .unwrap();
         assert_ne!(producer_tid, worker_tid);
 
-        let mine: Vec<_> =
-            flow_records().into_iter().filter(|r| r.id == id.get()).collect();
+        let mine: Vec<_> = flow_records()
+            .into_iter()
+            .filter(|r| r.id == id.get())
+            .collect();
         assert_eq!(mine.len(), 2);
         // Start recorded on the producer thread, finish on the worker thread.
         assert_eq!(mine[0].phase, FlowPhase::Start);

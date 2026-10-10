@@ -138,11 +138,7 @@ fn translated_sim_mesh_matches_golden_bit_for_bit() {
     let p = Vec3::new(0.6, 0.9, 0.0);
     let binding = bind_render_vertex(p, [0, 1, 2], &rest).expect("in range");
     let shift = Vec3::new(10.0, -4.0, 2.5);
-    let moved = [
-        rest[0].add(shift),
-        rest[1].add(shift),
-        rest[2].add(shift),
-    ];
+    let moved = [rest[0].add(shift), rest[1].add(shift), rest[2].add(shift)];
     assert_embed_bit_exact(&binding, &moved);
 }
 

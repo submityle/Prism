@@ -197,10 +197,20 @@ mod tests {
     fn matches_brute_force_reference() {
         let (positions, inverse_masses, constraints) = folded_strip();
         for iterations in [1_u32, 3, 8] {
-            let golden =
-                cpu_cloth_bending(&positions, &inverse_masses, &constraints, 1.0 / 60.0, iterations);
-            let brute =
-                brute_force(&positions, &inverse_masses, &constraints, 1.0 / 60.0, iterations);
+            let golden = cpu_cloth_bending(
+                &positions,
+                &inverse_masses,
+                &constraints,
+                1.0 / 60.0,
+                iterations,
+            );
+            let brute = brute_force(
+                &positions,
+                &inverse_masses,
+                &constraints,
+                1.0 / 60.0,
+                iterations,
+            );
             assert!(
                 max_abs_diff(&golden, &brute) <= 1.0e-6,
                 "golden drifted from the brute-force anchor at {iterations} iterations"

@@ -399,7 +399,11 @@ mod tests {
         )
         .unwrap();
         // FL FR C LFE SL SR
-        let input = mono_const(ChannelLayout::Surround5_1, &[1.0, 2.0, 1.0, 9.0, 1.0, 2.0], 8);
+        let input = mono_const(
+            ChannelLayout::Surround5_1,
+            &[1.0, 2.0, 1.0, 9.0, 1.0, 2.0],
+            8,
+        );
         let mut output = AudioBuffer::new(ChannelLayout::Stereo, 8);
         m.apply(&input, &mut output);
         // L = FL + 0.707*C + 0.707*SL ; LFE dropped (coeff 9.0 ignored).
@@ -532,7 +536,11 @@ mod tests {
         )
         .unwrap();
         let mut node = DownmixNode::new(matrix.clone());
-        let input = mono_const(ChannelLayout::Surround5_1, &[1.0, 2.0, 0.5, 0.0, 0.3, 0.4], 8);
+        let input = mono_const(
+            ChannelLayout::Surround5_1,
+            &[1.0, 2.0, 0.5, 0.0, 0.3, 0.4],
+            8,
+        );
         let mut via_matrix = AudioBuffer::new(ChannelLayout::Stereo, 8);
         matrix.apply(&input, &mut via_matrix);
 

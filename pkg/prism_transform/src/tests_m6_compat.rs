@@ -3,7 +3,7 @@
 //! prelude surfaces everything a ported call site reaches for.
 
 use crate::compat_bevy::prelude::*;
-use prism_math::{Affine3, vec3};
+use prism_math::{vec3, Affine3};
 
 #[test]
 fn affine3a_alias_is_prism_affine3() {

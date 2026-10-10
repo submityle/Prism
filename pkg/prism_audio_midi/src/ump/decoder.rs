@@ -21,9 +21,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use crate::ump::message::{
-    MidiMessage, decode_midi1, decode_midi2, decode_system, decode_utility,
-};
+use crate::ump::message::{decode_midi1, decode_midi2, decode_system, decode_utility, MidiMessage};
 use crate::ump::word::{MessageType, UmpWord};
 
 /// An incremental decoder that assembles UMP words into [`MidiMessage`]s.

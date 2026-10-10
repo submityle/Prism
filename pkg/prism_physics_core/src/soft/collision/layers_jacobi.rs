@@ -352,10 +352,28 @@ mod tests {
         let layer_of = [0u32, 1u32];
         let normals = [Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO];
         let mut out = Vec::new();
-        accumulate_layer_jacobi_corrections(&positions, &inv, &layer_of, &normals, params(), &mut out);
-        assert!(out[0].y < 0.0, "inner half should be negative, got {}", out[0].y);
-        assert!(out[1].y > 0.0, "outer half should be positive, got {}", out[1].y);
-        assert!((out[0].y + out[1].y).abs() < 1e-6, "equal-mass halves cancel");
+        accumulate_layer_jacobi_corrections(
+            &positions,
+            &inv,
+            &layer_of,
+            &normals,
+            params(),
+            &mut out,
+        );
+        assert!(
+            out[0].y < 0.0,
+            "inner half should be negative, got {}",
+            out[0].y
+        );
+        assert!(
+            out[1].y > 0.0,
+            "outer half should be positive, got {}",
+            out[1].y
+        );
+        assert!(
+            (out[0].y + out[1].y).abs() < 1e-6,
+            "equal-mass halves cancel"
+        );
     }
 
     #[test]

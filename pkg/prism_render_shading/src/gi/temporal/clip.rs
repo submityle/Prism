@@ -51,7 +51,11 @@ fn finite_or(x: f32, fallback: f32) -> f32 {
 /// Replaces any non-finite component of a vector with `0.0`.
 #[inline]
 fn sanitize(v: Vec3) -> Vec3 {
-    Vec3::new(finite_or(v.x, 0.0), finite_or(v.y, 0.0), finite_or(v.z, 0.0))
+    Vec3::new(
+        finite_or(v.x, 0.0),
+        finite_or(v.y, 0.0),
+        finite_or(v.z, 0.0),
+    )
 }
 
 /// Converts a linear RGB colour to the YCoCg lift basis.

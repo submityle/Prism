@@ -33,7 +33,7 @@
 //!   so a degenerate configuration never emits `NaN`/`inf`.
 
 use alloc::vec::Vec;
-use bevy_math::{Vec2, ops};
+use bevy_math::{ops, Vec2};
 
 /// Hard upper bound on the number of ghost samples synthesized per pixel.
 pub const MAX_GHOSTS: u32 = 64;
@@ -53,7 +53,11 @@ pub struct GhostSample {
 /// Replace a non-finite scalar with a fallback.
 #[inline]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Sanitize a `Vec2` component-wise against a fallback.
@@ -299,7 +303,11 @@ mod tests {
         let axis = cfg.center - uv; // the pixel -> centre direction
         for g in &ghosts {
             let v = g.uv - cfg.center;
-            assert!(cross(v, axis).abs() <= EPS, "ghost off the centre line: {:?}", g.uv);
+            assert!(
+                cross(v, axis).abs() <= EPS,
+                "ghost off the centre line: {:?}",
+                g.uv
+            );
         }
     }
 
@@ -310,7 +318,11 @@ mod tests {
         let halo = halo_sample(uv, cfg);
         let axis = cfg.center - uv;
         let v = halo.uv - cfg.center;
-        assert!(cross(v, axis).abs() <= EPS, "halo off the centre line: {:?}", halo.uv);
+        assert!(
+            cross(v, axis).abs() <= EPS,
+            "halo off the centre line: {:?}",
+            halo.uv
+        );
     }
 
     #[test]
@@ -322,8 +334,14 @@ mod tests {
         // A pixel far off the ring should weight much less.
         let off_ring = cfg.center + Vec2::new(cfg.halo_radius + 3.0 * cfg.halo_thickness, 0.0);
         let w_off = halo_sample(off_ring, cfg).weight;
-        assert!(w_on > w_off, "ring weight should peak on the ring: {w_on} vs {w_off}");
-        assert!(approx(w_on, 1.0, 1.0e-3), "on-ring weight should be ~1: {w_on}");
+        assert!(
+            w_on > w_off,
+            "ring weight should peak on the ring: {w_on} vs {w_off}"
+        );
+        assert!(
+            approx(w_on, 1.0, 1.0e-3),
+            "on-ring weight should be ~1: {w_on}"
+        );
     }
 
     #[test]
@@ -348,7 +366,9 @@ mod tests {
             halo_thickness: 0.0,
             intensity: f32::INFINITY,
         };
-        let out = synthesize(Vec2::new(f32::INFINITY, 0.3), cfg, -2.0, |_| [1e9, 2e9, 3e9]);
+        let out = synthesize(Vec2::new(f32::INFINITY, 0.3), cfg, -2.0, |_| {
+            [1e9, 2e9, 3e9]
+        });
         for c in out {
             assert!(c.is_finite(), "flare colour not finite: {c}");
         }
@@ -362,7 +382,11 @@ mod tests {
         let cfg = FlareConfig::default();
         let ghosts = synthesize_ghosts(cfg.center, cfg);
         for g in ghosts {
-            assert!((g.uv - cfg.center).length() <= EPS, "centre ghost drifted: {:?}", g.uv);
+            assert!(
+                (g.uv - cfg.center).length() <= EPS,
+                "centre ghost drifted: {:?}",
+                g.uv
+            );
         }
     }
 }

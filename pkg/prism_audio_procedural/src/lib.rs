@@ -53,7 +53,7 @@ pub use contact::{
     SeparationEvent, SustainEvent,
 };
 pub use continuous::{ContactPhase, ContactVoice};
-pub use granular::{Grain, GranularEngine, GrainParams, GrainPool};
+pub use granular::{Grain, GrainParams, GrainPool, GranularEngine};
 pub use material::{
     MaterialCategory, MaterialId, MaterialLibrary, MaterialPairId, MaterialPairProfile,
 };

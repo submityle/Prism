@@ -41,11 +41,17 @@ pub(super) struct Handle {
 
 /// Encode a path as a NUL-terminated UTF-16 sequence for `LoadLibraryW`.
 fn wide(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(core::iter::once(0)).collect()
+    path.as_os_str()
+        .encode_wide()
+        .chain(core::iter::once(0))
+        .collect()
 }
 
 /// `LoadLibraryW(path)`.
-#[expect(unsafe_code, reason = "LoadLibraryW maps the module and runs its entry point")]
+#[expect(
+    unsafe_code,
+    reason = "LoadLibraryW maps the module and runs its entry point"
+)]
 pub(super) fn open(path: &Path) -> Result<Handle> {
     let wpath = wide(path);
     // SAFETY: `wpath` is a valid NUL-terminated UTF-16 string for the call.
@@ -66,7 +72,10 @@ pub(super) fn open(path: &Path) -> Result<Handle> {
 }
 
 /// `GetProcAddress(module, name)`.
-#[expect(unsafe_code, reason = "GetProcAddress resolves an exported symbol address")]
+#[expect(
+    unsafe_code,
+    reason = "GetProcAddress resolves an exported symbol address"
+)]
 pub(super) fn symbol(handle: &Handle, name: &str) -> Result<NonNull<c_void>> {
     let c_name = CString::new(name).map_err(|_| DynlibError::InvalidName(name.to_string()))?;
     let _ = CStr::from_bytes_with_nul(c_name.as_bytes_with_nul());
@@ -90,6 +99,8 @@ pub(super) fn close(handle: Handle) -> Result<()> {
     } else {
         // SAFETY: see `open`.
         let code = unsafe { GetLastError() };
-        Err(DynlibError::System(format!("FreeLibrary failed (error {code})")))
+        Err(DynlibError::System(format!(
+            "FreeLibrary failed (error {code})"
+        )))
     }
 }

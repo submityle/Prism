@@ -196,8 +196,8 @@ impl ScopeStack {
     /// The shared allocation routine used by both [`ScopeStack`] and [`Scope`].
     fn bump(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         if layout.size() == 0 {
-            let ptr =
-                NonNull::new(core::ptr::without_provenance_mut(layout.align())).ok_or(AllocError)?;
+            let ptr = NonNull::new(core::ptr::without_provenance_mut(layout.align()))
+                .ok_or(AllocError)?;
             return Ok(NonNull::slice_from_raw_parts(ptr, 0));
         }
 
@@ -375,8 +375,12 @@ mod tests {
     #[test]
     fn allocations_are_aligned_and_distinct() {
         let stack = ScopeStack::new(4096);
-        let a = stack.allocate(Layout::from_size_align(1, 64).unwrap()).unwrap();
-        let b = stack.allocate(Layout::from_size_align(1, 64).unwrap()).unwrap();
+        let a = stack
+            .allocate(Layout::from_size_align(1, 64).unwrap())
+            .unwrap();
+        let b = stack
+            .allocate(Layout::from_size_align(1, 64).unwrap())
+            .unwrap();
         assert_eq!(a.as_ptr() as *const u8 as usize % 64, 0);
         assert_eq!(b.as_ptr() as *const u8 as usize % 64, 0);
         assert_ne!(a.as_ptr() as *const u8, b.as_ptr() as *const u8);
@@ -394,7 +398,9 @@ mod tests {
     fn zero_sized_request_never_bumps() {
         let stack = ScopeStack::new(64);
         let before = stack.used();
-        let z = stack.allocate(Layout::from_size_align(0, 8).unwrap()).unwrap();
+        let z = stack
+            .allocate(Layout::from_size_align(0, 8).unwrap())
+            .unwrap();
         assert_eq!(z.len(), 0);
         assert_eq!(stack.used(), before, "zero-sized request is free");
     }

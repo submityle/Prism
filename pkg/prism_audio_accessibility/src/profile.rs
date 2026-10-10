@@ -258,7 +258,9 @@ mod tests {
     fn apply_helpers_delegate() {
         let p = AccessibilityProfile::new()
             .with_dialogue_boost(DialogueBoost::new(BoostStrength::High))
-            .with_compression(CompressionProfile::from_preset(CompressionPreset::HardOfHearing));
+            .with_compression(CompressionProfile::from_preset(
+                CompressionPreset::HardOfHearing,
+            ));
         let duck = p.apply_ducking(DuckingParams::default());
         assert!(duck.range_db > DuckingParams::default().range_db);
         let comp = p.apply_compressor(CompressorParams::default());

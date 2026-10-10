@@ -31,8 +31,8 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use bevy_math::Vec3;
 use bevy_math::ops;
+use bevy_math::Vec3;
 use prism_audio_core::math::Sample;
 
 use crate::clustering::timbre::Timbre;
@@ -55,9 +55,22 @@ impl ClusterMember {
     /// Creates a member, clamping non-finite or negative energy to zero.
     #[must_use]
     pub fn new(voice: usize, position: Vec3, energy: Sample, timbre: Timbre) -> Self {
-        let energy = if energy.is_finite() && energy > 0.0 { energy } else { 0.0 };
-        let position = if position.is_finite() { position } else { Vec3::ZERO };
-        Self { voice, position, energy, timbre }
+        let energy = if energy.is_finite() && energy > 0.0 {
+            energy
+        } else {
+            0.0
+        };
+        let position = if position.is_finite() {
+            position
+        } else {
+            Vec3::ZERO
+        };
+        Self {
+            voice,
+            position,
+            energy,
+            timbre,
+        }
     }
 }
 
@@ -137,7 +150,11 @@ impl ClusterAccumulator {
 
     /// Folds one member into the accumulator.
     pub fn push(&mut self, member: &ClusterMember) {
-        let e = if member.energy.is_finite() && member.energy > 0.0 { member.energy } else { 0.0 };
+        let e = if member.energy.is_finite() && member.energy > 0.0 {
+            member.energy
+        } else {
+            0.0
+        };
         self.weighted_pos += member.position * e;
         self.plain_pos += member.position;
         self.energy += e;
@@ -199,7 +216,12 @@ impl ClusterAccumulator {
     pub fn finish(self) -> Cluster {
         let centroid = self.centroid();
         let timbre = self.timbre();
-        Cluster { centroid, total_energy: self.energy, timbre, members: self.members }
+        Cluster {
+            centroid,
+            total_energy: self.energy,
+            timbre,
+            members: self.members,
+        }
     }
 }
 
@@ -288,8 +310,16 @@ mod tests {
 
     #[test]
     fn weighted_timbre_blends_members() {
-        let bright = Timbre { brightness: 1.0, width: 0.0, flatness: 0.0 };
-        let dark = Timbre { brightness: 0.0, width: 0.0, flatness: 0.0 };
+        let bright = Timbre {
+            brightness: 1.0,
+            width: 0.0,
+            flatness: 0.0,
+        };
+        let dark = Timbre {
+            brightness: 0.0,
+            width: 0.0,
+            flatness: 0.0,
+        };
         let mut acc = ClusterAccumulator::new();
         acc.push(&ClusterMember::new(0, Vec3::ZERO, 1.0, bright));
         acc.push(&ClusterMember::new(1, Vec3::ZERO, 1.0, dark));

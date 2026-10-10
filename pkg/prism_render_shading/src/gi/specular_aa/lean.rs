@@ -47,8 +47,8 @@
 //! * Jonathan Dupuy et al. 2013, *Linear Efficient Antialiased Displacement and
 //!   Reflectance Mapping* (LEADR) — the displacement-aware extension.
 
-use crate::gi::spec_gi::ggx_lobe::{MIN_ALPHA, roughness_to_alpha};
-use bevy_math::{Vec2, Vec3, ops};
+use crate::gi::spec_gi::ggx_lobe::{roughness_to_alpha, MIN_ALPHA};
+use bevy_math::{ops, Vec2, Vec3};
 
 /// Smallest `|nz|` used when forming a slope `n.xy / n.z`.  Floors the divisor
 /// so a grazing micro-normal produces a large-but-finite slope.
@@ -69,7 +69,11 @@ pub fn normal_to_slope(normal: Vec3) -> Vec2 {
         return Vec2::ZERO;
     }
     let nz = if normal.z.abs() < MIN_NZ {
-        if normal.z < 0.0 { -MIN_NZ } else { MIN_NZ }
+        if normal.z < 0.0 {
+            -MIN_NZ
+        } else {
+            MIN_NZ
+        }
     } else {
         normal.z
     };
@@ -108,7 +112,11 @@ impl LeanMoments {
     /// bad sample cannot corrupt the accumulation.
     #[inline]
     pub fn accumulate(&mut self, normal: Vec3, weight: f32) {
-        let w = if weight.is_finite() { weight.max(0.0) } else { 0.0 };
+        let w = if weight.is_finite() {
+            weight.max(0.0)
+        } else {
+            0.0
+        };
         if w == 0.0 {
             return;
         }
@@ -136,11 +144,7 @@ impl LeanMoments {
     #[inline]
     pub fn covariance(&self) -> Vec3 {
         let (b, m) = self.normalized();
-        let raw = Vec3::new(
-            m.x - b.x * b.x,
-            m.y - b.y * b.y,
-            m.z - b.x * b.y,
-        );
+        let raw = Vec3::new(m.x - b.x * b.x, m.y - b.y * b.y, m.z - b.x * b.y);
         clamp_psd(raw)
     }
 
@@ -284,8 +288,7 @@ mod tests {
     #[test]
     fn covariance_only_coarsens() {
         for &r in &[0.0_f32, 0.1, 0.4, 0.8, 1.0] {
-            let (rx, ry) =
-                covariance_to_anisotropic_roughness(r, Vec3::new(0.05, 0.02, 0.0));
+            let (rx, ry) = covariance_to_anisotropic_roughness(r, Vec3::new(0.05, 0.02, 0.0));
             assert!(rx >= r - 1.0e-4 && ry >= r - 1.0e-4, "r {r} -> {rx},{ry}");
         }
     }

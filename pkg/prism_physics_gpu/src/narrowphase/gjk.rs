@@ -527,8 +527,14 @@ mod tests {
         assert!((distance - expected).abs() < 1.0e-4, "distance {distance}");
         let want_n = Vec3::new(1.0, 1.0, 0.0).normalize();
         assert!((normal - want_n).length() < 1.0e-4, "normal {normal:?}");
-        assert!((point_a.x - 2.0).abs() < 1.0e-4 && (point_a.y - 2.0).abs() < 1.0e-4, "point_a {point_a:?}");
-        assert!((point_b.x - 1.0).abs() < 1.0e-4 && (point_b.y - 1.0).abs() < 1.0e-4, "point_b {point_b:?}");
+        assert!(
+            (point_a.x - 2.0).abs() < 1.0e-4 && (point_a.y - 2.0).abs() < 1.0e-4,
+            "point_a {point_a:?}"
+        );
+        assert!(
+            (point_b.x - 1.0).abs() < 1.0e-4 && (point_b.y - 1.0).abs() < 1.0e-4,
+            "point_b {point_b:?}"
+        );
     }
 
     #[test]
@@ -549,7 +555,10 @@ mod tests {
         let (a, pose_a) = boxed_at(0.0, 0.0, 0.0);
         let (b, pose_b) = boxed_at(0.0, 0.0, 0.0);
         let status = gjk(&a, &pose_a, &b, &pose_b);
-        assert!(matches!(status, GjkStatus::Intersecting(_)), "got {status:?}");
+        assert!(
+            matches!(status, GjkStatus::Intersecting(_)),
+            "got {status:?}"
+        );
     }
 
     #[test]

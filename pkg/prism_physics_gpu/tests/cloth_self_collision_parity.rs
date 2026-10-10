@@ -162,7 +162,8 @@ fn stacked_cloth_matches_cpu_full_scope() {
     let mut rng = Rng::new(0x5e1f_c011);
     let thickness = 0.12_f32;
     let (positions, inverse_masses, triangles) = stacked_sheets(5, 5, 0.1, 0.05, &mut rng);
-    let virtuals = generate_virtual_particles(&triangles, &VirtualParticlePattern::nvcloth_default());
+    let virtuals =
+        generate_virtual_particles(&triangles, &VirtualParticlePattern::nvcloth_default());
 
     assert_parity(
         "full",
@@ -197,7 +198,8 @@ fn stacked_cloth_matches_cpu_virtual_only_scope() {
     let mut rng = Rng::new(0xa11c_e5ee);
     let thickness = 0.15_f32;
     let (positions, inverse_masses, triangles) = stacked_sheets(6, 4, 0.1, 0.04, &mut rng);
-    let virtuals = generate_virtual_particles(&triangles, &VirtualParticlePattern::nvcloth_default());
+    let virtuals =
+        generate_virtual_particles(&triangles, &VirtualParticlePattern::nvcloth_default());
 
     // A cell size strictly larger than the thickness still captures the same
     // penetrating pairs but exercises a different host bucketing.
@@ -232,15 +234,7 @@ fn no_op_inputs_pass_through_unchanged() {
     let kernel = GpuClothSelfCollision::new(&ctx);
 
     // Empty scene.
-    let empty = kernel.solve(
-        &ctx,
-        &[],
-        &[],
-        &[],
-        0.1,
-        0.1,
-        ClothSelfCollisionScope::All,
-    );
+    let empty = kernel.solve(&ctx, &[], &[], &[], 0.1, 0.1, ClothSelfCollisionScope::All);
     assert!(empty.is_empty(), "empty scene should stay empty");
 
     // A single particle has fewer than two samples: nothing to resolve.

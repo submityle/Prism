@@ -173,7 +173,10 @@ fn capsule_cast_clean_miss_matches_cpu_golden() {
     };
     let gpu = GpuSceneCapsuleCast::new(&ctx);
     let hulls = [unit_box(), unit_box()];
-    let poses = [at(Vec3::new(0.0, 20.0, 0.0)), at(Vec3::new(0.0, -20.0, 0.0))];
+    let poses = [
+        at(Vec3::new(0.0, 20.0, 0.0)),
+        at(Vec3::new(0.0, -20.0, 0.0)),
+    ];
     let radii = [0.0_f32, 0.0];
     let cast = SceneCapsuleCast::new(Vec3::ZERO, Vec3::X, Vec3::Y, 1.0, 0.5, 20.0);
     run_parity(&ctx, &gpu, &hulls, &poses, &radii, &cast);
@@ -238,7 +241,11 @@ fn capsule_cast_large_scene_prunes_and_matches_cpu_golden() {
     let mut radii = Vec::new();
     for k in 0..6 {
         hulls.push(unit_box());
-        poses.push(at(Vec3::new(3.0 + 2.0 * (k as f32), 0.01 * (k as f32), 0.0)));
+        poses.push(at(Vec3::new(
+            3.0 + 2.0 * (k as f32),
+            0.01 * (k as f32),
+            0.0,
+        )));
         radii.push(0.0_f32);
     }
     for k in 0..30 {

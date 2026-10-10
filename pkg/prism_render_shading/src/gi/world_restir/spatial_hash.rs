@@ -381,9 +381,15 @@ mod tests {
             assert!(b < res * res, "bin {b} out of range");
         }
         // Opposite normals must not share a bin (that is the whole point).
-        assert_ne!(quantize_normal(Vec3::Z, res), quantize_normal(Vec3::NEG_Z, res));
+        assert_ne!(
+            quantize_normal(Vec3::Z, res),
+            quantize_normal(Vec3::NEG_Z, res)
+        );
         // Degenerate normal falls back to +z's bin.
-        assert_eq!(quantize_normal(Vec3::ZERO, res), quantize_normal(Vec3::Z, res));
+        assert_eq!(
+            quantize_normal(Vec3::ZERO, res),
+            quantize_normal(Vec3::Z, res)
+        );
     }
 
     #[test]
@@ -415,7 +421,13 @@ mod tests {
                 for z in -4..4 {
                     let pos = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
                     let k = compute_key(pos, Vec3::Z, cam, &p);
-                    keys.insert((k.cell_coord.x, k.cell_coord.y, k.cell_coord.z, k.level, k.normal_bin));
+                    keys.insert((
+                        k.cell_coord.x,
+                        k.cell_coord.y,
+                        k.cell_coord.z,
+                        k.level,
+                        k.normal_bin,
+                    ));
                     let h = hash_key(&k);
                     if !hashes.insert(h) {
                         collisions += 1;
@@ -440,7 +452,10 @@ mod tests {
             normal_bin: 7,
         };
         let diff_level = HashGridKey { level: 2, ..base };
-        let diff_normal = HashGridKey { normal_bin: 8, ..base };
+        let diff_normal = HashGridKey {
+            normal_bin: 8,
+            ..base
+        };
         assert_ne!(hash_key(&base), hash_key(&diff_level));
         assert_ne!(hash_key(&base), hash_key(&diff_normal));
     }

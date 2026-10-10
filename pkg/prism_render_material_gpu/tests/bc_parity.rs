@@ -31,10 +31,9 @@ use prism_render_material::{
     encode_astc_single_partition_5x5_ldr, encode_astc_single_partition_6x5_ldr,
     encode_astc_single_partition_6x5_ldr_mode355, encode_astc_single_partition_6x5_ldr_mode369,
     encode_astc_single_partition_6x5_ldr_mode371, encode_astc_single_partition_6x6_ldr,
-    encode_astc_single_partition_8x5_ldr,
-    encode_astc_single_partition_8x6_ldr, encode_astc_single_partition_8x8_ldr, encode_bc1,
-    encode_bc3, encode_bc6h_mode11_signed, encode_bc6h_mode11_unsigned, encode_bc7_mode4,
-    encode_bc7_mode5, encode_bc7_mode6,
+    encode_astc_single_partition_8x5_ldr, encode_astc_single_partition_8x6_ldr,
+    encode_astc_single_partition_8x8_ldr, encode_bc1, encode_bc3, encode_bc6h_mode11_signed,
+    encode_bc6h_mode11_unsigned, encode_bc7_mode4, encode_bc7_mode5, encode_bc7_mode6,
 };
 use prism_render_material_gpu::BlockOracle;
 use wgpu::{Features, TextureFormat};
@@ -882,7 +881,9 @@ fn bc6h_mode11_signed_encoder_parity_against_gpu() {
             reason = "test diagnostic: GPU adapter unreachable in sandbox, graceful skip"
         )]
         {
-            eprintln!("no GPU adapter with BC support reachable; skipping BC6H mode11 signed encoder");
+            eprintln!(
+                "no GPU adapter with BC support reachable; skipping BC6H mode11 signed encoder"
+            );
         }
         return;
     };
@@ -6753,7 +6754,6 @@ fn astc_encoder_6x5_mode355_round_trip_parity_against_gpu_hardware_decode() {
         "ASTC 6x5 mode355 encoder round-trip parity: {compared} tiles decode within 1 LSB of hardware (QUANT_6 trit+1bit weights, QUANT_40 quint colour BISE via encode_quint_sequence, both streams mixed-radix BISE, non-square legal B6x5 full grid)"
     );
 }
-
 
 // ASTC 10x5 mode 373 encoder parity (recipe family 4: QUANT_32 bit colour +
 // QUANT_3 one-trit weight stream). This is the first encoder fusing the

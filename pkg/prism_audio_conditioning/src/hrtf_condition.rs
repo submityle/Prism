@@ -399,7 +399,11 @@ mod tests {
             minimum_phase: false,
         };
         let conditioned = condition(&dataset, &config);
-        assert!(conditioned.itd(0).abs() < 1.0e-3, "front ITD {}", conditioned.itd(0));
+        assert!(
+            conditioned.itd(0).abs() < 1.0e-3,
+            "front ITD {}",
+            conditioned.itd(0)
+        );
         // The delayed-right measurement recovers a positive ITD near 10.
         assert!(
             (conditioned.itd(1) - 10.0).abs() < 1.5,

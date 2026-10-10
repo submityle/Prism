@@ -58,7 +58,9 @@ use prism_audio_spatial::propagation::{
 use prism_audio_spatial::BandGains;
 
 use crate::config::{DiffractionModel, GeometricConfig, MAX_SUPPORTED_DIFFRACTION_ORDER};
-use crate::diffraction_edges::{diffracting_edges, distance, least_detour_point, utd_wedge, EdgeData};
+use crate::diffraction_edges::{
+    diffracting_edges, distance, least_detour_point, utd_wedge, EdgeData,
+};
 use crate::scene::AcousticScene;
 
 /// Fixed number of Gauss-Seidel sweeps used to pull a multi-edge route taut.
@@ -96,7 +98,10 @@ pub fn resolve_higher_order_diffraction(
     let max_order = config
         .max_diffraction_order
         .min(MAX_SUPPORTED_DIFFRACTION_ORDER);
-    if !config.diffraction_enabled || config.max_diffractions == 0 || scene.is_empty() || max_order < 2
+    if !config.diffraction_enabled
+        || config.max_diffractions == 0
+        || scene.is_empty()
+        || max_order < 2
     {
         return Vec::new();
     }
@@ -150,7 +155,12 @@ impl SequenceSolver<'_> {
     /// Depth-first growth of the current edge `sequence`: evaluates it once it
     /// reaches length two, then recurses with each not-yet-used edge until the
     /// configured order or the evaluation budget is exhausted.
-    fn extend(&self, sequence: &mut Vec<usize>, paths: &mut Vec<PropagationPath>, budget: &mut usize) {
+    fn extend(
+        &self,
+        sequence: &mut Vec<usize>,
+        paths: &mut Vec<PropagationPath>,
+        budget: &mut usize,
+    ) {
         if sequence.len() >= 2 {
             if *budget == 0 {
                 return;
@@ -265,7 +275,10 @@ impl SequenceSolver<'_> {
         let Some(&first) = corners.first() else {
             return false;
         };
-        if self.scene.segment_blocked(self.emitter.position, first, self.eps) {
+        if self
+            .scene
+            .segment_blocked(self.emitter.position, first, self.eps)
+        {
             return false;
         }
         for leg in corners.windows(2) {
@@ -300,7 +313,12 @@ impl SequenceSolver<'_> {
     /// Multiplies the per-edge shadow gains and colours into the route's scalar
     /// gain (including `spreading`), spectral `bands`, and tightest `cutoff_hz`.
     #[must_use]
-    fn shade(&self, sequence: &[usize], corners: &[Vec3], spreading: Sample) -> (Sample, BandGains, Sample) {
+    fn shade(
+        &self,
+        sequence: &[usize],
+        corners: &[Vec3],
+        spreading: Sample,
+    ) -> (Sample, BandGains, Sample) {
         let mut gain = spreading;
         let mut bands = BandGains::UNITY;
         let mut cutoff_hz = FULL_BAND_CUTOFF_HZ;
@@ -421,7 +439,9 @@ mod tests {
         // Default order is 1: single-edge bends belong to `diffraction_path`.
         let cfg = GeometricConfig::new(48_000);
         let base = (emitter.position - listener.position).length();
-        assert!(resolve_higher_order_diffraction(&scene, &listener, &emitter, &cfg, base).is_empty());
+        assert!(
+            resolve_higher_order_diffraction(&scene, &listener, &emitter, &cfg, base).is_empty()
+        );
     }
 
     #[test]
@@ -433,7 +453,9 @@ mod tests {
             .with_max_diffraction_order(2)
             .without_diffraction();
         let base = (emitter.position - listener.position).length();
-        assert!(resolve_higher_order_diffraction(&scene, &listener, &emitter, &cfg, base).is_empty());
+        assert!(
+            resolve_higher_order_diffraction(&scene, &listener, &emitter, &cfg, base).is_empty()
+        );
     }
 
     #[test]
@@ -461,6 +483,8 @@ mod tests {
         let emitter = Emitter::point(Vec3::new(3.0, 0.0, 0.0), Vec3::ZERO);
         let cfg = GeometricConfig::new(48_000).with_max_diffraction_order(3);
         let base = (emitter.position - listener.position).length();
-        assert!(resolve_higher_order_diffraction(&scene, &listener, &emitter, &cfg, base).is_empty());
+        assert!(
+            resolve_higher_order_diffraction(&scene, &listener, &emitter, &cfg, base).is_empty()
+        );
     }
 }

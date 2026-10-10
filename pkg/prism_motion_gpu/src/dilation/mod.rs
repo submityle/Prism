@@ -19,8 +19,8 @@
 use alloc::vec::Vec;
 
 use bytemuck::{Pod, Zeroable};
-use prism_render_architecture::motion::Vec2;
 use prism_render_architecture::motion::dilation::{DepthField, DepthOrder, VelocityField};
+use prism_render_architecture::motion::Vec2;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BufferBindingType, CommandEncoderDescriptor,
@@ -103,26 +103,38 @@ impl GpuDilate {
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("prism_motion_dilate_layout"),
             entries: &[
-                buffer_layout(0, BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
-                buffer_layout(1, BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
-                buffer_layout(2, BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
-                buffer_layout(3, BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                }),
+                buffer_layout(
+                    0,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                buffer_layout(
+                    1,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                buffer_layout(
+                    2,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                buffer_layout(
+                    3,
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -232,11 +244,7 @@ impl GpuDilate {
         ctx.queue().submit([enc.finish()]);
 
         let out_words = buffer::read_back::<GpuVec2>(ctx, &stage);
-        let pixels: Vec<Vec2> = out_words
-            .iter()
-            .take(count)
-            .map(|&w| w.to_vec2())
-            .collect();
+        let pixels: Vec<Vec2> = out_words.iter().take(count).map(|&w| w.to_vec2()).collect();
         VelocityField::from_pixels(width, height, pixels)
     }
 }

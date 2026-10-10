@@ -23,7 +23,9 @@ pub enum SampleStrategy {
 
 impl Default for SampleStrategy {
     fn default() -> Self {
-        Self::Uniform { samples_per_edge: 8 }
+        Self::Uniform {
+            samples_per_edge: 8,
+        }
     }
 }
 

@@ -10,8 +10,8 @@
 use crate::reflect::{Reflect, Typed};
 use crate::ReflectRef;
 use alloc::collections::{BTreeMap, BTreeSet};
-use std::collections::{HashMap, HashSet};
 use alloc::vec::Vec;
+use std::collections::{HashMap, HashSet};
 
 /// Reconstruct a concrete `Self` from an arbitrary reflected value.
 ///

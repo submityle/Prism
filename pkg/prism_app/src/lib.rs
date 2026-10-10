@@ -72,19 +72,40 @@
 //!   an [`Events<E>`](prism_ecs::event::Events) resource and rotates its double
 //!   buffer once per frame in [`First`], so events are readable for the frame
 //!   they are sent and the frame after (design §22 M1).
-#![cfg_attr(feature = "std", doc = "- A drift-free [frame pacer](crate::pacing) (design §13, §22 M4): the")]
-#![cfg_attr(not(feature = "std"), doc = "- A drift-free frame pacer (design §13, §22 M4): the")]
-#![cfg_attr(feature = "std", doc = "  [`FramePacer`] caps the loop to a [`FrameLimit`] (unlimited / target")]
-#![cfg_attr(not(feature = "std"), doc = "  `FramePacer` caps the loop to a `FrameLimit` (unlimited / target")]
+#![cfg_attr(
+    feature = "std",
+    doc = "- A drift-free [frame pacer](crate::pacing) (design §13, §22 M4): the"
+)]
+#![cfg_attr(
+    not(feature = "std"),
+    doc = "- A drift-free frame pacer (design §13, §22 M4): the"
+)]
+#![cfg_attr(
+    feature = "std",
+    doc = "  [`FramePacer`] caps the loop to a [`FrameLimit`] (unlimited / target"
+)]
+#![cfg_attr(
+    not(feature = "std"),
+    doc = "  `FramePacer` caps the loop to a `FrameLimit` (unlimited / target"
+)]
 //!   FPS / explicit period) by pacing to a *moving* cadence
 //!   (`deadline += period`, never `now + period`) so rounding error cannot
 //!   accumulate, with an anti-death-spiral clamp that resyncs after a hitch
-#![cfg_attr(feature = "std", doc = "  and rolling [`FrameStats`] for the design §16 diagnostics. Present-")]
-#![cfg_attr(not(feature = "std"), doc = "  and rolling `FrameStats` for the design §16 diagnostics. Present-")]
+#![cfg_attr(
+    feature = "std",
+    doc = "  and rolling [`FrameStats`] for the design §16 diagnostics. Present-"
+)]
+#![cfg_attr(
+    not(feature = "std"),
+    doc = "  and rolling `FrameStats` for the design §16 diagnostics. Present-"
+)]
 //!   timestamp / VRR alignment stays deferred until `prism_window`/RHI can
 //!   supply a present estimate (documented in the module). The
 //!   [`HeadlessRunner`] can opt into a cap via
-#![cfg_attr(feature = "std", doc = "  [`with_frame_limit`](crate::runner::HeadlessRunner::with_frame_limit)")]
+#![cfg_attr(
+    feature = "std",
+    doc = "  [`with_frame_limit`](crate::runner::HeadlessRunner::with_frame_limit)"
+)]
 #![cfg_attr(not(feature = "std"), doc = "  `with_frame_limit`")]
 //!   for a mobile frame limiter or a server tickrate; the default stays
 //!   uncapped.
@@ -108,19 +129,49 @@
 //!   it ("unsaved changes — really quit?") and keep the app running; the gate
 //!   prompts at most once per distinct request.
 //! - Platform-free runners: [`HeadlessRunner`], [`ScheduleRunnerOnce`],
-#![cfg_attr(feature = "std", doc = "  and the [`DedicatedServerRunner`] (design §10 / §24.4, M5): an")]
-#![cfg_attr(not(feature = "std"), doc = "  and the `DedicatedServerRunner` (design §10 / §24.4, M5): an")]
+#![cfg_attr(
+    feature = "std",
+    doc = "  and the [`DedicatedServerRunner`] (design §10 / §24.4, M5): an"
+)]
+#![cfg_attr(
+    not(feature = "std"),
+    doc = "  and the `DedicatedServerRunner` (design §10 / §24.4, M5): an"
+)]
 //!   authoritative fixed-tickrate, deterministic simulation heartbeat with
-#![cfg_attr(feature = "std", doc = "  no rendering, publishing live [`ServerTickDiagnostics`] so server")]
-#![cfg_attr(not(feature = "std"), doc = "  no rendering, publishing live `ServerTickDiagnostics` so server")]
+#![cfg_attr(
+    feature = "std",
+    doc = "  no rendering, publishing live [`ServerTickDiagnostics`] so server"
+)]
+#![cfg_attr(
+    not(feature = "std"),
+    doc = "  no rendering, publishing live `ServerTickDiagnostics` so server"
+)]
 //!   systems can detect tick overload. Networking stays in the
 //!   `prism_replication` layer (injected as a plugin), not this runner.
-#![cfg_attr(feature = "std", doc = "- Opt-in [observability](crate::diagnostics) (design §16, §22 M6): rolling")]
-#![cfg_attr(not(feature = "std"), doc = "- Opt-in observability (design §16, §22 M6): rolling")]
-#![cfg_attr(feature = "std", doc = "  [`FrameDiagnostics`] (whole-frame work time, per-phase timing, and the")]
-#![cfg_attr(not(feature = "std"), doc = "  `FrameDiagnostics` (whole-frame work time, per-phase timing, and the")]
-#![cfg_attr(feature = "std", doc = "  fixed-step substep count) plus per-plugin [`StartupDiagnostics`]")]
-#![cfg_attr(not(feature = "std"), doc = "  fixed-step substep count) plus per-plugin `StartupDiagnostics`")]
+#![cfg_attr(
+    feature = "std",
+    doc = "- Opt-in [observability](crate::diagnostics) (design §16, §22 M6): rolling"
+)]
+#![cfg_attr(
+    not(feature = "std"),
+    doc = "- Opt-in observability (design §16, §22 M6): rolling"
+)]
+#![cfg_attr(
+    feature = "std",
+    doc = "  [`FrameDiagnostics`] (whole-frame work time, per-phase timing, and the"
+)]
+#![cfg_attr(
+    not(feature = "std"),
+    doc = "  `FrameDiagnostics` (whole-frame work time, per-phase timing, and the"
+)]
+#![cfg_attr(
+    feature = "std",
+    doc = "  fixed-step substep count) plus per-plugin [`StartupDiagnostics`]"
+)]
+#![cfg_attr(
+    not(feature = "std"),
+    doc = "  fixed-step substep count) plus per-plugin `StartupDiagnostics`"
+)]
 //!   (`build`/`finish` wall time). Neither is installed by default, so an
 //!   un-observed frame pays only a single resource-presence check. Extract
 //!   cost, pipeline-overlap rate, and present latency are honestly deferred.
@@ -156,25 +207,25 @@
 
 pub mod app;
 pub mod capability;
-pub mod cvar;
 #[cfg(feature = "std")]
 pub mod crash;
-pub mod event;
-pub mod exit;
-pub mod fixed;
-pub mod lifecycle;
+pub mod cvar;
 #[cfg(feature = "determinism")]
 pub mod determinism;
 #[cfg(feature = "std")]
 pub mod diagnostics;
+pub mod event;
+pub mod exit;
+pub mod fixed;
+pub mod lifecycle;
 #[cfg(feature = "std")]
 pub mod pacing;
-pub mod platform_tier;
-pub mod plugin;
-pub mod plugin_group;
-pub mod plugin_graph;
 #[cfg(feature = "pipelined")]
 pub mod pipelined;
+pub mod platform_tier;
+pub mod plugin;
+pub mod plugin_graph;
+pub mod plugin_group;
 pub mod run_mode;
 pub mod runner;
 pub mod schedule;
@@ -191,23 +242,21 @@ mod tests;
 
 pub use app::{App, Plugins, PluginsState};
 pub use capability::{Capabilities, QualityTier};
+#[cfg(feature = "std")]
+pub use crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
 pub use cvar::{
     ConsoleOutcome, Cvar, CvarBounds, CvarCategory, CvarChanged, CvarCliApplied, CvarCliRejection,
     CvarCliReport, CvarError, CvarFlags, CvarListing, CvarRegistry, CvarSetOutcome, CvarSpec,
     ValidatedWrite,
 };
+#[cfg(feature = "determinism")]
+pub use determinism::{
+    DeterministicRng, FrameHash, FrameHashManifest, HashDivergence, InputRecording, RecordedInput,
+    ReplayLog, ReplayMode,
+};
 #[cfg(feature = "std")]
-pub use crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
-#[cfg(feature = "std")]
-pub use watchdog::{FrameStall, FrameWatchdog, StallHandler, WatchdogConfig};
+pub use diagnostics::{CountWindow, FrameDiagnostics, PluginStartupTiming, StartupDiagnostics};
 pub use exit::{AppExit, AppExitRequest};
-pub use plugin::{Plugin, PluginDependency};
-pub use plugin_graph::PluginGraphError;
-pub use plugin_group::{PluginGroup, PluginGroupBuilder};
-#[cfg(feature = "std")]
-pub use runner::{DedicatedServerRunner, ServerTickDiagnostics};
-pub use runner::{HeadlessRunner, ScheduleRunnerOnce, run_once};
-pub use run_mode::RunMode;
 pub use fixed::{
     AfterFixedMainLoop, BeforeFixedMainLoop, FixedFirst, FixedLast, FixedPostUpdate,
     FixedPreUpdate, FixedUpdate,
@@ -215,33 +264,33 @@ pub use fixed::{
 pub use lifecycle::{
     AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
 };
-#[cfg(feature = "determinism")]
-pub use determinism::{
-    DeterministicRng, FrameHash, FrameHashManifest, HashDivergence, InputRecording,
-    RecordedInput, ReplayLog, ReplayMode,
-};
-#[cfg(feature = "std")]
-pub use diagnostics::{
-    CountWindow, FrameDiagnostics, PluginStartupTiming, StartupDiagnostics,
-};
 #[cfg(feature = "std")]
 pub use pacing::{
     AdaptiveAction, AdaptiveFrameLimiter, FrameLimit, FramePacer, FrameRateLadder, FrameStats,
 };
+#[cfg(feature = "pipelined")]
+pub use pipelined::PipelinedExecutor;
+pub use platform_tier::PlatformTierProfile;
+pub use plugin::{Plugin, PluginDependency};
+pub use plugin_graph::PluginGraphError;
+pub use plugin_group::{PluginGroup, PluginGroupBuilder};
+pub use run_mode::RunMode;
+pub use runner::{run_once, HeadlessRunner, ScheduleRunnerOnce};
+#[cfg(feature = "std")]
+pub use runner::{DedicatedServerRunner, ServerTickDiagnostics};
 pub use schedule::{
     ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
-    StateTransition, Startup, Update,
+    Startup, StateTransition, Update,
 };
-pub use platform_tier::PlatformTierProfile;
 pub use settings::{SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer};
 pub use state::{
     ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,
 };
-#[cfg(feature = "pipelined")]
-pub use pipelined::PipelinedExecutor;
 pub use sub_app::{ExtractFn, SubApp, SubApps};
 pub use sub_app_label::{BoxedSubAppLabel, SubAppLabel};
 pub use time::{EngineClocks, TimeUpdateStrategy};
+#[cfg(feature = "std")]
+pub use watchdog::{FrameStall, FrameWatchdog, StallHandler, WatchdogConfig};
 
 /// Commonly used exports. Mirrors `bevy_app::prelude` ergonomics to keep the
 /// eventual migration a near "change-the-import" exercise, and re-exports the
@@ -249,29 +298,12 @@ pub use time::{EngineClocks, TimeUpdateStrategy};
 pub mod prelude {
     pub use crate::app::{App, Plugins, PluginsState};
     pub use crate::capability::{Capabilities, QualityTier};
+    #[cfg(feature = "std")]
+    pub use crate::crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
     pub use crate::cvar::{
         ConsoleOutcome, Cvar, CvarBounds, CvarCategory, CvarChanged, CvarCliApplied,
         CvarCliRejection, CvarCliReport, CvarError, CvarFlags, CvarListing, CvarRegistry,
         CvarSetOutcome, CvarSpec, ValidatedWrite,
-    };
-    #[cfg(feature = "std")]
-    pub use crate::crash::{CrashReport, CrashReporter, CrashSink, CrashSnapshot};
-    #[cfg(feature = "std")]
-    pub use crate::watchdog::{FrameStall, FrameWatchdog, StallHandler, WatchdogConfig};
-    pub use crate::exit::{AppExit, AppExitRequest};
-    pub use crate::plugin::{Plugin, PluginDependency};
-    pub use crate::plugin_graph::PluginGraphError;
-    pub use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
-    #[cfg(feature = "std")]
-    pub use crate::runner::{DedicatedServerRunner, ServerTickDiagnostics};
-    pub use crate::runner::{HeadlessRunner, ScheduleRunnerOnce};
-    pub use crate::run_mode::RunMode;
-    pub use crate::fixed::{
-        AfterFixedMainLoop, BeforeFixedMainLoop, FixedFirst, FixedLast, FixedPostUpdate,
-        FixedPreUpdate, FixedUpdate,
-    };
-    pub use crate::lifecycle::{
-        AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
     };
     #[cfg(feature = "determinism")]
     pub use crate::determinism::{
@@ -282,27 +314,43 @@ pub mod prelude {
     pub use crate::diagnostics::{
         CountWindow, FrameDiagnostics, PluginStartupTiming, StartupDiagnostics,
     };
+    pub use crate::exit::{AppExit, AppExitRequest};
+    pub use crate::fixed::{
+        AfterFixedMainLoop, BeforeFixedMainLoop, FixedFirst, FixedLast, FixedPostUpdate,
+        FixedPreUpdate, FixedUpdate,
+    };
+    pub use crate::lifecycle::{
+        AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+    };
     #[cfg(feature = "std")]
     pub use crate::pacing::{
-        AdaptiveAction, AdaptiveFrameLimiter, FrameLimit, FramePacer, FrameRateLadder,
-        FrameStats,
+        AdaptiveAction, AdaptiveFrameLimiter, FrameLimit, FramePacer, FrameRateLadder, FrameStats,
     };
+    #[cfg(feature = "pipelined")]
+    pub use crate::pipelined::PipelinedExecutor;
+    pub use crate::platform_tier::PlatformTierProfile;
+    pub use crate::plugin::{Plugin, PluginDependency};
+    pub use crate::plugin_graph::PluginGraphError;
+    pub use crate::plugin_group::{PluginGroup, PluginGroupBuilder};
+    pub use crate::run_mode::RunMode;
+    #[cfg(feature = "std")]
+    pub use crate::runner::{DedicatedServerRunner, ServerTickDiagnostics};
+    pub use crate::runner::{HeadlessRunner, ScheduleRunnerOnce};
     pub use crate::schedule::{
         ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
-        StateTransition, Startup, Update,
+        Startup, StateTransition, Update,
     };
-    pub use crate::platform_tier::PlatformTierProfile;
     pub use crate::settings::{
         SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer,
     };
     pub use crate::state::{
         ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,
     };
-    #[cfg(feature = "pipelined")]
-    pub use crate::pipelined::PipelinedExecutor;
     pub use crate::sub_app::{ExtractFn, SubApp, SubApps};
     pub use crate::sub_app_label::{BoxedSubAppLabel, SubAppLabel};
     pub use crate::time::{EngineClocks, TimeUpdateStrategy};
+    #[cfg(feature = "std")]
+    pub use crate::watchdog::{FrameStall, FrameWatchdog, StallHandler, WatchdogConfig};
 
     pub use prism_ecs::prelude::*;
 }

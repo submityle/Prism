@@ -205,9 +205,21 @@ fn channel_exp_neg(tau: f32) -> f32 {
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.max(0.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.max(0.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.max(0.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -288,7 +300,10 @@ mod tests {
         let column = h * (1.0 - ops::exp(-a.thickness() / h));
         let tau = a.rayleigh_scattering * column;
         let analytic = Vec3::new(ops::exp(-tau.x), ops::exp(-tau.y), ops::exp(-tau.z));
-        assert!((numeric - analytic).length() < 2e-3, "num={numeric:?} ana={analytic:?}");
+        assert!(
+            (numeric - analytic).length() < 2e-3,
+            "num={numeric:?} ana={analytic:?}"
+        );
     }
 
     #[test]

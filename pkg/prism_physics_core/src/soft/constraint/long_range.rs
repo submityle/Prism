@@ -189,7 +189,11 @@ mod tests {
         let inv = [1.0];
         let mut c = LongRangeConstraint::new(h(0), Vec3::ZERO, 1.0, 0.0);
         c.project(&mut positions, &inv, 1.0 / 60.0);
-        assert!((positions[0].length() - 1.0).abs() < 1e-5, "pos {:?}", positions[0]);
+        assert!(
+            (positions[0].length() - 1.0).abs() < 1e-5,
+            "pos {:?}",
+            positions[0]
+        );
     }
 
     #[test]

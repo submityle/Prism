@@ -267,7 +267,11 @@ impl GpuConvexConvexToiNarrowphase {
             target,
             pad0: 0,
         };
-        let params_buf = buffer::uniform(device, "prism_narrowphase_convex_convex_toi_params", &params);
+        let params_buf = buffer::uniform(
+            device,
+            "prism_narrowphase_convex_convex_toi_params",
+            &params,
+        );
 
         // Flatten every hull into shared headers and vertices. Each header
         // records where this body's vertex slice begins in the concatenated
@@ -299,8 +303,11 @@ impl GpuConvexConvexToiNarrowphase {
             packed_vertices.push([0.0, 0.0, 0.0, 0.0]);
         }
 
-        let headers_buf =
-            buffer::storage_read(device, "prism_narrowphase_convex_convex_toi_hulls", &headers);
+        let headers_buf = buffer::storage_read(
+            device,
+            "prism_narrowphase_convex_convex_toi_hulls",
+            &headers,
+        );
         let vertices_buf = buffer::storage_read(
             device,
             "prism_narrowphase_convex_convex_toi_vertices",
@@ -345,8 +352,11 @@ impl GpuConvexConvexToiNarrowphase {
         );
 
         let tois_bytes = TOI_BYTES * num_pairs as u64;
-        let tois_buf =
-            buffer::storage_rw_zeroed(device, "prism_narrowphase_convex_convex_toi_out", tois_bytes);
+        let tois_buf = buffer::storage_rw_zeroed(
+            device,
+            "prism_narrowphase_convex_convex_toi_out",
+            tois_bytes,
+        );
 
         let bind = device.create_bind_group(&BindGroupDescriptor {
             label: Some("prism_narrowphase_convex_convex_toi_bind"),
@@ -362,8 +372,11 @@ impl GpuConvexConvexToiNarrowphase {
             ],
         });
 
-        let tois_stage =
-            buffer::staging(device, "prism_narrowphase_convex_convex_toi_stage", tois_bytes);
+        let tois_stage = buffer::staging(
+            device,
+            "prism_narrowphase_convex_convex_toi_stage",
+            tois_bytes,
+        );
 
         let groups = u32::try_from(num_pairs.div_ceil(WORKGROUP)).unwrap_or(u32::MAX);
 

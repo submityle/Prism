@@ -121,7 +121,9 @@ impl<S: States> Resource for LastObservedState<S> {}
 /// [`StateTransitionSet::Notify`]. See the [module docs](crate::state::transition)
 /// for the firing table and ordering.
 pub fn run_transition_hooks<S: States>(world: &mut World) {
-    let current = world.get_resource::<State<S>>().map(|state| state.0.clone());
+    let current = world
+        .get_resource::<State<S>>()
+        .map(|state| state.0.clone());
     let last = world
         .get_resource::<LastObservedState<S>>()
         .and_then(|tracked| tracked.0.clone());
@@ -162,7 +164,10 @@ impl App {
     ///
     /// Idempotent: wiring happens only once per `S`.
     pub fn add_state_transition_hooks<S: States>(&mut self) -> &mut Self {
-        if self.initialized_states.insert(TypeId::of::<OnTransition<S>>()) {
+        if self
+            .initialized_states
+            .insert(TypeId::of::<OnTransition<S>>())
+        {
             self.add_systems(
                 StateTransition,
                 run_transition_hooks::<S>

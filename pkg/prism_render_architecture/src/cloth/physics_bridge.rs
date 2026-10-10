@@ -61,9 +61,7 @@ pub(crate) fn to_soa(particles: &[ClothParticle]) -> (Vec<GlamVec3>, Vec<f32>) {
 /// does, so a delegated pass leaves them fixed regardless of their stored
 /// `inverse_mass`.
 #[must_use]
-pub(crate) fn to_soa_full(
-    particles: &[ClothParticle],
-) -> (Vec<GlamVec3>, Vec<GlamVec3>, Vec<f32>) {
+pub(crate) fn to_soa_full(particles: &[ClothParticle]) -> (Vec<GlamVec3>, Vec<GlamVec3>, Vec<f32>) {
     let mut positions = Vec::with_capacity(particles.len());
     let mut velocities = Vec::with_capacity(particles.len());
     let mut inverse_masses = Vec::with_capacity(particles.len());

@@ -30,7 +30,9 @@ use prism_audio_rt::AudioCommand;
 
 use crate::budget::PhysicalVoiceBudget;
 use crate::client_resource::AudioClient;
-use crate::commands::{build_request, effective_importance, set_importance, spawn_voice, stop_voice};
+use crate::commands::{
+    build_request, effective_importance, set_importance, spawn_voice, stop_voice,
+};
 use crate::emitter::AudioEmitter;
 use crate::listener::AudioListener;
 use crate::master_gain::MasterGain;

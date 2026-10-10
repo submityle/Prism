@@ -128,12 +128,7 @@ pub fn analyze_fragmentation(capacity: u64, occupied: &[Span]) -> FragmentationR
         );
         cursor = span.end();
     }
-    note_gap(
-        cursor,
-        capacity,
-        &mut free_run_count,
-        &mut largest_free_run,
-    );
+    note_gap(cursor, capacity, &mut free_run_count, &mut largest_free_run);
 
     FragmentationReport {
         capacity,

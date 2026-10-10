@@ -6,7 +6,7 @@
 //! `GPU` while running the full dispatch on any machine with a real device.
 
 use prism_dmm::{
-    bake_triangle, BakedDmm, DmmBakeInput, DmmSubdivisionLevel, DisplacementScaleBias,
+    bake_triangle, BakedDmm, DisplacementScaleBias, DmmBakeInput, DmmSubdivisionLevel,
     ScaleBiasMode, TextureDisplacementMap, WrapMode,
 };
 use prism_dmm_gpu::{GpuBakedDmm, GpuContext, GpuDmmBaker};
@@ -61,7 +61,10 @@ fn flat_map_matches_cpu_golden() {
             let level = DmmSubdivisionLevel::new(level).expect("level in range");
             let cpu = cpu_bake(uv, level, ScaleBiasMode::PerTriangle, &map);
             let gpu = baker.bake(ctx, uv, level, ScaleBiasMode::PerTriangle, &map);
-            assert!(gpu.codes.iter().all(|&c| c == 0), "flat map must bake to code 0");
+            assert!(
+                gpu.codes.iter().all(|&c| c == 0),
+                "flat map must bake to code 0"
+            );
             assert_exact(&cpu, &gpu);
         }
     });

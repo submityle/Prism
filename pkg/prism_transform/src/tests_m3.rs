@@ -2,10 +2,12 @@
 //! to the serial full pass, across large random forests and edge cases.
 
 use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
-use crate::parallel::{LevelPlan, PARALLEL_THRESHOLD, propagate_parallel, propagate_parallel_with_plan};
+use crate::parallel::{
+    propagate_parallel, propagate_parallel_with_plan, LevelPlan, PARALLEL_THRESHOLD,
+};
 use crate::propagation::{identity_globals, propagate};
 use crate::{GlobalTransform, Transform};
-use prism_math::{Quat, Vec3, vec3};
+use prism_math::{vec3, Quat, Vec3};
 use prism_tasks::TaskPool;
 
 /// Deterministic xorshift64* PRNG so the differential test is reproducible
@@ -67,7 +69,10 @@ impl Rng {
                 self.range(-50.0, 50.0),
             ),
             // Non-uniform scale so hierarchical shear actually exercises Affine3.
-            rotation: Quat::from_axis_angle(axis, self.range(-core::f32::consts::PI, core::f32::consts::PI)),
+            rotation: Quat::from_axis_angle(
+                axis,
+                self.range(-core::f32::consts::PI, core::f32::consts::PI),
+            ),
             scale: vec3(
                 self.range(0.3, 2.5),
                 self.range(0.3, 2.5),
@@ -117,14 +122,38 @@ fn assert_parallel_equals_serial(pool: &TaskPool, h: &Hierarchy, locals: &[Trans
         let s = serial[i].affine();
         let p = par[i].affine();
         let pp = par_plan_globals[i].affine();
-        assert_eq!(s.matrix3.x_axis, p.matrix3.x_axis, "node {i} x_axis (fresh plan)");
-        assert_eq!(s.matrix3.y_axis, p.matrix3.y_axis, "node {i} y_axis (fresh plan)");
-        assert_eq!(s.matrix3.z_axis, p.matrix3.z_axis, "node {i} z_axis (fresh plan)");
-        assert_eq!(s.translation, p.translation, "node {i} translation (fresh plan)");
-        assert_eq!(s.matrix3.x_axis, pp.matrix3.x_axis, "node {i} x_axis (cached plan)");
-        assert_eq!(s.matrix3.y_axis, pp.matrix3.y_axis, "node {i} y_axis (cached plan)");
-        assert_eq!(s.matrix3.z_axis, pp.matrix3.z_axis, "node {i} z_axis (cached plan)");
-        assert_eq!(s.translation, pp.translation, "node {i} translation (cached plan)");
+        assert_eq!(
+            s.matrix3.x_axis, p.matrix3.x_axis,
+            "node {i} x_axis (fresh plan)"
+        );
+        assert_eq!(
+            s.matrix3.y_axis, p.matrix3.y_axis,
+            "node {i} y_axis (fresh plan)"
+        );
+        assert_eq!(
+            s.matrix3.z_axis, p.matrix3.z_axis,
+            "node {i} z_axis (fresh plan)"
+        );
+        assert_eq!(
+            s.translation, p.translation,
+            "node {i} translation (fresh plan)"
+        );
+        assert_eq!(
+            s.matrix3.x_axis, pp.matrix3.x_axis,
+            "node {i} x_axis (cached plan)"
+        );
+        assert_eq!(
+            s.matrix3.y_axis, pp.matrix3.y_axis,
+            "node {i} y_axis (cached plan)"
+        );
+        assert_eq!(
+            s.matrix3.z_axis, pp.matrix3.z_axis,
+            "node {i} z_axis (cached plan)"
+        );
+        assert_eq!(
+            s.translation, pp.translation,
+            "node {i} translation (cached plan)"
+        );
     }
 }
 

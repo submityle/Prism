@@ -286,7 +286,11 @@ mod tests {
         let mut concealed = vec![0.0; frame];
         plc.conceal(&mut concealed);
         // The concealed frame should carry comparable energy to the tone.
-        assert!(power(&concealed) > 0.1, "concealed power {}", power(&concealed));
+        assert!(
+            power(&concealed) > 0.1,
+            "concealed power {}",
+            power(&concealed)
+        );
     }
 
     #[test]

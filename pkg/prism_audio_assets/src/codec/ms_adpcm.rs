@@ -46,7 +46,11 @@ fn clamp_i16(value: i32) -> i32 {
 #[inline]
 fn sign_extend_nibble(nibble: u8) -> i32 {
     let value = i32::from(nibble & 0x0F);
-    if value >= 8 { value - 16 } else { value }
+    if value >= 8 {
+        value - 16
+    } else {
+        value
+    }
 }
 
 #[inline]

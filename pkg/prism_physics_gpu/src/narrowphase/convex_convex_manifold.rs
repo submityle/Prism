@@ -338,7 +338,11 @@ mod tests {
 
         assert_eq!(m.count, 4, "a flat face stack has four corners");
         // Normal runs a -> b, i.e. +y here.
-        assert!((m.normal - Vec3::Y).length() < 1.0e-4, "normal {:?}", m.normal);
+        assert!(
+            (m.normal - Vec3::Y).length() < 1.0e-4,
+            "normal {:?}",
+            m.normal
+        );
         assert!((m.normal.length() - 1.0).abs() < 1.0e-5);
         for p in m.points.iter().take(m.count as usize) {
             assert!((p.depth - 0.5).abs() < 1.0e-4, "depth {}", p.depth);
@@ -373,7 +377,11 @@ mod tests {
             .expect("overlapping yawed boxes form a manifold");
 
         assert!((m.normal.length() - 1.0).abs() < 1.0e-5);
-        assert!((m.normal - Vec3::Y).length() < 1.0e-3, "normal {:?}", m.normal);
+        assert!(
+            (m.normal - Vec3::Y).length() < 1.0e-3,
+            "normal {:?}",
+            m.normal
+        );
         assert!(
             (1..=4).contains(&m.count),
             "point count {} out of range",
@@ -397,8 +405,8 @@ mod tests {
             ConvexPose::new(center_b, Quat::IDENTITY),
         ];
         let pairs = [ConvexConvexPair::new(0, 1)];
-        let convex = cpu_convex_convex_manifold(&hulls, &poses, &pairs)[0]
-            .expect("convex path manifold");
+        let convex =
+            cpu_convex_convex_manifold(&hulls, &poses, &pairs)[0].expect("convex path manifold");
 
         let a = Obb::new(Vec3::ZERO, [Vec3::X, Vec3::Y, Vec3::Z], he);
         let b = Obb::new(center_b, [Vec3::X, Vec3::Y, Vec3::Z], he);
@@ -412,8 +420,18 @@ mod tests {
             obb.normal
         );
         // Depths form the same multiset (clip order may differ).
-        let mut cd: Vec<f32> = convex.points.iter().take(convex.count as usize).map(|p| p.depth).collect();
-        let mut od: Vec<f32> = obb.points.iter().take(obb.count as usize).map(|p| p.depth).collect();
+        let mut cd: Vec<f32> = convex
+            .points
+            .iter()
+            .take(convex.count as usize)
+            .map(|p| p.depth)
+            .collect();
+        let mut od: Vec<f32> = obb
+            .points
+            .iter()
+            .take(obb.count as usize)
+            .map(|p| p.depth)
+            .collect();
         cd.sort_by(|x, y| x.partial_cmp(y).unwrap());
         od.sort_by(|x, y| x.partial_cmp(y).unwrap());
         for (c, o) in cd.iter().zip(od.iter()) {

@@ -164,10 +164,16 @@ fn gpu_row_span_matches_cpu_golden_across_rows() {
         .remove(0)
         .span;
     match gpu_span {
-        None => assert!(covered.is_empty(), "twin empty but scan covered {covered:?}"),
+        None => assert!(
+            covered.is_empty(),
+            "twin empty but scan covered {covered:?}"
+        ),
         Some((k_lo, k_hi)) => {
             let expected: Vec<u32> = (k_lo..=k_hi).collect();
-            assert_eq!(covered, expected, "twin span not the contiguous covered run");
+            assert_eq!(
+                covered, expected,
+                "twin span not the contiguous covered run"
+            );
         }
     }
 }
@@ -187,7 +193,10 @@ fn gpu_row_span_and_depth_are_bit_exact_on_power_of_two_area() {
     let v1 = sv(16.0, 0.0, 0.5);
     let v2 = sv(0.0, 16.0, 1.0);
     let g = TriangleGradients::new(v0, v1, v2).expect("front-facing");
-    assert_eq!(g.double_area, 256.0, "double area must be 2^8 for exactness");
+    assert_eq!(
+        g.double_area, 256.0,
+        "double area must be 2^8 for exactness"
+    );
 
     let steps = 20u32;
     for y in 0..18u32 {
@@ -241,7 +250,11 @@ fn gpu_row_span_clamps_to_the_step_range() {
 
     // Positive control: the fully covered row clamps to exactly [0, steps].
     let span = twin.scan(&ctx, std::slice::from_ref(&q)).remove(0).span;
-    assert_eq!(span, Some((0, steps)), "fully covered row clamps to [0, steps]");
+    assert_eq!(
+        span,
+        Some((0, steps)),
+        "fully covered row clamps to [0, steps]"
+    );
 }
 
 #[test]

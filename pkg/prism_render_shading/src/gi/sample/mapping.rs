@@ -179,7 +179,12 @@ mod tests {
 
     #[test]
     fn basis_is_orthonormal() {
-        for n in [[0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.577_350_26, 0.577_350_26, 0.577_350_26], [1.0, 0.0, 0.0]] {
+        for n in [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [0.577_350_26, 0.577_350_26, 0.577_350_26],
+            [1.0, 0.0, 0.0],
+        ] {
             let (t, b) = orthonormal_basis(n);
             assert!((len(t) - 1.0).abs() < 1e-4, "t not unit for {n:?}");
             assert!((len(b) - 1.0).abs() < 1e-4, "b not unit for {n:?}");

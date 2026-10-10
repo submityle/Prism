@@ -109,7 +109,11 @@ struct FirstOrder {
 
 impl FirstOrder {
     /// The pass-through section `H(z) = 1`.
-    const IDENTITY: Self = Self { b0: 1.0, b1: 0.0, a1: 0.0 };
+    const IDENTITY: Self = Self {
+        b0: 1.0,
+        b1: 0.0,
+        a1: 0.0,
+    };
 }
 
 /// A biquad section `(b0 + b1 z^-1 + b2 z^-2) / (1 + a1 z^-1 + a2 z^-2)`.
@@ -124,7 +128,13 @@ struct Biquad {
 
 impl Biquad {
     /// The pass-through section `H(z) = 1`.
-    const IDENTITY: Self = Self { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0 };
+    const IDENTITY: Self = Self {
+        b0: 1.0,
+        b1: 0.0,
+        b2: 0.0,
+        a1: 0.0,
+        a2: 0.0,
+    };
 }
 
 /// The cascaded sections realising one Ambisonic order's compensation filter.
@@ -139,7 +149,10 @@ struct OrderSections {
 }
 
 impl OrderSections {
-    const IDENTITY: Self = Self { fos: FirstOrder::IDENTITY, biquad: Biquad::IDENTITY };
+    const IDENTITY: Self = Self {
+        fos: FirstOrder::IDENTITY,
+        biquad: Biquad::IDENTITY,
+    };
 }
 
 /// Designs the discrete first-order section for a real analog root `x_root`.
@@ -246,7 +259,10 @@ impl NfcCoeffs {
     /// Coefficients that pass every channel through unchanged.
     #[must_use]
     pub const fn identity() -> Self {
-        Self { order: MAX_NFC_ORDER, orders: [OrderSections::IDENTITY; MAX_NFC_ORDER + 1] }
+        Self {
+            order: MAX_NFC_ORDER,
+            orders: [OrderSections::IDENTITY; MAX_NFC_ORDER + 1],
+        }
     }
 
     /// Designs the stabilised NFC filter for a source at `source_distance`
@@ -282,11 +298,26 @@ impl NfcCoeffs {
         sound_speed: Sample,
     ) -> Self {
         let order = order.min(MAX_NFC_ORDER);
-        let r_src = if source_distance > MIN_DISTANCE { source_distance } else { MIN_DISTANCE };
-        let r_ref =
-            if reference_distance > MIN_DISTANCE { reference_distance } else { MIN_DISTANCE };
-        let fs = if sample_rate > MIN_SAMPLE_RATE { sample_rate } else { MIN_SAMPLE_RATE };
-        let c = if sound_speed > 0.0 { sound_speed } else { DEFAULT_SOUND_SPEED };
+        let r_src = if source_distance > MIN_DISTANCE {
+            source_distance
+        } else {
+            MIN_DISTANCE
+        };
+        let r_ref = if reference_distance > MIN_DISTANCE {
+            reference_distance
+        } else {
+            MIN_DISTANCE
+        };
+        let fs = if sample_rate > MIN_SAMPLE_RATE {
+            sample_rate
+        } else {
+            MIN_SAMPLE_RATE
+        };
+        let c = if sound_speed > 0.0 {
+            sound_speed
+        } else {
+            DEFAULT_SOUND_SPEED
+        };
         let k = 2.0 * fs;
 
         let mut orders = [OrderSections::IDENTITY; MAX_NFC_ORDER + 1];
@@ -518,7 +549,10 @@ mod tests {
         for (order, expected) in [(1, 2.0 as Sample), (2, 4.0), (3, 8.0)] {
             let g = order_dc_gain(&coeffs, order);
             let rel = ops::abs(g - expected) / expected;
-            assert!(rel < 5.0e-3, "order {order}: DC {g} != {expected} (rel {rel})");
+            assert!(
+                rel < 5.0e-3,
+                "order {order}: DC {g} != {expected} (rel {rel})"
+            );
         }
     }
 

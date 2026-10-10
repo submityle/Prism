@@ -84,19 +84,34 @@ mod tests {
         // dim 4: indices 0,1,2,3 then mirror 3,2,1,0 ...
         assert_eq!(wrap_texel(4, 4, WrapMode::MirroredRepeat), TexelAddr::In(3));
         assert_eq!(wrap_texel(5, 4, WrapMode::MirroredRepeat), TexelAddr::In(2));
-        assert_eq!(wrap_texel(-1, 4, WrapMode::MirroredRepeat), TexelAddr::In(0));
+        assert_eq!(
+            wrap_texel(-1, 4, WrapMode::MirroredRepeat),
+            TexelAddr::In(0)
+        );
     }
 
     #[test]
     fn mirror_clamp_to_edge_reflects_once_then_clamps() {
-        assert_eq!(wrap_texel(-1, 4, WrapMode::MirrorClampToEdge), TexelAddr::In(0));
-        assert_eq!(wrap_texel(-2, 4, WrapMode::MirrorClampToEdge), TexelAddr::In(1));
-        assert_eq!(wrap_texel(99, 4, WrapMode::MirrorClampToEdge), TexelAddr::In(3));
+        assert_eq!(
+            wrap_texel(-1, 4, WrapMode::MirrorClampToEdge),
+            TexelAddr::In(0)
+        );
+        assert_eq!(
+            wrap_texel(-2, 4, WrapMode::MirrorClampToEdge),
+            TexelAddr::In(1)
+        );
+        assert_eq!(
+            wrap_texel(99, 4, WrapMode::MirrorClampToEdge),
+            TexelAddr::In(3)
+        );
     }
 
     #[test]
     fn clamp_to_border_flags_out_of_range() {
-        assert_eq!(wrap_texel(-1, 4, WrapMode::ClampToBorder), TexelAddr::Border);
+        assert_eq!(
+            wrap_texel(-1, 4, WrapMode::ClampToBorder),
+            TexelAddr::Border
+        );
         assert_eq!(wrap_texel(4, 4, WrapMode::ClampToBorder), TexelAddr::Border);
         assert_eq!(wrap_texel(2, 4, WrapMode::ClampToBorder), TexelAddr::In(2));
     }

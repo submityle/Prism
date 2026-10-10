@@ -272,7 +272,11 @@ mod tests {
             cal.add_sample(2 * tick + 1000, GpuTick(tick));
         }
         let fit = cal.fit();
-        assert!((fit.slope_ns_per_tick - 2.0).abs() < 1e-9, "slope {}", fit.slope_ns_per_tick);
+        assert!(
+            (fit.slope_ns_per_tick - 2.0).abs() < 1e-9,
+            "slope {}",
+            fit.slope_ns_per_tick
+        );
         // Projection is exact on and off the sample grid.
         assert_eq!(cal.project_tick(GpuTick(150)), 1300);
         assert_eq!(cal.project_tick(GpuTick(1000)), 3000);
@@ -299,7 +303,10 @@ mod tests {
             b.add_sample(cpu, GpuTick(tick));
         }
         for probe in [0u64, 7, 123, 999, 50_000] {
-            assert_eq!(a.project_tick(GpuTick(probe)), b.project_tick(GpuTick(probe)));
+            assert_eq!(
+                a.project_tick(GpuTick(probe)),
+                b.project_tick(GpuTick(probe))
+            );
         }
     }
 
@@ -325,7 +332,10 @@ mod tests {
         let ema_slope = ema.fit().slope_ns_per_tick;
         assert!(raw_slope > 5.0, "raw slope should jump: {raw_slope}");
         // EMA moves toward the new slope but stays much closer to the prior.
-        assert!(ema_slope < raw_slope, "ema {ema_slope} should lag raw {raw_slope}");
+        assert!(
+            ema_slope < raw_slope,
+            "ema {ema_slope} should lag raw {raw_slope}"
+        );
         assert!((ema_slope - ema_before).abs() < (raw_slope - ema_before).abs());
     }
 
@@ -343,7 +353,11 @@ mod tests {
         for tick in [300u64, 400, 500] {
             cal.add_sample(400 + 4 * (tick - 300), GpuTick(tick));
         }
-        assert!((cal.fit().slope_ns_per_tick - 4.0).abs() < 1e-9, "{}", cal.fit().slope_ns_per_tick);
+        assert!(
+            (cal.fit().slope_ns_per_tick - 4.0).abs() < 1e-9,
+            "{}",
+            cal.fit().slope_ns_per_tick
+        );
     }
 
     #[test]

@@ -268,10 +268,19 @@ fn perspective_interpolate_endpoints_and_midpoint() {
         q(p, 0.4, 10.0, 0.0, 3.0, 9.0, 0.25, 1.0, 1.0),
     ];
     let got = check(&ctx, &gpu, &queries);
-    assert!(close(got[0].perspective, 3.0), "t=0 returns the first attribute");
-    assert!(close(got[2].perspective, 9.0), "t=1 returns the second attribute");
+    assert!(
+        close(got[0].perspective, 3.0),
+        "t=0 returns the first attribute"
+    );
+    assert!(
+        close(got[2].perspective, 9.0),
+        "t=1 returns the second attribute"
+    );
     // Weighted midpoint: (3*0.25 + 9*1.0) / (0.25 + 1.0) = 7.8.
-    assert!(close(got[1].perspective, 7.8), "t=0.5 blends perspective-correctly");
+    assert!(
+        close(got[1].perspective, 7.8),
+        "t=0.5 blends perspective-correctly"
+    );
 }
 
 #[test]
@@ -304,10 +313,19 @@ fn degenerate_fallbacks_stay_finite_and_match() {
         );
     }
     // The exactly-degenerate range returns the near-plane distance.
-    assert!(close(got[0].linearized, 10.0), "degenerate range linearizes to near");
-    assert!(close(got[0].view_z, 10.0), "degenerate range maps NDC to near");
+    assert!(
+        close(got[0].linearized, 10.0),
+        "degenerate range linearizes to near"
+    );
+    assert!(
+        close(got[0].view_z, 10.0),
+        "degenerate range maps NDC to near"
+    );
     // Zero reciprocal weights collapse to the screen-linear lerp: 4 + (10-4)*0.5.
-    assert!(close(got[0].perspective, 7.0), "zero weights fall back to the lerp");
+    assert!(
+        close(got[0].perspective, 7.0),
+        "zero weights fall back to the lerp"
+    );
 }
 
 #[test]
@@ -316,7 +334,10 @@ fn empty_batch_is_empty() {
         return;
     };
     let gpu = GpuDepthLinearize::new(&ctx);
-    assert!(gpu.eval(&ctx, &[]).is_empty(), "an empty query batch yields no results");
+    assert!(
+        gpu.eval(&ctx, &[]).is_empty(),
+        "an empty query batch yields no results"
+    );
     assert!(
         gpu.linearize_buffer(&ctx, &params(), &[]).is_empty(),
         "an empty depth slice yields no linearized values"
@@ -334,14 +355,21 @@ fn linearize_buffer_matches_scalar_golden() {
         let depths = [0.0_f32, 0.05, 0.2, 0.5, 0.73, 0.9, 1.0];
         let got = gpu.linearize_buffer(&ctx, &p, &depths);
         let want = linearize_buffer(&p, &depths);
-        assert_eq!(got.len(), want.len(), "length preserved (reverse_z={reverse})");
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "length preserved (reverse_z={reverse})"
+        );
         for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
             assert!(
                 close(g, w),
                 "buffer lane {i} mismatch (reverse_z={reverse}): gpu {g}, cpu {w}"
             );
             // Each lane equals the scalar linearize_01 of the same depth.
-            assert!(close(g, linearize_01(&p, depths[i])), "buffer lane {i} equals the scalar form");
+            assert!(
+                close(g, linearize_01(&p, depths[i])),
+                "buffer lane {i} equals the scalar form"
+            );
         }
     }
 }
@@ -375,7 +403,9 @@ fn random_batch_matches_cpu() {
             let inv_w_a = lcg(&mut state) * 2.0 + 0.25;
             let inv_w_b = lcg(&mut state) * 2.0 + 0.25;
             let t = lcg(&mut state);
-            queries.push(q(p, depth_01, linear, ndc_z, lerp_a, lerp_b, inv_w_a, inv_w_b, t));
+            queries.push(q(
+                p, depth_01, linear, ndc_z, lerp_a, lerp_b, inv_w_a, inv_w_b, t,
+            ));
         }
         // check asserts per-lane parity against the CPU golden.
         let got = check(&ctx, &gpu, &queries);

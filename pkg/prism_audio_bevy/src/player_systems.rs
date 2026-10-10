@@ -140,7 +140,10 @@ mod tests {
     fn test_app() -> App {
         let mut app = App::new();
         app.add_plugins(AudioRuntimePlugin::new(test_config()));
-        app.add_systems(Update, (sync_audio_players, apply_player_disposition).chain());
+        app.add_systems(
+            Update,
+            (sync_audio_players, apply_player_disposition).chain(),
+        );
         app
     }
 
@@ -185,7 +188,10 @@ mod tests {
             .volume = Volume::Linear(0.25);
         app.update();
 
-        let emitter = app.world().get::<AudioEmitter>(entity).expect("emitter present");
+        let emitter = app
+            .world()
+            .get::<AudioEmitter>(entity)
+            .expect("emitter present");
         assert!((emitter.importance - 0.25).abs() < 1.0e-4);
     }
 
@@ -209,7 +215,10 @@ mod tests {
             .stop();
         app.update();
 
-        assert!(app.world().get_entity(entity).is_err(), "entity should be despawned");
+        assert!(
+            app.world().get_entity(entity).is_err(),
+            "entity should be despawned"
+        );
     }
 
     #[test]
@@ -234,7 +243,10 @@ mod tests {
         assert!(app.world().get::<AudioPlayer>(entity).is_none());
         assert!(app.world().get::<PlaybackSettings>(entity).is_none());
         assert!(app.world().get::<AudioEmitter>(entity).is_none());
-        assert!(app.world().get_entity(entity).is_ok(), "entity itself should remain");
+        assert!(
+            app.world().get_entity(entity).is_ok(),
+            "entity itself should remain"
+        );
     }
 
     #[test]
@@ -256,7 +268,15 @@ mod tests {
             .stop();
         app.update();
 
-        assert!(!app.world().get::<AudioPlayer>(entity).expect("player present").stop_requested);
-        assert!(app.world().get::<AudioEmitter>(entity).is_some(), "entity and emitter remain");
+        assert!(
+            !app.world()
+                .get::<AudioPlayer>(entity)
+                .expect("player present")
+                .stop_requested
+        );
+        assert!(
+            app.world().get::<AudioEmitter>(entity).is_some(),
+            "entity and emitter remain"
+        );
     }
 }

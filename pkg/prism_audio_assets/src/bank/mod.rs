@@ -19,9 +19,7 @@ pub mod registry;
 
 pub use entry::{EntryId, MediaEntry, MediaFormat, Residency};
 pub use handle::{BankLoadError, BankMemoryUsage, LoadedBank, LoadedMedia};
-pub use manifest::{
-    BankId, BankManifest, ContainerRef, EventRef, ManifestError, PatchRef,
-};
+pub use manifest::{BankId, BankManifest, ContainerRef, EventRef, ManifestError, PatchRef};
 pub use registry::{BankRegistry, BankRegistryError};
 
 #[cfg(test)]
@@ -35,12 +33,7 @@ mod tests {
     const EPSILON: f32 = 1.0e-4;
 
     /// Builds a minimal canonical PCM WAV file in memory.
-    fn build_wav(
-        channels: u16,
-        sample_rate: u32,
-        bits_per_sample: u16,
-        data: &[u8],
-    ) -> Vec<u8> {
+    fn build_wav(channels: u16, sample_rate: u32, bits_per_sample: u16, data: &[u8]) -> Vec<u8> {
         let block_align = channels * (bits_per_sample / 8);
         let byte_rate = sample_rate * u32::from(block_align);
         let mut out = Vec::new();
@@ -108,25 +101,22 @@ mod tests {
     #[test]
     fn dependency_must_be_loaded_first_and_blocks_unload() {
         let wav = mono_wav(8);
-        let base = BankManifest::new(BankId(1), String::from("base"), 1).with_media(
-            MediaEntry::new(
+        let base =
+            BankManifest::new(BankId(1), String::from("base"), 1).with_media(MediaEntry::new(
                 EntryId(1),
                 String::from("tone"),
                 MediaFormat::new(CodecTag::Pcm, 1, 48_000, Some(8)),
                 Residency::Memory,
                 0,
                 wav.len() as u64,
-            ),
-        );
-        let dependent = BankManifest::new(BankId(2), String::from("level"), 1)
-            .with_dependency(BankId(1));
+            ));
+        let dependent =
+            BankManifest::new(BankId(2), String::from("level"), 1).with_dependency(BankId(1));
         let registry = DecoderRegistry::with_native();
         let mut banks = BankRegistry::new();
 
         // Loading the dependent before its dependency fails.
-        let err = banks
-            .load(dependent.clone(), &[], &registry)
-            .unwrap_err();
+        let err = banks.load(dependent.clone(), &[], &registry).unwrap_err();
         assert_eq!(
             err,
             BankRegistryError::MissingDependency {
@@ -257,9 +247,9 @@ mod tests {
         let err = banks.load(manifest, &wav, &registry).unwrap_err();
         assert_eq!(
             err,
-            BankRegistryError::Load(BankLoadError::Manifest(
-                ManifestError::DuplicateMediaId(EntryId(1))
-            ))
+            BankRegistryError::Load(BankLoadError::Manifest(ManifestError::DuplicateMediaId(
+                EntryId(1)
+            )))
         );
     }
 

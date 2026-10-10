@@ -175,7 +175,10 @@ mod tests {
         for _ in 0..2000 {
             diff += (smooth.next_sample() - stepped.next_sample()).abs();
         }
-        assert!(diff > 1.0, "expected smooth and stepped to differ, diff={diff}");
+        assert!(
+            diff > 1.0,
+            "expected smooth and stepped to differ, diff={diff}"
+        );
     }
 
     #[test]

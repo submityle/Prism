@@ -318,7 +318,7 @@ fn epoch_defers_until_safe_and_never_while_pinned() {
     drop(g);
 
     let g2 = h.pin(); // pinned at epoch 1
-    // Advances 1 -> 2; epoch-0 garbage is now unobservable and must run exactly once.
+                      // Advances 1 -> 2; epoch-0 garbage is now unobservable and must run exactly once.
     g2.flush();
     assert_eq!(ran.load(Ordering::SeqCst), 1);
     g2.flush();
@@ -447,7 +447,11 @@ fn treiber_concurrent_push_pop_no_loss_no_dup() {
                 assert!(all.insert(v), "Treiber stack yielded a duplicate: {v}");
             }
         }
-        assert_eq!(all.len(), TOTAL, "Treiber stack lost items (ABA/reclaim bug?)");
+        assert_eq!(
+            all.len(),
+            TOTAL,
+            "Treiber stack lost items (ABA/reclaim bug?)"
+        );
     });
 
     assert!(stack.is_empty());
@@ -459,7 +463,10 @@ fn treiber_concurrent_push_pop_no_loss_no_dup() {
 /// leaked or double-dropped elements.
 #[derive(Debug)]
 struct DropProbe {
-    #[expect(dead_code, reason = "identity is carried for debugging; tests assert on drops, not reads")]
+    #[expect(
+        dead_code,
+        reason = "identity is carried for debugging; tests assert on drops, not reads"
+    )]
     id: usize,
     dropped: Arc<AtomicUsize>,
 }

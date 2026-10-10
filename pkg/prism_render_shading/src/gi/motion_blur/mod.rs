@@ -12,9 +12,8 @@
 //! jittered along-velocity sampling with soft depth classification and
 //! cone/cylinder foreground-background weighting.
 
-
-pub mod weights;
-pub mod sampling;
 pub mod reconstruction;
+pub mod sampling;
+pub mod weights;
 
 pub use reconstruction::{reconstruct, PixelSample, ReconstructionParams};

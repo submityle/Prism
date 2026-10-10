@@ -117,7 +117,12 @@ impl Attenuation {
         let reference_distance = reference_distance.max(MIN_REFERENCE_DISTANCE);
         let max_distance = max_distance.max(reference_distance);
         let rolloff_factor = rolloff_factor.max(0.0);
-        Self { model, reference_distance, max_distance, rolloff_factor }
+        Self {
+            model,
+            reference_distance,
+            max_distance,
+            rolloff_factor,
+        }
     }
 
     /// Evaluates the linear gain multiplier for a source at `distance` metres.

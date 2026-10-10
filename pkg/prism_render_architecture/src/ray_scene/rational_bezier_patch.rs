@@ -479,7 +479,10 @@ mod tests {
         let heavy = RationalBezierPatch::new(net, heavy);
         let peak_unit = unit.point(0.5, 0.5)[2];
         let peak_heavy = heavy.point(0.5, 0.5)[2];
-        assert!(peak_heavy > peak_unit, "heavy {peak_heavy} <= unit {peak_unit}");
+        assert!(
+            peak_heavy > peak_unit,
+            "heavy {peak_heavy} <= unit {peak_unit}"
+        );
         assert!(peak_heavy < 0.6, "peak must stay below control height");
         assert!(peak_heavy > 0.5, "heavy weights should pull near the top");
     }
@@ -497,7 +500,7 @@ mod tests {
         let s2 = 2.0f32.sqrt();
         let inner = 2.0 - s2; // ≈ 0.585786
         let wmid = (1.0 + s2) / 3.0; // ≈ 0.804738
-        // u-profile control points (x, y) from (1,0) to (0,1):
+                                     // u-profile control points (x, y) from (1,0) to (0,1):
         let prof = [[1.0, 0.0], [1.0, inner], [inner, 1.0], [0.0, 1.0]];
         let wrow = [1.0f32, wmid, wmid, 1.0];
         let mut control = [[0.0f32; 3]; 16];
@@ -516,7 +519,10 @@ mod tests {
             let v = rng.range(0.0, 1.0);
             let pt = p.point(u, v);
             let r = (pt[0] * pt[0] + pt[1] * pt[1]).sqrt();
-            assert!((r - 1.0).abs() < 1e-3, "radius {r} off unit circle at u={u}");
+            assert!(
+                (r - 1.0).abs() < 1e-3,
+                "radius {r} off unit circle at u={u}"
+            );
         }
     }
 

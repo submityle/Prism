@@ -147,9 +147,7 @@ mod tests {
         let handle = pool.spawn_catch(|| {
             panic!("surfaced at join");
         });
-        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            handle.join()
-        }));
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle.join()));
         assert!(caught.is_err());
     }
 

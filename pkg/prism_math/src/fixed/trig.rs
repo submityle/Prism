@@ -108,8 +108,16 @@ impl Fixed {
             Self::FRAC_PI_2.saturating_sub(atan_unit(ax.saturating_div(ay)))
         };
         // Place into the correct quadrant from the signs of x and y.
-        let a = if x.is_negative() { Self::PI.saturating_sub(a) } else { a };
-        if y.is_negative() { a.saturating_neg() } else { a }
+        let a = if x.is_negative() {
+            Self::PI.saturating_sub(a)
+        } else {
+            a
+        };
+        if y.is_negative() {
+            a.saturating_neg()
+        } else {
+            a
+        }
     }
 }
 

@@ -226,7 +226,10 @@ impl GpuIndexedBilinearPatchMeshBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -282,7 +285,10 @@ impl GpuIndexedBilinearPatchMeshBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -433,7 +439,11 @@ mod tests {
             let gpu = GpuIndexedBilinearPatchMeshBvhBuffers::from_bvh(&bvh);
             let mut hits = 0;
             for _ in 0..600 {
-                let o = [rng.range(-1.0, 5.0), rng.range(1.0, 3.0), rng.range(-1.0, 5.0)];
+                let o = [
+                    rng.range(-1.0, 5.0),
+                    rng.range(1.0, 3.0),
+                    rng.range(-1.0, 5.0),
+                ];
                 let target = [rng.range(0.0, 4.0), 0.0, rng.range(0.0, 4.0)];
                 let d = [target[0] - o[0], target[1] - o[1], target[2] - o[2]];
                 let ray = Ray::infinite(o, d);

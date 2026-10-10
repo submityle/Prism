@@ -78,8 +78,7 @@ impl LodSavings {
     /// number for the profiler.
     #[must_use]
     pub fn mean(&self) -> Sample {
-        (self.oversampling + self.reverb + self.spatial + self.propagation + self.modulation)
-            / 5.0
+        (self.oversampling + self.reverb + self.spatial + self.propagation + self.modulation) / 5.0
     }
 }
 

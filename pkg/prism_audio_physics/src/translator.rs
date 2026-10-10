@@ -26,9 +26,9 @@
 //! [`prism_audio_procedural::contact`] event stream feeding
 //! `prism_audio_core::scheduler::EventScheduler`.
 
+use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
 use core::mem;
 
 use bevy_math::Vec3;
@@ -37,6 +37,7 @@ use prism_audio_procedural::contact::{
     merge_impacts, ContactId, ImpactEvent, SeparationEvent, SustainEvent,
 };
 
+use crate::body::BodyAudioState;
 use crate::cluster::cluster_far_impacts;
 use crate::config::TranslatorConfig;
 use crate::contact_id::{procedural_id, ContactKey};
@@ -46,7 +47,6 @@ use crate::kinematics::{decompose, relative_velocity};
 use crate::material::MaterialResolver;
 use crate::offset::BlockClock;
 use crate::roughness::{strike_position, surface_roughness};
-use crate::body::BodyAudioState;
 
 /// The procedural event batch produced for one audio block.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -116,7 +116,10 @@ impl ContactAudioTranslator {
     #[inline]
     fn contact_id_for(&mut self, view: &ContactManifoldView) -> (ContactKey, ContactId) {
         let key = ContactKey::new(view.body_a, view.body_b);
-        let id = *self.contacts.entry(key).or_insert_with(|| procedural_id(key));
+        let id = *self
+            .contacts
+            .entry(key)
+            .or_insert_with(|| procedural_id(key));
         (key, id)
     }
 
@@ -150,11 +153,8 @@ impl ContactAudioTranslator {
             ContactPhase::Started => {
                 let m = reduced_mass(a.inverse_mass(), b.inverse_mass());
                 let est = ImpulseEstimate::from_split(m, split, self.config.restitution);
-                let strike = strike_position(
-                    point,
-                    a.center_of_mass(),
-                    self.config.default_body_extent,
-                );
+                let strike =
+                    strike_position(point, a.center_of_mass(), self.config.default_body_extent);
                 let offset = self.clock.sample_offset(substep_fraction);
                 let impact = ImpactEvent::new(
                     contact,
@@ -326,12 +326,24 @@ mod tests {
         let b = body(2, Vec3::ZERO, 0.0, 20);
 
         t.begin_block(BlockClock::new(48_000, 128));
-        t.ingest(&manifold(1, 2, Vec3::ZERO, 0.01), &a, &b, ContactPhase::Started, 0.0);
+        t.ingest(
+            &manifold(1, 2, Vec3::ZERO, 0.01),
+            &a,
+            &b,
+            ContactPhase::Started,
+            0.0,
+        );
         let _ = t.drain();
         assert_eq!(t.tracked_contacts(), 1);
 
         t.begin_block(BlockClock::new(48_000, 128));
-        t.ingest(&manifold(1, 2, Vec3::ZERO, 0.0), &a, &b, ContactPhase::Ended, 0.0);
+        t.ingest(
+            &manifold(1, 2, Vec3::ZERO, 0.0),
+            &a,
+            &b,
+            ContactPhase::Ended,
+            0.0,
+        );
         let drive = t.drain();
         assert_eq!(drive.separations.len(), 1);
         assert_eq!(t.tracked_contacts(), 0);
@@ -351,7 +363,12 @@ mod tests {
         for i in 0..5u64 {
             let a = body(i * 2 + 1, Vec3::new(0.0, 1.0 + i as f32, 0.0), 1.0, 10);
             let b = body(i * 2 + 2, Vec3::ZERO, 0.0, 20);
-            let view = manifold(i * 2 + 1, i * 2 + 2, Vec3::new(i as f32 * 100.0, 0.0, 0.0), 0.01);
+            let view = manifold(
+                i * 2 + 1,
+                i * 2 + 2,
+                Vec3::new(i as f32 * 100.0, 0.0, 0.0),
+                0.01,
+            );
             t.ingest(&view, &a, &b, ContactPhase::Started, 0.0);
         }
         let drive = t.drain();
@@ -367,7 +384,13 @@ mod tests {
         t.begin_block(BlockClock::new(48_000, 128));
         let a = body(1, Vec3::new(0.0, 2.0, 0.0), 0.0, 10);
         let b = body(2, Vec3::ZERO, 0.0, 20);
-        t.ingest(&manifold(1, 2, Vec3::ZERO, 0.01), &a, &b, ContactPhase::Started, 0.0);
+        t.ingest(
+            &manifold(1, 2, Vec3::ZERO, 0.01),
+            &a,
+            &b,
+            ContactPhase::Started,
+            0.0,
+        );
         let drive = t.drain();
         assert_eq!(drive.impacts.len(), 1);
         assert!(drive.impacts[0].impulse.abs() < 1e-6);

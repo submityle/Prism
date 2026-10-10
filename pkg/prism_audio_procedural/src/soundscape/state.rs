@@ -101,7 +101,11 @@ impl SoundscapeState {
         }
         let f = x - ops::floor(x);
         // `floor` of a tiny negative can round to exactly `1.0`; keep it below.
-        if f >= 1.0 { 0.0 } else { f }
+        if f >= 1.0 {
+            0.0
+        } else {
+            f
+        }
     }
 }
 

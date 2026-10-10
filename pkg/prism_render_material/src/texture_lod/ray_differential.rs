@@ -67,7 +67,11 @@ impl RayDifferential {
     #[must_use]
     pub fn major_axis_uv(self, tex_width: u32, tex_height: u32) -> [f32; 2] {
         let (lx, ly) = self.axis_lengths_texels(tex_width, tex_height);
-        if lx >= ly { self.d_dx } else { self.d_dy }
+        if lx >= ly {
+            self.d_dx
+        } else {
+            self.d_dy
+        }
     }
 
     /// Anisotropic LOD: base LOD from the minor axis plus the clamped
@@ -124,7 +128,11 @@ mod tests {
         // major=8 texels, minor=1 texel -> anisotropy 8, lod from 8/8=1 -> 0.
         let rd = RayDifferential::new([8.0 / 256.0, 0.0], [0.0, 1.0 / 256.0]);
         let a = rd.anisotropic_mip(256, 256, 8.0, 16.0);
-        assert!((a.anisotropy - 8.0).abs() < 1.0e-4, "aniso={}", a.anisotropy);
+        assert!(
+            (a.anisotropy - 8.0).abs() < 1.0e-4,
+            "aniso={}",
+            a.anisotropy
+        );
         assert!(a.lod.abs() < 1.0e-5, "lod={}", a.lod);
     }
 
@@ -132,7 +140,11 @@ mod tests {
     fn anisotropy_is_capped() {
         let rd = RayDifferential::new([64.0 / 256.0, 0.0], [0.0, 1.0 / 256.0]);
         let a = rd.anisotropic_mip(256, 256, 8.0, 4.0);
-        assert!((a.anisotropy - 4.0).abs() < 1.0e-5, "aniso={}", a.anisotropy);
+        assert!(
+            (a.anisotropy - 4.0).abs() < 1.0e-5,
+            "aniso={}",
+            a.anisotropy
+        );
     }
 
     #[test]

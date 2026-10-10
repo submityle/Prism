@@ -615,10 +615,7 @@ mod tests {
         let tex = AlphaTexture::new(w, h, texels).unwrap();
         for y in 0..h {
             for x in 0..w {
-                let uv = [
-                    (x as f32 + 0.5) / w as f32,
-                    (y as f32 + 0.5) / h as f32,
-                ];
+                let uv = [(x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32];
                 assert!(
                     approx(tex.sample(uv), tex.texel(x, y), 1e-6),
                     "center ({x},{y}) sample {} vs texel {}",
@@ -685,12 +682,7 @@ mod tests {
             [0.75, 0.5],
             [0.75, 0.5],
         ];
-        let indices = vec![
-            [0, 1, 2],
-            [0, 2, 3],
-            [4, 5, 6],
-            [4, 6, 7],
-        ];
+        let indices = vec![[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]];
         let mesh = TriangleMesh::new(positions, vec![], uvs, indices).unwrap();
         // Mask: texel (0,0) = 0 (transparent), texel (1,0) = 0.8 (opaque at
         // the 0.5 cutoff, but transparent once the cutoff rises above 0.8).

@@ -285,7 +285,11 @@ fn node_aabb(tree: &Lbvh, encoded: u32) -> Aabb {
 /// including the lowest-index rule on a distance tie. Returns [`None`] when the
 /// ray misses every triangle or the tree is empty.
 #[must_use]
-pub fn cpu_trimesh_raycast_bvh(mesh: &Trimesh, lbvh: &Lbvh, ray: &MeshRay) -> Option<TrimeshRayHit> {
+pub fn cpu_trimesh_raycast_bvh(
+    mesh: &Trimesh,
+    lbvh: &Lbvh,
+    ray: &MeshRay,
+) -> Option<TrimeshRayHit> {
     if lbvh.num_leaves == 0 {
         return None;
     }
@@ -347,9 +351,7 @@ pub fn cpu_trimesh_raycast_built(mesh: &Trimesh, ray: &MeshRay) -> Option<Trimes
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        cpu_trimesh_raycast, cpu_trimesh_raycast_built, cpu_trimesh_raycast_bvh, MeshRay,
-    };
+    use super::{cpu_trimesh_raycast, cpu_trimesh_raycast_built, cpu_trimesh_raycast_bvh, MeshRay};
     use crate::collider::Trimesh;
     use glam::Vec3;
 
@@ -374,10 +376,17 @@ mod tests {
         let ray = MeshRay::new(Vec3::new(0.25, 0.25, 5.0), Vec3::new(0.0, 0.0, -1.0), 100.0);
         let hit = cpu_trimesh_raycast(&mesh, &ray).expect("hits the quad");
         assert_eq!(hit.triangle, 0, "lower quad triangle covers (0.25, 0.25)");
-        assert!((hit.distance - 5.0).abs() < 1e-4, "distance was {}", hit.distance);
+        assert!(
+            (hit.distance - 5.0).abs() < 1e-4,
+            "distance was {}",
+            hit.distance
+        );
         assert!((hit.point - Vec3::new(0.25, 0.25, 0.0)).length() < 1e-4);
         assert!(hit.front_face, "ray comes from the +normal side");
-        assert!((hit.normal - Vec3::Z).length() < 1e-4, "normal points back at origin");
+        assert!(
+            (hit.normal - Vec3::Z).length() < 1e-4,
+            "normal points back at origin"
+        );
     }
 
     #[test]
@@ -395,14 +404,20 @@ mod tests {
     fn misses_when_aimed_away() {
         let mesh = unit_quad();
         let ray = MeshRay::new(Vec3::new(0.25, 0.25, 5.0), Vec3::new(0.0, 0.0, 1.0), 100.0);
-        assert!(cpu_trimesh_raycast(&mesh, &ray).is_none(), "ray travels away from quad");
+        assert!(
+            cpu_trimesh_raycast(&mesh, &ray).is_none(),
+            "ray travels away from quad"
+        );
     }
 
     #[test]
     fn respects_max_distance() {
         let mesh = unit_quad();
         let ray = MeshRay::new(Vec3::new(0.25, 0.25, 5.0), Vec3::new(0.0, 0.0, -1.0), 2.0);
-        assert!(cpu_trimesh_raycast(&mesh, &ray).is_none(), "quad is 5 away, max is 2");
+        assert!(
+            cpu_trimesh_raycast(&mesh, &ray).is_none(),
+            "quad is 5 away, max is 2"
+        );
     }
 
     #[test]
@@ -429,7 +444,11 @@ mod tests {
         assert_eq!(brute.triangle, bvh.triangle, "same winning triangle");
         assert!((brute.distance - bvh.distance).abs() < 1e-5);
         // The nearest quad is at z = 7 (distance 13 from z = 20).
-        assert!((brute.distance - 13.0).abs() < 1e-4, "distance was {}", brute.distance);
+        assert!(
+            (brute.distance - 13.0).abs() < 1e-4,
+            "distance was {}",
+            brute.distance
+        );
         // Quad k = 7 occupies triangles 14 and 15; the off-diagonal point lands
         // in the lower-right triangle (even index), so 14 must win.
         assert_eq!(brute.triangle, 14, "nearest lower-right triangle wins");

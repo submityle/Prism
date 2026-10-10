@@ -61,8 +61,10 @@ fn dvec3_index() {
 
 #[test]
 fn dmat3_inverse_round_trip() {
-    let m = DMat3::from_quat(DQuat::from_axis_angle(dvec3(1.0, 2.0, 3.0).normalize(), 0.9))
-        * DMat3::from_scale(dvec3(2.0, 0.5, 1.5));
+    let m = DMat3::from_quat(DQuat::from_axis_angle(
+        dvec3(1.0, 2.0, 3.0).normalize(),
+        0.9,
+    )) * DMat3::from_scale(dvec3(2.0, 0.5, 1.5));
     let id = m * m.inverse();
     assert!(dvec3_approx(id * DVec3::X, DVec3::X, 1e-12));
     assert!(dvec3_approx(id * DVec3::Y, DVec3::Y, 1e-12));
@@ -98,7 +100,11 @@ fn dmat4_mul_associates() {
     let lhs = (a * b) * c;
     let rhs = a * (b * c);
     let p = dvec3(1.0, -2.0, 3.0);
-    assert!(dvec3_approx(lhs.transform_point3(p), rhs.transform_point3(p), 1e-12));
+    assert!(dvec3_approx(
+        lhs.transform_point3(p),
+        rhs.transform_point3(p),
+        1e-12
+    ));
 }
 
 // ---- DQuat ----------------------------------------------------------------
@@ -207,7 +213,10 @@ const CELL: f64 = GridCell::CELL_SIZE;
 #[test]
 fn gridcell_from_dvec3_floor() {
     assert_eq!(GridCell::from_dvec3(dvec3(0.0, 0.0, 0.0)), GridCell::ZERO);
-    assert_eq!(GridCell::from_dvec3(dvec3(CELL, 2.0 * CELL, -1.0)), GridCell::new(1, 2, -1));
+    assert_eq!(
+        GridCell::from_dvec3(dvec3(CELL, 2.0 * CELL, -1.0)),
+        GridCell::new(1, 2, -1)
+    );
     // Just below a boundary stays in the lower cell; negatives floor downward.
     assert_eq!(GridCell::from_dvec3(dvec3(-0.001, 0.0, 0.0)).x, -1);
 }
@@ -234,7 +243,10 @@ fn gridposition_round_trip_preserves_mm_at_100km() {
     // The exact f64 position reconstructs to within one local-offset ULP:
     // CELL * 2^-23 ~= 0.122 mm.
     let tol = CELL * 2f64.powi(-23);
-    assert!(dvec3_approx(back, world, tol), "round trip error exceeded {tol} m");
+    assert!(
+        dvec3_approx(back, world, tol),
+        "round trip error exceeded {tol} m"
+    );
     // Offset is canonicalised into [0, CELL).
     assert!(gp.offset.x >= 0.0 && gp.offset.x < CELL as f32);
 }
@@ -250,13 +262,21 @@ fn rebasing_resolves_mm_jitter_that_naive_f32_loses() {
     // at ~123 km the f32 ULP (~0.0156 m) swallows it entirely.
     let n0 = base.as_vec3();
     let n1 = (base + dvec3(0.001, 0.0, 0.0)).as_vec3();
-    assert_eq!(n0, n1, "naive f32 world coords should collapse a 1 mm offset");
+    assert_eq!(
+        n0, n1,
+        "naive f32 world coords should collapse a 1 mm offset"
+    );
 
     // Rebasing both points to the camera's cell keeps the 1 mm resolvable.
     let cam = GridCell::from_dvec3(base);
     let r0 = p0.rebased_offset(cam);
     let r1 = p1.rebased_offset(cam);
-    assert!((r1.x - r0.x - 0.001).abs() <= 1e-4, "rebased 1 mm offset lost: {} vs {}", r0.x, r1.x);
+    assert!(
+        (r1.x - r0.x - 0.001).abs() <= 1e-4,
+        "rebased 1 mm offset lost: {} vs {}",
+        r0.x,
+        r1.x
+    );
 }
 
 #[test]
@@ -268,7 +288,10 @@ fn rebasing_small_offsets_stay_submillimetre_near_camera() {
     let rebased = gp.rebased_offset(cam);
     // Reconstruct the true camera-relative position in f64 and compare.
     let truth = (world - cam.origin()).as_vec3();
-    assert!((rebased - truth).length() <= 5e-4, "near-camera rebasing exceeded 0.5 mm");
+    assert!(
+        (rebased - truth).length() <= 5e-4,
+        "near-camera rebasing exceeded 0.5 mm"
+    );
 }
 
 #[test]
@@ -281,7 +304,11 @@ fn gridposition_recenter_folds_drift_into_cell() {
     assert_eq!(fixed.cell.x, 6);
     assert!(fixed.offset.x >= 0.0 && fixed.offset.x < CELL as f32);
     // Recentering preserves the world position (within local-offset ULP).
-    assert!(dvec3_approx(fixed.to_dvec3(), before, CELL * 2f64.powi(-23)));
+    assert!(dvec3_approx(
+        fixed.to_dvec3(),
+        before,
+        CELL * 2f64.powi(-23)
+    ));
 }
 
 #[test]
@@ -293,5 +320,8 @@ fn relative_transform_matches_translation() {
     assert_eq!(xf.matrix3, DMat3::IDENTITY);
     // Transforming a local point adds the exact inter-cell translation.
     let local = dvec3(1.0, 2.0, 3.0);
-    assert_eq!(xf.transform_point3(local), local + a.relative_translation(b));
+    assert_eq!(
+        xf.transform_point3(local),
+        local + a.relative_translation(b)
+    );
 }

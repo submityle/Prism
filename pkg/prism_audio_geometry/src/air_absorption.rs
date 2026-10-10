@@ -50,8 +50,8 @@
 //! never duplicates, the geometric spreading and surface/edge colour the path
 //! builders already compute.
 
-use prism_audio_core::math::{Sample, db_to_linear};
-use prism_audio_spatial::air::{AirAbsorption, AtmosphericConditions, absorption_db_per_metre};
+use prism_audio_core::math::{db_to_linear, Sample};
+use prism_audio_spatial::air::{absorption_db_per_metre, AirAbsorption, AtmosphericConditions};
 use prism_audio_spatial::band_spectrum::{
     BandGains, PROPAGATION_BAND_CENTERS, PROPAGATION_BAND_COUNT,
 };
@@ -147,13 +147,13 @@ pub fn apply_air_absorption(paths: &mut [PropagationPath], config: &GeometricCon
 
 #[cfg(test)]
 mod tests {
-    use super::{AtmosphericFilter, apply_air_absorption};
+    use super::{apply_air_absorption, AtmosphericFilter};
     use crate::config::GeometricConfig;
     use bevy_math::Vec3;
     use prism_audio_spatial::air::AtmosphericConditions;
     use prism_audio_spatial::band_spectrum::BandGains;
     use prism_audio_spatial::doppler::SPEED_OF_SOUND_MPS;
-    use prism_audio_spatial::propagation::{FULL_BAND_CUTOFF_HZ, PathKind, PropagationPath};
+    use prism_audio_spatial::propagation::{PathKind, PropagationPath, FULL_BAND_CUTOFF_HZ};
 
     const SR: u32 = 48_000;
 
@@ -206,7 +206,10 @@ mod tests {
         for &d in &[0.0_f32, 1.0, 50.0, 1_000.0, 100_000.0] {
             for g in filter.band_gains(d).bands() {
                 assert!(g.is_finite(), "band gain must be finite at distance {d}");
-                assert!((0.0..=1.0).contains(&g), "band gain {g} out of range at {d}");
+                assert!(
+                    (0.0..=1.0).contains(&g),
+                    "band gain {g} out of range at {d}"
+                );
             }
         }
     }

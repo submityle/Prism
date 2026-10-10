@@ -264,11 +264,10 @@ mod tests {
         let field = padded_cube_field();
         let origin = [0.5, 0.5, 3.0];
         let dir = [0.0, 0.0, -1.0];
-        let enhanced =
-            enhanced_sphere_trace(&field, origin, dir, 10.0, 1e-3, 256, 1.8)
-                .expect("enhanced trace must hit");
-        let naive = sphere_trace(&field, origin, dir, 10.0, 1e-3, 256)
-            .expect("naive trace must hit");
+        let enhanced = enhanced_sphere_trace(&field, origin, dir, 10.0, 1e-3, 256, 1.8)
+            .expect("enhanced trace must hit");
+        let naive =
+            sphere_trace(&field, origin, dir, 10.0, 1e-3, 256).expect("naive trace must hit");
         assert!(
             (enhanced.t() - naive.t()).abs() < 0.05,
             "enhanced t {} vs naive t {}",

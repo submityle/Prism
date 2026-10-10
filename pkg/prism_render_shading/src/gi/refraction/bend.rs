@@ -253,7 +253,10 @@ mod tests {
     const EPS: f32 = 1.0e-4;
 
     fn assert_finite_vec3(v: Vec3) {
-        assert!(v.x.is_finite() && v.y.is_finite() && v.z.is_finite(), "{v:?}");
+        assert!(
+            v.x.is_finite() && v.y.is_finite() && v.z.is_finite(),
+            "{v:?}"
+        );
     }
 
     fn assert_finite_vec2(v: Vec2) {

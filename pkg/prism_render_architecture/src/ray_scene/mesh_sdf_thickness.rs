@@ -20,8 +20,8 @@
 //! the normal normalization performs, so it is transcendental-free and
 //! reproducible. [`sdf_thickness`] returns a distance in `0..=max_distance`.
 
-use super::mesh_signed_distance_field::SignedDistanceField;
 use super::mesh_sdf_raymarch::sample_signed_distance;
+use super::mesh_signed_distance_field::SignedDistanceField;
 
 /// Probes the solid thickness behind `position` along the inward normal,
 /// returning the distance in `0..=max_distance`.
@@ -86,7 +86,9 @@ fn normalize(vector: [f32; 3]) -> Option<[f32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::sdf_thickness;
-    use crate::ray_scene::mesh_signed_distance_field::{signed_distance_field, SignedDistanceField};
+    use crate::ray_scene::mesh_signed_distance_field::{
+        signed_distance_field, SignedDistanceField,
+    };
     use crate::ray_scene::mesh_voxel_padding::pad_voxel_grid;
     use crate::ray_scene::mesh_voxelize::voxelize_surface;
     use crate::ray_scene::triangle_mesh::TriangleMesh;
@@ -177,9 +179,15 @@ mod tests {
     fn result_stays_in_range() {
         let field = padded_cube_field();
         let max_distance = 2.0;
-        let thickness =
-            sdf_thickness(&field, [0.5, 0.5, 1.0], [0.0, 0.0, 1.0], max_distance, 0.01, 400)
-                .unwrap();
+        let thickness = sdf_thickness(
+            &field,
+            [0.5, 0.5, 1.0],
+            [0.0, 0.0, 1.0],
+            max_distance,
+            0.01,
+            400,
+        )
+        .unwrap();
         assert!(
             (0.0..=max_distance).contains(&thickness),
             "thickness stays within the probe budget",

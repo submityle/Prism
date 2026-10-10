@@ -215,9 +215,9 @@ fn build_output_stream(
         SampleFormat::I32 => build_typed::<i32>(device, config, renderer, block_frames, errors),
         SampleFormat::I8 => build_typed::<i8>(device, config, renderer, block_frames, errors),
         SampleFormat::U8 => build_typed::<u8>(device, config, renderer, block_frames, errors),
-        other => Err(DeviceError::UnsupportedSampleFormat(
-            alloc::format!("{other:?}"),
-        )),
+        other => Err(DeviceError::UnsupportedSampleFormat(alloc::format!(
+            "{other:?}"
+        ))),
     }
 }
 
@@ -286,7 +286,7 @@ mod tests {
     use crate::render::BlockRenderer;
     use cpal::Sample;
     use prism_audio_core::buffer::ChannelLayout;
-    use prism_audio_rt::{AudioRuntimeConfig, runtime};
+    use prism_audio_rt::{runtime, AudioRuntimeConfig};
 
     #[test]
     fn channel_counts_map_to_layouts() {

@@ -51,7 +51,11 @@ const MIN_DENOM: f32 = 1.0e-5;
 pub fn radiance_n2_gain(eta: f32) -> f32 {
     let inv = 1.0 / eta.max(MIN_DENOM);
     let g = inv * inv;
-    if g.is_finite() { g.max(0.0) } else { 0.0 }
+    if g.is_finite() {
+        g.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// First-order beam-compression factor `cos θ_i / cos θ_t`.
@@ -164,7 +168,11 @@ pub fn corneal_focus_gain(cos_i: f32, radius_norm: f32, params: CausticParams) -
     let excess = (peak - 1.0).max(0.0);
     let feather = radial_falloff(radius_norm, params.falloff);
     let gain = 1.0 + params.strength.max(0.0) * excess * feather;
-    if gain.is_finite() { gain.max(0.0) } else { 1.0 }
+    if gain.is_finite() {
+        gain.max(0.0)
+    } else {
+        1.0
+    }
 }
 
 #[cfg(test)]

@@ -38,5 +38,5 @@ pub use migration::{MigrateError, Migration, MigrationFn};
 pub use serde_integration::{
     from_versioned_binary, from_versioned_ron, to_versioned_binary, to_versioned_ron,
 };
-pub use validate::{ValidationError, validate, validate_version};
+pub use validate::{validate, validate_version, ValidationError};
 pub use version::{SchemaRegistry, SchemaVersion, TypeSchema};

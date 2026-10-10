@@ -464,7 +464,10 @@ impl FrameHashManifest {
     #[inline]
     #[must_use]
     pub fn new(start_frame: u64, hashes: Vec<u64>) -> Self {
-        Self { start_frame, hashes }
+        Self {
+            start_frame,
+            hashes,
+        }
     }
 
     /// Begin an empty manifest whose first [`push`](FrameHashManifest::push)ed
@@ -496,7 +499,9 @@ impl FrameHashManifest {
     #[must_use]
     pub fn from_frame_hash(hash: &FrameHash) -> Self {
         Self {
-            start_frame: hash.oldest_frame_index().unwrap_or_else(|| hash.frame_index()),
+            start_frame: hash
+                .oldest_frame_index()
+                .unwrap_or_else(|| hash.frame_index()),
             hashes: hash.history().collect(),
         }
     }
@@ -552,7 +557,9 @@ impl FrameHashManifest {
         if frame < self.start_frame {
             return None;
         }
-        self.hashes.get((frame - self.start_frame) as usize).copied()
+        self.hashes
+            .get((frame - self.start_frame) as usize)
+            .copied()
     }
 
     /// Find the first frame at which the live `actual` run disagrees with this
@@ -572,8 +579,7 @@ impl FrameHashManifest {
         let start = self.start_frame.max(actual_oldest);
         let end = self.end_frame().min(actual.frame_index());
         for frame in start..end {
-            if let (Some(expected), Some(got)) =
-                (self.expected_at(frame), actual.hash_at(frame))
+            if let (Some(expected), Some(got)) = (self.expected_at(frame), actual.hash_at(frame))
                 && expected != got
             {
                 return Some(HashDivergence {
@@ -960,18 +966,13 @@ impl crate::app::App {
     /// regression check: replay a [`ReplayLog`], then verify the reproduced
     /// run hashed identically to the recorded golden manifest.
     #[must_use]
-    pub fn verify_against_manifest(
-        &self,
-        manifest: &FrameHashManifest,
-    ) -> Option<HashDivergence> {
+    pub fn verify_against_manifest(&self, manifest: &FrameHashManifest) -> Option<HashDivergence> {
         manifest.first_divergence(self.frame_hash()?)
     }
 
     /// Borrow the main world's [`InputRecording<F>`], if installed.
     #[must_use]
-    pub fn input_recording<F: Clone + Send + Sync + 'static>(
-        &self,
-    ) -> Option<&InputRecording<F>> {
+    pub fn input_recording<F: Clone + Send + Sync + 'static>(&self) -> Option<&InputRecording<F>> {
         self.world().get_resource::<InputRecording<F>>()
     }
 }

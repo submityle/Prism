@@ -84,11 +84,19 @@ mod tests {
         // Plane x = 2 with inward normal +X, un-normalized (length 2).
         let p = Plane::new(Vec3::new(2.0, 0.0, 0.0), -4.0);
         // Raw distance is scaled by the normal length.
-        assert_relative_eq!(p.signed_distance(Vec3::new(3.0, 0.0, 0.0)), 2.0, epsilon = 1e-6);
+        assert_relative_eq!(
+            p.signed_distance(Vec3::new(3.0, 0.0, 0.0)),
+            2.0,
+            epsilon = 1e-6
+        );
         let n = p.normalized();
         assert_relative_eq!(n.normal.length(), 1.0, epsilon = 1e-6);
         // After normalizing, the distance from x=3 to the plane x=2 is 1.
-        assert_relative_eq!(n.signed_distance(Vec3::new(3.0, 0.0, 0.0)), 1.0, epsilon = 1e-6);
+        assert_relative_eq!(
+            n.signed_distance(Vec3::new(3.0, 0.0, 0.0)),
+            1.0,
+            epsilon = 1e-6
+        );
     }
 
     #[test]
@@ -103,9 +111,15 @@ mod tests {
         // Inward normal +X, plane at x = 0.
         let p = Plane::new(Vec3::X, 0.0);
         // Box fully behind the plane (x in [-2, -1]) is outside.
-        assert!(p.aabb_is_outside(&Aabb::new(Vec3::new(-2.0, -1.0, -1.0), Vec3::new(-1.0, 1.0, 1.0))));
+        assert!(p.aabb_is_outside(&Aabb::new(
+            Vec3::new(-2.0, -1.0, -1.0),
+            Vec3::new(-1.0, 1.0, 1.0)
+        )));
         // Box straddling the plane is not outside.
-        assert!(!p.aabb_is_outside(&Aabb::new(Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0))));
+        assert!(!p.aabb_is_outside(&Aabb::new(
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(1.0, 1.0, 1.0)
+        )));
         // Box fully in front is not outside.
         assert!(!p.aabb_is_outside(&Aabb::new(Vec3::splat(1.0), Vec3::splat(2.0))));
     }

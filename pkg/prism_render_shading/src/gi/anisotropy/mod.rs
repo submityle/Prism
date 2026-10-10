@@ -19,7 +19,7 @@ use bevy_math::Vec3;
 
 use crate::gi::spec_gi::ggx_lobe::fresnel_schlick;
 use ndf::{ndf_anisotropic, smith_g2};
-use remap::{TangentFrame, anisotropy_to_alpha, orthonormal_tangent_frame, rotate_tangent_frame};
+use remap::{anisotropy_to_alpha, orthonormal_tangent_frame, rotate_tangent_frame, TangentFrame};
 
 /// Floor applied to cosine denominators in the BRDF so grazing geometry stays
 /// finite instead of dividing by zero.
@@ -107,11 +107,23 @@ pub fn anisotropic_ggx_brdf(
     }
 
     let d = ndf_anisotropic(h, frame.tangent, frame.bitangent, nrm, alpha_t, alpha_b);
-    let g = smith_g2(wo, wi, frame.tangent, frame.bitangent, nrm, alpha_t, alpha_b);
+    let g = smith_g2(
+        wo,
+        wi,
+        frame.tangent,
+        frame.bitangent,
+        nrm,
+        alpha_t,
+        alpha_b,
+    );
     let f = fresnel_schlick(params.f0, wo.dot(h).max(0.0));
     let denom = (4.0 * n_dot_wo * n_dot_wi).max(MIN_DENOM);
     let v = f * (d * g / denom);
-    if v.is_finite() { v.max(Vec3::ZERO) } else { Vec3::ZERO }
+    if v.is_finite() {
+        v.max(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    }
 }
 
 #[cfg(test)]
@@ -179,7 +191,10 @@ mod tests {
             let wo_l = to_tangent_space(wo, frame.tangent, frame.bitangent, frame.normal);
             let wi_l = to_tangent_space(wi, frame.tangent, frame.bitangent, frame.normal);
             let reference = ggx_brdf(wo_l, wi_l, at, ab, params.f0);
-            assert!((ours - reference).length() < 1e-4, "ours={ours:?} ref={reference:?}");
+            assert!(
+                (ours - reference).length() < 1e-4,
+                "ours={ours:?} ref={reference:?}"
+            );
         }
     }
 

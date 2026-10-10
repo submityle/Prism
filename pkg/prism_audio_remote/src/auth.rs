@@ -113,11 +113,7 @@ impl Authenticator {
     /// This exists so the disabled (release-like) path can be exercised
     /// independently of the build profile.
     #[must_use]
-    pub fn with_gate(
-        enabled: bool,
-        expected: AccessToken,
-        capabilities: CapabilitySet,
-    ) -> Self {
+    pub fn with_gate(enabled: bool, expected: AccessToken, capabilities: CapabilitySet) -> Self {
         Self {
             enabled,
             expected,
@@ -189,9 +185,7 @@ mod tests {
     #[test]
     fn disabled_build_refuses_everything() {
         let auth = Authenticator::with_gate(false, token(1), CapabilitySet::full());
-        let cmd = AuthoringCommand::TriggerEvent {
-            event: EventId(1),
-        };
+        let cmd = AuthoringCommand::TriggerEvent { event: EventId(1) };
         assert_eq!(
             auth.authorize(&token(1), &cmd),
             Err(AuthError::RemoteDisabled)
@@ -213,9 +207,7 @@ mod tests {
     #[test]
     fn authorized_command_passes() {
         let auth = Authenticator::with_gate(true, token(3), CapabilitySet::full());
-        let cmd = AuthoringCommand::TriggerEvent {
-            event: EventId(7),
-        };
+        let cmd = AuthoringCommand::TriggerEvent { event: EventId(7) };
         assert_eq!(auth.authorize(&token(3), &cmd), Ok(()));
     }
 

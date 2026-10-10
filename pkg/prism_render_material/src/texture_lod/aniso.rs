@@ -136,8 +136,14 @@ mod tests {
 
     #[test]
     fn tap_count_is_ceil_of_ratio() {
-        assert_eq!(anisotropic_taps([0.0, 0.0], [1.0, 0.0], &aniso(3.2, 0.0)).len(), 4);
-        assert_eq!(anisotropic_taps([0.0, 0.0], [1.0, 0.0], &aniso(4.0, 0.0)).len(), 4);
+        assert_eq!(
+            anisotropic_taps([0.0, 0.0], [1.0, 0.0], &aniso(3.2, 0.0)).len(),
+            4
+        );
+        assert_eq!(
+            anisotropic_taps([0.0, 0.0], [1.0, 0.0], &aniso(4.0, 0.0)).len(),
+            4
+        );
     }
 
     #[test]

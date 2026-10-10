@@ -123,7 +123,11 @@ impl UplinkChain {
         Self {
             frame,
             gate_non_speech: config.gate_non_speech,
-            high_pass: HighPass::new(config.sample_rate, config.high_pass_hz, config.high_pass_order),
+            high_pass: HighPass::new(
+                config.sample_rate,
+                config.high_pass_hz,
+                config.high_pass_order,
+            ),
             aec: NlmsEchoCanceller::new(config.aec),
             noise_suppress,
             agc,

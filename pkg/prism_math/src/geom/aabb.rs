@@ -20,13 +20,19 @@ impl Aabb3 {
     /// result is always valid regardless of input order.
     #[inline]
     pub fn new(a: Vec3, b: Vec3) -> Self {
-        Self { min: a.min(b), max: a.max(b) }
+        Self {
+            min: a.min(b),
+            max: a.max(b),
+        }
     }
 
     /// Create a box from a center and (non-negative) half-extents.
     #[inline]
     pub fn from_center_half_extents(center: Vec3, half_extents: Vec3) -> Self {
-        Self { min: center - half_extents, max: center + half_extents }
+        Self {
+            min: center - half_extents,
+            max: center + half_extents,
+        }
     }
 
     /// Build the tightest box that contains all `points`.
@@ -34,7 +40,10 @@ impl Aabb3 {
     /// Returns [`None`] when `points` is empty.
     pub fn from_points(points: &[Vec3]) -> Option<Self> {
         let (first, rest) = points.split_first()?;
-        let mut bb = Self { min: *first, max: *first };
+        let mut bb = Self {
+            min: *first,
+            max: *first,
+        };
         for &p in rest {
             bb = bb.expand_to_include(p);
         }
@@ -105,20 +114,29 @@ impl Aabb3 {
     /// The smallest box containing both `self` and `other`.
     #[inline]
     pub fn merge(self, other: Self) -> Self {
-        Self { min: self.min.min(other.min), max: self.max.max(other.max) }
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
     }
 
     /// The smallest box containing both `self` and the point `p`.
     #[inline]
     pub fn expand_to_include(self, p: Vec3) -> Self {
-        Self { min: self.min.min(p), max: self.max.max(p) }
+        Self {
+            min: self.min.min(p),
+            max: self.max.max(p),
+        }
     }
 
     /// Grow the box outward by `amount` on every axis (negative shrinks it).
     #[inline]
     pub fn expand(self, amount: f32) -> Self {
         let a = Vec3::splat(amount);
-        Self { min: self.min - a, max: self.max + a }
+        Self {
+            min: self.min - a,
+            max: self.max + a,
+        }
     }
 
     /// The overlap box of `self` and `other`, or [`None`] when disjoint.

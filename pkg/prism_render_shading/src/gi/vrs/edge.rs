@@ -87,7 +87,11 @@ impl EdgeThresholds {
         let strong = sanitize_nonneg(self.strong_gradient);
         let ratio = {
             let r = sanitize_nonneg(self.anisotropy_ratio);
-            if r >= 1.0 { r } else { 1.0 }
+            if r >= 1.0 {
+                r
+            } else {
+                1.0
+            }
         };
         Self {
             flat_gradient: flat.min(strong),
@@ -120,7 +124,11 @@ impl GradientEnergy {
 /// Replaces a non-finite scalar with `0.0`, otherwise returns it unchanged.
 #[inline]
 fn finite_or_zero(x: f32) -> f32 {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Sanitizes a threshold: non-finite becomes `0.0`, negatives clamp up to
@@ -263,20 +271,14 @@ mod tests {
     /// A 4×4 tile with a sharp left/right luminance step (vertical edge → Gx).
     fn vertical_edge_tile() -> [f32; 16] {
         [
-            0.0, 0.0, 1.0, 1.0,
-            0.0, 0.0, 1.0, 1.0,
-            0.0, 0.0, 1.0, 1.0,
-            0.0, 0.0, 1.0, 1.0,
+            0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0,
         ]
     }
 
     /// A 4×4 tile with a sharp top/bottom step (horizontal edge → Gy).
     fn horizontal_edge_tile() -> [f32; 16] {
         [
-            0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0,
-            1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
         ]
     }
 
@@ -308,8 +310,14 @@ mod tests {
         let t = EdgeThresholds::default();
         // A full 0->1 step is a very strong edge; magnitude far exceeds the
         // strong threshold regardless of its orientation.
-        assert_eq!(classify_edge(&vertical_edge_tile(), 4, 4, &t), ShadingRate::X1x1);
-        assert_eq!(classify_edge(&horizontal_edge_tile(), 4, 4, &t), ShadingRate::X1x1);
+        assert_eq!(
+            classify_edge(&vertical_edge_tile(), 4, 4, &t),
+            ShadingRate::X1x1
+        );
+        assert_eq!(
+            classify_edge(&horizontal_edge_tile(), 4, 4, &t),
+            ShadingRate::X1x1
+        );
     }
 
     #[test]
@@ -357,7 +365,10 @@ mod tests {
                 *dst = src * scale;
             }
             let rank = classify_edge(&tile, 4, 4, &t).rank();
-            assert!(rank <= prev_rank, "coarsened as edge strengthened at {scale}");
+            assert!(
+                rank <= prev_rank,
+                "coarsened as edge strengthened at {scale}"
+            );
             prev_rank = rank;
             scale += 0.02;
         }
@@ -383,7 +394,10 @@ mod tests {
             }
         }
         let e = sobel_energy(&tile, 4, 4).expect("valid");
-        assert!((e.gx - e.gy).abs() < 1.0e-5, "expected gx == gy by symmetry");
+        assert!(
+            (e.gx - e.gy).abs() < 1.0e-5,
+            "expected gx == gy by symmetry"
+        );
         let m = e.magnitude();
         assert!(m > t.flat_gradient && m < t.strong_gradient, "mag {m}");
         assert_eq!(classify_edge(&tile, 4, 4, &t), ShadingRate::X2x2);

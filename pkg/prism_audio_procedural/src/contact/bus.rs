@@ -23,9 +23,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use crate::contact::event::{
-    ContactEvent, ContactId, ImpactEvent, SeparationEvent, SustainEvent,
-};
+use crate::contact::event::{ContactEvent, ContactId, ImpactEvent, SeparationEvent, SustainEvent};
 use crate::contact::merge::{merge_impacts, MergeConfig};
 
 /// A bounded collector for one block's worth of contact events.
@@ -101,7 +99,11 @@ impl ContactEventBus {
     /// Pushes or coalesces a sustain sample; a contact already present this
     /// block has its latest sample kept (the newest physics state wins).
     fn ingest_sustain(&mut self, event: SustainEvent) {
-        if let Some(slot) = self.sustains.iter_mut().find(|s| s.contact == event.contact) {
+        if let Some(slot) = self
+            .sustains
+            .iter_mut()
+            .find(|s| s.contact == event.contact)
+        {
             *slot = event;
             return;
         }

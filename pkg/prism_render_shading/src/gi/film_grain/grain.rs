@@ -62,7 +62,11 @@ const SHADOW_BIAS: f32 = 0.4;
 #[inline]
 #[must_use]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Smoothstep fade `3t² - 2t³` for `t` in `[0, 1]` (Hermite, C¹ continuous).
@@ -139,7 +143,10 @@ pub fn value_noise(x: f32, y: f32, seed: u32) -> f32 {
     let c00 = uniform01(hash_pixel(UVec2::new(ix, iy), seed));
     let c10 = uniform01(hash_pixel(UVec2::new(ix.wrapping_add(1), iy), seed));
     let c01 = uniform01(hash_pixel(UVec2::new(ix, iy.wrapping_add(1)), seed));
-    let c11 = uniform01(hash_pixel(UVec2::new(ix.wrapping_add(1), iy.wrapping_add(1)), seed));
+    let c11 = uniform01(hash_pixel(
+        UVec2::new(ix.wrapping_add(1), iy.wrapping_add(1)),
+        seed,
+    ));
 
     let top = c00 + (c10 - c00) * fx;
     let bot = c01 + (c11 - c01) * fx;
@@ -283,7 +290,10 @@ mod tests {
     /// The combined grain sample is deterministic, bounded, and zero-mean.
     #[test]
     fn grain_sample_is_zero_mean_and_deterministic() {
-        assert_eq!(grain_sample(UVec2::new(5, 9), 1), grain_sample(UVec2::new(5, 9), 1));
+        assert_eq!(
+            grain_sample(UVec2::new(5, 9), 1),
+            grain_sample(UVec2::new(5, 9), 1)
+        );
         let mut sum = 0.0_f64;
         let mut n = 0.0_f64;
         for y in 0..96u32 {
@@ -315,7 +325,10 @@ mod tests {
         let mid = luminance_response(0.5);
         let high = luminance_response(1.0);
         assert!(shadow > 0.0, "shadows should keep grain: {shadow}");
-        assert!(mid > shadow, "mids should exceed shadows: mid={mid} shadow={shadow}");
+        assert!(
+            mid > shadow,
+            "mids should exceed shadows: mid={mid} shadow={shadow}"
+        );
         assert!(high.abs() < 1.0e-6, "highlights should be clean: {high}");
         // Stays within [0, 1] across the full range.
         for i in 0..=100 {

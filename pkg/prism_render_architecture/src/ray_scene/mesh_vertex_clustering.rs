@@ -49,7 +49,10 @@ impl core::fmt::Display for ClusterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidCellSize => {
-                write!(f, "cluster cell size must be a finite, strictly positive value")
+                write!(
+                    f,
+                    "cluster cell size must be a finite, strictly positive value"
+                )
             }
             Self::Rebuild(err) => write!(f, "failed to rebuild clustered mesh: {err}"),
         }
@@ -92,10 +95,7 @@ struct Cluster {
 /// Returns [`ClusterError::InvalidCellSize`] when `cell_size` is not finite or
 /// not strictly positive, and [`ClusterError::Rebuild`] if the clustered pools
 /// fail [`TriangleMesh`] validation (not expected by construction).
-pub fn cluster_vertices(
-    mesh: &TriangleMesh,
-    cell_size: f32,
-) -> Result<TriangleMesh, ClusterError> {
+pub fn cluster_vertices(mesh: &TriangleMesh, cell_size: f32) -> Result<TriangleMesh, ClusterError> {
     if !cell_size.is_finite() || cell_size <= 0.0 {
         return Err(ClusterError::InvalidCellSize);
     }
@@ -226,7 +226,11 @@ fn normalize_or_z(v: [f64; 3]) -> [f32; 3] {
     let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     if len > 0.0 {
         let inv = 1.0 / len;
-        [(v[0] * inv) as f32, (v[1] * inv) as f32, (v[2] * inv) as f32]
+        [
+            (v[0] * inv) as f32,
+            (v[1] * inv) as f32,
+            (v[2] * inv) as f32,
+        ]
     } else {
         [0.0, 0.0, 1.0]
     }
@@ -331,7 +335,12 @@ mod tests {
     fn representative_is_cell_centroid() {
         // Two vertices in one cell → representative at their midpoint.
         let mesh = TriangleMesh::new(
-            vec![[0.0, 0.0, 0.0], [0.4, 0.2, 0.0], [5.0, 0.0, 0.0], [0.0, 5.0, 0.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [0.4, 0.2, 0.0],
+                [5.0, 0.0, 0.0],
+                [0.0, 5.0, 0.0],
+            ],
             Vec::new(),
             Vec::new(),
             vec![[0, 2, 3], [1, 2, 3]],
@@ -348,8 +357,18 @@ mod tests {
     #[test]
     fn normals_are_averaged_and_renormalized() {
         let mesh = TriangleMesh::new(
-            vec![[0.0, 0.0, 0.0], [0.3, 0.0, 0.0], [5.0, 0.0, 0.0], [0.0, 5.0, 0.0]],
-            vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [0.3, 0.0, 0.0],
+                [5.0, 0.0, 0.0],
+                [0.0, 5.0, 0.0],
+            ],
+            vec![
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
             Vec::new(),
             vec![[0, 2, 3], [1, 2, 3]],
         )
@@ -366,7 +385,12 @@ mod tests {
     #[test]
     fn uvs_are_averaged() {
         let mesh = TriangleMesh::new(
-            vec![[0.0, 0.0, 0.0], [0.3, 0.0, 0.0], [5.0, 0.0, 0.0], [0.0, 5.0, 0.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [0.3, 0.0, 0.0],
+                [5.0, 0.0, 0.0],
+                [0.0, 5.0, 0.0],
+            ],
             Vec::new(),
             vec![[0.0, 0.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]],
             vec![[0, 2, 3], [1, 2, 3]],
@@ -403,7 +427,13 @@ mod tests {
         let mesh = cluster_vertices(&unit_quad(), 0.01).unwrap();
         let bvh = TriangleMeshBvh::build(mesh);
         let ray = Ray::infinite([0.53, 0.47, 1.0], [0.0, 0.0, -1.0]);
-        let hit = bvh.closest_hit(&ray).expect("ray should hit clustered quad");
-        assert!((hit.position[2]).abs() < 1e-6, "hit z = {}", hit.position[2]);
+        let hit = bvh
+            .closest_hit(&ray)
+            .expect("ray should hit clustered quad");
+        assert!(
+            (hit.position[2]).abs() < 1e-6,
+            "hit z = {}",
+            hit.position[2]
+        );
     }
 }

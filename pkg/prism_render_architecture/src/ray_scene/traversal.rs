@@ -42,8 +42,16 @@ impl Ray {
             reciprocal(direction[1]),
             reciprocal(direction[2]),
         ];
-        let lo = if t_min.is_finite() { t_min.max(0.0) } else { 0.0 };
-        let hi = if t_max.is_nan() { f32::INFINITY } else { t_max.max(lo) };
+        let lo = if t_min.is_finite() {
+            t_min.max(0.0)
+        } else {
+            0.0
+        };
+        let hi = if t_max.is_nan() {
+            f32::INFINITY
+        } else {
+            t_max.max(lo)
+        };
         Self {
             origin,
             direction,
@@ -129,7 +137,13 @@ pub struct Hit {
 /// origin offset is finite and the reciprocal is `+/-inf`, giving `+/-inf`
 /// bounds that widen the interval).
 #[inline]
-fn slab_interval(origin: [f32; 3], inv_dir: [f32; 3], bounds: &Aabb, t_lo: f32, t_hi: f32) -> Option<(f32, f32)> {
+fn slab_interval(
+    origin: [f32; 3],
+    inv_dir: [f32; 3],
+    bounds: &Aabb,
+    t_lo: f32,
+    t_hi: f32,
+) -> Option<(f32, f32)> {
     let mut tmin = t_lo;
     let mut tmax = t_hi;
     for axis in 0..3 {
@@ -304,8 +318,14 @@ impl Bvh {
         let mut node_index = 0u32;
         loop {
             let node = &self.nodes[node_index as usize];
-            if slab_interval(ray.origin, ray.inv_direction, &node.bounds, ray.t_min, ray.t_max)
-                .is_some()
+            if slab_interval(
+                ray.origin,
+                ray.inv_direction,
+                &node.bounds,
+                ray.t_min,
+                ray.t_max,
+            )
+            .is_some()
             {
                 if node.is_leaf() {
                     let start = node.first_primitive as usize;
@@ -366,8 +386,14 @@ impl Bvh {
         let mut node_index = 0u32;
         loop {
             let node = &self.nodes[node_index as usize];
-            if slab_interval(ray.origin, ray.inv_direction, &node.bounds, ray.t_min, ray.t_max)
-                .is_some()
+            if slab_interval(
+                ray.origin,
+                ray.inv_direction,
+                &node.bounds,
+                ray.t_min,
+                ray.t_max,
+            )
+            .is_some()
             {
                 if node.is_leaf() {
                     let start = node.first_primitive as usize;
@@ -420,8 +446,14 @@ impl Bvh {
         let mut node_index = 0u32;
         loop {
             let node = &self.nodes[node_index as usize];
-            if slab_interval(ray.origin, ray.inv_direction, &node.bounds, ray.t_min, ray.t_max)
-                .is_some()
+            if slab_interval(
+                ray.origin,
+                ray.inv_direction,
+                &node.bounds,
+                ray.t_min,
+                ray.t_max,
+            )
+            .is_some()
             {
                 if node.is_leaf() {
                     let start = node.first_primitive as usize;
@@ -482,8 +514,14 @@ impl Bvh {
         let mut node_index = 0u32;
         loop {
             let node = &self.nodes[node_index as usize];
-            if slab_interval(ray.origin, ray.inv_direction, &node.bounds, ray.t_min, ray.t_max)
-                .is_some()
+            if slab_interval(
+                ray.origin,
+                ray.inv_direction,
+                &node.bounds,
+                ray.t_min,
+                ray.t_max,
+            )
+            .is_some()
             {
                 if node.is_leaf() {
                     let start = node.first_primitive as usize;
@@ -628,14 +666,20 @@ mod tests {
                     intersect_triangle(&ray, t),
                     intersect_triangle_watertight(&ray, t),
                 ) {
-                    assert!((tm - tw).abs() <= 1e-3 * tm.abs().max(1.0), "t {tm} vs {tw}");
+                    assert!(
+                        (tm - tw).abs() <= 1e-3 * tm.abs().max(1.0),
+                        "t {tm} vs {tw}"
+                    );
                     assert!((um - uw).abs() <= 2e-3, "u {um} vs {uw}");
                     assert!((vm - vw).abs() <= 2e-3, "v {vm} vs {vw}");
                     compared += 1;
                 }
             }
         }
-        assert!(compared > 100, "too few mutual hits ({compared}) to be meaningful");
+        assert!(
+            compared > 100,
+            "too few mutual hits ({compared}) to be meaningful"
+        );
     }
 
     /// The test is double-sided: it reports a hit from either face and returns
@@ -878,7 +922,11 @@ mod tests {
             let m = moved[id as usize];
             [m.v0, m.v1, m.v2]
         });
-        assert_eq!(bvh.node_count(), node_count_before, "refit changed node count");
+        assert_eq!(
+            bvh.node_count(),
+            node_count_before,
+            "refit changed node count"
+        );
         assert_eq!(bvh.primitive_count(), prim_count_before);
 
         let mut rng = Rng(0x5151_2727_9393_a1a1);
@@ -913,7 +961,10 @@ mod tests {
                 (a, b) => panic!("refit hit disagreement: bvh={a:?} bf={b:?}"),
             }
         }
-        assert!(hits > 50, "expected meaningful hit coverage after refit, got {hits}");
+        assert!(
+            hits > 50,
+            "expected meaningful hit coverage after refit, got {hits}"
+        );
     }
 
     #[test]
@@ -986,7 +1037,10 @@ mod tests {
                 (a, b) => panic!("rebuilt hit disagreement: bvh={a:?} bf={b:?}"),
             }
         }
-        assert!(hits > 50, "expected meaningful hit coverage after rebuild, got {hits}");
+        assert!(
+            hits > 50,
+            "expected meaningful hit coverage after rebuild, got {hits}"
+        );
     }
 
     /// Brute-force nearest hit using the watertight leaf test, mirroring
@@ -1031,7 +1085,10 @@ mod tests {
                 continue;
             }
             let ray = Ray::infinite(origin, dir);
-            match (bvh.closest_hit_watertight(&ray), brute_force_watertight(&tris, &ray)) {
+            match (
+                bvh.closest_hit_watertight(&ray),
+                brute_force_watertight(&tris, &ray),
+            ) {
                 (None, None) => {}
                 (Some(a), Some(b)) => {
                     assert!(
@@ -1040,13 +1097,19 @@ mod tests {
                         a.t,
                         b.t
                     );
-                    assert_eq!(a.primitive, b.primitive, "watertight bvh primitive mismatch");
+                    assert_eq!(
+                        a.primitive, b.primitive,
+                        "watertight bvh primitive mismatch"
+                    );
                     hits += 1;
                 }
                 (a, b) => panic!("watertight hit disagreement: bvh={a:?} bf={b:?}"),
             }
         }
-        assert!(hits > 50, "expected meaningful watertight hit coverage, got {hits}");
+        assert!(
+            hits > 50,
+            "expected meaningful watertight hit coverage, got {hits}"
+        );
     }
 
     /// End-to-end seam test through the `BVH`: on a rotated quad split along its

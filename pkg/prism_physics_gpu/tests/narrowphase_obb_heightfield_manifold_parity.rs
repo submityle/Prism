@@ -58,11 +58,7 @@ fn flat_field(rows: u32, cols: u32) -> Heightfield {
 /// An axis-aligned box at `center` with half extents `he`, matching the `CPU`
 /// golden tests.
 fn axis_box(center: glam::Vec3, he: glam::Vec3) -> Obb {
-    Obb::new(
-        center,
-        [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z],
-        he,
-    )
+    Obb::new(center, [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z], he)
 }
 
 /// Asserts every live `CPU` point pairs with a distinct live `GPU` point
@@ -184,10 +180,7 @@ fn gpu_obb_heightfield_manifold_misses_match_cpu_golden() {
         // no triangle penetrates.
         axis_box(glam::Vec3::new(1.0, 5.0, 1.0), glam::Vec3::splat(0.5)),
     ];
-    let pairs = [
-        HeightfieldObbPair::new(0, 0),
-        HeightfieldObbPair::new(1, 0),
-    ];
+    let pairs = [HeightfieldObbPair::new(0, 0), HeightfieldObbPair::new(1, 0)];
     run_parity(&ctx, &gpu, &boxes, &fields, &pairs);
 }
 
@@ -247,10 +240,7 @@ fn gpu_obb_heightfield_manifold_batch_matches_cpu_golden() {
         axis_box(glam::Vec3::new(1.0, 0.4, 1.0), glam::Vec3::splat(0.5)),
         axis_box(glam::Vec3::new(50.0, 0.4, 50.0), glam::Vec3::splat(0.5)),
     ];
-    let pairs = [
-        HeightfieldObbPair::new(0, 0),
-        HeightfieldObbPair::new(1, 0),
-    ];
+    let pairs = [HeightfieldObbPair::new(0, 0), HeightfieldObbPair::new(1, 0)];
     run_parity(&ctx, &gpu, &boxes, &fields, &pairs);
 }
 

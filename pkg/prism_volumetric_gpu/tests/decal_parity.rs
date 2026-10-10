@@ -128,8 +128,12 @@ fn rand_query(state: &mut u64) -> DecalQuery {
             lcg(state) * 2.0 + 0.5,
             lcg(state) * 2.0 + 0.5,
         );
-        let projector =
-            DecalProjector::from_forward_up(rand_vec(state, 3.0), forward, up_reference, half_extents);
+        let projector = DecalProjector::from_forward_up(
+            rand_vec(state, 3.0),
+            forward,
+            up_reference,
+            half_extents,
+        );
         // A valid orthonormal basis is guaranteed by the constructor, but guard
         // against a (degenerate) collapse before using it to place the point.
         if projector.right.length_squared() < 0.5 || projector.up.length_squared() < 0.5 {

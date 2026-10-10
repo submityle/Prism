@@ -194,8 +194,15 @@ mod tests {
         let mut out = AudioBuffer::new(ChannelLayout::Stereo, 64);
         let frame = pump(&mut app, &mut out);
 
-        assert_eq!(runtime_active(&mut app), 1, "runtime should allocate one voice");
-        assert_eq!(frame.physical_voices, 1, "telemetry should report one physical voice");
+        assert_eq!(
+            runtime_active(&mut app),
+            1,
+            "runtime should allocate one voice"
+        );
+        assert_eq!(
+            frame.physical_voices, 1,
+            "telemetry should report one physical voice"
+        );
     }
 
     #[test]
@@ -212,7 +219,11 @@ mod tests {
         app.update();
         let mut out = AudioBuffer::new(ChannelLayout::Stereo, 64);
         pump(&mut app, &mut out);
-        assert_eq!(runtime_active(&mut app), 1, "voice should be live before removal");
+        assert_eq!(
+            runtime_active(&mut app),
+            1,
+            "voice should be live before removal"
+        );
 
         app.world_mut().entity_mut(entity).remove::<AudioEmitter>();
         app.update();
@@ -248,8 +259,15 @@ mod tests {
         app.update();
         pump(&mut app, &mut out);
 
-        assert_eq!(runtime_active(&mut app), 0, "explicit stop should release the voice");
-        let emitter = app.world().get::<AudioEmitter>(entity).expect("emitter present");
+        assert_eq!(
+            runtime_active(&mut app),
+            0,
+            "explicit stop should release the voice"
+        );
+        let emitter = app
+            .world()
+            .get::<AudioEmitter>(entity)
+            .expect("emitter present");
         assert!(emitter.voice.is_none(), "live handle should be cleared");
         assert!(!emitter.stop_requested, "stop flag should be consumed");
     }
@@ -279,12 +297,20 @@ mod tests {
         app.update();
         let mut out = AudioBuffer::new(ChannelLayout::Mono, 64);
         let unity = pump(&mut app, &mut out);
-        assert!(close(unity.master_peak, 1.0), "unity peak was {}", unity.master_peak);
+        assert!(
+            close(unity.master_peak, 1.0),
+            "unity peak was {}",
+            unity.master_peak
+        );
 
         app.world_mut().resource_mut::<MasterGain>().linear = 0.25;
         app.update();
         let scaled = pump(&mut app, &mut out);
-        assert!(close(scaled.master_peak, 0.25), "scaled peak was {}", scaled.master_peak);
+        assert!(
+            close(scaled.master_peak, 0.25),
+            "scaled peak was {}",
+            scaled.master_peak
+        );
     }
 
     #[test]
@@ -297,8 +323,15 @@ mod tests {
         app.update();
 
         let telemetry = app.world().resource::<AudioTelemetry>();
-        assert!(telemetry.has_data(), "telemetry resource should hold a frame");
+        assert!(
+            telemetry.has_data(),
+            "telemetry resource should hold a frame"
+        );
         assert!(telemetry.received() >= 1, "received counter should advance");
-        assert_eq!(telemetry.latest().frames, 64, "frame should report 64 rendered frames");
+        assert_eq!(
+            telemetry.latest().frames,
+            64,
+            "frame should report 64 rendered frames"
+        );
     }
 }

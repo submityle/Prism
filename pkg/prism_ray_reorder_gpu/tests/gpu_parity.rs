@@ -55,8 +55,7 @@ fn gpu_matches_cpu_golden_on_random_raw_keys() {
             // stable multi-pass ordering is exercised across block boundaries.
             let n = 1 + (rng.next() % 2048) as usize;
             let mask = if case % 3 == 0 { 0xFF } else { u64::MAX };
-            let keys: Vec<CoherenceKey> =
-                (0..n).map(|_| CoherenceKey(rng.next() & mask)).collect();
+            let keys: Vec<CoherenceKey> = (0..n).map(|_| CoherenceKey(rng.next() & mask)).collect();
             let gpu = sorter.reorder(ctx, &keys);
             let cpu = radix_order(&keys);
             assert_eq!(gpu, cpu, "case {case}, n={n}, mask={mask:#x}");

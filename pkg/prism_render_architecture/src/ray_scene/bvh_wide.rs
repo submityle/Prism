@@ -271,9 +271,7 @@ impl WideBvh {
             let mut hit_count = 0usize;
             for c in 0..node.child_count as usize {
                 let bounds = node.child_bounds(c);
-                if let Some((t_enter, _)) =
-                    ray.aabb_interval(&bounds, ray.t_min(), ray.t_max())
-                {
+                if let Some((t_enter, _)) = ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()) {
                     order[hit_count] = (t_enter, c);
                     hit_count += 1;
                 }
@@ -312,11 +310,7 @@ impl WideBvh {
     /// the cheap shadow/occlusion query. Visits a superset of the leaves the
     /// binary walk would, so it reports occlusion whenever [`Bvh::any_hit`]
     /// does.
-    fn walk_any(
-        &self,
-        ray: &Ray,
-        test: fn(&Ray, &Triangle) -> Option<(f32, f32, f32)>,
-    ) -> bool {
+    fn walk_any(&self, ray: &Ray, test: fn(&Ray, &Triangle) -> Option<(f32, f32, f32)>) -> bool {
         if self.nodes.is_empty() {
             return false;
         }
@@ -435,8 +429,12 @@ fn emit(bvh: &Bvh, root: usize, out: &mut Vec<WideNode>) -> u32 {
     for (c, &s) in slots.iter().enumerate() {
         let cb = &nodes[s].bounds;
         for a in 0..3 {
-            let lo_rel = ((cb.min[a] - origin[a]) / scale[a]).floor().clamp(0.0, QUANT_STEPS);
-            let hi_rel = ((cb.max[a] - origin[a]) / scale[a]).ceil().clamp(0.0, QUANT_STEPS);
+            let lo_rel = ((cb.min[a] - origin[a]) / scale[a])
+                .floor()
+                .clamp(0.0, QUANT_STEPS);
+            let hi_rel = ((cb.max[a] - origin[a]) / scale[a])
+                .ceil()
+                .clamp(0.0, QUANT_STEPS);
             child_qlo[c][a] = lo_rel as u8;
             child_qhi[c][a] = hi_rel as u8;
         }
@@ -609,7 +607,10 @@ mod tests {
                 (a, b) => panic!("hit disagreement: {a:?} vs {b:?}"),
             }
         }
-        assert!(hits > 200, "test scene should produce many hits, got {hits}");
+        assert!(
+            hits > 200,
+            "test scene should produce many hits, got {hits}"
+        );
     }
 
     /// The watertight variant must likewise reproduce the binary watertight
@@ -667,10 +668,7 @@ mod tests {
             ];
             let ray = Ray::infinite(origin, dir);
             assert_eq!(bvh.any_hit(&ray), wide.any_hit(&ray));
-            assert_eq!(
-                bvh.any_hit_watertight(&ray),
-                wide.any_hit_watertight(&ray)
-            );
+            assert_eq!(bvh.any_hit_watertight(&ray), wide.any_hit_watertight(&ray));
         }
     }
 
@@ -721,4 +719,3 @@ mod tests {
         }
     }
 }
-

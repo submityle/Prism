@@ -171,8 +171,7 @@ const BODY_MODE_FREQUENCIES_HZ: [Sample; NUM_BODY_MODES] =
 
 /// Per-mode `60 dB` decay times in seconds. The air cavity rings longest; the
 /// higher plate/wood modes damp quickly, as measured on real soundboxes.
-const BODY_MODE_DECAY_SECONDS: [Sample; NUM_BODY_MODES] =
-    [0.08, 0.06, 0.05, 0.04, 0.035, 0.03];
+const BODY_MODE_DECAY_SECONDS: [Sample; NUM_BODY_MODES] = [0.08, 0.06, 0.05, 0.04, 0.035, 0.03];
 
 /// Per-mode *resonant* magnitude gains `|H(e^{j theta})|`. The feed gain `b0` is
 /// normalized so each mode contributes exactly this gain at its own resonance,
@@ -433,7 +432,8 @@ impl PluckedBodyNode {
         line.resize(line_len, 0.0);
 
         let frequency_hz = sanitize_frequency(params.frequency_hz, sr);
-        let decay_seconds = finite_or(params.decay_seconds, DEFAULT_DECAY_SECONDS).max(MIN_DECAY_SECONDS);
+        let decay_seconds =
+            finite_or(params.decay_seconds, DEFAULT_DECAY_SECONDS).max(MIN_DECAY_SECONDS);
         let brightness = finite_or(params.brightness, DEFAULT_BRIGHTNESS).clamp(0.0, 1.0);
         let excitation = finite_or(params.excitation, DEFAULT_EXCITATION).clamp(0.0, 1.0);
         let body_level = finite_or(params.body_level, DEFAULT_BODY_LEVEL).clamp(0.0, 1.0);
@@ -523,8 +523,7 @@ impl PluckedBodyNode {
     /// the body resonator bank immediately.
     #[inline]
     pub fn set_body_size(&mut self, body_size: Sample) {
-        self.body_size =
-            finite_or(body_size, self.body_size).clamp(MIN_BODY_SIZE, MAX_BODY_SIZE);
+        self.body_size = finite_or(body_size, self.body_size).clamp(MIN_BODY_SIZE, MAX_BODY_SIZE);
         self.recompute_body_coefficients();
     }
 
@@ -642,7 +641,8 @@ impl PluckedBodyNode {
             let st = ops::sin(theta);
             let c2 = ops::cos(2.0 * theta);
             let s2 = ops::sin(2.0 * theta);
-            let r = ops::exp(-LN_1000 / (BODY_MODE_DECAY_SECONDS[m] * sr)).clamp(0.0, MAX_LOOP_GAIN);
+            let r =
+                ops::exp(-LN_1000 / (BODY_MODE_DECAY_SECONDS[m] * sr)).clamp(0.0, MAX_LOOP_GAIN);
             let a1 = 2.0 * r * ct;
             let a2 = -r * r;
             // |denom(e^{-j theta})| = |1 - a1 e^{-j th} - a2 e^{-j2 th}|.
@@ -700,7 +700,8 @@ impl PluckedBodyNode {
     fn body_process(&mut self, x: Sample) -> Sample {
         let mut acc = 0.0;
         for m in 0..NUM_BODY_MODES {
-            let y = self.body_b0[m] * x + self.body_a1[m] * self.body_y1[m]
+            let y = self.body_b0[m] * x
+                + self.body_a1[m] * self.body_y1[m]
                 + self.body_a2[m] * self.body_y2[m];
             self.body_y2[m] = self.body_y1[m];
             self.body_y1[m] = flush_denormal(y);
@@ -785,7 +786,11 @@ mod tests {
     }
 
     /// Renders `frames` of output in `layout`, returning channel 0.
-    fn render_layout(node: &mut PluckedBodyNode, frames: usize, layout: ChannelLayout) -> Vec<Sample> {
+    fn render_layout(
+        node: &mut PluckedBodyNode,
+        frames: usize,
+        layout: ChannelLayout,
+    ) -> Vec<Sample> {
         let inputs: [AudioBuffer; 0] = [];
         let mut out = AudioBuffer::new(layout, frames.max(1));
         out.set_active_frames(frames);
@@ -801,7 +806,11 @@ mod tests {
     }
 
     /// Renders `frames` and returns every channel for a multi-channel layout.
-    fn render_channels(node: &mut PluckedBodyNode, frames: usize, layout: ChannelLayout) -> Vec<Vec<Sample>> {
+    fn render_channels(
+        node: &mut PluckedBodyNode,
+        frames: usize,
+        layout: ChannelLayout,
+    ) -> Vec<Vec<Sample>> {
         let inputs: [AudioBuffer; 0] = [];
         let mut out = AudioBuffer::new(layout, frames.max(1));
         out.set_active_frames(frames);
@@ -883,7 +892,10 @@ mod tests {
                             let mut node = PluckedBodyNode::new(SR, 0x51A7, params);
                             node.trigger();
                             let block = render(&mut node, 8192);
-                            assert!(peak(&block) < 1.0, "peak overflow at f={f} dec={dec} br={br} bl={bl} bs={bs}");
+                            assert!(
+                                peak(&block) < 1.0,
+                                "peak overflow at f={f} dec={dec} br={br} bl={bl} bs={bs}"
+                            );
                         }
                     }
                 }
@@ -904,7 +916,10 @@ mod tests {
         // sub-fundamental bin at 1.5 f0.
         let harmonic = goertzel(&block, 220.0) + goertzel(&block, 440.0);
         let inharmonic = goertzel(&block, 330.0);
-        assert!(harmonic > inharmonic * 20.0, "harmonic={harmonic} inharmonic={inharmonic}");
+        assert!(
+            harmonic > inharmonic * 20.0,
+            "harmonic={harmonic} inharmonic={inharmonic}"
+        );
     }
 
     #[test]
@@ -916,8 +931,22 @@ mod tests {
             body_size: 1.0,
             ..PluckedBodyParams::default()
         };
-        let mut dry_node = PluckedBodyNode::new(SR, 9, PluckedBodyParams { body_level: 0.0, ..base });
-        let mut wet_node = PluckedBodyNode::new(SR, 9, PluckedBodyParams { body_level: 1.0, ..base });
+        let mut dry_node = PluckedBodyNode::new(
+            SR,
+            9,
+            PluckedBodyParams {
+                body_level: 0.0,
+                ..base
+            },
+        );
+        let mut wet_node = PluckedBodyNode::new(
+            SR,
+            9,
+            PluckedBodyParams {
+                body_level: 1.0,
+                ..base
+            },
+        );
         dry_node.trigger();
         wet_node.trigger();
         let dry = render(&mut dry_node, 16_384);
@@ -939,7 +968,14 @@ mod tests {
 
     #[test]
     fn decays_over_time() {
-        let mut node = PluckedBodyNode::new(SR, 11, PluckedBodyParams { decay_seconds: 1.0, ..PluckedBodyParams::default() });
+        let mut node = PluckedBodyNode::new(
+            SR,
+            11,
+            PluckedBodyParams {
+                decay_seconds: 1.0,
+                ..PluckedBodyParams::default()
+            },
+        );
         node.trigger();
         let block = render(&mut node, SR as usize);
         let head = energy(&block[..4096]);
@@ -974,7 +1010,14 @@ mod tests {
     #[test]
     fn amplitude_scales_energy_quadratically() {
         let make = |amp: Sample| {
-            let mut node = PluckedBodyNode::new(SR, 0x3, PluckedBodyParams { amplitude: amp, ..PluckedBodyParams::default() });
+            let mut node = PluckedBodyNode::new(
+                SR,
+                0x3,
+                PluckedBodyParams {
+                    amplitude: amp,
+                    ..PluckedBodyParams::default()
+                },
+            );
             node.trigger();
             energy(&render(&mut node, 8192))
         };
@@ -1098,8 +1141,22 @@ mod tests {
     fn frequency_changes_output() {
         // Non-harmonically related pitches so neither fundamental lands on a
         // harmonic of the other.
-        let mut a = PluckedBodyNode::new(SR, 0xC, PluckedBodyParams { frequency_hz: 130.0, ..PluckedBodyParams::default() });
-        let mut b = PluckedBodyNode::new(SR, 0xC, PluckedBodyParams { frequency_hz: 350.0, ..PluckedBodyParams::default() });
+        let mut a = PluckedBodyNode::new(
+            SR,
+            0xC,
+            PluckedBodyParams {
+                frequency_hz: 130.0,
+                ..PluckedBodyParams::default()
+            },
+        );
+        let mut b = PluckedBodyNode::new(
+            SR,
+            0xC,
+            PluckedBodyParams {
+                frequency_hz: 350.0,
+                ..PluckedBodyParams::default()
+            },
+        );
         a.trigger();
         b.trigger();
         let ba = render(&mut a, 8192);
@@ -1111,7 +1168,14 @@ mod tests {
     #[test]
     fn high_and_low_pitches_both_sound() {
         for &f in &[41.2, 2000.0] {
-            let mut node = PluckedBodyNode::new(SR, 0xD, PluckedBodyParams { frequency_hz: f, ..PluckedBodyParams::default() });
+            let mut node = PluckedBodyNode::new(
+                SR,
+                0xD,
+                PluckedBodyParams {
+                    frequency_hz: f,
+                    ..PluckedBodyParams::default()
+                },
+            );
             node.trigger();
             let block = render(&mut node, 8192);
             assert!(energy(&block) > 0.0, "silent at {f} Hz");
@@ -1125,7 +1189,16 @@ mod tests {
         // (undamped) loop keeps far more high-frequency energy than a dull one,
         // whose two-tap loop filter attenuates partials near Nyquist.
         let make = |br: Sample| {
-            let mut node = PluckedBodyNode::new(SR, 0xE, PluckedBodyParams { frequency_hz: 220.0, brightness: br, body_level: 0.0, ..PluckedBodyParams::default() });
+            let mut node = PluckedBodyNode::new(
+                SR,
+                0xE,
+                PluckedBodyParams {
+                    frequency_hz: 220.0,
+                    brightness: br,
+                    body_level: 0.0,
+                    ..PluckedBodyParams::default()
+                },
+            );
             node.trigger();
             let block = render(&mut node, 16_384);
             block
@@ -1143,8 +1216,22 @@ mod tests {
 
     #[test]
     fn body_level_changes_output() {
-        let mut a = PluckedBodyNode::new(SR, 0xF, PluckedBodyParams { body_level: 0.0, ..PluckedBodyParams::default() });
-        let mut b = PluckedBodyNode::new(SR, 0xF, PluckedBodyParams { body_level: 1.0, ..PluckedBodyParams::default() });
+        let mut a = PluckedBodyNode::new(
+            SR,
+            0xF,
+            PluckedBodyParams {
+                body_level: 0.0,
+                ..PluckedBodyParams::default()
+            },
+        );
+        let mut b = PluckedBodyNode::new(
+            SR,
+            0xF,
+            PluckedBodyParams {
+                body_level: 1.0,
+                ..PluckedBodyParams::default()
+            },
+        );
         a.trigger();
         b.trigger();
         let ba = render(&mut a, 8192);
@@ -1154,7 +1241,14 @@ mod tests {
 
     #[test]
     fn amplitude_tracks_target() {
-        let mut node = PluckedBodyNode::new(SR, 0x10, PluckedBodyParams { amplitude: 0.1, ..PluckedBodyParams::default() });
+        let mut node = PluckedBodyNode::new(
+            SR,
+            0x10,
+            PluckedBodyParams {
+                amplitude: 0.1,
+                ..PluckedBodyParams::default()
+            },
+        );
         node.trigger();
         let _ = render(&mut node, 256);
         node.set_amplitude(0.8, Ramp::Immediate);

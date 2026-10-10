@@ -234,10 +234,16 @@ mod tests {
         let g = graph();
         // High intensity: the conditional edge (listed first) is chosen.
         let hot = TransitionContext::new(None, 0.9);
-        assert_eq!(g.select_edge(ClipId::new(1), &hot).unwrap().to, ClipId::new(2));
+        assert_eq!(
+            g.select_edge(ClipId::new(1), &hot).unwrap().to,
+            ClipId::new(2)
+        );
         // Low intensity: falls through to the unconditional default.
         let cold = TransitionContext::new(None, 0.1);
-        assert_eq!(g.select_edge(ClipId::new(1), &cold).unwrap().to, ClipId::new(3));
+        assert_eq!(
+            g.select_edge(ClipId::new(1), &cold).unwrap().to,
+            ClipId::new(3)
+        );
     }
 
     #[test]

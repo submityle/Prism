@@ -135,9 +135,15 @@ impl PositionalVoice {
         } else {
             reference_distance + 1.0
         };
-        let rolloff = if config.rolloff >= 0.0 { config.rolloff } else { 0.0 };
+        let rolloff = if config.rolloff >= 0.0 {
+            config.rolloff
+        } else {
+            0.0
+        };
         let min_gain = config.min_gain.clamp(0.0, 1.0);
-        let proximity_fade = config.proximity_fade.clamp(0.0, max_distance - reference_distance);
+        let proximity_fade = config
+            .proximity_fade
+            .clamp(0.0, max_distance - reference_distance);
         let side_tone_gain = if config.side_tone_gain >= 0.0 {
             config.side_tone_gain
         } else {
@@ -179,8 +185,8 @@ impl PositionalVoice {
             return 0.0;
         }
         // Classic inverse-distance rolloff past the reference distance.
-        let denom =
-            self.config.reference_distance + self.config.rolloff * (d - self.config.reference_distance);
+        let denom = self.config.reference_distance
+            + self.config.rolloff * (d - self.config.reference_distance);
         let raw = if denom > COINCIDENT_EPSILON {
             self.config.reference_distance / denom
         } else {

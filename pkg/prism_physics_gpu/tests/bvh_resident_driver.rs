@@ -87,14 +87,22 @@ fn small_motion_refits_and_tracks_the_refit_twin() {
     let update = driver.update(&ctx, &moved);
     ctx.wait();
 
-    assert_eq!(update.action, UpdateAction::Refit, "small motion stays a refit");
+    assert_eq!(
+        update.action,
+        UpdateAction::Refit,
+        "small motion stays a refit"
+    );
     let want = lbvh_sah_cost(&cpu_refit_lbvh(&cpu_build_lbvh(&boxes), &moved));
     assert!(
         close(update.cost, want),
         "refit cost {} vs twin {want}",
         update.cost
     );
-    assert_eq!(driver.leaf_count(), boxes.len(), "topology leaf count is kept");
+    assert_eq!(
+        driver.leaf_count(),
+        boxes.len(),
+        "topology leaf count is kept"
+    );
 }
 
 #[test]
@@ -156,9 +164,7 @@ fn staleness_forces_a_rebuild_after_the_bound() {
     let mut driver = ResidentBvhDriver::build_with_policy(&ctx, &boxes, 1.0e9, 3);
 
     // Three identical updates: refit, refit, then the staleness bound fires.
-    let actions: Vec<UpdateAction> = (0..3)
-        .map(|_| driver.update(&ctx, &boxes).action)
-        .collect();
+    let actions: Vec<UpdateAction> = (0..3).map(|_| driver.update(&ctx, &boxes).action).collect();
     ctx.wait();
 
     assert_eq!(
@@ -197,7 +203,11 @@ fn leaf_count_change_forces_a_rebuild() {
         UpdateAction::Rebuild,
         "a leaf-count change cannot be refit"
     );
-    assert_eq!(driver.leaf_count(), fewer.len(), "topology adopts the new count");
+    assert_eq!(
+        driver.leaf_count(),
+        fewer.len(),
+        "topology adopts the new count"
+    );
     let want = lbvh_sah_cost(&cpu_build_lbvh(&fewer));
     assert!(
         close(update.cost, want),

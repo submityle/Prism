@@ -146,8 +146,7 @@ mod tests {
         let field = padded_cube_field();
         let normal =
             sdf_tetrahedron_normal(&field, above_top_face(&field)).expect("gradient must orient");
-        let length_sq =
-            normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2];
+        let length_sq = normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2];
         assert!((length_sq - 1.0).abs() < 1e-5, "length^2 {length_sq} ~ 1");
     }
 
@@ -155,12 +154,14 @@ mod tests {
     fn agrees_with_central_difference_normal() {
         let field = padded_cube_field();
         let point = above_top_face(&field);
-        let tetra =
-            sdf_tetrahedron_normal(&field, point).expect("tetra normal must orient");
+        let tetra = sdf_tetrahedron_normal(&field, point).expect("tetra normal must orient");
         let central = sdf_normal(&field, point).expect("central normal must orient");
         // Both estimate the same outward normal; cosine close to 1.
         let dot = tetra[0] * central[0] + tetra[1] * central[1] + tetra[2] * central[2];
-        assert!(dot > 0.98, "tetra {tetra:?} vs central {central:?}, dot {dot}");
+        assert!(
+            dot > 0.98,
+            "tetra {tetra:?} vs central {central:?}, dot {dot}"
+        );
     }
 
     #[test]

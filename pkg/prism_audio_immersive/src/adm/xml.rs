@@ -319,7 +319,10 @@ fn build_block(block: &AudioBlockFormat) -> XmlElement {
     element.push_element(value_element("width", &fmt_sample(block.size.width)));
     element.push_element(value_element("height", &fmt_sample(block.size.height)));
     element.push_element(value_element("depth", &fmt_sample(block.size.depth)));
-    element.push_element(value_element("importance", &format!("{}", block.importance)));
+    element.push_element(value_element(
+        "importance",
+        &format!("{}", block.importance),
+    ));
     element
 }
 
@@ -758,7 +761,9 @@ fn parse_child_sample(
 
 /// Parses a [`Sample`] from text.
 fn parse_sample(text: &str) -> Result<Sample, XmlError> {
-    text.trim().parse::<Sample>().map_err(|_| XmlError::BadNumber)
+    text.trim()
+        .parse::<Sample>()
+        .map_err(|_| XmlError::BadNumber)
 }
 
 /// Parses a `u8` from text.
@@ -790,8 +795,12 @@ mod tests {
         pack.channel_format_refs.push(String::from("AC_00031001"));
         doc.pack_formats.push(pack);
 
-        doc.track_uids
-            .push(AudioTrackUid::new("ATU_00000001", 1, "AC_00031001", "AP_00031001"));
+        doc.track_uids.push(AudioTrackUid::new(
+            "ATU_00000001",
+            1,
+            "AC_00031001",
+            "AP_00031001",
+        ));
 
         let mut object = AudioObject::new("AO_1001", "Dialogue <lead>");
         object.pack_format_refs.push(String::from("AP_00031001"));

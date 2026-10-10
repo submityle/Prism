@@ -105,7 +105,10 @@ impl<T: CompensableFloat> KahanSum<T> {
     /// A fresh accumulator at zero.
     #[inline]
     pub const fn new() -> Self {
-        Self { sum: T::ZERO, compensation: T::ZERO }
+        Self {
+            sum: T::ZERO,
+            compensation: T::ZERO,
+        }
     }
     /// Add one term.
     #[inline]
@@ -152,7 +155,10 @@ impl<T: CompensableFloat> NeumaierSum<T> {
     /// A fresh accumulator at zero.
     #[inline]
     pub const fn new() -> Self {
-        Self { sum: T::ZERO, compensation: T::ZERO }
+        Self {
+            sum: T::ZERO,
+            compensation: T::ZERO,
+        }
     }
     /// Add one term.
     #[inline]

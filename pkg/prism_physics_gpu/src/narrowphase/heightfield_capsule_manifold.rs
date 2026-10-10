@@ -212,7 +212,13 @@ mod tests {
     /// A flat `rows x cols` field at `y = 0` with unit spacing, origin at the
     /// world origin.
     fn flat_field(rows: u32, cols: u32) -> Heightfield {
-        Heightfield::new(rows, cols, 1.0, Vec3::ZERO, vec![0.0; (rows * cols) as usize])
+        Heightfield::new(
+            rows,
+            cols,
+            1.0,
+            Vec3::ZERO,
+            vec![0.0; (rows * cols) as usize],
+        )
     }
 
     fn cap(p0: Vec3, p1: Vec3, radius: f32) -> Capsule {
@@ -232,11 +238,22 @@ mod tests {
             .expect("flat capsule over terrain must contact");
         assert_eq!(m.a, 0);
         assert_eq!(m.b, 0);
-        assert!((m.normal - Vec3::Y).length() < 1.0e-6, "normal {:?}", m.normal);
-        assert!(m.count >= 2, "flat span should give a multi-point manifold, got {}", m.count);
+        assert!(
+            (m.normal - Vec3::Y).length() < 1.0e-6,
+            "normal {:?}",
+            m.normal
+        );
+        assert!(
+            m.count >= 2,
+            "flat span should give a multi-point manifold, got {}",
+            m.count
+        );
         for point in m.points.iter().take(m.count as usize) {
             assert!((point.depth - 0.1).abs() < 1.0e-5, "depth {}", point.depth);
-            assert!(point.position.y.abs() < 1.0e-5, "contact should sit on the face");
+            assert!(
+                point.position.y.abs() < 1.0e-5,
+                "contact should sit on the face"
+            );
         }
     }
 
@@ -244,7 +261,11 @@ mod tests {
     fn capsule_off_the_grid_misses() {
         // Footprint lies wholly beyond the grid: no candidate cells, no contact.
         let field = flat_field(3, 3);
-        let capsules = [cap(Vec3::new(50.0, 0.4, 50.0), Vec3::new(52.0, 0.4, 50.0), 0.5)];
+        let capsules = [cap(
+            Vec3::new(50.0, 0.4, 50.0),
+            Vec3::new(52.0, 0.4, 50.0),
+            0.5,
+        )];
         let pairs = [HeightfieldCapsulePair::new(0, 0)];
         assert!(cpu_capsule_heightfield_manifold(&capsules, &[field], &pairs)[0].is_none());
     }
@@ -280,9 +301,20 @@ mod tests {
         let pairs = [HeightfieldCapsulePair::new(0, 0)];
         let m = cpu_capsule_heightfield_manifold(&capsules, &[field], &pairs)[0]
             .expect("capsule across the ridge must contact");
-        assert!((m.normal.length() - 1.0).abs() < 1.0e-5, "normal must be unit");
-        assert!(m.normal.dot(Vec3::Y) > 0.0, "terrain normal points up: {:?}", m.normal);
-        assert!((1..=4).contains(&m.count), "count in range, got {}", m.count);
+        assert!(
+            (m.normal.length() - 1.0).abs() < 1.0e-5,
+            "normal must be unit"
+        );
+        assert!(
+            m.normal.dot(Vec3::Y) > 0.0,
+            "terrain normal points up: {:?}",
+            m.normal
+        );
+        assert!(
+            (1..=4).contains(&m.count),
+            "count in range, got {}",
+            m.count
+        );
     }
 
     #[test]

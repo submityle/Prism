@@ -186,7 +186,11 @@ pub fn plan_partitioned(
     let e_cores: Vec<CoreInfo> = topology.cores_of_class(CoreClass::Efficiency).collect();
 
     // Latency work goes on P-cores; fall back to E-cores if there are none.
-    let latency_pool = if p_cores.is_empty() { &e_cores } else { &p_cores };
+    let latency_pool = if p_cores.is_empty() {
+        &e_cores
+    } else {
+        &p_cores
+    };
     // Background work goes on E-cores; fall back to P-cores if there are none.
     let background_pool = if e_cores.is_empty() {
         &p_cores

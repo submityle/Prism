@@ -211,8 +211,8 @@ impl SoftSolver {
 mod tests {
     use super::*;
     use crate::soft::collision::{
-        Backstop, BodyCollider, CcdParams, SelfCcdParams, VirtualParticlePattern,
-        generate_virtual_particles,
+        generate_virtual_particles, Backstop, BodyCollider, CcdParams, SelfCcdParams,
+        VirtualParticlePattern,
     };
     use crate::soft::constraint::DistanceConstraint;
     use crate::soft::particle::ParticleHandle;
@@ -323,7 +323,10 @@ mod tests {
         let gap = (particles.position(ParticleHandle::from_index(0)).unwrap()
             - particles.position(ParticleHandle::from_index(1)).unwrap())
         .length();
-        assert!(gap < 1e-6, "particles drifted apart without a collide stage: {gap}");
+        assert!(
+            gap < 1e-6,
+            "particles drifted apart without a collide stage: {gap}"
+        );
     }
 
     #[test]
@@ -407,7 +410,13 @@ mod tests {
         }];
         let contacts = SoftContacts::new(&colliders, &[]);
         for _ in 0..240 {
-            solver.step_with_contacts(&mut particles, &mut constraints, &config, &contacts, 1.0 / 60.0);
+            solver.step_with_contacts(
+                &mut particles,
+                &mut constraints,
+                &config,
+                &contacts,
+                1.0 / 60.0,
+            );
         }
         let pos = particles.position(p).unwrap();
         assert!(
@@ -433,7 +442,13 @@ mod tests {
         }];
         let contacts = SoftContacts::new(&[], &backstops);
         for _ in 0..240 {
-            solver.step_with_contacts(&mut particles, &mut constraints, &config, &contacts, 1.0 / 60.0);
+            solver.step_with_contacts(
+                &mut particles,
+                &mut constraints,
+                &config,
+                &contacts,
+                1.0 / 60.0,
+            );
         }
         let pos = particles.position(p).unwrap();
         assert!(pos.y >= -1e-3, "particle sank behind its backstop: {pos:?}");
@@ -454,7 +469,13 @@ mod tests {
             let config = SoftSolverConfig::default();
             let contacts = SoftContacts::new(&colliders, &[]).with_body_friction(0.3);
             for _ in 0..60 {
-                solver.step_with_contacts(&mut particles, &mut constraints, &config, &contacts, 1.0 / 60.0);
+                solver.step_with_contacts(
+                    &mut particles,
+                    &mut constraints,
+                    &config,
+                    &contacts,
+                    1.0 / 60.0,
+                );
             }
             particles.position(ParticleHandle::from_index(0)).unwrap()
         };
@@ -554,7 +575,10 @@ mod tests {
         solver.step(&mut swept, &mut c1, &cfg, 1.0 / 60.0);
         let xa = swept.position(a1).unwrap().x;
         let xb = swept.position(b1).unwrap().x;
-        assert!(xa <= xb + 1e-4, "self-CCD let the pair swap sides: a={xa} b={xb}");
+        assert!(
+            xa <= xb + 1e-4,
+            "self-CCD let the pair swap sides: a={xa} b={xb}"
+        );
         assert!(
             (xb - xa) >= thickness - 1e-3,
             "self-CCD did not keep thickness gap: a={xa} b={xb}"
@@ -681,7 +705,10 @@ mod tests {
         assert_eq!(plain, gate_on_no_vps);
 
         // Virtual particles supplied but gate None -> no-op.
-        let vps_no_gate = run(&base, &SoftContacts::EMPTY.with_virtual_particles(&virtuals));
+        let vps_no_gate = run(
+            &base,
+            &SoftContacts::EMPTY.with_virtual_particles(&virtuals),
+        );
         assert_eq!(plain, vps_no_gate);
     }
 }

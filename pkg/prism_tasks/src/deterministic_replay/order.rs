@@ -110,7 +110,10 @@ impl fmt::Display for ReplayOrderError {
             Self::BadHeader => f.write_str("replay order: bad magic header or version"),
             Self::BadEntry => f.write_str("replay order: malformed entry"),
             Self::LengthMismatch { expected, found } => {
-                write!(f, "replay order: expected {expected} entries, found {found}")
+                write!(
+                    f,
+                    "replay order: expected {expected} entries, found {found}"
+                )
             }
             Self::TaskOutOfRange { task, len } => {
                 write!(f, "replay order: task {task} out of range for len {len}")
@@ -221,7 +224,12 @@ impl ExecutionOrder {
         use core::fmt::Write as _;
         let mut out = String::new();
         // Writing to a `String` is infallible.
-        let _ = writeln!(out, "{TEXT_MAGIC} seed={:016x} len={}", self.seed, self.order.len());
+        let _ = writeln!(
+            out,
+            "{TEXT_MAGIC} seed={:016x} len={}",
+            self.seed,
+            self.order.len()
+        );
         for id in &self.order {
             let _ = writeln!(out, "{id}");
         }
@@ -258,7 +266,10 @@ impl ExecutionOrder {
 
         let mut order = Vec::with_capacity(len);
         for line in lines {
-            let id: u32 = line.trim().parse().map_err(|_| ReplayOrderError::BadEntry)?;
+            let id: u32 = line
+                .trim()
+                .parse()
+                .map_err(|_| ReplayOrderError::BadEntry)?;
             order.push(id);
         }
         if order.len() != len {

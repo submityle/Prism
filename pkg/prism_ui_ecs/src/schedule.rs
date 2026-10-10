@@ -69,7 +69,7 @@
 //! assert_eq!(world.get::<Counter>(entity).unwrap().value, 7);
 //! ```
 
-use prism_ecs::prelude::{IntoScheduleConfigs, SetConfig, Schedule, SystemSet, World};
+use prism_ecs::prelude::{IntoScheduleConfigs, Schedule, SetConfig, SystemSet, World};
 
 use crate::bridge::EcsBridge;
 

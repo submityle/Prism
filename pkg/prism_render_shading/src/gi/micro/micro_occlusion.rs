@@ -135,7 +135,11 @@ fn normalize_or(v: Vec3, fallback: Vec3) -> Vec3 {
 /// Returns `x` if it is finite, otherwise `fallback`.
 #[inline]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Maps a mean-resultant length `r` to a cone half-angle via the uniform-cone
@@ -353,7 +357,11 @@ mod tests {
             let cos_theta = cos_min + (1.0 - cos_min) * u;
             let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
             let phi = core::f32::consts::TAU * (i as f32 * 0.618_034);
-            let local = Vec3::new(sin_theta * ops::cos(phi), sin_theta * ops::sin(phi), cos_theta);
+            let local = Vec3::new(
+                sin_theta * ops::cos(phi),
+                sin_theta * ops::sin(phi),
+                cos_theta,
+            );
             out.push(t * local.x + b * local.y + axis * local.z);
         }
         out
@@ -365,12 +373,21 @@ mod tests {
         let normals = [n; 64];
         let mb = micro_bent_normal(&normals, 0.25, 1.0);
         // Mean direction recovers the (shared) input normal.
-        assert!(mb.direction.dot(n) > 0.9999, "dir {:?} n {:?}", mb.direction, n);
+        assert!(
+            mb.direction.dot(n) > 0.9999,
+            "dir {:?} n {:?}",
+            mb.direction,
+            n
+        );
         assert!((mb.direction.length() - 1.0).abs() < 1e-6);
         // r = 1 -> closed cone.
         assert!(mb.aperture < 5e-3, "aperture {}", mb.aperture);
         // Variance zero -> roughness is just the base.
-        assert!((mb.roughness - 0.25).abs() < 1e-5, "roughness {}", mb.roughness);
+        assert!(
+            (mb.roughness - 0.25).abs() < 1e-5,
+            "roughness {}",
+            mb.roughness
+        );
         // Fully visible.
         assert!((mb.visibility - 1.0).abs() < 1e-6, "vis {}", mb.visibility);
     }
@@ -380,13 +397,32 @@ mod tests {
         let coherent = micro_bent_normal(&spread_normals(Vec3::Z, 0.05, 256), 0.1, 1.0);
         let scattered = micro_bent_normal(&spread_normals(Vec3::Z, 1.2, 256), 0.1, 1.0);
         // Wider spread -> lower AO, both still bounded in [0, 1].
-        assert!(scattered.visibility < coherent.visibility, "coh {} scat {}", coherent.visibility, scattered.visibility);
-        for v in [coherent.visibility, scattered.visibility, scattered.roughness] {
+        assert!(
+            scattered.visibility < coherent.visibility,
+            "coh {} scat {}",
+            coherent.visibility,
+            scattered.visibility
+        );
+        for v in [
+            coherent.visibility,
+            scattered.visibility,
+            scattered.roughness,
+        ] {
             assert!((0.0..=1.0).contains(&v), "out of range {}", v);
         }
         // Wider spread -> wider cone and rougher lobe.
-        assert!(scattered.aperture > coherent.aperture, "coh {} scat {}", coherent.aperture, scattered.aperture);
-        assert!(scattered.roughness > coherent.roughness, "coh {} scat {}", coherent.roughness, scattered.roughness);
+        assert!(
+            scattered.aperture > coherent.aperture,
+            "coh {} scat {}",
+            coherent.aperture,
+            scattered.aperture
+        );
+        assert!(
+            scattered.roughness > coherent.roughness,
+            "coh {} scat {}",
+            coherent.roughness,
+            scattered.roughness
+        );
     }
 
     #[test]
@@ -400,8 +436,16 @@ mod tests {
             normals.push(Vec3::new(r * ops::cos(phi), r * ops::sin(phi), z));
         }
         let mb = micro_bent_normal(&normals, 0.3, 1.0);
-        assert!((0.0..=1.0).contains(&mb.visibility), "vis {}", mb.visibility);
-        assert!(mb.visibility < 0.2, "vis should be small, got {}", mb.visibility);
+        assert!(
+            (0.0..=1.0).contains(&mb.visibility),
+            "vis {}",
+            mb.visibility
+        );
+        assert!(
+            mb.visibility < 0.2,
+            "vis should be small, got {}",
+            mb.visibility
+        );
         assert!(mb.aperture > PI * 0.5, "aperture {}", mb.aperture);
         assert!(mb.visibility.is_finite() && mb.roughness.is_finite());
     }
@@ -410,7 +454,12 @@ mod tests {
     fn toksvig_variance_matches_closed_form() {
         for &r in &[1.0f32, 0.75, 0.5, 0.25, 0.1] {
             let expected = (1.0 - r) / r;
-            assert!((toksvig_variance(r) - expected).abs() < 1e-5, "r {} got {}", r, toksvig_variance(r));
+            assert!(
+                (toksvig_variance(r) - expected).abs() < 1e-5,
+                "r {} got {}",
+                r,
+                toksvig_variance(r)
+            );
         }
         // r = 0.5 -> sigma^2 = 1 exactly.
         assert!((toksvig_variance(0.5) - 1.0).abs() < 1e-6);
@@ -420,7 +469,12 @@ mod tests {
     fn cavity_ao_unit_strength_equals_mean_length() {
         for &r in &[1.0f32, 0.8, 0.6, 0.4, 0.2, 0.05] {
             // 1 / (1 + (1-r)/r) == r.
-            assert!((cavity_ao(r, 1.0) - r).abs() < 1e-5, "r {} ao {}", r, cavity_ao(r, 1.0));
+            assert!(
+                (cavity_ao(r, 1.0) - r).abs() < 1e-5,
+                "r {} ao {}",
+                r,
+                cavity_ao(r, 1.0)
+            );
         }
     }
 
@@ -430,7 +484,13 @@ mod tests {
             for &s in &[0.5f32, 1.0, 4.0] {
                 let sigma_sq = (1.0 - r) / r;
                 let expected = 1.0 / (1.0 + s * sigma_sq);
-                assert!((cavity_ao(r, s) - expected).abs() < 1e-5, "r {} s {} got {}", r, s, cavity_ao(r, s));
+                assert!(
+                    (cavity_ao(r, s) - expected).abs() < 1e-5,
+                    "r {} s {} got {}",
+                    r,
+                    s,
+                    cavity_ao(r, s)
+                );
             }
         }
     }
@@ -445,7 +505,11 @@ mod tests {
     #[test]
     fn effective_roughness_recovers_base_at_full_coherence() {
         for &base in &[0.0f32, 0.2, 0.5, 1.0] {
-            assert!((effective_roughness(base, 1.0) - base).abs() < 1e-5, "base {}", base);
+            assert!(
+                (effective_roughness(base, 1.0) - base).abs() < 1e-5,
+                "base {}",
+                base
+            );
         }
     }
 
@@ -454,9 +518,17 @@ mod tests {
         // Flat micro (r=1, +Z) merged with a tight macro cone along +Z.
         let micro = MicroBentNormal::FLAT;
         let merged = merge_micro_macro(micro, Vec3::Z, 0.0, 1.0);
-        assert!(merged.direction.dot(Vec3::Z) > 0.9999, "dir {:?}", merged.direction);
+        assert!(
+            merged.direction.dot(Vec3::Z) > 0.9999,
+            "dir {:?}",
+            merged.direction
+        );
         assert!(merged.aperture < 1e-3, "aperture {}", merged.aperture);
-        assert!((merged.visibility - 1.0).abs() < 1e-6, "vis {}", merged.visibility);
+        assert!(
+            (merged.visibility - 1.0).abs() < 1e-6,
+            "vis {}",
+            merged.visibility
+        );
     }
 
     #[test]
@@ -470,10 +542,18 @@ mod tests {
         // Macro leans toward +X with a medium cone and partial visibility.
         let merged = merge_micro_macro(micro, Vec3::X, 0.3, 0.5);
         // Axis sits between the two directions, in the upper hemisphere.
-        assert!(merged.direction.x > 0.0 && merged.direction.z > 0.0, "dir {:?}", merged.direction);
+        assert!(
+            merged.direction.x > 0.0 && merged.direction.z > 0.0,
+            "dir {:?}",
+            merged.direction
+        );
         assert!((merged.direction.length() - 1.0).abs() < 1e-5);
         // Visibility is the product of the two.
-        assert!((merged.visibility - 0.4).abs() < 1e-6, "vis {}", merged.visibility);
+        assert!(
+            (merged.visibility - 0.4).abs() < 1e-6,
+            "vis {}",
+            merged.visibility
+        );
         // Wider than either input cone because the directions disagree.
         assert!(merged.aperture > 0.3, "aperture {}", merged.aperture);
     }
@@ -488,7 +568,11 @@ mod tests {
             visibility: 1.0,
         };
         let merged = merge_micro_macro(micro, Vec3::NEG_Z, 0.0, 1.0);
-        assert!((merged.aperture - PI).abs() < 1e-4, "aperture {}", merged.aperture);
+        assert!(
+            (merged.aperture - PI).abs() < 1e-4,
+            "aperture {}",
+            merged.aperture
+        );
         assert!((merged.direction.length() - 1.0).abs() < 1e-5);
     }
 

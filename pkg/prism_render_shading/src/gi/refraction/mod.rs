@@ -213,7 +213,10 @@ mod tests {
     }
 
     fn assert_uv_in_range(uv: Vec2) {
-        assert!(uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0, "{uv:?}");
+        assert!(
+            uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0,
+            "{uv:?}"
+        );
     }
 
     #[test]
@@ -240,7 +243,10 @@ mod tests {
     fn dispersion_separates_channel_uvs() {
         let out = refract_background(&glass_params());
         // With dispersion and a real bend, the three UVs must differ.
-        assert!((out.uv[0] - out.uv[2]).length() > EPS, "red vs blue identical");
+        assert!(
+            (out.uv[0] - out.uv[2]).length() > EPS,
+            "red vs blue identical"
+        );
     }
 
     #[test]

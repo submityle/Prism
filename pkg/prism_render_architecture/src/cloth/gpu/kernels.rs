@@ -329,9 +329,7 @@ impl ClothKernel {
                 WorkgroupSize { x: 64, y: 1, z: 1 },
                 DispatchDomain::ConstraintBatch,
             ),
-            ClothKernel::StrainLimit
-            | ClothKernel::VelocityUpdate
-            | ClothKernel::Backstop => (
+            ClothKernel::StrainLimit | ClothKernel::VelocityUpdate | ClothKernel::Backstop => (
                 BindGroupLayout {
                     storage_buffers: 2,
                     uniform_buffers: 1,

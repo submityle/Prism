@@ -183,8 +183,11 @@ impl GpuTrimeshSphereSweep {
             ],
             counts: [u32::try_from(n).unwrap_or(u32::MAX), 0, 0, 0],
         };
-        let params_buf =
-            buffer::uniform(device, "prism_collider_trimesh_sphere_sweep_params", &params);
+        let params_buf = buffer::uniform(
+            device,
+            "prism_collider_trimesh_sphere_sweep_params",
+            &params,
+        );
         let vertices_buf = buffer::storage_read(
             device,
             "prism_collider_trimesh_sphere_sweep_vertices",
@@ -197,11 +200,8 @@ impl GpuTrimeshSphereSweep {
         );
 
         let out_bytes = (size_of::<SweepOut>() * 2 * n) as u64;
-        let out_buf = buffer::storage_rw_zeroed(
-            device,
-            "prism_collider_trimesh_sphere_sweep_out",
-            out_bytes,
-        );
+        let out_buf =
+            buffer::storage_rw_zeroed(device, "prism_collider_trimesh_sphere_sweep_out", out_bytes);
 
         let bind = device.create_bind_group(&BindGroupDescriptor {
             label: Some("prism_collider_trimesh_sphere_sweep_bind"),

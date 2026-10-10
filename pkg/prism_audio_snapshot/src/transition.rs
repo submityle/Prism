@@ -60,7 +60,14 @@ impl Transition {
         duration_secs: f32,
         interpolation: Interpolation,
     ) -> Self {
-        Self { start, dest, kinds, elapsed_secs: 0.0, duration_secs, interpolation }
+        Self {
+            start,
+            dest,
+            kinds,
+            elapsed_secs: 0.0,
+            duration_secs,
+            interpolation,
+        }
     }
 
     /// Returns normalized progress in `[0, 1]`.
@@ -97,8 +104,15 @@ impl Transition {
         for (&id, &start_value) in self.start.iter() {
             match self.dest.get(id) {
                 Some(dest_value) => {
-                    let kind = self.kinds.get(&id).copied().unwrap_or(ParameterKind::Linear);
-                    out.set(id, blend::interpolate(kind, start_value, dest_value, shaped));
+                    let kind = self
+                        .kinds
+                        .get(&id)
+                        .copied()
+                        .unwrap_or(ParameterKind::Linear);
+                    out.set(
+                        id,
+                        blend::interpolate(kind, start_value, dest_value, shaped),
+                    );
                 }
                 None => out.set(id, start_value),
             }
@@ -119,7 +133,10 @@ mod tests {
     const EPS: Sample = 1e-6;
 
     fn kinds(pairs: &[(u32, ParameterKind)]) -> BTreeMap<ParameterId, ParameterKind> {
-        pairs.iter().map(|&(id, k)| (ParameterId::new(id), k)).collect()
+        pairs
+            .iter()
+            .map(|&(id, k)| (ParameterId::new(id), k))
+            .collect()
     }
 
     fn resolved(pairs: &[(u32, Sample)]) -> ResolvedParameters {

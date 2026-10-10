@@ -18,8 +18,7 @@ use alloc::string::String;
 /// It receives the decoded payload for its *source* version and must leave it
 /// shaped like the *target* version (so the next step, or final
 /// reconstruction, can consume it).
-pub type MigrationFn =
-    Box<dyn Fn(&mut DynamicStruct) -> Result<(), MigrateError> + Send + Sync>;
+pub type MigrationFn = Box<dyn Fn(&mut DynamicStruct) -> Result<(), MigrateError> + Send + Sync>;
 
 /// A single ordered schema migration step (`from_version -> to_version`).
 ///
@@ -143,7 +142,10 @@ impl ::core::fmt::Display for MigrateError {
                 "migration from v{from} to v{to} is not contiguous (must advance one version)"
             ),
             MigrateError::NoMigrationPath { from, current } => {
-                write!(f, "no migration step from v{from} toward current v{current}")
+                write!(
+                    f,
+                    "no migration step from v{from} toward current v{current}"
+                )
             }
             MigrateError::VersionTooNew { found, current } => write!(
                 f,

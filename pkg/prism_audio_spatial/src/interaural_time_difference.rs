@@ -110,7 +110,11 @@ pub const KUHN_HIGH_FACTOR: Sample = 2.0;
 /// prediction.
 #[inline]
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Wraps an angle in radians to the principal interval `[-PI, PI]`.
@@ -188,7 +192,11 @@ impl InterauralTimeDifference {
     fn radius_over_speed(&self) -> Sample {
         let a = finite(self.head_radius_m);
         let c = finite(self.speed_of_sound);
-        if a <= 0.0 || c <= 0.0 { 0.0 } else { a / c }
+        if a <= 0.0 || c <= 0.0 {
+            0.0
+        } else {
+            a / c
+        }
     }
 
     /// Predicts the Woodworth ray-model ITD, in seconds, for a source at
@@ -209,7 +217,11 @@ impl InterauralTimeDifference {
         // delay is symmetric about the +-90 degree interaural axis.
         let folded = if abs <= FRAC_PI_2 { abs } else { PI - abs };
         let magnitude = ratio * (folded + ops::sin(folded));
-        if phi < 0.0 { -magnitude } else { magnitude }
+        if phi < 0.0 {
+            -magnitude
+        } else {
+            magnitude
+        }
     }
 
     /// Predicts the Kuhn low-frequency (below roughly `500` Hz) ITD, in
@@ -260,7 +272,11 @@ mod tests {
     fn woodworth_is_odd() {
         let itd = InterauralTimeDifference::default();
         for &phi in &[0.1, 0.6, 1.2, 2.0, 2.9] {
-            assert!(approx(itd.woodworth_itd(-phi), -itd.woodworth_itd(phi), 1e-9));
+            assert!(approx(
+                itd.woodworth_itd(-phi),
+                -itd.woodworth_itd(phi),
+                1e-9
+            ));
         }
     }
 
@@ -333,7 +349,11 @@ mod tests {
         let itd = InterauralTimeDifference::default();
         for &phi in &[0.2, 0.9, 1.4] {
             assert!(approx(itd.kuhn_itd_low(-phi), -itd.kuhn_itd_low(phi), 1e-9));
-            assert!(approx(itd.kuhn_itd_high(-phi), -itd.kuhn_itd_high(phi), 1e-9));
+            assert!(approx(
+                itd.kuhn_itd_high(-phi),
+                -itd.kuhn_itd_high(phi),
+                1e-9
+            ));
         }
     }
 
@@ -361,7 +381,11 @@ mod tests {
             itd.woodworth_itd(0.7 + TAU),
             1e-6
         ));
-        assert!(approx(itd.kuhn_itd_low(0.7), itd.kuhn_itd_low(0.7 - TAU), 1e-6));
+        assert!(approx(
+            itd.kuhn_itd_low(0.7),
+            itd.kuhn_itd_low(0.7 - TAU),
+            1e-6
+        ));
     }
 
     #[test]

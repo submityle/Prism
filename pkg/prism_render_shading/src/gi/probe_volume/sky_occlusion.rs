@@ -186,11 +186,7 @@ impl SkyOcclusion {
             if cos <= 0.0 {
                 continue;
             }
-            let vis = chebyshev_weight(
-                self.sample(dir)[0],
-                self.sample(dir)[1],
-                SKY_DISTANCE,
-            );
+            let vis = chebyshev_weight(self.sample(dir)[0], self.sample(dir)[1], SKY_DISTANCE);
             num += vis * cos;
             den += cos;
         }
@@ -283,15 +279,24 @@ mod tests {
         m.update(dir, 4.0, 1.0);
         let idx = m.index_for_dir(dir);
         let t = m.moments_at(idx);
-        assert!((t[0] - 4.0).abs() < 1e-6 && (t[1] - 16.0).abs() < 1e-6, "{t:?}");
+        assert!(
+            (t[0] - 4.0).abs() < 1e-6 && (t[1] - 16.0).abs() < 1e-6,
+            "{t:?}"
+        );
 
         m.update(dir, 6.0, 0.5);
         let t = m.moments_at(idx);
-        assert!((t[0] - 5.0).abs() < 1e-6 && (t[1] - 26.0).abs() < 1e-6, "{t:?}");
+        assert!(
+            (t[0] - 5.0).abs() < 1e-6 && (t[1] - 26.0).abs() < 1e-6,
+            "{t:?}"
+        );
 
         m.update(dir, 100.0, 0.0);
         let t = m.moments_at(idx);
-        assert!((t[0] - 5.0).abs() < 1e-6 && (t[1] - 26.0).abs() < 1e-6, "{t:?}");
+        assert!(
+            (t[0] - 5.0).abs() < 1e-6 && (t[1] - 26.0).abs() < 1e-6,
+            "{t:?}"
+        );
     }
 
     #[test]
@@ -371,7 +376,10 @@ mod tests {
         let a = build();
         let b = build();
         assert_eq!(a, b);
-        assert_eq!(a.sky_visibility(Vec3::Y, 128), b.sky_visibility(Vec3::Y, 128));
+        assert_eq!(
+            a.sky_visibility(Vec3::Y, 128),
+            b.sky_visibility(Vec3::Y, 128)
+        );
     }
 
     #[test]

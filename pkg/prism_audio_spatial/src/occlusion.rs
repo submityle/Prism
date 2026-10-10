@@ -49,7 +49,7 @@
 
 use bevy_math::ops;
 use prism_audio_core::graph::{AudioNode, ProcessIo, RenderContext};
-use prism_audio_core::math::{Sample, db_to_linear};
+use prism_audio_core::math::{db_to_linear, Sample};
 use prism_audio_core::nodes::biquad::{Biquad, BiquadCoeffs, BiquadKind};
 use prism_audio_core::param::{Ramp, Smoothed};
 
@@ -183,7 +183,11 @@ impl Occlusion {
     /// two corner frequencies are ordered so `blocked <= open`.
     #[inline]
     #[must_use]
-    pub fn new(max_attenuation_db: Sample, open_cutoff_hz: Sample, blocked_cutoff_hz: Sample) -> Self {
+    pub fn new(
+        max_attenuation_db: Sample,
+        open_cutoff_hz: Sample,
+        blocked_cutoff_hz: Sample,
+    ) -> Self {
         let att = max_attenuation_db.max(0.0);
         let open = open_cutoff_hz.max(0.0);
         let blocked = blocked_cutoff_hz.max(0.0).min(open);
@@ -423,9 +427,15 @@ mod tests {
     #[test]
     fn cutoff_is_monotonic_in_factor() {
         let occ = Occlusion::default();
-        let a = occ.resolve(OcclusionFactors::new(0.25, 0.0)).direct_cutoff_hz;
-        let b = occ.resolve(OcclusionFactors::new(0.5, 0.0)).direct_cutoff_hz;
-        let c = occ.resolve(OcclusionFactors::new(0.75, 0.0)).direct_cutoff_hz;
+        let a = occ
+            .resolve(OcclusionFactors::new(0.25, 0.0))
+            .direct_cutoff_hz;
+        let b = occ
+            .resolve(OcclusionFactors::new(0.5, 0.0))
+            .direct_cutoff_hz;
+        let c = occ
+            .resolve(OcclusionFactors::new(0.75, 0.0))
+            .direct_cutoff_hz;
         assert!(a > b && b > c, "cutoffs a={a} b={b} c={c}");
         assert!(c > occ.blocked_cutoff_hz - 1.0 && a < occ.open_cutoff_hz);
     }
@@ -433,10 +443,15 @@ mod tests {
     #[test]
     fn cutoff_midpoint_is_geometric_mean() {
         let occ = Occlusion::new(24.0, 16_000.0, 250.0);
-        let mid = occ.resolve(OcclusionFactors::new(0.5, 0.0)).direct_cutoff_hz;
+        let mid = occ
+            .resolve(OcclusionFactors::new(0.5, 0.0))
+            .direct_cutoff_hz;
         // Log-domain midpoint = sqrt(open * blocked).
         let expected = ops::sqrt(16_000.0 * 250.0);
-        assert!((mid - expected).abs() / expected < 1.0e-4, "mid={mid} exp={expected}");
+        assert!(
+            (mid - expected).abs() / expected < 1.0e-4,
+            "mid={mid} exp={expected}"
+        );
     }
 
     #[test]
@@ -492,7 +507,11 @@ mod tests {
         let sample_rate = 48_000;
         let frames = 128;
         let mut node = OcclusionNode::new(Occlusion::default(), 1, sample_rate);
-        node.set_factors(OcclusionFactors::new(1.0, 1.0), Ramp::Immediate, sample_rate);
+        node.set_factors(
+            OcclusionFactors::new(1.0, 1.0),
+            Ramp::Immediate,
+            sample_rate,
+        );
 
         let mut input = AudioBuffer::new(ChannelLayout::Mono, frames);
         for s in input.channel_mut(0).iter_mut() {

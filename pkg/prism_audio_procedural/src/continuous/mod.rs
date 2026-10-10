@@ -135,8 +135,13 @@ impl ContactVoice {
     ) {
         let amplitude = impulse_to_amplitude(impulse);
         let brightness = normal_tangential_brightness(normal, tangential);
-        self.synth
-            .schedule_impact(sample_offset, amplitude, point, brightness, self.transient_len);
+        self.synth.schedule_impact(
+            sample_offset,
+            amplitude,
+            point,
+            brightness,
+            self.transient_len,
+        );
         self.state.impact();
     }
 

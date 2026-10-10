@@ -202,7 +202,9 @@ impl GpuCutSelector {
             is_root[r as usize] = 1;
         }
 
-        let planes = frustum.planes.map(|p| [p.normal[0], p.normal[1], p.normal[2], p.distance]);
+        let planes = frustum
+            .planes
+            .map(|p| [p.normal[0], p.normal[1], p.normal[2], p.distance]);
         let params = Params {
             planes,
             view_origin,

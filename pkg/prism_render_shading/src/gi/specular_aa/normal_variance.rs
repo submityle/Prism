@@ -49,7 +49,7 @@
 //!   Antialiasing* (I3D) — the projected-variance estimate and the `κ` cap used
 //!   here, including the recommended `SIGMA2`/`KAPPA_MAX` constants.
 
-use crate::gi::spec_gi::ggx_lobe::{MIN_ALPHA, roughness_to_alpha};
+use crate::gi::spec_gi::ggx_lobe::{roughness_to_alpha, MIN_ALPHA};
 use bevy_math::Vec3;
 
 /// Default projection constant `SIGMA2` scaling the summed squared normal
@@ -80,10 +80,18 @@ fn safe_sq_len(v: Vec3) -> f32 {
 /// on a locally flat, static surface.
 #[inline]
 pub fn screen_space_variance(ddx_normal: Vec3, ddy_normal: Vec3, scale: f32) -> f32 {
-    let s = if scale.is_finite() { scale.max(0.0) } else { 0.0 };
+    let s = if scale.is_finite() {
+        scale.max(0.0)
+    } else {
+        0.0
+    };
     let sum = safe_sq_len(ddx_normal) + safe_sq_len(ddy_normal);
     let variance = s * sum;
-    if variance.is_finite() { variance.max(0.0) } else { 0.0 }
+    if variance.is_finite() {
+        variance.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Kernel roughness `κ = min(2σ², max_kernel)` — the extra GGX variance the
@@ -94,8 +102,16 @@ pub fn screen_space_variance(ddx_normal: Vec3, ddy_normal: Vec3, scale: f32) -> 
 /// lobe without bound.
 #[inline]
 pub fn kernel_roughness_sq(variance: f32, max_kernel: f32) -> f32 {
-    let v = if variance.is_finite() { variance.max(0.0) } else { 0.0 };
-    let cap = if max_kernel.is_finite() { max_kernel.max(0.0) } else { 0.0 };
+    let v = if variance.is_finite() {
+        variance.max(0.0)
+    } else {
+        0.0
+    };
+    let cap = if max_kernel.is_finite() {
+        max_kernel.max(0.0)
+    } else {
+        0.0
+    };
     (2.0 * v).min(cap)
 }
 
@@ -106,10 +122,18 @@ pub fn kernel_roughness_sq(variance: f32, max_kernel: f32) -> f32 {
 /// sharper than the base.
 #[inline]
 pub fn filter_alpha_sq(base_alpha_sq: f32, variance: f32, max_kernel: f32) -> f32 {
-    let base = if base_alpha_sq.is_finite() { base_alpha_sq.max(0.0) } else { 0.0 };
+    let base = if base_alpha_sq.is_finite() {
+        base_alpha_sq.max(0.0)
+    } else {
+        0.0
+    };
     let eff = base + kernel_roughness_sq(variance, max_kernel);
     let floor = MIN_ALPHA * MIN_ALPHA;
-    if eff.is_finite() { eff.clamp(floor, 1.0) } else { base.clamp(floor, 1.0) }
+    if eff.is_finite() {
+        eff.clamp(floor, 1.0)
+    } else {
+        base.clamp(floor, 1.0)
+    }
 }
 
 /// Closed-form additional GGX variance `Δα² = min(2σ², max_kernel)` contributed
@@ -206,13 +230,8 @@ mod tests {
         let ddx = Vec3::new(0.3, 0.1, 0.0);
         let ddy = Vec3::new(0.1, 0.3, 0.0);
         for &r in &[0.0_f32, 0.05, 0.2, 0.5, 0.9, 1.0] {
-            let out = geometric_specular_aa_roughness(
-                r,
-                ddx,
-                ddy,
-                DEFAULT_SIGMA2,
-                DEFAULT_KAPPA_MAX,
-            );
+            let out =
+                geometric_specular_aa_roughness(r, ddx, ddy, DEFAULT_SIGMA2, DEFAULT_KAPPA_MAX);
             assert!(out >= r - 1.0e-4, "r {r} out {out}");
             assert!((0.0..=1.0).contains(&out));
         }
@@ -230,12 +249,7 @@ mod tests {
         let ddx = Vec3::new(0.2, 0.05, 0.01);
         let ddy = Vec3::new(0.03, 0.22, 0.0);
         let variance = screen_space_variance(ddx, ddy, DEFAULT_SIGMA2);
-        let direct = delta_alpha_sq_from_derivatives(
-            ddx,
-            ddy,
-            DEFAULT_SIGMA2,
-            DEFAULT_KAPPA_MAX,
-        );
+        let direct = delta_alpha_sq_from_derivatives(ddx, ddy, DEFAULT_SIGMA2, DEFAULT_KAPPA_MAX);
         let staged = kernel_roughness_sq(variance, DEFAULT_KAPPA_MAX);
         assert!((direct - staged).abs() < EPS);
     }
@@ -246,13 +260,7 @@ mod tests {
         let inf = Vec3::splat(f32::INFINITY);
         assert!(screen_space_variance(nan, inf, DEFAULT_SIGMA2).is_finite());
         assert!(kernel_roughness_sq(f32::NAN, f32::NAN).is_finite());
-        let out = geometric_specular_aa_roughness(
-            f32::NAN,
-            nan,
-            inf,
-            f32::NAN,
-            f32::NAN,
-        );
+        let out = geometric_specular_aa_roughness(f32::NAN, nan, inf, f32::NAN, f32::NAN);
         assert!((0.0..=1.0).contains(&out));
     }
 

@@ -97,7 +97,10 @@ mod tests {
 
     #[test]
     fn is_deterministic() {
-        assert_eq!(animated_sample_2d((5, 9), 3, 1), animated_sample_2d((5, 9), 3, 1));
+        assert_eq!(
+            animated_sample_2d((5, 9), 3, 1),
+            animated_sample_2d((5, 9), 3, 1)
+        );
     }
 
     #[test]
@@ -144,6 +147,9 @@ mod tests {
         }
         let min_d = min_d2.sqrt();
         let bound = 0.5 / (n as f32).sqrt();
-        assert!(min_d > bound, "min distance {min_d} below blue-noise bound {bound}");
+        assert!(
+            min_d > bound,
+            "min distance {min_d} below blue-noise bound {bound}"
+        );
     }
 }

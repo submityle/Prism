@@ -42,7 +42,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use prism_platform::{Protection, Reservation, now, page_size, virtual_memory_supported};
+use prism_platform::{now, page_size, virtual_memory_supported, Protection, Reservation};
 
 /// Target reservation size in bytes (rounded to whole pages).
 const RESERVE_BYTES: usize = 64 * 1024 * 1024;
@@ -109,7 +109,10 @@ fn main() {
     }
 
     let page = page_size();
-    assert!(page >= 4096, "page size should be at least 4 KiB, got {page}");
+    assert!(
+        page >= 4096,
+        "page size should be at least 4 KiB, got {page}"
+    );
 
     let len = (RESERVE_BYTES / page) * page;
     let pages = len / page;

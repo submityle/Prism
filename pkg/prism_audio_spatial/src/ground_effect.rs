@@ -87,7 +87,7 @@
 
 use bevy_math::ops;
 
-use prism_audio_core::math::{Sample, db_to_linear};
+use prism_audio_core::math::{db_to_linear, Sample};
 
 use crate::material_library::{OCTAVE_BAND_CENTERS, OCTAVE_BAND_COUNT};
 
@@ -127,21 +127,33 @@ pub struct GroundEffect {
 #[inline]
 #[must_use]
 fn clamp_ground(g: Sample) -> Sample {
-    if g.is_finite() { g.clamp(0.0, 1.0) } else { 0.0 }
+    if g.is_finite() {
+        g.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Clamps a height to be finite and non-negative.
 #[inline]
 #[must_use]
 fn clamp_height(h: Sample) -> Sample {
-    if h.is_finite() { h.max(0.0) } else { 0.0 }
+    if h.is_finite() {
+        h.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Clamps a distance to be finite and non-negative.
 #[inline]
 #[must_use]
 fn clamp_distance(d: Sample) -> Sample {
-    if d.is_finite() { d.max(0.0) } else { 0.0 }
+    if d.is_finite() {
+        d.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 impl GroundEffect {
@@ -411,10 +423,7 @@ mod tests {
         // every band is A_s + A_r = -1.5 + -1.5 = -3 dB (constructive gain).
         let hard = GroundEffect::from_geometry(2.0, 2.0, 100.0, 0.0);
         for band in 0..OCTAVE_BAND_COUNT {
-            assert!(
-                approx(hard.attenuation_db(band), -3.0, 1e-4),
-                "band {band}"
-            );
+            assert!(approx(hard.attenuation_db(band), -3.0, 1e-4), "band {band}");
         }
     }
 

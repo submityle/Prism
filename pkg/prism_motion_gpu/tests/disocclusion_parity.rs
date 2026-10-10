@@ -14,7 +14,7 @@
 use prism_motion_gpu::context::GpuContext;
 use prism_motion_gpu::disocclusion::{DisocclusionResult, GpuDisocclusion};
 use prism_render_architecture::motion::disocclusion::{
-    DisocclusionParams, RejectionReasons, SurfacePoint, classify,
+    classify, DisocclusionParams, RejectionReasons, SurfacePoint,
 };
 
 /// Confidence tolerance: well above the normal-dot FMA noise (a few ULP, scaled
@@ -67,7 +67,13 @@ impl Lcg {
 
 /// Asserts a device result matches the golden verdict: discrete fields exactly,
 /// confidence within [`CONF_TOL`].
-fn assert_matches(gpu: DisocclusionResult, golden_c: SurfacePoint, golden_h: SurfacePoint, params: DisocclusionParams, label: &str) {
+fn assert_matches(
+    gpu: DisocclusionResult,
+    golden_c: SurfacePoint,
+    golden_h: SurfacePoint,
+    params: DisocclusionParams,
+    label: &str,
+) {
     let golden = classify(golden_c, golden_h, params);
     assert_eq!(gpu.accepted, golden.accepted, "{label}: accepted mismatch");
     assert_eq!(
@@ -94,7 +100,9 @@ fn coherent_surface_is_accepted() {
     let p = DisocclusionParams::default();
     let current = [SurfacePoint::new(1.0, UP, 42)];
     let history = [SurfacePoint::new(1.0, UP, 42)];
-    let out = kernel.classify(&ctx, &current, &history, p).expect("matched lengths");
+    let out = kernel
+        .classify(&ctx, &current, &history, p)
+        .expect("matched lengths");
     assert_matches(out[0], current[0], history[0], p, "coherent");
     // Anti-vacuous: a fully coherent sample is accepted with full confidence.
     assert!(out[0].accepted);
@@ -111,12 +119,17 @@ fn surface_mismatch_is_rejected() {
     let p = DisocclusionParams::default();
     let current = [SurfacePoint::new(1.0, UP, 7)];
     let history = [SurfacePoint::new(1.0, UP, 8)];
-    let out = kernel.classify(&ctx, &current, &history, p).expect("matched lengths");
+    let out = kernel
+        .classify(&ctx, &current, &history, p)
+        .expect("matched lengths");
     assert_matches(out[0], current[0], history[0], p, "surface_mismatch");
     // Anti-vacuous: mismatch hard-rejects to zero confidence with the bit set.
     assert!(!out[0].accepted);
     assert_eq!(out[0].confidence, 0.0);
-    assert_ne!(out[0].reasons & RejectionReasons::SURFACE_MISMATCH.bits(), 0);
+    assert_ne!(
+        out[0].reasons & RejectionReasons::SURFACE_MISMATCH.bits(),
+        0
+    );
 }
 
 #[test]
@@ -128,11 +141,16 @@ fn surface_ignored_when_disabled() {
     let p = DisocclusionParams::new(0.05, 0.9, false, 0.5);
     let current = [SurfacePoint::new(1.0, UP, 7)];
     let history = [SurfacePoint::new(1.0, UP, 8)];
-    let out = kernel.classify(&ctx, &current, &history, p).expect("matched lengths");
+    let out = kernel
+        .classify(&ctx, &current, &history, p)
+        .expect("matched lengths");
     assert_matches(out[0], current[0], history[0], p, "surface_disabled");
     // Anti-vacuous: with the check disabled the id gap no longer rejects.
     assert!(out[0].accepted);
-    assert_eq!(out[0].reasons & RejectionReasons::SURFACE_MISMATCH.bits(), 0);
+    assert_eq!(
+        out[0].reasons & RejectionReasons::SURFACE_MISMATCH.bits(),
+        0
+    );
 }
 
 #[test]
@@ -144,11 +162,16 @@ fn depth_discontinuity_is_rejected() {
     let p = DisocclusionParams::default();
     let current = [SurfacePoint::new(1.0, UP, 1)];
     let history = [SurfacePoint::new(5.0, UP, 1)];
-    let out = kernel.classify(&ctx, &current, &history, p).expect("matched lengths");
+    let out = kernel
+        .classify(&ctx, &current, &history, p)
+        .expect("matched lengths");
     assert_matches(out[0], current[0], history[0], p, "depth_gap");
     // Anti-vacuous: a 4x depth gap collapses the depth signal.
     assert!(!out[0].accepted);
-    assert_ne!(out[0].reasons & RejectionReasons::DEPTH_DISCONTINUITY.bits(), 0);
+    assert_ne!(
+        out[0].reasons & RejectionReasons::DEPTH_DISCONTINUITY.bits(),
+        0
+    );
 }
 
 #[test]
@@ -160,11 +183,16 @@ fn normal_discontinuity_is_rejected() {
     let p = DisocclusionParams::default();
     let current = [SurfacePoint::new(1.0, UP, 1)];
     let history = [SurfacePoint::new(1.0, RIGHT, 1)];
-    let out = kernel.classify(&ctx, &current, &history, p).expect("matched lengths");
+    let out = kernel
+        .classify(&ctx, &current, &history, p)
+        .expect("matched lengths");
     assert_matches(out[0], current[0], history[0], p, "normal_crease");
     // Anti-vacuous: orthogonal normals drop below the cosine threshold.
     assert!(!out[0].accepted);
-    assert_ne!(out[0].reasons & RejectionReasons::NORMAL_DISCONTINUITY.bits(), 0);
+    assert_ne!(
+        out[0].reasons & RejectionReasons::NORMAL_DISCONTINUITY.bits(),
+        0
+    );
 }
 
 #[test]
@@ -178,14 +206,16 @@ fn graded_depth_and_normal_confidence_match_golden() {
     // cos 0.95 is halfway between the 0.9 threshold and 1.0 -> 0.5 confidence.
     let half_normal = [0.312_249_8, 0.95, 0.0];
     let current = [
-        SurfacePoint::new(1.0, UP, 5),      // 5% depth gap, matching normal
-        SurfacePoint::new(1.0, UP, 9),      // perfect depth, graded normal
+        SurfacePoint::new(1.0, UP, 5), // 5% depth gap, matching normal
+        SurfacePoint::new(1.0, UP, 9), // perfect depth, graded normal
     ];
     let history = [
         SurfacePoint::new(0.95, UP, 5),
         SurfacePoint::new(1.0, half_normal, 9),
     ];
-    let out = kernel.classify(&ctx, &current, &history, p).expect("matched lengths");
+    let out = kernel
+        .classify(&ctx, &current, &history, p)
+        .expect("matched lengths");
     assert_matches(out[0], current[0], history[0], p, "graded_depth");
     assert_matches(out[1], current[1], history[1], p, "graded_normal");
     // Anti-vacuous: both grade to ~0.5, above the 0.25 accept threshold.
@@ -206,7 +236,9 @@ fn length_mismatch_returns_none_and_empty_is_empty() {
         kernel.classify(&ctx, &current, &[], p).is_none(),
         "length mismatch must return None"
     );
-    let empty = kernel.classify(&ctx, &[], &[], p).expect("empty matched lengths");
+    let empty = kernel
+        .classify(&ctx, &[], &[], p)
+        .expect("empty matched lengths");
     assert!(empty.is_empty(), "empty input must yield empty output");
 }
 
@@ -236,11 +268,17 @@ fn large_multi_workgroup_batch_matches_golden() {
         let hist_normal = if normal_matches { UP } else { RIGHT };
         let hist_id = if id_matches { id } else { id ^ 0x9e37_79b9 };
         current.push(SurfacePoint::new(base_depth, UP, id.max(1)));
-        history.push(SurfacePoint::new(base_depth + gap, hist_normal, hist_id.max(1)));
+        history.push(SurfacePoint::new(
+            base_depth + gap,
+            hist_normal,
+            hist_id.max(1),
+        ));
         let _ = i;
     }
 
-    let out = kernel.classify(&ctx, &current, &history, p).expect("matched lengths");
+    let out = kernel
+        .classify(&ctx, &current, &history, p)
+        .expect("matched lengths");
     assert_eq!(out.len(), count);
     let mut any_accepted = false;
     let mut any_rejected = false;

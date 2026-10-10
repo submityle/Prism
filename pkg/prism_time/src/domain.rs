@@ -93,7 +93,8 @@ impl TimeScaleDomain {
     #[inline]
     pub fn ease_to(&mut self, target: f64, duration: Duration, easing: Easing) {
         if target.is_finite() {
-            self.transition.retarget_with(target.max(0.0), duration, easing);
+            self.transition
+                .retarget_with(target.max(0.0), duration, easing);
         }
     }
 
@@ -198,20 +199,26 @@ fn sanitize_scale(scale: f64, fallback: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{TimeScaleDomain, composite_scale};
+    use super::{composite_scale, TimeScaleDomain};
     use crate::{Duration, Easing};
 
     #[test]
     fn identity_passes_delta_through() {
         let d = TimeScaleDomain::identity();
         assert_eq!(d.effective_scale(), 1.0);
-        assert_eq!(d.scale_delta(Duration::from_millis(16)), Duration::from_millis(16));
+        assert_eq!(
+            d.scale_delta(Duration::from_millis(16)),
+            Duration::from_millis(16)
+        );
     }
 
     #[test]
     fn half_speed_halves_delta() {
         let d = TimeScaleDomain::new(0.5);
-        assert_eq!(d.scale_delta(Duration::from_millis(20)), Duration::from_millis(10));
+        assert_eq!(
+            d.scale_delta(Duration::from_millis(20)),
+            Duration::from_millis(10)
+        );
     }
 
     #[test]
@@ -243,7 +250,7 @@ mod tests {
         let dt = Duration::from_millis(80);
         let chained = local.scale_delta(world.scale_delta(dt));
         assert_eq!(chained, Duration::from_millis(10)); // 80 * 0.5 * 0.25
-        // Via composite_scale helper.
+                                                        // Via composite_scale helper.
         let s = composite_scale([&world, &local]);
         assert!((s - 0.125).abs() < 1e-12);
         // Via compose fold.

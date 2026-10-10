@@ -243,9 +243,7 @@ pub fn segment_triangle_intersection(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ray_capsule, ray_obb, ray_sphere, ray_triangle, segment_triangle_intersection,
-    };
+    use super::{ray_capsule, ray_obb, ray_sphere, ray_triangle, segment_triangle_intersection};
     use crate::bounding::{BoundingSphere, Capsule, Obb, Ray};
     use approx::assert_relative_eq;
     use core::f32::consts::FRAC_PI_4;

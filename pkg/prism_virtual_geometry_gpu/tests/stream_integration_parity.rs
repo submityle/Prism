@@ -52,9 +52,7 @@ struct KeyedSource;
 
 fn encode_word(k: GeometryPageKey, word: u32) -> u32 {
     // Mix asset/page/word into a non-zero, per-(key, word) distinct value.
-    ((k.asset.wrapping_add(1)) << 20)
-        ^ ((k.page.wrapping_add(1)) << 8)
-        ^ word.wrapping_add(1)
+    ((k.asset.wrapping_add(1)) << 20) ^ ((k.page.wrapping_add(1)) << 8) ^ word.wrapping_add(1)
 }
 
 impl PageSource<GeometryPageKey> for KeyedSource {
@@ -101,15 +99,16 @@ fn assert_storage_parity(ctx: &GpuContext, mgr: &PageStreamManager<GeometryPageK
     // Golden slot-major buffer: zero-initialised pool with each resident page's
     // deterministic payload copied into its assigned slot span.
     let mut expected = vec![0u32; (CAPACITY * PAGE_WORDS) as usize];
-    let payloads: Vec<(u32, Vec<u32>)> =
-        entries.iter().map(|(k, slot)| (*slot, src.load(*k))).collect();
+    let payloads: Vec<(u32, Vec<u32>)> = entries
+        .iter()
+        .map(|(k, slot)| (*slot, src.load(*k)))
+        .collect();
     for (slot, words) in &payloads {
         let base = (*slot * PAGE_WORDS) as usize;
         expected[base..base + PAGE_WORDS as usize].copy_from_slice(words);
     }
 
-    let uploads: Vec<(u32, &[u32])> =
-        payloads.iter().map(|(s, w)| (*s, w.as_slice())).collect();
+    let uploads: Vec<(u32, &[u32])> = payloads.iter().map(|(s, w)| (*s, w.as_slice())).collect();
     let mut fetches = Vec::new();
     for slot in 0..CAPACITY {
         for word in 0..PAGE_WORDS {
@@ -119,7 +118,10 @@ fn assert_storage_parity(ctx: &GpuContext, mgr: &PageStreamManager<GeometryPageK
 
     let storage = GpuPageStorage::new(ctx);
     let got = storage.round_trip(ctx, PAGE_WORDS, CAPACITY, &uploads, &fetches);
-    assert_eq!(got, expected, "GPU storage round-trip must match golden buffer");
+    assert_eq!(
+        got, expected,
+        "GPU storage round-trip must match golden buffer"
+    );
     assert!(
         got.iter().any(|&w| w != 0),
         "resident payloads must be non-zero (guards against degenerate data)"
@@ -149,8 +151,14 @@ fn streamed_residency_resolves_and_stores_bit_exact() {
 
     let report = mgr.reconcile(&batch, 0, &mut src);
     assert_eq!(report.streamed_in.len(), 5, "all five pages fit the budget");
-    assert!(report.evicted.is_empty(), "nothing to evict on a fresh fill");
-    assert!(report.deferred.is_empty(), "budget covers the whole request");
+    assert!(
+        report.evicted.is_empty(),
+        "nothing to evict on a fresh fill"
+    );
+    assert!(
+        report.deferred.is_empty(),
+        "budget covers the whole request"
+    );
     assert_eq!(mgr.resident_count(), 5);
 
     let queries = vec![
@@ -195,7 +203,11 @@ fn displacement_eviction_stays_bit_exact() {
     b1.record(key(7, 7), 100.0);
     let r1 = mgr.reconcile(&b1, 1, &mut src);
     assert_eq!(r1.streamed_in, vec![key(7, 7)], "the new page streams in");
-    assert_eq!(r1.evicted, vec![key(0, 0)], "lowest-priority page is displaced");
+    assert_eq!(
+        r1.evicted,
+        vec![key(0, 0)],
+        "lowest-priority page is displaced"
+    );
     assert_eq!(mgr.resident_count(), 6, "residency stays at budget");
     assert!(mgr.slot_of(key(7, 7)).is_some(), "new page is resident");
     assert!(mgr.slot_of(key(0, 0)).is_none(), "displaced page is gone");

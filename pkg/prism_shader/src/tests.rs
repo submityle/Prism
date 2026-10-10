@@ -5,10 +5,10 @@ use alloc::vec::Vec;
 
 use crate::compose::{ComposeError, ShaderComposer};
 use crate::def::{ShaderDefValue, ShaderDefs};
-use crate::expr::{ExprError, evaluate};
+use crate::expr::{evaluate, ExprError};
 use crate::module::ShaderModule;
 use crate::permutation::PermutationId;
-use crate::preprocess::{PreprocessError, preprocess};
+use crate::preprocess::{preprocess, PreprocessError};
 
 fn defs_of(pairs: &[(&str, ShaderDefValue)]) -> ShaderDefs {
     let mut defs = ShaderDefs::new();
@@ -25,7 +25,10 @@ fn defs_insert_get_and_truthiness() {
     let mut defs = ShaderDefs::new();
     assert!(defs.is_empty());
     assert_eq!(defs.insert("A", ShaderDefValue::Int(3)), None);
-    assert_eq!(defs.insert("A", ShaderDefValue::Int(4)), Some(ShaderDefValue::Int(3)));
+    assert_eq!(
+        defs.insert("A", ShaderDefValue::Int(4)),
+        Some(ShaderDefValue::Int(3))
+    );
     assert!(defs.define("B").is_none());
     assert_eq!(defs.len(), 2);
     assert!(defs.contains("B"));
@@ -54,8 +57,14 @@ fn defs_iterate_in_name_sorted_order() {
 
 #[test]
 fn permutation_id_is_order_independent_and_stable() {
-    let a = defs_of(&[("A", ShaderDefValue::Int(1)), ("B", ShaderDefValue::Bool(true))]);
-    let b = defs_of(&[("B", ShaderDefValue::Bool(true)), ("A", ShaderDefValue::Int(1))]);
+    let a = defs_of(&[
+        ("A", ShaderDefValue::Int(1)),
+        ("B", ShaderDefValue::Bool(true)),
+    ]);
+    let b = defs_of(&[
+        ("B", ShaderDefValue::Bool(true)),
+        ("A", ShaderDefValue::Int(1)),
+    ]);
     assert_eq!(PermutationId::of(&a), PermutationId::of(&b));
     // Stable across repeated computation.
     assert_eq!(PermutationId::of(&a).get(), PermutationId::of(&a).get());
@@ -63,7 +72,10 @@ fn permutation_id_is_order_independent_and_stable() {
 
 #[test]
 fn permutation_id_empty_and_distinctness() {
-    assert_eq!(PermutationId::empty(), PermutationId::of(&ShaderDefs::new()));
+    assert_eq!(
+        PermutationId::empty(),
+        PermutationId::of(&ShaderDefs::new())
+    );
     let one = defs_of(&[("A", ShaderDefValue::Int(1))]);
     let two = defs_of(&[("A", ShaderDefValue::Int(2))]);
     assert_ne!(PermutationId::of(&one), PermutationId::of(&two));
@@ -103,7 +115,10 @@ fn expr_comparisons_and_logic() {
 
 #[test]
 fn expr_defined_and_bare_idents() {
-    let defs = defs_of(&[("QUALITY", ShaderDefValue::Int(2)), ("FEATURE", ShaderDefValue::Bool(true))]);
+    let defs = defs_of(&[
+        ("QUALITY", ShaderDefValue::Int(2)),
+        ("FEATURE", ShaderDefValue::Bool(true)),
+    ]);
     assert_eq!(evaluate("defined(QUALITY)", &defs), Ok(1));
     assert_eq!(evaluate("defined MISSING", &defs), Ok(0));
     assert_eq!(evaluate("QUALITY == 2", &defs), Ok(1));
@@ -119,7 +134,10 @@ fn expr_error_cases() {
     assert_eq!(evaluate("1 / 0", &defs), Err(ExprError::DivideByZero));
     assert_eq!(evaluate("1 2", &defs), Err(ExprError::TrailingTokens));
     assert_eq!(evaluate("(1 + 2", &defs), Err(ExprError::ExpectedRParen));
-    assert!(matches!(evaluate("1 &", &defs), Err(ExprError::IncompleteOperator('&'))));
+    assert!(matches!(
+        evaluate("1 &", &defs),
+        Err(ExprError::IncompleteOperator('&'))
+    ));
 }
 
 // ----- preprocess -----------------------------------------------------------
@@ -142,7 +160,10 @@ fn preprocess_if_elif_else_chain() {
 
 #[test]
 fn preprocess_nested_and_inactive_parent_suppresses_children() {
-    let defs = defs_of(&[("OUTER", ShaderDefValue::Bool(false)), ("INNER", ShaderDefValue::Bool(true))]);
+    let defs = defs_of(&[
+        ("OUTER", ShaderDefValue::Bool(false)),
+        ("INNER", ShaderDefValue::Bool(true)),
+    ]);
     let src = "#if OUTER\n#if INNER\nx\n#endif\ny\n#endif\nz";
     assert_eq!(preprocess(src, &defs).unwrap(), "z");
 }
@@ -151,7 +172,10 @@ fn preprocess_nested_and_inactive_parent_suppresses_children() {
 fn preprocess_passes_through_unknown_directives() {
     let defs = ShaderDefs::new();
     let src = "#import common/brdf\nfn main() {}";
-    assert_eq!(preprocess(src, &defs).unwrap(), "#import common/brdf\nfn main() {}");
+    assert_eq!(
+        preprocess(src, &defs).unwrap(),
+        "#import common/brdf\nfn main() {}"
+    );
 }
 
 #[test]
@@ -192,10 +216,17 @@ fn module_parses_imports_and_strips_them_from_body() {
 #[test]
 fn compose_resolves_dependencies_in_post_order_with_dedup() {
     let mut composer = ShaderComposer::new();
-    composer.add_module(ShaderModule::new("base", "// base")).unwrap();
-    composer.add_module(ShaderModule::new("mid", "#import base\n// mid")).unwrap();
     composer
-        .add_module(ShaderModule::new("root", "#import mid\n#import base\n// root"))
+        .add_module(ShaderModule::new("base", "// base"))
+        .unwrap();
+    composer
+        .add_module(ShaderModule::new("mid", "#import base\n// mid"))
+        .unwrap();
+    composer
+        .add_module(ShaderModule::new(
+            "root",
+            "#import mid\n#import base\n// root",
+        ))
         .unwrap();
     assert_eq!(composer.len(), 3);
     assert!(composer.contains("mid"));
@@ -211,15 +242,21 @@ fn compose_runs_preprocessor_over_combined_source() {
     composer
         .add_module(ShaderModule::new("lib", "#ifdef USE_PBR\npbr\n#endif"))
         .unwrap();
-    composer.add_module(ShaderModule::new("root", "#import lib\nmain")).unwrap();
+    composer
+        .add_module(ShaderModule::new("root", "#import lib\nmain"))
+        .unwrap();
     assert_eq!(composer.compose("root", &defs).unwrap(), "pbr\nmain");
 }
 
 #[test]
 fn compose_detects_cycles_and_unknown_modules() {
     let mut composer = ShaderComposer::new();
-    composer.add_module(ShaderModule::new("a", "#import b")).unwrap();
-    composer.add_module(ShaderModule::new("b", "#import a")).unwrap();
+    composer
+        .add_module(ShaderModule::new("a", "#import b"))
+        .unwrap();
+    composer
+        .add_module(ShaderModule::new("b", "#import a"))
+        .unwrap();
     match composer.compose("a", &ShaderDefs::new()) {
         Err(ComposeError::ImportCycle(path)) => {
             assert_eq!(path.first().map(ToString::to_string), Some("a".to_string()));

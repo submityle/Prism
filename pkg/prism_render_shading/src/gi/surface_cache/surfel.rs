@@ -257,7 +257,11 @@ mod tests {
     fn coverage_zero_beyond_radius() {
         let s = unit_disc();
         // Point two radii out in-plane: radial weight collapses to zero.
-        let w = s.coverage(Vec3::new(2.0, 0.0, 0.0), Vec3::Z, &CoverageParams::default());
+        let w = s.coverage(
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::Z,
+            &CoverageParams::default(),
+        );
         assert_eq!(w, 0.0);
         assert!(!s.covers(Vec3::new(2.0, 0.0, 0.0)));
         assert!(s.covers(Vec3::new(0.5, 0.0, 0.0)));

@@ -220,8 +220,7 @@ pub fn intensity_for_direction_params(
     luminaire_up: Vec3,
     params: IesSampleParams,
 ) -> f32 {
-    let (theta_deg, phi_deg) =
-        world_to_local_angles(world_dir, luminaire_forward, luminaire_up);
+    let (theta_deg, phi_deg) = world_to_local_angles(world_dir, luminaire_forward, luminaire_up);
 
     // sample_local already clamps to [0, 1]; when the caller opts out of the
     // unit clamp, recompute the raw normalised value instead.
@@ -232,7 +231,11 @@ pub fn intensity_for_direction_params(
         if reference > 0.0 {
             let folded_phi = fold_phi(phi_deg, profile.symmetry());
             let raw = profile.grid().sample(theta_deg, folded_phi) / reference;
-            if raw.is_finite() { raw.max(0.0) } else { 0.0 }
+            if raw.is_finite() {
+                raw.max(0.0)
+            } else {
+                0.0
+            }
         } else {
             0.0
         }
@@ -244,7 +247,11 @@ pub fn intensity_for_direction_params(
         1.0
     };
     let out = base * scale;
-    if out.is_finite() { out.max(0.0) } else { 0.0 }
+    if out.is_finite() {
+        out.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]

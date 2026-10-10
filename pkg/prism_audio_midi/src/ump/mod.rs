@@ -26,8 +26,8 @@ pub mod word;
 
 pub use decoder::UmpDecoder;
 pub use message::{
-    ChannelVoice, MidiMessage, NoteAttribute, PITCH_BEND_CENTER_32, SystemMessage, UtilityMessage,
-    decode_midi1, decode_midi2, decode_system, decode_utility,
+    decode_midi1, decode_midi2, decode_system, decode_utility, ChannelVoice, MidiMessage,
+    NoteAttribute, SystemMessage, UtilityMessage, PITCH_BEND_CENTER_32,
 };
 pub use scaling::{scale_down, scale_up};
 pub use word::{MessageType, UmpWord};

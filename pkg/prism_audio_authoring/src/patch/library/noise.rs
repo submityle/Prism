@@ -43,8 +43,12 @@ impl AudioNode for NoiseNode {
     fn process(&mut self, _ctx: &RenderContext, io: &mut ProcessIo<'_>) {
         let out = io.output(0);
         let frames = out.active_frames();
-        self.amp_smoothed
-            .set_target(self.amplitude.get(), Ramp::Linear { samples: frames.max(1) as u32 });
+        self.amp_smoothed.set_target(
+            self.amplitude.get(),
+            Ramp::Linear {
+                samples: frames.max(1) as u32,
+            },
+        );
         let dst = out.channel_mut(0);
         for d in dst.iter_mut() {
             let amp = self.amp_smoothed.next_sample();

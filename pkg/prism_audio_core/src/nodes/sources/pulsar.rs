@@ -559,7 +559,10 @@ mod tests {
                 max_step = d;
             }
         }
-        assert!(max_step < 0.1, "formant sweep should be click-free: {max_step}");
+        assert!(
+            max_step < 0.1,
+            "formant sweep should be click-free: {max_step}"
+        );
     }
 
     #[test]
@@ -739,6 +742,9 @@ mod tests {
         let mut node = PulsarNode::new(100.0, 1_000.0, 0.5, 0.8);
         let out = render(&mut node, SR, 48_000);
         let zeros = out.channel(0).iter().filter(|&&s| s == 0.0).count();
-        assert!(zeros > 20_000, "half-duty should silence about half the stream: zeros={zeros}");
+        assert!(
+            zeros > 20_000,
+            "half-duty should silence about half the stream: zeros={zeros}"
+        );
     }
 }

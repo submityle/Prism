@@ -130,7 +130,10 @@ fn ordered_map_entry_api() {
     assert_eq!(m.get("c"), Some(&103));
     assert_eq!(m.get("d"), Some(&7));
     // Entry insertion keeps first-seen order.
-    assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec!["a", "b", "c", "d"]);
+    assert_eq!(
+        m.keys().copied().collect::<Vec<_>>(),
+        vec!["a", "b", "c", "d"]
+    );
     assert_eq!(m.entry("b").key(), &"b");
 }
 

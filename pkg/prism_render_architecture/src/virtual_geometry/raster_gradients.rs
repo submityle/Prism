@@ -87,7 +87,11 @@ impl TriangleGradients {
             v0.pos[0] - v2.pos[0],
             v1.pos[0] - v0.pos[0],
         ];
-        let vertices_z = [v0.depth * inv_area, v1.depth * inv_area, v2.depth * inv_area];
+        let vertices_z = [
+            v0.depth * inv_area,
+            v1.depth * inv_area,
+            v2.depth * inv_area,
+        ];
         let z_x = vertices_z[0] * w_x[0] + vertices_z[1] * w_x[1] + vertices_z[2] * w_x[2];
         let z_y = vertices_z[0] * w_y[0] + vertices_z[1] * w_y[1] + vertices_z[2] * w_y[2];
         Some(Self {
@@ -205,8 +209,16 @@ mod tests {
             edge(v0.pos, v1.pos, py),
         ];
         for i in 0..3 {
-            assert_eq!(e_dx[i] - e[i], g.w_x[i], "w_x[{i}] must be the +x finite difference");
-            assert_eq!(e_dy[i] - e[i], g.w_y[i], "w_y[{i}] must be the +y finite difference");
+            assert_eq!(
+                e_dx[i] - e[i],
+                g.w_x[i],
+                "w_x[{i}] must be the +x finite difference"
+            );
+            assert_eq!(
+                e_dy[i] - e[i],
+                g.w_y[i],
+                "w_y[{i}] must be the +y finite difference"
+            );
         }
     }
 
@@ -293,12 +305,26 @@ mod tests {
 
             match g.row_span(w_row, steps) {
                 None => {
-                    assert!(covered.is_empty(), "row y={y}: closed form empty but scan covered {covered:?}");
+                    assert!(
+                        covered.is_empty(),
+                        "row y={y}: closed form empty but scan covered {covered:?}"
+                    );
                 }
                 Some((k_lo, k_hi)) => {
-                    assert!(!covered.is_empty(), "row y={y}: closed form span but scan empty");
-                    assert_eq!(k_lo, *covered.first().unwrap(), "row y={y}: lo bound mismatch");
-                    assert_eq!(k_hi, *covered.last().unwrap(), "row y={y}: hi bound mismatch");
+                    assert!(
+                        !covered.is_empty(),
+                        "row y={y}: closed form span but scan empty"
+                    );
+                    assert_eq!(
+                        k_lo,
+                        *covered.first().unwrap(),
+                        "row y={y}: lo bound mismatch"
+                    );
+                    assert_eq!(
+                        k_hi,
+                        *covered.last().unwrap(),
+                        "row y={y}: hi bound mismatch"
+                    );
                     // The covered set must be exactly the contiguous run [k_lo, k_hi].
                     let expected: Vec<u32> = (k_lo..=k_hi).collect();
                     assert_eq!(covered, expected, "row y={y}: coverage not contiguous");
@@ -340,7 +366,10 @@ mod tests {
         let v1 = sv(16.0, 0.0, 0.5);
         let v2 = sv(0.0, 16.0, 0.75);
         let g = TriangleGradients::new(v0, v1, v2).unwrap();
-        assert_eq!(g.double_area, 256.0, "chosen so vertices_z/z_x are dyadic-exact");
+        assert_eq!(
+            g.double_area, 256.0,
+            "chosen so vertices_z/z_x are dyadic-exact"
+        );
 
         const WIDTH: u32 = 18;
         let steps = WIDTH - 1;
@@ -393,6 +422,9 @@ mod tests {
                 );
             }
         }
-        assert!(rows_tested >= 4, "expected several covered rows, got {rows_tested}");
+        assert!(
+            rows_tested >= 4,
+            "expected several covered rows, got {rows_tested}"
+        );
     }
 }

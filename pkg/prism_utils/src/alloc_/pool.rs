@@ -169,10 +169,7 @@ impl Pool {
                 inner.free_head.ok_or(AllocError)?
             }
         };
-        #[expect(
-            unsafe_code,
-            reason = "popping the free list reads the intrusive link"
-        )]
+        #[expect(unsafe_code, reason = "popping the free list reads the intrusive link")]
         // SAFETY: `head` came from the free list, where every node stores a
         // valid link written by `write_link`, so reading it back is sound.
         let next = unsafe { read_link(head) };
@@ -209,8 +206,8 @@ impl Pool {
 impl Allocator for Pool {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         if layout.size() == 0 {
-            let ptr =
-                NonNull::new(core::ptr::without_provenance_mut(layout.align())).ok_or(AllocError)?;
+            let ptr = NonNull::new(core::ptr::without_provenance_mut(layout.align()))
+                .ok_or(AllocError)?;
             return Ok(NonNull::slice_from_raw_parts(ptr, 0));
         }
         if !self.fits(layout) {

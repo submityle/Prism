@@ -57,8 +57,10 @@ impl Default for DualQuat {
 
 impl DualQuat {
     /// The identity transform (identity rotation, zero translation).
-    pub const IDENTITY: Self =
-        Self { real: Quat::IDENTITY, dual: Quat::from_xyzw(0.0, 0.0, 0.0, 0.0) };
+    pub const IDENTITY: Self = Self {
+        real: Quat::IDENTITY,
+        dual: Quat::from_xyzw(0.0, 0.0, 0.0, 0.0),
+    };
 
     /// Build directly from real and dual parts (no normalization).
     #[inline]
@@ -131,7 +133,10 @@ impl DualQuat {
     #[inline]
     #[must_use]
     pub fn conjugate(self) -> Self {
-        Self { real: self.real.conjugate(), dual: self.dual.conjugate() }
+        Self {
+            real: self.real.conjugate(),
+            dual: self.dual.conjugate(),
+        }
     }
 
     /// The inverse rigid transform (identical to [`DualQuat::conjugate`] for a
@@ -162,7 +167,10 @@ impl DualQuat {
     #[inline]
     #[must_use]
     pub fn negated(self) -> Self {
-        Self { real: q_scale(self.real, -1.0), dual: q_scale(self.dual, -1.0) }
+        Self {
+            real: q_scale(self.real, -1.0),
+            dual: q_scale(self.dual, -1.0),
+        }
     }
 
     /// Transform a point by this (assumed unit) dual quaternion.
@@ -237,7 +245,11 @@ impl DualQuat {
         if mag <= 0.0 {
             return Self::IDENTITY;
         }
-        Self { real: acc_real, dual: acc_dual }.normalize()
+        Self {
+            real: acc_real,
+            dual: acc_dual,
+        }
+        .normalize()
     }
 
     /// Screw-linear interpolation (`ScLERP`): the constant-speed shortest screw

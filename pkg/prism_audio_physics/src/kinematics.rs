@@ -89,7 +89,14 @@ mod tests {
     use crate::material::AudioMaterialId;
 
     fn body(linear: Vec3, angular: Vec3, com: Vec3) -> BodyAudioState {
-        BodyAudioState::new(BodyAudioId(0), linear, angular, com, 1.0, AudioMaterialId(0))
+        BodyAudioState::new(
+            BodyAudioId(0),
+            linear,
+            angular,
+            com,
+            1.0,
+            AudioMaterialId(0),
+        )
     }
 
     #[test]

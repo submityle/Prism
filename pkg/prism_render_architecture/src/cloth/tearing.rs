@@ -238,11 +238,8 @@ pub fn apply_plasticity(
     particles: &[ClothParticle],
     params: PlasticParams,
 ) {
-    let physics_params = PhysicsPlasticParams::new(
-        params.yield_strain,
-        params.creep,
-        params.max_strain,
-    );
+    let physics_params =
+        PhysicsPlasticParams::new(params.yield_strain, params.creep, params.max_strain);
     for c in constraints.iter_mut() {
         let Some(len) = edge_length(c, particles) else {
             continue;

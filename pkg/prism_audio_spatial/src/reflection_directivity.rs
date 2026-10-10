@@ -72,8 +72,8 @@
 //! Google Resonance Audio source or derived code**; it is implemented purely by
 //! composing this crate's own directivity and image-source modules.
 
-use bevy_math::Vec3;
 use bevy_math::ops;
+use bevy_math::Vec3;
 
 use prism_audio_core::math::Sample;
 
@@ -238,7 +238,11 @@ fn sanitise_direction(dir: Vec3, default: Vec3) -> Vec3 {
 
 /// Clamps a tap gain to a finite, non-negative value.
 fn finite_gain(gain: Sample) -> Sample {
-    if gain.is_finite() { gain.max(0.0) } else { 0.0 }
+    if gain.is_finite() {
+        gain.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -323,8 +327,16 @@ mod tests {
     #[test]
     fn emission_cos_matches_geometry() {
         let w = DirectionalEarlyReflections::from_preset(DirectivityPreset::Omni, Vec3::NEG_Z);
-        assert!(approx(w.emission_cos(&tap(1.0, Vec3::NEG_Z, false)), 1.0, 1e-6));
-        assert!(approx(w.emission_cos(&tap(1.0, Vec3::Z, false)), -1.0, 1e-6));
+        assert!(approx(
+            w.emission_cos(&tap(1.0, Vec3::NEG_Z, false)),
+            1.0,
+            1e-6
+        ));
+        assert!(approx(
+            w.emission_cos(&tap(1.0, Vec3::Z, false)),
+            -1.0,
+            1e-6
+        ));
         assert!(approx(w.emission_cos(&tap(1.0, Vec3::X, false)), 0.0, 1e-6));
     }
 
@@ -358,7 +370,10 @@ mod tests {
         let mid = w.tap_broadband_gain(&t, 177.0);
         let (lo, hi) = (gains[1], gains[2]);
         let (min, max) = if lo < hi { (lo, hi) } else { (hi, lo) };
-        assert!(mid >= min - 1e-4 && mid <= max + 1e-4, "mid {mid} lo {lo} hi {hi}");
+        assert!(
+            mid >= min - 1e-4 && mid <= max + 1e-4,
+            "mid {mid} lo {lo} hi {hi}"
+        );
     }
 
     #[test]
@@ -377,7 +392,11 @@ mod tests {
         let w = DirectionalEarlyReflections::from_preset(DirectivityPreset::Cardioid, Vec3::ZERO);
         assert!(approx(w.source_forward().length(), 1.0, 1e-6));
         // Default forward is -Z, so a -Z tap is on-axis.
-        assert!(approx(w.emission_cos(&tap(1.0, Vec3::NEG_Z, false)), 1.0, 1e-6));
+        assert!(approx(
+            w.emission_cos(&tap(1.0, Vec3::NEG_Z, false)),
+            1.0,
+            1e-6
+        ));
     }
 
     #[test]

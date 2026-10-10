@@ -57,8 +57,8 @@
 //! supervising process (a crash handler restarting the app), which is out of
 //! this crate's scope.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use prism_time::{Duration, Instant};
@@ -326,8 +326,8 @@ fn default_stall_handler() -> StallHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::sync::atomic::AtomicU64;
+    use std::sync::Mutex;
 
     #[test]
     fn beats_are_counted_and_no_false_stall() {
@@ -370,7 +370,10 @@ mod tests {
         let reports = seen.lock().expect("stall log not poisoned").clone();
         assert_eq!(dog.observed_stalls(), 1, "stall should fire exactly once");
         assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0].frame, 2, "last beat before the stall was frame 2");
+        assert_eq!(
+            reports[0].frame, 2,
+            "last beat before the stall was frame 2"
+        );
         assert!(
             reports[0].stalled_for >= Duration::from_millis(40),
             "stall duration should be at least the timeout: {:?}",

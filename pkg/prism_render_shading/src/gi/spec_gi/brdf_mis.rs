@@ -36,7 +36,7 @@ use crate::gi::screen_probe::restir::luminance;
 use bevy_math::Vec3;
 
 use super::ggx_lobe::vndf_pdf_reflect;
-use super::glossy_reservoir::{GlossyShadingPoint, glossy_lobe_throughput_dir};
+use super::glossy_reservoir::{glossy_lobe_throughput_dir, GlossyShadingPoint};
 
 /// Balance-heuristic MIS weight `w_a = pdf_a / (pdf_a + pdf_b)` for a single
 /// sample from technique `a` paired against technique `b`.
@@ -109,7 +109,8 @@ pub fn balance_heuristic_counts(n_a: f32, pdf_a: f32, n_b: f32, pdf_b: f32) -> f
 pub fn brdf_pdf_glossy(point: &GlossyShadingPoint, wi_world: Vec3) -> f32 {
     let wo = point.local_dir(point.view);
     let wi = point.local_dir(wi_world);
-    let (ax, ay) = super::ggx_lobe::roughness_to_alpha_anisotropic(point.roughness, point.anisotropy);
+    let (ax, ay) =
+        super::ggx_lobe::roughness_to_alpha_anisotropic(point.roughness, point.anisotropy);
     vndf_pdf_reflect(wo, wi, ax, ay)
 }
 
@@ -129,7 +130,11 @@ pub fn area_to_solid_angle_pdf(pdf_area: f32, dist: f32, cos_light: f32) -> f32 
         return 0.0;
     }
     let pdf = p * d2 / c;
-    if pdf.is_finite() { pdf.max(0.0) } else { 0.0 }
+    if pdf.is_finite() {
+        pdf.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// A direct-lighting sample used by the MIS estimator.
@@ -165,7 +170,11 @@ pub fn brdf_sample_estimate(point: &GlossyShadingPoint, sample: &DirectionSample
     }
     let throughput = glossy_lobe_throughput_dir(point, sample.wi.normalize_or_zero());
     let v = throughput * sample.radiance / sample.pdf;
-    if v.is_finite() { v.max(Vec3::ZERO) } else { Vec3::ZERO }
+    if v.is_finite() {
+        v.max(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// Combined one-BRDF-sample + one-light-sample MIS estimator for glossy
@@ -209,7 +218,11 @@ pub fn mis_estimator_glossy(
         }
     }
 
-    if out.is_finite() { out.max(Vec3::ZERO) } else { Vec3::ZERO }
+    if out.is_finite() {
+        out.max(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// Rec. 709 luminance of a glossy MIS estimate, re-exported for callers that
@@ -345,7 +358,10 @@ mod tests {
         assert!((w_b + w_l - 1.0).abs() < 1e-6);
         let throughput = glossy_lobe_throughput_dir(&point, refl) * Vec3::splat(2.0);
         let expected = throughput * (w_b / brdf_pdf + w_l / light_pdf);
-        assert!((est - expected).length() < 1e-4, "est={est:?} expected={expected:?}");
+        assert!(
+            (est - expected).length() < 1e-4,
+            "est={est:?} expected={expected:?}"
+        );
     }
 
     #[test]

@@ -159,7 +159,10 @@ impl GpuRectangleBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -215,7 +218,10 @@ impl GpuRectangleBvhBuffers {
         loop {
             let ni = node_index as usize;
             let bounds = self.node_bounds(ni);
-            if ray.aabb_interval(&bounds, ray.t_min(), ray.t_max()).is_some() {
+            if ray
+                .aabb_interval(&bounds, ray.t_min(), ray.t_max())
+                .is_some()
+            {
                 let base = ni * NODE_WORDS;
                 let primitive_count = self.nodes[base + 8];
                 if primitive_count > 0 {
@@ -313,7 +319,10 @@ mod tests {
         assert_eq!(gpu.node_count(), bvh.node_count());
         assert_eq!(gpu.rectangle_count(), bvh.primitive_count());
         assert_eq!(gpu.nodes.len(), gpu.node_count() * NODE_WORDS);
-        assert_eq!(gpu.rectangles.len(), gpu.rectangle_count() * RECTANGLE_WORDS);
+        assert_eq!(
+            gpu.rectangles.len(),
+            gpu.rectangle_count() * RECTANGLE_WORDS
+        );
     }
 
     #[test]

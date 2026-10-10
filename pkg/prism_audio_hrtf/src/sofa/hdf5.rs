@@ -916,7 +916,7 @@ impl H5File {
         let eof_pos = b.buf.len();
         b.u64(0); // end-of-file address (patched at the end).
         b.u64(UNDEF); // driver information block address.
-        // Root group symbol table entry (40 bytes).
+                      // Root group symbol table entry (40 bytes).
         b.u64(0); // link name offset.
         b.offset_ref("root_oh"); // object header address.
         b.u32(1); // cache type: group cache present.
@@ -1082,7 +1082,7 @@ fn write_dataspace_message(b: &mut Builder, dims: &[u64]) {
 fn write_float_datatype_message(b: &mut Builder, dtype: Dtype) {
     write_message(b, 0x0003, 20, |mb| {
         mb.u8(0x11); // class 1 (float), version 1.
-        // Bit field: little-endian, IEEE mantissa normalization, sign at MSB.
+                     // Bit field: little-endian, IEEE mantissa normalization, sign at MSB.
         let (precision, exp_loc, exp_size, mant_size, bias, sign) = match dtype {
             Dtype::F32 => (32u16, 23u8, 8u8, 23u8, 127u32, 31u8),
             Dtype::F64 => (64u16, 52u8, 11u8, 52u8, 1023u32, 63u8),
@@ -1249,11 +1249,8 @@ fn write_attribute_message(b: &mut Builder, name: &str, value: &str) {
     let dt_size = 8usize;
     let ds_size = 8usize;
     let value_bytes = value.as_bytes();
-    let data_len = 8
-        + round_up_8(name_size)
-        + round_up_8(dt_size)
-        + round_up_8(ds_size)
-        + value_bytes.len();
+    let data_len =
+        8 + round_up_8(name_size) + round_up_8(dt_size) + round_up_8(ds_size) + value_bytes.len();
     write_message(b, 0x000C, data_len, |mb| {
         mb.u8(1); // version.
         mb.u8(0); // reserved.
@@ -1460,8 +1457,6 @@ mod tests {
     }
 
     fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        haystack
-            .windows(needle.len())
-            .position(|w| w == needle)
+        haystack.windows(needle.len()).position(|w| w == needle)
     }
 }

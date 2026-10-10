@@ -182,10 +182,7 @@ impl<T, const N: usize> InterpolationBuffer<T, N> {
 
         if self.len == N {
             // Full: drop the incoming sample if it is older than the oldest.
-            let oldest = self.entries[0]
-                .as_ref()
-                .map(|e| e.time_nanos)
-                .unwrap_or(0);
+            let oldest = self.entries[0].as_ref().map(|e| e.time_nanos).unwrap_or(0);
             if time_nanos <= oldest {
                 return;
             }
@@ -404,7 +401,9 @@ mod tests {
         buf.push(ms(0), (0.0, 0.0));
         buf.push(ms(100), (10.0, 20.0));
         let p = buf
-            .sample_with(ms(50), |a, b, t| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t))
+            .sample_with(ms(50), |a, b, t| {
+                (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+            })
             .unwrap();
         assert!((p.0 - 5.0).abs() < 1e-12);
         assert!((p.1 - 10.0).abs() < 1e-12);

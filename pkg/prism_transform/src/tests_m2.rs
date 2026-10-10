@@ -5,7 +5,7 @@
 use crate::dirty::DirtyStats;
 use crate::hierarchy::NodeId;
 use crate::{Transform, TransformGraph};
-use prism_math::{Affine3, Quat, Vec3, vec3};
+use prism_math::{vec3, Affine3, Quat, Vec3};
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -28,7 +28,11 @@ fn assert_matches_full_pass(g: &TransformGraph) {
     for i in 0..g.len() {
         let node = NodeId::new(i as u32);
         assert!(
-            affine_approx(g.global(node).affine(), reference.global(node).affine(), 1e-4),
+            affine_approx(
+                g.global(node).affine(),
+                reference.global(node).affine(),
+                1e-4
+            ),
             "node {i} incremental global disagrees with full pass",
         );
     }
@@ -111,11 +115,21 @@ fn static_scene_recomputes_nothing() {
 
     // First incremental pass computes every freshly-spawned node once.
     let first = g.propagate_incremental();
-    assert_eq!(first.recomputed, g.len(), "first pass must compute every node");
+    assert_eq!(
+        first.recomputed,
+        g.len(),
+        "first pass must compute every node"
+    );
 
     // Nothing changed since: a static scene must cost zero world-matrix work.
     let second = g.propagate_incremental();
-    assert_eq!(second, DirtyStats { recomputed: 0, dirty_roots: 0 });
+    assert_eq!(
+        second,
+        DirtyStats {
+            recomputed: 0,
+            dirty_roots: 0
+        }
+    );
 
     // Repeat to be sure it stays at zero.
     let third = g.propagate_incremental();
@@ -132,7 +146,10 @@ fn single_leaf_edit_recomputes_only_that_leaf() {
 
     // Pick a leaf (last spawned node is a leaf under m2).
     let leaf = *ids.last().unwrap();
-    assert!(g.hierarchy().children(leaf).is_empty(), "test node must be a leaf");
+    assert!(
+        g.hierarchy().children(leaf).is_empty(),
+        "test node must be a leaf"
+    );
 
     let before_sibling = g.global(ids[1]).affine(); // an untouched mid node
 
@@ -143,7 +160,11 @@ fn single_leaf_edit_recomputes_only_that_leaf() {
     assert_eq!(stats.recomputed, 1, "a leaf's subtree is just the leaf");
 
     // Untouched subtree's cached global is unchanged.
-    assert!(affine_approx(g.global(ids[1]).affine(), before_sibling, 0.0));
+    assert!(affine_approx(
+        g.global(ids[1]).affine(),
+        before_sibling,
+        0.0
+    ));
     // And the result matches a full pass.
     assert_matches_full_pass(&g);
 }
@@ -165,14 +186,24 @@ fn mid_tree_edit_recomputes_only_that_subtree() {
     let other_before = g.global(other).affine();
     let other_leaf_before = g.global(ids[4]).affine(); // a leaf under m0
 
-    g.set_local(mid, Transform::from_xyz(0.0, 0.0, 5.0).with_rotation(Quat::from_rotation_y(0.3)));
+    g.set_local(
+        mid,
+        Transform::from_xyz(0.0, 0.0, 5.0).with_rotation(Quat::from_rotation_y(0.3)),
+    );
     let stats = g.propagate_incremental();
 
     assert_eq!(stats.dirty_roots, 1);
-    assert_eq!(stats.recomputed, expected, "mid edit recomputes its subtree only");
+    assert_eq!(
+        stats.recomputed, expected,
+        "mid edit recomputes its subtree only"
+    );
 
     assert!(affine_approx(g.global(other).affine(), other_before, 0.0));
-    assert!(affine_approx(g.global(ids[4]).affine(), other_leaf_before, 0.0));
+    assert!(affine_approx(
+        g.global(ids[4]).affine(),
+        other_leaf_before,
+        0.0
+    ));
     assert_matches_full_pass(&g);
 }
 

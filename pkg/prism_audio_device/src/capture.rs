@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use prism_audio_core::buffer::AudioBuffer;
 use prism_audio_core::math::Sample;
-use prism_audio_rt::ring::{RingConsumer, RingProducer, ring};
+use prism_audio_rt::ring::{ring, RingConsumer, RingProducer};
 
 /// Real-time producer half of a capture ring. Cheap to clone; move into the
 /// device input callback.
@@ -204,7 +204,11 @@ mod tests {
         let (sink, mut consumer) = capture_ring(2, 2);
         let pushed = sink.push_interleaved(&[1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
         assert_eq!(pushed, 4, "only two frames fit");
-        assert_eq!(sink.dropped_samples(), 2, "the third frame's two samples dropped");
+        assert_eq!(
+            sink.dropped_samples(),
+            2,
+            "the third frame's two samples dropped"
+        );
 
         let mut buffer = AudioBuffer::new(ChannelLayout::Stereo, 4);
         assert_eq!(consumer.drain_into(&mut buffer), 2);

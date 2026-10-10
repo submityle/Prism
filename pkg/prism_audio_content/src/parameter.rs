@@ -68,7 +68,11 @@ impl ParameterTarget {
     /// also neutralising non-finite values to the target's identity.
     #[must_use]
     pub fn clamp_value(self, value: Sample) -> Sample {
-        let v = if value.is_finite() { value } else { self.identity() };
+        let v = if value.is_finite() {
+            value
+        } else {
+            self.identity()
+        };
         match self {
             Self::VolumeDb | Self::AuxSendDb => v.clamp(-120.0, 24.0),
             Self::PitchSemitones => v.clamp(-48.0, 48.0),
@@ -110,7 +114,10 @@ impl ParameterSetting {
     /// Builds a setting, clamping `value` to the target's valid range.
     #[must_use]
     pub fn new(target: ParameterTarget, value: Sample) -> Self {
-        Self { target, value: target.clamp_value(value) }
+        Self {
+            target,
+            value: target.clamp_value(value),
+        }
     }
 }
 
@@ -129,21 +136,42 @@ mod tests {
         assert!(close(ParameterTarget::VolumeDb.clamp_value(100.0), 24.0));
         assert!(close(ParameterTarget::VolumeDb.clamp_value(-500.0), -120.0));
         assert!(close(ParameterTarget::AuxSendDb.clamp_value(100.0), 24.0));
-        assert!(close(ParameterTarget::AuxSendDb.clamp_value(-500.0), -120.0));
+        assert!(close(
+            ParameterTarget::AuxSendDb.clamp_value(-500.0),
+            -120.0
+        ));
     }
 
     #[test]
     fn pitch_clamps_to_semitone_window() {
-        assert!(close(ParameterTarget::PitchSemitones.clamp_value(100.0), 48.0));
-        assert!(close(ParameterTarget::PitchSemitones.clamp_value(-100.0), -48.0));
+        assert!(close(
+            ParameterTarget::PitchSemitones.clamp_value(100.0),
+            48.0
+        ));
+        assert!(close(
+            ParameterTarget::PitchSemitones.clamp_value(-100.0),
+            -48.0
+        ));
     }
 
     #[test]
     fn cutoffs_clamp_to_audio_band() {
-        assert!(close(ParameterTarget::LowpassCutoffHz.clamp_value(0.0), 10.0));
-        assert!(close(ParameterTarget::LowpassCutoffHz.clamp_value(1.0e6), 20_000.0));
-        assert!(close(ParameterTarget::HighpassCutoffHz.clamp_value(0.0), 10.0));
-        assert!(close(ParameterTarget::HighpassCutoffHz.clamp_value(1.0e6), 20_000.0));
+        assert!(close(
+            ParameterTarget::LowpassCutoffHz.clamp_value(0.0),
+            10.0
+        ));
+        assert!(close(
+            ParameterTarget::LowpassCutoffHz.clamp_value(1.0e6),
+            20_000.0
+        ));
+        assert!(close(
+            ParameterTarget::HighpassCutoffHz.clamp_value(0.0),
+            10.0
+        ));
+        assert!(close(
+            ParameterTarget::HighpassCutoffHz.clamp_value(1.0e6),
+            20_000.0
+        ));
     }
 
     #[test]
@@ -162,10 +190,22 @@ mod tests {
 
     #[test]
     fn non_finite_falls_back_to_identity() {
-        assert!(close(ParameterTarget::VolumeDb.clamp_value(Sample::NAN), 0.0));
-        assert!(close(ParameterTarget::AuxSendDb.clamp_value(Sample::INFINITY), -120.0));
-        assert!(close(ParameterTarget::LowpassCutoffHz.clamp_value(Sample::NAN), 20_000.0));
-        assert!(close(ParameterTarget::HighpassCutoffHz.clamp_value(Sample::NAN), 10.0));
+        assert!(close(
+            ParameterTarget::VolumeDb.clamp_value(Sample::NAN),
+            0.0
+        ));
+        assert!(close(
+            ParameterTarget::AuxSendDb.clamp_value(Sample::INFINITY),
+            -120.0
+        ));
+        assert!(close(
+            ParameterTarget::LowpassCutoffHz.clamp_value(Sample::NAN),
+            20_000.0
+        ));
+        assert!(close(
+            ParameterTarget::HighpassCutoffHz.clamp_value(Sample::NAN),
+            10.0
+        ));
     }
 
     #[test]

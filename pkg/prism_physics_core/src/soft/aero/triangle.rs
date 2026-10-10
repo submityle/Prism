@@ -220,7 +220,10 @@ mod tests {
             Vec3::new(0.0, 0.0, 2.0),
             AeroParams::new(1.0, 0.0).with_air_density(1.0),
         );
-        assert!((quad.z - linear.z).abs() < 1.0e-6, "quad {quad:?} linear {linear:?}");
+        assert!(
+            (quad.z - linear.z).abs() < 1.0e-6,
+            "quad {quad:?} linear {linear:?}"
+        );
         // Doubling the airspeed quadruples the quadratic force.
         let quad_fast = triangle_aero_force(
             p0,

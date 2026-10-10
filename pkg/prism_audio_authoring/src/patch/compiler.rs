@@ -147,9 +147,8 @@ fn flatten_into(
 
     for conn in &desc.connections {
         let source = output_map[conn.from_node][conn.from_port];
-        let target = leaf_index[conn.to_node].ok_or(PatchError::ConnectionIntoSource {
-            node: conn.to_node,
-        })?;
+        let target = leaf_index[conn.to_node]
+            .ok_or(PatchError::ConnectionIntoSource { node: conn.to_node })?;
         flat.connections.push(FlatConn {
             from_node: source.0,
             from_port: source.1,
@@ -174,8 +173,8 @@ fn flatten_into(
     }
 
     for exposed in &desc.exposed_triggers {
-        let flat_idx = leaf_index[exposed.node]
-            .ok_or(PatchError::UnknownTrigger { node: exposed.node })?;
+        let flat_idx =
+            leaf_index[exposed.node].ok_or(PatchError::UnknownTrigger { node: exposed.node })?;
         let mut public = String::with_capacity(prefix.len() + exposed.public_name.len());
         public.push_str(prefix);
         public.push_str(&exposed.public_name);

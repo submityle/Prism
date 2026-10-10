@@ -23,7 +23,7 @@
 use alloc::vec::Vec;
 
 use crate::contact::event::ContactPoint;
-use crate::modal::bank::{Mode, ModalBank};
+use crate::modal::bank::{ModalBank, Mode};
 use crate::modal::excitation::TransientBurst;
 use prism_audio_core::math::Sample;
 
@@ -132,11 +132,15 @@ impl ModalSynth {
             let n = n as u32;
             while cursor < self.queue.len() && self.queue[cursor].sample_offset <= n {
                 let imp = self.queue[cursor];
-                self.bank.excite_impact(imp.amplitude, imp.point, imp.brightness);
+                self.bank
+                    .excite_impact(imp.amplitude, imp.point, imp.brightness);
                 self.transient.trigger(imp.amplitude, imp.transient_len);
                 cursor += 1;
             }
-            let drive_n = drive.and_then(|d| d.get(n as usize)).copied().unwrap_or(0.0);
+            let drive_n = drive
+                .and_then(|d| d.get(n as usize))
+                .copied()
+                .unwrap_or(0.0);
             let transient_n = self.transient.tick();
             let bank_out = self.bank.tick(drive_n + transient_n);
             *slot = bank_out + DRY_TRANSIENT_MIX * transient_n;

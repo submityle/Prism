@@ -296,7 +296,12 @@ fn safe_normalize(v: Vec3) -> Vec3 {
 /// Replace any non-finite component of an RGB triple with `0`, clamped `≥ 0`.
 #[must_use]
 fn sanitize_rgb(c: Vec3) -> Vec3 {
-    Vec3::new(finite_or_zero(c.x), finite_or_zero(c.y), finite_or_zero(c.z)).max(Vec3::ZERO)
+    Vec3::new(
+        finite_or_zero(c.x),
+        finite_or_zero(c.y),
+        finite_or_zero(c.z),
+    )
+    .max(Vec3::ZERO)
 }
 
 /// Replace a non-finite scalar with `0`.

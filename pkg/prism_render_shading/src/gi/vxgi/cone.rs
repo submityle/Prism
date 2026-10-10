@@ -155,7 +155,12 @@ fn normalize_or_up(v: Vec3) -> Vec3 {
 /// absorption operator, selecting a mip LOD from the cone diameter at each
 /// step, and terminates early once the accumulated opacity crosses
 /// `alpha_termination`.
-pub fn trace_cone(grid: &VoxelGrid, origin: Vec3, direction: Vec3, config: ConeConfig) -> ConeResult {
+pub fn trace_cone(
+    grid: &VoxelGrid,
+    origin: Vec3,
+    direction: Vec3,
+    config: ConeConfig,
+) -> ConeResult {
     let dir = normalize_or_up(direction);
     let aperture = config.aperture.clamp(MIN_APERTURE, MAX_APERTURE);
     let max_distance = config.max_distance.max(0.0);
@@ -295,7 +300,12 @@ mod tests {
     #[test]
     fn radiance_non_negative_and_finite() {
         let grid = filled_grid(8, 0.4, Vec3::new(0.5, 1.5, 3.0));
-        let r = trace_cone(&grid, Vec3::splat(0.5), Vec3::new(0.2, 1.0, 0.1), ConeConfig::default());
+        let r = trace_cone(
+            &grid,
+            Vec3::splat(0.5),
+            Vec3::new(0.2, 1.0, 0.1),
+            ConeConfig::default(),
+        );
         assert!(r.radiance.x >= 0.0 && r.radiance.y >= 0.0 && r.radiance.z >= 0.0);
         assert!(r.radiance.is_finite());
     }

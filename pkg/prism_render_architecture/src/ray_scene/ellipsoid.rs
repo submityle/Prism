@@ -120,7 +120,11 @@ impl Ellipsoid {
             (origin[1] - self.center[1]) / r[1],
             (origin[2] - self.center[2]) / r[2],
         ];
-        let sd = [direction[0] / r[0], direction[1] / r[1], direction[2] / r[2]];
+        let sd = [
+            direction[0] / r[0],
+            direction[1] / r[1],
+            direction[2] / r[2],
+        ];
         // Reduced quadratic `a·t² + 2·half_b·t + c_term = 0`; `a` carries the
         // full scaled-direction length so unit direction is never assumed.
         let a = dot(sd, sd);
@@ -464,7 +468,9 @@ mod tests {
     fn ray_from_inside_reports_back_face_with_flipped_normal() {
         let e = Ellipsoid::new([0.0, 0.0, 0.0], [2.0, 1.0, 3.0], 0);
         let ray = Ray::infinite([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
-        let hit = e.intersect(&ray).expect("interior ray must exit the surface");
+        let hit = e
+            .intersect(&ray)
+            .expect("interior ray must exit the surface");
         assert!(approx(hit.t, 2.0, 1e-5), "t = {}", hit.t);
         assert!(!hit.front_face);
         // Outward is +x at the exit point, so the ray-facing normal is −x.
@@ -544,7 +550,11 @@ mod tests {
             let ny = (p[1] - center[1]) / radii[1];
             let nz = (p[2] - center[2]) / radii[2];
             let f = nx * nx + ny * ny + nz * nz;
-            assert!((f - 1.0).abs() < 2e-3, "residual {} off the surface", f - 1.0);
+            assert!(
+                (f - 1.0).abs() < 2e-3,
+                "residual {} off the surface",
+                f - 1.0
+            );
 
             // Unit normal.
             let nlen = (hit.normal[0] * hit.normal[0]
@@ -555,7 +565,10 @@ mod tests {
 
             // Normal faces the ray.
             let facing = hit.normal[0] * dir[0] + hit.normal[1] * dir[1] + hit.normal[2] * dir[2];
-            assert!(facing <= 1e-4, "normal not oriented against the ray: {facing}");
+            assert!(
+                facing <= 1e-4,
+                "normal not oriented against the ray: {facing}"
+            );
         }
         assert!(hits > 2_000, "too few surface hits accumulated: {hits}");
     }
@@ -619,7 +632,10 @@ mod tests {
                 }
                 (e, a) => panic!("hit disagreement: {e:?} vs {a:?}"),
             }
-            assert_eq!(bvh.any_hit(&ray), brute_closest(&ellipsoids, &ray).is_some());
+            assert_eq!(
+                bvh.any_hit(&ray),
+                brute_closest(&ellipsoids, &ray).is_some()
+            );
         }
     }
 }

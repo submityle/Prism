@@ -292,7 +292,9 @@ mod tests {
     fn laplacian_reduces_high_frequency_noise() {
         let mesh = noisy_grid(6, 0.4);
         let before = peak_z(&mesh);
-        let out = LaplacianSmoothing::laplacian(10, 0.5).smooth(&mesh).unwrap();
+        let out = LaplacianSmoothing::laplacian(10, 0.5)
+            .smooth(&mesh)
+            .unwrap();
         let after = peak_z(&out);
         assert!(after < before * 0.25, "before {before}, after {after}");
     }
@@ -354,7 +356,9 @@ mod tests {
         let apex = (grid / 2) * stride + (grid / 2);
         let original_apex = mesh.positions()[apex][2];
 
-        let lap = LaplacianSmoothing::laplacian(40, 0.5).smooth(&mesh).unwrap();
+        let lap = LaplacianSmoothing::laplacian(40, 0.5)
+            .smooth(&mesh)
+            .unwrap();
         let tau = LaplacianSmoothing::taubin(40, 0.5, -0.53)
             .smooth(&mesh)
             .unwrap();
@@ -373,11 +377,7 @@ mod tests {
         let grid = 4;
         let base = noisy_grid(grid, 0.2);
         let normals = vec![[0.0, 0.0, 1.0]; base.vertex_count()];
-        let uvs: Vec<[f32; 2]> = base
-            .positions()
-            .iter()
-            .map(|p| [p[0], p[1]])
-            .collect();
+        let uvs: Vec<[f32; 2]> = base.positions().iter().map(|p| [p[0], p[1]]).collect();
         let mesh = TriangleMesh::new(
             base.positions().to_vec(),
             normals.clone(),

@@ -41,11 +41,11 @@ mod backstop_gpu_tests;
 #[cfg(test)]
 mod backstop_parity;
 mod bind_groups;
-mod budget;
 #[cfg(test)]
 mod body_collision_gpu_tests;
 #[cfg(test)]
 mod body_collision_parity;
+mod budget;
 #[cfg(test)]
 mod ccd_gpu_tests;
 #[cfg(test)]
@@ -62,24 +62,26 @@ mod garment;
 mod gpu_test_support;
 #[cfg(test)]
 mod layers_gpu_tests;
+#[cfg(test)]
+mod layers_parity;
 mod lod;
 mod lod_mesh;
 mod pack;
 #[cfg(test)]
-mod painted_parity;
-#[cfg(test)]
 mod painted_gpu_tests;
+#[cfg(test)]
+mod painted_parity;
 mod pipeline;
 #[cfg(test)]
-mod plasticity_parity;
-#[cfg(test)]
 mod plasticity_gpu_tests;
+#[cfg(test)]
+mod plasticity_parity;
 pub(crate) mod plugin;
 mod prepare;
 #[cfg(test)]
-mod pressure_parity;
-#[cfg(test)]
 mod pressure_gpu_tests;
+#[cfg(test)]
+mod pressure_parity;
 mod resources;
 #[cfg(test)]
 mod self_ccd_gpu_tests;
@@ -96,25 +98,23 @@ mod self_collision_virtual_parity;
 #[cfg(test)]
 mod shader_tests;
 #[cfg(test)]
+mod sim_bending_parity;
+#[cfg(test)]
 mod sim_gpu_tests;
 #[cfg(test)]
 mod sim_predict_parity;
 #[cfg(test)]
-mod sim_bending_parity;
-#[cfg(test)]
 mod sim_project_parity;
 #[cfg(test)]
-mod layers_parity;
+mod sleep_gpu_tests;
 #[cfg(test)]
 mod sleep_parity;
-#[cfg(test)]
-mod sleep_gpu_tests;
 mod solve_plan;
-mod teleport;
-#[cfg(test)]
-mod tearing_parity;
 #[cfg(test)]
 mod tearing_gpu_tests;
+#[cfg(test)]
+mod tearing_parity;
+mod teleport;
 #[cfg(test)]
 mod vbd_gpu_tests;
 mod vbd_parity;
@@ -123,5 +123,5 @@ mod virtual_gpu_tests;
 
 pub use authoring::ClothGarmentBuilder;
 pub use garment::ClothGarment;
-pub use teleport::ClothTeleportMode;
 pub use lod_mesh::{ClothReducedMesh, ClothReducedMeshBuilder};
+pub use teleport::ClothTeleportMode;

@@ -31,7 +31,7 @@ use bevy_math::ops;
 use prism_audio_core::math::Sample;
 
 use crate::fractional_delay::{linear_interp, sanitize};
-use crate::resampler::{ResampleProgress, ResampleQuality, Resampler, clamp_ratio};
+use crate::resampler::{clamp_ratio, ResampleProgress, ResampleQuality, Resampler};
 
 /// Number of past samples retained between blocks (only one is needed for the
 /// left side of a two-point blend; a small margin keeps rebasing simple).
@@ -208,7 +208,9 @@ mod tests {
 
     #[test]
     fn determinism_two_instances_match() {
-        let input: Vec<Sample> = (0..2048).map(|i| ((i * 13 % 97) as Sample) / 97.0).collect();
+        let input: Vec<Sample> = (0..2048)
+            .map(|i| ((i * 13 % 97) as Sample) / 97.0)
+            .collect();
         let mut a = LinearResampler::new();
         let mut b = LinearResampler::new();
         a.set_ratio(0.6);

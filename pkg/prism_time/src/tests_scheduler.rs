@@ -167,7 +167,7 @@ fn slot_reuse_does_not_resurrect_a_stale_handle() {
     let mut sched: Scheduler<u32> = Scheduler::new();
     let h1 = sched.schedule_after(ms(10), 1);
     let _ = sched.advance_collect(ms(10)); // h1 fires, slot freed
-    // New schedule reuses the freed slot under a fresh generation.
+                                           // New schedule reuses the freed slot under a fresh generation.
     let h2 = sched.schedule_after(ms(10), 2);
     assert_eq!(h1.index(), h2.index()); // same slot
     assert_ne!(h1.generation(), h2.generation());

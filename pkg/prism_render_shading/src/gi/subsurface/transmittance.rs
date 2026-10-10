@@ -57,12 +57,30 @@ pub struct TransmittanceLobe {
 /// Per-channel weights sum to `≈ (1.0, 1.0, 0.993)`, giving `T(0) ≈ 1`.  The
 /// widest lobes carry only red, reproducing the deep-red translucency of skin.
 pub const SKIN_SIX_GAUSSIAN: [TransmittanceLobe; 6] = [
-    TransmittanceLobe { falloff: 0.0064, weight: Vec3::new(0.233, 0.455, 0.649) },
-    TransmittanceLobe { falloff: 0.0484, weight: Vec3::new(0.100, 0.336, 0.344) },
-    TransmittanceLobe { falloff: 0.1870, weight: Vec3::new(0.118, 0.198, 0.000) },
-    TransmittanceLobe { falloff: 0.5670, weight: Vec3::new(0.113, 0.007, 0.007) },
-    TransmittanceLobe { falloff: 1.9900, weight: Vec3::new(0.358, 0.004, 0.000) },
-    TransmittanceLobe { falloff: 7.4100, weight: Vec3::new(0.078, 0.000, 0.000) },
+    TransmittanceLobe {
+        falloff: 0.0064,
+        weight: Vec3::new(0.233, 0.455, 0.649),
+    },
+    TransmittanceLobe {
+        falloff: 0.0484,
+        weight: Vec3::new(0.100, 0.336, 0.344),
+    },
+    TransmittanceLobe {
+        falloff: 0.1870,
+        weight: Vec3::new(0.118, 0.198, 0.000),
+    },
+    TransmittanceLobe {
+        falloff: 0.5670,
+        weight: Vec3::new(0.113, 0.007, 0.007),
+    },
+    TransmittanceLobe {
+        falloff: 1.9900,
+        weight: Vec3::new(0.358, 0.004, 0.000),
+    },
+    TransmittanceLobe {
+        falloff: 7.4100,
+        weight: Vec3::new(0.078, 0.000, 0.000),
+    },
 ];
 
 /// Reduced four-Gaussian skin transmittance fit (cheaper real-time variant).
@@ -70,10 +88,22 @@ pub const SKIN_SIX_GAUSSIAN: [TransmittanceLobe; 6] = [
 /// Per-channel weights sum to `≈ (1, 1, 1)`; it preserves the overall decay and
 /// red bias of [`SKIN_SIX_GAUSSIAN`] with two fewer exponentials.
 pub const SKIN_FOUR_GAUSSIAN: [TransmittanceLobe; 4] = [
-    TransmittanceLobe { falloff: 0.0064, weight: Vec3::new(0.233, 0.455, 0.649) },
-    TransmittanceLobe { falloff: 0.0484, weight: Vec3::new(0.100, 0.336, 0.344) },
-    TransmittanceLobe { falloff: 0.1870, weight: Vec3::new(0.187, 0.205, 0.007) },
-    TransmittanceLobe { falloff: 1.9900, weight: Vec3::new(0.480, 0.004, 0.000) },
+    TransmittanceLobe {
+        falloff: 0.0064,
+        weight: Vec3::new(0.233, 0.455, 0.649),
+    },
+    TransmittanceLobe {
+        falloff: 0.0484,
+        weight: Vec3::new(0.100, 0.336, 0.344),
+    },
+    TransmittanceLobe {
+        falloff: 0.1870,
+        weight: Vec3::new(0.187, 0.205, 0.007),
+    },
+    TransmittanceLobe {
+        falloff: 1.9900,
+        weight: Vec3::new(0.480, 0.004, 0.000),
+    },
 ];
 
 /// Clamp a possibly non-finite scalar into `[lo, hi]`, mapping `NaN` to `lo`.
@@ -242,7 +272,10 @@ mod tests {
         let full = transmitted_radiance(light, &SKIN_SIX_GAUSSIAN, 1.0, 1.0);
         let half = transmitted_radiance(light, &SKIN_SIX_GAUSSIAN, 1.0, 0.5);
         let none = transmitted_radiance(light, &SKIN_SIX_GAUSSIAN, 1.0, 0.0);
-        assert!((full - half * 2.0).length() < 1e-5, "full={full:?} half={half:?}");
+        assert!(
+            (full - half * 2.0).length() < 1e-5,
+            "full={full:?} half={half:?}"
+        );
         assert_eq!(none, Vec3::ZERO);
     }
 
@@ -252,7 +285,10 @@ mod tests {
         for s in [0.0f32, 0.5, 1.0, 2.0, 4.0] {
             let six = transmittance(s);
             let four = transmittance_reduced(s);
-            assert!((six - four).length() < 0.12, "s={s} six={six:?} four={four:?}");
+            assert!(
+                (six - four).length() < 0.12,
+                "s={s} six={six:?} four={four:?}"
+            );
         }
     }
 
@@ -268,7 +304,13 @@ mod tests {
         assert!(transmittance(f32::INFINITY).is_finite());
         assert!(transmittance_reduced(f32::NAN).is_finite());
         assert!(transmittance_scaled(&SKIN_SIX_GAUSSIAN, f32::NAN, f32::NAN).is_finite());
-        assert!(transmitted_radiance(Vec3::splat(f32::NAN), &SKIN_SIX_GAUSSIAN, f32::NAN, f32::NAN).is_finite());
+        assert!(transmitted_radiance(
+            Vec3::splat(f32::NAN),
+            &SKIN_SIX_GAUSSIAN,
+            f32::NAN,
+            f32::NAN
+        )
+        .is_finite());
         assert!(profile_energy(&SKIN_SIX_GAUSSIAN).is_finite());
     }
 }

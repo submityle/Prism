@@ -85,13 +85,21 @@ fn hash_identifier_pinned_vector() {
 
 #[test]
 fn hash_identifier_deterministic_and_distinct() {
-    assert_eq!(hash_identifier("session-abc"), hash_identifier("session-abc"));
-    assert_ne!(hash_identifier("session-abc"), hash_identifier("session-abd"));
+    assert_eq!(
+        hash_identifier("session-abc"),
+        hash_identifier("session-abc")
+    );
+    assert_ne!(
+        hash_identifier("session-abc"),
+        hash_identifier("session-abd")
+    );
     // Always "h:" + 16 lowercase hex digits.
     let h = hash_identifier("anything");
     assert_eq!(h.len(), 18);
     assert!(h.starts_with("h:"));
-    assert!(h[2..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    assert!(h[2..]
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
 }
 
 #[test]
@@ -243,7 +251,9 @@ fn schema_allow_unknown() {
 
 #[test]
 fn build_event_basic_sorts_and_drops_forbidden() {
-    let schema = EventSchema::new("crash").require("reason").optional("build");
+    let schema = EventSchema::new("crash")
+        .require("reason")
+        .optional("build");
     let policy = RedactionPolicy::new();
     // `user_path` is undeclared -> forbidden -> dropped.
     let ev = build_event(
@@ -271,7 +281,9 @@ fn build_event_basic_sorts_and_drops_forbidden() {
 
 #[test]
 fn build_event_canonical_and_digest_pinned() {
-    let schema = EventSchema::new("crash").require("reason").optional("build");
+    let schema = EventSchema::new("crash")
+        .require("reason")
+        .optional("build");
     let ev = build_event(
         &schema,
         &RedactionPolicy::new(),
@@ -284,7 +296,9 @@ fn build_event_canonical_and_digest_pinned() {
 
 #[test]
 fn build_event_missing_required() {
-    let schema = EventSchema::new("crash").require("reason").optional("build");
+    let schema = EventSchema::new("crash")
+        .require("reason")
+        .optional("build");
     let ev = build_event(&schema, &RedactionPolicy::new(), &[("build", "1.2.3")]);
     assert_eq!(ev.missing_required, alloc::vec!["reason".to_string()]);
     assert!(!ev.is_complete());
@@ -296,7 +310,9 @@ fn build_event_policy_drop_and_hash() {
         .require("reason")
         .optional("build")
         .optional("user_id");
-    let policy = RedactionPolicy::new().deny_field("build").hash_field("user_id");
+    let policy = RedactionPolicy::new()
+        .deny_field("build")
+        .hash_field("user_id");
     let ev = build_event(
         &schema,
         &policy,
@@ -438,7 +454,10 @@ fn sampler_bucket_pinned_and_salted() {
     // Pinned bucket for ("crash", "sess-1").
     assert_eq!(s.bucket("crash", "sess-1"), 0x2075_b8dc_d282_adec);
     // Name-salting: the same key under a different event name differs.
-    assert_ne!(s.bucket("crash", "sess-1"), s.bucket("frame_stats", "sess-1"));
+    assert_ne!(
+        s.bucket("crash", "sess-1"),
+        s.bucket("frame_stats", "sess-1")
+    );
 }
 
 #[test]
@@ -480,6 +499,9 @@ fn sampler_sample_event() {
     let ev = build_event(&schema, &RedactionPolicy::new(), &[("p99", "16")]);
     let s = TelemetrySampler::new(SampleRatio::one_in(10));
     // sample_event routes through the event name.
-    assert_eq!(s.sample_event(&ev, "sess-1"), s.should_sample("frame_stats", "sess-1"));
+    assert_eq!(
+        s.sample_event(&ev, "sess-1"),
+        s.should_sample("frame_stats", "sess-1")
+    );
     assert!(s.sample_event(&ev, "sess-1"));
 }

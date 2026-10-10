@@ -140,7 +140,10 @@ mod tests {
         let point = ScenePoint::new(Vec3::new(3.1, 0.05, -0.1));
         let brute = collide_point(&targets, &point);
         let bvh = collide_point_bvh(&targets, &point);
-        assert_eq!(brute, bvh, "BVH collide-point must equal brute force exactly");
+        assert_eq!(
+            brute, bvh,
+            "BVH collide-point must equal brute force exactly"
+        );
         assert_eq!(brute.len(), 1, "the point lies inside exactly one box");
         assert_eq!(brute[0].target, 1, "the middle box contains the point");
     }
@@ -173,7 +176,10 @@ mod tests {
         let point = ScenePoint::new(Vec3::new(0.2, 0.0, 0.0));
         let brute = collide_point(&targets, &point);
         let bvh = collide_point_bvh(&targets, &point);
-        assert_eq!(brute, bvh, "BVH collide-point must equal brute force exactly");
+        assert_eq!(
+            brute, bvh,
+            "BVH collide-point must equal brute force exactly"
+        );
         assert_eq!(brute.len(), 2, "both overlapping boxes contain the point");
         assert_eq!(brute[0].target, 0, "containing targets are ascending");
         assert_eq!(brute[1].target, 1);
@@ -188,12 +194,18 @@ mod tests {
         }
         let mut targets = vec![target_at(&hulls[0], Vec3::new(0.0, 0.0, 0.0))];
         for k in 0..40 {
-            targets.push(target_at(&hulls[k + 1], Vec3::new(1.0 + 1.5 * (k as f32), 60.0, 0.0)));
+            targets.push(target_at(
+                &hulls[k + 1],
+                Vec3::new(1.0 + 1.5 * (k as f32), 60.0, 0.0),
+            ));
         }
         let point = ScenePoint::new(Vec3::new(0.1, -0.1, 0.2));
         let brute = collide_point(&targets, &point);
         let bvh = collide_point_bvh(&targets, &point);
-        assert_eq!(brute, bvh, "BVH collide-point must equal brute force on a large scene");
+        assert_eq!(
+            brute, bvh,
+            "BVH collide-point must equal brute force on a large scene"
+        );
         assert_eq!(brute.len(), 1, "only the origin box contains the point");
         assert_eq!(brute[0].target, 0);
     }

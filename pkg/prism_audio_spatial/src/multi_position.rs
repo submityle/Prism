@@ -57,12 +57,12 @@
 //! source by several positions and combining them by nearest/weighted/all is a
 //! standard, publicly documented spatial-audio technique.
 
-use bevy_math::{Vec3, ops};
-use prism_audio_core::math::{MIN_AUDIBLE_GAIN, Sample};
+use bevy_math::{ops, Vec3};
+use prism_audio_core::math::{Sample, MIN_AUDIBLE_GAIN};
 
 use crate::geometry::{Emitter, Listener, LocalSource};
 use crate::occlusion::OcclusionFactors;
-use crate::spatializer::{SourceDescriptor, SpatialParams, resolve};
+use crate::spatializer::{resolve, SourceDescriptor, SpatialParams};
 use crate::spread::SpreadParams;
 
 use core::f32::consts::PI;
@@ -100,7 +100,10 @@ impl PositionInput {
     #[must_use]
     #[inline]
     pub fn open(emitter: Emitter) -> Self {
-        Self { emitter, factors: OcclusionFactors::OPEN }
+        Self {
+            emitter,
+            factors: OcclusionFactors::OPEN,
+        }
     }
 }
 
@@ -188,7 +191,13 @@ pub fn resolve_multi(
 
     for (i, input) in positions.iter().take(count).enumerate() {
         let local: LocalSource = listener.localize(&input.emitter);
-        params[i] = resolve(listener, &input.emitter, descriptor, input.factors, sample_rate);
+        params[i] = resolve(
+            listener,
+            &input.emitter,
+            descriptor,
+            input.factors,
+            sample_rate,
+        );
         dirs[i] = local.direction;
         weights[i] = params[i].direct_gain;
         if local.distance < nearest_distance {
@@ -199,12 +208,20 @@ pub fn resolve_multi(
 
     match mode {
         MultiPositionMode::Nearest => params[nearest_idx],
-        MultiPositionMode::Blend => {
-            combine(&params[..count], &dirs[..count], &weights[..count], nearest_idx, false)
-        }
-        MultiPositionMode::Envelop => {
-            combine(&params[..count], &dirs[..count], &weights[..count], nearest_idx, true)
-        }
+        MultiPositionMode::Blend => combine(
+            &params[..count],
+            &dirs[..count],
+            &weights[..count],
+            nearest_idx,
+            false,
+        ),
+        MultiPositionMode::Envelop => combine(
+            &params[..count],
+            &dirs[..count],
+            &weights[..count],
+            nearest_idx,
+            true,
+        ),
     }
 }
 
@@ -304,7 +321,11 @@ fn combine(
         (base_spread, base_spread * PI)
     };
 
-    let local = LocalSource { direction, distance: 0.0, radial_velocity: 0.0 };
+    let local = LocalSource {
+        direction,
+        distance: 0.0,
+        radial_velocity: 0.0,
+    };
 
     SpatialParams {
         direct_gain,
@@ -313,7 +334,11 @@ fn combine(
         elevation: local.elevation(),
         direct_cutoff_hz: cutoff,
         wet_gain: max_wet,
-        spread: SpreadParams { spread, focus, half_width },
+        spread: SpreadParams {
+            spread,
+            focus,
+            half_width,
+        },
     }
 }
 
@@ -341,7 +366,11 @@ fn angular_extent(dirs: &[Vec3], weights: &[Sample], centre: Vec3) -> Sample {
 #[inline]
 fn normalize_or(v: Vec3, fallback: Vec3) -> Vec3 {
     let len = ops::sqrt(v.dot(v));
-    if len <= MIN_AUDIBLE_GAIN { fallback } else { v / len }
+    if len <= MIN_AUDIBLE_GAIN {
+        fallback
+    } else {
+        v / len
+    }
 }
 
 #[cfg(test)]
@@ -438,7 +467,8 @@ mod tests {
         // image should sit to the right of centre.
         let listener = Listener::default();
         let loud_right = PositionInput::open(Emitter::point(Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO));
-        let quiet_left = PositionInput::open(Emitter::point(Vec3::new(-40.0, 0.0, 0.0), Vec3::ZERO));
+        let quiet_left =
+            PositionInput::open(Emitter::point(Vec3::new(-40.0, 0.0, 0.0), Vec3::ZERO));
         let params = resolve_multi(
             &listener,
             &[loud_right, quiet_left],

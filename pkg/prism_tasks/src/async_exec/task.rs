@@ -8,9 +8,9 @@
 //! an async result with [`TaskPool::wait`](crate::TaskPool::wait) — the same
 //! bridge the async side uses via [`Counter::wait_async`](crate::Counter::wait_async).
 
+use alloc::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
-use alloc::sync::Arc;
 use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 

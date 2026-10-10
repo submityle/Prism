@@ -77,7 +77,6 @@ impl CouplingBody {
     }
 }
 
-
 /// Resolves two-way cloth/rigid contact for every particle against every body.
 ///
 /// For each contact the push-out vector `c` (the correction that would move the

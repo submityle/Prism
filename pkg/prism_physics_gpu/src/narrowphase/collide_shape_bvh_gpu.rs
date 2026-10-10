@@ -94,7 +94,13 @@ impl GpuBvhCollideShape {
     /// bounds and descending it with the query shape's grown box, all on the
     /// `GPU`. The `Err` arm falls back to the whole scene so correctness never
     /// depends on the gather succeeding.
-    fn gather(&self, ctx: &GpuContext, hulls: &[ConvexHull], poses: &[ConvexPose], margin: f32) -> Vec<u32> {
+    fn gather(
+        &self,
+        ctx: &GpuContext,
+        hulls: &[ConvexHull],
+        poses: &[ConvexPose],
+        margin: f32,
+    ) -> Vec<u32> {
         let num_targets = hulls.len() - 1;
         if num_targets == 0 {
             return Vec::new();

@@ -48,7 +48,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::f32::consts::{FRAC_PI_2, PI};
 
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 
 /// Sentinel stored in [`LightTreeNode::right`] to mark a leaf node.
 ///
@@ -538,7 +538,9 @@ fn build_recursive(
     indices.sort_by(|&a, &b| {
         let ca = axis_component(lights[a as usize].centroid(), axis);
         let cb = axis_component(lights[b as usize].centroid(), axis);
-        ca.partial_cmp(&cb).unwrap_or(Ordering::Equal).then(a.cmp(&b))
+        ca.partial_cmp(&cb)
+            .unwrap_or(Ordering::Equal)
+            .then(a.cmp(&b))
     });
 
     let mid = indices.len() / 2;

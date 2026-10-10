@@ -9,10 +9,10 @@
 
 use prism_motion_gpu::context::GpuContext;
 use prism_motion_gpu::dilation::GpuDilate;
-use prism_render_architecture::motion::Vec2;
 use prism_render_architecture::motion::dilation::{
-    DepthField, DepthOrder, VelocityField, dilate_closest_depth,
+    dilate_closest_depth, DepthField, DepthOrder, VelocityField,
 };
+use prism_render_architecture::motion::Vec2;
 
 /// Acquires a device, or prints a skip note and returns `None` on hosts without
 /// a usable adapter.
@@ -72,10 +72,7 @@ fn assert_parity(gpu: &VelocityField, golden: &VelocityField) {
         for x in 0..golden.width() {
             let g = gpu.get(x, y).expect("gpu in bounds");
             let c = golden.get(x, y).expect("golden in bounds");
-            assert!(
-                bits_eq(g, c),
-                "pixel ({x},{y}): gpu {g:?} != golden {c:?}"
-            );
+            assert!(bits_eq(g, c), "pixel ({x},{y}): gpu {g:?} != golden {c:?}");
         }
     }
 }
@@ -166,7 +163,9 @@ fn non_square_dims_match_golden() {
     for order in [DepthOrder::SmallerIsCloser, DepthOrder::LargerIsCloser] {
         for radius in 0..=2 {
             let golden = dilate_closest_depth(&vel, &depth, radius, order).expect("dims");
-            let gpu = kernel.dilate(&ctx, &vel, &depth, radius, order).expect("dims");
+            let gpu = kernel
+                .dilate(&ctx, &vel, &depth, radius, order)
+                .expect("dims");
             assert_parity(&gpu, &golden);
         }
     }
@@ -194,7 +193,9 @@ fn large_multi_workgroup_grid_matches_golden() {
     for order in [DepthOrder::SmallerIsCloser, DepthOrder::LargerIsCloser] {
         for radius in [1usize, 2, 3] {
             let golden = dilate_closest_depth(&vel, &depth, radius, order).expect("dims");
-            let gpu = kernel.dilate(&ctx, &vel, &depth, radius, order).expect("dims");
+            let gpu = kernel
+                .dilate(&ctx, &vel, &depth, radius, order)
+                .expect("dims");
             assert_parity(&gpu, &golden);
             // Track whether dilation actually moved any velocity.
             for (g, v) in golden.as_slice().iter().zip(vel.as_slice().iter()) {
@@ -218,9 +219,7 @@ fn dimension_mismatch_returns_none() {
 
     let vel = VelocityField::zeroed(2, 2);
     let depth = DepthField::from_depths(2, 1, vec![0.0, 0.0]).expect("matches");
-    assert!(
-        kernel
-            .dilate(&ctx, &vel, &depth, 1, DepthOrder::SmallerIsCloser)
-            .is_none()
-    );
+    assert!(kernel
+        .dilate(&ctx, &vel, &depth, 1, DepthOrder::SmallerIsCloser)
+        .is_none());
 }

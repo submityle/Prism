@@ -93,8 +93,16 @@ pub struct BillboardNormal {
 /// the disc centre.
 #[inline]
 pub fn spherical_normal(uv: Vec2) -> BillboardNormal {
-    let px = if uv.x.is_finite() { uv.x * 2.0 - 1.0 } else { 0.0 };
-    let py = if uv.y.is_finite() { uv.y * 2.0 - 1.0 } else { 0.0 };
+    let px = if uv.x.is_finite() {
+        uv.x * 2.0 - 1.0
+    } else {
+        0.0
+    };
+    let py = if uv.y.is_finite() {
+        uv.y * 2.0 - 1.0
+    } else {
+        0.0
+    };
     let r2 = px * px + py * py;
     if r2 > UNIT_R2 {
         return BillboardNormal {
@@ -115,8 +123,16 @@ pub fn spherical_normal(uv: Vec2) -> BillboardNormal {
 /// the hard mask of [`spherical_normal`].
 #[inline]
 pub fn spherical_normal_soft(uv: Vec2, softness: f32) -> BillboardNormal {
-    let px = if uv.x.is_finite() { uv.x * 2.0 - 1.0 } else { 0.0 };
-    let py = if uv.y.is_finite() { uv.y * 2.0 - 1.0 } else { 0.0 };
+    let px = if uv.x.is_finite() {
+        uv.x * 2.0 - 1.0
+    } else {
+        0.0
+    };
+    let py = if uv.y.is_finite() {
+        uv.y * 2.0 - 1.0
+    } else {
+        0.0
+    };
     let r2 = px * px + py * py;
     let r = r2.max(0.0).sqrt();
     let soft = saturate(softness);
@@ -212,11 +228,7 @@ pub fn view_normal_to_world_mat(normal: Vec3, basis: Mat3) -> Vec3 {
 /// world space.  Returns the world normal together with the disc coverage so a
 /// caller can discard masked fragments.
 #[inline]
-pub fn billboard_normal_world(
-    uv: Vec2,
-    camera_right: Vec3,
-    camera_up: Vec3,
-) -> BillboardNormal {
+pub fn billboard_normal_world(uv: Vec2, camera_right: Vec3, camera_up: Vec3) -> BillboardNormal {
     let local = spherical_normal(uv);
     let (right, up, forward) = camera_facing_basis(camera_right, camera_up);
     let world = view_normal_to_world(local.normal, right, up, forward);

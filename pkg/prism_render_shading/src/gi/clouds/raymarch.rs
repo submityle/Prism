@@ -263,7 +263,12 @@ where
         0.0
     };
     let cos_theta = view.dot(light);
-    let phase = dual_lobe_hg(cos_theta, params.forward_g, params.backward_g, params.lobe_blend);
+    let phase = dual_lobe_hg(
+        cos_theta,
+        params.forward_g,
+        params.backward_g,
+        params.lobe_blend,
+    );
     let sun = sanitize_rgb(sun_radiance);
 
     let mut transmittance = 1.0f32;
@@ -296,16 +301,32 @@ where
     F: Fn(Vec3) -> f32,
 {
     let d = density(p);
-    if d.is_finite() { d.clamp(0.0, 1.0) } else { 0.0 }
+    if d.is_finite() {
+        d.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Replaces non-finite channels with `0` and clamps every channel non-negative.
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.max(0.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.max(0.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.max(0.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -333,7 +354,11 @@ mod tests {
         // |origin + t Z| = 2 -> t = sqrt(4 - 2.25) ~ 1.3229 either side.
         let expected = (4.0f32 - 2.25).sqrt();
         assert!((seg.0 - 0.0).abs() < 1e-4, "near={}", seg.0);
-        assert!((seg.1 - expected).abs() < 1e-3, "far={} exp={expected}", seg.1);
+        assert!(
+            (seg.1 - expected).abs() < 1e-3,
+            "far={} exp={expected}",
+            seg.1
+        );
     }
 
     #[test]
@@ -393,12 +418,20 @@ mod tests {
         for i in 0..=10 {
             let d = i as f32 / 10.0;
             let density = move |_p: Vec3| d;
-            let (rad, tr) = march_clouds(
-                origin, Vec3::Y, light, sun, INNER, OUTER, &params, &density,
+            let (rad, tr) =
+                march_clouds(origin, Vec3::Y, light, sun, INNER, OUTER, &params, &density);
+            assert!(
+                (0.0..=1.0).contains(&tr),
+                "transmittance out of range: {tr}"
             );
-            assert!((0.0..=1.0).contains(&tr), "transmittance out of range: {tr}");
-            assert!(rad.is_finite() && rad.min_element() >= 0.0, "bad radiance: {rad:?}");
-            assert!(tr <= prev + 1e-6, "transmittance not decreasing at d={d}: {tr} > {prev}");
+            assert!(
+                rad.is_finite() && rad.min_element() >= 0.0,
+                "bad radiance: {rad:?}"
+            );
+            assert!(
+                tr <= prev + 1e-6,
+                "transmittance not decreasing at d={d}: {tr} > {prev}"
+            );
             prev = tr;
         }
         // A dense cloud must attenuate noticeably.
@@ -417,7 +450,10 @@ mod tests {
             let density = move |_p: Vec3| d;
             let e = light_energy(pos, light, INNER, OUTER, &params, &density);
             assert!((0.0..=1.0).contains(&e), "light energy out of range: {e}");
-            assert!(e <= prev + 1e-6, "light energy not decreasing at d={d}: {e} > {prev}");
+            assert!(
+                e <= prev + 1e-6,
+                "light energy not decreasing at d={d}: {e} > {prev}"
+            );
             prev = e;
         }
     }
@@ -447,7 +483,10 @@ mod tests {
             &density,
         );
         assert!(rad.is_finite(), "radiance not finite: {rad:?}");
-        assert!(tr.is_finite() && (0.0..=1.0).contains(&tr), "transmittance bad: {tr}");
+        assert!(
+            tr.is_finite() && (0.0..=1.0).contains(&tr),
+            "transmittance bad: {tr}"
+        );
     }
 
     #[test]
@@ -457,11 +496,28 @@ mod tests {
         let light = Vec3::new(0.2, 1.0, 0.0);
         let density = |_p: Vec3| 0.3;
         let (dim, _) = march_clouds(
-            origin, Vec3::Y, light, Vec3::splat(1.0), INNER, OUTER, &params, &density,
+            origin,
+            Vec3::Y,
+            light,
+            Vec3::splat(1.0),
+            INNER,
+            OUTER,
+            &params,
+            &density,
         );
         let (bright, _) = march_clouds(
-            origin, Vec3::Y, light, Vec3::splat(10.0), INNER, OUTER, &params, &density,
+            origin,
+            Vec3::Y,
+            light,
+            Vec3::splat(10.0),
+            INNER,
+            OUTER,
+            &params,
+            &density,
         );
-        assert!(bright.length() > dim.length(), "radiance did not scale with sun");
+        assert!(
+            bright.length() > dim.length(),
+            "radiance did not scale with sun"
+        );
     }
 }

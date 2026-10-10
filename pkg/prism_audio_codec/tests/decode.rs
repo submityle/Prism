@@ -10,7 +10,7 @@
 use prism_audio_assets::codec::decoder::{DecodeError, SourceDecoder};
 use prism_audio_assets::codec::metadata::CodecTag;
 use prism_audio_assets::codec::registry::DecoderRegistry;
-use prism_audio_codec::{SymphoniaDecoder, register_symphonia_decoders};
+use prism_audio_codec::{register_symphonia_decoders, SymphoniaDecoder};
 
 /// A short, real Ogg Vorbis asset, embedded so the test exercises the genuine
 /// container-probe plus Vorbis decode path rather than a synthetic stub.
@@ -25,7 +25,10 @@ const VORBIS_OGG: &[u8] = include_bytes!(concat!(
 fn vorbis_header_is_parsed() {
     let decoder = SymphoniaDecoder::new(VORBIS_OGG).expect("probe real ogg vorbis");
     let info = decoder.info();
-    assert!(info.channels >= 1, "channel count must be learned from the header");
+    assert!(
+        info.channels >= 1,
+        "channel count must be learned from the header"
+    );
     assert!(info.sample_rate >= 8000, "sample rate must be plausible");
     assert!(
         matches!(info.codec, CodecTag::Vorbis),
@@ -44,13 +47,23 @@ fn vorbis_decodes_real_frames() {
 
     assert!(!pcm.is_empty(), "a real asset must decode to some samples");
     assert_eq!(pcm.len() % channels, 0, "output must be whole frames");
-    assert!(decoder.is_exhausted(), "decoder must report exhaustion at end");
+    assert!(
+        decoder.is_exhausted(),
+        "decoder must report exhaustion at end"
+    );
     for sample in &pcm {
         assert!(sample.is_finite(), "decoded sample must be finite");
-        assert!((-1.5..=1.5).contains(sample), "decoded sample out of range: {sample}");
+        assert!(
+            (-1.5..=1.5).contains(sample),
+            "decoded sample out of range: {sample}"
+        );
     }
     let frames = (pcm.len() / channels) as u64;
-    assert_eq!(decoder.position(), frames, "position must track decoded frames");
+    assert_eq!(
+        decoder.position(),
+        frames,
+        "position must track decoded frames"
+    );
 }
 
 /// Seeking back to the start must clear exhaustion and resume decoding real
@@ -66,12 +79,26 @@ fn seek_to_start_resumes_decoding() {
     assert!(first > 0, "the opening decode must produce frames");
 
     decoder.seek(0).expect("seek to start");
-    assert_eq!(decoder.position(), 0, "position must reset to zero after seek(0)");
-    assert!(!decoder.is_exhausted(), "seeking back to the start must clear exhaustion");
+    assert_eq!(
+        decoder.position(),
+        0,
+        "position must reset to zero after seek(0)"
+    );
+    assert!(
+        !decoder.is_exhausted(),
+        "seeking back to the start must clear exhaustion"
+    );
 
     let after = decoder.decode_to_end().expect("decode after seek");
-    assert!(!after.is_empty(), "decoding must resume after seeking to the start");
-    assert_eq!(after.len() % channels, 0, "resumed output must be whole frames");
+    assert!(
+        !after.is_empty(),
+        "decoding must resume after seeking to the start"
+    );
+    assert_eq!(
+        after.len() % channels,
+        0,
+        "resumed output must be whole frames"
+    );
     for sample in &after {
         assert!(sample.is_finite(), "resumed sample must be finite");
     }
@@ -114,8 +141,13 @@ fn seek_bounds_are_enforced() {
             Err(DecodeError::SeekOutOfRange),
             "seeking beyond the frame count must be rejected"
         );
-        decoder.seek(frames).expect("seeking exactly to the end is allowed");
-        assert!(decoder.is_exhausted(), "end-seek must leave the decoder exhausted");
+        decoder
+            .seek(frames)
+            .expect("seeking exactly to the end is allowed");
+        assert!(
+            decoder.is_exhausted(),
+            "end-seek must leave the decoder exhausted"
+        );
     }
 }
 
@@ -132,9 +164,15 @@ fn output_too_small_is_reported() {
 #[test]
 fn garbage_is_rejected_without_panicking() {
     let zeros = [0_u8; 128];
-    assert!(SymphoniaDecoder::new(&zeros).is_err(), "all-zero bytes are not a container");
+    assert!(
+        SymphoniaDecoder::new(&zeros).is_err(),
+        "all-zero bytes are not a container"
+    );
     let text = b"this is definitely not an audio container stream";
-    assert!(SymphoniaDecoder::new(text).is_err(), "plain text is not a container");
+    assert!(
+        SymphoniaDecoder::new(text).is_err(),
+        "plain text is not a container"
+    );
 }
 
 /// Registration must advertise the compressed families it supports and must
@@ -143,8 +181,14 @@ fn garbage_is_rejected_without_panicking() {
 fn registry_registers_compressed_families() {
     let mut registry = DecoderRegistry::with_native();
     register_symphonia_decoders(&mut registry);
-    assert!(registry.supports_tag(&CodecTag::Vorbis), "Vorbis tag must be registered");
-    assert!(registry.supports_tag(&CodecTag::Flac), "FLAC tag must be registered");
+    assert!(
+        registry.supports_tag(&CodecTag::Vorbis),
+        "Vorbis tag must be registered"
+    );
+    assert!(
+        registry.supports_tag(&CodecTag::Flac),
+        "FLAC tag must be registered"
+    );
     assert!(
         !registry.supports_tag(&CodecTag::Opus),
         "Opus must stay unsupported rather than registering a stub"

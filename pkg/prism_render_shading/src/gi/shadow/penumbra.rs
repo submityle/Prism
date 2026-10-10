@@ -214,7 +214,11 @@ where
         return 1.0;
     }
     let bias = if bias.is_finite() { bias.max(0.0) } else { 0.0 };
-    let radius = if radius.is_finite() { radius.max(0.0) } else { 0.0 };
+    let radius = if radius.is_finite() {
+        radius.max(0.0)
+    } else {
+        0.0
+    };
     let threshold = receiver_depth - bias;
 
     let mut vis = 0.0_f32;
@@ -389,15 +393,7 @@ mod tests {
     #[test]
     fn blocker_search_finds_near_occluders() {
         // A uniform occluder plane at depth 1.0 under a receiver at depth 3.0.
-        let res = blocker_search(
-            Vec2::splat(0.5),
-            3.0,
-            0.05,
-            0.001,
-            32,
-            7,
-            |_uv| 1.0,
-        );
+        let res = blocker_search(Vec2::splat(0.5), 3.0, 0.05, 0.001, 32, 7, |_uv| 1.0);
         assert!(res.has_blocker());
         assert_eq!(res.blocker_count, res.sample_count);
         assert!((res.average_depth - 1.0).abs() < 1e-5);
@@ -407,15 +403,7 @@ mod tests {
     #[test]
     fn blocker_search_reports_none_when_all_behind() {
         // Everything is farther than the receiver -> no blockers.
-        let res = blocker_search(
-            Vec2::splat(0.5),
-            1.0,
-            0.05,
-            0.001,
-            16,
-            3,
-            |_uv| 5.0,
-        );
+        let res = blocker_search(Vec2::splat(0.5), 1.0, 0.05, 0.001, 16, 3, |_uv| 5.0);
         assert!(!res.has_blocker());
         assert_eq!(res.average_depth, 0.0);
         assert_eq!(res.sample_count, 16);
@@ -496,7 +484,10 @@ mod tests {
             params.min_radius,
             params.max_radius,
         );
-        assert!(radius < 0.01, "contact kernel should be small, got {radius}");
+        assert!(
+            radius < 0.01,
+            "contact kernel should be small, got {radius}"
+        );
     }
 
     #[test]

@@ -433,7 +433,11 @@ mod tests {
         // Support resolves to the corner farthest along the query direction.
         assert_eq!(hull.support_local(Vec3::X), 1, "+x corner is b");
         assert_eq!(hull.support_local(Vec3::Y), 2, "+y corner is c");
-        assert_eq!(hull.support_local(Vec3::new(-1.0, -1.0, 0.0)), 0, "origin corner is a");
+        assert_eq!(
+            hull.support_local(Vec3::new(-1.0, -1.0, 0.0)),
+            0,
+            "origin corner is a"
+        );
     }
 
     #[test]

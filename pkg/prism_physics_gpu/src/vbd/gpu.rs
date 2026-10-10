@@ -207,8 +207,7 @@ impl GpuVbd {
         let prev_buf = buffer::storage_rw_zeroed(device, "prism_vbd_prev", out_bytes);
         let targets_buf = buffer::storage_rw_zeroed(device, "prism_vbd_targets", out_bytes);
 
-        let inv_mass_buf =
-            buffer::storage_read(device, "prism_vbd_invmass", &prep.inverse_masses);
+        let inv_mass_buf = buffer::storage_read(device, "prism_vbd_invmass", &prep.inverse_masses);
         // Empty read-only storage slices are illegal; pad to one dummy element
         // the kernel's CSR offsets guarantee it never reads.
         let springs_pod = pad_springs(&prep.springs);

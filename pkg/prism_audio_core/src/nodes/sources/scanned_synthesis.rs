@@ -353,7 +353,13 @@ impl ScannedSynthesisNode {
     #[must_use]
     pub fn from_params(params: ScannedSynthesisParams) -> Self {
         let p = params.sanitised();
-        Self::new(p.frequency_hz, p.scan_rate_hz, p.brightness, p.damping, p.amplitude)
+        Self::new(
+            p.frequency_hz,
+            p.scan_rate_hz,
+            p.brightness,
+            p.damping,
+            p.amplitude,
+        )
     }
 
     /// Sets a new target readout frequency in hertz, gliding with `ramp`.
@@ -859,7 +865,11 @@ mod tests {
         let second = render(&mut node, SR, 4_096);
         let last = *first.channel(0).last().unwrap();
         let next = second.channel(0)[0];
-        assert!((next - last).abs() < 0.2, "join step {}", (next - last).abs());
+        assert!(
+            (next - last).abs() < 0.2,
+            "join step {}",
+            (next - last).abs()
+        );
     }
 
     #[test]

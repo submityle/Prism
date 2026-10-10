@@ -28,9 +28,9 @@
 use alloc::string::String;
 
 use bytemuck::{Pod, Zeroable};
+use prism_math::shader_mirror::{WGSL_DUAL_QUAT_SKIN, WGSL_QUAT_ROTATE};
 use prism_math::DualQuat;
 use prism_math::Vec3;
-use prism_math::shader_mirror::{WGSL_DUAL_QUAT_SKIN, WGSL_QUAT_ROTATE};
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BufferBindingType, CommandEncoderDescriptor,

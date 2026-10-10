@@ -53,7 +53,7 @@ use glam::Vec3;
 
 use crate::math::scalar::Real;
 
-use super::virtual_particles::{PairScope, Sample, VirtualParticle, shares_active_vertex};
+use super::virtual_particles::{shares_active_vertex, PairScope, Sample, VirtualParticle};
 use super::{cell_of, EPS_LEN_SQ};
 
 /// Accumulates each sample's Jacobi self-collision correction, scattered onto
@@ -137,9 +137,7 @@ pub(crate) fn accumulate_virtual_jacobi_corrections(
                                 continue;
                             }
                             let bi = b as usize;
-                            if scope == PairScope::VirtualOnly
-                                && ai < real_count
-                                && bi < real_count
+                            if scope == PairScope::VirtualOnly && ai < real_count && bi < real_count
                             {
                                 // Both samples are real vertices; the friction
                                 // point-to-point tier already owns this pair.
@@ -318,7 +316,7 @@ pub fn resolve_self_collision_virtual_augment_jacobi(
 #[cfg(test)]
 mod tests {
     use super::super::virtual_particles::{
-        VirtualParticlePattern, generate_virtual_particles, resolve_self_collision_virtual,
+        generate_virtual_particles, resolve_self_collision_virtual, VirtualParticlePattern,
     };
     use super::*;
     use alloc::vec;

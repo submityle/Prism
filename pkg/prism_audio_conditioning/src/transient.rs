@@ -83,8 +83,11 @@ fn pick_peaks(odf: &[Sample], config: &TransientConfig) -> Vec<usize> {
         let span = &odf[lo..hi];
         let count = span.len() as Sample;
         let mean = span.iter().copied().sum::<Sample>() / count;
-        let variance =
-            span.iter().map(|&v| (v - mean) * (v - mean)).sum::<Sample>() / count;
+        let variance = span
+            .iter()
+            .map(|&v| (v - mean) * (v - mean))
+            .sum::<Sample>()
+            / count;
         let std = ops::sqrt(variance);
         let threshold = mean + config.threshold_k * std;
 
@@ -117,11 +120,7 @@ fn pick_peaks(odf: &[Sample], config: &TransientConfig) -> Vec<usize> {
 /// (`frame_index * hop`); the `sample_rate` is accepted for API symmetry and
 /// future rate-aware heuristics and does not change the quantisation.
 #[must_use]
-pub fn detect_onsets(
-    channel: &[Sample],
-    sample_rate: u32,
-    config: &TransientConfig,
-) -> Vec<usize> {
+pub fn detect_onsets(channel: &[Sample], sample_rate: u32, config: &TransientConfig) -> Vec<usize> {
     let _ = sample_rate;
     let hop = config.hop.max(1);
     let odf = onset_envelope(channel, config);

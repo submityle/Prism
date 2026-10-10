@@ -226,7 +226,11 @@ fn jittered_batch_matches_golden_bit_for_bit() {
     let seeds = [0.137_f32, 1.919, 2.718, 0.577, 3.141, 1.414, 0.618, 2.236];
     for (i, s) in seeds.iter().cycle().take(130).enumerate() {
         let j = i as f32;
-        particles.push(free(Vec3::new(s * 0.7 + j * 0.001, s * -0.3, s * 1.1 - j * 0.002)));
+        particles.push(free(Vec3::new(
+            s * 0.7 + j * 0.001,
+            s * -0.3,
+            s * 1.1 - j * 0.002,
+        )));
     }
     assert_bit_exact(&particles);
 }

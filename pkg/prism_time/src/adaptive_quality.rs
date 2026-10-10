@@ -245,9 +245,7 @@ impl QualityAdjustment {
     pub const fn delta(&self) -> i64 {
         match self {
             Self::Hold => 0,
-            Self::Downgrade { from, to } | Self::Upgrade { from, to } => {
-                *to as i64 - *from as i64
-            }
+            Self::Downgrade { from, to } | Self::Upgrade { from, to } => *to as i64 - *from as i64,
         }
     }
 }

@@ -243,7 +243,11 @@ fn smoothstep01(t: f32) -> f32 {
 /// Returns `v` when finite, else `0`.
 #[inline]
 fn sanitize_scalar(v: f32) -> f32 {
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
 }
 
 /// Returns `true` when both components of `v` are finite.
@@ -280,7 +284,12 @@ mod tests {
 
     #[test]
     fn reverse_z_gate_is_inverted() {
-        let c = OcclusionConfig { range: DepthRange::ReverseZ, sky_depth: 0.001, sky_softness: 0.0, ..cfg() };
+        let c = OcclusionConfig {
+            range: DepthRange::ReverseZ,
+            sky_depth: 0.001,
+            sky_softness: 0.0,
+            ..cfg()
+        };
         // Reverse-Z far plane is 0 -> sky.
         assert_eq!(sky_gate(0.0, &c), 1.0);
         // A near surface at 0.9 -> geometry.
@@ -306,7 +315,11 @@ mod tests {
     // Helper producing a config with a soft band but default sun, kept separate
     // so the struct-update syntax above reads cleanly.
     fn cfg_soft() -> OcclusionConfig {
-        OcclusionConfig { sky_depth: 0.5, sky_softness: 0.1, ..OcclusionConfig::default() }
+        OcclusionConfig {
+            sky_depth: 0.5,
+            sky_softness: 0.1,
+            ..OcclusionConfig::default()
+        }
     }
 
     #[test]
@@ -321,10 +334,16 @@ mod tests {
     #[test]
     fn sky_emits_scene_luminance_without_sun() {
         // Sky texel far from the sun emits (approximately) its luminance.
-        let c = OcclusionConfig { sun_intensity: 0.0, ..cfg() };
+        let c = OcclusionConfig {
+            sun_intensity: 0.0,
+            ..cfg()
+        };
         let col = Vec3::new(0.4, 0.4, 0.4);
         let emission = build_emission(1.0, col, Vec2::new(0.95, 0.95), &c);
-        assert!((emission - luminance(col)).abs() < 1e-6, "emission={emission}");
+        assert!(
+            (emission - luminance(col)).abs() < 1e-6,
+            "emission={emission}"
+        );
     }
 
     #[test]
@@ -346,7 +365,11 @@ mod tests {
 
     #[test]
     fn emission_is_clamped_to_max() {
-        let c = OcclusionConfig { sun_intensity: 100.0, max_emission: 2.0, ..cfg() };
+        let c = OcclusionConfig {
+            sun_intensity: 100.0,
+            max_emission: 2.0,
+            ..cfg()
+        };
         let emission = build_emission(1.0, Vec3::splat(1.0), c.sun_uv, &c);
         assert!(emission <= 2.0 + 1e-6, "emission={emission}");
     }
@@ -362,9 +385,15 @@ mod tests {
     #[test]
     fn degenerate_inputs_are_safe() {
         let c = cfg();
-        assert_eq!(build_emission(f32::NAN, Vec3::splat(1.0), c.sun_uv, &c), 0.0);
+        assert_eq!(
+            build_emission(f32::NAN, Vec3::splat(1.0), c.sun_uv, &c),
+            0.0
+        );
         assert_eq!(sun_disk(Vec2::new(f32::NAN, 0.0), &c), 0.0);
-        let zero_radius = OcclusionConfig { sun_radius: 0.0, ..c };
+        let zero_radius = OcclusionConfig {
+            sun_radius: 0.0,
+            ..c
+        };
         assert_eq!(sun_disk(c.sun_uv, &zero_radius), 0.0);
     }
 

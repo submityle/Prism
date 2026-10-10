@@ -170,10 +170,7 @@ impl TransientAllocation {
     /// The assigned region for `resource`, or `None` when it is not a planned
     /// transient (persistent, imported, or never accessed).
     pub fn region(&self, resource: ResourceId) -> Option<TransientRegion> {
-        self.regions
-            .get(resource.0 as usize)
-            .copied()
-            .flatten()
+        self.regions.get(resource.0 as usize).copied().flatten()
     }
 
     /// Per-resource regions indexed by `ResourceId`, for bulk consumers.
@@ -290,10 +287,7 @@ impl TransientAllocation {
     }
 
     fn lifetime_of(&self, resource: ResourceId) -> Option<Range<u32>> {
-        self.lifetimes
-            .get(resource.0 as usize)
-            .cloned()
-            .flatten()
+        self.lifetimes.get(resource.0 as usize).cloned().flatten()
     }
 }
 

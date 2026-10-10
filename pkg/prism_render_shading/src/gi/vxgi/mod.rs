@@ -145,12 +145,7 @@ mod tests {
     fn empty_scene_returns_no_light() {
         let mut grid = VoxelGrid::new(UVec3::splat(8), Vec3::ZERO, Vec3::splat(8.0));
         grid.build_mips();
-        let light = trace_indirect(
-            &grid,
-            Vec3::splat(4.0),
-            Vec3::Y,
-            IndirectParams::default(),
-        );
+        let light = trace_indirect(&grid, Vec3::splat(4.0), Vec3::Y, IndirectParams::default());
         assert!(light.diffuse.length() < 1.0e-6, "{:?}", light.diffuse);
         assert!(light.specular.length() < 1.0e-6, "{:?}", light.specular);
     }

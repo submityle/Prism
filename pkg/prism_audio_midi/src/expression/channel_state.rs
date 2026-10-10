@@ -174,9 +174,9 @@ pub fn normalized_bend(bend: u32) -> Sample {
 /// since serde does not implement its array traits for arrays this large.
 #[cfg(feature = "serialize")]
 mod cc_serde {
-    use serde::{Deserialize, Deserializer, Serializer};
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub(super) fn serialize<S: Serializer>(
         value: &[u32; 128],
@@ -203,10 +203,9 @@ mod cc_serde {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{ChannelState, DEFAULT_PITCH_BEND_RANGE, normalized_bend};
+    use super::{normalized_bend, ChannelState, DEFAULT_PITCH_BEND_RANGE};
     use crate::ump::message::{ChannelVoice, PITCH_BEND_CENTER_32};
 
     const EPS: f32 = 1.0e-5;

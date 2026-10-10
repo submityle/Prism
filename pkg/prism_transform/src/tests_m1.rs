@@ -4,7 +4,7 @@ use crate::change::ChangeTicks;
 use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
 use crate::propagation::propagate;
 use crate::{GlobalTransform, Transform, TransformGraph};
-use prism_math::{Affine3, Quat, Vec3, vec3};
+use prism_math::{vec3, Affine3, Quat, Vec3};
 
 fn v_approx(a: Vec3, b: Vec3, eps: f32) -> bool {
     (a.x - b.x).abs() <= eps && (a.y - b.y).abs() <= eps && (a.z - b.z).abs() <= eps
@@ -28,10 +28,26 @@ fn deep_translation_chain_four_levels() {
     let c3 = g.spawn_child(c2, Transform::from_xyz(1.0, 0.0, 0.0));
     g.propagate();
 
-    assert!(v_approx(g.global(root).translation(), vec3(10.0, 0.0, 0.0), 1e-5));
-    assert!(v_approx(g.global(c1).translation(), vec3(10.0, 5.0, 0.0), 1e-5));
-    assert!(v_approx(g.global(c2).translation(), vec3(10.0, 5.0, 3.0), 1e-5));
-    assert!(v_approx(g.global(c3).translation(), vec3(11.0, 5.0, 3.0), 1e-5));
+    assert!(v_approx(
+        g.global(root).translation(),
+        vec3(10.0, 0.0, 0.0),
+        1e-5
+    ));
+    assert!(v_approx(
+        g.global(c1).translation(),
+        vec3(10.0, 5.0, 0.0),
+        1e-5
+    ));
+    assert!(v_approx(
+        g.global(c2).translation(),
+        vec3(10.0, 5.0, 3.0),
+        1e-5
+    ));
+    assert!(v_approx(
+        g.global(c3).translation(),
+        vec3(11.0, 5.0, 3.0),
+        1e-5
+    ));
 }
 
 #[test]
@@ -59,7 +75,11 @@ fn deep_rotation_chain_matches_affine_chain() {
 
     // Spot-check a point transformed through the deepest node.
     let p = vec3(1.0, -2.0, 0.5);
-    assert!(v_approx(g.global(nc).transform_point(p), wc.transform_point3(p), 1e-4));
+    assert!(v_approx(
+        g.global(nc).transform_point(p),
+        wc.transform_point3(p),
+        1e-4
+    ));
 }
 
 #[test]
@@ -72,7 +92,11 @@ fn root_world_equals_local_affine() {
     let mut g = TransformGraph::new();
     let root = g.spawn_root(local);
     g.propagate();
-    assert!(affine_approx(g.global(root).affine(), local.to_affine(), 1e-6));
+    assert!(affine_approx(
+        g.global(root).affine(),
+        local.to_affine(),
+        1e-6
+    ));
 }
 
 // ---- non-uniform scale composing into a child world matrix ----------------
@@ -97,7 +121,11 @@ fn non_uniform_parent_scale_composes_into_child() {
 
     // The world translation picks up the parent's non-uniform scale: child
     // local translation (1,1,0) scaled by (3,1,1) -> (3,1,0).
-    assert!(v_approx(g.global(c).translation(), vec3(3.0, 1.0, 0.0), 1e-5));
+    assert!(v_approx(
+        g.global(c).translation(),
+        vec3(3.0, 1.0, 0.0),
+        1e-5
+    ));
 
     // Confirm shear is actually present: re-composing the recovered TRS loses
     // information, so it would differ from the true affine (hence no writeback).
@@ -128,7 +156,11 @@ fn change_ticks_track_edits_and_passes() {
 
     g.propagate();
     assert!(!g.is_changed(child));
-    assert!(v_approx(g.global(child).translation(), vec3(2.0, 0.0, 0.0), 1e-6));
+    assert!(v_approx(
+        g.global(child).translation(),
+        vec3(2.0, 0.0, 0.0),
+        1e-6
+    ));
 }
 
 #[test]
@@ -162,7 +194,11 @@ fn reparent_marks_child_changed() {
 
     // Local unchanged -> world moves under the new parent.
     g.propagate();
-    assert!(v_approx(g.global(c).translation(), vec3(1.0, 20.0, 0.0), 1e-5));
+    assert!(v_approx(
+        g.global(c).translation(),
+        vec3(1.0, 20.0, 0.0),
+        1e-5
+    ));
 }
 
 #[test]
@@ -241,8 +277,14 @@ fn set_parent_rejects_cycle_and_invalid() {
     // A node cannot parent itself.
     assert_eq!(h.set_parent(child, Some(child)), Err(HierarchyError::Cycle));
     // Out-of-bounds ids are rejected.
-    assert_eq!(h.set_parent(NodeId::new(99), None), Err(HierarchyError::InvalidNode));
-    assert_eq!(h.set_parent(child, Some(NodeId::new(99))), Err(HierarchyError::InvalidNode));
+    assert_eq!(
+        h.set_parent(NodeId::new(99), None),
+        Err(HierarchyError::InvalidNode)
+    );
+    assert_eq!(
+        h.set_parent(child, Some(NodeId::new(99))),
+        Err(HierarchyError::InvalidNode)
+    );
 
     // A legal re-parent (grand -> root) still works and stays acyclic.
     assert!(h.set_parent(grand, Some(root)).is_ok());

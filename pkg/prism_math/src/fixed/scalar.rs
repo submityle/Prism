@@ -30,7 +30,9 @@
 //! deterministic construction.
 
 use core::cmp::Ordering;
-use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub, SubAssign};
+use core::ops::{
+    Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub, SubAssign,
+};
 
 /// Number of fractional bits in [`Fixed`] (Q32.32).
 pub const FRAC_BITS: u32 = 32;
@@ -65,13 +67,21 @@ impl Fixed {
     /// Zero.
     pub const ZERO: Self = Self { raw: 0 };
     /// One.
-    pub const ONE: Self = Self { raw: Self::ONE_BITS };
+    pub const ONE: Self = Self {
+        raw: Self::ONE_BITS,
+    };
     /// Negative one.
-    pub const NEG_ONE: Self = Self { raw: -Self::ONE_BITS };
+    pub const NEG_ONE: Self = Self {
+        raw: -Self::ONE_BITS,
+    };
     /// One half (`0.5`).
-    pub const HALF: Self = Self { raw: Self::ONE_BITS >> 1 };
+    pub const HALF: Self = Self {
+        raw: Self::ONE_BITS >> 1,
+    };
     /// Two.
-    pub const TWO: Self = Self { raw: Self::ONE_BITS << 1 };
+    pub const TWO: Self = Self {
+        raw: Self::ONE_BITS << 1,
+    };
     /// The most negative representable value (`-2^31`).
     pub const MIN: Self = Self { raw: i64::MIN };
     /// The most positive representable value (`≈ 2^31 - ε`).
@@ -80,9 +90,13 @@ impl Fixed {
     pub const EPSILON: Self = Self { raw: 1 };
 
     /// π (ratio of a circle's circumference to its diameter).
-    pub const PI: Self = Self { raw: 13_493_037_705 };
+    pub const PI: Self = Self {
+        raw: 13_493_037_705,
+    };
     /// τ = 2π.
-    pub const TAU: Self = Self { raw: 26_986_075_409 };
+    pub const TAU: Self = Self {
+        raw: 26_986_075_409,
+    };
     /// π/2.
     pub const FRAC_PI_2: Self = Self { raw: 6_746_518_852 };
     /// π/4.
@@ -90,7 +104,9 @@ impl Fixed {
     /// Natural logarithm of 2.
     pub const LN_2: Self = Self { raw: 2_977_044_472 };
     /// Euler's number `e`.
-    pub const E: Self = Self { raw: 11_674_931_555 };
+    pub const E: Self = Self {
+        raw: 11_674_931_555,
+    };
 
     // -- construction ------------------------------------------------------
 
@@ -110,7 +126,9 @@ impl Fixed {
     #[inline]
     pub const fn from_int(n: i64) -> Self {
         // n * 2^32 can overflow i64, so widen first.
-        Self { raw: saturate_i128((n as i128) << FRAC_BITS) }
+        Self {
+            raw: saturate_i128((n as i128) << FRAC_BITS),
+        }
     }
 
     /// Truncate toward zero to a whole integer.
@@ -179,7 +197,9 @@ impl Fixed {
     #[inline]
     pub const fn abs(self) -> Self {
         if self.raw < 0 {
-            Self { raw: self.raw.saturating_neg() }
+            Self {
+                raw: self.raw.saturating_neg(),
+            }
         } else {
             self
         }
@@ -200,7 +220,9 @@ impl Fixed {
     /// Largest integer `≤ self`.
     #[inline]
     pub const fn floor(self) -> Self {
-        Self { raw: self.raw & !(Self::ONE_BITS - 1) }
+        Self {
+            raw: self.raw & !(Self::ONE_BITS - 1),
+        }
     }
 
     /// Smallest integer `≥ self`.
@@ -210,26 +232,34 @@ impl Fixed {
         if self.raw & frac_mask == 0 {
             self
         } else {
-            Self { raw: (self.raw & !frac_mask).saturating_add(Self::ONE_BITS) }
+            Self {
+                raw: (self.raw & !frac_mask).saturating_add(Self::ONE_BITS),
+            }
         }
     }
 
     /// Round to the nearest integer (ties toward `+∞`).
     #[inline]
     pub const fn round(self) -> Self {
-        Self { raw: (self.raw.saturating_add(Self::ONE_BITS >> 1)) & !(Self::ONE_BITS - 1) }
+        Self {
+            raw: (self.raw.saturating_add(Self::ONE_BITS >> 1)) & !(Self::ONE_BITS - 1),
+        }
     }
 
     /// Truncate toward zero to an integer value.
     #[inline]
     pub const fn trunc(self) -> Self {
-        Self { raw: (self.raw / Self::ONE_BITS) * Self::ONE_BITS }
+        Self {
+            raw: (self.raw / Self::ONE_BITS) * Self::ONE_BITS,
+        }
     }
 
     /// Fractional part `self - self.trunc()` (keeps the sign of `self`).
     #[inline]
     pub const fn fract(self) -> Self {
-        Self { raw: self.raw - self.trunc().raw }
+        Self {
+            raw: self.raw - self.trunc().raw,
+        }
     }
 
     // -- min / max / clamp -------------------------------------------------
@@ -237,12 +267,20 @@ impl Fixed {
     /// Minimum of two values.
     #[inline]
     pub const fn min(self, rhs: Self) -> Self {
-        if self.raw <= rhs.raw { self } else { rhs }
+        if self.raw <= rhs.raw {
+            self
+        } else {
+            rhs
+        }
     }
     /// Maximum of two values.
     #[inline]
     pub const fn max(self, rhs: Self) -> Self {
-        if self.raw >= rhs.raw { self } else { rhs }
+        if self.raw >= rhs.raw {
+            self
+        } else {
+            rhs
+        }
     }
     /// Clamp into `[lo, hi]`.
     #[inline]
@@ -255,19 +293,25 @@ impl Fixed {
     /// Wrapping addition (modular on the raw `i64`).
     #[inline]
     pub const fn wrapping_add(self, rhs: Self) -> Self {
-        Self { raw: self.raw.wrapping_add(rhs.raw) }
+        Self {
+            raw: self.raw.wrapping_add(rhs.raw),
+        }
     }
     /// Wrapping subtraction (modular on the raw `i64`).
     #[inline]
     pub const fn wrapping_sub(self, rhs: Self) -> Self {
-        Self { raw: self.raw.wrapping_sub(rhs.raw) }
+        Self {
+            raw: self.raw.wrapping_sub(rhs.raw),
+        }
     }
     /// Wrapping multiplication (round-to-nearest, modular on overflow).
     #[inline]
     pub const fn wrapping_mul(self, rhs: Self) -> Self {
         let p = (self.raw as i128) * (rhs.raw as i128);
         let rounded = (p + (1 << (FRAC_BITS - 1))) >> FRAC_BITS;
-        Self { raw: rounded as i64 }
+        Self {
+            raw: rounded as i64,
+        }
     }
 
     // -- saturating arithmetic --------------------------------------------
@@ -275,19 +319,25 @@ impl Fixed {
     /// Saturating addition.
     #[inline]
     pub const fn saturating_add(self, rhs: Self) -> Self {
-        Self { raw: self.raw.saturating_add(rhs.raw) }
+        Self {
+            raw: self.raw.saturating_add(rhs.raw),
+        }
     }
     /// Saturating subtraction.
     #[inline]
     pub const fn saturating_sub(self, rhs: Self) -> Self {
-        Self { raw: self.raw.saturating_sub(rhs.raw) }
+        Self {
+            raw: self.raw.saturating_sub(rhs.raw),
+        }
     }
     /// Saturating multiplication (round-to-nearest intermediate).
     #[inline]
     pub const fn saturating_mul(self, rhs: Self) -> Self {
         let p = (self.raw as i128) * (rhs.raw as i128);
         let rounded = (p + (1 << (FRAC_BITS - 1))) >> FRAC_BITS;
-        Self { raw: saturate_i128(rounded) }
+        Self {
+            raw: saturate_i128(rounded),
+        }
     }
     /// Saturating division (truncates toward zero; divide-by-zero saturates to
     /// `MAX`/`MIN` by sign, with `0/0 == 0`).
@@ -303,13 +353,17 @@ impl Fixed {
             }
         } else {
             let num = (self.raw as i128) << FRAC_BITS;
-            Self { raw: saturate_i128(num / (rhs.raw as i128)) }
+            Self {
+                raw: saturate_i128(num / (rhs.raw as i128)),
+            }
         }
     }
     /// Saturating negation (`MIN` negates to `MAX`).
     #[inline]
     pub const fn saturating_neg(self) -> Self {
-        Self { raw: self.raw.saturating_neg() }
+        Self {
+            raw: self.raw.saturating_neg(),
+        }
     }
 
     // -- checked arithmetic -----------------------------------------------
@@ -338,7 +392,9 @@ impl Fixed {
         if rounded > i64::MAX as i128 || rounded < i64::MIN as i128 {
             None
         } else {
-            Some(Self { raw: rounded as i64 })
+            Some(Self {
+                raw: rounded as i64,
+            })
         }
     }
     /// Checked division, `None` on divide-by-zero or overflow.
@@ -413,7 +469,9 @@ impl Rem for Fixed {
     #[inline]
     fn rem(self, rhs: Self) -> Self {
         // Exact: raw remainder shares the Q32.32 scale.
-        Self { raw: if rhs.raw == 0 { 0 } else { self.raw % rhs.raw } }
+        Self {
+            raw: if rhs.raw == 0 { 0 } else { self.raw % rhs.raw },
+        }
     }
 }
 impl Neg for Fixed {

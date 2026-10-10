@@ -116,7 +116,15 @@ fn oriented_cross_layer_pair_parity() {
     let im = [1.0, 1.0];
     let layer_of = [0u32, 1u32];
     let normals = [Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO];
-    assert_parity(&ctx, &kernel, &positions, &im, &layer_of, &normals, params());
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &im,
+        &layer_of,
+        &normals,
+        params(),
+    );
 }
 
 #[test]
@@ -130,7 +138,15 @@ fn radial_fallback_pair_parity() {
     let im = [1.0, 1.0];
     let layer_of = [0u32, 1u32];
     let normals = [Vec3::ZERO, Vec3::ZERO];
-    assert_parity(&ctx, &kernel, &positions, &im, &layer_of, &normals, params());
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &im,
+        &layer_of,
+        &normals,
+        params(),
+    );
 }
 
 #[test]
@@ -143,7 +159,15 @@ fn asymmetric_mass_pair_parity() {
     let im = [0.25, 1.0];
     let layer_of = [0u32, 1u32];
     let normals = [Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO];
-    assert_parity(&ctx, &kernel, &positions, &im, &layer_of, &normals, params());
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &im,
+        &layer_of,
+        &normals,
+        params(),
+    );
 }
 
 #[test]
@@ -156,7 +180,15 @@ fn pinned_inner_pair_parity() {
     let im = [0.0, 1.0];
     let layer_of = [0u32, 1u32];
     let normals = [Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO];
-    assert_parity(&ctx, &kernel, &positions, &im, &layer_of, &normals, params());
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &im,
+        &layer_of,
+        &normals,
+        params(),
+    );
 }
 
 #[test]
@@ -170,7 +202,15 @@ fn coincident_radial_pair_parity() {
     let im = [1.0, 1.0];
     let layer_of = [0u32, 1u32];
     let normals = [Vec3::ZERO, Vec3::ZERO];
-    assert_parity(&ctx, &kernel, &positions, &im, &layer_of, &normals, params());
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &im,
+        &layer_of,
+        &normals,
+        params(),
+    );
 }
 
 #[test]
@@ -184,7 +224,15 @@ fn same_layer_pair_is_untouched_parity() {
     let im = [1.0, 1.0];
     let layer_of = [2u32, 2u32];
     let normals = [Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO];
-    assert_parity(&ctx, &kernel, &positions, &im, &layer_of, &normals, params());
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &im,
+        &layer_of,
+        &normals,
+        params(),
+    );
 }
 
 #[test]
@@ -199,7 +247,15 @@ fn separated_pair_is_untouched_parity() {
     let im = [1.0, 1.0];
     let layer_of = [0u32, 1u32];
     let normals = [Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO];
-    assert_parity(&ctx, &kernel, &positions, &im, &layer_of, &normals, params());
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &im,
+        &layer_of,
+        &normals,
+        params(),
+    );
 }
 
 #[test]
@@ -224,7 +280,15 @@ fn cluster_parity() {
         Vec3::new(0.0, 1.0, 0.0),
         Vec3::new(0.0, 1.0, 0.0),
     ];
-    assert_parity(&ctx, &kernel, &positions, &im, &layer_of, &normals, params());
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &im,
+        &layer_of,
+        &normals,
+        params(),
+    );
 }
 
 #[test]
@@ -247,7 +311,15 @@ fn three_layer_stack_parity() {
         Vec3::new(0.0, 1.0, 0.0),
         Vec3::new(0.0, 1.0, 0.0),
     ];
-    assert_parity(&ctx, &kernel, &positions, &im, &layer_of, &normals, params());
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &im,
+        &layer_of,
+        &normals,
+        params(),
+    );
 }
 
 #[test]
@@ -268,7 +340,16 @@ fn iterated_cluster_parity() {
         Vec3::new(0.0, 1.0, 0.0),
         Vec3::new(0.0, 1.0, 0.0),
     ];
-    assert_parity_iterated(&ctx, &kernel, &positions, &im, &layer_of, &normals, params(), 32);
+    assert_parity_iterated(
+        &ctx,
+        &kernel,
+        &positions,
+        &im,
+        &layer_of,
+        &normals,
+        params(),
+        32,
+    );
 }
 
 #[test]
@@ -282,7 +363,15 @@ fn empty_neighborhood_is_untouched_parity() {
     let im = [1.0, 1.0];
     let layer_of = [0u32, 1u32];
     let normals = [Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO];
-    assert_parity(&ctx, &kernel, &positions, &im, &layer_of, &normals, params());
+    assert_parity(
+        &ctx,
+        &kernel,
+        &positions,
+        &im,
+        &layer_of,
+        &normals,
+        params(),
+    );
 }
 
 #[test]

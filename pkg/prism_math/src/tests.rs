@@ -91,7 +91,11 @@ fn mat4_transform_point_matches_affine() {
     let m = Mat4::from_scale_rotation_translation(scale, rot, trans);
     let a = Affine3::from_scale_rotation_translation(scale, rot, trans);
     let p = vec3(1.0, 2.0, 3.0);
-    assert!(vec3_approx(m.transform_point3(p), a.transform_point3(p), 1e-5));
+    assert!(vec3_approx(
+        m.transform_point3(p),
+        a.transform_point3(p),
+        1e-5
+    ));
 }
 
 #[test]
@@ -163,5 +167,9 @@ fn mat4_affine_mul4_round_trip() {
         Quat::from_rotation_z(0.5),
         vec3(1.0, 0.0, -1.0),
     );
-    assert!(mat4_approx(Affine3::from_mat4(a.to_mat4()).to_mat4(), a.to_mat4(), 1e-5));
+    assert!(mat4_approx(
+        Affine3::from_mat4(a.to_mat4()).to_mat4(),
+        a.to_mat4(),
+        1e-5
+    ));
 }

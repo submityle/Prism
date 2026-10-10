@@ -89,9 +89,7 @@ impl GpuClothSelfCollision {
         let device = ctx.device();
         let module = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("prism_cloth_self_collision"),
-            source: ShaderSource::Wgsl(
-                include_str!("../shaders/cloth_self_collision.wgsl").into(),
-            ),
+            source: ShaderSource::Wgsl(include_str!("../shaders/cloth_self_collision.wgsl").into()),
         });
         let read = BufferBindingType::Storage { read_only: true };
         let write = BufferBindingType::Storage { read_only: false };
@@ -256,9 +254,6 @@ impl GpuClothSelfCollision {
         ctx.queue().submit([encoder.finish()]);
 
         let packed = buffer::read_back::<[f32; 4]>(ctx, &out_stage);
-        packed
-            .iter()
-            .map(|q| Vec3::new(q[0], q[1], q[2]))
-            .collect()
+        packed.iter().map(|q| Vec3::new(q[0], q[1], q[2])).collect()
     }
 }

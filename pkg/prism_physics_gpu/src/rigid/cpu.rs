@@ -204,8 +204,7 @@ fn integrate_impl(
                 if use_implicit {
                     // Implicit (backward-Euler) gyroscopic coupling: solve for
                     // the end-of-substep body-frame angular velocity.
-                    omega_body =
-                        implicit_gyroscopic_body(omega_body, inertia, h, gyro_iterations);
+                    omega_body = implicit_gyroscopic_body(omega_body, inertia, h, gyro_iterations);
                 } else {
                     // Explicit gyroscopic coupling: subtract omega x (I * omega),
                     // expressed as an angular acceleration via the inverse inertia.

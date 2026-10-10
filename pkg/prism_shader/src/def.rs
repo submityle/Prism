@@ -69,7 +69,11 @@ impl ShaderDefs {
     }
 
     /// Inserts or overwrites a def, returning the previous value if any.
-    pub fn insert(&mut self, name: impl Into<String>, value: ShaderDefValue) -> Option<ShaderDefValue> {
+    pub fn insert(
+        &mut self,
+        name: impl Into<String>,
+        value: ShaderDefValue,
+    ) -> Option<ShaderDefValue> {
         self.entries.insert(name.into(), value)
     }
 
@@ -109,6 +113,8 @@ impl ShaderDefs {
 
     /// Iterates defs in canonical name-sorted order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, ShaderDefValue)> {
-        self.entries.iter().map(|(name, value)| (name.as_str(), *value))
+        self.entries
+            .iter()
+            .map(|(name, value)| (name.as_str(), *value))
     }
 }

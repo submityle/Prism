@@ -171,7 +171,7 @@ fn tilted_triangle_face_agrees_slot_for_slot() {
     let hit = centroid + normal * 0.3;
     let miss = centroid + normal * 6.0;
     let boxes = [
-        axis_box(hit, Vec3::splat(0.5)),  // interior-face overlap on the tilted triangle
+        axis_box(hit, Vec3::splat(0.5)), // interior-face overlap on the tilted triangle
         axis_box(miss, Vec3::splat(0.5)), // clear gap along the normal
     ];
     let triangles = [tri];

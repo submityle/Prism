@@ -35,7 +35,11 @@ impl Obb {
     /// Returns the point on or inside the box closest to `point`.
     pub fn closest_point(&self, point: Vec3) -> Vec3 {
         let axes = self.axes();
-        let e = [self.half_extents.x, self.half_extents.y, self.half_extents.z];
+        let e = [
+            self.half_extents.x,
+            self.half_extents.y,
+            self.half_extents.z,
+        ];
         let d = point - self.center;
         let mut result = self.center;
         for i in 0..3 {
@@ -48,7 +52,11 @@ impl Obb {
     /// Returns `true` when `point` lies on or inside the box.
     pub fn contains_point(&self, point: Vec3) -> bool {
         let axes = self.axes();
-        let e = [self.half_extents.x, self.half_extents.y, self.half_extents.z];
+        let e = [
+            self.half_extents.x,
+            self.half_extents.y,
+            self.half_extents.z,
+        ];
         let d = point - self.center;
         for i in 0..3 {
             if d.dot(axes[i]).abs() > e[i] {
@@ -76,7 +84,11 @@ impl Obb {
             return None;
         }
         let axes = self.axes();
-        let eh = [self.half_extents.x, self.half_extents.y, self.half_extents.z];
+        let eh = [
+            self.half_extents.x,
+            self.half_extents.y,
+            self.half_extents.z,
+        ];
         let d = center - self.center;
         let l = [d.dot(axes[0]), d.dot(axes[1]), d.dot(axes[2])];
 
@@ -165,8 +177,16 @@ impl Obb {
 
         let a = self.axes();
         let b = other.axes();
-        let ea = [self.half_extents.x, self.half_extents.y, self.half_extents.z];
-        let eb = [other.half_extents.x, other.half_extents.y, other.half_extents.z];
+        let ea = [
+            self.half_extents.x,
+            self.half_extents.y,
+            self.half_extents.z,
+        ];
+        let eb = [
+            other.half_extents.x,
+            other.half_extents.y,
+            other.half_extents.z,
+        ];
 
         // r[i][j] projects b's j-th axis onto a's i-th axis.
         let mut r = [[0.0f32; 3]; 3];
@@ -309,12 +329,8 @@ impl Obb {
                 continue;
             }
             let n = axis * len2.sqrt().recip();
-            let ra = ea.x * a[0].dot(n).abs()
-                + ea.y * a[1].dot(n).abs()
-                + ea.z * a[2].dot(n).abs();
-            let rb = eb.x * b[0].dot(n).abs()
-                + eb.y * b[1].dot(n).abs()
-                + eb.z * b[2].dot(n).abs();
+            let ra = ea.x * a[0].dot(n).abs() + ea.y * a[1].dot(n).abs() + ea.z * a[2].dot(n).abs();
+            let rb = eb.x * b[0].dot(n).abs() + eb.y * b[1].dot(n).abs() + eb.z * b[2].dot(n).abs();
             let dist = d.dot(n);
             let overlap = ra + rb - dist.abs();
             if overlap <= 0.0 {
@@ -378,7 +394,11 @@ mod tests {
 
     #[test]
     fn world_aabb_of_rotated_box() {
-        let b = Obb::new(Vec3::ZERO, Vec3::new(0.5, 0.5, 0.5), Quat::from_rotation_z(FRAC_PI_4));
+        let b = Obb::new(
+            Vec3::ZERO,
+            Vec3::new(0.5, 0.5, 0.5),
+            Quat::from_rotation_z(FRAC_PI_4),
+        );
         let aabb = b.aabb();
         let half = 0.5 * core::f32::consts::SQRT_2;
         assert_relative_eq!(aabb.max.x, half, epsilon = 1e-6);
@@ -427,10 +447,16 @@ mod tests {
         assert!(depth > 0.0, "depth = {depth}");
         assert_relative_eq!(normal.length(), 1.0, epsilon = 1e-5);
         // Resolving along the MTV must remove the overlap.
-        let moved = Obb::new(spun.center + normal * depth, spun.half_extents, spun.orientation);
-        assert!(!a.intersects_obb(&moved) || a.penetration(&moved).map(|(_, d)| d).unwrap_or(0.0) < 1e-4);
+        let moved = Obb::new(
+            spun.center + normal * depth,
+            spun.half_extents,
+            spun.orientation,
+        );
+        assert!(
+            !a.intersects_obb(&moved)
+                || a.penetration(&moved).map(|(_, d)| d).unwrap_or(0.0) < 1e-4
+        );
     }
-
 
     #[test]
     fn sphere_contact_outside_touching_face() {

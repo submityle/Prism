@@ -41,7 +41,11 @@ impl StateGroup {
     /// Builds a group from its members and default state.
     #[must_use]
     pub fn new(id: StateGroupId, states: Vec<StateId>, default_state: StateId) -> Self {
-        Self { id, states, default_state }
+        Self {
+            id,
+            states,
+            default_state,
+        }
     }
 
     /// Returns `true` if `state` is a declared member of this group.
@@ -67,7 +71,10 @@ impl StateManager {
     /// Creates an empty manager with no registered groups.
     #[must_use]
     pub fn new() -> Self {
-        Self { groups: BTreeMap::new(), active: BTreeMap::new() }
+        Self {
+            groups: BTreeMap::new(),
+            active: BTreeMap::new(),
+        }
     }
 
     /// Registers (or replaces) a group, seeding its active state to the
@@ -183,7 +190,10 @@ mod tests {
     fn group_lookup_returns_definition() {
         let mut mgr = StateManager::new();
         mgr.register(group());
-        assert_eq!(mgr.group(StateGroupId::new(1)).map(|g| g.id), Some(StateGroupId::new(1)));
+        assert_eq!(
+            mgr.group(StateGroupId::new(1)).map(|g| g.id),
+            Some(StateGroupId::new(1))
+        );
         assert!(mgr.group(StateGroupId::new(2)).is_none());
     }
 }

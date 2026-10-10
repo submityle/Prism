@@ -116,7 +116,11 @@ pub fn uniform_cone_pdf(cos_theta_max: f32) -> f32 {
         return 0.0;
     }
     let pdf = 1.0 / (TAU * one_minus);
-    if pdf.is_finite() { pdf.max(0.0) } else { 0.0 }
+    if pdf.is_finite() {
+        pdf.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Builds a unit direction at polar angle `θ` (given by `cos_theta`) and
@@ -173,8 +177,12 @@ pub fn sample_sphere(origin: Vec3, center: Vec3, radius: f32, u: f32, v: f32) ->
         let cos_theta = 1.0 - 2.0 * u;
         let sin_theta = (1.0 - cos_theta * cos_theta).max(0.0).sqrt();
         let phi = TAU * v;
-        let wi = Vec3::new(sin_theta * ops::cos(phi), sin_theta * ops::sin(phi), cos_theta)
-            .normalize_or_zero();
+        let wi = Vec3::new(
+            sin_theta * ops::cos(phi),
+            sin_theta * ops::sin(phi),
+            cos_theta,
+        )
+        .normalize_or_zero();
         if wi == Vec3::ZERO {
             return LightSample::NONE;
         }
@@ -238,7 +246,11 @@ pub fn area_to_solid_angle_pdf(area_pdf: f32, distance: f32, cos_light: f32) -> 
         return 0.0;
     }
     let pdf = area_pdf * distance * distance / cos_light;
-    if pdf.is_finite() { pdf.max(0.0) } else { 0.0 }
+    if pdf.is_finite() {
+        pdf.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Converts a **solid-angle** pdf at the shading point back to an **area** pdf
@@ -256,7 +268,11 @@ pub fn solid_angle_to_area_pdf(solid_angle_pdf: f32, distance: f32, cos_light: f
         return 0.0;
     }
     let pdf = solid_angle_pdf * cos_light / (distance * distance);
-    if pdf.is_finite() { pdf.max(0.0) } else { 0.0 }
+    if pdf.is_finite() {
+        pdf.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Samples a planar rectangular area light defined by a `corner` and two edge
@@ -470,10 +486,7 @@ mod tests {
     /// Deterministic stratified midpoint sample for cell `(i, j)` of an `n × n`
     /// grid of the unit square — avoids any RNG while converging like QMC.
     fn strat(i: u32, j: u32, n: u32) -> (f32, f32) {
-        (
-            (i as f32 + 0.5) / n as f32,
-            (j as f32 + 0.5) / n as f32,
-        )
+        ((i as f32 + 0.5) / n as f32, (j as f32 + 0.5) / n as f32)
     }
 
     #[test]
@@ -507,7 +520,11 @@ mod tests {
         let cos_theta_max = (1.0 - (radius * radius) / (d * d)).max(0.0).sqrt();
         let expected = 1.0 / (TAU * (1.0 - cos_theta_max));
         let s = sample_sphere(origin, center, radius, 0.3, 0.7);
-        assert!((s.pdf - expected).abs() / expected < 1.0e-4, "pdf={}", s.pdf);
+        assert!(
+            (s.pdf - expected).abs() / expected < 1.0e-4,
+            "pdf={}",
+            s.pdf
+        );
     }
 
     #[test]
@@ -586,8 +603,7 @@ mod tests {
             }
         }
         let mc = acc / (n as f64 * n as f64) * area as f64;
-        let analytic =
-            4.0 * ops::atan(a * a / (d * (2.0 * a * a + d * d).sqrt())) as f32;
+        let analytic = 4.0 * ops::atan(a * a / (d * (2.0 * a * a + d * d).sqrt())) as f32;
         let rel = ((mc - analytic as f64) / analytic as f64).abs();
         assert!(rel < 0.03, "mc={mc} analytic={analytic} rel={rel}");
     }
@@ -649,20 +665,10 @@ mod tests {
         let on_axis = spot_attenuation(Vec3::NEG_Z, axis, cos_inner, cos_outer);
         assert!((on_axis - 1.0).abs() < 1.0e-5, "on_axis={on_axis}");
         // Far outside the cone → zero.
-        let outside = spot_attenuation(
-            Vec3::new(1.0, 0.0, 0.0),
-            axis,
-            cos_inner,
-            cos_outer,
-        );
+        let outside = spot_attenuation(Vec3::new(1.0, 0.0, 0.0), axis, cos_inner, cos_outer);
         assert_eq!(outside, 0.0);
         // Everything stays in [0, 1].
-        let mid = spot_attenuation(
-            Vec3::new(0.0, -0.3, -1.0),
-            axis,
-            cos_inner,
-            cos_outer,
-        );
+        let mid = spot_attenuation(Vec3::new(0.0, -0.3, -1.0), axis, cos_inner, cos_outer);
         assert!((0.0..=1.0).contains(&mid));
     }
 
@@ -689,7 +695,14 @@ mod tests {
                 1.0,
                 1.0,
             ),
-            sample_disk(Vec3::ZERO, Vec3::new(0.0, 0.0, 5.0), Vec3::NEG_Z, 1.0, 0.0, 0.0),
+            sample_disk(
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.0, 5.0),
+                Vec3::NEG_Z,
+                1.0,
+                0.0,
+                0.0,
+            ),
         ];
         for s in samples {
             assert!(s.wi.is_finite());

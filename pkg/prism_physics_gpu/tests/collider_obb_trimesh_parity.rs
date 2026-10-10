@@ -57,8 +57,8 @@ fn check(mesh: &Trimesh, boxes: &[Obb], capacity: u32) {
         return;
     };
     let lbvh = cpu_build_lbvh(&mesh.triangle_aabbs());
-    let cpu =
-        cpu_obb_trimesh_collide(mesh, &lbvh, boxes, capacity).expect("cpu golden must not overflow");
+    let cpu = cpu_obb_trimesh_collide(mesh, &lbvh, boxes, capacity)
+        .expect("cpu golden must not overflow");
     let collider = GpuObbTrimeshCollider::new(&ctx);
     let gpu = collider
         .collide(&ctx, mesh, &lbvh, boxes, capacity)

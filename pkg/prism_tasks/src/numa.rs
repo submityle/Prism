@@ -228,7 +228,10 @@ mod tests {
         assert!(topo.core_count() >= 1);
         // Single node => never "numa_enabled" regardless of the cargo feature.
         assert!(!topo.numa_enabled());
-        assert!(topo.cores().iter().all(|c| c.class == CoreClass::Performance));
+        assert!(topo
+            .cores()
+            .iter()
+            .all(|c| c.class == CoreClass::Performance));
     }
 
     #[test]

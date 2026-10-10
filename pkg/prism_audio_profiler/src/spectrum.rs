@@ -59,11 +59,7 @@ impl SpectrumSnapshot {
     /// snapshot when the analyzer has produced no bins or the sample rate is
     /// zero.
     #[must_use]
-    pub fn from_analyzer(
-        analyzer: &SpectrumAnalyzer,
-        sample_rate: u32,
-        scale: BandScale,
-    ) -> Self {
+    pub fn from_analyzer(analyzer: &SpectrumAnalyzer, sample_rate: u32, scale: BandScale) -> Self {
         let magnitudes = analyzer.magnitudes();
         if magnitudes.is_empty() || sample_rate == 0 {
             return Self {
@@ -87,12 +83,8 @@ impl SpectrumSnapshot {
                     energy,
                 }
             }
-            BandScale::Octave => {
-                Self::fractional_octave(analyzer, sample_rate, scale, 1)
-            }
-            BandScale::ThirdOctave => {
-                Self::fractional_octave(analyzer, sample_rate, scale, 3)
-            }
+            BandScale::Octave => Self::fractional_octave(analyzer, sample_rate, scale, 1),
+            BandScale::ThirdOctave => Self::fractional_octave(analyzer, sample_rate, scale, 3),
         }
     }
 

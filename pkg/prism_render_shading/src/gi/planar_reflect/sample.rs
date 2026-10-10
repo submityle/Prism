@@ -176,8 +176,16 @@ pub fn edge_fade(uv: Vec2, fade_width: f32) -> f32 {
         0.0
     };
     // A non-finite coordinate is treated as sitting on the border (fully faded).
-    let u = if uv.x.is_finite() { uv.x.clamp(0.0, 1.0) } else { 0.0 };
-    let v = if uv.y.is_finite() { uv.y.clamp(0.0, 1.0) } else { 0.0 };
+    let u = if uv.x.is_finite() {
+        uv.x.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let v = if uv.y.is_finite() {
+        uv.y.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     if w <= f32::EPSILON {
         // Degenerate band: full weight strictly inside, zero on the border.
         let inside = u > 0.0 && u < 1.0 && v > 0.0 && v < 1.0;
@@ -258,7 +266,10 @@ mod tests {
         // A point straight ahead on the view axis (view looks down -Z).
         let (uv, on_screen) = project_to_uv(&proj, Vec3::new(0.0, 0.0, -5.0));
         assert!(on_screen);
-        assert!((uv - Vec2::splat(0.5)).length() < 1e-5, "centre uv = {uv:?}");
+        assert!(
+            (uv - Vec2::splat(0.5)).length() < 1e-5,
+            "centre uv = {uv:?}"
+        );
     }
 
     #[test]
@@ -300,7 +311,10 @@ mod tests {
         let w = 0.1;
         let edge = edge_fade(Vec2::new(0.05, 0.5), w);
         let corner = edge_fade(Vec2::new(0.05, 0.05), w);
-        assert!(corner < edge, "corner {corner} should fade below edge {edge}");
+        assert!(
+            corner < edge,
+            "corner {corner} should fade below edge {edge}"
+        );
     }
 
     #[test]
@@ -335,7 +349,13 @@ mod tests {
     #[test]
     fn sample_reflection_rejects_behind_camera() {
         let proj = perspective();
-        let s = sample_reflection(&proj, Vec3::new(0.0, 0.0, 10.0), 3.0, 0.2, &ReflectionParams::DEFAULT);
+        let s = sample_reflection(
+            &proj,
+            Vec3::new(0.0, 0.0, 10.0),
+            3.0,
+            0.2,
+            &ReflectionParams::DEFAULT,
+        );
         assert!(!s.on_screen);
         assert_eq!(s.weight, 0.0);
     }
@@ -343,7 +363,13 @@ mod tests {
     #[test]
     fn sample_reflection_centre_is_fully_weighted() {
         let proj = perspective();
-        let s = sample_reflection(&proj, Vec3::new(0.0, 0.0, -5.0), 0.0, 0.0, &ReflectionParams::DEFAULT);
+        let s = sample_reflection(
+            &proj,
+            Vec3::new(0.0, 0.0, -5.0),
+            0.0,
+            0.0,
+            &ReflectionParams::DEFAULT,
+        );
         assert!(s.on_screen);
         assert!((s.weight - 1.0).abs() < 1e-5);
         assert!(s.lod.abs() < 1e-6);

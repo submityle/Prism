@@ -315,5 +315,6 @@ mod tests {
                 assert_eq!(rows[0].len(), BedLayout::Surround5_1_4.channel_count());
             }
             _ => panic!("expected bed payload"),
-        }    }
+        }
+    }
 }

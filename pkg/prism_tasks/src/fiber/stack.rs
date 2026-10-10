@@ -37,8 +37,8 @@
 //! hoarded.
 
 use std::alloc::{self, Layout};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use crate::numa::NumaNodeId;
 
@@ -85,7 +85,10 @@ pub(crate) struct Stack {
 // aliased. Moving that ownership between threads (worker A acquires, the fiber
 // migrates, worker B releases) is sound because only one thread holds the
 // `Stack` at a time under the scheduler's single-owner protocol.
-#[expect(unsafe_code, reason = "Stack uniquely owns its heap region; move is sound")]
+#[expect(
+    unsafe_code,
+    reason = "Stack uniquely owns its heap region; move is sound"
+)]
 unsafe impl Send for Stack {}
 
 impl Stack {
@@ -95,8 +98,8 @@ impl Stack {
             StackClass::Small => SMALL_STACK_SIZE,
             StackClass::Large => LARGE_STACK_SIZE,
         };
-        let layout = Layout::from_size_align(size, STACK_ALIGN)
-            .expect("invalid fiber stack layout");
+        let layout =
+            Layout::from_size_align(size, STACK_ALIGN).expect("invalid fiber stack layout");
         // SAFETY: `layout` has a non-zero size and a valid power-of-two
         // alignment, so this call satisfies `alloc`'s contract.
         #[expect(unsafe_code, reason = "raw stack allocation for a fiber")]
@@ -124,13 +127,19 @@ impl Stack {
     }
 
     /// This stack's size class.
-    #[cfg_attr(not(test), expect(dead_code, reason = "diagnostic accessor, used in tests"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "diagnostic accessor, used in tests")
+    )]
     pub(crate) fn class(&self) -> StackClass {
         self.class
     }
 
     /// The NUMA node this stack is associated with.
-    #[cfg_attr(not(test), expect(dead_code, reason = "diagnostic accessor, used in tests"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "diagnostic accessor, used in tests")
+    )]
     pub(crate) fn node(&self) -> NumaNodeId {
         self.node
     }
@@ -239,13 +248,19 @@ impl StackPool {
     }
 
     /// Current number of live (acquired, not yet released) stacks of `class`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "diagnostic accessor, used in tests"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "diagnostic accessor, used in tests")
+    )]
     pub(crate) fn live(&self, class: StackClass) -> usize {
         self.class_pool(class).live.load(Ordering::Acquire)
     }
 
     /// Number of idle stacks currently retained on `class`'s free list.
-    #[cfg_attr(not(test), expect(dead_code, reason = "diagnostic accessor, used in tests"))]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "diagnostic accessor, used in tests")
+    )]
     pub(crate) fn free_len(&self, class: StackClass) -> usize {
         self.class_pool(class).free.lock().unwrap().len()
     }

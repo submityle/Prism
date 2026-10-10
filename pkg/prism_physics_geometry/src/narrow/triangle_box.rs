@@ -345,5 +345,4 @@ mod tests {
         assert!(depth > 0.0);
         assert!((normal.length() - 1.0).abs() < 1e-5, "unit normal");
     }
-
 }

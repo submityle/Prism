@@ -23,9 +23,7 @@ pub use bake::{
 };
 pub use encode::{pack_unorm11, packed_len, unpack_unorm11, BITS_PER_CODE};
 pub use heightmap::{DisplacementMap, TextureDisplacementMap, WrapMode};
-pub use quantize::{
-    dequantize_unorm11, quantize_unorm11, DisplacementScaleBias, UNORM11_MAX,
-};
+pub use quantize::{dequantize_unorm11, quantize_unorm11, DisplacementScaleBias, UNORM11_MAX};
 pub use subdivision::{
     barycentric_f32, micro_vertex_at, micro_vertices, DmmSubdivisionLevel, MAX_SUBDIVISION_LEVEL,
 };

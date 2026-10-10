@@ -65,7 +65,9 @@ use prism_audio_spatial::propagation::{
 use prism_audio_spatial::BandGains;
 
 use crate::config::{DiffractionModel, GeometricConfig};
-use crate::diffraction_edges::{diffracting_edges, distance, least_detour_point, utd_wedge, EdgeData};
+use crate::diffraction_edges::{
+    diffracting_edges, distance, least_detour_point, utd_wedge, EdgeData,
+};
 use crate::reflection_path::point_in_triangle;
 use crate::scene::AcousticScene;
 
@@ -199,9 +201,13 @@ impl CoupledSolver<'_> {
         let point = Self::plane_crossing(face, image, corner)?;
 
         // All three physical legs must be clear.
-        if self.scene.segment_blocked(self.emitter.position, point, self.eps)
+        if self
+            .scene
+            .segment_blocked(self.emitter.position, point, self.eps)
             || self.scene.segment_blocked(point, corner, self.eps)
-            || self.scene.segment_blocked(corner, self.listener.position, self.eps)
+            || self
+                .scene
+                .segment_blocked(corner, self.listener.position, self.eps)
         {
             return None;
         }
@@ -241,9 +247,13 @@ impl CoupledSolver<'_> {
         let corner = least_detour_point(edge.start, edge.end, image, self.emitter.position);
         let point = Self::plane_crossing(face, corner, image)?;
 
-        if self.scene.segment_blocked(self.emitter.position, corner, self.eps)
+        if self
+            .scene
+            .segment_blocked(self.emitter.position, corner, self.eps)
             || self.scene.segment_blocked(corner, point, self.eps)
-            || self.scene.segment_blocked(point, self.listener.position, self.eps)
+            || self
+                .scene
+                .segment_blocked(point, self.listener.position, self.eps)
         {
             return None;
         }

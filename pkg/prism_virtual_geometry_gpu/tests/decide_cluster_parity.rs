@@ -162,7 +162,11 @@ fn assert_parity(gpu: &GpuContext, ctx: &ViewCullContext, inputs: &[ClusterDecis
 
 /// An empty chain must still produce verdict/raster/priority, but `lod == None`
 /// exactly as the golden's `select_lod` returns on an empty chain.
-fn assert_parity_empty_chain(gpu: &GpuContext, ctx: &ViewCullContext, input: &ClusterDecisionInput) {
+fn assert_parity_empty_chain(
+    gpu: &GpuContext,
+    ctx: &ViewCullContext,
+    input: &ClusterDecisionInput,
+) {
     let decider = GpuClusterDecider::new(gpu);
     let got = decider.decide(gpu, ctx, &[], std::slice::from_ref(input));
     assert_eq!(got.len(), 1, "one decision for the single cluster");

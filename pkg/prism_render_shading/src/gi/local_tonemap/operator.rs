@@ -49,7 +49,11 @@ pub const OPERATOR_EPSILON: f32 = 1.0e-6;
 #[must_use]
 pub fn reinhard_local(l: f32, local_adaptation: f32, key: f32) -> f32 {
     let l = l.max(0.0);
-    let key = if key.is_finite() { key.max(OPERATOR_EPSILON) } else { 1.0 };
+    let key = if key.is_finite() {
+        key.max(OPERATOR_EPSILON)
+    } else {
+        1.0
+    };
     let adapt = if local_adaptation.is_finite() {
         local_adaptation.max(OPERATOR_EPSILON)
     } else {
@@ -57,7 +61,11 @@ pub fn reinhard_local(l: f32, local_adaptation: f32, key: f32) -> f32 {
     };
     let scaled = key * l / adapt;
     let out = scaled / (1.0 + scaled);
-    if out.is_finite() { out.clamp(0.0, 1.0) } else { 0.0 }
+    if out.is_finite() {
+        out.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Reinhard-local with a white point, so a luminance equal to `white` (after the
@@ -72,7 +80,11 @@ pub fn reinhard_local_white(l: f32, local_adaptation: f32, key: f32, white: f32)
         return reinhard_local(l, local_adaptation, key);
     }
     let l = l.max(0.0);
-    let key = if key.is_finite() { key.max(OPERATOR_EPSILON) } else { 1.0 };
+    let key = if key.is_finite() {
+        key.max(OPERATOR_EPSILON)
+    } else {
+        1.0
+    };
     let adapt = if local_adaptation.is_finite() {
         local_adaptation.max(OPERATOR_EPSILON)
     } else {
@@ -81,7 +93,11 @@ pub fn reinhard_local_white(l: f32, local_adaptation: f32, key: f32, white: f32)
     let s = key * l / adapt;
     let white_sq = white * white;
     let out = s * (1.0 + s / white_sq) / (1.0 + s);
-    if out.is_finite() { out.clamp(0.0, 1.0) } else { 0.0 }
+    if out.is_finite() {
+        out.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Mertens *well-exposedness* weight for a single channel value in `[0, 1]`.
@@ -91,10 +107,18 @@ pub fn reinhard_local_white(l: f32, local_adaptation: f32, key: f32, white: f32)
 /// small positive value.
 #[must_use]
 pub fn well_exposedness(value: f32, sigma: f32) -> f32 {
-    let s = if sigma.is_finite() { sigma.max(OPERATOR_EPSILON) } else { 0.2 };
+    let s = if sigma.is_finite() {
+        sigma.max(OPERATOR_EPSILON)
+    } else {
+        0.2
+    };
     let d = value.clamp(0.0, 1.0) - 0.5;
     let e = -(d * d) / (2.0 * s * s);
-    if e.is_finite() { ops::exp(e) } else { 0.0 }
+    if e.is_finite() {
+        ops::exp(e)
+    } else {
+        0.0
+    }
 }
 
 /// Mertens well-exposedness over an RGB triple: the product of the per-channel
@@ -118,7 +142,11 @@ pub fn saturation_weight(rgb: [f32; 3]) -> f32 {
     let mean = (r + g + b) / 3.0;
     let var = ((r - mean) * (r - mean) + (g - mean) * (g - mean) + (b - mean) * (b - mean)) / 3.0;
     let s = var.max(0.0).sqrt();
-    if s.is_finite() { s } else { 0.0 }
+    if s.is_finite() {
+        s
+    } else {
+        0.0
+    }
 }
 
 /// Mertens *contrast* weight from a 3-tap Laplacian response.
@@ -142,7 +170,11 @@ pub fn contrast_weight(center: f32, neighbors: &[f32]) -> f32 {
     }
     // Discrete Laplacian magnitude: |n*c - sum(neighbors)| == |sum(c - ni)|.
     let lap = (acc / n.max(1.0)).abs();
-    if lap.is_finite() { lap } else { 0.0 }
+    if lap.is_finite() {
+        lap
+    } else {
+        0.0
+    }
 }
 
 /// Combined Mertens fusion weight: `contrast^wc * saturation^ws * exposure^we`.
@@ -151,22 +183,31 @@ pub fn contrast_weight(center: f32, neighbors: &[f32]) -> f32 {
 /// each). All exponents are clamped to `[0, 8]`; the result is non-negative and
 /// finite.
 #[must_use]
-pub fn fusion_weight(
-    contrast: f32,
-    saturation: f32,
-    exposure: f32,
-    exponents: [f32; 3],
-) -> f32 {
+pub fn fusion_weight(contrast: f32, saturation: f32, exposure: f32, exponents: [f32; 3]) -> f32 {
     let term = |base: f32, exp: f32| -> f32 {
         let b = base.max(0.0);
-        let e = if exp.is_finite() { exp.clamp(0.0, 8.0) } else { 1.0 };
+        let e = if exp.is_finite() {
+            exp.clamp(0.0, 8.0)
+        } else {
+            1.0
+        };
         // Add a tiny epsilon so a zero measure does not annihilate the product
         // unless its exponent genuinely demands it.
         let v = ops::powf(b + OPERATOR_EPSILON, e);
-        if v.is_finite() { v } else { 0.0 }
+        if v.is_finite() {
+            v
+        } else {
+            0.0
+        }
     };
-    let w = term(contrast, exponents[0]) * term(saturation, exponents[1]) * term(exposure, exponents[2]);
-    if w.is_finite() { w.max(0.0) } else { 0.0 }
+    let w = term(contrast, exponents[0])
+        * term(saturation, exponents[1])
+        * term(exposure, exponents[2]);
+    if w.is_finite() {
+        w.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Compress a base/detail pair into a display-referred luminance in `[0, 1]`.
@@ -210,7 +251,11 @@ pub fn compress_base_detail(
 /// Replace non-finite values with zero.
 #[inline]
 fn sanitize(v: f32) -> f32 {
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -290,9 +335,8 @@ mod tests {
         let rgb = [0.5, 0.5, 0.5];
         approx(well_exposedness_rgb(rgb, 0.2), 1.0);
         let off = [0.0, 0.5, 1.0];
-        let expected = well_exposedness(0.0, 0.2)
-            * well_exposedness(0.5, 0.2)
-            * well_exposedness(1.0, 0.2);
+        let expected =
+            well_exposedness(0.0, 0.2) * well_exposedness(0.5, 0.2) * well_exposedness(1.0, 0.2);
         approx(well_exposedness_rgb(off, 0.2), expected);
     }
 

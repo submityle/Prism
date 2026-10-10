@@ -182,12 +182,10 @@ impl<T> Rcu<T> {
             // reclaimed, so reading it to build the next value is valid.
             let next = f(unsafe { &*current });
             let new = Box::into_raw(Box::new(next));
-            match self.ptr.compare_exchange(
-                current,
-                new,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match self
+                .ptr
+                .compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => {
                     // We unlinked `current`; retire it through the same pin.
                     self.defer_free(&guard, current);

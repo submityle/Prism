@@ -34,8 +34,8 @@ use crate::buffer;
 use crate::context::GpuContext;
 
 use super::coloring::{colour_bending, BendingColoring};
-use crate::cloth::layout::{buffer_entry, entry};
 use super::ClothBendingConstraint;
+use crate::cloth::layout::{buffer_entry, entry};
 
 /// Scalar type shared with [`prism_physics_core`] (`f32`).
 type Real = f32;

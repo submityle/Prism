@@ -274,7 +274,11 @@ mod tests {
     fn tangents_are_orthogonal_to_normals() {
         let mesh = xy_quad();
         let normals = mesh.normals().to_vec();
-        for (t, n) in compute_tangents(&mesh).expect("tangents").iter().zip(normals) {
+        for (t, n) in compute_tangents(&mesh)
+            .expect("tangents")
+            .iter()
+            .zip(normals)
+        {
             let d = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
             assert!(d.abs() < 1e-5, "tangent not orthogonal to normal: {d}");
         }
@@ -284,7 +288,11 @@ mod tests {
     fn handedness_is_unit_signed() {
         let mesh = xy_quad();
         for t in compute_tangents(&mesh).expect("tangents") {
-            assert!(t[3] == 1.0 || t[3] == -1.0, "handedness must be ±1: {}", t[3]);
+            assert!(
+                t[3] == 1.0 || t[3] == -1.0,
+                "handedness must be ±1: {}",
+                t[3]
+            );
         }
     }
 
@@ -329,7 +337,10 @@ mod tests {
             let len = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt();
             assert!((len - 1.0).abs() < 1e-5, "fallback tangent must be unit");
             let d = t[0] * 0.0 + t[1] * 0.0 + t[2] * 1.0;
-            assert!(d.abs() < 1e-5, "fallback tangent must be orthogonal to normal");
+            assert!(
+                d.abs() < 1e-5,
+                "fallback tangent must be orthogonal to normal"
+            );
         }
     }
 

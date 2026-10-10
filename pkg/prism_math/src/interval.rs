@@ -168,7 +168,11 @@ impl Interval {
     pub fn intersect(self, other: Self) -> Option<Self> {
         let lo = self.lo.max(other.lo);
         let hi = self.hi.min(other.hi);
-        if lo <= hi { Some(Self { lo, hi }) } else { None }
+        if lo <= hi {
+            Some(Self { lo, hi })
+        } else {
+            None
+        }
     }
 
     /// Conservative absolute value: the enclosure of `|x|` for all `x` in

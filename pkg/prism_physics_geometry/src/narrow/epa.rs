@@ -271,11 +271,7 @@ fn make_face(verts: &[SupportVertex], i: usize, j: usize, k: usize) -> Option<Fa
 
 /// Expands the initial tetrahedron toward the origin and reads off the closest
 /// boundary face as the minimum-translation contact.
-fn epa<A: SupportMap, B: SupportMap>(
-    a: &A,
-    b: &B,
-    simplex: [SupportVertex; 4],
-) -> Option<Contact> {
+fn epa<A: SupportMap, B: SupportMap>(a: &A, b: &B, simplex: [SupportVertex; 4]) -> Option<Contact> {
     let mut verts: Vec<SupportVertex> = simplex.to_vec();
     let mut faces: Vec<Face> = Vec::with_capacity(8);
     for &(i, j, k) in &[(0usize, 1usize, 2usize), (0, 1, 3), (0, 2, 3), (1, 2, 3)] {
@@ -464,7 +460,10 @@ mod tests {
         // Translate `a` by -normal*depth and confirm the shapes separate: the
         // moved A face (originally x = 1) lands on B's near face at x = 0.5.
         let moved_face_x = 1.0 + (-contact.normal * contact.depth).x;
-        assert!((moved_face_x - 0.5).abs() < 1.0e-2, "moved = {moved_face_x}");
+        assert!(
+            (moved_face_x - 0.5).abs() < 1.0e-2,
+            "moved = {moved_face_x}"
+        );
     }
 
     #[test]
@@ -473,8 +472,16 @@ mod tests {
         // Shifted +x by 1.5 so the two unit boxes overlap by 0.5 along x.
         let b = Aabb::new(Vec3::new(0.5, -1.0, -1.0), Vec3::new(2.5, 1.0, 1.0));
         let contact = gjk_contact(&a, &b).expect("boxes overlap");
-        assert!((contact.depth - 0.5).abs() < 1.0e-2, "depth = {}", contact.depth);
-        assert!(contact.normal.dot(Vec3::X).abs() > 0.99, "normal = {:?}", contact.normal);
+        assert!(
+            (contact.depth - 0.5).abs() < 1.0e-2,
+            "depth = {}",
+            contact.depth
+        );
+        assert!(
+            contact.normal.dot(Vec3::X).abs() > 0.99,
+            "normal = {:?}",
+            contact.normal
+        );
     }
 
     #[test]
@@ -488,7 +495,10 @@ mod tests {
         let contact = gjk_contact(&a, &b).expect("rotated boxes overlap");
         assert!(contact.depth > 0.0, "depth = {}", contact.depth);
         assert!(contact.depth < 0.5, "depth = {}", contact.depth);
-        assert!(contact.normal.is_normalized(), "normal = {:?}", contact.normal);
+        assert!(
+            contact.normal.is_normalized(),
+            "normal = {:?}",
+            contact.normal
+        );
     }
 }
-

@@ -384,7 +384,10 @@ mod tests {
         let plane = SpecularPlane::new(Vec3::ZERO, Vec3::Y);
         let x = Vec3::new(-0.8, -1.0, 0.0); // under water
         let l = Vec3::new(1.2, 2.0, 0.0); // in air
-        let interaction = Interaction::Refract { n_a: 1.33, n_b: 1.0 };
+        let interaction = Interaction::Refract {
+            n_a: 1.33,
+            n_b: 1.0,
+        };
         let res = solve_manifold(&plane, x, l, interaction, NewtonConfig::default());
         assert!(res.converged, "did not converge: {res:?}");
         let p = res.point;
@@ -487,7 +490,10 @@ mod tests {
             &plane,
             Vec3::new(0.0, 1.0, 0.0),
             Vec3::new(0.0, 1.0, 1.0),
-            Interaction::Refract { n_a: 0.0, n_b: f32::NAN },
+            Interaction::Refract {
+                n_a: 0.0,
+                n_b: f32::NAN,
+            },
             cfg,
         );
         assert!(res.point.is_finite() && res.residual.is_finite());

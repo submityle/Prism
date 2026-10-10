@@ -26,9 +26,9 @@ pub use stream_source::FileByteSource;
 mod tests {
     use super::*;
     use crate::codec::ima_adpcm::ImaAdpcmEncoder;
+    use crate::codec::metadata::PcmSampleFormat;
     use crate::codec::ms_adpcm::{self, MsAdpcmDecoder};
     use crate::codec::pcm::PcmDecoder;
-    use crate::codec::metadata::PcmSampleFormat;
     use alloc::boxed::Box;
     use alloc::vec::Vec;
 
@@ -164,7 +164,10 @@ mod tests {
         assert_eq!(out, [30, 40, 50]);
         let all = source.read_to_vec().unwrap();
         assert_eq!(all, alloc::vec![10, 20, 30, 40, 50]);
-        assert_eq!(source.read_at(99, &mut out), Err(ByteSourceError::OutOfRange));
+        assert_eq!(
+            source.read_at(99, &mut out),
+            Err(ByteSourceError::OutOfRange)
+        );
     }
 
     #[test]

@@ -103,9 +103,7 @@ impl fmt::Debug for Patch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Patch::Unchanged => f.write_str("Unchanged"),
-            Patch::Replace(value) => {
-                f.debug_tuple("Replace").field(&value.type_name()).finish()
-            }
+            Patch::Replace(value) => f.debug_tuple("Replace").field(&value.type_name()).finish(),
             Patch::Struct(fields) => f.debug_tuple("Struct").field(fields).finish(),
             Patch::TupleStruct(fields) => f.debug_tuple("TupleStruct").field(fields).finish(),
             Patch::Enum(fields) => f.debug_tuple("Enum").field(fields).finish(),

@@ -192,8 +192,10 @@ impl<T> MpmcQueue<T> {
                         let value = unsafe { (*slot).assume_init_read() };
                         // Mark the cell empty for the producer one lap ahead
                         // (`pos + mask + 1 == pos + capacity`).
-                        cell.sequence
-                            .store(pos.wrapping_add(inner.mask).wrapping_add(1), Ordering::Release);
+                        cell.sequence.store(
+                            pos.wrapping_add(inner.mask).wrapping_add(1),
+                            Ordering::Release,
+                        );
                         return Some(value);
                     }
                     Err(actual) => pos = actual,

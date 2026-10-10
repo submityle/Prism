@@ -8,10 +8,10 @@
 use crate::reflect::{Reflect, Struct, Typed};
 use crate::type_info::{NamedField, StructInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef};
-use prism_math::{Mat4, Quat, Vec2, Vec3, Vec3A, Vec4};
 use alloc::boxed::Box;
-use std::sync::OnceLock;
 use alloc::vec;
+use prism_math::{Mat4, Quat, Vec2, Vec3, Vec3A, Vec4};
+use std::sync::OnceLock;
 
 macro_rules! impl_reflect_math_struct {
     ($ty:ty { $($field:ident : $fty:ty),+ $(,)? }) => {
@@ -104,10 +104,28 @@ macro_rules! impl_reflect_math_struct {
 }
 
 impl_reflect_math_struct!(Vec2 { x: f32, y: f32 });
-impl_reflect_math_struct!(Vec3 { x: f32, y: f32, z: f32 });
-impl_reflect_math_struct!(Vec3A { x: f32, y: f32, z: f32 });
-impl_reflect_math_struct!(Vec4 { x: f32, y: f32, z: f32, w: f32 });
-impl_reflect_math_struct!(Quat { x: f32, y: f32, z: f32, w: f32 });
+impl_reflect_math_struct!(Vec3 {
+    x: f32,
+    y: f32,
+    z: f32
+});
+impl_reflect_math_struct!(Vec3A {
+    x: f32,
+    y: f32,
+    z: f32
+});
+impl_reflect_math_struct!(Vec4 {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32
+});
+impl_reflect_math_struct!(Quat {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32
+});
 impl_reflect_math_struct!(Mat4 {
     x_axis: Vec4,
     y_axis: Vec4,

@@ -67,8 +67,8 @@
 //! Unreal Engine, Unity, Godot, Wwise, or FMOD source or derived code**; it is
 //! implemented purely from that publicly documented acoustics knowledge.
 
-use bevy_math::{Vec3, ops};
-use prism_audio_core::math::{Sample, db_to_linear};
+use bevy_math::{ops, Vec3};
+use prism_audio_core::math::{db_to_linear, Sample};
 
 use crate::band_spectrum::BandGains;
 use crate::doppler::SPEED_OF_SOUND_MPS;
@@ -451,7 +451,10 @@ pub fn maekawa_attenuation_db(fresnel_number: Sample) -> Sample {
 #[inline]
 #[must_use]
 pub fn diffraction_gain(path_difference_m: Sample, freq_hz: Sample) -> Sample {
-    db_to_linear(-maekawa_attenuation_db(fresnel_number(path_difference_m, freq_hz)))
+    db_to_linear(-maekawa_attenuation_db(fresnel_number(
+        path_difference_m,
+        freq_hz,
+    )))
 }
 
 /// The low-pass corner (Hz) equivalent to diffraction around an edge with
@@ -595,7 +598,11 @@ mod tests {
     #[test]
     fn maekawa_is_capped() {
         // A huge Fresnel number saturates at the ceiling.
-        assert!(approx(maekawa_attenuation_db(1.0e6), MAX_DIFFRACTION_DB, 1e-3));
+        assert!(approx(
+            maekawa_attenuation_db(1.0e6),
+            MAX_DIFFRACTION_DB,
+            1e-3
+        ));
     }
 
     #[test]
@@ -654,7 +661,11 @@ mod tests {
         assert!(m.transmission_gain() < 1.0);
         // Reflection is clamped into [0, 1].
         assert!(approx(m.reflection_gain(), 1.0, 1e-6));
-        assert!(approx(AcousticMaterial::OPEN.transmission_gain(), 1.0, 1e-6));
+        assert!(approx(
+            AcousticMaterial::OPEN.transmission_gain(),
+            1.0,
+            1e-6
+        ));
         assert!(approx(AcousticMaterial::OPEN.reflection_gain(), 0.0, 1e-6));
     }
 
@@ -702,8 +713,7 @@ mod tests {
     #[test]
     fn free_field_backend_handles_empty_buffer() {
         let mut paths: [PropagationPath; 0] = [];
-        let summary =
-            FreeFieldBackend.query(&Listener::default(), &Emitter::default(), &mut paths);
+        let summary = FreeFieldBackend.query(&Listener::default(), &Emitter::default(), &mut paths);
         assert_eq!(summary.path_count, 0);
     }
 

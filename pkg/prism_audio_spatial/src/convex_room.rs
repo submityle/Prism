@@ -91,11 +91,11 @@
 //! Resonance Audio source or derived code**; it is implemented from the public
 //! mathematical description.
 
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 
 use prism_audio_core::math::Sample;
 
-use crate::early_reflections::{MAX_EARLY_REFLECTIONS, ReflectionTap};
+use crate::early_reflections::{ReflectionTap, MAX_EARLY_REFLECTIONS};
 use crate::geometry::Listener;
 
 /// Maximum number of bounding planes a convex room may hold. Rooms built from
@@ -223,7 +223,10 @@ impl ConvexRoom {
         for (slot, plane) in stored.iter_mut().zip(planes.iter()) {
             *slot = *plane;
         }
-        Self { planes: stored, count }
+        Self {
+            planes: stored,
+            count,
+        }
     }
 
     /// Builds a convex room equivalent to an axis-aligned box from two corners
@@ -339,7 +342,11 @@ fn seconds_to_samples(seconds: Sample, sample_rate: Sample) -> usize {
 
 /// Inserts a tap into a bounded buffer, keeping the strongest by gain when the
 /// buffer is full.
-fn push_tap(taps: &mut [ReflectionTap; MAX_EARLY_REFLECTIONS], count: &mut usize, tap: ReflectionTap) {
+fn push_tap(
+    taps: &mut [ReflectionTap; MAX_EARLY_REFLECTIONS],
+    count: &mut usize,
+    tap: ReflectionTap,
+) {
     if *count < MAX_EARLY_REFLECTIONS {
         taps[*count] = tap;
         *count += 1;
@@ -600,19 +607,13 @@ mod tests {
         .find(|t| !t.is_direct)
         .unwrap()
         .gain;
-        let far_gain = compute_convex_reflections(
-            &far_room,
-            &Listener::default(),
-            source,
-            1,
-            48_000.0,
-            343.0,
-        )
-        .taps()
-        .iter()
-        .find(|t| !t.is_direct)
-        .unwrap()
-        .gain;
+        let far_gain =
+            compute_convex_reflections(&far_room, &Listener::default(), source, 1, 48_000.0, 343.0)
+                .taps()
+                .iter()
+                .find(|t| !t.is_direct)
+                .unwrap()
+                .gain;
         assert!(far_gain < near_gain);
     }
 
@@ -667,7 +668,7 @@ mod tests {
 
     #[test]
     fn cube_matches_shoebox_image_distances() {
-        use crate::early_reflections::{ShoeboxRoom, compute_early_reflections};
+        use crate::early_reflections::{compute_early_reflections, ShoeboxRoom};
         let convex = cube(5.0);
         let shoebox = ShoeboxRoom::rigid(Vec3::splat(-5.0), Vec3::splat(5.0));
         let listener = Listener::default();
@@ -676,16 +677,16 @@ mod tests {
         let cr = compute_convex_reflections(&convex, &listener, source, 1, 48_000.0, 343.0);
 
         let mut taps = [SILENT_TAP; 32];
-        let n = compute_early_reflections(
-            &shoebox, &listener, source, 1, 48_000.0, 343.0, &mut taps,
-        );
+        let n =
+            compute_early_reflections(&shoebox, &listener, source, 1, 48_000.0, 343.0, &mut taps);
 
         // Every shoebox first-order tap has a matching convex tap (same delay
         // and gain within tolerance).
         for sb in taps[..n].iter().filter(|t| !t.is_direct) {
-            let matched = cr.taps().iter().filter(|t| !t.is_direct).any(|cv| {
-                cv.delay_samples == sb.delay_samples && approx(cv.gain, sb.gain, 1e-4)
-            });
+            let matched =
+                cr.taps().iter().filter(|t| !t.is_direct).any(|cv| {
+                    cv.delay_samples == sb.delay_samples && approx(cv.gain, sb.gain, 1e-4)
+                });
             assert!(matched, "no convex match for shoebox tap {sb:?}");
         }
     }
@@ -817,7 +818,10 @@ mod tests {
             343.0,
         );
         let clusters = cluster_taps(r.taps());
-        assert_eq!(clusters.count(), crate::reflection_clustering::CLUSTER_COUNT);
+        assert_eq!(
+            clusters.count(),
+            crate::reflection_clustering::CLUSTER_COUNT
+        );
     }
 
     #[test]

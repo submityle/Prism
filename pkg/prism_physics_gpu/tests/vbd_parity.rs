@@ -93,7 +93,11 @@ fn step_and_sync(
 /// Builds a `w x h` integer-coordinate grid in the `XY` plane with structural
 /// (axis) and shear (diagonal) springs. The top row (`y == h - 1`) is pinned.
 /// Returns the storage, spring set, and the row-major vertex handles.
-fn pinned_grid(w: usize, h: usize, stiffness: f32) -> (ParticleStorage, SpringSet, Vec<ParticleHandle>) {
+fn pinned_grid(
+    w: usize,
+    h: usize,
+    stiffness: f32,
+) -> (ParticleStorage, SpringSet, Vec<ParticleHandle>) {
     let mut particles = ParticleStorage::new();
     let mut handles = Vec::with_capacity(w * h);
     for y in 0..h {
@@ -113,10 +117,20 @@ fn pinned_grid(w: usize, h: usize, stiffness: f32) -> (ParticleStorage, SpringSe
     for y in 0..h {
         for x in 0..w {
             if x + 1 < w {
-                springs.push(SpringElement::new(handles[idx(x, y)], handles[idx(x + 1, y)], 1.0, stiffness));
+                springs.push(SpringElement::new(
+                    handles[idx(x, y)],
+                    handles[idx(x + 1, y)],
+                    1.0,
+                    stiffness,
+                ));
             }
             if y + 1 < h {
-                springs.push(SpringElement::new(handles[idx(x, y)], handles[idx(x, y + 1)], 1.0, stiffness));
+                springs.push(SpringElement::new(
+                    handles[idx(x, y)],
+                    handles[idx(x, y + 1)],
+                    1.0,
+                    stiffness,
+                ));
             }
         }
     }
@@ -124,8 +138,18 @@ fn pinned_grid(w: usize, h: usize, stiffness: f32) -> (ParticleStorage, SpringSe
     let diag = 2.0_f32.sqrt();
     for y in 0..h - 1 {
         for x in 0..w - 1 {
-            springs.push(SpringElement::new(handles[idx(x, y)], handles[idx(x + 1, y + 1)], diag, stiffness));
-            springs.push(SpringElement::new(handles[idx(x + 1, y)], handles[idx(x, y + 1)], diag, stiffness));
+            springs.push(SpringElement::new(
+                handles[idx(x, y)],
+                handles[idx(x + 1, y + 1)],
+                diag,
+                stiffness,
+            ));
+            springs.push(SpringElement::new(
+                handles[idx(x + 1, y)],
+                handles[idx(x, y + 1)],
+                diag,
+                stiffness,
+            ));
         }
     }
     (particles, springs, handles)
@@ -139,7 +163,10 @@ fn pinned_grid_multi_step_matches_cpu() {
     let gpu = GpuVbd::new(&ctx);
     let (mut storage, springs, handles) = pinned_grid(4, 4, 500.0);
     let coloring = color_springs(&springs, storage.len());
-    assert!(coloring.color_count() >= 2, "shear+structural grid needs several colours");
+    assert!(
+        coloring.color_count() >= 2,
+        "shear+structural grid needs several colours"
+    );
     let config = VbdConfig {
         gravity: Vec3::new(0.0, -9.81, 0.0),
         substeps: 2,
@@ -147,7 +174,17 @@ fn pinned_grid_multi_step_matches_cpu() {
         damping: 0.5,
     };
     for _ in 0..24 {
-        step_and_sync(&ctx, &gpu, &mut storage, &handles, &springs, &config, &coloring, DT, TOL_MULTI);
+        step_and_sync(
+            &ctx,
+            &gpu,
+            &mut storage,
+            &handles,
+            &springs,
+            &config,
+            &coloring,
+            DT,
+            TOL_MULTI,
+        );
     }
 }
 
@@ -167,7 +204,17 @@ fn free_fall_without_springs_matches_cpu() {
     let coloring = color_springs(&springs, storage.len());
     let config = VbdConfig::default();
     for _ in 0..10 {
-        step_and_sync(&ctx, &gpu, &mut storage, &handles, &springs, &config, &coloring, DT, TOL);
+        step_and_sync(
+            &ctx,
+            &gpu,
+            &mut storage,
+            &handles,
+            &springs,
+            &config,
+            &coloring,
+            DT,
+            TOL,
+        );
     }
 }
 
@@ -182,8 +229,23 @@ fn single_pinned_vertex_stays_put() {
     let springs = SpringSet::new();
     let coloring = color_springs(&springs, storage.len());
     let config = VbdConfig::default();
-    step_and_sync(&ctx, &gpu, &mut storage, &handles, &springs, &config, &coloring, DT, TOL);
-    assert_vec_close(storage.positions()[0], Vec3::new(3.0, 7.0, -2.0), TOL, "pinned stays put");
+    step_and_sync(
+        &ctx,
+        &gpu,
+        &mut storage,
+        &handles,
+        &springs,
+        &config,
+        &coloring,
+        DT,
+        TOL,
+    );
+    assert_vec_close(
+        storage.positions()[0],
+        Vec3::new(3.0, 7.0, -2.0),
+        TOL,
+        "pinned stays put",
+    );
 }
 
 #[test]
@@ -207,7 +269,17 @@ fn two_vertex_spring_matches_cpu() {
         damping: 0.5,
     };
     for _ in 0..16 {
-        step_and_sync(&ctx, &gpu, &mut storage, &handles, &springs, &config, &coloring, DT, TOL);
+        step_and_sync(
+            &ctx,
+            &gpu,
+            &mut storage,
+            &handles,
+            &springs,
+            &config,
+            &coloring,
+            DT,
+            TOL,
+        );
     }
 }
 

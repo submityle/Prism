@@ -67,7 +67,11 @@ pub type Neighborhood3x3 = [Vec3; 9];
 /// Replaces a non-finite scalar with `fallback`.
 #[inline]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Clamps a colour to be finite and non-negative component-wise.
@@ -94,7 +98,11 @@ fn safe_recip(v: Vec3) -> Vec3 {
 /// Component-wise square root of a non-negative colour.
 #[inline]
 fn sqrt3(v: Vec3) -> Vec3 {
-    Vec3::new(v.x.max(0.0).sqrt(), v.y.max(0.0).sqrt(), v.z.max(0.0).sqrt())
+    Vec3::new(
+        v.x.max(0.0).sqrt(),
+        v.y.max(0.0).sqrt(),
+        v.z.max(0.0).sqrt(),
+    )
 }
 
 /// Sanitizes every tap of a neighbourhood up front.
@@ -206,7 +214,10 @@ mod tests {
             let n = uniform_neighborhood(Vec3::splat(lvl));
             for &s in &[0.0_f32, 0.3, 0.7, 1.0] {
                 let out = cas(n, s);
-                assert!(approx(out, Vec3::splat(lvl), 1.0e-6), "lvl={lvl} s={s} out={out:?}");
+                assert!(
+                    approx(out, Vec3::splat(lvl), 1.0e-6),
+                    "lvl={lvl} s={s} out={out:?}"
+                );
             }
         }
     }
@@ -246,7 +257,10 @@ mod tests {
             Vec3::splat(1.0), // i corner
         ];
         let out = cas(n, 1.0);
-        assert!(out.x > center.x + 1.0e-3, "expected sharpening, out={out:?}");
+        assert!(
+            out.x > center.x + 1.0e-3,
+            "expected sharpening, out={out:?}"
+        );
     }
 
     /// The output can never leave the per-channel neighbourhood `[min, max]`
@@ -267,9 +281,18 @@ mod tests {
         let (lo, hi) = hard_min_max(&n);
         for &s in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
             let out = cas(n, s);
-            assert!(out.x >= lo.x - 1.0e-6 && out.x <= hi.x + 1.0e-6, "x s={s} out={out:?}");
-            assert!(out.y >= lo.y - 1.0e-6 && out.y <= hi.y + 1.0e-6, "y s={s} out={out:?}");
-            assert!(out.z >= lo.z - 1.0e-6 && out.z <= hi.z + 1.0e-6, "z s={s} out={out:?}");
+            assert!(
+                out.x >= lo.x - 1.0e-6 && out.x <= hi.x + 1.0e-6,
+                "x s={s} out={out:?}"
+            );
+            assert!(
+                out.y >= lo.y - 1.0e-6 && out.y <= hi.y + 1.0e-6,
+                "y s={s} out={out:?}"
+            );
+            assert!(
+                out.z >= lo.z - 1.0e-6 && out.z <= hi.z + 1.0e-6,
+                "z s={s} out={out:?}"
+            );
         }
     }
 

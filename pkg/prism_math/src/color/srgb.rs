@@ -27,7 +27,12 @@ impl Srgba {
     /// Construct from components.
     #[inline]
     pub const fn new(red: f32, green: f32, blue: f32, alpha: f32) -> Self {
-        Self { red, green, blue, alpha }
+        Self {
+            red,
+            green,
+            blue,
+            alpha,
+        }
     }
 
     /// Construct an opaque color (`alpha = 1`).
@@ -46,7 +51,12 @@ impl Srgba {
     #[inline]
     pub fn from_u8a(r: u8, g: u8, b: u8, a: u8) -> Self {
         const INV: f32 = 1.0 / 255.0;
-        Self::new(r as f32 * INV, g as f32 * INV, b as f32 * INV, a as f32 * INV)
+        Self::new(
+            r as f32 * INV,
+            g as f32 * INV,
+            b as f32 * INV,
+            a as f32 * INV,
+        )
     }
 
     /// Quantize to 8-bit `[r, g, b, a]`, rounding and clamping to `0..=255`.

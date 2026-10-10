@@ -21,21 +21,21 @@ use prism_ecs::resource::Resource;
 use prism_ecs::schedule::{IntoSystemConfigs, Schedule, ScheduleLabel, Schedules};
 use prism_ecs::world::World;
 
+use crate::capability::{Capabilities, QualityTier};
 use crate::exit::{AppExit, AppExitRequest};
 use crate::fixed::{
     AfterFixedMainLoop, BeforeFixedMainLoop, FixedFirst, FixedLast, FixedPostUpdate,
     FixedPreUpdate, FixedUpdate,
 };
-use crate::plugin::Plugin;
-use crate::plugin_group::PluginGroup;
-use crate::capability::{Capabilities, QualityTier};
-use crate::run_mode::RunMode;
 use crate::lifecycle::{
     AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
 };
+use crate::plugin::Plugin;
+use crate::plugin_group::PluginGroup;
+use crate::run_mode::RunMode;
 use crate::schedule::{
     ExitConfirmation, First, Last, PostStartup, PostUpdate, PreStartup, PreUpdate, Shutdown,
-    StateTransition, Startup, Update,
+    Startup, StateTransition, Update,
 };
 use crate::sub_app::{SubApp, SubApps};
 use crate::sub_app_label::SubAppLabel;
@@ -95,12 +95,16 @@ impl App {
     pub fn new() -> Self {
         let mut app = Self::empty();
         app.init_core_schedules();
-        app.sub_apps.main.world.insert_resource(AppExitRequest::default());
+        app.sub_apps
+            .main
+            .world
+            .insert_resource(AppExitRequest::default());
         // The time context (design §8, §25.1): the clocks bundle plus the
         // real-clock advancement strategy. Installed on the main world so the
         // frame loop can drive the fixed-step accumulator from frame one.
         app.sub_apps.main.world.insert_resource(EngineClocks::new());
-        app.sub_apps.main
+        app.sub_apps
+            .main
             .world
             .insert_resource(TimeUpdateStrategy::default());
         // Capability tiering (design §3, §24.4): probe the environment once at
@@ -398,11 +402,7 @@ impl App {
     /// Panics if no sub-app is registered under `label`, or if that sub-app has
     /// no time domain yet (call
     /// [`init_sub_app_time_domain`](App::init_sub_app_time_domain) first).
-    pub fn set_sub_app_fixed_timestep_hz(
-        &mut self,
-        label: impl SubAppLabel,
-        hz: f64,
-    ) -> &mut Self {
+    pub fn set_sub_app_fixed_timestep_hz(&mut self, label: impl SubAppLabel, hz: f64) -> &mut Self {
         let desc = format!("{label:?}");
         self.sub_apps
             .get_mut(label)
@@ -588,7 +588,8 @@ impl App {
     /// The pending exit request, if a system has signalled shutdown via
     /// [`AppExitRequest`].
     pub fn should_exit(&self) -> Option<AppExit> {
-        self.sub_apps.main
+        self.sub_apps
+            .main
             .world
             .get_resource::<AppExitRequest>()
             .and_then(AppExitRequest::get)
@@ -618,11 +619,7 @@ impl App {
     /// no exit is pending (the schedule is only run when a request exists).
     pub fn poll_exit(&mut self) -> Option<AppExit> {
         // Fast path: nothing requested, or already confirmed on a prior poll.
-        let request = self
-            .sub_apps
-            .main
-            .world
-            .get_resource::<AppExitRequest>()?;
+        let request = self.sub_apps.main.world.get_resource::<AppExitRequest>()?;
         let exit = request.get()?;
         if request.is_confirmed() {
             return Some(exit);
@@ -727,7 +724,13 @@ impl App {
             .add_event::<LowMemory>()
             .add_event::<FocusChanged>()
             .add_event::<WillRenderFirstFrame>();
-        if self.sub_apps.main.world.get_resource::<AppLifecycle>().is_none() {
+        if self
+            .sub_apps
+            .main
+            .world
+            .get_resource::<AppLifecycle>()
+            .is_none()
+        {
             self.insert_resource(AppLifecycle::Running);
             // Wire the suspend/resume -> run-state + virtual-clock-pause
             // handler exactly once, alongside the first install of the
@@ -866,8 +869,21 @@ impl_plugins_for_tuple!((P0, M0), (P1, M1), (P2, M2), (P3, M3));
 impl_plugins_for_tuple!((P0, M0), (P1, M1), (P2, M2), (P3, M3), (P4, M4));
 impl_plugins_for_tuple!((P0, M0), (P1, M1), (P2, M2), (P3, M3), (P4, M4), (P5, M5));
 impl_plugins_for_tuple!(
-    (P0, M0), (P1, M1), (P2, M2), (P3, M3), (P4, M4), (P5, M5), (P6, M6)
+    (P0, M0),
+    (P1, M1),
+    (P2, M2),
+    (P3, M3),
+    (P4, M4),
+    (P5, M5),
+    (P6, M6)
 );
 impl_plugins_for_tuple!(
-    (P0, M0), (P1, M1), (P2, M2), (P3, M3), (P4, M4), (P5, M5), (P6, M6), (P7, M7)
+    (P0, M0),
+    (P1, M1),
+    (P2, M2),
+    (P3, M3),
+    (P4, M4),
+    (P5, M5),
+    (P6, M6),
+    (P7, M7)
 );

@@ -43,7 +43,7 @@
 
 use crate::app::App;
 use crate::capability::QualityTier;
-use crate::settings::{SettingValue, SettingsLayer, Settings};
+use crate::settings::{SettingValue, Settings, SettingsLayer};
 
 /// Settings key for whether this tier drives presentation / rendering (`bool`).
 ///
@@ -174,7 +174,10 @@ impl PlatformTierProfile {
     #[must_use]
     pub fn entries(&self) -> [(&'static str, SettingValue); 5] {
         [
-            (KEY_RENDER_PRESENT, SettingValue::Bool(self.presents_display)),
+            (
+                KEY_RENDER_PRESENT,
+                SettingValue::Bool(self.presents_display),
+            ),
             (
                 KEY_FRAME_LIMIT_FPS,
                 SettingValue::Int(i64::from(self.frame_limit_fps)),

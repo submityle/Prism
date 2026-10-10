@@ -245,6 +245,9 @@ fn disabled_transmission_silences_the_voice() {
     }
     for &freq in &BAND_TONES_HZ {
         let ratio = rendered_ratio(effective, freq);
-        assert!(ratio < 1e-3, "silent colour should render silence at {freq} Hz");
+        assert!(
+            ratio < 1e-3,
+            "silent colour should render silence at {freq} Hz"
+        );
     }
 }

@@ -407,7 +407,9 @@ fn nearest_index_signed(target: [i32; 3], e0: [i32; 3], e1: [i32; 3]) -> (u8, u6
                 // unsigned path does via `interp_finish`), not the pre-finish
                 // intermediate, so the chosen index minimises the error the
                 // hardware actually produces.
-                let got = i64::from(finished_signed_linear(interp_signed(e0[c], e1[c], w as i32)));
+                let got = i64::from(finished_signed_linear(interp_signed(
+                    e0[c], e1[c], w as i32,
+                )));
                 let want = i64::from(finished_signed_linear(target[c]));
                 let d = got - want;
                 (d * d) as u64

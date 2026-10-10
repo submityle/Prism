@@ -83,7 +83,11 @@ impl Curve {
             Self::Linear => value,
             Self::Exponential { exponent } => {
                 let magnitude = ops::powf(ops::abs(value), exponent);
-                if value < 0.0 { -magnitude } else { magnitude }
+                if value < 0.0 {
+                    -magnitude
+                } else {
+                    magnitude
+                }
             }
         }
     }
@@ -162,7 +166,7 @@ pub fn normalize_u16(value: u16) -> Sample {
 #[cfg(test)]
 mod tests {
     use super::{
-        Curve, ExpressionDimension, ModulationTarget, TargetMapping, normalize_u16, normalize_u32,
+        normalize_u16, normalize_u32, Curve, ExpressionDimension, ModulationTarget, TargetMapping,
     };
 
     const EPS: f32 = 1.0e-6;

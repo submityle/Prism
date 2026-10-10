@@ -32,8 +32,8 @@ pub use manifold::{
     FacePolygon, ManifoldPoint,
 };
 pub use ray_cast::{
-    ray_capsule, ray_obb, ray_sphere, ray_triangle, segment_triangle_intersection,
-    RayTriangleHit, SegmentTriangleHit,
+    ray_capsule, ray_obb, ray_sphere, ray_triangle, segment_triangle_intersection, RayTriangleHit,
+    SegmentTriangleHit,
 };
 pub use speculative::{speculative_contact, SpeculativeContact};
 pub use support::{Inflated, SupportMap, Transformed, Translated};

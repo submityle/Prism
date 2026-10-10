@@ -152,12 +152,18 @@ mod tests {
             [0.0, 1.0, 1.0],
         ];
         let i = vec![
-            [0, 1, 2], [0, 2, 3],
-            [4, 5, 6], [4, 6, 7],
-            [0, 1, 5], [0, 5, 4],
-            [3, 2, 6], [3, 6, 7],
-            [0, 3, 7], [0, 7, 4],
-            [1, 2, 6], [1, 6, 5],
+            [0, 1, 2],
+            [0, 2, 3],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 2, 6],
+            [3, 6, 7],
+            [0, 3, 7],
+            [0, 7, 4],
+            [1, 2, 6],
+            [1, 6, 5],
         ];
         mesh(p, i)
     }
@@ -175,7 +181,12 @@ mod tests {
     /// empty cell is outside.
     fn quad() -> TriangleMesh {
         mesh(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
             vec![[0, 1, 2], [0, 2, 3]],
         )
     }
@@ -185,7 +196,10 @@ mod tests {
         // A sealed cube: an inner cell is interior (negative).
         let cube_grid = voxelize_surface(&cube(), 4).unwrap();
         let cube_field = signed_distance_field(&cube_grid);
-        assert!(cube_field.is_inside([1, 1, 1]), "cube inner cell must be inside");
+        assert!(
+            cube_field.is_inside([1, 1, 1]),
+            "cube inner cell must be inside"
+        );
         assert!(cube_field.signed_distance([1, 1, 1]) < 0.0);
 
         // A flat sheet: no interior, so every empty cell is outside (>= 0).
@@ -255,9 +269,8 @@ mod tests {
         assert_eq!(field.dims(), grid.dims());
         assert_eq!(field.voxel_size(), grid.voxel_size());
         assert_eq!(field.origin(), grid.origin());
-        let expected = (grid.dims()[0] as usize)
-            * (grid.dims()[1] as usize)
-            * (grid.dims()[2] as usize);
+        let expected =
+            (grid.dims()[0] as usize) * (grid.dims()[1] as usize) * (grid.dims()[2] as usize);
         assert_eq!(field.signed_squared_distances().len(), expected);
     }
 }

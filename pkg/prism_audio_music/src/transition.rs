@@ -221,6 +221,9 @@ mod tests {
 
         let t = Transition::bridged(TransitionType::NextBar, xf, SegmentId::new(5));
         assert_eq!(t.bridge, Some(SegmentId::new(5)));
-        assert_eq!(Transition::immediate().transition_type, TransitionType::Immediate);
+        assert_eq!(
+            Transition::immediate().transition_type,
+            TransitionType::Immediate
+        );
     }
 }

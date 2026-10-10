@@ -78,10 +78,16 @@ impl core::fmt::Display for BezierSurfaceError {
                 write!(f, "control grid needs at least 4 rows, got {rows}")
             }
             Self::InvalidColumnCount { cols } => {
-                write!(f, "column count must be 3m+1 to tile bicubic patches, got {cols}")
+                write!(
+                    f,
+                    "column count must be 3m+1 to tile bicubic patches, got {cols}"
+                )
             }
             Self::InvalidRowCount { rows } => {
-                write!(f, "row count must be 3n+1 to tile bicubic patches, got {rows}")
+                write!(
+                    f,
+                    "row count must be 3n+1 to tile bicubic patches, got {rows}"
+                )
             }
             Self::ControlCountMismatch { actual, expected } => {
                 write!(f, "control grid has {actual} points, expected {expected}")
@@ -148,7 +154,11 @@ impl BezierSurface {
                 expected,
             });
         }
-        Ok(Self { control, rows, cols })
+        Ok(Self {
+            control,
+            rows,
+            cols,
+        })
     }
 
     /// Returns the control grid as a flat row-major slice.
@@ -279,12 +289,7 @@ impl BezierSurface {
             for i in 0..nu {
                 let vid = |ii: usize, jj: usize| (jj * cols + ii) as u32;
                 // (u, v) corner order 0=(0,0), 1=(1,0), 2=(1,1), 3=(0,1).
-                indices.push([
-                    vid(i, j),
-                    vid(i + 1, j),
-                    vid(i + 1, j + 1),
-                    vid(i, j + 1),
-                ]);
+                indices.push([vid(i, j), vid(i + 1, j), vid(i + 1, j + 1), vid(i, j + 1)]);
             }
         }
         IndexedBilinearPatchMesh::new(positions, normals, uvs, indices)
@@ -418,9 +423,15 @@ mod tests {
             let u = rng.unit();
             let v = rng.unit();
             let p = s.point(u, v);
-            assert!(p[2].abs() < 1e-5, "flat surface should stay at z=0, got {p:?}");
+            assert!(
+                p[2].abs() < 1e-5,
+                "flat surface should stay at z=0, got {p:?}"
+            );
             let n = s.normal(u, v);
-            assert!((n[2].abs() - 1.0).abs() < 1e-4, "flat normal should be ±z, got {n:?}");
+            assert!(
+                (n[2].abs() - 1.0).abs() < 1e-4,
+                "flat normal should be ±z, got {n:?}"
+            );
         }
     }
 
@@ -430,7 +441,11 @@ mod tests {
         let mut net = [[0.0f32; 3]; 16];
         let mut grid = Vec::with_capacity(16);
         for item in net.iter_mut() {
-            let p = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let p = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             *item = p;
             grid.push(p);
         }
@@ -455,7 +470,10 @@ mod tests {
         let patch = s.patch_at(1, 1);
         let expected = patch.point(0.3, 0.7);
         let got = s.point(0.65, 0.85);
-        assert!(len(sub(expected, got)) < 1e-5, "point must agree with patch_at");
+        assert!(
+            len(sub(expected, got)) < 1e-5,
+            "point must agree with patch_at"
+        );
     }
 
     #[test]
@@ -470,7 +488,10 @@ mod tests {
             let v = rng.unit();
             let a = left.point(1.0, v);
             let b = right.point(0.0, v);
-            assert!(len(sub(a, b)) < 1e-5, "patch seam must be watertight: {a:?} vs {b:?}");
+            assert!(
+                len(sub(a, b)) < 1e-5,
+                "patch seam must be watertight: {a:?} vs {b:?}"
+            );
         }
     }
 
@@ -499,7 +520,10 @@ mod tests {
             let n = s.normal(u, v);
             // Allow either orientation; compare absolute dot.
             let dot = (n[0] * fd[0] + n[1] * fd[1] + n[2] * fd[2]).abs();
-            assert!(dot > 0.99, "analytic normal must match finite difference, dot={dot}");
+            assert!(
+                dot > 0.99,
+                "analytic normal must match finite difference, dot={dot}"
+            );
         }
     }
 

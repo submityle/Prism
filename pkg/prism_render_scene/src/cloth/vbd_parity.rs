@@ -60,7 +60,11 @@ fn wesl_predict(
     dt_sub: f32,
     gravity_step: [f32; 3],
 ) -> [f32; 3] {
-    let v = [velocity[0] * retain, velocity[1] * retain, velocity[2] * retain];
+    let v = [
+        velocity[0] * retain,
+        velocity[1] * retain,
+        velocity[2] * retain,
+    ];
     let stepped = [
         position[0] + v[0] * dt_sub,
         position[1] + v[1] * dt_sub,

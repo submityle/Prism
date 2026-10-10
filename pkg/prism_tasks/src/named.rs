@@ -30,13 +30,13 @@
 //! async bridge exactly like any other job.
 
 use alloc::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
 use alloc::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
 
-use crate::Counter;
 use crate::job::Job;
+use crate::Counter;
 
 /// A named execution lane with specific threading guarantees.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]

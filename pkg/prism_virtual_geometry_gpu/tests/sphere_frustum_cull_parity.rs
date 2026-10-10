@@ -147,7 +147,10 @@ fn each_frustum_face_culls_independently() {
         .iter()
         .map(|s| u32::from(frustum.contains_sphere(s.center, s.radius)))
         .collect();
-    assert_eq!(gpu, expected, "each face must cull identically to the golden");
+    assert_eq!(
+        gpu, expected,
+        "each face must cull identically to the golden"
+    );
     assert_eq!(gpu, vec![0, 0, 0, 0, 0, 0], "every face rejects its sphere");
 }
 

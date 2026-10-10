@@ -174,7 +174,10 @@ impl ArrayLayout {
     /// The physical positions of every speaker, in channel order.
     #[must_use]
     pub fn positions(&self) -> Vec<Vec3> {
-        self.speakers.iter().map(|speaker| speaker.position).collect()
+        self.speakers
+            .iter()
+            .map(|speaker| speaker.position)
+            .collect()
     }
 
     /// Whether every directional speaker lies within [`PLANAR_EPSILON`] of the

@@ -6,7 +6,9 @@
 
 use crate::backend;
 use crate::float::f32 as mf;
-use core::ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
+use core::ops::{
+    Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign,
+};
 
 /// A 2-component `f32` vector.
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -129,7 +131,11 @@ impl Vec2 {
     #[inline]
     pub fn normalize_or_zero(self) -> Self {
         let len = self.length();
-        if len > 1.0e-20 { self * (1.0 / len) } else { Self::ZERO }
+        if len > 1.0e-20 {
+            self * (1.0 / len)
+        } else {
+            Self::ZERO
+        }
     }
     /// True if both components are finite.
     #[inline]
@@ -262,7 +268,11 @@ impl Vec3 {
     #[inline]
     pub fn normalize_or_zero(self) -> Self {
         let len = self.length();
-        if len > 1.0e-20 { self * (1.0 / len) } else { Self::ZERO }
+        if len > 1.0e-20 {
+            self * (1.0 / len)
+        } else {
+            Self::ZERO
+        }
     }
     /// True if all components are finite.
     #[inline]
@@ -418,7 +428,11 @@ impl Vec3A {
     /// Rebuild from SIMD lanes `[x, y, z, _]` (padding lane dropped).
     #[inline]
     fn from_simd(a: [f32; 4]) -> Self {
-        Self { x: a[0], y: a[1], z: a[2] }
+        Self {
+            x: a[0],
+            y: a[1],
+            z: a[2],
+        }
     }
     /// Linear interpolation.
     #[inline]
@@ -449,7 +463,12 @@ impl Vec4 {
     /// Broadcast a scalar to every component.
     #[inline]
     pub const fn splat(v: f32) -> Self {
-        Self { x: v, y: v, z: v, w: v }
+        Self {
+            x: v,
+            y: v,
+            z: v,
+            w: v,
+        }
     }
     /// Dot product.
     #[inline]
@@ -479,7 +498,12 @@ impl Vec4 {
     /// Rebuild from SIMD lanes `[x, y, z, w]`.
     #[inline]
     fn from_simd(a: [f32; 4]) -> Self {
-        Self { x: a[0], y: a[1], z: a[2], w: a[3] }
+        Self {
+            x: a[0],
+            y: a[1],
+            z: a[2],
+            w: a[3],
+        }
     }
     /// True if all components are finite.
     #[inline]

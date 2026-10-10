@@ -36,14 +36,20 @@ impl BoundingSphere {
         for &p in points {
             r2 = r2.max((p - center).length_squared());
         }
-        Some(Self { center, radius: mf::sqrt(r2) })
+        Some(Self {
+            center,
+            radius: mf::sqrt(r2),
+        })
     }
 
     /// The tight bounding sphere of an [`Aabb3`].
     #[inline]
     pub fn from_aabb(aabb: Aabb3) -> Self {
         let center = aabb.center();
-        Self { center, radius: aabb.half_extents().length() }
+        Self {
+            center,
+            radius: aabb.half_extents().length(),
+        }
     }
 
     /// True if `p` lies inside or on the sphere.
@@ -74,9 +80,16 @@ impl BoundingSphere {
             return other;
         }
         let new_radius = (dist + self.radius + other.radius) * 0.5;
-        let dir = if dist > 1.0e-20 { offset * (1.0 / dist) } else { Vec3::ZERO };
+        let dir = if dist > 1.0e-20 {
+            offset * (1.0 / dist)
+        } else {
+            Vec3::ZERO
+        };
         let center = self.center + dir * (new_radius - self.radius);
-        Self { center, radius: new_radius }
+        Self {
+            center,
+            radius: new_radius,
+        }
     }
 
     /// The axis-aligned box that tightly bounds this sphere.

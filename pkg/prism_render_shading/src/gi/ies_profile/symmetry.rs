@@ -153,13 +153,25 @@ mod tests {
 
     #[test]
     fn classification_from_marker() {
-        assert_eq!(Symmetry::from_last_horizontal_angle(0.0), Symmetry::Rotational);
-        assert_eq!(Symmetry::from_last_horizontal_angle(90.0), Symmetry::Quadrant);
-        assert_eq!(Symmetry::from_last_horizontal_angle(180.0), Symmetry::Bilateral);
+        assert_eq!(
+            Symmetry::from_last_horizontal_angle(0.0),
+            Symmetry::Rotational
+        );
+        assert_eq!(
+            Symmetry::from_last_horizontal_angle(90.0),
+            Symmetry::Quadrant
+        );
+        assert_eq!(
+            Symmetry::from_last_horizontal_angle(180.0),
+            Symmetry::Bilateral
+        );
         assert_eq!(Symmetry::from_last_horizontal_angle(360.0), Symmetry::None);
         // Unknown marker -> None (lossless default).
         assert_eq!(Symmetry::from_last_horizontal_angle(270.0), Symmetry::None);
-        assert_eq!(Symmetry::from_last_horizontal_angle(f32::NAN), Symmetry::None);
+        assert_eq!(
+            Symmetry::from_last_horizontal_angle(f32::NAN),
+            Symmetry::None
+        );
     }
 
     #[test]

@@ -55,7 +55,10 @@ impl PresentMode {
     /// Whether this mode guarantees no tearing.
     #[must_use]
     pub const fn is_vsync(self) -> bool {
-        matches!(self, Self::AutoVsync | Self::Fifo | Self::FifoRelaxed | Self::Mailbox)
+        matches!(
+            self,
+            Self::AutoVsync | Self::Fifo | Self::FifoRelaxed | Self::Mailbox
+        )
     }
 }
 

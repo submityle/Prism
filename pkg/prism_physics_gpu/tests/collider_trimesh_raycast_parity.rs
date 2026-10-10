@@ -22,8 +22,8 @@
 
 use glam::Vec3;
 use prism_physics_gpu::{
-    cpu_trimesh_raycast, cpu_trimesh_raycast_built, GpuContext, GpuTrimeshRayCast, MeshRay, Trimesh,
-    TrimeshRayHit,
+    cpu_trimesh_raycast, cpu_trimesh_raycast_built, GpuContext, GpuTrimeshRayCast, MeshRay,
+    Trimesh, TrimeshRayHit,
 };
 
 /// Tolerance on the hit distance, point, barycentric weights, and normal: the

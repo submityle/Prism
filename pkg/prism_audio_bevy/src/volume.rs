@@ -162,7 +162,11 @@ mod tests {
     #[test]
     fn minus_six_decibels_is_half_amplitude() {
         let half = Volume::Decibels(-6.020_6);
-        assert!(close(half.to_linear(), 0.5), "linear was {}", half.to_linear());
+        assert!(
+            close(half.to_linear(), 0.5),
+            "linear was {}",
+            half.to_linear()
+        );
     }
 
     #[test]
@@ -190,14 +194,27 @@ mod tests {
     #[test]
     fn combine_stacks_in_linear_domain() {
         let stacked = Volume::Decibels(-6.020_6).combine(Volume::Decibels(-6.020_6));
-        assert!(close(stacked.to_linear(), 0.25), "linear was {}", stacked.to_linear());
+        assert!(
+            close(stacked.to_linear(), 0.25),
+            "linear was {}",
+            stacked.to_linear()
+        );
     }
 
     #[test]
     fn adjust_by_percentage_scales_amplitude() {
-        assert!(close(Volume::Linear(1.0).adjust_by_percentage(100.0).to_linear(), 2.0));
-        assert!(close(Volume::Linear(1.0).adjust_by_percentage(-50.0).to_linear(), 0.5));
-        assert_eq!(Volume::Linear(1.0).adjust_by_percentage(-200.0).to_linear(), 0.0);
+        assert!(close(
+            Volume::Linear(1.0).adjust_by_percentage(100.0).to_linear(),
+            2.0
+        ));
+        assert!(close(
+            Volume::Linear(1.0).adjust_by_percentage(-50.0).to_linear(),
+            0.5
+        ));
+        assert_eq!(
+            Volume::Linear(1.0).adjust_by_percentage(-200.0).to_linear(),
+            0.0
+        );
     }
 
     #[test]

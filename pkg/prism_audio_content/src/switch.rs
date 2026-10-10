@@ -39,7 +39,11 @@ impl SwitchGroup {
     /// Builds a switch group from its members and default.
     #[must_use]
     pub fn new(id: SwitchGroupId, switches: Vec<SwitchId>, default_switch: SwitchId) -> Self {
-        Self { id, switches, default_switch }
+        Self {
+            id,
+            switches,
+            default_switch,
+        }
     }
 
     /// Returns `true` if `switch` is a declared member of this group.
@@ -65,7 +69,10 @@ impl SwitchManager {
     /// Creates an empty manager.
     #[must_use]
     pub fn new() -> Self {
-        Self { groups: BTreeMap::new(), assignments: BTreeMap::new() }
+        Self {
+            groups: BTreeMap::new(),
+            assignments: BTreeMap::new(),
+        }
     }
 
     /// Registers (or replaces) a switch group definition.
@@ -142,13 +149,19 @@ mod tests {
         let mut mgr = SwitchManager::new();
         mgr.register(group());
         let obj = GameObjectId::new(100);
-        assert_eq!(mgr.resolve(obj, SwitchGroupId::new(1)), Some(SwitchId::new(10)));
+        assert_eq!(
+            mgr.resolve(obj, SwitchGroupId::new(1)),
+            Some(SwitchId::new(10))
+        );
     }
 
     #[test]
     fn resolve_unknown_group_is_none() {
         let mgr = SwitchManager::new();
-        assert_eq!(mgr.resolve(GameObjectId::new(1), SwitchGroupId::new(9)), None);
+        assert_eq!(
+            mgr.resolve(GameObjectId::new(1), SwitchGroupId::new(9)),
+            None
+        );
     }
 
     #[test]
@@ -159,8 +172,14 @@ mod tests {
         let b = GameObjectId::new(2);
         assert!(mgr.set(a, SwitchGroupId::new(1), SwitchId::new(11)));
         // Object `a` diverges, object `b` still resolves the default.
-        assert_eq!(mgr.resolve(a, SwitchGroupId::new(1)), Some(SwitchId::new(11)));
-        assert_eq!(mgr.resolve(b, SwitchGroupId::new(1)), Some(SwitchId::new(10)));
+        assert_eq!(
+            mgr.resolve(a, SwitchGroupId::new(1)),
+            Some(SwitchId::new(11))
+        );
+        assert_eq!(
+            mgr.resolve(b, SwitchGroupId::new(1)),
+            Some(SwitchId::new(10))
+        );
     }
 
     #[test]
@@ -171,7 +190,10 @@ mod tests {
         assert!(!mgr.set(obj, SwitchGroupId::new(1), SwitchId::new(99)));
         assert!(!mgr.set(obj, SwitchGroupId::new(2), SwitchId::new(10)));
         // Rejection leaves the resolve at the default.
-        assert_eq!(mgr.resolve(obj, SwitchGroupId::new(1)), Some(SwitchId::new(10)));
+        assert_eq!(
+            mgr.resolve(obj, SwitchGroupId::new(1)),
+            Some(SwitchId::new(10))
+        );
     }
 
     #[test]
@@ -181,7 +203,10 @@ mod tests {
         let obj = GameObjectId::new(1);
         assert!(mgr.set(obj, SwitchGroupId::new(1), SwitchId::new(11)));
         mgr.clear_object(obj);
-        assert_eq!(mgr.resolve(obj, SwitchGroupId::new(1)), Some(SwitchId::new(10)));
+        assert_eq!(
+            mgr.resolve(obj, SwitchGroupId::new(1)),
+            Some(SwitchId::new(10))
+        );
     }
 
     #[test]

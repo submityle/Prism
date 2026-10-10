@@ -24,7 +24,7 @@ pub mod server;
 
 pub use command::{CommandOutcome, RemoteCommand, RuntimeControls};
 pub use protocol::{
-    command_from_bytes, command_to_bytes, decode_command, encode_command, read_command,
-    read_event, write_command, write_event, FrameSummary, RemoteEvent, MAX_FRAME_LEN,
+    command_from_bytes, command_to_bytes, decode_command, encode_command, read_command, read_event,
+    write_command, write_event, FrameSummary, RemoteEvent, MAX_FRAME_LEN,
 };
 pub use server::{RemoteClient, RemoteServer, RemoteServerHandle};

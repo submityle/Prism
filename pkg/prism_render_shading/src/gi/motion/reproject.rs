@@ -345,7 +345,13 @@ mod tests {
     #[test]
     fn static_camera_static_object_is_zero() {
         let vp = identity_vp();
-        let mv = camera_motion_vector(&vp, &vp, Vec3::new(0.1, -0.2, 0.0), JitterNdc::NONE, DEFAULT_W_EPSILON);
+        let mv = camera_motion_vector(
+            &vp,
+            &vp,
+            Vec3::new(0.1, -0.2, 0.0),
+            JitterNdc::NONE,
+            DEFAULT_W_EPSILON,
+        );
         assert!(mv.valid);
         assert!(mv.velocity.length() < 1e-7, "velocity {:?}", mv.velocity);
     }
@@ -358,8 +364,16 @@ mod tests {
         let cur = camera_at(Vec3::new(0.2, 0.0, 0.0));
         let mv = camera_motion_vector(&cur, &prev, Vec3::ZERO, JitterNdc::NONE, DEFAULT_W_EPSILON);
         assert!(mv.valid);
-        assert!(mv.velocity.x < 0.0, "expected leftward motion, got {:?}", mv.velocity);
-        assert!((mv.velocity.x + 0.1).abs() < 1e-6, "velocity.x {:?}", mv.velocity.x);
+        assert!(
+            mv.velocity.x < 0.0,
+            "expected leftward motion, got {:?}",
+            mv.velocity
+        );
+        assert!(
+            (mv.velocity.x + 0.1).abs() < 1e-6,
+            "velocity.x {:?}",
+            mv.velocity.x
+        );
         assert!(mv.velocity.y.abs() < 1e-7, "velocity.y {:?}", mv.velocity.y);
     }
 
@@ -376,8 +390,16 @@ mod tests {
             DEFAULT_W_EPSILON,
         );
         assert!(mv.valid);
-        assert!(mv.velocity.x > 0.0, "expected rightward motion, got {:?}", mv.velocity);
-        assert!((mv.velocity.x - 0.1).abs() < 1e-6, "velocity.x {:?}", mv.velocity.x);
+        assert!(
+            mv.velocity.x > 0.0,
+            "expected rightward motion, got {:?}",
+            mv.velocity
+        );
+        assert!(
+            (mv.velocity.x - 0.1).abs() < 1e-6,
+            "velocity.x {:?}",
+            mv.velocity.x
+        );
     }
 
     #[test]
@@ -403,7 +425,10 @@ mod tests {
         let p = Vec3::new(0.2, -0.3, 0.0);
         let dejit = project_world_to_uv_dejittered(&jittered, p, j, DEFAULT_W_EPSILON).unwrap();
         let plain_uv = project_world_to_uv(&plain, p, DEFAULT_W_EPSILON).unwrap();
-        assert!((dejit - plain_uv).length() < 1e-6, "{dejit:?} vs {plain_uv:?}");
+        assert!(
+            (dejit - plain_uv).length() < 1e-6,
+            "{dejit:?} vs {plain_uv:?}"
+        );
     }
 
     #[test]
@@ -414,7 +439,13 @@ mod tests {
         m.w_axis = Vec4::new(0.0, 0.0, 0.0, 0.0);
         m.x_axis = Vec4::new(1.0, 0.0, 0.0, 0.0);
         assert!(clip_to_ndc(project_to_clip(&m, Vec3::ZERO), DEFAULT_W_EPSILON).is_none());
-        let mv = camera_motion_vector(&m, &Mat4::IDENTITY, Vec3::ZERO, JitterNdc::NONE, DEFAULT_W_EPSILON);
+        let mv = camera_motion_vector(
+            &m,
+            &Mat4::IDENTITY,
+            Vec3::ZERO,
+            JitterNdc::NONE,
+            DEFAULT_W_EPSILON,
+        );
         assert!(!mv.valid);
         assert_eq!(mv.velocity, Vec2::ZERO);
         assert!(mv.velocity.is_finite());

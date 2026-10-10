@@ -83,7 +83,9 @@ pub enum DynlibError {
 impl fmt::Display for DynlibError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DynlibError::Unsupported => write!(f, "dynamic libraries are unsupported in this build"),
+            DynlibError::Unsupported => {
+                write!(f, "dynamic libraries are unsupported in this build")
+            }
             DynlibError::SymbolNotFound(name) => write!(f, "symbol not found: {name}"),
             DynlibError::InvalidName(name) => write!(f, "invalid name (interior NUL): {name}"),
             DynlibError::Io(err) => write!(f, "dynamic-library I/O error: {err}"),

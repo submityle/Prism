@@ -29,8 +29,8 @@ use std::collections::HashMap as StdHashMap;
 use std::hint::black_box;
 use std::time::Instant;
 
-use prism_utils::HashMap as FxHashMap;
 use prism_utils::hash::FxBuildHasher;
+use prism_utils::HashMap as FxHashMap;
 
 /// Entries inserted and then probed per pass.
 const N: u64 = 1 << 20;
@@ -109,7 +109,10 @@ fn main() {
         "FxHashMap checksum diverged from std HashMap: {fx_sum:#x} != {std_sum:#x}"
     );
     // Anti-vacuous: the checksum must reflect real probed values.
-    assert_ne!(fx_sum, 0, "probe checksum is zero — the maps did no useful work");
+    assert_ne!(
+        fx_sum, 0,
+        "probe checksum is zero — the maps did no useful work"
+    );
 
     let fx_mops = (2 * N) as f64 / fx_s / 1e6; // insert + lookup
     let std_mops = (2 * N) as f64 / std_s / 1e6;
@@ -117,7 +120,13 @@ fn main() {
 
     println!("prism_utils fxhash_map (FxHashMap vs std SipHash)");
     println!("  entries/pass  : {N}  (insert + probe)");
-    println!("  FxHashMap     : {:.3} ms  ({fx_mops:.1} Mops/s)", fx_s * 1e3);
-    println!("  std HashMap   : {:.3} ms  ({std_mops:.1} Mops/s)", std_s * 1e3);
+    println!(
+        "  FxHashMap     : {:.3} ms  ({fx_mops:.1} Mops/s)",
+        fx_s * 1e3
+    );
+    println!(
+        "  std HashMap   : {:.3} ms  ({std_mops:.1} Mops/s)",
+        std_s * 1e3
+    );
     println!("  speedup       : {speedup:.2}x  (checksum {fx_sum:#018x})");
 }

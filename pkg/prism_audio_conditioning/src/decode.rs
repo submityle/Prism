@@ -16,7 +16,6 @@
 //! decode are exposed; compressed families decoded by externally registered
 //! plug-ins are intentionally absent from this offline matrix.
 
-
 use prism_audio_assets::codec::{
     DecodeError as AssetDecodeError, DecoderRegistry, PcmDecoder, SourceDecoder,
 };

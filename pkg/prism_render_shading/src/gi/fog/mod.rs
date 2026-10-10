@@ -11,7 +11,6 @@
 //! Implements closed-form exponential height fog, distance-based fog, and
 //! sun inscattering with a Henyey-Greenstein phase function.
 
-
 pub mod exponential;
 pub mod height_fog;
 pub mod inscatter;

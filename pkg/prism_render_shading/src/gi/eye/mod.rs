@@ -25,9 +25,9 @@
 //!   reports it and leaves the iris lookup at the (un-parallaxed) centre with
 //!   zero focusing gain.
 
+pub mod caustic;
 pub mod cornea;
 pub mod iris;
-pub mod caustic;
 
 pub use caustic::CausticParams;
 pub use cornea::{CorneaInterface, CorneaSample};
@@ -109,8 +109,11 @@ pub fn shade_eye(
                 params.geometry,
                 params.style,
             );
-            let caustic_gain =
-                caustic::corneal_focus_gain(surface.cos_incidence, iris.radius_norm, params.caustic);
+            let caustic_gain = caustic::corneal_focus_gain(
+                surface.cos_incidence,
+                iris.radius_norm,
+                params.caustic,
+            );
             EyeShadeSample {
                 cornea_reflectance: surface.reflectance,
                 iris_uv: iris.uv,
@@ -122,7 +125,11 @@ pub fn shade_eye(
         None => EyeShadeSample {
             cornea_reflectance: surface.reflectance,
             iris_uv: center_uv,
-            limbal: iris::limbal_darkening(0.0, params.style.limbal_start, params.style.limbal_strength),
+            limbal: iris::limbal_darkening(
+                0.0,
+                params.style.limbal_start,
+                params.style.limbal_strength,
+            ),
             caustic_gain: 1.0,
             total_internal_reflection: true,
         },
@@ -137,9 +144,19 @@ mod tests {
     fn head_on_eye_samples_iris_center() {
         // Looking straight down the axis: no parallax, iris centre, strong
         // focusing, weak Fresnel.
-        let s = shade_eye(Vec3::Z, Vec3::Z, Vec2::splat(0.5), 0.2, EyeParams::default());
+        let s = shade_eye(
+            Vec3::Z,
+            Vec3::Z,
+            Vec2::splat(0.5),
+            0.2,
+            EyeParams::default(),
+        );
         assert!(!s.total_internal_reflection);
-        assert!((s.iris_uv - Vec2::splat(0.5)).length() < 1e-5, "uv={:?}", s.iris_uv);
+        assert!(
+            (s.iris_uv - Vec2::splat(0.5)).length() < 1e-5,
+            "uv={:?}",
+            s.iris_uv
+        );
         assert!(s.caustic_gain > 1.0, "gain={}", s.caustic_gain);
         assert!(s.cornea_reflectance < 0.1, "F={}", s.cornea_reflectance);
         assert!((s.limbal - 1.0).abs() < 1e-6);
@@ -147,7 +164,13 @@ mod tests {
 
     #[test]
     fn oblique_view_shifts_iris_and_raises_fresnel() {
-        let head_on = shade_eye(Vec3::Z, Vec3::Z, Vec2::splat(0.5), 0.2, EyeParams::default());
+        let head_on = shade_eye(
+            Vec3::Z,
+            Vec3::Z,
+            Vec2::splat(0.5),
+            0.2,
+            EyeParams::default(),
+        );
         let view = Vec3::new(0.5, 0.0, 0.866).normalize();
         let oblique = shade_eye(view, Vec3::Z, Vec2::splat(0.5), 0.2, EyeParams::default());
 
@@ -193,7 +216,13 @@ mod tests {
 
     #[test]
     fn degenerate_view_is_handled() {
-        let s = shade_eye(Vec3::ZERO, Vec3::ZERO, Vec2::splat(0.5), 0.2, EyeParams::default());
+        let s = shade_eye(
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec2::splat(0.5),
+            0.2,
+            EyeParams::default(),
+        );
         assert!(s.cornea_reflectance.is_finite());
         assert!(s.iris_uv.is_finite());
         assert!(s.caustic_gain.is_finite());

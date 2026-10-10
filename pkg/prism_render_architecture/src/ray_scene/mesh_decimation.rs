@@ -503,8 +503,7 @@ impl Decimator {
                 continue;
             }
             let [a, b, c] = *tri;
-            let (ra, rb, rc) =
-                (remap[a as usize], remap[b as usize], remap[c as usize]);
+            let (ra, rb, rc) = (remap[a as usize], remap[b as usize], remap[c as usize]);
             // A live face can only reference live, remapped vertices.
             if ra == u32::MAX || rb == u32::MAX || rc == u32::MAX {
                 continue;
@@ -515,8 +514,7 @@ impl Decimator {
             indices.push([ra, rb, rc]);
         }
 
-        TriangleMesh::new(positions, normals, uvs, indices)
-            .map_err(DecimationError::Rebuild)
+        TriangleMesh::new(positions, normals, uvs, indices).map_err(DecimationError::Rebuild)
     }
 }
 
@@ -838,9 +836,10 @@ mod tests {
         // should keep all of them present in the simplified mesh.
         let corners = [[0.0, 0.0], [8.0, 0.0], [0.0, 8.0], [8.0, 8.0]];
         for corner in corners {
-            let found = out.positions().iter().any(|p| {
-                (p[0] - corner[0]).abs() < 1.0e-3 && (p[1] - corner[1]).abs() < 1.0e-3
-            });
+            let found = out
+                .positions()
+                .iter()
+                .any(|p| (p[0] - corner[0]).abs() < 1.0e-3 && (p[1] - corner[1]).abs() < 1.0e-3);
             assert!(found, "corner {corner:?} was collapsed away");
         }
     }

@@ -32,7 +32,6 @@
 
 use alloc::vec::Vec;
 
-
 /// Geometric fallback when a 2x2 mean normal cancels to near zero.
 const GEOMETRIC_NORMAL: [f32; 3] = [0.0, 0.0, 1.0];
 
@@ -62,7 +61,10 @@ pub fn average_unit_normals(normals: &[[f32; 3]]) -> ([f32; 3], f32) {
     }
     let len = len2.sqrt();
     let inv = 1.0 / len;
-    ([mean[0] * inv, mean[1] * inv, mean[2] * inv], len.clamp(0.0, 1.0))
+    (
+        [mean[0] * inv, mean[1] * inv, mean[2] * inv],
+        len.clamp(0.0, 1.0),
+    )
 }
 
 /// Blinn-Phong specular power equivalent to a GGX-style roughness `alpha`.
@@ -259,7 +261,10 @@ mod tests {
         let full = toksvig_roughness(1.0, base);
         let mid = toksvig_roughness(0.7, base);
         let low = toksvig_roughness(0.4, base);
-        assert!(full <= mid + 1e-6 && mid <= low + 1e-6, "{full} {mid} {low}");
+        assert!(
+            full <= mid + 1e-6 && mid <= low + 1e-6,
+            "{full} {mid} {low}"
+        );
         assert!(low >= base);
         assert!(low <= 1.0);
     }
@@ -304,8 +309,7 @@ mod tests {
     #[test]
     fn one_by_n_carries_dimension() {
         let n = [0.0, 0.0, 1.0];
-        let (on, _or, nw, nh) =
-            reduce_normal_roughness_2x(&[n, n, n, n], &[0.5; 4], 4, 1).unwrap();
+        let (on, _or, nw, nh) = reduce_normal_roughness_2x(&[n, n, n, n], &[0.5; 4], 4, 1).unwrap();
         assert_eq!((nw, nh), (2, 1));
         assert_eq!(on.len(), 2);
     }

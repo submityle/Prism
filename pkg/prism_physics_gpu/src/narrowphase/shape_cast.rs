@@ -212,9 +212,18 @@ mod tests {
         // at x = 8. The sphere surface (radius 0.5) meets the near box face
         // (at x = 3.5) first.
         let box_hull = unit_box();
-        let near = RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
-        let far = RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(8.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
-        let hit = cast_shape(&shape, &[near, far], 1.0, 0.0).expect("the cast must hit the near box");
+        let near = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
+        let far = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(8.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
+        let hit =
+            cast_shape(&shape, &[near, far], 1.0, 0.0).expect("the cast must hit the near box");
         assert_eq!(hit.target, 0, "the nearer box index 0 must win");
         // Surface gap is 3.0 (origin+0.5 to 3.5) closing at 10 per unit => 0.3.
         assert!((hit.toi.time - 0.3).abs() < 0.02, "time {}", hit.toi.time);
@@ -233,8 +242,15 @@ mod tests {
         );
         // A box well off the +x line of travel.
         let box_hull = unit_box();
-        let aside = RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 20.0, 0.0), Quat::IDENTITY), 0.0);
-        assert!(cast_shape(&shape, &[aside], 1.0, 0.0).is_none(), "an off-path target must not be hit");
+        let aside = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(4.0, 20.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
+        assert!(
+            cast_shape(&shape, &[aside], 1.0, 0.0).is_none(),
+            "an off-path target must not be hit"
+        );
     }
 
     #[test]
@@ -246,7 +262,10 @@ mod tests {
             BodyMotion::new(Vec3::new(1.0, 0.0, 0.0), Vec3::ZERO),
             0.5,
         );
-        assert!(cast_shape(&shape, &[], 1.0, 0.0).is_none(), "an empty scene cannot be hit");
+        assert!(
+            cast_shape(&shape, &[], 1.0, 0.0).is_none(),
+            "an empty scene cannot be hit"
+        );
     }
 
     #[test]
@@ -263,8 +282,16 @@ mod tests {
         let box_hull = unit_box();
         // Deliberately pass the far box first in the slice to prove ordering is
         // by time, not by input order.
-        let far = RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(8.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
-        let near = RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
+        let far = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(8.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
+        let near = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
         let hits = cast_shape_all(&shape, &[far, near], 1.0, 0.0);
         assert_eq!(hits.len(), 2, "both boxes lie on the path");
         // Index 1 (the near box at x = 4) is struck before index 0 (x = 8).
@@ -286,10 +313,22 @@ mod tests {
         );
         let box_hull = unit_box();
         // Both boxes centred on the travel line so each is reached at t = 0.3.
-        let first = RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
-        let second = RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
-        let hit = cast_shape(&shape, &[first, second], 1.0, 0.0).expect("the stacked boxes must be hit");
-        assert_eq!(hit.target, 0, "an exact time tie resolves to the lower index");
+        let first = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
+        let second = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
+        let hit =
+            cast_shape(&shape, &[first, second], 1.0, 0.0).expect("the stacked boxes must be hit");
+        assert_eq!(
+            hit.target, 0,
+            "an exact time tie resolves to the lower index"
+        );
     }
 
     #[test]
@@ -298,7 +337,11 @@ mod tests {
         // its inflated surface reaches the box with less core travel.
         let sphere = ConvexHull::from_point();
         let box_hull = unit_box();
-        let target = RoundedConvex::still(&box_hull, ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY), 0.0);
+        let target = RoundedConvex::still(
+            &box_hull,
+            ConvexPose::new(Vec3::new(4.0, 0.0, 0.0), Quat::IDENTITY),
+            0.0,
+        );
         let make = |radius: f32| {
             RoundedConvex::new(
                 &sphere,
@@ -309,6 +352,11 @@ mod tests {
         };
         let thin = cast_shape(&make(0.25), &[target], 1.0, 0.0).expect("thin sphere hits");
         let fat = cast_shape(&make(0.75), &[target], 1.0, 0.0).expect("fat sphere hits");
-        assert!(fat.toi.time < thin.toi.time, "fat {} should precede thin {}", fat.toi.time, thin.toi.time);
+        assert!(
+            fat.toi.time < thin.toi.time,
+            "fat {} should precede thin {}",
+            fat.toi.time,
+            thin.toi.time
+        );
     }
 }

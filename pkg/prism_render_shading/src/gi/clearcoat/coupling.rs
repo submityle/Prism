@@ -116,7 +116,11 @@ pub fn clearcoat_fresnel_reflectance(clearcoat_strength: f32, n_dot_v: f32) -> f
     };
     let f = fresnel_schlick_scalar(CLEARCOAT_F0, n_dot_v.max(0.0));
     let r = strength * f;
-    if r.is_finite() { r.clamp(0.0, 1.0) } else { 0.0 }
+    if r.is_finite() {
+        r.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Attenuates a base BRDF value by the clearcoat transmission `(1 - Fc)`.
@@ -128,7 +132,11 @@ pub fn attenuate_base(base_brdf: f32, fc: f32) -> f32 {
     let base = base_brdf.max(0.0);
     let transmit = (1.0 - fc.clamp(0.0, 1.0)).max(0.0);
     let r = base * transmit;
-    if r.is_finite() { r.max(0.0) } else { 0.0 }
+    if r.is_finite() {
+        r.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Stricter two-sided attenuation `base · (1 - Fc_view) · (1 - Fc_light)`.
@@ -143,7 +151,11 @@ pub fn attenuate_base_two_sided(base_brdf: f32, fc_view: f32, fc_light: f32) -> 
     let tv = (1.0 - fc_view.clamp(0.0, 1.0)).max(0.0);
     let tl = (1.0 - fc_light.clamp(0.0, 1.0)).max(0.0);
     let r = base * tv * tl;
-    if r.is_finite() { r.max(0.0) } else { 0.0 }
+    if r.is_finite() {
+        r.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Combines the attenuated base and the clearcoat contribution:
@@ -157,7 +169,11 @@ pub fn combine_layers(base_brdf: f32, clearcoat_contribution: f32, fc: f32) -> f
     let base = attenuate_base(base_brdf, fc);
     let coat = clearcoat_contribution.max(0.0);
     let r = base + coat;
-    if r.is_finite() { r.max(0.0) } else { 0.0 }
+    if r.is_finite() {
+        r.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Coat transmission weight `1 - Fc`, i.e. the fraction of base radiance that
@@ -185,7 +201,11 @@ pub fn clearcoat_fresnel_reflectance_two_sided(
     let fc_v = clearcoat_fresnel_reflectance(clearcoat_strength, n_dot_v);
     let fc_l = clearcoat_fresnel_reflectance(clearcoat_strength, n_dot_l);
     let r = 1.0 - (1.0 - fc_v) * (1.0 - fc_l);
-    if r.is_finite() { r.clamp(0.0, 1.0) } else { 0.0 }
+    if r.is_finite() {
+        r.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -302,6 +322,10 @@ mod tests {
         let fc_v = clearcoat_fresnel_reflectance(1.0, 0.5);
         let fc_l = clearcoat_fresnel_reflectance(1.0, 0.5);
         let via_atten = attenuate_base_two_sided(base, fc_v, fc_l);
-        assert!((via_atten - (1.0 - two)).abs() < 1e-6, "atten={via_atten} 1-two={}", 1.0 - two);
+        assert!(
+            (via_atten - (1.0 - two)).abs() < 1e-6,
+            "atten={via_atten} 1-two={}",
+            1.0 - two
+        );
     }
 }

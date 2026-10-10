@@ -202,8 +202,7 @@ mod tests {
     #[test]
     fn lookup_table_nonlinear_curve() {
         // A quadratic ease sampled at 5 points over [0, 1].
-        const EASE: LookupTable<5> =
-            LookupTable::new([0.0, 0.0625, 0.25, 0.5625, 1.0], 0.0, 1.0);
+        const EASE: LookupTable<5> = LookupTable::new([0.0, 0.0625, 0.25, 0.5625, 1.0], 0.0, 1.0);
         // Midway between the 0.25 and 0.5625 samples (x = 0.625).
         let mid = EASE.sample(0.625);
         assert!((mid - 0.406_25).abs() < 1e-6, "{mid}");

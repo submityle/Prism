@@ -312,7 +312,10 @@ mod tests {
         for r in [0.2f32, 0.8, 1.5, 3.0, 6.0] {
             let num = (radius_cdf(r + h, d) - radius_cdf(r - h, d)) / (2.0 * h);
             let analytic = radius_pdf(r, d);
-            assert!((num - analytic).abs() < 2e-3, "r={r} num={num} pdf={analytic}");
+            assert!(
+                (num - analytic).abs() < 2e-3,
+                "r={r} num={num} pdf={analytic}"
+            );
         }
     }
 
@@ -343,7 +346,10 @@ mod tests {
         }
         let mean = (acc / n as f64) as f32;
         let expected = 2.5 * d;
-        assert!((mean - expected).abs() < 0.05, "mean={mean} expected={expected}");
+        assert!(
+            (mean - expected).abs() < 0.05,
+            "mean={mean} expected={expected}"
+        );
     }
 
     #[test]
@@ -397,7 +403,10 @@ mod tests {
     fn is_deterministic() {
         assert_eq!(profile(0.4, 1.2), profile(0.4, 1.2));
         assert_eq!(sample_radius(1.0, 0.3, 0.6), sample_radius(1.0, 0.3, 0.6));
-        assert_eq!(sample_radius_2d(1.0, (0.3, 0.6)), sample_radius(1.0, 0.3, 0.6));
+        assert_eq!(
+            sample_radius_2d(1.0, (0.3, 0.6)),
+            sample_radius(1.0, 0.3, 0.6)
+        );
     }
 
     #[test]

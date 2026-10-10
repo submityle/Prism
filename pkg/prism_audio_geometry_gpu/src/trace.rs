@@ -133,7 +133,14 @@ pub(crate) fn first_hit(
     let mut best_t = max_distance;
     let mut best_index = 0usize;
     for (index, tri) in triangles.iter().enumerate() {
-        let hit = ray_triangle(origin, dir, vec3(tri.a), vec3(tri.b), vec3(tri.c), max_distance);
+        let hit = ray_triangle(
+            origin,
+            dir,
+            vec3(tri.a),
+            vec3(tri.b),
+            vec3(tri.c),
+            max_distance,
+        );
         if let Some(t) = hit
             && (!found || t < best_t)
         {

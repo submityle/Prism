@@ -112,13 +112,19 @@ impl DihedralCosines {
     /// whose cosine is strictly less than it — the crease candidates for that
     /// threshold.
     pub fn count_sharper_than(&self, cos_threshold: f32) -> usize {
-        self.edges.iter().filter(|e| e.cosine < cos_threshold).count()
+        self.edges
+            .iter()
+            .filter(|e| e.cosine < cos_threshold)
+            .count()
     }
 
     /// Returns how many interior edges are flatter than `cos_threshold`, i.e.
     /// whose cosine is greater than or equal to it.
     pub fn count_flatter_than(&self, cos_threshold: f32) -> usize {
-        self.edges.iter().filter(|e| e.cosine >= cos_threshold).count()
+        self.edges
+            .iter()
+            .filter(|e| e.cosine >= cos_threshold)
+            .count()
     }
 
     /// Returns the number of boundary edges (one incident face) skipped.
@@ -139,7 +145,11 @@ impl DihedralCosines {
 
 /// Orders two vertex indices into a canonical `(min, max)` undirected key.
 fn sorted_pair(a: u32, b: u32) -> (u32, u32) {
-    if a <= b { (a, b) } else { (b, a) }
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 /// Returns `lhs - rhs` component-wise.
@@ -230,7 +240,10 @@ pub fn dihedral_cosines(mesh: &TriangleMesh) -> DihedralCosines {
             degenerate_edges += 1;
             continue;
         };
-        let edge_vec = sub(positions[endpoints.1 as usize], positions[endpoints.0 as usize]);
+        let edge_vec = sub(
+            positions[endpoints.1 as usize],
+            positions[endpoints.0 as usize],
+        );
         let signed_sine = match normalize(edge_vec) {
             Some(e) => dot(cross(n0, n1), e).clamp(-1.0, 1.0),
             None => 0.0,
@@ -313,10 +326,19 @@ mod tests {
 
     #[test]
     fn opposite_folds_flip_signed_sine() {
-        let up = dihedral_cosines(&folded_pair(1.0)).edge(0, 1).unwrap().signed_sine;
-        let down = dihedral_cosines(&folded_pair(-1.0)).edge(0, 1).unwrap().signed_sine;
+        let up = dihedral_cosines(&folded_pair(1.0))
+            .edge(0, 1)
+            .unwrap()
+            .signed_sine;
+        let down = dihedral_cosines(&folded_pair(-1.0))
+            .edge(0, 1)
+            .unwrap()
+            .signed_sine;
         assert!(up.abs() > 1e-4 && down.abs() > 1e-4, "folds should bend");
-        assert!(up * down < 0.0, "ridge/valley should flip sign: {up} vs {down}");
+        assert!(
+            up * down < 0.0,
+            "ridge/valley should flip sign: {up} vs {down}"
+        );
     }
 
     #[test]

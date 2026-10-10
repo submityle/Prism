@@ -22,9 +22,7 @@ pub mod resolver;
 pub mod viseme;
 
 pub use caption::{CaptionEvent, CaptionTrack, CaptionWord};
-pub use decision_tree::{
-    DecisionNode, DialogueDecisionTree, DialogueState, NodeIndex, TreeError,
-};
+pub use decision_tree::{DecisionNode, DialogueDecisionTree, DialogueState, NodeIndex, TreeError};
 pub use localization::{LanguageBankSet, LanguageId, SwitchOutcome};
 pub use resolver::{DialogueKey, DialogueResolution, DialogueResolver, MediaRef};
 pub use viseme::{Viseme, VisemeKeyframe, VisemePose, VisemeTrack};
@@ -32,8 +30,8 @@ pub use viseme::{Viseme, VisemeKeyframe, VisemePose, VisemeTrack};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bank::manifest::BankId;
     use crate::bank::entry::EntryId;
+    use crate::bank::manifest::BankId;
 
     const EPSILON: f32 = 1.0e-4;
 

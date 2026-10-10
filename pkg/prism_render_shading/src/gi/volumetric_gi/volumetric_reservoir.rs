@@ -278,9 +278,21 @@ fn sanitize_scalar(value: f32) -> f32 {
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.max(0.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.max(0.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.max(0.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -329,7 +341,10 @@ mod tests {
         let t = beer_lambert(1.0, 2.0);
         let scale = 0.5 * phase * t;
         let expected = Vec3::new(3.0, 1.0, 0.5) * scale;
-        assert!((out - expected).abs().max_element() < 1e-6, "out={out} exp={expected}");
+        assert!(
+            (out - expected).abs().max_element() < 1e-6,
+            "out={out} exp={expected}"
+        );
     }
 
     #[test]
@@ -450,7 +465,10 @@ mod tests {
         for _ in 0..9 {
             // Inflate confidence by re-merging itself (temporal history buildup).
             let clone = history;
-            let p = history.sample().map(|s| scatter_target(&s, scatter, view, m)).unwrap_or(0.0);
+            let p = history
+                .sample()
+                .map(|s| scatter_target(&s, scatter, view, m))
+                .unwrap_or(0.0);
             history.merge(&clone, p, 1.0);
         }
         // u = 0 forces selecting the strong history sample.
@@ -483,12 +501,19 @@ mod tests {
         // Pump the history confidence well above the cap.
         for _ in 0..200 {
             let clone = history;
-            let p = history.sample().map(|s| scatter_target(&s, scatter, view, m)).unwrap_or(0.0);
+            let p = history
+                .sample()
+                .map(|s| scatter_target(&s, scatter, view, m))
+                .unwrap_or(0.0);
             history.merge(&clone, p, 1.0);
         }
         temporal_resample(&mut current, &history, scatter, view, m, 20.0, 0.0);
         // Current started empty, so its confidence is exactly the capped history.
-        assert!(current.confidence() <= 20.0 + 1e-6, "m={}", current.confidence());
+        assert!(
+            current.confidence() <= 20.0 + 1e-6,
+            "m={}",
+            current.confidence()
+        );
     }
 
     #[test]

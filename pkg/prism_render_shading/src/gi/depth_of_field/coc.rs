@@ -114,7 +114,11 @@ impl LensParams {
     fn sanitized(self) -> Self {
         #[inline]
         fn finite_or_zero(x: f32) -> f32 {
-            if x.is_finite() { x } else { 0.0 }
+            if x.is_finite() {
+                x
+            } else {
+                0.0
+            }
         }
         Self {
             aperture_f_stop: finite_or_zero(self.aperture_f_stop),
@@ -153,7 +157,11 @@ impl LensParams {
             return 0.0;
         }
         let c = a * f / denom;
-        if c.is_finite() { c.max(0.0) } else { 0.0 }
+        if c.is_finite() {
+            c.max(0.0)
+        } else {
+            0.0
+        }
     }
 
     /// Signed sensor-plane CoC diameter in millimetres for an object at
@@ -182,7 +190,11 @@ impl LensParams {
             return 0.0;
         }
         let c = a * f * (s2 - s1) / denom;
-        if c.is_finite() { c } else { 0.0 }
+        if c.is_finite() {
+            c
+        } else {
+            0.0
+        }
     }
 
     /// Signed CoC *radius* in sensor millimetres (half the diameter).
@@ -204,7 +216,11 @@ impl LensParams {
         }
         let c_mm = self.coc_diameter_mm(depth_m);
         let px = c_mm * (image_height_px / s.sensor_height_mm);
-        if px.is_finite() { px } else { 0.0 }
+        if px.is_finite() {
+            px
+        } else {
+            0.0
+        }
     }
 
     /// Signed CoC *radius* in output pixels (half the pixel diameter).
@@ -224,7 +240,11 @@ impl LensParams {
             return 0.0;
         }
         let n = self.coc_diameter_mm(depth_m) / scale;
-        if n.is_finite() { n.clamp(-1.0, 1.0) } else { 0.0 }
+        if n.is_finite() {
+            n.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
     }
 }
 
@@ -326,7 +346,10 @@ mod tests {
             let c = lens.coc_diameter_mm(depth);
             assert!(c <= 1.0e-6, "near side must be negative/zero: {c}");
             let mag = c.abs();
-            assert!(mag >= prev_mag - 1.0e-5, "near magnitude must grow: {mag} < {prev_mag}");
+            assert!(
+                mag >= prev_mag - 1.0e-5,
+                "near magnitude must grow: {mag} < {prev_mag}"
+            );
             prev_mag = mag;
         }
     }
@@ -339,7 +362,11 @@ mod tests {
         let px = lens.coc_diameter_pixels(4.0, 1080.0);
         assert!(approx(px, 14.423, 2.0e-2), "px = {px}");
         // Radius is half the diameter.
-        assert!(approx(lens.coc_radius_pixels(4.0, 1080.0), 0.5 * px, 1.0e-4));
+        assert!(approx(
+            lens.coc_radius_pixels(4.0, 1080.0),
+            0.5 * px,
+            1.0e-4
+        ));
     }
 
     #[test]
@@ -369,10 +396,22 @@ mod tests {
     #[test]
     fn degenerate_inputs_never_produce_nan() {
         let bad = [
-            LensParams { aperture_f_stop: f32::NAN, ..ref_lens() },
-            LensParams { focal_length_mm: -5.0, ..ref_lens() },
-            LensParams { focus_distance_m: f32::INFINITY, ..ref_lens() },
-            LensParams { sensor_height_mm: 0.0, ..ref_lens() },
+            LensParams {
+                aperture_f_stop: f32::NAN,
+                ..ref_lens()
+            },
+            LensParams {
+                focal_length_mm: -5.0,
+                ..ref_lens()
+            },
+            LensParams {
+                focus_distance_m: f32::INFINITY,
+                ..ref_lens()
+            },
+            LensParams {
+                sensor_height_mm: 0.0,
+                ..ref_lens()
+            },
         ];
         for lens in bad {
             for &d in &[-1.0, 0.0, 0.5, 2.0, 1.0e6] {
@@ -381,7 +420,10 @@ mod tests {
                 let px = lens.coc_diameter_pixels(d, 1080.0);
                 assert!(px.is_finite(), "pixel CoC must be finite, got {px}");
                 let n = lens.coc_normalized(d);
-                assert!(n.is_finite() && (-1.0..=1.0).contains(&n), "norm out of range: {n}");
+                assert!(
+                    n.is_finite() && (-1.0..=1.0).contains(&n),
+                    "norm out of range: {n}"
+                );
             }
         }
     }

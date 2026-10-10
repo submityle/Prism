@@ -74,12 +74,12 @@ fn scene() -> Vec<AabbQuery> {
         // -2 >= -5, margin 3.
         aabb([0.0, 0.0, -2.0], [1.0, 1.0, 5.0]),
         // Fully outside each of the six faces (margin ~89).
-        aabb([100.0, 0.0, 50.0], [1.0, 1.0, 1.0]),  // past -x face
+        aabb([100.0, 0.0, 50.0], [1.0, 1.0, 1.0]), // past -x face
         aabb([-100.0, 0.0, 50.0], [1.0, 1.0, 1.0]), // past +x face
-        aabb([0.0, 100.0, 50.0], [1.0, 1.0, 1.0]),  // past -y face
+        aabb([0.0, 100.0, 50.0], [1.0, 1.0, 1.0]), // past -y face
         aabb([0.0, -100.0, 50.0], [1.0, 1.0, 1.0]), // past +y face
-        aabb([0.0, 0.0, -50.0], [1.0, 1.0, 1.0]),   // behind the near face
-        aabb([0.0, 0.0, 200.0], [1.0, 1.0, 1.0]),   // past the far face
+        aabb([0.0, 0.0, -50.0], [1.0, 1.0, 1.0]),  // behind the near face
+        aabb([0.0, 0.0, 200.0], [1.0, 1.0, 1.0]),  // past the far face
     ]
 }
 

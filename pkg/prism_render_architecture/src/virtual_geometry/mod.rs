@@ -49,9 +49,9 @@ pub use pipeline::{ClusterDecision, ClusterRequest, ViewCullContext};
 pub use raster_gradients::TriangleGradients;
 pub use raster_path::{select_raster_path, ClusterRasterStats, RasterCapability};
 pub use software_raster::{
-    cluster_of, encode_depth, pack_cluster_triangle, pack_vis, project_vertex,
-    rasterize_cluster, rasterize_triangle, triangle_of, vis_depth, vis_payload,
-    ScreenVertex, VisBuffer, CLUSTER_TRIANGLE_BITS, MAX_CLUSTER_TRIANGLES,
+    cluster_of, encode_depth, pack_cluster_triangle, pack_vis, project_vertex, rasterize_cluster,
+    rasterize_triangle, triangle_of, vis_depth, vis_payload, ScreenVertex, VisBuffer,
+    CLUSTER_TRIANGLE_BITS, MAX_CLUSTER_TRIANGLES,
 };
 
 /// Version of the virtual-geometry contracts in this module.

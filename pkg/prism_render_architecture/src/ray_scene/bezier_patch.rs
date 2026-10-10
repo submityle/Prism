@@ -237,12 +237,7 @@ impl BezierPatch {
             for i in 0..ru {
                 let vid = |ii: usize, jj: usize| (jj * cols + ii) as u32;
                 // (u, v) corner order 0=(0,0), 1=(1,0), 2=(1,1), 3=(0,1).
-                indices.push([
-                    vid(i, j),
-                    vid(i + 1, j),
-                    vid(i + 1, j + 1),
-                    vid(i, j + 1),
-                ]);
+                indices.push([vid(i, j), vid(i + 1, j), vid(i + 1, j + 1), vid(i, j + 1)]);
             }
         }
         IndexedBilinearPatchMesh::new(positions, normals, uvs, indices)

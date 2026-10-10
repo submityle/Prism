@@ -226,14 +226,11 @@ mod tests {
 
     #[test]
     fn empty_scene_is_fully_lit() {
-        let s = evaluate_soft_shadow(
-            Vec3::ZERO,
-            Vec3::Y,
-            0.05,
-            &[],
-            SdfShadowParams::default(),
+        let s = evaluate_soft_shadow(Vec3::ZERO, Vec3::Y, 0.05, &[], SdfShadowParams::default());
+        assert!(
+            (s - 1.0).abs() < 1.0e-4,
+            "empty scene should be lit, got {s}"
         );
-        assert!((s - 1.0).abs() < 1.0e-4, "empty scene should be lit, got {s}");
     }
 
     #[test]
@@ -338,7 +335,11 @@ mod tests {
                 radius: 0.1,
             },
         ];
-        for p in [Vec3::ZERO, Vec3::new(0.0, 2.0, 0.0), Vec3::new(5.0, 5.0, 5.0)] {
+        for p in [
+            Vec3::ZERO,
+            Vec3::new(0.0, 2.0, 0.0),
+            Vec3::new(5.0, 5.0, 5.0),
+        ] {
             assert!(scene_distance(&scene, p).is_finite());
         }
     }

@@ -37,7 +37,10 @@ impl Event {
     /// Builds an event with no actions yet.
     #[must_use]
     pub fn new(id: EventId) -> Self {
-        Self { id, actions: Vec::new() }
+        Self {
+            id,
+            actions: Vec::new(),
+        }
     }
 
     /// Builds an event from an existing action list.
@@ -95,7 +98,10 @@ mod tests {
             .with(Action::Play(Playable::Sound(SoundId::new(10))))
             .with(Action::StopAll);
         assert_eq!(e.len(), 2);
-        assert_eq!(e.actions()[0], Action::Play(Playable::Sound(SoundId::new(10))));
+        assert_eq!(
+            e.actions()[0],
+            Action::Play(Playable::Sound(SoundId::new(10)))
+        );
         assert_eq!(e.actions()[1], Action::StopAll);
     }
 

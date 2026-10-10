@@ -78,7 +78,11 @@ const ENERGY_FLOOR: Sample = 1e-20;
 /// Sanitises a sample, mapping non-finite values to `0`.
 #[inline]
 fn finite(x: Sample) -> Sample {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Accumulates the energy `sum p[n]^2` over a slice as an `f64` accumulator,

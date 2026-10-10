@@ -322,7 +322,10 @@ mod tests {
         }
         let mut targets = vec![target_at(&hulls[0], Vec3::new(5.0, 0.0, 0.0))];
         for k in 0..40 {
-            targets.push(target_at(&hulls[k + 1], Vec3::new(1.0 + 1.5 * (k as f32), 60.0, 0.0)));
+            targets.push(target_at(
+                &hulls[k + 1],
+                Vec3::new(1.0 + 1.5 * (k as f32), 60.0, 0.0),
+            ));
         }
         let cast = SceneBoxCast::new(Vec3::ZERO, Vec3::X, Vec3::splat(0.5), Quat::IDENTITY, 50.0);
         let brute = box_cast(&targets, &cast);

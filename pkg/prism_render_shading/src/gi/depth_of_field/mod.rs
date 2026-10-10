@@ -11,7 +11,6 @@
 //! This module implements the thin-lens circle-of-confusion model, a
 //! scatter-as-gather bokeh accumulator, and near/far layer compositing.
 
-
 pub mod coc;
 pub mod gather;
 pub mod layers;

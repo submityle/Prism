@@ -25,10 +25,10 @@
 use alloc::string::String;
 
 use bytemuck::{Pod, Zeroable};
+use prism_math::shader_mirror::WGSL_LOOK_AT_RH;
 use prism_math::Mat4;
 use prism_math::Vec3;
 use prism_math::Vec4;
-use prism_math::shader_mirror::WGSL_LOOK_AT_RH;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BufferBindingType, CommandEncoderDescriptor,

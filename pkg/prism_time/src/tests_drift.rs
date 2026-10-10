@@ -196,7 +196,11 @@ fn deterministic_double_run_matches_bit_for_bit() {
             if frame % 50 == 0 {
                 dc.observe(ns(t + 7_000));
             }
-            let dt = if frame % 3 == 0 { 16_000_000 } else { 17_000_000 };
+            let dt = if frame % 3 == 0 {
+                16_000_000
+            } else {
+                17_000_000
+            };
             t += dt;
             dc.advance(ns(dt));
         }

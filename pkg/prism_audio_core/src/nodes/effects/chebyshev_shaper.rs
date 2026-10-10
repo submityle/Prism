@@ -639,7 +639,13 @@ mod tests {
         let reference: Vec<Sample> = input.channel(0).to_vec();
         let out = run(&mut node, input);
         // After the DC blocker settles the shaped output tracks the input.
-        for (actual, expected) in out.channel(0).iter().zip(reference.iter()).skip(1_000).take(3_800) {
+        for (actual, expected) in out
+            .channel(0)
+            .iter()
+            .zip(reference.iter())
+            .skip(1_000)
+            .take(3_800)
+        {
             assert!((actual - expected).abs() < 1e-2);
         }
     }

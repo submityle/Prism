@@ -111,7 +111,11 @@ pub struct Doppler {
 impl Default for Doppler {
     #[inline]
     fn default() -> Self {
-        Self { speed_of_sound: SPEED_OF_SOUND_MPS, scale: 1.0, max_ratio: 2.0 }
+        Self {
+            speed_of_sound: SPEED_OF_SOUND_MPS,
+            scale: 1.0,
+            max_ratio: 2.0,
+        }
     }
 }
 
@@ -199,7 +203,10 @@ mod tests {
         let weak = doppler_ratio(v, SPEED_OF_SOUND_MPS, 0.5);
 
         // All are receding (< 1). Larger scale pushes the ratio further from 1.
-        assert!(strong < normal, "strong {strong} should be < normal {normal}");
+        assert!(
+            strong < normal,
+            "strong {strong} should be < normal {normal}"
+        );
         assert!(normal < weak, "normal {normal} should be < weak {weak}");
         assert!(weak < 1.0);
     }
@@ -209,7 +216,10 @@ mod tests {
         assert!((doppler_ratio(123.0, SPEED_OF_SOUND_MPS, 0.0) - 1.0).abs() < EPS);
         assert!((doppler_ratio(-123.0, SPEED_OF_SOUND_MPS, 0.0) - 1.0).abs() < EPS);
 
-        let doppler = Doppler { scale: 0.0, ..Doppler::default() };
+        let doppler = Doppler {
+            scale: 0.0,
+            ..Doppler::default()
+        };
         assert!((doppler.pitch_ratio(500.0) - 1.0).abs() < EPS);
     }
 
@@ -242,7 +252,10 @@ mod tests {
     #[test]
     fn max_ratio_below_one_is_treated_as_unity() {
         // max_ratio < 1.0 is floored to 1.0, collapsing the clamp to [1, 1].
-        let doppler = Doppler { max_ratio: 0.25, ..Doppler::default() };
+        let doppler = Doppler {
+            max_ratio: 0.25,
+            ..Doppler::default()
+        };
         assert!((doppler.pitch_ratio(-100.0) - 1.0).abs() < EPS);
         assert!((doppler.pitch_ratio(100.0) - 1.0).abs() < EPS);
     }

@@ -270,10 +270,7 @@ fn hotcold_exposes_its_layout_plan() {
 fn column_shapes_arity_matches_tuple() {
     assert_eq!(<(u8,) as ColumnShapes>::ARITY, 1);
     assert_eq!(<(u8, u16, u32, u64) as ColumnShapes>::ARITY, 4);
-    assert_eq!(
-        <(u8, u8, u8, u8, u8, u8, u8, u8) as ColumnShapes>::ARITY,
-        8
-    );
+    assert_eq!(<(u8, u8, u8, u8, u8, u8, u8, u8) as ColumnShapes>::ARITY, 8);
     assert_eq!(
         <(u8, u16, u32, u64, u8, u16, u32, u64) as ColumnShapes>::column_shapes().len(),
         8

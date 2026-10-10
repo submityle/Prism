@@ -236,7 +236,11 @@ mod tests {
         assert_eq!(brute, bvh, "BVH convex cast must equal brute force");
         let hit = brute.expect("the swept box reaches the first target");
         assert_eq!(hit.target, 0, "the nearest target is struck first");
-        assert!((hit.distance - 2.0).abs() < 1e-4, "distance was {}", hit.distance);
+        assert!(
+            (hit.distance - 2.0).abs() < 1e-4,
+            "distance was {}",
+            hit.distance
+        );
     }
 
     #[test]
@@ -306,7 +310,14 @@ mod tests {
         let targets = [target_at(&th[0], Vec3::new(10.0, 0.0, 0.0), 0.0)];
         // Near face at x = 9.5, reached at origin travel 9.0, beyond max 5.0.
         let cast = SceneConvexCast::new(&swept, Vec3::ZERO, Vec3::X, Quat::IDENTITY, 0.0, 5.0);
-        assert_eq!(convex_cast_bvh(&targets, &cast), None, "contact is past max distance");
-        assert_eq!(convex_cast(&targets, &cast), convex_cast_bvh(&targets, &cast));
+        assert_eq!(
+            convex_cast_bvh(&targets, &cast),
+            None,
+            "contact is past max distance"
+        );
+        assert_eq!(
+            convex_cast(&targets, &cast),
+            convex_cast_bvh(&targets, &cast)
+        );
     }
 }

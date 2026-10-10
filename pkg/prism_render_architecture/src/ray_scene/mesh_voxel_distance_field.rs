@@ -206,9 +206,8 @@ mod tests {
     fn brute_force(grid: &VoxelGrid) -> Vec<u64> {
         let dims = grid.dims();
         let occupied = grid.occupied();
-        let mut out = Vec::with_capacity(
-            (dims[0] as usize) * (dims[1] as usize) * (dims[2] as usize),
-        );
+        let mut out =
+            Vec::with_capacity((dims[0] as usize) * (dims[1] as usize) * (dims[2] as usize));
         for z in 0..dims[2] {
             for y in 0..dims[1] {
                 for x in 0..dims[0] {
@@ -231,7 +230,12 @@ mod tests {
 
     fn quad() -> TriangleMesh {
         mesh(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
             vec![[0, 1, 2], [0, 2, 3]],
         )
     }
@@ -310,9 +314,8 @@ mod tests {
         let field = voxel_distance_field(&grid);
         assert_eq!(field.dims(), grid.dims());
         assert_eq!(field.voxel_size(), grid.voxel_size());
-        let expected = (grid.dims()[0] as usize)
-            * (grid.dims()[1] as usize)
-            * (grid.dims()[2] as usize);
+        let expected =
+            (grid.dims()[0] as usize) * (grid.dims()[1] as usize) * (grid.dims()[2] as usize);
         assert_eq!(field.squared_distances().len(), expected);
     }
 }

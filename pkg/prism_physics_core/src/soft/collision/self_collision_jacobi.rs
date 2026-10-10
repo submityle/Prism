@@ -454,7 +454,14 @@ mod tests {
         let inverse_masses = [1.0, 1.0];
         let mut jac = [Vec3::ZERO, Vec3::new(0.5, 0.0, 0.0)];
         let mut gs = jac;
-        resolve_self_collision_with_friction_jacobi(&mut jac, &prev, &inverse_masses, 2.0, 1.0, 1.0);
+        resolve_self_collision_with_friction_jacobi(
+            &mut jac,
+            &prev,
+            &inverse_masses,
+            2.0,
+            1.0,
+            1.0,
+        );
         resolve_self_collision_with_friction(&mut gs, &prev, &inverse_masses, 2.0, 1.0, 1.0);
         approx_eq(jac[0], gs[0]);
         approx_eq(jac[1], gs[1]);

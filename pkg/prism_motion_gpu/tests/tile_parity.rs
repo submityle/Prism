@@ -10,10 +10,10 @@
 
 use prism_motion_gpu::context::GpuContext;
 use prism_motion_gpu::tile::{GpuNeighborMax, GpuTileMax, TileField};
-use prism_render_architecture::motion::Vec2;
 use prism_render_architecture::motion::dilation::{
-    TileVelocityField, VelocityField, neighbor_max, tile_max,
+    neighbor_max, tile_max, TileVelocityField, VelocityField,
 };
+use prism_render_architecture::motion::Vec2;
 
 /// Acquires a device, or prints a skip note and returns `None` on hosts without
 /// a usable adapter.
@@ -75,7 +75,12 @@ fn assert_tile_parity(gpu: &TileField, golden: &TileVelocityField) {
     assert_eq!(gpu.tiles_x(), golden.tiles_x(), "tiles_x mismatch");
     assert_eq!(gpu.tiles_y(), golden.tiles_y(), "tiles_y mismatch");
     assert_eq!(gpu.len(), golden.len(), "tile count mismatch");
-    for (i, (g, c)) in gpu.as_slice().iter().zip(golden.as_slice().iter()).enumerate() {
+    for (i, (g, c)) in gpu
+        .as_slice()
+        .iter()
+        .zip(golden.as_slice().iter())
+        .enumerate()
+    {
         assert!(bits_eq(*g, *c), "tile {i}: gpu {g:?} != golden {c:?}");
     }
 }
@@ -136,7 +141,10 @@ fn tile_max_zero_or_empty_returns_none() {
     let kernel = GpuTileMax::new(&ctx);
 
     let vel = field(2, 2, &[(1.0, 1.0), (3.0, 4.0), (-2.0, 0.0), (0.0, -1.0)]);
-    assert!(kernel.reduce(&ctx, &vel, 0).is_none(), "tile_size 0 -> None");
+    assert!(
+        kernel.reduce(&ctx, &vel, 0).is_none(),
+        "tile_size 0 -> None"
+    );
 
     let empty = VelocityField::zeroed(0, 0);
     assert!(kernel.reduce(&ctx, &empty, 2).is_none(), "empty -> None");
@@ -227,7 +235,10 @@ fn large_multi_workgroup_grid_matches_golden() {
     // Anti-vacuous: some tile is non-zero, and NeighborMax changes at least one
     // tile relative to TileMax (a stronger neighbor bleeds in somewhere).
     assert!(
-        gpu_tiles.as_slice().iter().any(|v| !bits_eq(*v, Vec2::ZERO)),
+        gpu_tiles
+            .as_slice()
+            .iter()
+            .any(|v| !bits_eq(*v, Vec2::ZERO)),
         "tile_max produced an all-zero field"
     );
     assert!(

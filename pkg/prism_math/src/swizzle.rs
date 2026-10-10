@@ -4202,4 +4202,3 @@ impl Vec4 {
         Vec4::new(self.w, self.w, self.w, self.w)
     }
 }
-

@@ -90,8 +90,7 @@ macro_rules! instrument_system {
         let _prism_system = $crate::instrument::system::SystemScope::new($name);
     };
     ($name:expr, $category:expr) => {
-        let _prism_system =
-            $crate::instrument::system::SystemScope::in_category($name, $category);
+        let _prism_system = $crate::instrument::system::SystemScope::in_category($name, $category);
     };
 }
 

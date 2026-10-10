@@ -4,10 +4,10 @@ use crate::kinds::List;
 use crate::reflect::Reflect;
 use crate::type_info::{ListInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef};
-use core::any::Any;
 use alloc::boxed::Box;
-use std::sync::OnceLock;
 use alloc::vec::Vec;
+use core::any::Any;
+use std::sync::OnceLock;
 
 /// A growable, heterogeneously-boxed list assembled at runtime.
 ///

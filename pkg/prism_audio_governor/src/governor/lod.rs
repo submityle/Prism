@@ -46,7 +46,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
-use prism_audio_core::math::{Sample, lerp};
+use prism_audio_core::math::{lerp, Sample};
 use prism_audio_core::voice::Importance;
 
 /// Anti-aliasing oversampling factor for nonlinear stages (waveshapers,
@@ -466,7 +466,9 @@ mod tests {
 
     #[test]
     fn modulation_rate_cost() {
-        assert!(ModulationRate::PerBlock.relative_cost() < ModulationRate::PerSample.relative_cost());
+        assert!(
+            ModulationRate::PerBlock.relative_cost() < ModulationRate::PerSample.relative_cost()
+        );
     }
 
     #[test]
@@ -475,7 +477,9 @@ mod tests {
         // trace is dearer, and the hybrid tier that runs both is the most
         // expensive.
         assert!(PropagationTier::Wave.relative_cost() < PropagationTier::Geometric.relative_cost());
-        assert!(PropagationTier::Geometric.relative_cost() < PropagationTier::Hybrid.relative_cost());
+        assert!(
+            PropagationTier::Geometric.relative_cost() < PropagationTier::Hybrid.relative_cost()
+        );
         assert!((PropagationTier::Hybrid.relative_cost() - 1.0).abs() < EPS);
     }
 
@@ -496,8 +500,14 @@ mod tests {
         // The cheapest rung runs geometric-only; the reference rung runs the
         // hybrid backend; and the baked wave field is engaged before the top.
         let ladder = QualityLadder::standard();
-        assert_eq!(ladder.profile(QualityTier(0)).propagation, PropagationTier::Geometric);
-        assert_eq!(ladder.profile(QualityTier(4)).propagation, PropagationTier::Hybrid);
+        assert_eq!(
+            ladder.profile(QualityTier(0)).propagation,
+            PropagationTier::Geometric
+        );
+        assert_eq!(
+            ladder.profile(QualityTier(4)).propagation,
+            PropagationTier::Hybrid
+        );
         assert!(ladder.profile(QualityTier(2)).propagation.uses_wave_field());
     }
 

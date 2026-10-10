@@ -9,8 +9,8 @@
 //! [`FunctionError`] instead of being silently mis-read (design §12, §22 —
 //! "错配会 UB" is prevented entirely in safe code).
 
-use crate::func::args::ArgList;
 use crate::from_reflect::FromReflect;
+use crate::func::args::ArgList;
 use crate::reflect::{Reflect, Typed};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -96,10 +96,7 @@ impl fmt::Display for FunctionError {
                 expected,
                 actual,
             } => match function {
-                Some(name) => write!(
-                    f,
-                    "`{name}` expects {expected} argument(s), got {actual}"
-                ),
+                Some(name) => write!(f, "`{name}` expects {expected} argument(s), got {actual}"),
                 None => write!(f, "function expects {expected} argument(s), got {actual}"),
             },
             FunctionError::ArgTypeMismatch {
@@ -259,7 +256,13 @@ impl_into_function!((A0, a0, 0));
 impl_into_function!((A0, a0, 0), (A1, a1, 1));
 impl_into_function!((A0, a0, 0), (A1, a1, 1), (A2, a2, 2));
 impl_into_function!((A0, a0, 0), (A1, a1, 1), (A2, a2, 2), (A3, a3, 3));
-impl_into_function!((A0, a0, 0), (A1, a1, 1), (A2, a2, 2), (A3, a3, 3), (A4, a4, 4));
+impl_into_function!(
+    (A0, a0, 0),
+    (A1, a1, 1),
+    (A2, a2, 2),
+    (A3, a3, 3),
+    (A4, a4, 4)
+);
 impl_into_function!(
     (A0, a0, 0),
     (A1, a1, 1),
@@ -287,4 +290,3 @@ impl_into_function!(
     (A6, a6, 6),
     (A7, a7, 7)
 );
-

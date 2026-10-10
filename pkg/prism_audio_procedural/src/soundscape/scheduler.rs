@@ -217,8 +217,8 @@ impl SoundscapeScheduler {
                     let (dx, dz) = self.rng.next_in_disc(element.scatter_radius_m());
                     let pitch = self.rng.next_range(plo, phi);
                     let base_gain = self.rng.next_range(glo, ghi);
-                    let under_cap = clock.active_estimate + 1.0 <= per_cap
-                        && global_active + 1.0 <= max_total;
+                    let under_cap =
+                        clock.active_estimate + 1.0 <= per_cap && global_active + 1.0 <= max_total;
                     if permitted && under_cap {
                         let position = [
                             self.listener[0] + dx,

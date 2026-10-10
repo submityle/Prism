@@ -231,9 +231,21 @@ fn clamp_non_negative(value: f32) -> f32 {
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.max(0.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.max(0.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.max(0.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -317,20 +329,27 @@ mod tests {
         let lc = Vec3::splat(2.0);
         let leaf = Vec3::new(0.3, 0.6, 0.2);
         // Viewing from behind the leaf toward the light: V = -Z, so dot(V,-L)=1.
-        let aligned = foliage_transmission(
-            -Vec3::Z, light, normal, 0.1, 1.0, 1.0, sigma, lc, leaf, 0.5,
-        );
+        let aligned =
+            foliage_transmission(-Vec3::Z, light, normal, 0.1, 1.0, 1.0, sigma, lc, leaf, 0.5);
         // Viewing from the same side as the light: V = +Z, dot(V,-L) = -1.
-        let anti = foliage_transmission(
-            Vec3::Z, light, normal, 0.1, 1.0, 1.0, sigma, lc, leaf, 0.5,
-        );
+        let anti =
+            foliage_transmission(Vec3::Z, light, normal, 0.1, 1.0, 1.0, sigma, lc, leaf, 0.5);
         assert!(aligned.x > anti.x, "aligned={aligned} anti={anti}");
     }
 
     #[test]
     fn transmission_vanishes_without_translucency() {
         let out = foliage_transmission(
-            -Vec3::Z, Vec3::Z, Vec3::Y, 0.2, 0.0, 1.0, Vec3::splat(0.5), Vec3::ONE, Vec3::ONE, 0.5,
+            -Vec3::Z,
+            Vec3::Z,
+            Vec3::Y,
+            0.2,
+            0.0,
+            1.0,
+            Vec3::splat(0.5),
+            Vec3::ONE,
+            Vec3::ONE,
+            0.5,
         );
         assert!(out.max_element() < 1e-6, "out={out}");
     }
@@ -338,10 +357,28 @@ mod tests {
     #[test]
     fn transmission_attenuates_with_thickness() {
         let thin = foliage_transmission(
-            -Vec3::Z, Vec3::Z, Vec3::Y, 0.3, 1.0, 0.5, Vec3::splat(1.0), Vec3::ONE, Vec3::ONE, 0.5,
+            -Vec3::Z,
+            Vec3::Z,
+            Vec3::Y,
+            0.3,
+            1.0,
+            0.5,
+            Vec3::splat(1.0),
+            Vec3::ONE,
+            Vec3::ONE,
+            0.5,
         );
         let thick = foliage_transmission(
-            -Vec3::Z, Vec3::Z, Vec3::Y, 0.3, 1.0, 4.0, Vec3::splat(1.0), Vec3::ONE, Vec3::ONE, 0.5,
+            -Vec3::Z,
+            Vec3::Z,
+            Vec3::Y,
+            0.3,
+            1.0,
+            4.0,
+            Vec3::splat(1.0),
+            Vec3::ONE,
+            Vec3::ONE,
+            0.5,
         );
         assert!(thin.x > thick.x, "thin={thin} thick={thick}");
     }
@@ -350,7 +387,16 @@ mod tests {
     fn degenerate_direction_uses_neutral_cosine() {
         // Zero view vector must not NaN; falls back to cos = 0 (isotropic use).
         let out = foliage_transmission(
-            Vec3::ZERO, Vec3::Z, Vec3::Y, 0.5, 1.0, 1.0, Vec3::splat(0.5), Vec3::ONE, Vec3::ONE, 0.5,
+            Vec3::ZERO,
+            Vec3::Z,
+            Vec3::Y,
+            0.5,
+            1.0,
+            1.0,
+            Vec3::splat(0.5),
+            Vec3::ONE,
+            Vec3::ONE,
+            0.5,
         );
         assert!(out.is_finite());
     }
@@ -359,8 +405,16 @@ mod tests {
     fn is_deterministic() {
         let args = || {
             foliage_transmission(
-                -Vec3::Z, Vec3::Z, Vec3::Y, 0.25, 0.8, 1.2, Vec3::splat(0.6), Vec3::ONE,
-                Vec3::splat(0.5), 0.3,
+                -Vec3::Z,
+                Vec3::Z,
+                Vec3::Y,
+                0.25,
+                0.8,
+                1.2,
+                Vec3::splat(0.6),
+                Vec3::ONE,
+                Vec3::splat(0.5),
+                0.3,
             )
         };
         assert_eq!(args(), args());

@@ -307,7 +307,9 @@ impl Instance {
     /// input, or a result that collapses to zero length, yields `[0, 0, 0]`.
     #[must_use]
     pub fn transform_normal_to_world(&self, object_normal: [f32; 3]) -> [f32; 3] {
-        let n = self.world_to_object.transpose_transform_vector(object_normal);
+        let n = self
+            .world_to_object
+            .transpose_transform_vector(object_normal);
         let len_sq = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
         if len_sq <= 0.0 {
             return [0.0, 0.0, 0.0];
@@ -938,11 +940,7 @@ mod tests {
     /// Brute-force reference: query every instance's BLAS in object space and
     /// keep the globally nearest hit. Compared to `Tlas::closest_hit` by the
     /// stable `(instance_id, primitive, t)` tuple.
-    fn brute_closest(
-        instances: &[Instance],
-        blases: &[Bvh],
-        ray: &Ray,
-    ) -> Option<(u32, u32, f32)> {
+    fn brute_closest(instances: &[Instance], blases: &[Bvh], ray: &Ray) -> Option<(u32, u32, f32)> {
         let mut best: Option<(u32, u32, f32)> = None;
         let mut best_t = ray.t_max();
         for inst in instances {
@@ -973,7 +971,11 @@ mod tests {
             let round = inv.transform_point(m.transform_point(p));
             assert!(approx_pt(round, p, 1e-4), "roundtrip {round:?} != {p:?}");
             // Direction roundtrip (linear part only).
-            let v = [rng.range(-2.0, 2.0), rng.range(-2.0, 2.0), rng.range(-2.0, 2.0)];
+            let v = [
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+            ];
             let vr = inv.transform_vector(m.transform_vector(v));
             assert!(approx_pt(vr, v, 1e-4), "vec roundtrip {vr:?} != {v:?}");
         }
@@ -995,8 +997,16 @@ mod tests {
 
         let mut rng = Rng::new(99);
         for _ in 0..3000 {
-            let origin = [rng.range(-3.0, 3.0), rng.range(-3.0, 3.0), rng.range(2.0, 6.0)];
-            let target = [rng.range(-2.0, 2.0), rng.range(-2.0, 2.0), rng.range(-2.0, 2.0)];
+            let origin = [
+                rng.range(-3.0, 3.0),
+                rng.range(-3.0, 3.0),
+                rng.range(2.0, 6.0),
+            ];
+            let target = [
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+            ];
             let dir = [
                 target[0] - origin[0],
                 target[1] - origin[1],
@@ -1205,8 +1215,7 @@ mod tests {
 
             // New transforms per id; rebuild an independent reference TLAS with
             // them, then refit the existing one to the same target.
-            let moved_transforms: Vec<Affine3> =
-                (0..n).map(|_| random_affine(&mut rng)).collect();
+            let moved_transforms: Vec<Affine3> = (0..n).map(|_| random_affine(&mut rng)).collect();
             let moved_instances: Vec<Instance> = (0..n)
                 .map(|id| Instance::new(moved_transforms[id], 0, id as u32).unwrap())
                 .collect();
@@ -1265,8 +1274,11 @@ mod tests {
             let rebuilt = tlas.rebuilt(&blases);
 
             assert_eq!(rebuilt.instances().len(), n);
-            let mut ids: Vec<u32> =
-                rebuilt.instances().iter().map(Instance::instance_id).collect();
+            let mut ids: Vec<u32> = rebuilt
+                .instances()
+                .iter()
+                .map(Instance::instance_id)
+                .collect();
             ids.sort_unstable();
             let expected: Vec<u32> = (0..n as u32).collect();
             assert_eq!(ids, expected, "rebuilt must keep every instance once");
@@ -1283,7 +1295,10 @@ mod tests {
                     rng.range(-1.0, 1.0),
                 ];
                 let ray = Ray::infinite(origin, dir);
-                match (tlas.closest_hit(&ray, &blases), rebuilt.closest_hit(&ray, &blases)) {
+                match (
+                    tlas.closest_hit(&ray, &blases),
+                    rebuilt.closest_hit(&ray, &blases),
+                ) {
                     (None, None) => {}
                     (Some(a), Some(b)) => {
                         assert_eq!(a.instance_id, b.instance_id, "instance mismatch");
@@ -1308,10 +1323,17 @@ mod tests {
 
         // Flatten the transform (non-invertible) -> instance keeps its old one.
         tlas.refit(|_| Affine3::from_scale([1.0, 0.0, 1.0]), &blases);
-        let after = tlas.closest_hit(&ray, &blases).expect("still hits the quad");
+        let after = tlas
+            .closest_hit(&ray, &blases)
+            .expect("still hits the quad");
         assert_eq!(after.instance_id, before.instance_id);
         assert_eq!(after.primitive, before.primitive);
-        assert!(approx(after.t, before.t, 1e-5), "t {} != {}", after.t, before.t);
+        assert!(
+            approx(after.t, before.t, 1e-5),
+            "t {} != {}",
+            after.t,
+            before.t
+        );
     }
 
     /// Brute-force watertight reference: query every instance's BLAS with the
@@ -1350,8 +1372,16 @@ mod tests {
 
         let mut rng = Rng::new(0x1DEF_2266);
         for _ in 0..5000 {
-            let origin = [rng.range(-3.0, 3.0), rng.range(-3.0, 3.0), rng.range(2.0, 6.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-2.0, -0.2)];
+            let origin = [
+                rng.range(-3.0, 3.0),
+                rng.range(-3.0, 3.0),
+                rng.range(2.0, 6.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-2.0, -0.2),
+            ];
             let ray = Ray::infinite(origin, dir);
             let direct = blas.closest_hit_watertight(&ray);
             let via = tlas.closest_hit_watertight(&ray, &blases);
@@ -1459,7 +1489,10 @@ mod tests {
         // plane, so a -z ray still sees it. Exact 3-4-5 rotation (c^2+s^2=1)
         // avoids transcendental calls. Column-major z-rotation matrix.
         let (c, s) = (0.6_f32, 0.8_f32);
-        let rot = Affine3::from_cols([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]], [0.0, 0.0, 0.0]);
+        let rot = Affine3::from_cols(
+            [[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]],
+            [0.0, 0.0, 0.0],
+        );
         let inst = Instance::new(rot, 0, 0).unwrap();
         let tlas = Tlas::build(&[inst], &blases);
 
@@ -1478,7 +1511,10 @@ mod tests {
                 leaks += 1;
             }
         }
-        assert_eq!(leaks, 0, "watertight TLAS leaked {leaks}/{steps} along seam");
+        assert_eq!(
+            leaks, 0,
+            "watertight TLAS leaked {leaks}/{steps} along seam"
+        );
     }
 
     fn vdot(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -1539,7 +1575,10 @@ mod tests {
     #[test]
     fn degenerate_normal_maps_to_zero() {
         let inst = Instance::new(Affine3::from_scale([2.0, 3.0, 4.0]), 0, 0).unwrap();
-        assert_eq!(inst.transform_normal_to_world([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        assert_eq!(
+            inst.transform_normal_to_world([0.0, 0.0, 0.0]),
+            [0.0, 0.0, 0.0]
+        );
     }
 
     #[test]
@@ -1673,10 +1712,17 @@ mod tests {
         let tlas = Tlas::build(&[inst], &blases);
         // Straight down -z at the z=0 quad, which an all-mask ray would hit at t=5.
         let ray = Ray::new([0.0, 0.0, 5.0], [0.0, 0.0, -1.0], 1.0e-4, 100.0);
-        assert!(tlas.closest_hit(&ray, &blases).is_some(), "sanity: geometry is there");
-        assert!(tlas.closest_hit_masked(&ray, &blases, 0b0000_0010).is_none());
+        assert!(
+            tlas.closest_hit(&ray, &blases).is_some(),
+            "sanity: geometry is there"
+        );
+        assert!(tlas
+            .closest_hit_masked(&ray, &blases, 0b0000_0010)
+            .is_none());
         assert!(!tlas.any_hit_masked(&ray, &blases, 0b0000_0010));
-        assert!(tlas.closest_hit_watertight_masked(&ray, &blases, 0b0000_0010).is_none());
+        assert!(tlas
+            .closest_hit_watertight_masked(&ray, &blases, 0b0000_0010)
+            .is_none());
         assert!(!tlas.any_hit_watertight_masked(&ray, &blases, 0b0000_0010));
     }
 
@@ -1693,8 +1739,16 @@ mod tests {
         assert!(instances.iter().all(|i| i.mask() == Instance::MASK_ALL));
         let tlas = Tlas::build(&instances, &blases);
         for _ in 0..500 {
-            let origin = [rng.range(-8.0, 8.0), rng.range(-8.0, 8.0), rng.range(-8.0, 8.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-8.0, 8.0),
+                rng.range(-8.0, 8.0),
+                rng.range(-8.0, 8.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             let ray = Ray::new(origin, dir, 1.0e-4, 50.0);
 
             let a = tlas.closest_hit(&ray, &blases);
@@ -1730,7 +1784,9 @@ mod tests {
         let inst = Instance::with_mask(Affine3::identity(), 0, 7, 0b0000_0110).unwrap();
         let tlas = Tlas::build(&[inst], &blases);
         let ray = Ray::new([0.0, 0.0, 5.0], [0.0, 0.0, -1.0], 1.0e-4, 100.0);
-        let hit = tlas.closest_hit_masked(&ray, &blases, 0b0000_0100).expect("overlap hits");
+        let hit = tlas
+            .closest_hit_masked(&ray, &blases, 0b0000_0100)
+            .expect("overlap hits");
         assert_eq!(hit.instance_id, 7);
         assert!(tlas.any_hit_masked(&ray, &blases, 0b0000_0100));
     }
@@ -1745,7 +1801,9 @@ mod tests {
         let ray = Ray::new([0.0, 0.0, 5.0], [0.0, 0.0, -1.0], 1.0e-4, 100.0);
         assert!(tlas.closest_hit_masked(&ray, &blases, 0).is_none());
         assert!(!tlas.any_hit_masked(&ray, &blases, 0));
-        assert!(tlas.closest_hit_watertight_masked(&ray, &blases, 0).is_none());
+        assert!(tlas
+            .closest_hit_watertight_masked(&ray, &blases, 0)
+            .is_none());
         assert!(!tlas.any_hit_watertight_masked(&ray, &blases, 0));
     }
 
@@ -1802,9 +1860,10 @@ mod tests {
         for mask in 0u8..=0xFF {
             let a = tlas.closest_hit_masked(&ray, &blases, mask);
             let b = tlas.closest_hit_masked(&ray, &blases, mask);
-            assert_eq!(a.map(|h| (h.instance_id, h.primitive, h.t.to_bits())),
-                       b.map(|h| (h.instance_id, h.primitive, h.t.to_bits())));
+            assert_eq!(
+                a.map(|h| (h.instance_id, h.primitive, h.t.to_bits())),
+                b.map(|h| (h.instance_id, h.primitive, h.t.to_bits()))
+            );
         }
     }
 }
-

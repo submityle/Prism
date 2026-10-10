@@ -156,7 +156,11 @@ pub fn ray_aabb(ray: Ray3, aabb: Aabb3) -> Option<RayHit> {
         1 => normal.y = sign,
         _ => normal.z = sign,
     }
-    Some(RayHit { t, point: ray.at(t), normal })
+    Some(RayHit {
+        t,
+        point: ray.at(t),
+        normal,
+    })
 }
 
 /// Intersect a ray with a plane, returning the hit at non-negative `t`.
@@ -172,8 +176,16 @@ pub fn ray_plane(ray: Ray3, plane: Plane) -> Option<RayHit> {
     if t < 0.0 {
         return None;
     }
-    let normal = if denom > 0.0 { -plane.normal } else { plane.normal };
-    Some(RayHit { t, point: ray.at(t), normal })
+    let normal = if denom > 0.0 {
+        -plane.normal
+    } else {
+        plane.normal
+    };
+    Some(RayHit {
+        t,
+        point: ray.at(t),
+        normal,
+    })
 }
 
 /// Intersect a ray with a triangle via the Möller-Trumbore algorithm,
@@ -217,7 +229,11 @@ pub fn ray_triangle(ray: Ray3, a: Vec3, b: Vec3, c: Vec3) -> Option<RayHit> {
     if normal.dot(ray.direction) > 0.0 {
         normal = -normal;
     }
-    Some(RayHit { t, point: ray.at(t), normal })
+    Some(RayHit {
+        t,
+        point: ray.at(t),
+        normal,
+    })
 }
 
 /// True if two axis-aligned boxes overlap (touching counts as overlap).

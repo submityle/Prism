@@ -55,11 +55,11 @@ fn stat(max_triangle_pixels: f32, triangle_count: u32) -> ClusterRasterStats {
 ///   2 -> large (mesh/indirect per capability), 3 -> large, 4 -> tiny.
 fn scene_stats() -> Vec<ClusterRasterStats> {
     vec![
-        stat(1_000.0, 0), // node 0: empty -> FallbackMesh regardless of size
-        stat(1.0, 8),     // node 1: well below threshold -> ComputeSoftware
+        stat(1_000.0, 0),  // node 0: empty -> FallbackMesh regardless of size
+        stat(1.0, 8),      // node 1: well below threshold -> ComputeSoftware
         stat(4_096.0, 64), // node 2: far above threshold -> best hardware path
         stat(2_048.0, 32), // node 3: far above threshold -> best hardware path
-        stat(2.0, 4),     // node 4: below threshold -> ComputeSoftware
+        stat(2.0, 4),      // node 4: below threshold -> ComputeSoftware
     ]
 }
 
@@ -189,7 +189,13 @@ fn empty_cut_bins_to_empty() {
         mesh_shader: true,
         hardware_indirect: true,
     };
-    let out = binner.bin(&ctx, &[], &scene_stats(), capability, DEFAULT_SOFTWARE_PIXEL_THRESHOLD);
+    let out = binner.bin(
+        &ctx,
+        &[],
+        &scene_stats(),
+        capability,
+        DEFAULT_SOFTWARE_PIXEL_THRESHOLD,
+    );
     assert!(out.is_empty());
     assert_eq!(out.total(), 0);
 }
@@ -207,7 +213,13 @@ fn all_nodes_out_of_range_bins_to_empty() {
     // Every node index is out of range for a single-entry stats slice.
     let cut = [cluster(10), cluster(20), cluster(30)];
     let stats = [stat(4_096.0, 64)];
-    let gpu = binner.bin(&ctx, &cut, &stats, capability, DEFAULT_SOFTWARE_PIXEL_THRESHOLD);
+    let gpu = binner.bin(
+        &ctx,
+        &cut,
+        &stats,
+        capability,
+        DEFAULT_SOFTWARE_PIXEL_THRESHOLD,
+    );
     let expected = bin_cut(&cut, &stats, capability, DEFAULT_SOFTWARE_PIXEL_THRESHOLD);
     assert_eq!(gpu, expected);
     assert!(gpu.is_empty());

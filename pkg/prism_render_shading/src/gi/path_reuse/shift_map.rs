@@ -66,7 +66,11 @@ const MIN_DIST_SQ: f32 = 1.0e-12;
 /// (coincident vertex, zero-length segment, or degenerate normal) returns the
 /// identity `1.0`.  The result is always strictly positive and finite.
 #[inline]
-pub fn reconnection_jacobian(reconnection: PathVertex, src_primary: Vec3, dst_primary: Vec3) -> f32 {
+pub fn reconnection_jacobian(
+    reconnection: PathVertex,
+    src_primary: Vec3,
+    dst_primary: Vec3,
+) -> f32 {
     if reconnection.is_degenerate() {
         return 1.0;
     }
@@ -219,7 +223,8 @@ mod tests {
     #[test]
     fn results_are_deterministic() {
         let rv = anchor();
-        let build = || reconnection_jacobian(rv, Vec3::new(0.2, 0.3, 1.5), Vec3::new(-0.1, 0.4, 1.1));
+        let build =
+            || reconnection_jacobian(rv, Vec3::new(0.2, 0.3, 1.5), Vec3::new(-0.1, 0.4, 1.1));
         assert_eq!(build(), build());
     }
 }

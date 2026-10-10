@@ -160,7 +160,11 @@ impl EventSystem {
         }
         match playable {
             Playable::Sound(sound) => {
-                out.push(ResolvedAction::PlaySound { object, sound, gain_db });
+                out.push(ResolvedAction::PlaySound {
+                    object,
+                    sound,
+                    gain_db,
+                });
             }
             Playable::Container(cid) => {
                 let Some(container) = model.container(cid) else {
@@ -169,18 +173,25 @@ impl EventSystem {
                 let kind = &container.kind;
                 // Resolve the live switch/blend context into locals *before*
                 // borrowing `self`'s fields mutably below.
-                let active_switch =
-                    kind.switch_group().and_then(|group| self.switches.resolve(object, group));
-                let blend_position =
-                    kind.blend_rtpc().map_or(0.0, |rtpc| self.normalized_rtpc(object, rtpc));
+                let active_switch = kind
+                    .switch_group()
+                    .and_then(|group| self.switches.resolve(object, group));
+                let blend_position = kind
+                    .blend_rtpc()
+                    .map_or(0.0, |rtpc| self.normalized_rtpc(object, rtpc));
                 // Resolve one level into an owned pick list in an inner scope so
                 // the `container_states`/`rng` field borrows end before we
                 // recurse back through `&mut self`.
                 let picks = {
-                    let state =
-                        self.container_states.entry(cid).or_default();
+                    let state = self.container_states.entry(cid).or_default();
                     let mut picks = Vec::new();
-                    kind.resolve_into(state, &mut self.rng, active_switch, blend_position, &mut picks);
+                    kind.resolve_into(
+                        state,
+                        &mut self.rng,
+                        active_switch,
+                        blend_position,
+                        &mut picks,
+                    );
                     picks
                 };
                 for pick in picks {
@@ -239,7 +250,10 @@ impl EventSystem {
         value: Sample,
         out: &mut Vec<ResolvedAction>,
     ) {
-        let clamped = self.rtpc.definition(rtpc).map_or(value, |def| def.clamp(value));
+        let clamped = self
+            .rtpc
+            .definition(rtpc)
+            .map_or(value, |def| def.clamp(value));
         self.rtpc_values.insert((object, rtpc), clamped);
         let mut settings = Vec::new();
         self.rtpc.evaluate_into(rtpc, clamped, &mut settings);
@@ -298,11 +312,7 @@ impl EventSystem {
     /// Resolves the active switch for `(object, group)`, falling back to the
     /// group default. `None` only when the group is unknown.
     #[must_use]
-    pub fn resolve_switch(
-        &self,
-        object: GameObjectId,
-        group: SwitchGroupId,
-    ) -> Option<SwitchId> {
+    pub fn resolve_switch(&self, object: GameObjectId, group: SwitchGroupId) -> Option<SwitchId> {
         self.switches.resolve(object, group)
     }
 
@@ -428,7 +438,11 @@ mod tests {
         assert!(system.post_event(&model, EventId::new(1), GameObjectId::new(1), &mut out));
         assert_eq!(out.len(), 1);
         match out[0] {
-            ResolvedAction::PlaySound { object, sound, gain_db } => {
+            ResolvedAction::PlaySound {
+                object,
+                sound,
+                gain_db,
+            } => {
                 assert_eq!(object, GameObjectId::new(1));
                 assert_eq!(sound, SoundId::new(7));
                 assert!(close(gain_db, -9.0), "gain {gain_db} != -9");
@@ -500,10 +514,10 @@ mod tests {
             ParameterTarget::LowpassCutoffHz,
             ParameterCurve::line(0.0, 1000.0, 100.0, 20000.0),
         ));
-        model.add_event(
-            Event::new(EventId::new(1))
-                .with(Action::SetRtpc { rtpc: RtpcId::new(1), value: 50.0 }),
-        );
+        model.add_event(Event::new(EventId::new(1)).with(Action::SetRtpc {
+            rtpc: RtpcId::new(1),
+            value: 50.0,
+        }));
 
         let mut system = EventSystem::new(&model, 1);
         let mut out = Vec::new();
@@ -525,7 +539,10 @@ mod tests {
             }
         }
         // The live value is clamped/stored for later reads.
-        assert!(close(system.rtpc_value(GameObjectId::new(2), RtpcId::new(1)), 50.0));
+        assert!(close(
+            system.rtpc_value(GameObjectId::new(2), RtpcId::new(1)),
+            50.0
+        ));
     }
 
     #[test]
@@ -536,16 +553,22 @@ mod tests {
             vec![StateId::new(10), StateId::new(11)],
             StateId::new(10),
         ));
-        model.add_event(
-            Event::new(EventId::new(1))
-                .with(Action::SetState { group: StateGroupId::new(1), state: StateId::new(11) }),
-        );
+        model.add_event(Event::new(EventId::new(1)).with(Action::SetState {
+            group: StateGroupId::new(1),
+            state: StateId::new(11),
+        }));
         let mut system = EventSystem::new(&model, 1);
-        assert_eq!(system.active_state(StateGroupId::new(1)), Some(StateId::new(10)));
+        assert_eq!(
+            system.active_state(StateGroupId::new(1)),
+            Some(StateId::new(10))
+        );
         let mut out = Vec::new();
         assert!(system.post_event(&model, EventId::new(1), GameObjectId::new(1), &mut out));
         assert!(out.is_empty());
-        assert_eq!(system.active_state(StateGroupId::new(1)), Some(StateId::new(11)));
+        assert_eq!(
+            system.active_state(StateGroupId::new(1)),
+            Some(StateId::new(11))
+        );
     }
 
     #[test]
@@ -556,16 +579,22 @@ mod tests {
             vec![SwitchId::new(20), SwitchId::new(21)],
             SwitchId::new(20),
         ));
-        model.add_event(
-            Event::new(EventId::new(1))
-                .with(Action::SetSwitch { group: SwitchGroupId::new(1), switch: SwitchId::new(21) }),
-        );
+        model.add_event(Event::new(EventId::new(1)).with(Action::SetSwitch {
+            group: SwitchGroupId::new(1),
+            switch: SwitchId::new(21),
+        }));
         let mut system = EventSystem::new(&model, 1);
         let obj = GameObjectId::new(4);
-        assert_eq!(system.resolve_switch(obj, SwitchGroupId::new(1)), Some(SwitchId::new(20)));
+        assert_eq!(
+            system.resolve_switch(obj, SwitchGroupId::new(1)),
+            Some(SwitchId::new(20))
+        );
         let mut out = Vec::new();
         assert!(system.post_event(&model, EventId::new(1), obj, &mut out));
-        assert_eq!(system.resolve_switch(obj, SwitchGroupId::new(1)), Some(SwitchId::new(21)));
+        assert_eq!(
+            system.resolve_switch(obj, SwitchGroupId::new(1)),
+            Some(SwitchId::new(21))
+        );
         // Another object still sees the default.
         assert_eq!(
             system.resolve_switch(GameObjectId::new(5), SwitchGroupId::new(1)),
@@ -580,7 +609,9 @@ mod tests {
         let container = Container::new(
             ContainerId::new(1),
             ContainerKind::Random {
-                children: vec![WeightedChild::uniform(Playable::Container(ContainerId::new(1)))],
+                children: vec![WeightedChild::uniform(Playable::Container(
+                    ContainerId::new(1),
+                ))],
                 mode: RandomMode::Standard,
                 avoid_repeat: 0,
             },

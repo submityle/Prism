@@ -70,16 +70,16 @@
 //! implemented purely from that publicly documented acoustics and geometry
 //! knowledge.
 
-use bevy_math::{Vec3, ops};
-use prism_audio_core::math::{MIN_AUDIBLE_GAIN, Sample};
+use bevy_math::{ops, Vec3};
+use prism_audio_core::math::{Sample, MIN_AUDIBLE_GAIN};
 
 use crate::band_spectrum::BandGains;
 use crate::doppler::SPEED_OF_SOUND_MPS;
 use crate::geometry::{Emitter, Listener};
 use crate::occlusion::OcclusionFactors;
 use crate::propagation::{
-    AcousticMaterial, FULL_BAND_CUTOFF_HZ, MAX_PROPAGATION_PATHS, PathKind, PropagationBackend,
-    PropagationPath, PropagationSummary,
+    AcousticMaterial, PathKind, PropagationBackend, PropagationPath, PropagationSummary,
+    FULL_BAND_CUTOFF_HZ, MAX_PROPAGATION_PATHS,
 };
 
 /// Squared-length threshold below which a vector is treated as degenerate and
@@ -359,7 +359,8 @@ pub fn portal_coupling_gain(listener_pos: Vec3, emitter_pos: Vec3, portal: &Port
     let to_aperture = normalize_or(aperture - emitter_pos, normal);
     let to_listener = normalize_or(listener_pos - aperture, normal);
 
-    let obliquity = obliquity_factor(to_aperture.dot(normal)) * obliquity_factor(to_listener.dot(normal));
+    let obliquity =
+        obliquity_factor(to_aperture.dot(normal)) * obliquity_factor(to_listener.dot(normal));
     (portal.transmission_gain() * obliquity).clamp(0.0, 1.0)
 }
 
@@ -515,8 +516,7 @@ impl PropagationBackend for RoomNetwork<'_> {
 
         // Different rooms: the direct line of sight crosses the enclosing walls
         // of both endpoints.
-        let wall_gain =
-            self.room_wall_gain(listener_room) * self.room_wall_gain(emitter_room);
+        let wall_gain = self.room_wall_gain(listener_room) * self.room_wall_gain(emitter_room);
         let mut count = 0usize;
         paths[count] = PropagationPath {
             kind: PathKind::Transmission,
@@ -723,16 +723,10 @@ mod tests {
             1.0,
             AcousticMaterial::OPEN,
         );
-        let on_axis = portal_coupling_gain(
-            Vec3::new(-5.0, 0.0, 0.0),
-            Vec3::new(5.0, 0.0, 0.0),
-            &door,
-        );
-        let oblique = portal_coupling_gain(
-            Vec3::new(-5.0, 5.0, 0.0),
-            Vec3::new(5.0, 5.0, 0.0),
-            &door,
-        );
+        let on_axis =
+            portal_coupling_gain(Vec3::new(-5.0, 0.0, 0.0), Vec3::new(5.0, 0.0, 0.0), &door);
+        let oblique =
+            portal_coupling_gain(Vec3::new(-5.0, 5.0, 0.0), Vec3::new(5.0, 5.0, 0.0), &door);
         assert!(on_axis > oblique);
         assert!(on_axis <= 1.0 && oblique >= 0.0);
     }
@@ -748,18 +742,19 @@ mod tests {
             mat,
         );
         // On axis both obliquity factors are ~1, so coupling == material gain.
-        let g = portal_coupling_gain(
-            Vec3::new(-5.0, 0.0, 0.0),
-            Vec3::new(5.0, 0.0, 0.0),
-            &door,
-        );
+        let g = portal_coupling_gain(Vec3::new(-5.0, 0.0, 0.0), Vec3::new(5.0, 0.0, 0.0), &door);
         assert!((g - mat.transmission_gain()).abs() < 1e-3);
     }
 
     fn two_room_scene() -> ([Room; 2], [Portal; 1]) {
         let brick = AcousticMaterial::new(40.0, 0.2);
         let rooms = [
-            Room::new(RoomId(0), Vec3::new(-5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
+            Room::new(
+                RoomId(0),
+                Vec3::new(-5.0, 0.0, 0.0),
+                Vec3::splat(5.0),
+                brick,
+            ),
             Room::new(RoomId(1), Vec3::new(5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
         ];
         let door = Portal::new(
@@ -818,7 +813,7 @@ mod tests {
         assert_eq!(s.path_count, 2);
         assert_eq!(paths[0].kind, PathKind::Transmission); // through wall
         assert_eq!(paths[1].kind, PathKind::Transmission); // through door
-        // The open door is far louder than the muffled through-wall path.
+                                                           // The open door is far louder than the muffled through-wall path.
         assert!(paths[1].gain > paths[0].gain);
         // Direct line of sight is blocked -> non-open factors.
         assert!(s.direct.direct_factor() > 0.0);
@@ -829,7 +824,12 @@ mod tests {
         // Door offset in +Z so the through-door arrival is longer and bent.
         let brick = AcousticMaterial::new(40.0, 0.2);
         let rooms = [
-            Room::new(RoomId(0), Vec3::new(-5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
+            Room::new(
+                RoomId(0),
+                Vec3::new(-5.0, 0.0, 0.0),
+                Vec3::splat(5.0),
+                brick,
+            ),
             Room::new(RoomId(1), Vec3::new(5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
         ];
         let door = Portal::new(
@@ -859,7 +859,12 @@ mod tests {
     fn different_rooms_no_portal_only_wall() {
         let brick = AcousticMaterial::new(40.0, 0.2);
         let rooms = [
-            Room::new(RoomId(0), Vec3::new(-5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
+            Room::new(
+                RoomId(0),
+                Vec3::new(-5.0, 0.0, 0.0),
+                Vec3::splat(5.0),
+                brick,
+            ),
             Room::new(RoomId(1), Vec3::new(5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
         ];
         let portals: [Portal; 0] = [];
@@ -892,7 +897,12 @@ mod tests {
         // Many connecting portals, tiny buffer: never overrun.
         let brick = AcousticMaterial::new(40.0, 0.2);
         let rooms = [
-            Room::new(RoomId(0), Vec3::new(-5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
+            Room::new(
+                RoomId(0),
+                Vec3::new(-5.0, 0.0, 0.0),
+                Vec3::splat(5.0),
+                brick,
+            ),
             Room::new(RoomId(1), Vec3::new(5.0, 0.0, 0.0), Vec3::splat(5.0), brick),
         ];
         let door = Portal::new(

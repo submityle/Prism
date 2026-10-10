@@ -196,10 +196,10 @@ mod tests {
         let hulls = [unit_box(), unit_box(), unit_box(), unit_box(), unit_box()];
         let poses = [
             at(Vec3::new(0.0, 0.0, 0.0)),
-            at(Vec3::new(0.6, 0.03, 0.0)),   // overlaps
-            at(Vec3::new(-0.6, 0.0, 0.05)),  // overlaps
-            at(Vec3::new(40.0, 0.0, 0.0)),   // far
-            at(Vec3::new(0.0, 40.0, 0.0)),   // far
+            at(Vec3::new(0.6, 0.03, 0.0)),  // overlaps
+            at(Vec3::new(-0.6, 0.0, 0.05)), // overlaps
+            at(Vec3::new(40.0, 0.0, 0.0)),  // far
+            at(Vec3::new(0.0, 40.0, 0.0)),  // far
         ];
         let brute = collide_shape(&hulls, &poses);
         let bvh = collide_shape_bvh(&hulls, &poses, 0.0);
@@ -249,7 +249,10 @@ mod tests {
         }
         let brute = collide_shape(&hulls, &poses);
         let bvh = collide_shape_bvh(&hulls, &poses, 0.0);
-        assert_eq!(brute, bvh, "BVH collide must equal brute force on a large scene");
+        assert_eq!(
+            brute, bvh,
+            "BVH collide must equal brute force on a large scene"
+        );
         assert_eq!(brute.len(), 5, "only the five clustered targets overlap");
     }
 }

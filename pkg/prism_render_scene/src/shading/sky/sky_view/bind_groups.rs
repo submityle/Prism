@@ -1,7 +1,7 @@
 //! Bind group for the sky-view LUT bake: `[sampler, ms_lut, tr_lut, storage]`.
-use super::{pipeline::SkyViewPipeline, resources::SkyViewLut};
 use super::super::multiscatter::SkyMultiscatterLut;
 use super::super::transmittance::SkyTransmittanceLut;
+use super::{pipeline::SkyViewPipeline, resources::SkyViewLut};
 use bevy_ecs::prelude::*;
 use bevy_render::{
     render_resource::BindGroup, render_resource::BindGroupEntries, renderer::RenderDevice,

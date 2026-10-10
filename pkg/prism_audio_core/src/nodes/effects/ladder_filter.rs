@@ -462,9 +462,7 @@ mod tests {
 
     /// Peak absolute amplitude over the tail of a buffer.
     fn tail_peak(v: &[Sample], skip: usize) -> Sample {
-        v.iter()
-            .skip(skip)
-            .fold(0.0_f32, |m, &x| m.max(x.abs()))
+        v.iter().skip(skip).fold(0.0_f32, |m, &x| m.max(x.abs()))
     }
 
     /// Goertzel magnitude at `freq` over the tail of a buffer.
@@ -681,7 +679,10 @@ mod tests {
         node.reset();
         node.set_slope(LadderSlope::TwoPole);
         let two = rms(&run_mono(&mut node, &probe), 4_000);
-        assert!((four - two).abs() > 1e-4, "slope switch should change output");
+        assert!(
+            (four - two).abs() > 1e-4,
+            "slope switch should change output"
+        );
     }
 
     #[test]
@@ -695,18 +696,12 @@ mod tests {
         let mut clean = LadderFilterNode::new(
             SR,
             ChannelLayout::Mono,
-            LadderFilterParams {
-                drive: 1.0,
-                ..base
-            },
+            LadderFilterParams { drive: 1.0, ..base },
         );
         let mut dirty = LadderFilterNode::new(
             SR,
             ChannelLayout::Mono,
-            LadderFilterParams {
-                drive: 8.0,
-                ..base
-            },
+            LadderFilterParams { drive: 8.0, ..base },
         );
         let clean_h3 = goertzel(&run_mono(&mut clean, &tone), 600.0, 8_000);
         let dirty_h3 = goertzel(&run_mono(&mut dirty, &tone), 600.0, 8_000);
@@ -748,7 +743,10 @@ mod tests {
             },
         );
         let out = run_mono(&mut node, &vec![0.0_f32; 4_096]);
-        assert!(tail_peak(&out, 0) < 1e-6, "zero input must give zero output");
+        assert!(
+            tail_peak(&out, 0) < 1e-6,
+            "zero input must give zero output"
+        );
     }
 
     #[test]
@@ -762,7 +760,8 @@ mod tests {
     #[test]
     fn reset_clears_state() {
         let probe = sine(440.0, 4_096);
-        let mut node = LadderFilterNode::new(SR, ChannelLayout::Mono, LadderFilterParams::default());
+        let mut node =
+            LadderFilterNode::new(SR, ChannelLayout::Mono, LadderFilterParams::default());
         let first = run_mono(&mut node, &probe);
         node.reset();
         let second = run_mono(&mut node, &probe);
@@ -797,7 +796,8 @@ mod tests {
 
     #[test]
     fn zero_frames_is_noop() {
-        let mut node = LadderFilterNode::new(SR, ChannelLayout::Mono, LadderFilterParams::default());
+        let mut node =
+            LadderFilterNode::new(SR, ChannelLayout::Mono, LadderFilterParams::default());
         let input = AudioBuffer::new(ChannelLayout::Mono, 8);
         let mut output = AudioBuffer::new(ChannelLayout::Mono, 8);
         output.set_active_frames(0);

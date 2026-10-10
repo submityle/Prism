@@ -62,7 +62,11 @@ fn close(a: Vec3, b: Vec3) -> bool {
 /// Builds a `rows x cols` cloth grid lying in the `xy` plane with a seeded `z`
 /// fold jitter, plus the horizontal and vertical bending triples that resist
 /// the folds. Returns `(positions, inverse_masses, constraints)`.
-fn cloth_grid(rows: usize, cols: usize, seed: u64) -> (Vec<Vec3>, Vec<f32>, Vec<ClothBendingConstraint>) {
+fn cloth_grid(
+    rows: usize,
+    cols: usize,
+    seed: u64,
+) -> (Vec<Vec3>, Vec<f32>, Vec<ClothBendingConstraint>) {
     let mut rng = Rng::new(seed);
     let mut positions = Vec::with_capacity(rows * cols);
     for r in 0..rows {
@@ -130,7 +134,14 @@ fn gpu_matches_cpu_across_iterations() {
     let (positions, inverse_masses, constraints) = cloth_grid(6, 7, 0x5eed_1234);
     let dt = 1.0 / 60.0;
     for iterations in [1_u32, 4, 12] {
-        let gpu = kernel.solve(&ctx, &positions, &inverse_masses, &constraints, dt, iterations);
+        let gpu = kernel.solve(
+            &ctx,
+            &positions,
+            &inverse_masses,
+            &constraints,
+            dt,
+            iterations,
+        );
         let cpu = cpu_cloth_bending(&positions, &inverse_masses, &constraints, dt, iterations);
         assert_parity(&format!("iterations={iterations}"), &gpu, &cpu);
     }
@@ -150,7 +161,12 @@ fn gpu_matches_cpu_with_pinned_particles() {
     let (positions, mut inverse_masses, constraints) = cloth_grid(5, 5, 0xabcd_0001);
     // Pin the four corners.
     let cols = 5;
-    for &p in &[0_usize, cols - 1, inverse_masses.len() - cols, inverse_masses.len() - 1] {
+    for &p in &[
+        0_usize,
+        cols - 1,
+        inverse_masses.len() - cols,
+        inverse_masses.len() - 1,
+    ] {
         inverse_masses[p] = 0.0;
     }
     let dt = 1.0 / 60.0;
@@ -158,7 +174,12 @@ fn gpu_matches_cpu_with_pinned_particles() {
     let cpu = cpu_cloth_bending(&positions, &inverse_masses, &constraints, dt, 10);
     assert_parity("pinned", &gpu, &cpu);
     // The pinned corners must not have moved on the device.
-    for &p in &[0_usize, cols - 1, inverse_masses.len() - cols, inverse_masses.len() - 1] {
+    for &p in &[
+        0_usize,
+        cols - 1,
+        inverse_masses.len() - cols,
+        inverse_masses.len() - 1,
+    ] {
         assert!(close(gpu[p], positions[p]), "pinned corner {p} moved");
     }
 }

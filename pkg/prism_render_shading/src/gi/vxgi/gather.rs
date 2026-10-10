@@ -100,7 +100,11 @@ fn orthonormal_basis(normal: Vec3) -> (Vec3, Vec3) {
     let sign = if normal.z >= 0.0 { 1.0 } else { -1.0 };
     let a = -1.0 / (sign + normal.z);
     let b = normal.x * normal.y * a;
-    let tangent = Vec3::new(1.0 + sign * normal.x * normal.x * a, sign * b, -sign * normal.x);
+    let tangent = Vec3::new(
+        1.0 + sign * normal.x * normal.x * a,
+        sign * b,
+        -sign * normal.x,
+    );
     let bitangent = Vec3::new(b, sign + normal.y * normal.y * a, -normal.y);
     (tangent, bitangent)
 }
@@ -154,7 +158,12 @@ fn diffuse_local_cones() -> [(Vec3, f32); DIFFUSE_SIDE_CONES + 1] {
 /// Fires the fixed diffuse cone fan into the hemisphere about `normal`,
 /// cosine-weights each cone's accumulated radiance, and normalises by the total
 /// weight.  The result is non-negative and never contains `NaN`.
-pub fn gather_diffuse(grid: &VoxelGrid, position: Vec3, normal: Vec3, params: GatherParams) -> Vec3 {
+pub fn gather_diffuse(
+    grid: &VoxelGrid,
+    position: Vec3,
+    normal: Vec3,
+    params: GatherParams,
+) -> Vec3 {
     let n = normalize_or_up(normal);
     let (tangent, bitangent) = orthonormal_basis(n);
     let aperture = params.diffuse_aperture;
@@ -212,7 +221,9 @@ pub fn gather_specular(
         max_steps: params.max_steps,
         alpha_termination: params.alpha_termination,
     };
-    trace_cone(grid, position, dir, cfg).radiance.max(Vec3::ZERO)
+    trace_cone(grid, position, dir, cfg)
+        .radiance
+        .max(Vec3::ZERO)
 }
 
 #[cfg(test)]

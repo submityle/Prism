@@ -155,7 +155,11 @@ impl HdrWindowEdge {
 /// [`HdrWindowEdge::is_below_floor`] for the governor's per-block pass; it
 /// unions with the masking verdicts to form the full force-virtualise set.
 #[must_use]
-pub fn gate_voices(loudness_db: &[Sample], edge: HdrWindowEdge, floor_raise_db: Sample) -> Vec<bool> {
+pub fn gate_voices(
+    loudness_db: &[Sample],
+    edge: HdrWindowEdge,
+    floor_raise_db: Sample,
+) -> Vec<bool> {
     loudness_db
         .iter()
         .map(|&db| edge.is_below_floor(db, floor_raise_db))
@@ -210,8 +214,8 @@ mod tests {
     #[test]
     fn floor_raise_virtualises_more_voices() {
         let edge = HdrWindowEdge::new(-6.0, 24.0); // lower edge -30 dB
-        // A -25 dB voice is audible at rest but virtualises when the floor
-        // rises 10 dB under budget pressure.
+                                                   // A -25 dB voice is audible at rest but virtualises when the floor
+                                                   // rises 10 dB under budget pressure.
         assert!(!edge.is_below_floor(-25.0, 0.0));
         assert!(edge.is_below_floor(-25.0, 10.0));
     }
@@ -247,9 +251,6 @@ mod tests {
     fn gate_voices_is_deterministic() {
         let edge = HdrWindowEdge::new(-3.0, 18.0);
         let loud = [-10.0, -22.0, -5.0, -40.0];
-        assert_eq!(
-            gate_voices(&loud, edge, 4.0),
-            gate_voices(&loud, edge, 4.0)
-        );
+        assert_eq!(gate_voices(&loud, edge, 4.0), gate_voices(&loud, edge, 4.0));
     }
 }

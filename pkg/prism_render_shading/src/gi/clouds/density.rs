@@ -45,13 +45,21 @@ pub fn remap(v: f32, in_lo: f32, in_hi: f32, out_lo: f32, out_hi: f32) -> f32 {
     }
     let t = ((v - in_lo) / span).clamp(0.0, 1.0);
     let out = out_lo + (out_hi - out_lo) * t;
-    if out.is_finite() { out } else { out_lo }
+    if out.is_finite() {
+        out
+    } else {
+        out_lo
+    }
 }
 
 /// Clamps a value expected in `[0, 1]`, mapping non-finite inputs to `0`.
 #[inline]
 fn unit_clamp(v: f32) -> f32 {
-    if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Modelled cloud genera, each with a characteristic vertical profile.
@@ -182,7 +190,11 @@ mod tests {
 
     #[test]
     fn height_gradient_in_unit_range_and_zero_outside() {
-        for &ct in &[CloudType::Stratus, CloudType::Cumulus, CloudType::Cumulonimbus] {
+        for &ct in &[
+            CloudType::Stratus,
+            CloudType::Cumulus,
+            CloudType::Cumulonimbus,
+        ] {
             for i in 0..=100 {
                 let h = i as f32 / 100.0;
                 let g = height_gradient(h, ct);
@@ -227,7 +239,10 @@ mod tests {
         for i in 0..=100 {
             let c = i as f32 / 100.0;
             let v = coverage_remap(base, c);
-            assert!(v + 1e-6 >= prev, "coverage not monotone at c={c}: {v} < {prev}");
+            assert!(
+                v + 1e-6 >= prev,
+                "coverage not monotone at c={c}: {v} < {prev}"
+            );
             assert!((0.0..=1.0).contains(&v));
             prev = v;
         }
@@ -269,7 +284,10 @@ mod tests {
             let c = i as f32 / 100.0;
             let v = cloud_density(0.3, CloudType::Cumulus, 0.8, c, 0.3, 0.4);
             assert!((0.0..=1.0).contains(&v), "density out of range: {v}");
-            assert!(v + 1e-6 >= prev, "density not monotone in coverage at c={c}");
+            assert!(
+                v + 1e-6 >= prev,
+                "density not monotone in coverage at c={c}"
+            );
             prev = v;
         }
     }

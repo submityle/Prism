@@ -20,8 +20,8 @@
 //! writes to the [`crate::client_resource::AudioClient`] ring and the
 //! [`crate::voice_registry::VoiceMirror`].
 
-use bevy_math::Vec3;
 use bevy_math::ops;
+use bevy_math::Vec3;
 use prism_audio_core::voice::{Importance, VoiceHandle, VoiceRequest};
 use prism_audio_rt::AudioCommand;
 

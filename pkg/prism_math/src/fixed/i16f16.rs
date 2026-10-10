@@ -14,7 +14,9 @@
 
 use super::Fixed;
 use core::cmp::Ordering;
-use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub, SubAssign};
+use core::ops::{
+    Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub, SubAssign,
+};
 
 /// Number of fractional bits in [`I16F16`] (Q16.16).
 pub const FRAC_BITS: u32 = 16;
@@ -45,11 +47,17 @@ impl I16F16 {
     /// Zero.
     pub const ZERO: Self = Self { raw: 0 };
     /// One.
-    pub const ONE: Self = Self { raw: Self::ONE_BITS };
+    pub const ONE: Self = Self {
+        raw: Self::ONE_BITS,
+    };
     /// Negative one.
-    pub const NEG_ONE: Self = Self { raw: -Self::ONE_BITS };
+    pub const NEG_ONE: Self = Self {
+        raw: -Self::ONE_BITS,
+    };
     /// One half (`0.5`).
-    pub const HALF: Self = Self { raw: Self::ONE_BITS >> 1 };
+    pub const HALF: Self = Self {
+        raw: Self::ONE_BITS >> 1,
+    };
     /// The most negative representable value.
     pub const MIN: Self = Self { raw: i32::MIN };
     /// The most positive representable value.
@@ -70,7 +78,9 @@ impl I16F16 {
     /// Construct from a whole integer, saturating on overflow.
     #[inline]
     pub const fn from_int(n: i32) -> Self {
-        Self { raw: saturate_i64((n as i64) << FRAC_BITS) }
+        Self {
+            raw: saturate_i64((n as i64) << FRAC_BITS),
+        }
     }
     /// Truncate toward zero to a whole integer.
     #[inline]
@@ -89,7 +99,9 @@ impl I16F16 {
     pub const fn from_fixed(x: Fixed) -> Self {
         let shift = super::scalar::FRAC_BITS - FRAC_BITS;
         let rounded = (x.to_bits() + (1 << (shift - 1))) >> shift;
-        Self { raw: saturate_i64(rounded) }
+        Self {
+            raw: saturate_i64(rounded),
+        }
     }
 
     /// Construct from an `f64` (round to nearest). Not on the deterministic
@@ -125,17 +137,31 @@ impl I16F16 {
     /// Absolute value (saturating).
     #[inline]
     pub const fn abs(self) -> Self {
-        if self.raw < 0 { Self { raw: self.raw.saturating_neg() } } else { self }
+        if self.raw < 0 {
+            Self {
+                raw: self.raw.saturating_neg(),
+            }
+        } else {
+            self
+        }
     }
     /// Minimum of two values.
     #[inline]
     pub const fn min(self, rhs: Self) -> Self {
-        if self.raw <= rhs.raw { self } else { rhs }
+        if self.raw <= rhs.raw {
+            self
+        } else {
+            rhs
+        }
     }
     /// Maximum of two values.
     #[inline]
     pub const fn max(self, rhs: Self) -> Self {
-        if self.raw >= rhs.raw { self } else { rhs }
+        if self.raw >= rhs.raw {
+            self
+        } else {
+            rhs
+        }
     }
     /// Clamp into `[lo, hi]`.
     #[inline]
@@ -146,19 +172,25 @@ impl I16F16 {
     /// Saturating addition.
     #[inline]
     pub const fn saturating_add(self, rhs: Self) -> Self {
-        Self { raw: self.raw.saturating_add(rhs.raw) }
+        Self {
+            raw: self.raw.saturating_add(rhs.raw),
+        }
     }
     /// Saturating subtraction.
     #[inline]
     pub const fn saturating_sub(self, rhs: Self) -> Self {
-        Self { raw: self.raw.saturating_sub(rhs.raw) }
+        Self {
+            raw: self.raw.saturating_sub(rhs.raw),
+        }
     }
     /// Saturating multiplication (round-to-nearest intermediate).
     #[inline]
     pub const fn saturating_mul(self, rhs: Self) -> Self {
         let p = (self.raw as i64) * (rhs.raw as i64);
         let rounded = (p + (1 << (FRAC_BITS - 1))) >> FRAC_BITS;
-        Self { raw: saturate_i64(rounded) }
+        Self {
+            raw: saturate_i64(rounded),
+        }
     }
     /// Saturating division (truncates toward zero; divide-by-zero saturates by
     /// sign, with `0/0 == 0`).
@@ -174,13 +206,17 @@ impl I16F16 {
             }
         } else {
             let num = (self.raw as i64) << FRAC_BITS;
-            Self { raw: saturate_i64(num / (rhs.raw as i64)) }
+            Self {
+                raw: saturate_i64(num / (rhs.raw as i64)),
+            }
         }
     }
     /// Saturating negation.
     #[inline]
     pub const fn saturating_neg(self) -> Self {
-        Self { raw: self.raw.saturating_neg() }
+        Self {
+            raw: self.raw.saturating_neg(),
+        }
     }
     /// Checked multiplication, `None` on overflow.
     #[inline]
@@ -190,7 +226,9 @@ impl I16F16 {
         if rounded > i32::MAX as i64 || rounded < i32::MIN as i64 {
             None
         } else {
-            Some(Self { raw: rounded as i32 })
+            Some(Self {
+                raw: rounded as i32,
+            })
         }
     }
 }
@@ -240,7 +278,9 @@ impl Rem for I16F16 {
     type Output = Self;
     #[inline]
     fn rem(self, rhs: Self) -> Self {
-        Self { raw: if rhs.raw == 0 { 0 } else { self.raw % rhs.raw } }
+        Self {
+            raw: if rhs.raw == 0 { 0 } else { self.raw % rhs.raw },
+        }
     }
 }
 impl Neg for I16F16 {

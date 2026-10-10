@@ -283,7 +283,11 @@ impl VoxelGrid {
 
         // Shift by -0.5 so integer coordinates land on voxel centres.
         let centred = scaled - Vec3::splat(0.5);
-        let base = Vec3::new(ops::floor(centred.x), ops::floor(centred.y), ops::floor(centred.z));
+        let base = Vec3::new(
+            ops::floor(centred.x),
+            ops::floor(centred.y),
+            ops::floor(centred.z),
+        );
         let frac = centred - base;
 
         let bx = base.x as i32;
@@ -552,7 +556,11 @@ mod tests {
         // The single coarse voxel averages all eight: half opaque -> 0.5.
         let coarse = grid.level(1);
         assert_eq!(coarse.resolution(), UVec3::ONE);
-        assert!((coarse.opacity()[0] - 0.5).abs() < 1.0e-6, "{}", coarse.opacity()[0]);
+        assert!(
+            (coarse.opacity()[0] - 0.5).abs() < 1.0e-6,
+            "{}",
+            coarse.opacity()[0]
+        );
         assert!(
             (coarse.radiance()[0] - Vec3::splat(2.0)).length() < 1.0e-6,
             "{:?}",
@@ -590,7 +598,11 @@ mod tests {
         // The fractional LOD lies between the two integer levels.
         let lo = fine.opacity.min(coarse.opacity);
         let hi = fine.opacity.max(coarse.opacity);
-        assert!(mid.opacity >= lo - 1.0e-6 && mid.opacity <= hi + 1.0e-6, "{}", mid.opacity);
+        assert!(
+            mid.opacity >= lo - 1.0e-6 && mid.opacity <= hi + 1.0e-6,
+            "{}",
+            mid.opacity
+        );
     }
 
     #[test]

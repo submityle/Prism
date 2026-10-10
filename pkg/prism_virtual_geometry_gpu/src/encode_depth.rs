@@ -90,14 +90,8 @@ impl GpuEncodeDepth {
             label: Some("prism_encode_depth_layout"),
             entries: &[
                 buffer_entry(0, BufferBindingType::Uniform),
-                buffer_entry(
-                    1,
-                    BufferBindingType::Storage { read_only: true },
-                ),
-                buffer_entry(
-                    2,
-                    BufferBindingType::Storage { read_only: false },
-                ),
+                buffer_entry(1, BufferBindingType::Storage { read_only: true }),
+                buffer_entry(2, BufferBindingType::Storage { read_only: false }),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {

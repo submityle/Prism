@@ -101,7 +101,12 @@ fn assert_hit_matches(want: CapsuleSweepHit, got: CapsuleSweepHit) {
 
 /// Runs the `CPU` brute query, the `CPU` `LBVH` query, and the device query over
 /// the same mesh and sweep, asserting all three agree on presence and geometry.
-fn run_parity(ctx: &GpuContext, gpu: &GpuTrimeshCapsuleSweep, mesh: &Trimesh, sweep: &CapsuleSweep) {
+fn run_parity(
+    ctx: &GpuContext,
+    gpu: &GpuTrimeshCapsuleSweep,
+    mesh: &Trimesh,
+    sweep: &CapsuleSweep,
+) {
     let brute = cpu_trimesh_capsule_sweep(mesh, sweep);
     let bvh = cpu_trimesh_capsule_sweep_built(mesh, sweep);
     assert_eq!(brute, bvh, "CPU LBVH must equal CPU brute for {sweep:?}");

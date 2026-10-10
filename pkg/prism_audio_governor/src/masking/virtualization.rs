@@ -199,6 +199,9 @@ mod tests {
         let masked = [false, false, false];
         let hdr = [false, false, false];
         assert_eq!(virtualized_count(&combine(&masked, &hdr)), 0);
-        assert_eq!(force_virtualize_set(&masked, &hdr), vec![false, false, false]);
+        assert_eq!(
+            force_virtualize_set(&masked, &hdr),
+            vec![false, false, false]
+        );
     }
 }

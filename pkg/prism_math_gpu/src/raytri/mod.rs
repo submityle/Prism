@@ -291,7 +291,10 @@ impl GpuRayTri {
         ctx.queue().submit([enc.finish()]);
 
         let raw = buffer::read_back::<TriHitRaw>(ctx, &stage);
-        raw.iter().take(count).map(|&r| GpuTriHit::decode(r)).collect()
+        raw.iter()
+            .take(count)
+            .map(|&r| GpuTriHit::decode(r))
+            .collect()
     }
 }
 

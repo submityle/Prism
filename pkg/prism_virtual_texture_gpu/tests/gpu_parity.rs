@@ -12,7 +12,9 @@
 //! result *exactly* — these tests assert bit-for-bit equality, including the
 //! `MISS` sentinel for page coordinates with no resident entry.
 
-use prism_render_architecture::texture_streaming::{GpuPageTable, PhysicalPagePool, TexturePageKey};
+use prism_render_architecture::texture_streaming::{
+    GpuPageTable, PhysicalPagePool, TexturePageKey,
+};
 use prism_virtual_texture_gpu::{GpuContext, GpuPageLookup, MISS};
 
 /// Acquires the device or prints a skip note and returns `None`.

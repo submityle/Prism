@@ -71,11 +71,11 @@
 //! source or derived code.
 
 use bytemuck::{Pod, Zeroable};
-use prism_render_architecture::particle::Vec3;
 use prism_render_architecture::particle::fluid::GridResolution;
 use prism_render_architecture::particle::fluid_diffusion::{
-    DiffusionBoundary, DiffusionParams, diffusion_alpha,
+    diffusion_alpha, DiffusionBoundary, DiffusionParams,
 };
+use prism_render_architecture::particle::Vec3;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,

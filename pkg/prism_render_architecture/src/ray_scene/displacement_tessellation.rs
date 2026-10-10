@@ -200,7 +200,9 @@ impl DisplacementTessellation {
         height: &HeightMap,
         scale: f32,
     ) -> Result<TriangleMeshBvh, TriangleMeshError> {
-        Ok(TriangleMeshBvh::build(self.tessellate(base, height, scale)?))
+        Ok(TriangleMeshBvh::build(
+            self.tessellate(base, height, scale)?,
+        ))
     }
 }
 

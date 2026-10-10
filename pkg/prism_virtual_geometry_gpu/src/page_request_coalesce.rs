@@ -190,8 +190,7 @@ impl GpuPageRequestCoalescer {
         let mut slot_of: HashMap<GeometryPageKey, u32> = HashMap::new();
         let mut slot_key: Vec<GeometryPageKey> = Vec::new();
         for reference in references {
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                slot_of.entry(reference.page)
+            if let std::collections::hash_map::Entry::Vacant(entry) = slot_of.entry(reference.page)
             {
                 let slot = u32::try_from(slot_key.len())
                     .expect("page-request slot count exceeds u32 range");

@@ -114,8 +114,7 @@ fn check(
             (None, None) => {}
             (Some(exp), Some(act)) => {
                 assert!(
-                    close(act.uv_delta.x, exp.uv_delta.x)
-                        && close(act.uv_delta.y, exp.uv_delta.y),
+                    close(act.uv_delta.x, exp.uv_delta.x) && close(act.uv_delta.y, exp.uv_delta.y),
                     "uv delta mismatch at particle {idx}: gpu ({}, {}), cpu ({}, {})",
                     act.uv_delta.x,
                     act.uv_delta.y,
@@ -242,12 +241,10 @@ fn both_ndc_conventions_match_cpu() {
         &queries,
     );
     assert!(
-        top.iter()
-            .zip(bottom.iter())
-            .any(|(a, b)| match (a, b) {
-                (Some(a), Some(b)) => (a.uv_delta.y - b.uv_delta.y).abs() > EPS,
-                _ => false,
-            }),
+        top.iter().zip(bottom.iter()).any(|(a, b)| match (a, b) {
+            (Some(a), Some(b)) => (a.uv_delta.y - b.uv_delta.y).abs() > EPS,
+            _ => false,
+        }),
         "the two conventions should differ in the V channel"
     );
 }
@@ -347,8 +344,14 @@ fn degenerate_w_is_rejected_like_cpu() {
     let got = check(&ctx, &gpu, camera, &queries);
     assert!(got[0].is_none(), "a point on the camera plane is rejected");
     assert!(got[1].is_none(), "a point behind the camera is rejected");
-    assert!(got[2].is_none(), "a prev point behind the camera is rejected");
-    assert!(got[3].is_some(), "the fully valid particle still produces one");
+    assert!(
+        got[2].is_none(),
+        "a prev point behind the camera is rejected"
+    );
+    assert!(
+        got[3].is_some(),
+        "the fully valid particle still produces one"
+    );
 }
 
 #[test]

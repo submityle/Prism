@@ -115,7 +115,10 @@ mod tests {
     #[test]
     fn non_finite_collapses_to_zero() {
         assert_eq!(wrap_coord(f32::NAN, WrapMode::Repeat), (0.0, false));
-        assert_eq!(wrap_coord(f32::INFINITY, WrapMode::ClampToBorder), (0.0, false));
+        assert_eq!(
+            wrap_coord(f32::INFINITY, WrapMode::ClampToBorder),
+            (0.0, false)
+        );
     }
 
     #[test]

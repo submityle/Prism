@@ -145,13 +145,8 @@ fn assert_parity(got: &SpriteStretchResult, qq: &SpriteStretchQuery, idx: usize)
         size.aspect(),
     );
 
-    let want_vc = velocity_stretched_corners(
-        qq.center,
-        qq.velocity,
-        qq.binormal,
-        qq.base_half,
-        qq.params,
-    );
+    let want_vc =
+        velocity_stretched_corners(qq.center, qq.velocity, qq.binormal, qq.base_half, qq.params);
     close_corners(got.velocity_corners, want_vc, "velocity", idx);
 
     let want_trail = stretched_from_prev(

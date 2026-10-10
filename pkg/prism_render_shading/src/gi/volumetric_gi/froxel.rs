@@ -66,13 +66,7 @@ impl FroxelGrid {
     /// positive value.  Non-finite inputs collapse to the clamp bounds, so the
     /// returned grid always satisfies the module invariants.
     #[inline]
-    pub fn new(
-        dims: UVec3,
-        near: f32,
-        far: f32,
-        tan_half_fov_x: f32,
-        tan_half_fov_y: f32,
-    ) -> Self {
+    pub fn new(dims: UVec3, near: f32, far: f32, tan_half_fov_x: f32, tan_half_fov_y: f32) -> Self {
         let dims = UVec3::new(dims.x.max(1), dims.y.max(1), dims.z.max(1));
         let near = if near.is_finite() { near.max(EPS) } else { EPS };
         let far = if far.is_finite() {

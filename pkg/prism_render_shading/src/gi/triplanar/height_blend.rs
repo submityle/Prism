@@ -199,10 +199,7 @@ mod tests {
     #[test]
     fn weights_are_energy_normalized() {
         let stacks: [&[HeightSample]; 3] = [
-            &[
-                HeightSample::new(0.2, 1.0),
-                HeightSample::new(0.8, 1.0),
-            ],
+            &[HeightSample::new(0.2, 1.0), HeightSample::new(0.8, 1.0)],
             &[
                 HeightSample::new(0.5, 0.5),
                 HeightSample::new(0.4, 0.7),
@@ -219,7 +216,12 @@ mod tests {
             for &depth in &[0.05f32, 0.2, 1.0] {
                 let w = height_blend_weights(stack, depth);
                 assert_eq!(w.len(), stack.len());
-                assert!((sum(&w) - 1.0).abs() < 1e-5, "sum {} depth {}", sum(&w), depth);
+                assert!(
+                    (sum(&w) - 1.0).abs() < 1e-5,
+                    "sum {} depth {}",
+                    sum(&w),
+                    depth
+                );
                 assert!(w.iter().all(|&x| x >= 0.0), "negative weight {:?}", w);
             }
         }
@@ -229,14 +231,15 @@ mod tests {
     /// outright.
     #[test]
     fn higher_layer_dominates() {
-        let layers = [
-            HeightSample::new(0.2, 1.0),
-            HeightSample::new(0.9, 1.0),
-        ];
+        let layers = [HeightSample::new(0.2, 1.0), HeightSample::new(0.9, 1.0)];
         // Narrow transition: the taller (second) layer should dominate.
         let sharp = height_blend_weights(&layers, 0.05);
         assert!(sharp[1] > sharp[0], "taller must win: {:?}", sharp);
-        assert!(sharp[1] > 0.99, "sharp seam nearly all second layer: {:?}", sharp);
+        assert!(
+            sharp[1] > 0.99,
+            "sharp seam nearly all second layer: {:?}",
+            sharp
+        );
 
         // The convenience factor agrees.
         assert!(height_blend_factor(0.2, 0.9, 0.05) > 0.99);
@@ -255,9 +258,18 @@ mod tests {
         // Wide: the transition softens toward an even split.
         let wide = height_blend_factor(a, b, 4.0);
 
-        assert!(narrow > wide, "narrow {} should favor taller more than wide {}", narrow, wide);
+        assert!(
+            narrow > wide,
+            "narrow {} should favor taller more than wide {}",
+            narrow,
+            wide
+        );
         assert!(wide > 0.49 && wide < 0.6, "wide blend near even: {}", wide);
-        assert!(narrow > 0.95, "narrow blend near winner-takes-all: {}", narrow);
+        assert!(
+            narrow > 0.95,
+            "narrow blend near winner-takes-all: {}",
+            narrow
+        );
     }
 
     /// Height blending is sharper than a plain linear height-ratio blend near a
@@ -271,7 +283,12 @@ mod tests {
         // b / (a + b) ~= 0.55; height blending with a narrow depth exceeds it.
         let linear_share = b / (a + b);
         let hb = height_blend_factor(a, b, 0.05);
-        assert!(hb > linear_share, "height blend {} should beat linear {}", hb, linear_share);
+        assert!(
+            hb > linear_share,
+            "height blend {} should beat linear {}",
+            hb,
+            linear_share
+        );
     }
 
     /// Equal heights and controls give an exactly even split.
@@ -296,8 +313,16 @@ mod tests {
             HeightSample::new(0.2, 1.0),
         ];
         let w = height_blend_weights(&layers, 0.1);
-        assert!(w[0].abs() < 1e-6, "masked layer must not contribute: {:?}", w);
-        assert!((w[1] - 1.0).abs() < 1e-5, "visible layer takes everything: {:?}", w);
+        assert!(
+            w[0].abs() < 1e-6,
+            "masked layer must not contribute: {:?}",
+            w
+        );
+        assert!(
+            (w[1] - 1.0).abs() < 1e-5,
+            "visible layer takes everything: {:?}",
+            w
+        );
     }
 
     /// Empty input yields an empty result; all-masked yields a uniform one.
@@ -306,13 +331,18 @@ mod tests {
         let empty = height_blend_weights(&[], 0.2);
         assert!(empty.is_empty());
 
-        let masked = [
-            HeightSample::new(0.5, 0.0),
-            HeightSample::new(0.5, 0.0),
-        ];
+        let masked = [HeightSample::new(0.5, 0.0), HeightSample::new(0.5, 0.0)];
         let w = height_blend_weights(&masked, 0.2);
-        assert!((sum(&w) - 1.0).abs() < 1e-5, "uniform fallback sums to one: {:?}", w);
-        assert!(w.iter().all(|&x| (x - 0.5).abs() < 1e-5), "uniform fallback: {:?}", w);
+        assert!(
+            (sum(&w) - 1.0).abs() < 1e-5,
+            "uniform fallback sums to one: {:?}",
+            w
+        );
+        assert!(
+            w.iter().all(|&x| (x - 0.5).abs() < 1e-5),
+            "uniform fallback: {:?}",
+            w
+        );
     }
 
     /// Non-finite inputs are sanitised, never producing NaN weights.

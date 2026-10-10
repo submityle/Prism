@@ -270,7 +270,11 @@ pub fn scatter_at_interface(
     let point = sanitize(point, photon.position);
     let (n, n_i, n_t, cos_i) = orient(photon.direction, normal, n_i, n_t);
     let r = fresnel_dielectric(cos_i, n_i, n_t);
-    let u = if u.is_finite() { u.clamp(0.0, 1.0) } else { 0.0 };
+    let u = if u.is_finite() {
+        u.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
 
     let eta = n_i / n_t;
     let transmit_dir = refract(photon.direction, n, eta);
@@ -338,10 +342,7 @@ mod tests {
     fn total_internal_reflection_keeps_all_flux() {
         // Water -> air past the critical angle (~48.75 deg): grazing 70 deg.
         let ang = 70.0_f32.to_radians();
-        let incident = normalize_or(
-            Vec3::new(ang.sin(), -ang.cos(), 0.0),
-            Vec3::NEG_Y,
-        );
+        let incident = normalize_or(Vec3::new(ang.sin(), -ang.cos(), 0.0), Vec3::NEG_Y);
         let p = Photon::new(Vec3::ZERO, incident, Vec3::new(2.0, 2.0, 2.0));
         let s = split_at_interface(p, Vec3::ZERO, Vec3::Y, WATER, AIR);
         assert!(s.transmitted.is_none(), "expected TIR");
@@ -384,7 +385,10 @@ mod tests {
         }
         reflected_energy /= n as f32;
         transmitted_energy /= n as f32;
-        assert!(approx(reflected_energy, r, 2.0e-3), "refl={reflected_energy} r={r}");
+        assert!(
+            approx(reflected_energy, r, 2.0e-3),
+            "refl={reflected_energy} r={r}"
+        );
         assert!(
             approx(transmitted_energy, 1.0 - r, 2.0e-3),
             "trans={transmitted_energy} 1-r={}",
@@ -400,7 +404,11 @@ mod tests {
         for i in 0..10 {
             let u = i as f32 / 10.0;
             let out = scatter_at_interface(p, Vec3::ZERO, Vec3::Y, WATER, AIR, u);
-            assert!(out.direction.y >= 0.0, "u={u} should reflect: {:?}", out.direction);
+            assert!(
+                out.direction.y >= 0.0,
+                "u={u} should reflect: {:?}",
+                out.direction
+            );
             assert!((out.flux - p.flux).length() < 1.0e-6);
         }
     }
@@ -419,7 +427,11 @@ mod tests {
 
     #[test]
     fn is_deterministic() {
-        let p = Photon::new(Vec3::new(0.1, 0.2, 0.3), Vec3::new(0.0, -1.0, 0.2), Vec3::ONE);
+        let p = Photon::new(
+            Vec3::new(0.1, 0.2, 0.3),
+            Vec3::new(0.0, -1.0, 0.2),
+            Vec3::ONE,
+        );
         assert_eq!(
             split_at_interface(p, Vec3::ZERO, Vec3::Y, AIR, WATER),
             split_at_interface(p, Vec3::ZERO, Vec3::Y, AIR, WATER)

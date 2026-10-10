@@ -65,11 +65,11 @@ fn varied_grid(pages_x: u16, pages_y: u16) -> Vec<u8> {
             //  - some ask for progressively coarser mips (collapse)
             //  - some ask absurdly coarse (clamp to max)
             match (x + y) % 5 {
-                0 => {}                           // leave NOT_REQUESTED
-                1 => grid[i] = 1,                 // base mip
-                2 => grid[i] = 2,                 // one coarser -> 2x2 collapse
-                3 => grid[i] = 3,                 // two coarser -> 4x4 collapse
-                _ => grid[i] = 240,               // absurd -> clamp to max mip 5
+                0 => {}             // leave NOT_REQUESTED
+                1 => grid[i] = 1,   // base mip
+                2 => grid[i] = 2,   // one coarser -> 2x2 collapse
+                3 => grid[i] = 3,   // two coarser -> 4x4 collapse
+                _ => grid[i] = 240, // absurd -> clamp to max mip 5
             }
         }
     }
@@ -106,7 +106,9 @@ fn decode_large_grid_matches_golden_exactly() {
 
     // Anti-vacuous guards: the fixture must actually exercise the branches.
     assert!(
-        golden.iter().any(|d| d.key.mip == d.desired_mip && d.desired_mip == 5),
+        golden
+            .iter()
+            .any(|d| d.key.mip == d.desired_mip && d.desired_mip == 5),
         "some demand clamps to the coarsest streamable mip"
     );
     assert!(

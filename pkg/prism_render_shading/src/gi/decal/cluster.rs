@@ -246,9 +246,8 @@ mod tests {
             for y in 0..4u32 {
                 for x in 0..4u32 {
                     let cell = g.flatten(UVec3::new(x, y, z));
-                    let central = (1..=2).contains(&x)
-                        && (1..=2).contains(&y)
-                        && (1..=2).contains(&z);
+                    let central =
+                        (1..=2).contains(&x) && (1..=2).contains(&y) && (1..=2).contains(&z);
                     if !central {
                         assert!(
                             clusters[cell].is_empty(),
@@ -279,14 +278,20 @@ mod tests {
         let decals = [box_at(Vec3::ZERO, 5.0)];
         let clusters = g.bin(&decals);
         assert_eq!(clusters.len(), g.cluster_count());
-        assert!(clusters.iter().all(|c| c == &[0]), "every cell holds decal 0");
+        assert!(
+            clusters.iter().all(|c| c == &[0]),
+            "every cell holds decal 0"
+        );
     }
 
     #[test]
     fn multiple_froxel_span_is_contiguous() {
         let g = grid();
         // A slab covering the lower-x half: x in [-1, 0], full y/z.
-        let decals = [Aabb::new(Vec3::new(-1.0, -1.0, -1.0), Vec3::new(0.0, 1.0, 1.0))];
+        let decals = [Aabb::new(
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(0.0, 1.0, 1.0),
+        )];
         let clusters = g.bin(&decals);
         // Cells with x in {0,1} must hold the decal; x in {2,3} must not,
         // except the shared boundary cell x=2 edge at value 0 maps to cell 2.
@@ -377,7 +382,11 @@ mod tests {
     #[test]
     fn degenerate_grid_extent_bins_into_single_slab() {
         // Zero extent along z: every z maps to cell 0 (dim clamped to >=1 use).
-        let g = ClusterGrid::new(UVec3::new(2, 2, 2), Vec3::new(-1.0, -1.0, 0.0), Vec3::new(1.0, 1.0, 0.0));
+        let g = ClusterGrid::new(
+            UVec3::new(2, 2, 2),
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+        );
         let clusters = g.bin(&[box_at(Vec3::ZERO, 5.0)]);
         assert_eq!(clusters.len(), 8);
         // z-extent is zero so only z=0 layer (cells 0..=3) is populated.

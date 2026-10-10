@@ -29,7 +29,7 @@ use wgpu::{
     PipelineLayoutDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages,
 };
 
-use prism_micromap::omm::{OmmFormat, SubdivisionLevel, TextureAlphaMask, WrapMode, packed_len};
+use prism_micromap::omm::{packed_len, OmmFormat, SubdivisionLevel, TextureAlphaMask, WrapMode};
 
 use crate::buffer;
 use crate::context::GpuContext;
@@ -100,10 +100,16 @@ pub struct GpuBakedOmm {
 /// A compiled, reusable `GPU` opacity-micromap pipeline pair.
 pub struct GpuOmmBaker {
     /// Kept alive so the classify pipeline it produced stays valid.
-    #[expect(dead_code, reason = "kept alive so the pipeline it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline it produced stays valid"
+    )]
     classify_module: ShaderModule,
     /// Kept alive so the pack pipeline it produced stays valid.
-    #[expect(dead_code, reason = "kept alive so the pipeline it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline it produced stays valid"
+    )]
     pack_module: ShaderModule,
     /// Layout wiring params, the mask, and the state output.
     classify_layout: BindGroupLayout,
@@ -269,11 +275,8 @@ impl GpuOmmBaker {
 
         let params_buf = buffer::uniform(device, "prism_omm_params", &params);
         let mask_buf = buffer::storage_read(device, "prism_omm_mask", &alpha);
-        let states_buf = buffer::storage_rw_zeroed(
-            device,
-            "prism_omm_states",
-            u64::from(micro_count) * 4,
-        );
+        let states_buf =
+            buffer::storage_rw_zeroed(device, "prism_omm_states", u64::from(micro_count) * 4);
 
         let classify_bind = device.create_bind_group(&BindGroupDescriptor {
             label: Some("prism_omm_classify_bind"),
@@ -289,7 +292,13 @@ impl GpuOmmBaker {
         let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_omm_classify_encoder"),
         });
-        dispatch(&mut enc, "prism_omm_classify_pass", &self.classify, &classify_bind, classify_groups);
+        dispatch(
+            &mut enc,
+            "prism_omm_classify_pass",
+            &self.classify,
+            &classify_bind,
+            classify_groups,
+        );
         ctx.queue().submit([enc.finish()]);
 
         // One output word packs 16 four-state or 32 two-state micro-triangles.
@@ -326,8 +335,19 @@ impl GpuOmmBaker {
         let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_omm_pack_encoder"),
         });
-        dispatch(&mut enc, "prism_omm_pack_pass", &self.pack, &pack_bind, pack_groups);
-        buffer::copy(&mut enc, &states_buf, &states_stage, u64::from(micro_count) * 4);
+        dispatch(
+            &mut enc,
+            "prism_omm_pack_pass",
+            &self.pack,
+            &pack_bind,
+            pack_groups,
+        );
+        buffer::copy(
+            &mut enc,
+            &states_buf,
+            &states_stage,
+            u64::from(micro_count) * 4,
+        );
         buffer::copy(&mut enc, &out_buf, &out_stage, u64::from(word_count) * 4);
         ctx.queue().submit([enc.finish()]);
 

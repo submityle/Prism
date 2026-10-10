@@ -81,6 +81,8 @@ impl Frustum {
     /// True if `p` is inside (or on) all six planes.
     #[inline]
     pub fn contains_point(self, p: Vec3) -> bool {
-        self.planes.iter().all(|plane| plane.signed_distance(p) >= 0.0)
+        self.planes
+            .iter()
+            .all(|plane| plane.signed_distance(p) >= 0.0)
     }
 }

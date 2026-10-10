@@ -61,13 +61,7 @@ impl BilinearPatch {
     /// Corners use the `(u, v)` convention `p00 = P(0, 0)`, `p10 = P(1, 0)`,
     /// `p11 = P(1, 1)`, `p01 = P(0, 1)`.
     #[must_use]
-    pub fn new(
-        p00: [f32; 3],
-        p10: [f32; 3],
-        p11: [f32; 3],
-        p01: [f32; 3],
-        primitive: u32,
-    ) -> Self {
+    pub fn new(p00: [f32; 3], p10: [f32; 3], p11: [f32; 3], p01: [f32; 3], primitive: u32) -> Self {
         Self {
             p00,
             p10,

@@ -9,9 +9,9 @@
 //! cooperative-cancellation skip accounting, parent-to-child token cascade, and
 //! born-cancelled behaviour.
 
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -87,7 +87,9 @@ impl Mirror {
         self.preorder(id, &mut order);
         order
             .into_iter()
-            .filter(|&n| n != id && !matches!(self.state[n], NodeState::Joined | NodeState::Cancelled))
+            .filter(|&n| {
+                n != id && !matches!(self.state[n], NodeState::Joined | NodeState::Cancelled)
+            })
             .count()
     }
 }
@@ -145,11 +147,7 @@ fn cancel_subtree_matches_oracle_order_and_set() {
     mirror.set_joined(ids[5].index());
 
     let got = tree.cancel_subtree(ScopeTree::ROOT);
-    let want: Vec<NodeId> = mirror
-        .cancel_subtree(0)
-        .into_iter()
-        .map(NodeId)
-        .collect();
+    let want: Vec<NodeId> = mirror.cancel_subtree(0).into_iter().map(NodeId).collect();
     assert_eq!(got, want, "cancelled set + pre-order traversal");
 
     // Joined nodes stayed joined; everything else is cancelled now.

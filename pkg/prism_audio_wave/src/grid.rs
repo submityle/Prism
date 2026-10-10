@@ -324,7 +324,10 @@ mod tests {
             .filter(|(idx, _)| *idx == target)
             .map(|(_, w)| *w)
             .sum();
-        assert!(approx(w, 1.0, 1e-4), "expected full weight at probe, got {w}");
+        assert!(
+            approx(w, 1.0, 1e-4),
+            "expected full weight at probe, got {w}"
+        );
     }
 
     #[test]

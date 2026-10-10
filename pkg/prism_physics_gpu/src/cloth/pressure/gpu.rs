@@ -39,10 +39,10 @@ use alloc::vec::Vec;
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3;
 use wgpu::{
-    BindGroup, BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor,
-    BufferBindingType, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline,
-    ComputePipelineDescriptor, PipelineCompilationOptions, PipelineLayoutDescriptor, ShaderModule,
-    ShaderModuleDescriptor, ShaderSource,
+    BindGroup, BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, BufferBindingType,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, ShaderModule, ShaderModuleDescriptor,
+    ShaderSource,
 };
 
 use crate::buffer;
@@ -218,8 +218,7 @@ impl GpuClothPressure {
         let pos_bytes = (packed.len() as u64) * 16;
 
         // Triangles as padded `vec4<u32>` (a, b, c, 0).
-        let tri_packed: Vec<[u32; 4]> =
-            triangles.iter().map(|t| [t[0], t[1], t[2], 0]).collect();
+        let tri_packed: Vec<[u32; 4]> = triangles.iter().map(|t| [t[0], t[1], t[2], 0]).collect();
 
         // Host-built CSR vertex->corner adjacency turns the per-triangle
         // gradient scatter into a race-free per-vertex gather.
@@ -245,11 +244,14 @@ impl GpuClothPressure {
 
         let params_buf = buffer::uniform(device, "prism_cloth_pressure_params", &params);
         let positions_buf = buffer::storage_rw_init(device, "prism_cloth_pressure_pos", &packed);
-        let inv_mass_buf = buffer::storage_read(device, "prism_cloth_pressure_invmass", inv_mass_src);
-        let triangles_buf =
-            buffer::storage_read(device, "prism_cloth_pressure_tris", &tri_packed);
-        let offsets_buf =
-            buffer::storage_read(device, "prism_cloth_pressure_adj_offsets", &adjacency.offsets);
+        let inv_mass_buf =
+            buffer::storage_read(device, "prism_cloth_pressure_invmass", inv_mass_src);
+        let triangles_buf = buffer::storage_read(device, "prism_cloth_pressure_tris", &tri_packed);
+        let offsets_buf = buffer::storage_read(
+            device,
+            "prism_cloth_pressure_adj_offsets",
+            &adjacency.offsets,
+        );
         let corners_buf =
             buffer::storage_read(device, "prism_cloth_pressure_adj_corners", corners_src);
 
@@ -297,7 +299,13 @@ impl GpuClothPressure {
         for _ in 0..iterations {
             self.run_pass(&mut encoder, &self.tri_pass, &bind, tri_groups, "tri");
             self.run_pass(&mut encoder, &self.vol_reduce, &bind, 1, "vol_reduce");
-            self.run_pass(&mut encoder, &self.gather_pass, &bind, vert_groups, "gather");
+            self.run_pass(
+                &mut encoder,
+                &self.gather_pass,
+                &bind,
+                vert_groups,
+                "gather",
+            );
             self.run_pass(&mut encoder, &self.denom_reduce, &bind, 1, "denom_reduce");
             self.run_pass(&mut encoder, &self.lambda_pass, &bind, 1, "lambda");
             self.run_pass(&mut encoder, &self.apply_pass, &bind, vert_groups, "apply");

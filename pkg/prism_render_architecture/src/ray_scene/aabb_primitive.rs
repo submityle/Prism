@@ -453,7 +453,9 @@ mod tests {
         let b = AabbPrimitive::new([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0], 3);
         // Origin inside the box, travelling +y: exits through the +y (max) face.
         let ray = Ray::infinite([0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
-        let hit = b.intersect(&ray).expect("inside ray still hits an exit face");
+        let hit = b
+            .intersect(&ray)
+            .expect("inside ray still hits an exit face");
         assert!(!hit.front_face);
         assert!(approx(hit.t, 1.0, 1e-6));
         // Exit face is +y; reported normal is flipped against the ray => -y.

@@ -127,8 +127,7 @@ pub const NYQUIST_GUARD: Sample = 0.49;
 
 /// Default drawbar registration (`88 8800 000`): sub, quint, unison, and octave
 /// pulled fully out for a warm, full organ voice.
-pub const DEFAULT_DRAWBARS: [Sample; NUM_DRAWBARS] =
-    [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+pub const DEFAULT_DRAWBARS: [Sample; NUM_DRAWBARS] = [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
 /// Overall output scale keeping the normalized drawbar sum below full scale.
 ///
@@ -358,7 +357,11 @@ impl TonewheelOrganNode {
         }
         // Normalize by the active level sum when it exceeds one, keeping the mix
         // inside the single-drawbar envelope without altering relative timbre.
-        let norm = if level_sum > 1.0 { 1.0 / level_sum } else { 1.0 };
+        let norm = if level_sum > 1.0 {
+            1.0 / level_sum
+        } else {
+            1.0
+        };
         let amp = self.amplitude.next_sample();
         flush_denormal(acc * norm * OUTPUT_GAIN * amp)
     }
@@ -471,7 +474,10 @@ mod tests {
         let out = render(&mut node, SR as usize);
         let p = peak(&out);
         assert!(p > 0.0 && p < 1.0, "expected a bounded, audible peak: {p}");
-        assert!(out.iter().all(|s| s.is_finite()), "all samples must be finite");
+        assert!(
+            out.iter().all(|s| s.is_finite()),
+            "all samples must be finite"
+        );
     }
 
     #[test]
@@ -479,13 +485,22 @@ mod tests {
         // Worst-case headroom check: every drawbar fully out, amplitude 1,
         // across the tunable fundamental grid.
         let mut worst = 0.0_f32;
-        for &freq in &[MIN_FREQUENCY_HZ, 55.0, DEFAULT_FREQUENCY_HZ, 440.0, 1000.0, MAX_FREQUENCY_HZ]
-        {
+        for &freq in &[
+            MIN_FREQUENCY_HZ,
+            55.0,
+            DEFAULT_FREQUENCY_HZ,
+            440.0,
+            1000.0,
+            MAX_FREQUENCY_HZ,
+        ] {
             let mut node = TonewheelOrganNode::new(SR, all_drawbars_params(freq, 1.0));
             let out = render(&mut node, SR as usize);
             worst = worst.max(peak(&out));
         }
-        assert!(worst < 1.0, "grid peak should stay below full scale: {worst}");
+        assert!(
+            worst < 1.0,
+            "grid peak should stay below full scale: {worst}"
+        );
         assert!(worst > 0.4, "grid peak should use the headroom: {worst}");
     }
 
@@ -520,7 +535,10 @@ mod tests {
         let freq = 2_000.0;
         let node = TonewheelOrganNode::new(SR, all_drawbars_params(freq, 0.5));
         let raw = freq * ops::exp((DRAWBAR_SEMITONES[8] as Sample / 12.0) * LN_2);
-        assert!(raw > FOLDBACK_HZ, "setup: raw footage should exceed ceiling");
+        assert!(
+            raw > FOLDBACK_HZ,
+            "setup: raw footage should exceed ceiling"
+        );
         let mut expected = raw;
         while expected > FOLDBACK_HZ {
             expected *= 0.5;
@@ -603,7 +621,10 @@ mod tests {
         let mut full = TonewheelOrganNode::new(SR, all_drawbars_params(DEFAULT_FREQUENCY_HZ, 1.0));
         let p_one = peak(&render(&mut one, SR as usize));
         let p_full = peak(&render(&mut full, SR as usize));
-        assert!(p_full < 1.0, "full registration must stay bounded: {p_full}");
+        assert!(
+            p_full < 1.0,
+            "full registration must stay bounded: {p_full}"
+        );
         assert!(
             p_full < p_one * 2.0,
             "normalization should keep the full mix comparable: one={p_one} full={p_full}"
@@ -683,7 +704,10 @@ mod tests {
         let chans = render_layout(&mut node, SR as usize, ChannelLayout::Quad);
         assert_eq!(chans.len(), 4);
         for ch in 1..4 {
-            assert_eq!(chans[0], chans[ch], "channel {ch} must mirror the mono core");
+            assert_eq!(
+                chans[0], chans[ch],
+                "channel {ch} must mirror the mono core"
+            );
         }
     }
 
@@ -732,7 +756,10 @@ mod tests {
         assert_eq!(p.amplitude, DEFAULT_AMPLITUDE);
         assert_eq!(p.drawbars[0], 1.0, "2.0 clamps to 1");
         assert_eq!(p.drawbars[1], 0.0, "-1.0 clamps to 0");
-        assert_eq!(p.drawbars[2], DEFAULT_DRAWBARS[2], "inf falls back to default");
+        assert_eq!(
+            p.drawbars[2], DEFAULT_DRAWBARS[2],
+            "inf falls back to default"
+        );
         assert_eq!(p.drawbars[3], 0.5);
     }
 
@@ -760,7 +787,11 @@ mod tests {
     fn setters_reject_non_finite_and_clamp() {
         let mut node = TonewheelOrganNode::new(SR, TonewheelOrganParams::default());
         node.set_frequency(Sample::NAN);
-        assert_eq!(node.frequency_hz(), DEFAULT_FREQUENCY_HZ, "NaN keeps prior freq");
+        assert_eq!(
+            node.frequency_hz(),
+            DEFAULT_FREQUENCY_HZ,
+            "NaN keeps prior freq"
+        );
         node.set_frequency(1.0e9);
         assert_eq!(node.frequency_hz(), MAX_FREQUENCY_HZ, "huge freq clamps");
 
@@ -772,7 +803,11 @@ mod tests {
         node.set_drawbar(NUM_DRAWBARS, 1.0, Ramp::Immediate);
 
         node.set_amplitude(Sample::INFINITY, Ramp::Immediate);
-        assert_eq!(node.amplitude(), DEFAULT_AMPLITUDE, "inf amplitude keeps prior");
+        assert_eq!(
+            node.amplitude(),
+            DEFAULT_AMPLITUDE,
+            "inf amplitude keeps prior"
+        );
         node.set_amplitude(0.25, Ramp::Immediate);
         assert_eq!(node.amplitude(), 0.25);
     }
@@ -789,7 +824,11 @@ mod tests {
         );
         let before = render(&mut node, SR as usize);
         node.set_frequency(330.0);
-        assert_eq!(node.drawbar_frequency(2), 330.0, "unison footage tracks the key");
+        assert_eq!(
+            node.drawbar_frequency(2),
+            330.0,
+            "unison footage tracks the key"
+        );
         let after = render(&mut node, SR as usize);
         assert!(goertzel(&before, 220.0) > goertzel(&after, 220.0) * 4.0);
         assert!(goertzel(&after, 330.0) > goertzel(&before, 330.0) * 4.0);

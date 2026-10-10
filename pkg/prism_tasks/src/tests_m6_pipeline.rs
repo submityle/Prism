@@ -7,8 +7,8 @@
 use crate::TaskPool;
 use alloc::string::String;
 use alloc::vec::Vec;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 #[test]
 fn stages_run_in_declaration_order() {
@@ -40,7 +40,10 @@ fn later_stage_observes_earlier_stage_effects() {
         pipeline.add_stage("step").job(move || {
             // Observe the fully-settled value from all previous stages, then
             // contribute this stage's increment.
-            witnessed.lock().unwrap().push(state.load(Ordering::Acquire));
+            witnessed
+                .lock()
+                .unwrap()
+                .push(state.load(Ordering::Acquire));
             state.store(step + 1, Ordering::Release);
         });
     }

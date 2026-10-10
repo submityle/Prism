@@ -4,7 +4,7 @@
 
 use crate::hierarchy::{Hierarchy, HierarchyError};
 use crate::transform_2d::{
-    Affine2, GlobalTransform2d, Transform2d, TransformGraph2d, propagate_2d,
+    propagate_2d, Affine2, GlobalTransform2d, Transform2d, TransformGraph2d,
 };
 use prism_math::Vec2;
 
@@ -49,12 +49,24 @@ fn propagate_2d_matches_manual_composition() {
     let p = Vec2::new(0.3, -0.7);
     let manual_root = root().transform_point(p);
     let manual_child = root().transform_point(child().transform_point(p));
-    let manual_gc = root()
-        .transform_point(child().transform_point(grandchild().transform_point(p)));
+    let manual_gc =
+        root().transform_point(child().transform_point(grandchild().transform_point(p)));
 
-    assert!(v2_approx(globals[n0.index()].transform_point(p), manual_root, 1e-4));
-    assert!(v2_approx(globals[n1.index()].transform_point(p), manual_child, 1e-4));
-    assert!(v2_approx(globals[n2.index()].transform_point(p), manual_gc, 1e-4));
+    assert!(v2_approx(
+        globals[n0.index()].transform_point(p),
+        manual_root,
+        1e-4
+    ));
+    assert!(v2_approx(
+        globals[n1.index()].transform_point(p),
+        manual_child,
+        1e-4
+    ));
+    assert!(v2_approx(
+        globals[n2.index()].transform_point(p),
+        manual_gc,
+        1e-4
+    ));
 }
 
 #[test]
@@ -80,8 +92,16 @@ fn identity_transform_is_a_no_op() {
 
     // Compose identity on either side leaves the other operand unchanged.
     let t = child().to_affine2();
-    assert!(v2_approx((Affine2::IDENTITY * t).translation, t.translation, 1e-6));
-    assert!(v2_approx((t * Affine2::IDENTITY).translation, t.translation, 1e-6));
+    assert!(v2_approx(
+        (Affine2::IDENTITY * t).translation,
+        t.translation,
+        1e-6
+    ));
+    assert!(v2_approx(
+        (t * Affine2::IDENTITY).translation,
+        t.translation,
+        1e-6
+    ));
 }
 
 #[test]
@@ -104,16 +124,16 @@ fn transform_graph_2d_facade_matches_free_function() {
     g.propagate();
 
     let p = Vec2::new(0.3, -0.7);
-    let manual_gc = root()
-        .transform_point(child().transform_point(grandchild().transform_point(p)));
+    let manual_gc =
+        root().transform_point(child().transform_point(grandchild().transform_point(p)));
     assert!(v2_approx(g.global(gc).transform_point(p), manual_gc, 1e-4));
 
     // Editing the middle node and re-propagating stays correct.
     let new_child = Transform2d::from_xy(4.0, 4.0);
     g.set_local(c, new_child);
     g.propagate();
-    let manual_gc2 = root()
-        .transform_point(new_child.transform_point(grandchild().transform_point(p)));
+    let manual_gc2 =
+        root().transform_point(new_child.transform_point(grandchild().transform_point(p)));
     assert!(v2_approx(g.global(gc).transform_point(p), manual_gc2, 1e-4));
 }
 

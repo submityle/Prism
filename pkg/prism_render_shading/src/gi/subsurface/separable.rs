@@ -262,11 +262,7 @@ fn normalize_weights(weights: &mut [Vec3]) {
     for &w in weights.iter() {
         sum += w;
     }
-    let inv = Vec3::new(
-        safe_inv(sum.x),
-        safe_inv(sum.y),
-        safe_inv(sum.z),
-    );
+    let inv = Vec3::new(safe_inv(sum.x), safe_inv(sum.y), safe_inv(sum.z));
     for w in weights.iter_mut() {
         *w *= inv;
     }

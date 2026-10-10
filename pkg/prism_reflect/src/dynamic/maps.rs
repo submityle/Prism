@@ -5,10 +5,10 @@ use crate::kinds::{Map, MapIter};
 use crate::reflect::Reflect;
 use crate::type_info::{MapInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef};
-use core::any::Any;
 use alloc::boxed::Box;
-use std::sync::OnceLock;
 use alloc::vec::Vec;
+use core::any::Any;
+use std::sync::OnceLock;
 
 /// A boxed key/value pair in dynamic form.
 type ReflectPair = Box<dyn Reflect>;
@@ -94,9 +94,7 @@ impl Map for DynamicMap {
 
     fn iter_reflect(&self) -> MapIter<'_> {
         MapIter::new(Box::new(
-            self.entries
-                .iter()
-                .map(|(key, value)| (&**key, &**value)),
+            self.entries.iter().map(|(key, value)| (&**key, &**value)),
         ))
     }
 }

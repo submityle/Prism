@@ -209,7 +209,11 @@ mod tests {
                 if overlap && a.slot == b.slot {
                     let paired = alloc.inplace_pairs().contains(&(i, j))
                         || alloc.inplace_pairs().contains(&(j, i));
-                    assert!(paired, "overlapping buffers {i} and {j} share slot {}", a.slot);
+                    assert!(
+                        paired,
+                        "overlapping buffers {i} and {j} share slot {}",
+                        a.slot
+                    );
                 }
             }
         }

@@ -32,7 +32,11 @@ impl SoaVec3 {
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
-        Self { xs: Vec::new(), ys: Vec::new(), zs: Vec::new() }
+        Self {
+            xs: Vec::new(),
+            ys: Vec::new(),
+            zs: Vec::new(),
+        }
     }
 
     /// An empty batch with capacity reserved for `n` vectors.
@@ -142,7 +146,11 @@ impl SoaVec3 {
     /// Panics if the batches differ in length.
     #[inline]
     pub fn add_assign_batch(&mut self, rhs: &Self) {
-        assert_eq!(self.len(), rhs.len(), "SoaVec3::add_assign_batch length mismatch");
+        assert_eq!(
+            self.len(),
+            rhs.len(),
+            "SoaVec3::add_assign_batch length mismatch"
+        );
         for i in 0..self.len() {
             self.xs[i] += rhs.xs[i];
             self.ys[i] += rhs.ys[i];
@@ -177,7 +185,11 @@ impl SoaVec3 {
     #[inline]
     pub fn dot_batch(&self, rhs: &Self, out: &mut [f32]) {
         assert_eq!(self.len(), rhs.len(), "SoaVec3::dot_batch length mismatch");
-        assert_eq!(self.len(), out.len(), "SoaVec3::dot_batch output length mismatch");
+        assert_eq!(
+            self.len(),
+            out.len(),
+            "SoaVec3::dot_batch output length mismatch"
+        );
         for (i, o) in out.iter_mut().enumerate() {
             *o = self.xs[i] * rhs.xs[i] + self.ys[i] * rhs.ys[i] + self.zs[i] * rhs.zs[i];
         }
@@ -189,7 +201,11 @@ impl SoaVec3 {
     /// Panics if `out` is not the same length as the batch.
     #[inline]
     pub fn length_batch(&self, out: &mut [f32]) {
-        assert_eq!(self.len(), out.len(), "SoaVec3::length_batch output length mismatch");
+        assert_eq!(
+            self.len(),
+            out.len(),
+            "SoaVec3::length_batch output length mismatch"
+        );
         for (i, o) in out.iter_mut().enumerate() {
             let x = self.xs[i];
             let y = self.ys[i];

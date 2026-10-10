@@ -288,6 +288,9 @@ mod tests {
     fn empty_layout_has_zero_response() {
         let beam = Beamformer::new(&ArrayLayout::new(), Vec3::new(0.0, 0.0, -1.0));
         assert!(beam.is_empty());
-        assert!(close(beam.response(Vec3::new(0.0, 0.0, -1.0), 1_000.0), 0.0));
+        assert!(close(
+            beam.response(Vec3::new(0.0, 0.0, -1.0), 1_000.0),
+            0.0
+        ));
     }
 }

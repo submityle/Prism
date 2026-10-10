@@ -34,8 +34,8 @@
 //!   RNG, I/O, GPU, globals or `unsafe`, and no `NaN` is ever produced.
 
 use crate::gi::sample::mapping::orthonormal_basis;
-use crate::gi::screen_probe::restir::{GiSample, Reservoir, luminance};
-use bevy_math::{Vec3, ops};
+use crate::gi::screen_probe::restir::{luminance, GiSample, Reservoir};
+use bevy_math::{ops, Vec3};
 
 pub use crate::gi::screen_probe::restir::balance_heuristic;
 
@@ -110,7 +110,11 @@ pub fn glossy_lobe_throughput(point: &GlossyShadingPoint, sample: &GiSample) -> 
     let (ax, ay) = roughness_to_alpha_anisotropic(point.roughness, point.anisotropy);
     let f = ggx_brdf(wo, wi, ax, ay, point.f0);
     let v = f * wi.z;
-    if v.is_finite() { v.max(Vec3::ZERO) } else { Vec3::ZERO }
+    if v.is_finite() {
+        v.max(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// The glossy lobe throughput `f_spec · (n·wi)` for an explicit unit world
@@ -130,7 +134,11 @@ pub fn glossy_lobe_throughput_dir(point: &GlossyShadingPoint, wi_world: Vec3) ->
     let (ax, ay) = roughness_to_alpha_anisotropic(point.roughness, point.anisotropy);
     let f = ggx_brdf(wo, wi, ax, ay, point.f0);
     let v = f * wi.z;
-    if v.is_finite() { v.max(Vec3::ZERO) } else { Vec3::ZERO }
+    if v.is_finite() {
+        v.max(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    }
 }
 
 /// Directional glossy resampling target `p̂` for `sample` at `point`.
@@ -144,7 +152,11 @@ pub fn glossy_target_function(point: &GlossyShadingPoint, sample: &GiSample) -> 
     let throughput = glossy_lobe_throughput(point, sample);
     let contrib = throughput * sample.radiance;
     let t = luminance(contrib);
-    if t.is_finite() { t.max(0.0) } else { 0.0 }
+    if t.is_finite() {
+        t.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Similarity weight in `[0, 1]` for reusing a neighbour whose roughness and
@@ -178,7 +190,11 @@ pub fn roughness_reuse_weight(
     let normal_w = ops::powf(cos_n, exponent);
 
     let w = rough_w * normal_w;
-    if w.is_finite() { w.clamp(0.0, 1.0) } else { 0.0 }
+    if w.is_finite() {
+        w.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Roughness-dependent temporal confidence cap (`M`-cap).
@@ -286,7 +302,11 @@ pub fn glossy_contribution(reservoir: &Reservoir<GiSample>, point: &GlossyShadin
     }
     let throughput = glossy_lobe_throughput(point, &sample);
     let v = throughput * sample.radiance * w;
-    if v.is_finite() { v.max(Vec3::ZERO) } else { Vec3::ZERO }
+    if v.is_finite() {
+        v.max(Vec3::ZERO)
+    } else {
+        Vec3::ZERO
+    }
 }
 
 #[cfg(test)]
@@ -439,8 +459,20 @@ mod tests {
         let point = make_point(0.3);
         let build = || {
             let mut r = Reservoir::<GiSample>::new();
-            stream_glossy_candidate(&mut r, &point, mirror_sample(&point, Vec3::splat(2.0)), 1.0, 0.2);
-            stream_glossy_candidate(&mut r, &point, mirror_sample(&point, Vec3::splat(3.0)), 1.5, 0.7);
+            stream_glossy_candidate(
+                &mut r,
+                &point,
+                mirror_sample(&point, Vec3::splat(2.0)),
+                1.0,
+                0.2,
+            );
+            stream_glossy_candidate(
+                &mut r,
+                &point,
+                mirror_sample(&point, Vec3::splat(3.0)),
+                1.5,
+                0.7,
+            );
             finalize_glossy(&mut r, &point);
             r
         };

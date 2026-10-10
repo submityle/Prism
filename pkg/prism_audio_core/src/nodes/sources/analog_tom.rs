@@ -223,8 +223,8 @@ impl AnalogTomParams {
     pub fn sanitised(self, sample_rate: u32) -> Self {
         let d = Self::default();
         let tune_hz = clamp_tune(finite_or(self.tune_hz, d.tune_hz), sample_rate);
-        let pitch_env_hz = finite_or(self.pitch_env_hz, d.pitch_env_hz)
-            .clamp(MIN_PITCH_ENV_HZ, MAX_PITCH_ENV_HZ);
+        let pitch_env_hz =
+            finite_or(self.pitch_env_hz, d.pitch_env_hz).clamp(MIN_PITCH_ENV_HZ, MAX_PITCH_ENV_HZ);
         let pitch_decay_s = finite_or(self.pitch_decay_s, d.pitch_decay_s)
             .clamp(MIN_PITCH_DECAY_S, MAX_PITCH_DECAY_S);
         let amp_decay_s =

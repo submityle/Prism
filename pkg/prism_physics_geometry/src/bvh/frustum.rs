@@ -68,8 +68,8 @@ mod tests {
     fn slab_frustum(min_x: f32, max_x: f32) -> Frustum {
         let big = 1.0e6;
         Frustum::new([
-            Plane::new(Vec3::X, -min_x),     // x >= min_x
-            Plane::new(Vec3::NEG_X, max_x),  // x <= max_x
+            Plane::new(Vec3::X, -min_x),    // x >= min_x
+            Plane::new(Vec3::NEG_X, max_x), // x <= max_x
             Plane::new(Vec3::Y, big),
             Plane::new(Vec3::NEG_Y, big),
             Plane::new(Vec3::Z, big),
@@ -99,12 +99,16 @@ mod tests {
     fn frustum_rejecting_all() {
         let bvh = spaced_tree();
         // Slab well past every box.
-        assert!(bvh.query_frustum_collect(&slab_frustum(50.0, 60.0)).is_empty());
+        assert!(bvh
+            .query_frustum_collect(&slab_frustum(50.0, 60.0))
+            .is_empty());
     }
 
     #[test]
     fn empty_tree_yields_nothing() {
         let bvh = DynamicBvh::new();
-        assert!(bvh.query_frustum_collect(&slab_frustum(-1.0, 1.0)).is_empty());
+        assert!(bvh
+            .query_frustum_collect(&slab_frustum(-1.0, 1.0))
+            .is_empty());
     }
 }

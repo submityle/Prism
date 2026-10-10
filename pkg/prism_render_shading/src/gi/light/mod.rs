@@ -16,5 +16,5 @@
 pub mod light_tree;
 pub mod regir;
 
-pub use light_tree::{LightBounds, LightCone, LightSample, LightTree, LightTreeNode, importance};
-pub use regir::{GridConfig, GridLight, GridQuery, cell_target, fill_cell_reservoir, query};
+pub use light_tree::{importance, LightBounds, LightCone, LightSample, LightTree, LightTreeNode};
+pub use regir::{cell_target, fill_cell_reservoir, query, GridConfig, GridLight, GridQuery};

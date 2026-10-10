@@ -10,7 +10,9 @@ use crate::events::{ContactEventTracker, PhysicsEvent};
 use crate::joint::{JointDesc, JointHandle, JointStorage};
 use crate::math::scalar::Real;
 use crate::pipeline::detect_contacts;
-use crate::soft::rigid_coupling::{couple_cloth_to_rigid, ClothRigidCouplingConfig, CouplingReport};
+use crate::soft::rigid_coupling::{
+    couple_cloth_to_rigid, ClothRigidCouplingConfig, CouplingReport,
+};
 use crate::state::body::BodyDesc;
 use crate::state::handle::BodyHandle;
 use crate::state::storage::BodyStorage;

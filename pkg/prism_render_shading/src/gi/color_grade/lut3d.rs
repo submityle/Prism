@@ -27,8 +27,8 @@
 
 use alloc::vec::Vec;
 
-use bevy_math::Vec3;
 use bevy_math::ops;
+use bevy_math::Vec3;
 
 /// Minimum lattice edge length. A LUT needs at least the two endpoints `0` and
 /// `1` per axis to interpolate between.
@@ -42,7 +42,11 @@ pub const MAX_LUT_SIZE: usize = 64;
 /// non-finite input to `0`.
 #[must_use]
 fn clamp01(x: f32) -> f32 {
-    if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }
+    if x.is_finite() {
+        x.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Clamp an RGB colour component-wise into `[0, 1]`.
@@ -318,11 +322,7 @@ mod tests {
         for ib in 0..n {
             for ig in 0..n {
                 for ir in 0..n {
-                    let c = Vec3::new(
-                        ir as f32 / denom,
-                        ig as f32 / denom,
-                        ib as f32 / denom,
-                    );
+                    let c = Vec3::new(ir as f32 / denom, ig as f32 / denom, ib as f32 / denom);
                     approx3(lut.sample(c), c);
                 }
             }
@@ -400,18 +400,23 @@ mod tests {
 
     #[test]
     fn gamma_lut_matches_direct_evaluation_at_grid() {
-        let gamma = |c: Vec3| Vec3::new(
-            ops::powf(c.x, 2.2),
-            ops::powf(c.y, 2.2),
-            ops::powf(c.z, 2.2),
-        );
+        let gamma = |c: Vec3| {
+            Vec3::new(
+                ops::powf(c.x, 2.2),
+                ops::powf(c.y, 2.2),
+                ops::powf(c.z, 2.2),
+            )
+        };
         let lut = Lut3d::from_fn(33, gamma);
         for &c in &[Vec3::splat(0.25), Vec3::splat(0.5), Vec3::splat(0.75)] {
             // 33 lattice includes 0.25/0.5/0.75 only approximately, so compare
             // the sampled grade to the baked grade within interpolation error.
             let direct = gamma(c);
             let sampled = lut.sample(c);
-            assert!((sampled - direct).length() < 1.0e-3, "{sampled:?} vs {direct:?}");
+            assert!(
+                (sampled - direct).length() < 1.0e-3,
+                "{sampled:?} vs {direct:?}"
+            );
         }
     }
 
@@ -421,7 +426,10 @@ mod tests {
         for &x in &[0.0_f32, 0.123, 0.5, 0.9, 1.0] {
             approx(shaper.shape(x), x);
         }
-        approx3(shaper.apply(Vec3::new(0.2, 0.5, 0.8)), Vec3::new(0.2, 0.5, 0.8));
+        approx3(
+            shaper.apply(Vec3::new(0.2, 0.5, 0.8)),
+            Vec3::new(0.2, 0.5, 0.8),
+        );
     }
 
     #[test]

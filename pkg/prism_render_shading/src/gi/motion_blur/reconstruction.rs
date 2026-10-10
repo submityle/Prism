@@ -198,9 +198,7 @@ where
         let f = soft_depth_compare(center.depth, tap.depth, extent);
         let b = soft_depth_compare(tap.depth, center.depth, extent);
 
-        let w = f * cone(dist, vy)
-            + b * cone(dist, vx)
-            + cylinder(dist, vy, vx) * 2.0;
+        let w = f * cone(dist, vy) + b * cone(dist, vx) + cylinder(dist, vy, vx) * 2.0;
         let w = if w.is_finite() { w.max(0.0) } else { 0.0 };
 
         color_sum += tap.color * w;
@@ -254,9 +252,12 @@ mod tests {
     fn static_scene_returns_center_color() {
         let center = PixelSample::new(Vec3::new(0.2, 0.4, 0.6), Vec2::ZERO, 1.0);
         // Dominant velocity below threshold -> no blur.
-        let out = reconstruct(center, Vec2::new(0.1, 0.0), ReconstructionParams::default(), |_| {
-            PixelSample::new(Vec3::new(9.0, 9.0, 9.0), Vec2::ZERO, 1.0)
-        });
+        let out = reconstruct(
+            center,
+            Vec2::new(0.1, 0.0),
+            ReconstructionParams::default(),
+            |_| PixelSample::new(Vec3::new(9.0, 9.0, 9.0), Vec2::ZERO, 1.0),
+        );
         assert!(approx_eq(out, center.color, EPS), "got {out:?}");
     }
 
@@ -288,7 +289,10 @@ mod tests {
     #[test]
     fn deterministic_across_calls() {
         let center = PixelSample::new(Vec3::new(0.5, 0.25, 0.75), Vec2::new(8.0, 6.0), 1.0);
-        let params = ReconstructionParams { jitter: 0.42, ..Default::default() };
+        let params = ReconstructionParams {
+            jitter: 0.42,
+            ..Default::default()
+        };
         let field = |o: Vec2| {
             // A deterministic synthetic field varying with position.
             let shade = 0.5 + 0.1 * o.x - 0.05 * o.y;
@@ -305,10 +309,15 @@ mod tests {
         // front of it.  The resolved color should pull toward the foreground.
         let bg = PixelSample::new(Vec3::new(0.0, 0.0, 1.0), Vec2::ZERO, 10.0);
         let fg_color = Vec3::new(1.0, 0.0, 0.0);
-        let out = reconstruct(bg, Vec2::new(20.0, 0.0), ReconstructionParams::default(), |_| {
-            // Foreground: nearer (smaller depth) and fast.
-            PixelSample::new(fg_color, Vec2::new(20.0, 0.0), 1.0)
-        });
+        let out = reconstruct(
+            bg,
+            Vec2::new(20.0, 0.0),
+            ReconstructionParams::default(),
+            |_| {
+                // Foreground: nearer (smaller depth) and fast.
+                PixelSample::new(fg_color, Vec2::new(20.0, 0.0), 1.0)
+            },
+        );
         // Red channel must have increased relative to the pure background.
         assert!(out.x > 0.1, "foreground did not bleed in: {out:?}");
         assert!(out.is_finite());
@@ -317,20 +326,26 @@ mod tests {
     #[test]
     fn non_finite_taps_are_sanitized() {
         let center = PixelSample::new(Vec3::new(0.5, 0.5, 0.5), Vec2::new(10.0, 0.0), 1.0);
-        let out = reconstruct(center, Vec2::new(10.0, 0.0), ReconstructionParams::default(), |_| {
-            PixelSample {
+        let out = reconstruct(
+            center,
+            Vec2::new(10.0, 0.0),
+            ReconstructionParams::default(),
+            |_| PixelSample {
                 color: Vec3::new(f32::NAN, f32::INFINITY, 0.5),
                 velocity: Vec2::new(f32::NAN, 10.0),
                 depth: f32::INFINITY,
-            }
-        });
+            },
+        );
         assert!(out.x.is_finite() && out.y.is_finite() && out.z.is_finite());
     }
 
     #[test]
     fn sample_count_floored_and_bounded() {
         let center = PixelSample::new(Vec3::ONE, Vec2::new(5.0, 0.0), 1.0);
-        let params = ReconstructionParams { sample_count: 0, ..Default::default() };
+        let params = ReconstructionParams {
+            sample_count: 0,
+            ..Default::default()
+        };
         let out = reconstruct(center, Vec2::new(5.0, 0.0), params, |_| {
             PixelSample::new(Vec3::ONE, Vec2::new(5.0, 0.0), 1.0)
         });

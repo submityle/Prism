@@ -24,9 +24,7 @@ pub(crate) fn reflect_values_equal(a: &dyn Reflect, b: &dyn Reflect) -> bool {
         };
     }
 
-    try_eq!(
-        bool, char, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, String,
-    );
+    try_eq!(bool, char, i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, String,);
 
     if let (Some(lhs), Some(rhs)) = (
         a.as_any().downcast_ref::<f32>(),

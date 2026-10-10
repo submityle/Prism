@@ -151,7 +151,10 @@ mod tests {
     use prism_audio_spatial::propagation::AcousticMaterial;
 
     fn wall(transmission_loss_db: f32, absorption: f32) -> BandedAcousticMaterial {
-        BandedAcousticMaterial::from_scalar(&AcousticMaterial::new(transmission_loss_db, absorption))
+        BandedAcousticMaterial::from_scalar(&AcousticMaterial::new(
+            transmission_loss_db,
+            absorption,
+        ))
     }
 
     #[test]
@@ -166,7 +169,10 @@ mod tests {
     fn uniform_scalar_promotes_to_flat_band_material() {
         let scalar = AcousticMaterial::new(20.0, 0.5);
         let table = MaterialTable::uniform_scalar(scalar);
-        assert_eq!(table.material(0), BandedAcousticMaterial::from_scalar(&scalar));
+        assert_eq!(
+            table.material(0),
+            BandedAcousticMaterial::from_scalar(&scalar)
+        );
     }
 
     #[test]

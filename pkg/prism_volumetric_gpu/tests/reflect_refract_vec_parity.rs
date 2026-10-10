@@ -213,7 +213,12 @@ fn pin(idx: usize, query: &ReflectRefractQuery, got: &ReflectRefractResult) {
 
     let want_restitution =
         reflect_with_restitution(query.velocity, query.normal, query.restitution);
-    close_vec("restitution_dir", idx, got.restitution_dir, want_restitution);
+    close_vec(
+        "restitution_dir",
+        idx,
+        got.restitution_dir,
+        want_restitution,
+    );
 }
 
 /// Dispatches `queries` on the `GPU` and pins every result against the

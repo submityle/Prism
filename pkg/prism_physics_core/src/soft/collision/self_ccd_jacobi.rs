@@ -394,7 +394,14 @@ mod tests {
         let prev = [a, b];
         let mut velocities = [Vec3::ZERO, Vec3::ZERO];
         let masses = [0.0, 0.0];
-        resolve_self_ccd_jacobi(&mut positions, &prev, &mut velocities, &masses, params(0.5), 1.0);
+        resolve_self_ccd_jacobi(
+            &mut positions,
+            &prev,
+            &mut velocities,
+            &masses,
+            params(0.5),
+            1.0,
+        );
         assert_eq!(positions[0], a);
         assert_eq!(positions[1], b);
     }
@@ -418,7 +425,14 @@ mod tests {
         let prev = [Vec3::new(0.0, 0.0, 0.0)];
         let mut velocities = [Vec3::ZERO];
         let masses = [1.0];
-        resolve_self_ccd_jacobi(&mut positions, &prev, &mut velocities, &masses, params(0.5), 1.0);
+        resolve_self_ccd_jacobi(
+            &mut positions,
+            &prev,
+            &mut velocities,
+            &masses,
+            params(0.5),
+            1.0,
+        );
         assert_eq!(positions[0], Vec3::new(0.0, 0.0, 0.0));
     }
 
@@ -428,7 +442,14 @@ mod tests {
         let prev = [Vec3::new(0.0, 0.0, 0.0)]; // one short -> count == 1
         let mut velocities = [Vec3::ZERO, Vec3::ZERO];
         let masses = [1.0, 1.0];
-        resolve_self_ccd_jacobi(&mut positions, &prev, &mut velocities, &masses, params(0.5), 1.0);
+        resolve_self_ccd_jacobi(
+            &mut positions,
+            &prev,
+            &mut velocities,
+            &masses,
+            params(0.5),
+            1.0,
+        );
         assert_eq!(positions[1], Vec3::new(0.1, 0.0, 0.0));
     }
 
@@ -439,7 +460,14 @@ mod tests {
         let prev = [origin, origin];
         let mut velocities = [Vec3::ZERO, Vec3::ZERO];
         let masses = [1.0, 1.0];
-        resolve_self_ccd_jacobi(&mut positions, &prev, &mut velocities, &masses, params(0.5), 1.0);
+        resolve_self_ccd_jacobi(
+            &mut positions,
+            &prev,
+            &mut velocities,
+            &masses,
+            params(0.5),
+            1.0,
+        );
         for p in &positions {
             assert!(p.x.is_finite() && p.y.is_finite() && p.z.is_finite());
         }
@@ -502,7 +530,14 @@ mod tests {
         let mut velocities = [Vec3::new(5.0, 0.0, 0.0), Vec3::new(-5.0, 0.0, 0.0)];
         let before = velocities;
         let masses = [1.0, 1.0];
-        resolve_self_ccd_jacobi(&mut positions, &prev, &mut velocities, &masses, params(0.4), 0.0);
+        resolve_self_ccd_jacobi(
+            &mut positions,
+            &prev,
+            &mut velocities,
+            &masses,
+            params(0.4),
+            0.0,
+        );
         // inv_dt == 0 => va_in == vb_in == 0 => vrel_n == 0, not < 0, no impulse.
         assert_eq!(velocities, before, "dt=0 must not touch velocities");
     }

@@ -63,9 +63,9 @@
 
 use bevy_math::ops;
 
-use prism_audio_core::math::{Sample, db_to_linear, linear_to_db};
+use prism_audio_core::math::{db_to_linear, linear_to_db, Sample};
 
-use crate::air::{AtmosphericConditions, absorption_db_per_metre};
+use crate::air::{absorption_db_per_metre, AtmosphericConditions};
 use crate::attenuation::Attenuation;
 use crate::diffraction::Diffraction;
 use crate::ground_effect::GroundEffect;
@@ -109,7 +109,11 @@ pub struct OutdoorPropagation {
 #[inline]
 #[must_use]
 fn clamp_distance(d: Sample) -> Sample {
-    if d.is_finite() { d.max(0.0) } else { 0.0 }
+    if d.is_finite() {
+        d.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 impl OutdoorPropagation {
@@ -197,7 +201,11 @@ impl OutdoorPropagation {
     pub fn divergence_db(&self) -> Sample {
         let gain = self.attenuation.gain(self.distance_m);
         let a = -linear_to_db(gain);
-        if a.is_finite() { a } else { MAX_DIVERGENCE_DB }
+        if a.is_finite() {
+            a
+        } else {
+            MAX_DIVERGENCE_DB
+        }
     }
 
     /// The atmospheric absorption attenuation in decibels for octave band
@@ -332,7 +340,10 @@ mod tests {
         for band in 0..OCTAVE_BAND_COUNT {
             let manual =
                 f.divergence_db() + f.atmospheric_db(band) + f.ground_effect().attenuation_db(band);
-            assert!(approx(f.total_attenuation_db(band), manual, 1e-4), "band {band}");
+            assert!(
+                approx(f.total_attenuation_db(band), manual, 1e-4),
+                "band {band}"
+            );
         }
     }
 
@@ -345,7 +356,10 @@ mod tests {
                 + f.atmospheric_db(band)
                 + f.ground_effect().attenuation_db(band)
                 + barrier.insertion_loss_db(band);
-            assert!(approx(f.total_attenuation_db(band), manual, 1e-4), "band {band}");
+            assert!(
+                approx(f.total_attenuation_db(band), manual, 1e-4),
+                "band {band}"
+            );
         }
     }
 
@@ -391,12 +405,8 @@ mod tests {
         // divergence term must stay finite (capped), not become infinite.
         let att = Attenuation::new(DistanceModel::Linear, 1.0, 100.0, 1.0);
         let ground = GroundEffect::from_geometry(2.0, 2.0, 100.0, 0.5);
-        let f = OutdoorPropagation::line_of_sight(
-            100.0,
-            att,
-            AtmosphericConditions::default(),
-            ground,
-        );
+        let f =
+            OutdoorPropagation::line_of_sight(100.0, att, AtmosphericConditions::default(), ground);
         assert!(f.divergence_db().is_finite());
         for band in 0..OCTAVE_BAND_COUNT {
             assert!(f.total_attenuation_db(band).is_finite(), "band {band}");
@@ -455,7 +465,11 @@ mod tests {
         let low = f.broadband_attenuation_db(20.0);
         let high = f.broadband_attenuation_db(20_000.0);
         assert!(approx(low, f.total_attenuation_db(0), 1e-3));
-        assert!(approx(high, f.total_attenuation_db(OCTAVE_BAND_COUNT - 1), 1e-3));
+        assert!(approx(
+            high,
+            f.total_attenuation_db(OCTAVE_BAND_COUNT - 1),
+            1e-3
+        ));
     }
 
     #[test]
@@ -466,7 +480,10 @@ mod tests {
             divergence(),
             AtmosphericConditions::default(),
             ground,
-            Some(Diffraction::from_path_difference(Sample::INFINITY, Sample::NAN)),
+            Some(Diffraction::from_path_difference(
+                Sample::INFINITY,
+                Sample::NAN,
+            )),
         );
         assert!(f.distance().is_finite());
         for band in 0..OCTAVE_BAND_COUNT {

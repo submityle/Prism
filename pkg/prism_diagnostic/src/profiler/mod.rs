@@ -38,10 +38,10 @@ pub mod tracy;
 
 extern crate alloc;
 
-use String;
 use alloc::sync::Arc;
 use core::cell::Cell;
 use std::sync::{OnceLock, RwLock};
+use String;
 
 use prism_platform::now;
 
@@ -251,9 +251,9 @@ macro_rules! profiled_zone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use String;
     use alloc::vec::Vec;
     use std::sync::Mutex;
+    use String;
 
     #[derive(Default)]
     struct Recorder {
@@ -289,7 +289,9 @@ mod tests {
     // concurrently; a module mutex serializes them.
     fn lock() -> std::sync::MutexGuard<'static, ()> {
         static GUARD: Mutex<()> = Mutex::new(());
-        GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]

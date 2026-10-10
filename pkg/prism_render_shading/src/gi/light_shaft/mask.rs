@@ -75,7 +75,12 @@ impl HalfResShaft {
         if width == 0 || height == 0 || mask.len() < len || depth.len() < len {
             return None;
         }
-        Some(Self { width, height, mask, depth })
+        Some(Self {
+            width,
+            height,
+            mask,
+            depth,
+        })
     }
 
     /// Low-resolution width in texels.
@@ -134,7 +139,11 @@ pub fn bilateral_weights(
 
     let sigma = sigma_z.max(MIN_SIGMA_Z);
     let inv_sigma2 = 1.0 / (sigma * sigma);
-    let fd = if full_depth.is_finite() { full_depth } else { f32::NAN };
+    let fd = if full_depth.is_finite() {
+        full_depth
+    } else {
+        f32::NAN
+    };
 
     let mut w = [0.0_f32; 4];
     let mut sum = 0.0_f32;
@@ -201,7 +210,11 @@ pub fn upsample_bilateral(shaft: &HalfResShaft, uv: Vec2, full_depth: f32, sigma
     for k in 0..4 {
         acc += weights[k] * masks[k];
     }
-    if acc.is_finite() { acc.max(0.0) } else { 0.0 }
+    if acc.is_finite() {
+        acc.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Additive **screen** blend of a scalar shaft contribution over a scene colour.
@@ -214,7 +227,9 @@ pub fn upsample_bilateral(shaft: &HalfResShaft, uv: Vec2, full_depth: f32, sigma
 #[inline]
 pub fn composite_screen(scene: Vec3, shaft: f32, shaft_color: Vec3, intensity: f32) -> Vec3 {
     let s = sanitize_color(scene);
-    let add = sanitize_color(shaft_color) * sanitize_scalar(shaft).max(0.0) * sanitize_scalar(intensity).max(0.0);
+    let add = sanitize_color(shaft_color)
+        * sanitize_scalar(shaft).max(0.0)
+        * sanitize_scalar(intensity).max(0.0);
     let add = sanitize_color(add);
     screen_blend(s, add)
 }
@@ -227,7 +242,9 @@ pub fn composite_screen(scene: Vec3, shaft: f32, shaft_color: Vec3, intensity: f
 #[inline]
 pub fn composite_additive(scene: Vec3, shaft: f32, shaft_color: Vec3, intensity: f32) -> Vec3 {
     let s = sanitize_color(scene);
-    let add = sanitize_color(shaft_color) * sanitize_scalar(shaft).max(0.0) * sanitize_scalar(intensity).max(0.0);
+    let add = sanitize_color(shaft_color)
+        * sanitize_scalar(shaft).max(0.0)
+        * sanitize_scalar(intensity).max(0.0);
     sanitize_color(s + sanitize_color(add))
 }
 
@@ -283,13 +300,21 @@ fn nearest_tap(fx: f32, fy: f32) -> usize {
 /// Clamps a value to `[0, 1]`, mapping non-finite to `0`.
 #[inline]
 fn clamp_unit(v: f32) -> f32 {
-    if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+    if v.is_finite() {
+        v.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Returns `v` when finite, else `0`.
 #[inline]
 fn sanitize_scalar(v: f32) -> f32 {
-    if v.is_finite() { v } else { 0.0 }
+    if v.is_finite() {
+        v
+    } else {
+        0.0
+    }
 }
 
 /// Sanitizes a colour to be finite and non-negative per channel.
@@ -331,7 +356,10 @@ mod tests {
             + fx * (1.0 - fy) * masks[1]
             + (1.0 - fx) * fy * masks[2]
             + fx * fy * masks[3];
-        assert!((blended - bilinear).abs() < 1e-5, "blended={blended} bilinear={bilinear}");
+        assert!(
+            (blended - bilinear).abs() < 1e-5,
+            "blended={blended} bilinear={bilinear}"
+        );
     }
 
     #[test]
@@ -423,7 +451,12 @@ mod tests {
 
     #[test]
     fn composites_sanitize_non_finite_inputs() {
-        let out = composite_screen(Vec3::new(f32::NAN, 0.3, 0.3), f32::INFINITY, Vec3::splat(0.5), 1.0);
+        let out = composite_screen(
+            Vec3::new(f32::NAN, 0.3, 0.3),
+            f32::INFINITY,
+            Vec3::splat(0.5),
+            1.0,
+        );
         assert!(out.is_finite());
         let out2 = composite_additive(Vec3::splat(0.1), f32::NAN, Vec3::splat(0.5), 1.0);
         assert!(out2.is_finite());

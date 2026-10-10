@@ -168,7 +168,10 @@ impl Capsule {
                 if disc >= 0.0 {
                     let sqrt_disc = disc.sqrt();
                     let inv_2a = 1.0 / (2.0 * coeff_a);
-                    for t in [(-coeff_b - sqrt_disc) * inv_2a, (-coeff_b + sqrt_disc) * inv_2a] {
+                    for t in [
+                        (-coeff_b - sqrt_disc) * inv_2a,
+                        (-coeff_b + sqrt_disc) * inv_2a,
+                    ] {
                         let z = za + t * zd;
                         if z >= 0.0 && z <= h {
                             // Pivot is the axis point at height `z`, so the
@@ -537,7 +540,11 @@ mod tests {
         let hit = cap.intersect(&ray).expect("body hit");
         assert_eq!(hit.primitive, 2);
         assert!(approx(hit.t, 4.0, 1e-3), "t = {}", hit.t);
-        assert!(approx(hit.normal[0], 1.0, 1e-3), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[0], 1.0, 1e-3),
+            "normal = {:?}",
+            hit.normal
+        );
         assert!(hit.front_face);
     }
 
@@ -549,7 +556,11 @@ mod tests {
         let hit = cap.intersect(&ray).expect("cap hit");
         assert!(approx(hit.t, 5.0, 1e-3), "t = {}", hit.t);
         // Ray-facing normal points back up +z.
-        assert!(approx(hit.normal[2], 1.0, 1e-3), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[2], 1.0, 1e-3),
+            "normal = {:?}",
+            hit.normal
+        );
     }
 
     #[test]
@@ -616,7 +627,11 @@ mod tests {
     fn reported_hit_lies_on_the_swept_surface() {
         let mut rng = Rng::new(0xCA95_1234);
         for _ in 0..5_000 {
-            let a = [rng.range(-4.0, 4.0), rng.range(-4.0, 4.0), rng.range(-4.0, 4.0)];
+            let a = [
+                rng.range(-4.0, 4.0),
+                rng.range(-4.0, 4.0),
+                rng.range(-4.0, 4.0),
+            ];
             let b = [
                 a[0] + rng.range(-3.0, 3.0),
                 a[1] + rng.range(-3.0, 3.0),
@@ -625,8 +640,16 @@ mod tests {
             let radius = rng.range(0.3, 1.5);
             let cap = Capsule::new(a, b, radius, 0);
 
-            let origin = [rng.range(-9.0, 9.0), rng.range(-9.0, 9.0), rng.range(-9.0, 9.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-9.0, 9.0),
+                rng.range(-9.0, 9.0),
+                rng.range(-9.0, 9.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             if dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] < 1e-6 {
                 continue;
             }
@@ -646,7 +669,11 @@ mod tests {
     }
 
     fn random_capsule(rng: &mut Rng, primitive: u32) -> Capsule {
-        let a = [rng.range(-5.0, 5.0), rng.range(-5.0, 5.0), rng.range(-5.0, 5.0)];
+        let a = [
+            rng.range(-5.0, 5.0),
+            rng.range(-5.0, 5.0),
+            rng.range(-5.0, 5.0),
+        ];
         let b = [
             a[0] + rng.range(-3.0, 3.0),
             a[1] + rng.range(-3.0, 3.0),
@@ -678,8 +705,16 @@ mod tests {
         let ordered = bvh.capsules().to_vec();
 
         for _ in 0..3_000 {
-            let origin = [rng.range(-10.0, 10.0), rng.range(-10.0, 10.0), rng.range(-10.0, 10.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             if dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] < 1e-6 {
                 continue;
             }
@@ -717,8 +752,16 @@ mod tests {
         let ordered = bvh.capsules().to_vec();
 
         for _ in 0..3_000 {
-            let origin = [rng.range(-10.0, 10.0), rng.range(-10.0, 10.0), rng.range(-10.0, 10.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+                rng.range(-10.0, 10.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             if dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2] < 1e-6 {
                 continue;
             }

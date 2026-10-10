@@ -20,4 +20,6 @@ pub mod guided_sampling;
 pub mod restir;
 
 pub use guided_sampling::GuidingDistribution;
-pub use restir::{balance_heuristic, geometric_term, luminance, target_function, GiSample, Reservoir};
+pub use restir::{
+    balance_heuristic, geometric_term, luminance, target_function, GiSample, Reservoir,
+};

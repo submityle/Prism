@@ -59,7 +59,11 @@ const MAX_ALPHA: f32 = 1.0 - 1.0e-4;
 /// Sanitises a scalar to a finite value, substituting `fallback` otherwise.
 #[inline]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Converts a fragment `alpha ∈ [0, 1]` to optical absorbance `-ln(1 - a)`.
@@ -123,7 +127,12 @@ impl PowerMoments4 {
         let z3 = z2 * zc;
         let z4 = z2 * z2;
         self.b0 += absorbance;
-        self.b += Vec4::new(absorbance * zc, absorbance * z2, absorbance * z3, absorbance * z4);
+        self.b += Vec4::new(
+            absorbance * zc,
+            absorbance * z2,
+            absorbance * z3,
+            absorbance * z4,
+        );
     }
 
     /// Total transmittance through the whole transparent stack: `exp(-b₀)`.

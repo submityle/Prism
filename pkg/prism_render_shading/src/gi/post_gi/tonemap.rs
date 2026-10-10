@@ -177,8 +177,7 @@ fn agx_sigmoid(v: [f32; 3]) -> [f32; 3] {
         let x5 = x4 * x;
         let x6 = x3 * x3;
         // Minimal 6th-order fit of the AgX display sigmoid (Sobotka / Hill).
-        *o = (15.5 * x6 - 40.14 * x5 + 31.96 * x4 - 6.868 * x3 + 0.4298 * x2
-            + 0.1191 * x
+        *o = (15.5 * x6 - 40.14 * x5 + 31.96 * x4 - 6.868 * x3 + 0.4298 * x2 + 0.1191 * x
             - 0.00232)
             .clamp(0.0, 1.0);
     }
@@ -351,11 +350,7 @@ impl Default for TonemapParams {
 
 /// Dispatches to the selected [`TonemapOperator`] with `params`.
 #[must_use]
-pub fn apply_tonemap(
-    operator: TonemapOperator,
-    rgb: [f32; 3],
-    params: TonemapParams,
-) -> [f32; 3] {
+pub fn apply_tonemap(operator: TonemapOperator, rgb: [f32; 3], params: TonemapParams) -> [f32; 3] {
     match operator {
         TonemapOperator::Reinhard => tonemap_reinhard(rgb),
         TonemapOperator::ReinhardExtended => {

@@ -373,11 +373,7 @@ fn to_positions(particles: &[ClothParticle]) -> Vec<[f32; 4]> {
 /// 逐分量 `to_bits` 断言最终顶点位置一致（设备无关、无 FMA，构造正确即必过）。
 #[track_caller]
 fn assert_positions_bit_equal(label: &str, particles: &[ClothParticle], positions: &[[f32; 4]]) {
-    assert_eq!(
-        particles.len(),
-        positions.len(),
-        "{label}: 顶点数不一致"
-    );
+    assert_eq!(particles.len(), positions.len(), "{label}: 顶点数不一致");
     for (i, (p, q)) in particles.iter().zip(positions.iter()).enumerate() {
         assert_eq!(
             p.position.x.to_bits(),
@@ -410,7 +406,13 @@ fn particle(x: f32, y: f32, z: f32, inverse_mass: f32) -> ClothParticle {
 
 /// 隔离场景逐位对拍（`PairScope::All`）：驱动转写与黄金，断言最终位置逐位一致。
 #[track_caller]
-fn check_all(label: &str, particles: &[ClothParticle], virtuals: &[VirtualParticle], cell_size: f32, thickness: f32) {
+fn check_all(
+    label: &str,
+    particles: &[ClothParticle],
+    virtuals: &[VirtualParticle],
+    cell_size: f32,
+    thickness: f32,
+) {
     let mut gold = particles.to_vec();
     resolve_self_collision_virtual_jacobi(&mut gold, virtuals, cell_size, thickness);
     let mut positions = to_positions(particles);
@@ -420,7 +422,13 @@ fn check_all(label: &str, particles: &[ClothParticle], virtuals: &[VirtualPartic
 
 /// 隔离场景逐位对拍（`PairScope::VirtualOnly` augment）。
 #[track_caller]
-fn check_augment(label: &str, particles: &[ClothParticle], virtuals: &[VirtualParticle], cell_size: f32, thickness: f32) {
+fn check_augment(
+    label: &str,
+    particles: &[ClothParticle],
+    virtuals: &[VirtualParticle],
+    cell_size: f32,
+    thickness: f32,
+) {
     let mut gold = particles.to_vec();
     resolve_self_collision_virtual_augment_jacobi(&mut gold, virtuals, cell_size, thickness);
     let mut positions = to_positions(particles);
@@ -431,10 +439,7 @@ fn check_augment(label: &str, particles: &[ClothParticle], virtuals: &[VirtualPa
 #[test]
 fn two_reals_mutual_penetration_bit_parity() {
     // 两个动态 real 顶点互相穿透（无 virtuals），每 sample 仅一个穿透邻居 → 单项。
-    let particles = [
-        particle(0.0, 0.0, 0.0, 1.0),
-        particle(0.05, 0.0, 0.0, 1.0),
-    ];
+    let particles = [particle(0.0, 0.0, 0.0, 1.0), particle(0.05, 0.0, 0.0, 1.0)];
     check_all("two_reals", &particles, &[], 0.2, 0.1);
 }
 
@@ -459,10 +464,7 @@ fn real_diving_into_centroid_virtual_bit_parity() {
 #[test]
 fn coincident_samples_plus_x_fallback_bit_parity() {
     // 两 real 顶点完全重合（dist_sq <= EPS）：沿 +X 回退分支（黄金记录的退化行为）。
-    let particles = [
-        particle(1.0, 2.0, 3.0, 1.0),
-        particle(1.0, 2.0, 3.0, 1.0),
-    ];
+    let particles = [particle(1.0, 2.0, 3.0, 1.0), particle(1.0, 2.0, 3.0, 1.0)];
     check_all("coincident", &particles, &[], 0.2, 0.1);
 }
 
@@ -498,10 +500,7 @@ fn shares_active_vertex_skip_bit_parity() {
 #[test]
 fn augment_skips_real_real_pair_bit_parity() {
     // 两 real 顶点穿透，但 augment（VirtualOnly）跳过 real-real → 无推移。
-    let particles = [
-        particle(0.0, 0.0, 0.0, 1.0),
-        particle(0.05, 0.0, 0.0, 1.0),
-    ];
+    let particles = [particle(0.0, 0.0, 0.0, 1.0), particle(0.05, 0.0, 0.0, 1.0)];
     check_augment("augment_skip_real_real", &particles, &[], 0.2, 0.1);
 }
 
@@ -523,20 +522,14 @@ fn augment_still_resolves_real_vs_virtual_bit_parity() {
 #[test]
 fn beyond_thickness_is_noop_bit_parity() {
     // 两 real 顶点间距 > thickness：dist_sq >= thickness_sq → 零推移。
-    let particles = [
-        particle(0.0, 0.0, 0.0, 1.0),
-        particle(0.5, 0.0, 0.0, 1.0),
-    ];
+    let particles = [particle(0.0, 0.0, 0.0, 1.0), particle(0.5, 0.0, 0.0, 1.0)];
     check_all("beyond_thickness", &particles, &[], 0.2, 0.1);
 }
 
 #[test]
 fn non_positive_params_early_exit_bit_parity() {
     // 非正 cell_size / thickness：host 门禁早退，全零推移（位置不变）。
-    let particles = [
-        particle(0.0, 0.0, 0.0, 1.0),
-        particle(0.02, 0.0, 0.0, 1.0),
-    ];
+    let particles = [particle(0.0, 0.0, 0.0, 1.0), particle(0.02, 0.0, 0.0, 1.0)];
     check_all("zero_cell_size", &particles, &[], 0.0, 0.1);
     check_all("zero_thickness", &particles, &[], 0.2, 0.0);
     check_all("negative_cell_size", &particles, &[], -1.0, 0.1);

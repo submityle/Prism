@@ -85,12 +85,7 @@ fn scope_join_borrowed() {
     let pool = TaskPool::with_threads(3);
     let left = vec![1u64; 500];
     let right = vec![2u64; 500];
-    let (a, b) = pool.scope(|s| {
-        s.join(
-            || left.iter().sum::<u64>(),
-            || right.iter().sum::<u64>(),
-        )
-    });
+    let (a, b) = pool.scope(|s| s.join(|| left.iter().sum::<u64>(), || right.iter().sum::<u64>()));
     assert_eq!((a, b), (500, 1000));
 }
 
@@ -415,7 +410,10 @@ mod fiber_tests {
         assert_eq!(count.load(Ordering::Relaxed), ITERS);
         // Generous: < 100 µs per full cycle on any sane machine.
         let ceiling = Duration::from_micros(100) * ITERS as u32;
-        assert!(elapsed < ceiling, "fiber cycle unexpectedly slow: {elapsed:?}");
+        assert!(
+            elapsed < ceiling,
+            "fiber cycle unexpectedly slow: {elapsed:?}"
+        );
     }
 
     /// A panic inside a fiber job is captured across the asm boundary and
@@ -467,15 +465,15 @@ fn help_on_wait_fallback_handles_nested_waits() {
 /// concurrency are gated out of the single-threaded fallback.
 mod m3 {
     use crate::{Counter, NamedThreads, NamedThreadsConfig, TaskPool, ThreadCategory};
+    use alloc::sync::Arc;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
-    use alloc::sync::Arc;
     use std::sync::{Condvar, Mutex};
-    use std::task::{Context, Poll};
     #[cfg(not(feature = "single"))]
     use std::task::Waker;
+    use std::task::{Context, Poll};
 
     /// Spin until `counter` drains. Combo-independent (works with or without
     /// workers), used where `TaskPool::wait` is unavailable (e.g. waiting on a
@@ -641,7 +639,9 @@ mod m3 {
         let pool = TaskPool::new();
         let p = pool.clone();
         let out = pool.block_on(async move {
-            let tasks: Vec<_> = (0..64u64).map(|i| p.spawn_async(async move { i * i })).collect();
+            let tasks: Vec<_> = (0..64u64)
+                .map(|i| p.spawn_async(async move { i * i }))
+                .collect();
             let mut sum = 0u64;
             for task in tasks {
                 sum += task.await;
@@ -896,17 +896,17 @@ mod m3 {
 /// these exercise the `TaskPool` surface that stitches them together.
 mod m4 {
     use crate::{
-        CoreClass, CoreClassPolicy, CoreInfo, NumaNodeId, TaskPool, TaskPoolConfig, Topology,
-        affinity_supported, plan_worker_cores, steal_order,
+        affinity_supported, plan_worker_cores, steal_order, CoreClass, CoreClassPolicy, CoreInfo,
+        NumaNodeId, TaskPool, TaskPoolConfig, Topology,
     };
     // These are only touched by the worker-backed tests below, which the
     // synchronous `single` fallback compiles out.
     #[cfg(not(feature = "single"))]
     use crate::{Counter, DEFAULT_ARENA_CAPACITY};
     #[cfg(not(feature = "single"))]
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    #[cfg(not(feature = "single"))]
     use alloc::sync::Arc;
+    #[cfg(not(feature = "single"))]
+    use std::sync::atomic::{AtomicUsize, Ordering};
     #[cfg(not(feature = "single"))]
     use std::sync::Mutex;
 
@@ -959,10 +959,26 @@ mod m4 {
         // steal policy consumes — the affinity+NUMA wiring, exercised without
         // any platform NUMA map (honest, machine-independent).
         let topo = Topology::from_cores(vec![
-            CoreInfo { id: 0, node: NumaNodeId::new(0), class: CoreClass::Performance },
-            CoreInfo { id: 1, node: NumaNodeId::new(0), class: CoreClass::Performance },
-            CoreInfo { id: 2, node: NumaNodeId::new(1), class: CoreClass::Performance },
-            CoreInfo { id: 3, node: NumaNodeId::new(1), class: CoreClass::Performance },
+            CoreInfo {
+                id: 0,
+                node: NumaNodeId::new(0),
+                class: CoreClass::Performance,
+            },
+            CoreInfo {
+                id: 1,
+                node: NumaNodeId::new(0),
+                class: CoreClass::Performance,
+            },
+            CoreInfo {
+                id: 2,
+                node: NumaNodeId::new(1),
+                class: CoreClass::Performance,
+            },
+            CoreInfo {
+                id: 3,
+                node: NumaNodeId::new(1),
+                class: CoreClass::Performance,
+            },
         ]);
         let plan = plan_worker_cores(&topo, 4, CoreClassPolicy::Flat);
         let nodes = plan.worker_nodes();

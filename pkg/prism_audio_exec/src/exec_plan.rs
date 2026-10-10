@@ -20,10 +20,10 @@
 use alloc::vec::Vec;
 
 use crate::graph_desc::{ExecError, GraphDesc, NodeId};
-use crate::islands::{IslandPartition, partition_islands};
-use crate::liveness::{SlotAllocation, allocate_slots};
-use crate::pdc::{PdcPlan, compute_pdc};
-use crate::schedule::{ParallelSchedule, build_schedule};
+use crate::islands::{partition_islands, IslandPartition};
+use crate::liveness::{allocate_slots, SlotAllocation};
+use crate::pdc::{compute_pdc, PdcPlan};
+use crate::schedule::{build_schedule, ParallelSchedule};
 use crate::topo::topological_order;
 
 /// Immutable, ready-to-run plan for one compiled graph topology.

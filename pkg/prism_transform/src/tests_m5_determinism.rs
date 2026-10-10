@@ -3,8 +3,8 @@
 use prism_math::{Fixed, FxVec3};
 
 use crate::determinism::{
-    FxAffine3, FxMat3, hash_globals, identity_globals_fixed, propagate_fixed,
-    propagate_fixed_in_order,
+    hash_globals, identity_globals_fixed, propagate_fixed, propagate_fixed_in_order, FxAffine3,
+    FxMat3,
 };
 use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
 
@@ -112,8 +112,7 @@ fn hash_detects_single_bit_desync() {
     // Perturb one node's translation by a single ULP and re-hash.
     let mut desynced = g.clone();
     let t = desynced[2].translation;
-    desynced[2].translation =
-        FxVec3::new(Fixed::from_bits(t.x.to_bits() + 1), t.y, t.z);
+    desynced[2].translation = FxVec3::new(Fixed::from_bits(t.x.to_bits() + 1), t.y, t.z);
     assert_ne!(hash_globals(&desynced), digest);
 }
 

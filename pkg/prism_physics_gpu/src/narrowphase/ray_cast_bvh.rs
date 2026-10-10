@@ -253,12 +253,18 @@ mod tests {
         }
         let mut targets = vec![target_at(&hulls[0], Vec3::new(5.0, 0.0, 0.0))];
         for k in 0..40 {
-            targets.push(target_at(&hulls[k + 1], Vec3::new(1.0 + 1.5 * (k as f32), 60.0, 0.0)));
+            targets.push(target_at(
+                &hulls[k + 1],
+                Vec3::new(1.0 + 1.5 * (k as f32), 60.0, 0.0),
+            ));
         }
         let ray = SceneRay::new(Vec3::ZERO, Vec3::X, 50.0);
         let brute = ray_cast(&targets, &ray);
         let bvh = ray_cast_bvh(&targets, &ray);
-        assert_eq!(brute, bvh, "BVH ray cast must equal brute force on a large scene");
+        assert_eq!(
+            brute, bvh,
+            "BVH ray cast must equal brute force on a large scene"
+        );
         assert_eq!(bvh.expect("the on-path box is struck").target, 0);
     }
 }

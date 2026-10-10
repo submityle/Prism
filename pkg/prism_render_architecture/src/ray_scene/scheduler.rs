@@ -111,11 +111,8 @@ impl AccelerationScheduler {
 
         if self.rebuild_pending && !base.is_rebuild() {
             let wanted = self.policy.rebuild_variant(change.fragmentation);
-            let cost = update_scratch_bytes(
-                wanted,
-                change.total_primitives,
-                self.bytes_per_primitive,
-            );
+            let cost =
+                update_scratch_bytes(wanted, change.total_primitives, self.bytes_per_primitive);
             if ledger.admit(cost) {
                 self.rebuild_pending = false;
                 return ScheduledUpdate {

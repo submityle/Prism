@@ -85,7 +85,11 @@ fn sanitize_color(c: Vec3) -> Vec3 {
 /// Clamps a scalar to `[0, 1]`, mapping non-finite input to `0`.
 #[inline]
 fn sanitize_unit(x: f32) -> f32 {
-    if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }
+    if x.is_finite() {
+        x.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 /// Smootherstep `6t^5 - 15t^4 + 10t^3` on `[0, 1]`, clamped at the ends.
@@ -106,7 +110,11 @@ fn smootherstep(t: f32) -> f32 {
 /// (CoC `>= 0`) has zero foreground alpha.
 pub fn foreground_alpha(coc_normalized: f32, params: LayerParams) -> f32 {
     let params = params.sanitized();
-    let c = if coc_normalized.is_finite() { coc_normalized } else { 0.0 };
+    let c = if coc_normalized.is_finite() {
+        coc_normalized
+    } else {
+        0.0
+    };
     let near_mag = (-c).max(0.0); // only the negative (near) side counts
     smootherstep(near_mag / params.near_full_coc)
 }
@@ -118,7 +126,11 @@ pub fn foreground_alpha(coc_normalized: f32, params: LayerParams) -> f32 {
 /// layer into the sharp focus layer.  A near or in-focus pixel yields `0`.
 pub fn background_blend(coc_normalized: f32, params: LayerParams) -> f32 {
     let params = params.sanitized();
-    let c = if coc_normalized.is_finite() { coc_normalized } else { 0.0 };
+    let c = if coc_normalized.is_finite() {
+        coc_normalized
+    } else {
+        0.0
+    };
     let far_mag = c.max(0.0); // only the positive (far) side counts
     smootherstep(far_mag / params.far_full_coc)
 }
@@ -267,10 +279,16 @@ mod tests {
         for k in 0..=20 {
             let coc = -(k as f32 / 20.0);
             let a = foreground_alpha(coc, p);
-            assert!(a >= prev - 1.0e-6, "fg alpha not monotonic at {coc}: {a} < {prev}");
+            assert!(
+                a >= prev - 1.0e-6,
+                "fg alpha not monotonic at {coc}: {a} < {prev}"
+            );
             prev = a;
         }
-        assert!(approx(prev, 1.0, 1.0e-6), "deep foreground should saturate: {prev}");
+        assert!(
+            approx(prev, 1.0, 1.0e-6),
+            "deep foreground should saturate: {prev}"
+        );
     }
 
     #[test]
@@ -284,7 +302,10 @@ mod tests {
             coc_normalized: 0.0,
         };
         let out = composite(layers, LayerParams::default());
-        assert!(approx_vec(out, layers.sharp, 1.0e-6), "focus composite drifted: {out:?}");
+        assert!(
+            approx_vec(out, layers.sharp, 1.0e-6),
+            "focus composite drifted: {out:?}"
+        );
     }
 
     #[test]
@@ -297,7 +318,10 @@ mod tests {
             coc_normalized: -1.0,
         };
         let out = composite(layers, LayerParams::default());
-        assert!(approx_vec(out, layers.near_blurred, 1.0e-5), "foreground not opaque: {out:?}");
+        assert!(
+            approx_vec(out, layers.near_blurred, 1.0e-5),
+            "foreground not opaque: {out:?}"
+        );
     }
 
     #[test]
@@ -310,7 +334,10 @@ mod tests {
             coc_normalized: 1.0,
         };
         let out = composite(layers, LayerParams::default());
-        assert!(approx_vec(out, layers.far_blurred, 1.0e-5), "background not shown: {out:?}");
+        assert!(
+            approx_vec(out, layers.far_blurred, 1.0e-5),
+            "background not shown: {out:?}"
+        );
     }
 
     #[test]
@@ -330,7 +357,11 @@ mod tests {
                 coc_normalized: coc,
             };
             let out = composite(layers, p);
-            assert!(out.x <= prev + 1.0e-6, "diffusion not monotonic at {coc}: {} > {prev}", out.x);
+            assert!(
+                out.x <= prev + 1.0e-6,
+                "diffusion not monotonic at {coc}: {} > {prev}",
+                out.x
+            );
             prev = out.x;
         }
     }
@@ -341,11 +372,19 @@ mod tests {
         let top = premultiply(Vec3::new(0.3, 0.4, 0.5), 1.0);
         let bottom = premultiply(Vec3::new(0.9, 0.9, 0.9), 1.0);
         let out = over(top, bottom);
-        assert!(approx_vec(Vec3::new(out.x, out.y, out.z), Vec3::new(0.3, 0.4, 0.5), 1.0e-6));
+        assert!(approx_vec(
+            Vec3::new(out.x, out.y, out.z),
+            Vec3::new(0.3, 0.4, 0.5),
+            1.0e-6
+        ));
         // Fully transparent top leaves the bottom untouched.
         let clear = premultiply(Vec3::ONE, 0.0);
         let out2 = over(clear, bottom);
-        assert!(approx_vec(Vec3::new(out2.x, out2.y, out2.z), Vec3::new(0.9, 0.9, 0.9), 1.0e-6));
+        assert!(approx_vec(
+            Vec3::new(out2.x, out2.y, out2.z),
+            Vec3::new(0.9, 0.9, 0.9),
+            1.0e-6
+        ));
     }
 
     #[test]
@@ -355,7 +394,11 @@ mod tests {
         assert!(approx(pm.w, 0.5, 1.0e-7));
         assert!(approx_vec(unpremultiply(pm), c, 1.0e-6));
         // Transparent pixel unpremultiplies to black.
-        assert!(approx_vec(unpremultiply(premultiply(c, 0.0)), Vec3::ZERO, 0.0));
+        assert!(approx_vec(
+            unpremultiply(premultiply(c, 0.0)),
+            Vec3::ZERO,
+            0.0
+        ));
     }
 
     #[test]
@@ -366,7 +409,13 @@ mod tests {
             near_blurred: Vec3::new(0.0, f32::NAN, 0.0),
             coc_normalized: f32::NAN,
         };
-        let out = composite(layers, LayerParams { near_full_coc: 0.0, far_full_coc: -1.0 });
+        let out = composite(
+            layers,
+            LayerParams {
+                near_full_coc: 0.0,
+                far_full_coc: -1.0,
+            },
+        );
         assert!(out.is_finite(), "composite not finite: {out:?}");
     }
 }

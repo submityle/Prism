@@ -17,7 +17,10 @@ fn scratch(tag: &str, contents: &[u8]) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    path.push(format!("prism_mmap_{tag}_{nanos}_{:?}.bin", std::thread::current().id()));
+    path.push(format!(
+        "prism_mmap_{tag}_{nanos}_{:?}.bin",
+        std::thread::current().id()
+    ));
     let mut f = std::fs::File::create(&path).expect("create scratch file");
     f.write_all(contents).expect("write scratch file");
     f.sync_all().expect("sync scratch file");
@@ -28,7 +31,10 @@ fn scratch(tag: &str, contents: &[u8]) -> std::path::PathBuf {
 fn supported_is_true_on_this_host() {
     // Every CI/dev target this suite runs on (Linux/macOS/Windows) has real
     // mmap; the fallback is wasm-only.
-    assert!(mmap_supported(), "expected a zero-copy mmap backend on this host");
+    assert!(
+        mmap_supported(),
+        "expected a zero-copy mmap backend on this host"
+    );
 }
 
 #[test]

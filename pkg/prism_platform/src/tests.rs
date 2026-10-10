@@ -78,9 +78,8 @@ fn wall_clock_sample_pairs_wall_and_monotonic() {
 #[cfg(feature = "std")]
 #[test]
 fn wall_time_duration_since_is_none_on_backward() {
-    let later = WallTime::from_system_time(
-        std::time::UNIX_EPOCH + core::time::Duration::from_secs(100),
-    );
+    let later =
+        WallTime::from_system_time(std::time::UNIX_EPOCH + core::time::Duration::from_secs(100));
     let earlier = WallTime::unix_epoch();
     assert_eq!(
         later.duration_since(earlier),

@@ -178,8 +178,7 @@ pub fn build(
         nbr_offsets.push(u32::try_from(nbr_entries.len()).unwrap_or(u32::MAX));
     }
 
-    let positions_packed: Vec<[f32; 4]> =
-        positions.iter().map(|p| [p.x, p.y, p.z, 0.0]).collect();
+    let positions_packed: Vec<[f32; 4]> = positions.iter().map(|p| [p.x, p.y, p.z, 0.0]).collect();
     let normals_packed: Vec<[f32; 4]> = (0..count)
         .map(|i| {
             let n = normals.get(i).copied().unwrap_or(Vec3::ZERO);
@@ -259,7 +258,14 @@ mod tests {
         )
         .is_none());
         // Fewer than two particles.
-        assert!(build(&positions[..1], &im[..1], &layer_of[..1], &normals[..1], params()).is_none());
+        assert!(build(
+            &positions[..1],
+            &im[..1],
+            &layer_of[..1],
+            &normals[..1],
+            params()
+        )
+        .is_none());
         // Mismatched inverse-mass length.
         assert!(build(&positions, &im[..1], &layer_of, &normals, params()).is_none());
     }

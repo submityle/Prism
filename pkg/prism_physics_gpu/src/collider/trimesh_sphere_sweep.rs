@@ -300,7 +300,8 @@ pub(crate) fn sweep_sphere_triangle(
         return Some((0.0, q0, normal));
     }
 
-    let mut best: Option<(f32, Vec3, Vec3)> = sweep_face(origin, dir, max_distance, radius, a, b, c);
+    let mut best: Option<(f32, Vec3, Vec3)> =
+        sweep_face(origin, dir, max_distance, radius, a, b, c);
     for (p1, p2) in [(a, b), (b, c), (c, a)] {
         if let Some(hit) = sweep_edge(origin, dir, max_distance, radius, p1, p2)
             && best.is_none_or(|(bt, _, _)| hit.0 < bt)
@@ -327,8 +328,7 @@ pub(crate) fn closer_hit(candidate: &TrimeshSweepHit, best: &Option<TrimeshSweep
         // index-order brute sweep, the BVH-order LBVH sweep, and the GPU host
         // reduction all converge on the identical triangle.
         Some(b) => {
-            candidate.toi < b.toi
-                || (candidate.toi == b.toi && candidate.triangle < b.triangle)
+            candidate.toi < b.toi || (candidate.toi == b.toi && candidate.triangle < b.triangle)
         }
         None => true,
     }
@@ -514,19 +514,35 @@ mod tests {
         let mesh = unit_quad();
         // Sphere descending from +z toward the quad centre; it stops when its
         // surface reaches the plane, i.e. the centre is one radius above z = 0.
-        let sweep = SphereSweep::new(Vec3::new(0.3, 0.1, 5.0), Vec3::new(0.0, 0.0, -1.0), 100.0, 0.5);
+        let sweep = SphereSweep::new(
+            Vec3::new(0.3, 0.1, 5.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            100.0,
+            0.5,
+        );
         let hit = cpu_trimesh_sphere_sweep(&mesh, &sweep).expect("hits the quad");
         assert_eq!(hit.triangle, 0, "lower-right triangle covers (0.3, 0.1)");
         assert!((hit.toi - 4.5).abs() < 1e-4, "toi was {}", hit.toi);
         assert!((hit.point - Vec3::new(0.3, 0.1, 0.0)).length() < 1e-4);
-        assert!((hit.normal - Vec3::Z).length() < 1e-4, "normal points at sphere");
+        assert!(
+            (hit.normal - Vec3::Z).length() < 1e-4,
+            "normal points at sphere"
+        );
     }
 
     #[test]
     fn misses_when_aimed_away() {
         let mesh = unit_quad();
-        let sweep = SphereSweep::new(Vec3::new(0.3, 0.1, 5.0), Vec3::new(0.0, 0.0, 1.0), 100.0, 0.5);
-        assert!(cpu_trimesh_sphere_sweep(&mesh, &sweep).is_none(), "sweeps away from quad");
+        let sweep = SphereSweep::new(
+            Vec3::new(0.3, 0.1, 5.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            100.0,
+            0.5,
+        );
+        assert!(
+            cpu_trimesh_sphere_sweep(&mesh, &sweep).is_none(),
+            "sweeps away from quad"
+        );
     }
 
     #[test]
@@ -534,8 +550,16 @@ mod tests {
         let mesh = unit_quad();
         // Quad is 5 away, sphere radius 0.5 so contact is at toi 4.5; a max of
         // 2 cannot reach it.
-        let sweep = SphereSweep::new(Vec3::new(0.3, 0.1, 5.0), Vec3::new(0.0, 0.0, -1.0), 2.0, 0.5);
-        assert!(cpu_trimesh_sphere_sweep(&mesh, &sweep).is_none(), "contact beyond max");
+        let sweep = SphereSweep::new(
+            Vec3::new(0.3, 0.1, 5.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            2.0,
+            0.5,
+        );
+        assert!(
+            cpu_trimesh_sphere_sweep(&mesh, &sweep).is_none(),
+            "contact beyond max"
+        );
     }
 
     #[test]
@@ -543,10 +567,18 @@ mod tests {
         let mesh = unit_quad();
         // Sphere centred just above the quad with a radius that already reaches
         // the surface: the contact is immediate.
-        let sweep = SphereSweep::new(Vec3::new(0.3, 0.1, 0.2), Vec3::new(0.0, 0.0, -1.0), 100.0, 0.5);
+        let sweep = SphereSweep::new(
+            Vec3::new(0.3, 0.1, 0.2),
+            Vec3::new(0.0, 0.0, -1.0),
+            100.0,
+            0.5,
+        );
         let hit = cpu_trimesh_sphere_sweep(&mesh, &sweep).expect("already overlapping");
         assert!((hit.toi - 0.0).abs() < 1e-6, "toi was {}", hit.toi);
-        assert!((hit.normal - Vec3::Z).length() < 1e-4, "normal from surface to centre");
+        assert!(
+            (hit.normal - Vec3::Z).length() < 1e-4,
+            "normal from surface to centre"
+        );
     }
 
     #[test]
@@ -555,12 +587,23 @@ mod tests {
         // In-plane sweep toward the right edge x = 1; the face test is parallel
         // and misses, so the edge capsule must catch it. Centre stops one radius
         // from the edge line.
-        let sweep = SphereSweep::new(Vec3::new(1.5, 0.5, 0.0), Vec3::new(-1.0, 0.0, 0.0), 100.0, 0.3);
+        let sweep = SphereSweep::new(
+            Vec3::new(1.5, 0.5, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            100.0,
+            0.3,
+        );
         let hit = cpu_trimesh_sphere_sweep(&mesh, &sweep).expect("hits the right edge");
-        assert_eq!(hit.triangle, 0, "right edge belongs to the lower-right triangle");
+        assert_eq!(
+            hit.triangle, 0,
+            "right edge belongs to the lower-right triangle"
+        );
         assert!((hit.toi - 0.2).abs() < 1e-4, "toi was {}", hit.toi);
         assert!((hit.point - Vec3::new(1.0, 0.5, 0.0)).length() < 1e-4);
-        assert!((hit.normal - Vec3::X).length() < 1e-4, "normal points back along +x");
+        assert!(
+            (hit.normal - Vec3::X).length() < 1e-4,
+            "normal points back along +x"
+        );
     }
 
     #[test]
@@ -581,7 +624,12 @@ mod tests {
             indices.push([base, base + 2, base + 3]);
         }
         let mesh = Trimesh::new(vertices, indices);
-        let sweep = SphereSweep::new(Vec3::new(0.3, 0.1, 20.0), Vec3::new(0.0, 0.0, -1.0), 100.0, 0.25);
+        let sweep = SphereSweep::new(
+            Vec3::new(0.3, 0.1, 20.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            100.0,
+            0.25,
+        );
         let brute = cpu_trimesh_sphere_sweep(&mesh, &sweep).expect("hits");
         let bvh = cpu_trimesh_sphere_sweep_built(&mesh, &sweep).expect("hits");
         assert_eq!(brute.triangle, bvh.triangle, "same winning triangle");

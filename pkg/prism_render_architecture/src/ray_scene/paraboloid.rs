@@ -202,7 +202,11 @@ impl Paraboloid {
                 continue;
             }
             // Point relative to the apex and its perpendicular (radial) part.
-            let p = [a[0] + t * direction[0], a[1] + t * direction[1], a[2] + t * direction[2]];
+            let p = [
+                a[0] + t * direction[0],
+                a[1] + t * direction[1],
+                a[2] + t * direction[2],
+            ];
             let perp = [p[0] - z * n[0], p[1] - z * n[1], p[2] - z * n[2]];
             // Outward gradient of `k · ρ² − z`: `2k · ρ⃗ − n̂`.
             let grad = [
@@ -506,7 +510,11 @@ mod tests {
         // (−z). The ray also travels −z, so it strikes the concave *interior*
         // (back) face: `front_face` is false and the ray-facing shading normal
         // flips to +z to oppose the incident ray.
-        assert!(approx(hit.normal[2], 1.0, 1e-3), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[2], 1.0, 1e-3),
+            "normal = {:?}",
+            hit.normal
+        );
         assert!(!hit.front_face);
     }
 

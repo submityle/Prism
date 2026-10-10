@@ -26,7 +26,7 @@
 pub mod router;
 pub mod target;
 
-pub use router::{ExpressionRouter, MAX_VOICE_CONTROLLERS, ModulationWrite, VoiceExpression};
+pub use router::{ExpressionRouter, ModulationWrite, VoiceExpression, MAX_VOICE_CONTROLLERS};
 pub use target::{
-    Curve, ExpressionDimension, ModulationTarget, TargetMapping, normalize_u16, normalize_u32,
+    normalize_u16, normalize_u32, Curve, ExpressionDimension, ModulationTarget, TargetMapping,
 };

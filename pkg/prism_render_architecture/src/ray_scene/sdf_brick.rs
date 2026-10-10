@@ -245,9 +245,8 @@ impl SdfBrick {
     #[must_use]
     pub fn intersect(&self, ray: &Ray) -> Option<SdfBrickHit> {
         let direction = ray.direction();
-        let dir_len2 = direction[0] * direction[0]
-            + direction[1] * direction[1]
-            + direction[2] * direction[2];
+        let dir_len2 =
+            direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2];
         if dir_len2 <= 0.0 {
             return None;
         }
@@ -328,7 +327,11 @@ impl SdfBrick {
             [grad[0] * inv, grad[1] * inv, grad[2] * inv]
         } else {
             let inv = 1.0 / vec3_length(direction);
-            [-direction[0] * inv, -direction[1] * inv, -direction[2] * inv]
+            [
+                -direction[0] * inv,
+                -direction[1] * inv,
+                -direction[2] * inv,
+            ]
         };
         let facing =
             direction[0] * outward[0] + direction[1] * outward[1] + direction[2] * outward[2];
@@ -726,9 +729,11 @@ mod tests {
                 + hit.normal[2] * hit.normal[2])
                 .sqrt();
             assert!((nlen - 1.0).abs() < 1e-3, "normal not unit: {nlen}");
-            let facing =
-                hit.normal[0] * dir[0] + hit.normal[1] * dir[1] + hit.normal[2] * dir[2];
-            assert!(facing <= 1e-4, "normal not oriented against the ray: {facing}");
+            let facing = hit.normal[0] * dir[0] + hit.normal[1] * dir[1] + hit.normal[2] * dir[2];
+            assert!(
+                facing <= 1e-4,
+                "normal not oriented against the ray: {facing}"
+            );
             assert!(hit.front_face, "exterior ray should strike the front face");
 
             // The outward normal roughly matches the exact radial direction.

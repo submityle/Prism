@@ -5,8 +5,8 @@
 //! author-recommended procedure), and [`Xoshiro256StarStar::jump`] advances the
 //! stream by `2^128` steps to carve out non-overlapping sub-sequences.
 
-use crate::rng::Rng;
 use crate::rng::splitmix::SplitMix64;
+use crate::rng::Rng;
 
 /// The `xoshiro256**` generator.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,7 +24,9 @@ impl Xoshiro256StarStar {
     #[inline]
     pub fn new(seed: u64) -> Self {
         let mut sm = SplitMix64::new(seed);
-        Self { s: [sm.next(), sm.next(), sm.next(), sm.next()] }
+        Self {
+            s: [sm.next(), sm.next(), sm.next(), sm.next()],
+        }
     }
 
     /// Create a generator directly from raw state. All-zero state is invalid

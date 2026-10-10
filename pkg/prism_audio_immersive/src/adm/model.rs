@@ -347,7 +347,12 @@ pub struct AudioTrackUid {
 impl AudioTrackUid {
     /// Builds a track UID binding.
     #[must_use]
-    pub fn new(id: &str, track_index: u16, channel_format_ref: &str, pack_format_ref: &str) -> Self {
+    pub fn new(
+        id: &str,
+        track_index: u16,
+        channel_format_ref: &str,
+        pack_format_ref: &str,
+    ) -> Self {
         Self {
             id: String::from(id),
             track_index,
@@ -494,18 +499,24 @@ mod tests {
 
     fn minimal() -> AdmDocument {
         let mut doc = AdmDocument::new();
-        let mut channel = AudioChannelFormat::new("AC_00031001", "Front Left", TypeDefinition::Objects);
-        channel
-            .block_formats
-            .push(AudioBlockFormat::new("AB_00031001_00000001", AdmPosition::new(30.0, 0.0, 1.0)));
+        let mut channel =
+            AudioChannelFormat::new("AC_00031001", "Front Left", TypeDefinition::Objects);
+        channel.block_formats.push(AudioBlockFormat::new(
+            "AB_00031001_00000001",
+            AdmPosition::new(30.0, 0.0, 1.0),
+        ));
         doc.channel_formats.push(channel);
 
         let mut pack = AudioPackFormat::new("AP_00031001", "Mono Object", TypeDefinition::Objects);
         pack.channel_format_refs.push(String::from("AC_00031001"));
         doc.pack_formats.push(pack);
 
-        doc.track_uids
-            .push(AudioTrackUid::new("ATU_00000001", 1, "AC_00031001", "AP_00031001"));
+        doc.track_uids.push(AudioTrackUid::new(
+            "ATU_00000001",
+            1,
+            "AC_00031001",
+            "AP_00031001",
+        ));
 
         let mut object = AudioObject::new("AO_1001", "Dialogue");
         object.pack_format_refs.push(String::from("AP_00031001"));

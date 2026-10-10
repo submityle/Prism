@@ -26,9 +26,9 @@
 use alloc::string::String;
 
 use bytemuck::{Pod, Zeroable};
+use prism_math::shader_mirror::WGSL_PROJECTION_RH;
 use prism_math::Mat4;
 use prism_math::Vec4;
-use prism_math::shader_mirror::WGSL_PROJECTION_RH;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BufferBindingType, CommandEncoderDescriptor,
@@ -240,7 +240,10 @@ impl GpuProjection {
 
     /// Builds a right-handed orthographic matrix on the device (depth `[0, 1]`).
     #[must_use]
-    #[expect(clippy::too_many_arguments, reason = "mirrors the 6-param CPU ortho constructor plus ctx")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the 6-param CPU ortho constructor plus ctx"
+    )]
     pub fn orthographic_rh(
         &self,
         ctx: &GpuContext,

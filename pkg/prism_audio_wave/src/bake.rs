@@ -18,7 +18,9 @@
 use alloc::vec::Vec;
 use bevy_math::Vec3;
 
-use crate::encoding::{encode_perceptual, energy, DirectionalProbe, EncodeConfig, PerceptualParams};
+use crate::encoding::{
+    encode_perceptual, energy, DirectionalProbe, EncodeConfig, PerceptualParams,
+};
 use crate::field::{BitDepth, ParameterField, ParameterFieldBuilder};
 use crate::grid::ProbeGrid;
 use crate::solver::{ImpulseResponse, SolveConfig, VoxelScene, WaveSolver};
@@ -140,7 +142,9 @@ pub fn bake_field(
     for i in 0..probe_count {
         let [ix, iy, iz] = grid.triplet(i);
         let pos = grid.probe_position(ix, iy, iz);
-        let cell = scene.nearest_air(pos).unwrap_or_else(|| scene.voxel_of(pos));
+        let cell = scene
+            .nearest_air(pos)
+            .unwrap_or_else(|| scene.voxel_of(pos));
         let center = probe_cells.len();
         probe_cells.push(cell);
         let mut neighbors = [None; 6];
@@ -257,7 +261,12 @@ mod tests {
                 scene.set_solid(4, y, z, true);
             }
         }
-        let grid = ProbeGrid::new(Aabb::new(Vec3::new(0.25, 1.0, 1.0), Vec3::new(3.75, 1.0, 1.0)), 2, 1, 1);
+        let grid = ProbeGrid::new(
+            Aabb::new(Vec3::new(0.25, 1.0, 1.0), Vec3::new(3.75, 1.0, 1.0)),
+            2,
+            1,
+            1,
+        );
         // Source on the near (low-x) side.
         let source = SourcePlacement {
             position: Vec3::new(0.5, 1.0, 1.0),
@@ -294,6 +303,10 @@ mod tests {
         let source = SourcePlacement::new(Vec3::splat(1.0));
         let field = bake_field(&scene, &grid, &source, &BakeConfig::default());
         let p = field.decode(0);
-        assert!(p.direct_gain < 1e-3, "expected occluded, got {}", p.direct_gain);
+        assert!(
+            p.direct_gain < 1e-3,
+            "expected occluded, got {}",
+            p.direct_gain
+        );
     }
 }

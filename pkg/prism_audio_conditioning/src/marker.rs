@@ -65,9 +65,7 @@ impl MarkerTimeline {
     /// Inserts a marker, keeping the timeline sorted by `(frame, kind)`.
     pub fn insert(&mut self, marker: Marker) {
         let key = (marker.frame, marker.kind);
-        let index = self
-            .markers
-            .partition_point(|m| (m.frame, m.kind) < key);
+        let index = self.markers.partition_point(|m| (m.frame, m.kind) < key);
         self.markers.insert(index, marker);
     }
 
@@ -124,8 +122,7 @@ mod tests {
         timeline.insert(Marker::new(100, MarkerKind::Beat));
         timeline.insert(Marker::new(10, MarkerKind::Transient));
         timeline.insert(Marker::new(50, MarkerKind::Bar));
-        let frames: Vec<usize> =
-            timeline.markers().iter().map(|m| m.frame).collect();
+        let frames: Vec<usize> = timeline.markers().iter().map(|m| m.frame).collect();
         assert_eq!(frames, alloc::vec![10, 50, 100]);
     }
 
@@ -149,9 +146,6 @@ mod tests {
         let timeline = MarkerTimeline::build(&onsets, &beats, 0);
         assert_eq!(timeline.len(), 5);
         // All beats are plain beats when beats_per_bar is zero.
-        assert!(timeline
-            .markers()
-            .iter()
-            .all(|m| m.kind != MarkerKind::Bar));
+        assert!(timeline.markers().iter().all(|m| m.kind != MarkerKind::Bar));
     }
 }

@@ -141,10 +141,7 @@ impl ProbeRanges {
         rt60_s: (0.0, 10.0),
         wet_gain: (0.0, 1.0),
         azimuth: (-core::f32::consts::PI, core::f32::consts::PI),
-        elevation: (
-            -core::f32::consts::FRAC_PI_2,
-            core::f32::consts::FRAC_PI_2,
-        ),
+        elevation: (-core::f32::consts::FRAC_PI_2, core::f32::consts::FRAC_PI_2),
         drr_db: (-60.0, 60.0),
     };
 
@@ -390,16 +387,8 @@ impl ParameterField {
         let nx = read_u32(&mut cur);
         let ny = read_u32(&mut cur);
         let nz = read_u32(&mut cur);
-        let min = bevy_math::Vec3::new(
-            read_f32(&mut cur),
-            read_f32(&mut cur),
-            read_f32(&mut cur),
-        );
-        let max = bevy_math::Vec3::new(
-            read_f32(&mut cur),
-            read_f32(&mut cur),
-            read_f32(&mut cur),
-        );
+        let min = bevy_math::Vec3::new(read_f32(&mut cur), read_f32(&mut cur), read_f32(&mut cur));
+        let max = bevy_math::Vec3::new(read_f32(&mut cur), read_f32(&mut cur), read_f32(&mut cur));
         let mut slots = [(0.0_f32, 0.0_f32); FIELDS_PER_PROBE];
         for slot in &mut slots {
             let lo = read_f32(&mut cur);
@@ -545,11 +534,7 @@ impl ParameterFieldBuilder {
     pub fn build_with_ranges(&self, bit_depth: BitDepth, ranges: ProbeRanges) -> ParameterField {
         let levels = bit_depth.levels();
         let mut data = vec![0u16; self.probes.len() * FIELDS_PER_PROBE];
-        for (p, chunk) in self
-            .probes
-            .iter()
-            .zip(data.chunks_mut(FIELDS_PER_PROBE))
-        {
+        for (p, chunk) in self.probes.iter().zip(data.chunks_mut(FIELDS_PER_PROBE)) {
             let slots = params_to_slots(p);
             for (i, dst) in chunk.iter_mut().enumerate() {
                 let (min, max) = ranges.slot(i);

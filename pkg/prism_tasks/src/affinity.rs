@@ -177,7 +177,10 @@ mod tests {
         let cores: Vec<_> = plan.assignments().iter().map(|a| a.core).collect();
         assert_eq!(cores, vec![0, 1, 2, 3, 0, 1]);
         // Uniform topology => every worker on node 0, performance class.
-        assert!(plan.assignments().iter().all(|a| a.node == NumaNodeId::ZERO));
+        assert!(plan
+            .assignments()
+            .iter()
+            .all(|a| a.node == NumaNodeId::ZERO));
     }
 
     #[test]
@@ -203,7 +206,10 @@ mod tests {
             core(1, 1, CoreClass::Performance),
         ]);
         let plan = plan_worker_cores(&topo, 2, CoreClassPolicy::Flat);
-        assert_eq!(plan.worker_nodes(), vec![NumaNodeId::new(0), NumaNodeId::new(1)]);
+        assert_eq!(
+            plan.worker_nodes(),
+            vec![NumaNodeId::new(0), NumaNodeId::new(1)]
+        );
         assert_eq!(plan.node_of_worker(1), NumaNodeId::new(1));
     }
 

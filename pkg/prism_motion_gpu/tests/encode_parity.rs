@@ -14,10 +14,10 @@
 
 use prism_motion_gpu::context::GpuContext;
 use prism_motion_gpu::encode::GpuEncodeMotion;
-use prism_render_architecture::motion::MotionSample;
 use prism_render_architecture::motion::encode::{
-    EncodedMotion, VelocityEncoding, encode_sample, flags,
+    encode_sample, flags, EncodedMotion, VelocityEncoding,
 };
+use prism_render_architecture::motion::MotionSample;
 
 /// Acquires a device, or prints a skip note and returns `None` on hosts without
 /// a usable adapter.
@@ -88,13 +88,7 @@ fn assert_encode_parity(
     gpu
 }
 
-fn sample(
-    vx: f32,
-    vy: f32,
-    reactive: f32,
-    transparency: f32,
-    confidence: f32,
-) -> MotionSample {
+fn sample(vx: f32, vy: f32, reactive: f32, transparency: f32, confidence: f32) -> MotionSample {
     MotionSample {
         velocity_pixels: [vx, vy],
         reprojection_confidence: confidence,
@@ -114,7 +108,7 @@ fn snorm16_endpoints_and_saturation_match_golden() {
     let encoding = VelocityEncoding::new(100.0);
     // Full-scale, beyond full-scale (saturates), zero, and a mid value.
     let samples = [
-        sample(100.0, -100.0, 0.0, 0.0, 1.0),  // +/- full scale
+        sample(100.0, -100.0, 0.0, 0.0, 1.0),   // +/- full scale
         sample(1000.0, -1000.0, 0.0, 0.0, 1.0), // saturates to +/-32767
         sample(0.0, 0.0, 0.0, 0.0, 1.0),        // zero -> 0
         sample(25.0, -75.0, 0.0, 0.0, 1.0),     // interior

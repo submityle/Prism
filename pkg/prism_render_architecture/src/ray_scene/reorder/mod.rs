@@ -82,7 +82,10 @@ mod tests {
         assert_eq!(plan.batches[1].len, 3);
         for b in &plan.batches {
             for &i in plan.batch_indices(b) {
-                assert_eq!(keys[i as usize].raw() >> layout.material_shift(), b.key_prefix);
+                assert_eq!(
+                    keys[i as usize].raw() >> layout.material_shift(),
+                    b.key_prefix
+                );
             }
         }
     }

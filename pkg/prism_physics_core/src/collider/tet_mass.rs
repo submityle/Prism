@@ -528,8 +528,7 @@ mod tests {
         // 0.4 R_eff^2 with R_eff = (3V / 4pi)^(1/3). Comparing against the
         // measured volume (not the ideal unit radius) removes the voxelisation
         // volume-shrink artefact, leaving only shape roughness.
-        let r_eff2 =
-            (3.0 * props.total_volume / (4.0 * core::f32::consts::PI)).powf(2.0 / 3.0);
+        let r_eff2 = (3.0 * props.total_volume / (4.0 * core::f32::consts::PI)).powf(2.0 / 3.0);
         let analytic = 0.4 * props.total_mass * r_eff2;
         assert!(
             (mean - analytic).abs() < 0.05 * analytic,

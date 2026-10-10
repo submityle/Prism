@@ -9,7 +9,7 @@
 use core::time::Duration;
 use std::io::Write as _;
 
-use super::{Backend, EventKind, Watcher, watch_native_supported};
+use super::{watch_native_supported, Backend, EventKind, Watcher};
 
 /// A generous deadline — the native backend is immediate, the poller rescans
 /// on a 50 ms cadence, so a couple of seconds is comfortably safe without

@@ -75,7 +75,12 @@ impl Hsla {
     /// Construct from components.
     #[inline]
     pub const fn new(hue: f32, saturation: f32, lightness: f32, alpha: f32) -> Self {
-        Self { hue, saturation, lightness, alpha }
+        Self {
+            hue,
+            saturation,
+            lightness,
+            alpha,
+        }
     }
 
     /// Convert from non-linear [`Srgba`].
@@ -104,7 +109,12 @@ impl Hsva {
     /// Construct from components.
     #[inline]
     pub const fn new(hue: f32, saturation: f32, value: f32, alpha: f32) -> Self {
-        Self { hue, saturation, value, alpha }
+        Self {
+            hue,
+            saturation,
+            value,
+            alpha,
+        }
     }
 
     /// Convert from non-linear [`Srgba`].

@@ -170,7 +170,12 @@ impl RoomModes {
         let mut count = 0usize;
 
         if !max_frequency_hz.is_finite() || max_frequency_hz <= 0.0 {
-            return Self { modes, count, volume, sound_speed: c };
+            return Self {
+                modes,
+                count,
+                volume,
+                sound_speed: c,
+            };
         }
 
         let nx_max = axis_index_limit(lx, max_frequency_hz, c);
@@ -193,9 +198,8 @@ impl RoomModes {
                     let sum = rx * rx + ry * ry + rz * rz;
                     let freq = 0.5 * c * ops::sqrt(sum);
                     if freq.is_finite() && freq > 0.0 && freq <= max_frequency_hz {
-                        let nonzero = usize::from(nx > 0)
-                            + usize::from(ny > 0)
-                            + usize::from(nz > 0);
+                        let nonzero =
+                            usize::from(nx > 0) + usize::from(ny > 0) + usize::from(nz > 0);
                         let kind = match nonzero {
                             1 => ModeKind::Axial,
                             2 => ModeKind::Tangential,
@@ -215,7 +219,12 @@ impl RoomModes {
             nx += 1;
         }
 
-        Self { modes, count, volume, sound_speed: c }
+        Self {
+            modes,
+            count,
+            volume,
+            sound_speed: c,
+        }
     }
 
     /// The enumerated modes, ascending by frequency.
@@ -324,7 +333,11 @@ fn insert_mode(modes: &mut [RoomMode; MAX_ROOM_MODES], count: &mut usize, mode: 
     while pos < *count && modes[pos].frequency_hz <= mode.frequency_hz {
         pos += 1;
     }
-    let mut j = if *count < MAX_ROOM_MODES { *count } else { MAX_ROOM_MODES - 1 };
+    let mut j = if *count < MAX_ROOM_MODES {
+        *count
+    } else {
+        MAX_ROOM_MODES - 1
+    };
     while j > pos {
         modes[j] = modes[j - 1];
         j -= 1;
@@ -369,7 +382,11 @@ mod tests {
         let c = 343.0;
         let modes = RoomModes::from_shoebox(&cube(side), 200.0, c);
         let expected = c / (2.0 * side);
-        assert!(approx(modes.fundamental_hz(), expected, 1e-3), "f0 {}", modes.fundamental_hz());
+        assert!(
+            approx(modes.fundamental_hz(), expected, 1e-3),
+            "f0 {}",
+            modes.fundamental_hz()
+        );
         let axial = first_of(&modes, ModeKind::Axial).expect("axial mode");
         assert!(approx(axial.frequency_hz, expected, 1e-3));
     }
@@ -469,7 +486,10 @@ mod tests {
     #[test]
     fn non_finite_inputs_are_safe() {
         let room = cube(5.0);
-        assert_eq!(RoomModes::from_shoebox(&room, Sample::NAN, 343.0).count(), 0);
+        assert_eq!(
+            RoomModes::from_shoebox(&room, Sample::NAN, 343.0).count(),
+            0
+        );
         assert_eq!(RoomModes::from_shoebox(&room, -10.0, 343.0).count(), 0);
         // Bad sound speed falls back to the default and still enumerates.
         let fallback = RoomModes::from_shoebox(&room, 200.0, -1.0);
@@ -496,6 +516,9 @@ mod tests {
         for mode in modes.modes() {
             weight_sum += mode.weight;
         }
-        assert!(approx(band_sum, weight_sum, 1e-3), "band {band_sum} weight {weight_sum}");
+        assert!(
+            approx(band_sum, weight_sum, 1e-3),
+            "band {band_sum} weight {weight_sum}"
+        );
     }
 }

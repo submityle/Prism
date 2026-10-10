@@ -360,8 +360,7 @@ mod tests {
     fn polynomial_derivative_is_exact() {
         // f(x) = 3x^3 - 2x^2 + x - 5 ; f'(x) = 9x^2 - 4x + 1
         let eval = |x: Dual| {
-            x * x * x * Dual::constant(3.0) - x * x * Dual::constant(2.0) + x
-                - Dual::constant(5.0)
+            x * x * x * Dual::constant(3.0) - x * x * Dual::constant(2.0) + x - Dual::constant(5.0)
         };
         for &x in &[-2.0f32, -0.5, 0.0, 1.0, 3.3] {
             let d = eval(Dual::variable(x));
@@ -422,9 +421,7 @@ mod tests {
     fn curve_tangent_and_speed() {
         // Helix-like path built from polynomials to stay deterministic:
         // C(t) = (t, t^2, 2t) ; C'(t) = (1, 2t, 2) ; speed = |C'(t)|.
-        let curve = |t: Dual| {
-            DualVec3::from_components(t, t * t, t * Dual::constant(2.0))
-        };
+        let curve = |t: Dual| DualVec3::from_components(t, t * t, t * Dual::constant(2.0));
         for &t in &[0.0f32, 1.0, 2.5] {
             let c = curve(Dual::variable(t));
             assert!((c.deriv.x - 1.0).abs() < EPS);
@@ -456,8 +453,7 @@ mod tests {
         let a = DualVec3::new(Vec3::new(1.0, 2.0, 3.0), Vec3::new(0.5, -1.0, 2.0));
         let b = DualVec3::new(Vec3::new(-1.0, 0.0, 4.0), Vec3::new(2.0, 1.0, -0.5));
         let dot = a.dot(b);
-        let expected_dot_du =
-            a.deriv.dot(b.value) + a.value.dot(b.deriv);
+        let expected_dot_du = a.deriv.dot(b.value) + a.value.dot(b.deriv);
         assert!((dot.du - expected_dot_du).abs() < EPS);
         let cross = a.cross(b);
         let expected_cross_du = a.deriv.cross(b.value) + a.value.cross(b.deriv);

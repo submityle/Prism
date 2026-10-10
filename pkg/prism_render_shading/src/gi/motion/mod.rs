@@ -9,6 +9,6 @@
 //! * Transcendental math via [`bevy_math::ops`]; `sqrt` via the inherent method.
 //! * Defensive clamping everywhere; never emit `NaN`.
 
-pub mod reproject;
 pub mod dilation;
+pub mod reproject;
 pub mod tile;

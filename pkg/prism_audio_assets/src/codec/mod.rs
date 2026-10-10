@@ -156,14 +156,9 @@ mod tests {
         let block = encoder.encode_block(&pcm);
         assert_eq!(block.len(), encoder.block_align());
 
-        let mut decoder = ImaAdpcmDecoder::new(
-            block,
-            1,
-            48_000,
-            encoder.block_align(),
-            samples_per_block,
-        )
-        .unwrap();
+        let mut decoder =
+            ImaAdpcmDecoder::new(block, 1, 48_000, encoder.block_align(), samples_per_block)
+                .unwrap();
         let decoded = decoder.decode_to_end().unwrap();
         assert_eq!(decoded.len(), samples_per_block);
         // The preamble sample is exact.

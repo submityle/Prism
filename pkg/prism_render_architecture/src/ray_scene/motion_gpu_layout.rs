@@ -182,12 +182,7 @@ impl GpuMotionTlasBuffers {
 
     /// Nearest intersection along the world-space `ray` at shutter `time`.
     #[must_use]
-    pub fn closest_hit(
-        &self,
-        ray: &Ray,
-        time: f32,
-        pool: &GpuBlasPool,
-    ) -> Option<TlasPackedHit> {
+    pub fn closest_hit(&self, ray: &Ray, time: f32, pool: &GpuBlasPool) -> Option<TlasPackedHit> {
         self.closest_hit_masked(ray, time, pool, 0xFF)
     }
 
@@ -236,13 +231,7 @@ impl GpuMotionTlasBuffers {
 
     /// Occlusion query at `time` restricted to `ray_mask`-included instances.
     #[must_use]
-    pub fn any_hit_masked(
-        &self,
-        ray: &Ray,
-        time: f32,
-        pool: &GpuBlasPool,
-        ray_mask: u8,
-    ) -> bool {
+    pub fn any_hit_masked(&self, ray: &Ray, time: f32, pool: &GpuBlasPool, ray_mask: u8) -> bool {
         self.walk_any(ray, time, pool, ray_mask, false)
     }
 
@@ -539,10 +528,16 @@ mod tests {
         for _ in 0..6000 {
             let time = rng.range(-0.2, 1.2); // exercise the shutter clamp too
             let ray_mask = rng.next_u32() as u8;
-            let origin =
-                [rng.range(-7.0, 7.0), rng.range(-7.0, 7.0), rng.range(-7.0, 7.0)];
-            let target =
-                [rng.range(-2.0, 2.0), rng.range(-2.0, 2.0), rng.range(-2.0, 2.0)];
+            let origin = [
+                rng.range(-7.0, 7.0),
+                rng.range(-7.0, 7.0),
+                rng.range(-7.0, 7.0),
+            ];
+            let target = [
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+            ];
             let dir = [
                 target[0] - origin[0],
                 target[1] - origin[1],
@@ -600,9 +595,16 @@ mod tests {
 
         for _ in 0..2000 {
             let time = rng.range(0.0, 1.0);
-            let origin =
-                [rng.range(-6.0, 6.0), rng.range(-6.0, 6.0), rng.range(-6.0, 6.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, 1.0)];
+            let origin = [
+                rng.range(-6.0, 6.0),
+                rng.range(-6.0, 6.0),
+                rng.range(-6.0, 6.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            ];
             let ray = Ray::infinite(origin, dir);
 
             let plain = gpu.closest_hit(&ray, time, &pool);

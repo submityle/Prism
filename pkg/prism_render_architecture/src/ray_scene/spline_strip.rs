@@ -480,7 +480,12 @@ mod tests {
                 continue;
             }
             let inv = 1.0 / len2.sqrt();
-            let ray = Ray::new(origin, [dir[0] * inv, dir[1] * inv, dir[2] * inv], 0.0, 100.0);
+            let ray = Ray::new(
+                origin,
+                [dir[0] * inv, dir[1] * inv, dir[2] * inv],
+                0.0,
+                100.0,
+            );
 
             let mut best: Option<CurveHit> = None;
             let mut scan = ray;
@@ -559,7 +564,12 @@ mod tests {
                 continue;
             }
             let inv = 1.0 / len2.sqrt();
-            let ray = Ray::new(origin, [dir[0] * inv, dir[1] * inv, dir[2] * inv], 0.0, 100.0);
+            let ray = Ray::new(
+                origin,
+                [dir[0] * inv, dir[1] * inv, dir[2] * inv],
+                0.0,
+                100.0,
+            );
             let cpu = bvh.closest_hit(&ray);
             let packed = gpu.closest_hit(&ray);
             match (cpu, packed) {

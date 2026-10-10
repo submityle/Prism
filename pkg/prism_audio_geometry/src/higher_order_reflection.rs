@@ -126,7 +126,9 @@ pub fn resolve_higher_order_reflections(
     if !config.reflections_enabled || scene.is_empty() {
         return Vec::new();
     }
-    let max_order = config.max_reflection_order.min(MAX_SUPPORTED_REFLECTION_ORDER);
+    let max_order = config
+        .max_reflection_order
+        .min(MAX_SUPPORTED_REFLECTION_ORDER);
     if max_order < 2 {
         return Vec::new();
     }
@@ -359,12 +361,7 @@ mod tests {
             Vec3::new(10.0, 5.0, 0.0),
             Vec3::new(-10.0, 5.0, 0.0),
         ];
-        let indices = vec![
-            [0, 1, 2],
-            [0, 2, 3],
-            [4, 5, 6],
-            [4, 6, 7],
-        ];
+        let indices = vec![[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]];
         AcousticScene::new(vertices, indices, MaterialTable::uniform_scalar(material)).unwrap()
     }
 
@@ -394,7 +391,9 @@ mod tests {
         let base = (emitter.position - listener.position).length();
         // Default order is 1: this stage contributes nothing.
         let cfg = GeometricConfig::new(48_000);
-        assert!(resolve_higher_order_reflections(&scene, &listener, &emitter, &cfg, base).is_empty());
+        assert!(
+            resolve_higher_order_reflections(&scene, &listener, &emitter, &cfg, base).is_empty()
+        );
     }
 
     #[test]
@@ -406,7 +405,9 @@ mod tests {
         let cfg = GeometricConfig::new(48_000)
             .with_max_reflection_order(3)
             .without_reflections();
-        assert!(resolve_higher_order_reflections(&scene, &listener, &emitter, &cfg, base).is_empty());
+        assert!(
+            resolve_higher_order_reflections(&scene, &listener, &emitter, &cfg, base).is_empty()
+        );
     }
 
     #[test]
@@ -428,7 +429,9 @@ mod tests {
         let base = (emitter.position - listener.position).length();
         let cfg = GeometricConfig::new(48_000).with_max_reflection_order(3);
         // Two coplanar triangles cannot form a non-degenerate double bounce.
-        assert!(resolve_higher_order_reflections(&scene, &listener, &emitter, &cfg, base).is_empty());
+        assert!(
+            resolve_higher_order_reflections(&scene, &listener, &emitter, &cfg, base).is_empty()
+        );
     }
 
     #[test]

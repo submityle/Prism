@@ -223,9 +223,9 @@ pub fn tetrahedralize(
     let mut tets: Vec<[u32; 4]> = Vec::new();
 
     let intern = |key: (usize, usize, usize),
-                      pos: Vec3,
-                      verts: &mut Vec<Vec3>,
-                      map: &mut HashMap<(usize, usize, usize), u32>|
+                  pos: Vec3,
+                  verts: &mut Vec<Vec3>,
+                  map: &mut HashMap<(usize, usize, usize), u32>|
      -> u32 {
         *map.entry(key).or_insert_with(|| {
             let id = verts.len() as u32;

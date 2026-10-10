@@ -123,7 +123,11 @@ impl LumaStats {
 /// Replaces a non-finite scalar with `0.0`, otherwise returns it unchanged.
 #[inline]
 fn finite_or_zero(x: f32) -> f32 {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Sanitizes a threshold: non-finite becomes `0.0`, negatives clamp up to
@@ -193,7 +197,11 @@ pub fn weber_contrast(samples: &[f32]) -> f32 {
             // denominator strictly positive either way.
             let denom = stats.mean.max(LUMINANCE_FLOOR);
             let c = stats.std_dev() / denom;
-            if c.is_finite() { c.max(0.0) } else { 0.0 }
+            if c.is_finite() {
+                c.max(0.0)
+            } else {
+                0.0
+            }
         }
         None => 0.0,
     }
@@ -212,7 +220,11 @@ pub fn michelson_contrast(samples: &[f32]) -> f32 {
                 return 0.0;
             }
             let c = (stats.max - stats.min) / denom;
-            if c.is_finite() { c.clamp(0.0, 1.0) } else { 0.0 }
+            if c.is_finite() {
+                c.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
         }
         None => 0.0,
     }
@@ -230,7 +242,9 @@ pub fn michelson_contrast(samples: &[f32]) -> f32 {
 #[inline]
 pub fn rate_from_contrast(contrast: f32, thresholds: &LumaThresholds) -> ShadingRate {
     let t = thresholds.sanitized();
-    let c = if contrast.is_finite() { contrast.max(0.0) } else {
+    let c = if contrast.is_finite() {
+        contrast.max(0.0)
+    } else {
         // A non-finite contrast is treated as "maximally detailed": shade fully.
         return ShadingRate::X1x1;
     };
@@ -348,12 +362,7 @@ mod tests {
         let mut prev_rank = ShadingRate::X4x4.rank();
         let mut spread = 0.0_f32;
         while spread <= 0.4 {
-            let tile = [
-                mean - spread,
-                mean + spread,
-                mean - spread,
-                mean + spread,
-            ];
+            let tile = [mean - spread, mean + spread, mean - spread, mean + spread];
             let rank = classify_luma(&tile, &t).rank();
             assert!(rank <= prev_rank, "coarsened as spread grew at {spread}");
             prev_rank = rank;

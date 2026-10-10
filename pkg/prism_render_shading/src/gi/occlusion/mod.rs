@@ -20,6 +20,4 @@ pub mod bent_normal;
 pub mod specular_occlusion;
 
 pub use bent_normal::{accumulate_bent_normal, bent_normal_from_cosine_hemisphere, BentNormalCone};
-pub use specular_occlusion::{
-    cone_cone_intersection, horizon_occlusion, specular_occlusion,
-};
+pub use specular_occlusion::{cone_cone_intersection, horizon_occlusion, specular_occlusion};

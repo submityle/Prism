@@ -46,8 +46,8 @@ use bevy_math::Vec3;
 
 pub use blend::{
     composite_average, composite_over_opaque, composite_sorted, is_order_independent,
-    max_channel_error, over_premultiplied, over_straight, premultiply,
-    revealage_to_coverage, transmittance_to_coverage, unpremultiply, SortableFragment,
+    max_channel_error, over_premultiplied, over_straight, premultiply, revealage_to_coverage,
+    transmittance_to_coverage, unpremultiply, SortableFragment,
 };
 pub use moment_based::{
     alpha_to_absorbance, generate_moments, reconstruct_transmittance, warp_depth, PowerMoments4,
@@ -220,7 +220,10 @@ mod tests {
         let mut acc = WeightedBlendedAccumulator::new(OitParams::default());
         acc.step(Vec3::new(0.8, 0.2, 0.1), 1.0, 5.0);
         let out = acc.resolve(Vec3::ZERO);
-        assert!(max_channel_error(out, Vec3::new(0.8, 0.2, 0.1)) < 1e-5, "out={out:?}");
+        assert!(
+            max_channel_error(out, Vec3::new(0.8, 0.2, 0.1)) < 1e-5,
+            "out={out:?}"
+        );
     }
 
     #[test]
@@ -265,7 +268,10 @@ mod tests {
         let mut rev = frags;
         rev.reverse();
         let out_b = shuffled.composite(&rev, bg);
-        assert!(max_channel_error(out_a, out_b) < 1e-5, "a={out_a:?} b={out_b:?}");
+        assert!(
+            max_channel_error(out_a, out_b) < 1e-5,
+            "a={out_a:?} b={out_b:?}"
+        );
     }
 
     #[test]
@@ -284,7 +290,10 @@ mod tests {
             oit.accumulate(f.alpha, f.depth);
         }
         let est = oit.composite(&frags, bg);
-        assert!(max_channel_error(est, truth) < 0.1, "est={est:?} truth={truth:?}");
+        assert!(
+            max_channel_error(est, truth) < 0.1,
+            "est={est:?} truth={truth:?}"
+        );
     }
 
     #[test]
@@ -304,7 +313,11 @@ mod tests {
 
         let mut mb = MomentOit::new(OitParams::default());
         mb.accumulate(f32::NAN, f32::NAN);
-        let frag = [SortableFragment::new(Vec3::splat(f32::NAN), f32::NAN, f32::NAN)];
+        let frag = [SortableFragment::new(
+            Vec3::splat(f32::NAN),
+            f32::NAN,
+            f32::NAN,
+        )];
         assert!(mb.composite(&frag, Vec3::ZERO).is_finite());
     }
 }

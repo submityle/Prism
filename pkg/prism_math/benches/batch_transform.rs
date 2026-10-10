@@ -27,7 +27,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use prism_math::{Mat4, MathCaps, Quat, Vec3, batch};
+use prism_math::{batch, Mat4, MathCaps, Quat, Vec3};
 
 /// Points transformed per timed pass. Large enough to dwarf loop overhead and
 /// to exercise the batched inner kernel across many cache lines.
@@ -107,7 +107,10 @@ fn main() {
     for (a, b) in dst.iter().zip(reference.iter()) {
         worst = worst.max((*a - *b).length());
     }
-    assert!(worst < 1e-2, "batch path diverged from scalar reference: {worst}");
+    assert!(
+        worst < 1e-2,
+        "batch path diverged from scalar reference: {worst}"
+    );
 
     let batch_mps = 1_000.0 / batch_ns;
     let naive_mps = 1_000.0 / naive_ns;

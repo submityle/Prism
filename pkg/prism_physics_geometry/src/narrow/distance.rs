@@ -265,7 +265,11 @@ mod tests {
         let b = BoundingSphere::new(Vec3::new(5.0, 0.0, 0.0), 1.0);
         let r = gjk_closest_points(&a, &b).expect("separated");
         // Centres 5 apart, radii 1 each: surface gap = 3.
-        assert!((r.distance - 3.0).abs() < 1.0e-3, "distance = {}", r.distance);
+        assert!(
+            (r.distance - 3.0).abs() < 1.0e-3,
+            "distance = {}",
+            r.distance
+        );
         assert!(r.point_a.abs_diff_eq(Vec3::new(1.0, 0.0, 0.0), 1.0e-2));
         assert!(r.point_b.abs_diff_eq(Vec3::new(4.0, 0.0, 0.0), 1.0e-2));
         assert!(r.normal.dot(Vec3::X) > 0.99, "normal = {:?}", r.normal);
@@ -284,9 +288,21 @@ mod tests {
         let b = Aabb::new(Vec3::new(3.0, -1.0, -1.0), Vec3::new(5.0, 1.0, 1.0));
         let r = gjk_closest_points(&a, &b).expect("separated");
         // Faces at x = 1 and x = 3: gap = 2.
-        assert!((r.distance - 2.0).abs() < 1.0e-3, "distance = {}", r.distance);
-        assert!((r.point_a.x - 1.0).abs() < 1.0e-3, "point_a = {:?}", r.point_a);
-        assert!((r.point_b.x - 3.0).abs() < 1.0e-3, "point_b = {:?}", r.point_b);
+        assert!(
+            (r.distance - 2.0).abs() < 1.0e-3,
+            "distance = {}",
+            r.distance
+        );
+        assert!(
+            (r.point_a.x - 1.0).abs() < 1.0e-3,
+            "point_a = {:?}",
+            r.point_a
+        );
+        assert!(
+            (r.point_b.x - 3.0).abs() < 1.0e-3,
+            "point_b = {:?}",
+            r.point_b
+        );
     }
 
     #[test]
@@ -296,7 +312,11 @@ mod tests {
         let r = gjk_closest_points(&a, &b).expect("separated");
         // Nearest corners (1,1,1) and (2,2,2): gap = sqrt(3).
         let expected = (3.0_f32).sqrt();
-        assert!((r.distance - expected).abs() < 1.0e-3, "distance = {}", r.distance);
+        assert!(
+            (r.distance - expected).abs() < 1.0e-3,
+            "distance = {}",
+            r.distance
+        );
         assert!(r.point_a.abs_diff_eq(Vec3::splat(1.0), 1.0e-2));
         assert!(r.point_b.abs_diff_eq(Vec3::splat(2.0), 1.0e-2));
     }

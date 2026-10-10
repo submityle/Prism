@@ -193,8 +193,7 @@ impl HardSyncOscillatorNode {
     #[must_use]
     pub fn new(master_hz: Sample, sync_ratio: Sample, amplitude: Sample) -> Self {
         Self {
-            master_hz: finite_or(master_hz, DEFAULT_MASTER_HZ)
-                .clamp(MIN_MASTER_HZ, MAX_MASTER_HZ),
+            master_hz: finite_or(master_hz, DEFAULT_MASTER_HZ).clamp(MIN_MASTER_HZ, MAX_MASTER_HZ),
             sync_ratio: Smoothed::new(
                 finite_or(sync_ratio, DEFAULT_SYNC_RATIO).clamp(MIN_SYNC_RATIO, MAX_SYNC_RATIO),
             ),
@@ -457,10 +456,7 @@ mod tests {
         let out = render(&mut node, SR, 8_192);
         let at_master = goertzel(&out, SR, 110.0);
         let off = goertzel(&out, SR, 110.0 * 2.6);
-        assert!(
-            at_master > off,
-            "master={at_master} slave_bin={off}"
-        );
+        assert!(at_master > off, "master={at_master} slave_bin={off}");
     }
 
     #[test]
@@ -643,8 +639,7 @@ mod tests {
 
     #[test]
     fn non_finite_inputs_fall_back() {
-        let node =
-            HardSyncOscillatorNode::new(Sample::NAN, Sample::INFINITY, Sample::NAN);
+        let node = HardSyncOscillatorNode::new(Sample::NAN, Sample::INFINITY, Sample::NAN);
         assert_eq!(node.master_hz(), DEFAULT_MASTER_HZ);
         assert_eq!(node.sync_ratio(), DEFAULT_SYNC_RATIO);
         assert_eq!(node.amplitude(), DEFAULT_AMPLITUDE);

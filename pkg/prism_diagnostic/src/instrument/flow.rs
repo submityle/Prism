@@ -102,8 +102,10 @@ mod tests {
         let id = next_flow_id();
         flow_start(id, "hop", FLOW_CATEGORY);
         flow_finish(id, "hop", FLOW_CATEGORY);
-        let mine: Vec<_> =
-            flow_records().into_iter().filter(|r| r.id == id.get()).collect();
+        let mine: Vec<_> = flow_records()
+            .into_iter()
+            .filter(|r| r.id == id.get())
+            .collect();
         assert_eq!(mine.len(), 2);
         assert_eq!(mine[0].phase, FlowPhase::Start);
         assert_eq!(mine[1].phase, FlowPhase::Finish);

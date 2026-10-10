@@ -71,11 +71,26 @@ pub fn decode_color_block(block: &[u8; 8], punchthrough: bool) -> [[u8; 4]; 16] 
 
     if !punchthrough || c0 > c1 {
         // 4-colour opaque mode: two interpolated thirds.
-        palette[2] = [third(e0[0], e1[0]), third(e0[1], e1[1]), third(e0[2], e1[2]), 255];
-        palette[3] = [third(e1[0], e0[0]), third(e1[1], e0[1]), third(e1[2], e0[2]), 255];
+        palette[2] = [
+            third(e0[0], e1[0]),
+            third(e0[1], e1[1]),
+            third(e0[2], e1[2]),
+            255,
+        ];
+        palette[3] = [
+            third(e1[0], e0[0]),
+            third(e1[1], e0[1]),
+            third(e1[2], e0[2]),
+            255,
+        ];
     } else {
         // 3-colour + transparent-black mode.
-        palette[2] = [half(e0[0], e1[0]), half(e0[1], e1[1]), half(e0[2], e1[2]), 255];
+        palette[2] = [
+            half(e0[0], e1[0]),
+            half(e0[1], e1[1]),
+            half(e0[2], e1[2]),
+            255,
+        ];
         palette[3] = [0, 0, 0, 0];
     }
 

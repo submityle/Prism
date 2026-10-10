@@ -139,7 +139,10 @@ mod tests {
         assert_eq!(HapticGovernor::tier_for_load(0.1), HapticTier::Full);
         assert_eq!(HapticGovernor::tier_for_load(0.8), HapticTier::Reduced);
         assert_eq!(HapticGovernor::tier_for_load(0.95), HapticTier::Bypass);
-        assert_eq!(HapticGovernor::tier_for_load(Sample::NAN), HapticTier::Bypass);
+        assert_eq!(
+            HapticGovernor::tier_for_load(Sample::NAN),
+            HapticTier::Bypass
+        );
     }
 
     #[test]
@@ -153,7 +156,12 @@ mod tests {
     fn quality_scale_matches_tier() {
         assert!((HapticGovernor::new(HapticTier::Full).quality_scale() - 1.0).abs() < 1e-6);
         assert!((HapticGovernor::new(HapticTier::Reduced).quality_scale() - 0.5).abs() < 1e-6);
-        assert!(HapticGovernor::new(HapticTier::Bypass).quality_scale().abs() < 1e-6);
+        assert!(
+            HapticGovernor::new(HapticTier::Bypass)
+                .quality_scale()
+                .abs()
+                < 1e-6
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
 //! name into the [`Schema`] the decoders walk.
 
 use crate::ser::error::DeserializeError;
-use crate::ser::primitive::{Primitive, leaf_primitive};
+use crate::ser::primitive::{leaf_primitive, Primitive};
 use crate::type_info::TypeInfo;
 use crate::TypeRegistry;
 

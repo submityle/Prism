@@ -5,7 +5,6 @@
 //! stable so a self-owned `SwissTable` backend can be swapped in later without
 //! touching call sites.
 
-
 use crate::hash::hashers::FxBuildHasher;
 
 /// A hash map using the fast [`FxBuildHasher`].

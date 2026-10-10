@@ -73,7 +73,7 @@
 
 use bevy_math::ops;
 
-use prism_audio_core::math::{Sample, db_to_linear};
+use prism_audio_core::math::{db_to_linear, Sample};
 
 use crate::material_library::{OCTAVE_BAND_CENTERS, OCTAVE_BAND_COUNT};
 
@@ -550,7 +550,9 @@ mod tests {
             effect.attenuation_db(OCTAVE_BAND_COUNT - 1),
             1e-6
         ));
-        assert!(effect.broadband_attenuation_db(Sample::INFINITY).is_finite());
+        assert!(effect
+            .broadband_attenuation_db(Sample::INFINITY)
+            .is_finite());
     }
 
     #[test]

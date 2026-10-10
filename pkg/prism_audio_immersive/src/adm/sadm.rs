@@ -307,7 +307,11 @@ fn lerp_update(
     let elevation = lerp(start.position.elevation, end.position.elevation, fraction);
     let distance = lerp(start.position.distance, end.position.distance, fraction);
     let gain = lerp(start.gain, end.gain, fraction);
-    SadmObjectUpdate::new(object_id, AdmPosition::new(azimuth, elevation, distance), gain)
+    SadmObjectUpdate::new(
+        object_id,
+        AdmPosition::new(azimuth, elevation, distance),
+        gain,
+    )
 }
 
 /// Linear interpolation `a + fraction * (b - a)`.
@@ -351,7 +355,9 @@ impl<'a> Reader<'a> {
 
     fn sample(&mut self) -> Result<Sample, SadmError> {
         let bytes = self.take(4)?;
-        Ok(Sample::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        Ok(Sample::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+        ]))
     }
 }
 
@@ -420,10 +426,7 @@ mod tests {
 
     #[test]
     fn bad_header_is_rejected() {
-        assert_eq!(
-            SadmSequence::from_bytes(b"XXXX"),
-            Err(SadmError::BadHeader)
-        );
+        assert_eq!(SadmSequence::from_bytes(b"XXXX"), Err(SadmError::BadHeader));
         assert_eq!(SadmSequence::from_bytes(&[]), Err(SadmError::Truncated));
     }
 }

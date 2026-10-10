@@ -272,8 +272,10 @@ impl LorenzAttractorNode {
     /// Sets a new target Lorenz `rho`, gliding with `ramp`.
     #[inline]
     pub fn set_rho(&mut self, rho: Sample, ramp: Ramp) {
-        self.rho
-            .set_target(finite_or(rho, self.rho.target()).clamp(MIN_RHO, MAX_RHO), ramp);
+        self.rho.set_target(
+            finite_or(rho, self.rho.target()).clamp(MIN_RHO, MAX_RHO),
+            ramp,
+        );
     }
 
     /// Sets a new target master amplitude (linear), gliding with `ramp`.
@@ -662,7 +664,11 @@ mod tests {
         let second = render(&mut node, SR, 4_096);
         let last = *first.channel(0).last().unwrap();
         let next = second.channel(0)[0];
-        assert!((next - last).abs() < 0.2, "join step {}", (next - last).abs());
+        assert!(
+            (next - last).abs() < 0.2,
+            "join step {}",
+            (next - last).abs()
+        );
     }
 
     #[test]

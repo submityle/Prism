@@ -134,7 +134,15 @@ impl GpuRigidIntegrator {
         config: &IntegratorConfig,
         dt: f32,
     ) -> Result<(), RigidError> {
-        self.integrate_inner(ctx, state, forces, torques, config, &GyroscopicConfig::explicit(), dt)
+        self.integrate_inner(
+            ctx,
+            state,
+            forces,
+            torques,
+            config,
+            &GyroscopicConfig::explicit(),
+            dt,
+        )
     }
 
     /// Advances `state` by `dt` seconds like [`integrate`](Self::integrate) but

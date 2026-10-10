@@ -125,7 +125,12 @@ fn front_face_sweep_matches_cpu_golden() {
     let gpu = GpuTrimeshSphereSweep::new(&ctx);
     let mesh = unit_quad();
     // Sphere descending from +z; it stops one radius above the plane (toi 4.5).
-    let sweep = SphereSweep::new(Vec3::new(0.3, 0.1, 5.0), Vec3::new(0.0, 0.0, -1.0), 100.0, 0.5);
+    let sweep = SphereSweep::new(
+        Vec3::new(0.3, 0.1, 5.0),
+        Vec3::new(0.0, 0.0, -1.0),
+        100.0,
+        0.5,
+    );
     run_parity(&ctx, &gpu, &mesh, &sweep);
 }
 
@@ -143,7 +148,12 @@ fn edge_sweep_matches_cpu_golden() {
     let mesh = unit_quad();
     // In-plane sweep toward the right edge x = 1: the face test is parallel and
     // misses, so the edge capsule must catch it (toi 0.2).
-    let sweep = SphereSweep::new(Vec3::new(1.5, 0.5, 0.0), Vec3::new(-1.0, 0.0, 0.0), 100.0, 0.3);
+    let sweep = SphereSweep::new(
+        Vec3::new(1.5, 0.5, 0.0),
+        Vec3::new(-1.0, 0.0, 0.0),
+        100.0,
+        0.3,
+    );
     run_parity(&ctx, &gpu, &mesh, &sweep);
 }
 
@@ -160,7 +170,12 @@ fn initial_overlap_matches_cpu_golden() {
     let gpu = GpuTrimeshSphereSweep::new(&ctx);
     let mesh = unit_quad();
     // Sphere already touching the surface at the start: the contact is immediate.
-    let sweep = SphereSweep::new(Vec3::new(0.3, 0.1, 0.2), Vec3::new(0.0, 0.0, -1.0), 100.0, 0.5);
+    let sweep = SphereSweep::new(
+        Vec3::new(0.3, 0.1, 0.2),
+        Vec3::new(0.0, 0.0, -1.0),
+        100.0,
+        0.5,
+    );
     run_parity(&ctx, &gpu, &mesh, &sweep);
 }
 
@@ -177,7 +192,12 @@ fn miss_reports_no_hit_on_every_path() {
     let gpu = GpuTrimeshSphereSweep::new(&ctx);
     let mesh = unit_quad();
     // Aimed away from the quad: no path may report a contact.
-    let sweep = SphereSweep::new(Vec3::new(0.3, 0.1, 5.0), Vec3::new(0.0, 0.0, 1.0), 100.0, 0.5);
+    let sweep = SphereSweep::new(
+        Vec3::new(0.3, 0.1, 5.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        100.0,
+        0.5,
+    );
     run_parity(&ctx, &gpu, &mesh, &sweep);
 }
 
@@ -195,7 +215,12 @@ fn nearest_of_many_matches_cpu_golden() {
     let mesh = quad_fan(8);
     // Off the shared diagonal (y < x) so the winning triangle is unambiguous;
     // the nearest quad (z = 7) is touched one radius early at toi 12.75.
-    let sweep = SphereSweep::new(Vec3::new(0.3, 0.1, 20.0), Vec3::new(0.0, 0.0, -1.0), 100.0, 0.25);
+    let sweep = SphereSweep::new(
+        Vec3::new(0.3, 0.1, 20.0),
+        Vec3::new(0.0, 0.0, -1.0),
+        100.0,
+        0.25,
+    );
     run_parity(&ctx, &gpu, &mesh, &sweep);
 }
 

@@ -176,7 +176,11 @@ impl BudgetRegistry {
     #[must_use]
     pub fn evaluate(&self, category: &str, measured_nanos: u64) -> Option<BudgetStatus> {
         let budget = self.budgets.iter().find(|b| b.category == category)?;
-        Some(status(&budget.category, measured_nanos, budget.budget_nanos))
+        Some(status(
+            &budget.category,
+            measured_nanos,
+            budget.budget_nanos,
+        ))
     }
 
     /// Evaluate a whole frame: pair each `(category, measured_nanos)` with its
@@ -198,7 +202,11 @@ impl BudgetRegistry {
                 .iter()
                 .find(|(name, _)| *name == budget.category)
                 .map_or(0, |(_, v)| *v);
-            statuses.push(status(&budget.category, measured_nanos, budget.budget_nanos));
+            statuses.push(status(
+                &budget.category,
+                measured_nanos,
+                budget.budget_nanos,
+            ));
         }
         // Undeclared-but-measured categories afterwards, with a zero budget.
         for (name, measured_nanos) in measured {
@@ -207,9 +215,14 @@ impl BudgetRegistry {
             }
         }
 
-        let total_measured_nanos = measured.iter().map(|(_, v)| *v).fold(0u64, u64::saturating_add);
-        let over_frame = self.frame_budget_nanos != 0 && total_measured_nanos > self.frame_budget_nanos;
-        let remaining_background_nanos = self.frame_budget_nanos.saturating_sub(total_measured_nanos);
+        let total_measured_nanos = measured
+            .iter()
+            .map(|(_, v)| *v)
+            .fold(0u64, u64::saturating_add);
+        let over_frame =
+            self.frame_budget_nanos != 0 && total_measured_nanos > self.frame_budget_nanos;
+        let remaining_background_nanos =
+            self.frame_budget_nanos.saturating_sub(total_measured_nanos);
 
         FrameBudgetReport {
             statuses,

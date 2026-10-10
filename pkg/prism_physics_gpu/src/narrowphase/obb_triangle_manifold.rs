@@ -203,7 +203,6 @@ fn penetrating_points(clipped: &[Vec3], ref_point: Vec3, ref_out: Vec3) -> Vec<M
     out
 }
 
-
 /// Builds the single representative point used for the edge-edge contact and as
 /// the fallback when clipping leaves no penetrating corner.
 fn representative_point(obb: &Obb, tri: &Triangle, normal: Vec3, depth: f32) -> ManifoldPoint {
@@ -324,8 +323,8 @@ pub fn cpu_obb_triangle_manifold(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::obb_triangle::obb_triangle_contact;
+    use super::*;
     use glam::Vec3;
 
     const EPS: f32 = 1.0e-4;
@@ -386,7 +385,11 @@ mod tests {
         );
         let m = obb_triangle_manifold(0, 0, &obb, &tri).expect("penetrating");
         assert_eq!(m.count, 3);
-        assert!((m.normal - (-Vec3::X)).length() < EPS, "normal {:?}", m.normal);
+        assert!(
+            (m.normal - (-Vec3::X)).length() < EPS,
+            "normal {:?}",
+            m.normal
+        );
         for pt in &m.points[..m.count as usize] {
             assert!((pt.depth - 0.5).abs() < EPS, "depth {}", pt.depth);
             // Mid-overlap plane sits halfway between the triangle (x = 1.5) and
@@ -417,9 +420,7 @@ mod tests {
     fn batch_preserves_order_and_misses() {
         let boxes = vec![axis_aligned(Vec3::new(0.0, 0.0, 0.9), Vec3::splat(1.0))];
         let tris = vec![big_floor()];
-        let pairs = vec![
-            ObbTrianglePair::new(0, 0),
-        ];
+        let pairs = vec![ObbTrianglePair::new(0, 0)];
         let out = cpu_obb_triangle_manifold(&boxes, &tris, &pairs);
         assert_eq!(out.len(), 1);
         assert!(out[0].is_some());

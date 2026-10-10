@@ -230,8 +230,11 @@ pub fn is_disoccluded(
     history: SurfaceSample,
     params: DisocclusionParams,
 ) -> bool {
-    !(depth_consistent(current.depth, history.depth, params.depth_relative_threshold)
-        && normal_consistent(current.normal, history.normal, params.normal_cos_threshold)
+    !(depth_consistent(
+        current.depth,
+        history.depth,
+        params.depth_relative_threshold,
+    ) && normal_consistent(current.normal, history.normal, params.normal_cos_threshold)
         && velocity_consistent(
             current.velocity,
             history.velocity,
@@ -264,7 +267,9 @@ pub fn history_confidence(
     let l0 = current.normal.length();
     let l1 = history.normal.length();
     let normal_f = if l0 > 1.0e-8 && l1 > 1.0e-8 {
-        let c = (current.normal / l0).dot(history.normal / l1).clamp(-1.0, 1.0);
+        let c = (current.normal / l0)
+            .dot(history.normal / l1)
+            .clamp(-1.0, 1.0);
         let thr = params.normal_cos_threshold.clamp(-1.0, 1.0);
         ((c - thr) / (1.0 - thr).max(1.0e-6)).clamp(0.0, 1.0)
     } else {
@@ -302,7 +307,10 @@ pub fn bilinear_weights(uv: Vec2, size: Vec2) -> BilinearWeights {
     let coord = uv * size - Vec2::splat(0.5);
     let fx = ops::floor(coord.x);
     let fy = ops::floor(coord.y);
-    let frac = Vec2::new((coord.x - fx).clamp(0.0, 1.0), (coord.y - fy).clamp(0.0, 1.0));
+    let frac = Vec2::new(
+        (coord.x - fx).clamp(0.0, 1.0),
+        (coord.y - fy).clamp(0.0, 1.0),
+    );
     let base = IVec2::new(fx as i32, fy as i32);
     let (tx, ty) = (frac.x, frac.y);
     let weights = [
@@ -449,11 +457,7 @@ mod tests {
         let p = DisocclusionParams::default();
         let cur = SurfaceSample::new(5.0, Vec3::Z, Vec2::ZERO);
         let perfect = history_confidence(cur, cur, p);
-        let worse = history_confidence(
-            cur,
-            SurfaceSample::new(5.2, Vec3::Z, Vec2::ZERO),
-            p,
-        );
+        let worse = history_confidence(cur, SurfaceSample::new(5.2, Vec3::Z, Vec2::ZERO), p);
         assert!(perfect >= worse);
         assert!((0.0..=1.0).contains(&perfect));
         assert!((0.0..=1.0).contains(&worse));
@@ -488,7 +492,9 @@ mod tests {
     fn nearest_clamps_to_edge() {
         let size = Vec2::new(4.0, 4.0);
         // Far off-frame UV must clamp to a valid border texel (value 3).
-        let got = sample_nearest(Vec2::new(5.0, 0.5), size, |t: IVec2| Vec3::splat(t.x as f32));
+        let got = sample_nearest(Vec2::new(5.0, 0.5), size, |t: IVec2| {
+            Vec3::splat(t.x as f32)
+        });
         assert!((got.x - 3.0).abs() < EPS);
     }
 

@@ -262,9 +262,8 @@ impl RpnNrpnParser {
 
     fn update_selection(&mut self) {
         // RPN Null (bank 0x7F, index 0x7F) deselects the current parameter.
-        self.selected = !(self.kind == ParamKind::Registered
-            && self.bank == 0x7F
-            && self.index == 0x7F);
+        self.selected =
+            !(self.kind == ParamKind::Registered && self.bank == 0x7F && self.index == 0x7F);
     }
 
     fn data_value14(&self) -> u16 {
@@ -294,7 +293,10 @@ mod tests {
         for index in 0u8..=127 {
             assert_eq!(PerNoteController::from_index(index).index(), index);
         }
-        assert_eq!(PerNoteController::from_index(74), PerNoteController::Brightness);
+        assert_eq!(
+            PerNoteController::from_index(74),
+            PerNoteController::Brightness
+        );
     }
 
     #[test]

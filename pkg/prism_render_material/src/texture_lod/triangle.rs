@@ -42,12 +42,7 @@ impl TriangleLodConstant {
     /// Build the constant from the triangle's three world positions, its three
     /// UVs, and the sampled texture's mip-0 dimensions in texels.
     #[must_use]
-    pub fn new(
-        world: [[f32; 3]; 3],
-        uv: [[f32; 2]; 3],
-        tex_width: u32,
-        tex_height: u32,
-    ) -> Self {
+    pub fn new(world: [[f32; 3]; 3], uv: [[f32; 2]; 3], tex_width: u32, tex_height: u32) -> Self {
         // Texture-space twice-area in texels^2.
         let uv_area2 = uv_double_area(uv[0], uv[1], uv[2]).abs();
         let texels = (tex_width as f32) * (tex_height as f32);

@@ -255,7 +255,10 @@ fn gpu_d6_drive_joint_matches_cpu_golden() {
 
     // A stiff position servo on the free linear x axis pulling the anchor
     // separation to a commanded target and holding it there.
-    let (state, joints) = socketed_limb([D6Motion::Free, D6Motion::Locked, D6Motion::Locked], LOCKED3);
+    let (state, joints) = socketed_limb(
+        [D6Motion::Free, D6Motion::Locked, D6Motion::Locked],
+        LOCKED3,
+    );
     let drives = [D6DriveSet::new(
         [D6Drive::position(5.0e3, 0.35), D6Drive::OFF, D6Drive::OFF],
         OFF3,
@@ -274,10 +277,17 @@ fn gpu_d6_drive_joint_matches_cpu_golden() {
 
     // A stiff twist servo rotating the free-twisting limb to its target angle
     // about the twist axis.
-    let (state, joints) = socketed_limb(LOCKED3, [D6Motion::Free, D6Motion::Locked, D6Motion::Locked]);
+    let (state, joints) = socketed_limb(
+        LOCKED3,
+        [D6Motion::Free, D6Motion::Locked, D6Motion::Locked],
+    );
     let drives = [D6DriveSet::new(
         OFF3,
-        [D6Drive::new(3.0e3, 60.0, 0.5, 0.0), D6Drive::OFF, D6Drive::OFF],
+        [
+            D6Drive::new(3.0e3, 60.0, 0.5, 0.0),
+            D6Drive::OFF,
+            D6Drive::OFF,
+        ],
     )];
     run_parity(
         &ctx,
@@ -293,10 +303,17 @@ fn gpu_d6_drive_joint_matches_cpu_golden() {
 
     // A stiff swing1 servo tilting the limb to its target swing1 angle while
     // twist and swing2 stay welded shut.
-    let (state, joints) = socketed_limb(LOCKED3, [D6Motion::Locked, D6Motion::Free, D6Motion::Locked]);
+    let (state, joints) = socketed_limb(
+        LOCKED3,
+        [D6Motion::Locked, D6Motion::Free, D6Motion::Locked],
+    );
     let drives = [D6DriveSet::new(
         OFF3,
-        [D6Drive::OFF, D6Drive::new(3.0e3, 60.0, 0.3, 0.0), D6Drive::OFF],
+        [
+            D6Drive::OFF,
+            D6Drive::new(3.0e3, 60.0, 0.3, 0.0),
+            D6Drive::OFF,
+        ],
     )];
     run_parity(
         &ctx,
@@ -312,10 +329,17 @@ fn gpu_d6_drive_joint_matches_cpu_golden() {
 
     // A stiff swing2 servo tilting the limb to its target swing2 angle while
     // twist and swing1 stay welded shut.
-    let (state, joints) = socketed_limb(LOCKED3, [D6Motion::Locked, D6Motion::Locked, D6Motion::Free]);
+    let (state, joints) = socketed_limb(
+        LOCKED3,
+        [D6Motion::Locked, D6Motion::Locked, D6Motion::Free],
+    );
     let drives = [D6DriveSet::new(
         OFF3,
-        [D6Drive::OFF, D6Drive::OFF, D6Drive::new(3.0e3, 60.0, 0.3, 0.0)],
+        [
+            D6Drive::OFF,
+            D6Drive::OFF,
+            D6Drive::new(3.0e3, 60.0, 0.3, 0.0),
+        ],
     )];
     run_parity(
         &ctx,
@@ -333,7 +357,10 @@ fn gpu_d6_drive_joint_matches_cpu_golden() {
 
     // A pure velocity motor on the free twist axis spinning the limb up to its
     // commanded angular rate and holding it there.
-    let (state, joints) = socketed_limb(LOCKED3, [D6Motion::Free, D6Motion::Locked, D6Motion::Locked]);
+    let (state, joints) = socketed_limb(
+        LOCKED3,
+        [D6Motion::Free, D6Motion::Locked, D6Motion::Locked],
+    );
     let drives = [D6DriveSet::new(
         OFF3,
         [D6Drive::velocity(2.0e2, 2.0), D6Drive::OFF, D6Drive::OFF],
@@ -355,7 +382,10 @@ fn gpu_d6_drive_joint_matches_cpu_golden() {
     // A linear x position servo under a steady along-axis load: the spring sags
     // from its target by load / stiffness and holds there, exercising the
     // compliant (soft) branch of the drive against gravity.
-    let (state, joints) = socketed_limb([D6Motion::Free, D6Motion::Locked, D6Motion::Locked], LOCKED3);
+    let (state, joints) = socketed_limb(
+        [D6Motion::Free, D6Motion::Locked, D6Motion::Locked],
+        LOCKED3,
+    );
     let drives = [D6DriveSet::new(
         [D6Drive::position(1.0e3, 0.0), D6Drive::OFF, D6Drive::OFF],
         OFF3,

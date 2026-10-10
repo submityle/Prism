@@ -213,9 +213,21 @@ pub fn attenuation_ap(
 #[inline]
 fn clamp_vec01(v: Vec3) -> Vec3 {
     Vec3::new(
-        if v.x.is_finite() { v.x.clamp(0.0, 1.0) } else { 0.0 },
-        if v.y.is_finite() { v.y.clamp(0.0, 1.0) } else { 0.0 },
-        if v.z.is_finite() { v.z.clamp(0.0, 1.0) } else { 0.0 },
+        if v.x.is_finite() {
+            v.x.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        if v.y.is_finite() {
+            v.y.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        if v.z.is_finite() {
+            v.z.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -430,7 +442,10 @@ mod tests {
         assert!((phi0 + 0.6).abs() < 1.0e-6, "phi0={phi0}");
         // p = 1 transmission adds 2 gamma_t + pi.
         let phi1 = azimuthal_phi(1, 0.3, 0.1);
-        assert!((phi1 - (2.0 * 0.1 - 0.6 + PI)).abs() < 1.0e-6, "phi1={phi1}");
+        assert!(
+            (phi1 - (2.0 * 0.1 - 0.6 + PI)).abs() < 1.0e-6,
+            "phi1={phi1}"
+        );
     }
 
     #[test]
@@ -476,7 +491,10 @@ mod tests {
             route_b += attenuation_ap(cos_o, sin_o, eta, h, sigma_a)[p] * (0.5 * dh);
         }
 
-        assert!((route_a - route_b).length() < 2.0e-2, "a={route_a:?} b={route_b:?}");
+        assert!(
+            (route_a - route_b).length() < 2.0e-2,
+            "a={route_a:?} b={route_b:?}"
+        );
     }
 
     #[test]

@@ -272,13 +272,13 @@ fn test_segment(
 ) -> Option<CurveHit> {
     // Reject when the ray line projects before the start or past the end of the
     // segment (the two tangent half-planes at the endpoints), giving flat caps.
-    let start_edge =
-        (ray_cp[1][1] - ray_cp[0][1]) * -ray_cp[0][1] + ray_cp[0][0] * (ray_cp[0][0] - ray_cp[1][0]);
+    let start_edge = (ray_cp[1][1] - ray_cp[0][1]) * -ray_cp[0][1]
+        + ray_cp[0][0] * (ray_cp[0][0] - ray_cp[1][0]);
     if start_edge < 0.0 {
         return None;
     }
-    let end_edge =
-        (ray_cp[2][1] - ray_cp[3][1]) * -ray_cp[3][1] + ray_cp[3][0] * (ray_cp[3][0] - ray_cp[2][0]);
+    let end_edge = (ray_cp[2][1] - ray_cp[3][1]) * -ray_cp[3][1]
+        + ray_cp[3][0] * (ray_cp[3][0] - ray_cp[2][0]);
     if end_edge < 0.0 {
         return None;
     }
@@ -768,7 +768,11 @@ mod tests {
 
     /// A random curled cubic strand near `z = -5`, in front of the origin.
     fn random_curve(rng: &mut Rng, primitive: u32) -> Curve {
-        let base = [rng.range(-3.0, 3.0), rng.range(-3.0, 3.0), rng.range(-8.0, -3.0)];
+        let base = [
+            rng.range(-3.0, 3.0),
+            rng.range(-3.0, 3.0),
+            rng.range(-8.0, -3.0),
+        ];
         let mut control = [[0.0f32; 3]; 4];
         for (i, cp) in control.iter_mut().enumerate() {
             let s = i as f32 / 3.0;
@@ -806,8 +810,16 @@ mod tests {
 
         let mut hits = 0u32;
         for _ in 0..4000 {
-            let origin = [rng.range(-2.0, 2.0), rng.range(-2.0, 2.0), rng.range(0.0, 2.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, -0.2)];
+            let origin = [
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+                rng.range(0.0, 2.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, -0.2),
+            ];
             let ray = Ray::infinite(origin, dir);
             let bvh_hit = bvh.closest_hit(&ray);
             let brute_hit = brute_closest(&curves, &ray);
@@ -832,8 +844,16 @@ mod tests {
         let bvh = CurveBvh::build(&curves);
 
         for _ in 0..3000 {
-            let origin = [rng.range(-2.0, 2.0), rng.range(-2.0, 2.0), rng.range(0.0, 2.0)];
-            let dir = [rng.range(-1.0, 1.0), rng.range(-1.0, 1.0), rng.range(-1.0, -0.2)];
+            let origin = [
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+                rng.range(0.0, 2.0),
+            ];
+            let dir = [
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, -0.2),
+            ];
             let ray = Ray::infinite(origin, dir);
             let any = bvh.any_hit(&ray);
             let brute = brute_closest(&curves, &ray).is_some();

@@ -56,8 +56,13 @@ impl PollWatcher {
 
     pub(super) fn watch(&mut self, path: &Path, recursive: bool) -> Result<()> {
         let snapshot = snapshot(path, recursive);
-        self.roots
-            .insert(path.to_path_buf(), Root { recursive, snapshot });
+        self.roots.insert(
+            path.to_path_buf(),
+            Root {
+                recursive,
+                snapshot,
+            },
+        );
         Ok(())
     }
 

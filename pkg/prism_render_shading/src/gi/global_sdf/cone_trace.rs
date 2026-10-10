@@ -113,7 +113,11 @@ fn orthonormal_basis(normal: Vec3) -> (Vec3, Vec3) {
     let sign = if normal.z >= 0.0 { 1.0 } else { -1.0 };
     let a = -1.0 / (sign + normal.z);
     let b = normal.x * normal.y * a;
-    let tangent = Vec3::new(1.0 + sign * normal.x * normal.x * a, sign * b, -sign * normal.x);
+    let tangent = Vec3::new(
+        1.0 + sign * normal.x * normal.x * a,
+        sign * b,
+        -sign * normal.x,
+    );
     let bitangent = Vec3::new(b, sign + normal.y * normal.y * a, -normal.y);
     (tangent, bitangent)
 }
@@ -344,14 +348,17 @@ fn sanitize_radiance(c: Vec3) -> Vec3 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::brick_grid::DEFAULT_BRICK_DIM;
     use super::super::merge::{bake_merged, SdfObject, SdfPrimitive};
+    use super::*;
     use bevy_math::IVec3;
 
     /// A single unit sphere at the origin baked into a dense brick grid.
     fn sphere_grid() -> BrickGrid {
-        let objs = [SdfObject::new(SdfPrimitive::Sphere { radius: 1.0 }, Vec3::ZERO)];
+        let objs = [SdfObject::new(
+            SdfPrimitive::Sphere { radius: 1.0 },
+            Vec3::ZERO,
+        )];
         bake_merged(
             &objs,
             Vec3::ZERO,
@@ -366,7 +373,10 @@ mod tests {
     /// A large occluder sphere sitting directly above the origin, with plenty
     /// of baked open space below it.
     fn ceiling_grid() -> BrickGrid {
-        let objs = [SdfObject::new(SdfPrimitive::Sphere { radius: 1.5 }, Vec3::new(0.0, 2.0, 0.0))];
+        let objs = [SdfObject::new(
+            SdfPrimitive::Sphere { radius: 1.5 },
+            Vec3::new(0.0, 2.0, 0.0),
+        )];
         bake_merged(
             &objs,
             Vec3::ZERO,
@@ -384,9 +394,19 @@ mod tests {
         // March from +X toward the origin; the unit sphere surface is at x = 1.
         // Start at x = 2.3 (inside the baked brick range) so the distance to
         // the surface is 1.3.
-        let hit = sphere_march(&grid, Vec3::new(2.3, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0), 10.0, 128)
-            .expect("ray should hit the sphere");
-        assert!((hit.distance - 1.3).abs() < 0.05, "distance {}", hit.distance);
+        let hit = sphere_march(
+            &grid,
+            Vec3::new(2.3, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            10.0,
+            128,
+        )
+        .expect("ray should hit the sphere");
+        assert!(
+            (hit.distance - 1.3).abs() < 0.05,
+            "distance {}",
+            hit.distance
+        );
         assert!((hit.position.x - 1.0).abs() < 0.05, "x {}", hit.position.x);
     }
 
@@ -394,7 +414,13 @@ mod tests {
     fn sphere_march_misses_empty_direction() {
         let grid = sphere_grid();
         // March away from the sphere: nothing to hit.
-        let hit = sphere_march(&grid, Vec3::new(2.3, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 10.0, 128);
+        let hit = sphere_march(
+            &grid,
+            Vec3::new(2.3, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            10.0,
+            128,
+        );
         assert!(hit.is_none());
     }
 
@@ -413,7 +439,12 @@ mod tests {
             max_distance: 1.0,
             ..ConeConfig::default()
         };
-        let vis = cone_trace_ao(&grid, Vec3::new(0.0, -3.0, 0.0), Vec3::new(0.0, -1.0, 0.0), &cfg);
+        let vis = cone_trace_ao(
+            &grid,
+            Vec3::new(0.0, -3.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            &cfg,
+        );
         assert!(vis > 0.95, "expected open, got {vis}");
     }
 
@@ -426,7 +457,12 @@ mod tests {
             ..ConeConfig::default()
         };
         // Just below the ceiling sphere, hemisphere facing up into it.
-        let vis = cone_trace_ao(&grid, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), &cfg);
+        let vis = cone_trace_ao(
+            &grid,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            &cfg,
+        );
         assert!(vis < 0.5, "expected occluded, got {vis}");
     }
 

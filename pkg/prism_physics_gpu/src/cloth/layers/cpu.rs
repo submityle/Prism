@@ -69,7 +69,10 @@ mod tests {
         let normals = [Vec3::new(0.0, 1.0, 0.0), Vec3::ZERO];
         let out = cpu_cloth_layer_coupling(&positions, &im, &layer_of, &normals, params());
         let signed = (out[1] - out[0]).y;
-        assert!(signed >= 0.1 - 1e-5, "outer driven to +normal side: {signed}");
+        assert!(
+            signed >= 0.1 - 1e-5,
+            "outer driven to +normal side: {signed}"
+        );
     }
 
     #[test]

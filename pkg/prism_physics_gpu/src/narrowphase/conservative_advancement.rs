@@ -487,7 +487,12 @@ mod tests {
             &sphere, &pose_a, &motion_a, 1.5, &sphere, &pose_b, &motion_b, 1.5, 5.0, 0.0,
         )
         .expect("large spheres collide within dt");
-        assert!(large.time < small.time, "large {} small {}", large.time, small.time);
+        assert!(
+            large.time < small.time,
+            "large {} small {}",
+            large.time,
+            small.time
+        );
     }
 
     #[test]

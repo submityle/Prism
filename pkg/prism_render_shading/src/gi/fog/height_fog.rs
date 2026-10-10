@@ -118,7 +118,8 @@ impl HeightFog {
         let falloff = clamp_non_negative(self.falloff);
         let height = finite_or(height, self.base_height);
         // ρ(h) = density · exp(-falloff·(h - base_height)); bound the exponent.
-        let exponent = (-falloff * (height - self.base_height)).clamp(-MAX_OPTICAL_DEPTH, MAX_OPTICAL_DEPTH);
+        let exponent =
+            (-falloff * (height - self.base_height)).clamp(-MAX_OPTICAL_DEPTH, MAX_OPTICAL_DEPTH);
         let value = density * ops::exp(exponent);
         clamp_non_negative(value)
     }
@@ -253,7 +254,10 @@ mod tests {
         // Up component zero → constant density ρ(h0) along the whole ray.
         let tau = fog.optical_depth_axis(h0, 0.0, dist);
         let expected = fog.density_at(h0) * dist;
-        assert!((tau - expected).abs() < 1e-4, "tau={tau} expected={expected}");
+        assert!(
+            (tau - expected).abs() < 1e-4,
+            "tau={tau} expected={expected}"
+        );
     }
 
     #[test]
@@ -266,7 +270,10 @@ mod tests {
             // Closed form reference computed independently.
             let b = fog.falloff * up;
             let closed = fog.density_at(h0) * (1.0 - ops::exp(-b * dist)) / b;
-            assert!((tau - closed).abs() < 1e-3, "up={up} tau={tau} closed={closed}");
+            assert!(
+                (tau - closed).abs() < 1e-3,
+                "up={up} tau={tau} closed={closed}"
+            );
             let numeric = trapezoid_optical_depth(&fog, h0, up, dist);
             assert!(
                 (tau - numeric).abs() < 2e-3,

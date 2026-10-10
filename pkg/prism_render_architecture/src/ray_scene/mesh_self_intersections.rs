@@ -93,11 +93,7 @@ fn project_2d(p: [f64; 3], drop_axis: usize) -> [f64; 2] {
 
 /// Coplanar triangle overlap: project both onto the plane's dominant axis and
 /// test edge/edge crossings plus mutual vertex containment.
-fn coplanar_overlap(
-    normal: [f64; 3],
-    t1: [[f64; 3]; 3],
-    t2: [[f64; 3]; 3],
-) -> bool {
+fn coplanar_overlap(normal: [f64; 3], t1: [[f64; 3]; 3], t2: [[f64; 3]; 3]) -> bool {
     // Drop the axis with the largest normal magnitude for the most stable 2-D
     // projection.
     let abs = [normal[0].abs(), normal[1].abs(), normal[2].abs()];
@@ -131,8 +127,7 @@ fn coplanar_overlap(
         }
     }
     // Full containment (no edge crossing): one triangle inside the other.
-    point_in_triangle_2d(a[0], b[0], b[1], b[2])
-        || point_in_triangle_2d(b[0], a[0], a[1], a[2])
+    point_in_triangle_2d(a[0], b[0], b[1], b[2]) || point_in_triangle_2d(b[0], a[0], a[1], a[2])
 }
 
 /// Selects the "lone" vertex — the one that sits by itself on one side of the
@@ -238,9 +233,7 @@ pub fn mesh_self_intersections(mesh: &TriangleMesh) -> Vec<(u32, u32)> {
     };
     let tri = |t: [u32; 3]| -> [[f64; 3]; 3] { [vertex(t[0]), vertex(t[1]), vertex(t[2])] };
 
-    let shares_vertex = |a: [u32; 3], b: [u32; 3]| -> bool {
-        a.iter().any(|x| b.contains(x))
-    };
+    let shares_vertex = |a: [u32; 3], b: [u32; 3]| -> bool { a.iter().any(|x| b.contains(x)) };
 
     let mut hits = Vec::new();
     for (i, &face_i) in indices.iter().enumerate() {
@@ -309,7 +302,12 @@ mod tests {
     fn clean_mesh_reports_no_self_intersections() {
         // Two triangles forming a flat quad (share an edge, only touch).
         let m = mesh(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
             vec![[0, 1, 2], [0, 2, 3]],
         );
         assert!(mesh_self_intersections(&m).is_empty());

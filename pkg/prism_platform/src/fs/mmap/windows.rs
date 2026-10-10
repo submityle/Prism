@@ -93,7 +93,11 @@ fn allocation_granularity() -> u64 {
         GetSystemInfo(core::ptr::from_mut(&mut info));
     }
     let g = info.dw_allocation_granularity as u64;
-    if g > 0 { g } else { 65536 }
+    if g > 0 {
+        g
+    } else {
+        65536
+    }
 }
 
 /// An owned Windows file-mapping view.
@@ -116,7 +120,11 @@ pub(super) fn map(file: File, offset: u64, len: usize, writable: bool) -> Result
     let aligned = offset & !(granularity - 1);
     let delta = (offset - aligned) as usize;
     let view_len = delta.checked_add(len).ok_or(MmapError::InvalidArgument)?;
-    let protect = if writable { PAGE_READWRITE } else { PAGE_READONLY };
+    let protect = if writable {
+        PAGE_READWRITE
+    } else {
+        PAGE_READONLY
+    };
     let access = FILE_MAP_READ | if writable { FILE_MAP_WRITE } else { 0 };
     let fhandle = file.as_raw_handle().cast::<c_void>();
 
@@ -124,7 +132,14 @@ pub(super) fn map(file: File, offset: u64, len: usize, writable: bool) -> Result
     // maps the whole file. A null attributes/name pointer requests the default
     // unnamed mapping. The result is checked for null before use.
     let mapping = unsafe {
-        CreateFileMappingW(fhandle, core::ptr::null_mut(), protect, 0, 0, core::ptr::null())
+        CreateFileMappingW(
+            fhandle,
+            core::ptr::null_mut(),
+            protect,
+            0,
+            0,
+            core::ptr::null(),
+        )
     };
     if mapping.is_null() {
         // SAFETY: GetLastError only reads this thread's last-error code.
@@ -169,7 +184,10 @@ impl Mapping {
         self.len
     }
 
-    #[expect(unsafe_code, reason = "FlushViewOfFile writes dirty mapped pages to disk")]
+    #[expect(
+        unsafe_code,
+        reason = "FlushViewOfFile writes dirty mapped pages to disk"
+    )]
     pub(super) fn flush(&self) -> Result<()> {
         if !self.writable {
             return Ok(());

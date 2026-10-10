@@ -23,9 +23,7 @@
 //!   degenerate viewport, or no occluder in the pyramid), so the candidate is
 //!   kept visible.
 
-use crate::{
-    project_world_aabb, GpuViewRecord, HzbPhase, HzbPyramid, HzbTest, WorldAabb,
-};
+use crate::{project_world_aabb, GpuViewRecord, HzbPhase, HzbPyramid, HzbTest, WorldAabb};
 
 /// Per-candidate tuning for a [`test_bounds_occluded`] query. The depth and
 /// motion fields match [`HzbTest`](crate::HzbTest); the projected and sampled

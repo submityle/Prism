@@ -21,7 +21,7 @@ use prism_audio_core::voice::VoicePool;
 
 use crate::command::AudioCommand;
 use crate::epoch::{Collector, GraphConsumer, GraphHandoff, GraphProducer, RetireQueue, Retirer};
-use crate::ring::{RingConsumer, RingProducer, ring};
+use crate::ring::{ring, RingConsumer, RingProducer};
 use crate::telemetry::TelemetryFrame;
 
 /// Maximum number of master-gain changes honoured per block. Additional changes
@@ -412,7 +412,10 @@ impl AudioRuntime {
         let channels = master_out.channels();
         for channel in 0..channels {
             let data = master_out.channel_mut(channel);
-            for (sample, gain) in data[..frames].iter_mut().zip(self.gain_scratch[..frames].iter()) {
+            for (sample, gain) in data[..frames]
+                .iter_mut()
+                .zip(self.gain_scratch[..frames].iter())
+            {
                 *sample *= *gain;
             }
         }
@@ -446,7 +449,11 @@ impl AudioRuntime {
 /// negative inputs collapse to silence.
 #[inline]
 fn sanitize_gain(x: f32) -> f32 {
-    if x.is_finite() && x >= 0.0 { x } else { 0.0 }
+    if x.is_finite() && x >= 0.0 {
+        x
+    } else {
+        0.0
+    }
 }
 
 /// Computes the peak absolute magnitude and root-mean-square level of the first
@@ -474,7 +481,7 @@ fn peak_rms(buffer: &AudioBuffer, frames: usize) -> (Sample, Sample) {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioRuntimeConfig, runtime};
+    use super::{runtime, AudioRuntimeConfig};
     use crate::command::AudioCommand;
     use prism_audio_core::buffer::{AudioBuffer, ChannelLayout};
     use prism_audio_core::graph::AudioGraph;

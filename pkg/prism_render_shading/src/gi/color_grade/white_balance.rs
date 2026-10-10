@@ -131,7 +131,9 @@ impl ConeBasis {
     #[must_use]
     fn forward(self) -> Mat3 {
         match self {
-            ConeBasis::Bradford => mat3_from_rows(BRADFORD_ROWS[0], BRADFORD_ROWS[1], BRADFORD_ROWS[2]),
+            ConeBasis::Bradford => {
+                mat3_from_rows(BRADFORD_ROWS[0], BRADFORD_ROWS[1], BRADFORD_ROWS[2])
+            }
             ConeBasis::Cat02 => mat3_from_rows(CAT02_ROWS[0], CAT02_ROWS[1], CAT02_ROWS[2]),
         }
     }
@@ -140,10 +142,14 @@ impl ConeBasis {
     #[must_use]
     fn inverse(self) -> Mat3 {
         match self {
-            ConeBasis::Bradford => {
-                mat3_from_rows(BRADFORD_INV_ROWS[0], BRADFORD_INV_ROWS[1], BRADFORD_INV_ROWS[2])
+            ConeBasis::Bradford => mat3_from_rows(
+                BRADFORD_INV_ROWS[0],
+                BRADFORD_INV_ROWS[1],
+                BRADFORD_INV_ROWS[2],
+            ),
+            ConeBasis::Cat02 => {
+                mat3_from_rows(CAT02_INV_ROWS[0], CAT02_INV_ROWS[1], CAT02_INV_ROWS[2])
             }
-            ConeBasis::Cat02 => mat3_from_rows(CAT02_INV_ROWS[0], CAT02_INV_ROWS[1], CAT02_INV_ROWS[2]),
         }
     }
 }
@@ -151,13 +157,23 @@ impl ConeBasis {
 /// Convert a linear `sRGB` (D65) colour to CIE `XYZ`.
 #[must_use]
 pub fn srgb_to_xyz(color: Vec3) -> Vec3 {
-    mat3_from_rows(SRGB_TO_XYZ_ROWS[0], SRGB_TO_XYZ_ROWS[1], SRGB_TO_XYZ_ROWS[2]).mul_vec3(color)
+    mat3_from_rows(
+        SRGB_TO_XYZ_ROWS[0],
+        SRGB_TO_XYZ_ROWS[1],
+        SRGB_TO_XYZ_ROWS[2],
+    )
+    .mul_vec3(color)
 }
 
 /// Convert a CIE `XYZ` colour to linear `sRGB` (D65).
 #[must_use]
 pub fn xyz_to_srgb(xyz: Vec3) -> Vec3 {
-    mat3_from_rows(XYZ_TO_SRGB_ROWS[0], XYZ_TO_SRGB_ROWS[1], XYZ_TO_SRGB_ROWS[2]).mul_vec3(xyz)
+    mat3_from_rows(
+        XYZ_TO_SRGB_ROWS[0],
+        XYZ_TO_SRGB_ROWS[1],
+        XYZ_TO_SRGB_ROWS[2],
+    )
+    .mul_vec3(xyz)
 }
 
 /// Convert CIE `XYZ` to cone-response `LMS` under the given [`ConeBasis`].
@@ -203,7 +219,11 @@ pub fn cct_to_uv(temperature_k: f32) -> (f32, f32) {
 #[must_use]
 fn safe_denom(d: f32) -> f32 {
     if d.abs() < MIN_DENOM {
-        if d < 0.0 { -MIN_DENOM } else { MIN_DENOM }
+        if d < 0.0 {
+            -MIN_DENOM
+        } else {
+            MIN_DENOM
+        }
     } else {
         d
     }
@@ -259,7 +279,10 @@ pub fn cct_to_white(temperature_k: f32, tint: f32) -> Vec3 {
         // Normal = perpendicular to the (unit) tangent.
         let nu = -tv / len;
         let nv = tu / len;
-        (u + tint_c * TINT_UV_SCALE * nu, v + tint_c * TINT_UV_SCALE * nv)
+        (
+            u + tint_c * TINT_UV_SCALE * nu,
+            v + tint_c * TINT_UV_SCALE * nv,
+        )
     };
 
     let (x, y) = uv_to_xy(u_t, v_t);
@@ -357,13 +380,19 @@ mod tests {
     #[test]
     fn lms_round_trip_bradford() {
         let xyz = Vec3::new(0.4, 0.5, 0.6);
-        approx3(lms_to_xyz(xyz_to_lms(xyz, ConeBasis::Bradford), ConeBasis::Bradford), xyz);
+        approx3(
+            lms_to_xyz(xyz_to_lms(xyz, ConeBasis::Bradford), ConeBasis::Bradford),
+            xyz,
+        );
     }
 
     #[test]
     fn lms_round_trip_cat02() {
         let xyz = Vec3::new(0.4, 0.5, 0.6);
-        approx3(lms_to_xyz(xyz_to_lms(xyz, ConeBasis::Cat02), ConeBasis::Cat02), xyz);
+        approx3(
+            lms_to_xyz(xyz_to_lms(xyz, ConeBasis::Cat02), ConeBasis::Cat02),
+            xyz,
+        );
     }
 
     #[test]

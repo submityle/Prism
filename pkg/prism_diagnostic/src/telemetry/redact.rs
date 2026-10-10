@@ -48,8 +48,7 @@ pub const DEFAULT_MAX_STRING_CHARS: usize = 256;
 #[must_use]
 pub fn redact_user_path(input: &str) -> String {
     // (marker, path separator that terminates the user-name segment)
-    const MARKERS: [(&str, u8); 3] =
-        [("/Users/", b'/'), ("/home/", b'/'), ("\\Users\\", b'\\')];
+    const MARKERS: [(&str, u8); 3] = [("/Users/", b'/'), ("/home/", b'/'), ("\\Users\\", b'\\')];
 
     let bytes = input.as_bytes();
     let mut out = String::with_capacity(input.len());

@@ -76,7 +76,12 @@ fn split_particle(particle: &ClothParticle) -> ([f32; 4], [f32; 4]) {
         particle.position.z,
         particle.inverse_mass,
     ];
-    let velocity = [particle.velocity.x, particle.velocity.y, particle.velocity.z, 0.0];
+    let velocity = [
+        particle.velocity.x,
+        particle.velocity.y,
+        particle.velocity.z,
+        0.0,
+    ];
     (position, velocity)
 }
 

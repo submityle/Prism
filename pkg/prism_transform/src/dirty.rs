@@ -88,7 +88,12 @@ impl DirtyPropagator {
     /// Create a propagator with empty scratch buffers.
     #[inline]
     pub const fn new() -> Self {
-        Self { marked: Vec::new(), roots: Vec::new(), stack: Vec::new(), swept: Vec::new() }
+        Self {
+            marked: Vec::new(),
+            roots: Vec::new(),
+            stack: Vec::new(),
+            swept: Vec::new(),
+        }
     }
 
     /// Run one incremental pass, recomputing only the dirty subtrees and
@@ -186,7 +191,10 @@ impl DirtyPropagator {
             }
         }
 
-        Ok(DirtyStats { recomputed, dirty_roots })
+        Ok(DirtyStats {
+            recomputed,
+            dirty_roots,
+        })
     }
 
     /// The nodes whose world transform the most recent

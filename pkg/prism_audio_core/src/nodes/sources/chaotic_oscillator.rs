@@ -630,7 +630,11 @@ mod tests {
         // phase increment, so adjacent samples never jump.
         let mut node = ChaoticOscillatorNode::new(110.0, 1.0, 1.0);
         let out = render(&mut node, SR, 8_192);
-        assert!(max_adjacent_diff(&out) < 0.05, "{}", max_adjacent_diff(&out));
+        assert!(
+            max_adjacent_diff(&out) < 0.05,
+            "{}",
+            max_adjacent_diff(&out)
+        );
     }
 
     #[test]

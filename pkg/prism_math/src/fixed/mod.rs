@@ -39,9 +39,9 @@ pub mod transcendental;
 pub mod trig;
 pub mod vec;
 
-pub use compensated::{CompensableFloat, KahanSum, NeumaierSum, kahan_sum, neumaier_sum};
+pub use compensated::{kahan_sum, neumaier_sum, CompensableFloat, KahanSum, NeumaierSum};
 pub use double_double::DoubleDouble;
 pub use hash::StateHasher;
 pub use i16f16::I16F16;
 pub use scalar::Fixed;
-pub use vec::{FxVec2, FxVec3, FxVec4, fxvec2, fxvec3, fxvec4};
+pub use vec::{fxvec2, fxvec3, fxvec4, FxVec2, FxVec3, FxVec4};

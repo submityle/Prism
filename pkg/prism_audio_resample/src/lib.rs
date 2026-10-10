@@ -51,18 +51,16 @@ pub mod resampler;
 pub mod time_stretcher;
 pub mod wsola;
 
-pub use fractional_delay::{
-    EPS, SincInterpolator, close, linear_interp, sanitize, windowed_sinc,
-};
+pub use fractional_delay::{close, linear_interp, sanitize, windowed_sinc, SincInterpolator, EPS};
 pub use high_order_sinc::HighOrderSincResampler;
 pub use linear::LinearResampler;
 pub use phase_vocoder::PhaseVocoderStretcher;
 pub use polyphase_sinc::PolyphaseSincResampler;
 pub use resampler::{
-    MAX_RATIO, MIN_RATIO, ResampleProgress, ResampleQuality, Resampler, clamp_ratio,
+    clamp_ratio, ResampleProgress, ResampleQuality, Resampler, MAX_RATIO, MIN_RATIO,
 };
 pub use time_stretcher::{
-    MAX_PITCH, MAX_STRETCH, MIN_PITCH, MIN_STRETCH, StretchProgress, TimeStretcher,
-    clamp_pitch, clamp_stretch, semitones_to_ratio,
+    clamp_pitch, clamp_stretch, semitones_to_ratio, StretchProgress, TimeStretcher, MAX_PITCH,
+    MAX_STRETCH, MIN_PITCH, MIN_STRETCH,
 };
 pub use wsola::WsolaStretcher;

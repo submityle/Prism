@@ -89,10 +89,7 @@ impl OctaveReverb {
     ///
     /// [`ShoeboxRoom::wall_absorption`]: crate::early_reflections::ShoeboxRoom::wall_absorption
     #[must_use]
-    pub fn from_shoebox_material(
-        room: &ShoeboxRoom,
-        per_face: &[MaterialAbsorption; 6],
-    ) -> Self {
+    pub fn from_shoebox_material(room: &ShoeboxRoom, per_face: &[MaterialAbsorption; 6]) -> Self {
         let size = room.size();
         let lx = size.x.max(0.0);
         let ly = size.y.max(0.0);
@@ -189,16 +186,18 @@ impl OctaveReverb {
             return self.rt60[last];
         }
         let log_f = ops::ln(freq_hz);
-        for (centres, values) in
-            OCTAVE_BAND_CENTERS.windows(2).zip(self.rt60.windows(2))
-        {
+        for (centres, values) in OCTAVE_BAND_CENTERS.windows(2).zip(self.rt60.windows(2)) {
             let c_lo = centres[0];
             let c_hi = centres[1];
             if freq_hz <= c_hi {
                 let log_lo = ops::ln(c_lo);
                 let log_hi = ops::ln(c_hi);
                 let span = log_hi - log_lo;
-                let t = if span > 0.0 { (log_f - log_lo) / span } else { 0.0 };
+                let t = if span > 0.0 {
+                    (log_f - log_lo) / span
+                } else {
+                    0.0
+                };
                 let v = values[0] + (values[1] - values[0]) * t;
                 return v.max(0.0);
             }
@@ -324,7 +323,11 @@ mod tests {
         let rev = OctaveReverb::uniform(&room, Material::Brick);
         let bands = rev.rt60_bands();
         assert!(approx(rev.rt60_at(10.0), bands[0], 1e-4));
-        assert!(approx(rev.rt60_at(20000.0), bands[OCTAVE_BAND_COUNT - 1], 1e-4));
+        assert!(approx(
+            rev.rt60_at(20000.0),
+            bands[OCTAVE_BAND_COUNT - 1],
+            1e-4
+        ));
         // Degenerate frequencies do not panic.
         let _ = rev.rt60_at(Sample::NAN);
         let _ = rev.rt60_at(-5.0);

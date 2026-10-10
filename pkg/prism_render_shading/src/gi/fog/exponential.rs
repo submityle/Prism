@@ -197,9 +197,21 @@ fn sanitize_unit(value: f32) -> f32 {
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.max(0.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.max(0.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.max(0.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.max(0.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.max(0.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -343,8 +355,14 @@ mod tests {
             for density in [-1.0f32, 0.0, 1e9, f32::NAN, f32::INFINITY] {
                 let e = exponential_fog_factor(d, density);
                 let s = exponential_squared_fog_factor(d, density);
-                assert!(e.is_finite() && (0.0..=1.0).contains(&e), "d={d} dens={density} e={e}");
-                assert!(s.is_finite() && (0.0..=1.0).contains(&s), "d={d} dens={density} s={s}");
+                assert!(
+                    e.is_finite() && (0.0..=1.0).contains(&e),
+                    "d={d} dens={density} e={e}"
+                );
+                assert!(
+                    s.is_finite() && (0.0..=1.0).contains(&s),
+                    "d={d} dens={density} s={s}"
+                );
             }
         }
         let out = apply_fog_color(

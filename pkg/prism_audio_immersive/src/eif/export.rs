@@ -124,11 +124,9 @@ mod tests {
     fn bed_export_skips_lfe_and_counts_directional() {
         let sources = export_bed(BedLayout::Surround5_1_4, 0);
         assert_eq!(sources.len(), BedLayout::Surround5_1_4.directional_count());
-        assert!(
-            sources
-                .iter()
-                .all(|s| matches!(s.kind, EifSourceKind::Channel { .. }))
-        );
+        assert!(sources
+            .iter()
+            .all(|s| matches!(s.kind, EifSourceKind::Channel { .. })));
     }
 
     #[test]
@@ -143,8 +141,16 @@ mod tests {
     #[test]
     fn scene_export_counts_bed_plus_objects() {
         let mut scene = ObjectScene::new(BedLayout::Stereo);
-        scene.add_object(AudioObject::new(ObjectId(1), Vec3::new(1.0, 0.0, -2.0), 0.8));
-        scene.add_object(AudioObject::new(ObjectId(2), Vec3::new(-1.0, 0.0, -2.0), 0.6));
+        scene.add_object(AudioObject::new(
+            ObjectId(1),
+            Vec3::new(1.0, 0.0, -2.0),
+            0.8,
+        ));
+        scene.add_object(AudioObject::new(
+            ObjectId(2),
+            Vec3::new(-1.0, 0.0, -2.0),
+            0.6,
+        ));
         let eif = export_object_scene(&scene);
         assert_eq!(eif.sources.len(), 2 + 2);
     }

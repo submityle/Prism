@@ -125,7 +125,11 @@ impl BsplineSurface {
                 expected,
             });
         }
-        Ok(Self { control, rows, cols })
+        Ok(Self {
+            control,
+            rows,
+            cols,
+        })
     }
 
     /// Returns the control grid as a flat row-major slice.
@@ -249,12 +253,7 @@ impl BsplineSurface {
             for i in 0..nu {
                 let vid = |ii: usize, jj: usize| (jj * cols + ii) as u32;
                 // (u, v) corner order 0=(0,0), 1=(1,0), 2=(1,1), 3=(0,1).
-                indices.push([
-                    vid(i, j),
-                    vid(i + 1, j),
-                    vid(i + 1, j + 1),
-                    vid(i, j + 1),
-                ]);
+                indices.push([vid(i, j), vid(i + 1, j), vid(i + 1, j + 1), vid(i, j + 1)]);
             }
         }
         IndexedBilinearPatchMesh::new(positions, normals, uvs, indices)
@@ -381,7 +380,11 @@ mod tests {
         let mut rng = Rng::new(0x1234);
         let mut control = [[0.0f32; 3]; 16];
         for c in &mut control {
-            *c = [rng.range(-2.0, 2.0), rng.range(-2.0, 2.0), rng.range(-1.0, 1.0)];
+            *c = [
+                rng.range(-2.0, 2.0),
+                rng.range(-2.0, 2.0),
+                rng.range(-1.0, 1.0),
+            ];
         }
         let patch = BsplinePatch::new(control);
         let surface = BsplineSurface::new(control.to_vec(), 4, 4).unwrap();
@@ -430,7 +433,10 @@ mod tests {
             let local_v = rng.range(0.0, 1.0);
             let left = s.patch_at(0, 0).point(1.0, local_v);
             let right = s.patch_at(1, 0).point(0.0, local_v);
-            assert!(len(sub(left, right)) < 1e-4, "seam gap at local_v={local_v}");
+            assert!(
+                len(sub(left, right)) < 1e-4,
+                "seam gap at local_v={local_v}"
+            );
             // The global sampler at the seam must agree with that shared edge.
             let global_v = local_v / v_spans as f32;
             let mid = s.point(seam, global_v);
@@ -488,7 +494,10 @@ mod tests {
         let ray = Ray::infinite(origin, [0.0, 0.0, -1.0]);
         let hit = bvh.closest_hit(&ray).expect("ray must hit the dome");
         let hit_pt = ray.at(hit.t);
-        assert!(len(sub(hit_pt, center)) < 0.05, "hit {hit_pt:?} vs {center:?}");
+        assert!(
+            len(sub(hit_pt, center)) < 0.05,
+            "hit {hit_pt:?} vs {center:?}"
+        );
         assert!(bvh.any_hit(&ray));
         assert!(hit.shading_normal[2] > 0.3);
     }

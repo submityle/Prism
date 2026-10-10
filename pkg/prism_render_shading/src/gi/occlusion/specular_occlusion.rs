@@ -114,12 +114,7 @@ fn normalize_or(v: Vec3, fallback: Vec3) -> Vec3 {
 /// disjoint boundaries and monotonic in between, which is all the horizon
 /// term below needs.  Apertures are clamped to `[0, PI]` and directions are
 /// normalised, so the result is always finite.
-pub fn cone_cone_intersection(
-    dir_a: Vec3,
-    aperture_a: f32,
-    dir_b: Vec3,
-    aperture_b: f32,
-) -> f32 {
+pub fn cone_cone_intersection(dir_a: Vec3, aperture_a: f32, dir_b: Vec3, aperture_b: f32) -> f32 {
     let a = aperture_a.clamp(0.0, PI);
     let b = aperture_b.clamp(0.0, PI);
     let da = normalize_or(dir_a, Vec3::Y);
@@ -279,7 +274,10 @@ mod tests {
         let cap_a = 1.0 - ops::cos(a);
         let cap_b = 1.0 - ops::cos(b);
         let expected = (cap_b / cap_a).clamp(0.0, 1.0);
-        assert!((got - expected).abs() < 1e-6, "got {got} expected {expected}");
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "got {got} expected {expected}"
+        );
         assert!(got < 1.0);
     }
 
@@ -302,7 +300,10 @@ mod tests {
             let axis_b = Vec3::new(ops::sin(angle), 0.0, ops::cos(angle));
             let got = cone_cone_intersection(axis_a, a, axis_b, a);
             assert!(got.is_finite() && (0.0..=1.0).contains(&got), "got {got}");
-            assert!(got <= prev + 1e-6, "non-monotonic at {angle}: {prev} -> {got}");
+            assert!(
+                got <= prev + 1e-6,
+                "non-monotonic at {angle}: {prev} -> {got}"
+            );
             prev = got;
         }
         assert_eq!(prev, 0.0);
@@ -368,7 +369,10 @@ mod tests {
             let refl = Vec3::new(ops::sin(angle), 0.0, ops::cos(angle));
             let got = horizon_occlusion(refl, bent, aperture);
             assert!(got.is_finite() && (0.0..=1.0).contains(&got), "got {got}");
-            assert!(got <= prev + 1e-6, "non-monotonic at {angle}: {prev} -> {got}");
+            assert!(
+                got <= prev + 1e-6,
+                "non-monotonic at {angle}: {prev} -> {got}"
+            );
             prev = got;
         }
     }

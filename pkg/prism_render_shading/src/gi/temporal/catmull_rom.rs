@@ -245,15 +245,34 @@ where
     //   middle right  : (coord3,  coord12_y) weight w3x  * w12y
     //   bottom center : (coord12, coord3_y)  weight w12x * w3y
     let samples = [
-        (to_uv(ax.coords[1], ay.coords[0]), ax.weights[1] * ay.weights[0]),
-        (to_uv(ax.coords[0], ay.coords[1]), ax.weights[0] * ay.weights[1]),
-        (to_uv(ax.coords[1], ay.coords[1]), ax.weights[1] * ay.weights[1]),
-        (to_uv(ax.coords[2], ay.coords[1]), ax.weights[2] * ay.weights[1]),
-        (to_uv(ax.coords[1], ay.coords[2]), ax.weights[1] * ay.weights[2]),
+        (
+            to_uv(ax.coords[1], ay.coords[0]),
+            ax.weights[1] * ay.weights[0],
+        ),
+        (
+            to_uv(ax.coords[0], ay.coords[1]),
+            ax.weights[0] * ay.weights[1],
+        ),
+        (
+            to_uv(ax.coords[1], ay.coords[1]),
+            ax.weights[1] * ay.weights[1],
+        ),
+        (
+            to_uv(ax.coords[2], ay.coords[1]),
+            ax.weights[2] * ay.weights[1],
+        ),
+        (
+            to_uv(ax.coords[1], ay.coords[2]),
+            ax.weights[1] * ay.weights[2],
+        ),
     ];
 
     let total: f32 = samples.iter().map(|(_, w)| *w).sum();
-    let inv_total = if total.abs() > 1.0e-8 { 1.0 / total } else { 0.0 };
+    let inv_total = if total.abs() > 1.0e-8 {
+        1.0 / total
+    } else {
+        0.0
+    };
 
     let mut acc = Vec3::ZERO;
     for (tap_uv, w) in samples {
@@ -366,12 +385,8 @@ mod tests {
     #[test]
     fn non_finite_inputs_safe() {
         let size = Vec2::new(8.0, 8.0);
-        let got = sample_catmull_rom_9tap(
-            Vec2::new(f32::NAN, 0.5),
-            size,
-            true,
-            |_| Vec3::splat(1.0),
-        );
+        let got =
+            sample_catmull_rom_9tap(Vec2::new(f32::NAN, 0.5), size, true, |_| Vec3::splat(1.0));
         assert!(got.x.is_finite() && (got - Vec3::splat(1.0)).length() < EPS);
         let w = catmull_rom_weights(f32::INFINITY);
         assert!(w.iter().all(|x| x.is_finite()));

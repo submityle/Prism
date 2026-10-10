@@ -270,19 +270,31 @@ impl SoundscapeElement {
 
 #[inline]
 fn clamp01(x: Sample) -> Sample {
-    if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }
+    if x.is_finite() {
+        x.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 #[inline]
 fn sanitize_positive(x: Sample, floor: Sample) -> Sample {
-    if x.is_finite() { x.max(floor) } else { floor }
+    if x.is_finite() {
+        x.max(floor)
+    } else {
+        floor
+    }
 }
 
 #[inline]
 fn ordered(a: Sample, b: Sample) -> (Sample, Sample) {
     let a = if a.is_finite() { a } else { 0.0 };
     let b = if b.is_finite() { b } else { 0.0 };
-    if a <= b { (a, b) } else { (b, a) }
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 #[cfg(test)]

@@ -126,7 +126,10 @@ impl App {
     /// Idempotent: wiring happens only once per `S`. The despawn is flat; see
     /// the [module docs](crate::state::scoped) for the hierarchy limitation.
     pub fn enable_state_scoped_entities<S: States>(&mut self) -> &mut Self {
-        if self.initialized_states.insert(TypeId::of::<StateScoped<S>>()) {
+        if self
+            .initialized_states
+            .insert(TypeId::of::<StateScoped<S>>())
+        {
             self.add_systems(
                 StateTransition,
                 clean_up_state_scoped_entities::<S>

@@ -2,7 +2,7 @@
 
 use prism_math::{Affine3, Quat, Vec3};
 
-use crate::interpolation::{InterpolationBuffer, clamp_alpha};
+use crate::interpolation::{clamp_alpha, InterpolationBuffer};
 use crate::{GlobalTransform, Transform};
 
 fn approx_vec(a: Vec3, b: Vec3, eps: f32) -> bool {
@@ -63,7 +63,12 @@ fn transform_interpolate_rotation_shortest_path() {
 fn transform_interpolate_rotation_handles_negated_quat() {
     // b is the negation of a 90° rotation: same orientation, opposite sign.
     let q90 = Quat::from_axis_angle(Vec3::Y, core::f32::consts::FRAC_PI_2);
-    let neg = Quat { x: -q90.x, y: -q90.y, z: -q90.z, w: -q90.w };
+    let neg = Quat {
+        x: -q90.x,
+        y: -q90.y,
+        z: -q90.z,
+        w: -q90.w,
+    };
     let a = Transform::from_rotation(Quat::IDENTITY);
     let b = Transform::from_rotation(neg);
     let m = a.interpolate(&b, 0.5);
@@ -168,8 +173,16 @@ fn buffer_double_buffer_and_sample() {
 
     let mut out = [GlobalTransform::IDENTITY; 2];
     buf.sample(0.5, &mut out);
-    assert!(approx_vec(out[0].translation(), Vec3::new(5.0, 0.0, 0.0), 1e-5));
-    assert!(approx_vec(out[1].translation(), Vec3::new(0.0, 10.0, 0.0), 1e-5));
+    assert!(approx_vec(
+        out[0].translation(),
+        Vec3::new(5.0, 0.0, 0.0),
+        1e-5
+    ));
+    assert!(approx_vec(
+        out[1].translation(),
+        Vec3::new(0.0, 10.0, 0.0),
+        1e-5
+    ));
 }
 
 #[test]
@@ -191,13 +204,21 @@ fn buffer_teleport_snaps_not_lerps() {
     let mut out = [GlobalTransform::IDENTITY; 1];
     buf.sample(0.5, &mut out);
     // Snaps to current (1000), not the midpoint (500).
-    assert!(approx_vec(out[0].translation(), Vec3::new(1000.0, 0.0, 0.0), 1e-4));
+    assert!(approx_vec(
+        out[0].translation(),
+        Vec3::new(1000.0, 0.0, 0.0),
+        1e-4
+    ));
 
     // After clearing, the same alpha interpolates again.
     buf.clear_teleports();
     assert!(!buf.is_teleport(0));
     buf.sample(0.5, &mut out);
-    assert!(approx_vec(out[0].translation(), Vec3::new(500.0, 0.0, 0.0), 1e-4));
+    assert!(approx_vec(
+        out[0].translation(),
+        Vec3::new(500.0, 0.0, 0.0),
+        1e-4
+    ));
 }
 
 #[test]

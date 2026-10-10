@@ -201,7 +201,10 @@ pub fn spread_taps(half_width: Sample, focus: Sample, out: &mut [SpreadTap]) -> 
     // Force an odd count so the centre is sampled exactly.
     let n = if cap.is_multiple_of(2) { cap - 1 } else { cap };
     if n == 1 {
-        out[0] = SpreadTap { azimuth_offset: 0.0, azimuth_weight: 1.0 };
+        out[0] = SpreadTap {
+            azimuth_offset: 0.0,
+            azimuth_weight: 1.0,
+        };
         return 1;
     }
 
@@ -254,7 +257,10 @@ pub fn compute_spread_gains(
         *slot = 0.0;
     }
 
-    let mut taps = [SpreadTap { azimuth_offset: 0.0, azimuth_weight: 0.0 }; MAX_SPREAD_TAPS];
+    let mut taps = [SpreadTap {
+        azimuth_offset: 0.0,
+        azimuth_weight: 0.0,
+    }; MAX_SPREAD_TAPS];
     let n = spread_taps(params.half_width, params.focus, &mut taps);
 
     let mut scratch = [0.0 as Sample; MAX_PAN_CHANNELS];
@@ -317,7 +323,10 @@ mod tests {
 
     #[test]
     fn single_tap_is_a_point() {
-        let mut taps = [SpreadTap { azimuth_offset: 0.0, azimuth_weight: 0.0 }; 1];
+        let mut taps = [SpreadTap {
+            azimuth_offset: 0.0,
+            azimuth_weight: 0.0,
+        }; 1];
         let n = spread_taps(PI, 0.0, &mut taps);
         assert_eq!(n, 1);
         assert!(approx(taps[0].azimuth_offset, 0.0, 1e-6));
@@ -326,7 +335,10 @@ mod tests {
 
     #[test]
     fn taps_are_symmetric_and_sum_to_one() {
-        let mut taps = [SpreadTap { azimuth_offset: 0.0, azimuth_weight: 0.0 }; MAX_SPREAD_TAPS];
+        let mut taps = [SpreadTap {
+            azimuth_offset: 0.0,
+            azimuth_weight: 0.0,
+        }; MAX_SPREAD_TAPS];
         let n = spread_taps(1.0, 0.3, &mut taps);
         assert_eq!(n, MAX_SPREAD_TAPS);
         let sum: Sample = taps.iter().take(n).map(|t| t.azimuth_weight).sum();
@@ -350,15 +362,24 @@ mod tests {
 
     #[test]
     fn even_buffer_is_forced_odd() {
-        let mut taps = [SpreadTap { azimuth_offset: 0.0, azimuth_weight: 0.0 }; 4];
+        let mut taps = [SpreadTap {
+            azimuth_offset: 0.0,
+            azimuth_weight: 0.0,
+        }; 4];
         let n = spread_taps(1.0, 0.0, &mut taps);
         assert_eq!(n, 3);
     }
 
     #[test]
     fn zero_focus_is_uniform_high_focus_is_centred() {
-        let mut diffuse = [SpreadTap { azimuth_offset: 0.0, azimuth_weight: 0.0 }; 5];
-        let mut focused = [SpreadTap { azimuth_offset: 0.0, azimuth_weight: 0.0 }; 5];
+        let mut diffuse = [SpreadTap {
+            azimuth_offset: 0.0,
+            azimuth_weight: 0.0,
+        }; 5];
+        let mut focused = [SpreadTap {
+            azimuth_offset: 0.0,
+            azimuth_weight: 0.0,
+        }; 5];
         let nd = spread_taps(1.0, 0.0, &mut diffuse);
         let nf = spread_taps(1.0, 1.0, &mut focused);
         assert_eq!(nd, 5);
@@ -391,7 +412,11 @@ mod tests {
         let az = FRAC_PI_2; // hard right: point pan puts ~nothing on the left
         let mut point = [0.0; 2];
         compute_spread_gains(&panner, az, SpreadParams::POINT, &mut point);
-        let wide = SpreadParams { spread: 0.8, focus: 0.0, half_width: 0.8 * PI };
+        let wide = SpreadParams {
+            spread: 0.8,
+            focus: 0.0,
+            half_width: 0.8 * PI,
+        };
         let mut spread = [0.0; 2];
         compute_spread_gains(&panner, az, wide, &mut spread);
         // Left channel (index 0) gains energy as the source widens.
@@ -401,7 +426,11 @@ mod tests {
     #[test]
     fn spread_gains_are_finite_for_full_envelope() {
         let panner = VbapPanner::new(ChannelLayout::Surround5_1);
-        let params = SpreadParams { spread: 1.0, focus: 0.5, half_width: PI };
+        let params = SpreadParams {
+            spread: 1.0,
+            focus: 0.5,
+            half_width: PI,
+        };
         let mut out = [0.0; 6];
         compute_spread_gains(&panner, 0.3, params, &mut out);
         for g in out {

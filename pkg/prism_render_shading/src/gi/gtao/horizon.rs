@@ -218,8 +218,13 @@ mod tests {
     #[test]
     fn degenerate_view_falls_back_to_unoccluded() {
         let occluder = [Vec3::new(0.0, 0.0, -1.0)];
-        let (h1, h2) =
-            search_horizons(Vec3::ZERO, Vec3::ZERO, &occluder, &occluder, HorizonParams::default());
+        let (h1, h2) = search_horizons(
+            Vec3::ZERO,
+            Vec3::ZERO,
+            &occluder,
+            &occluder,
+            HorizonParams::default(),
+        );
         assert_eq!((h1, h2), (FRAC_PI_2, FRAC_PI_2));
     }
 
@@ -280,7 +285,10 @@ mod tests {
         let far = [Vec3::new(0.0, 0.9, 1.8)];
         let (h_near, _) = search_horizons(Vec3::ZERO, view, &near, &[], params);
         let (h_far, _) = search_horizons(Vec3::ZERO, view, &far, &[], params);
-        assert!(h_near < h_far, "near {h_near} should occlude more than far {h_far}");
+        assert!(
+            h_near < h_far,
+            "near {h_near} should occlude more than far {h_far}"
+        );
     }
 
     #[test]
@@ -292,7 +300,10 @@ mod tests {
         };
         let far = [Vec3::new(0.0, 0.0, 5.0)];
         let (h1, _) = search_horizons(Vec3::ZERO, view, &far, &[], params);
-        assert!(approx(h1, FRAC_PI_2, 1.0e-5), "far sample should not occlude: {h1}");
+        assert!(
+            approx(h1, FRAC_PI_2, 1.0e-5),
+            "far sample should not occlude: {h1}"
+        );
     }
 
     #[test]
@@ -312,18 +323,27 @@ mod tests {
         };
         let (h_thick, _) = search_horizons(Vec3::ZERO, view, &samples, &[], p);
         let (h_thin, _) = search_horizons(Vec3::ZERO, view, &samples, &[], p_thin);
-        assert!(h_thin > h_thick, "thin {h_thin} should occlude less than thick {h_thick}");
+        assert!(
+            h_thin > h_thick,
+            "thin {h_thin} should occlude less than thick {h_thick}"
+        );
     }
 
     #[test]
     fn results_are_finite_and_in_range() {
         let view = Vec3::new(0.1, -0.2, 1.0);
         let samples = [
-            Vec3::new(0.0, 0.0, 0.0),      // coincident -> skipped
+            Vec3::new(0.0, 0.0, 0.0), // coincident -> skipped
             Vec3::new(1.0e20, 0.0, 1.0e20),
             Vec3::new(-0.3, 0.4, 0.5),
         ];
-        let (h1, h2) = search_horizons(Vec3::ZERO, view, &samples, &samples, HorizonParams::default());
+        let (h1, h2) = search_horizons(
+            Vec3::ZERO,
+            view,
+            &samples,
+            &samples,
+            HorizonParams::default(),
+        );
         for h in [h1, h2] {
             assert!(h.is_finite());
             assert!((0.0..=FRAC_PI_2 + 1.0e-6).contains(&h));

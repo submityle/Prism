@@ -54,7 +54,12 @@ pub struct VoicePacket {
 impl VoicePacket {
     /// Creates a packet from its fields.
     #[must_use]
-    pub fn new(sequence: u32, timestamp_samples: u64, talkspurt_start: bool, payload: Vec<u8>) -> Self {
+    pub fn new(
+        sequence: u32,
+        timestamp_samples: u64,
+        talkspurt_start: bool,
+        payload: Vec<u8>,
+    ) -> Self {
         Self {
             sequence,
             timestamp_samples,

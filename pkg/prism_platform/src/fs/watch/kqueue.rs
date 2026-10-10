@@ -49,7 +49,10 @@ unsafe extern "C" {
 }
 
 /// Read this thread's `errno`.
-#[expect(unsafe_code, reason = "reading this thread's errno through its C accessor")]
+#[expect(
+    unsafe_code,
+    reason = "reading this thread's errno through its C accessor"
+)]
 fn errno() -> c_int {
     // SAFETY: `__error` returns a valid pointer to this thread's `errno`, which
     // we only read.
@@ -178,7 +181,10 @@ impl KqueueWatcher {
         // SAFETY: `self.kq` is a live kqueue fd; the changelist is empty
         // (null/0), and `buf`/`CAP` describe a writable array of `CAP` events
         // the kernel fills in. `ts` is a valid, live timespec.
-        #[expect(unsafe_code, reason = "kevent dequeues ready vnode events into our buffer")]
+        #[expect(
+            unsafe_code,
+            reason = "kevent dequeues ready vnode events into our buffer"
+        )]
         let n = unsafe {
             kevent(
                 self.kq,
@@ -318,7 +324,10 @@ impl KqueueWatcher {
 }
 
 impl Drop for KqueueWatcher {
-    #[expect(unsafe_code, reason = "close releases the kqueue fd exactly once on drop")]
+    #[expect(
+        unsafe_code,
+        reason = "close releases the kqueue fd exactly once on drop"
+    )]
     fn drop(&mut self) {
         // SAFETY: `self.kq` was returned by `kqueue()` and is closed exactly
         // once here at end of life. The owned `File`s in `entries` drop

@@ -13,7 +13,6 @@ use prism_render_architecture::gpu_scene::{
 use prism_render_material::MaterialRecord;
 use prism_render_visibility::{GeometryLodChain, ViewHandle};
 
-
 /// Per-camera culling state tracked across frames.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ViewState {

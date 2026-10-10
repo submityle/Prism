@@ -502,7 +502,10 @@ mod tests {
             select_cloth_lod_tier_hysteretic(0.53, THRESHOLDS, band, ClothLodTier::ReducedSim),
             ClothLodTier::ReducedSim,
         );
-        assert_eq!(select_cloth_lod_tier(0.53, THRESHOLDS), ClothLodTier::FullSim);
+        assert_eq!(
+            select_cloth_lod_tier(0.53, THRESHOLDS),
+            ClothLodTier::FullSim
+        );
         // Rising above 0.55 finally climbs back to full sim.
         assert_eq!(
             select_cloth_lod_tier_hysteretic(0.56, THRESHOLDS, band, ClothLodTier::ReducedSim),
@@ -524,7 +527,11 @@ mod tests {
         // Dither strictly inside (down_edge, up_edge) = (0.42, 0.58): no flips.
         for &coverage in &[0.57, 0.43, 0.55, 0.45, 0.5, 0.44, 0.56] {
             let next = select_cloth_lod_tier_hysteretic(coverage, THRESHOLDS, band, tier);
-            assert_eq!(next, ClothLodTier::FullSim, "coverage {coverage} popped the tier");
+            assert_eq!(
+                next,
+                ClothLodTier::FullSim,
+                "coverage {coverage} popped the tier"
+            );
             tier = next;
         }
     }

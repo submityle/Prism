@@ -168,8 +168,8 @@ impl ShepardToneParams {
     pub fn sanitised(self) -> Self {
         let d = Self::default();
         let base_hz = finite_or(self.base_hz, d.base_hz).clamp(MIN_BASE_HZ, MAX_BASE_HZ);
-        let speed_octaves_per_sec =
-            finite_or(self.speed_octaves_per_sec, d.speed_octaves_per_sec).clamp(MIN_SPEED, MAX_SPEED);
+        let speed_octaves_per_sec = finite_or(self.speed_octaves_per_sec, d.speed_octaves_per_sec)
+            .clamp(MIN_SPEED, MAX_SPEED);
         let amplitude = finite_or(self.amplitude, d.amplitude);
         Self {
             base_hz,
@@ -415,7 +415,10 @@ mod tests {
         let out = render(&mut node, 2 * SR as usize);
         let p = peak(&out);
         assert!(p > 0.0 && p < 1.0, "expected a bounded, audible peak: {p}");
-        assert!(out.iter().all(|s| s.is_finite()), "all samples must be finite");
+        assert!(
+            out.iter().all(|s| s.is_finite()),
+            "all samples must be finite"
+        );
     }
 
     #[test]
@@ -434,7 +437,10 @@ mod tests {
                 worst = worst.max(peak(&out));
             }
         }
-        assert!(worst < 1.0, "grid peak should stay below full scale: {worst}");
+        assert!(
+            worst < 1.0,
+            "grid peak should stay below full scale: {worst}"
+        );
         assert!(worst > 0.5, "grid peak should use the headroom: {worst}");
     }
 
@@ -547,7 +553,10 @@ mod tests {
         let mut b = ShepardToneNode::new(SR, ShepardToneParams::default());
         let out_a = render(&mut a, SR as usize);
         let out_b = render(&mut b, SR as usize);
-        assert_eq!(out_a, out_b, "two identical instances must match bit-for-bit");
+        assert_eq!(
+            out_a, out_b,
+            "two identical instances must match bit-for-bit"
+        );
     }
 
     #[test]
@@ -567,7 +576,11 @@ mod tests {
         };
         let mut node = ShepardToneNode::new(SR, params);
         let out = render(&mut node, SR as usize);
-        assert!(peak(&out) < 1e-6, "zero amplitude must be silent: {}", peak(&out));
+        assert!(
+            peak(&out) < 1e-6,
+            "zero amplitude must be silent: {}",
+            peak(&out)
+        );
     }
 
     #[test]
@@ -602,7 +615,10 @@ mod tests {
         let chans = render_layout(&mut node, 1024, ChannelLayout::Quad);
         assert_eq!(chans.len(), 4);
         for ch in 1..chans.len() {
-            assert_eq!(chans[0], chans[ch], "channel {ch} must mirror the mono core");
+            assert_eq!(
+                chans[0], chans[ch],
+                "channel {ch} must mirror the mono core"
+            );
         }
     }
 
@@ -729,6 +745,10 @@ mod tests {
         assert_eq!(node.amplitude(), 0.9);
         let _ = render(&mut node, 256);
         node.set_amplitude(Sample::NAN, Ramp::Immediate);
-        assert_eq!(node.amplitude(), 0.9, "non-finite amplitude keeps the target");
+        assert_eq!(
+            node.amplitude(),
+            0.9,
+            "non-finite amplitude keeps the target"
+        );
     }
 }

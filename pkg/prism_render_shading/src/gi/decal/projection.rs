@@ -160,9 +160,7 @@ impl DecalProjector {
         }
 
         // Bounds test against the unit cube.
-        if local.x.abs() > HALF_EXTENT
-            || local.y.abs() > HALF_EXTENT
-            || local.z.abs() > HALF_EXTENT
+        if local.x.abs() > HALF_EXTENT || local.y.abs() > HALF_EXTENT || local.z.abs() > HALF_EXTENT
         {
             return None;
         }
@@ -307,7 +305,11 @@ mod tests {
         let hit = p
             .project(Vec3::ZERO, p.projection_dir)
             .expect("still geometrically inside");
-        assert!(approx(hit.fade, 0.0, 1.0e-6), "back face fade = {}", hit.fade);
+        assert!(
+            approx(hit.fade, 0.0, 1.0e-6),
+            "back face fade = {}",
+            hit.fade
+        );
         assert!(approx(p.angle_fade(Vec3::Z), 0.0, 1.0e-6));
     }
 
@@ -354,7 +356,10 @@ mod tests {
             .project(Vec3::new(10.0, 0.0, 0.0), Vec3::NEG_Z)
             .expect("decal centre");
         assert!(approx(hit.uv.x, 0.5, 1.0e-6));
-        assert!(p.project(Vec3::ZERO, Vec3::NEG_Z).is_none(), "origin now outside");
+        assert!(
+            p.project(Vec3::ZERO, Vec3::NEG_Z).is_none(),
+            "origin now outside"
+        );
     }
 
     #[test]
@@ -368,7 +373,9 @@ mod tests {
     #[test]
     fn non_finite_inputs_miss_without_panic() {
         let p = identity_projector();
-        assert!(p.project(Vec3::new(f32::NAN, 0.0, 0.0), Vec3::NEG_Z).is_none());
+        assert!(p
+            .project(Vec3::new(f32::NAN, 0.0, 0.0), Vec3::NEG_Z)
+            .is_none());
         // A non-finite normal still produces a finite fade (missing-normal path).
         let hit = p.project(Vec3::ZERO, Vec3::new(f32::INFINITY, 0.0, 0.0));
         assert!(hit.is_some());

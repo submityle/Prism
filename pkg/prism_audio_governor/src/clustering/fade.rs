@@ -45,7 +45,11 @@ impl FadeRamp {
     #[must_use]
     pub fn new(initial: Sample, fade_blocks: u32) -> Self {
         let step = step_for(fade_blocks);
-        Self { gain: initial.clamp(0.0, 1.0), target: initial.clamp(0.0, 1.0), step }
+        Self {
+            gain: initial.clamp(0.0, 1.0),
+            target: initial.clamp(0.0, 1.0),
+            step,
+        }
     }
 
     /// Sets the gain the ramp walks toward, clamped to `[0, 1]`.
@@ -108,7 +112,10 @@ impl MembershipFades {
     /// Creates a tracker whose ramps span `fade_blocks` blocks edge to edge.
     #[must_use]
     pub fn new(fade_blocks: u32) -> Self {
-        Self { fade_blocks, ramps: BTreeMap::new() }
+        Self {
+            fade_blocks,
+            ramps: BTreeMap::new(),
+        }
     }
 
     /// Advances all ramps one block given the set of currently-active voices.
@@ -122,7 +129,10 @@ impl MembershipFades {
         }
         for &voice in active {
             let fade_blocks = self.fade_blocks;
-            let ramp = self.ramps.entry(voice).or_insert_with(|| FadeRamp::new(0.0, fade_blocks));
+            let ramp = self
+                .ramps
+                .entry(voice)
+                .or_insert_with(|| FadeRamp::new(0.0, fade_blocks));
             ramp.set_target(1.0);
         }
 

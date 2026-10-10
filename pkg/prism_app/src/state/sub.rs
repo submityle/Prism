@@ -70,8 +70,8 @@ use prism_ecs::world::World;
 
 use crate::app::App;
 use crate::schedule::StateTransition;
-use crate::state::StateTransitionSet;
 use crate::state::computed::ComputeDepth;
+use crate::state::StateTransitionSet;
 
 /// A [`States`] value that only exists while a parent mode is active.
 ///
@@ -117,7 +117,9 @@ pub fn apply_sub_state<S: SubStates>(world: &mut World) {
     let desired = world
         .get_resource::<State<S::SourceStates>>()
         .and_then(|source| S::should_exist(source.get()));
-    let current = world.get_resource::<State<S>>().map(|state| state.0.clone());
+    let current = world
+        .get_resource::<State<S>>()
+        .map(|state| state.0.clone());
 
     match (current, desired) {
         (None, None) => {

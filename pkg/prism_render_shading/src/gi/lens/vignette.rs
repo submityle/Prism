@@ -45,7 +45,11 @@ pub const UNDISTORT_ITERATIONS: u32 = 12;
 /// Replace a non-finite scalar with a fallback.
 #[inline]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Sanitize a `Vec2` component-wise against a fallback.
@@ -328,7 +332,10 @@ mod tests {
             let theta = ops::atan(r / f);
             let c = ops::cos(theta);
             let reference = c * c * c * c;
-            assert!(approx(closed, reference, 1.0e-5), "cos^4 mismatch at r={r}: {closed} vs {reference}");
+            assert!(
+                approx(closed, reference, 1.0e-5),
+                "cos^4 mismatch at r={r}: {closed} vs {reference}"
+            );
         }
     }
 
@@ -336,8 +343,14 @@ mod tests {
     fn distort_identity_when_k_zero() {
         for i in 0..=10 {
             let r = i as f32 / 10.0;
-            assert!(approx(distort(r, 0.0, 0.0), r, EPS), "distort k=0 not identity at r={r}");
-            assert!(approx(undistort(r, 0.0, 0.0), r, EPS), "undistort k=0 not identity at r={r}");
+            assert!(
+                approx(distort(r, 0.0, 0.0), r, EPS),
+                "distort k=0 not identity at r={r}"
+            );
+            assert!(
+                approx(undistort(r, 0.0, 0.0), r, EPS),
+                "undistort k=0 not identity at r={r}"
+            );
         }
     }
 
@@ -348,7 +361,10 @@ mod tests {
             let r = i as f32 / 12.0; // 0 .. 1 ideal radius
             let r_d = bc.distort_radius(r);
             let back = bc.undistort_radius(r_d);
-            assert!(approx(back, r, 1.0e-4), "round trip failed at r={r}: back={back}");
+            assert!(
+                approx(back, r, 1.0e-4),
+                "round trip failed at r={r}: back={back}"
+            );
         }
     }
 
@@ -359,7 +375,10 @@ mod tests {
             let r = i as f32 / 12.0;
             let r_d = bc.distort_radius(r);
             let back = bc.undistort_radius(r_d);
-            assert!(approx(back, r, 1.0e-3), "pincushion round trip at r={r}: back={back}");
+            assert!(
+                approx(back, r, 1.0e-3),
+                "pincushion round trip at r={r}: back={back}"
+            );
         }
     }
 
@@ -378,7 +397,10 @@ mod tests {
         let uv = Vec2::new(0.9, 0.2);
         let distorted = bc.distort_point(uv, center);
         let back = bc.undistort_point(distorted, center);
-        assert!((back - uv).length() <= 1.0e-4, "point round trip failed: {back:?}");
+        assert!(
+            (back - uv).length() <= 1.0e-4,
+            "point round trip failed: {back:?}"
+        );
     }
 
     #[test]

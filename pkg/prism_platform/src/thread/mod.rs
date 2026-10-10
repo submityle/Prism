@@ -27,9 +27,14 @@ pub mod spawn;
 pub mod sync;
 pub mod tls;
 
-pub use affinity::{affinity_supported, set_current_thread_affinity, set_current_thread_affinity_mask, AffinityError};
+pub use affinity::{
+    affinity_supported, set_current_thread_affinity, set_current_thread_affinity_mask,
+    AffinityError,
+};
 pub use park::{Parker, Unparker};
-pub use spawn::{current_id, hardware_concurrency, sleep, spawn, yield_now, Builder, JoinHandle, ThreadId};
+pub use spawn::{
+    current_id, hardware_concurrency, sleep, spawn, yield_now, Builder, JoinHandle, ThreadId,
+};
 pub use sync::{Backoff, Once, SpinLock, SpinLockGuard};
 pub use tls::ThreadLocal;
 

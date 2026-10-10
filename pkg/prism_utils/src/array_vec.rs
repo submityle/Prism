@@ -92,7 +92,10 @@ impl<T, const N: usize> ArrayVec<T, N> {
 
     /// Iterate over the stored elements in order.
     pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.storage.iter().take(self.len).filter_map(Option::as_ref)
+        self.storage
+            .iter()
+            .take(self.len)
+            .filter_map(Option::as_ref)
     }
 }
 

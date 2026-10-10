@@ -362,12 +362,7 @@ impl NurbsSurface {
             for i in 0..nu {
                 let vid = |ii: usize, jj: usize| (jj * cols + ii) as u32;
                 // (u, v) corner order 0=(0,0), 1=(1,0), 2=(1,1), 3=(0,1).
-                indices.push([
-                    vid(i, j),
-                    vid(i + 1, j),
-                    vid(i + 1, j + 1),
-                    vid(i, j + 1),
-                ]);
+                indices.push([vid(i, j), vid(i + 1, j), vid(i + 1, j + 1), vid(i, j + 1)]);
             }
         }
         IndexedBilinearPatchMesh::new(positions, normals, uvs, indices)
@@ -571,7 +566,10 @@ mod tests {
             "heavy weight should raise the peak: light={light_peak} heavy={heavy_peak}"
         );
         // The surface still stays below the handle height (convex hull).
-        assert!(heavy_peak < 2.0 + 1e-4, "peak {heavy_peak} broke convex hull");
+        assert!(
+            heavy_peak < 2.0 + 1e-4,
+            "peak {heavy_peak} broke convex hull"
+        );
     }
 
     #[test]
@@ -634,7 +632,10 @@ mod tests {
         let ray = Ray::infinite(origin, [0.0, 0.0, -1.0]);
         let hit = bvh.closest_hit(&ray).expect("ray must hit the dome");
         let hit_pt = ray.at(hit.t);
-        assert!(len(sub(hit_pt, center)) < 0.05, "hit {hit_pt:?} vs {center:?}");
+        assert!(
+            len(sub(hit_pt, center)) < 0.05,
+            "hit {hit_pt:?} vs {center:?}"
+        );
         assert!(bvh.any_hit(&ray));
         assert!(hit.shading_normal[2] > 0.3);
     }

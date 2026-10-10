@@ -45,7 +45,11 @@ pub const MAX_BITS: u32 = 16;
 #[inline]
 #[must_use]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Clamps a requested bit depth to the supported `[MIN_BITS, MAX_BITS]` range.
@@ -222,7 +226,10 @@ mod tests {
             dithered_bias < undithered_bias,
             "dither should reduce bias: dithered={dithered_bias} undithered={undithered_bias}"
         );
-        assert!(dithered_bias < 0.01, "dithered bias too large: {dithered_bias}");
+        assert!(
+            dithered_bias < 0.01,
+            "dithered bias too large: {dithered_bias}"
+        );
     }
 
     /// TPDF-dithered values converge to the true value over a large tile.

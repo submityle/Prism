@@ -28,9 +28,7 @@ extern crate alloc;
 use alloc::collections::BTreeSet;
 
 use prism_render_architecture::gpu_scene::SceneBounds;
-use prism_render_architecture::virtual_geometry::{
-    cluster_cull, Frustum, OcclusionProbe, Plane,
-};
+use prism_render_architecture::virtual_geometry::{cluster_cull, Frustum, OcclusionProbe, Plane};
 use prism_virtual_geometry_gpu::{GpuClusterCuller, GpuContext};
 
 /// Axis-aligned box frustum: `|x| <= 10`, `|y| <= 10`, `0 <= z <= 100`, with
@@ -77,12 +75,12 @@ fn scene() -> Vec<(SceneBounds, Option<OcclusionProbe>)> {
         // Visible, probe present but nearer than the occluder.
         (bounds([0.0, 0.0, 50.0], unit), Some(visible_probe)),
         // FrustumCulled through each of the six faces.
-        (bounds([100.0, 0.0, 50.0], unit), None), // +x
+        (bounds([100.0, 0.0, 50.0], unit), None),  // +x
         (bounds([-100.0, 0.0, 50.0], unit), None), // -x
-        (bounds([0.0, 100.0, 50.0], unit), None), // +y
+        (bounds([0.0, 100.0, 50.0], unit), None),  // +y
         (bounds([0.0, -100.0, 50.0], unit), None), // -y
-        (bounds([0.0, 0.0, -50.0], unit), None),  // near z (behind camera)
-        (bounds([0.0, 0.0, 200.0], unit), None),  // far z
+        (bounds([0.0, 0.0, -50.0], unit), None),   // near z (behind camera)
+        (bounds([0.0, 0.0, 200.0], unit), None),   // far z
         // Inside the frustum but behind a nearer occluder.
         (bounds([0.0, 0.0, 60.0], unit), Some(occluded_probe)),
     ]
@@ -161,6 +159,13 @@ fn each_frustum_face_culls_independently() {
         .iter()
         .map(|(b, probe)| cluster_cull(&frustum, b, *probe) as u32)
         .collect();
-    assert_eq!(gpu, expected, "each face must cull identically to the golden");
-    assert_eq!(gpu, vec![1, 1, 1, 1, 1, 1], "every face rejects its cluster");
+    assert_eq!(
+        gpu, expected,
+        "each face must cull identically to the golden"
+    );
+    assert_eq!(
+        gpu,
+        vec![1, 1, 1, 1, 1, 1],
+        "every face rejects its cluster"
+    );
 }

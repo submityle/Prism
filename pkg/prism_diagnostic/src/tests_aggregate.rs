@@ -8,8 +8,8 @@
 
 use crate::aggregate::{
     estimate_fleet_reports, AnomalyConfig, ClusterAggregator, DistributedSpan, InstanceFrameReport,
-    InstanceSummary, SampleRate, SampleReason, SamplingController, SamplingPolicy, SpanKind,
-    TraceAssembler, TraceId, SpanId,
+    InstanceSummary, SampleRate, SampleReason, SamplingController, SamplingPolicy, SpanId,
+    SpanKind, TraceAssembler, TraceId,
 };
 
 /// One millisecond in nanoseconds; frame-time fixtures are expressed in ms.
@@ -491,9 +491,11 @@ fn controller_boosts_only_anomalous_instances() {
     let decisions = controller.evaluate(&report);
 
     // One decision per instance, in label-sorted order (node-bad last).
-    let labels: Vec<&str> =
-        decisions.iter().map(|d| d.instance.as_str()).collect();
-    assert_eq!(labels, alloc::vec!["node-1", "node-2", "node-3", "node-4", "node-bad"]);
+    let labels: Vec<&str> = decisions.iter().map(|d| d.instance.as_str()).collect();
+    assert_eq!(
+        labels,
+        alloc::vec!["node-1", "node-2", "node-3", "node-4", "node-bad"]
+    );
 
     for decision in &decisions[..4] {
         assert_eq!(decision.rate, SampleRate::one_in(16));

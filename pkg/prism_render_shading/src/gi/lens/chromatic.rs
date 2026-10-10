@@ -67,7 +67,11 @@ fn sanitize_coeff(k: f32) -> f32 {
 /// Replace a non-finite coordinate component with a fallback.
 #[inline]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Sanitize a `Vec2`, falling back to `fallback` per component when non-finite.
@@ -109,7 +113,11 @@ impl ChromaticAberration {
     pub fn new(center: Vec2, k: [f32; 3]) -> Self {
         Self {
             center: sanitize_vec2(center, Vec2::splat(0.5)),
-            k: [sanitize_coeff(k[R]), sanitize_coeff(k[G]), sanitize_coeff(k[B])],
+            k: [
+                sanitize_coeff(k[R]),
+                sanitize_coeff(k[G]),
+                sanitize_coeff(k[B]),
+            ],
         }
     }
 
@@ -226,7 +234,10 @@ mod tests {
         let ca = ChromaticAberration::symmetric(Vec2::splat(0.5), 0.8);
         let uvs = ca.channel_uv(Vec2::splat(0.5));
         for uv in uvs {
-            assert!(approx_vec(uv, Vec2::splat(0.5), EPS), "centre moved: {uv:?}");
+            assert!(
+                approx_vec(uv, Vec2::splat(0.5), EPS),
+                "centre moved: {uv:?}"
+            );
         }
     }
 
@@ -267,7 +278,10 @@ mod tests {
         for c in 0..3 {
             // The two sample coordinates must be mirror images about the centre.
             let mirrored = 2.0 * center - plus[c];
-            assert!(approx_vec(minus[c], mirrored, EPS), "channel {c} not symmetric");
+            assert!(
+                approx_vec(minus[c], mirrored, EPS),
+                "channel {c} not symmetric"
+            );
         }
     }
 
@@ -279,13 +293,13 @@ mod tests {
         let sampler = |p: Vec2| [p.x, p.y, p.x + p.y];
         let coords = ca.channel_uv(uv);
         let via_sampler = ca.sample(uv, sampler);
-        let via_prefetched = resample_rgb(
-            sampler(coords[R]),
-            sampler(coords[G]),
-            sampler(coords[B]),
-        );
+        let via_prefetched =
+            resample_rgb(sampler(coords[R]), sampler(coords[G]), sampler(coords[B]));
         for c in 0..3 {
-            assert!(approx(via_sampler[c], via_prefetched[c], EPS), "channel {c} mismatch");
+            assert!(
+                approx(via_sampler[c], via_prefetched[c], EPS),
+                "channel {c} mismatch"
+            );
         }
     }
 
@@ -297,7 +311,10 @@ mod tests {
         let via_fn = chromatic_offsets(uv, center, k);
         let via_method = ChromaticAberration::new(center, k).channel_uv(uv);
         for c in 0..3 {
-            assert!(approx_vec(via_fn[c], via_method[c], EPS), "channel {c} mismatch");
+            assert!(
+                approx_vec(via_fn[c], via_method[c], EPS),
+                "channel {c} mismatch"
+            );
         }
     }
 
@@ -306,7 +323,10 @@ mod tests {
         let ca = ChromaticAberration::new(Vec2::new(f32::NAN, 0.5), [f32::INFINITY, 0.0, -1.0]);
         let uvs = ca.channel_uv(Vec2::new(f32::INFINITY, 0.2));
         for uv in uvs {
-            assert!(uv.x.is_finite() && uv.y.is_finite(), "coord not finite: {uv:?}");
+            assert!(
+                uv.x.is_finite() && uv.y.is_finite(),
+                "coord not finite: {uv:?}"
+            );
         }
         let out = ca.sample(Vec2::new(0.9, 0.1), |_| [f32::NAN, 1.0, f32::INFINITY]);
         for c in out {
@@ -323,6 +343,9 @@ mod tests {
         let uv = Vec2::new(1.0, 0.5); // r2 = 0.25
         let coords = ca.channel_uv(uv);
         // scale = max(0, 1 - 16 * 0.25) = 0 => red collapses to centre.
-        assert!(approx_vec(coords[R], Vec2::splat(0.5), EPS), "red should collapse to centre");
+        assert!(
+            approx_vec(coords[R], Vec2::splat(0.5), EPS),
+            "red should collapse to centre"
+        );
     }
 }

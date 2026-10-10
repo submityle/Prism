@@ -6,8 +6,8 @@
 //! [`get_unclamped`](Axis::get_unclamped) exposes the raw reading for callers
 //! that apply their own response curve.
 
-use alloc::collections::BTreeMap;
 use alloc::collections::btree_map;
+use alloc::collections::BTreeMap;
 
 /// Stores the current value of a set of analog axes of type `T`.
 #[derive(Clone, PartialEq, Debug)]

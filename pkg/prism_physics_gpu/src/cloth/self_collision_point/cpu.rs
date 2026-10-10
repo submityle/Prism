@@ -81,7 +81,10 @@ mod tests {
         let im = [1.0, 1.0];
         let out = cpu_cloth_self_collision_point(&positions, &prev, &im, 2.0, 1.0, 0.0);
         let gap = out[0].distance(out[1]);
-        assert!((gap - 1.0).abs() < 1e-4, "pair separated to thickness, got {gap}");
+        assert!(
+            (gap - 1.0).abs() < 1e-4,
+            "pair separated to thickness, got {gap}"
+        );
     }
 
     #[test]

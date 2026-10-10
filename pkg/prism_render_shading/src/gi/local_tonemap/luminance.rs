@@ -67,7 +67,11 @@ pub fn log_luminance(l: f32) -> f32 {
 #[must_use]
 pub fn exp_luminance(log_l: f32) -> f32 {
     let v = ops::exp(log_l);
-    if v.is_finite() { v.max(0.0) } else { 0.0 }
+    if v.is_finite() {
+        v.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 /// Aggregate statistics over a luminance window.
@@ -264,7 +268,11 @@ pub fn histogram_percentile_luminance(
 /// treated as achromatic and the output is a neutral grey at `l_out`.
 #[must_use]
 pub fn apply_luminance_ratio(rgb: [f32; 3], l_in: f32, l_out: f32, max_ratio: f32) -> [f32; 3] {
-    let l_out = if l_out.is_finite() { l_out.max(0.0) } else { 0.0 };
+    let l_out = if l_out.is_finite() {
+        l_out.max(0.0)
+    } else {
+        0.0
+    };
     let cap = if max_ratio.is_finite() && max_ratio > 0.0 {
         max_ratio
     } else {

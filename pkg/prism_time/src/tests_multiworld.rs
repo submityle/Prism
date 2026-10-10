@@ -145,7 +145,10 @@ fn audit_locates_first_divergence() {
         }
         other => panic!("expected divergence at 50, got {other:?}"),
     }
-    assert_eq!(compare_trails(&baseline, &perturbed).diverged_frame(), Some(50));
+    assert_eq!(
+        compare_trails(&baseline, &perturbed).diverged_frame(),
+        Some(50)
+    );
     // Frames before the divergence are provably equal.
     assert_eq!(&baseline.digests()[..50], &perturbed.digests()[..50]);
 }

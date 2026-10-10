@@ -201,8 +201,7 @@ impl IndexedBilinearPatchMesh {
     #[must_use]
     pub fn patch(&self, patch: usize) -> ShadedBilinearPatch {
         let [i00, i10, i11, i01] = self.indices[patch];
-        let (i00, i10, i11, i01) =
-            (i00 as usize, i10 as usize, i11 as usize, i01 as usize);
+        let (i00, i10, i11, i01) = (i00 as usize, i10 as usize, i11 as usize, i01 as usize);
         let positions = [
             self.positions[i00],
             self.positions[i10],
@@ -215,12 +214,7 @@ impl IndexedBilinearPatchMesh {
             self.normals[i11],
             self.normals[i01],
         ];
-        let uvs = [
-            self.uvs[i00],
-            self.uvs[i10],
-            self.uvs[i11],
-            self.uvs[i01],
-        ];
+        let uvs = [self.uvs[i00], self.uvs[i10], self.uvs[i11], self.uvs[i01]];
         ShadedBilinearPatch::new(positions, normals, uvs, patch as u32)
     }
 
@@ -647,7 +641,11 @@ mod tests {
         let mut rng = Rng::new(0xA11CE);
         let mut hits = 0;
         for _ in 0..400 {
-            let o = [rng.range(-0.5, 1.5), rng.range(0.5, 2.0), rng.range(-0.5, 1.5)];
+            let o = [
+                rng.range(-0.5, 1.5),
+                rng.range(0.5, 2.0),
+                rng.range(-0.5, 1.5),
+            ];
             let target = [rng.range(0.0, 1.0), 0.0, rng.range(0.0, 1.0)];
             let d = [target[0] - o[0], target[1] - o[1], target[2] - o[2]];
             let ray = Ray::infinite(o, d);
@@ -673,7 +671,11 @@ mod tests {
 
         let mut hits = 0;
         for _ in 0..600 {
-            let o = [rng.range(-1.0, 5.0), rng.range(1.0, 3.0), rng.range(-1.0, 5.0)];
+            let o = [
+                rng.range(-1.0, 5.0),
+                rng.range(1.0, 3.0),
+                rng.range(-1.0, 5.0),
+            ];
             let target = [rng.range(0.0, 4.0), 0.0, rng.range(0.0, 4.0)];
             let d = [target[0] - o[0], target[1] - o[1], target[2] - o[2]];
             let ray = Ray::infinite(o, d);
@@ -706,7 +708,7 @@ mod tests {
         ];
         let normals = vec![
             [0.0, 1.0, 0.0],
-            [0.3, 1.0, 0.0], // shared vertex 1
+            [0.3, 1.0, 0.0],  // shared vertex 1
             [-0.3, 1.0, 0.1], // shared vertex 2
             [0.0, 1.0, 0.0],
             [0.0, 1.0, 0.0],

@@ -76,11 +76,15 @@
 //! or derived code.
 
 mod body_motion;
+mod box_cast_bvh;
+mod box_cast_bvh_gpu;
 mod capsule;
 mod capsule_capsule;
 mod capsule_capsule_gpu;
 mod capsule_capsule_manifold;
 mod capsule_capsule_manifold_gpu;
+mod capsule_cast_bvh;
+mod capsule_cast_bvh_gpu;
 mod capsule_gpu;
 mod capsule_halfspace;
 mod capsule_halfspace_gpu;
@@ -92,6 +96,8 @@ mod capsule_triangle;
 mod capsule_triangle_gpu;
 mod capsule_triangle_manifold;
 mod capsule_triangle_manifold_gpu;
+mod closest_point_bvh;
+mod closest_point_bvh_gpu;
 mod collide_point_bvh;
 mod collide_point_bvh_gpu;
 mod collide_shape_bvh;
@@ -99,6 +105,8 @@ mod collide_shape_bvh_gpu;
 mod conservative_advancement;
 mod conservative_advancement_gpu;
 mod contact;
+mod convex_cast_bvh;
+mod convex_cast_bvh_gpu;
 mod convex_convex_manifold;
 mod convex_convex_manifold_gpu;
 mod convex_hull;
@@ -137,26 +145,27 @@ mod ray_cast_bvh_gpu;
 mod shape_cast;
 mod shape_cast_bvh;
 mod shape_cast_bvh_gpu;
-mod box_cast_bvh;
-mod box_cast_bvh_gpu;
-mod convex_cast_bvh;
-mod convex_cast_bvh_gpu;
-mod closest_point_bvh;
-mod closest_point_bvh_gpu;
-mod capsule_cast_bvh;
-mod capsule_cast_bvh_gpu;
+mod sphere;
 mod sphere_cast_bvh;
 mod sphere_cast_bvh_gpu;
-mod sphere;
 mod sphere_triangle;
 mod sphere_triangle_gpu;
 
 pub use body_motion::BodyMotion;
+pub use box_cast_bvh::{
+    box_cast, box_cast_all, box_cast_all_bvh, box_cast_bvh, BoxCastHit, SceneBoxCast,
+};
+pub use box_cast_bvh_gpu::GpuSceneBoxCast;
 pub use capsule::{cpu_capsule_narrowphase, Capsule, SphereCapsulePair};
 pub use capsule_capsule::{cpu_capsule_capsule_narrowphase, CapsuleCapsulePair};
 pub use capsule_capsule_gpu::GpuCapsuleCapsuleNarrowphase;
 pub use capsule_capsule_manifold::cpu_capsule_capsule_manifold;
 pub use capsule_capsule_manifold_gpu::GpuCapsuleCapsuleManifoldNarrowphase;
+pub use capsule_cast_bvh::{
+    capsule_cast, capsule_cast_all, capsule_cast_all_bvh, capsule_cast_bvh, CapsuleCastHit,
+    SceneCapsuleCast,
+};
+pub use capsule_cast_bvh_gpu::GpuSceneCapsuleCast;
 pub use capsule_gpu::GpuCapsuleNarrowphase;
 pub use capsule_halfspace::{cpu_capsule_halfspace_manifold, CapsulePlanePair};
 pub use capsule_halfspace_gpu::GpuCapsuleHalfspaceNarrowphase;
@@ -168,45 +177,24 @@ pub use capsule_triangle::{cpu_capsule_triangle_narrowphase, CapsuleTrianglePair
 pub use capsule_triangle_gpu::GpuCapsuleTriangleNarrowphase;
 pub use capsule_triangle_manifold::cpu_capsule_triangle_manifold;
 pub use capsule_triangle_manifold_gpu::GpuCapsuleTriangleManifoldNarrowphase;
-pub use conservative_advancement::{
-    conservative_advancement_toi, conservative_advancement_toi_rounded, cpu_convex_convex_toi,
-    cpu_convex_convex_toi_rounded, ConvexConvexSweepPair, Toi,
-};
-pub use contact::Contact;
-pub use convex_convex_manifold::{cpu_convex_convex_manifold, ConvexConvexPair};
+pub use closest_point_bvh::{closest_point, closest_point_bvh, ClosestPointHit, SceneClosestPoint};
+pub use closest_point_bvh_gpu::GpuSceneClosestPoint;
 pub use collide_point_bvh::{collide_point, collide_point_bvh, CollidePointHit, ScenePoint};
 pub use collide_point_bvh_gpu::GpuSceneCollidePoint;
 pub use collide_shape_bvh::{collide_shape, collide_shape_bvh, CollideShapeHit};
 pub use collide_shape_bvh_gpu::GpuBvhCollideShape;
+pub use conservative_advancement::{
+    conservative_advancement_toi, conservative_advancement_toi_rounded, cpu_convex_convex_toi,
+    cpu_convex_convex_toi_rounded, ConvexConvexSweepPair, Toi,
+};
 pub use conservative_advancement_gpu::GpuConvexConvexToiNarrowphase;
-pub use ray_cast_bvh::{
-    ray_cast, ray_cast_all, ray_cast_all_bvh, ray_cast_bvh, RayCastHit, SceneRay,
-};
-pub use ray_cast_bvh_gpu::GpuSceneRayCast;
-pub use sphere_cast_bvh::{
-    sphere_cast, sphere_cast_all, sphere_cast_all_bvh, sphere_cast_bvh, SceneSphereCast,
-    SphereCastHit,
-};
-pub use sphere_cast_bvh_gpu::GpuSceneSphereCast;
-pub use capsule_cast_bvh::{
-    capsule_cast, capsule_cast_all, capsule_cast_all_bvh, capsule_cast_bvh, CapsuleCastHit,
-    SceneCapsuleCast,
-};
-pub use capsule_cast_bvh_gpu::GpuSceneCapsuleCast;
-pub use box_cast_bvh::{
-    box_cast, box_cast_all, box_cast_all_bvh, box_cast_bvh, BoxCastHit, SceneBoxCast,
-};
-pub use box_cast_bvh_gpu::GpuSceneBoxCast;
+pub use contact::Contact;
 pub use convex_cast_bvh::{
     convex_cast, convex_cast_all, convex_cast_all_bvh, convex_cast_bvh, ConvexCastHit,
     SceneConvexCast,
 };
 pub use convex_cast_bvh_gpu::GpuSceneConvexCast;
-pub use closest_point_bvh::{closest_point, closest_point_bvh, ClosestPointHit, SceneClosestPoint};
-pub use closest_point_bvh_gpu::GpuSceneClosestPoint;
-pub use shape_cast::{cast_shape, cast_shape_all, RoundedConvex, ShapeCastHit};
-pub use shape_cast_bvh::{cast_shape_all_bvh, cast_shape_bvh};
-pub use shape_cast_bvh_gpu::GpuBvhShapeCast;
+pub use convex_convex_manifold::{cpu_convex_convex_manifold, ConvexConvexPair};
 pub use convex_convex_manifold_gpu::GpuConvexConvexManifoldNarrowphase;
 pub use convex_hull::{ConvexEdge, ConvexFace, ConvexHull};
 pub use convex_pose::ConvexPose;
@@ -216,15 +204,17 @@ pub use gjk::{gjk, GjkStatus};
 pub use gpu::GpuNarrowphase;
 pub use halfspace::{cpu_halfspace_narrowphase, Plane, SpherePlanePair};
 pub use halfspace_gpu::GpuHalfspaceNarrowphase;
-pub use heightfield::{cpu_sphere_heightfield_narrowphase, CellRange, Heightfield, HeightfieldSpherePair, XzAabb};
+pub use heightfield::{
+    cpu_sphere_heightfield_narrowphase, CellRange, Heightfield, HeightfieldSpherePair, XzAabb,
+};
 pub use heightfield_capsule_manifold::{cpu_capsule_heightfield_manifold, HeightfieldCapsulePair};
 pub use heightfield_capsule_manifold_gpu::GpuCapsuleHeightfieldManifoldNarrowphase;
 pub use heightfield_gpu::GpuSphereHeightfieldNarrowphase;
 pub use heightfield_obb_manifold::{cpu_obb_heightfield_manifold, HeightfieldObbPair};
 pub use heightfield_obb_manifold_gpu::GpuObbHeightfieldManifoldNarrowphase;
+pub(crate) use manifold::reduce_to_four;
 pub use manifold::{ContactManifold, ManifoldPoint, MAX_MANIFOLD_POINTS};
 pub use minkowski::{support, SupportPoint};
-pub(crate) use manifold::reduce_to_four;
 pub use obb::{cpu_obb_narrowphase, Obb, SphereObbPair};
 pub use obb_gpu::GpuObbNarrowphase;
 pub use obb_halfspace::{cpu_obb_halfspace_narrowphase, ObbPlanePair};
@@ -239,5 +229,17 @@ pub use obb_triangle::{cpu_obb_triangle_narrowphase, ObbTrianglePair};
 pub use obb_triangle_gpu::GpuObbTriangleNarrowphase;
 pub use obb_triangle_manifold::cpu_obb_triangle_manifold;
 pub use obb_triangle_manifold_gpu::GpuObbTriangleManifoldNarrowphase;
+pub use ray_cast_bvh::{
+    ray_cast, ray_cast_all, ray_cast_all_bvh, ray_cast_bvh, RayCastHit, SceneRay,
+};
+pub use ray_cast_bvh_gpu::GpuSceneRayCast;
+pub use shape_cast::{cast_shape, cast_shape_all, RoundedConvex, ShapeCastHit};
+pub use shape_cast_bvh::{cast_shape_all_bvh, cast_shape_bvh};
+pub use shape_cast_bvh_gpu::GpuBvhShapeCast;
+pub use sphere_cast_bvh::{
+    sphere_cast, sphere_cast_all, sphere_cast_all_bvh, sphere_cast_bvh, SceneSphereCast,
+    SphereCastHit,
+};
+pub use sphere_cast_bvh_gpu::GpuSceneSphereCast;
 pub use sphere_triangle::{cpu_sphere_triangle_narrowphase, SphereTrianglePair, Triangle};
 pub use sphere_triangle_gpu::GpuSphereTriangleNarrowphase;

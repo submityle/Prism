@@ -17,9 +17,9 @@
 //! - **`SoA`:** array-of-structures round-trip and batch-vs-per-element parity.
 //! - **Swizzle:** representative permutations and broadcasts.
 
-use crate::prelude::*;
 use crate::float::f32 as mf;
 use crate::octahedral;
+use crate::prelude::*;
 
 const PI: f32 = core::f32::consts::PI;
 
@@ -40,7 +40,7 @@ fn f16_known_bit_patterns() {
     assert_eq!(F16::from_f32(2.0).to_bits(), 0x4000);
     assert_eq!(F16::from_f32(0.5).to_bits(), 0x3800);
     assert_eq!(F16::from_f32(65504.0).to_bits(), 0x7BFF); // max finite
-    // smallest positive subnormal 2^-24 and normal 2^-14
+                                                          // smallest positive subnormal 2^-24 and normal 2^-14
     assert_eq!(F16::from_f32(f32::from_bits(0x3380_0000)).to_bits(), 0x0001);
     assert_eq!(F16::from_f32(f32::from_bits(0x3880_0000)).to_bits(), 0x0400);
 }
@@ -61,7 +61,10 @@ fn f16_specials() {
     // round-trip of specials in f16->f32
     assert_eq!(F16::INFINITY.to_f32(), f32::INFINITY);
     assert!(F16::NAN.to_f32().is_nan());
-    assert_eq!(F16::from_f32(f32::from_bits(0x3380_0000)).to_f32(), f32::from_bits(0x3380_0000));
+    assert_eq!(
+        F16::from_f32(f32::from_bits(0x3380_0000)).to_f32(),
+        f32::from_bits(0x3380_0000)
+    );
 }
 
 /// Brute-force the nearest representable finite `f16` to `x` by scanning all
@@ -86,8 +89,22 @@ fn nearest_f16_error(x: f32) -> f32 {
 fn f16_round_to_nearest_matches_brute_force() {
     // A spread of magnitudes inside the finite f16 range.
     let samples = [
-        0.3333_f32, 1.0 / 7.0, 123.456, -98.765, 0.001_234, 1024.5, 0.0625, -0.1, 42.0, core::f32::consts::PI,
-        1000.0, 0.5003, -2.5, 60000.0, 0.00006, 7.7777,
+        0.3333_f32,
+        1.0 / 7.0,
+        123.456,
+        -98.765,
+        0.001_234,
+        1024.5,
+        0.0625,
+        -0.1,
+        42.0,
+        core::f32::consts::PI,
+        1000.0,
+        0.5003,
+        -2.5,
+        60000.0,
+        0.00006,
+        7.7777,
     ];
     for &x in &samples {
         let got = (F16::from_f32(x).to_f32() - x).abs();
@@ -214,8 +231,18 @@ fn dq_normalize_keeps_unit_invariants() {
     let dq = DualQuat::from_rotation_translation(rot_y(0.3), vec3(10.0, -2.0, 3.0));
     // Scale both parts then renormalize.
     let scaled = DualQuat::from_real_dual(
-        Quat::from_xyzw(dq.real.x * 3.0, dq.real.y * 3.0, dq.real.z * 3.0, dq.real.w * 3.0),
-        Quat::from_xyzw(dq.dual.x * 3.0, dq.dual.y * 3.0, dq.dual.z * 3.0, dq.dual.w * 3.0),
+        Quat::from_xyzw(
+            dq.real.x * 3.0,
+            dq.real.y * 3.0,
+            dq.real.z * 3.0,
+            dq.real.w * 3.0,
+        ),
+        Quat::from_xyzw(
+            dq.dual.x * 3.0,
+            dq.dual.y * 3.0,
+            dq.dual.z * 3.0,
+            dq.dual.w * 3.0,
+        ),
     );
     let n = scaled.normalize();
     assert!(approx(n.real.length(), 1.0, 1.0e-5));
@@ -238,7 +265,7 @@ fn dq_nlerp_endpoints() {
 fn dq_sclerp_endpoints_and_half_angle() {
     let a = DualQuat::from_rotation(Quat::IDENTITY);
     let b = DualQuat::from_rotation(rot_y(PI * 0.5)); // 90 degrees
-    // endpoints
+                                                      // endpoints
     let p = vec3(1.0, 0.0, 0.0);
     assert!((a.sclerp(b, 0.0).transform_point3(p) - a.transform_point3(p)).length() < 1.0e-4);
     assert!((a.sclerp(b, 1.0).transform_point3(p) - b.transform_point3(p)).length() < 1.0e-4);
@@ -274,7 +301,11 @@ fn dq_blend_weighted_single_is_identity_blend() {
 
 #[test]
 fn soa_aos_round_trip() {
-    let src = [vec3(1.0, 2.0, 3.0), vec3(-4.0, 5.0, -6.0), vec3(0.5, 0.0, 9.0)];
+    let src = [
+        vec3(1.0, 2.0, 3.0),
+        vec3(-4.0, 5.0, -6.0),
+        vec3(0.5, 0.0, 9.0),
+    ];
     let soa = SoaVec3::from_aos(&src);
     assert_eq!(soa.len(), 3);
     assert_eq!(soa.to_aos(), src.to_vec());
@@ -283,7 +314,11 @@ fn soa_aos_round_trip() {
 
 #[test]
 fn soa_transform_points_parity() {
-    let src = [vec3(1.0, 2.0, 3.0), vec3(-1.0, 0.5, 2.0), vec3(4.0, -4.0, 1.0)];
+    let src = [
+        vec3(1.0, 2.0, 3.0),
+        vec3(-1.0, 0.5, 2.0),
+        vec3(4.0, -4.0, 1.0),
+    ];
     let a = Affine3::from_scale_rotation_translation(
         vec3(2.0, 1.0, 0.5),
         rot_y(0.8),
@@ -299,7 +334,11 @@ fn soa_transform_points_parity() {
 
 #[test]
 fn soa_batch_ops_parity() {
-    let src = [vec3(3.0, 4.0, 0.0), vec3(1.0, 2.0, 2.0), vec3(0.0, 0.0, 5.0)];
+    let src = [
+        vec3(3.0, 4.0, 0.0),
+        vec3(1.0, 2.0, 2.0),
+        vec3(0.0, 0.0, 5.0),
+    ];
     let soa = SoaVec3::from_aos(&src);
     // dot against self == length_squared
     let mut dots = [0.0_f32; 3];

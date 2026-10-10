@@ -99,7 +99,11 @@ impl Default for DebandParams {
 #[inline]
 #[must_use]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Computes the signed dither sample (in dither-step units) for one pixel.

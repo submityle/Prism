@@ -159,14 +159,29 @@ mod tests {
     fn sample_mip_matches_ceil_log2_of_the_texel_span() {
         let plenty = 16;
         // 1x1 (and sub-texel) footprints need no coarser mip.
-        assert_eq!(HzbFootprint::new([0.0, 0.0], [1.0, 1.0]).sample_mip(plenty), 0);
-        assert_eq!(HzbFootprint::new([0.0, 0.0], [0.5, 0.5]).sample_mip(plenty), 0);
+        assert_eq!(
+            HzbFootprint::new([0.0, 0.0], [1.0, 1.0]).sample_mip(plenty),
+            0
+        );
+        assert_eq!(
+            HzbFootprint::new([0.0, 0.0], [0.5, 0.5]).sample_mip(plenty),
+            0
+        );
         // 4 texels wide -> ceil(log2(4)) = 2.
-        assert_eq!(HzbFootprint::new([0.0, 0.0], [4.0, 2.0]).sample_mip(plenty), 2);
+        assert_eq!(
+            HzbFootprint::new([0.0, 0.0], [4.0, 2.0]).sample_mip(plenty),
+            2
+        );
         // 5 texels tall -> ceil(log2(5)) = 3, driven by the larger axis.
-        assert_eq!(HzbFootprint::new([0.0, 0.0], [2.0, 5.0]).sample_mip(plenty), 3);
+        assert_eq!(
+            HzbFootprint::new([0.0, 0.0], [2.0, 5.0]).sample_mip(plenty),
+            3
+        );
         // A fractional span ceils before the log: 4.1 -> 5 -> ceil(log2(5)) = 3.
-        assert_eq!(HzbFootprint::new([0.0, 0.0], [4.1, 1.0]).sample_mip(plenty), 3);
+        assert_eq!(
+            HzbFootprint::new([0.0, 0.0], [4.1, 1.0]).sample_mip(plenty),
+            3
+        );
     }
 
     #[test]
@@ -212,8 +227,8 @@ mod tests {
         let footprint = HzbFootprint::new([100.0, 50.0], [104.0, 53.0]);
         let mip = footprint.sample_mip(8);
         assert_eq!(mip, 2);
-        let occluder = conservative_occluder_reverse_z(&[0.80, 0.75, 0.78, 0.76])
-            .expect("finite gather");
+        let occluder =
+            conservative_occluder_reverse_z(&[0.80, 0.75, 0.78, 0.76]).expect("finite gather");
         let occluded = HzbTest {
             nearest_depth: 0.25,
             occluder_depth: occluder,
@@ -228,6 +243,10 @@ mod tests {
         assert!(occluded.is_occluded(HzbPhase::Current));
         // A candidate whose nearest point is in front of the farthest occluder
         // survives the same test.
-        assert!(!HzbTest { nearest_depth: 0.90, ..occluded }.is_occluded(HzbPhase::Current));
+        assert!(!HzbTest {
+            nearest_depth: 0.90,
+            ..occluded
+        }
+        .is_occluded(HzbPhase::Current));
     }
 }

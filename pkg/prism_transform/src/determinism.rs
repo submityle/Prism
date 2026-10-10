@@ -48,13 +48,20 @@ impl Default for FxMat3 {
 
 impl FxMat3 {
     /// The identity matrix.
-    pub const IDENTITY: Self =
-        Self { x_axis: FxVec3::X, y_axis: FxVec3::Y, z_axis: FxVec3::Z };
+    pub const IDENTITY: Self = Self {
+        x_axis: FxVec3::X,
+        y_axis: FxVec3::Y,
+        z_axis: FxVec3::Z,
+    };
 
     /// Build from explicit columns.
     #[inline]
     pub const fn from_cols(x_axis: FxVec3, y_axis: FxVec3, z_axis: FxVec3) -> Self {
-        Self { x_axis, y_axis, z_axis }
+        Self {
+            x_axis,
+            y_axis,
+            z_axis,
+        }
     }
 
     /// A diagonal (non-uniform) scale matrix.
@@ -166,32 +173,46 @@ impl Default for FxAffine3 {
 
 impl FxAffine3 {
     /// The identity transform.
-    pub const IDENTITY: Self =
-        Self { matrix3: FxMat3::IDENTITY, translation: FxVec3::ZERO };
+    pub const IDENTITY: Self = Self {
+        matrix3: FxMat3::IDENTITY,
+        translation: FxVec3::ZERO,
+    };
 
     /// Build from a linear part and a translation.
     #[inline]
     pub const fn from_mat3_translation(matrix3: FxMat3, translation: FxVec3) -> Self {
-        Self { matrix3, translation }
+        Self {
+            matrix3,
+            translation,
+        }
     }
 
     /// Translation-only transform.
     #[inline]
     pub const fn from_translation(translation: FxVec3) -> Self {
-        Self { matrix3: FxMat3::IDENTITY, translation }
+        Self {
+            matrix3: FxMat3::IDENTITY,
+            translation,
+        }
     }
 
     /// Scale-only transform.
     #[inline]
     pub fn from_scale(scale: FxVec3) -> Self {
-        Self { matrix3: FxMat3::from_scale(scale), translation: FxVec3::ZERO }
+        Self {
+            matrix3: FxMat3::from_scale(scale),
+            translation: FxVec3::ZERO,
+        }
     }
 
     /// Rotation-only transform about the Z axis (the common 2.5D / top-down
     /// case); X and Y variants are available via [`FxMat3`].
     #[inline]
     pub fn from_rotation_z(angle: Fixed) -> Self {
-        Self { matrix3: FxMat3::from_rotation_z(angle), translation: FxVec3::ZERO }
+        Self {
+            matrix3: FxMat3::from_rotation_z(angle),
+            translation: FxVec3::ZERO,
+        }
     }
 
     /// A scale → rotate-Z → translate transform, the deterministic analogue of
@@ -204,7 +225,10 @@ impl FxAffine3 {
         translation: FxVec3,
     ) -> Self {
         let matrix3 = FxMat3::from_rotation_z(angle).mul_mat3(FxMat3::from_scale(scale));
-        Self { matrix3, translation }
+        Self {
+            matrix3,
+            translation,
+        }
     }
 
     /// Transform a point: `matrix3 · p + translation`.
@@ -236,7 +260,9 @@ impl FxAffine3 {
     pub fn to_bits(self) -> [i64; 12] {
         let m = self.matrix3.to_bits();
         let [tx, ty, tz] = self.translation.to_bits();
-        [m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], tx, ty, tz]
+        [
+            m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], tx, ty, tz,
+        ]
     }
 }
 

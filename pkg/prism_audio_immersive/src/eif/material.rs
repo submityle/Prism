@@ -73,7 +73,11 @@ pub struct AcousticMaterial {
 /// entries with `0`.
 fn sanitize(mut spectrum: [Sample; OCTAVE_BAND_COUNT]) -> [Sample; OCTAVE_BAND_COUNT] {
     for v in &mut spectrum {
-        *v = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        *v = if v.is_finite() {
+            v.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
     }
     spectrum
 }

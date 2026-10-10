@@ -970,7 +970,10 @@ fn disable_for_run_mode_disables_render_plugins_in_headless() {
         .add(SimOnly)
         .add(RenderOnly)
         .disable_for_run_mode(RunMode::Headless);
-    assert!(builder.is_enabled::<SimOnly>(), "simulation survives headless");
+    assert!(
+        builder.is_enabled::<SimOnly>(),
+        "simulation survives headless"
+    );
     assert!(
         !builder.is_enabled::<RenderOnly>(),
         "rendering is dropped in headless"
@@ -1025,7 +1028,10 @@ fn disable_for_run_mode_keeps_rendering_for_editor_embedded() {
         .add(RenderOnly)
         .add(SimOnly)
         .disable_for_run_mode(RunMode::EditorEmbedded);
-    assert!(builder.is_enabled::<RenderOnly>(), "editor drives rendering");
+    assert!(
+        builder.is_enabled::<RenderOnly>(),
+        "editor drives rendering"
+    );
     assert!(builder.is_enabled::<SimOnly>());
 }
 
@@ -1080,7 +1086,11 @@ fn dependency_cycle_is_reported_at_assembly_time() {
         }
     }
 
-    let Err(err) = PluginGroupBuilder::new().add(Ping).add(Pong).try_into_plugins() else {
+    let Err(err) = PluginGroupBuilder::new()
+        .add(Ping)
+        .add(Pong)
+        .try_into_plugins()
+    else {
         panic!("cycle must fail");
     };
     match err {
@@ -1210,7 +1220,10 @@ fn fixed_loop_is_capped_by_max_substeps() {
     // 250 ms max first, then the fixed accumulator caps at 8 * 10 ms = 80 ms,
     // so exactly max_substeps (8) steps run — not 25 or 100.
     let (fixed, update) = run_fixed_counts(100.0, Duration::from_secs(1), 1);
-    assert_eq!(fixed, 8, "death-spiral cap bounds the step count at max_substeps");
+    assert_eq!(
+        fixed, 8,
+        "death-spiral cap bounds the step count at max_substeps"
+    );
     assert_eq!(update, 1);
 }
 
@@ -1327,7 +1340,11 @@ fn paused_virtual_time_freezes_fixed_steps() {
     app.set_runner(|app| HeadlessRunner::with_max_frames(5).run(app));
     app.run();
 
-    assert_eq!(fixed.load(Ordering::Relaxed), 0, "paused clock feeds no fixed steps");
+    assert_eq!(
+        fixed.load(Ordering::Relaxed),
+        0,
+        "paused clock feeds no fixed steps"
+    );
 }
 
 // ---- fixed-loop per-frame bracket hooks (BeforeFixedMainLoop / AfterFixedMainLoop) ----
@@ -1359,8 +1376,16 @@ fn fixed_bracket_hooks_run_once_per_frame_with_many_substeps() {
     app.run();
 
     assert_eq!(fixed.load(Ordering::Relaxed), 6, "3 fixed steps x 2 frames");
-    assert_eq!(before.load(Ordering::Relaxed), 2, "before-hook once per frame");
-    assert_eq!(after.load(Ordering::Relaxed), 2, "after-hook once per frame");
+    assert_eq!(
+        before.load(Ordering::Relaxed),
+        2,
+        "before-hook once per frame"
+    );
+    assert_eq!(
+        after.load(Ordering::Relaxed),
+        2,
+        "after-hook once per frame"
+    );
 }
 
 /// The bracket hooks still fire on frames that expend **zero** fixed steps
@@ -1389,9 +1414,21 @@ fn fixed_bracket_hooks_run_on_zero_substep_frames() {
     app.set_runner(|app| HeadlessRunner::with_max_frames(3).run(app));
     app.run();
 
-    assert_eq!(fixed.load(Ordering::Relaxed), 0, "no full step accumulates in 3 ms frames");
-    assert_eq!(before.load(Ordering::Relaxed), 3, "before-hook fires every frame");
-    assert_eq!(after.load(Ordering::Relaxed), 3, "after-hook fires every frame");
+    assert_eq!(
+        fixed.load(Ordering::Relaxed),
+        0,
+        "no full step accumulates in 3 ms frames"
+    );
+    assert_eq!(
+        before.load(Ordering::Relaxed),
+        3,
+        "before-hook fires every frame"
+    );
+    assert_eq!(
+        after.load(Ordering::Relaxed),
+        3,
+        "after-hook fires every frame"
+    );
 }
 
 /// The hooks bracket the inner loop: `BeforeFixedMainLoop` → fixed steps →
@@ -1410,7 +1447,9 @@ fn fixed_bracket_hooks_wrap_the_inner_loop_in_frame_order() {
     }
     {
         let o = order.clone();
-        app.add_systems(BeforeFixedMainLoop, move || o.lock().unwrap().push("before"));
+        app.add_systems(BeforeFixedMainLoop, move || {
+            o.lock().unwrap().push("before")
+        });
     }
     {
         let o = order.clone();
@@ -1498,7 +1537,11 @@ fn clockless_world_skips_bracket_hooks() {
         });
 
     crate::fixed::run_fixed_main_loop(&mut world);
-    assert_eq!(ran.load(Ordering::Relaxed), 0, "no clock => no bracket hooks run");
+    assert_eq!(
+        ran.load(Ordering::Relaxed),
+        0,
+        "no clock => no bracket hooks run"
+    );
 }
 
 // ---- M3 Inc1: secondary sub-apps + one-way extract seam -------------------
@@ -1569,10 +1612,13 @@ fn extract_copies_main_into_sub_before_sub_update() {
     app.insert_sub_app(RenderApp, render);
 
     // Extract copies the main counter into the sub counter (read-only on main).
-    app.set_extract(RenderApp, |main: &mut prism_ecs::world::World, sub: &mut prism_ecs::world::World| {
-        let value = main.resource::<Counter>().0;
-        sub.resource_mut::<Counter>().0 = value;
-    });
+    app.set_extract(
+        RenderApp,
+        |main: &mut prism_ecs::world::World, sub: &mut prism_ecs::world::World| {
+            let value = main.resource::<Counter>().0;
+            sub.resource_mut::<Counter>().0 = value;
+        },
+    );
 
     // Drive two frames directly (keeping ownership so we can inspect state;
     // `App::run` would move the app into its runner).
@@ -1581,7 +1627,14 @@ fn extract_copies_main_into_sub_before_sub_update() {
 
     // After 2 frames the main counter is 20; extract ran after each main
     // update, so the sub-app sees the latest value.
-    assert_eq!(app.get_sub_app(RenderApp).unwrap().world.resource::<Counter>().0, 20);
+    assert_eq!(
+        app.get_sub_app(RenderApp)
+            .unwrap()
+            .world
+            .resource::<Counter>()
+            .0,
+        20
+    );
     assert_eq!(app.world().resource::<Counter>().0, 20);
 }
 
@@ -1614,9 +1667,12 @@ fn main_runs_before_secondary_and_extract_before_sub_update() {
     app.insert_sub_app(RenderApp, render);
     {
         let o = order.clone();
-        app.set_extract(RenderApp, move |_main: &mut prism_ecs::world::World, _sub: &mut prism_ecs::world::World| {
-            o.lock().unwrap().push("extract");
-        });
+        app.set_extract(
+            RenderApp,
+            move |_main: &mut prism_ecs::world::World, _sub: &mut prism_ecs::world::World| {
+                o.lock().unwrap().push("extract");
+            },
+        );
     }
 
     app.update();
@@ -1674,14 +1730,40 @@ fn labeled_lookup_and_insertion_order() {
         .unwrap()
         .world
         .insert_resource(Counter(2));
-    assert_eq!(app.get_sub_app(RenderApp).unwrap().world.resource::<Counter>().0, 1);
-    assert_eq!(app.get_sub_app(ServerApp).unwrap().world.resource::<Counter>().0, 2);
+    assert_eq!(
+        app.get_sub_app(RenderApp)
+            .unwrap()
+            .world
+            .resource::<Counter>()
+            .0,
+        1
+    );
+    assert_eq!(
+        app.get_sub_app(ServerApp)
+            .unwrap()
+            .world
+            .resource::<Counter>()
+            .0,
+        2
+    );
 
     // Re-inserting RenderApp replaces it in place (fresh world has no Counter).
     app.insert_sub_app(RenderApp, SubApp::new());
-    assert!(app.get_sub_app(RenderApp).unwrap().world.get_resource::<Counter>().is_none());
+    assert!(app
+        .get_sub_app(RenderApp)
+        .unwrap()
+        .world
+        .get_resource::<Counter>()
+        .is_none());
     // ServerApp is untouched.
-    assert_eq!(app.get_sub_app(ServerApp).unwrap().world.resource::<Counter>().0, 2);
+    assert_eq!(
+        app.get_sub_app(ServerApp)
+            .unwrap()
+            .world
+            .resource::<Counter>()
+            .0,
+        2
+    );
 }
 
 /// `set_extract` on a missing label panics with a clear message.
@@ -1689,7 +1771,10 @@ fn labeled_lookup_and_insertion_order() {
 #[should_panic(expected = "no sub-app registered")]
 fn set_extract_on_missing_sub_app_panics() {
     let mut app = App::new();
-    app.set_extract(RenderApp, |_m: &mut prism_ecs::world::World, _s: &mut prism_ecs::world::World| {});
+    app.set_extract(
+        RenderApp,
+        |_m: &mut prism_ecs::world::World, _s: &mut prism_ecs::world::World| {},
+    );
 }
 
 // ---- §24.9 / §25.4: per-sub-app independent time domains -----------------
@@ -1803,7 +1888,10 @@ fn pausing_secondary_does_not_freeze_main() {
         (sub_elapsed - sub_frozen_at).abs() < 1e-9,
         "secondary should stay frozen: {sub_elapsed} vs {sub_frozen_at}"
     );
-    assert!((sub_frozen_at - 0.02).abs() < 1e-6, "frozen_at={sub_frozen_at}");
+    assert!(
+        (sub_frozen_at - 0.02).abs() < 1e-6,
+        "frozen_at={sub_frozen_at}"
+    );
 }
 
 /// The mirror case: pausing the main world's virtual time freezes only the main
@@ -1865,7 +1953,11 @@ fn secondary_without_time_domain_runs_update_but_owns_no_clock() {
     app.update();
     app.update();
 
-    assert_eq!(ran.load(Ordering::Relaxed), 2, "Update must still run each frame");
+    assert_eq!(
+        ran.load(Ordering::Relaxed),
+        2,
+        "Update must still run each frame"
+    );
     assert!(
         app.get_sub_app(RenderApp)
             .unwrap()
@@ -1896,7 +1988,10 @@ fn init_sub_app_time_domain_is_idempotent() {
     // Re-init must preserve the running clock.
     app.init_sub_app_time_domain(RenderApp);
     let after = virtual_elapsed(app.get_sub_app(RenderApp).unwrap());
-    assert!((before - after).abs() < 1e-9, "re-init rewound time: {before} vs {after}");
+    assert!(
+        (before - after).abs() < 1e-9,
+        "re-init rewound time: {before} vs {after}"
+    );
     assert!((before - 0.02).abs() < 1e-6, "before={before}");
 }
 
@@ -1910,11 +2005,7 @@ fn secondary_fixed_timestep_is_independent() {
     app.init_sub_app_time_domain(RenderApp);
     app.set_sub_app_fixed_timestep_hz(RenderApp, 20.0);
 
-    let main_step = app
-        .world()
-        .resource::<EngineClocks>()
-        .fixed()
-        .timestep();
+    let main_step = app.world().resource::<EngineClocks>().fixed().timestep();
     let sub_step = app
         .get_sub_app(RenderApp)
         .unwrap()
@@ -2041,7 +2132,11 @@ mod pipelined_tests {
 
         assert_eq!(app.world().resource::<Counter>().0, 40);
         assert_eq!(
-            app.get_sub_app(RenderApp).unwrap().world.resource::<Counter>().0,
+            app.get_sub_app(RenderApp)
+                .unwrap()
+                .world
+                .resource::<Counter>()
+                .0,
             40
         );
         assert_eq!(render_count.load(Ordering::Relaxed), 4);
@@ -2075,7 +2170,11 @@ mod pipelined_tests {
             app.sync_sub_apps();
             (
                 app.world().resource::<Counter>().0,
-                app.get_sub_app(RenderApp).unwrap().world.resource::<Counter>().0,
+                app.get_sub_app(RenderApp)
+                    .unwrap()
+                    .world
+                    .resource::<Counter>()
+                    .0,
                 render_count.load(Ordering::Relaxed),
             )
         }
@@ -2166,7 +2265,10 @@ mod pipelined_tests {
         // The derived ratio, when present, is a well-formed fraction. It is
         // timing-dependent, so we assert sanity rather than require `Some`.
         if let Some(ratio) = diag.pipeline_overlap_ratio() {
-            assert!((0.0..=1.0).contains(&ratio), "overlap ratio {ratio} out of range");
+            assert!(
+                (0.0..=1.0).contains(&ratio),
+                "overlap ratio {ratio} out of range"
+            );
         }
     }
 }
@@ -2190,11 +2292,10 @@ fn add_lifecycle_events_registers_events_and_installs_running_state() {
     assert!(app.world().get_resource::<Events<Resumed>>().is_some());
     assert!(app.world().get_resource::<Events<LowMemory>>().is_some());
     assert!(app.world().get_resource::<Events<FocusChanged>>().is_some());
-    assert!(
-        app.world()
-            .get_resource::<Events<WillRenderFirstFrame>>()
-            .is_some()
-    );
+    assert!(app
+        .world()
+        .get_resource::<Events<WillRenderFirstFrame>>()
+        .is_some());
 
     // The coarse run-state resource is installed, defaulting to Running.
     assert_eq!(
@@ -2337,27 +2438,42 @@ fn plugin_shutdown_runs_in_reverse_registration_order() {
             app.init_resource::<Teardown>();
         }
         fn cleanup(&self, app: &mut App) {
-            app.world_mut().resource_mut::<Teardown>().0.push("cleanup-A");
+            app.world_mut()
+                .resource_mut::<Teardown>()
+                .0
+                .push("cleanup-A");
         }
         fn shutdown(&self, app: &mut App) {
-            app.world_mut().resource_mut::<Teardown>().0.push("shutdown-A");
+            app.world_mut()
+                .resource_mut::<Teardown>()
+                .0
+                .push("shutdown-A");
         }
     }
     struct B;
     impl Plugin for B {
         fn build(&self, _app: &mut App) {}
         fn cleanup(&self, app: &mut App) {
-            app.world_mut().resource_mut::<Teardown>().0.push("cleanup-B");
+            app.world_mut()
+                .resource_mut::<Teardown>()
+                .0
+                .push("cleanup-B");
         }
         fn shutdown(&self, app: &mut App) {
-            app.world_mut().resource_mut::<Teardown>().0.push("shutdown-B");
+            app.world_mut()
+                .resource_mut::<Teardown>()
+                .0
+                .push("shutdown-B");
         }
     }
     struct C;
     impl Plugin for C {
         fn build(&self, _app: &mut App) {}
         fn shutdown(&self, app: &mut App) {
-            app.world_mut().resource_mut::<Teardown>().0.push("shutdown-C");
+            app.world_mut()
+                .resource_mut::<Teardown>()
+                .0
+                .push("shutdown-C");
         }
     }
 
@@ -2408,7 +2524,9 @@ fn headless_runner_runs_shutdown_once_after_frame_loop() {
         }
     });
 
-    let exit = app.set_runner(|app| HeadlessRunner::with_max_frames(3).run(app)).run();
+    let exit = app
+        .set_runner(|app| HeadlessRunner::with_max_frames(3).run(app))
+        .run();
     assert_eq!(exit, AppExit::Success);
     assert_eq!(
         shutdowns.load(Ordering::Relaxed),
@@ -2471,7 +2589,10 @@ fn suspend_event_pauses_simulation_and_sets_suspended_state() {
         "the Suspended event moves the run state to Suspended",
     );
     assert!(
-        app.world().resource::<EngineClocks>().virtual_time().is_paused(),
+        app.world()
+            .resource::<EngineClocks>()
+            .virtual_time()
+            .is_paused(),
         "suspending pauses the virtual clock",
     );
 
@@ -2504,7 +2625,11 @@ fn resume_event_unpauses_and_restores_running() {
 
     app.send_event(Suspended);
     app.update();
-    assert!(app.world().resource::<EngineClocks>().virtual_time().is_paused());
+    assert!(app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .is_paused());
 
     app.send_event(Resumed);
     app.update();
@@ -2514,7 +2639,10 @@ fn resume_event_unpauses_and_restores_running() {
         "the Resumed event restores the Running state",
     );
     assert!(
-        !app.world().resource::<EngineClocks>().virtual_time().is_paused(),
+        !app.world()
+            .resource::<EngineClocks>()
+            .virtual_time()
+            .is_paused(),
         "resuming unpauses the virtual clock",
     );
 
@@ -2549,17 +2677,29 @@ fn resume_preserves_a_user_pause_it_did_not_set() {
 
     app.send_event(Suspended);
     app.update();
-    assert_eq!(*app.world().resource::<AppLifecycle>(), AppLifecycle::Suspended);
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Suspended
+    );
     assert!(
-        app.world().resource::<EngineClocks>().virtual_time().is_paused(),
+        app.world()
+            .resource::<EngineClocks>()
+            .virtual_time()
+            .is_paused(),
         "an already-paused clock stays paused through suspend",
     );
 
     app.send_event(Resumed);
     app.update();
-    assert_eq!(*app.world().resource::<AppLifecycle>(), AppLifecycle::Running);
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Running
+    );
     assert!(
-        app.world().resource::<EngineClocks>().virtual_time().is_paused(),
+        app.world()
+            .resource::<EngineClocks>()
+            .virtual_time()
+            .is_paused(),
         "a user-owned pause survives the suspend/resume cycle",
     );
 }
@@ -2574,7 +2714,10 @@ fn resume_wins_when_both_edges_land_in_one_frame() {
     // Drive into the suspended state first.
     app.send_event(Suspended);
     app.update();
-    assert_eq!(*app.world().resource::<AppLifecycle>(), AppLifecycle::Suspended);
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Suspended
+    );
 
     // Same frame: both edges. Resume must win.
     app.send_event(Suspended);
@@ -2585,7 +2728,11 @@ fn resume_wins_when_both_edges_land_in_one_frame() {
         AppLifecycle::Running,
         "resume wins when both edges arrive in one frame",
     );
-    assert!(!app.world().resource::<EngineClocks>().virtual_time().is_paused());
+    assert!(!app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .is_paused());
 }
 
 /// A graceful exit in progress (`WillExit`) is terminal: lifecycle events do
@@ -3027,7 +3174,9 @@ fn settings_clear_falls_back_to_lower_layer() {
     assert_eq!(s.get_int("net.tickrate"), Some(128));
 
     // Clearing a lower, shadowed layer changes nothing resolved.
-    assert!(s.clear(SettingsLayer::EngineDefault, "net.tickrate").is_none());
+    assert!(s
+        .clear(SettingsLayer::EngineDefault, "net.tickrate")
+        .is_none());
     assert_eq!(s.get_int("net.tickrate"), Some(128));
 
     // Re-add the default, then clear the top layer: falls back to the default.
@@ -3078,7 +3227,10 @@ fn setting_value_parse_infers_type() {
     assert_eq!(SettingValue::parse("42"), SettingValue::Int(42));
     assert_eq!(SettingValue::parse("-7"), SettingValue::Int(-7));
     assert_eq!(SettingValue::parse("3.5"), SettingValue::Float(3.5));
-    assert_eq!(SettingValue::parse("hi"), SettingValue::Str("hi".to_owned()));
+    assert_eq!(
+        SettingValue::parse("hi"),
+        SettingValue::Str("hi".to_owned())
+    );
     // An empty token is not a bool/int/float, so it stays a string.
     assert_eq!(SettingValue::parse(""), SettingValue::Str(String::new()));
 
@@ -3118,7 +3270,10 @@ fn settings_apply_cli_args_parses_forms() {
     ]);
     assert_eq!(changes.len(), 4);
     assert_eq!(s.get_int("r.shadows"), Some(2));
-    assert_eq!(s.resolved_layer("r.shadows"), Some(SettingsLayer::CommandLine));
+    assert_eq!(
+        s.resolved_layer("r.shadows"),
+        Some(SettingsLayer::CommandLine)
+    );
     assert_eq!(s.get_int("net.tickrate"), Some(128));
     assert_eq!(s.get_bool("vsync"), Some(true));
     assert_eq!(s.get_str("name"), Some("prism"));
@@ -3147,7 +3302,10 @@ fn settings_apply_env_vars_folds_into_command_line_layer() {
     // r.shadows changed 1 -> 4; net.tickrate newly set; PATH ignored.
     assert_eq!(changes.len(), 2);
     assert_eq!(s.get_int("r.shadows"), Some(4));
-    assert_eq!(s.resolved_layer("r.shadows"), Some(SettingsLayer::CommandLine));
+    assert_eq!(
+        s.resolved_layer("r.shadows"),
+        Some(SettingsLayer::CommandLine)
+    );
     assert_eq!(s.get_int("net.tickrate"), Some(60));
     assert!(!s.contains("path"));
 }
@@ -3187,7 +3345,8 @@ fn app_insert_setting_broadcasts_resolved_change() {
     app.init_settings();
     app.add_systems(
         Update,
-        move |mut cursor: Local<EventCursor<SettingChanged>>, events: Res<Events<SettingChanged>>| {
+        move |mut cursor: Local<EventCursor<SettingChanged>>,
+              events: Res<Events<SettingChanged>>| {
             for change in cursor.read(&events) {
                 seen_sys.lock().unwrap().push((
                     change.key.clone(),
@@ -3224,7 +3383,12 @@ fn app_insert_setting_broadcasts_resolved_change() {
 #[test]
 fn app_apply_cli_overrides_and_typed_getters() {
     let mut app = App::new();
-    app.apply_cli_overrides(["--net.tickrate=128", "--vsync", "--name=prism", "--gain=0.5"]);
+    app.apply_cli_overrides([
+        "--net.tickrate=128",
+        "--vsync",
+        "--name=prism",
+        "--gain=0.5",
+    ]);
 
     assert_eq!(app.setting_int("net.tickrate"), Some(128));
     assert_eq!(app.setting_bool("vsync"), Some(true));
@@ -3290,7 +3454,11 @@ mod diagnostics_tests {
             let stats = diag
                 .phase(phase)
                 .unwrap_or_else(|| panic!("phase {phase} should be timed"));
-            assert_eq!(stats.total_frames(), FRAMES, "phase {phase} per-frame count");
+            assert_eq!(
+                stats.total_frames(),
+                FRAMES,
+                "phase {phase} per-frame count"
+            );
         }
         // The deterministic phase iterator yields exactly the core phases.
         assert_eq!(diag.phases().count(), TIMED_FRAME_PHASES.len());
@@ -3306,7 +3474,10 @@ mod diagnostics_tests {
         app.set_fixed_timestep_hz(100.0);
         app.init_frame_diagnostics();
         app.update();
-        assert_eq!(app.frame_diagnostics().unwrap().fixed_substeps().last(), Some(1));
+        assert_eq!(
+            app.frame_diagnostics().unwrap().fixed_substeps().last(),
+            Some(1)
+        );
 
         // 30 ms per frame => three 10 ms substeps.
         let mut app = App::new();
@@ -3337,7 +3508,11 @@ mod diagnostics_tests {
         let diag = app.frame_diagnostics().unwrap();
         assert_eq!(diag.window(), 3);
         assert_eq!(diag.frame_time().len(), 3, "window caps live samples");
-        assert_eq!(diag.frame_time().total_frames(), 7, "lifetime total is unbounded");
+        assert_eq!(
+            diag.frame_time().total_frames(),
+            7,
+            "lifetime total is unbounded"
+        );
         assert_eq!(diag.fixed_substeps().len(), 3);
         assert_eq!(diag.fixed_substeps().total_samples(), 7);
     }
@@ -3352,13 +3527,20 @@ mod diagnostics_tests {
         app.init_frame_diagnostics();
         app.update();
         app.update();
-        assert_eq!(app.frame_diagnostics().unwrap().frame_time().total_frames(), 2);
+        assert_eq!(
+            app.frame_diagnostics().unwrap().frame_time().total_frames(),
+            2
+        );
 
         // A redundant init (even with a different window) must not wipe history.
         app.init_frame_diagnostics_with_window(999);
         let diag = app.frame_diagnostics().unwrap();
         assert_eq!(diag.frame_time().total_frames(), 2, "history preserved");
-        assert_eq!(diag.window(), FrameDiagnostics::DEFAULT_WINDOW, "window unchanged");
+        assert_eq!(
+            diag.window(),
+            FrameDiagnostics::DEFAULT_WINDOW,
+            "window unchanged"
+        );
     }
 
     struct NoopBuild;
@@ -3406,7 +3588,10 @@ mod diagnostics_tests {
 
         let slowest = diag.slowest_build().expect("non-empty");
         assert_eq!(slowest.name, "slow-build");
-        assert!(slowest.build >= Duration::from_millis(5), "slow build measured");
+        assert!(
+            slowest.build >= Duration::from_millis(5),
+            "slow build measured"
+        );
         assert!(diag.total_build() >= Duration::from_millis(5));
     }
 
@@ -3422,10 +3607,17 @@ mod diagnostics_tests {
 
         let diag = app.startup_diagnostics().expect("installed");
         let noop = diag.plugins().iter().find(|p| p.name == "noop").unwrap();
-        let slow = diag.plugins().iter().find(|p| p.name == "slow-finish").unwrap();
+        let slow = diag
+            .plugins()
+            .iter()
+            .find(|p| p.name == "slow-finish")
+            .unwrap();
         // Every plugin's finish is timed, so a no-op finish records a tiny (not
         // literally zero) duration; the deliberately slow one dwarfs it.
-        assert!(slow.finish >= Duration::from_millis(5), "slow finish measured");
+        assert!(
+            slow.finish >= Duration::from_millis(5),
+            "slow finish measured"
+        );
         assert!(slow.finish > noop.finish, "slow finish outweighs the no-op");
         assert!(diag.total_finish() >= Duration::from_millis(5));
     }
@@ -3673,9 +3865,17 @@ mod determinism_tests {
         assert_eq!(h.last(), None);
 
         h.write_u8(0xAB);
-        assert_ne!(h.current(), 0xcbf2_9ce4_8422_2325, "folding changed current");
+        assert_ne!(
+            h.current(),
+            0xcbf2_9ce4_8422_2325,
+            "folding changed current"
+        );
         let f0 = h.finalize_frame();
-        assert_eq!(h.current(), 0xcbf2_9ce4_8422_2325, "current reset after finalize");
+        assert_eq!(
+            h.current(),
+            0xcbf2_9ce4_8422_2325,
+            "current reset after finalize"
+        );
         assert_eq!(h.frame_index(), 1);
         assert_eq!(h.last(), Some(f0));
         assert_eq!(h.len(), 1);
@@ -3693,7 +3893,11 @@ mod determinism_tests {
             h.finalize_frame();
         }
         assert_eq!(h.len(), 3, "history stays within the window");
-        assert_eq!(h.frame_index(), 5, "frame_index counts every finalized frame");
+        assert_eq!(
+            h.frame_index(),
+            5,
+            "frame_index counts every finalized frame"
+        );
 
         // The retained hashes are the last three frames (i = 2,3,4), oldest
         // first. Recompute the expected digests independently.
@@ -3922,9 +4126,9 @@ mod determinism_tests {
     fn dual_run_frame_hashes_match_for_equal_seeds() {
         fn hashing_app(seed: u64) -> App {
             let mut app = App::new();
-            app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(
-                Duration::from_millis(10),
-            ));
+            app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(
+                10,
+            )));
             app.set_fixed_timestep_hz(100.0);
             app.init_determinism(seed);
             app.add_systems(
@@ -4005,8 +4209,14 @@ mod determinism_tests {
     #[test]
     fn replay_exhaustion_falls_back_to_live() {
         let frames = vec![
-            RecordedInput { step: 0, frame: 1u8 },
-            RecordedInput { step: 1, frame: 2u8 },
+            RecordedInput {
+                step: 0,
+                frame: 1u8,
+            },
+            RecordedInput {
+                step: 1,
+                frame: 2u8,
+            },
         ];
         let mut replay = InputRecording::replaying(frames);
         assert!(!replay.is_exhausted());
@@ -4041,7 +4251,10 @@ mod determinism_tests {
         assert!(app.input_recording::<u16>().is_none());
 
         app.init_input_recording::<u16>(InputRecording::recording());
-        assert_eq!(app.input_recording::<u16>().unwrap().mode(), ReplayMode::Record);
+        assert_eq!(
+            app.input_recording::<u16>().unwrap().mode(),
+            ReplayMode::Record
+        );
 
         // A second call with a different mode must be ignored for the same `F`.
         app.init_input_recording::<u16>(InputRecording::idle());
@@ -4096,8 +4309,14 @@ mod determinism_tests {
         let log = ReplayLog::new(
             0x5EED,
             vec![
-                RecordedInput { step: 0, frame: 100u32 },
-                RecordedInput { step: 1, frame: 200u32 },
+                RecordedInput {
+                    step: 0,
+                    frame: 100u32,
+                },
+                RecordedInput {
+                    step: 1,
+                    frame: 200u32,
+                },
             ],
         );
         app.init_replay(log);
@@ -4159,7 +4378,9 @@ mod determinism_tests {
             actual.write_u64(v);
             actual.finalize_frame();
         }
-        let div = manifest.first_divergence(&actual).expect("divergence at frame 2");
+        let div = manifest
+            .first_divergence(&actual)
+            .expect("divergence at frame 2");
         assert_eq!(div.frame, 2);
         assert_eq!(div.left, manifest.expected_at(2).unwrap());
         assert_eq!(div.right, actual.hash_at(2).unwrap());
@@ -4393,9 +4614,13 @@ mod state_depth_tests {
 
     fn log_sim_edges(app: &mut App, log: &Log) {
         let l = log.clone();
-        app.add_systems(OnEnter(Simulating), move || l.lock().unwrap().push("enter:sim"));
+        app.add_systems(OnEnter(Simulating), move || {
+            l.lock().unwrap().push("enter:sim")
+        });
         let l = log.clone();
-        app.add_systems(OnExit(Simulating), move || l.lock().unwrap().push("exit:sim"));
+        app.add_systems(OnExit(Simulating), move || {
+            l.lock().unwrap().push("exit:sim")
+        });
     }
 
     /// A computed-of-computed chain settles in a single frame. When the base
@@ -4823,7 +5048,9 @@ mod state_depth_tests {
     /// Register an [`OnTransition`] edge that pushes `tag` to `log` when it runs.
     fn log_transition<S: States>(app: &mut App, from: S, to: S, log: &Log, tag: &'static str) {
         let l = log.clone();
-        app.add_systems(OnTransition { from, to }, move || l.lock().unwrap().push(tag));
+        app.add_systems(OnTransition { from, to }, move || {
+            l.lock().unwrap().push(tag)
+        });
     }
 
     /// A base-state `from -> to` edge runs its `OnTransition` schedule, and only
@@ -4834,13 +5061,34 @@ mod state_depth_tests {
         let mut app = App::new();
         app.insert_state(AppState::Menu)
             .add_state_transition_hooks::<AppState>();
-        log_transition(&mut app, AppState::Menu, AppState::InGame, &log, "menu->ingame");
-        log_transition(&mut app, AppState::InGame, AppState::Paused, &log, "ingame->paused");
-        log_transition(&mut app, AppState::Menu, AppState::Paused, &log, "menu->paused");
+        log_transition(
+            &mut app,
+            AppState::Menu,
+            AppState::InGame,
+            &log,
+            "menu->ingame",
+        );
+        log_transition(
+            &mut app,
+            AppState::InGame,
+            AppState::Paused,
+            &log,
+            "ingame->paused",
+        );
+        log_transition(
+            &mut app,
+            AppState::Menu,
+            AppState::Paused,
+            &log,
+            "menu->paused",
+        );
 
         // Frame 1: first entry into Menu is not an edge (no `from`): no hook.
         app.update();
-        assert!(drain(&log).is_empty(), "first entry fires no transition hook");
+        assert!(
+            drain(&log).is_empty(),
+            "first entry fires no transition hook"
+        );
 
         // Menu -> InGame fires only the matching edge.
         app.world_mut()
@@ -4866,12 +5114,20 @@ mod state_depth_tests {
         app.insert_state(AppState::Menu)
             .add_state_transition_hooks::<AppState>();
         let l = log.clone();
-        app.add_systems(OnExit(AppState::Menu), move || l.lock().unwrap().push("exit:menu"));
+        app.add_systems(OnExit(AppState::Menu), move || {
+            l.lock().unwrap().push("exit:menu")
+        });
         let l = log.clone();
         app.add_systems(OnEnter(AppState::InGame), move || {
             l.lock().unwrap().push("enter:ingame");
         });
-        log_transition(&mut app, AppState::Menu, AppState::InGame, &log, "transition");
+        log_transition(
+            &mut app,
+            AppState::Menu,
+            AppState::InGame,
+            &log,
+            "transition",
+        );
 
         app.update(); // settle into Menu (no edge yet)
         drain(&log);
@@ -4896,7 +5152,13 @@ mod state_depth_tests {
         app.insert_state(AppState::Menu)
             .add_computed_state::<Activity>()
             .add_state_transition_hooks::<Activity>();
-        log_transition(&mut app, Activity::Playing, Activity::Halted, &log, "play->halt");
+        log_transition(
+            &mut app,
+            Activity::Playing,
+            Activity::Halted,
+            &log,
+            "play->halt",
+        );
 
         app.update(); // Menu: Activity absent, no edge
         assert!(drain(&log).is_empty());
@@ -4920,7 +5182,10 @@ mod state_depth_tests {
             .resource_mut::<NextState<AppState>>()
             .set(AppState::Menu);
         app.update();
-        assert!(drain(&log).is_empty(), "disappearance is not a from->to edge");
+        assert!(
+            drain(&log).is_empty(),
+            "disappearance is not a from->to edge"
+        );
     }
 
     /// Transition hooks are opt-in: without `add_state_transition_hooks`, an
@@ -4930,7 +5195,13 @@ mod state_depth_tests {
         let log = log();
         let mut app = App::new();
         app.insert_state(AppState::Menu); // no add_state_transition_hooks
-        log_transition(&mut app, AppState::Menu, AppState::InGame, &log, "menu->ingame");
+        log_transition(
+            &mut app,
+            AppState::Menu,
+            AppState::InGame,
+            &log,
+            "menu->ingame",
+        );
 
         app.update();
         app.world_mut()
@@ -4942,7 +5213,6 @@ mod state_depth_tests {
             "without opt-in the transition driver is not wired"
         );
     }
-
 }
 
 /// Capability tiering (design §3, §24.4): `Capabilities` / `QualityTier` /
@@ -5145,7 +5415,10 @@ mod platform_tier_tests {
         assert_eq!(settings.get_bool(KEY_RENDER_PRESENT), Some(true));
         assert_eq!(settings.get_int(KEY_FRAME_LIMIT_FPS), Some(0));
         assert_eq!(settings.get_bool(KEY_PIPELINED_RENDERING), Some(true));
-        assert_eq!(settings.get_bool(KEY_POWER_AWARE_VARIABLE_STEP), Some(false));
+        assert_eq!(
+            settings.get_bool(KEY_POWER_AWARE_VARIABLE_STEP),
+            Some(false)
+        );
         assert_eq!(settings.get_bool(KEY_SUSPEND_RESUME_LIFECYCLE), Some(false));
         assert_eq!(
             settings.resolved_layer(KEY_RENDER_PRESENT),
@@ -5168,7 +5441,9 @@ mod platform_tier_tests {
         settings.set(SettingsLayer::User, KEY_FRAME_LIMIT_FPS, 30_i64);
 
         // Desktop would present and run uncapped, but the user layer wins.
-        let changed = QualityTier::Desktop.platform_profile().write_into(&mut settings);
+        let changed = QualityTier::Desktop
+            .platform_profile()
+            .write_into(&mut settings);
         // Three keys resolve to the tier value; the two user-pinned keys do not
         // change their resolved value.
         assert_eq!(changed, 3);
@@ -5324,11 +5599,7 @@ mod crash_tests {
 
         let snapshot = app.capture_crash_snapshot();
         assert_eq!(snapshot.main_entity_count, 3);
-        let keys: Vec<&str> = snapshot
-            .settings
-            .iter()
-            .map(|(k, _)| k.as_str())
-            .collect();
+        let keys: Vec<&str> = snapshot.settings.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, ["net.tickrate", "r.shadows"]);
     }
 
@@ -5493,7 +5764,9 @@ mod crash_tests {
 
         let captured = log.lock().unwrap();
         assert!(
-            captured.iter().any(|dump| dump.contains("sentinel-crash-xyz")),
+            captured
+                .iter()
+                .any(|dump| dump.contains("sentinel-crash-xyz")),
             "installed hook should have written the panic dump to the sink",
         );
     }
@@ -5542,7 +5815,9 @@ mod cvar_tests {
 
         assert_eq!(app.cvar_int("r.shadows"), Some(2));
         assert_eq!(
-            app.world().resource::<Settings>().resolved_layer("r.shadows"),
+            app.world()
+                .resource::<Settings>()
+                .resolved_layer("r.shadows"),
             Some(SettingsLayer::EngineDefault),
         );
     }
@@ -5562,7 +5837,9 @@ mod cvar_tests {
         assert_eq!(outcome.resolved, SettingValue::Int(128));
         assert_eq!(app.cvar_int("net.tickrate"), Some(128));
         assert_eq!(
-            app.world().resource::<Settings>().resolved_layer("net.tickrate"),
+            app.world()
+                .resource::<Settings>()
+                .resolved_layer("net.tickrate"),
             Some(SettingsLayer::Runtime),
         );
     }
@@ -5616,7 +5893,8 @@ mod cvar_tests {
     #[test]
     fn type_mismatch_is_rejected() {
         let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64)).unwrap();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64))
+            .unwrap();
 
         let err = app.set_cvar("r.shadows", "high").unwrap_err();
         assert_eq!(
@@ -5665,10 +5943,8 @@ mod cvar_tests {
     #[test]
     fn read_only_cvar_cannot_be_written() {
         let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("sys.version", "1.0").flag(CvarFlags::READ_ONLY),
-        )
-        .unwrap();
+        app.register_cvar(CvarSpec::new("sys.version", "1.0").flag(CvarFlags::READ_ONLY))
+            .unwrap();
 
         assert_eq!(
             app.set_cvar("sys.version", "2.0").unwrap_err(),
@@ -5686,10 +5962,8 @@ mod cvar_tests {
     #[test]
     fn cheat_protected_cvar_is_gated() {
         let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("g.godmode", false).flag(CvarFlags::CHEAT),
-        )
-        .unwrap();
+        app.register_cvar(CvarSpec::new("g.godmode", false).flag(CvarFlags::CHEAT))
+            .unwrap();
 
         assert_eq!(
             app.set_cvar("g.godmode", true).unwrap_err(),
@@ -5717,12 +5991,13 @@ mod cvar_tests {
         .unwrap();
         app.register_cvar(CvarSpec::new("r.quiet", 1_i64)).unwrap();
 
-        let seen = Arc::new(Mutex::new(Vec::<(String, Option<bool>, Option<bool>)>::new()));
+        let seen = Arc::new(Mutex::new(
+            Vec::<(String, Option<bool>, Option<bool>)>::new(),
+        ));
         let seen_sys = seen.clone();
         app.add_systems(
             Update,
-            move |mut cursor: Local<EventCursor<CvarChanged>>,
-                  events: Res<Events<CvarChanged>>| {
+            move |mut cursor: Local<EventCursor<CvarChanged>>, events: Res<Events<CvarChanged>>| {
                 for ev in cursor.read(&events) {
                     seen_sys.lock().unwrap().push((
                         ev.name.clone(),
@@ -5757,7 +6032,8 @@ mod cvar_tests {
         app.register_cvar(CvarSpec::new("r.shadows", 1_i64).bounds(CvarBounds::Int(0, 4)))
             .unwrap();
         // A user-layer preference sits above the engine default.
-        app.set_cvar_at(SettingsLayer::User, "r.shadows", 2_i64).unwrap();
+        app.set_cvar_at(SettingsLayer::User, "r.shadows", 2_i64)
+            .unwrap();
         // A runtime console write sits above the user layer.
         app.set_cvar("r.shadows", 3_i64).unwrap();
         assert_eq!(app.cvar_int("r.shadows"), Some(3));
@@ -5768,7 +6044,9 @@ mod cvar_tests {
         assert_eq!(outcome.resolved, SettingValue::Int(2));
         assert_eq!(app.cvar_int("r.shadows"), Some(2));
         assert_eq!(
-            app.world().resource::<Settings>().resolved_layer("r.shadows"),
+            app.world()
+                .resource::<Settings>()
+                .resolved_layer("r.shadows"),
             Some(SettingsLayer::User),
         );
     }
@@ -5778,20 +6056,16 @@ mod cvar_tests {
     #[test]
     fn iter_category_and_archived_are_filtered_and_ordered() {
         let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("r.shadows", 1_i64).category(CvarCategory::Render),
-        )
-        .unwrap();
+        app.register_cvar(CvarSpec::new("r.shadows", 1_i64).category(CvarCategory::Render))
+            .unwrap();
         app.register_cvar(
             CvarSpec::new("r.bloom", true)
                 .category(CvarCategory::Render)
                 .flag(CvarFlags::ARCHIVE),
         )
         .unwrap();
-        app.register_cvar(
-            CvarSpec::new("net.tickrate", 60_i64).category(CvarCategory::Network),
-        )
-        .unwrap();
+        app.register_cvar(CvarSpec::new("net.tickrate", 60_i64).category(CvarCategory::Network))
+            .unwrap();
 
         let registry = app.world().resource::<CvarRegistry>();
         let render: Vec<&str> = registry
@@ -5830,7 +6104,8 @@ mod cvar_tests {
     #[test]
     fn register_rejects_redeclaration() {
         let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 1_i64)).unwrap();
+        app.register_cvar(CvarSpec::new("r.shadows", 1_i64))
+            .unwrap();
         let err = app
             .register_cvar(CvarSpec::new("r.shadows", 9_i64))
             .unwrap_err();
@@ -5881,7 +6156,9 @@ mod cvar_tests {
             Err(CvarError::CheatProtected("g.noclip".to_owned()))
         );
         registry.set_cheats_enabled(true);
-        assert!(registry.validate_set("g.noclip", SettingValue::Bool(true)).is_ok());
+        assert!(registry
+            .validate_set("g.noclip", SettingValue::Bool(true))
+            .is_ok());
     }
 
     /// A command-line override for a declared cvar is validated and clamped into
@@ -5907,7 +6184,9 @@ mod cvar_tests {
 
         assert_eq!(app.cvar_int("r.shadows"), Some(4));
         assert_eq!(
-            app.world().resource::<Settings>().resolved_layer("r.shadows"),
+            app.world()
+                .resource::<Settings>()
+                .resolved_layer("r.shadows"),
             Some(SettingsLayer::CommandLine),
         );
     }
@@ -5933,7 +6212,9 @@ mod cvar_tests {
         // Untouched: still the EngineDefault seed.
         assert_eq!(app.cvar_int("r.shadows"), Some(2));
         assert_eq!(
-            app.world().resource::<Settings>().resolved_layer("r.shadows"),
+            app.world()
+                .resource::<Settings>()
+                .resolved_layer("r.shadows"),
             Some(SettingsLayer::EngineDefault),
         );
     }
@@ -6036,7 +6317,9 @@ mod cvar_tests {
         // Runtime still wins; the CommandLine value sits underneath.
         assert_eq!(app.cvar_int("net.tickrate"), Some(128));
         assert_eq!(
-            app.world().resource::<Settings>().resolved_layer("net.tickrate"),
+            app.world()
+                .resource::<Settings>()
+                .resolved_layer("net.tickrate"),
             Some(SettingsLayer::Runtime),
         );
     }
@@ -6097,7 +6380,10 @@ mod cvar_tests {
         assert_eq!(report.settings.len(), 1);
         assert_eq!(report.settings[0].key, "window.title");
         // The non-prefixed var is ignored entirely.
-        assert_eq!(app.world().resource::<Settings>().get("other.ignored"), None);
+        assert_eq!(
+            app.world().resource::<Settings>().get("other.ignored"),
+            None
+        );
     }
 
     /// An empty / all-no-op override pass produces an empty report.
@@ -6161,7 +6447,8 @@ mod cvar_tests {
         let mut app = App::new();
         // Register an unrelated cvar so the `Settings` cascade exists, then set
         // an *undeclared* key directly in it.
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64)).unwrap();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64))
+            .unwrap();
         app.world_mut().resource_mut::<Settings>().set(
             SettingsLayer::User,
             "window.title".to_owned(),
@@ -6196,7 +6483,9 @@ mod cvar_tests {
         }
         assert_eq!(app.cvar_int("r.shadows"), Some(3));
         assert_eq!(
-            app.world().resource::<Settings>().resolved_layer("r.shadows"),
+            app.world()
+                .resource::<Settings>()
+                .resolved_layer("r.shadows"),
             Some(SettingsLayer::Runtime),
         );
 
@@ -6233,11 +6522,15 @@ mod cvar_tests {
     #[test]
     fn console_multiword_value_is_a_single_string() {
         let mut app = App::new();
-        app.register_cvar(CvarSpec::new("sv.motd", "welcome")).unwrap();
+        app.register_cvar(CvarSpec::new("sv.motd", "welcome"))
+            .unwrap();
 
         match app.exec_console("sv.motd  hello   brave  world  ") {
             ConsoleOutcome::Set(set) => {
-                assert_eq!(set.resolved, SettingValue::Str("hello   brave  world".to_owned()));
+                assert_eq!(
+                    set.resolved,
+                    SettingValue::Str("hello   brave  world".to_owned())
+                );
             }
             other => panic!("expected Set, got {other:?}"),
         }
@@ -6261,7 +6554,8 @@ mod cvar_tests {
     #[test]
     fn console_type_mismatch_is_rejected() {
         let mut app = App::new();
-        app.register_cvar(CvarSpec::new("r.shadows", 2_i64)).unwrap();
+        app.register_cvar(CvarSpec::new("r.shadows", 2_i64))
+            .unwrap();
 
         match app.exec_console("r.shadows high") {
             ConsoleOutcome::Rejected(CvarError::TypeMismatch { name, .. }) => {
@@ -6327,7 +6621,8 @@ mod cvar_tests {
         .unwrap();
         app.register_cvar(CvarSpec::new("dbg.fps", false).flag(CvarFlags::ARCHIVE))
             .unwrap();
-        app.register_cvar(CvarSpec::new("net.rate", 60_i64)).unwrap(); // not archived
+        app.register_cvar(CvarSpec::new("net.rate", 60_i64))
+            .unwrap(); // not archived
         app.register_cvar(CvarSpec::new("snd.volume", 0.5_f64).flag(CvarFlags::ARCHIVE))
             .unwrap();
 
@@ -6363,7 +6658,9 @@ mod cvar_tests {
         schema(&mut source);
         // Mutate away from the defaults at the runtime layer.
         source.set_cvar("r.shadows", SettingValue::Int(4)).unwrap();
-        source.set_cvar("snd.volume", SettingValue::Float(0.25)).unwrap();
+        source
+            .set_cvar("snd.volume", SettingValue::Float(0.25))
+            .unwrap();
         source
             .set_cvar("net.name", SettingValue::Str("alice".to_owned()))
             .unwrap();
@@ -6437,7 +6734,9 @@ mod cvar_tests {
 
         let mut source = App::new();
         schema(&mut source);
-        source.set_cvar("r.gamma", SettingValue::Float(2.0)).unwrap();
+        source
+            .set_cvar("r.gamma", SettingValue::Float(2.0))
+            .unwrap();
         let config = source.write_archive_config();
         assert!(config.contains("r.gamma 2.0"), "got: {config:?}");
 
@@ -6577,7 +6876,11 @@ mod cvar_tests {
             .unwrap();
 
         // Name substring, case-insensitive.
-        let by_name: Vec<String> = app.find_cvars("SHADOW").into_iter().map(|l| l.name).collect();
+        let by_name: Vec<String> = app
+            .find_cvars("SHADOW")
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
         // `r.ao` matches on its description ("SHADOWing"), `r.shadows` on name.
         assert_eq!(by_name, ["r.ao", "r.shadows"]);
 
@@ -6791,7 +7094,9 @@ mod cvar_tests {
         assert!(matches!(outcomes.as_slice(), [ConsoleOutcome::Set(_)]));
         assert_eq!(app.cvar_int("r.quality"), Some(2));
         assert_eq!(
-            app.world().resource::<Settings>().resolved_layer("r.quality"),
+            app.world()
+                .resource::<Settings>()
+                .resolved_layer("r.quality"),
             Some(SettingsLayer::User)
         );
     }
@@ -6815,7 +7120,9 @@ mod cvar_tests {
         // The user-config value is recorded but does not win the cascade.
         assert_eq!(app.cvar_int("r.quality"), Some(3));
         assert_eq!(
-            app.world().resource::<Settings>().resolved_layer("r.quality"),
+            app.world()
+                .resource::<Settings>()
+                .resolved_layer("r.quality"),
             Some(SettingsLayer::Runtime)
         );
     }
@@ -6838,7 +7145,9 @@ mod cvar_tests {
         app.reset_cvar("r.quality").unwrap();
         assert_eq!(app.cvar_int("r.quality"), Some(0));
         assert_eq!(
-            app.world().resource::<Settings>().resolved_layer("r.quality"),
+            app.world()
+                .resource::<Settings>()
+                .resolved_layer("r.quality"),
             Some(SettingsLayer::User)
         );
     }
@@ -6912,7 +7221,9 @@ mod cvar_tests {
         );
         // A query changes nothing: the User layer stays empty.
         assert_eq!(
-            app.world().resource::<Settings>().resolved_layer("r.quality"),
+            app.world()
+                .resource::<Settings>()
+                .resolved_layer("r.quality"),
             Some(SettingsLayer::EngineDefault)
         );
     }
@@ -6946,7 +7257,8 @@ mod cvar_tests {
 
         app.set_cvar_at(SettingsLayer::User, "r.quality", 3_i64)
             .unwrap();
-        app.set_cvar_at(SettingsLayer::User, "r.vsync", false).unwrap();
+        app.set_cvar_at(SettingsLayer::User, "r.vsync", false)
+            .unwrap();
         app.set_cvar("r.gamma", 2.0_f64).unwrap(); // Runtime, not User.
         app.set_cvar_at(SettingsLayer::User, "sys.debug", true)
             .unwrap(); // not ARCHIVE.
@@ -6981,8 +7293,12 @@ mod cvar_tests {
         }
 
         let mut source = registered();
-        source.set_cvar_at(SettingsLayer::User, "r.quality", 2_i64).unwrap();
-        source.set_cvar_at(SettingsLayer::User, "r.gamma", 2.5_f64).unwrap();
+        source
+            .set_cvar_at(SettingsLayer::User, "r.quality", 2_i64)
+            .unwrap();
+        source
+            .set_cvar_at(SettingsLayer::User, "r.gamma", 2.5_f64)
+            .unwrap();
         let config = source.write_user_config();
 
         let mut loaded = registered();
@@ -6990,11 +7306,17 @@ mod cvar_tests {
         assert_eq!(loaded.cvar_int("r.quality"), Some(2));
         assert_eq!(loaded.cvar_float("r.gamma"), Some(2.5));
         assert_eq!(
-            loaded.world().resource::<Settings>().resolved_layer("r.quality"),
+            loaded
+                .world()
+                .resource::<Settings>()
+                .resolved_layer("r.quality"),
             Some(SettingsLayer::User)
         );
         assert_eq!(
-            loaded.world().resource::<Settings>().resolved_layer("r.gamma"),
+            loaded
+                .world()
+                .resource::<Settings>()
+                .resolved_layer("r.gamma"),
             Some(SettingsLayer::User)
         );
     }
@@ -7044,10 +7366,8 @@ mod cvar_tests {
                 .bounds(CvarBounds::Int(0, 4)),
         )
         .unwrap();
-        app.register_cvar(
-            CvarSpec::new("r.vsync", true).category(CvarCategory::Render),
-        )
-        .unwrap();
+        app.register_cvar(CvarSpec::new("r.vsync", true).category(CvarCategory::Render))
+            .unwrap();
         // Only one cvar is moved off its default.
         app.set_cvar("r.shadows", 4_i64).unwrap();
 
@@ -7067,10 +7387,8 @@ mod cvar_tests {
                 .bounds(CvarBounds::Int(0, 4)),
         )
         .unwrap();
-        app.register_cvar(
-            CvarSpec::new("net.rate", 60_i64).category(CvarCategory::Network),
-        )
-        .unwrap();
+        app.register_cvar(CvarSpec::new("net.rate", 60_i64).category(CvarCategory::Network))
+            .unwrap();
 
         assert!(app.list_modified_cvars().is_empty());
     }
@@ -7117,10 +7435,8 @@ mod cvar_tests {
     #[test]
     fn list_modified_cvars_reports_source_layer() {
         let mut app = App::new();
-        app.register_cvar(
-            CvarSpec::new("sys.lang", "en").category(CvarCategory::System),
-        )
-        .unwrap();
+        app.register_cvar(CvarSpec::new("sys.lang", "en").category(CvarCategory::System))
+            .unwrap();
         // Override only on the User layer (no Runtime write).
         app.set_cvar_at(SettingsLayer::User, "sys.lang", "fr")
             .unwrap();
@@ -7218,15 +7534,21 @@ mod cvar_tests {
 
         // 0 → 2 → 4 → wrap back to 0.
         assert_eq!(
-            app.toggle_cvar("r.shadows", &["0", "2", "4"]).unwrap().resolved,
+            app.toggle_cvar("r.shadows", &["0", "2", "4"])
+                .unwrap()
+                .resolved,
             SettingValue::Int(2)
         );
         assert_eq!(
-            app.toggle_cvar("r.shadows", &["0", "2", "4"]).unwrap().resolved,
+            app.toggle_cvar("r.shadows", &["0", "2", "4"])
+                .unwrap()
+                .resolved,
             SettingValue::Int(4)
         );
         assert_eq!(
-            app.toggle_cvar("r.shadows", &["0", "2", "4"]).unwrap().resolved,
+            app.toggle_cvar("r.shadows", &["0", "2", "4"])
+                .unwrap()
+                .resolved,
             SettingValue::Int(0)
         );
     }
@@ -7242,7 +7564,9 @@ mod cvar_tests {
         .unwrap();
         // Current value 1 is not in the cycle list, so toggle lands on the first.
         assert_eq!(
-            app.toggle_cvar("r.shadows", &["0", "2", "4"]).unwrap().resolved,
+            app.toggle_cvar("r.shadows", &["0", "2", "4"])
+                .unwrap()
+                .resolved,
             SettingValue::Int(0)
         );
     }
@@ -7365,11 +7689,15 @@ mod cvar_tests {
         .unwrap();
 
         assert_eq!(
-            app.increment_cvar("r.shadows", 0.0, 4.0, 1.0).unwrap().resolved,
+            app.increment_cvar("r.shadows", 0.0, 4.0, 1.0)
+                .unwrap()
+                .resolved,
             SettingValue::Int(1)
         );
         assert_eq!(
-            app.increment_cvar("r.shadows", 0.0, 4.0, 1.0).unwrap().resolved,
+            app.increment_cvar("r.shadows", 0.0, 4.0, 1.0)
+                .unwrap()
+                .resolved,
             SettingValue::Int(2)
         );
         assert_eq!(app.cvar_int("r.shadows"), Some(2));
@@ -7404,7 +7732,9 @@ mod cvar_tests {
 
         // 0 - 1 = -1 is below min (0), so it wraps to max (4).
         assert_eq!(
-            app.increment_cvar("r.shadows", 0.0, 4.0, -1.0).unwrap().resolved,
+            app.increment_cvar("r.shadows", 0.0, 4.0, -1.0)
+                .unwrap()
+                .resolved,
             SettingValue::Int(4)
         );
     }
@@ -7420,16 +7750,22 @@ mod cvar_tests {
         .unwrap();
 
         assert_eq!(
-            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5).unwrap().resolved,
+            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5)
+                .unwrap()
+                .resolved,
             SettingValue::Float(0.5)
         );
         assert_eq!(
-            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5).unwrap().resolved,
+            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5)
+                .unwrap()
+                .resolved,
             SettingValue::Float(1.0)
         );
         // 1.0 + 0.5 = 1.5 is past max, so it wraps to min (0.0).
         assert_eq!(
-            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5).unwrap().resolved,
+            app.increment_cvar("r.gamma", 0.0, 1.0, 0.5)
+                .unwrap()
+                .resolved,
             SettingValue::Float(0.0)
         );
     }

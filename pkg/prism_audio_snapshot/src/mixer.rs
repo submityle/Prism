@@ -51,7 +51,12 @@ impl SnapshotMixer {
     /// Creates a mixer with no current parameters and no active transition.
     #[must_use]
     pub fn new(registry: SnapshotRegistry, config: SnapshotConfig) -> Self {
-        Self { registry, config, current: ResolvedParameters::new(), active: None }
+        Self {
+            registry,
+            config,
+            current: ResolvedParameters::new(),
+            active: None,
+        }
     }
 
     /// Creates a mixer whose current parameters are the resolved values of
@@ -66,7 +71,12 @@ impl SnapshotMixer {
             .get(initial_snapshot)
             .map(ResolvedParameters::from_snapshot)
             .unwrap_or_default();
-        Self { registry, config, current, active: None }
+        Self {
+            registry,
+            config,
+            current,
+            active: None,
+        }
     }
 
     /// Starts a transition from the current values toward snapshot `id`.
@@ -192,8 +202,13 @@ impl SnapshotMixer {
     ) {
         let duration = duration_secs.unwrap_or(self.config.default_transition_secs);
         let interpolation = interp.unwrap_or(self.config.default_interpolation);
-        self.active =
-            Some(Transition::new(self.current.clone(), dest, kinds, duration, interpolation));
+        self.active = Some(Transition::new(
+            self.current.clone(),
+            dest,
+            kinds,
+            duration,
+            interpolation,
+        ));
     }
 }
 
@@ -245,11 +260,7 @@ mod tests {
 
     #[test]
     fn new_with_unknown_snapshot_starts_empty() {
-        let m = SnapshotMixer::new_with(
-            registry(),
-            SnapshotConfig::default(),
-            SnapshotId::new(99),
-        );
+        let m = SnapshotMixer::new_with(registry(), SnapshotConfig::default(), SnapshotId::new(99));
         assert!(m.current().is_empty());
     }
 

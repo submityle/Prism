@@ -47,7 +47,11 @@ pub(crate) fn dim_at(base: u32, mip: u32) -> u32 {
 
 #[inline]
 fn finite_or_zero(x: f32) -> f32 {
-    if x.is_finite() { x } else { 0.0 }
+    if x.is_finite() {
+        x
+    } else {
+        0.0
+    }
 }
 
 #[inline]
@@ -121,24 +125,52 @@ mod tests {
     #[test]
     fn texel_center_reads_exact_texel() {
         // uv = (0.5)/2 = 0.25 -> texel 0 centre on each axis.
-        let c = bilinear(&Checker, 0, [0.25, 0.25], WrapMode::ClampToEdge, WrapMode::ClampToEdge, [0.0; 4]);
+        let c = bilinear(
+            &Checker,
+            0,
+            [0.25, 0.25],
+            WrapMode::ClampToEdge,
+            WrapMode::ClampToEdge,
+            [0.0; 4],
+        );
         assert!((c[0] - 0.0).abs() < 1.0e-6, "{c:?}");
         // uv = 1.5/2 = 0.75 -> texel 1 on x, texel 0 on y -> value 1.
-        let c = bilinear(&Checker, 0, [0.75, 0.25], WrapMode::ClampToEdge, WrapMode::ClampToEdge, [0.0; 4]);
+        let c = bilinear(
+            &Checker,
+            0,
+            [0.75, 0.25],
+            WrapMode::ClampToEdge,
+            WrapMode::ClampToEdge,
+            [0.0; 4],
+        );
         assert!((c[0] - 1.0).abs() < 1.0e-6, "{c:?}");
     }
 
     #[test]
     fn midpoint_blends_two_texels() {
         // uv.x = 0.5 -> fx = 0.5 -> between texel 0 (val 0) and texel 1 (val 1).
-        let c = bilinear(&Checker, 0, [0.5, 0.25], WrapMode::ClampToEdge, WrapMode::ClampToEdge, [0.0; 4]);
+        let c = bilinear(
+            &Checker,
+            0,
+            [0.5, 0.25],
+            WrapMode::ClampToEdge,
+            WrapMode::ClampToEdge,
+            [0.0; 4],
+        );
         assert!((c[0] - 0.5).abs() < 1.0e-6, "{c:?}");
     }
 
     #[test]
     fn center_blends_all_four() {
         // uv = (0.5, 0.5) -> fx=fy=0.5 -> mean of 0,1,2,3 = 1.5.
-        let c = bilinear(&Checker, 0, [0.5, 0.5], WrapMode::ClampToEdge, WrapMode::ClampToEdge, [0.0; 4]);
+        let c = bilinear(
+            &Checker,
+            0,
+            [0.5, 0.5],
+            WrapMode::ClampToEdge,
+            WrapMode::ClampToEdge,
+            [0.0; 4],
+        );
         assert!((c[0] - 1.5).abs() < 1.0e-6, "{c:?}");
     }
 
@@ -146,7 +178,14 @@ mod tests {
     fn border_corner_uses_border_color() {
         // uv.x just inside 0 -> left neighbour index -1 -> border under ClampToBorder.
         let border = [9.0, 9.0, 9.0, 9.0];
-        let c = bilinear(&Checker, 0, [0.0, 0.25], WrapMode::ClampToBorder, WrapMode::ClampToEdge, border);
+        let c = bilinear(
+            &Checker,
+            0,
+            [0.0, 0.25],
+            WrapMode::ClampToBorder,
+            WrapMode::ClampToEdge,
+            border,
+        );
         // x0 = floor(-0.5) = -1 (border), x1 = 0 (texel). tx = 0.5.
         // top = lerp(border=9, texel0=0, 0.5) = 4.5 on red.
         assert!((c[0] - 4.5).abs() < 1.0e-6, "{c:?}");
@@ -154,7 +193,14 @@ mod tests {
 
     #[test]
     fn non_finite_uv_is_safe() {
-        let c = bilinear(&Checker, 0, [f32::NAN, f32::INFINITY], WrapMode::Repeat, WrapMode::Repeat, [0.0; 4]);
+        let c = bilinear(
+            &Checker,
+            0,
+            [f32::NAN, f32::INFINITY],
+            WrapMode::Repeat,
+            WrapMode::Repeat,
+            [0.0; 4],
+        );
         assert!(c.iter().all(|v| v.is_finite()));
     }
 }

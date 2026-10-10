@@ -209,7 +209,11 @@ mod tests {
         for (x, y) in [(0.0, 0.0), (1.0, 0.5), (-2.0, 1.5)] {
             let v = Vec3::new(x, y, -3.0);
             let ndc = project_ndc(&modified, v);
-            assert!(ndc.z.abs() < 1e-4, "on-plane z_ndc = {} (expected ~0)", ndc.z);
+            assert!(
+                ndc.z.abs() < 1e-4,
+                "on-plane z_ndc = {} (expected ~0)",
+                ndc.z
+            );
         }
     }
 

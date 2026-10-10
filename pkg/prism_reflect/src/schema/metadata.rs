@@ -43,10 +43,10 @@
 //! ```
 
 use crate::type_data::TypeData;
-use core::any::Any;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::any::Any;
 
 /// A single typed metadata attribute value.
 ///

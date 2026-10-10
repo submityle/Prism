@@ -126,7 +126,7 @@ use alloc::vec::Vec;
 use bevy_math::ops;
 
 use crate::graph::{AudioNode, ProcessIo, RenderContext};
-use crate::math::{Sample, flush_denormal};
+use crate::math::{flush_denormal, Sample};
 use crate::param::{Ramp, Smoothed};
 
 /// Lowest tunable fundamental in hertz. Bounds the pre-allocated delay lines.
@@ -192,7 +192,11 @@ const TURBULENCE_SCALE: Sample = 0.5;
 /// Replaces a non-finite value with `fallback`, otherwise returns the input.
 #[inline]
 fn finite_or(value: Sample, fallback: Sample) -> Sample {
-    if value.is_finite() { value } else { fallback }
+    if value.is_finite() {
+        value
+    } else {
+        fallback
+    }
 }
 
 /// Clamps `frequency_hz` to `[MIN_FREQUENCY_HZ, sample_rate / 2]`, falling back
@@ -212,7 +216,9 @@ struct Xorshift64 {
 impl Xorshift64 {
     #[inline]
     fn new(seed: u64) -> Self {
-        Self { state: seed_to_state(seed) }
+        Self {
+            state: seed_to_state(seed),
+        }
     }
 
     #[inline]
@@ -235,7 +241,11 @@ fn seed_to_state(seed: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^= z >> 31;
-    if z == 0 { 0x9E37_79B9_7F4A_7C15 } else { z }
+    if z == 0 {
+        0x9E37_79B9_7F4A_7C15
+    } else {
+        z
+    }
 }
 
 /// A linear-interpolating waveguide delay line (a travelling bore/jet segment).
@@ -247,7 +257,10 @@ struct WaveguideDelay {
 
 impl WaveguideDelay {
     fn new(capacity: usize) -> Self {
-        Self { buf: vec![0.0; capacity.max(2)], write: 0 }
+        Self {
+            buf: vec![0.0; capacity.max(2)],
+            write: 0,
+        }
     }
 
     #[inline]
@@ -390,10 +403,12 @@ impl AirJetFluteNode {
         let capacity = max_delay_frames + 4;
 
         let frequency_hz = sanitize_frequency(params.frequency_hz, sr);
-        let jet_ratio = finite_or(params.jet_ratio, DEFAULT_JET_RATIO).clamp(MIN_JET_RATIO, MAX_JET_RATIO);
+        let jet_ratio =
+            finite_or(params.jet_ratio, DEFAULT_JET_RATIO).clamp(MIN_JET_RATIO, MAX_JET_RATIO);
         let brightness = finite_or(params.brightness, DEFAULT_BRIGHTNESS).clamp(0.0, 1.0);
         let breath_noise = finite_or(params.breath_noise, DEFAULT_BREATH_NOISE).clamp(0.0, 1.0);
-        let breath_pressure = finite_or(params.breath_pressure, DEFAULT_BREATH_PRESSURE).clamp(0.0, 1.0);
+        let breath_pressure =
+            finite_or(params.breath_pressure, DEFAULT_BREATH_PRESSURE).clamp(0.0, 1.0);
         let amplitude = finite_or(params.amplitude, DEFAULT_AMPLITUDE);
 
         let mut node = Self {

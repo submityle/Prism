@@ -467,8 +467,7 @@ mod tests {
 
     #[test]
     fn not_silent_with_default_params() {
-        let mut node =
-            RosslerAttractorNode::new(DEFAULT_RATE_HZ, DEFAULT_C, DEFAULT_AMPLITUDE);
+        let mut node = RosslerAttractorNode::new(DEFAULT_RATE_HZ, DEFAULT_C, DEFAULT_AMPLITUDE);
         let out = render(&mut node, SR, 16_384);
         assert!(energy(&out) > 1.0, "energy={}", energy(&out));
     }

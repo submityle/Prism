@@ -39,7 +39,11 @@ const CHANNEL_OFFSETS: [u32; 3] = [0x0000_0000, 0x51ED_270B, 0xA341_316C];
 #[inline]
 #[must_use]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Composites film grain and sensor noise onto a display-referred colour.
@@ -185,6 +189,9 @@ mod tests {
         };
         let low = avg_dev(200.0);
         let high = avg_dev(6400.0);
-        assert!(high > low, "expected more noise at high ISO: low={low} high={high}");
+        assert!(
+            high > low,
+            "expected more noise at high ISO: low={low} high={high}"
+        );
     }
 }

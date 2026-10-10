@@ -122,7 +122,9 @@ impl<T> SpinLock<T> {
 
     /// Consume the lock and return the protected value.
     pub fn into_inner(self) -> T {
-        self.inner.into_inner().unwrap_or_else(PoisonRecover::recover)
+        self.inner
+            .into_inner()
+            .unwrap_or_else(PoisonRecover::recover)
     }
 
     /// Borrow the protected value mutably without locking (statically unique).

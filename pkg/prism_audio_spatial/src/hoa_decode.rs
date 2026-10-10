@@ -46,11 +46,11 @@
 //! across targets and can be golden-compared sample-for-sample. This is
 //! enforced by the workspace lints.
 
-use bevy_math::{Vec3, ops};
+use bevy_math::{ops, Vec3};
 
 use prism_audio_core::math::Sample;
 
-use crate::hoa::{MAX_HOA_CHANNELS, MAX_HOA_ORDER, acn_index, encode_hoa, hoa_channel_count};
+use crate::hoa::{acn_index, encode_hoa, hoa_channel_count, MAX_HOA_CHANNELS, MAX_HOA_ORDER};
 
 /// The number of per-order max-rE weights, `MAX_HOA_ORDER + 1`.
 pub const MAX_ORDER_WEIGHTS: usize = MAX_HOA_ORDER + 1;
@@ -145,7 +145,10 @@ pub fn max_re_gains(order: usize) -> [Sample; MAX_ORDER_WEIGHTS] {
 /// `(2n + 1)` term makes the projection decode reproduce the physical N3D max-rE
 /// energy-vector optimisation, so the high band genuinely lengthens the energy
 /// vector relative to the basic (low) band. Channels beyond `order` stay `0`.
-fn per_channel_gains(order: usize, weights: &[Sample; MAX_ORDER_WEIGHTS]) -> [Sample; MAX_HOA_CHANNELS] {
+fn per_channel_gains(
+    order: usize,
+    weights: &[Sample; MAX_ORDER_WEIGHTS],
+) -> [Sample; MAX_HOA_CHANNELS] {
     let order = order.min(MAX_HOA_ORDER);
     let mut gains = [0.0 as Sample; MAX_HOA_CHANNELS];
     for n in 0..=order {
@@ -183,7 +186,10 @@ impl SpeakerLayout {
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
-        Self { directions: [Vec3::ZERO; MAX_DECODE_SPEAKERS], count: 0 }
+        Self {
+            directions: [Vec3::ZERO; MAX_DECODE_SPEAKERS],
+            count: 0,
+        }
     }
 
     /// Builds a layout from a slice of directions, normalising each and keeping
@@ -429,7 +435,12 @@ mod tests {
         layout
     }
 
-    fn energy_vector_radius(decoder: &DualBandDecoder, coeffs: &[Sample], layout: &SpeakerLayout, band: DecodeBand) -> Sample {
+    fn energy_vector_radius(
+        decoder: &DualBandDecoder,
+        coeffs: &[Sample],
+        layout: &SpeakerLayout,
+        band: DecodeBand,
+    ) -> Sample {
         let dirs = layout.directions();
         let mut num = Vec3::ZERO;
         let mut den = 0.0 as Sample;
@@ -450,7 +461,11 @@ mod tests {
         let decoder = DualBandDecoder::new(0);
         let coeffs = [1.0 as Sample; 1];
         // Any speaker direction decodes the omni component identically.
-        for dir in [Vec3::new(0.0, 0.0, -1.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)] {
+        for dir in [
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ] {
             assert!(approx(decoder.decode_low(&coeffs, dir), 1.0));
             assert!(approx(decoder.decode_high(&coeffs, dir), 1.0));
         }
@@ -463,7 +478,10 @@ mod tests {
             let dir = Vec3::new(-0.3, 0.4, -0.866).normalize();
             let mut coeffs = [0.0 as Sample; MAX_HOA_CHANNELS];
             encode_hoa(dir, order, &mut coeffs);
-            assert!(approx(decoder.decode_low(&coeffs, dir), 1.0), "order {order}");
+            assert!(
+                approx(decoder.decode_low(&coeffs, dir), 1.0),
+                "order {order}"
+            );
         }
     }
 
@@ -476,7 +494,10 @@ mod tests {
             let dir = Vec3::new(0.5, -0.2, -0.84).normalize();
             let mut coeffs = [0.0 as Sample; MAX_HOA_CHANNELS];
             encode_hoa(dir, order, &mut coeffs);
-            assert!(approx(decoder.decode_high(&coeffs, dir), 1.0), "order {order}");
+            assert!(
+                approx(decoder.decode_high(&coeffs, dir), 1.0),
+                "order {order}"
+            );
         }
     }
 
@@ -486,7 +507,11 @@ mod tests {
             let g = max_re_gains(order);
             assert!(approx(g[0], 1.0), "order {order}: g0 = {}", g[0]);
             for n in 1..=order {
-                assert!(g[n] < g[n - 1], "order {order}: g[{n}] not below g[{}]", n - 1);
+                assert!(
+                    g[n] < g[n - 1],
+                    "order {order}: g[{n}] not below g[{}]",
+                    n - 1
+                );
                 assert!(g[n] > 0.0, "order {order}: g[{n}] should stay positive");
             }
             // Degrees beyond the order are untouched (zero).
@@ -501,7 +526,10 @@ mod tests {
         let mut prev = max_re_radius(1);
         for order in 2..=MAX_HOA_ORDER {
             let r = max_re_radius(order);
-            assert!(r > prev, "order {order}: r_E did not increase ({r} <= {prev})");
+            assert!(
+                r > prev,
+                "order {order}: r_E did not increase ({r} <= {prev})"
+            );
             prev = r;
         }
     }

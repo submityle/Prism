@@ -93,7 +93,10 @@ fn open_resolve_call_and_unload() {
     // Typed, called via the ABI.
     // SAFETY: the symbols are defined with exactly these C signatures in
     // `C_SOURCE`, and the library outlives both `Symbol`s.
-    #[expect(unsafe_code, reason = "calling resolved C symbols with their known ABI signatures")]
+    #[expect(
+        unsafe_code,
+        reason = "calling resolved C symbols with their known ABI signatures"
+    )]
     unsafe {
         let answer = lib
             .get::<extern "C" fn() -> i32>("prism_test_answer")
@@ -145,11 +148,18 @@ fn hot_reload_copies_versions_and_cleans_up() {
         version_a = a.version();
         version_b = b.version();
         assert_ne!(version_a, version_b, "each load gets a distinct version");
-        assert_eq!(a.path(), dylib.as_path(), "path() reports the origin, not the temp copy");
+        assert_eq!(
+            a.path(),
+            dylib.as_path(),
+            "path() reports the origin, not the temp copy"
+        );
 
         // The copy is loadable and callable just like the original.
         // SAFETY: signature matches `C_SOURCE`; `a` outlives the symbol.
-        #[expect(unsafe_code, reason = "calling a resolved C symbol with its known ABI signature")]
+        #[expect(
+            unsafe_code,
+            reason = "calling a resolved C symbol with its known ABI signature"
+        )]
         unsafe {
             let answer = a
                 .get::<extern "C" fn() -> i32>("prism_test_answer")

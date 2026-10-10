@@ -32,31 +32,50 @@ impl Default for DAffine3 {
 
 impl DAffine3 {
     /// The identity transform.
-    pub const IDENTITY: Self = Self { matrix3: DMat3::IDENTITY, translation: DVec3::ZERO };
+    pub const IDENTITY: Self = Self {
+        matrix3: DMat3::IDENTITY,
+        translation: DVec3::ZERO,
+    };
 
     /// Build from a linear part and translation.
     #[inline]
     pub const fn from_mat3_translation(matrix3: DMat3, translation: DVec3) -> Self {
-        Self { matrix3, translation }
+        Self {
+            matrix3,
+            translation,
+        }
     }
     /// Pure translation.
     #[inline]
     pub const fn from_translation(t: DVec3) -> Self {
-        Self { matrix3: DMat3::IDENTITY, translation: t }
+        Self {
+            matrix3: DMat3::IDENTITY,
+            translation: t,
+        }
     }
     /// Pure rotation.
     #[inline]
     pub fn from_quat(q: DQuat) -> Self {
-        Self { matrix3: DMat3::from_quat(q), translation: DVec3::ZERO }
+        Self {
+            matrix3: DMat3::from_quat(q),
+            translation: DVec3::ZERO,
+        }
     }
     /// Pure non-uniform scale.
     #[inline]
     pub fn from_scale(s: DVec3) -> Self {
-        Self { matrix3: DMat3::from_scale(s), translation: DVec3::ZERO }
+        Self {
+            matrix3: DMat3::from_scale(s),
+            translation: DVec3::ZERO,
+        }
     }
     /// Compose scale, then rotation, then translation.
     #[inline]
-    pub fn from_scale_rotation_translation(scale: DVec3, rotation: DQuat, translation: DVec3) -> Self {
+    pub fn from_scale_rotation_translation(
+        scale: DVec3,
+        rotation: DQuat,
+        translation: DVec3,
+    ) -> Self {
         let r = DMat3::from_quat(rotation);
         Self {
             matrix3: DMat3::from_cols(r.x_axis * scale.x, r.y_axis * scale.y, r.z_axis * scale.z),
@@ -77,7 +96,10 @@ impl DAffine3 {
     #[inline]
     pub fn inverse(self) -> Self {
         let m = self.matrix3.inverse();
-        Self { matrix3: m, translation: -m.mul_vec3(self.translation) }
+        Self {
+            matrix3: m,
+            translation: -m.mul_vec3(self.translation),
+        }
     }
     /// Convert to an equivalent [`DMat4`].
     #[inline]
@@ -157,6 +179,10 @@ impl Mul<DVec3> for DAffine3 {
 
 impl core::fmt::Debug for DAffine3 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "DAffine3 {{ matrix3: {:?}, translation: {:?} }}", self.matrix3, self.translation)
+        write!(
+            f,
+            "DAffine3 {{ matrix3: {:?}, translation: {:?} }}",
+            self.matrix3, self.translation
+        )
     }
 }

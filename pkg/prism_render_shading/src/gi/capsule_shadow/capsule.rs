@@ -124,12 +124,8 @@ pub fn closest_point_on_segment_to_line(a: Vec3, b: Vec3, origin: Vec3, dir: Vec
 /// capsule radius.
 #[inline]
 pub fn capsule_shadow_sphere(capsule: Capsule, receiver: Vec3, light_position: Vec3) -> Sphere {
-    let center = closest_point_on_segment_to_line(
-        capsule.a,
-        capsule.b,
-        receiver,
-        light_position - receiver,
-    );
+    let center =
+        closest_point_on_segment_to_line(capsule.a, capsule.b, receiver, light_position - receiver);
     Sphere::new(center, capsule.radius)
 }
 
@@ -218,7 +214,10 @@ mod tests {
     #[test]
     fn closest_point_degenerate_segment_returns_a() {
         let a = Vec3::new(1.0, 2.0, 3.0);
-        assert!(close(closest_point_on_segment(Vec3::new(9.0, 9.0, 9.0), a, a), a));
+        assert!(close(
+            closest_point_on_segment(Vec3::new(9.0, 9.0, 9.0), a, a),
+            a
+        ));
     }
 
     #[test]
@@ -260,7 +259,10 @@ mod tests {
         let sphere = Sphere::new(p, 0.8);
         let via_capsule = capsule_soft_shadow(Vec3::ZERO, light, capsule);
         let via_sphere = sphere_soft_shadow(Vec3::ZERO, light, sphere);
-        assert!((via_capsule - via_sphere).abs() < TOL, "{via_capsule} {via_sphere}");
+        assert!(
+            (via_capsule - via_sphere).abs() < TOL,
+            "{via_capsule} {via_sphere}"
+        );
     }
 
     #[test]
@@ -270,7 +272,10 @@ mod tests {
         let sphere = Sphere::new(p, 1.0);
         let via_capsule = capsule_ambient_occlusion(Vec3::ZERO, Vec3::Y, capsule);
         let via_sphere = sphere_ambient_occlusion(Vec3::ZERO, Vec3::Y, sphere);
-        assert!((via_capsule - via_sphere).abs() < TOL, "{via_capsule} {via_sphere}");
+        assert!(
+            (via_capsule - via_sphere).abs() < TOL,
+            "{via_capsule} {via_sphere}"
+        );
     }
 
     #[test]
@@ -278,11 +283,7 @@ mod tests {
         // A long vertical capsule in front of the receiver; the shadow sphere
         // should sit near the shadow ray height, giving a real occlusion.
         let light = DiskLight::new(Vec3::new(0.0, 0.0, 15.0), 0.5);
-        let capsule = Capsule::new(
-            Vec3::new(0.0, -5.0, 3.0),
-            Vec3::new(0.0, 5.0, 3.0),
-            0.7,
-        );
+        let capsule = Capsule::new(Vec3::new(0.0, -5.0, 3.0), Vec3::new(0.0, 5.0, 3.0), 0.7);
         let occ = capsule_soft_shadow(Vec3::ZERO, light, capsule);
         assert!(occ > 0.0 && occ <= 1.0, "occ = {occ}");
     }
@@ -290,11 +291,7 @@ mod tests {
     #[test]
     fn capsule_shadow_in_unit_range() {
         let light = DiskLight::new(Vec3::new(1.0, 1.0, 10.0), 0.6);
-        let capsule = Capsule::new(
-            Vec3::new(-1.0, -2.0, 3.0),
-            Vec3::new(1.0, 2.0, 4.0),
-            0.5,
-        );
+        let capsule = Capsule::new(Vec3::new(-1.0, -2.0, 3.0), Vec3::new(1.0, 2.0, 4.0), 0.5);
         for z in [1.0f32, 2.0, 5.0] {
             let occ = capsule_soft_shadow(Vec3::new(0.0, 0.0, z), light, capsule);
             assert!((0.0..=1.0).contains(&occ) && occ.is_finite(), "occ = {occ}");
@@ -303,11 +300,7 @@ mod tests {
 
     #[test]
     fn capsule_ao_in_unit_range() {
-        let capsule = Capsule::new(
-            Vec3::new(-2.0, 2.0, 0.0),
-            Vec3::new(2.0, 3.0, 0.0),
-            0.9,
-        );
+        let capsule = Capsule::new(Vec3::new(-2.0, 2.0, 0.0), Vec3::new(2.0, 3.0, 0.0), 0.9);
         let ao = capsule_ambient_occlusion(Vec3::ZERO, Vec3::Y, capsule);
         assert!((0.0..=1.0).contains(&ao) && ao.is_finite(), "ao = {ao}");
     }

@@ -71,8 +71,7 @@ fn projection() -> LodProjection {
 /// refined through; `B` fits and is drawn; the two leaves under `A` are the
 /// finest available and are drawn. Expected cut = {2, 3, 4}.
 fn mixed_hierarchy() -> ClusterHierarchy {
-    let root =
-        ClusterNode::interior(bounds_at(100.0, 8.0), 8.0, GeometryPageKey::new(0, 0), 1, 2);
+    let root = ClusterNode::interior(bounds_at(100.0, 8.0), 8.0, GeometryPageKey::new(0, 0), 1, 2);
     let a = ClusterNode::interior(bounds_at(100.0, 4.0), 2.0, GeometryPageKey::new(0, 1), 3, 2);
     let b = ClusterNode::leaf(bounds_at(100.0, 1.0), 0.05, GeometryPageKey::new(0, 2));
     let leaf_l = ClusterNode::leaf(bounds_at(100.0, 2.0), 0.5, GeometryPageKey::new(0, 3));
@@ -189,12 +188,18 @@ fn gpu_cut_rejects_malformed_hierarchy() {
     };
     // Child range runs past the end of the node array: golden and twin both
     // degrade to an empty cut rather than reading out of bounds.
-    let bad =
-        ClusterNode::interior(bounds_at(50.0, 8.0), 4.0, GeometryPageKey::new(0, 0), 1, 5);
+    let bad = ClusterNode::interior(bounds_at(50.0, 8.0), 4.0, GeometryPageKey::new(0, 0), 1, 5);
     let h = ClusterHierarchy::new(vec![bad], vec![0]);
     assert!(!h.is_well_formed());
     let selector = GpuCutSelector::new(&ctx);
-    let cut = selector.select_cut(&ctx, [0.0, 0.0, 0.0], &wide_frustum(), projection(), 4.0, &h);
+    let cut = selector.select_cut(
+        &ctx,
+        [0.0, 0.0, 0.0],
+        &wide_frustum(),
+        projection(),
+        4.0,
+        &h,
+    );
     assert!(cut.is_empty(), "a malformed hierarchy yields an empty cut");
 }
 
@@ -205,6 +210,13 @@ fn gpu_cut_empty_hierarchy_draws_nothing() {
     };
     let h = ClusterHierarchy::new(Vec::new(), Vec::new());
     let selector = GpuCutSelector::new(&ctx);
-    let cut = selector.select_cut(&ctx, [0.0, 0.0, 0.0], &wide_frustum(), projection(), 4.0, &h);
+    let cut = selector.select_cut(
+        &ctx,
+        [0.0, 0.0, 0.0],
+        &wide_frustum(),
+        projection(),
+        4.0,
+        &h,
+    );
     assert!(cut.is_empty(), "an empty hierarchy yields an empty cut");
 }

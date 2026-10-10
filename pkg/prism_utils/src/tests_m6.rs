@@ -30,7 +30,10 @@ fn hbitset_insert_contains_remove_over_sparse_domain() {
     assert!(!bs.contains(100_000));
 
     assert!(bs.remove(64));
-    assert!(!bs.remove(64), "removing a clear bit reports nothing removed");
+    assert!(
+        !bs.remove(64),
+        "removing a clear bit reports nothing removed"
+    );
     assert!(!bs.contains(64));
     assert_eq!(bs.count_ones(), marks.len() - 1);
 }
@@ -219,7 +222,11 @@ fn tlsf_allocates_frees_and_recoalesces() {
 fn tlsf_honours_alignment_and_exhaustion() {
     let mut t = TlsfAllocator::new(8192);
     let p = t.allocate_aligned(64, 256).expect("256-aligned block");
-    assert_eq!(p % 256, 0, "returned offset must honour the requested align");
+    assert_eq!(
+        p % 256,
+        0,
+        "returned offset must honour the requested align"
+    );
 
     assert!(t.allocate(0).is_none());
     // A request larger than the region fails cleanly.

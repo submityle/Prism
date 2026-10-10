@@ -251,8 +251,10 @@ impl AnalogSnareParams {
             finite_or(self.tone_decay_s, d.tone_decay_s).clamp(MIN_TONE_DECAY_S, MAX_TONE_DECAY_S);
         let noise_decay_s = finite_or(self.noise_decay_s, d.noise_decay_s)
             .clamp(MIN_NOISE_DECAY_S, MAX_NOISE_DECAY_S);
-        let noise_cutoff_hz =
-            clamp_cutoff(finite_or(self.noise_cutoff_hz, d.noise_cutoff_hz), sample_rate);
+        let noise_cutoff_hz = clamp_cutoff(
+            finite_or(self.noise_cutoff_hz, d.noise_cutoff_hz),
+            sample_rate,
+        );
         let noise_q = finite_or(self.noise_q, d.noise_q).clamp(MIN_NOISE_Q, MAX_NOISE_Q);
         let tone_noise_mix = finite_or(self.tone_noise_mix, d.tone_noise_mix).clamp(0.0, 1.0);
         let drive = finite_or(self.drive, d.drive).clamp(MIN_DRIVE, MAX_DRIVE);
@@ -429,8 +431,10 @@ impl AnalogSnareNode {
 
     /// Sets the band-pass centre for the noise layer, clamped to its range.
     pub fn set_noise_cutoff_hz(&mut self, noise_cutoff_hz: Sample) {
-        self.noise_cutoff_hz =
-            clamp_cutoff(finite_or(noise_cutoff_hz, self.noise_cutoff_hz), self.sample_rate);
+        self.noise_cutoff_hz = clamp_cutoff(
+            finite_or(noise_cutoff_hz, self.noise_cutoff_hz),
+            self.sample_rate,
+        );
         self.recompute();
     }
 
@@ -646,7 +650,9 @@ mod tests {
         assert!(d.frequency_hz >= MIN_FREQUENCY_HZ && d.frequency_hz <= MAX_FREQUENCY_HZ);
         assert!(d.tone_decay_s >= MIN_TONE_DECAY_S && d.tone_decay_s <= MAX_TONE_DECAY_S);
         assert!(d.noise_decay_s >= MIN_NOISE_DECAY_S && d.noise_decay_s <= MAX_NOISE_DECAY_S);
-        assert!(d.noise_cutoff_hz >= MIN_NOISE_CUTOFF_HZ && d.noise_cutoff_hz <= MAX_NOISE_CUTOFF_HZ);
+        assert!(
+            d.noise_cutoff_hz >= MIN_NOISE_CUTOFF_HZ && d.noise_cutoff_hz <= MAX_NOISE_CUTOFF_HZ
+        );
         assert!(d.noise_q >= MIN_NOISE_Q && d.noise_q <= MAX_NOISE_Q);
         assert!(d.tone_noise_mix >= 0.0 && d.tone_noise_mix <= 1.0);
         assert!(d.drive >= MIN_DRIVE && d.drive <= MAX_DRIVE);
@@ -846,7 +852,11 @@ mod tests {
         assert!(peak(&quiet) < 1e-2, "quiet peak={}", peak(&quiet));
         node.trigger(1.0);
         let loud = render(&mut node, SR, 256);
-        assert!(peak(&loud) > peak(&quiet) * 10.0, "loud peak={}", peak(&loud));
+        assert!(
+            peak(&loud) > peak(&quiet) * 10.0,
+            "loud peak={}",
+            peak(&loud)
+        );
     }
 
     #[test]
@@ -957,7 +967,10 @@ mod tests {
         let ol = render(&mut long, SR, 24_000);
         let tail_short: Sample = os.channel(0)[12_000..].iter().map(|s| s * s).sum();
         let tail_long: Sample = ol.channel(0)[12_000..].iter().map(|s| s * s).sum();
-        assert!(tail_long > tail_short * 10.0, "short={tail_short} long={tail_long}");
+        assert!(
+            tail_long > tail_short * 10.0,
+            "short={tail_short} long={tail_long}"
+        );
     }
 
     #[test]

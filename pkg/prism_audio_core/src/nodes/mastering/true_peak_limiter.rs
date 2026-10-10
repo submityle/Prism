@@ -239,10 +239,9 @@ impl TruePeakLimiter {
 
         // Look-ahead length (host frames). At least one frame so the detector
         // always leads the output.
-        let lookahead = (bevy_math::ops::round(
-            params.lookahead_ms.max(0.0) * (sr as Sample) * 0.001,
-        ) as usize)
-            .max(1);
+        let lookahead =
+            (bevy_math::ops::round(params.lookahead_ms.max(0.0) * (sr as Sample) * 0.001) as usize)
+                .max(1);
         // The oversampler's own group delay eats into the usable look-ahead, so
         // the signal is delayed by both to keep the detector ahead of output.
         let delay_len = lookahead + os_latency;
@@ -321,10 +320,7 @@ impl TruePeakLimiter {
     /// stereo/surround image stays coherent, driven by the loudest channel's
     /// estimated inter-sample peak.
     pub fn process(&mut self, input: &AudioBuffer, output: &mut AudioBuffer) {
-        let channels = output
-            .channels()
-            .min(input.channels())
-            .min(self.channels);
+        let channels = output.channels().min(input.channels()).min(self.channels);
         let frames = output.active_frames().min(input.active_frames());
         if frames == 0 || channels == 0 {
             return;
@@ -599,7 +595,11 @@ mod tests {
         let out_a = run_mono(&mut a, &input);
         let out_b = run_mono(&mut b, &input);
         for i in 0..n {
-            assert_eq!(out_a.channel(0)[i], out_b.channel(0)[i], "nondeterministic at {i}");
+            assert_eq!(
+                out_a.channel(0)[i],
+                out_b.channel(0)[i],
+                "nondeterministic at {i}"
+            );
         }
     }
 
@@ -653,8 +653,7 @@ mod tests {
     fn reports_lookahead_latency() {
         let node = TruePeakLimiterNode::new(SR, 2, TruePeakLimiterParams::default());
         let os = Oversampler::new(DEFAULT_OVERSAMPLE_FACTOR, DEFAULT_TAPS_PER_PHASE);
-        let lookahead =
-            (ops::round(DEFAULT_LOOKAHEAD_MS * SR as Sample * 0.001) as usize).max(1);
+        let lookahead = (ops::round(DEFAULT_LOOKAHEAD_MS * SR as Sample * 0.001) as usize).max(1);
         let expected = (lookahead + os.latency_frames() as usize) as u32;
         assert_eq!(node.latency_frames(), expected);
     }
@@ -680,7 +679,11 @@ mod tests {
         node.process(&ctx(n), &mut io);
         out = outputs.into_iter().next().unwrap();
         for i in 0..n {
-            assert_eq!(out.channel(0)[i], out.channel(1)[i], "image not coherent at {i}");
+            assert_eq!(
+                out.channel(0)[i],
+                out.channel(1)[i],
+                "image not coherent at {i}"
+            );
         }
     }
 

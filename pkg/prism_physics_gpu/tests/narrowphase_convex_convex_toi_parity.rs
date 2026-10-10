@@ -137,7 +137,9 @@ fn gpu_convex_convex_toi_linear_sweeps_match_cpu_golden() {
     // Every body is a sharp box: zero convex radius across the batch.
     let radii = [0.0_f32; 6];
 
-    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 2.0, 0.0);
+    run_parity(
+        &ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 2.0, 0.0,
+    );
 }
 
 #[test]
@@ -169,7 +171,9 @@ fn gpu_convex_convex_toi_rotating_sweep_matches_cpu_golden() {
     let pairs = [ConvexConvexSweepPair::new(0, 1)];
     let radii = [0.0_f32; 2];
 
-    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 2.0, 0.0);
+    run_parity(
+        &ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 2.0, 0.0,
+    );
 }
 
 #[test]
@@ -201,7 +205,9 @@ fn gpu_convex_convex_toi_speculative_target_matches_cpu_golden() {
     let pairs = [ConvexConvexSweepPair::new(0, 1)];
     let radii = [0.0_f32; 2];
 
-    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 3.0, 0.25);
+    run_parity(
+        &ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 3.0, 0.25,
+    );
 }
 
 #[test]
@@ -222,7 +228,9 @@ fn gpu_convex_convex_toi_empty_batch_matches_cpu_golden() {
     let pairs: [ConvexConvexSweepPair; 0] = [];
     let radii = [0.0_f32; 1];
 
-    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 1.0, 0.0);
+    run_parity(
+        &ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 1.0, 0.0,
+    );
 }
 
 #[test]
@@ -262,7 +270,9 @@ fn gpu_convex_convex_toi_rounded_spheres_match_cpu_golden() {
         ConvexConvexSweepPair::new(0, 2),
     ];
 
-    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 3.0, 0.0);
+    run_parity(
+        &ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 3.0, 0.0,
+    );
 }
 
 #[test]
@@ -305,5 +315,7 @@ fn gpu_convex_convex_toi_rounded_mixed_shapes_match_cpu_golden() {
         ConvexConvexSweepPair::new(2, 3),
     ];
 
-    run_parity(&ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 2.0, 0.0);
+    run_parity(
+        &ctx, &gpu, &hulls, &poses, &motions, &radii, &pairs, 2.0, 0.0,
+    );
 }

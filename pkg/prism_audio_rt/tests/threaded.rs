@@ -12,7 +12,7 @@ use std::time::Duration;
 use prism_audio_core::buffer::{AudioBuffer, ChannelLayout};
 use prism_audio_core::graph::{AudioGraph, AudioNode, PortRef, ProcessIo, RenderContext};
 use prism_audio_core::voice::{VoiceGroup, VoiceRequest};
-use prism_audio_rt::{AudioCommand, AudioRuntimeConfig, runtime};
+use prism_audio_rt::{runtime, AudioCommand, AudioRuntimeConfig};
 
 /// A node that writes a constant `1.0` to its single stereo output.
 struct Dc;
@@ -96,6 +96,9 @@ fn commands_graphs_and_telemetry_cross_threads() {
 
     assert!(blocks > 0, "audio thread rendered at least one block");
     assert!(saw_voice, "telemetry should report the spawned voice");
-    assert!(saw_signal, "the DC graph should produce non-silent master output");
+    assert!(
+        saw_signal,
+        "the DC graph should produce non-silent master output"
+    );
     assert!(reclaimed >= 1, "collector should reclaim the retired graph");
 }

@@ -292,8 +292,18 @@ mod tests {
         for &n in &normals {
             for &s in &[0.5f32, 1.0, 4.0, 16.0] {
                 let w = triplanar_weights(n, s);
-                assert!((w.sum() - 1.0).abs() < 1e-5, "sum {} for n {:?} s {}", w.sum(), n, s);
-                assert!(w.x >= 0.0 && w.y >= 0.0 && w.z >= 0.0, "negative weight {:?}", w);
+                assert!(
+                    (w.sum() - 1.0).abs() < 1e-5,
+                    "sum {} for n {:?} s {}",
+                    w.sum(),
+                    n,
+                    s
+                );
+                assert!(
+                    w.x >= 0.0 && w.y >= 0.0 && w.z >= 0.0,
+                    "negative weight {:?}",
+                    w
+                );
             }
         }
     }
@@ -319,10 +329,19 @@ mod tests {
             let w = triplanar_weights(n, s);
             // Y is the dominant axis here.
             assert!(w.y >= w.x && w.y >= w.z, "Y should dominate: {:?}", w);
-            assert!(w.y >= prev - 1e-6, "Y weight must not decrease: {} -> {}", prev, w.y);
+            assert!(
+                w.y >= prev - 1e-6,
+                "Y weight must not decrease: {} -> {}",
+                prev,
+                w.y
+            );
             prev = w.y;
         }
-        assert!(prev > 0.9, "high sharpness should nearly saturate: {}", prev);
+        assert!(
+            prev > 0.9,
+            "high sharpness should nearly saturate: {}",
+            prev
+        );
     }
 
     /// Projected UVs follow the documented component ordering.

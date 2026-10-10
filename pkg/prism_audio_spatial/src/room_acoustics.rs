@@ -247,9 +247,8 @@ impl RoomAcoustics {
         let area_z = lx * ly;
         let a = &room.wall_absorption;
         let surface_area = 2.0 * (area_x + area_y + area_z);
-        let total_absorption = area_x * (a[0] + a[1])
-            + area_y * (a[2] + a[3])
-            + area_z * (a[4] + a[5]);
+        let total_absorption =
+            area_x * (a[0] + a[1]) + area_y * (a[2] + a[3]) + area_z * (a[4] + a[5]);
         Self {
             volume: volume.max(0.0),
             surface_area: surface_area.max(0.0),
@@ -398,7 +397,10 @@ mod tests {
             let acoustics = RoomAcoustics::from_shoebox(&cube_shoebox(8.0, alpha));
             let sab = acoustics.rt60_sabine();
             let eyr = acoustics.rt60_eyring();
-            assert!(eyr <= sab + 1e-4, "alpha={alpha}: eyring {eyr} > sabine {sab}");
+            assert!(
+                eyr <= sab + 1e-4,
+                "alpha={alpha}: eyring {eyr} > sabine {sab}"
+            );
         }
     }
 

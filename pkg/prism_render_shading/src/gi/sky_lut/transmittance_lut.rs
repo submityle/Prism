@@ -148,9 +148,21 @@ fn clamp01(value: f32) -> f32 {
 #[inline]
 fn sanitize_rgb(rgb: Vec3) -> Vec3 {
     Vec3::new(
-        if rgb.x.is_finite() { rgb.x.clamp(0.0, 1.0) } else { 0.0 },
-        if rgb.y.is_finite() { rgb.y.clamp(0.0, 1.0) } else { 0.0 },
-        if rgb.z.is_finite() { rgb.z.clamp(0.0, 1.0) } else { 0.0 },
+        if rgb.x.is_finite() {
+            rgb.x.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        if rgb.y.is_finite() {
+            rgb.y.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        if rgb.z.is_finite() {
+            rgb.z.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
     )
 }
 
@@ -209,8 +221,16 @@ pub fn r_mu_to_uv(atmosphere: &Atmosphere, r: f32, mu: f32) -> (f32, f32) {
     if !(h > EPSILON) {
         return (0.0, 0.0);
     }
-    let r = if r.is_finite() { r.clamp(bottom, top) } else { bottom };
-    let mu = if mu.is_finite() { mu.clamp(-1.0, 1.0) } else { 1.0 };
+    let r = if r.is_finite() {
+        r.clamp(bottom, top)
+    } else {
+        bottom
+    };
+    let mu = if mu.is_finite() {
+        mu.clamp(-1.0, 1.0)
+    } else {
+        1.0
+    };
     let rho = (r * r - bottom * bottom).max(0.0).sqrt();
     // Distance to the top shell: positive root of d² + 2 r mu d + (r² - top²) = 0.
     let disc = (r * r * (mu * mu - 1.0) + top * top).max(0.0);
@@ -321,7 +341,10 @@ mod tests {
                 let u = (x as f32 + 0.5) / 8.0;
                 let v = (y as f32 + 0.5) / 8.0;
                 let (r, mu) = uv_to_r_mu(&a, u, v);
-                assert!(r >= a.bottom_radius - 1e-3 && r <= a.top_radius + 1e-3, "r={r}");
+                assert!(
+                    r >= a.bottom_radius - 1e-3 && r <= a.top_radius + 1e-3,
+                    "r={r}"
+                );
                 assert!((-1.0..=1.0).contains(&mu), "mu={mu}");
             }
         }
@@ -354,7 +377,10 @@ mod tests {
         for i in 1..=20 {
             let mu = 1.0 - i as f32 * 0.045;
             let t = sample_transmittance_lut(&lut, &a, r, mu);
-            assert!(t.x <= prev.x + 2e-3, "not monotonic at mu={mu}: {t:?} prev {prev:?}");
+            assert!(
+                t.x <= prev.x + 2e-3,
+                "not monotonic at mu={mu}: {t:?} prev {prev:?}"
+            );
             assert!(t.min_element() >= 0.0 && t.max_element() <= 1.0 + 1e-4);
             prev = t;
         }
@@ -365,7 +391,10 @@ mod tests {
         let a = earth();
         let lut = bake_transmittance_lut(&a, 64, 32, 32);
         let t = sample_transmittance_lut(&lut, &a, a.top_radius, 1.0);
-        assert!(t.min_element() > 0.99, "expected ~unit transmittance: {t:?}");
+        assert!(
+            t.min_element() > 0.99,
+            "expected ~unit transmittance: {t:?}"
+        );
     }
 
     #[test]
@@ -373,7 +402,10 @@ mod tests {
         let a = earth();
         // Empty table returns full transmittance.
         let empty = bake_transmittance_lut(&a, 0, 0, 16);
-        assert_eq!(sample_transmittance_lut(&empty, &a, a.bottom_radius, 0.5), Vec3::ONE);
+        assert_eq!(
+            sample_transmittance_lut(&empty, &a, a.bottom_radius, 0.5),
+            Vec3::ONE
+        );
         // Degenerate shell.
         let mut flat = a;
         flat.top_radius = flat.bottom_radius;

@@ -217,14 +217,7 @@ fn split_two(
 
 /// Triangulates the counter-clockwise quad `[a, b, c, d]` along its shorter
 /// diagonal, appending the two triangles to `out`.
-fn emit_quad(
-    a: u32,
-    b: u32,
-    c: u32,
-    d: u32,
-    positions: &[[f32; 3]],
-    out: &mut Vec<[u32; 3]>,
-) {
+fn emit_quad(a: u32, b: u32, c: u32, d: u32, positions: &[[f32; 3]], out: &mut Vec<[u32; 3]>) {
     // Diagonal (a, c) vs (b, d); pick the shorter for better-shaped triangles.
     if edge_len_sq(positions, a, c) <= edge_len_sq(positions, b, d) {
         out.push([a, b, c]);
@@ -237,7 +230,11 @@ fn emit_quad(
 
 /// Returns the sorted `(min, max)` endpoint pair used to key a shared edge.
 fn sorted_pair(a: u32, b: u32) -> (u32, u32) {
-    if a < b { (a, b) } else { (b, a) }
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
 }
 
 /// Squared length of the edge between vertices `a` and `b`.

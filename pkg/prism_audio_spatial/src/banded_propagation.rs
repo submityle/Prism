@@ -348,7 +348,10 @@ mod tests {
         };
         assert!(probe(100.0) < 0.1, "low tone rejected by mid-only colour");
         assert!(probe(2_000.0) > 0.85, "mid tone kept by mid-only colour");
-        assert!(probe(14_000.0) < 0.1, "high tone rejected by mid-only colour");
+        assert!(
+            probe(14_000.0) < 0.1,
+            "high tone rejected by mid-only colour"
+        );
     }
 
     #[test]
@@ -495,7 +498,10 @@ mod tests {
         let low_ratio = tail_rms(&output, 0, skip) / tail_rms(&input, 0, skip);
         let high_ratio = tail_rms(&output, 1, skip) / tail_rms(&input, 1, skip);
         assert!(low_ratio > 0.9, "left low tone kept (ratio {low_ratio})");
-        assert!(high_ratio < 0.05, "right high tone rejected (ratio {high_ratio})");
+        assert!(
+            high_ratio < 0.05,
+            "right high tone rejected (ratio {high_ratio})"
+        );
     }
 
     #[test]
@@ -521,7 +527,10 @@ mod tests {
         node.process(&ctx, &mut io);
 
         for (a, b) in direct_out.channel(0).iter().zip(outputs[0].channel(0)) {
-            assert!((a - b).abs() < 1.0e-9, "AudioNode path must match process_block");
+            assert!(
+                (a - b).abs() < 1.0e-9,
+                "AudioNode path must match process_block"
+            );
         }
     }
 

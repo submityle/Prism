@@ -244,7 +244,10 @@ mod tests {
         let cast = SceneCapsuleCast::new(Vec3::ZERO, Vec3::X, Vec3::Y, 1.0, 0.5, 20.0);
         let brute = capsule_cast(&targets, &cast);
         let bvh = capsule_cast_bvh(&targets, &cast);
-        assert_eq!(brute, bvh, "BVH capsule cast must equal brute force exactly");
+        assert_eq!(
+            brute, bvh,
+            "BVH capsule cast must equal brute force exactly"
+        );
         let hit = bvh.expect("the capsule touches the first box");
         assert_eq!(hit.target, 0, "the nearest box is struck first");
         assert!(
@@ -360,7 +363,10 @@ mod tests {
         }
         let mut targets = vec![target_at(&hulls[0], Vec3::new(5.0, 0.0, 0.0))];
         for k in 0..40 {
-            targets.push(target_at(&hulls[k + 1], Vec3::new(1.0 + 1.5 * (k as f32), 60.0, 0.0)));
+            targets.push(target_at(
+                &hulls[k + 1],
+                Vec3::new(1.0 + 1.5 * (k as f32), 60.0, 0.0),
+            ));
         }
         let cast = SceneCapsuleCast::new(Vec3::ZERO, Vec3::X, Vec3::Y, 1.0, 0.5, 50.0);
         let brute = capsule_cast(&targets, &cast);

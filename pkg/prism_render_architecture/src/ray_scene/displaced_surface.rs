@@ -136,7 +136,10 @@ impl core::fmt::Display for HeightMapError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::EmptyDimension { width, height } => {
-                write!(f, "height map dimensions must be >= 1, got {width}x{height}")
+                write!(
+                    f,
+                    "height map dimensions must be >= 1, got {width}x{height}"
+                )
             }
             Self::SampleCountMismatch { actual, expected } => {
                 write!(f, "height map has {actual} samples, expected {expected}")
@@ -175,7 +178,11 @@ impl HeightMap {
                 expected,
             });
         }
-        Ok(Self { data, width, height })
+        Ok(Self {
+            data,
+            width,
+            height,
+        })
     }
 
     /// Returns the sample width (count along `u`).
@@ -244,7 +251,11 @@ impl<S: ParametricSurface> DisplacedSurface<S> {
     /// Wraps `base` with a `height` field scaled by `scale`.
     #[must_use]
     pub fn new(base: S, height: HeightMap, scale: f32) -> Self {
-        Self { base, height, scale }
+        Self {
+            base,
+            height,
+            scale,
+        }
     }
 
     /// Borrows the underlying base surface.
@@ -310,12 +321,7 @@ impl<S: ParametricSurface> DisplacedSurface<S> {
             for i in 0..nu {
                 let vid = |ii: usize, jj: usize| (jj * cols + ii) as u32;
                 // (u, v) corner order 0=(0,0), 1=(1,0), 2=(1,1), 3=(0,1).
-                indices.push([
-                    vid(i, j),
-                    vid(i + 1, j),
-                    vid(i + 1, j + 1),
-                    vid(i, j + 1),
-                ]);
+                indices.push([vid(i, j), vid(i + 1, j), vid(i + 1, j + 1), vid(i, j + 1)]);
             }
         }
         IndexedBilinearPatchMesh::new(positions, normals, uvs, indices)
@@ -396,8 +402,16 @@ fn recompute_grid_normals(
             let pu_hi = positions[row * cols + cr];
             let pv_lo = positions[rb * cols + col];
             let pv_hi = positions[rt * cols + col];
-            let tu = [pu_hi[0] - pu_lo[0], pu_hi[1] - pu_lo[1], pu_hi[2] - pu_lo[2]];
-            let tv = [pv_hi[0] - pv_lo[0], pv_hi[1] - pv_lo[1], pv_hi[2] - pv_lo[2]];
+            let tu = [
+                pu_hi[0] - pu_lo[0],
+                pu_hi[1] - pu_lo[1],
+                pu_hi[2] - pu_lo[2],
+            ];
+            let tv = [
+                pv_hi[0] - pv_lo[0],
+                pv_hi[1] - pv_lo[1],
+                pv_hi[2] - pv_lo[2],
+            ];
             let n = [
                 tu[1] * tv[2] - tu[2] * tv[1],
                 tu[2] * tv[0] - tu[0] * tv[2],
@@ -481,11 +495,17 @@ mod tests {
     fn heightmap_rejects_degenerate() {
         assert_eq!(
             HeightMap::new(vec![], 0, 4),
-            Err(HeightMapError::EmptyDimension { width: 0, height: 4 })
+            Err(HeightMapError::EmptyDimension {
+                width: 0,
+                height: 4
+            })
         );
         assert_eq!(
             HeightMap::new(vec![1.0; 3], 2, 2),
-            Err(HeightMapError::SampleCountMismatch { actual: 3, expected: 4 })
+            Err(HeightMapError::SampleCountMismatch {
+                actual: 3,
+                expected: 4
+            })
         );
     }
 
@@ -545,10 +565,18 @@ mod tests {
         let target = d.point(0.53, 0.47);
         let origin = [target[0], target[1], target[2] + 3.0];
         let ray = Ray::infinite(origin, [0.0, 0.0, -1.0]);
-        let hit = bvh.closest_hit(&ray).expect("ray should hit the flat surface");
+        let hit = bvh
+            .closest_hit(&ray)
+            .expect("ray should hit the flat surface");
         let n = hit.shading_normal;
-        assert!((n[2].abs() - 1.0).abs() < 1e-4, "flat normal must be ±z, got {n:?}");
-        assert!(n[0].abs() < 1e-4 && n[1].abs() < 1e-4, "flat normal must be axis-aligned, got {n:?}");
+        assert!(
+            (n[2].abs() - 1.0).abs() < 1e-4,
+            "flat normal must be ±z, got {n:?}"
+        );
+        assert!(
+            n[0].abs() < 1e-4 && n[1].abs() < 1e-4,
+            "flat normal must be axis-aligned, got {n:?}"
+        );
     }
 
     #[test]
@@ -587,7 +615,11 @@ mod tests {
         let centre = d.point(0.5, 0.5);
         assert!(centre[2] > 0.5, "centre should bulge up, z={}", centre[2]);
         let corner = d.point(0.0, 0.0);
-        assert!(corner[2].abs() < 1e-5, "corner should stay flat, z={}", corner[2]);
+        assert!(
+            corner[2].abs() < 1e-5,
+            "corner should stay flat, z={}",
+            corner[2]
+        );
     }
 
     #[test]

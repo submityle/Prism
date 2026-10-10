@@ -4,10 +4,10 @@ use crate::kinds::{Enum, VariantType};
 use crate::reflect::Reflect;
 use crate::type_info::{EnumInfo, TypeInfo};
 use crate::{ReflectMut, ReflectRef};
-use core::any::Any;
 use alloc::boxed::Box;
-use std::sync::OnceLock;
 use alloc::vec::Vec;
+use core::any::Any;
+use std::sync::OnceLock;
 
 /// The payload shape of a [`DynamicEnum`]'s active variant.
 #[derive(Default)]
@@ -154,9 +154,7 @@ impl Enum for DynamicEnum {
         match &mut self.variant {
             DynamicVariant::Unit => None,
             DynamicVariant::Tuple(fields) => fields.get_mut(index).map(|value| &mut **value),
-            DynamicVariant::Struct(fields) => {
-                fields.get_mut(index).map(|(_, value)| &mut **value)
-            }
+            DynamicVariant::Struct(fields) => fields.get_mut(index).map(|(_, value)| &mut **value),
         }
     }
 
@@ -177,9 +175,7 @@ impl Reflect for DynamicEnum {
 
     fn type_info(&self) -> &'static TypeInfo {
         static CELL: OnceLock<TypeInfo> = OnceLock::new();
-        CELL.get_or_init(|| {
-            TypeInfo::Enum(EnumInfo::new("prism_reflect::DynamicEnum", Vec::new()))
-        })
+        CELL.get_or_init(|| TypeInfo::Enum(EnumInfo::new("prism_reflect::DynamicEnum", Vec::new())))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -211,7 +207,8 @@ impl Reflect for DynamicEnum {
     }
 
     fn reflect_clone(&self) -> Box<dyn Reflect> {
-        let mut cloned = DynamicEnum::new(self.variant_index, self.variant_name, self.clone_variant());
+        let mut cloned =
+            DynamicEnum::new(self.variant_index, self.variant_name, self.clone_variant());
         cloned.represented_type_name = self.represented_type_name;
         Box::new(cloned)
     }

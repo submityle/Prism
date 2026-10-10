@@ -21,8 +21,14 @@ use super::{MmapError, Result};
     reason = "memory mapping requires the mmap/munmap/msync syscalls via dependency-free C FFI"
 )]
 unsafe extern "C" {
-    fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, offset: i64)
-        -> *mut c_void;
+    fn mmap(
+        addr: *mut c_void,
+        len: usize,
+        prot: c_int,
+        flags: c_int,
+        fd: c_int,
+        offset: i64,
+    ) -> *mut c_void;
     fn munmap(addr: *mut c_void, len: usize) -> c_int;
     fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int;
 }
@@ -39,7 +45,10 @@ mod sys {
     unsafe extern "C" {
         fn __errno_location() -> *mut c_int;
     }
-    #[expect(unsafe_code, reason = "reading this thread's errno through its C accessor")]
+    #[expect(
+        unsafe_code,
+        reason = "reading this thread's errno through its C accessor"
+    )]
     pub(super) fn errno() -> c_int {
         // SAFETY: `__errno_location` returns a valid pointer to this thread's
         // `errno`, which we only read.
@@ -56,7 +65,10 @@ mod sys {
     unsafe extern "C" {
         fn __error() -> *mut c_int;
     }
-    #[expect(unsafe_code, reason = "reading this thread's errno through its C accessor")]
+    #[expect(
+        unsafe_code,
+        reason = "reading this thread's errno through its C accessor"
+    )]
     pub(super) fn errno() -> c_int {
         // SAFETY: `__error` returns a valid pointer to this thread's `errno`,
         // which we only read.
@@ -100,7 +112,16 @@ pub(super) fn map(file: File, offset: u64, len: usize, writable: bool) -> Result
     // page-aligned as `mmap` requires; `map_len` is the validated mapping
     // length. A null `addr` lets the kernel choose the base. The result is
     // checked against `MAP_FAILED` before any use.
-    let p = unsafe { mmap(core::ptr::null_mut(), map_len, prot, MAP_SHARED, fd, aligned as i64) };
+    let p = unsafe {
+        mmap(
+            core::ptr::null_mut(),
+            map_len,
+            prot,
+            MAP_SHARED,
+            fd,
+            aligned as i64,
+        )
+    };
     if p.addr() == usize::MAX {
         return Err(MmapError::System(sys::errno()));
     }
@@ -148,7 +169,10 @@ impl Mapping {
 }
 
 impl Drop for Mapping {
-    #[expect(unsafe_code, reason = "munmap releases the mapping exactly once on drop")]
+    #[expect(
+        unsafe_code,
+        reason = "munmap releases the mapping exactly once on drop"
+    )]
     fn drop(&mut self) {
         // SAFETY: `base`/`base_len` is the exact span returned by `mmap`;
         // `munmap` is called once, here, at end of life.

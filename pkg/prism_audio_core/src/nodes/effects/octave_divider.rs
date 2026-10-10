@@ -616,8 +616,7 @@ mod tests {
         let input = sine_buffer(freq, 1.0, frames);
         let out = run(&mut node, input);
         // Reference: how many input cycles in the measured region.
-        let input_cycles =
-            rising_sign_changes(sine_buffer(freq, 1.0, frames).channel(0), 2_000);
+        let input_cycles = rising_sign_changes(sine_buffer(freq, 1.0, frames).channel(0), 2_000);
         let sub_cycles = rising_sign_changes(out.channel(0), 2_000);
         // flop1 completes one full square cycle every two input periods.
         let ratio = sub_cycles as f32 / input_cycles as f32;
@@ -640,8 +639,7 @@ mod tests {
         let frames = SR as usize;
         let input = sine_buffer(freq, 1.0, frames);
         let out = run(&mut node, input);
-        let input_cycles =
-            rising_sign_changes(sine_buffer(freq, 1.0, frames).channel(0), 2_000);
+        let input_cycles = rising_sign_changes(sine_buffer(freq, 1.0, frames).channel(0), 2_000);
         let sub_cycles = rising_sign_changes(out.channel(0), 2_000);
         let ratio = sub_cycles as f32 / input_cycles as f32;
         assert!((ratio - 0.25).abs() < 0.03, "ratio={ratio}");

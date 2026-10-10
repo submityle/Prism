@@ -214,10 +214,7 @@ impl HdrWindow {
     /// stereo/surround image stays coherent, driven by the combined channel
     /// level.
     pub fn process(&mut self, input: &AudioBuffer, output: &mut AudioBuffer) {
-        let channels = output
-            .channels()
-            .min(input.channels())
-            .min(self.channels);
+        let channels = output.channels().min(input.channels()).min(self.channels);
         let frames = output.active_frames().min(input.active_frames());
         if frames == 0 || channels == 0 {
             return;
@@ -443,7 +440,11 @@ mod tests {
             assert!(y.abs() <= bound, "unbounded output: {y}");
         }
         // Once settled the makeup should be attenuating a hot input.
-        assert!(node.gain_db() < 0.0, "hot input not attenuated: {}", node.gain_db());
+        assert!(
+            node.gain_db() < 0.0,
+            "hot input not attenuated: {}",
+            node.gain_db()
+        );
     }
 
     #[test]
@@ -454,7 +455,11 @@ mod tests {
         let mut input = mono(SR as usize);
         tone(&mut input, 0.02, 1_000.0);
         let _ = run_mono(&mut node, &input);
-        assert!(node.gain_db() > 1.0, "quiet signal not lifted: {}", node.gain_db());
+        assert!(
+            node.gain_db() > 1.0,
+            "quiet signal not lifted: {}",
+            node.gain_db()
+        );
     }
 
     #[test]
@@ -470,7 +475,11 @@ mod tests {
         let out_a = run_mono(&mut a, &input);
         let out_b = run_mono(&mut b, &input);
         for i in 0..n {
-            assert_eq!(out_a.channel(0)[i], out_b.channel(0)[i], "nondeterministic at {i}");
+            assert_eq!(
+                out_a.channel(0)[i],
+                out_b.channel(0)[i],
+                "nondeterministic at {i}"
+            );
         }
     }
 
@@ -525,7 +534,11 @@ mod tests {
         node.process(&ctx(n), &mut io);
         out = outputs.into_iter().next().unwrap();
         for i in 0..n {
-            assert_eq!(out.channel(0)[i], out.channel(1)[i], "image not coherent at {i}");
+            assert_eq!(
+                out.channel(0)[i],
+                out.channel(1)[i],
+                "image not coherent at {i}"
+            );
         }
     }
 }

@@ -177,7 +177,10 @@ pub fn validate_version(
     }
     match schema.chain(logical, found) {
         Ok(_) => Ok(()),
-        Err(_) => Err(ValidationError::NoMigrationPath { from: found, current }),
+        Err(_) => Err(ValidationError::NoMigrationPath {
+            from: found,
+            current,
+        }),
     }
 }
 

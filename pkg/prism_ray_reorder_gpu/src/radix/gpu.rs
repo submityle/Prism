@@ -39,10 +39,10 @@
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::{
-    BindGroup, BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor,
-    BufferBindingType, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline,
-    ComputePipelineDescriptor, PipelineCompilationOptions, PipelineLayoutDescriptor, ShaderModule,
-    ShaderModuleDescriptor, ShaderSource,
+    BindGroup, BindGroupDescriptor, BindGroupLayout, BindGroupLayoutDescriptor, BufferBindingType,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, ShaderModule, ShaderModuleDescriptor,
+    ShaderSource,
 };
 
 use prism_render_architecture::ray_scene::reorder::CoherenceKey;
@@ -70,10 +70,16 @@ struct Params {
 /// A compiled, reusable `GPU` SER radix-sort pipeline set.
 pub struct GpuRayReorder {
     /// Kept alive so the count pipeline it produced stays valid.
-    #[expect(dead_code, reason = "kept alive so the pipeline it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline it produced stays valid"
+    )]
     count_module: ShaderModule,
     /// Kept alive so the scatter pipeline it produced stays valid.
-    #[expect(dead_code, reason = "kept alive so the pipeline it produced stays valid")]
+    #[expect(
+        dead_code,
+        reason = "kept alive so the pipeline it produced stays valid"
+    )]
     scatter_module: ShaderModule,
     /// Layout wiring params, the two key words, and the per-block histogram.
     count_layout: BindGroupLayout,
@@ -232,7 +238,13 @@ impl GpuRayReorder {
             let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("prism_reorder_count_encoder"),
             });
-            Self::dispatch(&mut enc, "prism_reorder_count_pass", &self.count, &count_bind, groups);
+            Self::dispatch(
+                &mut enc,
+                "prism_reorder_count_pass",
+                &self.count,
+                &count_bind,
+                groups,
+            );
             buffer::copy(&mut enc, &block_hist, &hist_stage, (hist_len * 4) as u64);
             ctx.queue().submit([enc.finish()]);
             let hist = buffer::read_back::<u32>(ctx, &hist_stage);

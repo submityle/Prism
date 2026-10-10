@@ -18,7 +18,7 @@
 //! multiply-adds, so localisation is bit-reproducible across targets and can be
 //! golden-compared sample-for-sample.
 
-use bevy_math::{Quat, Vec3, ops};
+use bevy_math::{ops, Quat, Vec3};
 use prism_audio_core::math::Sample;
 
 /// Distances below this (in metres) are treated as "at the listener": the
@@ -59,7 +59,11 @@ impl Listener {
     #[must_use]
     #[inline]
     pub fn new(position: Vec3, orientation: Quat, velocity: Vec3) -> Self {
-        Self { position, orientation, velocity }
+        Self {
+            position,
+            orientation,
+            velocity,
+        }
     }
 
     /// Resolves an [`Emitter`] into this listener's local frame, producing the
@@ -93,7 +97,11 @@ impl Listener {
         let relative_velocity = emitter.velocity - self.velocity;
         let radial_velocity = relative_velocity.dot(world_dir);
 
-        LocalSource { direction, distance, radial_velocity }
+        LocalSource {
+            direction,
+            distance,
+            radial_velocity,
+        }
     }
 }
 
@@ -130,7 +138,11 @@ impl Emitter {
     #[must_use]
     #[inline]
     pub fn new(position: Vec3, velocity: Vec3, forward: Vec3) -> Self {
-        Self { position, velocity, forward: normalize_or(forward, Vec3::NEG_Z) }
+        Self {
+            position,
+            velocity,
+            forward: normalize_or(forward, Vec3::NEG_Z),
+        }
     }
 
     /// Creates a non-directional emitter (facing `-Z`) at `position` with the
@@ -138,7 +150,11 @@ impl Emitter {
     #[must_use]
     #[inline]
     pub fn point(position: Vec3, velocity: Vec3) -> Self {
-        Self { position, velocity, forward: Vec3::NEG_Z }
+        Self {
+            position,
+            velocity,
+            forward: Vec3::NEG_Z,
+        }
     }
 }
 
@@ -174,9 +190,8 @@ impl LocalSource {
     #[must_use]
     #[inline]
     pub fn elevation(&self) -> Sample {
-        let horizontal = ops::sqrt(
-            self.direction.x * self.direction.x + self.direction.z * self.direction.z,
-        );
+        let horizontal =
+            ops::sqrt(self.direction.x * self.direction.x + self.direction.z * self.direction.z);
         ops::atan2(self.direction.y, horizontal)
     }
 }
@@ -189,7 +204,11 @@ impl LocalSource {
 fn normalize_or(v: Vec3, fallback: Vec3) -> Vec3 {
     let len_sq = v.dot(v);
     let len = ops::sqrt(len_sq);
-    if len <= COINCIDENT_EPSILON { fallback } else { v / len }
+    if len <= COINCIDENT_EPSILON {
+        fallback
+    } else {
+        v / len
+    }
 }
 
 #[cfg(test)]
@@ -238,11 +257,7 @@ mod tests {
     fn listener_rotation_is_applied() {
         // Listener yawed 90 degrees about +Y: local->world rotates -Z (forward)
         // to -X. A source at world -X should therefore appear straight ahead.
-        let listener = Listener::new(
-            Vec3::ZERO,
-            Quat::from_rotation_y(FRAC_PI_2),
-            Vec3::ZERO,
-        );
+        let listener = Listener::new(Vec3::ZERO, Quat::from_rotation_y(FRAC_PI_2), Vec3::ZERO);
         let emitter = Emitter::point(Vec3::new(-4.0, 0.0, 0.0), Vec3::ZERO);
         let local = listener.localize(&emitter);
         assert!(approx(local.distance, 4.0, 1e-5));
@@ -255,13 +270,25 @@ mod tests {
         let listener = Listener::default();
         // Source ahead at -Z moving further away along -Z at 10 m/s => receding.
         let receding = Emitter::point(Vec3::new(0.0, 0.0, -10.0), Vec3::new(0.0, 0.0, -10.0));
-        assert!(approx(listener.localize(&receding).radial_velocity, 10.0, 1e-4));
+        assert!(approx(
+            listener.localize(&receding).radial_velocity,
+            10.0,
+            1e-4
+        ));
         // Same source moving toward the listener (+Z) => approaching (negative).
         let approaching = Emitter::point(Vec3::new(0.0, 0.0, -10.0), Vec3::new(0.0, 0.0, 10.0));
-        assert!(approx(listener.localize(&approaching).radial_velocity, -10.0, 1e-4));
+        assert!(approx(
+            listener.localize(&approaching).radial_velocity,
+            -10.0,
+            1e-4
+        ));
         // Tangential motion (along X) has no radial component.
         let tangential = Emitter::point(Vec3::new(0.0, 0.0, -10.0), Vec3::new(5.0, 0.0, 0.0));
-        assert!(approx(listener.localize(&tangential).radial_velocity, 0.0, 1e-4));
+        assert!(approx(
+            listener.localize(&tangential).radial_velocity,
+            0.0,
+            1e-4
+        ));
     }
 
     #[test]

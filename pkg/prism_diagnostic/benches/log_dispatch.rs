@@ -32,7 +32,7 @@ use alloc::sync::Arc;
 use std::hint::black_box;
 use std::time::Instant;
 
-use prism_diagnostic::{CaptureSink, Level, clear_sink, event, set_max_level, set_sink};
+use prism_diagnostic::{clear_sink, event, set_max_level, set_sink, CaptureSink, Level};
 
 /// Filtered (disabled) calls per timed pass — large, since each is ~1 atomic load.
 const DISABLED_CALLS: usize = 1 << 24;
@@ -85,7 +85,11 @@ fn main() {
     set_sink(guard_sink.clone());
     set_max_level(Level::Error);
     event!(Level::Info, "should be filtered");
-    assert_eq!(guard_sink.len(), 0, "disabled-level event leaked to the sink");
+    assert_eq!(
+        guard_sink.len(),
+        0,
+        "disabled-level event leaked to the sink"
+    );
 
     let disabled_ns = bench_disabled();
     assert_eq!(

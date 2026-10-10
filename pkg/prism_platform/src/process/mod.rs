@@ -20,9 +20,7 @@ pub mod args;
 pub mod child;
 pub mod env;
 
-pub use child::{
-    Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio,
-};
+pub use child::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 
 #[cfg(test)]
 mod tests;

@@ -12,8 +12,8 @@
 
 use core::arch::naked_asm;
 
-use super::FiberInner;
 use super::context::Context;
+use super::FiberInner;
 
 /// Save the running context into `*from` and restore `*to`.
 ///

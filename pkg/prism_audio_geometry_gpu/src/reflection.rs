@@ -282,7 +282,11 @@ pub(crate) fn cpu_reflection(
         return out;
     }
     let colour = if peak > 0.0 {
-        [effective[0] / peak, effective[1] / peak, effective[2] / peak]
+        [
+            effective[0] / peak,
+            effective[1] / peak,
+            effective[2] / peak,
+        ]
     } else {
         [0.0, 0.0, 0.0]
     };

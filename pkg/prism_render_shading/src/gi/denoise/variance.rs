@@ -346,11 +346,7 @@ mod tests {
     /// variance consistent with the channel means.
     #[test]
     fn welford_rgb_tracks_channels_and_luminance() {
-        let samples = [
-            [1.0, 2.0, 3.0],
-            [3.0, 2.0, 1.0],
-            [2.0, 2.0, 2.0],
-        ];
+        let samples = [[1.0, 2.0, 3.0], [3.0, 2.0, 1.0], [2.0, 2.0, 2.0]];
         let mut acc = WelfordRgb::EMPTY;
         for &s in &samples {
             acc.push(s);

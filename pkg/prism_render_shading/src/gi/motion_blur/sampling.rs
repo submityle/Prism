@@ -56,7 +56,11 @@ fn sanitize_jitter(jitter: f32) -> f32 {
         return 0.0;
     }
     let f = fract(jitter);
-    if f < 0.0 { f + 1.0 } else { f }
+    if f < 0.0 {
+        f + 1.0
+    } else {
+        f
+    }
 }
 
 /// Deterministic per-pixel jitter in `[0, 1)` from interleaved gradient noise.

@@ -16,9 +16,9 @@
 //! [`HealthProbe`](crate::HealthProbe) façades are then exercised on a real
 //! [`TaskPool`](crate::TaskPool).
 
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::health::wait_graph::DeadlockError;
@@ -90,11 +90,11 @@ fn background_sheds_at_high_watermark_but_foreground_flows() {
     // Fill foreground to the high watermark, then background sheds while
     // Critical keeps being admitted up to capacity.
     let subs = [
-        Priority::Normal, // depth 1
-        Priority::Normal, // 2
-        Priority::Normal, // 3
-        Priority::Normal, // 4
-        Priority::Normal, // 5
+        Priority::Normal,     // depth 1
+        Priority::Normal,     // 2
+        Priority::Normal,     // 3
+        Priority::Normal,     // 4
+        Priority::Normal,     // 5
         Priority::Background, // 6? depth 5 < high 6 -> admitted -> depth 6 arms shedding
         Priority::Background, // shedding -> Deferred
         Priority::Critical,   // depth 6 -> admitted -> 7
@@ -319,7 +319,9 @@ fn histogram_percentiles_match_nearest_rank_oracle() {
     let mut samples = Vec::new();
     let mut state = 777u64;
     for _ in 0..1000 {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let v = (state >> 33) % 1200; // spans all buckets incl. overflow
         samples.push(v);
         hist.record(v);
@@ -416,7 +418,10 @@ fn backpressure_queue_runs_admitted_jobs_and_drains_depth() {
     let rejected = queue.offer(Priority::Normal, || {});
     assert_eq!(rejected, Admission::Rejected);
     // Background work is shed under pressure, too.
-    assert_eq!(queue.offer(Priority::Background, || {}), Admission::Rejected);
+    assert_eq!(
+        queue.offer(Priority::Background, || {}),
+        Admission::Rejected
+    );
 
     let report = queue.run();
     assert_eq!(report.ran, 4);
@@ -426,7 +431,10 @@ fn backpressure_queue_runs_admitted_jobs_and_drains_depth() {
     assert!(!queue.is_shedding());
 
     // After draining, new work is admitted again.
-    assert_eq!(queue.offer(Priority::Background, || {}), Admission::Admitted);
+    assert_eq!(
+        queue.offer(Priority::Background, || {}),
+        Admission::Admitted
+    );
 }
 
 #[test]

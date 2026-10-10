@@ -23,7 +23,7 @@
 //! Provenance: standard world -> clip -> ndc -> viewport vertex projection for
 //! software rasterization; no Unreal Engine source or derived code.
 
-use prism_render_architecture::virtual_geometry::{ScreenVertex, project_vertex};
+use prism_render_architecture::virtual_geometry::{project_vertex, ScreenVertex};
 use prism_virtual_geometry_gpu::{GpuContext, GpuProjectVertex};
 
 /// Column-major orthographic-style matrix: `clip.w` is a constant `2` (a power
@@ -90,7 +90,10 @@ fn gpu_project_vertex_matches_cpu_golden() {
 
     // Positive control: all four are in front of the camera (constant w = 2).
     let gpu = GpuProjectVertex::new(&ctx).project(&ctx, &ORTHO, &positions, vp);
-    assert!(gpu.iter().all(Option::is_some), "constant w=2 is never culled");
+    assert!(
+        gpu.iter().all(Option::is_some),
+        "constant w=2 is never culled"
+    );
     // Spot-check the first vertex: clip.x=0 -> ndc.x=0 -> u=0.5 -> pos.x=4.0;
     // clip.y=0 -> ndc.y=0 -> v=0.5 -> pos.y=4.0; ndc.z=(2*0+1)*0.5=0.5.
     assert_eq!(gpu[0], Some(ScreenVertex::new([4.0, 4.0], 0.5)));
@@ -112,8 +115,14 @@ fn gpu_project_vertex_culls_on_and_behind_plane() {
     assert_parity(&ctx, &PERSP, &positions, vp);
 
     let gpu = GpuProjectVertex::new(&ctx).project(&ctx, &PERSP, &positions, vp);
-    assert!(gpu[0].is_some(), "z=2 vertex must be in front of the camera");
-    assert!(gpu[1].is_none(), "z=-1 vertex must be culled (behind plane)");
+    assert!(
+        gpu[0].is_some(),
+        "z=2 vertex must be in front of the camera"
+    );
+    assert!(
+        gpu[1].is_none(),
+        "z=-1 vertex must be culled (behind plane)"
+    );
     assert!(gpu[2].is_none(), "z=0 vertex must be culled (on plane)");
     assert!(gpu[3].is_some(), "second z=2 vertex must be in front");
 }

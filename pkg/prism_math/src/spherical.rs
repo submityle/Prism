@@ -125,11 +125,7 @@ impl Sh2 {
     #[inline]
     #[must_use]
     pub fn eval(&self, dir: Vec3) -> f32 {
-        self.c
-            .iter()
-            .zip(basis2(dir))
-            .map(|(c, b)| c * b)
-            .sum()
+        self.c.iter().zip(basis2(dir)).map(|(c, b)| c * b).sum()
     }
 
     /// Convolve radiance coefficients with the clamped-cosine kernel to obtain
@@ -232,11 +228,7 @@ impl Sh3 {
     #[inline]
     #[must_use]
     pub fn eval(&self, dir: Vec3) -> f32 {
-        self.c
-            .iter()
-            .zip(basis3(dir))
-            .map(|(c, b)| c * b)
-            .sum()
+        self.c.iter().zip(basis3(dir)).map(|(c, b)| c * b).sum()
     }
 
     /// Diffuse-irradiance convolution. Band 3 vanishes under the clamped-cosine
@@ -377,10 +369,7 @@ mod tests {
         }
         for _ in 0..1000 {
             let d = rand_dir(&mut rng);
-            assert!(
-                (sh.eval(d) - field(d)).abs() < 0.05,
-                "reconstruct mismatch"
-            );
+            assert!((sh.eval(d) - field(d)).abs() < 0.05, "reconstruct mismatch");
         }
     }
 

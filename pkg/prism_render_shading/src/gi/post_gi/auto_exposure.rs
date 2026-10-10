@@ -131,11 +131,7 @@ impl LogLuminanceRange {
 /// [`LogLuminanceRange::luminance_to_bin`]. Returns an empty `Vec` when
 /// `bin_count` is `0`.
 #[must_use]
-pub fn build_histogram(
-    samples: &[[f32; 3]],
-    range: LogLuminanceRange,
-    bin_count: u32,
-) -> Vec<u32> {
+pub fn build_histogram(samples: &[[f32; 3]], range: LogLuminanceRange, bin_count: u32) -> Vec<u32> {
     let mut bins = alloc::vec![0_u32; bin_count as usize];
     if bin_count == 0 {
         return bins;
@@ -178,11 +174,7 @@ impl Default for HistogramClip {
 /// the function falls back to the *untrimmed* count-weighted mean rather than
 /// returning a meaningless value.
 #[must_use]
-pub fn average_log_luminance(
-    bins: &[u32],
-    range: LogLuminanceRange,
-    clip: HistogramClip,
-) -> f32 {
+pub fn average_log_luminance(bins: &[u32], range: LogLuminanceRange, clip: HistogramClip) -> f32 {
     let bin_count = bins.len() as u32;
     if bin_count == 0 {
         return range.min_log2;
@@ -239,11 +231,7 @@ pub fn average_log_luminance(
 
 /// Average *linear* luminance of a clipped histogram: `2^average_log_luminance`.
 #[must_use]
-pub fn average_luminance(
-    bins: &[u32],
-    range: LogLuminanceRange,
-    clip: HistogramClip,
-) -> f32 {
+pub fn average_luminance(bins: &[u32], range: LogLuminanceRange, clip: HistogramClip) -> f32 {
     ops::exp2(average_log_luminance(bins, range, clip))
 }
 
@@ -440,7 +428,10 @@ mod tests {
         let count = 32_u32;
         let mut bins = alloc::vec![0_u32; count as usize];
         bins[20] = 5000;
-        let clip = HistogramClip { low: 0.1, high: 0.1 };
+        let clip = HistogramClip {
+            low: 0.1,
+            high: 0.1,
+        };
         approx(
             average_luminance(&bins, range, clip),
             range.bin_center_luminance(20, count),
@@ -466,7 +457,10 @@ mod tests {
         bins[4] = 100;
         bins[7] = 100;
         // Discard the darkest and brightest thirds -> only the middle bin.
-        let clip = HistogramClip { low: 0.34, high: 0.34 };
+        let clip = HistogramClip {
+            low: 0.34,
+            high: 0.34,
+        };
         approx(
             average_luminance(&bins, range, clip),
             range.bin_center_luminance(4, count),
@@ -480,7 +474,10 @@ mod tests {
         let mut bins = alloc::vec![0_u32; count as usize];
         bins[1] = 10;
         bins[2] = 10;
-        let clip = HistogramClip { low: 0.6, high: 0.6 };
+        let clip = HistogramClip {
+            low: 0.6,
+            high: 0.6,
+        };
         let got = average_log_luminance(&bins, range, clip);
         let expect = (range.bin_center_log2(1, count) + range.bin_center_log2(2, count)) / 2.0;
         approx(got, expect);
@@ -598,7 +595,10 @@ mod tests {
         approx(eye.adapt(1.0, f32::INFINITY, 0.1), 1.0);
         approx(eye.adapt(2.0, f32::NAN, 0.1), 2.0);
         // Zero/negative speed holds the current value.
-        let frozen = EyeAdaptation { speed_up: 0.0, speed_down: 0.0 };
+        let frozen = EyeAdaptation {
+            speed_up: 0.0,
+            speed_down: 0.0,
+        };
         approx(frozen.adapt(1.0, 9.0, 1.0), 1.0);
     }
 }

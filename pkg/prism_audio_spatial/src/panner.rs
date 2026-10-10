@@ -363,7 +363,11 @@ impl AudioNode for PannerNode {
             // Advance all channel gains for this frame first so they stay in
             // lock-step, then write the scaled sample to each channel.
             let mut frame_gain = [0.0; MAX_SPEAKERS];
-            for (slot, gain) in frame_gain.iter_mut().zip(self.gains.iter_mut()).take(active) {
+            for (slot, gain) in frame_gain
+                .iter_mut()
+                .zip(self.gains.iter_mut())
+                .take(active)
+            {
                 *slot = gain.next_sample();
             }
             for (c, &g) in frame_gain.iter().enumerate().take(active) {
@@ -429,7 +433,7 @@ mod tests {
         let p = VbapPanner::new(ChannelLayout::Quad);
         let mut g = [0.0; MAX_SPEAKERS];
         p.compute_gains(PI, &mut g); // directly behind
-        // SL (ch2) and SR (ch3) dominate the fronts FL (ch0) / FR (ch1).
+                                     // SL (ch2) and SR (ch3) dominate the fronts FL (ch0) / FR (ch1).
         assert!(g[2] > g[0] && g[2] > g[1], "gains={:?}", g);
         assert!(g[3] > g[0] && g[3] > g[1], "gains={:?}", g);
         // Symmetric behind the listener.
@@ -468,7 +472,13 @@ mod tests {
                 let mut g = [0.0; MAX_SPEAKERS];
                 p.compute_gains(az, &mut g);
                 let pw = power(&g[..count]);
-                assert!(approx(pw, 1.0, EPS), "layout={:?} az={} power={}", layout, az, pw);
+                assert!(
+                    approx(pw, 1.0, EPS),
+                    "layout={:?} az={} power={}",
+                    layout,
+                    az,
+                    pw
+                );
             }
         }
     }
@@ -544,7 +554,12 @@ mod tests {
         let mut node = PannerNode::new(ChannelLayout::Stereo);
         // Start fully left, then glide to fully right over the whole block.
         node.set_azimuth_immediate(-FRAC_PI_6);
-        node.set_azimuth(FRAC_PI_6, Ramp::Linear { samples: frames as u32 });
+        node.set_azimuth(
+            FRAC_PI_6,
+            Ramp::Linear {
+                samples: frames as u32,
+            },
+        );
 
         let mut input = AudioBuffer::new(ChannelLayout::Mono, frames);
         for s in input.channel_mut(0) {
@@ -583,7 +598,11 @@ mod tests {
         // After reset the gains sit exactly on their targets (settled).
         for c in 0..node.active {
             assert!(node.gains[c].is_settled());
-            assert!(approx(node.gains[c].current(), node.gains[c].target(), 1e-9));
+            assert!(approx(
+                node.gains[c].current(),
+                node.gains[c].target(),
+                1e-9
+            ));
         }
     }
 }

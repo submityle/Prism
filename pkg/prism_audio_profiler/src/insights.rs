@@ -99,7 +99,10 @@ impl InsightsReport {
             None => {
                 let latest = session.iter().last();
                 match latest {
-                    Some(frame) => (linear_to_db(frame.master_peak), linear_to_db(frame.master_rms)),
+                    Some(frame) => (
+                        linear_to_db(frame.master_peak),
+                        linear_to_db(frame.master_rms),
+                    ),
                     None => (Sample::NEG_INFINITY, Sample::NEG_INFINITY),
                 }
             }

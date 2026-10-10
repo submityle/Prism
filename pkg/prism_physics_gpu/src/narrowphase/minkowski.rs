@@ -44,8 +44,12 @@ pub fn support(
     pose_b: &ConvexPose,
     dir: Vec3,
 ) -> SupportPoint {
-    let on_a = pose_a.transform_point(hull_a.vertices()[hull_a.support_local(pose_a.inverse_rotate(dir)) as usize]);
-    let on_b = pose_b.transform_point(hull_b.vertices()[hull_b.support_local(pose_b.inverse_rotate(-dir)) as usize]);
+    let on_a = pose_a.transform_point(
+        hull_a.vertices()[hull_a.support_local(pose_a.inverse_rotate(dir)) as usize],
+    );
+    let on_b = pose_b.transform_point(
+        hull_b.vertices()[hull_b.support_local(pose_b.inverse_rotate(-dir)) as usize],
+    );
     SupportPoint {
         diff: on_a - on_b,
         on_a,

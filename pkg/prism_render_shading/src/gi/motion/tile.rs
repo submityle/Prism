@@ -73,7 +73,11 @@ fn clamp_coord(c: i64, extent: usize) -> usize {
         0
     } else {
         let c = c as usize;
-        if c >= extent { extent - 1 } else { c }
+        if c >= extent {
+            extent - 1
+        } else {
+            c
+        }
     }
 }
 
@@ -92,7 +96,11 @@ impl TileVelocity {
     fn from_velocity(velocity: Vec2) -> Self {
         let velocity = sanitize_velocity(velocity);
         let radius = velocity.length();
-        let radius = if radius.is_finite() { radius.max(0.0) } else { 0.0 };
+        let radius = if radius.is_finite() {
+            radius.max(0.0)
+        } else {
+            0.0
+        };
         Self { velocity, radius }
     }
 }
@@ -290,7 +298,11 @@ mod tests {
         assert_eq!(map.tiles_x(), 3);
         let nm = map.neighbor_max();
         for t in &nm {
-            assert!((t.velocity - Vec2::new(6.0, 0.0)).length() < 1e-6, "tile {:?}", t.velocity);
+            assert!(
+                (t.velocity - Vec2::new(6.0, 0.0)).length() < 1e-6,
+                "tile {:?}",
+                t.velocity
+            );
             assert!((t.radius - 6.0).abs() < 1e-6, "radius {:?}", t.radius);
         }
     }

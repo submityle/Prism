@@ -26,27 +26,42 @@ impl Default for Affine3 {
 
 impl Affine3 {
     /// The identity transform.
-    pub const IDENTITY: Self = Self { matrix3: Mat3::IDENTITY, translation: Vec3::ZERO };
+    pub const IDENTITY: Self = Self {
+        matrix3: Mat3::IDENTITY,
+        translation: Vec3::ZERO,
+    };
 
     /// Build from a linear part and translation.
     #[inline]
     pub const fn from_mat3_translation(matrix3: Mat3, translation: Vec3) -> Self {
-        Self { matrix3, translation }
+        Self {
+            matrix3,
+            translation,
+        }
     }
     /// Pure translation.
     #[inline]
     pub const fn from_translation(t: Vec3) -> Self {
-        Self { matrix3: Mat3::IDENTITY, translation: t }
+        Self {
+            matrix3: Mat3::IDENTITY,
+            translation: t,
+        }
     }
     /// Pure rotation.
     #[inline]
     pub fn from_quat(q: Quat) -> Self {
-        Self { matrix3: Mat3::from_quat(q), translation: Vec3::ZERO }
+        Self {
+            matrix3: Mat3::from_quat(q),
+            translation: Vec3::ZERO,
+        }
     }
     /// Pure non-uniform scale.
     #[inline]
     pub fn from_scale(s: Vec3) -> Self {
-        Self { matrix3: Mat3::from_scale(s), translation: Vec3::ZERO }
+        Self {
+            matrix3: Mat3::from_scale(s),
+            translation: Vec3::ZERO,
+        }
     }
     /// Compose scale, then rotation, then translation.
     #[inline]
@@ -71,7 +86,10 @@ impl Affine3 {
     #[inline]
     pub fn inverse(self) -> Self {
         let m = self.matrix3.inverse();
-        Self { matrix3: m, translation: -m.mul_vec3(self.translation) }
+        Self {
+            matrix3: m,
+            translation: -m.mul_vec3(self.translation),
+        }
     }
     /// Convert to an equivalent [`Mat4`].
     #[inline]
@@ -138,6 +156,10 @@ impl Mul<Vec3> for Affine3 {
 
 impl core::fmt::Debug for Affine3 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Affine3 {{ matrix3: {:?}, translation: {:?} }}", self.matrix3, self.translation)
+        write!(
+            f,
+            "Affine3 {{ matrix3: {:?}, translation: {:?} }}",
+            self.matrix3, self.translation
+        )
     }
 }

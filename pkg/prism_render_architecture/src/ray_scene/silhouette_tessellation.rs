@@ -504,7 +504,10 @@ mod tests {
         let t = SilhouetteTessellation::new(3, 1, [0.5, 8.0, 0.5], 1, 24, 0.4);
         let left_patch = t.patch_outer_factors(&Bowl, 0, 0); // [bottom,right,top,left]
         let right_patch = t.patch_outer_factors(&Bowl, 1, 0);
-        assert_eq!(left_patch[1], right_patch[3], "shared seam factors must agree");
+        assert_eq!(
+            left_patch[1], right_patch[3],
+            "shared seam factors must agree"
+        );
     }
 
     #[test]
@@ -530,6 +533,9 @@ mod tests {
             }
             s
         };
-        assert!(sum(&narrow) <= sum(&wide), "narrower band must not refine more");
+        assert!(
+            sum(&narrow) <= sum(&wide),
+            "narrower band must not refine more"
+        );
     }
 }

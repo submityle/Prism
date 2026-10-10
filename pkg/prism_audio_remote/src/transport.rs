@@ -161,11 +161,8 @@ mod tests {
 
     #[test]
     fn command_flows_one_way() {
-        let (mut tool, mut engine) =
-            InProcessTransport::<AuthoringCommand, u32>::pair();
-        let cmd = AuthoringCommand::TriggerEvent {
-            event: EventId(42),
-        };
+        let (mut tool, mut engine) = InProcessTransport::<AuthoringCommand, u32>::pair();
+        let cmd = AuthoringCommand::TriggerEvent { event: EventId(42) };
         assert_eq!(tool.send(cmd), Ok(()));
         assert_eq!(engine.poll(), Some(cmd));
         assert_eq!(engine.poll(), None);
@@ -173,16 +170,14 @@ mod tests {
 
     #[test]
     fn telemetry_flows_the_other_way() {
-        let (mut tool, mut engine) =
-            InProcessTransport::<AuthoringCommand, u32>::pair();
+        let (mut tool, mut engine) = InProcessTransport::<AuthoringCommand, u32>::pair();
         assert_eq!(engine.send(99), Ok(()));
         assert_eq!(tool.poll(), Some(99));
     }
 
     #[test]
     fn capacity_is_enforced() {
-        let (mut tool, _engine) =
-            InProcessTransport::<u8, u8>::pair_with_capacity(2);
+        let (mut tool, _engine) = InProcessTransport::<u8, u8>::pair_with_capacity(2);
         assert_eq!(tool.send(1), Ok(()));
         assert_eq!(tool.send(2), Ok(()));
         assert_eq!(tool.send(3), Err(TransportError::Full));

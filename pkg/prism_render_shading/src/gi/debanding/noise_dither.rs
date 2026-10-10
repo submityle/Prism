@@ -39,7 +39,11 @@
 #[inline]
 #[must_use]
 fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
+    if x.is_finite() {
+        x
+    } else {
+        fallback
+    }
 }
 
 /// Interleaved Gradient Noise (Jiménez 2014) at pixel `(x, y)`, in `[0, 1)`.
@@ -63,7 +67,11 @@ pub fn interleaved_gradient_noise(x: f32, y: f32) -> f32 {
     let v = (C2 * inner.fract()).fract();
     // `fract` can return a tiny negative value for negative arguments; fold it
     // back into `[0, 1)` so the contract holds for any coordinate sign.
-    if v < 0.0 { v + 1.0 } else { v }
+    if v < 0.0 {
+        v + 1.0
+    } else {
+        v
+    }
 }
 
 /// Animated IGN: offsets the coordinate by a per-frame golden shift.

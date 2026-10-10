@@ -35,11 +35,7 @@ use prism_virtual_geometry_gpu::{GpuContext, GpuRasterClassifier};
 /// The reference path index a cluster resolves to, matching the twin's `u32`
 /// output (`0` = `MeshShader`, `1` = `ComputeSoftware`, `2` = `IndirectHardware`,
 /// `3` = `FallbackMesh`).
-fn reference_index(
-    stats: ClusterRasterStats,
-    capability: RasterCapability,
-    threshold: f32,
-) -> u32 {
+fn reference_index(stats: ClusterRasterStats, capability: RasterCapability, threshold: f32) -> u32 {
     select_raster_path(stats, capability, threshold) as u32
 }
 
@@ -168,5 +164,9 @@ fn negative_threshold_clamps_to_zero() {
         .map(|s| reference_index(*s, capability, threshold))
         .collect();
     assert_eq!(gpu, expected, "negative threshold must clamp identically");
-    assert_eq!(gpu, vec![1, 0, 3], "clamped classification is deterministic");
+    assert_eq!(
+        gpu,
+        vec![1, 0, 3],
+        "clamped classification is deterministic"
+    );
 }

@@ -58,7 +58,11 @@ pub struct ClusterConfig {
 
 impl Default for ClusterConfig {
     fn default() -> Self {
-        Self { max_clusters: 8, spatial_radius: 5.0, timbre_threshold: 0.35 }
+        Self {
+            max_clusters: 8,
+            spatial_radius: 5.0,
+            timbre_threshold: 0.35,
+        }
     }
 }
 
@@ -66,7 +70,10 @@ impl ClusterConfig {
     /// Returns a copy with `max_clusters` set to at least one.
     #[must_use]
     pub fn sanitised(self) -> Self {
-        Self { max_clusters: self.max_clusters.max(1), ..self }
+        Self {
+            max_clusters: self.max_clusters.max(1),
+            ..self
+        }
     }
 }
 
@@ -130,7 +137,12 @@ fn fuse(a: &Cluster, b: &Cluster) -> Cluster {
     let timbre = merge_timbre(a.timbre, a.total_energy, b.timbre, b.total_energy);
     let mut members = a.members.clone();
     members.extend_from_slice(&b.members);
-    Cluster { centroid, total_energy: a.total_energy + b.total_energy, timbre, members }
+    Cluster {
+        centroid,
+        total_energy: a.total_energy + b.total_energy,
+        timbre,
+        members,
+    }
 }
 
 /// Assigns `members` to at most `config.max_clusters` clusters by proximity and
@@ -143,7 +155,10 @@ fn fuse(a: &Cluster, b: &Cluster) -> Cluster {
 pub fn assign(members: &[ClusterMember], config: &ClusterConfig) -> ClusterSet {
     let config = config.sanitised();
     if members.is_empty() {
-        return ClusterSet { clusters: Vec::new(), of_member: Vec::new() };
+        return ClusterSet {
+            clusters: Vec::new(),
+            of_member: Vec::new(),
+        };
     }
 
     // Deterministic visit order: loudest first, ties broken by voice id, then
@@ -204,8 +219,14 @@ pub fn assign(members: &[ClusterMember], config: &ClusterConfig) -> ClusterSet {
         of_member[idx] = target;
     }
 
-    let clusters: Vec<Cluster> = accumulators.into_iter().map(ClusterAccumulator::finish).collect();
-    ClusterSet { clusters, of_member }
+    let clusters: Vec<Cluster> = accumulators
+        .into_iter()
+        .map(ClusterAccumulator::finish)
+        .collect();
+    ClusterSet {
+        clusters,
+        of_member,
+    }
 }
 
 /// Reduces `clusters` to at most `max_clusters` by repeatedly fusing the two
@@ -272,7 +293,11 @@ mod tests {
 
     #[test]
     fn nearby_similar_voices_cluster_together() {
-        let cfg = ClusterConfig { max_clusters: 8, spatial_radius: 2.0, timbre_threshold: 0.5 };
+        let cfg = ClusterConfig {
+            max_clusters: 8,
+            spatial_radius: 2.0,
+            timbre_threshold: 0.5,
+        };
         let members = [
             member(0, Vec3::new(0.0, 0.0, 0.0), 1.0),
             member(1, Vec3::new(0.5, 0.0, 0.0), 1.0),
@@ -285,7 +310,11 @@ mod tests {
 
     #[test]
     fn distant_voices_form_separate_clusters() {
-        let cfg = ClusterConfig { max_clusters: 8, spatial_radius: 2.0, timbre_threshold: 1.0 };
+        let cfg = ClusterConfig {
+            max_clusters: 8,
+            spatial_radius: 2.0,
+            timbre_threshold: 1.0,
+        };
         let members = [
             member(0, Vec3::new(0.0, 0.0, 0.0), 1.0),
             member(1, Vec3::new(100.0, 0.0, 0.0), 1.0),
@@ -296,9 +325,21 @@ mod tests {
 
     #[test]
     fn timbre_gate_separates_dissimilar_voices() {
-        let bright = Timbre { brightness: 1.0, width: 0.0, flatness: 0.0 };
-        let dark = Timbre { brightness: 0.0, width: 0.0, flatness: 0.0 };
-        let cfg = ClusterConfig { max_clusters: 8, spatial_radius: 100.0, timbre_threshold: 0.2 };
+        let bright = Timbre {
+            brightness: 1.0,
+            width: 0.0,
+            flatness: 0.0,
+        };
+        let dark = Timbre {
+            brightness: 0.0,
+            width: 0.0,
+            flatness: 0.0,
+        };
+        let cfg = ClusterConfig {
+            max_clusters: 8,
+            spatial_radius: 100.0,
+            timbre_threshold: 0.2,
+        };
         let members = [
             member_t(0, Vec3::new(0.0, 0.0, 0.0), 1.0, bright),
             member_t(1, Vec3::new(0.1, 0.0, 0.0), 1.0, dark),
@@ -310,7 +351,11 @@ mod tests {
 
     #[test]
     fn capacity_is_never_exceeded() {
-        let cfg = ClusterConfig { max_clusters: 2, spatial_radius: 1.0, timbre_threshold: 1.0 };
+        let cfg = ClusterConfig {
+            max_clusters: 2,
+            spatial_radius: 1.0,
+            timbre_threshold: 1.0,
+        };
         let members = [
             member(0, Vec3::new(0.0, 0.0, 0.0), 4.0),
             member(1, Vec3::new(50.0, 0.0, 0.0), 3.0),
@@ -327,7 +372,11 @@ mod tests {
 
     #[test]
     fn louder_voice_seeds_first_cluster() {
-        let cfg = ClusterConfig { max_clusters: 8, spatial_radius: 1.0, timbre_threshold: 1.0 };
+        let cfg = ClusterConfig {
+            max_clusters: 8,
+            spatial_radius: 1.0,
+            timbre_threshold: 1.0,
+        };
         let members = [
             member(0, Vec3::new(0.0, 0.0, 0.0), 1.0),
             member(1, Vec3::new(50.0, 0.0, 0.0), 9.0),
@@ -353,7 +402,11 @@ mod tests {
 
     #[test]
     fn centroid_is_energy_weighted_after_assignment() {
-        let cfg = ClusterConfig { max_clusters: 1, spatial_radius: 100.0, timbre_threshold: 1.0 };
+        let cfg = ClusterConfig {
+            max_clusters: 1,
+            spatial_radius: 100.0,
+            timbre_threshold: 1.0,
+        };
         let members = [
             member(0, Vec3::new(0.0, 0.0, 0.0), 1.0),
             member(1, Vec3::new(8.0, 0.0, 0.0), 3.0),
@@ -365,7 +418,11 @@ mod tests {
 
     #[test]
     fn merge_to_capacity_reduces_count() {
-        let cfg = ClusterConfig { max_clusters: 8, spatial_radius: 0.1, timbre_threshold: 1.0 };
+        let cfg = ClusterConfig {
+            max_clusters: 8,
+            spatial_radius: 0.1,
+            timbre_threshold: 1.0,
+        };
         let members = [
             member(0, Vec3::new(0.0, 0.0, 0.0), 1.0),
             member(1, Vec3::new(1.0, 0.0, 0.0), 1.0),
@@ -392,7 +449,11 @@ mod tests {
 
     #[test]
     fn merged_members_are_preserved() {
-        let cfg = ClusterConfig { max_clusters: 8, spatial_radius: 0.1, timbre_threshold: 1.0 };
+        let cfg = ClusterConfig {
+            max_clusters: 8,
+            spatial_radius: 0.1,
+            timbre_threshold: 1.0,
+        };
         let members = [
             member(0, Vec3::new(0.0, 0.0, 0.0), 2.0),
             member(5, Vec3::new(10.0, 0.0, 0.0), 1.0),
@@ -407,7 +468,11 @@ mod tests {
 
     #[test]
     fn zero_capacity_is_treated_as_one() {
-        let cfg = ClusterConfig { max_clusters: 0, spatial_radius: 1.0, timbre_threshold: 1.0 };
+        let cfg = ClusterConfig {
+            max_clusters: 0,
+            spatial_radius: 1.0,
+            timbre_threshold: 1.0,
+        };
         let members = [
             member(0, Vec3::new(0.0, 0.0, 0.0), 1.0),
             member(1, Vec3::new(50.0, 0.0, 0.0), 1.0),

@@ -98,13 +98,21 @@ impl GpuColumnBuffer {
     /// Create an empty buffer with the given layout.
     #[inline]
     pub const fn new(layout: MatrixLayout) -> Self {
-        Self { layout, buffer: Vec::new(), count: 0 }
+        Self {
+            layout,
+            buffer: Vec::new(),
+            count: 0,
+        }
     }
 
     /// Create an empty buffer with capacity preallocated for `entries` columns.
     #[inline]
     pub fn with_capacity(layout: MatrixLayout, entries: usize) -> Self {
-        Self { layout, buffer: Vec::with_capacity(entries * layout.stride()), count: 0 }
+        Self {
+            layout,
+            buffer: Vec::with_capacity(entries * layout.stride()),
+            count: 0,
+        }
     }
 
     /// The layout entries are packed in.
@@ -147,7 +155,10 @@ impl GpuColumnBuffer {
     #[inline]
     pub fn entry_range(&self, index: usize) -> UploadRange {
         let stride = self.stride();
-        UploadRange { offset: index * stride, len: stride }
+        UploadRange {
+            offset: index * stride,
+            len: stride,
+        }
     }
 
     /// (Re)pack **every** entry from `globals`, resizing the buffer to match.
@@ -160,12 +171,19 @@ impl GpuColumnBuffer {
         self.buffer.clear();
         self.buffer.resize(self.count * stride, 0);
         for (i, global) in globals.iter().enumerate() {
-            pack_entry(self.layout, &global.affine(), &mut self.buffer[i * stride..(i + 1) * stride]);
+            pack_entry(
+                self.layout,
+                &global.affine(),
+                &mut self.buffer[i * stride..(i + 1) * stride],
+            );
         }
         if self.buffer.is_empty() {
             Vec::new()
         } else {
-            vec![UploadRange { offset: 0, len: self.buffer.len() }]
+            vec![UploadRange {
+                offset: 0,
+                len: self.buffer.len(),
+            }]
         }
     }
 
@@ -181,11 +199,7 @@ impl GpuColumnBuffer {
     ///
     /// When `dirty` is empty this writes nothing and returns an empty plan, so
     /// a static frame uploads zero bytes.
-    pub fn pack_dirty(
-        &mut self,
-        globals: &[GlobalTransform],
-        dirty: &[u32],
-    ) -> Vec<UploadRange> {
+    pub fn pack_dirty(&mut self, globals: &[GlobalTransform], dirty: &[u32]) -> Vec<UploadRange> {
         let stride = self.stride();
 
         // Keep the backing store sized to the live entity set. Growth is the
@@ -263,8 +277,7 @@ fn rows_3x4(a: &Affine3) -> [f32; 12] {
     let m = a.matrix3;
     let t = a.translation;
     [
-        m.x_axis.x, m.y_axis.x, m.z_axis.x, t.x,
-        m.x_axis.y, m.y_axis.y, m.z_axis.y, t.y,
+        m.x_axis.x, m.y_axis.x, m.z_axis.x, t.x, m.x_axis.y, m.y_axis.y, m.z_axis.y, t.y,
         m.x_axis.z, m.y_axis.z, m.z_axis.z, t.z,
     ]
 }
@@ -276,10 +289,8 @@ fn rows_4x4(a: &Affine3) -> [f32; 16] {
     let m = a.matrix3;
     let t = a.translation;
     [
-        m.x_axis.x, m.y_axis.x, m.z_axis.x, t.x,
-        m.x_axis.y, m.y_axis.y, m.z_axis.y, t.y,
-        m.x_axis.z, m.y_axis.z, m.z_axis.z, t.z,
-        0.0, 0.0, 0.0, 1.0,
+        m.x_axis.x, m.y_axis.x, m.z_axis.x, t.x, m.x_axis.y, m.y_axis.y, m.z_axis.y, t.y,
+        m.x_axis.z, m.y_axis.z, m.z_axis.z, t.z, 0.0, 0.0, 0.0, 1.0,
     ]
 }
 

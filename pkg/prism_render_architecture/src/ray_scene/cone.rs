@@ -532,7 +532,11 @@ mod tests {
         assert!(approx(hit.t, 5.0, 1e-4), "t = {}", hit.t);
         assert!(hit.front_face);
         // Base cap outward normal is -z; oriented against the +z ray it stays -z.
-        assert!(approx(hit.normal[2], -1.0, 1e-4), "normal = {:?}", hit.normal);
+        assert!(
+            approx(hit.normal[2], -1.0, 1e-4),
+            "normal = {:?}",
+            hit.normal
+        );
     }
 
     #[test]
@@ -591,7 +595,13 @@ mod tests {
             base[1] + rng.range(-3.0, 3.0),
             base[2] + rng.range(0.5, 3.0),
         ];
-        Cone::new(base, top, rng.range(0.3, 1.5), rng.range(0.0, 1.2), primitive)
+        Cone::new(
+            base,
+            top,
+            rng.range(0.3, 1.5),
+            rng.range(0.0, 1.2),
+            primitive,
+        )
     }
 
     fn random_scene(rng: &mut Rng, count: u32) -> Vec<Cone> {

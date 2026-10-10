@@ -32,8 +32,8 @@
 
 use glam::{Quat, Vec3};
 use prism_physics_gpu::{
-    cpu_solve_contacts_tgs, GpuContext, GpuRigidTgsContactSolver, IntegratorConfig,
-    RigidBodyState, RigidContact, TgsContactConfig,
+    cpu_solve_contacts_tgs, GpuContext, GpuRigidTgsContactSolver, IntegratorConfig, RigidBodyState,
+    RigidContact, TgsContactConfig,
 };
 
 /// Absolute per-quantity divergence floor between the two engines.
@@ -287,22 +287,50 @@ fn gpu_rigid_tgs_contact_solver_matches_cpu_golden() {
 
     let (state, contacts, integrator) = resting_box_scene();
     run_parity(
-        &ctx, &solver, &state, &contacts, &integrator, &tgs, 120, "resting_box",
+        &ctx,
+        &solver,
+        &state,
+        &contacts,
+        &integrator,
+        &tgs,
+        120,
+        "resting_box",
     );
 
     let (state, contacts, integrator) = head_on_scene();
     run_parity(
-        &ctx, &solver, &state, &contacts, &integrator, &tgs, 5, "head_on",
+        &ctx,
+        &solver,
+        &state,
+        &contacts,
+        &integrator,
+        &tgs,
+        5,
+        "head_on",
     );
 
     let (state, contacts, integrator) = off_centre_scene();
     run_parity(
-        &ctx, &solver, &state, &contacts, &integrator, &tgs, 5, "off_centre",
+        &ctx,
+        &solver,
+        &state,
+        &contacts,
+        &integrator,
+        &tgs,
+        5,
+        "off_centre",
     );
 
     let (state, contacts, integrator) = stack_scene();
     run_parity(
-        &ctx, &solver, &state, &contacts, &integrator, &tgs, 120, "stack",
+        &ctx,
+        &solver,
+        &state,
+        &contacts,
+        &integrator,
+        &tgs,
+        120,
+        "stack",
     );
 
     // The rigid Baumgarte limit (zero contact frequency) exercises a different

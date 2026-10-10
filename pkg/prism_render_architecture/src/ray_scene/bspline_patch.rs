@@ -271,7 +271,10 @@ mod tests {
         let p = domed_patch();
         let peak = p.point(0.5, 0.5)[2];
         assert!(peak > 0.0, "peak should bulge up, got {peak}");
-        assert!(peak < 0.5, "peak must stay below control height, got {peak}");
+        assert!(
+            peak < 0.5,
+            "peak must stay below control height, got {peak}"
+        );
         // No corner interpolates its nearest inner control point.
         let c = p.control();
         assert!(len(sub(p.point(0.0, 0.0), c[5])) > 0.1);

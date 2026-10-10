@@ -90,8 +90,10 @@ pub fn build_dihedral_bending(
     triangles: &[[u32; 3]],
     compliance: Compliance,
 ) -> Vec<BendingConstraint> {
-    let glam_positions: Vec<glam::Vec3> =
-        positions.iter().map(|p| physics_bridge::to_glam(*p)).collect();
+    let glam_positions: Vec<glam::Vec3> = positions
+        .iter()
+        .map(|p| physics_bridge::to_glam(*p))
+        .collect();
     prism_physics_core::soft::constraint::build_dihedral_bending(
         &glam_positions,
         triangles,
