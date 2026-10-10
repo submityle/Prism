@@ -1,10 +1,12 @@
 //! The generational dense arena mapping [`AssetId`] to stored values.
 
+use crate::asset::Asset;
 use crate::error::AssetErrorId;
 use crate::event::AssetEvent;
 use crate::handle::{Handle, HandleInner};
 use crate::id::{AssetId, AssetIndex, UntypedAssetId};
 use crate::load_state::LoadState;
+use crate::type_id::AssetTypeId;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
@@ -53,7 +55,7 @@ enum Payload<A> {
     Failed(AssetErrorId),
 }
 
-impl<A> Assets<A> {
+impl<A: Asset> Assets<A> {
     /// Creates an empty arena.
     #[must_use]
     pub fn new() -> Self {
@@ -96,7 +98,7 @@ impl<A> Assets<A> {
 
         let slot = &mut self.slots[index as usize];
         let asset_index = AssetIndex::from_parts(index, slot.generation);
-        let untyped = UntypedAssetId::new(asset_index);
+        let untyped = UntypedAssetId::new(asset_index, AssetTypeId::of::<A>());
         let arc = HandleInner::new_arc(untyped);
         slot.entry = Some(Entry {
             payload,
@@ -318,7 +320,7 @@ impl<A> Assets<A> {
     }
 }
 
-impl<A> Default for Assets<A> {
+impl<A: Asset> Default for Assets<A> {
     fn default() -> Self {
         Self::new()
     }

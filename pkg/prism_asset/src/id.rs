@@ -1,5 +1,7 @@
 //! Stable asset identity: generational slot ids and typed/untyped asset ids.
 
+use crate::asset::Asset;
+use crate::type_id::AssetTypeId;
 use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
@@ -62,11 +64,20 @@ impl<A: ?Sized> AssetId<A> {
     pub const fn index(self) -> AssetIndex {
         self.index
     }
+}
 
-    /// Erases the type tag.
+impl<A: Asset> AssetId<A> {
+    /// Erases the compile-time type tag into a runtime [`AssetTypeId`], so the
+    /// resulting [`UntypedAssetId`] can later be re-typed with a checked
+    /// [`UntypedAssetId::typed`] that rejects a cross-type mismatch (design
+    /// §20). Not `const` because the type id is a runtime hash of
+    /// [`Asset::TYPE_NAME`].
     #[must_use]
-    pub const fn untyped(self) -> UntypedAssetId {
-        UntypedAssetId { index: self.index }
+    pub fn untyped(self) -> UntypedAssetId {
+        UntypedAssetId {
+            index: self.index,
+            type_id: AssetTypeId::of::<A>(),
+        }
     }
 }
 
@@ -106,16 +117,25 @@ impl<A: ?Sized> fmt::Debug for AssetId<A> {
 }
 
 /// A type-erased asset id, used by untyped handles and the dependency graph.
+///
+/// Unlike [`AssetId`], it carries the asset's [`AssetTypeId`] *as data* so the
+/// kernel can store heterogeneous ids together (handles, the dependency graph,
+/// soft references) and still re-type them safely: [`UntypedAssetId::typed`]
+/// returns `None` when the requested type does not match the one the id was
+/// minted for, turning a silent wrong-store lookup into a diagnosable miss
+/// (design §20). Equality, ordering, and hashing all include the type id, so a
+/// slot index reused across asset types never collides.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct UntypedAssetId {
     index: AssetIndex,
+    type_id: AssetTypeId,
 }
 
 impl UntypedAssetId {
-    /// Wraps an [`AssetIndex`] without a type tag.
+    /// Wraps an [`AssetIndex`] together with the asset's [`AssetTypeId`].
     #[must_use]
-    pub const fn new(index: AssetIndex) -> Self {
-        Self { index }
+    pub const fn new(index: AssetIndex, type_id: AssetTypeId) -> Self {
+        Self { index, type_id }
     }
 
     /// The underlying generational slot id.
@@ -124,16 +144,42 @@ impl UntypedAssetId {
         self.index
     }
 
-    /// Re-applies a type tag. The caller asserts the id was minted for `A`;
-    /// this is a pure value re-wrap and cannot cause memory unsafety, but
-    /// resolving a mismatched id in [`Assets`](crate::Assets) simply misses.
+    /// The asset type this id was minted for.
     #[must_use]
-    pub const fn typed<A: ?Sized>(self) -> AssetId<A> {
+    pub const fn type_id(self) -> AssetTypeId {
+        self.type_id
+    }
+
+    /// Whether this id was minted for asset type `A`.
+    #[must_use]
+    pub fn is<A: Asset>(self) -> bool {
+        self.type_id == AssetTypeId::of::<A>()
+    }
+
+    /// Re-applies the compile-time type tag `A`, but only if it matches the
+    /// type this id was minted for; otherwise returns `None`. This is the
+    /// type-safe erasure boundary of the kernel (design §20): a
+    /// `UntypedAssetId` for a texture cannot be silently viewed as a mesh id.
+    #[must_use]
+    pub fn typed<A: Asset>(self) -> Option<AssetId<A>> {
+        if self.is::<A>() {
+            Some(AssetId::new(self.index))
+        } else {
+            None
+        }
+    }
+
+    /// Re-applies a type tag without checking it, for callers that already hold
+    /// a type invariant for this id (for example a typed [`Handle`] re-reading
+    /// its own id). Prefer [`UntypedAssetId::typed`] at any boundary where the
+    /// type is not already guaranteed.
+    #[must_use]
+    pub const fn typed_unchecked<A: ?Sized>(self) -> AssetId<A> {
         AssetId::new(self.index)
     }
 }
 
-impl<A: ?Sized> From<AssetId<A>> for UntypedAssetId {
+impl<A: Asset> From<AssetId<A>> for UntypedAssetId {
     fn from(id: AssetId<A>) -> Self {
         id.untyped()
     }

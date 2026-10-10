@@ -11,10 +11,14 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// A deliberately non-`Clone`, non-`Default` payload to prove storage never
-/// imposes bounds on the stored type.
+/// A deliberately non-`Clone`, non-`Default` payload: storage only requires
+/// the lightweight [`Asset`] marker (needed to mint type-tagged ids), never
+/// `Clone`/`Default`/`Send` on the stored value.
 struct Mesh {
     verts: u32,
+}
+impl Asset for Mesh {
+    const TYPE_NAME: &'static str = "prism_asset::tests::Mesh";
 }
 
 #[test]
@@ -30,7 +34,7 @@ fn asset_id_untyped_round_trip() {
     let typed: AssetId<Mesh> = AssetId::new(index);
     let untyped = typed.untyped();
     assert_eq!(untyped.index(), index);
-    let back: AssetId<Mesh> = untyped.typed();
+    let back: AssetId<Mesh> = untyped.typed().expect("same type round-trips");
     assert_eq!(back, typed);
     assert_eq!(UntypedAssetId::from(typed), untyped);
 }
@@ -203,7 +207,7 @@ fn untyped_handle_round_trips() {
     let untyped = handle.untyped();
     assert_eq!(untyped.id(), handle.untyped_id());
     assert_eq!(untyped.handle_id(), handle.handle_id());
-    let typed: crate::Handle<Mesh> = untyped.typed();
+    let typed: crate::Handle<Mesh> = untyped.typed::<Mesh>().expect("same type round-trips");
     assert_eq!(typed.id(), handle.id());
 }
 
@@ -398,7 +402,7 @@ fn asset_event_failed_carries_error() {
 
 /// Builds an [`UntypedAssetId`] for graph tests from a raw index.
 fn node(index: u32) -> UntypedAssetId {
-    UntypedAssetId::new(AssetIndex::from_parts(index, 0))
+    UntypedAssetId::new(AssetIndex::from_parts(index, 0), AssetTypeId::of::<Mesh>())
 }
 
 #[test]
@@ -631,8 +635,8 @@ fn asset_type_id_is_stable_and_type_specific() {
 
 #[test]
 fn asset_visit_dependencies_reports_every_reference() {
-    let a = UntypedAssetId::new(AssetIndex::from_parts(1, 0));
-    let b = UntypedAssetId::new(AssetIndex::from_parts(2, 0));
+    let a = UntypedAssetId::new(AssetIndex::from_parts(1, 0), AssetTypeId::of::<Image>());
+    let b = UntypedAssetId::new(AssetIndex::from_parts(2, 0), AssetTypeId::of::<Image>());
     let material = Material {
         textures: vec![a, b],
     };
@@ -645,7 +649,7 @@ fn asset_visit_dependencies_reports_every_reference() {
 fn error_registry_records_and_resolves() {
     let mut registry = ErrorRegistry::new();
     assert!(registry.is_empty());
-    let dependent = UntypedAssetId::new(AssetIndex::from_parts(9, 1));
+    let dependent = UntypedAssetId::new(AssetIndex::from_parts(9, 1), AssetTypeId::of::<Image>());
     let id0 = registry.record(AssetError::new("a.png", "file not found"));
     let id1 = registry.record(AssetError::new("b.png", "decode failed").with_dependent(dependent));
     assert_eq!(registry.len(), 2);

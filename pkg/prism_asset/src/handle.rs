@@ -59,9 +59,13 @@ impl<A: ?Sized> Handle<A> {
     }
 
     /// The typed id this handle points at.
+    ///
+    /// A live [`Handle<A>`] is only ever created for an allocation minted as
+    /// `A`, so re-applying the tag is sound; we use the unchecked re-type
+    /// because `A` may be `?Sized` and cannot run the [`Asset`]-bounded check.
     #[must_use]
     pub fn id(&self) -> AssetId<A> {
-        self.inner.id.typed()
+        self.inner.id.typed_unchecked()
     }
 
     /// The type-erased id this handle points at.
@@ -208,10 +212,24 @@ impl UntypedHandle {
         Arc::strong_count(&self.inner)
     }
 
-    /// Re-applies a type tag, yielding a typed [`Handle`] that shares this
-    /// handle's strong reference.
+    /// Re-applies the compile-time type tag `A`, yielding a typed [`Handle`]
+    /// that shares this handle's strong reference, but only if `A` matches the
+    /// type the underlying id was minted for; otherwise returns `None`. This is
+    /// the type-safe erasure boundary for handles (design §20).
     #[must_use]
-    pub fn typed<A: ?Sized>(&self) -> Handle<A> {
+    pub fn typed<A: Asset>(&self) -> Option<Handle<A>> {
+        if self.inner.id.is::<A>() {
+            Some(Handle::from_arc(Arc::clone(&self.inner)))
+        } else {
+            None
+        }
+    }
+
+    /// Re-applies a type tag without checking it, for callers that already hold
+    /// a type invariant for this handle. Prefer [`UntypedHandle::typed`] at any
+    /// boundary where the type is not already guaranteed.
+    #[must_use]
+    pub fn typed_unchecked<A: ?Sized>(&self) -> Handle<A> {
         Handle::from_arc(Arc::clone(&self.inner))
     }
 }
