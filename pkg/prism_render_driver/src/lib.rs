@@ -19,7 +19,9 @@ extern crate alloc;
 
 mod binding;
 mod blend;
+mod budget;
 mod buffer;
+mod cache;
 mod capabilities;
 mod color;
 mod command;
@@ -28,11 +30,16 @@ mod device;
 mod flags;
 mod format;
 mod pipeline;
+mod reclaim;
 mod resource;
 mod sampler;
 mod shader;
+mod slotmap;
 mod state;
+mod suballoc;
+mod sync;
 mod texture;
+mod tracker;
 mod vertex;
 
 pub use binding::{
@@ -57,21 +64,34 @@ pub use pipeline::{
     PushConstantRange, RenderPipelineDescriptor, VertexState,
 };
 pub use resource::{
-    BindGroupId, BindGroupLayoutId, BufferId, ComputePipelineId, PipelineLayoutId, RenderPipelineId,
-    ResourceId, SamplerId, ShaderModuleId, TextureId, TextureViewId,
+    BindGroupId, BindGroupLayoutId, BufferId, ComputePipelineId, PipelineLayoutId,
+    RenderPipelineId, ResourceId, SamplerId, ShaderModuleId, TextureId, TextureViewId,
 };
 pub use sampler::{AddressMode, FilterMode, SamplerBorderColor, SamplerDescriptor};
 pub use shader::{ShaderModuleDescriptor, ShaderSource};
 pub use state::{
-    DepthBiasState, DepthStencilState, Face, FrontFace, IndexFormat, MultisampleState,
-    PolygonMode, PrimitiveState, PrimitiveTopology, StencilFaceState, StencilOperation,
-    StencilState,
+    DepthBiasState, DepthStencilState, Face, FrontFace, IndexFormat, MultisampleState, PolygonMode,
+    PrimitiveState, PrimitiveTopology, StencilFaceState, StencilOperation, StencilState,
 };
 pub use texture::{
     Extent3d, TextureAspect, TextureDescriptor, TextureDimension, TextureViewDescriptor,
     TextureViewDimension,
 };
 pub use vertex::{VertexAttribute, VertexBufferLayout, VertexStepMode};
+
+pub use budget::{HeapUsage, MemoryBudget, MemoryHeap};
+pub use cache::{CacheStats, ContentCache};
+pub use reclaim::{DeferredDeleter, FrameIndex};
+pub use slotmap::GenerationalSlotMap;
+pub use suballoc::{
+    Allocation, BuddyAllocator, LinearAllocator, Region, RingAllocator, TlsfAllocator,
+};
+pub use sync::{
+    merge_read_buffer_states, merge_read_texture_states, Accesses, Barrier, BarrierKind,
+    BufferBarrier, BufferState, PipelineStages, QueueKind, SubresourceRange, TextureBarrier,
+    TextureLayout, TextureState,
+};
+pub use tracker::{optimize_batch, split_barrier, StateTracker};
 
 /// The common imports for building render pipelines and recording commands.
 ///
@@ -85,9 +105,9 @@ pub mod prelude {
         ComputePipelineDescriptor, DepthStencilState, DeviceCapabilities, Extent3d, Features,
         FilterMode, FragmentState, IndexFormat, Limits, LoadOp, MultisampleState,
         PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology, RenderCommand, RenderDevice,
-        RenderPassDescriptor, RenderPipelineDescriptor, RenderQueue, SamplerDescriptor, ShaderStages,
-        StoreOp, TextureDescriptor, TextureFormat, TextureId, TextureUsages, TextureViewDescriptor,
-        VertexBufferLayout, VertexFormat, VertexState,
+        RenderPassDescriptor, RenderPipelineDescriptor, RenderQueue, SamplerDescriptor,
+        ShaderStages, StoreOp, TextureDescriptor, TextureFormat, TextureId, TextureUsages,
+        TextureViewDescriptor, VertexBufferLayout, VertexFormat, VertexState,
     };
 }
 
