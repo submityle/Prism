@@ -11,6 +11,7 @@
 //! | [`Bundle`]             | `unsafe impl prism_ecs::bundle::Bundle`      |
 //! | [`Resource`]           | `impl prism_ecs::resource::Resource`         |
 //! | [`Event`]              | `impl prism_ecs::event::Event`               |
+//! | [`SystemParam`]        | `unsafe impl prism_ecs::system::SystemParam` |
 //!
 //! All generated code refers to the target traits and types through the
 //! **absolute path** `prism_ecs::...`, so the derives can be invoked from any
@@ -27,12 +28,14 @@
 //! [`Bundle`]: macro@Bundle
 //! [`Resource`]: macro@Resource
 //! [`Event`]: macro@Event
+//! [`SystemParam`]: macro@SystemParam
 
 mod bundle;
 mod common;
 mod component;
 mod event;
 mod resource;
+mod system_param;
 mod systemset;
 
 use proc_macro::TokenStream;
@@ -226,6 +229,46 @@ pub fn derive_resource(input: TokenStream) -> TokenStream {
 pub fn derive_event(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     event::expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+/// Derive [`prism_ecs::system::SystemParam`] for a `struct` whose fields are
+/// each a [`SystemParam`], producing a single composite parameter.
+///
+/// This lets a system take one named bundle of parameters instead of a long
+/// positional tuple (design §18); the generated impl generalises the
+/// hand-written tuple impl in `prism_ecs::system::param`.
+///
+/// # Lifetime contract
+///
+/// A derived struct may declare at most the two lifetimes `'w` (world borrow)
+/// and `'s` (per-system state borrow), named exactly `w`/`s` and in that
+/// order. Any other lifetime name, a reversed order, or additional lifetimes
+/// is a compile error. Type and const generics are unrestricted and are
+/// threaded through verbatim. Each field type must itself be a `SystemParam`;
+/// enums and unions are rejected.
+///
+/// # Examples
+///
+/// ```ignore
+/// use prism_ecs::prelude::*;
+///
+/// #[derive(SystemParam)]
+/// struct PhysicsCtx<'w, 's> {
+///     clock: Res<'w, Clock>,
+///     score: ResMut<'w, Score>,
+///     scratch: Local<'s, Vec<Entity>>,
+///     commands: Commands<'w, 's>,
+/// }
+///
+/// fn step(ctx: PhysicsCtx) { /* ctx.clock, ctx.score, ctx.scratch, ctx.commands */ }
+/// ```
+///
+/// [`SystemParam`]: prism_ecs::system::SystemParam
+#[proc_macro_derive(SystemParam)]
+pub fn derive_system_param(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    system_param::expand(&input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
