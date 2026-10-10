@@ -4,8 +4,8 @@
 //! lifetime, change events, dependency ordering, and load-state folding.
 
 use crate::{
-    AssetEvent, AssetId, AssetIndex, AssetPath, Assets, DependencyError, DependencyGraph,
-    LoadState, RecursiveDependencyLoadState, UntypedAssetId,
+    AssetError, AssetErrorId, AssetEvent, AssetId, AssetIndex, AssetPath, Assets, DependencyError,
+    DependencyGraph, ErrorRegistry, LoadState, RecursiveDependencyLoadState, UntypedAssetId,
 };
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -208,19 +208,39 @@ fn untyped_handle_round_trips() {
 }
 
 #[test]
+fn load_state_is_copy_and_small() {
+    // `LoadState` must stay `Copy` so it can live by value in components and
+    // cross the main/render split without cloning. A `Failed` id costs 4 bytes.
+    let s = LoadState::Failed(mk_error());
+    let copied = s; // move-by-copy; `s` is still usable afterwards.
+    assert_eq!(s, copied);
+    assert!(size_of::<LoadState>() <= 8);
+}
+
+/// Records one error in a throwaway registry and returns its id.
+fn mk_error() -> AssetErrorId {
+    let mut reg = ErrorRegistry::new();
+    reg.record(AssetError::new("tex/a.png", "io"))
+}
+
+#[test]
 fn load_state_helpers() {
+    let err = mk_error();
     assert!(LoadState::Loaded.is_loaded());
     assert!(LoadState::Loading.is_loading());
-    assert!(LoadState::Failed("io".to_string()).is_failed());
+    assert!(LoadState::Failed(err).is_failed());
+    assert_eq!(LoadState::Failed(err).error(), Some(err));
+    assert_eq!(LoadState::Loaded.error(), None);
     assert_eq!(LoadState::default(), LoadState::NotLoaded);
 }
 
 #[test]
 fn recursive_load_state_combine_precedence() {
     use RecursiveDependencyLoadState as R;
+    let err = mk_error();
     // Failed dominates everything.
-    assert!(R::Loaded.combine(R::Failed("x".to_string())).is_failed());
-    assert!(R::Failed("x".to_string()).combine(R::Loading).is_failed());
+    assert!(R::Loaded.combine(R::Failed(err)).is_failed());
+    assert!(R::Failed(err).combine(R::Loading).is_failed());
     // Then Loading beats NotLoaded and Loaded.
     assert_eq!(R::Loaded.combine(R::Loading), R::Loading);
     // Then NotLoaded beats Loaded.
@@ -230,13 +250,47 @@ fn recursive_load_state_combine_precedence() {
 }
 
 #[test]
+fn recursive_load_state_combine_keeps_first_failure() {
+    use RecursiveDependencyLoadState as R;
+    let mut reg = ErrorRegistry::new();
+    let first = reg.record(AssetError::new("a", "a-reason"));
+    let second = reg.record(AssetError::new("b", "b-reason"));
+    assert_ne!(first, second);
+    // When both sides failed, the left-hand failure is preserved.
+    assert_eq!(
+        R::Failed(first).combine(R::Failed(second)).error(),
+        Some(first)
+    );
+}
+
+#[test]
 fn recursive_load_state_from_load_state() {
     use RecursiveDependencyLoadState as R;
-    assert_eq!(R::from(&LoadState::NotLoaded), R::NotLoaded);
-    assert_eq!(R::from(&LoadState::Loading), R::Loading);
-    assert_eq!(R::from(&LoadState::Loaded), R::Loaded);
-    let failed = R::from(&LoadState::Failed("disk".to_string()));
-    assert_eq!(failed, R::Failed("disk".to_string()));
+    let err = mk_error();
+    assert_eq!(R::from(LoadState::NotLoaded), R::NotLoaded);
+    assert_eq!(R::from(LoadState::Loading), R::Loading);
+    assert_eq!(R::from(LoadState::Loaded), R::Loaded);
+    assert_eq!(R::from(LoadState::Failed(err)), R::Failed(err));
+}
+
+#[test]
+fn asset_event_failed_carries_error() {
+    let mut reg = ErrorRegistry::new();
+    let err = reg.record(AssetError::new("tex/a.png", "io"));
+    let other = reg.record(AssetError::new("x", "y"));
+    assert_ne!(err, other);
+    let id = AssetId::<()>::new(AssetIndex::from_parts(3, 0));
+    let ev = AssetEvent::Failed { id, error: err };
+    assert!(ev.is_failed());
+    assert_eq!(ev.error(), Some(err));
+    assert_eq!(ev.id(), id);
+    // Two failures of the same asset with different errors are not equal.
+    let ev2 = AssetEvent::Failed { id, error: other };
+    assert_ne!(ev, ev2);
+    // Non-failure events report no error.
+    let added: AssetEvent<()> = AssetEvent::Added { id };
+    assert_eq!(added.error(), None);
+    assert!(!added.is_failed());
 }
 
 /// Builds an [`UntypedAssetId`] for graph tests from a raw index.
@@ -331,10 +385,7 @@ fn dependency_error_display_is_readable() {
 
 // --- M1: stable identity, type ids, assets, errors, soft handles, schemes ---
 
-use crate::{
-    direct_dependencies, normalize_path, Asset, AssetError, AssetTypeId, ErrorRegistry, SoftHandle,
-    StableGuid,
-};
+use crate::{direct_dependencies, normalize_path, Asset, AssetTypeId, SoftHandle, StableGuid};
 
 /// A leaf asset with no dependencies, for identity/type tests.
 struct Image;
