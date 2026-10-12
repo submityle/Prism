@@ -6,7 +6,7 @@
 > 运行时后端：**wgpu**（Metal/Vulkan/D3D12/WebGPU/主机/移动全覆盖）
 > 本文依据：对 `pkg/prism_render_material`、`prism_render_shading`、`prism_render_scene/src/shaders/*.wesl`、`prism_render_architecture` 的静态阅读（以代码为准）
 > 核心命题：**没有全局硬顶，不做运行时塌缩，也不做 per-pixel 预算裁剪。模型开放可扩展，每材质按声明静态特化成它确切需要的瓣集与特征——"界"是每材质编译期事实，不是全局天花板。分层在烘焙期解析成同参数化纹理空间混合（层数天然不限）；距离/性能靠纹理预过滤 + 高光抗锯齿 + 静态置换 + 采样缩放，全程无损、确定、跨平台。**
-> 规范参数化：**运行时 über 以 OpenPBR Surface（ASWF/Adobe/Autodesk 2024）为规范核心，Prism über 是 OpenPBR 的真超集**——`Prism über = OpenPBR Surface（全字段） ∪ { FACE 私有瓣 } ∪ { 开放词汇表后续瓣 }`。现有 7 瓣只是今天未补齐的实现子集；补齐缺口（thin_film 虹彩、coat/fuzz/subsurface 全字段等）是对开放词汇表的**加法扩充**，不是改架构。超集成立的三条硬约束见 §4.5（纯 OpenPBR 子集合规对拍 / 扩展位段隔离 / 向下投影）。FACE 作为 OpenPBR 之外的 Prism 私有瓣服务 NPR。
+> 规范参数化：**运行时 über 以 OpenPBR Surface（ASWF/Adobe/Autodesk 2024）为规范核心，Prism über 是 OpenPBR 的真超集**——`Prism über = OpenPBR Surface（全字段） ∪ { NPR_FACE 私有瓣 } ∪ { 开放词汇表后续瓣 }`。现有 7 瓣只是今天未补齐的实现子集；补齐缺口（thin_film 虹彩、coat/fuzz/subsurface 全字段等）是对开放词汇表的**加法扩充**，不是改架构。超集成立的三条硬约束见 §4.5（纯 OpenPBR 子集合规对拍 / 扩展位段隔离 / 向下投影）。NPR_FACE 作为 OpenPBR 之外的 Prism 私有瓣服务 NPR。
 > 四线正交：**PBR / NPR / 混合 / 自定义不是四条管线，而是同一条 OpenPBR über 上的正交响应模式**，由 `axis.rs` 的 `illumination` 轴 + `render_class` + 可选 `custom_program` 钩子选择；共享同一套参数解包、per-tile 分类与降级。
 > 最后更新：2026-10-10（v10 结构性重构：PCM 能力基座从“升级方向”提升为顶层 §5（“超集”的完整模型）；原 §5–§15 顺延为 §6–§16；原 §16“设计升级方向”收敛为纯可选演进并顺延为 §17；全文章节与交叉引用整体重编号。）
 
@@ -41,7 +41,7 @@
 |---|---|---|---|
 | `MATERIAL_ABI_VERSION = 4` | `record.rs:7` | GPU header 契约版本 | bump 到 5（破坏性） |
 | `MAX_MATERIAL_TEXTURES = 8` | `record.rs:8` | 纹理槽硬上限 | **删**，改 VT 页引用（§9） |
-| `LobeMask::COUNT = 7` | `surface.rs:153` | EMISSION/CLEARCOAT/ANISOTROPY/SHEEN/SUBSURFACE/TRANSMISSION/FACE | 改为**开放 enum**（词汇表可增，mask 位宽留足），不作天花板 |
+| `LobeMask::COUNT = 7` | `surface.rs` | EMISSION/CLEARCOAT/ANISOTROPY/SHEEN/SUBSURFACE/TRANSMISSION/**NPR_FACE** | 改为**开放 enum**（词汇表可增，mask 位宽留足），不作天花板 |
 | 核心 12 words + 每 lobe 4 words，变长打包 | `surface.rs` | WESL `material_unpack.wesl::prism_unpack_surface` 字节级镜像 | 保留变长打包，去掉 COUNT 作为上限的语义 |
 | `MAX_CLOSURE_SLAB_DEPTH = 4`，仅 Mix/Layer 计深度 | `ir.rs:9` / `slab_depth()` | 超限 → `ClosureSlabTooDeep` | **删**，运行时无闭包图,无需定界 |
 | 9-way 着色分类（prefix-sum/scatter，无 readback） | `classification.rs` / `material_classification.wesl` | `classify_count → prefix_classes → scatter_work` 共享 ABI | 保留，不加 tier 维度 |
@@ -117,7 +117,7 @@
 | 线 | 轴选择（代码） | 作者层（OpenPBR Surface +） | 烘焙产物 | 运行时响应 | 降级 |
 |---|---|---|---|---|---|
 | **PBR 物理** | `Illumination::Lit(0)` | OpenPBR 全瓣参数 | OpenPBR über 块 + lobe_mask | 能量守恒 BSDF（多散射 GGX、菲涅尔、瓣叠加） | VT mip + 高光抗锯齿 + 采样缩放（§7） |
-| **NPR 风格化** | `Illumination::Stylized(1)` | OpenPBR base + Prism 私有 FACE 瓣 + ramp/描边参数 | 同 über 块 + FACE 瓣 + ramp LUT(VT 页) | ramp 量化 / SDF 面阴影 / 描边：对**同一光照输入**的非物理响应 | ramp LUT mip；描边宽随距离；瓣集恒定 |
+| **NPR 风格化** | `Illumination::Stylized(1)` | OpenPBR base + Prism 私有 NPR_FACE 瓣 + ramp/描边参数 | 同 über 块 + NPR_FACE 瓣 + ramp LUT(VT 页) | ramp 量化 / SDF 面阴影 / 描边：对**同一光照输入**的非物理响应 | ramp LUT mip；描边宽随距离；瓣集恒定 |
 | **混合 Hybrid** | 逐材质/逐区域 `illumination`（PBR 底 + NPR 覆盖，遮罩选择） | 两套响应参数并存 + 选择遮罩 | 单一 über，illumination 可按区域切 | per-tile 分类把 Lit/Stylized 分到不同波前，避免发散 | 两路各自无损降级，合成相加 |
 | **自定义 Custom** | `Illumination::Custom(3)` + `custom_program` 句柄 | 作者挂自定义 WESL 片段/子图（编译期编入置换） | über 参数 + `custom_program` id | 走自定义着色入口，仍**复用 OpenPBR über 解包 + per-tile 分类** | 自定义程序声明自己的采样缩放钩子 |
 
@@ -149,10 +149,10 @@
 
 - **效果**：
   - **光照量化 ramp**：缓存"量化前的连续辐照度"（N·L 带状化前），采样期查 ramp LUT 施加量化曲线——连续量缓存更稳、避免档边闪烁（§14.3 已定此切分）；
-  - **SDF 面阴影（FACE 瓣，`surface.rs::softness`）**：miHoYo 式脸部阴影随光照方位平滑过渡；FACE 是 **OpenPBR 之外的 Prism 私有瓣**（§4.4），由 `Illumination::Stylized(1)` 消费；
+  - **SDF 面阴影（NPR_FACE 瓣，`surface.rs::softness`）**：miHoYo 式脸部阴影随光照方位平滑过渡；NPR_FACE 是 **OpenPBR 之外的 Prism 私有瓣**（§4.4），由 `Illumination::Stylized(1)` 消费；
   - **描边**：屏幕空间几何（背面挤出 / 后处理法线·深度边缘），**永远屏幕空间**，宽度随距离收敛；
   - **风格化高光**：阶跃锐边 / matcap / Kajiya-Kay 发丝各向异性高光。
-- **性能**：ramp/matcap/FACE 均为 **LUT 或单张贴图采样**（廉价）；量化在采样期逐像素查表（便宜且防档跳）；描边为一次后处理；NPR 可缓存项（ramp 输入辐照度、材质色、面阴影采样）进 §14.3，描边与锐边高光屏幕空间。**不变量：PBR/NPR 精度从架构上就一致，无按线特判**——缓存只存传递无关的感知均匀入射辐照度（四线共用一份，§14.3/§14.8），ramp/BRDF 等响应全在采样期施加；NPR 台阶锐度由采样期对解码辐照度的屏幕梯度做解析抗锯齿生成，**与缓存位深解耦**（§14.8），故既不降 NPR 精度、PBR/NPR 又走同一条路径。降级（§7）只作用于采样数/纹理 mip，不碰响应质量。
+- **性能**：ramp/matcap/NPR_FACE 均为 **LUT 或单张贴图采样**（廉价）；量化在采样期逐像素查表（便宜且防档跳）；描边为一次后处理；NPR 可缓存项（ramp 输入辐照度、材质色、面阴影采样）进 §14.3，描边与锐边高光屏幕空间。**不变量：PBR/NPR 精度从架构上就一致，无按线特判**——缓存只存传递无关的感知均匀入射辐照度（四线共用一份，§14.3/§14.8），ramp/BRDF 等响应全在采样期施加；NPR 台阶锐度由采样期对解码辐照度的屏幕梯度做解析抗锯齿生成，**与缓存位深解耦**（§14.8），故既不降 NPR 精度、PBR/NPR 又走同一条路径。降级（§7）只作用于采样数/纹理 mip，不碰响应质量。
 - **易用**：`Toon` archetype；ramp 曲线美术可画、matcap 直给贴图；描边参数与物理参数解耦互不污染；美术不碰 BSDF 也能出稳定风格。
 
 ### 3.5.3 混合线（深化：性能 / 效果 / 易用）
@@ -192,7 +192,7 @@
 ### 4.1 新 crate `prism_render_material_authoring`
 - 输入：OpenPBR Surface 参数集，或 MaterialX 节点图（`.mtlx`），**层数/节点/瓣类不限**。
 - 输出：烘焙层的输入（层栈 + 参数曲线 + 遮罩来源 + 声明的瓣集）。
-- OpenPBR 与现 über 近乎一一对应（base/specular→core，coat→CLEARCOAT，fuzz→SHEEN，subsurface→SUBSURFACE，transmission→TRANSMISSION，anisotropy→ANISOTROPY，emission→EMISSION，Prism 扩展 FACE 给 NPR）；**新瓣可作为开放词汇表的一等成员加入**，不必塞进固定槽。
+- OpenPBR 与现 über 近乎一一对应（base/specular→core，coat→CLEARCOAT，fuzz→SHEEN，subsurface→SUBSURFACE，transmission→TRANSMISSION，anisotropy→ANISOTROPY，emission→EMISSION，Prism 扩展 NPR_FACE 给 NPR）；**新瓣可作为开放词汇表的一等成员加入**，不必塞进固定槽。
 
 ### 4.2 archetype 模板
 预置 `Metal / Skin / Cloth / Glass / Foliage / Toon / CarPaint / Water`，美术选模板填参，不从空图搭。模板也作为**置换聚类锚点**（见 §8.4），把常见瓣集组合收敛成少量热门 permutation。
@@ -206,7 +206,7 @@
 
 ### 4.4 OpenPBR Surface 规范映射与补瓣（加法，不改架构；终态为 OpenPBR 超集）
 
-运行时 über 以 **OpenPBR Surface** 为规范核心，终态是其**真超集**：`Prism über = OpenPBR Surface（全字段） ∪ { FACE } ∪ { 开放词汇表后续瓣 }`。现 `surface.rs` 的核心 12 words + 7 瓣只是今天未补齐的**实现子集**；补齐 = 把现有 4-word lobe 扩成 OpenPBR 全字段 lobe，走变长打包 + 静态置换，**是加法，不改模型族**。补齐完成后，OpenPBR 字段构成超集的「规范核心区」，FACE / 后续开放瓣构成「Prism 扩展区」（位段划分见 §4.5）。
+运行时 über 以 **OpenPBR Surface** 为规范核心，终态是其**真超集**：`Prism über = OpenPBR Surface（全字段） ∪ { NPR_FACE } ∪ { 开放词汇表后续瓣 }`。现 `surface.rs` 的核心 12 words + 7 瓣只是今天未补齐的**实现子集**；补齐 = 把现有 4-word lobe 扩成 OpenPBR 全字段 lobe，走变长打包 + 静态置换，**是加法，不改模型族**。补齐完成后，OpenPBR 字段构成超集的「规范核心区」，NPR_FACE / 后续开放瓣构成「Prism 扩展区」（位段划分见 §4.5）。
 
 > ⚠️ **本节的对账基线已修正**：此前这里的表是手写的近似，与规范原文有出入（例如把 `subsurface_radius` 记成 vec3、漏了 `subsurface_radius_scale`、把 `transmission_scatter` 当 f32），据此得出的"补齐"是**自证式**的。下面的表改为**逐参数**对照 `AcademySoftwareFoundation/OpenPBR` 的 `parametrization` 表（v1.1.1；1.1.1 相对 1.1 只有说明性修改，**无新增参数**）。**判定"纯 OpenPBR 子集"以本表为准**。
 
@@ -250,7 +250,7 @@
 要点：
 - **开放词汇表让补瓣是加法**：新字段扩进对应 lobe 的变长块，位掩码/静态置换天然容纳，老材质不受影响（它们的 lobe_mask 不含新位）。
 - **thin_film 作为开放瓣的首个落地示例**（§10）：验证"新物理项 = 新 lobe 进词汇表"的扩展路径。
-- **FACE 保持 OpenPBR 外**：OpenPBR 是物理 BSDF 标准，不含 NPR；FACE 作为 Prism 私有瓣，由 `Illumination::Stylized` 线消费（§3.5），与 OpenPBR 物理瓣在同一 über 块里共存。
+- **NPR_FACE 保持 OpenPBR 外**：OpenPBR 是物理 BSDF 标准，不含 NPR；NPR_FACE 作为 Prism 私有瓣，由 `Illumination::Stylized` 线消费（§3.5），与 OpenPBR 物理瓣在同一 über 块里共存。
 - **删 `lower_standard_material`**（✅ 已落地，见 §13.a）：外部材质（含 Bevy `StandardMaterial`、glTF）统一经 OpenPBR Surface 导入器映射，不再逐格式写 1:1 翻译层。
 - **超集 = PCM 的一个 kind**：OpenPBR 补瓣只是 `kind=lobe` 的加法扩展；完整的九类扩展点能力基座（瓣只是其一）见 §5。
 
@@ -281,10 +281,10 @@
    **第七片（同轮）transmission 能量模型**：白炉门禁把 translucent base 加进来后测出 **3.74**，诊断出三处语义/能量错位并全部修掉：① `transmission_weight` 是 slab 的**统计混合权重**，原实现却把透射瓣**加**在反射基底上（改成 `base·(1−w) + w·translucent`）；② 透射项是 BRDF，原实现漏了 `1/π`（自身反照率成了 `(1−f)²·π ≈ 2.9`）；③ 只有透射、没有 slab 自身反射，掠射时界面该反射的能量被丢掉（0.74）。补上光滑双界面 slab 的闭式解 `T=(1−f_v)(1−f_l)/(1−f_v f_l)`、`R=f_l+(1−f_l)²f_v/(1−f_v f_l)`（**精确 `R+T=1`**）后回到 1.00。连带效果：slab 一旦能量封闭，`R+T` 就与波长无关，色散随之"看不见"——所以把色散改成走**逐通道折射路径长度**（`1/µᵗ`），这才是色散的物理机制，也让它在能量封闭后依然可见。
 
    **覆盖与已知偏差（门禁自声明，全部带测量值）**：白炉门禁现有 7 个配置——**metal（两个粗糙度）/ 纯漫反射（Lambert + 最大 diff roughness）/ 带介电界面（两个粗糙度）/ translucent** 全部到 **1.00 ± 2%**。规范清单里**尚未覆盖且已测量**的是：**coat 叠加（白色 `coat_color`）= 0.72 @ 掠射**——基底按闭式 slab 透射 `(1−f_v)(1−f_l)/(1−f_v f_l)` 衰减，但 coat 自身的**单次散射** microfacet 瓣（Fresnel 取 `v·h`）承载不了被透射扣掉的那份反射 `r_slab`；我按"该修就修"试了两种改法并**都实测否决**：加上与基底同款的多散射补偿（0.72 → 0.736，仍差 26%，因为 `F0=0.053` 时 Turquin 着色因子只有 ~0.009）、按 `r_slab/(F(v)·E_white)` 重归一化瓣（0.72 → 0.719）。结论写进代码注释：**这需要一个刻意的 coat 能量设计**（例如用准确的分瓣反照率把 `r_slab` 按瓣形状分配），不是再加一个修正项。另外 **fuzz 叠加**与 **subsurface（独立 shading class）** 尚未进门禁。
-2. **扩展位段隔离（Bit-Region Isolation）**：`LobeMask` 开放枚举按**规范核心区 / Prism 扩展区**静态分段——OpenPBR 规范瓣占低位固定区段（随上游版本演进只增不改语义），FACE 与开放词汇表后续瓣占高位扩展区段。两区位段互不重叠，变长解包 (`prism_unpack_surface`) 按区段路由，杜绝"私有瓣污染规范语义"或"上游新字段撞车扩展位"。
+2. **扩展位段隔离（Bit-Region Isolation）**：`LobeMask` 开放枚举按**规范核心区 / Prism 扩展区**静态分段——OpenPBR 规范瓣占低位固定区段（随上游版本演进只增不改语义），NPR_FACE 与开放词汇表后续瓣占高位扩展区段。两区位段互不重叠，变长解包 (`prism_unpack_surface`) 按区段路由，杜绝"私有瓣污染规范语义"或"上游新字段撞车扩展位"。
 
-   **已落地（code-truth）**：schema 现为**双密集段**——`KHR` 瓣占 slot `0..6`（emission/clearcoat/anisotropy/sheen/subsurface/transmission/**thin_film**），扩展瓣从 `EXTENSION_SLOT_BASE = 16` 起（FACE 从原来的 bit 6 **迁到 bit 16**）；`prism_material_schema` 的验证器**强制**这条规则（非双段布局直接 `NonContiguousRegistrySlots` 报错），所以"加规范瓣只会往低位段追加、加私有瓣只会往高位段追加"是**编译/校验期事实**而非约定。生成物 `SURFACE_LOBE_WORDS_BY_SLOT` 是按 slot 的 `[usize; 17]`（中段留 0），`LobeMask::all()` 相应改为"已定义位的 OR"。
-3. **向下投影（Lossy Downgrade Projection）**：提供 `project_to_openpbr`——把含扩展瓣的 Prism über **有损投影**成纯 OpenPBR 参数块（丢弃 FACE/私有瓣、把私有效果近似并入最接近的规范瓣），用于导出到外部纯 OpenPBR/MaterialX 消费端。投影是"超集→基集"的单向收敛，须显式标注有损项，不保证视觉等价、只保证"是合法 OpenPBR"。
+   **已落地（code-truth）**：schema 现为**双密集段**——`KHR` 瓣占 slot `0..6`（emission/clearcoat/anisotropy/sheen/subsurface/transmission/**thin_film**），扩展瓣从 `EXTENSION_SLOT_BASE = 16` 起（NPR_FACE 从原来的 bit 6 **迁到 bit 16**）；`prism_material_schema` 的验证器**强制**这条规则（非双段布局直接 `NonContiguousRegistrySlots` 报错），所以"加规范瓣只会往低位段追加、加私有瓣只会往高位段追加"是**编译/校验期事实**而非约定。生成物 `SURFACE_LOBE_WORDS_BY_SLOT` 是按 slot 的 `[usize; 17]`（中段留 0），`LobeMask::all()` 相应改为"已定义位的 OR"。
+3. **向下投影（Lossy Downgrade Projection）**：提供 `project_to_openpbr`——把含扩展瓣的 Prism über **有损投影**成纯 OpenPBR 参数块（丢弃 NPR_FACE/私有瓣、把私有效果近似并入最接近的规范瓣），用于导出到外部纯 OpenPBR/MaterialX 消费端。投影是"超集→基集"的单向收敛，须显式标注有损项，不保证视觉等价、只保证"是合法 OpenPBR"。
 
 > **维护义务**：OpenPBR 是活标准（版本演进）。超集定位意味着 Prism 承担"跟随规范核心区"的义务——上游新增/修订字段须在规范核心区加法吸收并过合规门禁；私有扩展只能在扩展区演进，永不侵入核心区语义。
 
@@ -337,7 +337,7 @@
 **九个点、九套定界 → 一个注册表**：`PRISM_lobe_face` 只是 `kind=lobe` 的一条 manifest；新增响应模式（`X_studio_mode_watercolor`）、动态通道（`PRISM_channel_wetness`）、描边 pass（`PRISM_pass_outline`）流程完全同构，走注册表而非改封闭 enum。超集（加瓣）由此降为 PCM 的一个 kind。
 
 ### 5.1 核心自举（dogfood）：消灭"核心 vs 扩展"特判
-OpenPBR 的 base/specular/coat/... 本身也注册为 `kind=lobe` 能力，命名空间 `KHR`（规范核心）；FACE 为 `PRISM`，私有瓣为 `X_studio_`。代码里不再有"核心瓣硬编码、扩展瓣走注册"的二分——只有一个注册表，区别仅在**命名空间 + 稳定级 + 位区**（§4.5 位段隔离）。这是 Vulkan（core 由 EXT 晋升）与 USD（内置 schema 也只是 schema）的红利：**唯一真相源 + codegen**，把 §17.5 自描述 schema 升为**所有 kind 的 manifest 格式**，`surface.rs`↔WESL 手写漂移从结构上消失。§4.5 三约束自然成为 PCM 全局不变量（合规对拍 = 只用 `KHR` 项 → 字节级等于 OpenPBR 参考；位区隔离 = 命名空间各占独立位/槽区、永不回收；向下投影 = 丢非 `KHR` 项投影回纯 OpenPBR）。
+OpenPBR 的 base/specular/coat/... 本身也注册为 `kind=lobe` 能力，命名空间 `KHR`（规范核心）；NPR_FACE 为 `PRISM`，私有瓣为 `X_studio_`。代码里不再有"核心瓣硬编码、扩展瓣走注册"的二分——只有一个注册表，区别仅在**命名空间 + 稳定级 + 位区**（§4.5 位段隔离）。这是 Vulkan（core 由 EXT 晋升）与 USD（内置 schema 也只是 schema）的红利：**唯一真相源 + codegen**，把 §17.5 自描述 schema 升为**所有 kind 的 manifest 格式**，`surface.rs`↔WESL 手写漂移从结构上消失。§4.5 三约束自然成为 PCM 全局不变量（合规对拍 = 只用 `KHR` 项 → 字节级等于 OpenPBR 参考；位区隔离 = 命名空间各占独立位/槽区、永不回收；向下投影 = 丢非 `KHR` 项投影回纯 OpenPBR）。
 
 ### 5.2 性能不变量：烘焙期单态化，不是运行时分发（对九类一视同仁）
 PCM 的全部治理机器（命名空间解析、能力协商、used/required、位区分配）在**烘焙/加载期**求值完毕并蒸发；运行时只剩**已特化好的那一份 WESL**，零 dispatch、零解释、零注册表查询——这是与"插件 VM"划清界限的红线。严守 §8.5"permutation 边界只由步骤1/3 决定"：transfer/cache-aux/provider/downgrade/composite 全部编入烘焙期置换 key 或 pass 图，运行时无新增 PSO、不改分类 key。置换聚类按"扩展组合原型"做（§8.4）。
@@ -406,7 +406,7 @@ PCM 的全部治理机器（命名空间解析、能力协商、used/required、
 
 ### 5.5 五维度小结
 - **性能**：运行时零分发；成本全在烘焙期，archetype 置换聚类 + 内容哈希去重吸收（§8.4）；`cost_hint` 进 CI 防某扩展悄悄变贵。
-- **效果**：FACE 升为 `PRISM_lobe_face@2`（SDF 图集 provider + 方向场）；glint/薄膜/测量 BRDF/水彩描边各作对应 kind 落地，均进 §10/§11 门禁，效果不设天花板。
+- **效果**：NPR_FACE 升为 `PRISM_lobe_face@2`（SDF 图集 provider + 方向场）；glint/薄膜/测量 BRDF/水彩描边各作对应 kind 落地，均进 §10/§11 门禁，效果不设天花板。
 - **易用**：三级作者入口（archetype → MaterialX 节点图 → 受限 Rust 瓣，§5.4.1；裸 WESL 为逃生口）；`required` 不满足给可诊断报错；MaterialX 往返（§17.6）对未知扩展优雅降级。
 - **易扩展**：新增任何一类能力 = 写一条 manifest，不碰封闭 enum；晋升路径 `X_studio_ → EXT_ → KHR_`（thin_film 可作首个走完晋升路径样例）。
 - **易维护**：单一真相源 + codegen 杀漂移；两条版本轴（OpenPBR 规范轴 / PCM 扩展轴）显式分离；合规门禁自动枚举 `KHR` 字段。
@@ -494,7 +494,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - 保留单一 `parameter_offset` / `parameter_size`，但其长度**由瓣集决定、变长**（不是固定 7 瓣，也不是 tier 数组）。
 - `lobe_mask` 保留并作为**开放位掩码**，驱动变长解包 + 静态置换。
 - **参数块布局 = OpenPBR Surface 瓣序**：核心 base/specular/geometry 常驻，可选瓣（coat/fuzz/subsurface/transmission/emission/thin_film）按 mask 低位优先顺序变长排布；WESL `prism_unpack_surface` 已是低位优先 mask 驱动聚集，补瓣只是加长每瓣字段数（§4.4），解包循环不变。
-- FACE（NPR 私有瓣）在 OpenPBR 物理瓣之后排布，由 `Illumination::Stylized` 消费（§3.5）；`custom_program` 字段承接自定义线（§3.5）。
+- NPR_FACE（NPR 私有瓣）在 OpenPBR 物理瓣之后排布，由 `Illumination::Stylized` 消费（§3.5）；`custom_program` 字段承接自定义线（§3.5）。
 - 纹理段 `texture_offset/texture_count` → **VT 页引用**（指向 `texture_streaming` 的页表句柄），不再是固定 8 槽索引，数量不限。
 - 删除一切 `MAX_*` 常量语义（`MAX_MATERIAL_TEXTURES` / `MAX_CLOSURE_SLAB_DEPTH`）。
 - `MATERIAL_ABI_VERSION = 5`。
@@ -557,7 +557,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - **Furnace test（白炉）CI 门禁**：均匀环境光下验证反照率守恒。CPU 金标准 + WESL twin 都跑。
 - **高光抗锯齿**（Toksvig/LEAN，§7.1）：远处高光不闪烁；这是距离 LOD 的无损手段。
 - **原理化分层 BSDF（coat/base 能量耦合，非瓣求和）**（§17.2）：coat 对其下 base 的能量不是简单叠加，而是按 Fresnel 透射做能量预算耦合（coat 反射掉的能量不再喂给 base），并统一 coat 吸收/变暗（`coat_darkening`）。取代"各瓣独立求和"的能量不自洽；进 furnace 门禁与双线对拍。
-- **NPR**（`Illumination::Stylized`，§3.5）：ramp 量化 / SDF 面部阴影（Prism 私有 FACE 瓣，OpenPBR 之外）/ 描边，作为对**同一 OpenPBR über 输入**的正交非物理响应；不进物理 furnace 门禁，但进 ramp/描边视觉回归。
+- **NPR**（`Illumination::Stylized`，§3.5）：ramp 量化 / SDF 面部阴影（Prism 私有 NPR_FACE 瓣，OpenPBR 之外）/ 描边，作为对**同一 OpenPBR über 输入**的正交非物理响应；不进物理 furnace 门禁，但进 ramp/描边视觉回归。
 - **thin_film 虹彩（OpenPBR thin_film 瓣，开放瓣首个落地示例）**：薄膜干涉随 `thin_film_thickness` / `thin_film_ior` 产生彩虹色高光（肥皂泡、氧化金属、涂层）。按 OpenPBR 作为新 lobe 加入开放词汇表——新增 `LobeMask::THIN_FILM` 位 + 3-word 块，`prism_unpack_surface` 低位优先循环自动容纳，老材质 mask 不含该位、零影响。这是"新物理项 = 加法补瓣"路径的验证用例（§4.4）。
 - **其余待补 OpenPBR 字段**（subsurface_color/radius、transmission 的 color/scatter/thin_walled，以及 coat 组剩余的 `coat_darkening`）以加法扩字段方式逐个补齐，各进 furnace / 对拍门禁；coat 组（`coat_ior` / `coat_color` / `coat_roughness_anisotropy` / `coat_normal`）、整个 fuzz 组（`fuzz_color` / `fuzz_roughness`）、整个 base 组（`base_weight` / `diffuse_roughness`）、整个 specular 组（`specular_weight` / `specular_color` / `specular_ior`，取代 `reflectance`）以及 transmission 瓣的**消费者**（消费 `transmission` / `index_of_refraction` / `dispersion`）已落地（§13.a）。
 - **开放瓣扩展机制**：任何新物理项（如各向异性 SSS）走同一路径——新位 + 变长字段 + 静态置换，不冲击现有材质、不加全局硬顶。
@@ -636,7 +636,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 代码：`lighting.rs` + `brdf.wesl` 双线同改；3 个 transmission 测试按新语义重基线。
   - 门禁：`prism_render_shading --lib` **3333 通过**（白炉 7 配置全到 1.00±2%）、`prism_render_scene --lib` **1602 通过**。
 
-- **P2-f 第八片：Prism 私有 FACE 瓣改名 `NPR_FACE` / `npr_face`**（§3.5 / §4.5）
+- **P2-f 第八片：Prism 私有 FACE 瓣（旧名）改名 `NPR_FACE` / `npr_face`**（§3.5 / §4.5）
   - 该瓣只服务 `Illumination::Stylized` 的 NPR 线；`face` 会被误读成"多边形面/朝向"，`npr_face` 同时表达**归属哪条线**。改名覆盖 lobe `id`、`mask_const`（`PRISM_LOBE_NPR_FACE`）、字段 `npr_face_softness`，共 47 处 / 10 文件，codegen 重新生成。
   - `uid` 保留 `studio.prism.face_shadow`：uid 是不可变身份，改名会破坏已序列化材质的识别（schema 内已注明该取舍）。
 
@@ -720,8 +720,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 - **P1-f 规范对齐：`thin_film` 成为 ABI 瓣 + 位区隔离真正落地**（§4.4 / §4.5 约束 2）
   - **thin_film 整瓣落地**：新增 `thin_film` 瓣（KHR 命名空间，uid `org.khronos.openpbr.thin_film`，4 字），含规范的三个参数 `thin_film_weight` / `thin_film_thickness`（**单位 µm**，规范默认 0.5）/ `thin_film_ior`（规范默认 1.4）。它接到 P2-d 已落地的 Airy 薄膜 BSDF：`resolve.rs` 与 `shading_resolve.wesl` 把瓣映射到 shade-time `iridescence*`，并做 **µm→nm** 换算；`weight = 0`（默认）时整个项惰性。新增桥接测试钉住这条映射（含 0.35µm → 350nm、以及默认惰性）。
-  - **位区隔离（§4.5 约束 2）落地**：为了让 `thin_film` 占 KHR 的低位段，**FACE 从 bit 6 迁到 bit 16**，于是 `LobeMask` 变成文档要求的**双密集段**——KHR 占 `0..6`、扩展从 `EXTENSION_SLOT_BASE = 16` 起。schema 验证器**强制**这条布局（非双段即 `NonContiguousRegistrySlots`），所以"规范瓣只增低位段、私有瓣只增高位段、永不撞车"成了校验期事实。连带：`LobeMask::all()` 由 `(1 << COUNT) - 1` 改为**已定义位的 OR**（稀疏位段下前者会把未定义位也算进来）；生成物 `SURFACE_LOBE_WORDS_BY_SLOT` 变为按 slot 的 `[usize; 17]`（中段留 0）。
-  - 代码：schema（新瓣 + FACE 槽位迁移 + 双段验证器 + `EXTENSION_SLOT_BASE`）、codegen（按 slot 跨度的字长表）、`surface.rs`（`THIN_FILM`/`FACE` 位、区域常量、`all()`、`GpuThinFilmLobe` 与 `SurfaceParameterBlock` 全链 pack/unpack）、fat `GpuSurfaceParameters`（288→**304** B，16 对齐）、`SURFACE_MAX_WORDS` 88→92；regenerated `material_unpack.wesl`；CPU + WESL 双线。
+  - **位区隔离（§4.5 约束 2）落地**：为了让 `thin_film` 占 KHR 的低位段，**NPR_FACE 从 bit 6 迁到 bit 16**，于是 `LobeMask` 变成文档要求的**双密集段**——KHR 占 `0..6`、扩展从 `EXTENSION_SLOT_BASE = 16` 起。schema 验证器**强制**这条布局（非双段即 `NonContiguousRegistrySlots`），所以"规范瓣只增低位段、私有瓣只增高位段、永不撞车"成了校验期事实。连带：`LobeMask::all()` 由 `(1 << COUNT) - 1` 改为**已定义位的 OR**（稀疏位段下前者会把未定义位也算进来）；生成物 `SURFACE_LOBE_WORDS_BY_SLOT` 变为按 slot 的 `[usize; 17]`（中段留 0）。
+  - 代码：schema（新瓣 + NPR_FACE 槽位迁移 + 双段验证器 + `EXTENSION_SLOT_BASE`）、codegen（按 slot 跨度的字长表）、`surface.rs`（`THIN_FILM`/`NPR_FACE` 位、区域常量、`all()`、`GpuThinFilmLobe` 与 `SurfaceParameterBlock` 全链 pack/unpack）、fat `GpuSurfaceParameters`（288→**304** B，16 对齐）、`SURFACE_MAX_WORDS` 88→92；regenerated `material_unpack.wesl`；CPU + WESL 双线。
   - 门禁：`cargo test -p prism_material_schema --lib` **13 通过**（含双段布局验证与新的槽位顺序 `[0,1,2,3,4,5,6,16]`）、`cargo test -p prism_render_material` **826+6+2 全绿**、`cargo test -p prism_render_shading --lib` **3311 通过**（新增桥接测试）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）。
 
 - **P1-f 规范对齐：`transmission_scatter` 改为规范要求的 color3**（§4.4）
@@ -763,7 +763,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - **`transmission_scatter` ∈ [0,1]**（transmission 瓣，slot 8）：吸收掉的那部分能量**各向同性地再散射**而不是丢失，`T_eff = T + s·(1−T)`，使 slab 朝自身颜色变亮。`0.0` 是纯 Beer-Lambert（逐位恒等）。
   - 代码：schema clearcoat/subsurface 瓣 12→16 字、transmission 瓣 8→12 字（各含新字段 + 尾 pad）；`SURFACE_LOBES` 每瓣字长 → `[4,16,4,8,16,12,4]`、`SURFACE_MAX_WORDS` 72→84；`Gpu{ClearCoat,Subsurface,Transmission}Lobe` 与 fat `GpuSurfaceParameters`（240→256 B，仍 16 字节对齐）；regenerated `material_unpack.wesl`；shade-time `SurfaceSample`（CPU + WESL）+ 桥接；BSDF 双线 `clearcoat.rs`/`clearcoat.wesl`、`subsurface.rs`/`subsurface.wesl`、`lighting.rs`/`brdf.wesl`；水栅格面写中性默认。
   - 门禁：`cargo test -p prism_render_shading --lib` **3307 通过**（新增：coat_darkening 压暗 base 且无 coat 时恒等、scatter_anisotropy 前向<各向同性<后向、transmission_scatter 提亮 slab）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）、`cargo test -p prism_material_schema` 13 通过（绝对偏移门禁：transmission 基址 60→68、IOR 70）、`cargo test -p prism_render_material` 826+6+2 全绿、`--features bevy` 编译干净；touched 文件 clippy 无告警。
-  - 结果：**§4.4 的九组 OpenPBR 字段全部补齐**（base / specular / coat / fuzz / subsurface / transmission / emission / thin_film(P2-d) / geometry / FACE）。
+  - 结果：**§4.4 的九组 OpenPBR 字段全部补齐**（base / specular / coat / fuzz / subsurface / transmission / emission / thin_film(P2-d) / geometry / NPR_FACE）。
 
 - **P1-f（subsurface 组）OpenPBR `subsurface_color` + `subsurface_radius` 落地**（§4.4 / §17.2）
   - 范围：给 subsurface 瓣补 `OpenPBR` subsurface 组的颜色与半径——`subsurface_color` 给散射光（wrap 漫反射 + 背透射）逐通道着色；`subsurface_radius`（RGB）按通道缩放 wrap 宽度，于是**红光能比蓝光更深地越过明暗分界**（皮肤那种经典红边）。两项默认都是白（恒等），既有材质逐位不变。
@@ -910,7 +910,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - **P2-f 超集合规门禁 + 向下投影导出器（§4.5 约束 1/2/3，结构/契约半边）**（§4.5 / §17.5.3 ⑥）
   - 范围：把 §4.5 的三条硬约束从"人工审读约定"落成**可机检的代码契约**。本阶段落地其中不依赖外部 OpenPBR 参考实现的**结构半边**：
     - **位区隔离（约束 2）**：`LobeMask` 新增 `KHR_REGION`（OpenPBR 规范核心区）与 `EXTENSION_REGION`（扩展区），及其 `canonical_region` / `extension_region` / `is_pure_openpbr` / `region_of` / `LobeRegion`；两区位段互斥且恰好铺满已定义瓣。位区的**数据来源是 schema**（`pkg/prism_material_schema/schema/surface.toml` 的 `namespace` 列），codegen 生成的 `LobeLayout` 新增 `uid` + `namespace` 字段；`surface.rs::region_masks_match_the_schema_namespaces` 与 `tests/schema_parity.rs::schema_namespaces_match_lobe_mask_regions` 对拍 schema↔生成表↔手写区，任一处漂移即 CI 标红。
-    - **向下投影（约束 3）**：`project_to_openpbr(&SurfaceParameterBlock) -> OpenPbrProjection`——保留核心 + 全部 `KHR` 区瓣、丢弃扩展瓣，并**逐瓣显式记录** `DroppedLobe{ id, uid, namespace, bit, approximated_by }`。`approximated_by` 走一张 `CORE_CARRIERS` 表，当前为空：FACE（PRISM 风格化 SDF 面阴影）在 OpenPBR 无对等瓣，故**诚实标注为 outright drop（`None`）而非臆造近似**；另设 `unknown_bits` 承接损坏/未定义位，保证投影**全函数不 panic**。投影单向（超集→基集）、幂等（对投影结果再投影即无损恒等）。
+    - **向下投影（约束 3）**：`project_to_openpbr(&SurfaceParameterBlock) -> OpenPbrProjection`——保留核心 + 全部 `KHR` 区瓣、丢弃扩展瓣，并**逐瓣显式记录** `DroppedLobe{ id, uid, namespace, bit, approximated_by }`。`approximated_by` 走一张 `CORE_CARRIERS` 表，当前为空：NPR_FACE（PRISM 风格化 SDF 面阴影）在 OpenPBR 无对等瓣，故**诚实标注为 outright drop（`None`）而非臆造近似**；另设 `unknown_bits` 承接损坏/未定义位，保证投影**全函数不 panic**。投影单向（超集→基集）、幂等（对投影结果再投影即无损恒等）。
     - **合规门禁（约束 1 的身份半边）**：`openpbr_conformance(&SurfaceParameterBlock) -> OpenPbrConformance{Conformant|NotApplicable|Breached}`——对纯 `KHR` 面，断言投影是**逐字节恒等**（`projection.block.pack() == block.pack()`），即"关掉扩展，Prism 就是 OpenPBR"；非纯面返回 `NotApplicable`（先投影再判）；纯面被改动则 `Breached`（内部不变量破坏，CI 失败）。
   - 代码：`pkg/prism_render_material/src/openpbr.rs`（新模块，投影 + 门禁 + 7 用例）、`surface.rs`（位区常量/方法 + 2 用例）、`tests/schema_parity.rs`（schema↔区 端到端门禁）、`pkg/prism_material_schema/{src/lib.rs,src/codegen.rs,schema/surface.toml}`（`Namespace::as_str`/`is_openpbr_core` + 生成 `uid`/`namespace`）、生成物 `surface_layout.rs` 重生成。
   - 门禁：`cargo test -p prism_render_material`（**826 lib + 6 schema_parity + 2 codegen_freshness 全绿**）、`cargo test -p prism_material_schema`（12 通过）、`cargo check -p prism_render_material_gpu -p prism_render_shading` 干净；touched 文件 clippy 无告警。
@@ -925,7 +925,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - 高光混入：`lighting.rs::evaluate_principled_direct` 与 `brdf.wesl::principled_direct` 在同一 `v_dot_h` 余弦下把 Schlick Fresnel 向 `iridescent_fresnel_rgb` 按 `iridescence` 权重 `mix`；`iridescence==0` 走原路径（恒等），`>0` 才评薄膜。两侧逐位同序。
     - 对拍门禁 `pkg/prism_render_scene/src/shading/thin_film/{mod,shader_tests}.rs`：仿 `shading/specular_aa/` 以一个真实 `@compute` link-test 入口引用全部导出符号（含新 `tf_base_ior_from_f0`/`tf_iridescent_fresnel_rgb`），覆盖 import 可见性/签名/类型检查。`brdf.wesl` 现 import `thin_film.wesl`，`shading::resolve::shader_tests` 的 deps 数组已登记 `thin_film.wesl` 并把定长 `[...; 16]` 升为 `[...; 17]`。
   - 门禁：`cargo test -p prism_render_shading --lib thin_film`（CPU 金标准 24 通过，含逐通道 IOR 往返 / 厚度 0 回落 / 有色膜着色 5 项新金标准）、`-p prism_render_shading --lib` 全量 **3197 通过**（权重 0 恒等，老金标准零回归）、`-p prism_render_scene --lib shading::thin_film`（link 1 通过）、`--lib shading::resolve::shader_tests`（brdf→thin_film 全链 48 通过）；已 rustfmt。
-  - **ABI 接入已落地**：`thin_film` 现在是**一等 ABI 瓣**（`LobeMask::THIN_FILM`，KHR slot 6，`thin_film_weight` / `_thickness`（µm）/ `_ior`），`prism_unpack_surface` 低位优先聚集自动容纳；FACE 为给规范段让位从 bit 6 迁到 bit 16，位区隔离成为校验期事实（§4.5 约束 2）。编辑器 MaterialX 作者前端（P2-a）按 goal 保持编辑器 TODO。
+  - **ABI 接入已落地**：`thin_film` 现在是**一等 ABI 瓣**（`LobeMask::THIN_FILM`，KHR slot 6，`thin_film_weight` / `_thickness`（µm）/ `_ior`），`prism_unpack_surface` 低位优先聚集自动容纳；NPR_FACE 为给规范段让位从 bit 6 迁到 bit 16，位区隔离成为校验期事实（§4.5 约束 2）。编辑器 MaterialX 作者前端（P2-a）按 goal 保持编辑器 TODO。
 
 
 - **开放瓣 CPU 金标准 + WESL 孪生：程序化 glint / 实测·表格化 BRDF（§17.6，shading 域内落地）**（§13 表 开放瓣）
@@ -1435,10 +1435,10 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 - **OpenPBR Surface**：ASWF/Adobe/Autodesk 2024 统一 PBR 作者 + BSDF 规范（base/specular/coat/fuzz/subsurface/transmission/emission/thin_film/geometry 分组）。Prism 运行时 über 的权威参数化，现 7 瓣是其子集，缺口加法补齐。
 - **四线正交**：PBR/NPR/混合/自定义不是四条管线，而是同一条 OpenPBR über 上由 `Illumination` 轴 + `render_class` + `custom_program` 选择的四种响应模式；共享解包/分类/降级/对拍。
 - **补瓣加法**：开放词汇表下，新物理瓣 = 新 mask 位 + 变长字段 + 静态置换，不影响老材质、不加全局硬顶。thin_film 虹彩是首个示例。
-- **FACE 私有瓣**：OpenPBR（纯物理）之外的 Prism NPR 专用瓣（SDF 面阴影），由 Stylized 线消费，与 OpenPBR 物理瓣同块共存。
-- **OpenPBR 超集**：Prism über = OpenPBR Surface（全字段）∪ FACE 私有瓣 ∪ 开放词汇表后续瓣；关掉扩展即退化为纯 OpenPBR（§4.4/§4.5）。
+- **NPR_FACE 私有瓣**：OpenPBR（纯物理）之外的 Prism NPR 专用瓣（SDF 面阴影），由 Stylized 线消费，与 OpenPBR 物理瓣同块共存。
+- **OpenPBR 超集**：Prism über = OpenPBR Surface（全字段）∪ NPR_FACE 私有瓣 ∪ 开放词汇表后续瓣；关掉扩展即退化为纯 OpenPBR（§4.4/§4.5）。
 - **合规门禁**：对纯 OpenPBR 子集材质，Prism 响应与 OpenPBR 参考实现 furnace/定向光字节对拍，进 CI，证明"真超集"（§4.5）。
-- **私有位区 / 位段隔离**：`LobeMask` 分规范核心区（OpenPBR）与扩展区（FACE/开放瓣），位段互不重叠，解包按区路由（§4.5）。
+- **私有位区 / 位段隔离**：`LobeMask` 分规范核心区（OpenPBR）与扩展区（NPR_FACE/开放瓣），位段互不重叠，解包按区路由（§4.5）。
 - **向下投影**：`project_to_openpbr`，把含扩展瓣的 über 有损投影为合法纯 OpenPBR 参数块，用于外部导出（§4.5）。
 - **运行时动态通道**：烘焙静态 über 之外的少量（≤4）解析式动态轴（wetness/snow/damage/dissolve），运行时调制既有字段，确定性可对拍（§17.1）。
 - **原理化分层**：coat/base 按 Fresnel 透射做能量耦合（非瓣求和）+ coat 吸收变暗，进 furnace 守恒门禁（§17.2）。
