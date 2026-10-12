@@ -151,6 +151,8 @@ pub struct ComponentInfo {
 - `N`（每 chunk 容量）= `floor((16KiB − 元数据) / 单实体列字节和)`。
 
 > **现状诚实注记（chunk 物理布局）**：上两条描述的是**目标形态**。当前 `pkg/prism_ecs` 落地的是**逻辑 chunk**——每个 archetype 仍是一段连续列存，chunk 只是"`rows_per_chunk` 个连续行"的窗口（`rows_per_chunk` 由 `TARGET_CHUNK_BYTES` 与单行字节和推出），每个窗口带一条 `change_version`（`storage/chunk.rs` 开篇即写明这一点）。**每窗口的元数据侧车已落地**：`storage::ChunkMeta`（+ 值类型 `ChunkBounds`）随窗口增删，携带 `bounds` / `visible` / `lod` / `batch_key` / `cell` 五个消费者字段与一个**结构 epoch**——每当窗口的**行集合**变化（spawn 落入 / swap-remove 移出或移入）就递增，值写入不动它；消费者只要缓存 epoch 匹配就可复用派生结果，见 `storage/chunk.rs`、`Table::chunk_metas/chunk_meta(_mut)` 与 `World::chunk_meta(_mut)`。**仍是 PLANNED 的是物理 16KiB 分块竞技场**（块级分配/回收、块内嵌元数据、块内 SoA 与 SIMD 对齐）——属 §22 高风险项第 1 条，须分步改造并配基准。
+>
+> **物理分块改造的实测前提（2026-10，实验已回退）**：实际试做过「列数据按块分配」的物理分块——每列一张 `rows_per_chunk` 槽位的块表、行寻址改为 `row >> shift` / `row & mask`、切片驱动收敛为**单块局部**（`par_chunks` 在一批内逐块调用、`simd_iter` 把切片夹到当前块边界）。功能全绿，含 1M 规模基准与 `dirty_chunks`。**但逐行 fetch 热路径出现实质回归**：可变串行传播 **6.6 → ~8.7 ns/实体**，只读 `iter.for_each` **1.2 → ~3.7 ns/实体**，`fold` 相对 `for-next` 的优势从 **~4.5× 塌到 ~1.2×**（去边界检查、power-of-two shift/mask 都无法消掉）。**根因**：`D::fetch(fetch, entity, row)` 是**逐行**接口，块寻址每行都要多一次块指针间接（`blocks[row >> shift]`），这层开销与迭代器协议无关、无法靠微调去掉。**结论**：物理分块必须**先让 fetch/迭代器按 chunk 推进**（进入一个 chunk 只解析一次块基址、chunk 内线性步进，即 Unity DOTS `IJobChunk` 的形态），再改存储；只改存储层会净亏。故物理 16KiB 分块仍列为 PLANNED，且改造顺序明确为 **① chunk-aware fetch → ② 分块存储 → ③ 单块切片驱动**，与 §22 高风险项第 1 条"分步改造并配基准"一致（本轮已回退该实验，未把回归留在主干）。
 - 结构性变更 = archetype 间搬迁（swap-remove + append），经并行 ECB 批量化（§9）。
 
 ---
