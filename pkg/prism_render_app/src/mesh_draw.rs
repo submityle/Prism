@@ -10,13 +10,12 @@
 //! index) and, for the GPU-driven path, a bin's indirect arguments; a direct
 //! per-item mesh draw binds its geometry once and draws one instance.
 
-use prism_render_graph::ExecuteContext;
-
+use crate::draw::MeshRecorder;
 use crate::queue::PhaseItem;
 
 /// Records one item's mesh draw: bind the pipeline, bind the geometry, draw.
-pub fn mesh_draw(item: &PhaseItem, ctx: &mut ExecuteContext) {
-    ctx.set_render_pipeline(item.pipeline);
+pub fn mesh_draw(item: &PhaseItem, ctx: &mut dyn MeshRecorder) {
+    ctx.set_pipeline(item.pipeline);
     ctx.set_vertex_buffer(0, item.vertices, 0);
     match item.indices {
         Some((indices, format)) => {

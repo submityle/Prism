@@ -8,7 +8,7 @@
 
 use prism_app::App;
 use prism_ecs::schedule::Schedules;
-use prism_render_driver::{Extent3d, ImageDataLayout, RenderQueue, TextureWrite};
+use prism_render_driver::{CommandBuffer, Extent3d, ImageDataLayout, RenderQueue, TextureWrite};
 use prism_render_driver_null::NullInstance;
 use prism_render_runtime::RenderRuntime;
 
@@ -302,33 +302,53 @@ fn recording_a_phase_invokes_each_draw_function() {
     let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
         "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
     ));
-    let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-        label: Some("record-test".into()),
-        layout: None,
-        vertex: VertexState {
-            module,
-            entry_point: "vs".into(),
-            buffers: vec![],
-        },
-        primitive: PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: MultisampleState::default(),
-        fragment: None,
-    });
+    let make_pipeline = |label: &str| {
+        device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some(label.into()),
+            layout: None,
+            vertex: VertexState {
+                module,
+                entry_point: "vs".into(),
+                buffers: vec![],
+            },
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            fragment: None,
+        })
+    };
+    let pipeline_a = make_pipeline("record-a");
+    let pipeline_b = make_pipeline("record-b");
 
-    // The recording context is a plain buffer here; production passes the
-    // graph's pass recorder instead.
-    let mut functions = DrawFunctions::<String>::new();
-    let draw = functions.register(|item, out: &mut String| {
-        out.push_str(&format!("{};", item.order));
-    });
+    // The recording context logs the pipeline each item binds, so the recorded
+    // order is observable without a GPU.
+    #[derive(Default)]
+    struct PipelineLog(Vec<prism_render_driver::RenderPipelineId>);
+    impl crate::MeshRecorder for PipelineLog {
+        fn set_pipeline(&mut self, pipeline: prism_render_driver::RenderPipelineId) {
+            self.0.push(pipeline);
+        }
+        fn set_vertex_buffer(&mut self, _: u32, _: BufferId, _: u64) {}
+        fn set_index_buffer(&mut self, _: BufferId, _: prism_render_driver::IndexFormat, _: u64) {}
+        fn draw(&mut self, _: core::ops::Range<u32>, _: core::ops::Range<u32>) {}
+        fn draw_indexed(
+            &mut self,
+            _: core::ops::Range<u32>,
+            _: i32,
+            _: core::ops::Range<u32>,
+        ) {
+        }
+    }
+
+    let mut functions = DrawFunctions::new();
+    let draw = functions.register(|item, ctx| ctx.set_pipeline(item.pipeline));
 
     let geometry = GenerationalHandle::new(2, 1);
     let material = GenerationalHandle::new(3, 1);
     let scene = GenerationalHandle::new(4, 1);
     let vertices = null_vertex_buffer(&device);
     let mut queues = RenderQueues::new();
-    for order in [2u64, 1] {
+    for (pipeline, order) in [(pipeline_a, 2u64), (pipeline_b, 1)] {
         queues.push(
             RenderPhase::Opaque,
             PhaseItem {
@@ -349,13 +369,17 @@ fn recording_a_phase_invokes_each_draw_function() {
     }
     queues.sort();
 
-    let mut recorded = String::new();
+    let mut recorded = PipelineLog::default();
     queues.record(RenderPhase::Opaque, &mut recorded, &functions);
-    assert_eq!(recorded, "1;2;", "items record in sorted order");
+    assert_eq!(
+        recorded.0,
+        [pipeline_b, pipeline_a],
+        "items record in sorted order (order 1 before order 2)"
+    );
 
     // An unknown id is a no-op, never a panic.
     functions.call(DrawFunctionId(99), &queues.phase(RenderPhase::Opaque)[0], &mut recorded);
-    assert_eq!(recorded, "1;2;");
+    assert_eq!(recorded.0.len(), 2, "an unknown id records nothing");
 }
 
 /// The queue stage end to end: visible work items resolve, specialize, and
@@ -1080,5 +1104,149 @@ fn wgpu_backend_records_and_clears_a_real_frame() {
     assert!(
         pixels.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]),
         "the frame's clear pass overwrote the white target with opaque black"
+    );
+}
+
+/// A `RenderQueue` that captures submitted command buffers instead of issuing
+/// them, so a graph recording can be asserted without a GPU.
+#[derive(Default)]
+struct CapturingQueue {
+    buffers: std::cell::RefCell<Vec<CommandBuffer>>,
+}
+
+impl CapturingQueue {
+    fn take(&self) -> Vec<CommandBuffer> {
+        core::mem::take(&mut *self.buffers.borrow_mut())
+    }
+}
+
+impl RenderQueue for CapturingQueue {
+    fn write_buffer(&self, _: BufferId, _: u64, _: &[u8]) {}
+
+    fn write_texture(
+        &self,
+        _: TextureWrite,
+        _: &[u8],
+        _: ImageDataLayout,
+    ) {
+    }
+
+    fn submit(&self, command_buffers: &[CommandBuffer]) {
+        self.buffers.borrow_mut().extend_from_slice(command_buffers);
+    }
+}
+
+/// `mesh_draw` records a full draw into a graph pass: bind the pipeline, bind the
+/// vertex and index buffers, then one indexed draw.
+#[test]
+fn mesh_draw_records_into_a_graph_pass() {
+    use prism_render_driver::{CommandBuffer, IndexFormat, Pass, RenderCommand};
+    use prism_render_graph::{ImportedTexture, PassFlags, RenderGraph, TextureDesc};
+
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+
+    let vertices = null_vertex_buffer(&device);
+    let indices = device.create_buffer(&BufferDescriptor {
+        label: Some("test-indices".into()),
+        size: 64,
+        usage: BufferUsages::INDEX,
+        mapped_at_creation: false,
+    });
+    let target = device.create_texture(&TextureDescriptor::new_2d(
+        Extent3d::new_2d(4, 4),
+        TextureFormat::Rgba8Unorm,
+        TextureUsages::RENDER_ATTACHMENT,
+    ));
+    let view = device.create_texture_view(target, &Default::default());
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+    let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some("record-mesh".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: None,
+    });
+
+    let mut functions = DrawFunctions::new();
+    let draw = functions.register(crate::mesh_draw);
+    assert_eq!(draw, DrawFunctionId(0), "the first registration is id 0");
+
+    let mut queues = RenderQueues::new();
+    queues.push(
+        RenderPhase::Opaque,
+        PhaseItem {
+            pipeline,
+            draw,
+            geometry: GenerationalHandle::new(1, 1),
+            vertices,
+            indices: Some((indices, IndexFormat::Uint16)),
+            first: 0,
+            count: 3,
+            base_vertex: 0,
+            lod_level: 0,
+            material: GenerationalHandle::new(2, 1),
+            scene: GenerationalHandle::new(3, 1),
+            order: 0,
+        },
+    );
+
+    let mut graph = RenderGraph::new(Extent3d::new_2d(4, 4));
+    let handle = graph.import_texture(
+        "target",
+        TextureDesc::color(TextureFormat::Rgba8Unorm),
+        ImportedTexture {
+            texture: target,
+            default_view: view,
+            entry_state: prism_render_driver::TextureState::initial(),
+            exit_state: prism_render_driver::TextureState::copy_src(),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
+    graph.add_raster_pass("queue-draw", PassFlags::SIDE_EFFECT, move |builder| {
+        let _ = builder.color_attachment(handle);
+        move |ctx| queues.record(RenderPhase::Opaque, ctx, &functions)
+    });
+
+    let capture = CapturingQueue::default();
+    graph.execute(&device, &capture).expect("the graph executes");
+
+    let buffers: Vec<CommandBuffer> = capture.take();
+    let commands = buffers
+        .iter()
+        .find_map(|buffer| match buffer.passes.first() {
+            Some(Pass::Render { commands, .. }) => Some(commands),
+            _ => None,
+        })
+        .expect("the raster pass was recorded");
+    assert!(
+        matches!(commands.first(), Some(RenderCommand::SetPipeline(_))),
+        "the item's pipeline is bound first"
+    );
+    assert!(
+        matches!(commands.get(1), Some(RenderCommand::SetVertexBuffer { slot: 0, .. })),
+        "the vertex buffer is bound at slot 0"
+    );
+    assert!(
+        matches!(commands.get(2), Some(RenderCommand::SetIndexBuffer(_))),
+        "the index buffer is bound"
+    );
+    assert!(
+        matches!(commands.get(3), Some(RenderCommand::DrawIndexed { .. })),
+        "one indexed draw is issued"
     );
 }

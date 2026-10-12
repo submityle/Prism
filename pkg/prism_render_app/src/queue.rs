@@ -180,11 +180,11 @@ impl RenderQueues {
     ///
     /// Items are recorded in queue order (call [`sort`](Self::sort) first to
     /// make that deterministic), each through its own [`DrawFunctionId`].
-    pub fn record<C>(
+    pub fn record(
         &self,
         phase: RenderPhase,
-        context: &mut C,
-        functions: &DrawFunctions<C>,
+        context: &mut dyn crate::MeshRecorder,
+        functions: &DrawFunctions,
     ) {
         for item in self.phase(phase) {
             functions.call(item.draw, item, context);
