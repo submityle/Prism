@@ -133,7 +133,9 @@ impl RetainedScene {
                     && !sh.inset
                 {
                     list.push(DrawCommand::Shadow(ShadowCmd {
-                        rect,
+                        // `spread` inflates (or, when negative, deflates) the
+                        // caster on every side before blurring.
+                        rect: crate::bounds::expand(rect, sh.spread),
                         radius,
                         blur: sh.blur,
                         offset: Point::new(sh.offset_x, sh.offset_y),
@@ -492,6 +494,48 @@ mod tests {
         // Shadow must come first (painted behind the fill).
         assert!(matches!(dl.commands()[0], DrawCommand::Shadow(_)));
         assert!(matches!(dl.commands()[1], DrawCommand::Rect(_)));
+    }
+
+    #[test]
+    fn shadow_spread_inflates_or_deflates_the_caster() {
+        use prism_ui::Shadow;
+        let shadow_rect = |spread: f32| {
+            let mut s = RetainedScene::new();
+            create(&mut s, 0, ElementKind::Box, None, 0);
+            s.apply(BackendOp::SetLayout {
+                id: BackendId(0),
+                location: Point::ZERO,
+                size: Size::new(40.0, 20.0),
+            });
+            s.apply(BackendOp::SetPaint {
+                id: BackendId(0),
+                paint: PaintStyle {
+                    background_color: Some(Color::rgba(1.0, 1.0, 1.0, 1.0)),
+                    shadow: Some(
+                        Shadow::drop(0.0, 4.0, 8.0, Color::rgba(0.0, 0.0, 0.0, 0.3))
+                            .with_spread(spread),
+                    ),
+                    ..PaintStyle::default()
+                },
+            });
+            let dl = s.to_draw_list();
+            let DrawCommand::Shadow(sh) = dl.commands()[0] else {
+                panic!("expected the shadow first");
+            };
+            sh.rect
+        };
+
+        let grown = shadow_rect(5.0);
+        assert_eq!(grown.location, Point::new(-5.0, -5.0));
+        assert_eq!(grown.size, Size::new(50.0, 30.0));
+
+        let shrunk = shadow_rect(-5.0);
+        assert_eq!(shrunk.location, Point::new(5.0, 5.0));
+        assert_eq!(shrunk.size, Size::new(30.0, 10.0));
+
+        let none = shadow_rect(0.0);
+        assert_eq!(none.location, Point::ZERO);
+        assert_eq!(none.size, Size::new(40.0, 20.0));
     }
 
     #[test]
