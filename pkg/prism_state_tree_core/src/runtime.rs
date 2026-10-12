@@ -1,5 +1,5 @@
 //! Bounded event delivery and deterministic cursor runtime.
-use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec, vec::Vec};
 
 use crate::model::{
     EventId, GuardId, HistoryMode, NodeKind, Plan, StateId, Transition, TransitionKind,
@@ -30,7 +30,7 @@ pub struct GuardContext {
 }
 
 /// A pure boolean transition guard.
-pub trait Guard {
+pub trait Guard: Send + Sync {
     /// Evaluates without mutating the runtime.
     fn evaluate(&self, context: GuardContext) -> bool;
 }
@@ -126,7 +126,7 @@ pub struct StepReport {
 
 /// A validated plan's mutable cursor and bounded input queue.
 pub struct Instance {
-    pub(crate) plan: Plan,
+    pub(crate) plan: Arc<Plan>,
     pub(crate) active: Vec<StateId>,
     pub(crate) history: Vec<Option<Vec<StateId>>>,
     pub(crate) queue: VecDeque<Event>,
@@ -142,6 +142,19 @@ impl Instance {
     /// Creates an instance with a fixed event capacity and per-run transition budget.
     pub fn new(
         plan: Plan,
+        event_capacity: usize,
+        microstep_limit: MicrostepLimit,
+    ) -> Result<Self, RuntimeError> {
+        Self::new_shared(Arc::new(plan), event_capacity, microstep_limit)
+    }
+
+    /// Creates an instance using an already shared immutable plan allocation.
+    ///
+    /// This is the allocation-free plan handoff used by host adapters that
+    /// keep a plan as an asset. The plan is retained for the instance lifetime
+    /// and is not cloned on subsequent [`Self::run`] calls.
+    pub fn new_shared(
+        plan: Arc<Plan>,
         event_capacity: usize,
         microstep_limit: MicrostepLimit,
     ) -> Result<Self, RuntimeError> {

@@ -72,6 +72,7 @@ members = [
   "pkg/prism_render_visibility",
   "pkg/prism_scene",
   "pkg/prism_state_tree_core",
+  "pkg/prism_state_tree_ecs",
   "pkg/prism_ui_dock",
   # Prism Bevy integration bridge for the GPU-driven renderer (phased-out once prism_app lands).
   "pkg/prism_bevy",

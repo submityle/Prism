@@ -653,6 +653,25 @@ fn queue_rejects_zero_capacity_and_missing_guard_is_false() {
 }
 
 #[test]
+fn shared_plan_instances_retain_one_plan_allocation() {
+    let shared = alloc::sync::Arc::new(basic_plan());
+    let first =
+        Instance::new_shared(alloc::sync::Arc::clone(&shared), 2, MicrostepLimit(4)).unwrap();
+    let second =
+        Instance::new_shared(alloc::sync::Arc::clone(&shared), 2, MicrostepLimit(4)).unwrap();
+    assert!(core::ptr::eq(first.plan(), second.plan()));
+    assert!(core::ptr::eq(first.plan(), shared.as_ref()));
+}
+
+#[test]
+fn instance_and_guard_satisfy_thread_safe_host_contract() {
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<AlwaysGuard>();
+    assert_send_sync::<Instance>();
+}
+
+#[test]
 fn compiler_rejects_inconsistent_parent_links() {
     let root = StateNode::compound(StateId(0), None, vec![StateId(1)], StateId(1), None);
     let child = StateNode::atomic(StateId(1), Some(StateId(0)));

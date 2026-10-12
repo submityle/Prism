@@ -16,7 +16,7 @@
 > 本文聚焦「**语义正确 + 数据导向 + 可作者化 + 可调试 + 可网络化**」的工程路线；不复刻 UE/Unity 的对象模型与源码，只借其**状态语义边界、任务生命周期、绑定心智与调试形态**；核心抽象 `no_std + alloc` 友好，ECS/资产/编辑器/调试层需 `std`；**不依赖任何 `bevy_*` crate**。
 
 - 版本: v0.2（ST0 核心语义内核实现同步版）
-- 状态: **ST0 CORE SHIPPED / ST1–ST8 PLANNED**（仅下方“实现进度”标明的 `prism_state_tree_core` 能力已交付；任务/绑定/ECS/作者工具/网络等仍按路线图推进，依赖项落地状态见 §2.1）
+- 状态: **ST0 CORE SHIPPED / ST1 ECS 最小装配切片已实现 / ST2–ST8 PLANNED**（ST1 的共享 Plan、逐实体 runtime 组件、CommandQueue 延迟 spawn 与显式 tick/event 路径已交付；Schema/Context、自动调度、observer 迁移事件等仍按路线图推进，依赖项落地状态见 §2.1 与 §20）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 层级定位: **通用决策运行时，非 AI 专属**。AI 是首要消费者而非所有者。上承 `prism_gameplay_*`（AI/能力/流程/交互）、动画与 UI 流程；内嵌 `prism_ecs` 调度，**不进内核仿真内循环**（ECS 存储遍历、物理 solver、渲染 RG 永远走原生路径）
 - 关键依赖（均为 `pkg/` 下的 prism 原生 crate，落地状态见 §2.1）: `prism_ecs`（observer/reaction/relation/snapshot：迁移事件的即时响应与回滚底座）、`prism_app`（Plugin/Schedule/`fixed`/`determinism`/`state`：相位与固定步）、`prism_reflect`（`path`/`schema`/`dynamic`/`property_bridge`：动态绑定路径、资产 schema、版本迁移）、`prism_tasks`（off-thread 编译、批量并行执行）、`prism_asset`（树资产加载/mtime 监视/热重载）、`prism_diagnostic`（budget/hitch/profiler/replay：调试器与帧预算）、`prism_time`（timeline/recording/确定性时间源）、`prism_ui*` + `prism_editor_framework`（图编辑器宿主与调试 HUD）
@@ -110,9 +110,9 @@ TreeDef(文本/图资产) ──compile(off-thread)──> TreePlan(不可变·�
 | 图 IR / durable / 画布 | `prism_visual_scripting` | **未就绪**（PLANNED） | 仅设计文档，无 `pkg/prism_visual_script` |
 | 响应式绑定内核 | `prism_loom` | **未就绪**（PLANNED） | 仅设计文档，无 `pkg/prism_loom` |
 | GameplayTag 门控 | `prism_gameplay_tags` | **未就绪**（PLANNED） | 仅设计文档 |
-| 决策运行时本体 | `prism_state_tree_core` | **ST0 CORE SHIPPED**；ST1–ST8 PLANNED | `pkg/prism_state_tree_core`；当前核心能力见 §20 ST0 实现进度 |
+| 决策运行时本体 | `prism_state_tree_core` + `prism_state_tree_ecs` | **ST0 CORE SHIPPED**；ST1 最小装配切片实现（自动调度/Schema/observer 仍 PLANNED）；ST2–ST8 PLANNED | `pkg/prism_state_tree_core`、`pkg/prism_state_tree_ecs`；见 §20 ST0/ST1 实现进度 |
 
-> **诚实边界**：上表「已有代码」指模块存在，其完整能力以各 crate 自身文档与测试为准；StateTree 仅 ST0 语义核心已落地，不等于完整决策产品；`prism_visual_scripting` / `prism_loom` / `prism_gameplay_tags` 三项未就绪，对应 feature 在落地前为**前置待建**，不阻塞 ST0–ST4 核心（它们只影响 `graph` / `reactive` / AI 域 `GameplayTag` 门控）。
+> **诚实边界**：上表「已有代码」指模块存在，其完整能力以各 crate 自身文档与测试为准；StateTree 的 ST0 语义内核与 ST1 最小逐实体 ECS 装配已落地，不等于完整决策产品；`prism_visual_scripting` / `prism_loom` / `prism_gameplay_tags` 三项未就绪，对应 feature 在落地前为**前置待建**，不阻塞 ST0–ST4 核心（它们只影响 `graph` / `reactive` / AI 域 `GameplayTag` 门控）。
 
 ### 2.2 为什么不复用现成方案
 
@@ -864,7 +864,7 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 
 §25 各高级功能与里程碑的依赖关系：§25.2/§25.4 → ST4；§25.1/§25.3/§25.5/§25.9 → ST6；§25.6/§25.7/§25.8 → ST7–ST8。
 
-### ST0 实现进度（Implementation Progress）
+### ST0 / ST1 实现进度（Implementation Progress）
 
 `pkg/prism_state_tree_core` 已作为根 workspace member 落地，定位为 ST0 的纯语义内核切片（`no_std + alloc`、`#![forbid(unsafe_code)]`、不依赖 ECS/渲染/网络/编辑器）。当前实现拆分为 `model.rs`（定义校验与不可变 `Plan`）、`runtime.rs`（游标运行时）、`snapshot.rs`（快照编解码与校验恢复）和 `tests.rs`（语义回归），而不是把所有逻辑堆在单文件中。
 
@@ -879,7 +879,9 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 
 当前证据：实现同步时 `cargo test -p prism_state_tree_core --offline -- --test-threads=1` 为 **24 tests + 0 doctest 全绿**。迁移/历史热路径目前使用临时 `Vec` 且日志无界增长，零分配仍是尚未满足的设计目标；完整 SCXML 一致性套件和分配计数基准也尚未交付。
 
-诚实边界：这不是完整 StateTree 产品的假实现，也不宣称 ST0–ST8 全部完成。`Task` / `Evaluator` / Schema 与 Context / typed binding / instance frame / ECS 装配 / batch runtime / 热重载 / 调试器 / 网络复制仍未实现；对应路线图保持 `PLANNED`，后续必须以独立模块、测试和版本文档推进。当前 ST0 同样不承诺 transition 期间无堆分配或外部 callback panic 可恢复。
+ST1 最小装配切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句柄、持有独立且长期存活 core cursor 的 `StateTreeInstance` ECS 组件、经 `CommandQueue` deferred spawn 的 `queue_spawn`，以及显式逐实体 `tick_entity` / `step` 和有界事件请求 API。core `Guard` 已增加 `Send + Sync` 约束，允许运行时组件满足 ECS 线程安全边界；集成测试验证 spawn 应用后初始进入，再请求事件并在后续 tick 切换状态。该 crate 保持 `no_std + alloc`。
+
+诚实边界：这不是完整 StateTree 产品的假实现，也不宣称 ST0–ST8 全部完成。ST1 尚未实现 Schema / Context、typed binding、批量查询、自动 Schedule 注册、observer 迁移事件桥接、资产服务器/热重载、ECS 快照回滚或 zero-config 插件；这些仍为 `PLANNED`。生命周期 callback 暂由 `NoopLifecycle` 承接。当前 ST0 同样不承诺 transition 期间无堆分配或外部 callback panic 可恢复。
 
 ---
 
