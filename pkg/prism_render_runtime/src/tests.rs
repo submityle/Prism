@@ -29,6 +29,14 @@ const SIZE: u32 = 64;
 /// inspects it, so the headless present loop needs no real OS window.
 struct FakeWindow;
 
+/// Whether a missing adapter must fail the test instead of skipping it.
+///
+/// Set `PRISM_REQUIRE_GPU` to opt into strictness: a run meant to exercise
+/// hardware cannot silently degrade into a no-op.
+fn require_gpu() -> bool {
+    std::env::var_os("PRISM_REQUIRE_GPU").is_some()
+}
+
 impl HasWindowHandle for FakeWindow {
     fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, HandleError> {
         Err(HandleError::Unavailable)
@@ -88,6 +96,10 @@ fn instance_enumerates_adapters_through_the_rhi() {
 #[test]
 fn rhi_graph_clears_imported_target() {
     let Some(rt) = RenderRuntime::wgpu(rhi::Extent3d::new_2d(SIZE, SIZE)).ok() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
         return;
     };
     let device = rt.device();
@@ -175,6 +187,10 @@ fn pacer_bounds_frames_in_flight_and_drains() {
 
     let extent = rhi::Extent3d::new_2d(SIZE, SIZE);
     let Some(rt) = RenderRuntime::<WgpuInstance>::wgpu_paced(extent, MAX_IN_FLIGHT).ok() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
         return;
     };
     assert_eq!(
@@ -235,6 +251,10 @@ const TRIANGLE_WGSL: &str = "\
 #[test]
 fn rhi_graph_draws_a_triangle() {
     let Some(rt) = RenderRuntime::wgpu(rhi::Extent3d::new_2d(SIZE, SIZE)).ok() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
         return;
     };
     let device = rt.device();

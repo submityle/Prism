@@ -21,9 +21,21 @@ fn device_or_skip() -> Option<(WgpuDevice, WgpuQueue)> {
     WgpuInstance::new().request_default_device().ok()
 }
 
+/// Whether a missing adapter must fail the test instead of skipping it.
+///
+/// Set `PRISM_REQUIRE_GPU` to opt into strictness so a run meant to exercise
+/// hardware cannot silently degrade into a no-op.
+fn require_gpu() -> bool {
+    std::env::var_os("PRISM_REQUIRE_GPU").is_some()
+}
+
 #[test]
 fn gpu_trivial_compute_dispatch() {
     let Some((device, queue)) = device_or_skip() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
         return;
     };
 
@@ -118,6 +130,10 @@ fn gpu_trivial_compute_dispatch() {
 #[test]
 fn gpu_trivial_clear_render_pass() {
     let Some((device, queue)) = device_or_skip() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
         return;
     };
 

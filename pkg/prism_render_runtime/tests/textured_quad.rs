@@ -23,6 +23,11 @@ use rhi::{
 
 use prism_render_runtime::RenderRuntime;
 
+/// Whether a missing adapter must fail the test instead of skipping it.
+fn require_gpu() -> bool {
+    std::env::var_os("PRISM_REQUIRE_GPU").is_some()
+}
+
 /// The offscreen render-target edge length.
 const SIZE: u32 = 64;
 
@@ -95,7 +100,10 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 #[test]
 fn rhi_texture_sampler_bind_group_renders_through_the_graph() {
     let Some(rt) = RenderRuntime::<WgpuInstance>::wgpu(Extent3d::new_2d(SIZE, SIZE)).ok() else {
-        // No adapter: a GPU-less sandbox. The suite must still pass.
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
         return;
     };
     let device = rt.device();

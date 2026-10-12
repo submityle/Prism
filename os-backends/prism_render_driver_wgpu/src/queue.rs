@@ -665,6 +665,11 @@ mod tests {
         WgpuInstance::new().request_default_device().ok()
     }
 
+    /// Whether a missing adapter must fail the test instead of skipping it.
+    fn require_gpu() -> bool {
+        std::env::var_os("PRISM_REQUIRE_GPU").is_some()
+    }
+
     #[test]
     fn gpu_transfer_pass_copies_buffer_to_buffer() {
         const PAYLOAD: [u8; 16] = [
@@ -672,6 +677,10 @@ mod tests {
             0x1e, 0x1f,
         ];
         let Some((device, queue)) = device_or_skip() else {
+            assert!(
+                !require_gpu(),
+                "PRISM_REQUIRE_GPU is set but no adapter was found"
+            );
             return;
         };
 
@@ -723,6 +732,10 @@ mod tests {
     #[test]
     fn gpu_tracked_submission_reports_completion() {
         let Some((device, queue)) = device_or_skip() else {
+            assert!(
+                !require_gpu(),
+                "PRISM_REQUIRE_GPU is set but no adapter was found"
+            );
             return;
         };
         // An empty command buffer is a valid, side-effect-free submission; its
