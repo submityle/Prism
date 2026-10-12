@@ -197,6 +197,7 @@ pub fn propagate_by_levels(
     if locals.len() != n || globals.len() != n {
         return Err(HierarchyError::LengthMismatch);
     }
+    validate_schedule(hierarchy, schedule)?;
     for level in 0..schedule.level_count() {
         for &node in schedule.level(level) {
             let local = &locals[node.index()];
@@ -206,6 +207,39 @@ pub fn propagate_by_levels(
             };
             globals[node.index()] = world;
         }
+    }
+    Ok(())
+}
+
+/// Check that `schedule` is a valid depth-order schedule for `hierarchy`: it
+/// must cover every node exactly once and place each node strictly deeper than
+/// its parent. Otherwise the by-level pass would read a not-yet-finalized parent
+/// and produce wrong globals (CR-found).
+fn validate_schedule(
+    hierarchy: &Hierarchy,
+    schedule: &LevelSchedule,
+) -> Result<(), HierarchyError> {
+    if schedule.len() != hierarchy.len() {
+        return Err(HierarchyError::LengthMismatch);
+    }
+    let mut seen = alloc::vec![false; hierarchy.len()];
+    for level in 0..schedule.level_count() {
+        for &node in schedule.level(level) {
+            let idx = node.index();
+            if idx >= hierarchy.len() || seen[idx] {
+                return Err(HierarchyError::InvalidNode);
+            }
+            seen[idx] = true;
+            if let Some(parent) = hierarchy.parent(node)
+                && (!seen[parent.index()]
+                    || schedule.node_depth(parent) >= schedule.node_depth(node))
+            {
+                return Err(HierarchyError::InvalidParent);
+            }
+        }
+    }
+    if seen.iter().any(|s| !s) {
+        return Err(HierarchyError::InvalidNode);
     }
     Ok(())
 }
@@ -241,7 +275,8 @@ impl ComputeHierarchyInput {
     /// matrices are packed from [`Transform::to_affine`] with `layout`.
     ///
     /// # Panics
-    /// Panics if `locals.len()` differs from the hierarchy node count or the
+    /// Panics if `locals.len()` differs from the hierarchy node count, if
+    /// `schedule` is not a valid depth-order schedule for `hierarchy`, or if the
     /// node count exceeds `i32::MAX` (parents are encoded as `i32`).
     pub fn pack(
         hierarchy: &Hierarchy,
@@ -254,6 +289,10 @@ impl ComputeHierarchyInput {
             locals.len(),
             n,
             "locals length must equal the hierarchy node count"
+        );
+        assert!(
+            validate_schedule(hierarchy, schedule).is_ok(),
+            "schedule must be a valid depth-order schedule for the hierarchy"
         );
         assert!(
             n <= i32::MAX as usize,
@@ -276,8 +315,11 @@ impl ComputeHierarchyInput {
             pack_affine_row_major(layout, &affine, out);
         }
 
-        let dispatch_order: Vec<u32> =
-            schedule.order().iter().map(|id| id.index() as u32).collect();
+        let dispatch_order: Vec<u32> = schedule
+            .order()
+            .iter()
+            .map(|id| id.index() as u32)
+            .collect();
         let level_ranges: Vec<(u32, u32)> = schedule
             .level_ranges()
             .iter()
@@ -370,5 +412,53 @@ fn pack_affine_row_major(layout: MatrixLayout, affine: &Affine3, out: &mut [u8])
 fn write_floats(floats: &[f32], out: &mut [u8]) {
     for (f, chunk) in floats.iter().zip(out.chunks_exact_mut(4)) {
         chunk.copy_from_slice(&f.to_le_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a balanced-three-node chain `2 <- 1 <- 0` and reverse the flattened
+    /// dispatch order, so a child is scheduled before its parent (CR-found: a
+    /// reversed schedule silently produced wrong globals).
+    fn chain_with_reversed_schedule() -> (Hierarchy, LevelSchedule) {
+        let hierarchy =
+            Hierarchy::from_parents(&[None, Some(NodeId::new(0)), Some(NodeId::new(1))])
+                .expect("valid chain");
+        let good = LevelSchedule::build(&hierarchy).expect("acyclic");
+        let mut order = good.order.clone();
+        order.reverse();
+        let n = order.len();
+        let level_ranges = if n == 0 {
+            Vec::new()
+        } else {
+            alloc::vec![0..n]
+        };
+        let reversed = LevelSchedule {
+            order,
+            level_ranges,
+            depth: good.depth.clone(),
+        };
+        (hierarchy, reversed)
+    }
+
+    #[test]
+    fn propagate_rejects_reversed_schedule() {
+        let (hierarchy, schedule) = chain_with_reversed_schedule();
+        let locals = alloc::vec![Transform::IDENTITY; hierarchy.len()];
+        let mut globals = alloc::vec![GlobalTransform::IDENTITY; hierarchy.len()];
+        let err = propagate_by_levels(&hierarchy, &schedule, &locals, &mut globals)
+            .expect_err("a child-before-parent schedule must be rejected");
+        assert_eq!(err, HierarchyError::InvalidParent);
+    }
+
+    #[test]
+    #[should_panic(expected = "valid depth-order schedule")]
+    fn pack_rejects_reversed_schedule() {
+        let (hierarchy, schedule) = chain_with_reversed_schedule();
+        let locals = alloc::vec![Transform::IDENTITY; hierarchy.len()];
+        let _ =
+            ComputeHierarchyInput::pack(&hierarchy, &schedule, &locals, MatrixLayout::RowMajor3x4);
     }
 }
