@@ -234,6 +234,10 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
             parameters.coat_color[1],
             parameters.coat_color[2],
         ],
+        // The CPU golden has no texture-sampling path, so it never carries a
+        // clearcoat normal map; the all-zero identity makes the coat use the
+        // base shading normal, mirroring the GPU resolve when no map is bound.
+        coat_normal: [0.0; 3],
         sheen: parameters.sheen,
         subsurface: parameters.subsurface,
         thickness: parameters.thickness,

@@ -344,6 +344,7 @@ mod tests {
             clearcoat_roughness: 0.25,
             coat_ior: 1.5,
             coat_color: [1.0; 3],
+            coat_normal: [0.0; 3],
             sheen: 0.5,
             subsurface: 0.0,
             thickness: 0.3,

@@ -30,6 +30,12 @@ pub struct SurfaceSample {
     /// `OpenPBR` `coat_color`: per-channel tint of the coat highlight (white for
     /// clear lacquer, hence the identity default).
     pub coat_color: [f32; 3],
+    /// World-space shading normal for the coat layer's own interface (`OpenPBR`
+    /// `coat_normal`, from a clearcoat normal map). The all-zero vector is the
+    /// identity: the coat then uses [`ShadingFrame::normal`] exactly as before
+    /// this field existed. A non-zero value must be unit length and perturbs the
+    /// coat's reflected lobe only — the base layer keeps the base shading normal.
+    pub coat_normal: [f32; 3],
     /// Sheen (fuzz) intensity driving the Cloth Charlie sheen lobe in `[0, 1]`.
     pub sheen: f32,
     /// Subsurface scattering weight driving Cloth/Subsurface diffusion in `[0, 1]`.
@@ -86,6 +92,7 @@ impl Default for SurfaceSample {
             clearcoat_roughness: 0.25,
             coat_ior: 1.5,
             coat_color: [1.0; 3],
+            coat_normal: [0.0; 3],
             sheen: 0.0,
             subsurface: 0.0,
             thickness: 0.0,

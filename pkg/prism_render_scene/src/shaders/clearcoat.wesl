@@ -62,6 +62,16 @@ fn clearcoat_fresnel_dielectric(cos_i: f32, coat_ior: f32) -> f32 {
     return 0.5 * (r_parl * r_parl + r_perp * r_perp);
 }
 
+// The coat interface normal: `OpenPBR` `coat_normal` when authored, else the
+// base shading normal. Twin of `clearcoat.rs::coat_interface_normal`; the zero
+// vector is the identity sentinel.
+fn clearcoat_interface_normal(coat_normal: vec3<f32>, base_normal: vec3<f32>) -> vec3<f32> {
+    if dot(coat_normal, coat_normal) > 0.0 {
+        return brdf_normalize_or(coat_normal, base_normal);
+    }
+    return base_normal;
+}
+
 // Two-layer clear-coat BSDF for a single analytic light. Mirrors
 // `evaluate_clearcoat_direct`.
 fn clearcoat_direct(
@@ -115,10 +125,21 @@ fn clearcoat_direct(
     // scalar `Fc` drives both the highlight and the base attenuation.
     let coat_ior = max(surface.coat_ior, CLEARCOAT_MIN_IOR);
     let coat_f = clearcoat_fresnel_dielectric(v_dot_h, coat_ior);
-    let coat_d = distribution_ggx(n_dot_h, coat_alpha);
-    let coat_g = vis_smith(n_dot_v, n_dot_l, coat_alpha);
-    // OpenPBR `coat_color` tints the highlight; white is the exact identity.
-    let coat_specular = surface.coat_color * (coat * coat_f * coat_d * coat_g * n_dot_l);
+    // `OpenPBR` `coat_normal`: the coat layer's own interface normal when a
+    // clearcoat normal map is authored; it drives the coat microfacet geometry
+    // only, while the base keeps the base normal.
+    let coat_n = clearcoat_interface_normal(surface.coat_normal, n);
+    let coat_n_dot_h = dot(coat_n, h);
+    let coat_n_dot_v = dot(coat_n, v);
+    let coat_n_dot_l = dot(coat_n, l);
+    var coat_d = 0.0;
+    var coat_g = 0.0;
+    if coat_n_dot_l > 0.0 && coat_n_dot_v > 0.0 && coat_n_dot_h > 0.0 {
+        coat_d = distribution_ggx(coat_n_dot_h, coat_alpha);
+        coat_g = vis_smith(max(coat_n_dot_v, CLEARCOAT_MIN_N_DOT), coat_n_dot_l, coat_alpha);
+    }
+    // `OpenPBR` `coat_color` tints the highlight; white is the exact identity.
+    let coat_specular = surface.coat_color * (coat * coat_f * coat_d * coat_g * coat_n_dot_l);
 
     // Double-pass transmission at the view and light angles (the reference PT
     // `CoatLayer` form): the base is gated entering and leaving the coat.

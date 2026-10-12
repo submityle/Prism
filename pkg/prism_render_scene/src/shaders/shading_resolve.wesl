@@ -1886,16 +1886,29 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.anisotropy_rotation = parameters.anisotropy_rotation;
 
     var frame: ShadingFrame;
+    // The interpolated tangent basis reused by both normal maps.
+    var basis: TangentBasis;
+    basis.tangent = geometry.tangent;
+    basis.bitangent = geometry.bitangent;
+    basis.degenerate = false;
     // A bound normal map rotates its tangent-space sample into world space
     // against the interpolated basis; otherwise the geometric normal stands.
     if sampled.has_normal_map {
-        var basis: TangentBasis;
-        basis.tangent = geometry.tangent;
-        basis.bitangent = geometry.bitangent;
-        basis.degenerate = false;
         frame.normal = apply_tangent_space_normal(basis, geometry.normal, sampled.normal_tangent);
     } else {
         frame.normal = geometry.normal;
+    }
+    // `OpenPBR` `coat_normal`: the coat layer's own interface normal, taken from
+    // the clearcoat normal map when one is bound. Without a map it stays the
+    // zero sentinel, so the coat uses the base shading normal exactly as before.
+    if sampled.has_clearcoat_normal {
+        surface.coat_normal = apply_tangent_space_normal(
+            basis,
+            geometry.normal,
+            sampled.clearcoat_normal_tangent,
+        );
+    } else {
+        surface.coat_normal = vec3<f32>(0.0);
     }
     frame.view = brdf_normalize_or(params.view_position.xyz - geometry.position, geometry.normal);
     frame.tangent = geometry.tangent;

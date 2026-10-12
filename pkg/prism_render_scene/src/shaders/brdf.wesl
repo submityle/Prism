@@ -62,6 +62,10 @@ struct SurfaceSample {
     // tint). Mirrors `SurfaceSample::coat_ior` / `coat_color` in `lighting.rs`.
     coat_ior: f32,
     coat_color: vec3<f32>,
+    // World-space coat interface normal (`OpenPBR` `coat_normal`); the zero
+    // vector means "use the base shading normal". Mirrors
+    // `SurfaceSample::coat_normal` in `lighting.rs`.
+    coat_normal: vec3<f32>,
     sheen: f32,
     subsurface: f32,
     thickness: f32,

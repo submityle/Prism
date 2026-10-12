@@ -77,6 +77,22 @@ fn fresnel_coat_dielectric(cos_i: f32, coat_ior: f32) -> f32 {
     0.5 * (r_parl * r_parl + r_perp * r_perp)
 }
 
+/// The coat interface normal: `OpenPBR` `coat_normal` when authored, else the
+/// base shading normal.
+///
+/// The all-zero [`SurfaceSample::coat_normal`] is the identity sentinel (see
+/// `lighting.rs`), so a surface without a clearcoat normal map evaluates the
+/// coat lobe against the base normal exactly as it did before the field existed.
+#[inline]
+fn coat_interface_normal(coat_normal: [f32; 3], base_normal: [f32; 3]) -> [f32; 3] {
+    let [x, y, z] = coat_normal;
+    if x * x + y * y + z * z > 0.0 {
+        normalize_or(coat_normal, base_normal)
+    } else {
+        base_normal
+    }
+}
+
 /// Evaluates the two-layer clear-coat BSDF for a single analytic light.
 ///
 /// Returns linear radiance for the light plus the surface emissive term. When
@@ -140,12 +156,31 @@ pub fn evaluate_clearcoat_direct(
     // scalar `Fc` drives both the highlight and the base attenuation.
     let coat_ior = surface.coat_ior.max(MIN_COAT_IOR);
     let coat_f = fresnel_coat_dielectric(v_dot_h, coat_ior);
-    let coat_d = distribution_ggx(n_dot_h, coat_alpha);
-    let coat_g = visibility_smith_ggx_correlated(n_dot_v, n_dot_l, coat_alpha);
+    // OpenPBR `coat_normal`: the coat layer has its own interface normal when a
+    // clearcoat normal map is authored. It drives the coat's microfacet
+    // geometry only; the base layer and its attenuation keep the base normal.
+    let coat_n = coat_interface_normal(surface.coat_normal, n);
+    let coat_n_dot_h = dot(coat_n, h);
+    let coat_n_dot_v = dot(coat_n, v);
+    let coat_n_dot_l = dot(coat_n, l);
+    // A coat facet that faces away from the light reflects nothing into it, but
+    // must not gate the base (the base is evaluated against its own normal).
+    let (coat_d, coat_g) = if coat_n_dot_l > 0.0 && coat_n_dot_v > 0.0 && coat_n_dot_h > 0.0 {
+        (
+            distribution_ggx(coat_n_dot_h, coat_alpha),
+            visibility_smith_ggx_correlated(
+                coat_n_dot_v.max(MIN_N_DOT),
+                coat_n_dot_l,
+                coat_alpha,
+            ),
+        )
+    } else {
+        (0.0, 0.0)
+    };
     // OpenPBR `coat_color` tints the highlight; white is the exact identity.
     let coat_specular = mul(
         surface.coat_color,
-        [coat * coat_f * coat_d * coat_g * n_dot_l; 3],
+        [coat * coat_f * coat_d * coat_g * coat_n_dot_l; 3],
     );
 
     // Double-pass transmission: light is refracted through the coat on entry
@@ -437,5 +472,100 @@ mod tests {
         assert!(red[0] >= white[0], "red coat must keep the red highlight: {red:?} vs {white:?}");
         assert!(red[1] < white[1], "red coat must drop green: {red:?} vs {white:?}");
         assert!(red[2] < white[2], "red coat must drop blue: {red:?} vs {white:?}");
+    }
+
+    #[test]
+    fn coat_interface_normal_is_the_identity_when_unset() {
+        let base = normalize_or([0.0, 1.0, 0.0], [0.0, 1.0, 0.0]);
+        // The all-zero sentinel falls back to the base normal exactly.
+        assert_eq!(coat_interface_normal([0.0; 3], base), base);
+        // A non-zero coat normal is normalized against the base as a fallback.
+        let tilted = coat_interface_normal([0.3, 1.0, 0.0], base);
+        assert!((tilted[0] * tilted[0] + tilted[1] * tilted[1] + tilted[2] * tilted[2] - 1.0).abs() < 1.0e-5);
+        // Degenerate (non-normalizable) input falls back rather than dividing by zero.
+        let tiny = coat_interface_normal([1.0e-30, 1.0e-30, 0.0], base);
+        assert!(tiny.iter().all(|c| c.is_finite()));
+    }
+
+    #[test]
+    fn tilted_coat_normal_perturbs_only_the_coat_highlight() {
+        // Isolate the coat contribution as (with coat) - (without coat): the
+        // uncoated result ignores `coat_normal` entirely, so any difference in
+        // the delta is the coat lobe reacting to its own interface normal.
+        let zero_normal_glint = {
+            let coated = evaluate_clearcoat_direct(
+                SurfaceSample {
+                    clearcoat: 1.0,
+                    ..base_surface()
+                },
+                frame(),
+                light(),
+            );
+            let uncoated = evaluate_clearcoat_direct(
+                SurfaceSample {
+                    clearcoat: 0.0,
+                    ..base_surface()
+                },
+                frame(),
+                light(),
+            );
+            sum(coated) - sum(uncoated)
+        };
+        let tilted_normal_glint = {
+            let coated = evaluate_clearcoat_direct(
+                SurfaceSample {
+                    clearcoat: 1.0,
+                    coat_normal: normalize_or([0.6, 0.8, 0.0], [0.0, 1.0, 0.0]),
+                    ..base_surface()
+                },
+                frame(),
+                light(),
+            );
+            let uncoated = evaluate_clearcoat_direct(
+                SurfaceSample {
+                    clearcoat: 0.0,
+                    ..base_surface()
+                },
+                frame(),
+                light(),
+            );
+            sum(coated) - sum(uncoated)
+        };
+        assert!(
+            (tilted_normal_glint - zero_normal_glint).abs() > 1.0e-4,
+            "a tilted coat normal must change the coat glint: tilted={tilted_normal_glint} zero={zero_normal_glint}"
+        );
+    }
+
+    #[test]
+    fn coat_normal_facing_away_zeroes_only_the_highlight() {
+        // A coat normal pointing away from the light reflects nothing into it.
+        // That must leave the base attenuation intact: the same surface with a
+        // black `coat_color` (highlight zeroed, attenuation kept) is the exact
+        // reference.
+        let away = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 1.0,
+                coat_normal: [0.0, -1.0, 0.0],
+                ..base_surface()
+            },
+            frame(),
+            light(),
+        );
+        let black_highlight = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 1.0,
+                coat_color: [0.0; 3],
+                ..base_surface()
+            },
+            frame(),
+            light(),
+        );
+        for c in 0..3 {
+            assert!(
+                (away[c] - black_highlight[c]).abs() < 1.0e-6,
+                "channel {c}: away={away:?} black={black_highlight:?}"
+            );
+        }
     }
 }
