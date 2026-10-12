@@ -38,11 +38,19 @@ use wgpu::{
 };
 
 use crate::draw::{DrawCommand, DrawList, GlyphCmd};
-use crate::layer::LayerTree;
 use crate::raster::Framebuffer;
+use prism_ui_layout::Rect;
 
-/// Number of `f32` lanes per encoded primitive (seven `vec4<f32>` = 112 bytes).
-const PRIM_STRIDE: usize = 28;
+/// Number of `f32` lanes per encoded primitive (eight `vec4<f32>` = 128 bytes).
+const PRIM_STRIDE: usize = 32;
+/// Clip lanes that leave a primitive unclipped (`x0, y0, x1, y1` all-inclusive).
+/// Matches the CPU reference's `None` scissor.
+const CLIP_UNBOUNDED: [f32; 4] = [
+    f32::NEG_INFINITY,
+    f32::NEG_INFINITY,
+    f32::INFINITY,
+    f32::INFINITY,
+];
 /// Compute workgroup edge; the shader uses an `8x8` tile.
 const WORKGROUP: u32 = 8;
 
@@ -57,6 +65,7 @@ struct Prim {
     offset: vec4<f32>,  // offset.x, offset.y, screen_px_range(glyph), _
     flags:  vec4<f32>,  // kind(0=shadow,1=rect,2=glyph), has_fill, has_border, _
     glyph:  vec4<f32>,  // su0, sv0, sstep, tstep  (normalised atlas uv ramp)
+    clip:   vec4<f32>,  // x0, y0, x1, y1 (scissor; an inverted rect clips all)
 };
 
 @group(0) @binding(0) var<storage, read>       prims:   array<Prim>;
@@ -111,6 +120,14 @@ fn over(dst: vec4<f32>, src: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(rgb, out_a);
 }
 
+// 1.0 when (x, y) is inside the clip rect, else 0.0.
+fn clip_factor(x: f32, y: f32, c: vec4<f32>) -> f32 {
+    if (x >= c.x && x <= c.z && y >= c.y && y <= c.w) {
+        return 1.0;
+    }
+    return 0.0;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let w = dims.x;
@@ -129,12 +146,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let hh = p.rect.w * 0.5;
         let kind = p.flags.x;
         let opacity = p.params.w;
+        let clip = clip_factor(sx, sy, p.clip);
         if (kind < 0.5) {
             // Shadow: centre shifted by offset.
             let cx = p.rect.x + hw + p.offset.x;
             let cy = p.rect.y + hh + p.offset.y;
             let dist = sd_rounded_box(sx - cx, sy - cy, hw, hh, p.params.x);
-            let a = shadow_alpha(dist, p.params.z) * opacity * p.fill.a;
+            let a = shadow_alpha(dist, p.params.z) * opacity * p.fill.a * clip;
             acc = over(acc, vec4<f32>(p.fill.rgb, a));
         } else if (kind < 1.5) {
             // Rect: fill then border ring.
@@ -142,11 +160,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let cy = p.rect.y + hh;
             let dist = sd_rounded_box(sx - cx, sy - cy, hw, hh, p.params.x);
             if (p.flags.y > 0.5) {
-                let cov = coverage(dist) * opacity * p.fill.a;
+                let cov = coverage(dist) * opacity * p.fill.a * clip;
                 acc = over(acc, vec4<f32>(p.fill.rgb, cov));
             }
             if (p.params.y > 0.0 && p.flags.z > 0.5) {
-                let cov = border_coverage(dist, p.params.y) * opacity * p.border.a;
+                let cov = border_coverage(dist, p.params.y) * opacity * p.border.a * clip;
                 acc = over(acc, vec4<f32>(p.border.rgb, cov));
             }
         } else {
@@ -161,7 +179,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let sv = p.glyph.y + ly * p.glyph.w;
                 let d = textureSampleLevel(atlas, atlas_s, vec2<f32>(su, sv), 0.0).r;
                 let spr = max(p.offset.z, 1.0);
-                let cov = clamp(spr * (d - 0.5) + 0.5, 0.0, 1.0) * opacity * p.fill.a;
+                let cov = clamp(spr * (d - 0.5) + 0.5, 0.0, 1.0) * opacity * p.fill.a * clip;
                 acc = over(acc, vec4<f32>(p.fill.rgb, cov));
             }
         }
@@ -257,13 +275,13 @@ impl GpuRasterizer {
 
     /// Rasterises `list` into a fresh [`Framebuffer`] on the GPU.
     ///
-    /// The draw list is flattened by layer opacity (identical to
-    /// [`crate::raster::rasterize`]) before upload, so nested group opacity is
-    /// honoured the same way on both backends.
+    /// The draw list is walked with an opacity stack and a scissor stack
+    /// (identical to [`crate::raster::rasterize`]) before upload, so nested
+    /// group opacity and per-layer [`bounds`](crate::draw::LayerCmd::bounds)
+    /// clipping are honoured the same way on both backends.
     #[must_use]
     pub fn rasterize(&self, list: &DrawList, width: u32, height: u32) -> Framebuffer {
-        let flat = LayerTree::parse(list).flatten();
-        let prims = encode_prims(&flat);
+        let prims = encode_prims(list);
         let count = (prims.len() / PRIM_STRIDE) as u32;
         let pixel_count = (width as usize) * (height as usize);
 
@@ -389,6 +407,9 @@ struct PrimRaw {
     screen_px_range: f32,
     /// Normalised atlas uv ramp `(su0, sv0, sstep, tstep)` for the glyph tier.
     glyph: [f32; 4],
+    /// Active scissor rect as `x0, y0, x1, y1` (all-inclusive); see
+    /// [`CLIP_UNBOUNDED`].
+    clip: [f32; 4],
 }
 
 impl PrimRaw {
@@ -405,44 +426,63 @@ impl PrimRaw {
             0.0,
         ]);
         out.extend_from_slice(&self.glyph);
+        out.extend_from_slice(&self.clip);
     }
 }
 
-/// Encodes the flattened draw list into the shader's `array<Prim>` layout.
+/// Encodes the draw list into the shader's `array<Prim>` layout.
 ///
-/// Layer markers must already be removed by [`LayerTree::flatten`]; any that
-/// remain are skipped. Text runs expand into one SDF-atlas glyph primitive per
-/// inked character (`kind == 2`), laid out identically to the CPU reference's
+/// Layer markers fold group opacity into a running product (mirroring
+/// [`crate::raster::rasterize`]) and push their [`bounds`](crate::draw::LayerCmd::bounds)
+/// onto a scissor stack; every emitted primitive carries the intersection of
+/// the enclosing bounds as its `clip` lanes so the shader can reject pixels
+/// outside it. Text runs expand into one SDF-atlas glyph primitive per inked
+/// character (`kind == 2`), laid out identically to the CPU reference's
 /// `raster_glyph_sdf`, so the shader can sample [`atlas_sdf`] and apply the
 /// same `screenPxRange` coverage. When the atlas is unavailable the run falls
 /// back to a single opaque rect fill so text never silently vanishes.
-fn encode_prims(flat: &DrawList) -> Vec<f32> {
+fn encode_prims(list: &DrawList) -> Vec<f32> {
     let transparent = Color::rgba(0.0, 0.0, 0.0, 0.0);
     let mut out = Vec::new();
-    for cmd in flat.commands() {
+    let mut opacity = 1.0_f32;
+    let mut opacity_stack: Vec<f32> = Vec::new();
+    let mut clip_stack: Vec<Rect> = Vec::new();
+    for cmd in list.commands() {
         match *cmd {
-            DrawCommand::Shadow(s) => PrimRaw {
-                rect: [
-                    s.rect.left(),
-                    s.rect.top(),
-                    s.rect.size.width,
-                    s.rect.size.height,
-                ],
-                fill: [s.color.r, s.color.g, s.color.b, s.color.a],
-                border: [0.0; 4],
-                params: [s.radius, 0.0, s.blur, s.opacity],
-                offset: [s.offset.x, s.offset.y],
-                kind: 0.0,
-                has_fill: true,
-                has_border: false,
-                screen_px_range: 0.0,
-                glyph: [0.0; 4],
+            DrawCommand::PushLayer(l) => {
+                opacity_stack.push(opacity);
+                opacity = clamp01(opacity * l.opacity);
+                clip_stack.push(l.bounds);
             }
-            .write_to(&mut out),
+            DrawCommand::PopLayer => {
+                opacity = opacity_stack.pop().unwrap_or(1.0);
+                clip_stack.pop();
+            }
+            DrawCommand::Shadow(s) => {
+                let prim = PrimRaw {
+                    rect: [
+                        s.rect.left(),
+                        s.rect.top(),
+                        s.rect.size.width,
+                        s.rect.size.height,
+                    ],
+                    fill: [s.color.r, s.color.g, s.color.b, s.color.a],
+                    border: [0.0; 4],
+                    params: [s.radius, 0.0, s.blur, clamp01(s.opacity * opacity)],
+                    offset: [s.offset.x, s.offset.y],
+                    kind: 0.0,
+                    has_fill: true,
+                    has_border: false,
+                    screen_px_range: 0.0,
+                    glyph: [0.0; 4],
+                    clip: clip_lanes(&clip_stack),
+                };
+                prim.write_to(&mut out);
+            }
             DrawCommand::Rect(r) => {
                 let fill = r.fill.unwrap_or(transparent);
                 let border = r.border_color.unwrap_or(transparent);
-                PrimRaw {
+                let prim = PrimRaw {
                     rect: [
                         r.rect.left(),
                         r.rect.top(),
@@ -451,26 +491,43 @@ fn encode_prims(flat: &DrawList) -> Vec<f32> {
                     ],
                     fill: [fill.r, fill.g, fill.b, fill.a],
                     border: [border.r, border.g, border.b, border.a],
-                    params: [r.radius, r.border_width, 0.0, r.opacity],
+                    params: [r.radius, r.border_width, 0.0, clamp01(r.opacity * opacity)],
                     offset: [0.0, 0.0],
                     kind: 1.0,
                     has_fill: r.fill.is_some(),
                     has_border: r.border_color.is_some(),
                     screen_px_range: 0.0,
                     glyph: [0.0; 4],
-                }
-                .write_to(&mut out);
+                    clip: clip_lanes(&clip_stack),
+                };
+                prim.write_to(&mut out);
             }
             DrawCommand::Glyph(g) => {
-                let text = flat.text(g.text);
-                for prim in glyph_prims(g, text) {
+                let text = list.text(g.text);
+                let clip = clip_lanes(&clip_stack);
+                for mut prim in glyph_prims(g, text) {
+                    prim.params[3] = clamp01(prim.params[3] * opacity);
+                    prim.clip = clip;
                     prim.write_to(&mut out);
                 }
             }
-            DrawCommand::PushLayer(_) | DrawCommand::PopLayer => continue,
         }
     }
     out
+}
+
+/// The active scissor lanes for a stack of enclosing layer bounds, or
+/// [`CLIP_UNBOUNDED`] when no layer is active.
+fn clip_lanes(stack: &[Rect]) -> [f32; 4] {
+    match crate::bounds::clip_of(stack) {
+        Some(r) => [r.left(), r.top(), r.right(), r.bottom()],
+        None => CLIP_UNBOUNDED,
+    }
+}
+
+#[inline]
+fn clamp01(v: f32) -> f32 {
+    v.clamp(0.0, 1.0)
 }
 
 /// Process-wide ASCII SDF atlas, baked once with the same parameters the CPU
@@ -510,6 +567,7 @@ fn glyph_prims(g: GlyphCmd, text: &str) -> Vec<PrimRaw> {
         has_border: false,
         screen_px_range: 0.0,
         glyph: [0.0; 4],
+        clip: CLIP_UNBOUNDED,
     };
 
     if text.is_empty() {
@@ -591,6 +649,7 @@ fn glyph_prims(g: GlyphCmd, text: &str) -> Vec<PrimRaw> {
             has_border: false,
             screen_px_range,
             glyph: [su0, sv0, sstep, tstep],
+            clip: CLIP_UNBOUNDED,
         });
     }
     prims

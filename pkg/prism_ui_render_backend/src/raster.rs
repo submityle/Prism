@@ -21,6 +21,10 @@ pub struct Framebuffer {
     width: u32,
     height: u32,
     pixels: Vec<[f32; 4]>,
+    /// Active scissor: a pixel whose centre falls outside this rect is skipped
+    /// by [`blend`](Self::blend). `None` means unbounded. An inverted rect (see
+    /// [`clip_of`]) contains no pixel, so it clips everything away.
+    clip: Option<Rect>,
 }
 
 impl Framebuffer {
@@ -31,6 +35,7 @@ impl Framebuffer {
             width,
             height,
             pixels: vec![[0.0; 4]; (width as usize) * (height as usize)],
+            clip: None,
         }
     }
 
@@ -51,6 +56,7 @@ impl Framebuffer {
             width,
             height,
             pixels: px,
+            clip: None,
         }
     }
 
@@ -79,6 +85,11 @@ impl Framebuffer {
         if x >= self.width || y >= self.height || src[3] <= 0.0 {
             return;
         }
+        if let Some(clip) = self.clip
+            && !crate::bounds::contains(clip, (x as f32 + 0.5, y as f32 + 0.5))
+        {
+            return;
+        }
         let idx = (y as usize) * (self.width as usize) + (x as usize);
         let dst = self.pixels[idx];
         let sa = clamp01(src[3]);
@@ -91,6 +102,11 @@ impl Framebuffer {
             }
         }
         self.pixels[idx] = out;
+    }
+
+    /// Sets the active scissor rect (or `None` to clear it).
+    pub(crate) fn set_clip(&mut self, clip: Option<Rect>) {
+        self.clip = clip;
     }
 
     /// Maximum absolute per-channel difference against another framebuffer of
@@ -116,23 +132,45 @@ impl Framebuffer {
 
 /// Rasterises a draw list into a fresh [`Framebuffer`].
 ///
-/// Layer markers are flattened by opacity before rasterising (see
-/// [`crate::layer::LayerTree::flatten`]), so nested group opacity is honoured.
+/// Layer markers are walked with an opacity stack (so nested group opacity is
+/// honoured) and a scissor stack: primitives inside a layer are clipped to the
+/// intersection of the enclosing layers' [`bounds`](crate::draw::LayerCmd::bounds).
 #[must_use]
 pub fn rasterize(list: &DrawList, width: u32, height: u32) -> Framebuffer {
-    let flat = crate::layer::LayerTree::parse(list).flatten();
     let mut fb = Framebuffer::new(width, height);
-    for cmd in flat.commands() {
+    let mut opacity = 1.0_f32;
+    let mut opacity_stack: Vec<f32> = Vec::new();
+    let mut clip_stack: Vec<Rect> = Vec::new();
+    for cmd in list.commands() {
         match *cmd {
-            DrawCommand::Shadow(s) => raster_shadow(&mut fb, s),
-            DrawCommand::Rect(r) => raster_rect(&mut fb, r),
-            DrawCommand::Glyph(g) => {
-                let text = flat.text(g.text);
+            DrawCommand::PushLayer(l) => {
+                opacity_stack.push(opacity);
+                opacity = clamp01(opacity * l.opacity);
+                clip_stack.push(l.bounds);
+            }
+            DrawCommand::PopLayer => {
+                opacity = opacity_stack.pop().unwrap_or(1.0);
+                clip_stack.pop();
+            }
+            DrawCommand::Shadow(mut s) => {
+                s.opacity = clamp01(s.opacity * opacity);
+                fb.set_clip(crate::bounds::clip_of(&clip_stack));
+                raster_shadow(&mut fb, s);
+            }
+            DrawCommand::Rect(mut r) => {
+                r.opacity = clamp01(r.opacity * opacity);
+                fb.set_clip(crate::bounds::clip_of(&clip_stack));
+                raster_rect(&mut fb, r);
+            }
+            DrawCommand::Glyph(mut g) => {
+                g.opacity = clamp01(g.opacity * opacity);
+                fb.set_clip(crate::bounds::clip_of(&clip_stack));
+                let text = list.text(g.text);
                 raster_glyph(&mut fb, g, text);
             }
-            DrawCommand::PushLayer(_) | DrawCommand::PopLayer => {}
         }
     }
+    fb.set_clip(None);
     fb
 }
 
@@ -571,6 +609,7 @@ fn clamp01(v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::draw::LayerCmd;
     use prism_ui_layout::{Point, Size};
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Rect {
@@ -692,5 +731,55 @@ mod tests {
         assert_eq!(u.left(), 0.0);
         assert_eq!(u.right(), 30.0);
         assert_eq!(u.bottom(), 15.0);
+    }
+
+    #[test]
+    fn layer_opacity_folds_into_children() {
+        let mut dl = DrawList::new();
+        dl.push(DrawCommand::PushLayer(LayerCmd {
+            bounds: rect(0.0, 0.0, 20.0, 20.0),
+            opacity: 0.5,
+        }));
+        dl.push_rect(RectCmd {
+            rect: rect(0.0, 0.0, 20.0, 20.0),
+            fill: Some(red()),
+            radius: 0.0,
+            border_width: 0.0,
+            border_color: None,
+            opacity: 1.0,
+        });
+        dl.push(DrawCommand::PopLayer);
+        let fb = rasterize(&dl, 20, 20);
+        assert!(
+            (fb.pixel(10, 10)[3] - 0.5).abs() < 1e-3,
+            "group opacity multiplies the child alpha"
+        );
+    }
+
+    #[test]
+    fn layer_bounds_clip_children() {
+        let mut dl = DrawList::new();
+        dl.push(DrawCommand::PushLayer(LayerCmd {
+            bounds: rect(4.0, 4.0, 8.0, 8.0),
+            opacity: 1.0,
+        }));
+        // The rect overflows the layer bounds; only the overlap may paint.
+        dl.push_rect(RectCmd {
+            rect: rect(0.0, 0.0, 20.0, 20.0),
+            fill: Some(red()),
+            radius: 0.0,
+            border_width: 0.0,
+            border_color: None,
+            opacity: 1.0,
+        });
+        dl.push(DrawCommand::PopLayer);
+        let fb = rasterize(&dl, 20, 20);
+        // Bounds span x, y in [4, 12]. Pixel centres +0.5 decide the scissor.
+        assert!(fb.pixel(8, 8)[3] > 0.9, "inside the clip is painted");
+        assert!(fb.pixel(11, 8)[3] > 0.9, "rightmost inside column painted");
+        assert_eq!(fb.pixel(3, 8)[3], 0.0, "left of the clip untouched");
+        assert_eq!(fb.pixel(12, 8)[3], 0.0, "right of the clip untouched");
+        assert_eq!(fb.pixel(8, 3)[3], 0.0, "above the clip untouched");
+        assert_eq!(fb.pixel(8, 12)[3], 0.0, "below the clip untouched");
     }
 }

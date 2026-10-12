@@ -87,6 +87,27 @@ pub fn contains(rect: Rect, p: (f32, f32)) -> bool {
     p.0 >= rect.left() && p.0 <= rect.right() && p.1 >= rect.top() && p.1 <= rect.bottom()
 }
 
+/// The intersection of every rect in `stack`, or `None` when `stack` is empty.
+///
+/// Used to fold a stack of enclosing layer bounds into the single active
+/// scissor rect that both the CPU reference rasteriser and the GPU compute
+/// shader apply per primitive. `None` means "unbounded"; a nested pair that does
+/// not overlap yields a rect with a negative extent, which [`contains`] rejects
+/// for every point — i.e. an empty clip clips everything away.
+#[must_use]
+pub fn clip_of(stack: &[Rect]) -> Option<Rect> {
+    let (&first, rest) = stack.split_first()?;
+    let mut acc = first;
+    for &r in rest {
+        let x0 = acc.left().max(r.left());
+        let x1 = acc.right().min(r.right());
+        let y0 = acc.top().max(r.top());
+        let y1 = acc.bottom().min(r.bottom());
+        acc = Rect::new(Point::new(x0, y0), Size::new(x1 - x0, y1 - y0));
+    }
+    Some(acc)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -179,5 +200,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn clip_of_is_empty_for_no_layers_and_folds_nested_bounds() {
+        assert_eq!(clip_of(&[]), None);
+        // A single layer clips to exactly its bounds.
+        assert_eq!(clip_of(&[rect(1.0, 2.0, 5.0, 6.0)]), Some(rect(1.0, 2.0, 5.0, 6.0)));
+        // Nested bounds intersect.
+        let nested = [rect(0.0, 0.0, 10.0, 10.0), rect(4.0, 4.0, 20.0, 20.0)];
+        assert_eq!(clip_of(&nested), Some(rect(4.0, 4.0, 6.0, 6.0)));
+        // Disjoint nested bounds clip everything away (negative extent).
+        let disjoint = [rect(0.0, 0.0, 2.0, 2.0), rect(5.0, 5.0, 2.0, 2.0)];
+        let empty = clip_of(&disjoint).expect("non-empty stack");
+        assert!(empty.size.width < 0.0 && empty.size.height < 0.0);
+        assert!(!contains(empty, (1.0, 1.0)) && !contains(empty, (6.0, 6.0)));
     }
 }

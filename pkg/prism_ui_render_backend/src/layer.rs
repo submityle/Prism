@@ -15,10 +15,13 @@ use crate::draw::TextRef;
 
 /// A node in the compositing tree. The implicit root layer has `opacity == 1`.
 ///
-/// A `LayerCmd` also carries a clip/compositing `bounds`, but this tree folds
-/// only the group opacity. The bounds are preserved through batching
-/// ([`Batch::PushLayer`](crate::batch::Batch)) for a future scissor/clip pass;
-/// neither the reference nor the GPU rasteriser applies them yet.
+/// This tree analyses **opacity only**: it folds the product of each layer's
+/// group opacity and does not itself carry a layer's clip/compositing `bounds`.
+/// The bounds are honoured by the rasterisers, which walk the raw
+/// `PushLayer`/`PopLayer` markers directly and intersect the enclosing bounds
+/// into a scissor ([`crate::bounds::clip_of`]) — both the CPU reference and the
+/// GPU shader apply them. This tree is the opacity structure a recompositing
+/// pass needs; the clip stack is derived separately from the raw draw list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layer {
     /// Group opacity declared for this layer.

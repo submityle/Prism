@@ -120,6 +120,27 @@ fn layered_opacity_parity() {
 }
 
 #[test]
+fn layer_bounds_clip_parity() {
+    let mut dl = DrawList::new();
+    dl.push(DrawCommand::PushLayer(LayerCmd {
+        bounds: rect(6.0, 6.0, 18.0, 12.0),
+        opacity: 1.0,
+    }));
+    // A rounded, bordered rect that overflows the layer bounds on every side;
+    // both the fill and the border ring must be scissored identically.
+    dl.push_rect(RectCmd {
+        rect: rect(2.0, 2.0, 30.0, 30.0),
+        fill: Some(Color::rgba(0.2, 0.7, 0.4, 1.0)),
+        radius: 4.0,
+        border_width: 2.0,
+        border_color: Some(Color::rgba(0.1, 0.1, 0.1, 1.0)),
+        opacity: 1.0,
+    });
+    dl.push(DrawCommand::PopLayer);
+    assert_parity(&dl, 40, 40);
+}
+
+#[test]
 fn empty_list_parity() {
     let dl = DrawList::new();
     assert_parity(&dl, 16, 16);
