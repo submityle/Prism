@@ -1,0 +1,151 @@
+//! The immutable, shareable [`SceneTemplate`] descriptor (design §5.1, §9).
+//!
+//! A template is the runtime-resident form of a scene asset: it is created by
+//! the bake pipeline, loaded through `prism_asset`, and shared by any number of
+//! instances. It is deliberately ECS-free — it holds only identity, counts, the
+//! local name table, the nested-instance slots and the dependency closure, all
+//! keyed by [`StableGuid`] so it carries no live handles.
+
+use alloc::boxed::Box;
+
+use prism_asset::StableGuid;
+
+use crate::identity::{LocalEntityId, NameTable};
+
+/// A nested instance slot inside a template (design §9.1).
+///
+/// A template may contain other templates as nested instances; each slot names
+/// the local entity the nested instance is rooted at and the sub-template's
+/// asset identity. A *level* is simply a top-level template with loose entities
+/// plus such nested slots — level and prefab are one mechanism, not two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NestedSlot {
+    /// The local entity the nested instance is rooted at.
+    pub root: LocalEntityId,
+    /// The nested sub-template's asset identity.
+    pub template: StableGuid,
+}
+
+impl NestedSlot {
+    /// Builds a nested slot.
+    #[must_use]
+    pub const fn new(root: LocalEntityId, template: StableGuid) -> Self {
+        Self { root, template }
+    }
+}
+
+/// A runtime-resident, immutable scene template (design §5.1).
+///
+/// The full bake-time `InstantiationPlan` (design §8) is produced and consumed
+/// by the instantiation pipeline; this descriptor carries the identity and the
+/// structural facts the runtime model needs to validate an instance, resolve
+/// names, walk nested slots and reason about the dependency closure.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneTemplate {
+    /// The template's stable asset identity (design §6 `StableGuid`).
+    pub guid: StableGuid,
+    /// Number of base-segment entities the template instantiates.
+    pub entity_count: u32,
+    /// Template-local `name -> LocalEntityId` table.
+    pub names: NameTable,
+    /// Nested instance slots, in author order.
+    pub nested: Box<[NestedSlot]>,
+    /// The dependency closure (nested sub-templates and referenced assets), by
+    /// identity.
+    pub deps: Box<[StableGuid]>,
+}
+
+impl SceneTemplate {
+    /// Builds a bare template with a guid and entity count.
+    #[must_use]
+    pub fn new(guid: StableGuid, entity_count: u32) -> Self {
+        Self {
+            guid,
+            entity_count,
+            names: NameTable::new(),
+            nested: Box::new([]),
+            deps: Box::new([]),
+        }
+    }
+
+    /// Whether `local` is a base-segment entity of this template.
+    #[must_use]
+    pub fn contains_local(&self, local: LocalEntityId) -> bool {
+        !local.is_reserved() && local.index() < self.entity_count
+    }
+
+    /// Resolves a local name through the template's [`NameTable`].
+    #[must_use]
+    pub fn local_of(&self, name: &str) -> Option<LocalEntityId> {
+        self.names.get(name)
+    }
+
+    /// The nested slot rooted at `root`, if any.
+    #[must_use]
+    pub fn nested_at(&self, root: LocalEntityId) -> Option<&NestedSlot> {
+        self.nested.iter().find(|slot| slot.root == root)
+    }
+
+    /// Number of nested instance slots.
+    #[must_use]
+    pub fn nested_count(&self) -> usize {
+        self.nested.len()
+    }
+
+    /// Number of dependencies in the closure.
+    #[must_use]
+    pub fn dependency_count(&self) -> usize {
+        self.deps.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NestedSlot, SceneTemplate};
+    use crate::identity::LocalEntityId;
+    use alloc::boxed::Box;
+    use alloc::vec;
+    use prism_asset::StableGuid;
+
+    fn guid(seed: u128) -> StableGuid {
+        StableGuid::from_u128(seed)
+    }
+
+    #[test]
+    fn contains_local_bounds_base_segment_only() {
+        let template = SceneTemplate::new(guid(1), 3);
+        assert!(template.contains_local(LocalEntityId::new(0)));
+        assert!(template.contains_local(LocalEntityId::new(2)));
+        assert!(!template.contains_local(LocalEntityId::new(3)));
+        // Reserved ids are never part of the base set.
+        assert!(!template.contains_local(LocalEntityId::reserved(0)));
+    }
+
+    #[test]
+    fn names_and_nested_slots_resolve() {
+        let mut template = SceneTemplate::new(guid(1), 4);
+        template.names.insert("root", LocalEntityId::new(0));
+        template.names.insert("wheel", LocalEntityId::new(3));
+        template.nested = Box::new([NestedSlot::new(LocalEntityId::new(1), guid(2))]);
+        template.deps = Box::new([guid(2), guid(3)]);
+
+        assert_eq!(template.local_of("wheel"), Some(LocalEntityId::new(3)));
+        assert_eq!(template.local_of("missing"), None);
+        assert_eq!(
+            template.nested_at(LocalEntityId::new(1)),
+            Some(&NestedSlot::new(LocalEntityId::new(1), guid(2)))
+        );
+        assert_eq!(template.nested_at(LocalEntityId::new(2)), None);
+        assert_eq!(template.nested_count(), 1);
+        assert_eq!(template.dependency_count(), 2);
+    }
+
+    #[test]
+    fn new_template_starts_empty() {
+        let template = SceneTemplate::new(guid(7), 0);
+        assert_eq!(template.nested_count(), 0);
+        assert_eq!(template.dependency_count(), 0);
+        assert!(template.names.is_empty());
+        assert_eq!(template.nested, Box::<[NestedSlot]>::from(vec![]));
+    }
+}

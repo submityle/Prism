@@ -1062,4 +1062,22 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 
 ---
 
-> 本文档为 `prism_scene` 的 clean-slate 设计稿（v0.2，纯文档，未进入编码）。它确立 scene 为 Prism 作者态内容的单一逻辑真相，世界系统降级为架其上的流送/常驻/持久化基座；旧 `prism_world_system_design_zh.md`（仍依赖 Bevy、以 WorldDB 为平行真相）将按本文契约在后续任务中重写为去 Bevy 多 crate 版本。所有性能数字为 design target，须以 §25 基准在真机校准。
+> 本文档为 `prism_scene` 的 clean-slate 设计稿（v0.2）。它确立 scene 为 Prism 作者态内容的单一逻辑真相，世界系统降级为架其上的流送/常驻/持久化基座；旧 `prism_world_system_design_zh.md`（仍依赖 Bevy、以 WorldDB 为平行真相）将按本文契约在后续任务中重写为去 Bevy 多 crate 版本。所有性能数字为 design target，须以 §25 基准在真机校准。实现进度见 §27。
+
+---
+
+## 27. 实现进度（Implementation Progress）
+
+**M0 核心模型已落地**——crate [`pkg/prism_scene`](../pkg/prism_scene)（`no_std + alloc`，`#![forbid(unsafe_code)]`，依赖 `prism_asset` + `prism_ecs`，不依赖任何 `bevy_*`）：
+
+| 模块 | 覆盖章节 | 内容 |
+|---|---|---|
+| `identity` | §6 | `LocalEntityId`（基段 / 保留段）、`NameTable`（`BTreeMap`，确定性迭代序）、`PersistentId`（FNV-1a-128 确定性派生）、`PersistentIdBuilder` |
+| `path` | §7.1 | `FieldPath` / `FieldSegment`，点号文本解析、规范化与往返 |
+| `overrides` | §7 | `ComponentTypeId`、`OverrideValue`（序列化态）、`PropertyOverride`、`StructuralOp`、`ArchetypeSignature`、`OverrideSet`（唯一键 `(target, component, path)` 去重、后写覆盖前写、`RemoveEntity` 孤儿回收） |
+| `remap` | §6.1 | `RemapTable`（基段 + 保留段两段稠密映射，O(1) 查、拒绝间隙） |
+| `template` | §5.1、§9 | `SceneTemplate`、`NestedSlot`（嵌套实例槽） |
+
+验证（本地）：`cargo test -p prism_scene` → **29 unit + 1 doctest 全绿**；`cargo build -p prism_scene --no-default-features`（`no_std`）通过；`cargo clippy -p prism_scene --all-targets` 无告警。
+
+**尚未落地（后续里程碑，非占位）**：`InstantiationPlan` + `spawn_scene()` 的 ECS 实例化热路径（§8）、COW 列共享（§8.5）、residency / 子场景流送（§11–§12）、热重载传播（§13）、bake 产出的二进制包（§10，归 `prism_scene_bake`）。

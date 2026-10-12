@@ -1,0 +1,23 @@
+[package]
+name = "prism_scene"
+version = "0.1.0"
+edition = "2024"
+description = "Prism scene/template/instance/override runtime (design §5-§7, §14). no_std + alloc; deterministic cross-session identity and sparse property/structural override sets. Contains no Unreal Engine source or derived code and depends on no bevy_* crate."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_asset = { path = "../prism_asset", default-features = false }
+prism_ecs = { path = "../prism_ecs", default-features = false }
+
+[dev-dependencies]
+prism_scene = { path = "." }
+
+[features]
+default = ["std"]
+# Unlocks std-backed facilities and the std test harness; the identity /
+# override / remap core is fully `no_std + alloc`.
+std = ["prism_asset/std", "prism_ecs/std"]
+
+[lints]
+workspace = true
