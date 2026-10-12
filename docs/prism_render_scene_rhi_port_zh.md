@@ -87,3 +87,18 @@
 - 每片：`cargo build/test/clippy -p prism_render_scene --all-targets` 全绿、零告警；该片 `rg bevy_render <子系统>` 归零。
 - GPU 相关片：真机跑（`PRISM_REQUIRE_GPU=1`，跨沙盒）；沙盒默认看不到 adapter。
 - 一次 CR + 修复 + 本地 commit。
+
+## 6. 接线层方案（六条替换，保住单执行路径）
+
+「接线层」= 把 bevy 的**接入点**换成与「四线共用一条执行路径」（§1.2 / `prism_material_pipeline_refactor_zh.md` §3.5/§8.5）等价的 Prism 接线。**不改 shading 逻辑，不拆管线**。逐条：
+
+| # | bevy 接入点 | Prism 目标 | 现状 |
+| --- | --- | --- | --- |
+| 1 | `RenderApp` / `ExtractSchedule` / `Render` / `RenderStartup` / `RenderSystems` / `RenderGraph(GraphSystems)` / `init_gpu_resource` | `prism_render_app::{RenderApp, Render}` + extract + **Prism 版 render system sets**（Extract/Prepare/Queue/Phase/Cleanup）+ `prism_render_graph` 承载 pass | host 骨架已有；**system sets 待建** |
+| 2 | `view::{ExtractedView,RetainedViewEntity}` / `renderer::ViewQuery` / `schedule::camera_driver` | `prism_render_architecture::view_family::{ViewRegistry,ViewEntry}` + Prism camera-driver set | view registry 已有；**driver set 待建** |
+| 3 | `core_3d::{Opaque3d,Opaque3dBatchSetKey,Opaque3dBinKey}` / `Core3d` / `Core3dSystems::{MainPass,PostProcess}` | `prism_render_graph` 的 pass + Prism **phase 标签**（Opaque/Transparent/NPR/Custom）；`RenderCommand<Opaque3d>` → Prism 绘制命令 | pass 图已有；**phase 标签待建** |
+| 4 | `MeshPipelineKey` / 分批键 | `prism_render_visibility::binning::DrawBinKey`（**已具备** `pipeline_class`/`pass_mask`）+ 由 **瓣集 + illumination + render_class + flags** 生成的 Prism pipeline key（§8.5：key **只**含步骤 1 瓣集 + 特征 flags，质量档/缓存/降级不进 key） | binning 已有；**key 映射待接** |
+| 5 | `queue_material_meshes` / `MeshPipelineSystems` / `RenderMeshInstances` / `StandardMaterial` / `PbrPlugin` | `prism_render_material`（IR/record）+ `prism_render_architecture::gpu_scene::{InstanceRecord,MaterialRecord}` + 间接/bindless 绘制（复用 `prism_render_gpudriven` 的间接多绘） | IR/record 已有；**队列/特化待建** |
+| 6 | `render_resource::*` / `renderer::{RenderDevice,RenderQueue}` / `TextureCache` / `PipelineCache` / `SpecializedMeshPipelines` | RHI（`PrismGpu` + `prism_render_driver`）+ Prism 版资源/管线缓存 + mesh 管线特化 | `PrismGpu` 已落；**缓存/特化待建** |
+
+**不变量**：步骤 2 的 per-tile 9-way 分类、步骤 5 的单一 `respond()` 分派、`binning` 的 `pipeline_class` 只是同一个 key 的三种视图——迁移后**仍是那条唯一执行路径**，不按 PBR/NPR/混合/自定义拆 PSO。
