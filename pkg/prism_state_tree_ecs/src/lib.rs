@@ -11,12 +11,68 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
+use core::marker::PhantomData;
 
 use prism_ecs::{component::Component, entity::Entity, world::World};
 use prism_state_tree_core::{
-    Event, EventQueueError, Guard, GuardId, Instance, MicrostepLimit, NoopLifecycle, Plan,
-    RuntimeError, StateId, StepReport,
+    ContextRef, Event, EventQueueError, Guard, GuardId, Instance, MicrostepLimit, NoopLifecycle,
+    Plan, RuntimeError, Schema, SchemaError, StateId, StepReport,
 };
+
+/// A host context validated against a concrete core [`Schema`].
+///
+/// The context is borrowed from the integration's world and is therefore not
+/// an ECS component. This wrapper is the explicit boundary an ECS adapter can
+/// pass to future binding/evaluator layers; the current ST1 runtime does not
+/// inspect or mutate it.
+pub struct ValidatedContext<'w, S>
+where
+    S: Schema + 'w,
+{
+    context: S::Context<'w>,
+    schema: PhantomData<fn() -> S>,
+}
+
+impl<'w, S> ValidatedContext<'w, S>
+where
+    S: Schema + 'w,
+{
+    /// Validates a borrowed host context and retains it without taking world
+    /// ownership.
+    pub fn new(context: S::Context<'w>) -> Result<Self, SchemaError> {
+        S::validate_context(&context)?;
+        Ok(Self {
+            context,
+            schema: PhantomData,
+        })
+    }
+
+    /// Returns the validated read-only host context.
+    pub fn context(&self) -> &S::Context<'w> {
+        &self.context
+    }
+
+    /// Returns the context to the integration layer.
+    pub fn into_inner(self) -> S::Context<'w> {
+        self.context
+    }
+}
+
+impl<'w, S> ContextRef<'w> for ValidatedContext<'w, S>
+where
+    S: Schema + 'w,
+{
+    fn schema_id(&self) -> prism_state_tree_core::SchemaId {
+        self.context.schema_id()
+    }
+}
+
+/// Validates a host context at the ECS adapter boundary without gathering a
+/// world implicitly. ECS integrations own the actual `World`/`Entity` query
+/// and pass its borrowed result here.
+pub fn validate_context<S: Schema>(context: &S::Context<'_>) -> Result<(), SchemaError> {
+    S::validate_context(context)
+}
 
 /// Shared immutable compiled tree asset.
 #[derive(Clone, Debug)]

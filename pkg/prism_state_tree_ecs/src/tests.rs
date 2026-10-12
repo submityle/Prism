@@ -2,11 +2,37 @@ use alloc::vec;
 
 use prism_ecs::{command::CommandQueue, world::World};
 use prism_state_tree_core::{
-    Event, EventId, Guard, GuardContext, GuardId, MicrostepLimit, NodeKind, StateId, StateNode,
-    Transition, TransitionKind, TransitionTarget, TreeDef, Trigger,
+    ContextRef, Event, EventId, Guard, GuardContext, GuardId, MicrostepLimit, NodeKind, Schema,
+    SchemaDescriptor, SchemaError, SchemaId, SchemaVersion, StateId, StateNode, Transition,
+    TransitionKind, TransitionTarget, TreeDef, Trigger,
 };
 
-use crate::{queue_spawn, tick_entity, StateTreeAsset, StateTreeInstance};
+use crate::{
+    queue_spawn, tick_entity, validate_context, StateTreeAsset, StateTreeInstance, ValidatedContext,
+};
+
+struct TestContext<'w> {
+    schema: SchemaId,
+    value: &'w u32,
+}
+
+impl<'w> ContextRef<'w> for TestContext<'w> {
+    fn schema_id(&self) -> SchemaId {
+        self.schema
+    }
+}
+
+struct TestSchema;
+const TEST_SCHEMA_ID: SchemaId = SchemaId::new(0x1234);
+const WRONG_SCHEMA_ID: SchemaId = SchemaId::new(0x9999);
+
+impl Schema for TestSchema {
+    type Context<'w> = TestContext<'w>;
+
+    fn descriptor() -> SchemaDescriptor {
+        SchemaDescriptor::new(TEST_SCHEMA_ID, SchemaVersion::new(1, 0), Default::default())
+    }
+}
 
 fn asset() -> StateTreeAsset {
     let transition = Transition::new(
@@ -224,4 +250,35 @@ fn tick_of_missing_or_despawned_entity_is_a_safe_noop() {
     let entity = world.spawn(StateTreeInstance::new(asset(), 1, MicrostepLimit(8)).unwrap());
     assert!(world.despawn(entity));
     assert!(tick_entity(&mut world, entity).is_none());
+}
+
+#[test]
+fn validates_borrowed_schema_context_without_implicit_world_gather() {
+    let value = 42;
+    let context = TestContext {
+        schema: TEST_SCHEMA_ID,
+        value: &value,
+    };
+    assert!(validate_context::<TestSchema>(&context).is_ok());
+    let validated = ValidatedContext::<TestSchema>::new(context).expect("schema matches");
+    assert_eq!(*validated.context().value, 42);
+
+    let wrong = TestContext {
+        schema: WRONG_SCHEMA_ID,
+        value: &value,
+    };
+    assert_eq!(
+        validate_context::<TestSchema>(&wrong),
+        Err(SchemaError::ContextSchemaMismatch {
+            expected: TEST_SCHEMA_ID,
+            found: WRONG_SCHEMA_ID,
+        })
+    );
+    assert!(matches!(
+        ValidatedContext::<TestSchema>::new(wrong),
+        Err(SchemaError::ContextSchemaMismatch {
+            expected: TEST_SCHEMA_ID,
+            found: WRONG_SCHEMA_ID,
+        })
+    ));
 }
