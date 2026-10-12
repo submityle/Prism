@@ -568,6 +568,22 @@ impl WgpuQueue {
     }
 }
 
+impl rhi::FrameSync for WgpuQueue {
+    fn submit_tracked(&self, command_buffers: &[rhi::CommandBuffer]) -> rhi::CompletionToken {
+        // The inherent `submit_tracked` returns the native submission index and
+        // takes precedence over this trait method; boxing type-erases it.
+        Box::new(self.submit_tracked(command_buffers))
+    }
+
+    fn wait_for(&self, token: &(dyn Any + Send + Sync)) -> bool {
+        self.wait_for_submission_erased(token)
+    }
+
+    fn wait_idle(&self) -> bool {
+        self.wait_idle()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

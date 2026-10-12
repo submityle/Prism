@@ -33,3 +33,20 @@ impl RenderQueue for NullQueue {
 
     fn submit(&self, _command_buffers: &[rhi::CommandBuffer]) {}
 }
+
+/// The null queue completes every submission instantly, so `FrameSync` is
+/// satisfied trivially: the token is a unit and every wait succeeds at once.
+/// This is what lets the paced executor run against the null backend in CI.
+impl rhi::FrameSync for NullQueue {
+    fn submit_tracked(&self, _command_buffers: &[rhi::CommandBuffer]) -> rhi::CompletionToken {
+        Box::new(())
+    }
+
+    fn wait_for(&self, _token: &(dyn core::any::Any + Send + Sync)) -> bool {
+        true
+    }
+
+    fn wait_idle(&self) -> bool {
+        true
+    }
+}

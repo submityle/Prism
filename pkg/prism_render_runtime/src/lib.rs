@@ -40,10 +40,11 @@ use prism_render_graph::{CompileError, RenderGraph};
 
 mod capture;
 mod frame_pacing;
-mod frame_sync;
 
 pub use frame_pacing::{FramePacer, DEFAULT_FRAMES_IN_FLIGHT};
-pub use frame_sync::{CompletionToken, FrameSync};
+// The waitable-submission contract is part of the RHI, so every backend can
+// satisfy it without depending on this crate. Re-exported for convenience.
+pub use prism_render_driver::{CompletionToken, FrameSync};
 
 #[cfg(test)]
 mod tests;

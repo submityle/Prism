@@ -29,6 +29,7 @@ mod compare;
 mod device;
 mod flags;
 mod format;
+mod frame_sync;
 mod instance;
 mod pipeline;
 mod reclaim;
@@ -61,6 +62,7 @@ pub use compare::CompareFunction;
 pub use device::{ImageDataLayout, RenderDevice, RenderQueue, TextureWrite};
 pub use flags::{BufferUsages, ColorWrites, ShaderStages, TextureUsages};
 pub use format::{FormatAspects, TextureFormat, TextureSampleType, VertexFormat};
+pub use frame_sync::{CompletionToken, FrameSync};
 pub use instance::{
     Adapter, AdapterInfo, DeviceDescriptor, DeviceError, DeviceType, Instance, PowerPreference,
     RequestAdapterOptions,
