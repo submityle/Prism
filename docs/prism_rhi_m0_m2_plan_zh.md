@@ -31,20 +31,23 @@
 - **Null 后端**：`os-backends/prism_render_driver_null`（单一 CPU/Noop adapter；generation 校验的 id 生命周期；surface 全流程）。
 - **runtime**：`RenderRuntime<I: Instance>` 后端无关，`headless` + `wgpu` 便捷构造。
 - **M0 验收**：`rhi_graph_draws_a_triangle` 在真实 GPU 上离屏画出三角形并回读中心红、四角黑。
-- **M1 起步**：RHI 命令模型补齐 `CopyCommand`（4 变体）+ `Pass::Transfer` + `push_transfer_pass` + `SetPushConstants`，wgpu 后端翻译到 `copy_*` / `set_immediates`（GPU 对拍通过）。
+- **M1 命令/同步**：RHI 补齐 `CopyCommand`（4 变体）+ `Pass::Transfer` + `push_transfer_pass` + `SetPushConstants`；`prism_render_graph` 把 Transfer pass 录进命令缓冲；`FrameSync`（可等待提交）落在 RHI，runtime 有界 frames-in-flight。
+- **M1 多线程录制**：`prism_render_graph` 加 `parallel` feature，pass 在 worker 池并行录制后按 `plan.order` 确定性装配，与串行结果逐字节相等（可选 feature，默认 no_std 不变）。
+- **M1 资源/采样器验收**：`tests/textured_quad.rs` —— 上传纹理 → sampler + bind group → 采样着色 → 离屏回读，4096 像素**精确等值**断言。
+- **M0 窗口呈现**：runtime 的 `render_frame` 走 `acquire → import 交换链 → 构图 → execute → present`；`tools/render_triangle` 是真窗口 demo（真机 8s 无错运行）。
+- **M2 起步**：`prism_render_driver` 补 `DrawIndexedIndirect` + `MultiDrawIndirect`（multi-draw-indirect-count）；新 crate `pkg/prism_render_gpudriven` 做 compute 视锥剔除 → GPU 写间接参数 → indirect 绘制，GPU 结果与 CPU 参考集**完全一致**。
 
 ## 4. 后续切片（依赖有序）
 
-1. **图侧 Transfer 录制**：`prism_render_graph` 把 `PassKind::Transfer` 录进命令缓冲（当前为空）。
-2. **frames-in-flight**：runtime 帧节奏 + 后端提交索引钩子 + `DeferredDeleter` 回收。
-3. **窗口呈现**：winit（`prism_window_winit::WinitBackend::window` 已给出 `Arc<winit::Window>`）→ `create_surface` → 每帧 `acquire → 构图 → execute → present`；示例二进制放 `tools/` 或 `prism_*_app`。
-4. **自动屏障可观测**：`StateTracker` 已算屏障；wgpu 阶段为 no-op，补 `validation` 档把推导屏障与后端追踪对拍。
-5. **M1 目标物**：纹理 + PBR 物体（需要 mesh/image/camera 内容类型，属 M3 抽取范围，先在 runtime 内做最小验证）。
-6. **M2**：graph + 材质/场景；bindless 资源表、multi-draw-indirect-count、compute 剔除、千物体基准。
+1. **M2 千物体场景 + 基准**：把 `prism_render_gpudriven` 从「剔除 + 间接参数」推进到真正绘制 ~1000 物体，并测 GPU-driven 与朴素逐物体提交的 CPU 提交/帧时差（基准即规格）。
+2. **M2 bindless 资源表**：RHI 加 descriptor-array 绑定（`binding_array`），按 wgpu 30 实际能力门控，落不到的绑定类显式文档化而非假实现。
+3. **自动屏障可观测**：`StateTracker` 已算屏障；wgpu 阶段为 no-op，补 `validation` 档把推导屏障与后端追踪对拍。
+4. **M1/M2 目标物（内容侧）**：纹理 + PBR 物体需要 mesh/image/camera 内容类型，属 M3 抽取范围，先由 runtime/gpudriven 做最小验证。
+5. **prism_app 渲染 sub-app**：把 runtime 挂进 `prism_app` 的 render sub-app + extract（P1 收尾，脱 Bevy 的落点）。
 
 ## 5. 验证门禁
 
 - 每个 crate 独立 `cargo build/test/clippy --all-targets` 全绿、零告警、可回退。
-- GPU 测试用「无 adapter 即 skip」模式，保证 GPU-less CI 也通过；有 GPU 的环境跑真实路径。
+- GPU 测试用「无 adapter 即 skip」模式，保证 GPU-less CI 也通过；设 `PRISM_REQUIRE_GPU=1` 时缺 adapter **直接失败**，避免「以为跑了其实全跳过」（沙盒默认看不到 adapter，真机验证须跨沙盒 + 该环境变量）。
 - 画面/拷贝正确性走像素与字节级对拍（`WgpuQueue::read_texture_rgba8`）。
 - 切片粒度：一次 CR + 修复 + 本地 commit。
