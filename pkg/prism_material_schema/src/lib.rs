@@ -84,6 +84,10 @@ pub struct SurfaceSchema {
     /// Object-space cache auxiliary declarations (§14.3).
     #[serde(default, rename = "cache_aux")]
     pub cache_aux: Vec<CacheAux>,
+    /// Bake/pass-time extensions that resolve before the runtime and therefore
+    /// hold no header-digest slot (§5.2).
+    #[serde(default, rename = "identity_extension")]
+    pub identity_extensions: Vec<IdentityExtension>,
 }
 
 /// A runtime dynamic parameter channel (§17.1).
@@ -185,6 +189,35 @@ pub struct CacheAux {
     #[serde(default)]
     pub requires_caps: Vec<String>,
     /// Whether the cached quantity changes with the view direction.
+    pub view_dependent: bool,
+}
+
+/// A bake/pass-time extension with no header-digest address (§5.2).
+///
+/// These rows are registered, promoted and negotiated exactly like
+/// header-resident extensions, but they evaporate into the bake-time
+/// permutation key or the pass graph before the runtime. The schema still owns
+/// their identity, governance, capability and view-dependence facts so the
+/// hand-written PCM catalogue cannot drift from the manifest.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityExtension {
+    /// Human-facing extension id.
+    pub id: String,
+    /// Immutable global identity, shared with the PCM registry row.
+    pub uid: String,
+    /// Which bake/pass-time kind this row registers.
+    pub kind: IdentityKind,
+    /// Mutable governance namespace (§5.4).
+    pub namespace: Namespace,
+    /// Mutable vendor tag (§5.4).
+    pub vendor: String,
+    /// Mutable stability level (§5.4).
+    pub stability: Stability,
+    /// Platform capabilities required beyond the baseline.
+    #[serde(default)]
+    pub requires_caps: Vec<String>,
+    /// Whether the produced result changes with the view direction.
     pub view_dependent: bool,
 }
 
@@ -399,6 +432,42 @@ impl Stability {
             Self::Experimental => "experimental",
             Self::Candidate => "candidate",
             Self::Stable => "stable",
+        }
+    }
+}
+
+/// A PCM kind that resolves at bake/pass time and therefore holds no header
+/// slot (§5.2's identity-only half).
+///
+/// The enum is the schema-side vocabulary for the kinds `provider`, `transfer`,
+/// `downgrade`, `author_node` and `composite`; the runtime resolves the
+/// canonical spelling through its own [`Kind`](https://docs.rs/prism_material_pcm)
+/// and a mismatch fails the PCM/schema parity gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityKind {
+    /// Produces a page/atlas (SDF, LUT, measured BTF).
+    Provider,
+    /// A transfer remap applied between response and composition.
+    Transfer,
+    /// A distance/quality downgrade policy hook.
+    Downgrade,
+    /// An authoring-layer node type (§4, editor front-end).
+    AuthorNode,
+    /// A composite pass recorded into the final step.
+    Composite,
+}
+
+impl IdentityKind {
+    /// Canonical lowercase spelling used in the schema and PCM catalogue.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::Transfer => "transfer",
+            Self::Downgrade => "downgrade",
+            Self::AuthorNode => "author_node",
+            Self::Composite => "composite",
         }
     }
 }
@@ -732,6 +801,15 @@ impl SurfaceSchema {
                 return Err(SchemaError::DuplicateHeaderSlot(aux.registry_slot));
             }
         }
+
+        // Bake/pass-time identity rows share the same global uid space but no
+        // header slot: their identity is resolved by the registry before the
+        // runtime, so there is no per-material address to allocate.
+        for extension in &self.identity_extensions {
+            if !uids.insert(extension.uid.clone()) {
+                return Err(SchemaError::DuplicateUid(extension.uid.clone()));
+            }
+        }
         Ok(())
     }
 }
@@ -982,6 +1060,17 @@ mod tests {
         assert_eq!(surfel.registry_slot, 26);
         assert_eq!(surfel.requires_caps, ["object_space_cache"]);
         assert!(!surfel.view_dependent);
+
+        assert_eq!(schema.identity_extensions.len(), 5);
+        let measured = schema
+            .identity_extensions
+            .iter()
+            .find(|extension| extension.id == "measured_brdf")
+            .expect("measured-BRDF provider declared");
+        assert_eq!(measured.kind, IdentityKind::Provider);
+        assert_eq!(measured.uid, "org.prism.provider.measured_brdf");
+        assert_eq!(measured.requires_caps, ["heavy_sampling"]);
+        assert!(measured.view_dependent);
     }
 
     #[test]
@@ -1242,5 +1331,26 @@ view_dependent = true
             SurfaceSchema::parse(&bad).unwrap_err(),
             SchemaError::DuplicateResponseModeIllumination(String::from("stylized"))
         );
+    }
+
+    #[test]
+    fn rejects_an_unknown_identity_extension_kind() {
+        let bad = schema_with_records(
+            r#"
+[[identity_extension]]
+id = "watercolor"
+uid = "org.prism.provider.watercolor"
+kind = "watercolor"
+namespace = "PRISM"
+vendor = "prism"
+stability = "experimental"
+requires_caps = []
+view_dependent = false
+"#,
+        );
+        assert!(matches!(
+            SurfaceSchema::parse(&bad),
+            Err(SchemaError::Parse(_))
+        ));
     }
 }

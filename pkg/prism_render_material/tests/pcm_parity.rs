@@ -16,7 +16,7 @@ use prism_render_material::capability::{
 };
 use prism_render_material::{
     DynamicChannels, Illumination, LobeMask, SURFACE_CACHE_AUX, SURFACE_CHANNELS, SURFACE_LOBES,
-    SURFACE_RESPONSE_MODES,
+    SURFACE_IDENTITY_EXTENSIONS, SURFACE_RESPONSE_MODES,
 };
 
 /// Every schema lobe is registered in the committed catalogue with the same
@@ -42,15 +42,37 @@ fn the_committed_catalogue_agrees_with_the_schema_row_for_row() {
         SURFACE_CACHE_AUX.len(),
         "object-space cache auxiliaries"
     );
-    assert_eq!(count_of(Kind::Provider), 2, "bake-time page providers");
-    assert_eq!(count_of(Kind::Transfer), 1, "transfer remaps");
-    assert_eq!(count_of(Kind::Downgrade), 1, "downgrade policies");
+    let count_identity = |kind: Kind| {
+        SURFACE_IDENTITY_EXTENSIONS
+            .iter()
+            .filter(|extension| extension.kind == kind.as_str())
+            .count()
+    };
+    assert_eq!(
+        count_of(Kind::Provider),
+        count_identity(Kind::Provider),
+        "bake-time page providers"
+    );
+    assert_eq!(
+        count_of(Kind::Transfer),
+        count_identity(Kind::Transfer),
+        "transfer remaps"
+    );
+    assert_eq!(
+        count_of(Kind::Downgrade),
+        count_identity(Kind::Downgrade),
+        "downgrade policies"
+    );
     assert_eq!(
         count_of(Kind::AuthorNode),
-        0,
+        count_identity(Kind::AuthorNode),
         "§4's authoring front-end does not exist yet, so no author node can be registered"
     );
-    assert_eq!(count_of(Kind::Composite), 1, "composite passes");
+    assert_eq!(
+        count_of(Kind::Composite),
+        count_identity(Kind::Composite),
+        "composite passes"
+    );
 
     for lobe in &SURFACE_LOBES {
         let schema_row = bridged
@@ -424,4 +446,70 @@ fn the_schema_cache_aux_matches_the_catalogue() {
         (last_lobe_slot + 1..last_lobe_slot + 1 + expected.len() as u32).collect::<Vec<_>>(),
         "header-resident non-lobe slots must be dense after the extension lobes"
     );
+}
+
+/// P2-i: the bake/pass-time identity rows are declared by the schema and
+/// mirrored by the PCM catalogue. They share the registry's identity and
+/// governance space but must never consume a header-digest slot.
+#[test]
+fn the_schema_identity_extensions_match_the_catalogue() {
+    let committed = builtin_registry();
+    for extension in &SURFACE_IDENTITY_EXTENSIONS {
+        let kind = Kind::parse(extension.kind).expect("schema identity kind spelling");
+        assert!(
+            matches!(
+                kind,
+                Kind::Provider | Kind::Transfer | Kind::Downgrade | Kind::AuthorNode | Kind::Composite
+            ),
+            "{} must be a bake/pass-time kind",
+            extension.id
+        );
+        let row = committed
+            .manifest_by_uid(extension.uid)
+            .unwrap_or_else(|| panic!("catalogue is missing identity extension {}", extension.uid));
+        assert_eq!(row.kind(), kind, "{} kind", extension.id);
+        assert_eq!(
+            row.registry_slot(),
+            None,
+            "{} resolves before the runtime and must not hold a slot",
+            extension.id
+        );
+        assert_eq!(
+            row.namespace(),
+            Namespace::parse(extension.namespace).expect("schema namespace spelling"),
+            "{} namespace",
+            extension.id
+        );
+        assert_eq!(row.vendor(), extension.vendor, "{} vendor", extension.id);
+        assert_eq!(
+            row.stability(),
+            Stability::parse(extension.stability).expect("schema stability spelling"),
+            "{} stability",
+            extension.id
+        );
+        let requires = parse_capabilities(extension.requires_caps.iter().copied())
+            .unwrap_or_else(|unknown| panic!("{} requires unknown {unknown}", extension.id));
+        assert_eq!(row.requires_caps(), requires, "{} caps", extension.id);
+        assert_eq!(
+            row.view_dependent(),
+            extension.view_dependent,
+            "{} view dependence",
+            extension.id
+        );
+    }
+    // The other direction: every identity-only catalogue row has a schema row.
+    for manifest in committed.iter().filter(|manifest| {
+        matches!(
+            manifest.kind(),
+            Kind::Provider | Kind::Transfer | Kind::Downgrade | Kind::AuthorNode | Kind::Composite
+        )
+    }) {
+        assert!(
+            SURFACE_IDENTITY_EXTENSIONS
+                .iter()
+                .any(|extension| extension.uid == manifest.uid()),
+            "{} has no schema identity-extension row",
+            manifest.uid()
+        );
+    }
 }

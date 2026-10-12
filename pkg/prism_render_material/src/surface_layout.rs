@@ -308,6 +308,81 @@ pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
     },
 ];
 
+/// One bake/pass-time extension's generated manifest identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdentityExtensionLayout {
+    /// Human-facing extension id (schema `id`).
+    pub id: &'static str,
+    /// Globally unique capability id (schema `uid`).
+    pub uid: &'static str,
+    /// Canonical PCM kind spelling (schema `kind`).
+    pub kind: &'static str,
+    /// Governance namespace (schema `namespace`).
+    pub namespace: &'static str,
+    /// Vendor tag (schema `vendor`).
+    pub vendor: &'static str,
+    /// Stability level (schema `stability`).
+    pub stability: &'static str,
+    /// Platform capabilities required beyond the baseline.
+    pub requires_caps: &'static [&'static str],
+    /// Whether the produced result changes with the view direction.
+    pub view_dependent: bool,
+}
+
+/// Bake/pass-time identity extensions, grouped by kind then id.
+pub const SURFACE_IDENTITY_EXTENSIONS: [IdentityExtensionLayout; 5] = [
+    IdentityExtensionLayout {
+        id: "face_shadow_sdf",
+        uid: "studio.prism.provider.face_shadow_sdf",
+        kind: "provider",
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "experimental",
+        requires_caps: &[],
+        view_dependent: false,
+    },
+    IdentityExtensionLayout {
+        id: "measured_brdf",
+        uid: "org.prism.provider.measured_brdf",
+        kind: "provider",
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "experimental",
+        requires_caps: &["heavy_sampling"],
+        view_dependent: true,
+    },
+    IdentityExtensionLayout {
+        id: "srgb",
+        uid: "org.prism.transfer.srgb",
+        kind: "transfer",
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "stable",
+        requires_caps: &[],
+        view_dependent: false,
+    },
+    IdentityExtensionLayout {
+        id: "sample_budget",
+        uid: "org.prism.downgrade.sample_budget",
+        kind: "downgrade",
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "candidate",
+        requires_caps: &[],
+        view_dependent: false,
+    },
+    IdentityExtensionLayout {
+        id: "outline",
+        uid: "org.prism.composite.outline",
+        kind: "composite",
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "stable",
+        requires_caps: &[],
+        view_dependent: false,
+    },
+];
+
 /// One runtime response mode's generated manifest identity.
 ///
 /// `illumination` is the schema spelling the shading side resolves; an

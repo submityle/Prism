@@ -263,6 +263,10 @@ const PRISM_SLOTTED: [(&str, u32, Kind, Stability, CapabilitySet, bool); 4] = [
 /// [`crate::hooks`]) so that front-end registers into the same table when it
 /// lands, instead of inventing a tenth mechanism.
 ///
+/// The identity/governance/capability/view-dependence fields below are mirrored
+/// from `surface.toml`'s `[[identity_extension]]` rows and checked both ways by
+/// `prism_render_material/tests/pcm_parity.rs`.
+///
 /// [`prism_render_material::authoring::enable_face_shadow`]: https://docs.rs/prism_render_material
 const PRISM_IDENTITY_ONLY: [(&str, Kind, Stability, CapabilitySet, bool); 5] = [
     (

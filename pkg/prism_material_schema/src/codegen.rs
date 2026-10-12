@@ -683,6 +683,59 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     }
     o.push_str("];\n");
 
+    // Bake/pass-time identity-only extensions (§5.2): no registry slot, no
+    // per-material payload; the generated table is the manifest's
+    // identity/governance/capability contract.
+    o.push_str("\n/// One bake/pass-time extension's generated manifest identity.\n");
+    o.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
+    o.push_str("pub struct IdentityExtensionLayout {\n");
+    o.push_str("    /// Human-facing extension id (schema `id`).\n");
+    o.push_str("    pub id: &'static str,\n");
+    o.push_str("    /// Globally unique capability id (schema `uid`).\n");
+    o.push_str("    pub uid: &'static str,\n");
+    o.push_str("    /// Canonical PCM kind spelling (schema `kind`).\n");
+    o.push_str("    pub kind: &'static str,\n");
+    o.push_str("    /// Governance namespace (schema `namespace`).\n");
+    o.push_str("    pub namespace: &'static str,\n");
+    o.push_str("    /// Vendor tag (schema `vendor`).\n");
+    o.push_str("    pub vendor: &'static str,\n");
+    o.push_str("    /// Stability level (schema `stability`).\n");
+    o.push_str("    pub stability: &'static str,\n");
+    o.push_str("    /// Platform capabilities required beyond the baseline.\n");
+    o.push_str("    pub requires_caps: &'static [&'static str],\n");
+    o.push_str("    /// Whether the produced result changes with the view direction.\n");
+    o.push_str("    pub view_dependent: bool,\n");
+    o.push_str("}\n\n");
+    let mut identity_extensions = schema.identity_extensions.clone();
+    identity_extensions.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+    });
+    let _ = writeln!(
+        o,
+        "/// Bake/pass-time identity extensions, grouped by kind then id.\npub const SURFACE_IDENTITY_EXTENSIONS: [IdentityExtensionLayout; {}] = [",
+        identity_extensions.len()
+    );
+    for extension in &identity_extensions {
+        o.push_str("    IdentityExtensionLayout {\n");
+        let _ = writeln!(o, "        id: {:?},", extension.id);
+        let _ = writeln!(o, "        uid: {:?},", extension.uid);
+        let _ = writeln!(o, "        kind: {:?},", extension.kind.as_str());
+        let _ = writeln!(o, "        namespace: {:?},", extension.namespace.as_str());
+        let _ = writeln!(o, "        vendor: {:?},", extension.vendor);
+        let _ = writeln!(o, "        stability: {:?},", extension.stability.as_str());
+        let caps: Vec<String> = extension
+            .requires_caps
+            .iter()
+            .map(|capability| format!("{capability:?}"))
+            .collect();
+        let _ = writeln!(o, "        requires_caps: &[{}],", caps.join(", "));
+        let _ = writeln!(o, "        view_dependent: {},", extension.view_dependent);
+        o.push_str("    },\n");
+    }
+    o.push_str("];\n");
+
     // Runtime response modes (§5.2): the non-default Illumination variants.
     // Like channels, they are header-resident PCM rows; unlike channels, their
     // generated table is the classification pass's row source.
@@ -831,6 +884,12 @@ mod tests {
             "    ChannelLayout {\n        id: \"snow\",\n        uid: \"org.prism.channel.snow\",\n        registry_slot: 20,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        header_word: 1,\n        default: 0.0,\n        requires_caps: &[\"virtual_texture\"],\n        view_dependent: false,\n    },",
             "pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [",
             "    CacheAuxLayout {\n        id: \"surfel\",\n        uid: \"org.prism.cache_aux.surfel\",\n        registry_slot: 26,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        requires_caps: &[\"object_space_cache\"],\n        view_dependent: false,\n    },",
+            "pub const SURFACE_IDENTITY_EXTENSIONS: [IdentityExtensionLayout; 5] = [",
+            "    IdentityExtensionLayout {\n        id: \"face_shadow_sdf\",\n        uid: \"studio.prism.provider.face_shadow_sdf\",\n        kind: \"provider\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",
+            "    IdentityExtensionLayout {\n        id: \"measured_brdf\",\n        uid: \"org.prism.provider.measured_brdf\",\n        kind: \"provider\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"experimental\",\n        requires_caps: &[\"heavy_sampling\"],\n        view_dependent: true,\n    },",
+            "    IdentityExtensionLayout {\n        id: \"srgb\",\n        uid: \"org.prism.transfer.srgb\",\n        kind: \"transfer\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"stable\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",
+            "    IdentityExtensionLayout {\n        id: \"sample_budget\",\n        uid: \"org.prism.downgrade.sample_budget\",\n        kind: \"downgrade\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",
+            "    IdentityExtensionLayout {\n        id: \"outline\",\n        uid: \"org.prism.composite.outline\",\n        kind: \"composite\",\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"stable\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",
             "pub const SURFACE_RESPONSE_MODES: [ResponseModeLayout; 3] = [",
             "    ResponseModeLayout {\n        id: \"stylized\",\n        uid: \"org.prism.response_mode.stylized\",\n        registry_slot: 23,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        illumination: \"stylized\",\n        requires_caps: &[],\n        view_dependent: true,\n    },",
             "    ResponseModeLayout {\n        id: \"unlit\",\n        uid: \"org.prism.response_mode.unlit\",\n        registry_slot: 24,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        illumination: \"unlit\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",

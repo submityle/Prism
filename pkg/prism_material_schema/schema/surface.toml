@@ -1197,3 +1197,59 @@ vendor = "prism"
 stability = "candidate"
 requires_caps = ["object_space_cache"]
 view_dependent = false
+
+# Bake/pass-time identity extensions (§5.2 identity-only half).
+#
+# These rows are registered, promoted and negotiated like every other PCM
+# extension, but they resolve before the runtime and therefore hold no header
+# digest slot. The schema still owns their identity/governance/capability
+# facts so the hand-written catalogue cannot drift.
+[[identity_extension]]
+id = "face_shadow_sdf"
+uid = "studio.prism.provider.face_shadow_sdf"
+kind = "provider"
+namespace = "PRISM"
+vendor = "prism"
+stability = "experimental"
+requires_caps = []
+view_dependent = false
+
+[[identity_extension]]
+id = "measured_brdf"
+uid = "org.prism.provider.measured_brdf"
+kind = "provider"
+namespace = "PRISM"
+vendor = "prism"
+stability = "experimental"
+requires_caps = ["heavy_sampling"]
+view_dependent = true
+
+[[identity_extension]]
+id = "srgb"
+uid = "org.prism.transfer.srgb"
+kind = "transfer"
+namespace = "PRISM"
+vendor = "prism"
+stability = "stable"
+requires_caps = []
+view_dependent = false
+
+[[identity_extension]]
+id = "sample_budget"
+uid = "org.prism.downgrade.sample_budget"
+kind = "downgrade"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+requires_caps = []
+view_dependent = false
+
+[[identity_extension]]
+id = "outline"
+uid = "org.prism.composite.outline"
+kind = "composite"
+namespace = "PRISM"
+vendor = "prism"
+stability = "stable"
+requires_caps = []
+view_dependent = false
