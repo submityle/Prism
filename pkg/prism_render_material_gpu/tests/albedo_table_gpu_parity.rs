@@ -521,6 +521,145 @@ fn bench_const_table_vs_buffer_table() {
     run(shader_buffer, "storage buffer");
 }
 
+/// **A/B of the per-light-loop hoisting** (`23a5f6d64`): the view- and
+/// material-only albedo terms are identical for every light, so a 4-light pixel
+/// can compute them once instead of four times. This measures that directly on
+/// the device, using the shipping lookup functions.
+#[test]
+#[ignore = "micro-benchmark: run outside the sandbox on a real GPU"]
+fn bench_per_light_hoisting() {
+    use std::time::Instant;
+
+    const THREADS: u32 = 1 << 18;
+    const LIGHTS: u32 = 4;
+
+    let mut shader = String::from(
+        "@group(0) @binding(0) var<storage, read_write> out: array<f32>;\n",
+    );
+    shader.push_str("const GGX_N_MU: i32 = 17;\nconst GGX_N_R: i32 = 9;\n");
+    shader.push_str("const DIEL_N_MU: i32 = 17;\nconst DIEL_N_R: i32 = 9;\n");
+    for (array, lookup) in [
+        ("GGX_ALBEDO", "ggx_albedo_lookup"),
+        ("DIELECTRIC_ALBEDO", "dielectric_albedo_lookup"),
+    ] {
+        let start = BRDF_WESL.find(&format!("const {array}:")).unwrap();
+        let open = BRDF_WESL[start..].find("array<f32,").unwrap() + start;
+        let end = BRDF_WESL[open..].find(");").unwrap() + open + 2;
+        shader.push_str(&BRDF_WESL[start..end]);
+        shader.push('\n');
+        shader.push_str(&extract_fn(array, lookup));
+        shader.push('\n');
+    }
+    // Kernel A recomputes the three view/material terms per light; kernel B
+    // hoists them. Both consume the results so nothing is eliminated.
+    shader.push_str(&format!(
+        "@compute @workgroup_size(64)\n\
+         fn recompute(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+             let mu_v = clamp(f32(gid.x % 4096u) / 4096.0, 1.0e-5, 1.0);\n\
+             let r = clamp(f32((gid.x / 4096u) % 64u) / 64.0, 0.05, 1.0);\n\
+             var acc = 0.0;\n\
+             for (var i = 0u; i < {LIGHTS}u; i = i + 1u) {{\n\
+                 let mu_l = clamp(mu_v * 0.5 + f32(i) * 0.125, 1.0e-5, 1.0);\n\
+                 acc = acc + ggx_albedo_lookup(mu_v, r)\n\
+                     + ggx_albedo_lookup(mu_l, r) + dielectric_albedo_lookup(mu_v, r);\n\
+             }}\n\
+             out[gid.x] = acc;\n\
+         }}\n\
+         @compute @workgroup_size(64)\n\
+         fn hoisted(@builtin(global_invocation_id) gid: vec3<u32>) {{\n\
+             let mu_v = clamp(f32(gid.x % 4096u) / 4096.0, 1.0e-5, 1.0);\n\
+             let r = clamp(f32((gid.x / 4096u) % 64u) / 64.0, 0.05, 1.0);\n\
+             let e_view = ggx_albedo_lookup(mu_v, r);\n\
+             let e_diel = dielectric_albedo_lookup(mu_v, r);\n\
+             var acc = 0.0;\n\
+             for (var i = 0u; i < {LIGHTS}u; i = i + 1u) {{\n\
+                 let mu_l = clamp(mu_v * 0.5 + f32(i) * 0.125, 1.0e-5, 1.0);\n\
+                 acc = acc + e_view + ggx_albedo_lookup(mu_l, r) + e_diel;\n\
+             }}\n\
+             out[gid.x] = acc;\n\
+         }}\n"
+    ));
+
+    let Some((device, queue)) = gpu_device() else {
+        eprintln!("skipping hoisting benchmark: no usable adapter");
+        return;
+    };
+    let out = device.create_buffer(&BufferDescriptor {
+        label: Some("bench_out"),
+        size: (THREADS as u64) * 4,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let module = device.create_shader_module(ShaderModuleDescriptor {
+        label: Some("hoist_bench"),
+        source: ShaderSource::Wgsl(shader.into()),
+    });
+    let bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[Some(&bgl)],
+        immediate_size: 0,
+    });
+    let bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: None,
+        layout: &bgl,
+        entries: &[BindGroupEntry {
+            binding: 0,
+            resource: out.as_entire_binding(),
+        }],
+    });
+    let mut run = |entry: &str, label: &str| {
+        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let dispatch = || {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(THREADS / 64, 1, 1);
+            }
+            queue.submit([encoder.finish()]);
+            let _ = device.poll(PollType::wait_indefinitely());
+        };
+        dispatch();
+        dispatch();
+        let reps = 8;
+        let t0 = Instant::now();
+        for _ in 0..reps {
+            dispatch();
+        }
+        let ms = t0.elapsed().as_secs_f64() / reps as f64 * 1e3;
+        println!("{label}: {ms:.3} ms/dispatch");
+        ms
+    };
+    let a = run("recompute", "recompute per light");
+    let b = run("hoisted", "hoisted once");
+    println!("saving: {:.1}%", (a - b) / a * 100.0);
+}
+
 /// Shared body: `LOOKUPS` dependent lookups per thread, accumulated so nothing
 /// is dead-code eliminated.
 const BENCH_MAIN: &str = "\n@compute @workgroup_size(64)\n\
