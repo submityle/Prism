@@ -60,6 +60,77 @@ fn clearcoat_interface_normal(coat_normal: vec3<f32>, base_normal: vec3<f32>) ->
     return base_normal;
 }
 
+// `OpenPBR` §Coat *Darkening*: hemispherical (average) albedo of the coat
+// Fresnel via the specification's closed-form fit for `η ≥ 1`, continued to
+// `η < 1` by `E_F(η) = 1 − η²(1 − E_F(1/η))`. Byte-for-byte twin of
+// `clearcoat.rs::coat_hemispherical_fresnel`.
+fn cc_hemispherical_fresnel_ge1(e: f32) -> f32 {
+    let num = 10893.0 * e - 1438.2;
+    let den = -774.4 * e * e + 10212.0 * e + 1.0;
+    if num <= 0.0 || den <= 0.0 {
+        return 0.0;
+    }
+    return clamp(log(num / den), 0.0, 1.0);
+}
+fn cc_hemispherical_fresnel(eta: f32) -> f32 {
+    let e = max(eta, BRDF_MIN_DIELECTRIC_IOR);
+    if e >= 1.0 {
+        return cc_hemispherical_fresnel_ge1(e);
+    }
+    let up = cc_hemispherical_fresnel_ge1(1.0 / e);
+    return clamp(1.0 - e * e * (1.0 - up), 0.0, 1.0);
+}
+
+// `openpbr` equation `internal_diffuse_reflection_coefficient_for_rough_base`:
+// `K_r = 1 − (1 − E_F(η_c))/η_c²`. Mirrors `coat_internal_reflection_rough`.
+fn cc_internal_reflection_rough(eta_c: f32) -> f32 {
+    let e = cc_hemispherical_fresnel(eta_c);
+    return clamp(1.0 - (1.0 - e) / (eta_c * eta_c), 0.0, 1.0);
+}
+
+// `openpbr` equations `internal_diffuse_reflection_coefficient_for_general_base`
+// / `dielectric_roughness_estimate` / `base_roughness_estimate`: the effective
+// internal-reflection coefficient blend. Mirrors
+// `clearcoat.rs::coat_base_roughness_estimate` + `_coefficient`.
+fn cc_base_roughness_estimate(
+    specular_roughness: f32,
+    specular_weight: f32,
+    specular_ior: f32,
+    base_metalness: f32,
+) -> f32 {
+    let r = clamp(specular_roughness, 0.0, 1.0);
+    let ior = clamp(specular_ior, 1.0, 3.0);
+    let t = (1.0 - ior) / (1.0 + ior);
+    let w = clamp(clamp(specular_weight, 0.0, 1.0) * (t * t), 0.0, 1.0);
+    let r_d = 1.0 + (r - 1.0) * w;
+    let m = clamp(base_metalness, 0.0, 1.0);
+    return r_d + (r - r_d) * m;
+}
+
+fn cc_internal_reflection_coefficient(eta_c: f32, mu_o: f32, r_b: f32) -> f32 {
+    let k_s = fresnel_dielectric(mu_o, eta_c);
+    let k_r = cc_internal_reflection_rough(eta_c);
+    return clamp(k_s + (k_r - k_s) * clamp(r_b, 0.0, 1.0), 0.0, 1.0);
+}
+
+// `openpbr` equation `general_darkening_formula`: `Δ = (1 − K)/(1 − E_b·K)`.
+fn cc_darkening_delta(base_albedo: f32, k: f32) -> f32 {
+    let eb = clamp(base_albedo, 0.0, 1.0);
+    let kk = clamp(k, 0.0, 1.0);
+    let den = 1.0 - eb * kk;
+    if den <= 1.0e-30 {
+        return 1.0;
+    }
+    return clamp((1.0 - kk) / den, 0.0, 1.0);
+}
+
+// `openpbr` equation `modulated_darkening_factor`: `lerp(1, Δ, C·δ)`.
+fn cc_modulated_darkening(coat_weight: f32, coat_darkening: f32, delta: f32) -> f32 {
+    let c = clamp(coat_weight, 0.0, 1.0);
+    let d = clamp(coat_darkening, 0.0, 1.0);
+    return 1.0 + (clamp(delta, 0.0, 1.0) - 1.0) * (c * d);
+}
+
 // Two-layer clear-coat BSDF for a single analytic light. Mirrors
 // `evaluate_clearcoat_direct`.
 fn clearcoat_direct(
@@ -171,12 +242,25 @@ fn clearcoat_direct(
     // `CoatLayer` form): the base is gated entering and leaving the coat.
     let throughput = (1.0 - coat * fresnel_dielectric(n_dot_v, coat_ior))
         * (1.0 - coat * fresnel_dielectric(n_dot_l, coat_ior));
-    // `OpenPBR` `coat_darkening`: internally reflected light is partly lost
-    // inside the coat, darkening the base by the trapped fraction (the coat's
-    // own interface Fresnel at the view angle) times `coat_darkening`.
-    // `0.0` is the exact identity.
-    let darkening = 1.0
-        - coat * clamp(surface.coat_darkening, 0.0, 1.0) * fresnel_dielectric(n_dot_v, coat_ior);
+    // `OpenPBR` §Coat *Darkening*: internal reflections at the coat/air
+    // interface make light strike the base repeatedly (darker, more saturated).
+    // The specification's `modulated_darkening_factor` `lerp(1, Δ, C·δ)`
+    // multiplies the whole base BSDF, with `Δ = (1 − K)/(1 − E_b·K)` and
+    // `K = lerp(K_s, K_r, r_b)`. Byte-identical to `clearcoat.rs`.
+    let r_b = cc_base_roughness_estimate(
+        surface.perceptual_roughness,
+        surface.specular_weight,
+        surface.specular_ior,
+        metallic,
+    );
+    let k = cc_internal_reflection_coefficient(coat_ior, n_dot_v, r_b);
+    let e_b = clamp(
+        (surface.base_color.r + surface.base_color.g + surface.base_color.b) / 3.0,
+        0.0,
+        1.0,
+    );
+    let delta = cc_darkening_delta(e_b, k);
+    let darkening = cc_modulated_darkening(coat, clamp(surface.coat_darkening, 0.0, 1.0), delta);
 
     let reflected = base * (throughput * darkening) + coat_specular;
     let radiance = reflected * light.illuminance;

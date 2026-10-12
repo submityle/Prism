@@ -186,6 +186,97 @@ pub fn base_metal_fresnel_rgb(
     out
 }
 
+/// `OpenPBR` §Coat *Darkening*: the hemispherical (average) albedo of the coat
+/// Fresnel, `E_F(η_c)`, using the specification's closed-form fit
+///
+/// ```text
+/// E_F(η) ≈ ln( (10893·η − 1438.2) / (−774.4·η² + 10212·η + 1) )     for η ≥ 1
+/// E_F(η) = 1 − η²·(1 − E_F(1/η))                                    for η < 1
+/// ```
+#[inline]
+#[must_use]
+pub fn hemispherical_fresnel(eta: f32) -> f32 {
+    let eta = eta.max(MIN_IOR);
+    if eta >= 1.0 {
+        let num = 10893.0 * eta - 1438.2;
+        let den = -774.4 * eta * eta + 10212.0 * eta + 1.0;
+        if num <= 0.0 || den <= 0.0 {
+            return 0.0;
+        }
+        ops::ln(num / den).clamp(0.0, 1.0)
+    } else {
+        let up = hemispherical_fresnel(1.0 / eta);
+        (1.0 - eta * eta * (1.0 - up)).clamp(0.0, 1.0)
+    }
+}
+
+/// `OpenPBR` equation `internal_diffuse_reflection_coefficient_for_rough_base`:
+/// `K_r = 1 − (1 − E_F(η_c))/η_c²`.
+#[inline]
+#[must_use]
+pub fn internal_reflection_rough(eta_c: f32) -> f32 {
+    let e = hemispherical_fresnel(eta_c);
+    (1.0 - (1.0 - e) / (eta_c * eta_c)).clamp(0.0, 1.0)
+}
+
+/// `OpenPBR` equations `dielectric_roughness_estimate` / `base_roughness_estimate`:
+/// the effective base roughness `r_b` that blends the smooth-base
+/// (`internal_diffuse_reflection_coefficient_for_smooth_base`) and rough-base
+/// darkening limits.
+#[inline]
+#[must_use]
+pub fn base_roughness_estimate(
+    specular_roughness: f32,
+    specular_weight: f32,
+    specular_ior: f32,
+    base_metalness: f32,
+) -> f32 {
+    let r = specular_roughness.clamp(0.0, 1.0);
+    let xi = specular_weight.clamp(0.0, 1.0);
+    let f_s = fresnel_normal_incidence(specular_ior);
+    // `ξ_s·F_s` must be clamped into [0, 1] before it is used as a lerp weight.
+    let w = (xi * f_s).clamp(0.0, 1.0);
+    let r_d = 1.0 + (r - 1.0) * w; // lerp(1, r, w)
+    let r_m = r;
+    let m = base_metalness.clamp(0.0, 1.0);
+    r_d + (r_m - r_d) * m
+}
+
+/// `OpenPBR` equation `internal_diffuse_reflection_coefficient_for_general_base`:
+/// `K = lerp(K_s, K_r, r_b)` with `K_s = F(ω_o, η_c)` and `K_r` from
+/// [`internal_reflection_rough`].
+#[inline]
+#[must_use]
+pub fn internal_reflection_general(eta_c: f32, mu_o: f32, r_b: f32) -> f32 {
+    let k_s = dielectric_fresnel(mu_o, eta_c);
+    let k_r = internal_reflection_rough(eta_c);
+    (k_s + (k_r - k_s) * r_b.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+}
+
+/// `OpenPBR` equation `general_darkening_formula`: `Δ = (1 − K)/(1 − E_b·K)`.
+#[inline]
+#[must_use]
+pub fn coat_darkening_delta(base_albedo: f32, k: f32) -> f32 {
+    let eb = base_albedo.clamp(0.0, 1.0);
+    let k = k.clamp(0.0, 1.0);
+    let den = 1.0 - eb * k;
+    if den.abs() <= f32::MIN_POSITIVE {
+        return 1.0;
+    }
+    ((1.0 - k) / den).clamp(0.0, 1.0)
+}
+
+/// `OpenPBR` equation `modulated_darkening_factor`:
+/// `(1 − C) + C·B(δ)·Δ = lerp(1, Δ, C·δ)`, the uniform multiplier applied to
+/// the whole base BSDF beneath the coat.
+#[inline]
+#[must_use]
+pub fn modulated_darkening_factor(coat_weight: f32, coat_darkening: f32, delta: f32) -> f32 {
+    let c = coat_weight.clamp(0.0, 1.0);
+    let d = coat_darkening.clamp(0.0, 1.0);
+    1.0 + (delta.clamp(0.0, 1.0) - 1.0) * (c * d)
+}
+
 /// `OpenPBR` equation `openpbr-anisotropy-formula`: perceptual roughness `r` and
 /// anisotropy `a ∈ [0, 1]` → the two GGX widths along the tangent and bitangent.
 #[inline]
@@ -576,5 +667,95 @@ mod conformance {
             worst_at.1,
             worst_at.2,
         );
+    }
+
+    /// `OpenPBR` §Coat *Darkening*: the hemispherical Fresnel fit, the
+    /// internal-reflection coefficients and the `modulated_darkening_factor` the
+    /// real-time Clearcoat lobe applies to the base beneath the coat.
+    #[test]
+    fn coat_darkening_matches_the_openpbr_reference() {
+        // Hemispherical Fresnel: zero at a vanishing interface, monotone, and
+        // the reciprocity identity holds across the physical index range.
+        // The fit is exact only in form: at a vanishing interface (η = 1) it
+        // lands within ~2e-3 of the true zero, which is the fit's documented
+        // accuracy, not a bug to paper over.
+        assert!(hemispherical_fresnel(1.0) < 5.0e-3);
+        let mut prev = -1.0;
+        for i in 10..=40 {
+            let eta = i as f32 / 10.0;
+            let e = hemispherical_fresnel(eta);
+            assert!((0.0..=1.0).contains(&e), "E_F({eta}) = {e}");
+            assert!(e >= prev, "not monotone at η={eta}");
+            prev = e;
+        }
+
+        let mut worst = 0.0_f32;
+        let mut worst_at = (0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32);
+        for eta_c in [1.1_f32, 1.3, 1.6, 2.0] {
+            for mu_o in [1.0_f32, 0.8, 0.5, 0.2, 0.05] {
+                for r_b in [0.0_f32, 0.35, 0.7, 1.0] {
+                    // Prism's real-time Clearcoat helpers.
+                    let k_rt = crate::clearcoat::coat_internal_reflection_coefficient(
+                        eta_c, mu_o, r_b,
+                    );
+                    let k_ref = internal_reflection_general(eta_c, mu_o, r_b);
+                    for base_albedo in [0.05_f32, 0.25, 0.5, 0.9] {
+                        let d_rt = crate::clearcoat::coat_darkening_delta(base_albedo, k_rt);
+                        let d_ref = coat_darkening_delta(base_albedo, k_ref);
+                        for coat_weight in [0.0_f32, 0.5, 1.0] {
+                            for coat_darkening in [0.0_f32, 0.5, 1.0] {
+                                let m_rt = crate::clearcoat::coat_modulated_darkening(
+                                    coat_weight,
+                                    coat_darkening,
+                                    d_rt,
+                                );
+                                let m_ref = modulated_darkening_factor(
+                                    coat_weight,
+                                    coat_darkening,
+                                    d_ref,
+                                );
+                                let d = (m_rt - m_ref).abs();
+                                if d > worst {
+                                    worst = d;
+                                    worst_at = (eta_c, mu_o, r_b, base_albedo);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            worst <= 1.0e-4,
+            "coat darkening deviates from the OpenPBR reference by {worst} \
+             (at eta_c={}, mu_o={}, r_b={}, E_b={}); the real-time Clearcoat lobe \
+             must use the specification's modulated darkening factor",
+            worst_at.0,
+            worst_at.1,
+            worst_at.2,
+            worst_at.3,
+        );
+
+        // The specification's defining reductions.
+        // δ = 0 restores the un-darkened base exactly (the artist escape hatch).
+        assert_eq!(modulated_darkening_factor(1.0, 0.0, 0.2), 1.0);
+        // C = 0 leaves the base untouched whatever the darkening.
+        assert_eq!(modulated_darkening_factor(0.0, 1.0, 0.2), 1.0);
+        // A white base cannot darken: Δ(E_b = 1) == 1.
+        assert!((coat_darkening_delta(1.0, internal_reflection_rough(1.6)) - 1.0).abs() < 1e-6);
+        // And the real-time roughness estimate agrees with the specification's.
+        let mut worst_r = 0.0_f32;
+        for r in [0.0_f32, 0.3, 0.7, 1.0] {
+            for weight in [0.0_f32, 0.5, 1.0] {
+                for ior in [1.2_f32, 1.5, 2.0, 3.0] {
+                    for m in [0.0_f32, 0.5, 1.0] {
+                        let rt = crate::clearcoat::coat_base_roughness_estimate(r, weight, ior, m);
+                        let rf = base_roughness_estimate(r, weight, ior, m);
+                        worst_r = worst_r.max((rt - rf).abs());
+                    }
+                }
+            }
+        }
+        assert!(worst_r <= 1.0e-6, "base roughness estimate deviates by {worst_r}");
     }
 }
