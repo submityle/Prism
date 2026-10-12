@@ -12,6 +12,9 @@ prism_ecs = { path = "../prism_ecs" }
 prism_time = { path = "../prism_time", default-features = false }
 prism_window = { path = "../prism_window", optional = true }
 prism_window_winit = { path = "../prism_window_winit", optional = true }
+# Schema validation / range clamping for reflected configuration (§25.3).
+# `math` is off (prism_app configs are not prism_math value types).
+prism_reflect = { path = "../prism_reflect", default-features = false, features = ["std"], optional = true }
 
 [features]
 # `std` is on by default: the Runner / main loop needs std (design §1). The
@@ -41,6 +44,12 @@ determinism = []
 # OS event loop. Pulls in the platform backend, so it is off by default; a
 # headless / no_std build pays nothing for it.
 winit = ["std", "dep:prism_window", "dep:prism_window_winit"]
+
+# Reflected configuration (design §25.3): clamp range-constrained config fields
+# and validate a reflected value against its schema, delegating to prism_reflect
+# rather than reimplementing the rules. Pulls in prism_reflect (std), so off by
+# default.
+reflect = ["std", "dep:prism_reflect"]
 
 # AAA lint bar. prism_app contains no `unsafe`, so unlike prism_ecs it can keep
 # the workspace-strength lints as warnings and still hit zero warnings.

@@ -383,7 +383,7 @@ pkg/prism_app/
 ## 23. 诚实边界与风险
 
 - 本文为设计规格。**截至 2026-10 代码已进入实现**：M0–M3 主体、M4 窗口 Runner、M5 确定性+回滚+重放+对端同步与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——M4 的平台 suspend / low-memory 回调、M6 的热重载/`prism_bevy` 退役/PIE、§24.9 多窗口多世界、网络传输层仍未实现。
-- **feature 面尚未对齐**：§20 列出的 `multi_thread`/`winit`/`headless`/`reflect`/`trace` 目前只定义了 `std`/`pipelined`/`determinism`；其余需与真实实现一起落地，**不提前声明空开关**，避免假实现。
+- **feature 面尚未完全对齐**：已按真实实现定义 `std`/`pipelined`/`determinism`/`winit`/`reflect`；§20 里的 `multi_thread`/`headless`/`trace` 仍未定义，需与真实实现一起落地，**不提前声明空开关**，避免假实现。
 - **高风险项**：
   1. **extract 管线 + 流水线并行（M3）**：跨 World 只读提取 + 跨线程生命周期是正确性要害；须先定义稳定 `ExtractComponent` trait，再上并行；可先串行提取跑通，再开 `pipelined`。这是 `prism_render_scene` 能否干净脱 Bevy 的决定性接缝。
   2. **固定步长熔断（M2）**：死亡螺旋参数（max_frame_dt/max_substeps）需按内容压测标定，错配会在卡顿时放大为慢放或卡死。
@@ -512,4 +512,4 @@ App 多世界（§24.9）与 ECS 多 World（ECS §16）协同时，每个 World
 
 ### 25.5 诚实边界
 
-本章为跨 crate 契约对齐说明，**部分已随实现落地**：25.1 主循环编排 `prism_time`（`time`/`fixed`/`pacing` 已接线）、25.2 `sub_app` 的 ECS 提取边界与 `pipelined` 执行已落地。**仍为 PLANNED**：25.3 配置/cvar 经 `prism_reflect` 的类型化读写与校验、25.4 多世界各持独立 time 时间域。落地时序：25.1 随 M2 主循环/平台接线；25.2 随 M3 渲染子应用；25.3 随 M1 配置/编辑器；25.4 随多世界/服务器模式落地。App 是地基运行时编排者，更高层游戏流程编排仍归 `prism_loom_runtime_framework`。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章为跨 crate 契约对齐说明，**部分已随实现落地**：25.1 主循环编排 `prism_time`（`time`/`fixed`/`pacing` 已接线）、25.2 `sub_app` 的 ECS 提取边界与 `pipelined` 执行已落地、25.3 配置的 `prism_reflect` 范围钳制 + 校验已有 seam（`reflect` feature 的 `reflect_config::clamp_and_validate`，非法输入按安全边界拒绝而非崩溃）。**仍为 PLANNED**：25.3 的改名兼容 / 默认值落盘与类型化反序列化级联、25.4 多世界各持独立 time 时间域。落地时序：25.1 随 M2 主循环/平台接线；25.2 随 M3 渲染子应用；25.3 随 M1 配置/编辑器；25.4 随多世界/服务器模式落地。App 是地基运行时编排者，更高层游戏流程编排仍归 `prism_loom_runtime_framework`。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
