@@ -150,6 +150,7 @@
 
 - **f64 大世界**：配合 `prism_transform` §9 的 cell + 原点重定位——世界空间用 f64/cell 存，渲染前 rebase 到相机局部 f32，热路径仍享 SIMD。
 - **f64 数值边界**：`DVec2/3/4` 与 `DQuat` 的长度/归一化先按最大分量缩放，避免可表示极大/次正规输入在平方阶段溢出或下溢；`DVec*::normalize` 对零/非有限输入返回零，`DQuat::normalize` 返回 identity。`normalize_or_zero` 继续执行 `1e-200` 最小长度契约。矩阵/仿射提供 `try_inverse()`，对奇异、非有限或结果溢出的输入返回 `None`。
+- **大世界边界**：`GridPosition::from_dvec3` 拒绝非有限和超出 `i32 × 1024m` 格点范围的坐标；`GridCell` 加减在格点边界饱和。`FixedGridPosition` 的平移在 `i128` 完整 Q32.32 世界坐标中计算后再拆分，并在世界边界饱和，避免局部 raw bits wrapping 造成跨世界跳变；`new()` 仍允许非规范 local，需显式 `canonical()`/`translated()`。
 - **fixed 定点**：Q 格式（如 Q32.32 位置、Q16.16 角度），加减为整数精确、乘除带缩放，超越函数（sin/cos/sqrt）走**确定性查表 + 多项式逼近**，保证跨平台**位级一致**。这是「四方确定性」的数值底座（见 §13）。
 - 三档可共存（不同系统用不同档）；转换函数显式 `.as_dvec3()` / `.to_fixed()`，不隐式混算。
 
@@ -365,7 +366,7 @@ pkg/prism_math/
 
 ## 23. 诚实边界与风险
 
-- M0–M6 核心路线图的大部分模块已有实现；每次发布前必须以当前代码重新运行测试，不能沿用历史数字或“全绿”宣称。本轮基线为 `cargo test -p prism_math`：248 项通过；`cargo check -p prism_math --no-default-features` 通过。GPU 侧的 device-free WGSL parse gate 通过，但本机没有可用 Metal adapter，因此真实 GPU parity 未完成硬件验证；在 CI/开发机应设置 `PRISM_MATH_GPU_REQUIRED=1`，并用 `PRISM_MATH_GPU_DIAGNOSTICS=1` 记录 adapter 信息。
+- M0–M6 核心路线图的大部分模块已有实现；每次发布前必须以当前代码重新运行测试，不能沿用历史数字或“全绿”宣称。本轮 CPU 基线为 `cargo test -p prism_math --lib`：264 项通过，`--no-default-features` 也通过；GPU 侧的 device-free WGSL parse gate 通过，但本机没有可用 Metal adapter，因此真实 GPU parity 未完成硬件验证；在 CI/开发机应设置 `PRISM_MATH_GPU_REQUIRED=1`，并用 `PRISM_MATH_GPU_DIAGNOSTICS=1` 记录 adapter 信息。
 - **高风险项**：
   1. **多后端一致性（M1）**：SSE/AVX/NEON/WASM 四套内在函数与 scalar 基准须在容差内一致，`rsqrt`/`fma` 近似、浮点结合律差异易产生「同代码不同结果」；必须 CI 跨平台对拍，否则物理/动画在不同机器行为漂移。
   2. **定点确定性（M4）**：超越函数定点逼近的精度/范围权衡、溢出处理、与并行归并序（tasks §24.7）的协同，任一处非确定即联机 desync；需严格跨平台位级对拍 + 状态哈希。

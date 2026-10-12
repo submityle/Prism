@@ -47,6 +47,10 @@ impl GridCell {
     /// The cell that contains `world` (component-wise floor division).
     #[inline]
     pub fn from_dvec3(world: DVec3) -> Self {
+        assert!(
+            world.is_finite(),
+            "GridPosition cannot contain NaN or infinity"
+        );
         Self {
             x: floor_div(world.x),
             y: floor_div(world.y),
@@ -88,14 +92,22 @@ impl Add for GridCell {
     type Output = GridCell;
     #[inline]
     fn add(self, r: GridCell) -> GridCell {
-        GridCell::new(self.x + r.x, self.y + r.y, self.z + r.z)
+        GridCell::new(
+            self.x.saturating_add(r.x),
+            self.y.saturating_add(r.y),
+            self.z.saturating_add(r.z),
+        )
     }
 }
 impl Sub for GridCell {
     type Output = GridCell;
     #[inline]
     fn sub(self, r: GridCell) -> GridCell {
-        GridCell::new(self.x - r.x, self.y - r.y, self.z - r.z)
+        GridCell::new(
+            self.x.saturating_sub(r.x),
+            self.y.saturating_sub(r.y),
+            self.z.saturating_sub(r.z),
+        )
     }
 }
 
@@ -134,6 +146,19 @@ impl GridPosition {
     /// `[0, CELL_SIZE)` the narrowing keeps ~0.12 mm precision.
     #[inline]
     pub fn from_dvec3(world: DVec3) -> Self {
+        assert!(
+            world.is_finite(),
+            "GridPosition cannot contain NaN or infinity"
+        );
+        assert!(
+            world.x >= i32::MIN as f64 * GridCell::CELL_SIZE
+                && world.x < (i32::MAX as f64 + 1.0) * GridCell::CELL_SIZE
+                && world.y >= i32::MIN as f64 * GridCell::CELL_SIZE
+                && world.y < (i32::MAX as f64 + 1.0) * GridCell::CELL_SIZE
+                && world.z >= i32::MIN as f64 * GridCell::CELL_SIZE
+                && world.z < (i32::MAX as f64 + 1.0) * GridCell::CELL_SIZE,
+            "world coordinate is outside the representable GridPosition range"
+        );
         let cell = GridCell::from_dvec3(world);
         let offset = (world - cell.origin()).as_vec3();
         Self { cell, offset }
@@ -187,5 +212,39 @@ fn floor_div(v: f64) -> i32 {
         i32::MIN
     } else {
         c as i32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cell_arithmetic_saturates_at_lattice_edges() {
+        let one = GridCell::new(1, 0, 0);
+        assert_eq!(
+            GridCell::new(i32::MAX, 0, 0) + one,
+            GridCell::new(i32::MAX, 0, 0)
+        );
+        assert_eq!(
+            GridCell::new(i32::MIN, 0, 0) - one,
+            GridCell::new(i32::MIN, 0, 0)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "NaN or infinity")]
+    fn non_finite_world_positions_are_rejected() {
+        let _ = GridPosition::from_dvec3(DVec3::new(f64::NAN, 0.0, 0.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "outside the representable")]
+    fn unrepresentable_world_positions_are_rejected() {
+        let _ = GridPosition::from_dvec3(DVec3::new(
+            (i32::MAX as f64 + 1.0) * GridCell::CELL_SIZE,
+            0.0,
+            0.0,
+        ));
     }
 }

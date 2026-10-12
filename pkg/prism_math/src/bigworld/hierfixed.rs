@@ -95,24 +95,47 @@ impl FixedGridPosition {
         let bits = local.to_bits();
         let q = bits.div_euclid(Self::CELL_BITS);
         let r = bits.rem_euclid(Self::CELL_BITS);
-        // Saturate the cell index; worlds never approach the i32 cell limit.
-        let new_cell = (cell as i64 + q).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-        (new_cell, Fixed::from_bits(r))
+        // Saturate the complete coordinate at the edge of the representable
+        // cell lattice. Keeping `r` after clamping the cell would otherwise
+        // make a positive overflow jump backwards from the world boundary.
+        let new_cell = cell as i64 + q;
+        if new_cell > i32::MAX as i64 {
+            (i32::MAX, Fixed::from_bits(Self::CELL_BITS - 1))
+        } else if new_cell < i32::MIN as i64 {
+            (i32::MIN, Fixed::ZERO)
+        } else {
+            (new_cell as i32, Fixed::from_bits(r))
+        }
     }
 
     /// Translate by a fixed-point `delta` (metres) and re-centre.
     #[inline]
     #[must_use]
     pub fn translated(self, delta: FxVec3) -> Self {
+        let x = Self::translate_axis(self.cell[0], self.local.x, delta.x);
+        let y = Self::translate_axis(self.cell[1], self.local.y, delta.y);
+        let z = Self::translate_axis(self.cell[2], self.local.z, delta.z);
         Self {
-            cell: self.cell,
-            local: FxVec3::new(
-                Fixed::from_bits(self.local.x.to_bits().wrapping_add(delta.x.to_bits())),
-                Fixed::from_bits(self.local.y.to_bits().wrapping_add(delta.y.to_bits())),
-                Fixed::from_bits(self.local.z.to_bits().wrapping_add(delta.z.to_bits())),
-            ),
+            cell: [x.0, y.0, z.0],
+            local: FxVec3::new(x.1, y.1, z.1),
         }
-        .canonical()
+    }
+
+    /// Translate one complete coordinate in widened raw-bit space, then
+    /// saturate to the representable hierarchical-world range before splitting
+    /// it back into a cell and canonical local offset.
+    #[inline]
+    fn translate_axis(cell: i32, local: Fixed, delta: Fixed) -> (i32, Fixed) {
+        let world = i128::from(cell) * i128::from(Self::CELL_BITS)
+            + i128::from(local.to_bits())
+            + i128::from(delta.to_bits());
+        let min = i128::from(i32::MIN) * i128::from(Self::CELL_BITS);
+        let max =
+            i128::from(i32::MAX) * i128::from(Self::CELL_BITS) + i128::from(Self::CELL_BITS - 1);
+        let world = world.clamp(min, max);
+        let cell = world.div_euclid(i128::from(Self::CELL_BITS));
+        let local = world.rem_euclid(i128::from(Self::CELL_BITS));
+        (cell as i32, Fixed::from_bits(local as i64))
     }
 
     /// Offset of `self` from `origin` as a single fixed-point vector (metres).
@@ -227,5 +250,19 @@ mod tests {
         // offset = (1024 + 76, 3, 0) = (1100, 3, 0); |.|^2 = 1210009.
         let d2 = a.distance_squared(b).to_f64();
         assert!((d2 - 1_210_009.0).abs() < 1.0, "d2 ={d2}");
+    }
+
+    #[test]
+    fn translation_does_not_wrap_fixed_point_bits() {
+        let p = FixedGridPosition::new(
+            [i32::MAX, 0, 0],
+            FxVec3::new(fx(1023.5), Fixed::ZERO, Fixed::ZERO),
+        );
+        let moved = p.translated(FxVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO));
+        assert_eq!(moved.cell[0], i32::MAX);
+        assert_eq!(
+            moved.local.x,
+            Fixed::from_bits(FixedGridPosition::CELL_BITS - 1)
+        );
     }
 }
