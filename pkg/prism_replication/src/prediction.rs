@@ -20,12 +20,14 @@
 
 use alloc::vec::Vec;
 
-use crate::delta::{Record, Schema};
+use crate::delta::{DeltaError, Record, Schema};
 use crate::snapshot::{SnapshotError, SnapshotStore};
 
 /// A prediction/reconciliation failure.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PredictionError {
+    /// The authoritative message was malformed or encoded against another schema.
+    Delta(DeltaError),
     /// The underlying store refused an operation.
     Snapshot(SnapshotError),
     /// The state at a revision the session needed was not retained.
@@ -48,6 +50,12 @@ impl From<SnapshotError> for PredictionError {
     }
 }
 
+impl From<DeltaError> for PredictionError {
+    fn from(error: DeltaError) -> Self {
+        Self::Delta(error)
+    }
+}
+
 /// A client's predicted view of one replicated record.
 #[derive(Clone, Debug)]
 pub struct Prediction<F> {
@@ -59,6 +67,11 @@ pub struct Prediction<F> {
 
 impl<F: Clone> Prediction<F> {
     /// Start from the server's authoritative snapshot (its seed message).
+    ///
+    /// `capacity` is the snapshot ring size. It must exceed the largest number of
+    /// un-acknowledged predictions the client will hold, or a replay evicts the
+    /// acknowledged baseline and the next [`reconcile`](Self::reconcile) fails
+    /// with [`SnapshotError::UnknownBaseline`] (resync from a fresh snapshot).
     ///
     /// # Errors
     /// [`PredictionError::Snapshot`] for a malformed snapshot.
@@ -132,22 +145,34 @@ impl<F: Clone> Prediction<F> {
     /// [`PredictionError::UnexpectedRevision`] when the authoritative change does
     /// not confirm exactly `acked + 1` (a gap or a stale message), or the store's
     /// errors.
+    ///
+    /// A message that does not name the acknowledged baseline is refused
+    /// **before** the store is touched, so a stale or gap delta can never
+    /// overwrite a retained frame on its way to the error. Not panic-safe against
+    /// a `simulate` that panics mid-replay: the authoritative step is then applied
+    /// and the replay is partial (the next `reconcile` resyncs from authority).
     pub fn reconcile(
         &mut self,
         authoritative: &[u8],
         simulate: impl FnMut(&mut Record, &F),
     ) -> Result<u32, PredictionError> {
-        let baseline = self.acked;
-        let new_acked = self.store.apply(authoritative)?;
-        let expected = baseline
+        let expected = self
+            .acked
             .checked_add(1)
-            .ok_or(PredictionError::RevisionOverflow(baseline))?;
-        if new_acked != expected {
+            .ok_or(PredictionError::RevisionOverflow(self.acked))?;
+        // Validate the message names the acknowledged baseline *before* touching
+        // the store: `SnapshotStore::apply` writes at `baseline + 1` in place, so
+        // applying a stale/gap delta first would overwrite a retained frame (which
+        // `state()` may read) and only then fail the revision check.
+        let baseline = crate::delta::decode_delta(self.store.schema(), authoritative)?.revision();
+        if baseline != self.acked {
             return Err(PredictionError::UnexpectedRevision {
                 expected,
-                found: new_acked,
+                found: baseline.saturating_add(1),
             });
         }
+        let new_acked = self.store.apply(authoritative)?;
+        debug_assert_eq!(new_acked, expected);
         self.acked = new_acked;
         // The server has confirmed the input this client predicted for the step;
         // the oldest pending input (if any) is now authority's.
@@ -278,7 +303,45 @@ mod tests {
         encode_delta(&schema(), &record(4), &record(6), 4, &mut bytes).unwrap();
         assert_eq!(
             client.reconcile(&bytes, add),
-            Err(PredictionError::Snapshot(SnapshotError::UnknownBaseline(4)))
+            Err(PredictionError::UnexpectedRevision {
+                expected: 1,
+                found: 5
+            })
         );
+        assert_eq!(client.acked(), 0, "the refused gap changed nothing");
+    }
+
+    /// A stale/gap message must be refused **without** overwriting a retained
+    /// frame on its way to the error (regression: `reconcile` applied the delta —
+    /// which writes at `baseline + 1` in place — before validating it, so a
+    /// re-sent step corrupted the acknowledged state and the corruption then
+    /// propagated through every later reconcile).
+    #[test]
+    fn a_stale_authoritative_message_does_not_corrupt_the_state() {
+        let mut client = session();
+        client.predict(5, add).unwrap();
+
+        // Step 0 -> 1 is applied normally: authority says +3.
+        let step = authoritative(&record(0), 3);
+        assert_eq!(client.reconcile(&step, add).unwrap(), 1);
+        assert_eq!(client.acked(), 1);
+        assert_eq!(field(client.state().unwrap()), 3);
+
+        // Re-send the already-applied step: baseline 0 < acked 1, so it would
+        // land on revision 1 == acked and corrupt the state without the guard.
+        assert_eq!(
+            client.reconcile(&step, add),
+            Err(PredictionError::UnexpectedRevision {
+                expected: 2,
+                found: 1
+            })
+        );
+        assert_eq!(client.acked(), 1, "a refused message does not advance");
+        assert_eq!(
+            field(client.state().unwrap()),
+            3,
+            "the acknowledged state survived"
+        );
+        assert!(client.pending().is_empty());
     }
 }
