@@ -195,6 +195,33 @@ impl App {
         self
     }
 
+    /// Add a [`PluginGroup`](crate::plugin_group::PluginGroup), returning its
+    /// dependency-resolution error instead of panicking.
+    ///
+    /// [`add_plugins`](App::add_plugins) panics on a missing dependency or a
+    /// dependency cycle (a deliberately loud assembly-time failure, design
+    /// §24.1). This variant returns the
+    /// [`PluginGraphError`](crate::plugin_graph::PluginGraphError) so a caller
+    /// (an editor, a mod loader) can report it. On error **nothing is added**:
+    /// the group is fully resolved before any plugin is built, so a rejected
+    /// assembly leaves the app untouched.
+    ///
+    /// # Panics
+    ///
+    /// Like [`add_plugins`](App::add_plugins), still panics for non-graph
+    /// assembly errors — a unique plugin added twice, or assembly already
+    /// finalized.
+    pub fn try_add_plugins<G: PluginGroup>(
+        &mut self,
+        group: G,
+    ) -> Result<&mut Self, crate::plugin_graph::PluginGraphError> {
+        let plugins = group.build().try_into_plugins()?;
+        for plugin in plugins {
+            self.add_boxed_plugin(plugin);
+        }
+        Ok(self)
+    }
+
     /// Add a single already-boxed plugin, honoring uniqueness and running its
     /// `build` immediately. Shared by every [`add_plugins`](App::add_plugins)
     /// entry point.

@@ -899,6 +899,47 @@ fn missing_dependency_is_reported_at_assembly_time() {
     }
 }
 
+/// `App::try_add_plugins` returns a group's graph error instead of panicking,
+/// and builds nothing when assembly fails.
+#[test]
+fn try_add_plugins_reports_graph_errors_and_adds_nothing_on_failure() {
+    struct Absent;
+    impl Plugin for Absent {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "absent"
+        }
+    }
+    struct Needs;
+    impl Plugin for Needs {
+        fn build(&self, _app: &mut App) {
+            panic!("build must not run when group assembly fails");
+        }
+        fn name(&self) -> &str {
+            "needs"
+        }
+        fn dependencies(&self) -> Vec<PluginDependency> {
+            vec![PluginDependency::on::<Absent>()]
+        }
+    }
+
+    let mut app = App::new();
+    let err = app.try_add_plugins(PluginGroupBuilder::new().add(Needs));
+    assert!(matches!(
+        err,
+        Err(PluginGraphError::MissingDependency { .. })
+    ));
+    // Resolution failed before any plugin was built, so the app is untouched.
+    assert_eq!(app.plugins_state(), PluginsState::Adding);
+
+    // A valid group goes through the same entry point.
+    let mut ok = App::new();
+    assert!(
+        ok.try_add_plugins(PluginGroupBuilder::new().add(Absent))
+            .is_ok()
+    );
+}
+
 /// A dependency on a member that was disabled out of the group is also treated
 /// as missing — resolution runs over the enabled set only.
 #[test]
