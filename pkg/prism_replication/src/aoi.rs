@@ -14,7 +14,11 @@
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
-use core::cmp::Ordering;
+
+/// The most cells a radius query will walk before falling back to scanning every
+/// entity. A cell walk is only an acceleration, so capping it trades a little
+/// work for a hard upper bound on a single query.
+const MAX_CELLS: i64 = 4096;
 
 /// A rejected AOI operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +123,11 @@ impl AoiGrid {
     /// result is exact: a cell is a coarse candidate set, and each candidate is
     /// checked against the true (squared) distance, so an entity sharing the
     /// centre's cell but outside the radius is excluded.
+    ///
+    /// The cell walk is bounded: a radius (or cell size) so extreme that the
+    /// circle spans more than [`MAX_CELLS`] cells falls back to scanning every
+    /// tracked entity, so a finite input can never make the query iterate over
+    /// billions of empty cells.
     #[must_use]
     pub fn query_circle(&self, x: f32, z: f32, radius: f32) -> Vec<u32> {
         if !x.is_finite() || !z.is_finite() || !radius.is_finite() || radius <= 0.0 {
@@ -127,6 +136,13 @@ impl AoiGrid {
         let radius_sq = radius * radius;
         let (min_x, min_z) = self.cell_of(x - radius, z - radius);
         let (max_x, max_z) = self.cell_of(x + radius, z + radius);
+
+        // Bound the cell scan (see the doc above).
+        let cells_x = i64::from(max_x) - i64::from(min_x) + 1;
+        let cells_z = i64::from(max_z) - i64::from(min_z) + 1;
+        if cells_x.saturating_mul(cells_z) > MAX_CELLS {
+            return self.scan_all(x, z, radius, radius_sq);
+        }
 
         // A `BTreeSet` keeps the view ascending and deduplicated regardless of
         // cell iteration order.
@@ -137,17 +153,25 @@ impl AoiGrid {
                     continue;
                 };
                 for &id in bucket {
-                    let Some(&(ex, ez)) = self.positions.get(&id) else {
-                        continue;
-                    };
-                    let (dx, dz) = (ex - x, ez - z);
-                    if dx * dx + dz * dz <= radius_sq {
+                    if let Some(&(ex, ez)) = self.positions.get(&id)
+                        && within(ex, ez, x, z, radius, radius_sq)
+                    {
                         view.insert(id);
                     }
                 }
             }
         }
         view.into_iter().collect()
+    }
+
+    /// The exact-distance scan used when the cell range is too large to walk.
+    /// `positions` is a `BTreeMap`, so the output is ascending.
+    fn scan_all(&self, x: f32, z: f32, radius: f32, radius_sq: f32) -> Vec<u32> {
+        self.positions
+            .iter()
+            .filter(|&(_, &(ex, ez))| within(ex, ez, x, z, radius, radius_sq))
+            .map(|(&id, _)| id)
+            .collect()
     }
 
     /// The grid cell a position falls in.
@@ -178,31 +202,16 @@ impl InterestDelta {
 
 /// The enter/leave edges between an old and a new interest set.
 ///
-/// Both inputs must be ascending (`AoiGrid::query_circle` returns them so); the
-/// result is computed with a linear merge, so it is deterministic.
+/// Both inputs are treated as **sets**: order does not matter and duplicates are
+/// ignored, so a caller passing a view that is not strictly ascending (or a
+/// hand-built list with repeats) still gets the correct edges rather than a bogus
+/// enter+leave pair for one id. The result is ascending and deterministic.
 #[must_use]
 pub fn interest_delta(previous: &[u32], current: &[u32]) -> InterestDelta {
-    let mut entered = Vec::new();
-    let mut left = Vec::new();
-    let (mut i, mut j) = (0, 0);
-    while i < previous.len() && j < current.len() {
-        match previous[i].cmp(&current[j]) {
-            Ordering::Less => {
-                left.push(previous[i]);
-                i += 1;
-            }
-            Ordering::Greater => {
-                entered.push(current[j]);
-                j += 1;
-            }
-            Ordering::Equal => {
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    left.extend_from_slice(&previous[i..]);
-    entered.extend_from_slice(&current[j..]);
+    let before: BTreeSet<u32> = previous.iter().copied().collect();
+    let after: BTreeSet<u32> = current.iter().copied().collect();
+    let entered = after.difference(&before).copied().collect();
+    let left = before.difference(&after).copied().collect();
     InterestDelta { entered, left }
 }
 
@@ -218,6 +227,26 @@ fn floor_to_i32(value: f32) -> i32 {
         truncated.saturating_sub(1)
     } else {
         truncated
+    }
+}
+
+/// Whether the finite position `(ex, ez)` lies within `radius` of `(x, z)`.
+///
+/// A box test (which cannot overflow) rejects the obvious misses. The exact
+/// circle test then uses the squared form normally — safe because the box test
+/// bounds `|dx|, |dz| <= radius`, so neither square overflows — and the
+/// radius-normalised form when `radius * radius` saturates to infinity, which
+/// keeps an extreme radius from admitting entities in the box corners.
+fn within(ex: f32, ez: f32, x: f32, z: f32, radius: f32, radius_sq: f32) -> bool {
+    let (dx, dz) = (ex - x, ez - z);
+    if dx.abs() > radius || dz.abs() > radius {
+        return false;
+    }
+    if radius_sq.is_finite() {
+        dx * dx + dz * dz <= radius_sq
+    } else {
+        let (nx, nz) = (dx / radius, dz / radius);
+        nx * nx + nz * nz <= 1.0
     }
 }
 
@@ -304,5 +333,52 @@ mod tests {
         assert!(same.is_empty());
         assert_eq!(interest_delta(&[], &[4]).entered, vec![4]);
         assert_eq!(interest_delta(&[4], &[]).left, vec![4]);
+    }
+
+    /// A radius spanning more cells than the walk cap falls back to scanning
+    /// every entity, so a finite input cannot hang and the view stays exact.
+    #[test]
+    fn a_huge_radius_falls_back_to_a_full_scan() {
+        let mut aoi = grid();
+        aoi.insert(1, 0.0, 0.0).unwrap();
+        aoi.insert(2, 3.0, 4.0).unwrap();
+        aoi.insert(3, 1.0e9, 0.0).unwrap();
+        assert_eq!(aoi.query_circle(0.0, 0.0, 1.0e9), vec![1, 2, 3]);
+        assert_eq!(aoi.query_circle(0.0, 0.0, 10.0), vec![1, 2]);
+        assert_eq!(aoi.query_circle(0.0, 0.0, f32::MAX), vec![1, 2, 3]);
+    }
+
+    /// A subnormal cell size makes every coordinate overflow the cell index; the
+    /// fallback keeps the query bounded and correct rather than walking the whole
+    /// i32 cell space.
+    #[test]
+    fn a_subnormal_cell_size_does_not_hang() {
+        let mut aoi = AoiGrid::new(1.0e-45).expect("finite positive cell size");
+        aoi.insert(1, 0.0, 0.0).unwrap();
+        aoi.insert(2, 100.0, 100.0).unwrap();
+        assert_eq!(aoi.query_circle(0.0, 0.0, 1.0), vec![1]);
+        assert_eq!(aoi.query_circle(0.0, 0.0, 200.0), vec![1, 2]);
+    }
+
+    /// An extreme radius must not admit a box-corner entity whose true distance
+    /// exceeds it (regression: `radius * radius` overflowed to infinity).
+    #[test]
+    fn an_extreme_radius_excludes_box_corners() {
+        let mut aoi = AoiGrid::new(1.0).expect("valid cell size");
+        let radius = 1.0e20_f32;
+        aoi.insert(1, 0.0, 0.0).unwrap();
+        aoi.insert(2, radius, radius).unwrap(); // distance r*sqrt(2) > r
+        assert_eq!(aoi.query_circle(0.0, 0.0, radius), vec![1]);
+    }
+
+    /// `interest_delta` treats the views as sets, so duplicates or a non-ascending
+    /// order cannot fabricate an enter+leave pair for one id.
+    #[test]
+    fn interest_delta_is_robust_to_duplicates_and_order() {
+        assert_eq!(interest_delta(&[1, 1], &[1]), InterestDelta::default());
+        assert_eq!(interest_delta(&[1], &[1, 1]), InterestDelta::default());
+        let unsorted = interest_delta(&[5, 1], &[1, 9]);
+        assert_eq!(unsorted.entered, vec![9]);
+        assert_eq!(unsorted.left, vec![5]);
     }
 }
