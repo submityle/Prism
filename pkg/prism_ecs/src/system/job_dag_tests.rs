@@ -289,3 +289,44 @@ fn job_graph_dag_entry_point() {
     sys.initialize(&mut world);
     sys.run(&mut world);
 }
+
+/// Regression for the dataflow dispatch driver (design §8.3) — this caught a
+/// real double-dispatch race that made the suite flaky under `multi_thread`.
+///
+/// The driver must spawn only the *true* roots, taken from the initial
+/// in-degrees. It previously re-read the **live** atomic pending count while
+/// iterating: once a root ran to completion on another worker (driving a join
+/// node's pending to 0) *before* the driver's loop reached that join, the driver
+/// dispatched it a second time — panicking with "node dispatched more than
+/// once" (or, for a panicking node, masking the real panic). Many two-root joins
+/// make that race window likely; every node must run exactly once.
+#[test]
+fn join_under_racing_roots_dispatches_each_node_once() {
+    let pool = TaskPool::with_threads(4);
+    for _ in 0..400 {
+        let left = AtomicUsize::new(0);
+        let right = AtomicUsize::new(0);
+        let join = AtomicUsize::new(0);
+
+        let mut dag = JobDag::new();
+        let l = dag.add(|| {
+            left.fetch_add(1, Ordering::SeqCst);
+        });
+        let r = dag.add(|| {
+            right.fetch_add(1, Ordering::SeqCst);
+        });
+        dag.add_after(&[l, r], || {
+            // A correct dataflow dispatch guarantees both producers finished
+            // (and their writes are visible) before the join begins.
+            assert_eq!(left.load(Ordering::SeqCst), 1, "left ran != once");
+            assert_eq!(right.load(Ordering::SeqCst), 1, "right ran != once");
+            join.fetch_add(1, Ordering::SeqCst);
+        });
+
+        dag.dispatch(&pool);
+
+        assert_eq!(left.load(Ordering::SeqCst), 1, "left ran != once");
+        assert_eq!(right.load(Ordering::SeqCst), 1, "right ran != once");
+        assert_eq!(join.load(Ordering::SeqCst), 1, "join ran != once");
+    }
+}

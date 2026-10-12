@@ -119,6 +119,66 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
         self.next_with_entity().map(|(_, item)| item)
     }
 
+    /// Batched `fold` fast path (design §17.1 性能工程: 收敛串行 vs `par(1)`)。
+    ///
+    /// The default [`Iterator::fold`] funnels every row through `next()`, which
+    /// pays the per-row `Option`/return-value protocol and reloads the fetch
+    /// cursors from `self` on each call. `for` loops keep using `next` (and so
+    /// see no change), but the batch consumers — `for_each`, `sum`, `count`, and
+    /// explicit `fold` — go through here instead. This override keeps the exact
+    /// same per-row `Added`/`Changed`/sparse gates while walking each archetype
+    /// as a tight inner loop with the entity column and both fetch cursors
+    /// hoisted into locals, so it runs at roughly the parallel driver's
+    /// single-worker batch speed. Row order and the visited set are identical to
+    /// [`next`](Iterator::next).
+    #[inline]
+    fn fold<B, G>(mut self, init: B, mut f: G) -> B
+    where
+        G: FnMut(B, Self::Item) -> B,
+    {
+        let mut acc = init;
+        loop {
+            if self.row < self.row_len {
+                // Hoist the archetype-local cursors out of the inner loop.
+                let entities = self.current_entities;
+                // SAFETY: `row < row_len` implies an archetype is entered, so
+                // both cursors are initialised; `row_len == entities.len()`.
+                let (filter_fetch, fetch) = unsafe {
+                    (
+                        self.current_filter_fetch.unwrap_unchecked(),
+                        self.current_fetch.unwrap_unchecked(),
+                    )
+                };
+                while self.row < self.row_len {
+                    let row = self.row;
+                    self.row += 1;
+                    // SAFETY: `row < row_len == entities.len()` (the loop
+                    // condition), so the index is in bounds.
+                    let entity = unsafe { *entities.get_unchecked(row) };
+                    // SAFETY: `filter_fetch` was built for this archetype and
+                    // `row` indexes a live row of it; `F::Fetch` is `Copy`.
+                    if !unsafe { F::filter_fetch(filter_fetch, entity, row) } {
+                        continue;
+                    }
+                    // SAFETY: same row/archetype invariants; resolves sparse
+                    // membership for sparse-backed terms; `D::Fetch` is `Copy`.
+                    if !unsafe { D::filter_fetch(fetch, entity, row) } {
+                        continue;
+                    }
+                    // SAFETY: `row < row_len == archetype.len()`, `fetch` was
+                    // built for this archetype, and the row cursor only
+                    // advances, so this `(archetype, row)` is fetched exactly
+                    // once — any `&mut` term yields a unique reference valid for
+                    // `'w`.
+                    acc = f(acc, unsafe { D::fetch(fetch, entity, row) });
+                }
+            }
+            if !self.enter_next_archetype() {
+                return acc;
+            }
+        }
+    }
+
     /// Upper bound on the rows left to yield.
     ///
     /// The exact count is unknowable without applying the per-row
@@ -192,52 +252,67 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
                 return Some((entity, unsafe { D::fetch(fetch, entity, row) }));
             }
 
-            if self.arch_cursor >= self.archetypes.len() {
+            if !self.enter_next_archetype() {
                 return None;
             }
-            let arch_id = self.archetypes[self.arch_cursor];
-            self.arch_cursor += 1;
-
-            // SAFETY: `self.world` is valid and borrowed for `'w`; we only form
-            // a shared `&'w World` to read archetype storage. Each matched
-            // archetype id was produced from this same world.
-            let world: &'w World = unsafe { &*self.world };
-            let archetype: &'w Archetype = world
-                .archetypes()
-                .get(arch_id)
-                .expect("matched archetype id must resolve");
-            // Out-of-band sparse storage consulted per row by sparse-backed terms
-            // (design §6); shares the `'w` world borrow.
-            let sparse_sets = world.sparse_sets();
-
-            self.row = 0;
-            self.row_len = archetype.len();
-            self.current_entities = archetype.table().entities();
-            // SAFETY: `arch_id` came from the matched list, so the archetype
-            // satisfies `D::matches` for `data_state` — the contract of
-            // `init_fetch`.
-            self.current_fetch = Some(unsafe {
-                D::init_fetch(
-                    self.data_state,
-                    archetype,
-                    sparse_sets,
-                    self.last_run,
-                    self.this_run,
-                )
-            });
-            // SAFETY: the same `arch_id` also satisfies `F::matches` for
-            // `filter_state` (guaranteed by `matched_archetypes`), the contract
-            // of `F::init_fetch`.
-            self.current_filter_fetch = Some(unsafe {
-                F::init_fetch(
-                    self.filter_state,
-                    archetype,
-                    sparse_sets,
-                    self.last_run,
-                    self.this_run,
-                )
-            });
         }
+    }
+
+    /// Advance to the next matched archetype, resetting the row cursor and
+    /// rebuilding the entity column and both fetch cursors for it.
+    ///
+    /// Returns `false` when no archetype remains (the iterator is then
+    /// exhausted). Shared by [`next_with_entity`](Self::next_with_entity) and the
+    /// batched [`fold`](Iterator::fold) fast path so the per-archetype entry
+    /// logic — the safety contracts in particular — lives in exactly one place.
+    #[inline(always)]
+    fn enter_next_archetype(&mut self) -> bool {
+        if self.arch_cursor >= self.archetypes.len() {
+            return false;
+        }
+        let arch_id = self.archetypes[self.arch_cursor];
+        self.arch_cursor += 1;
+
+        // SAFETY: `self.world` is valid and borrowed for `'w`; we only form a
+        // shared `&'w World` to read archetype storage. Each matched archetype
+        // id was produced from this same world.
+        let world: &'w World = unsafe { &*self.world };
+        let archetype: &'w Archetype = world
+            .archetypes()
+            .get(arch_id)
+            .expect("matched archetype id must resolve");
+        // Out-of-band sparse storage consulted per row by sparse-backed terms
+        // (design §6); shares the `'w` world borrow.
+        let sparse_sets = world.sparse_sets();
+
+        self.row = 0;
+        self.row_len = archetype.len();
+        self.current_entities = archetype.table().entities();
+        // SAFETY: `arch_id` came from the matched list, so the archetype
+        // satisfies `D::matches` for `data_state` — the contract of
+        // `init_fetch`.
+        self.current_fetch = Some(unsafe {
+            D::init_fetch(
+                self.data_state,
+                archetype,
+                sparse_sets,
+                self.last_run,
+                self.this_run,
+            )
+        });
+        // SAFETY: the same `arch_id` also satisfies `F::matches` for
+        // `filter_state` (guaranteed by `matched_archetypes`), the contract of
+        // `F::init_fetch`.
+        self.current_filter_fetch = Some(unsafe {
+            F::init_fetch(
+                self.filter_state,
+                archetype,
+                sparse_sets,
+                self.last_run,
+                self.this_run,
+            )
+        });
+        true
     }
 
 }

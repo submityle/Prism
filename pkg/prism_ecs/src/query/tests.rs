@@ -127,6 +127,54 @@ fn for_each_convenience_reads_all() {
 }
 
 #[test]
+fn fold_fast_path_matches_next_order_and_visits() {
+    let mut w = World::new();
+    w.spawn(Position(1, 0));
+    w.spawn(Velocity(9, 9)); // non-matching archetype is skipped
+    w.spawn(Position(2, 0));
+    w.spawn((Position(3, 0), Velocity(1, 1)));
+
+    let state = w.query::<&Position>();
+
+    // The `next()`-based for-loop fixes the reference order (archetype order,
+    // then row order).
+    let mut via_next = Vec::new();
+    for p in state.iter(&w) {
+        via_next.push(p.0);
+    }
+
+    // The batched `fold` path reached three ways: an explicit fold, the
+    // iterator's `for_each`, and the `QueryState` convenience.
+    let via_fold_sum = state.iter(&w).fold(0, |acc, p| acc + p.0);
+    let mut via_foreach = Vec::new();
+    state.iter(&w).for_each(|p| via_foreach.push(p.0));
+    let mut via_state = Vec::new();
+    state.for_each(&w, |p| via_state.push(p.0));
+    let via_count = state.iter(&w).count();
+
+    assert_eq!(via_next, [1, 2, 3]);
+    assert_eq!(via_foreach, via_next);
+    assert_eq!(via_state, via_next);
+    assert_eq!(via_fold_sum, 6);
+    assert_eq!(via_count, 3);
+}
+
+#[test]
+fn fold_fast_path_mutates_every_row() {
+    let mut w = World::new();
+    let a = w.spawn(Position(1, 0));
+    let b = w.spawn((Position(2, 0), Velocity(0, 0)));
+    w.spawn(Velocity(0, 0)); // no Position -> excluded from the mutation
+
+    let state = w.query::<&mut Position>();
+    state.iter_mut(&mut w).for_each(|mut p| p.0 += 10);
+
+    // A `next()`-based pass must observe exactly the fold's writes.
+    assert_eq!(w.get::<Position>(a), Some(&Position(11, 0)));
+    assert_eq!(w.get::<Position>(b), Some(&Position(12, 0)));
+}
+
+#[test]
 fn iter_is_empty_when_no_archetype_matches() {
     let mut w = World::new();
     w.spawn(Velocity(1, 1));

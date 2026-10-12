@@ -274,6 +274,24 @@ impl<'env> JobDag<'env> {
             return;
         }
 
+        // Roots = nodes with no predecessors, captured from the *initial*
+        // in-degrees before they are moved into the atomic pending counts.
+        //
+        // Reading `state.pending` for this instead would race: the scope may
+        // start a root on another worker the instant it is spawned, and that
+        // root can run to completion and drive a successor's pending to 0
+        // *before* the driver's loop reaches that successor — the driver would
+        // then dispatch it a second time, after the worker already did. Keying
+        // off the immutable initial `indeg` (only true roots are ever spawned
+        // from here) removes that race; its successors are dispatched solely by
+        // the finishing predecessor whose `fetch_sub` observes the last pending
+        // count.
+        let roots: Vec<usize> = indeg
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &d)| (d == 0).then_some(i))
+            .collect();
+
         // Multi-threaded dataflow dispatch. The shared state is allocated here —
         // *outside* the scope — so references handed to spawned sub-jobs outlive
         // the scope's `'scope` region.
@@ -288,10 +306,8 @@ impl<'env> JobDag<'env> {
         };
 
         pool.scope(|scope| {
-            for (i, p) in state.pending.iter().enumerate() {
-                if p.load(Ordering::Acquire) == 0 {
-                    spawn_node(scope, &state, i);
-                }
+            for i in roots {
+                spawn_node(scope, &state, i);
             }
         });
     }

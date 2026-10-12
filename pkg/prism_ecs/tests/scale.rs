@@ -153,6 +153,16 @@ fn scale_serial_vs_batch_diagnosis() {
         }
         black_box(acc);
     });
+    // The batched `fold` fast path (design §17.1): `for_each`/`sum`/`count`
+    // dispatch through `QueryIter::fold`, which walks each archetype as a tight
+    // inner loop instead of the per-row `next()` protocol.
+    let fold_ro = best_of(|| {
+        let mut acc = 0.0f32;
+        q_ro.iter(&world).for_each(|(v, p)| {
+            acc += v.0 + p.0;
+        });
+        black_box(acc);
+    });
     let par_ro = best_of(|| {
         q_ro.par_for_each(&world, &pool, 1024, |(v, p)| {
             black_box(v.0 + p.0);
@@ -171,6 +181,13 @@ fn scale_serial_vs_batch_diagnosis() {
             p.2 += v.2;
         }
     });
+    let fold_rw = best_of(|| {
+        q_rw.iter_mut(&mut world).for_each(|(v, mut p)| {
+            p.0 += v.0;
+            p.1 += v.1;
+            p.2 += v.2;
+        });
+    });
     let par_rw = best_of(|| {
         q_rw.par_for_each_mut(&mut world, &pool, 1024, |(v, mut p)| {
             p.0 += v.0;
@@ -180,16 +197,18 @@ fn scale_serial_vs_batch_diagnosis() {
     });
 
     println!(
-        "read-only  serial {:>7.2} ns/entity | par(1) {:>7.2} ns/entity | par/serial {:.2}x",
+        "read-only  for-next {:>6.2} | iter.for_each {:>6.2} | par(1) {:>6.2} ns/entity | fold speedup {:.2}x",
         ns_per_entity(serial_ro),
+        ns_per_entity(fold_ro),
         ns_per_entity(par_ro),
-        serial_ro.as_secs_f64() / par_ro.as_secs_f64(),
+        serial_ro.as_secs_f64() / fold_ro.as_secs_f64(),
     );
     println!(
-        "mutable    serial {:>7.2} ns/entity | par(1) {:>7.2} ns/entity | par/serial {:.2}x",
+        "mutable    for-next {:>6.2} | iter_mut.for_each {:>6.2} | par(1) {:>6.2} ns/entity | fold speedup {:.2}x",
         ns_per_entity(serial_rw),
+        ns_per_entity(fold_rw),
         ns_per_entity(par_rw),
-        serial_rw.as_secs_f64() / par_rw.as_secs_f64(),
+        serial_rw.as_secs_f64() / fold_rw.as_secs_f64(),
     );
 }
 
