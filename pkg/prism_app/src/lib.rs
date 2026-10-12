@@ -229,6 +229,8 @@ pub mod plugin_group;
 pub mod rollback;
 #[cfg(feature = "determinism")]
 pub mod rollback_replay;
+#[cfg(feature = "determinism")]
+pub mod peer_sync;
 pub mod run_mode;
 pub mod runner;
 pub mod schedule;
@@ -281,6 +283,8 @@ pub use run_mode::RunMode;
 pub use rollback::SnapshotHistory;
 #[cfg(feature = "determinism")]
 pub use rollback_replay::RollbackReplay;
+#[cfg(feature = "determinism")]
+pub use peer_sync::{reconcile_with_peer, PeerAuthoritative, ReconcileOutcome};
 pub use runner::{run_once, HeadlessRunner, ScheduleRunnerOnce};
 #[cfg(feature = "winit")]
 pub use runner::{run_windowed, window_actions, WindowAction, WindowSettings, WinitRunner};

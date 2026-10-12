@@ -91,6 +91,16 @@ impl SnapshotHistory {
         self.next_frame.checked_sub(1)
     }
 
+    /// The oldest retained frame, or `None` before the first capture.
+    ///
+    /// Retained frames are contiguous (`oldest..=last`), so this is
+    /// `next_frame - len` while the window is full, and `0` before it fills.
+    #[must_use]
+    pub fn oldest_frame(&self) -> Option<u64> {
+        let len = self.ring.len() as u64;
+        self.next_frame.checked_sub(len).filter(|_| len > 0)
+    }
+
     /// Whether `frame` is still retained (not yet evicted).
     #[must_use]
     pub fn contains(&self, frame: u64) -> bool {
