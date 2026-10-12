@@ -1,0 +1,21 @@
+[package]
+name = "prism_image"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Engine-neutral image data for Prism's own renderer: a tightly packed RGBA8 `Image` with an extent, an `ImageFormat` that maps onto the RHI `TextureFormat`, deterministic procedural generators, and the RHI upload path that turns an image into a sampled `GpuImage` texture view. Replaces `bevy_image` on Prism's render path and contains no Unreal Engine or Unity source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# The RHI this crate uploads through. Only the frozen trait surface and value
+# types are used; the crate names no backend.
+prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
+
+[dev-dependencies]
+# The shipped backend, used only by the GPU read-back test that proves an
+# upload lands verbatim. The library itself never depends on a backend.
+prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
+
+[lints]
+workspace = true
