@@ -22,6 +22,7 @@ use prism_render_driver as rhi;
 use rhi::RenderDevice;
 
 use crate::convert;
+use crate::loss::DeviceLostReason;
 
 /// Private marker for buffer slots.
 enum BufferMarker {}
@@ -92,6 +93,10 @@ pub(crate) struct DeviceInner {
     render_pipelines: Map<RenderPipelineMarker, wgpu::RenderPipeline>,
     /// Live compute pipelines.
     compute_pipelines: Map<ComputePipelineMarker, wgpu::ComputePipeline>,
+    /// The most recent device loss reported by wgpu, recorded by the callback
+    /// installed in [`DeviceInner::install_device_lost_callback`] and drained
+    /// by [`WgpuDevice::take_device_lost`]. `None` until the device is lost.
+    device_lost: Mutex<Option<DeviceLostReason>>,
 }
 
 /// Locks a mutex, treating poisoning (a panic in another thread while the lock
@@ -119,7 +124,35 @@ impl DeviceInner {
             pipeline_layouts: Mutex::new(rhi::GenerationalSlotMap::new()),
             render_pipelines: Mutex::new(rhi::GenerationalSlotMap::new()),
             compute_pipelines: Mutex::new(rhi::GenerationalSlotMap::new()),
+            device_lost: Mutex::new(None),
         }
+    }
+
+    /// Installs the wgpu device-lost callback that records why the device went
+    /// away, so [`WgpuDevice::take_device_lost`] can report it.
+    ///
+    /// wgpu signals a lost device through a one-shot callback rather than an
+    /// error return — a driver reset or crash routes through the "lose the
+    /// device" steps with reason [`DeviceLostReason::Unknown`], and an explicit
+    /// `wgpu::Device::destroy` delivers [`DeviceLostReason::Destroyed`] from a
+    /// later poll — so the callback is registered at bring-up to capture every
+    /// loss. Only the device-lost callback is installed; the default
+    /// uncaptured-error handler is left alone so genuine validation errors keep
+    /// surfacing as they did before.
+    ///
+    /// The callback observes the loss through a weak reference: the closure is
+    /// owned by the wgpu device stored in `self`, so capturing a strong
+    /// reference would keep this state — and the device — alive forever. If no
+    /// [`WgpuDevice`] handle is still alive when the loss fires, nobody can
+    /// observe it and the reason is dropped.
+    fn install_device_lost_callback(self: &Arc<Self>) {
+        let inner = Arc::downgrade(self);
+        self.device
+            .set_device_lost_callback(move |reason, _message| {
+                if let Some(inner) = inner.upgrade() {
+                    *lock(&inner.device_lost) = Some(DeviceLostReason::from_wgpu(reason));
+                }
+            });
     }
 
     /// Resolves a buffer id to a cloned wgpu handle, panicking on a stale id.
@@ -241,9 +274,9 @@ impl WgpuDevice {
         device: wgpu::Device,
         caps: rhi::DeviceCapabilities,
     ) -> Self {
-        Self {
-            inner: Arc::new(DeviceInner::new(adapter, device, caps)),
-        }
+        let inner = Arc::new(DeviceInner::new(adapter, device, caps));
+        inner.install_device_lost_callback();
+        Self { inner }
     }
 
     /// Returns a handle to the shared inner state, used to build the queue.
@@ -263,6 +296,22 @@ impl WgpuDevice {
     #[must_use]
     pub fn wgpu_adapter(&self) -> &wgpu::Adapter {
         &self.inner.adapter
+    }
+
+    /// Returns why the device was lost, clearing the record so a caller acts on
+    /// it once.
+    ///
+    /// wgpu reports a lost device (a driver reset or crash, or an explicit
+    /// `wgpu::Device::destroy`) through a callback instead of an error return,
+    /// so loss is edge-triggered: the callback records the reason and this
+    /// drains it. `None` means no loss has been reported since the previous
+    /// call.
+    ///
+    /// Once a reason is returned the device's resources are unusable, so a
+    /// caller must stop submitting work and rebuild the device; device rebuild
+    /// is out of scope for this backend.
+    pub fn take_device_lost(&self) -> Option<DeviceLostReason> {
+        lock(&self.inner.device_lost).take()
     }
 
     /// Blocks the calling thread until every previously submitted operation on

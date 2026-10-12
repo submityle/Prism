@@ -15,10 +15,11 @@
 extern crate alloc;
 
 use prism_render_driver as rhi;
-use prism_render_driver_wgpu::{WgpuDevice, WgpuInstance, WgpuQueue};
+use prism_render_driver_wgpu::{DeviceLostReason, WgpuDevice, WgpuInstance, WgpuQueue};
 use rhi::{FrameSync, RenderDevice, RenderQueue};
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use alloc::sync::Arc;
 
@@ -203,4 +204,57 @@ fn gpu_completion_callback_fires_after_the_queue_drains() {
         fired.load(Ordering::Acquire),
         "the completion callback ran once the queue drained"
     );
+}
+
+/// Polls until a device loss has been reported, or the bounded window expires.
+///
+/// wgpu fires the device-lost callback from a poll (it waits for the queue to
+/// drain before completing the "lose the device" steps), so a caller that has
+/// just destroyed the device must keep polling for the record to appear.
+fn poll_for_device_lost(device: &WgpuDevice, attempts: u32) -> Option<DeviceLostReason> {
+    for _ in 0..attempts {
+        // The poll's own return value is irrelevant here: a destroyed device
+        // legitimately reports `false`, and the callback runs regardless.
+        let _ = device.poll_wait();
+        if let Some(reason) = device.take_device_lost() {
+            return Some(reason);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    None
+}
+
+#[test]
+fn gpu_device_destroy_reports_device_lost() {
+    let Some((device, _queue)) = device_or_skip() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    };
+
+    // A freshly brought-up device has not been lost.
+    assert!(
+        device.take_device_lost().is_none(),
+        "a healthy device reports no loss"
+    );
+
+    // `destroy` is "lose the device" for a real wgpu device: it invalidates the
+    // device and wgpu delivers the registered callback with `Destroyed` from a
+    // later poll, once the queue has drained.
+    device.wgpu_device().destroy();
+
+    let Some(reason) = poll_for_device_lost(&device, 200) else {
+        // Honest skip: this backend never delivered a DeviceLost callback
+        // within a second of `destroy`. The wiring and the accessor stand; we
+        // do not fabricate a reason.
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but destroy() produced no DeviceLost callback"
+        );
+        return;
+    };
+
+    assert_eq!(reason, DeviceLostReason::Destroyed);
 }

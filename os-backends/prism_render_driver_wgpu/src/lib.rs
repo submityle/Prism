@@ -12,12 +12,16 @@
 //!
 //! Window-surface support (configure/acquire/present) is available behind the
 //! `surface` feature.
+//!
+//! Device loss (a driver reset or crash, or an explicit `destroy`) is reported
+//! through [`WgpuDevice::take_device_lost`]; see [`DeviceLostReason`].
 
 extern crate alloc;
 
 mod convert;
 mod device;
 mod instance;
+mod loss;
 mod queue;
 mod surface;
 
@@ -27,5 +31,6 @@ mod bindless_tests;
 
 pub use device::WgpuDevice;
 pub use instance::{DeviceCreationError, WgpuAdapter, WgpuInstance};
+pub use loss::DeviceLostReason;
 pub use queue::WgpuQueue;
 pub use surface::{SurfaceCreateError, WgpuFrame, WgpuSurface};
