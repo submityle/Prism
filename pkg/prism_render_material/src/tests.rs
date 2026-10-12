@@ -227,7 +227,7 @@ fn gpu_material_rows_match_the_shader_abi() {
     // transmission groups, including coat_darkening, scatter_anisotropy and
     // transmission_scatter) sized the fat authoring view, with trailing pad
     // words keeping it a 16-byte multiple.
-    assert_eq!(size_of::<GpuSurfaceParameters>(), 272);
+    assert_eq!(size_of::<GpuSurfaceParameters>(), 288);
     assert_eq!(size_of::<GpuMaterialTexture>(), 16);
     assert_eq!(size_of::<GpuMaterialHeader>() % 16, 0);
     assert_eq!(size_of::<GpuSurfaceParameters>() % 16, 0);

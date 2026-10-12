@@ -672,42 +672,17 @@ view = "invariant"
 
 [[lobe.field]]
 name = "transmission_scatter"
-type = "f32"
+type = "vec4f"
 bit_region = "KHR"
 pack_slot = 8
 consumed_by = ["unpack", "sample", "golden"]
-# OpenPBR `transmission_scatter` in [0, 1]: fraction of the absorbed energy that
-# is re-scattered isotropically instead of being lost, so the slab brightens
-# toward `transmission_color`. 0.0 is pure Beer-Lambert absorption (the exact
-# identity).
-default = 0.0
+# OpenPBR `transmission_scatter` (color3, w unused): per-channel fraction of the
+# absorbed energy re-scattered instead of lost. Black is pure Beer-Lambert
+# absorption (the exact identity).
+default = [0.0, 0.0, 0.0, 1.0]
 valid = "0.0..=1.0"
 energy_policy = "coupled"
 view = "invariant"
-
-[[lobe.field]]
-name = "_pad0"
-type = "pad"
-bit_region = "KHR"
-pack_slot = 9
-consumed_by = []
-default = 0.0
-
-[[lobe.field]]
-name = "_pad1"
-type = "pad"
-bit_region = "KHR"
-pack_slot = 10
-consumed_by = []
-default = 0.0
-
-[[lobe.field]]
-name = "_pad2"
-type = "pad"
-bit_region = "KHR"
-pack_slot = 11
-consumed_by = []
-default = 0.0
 
 [[lobe.field]]
 name = "transmission_scatter_anisotropy"

@@ -96,7 +96,7 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
     s.index_of_refraction = 1.5;
     s.dispersion = 0.0;
     s.transmission_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
-    s.transmission_scatter = 0.0;
+    s.transmission_scatter = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     s.transmission_scatter_anisotropy = 0.0;
     s.transmission_dispersion_abbe_number = 20.0;
     s.face_softness = 0.1;
@@ -205,7 +205,12 @@ fn prism_unpack_surface(words: array<u32, 88>, lobe_mask: u32) -> PrismSurfacePa
             bitcast<f32>(w[cursor + 6u]),
             bitcast<f32>(w[cursor + 7u]),
         );
-        s.transmission_scatter = bitcast<f32>(w[cursor + 8u]);
+        s.transmission_scatter = vec4<f32>(
+            bitcast<f32>(w[cursor + 8u]),
+            bitcast<f32>(w[cursor + 9u]),
+            bitcast<f32>(w[cursor + 10u]),
+            bitcast<f32>(w[cursor + 11u]),
+        );
         s.transmission_scatter_anisotropy = bitcast<f32>(w[cursor + 12u]);
         s.transmission_dispersion_abbe_number = bitcast<f32>(w[cursor + 13u]);
         cursor += PRISM_LOBE_WORDS_TRANSMISSION;

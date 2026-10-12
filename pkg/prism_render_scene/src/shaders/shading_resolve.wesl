@@ -1871,7 +1871,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.dispersion = parameters.dispersion;
     surface.thin_walled = parameters.thin_walled;
     surface.transmission_color = parameters.transmission_color.xyz;
-    surface.transmission_scatter = parameters.transmission_scatter;
+    surface.transmission_scatter = parameters.transmission_scatter.xyz;
     surface.transmission_scatter_anisotropy = parameters.transmission_scatter_anisotropy;
     surface.transmission_dispersion_abbe_number =
         parameters.transmission_dispersion_abbe_number;

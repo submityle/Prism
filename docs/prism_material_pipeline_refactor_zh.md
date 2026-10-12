@@ -224,7 +224,7 @@
 | **Transmission** | `transmission_weight` | float | `transmission` | ⚠️ 仅命名不同 |
 | | `transmission_color` | color3 | `transmission_color` | ✅ |
 | | `transmission_depth` | float（length） | `thickness`（归一化 [0,1]） | ⚠️ 语义/单位不一致 |
-| | `transmission_scatter` | **color3** | `transmission_scatter`（**f32**） | ❌ 类型不一致 |
+| | `transmission_scatter` | color3 | `transmission_scatter`（vec4，w 未用） | ✅（本轮修正类型） |
 | | `transmission_scatter_anisotropy` | float [-1,1] | `transmission_scatter_anisotropy` | ✅（本轮新增） |
 | | `transmission_dispersion_scale` | float | `dispersion` | ⚠️ 仅命名不同 |
 | | `transmission_dispersion_abbe_number` | float（默认 20） | `transmission_dispersion_abbe_number` | ✅（本轮新增，色散改由 Abbe 推导） |
@@ -243,7 +243,7 @@
 | | `geometry_normal` / `geometry_tangent` / `geometry_coat_normal` / `geometry_coat_tangent` | vector3 | 法线/切线纹理 + `coat_normal` | ❌ 缺向量字段 |
 | **（规范之外）** | — | — | `face`（`softness`）、`anisotropy_rotation`、`ambient_occlusion`、`normal_scale`、`alpha_cutoff`、`thickness` | Prism 扩展区，计入超集 |
 
-**结论（code-truth）**：**参数级尚未补齐。** 已对齐的：`base_weight` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_ior` / `transmission_color` / `transmission_scatter_anisotropy` / `transmission_dispersion_abbe_number` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / `coat_*` 全 6 项 / `fuzz_color` / `fuzz_roughness` / `geometry_thin_walled`。仍缺或需改类型：`transmission_scatter`(f32→color3)、`emission_luminance`、thin-film 三参数作为 ABI 瓣、`geometry_normal` / `geometry_tangent` / `geometry_coat_tangent`、`geometry_opacity` 独立字段；另有命名与默认值待对齐（见上表 ⚠️ 行）。
+**结论（code-truth）**：**参数级尚未补齐。** 已对齐的：`base_weight` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_ior` / `transmission_color` / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_abbe_number` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / `coat_*` 全 6 项 / `fuzz_color` / `fuzz_roughness` / `geometry_thin_walled`。仍缺或需改类型：`transmission_depth`（length vs 归一化 `thickness`）、`emission_luminance`、thin-film 三参数作为 ABI 瓣、`geometry_normal` / `geometry_tangent` / `geometry_coat_tangent`、`geometry_opacity` 独立字段；另有命名与默认值待对齐（见上表 ⚠️ 行）。
 
 要点：
 - **开放词汇表让补瓣是加法**：新字段扩进对应 lobe 的变长块，位掩码/静态置换天然容纳，老材质不受影响（它们的 lobe_mask 不含新位）。
@@ -602,6 +602,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f 规范对齐：`transmission_scatter` 改为规范要求的 color3**（§4.4）
+  - 规范里 `transmission_scatter` 是 **color3**（逐通道再散射比例），我此前实现成了 `f32`。本轮按规范改成 color3，并让**每个通道独立**参与再散射：`T_c = beer_c + phase · scatter_c · (1 − beer_c)`。
+  - 默认 `(0,0,0)` 与规范一致，即**纯 Beer-Lambert 吸收**（既有行为逐位不变）。
+  - 字长几乎免费：color3 占 4 字，正好吃掉该瓣原本的 3 个尾 pad，**transmission 瓣仍 16 字、`SURFACE_MAX_WORDS` 仍 88**；只有 fat 结构 +1 尾 pad（272→**288** B，仍 16 字节对齐）。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3310 通过**、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）、`prism_material_schema` 13、`prism_render_material` 826+6+2 全绿。
 
 - **P1-f 规范对齐：`subsurface_radius` 拆回 float + 新增 `subsurface_radius_scale`(color3)**（§4.4）
   - 问题：我此前把规范的两个**独立参数** `subsurface_radius`(float, length) 与 `subsurface_radius_scale`(color3) 揉成了一个 `vec4`，既不是规范的任何一个。本轮按规范拆开：

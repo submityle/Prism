@@ -240,13 +240,10 @@ pub struct GpuTransmissionLobe {
     pub dispersion: f32,
     /// `OpenPBR` `transmission_color` (white = identity).
     pub transmission_color: [f32; 4],
-    /// `OpenPBR` `transmission_scatter` in `[0, 1]`: fraction of the absorbed
-    /// energy re-scattered isotropically instead of lost. `0.0` is pure
+    /// `OpenPBR` `transmission_scatter` (color3, w unused): per-channel fraction
+    /// of the absorbed energy re-scattered instead of lost. Black is pure
     /// Beer-Lambert absorption.
-    pub transmission_scatter: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
-    pub _pad2: f32,
+    pub transmission_scatter: [f32; 4],
     /// `OpenPBR` `transmission_scatter_anisotropy` in `[-1, 1]` (`0` =
     /// isotropic in-scatter).
     pub transmission_scatter_anisotropy: f32,
@@ -264,10 +261,7 @@ impl Default for GpuTransmissionLobe {
             index_of_refraction: 1.5,
             dispersion: 0.0,
             transmission_color: [1.0; 4],
-            transmission_scatter: 0.0,
-            _pad0: 0.0,
-            _pad1: 0.0,
-            _pad2: 0.0,
+            transmission_scatter: [0.0, 0.0, 0.0, 1.0],
             transmission_scatter_anisotropy: 0.0,
             transmission_dispersion_abbe_number: 20.0,
             _pad3: 0.0,
@@ -532,9 +526,6 @@ impl SurfaceParameterBlock {
                 dispersion: params.dispersion,
                 transmission_color: params.transmission_color,
                 transmission_scatter: params.transmission_scatter,
-                _pad0: 0.0,
-                _pad1: 0.0,
-                _pad2: 0.0,
                 transmission_scatter_anisotropy: params.transmission_scatter_anisotropy,
                 transmission_dispersion_abbe_number: params.transmission_dispersion_abbe_number,
                 _pad3: 0.0,
@@ -763,14 +754,14 @@ mod tests {
             index_of_refraction: 1.33,
             dispersion: 0.05,
             transmission_color: [0.85, 0.95, 1.0, 1.0],
-            transmission_scatter: 0.25,
+            transmission_scatter: [0.25, 0.15, 0.05, 1.0],
             transmission_scatter_anisotropy: -0.4,
             transmission_dispersion_abbe_number: 35.0,
             face_softness: 0.25,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 3],
+            _pad_tail: [0.0; 4],
         }
     }
 

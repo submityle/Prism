@@ -52,10 +52,10 @@ pub struct SurfaceSample {
     /// slab. It multiplies the base albedo of the transmission term, so the
     /// default white is the exact identity.
     pub transmission_color: [f32; 3],
-    /// `OpenPBR` `transmission_scatter` in `[0, 1]`: fraction of the absorbed
-    /// slab energy re-scattered isotropically instead of lost. `0.0` is pure
+    /// `OpenPBR` `transmission_scatter` (color3): per-channel fraction of the
+    /// absorbed slab energy re-scattered instead of lost. Black is pure
     /// Beer-Lambert absorption (the exact identity).
-    pub transmission_scatter: f32,
+    pub transmission_scatter: [f32; 3],
     /// `OpenPBR` `transmission_scatter_anisotropy` in `[-1, 1]`: Henyey-Greenstein
     /// bias of the in-scattered transmission. `0.0` is the isotropic identity.
     pub transmission_scatter_anisotropy: f32,
@@ -172,7 +172,7 @@ impl Default for SurfaceSample {
             dispersion: 0.0,
             thin_walled: 0.0,
             transmission_color: [1.0; 3],
-            transmission_scatter: 0.0,
+            transmission_scatter: [0.0; 3],
             transmission_scatter_anisotropy: 0.0,
             transmission_dispersion_abbe_number: 20.0,
             coat_darkening: 0.0,
@@ -391,15 +391,15 @@ pub fn evaluate_principled_direct(
             // colour. `0.0` is pure Beer-Lambert. `transmission_scatter_anisotropy`
             // shapes that in-scatter with a Henyey-Greenstein phase, normalised so
             // that `g == 0` reproduces the isotropic term exactly.
-            let scatter = surface.transmission_scatter.clamp(0.0, 1.0);
             let g = surface.transmission_scatter_anisotropy.clamp(-1.0, 1.0);
             let phase = crate::gi::translucency::foliage::forward_phase(-dot(v, l), g)
                 / crate::gi::translucency::foliage::forward_phase(-dot(v, l), 0.0);
-            [
-                beer[0] + phase * scatter * (1.0 - beer[0]),
-                beer[1] + phase * scatter * (1.0 - beer[1]),
-                beer[2] + phase * scatter * (1.0 - beer[2]),
-            ]
+            let mut out = [0.0f32; 3];
+            for (channel, slot) in out.iter_mut().enumerate() {
+                let scatter = surface.transmission_scatter[channel].clamp(0.0, 1.0);
+                *slot = beer[channel] + phase * scatter * (1.0 - beer[channel]);
+            }
+            out
         };
         let mut out = [0.0f32; 3];
         for (channel, slot) in out.iter_mut().enumerate() {
@@ -1293,7 +1293,7 @@ mod tests {
         let absorbed = evaluate_principled_direct(base, frame(), light());
         let scattering = evaluate_principled_direct(
             SurfaceSample {
-                transmission_scatter: 1.0,
+                transmission_scatter: [1.0; 3],
                 ..base
             },
             frame(),
@@ -1330,7 +1330,7 @@ mod tests {
             base_color: [0.2, 0.4, 0.6],
             transmission: 1.0,
             thickness: 1.0,
-            transmission_scatter: 1.0,
+            transmission_scatter: [1.0; 3],
             ..Default::default()
         };
         let forward = evaluate_principled_direct(
