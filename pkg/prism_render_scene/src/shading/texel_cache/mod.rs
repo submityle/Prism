@@ -6,6 +6,7 @@
 //! epoch validation, and an active/staging page-table swap. No page is
 //! sampleable until the entire staging table is published.
 
+mod chart;
 mod key;
 mod plan;
 mod residency;
@@ -18,9 +19,11 @@ pub mod gpu;
 #[path = "gpu/tests.rs"]
 mod gpu_tests;
 
+pub use chart::{build_face_chart, FaceChart, FaceChartError};
 pub use gpu::page_table::{
     GpuShadePageEntry, ShadePageTableError, ShadePageTableRecord, ShadePageTableSnapshot,
 };
+pub use gpu::shade::{ShadeJob, ShadeJobError, ShadeJobFromDensityError};
 pub use key::{ShadeChannel, ShadePageKey};
 pub use plan::{build_shade_plan, ShadePlan, ShadePlanItem};
 pub use residency::{

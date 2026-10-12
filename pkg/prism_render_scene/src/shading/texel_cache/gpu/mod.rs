@@ -6,3 +6,7 @@
 //! slot from another cache cannot become sampleable by accident.
 
 pub mod page_table;
+pub mod shade;
+
+#[cfg(test)]
+mod shade_tests;
