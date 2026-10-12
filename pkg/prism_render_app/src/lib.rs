@@ -54,6 +54,8 @@
 //! lighting, and post-processing layer on top of the same `Render` schedule.
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
 mod camera;
 mod config;
 mod draw;
@@ -65,6 +67,7 @@ mod plugin;
 mod queue;
 mod record;
 mod runtime_resource;
+mod scene;
 mod sets;
 mod stats;
 mod systems;
@@ -86,6 +89,7 @@ pub use plugin::PrismRenderPlugin;
 pub use queue::{DrawRequest, PhaseItem, RenderQueues, phase_for_render_class};
 pub use record::RenderRecord;
 pub use runtime_resource::RenderRuntimeResource;
+pub use scene::{MeshClass, SceneRegistry};
 pub use sets::{RenderPhase, RenderSystems, configure_render_sets};
 pub use stats::RenderFrameStats;
 pub use target::RenderTarget;
@@ -104,6 +108,7 @@ pub mod prelude {
     pub use crate::plugin::PrismRenderPlugin;
     pub use crate::queue::{DrawRequest, PhaseItem, RenderQueues, phase_for_render_class};
     pub use crate::record::RenderRecord;
+    pub use crate::scene::{MeshClass, SceneRegistry};
     pub use crate::sets::{RenderPhase, RenderSystems};
     pub use crate::stats::RenderFrameStats;
     pub use crate::target::RenderTarget;

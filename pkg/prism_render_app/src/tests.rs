@@ -240,6 +240,7 @@ fn render_queues_are_phased_and_sort_deterministically() {
         pipeline,
         draw: DrawFunctionId(0),
         geometry,
+        lod_level: 0,
         material,
         scene,
         order,
@@ -316,6 +317,7 @@ fn recording_a_phase_invokes_each_draw_function() {
                 pipeline,
                 draw,
                 geometry,
+                lod_level: 0,
                 material,
                 scene,
                 order,
@@ -331,6 +333,81 @@ fn recording_a_phase_invokes_each_draw_function() {
     // An unknown id is a no-op, never a panic.
     functions.call(DrawFunctionId(99), &queues.phase(RenderPhase::Opaque)[0], &mut recorded);
     assert_eq!(recorded, "1;2;");
+}
+
+/// The scene registry resolves a visibility work item into a queueable draw,
+/// and skips one whose material is not resident.
+#[test]
+fn scene_registry_resolves_a_work_item() {
+    use crate::scene::{MeshClass, SceneRegistry};
+    use prism_render_architecture::geometry::{
+        GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
+    };
+    use prism_render_visibility::{GpuRenderWorkItem, WorkSortKey};
+
+    let geometry = GenerationalHandle::new(1, 1);
+    let material = GenerationalHandle::new(2, 1);
+    let scene = GenerationalHandle::new(3, 1);
+    let layout = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x3],
+    );
+
+    let mut registry = SceneRegistry::new();
+    registry.insert_geometry(GeometryRecord {
+        handle: geometry,
+        revision: 1,
+        vertex_buffer_class: 5,
+        index_buffer_class: 0,
+        primitive_start: 0,
+        primitive_count: 1,
+        lods: vec![GeometryLodRecord {
+            level: 0,
+            primitive_kind: GeometryPrimitiveKind::Indexed,
+            element_count: 6,
+            first_element: 0,
+            base_vertex: 0,
+            vertex_count: 4,
+            screen_error: 0.0,
+            resident: true,
+            fallback: false,
+        }],
+    });
+    registry.insert_material(prism_render_material::fallback_material_record(material, 1));
+    registry.insert_mesh_class(
+        5,
+        MeshClass::new(vec![layout.clone()], PrimitiveTopology::TriangleList),
+    );
+
+    let item = GpuRenderWorkItem {
+        scene,
+        geometry,
+        material,
+        lod_or_cluster: 0,
+        pass_mask: Default::default(),
+        visibility_stages: Default::default(),
+        sort_key: WorkSortKey::new(0, 0, 0, 0, 7),
+    };
+    let draw = registry
+        .resolve(&item, None, 1, DrawFunctionId(0))
+        .expect("a resident geometry + material resolves");
+    assert_eq!(draw.phase, RenderPhase::Opaque, "the opaque family phases here");
+    assert_eq!(draw.order, 7, "the work item's sort key carries through");
+    assert_eq!(draw.lod_level, 0, "the resolved LOD level is carried");
+    assert_eq!(draw.variant.topology, PrimitiveTopology::TriangleList);
+    assert_eq!(draw.layout, vec![layout], "the class's layout is used");
+
+    let missing_material = GpuRenderWorkItem {
+        material: GenerationalHandle::new(9, 1),
+        ..item
+    };
+    assert!(
+        registry
+            .resolve(&missing_material, None, 1, DrawFunctionId(0))
+            .is_none(),
+        "a non-resident material is skipped, not an error"
+    );
 }
 
 /// Filling the queue specializes each resolved draw and appends it to its phase.
@@ -385,6 +462,7 @@ fn filling_the_queue_specializes_and_appends() {
         phase: RenderPhase::Opaque,
         variant,
         layout: vec![layout],
+        lod_level: 0,
         geometry,
         material,
         scene,

@@ -14,6 +14,7 @@ use crate::pipeline_cache::PipelineCache;
 use crate::queue::RenderQueues;
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
+use crate::scene::SceneRegistry;
 use crate::sets::{RenderSystems, configure_render_sets};
 use crate::stats::RenderFrameStats;
 use crate::systems::{drive_render_schedule, execute_frame, extract_render_record};
@@ -125,6 +126,7 @@ where
         render.world.insert_resource(PipelineCache::new());
         render.world.insert_resource(TextureCache::new());
         render.world.insert_resource(RenderQueues::new());
+        render.world.insert_resource(SceneRegistry::new());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
         {

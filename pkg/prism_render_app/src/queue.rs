@@ -34,6 +34,8 @@ pub struct DrawRequest {
     pub variant: MeshPipelineKey,
     /// The mesh's vertex layouts, folded into the pipeline key.
     pub layout: Vec<VertexBufferLayout>,
+    /// The resolved LOD level to draw.
+    pub lod_level: u32,
     /// The geometry to draw.
     pub geometry: GeometryHandle,
     /// The material whose bindings the draw uses.
@@ -83,6 +85,8 @@ pub struct PhaseItem {
     pub draw: DrawFunctionId,
     /// The geometry (mesh) to draw.
     pub geometry: GeometryHandle,
+    /// The resolved LOD level this draw renders.
+    pub lod_level: u32,
     /// The material whose bindings this draw uses.
     pub material: SceneMaterialHandle,
     /// The scene instance this draw came from.
@@ -191,6 +195,7 @@ impl RenderQueues {
                     pipeline,
                     draw: request.draw,
                     geometry: request.geometry,
+                    lod_level: request.lod_level,
                     material: request.material,
                     scene: request.scene,
                     order: request.order,
