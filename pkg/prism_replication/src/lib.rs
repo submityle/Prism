@@ -35,6 +35,8 @@
 //!   without a socket (design §6).
 //! - [`frame`] — LEB128 length-prefixed message framing with an incremental
 //!   decoder, the boundary a stream transport needs (design §6).
+//! - [`arq`] — reliable ordered delivery over the unreliable transport: sequence,
+//!   acknowledge, retransmit, and an RTT-adapted timeout (design §6 "可靠 UDP").
 //! - [`session`] — the **wiring**: [`ServerSession`](session::ServerSession)
 //!   (authority: seed snapshots, step deltas, lagging-client catch-up) and
 //!   [`ClientSession`](session::ClientSession) (prediction fed by inbound frames),
@@ -58,6 +60,8 @@ extern crate std;
 pub mod sequence;
 
 pub mod aoi;
+
+pub mod arq;
 
 pub mod bitpack;
 
