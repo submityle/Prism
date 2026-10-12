@@ -104,8 +104,8 @@ pub use image::GpuImage;
 pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp, RenderStartup};
 pub use material::{
-    MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats, ParameterHeap,
-    RenderMaterials,
+    BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,
+    ParameterHeap, RenderMaterials, TextureFallback, TextureHeapStats, TextureSlotHeap,
 };
 pub use mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer};
 pub use mesh::{RenderMesh, RenderMeshBufferInfo};
@@ -145,8 +145,8 @@ pub mod prelude {
     pub use crate::intent::{RenderIntent, RenderViewport};
     pub use crate::label::{Render, RenderApp, RenderStartup};
     pub use crate::material::{
-        MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats, ParameterHeap,
-        RenderMaterials,
+        BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,
+        ParameterHeap, RenderMaterials, TextureFallback, TextureHeapStats, TextureSlotHeap,
     };
     pub use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer};
     pub use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};

@@ -16,6 +16,9 @@
 
 mod buffers;
 mod parameter_heap;
+mod texture_heap;
+#[cfg(test)]
+mod texture_heap_tests;
 mod stage;
 
 #[cfg(test)]
@@ -26,5 +29,6 @@ pub use buffers::{MaterialParameterBuffers, MaterialSyncReport};
 pub(crate) use buffers::{header_row_bytes, texture_row_bytes};
 pub(crate) use stage::sync_material_buffers;
 pub use stage::{MaterialUploadStats, RenderMaterials};
+pub use texture_heap::{BindlessSlot, TextureFallback, TextureHeapStats, TextureSlotHeap};
 pub use parameter_heap::ParameterHeap;
 
