@@ -104,6 +104,13 @@ pub enum TopologyError {
         /// The duplicated logical-core id.
         id: u32,
     },
+    /// Two cores share a `physical_id` (i.e. they are SMT siblings of one
+    /// physical core) but disagree about its class, NUMA node, or LLC domain —
+    /// a contradiction real hardware cannot present.
+    InconsistentSmtSiblings {
+        /// The shared physical-core id whose siblings disagree.
+        physical_id: u32,
+    },
 }
 
 impl fmt::Display for TopologyError {
@@ -113,6 +120,10 @@ impl fmt::Display for TopologyError {
             TopologyError::DuplicateLogicalId { id } => {
                 write!(f, "duplicate logical-core id {id}")
             }
+            TopologyError::InconsistentSmtSiblings { physical_id } => write!(
+                f,
+                "cores sharing physical id {physical_id} disagree on kind/NUMA/LLC"
+            ),
         }
     }
 }
@@ -287,12 +298,29 @@ impl TopologyBuilder {
                 return Err(TopologyError::DuplicateLogicalId { id: pair[0] });
             }
         }
-        let numa_node_count = self
-            .cores
-            .iter()
-            .map(|c| c.numa_node)
-            .max()
-            .map_or(1, |m| m + 1);
+        // Cores sharing a physical id are SMT siblings of one physical core, so
+        // they must agree on its class, NUMA node, and LLC domain. A
+        // contradiction would hand the scheduler impossible NUMA/affinity input
+        // (CR-found).
+        for (i, core) in self.cores.iter().enumerate() {
+            let disagrees = self.cores[i + 1..].iter().any(|other| {
+                other.physical_id == core.physical_id
+                    && (other.kind != core.kind
+                        || other.numa_node != core.numa_node
+                        || other.llc_domain != core.llc_domain)
+            });
+            if disagrees {
+                return Err(TopologyError::InconsistentSmtSiblings {
+                    physical_id: core.physical_id,
+                });
+            }
+        }
+        // Count the *distinct* NUMA node ids: `max + 1` over-counted a sparse
+        // node set and overflowed for `u16::MAX` (CR-found).
+        let mut node_ids: Vec<u16> = self.cores.iter().map(|c| c.numa_node).collect();
+        node_ids.sort_unstable();
+        node_ids.dedup();
+        let numa_node_count = node_ids.len().min(u16::MAX as usize) as u16;
         Ok(CpuTopology {
             cores: self.cores,
             numa_node_count,

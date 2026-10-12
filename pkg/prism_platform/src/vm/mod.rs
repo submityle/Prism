@@ -45,7 +45,11 @@
 
 use core::fmt;
 
-#[cfg(all(feature = "std", unix))]
+// `unix.rs` implements the Linux and Apple VM syscalls only. Other Unix systems
+// (the BSDs, Android) would hit a mixed-constant fallback inside it with wrong
+// `mmap`/`sysconf` values, so they fall through to the honest `Unsupported`
+// backend until their constants are implemented and verified (CR-found).
+#[cfg(all(feature = "std", any(target_os = "linux", target_vendor = "apple")))]
 #[path = "unix.rs"]
 mod backend;
 
@@ -53,7 +57,10 @@ mod backend;
 #[path = "windows.rs"]
 mod backend;
 
-#[cfg(all(feature = "std", not(any(unix, windows))))]
+#[cfg(not(any(
+    all(feature = "std", any(target_os = "linux", target_vendor = "apple")),
+    all(feature = "std", windows)
+)))]
 mod backend {
     //! Fallback backend for platforms without a page-level VM API (e.g. wasm).
     //! Every operation is honestly [`super::VmError::Unsupported`].

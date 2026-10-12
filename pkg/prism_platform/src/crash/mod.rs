@@ -46,23 +46,24 @@ pub mod mock;
 
 pub use context::{Backtrace, BuildMetadata, CrashContext, Signal, MAX_FRAMES};
 
-#[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+// The real backend implements the Linux `sigaction` ABI and the Apple one only;
+// feeding it to another Unix (whose `sigaction`/`sigevent` layout differs) would
+// install a wrong-layout handler while still claiming support (CR-found).
+#[cfg(all(unix, any(target_os = "linux", target_vendor = "apple")))]
 #[path = "posix.rs"]
 mod backend;
 
-#[cfg(not(all(unix, not(any(target_os = "android", target_os = "ios")))))]
+#[cfg(not(all(unix, any(target_os = "linux", target_vendor = "apple"))))]
 #[path = "unsupported.rs"]
 mod backend;
 
 /// Whether a real crash-capture backend is compiled in for this target.
 ///
-/// `true` on desktop `POSIX` hosts (Linux and macOS), `false` on Web, Android,
-/// iOS, and any other target without the real signal backend. Mirrored by
+/// `true` on the two hosts with a verified ABI (Linux and macOS), `false` on
+/// Web, Android, iOS, the BSDs, and any other target without the real signal
+/// backend. Mirrored by
 /// [`crate::PlatformCaps::has_crash_capture`].
-pub const SUPPORTED: bool = cfg!(all(
-    unix,
-    not(any(target_os = "android", target_os = "ios"))
-));
+pub const SUPPORTED: bool = cfg!(all(unix, any(target_os = "linux", target_vendor = "apple")));
 
 /// The signature of a user crash handler.
 ///
@@ -273,7 +274,7 @@ pub fn uninstall() -> Result<()> {
 #[cfg(all(
     test,
     unix,
-    not(any(target_os = "android", target_os = "ios")),
+    any(target_os = "linux", target_vendor = "apple"),
     not(feature = "mock")
 ))]
 pub(crate) fn disposition(sig: i32) -> usize {
@@ -284,7 +285,7 @@ pub(crate) fn disposition(sig: i32) -> usize {
 #[cfg(all(
     test,
     unix,
-    not(any(target_os = "android", target_os = "ios")),
+    any(target_os = "linux", target_vendor = "apple"),
     not(feature = "mock")
 ))]
 pub(crate) fn trampoline_addr() -> usize {

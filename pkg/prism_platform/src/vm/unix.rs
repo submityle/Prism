@@ -272,10 +272,12 @@ fn apple_total_physical(ps: usize) -> u64 {
 #[cfg(not(target_os = "linux"))]
 fn apple_available_physical(ps: usize) -> u64 {
     // `host_statistics64(HOST_VM_INFO64)` returns the Mach `vm_statistics64`
-    // page counters. We treat free + inactive + speculative + purgeable pages
-    // as reclaimable (available) memory. The counters live at fixed `u32`
-    // indices in the returned array (free=0, inactive=2, purgeable=22,
-    // speculative=23); a generous buffer tolerates kernel struct growth.
+    // page counters. We treat free + inactive + purgeable pages as reclaimable
+    // (available) memory. `speculative_count` (index 23) is deliberately *not*
+    // added: the macOS SDK documents it as already included in `free_count`, so
+    // adding it double-counted available memory (CR-found). The counters live at
+    // fixed `u32` indices in the returned array (free=0, inactive=2,
+    // purgeable=22); a generous buffer tolerates kernel struct growth.
     const HOST_VM_INFO64: i32 = 4;
 
     unsafe extern "C" {
@@ -307,7 +309,7 @@ fn apple_available_physical(ps: usize) -> u64 {
             0
         }
     };
-    let pages = read(0) + read(2) + read(22) + read(23);
+    let pages = read(0) + read(2) + read(22);
     pages.saturating_mul(ps as u64)
 }
 
@@ -491,7 +493,9 @@ pub(super) fn release(region: Region, _huge: bool) {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_vendor = "apple")]
-pub(super) use mirror::{map as mirror_map, release as mirror_release, SUPPORTED as MIRROR_SUPPORTED};
+pub(super) use mirror::{
+    map as mirror_map, release as mirror_release, SUPPORTED as MIRROR_SUPPORTED,
+};
 
 #[cfg(not(target_vendor = "apple"))]
 /// This build can mirror-map a magic ring buffer.
@@ -659,7 +663,11 @@ mod mirror {
         // ring allocated with `mach_vm_allocate`; deallocating it releases both
         // aliased halves exactly once, from `Drop`.
         unsafe {
-            mach_vm_deallocate(task, region.base.addr() as mach_vm_address_t, region.base_len as mach_vm_size_t);
+            mach_vm_deallocate(
+                task,
+                region.base.addr() as mach_vm_address_t,
+                region.base_len as mach_vm_size_t,
+            );
         }
     }
 }

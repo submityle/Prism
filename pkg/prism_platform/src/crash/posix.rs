@@ -268,13 +268,18 @@ pub(super) fn install() -> Result<(), CrashError> {
         let rc = unsafe { sigaction(sig, &act, &mut old) };
         if rc != 0 {
             let err = CrashError::Os(abi::errno());
-            // Roll back the handlers already installed in this loop.
-            for &done in &SIGNALS[..slot] {
-                // SAFETY: restoring with a null `oldact` using our own
-                // just-installed `act` is a well-formed `sigaction` call; a best
-                // effort during error rollback.
+            // Roll back the handlers already installed in this loop by
+            // restoring each one's *saved original* disposition (not our own
+            // just-installed `act`, which would leave the trampoline armed)
+            // (CR-found).
+            for (done_slot, &done) in SIGNALS[..slot].iter().enumerate() {
+                // SAFETY: holding `LOCK`, so we are the sole accessor of `SAVED`;
+                // `done_slot < slot` is in bounds.
+                let saved = unsafe { (*SAVED.0.get())[done_slot] };
+                // SAFETY: a best-effort restore during error rollback; `saved`
+                // is a valid disposition captured earlier this call.
                 unsafe {
-                    let _ = sigaction(done, &act, core::ptr::null_mut());
+                    let _ = sigaction(done, &saved, core::ptr::null_mut());
                 }
             }
             return Err(err);

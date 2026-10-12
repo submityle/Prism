@@ -70,6 +70,39 @@ fn builder_rejects_empty_and_duplicate() {
 }
 
 #[test]
+fn builder_rejects_inconsistent_smt_siblings() {
+    // Cores 0 and 1 share physical id 7 but disagree on NUMA node and class —
+    // impossible on real hardware, so the builder must reject it (CR-found).
+    let bad = TopologyBuilder::new()
+        .core(TopologyCore::new(0, 7, 0, 0, CoreKind::Performance))
+        .core(TopologyCore::new(1, 7, 1, 1, CoreKind::Efficiency))
+        .build();
+    assert_eq!(
+        bad,
+        Err(TopologyError::InconsistentSmtSiblings { physical_id: 7 })
+    );
+
+    // Consistent siblings are accepted.
+    let ok = TopologyBuilder::new()
+        .core(TopologyCore::new(0, 7, 0, 0, CoreKind::Performance))
+        .core(TopologyCore::new(1, 7, 0, 0, CoreKind::Performance))
+        .build();
+    assert!(ok.is_ok());
+}
+
+#[test]
+fn numa_node_count_counts_distinct_nodes() {
+    // Sparse node ids {0, 5}: the count is the number of distinct nodes (2), not
+    // max + 1 (6) (CR-found).
+    let topo = TopologyBuilder::new()
+        .core(TopologyCore::new(0, 0, 0, 0, CoreKind::Unknown))
+        .core(TopologyCore::new(1, 1, 5, 0, CoreKind::Unknown))
+        .build()
+        .unwrap();
+    assert_eq!(topo.numa_node_count(), 2);
+}
+
+#[test]
 fn detect_is_honest_about_being_unprobed() {
     let t = CpuTopology::detect();
     // At least one core, single flat node, all Unknown class, not probed.
@@ -114,14 +147,29 @@ fn qos_hint_maps_per_platform() {
         "QOS_CLASS_BACKGROUND"
     );
     // Windows ladder.
-    assert_eq!(qos_hint(Os::Windows, EngineQos::Default).class, "WIN_QOS_MEDIUM");
-    assert_eq!(qos_hint(Os::Windows, EngineQos::Background).class, "WIN_QOS_ECO");
+    assert_eq!(
+        qos_hint(Os::Windows, EngineQos::Default).class,
+        "WIN_QOS_MEDIUM"
+    );
+    assert_eq!(
+        qos_hint(Os::Windows, EngineQos::Background).class,
+        "WIN_QOS_ECO"
+    );
     // Linux nice levels.
     assert_eq!(qos_hint(Os::Linux, EngineQos::Critical).class, "NICE_-15");
-    assert_eq!(qos_hint(Os::Android, EngineQos::Background).class, "NICE_19");
+    assert_eq!(
+        qos_hint(Os::Android, EngineQos::Background).class,
+        "NICE_19"
+    );
     // Unsupported platforms are honest.
-    assert_eq!(qos_hint(Os::Web, EngineQos::Default).class, "QOS_UNSUPPORTED");
-    assert_eq!(qos_hint(Os::Unknown, EngineQos::Critical).class, "QOS_UNSUPPORTED");
+    assert_eq!(
+        qos_hint(Os::Web, EngineQos::Default).class,
+        "QOS_UNSUPPORTED"
+    );
+    assert_eq!(
+        qos_hint(Os::Unknown, EngineQos::Critical).class,
+        "QOS_UNSUPPORTED"
+    );
     // importance passes through from the lane; only low lanes are throttlable.
     assert_eq!(qos_hint(Os::Apple, EngineQos::Critical).importance, 100);
     assert!(!qos_hint(Os::Apple, EngineQos::Critical).throttlable);

@@ -36,27 +36,16 @@ use core::fmt;
 use core::time::Duration;
 use std::os::fd::RawFd;
 
-#[cfg(all(
-    feature = "std",
-    any(
-        target_vendor = "apple",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "dragonfly"
-    )
-))]
+// Only Apple is wired to the real backend: `posix.rs` implements the Darwin
+// `aiocb`/`sigevent` ABI, which differs from FreeBSD/NetBSD/DragonFly. Rather
+// than feed those systems a wrong-layout control block, they fall through to the
+// honest `Unsupported` backend until their ABIs are implemented and tested
+// (CR-found).
+#[cfg(all(feature = "std", target_vendor = "apple"))]
 #[path = "posix.rs"]
 mod backend;
 
-#[cfg(all(
-    feature = "std",
-    not(any(
-        target_vendor = "apple",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "dragonfly"
-    ))
-))]
+#[cfg(not(all(feature = "std", target_vendor = "apple")))]
 mod backend {
     //! Fallback backend for platforms without a batch async-I/O primitive wired
     //! up yet (Linux `io_uring`, Windows IOCP, Web). Every entry point honestly
