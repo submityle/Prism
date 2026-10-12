@@ -41,6 +41,9 @@ members = [
   "pkg/prism_render_app",
   # GPU-driven culling vertical slice (compute cull + indirect draw) on the RHI.
   "pkg/prism_render_gpudriven",
+  # Engine-neutral mesh geometry (vertex model + primitives + RHI upload),
+  # replacing bevy_mesh's mesh types on the RHI render path.
+  "pkg/prism_mesh",
   # Engine-neutral image data + RHI upload (the bevy_image replacement).
   "pkg/prism_image",
   "pkg/prism_input",
