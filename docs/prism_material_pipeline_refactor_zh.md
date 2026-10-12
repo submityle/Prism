@@ -644,7 +644,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P3-c | 缓存失效 + 时序复用 + mip LOD 策略（光照/动态变化时的页重算） | 调度/一致性 | P3 |
 | P1-g | 自描述反射瓣 schema：lobe 定义（字段名/位宽/置换 key）数据化，解包/分类/对拍从 schema 生成（§17.5） | 工具链+内部布局 | P1 |
 | P2-f ✅ | 超集合规门禁 + 向下投影导出器（§4.5/§17）：**参数块层 + 响应层均已落地**——独立 oracle（规范逐式转写、与实时零共享）+ **白炉能量门禁覆盖规范 §Testing 全部配置**（principled 8 + Cloth(fuzz) + Subsurface，共 10 个，全部 1.00±2%）+ **真机 GPU 对拍**（`albedo_table_gpu_parity`，4 张表 × 561 采样点）。全部对齐在**语义/标识符/能量不变量**层，不照抄参考计算路径（各向异性宽度映射等仍用引擎统一实现，规范曲线只作对照）。`refracted_coat_dir` 是规范给出的**与 `specular_ior_ratio` 二选一**的等价路径，Prism 选后者，不属缺口 | 新测试+导出路径 | P2 |
-| P2-g | 运行时动态参数通道（wetness/snow/damage/dissolve 等少量动态轴，烘焙静态 über + 运行时解析式调制，§17.1） | header 加动态段 | P2 |
+| P2-g | 运行时动态参数通道（wetness/snow/damage/dissolve 等少量动态轴，烘焙静态 über + 运行时解析式调制，§17.1）。**第一片已落地**：header 4 word 动态段 + 四轴解析调制（CPU/WESL 孪生）+ dissolve 覆盖度接进 alpha test / OIT blend + 真机对拍，见 §13.a | header 加动态段 | P2 |
 | P2-h | 原理化分层 BSDF（coat/base 能量耦合 + coat_darkening，§17.2） | 无（改 BSDF+测试） | P2 |
 | P3-d | 光谱提升（hero-wavelength，仅 RT twin / 离线参考，不进实时主线，§17.3） | 无（RT-only 分支） | P3 |
 | P3-e | 随机单瓣采样（blue-noise，贵瓣按预算随机选瓣 + TAA，§17.4） | 无（pass uniform） | P3 |
@@ -659,6 +659,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P2-g 全链：运行时动态参数通道（ABI 段 → 解析调制 → alpha/rim 分半接线 → 真机对拍）**（§17.1）
+  - **ABI（第一次提交，`af3ef0a70`）**：`GpuMaterialHeader` 加 4 个 word `dynamic_{wetness,snow,damage,dissolve}`（`f32` 位播，92→108 B，仍是致密 `u32` 数组——这正是逐字段镜像门禁检查的形状）。它们是 header 里唯一会随运行时状态变化的部分：写这四个 word + 标 dirty 就重传该行，**不重发布 record、不 bump generation**（可见性缓冲的校验照旧成立）、不动编译期置换。`DynamicChannels` 是这段的类型化脸面，`to_words()` 在打包处执行契约（非有限→惰性、其余钳 `[0,1]`），于是热路径无需 per-channel NaN 判断。`MaterialRegistry` 把值放在 record **旁边**而不是里面（record 是烘焙契约、这些每帧在变），`set_dynamic_channels` 是唯一不走 `publish` 的变更且**幂等**（每帧重申状态不应每帧重传），`publish` 会把该行重置为惰性（新烘焙 = 新材质，昨天的湿度不能漏上来）。
+  - **调制（第二次提交，`549d11257`）**：四轴按固定顺序 `wetness → snow → damage → dissolve` 解析重映射既有 über 字段（水的 IOR、雪的冷白/粗糙、崩坏的粗糙度与 coat 破坏、切线的自发光边），**零新增作者参数**；每轴 `0` 经 per-**材质**（非 per-像素）旁路逐位恒等，所以没驱动过通道的材质逐位不变。`dyn_mix` 特意写成 `a*(1−t)+b*t` 而非 WESL 内建 `mix`：后者在 `t == 1` 不精确，而满雪必须就是雪 albedo、满战损必须就是崩坏粗糙度 —— 两端点逐位精确。
+  - **dissolve 分半（真实架构约束，不是拆东墙）**：GPU 的 `SurfaceSample` 没有 opacity 字段（着色 resolve 产出辐亮度）；覆盖度这一半落在消费 alpha 的 pass（`dynamic_mask.wesl::dyn_dissolve_coverage` 被 `opaque.wesl` 的 alpha test 与 `transparent.wesl` 的 OIT blend 乘进 alpha），切线这一半留在 `dynamic.wesl`，且用**同一个 coverage 值**的互补峰 —— 可见边缘与覆盖边缘不可能对不上。蒙版是**量化单元哈希**（与 glint 同一套 hash 链）：无需美术画图、无需额外 binding、亚单元不闪烁、两线逐位一致；`transparent.wesl` 为此把 UV 作为 inter-stage varying 带上（非顶点布局变更），无 UV 网格退化为常量单元（整材质淡出，绝不出垃圾）。
+  - 门禁：`prism_render_shading --lib` **3355**（9 条调制单测 + 1 条 `resolve_pixel` 端到端：证明 header 的四个 word 真的走到被着色像素，且全零逐位恒等）、`prism_render_scene --lib` **1602**（resolve / alpha-test / blend 三条管线都在**注入真蒙版代码**的前提下编译）、`prism_render_material` **850+2+1+4+6**；真机（越沙盒 `PRISM_REQUIRE_GPU=1`）material_gpu **66** + 动态通道对拍 **1**（逐字段 + 覆盖度，全部从出货 WESL 抽源码）+ glint 对拍 1 + 纹理 LOD 对拍 1。
 
 - **P2-c 第一片：glint 开放瓣全链落地（ABI → 双线着色 → 真机对拍）**（§10 / §17.6）
   - **ABI（第一次提交，`a6b4a8639`）**：glint 成为 schema 一等 lobe——`uid = org.prism.lobe.glint`、`PRISM` 槽 17、`words = 4`、`stability = experimental`；四个字段 `glint_weight`（`coupled`）/`glint_roughness`/`glint_density`/`glint_bin_half_width` 全部 `view = dependent`。codegen 生成 9 瓣/18 槽表与 `material_unpack.wesl`，material crate 加 `GpuGlintLobe`（`Default` 与 schema 默认逐字一致）、`LobeMask::GLINT`、参数块装/卸臂，bake 层的 `Group` 同步学会新瓣。
@@ -1051,7 +1057,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 门禁：`cargo test -p prism_render_shading --lib glint`（glint CPU 全绿）、`--lib measured_brdf`（18 通过）、`cargo test -p prism_render_scene --lib shading::glint` / `shading::measured_brdf`（link 各 1 通过）；全量 `-p prism_render_shading --lib` 3257 通过。
   - **ABI 接入已具备路径**：`thin_film` 已按"新 lobe = 新 `LobeMask` 位（KHR 低位段）+ 变长字段块 + `prism_unpack_surface` 低位优先聚集"走通（且是规范段新增位、私有瓣走 `EXTENSION_SLOT_BASE = 16` 起的扩展段，由 schema 验证器强制）；开放的 glint / 测量 BRDF 瓣按同一路径接入即可（P2-c）。
 
-**⬜ 未开始（见上表）**：P1-d、P2-a~P2-c、P2-e、P2-g、P2-i、P2-j、P3-a~P3-d（**P1-b / P1-c / P1-f / P1-f2 / P1-g / P1-h 已完成**，见 §13.a）。**P1-a 第一片已完成**（解析式逐像素纹理 LOD：compute resolve 无导数 → 三角形投影解析求 `dUV/dx`/`dUV/dy` + 逐贴图取级 + 真机对拍，见 §7.1 / §13.a），余下的是"纹理段全面切到 VT 页引用"。**P2-c 第一片已完成**：**glint 开放瓣全链落地**（schema 槽 17 + 4 word ABI + 计数式无偏估计量接进 über 高光 + shade-time 足印契约 + CPU 集成门禁 + 真机对拍，见 §17.6 / §13.a）；P2-c 余下的是测量 BRDF·BTF 瓣（需 provider / 表寻址设计）与 MaterialX 往返（编辑器前端未起，按 goal 留 TODO）。**P1-h 已完成**（九类 kind 全部迁入 PCM 注册表：`lobe`/`channel`/`response_mode`/`cache_aux` 常驻 64 槽摘要，`provider`/`transfer`/`downgrade`/`composite` 为 identity-only；每类带类型化 hook ABI 与 §17.2 能量策略；能力协商 + header 4 word 摘要 + 单源平价门禁，见 §13.a）——其中 response-mode 的**分类表注册化**仍是唯一动热路径结构的项（P2-j，单独立项）：本项只把 `stylized`/`unlit`/`custom` 三类登记进注册表并与 `Illumination` 双向平价，9-way class 表本身仍在管线构建期写死。channel 一类已登记（`wetness`/`snow`/`damage`/`dissolve`），但尚未接到运行期参数通道（归 P2-g）；`author_node` 因 §4 前端未落地而无实例（kind 与 hook ABI 已就位，不造假条目）。P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（见上「部分完成」）——它的"贵瓣"消费者现在真的存在了（glint），所以接线不再是空转。
+**⬜ 未开始（见上表）**：P1-d、P2-a~P2-c、P2-e、P2-i、P2-j、P3-a~P3-d（**P1-b / P1-c / P1-f / P1-f2 / P1-g / P1-h / P2-g 已完成**，见 §13.a）。**P1-a 第一片已完成**（解析式逐像素纹理 LOD：compute resolve 无导数 → 三角形投影解析求 `dUV/dx`/`dUV/dy` + 逐贴图取级 + 真机对拍，见 §7.1 / §13.a），余下的是"纹理段全面切到 VT 页引用"。**P2-c 第一片已完成**：**glint 开放瓣全链落地**（schema 槽 17 + 4 word ABI + 计数式无偏估计量接进 über 高光 + shade-time 足印契约 + CPU 集成门禁 + 真机对拍，见 §17.6 / §13.a）；P2-c 余下的是测量 BRDF·BTF 瓣（需 provider / 表寻址设计）与 MaterialX 往返（编辑器前端未起，按 goal 留 TODO）。**P1-h 已完成**（九类 kind 全部迁入 PCM 注册表：`lobe`/`channel`/`response_mode`/`cache_aux` 常驻 64 槽摘要，`provider`/`transfer`/`downgrade`/`composite` 为 identity-only；每类带类型化 hook ABI 与 §17.2 能量策略；能力协商 + header 4 word 摘要 + 单源平价门禁，见 §13.a）——其中 response-mode 的**分类表注册化**仍是唯一动热路径结构的项（P2-j，单独立项）：本项只把 `stylized`/`unlit`/`custom` 三类登记进注册表并与 `Illumination` 双向平价，9-way class 表本身仍在管线构建期写死。channel 一类已登记（`wetness`/`snow`/`damage`/`dissolve`）**且已接进运行期参数通道**（P2-g 全链：header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha test / OIT blend + 真机对拍，见 §13.a）；`author_node` 因 §4 前端未落地而无实例（kind 与 hook ABI 已就位，不造假条目）。P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（见上「部分完成」）——它的"贵瓣"消费者现在真的存在了（glint），所以接线不再是空转。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 
@@ -1420,6 +1426,13 @@ fn respond_custom(surface: Surface, inc: IncomingRadiance, aux: CustomAux, view:
 现设计把一切固化进烘焙 über（§6），对**静态材质**最优，但对"同一材质需随运行时状态连续变化"的场景（**湿度 wetness、积雪 snow、战损 damage、溶解 dissolve、生长**）过于刚性——这些轴若靠"每状态烘一份"会 permutation 爆炸，靠纹理 blend 又丢物理。
 
 **升级**：在烘焙静态 über 之外，开一条**少量**（建议 ≤4）**运行时动态轴**，运行时按解析式调制既有 über 字段（如 wetness 降 roughness/升 specular/压暗 base_color、snow 叠加白 base + 高 roughness 顶面瓣、dissolve 驱动 alpha + 自发光边）。关键约束：动态轴是**解析式调制**（无分支爆炸、无逐像素预算），调制函数 CPU/WESL 双实现对拍，动态段在 ABI header 显式声明（P2-g）。这保留"无塌缩/确定性"，只是把"输入"从纯静态扩成"静态 + 少量解析动态"。
+
+**已落地（P2-g 全链，见 §13.a）**：动态段 = `GpuMaterialHeader` 的 4 个 word（`dynamic_wetness/snow/damage/dissolve`，各为 `f32` 位播；92→108 B）。这是 header 里**唯一**会被运行时改写的部分：写这四个 word + 标记该行 dirty 即可重传，**不重发布** record、不 bump `generation`（可见性缓冲的校验依然成立）、不触碰编译期置换。`DynamicChannels::to_words()` 是运行时状态的契约执行点：非有限值变惰性、其余钳到 `[0,1]`，于是着色侧可以**无 per-channel `is_nan`** 地直接消费。
+
+- **四轴的确切语义（固定顺序 `wetness → snow → damage → dissolve`，写在类型与模块注释里，不是口号）**：`wetness` 压暗 base（水填孔隙，漫散射变成表面反射）、`diffuse_roughness → 0`、高光更紧（film 比基底更光滑）、界面 IOR 趋向水（1.333）、fuzz 被压平；`snow` 把 base 推向冷白 (0.95,0.97,1.0)、金属度归零、两种粗糙度趋向 0.9、留一点颗粒 sheen；`damage` 压暗、按 0.6 破坏金属界面、向 1 粗糙化并**把 coat 打开**；`dissolve` 见下。
+- **端点精确**：`dyn_mix` 特意写成 `a*(1−t) + b*t` 而**不是** WESL 内建 `mix`（后者是 `a + (b−a)*t`，在 `t == 1` 不精确）。满雪必须**就是**雪的 albedo、满战损必须**就是**崩坏的粗糙度，所以两端点逐位精确，且 CPU/WESL 两侧表达式逐字相同。
+- **dissolve 的两半分工**：GPU 的 `SurfaceSample` 里**根本没有** opacity 字段（着色 resolve 产出辐亮度，不产出覆盖度），所以"剪掉覆盖度"这一半落在**消费 alpha 的 pass**：`dynamic_mask.wesl` 的 `dyn_dissolve_coverage`，被 `opaque.wesl`（alpha test）与 `transparent.wesl`（OIT blend）乘进 alpha；"点亮切线"这一半留在 `dynamic.wesl`，且用的**是同一个 coverage 值**的互补峰 —— 于是可见边缘与覆盖边缘不可能对不上。切线颜色取材质**自己的 emission**：作者写什么颜色就是什么边缘色；不写 emission 的材质就是干净的切口、没有边（不做无中生有的硬编码颜色）。
+- **蒙版是程序化的**：`dyn_dissolve_mask` 对**量化后的表面单元**做哈希（与 glint 种子同一套 hash 链），因此不需要作者画蒙版、不需要额外 binding、亚单元运动下不闪烁，且两条线逐位一致。`transparent.wesl` 为此把网格 UV 作为 inter-stage varying 带上（**不是**顶点缓冲布局变更），无 UV 网格退化为常量单元（读作"整材质淡出"，绝不会是垃圾）。
 
 > 优先级：**高**。覆盖大量实际美术诉求，成本可控（解析调制 + 显式 ABI 段）。
 
