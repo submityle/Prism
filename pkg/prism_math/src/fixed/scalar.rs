@@ -134,7 +134,9 @@ impl Fixed {
     /// Truncate toward zero to a whole integer.
     #[inline]
     pub const fn to_int(self) -> i64 {
-        self.raw >> FRAC_BITS
+        // Divide (truncates toward zero), unlike an arithmetic shift which
+        // floors negative fractions (CR-found).
+        self.raw / (1i64 << FRAC_BITS)
     }
 
     /// Construct from an `f64` (round to nearest). **Not** on the deterministic
@@ -470,7 +472,12 @@ impl Rem for Fixed {
     fn rem(self, rhs: Self) -> Self {
         // Exact: raw remainder shares the Q32.32 scale.
         Self {
-            raw: if rhs.raw == 0 { 0 } else { self.raw % rhs.raw },
+            // `i64::MIN % -1` overflows (mathematically 0); guard it (CR-found).
+            raw: if rhs.raw == 0 || (self.raw == i64::MIN && rhs.raw == -1) {
+                0
+            } else {
+                self.raw % rhs.raw
+            },
         }
     }
 }

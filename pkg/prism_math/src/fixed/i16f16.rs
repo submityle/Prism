@@ -85,7 +85,9 @@ impl I16F16 {
     /// Truncate toward zero to a whole integer.
     #[inline]
     pub const fn to_int(self) -> i32 {
-        self.raw >> FRAC_BITS
+        // Divide (truncates toward zero); an arithmetic shift would floor
+        // negative fractions (CR-found).
+        self.raw / (1i32 << FRAC_BITS)
     }
 
     /// Widen to a [`Fixed`] (exact: Q16.16 is a sub-lattice of Q32.32).
@@ -98,9 +100,17 @@ impl I16F16 {
     #[inline]
     pub const fn from_fixed(x: Fixed) -> Self {
         let shift = super::scalar::FRAC_BITS - FRAC_BITS;
-        let rounded = (x.to_bits() + (1 << (shift - 1))) >> shift;
-        Self {
-            raw: saturate_i64(rounded),
+        // Round in i128 so `i64::MAX + round` cannot overflow before saturating
+        // (CR-found).
+        let rounded = ((x.to_bits() as i128) + (1i128 << (shift - 1))) >> shift;
+        if rounded > i32::MAX as i128 {
+            Self::MAX
+        } else if rounded < i32::MIN as i128 {
+            Self::MIN
+        } else {
+            Self {
+                raw: rounded as i32,
+            }
         }
     }
 
@@ -279,7 +289,12 @@ impl Rem for I16F16 {
     #[inline]
     fn rem(self, rhs: Self) -> Self {
         Self {
-            raw: if rhs.raw == 0 { 0 } else { self.raw % rhs.raw },
+            // `i32::MIN % -1` overflows (mathematically 0); guard it (CR-found).
+            raw: if rhs.raw == 0 || (self.raw == i32::MIN && rhs.raw == -1) {
+                0
+            } else {
+                self.raw % rhs.raw
+            },
         }
     }
 }

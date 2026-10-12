@@ -2368,7 +2368,9 @@ fn prism_plane_distance(normal: vec3<f32>, d: f32, p: vec3<f32>) -> f32 {\n\
 }\n\
 \n\
 fn prism_plane_project_point(normal: vec3<f32>, d: f32, p: vec3<f32>) -> vec3<f32> {\n\
-    return p - normal * (dot(normal, p) + d);\n\
+    let n2 = dot(normal, normal);\n\
+    if (n2 == 0.0) { return p; }\n\
+    return p - normal * ((dot(normal, p) + d) / n2);\n\
 }\n\
 \n\
 fn prism_plane_normalized(normal: vec3<f32>, d: f32) -> vec4<f32> {\n\

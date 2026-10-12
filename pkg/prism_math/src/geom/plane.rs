@@ -76,7 +76,14 @@ impl Plane {
     /// Project `p` orthogonally onto the plane.
     #[inline]
     pub fn project_point(self, p: Vec3) -> Vec3 {
-        p - self.normal * self.signed_distance(p)
+        // Orthogonal projection needs the squared normal length when the plane
+        // holds raw (non-unit) coefficients (CR-found: was assuming a unit
+        // normal). A degenerate zero normal leaves `p` unchanged.
+        let n2 = self.normal.length_squared();
+        if n2 == 0.0 {
+            return p;
+        }
+        p - self.normal * (self.signed_distance(p) / n2)
     }
 
     /// Flip the plane to face the opposite half-space.

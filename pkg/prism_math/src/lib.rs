@@ -71,8 +71,8 @@ pub mod interval;
 pub mod octahedral;
 pub mod pack16;
 pub mod pack8;
-pub mod shader_mirror;
 pub mod projection;
+pub mod shader_mirror;
 pub mod soa;
 pub mod spatial;
 pub mod spherical;
@@ -95,9 +95,8 @@ pub use backend::Backend;
 pub use mat::{Mat2, Mat3, Mat4};
 pub use projection::{
     look_at_lh, look_at_rh, look_to_lh, look_to_rh, orthographic_lh, orthographic_rh,
-    orthographic_rh_gl, perspective_infinite_reverse_z_rh, perspective_infinite_rh,
-    perspective_lh, perspective_lh_gl, perspective_reverse_z_rh, perspective_rh,
-    perspective_rh_gl,
+    orthographic_rh_gl, perspective_infinite_reverse_z_rh, perspective_infinite_rh, perspective_lh,
+    perspective_lh_gl, perspective_reverse_z_rh, perspective_rh, perspective_rh_gl,
 };
 pub use quat::Quat;
 pub use vec::{vec2, vec3, vec3a, vec4, Vec2, Vec3, Vec3A, Vec4};
@@ -124,15 +123,15 @@ pub use self::dual::{Dual, DualVec3};
 pub use self::dual_quat::DualQuat;
 pub use self::f16::{F16Vec2, F16Vec3, F16Vec4, F16};
 pub use self::interval::{Interval, IntervalVec3};
+pub use self::shader_mirror::{
+    pack_mat3_std140, pack_mat4, pack_quat, pack_vec3_std140, pack_vec4, quat_rotate_vec3,
+};
 pub use self::soa::SoaVec3;
 pub use self::spatial::{
     hilbert_decode2, hilbert_decode3, hilbert_encode2, hilbert_encode3, morton_decode2,
     morton_decode3, morton_encode2, morton_encode3,
 };
 pub use self::spherical::{basis2, basis3, Sh2, Sh3};
-pub use self::shader_mirror::{
-    pack_mat3_std140, pack_mat4, pack_quat, pack_vec3_std140, pack_vec4, quat_rotate_vec3,
-};
 
 /// Mathematical constant helpers (`f32`).
 pub mod consts {
@@ -256,6 +255,8 @@ mod m4_tests;
 mod m5_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_cr_fixes;
 #[cfg(all(test, feature = "compat-bevy"))]
 mod tests_m6_compat;
 #[cfg(test)]
