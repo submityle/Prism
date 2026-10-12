@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
+const MANIFEST_MAGIC: &[u8] = b"PRISM-MANIFEST\0\x01";
+const MANIFEST_ENTRY_FIXED_BYTES: usize = 16 + 32 + 16 + 4 + 32 + 8 + 4 + 8;
+
 #[derive(Debug)]
 pub enum PublishError {
     Io(io::Error),
@@ -116,11 +119,15 @@ impl RevisionStore {
         let cas_root = root.join("cas");
         create_dir_all_durable(&cas_root)?;
         let cas = ContentAddressedStore::open(cas_root)?;
-        Ok(Self {
+        let store = Self {
             root,
             cas,
             publish_lock: Arc::new(Mutex::new(())),
-        })
+        };
+        // CURRENT is the publication boundary. Never open a store that points
+        // at a missing, malformed, or differently-numbered manifest.
+        store.current_revision()?;
+        Ok(store)
     }
 
     pub fn cas(&self) -> &ContentAddressedStore {
@@ -128,15 +135,18 @@ impl RevisionStore {
     }
 
     pub fn current_revision(&self) -> Result<Option<BuildRevision>, PublishError> {
-        let path = self.root.join("CURRENT");
-        match fs::read(path) {
+        let current = match fs::read(self.root.join("CURRENT")) {
             Ok(bytes) if bytes.len() == 8 => Ok(Some(BuildRevision(u64::from_le_bytes(
                 bytes.try_into().unwrap(),
             )))),
             Ok(_) => Err(PublishError::Invalid("CURRENT pointer has invalid length")),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
+        }?;
+        if let Some(revision) = current {
+            self.validate_current_manifest(revision)?;
         }
+        Ok(current)
     }
 
     pub fn begin(
@@ -158,6 +168,23 @@ impl RevisionStore {
                 .join("revisions")
                 .join(format!("{}.manifest", revision.0)),
         )?)
+    }
+
+    fn validate_current_manifest(&self, revision: BuildRevision) -> Result<(), PublishError> {
+        let path = self
+            .root
+            .join("revisions")
+            .join(format!("{}.manifest", revision.0));
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(PublishError::Invalid(
+                    "CURRENT points to a missing manifest",
+                ));
+            }
+            Err(error) => return Err(PublishError::Io(error)),
+        };
+        decode_manifest(&bytes, revision).map(|_| ())
     }
 }
 
@@ -335,6 +362,130 @@ fn validate_dependency_closure(
         ));
     }
     Ok(())
+}
+
+/// Decodes the local manifest wire format and proves that it is the exact
+/// canonical representation produced by [`Manifest::canonical_bytes`]. This
+/// is intentionally kept next to publication: `CURRENT` must never make an
+/// untrusted or partially-written manifest visible to callers.
+fn decode_manifest(
+    bytes: &[u8],
+    expected_revision: BuildRevision,
+) -> Result<Manifest, PublishError> {
+    let mut reader = ManifestReader { bytes, offset: 0 };
+    if reader.take(MANIFEST_MAGIC.len())? != MANIFEST_MAGIC {
+        return Err(PublishError::Invalid(
+            "manifest has invalid magic or version",
+        ));
+    }
+    let revision = BuildRevision(reader.u64()?);
+    if revision != expected_revision {
+        return Err(PublishError::Invalid(
+            "CURRENT revision does not match manifest revision",
+        ));
+    }
+    let entry_count = reader.usize_count("manifest entry count")?;
+    let minimum_remaining = entry_count
+        .checked_mul(MANIFEST_ENTRY_FIXED_BYTES)
+        .ok_or(PublishError::Invalid("manifest entry count overflows"))?;
+    if minimum_remaining > reader.remaining() {
+        return Err(PublishError::Invalid("manifest is truncated"));
+    }
+
+    let mut entries = Vec::with_capacity(entry_count);
+    for _ in 0..entry_count {
+        let asset = AssetId(reader.u128()?);
+        let key = ArtifactKey(reader.array::<32>()?);
+        let kind = reader.u128()?;
+        let schema = reader.u32()?;
+        let content_hash = crate::types::ContentHash(reader.array::<32>()?);
+        let byte_len = reader.u64()?;
+        let alignment = reader.u32()?;
+        let dependency_count = reader.usize_count("manifest dependency count")?;
+        let dependency_bytes = dependency_count
+            .checked_mul(std::mem::size_of::<ArtifactKey>())
+            .ok_or(PublishError::Invalid("manifest dependency count overflows"))?;
+        if dependency_bytes > reader.remaining() {
+            return Err(PublishError::Invalid("manifest dependencies are truncated"));
+        }
+        let mut dependencies = Vec::with_capacity(dependency_count);
+        for _ in 0..dependency_count {
+            dependencies.push(ArtifactKey(reader.array::<32>()?));
+        }
+        entries.push(ManifestEntry {
+            asset,
+            descriptor: ArtifactDescriptor {
+                key,
+                kind,
+                schema,
+                content_hash,
+                byte_len,
+                alignment,
+                dependencies,
+            },
+        });
+    }
+    if reader.remaining() != 0 {
+        return Err(PublishError::Invalid("manifest has trailing bytes"));
+    }
+
+    let manifest = Manifest::new(revision, entries).map_err(PublishError::Invalid)?;
+    let staged = manifest
+        .entries
+        .iter()
+        .map(|(&asset, descriptor)| (asset, (descriptor.clone(), Vec::new())))
+        .collect::<BTreeMap<_, _>>();
+    validate_dependency_closure(&staged)?;
+    if manifest.canonical_bytes() != bytes {
+        return Err(PublishError::Invalid("manifest is not canonical"));
+    }
+    Ok(manifest)
+}
+
+struct ManifestReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ManifestReader<'a> {
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.offset
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], PublishError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(PublishError::Invalid("manifest length overflows"))?;
+        if end > self.bytes.len() {
+            return Err(PublishError::Invalid("manifest is truncated"));
+        }
+        let result = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(result)
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], PublishError> {
+        self.take(N)?
+            .try_into()
+            .map_err(|_| PublishError::Invalid("manifest field has an invalid length"))
+    }
+
+    fn u32(&mut self) -> Result<u32, PublishError> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    fn u64(&mut self) -> Result<u64, PublishError> {
+        Ok(u64::from_le_bytes(self.array()?))
+    }
+
+    fn u128(&mut self) -> Result<u128, PublishError> {
+        Ok(u128::from_le_bytes(self.array()?))
+    }
+
+    fn usize_count(&mut self, what: &'static str) -> Result<usize, PublishError> {
+        usize::try_from(self.u64()?).map_err(|_| PublishError::Invalid(what))
+    }
 }
 
 fn write_immutable(path: &Path, bytes: &[u8]) -> Result<(), PublishError> {
@@ -520,6 +671,73 @@ mod tests {
             reopened.cas().read(ContentHash::digest(payload)).unwrap(),
             payload
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_fails_closed_when_current_manifest_is_missing() {
+        let dir = temp_dir();
+        fs::create_dir_all(dir.join("revisions")).unwrap();
+        fs::write(dir.join("CURRENT"), BuildRevision(7).0.to_le_bytes()).unwrap();
+
+        assert!(matches!(
+            RevisionStore::open(&dir),
+            Err(PublishError::Invalid(
+                "CURRENT points to a missing manifest"
+            ))
+        ));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_fails_closed_when_current_manifest_is_malformed() {
+        let dir = temp_dir();
+        fs::create_dir_all(dir.join("revisions")).unwrap();
+        fs::write(dir.join("CURRENT"), BuildRevision(3).0.to_le_bytes()).unwrap();
+        fs::write(dir.join("revisions/3.manifest"), b"truncated").unwrap();
+
+        assert!(matches!(
+            RevisionStore::open(&dir),
+            Err(PublishError::Invalid(
+                "manifest has invalid magic or version"
+            ))
+        ));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_fails_closed_when_manifest_revision_does_not_match_current() {
+        let dir = temp_dir();
+        fs::create_dir_all(dir.join("revisions")).unwrap();
+        fs::write(dir.join("CURRENT"), BuildRevision(3).0.to_le_bytes()).unwrap();
+        let manifest = Manifest::new(BuildRevision(2), Vec::<ManifestEntry>::new()).unwrap();
+        fs::write(dir.join("revisions/3.manifest"), manifest.canonical_bytes()).unwrap();
+
+        assert!(matches!(
+            RevisionStore::open(&dir),
+            Err(PublishError::Invalid(
+                "CURRENT revision does not match manifest revision"
+            ))
+        ));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn current_revision_revalidates_manifest_after_open() {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let mut tx = store.begin(BuildRevision(0), None);
+        tx.stage(AssetId(1), descriptor(b"payload"), b"payload".to_vec())
+            .unwrap();
+        tx.commit().unwrap();
+        fs::remove_file(dir.join("revisions/0.manifest")).unwrap();
+
+        assert!(matches!(
+            store.current_revision(),
+            Err(PublishError::Invalid(
+                "CURRENT points to a missing manifest"
+            ))
+        ));
         fs::remove_dir_all(dir).unwrap();
     }
 
