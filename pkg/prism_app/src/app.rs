@@ -68,6 +68,9 @@ pub struct App {
     sub_apps: SubApps,
     runner: Option<RunnerFn>,
     plugins: Vec<Box<dyn Plugin>>,
+    /// Every added plugin's [`name`](Plugin::name), so a unique plugin is
+    /// rejected when *any* earlier plugin already carries its name — including a
+    /// non-unique plugin the app allowed to repeat.
     plugin_names: HashSet<String>,
     plugins_state: PluginsState,
     /// State types already wired into the [`StateTransition`](crate::schedule::StateTransition)
@@ -238,7 +241,12 @@ impl App {
             "cannot add plugin {:?} after plugin assembly has been finalized",
             plugin.name()
         );
-        if plugin.is_unique() && !self.plugin_names.insert(plugin.name().to_string()) {
+        // Record the name for *every* plugin (unique or not) so the de-dup
+        // invariant cannot be side-stepped: a non-unique plugin added earlier
+        // must still block a later unique plugin of the same name. Only a
+        // unique plugin panics on a repeat.
+        let first_with_name = self.plugin_names.insert(plugin.name().to_string());
+        if plugin.is_unique() && !first_with_name {
             panic!(
                 "plugin {:?} was added more than once; override Plugin::is_unique to allow duplicates",
                 plugin.name()

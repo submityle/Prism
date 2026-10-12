@@ -424,6 +424,53 @@ fn duplicate_unique_plugin_panics() {
     app.add_plugins(NoopPlugin);
 }
 
+/// A plugin that declares itself non-unique may be added more than once.
+#[test]
+fn non_unique_plugin_can_be_added_twice() {
+    struct Repeatable;
+    impl Plugin for Repeatable {
+        fn build(&self, _app: &mut App) {}
+        fn is_unique(&self) -> bool {
+            false
+        }
+    }
+
+    let mut app = App::new();
+    app.add_plugins(Repeatable);
+    app.add_plugins(Repeatable);
+    assert!(app.all_plugins_ready());
+}
+
+/// A unique plugin is rejected when *any* earlier plugin already used its name,
+/// even one that was allowed to repeat because it declared itself non-unique
+/// (regression: a non-unique plugin must still reserve its name).
+#[test]
+#[should_panic(expected = "added more than once")]
+fn unique_plugin_conflicts_with_an_earlier_non_unique_name() {
+    struct Repeatable;
+    impl Plugin for Repeatable {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "shared"
+        }
+        fn is_unique(&self) -> bool {
+            false
+        }
+    }
+    struct Unique;
+    impl Plugin for Unique {
+        fn build(&self, _app: &mut App) {}
+        fn name(&self) -> &str {
+            "shared"
+        }
+    }
+
+    let mut app = App::new();
+    app.add_plugins(Repeatable);
+    // `Unique` is unique and the name is already reserved by `Repeatable`.
+    app.add_plugins(Unique);
+}
+
 /// A tuple of plugins is added in order.
 #[test]
 fn tuple_of_plugins_all_build() {
