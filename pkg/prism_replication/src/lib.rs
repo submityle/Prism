@@ -33,6 +33,8 @@
 //!   [`LoopbackLink`](transport::LoopbackLink) with latency, jitter and loss, so
 //!   the sequencing layer can be exercised against a real reordering/lossy channel
 //!   without a socket (design §6).
+//! - [`frame`] — LEB128 length-prefixed message framing with an incremental
+//!   decoder, the boundary a stream transport needs (design §6).
 //!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
@@ -58,3 +60,5 @@ pub mod snapshot;
 pub mod prediction;
 
 pub mod transport;
+
+pub mod frame;
