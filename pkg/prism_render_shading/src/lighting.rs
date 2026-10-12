@@ -10,7 +10,7 @@ const MIN_N_DOT: f32 = 1.0e-5;
 /// Lower bound on the per-axis GGX roughness so the anisotropic lobe stays
 /// finite when `aspect` drives one axis toward a perfect mirror (UE floors the
 /// anisotropic roughness identically).
-const MIN_ANISOTROPIC_ALPHA: f32 = 1.0e-3;
+pub(crate) const MIN_ANISOTROPIC_ALPHA: f32 = 1.0e-3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceSample {
@@ -36,6 +36,11 @@ pub struct SurfaceSample {
     /// this field existed. A non-zero value must be unit length and perturbs the
     /// coat's reflected lobe only — the base layer keeps the base shading normal.
     pub coat_normal: [f32; 3],
+    /// `OpenPBR` `coat_roughness_anisotropy` in `[0, 1]`: elongates the coat
+    /// highlight along the shared surface tangent frame (rotated by
+    /// `anisotropy_rotation`). `0` keeps the coat isotropically GGX, which is
+    /// the historical behaviour and the exact identity.
+    pub coat_roughness_anisotropy: f32,
     /// Sheen (fuzz) intensity driving the Cloth Charlie sheen lobe in `[0, 1]`.
     pub sheen: f32,
     /// Subsurface scattering weight driving Cloth/Subsurface diffusion in `[0, 1]`.
@@ -93,6 +98,7 @@ impl Default for SurfaceSample {
             coat_ior: 1.5,
             coat_color: [1.0; 3],
             coat_normal: [0.0; 3],
+            coat_roughness_anisotropy: 0.0,
             sheen: 0.0,
             subsurface: 0.0,
             thickness: 0.0,
@@ -316,7 +322,7 @@ pub(crate) fn visibility_smith_ggx_correlated(n_dot_v: f32, n_dot_l: f32, alpha:
 ///
 /// The returned `(tangent, bitangent)` are unit length and orthogonal to
 /// `normal`; the bitangent keeps the handedness carried by `basis_bitangent`.
-fn anisotropic_axes(
+pub(crate) fn anisotropic_axes(
     normal: [f32; 3],
     basis_tangent: [f32; 3],
     basis_bitangent: [f32; 3],

@@ -66,6 +66,9 @@ struct SurfaceSample {
     // vector means "use the base shading normal". Mirrors
     // `SurfaceSample::coat_normal` in `lighting.rs`.
     coat_normal: vec3<f32>,
+    // `OpenPBR` `coat_roughness_anisotropy` in [0, 1]; 0 is the isotropic
+    // identity. Mirrors `SurfaceSample::coat_roughness_anisotropy`.
+    coat_roughness_anisotropy: f32,
     sheen: f32,
     subsurface: f32,
     thickness: f32,

@@ -1879,6 +1879,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.clearcoat_roughness = sampled.clearcoat_roughness;
     surface.coat_ior = parameters.coat_ior;
     surface.coat_color = parameters.coat_color.xyz;
+    surface.coat_roughness_anisotropy = parameters.coat_roughness_anisotropy;
     surface.sheen = parameters.sheen;
     surface.subsurface = parameters.subsurface;
     surface.thickness = parameters.thickness;

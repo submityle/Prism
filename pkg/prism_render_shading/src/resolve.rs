@@ -238,6 +238,7 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         // clearcoat normal map; the all-zero identity makes the coat use the
         // base shading normal, mirroring the GPU resolve when no map is bound.
         coat_normal: [0.0; 3],
+        coat_roughness_anisotropy: parameters.coat_roughness_anisotropy,
         sheen: parameters.sheen,
         subsurface: parameters.subsurface,
         thickness: parameters.thickness,

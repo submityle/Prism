@@ -215,6 +215,7 @@ mod tests {
             clearcoat_roughness: 0.15,
             coat_ior: 1.45,
             coat_color: [0.9, 0.95, 1.0, 1.0],
+            coat_roughness_anisotropy: 0.35,
             anisotropy: 0.3,
             anisotropy_rotation: 0.2,
             sheen: 0.45,
@@ -225,9 +226,7 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail0: 0.0,
-            _pad_tail1: 0.0,
-            _pad_tail2: 0.0,
+            _pad_tail: [0.0; 2],
         }
     }
 

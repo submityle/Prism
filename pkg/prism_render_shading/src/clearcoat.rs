@@ -33,7 +33,10 @@
 
 use core::f32::consts::PI;
 
-use crate::lighting::{distribution_ggx, fresnel_schlick, visibility_smith_ggx_correlated};
+use crate::lighting::{
+    anisotropic_axes, distribution_ggx, distribution_ggx_anisotropic, fresnel_schlick,
+    visibility_smith_ggx_anisotropic, visibility_smith_ggx_correlated, MIN_ANISOTROPIC_ALPHA,
+};
 use crate::vecmath::{add, dot, mix3, mul, mul_scalar, normalize_or, sub};
 use crate::{DirectLightSample, ShadingFrame, SurfaceSample};
 
@@ -166,14 +169,50 @@ pub fn evaluate_clearcoat_direct(
     // A coat facet that faces away from the light reflects nothing into it, but
     // must not gate the base (the base is evaluated against its own normal).
     let (coat_d, coat_g) = if coat_n_dot_l > 0.0 && coat_n_dot_v > 0.0 && coat_n_dot_h > 0.0 {
-        (
-            distribution_ggx(coat_n_dot_h, coat_alpha),
-            visibility_smith_ggx_correlated(
-                coat_n_dot_v.max(MIN_N_DOT),
-                coat_n_dot_l,
-                coat_alpha,
-            ),
-        )
+        let coat_aniso = surface.coat_roughness_anisotropy.clamp(0.0, 1.0);
+        if coat_aniso > 0.0 {
+            // `OpenPBR` `coat_roughness_anisotropy`: elongate the coat highlight
+            // along the shared surface tangent frame, exactly as the base
+            // specular lobe does (same axes, same Burley aspect split).
+            let (coat_t, coat_b) = anisotropic_axes(
+                coat_n,
+                frame.tangent,
+                frame.bitangent,
+                surface.anisotropy_rotation,
+            );
+            let aspect = (1.0 - 0.9 * coat_aniso).sqrt();
+            let ax = (coat_alpha / aspect).max(MIN_ANISOTROPIC_ALPHA);
+            let ay = (coat_alpha * aspect).max(MIN_ANISOTROPIC_ALPHA);
+            (
+                distribution_ggx_anisotropic(
+                    dot(coat_t, h),
+                    dot(coat_b, h),
+                    coat_n_dot_h,
+                    ax,
+                    ay,
+                ),
+                visibility_smith_ggx_anisotropic(
+                    dot(coat_t, v),
+                    dot(coat_b, v),
+                    dot(coat_t, l),
+                    dot(coat_b, l),
+                    coat_n_dot_v.max(MIN_N_DOT),
+                    coat_n_dot_l,
+                    ax,
+                    ay,
+                ),
+            )
+        } else {
+            // Isotropic path: bit-for-bit the historical coat lobe.
+            (
+                distribution_ggx(coat_n_dot_h, coat_alpha),
+                visibility_smith_ggx_correlated(
+                    coat_n_dot_v.max(MIN_N_DOT),
+                    coat_n_dot_l,
+                    coat_alpha,
+                ),
+            )
+        }
     } else {
         (0.0, 0.0)
     };
@@ -567,5 +606,76 @@ mod tests {
                 "channel {c}: away={away:?} black={black_highlight:?}"
             );
         }
+    }
+
+    #[test]
+    fn coat_roughness_anisotropy_changes_the_off_peak_glint() {
+        // Off the specular peak the coat highlight samples the microfacet
+        // distribution away from the normal, where the aspect split matters;
+        // at the exact peak `ax * ay == alpha^2` leaves it untouched.
+        let off_peak = DirectLightSample {
+            direction: normalize_or([0.6, 0.8, 0.0], [0.0, 1.0, 0.0]),
+            ..light()
+        };
+        let isotropic = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 1.0,
+                clearcoat_roughness: 0.5,
+                ..base_surface()
+            },
+            frame(),
+            off_peak,
+        );
+        let anisotropic = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 1.0,
+                clearcoat_roughness: 0.5,
+                coat_roughness_anisotropy: 1.0,
+                ..base_surface()
+            },
+            frame(),
+            off_peak,
+        );
+        assert!(
+            (sum(anisotropic) - sum(isotropic)).abs() > 1.0e-4,
+            "anisotropic coat must change the off-peak glint: {anisotropic:?} vs {isotropic:?}"
+        );
+    }
+
+    #[test]
+    fn coat_anisotropy_rotation_rotates_the_elongation() {
+        // The elongation axis is the shared surface tangent frame rotated by
+        // `anisotropy_rotation`, so swapping the axis by 90 degrees must move
+        // the off-peak highlight.
+        let off_peak = DirectLightSample {
+            direction: normalize_or([0.6, 0.8, 0.0], [0.0, 1.0, 0.0]),
+            ..light()
+        };
+        let along_tangent = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 1.0,
+                clearcoat_roughness: 0.5,
+                coat_roughness_anisotropy: 1.0,
+                anisotropy_rotation: 0.0,
+                ..base_surface()
+            },
+            frame(),
+            off_peak,
+        );
+        let along_bitangent = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 1.0,
+                clearcoat_roughness: 0.5,
+                coat_roughness_anisotropy: 1.0,
+                anisotropy_rotation: core::f32::consts::FRAC_PI_2,
+                ..base_surface()
+            },
+            frame(),
+            off_peak,
+        );
+        assert!(
+            (sum(along_tangent) - sum(along_bitangent)).abs() > 1.0e-4,
+            "rotating the coat anisotropy axis must move the glint: {along_tangent:?} vs {along_bitangent:?}"
+        );
     }
 }

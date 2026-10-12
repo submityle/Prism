@@ -667,25 +667,26 @@ mod tests {
         let all: u32 = 12 + schema.lobes.iter().map(|lobe| lobe.words).sum::<u32>();
         assert_eq!(schema.packed_len_words(0b111_1111), all);
         // Only clearcoat (bit 1) present: core + the coat lobe's own footprint
-        // (8 words: clearcoat, clearcoat_roughness, coat_ior, a pad, coat_color).
-        assert_eq!(schema.packed_len_words(0b10), 12 + 8);
+        // (12 words: clearcoat, clearcoat_roughness, coat_ior, a pad, coat_color,
+        // coat_roughness_anisotropy and three trailing pads).
+        assert_eq!(schema.packed_len_words(0b10), 12 + 12);
     }
 
     #[test]
     fn transmission_fields_land_at_expected_offsets() {
         let schema = surface_schema();
         let all = 0b111_1111;
-        // Core (12) + emission (4) + clearcoat (8, now carrying coat_ior and
-        // coat_color) + anisotropy (4) + sheen (4) + subsurface (4) = 36 is the
+        // Core (12) + emission (4) + clearcoat (12, now carrying the full OpenPBR
+        // coat group) + anisotropy (4) + sheen (4) + subsurface (4) = 40 is the
         // transmission base; the transmission lobe then packs transmission,
-        // thickness, index_of_refraction, dispersion at 36..40.
+        // thickness, index_of_refraction, dispersion at 40..44.
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "transmission"),
-            Some(36)
+            Some(40)
         );
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "index_of_refraction"),
-            Some(38)
+            Some(42)
         );
     }
 

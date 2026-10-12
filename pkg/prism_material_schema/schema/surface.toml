@@ -158,7 +158,7 @@ mask_const = "CLEARCOAT"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
-words = 8
+words = 12
 
 [[lobe.field]]
 name = "clearcoat"
@@ -217,6 +217,44 @@ default = [1.0, 1.0, 1.0, 1.0]
 valid = "0.0..=1.0"
 energy_policy = "coupled"
 view = "dependent"
+
+[[lobe.field]]
+name = "coat_roughness_anisotropy"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 8
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `coat_roughness_anisotropy` in [0, 1]; the elongation direction is the
+# shared surface tangent frame (rotated by `anisotropy_rotation`). The default 0
+# keeps the coat isotropically GGX and preserves the historical lobe.
+default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "dependent"
+
+[[lobe.field]]
+name = "_pad1"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 9
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad2"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 10
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad3"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 11
+consumed_by = []
+default = 0.0
 
 [[lobe]]
 id = "anisotropy"

@@ -30,7 +30,11 @@ import prism_render_scene::shaders::brdf::{
     brdf_normalize_or,
     fresnel_schlick,
     distribution_ggx,
+    distribution_ggx_anisotropic,
+    anisotropic_axes,
     vis_smith,
+    vis_smith_anisotropic,
+    MIN_ANISOTROPIC_ALPHA,
 };
 import prism_render_scene::shaders::lighting::{
     INV_PI,
@@ -135,8 +139,41 @@ fn clearcoat_direct(
     var coat_d = 0.0;
     var coat_g = 0.0;
     if coat_n_dot_l > 0.0 && coat_n_dot_v > 0.0 && coat_n_dot_h > 0.0 {
-        coat_d = distribution_ggx(coat_n_dot_h, coat_alpha);
-        coat_g = vis_smith(max(coat_n_dot_v, CLEARCOAT_MIN_N_DOT), coat_n_dot_l, coat_alpha);
+        let coat_aniso = clamp(surface.coat_roughness_anisotropy, 0.0, 1.0);
+        if coat_aniso > 0.0 {
+            // `OpenPBR` `coat_roughness_anisotropy`: same shared tangent frame
+            // and Burley aspect split as the base specular lobe.
+            let axes = anisotropic_axes(
+                coat_n,
+                frame.tangent,
+                frame.bitangent,
+                surface.anisotropy_rotation,
+            );
+            let aspect = sqrt(1.0 - 0.9 * coat_aniso);
+            let ax = max(coat_alpha / aspect, MIN_ANISOTROPIC_ALPHA);
+            let ay = max(coat_alpha * aspect, MIN_ANISOTROPIC_ALPHA);
+            coat_d = distribution_ggx_anisotropic(
+                dot(axes.tangent, h),
+                dot(axes.bitangent, h),
+                coat_n_dot_h,
+                ax,
+                ay,
+            );
+            coat_g = vis_smith_anisotropic(
+                dot(axes.tangent, v),
+                dot(axes.bitangent, v),
+                dot(axes.tangent, l),
+                dot(axes.bitangent, l),
+                max(coat_n_dot_v, CLEARCOAT_MIN_N_DOT),
+                coat_n_dot_l,
+                ax,
+                ay,
+            );
+        } else {
+            // Isotropic path: bit-for-bit the historical coat lobe.
+            coat_d = distribution_ggx(coat_n_dot_h, coat_alpha);
+            coat_g = vis_smith(max(coat_n_dot_v, CLEARCOAT_MIN_N_DOT), coat_n_dot_l, coat_alpha);
+        }
     }
     // `OpenPBR` `coat_color` tints the highlight; white is the exact identity.
     let coat_specular = surface.coat_color * (coat * coat_f * coat_d * coat_g * coat_n_dot_l);

@@ -212,7 +212,7 @@
 |---|---|---|---|
 | **base**（diffuse+metal） | `base_color` / `metallic` / `perceptual_roughness` | 子集 | `base_weight`、`diffuse_roughness`（Oren-Nayar 糙漫反射） |
 | **specular** | `reflectance`（IOR 代理）/ `anisotropy` / `anisotropy_rotation` | 子集 | `specular_weight`、`specular_color`、显式 `specular_ior`（取代 reflectance 代理） |
-| **coat** | `clearcoat` / `clearcoat_roughness` / **`coat_ior` / `coat_color`（已补）** / **`coat_normal`（已补：纹理输入，非 ABI 字段，见 §13.a）** | 部分补全 | `coat_roughness_anisotropy`、`coat_darkening` |
+| **coat** | `clearcoat` / `clearcoat_roughness` / **`coat_ior` / `coat_color` / `coat_roughness_anisotropy`（已补）** / **`coat_normal`（已补：纹理输入，非 ABI 字段，见 §13.a）** | 仅差 `coat_darkening` | `coat_darkening` |
 | **fuzz** | `sheen` | 子集 | `fuzz_color`、`fuzz_roughness` |
 | **subsurface** | `subsurface` | 子集 | `subsurface_color`、`subsurface_radius`（vec3，RGB 自由程）、`scatter_anisotropy` |
 | **transmission** | `transmission` / `thickness` / `index_of_refraction` / `dispersion` | 较全 | `transmission_color`、`transmission_scatter`、`thin_walled` 标志 |
@@ -578,6 +578,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f（coat 组续）OpenPBR `coat_roughness_anisotropy` 端到端落地**（§4.4 / §17.2）
+  - 范围：给 coat 瓣补 `OpenPBR` `coat_roughness_anisotropy ∈ [0,1]`——沿**共享**表面切线系（由 `anisotropy_rotation` 旋转）拉长 coat 高光；伸长轴与 base specular 用同一套 `anisotropic_axes` + Burley `aspect` 拆分。`0` 走**逐位不变**的各向同性老路径（不是"近似相等"，是分支保持）。
+  - 代码：schema clearcoat 瓣 8→12 字（`coat_roughness_anisotropy` + 3 尾 pad），`MATERIAL_ABI_VERSION` 已在 5 上（无重复 bump）；`GpuClearCoatLobe` / fat `GpuSurfaceParameters`（尾 pad 收敛为 `_pad_tail: [f32;2]`，fat 尺寸仍 144 B 保持 16 字节对齐）；regenerated `material_unpack.wesl`（`array<u32,48>`）/ `surface_layout.rs`（`SURFACE_LOBE_WORDS_BY_SLOT = [4,12,4,4,4,4,4]`）；shade-time `SurfaceSample`（CPU `lighting.rs` + WESL `brdf.wesl`）与桥接（`resolve.rs` + `shading_resolve.wesl`）；BSDF 双线（CPU `clearcoat.rs` + WESL `clearcoat.wesl`，复用 `distribution_ggx_anisotropic` / `visibility_smith_ggx_anisotropic` / `anisotropic_axes`）；水栅格面显式写 0。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3287 通过**（新增 2 条：各向异性改变离峰高光、旋转伸长轴使高光移动）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过）、`cargo test -p prism_material_schema` 13 通过（含更新后的绝对偏移门禁：transmission 基址 40 / IOR 42）、`cargo test -p prism_render_material` 826+6+2 全绿；touched 文件 clippy 无告警。
+  - 结果：**coat 组只差 `coat_darkening` 一项**（该项仍因公式不确定、且仓库 path-traced 参考亦未实现而搁置）。
 
 - **P1-f（coat 组续）OpenPBR `coat_normal` 接线：修掉一处"采样了却没人用"的死数据**（§4.4 / §17.2）
   - 问题：`material_sample.wesl` 与 `TextureSemantic::ClearCoatNormal` 早就把 clearcoat 法线图解码成 `clearcoat_normal_tangent` / `has_clearcoat_normal`，但**没有任何 BSDF 消费它**——clearcoat 法线图在渲染里完全不起作用。这是一个真实的（非占位式的）缺口。

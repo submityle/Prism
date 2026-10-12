@@ -87,6 +87,12 @@ pub struct GpuClearCoatLobe {
     pub _pad0: f32,
     /// `OpenPBR` per-channel tint of the coat highlight (white = clear lacquer).
     pub coat_color: [f32; 4],
+    /// `OpenPBR` `coat_roughness_anisotropy` in `[0, 1]`: elongates the coat
+    /// highlight along the shared surface tangent frame. `0` is isotropic.
+    pub coat_roughness_anisotropy: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
+    pub _pad3: f32,
 }
 
 impl Default for GpuClearCoatLobe {
@@ -97,6 +103,10 @@ impl Default for GpuClearCoatLobe {
             coat_ior: 1.5,
             _pad0: 0.0,
             coat_color: [1.0; 4],
+            coat_roughness_anisotropy: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+            _pad3: 0.0,
         }
     }
 }
@@ -351,6 +361,10 @@ impl SurfaceParameterBlock {
                 coat_ior: params.coat_ior,
                 _pad0: 0.0,
                 coat_color: params.coat_color,
+                coat_roughness_anisotropy: params.coat_roughness_anisotropy,
+                _pad1: 0.0,
+                _pad2: 0.0,
+                _pad3: 0.0,
             },
             anisotropy: GpuAnisotropyLobe {
                 anisotropy: params.anisotropy,
@@ -408,6 +422,7 @@ impl SurfaceParameterBlock {
             full.clearcoat_roughness = self.clearcoat.clearcoat_roughness;
             full.coat_ior = self.clearcoat.coat_ior;
             full.coat_color = self.clearcoat.coat_color;
+            full.coat_roughness_anisotropy = self.clearcoat.coat_roughness_anisotropy;
         }
         if self.lobe_mask.contains(LobeMask::ANISOTROPY) {
             full.anisotropy = self.anisotropy.anisotropy;
@@ -560,6 +575,7 @@ mod tests {
             clearcoat_roughness: 0.15,
             coat_ior: 1.45,
             coat_color: [0.9, 0.95, 1.0, 1.0],
+            coat_roughness_anisotropy: 0.35,
             anisotropy: 0.3,
             anisotropy_rotation: 0.2,
             sheen: 0.45,
@@ -570,9 +586,7 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail0: 0.0,
-            _pad_tail1: 0.0,
-            _pad_tail2: 0.0,
+            _pad_tail: [0.0; 2],
         }
     }
 
