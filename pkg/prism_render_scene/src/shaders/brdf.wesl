@@ -505,6 +505,79 @@ fn oren_nayar_factor(n_dot_v: f32, n_dot_l: f32, v_dot_l: f32, diffuse_roughness
     return max(a + b * s / t, 0.0);
 }
 
+// `Ê_ON(μ_i, σ_j)`, row-major over σ (`μ_i = i/16`, `σ_j = j/8·π/2`).
+const EON_N_MU: i32 = 17;
+const EON_N_SIGMA: i32 = 9;
+const EON_ALBEDO: array<f32, 153> = array<f32, 153>(
+    1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102, 1.000102,
+    0.986645, 0.983973, 0.981022, 0.978077, 0.975073, 0.972048, 0.969053, 0.966109, 0.963232, 0.960478, 0.957871, 0.955444, 0.953240, 0.951300, 0.949674, 0.948444, 0.947782,
+    0.922654, 0.917026, 0.910807, 0.904613, 0.898283, 0.891915, 0.885615, 0.879407, 0.873357, 0.867555, 0.862069, 0.856957, 0.852316, 0.848229, 0.844811, 0.842220, 0.840847,
+    0.846674, 0.839602, 0.831781, 0.823991, 0.816032, 0.808029, 0.800101, 0.792296, 0.784691, 0.777392, 0.770494, 0.764063, 0.758232, 0.753093, 0.748796, 0.745533, 0.743797,
+    0.787386, 0.779612, 0.771021, 0.762455, 0.753710, 0.744912, 0.736201, 0.727622, 0.719264, 0.711242, 0.703662, 0.696595, 0.690184, 0.684535, 0.679813, 0.676232, 0.674332,
+    0.746080, 0.737933, 0.728924, 0.719954, 0.710785, 0.701562, 0.692436, 0.683445, 0.674682, 0.666280, 0.658332, 0.650927, 0.644210, 0.638288, 0.633338, 0.629584, 0.627586,
+    0.717770, 0.709404, 0.700156, 0.690942, 0.681529, 0.672060, 0.662687, 0.653458, 0.644460, 0.635832, 0.627671, 0.620066, 0.613169, 0.607089, 0.602005, 0.598151, 0.596103,
+    0.698071, 0.689569, 0.680169, 0.670805, 0.661239, 0.651613, 0.642086, 0.632702, 0.623559, 0.614790, 0.606495, 0.598766, 0.591756, 0.585576, 0.580408, 0.576491, 0.574419,
+    0.684031, 0.675436, 0.665937, 0.656470, 0.646799, 0.637073, 0.627444, 0.617960, 0.608717, 0.599852, 0.591468, 0.583657, 0.576569, 0.570325, 0.565099, 0.561141, 0.559036,
+);
+
+// `⟨Ê_ON⟩(σ_j)`.
+const EON_AVERAGE: array<f32, 9> = array<f32, 9>(
+    1.000102, 0.957581, 0.861456, 0.769724, 0.702815, 0.657445, 0.626761, 0.605569, 0.590533,
+);
+
+// Bilinear `Ê_ON(μ, σ)` with `sigma01 = σ/(π/2) ∈ [0, 1]`. Mirrors
+// `eon_albedo_table.rs::eon_albedo_lookup`.
+fn eon_albedo_lookup(mu: f32, sigma01: f32) -> f32 {
+    let x = clamp(mu, 0.0, 1.0) * f32(EON_N_MU - 1);
+    let y = clamp(sigma01, 0.0, 1.0) * f32(EON_N_SIGMA - 1);
+    let i0 = min(i32(x), EON_N_MU - 2);
+    let j0 = min(i32(y), EON_N_SIGMA - 2);
+    let fx = x - f32(i0);
+    let fy = y - f32(j0);
+    let a = EON_ALBEDO[j0 * EON_N_MU + i0];
+    let b = EON_ALBEDO[j0 * EON_N_MU + i0 + 1];
+    let c = EON_ALBEDO[(j0 + 1) * EON_N_MU + i0];
+    let d = EON_ALBEDO[(j0 + 1) * EON_N_MU + i0 + 1];
+    let top = a + (b - a) * fx;
+    let bottom = c + (d - c) * fx;
+    return clamp(top + (bottom - top) * fy, 0.0, 1.0);
+}
+
+// Linear `⟨Ê_ON⟩(σ)` with `sigma01 = σ/(π/2) ∈ [0, 1]`.
+fn eon_average_lookup(sigma01: f32) -> f32 {
+    let y = clamp(sigma01, 0.0, 1.0) * f32(EON_N_SIGMA - 1);
+    let j0 = min(i32(y), EON_N_SIGMA - 2);
+    let fy = y - f32(j0);
+    let a = EON_AVERAGE[j0];
+    let b = EON_AVERAGE[j0 + 1];
+    return clamp(a + (b - a) * fy, 0.0, 1.0);
+}
+
+// `OpenPBR` equation `EON_comp`: reciprocal energy compensation for the
+// energy-preserving Oren-Nayar diffuse,
+// `f_comp = (ρ_ms/π)(1 − Ê(ωi))(1 − Ê(ωo))` with
+// `ρ_ms = ρ²·(⟨Ê⟩/(1−⟨Ê⟩))/(1 − ρ(1−⟨Ê⟩))`. `Ê`/`⟨Ê⟩` come from the baked
+// table derived from the specification's own `FON_brdf`. Mirrors
+// `lighting.rs::oren_nayar_energy_compensation`; at `diffuse_roughness == 0` the
+// lookup saturates at 1 so this is exactly zero.
+fn oren_nayar_energy_compensation(
+    base_color: vec3<f32>,
+    n_dot_v: f32,
+    n_dot_l: f32,
+    diffuse_roughness: f32,
+) -> vec3<f32> {
+    let sigma01 = clamp(diffuse_roughness, 0.0, 1.0);
+    let e_avg = clamp(eon_average_lookup(sigma01), 0.0, 1.0 - 1.0e-4);
+    let e_i = eon_albedo_lookup(max(n_dot_v, 0.0), sigma01);
+    let e_o = eon_albedo_lookup(max(n_dot_l, 0.0), sigma01);
+    let one_minus_i = max(1.0 - e_i, 0.0);
+    let one_minus_o = max(1.0 - e_o, 0.0);
+    let ratio = e_avg / (1.0 - e_avg);
+    let rho = clamp(base_color, vec3<f32>(0.0), vec3<f32>(1.0));
+    let rho_ms = rho * rho * ratio / max(vec3<f32>(1.0) - rho * (1.0 - e_avg), vec3<f32>(1.0e-4));
+    return (rho_ms * INV_PI) * (one_minus_i * one_minus_o);
+}
+
 // Physically based direct lighting for one analytic light, including a
 // Kulla-Conty energy-compensation term and a clearcoat lobe. Mirrors
 // `evaluate_principled_direct`.
@@ -613,7 +686,17 @@ fn principled_direct(
     // exactly 1.0 and preserves the legacy path.
     let diffuse_factor =
         oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
-    let diffuse = (surface.base_color * (INV_PI * diffuse_factor)) * diffuse_weight;
+    // `OpenPBR` `EON_brdf` / `EON_comp`: the Fujii term plus the reciprocal
+    // multiple-scattering compensation that restores the energy plain
+    // Oren-Nayar loses as `base_diffuse_roughness` grows. Zero at roughness 0.
+    let diffuse_on = surface.base_color * (INV_PI * diffuse_factor);
+    let diffuse_comp = oren_nayar_energy_compensation(
+        surface.base_color,
+        n_dot_v,
+        n_dot_l,
+        surface.diffuse_roughness,
+    );
+    let diffuse = (diffuse_on + diffuse_comp) * diffuse_weight;
     // `OpenPBR` `base_weight` scales the whole base layer; 1.0 is exact.
     let base = (diffuse + specular) * (n_dot_l * clamp(surface.base_weight, 0.0, 1.0));
 

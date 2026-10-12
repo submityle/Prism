@@ -359,8 +359,20 @@ pub fn evaluate_clearcoat_direct(
     // keeps the historical coat response bit-for-bit.
     let diffuse_factor =
         oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
+    // `OpenPBR` `EON_comp`: same reciprocal compensation the principled lobe
+    // applies, so the Clearcoat class's base conserves energy under a white
+    // furnace too (`diffuse_roughness == 0` makes it exactly zero).
+    let diffuse_comp = crate::lighting::oren_nayar_energy_compensation(
+        surface.base_color,
+        n_dot_v,
+        n_dot_l,
+        surface.diffuse_roughness,
+    );
     let diffuse = mul(
-        mul_scalar(surface.base_color, INV_PI * diffuse_factor),
+        add(
+            mul_scalar(surface.base_color, INV_PI * diffuse_factor),
+            diffuse_comp,
+        ),
         diffuse_weight,
     );
     let base = mul_scalar(

@@ -37,6 +37,7 @@ import prism_render_scene::shaders::brdf::{
     distribution_ggx_anisotropic,
     anisotropic_axes,
     oren_nayar_factor,
+    oren_nayar_energy_compensation,
     fresnel_dielectric,
     BRDF_MIN_DIELECTRIC_IOR,
     vis_smith,
@@ -270,7 +271,16 @@ fn clearcoat_direct(
     // `base_weight` scales the whole base layer (1.0 = exactly the identity).
     let diffuse_factor =
         oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
-    let diffuse = (surface.base_color * (INV_PI * diffuse_factor)) * diffuse_weight;
+    // `OpenPBR` `EON_comp`: same reciprocal compensation the principled lobe
+    // applies, so the Clearcoat class's base conserves energy too.
+    let diffuse_comp = oren_nayar_energy_compensation(
+        surface.base_color,
+        n_dot_v,
+        n_dot_l,
+        surface.diffuse_roughness,
+    );
+    let diffuse =
+        ((surface.base_color * (INV_PI * diffuse_factor)) + diffuse_comp) * diffuse_weight;
     let base = (diffuse + specular) * (n_dot_l * clamp(surface.base_weight, 0.0, 1.0));
 
     // Coat layer: a second smooth dielectric GGX lobe. The coat is an

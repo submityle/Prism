@@ -378,10 +378,20 @@ pub fn evaluate_principled_direct(
     // preserved bit-for-bit.
     let diffuse_factor =
         oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
-    let diffuse = mul(
-        mul_scalar(surface.base_color, (1.0 / PI) * diffuse_factor),
-        diffuse_weight,
+    // `OpenPBR` equations `EON_brdf` / `EON_comp`: the energy-preserving
+    // Oren-Nayar diffuse is the Fujii term plus a reciprocal multiple-scattering
+    // compensation that restores the energy the plain Oren-Nayar lobe loses as
+    // `base_diffuse_roughness` grows (without it a white rough diffuse base
+    // reflects only ~58% of the energy and the specification's white furnace
+    // test fails). `diffuse_roughness == 0` makes the compensation exactly zero.
+    let diffuse_on = mul_scalar(surface.base_color, (1.0 / PI) * diffuse_factor);
+    let diffuse_comp = oren_nayar_energy_compensation(
+        surface.base_color,
+        n_dot_v,
+        n_dot_l,
+        surface.diffuse_roughness,
     );
+    let diffuse = mul(add(diffuse_on, diffuse_comp), diffuse_weight);
     // `OpenPBR` `base_weight` scales the whole base layer; `1.0` is exact.
     let base = mul_scalar(add(diffuse, specular), n_dot_l * surface.base_weight.clamp(0.0, 1.0));
 
@@ -887,6 +897,47 @@ pub(crate) fn oren_nayar_factor(
         1.0
     };
     (a + b * s / t).max(0.0)
+}
+
+/// `OpenPBR` equation `EON_comp`: the reciprocal energy-compensation term of the
+/// energy-preserving Oren-Nayar diffuse, per channel,
+///
+/// ```text
+/// f_comp = (ρ_ms/π)·(1 − Ê_ON(ωi))·(1 − Ê_ON(ωo))
+/// ρ_ms   = ρ²·(⟨Ê_ON⟩/(1 − ⟨Ê_ON⟩)) / (1 − ρ·(1 − ⟨Ê_ON⟩))
+/// ```
+///
+/// `Ê_ON` and `⟨Ê_ON⟩` come from the baked table derived from the
+/// specification's own `FON_brdf` equation (see `eon_albedo_table`). `ρ` is
+/// `base_color` (equation `glossy_diffuse_albedo_constraint`). At
+/// `diffuse_roughness == 0` the lookup saturates at `Ê = 1`, so this returns
+/// exactly zero and the diffuse stays bit-for-bit Lambert.
+///
+/// See `eon_albedo_table::EON_ALBEDO` for the specification erratum this
+/// implementation follows (`ρ_ms` must be dimensionless for the specification's
+/// own white-furnace guarantee to hold).
+#[inline]
+pub(crate) fn oren_nayar_energy_compensation(
+    base_color: [f32; 3],
+    n_dot_v: f32,
+    n_dot_l: f32,
+    diffuse_roughness: f32,
+) -> [f32; 3] {
+    use crate::eon_albedo_table::{eon_albedo_lookup, eon_average_lookup};
+    let sigma01 = diffuse_roughness.clamp(0.0, 1.0);
+    let e_avg = eon_average_lookup(sigma01).clamp(0.0, 1.0 - 1.0e-4);
+    let e_i = eon_albedo_lookup(n_dot_v.max(0.0), sigma01);
+    let e_o = eon_albedo_lookup(n_dot_l.max(0.0), sigma01);
+    let (one_minus_i, one_minus_o) = ((1.0 - e_i).max(0.0), (1.0 - e_o).max(0.0));
+    let ratio = e_avg / (1.0 - e_avg);
+    let mut out = [0.0_f32; 3];
+    for (c, slot) in out.iter_mut().enumerate() {
+        let rho = base_color[c].clamp(0.0, 1.0);
+        let den = (1.0 - rho * (1.0 - e_avg)).max(1.0e-4);
+        let rho_ms = rho * rho * ratio / den;
+        *slot = (rho_ms / PI) * one_minus_i * one_minus_o;
+    }
+    out
 }
 
 #[cfg(test)]

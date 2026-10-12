@@ -272,7 +272,13 @@
 
    **第五片（同轮）**：`specular_ior_ratio`（规范 + TIR 修正）落地——有 coat 时基底介电的**环境比**变成 `η_s = lerp(n_b/n_a, η_bc_fixed, C)`；规范明说朴素的 `n_b/n_c` 会让折射进致密 coat 的光线"越过临界角"照到基底，产生掠射亮环，所以 `n_c > n_b` 时**把比值反过来**用 `n_c/n_b`（`specular_ior_ratio_with_tir_fix`），结果恒 `≥ 1`、`C=0` 精确等于 `specular_ior`。顺带修掉一处**双线漂移**：`clearcoat` shading class 的基底瓣此前还是老的 **Schlick + `dielectric_f0`** 路径，而 principled 瓣上一轮已换成"精确 Fresnel + F82-tint"——两个基底现在共用同一对函数（`base_dielectric_fresnel_rgb` / `base_metal_fresnel_rgb`），Clearcoat class 不再落后。
 
-   **覆盖边界（门禁自己声明，不允许静默超范围）**：当前响应层门禁覆盖**基底介电镜面 Fresnel**、**金属 F82-tint Fresnel**、**coat 暗化**（`E_F`/`K`/`Δ`/`lerp(1,Δ,C·δ)`/`r_b`）、**coat 视角相关吸收**、**coat roughening**、**`specular_ior_ratio`（含 TIR 修正）**。尚未转写：`refracted_coat_dir` 的 Fresnel 角度混合（规范给的另一条等价近似路径）、fuzz/subsurface/transmission/thin_film 的规范节点图，以及 furnace 白炉**收敛值**对拍。下一片按瓣逐一补齐。
+   **第六片（同轮）白炉门禁 + EON 能量补偿（并发现一处规范 erratum）**：把规范 §*Testing* 明列的**白炉测试**做成响应层门禁（半球数值积分 `∫f·(n·l)dω`，规范列出应当通过的配置）。它当场证明了两件事：
+   - **`base_diffuse_roughness` 的漫反射在丢能量**：白基底 + `diffuse_roughness = 1` 只反射 **0.577**。根因是只实现了 `FON_brdf`（Fujii Oren-Nayar）而**漏了 `EON_comp` 的互易多次散射补偿项**——规范正是为"白炉必须通过"而定义它。
+   - **实现路径不靠发明拟合**：`EON_comp` 需要 `Ê_ON(μ,σ)` 与 `⟨Ê_ON⟩(σ)`；规范说这些"可解析求得"但把拟合推给 [Portsmouth2024]。Prism 改为**对规范自己的 `FON_brdf` 方程做确定性数值积分**，把结果烘成 17×9 表（`eon_albedo_table.rs` + `brdf.wesl` 内联镜像，`eon_albedo_table_mirrors_the_wesl` 守漂移），实时只做双线性插值。`diffuse_roughness == 0` 时 `Ê ≡ 1` ⇒ 补偿**精确为零**，Lambert 路径逐位不变。
+   - **顺带发现规范 erratum（已数值验证）**：`ρ_ms` 的 LaTeX 写作 `(ρ²/π)·…`，但那个 `1/π` **与同段声明的"ρ→1 时 E_diffuse→1"自相矛盾**（按字面实现白炉只能到 0.70），且量纲不一致（`f_comp` 已带 `1/π`，`ρ_ms` 必须无量纲）。Prism 采用去掉该 `1/π` 的读法——这是唯一能让规范自身不变量成立的读法，推导写在 `eon_rho_ms` 的文档注释里。
+   - **白炉门禁同时暴露两处仍未达标的能量偏差**（已量化，是下一步的明确目标）：① **金属基底过亮 ~11%**（收敛值 1.11，根因是多散射补偿用的解析方向反照率低估了实际单次散射反照率）；② **glossy-diffuse 耦合**：Prism 用 `1 − F(v·h)` 加权漫反射，规范 `glossy_diffuse_albedo_constraint` 要求 `1 − E_dielectric(ωo)`，导致带镜面界面时掠射过亮 ~12%（1.12）。
+
+   **覆盖边界（门禁自己声明，不允许静默超范围）**：当前响应层门禁覆盖**基底介电镜面 Fresnel**、**金属 F82-tint Fresnel**、**coat 暗化/吸收/roughening/`specular_ior_ratio`**、**EON 漫反射能量补偿**（白炉，纯漫反射基底）、以及白炉的**金属有界性**。尚未达标/未覆盖：金属白炉精确到 1（当前 1.11）、glossy-diffuse 的 `1 − E_dielectric(ωo)` 耦合（当前 1.12 @ 掠射）、`refracted_coat_dir` 角度混合（规范给的另一条等价路径）、fuzz/subsurface/transmission/thin_film 的规范节点图。这些都是**已量化**的具体目标，不是笼统的"待补"。
 2. **扩展位段隔离（Bit-Region Isolation）**：`LobeMask` 开放枚举按**规范核心区 / Prism 扩展区**静态分段——OpenPBR 规范瓣占低位固定区段（随上游版本演进只增不改语义），FACE 与开放词汇表后续瓣占高位扩展区段。两区位段互不重叠，变长解包 (`prism_unpack_surface`) 按区段路由，杜绝"私有瓣污染规范语义"或"上游新字段撞车扩展位"。
 
    **已落地（code-truth）**：schema 现为**双密集段**——`KHR` 瓣占 slot `0..6`（emission/clearcoat/anisotropy/sheen/subsurface/transmission/**thin_film**），扩展瓣从 `EXTENSION_SLOT_BASE = 16` 起（FACE 从原来的 bit 6 **迁到 bit 16**）；`prism_material_schema` 的验证器**强制**这条规则（非双段布局直接 `NonContiguousRegistrySlots` 报错），所以"加规范瓣只会往低位段追加、加私有瓣只会往高位段追加"是**编译/校验期事实**而非约定。生成物 `SURFACE_LOBE_WORDS_BY_SLOT` 是按 slot 的 `[usize; 17]`（中段留 0），`LobeMask::all()` 相应改为"已定义位的 OR"。
@@ -621,6 +627,14 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P2-f 第六片：白炉门禁 + OpenPBR `EON` 漫反射能量补偿（含一处规范 erratum）**（§4.5 / §10）
+  - **门禁**：把规范 §*Testing* 明列的白炉测试做成响应层门禁 `white_furnace_conserves_energy_for_the_specification_configurations`——对每个配置做半球数值积分 `∫f·(n·l)dω`（`furnace_albedo`，分辨率按瓣宽选择；`print_furnace_convergence` 是收敛性诊断：近镜面金属要到 768² 才收敛，故该类配置以有界性为准）。
+  - **抓到的真实缺口**：白基底 + `base_diffuse_roughness = 1` 的漫反射只反射 **0.577**——只落了 `FON_brdf`、漏了 `EON_comp` 的互易多次散射补偿，而规范正是为"白炉必须通过"定义它。
+  - **实现（不发明拟合）**：新增 `eon_albedo_table.rs`（17×9 `Ê_ON(μ,σ)` + 9 点 `⟨Ê_ON⟩(σ)`）与 `brdf.wesl` 内联镜像；两者都是对规范自己的 `FON_brdf` 方程**数值积分**得到（生成器 `print_eon_table`）。实时侧 `lighting.rs::oren_nayar_energy_compensation`（+ `brdf.wesl` 孪生）插值后按 `EON_comp` 求和，Clearcoat 基底同样接上。`diffuse_roughness == 0` 时 `Ê ≡ 1` ⇒ 补偿精确 0，Lambert 逐位不变（有门禁）。
+  - **规范 erratum（已数值验证）**：`ρ_ms` 的 `1/π` 与同段声明的不变量矛盾（按字面白炉只到 0.70），且量纲不一致（`f_comp` 已带 `1/π`）。Prism 去掉该 `1/π`，推导写在 `eon_rho_ms` 文档里，`eon_lobe_passes_the_white_furnace` 钉住。
+  - **门禁同时量化出两处仍未达标的偏差**（下一步目标）：① 金属白炉 1.11（多散射补偿的解析反照率低估单次散射反照率）；② glossy-diffuse 耦合 1.12 @ 掠射（`1 − F(v·h)` vs 规范的 `1 − E_dielectric(ωo)`）。
+  - 门禁：`prism_render_shading --lib` **3333 通过 + 2 ignored（诊断生成器）**、`prism_render_scene --lib` **1602 通过**（WESL 内联 const 表经编译链接验证）、`prism_render_material` **826+2+6 通过**；touched 文件 clippy 干净。
 
 - **P2-f 第一片：§4.5 约束 1 的「响应层」合规门禁 + 独立 OpenPBR oracle（并修掉一处真实偏差）**（§4.5 / §13）
   - **问题定位**：`openpbr_conformance` 此前只做"参数块投影不动点"，它**根本不碰 BSDF 响应**；而 §4.5 约束 1 要的是"与规范参考实现在定向光/furnace 下一致"。也就是说该约束长期只有结构半，没有响应半——属于"自证式"达标。

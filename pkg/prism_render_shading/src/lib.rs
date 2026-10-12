@@ -19,6 +19,7 @@ mod cloth_advanced;
 mod cluster;
 mod color_grade;
 mod dof;
+mod eon_albedo_table;
 mod environment;
 mod exposure;
 mod face_shadow;
