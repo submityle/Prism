@@ -286,6 +286,7 @@ impl RenderQueues {
         device: &D,
         specializer: &mut MeshPipelineSpecializer,
         registry: &crate::SceneRegistry,
+        meshes: &crate::RenderAssets<crate::RenderMesh>,
         work: &[prism_render_visibility::GpuRenderWorkItem],
         depth_format: Option<prism_render_driver::TextureFormat>,
         sample_count: u32,
@@ -294,7 +295,7 @@ impl RenderQueues {
     ) -> usize {
         let mut queued = 0;
         for item in work {
-            let Some(request) = registry.resolve(item, depth_format, sample_count, draw) else {
+            let Some(request) = registry.resolve(item, meshes, depth_format, sample_count, draw) else {
                 continue;
             };
             let descriptor = provider.descriptor(&request.variant);

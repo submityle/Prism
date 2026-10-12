@@ -46,6 +46,42 @@ use prism_render_driver::{
     VertexState,
 };
 
+/// A prepared, position-only mesh bound to `geometry`, plus the table holding it.
+///
+/// Buffers belong to the geometry's own mesh (a vertex class is a vertex stage),
+/// so a test that wants a drawable geometry needs a prepared mesh for it — which
+/// is exactly what the frame's asset pipeline produces.
+fn bind_prepared_mesh(
+    registry: &mut SceneRegistry,
+    device: &prism_render_driver_null::NullDevice,
+    queue: &impl RenderQueue,
+    geometry: GenerationalHandle,
+    mesh_id: prism_asset::AssetId<prism_mesh::Mesh>,
+    meshes: &mut crate::RenderAssets<crate::RenderMesh>,
+) {
+    let mesh = prism_mesh::Mesh::new(PrimitiveTopology::TriangleList)
+        .with_attribute(
+            prism_mesh::MeshVertexAttribute::new(
+                "Vertex_Position",
+                prism_render_driver::VertexFormat::Float32x3,
+                0,
+            ),
+            prism_mesh::VertexAttributeValues::Float32x3(vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]),
+        )
+        .expect("positions fit")
+        .indexed(prism_mesh::Indices::Uint16(vec![0, 1, 2, 0, 2, 3]));
+    use crate::render_asset::RenderAsset;
+    let prepared = crate::RenderMesh::prepare(&mesh, mesh_id, device, queue, None)
+        .expect("the test mesh prepares");
+    meshes.insert(mesh_id, prepared);
+    registry.bind_geometry_mesh(geometry, mesh_id);
+}
+
 /// A dummy vertex buffer id from the null device, for items that only need an id.
 fn null_vertex_buffer(device: &prism_render_driver_null::NullDevice) -> BufferId {
     device.create_buffer(&BufferDescriptor {
@@ -438,7 +474,7 @@ fn recording_a_phase_invokes_each_draw_function() {
 #[test]
 fn fill_from_visibility_resolves_and_queues() {
     use crate::mesh_pipeline::MeshPipelineProvider;
-    use crate::scene::{MeshBuffers, MeshClass, SceneRegistry};
+    use crate::scene::{MeshClass, SceneRegistry};
     use prism_render_architecture::geometry::{
         GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
     };
@@ -448,7 +484,7 @@ fn fill_from_visibility_resolves_and_queues() {
     let adapter = NullInstance::new()
         .request_adapter(&options)
         .expect("the null backend always has an adapter");
-    let (device, _queue) = NullInstance::new()
+    let (device, queue) = NullInstance::new()
         .create_device(&adapter, &DeviceDescriptor::default())
         .expect("the null device always comes up");
     let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
@@ -509,16 +545,15 @@ fn fill_from_visibility_resolves_and_queues() {
         }],
     });
     registry.insert_material(prism_render_material::fallback_material_record(material, 1));
-    registry.insert_mesh_class(
-        5,
-        MeshClass::new(
-            vec![layout],
-            PrimitiveTopology::TriangleList,
-            MeshBuffers {
-                vertices: null_vertex_buffer(&device),
-                indices: None,
-            },
-        ),
+    registry.insert_mesh_class(5, MeshClass::new(vec![layout], PrimitiveTopology::TriangleList));
+    let mut meshes = crate::RenderAssets::<crate::RenderMesh>::new();
+    bind_prepared_mesh(
+        &mut registry,
+        &device,
+        &queue,
+        geometry,
+        prism_asset::AssetId::new(prism_asset::AssetIndex::from_parts(0, 1)),
+        &mut meshes,
     );
 
     let item = |material: GenerationalHandle| GpuRenderWorkItem {
@@ -538,6 +573,7 @@ fn fill_from_visibility_resolves_and_queues() {
         &device,
         &mut specializer,
         &registry,
+        &meshes,
         &work,
         None,
         1,
@@ -558,7 +594,7 @@ fn fill_from_visibility_resolves_and_queues() {
 /// and skips one whose material is not resident.
 #[test]
 fn scene_registry_resolves_a_work_item() {
-    use crate::scene::{MeshBuffers, MeshClass, SceneRegistry};
+    use crate::scene::{MeshClass, SceneRegistry};
     use prism_render_architecture::geometry::{
         GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
     };
@@ -568,7 +604,7 @@ fn scene_registry_resolves_a_work_item() {
     let adapter = NullInstance::new()
         .request_adapter(&options)
         .expect("the null backend always has an adapter");
-    let (device, _queue) = NullInstance::new()
+    let (device, queue) = NullInstance::new()
         .create_device(&adapter, &DeviceDescriptor::default())
         .expect("the null device always comes up");
 
@@ -602,16 +638,15 @@ fn scene_registry_resolves_a_work_item() {
         }],
     });
     registry.insert_material(prism_render_material::fallback_material_record(material, 1));
-    registry.insert_mesh_class(
-        5,
-        MeshClass::new(
-            vec![layout.clone()],
-            PrimitiveTopology::TriangleList,
-            MeshBuffers {
-                vertices: null_vertex_buffer(&device),
-                indices: None,
-            },
-        ),
+    registry.insert_mesh_class(5, MeshClass::new(vec![layout.clone()], PrimitiveTopology::TriangleList));
+    let mut meshes = crate::RenderAssets::<crate::RenderMesh>::new();
+    bind_prepared_mesh(
+        &mut registry,
+        &device,
+        &queue,
+        geometry,
+        prism_asset::AssetId::new(prism_asset::AssetIndex::from_parts(0, 1)),
+        &mut meshes,
     );
 
     let item = GpuRenderWorkItem {
@@ -624,7 +659,7 @@ fn scene_registry_resolves_a_work_item() {
         sort_key: WorkSortKey::new(0, 0, 0, 0, 7),
     };
     let draw = registry
-        .resolve(&item, None, 1, DrawFunctionId(0))
+        .resolve(&item, &meshes, None, 1, DrawFunctionId(0))
         .expect("a resident geometry + material resolves");
     assert_eq!(draw.phase, RenderPhase::Opaque, "the opaque family phases here");
     assert_eq!(draw.order, 7, "the work item's sort key carries through");
@@ -638,7 +673,7 @@ fn scene_registry_resolves_a_work_item() {
     };
     assert!(
         registry
-            .resolve(&missing_material, None, 1, DrawFunctionId(0))
+            .resolve(&missing_material, &meshes, None, 1, DrawFunctionId(0))
             .is_none(),
         "a non-resident material is skipped, not an error"
     );
@@ -1549,16 +1584,16 @@ fn mesh_bin_draw_records_a_multi_draw() {
         .expect("the null device always comes up");
 
     let vertices = null_vertex_buffer(&device);
-    let indices = device.create_buffer(&BufferDescriptor {
-        label: Some("bin-indices".into()),
-        size: 64,
-        usage: BufferUsages::INDEX,
-        mapped_at_creation: false,
-    });
     let args_buffer = device.create_buffer(&BufferDescriptor {
         label: Some("bin-args".into()),
         size: 64,
         usage: BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let indices = device.create_buffer(&BufferDescriptor {
+        label: Some("bin-indices".into()),
+        size: 64,
+        usage: BufferUsages::INDEX,
         mapped_at_creation: false,
     });
     let target = device.create_texture(&TextureDescriptor::new_2d(
@@ -1689,6 +1724,7 @@ fn declared_args_buffer(device: &prism_render_driver_null::NullDevice) -> prism_
 /// material, and the work list naming both.
 struct BinFixture {
     registry: SceneRegistry,
+    meshes: crate::RenderAssets<crate::RenderMesh>,
     instances: CpuRenderScene,
     geometry: GeometryHandle,
     opaque: SceneHandle,
@@ -1696,8 +1732,11 @@ struct BinFixture {
     work: Vec<GpuRenderWorkItem>,
 }
 
-fn bin_fixture(device: &prism_render_driver_null::NullDevice) -> BinFixture {
-    use crate::scene::{MeshBuffers, MeshClass};
+fn bin_fixture(
+    device: &prism_render_driver_null::NullDevice,
+    queue: &impl RenderQueue,
+) -> BinFixture {
+    use crate::scene::MeshClass;
     use prism_render_architecture::geometry::{
         GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
     };
@@ -1712,12 +1751,6 @@ fn bin_fixture(device: &prism_render_driver_null::NullDevice) -> BinFixture {
     let transparent_material = GenerationalHandle::new(2, 2);
     let opaque: SceneHandle = GenerationalHandle::new(3, 1);
     let transparent: SceneHandle = GenerationalHandle::new(4, 1);
-    let indices = device.create_buffer(&BufferDescriptor {
-        label: Some("bin-indices".into()),
-        size: 64,
-        usage: BufferUsages::INDEX,
-        mapped_at_creation: false,
-    });
     let layout = prism_render_driver::VertexBufferLayout::packed(
         prism_render_driver::VertexStepMode::Vertex,
         0,
@@ -1744,17 +1777,33 @@ fn bin_fixture(device: &prism_render_driver_null::NullDevice) -> BinFixture {
             fallback: false,
         }],
     });
-    registry.insert_mesh_class(
-        5,
-        MeshClass::new(
-            vec![layout],
-            PrimitiveTopology::TriangleList,
-            MeshBuffers {
-                vertices: null_vertex_buffer(device),
-                indices: Some((indices, prism_render_driver::IndexFormat::Uint16)),
-            },
-        ),
-    );
+    registry.insert_mesh_class(5, MeshClass::new(vec![layout], PrimitiveTopology::TriangleList));
+    // The geometry's own mesh owns the buffers the draws bind.
+    let mesh_source = prism_mesh::Mesh::new(PrimitiveTopology::TriangleList)
+        .with_attribute(
+            prism_mesh::MeshVertexAttribute::new(
+                "Vertex_Position",
+                prism_render_driver::VertexFormat::Float32x3,
+                0,
+            ),
+            prism_mesh::VertexAttributeValues::Float32x3(vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]),
+        )
+        .expect("positions fit")
+        .indexed(prism_mesh::Indices::Uint16(vec![0, 1, 2, 0, 2, 3]));
+    let mesh_id = prism_asset::AssetId::new(prism_asset::AssetIndex::from_parts(0, 1));
+    let mut meshes = crate::RenderAssets::<crate::RenderMesh>::new();
+    {
+        use crate::render_asset::RenderAsset;
+        let prepared = crate::RenderMesh::prepare(&mesh_source, mesh_id, device, queue, None)
+            .expect("the fixture mesh prepares");
+        meshes.insert(mesh_id, prepared);
+    }
+    registry.bind_geometry_mesh(geometry, mesh_id);
     registry.insert_material(fallback_material_record(opaque_material, 1));
     let mut clear = fallback_material_record(transparent_material, 1);
     clear.render_class = MaterialRenderClass::Transparent;
@@ -1789,6 +1838,7 @@ fn bin_fixture(device: &prism_render_driver_null::NullDevice) -> BinFixture {
 
     BinFixture {
         registry,
+        meshes,
         instances,
         geometry,
         opaque,
@@ -1812,13 +1862,13 @@ fn bin_stream_fills_the_indirect_queue_and_records_a_multi_draw() {
     let adapter = NullInstance::new()
         .request_adapter(&options)
         .expect("the null backend always has an adapter");
-    let (device, _queue) = NullInstance::new()
+    let (device, queue) = NullInstance::new()
         .create_device(&adapter, &DeviceDescriptor::default())
         .expect("the null device always comes up");
-    let fixture = bin_fixture(&device);
+    let fixture = bin_fixture(&device, &queue);
     let provider = StubProvider::new(&device);
 
-    let candidates = fixture.registry.bin_candidates(&fixture.work);
+    let candidates = fixture.registry.bin_candidates(&fixture.meshes, &fixture.work);
     assert_eq!(candidates.len(), 2, "both instances are drawable");
     let bins = build_view_draw_bins(
         GenerationalHandle::new(0, 1),
@@ -1871,6 +1921,7 @@ fn bin_stream_fills_the_indirect_queue_and_records_a_multi_draw() {
         &device,
         &mut specializer,
         &fixture.registry,
+        &fixture.meshes,
         &fixture.instances,
         args,
         &bins,
@@ -1966,10 +2017,10 @@ fn direct_and_bin_paths_specialize_one_pipeline_per_material() {
     let adapter = NullInstance::new()
         .request_adapter(&options)
         .expect("the null backend always has an adapter");
-    let (device, _queue) = NullInstance::new()
+    let (device, queue) = NullInstance::new()
         .create_device(&adapter, &DeviceDescriptor::default())
         .expect("the null device always comes up");
-    let fixture = bin_fixture(&device);
+    let fixture = bin_fixture(&device, &queue);
     let provider = StubProvider::new(&device);
 
     let mut queues = RenderQueues::new();
@@ -1978,6 +2029,7 @@ fn direct_and_bin_paths_specialize_one_pipeline_per_material() {
         &device,
         &mut specializer,
         &fixture.registry,
+        &fixture.meshes,
         &fixture.work,
         None,
         1,
@@ -1990,12 +2042,13 @@ fn direct_and_bin_paths_specialize_one_pipeline_per_material() {
     let bins = build_view_draw_bins(
         GenerationalHandle::new(0, 1),
         8,
-        fixture.registry.bin_candidates(&fixture.work),
+        fixture.registry.bin_candidates(&fixture.meshes, &fixture.work),
     );
     let outcome = queues.fill_bins(
         &device,
         &mut specializer,
         &fixture.registry,
+        &fixture.meshes,
         &fixture.instances,
         declared_args_buffer(&device),
         &bins,
@@ -2023,22 +2076,22 @@ fn packed_bin_streams_offset_the_indirect_arguments() {
     let adapter = NullInstance::new()
         .request_adapter(&options)
         .expect("the null backend always has an adapter");
-    let (device, _queue) = NullInstance::new()
+    let (device, queue) = NullInstance::new()
         .create_device(&adapter, &DeviceDescriptor::default())
         .expect("the null device always comes up");
-    let fixture = bin_fixture(&device);
+    let fixture = bin_fixture(&device, &queue);
     let provider = StubProvider::new(&device);
 
     // Two views seeing the same two instances each: four commands in total.
     let mut first = build_view_draw_bins(
         GenerationalHandle::new(0, 1),
         8,
-        fixture.registry.bin_candidates(&fixture.work),
+        fixture.registry.bin_candidates(&fixture.meshes, &fixture.work),
     );
     let mut second = build_view_draw_bins(
         GenerationalHandle::new(1, 1),
         8,
-        fixture.registry.bin_candidates(&fixture.work),
+        fixture.registry.bin_candidates(&fixture.meshes, &fixture.work),
     );
     pack_draw_bin_streams([&mut first, &mut second]);
     assert_eq!(second.command_buffer_start, first.command_count);
@@ -2049,6 +2102,7 @@ fn packed_bin_streams_offset_the_indirect_arguments() {
         &device,
         &mut specializer,
         &fixture.registry,
+        &fixture.meshes,
         &fixture.instances,
         declared_args_buffer(&device),
         &second,
@@ -2080,13 +2134,13 @@ fn undecodable_and_unresolved_bins_are_counted() {
     let adapter = NullInstance::new()
         .request_adapter(&options)
         .expect("the null backend always has an adapter");
-    let (device, _queue) = NullInstance::new()
+    let (device, queue) = NullInstance::new()
         .create_device(&adapter, &DeviceDescriptor::default())
         .expect("the null device always comes up");
-    let fixture = bin_fixture(&device);
+    let fixture = bin_fixture(&device, &queue);
     let provider = StubProvider::new(&device);
 
-    let mut candidates = fixture.registry.bin_candidates(&fixture.work);
+    let mut candidates = fixture.registry.bin_candidates(&fixture.meshes, &fixture.work);
     // A foreign permutation class: bits outside the packed field width.
     let mut foreign = candidates[0];
     foreign.key.pipeline_class = 1 << prism_render_material::BIN_CLASS_BITS;
@@ -2107,6 +2161,7 @@ fn undecodable_and_unresolved_bins_are_counted() {
         &device,
         &mut specializer,
         &fixture.registry,
+        &fixture.meshes,
         &fixture.instances,
         declared_args_buffer(&device),
         &bins,
@@ -2448,7 +2503,11 @@ fn the_frame_draws_a_queued_mesh_on_a_gpu() {
                 buffers: vec![prepared.layout.clone()],
             },
             primitive: PrimitiveState::default(),
-            depth_stencil: None,
+            // The frame has a depth attachment, so a pipeline recorded into it
+            // must declare the matching depth state.
+            depth_stencil: Some(prism_render_driver::DepthStencilState::reverse_z(
+                crate::RENDER_DEPTH_FORMAT,
+            )),
             multisample: MultisampleState::default(),
             fragment: Some(prism_render_driver::FragmentState {
                 module,
@@ -2724,5 +2783,226 @@ fn an_empty_stage_does_not_break_the_stage_chain() {
     assert!(
         prepare < queue,
         "the asset stage still precedes the queue stage across the empty stages"
+    );
+}
+/// A provider that gives one colour per material permutation class, so a test
+/// can tell two draws apart by their pixels.
+struct ClassColourPipeline {
+    descriptors: alloc::collections::BTreeMap<u32, RenderPipelineDescriptor>,
+}
+
+impl crate::mesh_pipeline::MeshPipelineProvider for ClassColourPipeline {
+    fn descriptor(&self, variant: &MeshPipelineKey) -> RenderPipelineDescriptor {
+        self.descriptors
+            .get(&variant.class)
+            .expect("the test registered a descriptor for every class it draws")
+            .clone()
+    }
+}
+
+/// Depth resolves occlusion, and it does so *by depth*, not by draw order: two
+/// overlapping quads are drawn far-last (which would overwrite the near one if
+/// nothing tested depth), and the near quad's colour must survive.
+///
+/// This is also what pins the engine's depth *convention*: reversed-Z with the
+/// clear at the far plane (0). Clearing to 1 would reject every fragment, and a
+/// pipeline without depth state would let the far quad win — either way the
+/// centre pixel would not be the near quad's colour.
+#[test]
+fn depth_resolves_occlusion_on_a_gpu() {
+    use crate::mesh_pipelines::MeshPipelines;
+    use prism_render_architecture::geometry::{
+        GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
+    };
+    use prism_render_material::{Illumination, MaterialRenderClass};
+    use prism_render_visibility::{
+        GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey,
+    };
+
+    const SIZE: u32 = 8;
+    let extent = Extent3d::new_2d(SIZE, SIZE);
+    if RenderRuntime::<prism_render_driver_wgpu::WgpuInstance>::wgpu(extent).is_err() {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    }
+
+    let mut app = App::new();
+    app.add_plugins(PrismRenderPlugin::with_config(
+        prism_render_driver_wgpu::WgpuInstance::new(),
+        RenderAppConfig::new(extent),
+    ));
+
+    // Two quads over the same screen area, one nearer (reversed-Z: bigger depth).
+    let quad = |depth: f32| {
+        prism_mesh::Mesh::new(PrimitiveTopology::TriangleList)
+            .with_attribute(
+                prism_mesh::MeshVertexAttribute::new(
+                    "Vertex_Position",
+                    prism_render_driver::VertexFormat::Float32x3,
+                    0,
+                ),
+                prism_mesh::VertexAttributeValues::Float32x3(vec![
+                    [-0.5, -0.5, depth],
+                    [0.5, -0.5, depth],
+                    [0.5, 0.5, depth],
+                    [-0.5, 0.5, depth],
+                ]),
+            )
+            .expect("positions fit")
+            .indexed(prism_mesh::Indices::Uint16(vec![0, 1, 2, 0, 2, 3]))
+    };
+    let mut meshes = prism_asset::Assets::new();
+    let near_mesh = meshes.insert(quad(0.9)).id();
+    let far_mesh = meshes.insert(quad(0.1)).id();
+    app.world_mut().insert_resource(meshes);
+
+    let near_geometry = GenerationalHandle::new(1, 1);
+    let far_geometry = GenerationalHandle::new(2, 1);
+    let near_material = GenerationalHandle::new(3, 1);
+    let far_material = GenerationalHandle::new(4, 1);
+    // Two permutations, so the two draws specialize to different pipelines.
+    let near_record = prism_render_material::fallback_material_record(near_material, 1);
+    let mut far_record = prism_render_material::fallback_material_record(far_material, 1);
+    far_record.illumination = Illumination::Stylized;
+    far_record.render_class = MaterialRenderClass::Opaque;
+    let near_class = near_record.specialization().bin_class();
+    let far_class = far_record.specialization().bin_class();
+    assert_ne!(near_class, far_class, "the two materials differ");
+
+    let (device, colour_pipelines) = {
+        let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+        let runtime = render
+            .world
+            .resource::<RenderRuntimeResource<prism_render_driver_wgpu::WgpuInstance>>();
+        let device = runtime.runtime().device();
+        let descriptor = |rgb: &str| {
+            let source = format!(
+                "@vertex fn vs(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {{\n\
+                     return vec4<f32>(position, 1.0);\n\
+                 }}\n\
+                 @fragment fn fs() -> @location(0) vec4<f32> {{\n\
+                     return vec4<f32>({rgb});\n\
+                 }}"
+            );
+            let module = device.create_shader_module(&ShaderModuleDescriptor {
+                    label: Some("depth-test".into()),
+                    source: prism_render_driver::ShaderSource::Wgsl(alloc::borrow::Cow::Owned(source)),
+                });
+            RenderPipelineDescriptor {
+                label: Some("depth-test".into()),
+                layout: None,
+                vertex: VertexState {
+                    module,
+                    entry_point: "vs".into(),
+                    buffers: vec![],
+                },
+                primitive: PrimitiveState::default(),
+                depth_stencil: Some(prism_render_driver::DepthStencilState::reverse_z(
+                    crate::RENDER_DEPTH_FORMAT,
+                )),
+                multisample: MultisampleState::default(),
+                fragment: Some(prism_render_driver::FragmentState {
+                    module,
+                    entry_point: "fs".into(),
+                    targets: vec![Some(prism_render_driver::ColorTargetState::opaque(
+                        crate::RENDER_TARGET_FORMAT,
+                    ))],
+                }),
+            }
+        };
+        (
+            device,
+            ClassColourPipeline {
+                descriptors: alloc::collections::BTreeMap::from([
+                    (near_class, descriptor("1.0, 0.0, 0.0, 1.0")),
+                    (far_class, descriptor("0.0, 0.0, 1.0, 1.0")),
+                ]),
+            },
+        )
+    };
+    let _ = device;
+
+    let render = app.sub_app_mut(RenderApp).expect("the render sub-app");
+    render
+        .world
+        .insert_resource(MeshPipelines::new(colour_pipelines));
+    {
+        let registry = render.world.resource_mut::<SceneRegistry>();
+        // Both quads share class 5: they share a vertex stage while each binds
+        // its own mesh's buffers.
+        for (geometry, mesh) in [(near_geometry, near_mesh), (far_geometry, far_mesh)] {
+            registry.insert_geometry(GeometryRecord {
+                handle: geometry,
+                revision: 1,
+                vertex_buffer_class: 5,
+                index_buffer_class: 0,
+                primitive_start: 0,
+                primitive_count: 1,
+                lods: vec![GeometryLodRecord {
+                    level: 0,
+                    primitive_kind: GeometryPrimitiveKind::Indexed,
+                    element_count: 6,
+                    first_element: 0,
+                    base_vertex: 0,
+                    vertex_count: 4,
+                    screen_error: 0.0,
+                    resident: true,
+                    fallback: false,
+                }],
+            });
+            registry.bind_geometry_mesh(geometry, mesh);
+        }
+        registry.insert_material(near_record);
+        registry.insert_material(far_record);
+    }
+    {
+        let work = render.world.resource_mut::<VisibilityWorkList>();
+        // The *far* quad sorts last, so it is drawn last: without a working depth
+        // test it would overwrite the near quad and the centre would be blue.
+        work.push(GpuRenderWorkItem {
+            scene: GenerationalHandle::new(10, 1),
+            geometry: near_geometry,
+            material: near_material,
+            lod_or_cluster: 0,
+            pass_mask: RenderPassMask::OPAQUE,
+            visibility_stages: VisibilityStageMask::EARLY,
+            sort_key: WorkSortKey::new(0, 0, 0, 0, 1),
+        });
+        work.push(GpuRenderWorkItem {
+            scene: GenerationalHandle::new(11, 1),
+            geometry: far_geometry,
+            material: far_material,
+            lod_or_cluster: 0,
+            pass_mask: RenderPassMask::OPAQUE,
+            visibility_stages: VisibilityStageMask::EARLY,
+            sort_key: WorkSortKey::new(0, 0, 0, 0, 9),
+        });
+    }
+
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+    assert_eq!(
+        render.world.resource::<RenderFrameStats>().draws_recorded,
+        2,
+        "both quads were drawn"
+    );
+    let runtime = render
+        .world
+        .resource::<RenderRuntimeResource<prism_render_driver_wgpu::WgpuInstance>>();
+    assert!(runtime.runtime().wait_idle(), "the draws complete");
+    let target = *render.world.resource::<RenderTarget>();
+    let pixels = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba8(target.texture(), SIZE, SIZE);
+    let centre = ((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize;
+    assert_eq!(
+        &pixels[centre..centre + 4],
+        &[255, 0, 0, 255],
+        "the nearer quad survives the later, farther draw"
     );
 }

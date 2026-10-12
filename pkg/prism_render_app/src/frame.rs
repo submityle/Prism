@@ -21,6 +21,15 @@ use crate::target::RenderTarget;
 /// back, so a frame recorded here is verifiable on any GPU.
 pub const RENDER_TARGET_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
+/// The depth format of the render sub-app's frame.
+///
+/// `Depth32Float` is what reversed-Z wants: the convention is near 1 / far 0
+/// tested with `GreaterEqual`, which needs the float buffer's precision near the
+/// far plane (see [`DepthStencilState::reverse_z`]).
+///
+/// [`DepthStencilState::reverse_z`]: prism_render_driver::DepthStencilState::reverse_z
+pub const RENDER_DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
+
 /// Builds the frame graph: clear the target, then record the queued draws.
 ///
 /// One raster pass per phase that has items, in [`RenderPhase::ORDER`], each
@@ -89,6 +98,22 @@ pub(crate) fn target_graph(
         }
     }
 
+    // A frame that rasterizes geometry needs depth, and the pipelines it
+    // specializes must agree with the attachment: the queue stage passes
+    // `RENDER_DEPTH_FORMAT` into the variant for exactly this reason.
+    let depth = graph.import_texture(
+        "prism-render-app-depth",
+        TextureDesc::depth(target.depth_format()),
+        ImportedTexture {
+            texture: target.depth_texture(),
+            default_view: target.depth_view(),
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::depth_write(),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
+
     // The clear runs first and is never culled: the frame overwrites whatever the
     // previous frame left in the target.
     graph.add_raster_pass(
@@ -96,6 +121,7 @@ pub(crate) fn target_graph(
         PassFlags::SIDE_EFFECT,
         move |builder| {
             let _ = builder.color_attachment(color);
+            let _ = builder.depth_attachment(depth);
             |_ctx| {}
         },
     );
@@ -127,6 +153,7 @@ pub(crate) fn target_graph(
             PassFlags::SIDE_EFFECT,
             move |builder| {
                 let _ = builder.color_attachment(color);
+                let _ = builder.depth_attachment(depth);
                 for handle in &vertex_reads {
                     let _ = builder.read_vertex(*handle);
                 }

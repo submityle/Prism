@@ -66,11 +66,7 @@ impl SceneRegistry {
                 continue;
             };
             let class = record.vertex_buffer_class;
-            let updated = MeshClass::new(
-                vec![prepared.layout.clone()],
-                prepared.topology,
-                prepared.buffers,
-            );
+            let updated = MeshClass::new(vec![prepared.layout.clone()], prepared.topology);
             if self.mesh_classes.get(&class) != Some(&updated) {
                 self.mesh_classes.insert(class, updated);
                 written += 1;
@@ -85,8 +81,10 @@ mod tests {
     use alloc::vec;
 
     use prism_asset::AssetIndex;
-    use prism_mesh::{Indices, Mesh, MeshVertexAttribute, VertexAttributeValues};
     use prism_render_architecture::abi::GenerationalHandle;
+    use alloc::vec::Vec;
+
+    use prism_mesh::{Indices, Mesh, MeshVertexAttribute, VertexAttributeValues};
     use prism_render_architecture::geometry::{
         GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
     };
@@ -174,7 +172,6 @@ mod tests {
         )
         .expect("the quad prepares");
         let expected_layout = prepared.layout.clone();
-        let expected_buffers = prepared.buffers;
         meshes.insert(mesh_id, prepared);
 
         assert_eq!(registry.sync_mesh_classes(&meshes), 1, "the class is written");
@@ -184,11 +181,110 @@ mod tests {
             vec![expected_layout],
             "the layout is the mesh's"
         );
-        assert_eq!(class.topology, PrimitiveTopology::TriangleList);
-        assert_eq!(class.buffers, expected_buffers);
+        assert_eq!(
+            class.topology,
+            PrimitiveTopology::TriangleList,
+            "the topology is the mesh's"
+        );
 
         // A second sync with nothing changed writes nothing.
         assert_eq!(registry.sync_mesh_classes(&meshes), 0);
+    }
+
+    /// A vertex class is a vertex *stage*, not a buffer set: two geometries that
+    /// share one class but draw different meshes each bind their own mesh's
+    /// buffers.
+    ///
+    /// Sharing a class is the normal case — every mesh authored with the same
+    /// attributes is one vertex stage — so a class that carried one mesh's
+    /// buffers would silently draw that mesh for every geometry in the class.
+    #[test]
+    fn geometries_sharing_a_class_bind_their_own_meshes() {
+        use prism_render_visibility::{GpuRenderWorkItem, WorkSortKey};
+
+        let (device, queue) = null_device();
+        let mut registry = SceneRegistry::new();
+        // The class is *derived* by the sync from the first mesh bound to it.
+        let mesh_record = |handle: GenerationalHandle| {
+            GeometryRecord {
+                handle,
+                revision: 1,
+                vertex_buffer_class: 5,
+                index_buffer_class: 0,
+                primitive_start: 0,
+                primitive_count: 1,
+                lods: vec![GeometryLodRecord {
+                    level: 0,
+                    primitive_kind: GeometryPrimitiveKind::Indexed,
+                    element_count: 6,
+                    first_element: 0,
+                    base_vertex: 0,
+                    vertex_count: 4,
+                    screen_error: 0.0,
+                    resident: true,
+                    fallback: false,
+                }],
+            }
+        };
+        let material = prism_render_material::fallback_material_record(
+            GenerationalHandle::new(9, 1),
+            1,
+        );
+        let mut meshes = RenderAssets::<RenderMesh>::new();
+        let mut buffers = Vec::new();
+        for index in 0..2_u32 {
+            let geometry =
+                GenerationalHandle::new(1 + index, 1);
+            let mesh_id = prism_asset::AssetId::new(AssetIndex::from_parts(index, 1));
+            registry.insert_geometry(mesh_record(geometry));
+            registry.bind_geometry_mesh(geometry, mesh_id);
+            // Two meshes that differ in their buffers (different vertex counts).
+            let vertices = if index == 0 { 3 } else { 7 };
+            let positions: Vec<[f32; 3]> =
+                (0..vertices).map(|v| [v as f32, 0.0, 0.0]).collect();
+            let source = Mesh::new(PrimitiveTopology::TriangleList)
+                .with_attribute(
+                    MeshVertexAttribute::new("Vertex_Position", VertexFormat::Float32x3, 0),
+                    VertexAttributeValues::Float32x3(positions),
+                )
+                .expect("positions fit");
+            let prepared =
+                RenderMesh::prepare(&source, mesh_id, &device, &queue, None).expect("prepares");
+            buffers.push(prepared.buffers.vertices);
+            meshes.insert(mesh_id, prepared);
+        }
+        registry.insert_material(material);
+        assert_eq!(registry.sync_mesh_classes(&meshes), 1, "one class, two meshes");
+
+        let resolve = |index: u32| {
+            let geometry =
+                GenerationalHandle::new(1 + index, 1);
+            registry
+                .resolve(
+                    &GpuRenderWorkItem {
+                        scene: GenerationalHandle::new(20, 1),
+                        geometry,
+                        material: GenerationalHandle::new(9, 1),
+                        lod_or_cluster: 0,
+                        pass_mask: Default::default(),
+                        visibility_stages: Default::default(),
+                        sort_key: WorkSortKey::new(0, 0, 0, 0, 0),
+                    },
+                    &meshes,
+                    None,
+                    1,
+                    crate::DrawFunctionId(0),
+                )
+                .expect("both geometries resolve")
+        };
+        let first = resolve(0);
+        let second = resolve(1);
+        assert_eq!(first.vertices, buffers[0], "the first binds its own mesh");
+        assert_eq!(second.vertices, buffers[1], "the second binds its own mesh");
+        assert_ne!(
+            first.vertices, second.vertices,
+            "one class, two geometries, two buffer sets"
+        );
     }
 
     /// A geometry whose record or whose mesh is not resident is skipped, so the

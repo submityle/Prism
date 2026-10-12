@@ -1009,3 +1009,45 @@ fn compute_pass_records_indirect_dispatch() {
         "the indirect dispatch resolves the declared handle to the imported buffer"
     );
 }
+/// A depth attachment nobody has written is cleared to the engine's *far* plane:
+/// reversed-Z puts the near plane at 1 and the far plane at 0, so the clear
+/// value is `0.0` (with `GreaterEqual` testing, anything else would clear the
+/// buffer to "in front of every fragment" and reject the whole frame).
+#[test]
+fn a_fresh_depth_attachment_is_cleared_to_the_reversed_z_far_plane() {
+    let mut g = RenderGraph::new(swap());
+    let color = g.import_texture(
+        "color",
+        TextureDesc::color(TextureFormat::Rgba8Unorm),
+        imported_texture(1, 2),
+    );
+    let depth = g.import_texture(
+        "depth",
+        TextureDesc::color(TextureFormat::Depth32Float),
+        imported_texture(3, 4),
+    );
+    g.add_raster_pass("with-depth", PassFlags::SIDE_EFFECT, move |b| {
+        b.color_attachment(color);
+        b.depth_attachment(depth);
+        |_ctx| {}
+    });
+
+    let plan = g.compile().expect("acyclic graph compiles");
+    let index = plan
+        .order
+        .iter()
+        .position(|&i| i == 0)
+        .expect("the pass is scheduled");
+    let depth = plan.attachments[index]
+        .as_ref()
+        .expect("the pass has attachments")
+        .depth
+        .as_ref()
+        .expect("the pass has a depth attachment");
+    assert!(depth.writes, "the pass writes depth");
+    assert_eq!(
+        depth.depth_load,
+        prism_render_driver::DepthLoadOp::Clear(0.0),
+        "a fresh depth attachment clears to the reversed-Z far plane"
+    );
+}

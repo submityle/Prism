@@ -100,6 +100,7 @@ impl RenderQueues {
         device: &D,
         specializer: &mut MeshPipelineSpecializer,
         registry: &SceneRegistry,
+        meshes: &crate::RenderAssets<crate::RenderMesh>,
         instances: &CpuRenderScene,
         args: BufferHandle,
         bins: &ViewDrawBins,
@@ -121,6 +122,15 @@ impl RenderQueues {
                 outcome.unresolved += 1;
                 continue;
             };
+            // A class is a vertex stage; the buffers are the geometry's mesh's.
+            let Some(buffers) = registry
+                .geometry_mesh(range.key.geometry)
+                .and_then(|mesh| meshes.get(mesh))
+                .map(|prepared| prepared.buffers)
+            else {
+                outcome.unresolved += 1;
+                continue;
+            };
             let Some(instance) = instances.get(range.representative_scene) else {
                 outcome.unresolved += 1;
                 continue;
@@ -134,8 +144,8 @@ impl RenderQueues {
                     pipeline,
                     draw,
                     geometry: range.key.geometry,
-                    vertices: mesh_class.buffers.vertices,
-                    indices: mesh_class.buffers.indices,
+                    vertices: buffers.vertices,
+                    indices: buffers.indices,
                     first: 0,
                     count: 0,
                     base_vertex: 0,

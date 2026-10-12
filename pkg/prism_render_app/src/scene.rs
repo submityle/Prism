@@ -17,15 +17,15 @@ use alloc::collections::BTreeMap;
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::geometry::{GeometryPrimitiveKind, GeometryRecord};
 use prism_render_architecture::gpu_scene::{GeometryHandle, SceneMaterialHandle};
-use prism_render_driver::{
-    BufferId, IndexFormat, PrimitiveTopology, TextureFormat, VertexBufferLayout,
-};
+use prism_render_driver::{BufferId, IndexFormat, PrimitiveTopology, TextureFormat, VertexBufferLayout};
 use prism_render_material::MaterialRecord;
 use prism_render_visibility::{DrawBinCandidate, DrawBinKey, GpuRenderWorkItem};
 
 use crate::draw::DrawFunctionId;
 use crate::frame::RENDER_TARGET_FORMAT;
+use crate::mesh::RenderMesh;
 use crate::mesh_pipeline::MeshPipelineKey;
+use crate::render_asset::RenderAssets;
 use crate::queue::{DrawRequest, phase_for_render_class};
 
 /// The frame's visible draw work, published by the visibility stage.
@@ -84,30 +84,27 @@ impl VisibilityWorkList {
 ///
 /// A work item names a `vertex_buffer_class`; this is where that class maps to
 /// the concrete mesh pipeline inputs. Two geometries sharing a class share a
-/// vertex stage (and, if their variants match, a pipeline).
+/// vertex stage (and, if their variants match, a pipeline) — which is the point
+/// of a class: *every* mesh authored with position + uv is one vertex stage.
+///
+/// The class deliberately carries **no buffers**. Buffers belong to the mesh the
+/// geometry draws (they are that mesh's vertex and index data), so two meshes
+/// that share a class share a vertex stage while each binds its own geometry.
+/// The buffers are resolved from the prepared mesh when a work item is resolved —
+/// see [`resolve`](SceneRegistry::resolve).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshClass {
     /// The vertex buffer layouts the class's meshes use.
     pub layout: Vec<VertexBufferLayout>,
     /// The primitive topology the class draws with.
     pub topology: PrimitiveTopology,
-    /// The GPU buffers a draw of this class binds.
-    pub buffers: MeshBuffers,
 }
 
 impl MeshClass {
-    /// A class with `layout` drawn as `topology` from `buffers`.
+    /// A class whose meshes are laid out as `layout` and drawn as `topology`.
     #[must_use]
-    pub fn new(
-        layout: Vec<VertexBufferLayout>,
-        topology: PrimitiveTopology,
-        buffers: MeshBuffers,
-    ) -> Self {
-        Self {
-            layout,
-            topology,
-            buffers,
-        }
+    pub fn new(layout: Vec<VertexBufferLayout>, topology: PrimitiveTopology) -> Self {
+        Self { layout, topology }
     }
 }
 
@@ -195,6 +192,7 @@ impl SceneRegistry {
     pub fn resolve(
         &self,
         item: &GpuRenderWorkItem,
+        meshes: &RenderAssets<RenderMesh>,
         depth_format: Option<TextureFormat>,
         sample_count: u32,
         draw: DrawFunctionId,
@@ -203,6 +201,10 @@ impl SceneRegistry {
         let lod = geometry.resolve_lod(item.lod_or_cluster)?;
         let material = self.materials.get(&item.material)?;
         let mesh_class = self.mesh_classes.get(&geometry.vertex_buffer_class)?;
+        // The geometry's own mesh owns the buffers: a class is a vertex stage,
+        // not a buffer set, so several meshes share it.
+        let mesh = self.geometry_mesh(item.geometry)?;
+        let prepared = meshes.get(mesh)?;
 
         // `illumination` is a response axis, not a phase; the phase comes from
         // the blend family, and the permutation identity keys the pipeline.
@@ -227,8 +229,8 @@ impl SceneRegistry {
             scene: item.scene,
             order: item.sort_key.0,
             draw,
-            vertices: mesh_class.buffers.vertices,
-            indices: mesh_class.buffers.indices,
+            vertices: prepared.buffers.vertices,
+            indices: prepared.buffers.indices,
             first: lod.first_element,
             count: lod.element_count,
             base_vertex: lod.base_vertex,
@@ -279,11 +281,15 @@ impl SceneRegistry {
     /// same set the direct path ([`resolve`](Self::resolve)) draws — so both
     /// paths agree on what is drawable and a bin never outlives its content.
     ///
-    /// `indexed`/`primitive_kind` follow the *class's bound buffers*, not the
-    /// geometry record's statement: the draw binds the class's index buffer (or
-    /// none), and the bin's GPU header must describe the draw that will happen.
+    /// `indexed`/`primitive_kind` follow the geometry's own prepared mesh, since
+    /// the draw binds that mesh's index buffer (or none) and the bin's GPU header
+    /// must describe the draw that will happen.
     #[must_use]
-    pub fn bin_candidates(&self, work: &[GpuRenderWorkItem]) -> Vec<DrawBinCandidate> {
+    pub fn bin_candidates(
+        &self,
+        meshes: &RenderAssets<RenderMesh>,
+        work: &[GpuRenderWorkItem],
+    ) -> Vec<DrawBinCandidate> {
         let mut candidates = Vec::new();
         for item in work {
             let Some(geometry) = self.geometries.get(&item.geometry) else {
@@ -295,10 +301,19 @@ impl SceneRegistry {
             let Some(material) = self.materials.get(&item.material) else {
                 continue;
             };
-            let Some(mesh_class) = self.mesh_classes.get(&geometry.vertex_buffer_class) else {
+            // Both must exist for the item to be drawable: the class is the
+            // vertex stage, and the geometry's own mesh holds the buffers — a
+            // class says nothing about a particular mesh's buffers.
+            if !self.mesh_classes.contains_key(&geometry.vertex_buffer_class) {
+                continue;
+            }
+            let Some(prepared) = self
+                .geometry_mesh(item.geometry)
+                .and_then(|mesh| meshes.get(mesh))
+            else {
                 continue;
             };
-            let indexed = mesh_class.buffers.indices.is_some();
+            let indexed = prepared.is_indexed();
             candidates.push(DrawBinCandidate {
                 scene: item.scene,
                 key: DrawBinKey {

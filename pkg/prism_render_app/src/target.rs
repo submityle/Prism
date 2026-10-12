@@ -19,18 +19,23 @@ pub(crate) const RENDER_TARGET_USAGES: TextureUsages = TextureUsages::RENDER_ATT
     .union(TextureUsages::COPY_SRC)
     .union(TextureUsages::COPY_DST);
 
-/// The render sub-app's offscreen frame target.
+/// The render sub-app's offscreen frame target: its color plane and its depth
+/// plane.
 ///
-/// It is an ordinary RHI texture imported into each frame graph, owned here so
-/// it survives across frames (the graph never allocates or frees it). The
-/// render system resizes it when the extracted intent asks for a different
-/// viewport.
+/// Both are ordinary RHI textures imported into each frame graph, owned here so
+/// they survive across frames (the graph never allocates or frees them). They
+/// live in one resource because they must agree on size — a depth plane that
+/// disagrees with the color plane is an invalid framebuffer — so they are
+/// created, resized, and destroyed together.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Resource)]
 pub struct RenderTarget {
     texture: TextureId,
     view: TextureViewId,
-    viewport: RenderViewport,
     format: TextureFormat,
+    depth_texture: TextureId,
+    depth_view: TextureViewId,
+    depth_format: TextureFormat,
+    viewport: RenderViewport,
 }
 
 impl RenderTarget {
@@ -41,7 +46,7 @@ impl RenderTarget {
         Self::create(device, RenderViewport::from_extent(extent))
     }
 
-    /// Creates a target of `viewport` in the crate's frame-target format.
+    /// Creates a target of `viewport` in the crate's frame-target formats.
     fn create<D: RenderDevice>(device: &D, viewport: RenderViewport) -> Self {
         let format = crate::RENDER_TARGET_FORMAT;
         let texture = device.create_texture(&TextureDescriptor::new_2d(
@@ -50,11 +55,22 @@ impl RenderTarget {
             RENDER_TARGET_USAGES,
         ));
         let view = device.create_texture_view(texture, &TextureViewDescriptor::default());
+        let depth_format = crate::RENDER_DEPTH_FORMAT;
+        let depth_texture = device.create_texture(&TextureDescriptor::new_2d(
+            viewport.extent(),
+            depth_format,
+            TextureUsages::RENDER_ATTACHMENT,
+        ));
+        let depth_view =
+            device.create_texture_view(depth_texture, &TextureViewDescriptor::default());
         Self {
             texture,
             view,
-            viewport,
             format,
+            depth_texture,
+            depth_view,
+            depth_format,
+            viewport,
         }
     }
 
@@ -73,10 +89,12 @@ impl RenderTarget {
         *self = Self::create(device, viewport);
     }
 
-    /// Releases the target's texture and view.
+    /// Releases the target's textures and views.
     pub(crate) fn destroy<D: RenderDevice>(&self, device: &D) {
         device.destroy_texture_view(self.view);
         device.destroy_texture(self.texture);
+        device.destroy_texture_view(self.depth_view);
+        device.destroy_texture(self.depth_texture);
     }
 
     /// The RHI texture the frame is rendered into.
@@ -101,5 +119,23 @@ impl RenderTarget {
     #[must_use]
     pub fn format(&self) -> TextureFormat {
         self.format
+    }
+
+    /// The RHI texture holding the frame's depth.
+    #[must_use]
+    pub fn depth_texture(&self) -> TextureId {
+        self.depth_texture
+    }
+
+    /// The default view of [`depth_texture`](Self::depth_texture).
+    #[must_use]
+    pub fn depth_view(&self) -> TextureViewId {
+        self.depth_view
+    }
+
+    /// The depth plane's texel format.
+    #[must_use]
+    pub fn depth_format(&self) -> TextureFormat {
+        self.depth_format
     }
 }

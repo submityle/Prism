@@ -95,7 +95,7 @@ pub use bin_queue::{BinQueueOutcome, bin_indirect_args};
 pub use config::RenderAppConfig;
 pub use device_loss::DeviceLossSignal;
 pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
-pub use frame::RENDER_TARGET_FORMAT;
+pub use frame::{RENDER_DEPTH_FORMAT, RENDER_TARGET_FORMAT};
 pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp, RenderStartup};
 pub use mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer};

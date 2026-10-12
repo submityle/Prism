@@ -156,8 +156,16 @@ fn derive_attachments(
                     } else {
                         acc.input_version
                     };
+                    // A depth attachment that has never been written is cleared.
+                    //
+                    // The value is the *far* plane of the engine's depth
+                    // convention — reversed-Z with the near plane at 1 and the far
+                    // plane at 0, tested with `GreaterEqual` (design: "所有透视投影
+                    // reversed-Z；深度约定全仓一致（近 1 远 0，测试 GREATER，清 0）").
+                    // Clearing to 1.0 (the GL/D3D far plane) would clear to *near*
+                    // under reversed-Z, so nothing would pass the test.
                     let depth_load = if writes && acc.input_version == 0 {
-                        DepthLoadOp::Clear(1.0)
+                        DepthLoadOp::Clear(0.0)
                     } else {
                         DepthLoadOp::Load
                     };

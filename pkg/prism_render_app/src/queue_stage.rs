@@ -19,6 +19,7 @@ use crate::runtime_resource::RenderRuntimeResource;
 use crate::scene::{SceneRegistry, VisibilityWorkList};
 use crate::stats::RenderFrameStats;
 
+use crate::frame::RENDER_DEPTH_FORMAT;
 use crate::mesh::RenderMesh;
 
 /// Resolves the frame's visible work into queued draws.
@@ -61,10 +62,12 @@ pub(crate) fn fill_queues<I>(
         runtime.runtime().device(),
         &mut specializer,
         &registry,
+        &meshes,
         work.items(),
-        // The spine's frame has no depth attachment yet; a depth pass adds one
-        // and the variants follow.
-        None,
+        // The frame has a depth attachment, so the variants must declare the
+        // matching depth state: a pipeline and the pass it records into have to
+        // agree on the attachment set.
+        Some(RENDER_DEPTH_FORMAT),
         1,
         canonical::MESH,
         &*pipelines,
