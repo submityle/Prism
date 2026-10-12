@@ -34,6 +34,17 @@ pub trait MeshRecorder {
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>);
     /// Records an indexed draw.
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>);
+    /// Records a single indexed indirect draw from a declared argument buffer.
+    fn draw_indexed_indirect(&mut self, args: prism_render_graph::BufferHandle, offset: u64);
+    /// Records `count` packed indexed indirect draws from a declared argument
+    /// array (the GPU-driven bin path).
+    fn multi_draw_indirect(
+        &mut self,
+        args: prism_render_graph::BufferHandle,
+        offset: u64,
+        count: u32,
+        stride: u32,
+    );
 }
 
 /// A registered draw function.
@@ -106,5 +117,19 @@ impl MeshRecorder for prism_render_graph::ExecuteContext<'_> {
 
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
         self.draw_indexed(indices, base_vertex, instances);
+    }
+
+    fn draw_indexed_indirect(&mut self, args: prism_render_graph::BufferHandle, offset: u64) {
+        self.draw_indexed_indirect(args, offset);
+    }
+
+    fn multi_draw_indirect(
+        &mut self,
+        args: prism_render_graph::BufferHandle,
+        offset: u64,
+        count: u32,
+        stride: u32,
+    ) {
+        self.multi_draw_indirect(args, offset, count, stride);
     }
 }

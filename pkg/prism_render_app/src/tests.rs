@@ -257,6 +257,7 @@ fn render_queues_are_phased_and_sort_deterministically() {
         first: 0,
         count: 3,
         base_vertex: 0,
+        indirect: None,
         lod_level: 0,
         material,
         scene,
@@ -338,6 +339,15 @@ fn recording_a_phase_invokes_each_draw_function() {
             _: core::ops::Range<u32>,
         ) {
         }
+        fn draw_indexed_indirect(&mut self, _: prism_render_graph::BufferHandle, _: u64) {}
+        fn multi_draw_indirect(
+            &mut self,
+            _: prism_render_graph::BufferHandle,
+            _: u64,
+            _: u32,
+            _: u32,
+        ) {
+        }
     }
 
     let mut functions = DrawFunctions::new();
@@ -360,6 +370,7 @@ fn recording_a_phase_invokes_each_draw_function() {
                 first: 0,
                 count: 3,
                 base_vertex: 0,
+                indirect: None,
                 lod_level: 0,
                 material,
                 scene,
@@ -1197,6 +1208,7 @@ fn mesh_draw_records_into_a_graph_pass() {
             first: 0,
             count: 3,
             base_vertex: 0,
+            indirect: None,
             lod_level: 0,
             material: GenerationalHandle::new(2, 1),
             scene: GenerationalHandle::new(3, 1),
@@ -1248,5 +1260,139 @@ fn mesh_draw_records_into_a_graph_pass() {
     assert!(
         matches!(commands.get(3), Some(RenderCommand::DrawIndexed { .. })),
         "one indexed draw is issued"
+    );
+}
+
+/// `mesh_bin_draw` records a GPU-driven bin draw: bind the pipeline and
+/// geometry, then issue one multi-draw over the item's indirect argument range.
+#[test]
+fn mesh_bin_draw_records_a_multi_draw() {
+    use prism_render_driver::{
+        BufferState, BufferUsages, CommandBuffer, IndexFormat, Pass, RenderCommand,
+    };
+    use prism_render_graph::{
+        BufferDesc, ImportedBuffer, ImportedTexture, PassFlags, RenderGraph, TextureDesc,
+    };
+
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+
+    let vertices = null_vertex_buffer(&device);
+    let indices = device.create_buffer(&BufferDescriptor {
+        label: Some("bin-indices".into()),
+        size: 64,
+        usage: BufferUsages::INDEX,
+        mapped_at_creation: false,
+    });
+    let args_buffer = device.create_buffer(&BufferDescriptor {
+        label: Some("bin-args".into()),
+        size: 64,
+        usage: BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let target = device.create_texture(&TextureDescriptor::new_2d(
+        Extent3d::new_2d(4, 4),
+        TextureFormat::Rgba8Unorm,
+        TextureUsages::RENDER_ATTACHMENT,
+    ));
+    let view = device.create_texture_view(target, &Default::default());
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+    let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some("bin-mesh".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: None,
+    });
+
+    let mut functions = DrawFunctions::new();
+    let draw = functions.register(crate::mesh_bin_draw);
+
+    let mut graph = RenderGraph::new(Extent3d::new_2d(4, 4));
+    let target = graph.import_texture(
+        "target",
+        TextureDesc::color(TextureFormat::Rgba8Unorm),
+        ImportedTexture {
+            texture: target,
+            default_view: view,
+            entry_state: prism_render_driver::TextureState::initial(),
+            exit_state: prism_render_driver::TextureState::copy_src(),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
+    let args = graph.import_buffer(
+        "bin-args",
+        BufferDesc::new(64, BufferUsages::INDIRECT),
+        ImportedBuffer {
+            buffer: args_buffer,
+            entry_state: BufferState::initial(),
+        },
+    );
+
+    let mut queues = RenderQueues::new();
+    queues.push(
+        RenderPhase::Opaque,
+        PhaseItem {
+            pipeline,
+            draw,
+            geometry: GenerationalHandle::new(1, 1),
+            vertices,
+            indices: Some((indices, IndexFormat::Uint16)),
+            first: 0,
+            count: 0,
+            base_vertex: 0,
+            indirect: Some(crate::IndirectArgs {
+                args,
+                offset: 0,
+                count: 1,
+                stride: prism_render_driver::DRAW_INDEXED_INDIRECT_ARGS_SIZE,
+            }),
+            lod_level: 0,
+            material: GenerationalHandle::new(2, 1),
+            scene: GenerationalHandle::new(3, 1),
+            order: 0,
+        },
+    );
+
+    graph.add_raster_pass("bin-draw", PassFlags::SIDE_EFFECT, move |builder| {
+        let _ = builder.color_attachment(target);
+        let _ = builder.read_indirect(args);
+        move |ctx| queues.record(RenderPhase::Opaque, ctx, &functions)
+    });
+
+    let capture = CapturingQueue::default();
+    graph.execute(&device, &capture).expect("the graph executes");
+
+    let buffers: Vec<CommandBuffer> = capture.take();
+    let commands = buffers
+        .iter()
+        .find_map(|buffer| match buffer.passes.first() {
+            Some(Pass::Render { commands, .. }) => Some(commands),
+            _ => None,
+        })
+        .expect("the raster pass was recorded");
+    assert!(
+        matches!(commands.first(), Some(RenderCommand::SetPipeline(_))),
+        "the bin's pipeline is bound first"
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, RenderCommand::MultiDrawIndirect { count: 1, .. })),
+        "one multi-draw is issued from the indirect argument range"
     );
 }

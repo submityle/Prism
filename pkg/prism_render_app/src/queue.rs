@@ -108,6 +108,12 @@ pub struct PhaseItem {
     pub count: u32,
     /// The base vertex added to each index.
     pub base_vertex: i32,
+    /// The indirect argument range, for the GPU-driven bin path.
+    ///
+    /// When set, the draw function issues one multi-draw from this range instead
+    /// of the item's direct element range (the vertex/index buffers are still
+    /// bound; the arguments supply counts, first index, and base vertex).
+    pub indirect: Option<IndirectArgs>,
     /// The resolved LOD level this draw renders.
     pub lod_level: u32,
     /// The material whose bindings this draw uses.
@@ -116,6 +122,19 @@ pub struct PhaseItem {
     pub scene: SceneHandle,
     /// The caller's ordering key within the phase (e.g. a depth or bin key).
     pub order: u64,
+}
+
+/// A range of packed indirect argument records in a declared buffer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct IndirectArgs {
+    /// The argument buffer, declared in the frame graph (so it is synchronized).
+    pub args: prism_render_graph::BufferHandle,
+    /// The byte offset of the first record.
+    pub offset: u64,
+    /// The number of records to draw.
+    pub count: u32,
+    /// The byte stride between records (tightly packed indexed args).
+    pub stride: u32,
 }
 
 /// The frame's queued draws, one list per [`RenderPhase`].
@@ -223,6 +242,7 @@ impl RenderQueues {
                     first: request.first,
                     count: request.count,
                     base_vertex: request.base_vertex,
+                    indirect: None,
                     lod_level: request.lod_level,
                     material: request.material,
                     scene: request.scene,
@@ -271,6 +291,7 @@ impl RenderQueues {
                     first: request.first,
                     count: request.count,
                     base_vertex: request.base_vertex,
+                    indirect: None,
                     lod_level: request.lod_level,
                     material: request.material,
                     scene: request.scene,

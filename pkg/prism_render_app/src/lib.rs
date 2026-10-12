@@ -85,10 +85,10 @@ pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
 pub use frame::RENDER_TARGET_FORMAT;
 pub use label::{Render, RenderApp};
 pub use mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer};
-pub use mesh_draw::mesh_draw;
+pub use mesh_draw::{mesh_bin_draw, mesh_draw};
 pub use pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
 pub use plugin::PrismRenderPlugin;
-pub use queue::{DrawRequest, PhaseItem, RenderQueues, phase_for_render_class};
+pub use queue::{DrawRequest, IndirectArgs, PhaseItem, RenderQueues, phase_for_render_class};
 pub use record::RenderRecord;
 pub use runtime_resource::RenderRuntimeResource;
 pub use scene::{MeshClass, SceneRegistry, VisibilityWorkList};
@@ -108,7 +108,9 @@ pub mod prelude {
     pub use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer};
     pub use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
     pub use crate::plugin::PrismRenderPlugin;
-    pub use crate::queue::{DrawRequest, PhaseItem, RenderQueues, phase_for_render_class};
+    pub use crate::queue::{
+        DrawRequest, IndirectArgs, PhaseItem, RenderQueues, phase_for_render_class,
+    };
     pub use crate::record::RenderRecord;
     pub use crate::scene::{MeshClass, SceneRegistry, VisibilityWorkList};
     pub use crate::sets::{RenderPhase, RenderSystems};

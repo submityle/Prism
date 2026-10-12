@@ -31,3 +31,23 @@ pub fn mesh_draw(item: &PhaseItem, ctx: &mut dyn MeshRecorder) {
         }
     }
 }
+
+/// Records a GPU-driven bin draw: bind the pipeline and geometry, then issue one
+/// multi-draw over the item's indirect argument range.
+///
+/// This is the bin path of the GPU-driven base: the arguments (element count,
+/// first index, base vertex, and — for the GPU-driven cull — the instance count
+/// the CPU never learns) come from a buffer the frame graph declared, so the
+/// read is synchronized like any other declared access. An item with no indirect
+/// range records nothing here.
+pub fn mesh_bin_draw(item: &PhaseItem, ctx: &mut dyn MeshRecorder) {
+    let Some(args) = item.indirect else {
+        return;
+    };
+    ctx.set_pipeline(item.pipeline);
+    ctx.set_vertex_buffer(0, item.vertices, 0);
+    if let Some((indices, format)) = item.indices {
+        ctx.set_index_buffer(indices, format, 0);
+    }
+    ctx.multi_draw_indirect(args.args, args.offset, args.count, args.stride);
+}
