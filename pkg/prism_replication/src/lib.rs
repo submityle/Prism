@@ -40,6 +40,9 @@
 //!   [`ClientSession`](session::ClientSession) (prediction fed by inbound frames),
 //!   exchanging framed bytes over any transport.
 //!
+//! With the `app` feature, [`plugin`] wires a client session into a `prism_app`
+//! `App` as a plugin (design §25.2).
+//!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
 //! they land; nothing here is a stub.
@@ -48,6 +51,9 @@
 #![no_std]
 
 extern crate alloc;
+
+#[cfg(feature = "std")]
+extern crate std;
 
 pub mod sequence;
 
@@ -68,3 +74,6 @@ pub mod transport;
 pub mod frame;
 
 pub mod session;
+
+#[cfg(feature = "app")]
+pub mod plugin;

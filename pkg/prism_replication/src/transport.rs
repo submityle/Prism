@@ -16,6 +16,119 @@
 
 use alloc::vec::Vec;
 
+/// The transport provider seam (design §6): bytes out, bytes in.
+///
+/// A real provider (reliable UDP / QUIC) implements this over a socket; the
+/// in-memory pair below implements it over a shared queue, so an app can be wired
+/// end-to-end without a network. `Transport` is `no_std`-clean — the std-only
+/// pieces are the concrete in-memory endpoints.
+pub trait Transport: Send + Sync {
+    /// Send `bytes` to the peer.
+    fn send(&mut self, bytes: &[u8]);
+    /// Take the next inbound message, if any.
+    fn recv(&mut self) -> Option<Vec<u8>>;
+}
+
+/// A shared in-memory [`Transport`] pair (std): one endpoint's `send` lands in the
+/// other's inbox immediately, so an app can be driven end-to-end in tests and
+/// local play without a socket.
+#[cfg(feature = "std")]
+pub mod memory {
+    use super::Transport;
+    use alloc::collections::VecDeque;
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Inboxes {
+        to_a: VecDeque<Vec<u8>>,
+        to_b: VecDeque<Vec<u8>>,
+    }
+
+    /// One end of a shared in-memory transport pair.
+    #[derive(Clone)]
+    pub struct InMemoryTransport {
+        inboxes: Arc<Mutex<Inboxes>>,
+        as_a: bool,
+    }
+
+    impl InMemoryTransport {
+        /// Two connected endpoints `(a, b)`.
+        #[must_use]
+        pub fn pair() -> (Self, Self) {
+            let inboxes = Arc::new(Mutex::new(Inboxes::default()));
+            (
+                Self {
+                    inboxes: Arc::clone(&inboxes),
+                    as_a: true,
+                },
+                Self {
+                    inboxes,
+                    as_a: false,
+                },
+            )
+        }
+
+        /// How many messages are waiting to be received by this endpoint.
+        #[must_use]
+        pub fn pending(&self) -> usize {
+            let inboxes = lock(&self.inboxes);
+            if self.as_a {
+                inboxes.to_a.len()
+            } else {
+                inboxes.to_b.len()
+            }
+        }
+    }
+
+    impl Transport for InMemoryTransport {
+        fn send(&mut self, bytes: &[u8]) {
+            let mut inboxes = lock(&self.inboxes);
+            let target = if self.as_a {
+                &mut inboxes.to_b
+            } else {
+                &mut inboxes.to_a
+            };
+            target.push_back(bytes.to_vec());
+        }
+
+        fn recv(&mut self) -> Option<Vec<u8>> {
+            let mut inboxes = lock(&self.inboxes);
+            let source = if self.as_a {
+                &mut inboxes.to_a
+            } else {
+                &mut inboxes.to_b
+            };
+            source.pop_front()
+        }
+    }
+
+    fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_pair_delivers_each_way_once() {
+            let (mut a, mut b) = InMemoryTransport::pair();
+            a.send(b"from-a"); // lands in B's inbox
+            b.send(b"from-b"); // lands in A's inbox
+            assert_eq!(b.pending(), 1, "B has A's message");
+            assert_eq!(a.pending(), 1, "A has B's message");
+            assert_eq!(a.recv(), Some(b"from-b".to_vec()));
+            assert_eq!(b.recv(), Some(b"from-a".to_vec()));
+            assert_eq!(a.recv(), None);
+            assert_eq!(b.pending(), 0);
+        }
+    }
+}
+
 /// A deterministic two-endpoint link with latency, jitter and loss.
 ///
 /// Delivery is driven by [`poll`](Self::poll): each call advances one logical

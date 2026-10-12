@@ -8,6 +8,16 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+prism_app = { path = "../prism_app", optional = true }
+prism_ecs = { path = "../prism_ecs", optional = true }
+
+[features]
+default = []
+# `std`-only pieces: the shared in-memory transport and the `prism_app` seam.
+std = []
+# The `prism_app` integration (§25.2): a `ReplicationPlugin` that drives a client
+# session from the app's frame loop. Pulls in `prism_app` (std).
+app = ["std", "dep:prism_app", "dep:prism_ecs"]
 
 [lints]
 workspace = true
