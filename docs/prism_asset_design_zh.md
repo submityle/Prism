@@ -20,11 +20,11 @@
 
 以下状态只记录仓库中已存在、可运行并有测试覆盖的能力，不把设计文字当作实现：
 
-- **已完成**：`prism_asset` M0/M1 核（稳定身份、句柄、代际存储、依赖图、加载状态、错误注册、loader 选择与同步 `AssetServer`/VFS）；`prism_asset_container` 的 v1 原始 payload 容器读写、严格 ToC/哈希校验、范围读取与优先级 overlay。
+- **已完成**：`prism_asset` M0/M1 核（稳定身份、句柄、代际存储、依赖图、加载状态、错误注册、loader 选择与同步 `AssetServer`/VFS）；`prism_asset_container` 的 v1 原始 payload 容器读写、严格 ToC/哈希校验、范围读取与优先级 overlay；ChunkPlanner/Writer 的起始对齐约束、Runtime Manifest 的 manifest/chunk priority 传递，以及同名容器 remount 替换旧 mount 的回归修复均已有测试覆盖。
 - **部分完成**：M2 已有同步装配之上的 bounded scheduler facade；它能做线程池投递、同路径合并、优先级提升、容量背压、消费者取消、waiter 生命周期清理和完成通知竞态防护，并有并发测试，但底层 `AssetServer` 仍由单 mutex 串行，尚不是设计中的 EDL/I/O-CPU 分离调度。
-- **部分完成**：Asset Build 已有确定性串行 `BuildGraph`/`Processor`、ArtifactKey、BLAKE3 CAS、持久化本地 DDC 描述符索引、本地 manifest revision 与进程内事务发布；`BuildExecutor` 已把图执行、DDC/CAS 校验和、缓存损坏重建及事务发布接成单机串行核心闭环，但仍缺完整 Recipe/Importer 主链、并行调度、跨进程 DDC 写入协调、远程 CAS、CLI 和真实纹理垂直链。
-- **部分完成**：M5 容器已有 v1 raw reader/writer、严格 ToC/哈希校验、范围读取、overlay、Runtime Manifest 路由索引、实现 `AssetReader` 的 `ManifestAssetReader`，以及 ChunkPlanner 驱动的 v2 raw 物理布局读写；仍未接入 `AssetServer` 的异步 EDL/I/O-CPU 调度，也没有 Cook/发行闭环。
-- **未完成**：M3 已有文件 watcher/去抖事件模型、可由调用方驱动的 `AssetServer::apply_change_batch` 接线、依赖闭包重装配计划、失败依赖门禁及 labeled 子资产候选图校验；但 watcher 尚无自动后台消费循环，重载仍在同步 server 锁内执行，失败 staging 的 provisional ID/catalog 回滚也未闭环。M4 预算驱动流送、压缩/加密容器、DirectStorage 形态队列和完整 GPU 解压仍未实现（`prism_gdeflate_gpu` 仍有 CPU Huffman fallback）；M5/M6 的 BakeService、ECS/渲染/编辑器集成、发行闭包/patch/DLC、签名与 Provenance 仍未完成。
+- **部分完成**：Asset Build 已有确定性串行 `BuildGraph`/`Processor`、ArtifactKey、BLAKE3 CAS、持久化本地 DDC 描述符索引、本地 manifest revision 与进程内事务发布；`BuildExecutor` 已把图执行、DDC/CAS 校验和、缓存损坏重建及事务发布接成单机串行核心闭环，但仍缺完整 Recipe/Importer 主链、并行调度、远程 CAS、CLI 和真实纹理垂直链。Unix DDC 索引已用 advisory `flock` 协调跨进程 read-modify-write；真实跨进程测试、非 Unix 协调和完整崩溃恢复仍未完成。
+- **部分完成**：M5 容器已有 v1 raw reader/writer、严格 ToC/哈希校验、范围读取、overlay、Runtime Manifest 路由索引、实现 `AssetReader` 的 `ManifestAssetReader`，以及 ChunkPlanner 驱动的 v2 raw 物理布局读写；v2 对齐、跨 Chunk 依赖的物理先后顺序与当前布局读回已有测试，但完整 wire contract（持久化 ChunkPlan/依赖/流送/平台/压缩加密/签名元数据）尚未冻结或实现。Manifest 路由没有绑定不可变容器内容摘要或 generation。`read_range` 仍建立在完整内存容器之上，不是文件/CDN 的按 Chunk 流式后端。仍未接入 `AssetServer` 的异步 EDL/I/O-CPU 调度，也没有 Cook/发行闭环。
+- **部分完成**：M3 已有文件 watcher/去抖事件模型、可由调用方驱动的 `AssetServer::apply_change_batch` 接线、依赖闭包重装配计划、失败依赖门禁及 labeled 子资产候选图校验；source reload 现在会传播到 labeled 输出的消费者，且有 ownership promotion 回归测试，避免 source→label 与 label→source 形成永久强引用环。旧 revision 消失的 label 生命周期、staging 的 provisional ID/catalog 回滚仍未闭环；watcher 尚无自动后台消费循环，重载仍在同步 server 锁内执行。Unix `FsSource` 已改用目录 fd 相对打开和 `O_NOFOLLOW`，但 Windows reparse-point 防护及非 Unix 等价安全打开语义仍未完成。M4 预算驱动流送、压缩/加密容器、DirectStorage 形态队列和完整 GPU 解压仍未实现（`prism_gdeflate_gpu` 仍有 CPU Huffman fallback）；M5/M6 的 BakeService、ECS/渲染/编辑器集成、发行闭包/patch/DLC、签名与 Provenance 仍未完成。
 
 因此本文下方路线图仍是目标规格；任何“已支持”表述均以上述实现状态和对应测试为准。
 
@@ -575,6 +575,8 @@ mount("assets", patch_pak,priority=30)   // 热补丁
 - **压缩块独立可解**：每块独立压缩（GDeflate/zstd/平台专有）+ 独立 `content_hash`，支撑随机 mip/page 访问与并行/GPU 解压；块表让 `read_range(mip_offset,len)` 精确定位到块集合。
 - **挂载叠加**：多容器按优先级构成合并 ToC（§10.3/§10.4），同 ChunkId 高优先级覆盖——补丁/DLC 只追加容器 + 新 ToC。
 
+> **当前实现边界**：上述为目标容器协议，不是已交付的完整 wire format。仓库当前只有 v1 raw 容器和 v2 raw 物理布局切片；`Codec` 仍只有 `Raw`，未实现压缩块表、加密、认证签名、Merkle/防回滚或完整依赖/流送表。v2 的版本常量和计划布局尚未形成独立的公开兼容协议，不能据此宣称跨版本或跨工具链互操作。
+
 **I/O 调度器（吃满带宽、压读放大）：**
 
 - **请求合并（coalescing）**：同容器相邻/重叠的 `read_range` 合并成一次大读，摊薄 syscall/队列开销；间隙小于阈值时「宁可多读一点」也不拆成两次（减少 IOP）。
@@ -589,6 +591,8 @@ mount("assets", patch_pak,priority=30)   // 热补丁
 ### 11.1 流送管理器
 
 大世界/高清资产装不下显存，必须按需换入换出。`StreamingManager` 对标 DOOM Eternal / Decima 的预算驱动流送：
+
+> **当前实现边界**：`StreamingManager`、预算驱动驻留/驱逐、滞回、预取、GPU 反馈闭环和 DirectStorage 形态批量队列尚未实现；现有 `read_range` 主要是完整内存容器上的范围切片，不能替代文件/CDN 的按 Chunk 流式读取。`prism_gdeflate_gpu` 也仍存在 CPU Huffman fallback，不能宣称已完成 GPU 直通解压。
 
 - **可流送资产声明分级**：纹理按 mip、网格按 LOD、虚拟纹理按 page。资产值内只常驻「低清兜底 + 元数据」，高清层级按需 `read_range` 流入。
 - **预算驱动驻留**：`StreamingBudget`（显存上限、每帧 I/O 带宽、并发解码）。管理器维护「每个可流送资产的目标层级」，由**请求器**（相机距离、屏幕占比、可见性、显式 pin）打分，预算内尽量满足高分请求，超预算则驱逐低分层级。
@@ -661,6 +665,8 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 
 `feature = "hot_reload"`，编辑器/迭代核心。
 
+> **当前实现边界**：已有 watcher 事件/去抖模型和由调用方驱动的批次应用入口；自动后台 watcher 消费循环、锁外异步重装配、失败 staging 回滚和旧 revision 消失的 labeled 子资产生命周期仍未完成。Unix `FsSource` 已使用目录 fd 相对打开与 `O_NOFOLLOW` 消除 metadata→open 的 TOCTOU 窗口；Windows reparse-point 防护及非 Unix 等价安全打开语义仍待实现。
+
 - **变更侦测**：`AssetSource::watch` 接平台 FS 事件（inotify/FSEvents/ReadDirectoryChangesW，经 `prism_platform` 隔离），去抖后产出「路径 X 变更」。
 - **失效传播**：路径 → `StableGuid` → `AssetIndex`，经 §8.1 依赖图**反向遍历** dependents，把该资产及其所有传递依赖者标 `stale`。例：`tex.png` 改 → 用它的 `material` stale → 用该材质的 `scene` 的受影响部分 stale。
 - **重装配**：stale 资产重走 §9.3 装配，完成后**原地替换**存储槽的值（同 `AssetIndex`、句柄不变），发 `Modified` 事件。消费方收 `Modified` 自行刷新（渲染重建 GPU 资源、UI 重绘）。句柄身份不变是关键——热改纹理不该让所有持有者的句柄失效。
@@ -723,6 +729,8 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 - 发行闭包扫描、分组与 chunk 规划：Asset Build §14.1–§14.4。
 - 容器格式（ToC + 压缩分块 blob）与 patch/DLC：Asset Build §14.3/§14.5。
 - 本 crate 侧：按内容目录（`StableGuid → ChunkId → 容器`）定位、挂载优先级（§10.4）、按段异步读取（§10.3/§10.5）、解压与 GPU 直通（§11.2）。
+
+> **当前实现边界**：当前运行时消费切片只覆盖 raw 容器、ToC/范围/哈希校验、Manifest 路由和 overlay；BLAKE3 是未认证完整性摘要，不是防篡改签名。压缩、加密、密钥/nonce/tag、Manifest/容器签名、Merkle root、anti-rollback、真正的文件/远程按段读取及 package-level rollback 均未完成。
 
 ---
 

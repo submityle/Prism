@@ -30,7 +30,9 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
-use std::path::{Component, Path, PathBuf};
+#[cfg(not(unix))]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 
 /// Why a read failed. Deliberately small and `std`-free in representation so it
 /// can cross the loader boundary cheaply and be matched on by callers that want
@@ -322,6 +324,11 @@ impl FsSource {
     }
 
     /// Joins a sanitized logical path onto the root, rejecting traversal.
+    ///
+    /// This is retained for platforms without a directory-fd API. Unix reads
+    /// use [`Self::open_relative_fd`] instead, so a metadata check can never be
+    /// raced with the subsequent open.
+    #[cfg(not(unix))]
     fn resolve(&self, path: &str) -> Result<PathBuf, ReadError> {
         let clean = sanitize_relative(path).ok_or(ReadError::InvalidPath)?;
         let mut full = self.root.clone();
@@ -349,6 +356,61 @@ impl FsSource {
         Ok(full)
     }
 
+    /// Opens a mount-relative path from a stable directory descriptor.
+    ///
+    /// Every directory component and the final file is opened with
+    /// `O_NOFOLLOW`. Once a directory descriptor has been acquired, replacing
+    /// a path component in the parent filesystem cannot redirect the lookup
+    /// outside the mounted tree. This closes the metadata-then-open TOCTOU
+    /// window in the Unix filesystem backend.
+    #[cfg(unix)]
+    fn open_relative_fd(&self, path: &str) -> Result<rustix::fd::OwnedFd, ReadError> {
+        use rustix::fs::{openat, Mode, OFlags, CWD};
+
+        let clean = sanitize_relative(path).ok_or(ReadError::InvalidPath)?;
+        let mut directory = openat(
+            CWD,
+            &self.root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(Self::map_rustix)?;
+
+        let mut components = clean.split('/').filter(|segment| !segment.is_empty());
+        let Some(final_component) = components.next_back() else {
+            return Ok(directory);
+        };
+
+        for component in components {
+            directory = openat(
+                &directory,
+                component,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .map_err(Self::map_rustix)?;
+        }
+
+        openat(
+            &directory,
+            final_component,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(Self::map_rustix)
+    }
+
+    #[cfg(unix)]
+    fn map_rustix(error: rustix::io::Errno) -> ReadError {
+        if error == rustix::io::Errno::NOENT {
+            ReadError::NotFound
+        } else if error == rustix::io::Errno::LOOP || error == rustix::io::Errno::NOTDIR {
+            ReadError::InvalidPath
+        } else {
+            Self::map_io(&std::io::Error::from(error))
+        }
+    }
+
     fn map_io(err: &std::io::Error) -> ReadError {
         if err.kind() == std::io::ErrorKind::NotFound {
             ReadError::NotFound
@@ -360,56 +422,141 @@ impl FsSource {
 
 impl AssetReader for FsSource {
     fn read(&self, path: &str) -> Result<Vec<u8>, ReadError> {
-        let full = self.resolve(path)?;
-        std::fs::read(&full).map_err(|e| Self::map_io(&e))
+        #[cfg(unix)]
+        {
+            use std::io::Read;
+            let fd = self.open_relative_fd(path)?;
+            let mut file = std::fs::File::from(fd);
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map_err(|e| Self::map_io(&e))?;
+            return Ok(bytes);
+        }
+
+        #[cfg(not(unix))]
+        {
+            let full = self.resolve(path)?;
+            std::fs::read(&full).map_err(|e| Self::map_io(&e))
+        }
     }
 
     fn read_range(&self, path: &str, offset: u64, len: u64) -> Result<Vec<u8>, ReadError> {
-        use std::io::{Read, Seek, SeekFrom};
-        let full = self.resolve(path)?;
-        let mut file = std::fs::File::open(&full).map_err(|e| Self::map_io(&e))?;
-        let size = file.metadata().map_err(|e| Self::map_io(&e))?.len();
-        let end = offset
-            .checked_add(len)
-            .ok_or(ReadError::OutOfRange { offset, len, size })?;
-        if end > size {
-            return Err(ReadError::OutOfRange { offset, len, size });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            let fd = self.open_relative_fd(path)?;
+            let file = std::fs::File::from(fd);
+            let size = file.metadata().map_err(|e| Self::map_io(&e))?.len();
+            let end = offset
+                .checked_add(len)
+                .ok_or(ReadError::OutOfRange { offset, len, size })?;
+            if end > size {
+                return Err(ReadError::OutOfRange { offset, len, size });
+            }
+            let buffer_len =
+                usize::try_from(len).map_err(|_| ReadError::OutOfRange { offset, len, size })?;
+            let mut buf = vec![0u8; buffer_len];
+            let mut filled = 0usize;
+            while filled < buf.len() {
+                let read = file
+                    .read_at(&mut buf[filled..], offset + filled as u64)
+                    .map_err(|e| Self::map_io(&e))?;
+                if read == 0 {
+                    return Err(ReadError::Io("unexpected end of file".to_string()));
+                }
+                filled += read;
+            }
+            return Ok(buf);
         }
-        let buffer_len =
-            usize::try_from(len).map_err(|_| ReadError::OutOfRange { offset, len, size })?;
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| Self::map_io(&e))?;
-        let mut buf = alloc::vec![0u8; buffer_len];
-        file.read_exact(&mut buf).map_err(|e| Self::map_io(&e))?;
-        Ok(buf)
+
+        #[cfg(not(unix))]
+        {
+            use std::io::{Read, Seek, SeekFrom};
+            let full = self.resolve(path)?;
+            let mut file = std::fs::File::open(&full).map_err(|e| Self::map_io(&e))?;
+            let size = file.metadata().map_err(|e| Self::map_io(&e))?.len();
+            let end = offset
+                .checked_add(len)
+                .ok_or(ReadError::OutOfRange { offset, len, size })?;
+            if end > size {
+                return Err(ReadError::OutOfRange { offset, len, size });
+            }
+            let buffer_len =
+                usize::try_from(len).map_err(|_| ReadError::OutOfRange { offset, len, size })?;
+            file.seek(SeekFrom::Start(offset))
+                .map_err(|e| Self::map_io(&e))?;
+            let mut buf = alloc::vec![0u8; buffer_len];
+            file.read_exact(&mut buf).map_err(|e| Self::map_io(&e))?;
+            Ok(buf)
+        }
     }
 
     fn metadata(&self, path: &str) -> Result<AssetMeta, ReadError> {
-        let full = self.resolve(path)?;
-        let meta = std::fs::metadata(&full).map_err(|e| Self::map_io(&e))?;
-        let modified_ms = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64);
-        Ok(AssetMeta {
-            size: meta.len(),
-            modified_ms,
-            is_dir: meta.is_dir(),
-        })
+        #[cfg(unix)]
+        {
+            let fd = self.open_relative_fd(path)?;
+            let file = std::fs::File::from(fd);
+            let meta = file.metadata().map_err(|e| Self::map_io(&e))?;
+            let modified_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
+            return Ok(AssetMeta {
+                size: meta.len(),
+                modified_ms,
+                is_dir: meta.is_dir(),
+            });
+        }
+
+        #[cfg(not(unix))]
+        {
+            let full = self.resolve(path)?;
+            let meta = std::fs::metadata(&full).map_err(|e| Self::map_io(&e))?;
+            let modified_ms = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
+            Ok(AssetMeta {
+                size: meta.len(),
+                modified_ms,
+                is_dir: meta.is_dir(),
+            })
+        }
     }
 
     fn list(&self, dir: &str) -> Result<Vec<String>, ReadError> {
-        let full = self.resolve(dir)?;
-        let mut names = Vec::new();
-        for entry in std::fs::read_dir(&full).map_err(|e| Self::map_io(&e))? {
-            let entry = entry.map_err(|e| Self::map_io(&e))?;
-            if let Some(name) = entry.file_name().to_str() {
-                names.push(name.to_string());
+        #[cfg(unix)]
+        {
+            let fd = self.open_relative_fd(dir)?;
+            let mut directory = rustix::fs::Dir::new(fd).map_err(Self::map_rustix)?;
+            let mut names = Vec::new();
+            for entry in &mut directory {
+                let entry = entry.map_err(Self::map_rustix)?;
+                if matches!(entry.file_name().to_bytes(), b"." | b"..") {
+                    continue;
+                }
+                if let Ok(name) = entry.file_name().to_str() {
+                    names.push(name.to_string());
+                }
             }
+            names.sort();
+            return Ok(names);
         }
-        names.sort();
-        Ok(names)
+
+        #[cfg(not(unix))]
+        {
+            let full = self.resolve(dir)?;
+            let mut names = Vec::new();
+            for entry in std::fs::read_dir(&full).map_err(|e| Self::map_io(&e))? {
+                let entry = entry.map_err(|e| Self::map_io(&e))?;
+                if let Some(name) = entry.file_name().to_str() {
+                    names.push(name.to_string());
+                }
+            }
+            names.sort();
+            Ok(names)
+        }
     }
 }
 
