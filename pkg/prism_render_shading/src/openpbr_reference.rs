@@ -943,7 +943,21 @@ mod conformance {
             specular_weight: 1.0,
             ..Default::default()
         };
-        let configs: [(&str, SurfaceSample); 6] = [
+        // Specification: translucent base (`transmission_weight = 1`) with white
+        // `transmission_color` at `transmission_depth == 0`.
+        let translucent = SurfaceSample {
+            base_color: white,
+            metallic: 0.0,
+            perceptual_roughness: 0.3,
+            specular_color: white,
+            specular_weight: 1.0,
+            transmission: 1.0,
+            transmission_color: white,
+            index_of_refraction: 1.5,
+            thickness: 0.0,
+            ..Default::default()
+        };
+        let configs: [(&str, SurfaceSample); 7] = [
             ("metal, default roughness", metal(0.3)),
             ("metal, rough", metal(0.8)),
             ("pure diffuse base, Lambertian", pure_diffuse(0.0)),
@@ -956,6 +970,7 @@ mod conformance {
                 "dielectric base, maximum diffuse roughness",
                 coupled(1.0),
             ),
+            ("translucent base (transmission_weight=1)", translucent),
         ];
         let mut worst = (0.0_f32, String::new());
         // One gate, three energy invariants it has already caught: the diffuse

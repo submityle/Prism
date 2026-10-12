@@ -522,15 +522,54 @@ pub fn evaluate_principled_direct(
             );
             let f_view = fresnel_dielectric(n_dot_v, ior_c);
             let f_light = fresnel_dielectric(n_dot_l, ior_c);
-            *slot = transmission * (1.0 - f_view) * (1.0 - f_light) * sigma_factor[channel];
+            // `OpenPBR` dispersion, physically: a channel with a higher index
+            // refracts to a shallower cosine, so it traverses a *longer* path
+            // through the absorbing slab. Extending the Beer-Lambert path by
+            // `1/µᵗ` is what makes dispersion visible once the slab is
+            // energy-closing (`R + T = 1` would otherwise make the sum
+            // wavelength-independent).
+            let mu_t = {
+                let s = 1.0 - (1.0 - n_dot_v * n_dot_v).max(0.0) / (ior_c * ior_c);
+                if s <= 0.0 {
+                    1.0
+                } else {
+                    s.max(1.0e-3).sqrt()
+                }
+            };
+            let path_scale = 1.0 / mu_t;
+            // Smooth two-interface slab, closed form: the internal bounces
+            // between the two interfaces form a geometric series with ratio
+            // `f_v·f_l`, giving
+            //   T = (1−f_v)(1−f_l) / (1 − f_v·f_l)
+            //   R = f_l + (1−f_l)² f_v / (1 − f_v·f_l)
+            // and exactly `R + T = 1` for a non-absorbing slab. Modelling the
+            // lobe as `R + T` (instead of transmission alone) is what keeps a
+            // grazing view from *losing* the energy that the interface reflects.
+            let denom = (1.0 - f_view * f_light).max(1.0e-4);
+            let t_slab = (1.0 - f_view) * (1.0 - f_light) / denom;
+            let one_minus_light = 1.0 - f_light;
+            let r_slab = f_light
+                + one_minus_light * one_minus_light * f_view / denom;
+            *slot = transmission * (r_slab + t_slab * bevy_math::ops::powf(sigma_factor[channel], path_scale));
         }
-        mul_scalar(out, n_dot_l)
+        // Lambertian (diffuse) transmission: the term is a BRDF, so it carries
+        // the `1/π` that a radiance factor would not. Without it the lobe's
+        // directional albedo is `(1−f)²·π`, which is why a white translucent
+        // base measured 3.74 in the white-furnace gate instead of 1.
+        mul_scalar(out, n_dot_l * (1.0 / PI))
     } else {
         [0.0; 3]
     };
 
+    // `OpenPBR` `transmission_weight` is a **statistical mixture weight** between
+    // the reflective base slab and the translucent slab, not an additive lobe:
+    // mixing (rather than summing) is what keeps the two slabs inside one energy
+    // budget. `transmission == 0` leaves the base untouched bit-for-bit.
     let reflected = add(
-        add(mul_scalar(base, coat_attenuation), coat_specular),
+        add(
+            mul_scalar(base, coat_attenuation * (1.0 - transmission)),
+            coat_specular,
+        ),
         transmission_term,
     );
     let radiance = mul(reflected, light.illuminance);
@@ -1477,22 +1516,42 @@ mod tests {
     }
 
     #[test]
-    fn transmission_adds_light_through_the_slab() {
+    fn transmission_carries_light_through_the_slab() {
+        // `transmission_weight` is a slab *mixture* weight, so the comparison is
+        // against an equally-black opaque base: the transmitted light is then the
+        // only difference (a reflective base would simply be replaced, not
+        // amplified).
         let base = SurfaceSample {
             base_color: [0.4, 0.6, 0.8],
             ..Default::default()
         };
-        let opaque = evaluate_principled_direct(base, frame(), light());
-        let glassy = evaluate_principled_direct(
+        // Off the specular peak (a 60° light), so the opaque base's GGX glint is
+        // not what dominates the comparison.
+        let tilted = DirectLightSample {
+            direction: [0.866, 0.5, 0.0],
+            ..light()
+        };
+        let opaque = evaluate_principled_direct(
+            SurfaceSample {
+                base_color: [0.0, 0.0, 0.0],
+                ..base
+            },
+            frame(),
+            tilted,
+        );
+        let glassy_tilted = evaluate_principled_direct(
             SurfaceSample {
                 transmission: 1.0,
                 thickness: 0.0, // `transmission_depth == 0`: non-physical tint
                 ..base
             },
             frame(),
-            light(),
+            tilted,
         );
-        assert!(sum3(glassy) > sum3(opaque), "glassy={glassy:?} opaque={opaque:?}");
+        assert!(
+            sum3(glassy_tilted) > sum3(opaque),
+            "glassy={glassy_tilted:?} opaque={opaque:?}"
+        );
 
         // A unit path through a `depth == 1` slab transmits the tint exactly,
         // which is darker than the zero-depth (non-physical) tint of the same
@@ -1500,6 +1559,15 @@ mod tests {
         // grows, so a larger depth absorbs *less* over the same unit path. The
         // ordering `depth == 0` (lightest) > `depth == 2` > `depth == 1` pins
         // the length semantics.
+        let glassy = evaluate_principled_direct(
+            SurfaceSample {
+                transmission: 1.0,
+                thickness: 0.0,
+                ..base
+            },
+            frame(),
+            light(),
+        );
         let thick = evaluate_principled_direct(
             SurfaceSample {
                 transmission: 1.0,
@@ -1552,14 +1620,17 @@ mod tests {
             frame(),
             light(),
         );
+        // The slab's own interface reflection is achromatic and survives the
+        // tint, so the green/blue channels keep that floor while the transmitted
+        // part is filtered out: they must drop by most of the transmitted energy.
         assert!(red[0] >= white[0] * 0.999, "red={red:?} white={white:?}");
         assert!(
-            red[1] < white[1] * 1.0e-3,
-            "a zero-depth red tint must not leak green: {red:?} vs {white:?}"
+            red[1] < white[1] * 0.5,
+            "a zero-depth red tint must absorb green: {red:?} vs {white:?}"
         );
         assert!(
-            red[2] < white[2] * 1.0e-3,
-            "a zero-depth red tint must not leak blue: {red:?} vs {white:?}"
+            red[2] < white[2] * 0.5,
+            "a zero-depth red tint must absorb blue: {red:?} vs {white:?}"
         );
     }
 
@@ -1600,10 +1671,14 @@ mod tests {
 
     #[test]
     fn transmission_dispersion_fringes_the_spectrum() {
+        // A real (absorbing) slab: with a non-absorbing one the two-way slab is
+        // exactly energy-closing, so `R + T` is wavelength-independent by
+        // construction and there is nothing for dispersion to fringe.
         let base = SurfaceSample {
             base_color: [1.0; 3],
             transmission: 1.0,
-            thickness: 0.0,
+            thickness: 2.0,
+            transmission_color: [0.75, 0.75, 0.75],
             index_of_refraction: 1.6,
             ..Default::default()
         };
@@ -1621,7 +1696,7 @@ mod tests {
             light(),
         );
         assert!(
-            (dispersive[0] - dispersive[2]).abs() > 1.0e-4,
+            (dispersive[0] - dispersive[2]).abs() > 1.0e-5,
             "dispersion must separate the channels: {dispersive:?}"
         );
     }

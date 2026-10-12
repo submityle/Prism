@@ -857,11 +857,40 @@ fn principled_direct(
                 let scatter = clamp(surface.transmission_scatter[c], 0.0, 1.0);
                 transmittance = beer + phase * scatter * (1.0 - beer);
             }
-            transmission_term[c] = transmission * (1.0 - f_view) * (1.0 - f_light) * transmittance;
+            // Smooth two-interface slab, closed form: the internal bounces form a
+            // geometric series with ratio `f_v·f_l`, giving
+            //   T = (1−f_v)(1−f_l)/(1 − f_v·f_l)
+            //   R = f_l + (1−f_l)² f_v/(1 − f_v·f_l)
+            // with exactly `R + T = 1` for a non-absorbing slab. Modelling the
+            // lobe as `R + T` (not transmission alone) keeps a grazing view from
+            // losing the energy the interface reflects. Mirrors `lighting.rs`.
+            let denom = max(1.0 - f_view * f_light, 1.0e-4);
+            let t_slab = (1.0 - f_view) * (1.0 - f_light) / denom;
+            let one_minus_light = 1.0 - f_light;
+            let r_slab = f_light + one_minus_light * one_minus_light * f_view / denom;
+            // `OpenPBR` dispersion, physically: a channel with a higher index
+            // refracts to a shallower cosine and therefore traverses a *longer*
+            // path through the absorbing slab. Extending the Beer-Lambert path by
+            // `1/µᵗ` is what keeps dispersion visible now that the slab is
+            // energy-closing (`R + T = 1` makes the sum wavelength-independent).
+            let s_refr = 1.0 - max(1.0 - n_dot_v * n_dot_v, 0.0) / (ior_c * ior_c);
+            let mu_t = select(1.0, sqrt(max(s_refr, 1.0e-3)), s_refr > 0.0);
+            let path_scale = 1.0 / mu_t;
+            transmission_term[c] =
+                transmission * (r_slab + t_slab * pow(transmittance, path_scale));
         }
+        // Lambertian transmission is a BRDF: it carries the `1/π` a radiance
+        // factor would not (without it the lobe's albedo is `(1−f)²·π`).
+        transmission_term = transmission_term * (n_dot_l * INV_PI);
     }
 
-    let reflected = base * coat_attenuation + coat_specular + transmission_term * n_dot_l;
+    // `OpenPBR` `transmission_weight` is a **statistical mixture weight** between
+    // the reflective base slab and the translucent slab, not an additive lobe;
+    // mixing keeps both slabs inside one energy budget. `transmission == 0`
+    // leaves the base untouched bit-for-bit.
+    let reflected = base * (coat_attenuation * (1.0 - transmission))
+        + coat_specular
+        + transmission_term;
 
     let radiance = reflected * light.illuminance;
     return radiance * clamp(light.visibility, 0.0, 1.0) + surface.emissive;
