@@ -31,6 +31,23 @@ cargo bench -p benches -- --save-baseline before
 cargo bench -p benches -- --baseline before
 ```
 
+## The GPU-driven culling benchmark
+
+`prism_gpu_cull` measures the M2 GPU-driven submission against a naive
+per-object one: the same scene drawn by one compute cull plus one indirect draw,
+and by one `DrawIndexed` per object. It reports the CPU cost of assembling a
+frame, the cost of assembling and submitting it, and the end-to-end frame time,
+for 100, 1000 and 10000 objects.
+
+It needs a graphics adapter. Without one it prints a skip notice and does
+nothing; set `PRISM_REQUIRE_GPU=1` to make a missing adapter fail the run instead
+of skipping it (useful on a GPU machine, where a silent skip would look like a
+green result).
+
+```sh
+PRISM_REQUIRE_GPU=1 cargo bench -p benches --bench prism_gpu_cull
+```
+
 ## Criterion
 
 Bevy's benchmarks use [Criterion](https://crates.io/crates/criterion). If you want to learn more about using Criterion for comparing performance against a baseline or generating detailed reports, you can read the [Criterion.rs documentation](https://bheisler.github.io/criterion.rs/book/criterion_rs.html).

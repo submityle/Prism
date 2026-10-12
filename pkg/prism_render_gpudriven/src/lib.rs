@@ -34,28 +34,46 @@
 //! - [`scene`]: the deterministic test lattice and view volume.
 //! - [`reference`]: the CPU cull the GPU result is checked against.
 //! - [`encoding`]: the little-endian layouts shared with the WGSL shaders.
-//! - [`cull`] / [`draw`]: the compute cull and the indirect draw it feeds.
+//! - [`instances`]: per-instance transform/color and the id-derived colors.
+//! - [`quad`]: the shared instance quad both draw paths rasterize.
+//! - [`camera`]: the orthographic view and its uniform.
+//! - [`cull`] / [`draw`]: the compute cull and the coverage draw it feeds.
+//! - [`scene_draw`]: the GPU-driven scene draw, reading instance storage.
+//! - [`naive`]: the per-object submission baseline the benchmark compares to.
+//! - [`gpu`]: the RHI assembly helpers every stage shares.
 //! - [`readback`]: backend readback and pixel-coverage counting.
 
 extern crate alloc;
 
+pub mod camera;
 pub mod cull;
 pub mod draw;
 pub mod encoding;
 pub mod frustum;
+pub mod gpu;
+pub mod instances;
+pub mod naive;
+pub mod quad;
 pub mod readback;
 pub mod reference;
 pub mod scene;
+pub mod scene_draw;
 
+pub use camera::{FrameUniform, OrthoCamera};
 pub use cull::{CullOutput, CullParams, CullStage};
-pub use draw::DrawStage;
+pub use draw::{DrawStage, INDICES_PER_INSTANCE};
 pub use encoding::IndirectArgs;
 pub use frustum::{aabb_inside, signed_distance, Aabb, Frustum, Plane};
-pub use readback::{count_lit_pixels, ReadBuffer};
-pub use reference::cull_cpu;
+pub use instances::{id_color, id_color_bytes, instance_storage_bytes, Instance};
+pub use naive::NaiveStage;
+pub use quad::{corner_offset, corners, QUAD_HALF_EXTENT, QUAD_VERTICES};
+pub use readback::{count_lit_pixels, pixel_at, ReadBuffer};
+pub use reference::{cull_cpu, projected_center_pixel};
 pub use scene::{
-    lattice_instances, view_box_frustum, DEFAULT_GRID, DEFAULT_HALF_EXTENT, DEFAULT_SPACING,
+    candidate_lattice, instance_records, lattice_instances, layer_slab, plane_view_center_frustum,
+    plane_view_frustum, view_box_frustum, DEFAULT_GRID, DEFAULT_HALF_EXTENT, DEFAULT_SPACING,
 };
+pub use scene_draw::SceneDrawStage;
 
 #[cfg(test)]
 mod tests;

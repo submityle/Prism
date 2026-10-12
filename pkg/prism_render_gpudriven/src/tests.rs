@@ -6,16 +6,20 @@
 //! reference. Without an adapter it returns early, so the suite still passes on
 //! a GPU-less host (the base CI sandbox).
 
-use prism_render_driver::RenderQueue;
+use prism_render_driver::{CommandEncoder, RenderQueue};
 use prism_render_driver_wgpu::{WgpuDevice, WgpuInstance, WgpuQueue};
 
+use crate::camera::{FrameUniform, OrthoCamera};
 use crate::cull::{CullParams, CullStage};
 use crate::draw::{DrawStage, CELL_PIXELS, INDICES_PER_INSTANCE};
 use crate::encoding::{instance_storage_bytes, IndirectArgs, AABB_STRIDE};
 use crate::frustum::{Aabb, Frustum};
-use crate::readback::count_lit_pixels;
-use crate::reference::cull_cpu;
+use crate::instances::Instance;
+use crate::naive::NaiveStage;
+use crate::readback::{count_lit_pixels, pixel_at};
+use crate::reference::{cull_cpu, projected_center_pixel};
 use crate::scene;
+use crate::scene_draw::SceneDrawStage;
 
 /// One instance draws a four-index triangle strip (the quad), matching the
 /// draw stage's geometry.
@@ -24,6 +28,10 @@ const INDEX_COUNT: u32 = INDICES_PER_INSTANCE;
 /// The square offscreen target's side, in pixels. Sixty-four survivors, the
 /// default lattice's count, each cover a 4x4-pixel quad in a distinct cell.
 const RESOLUTION: u32 = 256;
+
+/// The scene draw's target side, in pixels. Large enough that neighbouring
+/// lattice columns (54 pixels apart) keep their quads well separated.
+const SCENE_RESOLUTION: u32 = 512;
 
 /// Brings up a device/queue pair, or `None` when no GPU is available.
 fn device_or_skip() -> Option<(WgpuDevice, WgpuQueue)> {
@@ -231,5 +239,335 @@ fn gpu_cull_matches_the_cpu_reference_and_drives_indirect_draws() {
     );
 
     draw.destroy(&device);
+    cull.destroy(&device);
+}
+
+/// The camera that frames the whole default lattice, used by the scene tests.
+fn lattice_camera() -> OrthoCamera {
+    let half = scene::lattice_half_width();
+    OrthoCamera::centered([half * 2.0, half * 2.0], [SCENE_RESOLUTION as f32; 2])
+}
+
+/// Runs the original GPU-driven submission — a compute cull followed by one
+/// indirect draw that reads the cull's GPU-authored arguments — and returns both
+/// the rendered pixels and the GPU's surviving set.
+///
+/// The cull's readback exists only so a test can compare the survivors against
+/// the CPU reference; the draw itself never needs it, because it consumes the
+/// instance count straight from the argument buffer on the GPU.
+fn render_gpu_driven(
+    device: &WgpuDevice,
+    queue: &WgpuQueue,
+    aabbs: &[Aabb],
+    instances: &[Instance],
+    frustum: &Frustum,
+    camera: &OrthoCamera,
+) -> (Vec<u8>, Vec<u32>) {
+    let capacity = aabbs.len() as u32;
+    let cull = CullStage::new(
+        device,
+        capacity,
+        CullParams {
+            index_count: INDEX_COUNT,
+            first_index: 0,
+            base_vertex: 0,
+        },
+    );
+    cull.set_scene(queue, frustum, aabbs);
+    let scene = SceneDrawStage::new(device, SCENE_RESOLUTION, cull.visible(), capacity);
+    scene.upload(queue, &FrameUniform::new(*camera, INDEX_COUNT), instances);
+
+    let output = cull.run(queue);
+    let mut encoder = CommandEncoder::labeled("gpudriven-frame");
+    cull.record(&mut encoder);
+    scene.record_indexed_indirect(&mut encoder, cull.draw_args(), 0);
+    queue.submit(&[encoder.finish()]);
+    assert!(
+        device.poll_wait(),
+        "the device stays healthy after the GPU-driven scene draw"
+    );
+    let pixels = queue.read_texture_rgba8(scene.target(), SCENE_RESOLUTION, SCENE_RESOLUTION);
+
+    scene.destroy(device);
+    cull.destroy(device);
+    (pixels, output.indices)
+}
+
+/// The scene draw renders the GPU-culled survivors at their projected centres,
+/// each in its own id-derived color.
+///
+/// The plane view keeps one full lattice layer, so every survivor has a distinct
+/// screen cell and the pixel at an instance's centre can only be that instance.
+#[test]
+fn gpu_scene_draw_paints_each_survivor_at_its_projected_center() {
+    let Some((device, queue)) = device_or_skip() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    };
+
+    let aabbs = scene::lattice_instances(
+        scene::DEFAULT_GRID,
+        scene::DEFAULT_SPACING,
+        scene::DEFAULT_HALF_EXTENT,
+    );
+    let instances = scene::instance_records(&aabbs);
+    let frustum = scene::plane_view_frustum();
+    let camera = lattice_camera();
+    let reference = cull_cpu(&frustum, &aabbs);
+    assert_eq!(
+        reference.len(),
+        (scene::DEFAULT_GRID * scene::DEFAULT_GRID) as usize,
+        "the plane view keeps exactly one full 10x10 lattice layer"
+    );
+
+    let (pixels, visible) =
+        render_gpu_driven(&device, &queue, &aabbs, &instances, &frustum, &camera);
+
+    let mut gpu_sorted = visible.clone();
+    gpu_sorted.sort_unstable();
+    assert_eq!(
+        gpu_sorted, reference,
+        "the GPU survivors equal the CPU reference"
+    );
+    assert!(
+        count_lit_pixels(&pixels) > 0,
+        "the scene draw covered at least one pixel"
+    );
+
+    for &id in &reference {
+        let instance = instances[id as usize];
+        let pixel = projected_center_pixel(&camera, instance.center)
+            .unwrap_or_else(|| panic!("instance {id} must project inside the target"));
+        let expected = crate::instances::id_color_bytes(id);
+        assert_eq!(
+            pixel_at(&pixels, SCENE_RESOLUTION, pixel[0], pixel[1]),
+            [expected[0], expected[1], expected[2], 255],
+            "instance {id} paints its own color at its projected centre"
+        );
+    }
+}
+
+/// An instance the frustum rejects leaves the background untouched at the pixel
+/// it would have painted.
+///
+/// The centre view keeps only the middle 2x2 columns of the layer, so the other
+/// 96 instances of that layer are culled but still project to the very pixels
+/// they would otherwise have filled.
+#[test]
+fn gpu_scene_draw_leaves_culled_instances_at_background() {
+    let Some((device, queue)) = device_or_skip() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    };
+
+    let aabbs = scene::lattice_instances(
+        scene::DEFAULT_GRID,
+        scene::DEFAULT_SPACING,
+        scene::DEFAULT_HALF_EXTENT,
+    );
+    let instances = scene::instance_records(&aabbs);
+    let frustum = scene::plane_view_center_frustum();
+    let camera = lattice_camera();
+    let reference = cull_cpu(&frustum, &aabbs);
+    assert_eq!(reference.len(), 4, "the centre view keeps a 2x2 block");
+
+    let (pixels, visible) =
+        render_gpu_driven(&device, &queue, &aabbs, &instances, &frustum, &camera);
+
+    let mut gpu_sorted = visible.clone();
+    gpu_sorted.sort_unstable();
+    assert_eq!(gpu_sorted, reference);
+
+    for &id in &reference {
+        let instance = instances[id as usize];
+        let pixel =
+            projected_center_pixel(&camera, instance.center).expect("kept instance projects");
+        let expected = crate::instances::id_color_bytes(id);
+        assert_eq!(
+            pixel_at(&pixels, SCENE_RESOLUTION, pixel[0], pixel[1]),
+            [expected[0], expected[1], expected[2], 255]
+        );
+    }
+
+    // Every other instance of the kept layer is culled, yet its centre still
+    // lands on a pixel inside the target: that pixel must remain background.
+    let grid = scene::DEFAULT_GRID;
+    let layer_base = scene::VIEW_LAYER * grid * grid;
+    let culled: Vec<u32> = (layer_base..layer_base + grid * grid)
+        .filter(|id| !reference.contains(id))
+        .step_by((grid * grid) as usize / 8)
+        .collect();
+    assert!(culled.len() >= 8, "sample at least eight culled instances");
+    for &id in &culled {
+        let instance = instances[id as usize];
+        let pixel = projected_center_pixel(&camera, instance.center)
+            .unwrap_or_else(|| panic!("culled instance {id} must project inside the target"));
+        assert_eq!(
+            pixel_at(&pixels, SCENE_RESOLUTION, pixel[0], pixel[1]),
+            [0, 0, 0, 255],
+            "culled instance {id} leaves the background at its projected centre"
+        );
+    }
+}
+
+/// The naive per-object submission and the GPU-driven path render the same
+/// image, so the benchmark compares two correct implementations of one scene and
+/// not two different scenes.
+#[test]
+fn naive_and_gpu_driven_paths_render_identical_images() {
+    let Some((device, queue)) = device_or_skip() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    };
+
+    let aabbs = scene::lattice_instances(
+        scene::DEFAULT_GRID,
+        scene::DEFAULT_SPACING,
+        scene::DEFAULT_HALF_EXTENT,
+    );
+    let instances = scene::instance_records(&aabbs);
+    let frustum = scene::plane_view_frustum();
+    let camera = lattice_camera();
+    let visible = cull_cpu(&frustum, &aabbs);
+
+    let (driven_pixels, _) =
+        render_gpu_driven(&device, &queue, &aabbs, &instances, &frustum, &camera);
+
+    let naive = NaiveStage::new(&device, SCENE_RESOLUTION, aabbs.len() as u32);
+    naive.upload(&queue, &FrameUniform::new(camera, INDEX_COUNT), &instances);
+    queue.submit(&[naive.encode(&visible)]);
+    assert!(
+        device.poll_wait(),
+        "the device stays healthy after the naive scene draw"
+    );
+    let naive_pixels = queue.read_texture_rgba8(naive.target(), SCENE_RESOLUTION, SCENE_RESOLUTION);
+    naive.destroy(&device);
+
+    assert_eq!(
+        naive_pixels, driven_pixels,
+        "the per-object baseline and the GPU-driven path must paint the same frame"
+    );
+}
+
+/// The cull frame is repeatable: resubmitting it must not let the append cursor
+/// accumulate across submissions.
+///
+/// This is the regression guard for the cursor reset. Without the reset pass the
+/// second submission would report twice as many survivors and the cull would
+/// write past the end of the visible list.
+#[test]
+fn gpu_cull_is_repeatable_across_resubmissions() {
+    let Some((device, queue)) = device_or_skip() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    };
+
+    let instances = scene::lattice_instances(
+        scene::DEFAULT_GRID,
+        scene::DEFAULT_SPACING,
+        scene::DEFAULT_HALF_EXTENT,
+    );
+    let frustum = scene::view_box_frustum();
+    let reference = cull_cpu(&frustum, &instances);
+    let cull = CullStage::new(
+        &device,
+        instances.len() as u32,
+        CullParams {
+            index_count: INDEX_COUNT,
+            first_index: 0,
+            base_vertex: 0,
+        },
+    );
+    cull.set_scene(&queue, &frustum, &instances);
+
+    for round in 0..4 {
+        let output = cull.run(&queue);
+        assert_eq!(
+            output.args.instance_count,
+            reference.len() as u32,
+            "round {round} reports the same surviving count"
+        );
+        let mut sorted = output.indices.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, reference, "round {round} keeps the same survivors");
+    }
+
+    cull.destroy(&device);
+}
+
+/// The rendered coverage of a repeated frame is constant.
+///
+/// A leaky cursor would make each resubmission draw more instances than the
+/// last; this asserts the on-screen result is identical frame to frame.
+#[test]
+fn gpu_scene_draw_coverage_is_stable_across_resubmissions() {
+    let Some((device, queue)) = device_or_skip() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    };
+
+    let aabbs = scene::lattice_instances(
+        scene::DEFAULT_GRID,
+        scene::DEFAULT_SPACING,
+        scene::DEFAULT_HALF_EXTENT,
+    );
+    let instances = scene::instance_records(&aabbs);
+    let frustum = scene::plane_view_frustum();
+    let camera = lattice_camera();
+    let capacity = aabbs.len() as u32;
+
+    let cull = CullStage::new(
+        &device,
+        capacity,
+        CullParams {
+            index_count: INDEX_COUNT,
+            first_index: 0,
+            base_vertex: 0,
+        },
+    );
+    cull.set_scene(&queue, &frustum, &aabbs);
+    let scene = SceneDrawStage::new(&device, SCENE_RESOLUTION, cull.visible(), capacity);
+    scene.upload(&queue, &FrameUniform::new(camera, INDEX_COUNT), &instances);
+
+    let mut coverage = Vec::new();
+    let mut counts = Vec::new();
+    for _ in 0..3 {
+        let output = cull.run(&queue);
+        counts.push(output.args.instance_count);
+        let mut encoder = CommandEncoder::labeled("gpudriven-frame");
+        cull.record(&mut encoder);
+        scene.record_indexed_indirect(&mut encoder, cull.draw_args(), 0);
+        queue.submit(&[encoder.finish()]);
+        assert!(device.poll_wait(), "the device stays healthy across frames");
+        let pixels = queue.read_texture_rgba8(scene.target(), SCENE_RESOLUTION, SCENE_RESOLUTION);
+        coverage.push(count_lit_pixels(&pixels));
+    }
+
+    assert!(
+        counts.windows(2).all(|pair| pair[0] == pair[1]),
+        "every resubmission reports the same survivor count: {counts:?}"
+    );
+    assert!(
+        coverage.windows(2).all(|pair| pair[0] == pair[1]),
+        "every resubmission covers the same pixels: {coverage:?}"
+    );
+    assert!(coverage[0] > 0, "the frame actually drew something");
+
+    scene.destroy(&device);
     cull.destroy(&device);
 }

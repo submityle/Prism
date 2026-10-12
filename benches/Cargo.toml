@@ -28,6 +28,11 @@ bevy_mesh = { path = "../crates/bevy_mesh" }
 bevy_asset = { path = "../crates/bevy_asset" }
 bevy_render = { path = "../crates/bevy_render" }
 prism_render_architecture = { path = "../pkg/prism_render_architecture" }
+# The GPU-driven culling slice and the RHI it is built on, for the M2
+# submission-cost benchmark (`prism_gpu_cull`).
+prism_render_driver = { path = "../pkg/prism_render_driver", features = ["std"] }
+prism_render_driver_wgpu = { path = "../os-backends/prism_render_driver_wgpu" }
+prism_render_gpudriven = { path = "../pkg/prism_render_gpudriven" }
 prism_physics_core = { path = "../pkg/prism_physics_core" }
 prism_physics_geometry = { path = "../pkg/prism_physics_geometry" }
 bevy_scene = { path = "../crates/bevy_scene" }
@@ -103,6 +108,11 @@ harness = false
 [[bench]]
 name = "prism_gpu_scene"
 path = "benches/prism_gpu_scene/main.rs"
+harness = false
+
+[[bench]]
+name = "prism_gpu_cull"
+path = "benches/prism_gpu_cull/main.rs"
 harness = false
 
 [[bench]]

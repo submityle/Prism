@@ -99,3 +99,14 @@ fn cull(@builtin(global_invocation_id) invocation: vec3<u32>) {
         0u,
     );
 }
+
+// Resets the append cursor so the cull can run again on the next frame.
+//
+// The counter must start at zero for every frame; leaving it to accumulate
+// would make the draw's instance count grow without bound across resubmissions
+// and write past the end of the visible list. A single invocation in its own
+// pass is enough, and the pass boundary orders it before the cull.
+@compute @workgroup_size(1)
+fn reset() {
+    atomicStore(&draw_args.instance_count, 0u);
+}

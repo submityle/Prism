@@ -33,3 +33,20 @@ impl ReadBuffer for WgpuQueue {
 pub fn count_lit_pixels(rgba: &[u8]) -> usize {
     rgba.chunks_exact(4).filter(|pixel| pixel[0] > 127).count()
 }
+
+/// The RGBA bytes of pixel `(x, y)` in a tightly packed `width x height` image.
+///
+/// # Panics
+///
+/// Panics when the pixel lies outside the image or the buffer is too short.
+#[must_use]
+pub fn pixel_at(rgba: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+    assert!(
+        x < width,
+        "pixel column {x} is outside a {width}-wide image"
+    );
+    let offset = ((y * width + x) * 4) as usize;
+    rgba[offset..offset + 4]
+        .try_into()
+        .expect("a tightly packed RGBA image has four bytes per pixel")
+}

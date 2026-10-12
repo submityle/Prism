@@ -5,11 +5,11 @@ use alloc::vec::Vec;
 
 use prism_render_driver as rhi;
 use rhi::{
-    BindGroupDescriptor, BindGroupEntry, BindGroupId, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindGroupLayoutId, BindingResource, BindingType, BufferBindingType,
-    BufferDescriptor, BufferId, BufferUsages, CommandBuffer, CommandEncoder, ComputeCommand,
-    ComputePipelineDescriptor, ComputePipelineId, PipelineLayoutDescriptor, PipelineLayoutId,
-    RenderDevice, RenderQueue, ShaderModuleDescriptor, ShaderModuleId, ShaderStages,
+    BindGroupDescriptor, BindGroupId, BindGroupLayoutDescriptor, BindGroupLayoutId,
+    BufferBindingType, BufferDescriptor, BufferId, BufferUsages, CommandBuffer, CommandEncoder,
+    ComputeCommand, ComputePipelineDescriptor, ComputePipelineId, PipelineLayoutDescriptor,
+    PipelineLayoutId, RenderDevice, RenderQueue, ShaderModuleDescriptor, ShaderModuleId,
+    ShaderStages,
 };
 
 use crate::encoding::{
@@ -17,6 +17,7 @@ use crate::encoding::{
     FRUSTUM_UNIFORM_BYTES, PARAMS_BYTES,
 };
 use crate::frustum::{Aabb, Frustum};
+use crate::gpu::{bind_buffer, buffer_entry};
 use crate::readback::ReadBuffer;
 
 /// The workgroup size mirrored by `shaders/cull.wgsl`.
@@ -74,6 +75,7 @@ pub struct CullStage {
     bind_group_layout: BindGroupLayoutId,
     pipeline_layout: PipelineLayoutId,
     pipeline: ComputePipelineId,
+    reset_pipeline: ComputePipelineId,
     shader: ShaderModuleId,
     bind_group: BindGroupId,
 }
@@ -125,12 +127,28 @@ impl CullStage {
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("gpudriven-cull-bgl".into()),
             entries: vec![
-                storage_entry(0, BufferBindingType::Uniform),
-                storage_entry(1, BufferBindingType::Storage { read_only: true }),
-                storage_entry(2, BufferBindingType::Storage { read_only: false }),
-                storage_entry(3, BufferBindingType::Storage { read_only: false }),
-                storage_entry(4, BufferBindingType::Uniform),
-                storage_entry(5, BufferBindingType::Storage { read_only: false }),
+                buffer_entry(0, BufferBindingType::Uniform, ShaderStages::COMPUTE),
+                buffer_entry(
+                    1,
+                    BufferBindingType::Storage { read_only: true },
+                    ShaderStages::COMPUTE,
+                ),
+                buffer_entry(
+                    2,
+                    BufferBindingType::Storage { read_only: false },
+                    ShaderStages::COMPUTE,
+                ),
+                buffer_entry(
+                    3,
+                    BufferBindingType::Storage { read_only: false },
+                    ShaderStages::COMPUTE,
+                ),
+                buffer_entry(4, BufferBindingType::Uniform, ShaderStages::COMPUTE),
+                buffer_entry(
+                    5,
+                    BufferBindingType::Storage { read_only: false },
+                    ShaderStages::COMPUTE,
+                ),
             ],
         });
 
@@ -145,6 +163,12 @@ impl CullStage {
             layout: Some(pipeline_layout),
             module: shader,
             entry_point: "cull".into(),
+        });
+        let reset_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("gpudriven-cull-reset".into()),
+            layout: Some(pipeline_layout),
+            module: shader,
+            entry_point: "reset".into(),
         });
 
         let bind_group = device.create_bind_group(&BindGroupDescriptor {
@@ -172,6 +196,7 @@ impl CullStage {
             bind_group_layout,
             pipeline_layout,
             pipeline,
+            reset_pipeline,
             shader,
             bind_group,
         }
@@ -216,10 +241,31 @@ impl CullStage {
         );
     }
 
-    /// Records the single compute pass that culls every candidate instance.
-    #[must_use]
-    pub fn encode(&self) -> CommandBuffer {
-        let mut encoder = CommandEncoder::labeled("gpudriven-cull");
+    /// Records the cull frame into an encoder a caller owns: a one-invocation
+    /// pass that resets the append cursor, then the pass that classifies every
+    /// candidate instance.
+    ///
+    /// The reset is part of the recording so the frame is self-contained and
+    /// repeatable: submitting the same command buffer twice must produce the
+    /// same survivor count. Without it the atomic cursor would accumulate across
+    /// submissions, the draw's instance count would grow without bound, and the
+    /// cull would write past the end of the visible list.
+    ///
+    /// Taking an existing encoder lets a caller put the cull and the draw it
+    /// feeds into a single command buffer, which is one commit rather than two.
+    pub fn record(&self, encoder: &mut CommandEncoder) {
+        encoder.push_compute_pass(
+            Some("cull-reset".into()),
+            vec![
+                ComputeCommand::SetPipeline(self.reset_pipeline),
+                ComputeCommand::SetBindGroup {
+                    index: 0,
+                    bind_group: self.bind_group,
+                    dynamic_offsets: Vec::new(),
+                },
+                ComputeCommand::Dispatch { x: 1, y: 1, z: 1 },
+            ],
+        );
         encoder.push_compute_pass(
             Some("cull".into()),
             vec![
@@ -236,6 +282,13 @@ impl CullStage {
                 },
             ],
         );
+    }
+
+    /// Records the cull frame into a command buffer of its own.
+    #[must_use]
+    pub fn encode(&self) -> CommandBuffer {
+        let mut encoder = CommandEncoder::labeled("gpudriven-cull");
+        self.record(&mut encoder);
         encoder.finish()
     }
 
@@ -297,36 +350,11 @@ impl CullStage {
         device.destroy_buffer(self.multi_args);
         device.destroy_buffer(self.cull_params);
         device.destroy_compute_pipeline(self.pipeline);
+        device.destroy_compute_pipeline(self.reset_pipeline);
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group_layout(self.bind_group_layout);
         device.destroy_shader_module(self.shader);
         device.destroy_bind_group(self.bind_group);
-    }
-}
-
-/// A compute-visible bind-group-layout entry for a buffer binding.
-fn storage_entry(binding: u32, ty: BufferBindingType) -> BindGroupLayoutEntry {
-    BindGroupLayoutEntry {
-        binding,
-        visibility: ShaderStages::COMPUTE,
-        ty: BindingType::Buffer {
-            ty,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-/// A whole-buffer bind-group entry.
-fn bind_buffer(binding: u32, buffer: BufferId) -> BindGroupEntry {
-    BindGroupEntry {
-        binding,
-        resource: BindingResource::Buffer {
-            buffer,
-            offset: 0,
-            size: None,
-        },
     }
 }
 

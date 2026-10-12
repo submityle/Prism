@@ -5,15 +5,15 @@ use alloc::vec::Vec;
 
 use prism_render_driver as rhi;
 use rhi::{
-    BindGroupDescriptor, BindGroupEntry, BindGroupId, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindGroupLayoutId, BindingResource, BindingType, BufferBindingType,
-    BufferDescriptor, BufferId, BufferUsages, Color, ColorAttachment, ColorTargetState,
-    CommandBuffer, CommandEncoder, FragmentState, IndexBufferBinding, IndexFormat, LoadOp,
-    MultisampleState, PipelineLayoutDescriptor, PipelineLayoutId, PrimitiveState,
-    PrimitiveTopology, RenderCommand, RenderDevice, RenderPassDescriptor, RenderPipelineDescriptor,
-    RenderPipelineId, RenderQueue, ShaderModuleDescriptor, ShaderModuleId, ShaderStages, StoreOp,
-    TextureId, TextureViewId, VertexState,
+    BindGroupDescriptor, BindGroupId, BindGroupLayoutDescriptor, BindGroupLayoutId,
+    BufferBindingType, BufferDescriptor, BufferId, BufferUsages, ColorTargetState, CommandBuffer,
+    FragmentState, IndexFormat, MultisampleState, PipelineLayoutDescriptor, PipelineLayoutId,
+    PrimitiveState, PrimitiveTopology, RenderCommand, RenderDevice, RenderPipelineDescriptor,
+    RenderPipelineId, RenderQueue, ShaderModuleDescriptor, ShaderModuleId, ShaderStages, TextureId,
+    TextureViewId, VertexState,
 };
+
+use crate::gpu::{bind_buffer, black_pass, buffer_entry, quad_prefix};
 
 /// The quad's index count: the number of indices one instance draws, and the
 /// size of one instance's block in the shared index buffer.
@@ -129,26 +129,12 @@ impl DrawStage {
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("gpudriven-draw-bgl".into()),
             entries: vec![
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::VERTEX,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                buffer_entry(0, BufferBindingType::Uniform, ShaderStages::VERTEX),
+                buffer_entry(
+                    1,
+                    BufferBindingType::Storage { read_only: true },
+                    ShaderStages::VERTEX,
+                ),
             ],
         });
 
@@ -164,24 +150,7 @@ impl DrawStage {
         let bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: Some("gpudriven-draw-bg".into()),
             layout: Some(bind_group_layout),
-            entries: vec![
-                BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::Buffer {
-                        buffer: params,
-                        offset: 0,
-                        size: None,
-                    },
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::Buffer {
-                        buffer: visible,
-                        offset: 0,
-                        size: None,
-                    },
-                },
-            ],
+            entries: vec![bind_buffer(0, params), bind_buffer(1, visible)],
         });
 
         Self {
@@ -297,38 +266,11 @@ impl DrawStage {
 
     /// Records a raster pass into the target with the given draw commands.
     fn encode(&self, pipeline: RenderPipelineId, draws: Vec<RenderCommand>) -> CommandBuffer {
-        let mut commands = vec![
-            RenderCommand::SetPipeline(pipeline),
-            RenderCommand::SetBindGroup {
-                index: 0,
-                bind_group: self.bind_group,
-                dynamic_offsets: Vec::new(),
-            },
-            RenderCommand::SetIndexBuffer(IndexBufferBinding {
-                buffer: self.index_buffer,
-                format: IndexFormat::Uint16,
-                offset: 0,
-            }),
-        ];
+        let mut commands = quad_prefix(pipeline, self.bind_group, self.index_buffer);
         commands.extend(draws);
-
-        let mut encoder = CommandEncoder::labeled("gpudriven-draw");
-        encoder.push_render_pass(
-            RenderPassDescriptor {
-                label: Some("gpudriven-draw".into()),
-                color_attachments: vec![Some(ColorAttachment {
-                    view: self.target_view,
-                    resolve_target: None,
-                    // Clear so each pass starts from a known black frame and
-                    // the coverage measured is exactly this pass's output.
-                    load: LoadOp::Clear(Color::new(0.0, 0.0, 0.0, 1.0)),
-                    store: StoreOp::Store,
-                })],
-                depth_stencil_attachment: None,
-            },
-            commands,
-        );
-        encoder.finish()
+        // Clear so each pass starts from a known black frame and the coverage
+        // measured is exactly this pass's output.
+        black_pass("gpudriven-draw", self.target_view, commands)
     }
 
     /// The draw parameter uniform, packed as `DrawParams` expects.
