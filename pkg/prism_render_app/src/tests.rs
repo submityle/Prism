@@ -23,10 +23,68 @@ use crate::target::RenderTarget;
 
 use crate::sets::{RenderPhase, RenderSystems};
 use crate::views::RenderViews;
+use crate::pipeline_cache::{PipelineCache, PipelineKey};
 use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::view_family::ViewKind;
+use prism_render_driver::{
+    DeviceDescriptor, Instance, MultisampleState, PrimitiveState, RenderDevice,
+    RenderPipelineDescriptor, RequestAdapterOptions, ShaderModuleDescriptor, TextureFormat,
+    VertexState,
+};
 
+/// The pipeline cache builds a PSO once per content key, shares it, and destroys
+/// it on the last release (or on clear).
+#[test]
+fn pipeline_cache_dedups_and_evicts_by_key() {
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+    let descriptor = RenderPipelineDescriptor {
+        label: Some("cache-test".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: None,
+    };
+
+    let mut cache = PipelineCache::new();
+    let key = PipelineKey::new(7, Some(TextureFormat::Rgba8Unorm), None, 1, 32);
+    let first = cache.get_or_create(&device, key, &descriptor);
+    let second = cache.get_or_create(&device, key, &descriptor);
+    assert_eq!(first, second, "the same key returns the same pipeline");
+    assert_eq!(cache.len(), 1, "the pipeline is built once");
+
+    let other = PipelineKey::new(8, Some(TextureFormat::Rgba8Unorm), None, 1, 32);
+    let distinct = cache.get_or_create(&device, other, &descriptor);
+    assert_ne!(distinct, first, "a different key compiles a new pipeline");
+    assert_eq!(cache.len(), 2);
+
+    assert!(
+        !cache.release(&device, &key),
+        "one of the two references still holds the pipeline"
+    );
+    assert!(cache.release(&device, &key), "the last release evicts");
+    assert_eq!(cache.len(), 1);
+    assert!(!cache.release(&device, &key), "an absent key is a no-op");
+
+    cache.clear(&device);
+    assert!(cache.is_empty(), "clear destroys every cached pipeline");
+}
 /// The render world materializes the frame's view family from the extracted
 /// viewport, and a minimized frame disables (rather than removes) the view.
 #[test]

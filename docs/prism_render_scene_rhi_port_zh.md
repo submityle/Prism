@@ -99,7 +99,7 @@
 | 3 | `core_3d::{Opaque3d,Opaque3dBatchSetKey,Opaque3dBinKey}` / `Core3d` / `Core3dSystems::{MainPass,PostProcess}` | `prism_render_graph` 的 pass + Prism **phase 标签**（Opaque/Transparent/NPR/Custom）；`RenderCommand<Opaque3d>` → Prism 绘制命令 | pass 图已有；**phase 标签待建** |
 | 4 | `MeshPipelineKey` / 分批键 | `prism_render_visibility::binning::DrawBinKey`（**已具备** `pipeline_class`/`pass_mask`）+ `prism_render_material::axis::SpecializationId`（illumination + closure + render_class）（§8.5：key **只**含步骤 1 瓣集 + 特征 flags，质量档/缓存/降级不进 key） | binning + key 已有；**已修一处真 bug**（见下）；binkey 映射待接 |
 | 5 | `queue_material_meshes` / `MeshPipelineSystems` / `RenderMeshInstances` / `StandardMaterial` / `PbrPlugin` | `prism_render_material`（IR/record）+ `prism_render_architecture::gpu_scene::{InstanceRecord,MaterialRecord}` + 间接/bindless 绘制（复用 `prism_render_gpudriven` 的间接多绘） | IR/record 已有；**队列/特化待建** |
-| 6 | `render_resource::*` / `renderer::{RenderDevice,RenderQueue}` / `TextureCache` / `PipelineCache` / `SpecializedMeshPipelines` | RHI（`PrismGpu` + `prism_render_driver`）+ Prism 版资源/管线缓存 + mesh 管线特化 | `PrismGpu` 已落；**缓存/特化待建** |
+| 6 | `render_resource::*` / `renderer::{RenderDevice,RenderQueue}` / `TextureCache` / `PipelineCache` / `SpecializedMeshPipelines` | RHI（`PrismGpu` + `prism_render_driver`）+ Prism 版资源/管线缓存 + mesh 管线特化 | `PrismGpu` 已落；**管线缓存已落**（`prism_render_app::PipelineCache`，建在 RHI 既有 `ContentCache` 之上，内容寻址 + 引用计数 + 逐出销毁）；纹理缓存/mesh 特化待建 |
 
 **不变量**：步骤 2 的 per-tile 9-way 分类、步骤 5 的单一 `respond()` 分派、`binning` 的 `pipeline_class` 只是同一个 key 的三种视图——迁移后**仍是那条唯一执行路径**，不按 PBR/NPR/混合/自定义拆 PSO。
 

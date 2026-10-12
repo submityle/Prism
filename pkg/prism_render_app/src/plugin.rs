@@ -10,6 +10,7 @@ use prism_render_runtime::RenderRuntime;
 use crate::camera::RenderCamera;
 use crate::config::RenderAppConfig;
 use crate::label::{Render, RenderApp};
+use crate::pipeline_cache::PipelineCache;
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
 use crate::sets::{RenderSystems, configure_render_sets};
@@ -119,6 +120,7 @@ where
         render.world.insert_resource(RenderRecord::default());
         render.world.insert_resource(RenderFrameStats::default());
         render.world.insert_resource(RenderViews::new());
+        render.world.insert_resource(PipelineCache::new());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
         {
