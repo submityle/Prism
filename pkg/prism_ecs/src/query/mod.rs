@@ -18,6 +18,7 @@
 //! driven by the per-column ticks on [`Column`](crate::storage::Column).
 
 mod access;
+mod combinations;
 mod dirty;
 mod fetch;
 mod filter;
@@ -33,6 +34,7 @@ mod simd;
 mod state;
 
 pub use access::Access;
+pub use combinations::QueryCombinationsIter;
 pub use dirty::DirtyChunk;
 pub use fetch::{AnyOf, Has, QueryData, ReadOnlyQueryData};
 pub use filter::{Added, Changed, Or, QueryFilter, With, Without};
@@ -48,6 +50,8 @@ pub use state::{QueryEntityError, QuerySingleError, QueryState};
 mod any_of_tests;
 #[cfg(all(test, feature = "std"))]
 mod cache_concurrency_tests;
+#[cfg(test)]
+mod combinations_tests;
 #[cfg(test)]
 mod get_tests;
 #[cfg(test)]

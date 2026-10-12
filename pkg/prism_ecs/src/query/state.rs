@@ -22,6 +22,7 @@ use crate::query::slice::{ArchetypalFilter, ColumnSliceData};
 use crate::query::iter::QueryIter;
 use crate::query::many::QueryManyIter;
 use crate::query::matched::{MatchedArchetypes, SpinLock};
+use crate::query::combinations::QueryCombinationsIter;
 use crate::world::{World, WorldId};
 
 /// Why [`QueryState::get`] / [`QueryState::get_mut`] could not resolve an
@@ -281,6 +282,44 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 this_run,
             )
         }
+    }
+
+    /// Iterate every unordered `K`-subset of the rows this query matches
+    /// (design §7; the read-only half of Bevy's `iter_combinations`).
+    ///
+    /// Matching the rows costs one pass (the ordinary iterator's traversal, so
+    /// the per-row gate is shared); each yielded combination then re-fetches its
+    /// `K` entities at `O(1)`. Combinations come out in a deterministic
+    /// lexicographic order over the matched rows.
+    ///
+    /// Restricted to [`ReadOnlyQueryData`] because a yield hands out `K` items:
+    /// with `&mut T` terms one entity could appear in two live combinations and
+    /// alias itself. `K = 2` is the broad-phase pair case; `K = 1` degenerates to
+    /// ordinary iteration; `K = 0` or `K` greater than the match count yields
+    /// nothing.
+    #[inline]
+    pub fn iter_combinations<'w, 's, const K: usize>(
+        &'s self,
+        world: &'w World,
+    ) -> QueryCombinationsIter<'w, 's, D, F, K>
+    where
+        D: ReadOnlyQueryData,
+    {
+        self.validate_world(world);
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
+        // Collect the matched rows by driving the ordinary iterator, so the
+        // per-row gate lives in exactly one place.
+        let mut rows = Vec::new();
+        let mut iter = self.iter(world);
+        while let Some((entity, _item)) = iter.next_with_entity() {
+            rows.push(entity);
+        }
+        let world_ptr = (world as *const World).cast_mut();
+        // SAFETY: `D: ReadOnlyQueryData`, so only shared fetches are formed and
+        // the shared `&'w World` borrow is sufficient; every collected id matched
+        // this state for the same window.
+        unsafe { QueryCombinationsIter::new(self, world_ptr, last_run, this_run, rows) }
     }
 
     /// Iterate the rows matched by this query over an exclusive view of `world`,

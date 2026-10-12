@@ -116,6 +116,39 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
+        self.next_with_entity().map(|(_, item)| item)
+    }
+
+    /// Upper bound on the rows left to yield.
+    ///
+    /// The exact count is unknowable without applying the per-row
+    /// `Added`/`Changed`/sparse gates, but the sum of the remaining archetypes'
+    /// row counts is a sound upper bound (it is exact when those gates admit
+    /// every row). Exposing it lets `collect`/`Vec` size its buffer once.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // SAFETY: `self.world` is valid for `'w` (the constructor's contract),
+        // and this only forms a shared `&World` to read archetype lengths.
+        let world: &World = unsafe { &*self.world };
+        let mut upper = self.row_len.saturating_sub(self.row);
+        for &id in &self.archetypes[self.arch_cursor..] {
+            if let Some(archetype) = world.archetypes().get(id) {
+                upper += archetype.len();
+            }
+        }
+        (0, Some(upper))
+    }
+}
+
+impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
+    /// The next matched row together with **its entity**.
+    ///
+    /// [`Iterator::next`] is exactly this with the entity dropped; the pairing
+    /// form exists so drivers that need identities (e.g. combination iteration,
+    /// which re-fetches by entity) can reuse this traversal instead of
+    /// duplicating the per-row gate.
+    #[inline(always)]
+    pub(crate) fn next_with_entity(&mut self) -> Option<(Entity, D::Item<'w>)> {
         loop {
             if self.row < self.row_len {
                 let row = self.row;
@@ -156,7 +189,7 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
                 // so this `(archetype, row)` is fetched exactly once. Any `&mut`
                 // term therefore yields a unique reference, valid for `'w`
                 // because the world is exclusively borrowed for `'w`.
-                return Some(unsafe { D::fetch(fetch, entity, row) });
+                return Some((entity, unsafe { D::fetch(fetch, entity, row) }));
             }
 
             if self.arch_cursor >= self.archetypes.len() {
@@ -207,23 +240,4 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
         }
     }
 
-    /// Upper bound on the rows left to yield.
-    ///
-    /// The exact count is unknowable without applying the per-row
-    /// `Added`/`Changed`/sparse gates, but the sum of the remaining archetypes'
-    /// row counts is a sound upper bound (it is exact when those gates admit
-    /// every row). Exposing it lets `collect`/`Vec` size its buffer once.
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        // SAFETY: `self.world` is valid for `'w` (the constructor's contract),
-        // and this only forms a shared `&World` to read archetype lengths.
-        let world: &World = unsafe { &*self.world };
-        let mut upper = self.row_len.saturating_sub(self.row);
-        for &id in &self.archetypes[self.arch_cursor..] {
-            if let Some(archetype) = world.archetypes().get(id) {
-                upper += archetype.len();
-            }
-        }
-        (0, Some(upper))
-    }
 }
