@@ -1,16 +1,4 @@
-//! The `prism_app` seam (design §25.2): drive a client replication session from
-//! the app's frame loop.
-//!
-//! Replication is a plugin on the app shell: [`ReplicationPlugin`] installs a
-//! [`Replication`] resource (a [`ClientSession`] plus a
-//! [`ReliableChannel`] over its [`Transport`]) and a `First` system that advances
-//! the channel one tick and drains the recovered frames into the prediction each
-//! frame. The reliability (sequence, ACK, retransmit) is therefore *in* the frame
-//! loop: a dropped datagram is retransmitted on a later frame rather than lost.
-//! The application supplies a [`ReplicationStrategy`] — how one local input
-//! advances the replicated [`Record`] — so the same plugin drives any replicated
-//! field set. The caller keeps the peer transport endpoint, so it can drive
-//! authority or a test peer with a matching [`ReliableChannel`].
+//! The client half of the app seam: predict locally, reconcile authority.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -25,11 +13,7 @@ use crate::reliable::ReliableChannel;
 use crate::session::{ClientSession, SessionError};
 use crate::transport::Transport;
 
-/// The retransmit floor (in frames) and receiver window the plugin uses when it
-/// wraps the caller's transport in a [`ReliableChannel`].
-const DEFAULT_MIN_RTO: u32 = 2;
-/// How many out-of-order frames the receiver buffers before it refuses.
-const DEFAULT_WINDOW: usize = 64;
+use super::{DEFAULT_MIN_RTO, DEFAULT_WINDOW};
 
 /// The application's replication strategy: how a local input advances the record.
 pub trait ReplicationStrategy: Send + Sync + 'static {
@@ -240,11 +224,11 @@ mod tests {
         }
     }
 
-    fn schema() -> Schema {
+    pub(crate) fn schema() -> Schema {
         Schema::new(vec![FieldKind::Int { bits: 12 }])
     }
 
-    fn snapshot_at(revision: u32, value: i64) -> Vec<u8> {
+    pub(crate) fn snapshot_at(revision: u32, value: i64) -> Vec<u8> {
         let mut bytes = Vec::new();
         encode_snapshot(
             &schema(),
@@ -256,7 +240,7 @@ mod tests {
         bytes
     }
 
-    fn int(record: &Record) -> i64 {
+    pub(crate) fn int(record: &Record) -> i64 {
         let FieldValue::Int(value) = record.value(0).expect("one field") else {
             panic!("field 0 is an int");
         };

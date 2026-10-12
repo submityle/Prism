@@ -46,8 +46,11 @@
 //!   [`ClientSession`](session::ClientSession) (prediction fed by inbound frames),
 //!   exchanging framed bytes over any transport.
 //!
-//! With the `app` feature, [`plugin`] wires a client session into a `prism_app`
-//! `App` as a plugin (design §25.2).
+//! With the `app` feature, [`plugin`] wires replication into a `prism_app` `App`
+//! as plugins (design §25.2): [`ReplicationPlugin`](plugin::ReplicationPlugin) is
+//! the client half (predict + reconcile) and
+//! [`ReplicationServerPlugin`](plugin::ReplicationServerPlugin) is the authority
+//! half (apply inbound commands + broadcast deltas).
 //!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
