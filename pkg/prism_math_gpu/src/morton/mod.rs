@@ -347,3 +347,23 @@ fn buffer_layout(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
         count: None,
     }
 }
+
+/// Device-free gate: every composed kernel (fragment + wrapper) must be a valid
+/// WGSL module on the pinned `naga`.
+#[cfg(test)]
+mod parse_gate {
+    #[test]
+    fn composed_kernels_parse() {
+        for (label, wrapper) in [
+            ("encode2", super::WRAP_ENCODE2),
+            ("decode2", super::WRAP_DECODE2),
+            ("encode3", super::WRAP_ENCODE3),
+            ("decode3", super::WRAP_DECODE3),
+        ] {
+            let src = alloc::format!("{}\n{}", super::WGSL_MORTON, wrapper);
+            if let Err(err) = wgpu::naga::front::wgsl::parse_str(&src) {
+                panic!("morton `{label}` failed to parse: {err}\n--- source ---\n{src}");
+            }
+        }
+    }
+}
