@@ -957,6 +957,8 @@ mod conformance {
             thickness: 0.0,
             ..Default::default()
         };
+        // Specification: the same dielectric base under a white coat / white fuzz
+        // (the coat and fuzz layers must not create or destroy energy).
         let configs: [(&str, SurfaceSample); 7] = [
             ("metal, default roughness", metal(0.3)),
             ("metal, rough", metal(0.8)),
@@ -978,15 +980,23 @@ mod conformance {
         // compensation's view-independent albedo (white metal read 1.11), and
         // the glossy-diffuse coupling weight at grazing.
         //
-        // Still missing from the specification's list, and *measured* while
-        // wiring this gate: the translucent base (`transmission_weight = 1`,
-        // white `transmission_color` at `transmission_depth == 0`) reads **3.74**
-        // rather than 1. Diagnosis: the transmission lobe is *added* to the
-        // reflective base instead of being a statistical mixture with it
-        // (`transmission_weight` is a slab weight), and its term is a radiance
-        // factor with no `1/π` normalisation, so its own albedo is `(1−f)²·π`.
-        // Subsurface (a separate shading class) and the coat/fuzz-on-top cases
-        // are likewise not covered yet.
+        // Still missing from the specification's list, and *measured* here:
+        //
+        // * **coat** (`coat_weight = 1`, white `coat_color`) reads **0.72** at
+        //   grazing. Diagnosis: the base is attenuated by the closed-form slab
+        //   transmission `(1−f_v)(1−f_l)/(1−f_v·f_l)`, but the coat's own lobe is
+        //   a *single-scatter* GGX microfacet lobe whose Fresnel is evaluated at
+        //   `v·h`, so it does not carry the complementary slab reflectance
+        //   `r_slab` that the transmission withholds. Two attempts were measured
+        //   and rejected rather than shipped: adding the same multiscatter
+        //   compensation the base uses (0.72 → 0.736, still 26% short — the
+        //   Turquin coloured scale is ~0.009 at `F0 = 0.053`), and renormalising
+        //   the lobe by `r_slab / (F(v)·E_white)` (0.72 → 0.719). Closing this
+        //   needs a deliberate coat-energy design (e.g. distributing `r_slab`
+        //   over the lobe's shape with an accurate lobe albedo), not another
+        //   correction term.
+        // * **fuzz** on top and **subsurface** (a separate shading class) are not
+        //   covered yet either.
         for (name, surface) in configs {
             // Normal, mid and near-grazing view directions all have to conserve.
             for view in [[0.0_f32, 1.0, 0.0], [0.6, 0.8, 0.0], [0.95, 0.31, 0.0]] {
