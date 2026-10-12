@@ -51,6 +51,38 @@ pub struct ShadeSubmission {
     pub handle: ShadePageHandle,
 }
 
+/// Evidence that the render queue has completed through a timeline value.
+///
+/// The value is read from [`crate::GpuCompletionTracker`], whose completion
+/// counter is only advanced by the queue completion callback. Its private
+/// field prevents external callers from manufacturing a larger value.
+///
+/// ```compile_fail
+/// use prism_render_scene::shading::texel_cache::ShadeCompletionProof;
+/// use prism_render_architecture::gpu_scene::GpuCompletionValue;
+///
+/// let _forged = ShadeCompletionProof { completed: GpuCompletionValue(u64::MAX) };
+/// ```
+#[derive(Debug, Eq, PartialEq)]
+pub struct ShadeCompletionProof {
+    completed: GpuCompletionValue,
+}
+
+impl ShadeCompletionProof {
+    /// Captures the completion value observed by the render queue tracker.
+    #[must_use]
+    pub fn from_tracker(tracker: &crate::GpuCompletionTracker) -> Self {
+        Self {
+            completed: tracker.completed_value(),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_completion_proof(completed: GpuCompletionValue) -> ShadeCompletionProof {
+    ShadeCompletionProof { completed }
+}
+
 /// GPU writes that have been submitted but have not reached their queue
 /// completion value yet remain in this state and cannot be published.
 
@@ -131,7 +163,13 @@ impl ShadePageStore {
         }
     }
 
-    /// Opens a new staging generation seeded from the currently active map.
+    /// Opens a new staging generation seeded from active pages in `epoch`.
+    ///
+    /// Pages from an older material/light epoch are deliberately omitted from
+    /// staging. They remain visible in `active` until publish, then follow the
+    /// same GPU-retirement path as any other evicted page. This prevents stale
+    /// epochs from occupying the logical working set indefinitely without
+    /// reusing their physical slots before prior GPU readers have completed.
     pub fn begin_frame(&mut self, epoch: u64) -> Result<ShadeFrameToken, ShadeStoreError> {
         if self.staging.is_some() {
             return Err(ShadeStoreError::FrameAlreadyOpen);
@@ -140,7 +178,14 @@ impl ShadePageStore {
             .frame_serial
             .checked_add(1)
             .ok_or(ShadeStoreError::FrameSerialExhausted)?;
-        self.staging = Some(self.active.clone());
+        self.staging = Some(
+            self.active
+                .iter()
+                .filter_map(|(&key, &handle)| {
+                    (key.material_epoch == epoch && handle.epoch == epoch).then_some((key, handle))
+                })
+                .collect(),
+        );
         self.pending_writes.clear();
         self.submitted_writes.clear();
         self.written_pages.clear();
@@ -251,7 +296,7 @@ impl ShadePageStore {
     pub fn complete_write(
         &mut self,
         submission: ShadeSubmission,
-        completed: GpuCompletionValue,
+        proof: ShadeCompletionProof,
     ) -> Result<(), ShadeStoreError> {
         if self.staging.is_none() {
             return Err(ShadeStoreError::NoOpenFrame);
@@ -263,7 +308,7 @@ impl ShadePageStore {
                 .and_then(|staging| staging.get(&submission.key))
                 != Some(&submission.handle)
             || self.submitted_writes.get(&submission.key) != Some(&submission)
-            || completed < submission.completion
+            || proof.completed < submission.completion
         {
             return Err(ShadeStoreError::InvalidWrite);
         }
@@ -305,13 +350,15 @@ impl ShadePageStore {
 
     /// Atomically publishes the complete staging page table.
     ///
-    /// Old active slots are retired until `retire_after` is observed by the
-    /// queue completion tracker. This prevents a subsequent frame from
-    /// overwriting a page while an earlier render submission still samples it.
+    /// Old active slots are retired at the completion value observed by
+    /// `proof`. The caller must capture this proof only after all GPU readers
+    /// of the old active generation have completed. This prevents a subsequent
+    /// frame from overwriting a page while an earlier render submission still
+    /// samples it.
     pub fn publish_after(
         &mut self,
         token: ShadeFrameToken,
-        retire_after: GpuCompletionValue,
+        proof: ShadeCompletionProof,
     ) -> Result<(), ShadeStoreError> {
         if token.serial != self.frame_serial {
             return Err(ShadeStoreError::InvalidFrame);
@@ -327,7 +374,7 @@ impl ShadePageStore {
                 .values()
                 .any(|candidate| candidate.slot == handle.slot)
             {
-                self.retired_slots.insert(handle.slot, retire_after);
+                self.retired_slots.insert(handle.slot, proof.completed);
             }
         }
         self.active = staging;
@@ -335,8 +382,8 @@ impl ShadePageStore {
     }
 
     /// Returns retired slots to the allocator once their GPU readers are done.
-    pub fn reclaim_completed(&mut self, completed: GpuCompletionValue) -> usize {
-        self.completed_value = self.completed_value.max(completed);
+    pub fn reclaim_completed(&mut self, proof: ShadeCompletionProof) -> usize {
+        self.completed_value = self.completed_value.max(proof.completed);
         let reusable: Vec<u32> = self
             .retired_slots
             .iter()
@@ -386,6 +433,27 @@ mod tests {
     const COMPLETION: GpuCompletionValue = GpuCompletionValue(1);
 
     #[test]
+    fn completion_proof_must_reach_submission_value() {
+        let mut store = ShadePageStore::new(1);
+        let page = key(4);
+        let frame = store.begin_frame(4).unwrap();
+        let write = store.begin_write(frame, page, 1).unwrap();
+        let submission = store.submit_write(write, COMPLETION).unwrap();
+
+        assert_eq!(
+            store.complete_write(submission, test_completion_proof(GpuCompletionValue(0))),
+            Err(ShadeStoreError::InvalidWrite)
+        );
+        store
+            .complete_write(submission, test_completion_proof(COMPLETION))
+            .unwrap();
+        store
+            .publish_after(frame, test_completion_proof(COMPLETION))
+            .unwrap();
+        assert_eq!(store.lookup(page, 4), ShadeStoreLookup::Ready(write.handle));
+    }
+
+    #[test]
     fn epoch_mismatch_is_rejected_and_serial_exhaustion_does_not_alias_tokens() {
         let mut store = ShadePageStore::new(1);
         let frame = store.begin_frame(4).unwrap();
@@ -393,7 +461,9 @@ mod tests {
             store.begin_write(frame, key(3), 1),
             Err(ShadeStoreError::EpochMismatch)
         );
-        store.publish_after(frame, COMPLETION).unwrap();
+        store
+            .publish_after(frame, test_completion_proof(COMPLETION))
+            .unwrap();
 
         store.frame_serial = u64::MAX;
         assert_eq!(
@@ -411,15 +481,19 @@ mod tests {
         let submission = store.submit_write(write, COMPLETION).unwrap();
 
         assert_eq!(
-            store.publish_after(frame, COMPLETION),
+            store.publish_after(frame, test_completion_proof(COMPLETION)),
             Err(ShadeStoreError::PendingWrites)
         );
         assert_eq!(
-            store.complete_write(submission, GpuCompletionValue(0)),
+            store.complete_write(submission, test_completion_proof(GpuCompletionValue(0))),
             Err(ShadeStoreError::InvalidWrite)
         );
-        store.complete_write(submission, COMPLETION).unwrap();
-        store.publish_after(frame, COMPLETION).unwrap();
+        store
+            .complete_write(submission, test_completion_proof(COMPLETION))
+            .unwrap();
+        store
+            .publish_after(frame, test_completion_proof(COMPLETION))
+            .unwrap();
         assert_eq!(store.lookup(page, 4), ShadeStoreLookup::Ready(write.handle));
     }
 
@@ -431,9 +505,11 @@ mod tests {
         let write = store.begin_write(frame, page, 1).unwrap();
         let submission = store.submit_write(write, COMPLETION).unwrap();
 
-        store.complete_write(submission, COMPLETION).unwrap();
+        store
+            .complete_write(submission, test_completion_proof(COMPLETION))
+            .unwrap();
         assert_eq!(
-            store.complete_write(submission, COMPLETION),
+            store.complete_write(submission, test_completion_proof(COMPLETION)),
             Err(ShadeStoreError::InvalidWrite)
         );
     }
@@ -460,9 +536,11 @@ mod tests {
         let initial = store.begin_write(initial_frame, page, 1).unwrap();
         let initial_submission = store.submit_write(initial, COMPLETION).unwrap();
         store
-            .complete_write(initial_submission, COMPLETION)
+            .complete_write(initial_submission, test_completion_proof(COMPLETION))
             .unwrap();
-        store.publish_after(initial_frame, COMPLETION).unwrap();
+        store
+            .publish_after(initial_frame, test_completion_proof(COMPLETION))
+            .unwrap();
 
         let aborted_frame = store.begin_frame(4).unwrap();
         assert_eq!(
@@ -498,12 +576,16 @@ mod tests {
         let second_frame = store.begin_frame(4).unwrap();
         let second = store.begin_write(second_frame, page, 2).unwrap();
         assert_eq!(
-            store.complete_write(stale_submission, COMPLETION),
+            store.complete_write(stale_submission, test_completion_proof(COMPLETION)),
             Err(ShadeStoreError::InvalidWrite)
         );
         let second_submission = store.submit_write(second, COMPLETION).unwrap();
-        store.complete_write(second_submission, COMPLETION).unwrap();
-        store.publish_after(second_frame, COMPLETION).unwrap();
+        store
+            .complete_write(second_submission, test_completion_proof(COMPLETION))
+            .unwrap();
+        store
+            .publish_after(second_frame, test_completion_proof(COMPLETION))
+            .unwrap();
     }
 
     #[test]
@@ -514,15 +596,23 @@ mod tests {
         let first_frame = store.begin_frame(4).unwrap();
         let first = store.begin_write(first_frame, page, 1).unwrap();
         let first_submission = store.submit_write(first, COMPLETION).unwrap();
-        store.complete_write(first_submission, COMPLETION).unwrap();
-        store.publish_after(first_frame, COMPLETION).unwrap();
+        store
+            .complete_write(first_submission, test_completion_proof(COMPLETION))
+            .unwrap();
+        store
+            .publish_after(first_frame, test_completion_proof(COMPLETION))
+            .unwrap();
 
         let second_frame = store.begin_frame(4).unwrap();
         let second = store.begin_write(second_frame, page, 2).unwrap();
         assert_ne!(second.handle.slot, first.handle.slot);
         let second_submission = store.submit_write(second, COMPLETION).unwrap();
-        store.complete_write(second_submission, COMPLETION).unwrap();
-        store.publish_after(second_frame, COMPLETION).unwrap();
+        store
+            .complete_write(second_submission, test_completion_proof(COMPLETION))
+            .unwrap();
+        store
+            .publish_after(second_frame, test_completion_proof(COMPLETION))
+            .unwrap();
 
         let blocked_frame = store.begin_frame(4).unwrap();
         assert_eq!(
@@ -531,13 +621,76 @@ mod tests {
         );
         store.abort_frame(blocked_frame).unwrap();
 
-        assert_eq!(store.reclaim_completed(GpuCompletionValue(0)), 0);
-        assert_eq!(store.reclaim_completed(COMPLETION), 1);
+        assert_eq!(
+            store.reclaim_completed(test_completion_proof(GpuCompletionValue(0))),
+            0
+        );
+        assert_eq!(
+            store.reclaim_completed(test_completion_proof(COMPLETION)),
+            1
+        );
         let reusable_frame = store.begin_frame(4).unwrap();
         let reusable = store.begin_write(reusable_frame, page, 3).unwrap();
         assert!(
             reusable.handle.slot == first.handle.slot || reusable.handle.slot == second.handle.slot
         );
         store.abort_frame(reusable_frame).unwrap();
+    }
+
+    #[test]
+    fn epoch_change_evicts_old_pages_only_at_publish_and_retires_their_slots() {
+        let mut store = ShadePageStore::new(2);
+        let old_page = key(4);
+        let new_page = key(5);
+
+        let first_frame = store.begin_frame(4).unwrap();
+        let first_write = store.begin_write(first_frame, old_page, 1).unwrap();
+        let first_submission = store.submit_write(first_write, COMPLETION).unwrap();
+        store
+            .complete_write(first_submission, test_completion_proof(COMPLETION))
+            .unwrap();
+        store
+            .publish_after(first_frame, test_completion_proof(COMPLETION))
+            .unwrap();
+
+        let next_epoch = store.begin_frame(5).unwrap();
+        assert_eq!(
+            store.lookup(old_page, 4),
+            ShadeStoreLookup::Ready(first_write.handle)
+        );
+        let new_write = store.begin_write(next_epoch, new_page, 1).unwrap();
+        let new_submission = store.submit_write(new_write, COMPLETION).unwrap();
+        store
+            .complete_write(new_submission, test_completion_proof(COMPLETION))
+            .unwrap();
+        store
+            .publish_after(next_epoch, test_completion_proof(GpuCompletionValue(2)))
+            .unwrap();
+
+        assert_eq!(store.lookup(old_page, 4), ShadeStoreLookup::Fallback);
+        assert_eq!(
+            store.lookup(new_page, 5),
+            ShadeStoreLookup::Ready(new_write.handle)
+        );
+        assert_eq!(
+            store.reclaim_completed(test_completion_proof(COMPLETION)),
+            0
+        );
+
+        let blocked = store.begin_frame(5).unwrap();
+        assert_eq!(
+            store.begin_write(blocked, key(5), 2),
+            Err(ShadeStoreError::CapacityExhausted)
+        );
+        store.abort_frame(blocked).unwrap();
+
+        assert_eq!(
+            store.reclaim_completed(test_completion_proof(GpuCompletionValue(2))),
+            1
+        );
+        let reusable = store.begin_frame(5).unwrap();
+        let write = store.begin_write(reusable, key(5), 2).unwrap();
+        assert_eq!(write.handle.slot, first_write.handle.slot);
+        store.abort_frame(reusable).unwrap();
     }
 }

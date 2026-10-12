@@ -96,7 +96,7 @@
 │  产出：开放 über 参数块（变长）+ VT 页引用 + lobe_mask        │
 │  按材质声明的瓣集生成静态置换 key，无 tier、无全局 MAX        │
 └───────────────────────────┬─────────────────────────────────┘
-                            │ 开放 ABI v5（变长 über 参数块）
+                            │ 开放 ABI v6（变长 über 参数块；纹理 VT 行元数据）
 ┌───────────────────────────▼─────────────────────────────────┐
 │ 运行层 (Runtime)  —  prism_render_scene / prism_render_arch   │
 │  vis-buffer per-tile 9-way 分类（已有）→ 波前一致 über 着色   │
@@ -508,7 +508,9 @@ MaterialX/OpenPBR 的程序化节点（noise/curve/blend）在烘焙期**烘到�
 
 ---
 
-## 8. 运行层 ABI v5（破坏性，不保留 v4，无硬顶）
+## 8. 运行层 ABI v6（破坏性，不保留 v4，无硬顶）
+
+> **实现状态注记（2026-10-13）**：当前 `MATERIAL_ABI_VERSION = 6`，ABI v6 的实际增量是材质纹理行从 4 个扩为 8 个 word，并携带可选 VT 标识/尺寸元数据；这只建立记录契约，**不代表材质 resolve 已经通过 page table + atlas 采样**。本节中 `vt_page_offset/count` 与 VT 页引用采样仍是目标布局，现行 header 仍保留 `texture_offset/count`，生产材质采样仍走 bindless 纹理路径。旧 v5 ABI/header 对齐工作是 v6 的历史基础，不应解读为当前版本号。
 
 ### 8.1 SpecializationId（去掉 tier，纯正交轴 + 开放 lobe_mask）
 ```
@@ -519,7 +521,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 ```
 降级不改 permutation：同一材质在近景/远景用**同一个** PSO，只是采样的 VT mip 和采样数不同。瓣集扩展时在 `closure_mask` 位域内扩展，不改轴布局。
 
-### 8.2 GpuMaterialHeader v5
+### 8.2 GpuMaterialHeader v6（目标布局）
 相对 v4 的破坏性改动：
 - 保留单一 `parameter_offset` / `parameter_size`，但其长度**由瓣集决定、变长**（不是固定 7 瓣，也不是 tier 数组）。
 - `lobe_mask` 保留并作为**开放位掩码**，驱动变长解包 + 静态置换。
@@ -528,7 +530,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - 纹理段 `texture_offset/texture_count` → **VT 页引用**（指向 `texture_streaming` 的页表句柄），不再是固定 8 槽索引，数量不限。
 - 删除一切 `MAX_*` 常量语义（`MAX_MATERIAL_TEXTURES` / `MAX_CLOSURE_SLAB_DEPTH`）。
 - **PCM 扩展摘要（4 word，P1-h）**：`extensions_used_low/high` + `extensions_required_low/high`，由 `lobe_mask` 按 namespace/stability 派生（§5.3），覆盖 64 个注册槽位（19 word 基础字段 + 4 word 摘要 = **92 B**，WESL 各 `MaterialHeader` 镜像逐字段同步）。
-- `MATERIAL_ABI_VERSION = 5`。
+- `MATERIAL_ABI_VERSION = 6`（schema `abi_version` 亦为 6；当前版本只为材质纹理行增加可选 VT 元数据，采样闭环仍未接线）。
 - `material_classification.wesl` 的 `MaterialHeader` 镜像同步更新字段名（现仍是 v4 布局：`parameter_offset/parameter_size/lobe_mask`）。
 
 ### 8.3 per-tile 分类（复用现有，不加 tier 维度）
@@ -632,15 +634,15 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P0-a | 多散射能量补偿 + furnace CI 门禁 | 无（改 BSDF+测试） | P0 |
 | P0-b | 高光抗锯齿（Toksvig/LEAN）接入 über | 无 | P0 |
 | P1-a | 距离 LOD 全面切到 VT mip（`MAX_MATERIAL_TEXTURES` 已随 P1-c 删除）。**第一片：解析式逐像素纹理 LOD 已落地**（compute resolve 无导数 → 由三角形投影解析求 `dUV/dx`/`dUV/dy`，逐贴图取级；真机 GPU 对拍门禁），见 §7.1 / §13.a | 纹理段改 VT 页引用 | P1 |
-| P1-b ✅ | ABI v5：header/分类 shader 字段同步（变长 über，无 tier/MAX）；Rust `GpuMaterialHeader` 与 5 处 WESL 镜像**逐字段同名同序**，平价门禁 `tests/material_header_abi.rs`（已落地，见 §13.a） | **破坏性 v4→v5**（版本标记已随 P1-f 首发 v5-only 字段 bump 到 5，见 §13.a；本项补 header/分类侧） | P1 |
+| P1-b ✅ | ABI v5 历史项：header/分类 shader 字段同步（变长 über，无 tier/MAX）；Rust `GpuMaterialHeader` 与 5 处 WESL 镜像**逐字段同名同序**，平价门禁 `tests/material_header_abi.rs`（已落地，见 §13.a） | **破坏性 v4→v5**（版本标记已随 P1-f 首发 v5-only 字段 bump 到 5，之后 v6 增加材质纹理行 VT 元数据） | P1 |
 | P1-c ✅ | 烘焙层：分层 → 纹理空间混合 → 开放 über（删闭包图/所有硬顶）；两处硬顶（闭包 slab 深度、纹理槽数）已删，GPU 纹理表改为变长行堆；分层混合 `bake_layer_stack` / `LayerStack`（任意层数、逐瓣归一、单层逐位恒等、逐纹素零分配）已落地（见 §13.a） | 内部，删 `MAX_CLOSURE_SLAB_DEPTH` / `MAX_MATERIAL_TEXTURES` | P1 |
 | P1-d | 置换治理：内容哈希去重 + 按需编译 + über 回退 | 工具链/PSO 缓存 | P1 |
 | P1-e | 贵瓣采样数按画质档缩放（SSS/透射/多散射） | 无（pass uniform） | P1 |
-| P1-f | über 参数块规范化到 **OpenPBR Surface** 瓣序（补 base_weight/specular_color/coat_color/subsurface_radius 等字段，删 `lower_standard_material`） | 内部布局（随 v5） | P1 |
+| P1-f | über 参数块规范化到 **OpenPBR Surface** 瓣序（补 base_weight/specular_color/coat_color/subsurface_radius 等字段，删 `lower_standard_material`） | 内部布局（v5 lobe ABI） | P1 |
 | P1-f2 ✅ | **OpenPBR 默认值对齐**（8 项：`base_color` 0.8、`specular_roughness` 0.3、`coat_roughness` 0、`coat_ior` 1.6、`coat_darkening` 1、`subsurface_color` 0.8、`emission_luminance` 0、`emission_color` 白）：schema `default` ↔ `GpuSurfaceParameters::default` ↔ 各 lobe / `SurfaceSample::default` 四处同步 + 金标准重基线，使"未作者字段"也规范一致（§4.4；已落地，见 §13.a） | 内部（改默认值） | P1 |
 | P2-d | **thin_film 虹彩瓣**落地（开放瓣首验：新位 + 3-word 块 + furnace/对拍） | 内部 enum 开放化 | P2 |
 | P2-e | 四线正交落地：`Illumination` 四值 + `custom_program` 钩子 + 混合线逐区域 illumination（per-tile 分类消化发散） | 运行时/分类 | P2 |
-| P2-a | OpenPBR/MaterialX 作者前端 + archetype 模板（兼作置换聚类锚点） | 新 crate | P2 |
+| P2-a ◐ | OpenPBR/MaterialX 作者前端 + archetype 模板（兼作置换聚类锚点）；已落地受限结构解析与 loss-aware runtime adapter，见 §13.a.1 | 新 crate | P2 |
 | P2-b | 作者节点图烘焙到 VT（noise/curve/blend 固化） | 工具链 | P2 |
 | P2-c | 开放瓣词汇表扩展机制（新 lobe 作为一等成员接入静态置换） | 内部 enum 开放化 | P2 |
 | P3-a | 解耦着色地基：纹理空间着色 pass，着色结果写入 VT 页缓存（复用 `texture_streaming`） | 新 pass/缓存，不改 ABI | P3 |
@@ -653,7 +655,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P3-d | 光谱提升（hero-wavelength，仅 RT twin / 离线参考，不进实时主线，§17.3） | 无（RT-only 分支） | P3 |
 | P3-e | 随机单瓣采样（blue-noise，贵瓣按预算随机选瓣 + TAA，§17.4） | 无（pass uniform） | P3 |
 | 开放瓣 | glint / 测量 BRDF·BTF 瓣作为开放词汇表成员落地（§17.6）。**两者均已全链落地**：glint（槽 17，计数式估计量接进 über 高光）与测量 BRDF（槽 18，纹理行 provider + 图集三线性查表，逐光源进 principled 积分器），见 §13.a | 内部 enum 开放化 | P2+ |
-| P1-h ✅ | **PCM 地基**：ABI v5 加 4 word 扩展摘要 `extensions_{used,required}_{low,high}`；OpenPBR 核心瓣自举为 `KHR` 命名空间项（§5）。**已全部落地**（见 §13.a）：九类 kind 统一进注册表 —— `lobe`(8)/`channel`(4)/`response_mode`(3)/`cache_aux`(1) 为 **header 常驻**（占 64 槽摘要），`provider`(2)/`transfer`(1)/`downgrade`(1)/`composite`(1) 为 **identity-only**（烘焙/pass 期解析，零摘要槽，§5.2）；`author_node` 因 §4 前端尚未落地而无实例（不造假条目，kind 与 hook ABI 已就位）。每类带类型化 hook ABI（`hooks.rs`：stage + 对拍义务）与 §17.2 能量策略；能力协商 + 单源平价门禁 + response-mode↔`Illumination` 平价门禁 | **随 v5**（header 加摘要） | P1 |
+| P1-h ✅ | **PCM 地基**：ABI v5 加 4 word 扩展摘要 `extensions_{used,required}_{low,high}`；OpenPBR 核心瓣自举为 `KHR` 命名空间项（§5）。**已全部落地**（见 §13.a）：九类 kind 统一进注册表 —— `lobe`(8)/`channel`(4)/`response_mode`(3)/`cache_aux`(1) 为 **header 常驻**（占 64 槽摘要），`provider`(2)/`transfer`(1)/`downgrade`(1)/`composite`(1) 为 **identity-only**（烘焙/pass 期解析，零摘要槽，§5.2）；`author_node` 因 §4 前端尚未落地而无实例（不造假条目，kind 与 hook ABI 已就位）。每类带类型化 hook ABI（`hooks.rs`：stage + 对拍义务）与 §17.2 能量策略；能力协商 + 单源平价门禁 + response-mode↔`Illumination` 平价门禁 | **ABI v5 header 增量**（header 加摘要；v6 仅增加纹理行字段） | P1 |
 | P2-i | 全 kind manifest 格式（§17.5 schema 升级）+ codegen（解包/分类/对拍从 manifest 生成）+ MaterialX nodedef 往返 | 工具链+内部布局 | P2 |
 | P2-j | **response-mode 分类注册化**（步骤 2 类数从定值改为注册驱动固定表，§5.2；唯一动热路径项，单独立项） | 分类 shader/运行时 | P2 |
 | P2+ 扩展点 | transfer / cache-aux / provider / downgrade / composite 五类逐类接入 PCM；glint/测量/水彩描边作各 kind 首样例；thin_film 走完 `EXT_→KHR_` 晋升路径（§5） | 内部（烘焙期单态化） | P2+ |
@@ -775,7 +777,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - **摘要槽的"读写分离"（§5.2 深化）**：64 槽摘要（4 命名空间 × 16）是**唯一**能让 per-material 事实零分发抵达运行时的地址空间，因此稀缺。本轮把"每个 manifest 都必须钉 `registry_slot`"深化为**只给运行时真会读的 kind 发地址**：`Kind::header_resident()` ⇒ `lobe`/`channel`/`response_mode`/`cache_aux` 常驻（前两者进 `closure_mask`/动态段，response-mode 是 §5.2 分类输入，cache-aux 是 §14.3 每材质不同的缓存 aux 集）；`transfer`/`provider`/`downgrade`/`author_node`/`composite` 为 **identity-only**（`ExtensionManifest::new_identity_only`，`registry_slot() == None`）——它们按 §5.2 折进烘焙期置换 key 或 pass 图，per-material 位**没有读者**，给它们发地址正是该红线禁止的"无人读的状态"。identity-only 行仍进同一张表、同样参与晋升与能力协商（协商按 `uid`：`ExtensionRegistry::required_caps_of_uids`），只是不占摘要槽。两个方向都被 `validate()` 机检：常驻 kind 缺槽 ⇒ `MissingSlotForHeaderResidentKind`，非常驻 kind 有槽 ⇒ `SlotForIdentityOnlyKind`。
   - **为什么必须这么做（实测动机）**：内置目录如今 22 行（7 KHR 瓣 + 15 PRISM 行）。若九类一律占槽，Prism 区（16..32，16 槽）会在**加满第一版目录时就剩 0 余量**，下一个本体扩展直接 `PoolExhausted`；identity-only 之后只占 10 槽，留有余量。另修一处分配器隐患：`register()` 现在把区域的 first-fit 游标推过**被钉死的**槽（`cursors` 单调），否则"高槽被 schema 钉死 + 低槽留空"时 first-fit 会把低槽发给新扩展，挤出 schema 已声明的地址。
   - **能量策略（§17.2 落地为 manifest 字段）**：`EnergyPolicy { Coupled, Independent, None }` 进 manifest（§5.4 字段表里的 `energy_policy`），并把 §17.5.2 的**字段级**列轮转为瓣级：`EnergyPolicy::roll_up` = `coupled > independent > none` 的取最大（与字段声明顺序无关，可测）。内置值直接取自 schema 的字段列：`emission` = independent，`npr_face` = none（风格化终结项不带能量参数），其余 7 个物理瓣 = coupled。非 `lobe` 的 kind 声明能量策略会被 `validate()` 拒绝（`EnergyPolicyOutsideLobe`）——预算只是瓣的事。
-  - **目录（余下八类的实际迁入）**：`response_mode` 3 行（`stylized` 22 / `unlit` 23 / `custom` 24，与 `Illumination` 的**非默认**变体一一对应；`Lit` 即规范默认响应，故**不**注册为扩展）；`cache_aux` 1 行（`org.prism.cache_aux.surfel` ↔ 对象空间缓存的 `GpuSurfel` 48 B 契约）；`provider` 2 行（`face_shadow_sdf` ↔ `authoring::FACE_SHADOW_SDF_SEMANTIC` + 烘焙 SDF 图集；`measured_brdf` ↔ `prism_render_shading::measured_brdf`，需 `heavy_sampling`）；`transfer` 1 行（`srgb` ↔ IEC 61966-2-1 OETF/EOTF 对）；`downgrade` 1 行（`sample_budget` ↔ §7.2/P1-e 的 `LobeSampleBudget`）；`composite` 1 行（`outline` ↔ §8.5 步骤 6 描边 pass）。**`author_node` 故意不注册**：§4 的作者前端（`prism_render_material_authoring`）是独立路线图项、尚未落地，此刻登记任何 `author_node` 都只能是占位——kind 与 hook ABI 已就位，前端落地时进同一张表，而不是另起第十套机制。
+  - **目录（余下八类的实际迁入）**：`response_mode` 3 行（`stylized` 22 / `unlit` 23 / `custom` 24，与 `Illumination` 的**非默认**变体一一对应；`Lit` 即规范默认响应，故**不**注册为扩展）；`cache_aux` 1 行（`org.prism.cache_aux.surfel` ↔ 对象空间缓存的 `GpuSurfel` 48 B 契约）；`provider` 2 行（`face_shadow_sdf` ↔ `authoring::FACE_SHADOW_SDF_SEMANTIC` + 烘焙 SDF 图集；`measured_brdf` ↔ `prism_render_shading::measured_brdf`，需 `heavy_sampling`）；`transfer` 1 行（`srgb` ↔ IEC 61966-2-1 OETF/EOTF 对）；`downgrade` 1 行（`sample_budget` ↔ §7.2/P1-e 的 `LobeSampleBudget`）；`composite` 1 行（`outline` ↔ §8.5 步骤 6 描边 pass）。**`author_node` 故意不注册**：MaterialX 受限解析与 runtime adapter 已作为 P2-a 首片落地，但通用节点图求值、bake、nodedef ↔ author_node 实例映射尚未落地；此刻登记任何 `author_node` 都只能是占位——kind 与 hook ABI 已就位，等到真实语义实现后再进同一张表。
   - **新门禁**：`pcm_parity.rs` 增 `the_registry_response_modes_mirror_the_illumination_axis`（双向：每个非默认 `Illumination` 有登记行、每个登记行有运行期变体，且 `unlit` 的 view-invariance 与 §14.3 一致）并把"目录行数"从魔数改为**逐 kind 计数**；`prism_material_pcm` 增 residency 双向谓词、能量轮转、identity-only 协商、目录覆盖（含 `author_node` 为空的显式断言）与 Prism 区余量等用例。
   - 门禁：`prism_material_pcm` **27**、`prism_render_material` **848 + 2(header ABI) + 1(schema parity) + 6(codegen freshness) + 4(pcm_parity)**。
 
@@ -1022,7 +1024,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 范围：把 clearcoat 瓣从"固定 `F0 = 0.04` 的白 dielectric"升级为 OpenPBR `coat` 组的真参数化子集——`coat_ior` 驱动**精确介质 Fresnel**（含 TIR 分支），`coat_color` 逐通道给 coat 高光着色；同时把 base 衰减从 `(1 - coat·F(v·h))²` 对齐为参考 PT 的**两宏观角**形式 `(1 - coat·F(n·v))·(1 - coat·F(n·l))`。默认 `coat_ior = 1.5`（法向入射恰为 0.04）+ 白色 `coat_color`，故仅"作者改了 IOR/颜色"才改变外观。
   - 依据：仓库自带的 path-traced 参考 `pkg/prism_render_architecture/src/reference_pt/coat.rs`（`CoatLayer` 的 `coat_ior`/`coat_color`/`fresnel_dielectric(cos, 1, ior)`）——实时金标准与 WESL 孪生都照它落地，不臆造公式。
   - 代码（全链五处同步）：schema `schema/surface.toml` clearcoat 瓣 4→8 字（新增 `coat_ior` + `coat_color` vec4f）；`GpuClearCoatLobe`（+手写 `Default`：1.5/白）与 fat `GpuSurfaceParameters`（+尾部 pad 保 16 字节对齐，112→144 B）；regenerated `material_unpack.wesl` / `surface_layout.rs`；shade-time `SurfaceSample`（CPU `lighting.rs` + WESL `brdf.wesl`）与桥接（`resolve.rs` + `shading_resolve.wesl`）；BSDF 双线（CPU `clearcoat.rs` + WESL `clearcoat.wesl`，含 `fresnel_coat_dielectric` 逐位孪生）；水栅格面的 `SurfaceSample` 显式写中性默认。
-  - **ABI 版本**：`MATERIAL_ABI_VERSION` 4→5、schema `abi_version` 4→5——这是首个 v4 读者无法解码的 schema diff（瓣字长变了），版本标记就该诚实地跟着走；§8 的 header/分类侧 v5 工作（P1-b/P1-h）在同一个 5 之上继续，不再重复 bump。
+  - **ABI 版本历史**：`MATERIAL_ABI_VERSION` 4→5、schema `abi_version` 4→5——这是首个 v4 读者无法解码的 schema diff（瓣字长变了）；后来 ABI v6 因材质纹理行增加四个 VT 元数据 word 再次升级。§8 的 header/分类侧 v5 工作（P1-b/P1-h）是在 v5 上完成的历史项。
   - 门禁：`cargo test -p prism_render_shading --lib` **3282 通过**（含新增 `coat_ior_default_reproduces_the_legacy_normal_incidence_f0` / `denser_coat_ior_strengthens_the_interface` / `coat_color_tints_only_the_coat_highlight`，且既有 `zero_clearcoat_matches_principled_base`、掠射压暗、峰值加亮等性质门禁全绿）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过，含 brdf/shading_resolve/clearcoat 全链）、`cargo test -p prism_render_material` 826+6+2 全绿；touched 文件 clippy 无告警。
   - **后续已全部落地**：`coat_roughness_anisotropy`（各向异性 coat 瓣）、`coat_normal` / `geometry_coat_tangent`（coat 自己界面的法线/切线，零向量 = 继承基础帧，恒等）、`coat_darkening`（规范 `general_darkening_formula` 的 `lerp(1, Δ, C·δ)`）都已接上；`lower_standard_material` 也已删除（外部材质统一走 OpenPBR 导入器）。详见 §13.a 的 coat 组条目。
 
@@ -1055,7 +1057,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - 构造点同步：`resolve.rs::surface_sample_from_parameters`、`cloth_advanced.rs` 测试基面（其余均走 `..Default::default()`）。
     - WESL twin `pkg/prism_render_scene/src/shaders/brdf.wesl`：`SurfaceSample.normal_variance` + `principled_direct` 调 `prism_render_scene::shaders::specular_aa::spec_aa_filter_alpha_sq`（与 CPU 逐位同算术、同常量、同参序）。
     - 核本体（本阶段前已落地、本阶段接入）：CPU `gi/specular_aa/{mod,toksvig,normal_variance,lean}.rs` + WESL `shaders/specular_aa.wesl` + 对拍 `shading/specular_aa/{mod,shader_tests}.rs`。
-  - **恒等旁路 + 明确的上游**：`normal_variance` 现在恒为 `0.0`，而 `0.0` 在数学上是**精确恒等**（`filter_alpha_sq` 在 `variance = 0` 时返回原值，任何既有金标准逐位不变）。真实喂数来自上游纹理足迹 / 烘焙方差图，属 **P1-a**（VT 纹理足迹）与 **P2-b**（烘焙）的产线；本项已把消费端（Toksvig/LEAN 展宽）完整实现并加了"方差单调抬高粗糙度、`0` 恒等"的门禁。编辑器 MaterialX 作者前端（P2-a）按 goal 保持编辑器 TODO。
+  - **恒等旁路 + 明确的上游**：`normal_variance` 现在恒为 `0.0`，而 `0.0` 在数学上是**精确恒等**（`filter_alpha_sq` 在 `variance = 0` 时返回原值，任何既有金标准逐位不变）。真实喂数来自上游纹理足迹 / 烘焙方差图，属 **P1-a**（VT 纹理足迹）与 **P2-b**（烘焙）的产线；本项已把消费端（Toksvig/LEAN 展宽）完整实现并加了"方差单调抬高粗糙度、`0` 恒等"的门禁。MaterialX parser/runtime adapter 已作为 P2-a 首片落地；P2-b 图求值和方差烘焙仍未开始。
   - 门禁：`cargo test -p prism_render_shading --lib lighting`（22 通过，含 `specular_aa_variance_is_identity_at_zero_and_coarsens_the_peak`：恒等 + 单调粗化 + κ 饱和）、`--lib gi::specular_aa`；`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过，编译 brdf.wesl + specular_aa.wesl 全链路）、`--lib shading::specular_aa`；touched 文件 clippy 干净、已 rustfmt。
 
 - **P2-h 原理化分层：coat/base 两程能量耦合**（§17.2 / §13 表 P2-h）
@@ -1108,7 +1110,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - 高光混入：`lighting.rs::evaluate_principled_direct` 与 `brdf.wesl::principled_direct` 在同一 `v_dot_h` 余弦下把 Schlick Fresnel 向 `iridescent_fresnel_rgb` 按 `iridescence` 权重 `mix`；`iridescence==0` 走原路径（恒等），`>0` 才评薄膜。两侧逐位同序。
     - 对拍门禁 `pkg/prism_render_scene/src/shading/thin_film/{mod,shader_tests}.rs`：仿 `shading/specular_aa/` 以一个真实 `@compute` link-test 入口引用全部导出符号（含新 `tf_base_ior_from_f0`/`tf_iridescent_fresnel_rgb`），覆盖 import 可见性/签名/类型检查。`brdf.wesl` 现 import `thin_film.wesl`，`shading::resolve::shader_tests` 的 deps 数组已登记 `thin_film.wesl` 并把定长 `[...; 16]` 升为 `[...; 17]`。
   - 门禁：`cargo test -p prism_render_shading --lib thin_film`（CPU 金标准 24 通过，含逐通道 IOR 往返 / 厚度 0 回落 / 有色膜着色 5 项新金标准）、`-p prism_render_shading --lib` 全量 **3197 通过**（权重 0 恒等，老金标准零回归）、`-p prism_render_scene --lib shading::thin_film`（link 1 通过）、`--lib shading::resolve::shader_tests`（brdf→thin_film 全链 48 通过）；已 rustfmt。
-  - **ABI 接入已落地**：`thin_film` 现在是**一等 ABI 瓣**（`LobeMask::THIN_FILM`，KHR slot 6，`thin_film_weight` / `_thickness`（µm）/ `_ior`），`prism_unpack_surface` 低位优先聚集自动容纳；NPR_FACE 为给规范段让位从 bit 6 迁到 bit 16，位区隔离成为校验期事实（§4.5 约束 2）。编辑器 MaterialX 作者前端（P2-a）按 goal 保持编辑器 TODO。
+  - **ABI 接入已落地**：`thin_film` 现在是**一等 ABI 瓣**（`LobeMask::THIN_FILM`，KHR slot 6，`thin_film_weight` / `_thickness`（µm）/ `_ior`），`prism_unpack_surface` 低位优先聚集自动容纳；NPR_FACE 为给规范段让位从 bit 6 迁到 bit 16，位区隔离成为校验期事实（§4.5 约束 2）。P2-a 的受限 MaterialX 到 runtime adapter 已有首片；完整作者图求值、编辑器集成与 P2-b bake 仍是 TODO。
 
 
 - **开放瓣 CPU 金标准 + WESL 孪生：程序化 glint / 实测·表格化 BRDF（§17.6，shading 域内落地）**（§13 表 开放瓣）
@@ -1120,6 +1122,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 **⬜ 未开始（见上表）**：P1-d、P2-e、P3-a~P3-d（**P1-b / P1-c / P1-f / P1-f2 / P1-g / P1-h / P2-g / P2-j 已完成**，见 §13.a；**P2-a / P2-b / P2-c 的 MaterialX 往返 / P2-i 的 MaterialX nodedef 部分**按 goal 归编辑器前端，属显式 TODO；P2-i 的其余部分见下方审计）。**P1-a 第一片已完成**（解析式逐像素纹理 LOD：compute resolve 无导数 → 三角形投影解析求 `dUV/dx`/`dUV/dy` + 逐贴图取级 + 真机对拍，见 §7.1 / §13.a），余下的是"纹理段全面切到 VT 页引用"。**P2-c 第一片已完成**：**glint 开放瓣全链落地**（schema 槽 17 + 4 word ABI + 计数式无偏估计量接进 über 高光 + shade-time 足印契约 + CPU 集成门禁 + 真机对拍，见 §17.6 / §13.a）；**P2-c 第二片（测量 BRDF·BTF 瓣）已完成**（槽 18 + 纹理行 provider + 图集三线性 + 双线响应 + CPU 端到端门禁，见 §17.6 / §13.a；含真机图集对拍）；P2-c 余下的是 MaterialX 往返（编辑器前端未起，按 goal 留 TODO）。**P1-h 已完成**（九类 kind 全部迁入 PCM 注册表：`lobe`/`channel`/`response_mode`/`cache_aux` 常驻 64 槽摘要，`provider`/`transfer`/`downgrade`/`composite` 为 identity-only；每类带类型化 hook ABI 与 §17.2 能量策略；能力协商 + header 4 word 摘要 + 单源平价门禁，见 §13.a）——其中 response-mode 的**分类表注册化**仍是唯一动热路径结构的项（P2-j，单独立项）：本项只把 `stylized`/`unlit`/`custom` 三类登记进注册表并与 `Illumination` 双向平价，9-way class 表本身仍在管线构建期写死。channel 一类已登记（`wetness`/`snow`/`damage`/`dissolve`）**且已接进运行期参数通道**（P2-g 全链：header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha test / OIT blend + 真机对拍，见 §13.a）；`author_node` 因 §4 前端未落地而无实例（kind 与 hook ABI 已就位，不造假条目）。P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（见上「部分完成」）——它的"贵瓣"消费者现在真的存在了（glint），所以接线不再是空转。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
+
+> **P2-a 状态修订（2026-10-13）**：`pkg/prism_render_material_authoring` 已不再是空 crate。首片已实现受限 MaterialX IR、OpenPBR/Standard Surface 到 `prism_render_material::GpuSurfaceParameters` 的 loss-aware adapter，以及“支持字段 / 未支持字段 / 不安全任意图连接”三类边界；12 项定向测试通过。完整任意图求值、节点图 bake/VT、`author_node`/`nodedef` 实例、archetype 模板和编辑器集成仍未完成，不能将本首片记为完整 P2-a。
 
 
 #### 13.a.1 code-truth 审计（剩余路线图项 · 逐项证据）
@@ -1135,15 +1139,16 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | **P1-b** | 完成 | `material_header_abi.rs` 逐字段镜像门禁；§13.a 记录 | — |
 | **P1-c** | 完成 | `bake.rs`（层栈 → 纹理空间混合）、硬顶删除记录 | — |
 | **P1-d 置换治理** | **完成（引擎侧）** | `pipeline_cache.rs`：内容键 + 引用计数 ✔、后台 `PipelineCompiler` worker、ready/pending/waiting/canceled 状态机、全瓣 über fallback、`MAX_IN_FLIGHT_COMPILES` 背压、每帧 `pump_pipeline_compiles` 接线、`prewarm` 批量预热 API；`bin_class` 扩到 19-bit lobe set ✔。真机 cold-compile 测试已落地 | archetype 模板内容/热门 key 集合由 P2-a 编辑器提供（引擎 API 已就位） |
-| **P2-a / P2-b** | 编辑器 TODO | goal 明确：编辑器架构未起 | 归 `prism_render_material_authoring`（未建） |
+| **P2-a** | **部分完成（受限作者前端 + runtime adapter）** | `prism_render_material_authoring`：MaterialX 子集 IR、OpenPBR/Standard Surface → `GpuSurfaceParameters` 映射、支持/不支持字段报告、任意表达式连接拒绝；`cargo test -p prism_render_material_authoring` 12 项通过 | 完整 MaterialX 节点图求值/bake、archetype 模板与编辑器集成 |
+| **P2-b** | 未开始 | 尚无 MaterialX 程序化节点到 VT 的 bake 接口 | noise/curve/blend 节点图求值和 VT 烘焙 |
 | **P2-c** | 完成（两个开放瓣） | glint + measured 的 ABI/双线/真机对拍（§17.6、§13.a） | MaterialX 往返（编辑器 TODO） |
 | **P2-e 四线正交运行期** | **部分** | `Illumination` 四值 ✔、分类到 `Npr`/`Unlit`/`Custom` ✔、per-tile 9-way 分类 ✔；**custom 的运行期退化已落地**（见 §13.a）| ① **逐区域 illumination**（遮罩在分类 pass 里选 Lit/Stylized，才符合 §3.5.3 的"per-tile 分波前消发散"）；② 作者侧 `respond_custom` WESL 属编辑器 TODO（契约 §5.4.1） |
 | **P2-g** | 完成 | header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha/OIT + 真机对拍（§17.1、§13.a） | — |
 | **P2-i 全 kind manifest + codegen** | **非编辑器完成（8 个有实例的 kind 全部声明化）** | `prism_material_schema` 现已覆盖 lobe（含 closure 分类链接）、channel、response_mode、cache_aux 与 identity-only 的 provider/transfer/downgrade/composite：codegen 产出 `SURFACE_LOBE_CLOSURES`、`SURFACE_CHANNELS`、`SURFACE_RESPONSE_MODES`、`SURFACE_CACHE_AUX`、`SURFACE_IDENTITY_EXTENSIONS`；header 常驻非-lobe 槽位致密、identity-only 行零槽，全部与 PCM 目录双向对拍（见 §13.a）。`author_node` 是第 9 类：kind/hook/词表已就位，唯一实例等待 §4 编辑器前端 | **编辑器部分**：author_node 实例 + MaterialX nodedef 往返（架构未起，显式 TODO） |
 | **P2-j** | 完成 | 类表由 PCM 注册表 + lobe 目录派生、穷举平价门禁、WESL `CLASS_*` 平价门禁、类数由表驱动（§5.2、§13.a） | — |
-| **P3-a~d 解耦着色** | **P3-a 逻辑地基已落地；GPU VT page lookup/feedback 基础设施已落地；P3-b~d 未开始** | `shading/texel_cache/` 已提供稳定 texel key、可复现可见性预算、generation/epoch 校验、Stale 生命周期与 active/staging 原子页表；`prism_virtual_texture_gpu` 已提供真实 wgpu page-table lookup、coarse-mip resolve、refinement feedback 与 sampler-feedback map 的 CPU/GPU parity 门禁；仍不是 shade-page atlas 写入、材质/光照 compute pass 或 `render_scene` 接线。`gi/surface_cache/` 仍是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统） | 下一步按 §14.10 接入真实 shade-page atlas/compute pass（需 completion fence 后发布），再做视角无关项分离、失效/时序复用、LOD 策略 |
+| **P3-a~d 解耦着色** | **P3-a 逻辑地基与独立 GPU atlas/write protocol slice 已落地；完整 shade pass 与 P3-b~d 未开始** | `shading/texel_cache/` 已提供稳定 texel key、可复现可见性预算、generation/epoch 校验、Stale 生命周期、active/staging 原子页表与不可伪造的 completion proof；`gpu/atlas.wgsl` + wgpu integration gate 已验证多页隔离、越界 invocation、generation/epoch 失配与 atlas 边界协议（无 adapter 时跳过，强制门禁失败）；仍不是材质/光照 texture-space compute、GPU page table、`render_scene` 接线或完整 P3-a 闭环。`gi/surface_cache/` 仍是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统） | 下一步按 §14.10 接入真实 object/material/face/UV/chart 输入与 shade compute pass（需 completion proof 后发布），再做粗 mip/fallback、视角无关项分离、失效/时序复用、LOD 策略 |
 
-> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P2-e 的逐区域 illumination、P3-a 的 shade-page GPU atlas/pass 接线及 P3-b~d**；P3-a 的 CPU 逻辑地基与独立 VT GPU lookup/feedback 基础设施已落地，但两者尚未接成实际材质/光照渲染闭环。archetype 热门置换预热、作者侧 `respond_custom` / author_node / MaterialX nodedef 归编辑器前端（显式 TODO）。
+> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P2-e 的逐区域 illumination、P3-a 的真实材质/光照 shade pass 接线及 P3-b~d**；P3-a 已有 CPU 生命周期地基和独立 GPU atlas/write protocol 验证，但尚未接成实际材质/光照渲染闭环，不能宣称完整 GPU shade cache。archetype 热门置换预热、作者侧 `respond_custom` / author_node / MaterialX nodedef 归编辑器前端（显式 TODO）。
 > 其余路线图项要么已完成（上表），要么按 goal 明确挂在编辑器前端（MaterialX / 节点图 / 作者 WESL）。
 
 ### 13.5 P3 远期：解耦着色 / texel-space shading（性能上限最高，工程最重）
@@ -1287,7 +1292,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 | 阶段 | 内容 | 门禁 |
 |---|---|---|
-| P3-a 地基 | **CPU 逻辑地基已落地**：`shading/texel_cache/` 提供稳定 key、请求预算、`Stale`/generation/epoch 状态机、active/staging 页表，以及带 `GpuCompletionValue` 的 `submit_write`→completion→`complete_write` 发布协议；旧 active 槽位经 `publish_after` retired，只有 `reclaim_completed` 后才可复用，abort 对已提交写入同样延迟回收；**待接线**：页表 `w1`、GPU atlas tile 写入与 compute pass | 当前已覆盖命中/未命中、预算确定性、代际/epoch 隔离、无半写可见、未完成 GPU 写入不可发布和 in-flight 槽位不复用；GPU atlas/pass 与粗 mip 兜底仍是后续门禁 |
+| P3-a 地基 | **CPU 逻辑地基与 GPU atlas/write protocol slice 已落地**：`shading/texel_cache/` 提供稳定 key、请求预算、`Stale`/generation/epoch 状态机、active/staging 页表，以及 `submit_write`→completion proof→`complete_write` 发布协议；旧 active 槽位经 `publish_after` retired，只有 `reclaim_completed` 后才可复用，abort 对已提交写入同样延迟回收；epoch 切换时旧页保留到 publish 并按 GPU timeline 安全退役。`gpu/atlas.wgsl` 的真实 wgpu gate 覆盖多页隔离、越界 invocation、元数据失配与 atlas 边界；无 adapter 时安全跳过，`PRISM_REQUIRE_GPU=1` 时明确失败；**待接线**：真实页表 `w1`、object/material/face/UV/chart 输入、材质/光照 shade compute、render plugin 与 fallback | 当前已覆盖命中/未命中、预算确定性、代际/epoch 隔离、无半写可见、未完成 GPU 写入不可发布、in-flight 槽位不复用及 atlas protocol；完整 GPU shade pass、粗 mip 兜底和硬件 parity 仍是后续门禁 |
 | P3-b 视角无关项 | 先缓存 diffuse/SSS/emission/GI 辐照度（PBR+NPR 可缓存项），高光走屏幕空间 split-sum | 与纯屏幕空间抽样对拍误差阈值；furnace 不回归 |
 | P3-c 失效摊销 | generation/epoch 局部失效 + 分帧预算重着 + 时序累积 | 动态光场景帧时稳定、无档跳；staleness 上限 CI |
 | P3-d seam/一致性 | per-face tile + gutter + 无锁双代 + disocclusion 屏幕回退 | seam 视觉零裂；骤转无黑块 CI |
@@ -1370,8 +1375,8 @@ impl LayerStack {
 ```
 
 ```rust
-// record.rs —— ABI v5（破坏性，单一开放 über，无 tier、无 MAX 常量）
-pub const MATERIAL_ABI_VERSION: u32 = 5;
+// 目标布局草案；当前代码的 MATERIAL_ABI_VERSION = 6，材质 VT 采样尚未接通。
+pub const MATERIAL_ABI_VERSION: u32 = 6;
 
 #[repr(C)]
 pub struct GpuMaterialHeader {
@@ -1562,7 +1567,7 @@ RGB 渲染在**强色散、薄膜虹彩、荧光**下与真值有偏差。全实
 | **MaterialX `nodedef`** | 声明式节点接口 + 版本 + 命名空间，天然对接 §4 作者层 | 仅描述接口不生成运行时布局；我们延伸到位级 codegen |
 | **LLVM TableGen** | 声明式 record → **多后端** codegen（一个源出多目标）的范式本体 | 领域是指令选择；我们把范式搬到瓣/能力布局 |
 | **glTF KHR + JSON Schema** | 注册表 + 校验 + `namespace` + 向后兼容的扩展治理 | 纯数据交换；我们加编译期布局与特化 |
-| **FlatBuffers / Cap'n Proto** | schema → **确定性二进制布局** codegen，跨语言零漂移 | 通用序列化；我们绑定 ABI v5 位段与置换 key |
+| **FlatBuffers / Cap'n Proto** | schema → **确定性二进制布局** codegen，跨语言零漂移 | 通用序列化；我们绑定 ABI v6 位段与置换 key |
 | **Slang reflection / UE `FShaderParametersMetadata`** | CPU↔GPU 参数布局**单源绑定**，杜绝两侧手对 offset | 偏运行时反射/宏；我们编译期一次性生成、运行时零反射 |
 
 一句话取舍：**取"自描述 + 单源多后端 codegen + 命名空间治理"，去"运行时反射/查询"**——所有生成与校验落在烘焙/加载期（§5.2），运行时只剩已特化好的那份 WESL，零反射、零注册表查询。
@@ -1633,7 +1638,7 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 |---|---|
 | codegen 增编译/构建成本 | 按 schema 内容哈希做**增量生成 + 缓存**；生成物入库，CI 只校验"新鲜度"（与 schema 同步），非每次全量重生 |
 | schema 表达力不够（某瓣需复杂逻辑） | 明确划界（§17.5.5）：schema 管布局/契约，行为留在类型化 hook；schema 不追求图灵完备 |
-| 版本迁移 / ABI 演进 | schema 版本与 **ABI v5** 耦合（§8），迁移 = schema diff；`registry_slot` 永不回收保证老位绑定稳定（§5.4） |
+| 版本迁移 / ABI 演进 | schema 版本与 **ABI v6** 耦合（§8），迁移 = schema diff；`registry_slot` 永不回收保证老位绑定稳定（§5.4） |
 | 生成代码难调试 | 生成物**可读 + 源映射回 schema 行 + 确定性**（同源同输出）；调试视图亦同源生成（§4.6） |
 | schema 自身偏离 OpenPBR 规范 | `namespace==KHR` 区由 ⑤/⑥ 自动对 OpenPBR 参考**枚举对拍**，偏离即 CI 标红（§4.5 约束1） |
 
