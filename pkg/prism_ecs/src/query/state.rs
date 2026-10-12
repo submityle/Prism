@@ -17,8 +17,8 @@ use crate::entity::Entity;
 use crate::query::access::Access;
 use crate::query::fetch::{QueryData, ReadOnlyQueryData};
 use crate::query::filter::QueryFilter;
-#[cfg(feature = "multi_thread")]
 use crate::query::slice::{ArchetypalFilter, ColumnSliceData};
+use crate::query::slice_iter::QuerySliceIter;
 use crate::query::iter::QueryIter;
 use crate::query::many::QueryManyIter;
 use crate::query::matched::{MatchedArchetypes, SpinLock};
@@ -282,6 +282,65 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 this_run,
             )
         }
+    }
+
+    /// Iterate the matched rows in **chunk-aligned typed column slices** over a
+    /// shared view of `world` (design §7 SIMD 迭代).
+    ///
+    /// The serial sibling of [`par_chunks`](Self::par_chunks): each yielded
+    /// slice covers at most `K` contiguous rows of one archetype (the last slice
+    /// of an archetype may be shorter), which is exactly the input the `simd`
+    /// bulk kernels take. Every data term must be
+    /// [`ColumnSliceData`] and the filter must be an [`ArchetypalFilter`]; both
+    /// are checked once, up front, with a clear panic rather than silently
+    /// falling back.
+    #[inline]
+    pub fn simd_iter<'w, 's, const K: usize>(
+        &'s self,
+        world: &'w World,
+    ) -> QuerySliceIter<'w, 's, D, F>
+    where
+        D: ColumnSliceData + ReadOnlyQueryData,
+        F: ArchetypalFilter,
+    {
+        <D as ColumnSliceData>::assert_sliceable();
+        <F as ArchetypalFilter>::assert_archetypal();
+        self.validate_world(world);
+        let this_run = world.change_tick();
+        let archetypes = self.matched_archetypes(world);
+        let world_ptr = (world as *const World).cast_mut();
+        // SAFETY: `D: ReadOnlyQueryData`, so no `&mut [T]` slice is ever formed
+        // and the shared `&'w World` borrow is sufficient; every id in
+        // `archetypes` came from `matched_archetypes`.
+        unsafe { QuerySliceIter::new(world_ptr, &self.data_state, archetypes, K, this_run) }
+    }
+
+    /// Iterate the matched rows in chunk-aligned typed column slices over an
+    /// **exclusive** view of `world`, permitting `&mut [T]` terms (design §7/§8.3).
+    ///
+    /// The serial counterpart of [`par_chunks_mut`](Self::par_chunks_mut). A
+    /// `&mut T` term stamps the change ticks of the whole handed-out range up
+    /// front (a bare slice loses the per-row write information), and the
+    /// caller's exclusive borrow makes every slice unique.
+    #[inline]
+    pub fn simd_iter_mut<'w, 's, const K: usize>(
+        &'s self,
+        world: &'w mut World,
+    ) -> QuerySliceIter<'w, 's, D, F>
+    where
+        D: ColumnSliceData,
+        F: ArchetypalFilter,
+    {
+        <D as ColumnSliceData>::assert_sliceable();
+        <F as ArchetypalFilter>::assert_archetypal();
+        self.validate_world(world);
+        let this_run = world.change_tick();
+        let archetypes = self.matched_archetypes(world);
+        let world_ptr = world as *mut World;
+        // SAFETY: `world` is exclusively borrowed for `'w`, so the raw pointer is
+        // the sole route to the world during iteration; the slices are disjoint
+        // by construction, so each `&mut [T]` is unique.
+        unsafe { QuerySliceIter::new(world_ptr, &self.data_state, archetypes, K, this_run) }
     }
 
     /// Iterate every unordered `K`-subset of the rows this query matches

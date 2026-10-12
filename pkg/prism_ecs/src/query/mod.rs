@@ -27,8 +27,8 @@ mod many;
 mod matched;
 #[cfg(feature = "multi_thread")]
 mod par;
-#[cfg(feature = "multi_thread")]
 mod slice;
+mod slice_iter;
 #[cfg(feature = "simd")]
 mod simd;
 mod state;
@@ -42,8 +42,8 @@ pub use iter::QueryIter;
 pub use many::{QueryManyIter, QueryManyMatchedIter};
 #[cfg(feature = "simd")]
 pub use simd::{active, add_assign, axpy_assign, scale_assign, sum, Backend};
-#[cfg(feature = "multi_thread")]
 pub use slice::{ArchetypalFilter, ColumnSliceData};
+pub use slice_iter::QuerySliceIter;
 pub use state::{QueryEntityError, QuerySingleError, QueryState};
 
 #[cfg(test)]
@@ -60,6 +60,8 @@ mod identity_tests;
 mod many_tests;
 #[cfg(test)]
 mod single_tests;
+#[cfg(test)]
+mod slice_iter_tests;
 #[cfg(test)]
 mod change_detection_tests;
 #[cfg(test)]

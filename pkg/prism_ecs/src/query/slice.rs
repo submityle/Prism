@@ -110,7 +110,7 @@ unsafe impl<T: Component> ColumnSliceData for &T {
     fn assert_sliceable() {
         assert!(
             matches!(T::STORAGE, StorageType::Table),
-            "par_chunks requires table-backed components; `&{}` over sparse/shared storage (design §6) has no contiguous column slice",
+            "chunk-slice iteration (par_chunks / simd_iter) requires table-backed components; `&{}` over sparse/shared storage (design §6) has no contiguous column slice",
             core::any::type_name::<T>(),
         );
     }
@@ -285,7 +285,7 @@ unsafe impl<T: Component> ArchetypalFilter for With<T> {
     fn assert_archetypal() {
         assert!(
             !matches!(T::STORAGE, StorageType::SparseSet),
-            "par_chunks filters must be archetype-uniform; `With<{}>` over sparse storage (design §6) is a per-entity test",
+            "chunk-slice filters (par_chunks / simd_iter) must be archetype-uniform; `With<{}>` over sparse storage (design §6) is a per-entity test",
             core::any::type_name::<T>(),
         );
     }
