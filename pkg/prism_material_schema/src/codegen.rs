@@ -509,11 +509,11 @@ mod tests {
     fn wesl_exposes_the_consumer_api() {
         let wesl = emit_wesl_unpack(&surface_schema());
         for needle in [
-            "fn prism_unpack_surface(words: array<u32, 92>, lobe_mask: u32)",
+            "fn prism_unpack_surface(words: array<u32, 96>, lobe_mask: u32)",
             "fn prism_packed_word_count(lobe_mask: u32) -> u32",
             "fn prism_neutral_surface() -> PrismSurfaceParameters",
-            "const PRISM_SURFACE_MAX_WORDS: u32 = 92u;",
-            "const PRISM_LOBE_WORDS_EMISSION: u32 = 4u;",
+            "const PRISM_SURFACE_MAX_WORDS: u32 = 96u;",
+            "const PRISM_LOBE_WORDS_EMISSION: u32 = 8u;",
             "const PRISM_LOBE_WORDS_FACE: u32 = 4u;",
             "const PRISM_LOBE_WORDS_CLEARCOAT: u32 = 16u;",
             "const PRISM_LOBE_WORDS_SHEEN: u32 = 8u;",
@@ -550,11 +550,11 @@ mod tests {
         for needle in [
             "pub const SURFACE_CORE_WORDS: usize = 20;",
             "pub const SURFACE_LOBE_WORDS: usize = 16;",
-            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 17] = [4, 16, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];",
+            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 17] = [8, 16, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];",
             "pub const SURFACE_LOBE_COUNT: u32 = 8;",
-            "pub const SURFACE_MAX_WORDS: usize = 92;",
+            "pub const SURFACE_MAX_WORDS: usize = 96;",
             "pub const SURFACE_LOBES: [LobeLayout; 8] = [",
-            "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 4,\n        namespace: \"KHR\",\n    },",
+            "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 8,\n        namespace: \"KHR\",\n    },",
             "    LobeLayout {\n        id: \"face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"FACE\",\n        registry_slot: 16,\n        words: 4,\n        namespace: \"PRISM\",\n    },",
         ] {
             assert!(rust.contains(needle), "generated Rust missing `{needle}`");
@@ -582,7 +582,7 @@ mod tests {
         assert!(rust.contains("pub const SURFACE_LOBE_WORDS: usize = 20;"));
         // Two dense segments with a reserved gap: canonical 0..6, extension 16.
         assert!(rust.contains(
-            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 17] = [4, 20, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];"
+            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 17] = [8, 20, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];"
         ));
         // Worst case grows with the widened lobe; derive it from the schema so
         // the test does not re-hardcode the other lobes' footprints.

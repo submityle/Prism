@@ -203,6 +203,7 @@ mod tests {
         GpuSurfaceParameters {
             base_color: [0.1, 0.2, 0.3, 1.0],
             emissive: [2.0, 0.0, 0.0, 1.0],
+            emission_luminance: 3.5,
             metallic: 0.25,
             perceptual_roughness: 0.4,
             specular_weight: 0.65,
@@ -214,6 +215,7 @@ mod tests {
             specular_color: [0.95, 0.97, 1.0, 1.0],
             specular_ior: 1.7,
             thin_walled: 0.0,
+            geometry_opacity: 0.9,
             transmission: 0.6,
             thickness: 1.5,
             clearcoat: 0.7,
@@ -245,7 +247,7 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 5],
+            _pad_tail: [0.0; 7],
         }
     }
 

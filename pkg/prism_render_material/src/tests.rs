@@ -227,9 +227,30 @@ fn gpu_material_rows_match_the_shader_abi() {
     // transmission groups, including coat_darkening, scatter_anisotropy and
     // transmission_scatter) sized the fat authoring view, with trailing pad
     // words keeping it a 16-byte multiple.
-    assert_eq!(size_of::<GpuSurfaceParameters>(), 304);
+    assert_eq!(size_of::<GpuSurfaceParameters>(), 320);
     assert_eq!(size_of::<GpuMaterialTexture>(), 16);
     assert_eq!(size_of::<GpuMaterialHeader>() % 16, 0);
     assert_eq!(size_of::<GpuSurfaceParameters>() % 16, 0);
     assert_eq!(size_of::<GpuMaterialTexture>() % 16, 0);
+}
+
+/// The importer must split Bevy's authored emission radiance into the
+/// specification's `emission_color * emission_luminance` without changing the
+/// product, so a converted material renders identically.
+#[cfg(feature = "bevy")]
+#[test]
+fn openpbr_importer_preserves_the_emission_radiance() {
+    let material = bevy_pbr::StandardMaterial {
+        emissive: bevy_color::LinearRgba::new(2.0, 1.0, 0.5, 1.0),
+        ..Default::default()
+    };
+    let imported = import_openpbr_surface(&material, 0.5);
+    assert!((imported.emission_luminance - 2.0).abs() < 1.0e-6);
+    for (channel, expected) in [2.0f32, 1.0, 0.5].into_iter().enumerate() {
+        let radiance = imported.emissive[channel] * imported.emission_luminance;
+        assert!(
+            (radiance - expected).abs() < 1.0e-5,
+            "channel {channel}: {radiance} vs {expected}"
+        );
+    }
 }

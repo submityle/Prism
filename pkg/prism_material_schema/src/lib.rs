@@ -522,7 +522,7 @@ impl SurfaceSchema {
 
 /// First `registry_slot` of the Prism extension region (§4.5 constraint 2).
 ///
-/// The canonical OpenPBR (`KHR`) bit region grows densely from slot `0`; every
+/// The canonical `OpenPBR` (`KHR`) bit region grows densely from slot `0`; every
 /// non-`KHR` lobe occupies the extension region that starts here, leaving the
 /// slots between as a reserved gap so the two regions can grow independently
 /// without ever colliding.
@@ -719,18 +719,16 @@ mod tests {
             .lobes
             .iter()
             .fold(0u32, |acc, lobe| acc | (1 << lobe.registry_slot));
-        // Core (20) + emission (4) + clearcoat (16, the OpenPBR coat group) +
-        // anisotropy (4) + sheen (8) + subsurface (16, the OpenPBR subsurface
-        // group) = 68 is the transmission base; the transmission lobe then packs
-        // transmission, thickness, index_of_refraction, dispersion,
-        // transmission_color and transmission_scatter at 68..80.
+        // Core (20) + emission (8, the OpenPBR emission group) + clearcoat (16)
+        // + anisotropy (4) + sheen (8) + subsurface (16) = 72 is the transmission
+        // base; the transmission lobe then packs its fields at 72..88.
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "transmission"),
-            Some(68)
+            Some(72)
         );
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "index_of_refraction"),
-            Some(70)
+            Some(74)
         );
     }
 

@@ -38,7 +38,7 @@ use crate::lighting::{
     fresnel_dielectric, fresnel_schlick, oren_nayar_factor, visibility_smith_ggx_anisotropic,
     visibility_smith_ggx_correlated, MIN_ANISOTROPIC_ALPHA, MIN_DIELECTRIC_IOR,
 };
-use crate::vecmath::{add, dot, mix3, mul, mul_scalar, normalize_or, sub};
+use crate::vecmath::{add, cross, dot, mix3, mul, mul_scalar, normalize_or, sub};
 use crate::{DirectLightSample, ShadingFrame, SurfaceSample};
 
 /// Reciprocal of pi, matching the GPU `INV_PI` constant.
@@ -60,6 +60,38 @@ fn coat_interface_normal(coat_normal: [f32; 3], base_normal: [f32; 3]) -> [f32; 
         normalize_or(coat_normal, base_normal)
     } else {
         base_normal
+    }
+}
+
+/// `OpenPBR` `geometry_coat_tangent`, falling back to the base frame tangent
+/// when unauthored (the all-zero identity sentinel).
+#[inline]
+fn coat_tangent_or(
+    coat_tangent: [f32; 3],
+    base_tangent: [f32; 3],
+) -> [f32; 3] {
+    let [x, y, z] = coat_tangent;
+    if x * x + y * y + z * z > 0.0 {
+        normalize_or(coat_tangent, base_tangent)
+    } else {
+        base_tangent
+    }
+}
+
+/// The bitangent matching [`coat_tangent_or`]: the coat's own (or the base
+/// frame's) handedness axis.
+#[inline]
+fn coat_bitangent_or(
+    coat_tangent: [f32; 3],
+    coat_normal: [f32; 3],
+    base_tangent: [f32; 3],
+    base_bitangent: [f32; 3],
+) -> [f32; 3] {
+    let [x, y, z] = coat_tangent;
+    if x * x + y * y + z * z > 0.0 {
+        cross(coat_normal, normalize_or(coat_tangent, base_tangent))
+    } else {
+        base_bitangent
     }
 }
 
@@ -154,8 +186,13 @@ pub fn evaluate_clearcoat_direct(
             // specular lobe does (same axes, same Burley aspect split).
             let (coat_t, coat_b) = anisotropic_axes(
                 coat_n,
-                frame.tangent,
-                frame.bitangent,
+                coat_tangent_or(surface.coat_tangent, frame.tangent),
+                coat_bitangent_or(
+                    surface.coat_tangent,
+                    coat_n,
+                    frame.tangent,
+                    frame.bitangent,
+                ),
                 surface.anisotropy_rotation,
             );
             let aspect = (1.0 - 0.9 * coat_aniso).sqrt();

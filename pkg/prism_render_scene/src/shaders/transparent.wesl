@@ -152,7 +152,8 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
     let material_header = material_headers[in.material_index];
     let surface = load_surface_parameters(material_header.parameter_offset, material_header.lobe_mask);
     let color = surface.base_color.rgb + surface.emissive.rgb;
-    let alpha = clamp(surface.base_color.a, 0.0, 1.0);
+    // `OpenPBR` `geometry_opacity` scales the coverage the blend path reads.
+    let alpha = clamp(surface.base_color.a * surface.geometry_opacity, 0.0, 1.0);
     let targets: OitTargets = oit_accumulate(color, alpha, in.view_depth);
     var out: FragmentOutput;
     out.accum = targets.accum;

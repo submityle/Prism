@@ -138,6 +138,8 @@ impl GpuMaterialHeader {
 pub struct GpuSurfaceParameters {
     pub base_color: [f32; 4],
     pub emissive: [f32; 4],
+    /// `OpenPBR` `emission_luminance` (nits): radiance = emissive * luminance.
+    pub emission_luminance: f32,
     pub metallic: f32,
     pub perceptual_roughness: f32,
     /// `OpenPBR` `specular_weight`: scales the dielectric specular lobe.
@@ -156,6 +158,8 @@ pub struct GpuSurfaceParameters {
     pub specular_ior: f32,
     /// `OpenPBR` `geometry_thin_walled`: single-interface open surface.
     pub thin_walled: f32,
+    /// `OpenPBR` `geometry_opacity` in [0, 1].
+    pub geometry_opacity: f32,
     pub transmission: f32,
     pub thickness: f32,
     pub clearcoat: f32,
@@ -206,7 +210,7 @@ pub struct GpuSurfaceParameters {
     pub _pad_face2: f32,
     /// Tail padding keeping the fat authoring view a 16-byte multiple as the
     /// coat group grows. Carries no data.
-    pub _pad_tail: [f32; 5],
+    pub _pad_tail: [f32; 7],
 }
 
 impl Default for GpuSurfaceParameters {
@@ -214,6 +218,7 @@ impl Default for GpuSurfaceParameters {
         Self {
             base_color: [1.0; 4],
             emissive: [0.0; 4],
+            emission_luminance: 1.0,
             metallic: 0.0,
             perceptual_roughness: 0.5,
             specular_weight: 1.0,
@@ -225,6 +230,7 @@ impl Default for GpuSurfaceParameters {
             specular_color: [1.0; 4],
             specular_ior: 1.5,
             thin_walled: 0.0,
+            geometry_opacity: 1.0,
             transmission: 0.0,
             thickness: 0.0,
             clearcoat: 0.0,
@@ -256,7 +262,7 @@ impl Default for GpuSurfaceParameters {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 5],
+            _pad_tail: [0.0; 7],
         }
     }
 }

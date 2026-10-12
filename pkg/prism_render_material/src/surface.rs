@@ -59,7 +59,9 @@ pub struct GpuSurfaceCore {
     /// `OpenPBR` `geometry_thin_walled`: a single-interface, open surface whose
     /// transmission lobe skips the volume absorption. `0.0` keeps the solid slab.
     pub thin_walled: f32,
-    pub _pad1: f32,
+    /// `OpenPBR` `geometry_opacity` in `[0, 1]`: multiplied into the alpha the
+    /// blend/mask path reads. `1.0` is the exact identity.
+    pub geometry_opacity: f32,
     pub _pad2: f32,
 }
 
@@ -78,7 +80,7 @@ impl Default for GpuSurfaceCore {
             specular_color: [1.0; 4],
             specular_ior: 1.5,
             thin_walled: 0.0,
-            _pad1: 0.0,
+            geometry_opacity: 1.0,
             _pad2: 0.0,
         }
     }
@@ -86,9 +88,28 @@ impl Default for GpuSurfaceCore {
 
 /// Emissive radiance lobe (`illumination`-independent self-illumination).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuEmissionLobe {
+    /// `OpenPBR` `emission_color` (Prism's long-standing `emissive` name).
     pub emissive: [f32; 4],
+    /// `OpenPBR` `emission_luminance` in nits: emission radiance is
+    /// `emissive * emission_luminance`.
+    pub emission_luminance: f32,
+    pub _pad0: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
+}
+
+impl Default for GpuEmissionLobe {
+    fn default() -> Self {
+        Self {
+            emissive: [0.0; 4],
+            emission_luminance: 1.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+        }
+    }
 }
 
 /// Clearcoat lobe: a second, smoother specular layer over the base.
@@ -495,12 +516,16 @@ impl SurfaceParameterBlock {
                 specular_color: params.specular_color,
                 specular_ior: params.specular_ior,
                 thin_walled: params.thin_walled,
-                _pad1: 0.0,
+                geometry_opacity: params.geometry_opacity,
                 _pad2: 0.0,
             },
             lobe_mask,
             emission: GpuEmissionLobe {
                 emissive: params.emissive,
+                emission_luminance: params.emission_luminance,
+                _pad0: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
             },
             clearcoat: GpuClearCoatLobe {
                 clearcoat: params.clearcoat,
@@ -587,10 +612,12 @@ impl SurfaceParameterBlock {
             specular_color: self.core.specular_color,
             specular_ior: self.core.specular_ior,
             thin_walled: self.core.thin_walled,
+            geometry_opacity: self.core.geometry_opacity,
             ..GpuSurfaceParameters::default()
         };
         if self.lobe_mask.contains(LobeMask::EMISSION) {
             full.emissive = self.emission.emissive;
+            full.emission_luminance = self.emission.emission_luminance;
         }
         if self.lobe_mask.contains(LobeMask::CLEARCOAT) {
             full.clearcoat = self.clearcoat.clearcoat;
@@ -758,6 +785,7 @@ mod tests {
         GpuSurfaceParameters {
             base_color: [0.1, 0.2, 0.3, 1.0],
             emissive: [2.0, 0.0, 0.0, 1.0],
+            emission_luminance: 3.5,
             metallic: 0.25,
             perceptual_roughness: 0.4,
             specular_weight: 0.65,
@@ -769,6 +797,7 @@ mod tests {
             specular_color: [0.95, 0.97, 1.0, 1.0],
             specular_ior: 1.7,
             thin_walled: 0.0,
+            geometry_opacity: 0.9,
             transmission: 0.6,
             thickness: 1.5,
             clearcoat: 0.7,
@@ -800,7 +829,7 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 5],
+            _pad_tail: [0.0; 7],
         }
     }
 

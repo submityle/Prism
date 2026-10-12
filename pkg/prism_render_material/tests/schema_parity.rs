@@ -20,6 +20,7 @@ fn authored() -> GpuSurfaceParameters {
     GpuSurfaceParameters {
         base_color: [0.1, 0.2, 0.3, 1.0],
         emissive: [2.0, 0.0, 0.0, 1.0],
+        emission_luminance: 3.5,
         metallic: 0.25,
         perceptual_roughness: 0.4,
         specular_weight: 0.65,
@@ -31,6 +32,7 @@ fn authored() -> GpuSurfaceParameters {
         specular_color: [0.95, 0.97, 1.0, 1.0],
         specular_ior: 1.7,
         thin_walled: 0.0,
+        geometry_opacity: 0.9,
         transmission: 0.6,
         thickness: 1.5,
         clearcoat: 0.7,
@@ -62,7 +64,7 @@ fn authored() -> GpuSurfaceParameters {
         _pad_face0: 0.0,
         _pad_face1: 0.0,
         _pad_face2: 0.0,
-        _pad_tail: [0.0; 5],
+        _pad_tail: [0.0; 7],
     }
 }
 
@@ -78,12 +80,14 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
         (None, "specular_color") => p.specular_color.to_vec(),
         (None, "specular_ior") => vec![p.specular_ior],
         (None, "thin_walled") => vec![p.thin_walled],
+        (None, "geometry_opacity") => vec![p.geometry_opacity],
         (None, "ambient_occlusion") => vec![p.ambient_occlusion],
         (None, "normal_scale") => vec![p.normal_scale],
         (None, "alpha_cutoff") => vec![p.alpha_cutoff],
         (None, "base_weight") => vec![p.base_weight],
         (None, "diffuse_roughness") => vec![p.diffuse_roughness],
         (Some("emission"), "emissive") => p.emissive.to_vec(),
+        (Some("emission"), "emission_luminance") => vec![p.emission_luminance],
         (Some("clearcoat"), "clearcoat") => vec![p.clearcoat],
         (Some("clearcoat"), "clearcoat_roughness") => vec![p.clearcoat_roughness],
         (Some("clearcoat"), "coat_ior") => vec![p.coat_ior],

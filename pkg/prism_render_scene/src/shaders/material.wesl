@@ -24,6 +24,8 @@ struct PrismMaterialHeader {
 struct PrismSurfaceParameters {
     base_color: vec4<f32>,
     emissive: vec4<f32>,
+    // `OpenPBR` `emission_luminance` (nits); radiance = emissive * luminance.
+    emission_luminance: f32,
     metallic: f32,
     perceptual_roughness: f32,
     // `OpenPBR` specular group (see `brdf.wesl::SurfaceSample`).
@@ -32,6 +34,8 @@ struct PrismSurfaceParameters {
     specular_ior: f32,
     // `OpenPBR` `geometry_thin_walled` (single-interface open surface).
     thin_walled: f32,
+    // `OpenPBR` `geometry_opacity` in [0, 1].
+    geometry_opacity: f32,
     ambient_occlusion: f32,
     normal_scale: f32,
     alpha_cutoff: f32,

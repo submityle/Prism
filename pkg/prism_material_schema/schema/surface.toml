@@ -179,12 +179,18 @@ energy_policy = "none"
 view = "invariant"
 
 [[core.field]]
-name = "_pad1"
-type = "pad"
+name = "geometry_opacity"
+type = "f32"
 bit_region = "KHR"
 pack_slot = 18
-consumed_by = []
-default = 0.0
+consumed_by = ["unpack", "classify", "sample"]
+# OpenPBR `geometry_opacity` in [0, 1]: the coverage of the surface, multiplied
+# into the alpha the blend/mask path reads. The default 1.0 is the exact
+# identity, so this reuses a former core padding word.
+default = 1.0
+valid = "0.0..=1.0"
+energy_policy = "none"
+view = "invariant"
 
 [[core.field]]
 name = "_pad2"
@@ -209,7 +215,7 @@ mask_const = "EMISSION"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
-words = 4
+words = 8
 
 [[lobe.field]]
 name = "emissive"
@@ -221,6 +227,46 @@ default = [0.0, 0.0, 0.0, 0.0]
 valid = "0.0..=inf"
 energy_policy = "independent"
 view = "invariant"
+
+[[lobe.field]]
+name = "emission_luminance"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 4
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `emission_luminance` in nits. Emission radiance is
+# `emissive (emission_color) * emission_luminance`. Prism defaults the scale to
+# 1 so a legacy material that authored bare radiance in `emissive` keeps its
+# look; the product semantics match the specification exactly (a pure-OpenPBR
+# material with luminance 0 emits nothing).
+default = 1.0
+valid = "0.0..=inf"
+energy_policy = "independent"
+view = "invariant"
+
+[[lobe.field]]
+name = "_pad0"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 5
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad1"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 6
+consumed_by = []
+default = 0.0
+
+[[lobe.field]]
+name = "_pad2"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 7
+consumed_by = []
+default = 0.0
 
 [[lobe]]
 id = "clearcoat"

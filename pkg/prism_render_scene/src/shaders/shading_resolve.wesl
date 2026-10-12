@@ -1870,6 +1870,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.index_of_refraction = parameters.index_of_refraction;
     surface.dispersion = parameters.dispersion;
     surface.thin_walled = parameters.thin_walled;
+    surface.geometry_opacity = parameters.geometry_opacity;
     surface.transmission_color = parameters.transmission_color.xyz;
     surface.transmission_scatter = parameters.transmission_scatter.xyz;
     surface.transmission_scatter_anisotropy = parameters.transmission_scatter_anisotropy;
@@ -1892,12 +1893,16 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         screen_space_ao = textureLoad(gtao_ao, coord, 0).x;
     }
     surface.ambient_occlusion = clamp(sampled.occlusion * screen_space_ao, 0.0, 1.0);
-    surface.emissive = sampled.emissive;
+    // `OpenPBR` emission: radiance = emission_color * emission_luminance.
+    surface.emissive = sampled.emissive * parameters.emission_luminance;
     surface.clearcoat = sampled.clearcoat;
     surface.clearcoat_roughness = sampled.clearcoat_roughness;
     surface.coat_ior = parameters.coat_ior;
     surface.coat_color = parameters.coat_color.xyz;
     surface.coat_roughness_anisotropy = parameters.coat_roughness_anisotropy;
+    // `geometry_coat_tangent` is a shade-time input, so the coat inherits the
+    // base frame tangent by default.
+    surface.coat_tangent = vec3<f32>(0.0);
     surface.sheen = parameters.sheen;
     surface.fuzz_roughness = parameters.fuzz_roughness;
     surface.fuzz_color = parameters.fuzz_color.xyz;

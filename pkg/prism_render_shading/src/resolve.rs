@@ -232,6 +232,7 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         index_of_refraction: parameters.index_of_refraction,
         dispersion: parameters.dispersion,
         thin_walled: parameters.thin_walled,
+        geometry_opacity: parameters.geometry_opacity,
         transmission_color: [
             parameters.transmission_color[0],
             parameters.transmission_color[1],
@@ -247,10 +248,11 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         coat_darkening: parameters.coat_darkening,
         scatter_anisotropy: parameters.scatter_anisotropy,
         ambient_occlusion: parameters.ambient_occlusion,
+        // `OpenPBR` emission: radiance = emission_color * emission_luminance.
         emissive: [
-            parameters.emissive[0],
-            parameters.emissive[1],
-            parameters.emissive[2],
+            parameters.emissive[0] * parameters.emission_luminance,
+            parameters.emissive[1] * parameters.emission_luminance,
+            parameters.emissive[2] * parameters.emission_luminance,
         ],
         clearcoat: parameters.clearcoat,
         clearcoat_roughness: parameters.clearcoat_roughness,
@@ -265,6 +267,9 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         // base shading normal, mirroring the GPU resolve when no map is bound.
         coat_normal: [0.0; 3],
         coat_roughness_anisotropy: parameters.coat_roughness_anisotropy,
+        // `geometry_coat_tangent` is a shade-time input; the material block does
+        // not carry it, so the coat inherits the base frame tangent.
+        coat_tangent: [0.0; 3],
         sheen: parameters.sheen,
         fuzz_roughness: parameters.fuzz_roughness,
         fuzz_color: [
@@ -727,6 +732,21 @@ mod tests {
         assert_eq!(sample.iridescence, 0.8);
         assert!((sample.iridescence_thickness_nm - 350.0).abs() < 1.0e-3);
         assert_eq!(sample.iridescence_ior, 1.55);
+    }
+
+    /// `OpenPBR` emission is `emission_color * emission_luminance`, and the
+    /// geometry group's opacity reaches the sample the blend path reads.
+    #[test]
+    fn emission_luminance_and_geometry_opacity_reach_the_sample() {
+        let parameters = GpuSurfaceParameters {
+            emissive: [1.0, 0.5, 0.25, 1.0],
+            emission_luminance: 4.0,
+            geometry_opacity: 0.4,
+            ..Default::default()
+        };
+        let sample = surface_sample_from_parameters(&parameters);
+        assert_eq!(sample.emissive, [4.0, 2.0, 1.0]);
+        assert_eq!(sample.geometry_opacity, 0.4);
     }
 
     fn unit_triangle() -> ([GpuShadingPrimitive; 1], [GpuShadingVertex; 3]) {

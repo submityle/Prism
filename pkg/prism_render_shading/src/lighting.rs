@@ -48,6 +48,9 @@ pub struct SurfaceSample {
     /// transmission lobe skips the Beer-Lambert volume absorption. `0.0` (the
     /// default) keeps the solid-slab path, so existing materials are unchanged.
     pub thin_walled: f32,
+    /// `OpenPBR` `geometry_opacity` in `[0, 1]`: surface coverage, multiplied
+    /// into the alpha the blend/mask path reads. `1.0` is the exact identity.
+    pub geometry_opacity: f32,
     /// `OpenPBR` `transmission_color`: tint of the light refracted through the
     /// slab. It multiplies the base albedo of the transmission term, so the
     /// default white is the exact identity.
@@ -94,6 +97,10 @@ pub struct SurfaceSample {
     /// `anisotropy_rotation`). `0` keeps the coat isotropically GGX, which is
     /// the historical behaviour and the exact identity.
     pub coat_roughness_anisotropy: f32,
+    /// `OpenPBR` `geometry_coat_tangent`: an optional tangent for the coat's own
+    /// anisotropy axes. The all-zero vector means "inherit the base
+    /// [`ShadingFrame::tangent`]", which is the exact pre-existing behaviour.
+    pub coat_tangent: [f32; 3],
     /// Sheen (fuzz) intensity driving the Cloth Charlie sheen lobe in `[0, 1]`.
     pub sheen: f32,
     /// `OpenPBR` `fuzz_roughness` in `[0, 1]`: the fuzz lobe's own highlight
@@ -171,6 +178,7 @@ impl Default for SurfaceSample {
             index_of_refraction: 1.5,
             dispersion: 0.0,
             thin_walled: 0.0,
+            geometry_opacity: 1.0,
             transmission_color: [1.0; 3],
             transmission_scatter: [0.0; 3],
             transmission_scatter_anisotropy: 0.0,
@@ -185,6 +193,7 @@ impl Default for SurfaceSample {
             coat_color: [1.0; 3],
             coat_normal: [0.0; 3],
             coat_roughness_anisotropy: 0.0,
+            coat_tangent: [0.0; 3],
             sheen: 0.0,
             fuzz_roughness: 0.5,
             fuzz_color: [1.0; 3],

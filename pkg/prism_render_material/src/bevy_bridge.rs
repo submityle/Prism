@@ -1,8 +1,8 @@
-//! OpenPBR Surface importer for external materials (design doc §4.4).
+//! `OpenPBR` Surface importer for external materials (design doc §4.4).
 //!
 //! External materials — Bevy `StandardMaterial` today, glTF/`KHR_*` material
-//! extensions, MaterialX and USD importers later — are mapped through ONE
-//! format adapter onto the canonical OpenPBR Surface parameter block
+//! extensions, `MaterialX` and USD importers later — are mapped through ONE
+//! format adapter onto the canonical `OpenPBR` Surface parameter block
 //! ([`import_openpbr_surface`]). The packaging step ([`import_standard_material`])
 //! is format-agnostic, so there is no per-format 1:1 translation layer.
 
@@ -46,7 +46,7 @@ pub trait StandardMaterialTextureResolver {
 }
 
 /// Import an external `StandardMaterial` (Bevy / glTF / KHR material extensions)
-/// into the canonical **OpenPBR Surface** parameter set (design doc §4.4).
+/// into the canonical **`OpenPBR` Surface** parameter set (design doc §4.4).
 ///
 /// This is the single format-adapter step: every external material — Bevy
 /// `StandardMaterial` today, glTF/MaterialX/USD importers later — is mapped onto
@@ -59,9 +59,26 @@ pub fn import_openpbr_surface(
     material: &StandardMaterial,
     alpha_cutoff: f32,
 ) -> GpuSurfaceParameters {
+    // `OpenPBR` splits emission into `emission_color * emission_luminance`;
+    // Bevy authors a single radiance colour, so factor it into a normalised
+    // colour and its luminance (the max channel). The product — and therefore
+    // the rendered emission — is preserved exactly.
+    let emissive = material.emissive.to_f32_array();
+    let emission_luminance = emissive[0].max(emissive[1]).max(emissive[2]);
+    let emission_color = if emission_luminance > 0.0 {
+        [
+            emissive[0] / emission_luminance,
+            emissive[1] / emission_luminance,
+            emissive[2] / emission_luminance,
+            emissive[3],
+        ]
+    } else {
+        emissive
+    };
     GpuSurfaceParameters {
         base_color: material.base_color.to_linear().to_f32_array(),
-        emissive: material.emissive.to_f32_array(),
+        emissive: emission_color,
+        emission_luminance,
         metallic: material.metallic,
         perceptual_roughness: material.perceptual_roughness,
         // `OpenPBR` specular group. Bevy's `reflectance` is the
@@ -89,7 +106,7 @@ pub fn import_openpbr_surface(
 
 /// Import an external `StandardMaterial` into a runtime [`MaterialRecord`].
 ///
-/// The OpenPBR Surface parameters come from [`import_openpbr_surface`]; this
+/// The `OpenPBR` Surface parameters come from [`import_openpbr_surface`]; this
 /// function only adds the format-independent packaging (render class, features,
 /// closure mask, texture rows, illumination axis). It replaces the former
 /// per-format `lower_standard_material` translator (design doc §4.4).

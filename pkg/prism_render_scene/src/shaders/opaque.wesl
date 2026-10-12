@@ -174,5 +174,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // and mislead debugging. Emit unlit base color + emissive only.
     let material_header = material_headers[in.material_index];
     let surface = load_surface_parameters(material_header.parameter_offset, material_header.lobe_mask);
-    return vec4<f32>(surface.base_color.rgb + surface.emissive.rgb, surface.base_color.a);
+    // `OpenPBR` `geometry_opacity` scales the coverage the blend/mask path reads.
+    return vec4<f32>(
+        surface.base_color.rgb + surface.emissive.rgb,
+        surface.base_color.a * surface.geometry_opacity,
+    );
 }

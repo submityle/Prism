@@ -103,6 +103,9 @@ struct SurfaceSample {
     // `OpenPBR` `coat_roughness_anisotropy` in [0, 1]; 0 is the isotropic
     // identity. Mirrors `SurfaceSample::coat_roughness_anisotropy`.
     coat_roughness_anisotropy: f32,
+    // `OpenPBR` `geometry_coat_tangent`; the zero vector inherits the base
+    // frame tangent. Mirrors `SurfaceSample::coat_tangent`.
+    coat_tangent: vec3<f32>,
     sheen: f32,
     // `OpenPBR` `fuzz_roughness` in [0, 1]: the fuzz lobe's own highlight width.
     fuzz_roughness: f32,

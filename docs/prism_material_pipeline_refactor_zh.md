@@ -235,15 +235,15 @@
 | | `subsurface_scatter_anisotropy` | float [-1,1] | `scatter_anisotropy` | ⚠️ 仅命名不同 |
 | **Coat** | `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` | — | `clearcoat` / `coat_color` / `clearcoat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` | ⚠️ 命名不同；`coat_ior` 默认 1.5 vs 1.6、`coat_darkening` 默认 0 vs 1 |
 | **Fuzz** | `fuzz_weight` / `fuzz_color` / `fuzz_roughness` | — | `sheen` / `fuzz_color` / `fuzz_roughness` | ⚠️ `fuzz_weight` 命名不同，其余 ✅ |
-| **Emission** | `emission_luminance`（nits） | float | —（只有 RGB `emissive`） | ❌ 缺亮度单位分离 |
+| **Emission** | `emission_luminance` | float（nits） | `emission_luminance`（默认 1 以保持旧材质外观；乘积语义与规范一致） | ✅（本轮新增） |
 | | `emission_color` | color3 | `emissive` | ⚠️ 命名不同 |
 | **Thin-film** | `thin_film_weight` / `thin_film_thickness` / `thin_film_ior` | float×3 | 新增 `thin_film` **瓣**（KHR, slot 6）→ shade-time `iridescence*`（µm→nm 换算） | ✅（本轮落地为 ABI 瓣并接到 Airy BSDF） |
-| **Geometry** | `geometry_opacity` | float | `base_color.a` | ⚠️ 借位承担，非独立字段 |
+| **Geometry** | `geometry_opacity` | float | `geometry_opacity`（复用一个 core 填充字，乘进 alpha） | ✅（本轮新增为独立字段） |
 | | `geometry_thin_walled` | boolean | `thin_walled` | ✅ |
-| | `geometry_normal` / `geometry_tangent` / `geometry_coat_normal` / `geometry_coat_tangent` | vector3 | 法线/切线纹理 + `coat_normal` | ❌ 缺向量字段 |
+| | `geometry_normal` / `geometry_tangent` / `geometry_coat_normal` / `geometry_coat_tangent` | vector3 | **shade-time 输入**（非材质参数）：`ShadingFrame.{normal,tangent}` / `SurfaceSample.coat_normal` / `SurfaceSample.coat_tangent` | ✅（由网格/法线图在着色期提供；`coat_tangent` 本轮补上） |
 | **（规范之外）** | — | — | `face`（`softness`）、`anisotropy_rotation`、`ambient_occlusion`、`normal_scale`、`alpha_cutoff`、`thickness` | Prism 扩展区，计入超集 |
 
-**结论（code-truth）**：**参数级尚未补齐。** 已对齐的：`base_weight` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_ior` / `transmission_color` / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_abbe_number` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / **thin-film 全 3 项（已是 ABI 瓣）** / `coat_*` 全 6 项 / `fuzz_color` / `fuzz_roughness` / `geometry_thin_walled`。仍缺或需改类型：`transmission_depth`（length vs 归一化 `thickness`）、`emission_luminance`、`geometry_normal` / `geometry_tangent` / `geometry_coat_tangent`、`geometry_opacity` 独立字段；另有命名与默认值待对齐（见上表 ⚠️ 行）。
+**结论（code-truth）**：**规范参数已全部有对应物；剩余的是"命名/默认值对齐"与一处单位语义。** 已对齐：`base_weight` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_ior` / `transmission_color` / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_abbe_number` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / **thin-film 全 3 项（ABI 瓣）** / `coat_*` 全 6 项 / `fuzz_color` / `fuzz_roughness` / `emission_luminance` / `geometry_opacity` / `geometry_thin_walled` / 四个 **geometry 向量字段**（shade-time 输入）。**仍待处理**：`transmission_depth`（规范是 length，Prism 的 `thickness` 是归一化 [0,1]——需决定是改单位还是显式声明为近似）、以及上表 ⚠️ 行的**命名与默认值对齐**（`base_metalness`/`specular_roughness`/`coat_weight`/`subsurface_weight`/`transmission_weight`/`fuzz_weight`/`emission_color`；`base_color` 1.0 vs 0.8、`specular_roughness` 0.5 vs 0.3、`coat_ior` 1.5 vs 1.6 等）。
 
 要点：
 - **开放词汇表让补瓣是加法**：新字段扩进对应 lobe 的变长块，位掩码/静态置换天然容纳，老材质不受影响（它们的 lobe_mask 不含新位）。
@@ -604,6 +604,13 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f 规范对齐：`emission_luminance` / `geometry_opacity` / `geometry_coat_tangent`**（§4.4）
+  - **`emission_luminance`（nits）**：新增到 emission 瓣（4→8 字）。规范语义是 `radiance = emission_color × emission_luminance`——桥接处（CPU `resolve.rs` / WESL `shading_resolve.wesl`）都按乘积求值；导入器把 Bevy 的单色 `emissive` **分解**成归一化 color + 最大通道 luminance，**乘积逐位保持**（新增测试钉住 2/1/0.5 的分解）。Prism 默认 luminance = 1（规范默认 0）是为了让"只写了裸 radiance 在 `emissive` 里的旧材质"外观不变；纯规范材质两边都写、语义一致。
+  - **`geometry_opacity` 成为独立字段**：复用一个 core 填充字（core 仍 20 字），默认 1.0 恒等。它现在真正**被消费**：`opaque.wesl` 与 `transparent.wesl` 把覆盖率乘进 alpha（`base_color.a × geometry_opacity`），而不是像之前那样蹭 `base_color.a`。
+  - **`geometry_coat_tangent`**：`geometry_normal/tangent` 与 `geometry_coat_normal` 本来就是**着色期输入**（`ShadingFrame.normal/tangent`、`SurfaceSample.coat_normal`），不是材质参数字段；本轮把缺的 `coat_tangent` 补成 shade-time 字段（零向量 = 继承基础帧切线，恒等），并让 coat 的各向异性轴真正用它。
+  - 代码：schema emission 瓣 4→8 字、core `_pad1`→`geometry_opacity`；`GpuEmissionLobe` / `GpuSurfaceCore` / fat `GpuSurfaceParameters`（304→**320** B，16 对齐）；`SURFACE_MAX_WORDS` 92→96；regenerated `material_unpack.wesl`；shade-time `SurfaceSample`（`geometry_opacity` / `coat_tangent`）+ 桥接；BSDF/alpha 消费端 `opaque.wesl` / `transparent.wesl` / `clearcoat.rs` / `clearcoat.wesl`；导入器 emission 分解。
+  - 门禁：`cargo test -p prism_render_material --features bevy` **829 通过**（含 emission 分解保真）、`cargo test -p prism_render_shading --lib` **3312 通过**（含 emission×luminance 与 opacity 桥接测试）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）、`cargo test -p prism_material_schema` 13、默认特性 material 826+6+2 全绿。
 
 - **P1-f 规范对齐：`thin_film` 成为 ABI 瓣 + 位区隔离真正落地**（§4.4 / §4.5 约束 2）
   - **thin_film 整瓣落地**：新增 `thin_film` 瓣（KHR 命名空间，uid `org.khronos.openpbr.thin_film`，4 字），含规范的三个参数 `thin_film_weight` / `thin_film_thickness`（**单位 µm**，规范默认 0.5）/ `thin_film_ior`（规范默认 1.4）。它接到 P2-d 已落地的 Airy 薄膜 BSDF：`resolve.rs` 与 `shading_resolve.wesl` 把瓣映射到 shade-time `iridescence*`，并做 **µm→nm** 换算；`weight = 0`（默认）时整个项惰性。新增桥接测试钉住这条映射（含 0.35µm → 350nm、以及默认惰性）。

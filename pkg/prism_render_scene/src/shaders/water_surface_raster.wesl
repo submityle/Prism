@@ -1061,6 +1061,7 @@ fn surface_from(foam: f32) -> SurfaceSample {
     s.index_of_refraction = 1.5;
     s.dispersion = 0.0;
     s.thin_walled = 0.0;
+    s.geometry_opacity = 1.0;
     s.transmission_color = vec3<f32>(1.0);
     s.transmission_scatter = vec3<f32>(0.0);
     s.transmission_scatter_anisotropy = 0.0;
@@ -1085,6 +1086,7 @@ fn surface_from(foam: f32) -> SurfaceSample {
     // Water has no clearcoat normal map; the zero sentinel uses the base normal.
     s.coat_normal = vec3<f32>(0.0);
     s.coat_roughness_anisotropy = 0.0;
+    s.coat_tangent = vec3<f32>(0.0);
     s.sheen = 0.0;
     // Fuzz is disabled for water (`sheen == 0`); keep the neutral fuzz params.
     s.fuzz_roughness = 0.5;
