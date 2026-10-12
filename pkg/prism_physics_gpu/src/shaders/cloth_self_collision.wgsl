@@ -155,6 +155,20 @@ fn compare_cell(key: vec3<i32>, probe: vec3<i32>) -> i32 {
     return 0;
 }
 
+// Saturating `i32` addition, matching Rust's `i32::saturating_add` (the CPU
+// golden and the host pair-builder use it so a boundary cell never wraps).
+fn prism_sat_add_i32(v: i32, d: i32) -> i32 {
+    let max_v = 2147483647;
+    let min_v = -2147483647 - 1;
+    if (d > 0i && v > max_v - d) {
+        return max_v;
+    }
+    if (d < 0i && v < min_v - d) {
+        return min_v;
+    }
+    return v + d;
+}
+
 // Binary-searches `grid_keys` for `cell`; returns its index, or -1 if absent.
 fn find_cell(cell: vec3<i32>) -> i32 {
     var lo = 0i;
@@ -184,7 +198,11 @@ fn phase1_samples(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var dx = -1i; dx <= 1i; dx = dx + 1i) {
         for (var dy = -1i; dy <= 1i; dy = dy + 1i) {
             for (var dz = -1i; dz <= 1i; dz = dz + 1i) {
-                let neighbor = cell + vec3<i32>(dx, dy, dz);
+                let neighbor = vec3<i32>(
+                    prism_sat_add_i32(cell.x, dx),
+                    prism_sat_add_i32(cell.y, dy),
+                    prism_sat_add_i32(cell.z, dz),
+                );
                 let idx = find_cell(neighbor);
                 if (idx < 0) {
                     continue;

@@ -266,3 +266,46 @@ fn no_op_inputs_pass_through_unchanged() {
     assert!(close(resolved[0], apart[0]), "far pair must not move (0)");
     assert!(close(resolved[1], apart[1]), "far pair must not move (1)");
 }
+
+/// Boundary cells: positions at ±3e9 floor-saturate `cell_of` to
+/// `i32::MAX`/`MIN`. The 27-cell neighbourhood must saturate too (a plain
+/// `cell.0 + dx` would overflow: panic in the debug golden, wrap on the GPU).
+/// The two extreme clusters are far apart, so nothing moves; the test pins that
+/// both sides stay total and agree (CR-found).
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log"
+)]
+fn extreme_cells_saturate_not_overflow() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        eprintln!("no GPU adapter; skipping extreme_cells_saturate_not_overflow");
+        return;
+    };
+    let kernel = GpuClothSelfCollision::new(&ctx);
+
+    let positions = vec![
+        Vec3::new(3.0e9, 0.0, 0.0),
+        Vec3::new(3.0e9, 100.0, 0.0),
+        Vec3::new(3.0e9, 50.0, 100.0),
+        Vec3::new(-3.0e9, 0.0, 0.0),
+        Vec3::new(-3.0e9, 100.0, 0.0),
+        Vec3::new(-3.0e9, 50.0, 100.0),
+    ];
+    let inverse_masses = vec![1.0_f32; positions.len()];
+    let triangles = vec![[0_u32, 1, 2], [3, 4, 5]];
+    let virtuals =
+        generate_virtual_particles(&triangles, &VirtualParticlePattern::nvcloth_default());
+
+    assert_parity(
+        "extreme-cells",
+        &ctx,
+        &kernel,
+        &positions,
+        &inverse_masses,
+        &virtuals,
+        1.0,
+        0.01,
+        ClothSelfCollisionScope::All,
+    );
+}

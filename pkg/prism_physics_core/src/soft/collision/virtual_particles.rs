@@ -437,7 +437,11 @@ fn resolve_core(
             for dx in -1..=1 {
                 for dy in -1..=1 {
                     for dz in -1..=1 {
-                        let neighbor = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+                        let neighbor = (
+                            cell.0.saturating_add(dx),
+                            cell.1.saturating_add(dy),
+                            cell.2.saturating_add(dz),
+                        );
                         let Some(nbucket) = grid.get(&neighbor) else {
                             continue;
                         };
