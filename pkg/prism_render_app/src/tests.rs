@@ -26,6 +26,7 @@ use crate::views::RenderViews;
 use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
 use crate::queue::{PhaseItem, RenderQueues};
 use crate::draw::{DrawFunctionId, DrawFunctions};
+use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineSpecializer};
 use crate::texture_cache::{TextureCache, TextureKey};
 use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
@@ -327,6 +328,69 @@ fn recording_a_phase_invokes_each_draw_function() {
     // An unknown id is a no-op, never a panic.
     functions.call(DrawFunctionId(99), &queues.phase(RenderPhase::Opaque)[0], &mut recorded);
     assert_eq!(recorded, "1;2;");
+}
+
+/// Mesh specialization builds one pipeline per `(variant, layout)` pair and
+/// reuses it.
+#[test]
+fn mesh_specialization_dedups_by_variant_and_layout() {
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+    let descriptor = RenderPipelineDescriptor {
+        label: Some("mesh-specialize".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: None,
+    };
+
+    let variant = MeshPipelineKey {
+        class: 3,
+        color_format: Some(TextureFormat::Rgba8Unorm),
+        depth_format: None,
+        sample_count: 1,
+        topology: PrimitiveTopology::TriangleList,
+        shader_id: 0x55,
+    };
+    let layout_a = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x3],
+    );
+    let layout_b = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x2],
+    );
+
+    let mut specializer = MeshPipelineSpecializer::new();
+    let a1 = specializer.specialize(&device, variant, core::slice::from_ref(&layout_a), &descriptor);
+    let a2 = specializer.specialize(&device, variant, core::slice::from_ref(&layout_a), &descriptor);
+    assert_eq!(a1, a2, "the same variant + layout reuses the pipeline");
+    assert_eq!(specializer.pipeline_count(), 1);
+
+    let b = specializer.specialize(&device, variant, core::slice::from_ref(&layout_b), &descriptor);
+    assert_ne!(a1, b, "a different layout specializes a new pipeline");
+    assert_eq!(specializer.pipeline_count(), 2);
+
+    assert!(specializer.release(&device, variant, core::slice::from_ref(&layout_b)));
+    assert_eq!(specializer.pipeline_count(), 1);
+    specializer.clear(&device);
+    assert_eq!(specializer.pipeline_count(), 0);
 }
 /// The render world materializes the frame's view family from the extracted
 /// viewport, and a minimized frame disables (rather than removes) the view.
