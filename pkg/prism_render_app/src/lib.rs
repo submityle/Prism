@@ -77,6 +77,7 @@ mod stats;
 mod systems;
 mod target;
 mod texture_cache;
+mod view_query;
 mod views;
 
 #[cfg(test)]
@@ -99,11 +100,14 @@ pub use queue::{
 pub use record::RenderRecord;
 pub use runtime_resource::RenderRuntimeResource;
 pub use scene::{MeshClass, SceneRegistry, VisibilityWorkList};
-pub use sets::{RenderPhase, RenderSystems, configure_render_sets};
+pub use sets::{
+    RenderGraphSet, RenderPhase, RenderSystems, configure_render_graph_sets, configure_render_sets,
+};
 pub use startup::{GpuResourceAppExt, RenderStartupState, init_gpu_resource};
 pub use stats::RenderFrameStats;
 pub use target::RenderTarget;
 pub use texture_cache::{GpuTexture, TextureCache, TextureKey};
+pub use view_query::{CurrentView, ViewQuery, ViewQueryState};
 pub use views::RenderViews;
 
 /// Commonly used exports: the plugin, its labels, and the resources that cross
@@ -123,10 +127,14 @@ pub mod prelude {
     };
     pub use crate::record::RenderRecord;
     pub use crate::scene::{MeshClass, SceneRegistry, VisibilityWorkList};
-    pub use crate::sets::{RenderPhase, RenderSystems};
+    pub use crate::sets::{
+        RenderGraphSet, RenderPhase, RenderSystems, configure_render_graph_sets,
+        configure_render_sets,
+    };
     pub use crate::startup::{GpuResourceAppExt, RenderStartupState, init_gpu_resource};
     pub use crate::stats::RenderFrameStats;
     pub use crate::target::RenderTarget;
     pub use crate::texture_cache::{GpuTexture, TextureCache, TextureKey};
+    pub use crate::view_query::{CurrentView, ViewQuery, ViewQueryState};
     pub use crate::views::RenderViews;
 }

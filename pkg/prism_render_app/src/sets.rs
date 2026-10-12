@@ -14,6 +14,7 @@
 //! differences ride on the pipeline key.
 
 use prism_ecs::schedule::{Schedule, SetConfig, SystemSet, SystemSetId};
+use prism_render_graph::RenderGraphSystems;
 
 /// The ordered stages of a render frame.
 ///
@@ -212,4 +213,49 @@ pub fn configure_render_sets(schedule: &mut Schedule) {
         );
         schedule.configure_set(phase, SetConfig::new().before(RenderSystems::Cleanup));
     }
+}
+
+/// The renderer's schedulable spelling of the frame graph's own system sets.
+///
+/// [`RenderGraphSystems`] lives in `prism_render_graph`, which is deliberately
+/// dependency-free (`no_std` over the RHI) and therefore cannot name
+/// `prism_ecs`'s [`SystemSet`]; the orphan rule also forbids implementing a
+/// foreign trait for a foreign type here. So the graph *names* the sets and the
+/// renderer — which owns the schedule — makes them schedulable, exactly as the
+/// port doc splits it (`docs/prism_render_scene_rhi_port_zh.md` §3, "自建系统集").
+///
+/// Graph nodes register with `in_set(RenderGraphSet(RenderGraphSystems::Render))`
+/// and never wire edges by hand; the order is
+/// [`RenderGraphSystems::ORDER_EDGES`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RenderGraphSet(pub RenderGraphSystems);
+
+impl RenderGraphSet {
+    /// The graph sets in run order: begin → render → submit → finish.
+    pub const ORDER: [Self; 4] = [
+        Self(RenderGraphSystems::Begin),
+        Self(RenderGraphSystems::Render),
+        Self(RenderGraphSystems::Submit),
+        Self(RenderGraphSystems::Finish),
+    ];
+}
+
+impl SystemSet for RenderGraphSet {
+    fn set_id(&self) -> SystemSetId {
+        // Keyed on the variant index, so every variant is a distinct set while
+        // the label stays one type — the set id the graph's own vocabulary
+        // documents.
+        SystemSetId::with::<RenderGraphSystems>(self.0.variant_index())
+    }
+}
+
+/// Orders the frame graph's system sets on `schedule`.
+///
+/// The renderer's half of [`prism_render_graph::configure_render_graph_sets`]:
+/// the graph carries the ordering policy as data, and this applies it to the
+/// schedule that owns the node systems.
+pub fn configure_render_graph_sets(schedule: &mut Schedule) {
+    prism_render_graph::configure_render_graph_sets(|before, after| {
+        schedule.configure_set(RenderGraphSet(after), SetConfig::new().after(RenderGraphSet(before)));
+    });
 }

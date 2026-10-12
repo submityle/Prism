@@ -967,6 +967,59 @@ fn render_sets_order_stages_and_phases() {
 /// The frame count the headless tests drive.
 const FRAMES: u64 = 5;
 
+fn mark_graph_begin(mut log: ResMut<OrderLog>) {
+    log.0.push("graph-begin");
+}
+
+fn mark_graph_render(mut log: ResMut<OrderLog>) {
+    log.0.push("graph-render");
+}
+
+fn mark_graph_submit(mut log: ResMut<OrderLog>) {
+    log.0.push("graph-submit");
+}
+
+fn mark_graph_finish(mut log: ResMut<OrderLog>) {
+    log.0.push("graph-finish");
+}
+
+/// The render graph's own sets order node systems: the graph crate carries the
+/// policy as data (it cannot name `prism_ecs`'s `SystemSet`), and the renderer
+/// makes it schedulable — so a node registers `in_set(RenderGraphSet(..))` and
+/// gets the order without wiring edges by hand.
+#[test]
+fn render_graph_sets_order_node_systems() {
+    use crate::sets::{RenderGraphSet, configure_render_graph_sets};
+    use prism_ecs::schedule::IntoSystemConfigs;
+
+    let mut world = prism_ecs::world::World::new();
+    world.insert_resource(OrderLog::default());
+    let mut schedule = prism_ecs::schedule::Schedule::new();
+    configure_render_graph_sets(&mut schedule);
+    // Registered in reverse, so only the set policy can produce the order.
+    schedule.add_systems(
+        mark_graph_finish.in_set(RenderGraphSet(prism_render_graph::RenderGraphSystems::Finish)),
+    );
+    schedule.add_systems(
+        mark_graph_submit.in_set(RenderGraphSet(prism_render_graph::RenderGraphSystems::Submit)),
+    );
+    schedule.add_systems(
+        mark_graph_render.in_set(RenderGraphSet(prism_render_graph::RenderGraphSystems::Render)),
+    );
+    schedule.add_systems(
+        mark_graph_begin.in_set(RenderGraphSet(prism_render_graph::RenderGraphSystems::Begin)),
+    );
+
+    schedule.run(&mut world);
+
+    let log = world.resource::<OrderLog>();
+    assert_eq!(
+        log.0,
+        ["graph-begin", "graph-render", "graph-submit", "graph-finish"],
+        "the graph's begin → render → submit → finish order is imposed by the sets"
+    );
+}
+
 /// A small, non-square frame so a swapped axis cannot pass by accident.
 const EXTENT: Extent3d = Extent3d::new_2d(64, 48);
 

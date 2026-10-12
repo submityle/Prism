@@ -67,6 +67,7 @@ pub mod handle;
 pub mod pass;
 pub mod plan;
 pub mod resource;
+pub mod systems;
 
 mod record;
 
@@ -91,6 +92,7 @@ pub use plan::{
 pub use resource::{
     BufferResource, ImportedBuffer, ImportedTexture, Lifetime, RealizedTexture, TextureResource,
 };
+pub use systems::{configure_render_graph_sets, RenderGraphSystems};
 
 #[cfg(test)]
 mod tests;

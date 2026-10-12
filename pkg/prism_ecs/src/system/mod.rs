@@ -7,7 +7,8 @@
 //!   value from an [`UnsafeWorldCell`] under the kernel's non-aliasing
 //!   discipline. Implemented for [`Res`], [`ResMut`],
 //!   [`Commands`](crate::command::Commands), [`Query`], and tuples of up to
-//!   twelve params.
+//!   twelve params, plus the renderer's per-view lookup: [`CurrentView`] and
+//!   the `Option`-wrapped [`ViewQuery`].
 //! * [`System`] — a runnable unit, implemented by [`FunctionSystem`] (ordinary
 //!   `fn(P0, …)`) and [`ExclusiveFunctionSystem`] (`fn(&mut World)`).
 //! * [`IntoSystem`] — the conversion `fn → System` used by the scheduler.
@@ -37,6 +38,7 @@ pub mod job_dag;
 pub mod job_graph;
 pub mod param;
 pub mod query_param;
+pub mod view_query;
 pub mod world_cell;
 
 pub use exclusive::{ExclusiveFunctionSystem, IsExclusiveSystem};
@@ -45,6 +47,7 @@ pub use function::{
 };
 pub use param::{Local, Res, ResMut, SystemParam, SystemParamItem};
 pub use query_param::Query;
+pub use view_query::{CurrentView, ViewQuery, ViewQueryState};
 pub use world_cell::UnsafeWorldCell;
 
 #[cfg(feature = "multi_thread")]
