@@ -75,7 +75,8 @@ BufferInitDescriptor / SpecializedRenderPipelines / ShaderType`，
 | 缺的东西 | bevy 处 | 导入点 | 建议落点 |
 | --- | --- | --- | --- |
 | 每 view 录制上下文 + `CurrentView` | `renderer::{RenderContext, ViewQuery}` | 72 + 61 | `prism_render_app`（`ViewQuery` 进行中） |
-| extract 层与主世界实体映射 | `sync_world::MainEntity`、`render_asset::RenderAssets` | 16+5 / 11 | `prism_render_app`（单向 extract 缝已有） |
+| extract 层的实体映射 | ~~`sync_world::MainEntity`~~ | 16+5 | **已落**：`prism_render_app::sync_world`（`MainEntity` + `MainEntityHashSet` + `tag_extracted_entities`，接在 `prism_ecs::extract::extract_components` 的 `(main, render)` 对上） |
+| 资源表 `RenderAssets<T>` | `render_asset::RenderAssets` | 11 | `prism_render_app`（按 `TextureCache`/`PipelineCache` 同模式） |
 | mesh 资源与分配器 | `mesh::{RenderMesh, allocator::MeshAllocator}` | 9 + 8 | `prism_render_architecture` 的 geometry 侧 |
 | camera 提取 / MSAA 目标状态 | `camera::ExtractedCamera`、`view::Msaa` | 37 / 33 | **场景侧**（渲染层不收相机，见 §6/2）；`Msaa` 属渲染目标状态 |
 | `ShaderType`、`AtomicPod`、`RawBufferVec` | `render_resource::*` | 9 / 8 / 8 | 已有 `bytemuck` + `prism_render_architecture::abi`；用到再加，不预先造 |
@@ -83,10 +84,10 @@ BufferInitDescriptor / SpecializedRenderPipelines / ShaderType`，
 
 ## 4. 切片顺序（依赖有序，每片一个 commit + CR）
 
-1. **S2a 每 view 录制上下文**：`CurrentView` + `ViewQuery`（进行中）+ 把 `ExecuteContext` 包成
-   view 作用域的录制面。解锁 `shading/` 里最大的一批（`RenderContext` 72 + `ViewQuery` 61）。
-2. **S2b extract + 实体映射**：`MainEntity`/`MainEntityHashSet` 与 `RenderAssets` 对应物，
-   主世界 ↔ 渲染世界实体映射（现在只有单向 `RenderRecord`）。
+1. **S2a 每 view 录制上下文**：`CurrentView` + `ViewQuery` **已落**（`prism_ecs::system::view_query`
+   + `prism_render_app` 再导出；缺 skip 机制，参数是 `Option<ViewQuery<..>>`，见该模块文档）；
+   剩：把 `ExecuteContext` 包成 view 作用域的录制面（外层循环按 view 设 `CurrentView`）。
+2. **S2b extract + 实体映射**：实体映射**已落**（`sync_world`）；剩 `RenderAssets<T>` 对应物。
 3. **S2c mesh 资源层**：`RenderMesh`/`RenderMeshBufferInfo`/`MeshAllocator`。
 4. **S2d 资源缝收敛**：逐条目把 `render_resource::*` 换成 RHI 同名类型（§3 第一组，机械但量最大）。
 5. **S2e 小工具**：`affine3_to_square`、`decompress_vertex_position`、`allocator::*`。

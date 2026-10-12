@@ -74,6 +74,7 @@ mod scene;
 mod sets;
 mod startup;
 mod stats;
+mod sync_world;
 mod systems;
 mod target;
 mod texture_cache;
@@ -105,6 +106,7 @@ pub use sets::{
 };
 pub use startup::{GpuResourceAppExt, RenderStartupState, init_gpu_resource};
 pub use stats::RenderFrameStats;
+pub use sync_world::{MainEntity, MainEntityHashSet, tag_extracted_entities};
 pub use target::RenderTarget;
 pub use texture_cache::{GpuTexture, TextureCache, TextureKey};
 pub use view_query::{CurrentView, ViewQuery, ViewQueryState};
@@ -133,6 +135,7 @@ pub mod prelude {
     };
     pub use crate::startup::{GpuResourceAppExt, RenderStartupState, init_gpu_resource};
     pub use crate::stats::RenderFrameStats;
+    pub use crate::sync_world::{MainEntity, MainEntityHashSet, tag_extracted_entities};
     pub use crate::target::RenderTarget;
     pub use crate::texture_cache::{GpuTexture, TextureCache, TextureKey};
     pub use crate::view_query::{CurrentView, ViewQuery, ViewQueryState};
