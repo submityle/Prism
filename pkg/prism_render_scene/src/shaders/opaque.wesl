@@ -7,6 +7,9 @@ import bevy_pbr::render::{
 };
 import bevy_render::maths::affine3_to_square;
 import prism_render_scene::shaders::material::PrismSurfaceParameters;
+import prism_render_scene::shaders::dynamic_mask::{
+    dyn_dissolve_coverage,
+};
 import prism_render_scene::shaders::material_unpack::{
     prism_unpack_surface, prism_packed_word_count, prism_neutral_surface
 };
@@ -182,9 +185,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // and mislead debugging. Emit unlit base color + emissive only.
     let material_header = material_headers[in.material_index];
     let surface = load_surface_parameters(material_header.parameter_offset, material_header.lobe_mask);
-    // `OpenPBR` `geometry_opacity` scales the coverage the blend/mask path reads.
+    // `OpenPBR` `geometry_opacity` scales the coverage the blend/mask path reads,
+    // and the runtime dissolve channel (§17.1) cuts that coverage against the
+    // procedural mask — the same mask the shading resolve samples to light its
+    // rim, so the visible edge and the coverage edge agree.
+    let dissolve = bitcast<f32>(material_header.dynamic_dissolve);
+    let coverage = dyn_dissolve_coverage(dissolve, in.uv);
     return vec4<f32>(
         surface.base_color.rgb + surface.emissive.rgb,
-        surface.base_color.a * surface.geometry_opacity,
+        surface.base_color.a * surface.geometry_opacity * coverage,
     );
 }

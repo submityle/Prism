@@ -6,7 +6,7 @@
 //! GPU or Bevy dependency so it can act as the golden reference the WESL
 //! resolve shader must match bit-for-bit within tolerance.
 
-use prism_render_material::{GpuMaterialHeader, GpuSurfaceParameters};
+use prism_render_material::{DynamicChannels, GpuMaterialHeader, GpuSurfaceParameters};
 
 use crate::{
     apply_tangent_space_normal, classify_material_header, evaluate_image_based_light,
@@ -423,6 +423,23 @@ pub fn resolve_pixel(
     // two quantities.
     surface.glint_cell = geometry.uv;
     surface.glint_footprint_area = input.uv_footprint_area;
+    // Runtime dynamic channels (§17.1): the header's four dynamic words are the
+    // material's live wetness / snow / damage / dissolve state, remapped
+    // analytically onto the frozen über fields *before* any light or ambient term
+    // is evaluated, so every consumer (direct, IBL, constant ambient) sees the
+    // same modulated surface. All-zero is a bit-for-bit identity, and the bypass
+    // branch is per material, not per pixel — see
+    // [`crate::dynamic::apply_dynamic_channels`].
+    crate::dynamic::apply_dynamic_channels(
+        &mut surface,
+        DynamicChannels::from_words([
+            input.header.dynamic_wetness,
+            input.header.dynamic_snow,
+            input.header.dynamic_damage,
+            input.header.dynamic_dissolve,
+        ]),
+        geometry.uv,
+    );
 
     let emissive = surface.emissive;
     let base_color = surface.base_color;
@@ -899,6 +916,125 @@ mod tests {
             uv_footprint_area: 0.0,
             world_from_local: IDENTITY_WORLD_FROM_LOCAL,
         }
+    }
+
+
+    #[test]
+    fn runtime_dynamic_channels_reach_the_resolved_pixel() {
+        let (primitives, vertices) = unit_triangle();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.6, 0.5, 0.4, 1.0],
+            specular_roughness: 0.5,
+            ..Default::default()
+        };
+        let light = DirectionalLight {
+            direction: [0.0, 0.0, 1.0],
+            illuminance: [10.0; 3],
+            visibility: 1.0,
+        };
+        let resolve = |header: GpuMaterialHeader| {
+            resolve_pixel(
+                base_input(&primitives, &vertices, header, parameters),
+                LightingEnvironment {
+                    directional: &[light],
+                    punctual: &[],
+                    image_based: None,
+                    ambient: [5.0; 3],
+                    stylized: StylizedParams::with_bands(4),
+                    area: &[],
+                    ltc_lut: None,
+                },
+            )
+            .unwrap()
+            .color
+        };
+
+        // All-zero dynamic words are a bit-for-bit identity: a header that never
+        // drives a channel is exactly the pre-§17.1 header.
+        let inert = resolve(principled_header());
+        assert_eq!(resolve(principled_header()), inert);
+
+        // Wetness darkens the base and tightens the highlight, so the resolved
+        // radiance must move — this is the wiring gate, not the modulation unit
+        // test: it proves the header words reach the shaded pixel.
+        let mut wet_header = principled_header();
+        wet_header.dynamic_wetness = 1.0_f32.to_bits();
+        let wet = resolve(wet_header);
+        assert!(
+            wet.iter().zip(&inert).all(|(a, b)| a < b),
+            "wet {wet:?} vs dry {inert:?}"
+        );
+
+        // Snow whitens and roughens: brighter than inert, and a different
+        // response again than wetness.
+        let mut snow_header = principled_header();
+        snow_header.dynamic_snow = 1.0_f32.to_bits();
+        let snow = resolve(snow_header);
+        assert!(
+            snow.iter().zip(&inert).all(|(a, b)| a > b),
+            "snow {snow:?} vs bare {inert:?}"
+        );
+
+        // Dissolve cuts coverage against the *procedural* mask, and lights its
+        // cut line with the material's own emission — so gate it on an emissive
+        // material, at the pixel's actual cell. The barycentrics [0.2, 0.3, 0.5]
+        // over the unit triangle's UVs interpolate to cell [0.3, 0.5].
+        let emissive_parameters = GpuSurfaceParameters {
+            emission_color: [1.0, 1.0, 1.0, 1.0],
+            emission_luminance: 1.0,
+            ..parameters
+        };
+        let resolve_emissive = |header: GpuMaterialHeader| {
+            resolve_pixel(
+                base_input(&primitives, &vertices, header, emissive_parameters),
+                LightingEnvironment {
+                    directional: &[light],
+                    punctual: &[],
+                    image_based: None,
+                    ambient: [5.0; 3],
+                    stylized: StylizedParams::with_bands(4),
+                    area: &[],
+                    ltc_lut: None,
+                },
+            )
+            .unwrap()
+            .color
+        };
+        // Reconstruct the pixel exactly as the resolve does, so the mask is
+        // taken from the cell the shader would use rather than a hand-computed
+        // guess at the barycentric interpolation.
+        let decoded = pixel(principled_header().generation, [0.2, 0.3, 0.5]).barycentrics();
+        let geometry = crate::reconstruct_surface(
+            SurfaceReconstructionInput {
+                primitive_id: 0,
+                barycentrics: decoded,
+                geometry_generation: 9,
+                expected_geometry_generation: 9,
+            },
+            &primitives,
+            &vertices,
+        )
+        .unwrap();
+        let mask = crate::dynamic::dissolve_mask(geometry.uv);
+        let intact_emissive = resolve_emissive(principled_header());
+        let mut dissolve_header = principled_header();
+        // Sit the pixel on the cut line: coverage 0.5 is where the rim peaks.
+        dissolve_header.dynamic_dissolve = (mask - 0.5 * crate::dynamic::DISSOLVE_EDGE_WIDTH).to_bits();
+        let rimmed = resolve_emissive(dissolve_header);
+        assert!(
+            rimmed.iter().zip(&intact_emissive).all(|(a, b)| a > b),
+            "the cut line must glow: rimmed {rimmed:?} vs intact {intact_emissive:?} (uv {:?} mask {mask})",
+            geometry.uv
+        );
+
+        // Past the cut, the pixel is gone: coverage 0 kills the rim again.
+        let mut gone_header = principled_header();
+        gone_header.dynamic_dissolve = (mask + 0.5 * crate::dynamic::DISSOLVE_EDGE_WIDTH).to_bits();
+        let gone = resolve_emissive(gone_header);
+        assert!(
+            gone.iter().zip(&intact_emissive).all(|(a, b)| a <= b),
+            "a fully cut pixel must not glow: {gone:?} vs {intact_emissive:?}"
+        );
     }
 
     #[test]

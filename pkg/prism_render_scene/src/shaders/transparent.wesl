@@ -30,6 +30,9 @@ import bevy_pbr::render::{
 import bevy_render::maths::affine3_to_square;
 import prism_render_scene::shaders::oit::{OitTargets, oit_accumulate};
 import prism_render_scene::shaders::material::PrismSurfaceParameters;
+import prism_render_scene::shaders::dynamic_mask::{
+    dyn_dissolve_coverage,
+};
 import prism_render_scene::shaders::material_unpack::{
     prism_unpack_surface, prism_packed_word_count, prism_neutral_surface
 };
@@ -100,6 +103,9 @@ struct VertexOutput {
     @location(2) world_position: vec3<f32>,
     // Positive view-space distance from the camera, consumed by the OIT weight.
     @location(3) view_depth: f32,
+    // Surface cell for the procedural dissolve mask (§17.1). Inter-stage only:
+    // it does not change the mesh's vertex-buffer layout.
+    @location(4) uv: vec2<f32>,
 };
 
 @vertex
@@ -133,6 +139,11 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // View space looks down -z, so negating the view-space z gives the positive
     // linear distance from the camera the McGuire/Bavoil weight expects.
     out.view_depth = max(-position_world_to_view(world_position).z, 0.0);
+    // Surface cell for the procedural dissolve mask (§17.1). A mesh without
+    // UVs falls back to a constant cell, which makes the cut read as a
+    // per-material fade rather than a ragged edge — never as garbage.
+    @if(VERTEX_UVS) { out.uv = vertex.uv; }
+    @else { out.uv = vec2<f32>(0.0); }
     out.valid = u32(valid);
     let material_in_bounds = instance.material_index < arrayLength(&material_headers);
     out.material_index = select(0u, instance.material_index, material_in_bounds);
@@ -160,8 +171,15 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
     let material_header = material_headers[in.material_index];
     let surface = load_surface_parameters(material_header.parameter_offset, material_header.lobe_mask);
     let color = surface.base_color.rgb + surface.emissive.rgb;
-    // `OpenPBR` `geometry_opacity` scales the coverage the blend path reads.
-    let alpha = clamp(surface.base_color.a * surface.geometry_opacity, 0.0, 1.0);
+    // `OpenPBR` `geometry_opacity` scales the coverage the blend path reads, and
+    // the runtime dissolve channel (§17.1) cuts it against the procedural mask
+    // (the same mask the shading resolve lights its rim with).
+    let dissolve = bitcast<f32>(material_header.dynamic_dissolve);
+    let alpha = clamp(
+        surface.base_color.a * surface.geometry_opacity * dyn_dissolve_coverage(dissolve, in.uv),
+        0.0,
+        1.0,
+    );
     let targets: OitTargets = oit_accumulate(color, alpha, in.view_depth);
     var out: FragmentOutput;
     out.accum = targets.accum;

@@ -37,6 +37,15 @@ fn transparent_wesl_compiles_for_every_specialization() {
     // variable-length word-heap (`material_unpack.wesl`). The test slices from the
     // first `struct` (dropping imports), so inject the imported surface type plus
     // the *real* unpack functions rather than a hand-written twin.
+    // The runtime dissolve coverage (§17.1) is real code as well.
+    let dynamic_mask = include_str!("../../shaders/dynamic_mask.wesl");
+    let dynamic_mask = &dynamic_mask[dynamic_mask
+        .find("const DISSOLVE_MASK_CELLS")
+        .expect("dynamic_mask.wesl must define DISSOLVE_MASK_CELLS")..];
+    let lobe_sampling = include_str!("../../shaders/lobe_sampling.wesl");
+    let lobe_sampling = &lobe_sampling[lobe_sampling
+        .find("const LS_SEED_SALT")
+        .expect("lobe_sampling.wesl must define LS_SEED_SALT")..];
     let unpack = include_str!("../../shaders/material_unpack.wesl");
     let unpack = &unpack[unpack
         .find("const PRISM_LOBE_EMISSION")
@@ -88,7 +97,7 @@ fn oit_accumulate(color: vec3<f32>, alpha: f32, view_depth: f32) -> OitTargets {
     cache.set_shader(
         shader_id,
         Shader::from_wesl(
-            format!("{stubs}{surface_type}{unpack}\n{source}"),
+            format!("{stubs}{lobe_sampling}{dynamic_mask}\n{surface_type}{unpack}\n{source}"),
             "shaders/prism_transparent.wesl",
         ),
     );

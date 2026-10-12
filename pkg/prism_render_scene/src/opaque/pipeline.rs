@@ -175,6 +175,16 @@ mod tests {
         // `struct` (dropping every `import`), so provide the imported surface type
         // plus the *real* unpack functions here: this keeps the compile honest and
         // free of a hand-written twin. The bevy stubs below remain unchanged.
+        // …and the runtime dissolve coverage (§17.1) is real code too: slice the
+        // mask twin and the hash chain it reads, for the same reason.
+        let dynamic_mask = include_str!("../shaders/dynamic_mask.wesl");
+        let dynamic_mask = &dynamic_mask[dynamic_mask
+            .find("const DISSOLVE_MASK_CELLS")
+            .expect("dynamic_mask.wesl must define DISSOLVE_MASK_CELLS")..];
+        let lobe_sampling = include_str!("../shaders/lobe_sampling.wesl");
+        let lobe_sampling = &lobe_sampling[lobe_sampling
+            .find("const LS_SEED_SALT")
+            .expect("lobe_sampling.wesl must define LS_SEED_SALT")..];
         let unpack = include_str!("../shaders/material_unpack.wesl");
         let unpack = &unpack[unpack
             .find("const PRISM_LOBE_EMISSION")
@@ -213,7 +223,7 @@ fn decompress_vertex_position(
         cache.set_shader(
             shader_id,
             Shader::from_wesl(
-                format!("{stubs}{surface_type}{unpack}\n{source}"),
+                format!("{stubs}{lobe_sampling}{dynamic_mask}\n{surface_type}{unpack}\n{source}"),
                 "shaders/prism_opaque.wesl",
             ),
         );

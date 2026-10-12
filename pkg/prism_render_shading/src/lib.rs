@@ -21,6 +21,7 @@ mod cluster;
 mod color_grade;
 mod dielectric_albedo_table;
 mod dof;
+mod dynamic;
 mod eon_albedo_table;
 mod environment;
 mod exposure;
@@ -112,6 +113,12 @@ pub use color_grade::{
 pub use dof::{
     aperture_diameter, apply_dof, bokeh_weight, circle_of_confusion, coc_to_pixels,
     dof_blend_factor, far_field_coc, near_field_coc, signed_coc, DofCamera, DofParams,
+};
+pub use dynamic::{
+    apply_dynamic_channels, dissolve_coverage, dissolve_mask, DAMAGE_BASE_DARKEN, DAMAGE_METAL_LOSS, DAMAGE_ROUGHEN,
+    DISSOLVE_EDGE_GAIN, DISSOLVE_EDGE_WIDTH, DISSOLVE_MASK_CELLS, SNOW_ALBEDO,
+    SNOW_DIFFUSE_ROUGHNESS, SNOW_ROUGHNESS, SNOW_SHEEN, SNOW_SPECULAR_WEIGHT, WATER_IOR,
+    WET_BASE_DARKEN, WET_ROUGHNESS_SCALE,
 };
 pub use environment::{
     env_brdf_approx, evaluate_image_based_light, evaluate_image_based_light_specular,

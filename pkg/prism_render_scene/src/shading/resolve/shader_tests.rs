@@ -334,7 +334,7 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 18] = [
+    let deps: [(u128, &str, &str); 21] = [
         (
             0x5052_4953_4d5f_5441_4e47_454e_5400_0002,
             include_str!("../../shaders/tangent.wesl"),
@@ -428,6 +428,27 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             0x5052_4953_4d5f_474c_494e_5400_0001,
             include_str!("../../shaders/glint.wesl"),
             "embedded://prism_render_scene/shaders/glint.wesl",
+        ),
+        // The resolve imports the runtime dynamic-channel twin (§17.1) to remap
+        // the frozen über fields from the header's four dynamic words.
+        (
+            0x5052_4953_4d5f_4459_4e41_4d49_4301,
+            include_str!("../../shaders/dynamic.wesl"),
+            "embedded://prism_render_scene/shaders/dynamic.wesl",
+        ),
+        // …which in turn hashes the quantised surface cell for its procedural
+        // dissolve mask, so the lobe-sampling hash helpers must resolve too.
+        (
+            0x5052_4953_4d5f_4c53_414d_504c_455f_0001,
+            include_str!("../../shaders/lobe_sampling.wesl"),
+            "embedded://prism_render_scene/shaders/lobe_sampling.wesl",
+        ),
+        // The dynamic-channel twin delegates its dissolve coverage to
+        // `dynamic_mask.wesl` (§17.1).
+        (
+            0x5052_4953_4d5f_4459_4d5f_4d41_534b_0001,
+            include_str!("../../shaders/dynamic_mask.wesl"),
+            "embedded://prism_render_scene/shaders/dynamic_mask.wesl",
         ),
         // Minimal stand-in for Bevy's `bevy_render::maths`: the resolve shader
         // imports `affine3_to_square` from it exactly like `opaque.wesl` and

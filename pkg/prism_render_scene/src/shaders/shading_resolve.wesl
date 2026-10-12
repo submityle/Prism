@@ -99,6 +99,9 @@ import prism_render_scene::shaders::material_sample::{
     prism_uv_gradients,
     prism_texture_lod,
 };
+import prism_render_scene::shaders::dynamic::{
+    apply_dynamic_channels,
+};
 import prism_render_scene::shaders::tangent::{
     TangentBasis,
     apply_tangent_space_normal,
@@ -1999,6 +2002,22 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.glint_cell = geometry.uv;
     surface.glint_footprint_area = abs(
         uv_gradients[0].x * uv_gradients[1].y - uv_gradients[0].y * uv_gradients[1].x,
+    );
+    // Runtime dynamic channels (§17.1): the four header words are the material's
+    // live wetness / snow / damage / dissolve state, remapped analytically onto
+    // the frozen über fields *before* any light or ambient term is evaluated, so
+    // every consumer (direct, IBL, ambient) sees the same modulated surface.
+    // All-zero is a bit-for-bit identity, and the bypass branch is per material,
+    // not per pixel.
+    surface = apply_dynamic_channels(
+        surface,
+        vec4<f32>(
+            bitcast<f32>(material_header.dynamic_wetness),
+            bitcast<f32>(material_header.dynamic_snow),
+            bitcast<f32>(material_header.dynamic_damage),
+            bitcast<f32>(material_header.dynamic_dissolve),
+        ),
+        geometry.uv,
     );
     // `geometry_coat_tangent` is a shade-time input, so the coat inherits the
     // base frame tangent by default.
