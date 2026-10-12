@@ -107,11 +107,15 @@ pub use material::{
     BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,
     ParameterHeap, RenderMaterials, TextureFallback, TextureHeapStats, TextureSlotHeap,
 };
-pub use mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer};
+pub use mesh_pipeline::{
+    MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer, full_lobe_fallback,
+};
 pub use mesh::{RenderMesh, RenderMeshBufferInfo};
 pub use mesh_pipelines::{MeshPipelines, SpineMeshPipeline};
 pub use mesh_draw::{mesh_bin_draw, mesh_draw};
-pub use pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
+pub use pipeline_cache::{
+    PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution, hash_vertex_layouts,
+};
 pub use plugin::PrismRenderPlugin;
 pub use queue::{
     DrawRequest, IndirectArgs, PhaseItem, RenderQueues, phase_for_bin_class,
@@ -148,8 +152,12 @@ pub mod prelude {
         BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,
         ParameterHeap, RenderMaterials, TextureFallback, TextureHeapStats, TextureSlotHeap,
     };
-    pub use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer};
-    pub use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
+    pub use crate::mesh_pipeline::{
+        MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer, full_lobe_fallback,
+    };
+    pub use crate::pipeline_cache::{
+        PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution, hash_vertex_layouts,
+    };
     pub use crate::plugin::PrismRenderPlugin;
     pub use crate::queue::{
         DrawRequest, IndirectArgs, PhaseItem, RenderQueues, phase_for_bin_class,

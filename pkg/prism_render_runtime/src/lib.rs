@@ -100,7 +100,10 @@ impl fmt::Display for RenderInitError {
 pub struct RenderRuntime<I: Instance> {
     instance: I,
     adapter: I::Adapter,
-    device: I::Device,
+    /// The device is kept behind an `Arc` so background pipeline compilation
+    /// can hold a handle while the runtime remains the owner of the render
+    /// world's lifetime.
+    device: Arc<I::Device>,
     queue: I::Queue,
     extent: Extent3d,
     /// The frames-in-flight bound and its outstanding completion tokens.
@@ -152,7 +155,7 @@ impl<I: Instance> RenderRuntime<I> {
         Ok(Self {
             instance,
             adapter,
-            device,
+            device: Arc::new(device),
             queue,
             extent,
             pacer: Mutex::new(FramePacer::new(max_in_flight)),
@@ -183,6 +186,17 @@ impl<I: Instance> RenderRuntime<I> {
     #[must_use]
     pub fn device(&self) -> &I::Device {
         &self.device
+    }
+
+    /// A shareable handle to the render device.
+    ///
+    /// Pipeline compilation is independently schedulable (design §8.4), so a
+    /// background compiler needs an owned handle rather than a borrow into the
+    /// render runtime. Cloning the `Arc` keeps the device alive until the
+    /// compiler is dropped.
+    #[must_use]
+    pub fn device_handle(&self) -> Arc<I::Device> {
+        Arc::clone(&self.device)
     }
 
     /// Returns why the GPU device was lost, clearing the record so a caller acts
@@ -231,7 +245,7 @@ impl<I: Instance> RenderRuntime<I> {
     {
         let surface = self
             .instance
-            .create_surface(window, &self.device, &self.queue)?;
+            .create_surface(window, &*self.device, &self.queue)?;
         self.surface = Some(surface);
         self.surface_config = None;
         Ok(())
@@ -420,7 +434,7 @@ impl<I: Instance> RenderRuntime<I> {
         // Record the graph into a command buffer without submitting it, so the
         // pacer can own the actual submission and receive its completion token.
         let capture = capture::CapturingQueue::new(&self.queue);
-        graph.execute(&self.device, &capture)?;
+        graph.execute(&*self.device, &capture)?;
         let commands = capture.take();
 
         // Retire the oldest frame if the pipeline is full; this is the only

@@ -248,9 +248,9 @@ impl RenderQueues {
         build: impl Fn(&MeshPipelineKey) -> RenderPipelineDescriptor,
     ) {
         for request in requests {
-            let descriptor = build(&request.variant);
-            let pipeline =
-                specializer.specialize(device, request.variant, &request.layout, descriptor);
+            let pipeline = specializer
+                .specialize_with(device, request.variant, &request.layout, &build)
+                .id();
             self.push(
                 request.phase,
                 PhaseItem {
@@ -298,9 +298,9 @@ impl RenderQueues {
             let Some(request) = registry.resolve(item, meshes, depth_format, sample_count, draw) else {
                 continue;
             };
-            let descriptor = provider.descriptor(&request.variant);
-            let pipeline =
-                specializer.specialize(device, request.variant, &request.layout, descriptor);
+            let pipeline = specializer
+                .specialize_with_provider(device, request.variant, &request.layout, provider)
+                .id();
             self.push(
                 request.phase,
                 PhaseItem {

@@ -17,7 +17,6 @@ use crate::material::{
 use crate::mesh_pipelines::MeshPipelines;
 use crate::queue_stage::fill_queues;
 use crate::label::{Render, RenderApp, RenderStartup};
-use crate::pipeline_cache::PipelineCache;
 use crate::queue::RenderQueues;
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
@@ -25,7 +24,10 @@ use crate::scene::{SceneRegistry, VisibilityWorkList};
 use crate::sets::{RenderSystems, configure_render_sets};
 use crate::stats::RenderFrameStats;
 use crate::startup::ensure_render_startup;
-use crate::systems::{clear_queues, drive_render_schedule, execute_frame, extract_render_record};
+use crate::systems::{
+    clear_queues, drive_render_schedule, execute_frame, extract_render_record,
+    pump_pipeline_compiles,
+};
 use crate::target::RenderTarget;
 use crate::texture_cache::TextureCache;
 use crate::views::{RenderViews, build_view_family};
@@ -144,6 +146,10 @@ where
             config.material_texture_rows,
             prism_render_driver::BufferUsages::NONE,
         );
+        // Cold material permutations compile on a worker that owns a shareable
+        // device handle; the specializer's cache serves the full-lobe fallback
+        // until the exact PSO arrives.
+        let pipeline_specializer = MeshPipelineSpecializer::with_worker(runtime.device_handle());
         let mut render = SubApp::new();
         render
             .world
@@ -152,13 +158,12 @@ where
         render.world.insert_resource(RenderRecord::default());
         render.world.insert_resource(RenderFrameStats::default());
         render.world.insert_resource(RenderViews::new());
-        render.world.insert_resource(PipelineCache::new());
         render.world.insert_resource(TextureCache::new());
         render.world.insert_resource(RenderQueues::new());
         render
             .world
             .insert_resource(crate::draw::canonical::registry());
-        render.world.insert_resource(MeshPipelineSpecializer::new());
+        render.world.insert_resource(pipeline_specializer);
         render.world.insert_resource(mesh_pipelines);
         render.world.insert_resource(SceneRegistry::new());
         render.world.insert_resource(VisibilityWorkList::new());
@@ -193,6 +198,9 @@ where
             // Materials register/retire → the ABI buffers, before anything binds them.
             schedule.add_systems(
                 sync_material_buffers::<I>.in_set(RenderSystems::PrepareResources),
+            );
+            schedule.add_systems(
+                pump_pipeline_compiles::<I>.in_set(RenderSystems::PrepareResources),
             );
             schedule.add_systems(fill_queues::<I>.in_set(RenderSystems::Queue));
             schedule.add_systems(execute_frame::<I>.in_set(RenderSystems::Phase));

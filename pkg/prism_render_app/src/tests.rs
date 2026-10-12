@@ -23,13 +23,15 @@ use crate::target::RenderTarget;
 
 use crate::sets::{RenderPhase, RenderSystems};
 use crate::views::RenderViews;
-use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
+use crate::pipeline_cache::{
+    PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution, hash_vertex_layouts,
+};
 use crate::queue::{PhaseItem, RenderQueues};
 use crate::queue::DrawRequest;
 use crate::queue::phase_for_render_class;
-use prism_render_material::MaterialRenderClass;
+use prism_render_material::{Illumination, LobeMask, MaterialRenderClass, SpecializationId};
 use crate::draw::{DrawFunctionId, DrawFunctions};
-use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineSpecializer};
+use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineSpecializer, full_lobe_fallback};
 use crate::texture_cache::{TextureCache, TextureKey};
 use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
@@ -37,14 +39,60 @@ use prism_render_architecture::view_family::ViewKind;
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
 use prism_render_visibility::GpuRenderWorkItem;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 
 use crate::scene::{SceneRegistry, VisibilityWorkList};
 use prism_render_driver::{
-    BufferDescriptor, BufferId, BufferUsages, DeviceDescriptor, Instance, MultisampleState,
-    PrimitiveState, PrimitiveTopology, RenderDevice, RenderPipelineDescriptor,
-    RequestAdapterOptions, ShaderModuleDescriptor, TextureDescriptor, TextureFormat, TextureUsages,
-    VertexState,
+    BufferDescriptor, BufferId, BufferUsages, ColorTargetState, DeviceDescriptor, FragmentState,
+    Instance, MultisampleState, PrimitiveState, PrimitiveTopology, RenderDevice,
+    RenderPipelineDescriptor, RenderPipelineId, RequestAdapterOptions, ShaderModuleDescriptor,
+    TextureDescriptor, TextureFormat, TextureUsages, VertexState,
 };
+
+/// A deterministic compiler gate for exercising the asynchronous cache without
+/// racing the real worker.
+struct GateCompiler {
+    open: Mutex<bool>,
+    wake: Condvar,
+    result: RenderPipelineId,
+    calls: AtomicUsize,
+}
+
+impl GateCompiler {
+    fn new(result: RenderPipelineId) -> Arc<Self> {
+        Arc::new(Self {
+            open: Mutex::new(false),
+            wake: Condvar::new(),
+            result,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn release(&self) {
+        *self.open.lock().expect("gate compiler lock") = true;
+        self.wake.notify_all();
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl PipelineCompiler for GateCompiler {
+    fn compile(
+        &self,
+        _key: PipelineKey,
+        _descriptor: &RenderPipelineDescriptor,
+    ) -> RenderPipelineId {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut open = self.open.lock().expect("gate compiler lock");
+        while !*open {
+            open = self.wake.wait(open).expect("gate compiler wait");
+        }
+        self.result
+    }
+}
 
 /// A prepared, position-only mesh bound to `geometry`, plus the table holding it.
 ///
@@ -587,7 +635,11 @@ fn fill_from_visibility_resolves_and_queues() {
         1,
         "the draw lands in the opaque phase"
     );
-    assert_eq!(specializer.pipeline_count(), 1, "one pipeline specialized");
+    assert_eq!(
+        specializer.pipeline_count(),
+        2,
+        "one specialization plus its full-lobe fallback"
+    );
 }
 
 /// The scene registry resolves a visibility work item into a queueable draw,
@@ -757,8 +809,8 @@ fn filling_the_queue_specializes_and_appends() {
     assert_eq!(queues.phase(RenderPhase::Opaque).len(), 3, "every draw queues");
     assert_eq!(
         specializer.pipeline_count(),
-        2,
-        "two distinct layouts specialize two pipelines"
+        4,
+        "two distinct layouts specialize two pipelines plus their fallbacks"
     );
 }
 
@@ -888,6 +940,334 @@ fn mesh_specialization_dedups_by_variant_and_layout() {
     specializer.clear(&device);
     assert_eq!(specializer.pipeline_count(), 0);
 }
+
+/// The fallback key preserves illumination/render-class and expands the live
+/// lobe set to every schema lobe; its shader identity is the full specialization.
+#[test]
+fn full_lobe_fallback_expands_the_live_lobe_set() {
+    let specialization = SpecializationId::new(Illumination::Lit, 1 << 3, 2);
+    let variant = MeshPipelineKey {
+        class: specialization.bin_class(),
+        color_format: Some(TextureFormat::Rgba8Unorm),
+        depth_format: None,
+        sample_count: 1,
+        topology: PrimitiveTopology::TriangleList,
+        shader_id: specialization.0,
+    };
+    let fallback = full_lobe_fallback(variant).expect("a legal specialization has a fallback");
+    let decoded =
+        SpecializationId::from_bin_class(fallback.class).expect("the fallback class decodes");
+    assert_eq!(decoded.illumination(), Some(Illumination::Lit));
+    assert_eq!(decoded.closure_mask(), LobeMask::all().0);
+    assert_eq!(decoded.render_class_bits(), 2);
+    assert_eq!(fallback.shader_id, decoded.0);
+}
+
+/// A cold specialization resolves to the über fallback immediately; the worker
+/// result then replaces it on the next lookup.
+#[test]
+fn async_pipeline_cache_serves_fallback_then_switches() {
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+    let descriptor = RenderPipelineDescriptor {
+        label: Some("async-cache-test".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: None,
+    };
+    let layout = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x3],
+    );
+    let layout = core::slice::from_ref(&layout);
+    let specialization = SpecializationId::new(Illumination::Lit, 1, 0);
+    let variant = MeshPipelineKey {
+        class: specialization.bin_class(),
+        color_format: Some(TextureFormat::Rgba8Unorm),
+        depth_format: None,
+        sample_count: 1,
+        topology: PrimitiveTopology::TriangleList,
+        shader_id: specialization.0,
+    };
+    let fallback = full_lobe_fallback(variant).expect("fallback variant");
+    let target_key = variant.with_layout(layout);
+    let fallback_key = fallback.with_layout(layout);
+    assert_ne!(target_key, fallback_key, "the test uses a partial lobe set");
+
+    let compiler = GateCompiler::new(RenderPipelineId::from_parts(101, 1));
+    let mut cache = PipelineCache::with_compiler(compiler.clone());
+    let first = cache.resolve_or_request(
+        &device,
+        target_key,
+        descriptor.clone(),
+        fallback_key,
+        descriptor.clone(),
+    );
+    assert!(
+        matches!(first, PipelineResolution::Fallback(_)),
+        "a cold permutation must use the fallback immediately"
+    );
+    assert_eq!(cache.pending_len(), 1);
+    compiler.release();
+    for _ in 0..10_000 {
+        cache.pump(&device);
+        if cache.pending_len() == 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(cache.pending_len(), 0);
+    assert_eq!(compiler.calls(), 1, "the worker compiles the key once");
+    let second = cache.resolve_or_request(
+        &device,
+        target_key,
+        descriptor.clone(),
+        fallback_key,
+        descriptor,
+    );
+    assert_eq!(
+        second,
+        PipelineResolution::Ready(compiler.result),
+        "the completed specialization replaces the fallback"
+    );
+}
+
+/// A frame that discovers more cold permutations than the in-flight bound
+/// queues the excess instead of growing the worker channel without limit.
+#[test]
+fn async_pipeline_cache_bounds_the_in_flight_backlog() {
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+    let descriptor = RenderPipelineDescriptor {
+        label: Some("async-backpressure-test".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: None,
+    };
+    let layout = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x3],
+    );
+    let layout = core::slice::from_ref(&layout);
+    let compiler = GateCompiler::new(RenderPipelineId::from_parts(303, 1));
+    let mut cache = PipelineCache::with_compiler(compiler.clone());
+
+    let mut keys = Vec::new();
+    for bit in 0..5 {
+        let specialization = SpecializationId::new(Illumination::Lit, 1 << bit, 0);
+        let variant = MeshPipelineKey {
+            class: specialization.bin_class(),
+            color_format: Some(TextureFormat::Rgba8Unorm),
+            depth_format: None,
+            sample_count: 1,
+            topology: PrimitiveTopology::TriangleList,
+            shader_id: specialization.0,
+        };
+        let fallback = full_lobe_fallback(variant).expect("fallback variant");
+        let key = variant.with_layout(layout);
+        let fallback_key = fallback.with_layout(layout);
+        assert!(matches!(
+            cache.resolve_or_request(
+                &device,
+                key,
+                descriptor.clone(),
+                fallback_key,
+                descriptor.clone(),
+            ),
+            PipelineResolution::Fallback(_)
+        ));
+        keys.push(key);
+    }
+    assert_eq!(cache.pending_len(), 5);
+    assert_eq!(
+        cache.waiting_len(),
+        1,
+        "five cold jobs with a four-job in-flight bound leave one queued"
+    );
+
+    compiler.release();
+    for _ in 0..20_000 {
+        cache.pump(&device);
+        if cache.pending_len() == 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(cache.pending_len(), 0);
+    assert_eq!(cache.waiting_len(), 0);
+    assert_eq!(compiler.calls(), 5);
+}
+
+/// The mesh specializer wires the same fallback/switch behavior around the
+/// provider's descriptors.
+#[test]
+fn mesh_specialization_uses_the_full_lobe_fallback_while_compiling() {
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+    let descriptor = RenderPipelineDescriptor {
+        label: Some("mesh-async-test".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: None,
+    };
+    let layout = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x3],
+    );
+    let layout = core::slice::from_ref(&layout);
+    let specialization = SpecializationId::new(Illumination::Lit, 1, 0);
+    let variant = MeshPipelineKey {
+        class: specialization.bin_class(),
+        color_format: Some(TextureFormat::Rgba8Unorm),
+        depth_format: None,
+        sample_count: 1,
+        topology: PrimitiveTopology::TriangleList,
+        shader_id: specialization.0,
+    };
+    let compiler = GateCompiler::new(RenderPipelineId::from_parts(202, 1));
+    let mut specializer = MeshPipelineSpecializer::with_compiler(compiler.clone());
+
+    let first = specializer.specialize_with(&device, variant, layout, |_| descriptor.clone());
+    assert!(matches!(first, PipelineResolution::Fallback(_)));
+    assert_eq!(specializer.pending_pipeline_count(), 1);
+    compiler.release();
+    for _ in 0..10_000 {
+        specializer.pump(&device);
+        if specializer.pending_pipeline_count() == 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(specializer.pending_pipeline_count(), 0);
+    let second = specializer.specialize_with(&device, variant, layout, |_| descriptor.clone());
+    assert_eq!(second, PipelineResolution::Ready(compiler.result));
+}
+
+/// The real backend proof for P1-d: a cold specialization draws with the
+/// full-lobe fallback while the worker compiles the exact PSO on a live device.
+#[test]
+fn wgpu_pipeline_worker_compiles_a_cold_specialization_in_the_background() {
+    let extent = Extent3d::new_2d(4, 4);
+    if RenderRuntime::<prism_render_driver_wgpu::WgpuInstance>::wgpu(extent).is_err() {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    }
+    let runtime = RenderRuntime::<prism_render_driver_wgpu::WgpuInstance>::wgpu(extent)
+        .expect("the probe above succeeded");
+    let device = runtime.device();
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }\n\
+         @fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }",
+    ));
+    let descriptor = RenderPipelineDescriptor {
+        label: Some("wgpu-async-pipeline-test".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: Some(FragmentState {
+            module,
+            entry_point: "fs".into(),
+            targets: vec![Some(ColorTargetState::opaque(TextureFormat::Rgba8Unorm))],
+        }),
+    };
+    let layout = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x3],
+    );
+    let layout = core::slice::from_ref(&layout);
+    let specialization = SpecializationId::new(Illumination::Lit, 1, 0);
+    let variant = MeshPipelineKey {
+        class: specialization.bin_class(),
+        color_format: Some(TextureFormat::Rgba8Unorm),
+        depth_format: None,
+        sample_count: 1,
+        topology: PrimitiveTopology::TriangleList,
+        shader_id: specialization.0,
+    };
+    let mut specializer = MeshPipelineSpecializer::with_worker(runtime.device_handle());
+    let first = specializer.specialize_with(device, variant, layout, |_| descriptor.clone());
+    assert!(
+        matches!(first, PipelineResolution::Fallback(_)),
+        "the first cold request must bind the fallback"
+    );
+    for _ in 0..100_000 {
+        specializer.pump(device);
+        if specializer.pending_pipeline_count() == 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        specializer.pending_pipeline_count(),
+        0,
+        "the background worker must finish the exact PSO"
+    );
+    let second = specializer.specialize_with(device, variant, layout, |_| descriptor.clone());
+    assert!(
+        matches!(second, PipelineResolution::Ready(_)),
+        "the exact PSO replaces the fallback once compiled"
+    );
+    specializer.clear(device);
+}
+
 /// The render world materializes the frame's view family from the extracted
 /// viewport, and a minimized frame disables (rather than removes) the view.
 #[test]
@@ -1938,7 +2318,11 @@ fn bin_stream_fills_the_indirect_queue_and_records_a_multi_draw() {
             unresolved: 0
         }
     );
-    assert_eq!(specializer.pipeline_count(), 2, "one pipeline per class");
+    assert_eq!(
+        specializer.pipeline_count(),
+        4,
+        "one pipeline plus fallback per class"
+    );
 
     // Each bin lands in the phase its packed class names, and its argument
     // range is its own slot range in the packed stream.
@@ -2037,7 +2421,7 @@ fn direct_and_bin_paths_specialize_one_pipeline_per_material() {
         &provider,
     );
     assert_eq!(queued, 2);
-    assert_eq!(specializer.pipeline_count(), 2);
+    assert_eq!(specializer.pipeline_count(), 4);
 
     let bins = build_view_draw_bins(
         GenerationalHandle::new(0, 1),
@@ -2060,8 +2444,8 @@ fn direct_and_bin_paths_specialize_one_pipeline_per_material() {
     assert_eq!(outcome.queued, 2, "the bin path queues both instances");
     assert_eq!(
         specializer.pipeline_count(),
-        2,
-        "the bin path reuses the direct path's pipelines instead of compiling more"
+        4,
+        "the bin path reuses the direct path's pipelines and fallbacks instead of compiling more"
     );
 }
 

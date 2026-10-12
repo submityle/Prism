@@ -13,8 +13,11 @@ use prism_render_driver::{
     PrimitiveTopology, RenderDevice, RenderPipelineDescriptor, RenderPipelineId, TextureFormat,
     VertexBufferLayout,
 };
+use prism_render_material::{LobeMask, SpecializationId};
 
-use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
+use crate::pipeline_cache::{
+    PipelineCache, PipelineCompiler, PipelineKey, PipelineResolution, hash_vertex_layouts,
+};
 
 /// The variant part of a mesh pipeline key: everything but the vertex layout.
 ///
@@ -53,6 +56,30 @@ impl MeshPipelineKey {
             self.shader_id,
         )
     }
+}
+
+/// The full-lobe über fallback for a cold specialization.
+///
+/// The fallback keeps the illumination and render-class axes but expands the
+/// live lobe set to every schema lobe. A provider can therefore select the
+/// all-lobe über shader from the fallback key while the exact specialization
+/// compiles in the background. `None` means the compact class did not decode to
+/// a legal `SpecializationId`, in which case the caller keeps the synchronous
+/// path.
+#[must_use]
+pub fn full_lobe_fallback(variant: MeshPipelineKey) -> Option<MeshPipelineKey> {
+    let specialization = SpecializationId::from_bin_class(variant.class)?;
+    let illumination = specialization.illumination()?;
+    let full = SpecializationId::new(
+        illumination,
+        LobeMask::all().0,
+        specialization.render_class_bits(),
+    );
+    Some(MeshPipelineKey {
+        class: full.bin_class(),
+        shader_id: full.0,
+        ..variant
+    })
 }
 
 /// Specializes and caches a pipeline per `(variant, vertex layout)` pair.
@@ -102,10 +129,41 @@ impl MeshPipelineSpecializer {
         }
     }
 
+    /// A specializer whose cache compiles cold permutations in the background.
+    #[must_use]
+    pub fn with_worker<D>(device: alloc::sync::Arc<D>) -> Self
+    where
+        D: RenderDevice + Send + Sync + 'static,
+    {
+        Self {
+            cache: PipelineCache::with_worker(device),
+        }
+    }
+
+    /// A specializer with an injected background compiler.
+    #[must_use]
+    pub fn with_compiler(compiler: alloc::sync::Arc<dyn PipelineCompiler>) -> Self {
+        Self {
+            cache: PipelineCache::with_compiler(compiler),
+        }
+    }
+
+    /// Drains completed background compiles. Runs once per frame before the
+    /// queue specializes.
+    pub fn pump<D: RenderDevice>(&mut self, device: &D) {
+        self.cache.pump(device);
+    }
+
     /// The number of distinct specialized pipelines.
     #[must_use]
     pub fn pipeline_count(&self) -> usize {
         self.cache.len()
+    }
+
+    /// The number of specializations currently compiling in the background.
+    #[must_use]
+    pub fn pending_pipeline_count(&self) -> usize {
+        self.cache.pending_len()
     }
 
     /// Returns the pipeline for `(variant, layout)`, compiling `descriptor` on
@@ -124,6 +182,54 @@ impl MeshPipelineSpecializer {
         let descriptor = with_mesh_layout(descriptor, layout);
         self.cache
             .get_or_create(device, variant.with_layout(layout), &descriptor)
+    }
+
+    /// Specializes `variant`, returning a ready pipeline or the full-lobe über
+    /// fallback while the exact permutation compiles in the background.
+    ///
+    /// `build` supplies both the requested and fallback descriptors; providers
+    /// can therefore return different shader entry points for the fallback.
+    pub fn specialize_with<D, F>(
+        &mut self,
+        device: &D,
+        variant: MeshPipelineKey,
+        layout: &[VertexBufferLayout],
+        build: F,
+    ) -> PipelineResolution
+    where
+        D: RenderDevice,
+        F: Fn(&MeshPipelineKey) -> RenderPipelineDescriptor,
+    {
+        let key = variant.with_layout(layout);
+        let Some(fallback_variant) = full_lobe_fallback(variant) else {
+            let descriptor = with_mesh_layout(build(&variant), layout);
+            return PipelineResolution::Ready(self.cache.get_or_create(device, key, &descriptor));
+        };
+        let descriptor = with_mesh_layout(build(&variant), layout);
+        let fallback_descriptor = with_mesh_layout(build(&fallback_variant), layout);
+        self.cache.resolve_or_request(
+            device,
+            key,
+            descriptor,
+            fallback_variant.with_layout(layout),
+            fallback_descriptor,
+        )
+    }
+
+    /// Specializes `variant` through a [`MeshPipelineProvider`], with the
+    /// full-lobe über fallback path enabled.
+    pub fn specialize_with_provider<D, P>(
+        &mut self,
+        device: &D,
+        variant: MeshPipelineKey,
+        layout: &[VertexBufferLayout],
+        provider: &P,
+    ) -> PipelineResolution
+    where
+        D: RenderDevice,
+        P: MeshPipelineProvider,
+    {
+        self.specialize_with(device, variant, layout, |variant| provider.descriptor(variant))
     }
 
     /// Drops one reference to `(variant, layout)`, destroying the pipeline at

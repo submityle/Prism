@@ -64,6 +64,25 @@ pub(crate) fn clear_queues(mut queues: ResMut<crate::RenderQueues>) {
     queues.clear();
 }
 
+/// Drains completed asynchronous pipeline compiles before the queue stage
+/// specializes this frame's draws.
+///
+/// The worker owns a shareable device handle; the cache owns the request state.
+/// Polling here keeps the render schedule single-threaded from the ECS point of
+/// view while moving the expensive `create_render_pipeline` call off it.
+pub(crate) fn pump_pipeline_compiles<I>(
+    mut specializer: ResMut<crate::MeshPipelineSpecializer>,
+    runtime: Res<RenderRuntimeResource<I>>,
+) where
+    I: Instance + Send + Sync + 'static,
+    I::Adapter: Send + Sync + 'static,
+    I::Device: Send + Sync + 'static,
+    I::Queue: Send + Sync + FrameSync + 'static,
+    I::Surface: Send + Sync + 'static,
+{
+    specializer.pump(runtime.runtime().device());
+}
+
 /// The render system: record and submit one frame through the RHI runtime.
 ///
 /// Registered in the [`Render`] schedule, it reads the extracted
