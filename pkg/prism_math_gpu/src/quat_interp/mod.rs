@@ -245,7 +245,7 @@ impl GpuQuatInterp {
         let a_pod: Vec<GpuQuat> = a.iter().map(|&q| GpuQuat::from_quat(q)).collect();
         let b_pod: Vec<GpuQuat> = b.iter().map(|&q| GpuQuat::from_quat(q)).collect();
         let params = Params {
-            count: u32::try_from(count).expect("quat count fits in u32"),
+            count: crate::dispatch::checked_count(count),
             mode,
             pad0: 0,
             pad1: 0,
@@ -295,7 +295,11 @@ impl GpuQuatInterp {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(params.count.div_ceil(WORKGROUP), 1, 1);
+            pass.dispatch_workgroups(
+                crate::dispatch::checked_workgroup_count(count, WORKGROUP),
+                1,
+                1,
+            );
         }
 
         let stage = buffer::staging(device, "prism_math_quat_interp_stage", out_bytes);

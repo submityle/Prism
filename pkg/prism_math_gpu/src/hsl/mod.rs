@@ -247,7 +247,7 @@ impl GpuHsl {
             device,
             "prism_math_hsl_params",
             &Count {
-                count: count as u32,
+                count: crate::dispatch::checked_count(count),
                 _pad: [0; 3],
             },
         );
@@ -280,7 +280,7 @@ fn dispatch(
     bind_group: &BindGroup,
     n: usize,
 ) {
-    let groups = (n as u32).div_ceil(WORKGROUP);
+    let groups = crate::dispatch::checked_workgroup_count(n, WORKGROUP);
     let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
         label: Some("prism_math_hsl_pass"),
         timestamp_writes: None,

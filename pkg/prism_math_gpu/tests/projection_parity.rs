@@ -10,8 +10,8 @@
 //! still passes on a device-less CI image while running the full dispatch on a
 //! real `GPU`.
 
-use prism_math::Mat4;
 use prism_math::projection::{orthographic_rh, perspective_reverse_z_rh, perspective_rh};
+use prism_math::Mat4;
 use prism_math_gpu::GpuContext;
 use prism_math_gpu::GpuProjection;
 use std::f32::consts::FRAC_PI_2;
@@ -51,7 +51,14 @@ fn assert_mat_close(cpu: Mat4, gpu: Mat4) {
         assert!(
             close(cc.x, gg.x) && close(cc.y, gg.y) && close(cc.z, gg.z) && close(cc.w, gg.w),
             "column {col} drifted: cpu=({}, {}, {}, {}) gpu=({}, {}, {}, {})",
-            cc.x, cc.y, cc.z, cc.w, gg.x, gg.y, gg.z, gg.w,
+            cc.x,
+            cc.y,
+            cc.z,
+            cc.w,
+            gg.x,
+            gg.y,
+            gg.z,
+            gg.w,
         );
     }
 }

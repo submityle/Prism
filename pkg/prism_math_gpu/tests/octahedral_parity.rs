@@ -38,14 +38,7 @@ fn with_gpu() -> Option<GpuContext> {
 /// axis directions plus every normalized nonzero integer point in
 /// `[-3, 3]^3`.
 fn sample_dirs() -> Vec<Vec3> {
-    let mut v = vec![
-        Vec3::X,
-        -Vec3::X,
-        Vec3::Y,
-        -Vec3::Y,
-        Vec3::Z,
-        -Vec3::Z,
-    ];
+    let mut v = vec![Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z];
     for x in -3..=3 {
         for y in -3..=3 {
             for z in -3..=3 {
@@ -90,7 +83,11 @@ fn encode_matches_cpu() {
         let cpu = octahedral::encode(*n);
         let dx = (gpu[i][0] - cpu.x).abs();
         let dy = (gpu[i][1] - cpu.y).abs();
-        assert!(dx < 1.0e-5 && dy < 1.0e-5, "encode {i}: gpu={:?} cpu={cpu:?}", gpu[i]);
+        assert!(
+            dx < 1.0e-5 && dy < 1.0e-5,
+            "encode {i}: gpu={:?} cpu={cpu:?}",
+            gpu[i]
+        );
     }
 }
 
@@ -116,8 +113,16 @@ fn decode_matches_cpu() {
         let cpu = octahedral::decode(Vec2::new(c[0], c[1]));
         // GPU vs CPU decode of the same input agree to a tight tolerance, and
         // the result reconstructs the original direction.
-        assert!(dot4(gpu[i], cpu) > 1.0 - 1.0e-5, "decode {i} vs cpu: {:?}", gpu[i]);
-        assert!(dot4(gpu[i], dirs[i]) > 1.0 - 1.0e-5, "decode {i} vs orig: {:?}", gpu[i]);
+        assert!(
+            dot4(gpu[i], cpu) > 1.0 - 1.0e-5,
+            "decode {i} vs cpu: {:?}",
+            gpu[i]
+        );
+        assert!(
+            dot4(gpu[i], dirs[i]) > 1.0 - 1.0e-5,
+            "decode {i} vs orig: {:?}",
+            gpu[i]
+        );
     }
 }
 
@@ -141,9 +146,17 @@ fn pack_matches_cpu() {
         let (cx, cy) = ((cpu & 0xFFFF) as i32, ((cpu >> 16) & 0xFFFF) as i32);
         let dx = ((gx as i16) as i32 - (cx as i16) as i32).abs();
         let dy = ((gy as i16) as i32 - (cy as i16) as i32).abs();
-        assert!(dx <= 1 && dy <= 1, "pack {i}: gpu={:#010x} cpu={cpu:#010x}", gpu[i]);
+        assert!(
+            dx <= 1 && dy <= 1,
+            "pack {i}: gpu={:#010x} cpu={cpu:#010x}",
+            gpu[i]
+        );
         let d = octahedral::unpack_snorm(gpu[i]);
-        assert!(n.dot(d) > 1.0 - 1.0e-3, "pack {i} direction: dot={}", n.dot(d));
+        assert!(
+            n.dot(d) > 1.0 - 1.0e-3,
+            "pack {i} direction: dot={}",
+            n.dot(d)
+        );
     }
 }
 
@@ -161,6 +174,10 @@ fn unpack_matches_cpu() {
     assert_eq!(gpu.len(), dirs.len());
     for (i, b) in bits.iter().enumerate() {
         let cpu = octahedral::unpack_snorm(*b);
-        assert!(dot4(gpu[i], cpu) > 1.0 - 1.0e-5, "unpack {i} vs cpu: {:?}", gpu[i]);
+        assert!(
+            dot4(gpu[i], cpu) > 1.0 - 1.0e-5,
+            "unpack {i} vs cpu: {:?}",
+            gpu[i]
+        );
     }
 }

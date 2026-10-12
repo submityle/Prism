@@ -9,9 +9,9 @@
 //! is available so it still passes on a device-less CI image while running the
 //! full dispatch on a real `GPU`.
 
+use prism_math::shader_mirror::quat_rotate_vec3;
 use prism_math::Quat;
 use prism_math::Vec3;
-use prism_math::shader_mirror::quat_rotate_vec3;
 use prism_math_gpu::GpuContext;
 use prism_math_gpu::GpuQuatRotate;
 

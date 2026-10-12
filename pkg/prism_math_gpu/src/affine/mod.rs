@@ -53,7 +53,7 @@ const WRAP_POINT: &str = "\
 @compute @workgroup_size(64)\n\
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     let i = gid.x;\n\
-    if (i >= arrayLength(&src)) { return; }\n\
+    if (i >= arrayLength(&src) || i >= arrayLength(&dst)) { return; }\n\
     let a = src[i];\n\
     let r = prism_affine_transform_point(a.quat, a.scale.xyz, a.translation.xyz, a.point.xyz);\n\
     dst[i] = vec4<f32>(r, 0.0);\n\
@@ -64,7 +64,7 @@ const WRAP_VECTOR: &str = "\
 @compute @workgroup_size(64)\n\
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     let i = gid.x;\n\
-    if (i >= arrayLength(&src)) { return; }\n\
+    if (i >= arrayLength(&src) || i >= arrayLength(&dst)) { return; }\n\
     let a = src[i];\n\
     let r = prism_affine_transform_vector(a.quat, a.scale.xyz, a.point.xyz);\n\
     dst[i] = vec4<f32>(r, 0.0);\n\
@@ -181,6 +181,7 @@ impl GpuAffine3 {
         if n == 0 {
             return Vec::new();
         }
+        let _ = crate::dispatch::checked_count(n);
         let device = ctx.device();
         let in_buf = buffer::storage_read(device, "prism_math_affine_in", items);
         let out_bytes = (n * size_of::<[f32; 4]>()) as u64;
@@ -228,7 +229,7 @@ fn dispatch(
     bind_group: &BindGroup,
     n: usize,
 ) {
-    let groups = (n as u32).div_ceil(WORKGROUP);
+    let groups = crate::dispatch::checked_workgroup_count(n, WORKGROUP);
     let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
         label: Some("prism_math_affine_pass"),
         timestamp_writes: None,

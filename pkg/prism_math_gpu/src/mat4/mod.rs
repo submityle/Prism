@@ -49,7 +49,7 @@ struct Params { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: vec4<f32> };\n\
 @compute @workgroup_size(64)\n\
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     let i = gid.x;\n\
-    if (i >= arrayLength(&src)) { return; }\n\
+    if (i >= arrayLength(&src) || i >= arrayLength(&dst)) { return; }\n\
     let r = prism_mat4_transform_point(params.m0, params.m1, params.m2, params.m3, src[i].xyz);\n\
     dst[i] = vec4<f32>(r, 0.0);\n\
 }\n";
@@ -64,7 +64,7 @@ struct Params { m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: vec4<f32> };\n\
 @compute @workgroup_size(64)\n\
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     let i = gid.x;\n\
-    if (i >= arrayLength(&src)) { return; }\n\
+    if (i >= arrayLength(&src) || i >= arrayLength(&dst)) { return; }\n\
     let r = prism_mat4_transform_vector(params.m0, params.m1, params.m2, params.m3, src[i].xyz);\n\
     dst[i] = vec4<f32>(r, 0.0);\n\
 }\n";
@@ -189,6 +189,7 @@ impl GpuMat4 {
         if n == 0 {
             return Vec::new();
         }
+        let _ = crate::dispatch::checked_count(n);
         let device = ctx.device();
         let params = buffer::uniform(
             device,
@@ -251,7 +252,7 @@ fn dispatch(
     bind_group: &BindGroup,
     n: usize,
 ) {
-    let groups = (n as u32).div_ceil(WORKGROUP);
+    let groups = crate::dispatch::checked_workgroup_count(n, WORKGROUP);
     let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
         label: Some("prism_math_mat4_pass"),
         timestamp_writes: None,

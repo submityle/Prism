@@ -70,7 +70,13 @@ fn get2_matches_cpu_within_tolerance() {
             points.push([coord(lcg(&mut rng)), coord(lcg(&mut rng))]);
         }
         // Exact integer lattice points (fractional part zero) and tiny offsets.
-        for &p in &[[0.0, 0.0], [1.0, -1.0], [12.0, 7.0], [-5.0, 3.0], [0.5, 0.5]] {
+        for &p in &[
+            [0.0, 0.0],
+            [1.0, -1.0],
+            [12.0, 7.0],
+            [-5.0, 3.0],
+            [0.5, 0.5],
+        ] {
             points.push(p);
         }
 

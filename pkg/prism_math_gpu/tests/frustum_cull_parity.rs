@@ -21,7 +21,7 @@
 use prism_math::geom::aabb::Aabb3;
 use prism_math::geom::frustum::Frustum;
 use prism_math::geom::sphere::BoundingSphere;
-use prism_math::intersect::{Containment, frustum_aabb, frustum_sphere};
+use prism_math::intersect::{frustum_aabb, frustum_sphere, Containment};
 use prism_math::projection::{look_at_rh, perspective_rh};
 use prism_math::Vec3;
 use prism_math_gpu::GpuContext;
@@ -96,19 +96,16 @@ fn sphere_classification_matches_cpu() {
     // Centers chosen with a comfortable margin from every plane, plus one large
     // straddling sphere that is unambiguously Intersecting.
     let spheres: &[(Vec3, f32)] = &[
-        (Vec3::new(0.0, 0.0, 0.0), 0.5),      // deep inside
-        (Vec3::new(0.0, 0.0, 500.0), 1.0),    // behind the near plane (eye at z=10)
-        (Vec3::new(0.0, 0.0, -500.0), 1.0),   // beyond the far plane
-        (Vec3::new(500.0, 0.0, 0.0), 1.0),    // far to the right
-        (Vec3::new(-500.0, 0.0, 0.0), 1.0),   // far to the left
-        (Vec3::new(0.0, 500.0, 0.0), 1.0),    // far above
-        (Vec3::new(0.0, -500.0, 0.0), 1.0),   // far below
-        (Vec3::new(0.0, 0.0, 0.0), 1000.0),   // engulfs the frustum -> Intersecting
+        (Vec3::new(0.0, 0.0, 0.0), 0.5),    // deep inside
+        (Vec3::new(0.0, 0.0, 500.0), 1.0),  // behind the near plane (eye at z=10)
+        (Vec3::new(0.0, 0.0, -500.0), 1.0), // beyond the far plane
+        (Vec3::new(500.0, 0.0, 0.0), 1.0),  // far to the right
+        (Vec3::new(-500.0, 0.0, 0.0), 1.0), // far to the left
+        (Vec3::new(0.0, 500.0, 0.0), 1.0),  // far above
+        (Vec3::new(0.0, -500.0, 0.0), 1.0), // far below
+        (Vec3::new(0.0, 0.0, 0.0), 1000.0), // engulfs the frustum -> Intersecting
     ];
-    let input: Vec<[f32; 4]> = spheres
-        .iter()
-        .map(|&(c, r)| [c.x, c.y, c.z, r])
-        .collect();
+    let input: Vec<[f32; 4]> = spheres.iter().map(|&(c, r)| [c.x, c.y, c.z, r]).collect();
 
     let gpu = cull.cull_spheres(&ctx, &planes, &input);
     assert_eq!(gpu.len(), spheres.len());
@@ -133,13 +130,13 @@ fn aabb_classification_matches_cpu() {
 
     let boxes: &[(Vec3, Vec3)] = &[
         (Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.5, 0.5, 0.5)), // deep inside
-        (Vec3::new(0.0, 0.0, 500.0), Vec3::new(1.0, 1.0, 1.0)),       // behind near
-        (Vec3::new(0.0, 0.0, -500.0), Vec3::new(1.0, 1.0, 1.0)),      // beyond far
-        (Vec3::new(500.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0)),       // right
-        (Vec3::new(-500.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0)),      // left
-        (Vec3::new(0.0, 500.0, 0.0), Vec3::new(1.0, 1.0, 1.0)),       // above
-        (Vec3::new(0.0, -500.0, 0.0), Vec3::new(1.0, 1.0, 1.0)),      // below
-        (Vec3::new(0.0, 0.0, 0.0), Vec3::new(1000.0, 1000.0, 1000.0)),      // engulfing -> Intersecting
+        (Vec3::new(0.0, 0.0, 500.0), Vec3::new(1.0, 1.0, 1.0)), // behind near
+        (Vec3::new(0.0, 0.0, -500.0), Vec3::new(1.0, 1.0, 1.0)), // beyond far
+        (Vec3::new(500.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0)), // right
+        (Vec3::new(-500.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0)), // left
+        (Vec3::new(0.0, 500.0, 0.0), Vec3::new(1.0, 1.0, 1.0)), // above
+        (Vec3::new(0.0, -500.0, 0.0), Vec3::new(1.0, 1.0, 1.0)), // below
+        (Vec3::new(0.0, 0.0, 0.0), Vec3::new(1000.0, 1000.0, 1000.0)), // engulfing -> Intersecting
     ];
     let input: Vec<[[f32; 4]; 2]> = boxes
         .iter()

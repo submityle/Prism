@@ -14,9 +14,9 @@
 //! inverse. The suite skips gracefully when no adapter is available.
 
 use prism_math::spatial::{morton_decode2, morton_decode3, morton_encode2, morton_encode3};
+use prism_math_gpu::morton::{MAX_COORD_2D, MAX_COORD_3D};
 use prism_math_gpu::GpuContext;
 use prism_math_gpu::GpuMorton;
-use prism_math_gpu::morton::{MAX_COORD_2D, MAX_COORD_3D};
 
 /// Acquires a device, or prints a skip note and returns `None` on hosts without
 /// a usable adapter.
@@ -131,8 +131,11 @@ fn decode3_inverts_encode3() {
     };
     let kernel = GpuMorton::new(&ctx);
 
-    let mut coords: Vec<[u32; 3]> =
-        vec![[0, 0, 0], [MAX_COORD_3D, MAX_COORD_3D, MAX_COORD_3D], [5, 9, 13]];
+    let mut coords: Vec<[u32; 3]> = vec![
+        [0, 0, 0],
+        [MAX_COORD_3D, MAX_COORD_3D, MAX_COORD_3D],
+        [5, 9, 13],
+    ];
     let mut seed = 0xdead_beefu32;
     for _ in 0..200 {
         coords.push([

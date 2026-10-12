@@ -61,7 +61,7 @@ struct Frustum { planes: array<vec4<f32>, 6>, count: u32 };\n\
 @compute @workgroup_size(64)\n\
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     let i = gid.x;\n\
-    if (i >= fr.count) { return; }\n\
+    if (i >= fr.count || i >= arrayLength(&spheres) || i >= arrayLength(&result)) { return; }\n\
     let s = spheres[i];\n\
     result[i] = prism_frustum_classify_sphere(fr.planes, s.xyz, s.w);\n\
 }\n";
@@ -77,7 +77,7 @@ struct AabbIn { center: vec4<f32>, extent: vec4<f32> };\n\
 @compute @workgroup_size(64)\n\
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     let i = gid.x;\n\
-    if (i >= fr.count) { return; }\n\
+    if (i >= fr.count || i >= arrayLength(&boxes) || i >= arrayLength(&result)) { return; }\n\
     let b = boxes[i];\n\
     result[i] = prism_frustum_classify_aabb(fr.planes, b.center.xyz, b.extent.xyz);\n\
 }\n";
@@ -210,7 +210,7 @@ impl GpuFrustumCull {
             "prism_math_frustum_cull_params",
             &FrustumParams {
                 planes: *planes,
-                count: n as u32,
+                count: crate::dispatch::checked_count(n),
                 _pad: [0; 3],
             },
         );
@@ -261,7 +261,7 @@ fn dispatch(
     bind_group: &BindGroup,
     n: usize,
 ) {
-    let groups = (n as u32).div_ceil(WORKGROUP);
+    let groups = crate::dispatch::checked_workgroup_count(n, WORKGROUP);
     let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
         label: Some("prism_math_frustum_cull_pass"),
         timestamp_writes: None,

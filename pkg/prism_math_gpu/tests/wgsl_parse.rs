@@ -120,3 +120,84 @@ fn every_fragment_parses_on_the_pinned_naga() {
         }
     }
 }
+
+#[test]
+fn batch_dispatch_regressions_remain_guarded() {
+    // These wrappers read and write storage arrays directly. Keep both sides
+    // of the guard: the host normally allocates matching buffers, but a
+    // mismatched binding must fail closed instead of becoming an out-of-range
+    // shader access.
+    for (module, names) in [
+        ("affine", ["src", "dst"]),
+        ("mat4", ["src", "dst"]),
+        ("octahedral", ["src", "dst"]),
+        ("sphere", ["src", "dst"]),
+        ("frustum_cull", ["spheres", "result"]),
+    ] {
+        let source = match module {
+            "affine" => include_str!("../src/affine/mod.rs"),
+            "mat4" => include_str!("../src/mat4/mod.rs"),
+            "octahedral" => include_str!("../src/octahedral/mod.rs"),
+            "sphere" => include_str!("../src/sphere/mod.rs"),
+            "frustum_cull" => include_str!("../src/frustum_cull/mod.rs"),
+            _ => unreachable!(),
+        };
+        for name in names {
+            assert!(
+                source.contains(&format!("arrayLength(&{name})")),
+                "{module} wrapper lost its {name} storage-length guard"
+            );
+        }
+    }
+
+    let frustum = include_str!("../src/frustum_cull/mod.rs");
+    assert!(frustum.contains("planes: [[f32; 4]; 6],\n    count: u32,\n    _pad: [u32; 3]"));
+
+    // Every standard batch dispatch must use the checked host conversion;
+    // this catches a future reintroduction of silent usize -> u32 wrapping.
+    for source in [
+        include_str!("../src/affine/mod.rs"),
+        include_str!("../src/aabb_ops/mod.rs"),
+        include_str!("../src/dual/mod.rs"),
+        include_str!("../src/dual_quat_alg/mod.rs"),
+        include_str!("../src/easing/mod.rs"),
+        include_str!("../src/f16/mod.rs"),
+        include_str!("../src/fractal/mod.rs"),
+        include_str!("../src/frustum_cull/mod.rs"),
+        include_str!("../src/hilbert/mod.rs"),
+        include_str!("../src/hsl/mod.rs"),
+        include_str!("../src/i16f16/mod.rs"),
+        include_str!("../src/interval/mod.rs"),
+        include_str!("../src/mat4/mod.rs"),
+        include_str!("../src/morton/mod.rs"),
+        include_str!("../src/octahedral/mod.rs"),
+        include_str!("../src/oklab/mod.rs"),
+        include_str!("../src/overlap/mod.rs"),
+        include_str!("../src/pack16/mod.rs"),
+        include_str!("../src/pack8/mod.rs"),
+        include_str!("../src/pcg/mod.rs"),
+        include_str!("../src/perlin/mod.rs"),
+        include_str!("../src/plane/mod.rs"),
+        include_str!("../src/quat/mod.rs"),
+        include_str!("../src/quat_alg/mod.rs"),
+        include_str!("../src/quat_interp/mod.rs"),
+        include_str!("../src/raycast/mod.rs"),
+        include_str!("../src/raytri/mod.rs"),
+        include_str!("../src/rng64/mod.rs"),
+        include_str!("../src/segment/mod.rs"),
+        include_str!("../src/sh_batch/mod.rs"),
+        include_str!("../src/sh_cosine/mod.rs"),
+        include_str!("../src/simplex/mod.rs"),
+        include_str!("../src/sphere/mod.rs"),
+        include_str!("../src/spline/mod.rs"),
+        include_str!("../src/srgb/mod.rs"),
+        include_str!("../src/surface/mod.rs"),
+        include_str!("../src/temperature/mod.rs"),
+        include_str!("../src/xyz/mod.rs"),
+    ] {
+        assert!(
+            source.contains("crate::dispatch::checked_workgroup_count"),
+            "batch module lost checked workgroup dispatch"
+        );
+    }
+}

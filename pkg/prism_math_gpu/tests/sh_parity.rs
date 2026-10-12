@@ -48,7 +48,9 @@ fn assert_close(cpu: f32, gpu: f32, dir: Vec3) {
     assert!(
         close(cpu, gpu),
         "sh3 eval drifted at dir=({}, {}, {}): cpu={cpu} gpu={gpu}",
-        dir.x, dir.y, dir.z,
+        dir.x,
+        dir.y,
+        dir.z,
     );
 }
 

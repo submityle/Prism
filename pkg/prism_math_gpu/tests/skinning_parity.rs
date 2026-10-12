@@ -55,7 +55,12 @@ fn assert_vec_close(cpu: Vec3, gpu: Vec3) {
     assert!(
         close(cpu.x, gpu.x) && close(cpu.y, gpu.y) && close(cpu.z, gpu.z),
         "skinned point drifted: cpu=({}, {}, {}) gpu=({}, {}, {})",
-        cpu.x, cpu.y, cpu.z, gpu.x, gpu.y, gpu.z,
+        cpu.x,
+        cpu.y,
+        cpu.z,
+        gpu.x,
+        gpu.y,
+        gpu.z,
     );
 }
 
@@ -78,11 +83,18 @@ fn single_bone_matches_cpu_reference() {
     };
     let kernel = GpuDualQuatSkin::new(&ctx);
     let influences = [Influence {
-        transform: dq(Vec3::new(0.0, 1.0, 0.0), FRAC_PI_3, Vec3::new(2.0, -1.0, 3.0)),
+        transform: dq(
+            Vec3::new(0.0, 1.0, 0.0),
+            FRAC_PI_3,
+            Vec3::new(2.0, -1.0, 3.0),
+        ),
         weight: 1.0,
     }];
     let p = Vec3::new(1.0, 2.0, -0.5);
-    assert_vec_close(cpu_skin(&influences, p), kernel.skin_point(&ctx, &influences, p));
+    assert_vec_close(
+        cpu_skin(&influences, p),
+        kernel.skin_point(&ctx, &influences, p),
+    );
 }
 
 #[test]
@@ -93,16 +105,27 @@ fn two_bone_blend_matches_cpu_reference() {
     let kernel = GpuDualQuatSkin::new(&ctx);
     let influences = [
         Influence {
-            transform: dq(Vec3::new(0.0, 1.0, 0.0), FRAC_PI_4, Vec3::new(1.0, 0.0, 0.0)),
+            transform: dq(
+                Vec3::new(0.0, 1.0, 0.0),
+                FRAC_PI_4,
+                Vec3::new(1.0, 0.0, 0.0),
+            ),
             weight: 0.6,
         },
         Influence {
-            transform: dq(Vec3::new(1.0, 0.0, 0.0), -FRAC_PI_3, Vec3::new(0.0, 2.0, -1.0)),
+            transform: dq(
+                Vec3::new(1.0, 0.0, 0.0),
+                -FRAC_PI_3,
+                Vec3::new(0.0, 2.0, -1.0),
+            ),
             weight: 0.4,
         },
     ];
     let p = Vec3::new(0.5, 1.5, 2.0);
-    assert_vec_close(cpu_skin(&influences, p), kernel.skin_point(&ctx, &influences, p));
+    assert_vec_close(
+        cpu_skin(&influences, p),
+        kernel.skin_point(&ctx, &influences, p),
+    );
 }
 
 #[test]
@@ -113,24 +136,43 @@ fn four_bone_blend_matches_cpu_reference() {
     let kernel = GpuDualQuatSkin::new(&ctx);
     let influences = [
         Influence {
-            transform: dq(Vec3::new(0.0, 1.0, 0.0), FRAC_PI_4, Vec3::new(1.0, 0.0, 0.0)),
+            transform: dq(
+                Vec3::new(0.0, 1.0, 0.0),
+                FRAC_PI_4,
+                Vec3::new(1.0, 0.0, 0.0),
+            ),
             weight: 0.4,
         },
         Influence {
-            transform: dq(Vec3::new(1.0, 0.0, 0.0), FRAC_PI_3, Vec3::new(0.0, 1.0, 0.0)),
+            transform: dq(
+                Vec3::new(1.0, 0.0, 0.0),
+                FRAC_PI_3,
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
             weight: 0.3,
         },
         Influence {
-            transform: dq(Vec3::new(0.0, 0.0, 1.0), -FRAC_PI_4, Vec3::new(0.0, 0.0, 1.0)),
+            transform: dq(
+                Vec3::new(0.0, 0.0, 1.0),
+                -FRAC_PI_4,
+                Vec3::new(0.0, 0.0, 1.0),
+            ),
             weight: 0.2,
         },
         Influence {
-            transform: dq(Vec3::new(1.0, 1.0, 0.0), FRAC_PI_3, Vec3::new(-1.0, 1.0, 0.5)),
+            transform: dq(
+                Vec3::new(1.0, 1.0, 0.0),
+                FRAC_PI_3,
+                Vec3::new(-1.0, 1.0, 0.5),
+            ),
             weight: 0.1,
         },
     ];
     let p = Vec3::new(2.0, -1.0, 0.5);
-    assert_vec_close(cpu_skin(&influences, p), kernel.skin_point(&ctx, &influences, p));
+    assert_vec_close(
+        cpu_skin(&influences, p),
+        kernel.skin_point(&ctx, &influences, p),
+    );
 }
 
 #[test]
@@ -141,7 +183,11 @@ fn opposite_hemisphere_blend_matches_cpu_reference() {
     let kernel = GpuDualQuatSkin::new(&ctx);
     // Second bone deliberately in the opposite hemisphere (negated) so the
     // pivot-flip path is exercised on both sides.
-    let base = dq(Vec3::new(0.0, 1.0, 0.0), FRAC_PI_3, Vec3::new(1.0, 0.0, 0.0));
+    let base = dq(
+        Vec3::new(0.0, 1.0, 0.0),
+        FRAC_PI_3,
+        Vec3::new(1.0, 0.0, 0.0),
+    );
     let influences = [
         Influence {
             transform: base,
@@ -153,5 +199,8 @@ fn opposite_hemisphere_blend_matches_cpu_reference() {
         },
     ];
     let p = Vec3::new(1.0, 1.0, 1.0);
-    assert_vec_close(cpu_skin(&influences, p), kernel.skin_point(&ctx, &influences, p));
+    assert_vec_close(
+        cpu_skin(&influences, p),
+        kernel.skin_point(&ctx, &influences, p),
+    );
 }

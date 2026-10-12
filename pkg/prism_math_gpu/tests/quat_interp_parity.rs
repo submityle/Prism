@@ -49,10 +49,7 @@ fn assert_quat_close(gpu: Quat, cpu: Quat, tag: &str) {
         gpu
     };
     assert!(
-        close(gpu.x, cpu.x)
-            && close(gpu.y, cpu.y)
-            && close(gpu.z, cpu.z)
-            && close(gpu.w, cpu.w),
+        close(gpu.x, cpu.x) && close(gpu.y, cpu.y) && close(gpu.z, cpu.z) && close(gpu.w, cpu.w),
         "{tag}: quat mismatch gpu=({},{},{},{}) cpu=({},{},{},{})",
         gpu.x,
         gpu.y,

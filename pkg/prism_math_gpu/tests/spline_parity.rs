@@ -10,8 +10,8 @@
 //! tolerance that rejects operand-order/layout drift while tolerating last-ULP
 //! fast-math rounding. The suite skips gracefully when no adapter is available.
 
-use prism_math::Vec3;
 use prism_math::curve::spline;
+use prism_math::Vec3;
 use prism_math_gpu::{GpuContext, GpuSpline, Spline, SplineSample};
 
 /// Acquires a device, or prints a skip note and returns `None` on hosts without
