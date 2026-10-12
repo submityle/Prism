@@ -49,6 +49,48 @@ pub fn point_in_polygon(verts: &[(f32, f32)], p: (f32, f32)) -> bool {
     inside
 }
 
+/// The signed winding number of the closed polygon `verts` around `p`.
+///
+/// Counts how many times the ring wraps `p` counter-clockwise (negative for a
+/// clockwise ring), so — unlike [`point_in_polygon`] — both the winding
+/// *direction* and self-overlap matter. `verts` is treated as implicitly closed
+/// and fewer than three vertices return `0`. Points exactly on an edge are an
+/// unspecified boundary case, matching [`point_in_polygon`].
+#[must_use]
+pub fn winding_number(verts: &[(f32, f32)], p: (f32, f32)) -> i32 {
+    let n = verts.len();
+    if n < 3 {
+        return 0;
+    }
+    let (x, y) = p;
+    let mut wn = 0_i32;
+    for (i, &(ax, ay)) in verts.iter().enumerate() {
+        let (bx, by) = verts[(i + 1) % n];
+        // `> 0` means `p` is left of the directed edge `a -> b`.
+        let is_left = (bx - ax) * (y - ay) - (x - ax) * (by - ay);
+        if ay <= y {
+            if by > y && is_left > 0.0 {
+                wn += 1;
+            }
+        } else if by <= y && is_left < 0.0 {
+            wn -= 1;
+        }
+    }
+    wn
+}
+
+/// The **non-zero** fill rule: `true` when [`winding_number`] around `p` is not
+/// zero.
+///
+/// This is the alternative to the even-odd rule [`point_in_polygon`] implements;
+/// the two agree for simple (non-self-intersecting) polygons and differ only for
+/// rings that overlap themselves (a pentagram, for example, fills its center
+/// under non-zero but not under even-odd).
+#[must_use]
+pub fn point_in_polygon_nonzero(verts: &[(f32, f32)], p: (f32, f32)) -> bool {
+    winding_number(verts, p) != 0
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -253,5 +295,49 @@ mod tests {
             let c = crate::centroid(&poly).unwrap();
             assert!(point_in_polygon(&poly, c), "centroid {c:?} not inside");
         }
+    }
+
+    /// A centered regular `n`-gon in CCW order (f64 trig, cast to `f32`).
+    fn regular_polygon(n: usize, radius: f32) -> Vec<(f32, f32)> {
+        let r = f64::from(radius);
+        (0..n)
+            .map(|k| {
+                let a = core::f64::consts::TAU * (k as f64) / (n as f64);
+                ((r * a.cos()) as f32, (r * a.sin()) as f32)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn winding_sign_flips_with_orientation() {
+        let ccw = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)];
+        let mut cw = ccw.to_vec();
+        cw.reverse();
+        assert_eq!(winding_number(&ccw, (1.0, 1.0)), 1);
+        assert_eq!(winding_number(&cw, (1.0, 1.0)), -1);
+        // Winding is zero outside the ring.
+        assert_eq!(winding_number(&ccw, (5.0, 5.0)), 0);
+    }
+
+    #[test]
+    fn nonzero_fill_differs_from_even_odd_on_a_pentagram() {
+        // A pentagram (pentagon traced 0,2,4,1,3) wraps its center twice.
+        let pentagon = regular_polygon(5, 10.0);
+        let star = [
+            pentagon[0],
+            pentagon[2],
+            pentagon[4],
+            pentagon[1],
+            pentagon[3],
+        ];
+        let center = (0.0, 0.0);
+        assert_eq!(winding_number(&star, center).abs(), 2);
+        // Even-odd excludes the twice-wrapped center; non-zero includes it.
+        assert!(!point_in_polygon(&star, center));
+        assert!(point_in_polygon_nonzero(&star, center));
+        // Well outside the star both rules agree it is out.
+        let outside = (100.0, 100.0);
+        assert_eq!(winding_number(&star, outside), 0);
+        assert!(!point_in_polygon_nonzero(&star, outside));
     }
 }

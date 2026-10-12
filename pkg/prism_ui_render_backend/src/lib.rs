@@ -111,7 +111,7 @@ pub use ellipse::flatten_ellipse;
 pub use gpu::GpuRasterizer;
 pub use gradient::{ConicGradient, LinearGradient, RadialGradient, Stop};
 pub use hull::convex_hull;
-pub use inside::point_in_polygon;
+pub use inside::{point_in_polygon, point_in_polygon_nonzero, winding_number};
 pub use layer::{Layer, LayerTree};
 pub use line_raster::{raster_line, raster_polyline};
 pub use measure::{area, centroid, signed_area};

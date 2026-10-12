@@ -398,7 +398,7 @@ pub trait LayoutProtocol {
 > **实现状态(✅ `prism_ui_render_backend` — CPU 参考后端)**:SDF 圆角/边框/阴影(纯 f32,无超越函数,确定性)、
 > `RetainedScene` 吸收 `BackendOp` 增量并按需 lower 为绝对坐标 `DrawList`(成本 ∝ 变更)、同类命令合批实例化、
 > `Push/PopLayer` 分层合成(乘性不透明度折叠)、无头 CPU 栅格器(linear RGBA)均落地,后者作为 GPU 后端的
-> **金色孪生**。此外 crate 内沉淀了一套**后端无关的 2D 几何工具链**(一模块一关注点):凸包、多边形裁剪、严格三角化、SDF 多边形、开折线 SDF、线段求交/矩形裁剪、Minkowski 和、最近点、OBB、卡尺宽度、三次贝塞尔(flatten/弧长/匀速采样)、圆弧与椭圆 flatten、折线(弧长/等距重采样/切线/子段/虚线)、凸多边形偏移、简单性(自交)判定、线性/径向/锥形渐变、九宫格切分、折线栅格——纯 `f32`、无超越函数、no_std。**268 lib + 2 集成 + 10 doctest** 全绿,clippy `-D warnings` 干净。wgpu/Metal GPU 后端(`gpu` feature,WGSL SDF 镜像 + 回读 parity 对拍,参照 `prism_physics_gpu`
+> **金色孪生**。此外 crate 内沉淀了一套**后端无关的 2D 几何工具链**(一模块一关注点):凸包、多边形裁剪、严格三角化、SDF 多边形、开折线 SDF、线段求交/矩形裁剪、Minkowski 和、最近点、OBB、卡尺宽度、三次贝塞尔(flatten/弧长/匀速采样)、圆弧与椭圆 flatten、折线(弧长/等距重采样/切线/子段/虚线)、凸多边形偏移、简单性(自交)判定、环绕数(非零填充规则)、线性/径向/锥形渐变、九宫格切分、折线栅格——纯 `f32`、无超越函数、no_std。**270 lib + 2 集成 + 10 doctest** 全绿,clippy `-D warnings` 干净。wgpu/Metal GPU 后端(`gpu` feature,WGSL SDF 镜像 + 回读 parity 对拍,参照 `prism_physics_gpu`
 > 的 CPU 孪生模式)**已交付并通过真机 parity**:Apple M2 Metal 上 solid / rounded+border / shadow /
 > overlap / layered-opacity / empty 六用例 **6/6 全绿**(容差 `TOL=2e-3`,span 外 coverage=0 等价推理);
 > 对齐 wgpu 30 API(`Instance` 按值 + `display: None`、`PipelineLayout` 用 `immediate_size`)。
@@ -519,7 +519,7 @@ pub trait LayoutProtocol {
 |---|---|---|---|---|
 | `prism_ui_text` | 分词/字素/UAX#14 换行/富文本/可插拔整形(swash 可选)/光标/BiDi 最小子集/整形缓存 | §9.6 | ✅ 已交付 | 51(shaping 53) |
 | `prism_ui_input` | 裁剪命中测试/三阶段事件分发/Flutter 式手势竞技场/焦点环 | §9.7 | ✅ 已交付 | 37 |
-| `prism_ui_render_backend` | SDF 圆角/边框/阴影、保留场景 lower、合批实例化、分层合成、无头 CPU 参考栅格器 + wgpu/Metal GPU 后端(真机 parity);外加后端无关 2D 几何工具链(凸包/裁剪/严格三角化/线段/开折线 SDF/折线弧长·采样·切线·虚线/贝塞尔弧长·匀速/凸偏移/简单性/线性·径向·锥形渐变/九宫格) | §9.8 | ✅ 已交付 | 268 lib + 2 集成 + 10 doc(+GPU parity 6) |
+| `prism_ui_render_backend` | SDF 圆角/边框/阴影、保留场景 lower、合批实例化、分层合成、无头 CPU 参考栅格器 + wgpu/Metal GPU 后端(真机 parity);外加后端无关 2D 几何工具链(凸包/裁剪/严格三角化/线段/开折线 SDF/折线弧长·采样·切线·虚线/贝塞尔弧长·匀速/凸偏移/简单性/环绕数/线性·径向·锥形渐变/九宫格) | §9.8 | ✅ 已交付 | 270 lib + 2 集成 + 10 doc(+GPU parity 6) |
 | `prism_ui_scheduler` | 优先级车道(6 级)/帧预算时间切片/可抢占协调/可见性→车道映射/窗口化增量协调(对标 React Fiber) | §9.5 | ✅ 已交付 | 7(+1doc) |
 | `prism_ui_sdui` | 零信任 schema/能力白名单/沙箱净化/版本协商/解码,全程 no-panic | §9.10 | ✅ 已交付 | 43 |
 | `prism_ui_theme` | 令牌编译/语义令牌/Signal 驱动动态主题/环检测/RTL 逻辑属性 | §9.12 | ✅ 已交付 | 54 |
