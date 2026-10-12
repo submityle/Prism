@@ -105,6 +105,12 @@ pub struct Lobe {
     pub vendor: String,
     /// Mutable stability level (§5.4 promotion flips mutable fields only).
     pub stability: Stability,
+    /// Platform capabilities this lobe needs beyond the shared über path
+    /// (§5.3): e.g. `object_space_cache`, `virtual_texturing`, `compute_scatter`.
+    /// Empty means "runs on the baseline über path". The capability negotiator
+    /// checks the union of these for a material's **required** extensions.
+    #[serde(default)]
+    pub requires_caps: Vec<String>,
     /// Number of `u32` words the lobe occupies. Lobes are **variable length**
     /// (§4.4): the pack cursor advances by each present lobe's own `words`, and
     /// the codegen emits a per-lobe footprint (`SURFACE_LOBE_WORDS_BY_SLOT` /
@@ -246,17 +252,32 @@ impl Namespace {
 }
 
 /// Stability level of a capability (§5.4).
+///
+/// The three levels are exactly the ones the PCM registry speaks
+/// (`prism_material_pcm::Stability`): the schema and the registry must not
+/// drift into two vocabularies for the same governance axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stability {
+    /// Under active design; layout or response may still change.
+    Experimental,
+    /// Layout frozen, response settling; a promotion candidate.
+    Candidate,
     /// Frozen; covered by compliance parity.
     Stable,
-    /// Usable but may change before stabilization.
-    Experimental,
-    /// Early draft, no compatibility promise.
-    Draft,
-    /// Superseded; retained only for bit-region stability.
-    Deprecated,
+}
+
+impl Stability {
+    /// The schema spelling, emitted verbatim by codegen and parsed back by the
+    /// PCM registry.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Experimental => "experimental",
+            Self::Candidate => "candidate",
+            Self::Stable => "stable",
+        }
+    }
 }
 
 /// Which `SpecializationId` subfield a field contributes to (§8.1).

@@ -222,6 +222,9 @@ mask_const = "EMISSION"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
+# Platform capabilities this lobe needs beyond the shared über path (§5.3).
+# Empty today: every registered lobe is pure ALU + the standard bindings.
+requires_caps = []
 words = 8
 
 [[lobe.field]]
@@ -286,6 +289,9 @@ mask_const = "CLEARCOAT"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
+# Platform capabilities this lobe needs beyond the shared über path (§5.3).
+# Empty today: every registered lobe is pure ALU + the standard bindings.
+requires_caps = []
 words = 16
 
 [[lobe.field]]
@@ -431,6 +437,9 @@ mask_const = "ANISOTROPY"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
+# Platform capabilities this lobe needs beyond the shared über path (§5.3).
+# Empty today: every registered lobe is pure ALU + the standard bindings.
+requires_caps = []
 words = 4
 
 [[lobe.field]]
@@ -487,6 +496,9 @@ mask_const = "SHEEN"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
+# Platform capabilities this lobe needs beyond the shared über path (§5.3).
+# Empty today: every registered lobe is pure ALU + the standard bindings.
+requires_caps = []
 words = 8
 
 [[lobe.field]]
@@ -553,6 +565,9 @@ mask_const = "SUBSURFACE"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
+# Platform capabilities this lobe needs beyond the shared über path (§5.3).
+# Empty today: every registered lobe is pure ALU + the standard bindings.
+requires_caps = []
 words = 16
 
 [[lobe.field]]
@@ -672,6 +687,9 @@ mask_const = "TRANSMISSION"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
+# Platform capabilities this lobe needs beyond the shared über path (§5.3).
+# Empty today: every registered lobe is pure ALU + the standard bindings.
+requires_caps = []
 words = 16
 
 [[lobe.field]]
@@ -808,6 +826,9 @@ mask_const = "THIN_FILM"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
+# Platform capabilities this lobe needs beyond the shared über path (§5.3).
+# Empty today: every registered lobe is pure ALU + the standard bindings.
+requires_caps = []
 words = 4
 
 [[lobe.field]]
@@ -866,6 +887,9 @@ mask_const = "NPR_FACE"
 namespace = "PRISM"
 vendor = "prism"
 stability = "experimental"
+# Platform capabilities this lobe needs beyond the shared über path (§5.3).
+# Empty today: every registered lobe is pure ALU + the standard bindings.
+requires_caps = []
 words = 4
 
 [[lobe.field]]

@@ -848,7 +848,7 @@ mod tests {
     fn principled_header() -> GpuMaterialHeader {
         let mut header = fallback_material_header(1);
         header.generation = 4;
-        header.active = 1;
+        header.is_active = 1;
         header.render_class = MaterialRenderClass::Opaque as u32;
         header.illumination = Illumination::Lit as u32;
         header

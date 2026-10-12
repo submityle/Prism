@@ -8,6 +8,7 @@ mod authoring;
 mod axis;
 #[cfg(feature = "bevy")]
 mod bevy_bridge;
+pub mod capability;
 mod handle;
 mod ir;
 mod normal_map;
@@ -57,6 +58,9 @@ pub use normal_map::{
     tangent_to_object, toksvig_factor, toksvig_roughness, triplanar_weights, unorm_to_snorm,
     variance_to_ggx_alpha, HeightGradient, LeanMoments, NormalLayer, SlopeEigen, TangentBasis,
 };
+pub use openpbr::{
+    openpbr_conformance, project_to_openpbr, DroppedLobe, OpenPbrConformance, OpenPbrProjection,
+};
 pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header,
     GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain,
@@ -69,9 +73,6 @@ pub use surface::{
     GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe, GpuSheenLobe, GpuSubsurfaceLobe,
     GpuSurfaceCore, GpuTransmissionLobe, LobeMask, LobeRegion, SurfaceParameterBlock,
     SurfaceUnpackError, SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
-};
-pub use openpbr::{
-    openpbr_conformance, project_to_openpbr, DroppedLobe, OpenPbrConformance, OpenPbrProjection,
 };
 pub use surface_layout::{
     LobeLayout, SURFACE_LOBES, SURFACE_LOBE_COUNT, SURFACE_LOBE_WORDS_BY_SLOT, SURFACE_MAX_WORDS,

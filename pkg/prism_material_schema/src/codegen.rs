@@ -453,6 +453,13 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     o.push_str("    /// `\"KHR\"` is the `OpenPBR` specification core; every other value\n");
     o.push_str("    /// lives in the Prism extension region (§4.5 constraint 2).\n");
     o.push_str("    pub namespace: &'static str,\n");
+    o.push_str("    /// Stability level (schema `stability`): `\"stable\"` means the engine\n");
+    o.push_str("    /// treats the extension as a contract (required when present),\n");
+    o.push_str("    /// `\"experimental\"` means optional / gracefully degradable (§5.3).\n");
+    o.push_str("    pub stability: &'static str,\n");
+    o.push_str("    /// Platform capabilities this lobe needs beyond the shared über path\n");
+    o.push_str("    /// (§5.3). Empty means \"runs on the baseline über path\".\n");
+    o.push_str("    pub requires_caps: &'static [&'static str],\n");
     o.push_str("}\n\n");
     o.push_str("/// The defined lobes in canonical low-bit-first pack order.\n");
     o.push_str("///\n");
@@ -473,6 +480,13 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         let _ = writeln!(o, "        registry_slot: {},", lobe.registry_slot);
         let _ = writeln!(o, "        words: {},", lobe.words);
         let _ = writeln!(o, "        namespace: {:?},", lobe.namespace.as_str());
+        let caps: Vec<String> = lobe
+            .requires_caps
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect();
+        let _ = writeln!(o, "        stability: {:?},", lobe.stability.as_str());
+        let _ = writeln!(o, "        requires_caps: &[{}],", caps.join(", "));
         o.push_str("    },\n");
     }
     o.push_str("];\n");
@@ -561,8 +575,8 @@ mod tests {
             "pub const SURFACE_LOBE_COUNT: u32 = 8;",
             "pub const SURFACE_MAX_WORDS: usize = 96;",
             "pub const SURFACE_LOBES: [LobeLayout; 8] = [",
-            "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 8,\n        namespace: \"KHR\",\n    },",
-            "    LobeLayout {\n        id: \"npr_face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"NPR_FACE\",\n        registry_slot: 16,\n        words: 4,\n        namespace: \"PRISM\",\n    },",
+            "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 8,\n        namespace: \"KHR\",\n        stability: \"stable\",\n        requires_caps: &[],\n    },",
+            "    LobeLayout {\n        id: \"npr_face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"NPR_FACE\",\n        registry_slot: 16,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n    },",
         ] {
             assert!(rust.contains(needle), "generated Rust missing `{needle}`");
         }

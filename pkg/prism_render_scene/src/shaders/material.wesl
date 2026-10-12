@@ -19,6 +19,13 @@ struct PrismMaterialHeader {
     specialization_low: u32,
     specialization_high: u32,
     lobe_mask: u32,
+    // PCM extension digest (§5.3): `used` and `required`, each split low/high
+    // so all 64 registry slots are addressable. Mirrors
+    // `GpuMaterialHeader::extensions_{used,required}_{low,high}`.
+    extensions_used_low: u32,
+    extensions_used_high: u32,
+    extensions_required_low: u32,
+    extensions_required_high: u32,
 }
 
 struct PrismSurfaceParameters {

@@ -7,8 +7,8 @@ use crate::builtin::{
     UID_CHANNEL_WETNESS, UID_LOBE_CLEARCOAT, UID_LOBE_FACE,
 };
 use crate::namespace::Region;
-use crate::registry::is_specification_region;
 use crate::negotiate::negotiate;
+use crate::registry::is_specification_region;
 use crate::{
     Capability, CapabilitySet, ExtensionRegistry, ExtensionSet, Kind, Namespace, RegistryError,
     Stability, HEADER_DIGEST_SLOTS,
@@ -148,12 +148,7 @@ fn promotion_flips_attribution_and_keeps_identity_bits() {
         .expect("face lobe")
         .to_owned();
     let promoted = registry
-        .promote(
-            UID_LOBE_FACE,
-            Namespace::Khr,
-            "prism",
-            Stability::Stable,
-        )
+        .promote(UID_LOBE_FACE, Namespace::Khr, "prism", Stability::Stable)
         .expect("PRISM -> KHR is on the promotion chain");
 
     // Identity is pinned: uid, slot and origin region never move.
@@ -164,7 +159,11 @@ fn promotion_flips_attribution_and_keeps_identity_bits() {
     // Attribution flipped.
     assert_eq!(promoted.namespace(), Namespace::Khr);
     assert_eq!(promoted.stability(), Stability::Stable);
-    assert_eq!(promoted.id().as_str(), "KHR_lobe_face");
+    // The display id is derived from the uid's semantic segment. The lobe's uid
+    // is pinned to its original spelling (`studio.prism.face_shadow`) because
+    // identity is not rewritten by a rename, so the derived name follows the
+    // uid, not the schema's human-facing `id`.
+    assert_eq!(promoted.id().as_str(), "KHR_lobe_face_shadow");
     // The registry now agrees, and no cross-reference broke.
     assert_eq!(registry.slot_of_uid(UID_LOBE_FACE), Some(16));
     assert!(registry.is_registered(16));
@@ -190,7 +189,12 @@ fn illegal_and_regressing_promotions_are_rejected() {
     assert!(matches!(error, RegistryError::Manifest(_)));
     // A KHR item may not demote.
     let error = registry
-        .promote(UID_LOBE_CLEARCOAT, Namespace::Prism, "prism", Stability::Stable)
+        .promote(
+            UID_LOBE_CLEARCOAT,
+            Namespace::Prism,
+            "prism",
+            Stability::Stable,
+        )
         .expect_err("KHR never demotes");
     assert!(matches!(error, RegistryError::Manifest(_)));
     assert!(registry
@@ -207,13 +211,18 @@ fn manifest_predicates_reject_region_and_capability_violations() {
     assert!(misplaced.validate().is_err());
 
     // A specification-core item may not require a platform capability.
-    let core_needs_caps = ExtensionManifest::new("org.khronos.openpbr.glint", 7, Namespace::Khr, Kind::Lobe)
-        .with_requires_caps(CapabilitySet::of(Capability::HeavySampling));
+    let core_needs_caps =
+        ExtensionManifest::new("org.khronos.openpbr.glint", 7, Namespace::Khr, Kind::Lobe)
+            .with_requires_caps(CapabilitySet::of(Capability::HeavySampling));
     assert!(core_needs_caps.validate().is_err());
 
     // A slot outside the fixed-width digest is rejected explicitly.
-    let out_of_digest =
-        ExtensionManifest::new("org.prism.lobe.far", HEADER_DIGEST_SLOTS, Namespace::Prism, Kind::Lobe);
+    let out_of_digest = ExtensionManifest::new(
+        "org.prism.lobe.far",
+        HEADER_DIGEST_SLOTS,
+        Namespace::Prism,
+        Kind::Lobe,
+    );
     assert!(out_of_digest.validate().is_err());
 
     // A malformed uid is rejected.
@@ -237,8 +246,7 @@ fn negotiation_errors_on_a_missing_required_capability() {
         error.unsupported[0].uid.as_deref(),
         Some("org.prism.channel.snow")
     );
-    assert!(error
-        .unsupported[0]
+    assert!(error.unsupported[0]
         .missing
         .contains(Capability::VirtualTexture));
     assert_eq!(error.available, weak);
@@ -266,7 +274,10 @@ fn negotiation_gracefully_ignores_an_unsatisfiable_used_only_extension() {
     let kept = negotiation.extensions();
     assert!(kept.contains_used(16));
     assert!(kept.contains_used(19));
-    assert!(!kept.contains_used(18), "the unsatisfiable extension is dropped");
+    assert!(
+        !kept.contains_used(18),
+        "the unsatisfiable extension is dropped"
+    );
     assert!(!kept.contains_required(18));
 }
 

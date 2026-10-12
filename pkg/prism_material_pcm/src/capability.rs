@@ -58,6 +58,18 @@ impl Capability {
             Self::HeavySampling => "heavy_sampling",
         }
     }
+
+    /// Parse the canonical spelling (case-insensitive).
+    ///
+    /// This is how a schema `requires_caps` entry becomes a capability: the
+    /// schema is the single source of truth for *which* names a manifest may
+    /// cite, and a name the crate does not know is a schema bug rather than a
+    /// silently-ignored requirement.
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|capability| capability.as_str().eq_ignore_ascii_case(text))
+    }
 }
 
 impl fmt::Display for Capability {

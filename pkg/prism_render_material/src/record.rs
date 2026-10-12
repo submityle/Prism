@@ -110,7 +110,14 @@ pub struct GpuMaterialHeader {
     pub sampler_offset: u32,
     pub sampler_count: u32,
     pub custom_program: u32,
-    pub active: u32,
+    /// `1` for a live material, `0` for a dormant placeholder.
+    ///
+    /// Spelled `is_active`, not `active`: WGSL reserves `active`, so the
+    /// WESL mirrors (`PrismMaterialHeader` / the standalone `MaterialHeader`)
+    /// are forced to `is_active`, and the ABI's canonical Rust name follows
+    /// suit. `tests/material_header_abi.rs` pins both sides to this exact
+    /// spelling.
+    pub is_active: u32,
     pub material_epoch_low: u32,
     pub material_epoch_high: u32,
     pub closure_graph_offset: u32,
@@ -123,6 +130,31 @@ pub struct GpuMaterialHeader {
     /// (`material_unpack.wesl::prism_unpack_surface`, the byte-exact twin of
     /// [`crate::SurfaceParameterBlock::unpack`]).
     pub lobe_mask: u32,
+    /// PCM extension digest, `used` half, slots `0..32` (§5.3, P1-h).
+    ///
+    /// The non-`KHR` capabilities this material **uses**. Optional capabilities
+    /// a target lacks are gracefully ignored (the material projects to a
+    /// variant without them), exactly like a glTF extension. Derived from
+    /// `lobe_mask` by the namespace of each registered lobe, so it is `0` for a
+    /// pure-`OpenPBR` material.
+    ///
+    /// The digest is four words — `used` and `required`, each split low/high
+    /// ([`prism_material_pcm::HEADER_DIGEST_WORDS`]) — so all 64 registry slots
+    /// are addressable and the header stays a 16-byte multiple.
+    pub extensions_used_low: u32,
+    /// PCM extension digest, `used` half, slots `32..64` (§5.3).
+    pub extensions_used_high: u32,
+    /// PCM extension digest, `required` half, slots `0..32` (§5.3). A target
+    /// whose capability set does not satisfy every entry here is a *load-time
+    /// error* (like a Vulkan required extension), never a silent runtime
+    /// surprise.
+    ///
+    /// Policy: a **stable** extension is part of the engine's contract
+    /// (required when present); an **experimental** one is optional and degrades
+    /// gracefully ([`crate::capability::negotiate_digest`]).
+    pub extensions_required_low: u32,
+    /// PCM extension digest, `required` half, slots `32..64` (§5.3).
+    pub extensions_required_high: u32,
 }
 
 impl GpuMaterialHeader {
@@ -301,7 +333,7 @@ pub fn fallback_material_header(epoch: u64) -> GpuMaterialHeader {
         )
         .packed_size_bytes() as u32,
         custom_program: u32::MAX,
-        active: 1,
+        is_active: 1,
         material_epoch_low: epoch as u32,
         material_epoch_high: (epoch >> 32) as u32,
         specialization_low: spec.low(),
@@ -409,6 +441,7 @@ impl MaterialRecord {
         epoch: u64,
     ) -> GpuMaterialHeader {
         let spec = self.specialization();
+        let digest = crate::capability::digest_for(self.lobe_mask());
         GpuMaterialHeader {
             generation: self.handle.generation,
             revision: self.revision,
@@ -423,13 +456,23 @@ impl MaterialRecord {
             sampler_offset: texture_offset,
             sampler_count: self.textures.len() as u32,
             custom_program: self.custom_program.unwrap_or(u32::MAX),
-            active: 1,
+            is_active: 1,
             material_epoch_low: epoch as u32,
             material_epoch_high: (epoch >> 32) as u32,
             closure_graph_offset,
             specialization_low: spec.low(),
             specialization_high: spec.high(),
             lobe_mask: self.lobe_mask().bits(),
+            // PCM (§5.3): `extensions_used` is the non-`KHR` subset of
+            // `lobe_mask`, `extensions_required` the subset of that the schema
+            // marks `stable`. Both come from the *derivation*, not from a field
+            // an author could set: the catalogue in `capability.rs` is the only
+            // place the policy lives, so a header can never claim an extension
+            // the material does not actually carry.
+            extensions_used_low: digest.used_low(),
+            extensions_used_high: digest.used_high(),
+            extensions_required_low: digest.required_low(),
+            extensions_required_high: digest.required_high(),
         }
     }
 }
@@ -525,7 +568,7 @@ mod tests {
         let value = record(handle, closure_bit(ClosureKind::ClearCoat), 2);
         let epoch = 0x1_0000_0002_u64;
         let header = value.header(64, 128, 256, epoch);
-        assert_eq!(header.active, 1);
+        assert_eq!(header.is_active, 1);
         assert_eq!(header.generation, 7);
         assert_eq!(header.texture_count, 2);
         assert_eq!(header.parameter_offset, 64);
@@ -555,7 +598,7 @@ mod tests {
     fn inactive_header_is_generation_tagged_and_dormant() {
         let header = inactive_material_header(5);
         assert_eq!(header.generation, 5);
-        assert_eq!(header.active, 0);
+        assert_eq!(header.is_active, 0);
         assert_eq!(header.custom_program, u32::MAX);
     }
 
@@ -565,6 +608,6 @@ mod tests {
         let expected =
             SpecializationId::new(Illumination::Lit, 1, MaterialRenderClass::Opaque as u32);
         assert_eq!(header.specialization(), expected);
-        assert_eq!(header.active, 1);
+        assert_eq!(header.is_active, 1);
     }
 }

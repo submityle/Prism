@@ -118,7 +118,7 @@ fn lit_class_from_closures(closure_mask: u32) -> MaterialShadingClass {
 pub fn classify_material_header(
     header: &GpuMaterialHeader,
 ) -> Result<MaterialShadingClass, ClassificationError> {
-    if header.active == 0 {
+    if header.is_active == 0 {
         return Err(ClassificationError::Inactive);
     }
     // Surface-domain blend families only. `Npr*`/`Custom*` no longer exist as

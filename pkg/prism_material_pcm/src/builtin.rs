@@ -43,7 +43,13 @@ pub const UID_LOBE_TRANSMISSION: &str = "org.khronos.openpbr.transmission";
 /// `uid` of the thin-film lobe (`KHR`).
 pub const UID_LOBE_THIN_FILM: &str = "org.khronos.openpbr.thin_film";
 /// `uid` of the stylized SDF face-shadow lobe (`PRISM`).
-pub const UID_LOBE_FACE: &str = "org.prism.lobe.face";
+///
+/// The spelling is the schema's: `studio.prism.face_shadow`. Identity is
+/// `uid`-based and immutable once a material has been serialized, so it keeps
+/// its original spelling even though the human-facing `id` became `npr_face`
+/// (`PRISM_lobe_npr_face`) when the lobe was renamed — see
+/// `prism_material_schema/schema/surface.toml`.
+pub const UID_LOBE_FACE: &str = "studio.prism.face_shadow";
 /// `uid` of the wetness dynamic channel (`PRISM`).
 pub const UID_CHANNEL_WETNESS: &str = "org.prism.channel.wetness";
 /// `uid` of the snow-cover dynamic channel (`PRISM`).
@@ -75,17 +81,24 @@ const KHR_LOBES: [(&str, u32, bool); 7] = [
     (UID_LOBE_THIN_FILM, 6, true),
 ];
 
-/// The Prism-private extensions, with the capability each one needs.
+/// The Prism-private extensions, with the stability and capability each needs.
 ///
 /// A missing capability is *not* a silent fold-in: `snow` without virtual
 /// texturing is gracefully ignored (the material renders dry), `wetness`
 /// without the object-space cache is ignored (the coat renders un-wetted), and
 /// neither ever errors because neither is `required`.
-const PRISM_EXTENSIONS: [(&str, u32, Kind, CapabilitySet, bool); 5] = [
+///
+/// The stability column mirrors the schema: the `npr_face` lobe is
+/// `experimental` (its SDF-atlas provider and direction field are still
+/// landing, §5.5), while the dynamic channels are `candidate` (layout frozen,
+/// response settling). `tests/pcm_parity.rs` in `prism_render_material` asserts
+/// the two catalogues agree row for row, so this column cannot drift.
+const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 5] = [
     (
         UID_LOBE_FACE,
         16,
         Kind::Lobe,
+        Stability::Experimental,
         CapabilitySet::EMPTY,
         true,
     ),
@@ -93,6 +106,7 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, CapabilitySet, bool); 5] = [
         UID_CHANNEL_WETNESS,
         17,
         Kind::Channel,
+        Stability::Candidate,
         CapabilitySet::of(Capability::ObjectSpaceCache),
         false,
     ),
@@ -100,14 +114,23 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, CapabilitySet, bool); 5] = [
         UID_CHANNEL_SNOW,
         18,
         Kind::Channel,
+        Stability::Candidate,
         CapabilitySet::of(Capability::VirtualTexture),
         false,
     ),
-    (UID_CHANNEL_DAMAGE, 19, Kind::Channel, CapabilitySet::EMPTY, false),
+    (
+        UID_CHANNEL_DAMAGE,
+        19,
+        Kind::Channel,
+        Stability::Candidate,
+        CapabilitySet::EMPTY,
+        false,
+    ),
     (
         UID_CHANNEL_DISSOLVE,
         20,
         Kind::Channel,
+        Stability::Candidate,
         CapabilitySet::EMPTY,
         false,
     ),
@@ -135,10 +158,10 @@ pub fn builtin_registry() -> ExtensionRegistry {
             .register(manifest)
             .expect("the built-in KHR lobe catalogue is valid");
     }
-    for (uid, slot, kind, requires_caps, view_dependent) in PRISM_EXTENSIONS {
+    for (uid, slot, kind, stability, requires_caps, view_dependent) in PRISM_EXTENSIONS {
         let manifest = ExtensionManifest::new(uid, slot, Namespace::Prism, kind)
             .with_vendor(VENDOR_PRISM)
-            .with_stability(Stability::Candidate)
+            .with_stability(stability)
             .with_requires_caps(requires_caps)
             .with_view_dependent(view_dependent);
         registry

@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 prism_render_architecture = { path = "../prism_render_architecture" }
+prism_material_pcm = { path = "../prism_material_pcm" }
 bevy_math = { path = "../../crates/bevy_math", version = "0.20.0-dev", default-features = false, features = ["nostd-libm"] }
 
 [features]

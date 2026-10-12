@@ -25,7 +25,8 @@ pub const SURFACE_LOBE_WORDS: usize = 16;
 /// `SURFACE_LOBE_WORDS_BY_SLOT[bit.trailing_zeros()]` is the stride for that
 /// lobe. Summing the present entries plus [`SURFACE_CORE_WORDS`] gives
 /// `SurfaceParameterBlock::packed_len_words`.
-pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 17] = [8, 16, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];
+pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 17] =
+    [8, 16, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];
 /// Number of defined optional lobes (equals `LobeMask::COUNT`).
 pub const SURFACE_LOBE_COUNT: u32 = 8;
 /// Fully-loaded worst case: core plus every lobe. The WESL decoder gathers into
@@ -50,6 +51,13 @@ pub struct LobeLayout {
     /// `"KHR"` is the `OpenPBR` specification core; every other value
     /// lives in the Prism extension region (§4.5 constraint 2).
     pub namespace: &'static str,
+    /// Stability level (schema `stability`): `"stable"` means the engine
+    /// treats the extension as a contract (required when present),
+    /// `"experimental"` means optional / gracefully degradable (§5.3).
+    pub stability: &'static str,
+    /// Platform capabilities this lobe needs beyond the shared über path
+    /// (§5.3). Empty means "runs on the baseline über path".
+    pub requires_caps: &'static [&'static str],
 }
 
 /// The defined lobes in canonical low-bit-first pack order.
@@ -66,6 +74,8 @@ pub const SURFACE_LOBES: [LobeLayout; 8] = [
         registry_slot: 0,
         words: 8,
         namespace: "KHR",
+        stability: "stable",
+        requires_caps: &[],
     },
     LobeLayout {
         id: "clearcoat",
@@ -74,6 +84,8 @@ pub const SURFACE_LOBES: [LobeLayout; 8] = [
         registry_slot: 1,
         words: 16,
         namespace: "KHR",
+        stability: "stable",
+        requires_caps: &[],
     },
     LobeLayout {
         id: "anisotropy",
@@ -82,6 +94,8 @@ pub const SURFACE_LOBES: [LobeLayout; 8] = [
         registry_slot: 2,
         words: 4,
         namespace: "KHR",
+        stability: "stable",
+        requires_caps: &[],
     },
     LobeLayout {
         id: "sheen",
@@ -90,6 +104,8 @@ pub const SURFACE_LOBES: [LobeLayout; 8] = [
         registry_slot: 3,
         words: 8,
         namespace: "KHR",
+        stability: "stable",
+        requires_caps: &[],
     },
     LobeLayout {
         id: "subsurface",
@@ -98,6 +114,8 @@ pub const SURFACE_LOBES: [LobeLayout; 8] = [
         registry_slot: 4,
         words: 16,
         namespace: "KHR",
+        stability: "stable",
+        requires_caps: &[],
     },
     LobeLayout {
         id: "transmission",
@@ -106,6 +124,8 @@ pub const SURFACE_LOBES: [LobeLayout; 8] = [
         registry_slot: 5,
         words: 16,
         namespace: "KHR",
+        stability: "stable",
+        requires_caps: &[],
     },
     LobeLayout {
         id: "thin_film",
@@ -114,6 +134,8 @@ pub const SURFACE_LOBES: [LobeLayout; 8] = [
         registry_slot: 6,
         words: 4,
         namespace: "KHR",
+        stability: "stable",
+        requires_caps: &[],
     },
     LobeLayout {
         id: "npr_face",
@@ -122,5 +144,7 @@ pub const SURFACE_LOBES: [LobeLayout; 8] = [
         registry_slot: 16,
         words: 4,
         namespace: "PRISM",
+        stability: "experimental",
+        requires_caps: &[],
     },
 ];

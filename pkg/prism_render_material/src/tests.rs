@@ -112,8 +112,12 @@ fn graph_normalization_accepts_an_arbitrarily_deep_closure_slab() {
         nodes,
         output: Some(last),
     };
-    let normalized = graph.normalize().expect("a 64-deep layer chain is unbounded");
-    assert!(normalized.features.contains(MaterialFeatureFlags::COMPLEX_CLOSURE));
+    let normalized = graph
+        .normalize()
+        .expect("a 64-deep layer chain is unbounded");
+    assert!(normalized
+        .features
+        .contains(MaterialFeatureFlags::COMPLEX_CLOSURE));
 }
 
 #[cfg(feature = "bevy")]
@@ -228,14 +232,18 @@ fn slot_zero_is_a_live_principled_fallback() {
     let registry = MaterialRegistry::new(8);
     let (headers, parameters, _) = registry.gpu_tables();
     assert_eq!(headers[0].generation, 0);
-    assert_eq!(headers[0].active, 1);
+    assert_eq!(headers[0].is_active, 1);
     assert_eq!(headers[0].illumination, Illumination::Lit as u32);
     assert_eq!(parameters[0], GpuSurfaceParameters::default());
 }
 
 #[test]
 fn gpu_material_rows_match_the_shader_abi() {
-    assert_eq!(size_of::<GpuMaterialHeader>(), 80);
+    // 20 v5 words + the 4-word PCM extension digest (§5.3, P1-h):
+    // `extensions_{used,required}_{low,high}`, so the header carries the
+    // material's whole registry digest and a load-time negotiator can project it
+    // against a target's capabilities without re-deriving the catalogue.
+    assert_eq!(size_of::<GpuMaterialHeader>(), 96);
     // The v5 OpenPBR field completion (coat/fuzz/base/specular/subsurface/
     // transmission groups, including coat_darkening, scatter_anisotropy and
     // transmission_scatter) sized the fat authoring view, with trailing pad
