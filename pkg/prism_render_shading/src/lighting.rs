@@ -15,6 +15,14 @@ pub(crate) const MIN_ANISOTROPIC_ALPHA: f32 = 1.0e-3;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceSample {
     pub base_color: [f32; 3],
+    /// `OpenPBR` `base_weight`: scales the whole base diffuse + specular layer.
+    /// The default `1.0` is an exact identity, so a material that never authors
+    /// it shades bit-for-bit as before.
+    pub base_weight: f32,
+    /// `OpenPBR` `diffuse_roughness` in `[0, 1]`: micro-slope roughness of the
+    /// base diffuse lobe, evaluated with Oren-Nayar. `0` is exactly Lambert (the
+    /// historical behaviour), so the default preserves every existing golden.
+    pub diffuse_roughness: f32,
     pub metallic: f32,
     pub perceptual_roughness: f32,
     pub reflectance: f32,
@@ -96,6 +104,8 @@ impl Default for SurfaceSample {
     fn default() -> Self {
         Self {
             base_color: [1.0; 3],
+            base_weight: 1.0,
+            diffuse_roughness: 0.0,
             metallic: 0.0,
             perceptual_roughness: 0.5,
             reflectance: 0.5,
@@ -238,8 +248,18 @@ pub fn evaluate_principled_direct(
     .to_array();
     let specular = add(single_scatter, compensation);
     let diffuse_weight = mul_scalar(sub([1.0; 3], f), 1.0 - metallic);
-    let diffuse = mul(mul_scalar(surface.base_color, 1.0 / PI), diffuse_weight);
-    let base = mul_scalar(add(diffuse, specular), n_dot_l);
+    // `OpenPBR` `diffuse_roughness`: the base diffuse lobe is Oren-Nayar rather
+    // than Lambert when the surface is microscopically rough. `sigma == 0`
+    // collapses the factor to exactly `1.0`, so the legacy Lambert path is
+    // preserved bit-for-bit.
+    let diffuse_factor =
+        oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
+    let diffuse = mul(
+        mul_scalar(surface.base_color, (1.0 / PI) * diffuse_factor),
+        diffuse_weight,
+    );
+    // `OpenPBR` `base_weight` scales the whole base layer; `1.0` is exact.
+    let base = mul_scalar(add(diffuse, specular), n_dot_l * surface.base_weight.clamp(0.0, 1.0));
 
     let coat = surface.clearcoat.clamp(0.0, 1.0);
     let coat_roughness = surface.clearcoat_roughness.clamp(MIN_ROUGHNESS, 1.0);
@@ -402,6 +422,48 @@ pub(crate) fn fresnel_schlick(f0: [f32; 3], v_dot_h: f32) -> [f32; 3] {
     let squared = one_minus * one_minus;
     let factor = squared * squared * one_minus;
     add(f0, mul_scalar(sub([1.0; 3], f0), factor))
+}
+
+/// Denominator offset of the Oren-Nayar `A` (base) coefficient.
+const OREN_A_OFFSET: f32 = 0.33;
+/// Denominator offset of the Oren-Nayar `B` (inter-reflection) coefficient.
+const OREN_B_OFFSET: f32 = 0.09;
+/// Leading factor of the Oren-Nayar `A` coefficient.
+const OREN_A_SCALE: f32 = 0.5;
+/// Leading factor of the Oren-Nayar `B` coefficient.
+const OREN_B_SCALE: f32 = 0.45;
+/// Guard for the `s / t` denominator when `s > 0` but `max(cos_o, cos_i)` is
+/// numerically zero. Mirrors `reference_pt::oren_nayar::MIN_T`.
+const OREN_MIN_T: f32 = 1.0e-6;
+/// `OpenPBR` `diffuse_roughness` in `[0, 1]` is mapped onto the Oren-Nayar
+/// micro-slope standard deviation `sigma` in radians as `sigma = roughness *
+/// pi/2`, so authored `1` is the fully rough cavity field. This is a unit
+/// convention, not a physical claim; `0` is exactly Lambert either way.
+const OREN_MAX_SIGMA: f32 = core::f32::consts::FRAC_PI_2;
+
+/// Oren-Nayar (1994) rough-diffuse factor multiplying the Lambertian
+/// `albedo / pi` term.
+///
+/// Implements the trig-free "qualitative" form (Gotanda / Fujii) with
+/// `A = 1 - 0.5*sigma^2/(sigma^2 + 0.33)` and
+/// `B = 0.45*sigma^2/(sigma^2 + 0.09)`, exactly mirroring the path-traced oracle
+/// `reference_pt::oren_nayar` so the real-time lobe and the offline reference
+/// evaluate the identical model. `s = v·l - cos_o*cos_i` is the azimuthal
+/// coupling and `t = max(cos_o, cos_i)` when `s > 0`, else `1`. At
+/// `diffuse_roughness == 0` the factor is exactly `1.0` (Lambert).
+#[inline]
+fn oren_nayar_factor(n_dot_v: f32, n_dot_l: f32, v_dot_l: f32, diffuse_roughness: f32) -> f32 {
+    let sigma = diffuse_roughness.clamp(0.0, 1.0) * OREN_MAX_SIGMA;
+    let sigma_sq = sigma * sigma;
+    let a = 1.0 - OREN_A_SCALE * sigma_sq / (sigma_sq + OREN_A_OFFSET);
+    let b = OREN_B_SCALE * sigma_sq / (sigma_sq + OREN_B_OFFSET);
+    let s = v_dot_l - n_dot_v * n_dot_l;
+    let t = if s > 0.0 {
+        n_dot_v.max(n_dot_l).max(OREN_MIN_T)
+    } else {
+        1.0
+    };
+    (a + b * s / t).max(0.0)
 }
 
 #[cfg(test)]
@@ -691,6 +753,95 @@ mod tests {
         assert!(
             (big - bigger).abs() <= 1.0e-6 * big.max(1.0),
             "{big} vs {bigger}"
+        );
+    }
+
+    #[test]
+    fn oren_nayar_factor_is_exactly_lambert_at_zero_roughness() {
+        // `diffuse_roughness == 0` must be an exact identity on the legacy
+        // Lambert diffuse, for any geometry.
+        for (cos_o, cos_i, v_dot_l) in [
+            (1.0f32, 1.0f32, 1.0f32),
+            (0.2, 0.9, 0.6),
+            (0.05, 0.05, 0.99),
+            (0.7, 0.3, 0.1),
+        ] {
+            assert_eq!(oren_nayar_factor(cos_o, cos_i, v_dot_l, 0.0), 1.0);
+        }
+        // A fully rough cavity field is no longer Lambert, and stays finite and
+        // non-negative everywhere.
+        assert_ne!(oren_nayar_factor(0.2, 0.2, 0.9, 1.0), 1.0);
+        for cos_o in [0.0, 0.1, 0.5, 1.0] {
+            for cos_i in [0.0, 0.1, 0.5, 1.0] {
+                for v_dot_l in [-1.0, 0.0, 0.5, 1.0] {
+                    let f = oren_nayar_factor(cos_o, cos_i, v_dot_l, 1.0);
+                    assert!(f.is_finite() && f >= 0.0, "{cos_o} {cos_i} {v_dot_l} -> {f}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn base_weight_zero_removes_the_base_layer() {
+        // With no coat and no emission the base layer is the only contributor,
+        // so a zero `base_weight` must leave exactly the emissive term.
+        let surface = SurfaceSample {
+            base_weight: 0.0,
+            emissive: [0.02, 0.03, 0.04],
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate_principled_direct(surface, frame(), light()),
+            surface.emissive
+        );
+        // And a non-zero weight scales the term monotonically.
+        let dim = evaluate_principled_direct(
+            SurfaceSample {
+                base_weight: 0.25,
+                ..Default::default()
+            },
+            frame(),
+            light(),
+        );
+        let full = evaluate_principled_direct(SurfaceSample::default(), frame(), light());
+        assert!(dim[0] < full[0] && dim[0] > 0.0, "{dim:?} vs {full:?}");
+    }
+
+    #[test]
+    fn diffuse_roughness_changes_the_diffuse_response() {
+        // Head-on the Oren-Nayar factor is 1 (a and b only act through `s`), so
+        // probe a grazing geometry where the inter-reflection lobe contributes.
+        let grazing = ShadingFrame {
+            view: normalize_or([0.99, 0.14, 0.0], [0.0, 1.0, 0.0]),
+            ..frame()
+        };
+        let grazing_light = DirectLightSample {
+            direction: normalize_or([0.99, 0.14, 0.0], [0.0, 1.0, 0.0]),
+            ..light()
+        };
+        let smooth = evaluate_principled_direct(
+            SurfaceSample {
+                metallic: 0.0,
+                reflectance: 0.0,
+                diffuse_roughness: 0.0,
+                ..Default::default()
+            },
+            grazing,
+            grazing_light,
+        );
+        let rough = evaluate_principled_direct(
+            SurfaceSample {
+                metallic: 0.0,
+                reflectance: 0.0,
+                diffuse_roughness: 1.0,
+                ..Default::default()
+            },
+            grazing,
+            grazing_light,
+        );
+        assert!(
+            rough[0] > smooth[0],
+            "a rough cavity field must retro-reflect more at grazing: {rough:?} vs {smooth:?}"
         );
     }
 }

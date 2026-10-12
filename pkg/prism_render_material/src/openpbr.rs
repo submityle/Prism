@@ -209,6 +209,8 @@ mod tests {
             ambient_occlusion: 0.9,
             normal_scale: 0.8,
             alpha_cutoff: 0.37,
+            base_weight: 0.85,
+            diffuse_roughness: 0.4,
             transmission: 0.6,
             thickness: 1.5,
             clearcoat: 0.7,
@@ -228,7 +230,7 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: 0.0,
+            _pad_tail: [0.0; 3],
         }
     }
 

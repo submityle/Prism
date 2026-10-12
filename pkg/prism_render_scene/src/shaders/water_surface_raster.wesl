@@ -1042,6 +1042,8 @@ fn surface_from(foam: f32) -> SurfaceSample {
     var s: SurfaceSample;
     let foam_color = mix(view.water_color.rgb, vec3<f32>(1.0), foam);
     s.base_color = foam_color;
+    s.base_weight = 1.0;
+    s.diffuse_roughness = 0.0;
     s.metallic = 0.0;
     s.perceptual_roughness = clamp(view.surface_params.x + foam * 0.5, 0.0, 1.0);
     s.reflectance = clamp(view.surface_params.y, 0.0, 1.0);

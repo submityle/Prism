@@ -51,6 +51,11 @@ const MAX_STYLIZED_SPEC_EXPONENT: f32 = 256.0;
 // resolve pass can add it exactly once.
 struct SurfaceSample {
     base_color: vec3<f32>,
+    // `OpenPBR` `base_weight` (scales the base layer) and `diffuse_roughness`
+    // (Oren-Nayar micro-slope roughness; 0 is exactly Lambert). Mirrors
+    // `SurfaceSample::base_weight` / `diffuse_roughness` in `lighting.rs`.
+    base_weight: f32,
+    diffuse_roughness: f32,
     metallic: f32,
     perceptual_roughness: f32,
     reflectance: f32,
@@ -267,6 +272,31 @@ fn multiscatter_direct(
     return f_ms * f_ms_color;
 }
 
+// Oren-Nayar "qualitative" (Gotanda / Fujii, trig-free) rough-diffuse factor on
+// the Lambertian `albedo / pi` term. Byte-for-byte twin of
+// `lighting.rs::oren_nayar_factor` and of the path-traced oracle
+// `reference_pt::oren_nayar`. `fuzz == 0` is exactly Lambert.
+const OREN_A_OFFSET: f32 = 0.33;
+const OREN_B_OFFSET: f32 = 0.09;
+const OREN_A_SCALE: f32 = 0.5;
+const OREN_B_SCALE: f32 = 0.45;
+const OREN_MIN_T: f32 = 1.0e-6;
+// `pi / 2`, matching `core::f32::consts::FRAC_PI_2` on the CPU side.
+const OREN_MAX_SIGMA: f32 = PI * 0.5;
+
+fn oren_nayar_factor(n_dot_v: f32, n_dot_l: f32, v_dot_l: f32, diffuse_roughness: f32) -> f32 {
+    let sigma = clamp(diffuse_roughness, 0.0, 1.0) * OREN_MAX_SIGMA;
+    let sigma_sq = sigma * sigma;
+    let a = 1.0 - OREN_A_SCALE * sigma_sq / (sigma_sq + OREN_A_OFFSET);
+    let b = OREN_B_SCALE * sigma_sq / (sigma_sq + OREN_B_OFFSET);
+    let s = v_dot_l - n_dot_v * n_dot_l;
+    var t = 1.0;
+    if s > 0.0 {
+        t = max(max(n_dot_v, n_dot_l), OREN_MIN_T);
+    }
+    return max(a + b * s / t, 0.0);
+}
+
 // Physically based direct lighting for one analytic light, including a
 // Kulla-Conty energy-compensation term and a clearcoat lobe. Mirrors
 // `evaluate_principled_direct`.
@@ -348,8 +378,14 @@ fn principled_direct(
     let specular = single_scatter + compensation;
 
     let diffuse_weight = (vec3<f32>(1.0) - f) * (1.0 - metallic);
-    let diffuse = (surface.base_color * INV_PI) * diffuse_weight;
-    let base = (diffuse + specular) * n_dot_l;
+    // `OpenPBR` `diffuse_roughness`: Oren-Nayar replaces Lambert for
+    // microscopically rough diffuse surfaces; `0` collapses the factor to
+    // exactly 1.0 and preserves the legacy path.
+    let diffuse_factor =
+        oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
+    let diffuse = (surface.base_color * (INV_PI * diffuse_factor)) * diffuse_weight;
+    // `OpenPBR` `base_weight` scales the whole base layer; 1.0 is exact.
+    let base = (diffuse + specular) * (n_dot_l * clamp(surface.base_weight, 0.0, 1.0));
 
     // Clearcoat: a second, always-dielectric GGX lobe that attenuates the base
     // response by its own Fresnel reflectance.

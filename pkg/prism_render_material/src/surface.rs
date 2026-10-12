@@ -42,8 +42,11 @@ pub struct GpuSurfaceCore {
     pub ambient_occlusion: f32,
     pub normal_scale: f32,
     pub alpha_cutoff: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
+    /// `OpenPBR` `base_weight`: scales the base diffuse + specular layer.
+    pub base_weight: f32,
+    /// `OpenPBR` `diffuse_roughness`: micro-slope roughness of the base diffuse
+    /// lobe (Oren-Nayar). `0` is exactly Lambert.
+    pub diffuse_roughness: f32,
 }
 
 impl Default for GpuSurfaceCore {
@@ -56,8 +59,8 @@ impl Default for GpuSurfaceCore {
             ambient_occlusion: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.5,
-            _pad0: 0.0,
-            _pad1: 0.0,
+            base_weight: 1.0,
+            diffuse_roughness: 0.0,
         }
     }
 }
@@ -367,8 +370,8 @@ impl SurfaceParameterBlock {
                 ambient_occlusion: params.ambient_occlusion,
                 normal_scale: params.normal_scale,
                 alpha_cutoff: params.alpha_cutoff,
-                _pad0: 0.0,
-                _pad1: 0.0,
+                base_weight: params.base_weight,
+                diffuse_roughness: params.diffuse_roughness,
             },
             lobe_mask,
             emission: GpuEmissionLobe {
@@ -432,6 +435,8 @@ impl SurfaceParameterBlock {
             ambient_occlusion: self.core.ambient_occlusion,
             normal_scale: self.core.normal_scale,
             alpha_cutoff: self.core.alpha_cutoff,
+            base_weight: self.core.base_weight,
+            diffuse_roughness: self.core.diffuse_roughness,
             ..GpuSurfaceParameters::default()
         };
         if self.lobe_mask.contains(LobeMask::EMISSION) {
@@ -591,6 +596,8 @@ mod tests {
             ambient_occlusion: 0.9,
             normal_scale: 0.8,
             alpha_cutoff: 0.37,
+            base_weight: 0.85,
+            diffuse_roughness: 0.4,
             transmission: 0.6,
             thickness: 1.5,
             clearcoat: 0.7,
@@ -610,7 +617,7 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: 0.0,
+            _pad_tail: [0.0; 3],
         }
     }
 

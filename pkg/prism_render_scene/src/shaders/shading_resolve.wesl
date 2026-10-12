@@ -1862,6 +1862,8 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     // Assemble the analytic BSDF sample from the stable surface parameters.
     var surface: SurfaceSample;
     surface.base_color = sampled.base_color;
+    surface.base_weight = parameters.base_weight;
+    surface.diffuse_roughness = parameters.diffuse_roughness;
     surface.metallic = sampled.metallic;
     surface.perceptual_roughness = sampled.perceptual_roughness;
     surface.reflectance = parameters.reflectance;

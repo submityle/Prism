@@ -210,7 +210,7 @@
 
 | OpenPBR 组 / lobe | 现 über 字段（`surface.rs`） | 状态 | 待补字段（加法） |
 |---|---|---|---|
-| **base**（diffuse+metal） | `base_color` / `metallic` / `perceptual_roughness` | 子集 | `base_weight`、`diffuse_roughness`（Oren-Nayar 糙漫反射） |
+| **base**（diffuse+metal） | `base_color` / `metallic` / `perceptual_roughness` / **`base_weight` / `diffuse_roughness`（已补，见 §13.a）** | ✅ 补齐 | — |
 | **specular** | `reflectance`（IOR 代理）/ `anisotropy` / `anisotropy_rotation` | 子集 | `specular_weight`、`specular_color`、显式 `specular_ior`（取代 reflectance 代理） |
 | **coat** | `clearcoat` / `clearcoat_roughness` / **`coat_ior` / `coat_color` / `coat_roughness_anisotropy`（已补）** / **`coat_normal`（已补：纹理输入，非 ABI 字段，见 §13.a）** | 仅差 `coat_darkening` | `coat_darkening` |
 | **fuzz** | `sheen` / **`fuzz_roughness` / `fuzz_color`（已补，见 §13.a）** | ✅ 补齐 | —（`fuzz_roughness` 与 base roughness 的解耦是刻意的模型修正） |
@@ -509,7 +509,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - **原理化分层 BSDF（coat/base 能量耦合，非瓣求和）**（§17.2）：coat 对其下 base 的能量不是简单叠加，而是按 Fresnel 透射做能量预算耦合（coat 反射掉的能量不再喂给 base），并统一 coat 吸收/变暗（`coat_darkening`）。取代"各瓣独立求和"的能量不自洽；进 furnace 门禁与双线对拍。
 - **NPR**（`Illumination::Stylized`，§3.5）：ramp 量化 / SDF 面部阴影（Prism 私有 FACE 瓣，OpenPBR 之外）/ 描边，作为对**同一 OpenPBR über 输入**的正交非物理响应；不进物理 furnace 门禁，但进 ramp/描边视觉回归。
 - **thin_film 虹彩（OpenPBR thin_film 瓣，开放瓣首个落地示例）**：薄膜干涉随 `thin_film_thickness` / `thin_film_ior` 产生彩虹色高光（肥皂泡、氧化金属、涂层）。按 OpenPBR 作为新 lobe 加入开放词汇表——新增 `LobeMask::THIN_FILM` 位 + 3-word 块，`prism_unpack_surface` 低位优先循环自动容纳，老材质 mask 不含该位、零影响。这是"新物理项 = 加法补瓣"路径的验证用例（§4.4）。
-- **其余待补 OpenPBR 字段**（subsurface_radius vec3、specular_color/weight、diffuse_roughness，以及 coat 组剩余的 `coat_darkening`）以加法扩字段方式逐个补齐，各进 furnace / 对拍门禁；coat 组的 `coat_ior` / `coat_color` / `coat_roughness_anisotropy` / `coat_normal` 与整个 fuzz 组（`fuzz_color` / `fuzz_roughness`）已落地（§13.a）。
+- **其余待补 OpenPBR 字段**（subsurface_color/radius、specular_color/weight/ior、transmission 组，以及 coat 组剩余的 `coat_darkening`）以加法扩字段方式逐个补齐，各进 furnace / 对拍门禁；coat 组（`coat_ior` / `coat_color` / `coat_roughness_anisotropy` / `coat_normal`）、整个 fuzz 组（`fuzz_color` / `fuzz_roughness`）与整个 base 组（`base_weight` / `diffuse_roughness`）已落地（§13.a）。
 - **开放瓣扩展机制**：任何新物理项（如各向异性 SSS）走同一路径——新位 + 变长字段 + 静态置换，不冲击现有材质、不加全局硬顶。
 
 ---
@@ -578,6 +578,15 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f（第三个 lobe 组）OpenPBR base 组：`base_weight` + `diffuse_roughness` 端到端落地**（§4.4 / §17.2）
+  - 范围：给 über 的 base 层补 `OpenPBR` base 组两项——`base_weight`（缩放整层 base diffuse+specular）与 `diffuse_roughness`（base 漫反射的微观坡度粗糙度，走 Oren-Nayar）。
+  - **零字长代价**：core 原本有 2 个填充字（`_pad0`/`_pad1`），本项**原地复用**它们，所以 `SURFACE_CORE_WORDS` 仍是 **12**、`SURFACE_MAX_WORDS` 仍是 52——core 从"12 字含 2 填充"变成"12 字全有效"。这是 §4.4"补字段是加法"在 core 上的第一次实证。
+  - **默认即恒等**：`base_weight = 1.0`（乘 1 逐位不变）、`diffuse_roughness = 0.0`（Oren-Nayar 在 σ=0 时 A=1、B=0，因子恰为 1.0，逐位退化为 Lambert）。既有金标准全部保持。
+  - **依据**：Oren-Nayar 走仓库自带 path-traced oracle `pkg/prism_render_architecture/src/reference_pt/oren_nayar.rs` 的 trig-free "qualitative"（Gotanda/Fujii）形式——同样的 A/B 系数（0.33/0.09/0.5/0.45）、同样的 `s = v·l − cos_o·cos_i` 与 Fujii `t` 分母、同样的 `MIN_T` 地板。作者侧 `diffuse_roughness ∈ [0,1]` 到 σ(弧度) 的映射取 `σ = rough · π/2`，这是**显式的单位约定**（文档注明），不是物理断言；σ=0 一定是 Lambert。
+  - 代码：schema core 两 pad → 两字段（字长不变）；`GpuSurfaceCore` 同步换位、fat `GpuSurfaceParameters` +2 字段（`_pad_tail` 变 `[f32;3]`，144→176 B 仍 16 字节对齐）；regenerated `material_unpack.wesl`；shade-time `SurfaceSample`（CPU + WESL）+ 桥接；BSDF 双线 **principled**（`lighting.rs` / `brdf.wesl`，含逐位孪生的 `oren_nayar_factor`）。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3292 通过**（新增：σ=0 在任意几何上恰为 1.0 且全域有限非负、`base_weight = 0` 正好只剩 emissive、掠射下粗糙腔体回射更强）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）、`cargo test -p prism_material_schema` 13 通过、`cargo test -p prism_render_material` 826+6+2 全绿、`--features bevy` 编译干净；touched 文件 clippy 无告警。
+  - 诚实边界：目前只有 **principled über base** 消费这两项；Cloth / Clearcoat / Subsurface 是各自的 shading class、有自己的 diffuse law（cloth 的 wrap/subsurface、clearcoat 的两程、subsurface 的 wrap+back-transmission），把 `base_weight` 一并路由进它们留作后续（`diffuse_roughness` 是 V-cavity matte 模型，本就不适用于织物）。
 
 - **P1-f（第二个 lobe 组）OpenPBR fuzz 组：`fuzz_color` + `fuzz_roughness` 端到端落地**（§4.4 / §17.2）
   - 范围：给 `sheen` 瓣补 `OpenPBR` fuzz 组两项——`fuzz_roughness`（fuzz 高光**自身**的宽度）与 `fuzz_color`（逐通道 tint）。顺手修掉一处**假的耦合**：Cloth / ClothAdvanced 之前都拿 base `perceptual_roughness` 当 fuzz 宽度、写死白色 tint，等于"fuzz 永远跟 base 一样糙且只能是白的"，OpenPBR fuzz 的独立参数化根本无从表达。现在 fuzz 宽度只读 `fuzz_roughness`、tint 只读 `fuzz_color`。

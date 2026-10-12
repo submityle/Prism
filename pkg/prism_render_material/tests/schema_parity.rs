@@ -26,6 +26,8 @@ fn authored() -> GpuSurfaceParameters {
         ambient_occlusion: 0.9,
         normal_scale: 0.8,
         alpha_cutoff: 0.37,
+        base_weight: 0.85,
+        diffuse_roughness: 0.4,
         transmission: 0.6,
         thickness: 1.5,
         clearcoat: 0.7,
@@ -45,7 +47,7 @@ fn authored() -> GpuSurfaceParameters {
         _pad_face0: 0.0,
         _pad_face1: 0.0,
         _pad_face2: 0.0,
-        _pad_tail: 0.0,
+        _pad_tail: [0.0; 3],
     }
 }
 
@@ -61,6 +63,8 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
         (None, "ambient_occlusion") => vec![p.ambient_occlusion],
         (None, "normal_scale") => vec![p.normal_scale],
         (None, "alpha_cutoff") => vec![p.alpha_cutoff],
+        (None, "base_weight") => vec![p.base_weight],
+        (None, "diffuse_roughness") => vec![p.diffuse_roughness],
         (Some("emission"), "emissive") => p.emissive.to_vec(),
         (Some("clearcoat"), "clearcoat") => vec![p.clearcoat],
         (Some("clearcoat"), "clearcoat_roughness") => vec![p.clearcoat_roughness],

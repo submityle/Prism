@@ -30,6 +30,10 @@ struct PrismSurfaceParameters {
     ambient_occlusion: f32,
     normal_scale: f32,
     alpha_cutoff: f32,
+    // `OpenPBR` base group: `base_weight` scales the base layer and
+    // `diffuse_roughness` drives the Oren-Nayar diffuse lobe.
+    base_weight: f32,
+    diffuse_roughness: f32,
     transmission: f32,
     thickness: f32,
     clearcoat: f32,

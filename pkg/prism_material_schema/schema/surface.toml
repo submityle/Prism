@@ -107,20 +107,32 @@ energy_policy = "none"
 view = "invariant"
 
 [[core.field]]
-name = "_pad0"
-type = "pad"
+name = "base_weight"
+type = "f32"
 bit_region = "KHR"
 pack_slot = 10
-consumed_by = []
-default = 0.0
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `base_weight`: scales the base layer (diffuse + specular). The default
+# 1.0 is the exact identity, so it reuses a former core padding word and does
+# not change the core word count.
+default = 1.0
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
 
 [[core.field]]
-name = "_pad1"
-type = "pad"
+name = "diffuse_roughness"
+type = "f32"
 bit_region = "KHR"
 pack_slot = 11
-consumed_by = []
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `diffuse_roughness`: micro-slope roughness of the base diffuse lobe,
+# evaluated with the Oren-Nayar V-cavity model. 0 is exactly Lambert (the
+# identity the core carried before), so this also reuses a former padding word.
 default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
 
 # ---------------------------------------------------------------------------
 # Optional lobes. Each is a uniform 4-word (16-byte) quantum; `registry_slot`

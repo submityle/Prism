@@ -144,6 +144,11 @@ pub struct GpuSurfaceParameters {
     pub ambient_occlusion: f32,
     pub normal_scale: f32,
     pub alpha_cutoff: f32,
+    /// `OpenPBR` `base_weight`: scales the base diffuse + specular layer.
+    pub base_weight: f32,
+    /// `OpenPBR` `diffuse_roughness`: Oren-Nayar micro-slope roughness of the
+    /// base diffuse lobe (`0` = Lambert).
+    pub diffuse_roughness: f32,
     pub transmission: f32,
     pub thickness: f32,
     pub clearcoat: f32,
@@ -172,7 +177,7 @@ pub struct GpuSurfaceParameters {
     pub _pad_face2: f32,
     /// Tail padding keeping the fat authoring view a 16-byte multiple as the
     /// coat group grows. Carries no data.
-    pub _pad_tail: f32,
+    pub _pad_tail: [f32; 3],
 }
 
 impl Default for GpuSurfaceParameters {
@@ -186,6 +191,8 @@ impl Default for GpuSurfaceParameters {
             ambient_occlusion: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.5,
+            base_weight: 1.0,
+            diffuse_roughness: 0.0,
             transmission: 0.0,
             thickness: 0.0,
             clearcoat: 0.0,
@@ -205,7 +212,7 @@ impl Default for GpuSurfaceParameters {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: 0.0,
+            _pad_tail: [0.0; 3],
         }
     }
 }

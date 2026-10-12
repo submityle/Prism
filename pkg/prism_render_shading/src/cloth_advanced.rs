@@ -334,6 +334,8 @@ mod tests {
     fn base_surface() -> SurfaceSample {
         SurfaceSample {
             base_color: [0.5, 0.4, 0.3],
+            base_weight: 1.0,
+            diffuse_roughness: 0.0,
             metallic: 0.0,
             perceptual_roughness: 0.6,
             reflectance: 0.5,

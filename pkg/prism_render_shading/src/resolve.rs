@@ -217,6 +217,8 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
             parameters.base_color[1],
             parameters.base_color[2],
         ],
+        base_weight: parameters.base_weight,
+        diffuse_roughness: parameters.diffuse_roughness,
         metallic: parameters.metallic,
         perceptual_roughness: parameters.perceptual_roughness,
         reflectance: parameters.reflectance,
