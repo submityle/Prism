@@ -95,11 +95,18 @@ impl DAffine3 {
     /// Inverse transform.
     #[inline]
     pub fn inverse(self) -> Self {
-        let m = self.matrix3.inverse();
-        Self {
+        self.try_inverse()
+            .expect("DAffine3::inverse of singular or non-finite transform")
+    }
+    /// Invert a finite, nonsingular affine transform, returning `None` otherwise.
+    #[inline]
+    pub fn try_inverse(self) -> Option<Self> {
+        let m = self.matrix3.try_inverse()?;
+        let result = Self {
             matrix3: m,
             translation: -m.mul_vec3(self.translation),
-        }
+        };
+        result.is_finite().then_some(result)
     }
     /// Convert to an equivalent [`DMat4`].
     #[inline]

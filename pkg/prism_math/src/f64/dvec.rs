@@ -101,29 +101,54 @@ impl DVec2 {
     /// Euclidean length.
     #[inline]
     pub fn length(self) -> f64 {
-        mf::sqrt(self.length_squared())
+        // Scale before squaring so representable vectors near f64's extremes
+        // do not overflow/underflow merely while computing their norm.
+        if self.x.is_nan() || self.y.is_nan() {
+            return f64::NAN;
+        }
+        let scale = mf::abs(self.x).max(mf::abs(self.y));
+        if scale == 0.0 || !scale.is_finite() {
+            return scale;
+        }
+        let x = self.x / scale;
+        let y = self.y / scale;
+        scale * mf::sqrt(x * x + y * y)
     }
     /// Distance to `rhs`.
     #[inline]
     pub fn distance(self, rhs: Self) -> f64 {
         (self - rhs).length()
     }
-    /// Normalize to unit length (panics in debug if non-finite result).
+    /// Normalize to unit length, returning zero for zero or non-finite input.
     #[inline]
     pub fn normalize(self) -> Self {
-        let inv = 1.0 / self.length();
-        let n = self * inv;
-        debug_assert!(n.is_finite(), "normalize of near-zero vector");
-        n
+        if !self.is_finite() {
+            return Self::ZERO;
+        }
+        let scale = mf::abs(self.x).max(mf::abs(self.y));
+        if scale == 0.0 || !scale.is_finite() {
+            return Self::ZERO;
+        }
+        let scaled = Self::new(self.x / scale, self.y / scale);
+        scaled * (1.0 / mf::sqrt(scaled.length_squared()))
     }
     /// Normalize, or return zero if the length is too small to normalize.
     #[inline]
     pub fn normalize_or_zero(self) -> Self {
-        let len = self.length();
-        if len > 1.0e-200 {
-            self * (1.0 / len)
-        } else {
+        if !self.is_finite() {
+            return Self::ZERO;
+        }
+        let scale = mf::abs(self.x).max(mf::abs(self.y));
+        if scale == 0.0 || !scale.is_finite() {
             Self::ZERO
+        } else {
+            let scaled = Self::new(self.x / scale, self.y / scale);
+            let scaled_len = mf::sqrt(scaled.length_squared());
+            if scale > 1.0e-200 / scaled_len {
+                scaled * (1.0 / scaled_len)
+            } else {
+                Self::ZERO
+            }
         }
     }
     /// True if both components are finite.
@@ -243,29 +268,53 @@ impl DVec3 {
     /// Euclidean length.
     #[inline]
     pub fn length(self) -> f64 {
-        mf::sqrt(self.length_squared())
+        if self.x.is_nan() || self.y.is_nan() || self.z.is_nan() {
+            return f64::NAN;
+        }
+        let scale = mf::abs(self.x).max(mf::abs(self.y)).max(mf::abs(self.z));
+        if scale == 0.0 || !scale.is_finite() {
+            return scale;
+        }
+        let x = self.x / scale;
+        let y = self.y / scale;
+        let z = self.z / scale;
+        scale * mf::sqrt(x * x + y * y + z * z)
     }
     /// Distance to `rhs`.
     #[inline]
     pub fn distance(self, rhs: Self) -> f64 {
         (self - rhs).length()
     }
-    /// Normalize to unit length (panics in debug if non-finite result).
+    /// Normalize to unit length, returning zero for zero or non-finite input.
     #[inline]
     pub fn normalize(self) -> Self {
-        let inv = 1.0 / self.length();
-        let n = self * inv;
-        debug_assert!(n.is_finite(), "normalize of near-zero vector");
-        n
+        if !self.is_finite() {
+            return Self::ZERO;
+        }
+        let scale = mf::abs(self.x).max(mf::abs(self.y)).max(mf::abs(self.z));
+        if scale == 0.0 || !scale.is_finite() {
+            return Self::ZERO;
+        }
+        let scaled = Self::new(self.x / scale, self.y / scale, self.z / scale);
+        scaled * (1.0 / mf::sqrt(scaled.length_squared()))
     }
     /// Normalize, or return zero if too short to normalize.
     #[inline]
     pub fn normalize_or_zero(self) -> Self {
-        let len = self.length();
-        if len > 1.0e-200 {
-            self * (1.0 / len)
-        } else {
+        if !self.is_finite() {
+            return Self::ZERO;
+        }
+        let scale = mf::abs(self.x).max(mf::abs(self.y)).max(mf::abs(self.z));
+        if scale == 0.0 || !scale.is_finite() {
             Self::ZERO
+        } else {
+            let scaled = Self::new(self.x / scale, self.y / scale, self.z / scale);
+            let scaled_len = mf::sqrt(scaled.length_squared());
+            if scale > 1.0e-200 / scaled_len {
+                scaled * (1.0 / scaled_len)
+            } else {
+                Self::ZERO
+            }
         }
     }
     /// True if all components are finite.
@@ -399,15 +448,42 @@ impl DVec4 {
     /// Euclidean length.
     #[inline]
     pub fn length(self) -> f64 {
-        mf::sqrt(self.length_squared())
+        if self.x.is_nan() || self.y.is_nan() || self.z.is_nan() || self.w.is_nan() {
+            return f64::NAN;
+        }
+        let scale = mf::abs(self.x)
+            .max(mf::abs(self.y))
+            .max(mf::abs(self.z))
+            .max(mf::abs(self.w));
+        if scale == 0.0 || !scale.is_finite() {
+            return scale;
+        }
+        let x = self.x / scale;
+        let y = self.y / scale;
+        let z = self.z / scale;
+        let w = self.w / scale;
+        scale * mf::sqrt(x * x + y * y + z * z + w * w)
     }
-    /// Normalize to unit length (panics in debug if non-finite result).
+    /// Normalize to unit length, returning zero for zero or non-finite input.
     #[inline]
     pub fn normalize(self) -> Self {
-        let inv = 1.0 / self.length();
-        let n = self * inv;
-        debug_assert!(n.is_finite(), "normalize of near-zero vector");
-        n
+        if !self.is_finite() {
+            return Self::ZERO;
+        }
+        let scale = mf::abs(self.x)
+            .max(mf::abs(self.y))
+            .max(mf::abs(self.z))
+            .max(mf::abs(self.w));
+        if scale == 0.0 || !scale.is_finite() {
+            return Self::ZERO;
+        }
+        let scaled = Self::new(
+            self.x / scale,
+            self.y / scale,
+            self.z / scale,
+            self.w / scale,
+        );
+        scaled * (1.0 / mf::sqrt(scaled.length_squared()))
     }
     /// True if all components are finite.
     #[inline]
@@ -438,6 +514,46 @@ impl DVec4 {
     #[inline]
     pub fn as_vec4(self) -> Vec4 {
         Vec4::new(self.x as f32, self.y as f32, self.z as f32, self.w as f32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DVec2, DVec3, DVec4};
+
+    #[test]
+    fn lengths_and_normalization_scale_without_overflow() {
+        let v2 = DVec2::new(8.0e307, -8.0e307);
+        let v3 = DVec3::new(8.0e307, -8.0e307, 8.0e307);
+        let v4 = DVec4::new(8.0e307, -8.0e307, 8.0e307, -8.0e307);
+        assert!(v2.length().is_finite());
+        assert!(v3.length().is_finite());
+        assert!(v4.length().is_finite());
+        assert!((v2.normalize().length() - 1.0).abs() < 1.0e-15);
+        assert!((v3.normalize().length() - 1.0).abs() < 1.0e-15);
+        assert!((v4.normalize().length() - 1.0).abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn tiny_nonzero_vectors_normalize_without_underflow() {
+        let v = DVec3::new(5.0e-320, -5.0e-320, 0.0).normalize();
+        assert!(v.is_finite());
+        assert!((v.length() - 1.0).abs() < 1.0e-15);
+        assert_eq!(
+            DVec3::new(5.0e-320, -5.0e-320, 0.0).normalize_or_zero(),
+            DVec3::ZERO
+        );
+    }
+
+    #[test]
+    fn non_finite_lengths_and_normalization_fail_closed() {
+        assert!(DVec2::new(f64::NAN, 1.0).length().is_nan());
+        assert!(DVec3::new(f64::INFINITY, 1.0, 0.0).length().is_infinite());
+        assert_eq!(DVec4::new(f64::NAN, 0.0, 0.0, 0.0).normalize(), DVec4::ZERO);
+        assert_eq!(
+            DVec4::new(f64::INFINITY, 0.0, 0.0, 0.0).normalize(),
+            DVec4::ZERO
+        );
     }
 }
 

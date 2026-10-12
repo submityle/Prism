@@ -100,22 +100,44 @@ impl DQuat {
     /// Length.
     #[inline]
     pub fn length(self) -> f64 {
-        mf::sqrt(self.dot(self))
+        let scale = mf::abs(self.x)
+            .max(mf::abs(self.y))
+            .max(mf::abs(self.z))
+            .max(mf::abs(self.w));
+        if scale == 0.0 || !scale.is_finite() {
+            return scale;
+        }
+        let x = self.x / scale;
+        let y = self.y / scale;
+        let z = self.z / scale;
+        let w = self.w / scale;
+        scale * mf::sqrt(x * x + y * y + z * z + w * w)
     }
     /// Squared length.
     #[inline]
     pub fn length_squared(self) -> f64 {
         self.dot(self)
     }
-    /// Normalize to a unit quaternion.
+    /// Normalize to a unit quaternion, returning identity for zero or non-finite input.
     #[inline]
     pub fn normalize(self) -> Self {
-        let inv = 1.0 / self.length();
+        let scale = mf::abs(self.x)
+            .max(mf::abs(self.y))
+            .max(mf::abs(self.z))
+            .max(mf::abs(self.w));
+        if scale == 0.0 || !scale.is_finite() {
+            return Self::IDENTITY;
+        }
+        let x = self.x / scale;
+        let y = self.y / scale;
+        let z = self.z / scale;
+        let w = self.w / scale;
+        let inv = 1.0 / mf::sqrt(x * x + y * y + z * z + w * w);
         Self {
-            x: self.x * inv,
-            y: self.y * inv,
-            z: self.z * inv,
-            w: self.w * inv,
+            x: x * inv,
+            y: y * inv,
+            z: z * inv,
+            w: w * inv,
         }
     }
     /// Conjugate (inverse for a unit quaternion).
@@ -131,7 +153,29 @@ impl DQuat {
     /// Inverse. For unit quaternions this equals [`DQuat::conjugate`].
     #[inline]
     pub fn inverse(self) -> Self {
-        self.conjugate()
+        let scale = self
+            .x
+            .abs()
+            .max(self.y.abs())
+            .max(self.z.abs())
+            .max(self.w.abs());
+        assert!(
+            scale > 0.0 && scale.is_finite(),
+            "cannot invert zero or non-finite quaternion"
+        );
+        let q = Self::from_xyzw(
+            self.x / scale,
+            self.y / scale,
+            self.z / scale,
+            self.w / scale,
+        );
+        let norm_squared = q.dot(q);
+        Self::from_xyzw(
+            (-q.x / norm_squared) / scale,
+            (-q.y / norm_squared) / scale,
+            (-q.z / norm_squared) / scale,
+            (q.w / norm_squared) / scale,
+        )
     }
     /// True if all components are finite.
     #[inline]
@@ -313,5 +357,34 @@ impl Neg for DQuat {
 impl core::fmt::Debug for DQuat {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "DQuat({}, {}, {}, {})", self.x, self.y, self.z, self.w)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DQuat;
+
+    #[test]
+    fn normalize_handles_extreme_and_tiny_quaternions() {
+        let large = DQuat::from_xyzw(8.0e307, -8.0e307, 8.0e307, -8.0e307).normalize();
+        let tiny = DQuat::from_xyzw(5.0e-320, -5.0e-320, 0.0, 0.0).normalize();
+        assert!(large.is_finite());
+        assert!(tiny.is_finite());
+        assert!((large.length() - 1.0).abs() < 1.0e-15);
+        assert!((tiny.length() - 1.0).abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn normalize_zero_falls_back_to_identity() {
+        assert_eq!(
+            DQuat::from_xyzw(0.0, 0.0, 0.0, 0.0).normalize(),
+            DQuat::IDENTITY
+        );
+    }
+
+    #[test]
+    fn length_handles_extreme_values() {
+        let q = DQuat::from_xyzw(8.0e307, -8.0e307, 8.0e307, -8.0e307);
+        assert!(q.length().is_finite());
     }
 }
