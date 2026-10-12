@@ -62,6 +62,10 @@ pub struct SpecializationId(pub u64);
 
 impl SpecializationId {
     /// Build a specialization key from the orthogonal axes.
+    ///
+    /// `closure_mask` is the **live lobe set** (the derived `LobeMask` bits), not
+    /// the raw authored closure bits: feature flags fold extra lobes in, and the
+    /// permutation must follow the live set.
     pub const fn new(illumination: Illumination, closure_mask: u32, render_class: u32) -> Self {
         let illum = (illumination as u64) & 0xFF;
         let closure = (closure_mask as u64) << 8;
@@ -79,7 +83,7 @@ impl SpecializationId {
         Illumination::from_u32(self.illumination_bits())
     }
 
-    /// The closure-kind bitmask packed into the key.
+    /// The live lobe set packed into the key (the derived `LobeMask` bits).
     pub const fn closure_mask(self) -> u32 {
         ((self.0 >> 8) & 0xFFFF_FFFF) as u32
     }
@@ -97,6 +101,26 @@ impl SpecializationId {
     /// High 32 bits, for splitting into two `u32` GPU header slots.
     pub const fn high(self) -> u32 {
         (self.0 >> 32) as u32
+    }
+
+    /// The compact `u32` form of this key used as a draw-bin class.
+    ///
+    /// Layout (LSB → MSB): `illumination` `0..2`, `render_class` `2..10`, live
+    /// lobe set `10..27`. A legal lobe mask uses only bits `0..17` — the `LobeMask`
+    /// vocabulary has eight kinds and the highest, `NPR_FACE`, sits at bit `16` —
+    /// so the projection is collision-free for any legal material: a bin keyed on
+    /// this class carries the **full** permutation, not just the
+    /// illumination/render-class pair.
+    ///
+    /// Binning is therefore correct for materials that differ only in their live
+    /// lobes (e.g. one with a face-shadow or clearcoat lobe) — collapsing them
+    /// onto one class batched different pipelines together
+    /// (`prism_material_pipeline_refactor_zh.md` §8.5).
+    #[must_use]
+    pub const fn bin_class(self) -> u32 {
+        (self.illumination_bits() & 0x3)
+            | ((self.render_class_bits() & 0xFF) << 2)
+            | ((self.closure_mask() & 0x1_FFFF) << 10)
     }
 }
 
@@ -160,5 +184,38 @@ mod tests {
         let a = SpecializationId::new(Illumination::Unlit, 42, 3);
         let b = SpecializationId::new(Illumination::Unlit, 42, 3);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn bin_class_carries_the_live_lobe_set() {
+        let plain = SpecializationId::new(Illumination::Lit, 0, 0);
+        // `LobeMask::CLEARCOAT` (bit 1) and `LobeMask::NPR_FACE` (bit 16).
+        let clearcoat = SpecializationId::new(Illumination::Lit, 1 << 1, 0);
+        let face_shadow = SpecializationId::new(Illumination::Lit, 1 << 16, 0);
+        assert_ne!(
+            plain.bin_class(),
+            clearcoat.bin_class(),
+            "a differing lobe yields a different bin class"
+        );
+        assert_ne!(plain.bin_class(), face_shadow.bin_class());
+        assert_eq!(
+            plain.bin_class(),
+            SpecializationId::new(Illumination::Lit, 0, 0).bin_class(),
+            "the bin class is deterministic"
+        );
+
+        // Illumination and render_class still separate bins on their own.
+        assert_ne!(
+            plain.bin_class(),
+            SpecializationId::new(Illumination::Stylized, 0, 0).bin_class()
+        );
+        assert_ne!(
+            plain.bin_class(),
+            SpecializationId::new(Illumination::Lit, 0, 1).bin_class()
+        );
+
+        // The projection fits the documented field widths (27 bits total).
+        let widest = SpecializationId::new(Illumination::Custom, 0x1_FFFF, 0xFF);
+        assert_eq!(widest.bin_class() >> 27, 0, "bin class stays within 27 bits");
     }
 }
