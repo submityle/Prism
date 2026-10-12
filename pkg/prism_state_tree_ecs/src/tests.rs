@@ -157,8 +157,7 @@ fn entity_guard_is_evaluated_by_its_persistent_runtime() {
     .expect("guard plan is valid");
     let mut instance = StateTreeInstance::new(StateTreeAsset::new(plan), 4, MicrostepLimit(8))
         .expect("runtime setup");
-    instance
-        .set_guard(GuardId(3), MatchEvent(EventId(9)));
+    instance.set_guard(GuardId(3), MatchEvent(EventId(9)));
     instance.step().expect("initial tick");
     instance
         .request_event(Event::new(EventId(7)))
@@ -174,4 +173,55 @@ fn entity_guard_is_evaluated_by_its_persistent_runtime() {
         .expect("event fits bounded queue");
     assert_eq!(instance.step().unwrap().microsteps, 1);
     assert_eq!(instance.active_states(), &[StateId(0), StateId(2)]);
+}
+
+#[test]
+fn event_queue_capacity_is_enforced_at_the_ecs_boundary() {
+    let mut instance =
+        StateTreeInstance::new(asset(), 1, MicrostepLimit(8)).expect("runtime setup");
+    instance
+        .request_event(Event::new(EventId(7)))
+        .expect("first event fits");
+    assert_eq!(
+        instance.request_event(Event::new(EventId(7))),
+        Err(prism_state_tree_core::EventQueueError::Full)
+    );
+}
+
+#[test]
+fn tick_reports_budget_exhaustion_without_losing_the_event() {
+    let mut world = World::new();
+    let mut queue = CommandQueue::new();
+    let entity = {
+        let mut commands = queue.commands(world.entities());
+        queue_spawn(&mut commands, asset(), 1, MicrostepLimit(0)).expect("spawn setup")
+    };
+    queue.apply(&mut world);
+
+    tick_entity(&mut world, entity)
+        .unwrap()
+        .expect("initial entry has no transition");
+    world
+        .get_mut::<StateTreeInstance>(entity)
+        .unwrap()
+        .request_event(Event::new(EventId(7)))
+        .expect("event fits bounded queue");
+    assert_eq!(
+        tick_entity(&mut world, entity).unwrap(),
+        Err(prism_state_tree_core::RuntimeError::MicrostepLimit(
+            MicrostepLimit(0)
+        ))
+    );
+}
+
+#[test]
+fn tick_of_missing_or_despawned_entity_is_a_safe_noop() {
+    let mut world = World::new();
+    let missing = world.entities().reserve_entity();
+    world.flush_reserved();
+    assert!(tick_entity(&mut world, missing).is_none());
+
+    let entity = world.spawn(StateTreeInstance::new(asset(), 1, MicrostepLimit(8)).unwrap());
+    assert!(world.despawn(entity));
+    assert!(tick_entity(&mut world, entity).is_none());
 }

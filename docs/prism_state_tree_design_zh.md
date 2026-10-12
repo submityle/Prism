@@ -879,7 +879,7 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 
 当前证据：当前 `cargo test -p prism_state_tree_core --offline -- --test-threads=1` 为 **28 tests + 0 doctest 全绿**；回归覆盖首次 `run()` 的启动 Eventless 稳定化与事件共享同一微步预算、Parallel owner 转移后所有 region 仍有活跃配置，以及 History 请求深度与 owner 配置不匹配时的编译期拒绝。`cargo clippy -p prism_state_tree_core --offline -- -D warnings` 通过；`prism_state_tree_ecs` 的集成单测此前为 **4 tests + 0 doctest 全绿**。迁移/历史热路径目前使用临时 `Vec` 且日志无界增长，零分配仍是尚未满足的设计目标；完整 SCXML 一致性套件和分配计数基准也尚未交付。
 
-ST1 最小装配切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句柄、持有独立且长期存活 core cursor 的 `StateTreeInstance` ECS 组件、经 `CommandQueue` deferred spawn 的 `queue_spawn`，以及显式逐实体 `tick_entity` / `step` 和有界事件请求 API。core `Guard` 已增加 `Send + Sync` 约束，允许运行时组件满足 ECS 线程安全边界；集成测试验证 spawn 应用后初始进入，再请求事件并在后续 tick 切换状态。该 crate 保持 `no_std + alloc`。
+ST1 最小装配切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句柄、持有独立且长期存活 core cursor 的 `StateTreeInstance` ECS 组件、经 `CommandQueue` deferred spawn 的 `queue_spawn`，以及显式逐实体 `tick_entity` / `step` 和有界事件请求 API。core `Guard` 已增加 `Send + Sync` 约束，允许运行时组件满足 ECS 线程安全边界；集成测试验证 spawn 应用后初始进入，再请求事件并在后续 tick 切换状态，并覆盖事件队列满、预算错误和失效实体的安全 no-op。该 crate 保持 `no_std + alloc`。
 
 诚实边界：这不是完整 StateTree 产品的假实现，也不宣称 ST0–ST8 全部完成。ST1 尚未实现 Schema / Context、typed binding、批量查询、自动 Schedule 注册、observer 迁移事件桥接、资产服务器/热重载、ECS 快照回滚或 zero-config 插件；这些仍为 `PLANNED`。生命周期 callback 暂由 `NoopLifecycle` 承接。当前 ST0 同样不承诺 transition 期间无堆分配或外部 callback panic 可恢复。
 
