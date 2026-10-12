@@ -29,6 +29,8 @@
 //! - [`overrides`] — the crown (design §7): sparse [`PropertyOverride`] and
 //!   [`StructuralOp`] deltas in an [`OverrideSet`], with unique-key dedup and
 //!   orphan detection.
+//! - [`layers`] — bottom-up composition of an override-layer stack (base →
+//!   variant → … → instance), the Prefab Variant replay (design §7.3).
 //! - [`remap`] — the per-instance [`RemapTable`] that keeps a template's
 //!   internal references pointing inside *its own* instance (design §6.1).
 //! - [`template`] — the immutable [`SceneTemplate`] descriptor and its nested
@@ -46,6 +48,7 @@ extern crate alloc;
 
 pub mod identity;
 pub mod instance;
+pub mod layers;
 pub mod overrides;
 pub mod path;
 pub mod plan;
@@ -55,6 +58,7 @@ pub mod template;
 
 pub use identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
 pub use instance::SceneInstance;
+pub use layers::{compose_layers, OrphanKey, OverrideComposition};
 pub use overrides::{ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride, StructuralOp};
 pub use path::{FieldPath, FieldSegment};
 pub use plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
@@ -66,6 +70,7 @@ pub use template::{NestedSlot, SceneTemplate};
 pub mod prelude {
     pub use crate::identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
     pub use crate::instance::SceneInstance;
+    pub use crate::layers::{compose_layers, OrphanKey, OverrideComposition};
     pub use crate::overrides::{
         ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride,
         StructuralOp,

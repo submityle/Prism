@@ -1074,6 +1074,7 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 |---|---|---|
 | `identity` | §6 | `LocalEntityId`（基段 / 保留段）、`NameTable`（`BTreeMap`，确定性迭代序）、`PersistentId`（FNV-1a-128 确定性派生）、`PersistentIdBuilder` |
 | `instance` | §5.2 | `SceneInstance` 根锚组件（`impl Component`，可挂 ECS 实体；COW override） |
+| `layers` | §7.3 | `compose_layers`：变体 override 层自底向上重放（上层覆盖下层同键、结构操作按层序、孤儿 override 回收 + 报告） |
 | `residency` | §11.1 | `ResidencyTier`（Interactive / Streamed / Proxy）、`ResidencyPlan`（按 `LocalEntityId` 标注，缺省 Interactive、确定性迭代） |
 | `path` | §7.1 | `FieldPath` / `FieldSegment`，点号文本解析、规范化与往返 |
 | `plan` | §8.1 | `InstantiationPlan`（bake→runtime 契约）、`ArchetypeGroup`、`Column`（`Arc<[u8]>` COW 共享 SoA blob）、`FieldSlot`、`PlanError` + `validate()` 结构化校验 |
@@ -1081,6 +1082,6 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 | `remap` | §6.1 | `RemapTable`（基段 + 保留段两段稠密映射，O(1) 查、拒绝间隙） |
 | `template` | §5.1、§9 | `SceneTemplate`（含 `plan: InstantiationPlan` + `tiers: ResidencyPlan`）、`NestedSlot`（嵌套实例槽） |
 
-验证（本地）：`cargo test -p prism_scene` → **46 unit + 1 doctest 全绿**；`cargo build -p prism_scene --no-default-features`（`no_std`）通过；`cargo clippy -p prism_scene --all-targets` 无告警。
+验证（本地）：`cargo test -p prism_scene` → **50 unit + 1 doctest 全绿**；`cargo build -p prism_scene --no-default-features`（`no_std`）通过；`cargo clippy -p prism_scene --all-targets` 无告警。
 
 **尚未落地（后续里程碑，非占位）**：`spawn_scene()` 的 ECS 实例化热路径（§8.2，需 `prism_ecs` 提供批量预留 / 列块装载 API）、SIMD remap 与预取微架构（§8.5）、子场景流送（§12）、热重载传播（§13）、bake 产出的二进制包（§10，归 `prism_scene_bake`）。
