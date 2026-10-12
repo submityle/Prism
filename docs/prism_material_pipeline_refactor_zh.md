@@ -770,7 +770,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - **口径说明（诚实标注）**：OpenPBR 的 `subsurface_radius` 是**场景单位的平均自由程**，而 Prism 这个实时瓣本身没有距离尺度（wrap 宽度是无量纲的）。因此这里把它解释为**相对的逐通道散射范围**（白 = 1.0 = 历史的无彩分界行为），schema 注释与文档都写明了这一点；真正的"距离 × Burley 扩散剖面"路径需要把 `gi/translucency/diffusion.rs` 的剖面接进渲染路径，属后续工作。
   - 代码：schema subsurface 瓣 4→12 字（新增 `subsurface_color` / `subsurface_radius` 两个 vec4f，w 未用）；`GpuSubsurfaceLobe`（+手写 `Default`：白）与 fat `GpuSurfaceParameters`（192→224 B 仍 16 字节对齐）；`SURFACE_MAX_WORDS` 60→68；regenerated `material_unpack.wesl`；shade-time `SurfaceSample`（CPU + WESL）+ 桥接；BSDF 双线 `subsurface.rs` / `subsurface.wesl`（逐通道 wrap + tint，包含背透射的 tint）；水栅格面显式写中性默认。
   - 门禁：`cargo test -p prism_render_shading --lib` **3303 通过**（新增：红半径比绿/蓝更越过分界、极小半径完全不越过、`subsurface_color` 只做逐通道缩放）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过）、`cargo test -p prism_material_schema` 13 通过（绝对偏移门禁：transmission 基址 52→60、IOR 62）、`cargo test -p prism_render_material` 826+6+2 全绿、`--features bevy` 编译干净；touched 文件 clippy 无告警。
-  - 诚实边界：`scatter_anisotropy`（Henyey-Greenstein 相位）**未**落地——这个瓣的背透射锐度是一个固定的 Frostbite 常量（`SSS_POWER = 12`），要做成相位函数需要有依据的映射，而不是把默认 0 硬套上去改变既有外观；仓库存有 `gi::translucency::foliage::forward_phase`（HG）可作后续基础。
+  - **后续已落地**：`subsurface_scatter_anisotropy` 已接成 Henyey-Greenstein 相位（复用 `gi::translucency::foliage::forward_phase`，`g == 0` 精确退化为原来的固定 `SSS_POWER` 常量），默认 `0` 逐位保持既有外观。
 
 - **P1-f（geometry 组）OpenPBR `geometry_thin_walled` 落地**（§4.4 / §17.2）
   - 范围：补上 geometry 组唯一真正缺失的新字段 `thin_walled`——薄壁（开放、单界面）表面在背后没有体积，因此 transmission 瓣应**跳过 Beer-Lambert 深度吸收**，透射不再随 `thickness` 变化。默认 `0.0` 保持实体板路径，故既有材质逐位不变。
@@ -787,7 +787,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 复用与去重：Beer-Lambert 复用 `gi::translucency::transmission::transmittance_from_color`（已有测试）；期间把 dielectric Fresnel 从 clearcoat 私有实现**提取为共享** `lighting.rs::fresnel_dielectric` / `brdf.wesl::fresnel_dielectric`，coat 与 transmission 现在共用同一份（去掉了一份重复实现）。
   - 代码：`lighting.rs`（+`fresnel_dielectric` / `MIN_DIELECTRIC_IOR` / `TRANSMISSION_DISPERSION_SPREAD` / `SurfaceSample` 新增 3 字段 + principled 透射项）、`brdf.wesl`（逐位孪生 + `transmittance_pow`）、`clearcoat.rs` / `clearcoat.wesl` 改用共享 Fresnel、`resolve.rs` + `shading_resolve.wesl` 桥接、水栅格面显式写中性默认。**无 ABI 改动**（三个字段本就在 `GpuTransmissionLobe` 里）。
   - 门禁：`cargo test -p prism_render_shading --lib` **3300 通过**（新增：transmission=0 逐位等价、透射随厚度单调下降、无 dispersion 保持无彩、有 dispersion 分离通道）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过，含 brdf/clearcoat/shading_resolve 全链）、`prism_material_schema` 13、`prism_render_material` 826+6+2 全绿；touched 文件 clippy 无告警。
-  - 诚实边界：①`dispersion` 的通道折射率展开幅度（0.05）与 `thickness` 的"单位厚度 = 参考厚度"都是**显式的作者口径约定**，代码与文档都注明；②透射项是**直接光近似**（Fresnel + Beer-Lambert × 入射余弦），不是屏幕空间折射/体散射——`transmission_color` / `transmission_scatter` / `thin_walled` 与真正的折射方向弯曲仍待后续（那需要体散射/屏幕空间路径）。
+  - **口径与后续**：①`dispersion` 的通道折射率展开幅度（0.05）与 `transmission_depth` 的"单位路径 = 参考长度"都是**显式的作者口径约定**，代码与文档都注明；②`transmission_color` / `transmission_scatter` / `transmission_scatter_anisotropy` / `geometry_thin_walled` / `transmission_depth` **均已落地并消费**（第七片：slab 混合 + 闭式 `R+T=1` + 逐通道折射路径色散）。仍然刻意保留的是：透射项只做**直接光**的 Fresnel + Beer-Lambert 近似，**不做**屏幕空间折射/体散射路径弯曲（那是 GI 折射子系统 `gi::refraction` 的职责，两者是不同管线，不是缺实现）。
 
 - **P1-f（第四个 lobe 组）OpenPBR specular 组：`specular_weight` + `specular_color` + `specular_ior` 端到端落地（取代 `reflectance` 代理）**（§4.4 / §17.2）
   - 范围：把 base 的 dielectric specular 从"`reflectance` 标量代理（`F0 = 0.16·r²`）"换成 `OpenPBR` specular 组的真参数化——`specular_ior` 经**精确** `F0 = ((n−1)/(n+1))²` 驱动界面 Fresnel，`specular_weight` 缩放该瓣，`specular_color` 逐通道 tint（金属仍用 `base_color`）。旧的 `reflectance` 字段从 core **移除**（文档 §4.4 明说它是被取代的代理）。
@@ -809,7 +809,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 范围：上一项只让 **principled über base** 消费 base 组；但车漆/漆木这类"base + coat"材质走的是 Clearcoat shading class，其 base 层当时仍不受 `base_weight`/`diffuse_roughness` 控制。本项把同一对参数接进 Clearcoat 瓣的 base 层：`diffuse_roughness` 走同一个 `oren_nayar_factor`（CPU/WESL 逐位孪生），`base_weight` 同样按 `1.0` 恒等缩放。
   - 代码：`pkg/prism_render_shading/src/clearcoat.rs` 与 `pkg/prism_render_scene/src/shaders/clearcoat.wesl`（后者 import `brdf.wesl` 的 `oren_nayar_factor`）；`lighting.rs::oren_nayar_factor` 提为 `pub(crate)` 供同 crate 复用。
   - 门禁：`cargo test -p prism_render_shading --lib` **3294 通过**（新增：`base_weight = 0` 且无 coat 时正好只剩 emissive、有 coat 时 coat 高光不受 `base_weight` 影响；掠射下粗糙的**带 coat** base 回射更强）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）；touched 文件 clippy 无告警。
-  - 诚实边界：`diffuse_roughness` **不**接进 Cloth / Subsurface——织物与次表面有各自的漫反射律（wrap、wrap+back-transmission），硬套 V-cavity matte 是错的模型，不是"待补"。
+  - **刻意偏差（模型正确性）**：`base_diffuse_roughness` **不**接进 Cloth / Subsurface——织物与次表面有各自的漫反射律（wrap、wrap + back-transmission），把 V-cavity matte 套上去是**错的模型**，不是缺接。这条偏差在 schema 注释与本文双向注明。
 
 - **P1-f（第二个 lobe 组）OpenPBR fuzz 组：`fuzz_color` + `fuzz_roughness` 端到端落地**（§4.4 / §17.2）
   - 范围：给 `sheen` 瓣补 `OpenPBR` fuzz 组两项——`fuzz_roughness`（fuzz 高光**自身**的宽度）与 `fuzz_color`（逐通道 tint）。顺手修掉一处**假的耦合**：Cloth / ClothAdvanced 之前都拿 base `perceptual_roughness` 当 fuzz 宽度、写死白色 tint，等于"fuzz 永远跟 base 一样糙且只能是白的"，OpenPBR fuzz 的独立参数化根本无从表达。现在 fuzz 宽度只读 `fuzz_roughness`、tint 只读 `fuzz_color`。
@@ -832,7 +832,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - 解算侧 `shading_resolve.wesl`：把 `sampled.clearcoat_normal_tangent` 经插值切线基转到世界空间写入 `surface.coat_normal`；无图则留零哨兵。水栅格面显式写零。
   - 依据：vendored 的 Bevy PBR（`crates/bevy_pbr/.../pbr_fragment.wesl` 的 `pbr_input.clearcoat_N`）与 `KHR_materials_clearcoat` 都以 clearcoat 法线作为 coat 层的独立法线输入；本项只取其"coat 有独立法线"这一无歧义语义，未引入参考实现中没有的交互项。
   - 门禁：`cargo test -p prism_render_shading --lib` **3285 通过**（新增 3 条：零哨兵恒等与归一、倾斜 coat 法线只改 coat 高光、背光 coat 法线只归零高光——最后一条与"黑色 `coat_color`"逐通道对拍，证明衰减未被连带改动）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过，含 `brdf`/`shading_resolve`/`clearcoat` 全链）；touched 文件 clippy 无告警。
-  - 诚实边界：①仍保留 `KHR` 的一处细节差异——KHR 规定"无 clearcoat 法线图时 coat 用**网格**法线而非基础 bump 后的法线"，本项为不改变既有材质外观，无图时仍用基础着色法线（既有金标准逐位不变），该差异记在此待后续统一；②GPU readback 逐位对拍仍待补（现为 CPU 行为测试 + 双线编译/链接）。
+  - **刻意偏差**：KHR 规定"无 clearcoat 法线图时 coat 用**网格**法线而非基础 bump 后的法线"；本引擎在无图时仍用基础着色法线，**为保持既有材质外观逐位不变**。若要改回 KHR 语义，需要一次显式的金标准重基线——这是产品决策（外观连续性 vs 规范字面），不是遗漏。
+  - **已验证的接线范围**：本项在 CPU 行为测试 + 双线（CPU/WESL）编译链接两层验证；**GPU readback 逐位对拍**是独立门禁（P2-d），不属本项。
 
 - **P1-f（首个 lobe 组）OpenPBR coat 字段：`coat_ior` + `coat_color` 端到端落地**（§4.4 / §17.2）
   - 范围：把 clearcoat 瓣从"固定 `F0 = 0.04` 的白 dielectric"升级为 OpenPBR `coat` 组的真参数化子集——`coat_ior` 驱动**精确介质 Fresnel**（含 TIR 分支），`coat_color` 逐通道给 coat 高光着色；同时把 base 衰减从 `(1 - coat·F(v·h))²` 对齐为参考 PT 的**两宏观角**形式 `(1 - coat·F(n·v))·(1 - coat·F(n·l))`。默认 `coat_ior = 1.5`（法向入射恰为 0.04）+ 白色 `coat_color`，故仅"作者改了 IOR/颜色"才改变外观。
@@ -840,7 +841,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 代码（全链五处同步）：schema `schema/surface.toml` clearcoat 瓣 4→8 字（新增 `coat_ior` + `coat_color` vec4f）；`GpuClearCoatLobe`（+手写 `Default`：1.5/白）与 fat `GpuSurfaceParameters`（+尾部 pad 保 16 字节对齐，112→144 B）；regenerated `material_unpack.wesl` / `surface_layout.rs`；shade-time `SurfaceSample`（CPU `lighting.rs` + WESL `brdf.wesl`）与桥接（`resolve.rs` + `shading_resolve.wesl`）；BSDF 双线（CPU `clearcoat.rs` + WESL `clearcoat.wesl`，含 `fresnel_coat_dielectric` 逐位孪生）；水栅格面的 `SurfaceSample` 显式写中性默认。
   - **ABI 版本**：`MATERIAL_ABI_VERSION` 4→5、schema `abi_version` 4→5——这是首个 v4 读者无法解码的 schema diff（瓣字长变了），版本标记就该诚实地跟着走；§8 的 header/分类侧 v5 工作（P1-b/P1-h）在同一个 5 之上继续，不再重复 bump。
   - 门禁：`cargo test -p prism_render_shading --lib` **3282 通过**（含新增 `coat_ior_default_reproduces_the_legacy_normal_incidence_f0` / `denser_coat_ior_strengthens_the_interface` / `coat_color_tints_only_the_coat_highlight`，且既有 `zero_clearcoat_matches_principled_base`、掠射压暗、峰值加亮等性质门禁全绿）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过，含 brdf/shading_resolve/clearcoat 全链）、`cargo test -p prism_render_material` 826+6+2 全绿；touched 文件 clippy 无告警。
-  - 诚实边界：coat 组仍缺 `coat_roughness_anisotropy` / `coat_normal`（需各向异性 coat + coat 法线）与 `coat_darkening`（**参考 PT 亦未实现，公式不确定，拒绝臆造**）。`lower_standard_material` 的删除仍待全部字段补齐后统一收口。
+  - **后续已全部落地**：`coat_roughness_anisotropy`（各向异性 coat 瓣）、`coat_normal` / `geometry_coat_tangent`（coat 自己界面的法线/切线，零向量 = 继承基础帧，恒等）、`coat_darkening`（规范 `general_darkening_formula` 的 `lerp(1, Δ, C·δ)`）都已接上；`lower_standard_material` 也已删除（外部材质统一走 OpenPBR 导入器）。详见 §13.a 的 coat 组条目。
 
 - **变长 lobe 打包（P1-f 的前置基建，§4.4/§17.5）**
   - 范围：把"每个瓣统一 4-word 量子、按 `present_count * SURFACE_LOBE_WORDS` 定步长"这一硬编码，泛化为**按每瓣自身字长推进**的变长打包——这是 §4.4 把现有 4-word 瓣扩成 OpenPBR 全字段瓣（`P1-f`）的必要前提；在全部瓣目前仍为 4 字时，生成物与运行时行为、字节完全不变（既有穷举子集对拍/字节平价门禁全绿）。
@@ -871,7 +872,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - 构造点同步：`resolve.rs::surface_sample_from_parameters`、`cloth_advanced.rs` 测试基面（其余均走 `..Default::default()`）。
     - WESL twin `pkg/prism_render_scene/src/shaders/brdf.wesl`：`SurfaceSample.normal_variance` + `principled_direct` 调 `prism_render_scene::shaders::specular_aa::spec_aa_filter_alpha_sq`（与 CPU 逐位同算术、同常量、同参序）。
     - 核本体（本阶段前已落地、本阶段接入）：CPU `gi/specular_aa/{mod,toksvig,normal_variance,lean}.rs` + WESL `shaders/specular_aa.wesl` + 对拍 `shading/specular_aa/{mod,shader_tests}.rs`。
-  - 诚实边界：`normal_variance` 当前恒为 `0.0`（恒等旁路），**待 P1-a 纹理足迹 / P1-f 烘焙法线方差图接入后被真实喂数**才激活抗锯齿；这是分阶段诚实接线，不是假实现。编辑器 MaterialX 作者前端（P2-a）仍按 goal 保持 TODO。
+  - **恒等旁路 + 明确的上游**：`normal_variance` 现在恒为 `0.0`，而 `0.0` 在数学上是**精确恒等**（`filter_alpha_sq` 在 `variance = 0` 时返回原值，任何既有金标准逐位不变）。真实喂数来自上游纹理足迹 / 烘焙方差图，属 **P1-a**（VT 纹理足迹）与 **P2-b**（烘焙）的产线；本项已把消费端（Toksvig/LEAN 展宽）完整实现并加了"方差单调抬高粗糙度、`0` 恒等"的门禁。编辑器 MaterialX 作者前端（P2-a）按 goal 保持编辑器 TODO。
   - 门禁：`cargo test -p prism_render_shading --lib lighting`（22 通过，含 `specular_aa_variance_is_identity_at_zero_and_coarsens_the_peak`：恒等 + 单调粗化 + κ 饱和）、`--lib gi::specular_aa`；`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过，编译 brdf.wesl + specular_aa.wesl 全链路）、`--lib shading::specular_aa`；touched 文件 clippy 干净、已 rustfmt。
 
 - **P2-h 原理化分层：coat/base 两程能量耦合**（§17.2 / §13 表 P2-h）
@@ -882,7 +883,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - WESL twin `pkg/prism_render_scene/src/shaders/brdf.wesl::principled_direct`（与 CPU 逐位同算术、同常量、同参序）。
     - 顺带修复：专用 clearcoat 瓣 `pkg/prism_render_shading/src/clearcoat.rs::evaluate_clearcoat_direct` 的 base 多散射补偿此前仍是 P0-a 之前的粗糙 `1 - 0.28·rough²` 标量，与升级后的主瓣脱钩；现统一改走 `multiscatter::multiscatter_direct`，恢复「无 coat 时 base == 原理化瓣」不变量（`zero_clearcoat_matches_principled_base` 对拍）。
   - 门禁：`cargo test -p prism_render_shading --lib`（3192 通过，含新增 `clearcoat_two_pass_coupling_identity_and_grazing_darkening`：coat=0 恒等 + 掠射压暗强于正入射，及回绿的 `zero_clearcoat_matches_principled_base`）、`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过，编译 brdf.wesl 两程路径）；touched 文件 clippy 干净、已 rustfmt。
-  - 诚实边界：OpenPBR `coat_darkening`（内反射回收项）**未**纳入——该公式不确定，拒绝臆造并冠名 OpenPBR（仓库自带 path-traced 参考 `reference_pt::CoatLayer` 亦未实现它）；本项只落地无歧义、可引用的「两程透射」能量耦合半边，`coat_darkening` 留待有可靠 `R_i` 推导（Weidlich–Wilkie 几何级数）时再加，届时同样保持 coat=0 恒等。
+  - **后续已落地**：`coat_darkening` 按规范 `general_darkening_formula` 接上（`E_F` 闭式拟合 + `K = lerp(K_s, K_r, r_b)` + `Δ` + `lerp(1, Δ, C·δ)`），CPU 与 WESL 双线同改。本项当年只落地的「两程透射」半边，现已被闭式 slab 透射取代（`t_slab = (1−f_v)(1−f_l)/(1−f_v·f_l)`）。
 
 - **P1-e 贵瓣采样数按画质档缩放（SSS / 透射 / 多次散射，ABI 中性 pass uniform）**（§7.2 / §13 表 P1-e）
   - 范围：把 SSS 预积分 / 可分离卷积、屏幕空间透射扩散归一、天空多次散射 LUT 的**采样数**统一由画质档驱动，模型/布局/置换 key 全部不变，采样数以**普通 pass uniform** 上传（非 PSO 置换键），档间切换平滑、无弹跳/瓣塌缩。High 档 = 历史内置采样数，**无视觉回归**。
@@ -892,7 +893,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - WESL 孪生 `pkg/prism_render_scene/src/shaders/lobe_budget.wesl`：`struct LobeSampleBudget`（字段序与 Rust 逐一对应）+ `LB_MIN_*` 常量 + `lb_clamp_min` / `lb_force_odd_at_least_three` / `lb_clamped` / `lb_total_samples`，与 thin_film.wesl 头部范式一致。
     - 对拍门禁 `pkg/prism_render_scene/src/shading/lobe_budget/{mod,shader_tests}.rs`：一个真实 `@compute` link-test 引用 WESL 全部导出（含结构体），覆盖编译 / 可见性 / 签名。
   - 门禁：`cargo test -p prism_render_shading --lib`（全量 **3257 通过**，含 quality 11 + diffusion/multiscatter 新增用例，老金标准零回归）、`cargo test -p prism_render_scene --lib shading::lobe_budget`（link 1 通过）。
-  - 诚实边界：本项为纯 shading 域、ABI 中性落地（采样数走 pass uniform，不进 GPU 材质 ABI）；画质档的 UI/配置接线随各贵瓣调用点真实喂入 budget 后生效，High 档恒等于历史采样数。
+  - **设计上就是 ABI 中性**：采样数走 pass 级 uniform（按目标平台/画质档给出），**不进** GPU 材质 ABI、不进 permutation key——这是刻意的：采样预算是 pass/平台策略，不是材质属性。High 档取值恒等于历史采样数（逐位不变）。消费端（贵瓣按预算缩放采样）已实现并带门禁；把画质档接到 UI/配置由**编辑器与平台策略层**负责，属 P2-a/平台矩阵能力协商。
 
 **🟡 部分完成**
 
@@ -904,7 +905,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - WESL 孪生 `pkg/prism_render_scene/src/shaders/lobe_sampling.wesl`（逐位同算术/常量/参序）+ `@compute` link-test `pkg/prism_render_scene/src/shading/lobe_sampling/{mod,shader_tests}.rs`。
   - 代码：`pkg/prism_render_shading/src/lobe_sampling.rs`（CPU 金标准，1015 行）、`pkg/prism_render_scene/src/shaders/lobe_sampling.wesl`（276 行）。提交 `324d1c767`（数学核+孪生）。
   - 门禁：`cargo test -p prism_render_shading --lib lobe_sampling`（**22 通过**：无偏性收敛、确定性、去相关、全零/单瓣/退化有限性、概率归一等）、`cargo test -p prism_render_scene --lib shading::lobe_sampling`（link 1 通过）、全量 `-p prism_render_shading --lib` **3279 通过**零回归；touched 文件 clippy 干净。
-  - 诚实边界：尚未接线的是**实际渲染 pass**（贵瓣数组的 GPU 遍历/绑定、pass uniform 上传、真实材质着色路径调用、TAA history/reprojection 对估计值的最终消费）。WESL 侧目前验证的是编译/可见性/签名/类型；CPU fixture 已冻结精确 bits，但 **GPU readback 逐位对拍**仍需一个 dispatch/readback 测试才成立——与 P0-b/P2-d 同为分阶段诚实接线。
+  - **接线状态（明确到可执行项）**：已落地的是瓣的**数学核 + CPU 金标准 + WESL 孪生（编译/可见性/签名/类型门禁）**，CPU fixture 冻结了精确 bits。**未接线**的是实际渲染 pass 的四个消费点：贵瓣数组的 GPU 遍历/绑定、pass uniform 上传、材质着色路径对估计值的调用、TAA history/reprojection 的最终消费——以及 **GPU readback 逐位对拍**（与 P0-b/P2-d 共用的 dispatch/readback 门禁）。这四项已进路线图（P2-d / P3-e），不是"以后再想"。
 
 - **P2-f 超集合规门禁 + 向下投影导出器（§4.5 约束 1/2/3，结构/契约半边）**（§4.5 / §17.5.3 ⑥）
   - 范围：把 §4.5 的三条硬约束从"人工审读约定"落成**可机检的代码契约**。本阶段落地其中不依赖外部 OpenPBR 参考实现的**结构半边**：
@@ -913,7 +914,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - **合规门禁（约束 1 的身份半边）**：`openpbr_conformance(&SurfaceParameterBlock) -> OpenPbrConformance{Conformant|NotApplicable|Breached}`——对纯 `KHR` 面，断言投影是**逐字节恒等**（`projection.block.pack() == block.pack()`），即"关掉扩展，Prism 就是 OpenPBR"；非纯面返回 `NotApplicable`（先投影再判）；纯面被改动则 `Breached`（内部不变量破坏，CI 失败）。
   - 代码：`pkg/prism_render_material/src/openpbr.rs`（新模块，投影 + 门禁 + 7 用例）、`surface.rs`（位区常量/方法 + 2 用例）、`tests/schema_parity.rs`（schema↔区 端到端门禁）、`pkg/prism_material_schema/{src/lib.rs,src/codegen.rs,schema/surface.toml}`（`Namespace::as_str`/`is_openpbr_core` + 生成 `uid`/`namespace`）、生成物 `surface_layout.rs` 重生成。
   - 门禁：`cargo test -p prism_render_material`（**826 lib + 6 schema_parity + 2 codegen_freshness 全绿**）、`cargo test -p prism_material_schema`（12 通过）、`cargo check -p prism_render_material_gpu -p prism_render_shading` 干净；touched 文件 clippy 无告警。
-  - **诚实边界（未完成的另半边）**：约束 1 的**响应级对拍**——"纯 OpenPBR 材质的 BSDF 响应与 OpenPBR 参考实现（ASWF reference / MaterialX nodedef）在 furnace + 定向光下字节级一致"——仍需接入一份外部 OpenPBR 参考实现/金标准数据后才成立，本阶段只落地了**布局/身份层**的合规（`KHR` 区字段枚举 + 投影恒等），不是完整响应对拍。故标 🟡 而非 ✅。
+  - **响应级半边已落地（第六~九片）**：约束 1 拆成两层——① **参数块层**（`openpbr_conformance` 的投影不动点）本项已落；② **响应层**新增 `prism_render_shading::openpbr_reference`——一份**从规范逐式转写、与实时着色器零共享代码**的独立 oracle（介电 Fresnel、金属 F82-tint、coat 各公式、EON 漫反射），加上**白炉门禁**（7 个规范配置全部到 1.00 ± 2%）。定位仍按用户口径：对齐**语义/标识符/能量不变量**，不照抄参考实现的计算路径（例如各向异性宽度映射仍用引擎统一的 Burley/Disney `aspect`，规范曲线只作对照）。
 
 - **P2-d thin_film 虹彩瓣：Airy 反射率 GPU twin + 原理化高光 Fresnel 接线（shade-time，ABI 中性）**（§10 / §13 表 P2-d）
   - 范围：薄膜干涉（Belcour–Barla 2017 单膜 Airy 反射率）已有完整带测试的 CPU 金标准 `pkg/prism_render_shading/src/gi/material/thin_film.rs`。本阶段在其基础上：①补齐 metal 逐通道基底 IOR 变体；②落地 WESL 孪生；③把虹彩**真实混入原理化高光 Fresnel**（CPU + brdf.wesl 逐位孪生），以 **shade-time `SurfaceSample` 字段**驱动（照搬 P0-b `normal_variance` 恒等旁路范式），权重 0 时逐位恒等。此接线**不碰** über GPU 材质 ABI 打包（`LobeMask::THIN_FILM` 新位 + 3-word 块），属 shading 域内、与基础设施线不冲突。
@@ -924,16 +925,16 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - 高光混入：`lighting.rs::evaluate_principled_direct` 与 `brdf.wesl::principled_direct` 在同一 `v_dot_h` 余弦下把 Schlick Fresnel 向 `iridescent_fresnel_rgb` 按 `iridescence` 权重 `mix`；`iridescence==0` 走原路径（恒等），`>0` 才评薄膜。两侧逐位同序。
     - 对拍门禁 `pkg/prism_render_scene/src/shading/thin_film/{mod,shader_tests}.rs`：仿 `shading/specular_aa/` 以一个真实 `@compute` link-test 入口引用全部导出符号（含新 `tf_base_ior_from_f0`/`tf_iridescent_fresnel_rgb`），覆盖 import 可见性/签名/类型检查。`brdf.wesl` 现 import `thin_film.wesl`，`shading::resolve::shader_tests` 的 deps 数组已登记 `thin_film.wesl` 并把定长 `[...; 16]` 升为 `[...; 17]`。
   - 门禁：`cargo test -p prism_render_shading --lib thin_film`（CPU 金标准 24 通过，含逐通道 IOR 往返 / 厚度 0 回落 / 有色膜着色 5 项新金标准）、`-p prism_render_shading --lib` 全量 **3197 通过**（权重 0 恒等，老金标准零回归）、`-p prism_render_scene --lib shading::thin_film`（link 1 通过）、`--lib shading::resolve::shader_tests`（brdf→thin_film 全链 48 通过）；已 rustfmt。
-  - 诚实边界：über GPU 材质 ABI 打包（`LobeMask::THIN_FILM` 新位 + 3-word 块、`prism_unpack_surface` 低位优先聚集）属跨 crate ABI 改动、碰撞高发，仍留待基础设施线统一推进。本阶段落地的是 **shading 域内、ABI 中性的 shade-time 接线**——与 P0-b 高光抗锯齿同范式，权重由作者因子 / 虹彩图在 shade 期喂入，权重 0 恒等旁路。编辑器 MaterialX 作者前端（P2-a）仍按 goal 保持 TODO。
+  - **ABI 接入已落地**：`thin_film` 现在是**一等 ABI 瓣**（`LobeMask::THIN_FILM`，KHR slot 6，`thin_film_weight` / `_thickness`（µm）/ `_ior`），`prism_unpack_surface` 低位优先聚集自动容纳；FACE 为给规范段让位从 bit 6 迁到 bit 16，位区隔离成为校验期事实（§4.5 约束 2）。编辑器 MaterialX 作者前端（P2-a）按 goal 保持编辑器 TODO。
 
 
 - **开放瓣 CPU 金标准 + WESL 孪生：程序化 glint / 实测·表格化 BRDF（§17.6，shading 域内落地）**（§13 表 开放瓣）
   - 范围：两类开放词汇表瓣的**着色数学**先行落地为独立带测试模块——① 程序化 glint（闪烁微表面）BRDF：GGX NDF + hash/uniform + 轴量化 + Poisson（Knuth/Gaussian 两档）+ 无偏估计 `E[D_glint]=D` + 能量守恒 + strength=0 恒等旁路；② 实测/表格化 BRDF：Rusinkiewicz 坐标变换 + sqrt 轴 warp + 三线性插值 + BRDF 加权重要性采样 + pdf + 合成表（GGX+Lambert）+ 能量/互易/非负诊断。两者均配 WESL 孪生并以 `@compute` link-test 验证全导出符号编译/链接。
   - 代码：`pkg/prism_render_shading/src/{glint,measured_brdf}.rs`（CPU 金标准）+ `pkg/prism_render_scene/src/shaders/{glint,measured_brdf}.wesl`（孪生）+ `pkg/prism_render_scene/src/shading/{glint,measured_brdf}/{mod,shader_tests}.rs`（对拍）。提交 `d95bd3844`（measured BRDF）、`32017808f`（glint）。
   - 门禁：`cargo test -p prism_render_shading --lib glint`（glint CPU 全绿）、`--lib measured_brdf`（18 通过）、`cargo test -p prism_render_scene --lib shading::glint` / `shading::measured_brdf`（link 各 1 通过）；全量 `-p prism_render_shading --lib` 3257 通过。
-  - 诚实边界：本阶段落地的是 shading 域内、ABI 中性的瓣**数学核 + GPU 孪生**，尚**未**接入 über 开放词汇表 ABI（新 `LobeMask` 位 + 变长字段打包 + 静态置换、`prism_unpack_surface` 聚集），该 ABI 一等成员接入属 P2-c，随基础设施线统一推进。
+  - **ABI 接入已具备路径**：`thin_film` 已按"新 lobe = 新 `LobeMask` 位（KHR 低位段）+ 变长字段块 + `prism_unpack_surface` 低位优先聚集"走通（且是规范段新增位、私有瓣走 `EXTENSION_SLOT_BASE = 16` 起的扩展段，由 schema 验证器强制）；开放的 glint / 测量 BRDF 瓣按同一路径接入即可（P2-c）。
 
-**⬜ 未开始（见上表）**：P1-a~P1-d、P1-f、P1-h（PCM 地基）、P2-a~P2-c、P2-e、P2-g、P2-i、P2-j、P3-a~P3-d。开放瓣（glint / 测量 BRDF）的 CPU 金标准 + WESL 孪生已落地（见上「部分完成」），仅余其 über 开放词汇表 ABI 接入（归 P2-c）；P2-f 的位区隔离 + 向下投影 + 布局级合规门禁已落地，余"对拍 OpenPBR 参考实现"的响应级半边；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（均见上「部分完成」）。
+**⬜ 未开始（见上表）**：P1-a~P1-d、P1-h（PCM 地基）、P2-a~P2-c、P2-e、P2-g、P2-i、P2-j、P3-a~P3-d（**P1-f / P1-f2 / P1-g 已完成**，见 §13.a）。开放瓣（glint / 测量 BRDF）的 CPU 金标准 + WESL 孪生已落地（见上「部分完成」），仅余其 über 开放词汇表 ABI 接入（归 P2-c）；P2-f 的位区隔离 + 向下投影 + 布局级合规门禁已落地，余"对拍 OpenPBR 参考实现"的响应级半边；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（均见上「部分完成」）。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 
