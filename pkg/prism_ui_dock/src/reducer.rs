@@ -18,6 +18,8 @@ pub enum Target {
 pub enum Placement {
     /// Add a panel to the target's tab stack.
     Tab,
+    /// Insert a panel before the tab at the given index, or append at `len`.
+    TabAt(usize),
     /// Create a split on the selected edge.
     Side(Side),
 }
@@ -328,6 +330,28 @@ fn insert_rec(
                         false
                     }
                 }
+                Placement::TabAt(index) => {
+                    if let DockNode::TabStack {
+                        tabs: incoming,
+                        active: _,
+                    } = moving
+                    {
+                        if index > tabs.len() {
+                            return false;
+                        }
+                        let incoming_len = incoming.len();
+                        let old_active = *active;
+                        tabs.splice(index..index, incoming);
+                        if index <= old_active {
+                            *active = old_active + incoming_len;
+                        } else {
+                            *active = old_active;
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
                 Placement::Side(side) => {
                     let old = core::mem::replace(root, DockNode::Empty);
                     *root = side_split(old, moving, side);
@@ -337,7 +361,7 @@ fn insert_rec(
         }
         DockNode::Document { tabs, .. } if matches!(target, Target::Document(d) if tabs.contains(d)) => {
             match placement {
-                Placement::Tab => false,
+                Placement::Tab | Placement::TabAt(_) => false,
                 Placement::Side(side) => {
                     let old = core::mem::replace(root, DockNode::Empty);
                     *root = side_split(old, moving, side);

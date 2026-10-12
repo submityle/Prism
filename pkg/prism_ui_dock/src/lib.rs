@@ -8,10 +8,15 @@
 
 extern crate alloc;
 
+mod drag;
 mod model;
 mod reducer;
 mod validate;
 
+pub use drag::{
+    calculate_drop_zone, map_drop_action, tab_insertion_index, transition, DragError, DragEvent,
+    DragState, DropMapError, DropZone, PointerPosition,
+};
 pub use model::{
     AutoHideBars, AutoHideEntry, Axis, DockLayout, DockNode, DocumentId, FloatingWindow,
     MaximizeRestore, PanelId, Ratio, Rect, Side, SplitChild,
