@@ -226,17 +226,26 @@ impl Instance {
         &mut self,
         callback: &mut C,
     ) -> Result<StepReport, RuntimeError> {
-        if !self.started {
-            self.started = true;
-            self.enter_target(self.plan.root(), None, None, 0, callback);
-        }
         let mut report = StepReport {
             events_processed: 0,
             microsteps: 0,
             queued_events: self.queue.len(),
         };
-        self.run_eventless(callback, &mut report)?;
+        self.start_into(callback, &mut report)?;
+        report.queued_events = self.queue.len();
         Ok(report)
+    }
+
+    fn start_into<C: LifecycleCallback>(
+        &mut self,
+        callback: &mut C,
+        report: &mut StepReport,
+    ) -> Result<(), RuntimeError> {
+        if !self.started {
+            self.started = true;
+            self.enter_target(self.plan.root(), None, None, 0, callback);
+        }
+        self.run_eventless(callback, report)
     }
 
     /// Consumes queued events FIFO and runs eventless cascades until completion
@@ -252,14 +261,12 @@ impl Instance {
         &mut self,
         callback: &mut C,
     ) -> Result<StepReport, RuntimeError> {
-        if !self.started {
-            self.start(callback)?;
-        }
         let mut report = StepReport {
             events_processed: 0,
             microsteps: 0,
             queued_events: self.queue.len(),
         };
+        self.start_into(callback, &mut report)?;
         while let Some(event) = self.queue.pop_front() {
             self.current_event = Some(event);
             let selected = self.select(Trigger::Event(event.id));
@@ -410,6 +417,7 @@ impl Instance {
                 report.microsteps,
                 callback,
             );
+            self.complete_parallel_configuration(report.microsteps, callback);
         }
         self.log.push(LogEntry {
             kind: LogKind::Transition,
@@ -422,6 +430,39 @@ impl Instance {
         callback.on_transition(source, transition.target);
         report.microsteps += 1;
         Ok(())
+    }
+
+    /// Repairs region roots that were removed by a transition owned by an
+    /// already-active parallel state. A transition from a parallel owner may
+    /// intentionally replace one region's branch while the owner itself stays
+    /// active; every other region must still have a live configuration.
+    fn complete_parallel_configuration<C: LifecycleCallback>(
+        &mut self,
+        microstep: usize,
+        callback: &mut C,
+    ) {
+        let parallel_states: Vec<StateId> = self
+            .active
+            .iter()
+            .copied()
+            .filter(|state| {
+                matches!(
+                    self.plan.nodes[state.0 as usize].kind,
+                    NodeKind::Parallel { .. }
+                )
+            })
+            .collect();
+        for parallel in parallel_states {
+            let regions = match self.plan.nodes[parallel.0 as usize].kind.clone() {
+                NodeKind::Parallel { regions, .. } => regions,
+                _ => continue,
+            };
+            for region in regions {
+                if !self.is_active(region) {
+                    self.enter_state_default(region, microstep, callback);
+                }
+            }
+        }
     }
 
     fn capture_histories(&mut self, root: StateId) {

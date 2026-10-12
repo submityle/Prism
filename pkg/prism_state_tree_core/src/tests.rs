@@ -336,6 +336,64 @@ fn cross_parallel_region_transition_exits_stale_target_region_configuration() {
 }
 
 #[test]
+fn parallel_owner_transition_rehydrates_all_regions() {
+    let root = StateNode::compound(StateId(0), None, vec![StateId(1)], StateId(1), None);
+    let parallel = StateNode::parallel(
+        StateId(1),
+        Some(StateId(0)),
+        vec![StateId(2), StateId(4)],
+        vec![StateId(2), StateId(4)],
+        None,
+    )
+    .with_transition(Transition::new(
+        StateId(1),
+        TransitionTarget::State(StateId(3)),
+        Trigger::Event(EventId(11)),
+        None,
+        0,
+        TransitionKind::External,
+    ));
+    let region_a = StateNode::compound(
+        StateId(2),
+        Some(StateId(1)),
+        vec![StateId(3)],
+        StateId(3),
+        None,
+    );
+    let a = StateNode::atomic(StateId(3), Some(StateId(2)));
+    let region_b = StateNode::compound(
+        StateId(4),
+        Some(StateId(1)),
+        vec![StateId(5)],
+        StateId(5),
+        None,
+    );
+    let b = StateNode::atomic(StateId(5), Some(StateId(4)));
+    let plan = TreeDef {
+        root: StateId(0),
+        nodes: vec![root, parallel, region_a, a, region_b, b],
+    }
+    .compile()
+    .unwrap();
+    let mut instance = Instance::new(plan, 1, MicrostepLimit(4)).unwrap();
+    instance.start(&mut NoopLifecycle).unwrap();
+    instance.send(Event::new(EventId(11))).unwrap();
+    instance.run(&mut NoopLifecycle).unwrap();
+
+    assert_eq!(
+        instance.active_states(),
+        &[
+            StateId(0),
+            StateId(1),
+            StateId(2),
+            StateId(3),
+            StateId(4),
+            StateId(5)
+        ]
+    );
+}
+
+#[test]
 fn compiler_rejects_duplicate_regions_and_invalid_history_owner() {
     let root = StateNode::parallel(
         StateId(0),
@@ -376,6 +434,40 @@ fn compiler_rejects_duplicate_regions_and_invalid_history_owner() {
         .compile()
         .unwrap_err(),
         PlanError::InvalidHistoryOwner(StateId(1))
+    );
+
+    let root = StateNode::compound(StateId(0), None, vec![StateId(1)], StateId(1), None)
+        .with_transition(Transition::new(
+            StateId(0),
+            TransitionTarget::History {
+                owner: StateId(1),
+                depth: HistoryMode::Deep,
+            },
+            Trigger::Event(EventId(2)),
+            None,
+            0,
+            TransitionKind::External,
+        ));
+    let owner = StateNode::compound(
+        StateId(1),
+        Some(StateId(0)),
+        vec![StateId(2)],
+        StateId(2),
+        Some(HistoryMode::Shallow),
+    );
+    let child = StateNode::atomic(StateId(2), Some(StateId(1)));
+    assert_eq!(
+        (TreeDef {
+            root: StateId(0),
+            nodes: vec![root, owner, child],
+        })
+        .compile()
+        .unwrap_err(),
+        PlanError::HistoryDepthMismatch {
+            owner: StateId(1),
+            configured: HistoryMode::Shallow,
+            requested: HistoryMode::Deep,
+        }
     );
 }
 
@@ -433,6 +525,49 @@ fn budget_exhaustion_retains_unprocessed_event_and_clears_event_context() {
     );
     assert_eq!(instance.queued_events(), 1);
     assert_eq!(instance.active_states(), &[StateId(0), StateId(1)]);
+}
+
+#[test]
+fn run_budget_includes_initial_eventless_stabilization() {
+    let root = StateNode::compound(
+        StateId(0),
+        None,
+        vec![StateId(1), StateId(2), StateId(3)],
+        StateId(1),
+        None,
+    );
+    let initial = StateNode::atomic(StateId(1), Some(StateId(0))).with_transition(Transition::new(
+        StateId(1),
+        TransitionTarget::State(StateId(2)),
+        Trigger::Eventless,
+        None,
+        0,
+        TransitionKind::External,
+    ));
+    let next = StateNode::atomic(StateId(2), Some(StateId(0))).with_transition(Transition::new(
+        StateId(2),
+        TransitionTarget::State(StateId(3)),
+        Trigger::Event(EventId(7)),
+        None,
+        0,
+        TransitionKind::External,
+    ));
+    let final_state = StateNode::atomic(StateId(3), Some(StateId(0)));
+    let plan = TreeDef {
+        root: StateId(0),
+        nodes: vec![root, initial, next, final_state],
+    }
+    .compile()
+    .unwrap();
+    let mut instance = Instance::new(plan, 2, MicrostepLimit(1)).unwrap();
+    instance.send(Event::new(EventId(7))).unwrap();
+
+    assert_eq!(
+        instance.run(&mut NoopLifecycle),
+        Err(RuntimeError::MicrostepLimit(MicrostepLimit(1)))
+    );
+    assert_eq!(instance.active_states(), &[StateId(0), StateId(2)]);
+    assert_eq!(instance.queued_events(), 1);
 }
 
 #[test]

@@ -383,21 +383,21 @@ impl Plan {
                     TransitionTarget::State(id) if id.0 as usize >= count => {
                         return Err(PlanError::UnknownState(id));
                     }
-                    TransitionTarget::History { owner, .. } => {
+                    TransitionTarget::History { owner, depth } => {
                         if owner.0 as usize >= count {
                             return Err(PlanError::UnknownState(owner));
                         }
-                        if !matches!(
-                            nodes[owner.0 as usize].kind,
-                            NodeKind::Compound {
-                                history: Some(_),
-                                ..
-                            } | NodeKind::Parallel {
-                                history: Some(_),
-                                ..
+                        let configured = nodes[owner.0 as usize].kind.history();
+                        match configured {
+                            None => return Err(PlanError::InvalidHistoryOwner(owner)),
+                            Some(configured) if configured != depth => {
+                                return Err(PlanError::HistoryDepthMismatch {
+                                    owner,
+                                    configured,
+                                    requested: depth,
+                                });
                             }
-                        ) {
-                            return Err(PlanError::InvalidHistoryOwner(owner));
+                            Some(_) => {}
                         }
                     }
                     _ => {}
@@ -507,6 +507,17 @@ pub enum PlanError {
     },
     /// A history transition targets a node without configured history.
     InvalidHistoryOwner(StateId),
+    /// A history transition requests a depth different from the owner's
+    /// configured capture depth. Captured data is intentionally single-depth
+    /// so an incompatible request cannot produce an invalid configuration.
+    HistoryDepthMismatch {
+        /// History owner referenced by the transition.
+        owner: StateId,
+        /// Depth configured on the owner node.
+        configured: HistoryMode,
+        /// Depth requested by the transition.
+        requested: HistoryMode,
+    },
     /// A transition source differs from the node containing it.
     TransitionSourceMismatch(StateId),
     /// A node is not reachable from the root.

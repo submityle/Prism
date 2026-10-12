@@ -17,6 +17,7 @@
 //! (design §7.3), which is what keeps a nested-variant replay from resurrecting
 //! a deleted entity.
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -252,6 +253,106 @@ impl OverrideSet {
         self.structural.len()
     }
 
+    /// Validates entity references and structural-operation ordering against a
+    /// base template containing `entity_count` entities (`0..entity_count`).
+    ///
+    /// Property targets may refer to a base entity or any entity declared by
+    /// an [`StructuralOp::AddEntity`] in this set. Structural operations are
+    /// checked in insertion order: added entities must use reserved ids and
+    /// unique ids, their parents must already exist, removals must name a live
+    /// entity exactly once, and component operations must target a live entity
+    /// without repeating the same add/remove pair.
+    ///
+    /// This is intentionally a structural validator: `OverrideSet` does not
+    /// carry the base template's component inventory, so it cannot establish
+    /// whether a removed component exists in the base archetype. It also does
+    /// not interpret property paths or validate value/component types.
+    pub fn validate_for_template(&self, entity_count: u32) -> Result<(), OverrideError> {
+        let mut declared_added = BTreeSet::new();
+        for op in &self.structural {
+            if let StructuralOp::AddEntity { local, .. } = op {
+                declared_added.insert(*local);
+            }
+        }
+
+        for property in &self.properties {
+            if !is_base_entity(property.target, entity_count)
+                && !declared_added.contains(&property.target)
+            {
+                return Err(OverrideError::PropertyTargetMissing {
+                    target: property.target,
+                });
+            }
+        }
+
+        let mut added = BTreeSet::new();
+        let mut removed = BTreeSet::new();
+        let mut added_components = BTreeSet::new();
+        let mut removed_components = BTreeSet::new();
+
+        for op in &self.structural {
+            match op {
+                StructuralOp::AddEntity { local, parent, .. } => {
+                    if !local.is_reserved() {
+                        return Err(OverrideError::AddedEntityIdNotReserved { local: *local });
+                    }
+                    // The id itself is representable, but there must also be a
+                    // representable successor if this reserved id is consumed.
+                    if local.index().checked_add(1).is_none() {
+                        return Err(OverrideError::ReservedIdOverflow { local: *local });
+                    }
+                    if added.contains(local) {
+                        return Err(OverrideError::DuplicateAddedEntity { local: *local });
+                    }
+                    if local == parent {
+                        return Err(OverrideError::ParentIsSelf { local: *local });
+                    }
+                    if !entity_is_live(*parent, entity_count, &added, &removed) {
+                        return Err(OverrideError::AddedEntityParentMissing {
+                            local: *local,
+                            parent: *parent,
+                        });
+                    }
+                    added.insert(*local);
+                }
+                StructuralOp::RemoveEntity { local } => {
+                    if removed.contains(local) {
+                        return Err(OverrideError::DuplicateRemoveEntity { local: *local });
+                    }
+                    if !entity_is_live(*local, entity_count, &added, &removed) {
+                        return Err(OverrideError::RemoveEntityMissing { local: *local });
+                    }
+                    removed.insert(*local);
+                }
+                StructuralOp::AddComponent {
+                    target, component, ..
+                } => {
+                    if !entity_is_live(*target, entity_count, &added, &removed) {
+                        return Err(OverrideError::ComponentTargetMissing { target: *target });
+                    }
+                    if !added_components.insert((*target, *component)) {
+                        return Err(OverrideError::DuplicateAddComponent {
+                            target: *target,
+                            component: *component,
+                        });
+                    }
+                }
+                StructuralOp::RemoveComponent { target, component } => {
+                    if !entity_is_live(*target, entity_count, &added, &removed) {
+                        return Err(OverrideError::ComponentTargetMissing { target: *target });
+                    }
+                    if !removed_components.insert((*target, *component)) {
+                        return Err(OverrideError::DuplicateRemoveComponent {
+                            target: *target,
+                            component: *component,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The property overrides, in insertion order.
     #[must_use]
     pub fn properties(&self) -> &[PropertyOverride] {
@@ -342,6 +443,85 @@ impl OverrideSet {
         self.properties = kept;
         orphans
     }
+}
+
+/// A structural defect in an [`OverrideSet`] relative to a base template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverrideError {
+    /// A property override targets neither a base entity nor a declared addition.
+    PropertyTargetMissing {
+        /// The invalid property target.
+        target: LocalEntityId,
+    },
+    /// An added entity used an id from the base segment.
+    AddedEntityIdNotReserved {
+        /// The non-reserved id used by the add operation.
+        local: LocalEntityId,
+    },
+    /// An added entity reused an id already declared by an earlier addition.
+    DuplicateAddedEntity {
+        /// The id declared more than once.
+        local: LocalEntityId,
+    },
+    /// An added entity's parent did not exist when the operation was applied.
+    AddedEntityParentMissing {
+        /// The entity being added.
+        local: LocalEntityId,
+        /// The parent not yet available at this operation.
+        parent: LocalEntityId,
+    },
+    /// An added entity was attached to itself.
+    ParentIsSelf {
+        /// The entity that names itself as parent.
+        local: LocalEntityId,
+    },
+    /// A reserved local id has no representable successor (u32 overflow).
+    ReservedIdOverflow {
+        /// The reserved id whose successor cannot be represented.
+        local: LocalEntityId,
+    },
+    /// A remove operation targets an entity that is not currently alive.
+    RemoveEntityMissing {
+        /// The entity requested for removal.
+        local: LocalEntityId,
+    },
+    /// An entity is removed more than once.
+    DuplicateRemoveEntity {
+        /// The entity removed more than once.
+        local: LocalEntityId,
+    },
+    /// A component operation targets an entity that is not currently alive.
+    ComponentTargetMissing {
+        /// The entity targeted by the component operation.
+        target: LocalEntityId,
+    },
+    /// The same component is added to the same entity more than once.
+    DuplicateAddComponent {
+        /// The entity receiving the duplicate add.
+        target: LocalEntityId,
+        /// The component repeated on that entity.
+        component: ComponentTypeId,
+    },
+    /// The same component is removed from the same entity more than once.
+    DuplicateRemoveComponent {
+        /// The entity receiving the duplicate remove.
+        target: LocalEntityId,
+        /// The component repeated on that entity.
+        component: ComponentTypeId,
+    },
+}
+
+fn is_base_entity(local: LocalEntityId, entity_count: u32) -> bool {
+    !local.is_reserved() && local.index() < entity_count
+}
+
+fn entity_is_live(
+    local: LocalEntityId,
+    entity_count: u32,
+    added: &BTreeSet<LocalEntityId>,
+    removed: &BTreeSet<LocalEntityId>,
+) -> bool {
+    (is_base_entity(local, entity_count) || added.contains(&local)) && !removed.contains(&local)
 }
 
 #[cfg(test)]
@@ -470,5 +650,204 @@ mod tests {
         });
         assert_eq!(set.structural_count(), 2);
         assert!(!set.is_empty());
+    }
+
+    fn add_entity(set: &mut OverrideSet, local: u32, parent: u32) {
+        set.push_structural(StructuralOp::AddEntity {
+            local: LocalEntityId::new(local),
+            parent: LocalEntityId::new(parent),
+            archetype: ArchetypeSignature::default(),
+            data: vec![],
+        });
+    }
+
+    #[test]
+    fn validate_accepts_base_and_declared_added_property_targets() {
+        let component = ComponentTypeId::from_raw(1);
+        let mut set = OverrideSet::new();
+        add_entity(&mut set, LocalEntityId::RESERVED_BASE, 0);
+        set.set_property(ov(0, component, "x", 1.0));
+        set.set_property(ov(LocalEntityId::RESERVED_BASE, component, "x", 2.0));
+        assert_eq!(set.validate_for_template(1), Ok(()));
+    }
+
+    #[test]
+    fn validate_rejects_property_target_outside_base_and_additions() {
+        let mut set = OverrideSet::new();
+        set.set_property(ov(2, ComponentTypeId::from_raw(1), "x", 1.0));
+        assert_eq!(
+            set.validate_for_template(2),
+            Err(super::OverrideError::PropertyTargetMissing {
+                target: LocalEntityId::new(2)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_non_reserved_added_id() {
+        let mut set = OverrideSet::new();
+        add_entity(&mut set, 1, 0);
+        assert_eq!(
+            set.validate_for_template(2),
+            Err(super::OverrideError::AddedEntityIdNotReserved {
+                local: LocalEntityId::new(1)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_added_id() {
+        let mut set = OverrideSet::new();
+        add_entity(&mut set, LocalEntityId::RESERVED_BASE, 0);
+        add_entity(&mut set, LocalEntityId::RESERVED_BASE, 0);
+        assert_eq!(
+            set.validate_for_template(1),
+            Err(super::OverrideError::DuplicateAddedEntity {
+                local: LocalEntityId::new(LocalEntityId::RESERVED_BASE)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_requires_add_parent_to_exist_before_add() {
+        let mut set = OverrideSet::new();
+        add_entity(
+            &mut set,
+            LocalEntityId::RESERVED_BASE,
+            LocalEntityId::RESERVED_BASE + 1,
+        );
+        assert_eq!(
+            set.validate_for_template(1),
+            Err(super::OverrideError::AddedEntityParentMissing {
+                local: LocalEntityId::new(LocalEntityId::RESERVED_BASE),
+                parent: LocalEntityId::new(LocalEntityId::RESERVED_BASE + 1)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_self_parent() {
+        let mut set = OverrideSet::new();
+        add_entity(
+            &mut set,
+            LocalEntityId::RESERVED_BASE,
+            LocalEntityId::RESERVED_BASE,
+        );
+        assert_eq!(
+            set.validate_for_template(1),
+            Err(super::OverrideError::ParentIsSelf {
+                local: LocalEntityId::new(LocalEntityId::RESERVED_BASE)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_reserved_id_successor_overflow() {
+        let mut set = OverrideSet::new();
+        add_entity(&mut set, u32::MAX, 0);
+        assert_eq!(
+            set.validate_for_template(1),
+            Err(super::OverrideError::ReservedIdOverflow {
+                local: LocalEntityId::new(u32::MAX)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_missing_or_repeated_entity_removal() {
+        let mut missing = OverrideSet::new();
+        missing.push_structural(StructuralOp::RemoveEntity {
+            local: LocalEntityId::new(4),
+        });
+        assert_eq!(
+            missing.validate_for_template(1),
+            Err(super::OverrideError::RemoveEntityMissing {
+                local: LocalEntityId::new(4)
+            })
+        );
+
+        let mut repeated = OverrideSet::new();
+        for _ in 0..2 {
+            repeated.push_structural(StructuralOp::RemoveEntity {
+                local: LocalEntityId::new(0),
+            });
+        }
+        assert_eq!(
+            repeated.validate_for_template(1),
+            Err(super::OverrideError::DuplicateRemoveEntity {
+                local: LocalEntityId::new(0)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_component_ops_require_live_target() {
+        let mut set = OverrideSet::new();
+        set.push_structural(StructuralOp::AddComponent {
+            target: LocalEntityId::new(2),
+            component: ComponentTypeId::from_raw(1),
+            data: vec![],
+        });
+        assert_eq!(
+            set.validate_for_template(2),
+            Err(super::OverrideError::ComponentTargetMissing {
+                target: LocalEntityId::new(2)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_repeated_add_component() {
+        let mut set = OverrideSet::new();
+        for _ in 0..2 {
+            set.push_structural(StructuralOp::AddComponent {
+                target: LocalEntityId::new(0),
+                component: ComponentTypeId::from_raw(7),
+                data: vec![],
+            });
+        }
+        assert_eq!(
+            set.validate_for_template(1),
+            Err(super::OverrideError::DuplicateAddComponent {
+                target: LocalEntityId::new(0),
+                component: ComponentTypeId::from_raw(7)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_repeated_remove_component() {
+        let mut set = OverrideSet::new();
+        for _ in 0..2 {
+            set.push_structural(StructuralOp::RemoveComponent {
+                target: LocalEntityId::new(0),
+                component: ComponentTypeId::from_raw(7),
+            });
+        }
+        assert_eq!(
+            set.validate_for_template(1),
+            Err(super::OverrideError::DuplicateRemoveComponent {
+                target: LocalEntityId::new(0),
+                component: ComponentTypeId::from_raw(7)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_component_op_after_entity_removal() {
+        let mut set = OverrideSet::new();
+        set.push_structural(StructuralOp::RemoveEntity {
+            local: LocalEntityId::new(0),
+        });
+        set.push_structural(StructuralOp::RemoveComponent {
+            target: LocalEntityId::new(0),
+            component: ComponentTypeId::from_raw(7),
+        });
+        assert_eq!(
+            set.validate_for_template(1),
+            Err(super::OverrideError::ComponentTargetMissing {
+                target: LocalEntityId::new(0)
+            })
+        );
     }
 }

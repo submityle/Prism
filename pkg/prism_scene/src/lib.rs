@@ -72,7 +72,8 @@ pub use materialize::{
     MaterializerRegistry, RemappedEntityField, RowLayout,
 };
 pub use overrides::{
-    ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride, StructuralOp,
+    ArchetypeSignature, ComponentTypeId, OverrideError, OverrideSet, OverrideValue,
+    PropertyOverride, StructuralOp,
 };
 pub use path::{FieldPath, FieldSegment};
 pub use plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
@@ -95,8 +96,8 @@ pub mod prelude {
         MaterializerRegistry, RemappedEntityField, RowLayout,
     };
     pub use crate::overrides::{
-        ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride,
-        StructuralOp,
+        ArchetypeSignature, ComponentTypeId, OverrideError, OverrideSet, OverrideValue,
+        PropertyOverride, StructuralOp,
     };
     pub use crate::path::{FieldPath, FieldSegment};
     pub use crate::plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
