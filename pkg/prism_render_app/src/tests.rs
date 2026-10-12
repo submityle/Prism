@@ -1,0 +1,269 @@
+//! Tests for the render sub-app seam.
+//!
+//! The headless tests run on the null backend, so they need no window and no
+//! GPU: they drive the full plugin → extract → render-schedule → frame-graph
+//! path and assert on what the render world recorded. The wgpu test is gated on
+//! a real adapter and reads the rendered frame back, so the same seam is proven
+//! on hardware rather than only in the ring buffer.
+
+use prism_app::App;
+use prism_ecs::schedule::Schedules;
+use prism_render_driver::{Extent3d, ImageDataLayout, RenderQueue, TextureWrite};
+use prism_render_driver_null::NullInstance;
+use prism_render_runtime::RenderRuntime;
+
+use crate::camera::{RenderCamera, RenderViewport};
+use crate::config::RenderAppConfig;
+use crate::label::{Render, RenderApp};
+use crate::plugin::PrismRenderPlugin;
+use crate::record::RenderRecord;
+use crate::runtime_resource::RenderRuntimeResource;
+use crate::stats::RenderFrameStats;
+use crate::target::RenderTarget;
+
+/// The frame count the headless tests drive.
+const FRAMES: u64 = 5;
+
+/// A small, non-square frame so a swapped axis cannot pass by accident.
+const EXTENT: Extent3d = Extent3d::new_2d(64, 48);
+
+/// An app with the plugin built on the headless null backend.
+fn app_on_null_backend(config: RenderAppConfig) -> App {
+    let mut app = App::new();
+    app.add_plugins(PrismRenderPlugin::with_config(NullInstance::new(), config));
+    app
+}
+
+/// Whether a missing adapter must fail a GPU-gated test instead of skipping it.
+fn require_gpu() -> bool {
+    std::env::var_os("PRISM_REQUIRE_GPU").is_some()
+}
+
+/// The render schedule runs every frame, the extract feeds it, and the runtime
+/// submits one frame per `App::update`.
+#[test]
+fn render_schedule_runs_each_frame_and_submits_a_frame() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+
+    for _ in 0..FRAMES {
+        app.update();
+    }
+
+    let render = app
+        .get_sub_app(RenderApp)
+        .expect("the plugin registers the render sub-app");
+    let stats = *render
+        .world
+        .get_resource::<RenderFrameStats>()
+        .expect("the plugin installs the stats resource");
+    assert_eq!(
+        stats.frames_submitted, FRAMES,
+        "one frame is submitted per App::update"
+    );
+    assert_eq!(stats.frames_failed, 0, "no frame failed to record");
+    assert_eq!(
+        stats.frames_skipped, 0,
+        "every frame had a non-empty viewport"
+    );
+    assert_eq!(
+        stats.passes_declared, FRAMES,
+        "each recorded frame declares exactly one pass"
+    );
+    assert_eq!(stats.last_viewport, RenderViewport::from_extent(EXTENT));
+
+    let record = *render
+        .world
+        .get_resource::<RenderRecord>()
+        .expect("the plugin installs the render record");
+    assert_eq!(
+        record.frame_index, FRAMES,
+        "the extract ran once per frame and advanced the record"
+    );
+    assert_eq!(record.viewport, RenderViewport::from_extent(EXTENT));
+}
+
+/// The render sub-app owns the GPU state; the main world never sees it.
+#[test]
+fn gpu_state_lives_only_in_the_render_world() {
+    let app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+
+    assert!(
+        app.world()
+            .get_resource::<RenderRuntimeResource<NullInstance>>()
+            .is_none(),
+        "the main world must never hold the render runtime"
+    );
+    let render = app
+        .get_sub_app(RenderApp)
+        .expect("render sub-app registered");
+    assert!(
+        render
+            .world
+            .get_resource::<RenderRuntimeResource<NullInstance>>()
+            .is_some(),
+        "the render world owns the render runtime"
+    );
+    assert!(
+        render.world.get_resource::<RenderTarget>().is_some(),
+        "the render world owns the frame target"
+    );
+    assert!(
+        app.world().get_resource::<RenderTarget>().is_none(),
+        "the frame target must not leak into the main world"
+    );
+    // The render schedule really is a schedule, not a bare core phase.
+    let schedules = render
+        .world
+        .get_resource::<Schedules>()
+        .expect("the render world owns its schedules");
+    assert!(
+        schedules.contains(Render),
+        "the Render schedule is registered"
+    );
+}
+
+/// Changing the main world's camera resizes the render world's frame target:
+/// the extract genuinely drives the renderer rather than merely running.
+#[test]
+fn extract_resizes_the_frame_target_from_the_main_world() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    app.update();
+    {
+        let render = app.get_sub_app(RenderApp).expect("render sub-app");
+        let target = render
+            .world
+            .get_resource::<RenderTarget>()
+            .expect("frame target");
+        assert_eq!(target.viewport(), RenderViewport::from_extent(EXTENT));
+    }
+
+    let resized = RenderViewport::new(32, 96);
+    *app.world_mut().resource_mut::<RenderCamera>() = RenderCamera::new(resized);
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let target = render
+        .world
+        .get_resource::<RenderTarget>()
+        .expect("frame target");
+    assert_eq!(
+        target.viewport(),
+        resized,
+        "the extracted camera resized the render target"
+    );
+    let stats = render
+        .world
+        .get_resource::<RenderFrameStats>()
+        .expect("stats");
+    assert_eq!(stats.frames_submitted, 2, "both frames were submitted");
+}
+
+/// A zero-sized frame is a successful no-op, not a failed or submitted frame.
+#[test]
+fn empty_viewport_skips_the_frame() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    *app.world_mut().resource_mut::<RenderCamera>() = RenderCamera::new(RenderViewport::new(0, 0));
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let stats = render
+        .world
+        .get_resource::<RenderFrameStats>()
+        .expect("stats");
+    assert_eq!(stats.frames_skipped, 1);
+    assert_eq!(stats.frames_submitted, 0);
+    assert_eq!(stats.frames_recorded(), 1);
+}
+
+/// The seam verified on hardware: the extracted viewport sizes a real GPU
+/// frame, and reading it back shows the frame's pass actually wrote the target.
+///
+/// The target is pre-filled opaque white first (and the pre-fill is itself read
+/// back to prove it landed), so a black result can only come from the frame's
+/// clear pass executing — a freshly created wgpu texture is already zeroed, so
+/// an unfilled target would pass vacuously.
+#[test]
+fn wgpu_backend_records_and_clears_a_real_frame() {
+    const SIZE: u32 = 32;
+    let extent = Extent3d::new_2d(SIZE, SIZE);
+
+    // The plugin panics when no adapter exists, so probe first and skip cleanly.
+    if RenderRuntime::<prism_render_driver_wgpu::WgpuInstance>::wgpu(extent).is_err() {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    }
+
+    let mut app = App::new();
+    app.add_plugins(PrismRenderPlugin::with_config(
+        prism_render_driver_wgpu::WgpuInstance::new(),
+        RenderAppConfig::new(extent),
+    ));
+
+    // Pre-fill the offscreen target with opaque white, then prove the upload
+    // landed before any frame is rendered.
+    let white = vec![0xFF_u8; (SIZE * SIZE * 4) as usize];
+    {
+        let render = app.get_sub_app(RenderApp).expect("render sub-app");
+        let runtime = render
+            .world
+            .get_resource::<RenderRuntimeResource<prism_render_driver_wgpu::WgpuInstance>>()
+            .expect("render runtime");
+        let target = *render
+            .world
+            .get_resource::<RenderTarget>()
+            .expect("frame target");
+        let queue = runtime.runtime().queue();
+        queue.write_texture(
+            TextureWrite {
+                texture: target.texture(),
+                mip_level: 0,
+                origin: [0, 0, 0],
+                size: extent,
+            },
+            &white,
+            ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(SIZE * 4),
+                rows_per_image: Some(SIZE),
+            },
+        );
+        assert!(runtime.runtime().wait_idle());
+        let prefill = queue.read_texture_rgba8(target.texture(), SIZE, SIZE);
+        assert!(
+            prefill
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0xFF, 0xFF, 0xFF, 0xFF]),
+            "the white pre-fill landed, so the black assertion below is meaningful"
+        );
+    }
+
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("render sub-app");
+    let runtime = render
+        .world
+        .get_resource::<RenderRuntimeResource<prism_render_driver_wgpu::WgpuInstance>>()
+        .expect("render runtime");
+    assert!(
+        runtime.runtime().wait_idle(),
+        "the submitted frame completes on the GPU"
+    );
+
+    let target = *render
+        .world
+        .get_resource::<RenderTarget>()
+        .expect("frame target");
+    assert_eq!(target.viewport(), RenderViewport::from_extent(extent));
+    let pixels = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba8(target.texture(), SIZE, SIZE);
+    assert_eq!(pixels.len(), (SIZE * SIZE * 4) as usize);
+    assert!(
+        pixels.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]),
+        "the frame's clear pass overwrote the white target with opaque black"
+    );
+}

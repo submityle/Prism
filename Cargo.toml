@@ -34,6 +34,9 @@ members = [
   "pkg/prism_render_graph",
   # Prism RHI-backed render spine (device/queue + frame-graph execution).
   "pkg/prism_render_runtime",
+  # Render sub-app integration: wires the RHI runtime into prism_app as a
+  # dedicated render SubApp (the in-house bevy_render `RenderApp` replacement).
+  "pkg/prism_render_app",
   # GPU-driven culling vertical slice (compute cull + indirect draw) on the RHI.
   "pkg/prism_render_gpudriven",
   "pkg/prism_input",

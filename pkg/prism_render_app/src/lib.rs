@@ -1,0 +1,91 @@
+//! # `prism_render_app`
+//!
+//! The integration seam that wires the RHI-backed render spine
+//! ([`prism_render_runtime`]) into the application shell ([`prism_app`]) as a
+//! dedicated **render sub-app**. It is the in-house replacement for the host
+//! role `bevy_render`'s `RenderApp` used to play: the place that owns the GPU
+//! device, drives a frame graph every frame, and is fed each frame by a
+//! one-way extract from the authoritative simulation world.
+//!
+//! ## The boundary
+//!
+//! The design splits the app into a main sub-app (authoritative simulation) and
+//! an ordered set of secondary sub-apps, of which the render sub-app is the
+//! archetype (design §9, §25.2). This crate draws that boundary explicitly:
+//!
+//! - **GPU state lives in the render world.** [`PrismRenderPlugin`] brings up a
+//!   [`RenderRuntime`](prism_render_runtime::RenderRuntime) and installs it as a
+//!   resource on the render sub-app's world, together with the offscreen frame
+//!   [`RenderTarget`] and per-frame [`RenderFrameStats`]. The main world never
+//!   names a device, a queue, or a texture.
+//! - **The main world only publishes intent.** A [`RenderCamera`] resource on
+//!   the main world is the single source of truth for the frame; the extract
+//!   step copies it into a [`RenderRecord`] on the render world.
+//! - **The render world renders.** A [`Render`] schedule holds the system that
+//!   builds and executes the frame graph, and a small driver in the render
+//!   sub-app's `Last` phase runs that schedule each frame.
+//!
+//! ## Backend-agnostic
+//!
+//! [`PrismRenderPlugin`] is generic over the RHI [`Instance`] backend, so a real
+//! app constructs it with the shipped wgpu backend while tests construct it with
+//! the headless null backend — no window, no GPU, no driver. Switching backends
+//! is constructing the plugin with a different `Instance`; nothing in this crate
+//! changes.
+//!
+//! ## Example
+//!
+//! ```no_run
+//! use prism_app::prelude::*;
+//! use prism_render_app::prelude::*;
+//! use prism_render_driver_wgpu::WgpuInstance;
+//!
+//! let mut app = App::new();
+//! app.add_plugins(PrismRenderPlugin::new(WgpuInstance::new()));
+//! // ... add gameplay systems ...
+//! app.update(); // each update extracts and renders one frame
+//! ```
+//!
+//! ## Scope
+//!
+//! This crate is the seam, not the renderer. The frame graph it records is
+//! deliberately minimal — it clears the offscreen target — because the point of
+//! this layer is to prove the ECS ↔ RHI wiring. Passes for geometry, materials,
+//! lighting, and post-processing layer on top of the same `Render` schedule.
+#![forbid(unsafe_code)]
+
+mod camera;
+mod config;
+mod frame;
+mod label;
+mod plugin;
+mod record;
+mod runtime_resource;
+mod stats;
+mod systems;
+mod target;
+
+#[cfg(test)]
+mod tests;
+
+pub use camera::{RenderCamera, RenderViewport};
+pub use config::RenderAppConfig;
+pub use frame::RENDER_TARGET_FORMAT;
+pub use label::{Render, RenderApp};
+pub use plugin::PrismRenderPlugin;
+pub use record::RenderRecord;
+pub use runtime_resource::RenderRuntimeResource;
+pub use stats::RenderFrameStats;
+pub use target::RenderTarget;
+
+/// Commonly used exports: the plugin, its labels, and the resources that cross
+/// the main-world/render-world boundary.
+pub mod prelude {
+    pub use crate::camera::{RenderCamera, RenderViewport};
+    pub use crate::config::RenderAppConfig;
+    pub use crate::label::{Render, RenderApp};
+    pub use crate::plugin::PrismRenderPlugin;
+    pub use crate::record::RenderRecord;
+    pub use crate::stats::RenderFrameStats;
+    pub use crate::target::RenderTarget;
+}
