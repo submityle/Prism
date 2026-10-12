@@ -17,8 +17,11 @@
 //! rather than guess. Revisions are fed in increasing order.
 
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 
-use crate::delta::{DeltaError, Record, Schema, apply_delta, decode_delta};
+use crate::delta::{
+    DeltaError, Record, Schema, apply_delta, decode_delta, decode_snapshot, encode_snapshot,
+};
 
 /// A failure applying a delta to a [`SnapshotStore`].
 #[derive(Clone, Debug, PartialEq)]
@@ -183,6 +186,32 @@ impl SnapshotStore {
         self.insert_baseline(next_revision, next)?;
         Ok(next_revision)
     }
+
+    /// Serialize the baseline retained at `revision` as a full snapshot, for a
+    /// late joiner or a peer resyncing after eviction.
+    ///
+    /// # Errors
+    /// [`SnapshotError::UnknownBaseline`] when `revision` is not retained.
+    pub fn encode_snapshot(&self, revision: u32, out: &mut Vec<u8>) -> Result<(), SnapshotError> {
+        let Some(record) = self.record(revision) else {
+            return Err(SnapshotError::UnknownBaseline(revision));
+        };
+        encode_snapshot(&self.schema, revision, record, out)?;
+        Ok(())
+    }
+
+    /// Seed this store from a full snapshot (a late joiner's first message),
+    /// storing it as a baseline at the snapshot's revision.
+    ///
+    /// # Errors
+    /// [`SnapshotError::Delta`] for a malformed snapshot, or
+    /// [`SnapshotError::OutOfOrder`] when its revision is not newer than the
+    /// newest retained one.
+    pub fn seed(&mut self, bytes: &[u8]) -> Result<u32, SnapshotError> {
+        let (revision, record) = decode_snapshot(&self.schema, bytes)?;
+        self.insert_baseline(revision, record)?;
+        Ok(revision)
+    }
 }
 
 #[cfg(test)]
@@ -315,5 +344,41 @@ mod tests {
         // Re-confirming the existing revision in place is still allowed.
         store.insert_baseline(5, record(true, 5, 0.0, 5)).unwrap();
         assert_eq!(store.latest_revision(), Some(5));
+    }
+
+    /// A full snapshot seeds a late joiner, and subsequent deltas chain onto it.
+    #[test]
+    fn a_full_snapshot_seeds_a_late_joiner() {
+        let schema = schema();
+        let r0 = record(false, 1, 0.0, 1);
+        let r1 = record(true, 1, 0.0, 2);
+
+        let mut sender = SnapshotStore::new(schema.clone(), 8);
+        sender.insert_baseline(0, r0.clone()).unwrap();
+        let mut snapshot = Vec::new();
+        sender.encode_snapshot(0, &mut snapshot).unwrap();
+
+        let mut joiner = SnapshotStore::new(schema.clone(), 8);
+        assert_eq!(joiner.seed(&snapshot).unwrap(), 0);
+        // Floats are quantized on the wire, so compare the exact fields and the
+        // float within the quantizer's bound.
+        let seeded = joiner.record(0).expect("seeded");
+        assert_eq!(seeded.value(0), Some(FieldValue::Bool(false)));
+        assert_eq!(seeded.value(1), Some(FieldValue::Int(1)));
+        assert_eq!(seeded.value(3), Some(FieldValue::Int(1)));
+
+        let mut delta = Vec::new();
+        encode_delta(&schema, &r0, &r1, 0, &mut delta).unwrap();
+        assert_eq!(joiner.apply(&delta).unwrap(), 1);
+        let advanced = joiner.record(1).expect("advanced");
+        assert_eq!(advanced.value(0), Some(FieldValue::Bool(true)));
+        assert_eq!(advanced.value(3), Some(FieldValue::Int(2)));
+
+        // A revision the store does not retain cannot be serialized.
+        let mut out = Vec::new();
+        assert_eq!(
+            joiner.encode_snapshot(9, &mut out),
+            Err(SnapshotError::UnknownBaseline(9))
+        );
     }
 }

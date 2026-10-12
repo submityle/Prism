@@ -308,6 +308,63 @@ pub fn apply_delta(
     Ok(applied)
 }
 
+/// Encode a **full** record at `revision` — the seed a late joiner or a resyncing
+/// peer applies before any delta arrives.
+///
+/// Same header as a [`encode_delta`], but every field is written in schema order
+/// with no changed-field mask (the mask would always be all-ones).
+///
+/// # Errors
+/// The same record/schema errors as [`encode_delta`].
+pub fn encode_snapshot(
+    schema: &Schema,
+    revision: u32,
+    record: &Record,
+    out: &mut Vec<u8>,
+) -> Result<(), DeltaError> {
+    check_shape(schema, record)?;
+    let count =
+        u8::try_from(schema.len()).map_err(|_| DeltaError::TooManyFields { len: schema.len() })?;
+
+    out.extend_from_slice(&revision.to_le_bytes());
+    out.push(count);
+
+    let mut bits = BitWriter::new();
+    for (kind, value) in schema.kinds.iter().zip(&record.values) {
+        write_value(*kind, *value, &mut bits);
+    }
+    out.extend_from_slice(&bits.into_bytes());
+    Ok(())
+}
+
+/// Decode a full-record snapshot: its revision and values.
+///
+/// # Errors
+/// [`DeltaError::SchemaMismatch`] on a field-count mismatch and
+/// [`DeltaError::Truncated`] when the payload ends early, exactly as
+/// [`decode_delta`].
+pub fn decode_snapshot(schema: &Schema, bytes: &[u8]) -> Result<(u32, Record), DeltaError> {
+    check_kinds(schema)?;
+    if bytes.len() < 5 {
+        return Err(DeltaError::Truncated);
+    }
+    let revision = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let found = bytes[4] as usize;
+    if found != schema.len() {
+        return Err(DeltaError::SchemaMismatch {
+            expected: schema.len(),
+            found,
+        });
+    }
+
+    let mut reader = BitReader::new(&bytes[5..]);
+    let mut values = Vec::with_capacity(schema.len());
+    for kind in &schema.kinds {
+        values.push(read_value(*kind, &mut reader)?);
+    }
+    Ok((revision, Record::new(values)))
+}
+
 fn check_shape(schema: &Schema, record: &Record) -> Result<(), DeltaError> {
     check_kinds(schema)?;
     if record.values.len() != schema.len() {
@@ -568,5 +625,38 @@ mod tests {
                 "decode kind {kind:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_full_snapshot_round_trips_and_rejects_mismatches() {
+        let schema = schema();
+        let rec = record(true, -42, 2.5, 7);
+        let mut bytes = Vec::new();
+        encode_snapshot(&schema, 5, &rec, &mut bytes).unwrap();
+
+        let (revision, decoded) = decode_snapshot(&schema, &bytes).unwrap();
+        assert_eq!(revision, 5);
+        assert_eq!(decoded.value(0), Some(FieldValue::Bool(true)));
+        assert_eq!(decoded.value(1), Some(FieldValue::Int(-42)));
+        assert_eq!(decoded.value(3), Some(FieldValue::Int(7)));
+        let FieldValue::Float(angle) = decoded.value(2).unwrap() else {
+            panic!("field 2 is a float");
+        };
+        let bound = Quantizer::new(-10.0, 10.0, 16).max_error();
+        assert!((angle - 2.5).abs() <= bound, "angle {angle}, bound {bound}");
+
+        let narrower = Schema::new(vec![FieldKind::Bool]);
+        assert_eq!(
+            decode_snapshot(&narrower, &bytes),
+            Err(DeltaError::SchemaMismatch {
+                expected: 1,
+                found: 4
+            })
+        );
+        let truncated = &bytes[..bytes.len() - 1];
+        assert!(matches!(
+            decode_snapshot(&schema, truncated),
+            Err(DeltaError::Truncated)
+        ));
     }
 }

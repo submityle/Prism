@@ -18,7 +18,9 @@
 //!   bit-width-addressable stream and a uniform scalar quantizer, so a replicated
 //!   field costs the bits it needs (design §15).
 //! - [`delta`] — baseline-relative field deltas: a schema, a changed-field mask,
-//!   and only the changed values, with the baseline revision checked on apply.
+//!   and only the changed values, with the baseline revision checked on apply —
+//!   plus full-record snapshots, the seed a late joiner or a resyncing peer
+//!   applies before any delta.
 //! - [`snapshot`] — the bounded baseline ring that applies those deltas forward
 //!   into new baselines and serves any retained revision for a late-join or a
 //!   resync.
