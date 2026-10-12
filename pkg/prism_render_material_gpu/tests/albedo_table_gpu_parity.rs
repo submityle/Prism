@@ -355,3 +355,215 @@ fn albedo_lookups_match_on_device() {
         }
     }
 }
+
+/// **Micro-benchmark: `const`-array lookup vs storage-buffer table on the real
+/// device.** The white-furnace work added five `const` lookup tables; a WGSL
+/// `const` array indexed dynamically is normally materialised into
+/// private/local memory, so the question is whether that is actually cheaper
+/// than fetching the same numbers from a storage buffer (the stand-in for the
+/// "move it to a small linear-filtered texture" option).
+///
+/// Ignored by default (it is a measurement, not a gate). Run with:
+/// `PRISM_REQUIRE_GPU=1 cargo test -p prism_render_material_gpu --test
+/// albedo_table_gpu_parity -- --ignored --nocapture` **outside the sandbox**
+/// (the sandbox blocks Metal device access), which is also where the numbers in
+/// the design doc come from. Each thread performs `LOOKUPS` dependent lookups so
+/// the measurement is ALU/latency-bound rather than launch-bound.
+#[test]
+#[ignore = "micro-benchmark: run outside the sandbox on a real GPU"]
+fn bench_const_table_vs_buffer_table() {
+    use std::time::Instant;
+
+    const THREADS: u32 = 1 << 18;
+    const LOOKUPS: u32 = 64;
+
+    // Kernel A: the shipping `const` table + lookup, straight from brdf.wesl.
+    let table = parse_wesl_array("GGX_ALBEDO");
+    let mut shader_const = String::from(
+        "@group(0) @binding(0) var<storage, read_write> out: array<f32>;\n",
+    );
+    shader_const.push_str("const GGX_N_MU: i32 = 17;\nconst GGX_N_R: i32 = 9;\n");
+    let src = BRDF_WESL;
+    let start = src.find("const GGX_ALBEDO:").unwrap();
+    let open = src[start..].find("array<f32,").unwrap() + start;
+    let decl_end = src[open..].find(");").unwrap() + open + 2;
+    shader_const.push_str(&src[start..decl_end]);
+    shader_const.push('\n');
+    shader_const.push_str(&extract_fn("GGX_ALBEDO", "ggx_albedo_lookup"));
+    shader_const.push_str(BENCH_MAIN);
+
+    // Kernel B: the identical numbers and interpolation, but read from a
+    // storage buffer.
+    let mut shader_buffer = String::from(
+        "@group(0) @binding(0) var<storage, read_write> out: array<f32>;\n\
+         @group(0) @binding(1) var<storage, read> table: array<f32>;\n\
+         const GGX_N_MU: i32 = 17;\nconst GGX_N_R: i32 = 9;\n",
+    );
+    shader_buffer.push_str(&buffer_lookup_fn());
+    shader_buffer.push_str(&BENCH_MAIN.replace("ggx_albedo_lookup", "buffer_albedo_lookup"));
+
+    let Some((device, queue)) = gpu_device() else {
+        eprintln!("skipping albedo micro-benchmark: no usable adapter");
+        return;
+    };
+    let out_len = (THREADS as u64) * 4;
+    let out = device.create_buffer(&BufferDescriptor {
+        label: Some("bench_out"),
+        size: out_len,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let table_buf = device.create_buffer(&BufferDescriptor {
+        label: Some("bench_table"),
+        size: (table.len() * 4) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let table_bytes: Vec<u8> = table.iter().flat_map(|v| v.to_le_bytes()).collect();
+    queue.write_buffer(&table_buf, 0, &table_bytes);
+
+    let mut run = |shader: String, label: &str| -> f64 {
+        let module = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some(label),
+            source: ShaderSource::Wgsl(shader.into()),
+        });
+        let bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            module: &module,
+            entry_point: None,
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &bgl,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: out.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: table_buf.as_entire_binding(),
+                },
+            ],
+        });
+        // Warm up once (pipeline/shader residency), then time the steady state.
+        for _ in 0..2 {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(THREADS / 64, 1, 1);
+            }
+            queue.submit([encoder.finish()]);
+            let _ = device.poll(PollType::wait_indefinitely());
+        }
+        let reps = 8;
+        let t0 = Instant::now();
+        for _ in 0..reps {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDescriptor { label: None });
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(THREADS / 64, 1, 1);
+            }
+            queue.submit([encoder.finish()]);
+            let _ = device.poll(PollType::wait_indefinitely());
+        }
+        let secs = t0.elapsed().as_secs_f64() / reps as f64;
+        let lookups = THREADS as f64 * LOOKUPS as f64;
+        println!("{label}: {:.3} ms/dispatch  ({:.2} Glookup/s)", secs * 1e3, lookups / secs / 1e9);
+        secs * 1e3
+    };
+    run(shader_const, "const table");
+    run(shader_buffer, "storage buffer");
+}
+
+/// Shared body: `LOOKUPS` dependent lookups per thread, accumulated so nothing
+/// is dead-code eliminated.
+const BENCH_MAIN: &str = "\n@compute @workgroup_size(64)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    var mu = f32(gid.x % 4096u) / 4096.0;\n\
+    var r = f32((gid.x / 4096u) % 64u) / 64.0;\n\
+    var acc = 0.0;\n\
+    for (var i = 0u; i < 64u; i = i + 1u) {\n\
+        acc = acc + ggx_albedo_lookup(mu, r);\n\
+        let t = mu; mu = clamp(r * 0.5 + 0.25, 0.0, 1.0); r = clamp(t * 0.5 + 0.5, 0.0, 1.0);\n\
+    }\n\
+    out[gid.x] = acc;\n\
+}\n";
+
+/// The same interpolation against a storage-buffer table.
+fn buffer_lookup_fn() -> String {
+    "fn buffer_albedo_lookup(n_dot_v: f32, roughness: f32) -> f32 {\n\
+         let x = clamp(n_dot_v, 0.0, 1.0) * f32(GGX_N_MU - 1);\n\
+         let y = clamp(roughness, 0.0, 1.0) * f32(GGX_N_R - 1);\n\
+         let i0 = min(i32(x), GGX_N_MU - 2);\n\
+         let j0 = min(i32(y), GGX_N_R - 2);\n\
+         let fx = x - f32(i0);\n\
+         let fy = y - f32(j0);\n\
+         let a = table[j0 * GGX_N_MU + i0];\n\
+         let b = table[j0 * GGX_N_MU + i0 + 1];\n\
+         let c = table[(j0 + 1) * GGX_N_MU + i0];\n\
+         let d = table[(j0 + 1) * GGX_N_MU + i0 + 1];\n\
+         let top = a + (b - a) * fx;\n\
+         let bottom = c + (d - c) * fx;\n\
+         return clamp(top + (bottom - top) * fy, 0.0, 1.0);\n\
+     }\n"
+        .to_string()
+}
+
+/// Headless device, or `None` on hosts without a usable adapter.
+fn gpu_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let instance = Instance::new(InstanceDescriptor {
+        backends: Backends::METAL | Backends::VULKAN | Backends::DX12,
+        flags: InstanceFlags::default(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        display: None,
+        backend_options: BackendOptions::default(),
+    });
+    let adapter = block_on(instance.request_adapter(&RequestAdapterOptions::default())).ok()?;
+    block_on(adapter.request_device(&DeviceDescriptor::default())).ok()
+}
