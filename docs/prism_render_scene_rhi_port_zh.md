@@ -40,6 +40,10 @@
 ## 3. 切片顺序（依赖有序）
 
 - **S1 渲染世界地基**：`plugin.rs`（7 个）——`RenderApp/ExtractSchedule/Render/RenderSystems/RenderStartup` → `prism_render_app` 的 render sub-app + `Render` schedule；`renderer::{RenderDevice, RenderQueue}` → RHI trait。产出：crate 骨架跑在 Prism 上。
+
+  **进度**：地基第一部分已落（`d3b39d514`）——新增 `src/gpu/`（`PrismGpu` RHI 设备/队列资源 + `PrismGpuPlugin`，best-effort、无 adapter 时资源缺席），`completion.rs` 已改用它（`FrameSync::on_submitted_work_done`）。crate 仍编译、1602 测试通过。
+
+  **规模实测**：`RenderDevice`/`RenderQueue` 在 crate 内共 **594 处**、`bevy_render::renderer` 相关 287 行 / 256 文件。设备/资源类型的替换是**全局协调一次过**的 pass（改一处即全 crate 类型不一致），只能在一次大 pass 内完成，期间 crate 红。
 - **S2 资源类型**：`render_resource::{Buffer, Texture, TextureView, Sampler, BindGroup, BindGroupLayout, ShaderModule}` → RHI 类型/句柄；`TextureCache`/`PipelineCache` 自建。
 - **S3 视图与提取**：`ExtractedView/RetainedViewEntity/ViewQuery/sync_world::MainEntity` → 自建 view 记录 + extract 映射。
 - **S4 几何/缓冲**：`buffers/*`、`geometry/*`。
