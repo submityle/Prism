@@ -50,20 +50,23 @@
 //! ascending-name order regardless of registration order or hash seeding —
 //! the same determinism contract the settings store keeps (design §15).
 //!
-//! # Honestly deferred: `reflect`-backed schema
+//! # Schema source: imperative now, `reflect` later
 //!
 //! Design §25.3 routes cvar range-clamping / defaults / rename compatibility
 //! through `prism_reflect` attribute metadata once that lands. This module
-//! declares the same schema **imperatively** at registration (a real,
-//! self-contained mechanism — not a fake of reflect), and the reflect-attribute
-//! path is documented as absent, to be layered on without changing these
-//! validation semantics. Nothing here is stubbed.
+//! provides all three **imperatively** at registration — a real, self-contained
+//! mechanism, not a fake of reflect: bounds give clamping
+//! ([`CvarBounds`]), the default is fixed per cvar, and a rename is declared
+//! with [`CvarSpec::alias`] and resolved by [`CvarRegistry::resolve`] on every
+//! read/write. Only the reflect-*attribute* source of that same metadata is
+//! absent, to be layered on later without changing these validation semantics.
+//! Nothing here is stubbed.
 //!
 //! [`Resource`]: prism_ecs::resource::Resource
 //! [`Settings`]: crate::settings::Settings
 //! [`BTreeMap`]: std::collections::BTreeMap
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
@@ -319,6 +322,9 @@ pub struct CvarSpec {
     bounds: CvarBounds,
     flags: CvarFlags,
     description: String,
+    /// Former names of this cvar, accepted as aliases on read/write (design
+    /// §25.3 "改名兼容").
+    aliases: Vec<String>,
 }
 
 impl CvarSpec {
@@ -336,7 +342,22 @@ impl CvarSpec {
             bounds: CvarBounds::None,
             flags: CvarFlags::EMPTY,
             description: String::new(),
+            aliases: Vec::new(),
         }
+    }
+
+    /// Declare a former name of this cvar (design §25.3 "改名兼容").
+    ///
+    /// A read or write that names the alias resolves to this cvar's canonical
+    /// [`name`](CvarSpec::name), so an old config / console script keeps working
+    /// after a rename. A cvar may carry several aliases (e.g. across successive
+    /// renames). An alias that collides with an existing cvar name or alias is
+    /// rejected at [registration](CvarRegistry::register) with
+    /// [`CvarError::Redeclared`].
+    #[must_use]
+    pub fn alias(mut self, former_name: impl Into<String>) -> Self {
+        self.aliases.push(former_name.into());
+        self
     }
 
     /// Set the [category](CvarCategory).
@@ -762,6 +783,8 @@ fn bounds_match_kind(bounds: CvarBounds, default: &SettingValue) -> bool {
 #[derive(Clone, Debug, Default)]
 pub struct CvarRegistry {
     cvars: BTreeMap<String, Cvar>,
+    /// Former names → canonical name, for rename compatibility (design §25.3).
+    aliases: BTreeMap<String, String>,
     cheats_enabled: bool,
 }
 
@@ -785,11 +808,26 @@ impl CvarRegistry {
     /// returned `(name, default)` lets a caller seed the settings cascade
     /// without re-deriving them.
     pub fn register(&mut self, spec: CvarSpec) -> Result<(String, SettingValue), CvarError> {
-        if self.cvars.contains_key(&spec.name) {
+        if self.cvars.contains_key(&spec.name) || self.aliases.contains_key(&spec.name) {
             return Err(CvarError::Redeclared(spec.name));
         }
         if !bounds_match_kind(spec.bounds, &spec.default) || !spec.bounds.is_well_formed() {
             return Err(CvarError::InvalidBounds(spec.name));
+        }
+        // Validate every alias before mutating, so a rejected spec leaves the
+        // registry untouched: no alias may be the canonical name, an existing
+        // cvar, an existing alias, or a duplicate of another alias in this spec.
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for alias in &spec.aliases {
+            if alias == &spec.name {
+                return Err(CvarError::Redeclared(alias.clone()));
+            }
+            if self.cvars.contains_key(alias) || self.aliases.contains_key(alias) {
+                return Err(CvarError::Redeclared(alias.clone()));
+            }
+            if !seen.insert(alias.as_str()) {
+                return Err(CvarError::Redeclared(alias.clone()));
+            }
         }
         let (default, _) = spec.bounds.clamp(spec.default);
         let cvar = Cvar {
@@ -799,20 +837,36 @@ impl CvarRegistry {
             flags: spec.flags,
             description: spec.description,
         };
+        for alias in spec.aliases {
+            self.aliases.insert(alias, spec.name.clone());
+        }
         self.cvars.insert(spec.name.clone(), cvar);
         Ok((spec.name, default))
     }
 
-    /// Whether a cvar named `name` is registered.
+    /// The canonical name for `name`, following a rename
+    /// [alias](CvarSpec::alias); returns `name` unchanged when it is not an
+    /// alias (including when it is unknown). Canonical names are never aliases
+    /// of another cvar, so this resolves in a single step (design §25.3).
     #[must_use]
-    pub fn contains(&self, name: &str) -> bool {
-        self.cvars.contains_key(name)
+    pub fn resolve<'a>(&'a self, name: &'a str) -> &'a str {
+        self.aliases.get(name).map_or(name, String::as_str)
     }
 
-    /// The schema of a registered cvar, or `None`.
+    /// Whether a cvar named `name` is registered.
+    ///
+    /// A former name declared via [`CvarSpec::alias`] counts as registered and
+    /// resolves to its canonical cvar.
+    #[must_use]
+    pub fn contains(&self, name: &str) -> bool {
+        self.cvars.contains_key(self.resolve(name))
+    }
+
+    /// The schema of a registered cvar, or `None`. A rename
+    /// [alias](CvarSpec::alias) resolves to the canonical cvar's schema.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Cvar> {
-        self.cvars.get(name)
+        self.cvars.get(self.resolve(name))
     }
 
     /// The number of registered cvars.
@@ -882,6 +936,7 @@ impl CvarRegistry {
         name: &str,
         value: SettingValue,
     ) -> Result<ValidatedWrite, CvarError> {
+        let name = self.resolve(name);
         let cvar = self
             .cvars
             .get(name)
@@ -984,6 +1039,15 @@ impl App {
         value: impl Into<SettingValue>,
     ) -> Result<CvarSetOutcome, CvarError> {
         self.init_cvars();
+        // Rename compatibility (§25.3): resolve a former name to its canonical
+        // cvar so validation, the cascade key, and the emitted events all use
+        // the canonical name.
+        let canonical = self
+            .world()
+            .resource::<CvarRegistry>()
+            .resolve(name)
+            .to_owned();
+        let name = canonical.as_str();
         let registry = self.world().resource::<CvarRegistry>();
         let raw = value.into();
         let ValidatedWrite {
@@ -1078,6 +1142,14 @@ impl App {
         values: &[&str],
     ) -> Result<CvarSetOutcome, CvarError> {
         self.init_cvars();
+        // Rename compatibility (§25.3): operate on the canonical name so the
+        // resolved value, validation, and write all target the same key.
+        let canonical = self
+            .world()
+            .resource::<CvarRegistry>()
+            .resolve(name)
+            .to_owned();
+        let name = canonical.as_str();
         if !self.world().resource::<CvarRegistry>().contains(name) {
             return Err(CvarError::Unregistered(name.to_owned()));
         }
@@ -1169,6 +1241,14 @@ impl App {
         delta: f64,
     ) -> Result<CvarSetOutcome, CvarError> {
         self.init_cvars();
+        // Rename compatibility (§25.3): operate on the canonical name so the
+        // resolved value, validation, and write all target the same key.
+        let canonical = self
+            .world()
+            .resource::<CvarRegistry>()
+            .resolve(name)
+            .to_owned();
+        let name = canonical.as_str();
         if !self.world().resource::<CvarRegistry>().contains(name) {
             return Err(CvarError::Unregistered(name.to_owned()));
         }
@@ -1758,7 +1838,11 @@ impl App {
     /// unset.
     #[must_use]
     pub fn cvar(&self, name: &str) -> Option<&SettingValue> {
-        self.world().get_resource::<Settings>()?.get(name)
+        // Resolve a rename alias to its canonical name so an old name reads the
+        // current value (design §25.3).
+        let world = self.world();
+        let key = world.get_resource::<CvarRegistry>()?.resolve(name);
+        world.get_resource::<Settings>()?.get(key)
     }
 
     /// Resolve the cvar `name` as a `bool`, if set and boolean.

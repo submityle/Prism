@@ -7988,4 +7988,97 @@ mod cvar_tests {
         );
         assert_eq!(app.cvar_int("r.shadows"), Some(0));
     }
+
+    /// A former name declared with `CvarSpec::alias` resolves to the canonical
+    /// cvar on read, and a write through it lands in the canonical cascade key
+    /// (design §25.3 "改名兼容").
+    #[test]
+    fn rename_alias_resolves_reads_and_writes_to_canonical() {
+        let mut app = App::new();
+        app.register_cvar(
+            CvarSpec::new("r.shadows", 1_i64)
+                .bounds(CvarBounds::Int(0, 4))
+                .alias("r.shadow"),
+        )
+        .unwrap();
+
+        let registry = app.world().resource::<CvarRegistry>();
+        assert!(registry.contains("r.shadow"), "an alias counts as registered");
+        assert_eq!(registry.resolve("r.shadow"), "r.shadows");
+        assert_eq!(registry.resolve("r.shadows"), "r.shadows");
+        assert_eq!(registry.resolve("nope"), "nope", "unknown names pass through");
+        assert_eq!(registry.len(), 1, "an alias is not a second cvar");
+
+        // A write through the former name lands in the canonical cascade key.
+        let outcome = app.set_cvar("r.shadow", 3_i64).unwrap();
+        assert_eq!(outcome.resolved, SettingValue::Int(3));
+        assert_eq!(app.cvar_int("r.shadows"), Some(3));
+        assert_eq!(
+            app.cvar_int("r.shadow"),
+            Some(3),
+            "reading through the alias sees the write"
+        );
+        let settings = app.world().resource::<Settings>();
+        assert!(settings.get("r.shadow").is_none(), "no alias key is stored");
+        assert_eq!(
+            settings.resolved_layer("r.shadows"),
+            Some(SettingsLayer::Runtime)
+        );
+    }
+
+    /// Aliases are honoured by the `toggle` / `incrementvar` commands too, since
+    /// those route through the canonical cvar.
+    #[test]
+    fn rename_alias_works_for_toggle_and_increment() {
+        let mut app = App::new();
+        app.register_cvar(CvarSpec::new("r.vsync", false).alias("r.vsync_enabled"))
+            .unwrap();
+        app.register_cvar(
+            CvarSpec::new("r.scale", 100_i64)
+                .bounds(CvarBounds::Int(50, 200))
+                .alias("r.res_scale"),
+        )
+        .unwrap();
+
+        app.toggle_cvar("r.vsync_enabled", &[]).unwrap();
+        assert_eq!(app.cvar_bool("r.vsync"), Some(true));
+
+        app.increment_cvar("r.res_scale", 50.0, 200.0, 25.0)
+            .unwrap();
+        assert_eq!(app.cvar_int("r.scale"), Some(125));
+    }
+
+    /// An alias that collides with an existing cvar name, its own name, or
+    /// another alias is rejected at registration, leaving the registry intact.
+    #[test]
+    fn duplicate_aliases_are_rejected() {
+        let mut registry = CvarRegistry::new();
+        registry.register(CvarSpec::new("a", 1_i64)).unwrap();
+
+        // Alias equal to an existing cvar name.
+        assert_eq!(
+            registry.register(CvarSpec::new("b", 2_i64).alias("a")),
+            Err(CvarError::Redeclared("a".to_string()))
+        );
+        // Alias equal to the cvar's own name.
+        assert_eq!(
+            registry.register(CvarSpec::new("c", 3_i64).alias("c")),
+            Err(CvarError::Redeclared("c".to_string()))
+        );
+        // The same alias twice in one spec.
+        assert_eq!(
+            registry.register(CvarSpec::new("d", 4_i64).alias("x").alias("x")),
+            Err(CvarError::Redeclared("x".to_string()))
+        );
+        // A later cvar may not claim a name that is already an alias.
+        registry
+            .register(CvarSpec::new("e", 5_i64).alias("old_e"))
+            .unwrap();
+        assert_eq!(
+            registry.register(CvarSpec::new("old_e", 6_i64)),
+            Err(CvarError::Redeclared("old_e".to_string()))
+        );
+        // Only `a` and `e` registered; every rejected spec left no trace.
+        assert_eq!(registry.len(), 2);
+    }
 }
