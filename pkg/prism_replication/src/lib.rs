@@ -17,6 +17,8 @@
 //! - [`bitpack`] / [`quantize`] — the delta layer's wire primitives: a
 //!   bit-width-addressable stream and a uniform scalar quantizer, so a replicated
 //!   field costs the bits it needs (design §15).
+//! - [`delta`] — baseline-relative field deltas: a schema, a changed-field mask,
+//!   and only the changed values, with the baseline revision checked on apply.
 //!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
@@ -30,5 +32,7 @@ extern crate alloc;
 pub mod sequence;
 
 pub mod bitpack;
+
+pub mod delta;
 
 pub mod quantize;
