@@ -8,6 +8,7 @@
 //! finished command buffers to the wgpu queue in submission order.
 
 use alloc::vec::Vec;
+use core::any::Any;
 
 use prism_render_driver as rhi;
 use rhi::RenderQueue;
@@ -429,9 +430,61 @@ impl RenderQueue for WgpuQueue {
     }
 
     fn submit(&self, command_buffers: &[rhi::CommandBuffer]) {
+        // The frozen trait is fire-and-forget; discard the submission index.
+        let _ = self.submit_tracked(command_buffers);
+    }
+}
+
+impl WgpuQueue {
+    /// Encodes and submits `command_buffers`, returning `wgpu`'s completion
+    /// token (its submission index) for the batch.
+    ///
+    /// This is the tracked counterpart to the frozen
+    /// [`RenderQueue::submit`], which discards the index. Frames-in-flight
+    /// pacing holds the returned index and waits on it with
+    /// [`wait_for_submission`](Self::wait_for_submission) to know when a frame
+    /// has actually retired.
+    #[must_use]
+    pub fn submit_tracked(&self, command_buffers: &[rhi::CommandBuffer]) -> wgpu::SubmissionIndex {
         let encoded: Vec<wgpu::CommandBuffer> =
             command_buffers.iter().map(|cb| self.encode(cb)).collect();
-        self.queue.submit(encoded);
+        self.queue.submit(encoded)
+    }
+
+    /// Blocks the calling thread until the submission named by `index` has
+    /// completed.
+    ///
+    /// Returns `true` once the submission is done, or `false` if the device was
+    /// lost or `wgpu` rejected the index. Prefer this over a queue-wide wait
+    /// when pacing frames: it waits for exactly one frame rather than for every
+    /// later submission too.
+    pub fn wait_for_submission(&self, index: &wgpu::SubmissionIndex) -> bool {
+        self.inner.wait_for_submission(index)
+    }
+
+    /// Type-erased [`wait_for_submission`](Self::wait_for_submission).
+    ///
+    /// Accepts a token boxed through the [`Any`] boundary by a `FrameSync`
+    /// owner, downcasting it back to a submission index internally so that owner
+    /// can carry tokens without naming `wgpu` types. Returns `false` if `token`
+    /// did not originate from this backend.
+    pub fn wait_for_submission_erased(&self, token: &(dyn Any + Send + Sync)) -> bool {
+        token
+            .downcast_ref::<wgpu::SubmissionIndex>()
+            .is_some_and(|index| self.wait_for_submission(index))
+    }
+
+    /// Blocks the calling thread until every submission on this queue has
+    /// completed.
+    ///
+    /// Returns `true` on success, or `false` if the device was lost. Use this at
+    /// idle points (readback, surface resize, shutdown) that need the GPU fully
+    /// caught up.
+    pub fn wait_idle(&self) -> bool {
+        self.inner
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .is_ok()
     }
 }
 
@@ -601,5 +654,39 @@ mod tests {
 
         device.destroy_buffer(src);
         device.destroy_buffer(dst);
+    }
+
+    #[test]
+    fn gpu_tracked_submission_reports_completion() {
+        let Some((device, queue)) = device_or_skip() else {
+            return;
+        };
+        // An empty command buffer is a valid, side-effect-free submission; its
+        // readiness is exactly what frames-in-flight pacing waits on.
+        let commands = [rhi::CommandEncoder::new().finish()];
+
+        let index = queue.submit_tracked(&commands);
+        assert!(
+            queue.wait_for_submission(&index),
+            "the queue's typed completion hook confirms the submission finished"
+        );
+        assert!(
+            device.wait_for_submission(&index),
+            "the device's completion hook confirms the same submission"
+        );
+
+        // The type-erased route (what the runtime's pacer carries) must accept a
+        // token from this backend and reject a foreign one rather than block.
+        let erased: Box<dyn Any + Send + Sync> = Box::new(queue.submit_tracked(&commands));
+        assert!(
+            queue.wait_for_submission_erased(erased.as_ref()),
+            "the erased token route completes a real submission"
+        );
+        assert!(
+            !queue.wait_for_submission_erased(&0_u32),
+            "a token from another source is rejected, not silently accepted"
+        );
+
+        assert!(queue.wait_idle(), "the queue drains to idle");
     }
 }

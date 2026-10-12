@@ -84,6 +84,93 @@ fn rhi_graph_clears_imported_target() {
 /// A back-to-front triangle in clip space, three `vec3<f32>` positions.
 const TRIANGLE: [f32; 9] = [0.0, 0.6, 0.0, -0.6, -0.6, 0.0, 0.6, -0.6, 0.0];
 
+/// Builds a one-pass graph that clears `target`, giving the frame pacer real
+/// submissions to bound.
+///
+/// `target` is imported (rather than created transiently) so the same texture
+/// can back every frame without the graph leaking a fresh allocation per call.
+fn clear_graph(
+    rt: &RenderRuntime<WgpuInstance>,
+    texture: rhi::TextureId,
+    view: rhi::TextureViewId,
+) -> prism_render_graph::RenderGraph {
+    let mut graph = rt.new_graph();
+    let target = graph.import_texture(
+        "paced-target",
+        TextureDesc::color(rhi::TextureFormat::Rgba8Unorm).with_usage(TextureUsages::COPY_SRC),
+        ImportedTexture {
+            texture,
+            default_view: view,
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::copy_src(),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
+    graph.add_raster_pass("paced-clear", PassFlags::SIDE_EFFECT, |b| {
+        let _ = b.color_attachment(target);
+        |_ctx| {}
+    });
+    graph
+}
+
+/// Submitting more frames than the configured maximum must never leave more
+/// than `max` outstanding, and `wait_idle` must drain the pipeline to zero.
+#[test]
+fn pacer_bounds_frames_in_flight_and_drains() {
+    const MAX_IN_FLIGHT: usize = 2;
+    const FRAMES: usize = 5;
+
+    let extent = rhi::Extent3d::new_2d(SIZE, SIZE);
+    let Some(rt) = RenderRuntime::<WgpuInstance>::wgpu_paced(extent, MAX_IN_FLIGHT).ok() else {
+        return;
+    };
+    assert_eq!(
+        rt.max_frames_in_flight(),
+        MAX_IN_FLIGHT,
+        "the configured bound is reported back"
+    );
+    assert_eq!(
+        rt.frames_in_flight(),
+        0,
+        "a fresh runtime has no frames in flight"
+    );
+
+    let device = rt.device();
+    let texture = device.create_texture(&rhi::TextureDescriptor::new_2d(
+        extent,
+        rhi::TextureFormat::Rgba8Unorm,
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+    ));
+    let view = device.create_texture_view(texture, &rhi::TextureViewDescriptor::default());
+
+    for frame in 0..FRAMES {
+        rt.execute(clear_graph(&rt, texture, view))
+            .expect("a paced frame executes on the RHI");
+        assert!(
+            rt.frames_in_flight() <= MAX_IN_FLIGHT,
+            "frame {frame} left {} outstanding, bound is {MAX_IN_FLIGHT}",
+            rt.frames_in_flight()
+        );
+    }
+    assert_eq!(
+        rt.frames_in_flight(),
+        MAX_IN_FLIGHT,
+        "after more frames than the bound, the pipeline stays exactly full"
+    );
+
+    assert!(rt.wait_idle(), "wait_idle confirms every outstanding frame");
+    assert_eq!(
+        rt.frames_in_flight(),
+        0,
+        "wait_idle leaves no outstanding frames"
+    );
+
+    // The queue is idle now, so the imported target is safe to release.
+    device.destroy_texture_view(view);
+    device.destroy_texture(texture);
+}
+
 /// Minimal pass-through vertex + constant-color fragment shader.
 const TRIANGLE_WGSL: &str = "\
 @vertex fn vs(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {\n\

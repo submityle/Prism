@@ -17,14 +17,33 @@
 //! executes frame graphs against offscreen targets. Surface acquisition and
 //! present are exposed through the RHI [`Surface`](prism_render_driver::Surface)
 //! trait and are wired into the app loop next.
+//!
+//! ## Frame pacing
+//!
+//! Submission is bounded: the runtime keeps at most
+//! [`DEFAULT_FRAMES_IN_FLIGHT`] (configurable) frames outstanding and blocks on
+//! the oldest before starting a new one, so the CPU cannot race arbitrarily far
+//! ahead of the GPU. The policy lives in the pure [`FramePacer`]; the completion
+//! signal it waits on comes from the backend through [`FrameSync`]. Both are
+//! backend-agnostic — the runtime itself never names a native submission handle.
+
+extern crate alloc;
 
 use core::fmt;
+use std::sync::{Mutex, MutexGuard};
 
 use prism_render_driver::{
     Adapter, AdapterInfo, DeviceDescriptor, Extent3d, Instance, PowerPreference,
     RequestAdapterOptions,
 };
 use prism_render_graph::{CompileError, RenderGraph};
+
+mod capture;
+mod frame_pacing;
+mod frame_sync;
+
+pub use frame_pacing::{FramePacer, DEFAULT_FRAMES_IN_FLIGHT};
+pub use frame_sync::{CompletionToken, FrameSync};
 
 #[cfg(test)]
 mod tests;
@@ -56,17 +75,37 @@ pub struct RenderRuntime<I: Instance> {
     device: I::Device,
     queue: I::Queue,
     extent: Extent3d,
+    /// The frames-in-flight bound and its outstanding completion tokens.
+    pacer: Mutex<FramePacer<CompletionToken>>,
 }
 
 impl<I: Instance> RenderRuntime<I> {
     /// Brings up a headless runtime on a high-performance adapter from
-    /// `instance`.
+    /// `instance`, keeping [`DEFAULT_FRAMES_IN_FLIGHT`] frames in flight.
     ///
     /// # Errors
     ///
     /// [`RenderInitError::NoAdapter`] when no adapter is available, or
     /// [`RenderInitError::Device`] when the device request is rejected.
     pub fn headless(instance: I, extent: Extent3d) -> Result<Self, RenderInitError> {
+        Self::with_frames_in_flight(instance, extent, DEFAULT_FRAMES_IN_FLIGHT)
+    }
+
+    /// Brings up a headless runtime that keeps at most `max_in_flight` frames
+    /// outstanding.
+    ///
+    /// `max_in_flight` is clamped to at least one. Higher values trade latency
+    /// for throughput; the double-buffered default of
+    /// [`DEFAULT_FRAMES_IN_FLIGHT`] is the usual choice.
+    ///
+    /// # Errors
+    ///
+    /// See [`RenderRuntime::headless`].
+    pub fn with_frames_in_flight(
+        instance: I,
+        extent: Extent3d,
+        max_in_flight: usize,
+    ) -> Result<Self, RenderInitError> {
         let options = RequestAdapterOptions {
             power_preference: PowerPreference::HighPerformance,
             force_fallback: false,
@@ -83,6 +122,7 @@ impl<I: Instance> RenderRuntime<I> {
             device,
             queue,
             extent,
+            pacer: Mutex::new(FramePacer::new(max_in_flight)),
         })
     }
 
@@ -128,14 +168,81 @@ impl<I: Instance> RenderRuntime<I> {
         RenderGraph::new(self.extent)
     }
 
-    /// Compiles, realizes transients, records commands, and submits `graph`.
+    /// Locks and returns the frame pacer, tolerating a poisoned mutex.
+    ///
+    /// A panic in a thread that held the lock cannot leave the pacer in a
+    /// partially-updated state — every mutation is a single `VecDeque` push or
+    /// pop — so recovering the guard is safe and keeps a single panicking frame
+    /// from wedging the whole render loop.
+    fn pacer(&self) -> MutexGuard<'_, FramePacer<CompletionToken>> {
+        self.pacer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The number of frames currently allowed to be outstanding at once.
+    #[must_use]
+    pub fn max_frames_in_flight(&self) -> usize {
+        self.pacer().max_in_flight()
+    }
+
+    /// The number of frames submitted but not yet confirmed complete.
+    #[must_use]
+    pub fn frames_in_flight(&self) -> usize {
+        self.pacer().in_flight()
+    }
+
+    /// Compiles, realizes transients, records commands, and submits `graph`
+    /// under the frames-in-flight bound.
+    ///
+    /// Before the frame is submitted, the pacer is consulted: if
+    /// [`Self::max_frames_in_flight`] frames are already outstanding, this
+    /// blocks on the oldest one's completion token first. As a result no more
+    /// than that many frames are ever in flight.
     ///
     /// # Errors
     ///
     /// Returns [`CompileError`] when the graph fails to compile (a dependency
-    /// cycle); no GPU work is issued in that case.
-    pub fn execute(&self, graph: RenderGraph) -> Result<(), CompileError> {
-        graph.execute(&self.device, &self.queue)
+    /// cycle); no GPU work is issued and the pacer is left untouched in that
+    /// case.
+    pub fn execute(&self, graph: RenderGraph) -> Result<(), CompileError>
+    where
+        I::Queue: FrameSync,
+    {
+        // Record the graph into a command buffer without submitting it, so the
+        // pacer can own the actual submission and receive its completion token.
+        let capture = capture::CapturingQueue::new(&self.queue);
+        graph.execute(&self.device, &capture)?;
+        let commands = capture.take();
+
+        // Retire the oldest frame if the pipeline is full; this is the only
+        // place the CPU blocks on the GPU.
+        if let Some(oldest) = self.pacer().begin_frame() {
+            let _ = self.queue.wait_for(oldest.as_ref());
+        }
+
+        let token = self.queue.submit_tracked(&commands);
+        self.pacer().record(token);
+        Ok(())
+    }
+
+    /// Blocks until every outstanding frame has completed, leaving the pacer
+    /// empty.
+    ///
+    /// Call this before reading results back, resizing a surface, or tearing
+    /// the runtime down. Returns `true` when every wait confirmed completion.
+    pub fn wait_idle(&self) -> bool
+    where
+        I::Queue: FrameSync,
+    {
+        let outstanding: Vec<CompletionToken> = self.pacer().drain().collect();
+        let all_confirmed = outstanding
+            .iter()
+            .all(|token| self.queue.wait_for(token.as_ref()));
+        // Always reach for the queue-wide barrier too: it also covers work the
+        // runtime did not submit through `execute`.
+        let idle = self.queue.wait_idle();
+        all_confirmed && idle
     }
 }
 
@@ -150,5 +257,19 @@ impl RenderRuntime<prism_render_driver_wgpu::WgpuInstance> {
     /// See [`RenderRuntime::headless`].
     pub fn wgpu(extent: Extent3d) -> Result<Self, RenderInitError> {
         Self::headless(prism_render_driver_wgpu::WgpuInstance::new(), extent)
+    }
+
+    /// Brings up a headless wgpu runtime that keeps at most `max_in_flight`
+    /// frames outstanding.
+    ///
+    /// # Errors
+    ///
+    /// See [`RenderRuntime::headless`].
+    pub fn wgpu_paced(extent: Extent3d, max_in_flight: usize) -> Result<Self, RenderInitError> {
+        Self::with_frames_in_flight(
+            prism_render_driver_wgpu::WgpuInstance::new(),
+            extent,
+            max_in_flight,
+        )
     }
 }

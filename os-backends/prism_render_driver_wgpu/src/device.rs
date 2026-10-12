@@ -207,6 +207,20 @@ impl DeviceInner {
             .expect("stale ComputePipelineId in command stream")
             .clone()
     }
+
+    /// Blocks until the submission named by `index` has completed.
+    ///
+    /// Shared by [`WgpuDevice::wait_for_submission`] and the queue's
+    /// completion-token hook so both go through one `wgpu` poll call. Returns
+    /// `false` on device loss or if `wgpu` rejects the index.
+    pub(crate) fn wait_for_submission(&self, index: &wgpu::SubmissionIndex) -> bool {
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(index.clone()),
+                timeout: None,
+            })
+            .is_ok()
+    }
 }
 
 /// A wgpu-backed [`rhi::RenderDevice`]: the factory for every GPU resource.
@@ -264,6 +278,18 @@ impl WgpuDevice {
             .device
             .poll(wgpu::PollType::wait_indefinitely())
             .is_ok()
+    }
+
+    /// Blocks the calling thread until the submission identified by `index` has
+    /// completed, without waiting for later submissions.
+    ///
+    /// This is the precise-completion hook frames-in-flight pacing is built on:
+    /// a caller holds the `wgpu::SubmissionIndex` returned when it submitted a
+    /// frame and polls for exactly that frame. Returns `true` once the
+    /// submission is done, or `false` if the device was lost or `wgpu` rejected
+    /// the index.
+    pub fn wait_for_submission(&self, index: &wgpu::SubmissionIndex) -> bool {
+        self.inner.wait_for_submission(index)
     }
 }
 
