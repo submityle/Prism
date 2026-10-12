@@ -363,7 +363,7 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 ### 16.5 Snapshot / 多 World / 反射桥
 
 - `world.snapshot()` / `restore()`：结构化（可差量）快照，服务回滚网络、`prism_ui_timetravel` 时间旅行、编辑器撤销。
-- 反射桥（`prism_reflect`）：序列化、编辑器 inspector、脚本访问统一走反射，组件无需各自手写 serde。**已落地第一段**（`reflect` feature，见 `src/reflect_bridge.rs` 与 §24.3）：`register_reflect_component::<T>()` 后可按 `StableTypeId` 动态 `get_reflect` / `get_reflect_mut` / `insert_reflect` / `remove_reflect`，并做 dense `ComponentId` ↔ `StableTypeId` 双向映射；组件仍住在类型化列里，注册表只存单态化操作，不装箱活值。**待接**：以反射为基座的零拷贝序列化与字段级 diff 复制（`serialize` feature，PLANNED）。
+- 反射桥（`prism_reflect`）：序列化、编辑器 inspector、脚本访问统一走反射，组件无需各自手写 serde。**已落地**（`reflect` feature，见 `src/reflect_bridge.rs` 与 §24.3）：`register_reflect_component::<T>()` 后可按 `StableTypeId` 动态 `get_reflect` / `get_reflect_mut` / `insert_reflect` / `remove_reflect`，并做 dense `ComponentId` ↔ `StableTypeId` 双向映射；组件仍住在类型化列里，注册表只存单态化操作，不装箱活值。**以反射为基座的序列化/复制也已落地**（`serialize` feature）：字段级 diff 走 `diff_reflect` / `apply_reflect_patch`（`Patch::Unchanged` 是真 no-op），按策略收发走 `replicated_diff_reflect`，实体二进制存档走 `save/load_reflect_archive`，跨版本读取走 `SchemaRegistry` + `Migration` 链——均见 §24.3。
 
 ### 16.6 ECS 检视器 + 系统火焰图 + 时间旅行
 
@@ -619,4 +619,4 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 
 ### 24.5 诚实边界
 
-本章为跨 crate 职责对齐说明：**§24.1 调度执行底座已部分接入**（冲突图执行器把并行波次派发到 `prism_tasks::TaskPool`、lane→优先级映射见 `schedule/{graph,config,lane}.rs`）；**§24.2 的 ECS 侧已落地**（变更观察总线 `change_observers.rs`：`observe_changed` / `flush_changed_observers`，按帧合并 + 确定序 + `Schedule::run` 自动 flush；跨 crate 的 transform 触发点仍待接）；**§24.3 的 ECS 侧第一段已落地**（`reflect` feature + `reflect_bridge.rs`：按 `StableTypeId` 动态读写组件；snapshot 零拷贝 / schema 迁移 / 字段级 diff 复制仍待 `serialize`）；**§24.4 已有可执行的四环对拍夹具**（`tests/determinism_link.rs`，见 §24.4），但「任意场景确定」仍需各 crate 的确定性档全覆盖。本章不引入 ECS 新机制，仅固定跨 crate 职责边界与引用。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章为跨 crate 职责对齐说明：**§24.1 调度执行底座已部分接入**（冲突图执行器把并行波次派发到 `prism_tasks::TaskPool`、lane→优先级映射见 `schedule/{graph,config,lane}.rs`）；**§24.2 的 ECS 侧已落地**（变更观察总线 `change_observers.rs`：`observe_changed` / `flush_changed_observers`，按帧合并 + 确定序 + `Schedule::run` 自动 flush；跨 crate 的 transform 触发点仍待接）；**§24.3 的 ECS 侧已落地**（`reflect` feature + `reflect_bridge.rs` 按 `StableTypeId` 动态读写组件，`serialize` feature + `reflect_archive.rs` 落字段级 diff / 复制策略 / 实体二进制存档 / 跨版本 schema 迁移，见 §24.3）；**§24.4 已有可执行的四环对拍夹具**（`tests/determinism_link.rs`，见 §24.4），但「任意场景确定」仍需各 crate 的确定性档全覆盖。本章不引入 ECS 新机制，仅固定跨 crate 职责边界与引用。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
