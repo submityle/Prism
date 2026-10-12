@@ -210,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn increasing_sheen_brightens_the_specular_lobe() {
+    fn increasing_sheen_grows_the_fuzz_lobe() {
         // A grazing view/light configuration maximises the Charlie lobe.
         let grazing_frame = ShadingFrame {
             normal: [0.0, 1.0, 0.0],
@@ -222,10 +222,19 @@ mod tests {
             direction: normalize_or([-1.0, 0.2, 0.0], [0.0, 1.0, 0.0]),
             ..light()
         };
+        // `base_color = 0` isolates the fuzz lobe: under `fuzz-layering-approx`
+        // the fuzz layer *redistributes* energy (it takes `F·E_fuzz` out of the
+        // substrate and returns it as the lobe), so the *total* no longer has to
+        // grow with the weight — the lobe itself does. The energy invariant of
+        // the whole class is the white-furnace gate.
+        let base_surface = SurfaceSample {
+            base_color: [0.0; 3],
+            ..base_surface()
+        };
         let low = evaluate_cloth_direct(
             SurfaceSample {
                 sheen: 0.1,
-                ..base_surface()
+                ..base_surface
             },
             grazing_frame,
             grazing_light,
@@ -233,7 +242,7 @@ mod tests {
         let high = evaluate_cloth_direct(
             SurfaceSample {
                 sheen: 0.9,
-                ..base_surface()
+                ..base_surface
             },
             grazing_frame,
             grazing_light,
@@ -241,7 +250,7 @@ mod tests {
         let sum = |c: [f32; 3]| c[0] + c[1] + c[2];
         assert!(
             sum(high) > sum(low),
-            "sheen should brighten the lobe: low={low:?} high={high:?}"
+            "the fuzz lobe itself must grow with the weight: low={low:?} high={high:?}"
         );
     }
 
