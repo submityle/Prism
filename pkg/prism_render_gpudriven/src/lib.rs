@@ -28,6 +28,17 @@
 //! capability (the RHI is fire-and-forget), implemented here for the shipped
 //! wgpu backend and used only by the GPU test and by [`cull::CullStage::run`].
 //!
+//! ## Why a direct encoder rather than a frame graph
+//!
+//! The slice records straight into [`prism_render_driver`] command buffers and
+//! assembles its whole frame into one of them. Routing it through a frame graph
+//! would add virtual-handle import plumbing for the cull's GPU-authored argument
+//! buffer and for the render target, without changing a single thing the GPU is
+//! asked to do — and the point of this prototype is the RHI primitives
+//! themselves: a compute append feeding an indirect draw, with no CPU readback
+//! anywhere in the loop. A full renderer's pass graph belongs one level up (see
+//! the render runtime); this slice deliberately stays below it.
+//!
 //! ## Layout
 //!
 //! - [`frustum`]: planes, AABBs, and the classification test the shader mirrors.
