@@ -33,11 +33,16 @@
 //! a modification made through reflection must be visible to `Changed<T>`,
 //! dirty chunks and the replication layer.
 
+#[cfg(feature = "serialize")]
+use alloc::boxed::Box;
+
 use crate::collections::HashMap;
 use crate::component::{Component, ComponentId};
 use crate::entity::Entity;
 use crate::world::World;
-use prism_reflect::{FromReflect, Reflect, StableTypeId};
+use prism_reflect::{FromReflect, GetTypeRegistration, Reflect, StableTypeId};
+#[cfg(feature = "serialize")]
+use prism_reflect::{DeserializeError, TypeRegistry};
 
 /// The stable, path-derived type id the bridge keys on (re-exported so callers
 /// need not depend on `prism_reflect` directly).
@@ -60,12 +65,18 @@ struct ReflectComponentOps {
     apply: fn(&mut World, Entity, &dyn Reflect) -> bool,
     /// Remove `T` from `entity`; `false` when the entity did not carry it.
     remove: fn(&mut World, Entity) -> bool,
+    /// Decode a `prism_reflect` binary blob back into a reflected value, which
+    /// [`World::insert_reflect`] then lands through `FromReflect` (design §24.3).
+    #[cfg(feature = "serialize")]
+    decode: fn(&[u8], &TypeRegistry) -> Result<Box<dyn Reflect>, DeserializeError>,
 }
 
 impl ReflectComponentOps {
     /// Build the operations for `T` by instantiating one monomorphised function
     /// per entry point.
-    fn of<T: Component + Reflect + FromReflect + Clone>(component: ComponentId) -> Self {
+    fn of<T: Component + Reflect + FromReflect + GetTypeRegistration + Clone>(
+        component: ComponentId,
+    ) -> Self {
         fn get<T: Component + Reflect>(world: &World, entity: Entity) -> Option<&dyn Reflect> {
             world.get::<T>(entity).map(|value| value as &dyn Reflect)
         }
@@ -101,6 +112,18 @@ impl ReflectComponentOps {
         fn remove<T: Component>(world: &mut World, entity: Entity) -> bool {
             world.remove::<T>(entity)
         }
+        #[cfg(feature = "serialize")]
+        fn decode<T: Reflect + GetTypeRegistration>(
+            bytes: &[u8],
+            registry: &TypeRegistry,
+        ) -> Result<Box<dyn Reflect>, DeserializeError> {
+            // The registration is inserted by `register_reflect_component`
+            // before this op can be reached, so the lookup cannot miss.
+            let registration = registry
+                .get_with_name(core::any::type_name::<T>())
+                .expect("reflect registration added at register_reflect_component");
+            prism_reflect::from_binary(bytes, registry, registration.type_info())
+        }
 
         Self {
             component,
@@ -108,6 +131,8 @@ impl ReflectComponentOps {
             get_mut: get_mut::<T>,
             apply: apply::<T>,
             remove: remove::<T>,
+            #[cfg(feature = "serialize")]
+            decode: decode::<T>,
         }
     }
 }
@@ -121,6 +146,10 @@ pub(crate) struct ReflectRegistry {
     /// through world introspection (columns, dirty chunks, snapshots) can name it
     /// in the stable, persistable id space.
     by_component: HashMap<ComponentId, StableTypeId>,
+    /// The `prism_reflect` registrations of every reflected component, used to
+    /// drive binary decoding (design §24.3).
+    #[cfg(feature = "serialize")]
+    types: TypeRegistry,
 }
 
 impl ReflectRegistry {
@@ -128,6 +157,18 @@ impl ReflectRegistry {
     #[inline]
     pub(crate) fn stable_of(&self, component: ComponentId) -> Option<StableTypeId> {
         self.by_component.get(&component).copied()
+    }
+
+    /// Decode `bytes` into the reflected value of the type registered under
+    /// `type_id`, or `None` when this world has no such registration.
+    #[cfg(feature = "serialize")]
+    pub(crate) fn decode(
+        &self,
+        type_id: StableTypeId,
+        bytes: &[u8],
+    ) -> Option<Result<Box<dyn Reflect>, DeserializeError>> {
+        let ops = self.ops.get(&type_id)?;
+        Some((ops.decode)(bytes, &self.types))
     }
 }
 
@@ -141,11 +182,15 @@ impl World {
     /// dynamically can be materialised into the typed column). `prism_reflect`
     /// is the type basis; the ECS stores only the monomorphised operations, never
     /// a boxed value.
-    pub fn register_reflect_component<T: Component + Reflect + FromReflect + Clone>(
+    pub fn register_reflect_component<
+        T: Component + Reflect + FromReflect + GetTypeRegistration + Clone,
+    >(
         &mut self,
     ) -> StableTypeId {
         let component = self.components_mut().register::<T>();
         let stable = StableTypeId::of_type::<T>();
+        #[cfg(feature = "serialize")]
+        self.reflect.types.register::<T>();
         self.reflect
             .ops
             .insert(stable, ReflectComponentOps::of::<T>(component));
@@ -164,6 +209,25 @@ impl World {
     #[inline]
     pub fn reflected_component_count(&self) -> usize {
         self.reflect.ops.len()
+    }
+
+    /// Every reflected component carried by `entity`, as `(stable id, value)`
+    /// pairs sorted by stable id.
+    ///
+    /// This is the "what does this entity have that I can talk about
+    /// dynamically?" primitive an inspector or a serialiser needs. The cost is
+    /// `O(registered types)` lookups — fine for an editor or a save pass, not
+    /// for a per-frame hot loop. The sort makes the order deterministic across
+    /// runs (the registry is a hash map).
+    pub fn reflect_entity(&self, entity: Entity) -> alloc::vec::Vec<(StableTypeId, &dyn Reflect)> {
+        let mut found: alloc::vec::Vec<(StableTypeId, &dyn Reflect)> = self
+            .reflect
+            .ops
+            .keys()
+            .filter_map(|&type_id| Some((type_id, self.get_reflect(entity, type_id)?)))
+            .collect();
+        found.sort_unstable_by_key(|(type_id, _)| *type_id);
+        found
     }
 
     /// Read `entity`'s component of reflected type `type_id` (design §24.3).

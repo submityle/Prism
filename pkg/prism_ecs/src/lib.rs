@@ -72,8 +72,12 @@ pub mod query;
 pub mod reaction;
 #[cfg(feature = "reflect")]
 pub mod reflect_bridge;
+#[cfg(feature = "serialize")]
+pub mod reflect_archive;
 #[cfg(all(test, feature = "reflect"))]
 mod reflect_bridge_tests;
+#[cfg(all(test, feature = "serialize"))]
+mod reflect_archive_tests;
 pub mod relation;
 pub mod resource;
 pub mod schedule;

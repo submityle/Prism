@@ -34,6 +34,11 @@ multi_thread = ["std", "dep:prism_tasks"]
 # Pulls in `prism_reflect` (and `std`), so the base kernel stays free of it.
 reflect = ["std", "dep:prism_reflect"]
 
+# Reflect-driven binary archives (design §16.5 / §24.3): save/load an entity
+# set's reflected components through `prism_reflect`'s binary format, so a
+# save file or prefab payload needs no per-component glue. Builds on `reflect`.
+serialize = ["reflect"]
+
 # SIMD-accelerated bulk column kernels (design §7/§17). Hot component columns
 # are iterated through per-arch `core::arch` intrinsics (SSE2 on x86_64, NEON on
 # aarch64) with a portable scalar reference fallback — the same backend-selection

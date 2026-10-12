@@ -441,7 +441,7 @@ pkg/prism_ecs/                     # no_std + alloc 内核
 pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource/Event/SystemParam/Relation 已实现
 ```
 
-> **feature 现状诚实注记**：上方 feature 清单为**目标形态**。`pkg/prism_ecs/Cargo.toml` 当前**已落地**的 feature 为 `std` / `multi_thread` / `simd` / `partition` / `gpu_resident` / `determinism` / `trace` / **`reflect`**（均有真实 `cfg` 门控代码与测试，`determinism` 见 `world/snapshot/determinism.rs`，`trace` 见 `diagnostics/trace/`）。`reflect` 已按 §16.5 / §24.3 接入 `prism_reflect`：`src/reflect_bridge.rs` 提供 `World::register_reflect_component::<T>()`（登记 `StableTypeId → 单态化操作` 表）与 `get_reflect` / `get_reflect_mut` / `insert_reflect` / `remove_reflect` / `reflect_component_id` / `reflect_stable_id`，热路径为一次哈希探测 + 一次间接调用，不把活组件装箱（`T: Reflect + Clone`；`get_reflect_mut` 走 `Mut`，因此会像直接 `get_mut` 一样标记 changed）。`serialize` 仍为 **PLANNED feature 名**（尚未在 Cargo.toml 落地）：待 `prism_reflect` 的零拷贝二进制序列化（§16.5 / §24.3）接上快照/存档路径后接入。`trace` 已落地为「结构化事件流 + Chrome/Perfetto 时间线导出」——作为 §16.6 火焰图 profiler 的对偶（profiler 折叠自时间树，trace 保留有序事件流），共用 `SystemInstrument` 捕获钩子、core `no_std + alloc`、`TraceRecorder` 实时捕获层 `std` 门控，非薄壳。
+> **feature 现状诚实注记**：上方 feature 清单为**目标形态**。`pkg/prism_ecs/Cargo.toml` 当前**已落地**的 feature 为 `std` / `multi_thread` / `simd` / `partition` / `gpu_resident` / `determinism` / `trace` / **`reflect`** / **`serialize`**（均有真实 `cfg` 门控代码与测试，`determinism` 见 `world/snapshot/determinism.rs`，`trace` 见 `diagnostics/trace/`）。`reflect` 已按 §16.5 / §24.3 接入 `prism_reflect`：`src/reflect_bridge.rs` 提供 `World::register_reflect_component::<T>()`（登记 `StableTypeId → 单态化操作` 表）与 `get_reflect` / `get_reflect_mut` / `insert_reflect` / `remove_reflect` / `reflect_component_id` / `reflect_stable_id` / `reflect_entity`，热路径为一次哈希探测 + 一次间接调用，不把活组件装箱（`T: Reflect + FromReflect + Clone`；`get_reflect_mut` 走 `Mut`，因此会像直接 `get_mut` 一样标记 changed）。`serialize` 已落地为反射驱动的实体二进制存档（`src/reflect_archive.rs`，信封与语义见 §24.3）：`save_reflect_archive` 产出**字节确定**的存档，`load_reflect_archive` 同 id 存活则覆盖、缺失则新开实体并返回落地实体表。**仍未接**：跨版本 schema 迁移（`prism_reflect::SchemaRegistry`/`Migration` 已就绪，尚未接进存档回读路径）。`trace` 已落地为「结构化事件流 + Chrome/Perfetto 时间线导出」——作为 §16.6 火焰图 profiler 的对偶（profiler 折叠自时间树，trace 保留有序事件流），共用 `SystemInstrument` 捕获钩子、core `no_std + alloc`、`TraceRecorder` 实时捕获层 `std` 门控，非薄壳。
 
 依赖：仅 `prism_math`、`prism_tasks`（std）、`prism_reflect`（可选）。**不碰任何 `bevy_*`。**
 
@@ -471,7 +471,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 ## 22. 诚实边界与风险
 
-- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 / 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 反射桥第一段 / 快照+回滚 / 分区流送 / GPU 常驻列 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 的动态组件访问已落地，零拷贝序列化 / schema 迁移 / 字段级 diff 复制待 `serialize`；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、`serialize` feature、§23.5 渲染提取管线，以及独占机多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
+- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 / 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档，仅剩跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 渲染提取管线，以及独占机多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
 - 规模与多核扩展性、NUMA、GPU 常驻指标依赖真实硬件压测，单测不能替代。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。
@@ -568,6 +568,8 @@ ECS §16 的动态组件、snapshot、prefab 继承、反射桥**以 `prism_refl
 **ECS 侧已落地**：`reflect` feature 下的 `src/reflect_bridge.rs` 把「按类型名动态读写组件」变成真实可用的 API——`register_reflect_component::<T>()` 登记 `StableTypeId → {get, get_mut, apply, remove}` 单态化函数指针表，随后 `get_reflect` / `get_reflect_mut` / `insert_reflect` / `remove_reflect` 全部只认 `&dyn Reflect` 与 `StableTypeId`，调用点不再出现 Rust 类型名（编辑器检视器、场景装载、存档迁移、复制层正是这种用法）。`insert_reflect` 同时接受**具体值**（`downcast` 快路径）与 **`Dynamic*` 树**（存档解码/`reflect_clone` 的产物，经 `FromReflect` 还原）；`StableTypeId` 由类型路径派生，因此可安全写进存档/网络流；`reflect_component_id` / `reflect_stable_id` 提供「世界内 dense id ↔ 稳定 id」双向映射。**字段级增量也已接上第一段**：`diff_reflect(entity, id, authoritative)` 直接产出 `prism_reflect::Patch`（只含变化字段），`apply_reflect_patch(entity, id, &patch)` 把补丁写回活组件；`Patch::Unchanged` 是**真 no-op**（既不写也不标 changed），所以已经同步的接收端不会因「空补丁」反复触发 `Changed<T>`/脏块。**尚未接**：snapshot 走 reflect 二进制零拷贝与 schema 迁移——依赖 `serialize` feature，仍为 PLANNED。
 
 **复制策略一层**：`replicated_diff_reflect(entity, id, authoritative, &ReplicationPlan)` 在 `diff_reflect` 之上叠加 `prism_reflect::ReplicationPlan` 的字段许可——补丁只覆盖策略选中的字段（例如服务端专有字段永不下发），再交给 `apply_reflect_patch` 落地，构成「按策略只发差异字段」的完整收发回路。
+
+**存档一段也已落地（`serialize` feature）**：`src/reflect_archive.rs` 提供 `World::save_reflect_archive(entities) -> Result<Vec<u8>, _>` 与 `load_reflect_archive(&[u8]) -> Result<Vec<Entity>, _>`。信封 = `"PECA" | 版本 | 实体数 | { 实体bits, 组件数, [StableTypeId, blob_len, prism_reflect::to_binary blob] }`；组件按 `StableTypeId` 升序写出，所以同一世界产出**字节确定**的存档（可哈希/可 diff/可按内容缓存）。回读语义明确：同 id 仍存活则原地覆盖，缺失则新开实体，返回按存档序的落地实体表供上层建映射。坏 magic / 版本不符 / 截断 / 实体位非法 / 目标世界未注册该类型 / 值解码失败，都返回带原因的 `ReflectArchiveError`（复用 `prism_reflect` 的二进制格式与其反序列化限额）。
 
 ### 24.4 确定性链路四方对齐
 
