@@ -17,7 +17,9 @@ use alloc::collections::BTreeMap;
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::geometry::GeometryRecord;
 use prism_render_architecture::gpu_scene::{GeometryHandle, SceneMaterialHandle};
-use prism_render_driver::{PrimitiveTopology, TextureFormat, VertexBufferLayout};
+use prism_render_driver::{
+    BufferId, IndexFormat, PrimitiveTopology, TextureFormat, VertexBufferLayout,
+};
 use prism_render_material::MaterialRecord;
 use prism_render_visibility::GpuRenderWorkItem;
 
@@ -89,14 +91,33 @@ pub struct MeshClass {
     pub layout: Vec<VertexBufferLayout>,
     /// The primitive topology the class draws with.
     pub topology: PrimitiveTopology,
+    /// The GPU buffers a draw of this class binds.
+    pub buffers: MeshBuffers,
 }
 
 impl MeshClass {
-    /// A class with `layout` drawn as `topology`.
+    /// A class with `layout` drawn as `topology` from `buffers`.
     #[must_use]
-    pub fn new(layout: Vec<VertexBufferLayout>, topology: PrimitiveTopology) -> Self {
-        Self { layout, topology }
+    pub fn new(
+        layout: Vec<VertexBufferLayout>,
+        topology: PrimitiveTopology,
+        buffers: MeshBuffers,
+    ) -> Self {
+        Self {
+            layout,
+            topology,
+            buffers,
+        }
     }
+}
+
+/// The GPU buffers a mesh draw binds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MeshBuffers {
+    /// The vertex buffer bound at slot `0`.
+    pub vertices: BufferId,
+    /// The index buffer and its format, or `None` for a non-indexed class.
+    pub indices: Option<(BufferId, IndexFormat)>,
 }
 
 /// The render side's geometry / material / mesh-class tables.
@@ -195,6 +216,11 @@ impl SceneRegistry {
             scene: item.scene,
             order: item.sort_key.0,
             draw,
+            vertices: mesh_class.buffers.vertices,
+            indices: mesh_class.buffers.indices,
+            first: lod.first_element,
+            count: lod.element_count,
+            base_vertex: lod.base_vertex,
         })
     }
 }

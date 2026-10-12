@@ -14,7 +14,10 @@
 
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::gpu_scene::{GeometryHandle, SceneHandle, SceneMaterialHandle};
-use prism_render_driver::{RenderDevice, RenderPipelineDescriptor, RenderPipelineId, VertexBufferLayout};
+use prism_render_driver::{
+    BufferId, IndexFormat, RenderDevice, RenderPipelineDescriptor, RenderPipelineId,
+    VertexBufferLayout,
+};
 use prism_render_material::MaterialRenderClass;
 
 use crate::draw::{DrawFunctionId, DrawFunctions};
@@ -38,6 +41,16 @@ pub struct DrawRequest {
     pub lod_level: u32,
     /// The geometry to draw.
     pub geometry: GeometryHandle,
+    /// The vertex buffer bound at slot `0`.
+    pub vertices: BufferId,
+    /// The index buffer and format, or `None` for a non-indexed draw.
+    pub indices: Option<(BufferId, IndexFormat)>,
+    /// The first element (index or vertex) to draw.
+    pub first: u32,
+    /// The number of elements to draw.
+    pub count: u32,
+    /// The base vertex added to each index (`0` for non-indexed).
+    pub base_vertex: i32,
     /// The material whose bindings the draw uses.
     pub material: SceneMaterialHandle,
     /// The scene instance the draw came from.
@@ -85,6 +98,16 @@ pub struct PhaseItem {
     pub draw: DrawFunctionId,
     /// The geometry (mesh) to draw.
     pub geometry: GeometryHandle,
+    /// The vertex buffer bound at slot `0`.
+    pub vertices: BufferId,
+    /// The index buffer and format, or `None` for a non-indexed draw.
+    pub indices: Option<(BufferId, IndexFormat)>,
+    /// The first element to draw.
+    pub first: u32,
+    /// The number of elements to draw.
+    pub count: u32,
+    /// The base vertex added to each index.
+    pub base_vertex: i32,
     /// The resolved LOD level this draw renders.
     pub lod_level: u32,
     /// The material whose bindings this draw uses.
@@ -195,6 +218,11 @@ impl RenderQueues {
                     pipeline,
                     draw: request.draw,
                     geometry: request.geometry,
+                    vertices: request.vertices,
+                    indices: request.indices,
+                    first: request.first,
+                    count: request.count,
+                    base_vertex: request.base_vertex,
                     lod_level: request.lod_level,
                     material: request.material,
                     scene: request.scene,
@@ -238,6 +266,11 @@ impl RenderQueues {
                     pipeline,
                     draw: request.draw,
                     geometry: request.geometry,
+                    vertices: request.vertices,
+                    indices: request.indices,
+                    first: request.first,
+                    count: request.count,
+                    base_vertex: request.base_vertex,
                     lod_level: request.lod_level,
                     material: request.material,
                     scene: request.scene,

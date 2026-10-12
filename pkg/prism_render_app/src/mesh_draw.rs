@@ -1,0 +1,34 @@
+//! The canonical mesh draw function.
+//!
+//! A phase item is self-contained: it carries the pipeline to bind and the
+//! exact draw call (vertex buffer, optional index buffer, element range, base
+//! vertex). So the draw function needs no external state — it records the item
+//! straight into the frame graph's pass recorder, which is what makes it usable
+//! as a `DrawFunctions<ExecuteContext>` entry.
+//!
+//! The instance count is `1`: per-instance data rides the GPU scene (instance
+//! index) and, for the GPU-driven path, a bin's indirect arguments; a direct
+//! per-item mesh draw binds its geometry once and draws one instance.
+
+use prism_render_graph::ExecuteContext;
+
+use crate::queue::PhaseItem;
+
+/// Records one item's mesh draw: bind the pipeline, bind the geometry, draw.
+pub fn mesh_draw(item: &PhaseItem, ctx: &mut ExecuteContext) {
+    ctx.set_render_pipeline(item.pipeline);
+    ctx.set_vertex_buffer(0, item.vertices, 0);
+    match item.indices {
+        Some((indices, format)) => {
+            ctx.set_index_buffer(indices, format, 0);
+            ctx.draw_indexed(
+                item.first..item.first + item.count,
+                item.base_vertex,
+                0..1,
+            );
+        }
+        None => {
+            ctx.draw(item.first..item.first + item.count, 0..1);
+        }
+    }
+}

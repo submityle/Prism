@@ -36,10 +36,21 @@ use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::view_family::ViewKind;
 use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_driver::{
-    DeviceDescriptor, Instance, MultisampleState, PrimitiveState, RenderDevice,
-    RenderPipelineDescriptor, RequestAdapterOptions, PrimitiveTopology, ShaderModuleDescriptor,
-    TextureDescriptor, TextureFormat, TextureUsages, VertexState,
+    BufferDescriptor, BufferId, BufferUsages, DeviceDescriptor, Instance, MultisampleState,
+    PrimitiveState, PrimitiveTopology, RenderDevice, RenderPipelineDescriptor,
+    RequestAdapterOptions, ShaderModuleDescriptor, TextureDescriptor, TextureFormat, TextureUsages,
+    VertexState,
 };
+
+/// A dummy vertex buffer id from the null device, for items that only need an id.
+fn null_vertex_buffer(device: &prism_render_driver_null::NullDevice) -> BufferId {
+    device.create_buffer(&BufferDescriptor {
+        label: Some("test-vertices".into()),
+        size: 64,
+        usage: BufferUsages::VERTEX,
+        mapped_at_creation: false,
+    })
+}
 
 /// The pipeline cache builds a PSO once per content key, shares it, and destroys
 /// it on the last release (or on clear).
@@ -236,10 +247,16 @@ fn render_queues_are_phased_and_sort_deterministically() {
     let geometry = GenerationalHandle::new(2, 1);
     let material = GenerationalHandle::new(3, 1);
     let scene = GenerationalHandle::new(4, 1);
+    let vertices = null_vertex_buffer(&device);
     let item = |order: u64| PhaseItem {
         pipeline,
         draw: DrawFunctionId(0),
         geometry,
+        vertices,
+        indices: None,
+        first: 0,
+        count: 3,
+        base_vertex: 0,
         lod_level: 0,
         material,
         scene,
@@ -309,6 +326,7 @@ fn recording_a_phase_invokes_each_draw_function() {
     let geometry = GenerationalHandle::new(2, 1);
     let material = GenerationalHandle::new(3, 1);
     let scene = GenerationalHandle::new(4, 1);
+    let vertices = null_vertex_buffer(&device);
     let mut queues = RenderQueues::new();
     for order in [2u64, 1] {
         queues.push(
@@ -317,6 +335,11 @@ fn recording_a_phase_invokes_each_draw_function() {
                 pipeline,
                 draw,
                 geometry,
+                vertices,
+                indices: None,
+                first: 0,
+                count: 3,
+                base_vertex: 0,
                 lod_level: 0,
                 material,
                 scene,
@@ -340,7 +363,7 @@ fn recording_a_phase_invokes_each_draw_function() {
 #[test]
 fn fill_from_visibility_resolves_and_queues() {
     use crate::mesh_pipeline::MeshPipelineProvider;
-    use crate::scene::{MeshClass, SceneRegistry};
+    use crate::scene::{MeshBuffers, MeshClass, SceneRegistry};
     use prism_render_architecture::geometry::{
         GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
     };
@@ -413,7 +436,14 @@ fn fill_from_visibility_resolves_and_queues() {
     registry.insert_material(prism_render_material::fallback_material_record(material, 1));
     registry.insert_mesh_class(
         5,
-        MeshClass::new(vec![layout], PrimitiveTopology::TriangleList),
+        MeshClass::new(
+            vec![layout],
+            PrimitiveTopology::TriangleList,
+            MeshBuffers {
+                vertices: null_vertex_buffer(&device),
+                indices: None,
+            },
+        ),
     );
 
     let item = |material: GenerationalHandle| GpuRenderWorkItem {
@@ -453,11 +483,19 @@ fn fill_from_visibility_resolves_and_queues() {
 /// and skips one whose material is not resident.
 #[test]
 fn scene_registry_resolves_a_work_item() {
-    use crate::scene::{MeshClass, SceneRegistry};
+    use crate::scene::{MeshBuffers, MeshClass, SceneRegistry};
     use prism_render_architecture::geometry::{
         GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
     };
     use prism_render_visibility::{GpuRenderWorkItem, WorkSortKey};
+
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
 
     let geometry = GenerationalHandle::new(1, 1);
     let material = GenerationalHandle::new(2, 1);
@@ -491,7 +529,14 @@ fn scene_registry_resolves_a_work_item() {
     registry.insert_material(prism_render_material::fallback_material_record(material, 1));
     registry.insert_mesh_class(
         5,
-        MeshClass::new(vec![layout.clone()], PrimitiveTopology::TriangleList),
+        MeshClass::new(
+            vec![layout.clone()],
+            PrimitiveTopology::TriangleList,
+            MeshBuffers {
+                vertices: null_vertex_buffer(&device),
+                indices: None,
+            },
+        ),
     );
 
     let item = GpuRenderWorkItem {
@@ -572,10 +617,16 @@ fn filling_the_queue_specializes_and_appends() {
     let geometry = GenerationalHandle::new(2, 1);
     let material = GenerationalHandle::new(3, 1);
     let scene = GenerationalHandle::new(4, 1);
+    let vertices = null_vertex_buffer(&device);
     let request = |layout: prism_render_driver::VertexBufferLayout, order: u64| DrawRequest {
         phase: RenderPhase::Opaque,
         variant,
         layout: vec![layout],
+        vertices,
+        indices: None,
+        first: 0,
+        count: 3,
+        base_vertex: 0,
         lod_level: 0,
         geometry,
         material,
