@@ -316,7 +316,14 @@ impl<'a> ByteReader<'a> {
             if shift >= 64 {
                 return Err(DeserializeError::TrailingData);
             }
-            result |= u64::from(byte & 0x7f) << shift;
+            let payload = u64::from(byte & 0x7f);
+            // Reject a payload whose set bits fall past `u64` instead of
+            // silently truncating them. Only the final group can overflow (at
+            // `shift == 63` just one bit fits), so guard the shift itself.
+            if shift > 57 && payload >> (64 - shift) != 0 {
+                return Err(DeserializeError::TrailingData);
+            }
+            result |= payload << shift;
             if byte & 0x80 == 0 {
                 break;
             }

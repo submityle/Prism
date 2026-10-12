@@ -174,6 +174,34 @@ fn scene_binary_rejects_bad_magic_and_truncation() {
 }
 
 #[test]
+fn scene_binary_count_bomb_is_bounded_by_input() {
+    // A legal header declaring ~4.29 billion entries but carrying no entries
+    // must fail as a clean truncation, not attempt a multi-GiB pre-allocation
+    // from an untrusted length (CR-found).
+    let registry = registry();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"PSCN");
+    bytes.push(1);
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    assert!(matches!(
+        DynamicScene::from_binary(&bytes, &registry),
+        Err(SceneError::Truncated)
+    ));
+}
+
+#[test]
+fn scene_text_count_bomb_is_bounded_by_input() {
+    // Same guard on the text path: an enormous declared count must not be
+    // pre-allocated before the header lines are read (CR-found).
+    let registry = registry();
+    let text = "PSCN-RON v1\n18446744073709551615\n";
+    assert!(matches!(
+        DynamicScene::from_text(text, &registry),
+        Err(SceneError::BadHeader)
+    ));
+}
+
+#[test]
 fn scene_empty_round_trips_both_formats() {
     let registry = registry();
     let scene = DynamicScene::new();

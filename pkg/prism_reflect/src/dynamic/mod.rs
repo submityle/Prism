@@ -31,4 +31,4 @@ pub use sets::DynamicSet;
 pub use structs::DynamicStruct;
 pub use tuple_structs::DynamicTupleStruct;
 
-pub(crate) use equality::reflect_values_equal;
+pub(crate) use equality::{reflect_values_equal, reflect_values_identical};

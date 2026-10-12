@@ -224,3 +224,41 @@ fn access_plan_on_wrong_shape_returns_none() {
     };
     assert!(plan.get(&wrong).is_none());
 }
+
+#[derive(Reflect, Accessors, Debug, PartialEq)]
+struct PairXy {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Reflect, Accessors, Debug, PartialEq)]
+struct PairWh {
+    width: i32,
+    height: i32,
+}
+
+#[test]
+fn access_plan_rejects_same_layout_different_field_names() {
+    // A plan is bound to the type and field names it was compiled against: a
+    // same-layout-but-renamed type must NOT be silently read/written through the
+    // wrong field (CR-found).
+    let plan = AccessPlan::compile(&PairXy { x: 1, y: 2 }, "x").unwrap();
+
+    let other = PairWh {
+        width: 9,
+        height: 8,
+    };
+    assert!(
+        plan.get(&other).is_none(),
+        "must not read `width` under the name `x`"
+    );
+
+    let mut other = PairWh {
+        width: 9,
+        height: 8,
+    };
+    assert!(plan.get_mut(&mut other).is_none());
+    assert_eq!(other.width, 9, "a rejected plan must not mutate the value");
+    assert!(plan.set(&mut other, &42_i32).is_err());
+    assert_eq!(other.width, 9, "a rejected set must not mutate the value");
+}

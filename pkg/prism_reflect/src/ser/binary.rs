@@ -20,10 +20,10 @@ use crate::kinds::VariantType;
 use crate::reflect::Reflect;
 use crate::ser::de::{resolve, root_schema, Schema};
 use crate::ser::encode::{serialize_value, Encoder};
-use crate::ser::pod;
 use crate::ser::error::{DeserializeError, SerializeError};
-use crate::ser::primitive::{leaf_primitive, node_tag, write_varint, ByteReader, Primitive};
 use crate::ser::limits::DeserializeLimits;
+use crate::ser::pod;
+use crate::ser::primitive::{leaf_primitive, node_tag, write_varint, ByteReader, Primitive};
 use crate::ser::stable_id::StableTypeId;
 use crate::type_info::TypeInfo;
 use crate::{
@@ -368,7 +368,13 @@ fn read_info_node(
                     let mut values = Vec::with_capacity(fields.len());
                     for field in fields {
                         let child_schema = resolve(registry, field.type_name())?;
-                        values.push(read_node(reader, registry, &child_schema, limits, depth + 1)?);
+                        values.push(read_node(
+                            reader,
+                            registry,
+                            &child_schema,
+                            limits,
+                            depth + 1,
+                        )?);
                     }
                     DynamicVariant::Tuple(values)
                 }
@@ -413,13 +419,22 @@ fn read_info_node(
             let mut dynamic = DynamicArray::new();
             dynamic.set_represented_type_name(array_info.type_name());
             if tag == node_tag::POD_BLOB {
-                for element in read_pod_blob(reader, &item_schema, limits)? {
+                let elements = read_pod_blob(reader, &item_schema, limits)?;
+                if elements.len() != array_info.capacity() {
+                    return Err(DeserializeError::FieldCountMismatch);
+                }
+                for element in elements {
                     dynamic.push_boxed(element);
                 }
             } else {
                 expect_tag(tag, node_tag::ARRAY, "Array")?;
                 let len = reader.read_len()?;
                 check_collection_len(len, limits)?;
+                // A fixed-length array must decode to exactly its declared
+                // capacity, not an arbitrary attacker-chosen length (CR-found).
+                if len != array_info.capacity() {
+                    return Err(DeserializeError::FieldCountMismatch);
+                }
                 for _ in 0..len {
                     let child = read_node(reader, registry, &item_schema, limits, depth + 1)?;
                     dynamic.push_boxed(child);
@@ -592,7 +607,7 @@ mod pod_tests {
     use super::{from_binary, node_tag, to_binary, MAGIC, VERSION};
     use crate::ser::primitive::{prim_tag, write_varint};
     use crate::ser::stable_id::StableTypeId;
-    use crate::{FromReflect, Typed, TypeRegistry};
+    use crate::{FromReflect, TypeRegistry, Typed};
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -627,8 +642,8 @@ mod pod_tests {
 
         let ints: Vec<i32> = vec![7, 8, 9, i32::MIN, i32::MAX];
         let bytes = to_binary(&ints).expect("serialize ints");
-        let decoded = from_binary(&bytes, &registry, <Vec<i32> as Typed>::type_info())
-            .expect("decode ints");
+        let decoded =
+            from_binary(&bytes, &registry, <Vec<i32> as Typed>::type_info()).expect("decode ints");
         assert_eq!(<Vec<i32>>::from_reflect(&*decoded).unwrap(), ints);
 
         let floats: Vec<f32> = vec![0.0, -1.5, f32::INFINITY, f32::NEG_INFINITY];
@@ -639,8 +654,8 @@ mod pod_tests {
 
         let array: [u8; 4] = [10, 20, 30, 40];
         let bytes = to_binary(&array).expect("serialize array");
-        let decoded = from_binary(&bytes, &registry, <[u8; 4] as Typed>::type_info())
-            .expect("decode array");
+        let decoded =
+            from_binary(&bytes, &registry, <[u8; 4] as Typed>::type_info()).expect("decode array");
         assert_eq!(<[u8; 4]>::from_reflect(&*decoded).unwrap(), array);
     }
 
@@ -675,8 +690,7 @@ mod pod_tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
         bytes.push(VERSION);
-        let root_id =
-            StableTypeId::of_path(<Vec<i32> as Typed>::type_info().type_name()).value();
+        let root_id = StableTypeId::of_path(<Vec<i32> as Typed>::type_info().type_name()).value();
         bytes.extend_from_slice(&root_id.to_le_bytes());
         // Hand-build the LIST body the pre-§24.3 encoder would have produced.
         bytes.push(node_tag::LIST);
@@ -689,7 +703,10 @@ mod pod_tests {
 
         let decoded =
             from_binary(&bytes, &registry, <Vec<i32> as Typed>::type_info()).expect("decode");
-        assert_eq!(<Vec<i32>>::from_reflect(&*decoded).unwrap(), elements.to_vec());
+        assert_eq!(
+            <Vec<i32>>::from_reflect(&*decoded).unwrap(),
+            elements.to_vec()
+        );
     }
 }
 
@@ -702,7 +719,7 @@ mod safety_tests {
     use super::{from_binary, from_binary_with_limits, node_tag, to_binary, MAGIC, VERSION};
     use crate::ser::primitive::{prim_tag, write_varint};
     use crate::ser::stable_id::StableTypeId;
-    use crate::{DeserializeError, DeserializeLimits, Typed, TypeRegistry};
+    use crate::{DeserializeError, DeserializeLimits, TypeRegistry, Typed};
     use alloc::vec;
     use alloc::vec::Vec;
 
@@ -754,12 +771,9 @@ mod safety_tests {
         let bytes = framed(<Vec<i32> as Typed>::type_info().type_name(), &body);
 
         let tight = DeserializeLimits::new(usize::MAX, 10);
-        let Err(err) = from_binary_with_limits(
-            &bytes,
-            &registry,
-            <Vec<i32> as Typed>::type_info(),
-            &tight,
-        ) else {
+        let Err(err) =
+            from_binary_with_limits(&bytes, &registry, <Vec<i32> as Typed>::type_info(), &tight)
+        else {
             panic!("declared 100 > limit 10");
         };
         assert_eq!(
@@ -782,7 +796,7 @@ mod safety_tests {
         body.push(node_tag::POD_BLOB);
         body.push(prim_tag::I32);
         write_varint(&mut body, u64::from(u32::MAX)); // ~4.29 billion elements
-        // ...but zero payload bytes follow.
+                                                      // ...but zero payload bytes follow.
         let bytes = framed(<Vec<i32> as Typed>::type_info().type_name(), &body);
 
         let Err(err) = from_binary_with_limits(
@@ -803,8 +817,59 @@ mod safety_tests {
         let registry = registry();
         let value: Vec<i32> = vec![1, 2, 3, 4, 5];
         let bytes = to_binary(&value).expect("serialize");
-        let decoded = from_binary(&bytes, &registry, <Vec<i32> as Typed>::type_info())
-            .expect("decode");
+        let decoded =
+            from_binary(&bytes, &registry, <Vec<i32> as Typed>::type_info()).expect("decode");
         assert_eq!(<Vec<i32>>::from_reflect(&*decoded).unwrap(), value);
+    }
+
+    /// A 10-group LEB128 whose final payload sets a bit past `u64` must be
+    /// rejected as malformed, not silently truncated to a small value (CR).
+    #[test]
+    fn varint_overflow_is_rejected() {
+        use crate::ser::primitive::ByteReader;
+
+        // `0x02 << 63` overflows u64; the leading nine groups keep it overlong.
+        let overlong = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02];
+        let mut reader = ByteReader::new(&overlong);
+        assert!(
+            reader.read_varint().is_err(),
+            "an out-of-range varint must not decode"
+        );
+
+        // The largest legal encoding (`u64::MAX`) still decodes exactly.
+        let max = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01];
+        let mut reader = ByteReader::new(&max);
+        assert_eq!(reader.read_varint().unwrap(), u64::MAX);
+    }
+
+    /// A fixed-length array whose payload declares a different element count
+    /// than its `ArrayInfo::capacity` must be rejected (CR), rather than
+    /// decoding to a `DynamicArray` of the wrong length.
+    #[test]
+    fn fixed_array_length_mismatch_is_rejected() {
+        let mut registry = registry();
+        registry.register::<[u8; 4]>();
+
+        // `[u8; 4]` framing: ARRAY tag + varint(5) -> five `[VALUE, U8, byte]`
+        // children that would otherwise decode fine on their own.
+        let mut body = Vec::new();
+        body.push(node_tag::ARRAY);
+        write_varint(&mut body, 5);
+        for byte in [1u8, 2, 3, 4, 5] {
+            body.push(node_tag::VALUE);
+            body.push(prim_tag::U8);
+            body.push(byte);
+        }
+        let bytes = framed(<[u8; 4] as Typed>::type_info().type_name(), &body);
+
+        let Err(err) = from_binary_with_limits(
+            &bytes,
+            &registry,
+            <[u8; 4] as Typed>::type_info(),
+            &DeserializeLimits::UNLIMITED,
+        ) else {
+            panic!("a 5-element array must not decode as `[u8; 4]`");
+        };
+        assert_eq!(err, DeserializeError::FieldCountMismatch);
     }
 }

@@ -193,7 +193,11 @@ impl DynamicScene {
             return Err(SceneError::BadHeader);
         }
         let count = reader.take_u32()? as usize;
-        let mut scene = Self::with_capacity(count);
+        // Each entry costs at least 8 wire bytes (two `u32` length prefixes), so
+        // a declared count larger than that bound is a truncation/DoS attempt:
+        // cap the preallocation instead of trusting an attacker-chosen length
+        // (CR-found). The loop still errors on the real EOF.
+        let mut scene = Self::with_capacity(count.min(bytes.len() / 8));
         for _ in 0..count {
             let name_len = reader.take_u32()? as usize;
             let name_bytes = reader.take(name_len)?;
@@ -264,7 +268,11 @@ impl DynamicScene {
             .ok_or(SceneError::BadHeader)?
             .parse()
             .map_err(|_| SceneError::BadHeader)?;
-        let mut specs: Vec<(String, usize)> = Vec::with_capacity(count);
+        // Nothing constrains the declared count, so cap both preallocations by
+        // the input length to avoid allocating from an untrusted header before
+        // the header lines are even read (CR-found).
+        let prealloc = count.min(text.len());
+        let mut specs: Vec<(String, usize)> = Vec::with_capacity(prealloc);
         for _ in 0..count {
             let line = lines.next().ok_or(SceneError::BadHeader)?;
             let (name, len) = line.split_once('\t').ok_or(SceneError::BadHeader)?;
@@ -281,7 +289,7 @@ impl DynamicScene {
             .map(|i| i + sep.len())
             .ok_or(SceneError::BadHeader)?;
         let body = &text[body_start..];
-        let mut scene = Self::with_capacity(count);
+        let mut scene = Self::with_capacity(prealloc);
         let mut cursor = 0usize;
         for (type_name, len) in specs {
             let end = cursor.checked_add(len).ok_or(SceneError::Truncated)?;

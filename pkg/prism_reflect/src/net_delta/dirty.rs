@@ -74,9 +74,7 @@ impl DirtyMask {
     pub fn is_marked(&self, index: usize) -> bool {
         let word = index / 64;
         let bit = index % 64;
-        self.words
-            .get(word)
-            .is_some_and(|w| w & (1u64 << bit) != 0)
+        self.words.get(word).is_some_and(|w| w & (1u64 << bit) != 0)
     }
 
     /// Clear every dirty bit, keeping the allocated capacity for reuse.
@@ -187,8 +185,16 @@ fn changed_fields<'a>(
 ) -> impl Iterator<Item = (usize, &'a str)> {
     (0..new_s.field_count()).filter_map(move |index| {
         let name = new_s.name_at(index)?;
-        let old_field = old_s.field_at(index)?;
         let new_field = new_s.field_at(index)?;
-        (!diff(old_field, new_field).is_unchanged()).then_some((index, name))
+        // Match the old field by NAME, not position. A `DynamicStruct` stores
+        // fields in insertion order, so a positional compare would diff the
+        // wrong pair — missing real changes or emitting one field's value under
+        // another field's index (CR-found). A name absent from `old` counts as
+        // changed.
+        let differs = match old_s.field(name) {
+            Some(old_field) => !diff(old_field, new_field).is_unchanged(),
+            None => true,
+        };
+        differs.then_some((index, name))
     })
 }

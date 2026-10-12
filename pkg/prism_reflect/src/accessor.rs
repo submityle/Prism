@@ -166,7 +166,10 @@ pub trait FieldAccess: Reflect + Sized + 'static {
             type_name: core::any::type_name::<Self>(),
             field: name.to_string(),
         })?;
-        accessor.get_mut(self).apply(value).map_err(AccessError::Apply)
+        accessor
+            .get_mut(self)
+            .apply(value)
+            .map_err(AccessError::Apply)
     }
 }
 
@@ -236,7 +239,15 @@ impl std::error::Error for AccessError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessPlan {
     path: String,
+    /// The root value's `type_name` at compile time; a plan only replays on the
+    /// same reflected type.
+    root_type: &'static str,
     steps: Vec<usize>,
+    /// The expected field name at each step, so a same-layout-but-renamed type
+    /// (or a reordered [`DynamicStruct`](crate::dynamic::DynamicStruct)) fails
+    /// the lookup instead of silently reading or writing the wrong field
+    /// (CR-found).
+    names: Vec<String>,
 }
 
 impl AccessPlan {
@@ -255,6 +266,7 @@ impl AccessPlan {
         }
 
         let mut steps = Vec::with_capacity(segments.len());
+        let mut names: Vec<String> = Vec::with_capacity(segments.len());
         let mut current: &dyn Reflect = root;
         for segment in segments {
             let ReflectRef::Struct(structure) = current.reflect_ref() else {
@@ -270,6 +282,7 @@ impl AccessPlan {
                     field: segment.to_string(),
                 })?;
             steps.push(index);
+            names.push(segment.to_string());
             current = structure
                 .field_at(index)
                 .expect("index came from field_count range");
@@ -277,7 +290,9 @@ impl AccessPlan {
 
         Ok(Self {
             path: path.to_string(),
+            root_type: root.type_name(),
             steps,
+            names,
         })
     }
 
@@ -299,11 +314,17 @@ impl AccessPlan {
     /// compiled for (a step index is out of range or lands on a non-struct).
     #[must_use]
     pub fn get<'a>(&self, root: &'a dyn Reflect) -> Option<&'a dyn Reflect> {
+        if root.type_name() != self.root_type {
+            return None;
+        }
         let mut current: &dyn Reflect = root;
-        for &index in &self.steps {
+        for (&index, name) in self.steps.iter().zip(self.names.iter()) {
             let ReflectRef::Struct(structure) = current.reflect_ref() else {
                 return None;
             };
+            if structure.name_at(index) != Some(name.as_str()) {
+                return None;
+            }
             current = structure.field_at(index)?;
         }
         Some(current)
@@ -315,11 +336,17 @@ impl AccessPlan {
     /// compiled for.
     #[must_use]
     pub fn get_mut<'a>(&self, root: &'a mut dyn Reflect) -> Option<&'a mut dyn Reflect> {
+        if root.type_name() != self.root_type {
+            return None;
+        }
         let mut current: &mut dyn Reflect = root;
-        for &index in &self.steps {
+        for (&index, name) in self.steps.iter().zip(self.names.iter()) {
             let ReflectMut::Struct(structure) = current.reflect_mut() else {
                 return None;
             };
+            if structure.name_at(index) != Some(name.as_str()) {
+                return None;
+            }
             current = structure.field_at_mut(index)?;
         }
         Some(current)
@@ -333,10 +360,12 @@ impl AccessPlan {
     /// `root`, or [`AccessError::Apply`] when the value is incompatible with the
     /// field.
     pub fn set(&self, root: &mut dyn Reflect, value: &dyn Reflect) -> Result<(), AccessError> {
-        let target = self.get_mut(root).ok_or_else(|| AccessError::UnknownField {
-            type_name: core::any::type_name::<AccessPlan>(),
-            field: self.path.clone(),
-        })?;
+        let target = self
+            .get_mut(root)
+            .ok_or_else(|| AccessError::UnknownField {
+                type_name: core::any::type_name::<AccessPlan>(),
+                field: self.path.clone(),
+            })?;
         target.apply(value).map_err(AccessError::Apply)
     }
 }

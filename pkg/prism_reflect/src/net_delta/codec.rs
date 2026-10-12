@@ -23,9 +23,9 @@
 //! value (verified by the oracle tests).
 
 use crate::net_delta::DeltaError;
+use crate::net_delta::DirtyMask;
 use crate::reflect::{Reflect, ReflectMut};
 use crate::ser::{from_binary, to_binary};
-use crate::net_delta::DirtyMask;
 use crate::TypeRegistry;
 use alloc::vec::Vec;
 
@@ -222,7 +222,13 @@ impl<'a> Cursor<'a> {
             if shift >= 64 {
                 return Err(DeltaError::Malformed);
             }
-            result |= u64::from(byte & 0x7f) << shift;
+            let payload = u64::from(byte & 0x7f);
+            // The final group (shift == 63) can carry only one bit; reject a
+            // payload with higher bits set instead of truncating it (CR-found).
+            if shift > 57 && payload >> (64 - shift) != 0 {
+                return Err(DeltaError::Malformed);
+            }
+            result |= payload << shift;
             if byte & 0x80 == 0 {
                 return Ok(result);
             }

@@ -73,8 +73,10 @@ pub fn clamp(value: &mut dyn Reflect, metadata: &TypeMetadata) -> Vec<Clamped> {
         let Some((min, max)) = field.range() else {
             continue;
         };
-        // A malformed `min > max` range cannot clamp meaningfully; skip it.
-        if min > max {
+        // A malformed range cannot clamp meaningfully; skip it. `partial_cmp`
+        // yields `None` for a NaN bound, which would otherwise reach
+        // `f64::clamp`/`f32::clamp` and panic (CR-found).
+        if min.partial_cmp(&max).is_none_or(core::cmp::Ordering::is_gt) {
             continue;
         }
         let Some(slot) = source.field_mut(field.name()) else {
@@ -211,6 +213,24 @@ mod tests {
     }
 
     #[test]
+    fn nan_bounds_are_skipped_without_panicking() {
+        // `f64::clamp` panics if either bound is NaN; a NaN range must be treated
+        // as malformed and skipped, leaving the value untouched (CR-found).
+        let meta = TypeMetadata::new()
+            .with_field(FieldMetadata::new("d").with_range(f64::NAN, 1.0))
+            .with_field(FieldMetadata::new("f").with_range(0.0, f32::NAN as f64));
+        let mut s = Sample {
+            f: 5.0,
+            d: -5.0,
+            ..Default::default()
+        };
+        let changed = clamp(&mut s, &meta);
+        assert!(changed.is_empty());
+        assert_eq!(s.d, -5.0);
+        assert_eq!(s.f, 5.0);
+    }
+
+    #[test]
     fn report_records_from_and_to() {
         let mut s = Sample {
             f: 2.0,
@@ -230,8 +250,7 @@ mod tests {
             i: 20,
             ..Default::default()
         };
-        let meta = TypeMetadata::new()
-            .with_field(FieldMetadata::new("i").with_range(0.3, 9.7));
+        let meta = TypeMetadata::new().with_field(FieldMetadata::new("i").with_range(0.3, 9.7));
         let changed = clamp(&mut s, &meta);
         assert_eq!(changed.len(), 1);
         assert_eq!(s.i, 9);
@@ -254,8 +273,7 @@ mod tests {
             i: 500,
             ..Default::default()
         };
-        let meta = TypeMetadata::new()
-            .with_field(FieldMetadata::new("i").with_range(100.0, 1.0));
+        let meta = TypeMetadata::new().with_field(FieldMetadata::new("i").with_range(100.0, 1.0));
         let changed = clamp(&mut s, &meta);
         assert!(changed.is_empty(), "min > max cannot clamp");
         assert_eq!(s.i, 500);

@@ -215,20 +215,24 @@ impl TypeRegistry {
         self.registrations.contains_key(&type_id)
     }
 
-    /// Number of registered types.
+    /// Number of registered types, including runtime-defined registrations
+    /// (which live in a separate name-keyed table; see
+    /// [`register_runtime`](Self::register_runtime)).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.registrations.len()
+        self.registrations.len() + self.runtime_by_name.len()
     }
 
-    /// Whether no types are registered.
+    /// Whether no types are registered (concrete or runtime).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.registrations.is_empty()
+        self.registrations.is_empty() && self.runtime_by_name.is_empty()
     }
 
-    /// Iterate over all registrations.
+    /// Iterate over all registrations, concrete first then runtime-defined.
     pub fn iter(&self) -> impl Iterator<Item = &TypeRegistration> {
-        self.registrations.values()
+        self.registrations
+            .values()
+            .chain(self.runtime_by_name.values())
     }
 }

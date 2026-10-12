@@ -59,6 +59,8 @@ pub enum AttributeValue {
     Bool(bool),
     /// A signed integer attribute.
     Int(i64),
+    /// An unsigned integer attribute that does not fit an `i64`.
+    UInt(u64),
     /// A floating-point attribute.
     Float(f64),
     /// A text attribute.

@@ -123,6 +123,38 @@ fn changed_on_equal_values_is_empty() {
     assert!(mask.is_empty());
 }
 
+fn dynamic_pair(order: &[(&'static str, i32)]) -> crate::DynamicStruct {
+    let mut s = crate::DynamicStruct::new();
+    s.set_represented_type_name("game::Pair");
+    for &(key, value) in order {
+        s.insert(key, value);
+    }
+    s
+}
+
+#[test]
+fn changed_matches_fields_by_name_not_position() {
+    // `old` and `new` are the same struct with fields inserted in a different
+    // order; only `a`'s value changed. A positional compare would diff the
+    // wrong pairs and mark both fields (CR-found).
+    let old = dynamic_pair(&[("a", 1), ("b", 2)]);
+    let new = dynamic_pair(&[("b", 2), ("a", 3)]);
+    let mask = DirtyMask::changed(&old, &new).expect("same field count");
+    // `a` is at index 1 in `new`; `b` (index 0) is unchanged.
+    assert_eq!(mask.iter().collect::<Vec<_>>(), vec![1]);
+}
+
+#[test]
+fn changed_is_empty_for_reordered_but_equal_structs() {
+    let old = dynamic_pair(&[("a", 1), ("b", 2)]);
+    let new = dynamic_pair(&[("b", 2), ("a", 1)]);
+    let mask = DirtyMask::changed(&old, &new).expect("same field count");
+    assert!(
+        mask.iter().next().is_none(),
+        "reordered-but-equal structs must not be dirty"
+    );
+}
+
 #[test]
 fn changed_rejects_non_structs() {
     let err = DirtyMask::changed(&1_i32, &2_i32).expect_err("scalars are not structs");
@@ -212,7 +244,11 @@ fn field_delta_to_bytes_round_trips() {
     let bytes = encode_delta(&new, &mask).expect("encode");
 
     let delta = decode_delta(&bytes).expect("decode");
-    assert_eq!(delta.to_bytes(), bytes, "FieldDelta re-serialises identically");
+    assert_eq!(
+        delta.to_bytes(),
+        bytes,
+        "FieldDelta re-serialises identically"
+    );
 
     let delta2 = decode_delta(&delta.to_bytes()).expect("decode round-trip");
     assert_eq!(delta, delta2);
@@ -305,13 +341,9 @@ struct PlannedState {
 fn planned_registry() -> TypeRegistry {
     let mut registry = TypeRegistry::new();
     registry.register::<PlannedState>();
-    registry.register_type_data::<PlannedState, _>(
-        TypeMetadata::new()
-            .with_field(
-                FieldMetadata::new("debug_counter")
-                    .with_custom("no_replicate", AttributeValue::Bool(true)),
-            ),
-    );
+    registry.register_type_data::<PlannedState, _>(TypeMetadata::new().with_field(
+        FieldMetadata::new("debug_counter").with_custom("no_replicate", AttributeValue::Bool(true)),
+    ));
     registry
 }
 

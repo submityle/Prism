@@ -50,7 +50,7 @@
 //! ```
 
 use crate::apply::ApplyError;
-use crate::dynamic::reflect_values_equal;
+use crate::dynamic::reflect_values_identical;
 use crate::reflect::{Reflect, ReflectMut, ReflectRef};
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -384,7 +384,7 @@ pub fn diff(a: &dyn Reflect, b: &dyn Reflect) -> Patch {
             }
         }
         (ReflectRef::Value(a), ReflectRef::Value(b)) => {
-            if reflect_values_equal(a, b) {
+            if reflect_values_identical(a, b) {
                 Patch::Unchanged
             } else {
                 replace(b)
@@ -478,5 +478,29 @@ impl std::error::Error for DiffError {
 impl From<ApplyError> for DiffError {
     fn from(error: ApplyError) -> Self {
         DiffError::Apply(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::diff;
+
+    /// `diff(a, a)` must be `Unchanged` even for a `NaN` leaf (bit-identical
+    /// comparison), and a `+0.0 -> -0.0` change must be observed (their bit
+    /// patterns differ) — the semantic `==` used by map keys would get both
+    /// wrong (CR-found).
+    #[test]
+    fn float_diff_is_bit_exact() {
+        let nan = f32::NAN;
+        assert!(diff(&nan, &nan).is_unchanged());
+        let nan64 = f64::NAN;
+        assert!(diff(&nan64, &nan64).is_unchanged());
+
+        assert!(!diff(&0.0f64, &-0.0f64).is_unchanged());
+        assert!(!diff(&0.0f32, &-0.0f32).is_unchanged());
+
+        // A genuine sign change is still a change.
+        assert!(!diff(&1.0f64, &-1.0f64).is_unchanged());
+        assert!(diff(&2.5f64, &2.5f64).is_unchanged());
     }
 }

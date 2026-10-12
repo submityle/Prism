@@ -41,3 +41,26 @@ pub(crate) fn reflect_values_equal(a: &dyn Reflect, b: &dyn Reflect) -> bool {
 
     false
 }
+
+/// Exact (bit-pattern) equality for two reflected leaf values.
+///
+/// Same contract as [`reflect_values_equal`], except `f32`/`f64` compare by
+/// [`f32::to_bits`] rather than `==`. [`diff`](crate::diff::diff) uses this so
+/// `diff(a, a)` is always `Unchanged` — even when a leaf is `NaN` — and a
+/// `+0.0`/`-0.0` change is not silently missed (CR-found). Map-key lookups keep
+/// the IEEE `==` semantics of [`reflect_values_equal`].
+pub(crate) fn reflect_values_identical(a: &dyn Reflect, b: &dyn Reflect) -> bool {
+    if let (Some(lhs), Some(rhs)) = (
+        a.as_any().downcast_ref::<f32>(),
+        b.as_any().downcast_ref::<f32>(),
+    ) {
+        return lhs.to_bits() == rhs.to_bits();
+    }
+    if let (Some(lhs), Some(rhs)) = (
+        a.as_any().downcast_ref::<f64>(),
+        b.as_any().downcast_ref::<f64>(),
+    ) {
+        return lhs.to_bits() == rhs.to_bits();
+    }
+    reflect_values_equal(a, b)
+}

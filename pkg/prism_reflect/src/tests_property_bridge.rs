@@ -79,7 +79,9 @@ fn typed_get_set_round_trip() {
     let bridge = PropertyBridge::new(&registry);
     let mut settings = sample();
 
-    bridge.set(&mut settings, "difficulty", &4_i32).expect("set");
+    bridge
+        .set(&mut settings, "difficulty", &4_i32)
+        .expect("set");
     let got = bridge.get_as::<i32>(&settings, "difficulty").expect("get");
     assert_eq!(*got, 4);
 
@@ -191,7 +193,9 @@ fn scalar_round_trip_is_a_no_op() {
 
     for path in ["name", "difficulty", "fullscreen", "volume.music"] {
         let before = bridge.read_scalar(&settings, path).expect("read");
-        bridge.set_scalar(&mut settings, path, &before).expect("write back");
+        bridge
+            .set_scalar(&mut settings, path, &before)
+            .expect("write back");
         let after = bridge.read_scalar(&settings, path).expect("read back");
         assert_eq!(before, after, "round-trip of `{path}` must be a no-op");
     }
@@ -279,7 +283,10 @@ fn properties_enumerates_metadata_and_omits_hidden() {
         !names.contains(&"internal_seed"),
         "hidden field must be omitted"
     );
-    assert_eq!(names, ["name", "difficulty", "volume", "fullscreen", "build_id"]);
+    assert_eq!(
+        names,
+        ["name", "difficulty", "volume", "fullscreen", "build_id"]
+    );
 
     let difficulty = descriptors
         .iter()
@@ -326,5 +333,42 @@ fn bridge_properties_matches_free_function() {
     let registry = registry();
     let bridge = PropertyBridge::new(&registry);
     let settings = sample();
-    assert_eq!(bridge.properties(&settings), properties(&settings, &registry));
+    assert_eq!(
+        bridge.properties(&settings),
+        properties(&settings, &registry)
+    );
+}
+
+#[test]
+fn large_unsigned_scalar_round_trips_losslessly() {
+    // CR-found: values past `i64::MAX` used to widen to `Float`, which could
+    // never be written back (round-trip contract broken). They now read as
+    // `UInt` and set back losslessly.
+    #[derive(Reflect, Debug, PartialEq, Clone)]
+    struct Account {
+        id: u64,
+    }
+
+    let mut registry = TypeRegistry::new();
+    registry.register::<Account>();
+    let bridge = PropertyBridge::new(&registry);
+    let mut account = Account { id: u64::MAX };
+
+    let read = bridge.read_scalar(&account, "id").unwrap();
+    assert_eq!(read, AttributeValue::UInt(u64::MAX));
+    bridge
+        .set_scalar(&mut account, "id", &read)
+        .expect("a value read back must be writable");
+    assert_eq!(account.id, u64::MAX);
+
+    // A `u64` that fits an `i64` still reads as `Int`.
+    account.id = 7;
+    assert_eq!(
+        bridge.read_scalar(&account, "id").unwrap(),
+        AttributeValue::Int(7)
+    );
+    bridge
+        .set_scalar(&mut account, "id", &AttributeValue::Int(9))
+        .unwrap();
+    assert_eq!(account.id, 9);
 }

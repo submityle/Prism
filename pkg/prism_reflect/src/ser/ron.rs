@@ -542,11 +542,18 @@ impl<'a> RonParser<'a> {
                 let item_schema = resolve(self.registry, array_info.item_type_name())?;
                 let mut dynamic = DynamicArray::new();
                 dynamic.set_represented_type_name(array_info.type_name());
+                let mut count = 0usize;
                 self.parse_sequence(']', |parser| {
                     let child = parser.parse_value(&item_schema)?;
                     dynamic.push_boxed(child);
+                    count += 1;
                     Ok(())
                 })?;
+                // A fixed-length array must decode to exactly its declared
+                // capacity, not an arbitrary element count (CR-found).
+                if count != array_info.capacity() {
+                    return Err(DeserializeError::FieldCountMismatch);
+                }
                 Ok(Box::new(dynamic))
             }
             TypeInfo::Set(set_info) => {

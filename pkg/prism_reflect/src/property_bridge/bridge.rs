@@ -7,7 +7,9 @@ use core::fmt;
 
 use crate::path::ParsePathError;
 use crate::schema::{clamp, AttributeValue, TypeMetadata};
-use crate::{reflect_path, reflect_path_mut, Access, ApplyError, ParsedPath, Reflect, TypeRegistry};
+use crate::{
+    reflect_path, reflect_path_mut, Access, ApplyError, ParsedPath, Reflect, TypeRegistry,
+};
 
 /// A reflection-backed property surface for scripts and editors.
 ///
@@ -78,11 +80,13 @@ impl<'a> PropertyBridge<'a> {
         path: &str,
     ) -> Result<&'r T, PropertyError> {
         let value = self.get(root, path)?;
-        value.downcast_ref::<T>().ok_or_else(|| PropertyError::TypeMismatch {
-            path: path.to_string(),
-            expected: type_name::<T>().to_string(),
-            found: value.type_name().to_string(),
-        })
+        value
+            .downcast_ref::<T>()
+            .ok_or_else(|| PropertyError::TypeMismatch {
+                path: path.to_string(),
+                expected: type_name::<T>().to_string(),
+                found: value.type_name().to_string(),
+            })
     }
 
     /// Write `value` into the property at `path`, applying it onto the existing
@@ -116,9 +120,12 @@ impl<'a> PropertyBridge<'a> {
     /// Read the leaf property at `path` as a dynamic [`AttributeValue`] scalar.
     ///
     /// Integer leaves widen to [`AttributeValue::Int`] when they fit an `i64`
-    /// and otherwise to [`AttributeValue::Float`]; floating-point leaves widen
-    /// to [`AttributeValue::Float`]; booleans and strings map directly. This is
-    /// the read half of the dynamic scalar exchange a scripting runtime uses.
+    /// and to [`AttributeValue::UInt`] when they fit a `u64` but not an `i64`;
+    /// floating-point leaves widen to [`AttributeValue::Float`]; booleans and
+    /// strings map directly. Integers representable by neither (`i128`/`u128`
+    /// outside both ranges) report [`PropertyError::NotScalar`] rather than a
+    /// lossy float. This is the read half of the dynamic scalar exchange a
+    /// scripting runtime uses.
     ///
     /// # Errors
     /// Returns [`PropertyError::Path`]/[`PropertyError::NoSuchProperty`] for an
@@ -139,10 +146,11 @@ impl<'a> PropertyBridge<'a> {
     /// Write a dynamic [`AttributeValue`] scalar into the leaf property at
     /// `path`, coercing it to the target leaf's concrete type.
     ///
-    /// An [`Int`](AttributeValue::Int) coerces into any integer leaf that can
-    /// represent it losslessly (bounds-checked) or into a floating-point leaf;
-    /// a [`Float`](AttributeValue::Float) coerces into a floating-point leaf; a
-    /// [`Bool`](AttributeValue::Bool) into a `bool`; a
+    /// An [`Int`](AttributeValue::Int)/[`UInt`](AttributeValue::UInt) coerces
+    /// into any integer leaf that can represent it losslessly (bounds-checked)
+    /// or into a floating-point leaf; a [`Float`](AttributeValue::Float)
+    /// coerces into a floating-point leaf; a [`Bool`](AttributeValue::Bool)
+    /// into a `bool`; a
     /// [`Text`](AttributeValue::Text) into a [`String`]. Narrowing that would
     /// lose data (an out-of-range integer, or a float into an integer leaf) is
     /// rejected rather than silently truncated. Read-only and range metadata
@@ -265,9 +273,14 @@ fn scalar_of(value: &dyn Reflect) -> Option<AttributeValue> {
             if let Some(v) = any.downcast_ref::<$ty>() {
                 return Some(match i64::try_from(*v) {
                     Ok(i) => AttributeValue::Int(i),
-                    // Values beyond i64 (large u64/u128/i128) widen to Float so
-                    // the scalar stays representable rather than failing.
-                    Err(_) => AttributeValue::Float(*v as f64),
+                    // Unsigned values beyond `i64::MAX` widen to `UInt(u64)` so
+                    // the read/write round-trip stays lossless (CR-found). Only
+                    // `i128`/`u128` beyond both ranges are not representable and
+                    // are reported as non-scalar instead of a lossy `Float`.
+                    Err(_) => match u64::try_from(*v) {
+                        Ok(u) => AttributeValue::UInt(u),
+                        Err(_) => return None,
+                    },
                 });
             }
         )*};
@@ -307,6 +320,7 @@ fn assign_scalar(slot: &mut dyn Reflect, value: &AttributeValue) -> Result<(), S
             Err("f32 or f64".to_string())
         }
         AttributeValue::Int(i) => assign_int(any, *i),
+        AttributeValue::UInt(u) => assign_uint(any, *u),
     }
 }
 
@@ -338,11 +352,41 @@ fn assign_int(any: &mut dyn core::any::Any, i: i64) -> Result<(), String> {
     Err("an integer or floating-point leaf".to_string())
 }
 
+/// Coerce an unsigned integer scalar into any integer or float leaf,
+/// bounds-checked.
+fn assign_uint(any: &mut dyn core::any::Any, u: u64) -> Result<(), String> {
+    macro_rules! write_uint {
+        ($($ty:ty),* $(,)?) => {$(
+            if let Some(target) = any.downcast_mut::<$ty>() {
+                return match <$ty>::try_from(u) {
+                    Ok(v) => {
+                        *target = v;
+                        Ok(())
+                    }
+                    Err(_) => Err(concat!("an in-range ", stringify!($ty)).to_string()),
+                };
+            }
+        )*};
+    }
+    write_uint!(i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize);
+
+    if let Some(target) = any.downcast_mut::<f64>() {
+        *target = u as f64;
+        return Ok(());
+    }
+    if let Some(target) = any.downcast_mut::<f32>() {
+        *target = u as f32;
+        return Ok(());
+    }
+    Err("an integer or floating-point leaf".to_string())
+}
+
 /// The human-readable kind name of a scalar, for error messages.
 fn scalar_kind(value: &AttributeValue) -> &'static str {
     match value {
         AttributeValue::Bool(_) => "bool scalar",
         AttributeValue::Int(_) => "integer scalar",
+        AttributeValue::UInt(_) => "unsigned integer scalar",
         AttributeValue::Float(_) => "float scalar",
         AttributeValue::Text(_) => "text scalar",
     }
@@ -390,10 +434,7 @@ impl fmt::Display for PropertyError {
                 path,
                 expected,
                 found,
-            } => write!(
-                f,
-                "property `{path}` expected {expected} but found {found}"
-            ),
+            } => write!(f, "property `{path}` expected {expected} but found {found}"),
             PropertyError::NotScalar { path, found } => {
                 write!(f, "property `{path}` is not a scalar leaf (found {found})")
             }

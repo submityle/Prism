@@ -1862,6 +1862,26 @@ mod runtime_types {
         );
     }
 
+    /// Runtime registrations live in a separate name-keyed table, but
+    /// `len`/`is_empty`/`iter` must still account for them, or they would lie
+    /// about the registry's contents (CR-found).
+    #[test]
+    fn runtime_types_count_toward_len_and_iter() {
+        let mut registry = TypeRegistry::new();
+        assert!(registry.is_empty());
+        assert_eq!(registry.iter().count(), 0);
+
+        StructTypeBuilder::new("game::Runtime")
+            .with_field("hp", "i32")
+            .register(&mut registry);
+
+        assert_eq!(registry.len(), 1);
+        assert!(!registry.is_empty());
+        assert_eq!(registry.iter().count(), 1);
+        assert!(registry.iter().any(|r| r.type_name() == "game::Runtime"));
+        assert!(registry.get_with_name("game::Runtime").is_some());
+    }
+
     #[test]
     fn nested_runtime_struct_round_trips() {
         let mut registry = TypeRegistry::new();
