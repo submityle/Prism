@@ -24,13 +24,14 @@ use crate::target::RenderTarget;
 use crate::sets::{RenderPhase, RenderSystems};
 use crate::views::RenderViews;
 use crate::pipeline_cache::{PipelineCache, PipelineKey};
+use crate::texture_cache::{TextureCache, TextureKey};
 use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::view_family::ViewKind;
 use prism_render_driver::{
     DeviceDescriptor, Instance, MultisampleState, PrimitiveState, RenderDevice,
-    RenderPipelineDescriptor, RequestAdapterOptions, ShaderModuleDescriptor, TextureFormat,
-    VertexState,
+    RenderPipelineDescriptor, RequestAdapterOptions, ShaderModuleDescriptor, TextureDescriptor,
+    TextureFormat, TextureUsages, VertexState,
 };
 
 /// The pipeline cache builds a PSO once per content key, shares it, and destroys
@@ -84,6 +85,50 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
 
     cache.clear(&device);
     assert!(cache.is_empty(), "clear destroys every cached pipeline");
+}
+
+/// The texture cache uploads a texture once per key, shares it, and destroys it
+/// on the last release (or on clear).
+#[test]
+fn texture_cache_dedups_and_evicts_by_key() {
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+
+    let descriptor = TextureDescriptor::new_2d(
+        Extent3d::new_2d(2, 2),
+        TextureFormat::Rgba8Unorm,
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+    );
+    let pixels = [0u8; 2 * 2 * 4];
+    let layout = ImageDataLayout {
+        offset: 0,
+        bytes_per_row: Some(8),
+        rows_per_image: Some(2),
+    };
+
+    let mut cache = TextureCache::new();
+    let a = cache.get_or_create(&device, &queue, TextureKey(1), &descriptor, &pixels, layout);
+    let b = cache.get_or_create(&device, &queue, TextureKey(1), &descriptor, &pixels, layout);
+    assert_eq!(a, b, "the same key returns the same texture");
+    assert_eq!(cache.len(), 1, "the texture is uploaded once");
+
+    cache.get_or_create(&device, &queue, TextureKey(2), &descriptor, &[], layout);
+    assert_eq!(cache.len(), 2, "a different key creates a new texture");
+
+    assert!(
+        !cache.release(&device, &TextureKey(1)),
+        "one of the two references still holds the texture"
+    );
+    assert!(cache.release(&device, &TextureKey(1)), "the last release evicts");
+    assert_eq!(cache.len(), 1);
+
+    cache.clear(&device);
+    assert!(cache.is_empty(), "clear destroys every cached texture");
 }
 /// The render world materializes the frame's view family from the extracted
 /// viewport, and a minimized frame disables (rather than removes) the view.

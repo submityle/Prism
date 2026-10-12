@@ -66,6 +66,7 @@ mod sets;
 mod stats;
 mod systems;
 mod target;
+mod texture_cache;
 mod views;
 
 #[cfg(test)]
@@ -82,6 +83,7 @@ pub use runtime_resource::RenderRuntimeResource;
 pub use sets::{RenderPhase, RenderSystems, configure_render_sets};
 pub use stats::RenderFrameStats;
 pub use target::RenderTarget;
+pub use texture_cache::{GpuTexture, TextureCache, TextureKey};
 pub use views::RenderViews;
 
 /// Commonly used exports: the plugin, its labels, and the resources that cross
@@ -96,5 +98,6 @@ pub mod prelude {
     pub use crate::sets::{RenderPhase, RenderSystems};
     pub use crate::stats::RenderFrameStats;
     pub use crate::target::RenderTarget;
+    pub use crate::texture_cache::{GpuTexture, TextureCache, TextureKey};
     pub use crate::views::RenderViews;
 }

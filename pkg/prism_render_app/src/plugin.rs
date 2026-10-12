@@ -17,6 +17,7 @@ use crate::sets::{RenderSystems, configure_render_sets};
 use crate::stats::RenderFrameStats;
 use crate::systems::{drive_render_schedule, execute_frame, extract_render_record};
 use crate::target::RenderTarget;
+use crate::texture_cache::TextureCache;
 use crate::views::{RenderViews, build_view_family};
 
 /// Wires the RHI render runtime into a [`prism_app::App`] as a dedicated render
@@ -121,6 +122,7 @@ where
         render.world.insert_resource(RenderFrameStats::default());
         render.world.insert_resource(RenderViews::new());
         render.world.insert_resource(PipelineCache::new());
+        render.world.insert_resource(TextureCache::new());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
         {
