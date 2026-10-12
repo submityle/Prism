@@ -53,11 +53,15 @@ pub struct MaterialSyncReport {
 
 /// The material ABI's two buffers, with a CPU mirror of each.
 ///
+/// A render-world resource: the render world owns the GPU buffers, and the
+/// prepare stage is the only thing that writes them.
+///
 /// The mirror is not a cache: it is how the buffers can *grow*. A reallocated
 /// buffer keeps nothing, so the new one has to be filled from something that
 /// survives the reallocation — the mirror — without asking the caller to hand
 /// back every material it ever synced. It is also what keeps a quiet frame quiet:
 /// only the rows and words that changed are uploaded.
+#[derive(prism_ecs::prelude::Resource)]
 pub struct MaterialParameterBuffers {
     headers: Option<BufferId>,
     header_capacity: u32,

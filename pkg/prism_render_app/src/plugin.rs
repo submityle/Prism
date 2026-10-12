@@ -11,6 +11,9 @@ use crate::config::RenderAppConfig;
 use crate::device_loss::{DeviceLossSignal, poll_device_loss};
 use crate::intent::RenderIntent;
 use crate::mesh_pipeline::MeshPipelineSpecializer;
+use crate::material::{
+    MaterialParameterBuffers, MaterialUploadStats, RenderMaterials, sync_material_buffers,
+};
 use crate::mesh_pipelines::MeshPipelines;
 use crate::queue_stage::fill_queues;
 use crate::label::{Render, RenderApp, RenderStartup};
@@ -132,6 +135,14 @@ where
         // The spine's default mesh pipelines are built against the device, so
         // they are created before the runtime moves into the render world.
         let mesh_pipelines = MeshPipelines::spine(runtime.device(), crate::RENDER_TARGET_FORMAT);
+        // The material ABI buffers are created against the device too, so they are
+        // built here as well.
+        let material_buffers = MaterialParameterBuffers::new(
+            runtime.device(),
+            config.material_capacity,
+            config.material_parameter_words,
+            prism_render_driver::BufferUsages::NONE,
+        );
         let mut render = SubApp::new();
         render
             .world
@@ -150,6 +161,13 @@ where
         render.world.insert_resource(mesh_pipelines);
         render.world.insert_resource(SceneRegistry::new());
         render.world.insert_resource(VisibilityWorkList::new());
+        // The material ABI: the render world's registry plus the header/parameter
+        // buffers built from it (sized for the scene's material budget).
+        render
+            .world
+            .insert_resource(RenderMaterials::new(config.material_capacity));
+        render.world.insert_resource(material_buffers);
+        render.world.insert_resource(MaterialUploadStats::default());
         render.world.insert_resource(device_loss.clone());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
@@ -171,6 +189,10 @@ where
             // Materialize the view family before the record stage consumes it.
             schedule.add_systems(build_view_family.in_set(RenderSystems::CreateViews));
             // The visible set becomes this frame's queue before anything records.
+            // Materials register/retire → the ABI buffers, before anything binds them.
+            schedule.add_systems(
+                sync_material_buffers::<I>.in_set(RenderSystems::PrepareResources),
+            );
             schedule.add_systems(fill_queues::<I>.in_set(RenderSystems::Queue));
             schedule.add_systems(execute_frame::<I>.in_set(RenderSystems::Phase));
             schedule.add_systems(clear_queues.in_set(RenderSystems::Cleanup));

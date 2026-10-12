@@ -226,4 +226,249 @@ fn a_material_with_a_different_illumination_still_lands() {
         "the packed block matches the record"
     );
 }
+/// The stage end to end: a material published into the render registry lands in
+/// the ABI buffers during a frame, and retiring it leaves an inactive row.
+#[test]
+fn the_frame_packs_published_materials_into_the_buffers() {
+    use crate::material::{MaterialUploadStats, RenderMaterials};
+    use crate::RenderAppConfig;
+    use prism_render_architecture::gpu_scene::GpuCompletionValue;
+    use prism_render_driver::Extent3d;
 
+    let mut app = prism_app::App::new();
+    app.add_plugins(crate::PrismRenderPlugin::with_config(
+        NullInstance::new(),
+        RenderAppConfig::new(Extent3d::new_2d(8, 8)).with_material_capacity(8),
+    ));
+
+    let handle = {
+        let render = app.sub_app_mut(crate::RenderApp).expect("the render sub-app");
+        let materials = render.world.resource_mut::<RenderMaterials>();
+        let handle = materials
+            .registry_mut()
+            .allocate()
+            .expect("the fixture capacity has room");
+        let record = record_with_lobes(handle.index, 1);
+        materials.publish(record).expect("the record publishes");
+        handle
+    };
+
+    app.update();
+
+    {
+        let render = app.get_sub_app(crate::RenderApp).expect("the render sub-app");
+        let stats = render.world.resource::<MaterialUploadStats>();
+        assert!(
+            stats.last.headers_written >= 1,
+            "the frame wrote the material's row (plus the permanent fallback)"
+        );
+        assert!(stats.last.parameters_written >= 1);
+        assert_eq!(
+            render
+                .world
+                .resource::<MaterialParameterBuffers>()
+                .header(0)
+                .expect("the fallback row")
+                .is_active,
+            1,
+            "slot zero holds a live fallback, never a retired row"
+        );
+        let buffers = render.world.resource::<MaterialParameterBuffers>();
+        let row = buffers.header(handle.index).expect("row");
+        assert_eq!(row.is_active, 1);
+        assert_eq!(row.generation, handle.generation);
+        let fallback_words = render
+            .world
+            .resource::<MaterialParameterBuffers>()
+            .header(0)
+            .expect("the fallback row")
+            .parameter_size
+            / 4;
+        assert_eq!(
+            row.parameter_offset, fallback_words,
+            "the material's block follows the permanent fallback's"
+        );
+    }
+
+    // Retire it: the next frame's sync must find no record for the dirty index
+    // and retire the row.
+    {
+        let render = app.sub_app_mut(crate::RenderApp).expect("the render sub-app");
+        render
+            .world
+            .resource_mut::<RenderMaterials>()
+            .registry_mut()
+            .retire(handle, GpuCompletionValue(0))
+            .expect("the handle retires");
+    }
+    app.update();
+
+    let render = app.get_sub_app(crate::RenderApp).expect("the render sub-app");
+    let buffers = render.world.resource::<MaterialParameterBuffers>();
+    assert_eq!(
+        buffers.header(handle.index).expect("row").is_active,
+        0,
+        "the retired material's row is inactive"
+    );
+    assert!(
+        buffers.parameters_of(handle.index).is_none(),
+        "and its words went back to the heap"
+    );
+}
+/// The ABI lands byte-exact on hardware: after a frame packs the registry's
+/// materials, the header rows read back from the GPU *are* the headers the ABI
+/// builds at those offsets, and the word heap read back is their packed surface
+/// blocks.
+///
+/// The buffers are replaced with `COPY_SRC` variants first — a diagnostic
+/// readback is the only reason to want that usage — which also exercises the
+/// growth path from an empty mirror (`mark_all_dirty`).
+#[test]
+fn the_abi_lands_byte_exact_on_a_gpu() {
+    use crate::material::RenderMaterials;
+    use crate::RenderAppConfig;
+    use prism_render_architecture::abi::GenerationalHandle;
+    use prism_render_driver::{BufferUsages, Extent3d};
+    use prism_render_driver_wgpu::WgpuInstance;
+
+    const CAPACITY: u32 = 4;
+    let extent = Extent3d::new_2d(8, 8);
+    if prism_render_runtime::RenderRuntime::<WgpuInstance>::wgpu(extent).is_err() {
+        assert!(
+            !crate::tests::require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    }
+
+    let mut app = prism_app::App::new();
+    app.add_plugins(crate::PrismRenderPlugin::with_config(
+        WgpuInstance::new(),
+        RenderAppConfig::new(extent).with_material_capacity(CAPACITY),
+    ));
+
+    // Two materials whose lobe sets differ, so their blocks differ in width and
+    // the placement (not just the contents) has to be right.
+    let (first, second) = {
+        let render = app.sub_app_mut(crate::RenderApp).expect("the render sub-app");
+        let materials = render.world.resource_mut::<RenderMaterials>();
+        let first = materials.registry_mut().allocate().expect("capacity for two");
+        let second = materials.registry_mut().allocate().expect("capacity for two");
+        materials
+            .publish(record_with_lobes(first.index, 1))
+            .expect("the first record publishes");
+        materials
+            .publish(record_with_lobes(
+                second.index,
+                1 | (1 << ClosureKind::ClearCoat as u32),
+            ))
+            .expect("the second record publishes");
+        (first, second)
+    };
+    {
+        // A fresh resource has an empty mirror, so the frame uploads every row.
+        let render = app.sub_app_mut(crate::RenderApp).expect("the render sub-app");
+        let runtime = render
+            .world
+            .resource::<crate::RenderRuntimeResource<WgpuInstance>>();
+        let device = runtime.runtime().device();
+        render.world.insert_resource(MaterialParameterBuffers::new(
+            device,
+            CAPACITY,
+            512,
+            BufferUsages::COPY_SRC,
+        ));
+        render
+            .world
+            .resource_mut::<RenderMaterials>()
+            .registry_mut()
+            .mark_all_dirty();
+    }
+
+    app.update();
+
+    let render = app.get_sub_app(crate::RenderApp).expect("the render sub-app");
+    let (headers, parameters, word_len, epoch) = {
+        let buffers = render.world.resource::<MaterialParameterBuffers>();
+        (
+            buffers.headers().expect("the header buffer"),
+            buffers.parameters().expect("the word heap"),
+            buffers.used_words(),
+            render.world.resource::<RenderMaterials>().snapshot().epoch,
+        )
+    };
+    let runtime = render
+        .world
+        .resource::<crate::RenderRuntimeResource<WgpuInstance>>();
+    assert!(runtime.runtime().wait_idle(), "the upload completes");
+    let queue = runtime.runtime().queue();
+
+    let header_bytes = queue.read_buffer(
+        headers,
+        crate::material::header_row_bytes() * u64::from(CAPACITY),
+    );
+    let row_bytes = crate::material::header_row_bytes() as usize;
+    let row = |index: u32| -> prism_render_material::GpuMaterialHeader {
+        let start = index as usize * row_bytes;
+        // `pod_read_unaligned` wants exactly one value's bytes, so the slice is
+        // one row rather than the rest of the buffer.
+        bytemuck::pod_read_unaligned(&header_bytes[start..start + row_bytes])
+    };
+    let words = queue.read_buffer(parameters, u64::from(word_len) * 4);
+    let words_at = |offset: u32, len: u32| -> Vec<u32> {
+        words[offset as usize * 4..(offset + len) as usize * 4]
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect()
+    };
+
+    // Slot zero is the permanent fallback, at the heap's origin.
+    let fallback = fallback_material_record(
+        GenerationalHandle::new(0, 0),
+        epoch,
+    );
+    let fallback_words = fallback.packed_parameters().pack();
+    assert_eq!(
+        row(0),
+        fallback.header(0, 0, epoch),
+        "the fallback row read from the GPU is the ABI's header"
+    );
+    assert_eq!(
+        words_at(0, fallback_words.len() as u32),
+        fallback_words,
+        "the fallback's packed block is at the heap's origin"
+    );
+
+    // Each published material: the row names an offset, and the words at that
+    // offset *are* its packed block — and the row is what the ABI builds for it.
+    for (handle, lobes) in [
+        (first, 1_u32),
+        (second, 1 | (1 << ClosureKind::ClearCoat as u32)),
+    ] {
+        let record = record_with_lobes(handle.index, lobes);
+        let block = record.packed_parameters().pack();
+        let gpu_row = row(handle.index);
+        assert_eq!(gpu_row.is_active, 1, "material {} is live", handle.index);
+        assert_eq!(gpu_row.generation, handle.generation);
+        assert_eq!(
+            gpu_row.parameter_size as usize,
+            block.len() * 4,
+            "the row's size is the block's byte length"
+        );
+        assert_eq!(
+            words_at(gpu_row.parameter_offset, block.len() as u32),
+            block,
+            "the words at the row's offset are the material's packed block"
+        );
+        assert_eq!(
+            gpu_row,
+            record.header(gpu_row.parameter_offset, 0, epoch),
+            "the row read from the GPU is the ABI's header for that material"
+        );
+    }
+    assert_ne!(
+        row(first.index).parameter_offset,
+        row(second.index).parameter_offset,
+        "the two blocks are placed separately"
+    );
+}
