@@ -30,8 +30,8 @@ use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::view_family::ViewKind;
 use prism_render_driver::{
     DeviceDescriptor, Instance, MultisampleState, PrimitiveState, RenderDevice,
-    RenderPipelineDescriptor, RequestAdapterOptions, ShaderModuleDescriptor, TextureDescriptor,
-    TextureFormat, TextureUsages, VertexState,
+    RenderPipelineDescriptor, RequestAdapterOptions, PrimitiveTopology, ShaderModuleDescriptor,
+    TextureDescriptor, TextureFormat, TextureUsages, VertexState,
 };
 
 /// The pipeline cache builds a PSO once per content key, shares it, and destroys
@@ -64,16 +64,55 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
     };
 
     let mut cache = PipelineCache::new();
-    let key = PipelineKey::new(7, Some(TextureFormat::Rgba8Unorm), None, 1, 32);
+    let key = PipelineKey::new(
+        7,
+        Some(TextureFormat::Rgba8Unorm),
+        None,
+        1,
+        32,
+        PrimitiveTopology::TriangleList,
+        0xABCD,
+    );
     let first = cache.get_or_create(&device, key, &descriptor);
     let second = cache.get_or_create(&device, key, &descriptor);
     assert_eq!(first, second, "the same key returns the same pipeline");
     assert_eq!(cache.len(), 1, "the pipeline is built once");
 
-    let other = PipelineKey::new(8, Some(TextureFormat::Rgba8Unorm), None, 1, 32);
+    let other = PipelineKey::new(
+        8,
+        Some(TextureFormat::Rgba8Unorm),
+        None,
+        1,
+        32,
+        PrimitiveTopology::TriangleList,
+        0xABCD,
+    );
     let distinct = cache.get_or_create(&device, other, &descriptor);
     assert_ne!(distinct, first, "a different key compiles a new pipeline");
     assert_eq!(cache.len(), 2);
+
+    // The key must separate pipelines that differ only in topology or shader:
+    // keying on neither aliased two different PSOs onto one cache entry.
+    let other_topology = PipelineKey::new(
+        7,
+        Some(TextureFormat::Rgba8Unorm),
+        None,
+        1,
+        32,
+        PrimitiveTopology::TriangleStrip,
+        0xABCD,
+    );
+    assert_ne!(other_topology, key, "topology is part of the identity");
+    let other_shader = PipelineKey::new(
+        7,
+        Some(TextureFormat::Rgba8Unorm),
+        None,
+        1,
+        32,
+        PrimitiveTopology::TriangleList,
+        0x1234,
+    );
+    assert_ne!(other_shader, key, "the shader identity is part of the key");
 
     assert!(
         !cache.release(&device, &key),

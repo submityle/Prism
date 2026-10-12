@@ -17,7 +17,7 @@
 use prism_ecs::prelude::Resource;
 use prism_render_driver::{
     CacheStats, ContentCache, RenderDevice, RenderPipelineDescriptor, RenderPipelineId,
-    TextureFormat,
+    PrimitiveTopology, TextureFormat,
 };
 
 /// The content key of one render pipeline.
@@ -26,6 +26,19 @@ use prism_render_driver::{
 /// `SpecializationId::bin_class()`); the rest is the fixed-function state that
 /// changes the compiled pipeline. The fields are plain integers so the key is
 /// `Ord` and the cache is a deterministic `BTreeMap`.
+///
+/// # Coverage
+///
+/// Covered: the material permutation class (which folds every material-driven
+/// state — blend, depth test/write, culling — that the material layer already
+/// keys), the color/depth attachment formats, the sample count, the vertex
+/// stride, the primitive topology, and the shader identity.
+///
+/// Not covered: per-pipeline fixed-function overrides that no material class
+/// keys (e.g. an explicit depth-bias). A pipeline that needs those must fold
+/// them into `class` until the key grows a field for them — `get_or_create`
+/// trusts the key, so an under-specified key would silently alias two
+/// pipelines.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PipelineKey {
     /// The material permutation / bin class.
@@ -40,6 +53,15 @@ pub struct PipelineKey {
     pub sample_count: u32,
     /// The total vertex stride, which fixes the vertex layout the PSO bakes in.
     pub vertex_stride: u32,
+    /// The primitive topology, encoded as the RHI enum's discriminant.
+    topology: u32,
+    /// A stable identity for the shader module **and its entry points**.
+    ///
+    /// The RHI's `ShaderModuleId` is backend-assigned, so it is not a portable
+    /// identity; the caller supplies a content id (e.g. from `prism_shader`'s
+    /// permutation) that is equal exactly when two pipelines compile the same
+    /// shader program.
+    shader_id: u64,
 }
 
 impl PipelineKey {
@@ -51,6 +73,8 @@ impl PipelineKey {
         depth_format: Option<TextureFormat>,
         sample_count: u32,
         vertex_stride: u32,
+        topology: PrimitiveTopology,
+        shader_id: u64,
     ) -> Self {
         Self {
             class,
@@ -58,10 +82,13 @@ impl PipelineKey {
             depth_format: encode_format(depth_format),
             sample_count,
             vertex_stride,
+            topology: topology as u32,
+            shader_id,
         }
     }
 
 }
+
 
 /// Encodes an optional format as `format + 1` (`0` is the "none" sentinel), so
 /// the key is an `Ord` integer even though `TextureFormat` is not.
