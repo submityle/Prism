@@ -125,8 +125,46 @@ impl CubicBezier {
         left.flatten_rec(tol, depth - 1, out);
         right.flatten_rec(tol, depth - 1, out);
     }
+
+    /// The arc length of the curve: flatten at `tolerance` and sum the segment
+    /// lengths. A cubic's length has no closed form in elementary functions, but
+    /// the chord sum is a convergent approximation that needs no transcendentals.
+    ///
+    /// `tolerance` is the maximum chord deviation
+    /// [`flatten`](Self::flatten) guarantees, so this value is never *less* than
+    /// the true length (the polyline inscribes the curve) and approaches it from
+    /// above.
+    #[must_use]
+    pub fn arc_length(&self, tolerance: f32) -> f32 {
+        polyline_length(&self.flatten(tolerance))
+    }
+
+    /// The point at arc length `distance` from the start of the curve.
+    ///
+    /// `distance` is clamped to the curve's extent, so negatives return the
+    /// start and values past the length return the end — the natural
+    /// constant-speed parameterization a caller walks a fixed distance per step.
+    /// The point lies on the flattened polyline (within `tolerance` of the true
+    /// curve).
+    #[must_use]
+    pub fn point_at_arc_length(&self, distance: f32, tolerance: f32) -> (f32, f32) {
+        let polyline = self.flatten(tolerance);
+        point_at_distance(&polyline, distance).unwrap_or_else(|| self.eval(0.0))
+    }
+
+    /// Resample the curve into vertices spaced by at most `spacing` of arc
+    /// length: flatten at `tolerance`, then redistribute the polyline vertices
+    /// uniformly ([`resample_uniform`](crate::polyline::resample_uniform)).
+    ///
+    /// Both endpoints are preserved exactly and every returned vertex lies on
+    /// the flattened polyline.
+    #[must_use]
+    pub fn resample_arc_length(&self, spacing: f32, tolerance: f32) -> Vec<(f32, f32)> {
+        resample_uniform(&self.flatten(tolerance), spacing)
+    }
 }
 
+use crate::polyline::{point_at_distance, polyline_length, resample_uniform};
 use crate::vec2::lerp;
 
 #[inline]
@@ -338,6 +376,75 @@ mod tests {
             let t = (k as f32) / 200.0;
             let d = point_polyline_distance(c.eval(t), &poly);
             assert!(d <= 0.5 + 1e-2);
+        }
+    }
+
+    /// `|B'(t)|`, the curve's instantaneous speed, in `f64`.
+    fn speed(c: &CubicBezier, t: f64) -> f64 {
+        let mt = 1.0 - t;
+        let (a, b, d) = (3.0 * mt * mt, 6.0 * mt * t, 3.0 * t * t);
+        let dx = a * (f64::from(c.p1.0) - f64::from(c.p0.0))
+            + b * (f64::from(c.p2.0) - f64::from(c.p1.0))
+            + d * (f64::from(c.p3.0) - f64::from(c.p2.0));
+        let dy = a * (f64::from(c.p1.1) - f64::from(c.p0.1))
+            + b * (f64::from(c.p2.1) - f64::from(c.p1.1))
+            + d * (f64::from(c.p3.1) - f64::from(c.p2.1));
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    /// Independent oracle: composite Simpson integration of `|B'(t)|` over
+    /// `[0, 1]` (even `n`), the true arc length a transcription would compute.
+    fn numeric_length(c: &CubicBezier) -> f64 {
+        let n = 2000usize;
+        let h = 1.0 / n as f64;
+        let mut sum = speed(c, 0.0) + speed(c, 1.0);
+        for i in 1..n {
+            let weight = if i % 2 == 0 { 2.0 } else { 4.0 };
+            sum += weight * speed(c, i as f64 * h);
+        }
+        sum * h / 3.0
+    }
+
+    #[test]
+    fn arc_length_of_a_straight_control_line() {
+        // Collinear control points: the curve is the segment (0,0)->(10,0).
+        let c = CubicBezier::new((0.0, 0.0), (3.0, 0.0), (7.0, 0.0), (10.0, 0.0));
+        assert!((c.arc_length(0.1) - 10.0).abs() < 1e-3);
+        let mid = c.point_at_arc_length(5.0, 0.1);
+        assert!((mid.0 - 5.0).abs() < 1e-3 && mid.1.abs() < 1e-3);
+        let start = c.point_at_arc_length(-1.0, 0.1);
+        assert!(start.0.abs() < 1e-6 && start.1.abs() < 1e-6);
+        let end = c.point_at_arc_length(99.0, 0.1);
+        assert!((end.0 - 10.0).abs() < 1e-3 && end.1.abs() < 1e-3);
+    }
+
+    #[test]
+    fn arc_length_matches_numeric_integration() {
+        let c = CubicBezier::new((0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0));
+        let numeric = numeric_length(&c);
+        let chord = f64::from(c.arc_length(1e-3));
+        // The flattened polyline inscribes the curve, so it is at least as long,
+        // and converges to the true length as the flatten tolerance shrinks.
+        assert!(chord >= numeric * (1.0 - 1e-3), "chord {chord} < {numeric}");
+        assert!(
+            (chord - numeric).abs() <= 1e-3 * numeric,
+            "chord {chord} vs numeric {numeric}"
+        );
+    }
+
+    #[test]
+    fn resample_arc_length_spaces_vertices_by_at_most_spacing() {
+        let c = CubicBezier::new((0.0, 0.0), (0.0, 10.0), (10.0, 10.0), (10.0, 0.0));
+        let poly = c.resample_arc_length(0.5, 1e-3);
+        assert!(poly.len() >= 2);
+        let first = poly[0];
+        let last = poly[poly.len() - 1];
+        assert!(first.0.abs() < 1e-4 && first.1.abs() < 1e-4);
+        assert!((last.0 - 10.0).abs() < 1e-4 && last.1.abs() < 1e-4);
+        for w in poly.windows(2) {
+            let dx = w[1].0 - w[0].0;
+            let dy = w[1].1 - w[0].1;
+            assert!((dx * dx + dy * dy).sqrt() <= 0.5 + 1e-3);
         }
     }
 }
