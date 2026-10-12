@@ -99,6 +99,10 @@ import prism_render_scene::shaders::material_sample::{
     prism_uv_gradients,
     prism_texture_lod,
 };
+import prism_render_scene::shaders::measured_lobe::{
+    measured_direct,
+    SEMANTIC_MEASURED_BRDF,
+};
 import prism_render_scene::shaders::dynamic::{
     apply_dynamic_channels,
 };
@@ -1328,6 +1332,10 @@ fn shade_principled(
     emissive: vec3<f32>,
     env: LightEnvironment,
     slice: ClusterSlice,
+    // §17.6 measured lobe: the bound table's heap slot (`u32::MAX` when the
+    // material binds none) and its authored (weight, phi_d, scale).
+    measured_slot: u32,
+    measured_params: vec3<f32>,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
     // The view- and material-only albedo terms are identical for every light, so
@@ -1339,7 +1347,18 @@ fn shade_principled(
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
         let sample = sample_directional_shadowed(i, frame, world_position);
-        accumulated = accumulated + principled_direct_with(lit, frame, to_direct_sample(sample), pre);
+        let direct = to_direct_sample(sample);
+        accumulated = accumulated + principled_direct_with(lit, frame, direct, pre);
+        if measured_slot != 0xFFFFFFFFu && measured_params.x > 0.0 {
+            accumulated = accumulated + measured_direct(
+                measured_slot,
+                measured_params.y,
+                measured_params.z,
+                measured_params.x,
+                frame,
+                direct,
+            );
+        }
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
@@ -1356,7 +1375,18 @@ fn shade_principled(
         if sample.valid == 0.0 {
             continue;
         }
-        accumulated = accumulated + principled_direct_with(lit, frame, to_direct_sample(sample), pre);
+        let direct = to_direct_sample(sample);
+        accumulated = accumulated + principled_direct_with(lit, frame, direct, pre);
+        if measured_slot != 0xFFFFFFFFu && measured_params.x > 0.0 {
+            accumulated = accumulated + measured_direct(
+                measured_slot,
+                measured_params.y,
+                measured_params.z,
+                measured_params.x,
+                frame,
+                direct,
+            );
+        }
     }
 
     accumulated = accumulated + accumulate_area_lights(lit, frame, world_position);
@@ -1392,6 +1422,23 @@ fn face_shadow_disabled() -> FaceShadow {
     f.tex_count = 0u;
     f.uv = vec2<f32>(0.0, 0.0);
     return f;
+}
+
+// Scans the material's texture rows for the measured-BRDF table (§17.6) and
+// returns its bindless heap slot, or `u32::MAX` when the material binds none.
+// The scan lives here (not in the lobe module) because this is where the
+// material texture table is declared — the same reason the face-SDF scan above
+// does.
+fn measured_table_slot_of(tex_offset: u32, tex_count: u32) -> u32 {
+    let tex_end = tex_offset + tex_count;
+    let tex_physical = arrayLength(&material_textures);
+    for (var i = tex_offset; i < tex_end && i < tex_physical; i = i + 1u) {
+        let record = material_textures[i];
+        if record.semantic == SEMANTIC_MEASURED_BRDF {
+            return record.index;
+        }
+    }
+    return 0xFFFFFFFFu;
 }
 
 // Scans the material's texture rows for the `SEMANTIC_FACE_SDF` map and returns
@@ -2090,10 +2137,32 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     // integrator, and each keeps its own arm so a real closure drops in
     // independently.
     let slice = resolve_cluster_slice(geometry.position, u32(coord.x), u32(coord.y));
+    // §17.6 measured lobe: resolve the table row once per pixel and hand the
+    // integrator its slot plus the authored (weight, phi_d, scale). An unbound
+    // table or a zero weight keeps the integrator on the analytic path.
+    let measured_slot = measured_table_slot_of(
+        material_header.texture_offset,
+        material_header.texture_count,
+    );
+    let measured_params = vec3<f32>(
+        parameters.measured_weight,
+        parameters.measured_phi_d,
+        parameters.measured_scale,
+    );
     var color: vec3<f32>;
     switch params.shading_class {
         case SHADING_CLASS_PRINCIPLED: {
-            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env, slice);
+            color = shade_principled(
+                lit,
+                frame,
+                geometry.position,
+                indirect,
+                emissive,
+                env,
+                slice,
+                measured_slot,
+                measured_params,
+            );
         }
         case SHADING_CLASS_UNLIT: {
             color = surface.base_color + surface.emissive;
@@ -2128,10 +2197,30 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
             color = shade_toon(lit, frame, geometry.position, indirect, emissive, env, slice, face);
         }
         case SHADING_CLASS_CUSTOM: {
-            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env, slice);
+            color = shade_principled(
+                lit,
+                frame,
+                geometry.position,
+                indirect,
+                emissive,
+                env,
+                slice,
+                measured_slot,
+                measured_params,
+            );
         }
         default: {
-            color = shade_principled(lit, frame, geometry.position, indirect, emissive, env, slice);
+            color = shade_principled(
+                lit,
+                frame,
+                geometry.position,
+                indirect,
+                emissive,
+                env,
+                slice,
+                measured_slot,
+                measured_params,
+            );
         }
     }
 

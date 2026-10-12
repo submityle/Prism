@@ -41,6 +41,19 @@ pub const SEMANTIC_CLEAR_COAT: u32 = 5;
 pub const SEMANTIC_CLEAR_COAT_ROUGHNESS: u32 = 6;
 /// Clear-coat tangent-space normal map, linear, `[0, 1]`-remapped.
 pub const SEMANTIC_CLEAR_COAT_NORMAL: u32 = 7;
+/// Measured (tabulated) BRDF/BTF table (§17.6).
+///
+/// Not a fold input like the maps above: the row carries a whole *table*, which
+/// the measured lobe reads as an atlas (width = `theta_h`, height = `theta_d` ×
+/// `phi_d`) with integer texel loads. The tag exists so a material can bind the
+/// table through the ordinary texture list and both lines find it the same way.
+pub const SEMANTIC_MEASURED_BRDF: u32 = 9;
+
+// The semantic bytes are an ABI shared with the material crate and every
+// shader; pin the one the measured lobe scans for, so a drift is a build error.
+const _: () = assert!(
+    SEMANTIC_MEASURED_BRDF == prism_render_material::MEASURED_BRDF_SEMANTIC
+);
 
 /// Squared-length floor below which a decoded normal is treated as degenerate
 /// and replaced by the geometric `+Z` tangent-space normal.  Mirrors the

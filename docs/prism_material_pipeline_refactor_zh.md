@@ -648,7 +648,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P2-h | 原理化分层 BSDF（coat/base 能量耦合 + coat_darkening，§17.2） | 无（改 BSDF+测试） | P2 |
 | P3-d | 光谱提升（hero-wavelength，仅 RT twin / 离线参考，不进实时主线，§17.3） | 无（RT-only 分支） | P3 |
 | P3-e | 随机单瓣采样（blue-noise，贵瓣按预算随机选瓣 + TAA，§17.4） | 无（pass uniform） | P3 |
-| 开放瓣 | glint / 测量 BRDF·BTF 瓣作为开放词汇表成员落地（§17.6）。**glint 已全链落地**（schema 槽 17 + 4 word ABI + 计数式估计量接进 über 高光 + CPU 集成门禁 + 真机对拍，见 §13.a）；测量 BRDF·BTF 尚余（需 provider/表寻址） | 内部 enum 开放化 | P2+ |
+| 开放瓣 | glint / 测量 BRDF·BTF 瓣作为开放词汇表成员落地（§17.6）。**两者均已全链落地**：glint（槽 17，计数式估计量接进 über 高光）与测量 BRDF（槽 18，纹理行 provider + 图集三线性查表，逐光源进 principled 积分器），见 §13.a | 内部 enum 开放化 | P2+ |
 | P1-h ✅ | **PCM 地基**：ABI v5 加 4 word 扩展摘要 `extensions_{used,required}_{low,high}`；OpenPBR 核心瓣自举为 `KHR` 命名空间项（§5）。**已全部落地**（见 §13.a）：九类 kind 统一进注册表 —— `lobe`(8)/`channel`(4)/`response_mode`(3)/`cache_aux`(1) 为 **header 常驻**（占 64 槽摘要），`provider`(2)/`transfer`(1)/`downgrade`(1)/`composite`(1) 为 **identity-only**（烘焙/pass 期解析，零摘要槽，§5.2）；`author_node` 因 §4 前端尚未落地而无实例（不造假条目，kind 与 hook ABI 已就位）。每类带类型化 hook ABI（`hooks.rs`：stage + 对拍义务）与 §17.2 能量策略；能力协商 + 单源平价门禁 + response-mode↔`Illumination` 平价门禁 | **随 v5**（header 加摘要） | P1 |
 | P2-i | 全 kind manifest 格式（§17.5 schema 升级）+ codegen（解包/分类/对拍从 manifest 生成）+ MaterialX nodedef 往返 | 工具链+内部布局 | P2 |
 | P2-j | **response-mode 分类注册化**（步骤 2 类数从定值改为注册驱动固定表，§5.2；唯一动热路径项，单独立项） | 分类 shader/运行时 | P2 |
@@ -659,6 +659,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P2-c 第二片：测量 BRDF·BTF 开放瓣全链落地（ABI → provider → 双线响应）**（§17.6）
+  - **ABI（提交 `abdd86ea3`）**：`measured_brdf` 成为 schema 一等 lobe（`PRISM` 槽 18、4 word、experimental）：`measured_weight`（`independent`：数据自带能量）、`measured_phi_d`（表宽高表达不了的差方位分辨率）、`measured_scale`（表→渲染单位）＋pad。生成 10 瓣/19 槽表；material crate 的 `GpuMeasuredBrdfLobe`/`LobeMask::MEASURED_BRDF`/参数块装卸臂/bake `Group` 同步。**瓣子区增长把非瓣行整体上移一位**（动态通道 19..22、response-mode 与 cache-aux 23..26）——这正是 `pcm_parity` 的"非瓣槽必须在最后一个瓣之后 + 瓣子区必须致密"不变式在起作用，同时**能量策略平价断言立刻抓到**手抄的内置策略漏了新行的 `independent`。
+  - **provider = 材质纹理行**：`MEASURED_BRDF_SEMANTIC = 9`（material crate 定义、Bevy 枚举编译期钉住、shading 侧常量编译期断言相等、WESL 常量同名），着色器扫材质自己的纹理行取 bindless 槽——与 face-SDF 同一套路，所以 ABI 不需要槽位索引（堆重排不会致陈）。图集契约：宽=`theta_h`、高=`theta_d`×`phi_d`，纹素 `(i, j*phi_d+k)` = 单元 `(i,j,k)`。
+  - **双线响应（提交 `549d11257` 之后的同族工作）**：`measured_lobe.wesl` 用整数 `textureLoad` 取 8 个包围纹素（不让硬件预滤波 BRDF 表）后走 `measured_brdf.wesl` 的 Rusinkiewicz→网格→三线性核；CPU `prism_render_shading::measured_lobe` 用同一形状。两边都在 **principled 积分器**里逐光源相加；权重 0 / 未绑定 / 地平线下 / 零辐照度精确归零，未作者过的材质逐位不变。
+  - 门禁：`prism_render_shading --lib` **3358**（3 条 lobe 单测 + 1 条 `resolve_pixel` 端到端：绑定表后变亮、权重 0 时与未绑定逐位相等）、`prism_render_scene --lib` **1602**（resolve 链接 `measured_lobe.wesl`，模块图无环）、`prism_render_material` **850+2+1+4+6**、`prism_material_pcm` **28**；**待补**：测量瓣的真机图集对拍（真机门禁，按 glint/纹理 LOD 的同一套路，需要真实 2D 纹理绑定）。
 
 - **P2-g 全链：运行时动态参数通道（ABI 段 → 解析调制 → alpha/rim 分半接线 → 真机对拍）**（§17.1）
   - **ABI（第一次提交，`af3ef0a70`）**：`GpuMaterialHeader` 加 4 个 word `dynamic_{wetness,snow,damage,dissolve}`（`f32` 位播，92→108 B，仍是致密 `u32` 数组——这正是逐字段镜像门禁检查的形状）。它们是 header 里唯一会随运行时状态变化的部分：写这四个 word + 标 dirty 就重传该行，**不重发布 record、不 bump generation**（可见性缓冲的校验照旧成立）、不动编译期置换。`DynamicChannels` 是这段的类型化脸面，`to_words()` 在打包处执行契约（非有限→惰性、其余钳 `[0,1]`），于是热路径无需 per-channel NaN 判断。`MaterialRegistry` 把值放在 record **旁边**而不是里面（record 是烘焙契约、这些每帧在变），`set_dynamic_channels` 是唯一不走 `publish` 的变更且**幂等**（每帧重申状态不应每帧重传），`publish` 会把该行重置为惰性（新烘焙 = 新材质，昨天的湿度不能漏上来）。
@@ -1057,7 +1063,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 门禁：`cargo test -p prism_render_shading --lib glint`（glint CPU 全绿）、`--lib measured_brdf`（18 通过）、`cargo test -p prism_render_scene --lib shading::glint` / `shading::measured_brdf`（link 各 1 通过）；全量 `-p prism_render_shading --lib` 3257 通过。
   - **ABI 接入已具备路径**：`thin_film` 已按"新 lobe = 新 `LobeMask` 位（KHR 低位段）+ 变长字段块 + `prism_unpack_surface` 低位优先聚集"走通（且是规范段新增位、私有瓣走 `EXTENSION_SLOT_BASE = 16` 起的扩展段，由 schema 验证器强制）；开放的 glint / 测量 BRDF 瓣按同一路径接入即可（P2-c）。
 
-**⬜ 未开始（见上表）**：P1-d、P2-a~P2-c、P2-e、P2-i、P2-j、P3-a~P3-d（**P1-b / P1-c / P1-f / P1-f2 / P1-g / P1-h / P2-g 已完成**，见 §13.a）。**P1-a 第一片已完成**（解析式逐像素纹理 LOD：compute resolve 无导数 → 三角形投影解析求 `dUV/dx`/`dUV/dy` + 逐贴图取级 + 真机对拍，见 §7.1 / §13.a），余下的是"纹理段全面切到 VT 页引用"。**P2-c 第一片已完成**：**glint 开放瓣全链落地**（schema 槽 17 + 4 word ABI + 计数式无偏估计量接进 über 高光 + shade-time 足印契约 + CPU 集成门禁 + 真机对拍，见 §17.6 / §13.a）；P2-c 余下的是测量 BRDF·BTF 瓣（需 provider / 表寻址设计）与 MaterialX 往返（编辑器前端未起，按 goal 留 TODO）。**P1-h 已完成**（九类 kind 全部迁入 PCM 注册表：`lobe`/`channel`/`response_mode`/`cache_aux` 常驻 64 槽摘要，`provider`/`transfer`/`downgrade`/`composite` 为 identity-only；每类带类型化 hook ABI 与 §17.2 能量策略；能力协商 + header 4 word 摘要 + 单源平价门禁，见 §13.a）——其中 response-mode 的**分类表注册化**仍是唯一动热路径结构的项（P2-j，单独立项）：本项只把 `stylized`/`unlit`/`custom` 三类登记进注册表并与 `Illumination` 双向平价，9-way class 表本身仍在管线构建期写死。channel 一类已登记（`wetness`/`snow`/`damage`/`dissolve`）**且已接进运行期参数通道**（P2-g 全链：header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha test / OIT blend + 真机对拍，见 §13.a）；`author_node` 因 §4 前端未落地而无实例（kind 与 hook ABI 已就位，不造假条目）。P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（见上「部分完成」）——它的"贵瓣"消费者现在真的存在了（glint），所以接线不再是空转。
+**⬜ 未开始（见上表）**：P1-d、P2-a~P2-c、P2-e、P2-i、P2-j、P3-a~P3-d（**P1-b / P1-c / P1-f / P1-f2 / P1-g / P1-h / P2-g 已完成**，见 §13.a）。**P1-a 第一片已完成**（解析式逐像素纹理 LOD：compute resolve 无导数 → 三角形投影解析求 `dUV/dx`/`dUV/dy` + 逐贴图取级 + 真机对拍，见 §7.1 / §13.a），余下的是"纹理段全面切到 VT 页引用"。**P2-c 第一片已完成**：**glint 开放瓣全链落地**（schema 槽 17 + 4 word ABI + 计数式无偏估计量接进 über 高光 + shade-time 足印契约 + CPU 集成门禁 + 真机对拍，见 §17.6 / §13.a）；**P2-c 第二片（测量 BRDF·BTF 瓣）已完成**（槽 18 + 纹理行 provider + 图集三线性 + 双线响应 + CPU 端到端门禁，见 §17.6 / §13.a；余真机图集对拍这一条验证门禁）；P2-c 余下的是 MaterialX 往返（编辑器前端未起，按 goal 留 TODO）。**P1-h 已完成**（九类 kind 全部迁入 PCM 注册表：`lobe`/`channel`/`response_mode`/`cache_aux` 常驻 64 槽摘要，`provider`/`transfer`/`downgrade`/`composite` 为 identity-only；每类带类型化 hook ABI 与 §17.2 能量策略；能力协商 + header 4 word 摘要 + 单源平价门禁，见 §13.a）——其中 response-mode 的**分类表注册化**仍是唯一动热路径结构的项（P2-j，单独立项）：本项只把 `stylized`/`unlit`/`custom` 三类登记进注册表并与 `Illumination` 双向平价，9-way class 表本身仍在管线构建期写死。channel 一类已登记（`wetness`/`snow`/`damage`/`dissolve`）**且已接进运行期参数通道**（P2-g 全链：header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha test / OIT blend + 真机对拍，见 §13.a）；`author_node` 因 §4 前端未落地而无实例（kind 与 hook ABI 已就位，不造假条目）。P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（见上「部分完成」）——它的"贵瓣"消费者现在真的存在了（glint），所以接线不再是空转。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 
@@ -1560,6 +1566,11 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 
 - **glint / 闪光瓣**：车漆金属片、雪、沙的离散闪烁，现 GGX 微表面模型无法表达。作为开放词汇表新瓣（解析 glint，如 Zirr/Jakob 多尺度法线分布），走 §4.4 加法路径。
 - **测量 BRDF / BTF 瓣**：对无法解析建模的真实材质（织物、复杂涂层），引入**测量数据瓣**（表格化 BRDF/BTF），作为开放瓣的"数据驱动但非 AI"成员——纯查表插值，确定性、可对拍。
+**已落地（测量瓣全链，见 §13.a）**：测量 BRDF/BTF 不再是"只有 CPU 核"：
+- **ABI（4 word，`PRISM` 槽 18）**：`measured_weight`（`independent`：测量数据自带能量，它*加*一份表驱动响应，而不是像 glint 那样重塑解析高光预算）、`measured_phi_d`（表的差方位分辨率——纹理尺寸表达不了的那一维）、`measured_scale`（把数据的自身归一化换算进渲染单位），加一个 pad。`requires_caps` 为空：取表只是一次普通纹理读，平台能力属于 **provider**。
+- **provider = 材质纹理行**：表以普通材质纹理绑定（语义 `MEASURED_BRDF_SEMANTIC = 9`），着色器**扫描材质自己的纹理行**找到它（与 face-SDF 同一套路），所以 ABI 里不放槽位索引——那会在 bindless 堆重排时变陈旧。图集布局是契约的一部分：**宽 = `theta_h` 分辨率，高 = `theta_d` × `phi_d`**，纹素 `(i, j*phi_d + k)` 就是网格单元 `(i, j, k)`。
+- **双线响应**：`measured_lobe.wesl`（GPU）从材质堆里用**整数 `textureLoad`**取 8 个包围纹素（绝不让硬件替我们预滤波一张 BRDF 表），再走 `measured_brdf.wesl` 已有的 Rusinkiewicz → 网格 → 三线性核；CPU 侧 `prism_render_shading::measured_lobe` 用同一套核与同一个"表 × `n·l` × 辐照度 × 权重 × scale"形状。逐光源在**principled 积分器**里相加（CPU `shade_principled` / GPU `shade_principled` 一一对应），权重 0、未绑定表、地平线下的光、零辐照度都精确返回 0，所以没作者过的材质逐位不变。
+
 - **MaterialX 往返（round-trip）**：作者层（§4）不止"导入"MaterialX，还支持**导出**——结合 §4.5 向下投影，Prism über ↔ MaterialX 可往返（扩展瓣标注为私有节点），打通外部 DCC 协作。
 
 **已落地（glint 全链，见 §13.a）**：上条"解析 glint"不再是数学核，而是**一等 ABI 瓣 + 真实着色路径**：

@@ -44,6 +44,7 @@ mod light_routing;
 mod lighting;
 mod lobe_sampling;
 mod measured_brdf;
+mod measured_lobe;
 mod motion_blur;
 mod oit;
 // The conformance oracle is a *test* artifact (§4.5 constraint 1 / roadmap
@@ -191,6 +192,7 @@ pub use lighting::{
     glint_shade_seed, principled_pre, DirectLightSample, PrincipledPre, ShadingFrame,
     SurfaceSample,
 };
+pub use measured_lobe::evaluate_measured_direct;
 pub use measured_brdf::{
     directions_to_rusinkiewicz, half_vector, is_non_negative, reciprocity_error,
     rusinkiewicz_to_directions, theta_h_to_unit, unit_to_theta_h, MeasuredBrdf, MeasuredBrdfDims,

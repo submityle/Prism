@@ -34,7 +34,7 @@ mod texture_sample;
 mod texture_upsample;
 mod validation;
 
-pub use authoring::FACE_SHADOW_SDF_SEMANTIC;
+pub use authoring::{FACE_SHADOW_SDF_SEMANTIC, MEASURED_BRDF_SEMANTIC};
 pub use axis::{BIN_CLASS_BITS, Illumination, SpecializationId};
 pub use bake::{
     bake_layer_stack, sanitize_weight, ConstantMask, LayerParams, LayerStack, LayerWeights,

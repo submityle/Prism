@@ -17,6 +17,20 @@ use crate::{GpuMaterialTexture, MaterialFeatureFlags, MaterialRecord};
 /// integrator can find it by scanning the material's texture rows.
 pub const FACE_SHADOW_SDF_SEMANTIC: u32 = 8;
 
+/// ABI semantic tag for a measured (tabulated) BRDF/BTF table (§17.6).
+///
+/// A measured material's table ships as an ordinary texture row carrying this
+/// tag, exactly like the face-shadow SDF row above: the lobe finds it by
+/// scanning the material's own texture list, so the ABI needs no slot index
+/// (which would go stale whenever the bindless heap is repacked). Mirrored by
+/// `TextureSemantic::MeasuredBrdf` (the Bevy bridge enum), `SEMANTIC_MEASURED_BRDF`
+/// in `measured_lobe.wesl` and the shading-side texture semantics.
+///
+/// The table's atlas layout is part of the contract: width = `theta_h`
+/// resolution, height = `theta_d` resolution × `phi_d` resolution, and texel
+/// `(i, j * phi_d + k)` holds grid cell `(i, j, k)`.
+pub const MEASURED_BRDF_SEMANTIC: u32 = 9;
+
 impl MaterialRecord {
     /// Turns this record into a stylized (NPR) face-shadow producer.
     ///

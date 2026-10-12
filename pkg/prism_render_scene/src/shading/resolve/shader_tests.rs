@@ -334,7 +334,7 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 21] = [
+    let deps: [(u128, &str, &str); 23] = [
         (
             0x5052_4953_4d5f_5441_4e47_454e_5400_0002,
             include_str!("../../shaders/tangent.wesl"),
@@ -449,6 +449,18 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             0x5052_4953_4d5f_4459_4d5f_4d41_534b_0001,
             include_str!("../../shaders/dynamic_mask.wesl"),
             "embedded://prism_render_scene/shaders/dynamic_mask.wesl",
+        ),
+        // …and the measured (tabulated) BRDF lobe (§17.6): its kernel plus the
+        // lobe half that fetches the table from the material texture heap.
+        (
+            0x5052_4953_4d5f_4d5f_4252_4446_0001,
+            include_str!("../../shaders/measured_brdf.wesl"),
+            "embedded://prism_render_scene/shaders/measured_brdf.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_4d4c_4f42_4500_0001,
+            include_str!("../../shaders/measured_lobe.wesl"),
+            "embedded://prism_render_scene/shaders/measured_lobe.wesl",
         ),
         // Minimal stand-in for Bevy's `bevy_render::maths`: the resolve shader
         // imports `affine3_to_square` from it exactly like `opaque.wesl` and

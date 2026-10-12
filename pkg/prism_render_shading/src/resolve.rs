@@ -6,6 +6,7 @@
 //! GPU or Bevy dependency so it can act as the golden reference the WESL
 //! resolve shader must match bit-for-bit within tolerance.
 
+use crate::measured_brdf::MeasuredBrdf;
 use prism_render_material::{DynamicChannels, GpuMaterialHeader, GpuSurfaceParameters};
 
 use crate::{
@@ -172,6 +173,12 @@ pub struct ResolveInput<'a> {
     /// sampled at the interpolated surface UV; an empty slice shades from the
     /// authored factors alone (the bindless heap's white/flat-normal defaults).
     pub textures: &'a [SampledTextureBinding],
+    /// The material's measured (tabulated) BRDF/BTF table, when it binds one
+    /// (§17.6). The table itself is *data*: in the shipping renderer it is a
+    /// material texture bound with the measured-BRDF semantic, and the GPU fetch
+    /// lives in `measured_lobe.wesl`; the CPU golden receives the table directly
+    /// rather than a sampled texel, because a BRDF lookup is not a texture fold.
+    pub measured_brdf: Option<&'a MeasuredBrdf>,
     /// World-space camera position used to derive the view vector.
     pub view_position: [f32; 3],
     /// Screen-space ambient visibility in `[0, 1]` (`1` = unoccluded) sampled
@@ -491,6 +498,26 @@ pub fn resolve_pixel(
     let area_light_term =
         accumulate_area_lights(&lit_surface, frame, geometry.position, lights.area, lights.ltc_lut);
 
+    // §17.6 measured (tabulated) BRDF lobe: an additive, table-driven specular
+    // response evaluated per light. Zero weight, an unbound table, a
+    // below-horizon light or a dark light all return zero, so a material that
+    // never authors the lobe is bit-for-bit unchanged.
+    let measured_table = input
+        .measured_brdf
+        .filter(|_| input.parameters.measured_weight > 0.0);
+    let measured_weight = input.parameters.measured_weight;
+    let measured_scale = input.parameters.measured_scale;
+    let measured_term = |light: DirectLightSample| match measured_table {
+        Some(table) => crate::evaluate_measured_direct(
+            table,
+            measured_scale,
+            measured_weight,
+            &frame,
+            &light,
+        ),
+        None => [0.0; 3],
+    };
+
     // Integrates the principled GGX lobe over every analytic light, then adds
     // the shared indirect + emissive terms once.  Shared by the physically
     // based classes (Principled and, until their specialized lobes land,
@@ -504,15 +531,12 @@ pub fn resolve_pixel(
         let pre = crate::principled_pre(&lit_surface, &frame);
         let mut accumulated = [0.0; 3];
         for light in lights.directional {
+            let sample = direct_sample(*light);
             accumulated = add(
                 accumulated,
-                crate::evaluate_principled_direct_with(
-                    lit_surface,
-                    frame,
-                    direct_sample(*light),
-                    &pre,
-                ),
+                crate::evaluate_principled_direct_with(lit_surface, frame, sample, &pre),
             );
+            accumulated = add(accumulated, measured_term(sample));
         }
         for light in lights.punctual {
             if let Some(sample) = light.sample(geometry.position) {
@@ -520,6 +544,7 @@ pub fn resolve_pixel(
                     accumulated,
                     crate::evaluate_principled_direct_with(lit_surface, frame, sample, &pre),
                 );
+                accumulated = add(accumulated, measured_term(sample));
             }
         }
         add(add(add(accumulated, area_light_term), indirect), emissive)
@@ -914,10 +939,86 @@ mod tests {
             view_position: [0.0, 0.0, 4.0],
             screen_space_ao: 1.0,
             uv_footprint_area: 0.0,
+            measured_brdf: None,
             world_from_local: IDENTITY_WORLD_FROM_LOCAL,
         }
     }
 
+
+
+    #[test]
+    fn a_bound_measured_table_reaches_the_resolved_pixel() {
+        let (primitives, vertices) = unit_triangle();
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.4, 0.4, 0.4, 1.0],
+            specular_roughness: 0.5,
+            measured_weight: 1.0,
+            measured_phi_d: crate::measured_brdf::MB_DEFAULT_PHI_D as f32,
+            measured_scale: 1.0,
+            ..Default::default()
+        };
+        let table = crate::measured_brdf::MeasuredBrdf::from_analytic(
+            crate::measured_brdf::MeasuredBrdfDims::MERL,
+            crate::measured_brdf::SyntheticBrdfParams::default(),
+        );
+        let light = DirectionalLight {
+            direction: [0.0, 0.0, 1.0],
+            illuminance: [10.0; 3],
+            visibility: 1.0,
+        };
+        let resolve = |measured: Option<&crate::measured_brdf::MeasuredBrdf>| {
+            let mut input = base_input(&primitives, &vertices, principled_header(), parameters);
+            input.measured_brdf = measured;
+            resolve_pixel(
+                input,
+                LightingEnvironment {
+                    directional: &[light],
+                    punctual: &[],
+                    image_based: None,
+                    ambient: [5.0; 3],
+                    stylized: StylizedParams::with_bands(4),
+                    area: &[],
+                    ltc_lut: None,
+                },
+            )
+            .unwrap()
+            .color
+        };
+
+        // §17.6 wiring gate: a *bound* table adds the measured term, and the
+        // lobe is additive — never negative, never NaN.
+        let unbound = resolve(None);
+        let bound = resolve(Some(&table));
+        assert!(
+            bound.iter().zip(&unbound).all(|(a, b)| a > b),
+            "bound {bound:?} vs unbound {unbound:?}"
+        );
+        for value in bound.iter() {
+            assert!(value.is_finite() && *value >= 0.0, "{value}");
+        }
+
+        // An authored weight of 0 keeps the analytic path bit-for-bit: the table
+        // is bound and ignored, exactly like a material that never authors it.
+        let mut inert_parameters = parameters;
+        inert_parameters.measured_weight = 0.0;
+        let mut input = base_input(&primitives, &vertices, principled_header(), inert_parameters);
+        input.measured_brdf = Some(&table);
+        let inert = resolve_pixel(
+            input,
+            LightingEnvironment {
+                directional: &[light],
+                punctual: &[],
+                image_based: None,
+                ambient: [5.0; 3],
+                stylized: StylizedParams::with_bands(4),
+                area: &[],
+                ltc_lut: None,
+            },
+        )
+        .unwrap()
+        .color;
+        assert_eq!(inert, unbound);
+    }
 
     #[test]
     fn runtime_dynamic_channels_reach_the_resolved_pixel() {
