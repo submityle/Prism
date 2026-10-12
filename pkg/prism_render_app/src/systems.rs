@@ -9,6 +9,7 @@ use crate::intent::RenderIntent;
 use crate::label::Render;
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
+use crate::startup::ensure_render_startup;
 use crate::stats::RenderFrameStats;
 use crate::target::RenderTarget;
 
@@ -36,14 +37,20 @@ pub(crate) fn extract_render_record(main: &mut World, render: &mut World) {
     render.insert_resource(RenderRecord::new(viewport, frame_index));
 }
 
-/// Runs the render sub-app's [`Render`] schedule as part of its frame.
+/// Runs the render sub-app's GPU startup, then its [`Render`] schedule, as part
+/// of its frame.
 ///
 /// The sub-app's per-frame loop drives the fixed core phases; a dedicated render
 /// schedule would otherwise never run, so this exclusive system — registered in
 /// the render sub-app's `Last` phase — runs it explicitly. It is the render
 /// world's analogue of the main loop calling into a render schedule, and it is
 /// what makes a single `App::update` produce exactly one rendered frame.
+///
+/// [`RenderStartup`] runs first (once per device): a plugin registered its GPU
+/// resources from any plugin, in any order, and they must exist before the first
+/// frame reads them.
 pub(crate) fn drive_render_schedule(world: &mut World) {
+    ensure_render_startup(world);
     world.run_schedule(Render);
 }
 

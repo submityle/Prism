@@ -5,24 +5,53 @@
 //! [`SystemSet`]s that renderer systems hang off so a frame's work is ordered
 //! the same way regardless of which plugin registered it.
 //!
-//! The stages are the classic frame order — extract, prepare resources, queue
-//! draws, record phases, clean up — and the phases are the material-model-
-//! agnostic draw buckets of the single execution path
-//! (`prism_material_pipeline_refactor_zh.md` §3.5/§8.5): the four lines
-//! (PBR / NPR / hybrid / custom) are *response modes*, not separate phases, so
-//! the phase set stays small and the model differences ride on the pipeline key.
+//! The stages are the renderer's frame order — extract, build views, queue
+//! draws, prepare the GPU resources the queued order needs, record phases,
+//! clean up — and the phases are the material-model-agnostic draw buckets of
+//! the single execution path (`prism_material_pipeline_refactor_zh.md`
+//! §3.5/§8.5): the four lines (PBR / NPR / hybrid / custom) are *response
+//! modes*, not separate phases, so the phase set stays small and the model
+//! differences ride on the pipeline key.
 
 use prism_ecs::schedule::{Schedule, SetConfig, SystemSet, SystemSetId};
 
 /// The ordered stages of a render frame.
+///
+/// The names and the order are the renderer's, not a fresh invention: bevy's
+/// `RenderSystems` orders `… → Queue → Prepare → Render → Cleanup`, where
+/// queueing (specialize + bin) happens **before** GPU resources and bind groups
+/// are prepared, because preparation walks the queued/sorted order. Prism keeps
+/// that order and the sub-stages the renderer's systems hang off
+/// ([`QueueMeshes`](Self::QueueMeshes),
+/// [`PrepareResources`](Self::PrepareResources),
+/// [`PrepareResourcesFlush`](Self::PrepareResourcesFlush),
+/// [`PrepareBindGroups`](Self::PrepareBindGroups)), so ported systems keep their
+/// relative order without every one of them declaring edges by hand.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum RenderSystems {
     /// Pull the frame's inputs out of the main world.
     Extract,
-    /// Build/upload the GPU resources the frame's passes will read.
-    Prepare,
+    /// Create the frame's views (its view family) before anything is queued or
+    /// prepared against them.
+    CreateViews,
+    /// Prepare the auxiliary views queueing consumes (shadow, reflection,
+    /// capture).
+    PrepareViews,
     /// Turn the visible set into draw commands / bins.
     Queue,
+    /// The mesh-queueing sub-stage within [`Queue`](Self::Queue).
+    QueueMeshes,
+    /// Build/upload the GPU resources and bind groups the frame's passes read,
+    /// in the order the queue produced.
+    Prepare,
+    /// The resource-construction sub-stage within [`Prepare`](Self::Prepare).
+    PrepareResources,
+    /// Flush the resources built in
+    /// [`PrepareResources`](Self::PrepareResources) before bind groups are
+    /// created from them.
+    PrepareResourcesFlush,
+    /// The bind-group sub-stage within [`Prepare`](Self::Prepare).
+    PrepareBindGroups,
     /// Record the graph's passes.
     Phase,
     /// Release per-frame scratch and publish stats.
@@ -30,11 +59,18 @@ pub enum RenderSystems {
 }
 
 impl RenderSystems {
-    /// The stage order, earliest first.
-    pub const ORDER: [Self; 5] = [
+    /// The top-level stage order, earliest first.
+    ///
+    /// Sub-stages are not listed: they are ordered *inside* the stage that owns
+    /// them (see [`configure_render_sets`]), so a system registered in
+    /// [`QueueMeshes`](Self::QueueMeshes) needs no edge to one in
+    /// [`PrepareResources`](Self::PrepareResources).
+    pub const ORDER: [Self; 7] = [
         Self::Extract,
-        Self::Prepare,
+        Self::CreateViews,
+        Self::PrepareViews,
         Self::Queue,
+        Self::Prepare,
         Self::Phase,
         Self::Cleanup,
     ];
@@ -42,10 +78,16 @@ impl RenderSystems {
     const fn discriminant(self) -> u64 {
         match self {
             Self::Extract => 0,
-            Self::Prepare => 1,
-            Self::Queue => 2,
-            Self::Phase => 3,
-            Self::Cleanup => 4,
+            Self::CreateViews => 1,
+            Self::PrepareViews => 2,
+            Self::Queue => 3,
+            Self::QueueMeshes => 4,
+            Self::Prepare => 5,
+            Self::PrepareResources => 6,
+            Self::PrepareResourcesFlush => 7,
+            Self::PrepareBindGroups => 8,
+            Self::Phase => 9,
+            Self::Cleanup => 10,
         }
     }
 }
@@ -114,16 +156,60 @@ impl SystemSet for RenderPhase {
 /// a system `in_set(RenderSystems::Queue)` does not need to know about every
 /// other stage. Phases are ordered within the [`RenderSystems::Phase`] stage and
 /// across each other.
+///
+/// The sub-stages nest inside their owner:
+/// [`QueueMeshes`](RenderSystems::QueueMeshes) inside
+/// [`Queue`](RenderSystems::Queue), and
+/// [`PrepareResources`](RenderSystems::PrepareResources) →
+/// [`PrepareResourcesFlush`](RenderSystems::PrepareResourcesFlush) →
+/// [`PrepareBindGroups`](RenderSystems::PrepareBindGroups) inside
+/// [`Prepare`](RenderSystems::Prepare).
 pub fn configure_render_sets(schedule: &mut Schedule) {
     for pair in RenderSystems::ORDER.windows(2) {
         schedule.configure_set(pair[1], SetConfig::new().after(pair[0]));
     }
+    // Mesh queueing is part of queueing.
+    schedule.configure_set(
+        RenderSystems::QueueMeshes,
+        SetConfig::new().after(RenderSystems::Queue),
+    );
+    schedule.configure_set(
+        RenderSystems::QueueMeshes,
+        SetConfig::new().before(RenderSystems::Prepare),
+    );
+    // Resources → flush → bind groups, all inside prepare.
+    for (before, after) in [
+        (
+            RenderSystems::PrepareResources,
+            RenderSystems::PrepareResourcesFlush,
+        ),
+        (
+            RenderSystems::PrepareResourcesFlush,
+            RenderSystems::PrepareBindGroups,
+        ),
+    ] {
+        schedule.configure_set(after, SetConfig::new().after(before));
+    }
+    for sub in [
+        RenderSystems::PrepareResources,
+        RenderSystems::PrepareResourcesFlush,
+        RenderSystems::PrepareBindGroups,
+    ] {
+        schedule.configure_set(sub, SetConfig::new().after(RenderSystems::Prepare));
+        schedule.configure_set(sub, SetConfig::new().before(RenderSystems::Phase));
+    }
     for pair in RenderPhase::ORDER.windows(2) {
         schedule.configure_set(pair[1], SetConfig::new().after(pair[0]));
     }
-    // Phases run inside the record stage.
+    // Phases run inside the record stage, which is *after* every prepare
+    // sub-stage: a phase item records with the bind groups preparation built, so
+    // ordering against `Prepare` alone would leave the sub-stages unordered
+    // against the record.
     for phase in RenderPhase::ORDER {
-        schedule.configure_set(phase, SetConfig::new().after(RenderSystems::Queue));
+        schedule.configure_set(
+            phase,
+            SetConfig::new().after(RenderSystems::PrepareBindGroups),
+        );
         schedule.configure_set(phase, SetConfig::new().before(RenderSystems::Cleanup));
     }
 }

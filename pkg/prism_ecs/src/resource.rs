@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 use core::any::{type_name, Any, TypeId};
 
 use crate::collections::HashMap;
+use crate::world::World;
 
 /// A globally-unique, type-keyed value stored once per
 /// [`World`](crate::world::World).
@@ -32,6 +33,18 @@ use crate::collections::HashMap;
 /// `Send + Sync + 'static` bounds make resources safe to store type-erased and
 /// to reference from systems running across threads.
 pub trait Resource: Send + Sync + 'static {}
+
+/// A [`Resource`] the world can build on demand.
+///
+/// [`Default`]-constructed resources are born empty; a `FromWorld` resource is
+/// built *from* the world it will live in, which is what a GPU resource needs:
+/// it must be created against the device and queue that world owns, and it may
+/// need to read several other resources to do so. It is the seam behind the
+/// renderer's `init_gpu_resource` / `RenderStartup`.
+pub trait FromWorld: Sized {
+    /// Builds the value from `world`.
+    fn from_world(world: &mut World) -> Self;
+}
 
 /// A dense, stable identifier for a registered resource type within one
 /// [`World`](crate::world::World).

@@ -145,7 +145,7 @@ pub mod prelude {
         CascadeEdge, CascadePlan, CleanupPolicy, Pair, PairKey, Relation, RelationId,
         RelationIndex, RelationKind, RelationTarget, Relations, TargetId,
     };
-    pub use crate::resource::{Resource, ResourceId, Resources};
+    pub use crate::resource::{FromWorld, Resource, ResourceId, Resources};
     pub use crate::schedule::{
         apply_state_transition, in_state, resource_equals, resource_exists, run_once,
         IntoSystemConfigs, IntoSystemConfigs as IntoScheduleConfigs, NextState, OnEnter, OnExit,

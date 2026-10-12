@@ -9,7 +9,7 @@ use prism_render_runtime::RenderRuntime;
 
 use crate::config::RenderAppConfig;
 use crate::intent::RenderIntent;
-use crate::label::{Render, RenderApp};
+use crate::label::{Render, RenderApp, RenderStartup};
 use crate::pipeline_cache::PipelineCache;
 use crate::queue::RenderQueues;
 use crate::record::RenderRecord;
@@ -17,6 +17,7 @@ use crate::runtime_resource::RenderRuntimeResource;
 use crate::scene::SceneRegistry;
 use crate::sets::{RenderSystems, configure_render_sets};
 use crate::stats::RenderFrameStats;
+use crate::startup::ensure_render_startup;
 use crate::systems::{drive_render_schedule, execute_frame, extract_render_record};
 use crate::target::RenderTarget;
 use crate::texture_cache::TextureCache;
@@ -35,6 +36,10 @@ use crate::views::{RenderViews, build_view_family};
 ///    frame from the render sub-app's `Last` phase;
 /// 4. installs the one-way extract that copies the main world's [`RenderIntent`]
 ///    into the render world.
+///
+/// It also registers the [`RenderStartup`] schedule, which runs once before the
+/// first frame so a plugin can register GPU resources (which must be built
+/// against the device) from anywhere in the app.
 ///
 /// The plugin is generic over the backend, so a real app passes the shipped
 /// wgpu backend and a test passes the headless null backend; neither the plugin
@@ -132,6 +137,7 @@ where
         {
             let schedules = render.world.resource_mut::<Schedules>();
             schedules.insert(Render, Schedule::new());
+            schedules.insert(RenderStartup, Schedule::new());
             schedules.insert(Last, Schedule::new());
         }
         {
@@ -144,7 +150,7 @@ where
             // off the record stage so later renderer plugins slot in by set.
             configure_render_sets(schedule);
             // Materialize the view family before the record stage consumes it.
-            schedule.add_systems(build_view_family.in_set(RenderSystems::Prepare));
+            schedule.add_systems(build_view_family.in_set(RenderSystems::CreateViews));
             schedule.add_systems(execute_frame::<I>.in_set(RenderSystems::Phase));
         }
         render
@@ -159,6 +165,17 @@ where
         // The main world's authoritative render intent, and the one-way feed.
         app.insert_resource(RenderIntent::from_extent(config.extent));
         app.set_extract(RenderApp, extract_render_record);
+    }
+
+    fn finish(&self, app: &mut App) {
+        // Every plugin has registered its `RenderStartup` systems by now, so the
+        // render world's GPU resources can be built. The schedule runs lazily on
+        // the first frame too, so a test that only calls `update` still gets it;
+        // running here as well means an app that inspects its render world before
+        // the first frame sees the resources.
+        if let Some(render) = app.sub_app_mut(RenderApp) {
+            ensure_render_startup(&mut render.world);
+        }
     }
 
     fn shutdown(&self, app: &mut App) {

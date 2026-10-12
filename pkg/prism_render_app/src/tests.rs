@@ -909,9 +909,18 @@ fn mark_opaque(mut log: ResMut<OrderLog>) {
     log.0.push("opaque");
 }
 
+fn mark_queue_meshes(mut log: ResMut<OrderLog>) {
+    log.0.push("queue-meshes");
+}
+
+fn mark_prepare_bind_groups(mut log: ResMut<OrderLog>) {
+    log.0.push("prepare-bind-groups");
+}
+
 /// The render stages and phases order systems whether or not the registering
-/// plugin knows about the others: `Prepare` precedes `Queue`, and the `Opaque`
-/// phase records after `Queue`.
+/// plugin knows about the others: queueing precedes GPU-resource preparation
+/// (the renderer's real order — preparation walks the queued order), mesh
+/// queueing nests inside queueing, and the `Opaque` phase records after both.
 #[test]
 fn render_sets_order_stages_and_phases() {
     let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
@@ -927,8 +936,10 @@ fn render_sets_order_stages_and_phases() {
             .expect("the plugin registers the Render schedule");
         // Registered out of order on purpose: the sets must impose the order.
         schedule.add_systems(mark_queue.in_set(RenderSystems::Queue));
+        schedule.add_systems(mark_queue_meshes.in_set(RenderSystems::QueueMeshes));
         schedule.add_systems(mark_opaque.in_set(RenderPhase::Opaque));
         schedule.add_systems(mark_prepare.in_set(RenderSystems::Prepare));
+        schedule.add_systems(mark_prepare_bind_groups.in_set(RenderSystems::PrepareBindGroups));
     }
 
     app.update();
@@ -941,8 +952,15 @@ fn render_sets_order_stages_and_phases() {
         .expect("the order log");
     assert_eq!(
         log.0,
-        ["prepare", "queue", "opaque"],
-        "Prepare runs before Queue, and the Opaque phase records after Queue"
+        [
+            "queue",
+            "queue-meshes",
+            "prepare",
+            "prepare-bind-groups",
+            "opaque"
+        ],
+        "queueing precedes preparation, mesh queueing nests inside queueing, \
+         bind groups nest inside preparation, and the Opaque phase records last"
     );
 }
 
@@ -1928,4 +1946,135 @@ fn undecodable_and_unresolved_bins_are_counted() {
     assert_eq!(outcome.unknown_class, 1, "the foreign class is not guessed");
     assert_eq!(outcome.unresolved, 1, "the orphan class is not drawn");
     assert_eq!(outcome.total(), bins.bins.len());
+}
+
+/// What the startup probes recorded: how many times a GPU resource was built,
+/// and whether it could see the render runtime while being built.
+#[derive(Default, Resource)]
+struct StartupLog {
+    builds: u32,
+    saw_runtime: bool,
+}
+
+/// A GPU resource: it must read the render world (the runtime) to exist, which
+/// is exactly why it cannot be a `Default` value.
+#[derive(Resource)]
+struct StartedResource;
+
+impl prism_ecs::resource::FromWorld for StartedResource {
+    fn from_world(world: &mut prism_ecs::world::World) -> Self {
+        let saw_runtime = world
+            .get_resource::<RenderRuntimeResource<NullInstance>>()
+            .is_some();
+        let log = world.resource_mut::<StartupLog>();
+        log.builds += 1;
+        log.saw_runtime |= saw_runtime;
+        Self
+    }
+}
+
+/// The startup seam: a registered GPU resource is built once, before the first
+/// frame reads it, against the render world that owns the device — and a
+/// device-recovery invalidation rebuilds it.
+#[test]
+fn render_startup_builds_registered_gpu_resources_once_per_device() {
+    use crate::startup::{GpuResourceAppExt, RenderStartupState};
+
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    {
+        let render = app
+            .sub_app_mut(RenderApp)
+            .expect("the plugin registers the render sub-app");
+        render.world.insert_resource(StartupLog::default());
+        // Registered *after* the plugin built, as a later renderer plugin would.
+        render.init_gpu_resource::<StartedResource>();
+    }
+
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+    assert!(
+        render.world.get_resource::<StartedResource>().is_some(),
+        "the resource exists before the frame that needs it"
+    );
+    let log = render.world.resource::<StartupLog>();
+    assert_eq!(log.builds, 1, "startup built it exactly once");
+    assert!(
+        log.saw_runtime,
+        "a GPU resource is built against the render world's device"
+    );
+    assert!(
+        render.world.resource::<RenderStartupState>().initialized(),
+        "the startup guard is set"
+    );
+
+    // Frames after the first must not rebuild anything.
+    app.update();
+    app.update();
+    assert_eq!(
+        app.get_sub_app(RenderApp)
+            .expect("the render sub-app")
+            .world
+            .resource::<StartupLog>()
+            .builds,
+        1,
+        "startup is idempotent across frames"
+    );
+
+    // Device recovery: invalidating makes the next frame rebuild every resource.
+    app.sub_app_mut(RenderApp)
+        .expect("the render sub-app")
+        .world
+        .resource_mut::<RenderStartupState>()
+        .invalidate();
+    app.update();
+    assert_eq!(
+        app.get_sub_app(RenderApp)
+            .expect("the render sub-app")
+            .world
+            .resource::<StartupLog>()
+            .builds,
+        2,
+        "an invalidated startup rebuilds against the new device"
+    );
+}
+
+/// Startup runs before the frame's `Render` schedule, so a render system can
+/// read a resource a startup system inserted — regardless of registration order.
+#[test]
+fn render_startup_runs_before_the_render_schedule() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    {
+        let render = app
+            .sub_app_mut(RenderApp)
+            .expect("the plugin registers the render sub-app");
+        let schedules = render.world.resource_mut::<Schedules>();
+        schedules
+            .get_mut(crate::label::RenderStartup)
+            .expect("the plugin registers the RenderStartup schedule")
+            .add_systems(insert_startup_value);
+        schedules
+            .get_mut(Render)
+            .expect("the plugin registers the Render schedule")
+            .add_systems(assert_startup_value_present);
+    }
+
+    // The render schedule asserts the value is present when it runs.
+    app.update();
+}
+
+/// A resource only a startup system creates, so a render system reading it
+/// proves the startup schedule ran first.
+#[derive(Resource)]
+struct StartupValue(u32);
+
+fn insert_startup_value(world: &mut prism_ecs::world::World) {
+    world.insert_resource(StartupValue(7));
+}
+
+fn assert_startup_value_present(world: &mut prism_ecs::world::World) {
+    assert!(
+        world.resource::<StartupValue>().0 == 7,
+        "RenderStartup ran before the Render schedule, with its value"
+    );
 }

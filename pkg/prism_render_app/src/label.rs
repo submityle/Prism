@@ -21,3 +21,21 @@ pub struct RenderApp;
 /// reordering the main-frame phase sequence.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Render;
+
+/// The render sub-app's GPU-resource startup
+/// [`ScheduleLabel`](prism_ecs::schedule::ScheduleLabel).
+///
+/// Registered by [`PrismRenderPlugin`](crate::PrismRenderPlugin) and run once
+/// before the first frame's [`Render`] schedule — the Prism counterpart of
+/// Bevy's `RenderStartup`. GPU resources cannot be `Default` values: they must
+/// be built against the device and queue the render world owns, so they are
+/// constructed here through
+/// [`init_gpu_resource`](crate::init_gpu_resource) and its
+/// [`SubApp`](prism_app::SubApp) extension
+/// [`GpuResourceAppExt::init_gpu_resource`](crate::GpuResourceAppExt::init_gpu_resource).
+///
+/// The schedule is *re-runnable*: a device-recovery path clears
+/// [`RenderStartupState`](crate::RenderStartupState) and the next frame rebuilds
+/// every registered GPU resource against the new device.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RenderStartup;
