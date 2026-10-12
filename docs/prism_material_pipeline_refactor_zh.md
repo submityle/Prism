@@ -661,6 +661,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 **✅ 已完成**
 
+- **P2-e 第一片：custom 响应的运行期退化（`custom_program` 的第一个读者）**（§3.5.4 / §5.2）
+  - **规范语义**：§3.5.4 说"不实现 `respond_custom` → 自动全屏幕空间安全退化"。此前 `Illumination::Custom` 一律分类进 `Custom` 桶，而 `custom_program`（header 里那个句柄）**没有任何 shader 读者**——也就是说，一个没有程序的 custom 材质会占用一个"名字叫 custom、实际跑的是同一条 principled 积分器"的桶，既浪费分桶也误导诊断。
+  - **修法**：类表新增 `ShadingClassRule::CustomProgram`——`Illumination::Custom` **且** `custom_program != u32::MAX` 才进 `Custom` 桶；没有句柄时**落到 default 行**（即共享的屏幕空间 über 路径，与它本会跑到的那条完全一致）。`classify_material_header`（热路径特化）与出货 `material_classification.wesl` 同步实现同一语义。
+  - **门禁**：穷举平价门禁新增 `custom_program` 轴（0 / 有效句柄 / `u32::MAX`），与 illumination × render-class × 闭包组合一起扫；分类单测同时钉住"无句柄 → Principled / 有句柄 → Custom"。
+  - 门禁：`prism_render_shading --lib` **3372**、`prism_render_scene --lib` **1602**（WESL 分类同构）、`prism_render_material` 850+2+1+4+6、`prism_material_pcm` 28。
+
 - **P2-j：响应模式分类表注册化（类集/类数单一来源 + 双平价门禁）**（§5.2）
   - **类集来自注册表**：`ShadingClassTable::from_registry(PCM 注册表, lobe 目录)` 在管线构建期建表——专属子系统桶（`Water`/`Hair`）优先（不看 illumination），再按**注册槽顺序**放 `Kind::ResponseMode` 的行（unlit/npr/custom，**类数来自注册表**），随后是『最具体优先』的 `Lit` 闭包桶（`subsurface`/`clearcoat`/`cloth` 只在 schema 声明该 lobe 时存在），末行 default。注册了 response-mode 却没有实现 → **建表报错**（`UnhandledResponseMode`），杜绝注册即静默归类。
   - **热路径不变 + 穷举平价**：`classify_material_header` 仍是零分配特化实现，新增**穷举门禁**（is_active × render-class（含非 surface）× illumination（含非法值）× 闭包掩码（空/满/每个单 bit/每对））把两者逐例对齐；写门禁时抓到并修正一个真实顺序细节：**render-class 行必须先于 illumination 解析**，否则 illumination 越界的 Hair 材质会被拒而不是绑定自己的桶。另一条门禁直接读**出货 `material_classification.wesl`**，断言 `CLASS_*` 常量与表行 id 一一对应、且 shader 不含表外类。
@@ -1070,9 +1076,33 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 门禁：`cargo test -p prism_render_shading --lib glint`（glint CPU 全绿）、`--lib measured_brdf`（18 通过）、`cargo test -p prism_render_scene --lib shading::glint` / `shading::measured_brdf`（link 各 1 通过）；全量 `-p prism_render_shading --lib` 3257 通过。
   - **ABI 接入已具备路径**：`thin_film` 已按"新 lobe = 新 `LobeMask` 位（KHR 低位段）+ 变长字段块 + `prism_unpack_surface` 低位优先聚集"走通（且是规范段新增位、私有瓣走 `EXTENSION_SLOT_BASE = 16` 起的扩展段，由 schema 验证器强制）；开放的 glint / 测量 BRDF 瓣按同一路径接入即可（P2-c）。
 
-**⬜ 未开始（见上表）**：P1-d、P2-a~P2-c、P2-e、P2-i、P2-j、P3-a~P3-d（**P1-b / P1-c / P1-f / P1-f2 / P1-g / P1-h / P2-g 已完成**，见 §13.a）。**P1-a 第一片已完成**（解析式逐像素纹理 LOD：compute resolve 无导数 → 三角形投影解析求 `dUV/dx`/`dUV/dy` + 逐贴图取级 + 真机对拍，见 §7.1 / §13.a），余下的是"纹理段全面切到 VT 页引用"。**P2-c 第一片已完成**：**glint 开放瓣全链落地**（schema 槽 17 + 4 word ABI + 计数式无偏估计量接进 über 高光 + shade-time 足印契约 + CPU 集成门禁 + 真机对拍，见 §17.6 / §13.a）；**P2-c 第二片（测量 BRDF·BTF 瓣）已完成**（槽 18 + 纹理行 provider + 图集三线性 + 双线响应 + CPU 端到端门禁，见 §17.6 / §13.a；含真机图集对拍）；P2-c 余下的是 MaterialX 往返（编辑器前端未起，按 goal 留 TODO）。**P1-h 已完成**（九类 kind 全部迁入 PCM 注册表：`lobe`/`channel`/`response_mode`/`cache_aux` 常驻 64 槽摘要，`provider`/`transfer`/`downgrade`/`composite` 为 identity-only；每类带类型化 hook ABI 与 §17.2 能量策略；能力协商 + header 4 word 摘要 + 单源平价门禁，见 §13.a）——其中 response-mode 的**分类表注册化**仍是唯一动热路径结构的项（P2-j，单独立项）：本项只把 `stylized`/`unlit`/`custom` 三类登记进注册表并与 `Illumination` 双向平价，9-way class 表本身仍在管线构建期写死。channel 一类已登记（`wetness`/`snow`/`damage`/`dissolve`）**且已接进运行期参数通道**（P2-g 全链：header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha test / OIT blend + 真机对拍，见 §13.a）；`author_node` 因 §4 前端未落地而无实例（kind 与 hook ABI 已就位，不造假条目）。P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（见上「部分完成」）——它的"贵瓣"消费者现在真的存在了（glint），所以接线不再是空转。
+**⬜ 未开始（见上表）**：P1-d、P2-e、P3-a~P3-d（**P1-b / P1-c / P1-f / P1-f2 / P1-g / P1-h / P2-g / P2-j 已完成**，见 §13.a；**P2-a / P2-b / P2-c 的 MaterialX 往返 / P2-i 的 MaterialX nodedef 部分**按 goal 归编辑器前端，属显式 TODO；P2-i 的其余部分见下方审计）。**P1-a 第一片已完成**（解析式逐像素纹理 LOD：compute resolve 无导数 → 三角形投影解析求 `dUV/dx`/`dUV/dy` + 逐贴图取级 + 真机对拍，见 §7.1 / §13.a），余下的是"纹理段全面切到 VT 页引用"。**P2-c 第一片已完成**：**glint 开放瓣全链落地**（schema 槽 17 + 4 word ABI + 计数式无偏估计量接进 über 高光 + shade-time 足印契约 + CPU 集成门禁 + 真机对拍，见 §17.6 / §13.a）；**P2-c 第二片（测量 BRDF·BTF 瓣）已完成**（槽 18 + 纹理行 provider + 图集三线性 + 双线响应 + CPU 端到端门禁，见 §17.6 / §13.a；含真机图集对拍）；P2-c 余下的是 MaterialX 往返（编辑器前端未起，按 goal 留 TODO）。**P1-h 已完成**（九类 kind 全部迁入 PCM 注册表：`lobe`/`channel`/`response_mode`/`cache_aux` 常驻 64 槽摘要，`provider`/`transfer`/`downgrade`/`composite` 为 identity-only；每类带类型化 hook ABI 与 §17.2 能量策略；能力协商 + header 4 word 摘要 + 单源平价门禁，见 §13.a）——其中 response-mode 的**分类表注册化**仍是唯一动热路径结构的项（P2-j，单独立项）：本项只把 `stylized`/`unlit`/`custom` 三类登记进注册表并与 `Illumination` 双向平价，9-way class 表本身仍在管线构建期写死。channel 一类已登记（`wetness`/`snow`/`damage`/`dissolve`）**且已接进运行期参数通道**（P2-g 全链：header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha test / OIT blend + 真机对拍，见 §13.a）；`author_node` 因 §4 前端未落地而无实例（kind 与 hook ABI 已就位，不造假条目）。P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（见上「部分完成」）——它的"贵瓣"消费者现在真的存在了（glint），所以接线不再是空转。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
+
+
+#### 13.a.1 code-truth 审计（剩余路线图项 · 逐项证据）
+
+下表是"**以代码为准**"的剩余工作清点，每行给出可复现的证据与本轮实测的门禁数（CPU 侧 `prism_render_shading --lib` 3372、
+`prism_render_scene --lib` 1602、`prism_render_material` 850+2+1+4+6、`prism_material_pcm` 28、`prism_material_schema` 13；
+真机侧越沙盒 `PRISM_REQUIRE_GPU=1`：硬件解码 66 + 纹理 LOD / glint / 动态通道 / 测量 BRDF / 单瓣采样器 各 1）。
+
+| 项 | 状态 | 证据 | 余下 |
+| --- | --- | --- | --- |
+| **P1-a 距离 LOD** | 第一片完成 | `texture_lod.rs`（解析 UV 雅可比 + 逐贴图取级）、`material_sample.wesl::sample_texture_slot(record, uv, lod)`、真机 `texture_lod_gpu_parity` | 纹理段"全面切到 VT 页引用"（今天是 bindless 2D + 显式 LOD） |
+| **P1-b** | 完成 | `material_header_abi.rs` 逐字段镜像门禁；§13.a 记录 | — |
+| **P1-c** | 完成 | `bake.rs`（层栈 → 纹理空间混合）、硬顶删除记录 | — |
+| **P1-d 置换治理** | **未完成** | `prism_render_app/pipeline_cache.rs`：内容键（`SpecializationId` 类 + 固定功能状态 + 顶点布局哈希）去重 + 引用计数回收 ✔；**但没有任何异步/按需编译、也没有 über 回退 PSO**（grep `fallback`/async 无命中；`prism_render_driver` 无 naga/异步编译路径） | ① 后台按需编译；② 冷 permutation 未就绪时的全瓣 über 回退 PSO；③ 与 §8.4 的 archetype 聚类联动 |
+| **P2-a / P2-b** | 编辑器 TODO | goal 明确：编辑器架构未起 | 归 `prism_render_material_authoring`（未建） |
+| **P2-c** | 完成（两个开放瓣） | glint + measured 的 ABI/双线/真机对拍（§17.6、§13.a） | MaterialX 往返（编辑器 TODO） |
+| **P2-e 四线正交运行期** | **部分** | `Illumination` 四值 ✔、分类到 `Npr`/`Unlit`/`Custom` ✔、per-tile 9-way 分类 ✔；**custom 的运行期退化已落地**（见 §13.a）| ① **逐区域 illumination**（遮罩在分类 pass 里选 Lit/Stylized，才符合 §3.5.3 的"per-tile 分波前消发散"）；② 作者侧 `respond_custom` WESL 属编辑器 TODO（契约 §5.4.1） |
+| **P2-g** | 完成 | header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha/OIT + 真机对拍（§17.1、§13.a） | — |
+| **P2-i 全 kind manifest + codegen** | **部分** | PCM 的九类 kind、hook ABI、`header_resident`、能量轮转已落地（P1-h 收官）；`prism_material_schema` 的 codegen 仍只覆盖 **lobe** 一类 | 把 manifest/codegen 扩到其余八类（channel/response-mode/transfer/cache-aux/provider/downgrade/author-node/composite）；MaterialX nodedef 往返归编辑器 |
+| **P2-j** | 完成 | 类表由 PCM 注册表 + lobe 目录派生、穷举平价门禁、WESL `CLASS_*` 平价门禁、类数由表驱动（§5.2、§13.a） | — |
+| **P3-a~d 解耦着色** | **未开始** | `gi/surface_cache/` 是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统），不是 §14 的 texel-space/对象空间着色缓存；没有把着色结果写进 VT 页的 pass | 按 §14.10 分阶段：texel-space 着色 pass → 视角无关项分离 → 失效/时序复用 → LOD 策略 |
+
+> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P1-d 的异步编译 + über 回退、P2-e 的逐区域 illumination + custom hook、P2-i 的其余八类 codegen、P3-a~d 整块**。
+> 其余路线图项要么已完成（上表），要么按 goal 明确挂在编辑器前端（MaterialX / 节点图 / 作者 WESL）。
 
 ### 13.5 P3 远期：解耦着色 / texel-space shading（性能上限最高，工程最重）
 

@@ -102,7 +102,13 @@ fn material_class(header: MaterialHeader) -> u32 {
     switch header.illumination {
         case 2u: { return CLASS_UNLIT; }
         case 1u: { return CLASS_NPR; }
-        case 3u: { return CLASS_CUSTOM; }
+        // §3.5.4: a custom response needs a program handle. Without one the
+        // material degrades to the shared über path (the same integrator the
+        // custom bucket would run), so it classifies as principled.
+        case 3u: {
+            if (header.custom_program != 0xffffffffu) { return CLASS_CUSTOM; }
+            return CLASS_PRINCIPLED;
+        }
         case 0u: { return lit_class_from_closures(header.closure_mask); }
         default: { return 0xffffffffu; }
     }

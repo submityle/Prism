@@ -113,6 +113,14 @@ pub enum ShadingClassRule {
     RenderClass(MaterialRenderClass),
     /// The illumination axis selects this bucket.
     Illumination(Illumination),
+    /// `Illumination::Custom` **with a bound program handle** (§3.5.4).
+    ///
+    /// A custom response needs something to run. With no handle the material
+    /// falls through to the default row, i.e. it renders on the shared
+    /// screen-space über path — the specification's "no `respond_custom` ⇒ safe
+    /// degradation" — instead of occupying a `Custom` bucket that would run the
+    /// very same integrator under a different name.
+    CustomProgram,
     /// A `Lit` surface carrying this dominant closure selects this bucket.
     Closure(ClosureKind),
     /// The fallback: a `Lit` surface whose closures name no specialized bucket.
@@ -233,17 +241,19 @@ impl ShadingClassTable {
                 prism_material_pcm::builtin::UID_MODE_CUSTOM => (
                     MaterialShadingClass::Custom as u32,
                     "custom",
+                    // Marked below: this row tests the program handle too.
                     Illumination::Custom,
                 ),
                 other => {
                     return Err(ClassTableError::UnhandledResponseMode(String::from(other)));
                 }
             };
-            rows.push(ShadingClassRow {
-                id,
-                name,
-                rule: ShadingClassRule::Illumination(illumination),
-            });
+            let rule = if id == MaterialShadingClass::Custom as u32 {
+                ShadingClassRule::CustomProgram
+            } else {
+                ShadingClassRule::Illumination(illumination)
+            };
+            rows.push(ShadingClassRow { id, name, rule });
         }
 
         // `Lit` closure buckets, most specific first — the lobe catalogue is the
@@ -396,6 +406,16 @@ impl ShadingClassTable {
                     };
                     actual == axis
                 }
+                ShadingClassRule::CustomProgram => {
+                    let Some(actual) = illumination else {
+                        return Err(ClassificationError::UnsupportedIllumination(
+                            header.illumination,
+                        ));
+                    };
+                    // A custom response needs a program to run; without one the
+                    // row below (the default) claims it.
+                    actual == Illumination::Custom && header.custom_program != u32::MAX
+                }
                 ShadingClassRule::Closure(kind) => {
                     let Some(actual) = illumination else {
                         return Err(ClassificationError::UnsupportedIllumination(
@@ -405,12 +425,15 @@ impl ShadingClassTable {
                     actual == Illumination::Lit && has_closure(header.closure_mask, kind)
                 }
                 ShadingClassRule::Default => {
+                    // The fallback claims whatever the rows above did not: a
+                    // `Lit` surface with no specialized closure, and a `Custom`
+                    // surface with no bound program (the safe degradation).
                     let Some(actual) = illumination else {
                         return Err(ClassificationError::UnsupportedIllumination(
                             header.illumination,
                         ));
                     };
-                    actual == Illumination::Lit
+                    matches!(actual, Illumination::Lit | Illumination::Custom)
                 }
             };
             if matched {
@@ -484,7 +507,13 @@ pub fn classify_material_header(
     match Illumination::from_u32(header.illumination) {
         Some(Illumination::Unlit) => Ok(MaterialShadingClass::Unlit),
         Some(Illumination::Stylized) => Ok(MaterialShadingClass::Npr),
-        Some(Illumination::Custom) => Ok(MaterialShadingClass::Custom),
+        // §3.5.4: a custom response needs a program. With no handle the material
+        // degrades to the shared über path (the same integrator the `Custom`
+        // bucket would run), so it classifies as `Principled`.
+        Some(Illumination::Custom) if header.custom_program != u32::MAX => {
+            Ok(MaterialShadingClass::Custom)
+        }
+        Some(Illumination::Custom) => Ok(MaterialShadingClass::Principled),
         Some(Illumination::Lit) => Ok(lit_class_from_closures(header.closure_mask)),
         None => Err(ClassificationError::UnsupportedIllumination(
             header.illumination,
@@ -522,8 +551,21 @@ mod tests {
             classify_material_header(&with_illumination(base, Illumination::Stylized)),
             Ok(MaterialShadingClass::Npr)
         );
+        // §3.5.4: the custom bucket needs a program to run. With a handle it is
+        // its own bucket; without one the material degrades to the shared über
+        // path (the default row) instead of occupying a bucket that would run
+        // the same integrator under a different name.
+        let unbound = with_illumination(base, Illumination::Custom);
         assert_eq!(
-            classify_material_header(&with_illumination(base, Illumination::Custom)),
+            classify_material_header(&unbound),
+            Ok(MaterialShadingClass::Principled)
+        );
+        let bound = GpuMaterialHeader {
+            custom_program: 7,
+            ..unbound
+        };
+        assert_eq!(
+            classify_material_header(&bound),
             Ok(MaterialShadingClass::Custom)
         );
     }
@@ -793,6 +835,7 @@ mod tests {
                 MaterialRenderClass::Decal as u32,
             ] {
                 for illumination in [0u32, 1, 2, 3, 4, u32::MAX] {
+                  for custom_program in [0u32, 7, u32::MAX] {
                     let mut closure_masks = vec![0u32, u32::MAX];
                     for kind in [
                         ClosureKind::Hair,
@@ -813,6 +856,7 @@ mod tests {
                         header.is_active = active;
                         header.render_class = render_class;
                         header.illumination = illumination;
+                        header.custom_program = custom_program;
                         header.closure_mask = closure_mask;
                         let hot = classify_material_header(&header)
                             .map(|class| class as u32)
@@ -820,6 +864,7 @@ mod tests {
                         let walked = table.classify(&header);
                         assert_eq!(hot, walked, "{header:?}");
                     }
+                  }
                 }
             }
         }
