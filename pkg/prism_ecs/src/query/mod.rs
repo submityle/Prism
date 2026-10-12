@@ -23,6 +23,7 @@ mod fetch;
 mod filter;
 mod iter;
 mod many;
+mod matched;
 #[cfg(feature = "multi_thread")]
 mod par;
 #[cfg(feature = "multi_thread")]
@@ -45,6 +46,8 @@ pub use state::{QueryEntityError, QuerySingleError, QueryState};
 
 #[cfg(test)]
 mod any_of_tests;
+#[cfg(all(test, feature = "std"))]
+mod cache_concurrency_tests;
 #[cfg(test)]
 mod get_tests;
 #[cfg(test)]
