@@ -59,6 +59,7 @@ extern crate alloc;
 
 mod bin_queue;
 mod config;
+mod device_loss;
 mod draw;
 mod frame;
 mod intent;
@@ -92,6 +93,7 @@ mod tests;
 
 pub use bin_queue::{BinQueueOutcome, bin_indirect_args};
 pub use config::RenderAppConfig;
+pub use device_loss::DeviceLossSignal;
 pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
 pub use frame::RENDER_TARGET_FORMAT;
 pub use intent::{RenderIntent, RenderViewport};

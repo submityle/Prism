@@ -2,12 +2,13 @@
 
 use std::sync::Mutex;
 
-use prism_app::{App, Last, Plugin, SubApp};
+use prism_app::{App, First, Last, Plugin, SubApp};
 use prism_ecs::schedule::{IntoSystemConfigs, Schedule, Schedules};
 use prism_render_driver::{FrameSync, Instance};
 use prism_render_runtime::RenderRuntime;
 
 use crate::config::RenderAppConfig;
+use crate::device_loss::{DeviceLossSignal, poll_device_loss};
 use crate::intent::RenderIntent;
 use crate::mesh_pipeline::MeshPipelineSpecializer;
 use crate::mesh_pipelines::MeshPipelines;
@@ -121,6 +122,11 @@ where
             panic!("PrismRenderPlugin: render backend bring-up failed: {error}")
         });
 
+        // Device-loss bridge (design §12/§24.3): one cell, cloned into both the
+        // render world (which owns the GPU runtime) and the main world (which
+        // owns the app lifecycle).
+        let device_loss = DeviceLossSignal::new();
+
         // The GPU state the render world owns for the app's lifetime.
         let target = RenderTarget::new(runtime.device(), config.extent);
         // The spine's default mesh pipelines are built against the device, so
@@ -144,6 +150,7 @@ where
         render.world.insert_resource(mesh_pipelines);
         render.world.insert_resource(SceneRegistry::new());
         render.world.insert_resource(VisibilityWorkList::new());
+        render.world.insert_resource(device_loss.clone());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
         {
@@ -167,6 +174,9 @@ where
             schedule.add_systems(fill_queues::<I>.in_set(RenderSystems::Queue));
             schedule.add_systems(execute_frame::<I>.in_set(RenderSystems::Phase));
             schedule.add_systems(clear_queues.in_set(RenderSystems::Cleanup));
+            // Poll the runtime for a lost device after the frame; the value
+            // crosses to the main world through the shared signal.
+            schedule.add_systems(poll_device_loss::<I>.in_set(RenderSystems::Cleanup));
         }
         render
             .world
@@ -176,6 +186,13 @@ where
             .add_systems(drive_render_schedule);
 
         app.insert_sub_app(RenderApp, render);
+
+        // The main-world end of the bridge: each frame, drain the signal and
+        // emit `DeviceLost`, which `drive_app_lifecycle` folds into
+        // `AppLifecycle::Recovering` (pausing simulation for the rebuild).
+        app.insert_resource(device_loss);
+        app.add_event::<prism_app::lifecycle::DeviceLost>();
+        app.add_systems(First, crate::device_loss::forward_device_loss);
 
         // The main world's authoritative render intent, and the one-way feeds.
         //

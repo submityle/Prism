@@ -2331,6 +2331,46 @@ fn the_frame_records_the_queued_draws() {
     );
 }
 
+/// The render plugin bridges a lost device into the app: reporting a loss on
+/// the shared signal surfaces as a `DeviceLost` lifecycle event on the next
+/// frame, which `drive_app_lifecycle` folds into `AppLifecycle::Recovering`
+/// (design §12/§24.3). The signal is the only channel the render world has back
+/// to the main world — the extract seam stays one-way.
+#[test]
+fn plugin_bridges_device_loss_to_the_app_event() {
+    use prism_app::lifecycle::DeviceLost;
+    use prism_ecs::event::Events;
+    use prism_render_driver::DeviceLostReason;
+
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+
+    let signal = app
+        .world()
+        .get_resource::<crate::DeviceLossSignal>()
+        .expect("the plugin installs the loss signal")
+        .clone();
+    assert!(signal.take().is_none(), "no loss before it happens");
+
+    // Simulate the render world recording a loss, then run a frame.
+    signal.report(DeviceLostReason::Destroyed);
+    app.update();
+
+    let events = app
+        .world()
+        .get_resource::<Events<DeviceLost>>()
+        .expect("the plugin registers the DeviceLost event");
+    assert!(
+        !events.is_empty(),
+        "the loss is bridged to a DeviceLost event"
+    );
+
+    // The signal was drained, so a second frame does not re-emit.
+    app.update();
+    assert!(
+        signal.take().is_none(),
+        "the bridge drains the signal (no loss reported since)"
+    );
+}
 /// The spine draws on hardware: a mesh prepared into GPU buffers is queued as a
 /// phase item, the frame's opaque pass records it with the layout the mesh
 /// derived, and the pixels land where the mesh's vertices say.
