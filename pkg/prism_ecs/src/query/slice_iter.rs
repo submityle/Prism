@@ -41,8 +41,9 @@ use crate::world::World;
 /// Created by [`QueryState::simd_iter`](crate::query::QueryState::simd_iter)
 /// (shared view, read-only terms) or
 /// [`QueryState::simd_iter_mut`](crate::query::QueryState::simd_iter_mut)
-/// (exclusive view, `&mut T` terms). Yields `D::Slice<'w>` per chunk of at most
-/// `K` rows; the last chunk of an archetype may be shorter.
+/// (exclusive view, `&mut T` terms). Yields `D::Slice<'w>` per slice of at most
+/// `K` rows, never crossing a physical chunk boundary (so at most
+/// `min(K, rows_per_chunk)` rows); the last slice may be shorter.
 pub struct QuerySliceIter<'w, 's, D: ColumnSliceData, F: ArchetypalFilter> {
     /// The world under iteration; valid for `'w`. Only read through shared
     /// derefs — `&mut [T]` slices are formed by the column helpers, exactly as
@@ -105,8 +106,6 @@ impl<'w, 's, D: ColumnSliceData, F: ArchetypalFilter> Iterator
         loop {
             if self.row < self.row_len {
                 let start = self.row;
-                let end = (start + self.chunk).min(self.row_len);
-                self.row = end;
                 let arch_id = self.archetypes[self.arch_cursor - 1];
                 // SAFETY: `self.world` is valid and borrowed for `'w`; only a
                 // shared `&'w World` is formed here, and `arch_id` came from this
@@ -116,10 +115,19 @@ impl<'w, 's, D: ColumnSliceData, F: ArchetypalFilter> Iterator
                     .archetypes()
                     .get(arch_id)
                     .expect("matched archetype id must resolve");
+                // Clamp the slice to the current physical chunk: a column block
+                // holds exactly `rows_per_chunk` values, so a slice spanning two
+                // blocks would be non-contiguous (design §5.3).
+                let rows_per_chunk = archetype.table().rows_per_chunk().max(1);
+                let chunk_end = (start / rows_per_chunk + 1) * rows_per_chunk;
+                let end = (start + self.chunk).min(self.row_len).min(chunk_end);
+                self.row = end;
                 // SAFETY: `start <= end <= archetype.len()`; the caller holds the
                 // access these terms require over those rows for `'w` (read-only
                 // entry point) or exclusively (mutable entry point), and the
-                // ranges are disjoint by construction, so the slice is unique.
+                // ranges are disjoint by construction, so the slice is unique;
+                // `[start, end)` lies inside one block, so the column slice is
+                // contiguous.
                 return Some(unsafe {
                     D::column_slice(self.data_state, archetype, start, end, self.this_run)
                 });

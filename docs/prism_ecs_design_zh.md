@@ -150,9 +150,12 @@ pub struct ComponentInfo {
 - **Chunk** = 固定 16KiB 块，列式 SoA；每列按 SIMD 宽对齐。chunk 槽内嵌 `change_version` + 可选 `ChunkMeta`（AABB / 可见位 / LOD / 批次键 / cell 归属）。
 - `N`（每 chunk 容量）= `floor((16KiB − 元数据) / 单实体列字节和)`。
 
-> **现状诚实注记（chunk 物理布局）**：上两条描述的是**目标形态**。当前 `pkg/prism_ecs` 落地的是**逻辑 chunk**——每个 archetype 仍是一段连续列存，chunk 只是"`rows_per_chunk` 个连续行"的窗口（`rows_per_chunk` 由 `TARGET_CHUNK_BYTES` 与单行字节和推出），每个窗口带一条 `change_version`（`storage/chunk.rs` 开篇即写明这一点）。**每窗口的元数据侧车已落地**：`storage::ChunkMeta`（+ 值类型 `ChunkBounds`）随窗口增删，携带 `bounds` / `visible` / `lod` / `batch_key` / `cell` 五个消费者字段与一个**结构 epoch**——每当窗口的**行集合**变化（spawn 落入 / swap-remove 移出或移入）就递增，值写入不动它；消费者只要缓存 epoch 匹配就可复用派生结果，见 `storage/chunk.rs`、`Table::chunk_metas/chunk_meta(_mut)` 与 `World::chunk_meta(_mut)`。**仍是 PLANNED 的是物理 16KiB 分块竞技场**（块级分配/回收、块内嵌元数据、块内 SoA 与 SIMD 对齐）——属 §22 高风险项第 1 条，须分步改造并配基准。
+> **现状诚实注记（chunk 物理布局）**：`pkg/prism_ecs` 现已落地**物理分块存储 + chunk-aware fetch**。每个 archetype 的每个列按 `rows_per_chunk` 行切成**独立块**（`BlobVec` 块表：块级分配/回收、按 64B 对齐、增长只追加新块，故**已有块地址稳定**，无 realloc 搬移）；行 `r` 落在块 `r / rows_per_chunk` 的第 `r % rows_per_chunk` 槽，值块 `c` 与逻辑 chunk `c`、其 `change_version`、其 `ChunkMeta` 一一对应。**逐行 fetch 不经过块表**：`QueryData::init_fetch_for_chunk` + `TableFetch` 在每个 chunk 入口解析一次块基址与 change-version cell，逐行 `fetch` 退化为 `base + (row - first_row) * size` 的纯偏移；`QueryIter` / `fold` / `par_for_each(_mut)` 按 chunk 推进，单实体 `get` 按行所属 chunk 解析。切片驱动（`simd_iter` / `par_chunks`）把每个切片夹在**单块**内（跨块切片在入口被拒），SIMD 核拿到的仍是连续 SoA run。
 >
-> **物理分块改造的实测前提（2026-10）**：曾直接试做「列数据按块分配」的物理分块（每列一张 `rows_per_chunk` 槽位的块表、行寻址 `row >> shift`、切片驱动收敛为单块局部），功能全绿（含 1M 基准与 `dirty_chunks`），**但逐行 fetch 出现实质回归**（可变串行 6.6 → ~8.7 ns/实体，`fold` 相对 `for-next` 的优势从 ~4.5× 塌到 ~1.2×，去边界检查 / shift-mask 都消不掉）。**根因**：`D::fetch(fetch, entity, row)` 是逐行接口，块寻址每行都要多一次块指针间接，这层开销与迭代器协议无关。**因此先做 ① chunk-aware fetch（已落地）**：`QueryData::init_fetch_for_chunk` 与新的 `TableFetch` 把**一个 chunk 窗口**的值基址与 change-version cell 解析**一次**（`QueryIter` / `QueryIter::fold` / `par_for_each(_mut)` 按 chunk 推进、单实体 `get` 按行所属 chunk 解析），逐行 `fetch` 退化为 `base + (row - first_row) * size` 的纯偏移。落地后热路径不再依赖每行块寻址，只读批量路径反而更快（`par(1)` 只读 ~1.15 ns/实体、`iter.for_each` ~1.6 ns/实体，见 §17.1）。**② 把连续列存换成物理块存**与 **③ 单块切片驱动**仍是 PLANNED；在 ② 落地前列数据保持连续，`TableFetch` 的窗口基址就是「起始地址 + first_row·size」，语义与旧路径等价。
+> **与 Unity DOTS 的差异（诚实）**：DOTS 的一个 chunk = 一个 16 KiB 块、所有列交错放在**同一块**内（row-major chunk）；这里是**列主块**——每列各自一块，块大小 ≈ `16 KiB / 列数`，各列共享同一 row 窗口、同一 `change_version` 与 `ChunkMeta`，但不是一个物理块。真正的 DOTS 式"块内嵌元数据 + 多列合并进单块"仍是 PLANNED（属 §22 高风险项第 1 条的剩余部分）。
+>
+> 注：曾直接先换块存储再谈 fetch，逐行 fetch 每行多一次块指针间接，实测可变串行 6.6 → ~8.7 ns/实体、`fold` 优势从 ~4.5× 塌到 ~1.2×；因此改为**先 chunk-aware fetch、再块存储**。两步落地后热路径回到基线（见 §17.1），且块存储带来稳定地址与块级回收。
+
 - 结构性变更 = archetype 间搬迁（swap-remove + append），经并行 ECB 批量化（§9）。
 
 ---
@@ -431,7 +434,7 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 - 百万级单线程迭代已在 **~6.6 ns/实体**量级，规模性不再只是推断。
 - 多核**非线性**（8 线程 1.86×）。本机为共享开发机（测量期间有其它构建/agent 并发），且该场景是**内存带宽受限**的 24 B/实体读写；要给出可信的扩展曲线需独占机器 + NUMA/绑核，仍属 PLANNED。
 - **已修复的量化优化**：初测发现串行 `QueryIter` 比「`par_for_each_mut` + 1 线程」慢约 2.1×（可变）。定位为 `QueryIter::next` 的逐行开销：每行都要做两次 `Option` 判别 + 切片边界检查。改为在**已证明的不变量**（进入一个 archetype 时同时设置 `row_len` 与两个 fetch 游标，故 `row < row_len` ⇒ 游标已初始化且 `row < entities.len()`）下用 `get_unchecked`/`unwrap_unchecked` 去掉这两个分支，并给 `next` 加 `inline(always)`；随后实测可变 **9.05 → 6.6 ns/实体（1.37×）**、只读 **5.02 → 3.9 ns/实体（1.29×）**，全量测试无回归。
-- **批量消费者已拿到快路径（原 PLANNED，现落地）**：`for` 循环必须走 `Iterator::next`，所以它仍比 `par(1)` 慢（可变约 1.4×/只读约 2×）——这是迭代器协议的固有成本，`next` 已是热路径最优。真正的收益给了**批量消费者**：给 `QueryIter` 实现了批量化的 `Iterator::fold` 重写（每个 archetype 内部用紧凑内循环，把实体列与两个 fetch 游标提到局部变量，逐行 gate 与 `next` 同源），`for_each`/`sum`/`count`/显式 `fold` 全部改走它。实测（1M 行，release，多次取样取稳定区间）：**只读** `iter.for_each` **1.1–1.5 ns/实体**，比 `for-next` 的 4.5–6.6 ns/实体快 **约 4–5×**，且不慢于 `par(1)`（1.6–3.2 ns/实体）；**可变** `iter_mut.for_each` 7.6–14.1 ns/实体，与 `for-next` 基本持平（约 0.97–1.22×）——因为可变路径每行都要**打 change tick**，行成本由变更检测写入主导，fold 省下的协议开销占比很小。行序与访问集合与 `next` 完全一致（有排序 / 计数 / 写回三条测试守护）。
+- **批量消费者快路径（`fold` 重写，原 PLANNED 现落地）+ 分块后的再测**：`for` 循环必须走 `Iterator::next`；给 `QueryIter` 实现了批量化的 `Iterator::fold` 重写（chunk 内紧凑内循环、实体列与 fetch 游标提到局部变量），`for_each`/`sum`/`count`/显式 `fold` 全部改走它，行序与访问集合与 `next` 完全一致（排序 / 计数 / 写回三条测试守护）。**连续列存时代**实测只读 `iter.for_each` 比 `for-next` 快约 **4–5×**（1.1–1.5 vs 4.5–6.6 ns/实体）。**改为物理分块列存 + chunk-aware fetch 后这条优势收窄到 ~1.1×**（只读 `iter.for_each` 3.5 vs `for-next` 3.9；可变 6.7 vs 6.9 ns/实体）：逐行成本此时由 chunk 局部 fetch 主导，迭代器协议不再是瓶颈，两条路径趋同——`fold` 快路径仍保留（它优化的是协议开销，存储/迭代策略变化时自动让位），但文档不再宣称固定倍数。绝对吞吐与基线相当（下表为最近一次实测）。
 
 诚实边界：CPU 单测只能证机制正确；NUMA / GPU 常驻 / 独占机的多核近线性等规模指标仍需真实硬件与大场景压测，仍标注 PLANNED。
 
@@ -498,7 +501,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 ## 22. 诚实边界与风险
 
-- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 + 每块元数据 `ChunkMeta`（bounds/可见/LOD/批次/cell + 结构 epoch）/ 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 规范层级关系 ChildOf（作用域命令 + 层级 despawn）/ 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档 + 跨版本 schema 迁移）/ 提取契约（`ExtractResource`/`ExtractComponent` + 运行器）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 原型预热 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档 / 跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 的渲染侧接线与流水线并行（ECS 侧提取契约已落地）、物理 16KiB 分块竞技场（§22 高风险项 1），以及独占机多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
+- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 + **物理分块存储**（`BlobVec` 块表：块级分配回收 / 稳定地址 / 块局部切片）+ **chunk-aware fetch**（每 chunk 解析一次块基址）+ 每块元数据 `ChunkMeta`（bounds/可见/LOD/批次/cell + 结构 epoch）/ 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 规范层级关系 ChildOf（作用域命令 + 层级 despawn）/ 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档 + 跨版本 schema 迁移）/ 提取契约（`ExtractResource`/`ExtractComponent` + 运行器）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 原型预热 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档 / 跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 的渲染侧接线与流水线并行（ECS 侧提取契约已落地）、DOTS 式**单块 row-major chunk**（多列合并进一个 16KiB 块 + 块内嵌元数据；当前为列主块，见 §5.3），以及独占机多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
 - 规模与多核扩展性、NUMA、GPU 常驻指标依赖真实硬件压测，单测不能替代。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。

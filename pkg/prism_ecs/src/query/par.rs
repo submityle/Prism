@@ -296,8 +296,14 @@ fn build_chunk_aligned_batches(
     batches
 }
 
-/// Run `func` once over the whole typed column slice of a single chunk-aligned
-/// batch (design §8.3 `jobs.par_chunks`).
+/// Run `func` once per **physical chunk** covered by `batch` (design §8.3
+/// `jobs.par_chunks` / §5.3 physical chunks).
+///
+/// A batch is a whole number of chunk windows; each window's column data is a
+/// separate contiguous block, so the batch is walked window by window and
+/// `func` is invoked once per window with that window's block-local typed slice.
+/// `func` therefore sees exactly the SoA run a SIMD kernel wants, never a slice
+/// that straddles two blocks.
 ///
 /// # Safety
 /// - `world` must be valid for reads for the duration of the call, and the
@@ -325,13 +331,21 @@ unsafe fn run_chunk_batch<D, Func>(
         .archetypes()
         .get(batch.archetype)
         .expect("batch archetype id must resolve");
-    // SAFETY: `batch.start <= batch.end <= archetype.len()` and
-    // `batch.archetype` satisfies `D::matches` (both caller contract), so every
-    // term's column exists; the batch's rows are task-exclusive, so each
-    // `&mut [T]` is unique and the per-chunk version stamps never race.
-    let slice =
-        unsafe { D::column_slice(data_state, archetype, batch.start, batch.end, this_run) };
-    func(slice);
+    // `batch.start` is chunk-aligned (the partition rounds to chunk multiples),
+    // so each step is exactly one chunk window of the archetype.
+    let rows_per_chunk = archetype.table().rows_per_chunk().max(1);
+    let mut start = batch.start;
+    while start < batch.end {
+        let end = (start + rows_per_chunk).min(batch.end);
+        // SAFETY: `start <= end <= batch.end <= archetype.len()` and
+        // `batch.archetype` satisfies `D::matches` (both caller contract), so
+        // every term's column exists and `[start, end)` lies inside one block;
+        // the batch's rows are task-exclusive, so each `&mut [T]` is unique and
+        // the per-chunk version stamps never race.
+        let slice = unsafe { D::column_slice(data_state, archetype, start, end, this_run) };
+        func(slice);
+        start = end;
+    }
 }
 
 /// Dispatch `func` over every matched row in chunk-aligned typed slices, in

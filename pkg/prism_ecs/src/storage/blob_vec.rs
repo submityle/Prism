@@ -1,35 +1,72 @@
-//! A type-erased, growable column of equally-sized values — the physical
-//! backbone of the columnar (Structure-of-Arrays) storage.
+//! A type-erased, growable column of equally-sized values stored in fixed-size
+//! **blocks** — the physical layer of the columnar (Structure-of-Arrays) storage
+//! described in design §5.3.
 //!
-//! A [`BlobVec`] is like `Vec<T>` with `T` erased to a runtime [`Layout`] plus
-//! an optional [`DropFn`]. It owns its elements: dropping the [`BlobVec`] drops
-//! every live element. All element access is `unsafe` because the type is
-//! erased — callers must pass pointers to values of the exact type the column
-//! was created for.
+//! # Block layout
+//!
+//! Unlike a `Vec<T>`, a [`BlobVec`] does not keep its elements in one
+//! ever-reallocating contiguous buffer. It allocates them in **blocks of a
+//! fixed number of element slots** ([`BlobVec::rows_per_block`]). Block `b`
+//! holds rows `[b * rows_per_block, (b + 1) * rows_per_block)`; within a block
+//! the values stay contiguous, so each block is an independent, cache/GPU
+//! friendly SoA run that can be allocated, freed and handed out on its own —
+//! exactly the "16 KiB chunk" of the design, with the row-window size chosen by
+//! the owning [`Table`](crate::storage::Table) so one chunk's worth of a row
+//! spans all of its columns.
+//!
+//! Consequences the callers rely on:
+//!
+//! * **Stable addresses.** Growing a column never reallocates or moves the
+//!   blocks already handed out: appending a row that crosses a block boundary
+//!   merely allocates a fresh block, leaving every existing value at the same
+//!   address (the property GPU resident columns §15 and interior-mutability
+//!   change stamping depend on).
+//! * **Chunk-local slices.** [`as_slice_range`](BlobVec::as_slice_range) hands
+//!   out a `&[T]` only when `[start, end)` lies inside a *single* block — the
+//!   slice *is* the SIMD kernel input (§7/§17). The row-by-row query fetch does
+//!   **not** go through a block lookup at all: it resolves the block base once
+//!   per chunk (see `TableFetch` in `query/fetch.rs`). Only whole-column
+//!   ([`as_slice`](BlobVec::as_slice)) and per-range access touch the block
+//!   table, and those are per-chunk / per-snapshot, not per-row.
+//!
+//! All element access is `unsafe` because the type is erased — callers must
+//! pass pointers to values of the exact type the column was created for.
 
-use alloc::alloc::{alloc, dealloc, handle_alloc_error, realloc};
+use alloc::alloc::{alloc, dealloc, handle_alloc_error};
+use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
 use crate::component::DropFn;
+use crate::storage::chunk::TARGET_CHUNK_BYTES;
 
-/// A type-erased, owning, growable array of `item_layout`-sized values.
+/// Minimum alignment of every block, matching a common SIMD register / cache
+/// line width so the kernels can use aligned loads where it helps.
+const BLOCK_ALIGN: usize = 64;
+
+/// A type-erased, owning, growable array of `item_layout`-sized values stored in
+/// fixed-slot blocks (design §5.3 physical chunks).
 pub struct BlobVec {
     item_layout: Layout,
-    /// Allocated capacity in elements. For zero-sized items this is
-    /// `usize::MAX` and no allocation is performed.
-    capacity: usize,
+    /// Element slots per block. `usize::MAX` for zero-sized items (no blocks).
+    rows_per_block: usize,
     len: usize,
-    /// Pointer to the backing allocation. Dangling (but aligned) when
-    /// `capacity == 0` or the item is zero-sized.
-    data: NonNull<u8>,
+    /// The allocated blocks, in row order. Block `b` covers rows
+    /// `[b * rows_per_block, (b + 1) * rows_per_block)`.
+    blocks: Vec<Block>,
     drop: Option<DropFn>,
+}
+
+/// A single allocated block: `rows_per_block` element slots, contiguous.
+struct Block {
+    ptr: NonNull<u8>,
 }
 
 // SAFETY: `BlobVec` only stores component data for `Component: Send + Sync`
 // types (or dynamically-registered data the caller promises is `Send + Sync`),
 // so transferring/aliasing the column across threads is as safe as for the
-// underlying values. The raw pointer is an owning allocation, not shared state.
+// underlying values. The raw block pointers are owning allocations, not shared
+// state.
 unsafe impl Send for BlobVec {}
 // SAFETY: see the `Send` impl above.
 unsafe impl Sync for BlobVec {}
@@ -37,19 +74,40 @@ unsafe impl Sync for BlobVec {}
 impl BlobVec {
     /// Create an empty column for values described by `item_layout`, dropped by
     /// `drop` (or none if the type needs no drop).
+    ///
+    /// The block slot count is derived from the element size so one block holds
+    /// about [`TARGET_CHUNK_BYTES`] of one column; a whole-table chunk uses
+    /// [`new_with_rows_per_block`](BlobVec::new_with_rows_per_block) so every
+    /// column shares the table's row window.
     pub fn new(item_layout: Layout, drop: Option<DropFn>) -> Self {
-        let capacity = if item_layout.size() == 0 {
+        let rows_per_block = match TARGET_CHUNK_BYTES.checked_div(item_layout.size()) {
+            None => usize::MAX, // zero-sized item: no block is ever allocated
+            Some(0) => 1,       // element larger than a target block: one per block
+            Some(rows) => rows,
+        };
+        Self::new_with_rows_per_block(item_layout, drop, rows_per_block)
+    }
+
+    /// Create an empty column whose blocks each hold `rows_per_block` element
+    /// slots.
+    ///
+    /// The owning table passes its shared `rows_per_chunk` so a column block is
+    /// exactly one logical chunk window of that table (design §5.3).
+    pub fn new_with_rows_per_block(
+        item_layout: Layout,
+        drop: Option<DropFn>,
+        rows_per_block: usize,
+    ) -> Self {
+        let rows_per_block = if item_layout.size() == 0 {
             usize::MAX
         } else {
-            0
+            rows_per_block.max(1)
         };
         Self {
             item_layout,
-            capacity,
+            rows_per_block,
             len: 0,
-            // A dangling-but-aligned pointer is valid for zero-sized reads and
-            // for an empty, never-dereferenced allocation.
-            data: dangling_aligned(item_layout.align()),
+            blocks: Vec::new(),
             drop,
         }
     }
@@ -58,15 +116,6 @@ impl BlobVec {
     #[inline]
     pub fn len(&self) -> usize {
         self.len
-    }
-
-    /// Elements the backing allocation can hold before it must grow.
-    ///
-    /// Zero-sized element types report [`usize::MAX`]: they never allocate, so
-    /// there is no capacity to run out of.
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.capacity
     }
 
     /// Whether the column holds no elements.
@@ -81,145 +130,238 @@ impl BlobVec {
         self.item_layout
     }
 
-    /// Compute the layout of a backing array of `n` elements.
-    fn array_layout(&self, n: usize) -> Layout {
-        // Rust type layouts always have `size` a multiple of `align`, so the
-        // element stride equals the size and the array size is `size * n`.
+    /// The fixed number of element slots per block (the table's chunk window).
+    ///
+    /// [`usize::MAX`] for a zero-sized item, which allocates no blocks.
+    #[inline]
+    pub fn rows_per_block(&self) -> usize {
+        self.rows_per_block
+    }
+
+    /// Number of blocks currently allocated.
+    #[inline]
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Elements the backing blocks can hold before another block must be
+    /// allocated.
+    ///
+    /// Zero-sized element types report [`usize::MAX`]: they never allocate.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        if self.item_layout.size() == 0 {
+            return usize::MAX;
+        }
+        self.blocks.len() * self.rows_per_block
+    }
+
+    /// The block index owning `row`, and the row-within-block offset.
+    #[inline]
+    fn split(&self, row: usize) -> (usize, usize) {
+        (row / self.rows_per_block, row % self.rows_per_block)
+    }
+
+    /// The layout of one block (its slot count times the element size), with the
+    /// block alignment.
+    fn block_layout(&self) -> Layout {
         let size = self
             .item_layout
             .size()
-            .checked_mul(n)
-            .expect("column allocation size overflow");
-        Layout::from_size_align(size, self.item_layout.align())
-            .expect("invalid column array layout")
+            .checked_mul(self.rows_per_block)
+            .expect("column block size overflow");
+        let align = self.item_layout.align().max(BLOCK_ALIGN);
+        Layout::from_size_align(size, align).expect("invalid column block layout")
+    }
+
+    /// Allocate one fresh block and append it to `blocks`.
+    fn push_block(&mut self) {
+        debug_assert!(self.item_layout.size() != 0);
+        let layout = self.block_layout();
+        // SAFETY: `layout.size()` is non-zero (a non-ZST item with at least one
+        // slot per block), as `alloc` requires.
+        let ptr = unsafe { alloc(layout) };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+        self.blocks.push(Block { ptr });
+    }
+
+    /// Free and drop the trailing block (used when a removal empties it).
+    fn pop_block(&mut self) {
+        let block = self.blocks.pop().expect("pop_block on an empty column");
+        let layout = self.block_layout();
+        // SAFETY: `block.ptr` was allocated with this exact layout by
+        // `push_block`, and no value in the block is live (the caller only calls
+        // this after the block's last row was removed).
+        unsafe { dealloc(block.ptr.as_ptr(), layout) };
     }
 
     /// Ensure there is capacity for at least `additional` more elements.
     pub fn reserve(&mut self, additional: usize) {
+        if self.item_layout.size() == 0 {
+            return; // no blocks are ever needed for a ZST
+        }
         let required = self.len + additional;
-        if required <= self.capacity {
+        let needed_blocks = required.div_ceil(self.rows_per_block);
+        while self.blocks.len() < needed_blocks {
+            self.push_block();
+        }
+    }
+
+    /// Free every trailing block that no longer holds a live row.
+    #[inline]
+    fn shrink_blocks_to_len(&mut self) {
+        if self.item_layout.size() == 0 {
             return;
         }
-        // Zero-sized items have `capacity == usize::MAX`; we can never get here.
-        debug_assert!(self.item_layout.size() != 0);
-        // Amortised growth: at least double, at least `required`, start at 4.
-        let new_cap = required.max(self.capacity.saturating_mul(2)).max(4);
-        self.grow_exact(new_cap);
+        let needed = self.len.div_ceil(self.rows_per_block);
+        while self.blocks.len() > needed {
+            self.pop_block();
+        }
     }
 
-    /// Grow the backing allocation to exactly `new_cap` elements.
-    fn grow_exact(&mut self, new_cap: usize) {
-        debug_assert!(new_cap > self.capacity);
-        let new_layout = self.array_layout(new_cap);
-        let new_ptr = if self.capacity == 0 {
-            // SAFETY: `new_layout` has non-zero size (item is non-ZST and
-            // `new_cap > 0`), as required by `alloc`.
-            unsafe { alloc(new_layout) }
-        } else {
-            let old_layout = self.array_layout(self.capacity);
-            // SAFETY: `self.data` was allocated with `old_layout` by a previous
-            // `alloc`/`realloc`, and `new_layout.size()` is non-zero and larger.
-            unsafe { realloc(self.data.as_ptr(), old_layout, new_layout.size()) }
-        };
-        self.data = NonNull::new(new_ptr).unwrap_or_else(|| handle_alloc_error(new_layout));
-        self.capacity = new_cap;
-    }
-
-    /// Pointer to the start of element `index` (may be past the live length;
-    /// used for writing a freshly-reserved slot).
+    /// Pointer to the start of element `index`.
     ///
     /// # Safety
-    /// `index` must be `<= capacity` and the returned pointer must only be used
-    /// for `item_layout`-typed accesses.
+    /// `index` must be `< capacity()` (callers writing a freshly-reserved slot
+    /// call [`reserve`](BlobVec::reserve) first). The returned pointer must only
+    /// be used for `item_layout`-typed accesses, and only indexes `< len()` are
+    /// dereferenced.
     #[inline]
     pub unsafe fn get_ptr(&self, index: usize) -> *mut u8 {
-        // SAFETY: the caller guarantees `index <= capacity`; for ZSTs `size` is
-        // 0 so the offset is 0 and the dangling pointer is returned unchanged.
-        unsafe { self.data.as_ptr().add(index * self.item_layout.size()) }
+        if self.item_layout.size() == 0 {
+            // A dangling-but-aligned base is valid for zero-sized reads/writes.
+            return dangling_aligned(self.item_layout.align()).as_ptr();
+        }
+        let (block, offset) = self.split(index);
+        if block >= self.blocks.len() {
+            // Only reachable when `index` is past the last live row of an empty
+            // column (e.g. an empty `as_slice`); the base is never dereferenced.
+            return dangling_aligned(self.item_layout.align().max(BLOCK_ALIGN)).as_ptr();
+        }
+        // SAFETY: `block < blocks.len()` was just checked; the offset stays
+        // within the block because `offset < rows_per_block`.
+        unsafe {
+            let base = self.blocks.get_unchecked(block).ptr.as_ptr();
+            base.add(offset * self.item_layout.size())
+        }
     }
 
     /// Borrow the live elements as a typed slice `&[T]`.
     ///
-    /// The backing allocation is contiguous, so the `len()` live elements form
-    /// one slice — the contiguity the SIMD column kernels (design §7/§17) rely
-    /// on to vectorize a whole column in one pass.
+    /// A block-based column is only a single contiguous run while it fits in one
+    /// block, so this is valid **only for single-block columns**; iterate
+    /// [`as_slice_range`](BlobVec::as_slice_range) block by block otherwise (the
+    /// `simd_iter` / `par_chunks` drivers already do).
     ///
     /// # Safety
     /// `T` must be the exact type this column stores (so `item_layout` matches
     /// `Layout::new::<T>()`), and the caller must hold shared access to every
     /// live element for the slice's lifetime.
+    ///
+    /// # Panics
+    /// Panics if the column spans more than one block.
     #[inline]
     pub unsafe fn as_slice<T>(&self) -> &[T] {
-        // SAFETY: the allocation holds `len` contiguous `T` (forwarded type
-        // contract); for `len == 0` the dangling-but-aligned base is a valid
-        // empty-slice pointer.
-        unsafe { core::slice::from_raw_parts(self.data.as_ptr().cast::<T>(), self.len) }
+        assert!(
+            self.blocks.len() <= 1,
+            "whole-column as_slice requires a single block; this column spans \
+             {} blocks — use as_slice_range per block (simd_iter / par_chunks)",
+            self.blocks.len(),
+        );
+        // SAFETY: the forwarded type contract makes the base a valid `*const T`;
+        // at most one block holds all `len` live elements, contiguous from base.
+        unsafe { core::slice::from_raw_parts(self.get_ptr(0).cast::<T>(), self.len) }
     }
 
     /// Borrow the live elements as a typed mutable slice `&mut [T]`.
     ///
+    /// See [`as_slice`](BlobVec::as_slice): valid only for single-block columns.
+    ///
     /// # Safety
     /// `T` must be the exact type this column stores, and the caller must hold
     /// unique access to every live element for the slice's lifetime.
+    ///
+    /// # Panics
+    /// Panics if the column spans more than one block.
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn as_mut_slice<T>(&self) -> &mut [T] {
-        // SAFETY: as [`BlobVec::as_slice`], plus the caller's unique-access
-        // guarantee makes forming a `&mut [T]` non-aliasing.
-        unsafe { core::slice::from_raw_parts_mut(self.data.as_ptr().cast::<T>(), self.len) }
+        assert!(
+            self.blocks.len() <= 1,
+            "whole-column as_mut_slice requires a single block; this column spans \
+             {} blocks — use as_mut_slice_range per block (simd_iter / par_chunks)",
+            self.blocks.len(),
+        );
+        // SAFETY: as `as_slice`, plus the caller's unique-access guarantee makes
+        // forming a `&mut [T]` non-aliasing.
+        unsafe { core::slice::from_raw_parts_mut(self.get_ptr(0).cast::<T>(), self.len) }
     }
 
     /// Borrow the half-open sub-range `[start, end)` as a typed slice `&[T]`.
     ///
-    /// Builds the slice *directly* from the element base pointer rather than
-    /// subslicing [`BlobVec::as_slice`]: forming a whole-column `&[T]` only to
-    /// index into it would transiently create a column-wide borrow, which the
-    /// chunk-parallel slice path (design §8.3) must avoid so that disjoint row
-    /// ranges can be handed to different threads without overlapping borrows.
+    /// The range must lie **within a single block** (the design's chunk-local
+    /// slice; the SIMD kernels run one block at a time). Forming it directly
+    /// from the offset element base avoids transiently borrowing a whole-column
+    /// slice, so disjoint ranges of one column can go to different threads.
     ///
     /// # Safety
     /// `T` must be the exact type this column stores; `start <= end <= len()`;
     /// and the caller must hold shared access to every element in the range for
     /// the slice's lifetime.
+    ///
+    /// # Panics
+    /// Panics if `[start, end)` straddles a block boundary.
     #[inline]
     pub unsafe fn as_slice_range<T>(&self, start: usize, end: usize) -> &[T] {
         debug_assert!(start <= end && end <= self.len);
+        self.assert_single_block_range(start, end);
         // SAFETY: the forwarded type contract makes the base a valid `*const T`;
-        // `start <= len` keeps the offset in-bounds (or one-past-the-end when
-        // `start == len`, still a valid slice base), and `end - start` elements
-        // are live per the range precondition.
-        unsafe {
-            core::slice::from_raw_parts(
-                self.data.as_ptr().cast::<T>().add(start),
-                end - start,
-            )
-        }
+        // the range is within one block, so `start .. end` is contiguous.
+        unsafe { core::slice::from_raw_parts(self.get_ptr(start).cast::<T>(), end - start) }
     }
 
     /// Borrow the half-open sub-range `[start, end)` as a typed mutable slice
-    /// `&mut [T]`, built directly from the element base pointer.
+    /// `&mut [T]`, within a single block.
     ///
-    /// See [`BlobVec::as_slice_range`] for why the slice is formed from the
-    /// offset base rather than by subslicing a whole-column `&mut [T]`.
+    /// See [`as_slice_range`](BlobVec::as_slice_range).
     ///
     /// # Safety
     /// `T` must be the exact type this column stores; `start <= end <= len()`;
     /// and the caller must hold unique access to every element in the range for
     /// the slice's lifetime (disjoint ranges on the same column may be lent to
     /// different threads).
+    ///
+    /// # Panics
+    /// Panics if `[start, end)` straddles a block boundary.
     #[inline]
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn as_mut_slice_range<T>(&self, start: usize, end: usize) -> &mut [T] {
         debug_assert!(start <= end && end <= self.len);
-        // SAFETY: as [`BlobVec::as_slice_range`], plus the caller's unique-access
-        // guarantee over `[start, end)` makes the `&mut [T]` non-aliasing even
-        // when sibling ranges of the same column are borrowed concurrently.
+        self.assert_single_block_range(start, end);
+        // SAFETY: as `as_slice_range`, plus the caller's unique-access guarantee
+        // over `[start, end)` makes the `&mut [T]` non-aliasing even when
+        // sibling ranges of the same column are borrowed concurrently.
         unsafe {
             core::slice::from_raw_parts_mut(
-                self.data.as_ptr().cast::<T>().add(start),
+                self.get_ptr(start).cast::<T>(),
                 end - start,
             )
         }
+    }
+
+    /// Assert `[start, end)` does not cross a block boundary (or is empty).
+    #[inline]
+    fn assert_single_block_range(&self, start: usize, end: usize) {
+        if self.item_layout.size() == 0 || start == end {
+            return; // ZSTs have a single logical block; empty ranges are fine
+        }
+        assert_eq!(
+            start / self.rows_per_block,
+            (end - 1) / self.rows_per_block,
+            "column slice [{start}, {end}) straddles a block boundary \
+             (rows_per_block {}); slices must be block-local",
+            self.rows_per_block,
+        );
     }
 
     /// Append a value by copying `item_layout.size()` bytes from `value`.
@@ -251,7 +393,7 @@ impl BlobVec {
     pub unsafe fn swap_remove_and_drop(&mut self, index: usize) {
         debug_assert!(index < self.len);
         let size = self.item_layout.size();
-        // SAFETY: `index < len <= capacity`, so the pointer is in-bounds.
+        // SAFETY: `index < len`, so the pointer is in-bounds.
         let removed = unsafe { self.get_ptr(index) };
         if let Some(drop) = self.drop {
             // SAFETY: `removed` points at a valid, initialized element; dropping
@@ -260,15 +402,17 @@ impl BlobVec {
         }
         let last = self.len - 1;
         if index != last {
-            // SAFETY: both `index` and `last` are in-bounds; the source slot is
-            // being logically removed so moving its bytes over the (already
-            // dropped) `index` slot leaves exactly one owner.
+            // SAFETY: both `index` and `last` are in-bounds (possibly in
+            // different blocks); the source slot is being logically removed so
+            // moving its bytes over the (already dropped) `index` slot leaves
+            // exactly one owner.
             unsafe {
                 let src = self.get_ptr(last);
                 core::ptr::copy_nonoverlapping(src, removed, size);
             }
         }
         self.len = last;
+        self.shrink_blocks_to_len();
     }
 
     /// Remove the element at `index` by swapping the last element into its
@@ -299,9 +443,10 @@ impl BlobVec {
             }
         }
         self.len = last;
+        self.shrink_blocks_to_len();
     }
 
-    /// Drop all live elements, leaving the column empty (allocation retained).
+    /// Drop all live elements, leaving the column empty (blocks retained).
     pub fn clear(&mut self) {
         if let Some(drop) = self.drop {
             for i in 0..self.len {
@@ -312,9 +457,7 @@ impl BlobVec {
         }
         self.len = 0;
     }
-}
 
-impl BlobVec {
     /// Relocate the element at `src_index` out of `src` and append it to
     /// `self`. The value is bitwise-copied, transferring ownership into `self`;
     /// the source slot is **not** removed or shrunk here, so after this call
@@ -322,11 +465,6 @@ impl BlobVec {
     /// reconciled by the caller via [`BlobVec::swap_remove_forget`] (never
     /// dropped). Used to relocate a component value from one archetype column
     /// to another during a structural change.
-    ///
-    /// Leaving the source slot in place lets the owning table swap-remove every
-    /// column (moved and unmoved alike) in one consistent pass, preserving the
-    /// invariant that all columns and the entity list shrink against the same
-    /// `last` row.
     ///
     /// # Safety
     /// `self` and `src` must have identical item layouts, and
@@ -347,9 +485,7 @@ impl BlobVec {
         }
         self.len += 1;
     }
-}
 
-impl BlobVec {
     /// Overwrite the element at `index` with the value at `value`, dropping
     /// the previous element. Used for last-wins component insertion.
     ///
@@ -393,18 +529,21 @@ impl BlobVec {
             }
         }
         self.len = last;
+        self.shrink_blocks_to_len();
     }
 }
 
 impl Drop for BlobVec {
     fn drop(&mut self) {
         self.clear();
-        if self.capacity != 0 && self.item_layout.size() != 0 {
-            let layout = self.array_layout(self.capacity);
-            // SAFETY: `self.data` was allocated with this exact layout and has
-            // not been freed; `capacity != 0` and non-ZST guarantee a real
-            // allocation.
-            unsafe { dealloc(self.data.as_ptr(), layout) };
+        if self.item_layout.size() == 0 {
+            return;
+        }
+        let layout = self.block_layout();
+        while let Some(block) = self.blocks.pop() {
+            // SAFETY: every block was allocated with `layout` by `push_block`
+            // and has not been freed; all live values were dropped by `clear`.
+            unsafe { dealloc(block.ptr.as_ptr(), layout) };
         }
     }
 }
@@ -430,8 +569,6 @@ mod tests {
 
     /// Drop glue used by the column tests.
     ///
-    /// # Safety
-    /// `p` must point at a valid, initialized `T`.
     /// # Safety
     /// `p` must point at a valid, initialized `T` that is dropped exactly once.
     unsafe fn drop_t<T>(p: *mut u8) {
@@ -533,8 +670,128 @@ mod tests {
             unsafe { v.push((&z as *const Zst).cast::<u8>()) };
         }
         assert_eq!(v.len(), 1000);
+        assert_eq!(v.block_count(), 0, "a ZST column never allocates blocks");
         // SAFETY: index < len.
         unsafe { v.swap_remove_and_drop(0) };
         assert_eq!(v.len(), 999);
+    }
+
+    // --- block (physical chunk) behaviour -----------------------------------
+
+    #[test]
+    fn rows_fill_blocks_and_blocks_grow_on_demand() {
+        // 8 slots per block so the boundary is easy to cross.
+        let mut v = BlobVec::new_with_rows_per_block(layout_of::<u64>(), None, 8);
+        assert_eq!(v.rows_per_block(), 8);
+        assert_eq!(v.block_count(), 0);
+        assert_eq!(v.capacity(), 0);
+
+        for i in 0u64..8 {
+            // SAFETY: valid u64.
+            unsafe { v.push((&i as *const u64).cast::<u8>()) };
+        }
+        assert_eq!(v.block_count(), 1);
+        assert_eq!(v.capacity(), 8);
+
+        // The 9th push crosses into a second block.
+        let nine = 8u64;
+        // SAFETY: valid u64.
+        unsafe { v.push((&nine as *const u64).cast::<u8>()) };
+        assert_eq!(v.block_count(), 2);
+        assert_eq!(v.capacity(), 16);
+        // Every value is still readable through row addressing.
+        for i in 0..9usize {
+            // SAFETY: i < len, column holds u64.
+            assert_eq!(unsafe { *v.get_ptr(i).cast::<u64>() }, i as u64);
+        }
+    }
+
+    #[test]
+    fn cross_block_swap_remove_and_block_reclaim() {
+        let mut v = BlobVec::new_with_rows_per_block(layout_of::<u32>(), None, 4);
+        for i in 0u32..6 {
+            // SAFETY: valid u32.
+            unsafe { v.push((&i as *const u32).cast::<u8>()) };
+        }
+        assert_eq!(v.block_count(), 2); // rows 0..4 in block 0, 4..6 in block 1
+
+        // Remove row 0: the last row (value 5, block 1) swaps into block 0.
+        // SAFETY: 0 < len.
+        unsafe { v.swap_remove_and_drop(0) };
+        assert_eq!(v.len(), 5);
+        // SAFETY: reads of the 5 live u32 rows.
+        let got: Vec<u32> = (0..5)
+            .map(|i| unsafe { *v.get_ptr(i).cast::<u32>() })
+            .collect();
+        assert_eq!(got, alloc::vec![5, 1, 2, 3, 4]);
+        assert_eq!(v.block_count(), 2, "row 4 still lives in block 1");
+
+        // Drain down to 3 rows -> block 1 empties and is reclaimed.
+        for _ in 0..2 {
+            // SAFETY: removing the current last row is always in-bounds.
+            unsafe { v.swap_remove_and_drop(v.len() - 1) };
+        }
+        assert_eq!(v.len(), 3);
+        assert_eq!(v.block_count(), 1, "the second block is freed when it empties");
+    }
+
+    #[test]
+    fn slice_range_is_block_local() {
+        let mut v = BlobVec::new_with_rows_per_block(layout_of::<u32>(), None, 4);
+        for i in 0u32..6 {
+            // SAFETY: valid u32.
+            unsafe { v.push((&i as *const u32).cast::<u8>()) };
+        }
+        // SAFETY: [1, 4) is inside block 0.
+        let inside = unsafe { v.as_slice_range::<u32>(1, 4) };
+        assert_eq!(inside, [1, 2, 3]);
+        // SAFETY: [4, 6) is inside block 1.
+        let second = unsafe { v.as_slice_range::<u32>(4, 6) };
+        assert_eq!(second, [4, 5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "straddles a block boundary")]
+    fn slice_range_across_blocks_is_rejected() {
+        let mut v = BlobVec::new_with_rows_per_block(layout_of::<u32>(), None, 4);
+        for i in 0u32..6 {
+            // SAFETY: valid u32.
+            unsafe { v.push((&i as *const u32).cast::<u8>()) };
+        }
+        // [2, 5) crosses the 4-row block boundary.
+        // SAFETY: in-bounds range (the panic is the block-boundary check).
+        let _ = unsafe { v.as_slice_range::<u32>(2, 5) };
+    }
+
+    #[test]
+    fn single_block_column_keeps_whole_slice() {
+        let mut v = BlobVec::new_with_rows_per_block(layout_of::<u32>(), None, 8);
+        for i in 0u32..3 {
+            // SAFETY: valid u32.
+            unsafe { v.push((&i as *const u32).cast::<u8>()) };
+        }
+        // SAFETY: a single-block column may be borrowed whole.
+        let all = unsafe { v.as_slice::<u32>() };
+        assert_eq!(all, [0, 1, 2]);
+    }
+
+    #[test]
+    fn blocks_give_stable_addresses_on_growth() {
+        let mut v = BlobVec::new_with_rows_per_block(layout_of::<u32>(), None, 4);
+        for i in 0u32..4 {
+            // SAFETY: valid u32.
+            unsafe { v.push((&i as *const u32).cast::<u8>()) };
+        }
+        // SAFETY: row 0 is live.
+        let before = unsafe { v.get_ptr(0) };
+        // Crossing into a new block must not move the first block's values.
+        let four = 4u32;
+        // SAFETY: valid u32.
+        unsafe { v.push((&four as *const u32).cast::<u8>()) };
+        // SAFETY: row 0 is still live.
+        let after = unsafe { v.get_ptr(0) };
+        assert_eq!(before, after, "growing a column must not move existing blocks");
+        // SAFETY: row 0 holds a live u32.
+        assert_eq!(unsafe { *after.cast::<u32>() }, 0);
     }
 }

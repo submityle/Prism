@@ -51,7 +51,10 @@ unsafe impl Sync for Column {}
 impl Column {
     fn new(layout: Layout, drop: Option<DropFn>, rows_per_chunk: usize) -> Self {
         Self {
-            data: BlobVec::new(layout, drop),
+            // The value blocks and the change-version windows share the table's
+            // `rows_per_chunk`, so value block `c` is exactly chunk window `c`
+            // (design §5.3 physical chunks).
+            data: BlobVec::new_with_rows_per_block(layout, drop, rows_per_chunk),
             added_ticks: Vec::new(),
             changed_ticks: Vec::new(),
             chunk: ChunkVersions::new(rows_per_chunk),
@@ -129,9 +132,11 @@ impl Column {
 
     /// Borrow the whole column as a typed slice `&[T]`.
     ///
-    /// Every row of this column is contiguous (M0/M2 keep one table per
-    /// archetype), so this exposes the entire column as a single slice for the
-    /// SIMD bulk kernels (design §7/§17) and other whole-column scans.
+    /// A column's values live in fixed-size blocks (design §5.3 physical
+    /// chunks), so the whole column is a single contiguous run **only while it
+    /// fits in one block**. Columns that span several blocks must be accessed
+    /// block by block via [`Column::as_slice_range`] (or iterated with
+    /// `simd_iter` / `par_chunks`); this method panics on a multi-block column.
     ///
     /// # Safety
     /// `T` must be the exact component type stored here, and the caller must

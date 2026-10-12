@@ -300,9 +300,10 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     /// shared view of `world` (design §7 SIMD 迭代).
     ///
     /// The serial sibling of [`par_chunks`](Self::par_chunks): each yielded
-    /// slice covers at most `K` contiguous rows of one archetype (the last slice
-    /// of an archetype may be shorter), which is exactly the input the `simd`
-    /// bulk kernels take. Every data term must be
+    /// slice covers at most `K` rows of one archetype and never crosses a
+    /// physical chunk boundary (so it is at most `min(K, rows_per_chunk)` rows;
+    /// the last slice of a chunk may be shorter), which is exactly the
+    /// contiguous input the `simd` bulk kernels take. Every data term must be
     /// [`ColumnSliceData`] and the filter must be an [`ArchetypalFilter`]; both
     /// are checked once, up front, with a clear panic rather than silently
     /// falling back.
