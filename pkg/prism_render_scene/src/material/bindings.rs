@@ -11,14 +11,15 @@ use bevy_material::{
 };
 use bevy_render::{
     render_resource::{
-        BindGroup, BindGroupEntries, BindGroupLayout, BufferId, SamplerBindingType, ShaderStages,
-        TextureSampleType,
+        BindGroup, BindGroupEntries, BindGroupLayout, Buffer, BufferId, BufferInitDescriptor,
+        BufferUsages, SamplerBindingType, ShaderStages, TextureSampleType,
     },
-    renderer::RenderDevice,
+    renderer::{RenderDevice, RenderQueue},
 };
 use core::num::NonZero;
 use prism_render_material::{GpuMaterialHeader, GpuMaterialTexture};
 
+use super::texture_heap::RESERVED_GENERATION;
 use super::{
     buffers::MaterialGpuBuffers,
     runtime::RenderMaterialRegistry,
@@ -42,10 +43,13 @@ pub struct MaterialBindGroup {
     pub layout_descriptor: BindGroupLayoutDescriptor,
     pub bind_group: Option<BindGroup>,
     bindless: bool,
+    generation_table_buffer: Option<Buffer>,
     buffer_ids: Option<[BufferId; 3]>,
     virtual_texture_buffer_ids: Option<[BufferId; 2]>,
+    generation_table_buffer_id: Option<BufferId>,
     buffer_version: u32,
     texture_version: u32,
+    generation_table_version: u32,
 }
 
 impl FromWorld for MaterialBindGroup {
@@ -79,6 +83,22 @@ impl FromWorld for MaterialBindGroup {
         );
         let virtual_texture_atlas = texture_2d_array(TextureSampleType::Float { filterable: true });
         let virtual_texture_sampler = sampler(SamplerBindingType::Filtering);
+        let generation_table_buffer = bindless.then(|| {
+            // Initialise every slot, not only the current high-water prefix.
+            // Reserved fallback slots are valid from frame zero. Dynamic slots
+            // that have never been materialised stay at generation zero, which
+            // is the shader's invalid/stale sentinel; otherwise an arbitrary
+            // `(index, generation=1)` row could pass the guard for an index
+            // that the heap has never allocated.
+            let mut initial_generations = vec![0_u32; capacity as usize];
+            initial_generations[..super::texture_heap::FIRST_DYNAMIC_SLOT as usize]
+                .fill(RESERVED_GENERATION);
+            device.create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("prism material texture generation table"),
+                contents: bytemuck::cast_slice(&initial_generations),
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            })
+        });
 
         let (layout, layout_descriptor) = if bindless {
             let count = NonZero::new(capacity)
@@ -95,6 +115,7 @@ impl FromWorld for MaterialBindGroup {
                     virtual_texture_config,
                     virtual_texture_atlas,
                     virtual_texture_sampler,
+                    storage_buffer_read_only_sized(false, NonZero::new(size_of::<u32>() as u64)),
                 ),
             );
             (
@@ -125,10 +146,13 @@ impl FromWorld for MaterialBindGroup {
             layout_descriptor,
             bind_group: None,
             bindless,
+            generation_table_buffer,
             buffer_ids: None,
             virtual_texture_buffer_ids: None,
+            generation_table_buffer_id: None,
             buffer_version: 0,
             texture_version: 0,
+            generation_table_version: 0,
         }
     }
 }
@@ -147,6 +171,7 @@ impl MaterialBindGroup {
         runtime: &RenderMaterialRegistry,
         arrays: &MaterialTextureArrays,
         virtual_texture: &MaterialVirtualTextureGpuBundle,
+        queue: &RenderQueue,
     ) {
         let Some((headers, parameters, textures)) = buffers.buffers() else {
             return;
@@ -154,6 +179,8 @@ impl MaterialBindGroup {
         let ids = [headers.id(), parameters.id(), textures.id()];
         let version = runtime.registry.snapshot().buffer_version;
         let texture_version = arrays.version();
+        let generation_table_version = runtime.texture_generation_version();
+        let generation_table_buffer_id = self.generation_table_buffer.as_ref().map(Buffer::id);
         let virtual_texture_buffer_ids = [
             virtual_texture.page_table_buffer().id(),
             virtual_texture.config_buffer().id(),
@@ -162,8 +189,19 @@ impl MaterialBindGroup {
             && self.virtual_texture_buffer_ids == Some(virtual_texture_buffer_ids)
             && self.buffer_version == version
             && self.texture_version == texture_version
+            && self.generation_table_version == generation_table_version
+            && self.generation_table_buffer_id == generation_table_buffer_id
         {
             return;
+        }
+        if self.bindless && self.generation_table_version != generation_table_version {
+            if let Some(buffer) = self.generation_table_buffer.as_ref() {
+                queue.write_buffer(
+                    buffer,
+                    0,
+                    bytemuck::cast_slice(runtime.texture_generation_table()),
+                );
+            }
         }
         self.bind_group = Some(if self.bindless {
             // The bindless arrays extend the same bind group with the texture
@@ -185,6 +223,10 @@ impl MaterialBindGroup {
                     virtual_texture.config_buffer().as_entire_binding(),
                     virtual_texture.atlas_view(),
                     virtual_texture.sampler(),
+                    self.generation_table_buffer
+                        .as_ref()
+                        .expect("bindless material layout requires generation table")
+                        .as_entire_binding(),
                 )),
             )
         } else {
@@ -204,7 +246,9 @@ impl MaterialBindGroup {
         });
         self.buffer_ids = Some(ids);
         self.virtual_texture_buffer_ids = Some(virtual_texture_buffer_ids);
+        self.generation_table_buffer_id = generation_table_buffer_id;
         self.buffer_version = version;
         self.texture_version = texture_version;
+        self.generation_table_version = generation_table_version;
     }
 }
