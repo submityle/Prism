@@ -32,6 +32,8 @@ struct CellState<T> {
     /// Set once the future has finished (distinguishes "no value yet" from
     /// "value already taken").
     done: bool,
+    /// A captured panic payload if the future panicked instead of returning.
+    panicked: Option<Box<dyn core::any::Any + Send>>,
     /// Waker of a handle awaiting the result, fired on completion.
     waker: Option<Waker>,
 }
@@ -45,6 +47,7 @@ impl<T> ResultCell<T> {
             state: Mutex::new(CellState {
                 value: None,
                 done: false,
+                panicked: None,
                 waker: None,
             }),
             counter,
@@ -67,9 +70,29 @@ impl<T> ResultCell<T> {
         }
     }
 
+    /// Mark the cell complete with a captured panic instead of a value, waking
+    /// any waiting handle and the counter so waiters never hang (CR-found: a
+    /// panicking future left the cell — and `block_on` — stuck forever).
+    pub(crate) fn complete_panic(&self, payload: Box<dyn core::any::Any + Send>) {
+        let waker = {
+            let mut state = self.state.lock().unwrap();
+            state.done = true;
+            state.panicked = Some(payload);
+            state.waker.take()
+        };
+        self.counter.finish_one();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
     /// Poll for the result, parking `waker` if it is not ready yet.
     fn poll_result(&self, waker: &Waker) -> Poll<T> {
         let mut state = self.state.lock().unwrap();
+        if let Some(payload) = state.panicked.take() {
+            drop(state);
+            std::panic::resume_unwind(payload);
+        }
         if let Some(value) = state.value.take() {
             return Poll::Ready(value);
         }

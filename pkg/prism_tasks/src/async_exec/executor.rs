@@ -60,6 +60,9 @@ struct TaskHarness {
     shared: Arc<Shared>,
     /// Whether the owning pool is the single-threaded fallback (no workers).
     single: bool,
+    /// Completes the task's result cell with a captured panic payload if the
+    /// future panics while being polled (so waiters never hang).
+    on_panic: Box<dyn Fn(Box<dyn core::any::Any + Send>) + Send + Sync>,
 }
 
 /// The mutable half of a [`TaskHarness`].
@@ -129,7 +132,21 @@ impl RunnableTask for TaskHarness {
         let mut cx = Context::from_waker(&waker);
 
         loop {
-            match future.as_mut().poll(&mut cx) {
+            // Isolate a panicking future: complete the result cell with the
+            // panic so `block_on`/await re-raise it instead of hanging, and
+            // never unwind the worker (CR-found).
+            let poll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                future.as_mut().poll(&mut cx)
+            }));
+            let poll = match poll {
+                Ok(poll) => poll,
+                Err(payload) => {
+                    self.inner.lock().unwrap().run = RunState::Done;
+                    (self.on_panic)(payload);
+                    return;
+                }
+            };
+            match poll {
                 Poll::Ready(()) => {
                     let mut inner = self.inner.lock().unwrap();
                     inner.run = RunState::Done;
@@ -236,6 +253,7 @@ impl TaskPool {
     {
         let cell = ResultCell::<F::Output>::new();
         let cell_for_future = Arc::clone(&cell);
+        let cell_for_panic = Arc::clone(&cell);
         let wrapped = async move {
             let output = future.await;
             cell_for_future.complete(output);
@@ -248,6 +266,7 @@ impl TaskPool {
             }),
             shared: Arc::clone(self.shared_state()),
             single: self.is_single_threaded(),
+            on_panic: Box::new(move |payload| cell_for_panic.complete_panic(payload)),
         });
         harness.enqueue();
 
@@ -325,4 +344,22 @@ impl TaskPool {
 /// declaring the future stalled.
 fn block_on_stall_timeout() -> core::time::Duration {
     core::time::Duration::from_secs(5)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::TaskPool;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn panicking_future_does_not_hang_block_on() {
+        // A future that panics must complete its result cell with the panic so
+        // `block_on`/await re-raise it rather than hang (CR-found).
+        let pool = TaskPool::with_threads(1);
+        let task = pool.spawn_async(async { panic!("future boom") });
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            pool.block_on(task);
+        }));
+        assert!(r.is_err());
+    }
 }
