@@ -150,7 +150,7 @@ pub struct ComponentInfo {
 - **Chunk** = 固定 16KiB 块，列式 SoA；每列按 SIMD 宽对齐。chunk 槽内嵌 `change_version` + 可选 `ChunkMeta`（AABB / 可见位 / LOD / 批次键 / cell 归属）。
 - `N`（每 chunk 容量）= `floor((16KiB − 元数据) / 单实体列字节和)`。
 
-> **现状诚实注记（chunk 物理布局）**：上两条描述的是**目标形态**。当前 `pkg/prism_ecs` 落地的是**逻辑 chunk**——每个 archetype 仍是一段连续列存，chunk 只是"`rows_per_chunk` 个连续行"的窗口（`rows_per_chunk` 由 `TARGET_CHUNK_BYTES` 与单行字节和推出），每个窗口带一条 `change_version`（`storage/chunk.rs` 开篇即写明这一点）。**物理 16KiB 分块竞技场**（每块内嵌元数据、按块分配/回收、块内 SoA 与 SIMD 对齐）仍是 PLANNED，属 §22 高风险项第 1 条，须分步改造并配基准。
+> **现状诚实注记（chunk 物理布局）**：上两条描述的是**目标形态**。当前 `pkg/prism_ecs` 落地的是**逻辑 chunk**——每个 archetype 仍是一段连续列存，chunk 只是"`rows_per_chunk` 个连续行"的窗口（`rows_per_chunk` 由 `TARGET_CHUNK_BYTES` 与单行字节和推出），每个窗口带一条 `change_version`（`storage/chunk.rs` 开篇即写明这一点）。**每窗口的元数据侧车已落地**：`storage::ChunkMeta`（+ 值类型 `ChunkBounds`）随窗口增删，携带 `bounds` / `visible` / `lod` / `batch_key` / `cell` 五个消费者字段与一个**结构 epoch**——每当窗口的**行集合**变化（spawn 落入 / swap-remove 移出或移入）就递增，值写入不动它；消费者只要缓存 epoch 匹配就可复用派生结果，见 `storage/chunk.rs`、`Table::chunk_metas/chunk_meta(_mut)` 与 `World::chunk_meta(_mut)`。**仍是 PLANNED 的是物理 16KiB 分块竞技场**（块级分配/回收、块内嵌元数据、块内 SoA 与 SIMD 对齐）——属 §22 高风险项第 1 条，须分步改造并配基准。
 - 结构性变更 = archetype 间搬迁（swap-remove + append），经并行 ECB 批量化（§9）。
 
 ---
@@ -475,7 +475,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 ## 20. 契约、不变量与版本化
 
 - **下游 API 契约优先**：对接层公共 API 是红线；内部实现随便改，公共 API 改动必须同步迁移依赖方，保持全仓绿。
-- **版本化新增契约（以实际导出名为准）**：`storage::{ChunkVersions, TARGET_CHUNK_BYTES, rows_per_chunk}`（每 chunk 一条变更版本；草案里的 **`ChunkMeta`——每块元数据（AABB / 可见位 / LOD / 批次键 / cell 归属）——尚未落地**，见 §5 的 chunk 诚实注记）、`query::DirtyChunk` + `QueryState::dirty_chunks`（草案名 `ChunkDirtyIndex`）、`WorldSnapshot` / `SnapshotDelta` / `SnapshotRing`（草案名 `EcsSnapshot`/`EcsDelta`）、`OwningGroupId`、`WorldPartitionCell`、`GridCell`/`FloatingOrigin`、`NodeId` / `ReactionGraph`（草案名 `ReactionHandle`）、`JobHandle`（来自 `prism_tasks`）、`WorldSnapshot::state_hash()`（草案名 `StateHash`，实际是逐帧 `u64` 哈希）、`GpuResidentColumn`。列出实际名是有意的：这一节是给别人照抄的契约面，旧稿的草案名与代码不符会让读者找不到对应类型。
+- **版本化新增契约（以实际导出名为准）**：`storage::{ChunkVersions, TARGET_CHUNK_BYTES, rows_per_chunk}`（每 chunk 一条变更版本）、`storage::ChunkMeta` + `storage::ChunkBounds`（每块元数据：AABB / 可见位 / LOD / 批次键 / cell 归属 + 结构 epoch，经 `Archetype::table().chunk_metas()` 与 `World::chunk_meta(_mut)` 暴露）、`query::DirtyChunk` + `QueryState::dirty_chunks`（草案名 `ChunkDirtyIndex`）、`WorldSnapshot` / `SnapshotDelta` / `SnapshotRing`（草案名 `EcsSnapshot`/`EcsDelta`）、`OwningGroupId`、`WorldPartitionCell`、`GridCell`/`FloatingOrigin`、`NodeId` / `ReactionGraph`（草案名 `ReactionHandle`）、`JobHandle`（来自 `prism_tasks`）、`WorldSnapshot::state_hash()`（草案名 `StateHash`，实际是逐帧 `u64` 哈希）、`GpuResidentColumn`。列出实际名是有意的：这一节是给别人照抄的契约面，旧稿的草案名与代码不符会让读者找不到对应类型。
 - **不变量**：owning group 单一拥有者；chunk 版本单调递增；确定性稳定键；快照 roundtrip 等价；子世界实体迁移保 generation；Entity generation 为 `NonZeroU32`（保留 0、回收自增、回绕跳 0），index 0 为正常可用槽。
 
 ---
@@ -496,7 +496,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 ## 22. 诚实边界与风险
 
-- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 / 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 规范层级关系 ChildOf（作用域命令 + 层级 despawn）/ 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档 + 跨版本 schema 迁移）/ 提取契约（`ExtractResource`/`ExtractComponent` + 运行器）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 原型预热 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档 / 跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 的渲染侧接线与流水线并行（ECS 侧提取契约已落地），以及独占机多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
+- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 + 每块元数据 `ChunkMeta`（bounds/可见/LOD/批次/cell + 结构 epoch）/ 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 规范层级关系 ChildOf（作用域命令 + 层级 despawn）/ 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档 + 跨版本 schema 迁移）/ 提取契约（`ExtractResource`/`ExtractComponent` + 运行器）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 原型预热 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档 / 跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 的渲染侧接线与流水线并行（ECS 侧提取契约已落地）、物理 16KiB 分块竞技场（§22 高风险项 1），以及独占机多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
 - 规模与多核扩展性、NUMA、GPU 常驻指标依赖真实硬件压测，单测不能替代。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。

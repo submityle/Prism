@@ -238,6 +238,120 @@ impl ChunkVersions {
     }
 }
 
+/// A world-space axis-aligned bounding box a consumer derived for one chunk
+/// window (design §5.3 `ChunkMeta` AABB; used by render culling, GPU resident
+/// columns §15, and HLOD §13).
+///
+/// This is a plain value type: the ECS only *stores* it per chunk, never
+/// computes it. A consumer (e.g. the render extractor) fills it in and re-fills
+/// it whenever the window's [`ChunkMeta::structural_epoch`] advances.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChunkBounds {
+    /// Component-wise minimum corner.
+    pub min: [f32; 3],
+    /// Component-wise maximum corner.
+    pub max: [f32; 3],
+}
+
+impl ChunkBounds {
+    /// Build bounds from explicit corners.
+    #[inline]
+    pub const fn new(min: [f32; 3], max: [f32; 3]) -> Self {
+        Self { min, max }
+    }
+
+    /// Whether every component of `min` is `<=` the matching component of
+    /// `max` (so the box is non-empty / not inverted).
+    #[inline]
+    pub fn is_well_formed(&self) -> bool {
+        (0..3).all(|i| self.min[i] <= self.max[i])
+    }
+
+    /// Whether the point `p` lies inside the box (inclusive on both faces).
+    #[inline]
+    pub fn contains(&self, p: [f32; 3]) -> bool {
+        (0..3).all(|i| self.min[i] <= p[i] && p[i] <= self.max[i])
+    }
+
+    /// Grow this box to also contain `other` (component-wise min/max).
+    #[inline]
+    pub fn union(&mut self, other: &ChunkBounds) {
+        for i in 0..3 {
+            self.min[i] = self.min[i].min(other.min[i]);
+            self.max[i] = self.max[i].max(other.max[i]);
+        }
+    }
+}
+
+/// Per-chunk metadata sidecar (design §5.3 `ChunkMeta`): the optional,
+/// consumer-facing fields a chunk window carries besides its change version.
+///
+/// The ECS owns only the *storage* and the *structural epoch*; the derived
+/// fields ([`bounds`](Self::bounds), [`lod`](Self::lod), [`batch_key`](Self::batch_key),
+/// [`cell`](Self::cell)) are written by consumers. The contract that makes the
+/// cache sound:
+///
+/// * [`structural_epoch`](Self::structural_epoch) is a monotonic counter the
+///   table bumps whenever the **set of rows in this window changes** — a spawn
+///   into the window, or a swap-remove that adds or drops a row of it. It never
+///   changes for value-only writes (those bump the chunk's change version in
+///   [`ChunkVersions`] instead).
+/// * A consumer that derived `bounds`/`lod`/`batch_key`/`cell` from the window's
+///   rows may keep using them **only while the epoch it cached still matches**;
+///   once it differs, the derived fields are stale and must be recomputed.
+///
+/// This split keeps the kernel independent of any particular derivation (a
+/// renderer's AABB, a physics broadphase's fat bounds, a network interest set)
+/// while giving them a cheap, correct invalidation signal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChunkMeta {
+    structural_epoch: u64,
+    /// Cached world-space bounds for this window, or `None` when a consumer has
+    /// not (re)computed them for the current epoch.
+    pub bounds: Option<ChunkBounds>,
+    /// Visibility bit for culling (design §13.2 / §15); defaults to `true` so a
+    /// freshly-created window is not accidentally culled.
+    pub visible: bool,
+    /// Level-of-detail bucket (design §13.2 / §23.7 processor LOD).
+    pub lod: u8,
+    /// Batch key (design §6 `SharedComponent` / §15): windows with equal keys may
+    /// merge into one GPU draw.
+    pub batch_key: u64,
+    /// Owning world-partition cell id (design §13.1); `0` means "no cell".
+    pub cell: u64,
+}
+
+impl Default for ChunkMeta {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            structural_epoch: 0,
+            bounds: None,
+            visible: true,
+            lod: 0,
+            batch_key: 0,
+            cell: 0,
+        }
+    }
+}
+
+impl ChunkMeta {
+    /// The monotonic structural epoch — see the type-level contract.
+    #[inline]
+    pub fn structural_epoch(&self) -> u64 {
+        self.structural_epoch
+    }
+
+    /// Advance the structural epoch. Called by the owning [`Table`] whenever the
+    /// window's row set changes; consumers only ever read it.
+    ///
+    /// [`Table`]: crate::storage::Table
+    #[inline]
+    pub(crate) fn bump_structural(&mut self) {
+        self.structural_epoch = self.structural_epoch.wrapping_add(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,5 +427,45 @@ mod tests {
         let now = Tick::new(Tick::MAX_CHANGE_AGE + 100);
         cv.check_ticks(now);
         assert_eq!(cv.version(0).age_since(now), Tick::MAX_CHANGE_AGE);
+    }
+
+    #[test]
+    fn chunk_meta_defaults_are_visible_and_uncomputed() {
+        let m = ChunkMeta::default();
+        assert_eq!(m.structural_epoch(), 0);
+        assert!(m.bounds.is_none());
+        assert!(m.visible, "a fresh window must not be culled by default");
+        assert_eq!(m.lod, 0);
+        assert_eq!(m.batch_key, 0);
+        assert_eq!(m.cell, 0);
+    }
+
+    #[test]
+    fn chunk_meta_structural_bump_is_monotonic() {
+        let mut m = ChunkMeta::default();
+        for expected in 1..=5 {
+            m.bump_structural();
+            assert_eq!(m.structural_epoch(), expected);
+        }
+        // Available fields can be written by a consumer without touching the epoch.
+        m.lod = 3;
+        m.batch_key = 42;
+        assert_eq!(m.structural_epoch(), 5);
+    }
+
+    #[test]
+    fn chunk_bounds_well_formed_contains_and_union() {
+        let a = ChunkBounds::new([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
+        assert!(a.is_well_formed());
+        assert!(a.contains([1.0, 1.0, 1.0]));
+        assert!(a.contains([0.0, 2.0, 1.5]));
+        assert!(!a.contains([2.5, 1.0, 1.0]));
+
+        let inverted = ChunkBounds::new([1.0, 0.0, 0.0], [0.0, 1.0, 1.0]);
+        assert!(!inverted.is_well_formed());
+
+        let mut u = a;
+        u.union(&ChunkBounds::new([-1.0, 1.0, 0.5], [1.5, 3.0, 1.0]));
+        assert_eq!(u, ChunkBounds::new([-1.0, 0.0, 0.0], [2.0, 3.0, 2.0]));
     }
 }

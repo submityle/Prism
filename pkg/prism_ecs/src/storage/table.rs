@@ -17,7 +17,7 @@ use crate::collections::HashMap;
 use crate::component::{ComponentId, DropFn};
 use crate::entity::Entity;
 use crate::storage::blob_vec::BlobVec;
-use crate::storage::chunk::{rows_per_chunk, ChunkVersions};
+use crate::storage::chunk::{rows_per_chunk, ChunkMeta, ChunkVersions};
 
 /// A single type-erased component column within a [`Table`].
 ///
@@ -356,6 +356,10 @@ pub struct Table {
     /// Shared logical chunk window size for every column (design §7). Stored on
     /// the table so chunk-index/row-window math is identical across columns.
     rows_per_chunk: usize,
+    /// Per-chunk metadata sidecar (design §5.3 `ChunkMeta`), one entry per
+    /// logical chunk window and kept in lockstep with `chunk_count()`. Its
+    /// structural epochs are bumped by the row-membership mutators below.
+    chunk_meta: Vec<ChunkMeta>,
 }
 
 impl Table {
@@ -380,6 +384,7 @@ impl Table {
             entities: Vec::new(),
             columns: map,
             rows_per_chunk: rpc,
+            chunk_meta: Vec::new(),
         }
     }
 
@@ -419,8 +424,59 @@ impl Table {
     /// column (design §17 原型预热).
     pub(crate) fn reserve(&mut self, additional: usize) {
         self.entities.reserve(additional);
+        self.chunk_meta.reserve(additional.div_ceil(self.rows_per_chunk));
         for column in self.columns.values_mut() {
             column.reserve(additional);
+        }
+    }
+
+    /// Per-chunk metadata for every logical chunk window, in chunk order
+    /// (design §5.3 `ChunkMeta`). Index `c` covers rows
+    /// `[c * rows_per_chunk, (c + 1) * rows_per_chunk)`.
+    #[inline]
+    pub fn chunk_metas(&self) -> &[ChunkMeta] {
+        &self.chunk_meta
+    }
+
+    /// The metadata of chunk `chunk`.
+    ///
+    /// # Panics
+    /// Panics if `chunk >= chunk_count()`.
+    #[inline]
+    pub fn chunk_meta(&self, chunk: usize) -> &ChunkMeta {
+        &self.chunk_meta[chunk]
+    }
+
+    /// Mutable access to chunk `chunk`'s metadata, for consumers that cache
+    /// derived fields ([`ChunkMeta::bounds`], LOD, batch key, cell) there.
+    ///
+    /// # Panics
+    /// Panics if `chunk >= chunk_count()`.
+    #[inline]
+    pub fn chunk_meta_mut(&mut self, chunk: usize) -> &mut ChunkMeta {
+        &mut self.chunk_meta[chunk]
+    }
+
+    /// Grow or shrink `chunk_meta` so it holds exactly `ceil(len / rpc)` entries,
+    /// keeping it in lockstep with the row count. New windows start with
+    /// [`ChunkMeta::default`].
+    #[inline]
+    fn resize_chunk_meta(&mut self, len: usize) {
+        let needed = len.div_ceil(self.rows_per_chunk);
+        if self.chunk_meta.len() < needed {
+            self.chunk_meta.resize(needed, ChunkMeta::default());
+        } else if self.chunk_meta.len() > needed {
+            self.chunk_meta.truncate(needed);
+        }
+    }
+
+    /// Bump the structural epoch of the window owning `row`, if that window is
+    /// still live after a resize. Called on every row-membership change.
+    #[inline]
+    fn bump_chunk_meta(&mut self, row: usize) {
+        let chunk = row / self.rows_per_chunk;
+        if let Some(meta) = self.chunk_meta.get_mut(chunk) {
+            meta.bump_structural();
         }
     }
 
@@ -471,6 +527,10 @@ impl Table {
     pub fn allocate(&mut self, entity: Entity) -> usize {
         let row = self.entities.len();
         self.entities.push(entity);
+        // A brand-new row joins its window: keep the metadata sidecar sized and
+        // bump the window's structural epoch (design §5.3 `ChunkMeta`).
+        self.resize_chunk_meta(self.entities.len());
+        self.bump_chunk_meta(row);
         row
     }
 
@@ -554,6 +614,16 @@ impl Table {
             None
         };
         self.entities.swap_remove(row);
+        // Row membership changed: the destination window lost its old row (and,
+        // unless `row` was the last row, gained the former last row), while the
+        // last row's window lost a row. Bump each distinct affected window once
+        // and drop any window that no longer holds rows (design §5.3 `ChunkMeta`).
+        let after = self.entities.len();
+        self.resize_chunk_meta(after);
+        self.bump_chunk_meta(row);
+        if row != last && row / self.rows_per_chunk != last / self.rows_per_chunk {
+            self.bump_chunk_meta(last);
+        }
         moved
     }
 }
@@ -613,5 +683,94 @@ impl Column {
         self.changed_ticks.swap_remove(row);
         self.chunk
             .on_swap_remove(row, self.changed_ticks.len(), moved_changed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::Component;
+    use crate::storage::ChunkBounds;
+    use crate::world::World;
+
+    /// 2048 B/row -> `TARGET_CHUNK_BYTES / 2048 == 8` rows per chunk window, so
+    /// a handful of spawns crosses a window boundary without a huge allocation.
+    #[allow(dead_code)]
+    #[derive(Debug, Clone, Copy)]
+    struct Wide([u8; 2048]);
+    impl Component for Wide {}
+
+    #[test]
+    fn chunk_meta_tracks_windows_and_structural_epochs() {
+        let mut world = World::new();
+        let arch = world.prewarm::<Wide>(0);
+        assert_eq!(
+            world.archetypes().get(arch).unwrap().table().rows_per_chunk(),
+            8,
+        );
+
+        // No rows yet -> no windows, hence no metadata.
+        assert!(world
+            .archetypes()
+            .get(arch)
+            .unwrap()
+            .table()
+            .chunk_metas()
+            .is_empty());
+
+        // Fill exactly one window; every spawn changes that window's row set.
+        let mut first_window = Vec::new();
+        for _ in 0..8 {
+            first_window.push(world.spawn(Wide([3; 2048])));
+        }
+        {
+            let t = world.archetypes().get(arch).unwrap().table();
+            assert_eq!(t.chunk_count(), 1);
+            assert_eq!(t.chunk_metas().len(), 1);
+            assert_eq!(t.chunk_meta(0).structural_epoch(), 8);
+            assert!(t.chunk_meta(0).visible);
+            assert!(t.chunk_meta(0).bounds.is_none());
+        }
+
+        // Spill one row into a second window; only the new window's epoch starts.
+        let spill = world.spawn(Wide([4; 2048]));
+        {
+            let t = world.archetypes().get(arch).unwrap().table();
+            assert_eq!(t.chunk_count(), 2);
+            assert_eq!(t.chunk_metas().len(), 2);
+            assert_eq!(t.chunk_meta(0).structural_epoch(), 8, "first window untouched");
+            assert_eq!(t.chunk_meta(1).structural_epoch(), 1);
+        }
+
+        // A consumer caches derived metadata; the kernel stores it verbatim.
+        {
+            let m = world
+                .chunk_meta_mut(arch, 1)
+                .expect("chunk 1 exists after the spill");
+            m.bounds = Some(ChunkBounds::new([0.0; 3], [1.0; 3]));
+            m.lod = 2;
+            m.batch_key = 0xDEAD_BEEF;
+            m.cell = 7;
+        }
+
+        // Despawning the lone row of window 1 drops that window entirely; the
+        // surviving window's row set did not change, so its epoch holds.
+        assert!(world.despawn(spill));
+        {
+            let t = world.archetypes().get(arch).unwrap().table();
+            assert_eq!(t.chunk_count(), 1);
+            assert_eq!(t.chunk_metas().len(), 1);
+            assert_eq!(t.chunk_meta(0).structural_epoch(), 8);
+        }
+
+        // Removing a non-last row swap-moves the window's last row into its
+        // place: the row set changed, so the epoch advances and any cached
+        // `bounds` must be treated as stale by consumers.
+        assert!(world.despawn(first_window[0]));
+        {
+            let t = world.archetypes().get(arch).unwrap().table();
+            assert_eq!(t.chunk_count(), 1);
+            assert_eq!(t.chunk_meta(0).structural_epoch(), 9);
+        }
     }
 }

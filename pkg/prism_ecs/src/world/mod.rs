@@ -222,6 +222,40 @@ impl World {
         &self.archetypes
     }
 
+    /// The per-chunk metadata of `archetype`'s chunk window `chunk`
+    /// (design §5.3 `ChunkMeta`), or `None` if the archetype is not live or the
+    /// window is out of range for its current row count.
+    #[inline]
+    pub fn chunk_meta(&self, archetype: ArchetypeId, chunk: usize) -> Option<&crate::storage::ChunkMeta> {
+        self.archetypes
+            .get(archetype)?
+            .table()
+            .chunk_metas()
+            .get(chunk)
+    }
+
+    /// Mutable access to a chunk window's metadata (design §5.3 `ChunkMeta`), so
+    /// a consumer (render extractor, GPU resident column uploader, LOD
+    /// scheduler) can cache derived data — `bounds` / `visible` / `lod` /
+    /// `batch_key` / `cell` — on the chunk. Recompute them whenever the window's
+    /// [`structural_epoch`](crate::storage::ChunkMeta::structural_epoch)
+    /// advances.
+    ///
+    /// Returns `None` if `archetype` is not live or `chunk` is out of range.
+    #[inline]
+    pub fn chunk_meta_mut(
+        &mut self,
+        archetype: ArchetypeId,
+        chunk: usize,
+    ) -> Option<&mut crate::storage::ChunkMeta> {
+        let table = self.archetypes.get_mut(archetype)?.table_mut();
+        if chunk < table.chunk_metas().len() {
+            Some(table.chunk_meta_mut(chunk))
+        } else {
+            None
+        }
+    }
+
     /// The out-of-band sparse-component registry (design §6).
     ///
     /// Sparse components live here keyed by [`Entity`], not inside archetype
