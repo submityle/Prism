@@ -27,7 +27,8 @@
 //!
 //! ## Backend-agnostic
 //!
-//! [`PrismRenderPlugin`] is generic over the RHI [`Instance`] backend, so a real
+//! [`PrismRenderPlugin`] is generic over the RHI
+//! [`Instance`](prism_render_driver::Instance) backend, so a real
 //! app constructs it with the shipped wgpu backend while tests construct it with
 //! the headless null backend — no window, no GPU, no driver. Switching backends
 //! is constructing the plugin with a different `Instance`; nothing in this crate
@@ -56,6 +57,7 @@
 
 extern crate alloc;
 
+mod bin_queue;
 mod config;
 mod draw;
 mod frame;
@@ -79,6 +81,7 @@ mod views;
 #[cfg(test)]
 mod tests;
 
+pub use bin_queue::{BinQueueOutcome, bin_indirect_args};
 pub use config::RenderAppConfig;
 pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
 pub use frame::RENDER_TARGET_FORMAT;
@@ -104,6 +107,7 @@ pub use views::RenderViews;
 /// Commonly used exports: the plugin, its labels, and the resources that cross
 /// the main-world/render-world boundary.
 pub mod prelude {
+    pub use crate::bin_queue::{BinQueueOutcome, bin_indirect_args};
     pub use crate::config::RenderAppConfig;
     pub use crate::draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
     pub use crate::intent::{RenderIntent, RenderViewport};

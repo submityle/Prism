@@ -35,6 +35,10 @@ use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::view_family::ViewKind;
 use prism_render_architecture::abi::GenerationalHandle;
+use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
+use prism_render_visibility::GpuRenderWorkItem;
+
+use crate::scene::SceneRegistry;
 use prism_render_driver::{
     BufferDescriptor, BufferId, BufferUsages, DeviceDescriptor, Instance, MultisampleState,
     PrimitiveState, PrimitiveTopology, RenderDevice, RenderPipelineDescriptor,
@@ -50,6 +54,42 @@ fn null_vertex_buffer(device: &prism_render_driver_null::NullDevice) -> BufferId
         usage: BufferUsages::VERTEX,
         mapped_at_creation: false,
     })
+}
+
+/// A mesh pipeline provider that hands every variant the same trivial
+/// descriptor, so a test observes the *keys* the queue specializes rather than
+/// the shader contents.
+struct StubProvider {
+    descriptor: RenderPipelineDescriptor,
+}
+
+impl StubProvider {
+    fn new(device: &prism_render_driver_null::NullDevice) -> Self {
+        let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+        ));
+        Self {
+            descriptor: RenderPipelineDescriptor {
+                label: Some("stub".into()),
+                layout: None,
+                vertex: VertexState {
+                    module,
+                    entry_point: "vs".into(),
+                    buffers: vec![],
+                },
+                primitive: PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                fragment: None,
+            },
+        }
+    }
+}
+
+impl crate::mesh_pipeline::MeshPipelineProvider for StubProvider {
+    fn descriptor(&self, _: &MeshPipelineKey) -> RenderPipelineDescriptor {
+        self.descriptor.clone()
+    }
 }
 
 /// The pipeline cache builds a PSO once per content key, shares it, and destroys
@@ -1430,4 +1470,462 @@ fn mesh_bin_draw_records_a_multi_draw() {
             .any(|command| matches!(command, RenderCommand::MultiDrawIndirect { count: 1, .. })),
         "one multi-draw is issued from the indirect argument range"
     );
+}
+
+/// An argument buffer declared in a throwaway graph, for tests that need a
+/// graph-owned [`BufferHandle`] without recording a frame.
+fn declared_args_buffer(device: &prism_render_driver_null::NullDevice) -> prism_render_graph::BufferHandle {
+    use prism_render_graph::{BufferDesc, ImportedBuffer, RenderGraph};
+    let buffer = device.create_buffer(&BufferDescriptor {
+        label: Some("declared-args".into()),
+        size: 128,
+        usage: BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut graph = RenderGraph::new(Extent3d::new_2d(4, 4));
+    graph.import_buffer(
+        "declared-args",
+        BufferDesc::new(128, BufferUsages::INDIRECT),
+        ImportedBuffer {
+            buffer,
+            entry_state: prism_render_driver::BufferState::initial(),
+        },
+    )
+}
+
+/// The bin-path fixture: one geometry and mesh class, two materials whose
+/// permutation classes differ (lit opaque vs lit transparent), one instance per
+/// material, and the work list naming both.
+struct BinFixture {
+    registry: SceneRegistry,
+    instances: CpuRenderScene,
+    geometry: GeometryHandle,
+    opaque: SceneHandle,
+    transparent: SceneHandle,
+    work: Vec<GpuRenderWorkItem>,
+}
+
+fn bin_fixture(device: &prism_render_driver_null::NullDevice) -> BinFixture {
+    use crate::scene::{MeshBuffers, MeshClass};
+    use prism_render_architecture::geometry::{
+        GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
+    };
+    use prism_render_architecture::gpu_scene::{
+        InstanceRecord, SceneOperation, SceneTransactionBuilder,
+    };
+    use prism_render_material::{MaterialRenderClass, fallback_material_record};
+    use prism_render_visibility::{GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey};
+
+    let geometry: GeometryHandle = GenerationalHandle::new(1, 1);
+    let opaque_material = GenerationalHandle::new(2, 1);
+    let transparent_material = GenerationalHandle::new(2, 2);
+    let opaque: SceneHandle = GenerationalHandle::new(3, 1);
+    let transparent: SceneHandle = GenerationalHandle::new(4, 1);
+    let indices = device.create_buffer(&BufferDescriptor {
+        label: Some("bin-indices".into()),
+        size: 64,
+        usage: BufferUsages::INDEX,
+        mapped_at_creation: false,
+    });
+    let layout = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x3],
+    );
+
+    let mut registry = SceneRegistry::new();
+    registry.insert_geometry(GeometryRecord {
+        handle: geometry,
+        revision: 1,
+        vertex_buffer_class: 5,
+        index_buffer_class: 0,
+        primitive_start: 0,
+        primitive_count: 1,
+        lods: vec![GeometryLodRecord {
+            level: 0,
+            primitive_kind: GeometryPrimitiveKind::Indexed,
+            element_count: 6,
+            first_element: 0,
+            base_vertex: 0,
+            vertex_count: 4,
+            screen_error: 0.0,
+            resident: true,
+            fallback: false,
+        }],
+    });
+    registry.insert_mesh_class(
+        5,
+        MeshClass::new(
+            vec![layout],
+            PrimitiveTopology::TriangleList,
+            MeshBuffers {
+                vertices: null_vertex_buffer(device),
+                indices: Some((indices, prism_render_driver::IndexFormat::Uint16)),
+            },
+        ),
+    );
+    registry.insert_material(fallback_material_record(opaque_material, 1));
+    let mut clear = fallback_material_record(transparent_material, 1);
+    clear.render_class = MaterialRenderClass::Transparent;
+    registry.insert_material(clear);
+
+    let mut builder = SceneTransactionBuilder::new(0, 1);
+    for (handle, material) in [(opaque, opaque_material), (transparent, transparent_material)] {
+        builder.push(SceneOperation::Create {
+            handle,
+            record: InstanceRecord {
+                geometry,
+                material,
+                ..Default::default()
+            },
+        });
+    }
+    let mut instances = CpuRenderScene::default();
+    let report = instances.apply(&builder.finish());
+    assert_eq!(report.created, 2, "the fixture scene holds both instances");
+    assert_eq!(instances.live_count(), 2);
+
+    let item = |scene, material| GpuRenderWorkItem {
+        scene,
+        geometry,
+        material,
+        lod_or_cluster: 0,
+        pass_mask: RenderPassMask::OPAQUE,
+        visibility_stages: VisibilityStageMask::EARLY,
+        sort_key: WorkSortKey::new(0, 0, 0, 0, 3),
+    };
+    let work = vec![item(opaque, opaque_material), item(transparent, transparent_material)];
+
+    BinFixture {
+        registry,
+        instances,
+        geometry,
+        opaque,
+        transparent,
+        work,
+    }
+}
+
+/// The bin path end to end: the visible set bins by permutation class, each
+/// bin's packed slot range becomes one indirect item in its phase, and the frame
+/// records one multi-draw per bin.
+#[test]
+fn bin_stream_fills_the_indirect_queue_and_records_a_multi_draw() {
+    use prism_render_driver::{BufferState, IndexFormat, Pass, RenderCommand};
+    use prism_render_graph::{
+        BufferDesc, ImportedBuffer, ImportedTexture, PassFlags, RenderGraph, TextureDesc,
+    };
+    use prism_render_visibility::build_view_draw_bins;
+
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let fixture = bin_fixture(&device);
+    let provider = StubProvider::new(&device);
+
+    let candidates = fixture.registry.bin_candidates(&fixture.work);
+    assert_eq!(candidates.len(), 2, "both instances are drawable");
+    let bins = build_view_draw_bins(
+        GenerationalHandle::new(0, 1),
+        8,
+        candidates,
+    );
+    assert_eq!(bins.bins.len(), 2, "two permutation classes bin separately");
+    assert_eq!(bins.command_count, 2, "one command slot per instance");
+
+    let target = device.create_texture(&TextureDescriptor::new_2d(
+        Extent3d::new_2d(4, 4),
+        TextureFormat::Rgba8Unorm,
+        TextureUsages::RENDER_ATTACHMENT,
+    ));
+    let target_view = device.create_texture_view(target, &Default::default());
+    let args_buffer = device.create_buffer(&BufferDescriptor {
+        label: Some("bin-args".into()),
+        size: 128,
+        usage: BufferUsages::INDIRECT | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut graph = RenderGraph::new(Extent3d::new_2d(4, 4));
+    let target = graph.import_texture(
+        "target",
+        TextureDesc::color(TextureFormat::Rgba8Unorm),
+        ImportedTexture {
+            texture: target,
+            default_view: target_view,
+            entry_state: prism_render_driver::TextureState::initial(),
+            exit_state: prism_render_driver::TextureState::copy_src(),
+            mip_levels: 1,
+            array_layers: 1,
+        },
+    );
+    let args = graph.import_buffer(
+        "bin-args",
+        BufferDesc::new(128, BufferUsages::INDIRECT),
+        ImportedBuffer {
+            buffer: args_buffer,
+            entry_state: BufferState::initial(),
+        },
+    );
+
+    let mut functions = DrawFunctions::new();
+    let draw = functions.register(crate::mesh_bin_draw);
+    let mut queues = RenderQueues::new();
+    let mut specializer = MeshPipelineSpecializer::new();
+    let outcome = queues.fill_bins(
+        &device,
+        &mut specializer,
+        &fixture.registry,
+        &fixture.instances,
+        args,
+        &bins,
+        None,
+        1,
+        draw,
+        &provider,
+    );
+    assert_eq!(
+        outcome,
+        crate::BinQueueOutcome {
+            queued: 2,
+            unknown_class: 0,
+            unresolved: 0
+        }
+    );
+    assert_eq!(specializer.pipeline_count(), 2, "one pipeline per class");
+
+    // Each bin lands in the phase its packed class names, and its argument
+    // range is its own slot range in the packed stream.
+    let opaque = queues.phase(RenderPhase::Opaque);
+    let clear = queues.phase(RenderPhase::Transparent);
+    assert_eq!(opaque.len(), 1, "the opaque bin queues in the opaque phase");
+    assert_eq!(clear.len(), 1, "the transparent bin is blend-family phased");
+    assert_eq!(
+        (opaque[0].scene, opaque[0].geometry),
+        (fixture.opaque, fixture.geometry),
+        "the opaque bin represents the opaque instance's geometry"
+    );
+    assert_eq!(
+        clear[0].scene, fixture.transparent,
+        "the transparent bin represents its own instance"
+    );
+    let opaque_args = opaque[0].indirect.expect("a bin item carries args");
+    assert_eq!(opaque_args.offset, 0, "the first bin owns slot 0");
+    assert_eq!(opaque_args.count, 1);
+    let clear_args = clear[0].indirect.expect("a bin item carries args");
+    assert_eq!(clear_args.offset, 20, "the second bin owns slot 1");
+    assert_eq!(clear_args.count, 1);
+    assert_eq!(
+        clear_args.stride,
+        prism_render_driver::DRAW_INDEXED_INDIRECT_ARGS_SIZE
+    );
+    assert_eq!(
+        opaque[0].indices.map(|(_, format)| format),
+        Some(IndexFormat::Uint16)
+    );
+
+    graph.add_raster_pass("bin-draw", PassFlags::SIDE_EFFECT, move |builder| {
+        let _ = builder.color_attachment(target);
+        let _ = builder.read_indirect(args);
+        move |ctx| {
+            queues.record(RenderPhase::Opaque, ctx, &functions);
+            queues.record(RenderPhase::Transparent, ctx, &functions);
+        }
+    });
+
+    let capture = CapturingQueue::default();
+    graph.execute(&device, &capture).expect("the graph executes");
+    let buffers: Vec<CommandBuffer> = capture.take();
+    let commands = buffers
+        .iter()
+        .find_map(|buffer| match buffer.passes.first() {
+            Some(Pass::Render { commands, .. }) => Some(commands),
+            _ => None,
+        })
+        .expect("the raster pass was recorded");
+    let multi: Vec<(u32, u64)> = commands
+        .iter()
+        .filter_map(|command| match command {
+            RenderCommand::MultiDrawIndirect {
+                offset, count, ..
+            } => Some((*count, *offset)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        multi,
+        vec![(1, 0), (1, 20)],
+        "one multi-draw per bin, in packed slot order"
+    );
+}
+
+/// The invariant that item ④/⑤ exist to preserve: the direct path and the bin
+/// path must reach the *same* pipeline for the same material. The bin key only
+/// carries the compact class, so a decode that produced a different shader
+/// identity would compile a second PSO for identical draws.
+#[test]
+fn direct_and_bin_paths_specialize_one_pipeline_per_material() {
+    use prism_render_visibility::build_view_draw_bins;
+
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let fixture = bin_fixture(&device);
+    let provider = StubProvider::new(&device);
+
+    let mut queues = RenderQueues::new();
+    let mut specializer = MeshPipelineSpecializer::new();
+    let queued = queues.fill_from_visibility(
+        &device,
+        &mut specializer,
+        &fixture.registry,
+        &fixture.work,
+        None,
+        1,
+        DrawFunctionId(0),
+        &provider,
+    );
+    assert_eq!(queued, 2);
+    assert_eq!(specializer.pipeline_count(), 2);
+
+    let bins = build_view_draw_bins(
+        GenerationalHandle::new(0, 1),
+        8,
+        fixture.registry.bin_candidates(&fixture.work),
+    );
+    let outcome = queues.fill_bins(
+        &device,
+        &mut specializer,
+        &fixture.registry,
+        &fixture.instances,
+        declared_args_buffer(&device),
+        &bins,
+        None,
+        1,
+        DrawFunctionId(0),
+        &provider,
+    );
+    assert_eq!(outcome.queued, 2, "the bin path queues both instances");
+    assert_eq!(
+        specializer.pipeline_count(),
+        2,
+        "the bin path reuses the direct path's pipelines instead of compiling more"
+    );
+}
+
+/// Packing several bin streams into one argument buffer moves each stream's
+/// slots past the previous stream's, and the queued range follows the packed
+/// base (the same base `GpuDrawBinHeader::from_range_at` publishes).
+#[test]
+fn packed_bin_streams_offset_the_indirect_arguments() {
+    use prism_render_visibility::{build_view_draw_bins, pack_draw_bin_streams};
+
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let fixture = bin_fixture(&device);
+    let provider = StubProvider::new(&device);
+
+    // Two views seeing the same two instances each: four commands in total.
+    let mut first = build_view_draw_bins(
+        GenerationalHandle::new(0, 1),
+        8,
+        fixture.registry.bin_candidates(&fixture.work),
+    );
+    let mut second = build_view_draw_bins(
+        GenerationalHandle::new(1, 1),
+        8,
+        fixture.registry.bin_candidates(&fixture.work),
+    );
+    pack_draw_bin_streams([&mut first, &mut second]);
+    assert_eq!(second.command_buffer_start, first.command_count);
+
+    let mut queues = RenderQueues::new();
+    let mut specializer = MeshPipelineSpecializer::new();
+    let outcome = queues.fill_bins(
+        &device,
+        &mut specializer,
+        &fixture.registry,
+        &fixture.instances,
+        declared_args_buffer(&device),
+        &second,
+        None,
+        1,
+        DrawFunctionId(0),
+        &provider,
+    );
+    assert_eq!(outcome.queued, 2);
+
+    // The second stream's bins sit past the first stream's two slots.
+    let base = u64::from(first.command_count)
+        * u64::from(prism_render_driver::DRAW_INDEXED_INDIRECT_ARGS_SIZE);
+    let offsets: Vec<u64> = [RenderPhase::Opaque, RenderPhase::Transparent]
+        .into_iter()
+        .flat_map(|phase| queues.phase(phase))
+        .map(|item| item.indirect.expect("a bin item carries args").offset)
+        .collect();
+    assert_eq!(offsets, vec![base, base + 20]);
+}
+
+/// A bin whose packed class does not decode, and one whose pipeline is not
+/// resident, are counted as skips instead of queueing an unusable draw.
+#[test]
+fn undecodable_and_unresolved_bins_are_counted() {
+    use prism_render_visibility::build_view_draw_bins;
+
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let fixture = bin_fixture(&device);
+    let provider = StubProvider::new(&device);
+
+    let mut candidates = fixture.registry.bin_candidates(&fixture.work);
+    // A foreign permutation class: bits outside the packed field width.
+    let mut foreign = candidates[0];
+    foreign.key.pipeline_class = 1 << prism_render_material::BIN_CLASS_BITS;
+    // A bin whose vertex-buffer class has no resident pipeline inputs.
+    let mut orphan = candidates[1];
+    orphan.key.vertex_buffer_class = 99;
+    candidates.push(foreign);
+    candidates.push(orphan);
+
+    let bins = build_view_draw_bins(
+        GenerationalHandle::new(0, 1),
+        8,
+        candidates,
+    );
+    let mut queues = RenderQueues::new();
+    let mut specializer = MeshPipelineSpecializer::new();
+    let outcome = queues.fill_bins(
+        &device,
+        &mut specializer,
+        &fixture.registry,
+        &fixture.instances,
+        declared_args_buffer(&device),
+        &bins,
+        None,
+        1,
+        DrawFunctionId(0),
+        &provider,
+    );
+    assert_eq!(outcome.queued, 2, "the two drawable bins still queue");
+    assert_eq!(outcome.unknown_class, 1, "the foreign class is not guessed");
+    assert_eq!(outcome.unresolved, 1, "the orphan class is not drawn");
+    assert_eq!(outcome.total(), bins.bins.len());
 }

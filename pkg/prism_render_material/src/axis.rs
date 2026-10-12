@@ -13,6 +13,8 @@
 //! [`SpecializationId`], the stable key that classification buckets on today
 //! and that the WESL specialization pipeline keys on later.
 
+use crate::record::MaterialRenderClass;
+
 /// The *style* axis: how a surface interprets the shared lighting data.
 ///
 /// This is orthogonal to the closure graph and to the blend family. NPR is a
@@ -46,6 +48,10 @@ impl Illumination {
         }
     }
 }
+
+/// The bit width of a compact [`SpecializationId::bin_class`] value:
+/// `illumination` 2 bits, `render_class` 8, live lobe set 17.
+pub const BIN_CLASS_BITS: u32 = 27;
 
 /// Deterministic identity of one compiled shader permutation.
 ///
@@ -121,6 +127,32 @@ impl SpecializationId {
         (self.illumination_bits() & 0x3)
             | ((self.render_class_bits() & 0xFF) << 2)
             | ((self.closure_mask() & 0x1_FFFF) << 10)
+    }
+
+    /// Reconstructs the canonical key from a compact [`bin_class`] value.
+    ///
+    /// [`bin_class`]: Self::bin_class
+    ///
+    /// This is the exact inverse of [`bin_class`](Self::bin_class) for every
+    /// material whose live lobe set fits the `LobeMask` vocabulary (bits
+    /// `0..17`) — which every legal material does. Binning stores only the
+    /// compact class, so recovering the full key is what lets the GPU-driven bin
+    /// path and the CPU direct path land on the **same** pipeline instead of one
+    /// keyed on the raw `u64` and one on the compact `u32`.
+    ///
+    /// Returns `None` when `bin_class` cannot be a legal class: bits above the
+    /// documented [`BIN_CLASS_BITS`] width are set, or the packed render class is
+    /// not a [`MaterialRenderClass`].
+    #[must_use]
+    pub fn from_bin_class(bin_class: u32) -> Option<Self> {
+        if bin_class >> BIN_CLASS_BITS != 0 {
+            return None;
+        }
+        let illumination = Illumination::from_u32(bin_class & 0x3)?;
+        let render_class = (bin_class >> 2) & 0xFF;
+        MaterialRenderClass::from_u32(render_class)?;
+        let closure_mask = (bin_class >> 10) & 0x1_FFFF;
+        Some(Self::new(illumination, closure_mask, render_class))
     }
 }
 
@@ -216,6 +248,50 @@ mod tests {
 
         // The projection fits the documented field widths (27 bits total).
         let widest = SpecializationId::new(Illumination::Custom, 0x1_FFFF, 0xFF);
-        assert_eq!(widest.bin_class() >> 27, 0, "bin class stays within 27 bits");
+        assert_eq!(
+            widest.bin_class() >> BIN_CLASS_BITS,
+            0,
+            "bin class stays within its documented width"
+        );
+    }
+
+    #[test]
+    fn bin_class_round_trips_through_from_bin_class() {
+        // Every legal axis combination survives the compact form, including the
+        // lobe-only differences that used to alias (bit 1 and bit 16).
+        for illumination in [
+            Illumination::Lit,
+            Illumination::Stylized,
+            Illumination::Unlit,
+            Illumination::Custom,
+        ] {
+            for closure_mask in [0_u32, 1, 1 << 1, 1 << 16, 0x1_FFFF, 0b1010_1001_0110_0101] {
+                for render_class in [0_u32, 1, 4, 7, 10] {
+                    let id = SpecializationId::new(illumination, closure_mask, render_class);
+                    assert_eq!(
+                        SpecializationId::from_bin_class(id.bin_class()),
+                        Some(id),
+                        "{id:?} round trips through its bin class"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn from_bin_class_rejects_unusable_classes() {
+        // Bits above the documented width cannot come from `bin_class`.
+        assert_eq!(
+            SpecializationId::from_bin_class(1 << BIN_CLASS_BITS),
+            None,
+            "a bit outside the packed fields is rejected"
+        );
+        assert_eq!(SpecializationId::from_bin_class(u32::MAX), None);
+        // A render class outside the vocabulary is rejected rather than trusted.
+        assert_eq!(
+            SpecializationId::from_bin_class(11 << 2),
+            None,
+            "an unknown render class is not a legal permutation"
+        );
     }
 }
