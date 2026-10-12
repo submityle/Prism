@@ -25,6 +25,12 @@ prism_reflect = { path = "../prism_reflect", default-features = false, features 
 default = ["std"]
 std = ["prism_time/std"]
 
+# §8.2 / §20: dispatch each phase schedule's conflict-free system waves across a
+# `prism_tasks` work-stealing pool (stage-internal parallelism). Pulls in
+# `prism_ecs/multi_thread` (the conflict-graph executor) + `prism_tasks`, so it
+# needs `std`. Off by default; a serial build pays nothing for it.
+multi_thread = ["std", "prism_ecs/multi_thread", "dep:prism_tasks"]
+
 # Cross-thread sub-app pipelining (design §9 / §24.3 / §25.2): run a secondary
 # (e.g. render) sub-app for frame N on a worker thread while the main sub-app
 # simulates frame N+1. Opt-in at runtime via

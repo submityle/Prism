@@ -300,7 +300,7 @@ Runner 经 `app.set_runner(..)` 注入；默认按 capability（有无显示器�
 
 - **装配零运行时开销**：插件/依赖解析只在启动期做；运行期是纯 Schedule 执行，无动态查表。
 - **流水线重叠**：§9 让仿真/渲染错帧并行，吞吐接近翻倍。
-- **阶段内并行**：阶段 system 走 ECS 冲突图 + fiber 作业图，近线性扩展。
+- **阶段内并行**（✅ `multi_thread` feature）：阶段 system 走 ECS 冲突图，冲突无关的 system 波次投到共享 `prism_tasks` 池并发执行（`SubApp::run_schedule` → `World::run_schedule_parallel`）；`App::new` 自动装池，`App::set_task_pool` 可共享/调线程数。fiber 让"等依赖"的作业让出 worker（prism_tasks §24.2），近线性扩展。
 - **extract 最小化**：只提取「可见 + 变化」数据（接 ECS 脏块访问器），成本 ∝ 变化量。
 - **帧节奏稳定**：优先稳定 1%low 而非平均 FPS；熔断防死亡螺旋。
 - **无头精简**：server 档不建渲染子应用/窗口，纯心跳。
@@ -384,7 +384,7 @@ pkg/prism_app/
 ## 23. 诚实边界与风险
 
 - 本文为设计规格。**截至 2026-10 代码已进入实现**：M0–M3 主体、M4 窗口 Runner、M5 确定性+回滚+重放+对端同步与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——M4 的移动端设备丢失**重建**（检测链路已端到端贯通：wgpu 回调 → RHI `take_device_lost` → `RenderRuntime` → `PrismRenderPlugin` 桥 → `prism_app` 的 `DeviceLost` / `Recovering`；重建/重上传仍待做）、M6 的热重载/`prism_bevy` 退役/PIE、§24.9 的每窗口渲染目标、网络传输层仍未实现（多窗口、多世界、平台 suspend / low-memory 回调、设备丢失检测已落地，见 §24.10/§25.5）。
-- **feature 面尚未完全对齐**：已按真实实现定义 `std`/`pipelined`/`determinism`/`winit`/`reflect`/`trace`；§20 里的 `multi_thread`/`headless` 仍未定义，需与真实实现一起落地，**不提前声明空开关**，避免假实现。
+- **feature 面尚未完全对齐**：已按真实实现定义 `std`/`multi_thread`（阶段内并行，接 `prism_ecs/multi_thread` 的冲突图执行器）/`pipelined`/`pipelined-tasks`/`determinism`/`winit`/`reflect`/`trace`/`hot-reload`；§20 里的 `headless` 仍未定义（`HeadlessRunner` 本身就是无依赖的默认构件，暂不造空开关），**不提前声明空开关**，避免假实现。
 - **高风险项**：
   1. **extract 管线 + 流水线并行（M3）**：跨 World 只读提取 + 跨线程生命周期是正确性要害；须先定义稳定 `ExtractComponent` trait，再上并行；可先串行提取跑通，再开 `pipelined`。这是 `prism_render_scene` 能否干净脱 Bevy 的决定性接缝。
   2. **固定步长熔断（M2）**：死亡螺旋参数（max_frame_dt/max_substeps）需按内容压测标定，错配会在卡顿时放大为慢放或卡死。

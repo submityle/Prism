@@ -141,7 +141,21 @@ impl SubApp {
     /// A missing label is a no-op: a phase with no schedule simply does
     /// nothing. This keeps the frame loop total even when a user never adds
     /// systems to, say, `PreUpdate`.
+    ///
+    /// Under the `multi_thread` feature, a world carrying a
+    /// [`TaskPoolResource`](crate::tasks::TaskPoolResource) dispatches the
+    /// schedule's conflict-free system waves across that pool (design §8.2);
+    /// otherwise (or with the feature off) it runs single-threaded.
     pub fn run_schedule(&mut self, label: impl ScheduleLabel) {
+        #[cfg(feature = "multi_thread")]
+        if let Some(pool) = self
+            .world
+            .get_resource::<crate::tasks::TaskPoolResource>()
+            .map(|resource| resource.0.clone())
+        {
+            self.world.run_schedule_parallel(label, &pool);
+            return;
+        }
         self.world.run_schedule(label);
     }
 

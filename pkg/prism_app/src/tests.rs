@@ -8404,3 +8404,74 @@ mod cvar_tests {
         assert_eq!(registry.len(), 2);
     }
 }
+
+/// Tests for the `multi_thread` feature: stage-internal parallelism (design
+/// §8.2), where each phase schedule's conflict-free system waves run across the
+/// app's `prism_tasks` pool.
+#[cfg(feature = "multi_thread")]
+mod multi_thread_tests {
+    use super::*;
+
+    /// `App::new` installs a pool, and `set_task_pool` replaces it (e.g. to share
+    /// one pool across apps), still running frames.
+    #[test]
+    fn app_installs_and_can_replace_the_task_pool() {
+        let mut app = App::new();
+        assert!(app.task_pool().is_some(), "App::new installs a pool");
+
+        app.set_task_pool(prism_tasks::TaskPool::with_threads(1));
+        assert!(app.task_pool().is_some(), "the shared pool is installed");
+        app.update();
+    }
+
+    /// Every system in a conflict-free wave runs exactly once per frame, even
+    /// though they touch disjoint resources and may run concurrently.
+    #[test]
+    fn parallel_schedule_runs_every_system_once_per_frame() {
+        #[derive(Default)]
+        struct A(i64);
+        impl Resource for A {}
+        #[derive(Default)]
+        struct B(i64);
+        impl Resource for B {}
+
+        let mut app = App::new();
+        app.set_task_pool(prism_tasks::TaskPool::with_threads(4));
+        app.insert_resource(A::default());
+        app.insert_resource(B::default());
+        app.add_systems(Update, |mut a: ResMut<A>| a.0 += 1);
+        app.add_systems(Update, |mut b: ResMut<B>| b.0 += 2);
+
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<A>().0, 5);
+        assert_eq!(app.world().resource::<B>().0, 10);
+    }
+
+    /// A conflict-free wave really is dispatched onto worker threads: with four
+    /// disjoint systems on a four-worker pool, more than one thread runs them.
+    #[test]
+    fn parallel_dispatch_uses_worker_threads() {
+        use std::collections::HashSet;
+
+        let ids: Arc<Mutex<HashSet<std::thread::ThreadId>>> = Arc::new(Mutex::new(HashSet::new()));
+        let mut app = App::new();
+        app.set_task_pool(prism_tasks::TaskPool::with_threads(4));
+        for _ in 0..4 {
+            let ids = Arc::clone(&ids);
+            app.add_systems(Update, move || {
+                // A little work so a worker (not only the helping main thread)
+                // picks the system up, making multi-threaded execution observable.
+                std::thread::sleep(Duration::from_millis(10));
+                ids.lock().unwrap().insert(std::thread::current().id());
+            });
+        }
+        app.update();
+
+        assert!(
+            ids.lock().unwrap().len() >= 2,
+            "a conflict-free wave must run across more than one thread"
+        );
+    }
+}

@@ -122,4 +122,32 @@ impl World {
             schedules.insert_boxed(boxed, schedule);
         }
     }
+
+    /// Run the schedule registered under `label` against this world, dispatching
+    /// its conflict-free system waves across `pool` (design §8.2).
+    ///
+    /// The parallel twin of [`run_schedule`](World::run_schedule), with the same
+    /// remove-run-reinsert dance so the schedule can run against `&mut World`
+    /// without aliasing. A missing [`Schedules`] resource or an unregistered
+    /// label is a no-op.
+    ///
+    /// Available only with the `multi_thread` feature.
+    #[cfg(feature = "multi_thread")]
+    pub fn run_schedule_parallel(
+        &mut self,
+        label: impl ScheduleLabel,
+        pool: &prism_tasks::TaskPool,
+    ) {
+        let boxed = BoxedScheduleLabel::new(label);
+        let Some(mut schedule) = self
+            .get_resource_mut::<Schedules>()
+            .and_then(|schedules| schedules.remove_boxed(&boxed))
+        else {
+            return;
+        };
+        schedule.run_parallel(pool, self);
+        if let Some(schedules) = self.get_resource_mut::<Schedules>() {
+            schedules.insert_boxed(boxed, schedule);
+        }
+    }
 }

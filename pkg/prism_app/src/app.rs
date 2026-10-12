@@ -126,6 +126,11 @@ impl App {
         app.sub_apps.main.world.insert_resource(capabilities);
         app.sub_apps.main.world.insert_resource(quality_tier);
         app.sub_apps.main.world.insert_resource(run_mode);
+        // Parallel phase execution (design §8.2, `multi_thread`): install a
+        // private work-stealing pool so each schedule's conflict-free system
+        // waves run across worker threads. `set_task_pool` shares one instead.
+        #[cfg(feature = "multi_thread")]
+        app.set_task_pool(prism_tasks::TaskPool::new());
         app
     }
 
@@ -653,6 +658,28 @@ impl App {
     pub fn sync_sub_apps(&mut self) -> &mut Self {
         #[cfg(feature = "pipelined")]
         self.sub_apps.sync();
+        self
+    }
+
+    /// The `prism_tasks` pool the main sub-app's schedules dispatch onto, when
+    /// the `multi_thread` feature is on (design §8.2). `None` when the feature
+    /// is off or no pool was installed.
+    #[cfg(feature = "multi_thread")]
+    #[must_use]
+    pub fn task_pool(&self) -> Option<&crate::tasks::TaskPoolResource> {
+        self.world().get_resource::<crate::tasks::TaskPoolResource>()
+    }
+
+    /// Install (or replace) the `prism_tasks` pool the main sub-app's schedules
+    /// dispatch conflict-free system waves onto (design §8.2).
+    ///
+    /// Under the `multi_thread` feature [`App::new`] already installs a private
+    /// pool; call this to *share* one pool across several apps (or tune the
+    /// worker count with [`prism_tasks::TaskPool::with_threads`]).
+    #[cfg(feature = "multi_thread")]
+    pub fn set_task_pool(&mut self, pool: prism_tasks::TaskPool) -> &mut Self {
+        self.world_mut()
+            .insert_resource(crate::tasks::TaskPoolResource(pool));
         self
     }
 
