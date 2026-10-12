@@ -218,9 +218,9 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
             parameters.base_color[2],
         ],
         base_weight: parameters.base_weight,
-        diffuse_roughness: parameters.diffuse_roughness,
-        metallic: parameters.metallic,
-        perceptual_roughness: parameters.perceptual_roughness,
+        diffuse_roughness: parameters.base_diffuse_roughness,
+        metallic: parameters.base_metalness,
+        perceptual_roughness: parameters.specular_roughness,
         specular_weight: parameters.specular_weight,
         specular_color: [
             parameters.specular_color[0],
@@ -228,9 +228,9 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
             parameters.specular_color[2],
         ],
         specular_ior: parameters.specular_ior,
-        transmission: parameters.transmission,
+        transmission: parameters.transmission_weight,
         index_of_refraction: parameters.index_of_refraction,
-        dispersion: parameters.dispersion,
+        dispersion: parameters.transmission_dispersion_scale,
         thin_walled: parameters.thin_walled,
         geometry_opacity: parameters.geometry_opacity,
         transmission_color: [
@@ -246,16 +246,16 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         transmission_scatter_anisotropy: parameters.transmission_scatter_anisotropy,
         transmission_dispersion_abbe_number: parameters.transmission_dispersion_abbe_number,
         coat_darkening: parameters.coat_darkening,
-        scatter_anisotropy: parameters.scatter_anisotropy,
+        scatter_anisotropy: parameters.subsurface_scatter_anisotropy,
         ambient_occlusion: parameters.ambient_occlusion,
         // `OpenPBR` emission: radiance = emission_color * emission_luminance.
         emissive: [
-            parameters.emissive[0] * parameters.emission_luminance,
-            parameters.emissive[1] * parameters.emission_luminance,
-            parameters.emissive[2] * parameters.emission_luminance,
+            parameters.emission_color[0] * parameters.emission_luminance,
+            parameters.emission_color[1] * parameters.emission_luminance,
+            parameters.emission_color[2] * parameters.emission_luminance,
         ],
-        clearcoat: parameters.clearcoat,
-        clearcoat_roughness: parameters.clearcoat_roughness,
+        clearcoat: parameters.coat_weight,
+        clearcoat_roughness: parameters.coat_roughness,
         coat_ior: parameters.coat_ior,
         coat_color: [
             parameters.coat_color[0],
@@ -270,14 +270,14 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         // `geometry_coat_tangent` is a shade-time input; the material block does
         // not carry it, so the coat inherits the base frame tangent.
         coat_tangent: [0.0; 3],
-        sheen: parameters.sheen,
+        sheen: parameters.fuzz_weight,
         fuzz_roughness: parameters.fuzz_roughness,
         fuzz_color: [
             parameters.fuzz_color[0],
             parameters.fuzz_color[1],
             parameters.fuzz_color[2],
         ],
-        subsurface: parameters.subsurface,
+        subsurface: parameters.subsurface_weight,
         subsurface_color: [
             parameters.subsurface_color[0],
             parameters.subsurface_color[1],
@@ -317,16 +317,16 @@ fn modulation_params_from(parameters: &GpuSurfaceParameters) -> MaterialModulati
     MaterialModulationParams {
         base_color: parameters.base_color,
         emissive: [
-            parameters.emissive[0],
-            parameters.emissive[1],
-            parameters.emissive[2],
+            parameters.emission_color[0],
+            parameters.emission_color[1],
+            parameters.emission_color[2],
         ],
-        metallic: parameters.metallic,
-        perceptual_roughness: parameters.perceptual_roughness,
+        metallic: parameters.base_metalness,
+        perceptual_roughness: parameters.specular_roughness,
         ambient_occlusion: parameters.ambient_occlusion,
         normal_scale: parameters.normal_scale,
-        clearcoat: parameters.clearcoat,
-        clearcoat_roughness: parameters.clearcoat_roughness,
+        clearcoat: parameters.coat_weight,
+        clearcoat_roughness: parameters.coat_roughness,
     }
 }
 
@@ -739,7 +739,7 @@ mod tests {
     #[test]
     fn emission_luminance_and_geometry_opacity_reach_the_sample() {
         let parameters = GpuSurfaceParameters {
-            emissive: [1.0, 0.5, 0.25, 1.0],
+            emission_color: [1.0, 0.5, 0.25, 1.0],
             emission_luminance: 4.0,
             geometry_opacity: 0.4,
             ..Default::default()
@@ -823,7 +823,7 @@ mod tests {
         header.illumination = Illumination::Unlit as u32;
         let parameters = GpuSurfaceParameters {
             base_color: [0.2, 0.4, 0.6, 1.0],
-            emissive: [0.1, 0.0, 0.0, 0.0],
+            emission_color: [0.1, 0.0, 0.0, 0.0],
             ..Default::default()
         };
         let light = DirectionalLight {
@@ -854,7 +854,7 @@ mod tests {
         let header = principled_header();
         let parameters = GpuSurfaceParameters {
             base_color: [0.5, 0.5, 0.5, 1.0],
-            emissive: [2.0, 2.0, 2.0, 0.0],
+            emission_color: [2.0, 2.0, 2.0, 0.0],
             ..Default::default()
         };
         let light = DirectionalLight {
@@ -973,7 +973,7 @@ mod tests {
         let header = principled_header();
         let parameters = GpuSurfaceParameters {
             base_color: [0.8, 0.8, 0.8, 1.0],
-            perceptual_roughness: 0.6,
+            specular_roughness: 0.6,
             ..Default::default()
         };
         // The unit triangle sits on the z=0 plane; place the light above it so
@@ -1022,8 +1022,8 @@ mod tests {
         let header = principled_header();
         let parameters = GpuSurfaceParameters {
             base_color: [0.8, 0.8, 0.8, 1.0],
-            metallic: 0.0,
-            perceptual_roughness: 1.0,
+            base_metalness: 0.0,
+            specular_roughness: 1.0,
             ambient_occlusion: 1.0,
             ..Default::default()
         };
@@ -1070,7 +1070,7 @@ mod tests {
         header.illumination = Illumination::Unlit as u32;
         let parameters = GpuSurfaceParameters {
             base_color: [0.2, 0.4, 0.6, 1.0],
-            emissive: [0.1, 0.0, 0.0, 0.0],
+            emission_color: [0.1, 0.0, 0.0, 0.0],
             ..Default::default()
         };
         // A mid-grey sRGB base-color texel decodes to linear ~0.214 and scales
@@ -1114,8 +1114,8 @@ mod tests {
         let header = principled_header();
         let parameters = GpuSurfaceParameters {
             base_color: [0.8, 0.8, 0.8, 1.0],
-            metallic: 0.0,
-            perceptual_roughness: 0.5,
+            base_metalness: 0.0,
+            specular_roughness: 0.5,
             ..Default::default()
         };
         // Offset the light from the geometric normal so a tilt in the shading
@@ -1178,8 +1178,8 @@ mod tests {
         let header = principled_header();
         let parameters = GpuSurfaceParameters {
             base_color: [0.8, 0.8, 0.8, 1.0],
-            metallic: 1.0,
-            perceptual_roughness: 1.0,
+            base_metalness: 1.0,
+            specular_roughness: 1.0,
             ..Default::default()
         };
         let untextured = resolve_pixel(
@@ -1246,8 +1246,8 @@ mod tests {
         let header = principled_header();
         let parameters = GpuSurfaceParameters {
             base_color: [0.6, 0.7, 0.8, 1.0],
-            metallic: 0.3,
-            perceptual_roughness: 0.4,
+            base_metalness: 0.3,
+            specular_roughness: 0.4,
             ambient_occlusion: 1.0,
             ..Default::default()
         };
@@ -1319,7 +1319,7 @@ mod tests {
         let header = principled_header();
         let parameters = GpuSurfaceParameters {
             base_color: [0.8, 0.8, 0.8, 1.0],
-            metallic: 0.0,
+            base_metalness: 0.0,
             ..Default::default()
         };
         let ambient_only = LightingEnvironment {
@@ -1460,8 +1460,8 @@ mod tests {
         let header = principled_header();
         let parameters = GpuSurfaceParameters {
             base_color: [0.8, 0.7, 0.6, 1.0],
-            metallic: 0.2,
-            perceptual_roughness: 0.5,
+            base_metalness: 0.2,
+            specular_roughness: 0.5,
             ..Default::default()
         };
         let offset = [4.0, -2.0, 7.0];
@@ -1579,7 +1579,7 @@ mod tests {
         let header = principled_header();
         let parameters = GpuSurfaceParameters {
             base_color: [0.8, 0.6, 0.4, 1.0],
-            metallic: 0.0,
+            base_metalness: 0.0,
             ..Default::default()
         };
 

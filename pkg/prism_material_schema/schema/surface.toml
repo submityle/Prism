@@ -41,7 +41,7 @@ energy_policy = "coupled"
 view = "invariant"
 
 [[core.field]]
-name = "metallic"
+name = "base_metalness"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 4
@@ -52,7 +52,7 @@ energy_policy = "coupled"
 view = "invariant"
 
 [[core.field]]
-name = "perceptual_roughness"
+name = "specular_roughness"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 5
@@ -123,7 +123,7 @@ energy_policy = "coupled"
 view = "invariant"
 
 [[core.field]]
-name = "diffuse_roughness"
+name = "base_diffuse_roughness"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 11
@@ -218,7 +218,7 @@ stability = "stable"
 words = 8
 
 [[lobe.field]]
-name = "emissive"
+name = "emission_color"
 type = "vec4f"
 bit_region = "KHR"
 pack_slot = 0
@@ -279,7 +279,7 @@ stability = "stable"
 words = 16
 
 [[lobe.field]]
-name = "clearcoat"
+name = "coat_weight"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
@@ -291,7 +291,7 @@ energy_policy = "coupled"
 view = "invariant"
 
 [[lobe.field]]
-name = "clearcoat_roughness"
+name = "coat_roughness"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 1
@@ -473,7 +473,7 @@ stability = "stable"
 words = 8
 
 [[lobe.field]]
-name = "sheen"
+name = "fuzz_weight"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
@@ -539,7 +539,7 @@ stability = "stable"
 words = 16
 
 [[lobe.field]]
-name = "subsurface"
+name = "subsurface_weight"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
@@ -610,7 +610,7 @@ energy_policy = "coupled"
 view = "invariant"
 
 [[lobe.field]]
-name = "scatter_anisotropy"
+name = "subsurface_scatter_anisotropy"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 12
@@ -658,7 +658,7 @@ stability = "stable"
 words = 16
 
 [[lobe.field]]
-name = "transmission"
+name = "transmission_weight"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
@@ -692,7 +692,7 @@ energy_policy = "coupled"
 view = "dependent"
 
 [[lobe.field]]
-name = "dispersion"
+name = "transmission_dispersion_scale"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 3

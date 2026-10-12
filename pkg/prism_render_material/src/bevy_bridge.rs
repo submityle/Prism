@@ -77,10 +77,10 @@ pub fn import_openpbr_surface(
     };
     GpuSurfaceParameters {
         base_color: material.base_color.to_linear().to_f32_array(),
-        emissive: emission_color,
+        emission_color: emission_color,
         emission_luminance,
-        metallic: material.metallic,
-        perceptual_roughness: material.perceptual_roughness,
+        base_metalness: material.metallic,
+        specular_roughness: material.perceptual_roughness,
         // `OpenPBR` specular group. Bevy's `reflectance` is the
         // `KHR_materials_specular`-style `F0 = 0.16*r^2` remap, so invert it
         // back to a physical IOR (`ior = (1+sqrt(F0))/(1-sqrt(F0))`) and the
@@ -91,12 +91,12 @@ pub fn import_openpbr_surface(
         ambient_occlusion: 1.0,
         normal_scale: 1.0,
         alpha_cutoff,
-        transmission: material
+        transmission_weight: material
             .specular_transmission
             .max(material.diffuse_transmission),
         thickness: material.thickness,
-        clearcoat: material.clearcoat,
-        clearcoat_roughness: material.clearcoat_perceptual_roughness,
+        coat_weight: material.clearcoat,
+        coat_roughness: material.clearcoat_perceptual_roughness,
         anisotropy: material.anisotropy_strength,
         anisotropy_rotation: material.anisotropy_rotation,
         index_of_refraction: material.ior,

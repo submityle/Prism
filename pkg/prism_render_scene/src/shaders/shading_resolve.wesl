@@ -1860,15 +1860,15 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     var surface: SurfaceSample;
     surface.base_color = sampled.base_color;
     surface.base_weight = parameters.base_weight;
-    surface.diffuse_roughness = parameters.diffuse_roughness;
+    surface.diffuse_roughness = parameters.base_diffuse_roughness;
     surface.metallic = sampled.metallic;
     surface.perceptual_roughness = sampled.perceptual_roughness;
     surface.specular_weight = parameters.specular_weight;
     surface.specular_color = parameters.specular_color.xyz;
     surface.specular_ior = parameters.specular_ior;
-    surface.transmission = parameters.transmission;
+    surface.transmission = parameters.transmission_weight;
     surface.index_of_refraction = parameters.index_of_refraction;
-    surface.dispersion = parameters.dispersion;
+    surface.dispersion = parameters.transmission_dispersion_scale;
     surface.thin_walled = parameters.thin_walled;
     surface.geometry_opacity = parameters.geometry_opacity;
     surface.transmission_color = parameters.transmission_color.xyz;
@@ -1877,7 +1877,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.transmission_dispersion_abbe_number =
         parameters.transmission_dispersion_abbe_number;
     surface.coat_darkening = parameters.coat_darkening;
-    surface.scatter_anisotropy = parameters.scatter_anisotropy;
+    surface.scatter_anisotropy = parameters.subsurface_scatter_anisotropy;
     // `OpenPBR` thin-film lobe -> Airy BSDF. The ABI stores micrometres (the
     // specification unit) and the shader evaluates nanometres, so convert here.
     // Weight 0 (the default) keeps the term inert.
@@ -1903,10 +1903,10 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     // `geometry_coat_tangent` is a shade-time input, so the coat inherits the
     // base frame tangent by default.
     surface.coat_tangent = vec3<f32>(0.0);
-    surface.sheen = parameters.sheen;
+    surface.sheen = parameters.fuzz_weight;
     surface.fuzz_roughness = parameters.fuzz_roughness;
     surface.fuzz_color = parameters.fuzz_color.xyz;
-    surface.subsurface = parameters.subsurface;
+    surface.subsurface = parameters.subsurface_weight;
     surface.subsurface_color = parameters.subsurface_color.xyz;
     surface.subsurface_radius = parameters.subsurface_radius;
     surface.subsurface_radius_scale = parameters.subsurface_radius_scale.xyz;

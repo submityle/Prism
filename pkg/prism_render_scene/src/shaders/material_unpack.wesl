@@ -66,40 +66,40 @@ fn prism_packed_word_count(lobe_mask: u32) -> u32 {
 fn prism_neutral_surface() -> PrismSurfaceParameters {
     var s: PrismSurfaceParameters;
     s.base_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
-    s.metallic = 0.0;
-    s.perceptual_roughness = 0.5;
+    s.base_metalness = 0.0;
+    s.specular_roughness = 0.5;
     s.specular_weight = 1.0;
     s.ambient_occlusion = 1.0;
     s.normal_scale = 1.0;
     s.alpha_cutoff = 0.5;
     s.base_weight = 1.0;
-    s.diffuse_roughness = 0.0;
+    s.base_diffuse_roughness = 0.0;
     s.specular_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     s.specular_ior = 1.5;
     s.thin_walled = 0.0;
     s.geometry_opacity = 1.0;
-    s.emissive = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    s.emission_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     s.emission_luminance = 1.0;
-    s.clearcoat = 0.0;
-    s.clearcoat_roughness = 0.5;
+    s.coat_weight = 0.0;
+    s.coat_roughness = 0.5;
     s.coat_ior = 1.5;
     s.coat_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     s.coat_roughness_anisotropy = 0.0;
     s.coat_darkening = 0.0;
     s.anisotropy = 0.0;
     s.anisotropy_rotation = 0.0;
-    s.sheen = 0.0;
+    s.fuzz_weight = 0.0;
     s.fuzz_roughness = 0.5;
     s.fuzz_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
-    s.subsurface = 0.0;
+    s.subsurface_weight = 0.0;
     s.subsurface_radius = 1.0;
     s.subsurface_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     s.subsurface_radius_scale = vec4<f32>(1.0, 0.5, 0.25, 1.0);
-    s.scatter_anisotropy = 0.0;
-    s.transmission = 0.0;
+    s.subsurface_scatter_anisotropy = 0.0;
+    s.transmission_weight = 0.0;
     s.thickness = 0.0;
     s.index_of_refraction = 1.5;
-    s.dispersion = 0.0;
+    s.transmission_dispersion_scale = 0.0;
     s.transmission_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     s.transmission_scatter = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     s.transmission_scatter_anisotropy = 0.0;
@@ -126,14 +126,14 @@ fn prism_unpack_surface(words: array<u32, 96>, lobe_mask: u32) -> PrismSurfacePa
         bitcast<f32>(w[2]),
         bitcast<f32>(w[3]),
     );
-    s.metallic = bitcast<f32>(w[4]);
-    s.perceptual_roughness = bitcast<f32>(w[5]);
+    s.base_metalness = bitcast<f32>(w[4]);
+    s.specular_roughness = bitcast<f32>(w[5]);
     s.specular_weight = bitcast<f32>(w[6]);
     s.ambient_occlusion = bitcast<f32>(w[7]);
     s.normal_scale = bitcast<f32>(w[8]);
     s.alpha_cutoff = bitcast<f32>(w[9]);
     s.base_weight = bitcast<f32>(w[10]);
-    s.diffuse_roughness = bitcast<f32>(w[11]);
+    s.base_diffuse_roughness = bitcast<f32>(w[11]);
     s.specular_color = vec4<f32>(
         bitcast<f32>(w[12]),
         bitcast<f32>(w[13]),
@@ -147,7 +147,7 @@ fn prism_unpack_surface(words: array<u32, 96>, lobe_mask: u32) -> PrismSurfacePa
     // Present lobes, canonical low-bit-first order, each its own footprint.
     var cursor: u32 = PRISM_SURFACE_CORE_WORDS;
     if (lobe_mask & PRISM_LOBE_EMISSION) != 0u {
-        s.emissive = vec4<f32>(
+        s.emission_color = vec4<f32>(
             bitcast<f32>(w[cursor]),
             bitcast<f32>(w[cursor + 1u]),
             bitcast<f32>(w[cursor + 2u]),
@@ -157,8 +157,8 @@ fn prism_unpack_surface(words: array<u32, 96>, lobe_mask: u32) -> PrismSurfacePa
         cursor += PRISM_LOBE_WORDS_EMISSION;
     }
     if (lobe_mask & PRISM_LOBE_CLEARCOAT) != 0u {
-        s.clearcoat = bitcast<f32>(w[cursor]);
-        s.clearcoat_roughness = bitcast<f32>(w[cursor + 1u]);
+        s.coat_weight = bitcast<f32>(w[cursor]);
+        s.coat_roughness = bitcast<f32>(w[cursor + 1u]);
         s.coat_ior = bitcast<f32>(w[cursor + 2u]);
         s.coat_color = vec4<f32>(
             bitcast<f32>(w[cursor + 4u]),
@@ -176,7 +176,7 @@ fn prism_unpack_surface(words: array<u32, 96>, lobe_mask: u32) -> PrismSurfacePa
         cursor += PRISM_LOBE_WORDS_ANISOTROPY;
     }
     if (lobe_mask & PRISM_LOBE_SHEEN) != 0u {
-        s.sheen = bitcast<f32>(w[cursor]);
+        s.fuzz_weight = bitcast<f32>(w[cursor]);
         s.fuzz_roughness = bitcast<f32>(w[cursor + 1u]);
         s.fuzz_color = vec4<f32>(
             bitcast<f32>(w[cursor + 4u]),
@@ -187,7 +187,7 @@ fn prism_unpack_surface(words: array<u32, 96>, lobe_mask: u32) -> PrismSurfacePa
         cursor += PRISM_LOBE_WORDS_SHEEN;
     }
     if (lobe_mask & PRISM_LOBE_SUBSURFACE) != 0u {
-        s.subsurface = bitcast<f32>(w[cursor]);
+        s.subsurface_weight = bitcast<f32>(w[cursor]);
         s.subsurface_radius = bitcast<f32>(w[cursor + 2u]);
         s.subsurface_color = vec4<f32>(
             bitcast<f32>(w[cursor + 4u]),
@@ -201,14 +201,14 @@ fn prism_unpack_surface(words: array<u32, 96>, lobe_mask: u32) -> PrismSurfacePa
             bitcast<f32>(w[cursor + 10u]),
             bitcast<f32>(w[cursor + 11u]),
         );
-        s.scatter_anisotropy = bitcast<f32>(w[cursor + 12u]);
+        s.subsurface_scatter_anisotropy = bitcast<f32>(w[cursor + 12u]);
         cursor += PRISM_LOBE_WORDS_SUBSURFACE;
     }
     if (lobe_mask & PRISM_LOBE_TRANSMISSION) != 0u {
-        s.transmission = bitcast<f32>(w[cursor]);
+        s.transmission_weight = bitcast<f32>(w[cursor]);
         s.thickness = bitcast<f32>(w[cursor + 1u]);
         s.index_of_refraction = bitcast<f32>(w[cursor + 2u]);
-        s.dispersion = bitcast<f32>(w[cursor + 3u]);
+        s.transmission_dispersion_scale = bitcast<f32>(w[cursor + 3u]);
         s.transmission_color = vec4<f32>(
             bitcast<f32>(w[cursor + 4u]),
             bitcast<f32>(w[cursor + 5u]),

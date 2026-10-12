@@ -23,11 +23,11 @@ struct PrismMaterialHeader {
 
 struct PrismSurfaceParameters {
     base_color: vec4<f32>,
-    emissive: vec4<f32>,
+    emission_color: vec4<f32>,
     // `OpenPBR` `emission_luminance` (nits); radiance = emissive * luminance.
     emission_luminance: f32,
-    metallic: f32,
-    perceptual_roughness: f32,
+    base_metalness: f32,
+    specular_roughness: f32,
     // `OpenPBR` specular group (see `brdf.wesl::SurfaceSample`).
     specular_weight: f32,
     specular_color: vec4<f32>,
@@ -42,32 +42,32 @@ struct PrismSurfaceParameters {
     // `OpenPBR` base group: `base_weight` scales the base layer and
     // `diffuse_roughness` drives the Oren-Nayar diffuse lobe.
     base_weight: f32,
-    diffuse_roughness: f32,
-    transmission: f32,
+    base_diffuse_roughness: f32,
+    transmission_weight: f32,
     thickness: f32,
-    clearcoat: f32,
-    clearcoat_roughness: f32,
+    coat_weight: f32,
+    coat_roughness: f32,
     // OpenPBR `coat_ior` (relative coat index) and `coat_color` (highlight
     // tint). Mirrors `GpuSurfaceParameters::coat_ior` / `coat_color`.
     coat_ior: f32,
     coat_color: vec4<f32>,
     anisotropy: f32,
     anisotropy_rotation: f32,
-    sheen: f32,
-    subsurface: f32,
+    fuzz_weight: f32,
+    subsurface_weight: f32,
     // `OpenPBR` subsurface group (see `brdf.wesl::SurfaceSample`).
     subsurface_color: vec4<f32>,
     subsurface_radius: f32,
     subsurface_radius_scale: vec4<f32>,
     index_of_refraction: f32,
-    dispersion: f32,
+    transmission_dispersion_scale: f32,
     // `OpenPBR` `transmission_color`: tint of the refracted light.
     transmission_color: vec4<f32>,
     transmission_scatter: vec4<f32>,
     transmission_scatter_anisotropy: f32,
     transmission_dispersion_abbe_number: f32,
     coat_darkening: f32,
-    scatter_anisotropy: f32,
+    subsurface_scatter_anisotropy: f32,
     face_softness: f32,
 }
 

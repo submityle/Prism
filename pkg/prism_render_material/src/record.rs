@@ -137,11 +137,11 @@ impl GpuMaterialHeader {
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuSurfaceParameters {
     pub base_color: [f32; 4],
-    pub emissive: [f32; 4],
+    pub emission_color: [f32; 4],
     /// `OpenPBR` `emission_luminance` (nits): radiance = emissive * luminance.
     pub emission_luminance: f32,
-    pub metallic: f32,
-    pub perceptual_roughness: f32,
+    pub base_metalness: f32,
+    pub specular_roughness: f32,
     /// `OpenPBR` `specular_weight`: scales the dielectric specular lobe.
     pub specular_weight: f32,
     pub ambient_occlusion: f32,
@@ -151,7 +151,7 @@ pub struct GpuSurfaceParameters {
     pub base_weight: f32,
     /// `OpenPBR` `diffuse_roughness`: Oren-Nayar micro-slope roughness of the
     /// base diffuse lobe (`0` = Lambert).
-    pub diffuse_roughness: f32,
+    pub base_diffuse_roughness: f32,
     /// `OpenPBR` `specular_color`: per-channel tint of the dielectric specular.
     pub specular_color: [f32; 4],
     /// `OpenPBR` `specular_ior`: dielectric specular interface index.
@@ -160,10 +160,10 @@ pub struct GpuSurfaceParameters {
     pub thin_walled: f32,
     /// `OpenPBR` `geometry_opacity` in [0, 1].
     pub geometry_opacity: f32,
-    pub transmission: f32,
+    pub transmission_weight: f32,
     pub thickness: f32,
-    pub clearcoat: f32,
-    pub clearcoat_roughness: f32,
+    pub coat_weight: f32,
+    pub coat_roughness: f32,
     /// `OpenPBR` `coat_ior`: relative index of refraction of the coat interface.
     pub coat_ior: f32,
     /// `OpenPBR` `coat_color`: per-channel tint of the coat highlight.
@@ -174,12 +174,12 @@ pub struct GpuSurfaceParameters {
     pub coat_darkening: f32,
     pub anisotropy: f32,
     pub anisotropy_rotation: f32,
-    pub sheen: f32,
+    pub fuzz_weight: f32,
     /// `OpenPBR` `fuzz_roughness`: independent width of the fuzz highlight.
     pub fuzz_roughness: f32,
     /// `OpenPBR` `fuzz_color`: per-channel tint of the fuzz lobe.
     pub fuzz_color: [f32; 4],
-    pub subsurface: f32,
+    pub subsurface_weight: f32,
     /// `OpenPBR` `subsurface_color`: tint of the scattered light.
     pub subsurface_color: [f32; 4],
     /// `OpenPBR` `subsurface_radius`: scalar scattering radius.
@@ -187,9 +187,9 @@ pub struct GpuSurfaceParameters {
     /// `OpenPBR` `subsurface_radius_scale`: per-channel split (color3).
     pub subsurface_radius_scale: [f32; 4],
     /// `OpenPBR` `scatter_anisotropy` in `[-1, 1]`.
-    pub scatter_anisotropy: f32,
+    pub subsurface_scatter_anisotropy: f32,
     pub index_of_refraction: f32,
-    pub dispersion: f32,
+    pub transmission_dispersion_scale: f32,
     /// `OpenPBR` `transmission_color`: tint of the refracted light.
     pub transmission_color: [f32; 4],
     /// `OpenPBR` `transmission_scatter` (color3, w unused).
@@ -217,40 +217,40 @@ impl Default for GpuSurfaceParameters {
     fn default() -> Self {
         Self {
             base_color: [1.0; 4],
-            emissive: [0.0; 4],
+            emission_color: [0.0; 4],
             emission_luminance: 1.0,
-            metallic: 0.0,
-            perceptual_roughness: 0.5,
+            base_metalness: 0.0,
+            specular_roughness: 0.5,
             specular_weight: 1.0,
             ambient_occlusion: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.5,
             base_weight: 1.0,
-            diffuse_roughness: 0.0,
+            base_diffuse_roughness: 0.0,
             specular_color: [1.0; 4],
             specular_ior: 1.5,
             thin_walled: 0.0,
             geometry_opacity: 1.0,
-            transmission: 0.0,
+            transmission_weight: 0.0,
             thickness: 0.0,
-            clearcoat: 0.0,
-            clearcoat_roughness: 0.5,
+            coat_weight: 0.0,
+            coat_roughness: 0.5,
             coat_ior: 1.5,
             coat_color: [1.0; 4],
             coat_roughness_anisotropy: 0.0,
             coat_darkening: 0.0,
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
-            sheen: 0.0,
+            fuzz_weight: 0.0,
             fuzz_roughness: 0.5,
             fuzz_color: [1.0; 4],
-            subsurface: 0.0,
+            subsurface_weight: 0.0,
             subsurface_color: [1.0; 4],
             subsurface_radius: 1.0,
             subsurface_radius_scale: [1.0, 0.5, 0.25, 1.0],
-            scatter_anisotropy: 0.0,
+            subsurface_scatter_anisotropy: 0.0,
             index_of_refraction: 1.5,
-            dispersion: 0.0,
+            transmission_dispersion_scale: 0.0,
             transmission_color: [1.0; 4],
             transmission_scatter: [0.0, 0.0, 0.0, 1.0],
             thin_film_weight: 0.0,

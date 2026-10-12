@@ -541,7 +541,7 @@ mod tests {
         assert!(wesl.contains("s.base_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);"));
         assert!(wesl.contains("s.index_of_refraction = 1.5;"));
         assert!(wesl.contains("s.face_softness = 0.1;"));
-        assert!(wesl.contains("s.perceptual_roughness = 0.5;"));
+        assert!(wesl.contains("s.specular_roughness = 0.5;"));
     }
 
     #[test]

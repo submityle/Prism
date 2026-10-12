@@ -247,7 +247,7 @@ fn openpbr_importer_preserves_the_emission_radiance() {
     let imported = import_openpbr_surface(&material, 0.5);
     assert!((imported.emission_luminance - 2.0).abs() < 1.0e-6);
     for (channel, expected) in [2.0f32, 1.0, 0.5].into_iter().enumerate() {
-        let radiance = imported.emissive[channel] * imported.emission_luminance;
+        let radiance = imported.emission_color[channel] * imported.emission_luminance;
         assert!(
             (radiance - expected).abs() < 1.0e-5,
             "channel {channel}: {radiance} vs {expected}"

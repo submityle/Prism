@@ -36,8 +36,8 @@ pub use crate::surface_layout::{
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuSurfaceCore {
     pub base_color: [f32; 4],
-    pub metallic: f32,
-    pub perceptual_roughness: f32,
+    pub base_metalness: f32,
+    pub specular_roughness: f32,
     /// `OpenPBR` `specular_weight`: scales the dielectric specular lobe. It
     /// replaces the former `reflectance` IOR proxy.
     pub specular_weight: f32,
@@ -48,7 +48,7 @@ pub struct GpuSurfaceCore {
     pub base_weight: f32,
     /// `OpenPBR` `diffuse_roughness`: micro-slope roughness of the base diffuse
     /// lobe (Oren-Nayar). `0` is exactly Lambert.
-    pub diffuse_roughness: f32,
+    pub base_diffuse_roughness: f32,
     /// `OpenPBR` `specular_color`: per-channel tint of the dielectric specular
     /// (white = the identity; metals use `base_color`).
     pub specular_color: [f32; 4],
@@ -69,14 +69,14 @@ impl Default for GpuSurfaceCore {
     fn default() -> Self {
         Self {
             base_color: [1.0; 4],
-            metallic: 0.0,
-            perceptual_roughness: 0.5,
+            base_metalness: 0.0,
+            specular_roughness: 0.5,
             specular_weight: 1.0,
             ambient_occlusion: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.5,
             base_weight: 1.0,
-            diffuse_roughness: 0.0,
+            base_diffuse_roughness: 0.0,
             specular_color: [1.0; 4],
             specular_ior: 1.5,
             thin_walled: 0.0,
@@ -91,7 +91,7 @@ impl Default for GpuSurfaceCore {
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuEmissionLobe {
     /// `OpenPBR` `emission_color` (Prism's long-standing `emissive` name).
-    pub emissive: [f32; 4],
+    pub emission_color: [f32; 4],
     /// `OpenPBR` `emission_luminance` in nits: emission radiance is
     /// `emissive * emission_luminance`.
     pub emission_luminance: f32,
@@ -103,7 +103,7 @@ pub struct GpuEmissionLobe {
 impl Default for GpuEmissionLobe {
     fn default() -> Self {
         Self {
-            emissive: [0.0; 4],
+            emission_color: [0.0; 4],
             emission_luminance: 1.0,
             _pad0: 0.0,
             _pad1: 0.0,
@@ -123,8 +123,8 @@ impl Default for GpuEmissionLobe {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuClearCoatLobe {
-    pub clearcoat: f32,
-    pub clearcoat_roughness: f32,
+    pub coat_weight: f32,
+    pub coat_roughness: f32,
     /// `OpenPBR` relative index of refraction of the coat interface.
     pub coat_ior: f32,
     pub _pad0: f32,
@@ -148,8 +148,8 @@ pub struct GpuClearCoatLobe {
 impl Default for GpuClearCoatLobe {
     fn default() -> Self {
         Self {
-            clearcoat: 0.0,
-            clearcoat_roughness: 0.5,
+            coat_weight: 0.0,
+            coat_roughness: 0.5,
             coat_ior: 1.5,
             _pad0: 0.0,
             coat_color: [1.0; 4],
@@ -183,7 +183,7 @@ pub struct GpuAnisotropyLobe {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuSheenLobe {
-    pub sheen: f32,
+    pub fuzz_weight: f32,
     /// `OpenPBR` `fuzz_roughness` in `[0, 1]`.
     pub fuzz_roughness: f32,
     pub _pad0: f32,
@@ -195,7 +195,7 @@ pub struct GpuSheenLobe {
 impl Default for GpuSheenLobe {
     fn default() -> Self {
         Self {
-            sheen: 0.0,
+            fuzz_weight: 0.0,
             fuzz_roughness: 0.5,
             _pad0: 0.0,
             _pad1: 0.0,
@@ -212,7 +212,7 @@ impl Default for GpuSheenLobe {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuSubsurfaceLobe {
-    pub subsurface: f32,
+    pub subsurface_weight: f32,
     pub _pad0: f32,
     /// `OpenPBR` `subsurface_radius`: scalar scattering radius (relative in this
     /// real-time lobe; the specification default is 1).
@@ -225,7 +225,7 @@ pub struct GpuSubsurfaceLobe {
     pub subsurface_radius_scale: [f32; 4],
     /// `OpenPBR` `scatter_anisotropy` in `[-1, 1]`: forward (+) / backward (-)
     /// bias of the transmitted lobe. `0.0` is the historical constant.
-    pub scatter_anisotropy: f32,
+    pub subsurface_scatter_anisotropy: f32,
     pub _pad2: f32,
     pub _pad3: f32,
     pub _pad4: f32,
@@ -234,13 +234,13 @@ pub struct GpuSubsurfaceLobe {
 impl Default for GpuSubsurfaceLobe {
     fn default() -> Self {
         Self {
-            subsurface: 0.0,
+            subsurface_weight: 0.0,
             _pad0: 0.0,
             subsurface_radius: 1.0,
             _pad1: 0.0,
             subsurface_color: [1.0; 4],
             subsurface_radius_scale: [1.0, 0.5, 0.25, 1.0],
-            scatter_anisotropy: 0.0,
+            subsurface_scatter_anisotropy: 0.0,
             _pad2: 0.0,
             _pad3: 0.0,
             _pad4: 0.0,
@@ -255,10 +255,10 @@ impl Default for GpuSubsurfaceLobe {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuTransmissionLobe {
-    pub transmission: f32,
+    pub transmission_weight: f32,
     pub thickness: f32,
     pub index_of_refraction: f32,
-    pub dispersion: f32,
+    pub transmission_dispersion_scale: f32,
     /// `OpenPBR` `transmission_color` (white = identity).
     pub transmission_color: [f32; 4],
     /// `OpenPBR` `transmission_scatter` (color3, w unused): per-channel fraction
@@ -277,10 +277,10 @@ pub struct GpuTransmissionLobe {
 impl Default for GpuTransmissionLobe {
     fn default() -> Self {
         Self {
-            transmission: 0.0,
+            transmission_weight: 0.0,
             thickness: 0.0,
             index_of_refraction: 1.5,
-            dispersion: 0.0,
+            transmission_dispersion_scale: 0.0,
             transmission_color: [1.0; 4],
             transmission_scatter: [0.0, 0.0, 0.0, 1.0],
             transmission_scatter_anisotropy: 0.0,
@@ -505,14 +505,14 @@ impl SurfaceParameterBlock {
         Self {
             core: GpuSurfaceCore {
                 base_color: params.base_color,
-                metallic: params.metallic,
-                perceptual_roughness: params.perceptual_roughness,
+                base_metalness: params.base_metalness,
+                specular_roughness: params.specular_roughness,
                 specular_weight: params.specular_weight,
                 ambient_occlusion: params.ambient_occlusion,
                 normal_scale: params.normal_scale,
                 alpha_cutoff: params.alpha_cutoff,
                 base_weight: params.base_weight,
-                diffuse_roughness: params.diffuse_roughness,
+                base_diffuse_roughness: params.base_diffuse_roughness,
                 specular_color: params.specular_color,
                 specular_ior: params.specular_ior,
                 thin_walled: params.thin_walled,
@@ -521,15 +521,15 @@ impl SurfaceParameterBlock {
             },
             lobe_mask,
             emission: GpuEmissionLobe {
-                emissive: params.emissive,
+                emission_color: params.emission_color,
                 emission_luminance: params.emission_luminance,
                 _pad0: 0.0,
                 _pad1: 0.0,
                 _pad2: 0.0,
             },
             clearcoat: GpuClearCoatLobe {
-                clearcoat: params.clearcoat,
-                clearcoat_roughness: params.clearcoat_roughness,
+                coat_weight: params.coat_weight,
+                coat_roughness: params.coat_roughness,
                 coat_ior: params.coat_ior,
                 _pad0: 0.0,
                 coat_color: params.coat_color,
@@ -549,29 +549,29 @@ impl SurfaceParameterBlock {
                 _pad1: 0.0,
             },
             sheen: GpuSheenLobe {
-                sheen: params.sheen,
+                fuzz_weight: params.fuzz_weight,
                 fuzz_roughness: params.fuzz_roughness,
                 _pad0: 0.0,
                 _pad1: 0.0,
                 fuzz_color: params.fuzz_color,
             },
             subsurface: GpuSubsurfaceLobe {
-                subsurface: params.subsurface,
+                subsurface_weight: params.subsurface_weight,
                 _pad0: 0.0,
                 subsurface_radius: params.subsurface_radius,
                 _pad1: 0.0,
                 subsurface_color: params.subsurface_color,
                 subsurface_radius_scale: params.subsurface_radius_scale,
-                scatter_anisotropy: params.scatter_anisotropy,
+                subsurface_scatter_anisotropy: params.subsurface_scatter_anisotropy,
                 _pad2: 0.0,
                 _pad3: 0.0,
                 _pad4: 0.0,
             },
             transmission: GpuTransmissionLobe {
-                transmission: params.transmission,
+                transmission_weight: params.transmission_weight,
                 thickness: params.thickness,
                 index_of_refraction: params.index_of_refraction,
-                dispersion: params.dispersion,
+                transmission_dispersion_scale: params.transmission_dispersion_scale,
                 transmission_color: params.transmission_color,
                 transmission_scatter: params.transmission_scatter,
                 transmission_scatter_anisotropy: params.transmission_scatter_anisotropy,
@@ -601,14 +601,14 @@ impl SurfaceParameterBlock {
     pub fn to_full(&self) -> GpuSurfaceParameters {
         let mut full = GpuSurfaceParameters {
             base_color: self.core.base_color,
-            metallic: self.core.metallic,
-            perceptual_roughness: self.core.perceptual_roughness,
+            base_metalness: self.core.base_metalness,
+            specular_roughness: self.core.specular_roughness,
             specular_weight: self.core.specular_weight,
             ambient_occlusion: self.core.ambient_occlusion,
             normal_scale: self.core.normal_scale,
             alpha_cutoff: self.core.alpha_cutoff,
             base_weight: self.core.base_weight,
-            diffuse_roughness: self.core.diffuse_roughness,
+            base_diffuse_roughness: self.core.base_diffuse_roughness,
             specular_color: self.core.specular_color,
             specular_ior: self.core.specular_ior,
             thin_walled: self.core.thin_walled,
@@ -616,12 +616,12 @@ impl SurfaceParameterBlock {
             ..GpuSurfaceParameters::default()
         };
         if self.lobe_mask.contains(LobeMask::EMISSION) {
-            full.emissive = self.emission.emissive;
+            full.emission_color = self.emission.emission_color;
             full.emission_luminance = self.emission.emission_luminance;
         }
         if self.lobe_mask.contains(LobeMask::CLEARCOAT) {
-            full.clearcoat = self.clearcoat.clearcoat;
-            full.clearcoat_roughness = self.clearcoat.clearcoat_roughness;
+            full.coat_weight = self.clearcoat.coat_weight;
+            full.coat_roughness = self.clearcoat.coat_roughness;
             full.coat_ior = self.clearcoat.coat_ior;
             full.coat_color = self.clearcoat.coat_color;
             full.coat_roughness_anisotropy = self.clearcoat.coat_roughness_anisotropy;
@@ -632,22 +632,22 @@ impl SurfaceParameterBlock {
             full.anisotropy_rotation = self.anisotropy.anisotropy_rotation;
         }
         if self.lobe_mask.contains(LobeMask::SHEEN) {
-            full.sheen = self.sheen.sheen;
+            full.fuzz_weight = self.sheen.fuzz_weight;
             full.fuzz_roughness = self.sheen.fuzz_roughness;
             full.fuzz_color = self.sheen.fuzz_color;
         }
         if self.lobe_mask.contains(LobeMask::SUBSURFACE) {
-            full.subsurface = self.subsurface.subsurface;
+            full.subsurface_weight = self.subsurface.subsurface_weight;
             full.subsurface_color = self.subsurface.subsurface_color;
             full.subsurface_radius = self.subsurface.subsurface_radius;
             full.subsurface_radius_scale = self.subsurface.subsurface_radius_scale;
-            full.scatter_anisotropy = self.subsurface.scatter_anisotropy;
+            full.subsurface_scatter_anisotropy = self.subsurface.subsurface_scatter_anisotropy;
         }
         if self.lobe_mask.contains(LobeMask::TRANSMISSION) {
-            full.transmission = self.transmission.transmission;
+            full.transmission_weight = self.transmission.transmission_weight;
             full.thickness = self.transmission.thickness;
             full.index_of_refraction = self.transmission.index_of_refraction;
-            full.dispersion = self.transmission.dispersion;
+            full.transmission_dispersion_scale = self.transmission.transmission_dispersion_scale;
             full.transmission_color = self.transmission.transmission_color;
             full.transmission_scatter = self.transmission.transmission_scatter;
             full.transmission_scatter_anisotropy =
@@ -784,40 +784,40 @@ mod tests {
     fn authored() -> GpuSurfaceParameters {
         GpuSurfaceParameters {
             base_color: [0.1, 0.2, 0.3, 1.0],
-            emissive: [2.0, 0.0, 0.0, 1.0],
+            emission_color: [2.0, 0.0, 0.0, 1.0],
             emission_luminance: 3.5,
-            metallic: 0.25,
-            perceptual_roughness: 0.4,
+            base_metalness: 0.25,
+            specular_roughness: 0.4,
             specular_weight: 0.65,
             ambient_occlusion: 0.9,
             normal_scale: 0.8,
             alpha_cutoff: 0.37,
             base_weight: 0.85,
-            diffuse_roughness: 0.4,
+            base_diffuse_roughness: 0.4,
             specular_color: [0.95, 0.97, 1.0, 1.0],
             specular_ior: 1.7,
             thin_walled: 0.0,
             geometry_opacity: 0.9,
-            transmission: 0.6,
+            transmission_weight: 0.6,
             thickness: 1.5,
-            clearcoat: 0.7,
-            clearcoat_roughness: 0.15,
+            coat_weight: 0.7,
+            coat_roughness: 0.15,
             coat_ior: 1.45,
             coat_color: [0.9, 0.95, 1.0, 1.0],
             coat_roughness_anisotropy: 0.35,
             coat_darkening: 0.6,
             anisotropy: 0.3,
             anisotropy_rotation: 0.2,
-            sheen: 0.45,
+            fuzz_weight: 0.45,
             fuzz_roughness: 0.3,
             fuzz_color: [0.8, 0.85, 0.9, 1.0],
-            subsurface: 0.65,
+            subsurface_weight: 0.65,
             subsurface_color: [0.9, 0.5, 0.4, 1.0],
             subsurface_radius: 0.8,
             subsurface_radius_scale: [1.0, 0.6, 0.4, 1.0],
-            scatter_anisotropy: 0.7,
+            subsurface_scatter_anisotropy: 0.7,
             index_of_refraction: 1.33,
-            dispersion: 0.05,
+            transmission_dispersion_scale: 0.05,
             transmission_color: [0.85, 0.95, 1.0, 1.0],
             transmission_scatter: [0.25, 0.15, 0.05, 1.0],
             transmission_scatter_anisotropy: -0.4,
@@ -985,11 +985,11 @@ mod tests {
         // Emission live, everything else masked out.
         let block = SurfaceParameterBlock::from_full(&params, LobeMask::EMISSION);
         let full = block.to_full();
-        assert_eq!(full.emissive, params.emissive);
+        assert_eq!(full.emission_color, params.emission_color);
         // Transmission/clearcoat/etc. were authored non-zero but are absent, so
         // they must read back as their neutral defaults, not the stale values.
-        assert_eq!(full.transmission, 0.0);
-        assert_eq!(full.clearcoat, 0.0);
+        assert_eq!(full.transmission_weight, 0.0);
+        assert_eq!(full.coat_weight, 0.0);
         assert_eq!(full.index_of_refraction, 1.5);
     }
 

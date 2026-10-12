@@ -723,7 +723,7 @@ mod tests {
         // + anisotropy (4) + sheen (8) + subsurface (16) = 72 is the transmission
         // base; the transmission lobe then packs its fields at 72..88.
         assert_eq!(
-            schema.lobe_field_offset(all, "transmission", "transmission"),
+            schema.lobe_field_offset(all, "transmission", "transmission_weight"),
             Some(72)
         );
         assert_eq!(
