@@ -219,11 +219,11 @@
 | **Specular** | `specular_weight` | float | `specular_weight` | ✅ |
 | | `specular_color` | color3 | `specular_color` | ✅ |
 | | `specular_roughness` | float | `specular_roughness`（本轮改名） | ⚠️ 仅默认 0.5 vs 0.3 |
-| | `specular_roughness_anisotropy` | float [0,1] | ANISOTROPY 瓣 `anisotropy`（带符号 [-1,1]）+ `anisotropy_rotation` | ⚠️ 类型/编码不一致，且多一个 rotation |
+| | `specular_roughness_anisotropy` | float [0,1] | ANISOTROPY 瓣：schema/ABI 标识符已改名 `specular_roughness_anisotropy`（值域 [0,1]），解码后的 Prism 字段经 `surface_field` 保留短名 `anisotropy`；方向来自 `geometry_tangent`，`anisotropy_rotation` 是 Prism 扩展 | ✅ 标识符 + 值域（本轮对齐）。⚠️ 残留：GGX 伸长仍用 Prism 的 `aspect = sqrt(1-0.9a)` 映射，未换成规范参考的 alpha 公式 |
 | | `specular_ior` | float | `specular_ior` | ✅ |
 | **Transmission** | `transmission_weight` | float | `transmission_weight`（本轮改名） | ✅ |
 | | `transmission_color` | color3 | `transmission_color` | ✅ |
-| | `transmission_depth` | float（length） | `thickness`（归一化 [0,1]） | ⚠️ 语义/单位不一致 |
+| | `transmission_depth` | float（length） | schema/ABI 标识符已改名 `transmission_depth`，解码后的 Prism 字段经 `surface_field` 保留 `thickness` | ⚠️ 标识符 ✅（本轮对齐）；**语义仍不符**：规范是"到达 `transmission_color` 的参考长度"且 `depth==0` 退化为非物理 tint，Prism 仍把该值当光学深度指数 |
 | | `transmission_scatter` | color3 | `transmission_scatter`（vec4，w 未用） | ✅（本轮修正类型） |
 | | `transmission_scatter_anisotropy` | float [-1,1] | `transmission_scatter_anisotropy` | ✅（本轮新增） |
 | | `transmission_dispersion_scale` | float | `transmission_dispersion_scale`（本轮改名） | ✅ |
@@ -243,7 +243,7 @@
 | | `geometry_normal` / `geometry_tangent` / `geometry_coat_normal` / `geometry_coat_tangent` | vector3 | **shade-time 输入**（非材质参数）：`ShadingFrame.{normal,tangent}` / `SurfaceSample.coat_normal` / `SurfaceSample.coat_tangent` | ✅（由网格/法线图在着色期提供；`coat_tangent` 本轮补上） |
 | **（规范之外）** | — | — | `face`（`softness`）、`anisotropy_rotation`、`ambient_occlusion`、`normal_scale`、`alpha_cutoff`、`thickness` | Prism 扩展区，计入超集 |
 
-**结论（code-truth）**：**规范参数已全部有对应物且命名已统一到规范；剩余只有"默认值对齐"与两处语义细化。** 已对齐（名字与含义）：`base_weight` / `base_color` / `base_metalness` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_roughness` / `specular_ior` / `transmission_weight` / `transmission_color` / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_scale` / `transmission_dispersion_abbe_number` / `subsurface_weight` / `subsurface_color` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / `subsurface_scatter_anisotropy` / `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` / `fuzz_weight` / `fuzz_color` / `fuzz_roughness` / `emission_color` / `emission_luminance` / **thin-film 全 3 项（ABI 瓣）** / `geometry_opacity` / `geometry_thin_walled` / 四个 geometry 向量字段（shade-time 输入）。**仍待处理**：①`transmission_depth`（规范 length vs Prism 归一化 `thickness`，需决定改单位或声明近似）；②`specular_roughness_anisotropy`（规范 [0,1] vs Prism 带符号 [-1,1] + 额外 `anisotropy_rotation`）；③若干**默认值**（`base_color` 1.0 vs 0.8、`specular_roughness` 0.5 vs 0.3、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1、`subsurface_color` 白 vs 0.8、`emission_luminance` 1 vs 0，多数为"保旧材质外观"的刻意偏差，已在 schema 注释逐条写明）。
+**结论（code-truth）**：**规范参数已全部有对应物，标识符已全部统一到规范；剩余只有一处行为语义与一批默认值。** 已对齐（名字与含义）：`base_weight` / `base_color` / `base_metalness` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_roughness` / `specular_ior` / `transmission_weight` / `transmission_color` / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_scale` / `transmission_dispersion_abbe_number` / `subsurface_weight` / `subsurface_color` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / `subsurface_scatter_anisotropy` / `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` / `fuzz_weight` / `fuzz_color` / `fuzz_roughness` / `emission_color` / `emission_luminance` / **thin-film 全 3 项（ABI 瓣）** / `geometry_opacity` / `geometry_thin_walled` / 四个 geometry 向量字段（shade-time 输入）。**仍待处理**：①`transmission_depth` **行为**——规范语义是"到达 `transmission_color` 的参考长度"、`depth==0` 时退化为非物理 tint，Prism 目前把该值当光学深度指数（`color^thickness`），需改真实长度口径或显式声明近似；②`specular_roughness_anisotropy` 的 GGX 伸长**公式**（Prism `aspect` 映射 vs 规范参考的 alpha 公式）；③若干**默认值**（`base_color` 1.0 vs 0.8、`specular_roughness` 0.5 vs 0.3、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1、`subsurface_color` 白 vs 0.8、`emission_luminance` 1 vs 0，多数为"保旧材质外观"的刻意偏差，已在 schema 注释逐条写明）。
 
 要点：
 - **开放词汇表让补瓣是加法**：新字段扩进对应 lobe 的变长块，位掩码/静态置换天然容纳，老材质不受影响（它们的 lobe_mask 不含新位）。
@@ -604,6 +604,15 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f 规范对齐：`specular_roughness_anisotropy` / `transmission_depth` 标识符对齐规范**（§4.4）
+  - 依据 `AcademySoftwareFoundation/OpenPBR` 的 `parametrization.md.html`（v1.1.1 全参数表，逐行比对，非自证）复核后，确认**瓣集合本身已齐全**（base / specular / transmission / subsurface / coat / fuzz / emission / thin-film / geometry 九组、共 42 个规范参数全部有对应物），缺口只剩**标识符**与**两处行为语义**。本轮先清掉标识符：
+    - `anisotropy` → **`specular_roughness_anisotropy`**（schema `name`）；
+    - `thickness` → **`transmission_depth`**（schema `name`）。
+  - **零字长 / 零生成物变化**：两者都通过 schema 新增的 `surface_field` 覆盖保留了解码后 fat 结构里的历史短名（`anisotropy` / `thickness`），所以 `GpuAnisotropyLobe` / `GpuTransmissionLobe` 字段布局不变、生成的 `material_unpack.wesl` 与 `surface_layout.rs` **逐字节不变**（`codegen_freshness` 保持绿）。这是把 `surface_field`（原本用于 face 瓣的 `softness`→`face_softness` 命名空间化）推广为"规范标识符 ↔ Prism 内部短名"的解耦点。
+  - 代码：`pkg/prism_material_schema/schema/surface.toml`（2 处 `name` + `surface_field` + 语义注释）、`pkg/prism_render_material/tests/schema_parity.rs`（`authored_components` 的两条 match 臂改到规范名）、本文 §4.4 对账表与结论段。
+  - 门禁：`cargo test -p prism_material_schema` **13 通过**、`cargo test -p prism_render_material --test schema_parity` **6 通过**；`prism-material-codegen write` 后 `material_unpack.wesl` / `surface_layout.rs` 无 diff。
+  - **仍未完成（诚实边界，不再是"待细化"）**：①`transmission_depth` **行为**——规范是"到达 `transmission_color` 的参考长度"、`depth==0` 退化为非物理 tint，Prism 仍把该值当光学深度指数；②`specular_roughness_anisotropy` 的 GGX 伸长**公式**（Prism `aspect` 映射 vs 规范参考 alpha 公式）；③6 个**默认值**偏差（刻意保旧外观，schema 注释已逐条写明）。
 
 - **P1-f 规范对齐：ABI 字段名统一到 OpenPBR 规范名**（§4.4）
   - 把 11 处"同义不同名"的 ABI 字段改成规范标识符，这是"纯 OpenPBR 子集字节等价"的最后一道命名门槛：

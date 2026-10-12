@@ -424,12 +424,16 @@ stability = "stable"
 words = 4
 
 [[lobe.field]]
-name = "anisotropy"
+name = "specular_roughness_anisotropy"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 0
 spec_subfield = "closure_mask"
 consumed_by = ["unpack", "classify", "sample", "golden"]
+# The `OpenPBR` identifier is `specular_roughness_anisotropy`; Prism's decoded fat
+# struct keeps the historical short name `anisotropy` (the elongation direction
+# comes from `geometry_tangent`, so there is no separate rotation in the spec).
+surface_field = "anisotropy"
 default = 0.0
 valid = "0.0..=1.0"
 energy_policy = "coupled"
@@ -670,11 +674,18 @@ energy_policy = "coupled"
 view = "invariant"
 
 [[lobe.field]]
-name = "thickness"
+name = "transmission_depth"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 1
 consumed_by = ["unpack", "sample", "golden"]
+# The `OpenPBR` identifier is `transmission_depth` (a length: the distance the
+# refracted ray travels inside the transparent base before it is exactly
+# `transmission_color` under Beer's law). Prism's decoded fat struct keeps the
+# historical short name `thickness`; the real-time lobe has no scene-unit path
+# length, so the value is the depth at which the tint is reached (a reference
+# length in world units). `0` is the specification's non-physical tint case.
+surface_field = "thickness"
 default = 0.0
 valid = "0.0..=inf"
 energy_policy = "none"
