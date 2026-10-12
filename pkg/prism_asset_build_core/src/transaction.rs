@@ -184,7 +184,25 @@ impl RevisionStore {
             }
             Err(error) => return Err(PublishError::Io(error)),
         };
-        decode_manifest(&bytes, revision).map(|_| ())
+        let manifest = decode_manifest(&bytes, revision)?;
+        // A syntactically valid manifest is not a valid publication if any
+        // immutable payload it names has disappeared or no longer matches its
+        // declared length.  Verify the closure at the publication boundary so
+        // a later build never treats a dangling CURRENT as a usable base.
+        for descriptor in manifest.entries.values() {
+            let payload = self
+                .cas
+                .read(descriptor.content_hash)
+                .map_err(|error| PublishError::Cas(error))?;
+            let actual_len = u64::try_from(payload.len())
+                .map_err(|_| PublishError::Invalid("CAS payload length overflows"))?;
+            if actual_len != descriptor.byte_len {
+                return Err(PublishError::Invalid(
+                    "CURRENT manifest payload length does not match CAS",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -372,6 +390,11 @@ fn decode_manifest(
     bytes: &[u8],
     expected_revision: BuildRevision,
 ) -> Result<Manifest, PublishError> {
+    if bytes.len() < MANIFEST_MAGIC.len() || !bytes.starts_with(MANIFEST_MAGIC) {
+        return Err(PublishError::Invalid(
+            "manifest has invalid magic or version",
+        ));
+    }
     let mut reader = ManifestReader { bytes, offset: 0 };
     if reader.take(MANIFEST_MAGIC.len())? != MANIFEST_MAGIC {
         return Err(PublishError::Invalid(
@@ -737,6 +760,27 @@ mod tests {
             Err(PublishError::Invalid(
                 "CURRENT points to a missing manifest"
             ))
+        ));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_fails_closed_when_current_manifest_payload_is_missing() {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let payload = b"payload missing after publication";
+        let hash = ContentHash::digest(payload);
+        let mut tx = store.begin(BuildRevision(0), None);
+        tx.stage(AssetId(1), descriptor(payload), payload.to_vec())
+            .unwrap();
+        tx.commit().unwrap();
+        fs::remove_file(store.cas().blob_path(hash)).unwrap();
+        drop(store);
+
+        assert!(matches!(
+            RevisionStore::open(&dir),
+            Err(PublishError::Cas(CasError::Io(error)))
+                if error.kind() == io::ErrorKind::NotFound
         ));
         fs::remove_dir_all(dir).unwrap();
     }

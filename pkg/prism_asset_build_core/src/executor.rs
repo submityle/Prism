@@ -432,7 +432,15 @@ mod tests {
         fs::write(store.cas().blob_path(descriptor.content_hash), b"tampered").unwrap();
 
         let before = count.load(Ordering::Relaxed);
-        let rebuilt = run(&graph, &specs, &root, 2);
+        // `RevisionStore::open` intentionally fails closed when CURRENT names
+        // a corrupt payload. Keep the already-open store here so this test
+        // exercises the executor's recoverable DDC/CAS cache-rebuild path
+        // without weakening publication-boundary validation.
+        let rebuilt = BuildExecutor {
+            protocol_version: 1,
+        }
+        .execute(&graph, &specs, &store, &mut ddc, BuildRevision(2))
+        .unwrap();
         assert!(rebuilt.cache_hits.is_empty());
         assert_eq!(count.load(Ordering::Relaxed), before + 1);
         fs::remove_dir_all(root).unwrap();

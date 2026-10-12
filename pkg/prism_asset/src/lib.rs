@@ -115,10 +115,10 @@ pub use source::{AssetMeta, AssetReader, AssetSources, FsSource, MemSource, Read
 pub use storage::Assets;
 pub use stores::{AssetStores, ErasedAssetStore, StoreError};
 pub use type_id::AssetTypeId;
-#[cfg(feature = "file_watcher")]
-pub use watch::FileWatcher;
 #[cfg(feature = "std")]
 pub use watch::{AssetChange, AssetChangeKind, ChangeBatch, ChangeBatchBuilder};
+#[cfg(feature = "file_watcher")]
+pub use watch::{AssetWatchHandle, FileWatcher, WatchStartError};
 
 /// Convenient re-exports for downstream crates.
 pub mod prelude {

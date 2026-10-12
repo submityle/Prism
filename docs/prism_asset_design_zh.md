@@ -24,7 +24,7 @@
 - **部分完成**：M2 已有同步装配之上的 bounded scheduler facade；它能做线程池投递、同路径合并、优先级提升、容量背压、消费者取消、waiter 生命周期清理和完成通知竞态防护，并有并发测试，但底层 `AssetServer` 仍由单 mutex 串行，尚不是设计中的 EDL/I/O-CPU 分离调度。
 - **部分完成**：Asset Build 已有确定性串行 `BuildGraph`/`Processor`、ArtifactKey、BLAKE3 CAS、持久化本地 DDC 描述符索引、本地 manifest revision 与进程内事务发布；`BuildExecutor` 已把图执行、DDC/CAS 校验和、缓存损坏重建及事务发布接成单机串行核心闭环，但仍缺完整 Recipe/Importer 主链、并行调度、远程 CAS、CLI 和真实纹理垂直链。Unix DDC 索引已用 advisory `flock` 协调跨进程 read-modify-write；真实跨进程测试、非 Unix 协调和完整崩溃恢复仍未完成。
 - **部分完成**：M5 容器已有 v1 raw reader/writer、严格 ToC/哈希校验、范围读取、overlay、Runtime Manifest 路由索引、实现 `AssetReader` 的 `ManifestAssetReader`，以及 ChunkPlanner 驱动的 v2 raw 物理布局读写；v2 对齐、跨 Chunk 依赖的物理先后顺序与当前布局读回已有测试，但完整 wire contract（持久化 ChunkPlan/依赖/流送/平台/压缩加密/签名元数据）尚未冻结或实现。Manifest 路由没有绑定不可变容器内容摘要或 generation。`read_range` 仍建立在完整内存容器之上，不是文件/CDN 的按 Chunk 流式后端。仍未接入 `AssetServer` 的异步 EDL/I/O-CPU 调度，也没有 Cook/发行闭环。
-- **部分完成**：M3 已有文件 watcher/去抖事件模型、可由调用方驱动的 `AssetServer::apply_change_batch` 接线、依赖闭包重装配计划、失败依赖门禁及 labeled 子资产候选图校验；source reload 现在会传播到 labeled 输出的消费者，且有 ownership promotion 回归测试，避免 source→label 与 label→source 形成永久强引用环。旧 revision 消失的 label 生命周期、staging 的 provisional ID/catalog 回滚仍未闭环；watcher 尚无自动后台消费循环，重载仍在同步 server 锁内执行。Unix `FsSource` 已改用目录 fd 相对打开和 `O_NOFOLLOW`，但 Windows reparse-point 防护及非 Unix 等价安全打开语义仍未完成。M4 预算驱动流送、压缩/加密容器、DirectStorage 形态队列和完整 GPU 解压仍未实现（`prism_gdeflate_gpu` 仍有 CPU Huffman fallback）；M5/M6 的 BakeService、ECS/渲染/编辑器集成、发行闭包/patch/DLC、签名与 Provenance 仍未完成。
+- **部分完成**：M3 已有文件 watcher/去抖事件模型、`Arc<AssetServer>::watch` 托管后台消费入口、可由调用方驱动的 `AssetServer::apply_change_batch` 接线、依赖闭包重装配计划、失败依赖门禁及 labeled 子资产候选图校验；source reload 现在会传播到 labeled 输出的消费者，且有 ownership promotion 回归测试，避免 source→label 与 label→source 形成永久强引用环。旧 revision 消失的 label 生命周期、staging 的 provisional ID/catalog 回滚、锁外异步重装配仍未闭环。Unix `FsSource` 已改用目录 fd 相对打开和 `O_NOFOLLOW`，但 Windows reparse-point 防护及非 Unix 等价安全打开语义仍未完成。M4 预算驱动流送、压缩/加密容器、DirectStorage 形态队列和完整 GPU 解压仍未实现（`prism_gdeflate_gpu` 仍有 CPU Huffman fallback）；M5/M6 的 BakeService、ECS/渲染/编辑器集成、发行闭包/patch/DLC、签名与 Provenance 仍未完成。
 
 因此本文下方路线图仍是目标规格；任何“已支持”表述均以上述实现状态和对应测试为准。
 
@@ -665,7 +665,7 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 
 `feature = "hot_reload"`，编辑器/迭代核心。
 
-> **当前实现边界**：已有 watcher 事件/去抖模型和由调用方驱动的批次应用入口；自动后台 watcher 消费循环、锁外异步重装配、失败 staging 回滚和旧 revision 消失的 labeled 子资产生命周期仍未完成。Unix `FsSource` 已使用目录 fd 相对打开与 `O_NOFOLLOW` 消除 metadata→open 的 TOCTOU 窗口；Windows reparse-point 防护及非 Unix 等价安全打开语义仍待实现。
+> **当前实现边界**：已有 watcher 事件/去抖模型、`Arc<AssetServer>::watch` 托管后台消费入口和由调用方驱动的批次应用入口；锁外异步重装配、失败 staging 回滚和旧 revision 消失的 labeled 子资产生命周期仍未完成。Unix `FsSource` 已使用目录 fd 相对打开与 `O_NOFOLLOW` 消除 metadata→open 的 TOCTOU 窗口；Windows reparse-point 防护及非 Unix 等价安全打开语义仍待实现。
 
 - **变更侦测**：`AssetSource::watch` 接平台 FS 事件（inotify/FSEvents/ReadDirectoryChangesW，经 `prism_platform` 隔离），去抖后产出「路径 X 变更」。
 - **失效传播**：路径 → `StableGuid` → `AssetIndex`，经 §8.1 依赖图**反向遍历** dependents，把该资产及其所有传递依赖者标 `stale`。例：`tex.png` 改 → 用它的 `material` stale → 用该材质的 `scene` 的受影响部分 stale。
@@ -925,7 +925,7 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 
 ## 22. 诚实边界与风险
 
-- **现状**：M0/M1 核与同步 AssetServer/VFS 已落地并有单测；构建核心有 CAS/ArtifactKey/Revision、串行 BuildGraph/Processor、本地 DDC 描述符索引和独立质量门禁；容器 v1 有 Runtime Manifest 路由读取、`AssetReader` 适配、overlay，且 ChunkPlanner 已接入 v2 raw 物理布局；有界异步调度 facade 已覆盖容量、去重、取消和通知竞态，AssetServer 已提供 watcher 批次应用入口（不是自动后台 watcher）。M2 仍非 EDL 完整实现；M3–M6（自动 watcher 热重载闭环、流送/GPU 完整解压、BakeService、ECS/渲染/编辑器集成和发行生产链）仍未完成。本文是实施规格而非对未交付能力的宣称。
+- **现状**：M0/M1 核与同步 AssetServer/VFS 已落地并有单测；构建核心有 CAS/ArtifactKey/Revision、串行 BuildGraph/Processor、本地 DDC 描述符索引和独立质量门禁；容器 v1 有 Runtime Manifest 路由读取、`AssetReader` 适配、overlay，且 ChunkPlanner 已接入 v2 raw 物理布局；有界异步调度 facade 已覆盖容量、去重、取消和通知竞态，AssetServer 已提供 watcher 批次应用入口和托管后台消费入口。M2 仍非 EDL 完整实现；M3 的自动 watcher 消费切片已落地，但锁外异步重装配、失败 staging 回滚和完整 revision/labeled 生命周期仍未完成；M4–M6（流送/GPU 完整解压、BakeService、ECS/渲染/编辑器集成和发行生产链）仍未完成。本文是实施规格而非对未交付能力的宣称。
 - **高风险项**：
   1. **StableGuid 冻结（M1/M5）**：派生规则一旦发行即不可变，变则旧存档/容器目录失效。须早定早冻、哈希算法与规范化规则定死并测「跨构建一致」。
   2. **异步装配正确性（M2）**：EDL 作业图 + 依赖增量就绪的竞态（并发 load 去重、依赖边并发更新、失败半装配回滚）是最易出错处，须压测并发加载 + 乱序完成。
