@@ -24,17 +24,25 @@
 
 ### 1.2 接线层必须对齐既有「四前端 + 正交风格轴」设计（PBR / NPR / 混合 / 自定义）
 
-**权威设计**：`prism_material_pipeline_design_zh.md` §1/§7——同一引擎**同时**是顶级 PBR / NPR / 混合 / 自定义引擎，四者皆一等：
-共享 GPU-driven 基底（几何/可见性/material id、光/影/GI 数据、跨切面基底）**算一次**，四条**并存前端**各自取数据、叠自己的响应：
-延迟 PBR 前端 / forward+ 前端 / NPR 风格化前端 / **自定义前端槽**；风格轴 `illumination = Lit / Stylized / Unlit / Custom` 正交叠在任意前端上；
-**混合 = 逐像素 material id + tile 分类路由**（因共享光/影/GI 而连贯，不是各前端各建一套）。
+**权威设计**：`prism_material_pipeline_refactor_zh.md` §3.5/§8.5——四条线（PBR / NPR / 混合 / 自定义）**是同一条 OpenPBR über 上的正交响应模式，不是四套管线**；运行层**只有一条执行路径，四线共用**：
+
+```
+1 解包    prism_unpack_surface（变长 OpenPBR 瓣集）
+2 分类    per-tile 9-way（illumination / render_class 分波前）
+3 瓣求值  热=spec-constant 置换 ⇔ 冷=全瓣 über + mask 兜底
+4 光照源  对象空间缓存命中 → IncomingRadiance ｜ 未命中 → 屏幕空间直接积分（唯一分支点）
+5 响应    respond()：PBR 乘 albedo·BRDF ｜ NPR ramp/描边 ｜ 混合按 illumination 遮罩 ｜ 自定义走契约
+6 合成    + 视角相关项 → 输出
+```
+
+差异**只落在步骤 5 的响应函数**；缓存（步骤 4）/降级（步骤 6）**不改 key、不新增 PSO、不产生并行着色栈**。风格轴 `illumination = Lit(0)/Stylized(1)/Unlit/Custom(3)` 正交叠在任一处；**混合 = 逐像素/逐区域 illumination + per-tile 分类路由**。共享基底另见 `prism_aaa_advanced_features_zh.md` §1、`prism_material_pipeline_design_zh.md` §1/§7。
 
 **已 committed 的落地锚点（移植时必须保留语义）**：
 - CPU 分桶：`prism_render_shading/src/classification.rs`——`classify_material_header` 投影到 9 值 `MaterialShadingClass`，`ShadingWorkPlan::build` 分出同 permutation 的 bin。
 - GPU 路由：`prism_render_scene/src/shaders/shading_resolve.wesl`——9 个 `SHADING_CLASS_*` 常量 + `switch params.shading_class` 分派到 `shade_principled`/`shade_toon`(NPR)/`shade_subsurface`/`shade_clearcoat`/`shade_cloth`/`shade_hair`/`shade_water` 等。
 - NPR 描边白送：`prism_render_shading/src/outline.rs::outline_id_edge` 直接吃 vis-buffer 的 material id。
 
-**移植约束**：换 `bevy_render` 时，**不能**把 `MeshPipelineKey` + `StandardMaterial`（PBR-only）当成总体管线键；要保持「逐像素 material id + tile 分类 + 9 类前端分派 + 风格轴」这套语义。`Core3d`/`Opaque3d`/`MeshPipelineKey`/`Core3dSystems` 只是 bevy 的**接入点**，替换时按上文设计做等价实现（Prism graph pass + 模型/前端注册 + `prism_render_visibility::binning` 的分批键）。
+**移植约束**：换 `bevy_render` 时，必须保住这条**单执行路径**——既不能把 `MeshPipelineKey` + `StandardMaterial`（PBR-only）当总体管线键，也**不能拆成四条管线**（§3.5 明确「线 = 管线；模式 = 响应」）。`Core3d`/`Opaque3d`/`Core3dSystems`/`MeshPipelineKey` 只是 bevy 的**接入点**，替换时按上面的执行模型做等价实现（Prism graph pass + `binning` 分批键 + 单一 `respond()` 分派）。
 
 ## 2. 符号映射（bevy_render → Prism）
 
