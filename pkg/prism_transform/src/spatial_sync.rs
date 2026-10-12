@@ -291,6 +291,10 @@ impl SpatialSync {
             Some(proxy) => {
                 proxy.local = local;
                 proxy.removing = false;
+                // Drop any pending world box derived from the old local bounds;
+                // the re-registered proxy must be re-observed before insertion
+                // (CR-found: the stale pending box was emitted).
+                proxy.pending = None;
             }
             slot @ None => {
                 *slot = Some(Proxy {
@@ -406,13 +410,21 @@ impl SpatialSync {
                 };
                 if needs_refit {
                     let old = proxy.stored;
-                    let new = if margin > 0.0 { tight.expand(margin) } else { tight };
+                    let new = if margin > 0.0 {
+                        tight.expand(margin)
+                    } else {
+                        tight
+                    };
                     proxy.stored = new;
                     out.push(SpatialCommand::Update { node, old, new });
                     stats.updates += 1;
                 }
             } else {
-                let stored = if margin > 0.0 { tight.expand(margin) } else { tight };
+                let stored = if margin > 0.0 {
+                    tight.expand(margin)
+                } else {
+                    tight
+                };
                 proxy.stored = stored;
                 proxy.live = true;
                 self.live += 1;

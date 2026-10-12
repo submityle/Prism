@@ -52,7 +52,11 @@ fn quantize_signed(value: f32, range: f32, bits: u32) -> u32 {
     // `scaled` is in [0, max + 0.5]; the floor lands in [0, max].
     let code = scaled as u32;
     let max_u = ((1u64 << bits) - 1) as u32;
-    if code > max_u { max_u } else { code }
+    if code > max_u {
+        max_u
+    } else {
+        code
+    }
 }
 
 /// Inverse of [`quantize_signed`]: map an integer code back to the centre of its
@@ -76,7 +80,11 @@ fn quantize_unsigned(value: f32, min: f32, max: f32, bits: u32) -> u32 {
     let scaled = normalized * levels + 0.5;
     let code = scaled as u32;
     let max_u = ((1u64 << bits) - 1) as u32;
-    if code > max_u { max_u } else { code }
+    if code > max_u {
+        max_u
+    } else {
+        code
+    }
 }
 
 /// Inverse of [`quantize_unsigned`].
@@ -162,7 +170,14 @@ impl QuatQuantizer {
     /// is non-negative) before the three smallest components are quantized over
     /// `[-1/sqrt(2), 1/sqrt(2)]`.
     pub fn encode(self, q: Quat) -> QuatQuantized {
-        let q = q.normalize();
+        // A zero-length quaternion has no well-defined rotation; falling back to
+        // identity avoids normalizing NaNs into an arbitrary orientation
+        // (CR-found).
+        let q = if q.length_squared() > 1.0e-20 {
+            q.normalize()
+        } else {
+            Quat::IDENTITY
+        };
         let comps = [q.x, q.y, q.z, q.w];
 
         // Find the largest-magnitude component.
@@ -437,8 +452,11 @@ impl LayeredQuantizer {
     #[inline]
     fn encode_axis(self, value: f32) -> (i32, u32) {
         // Floor division into cells, then quantize the in-cell remainder over
-        // `[0, cell_size]`.
-        let cell_f = floor_f32(value / self.cell_size);
+        // `[0, cell_size]`. Saturate the cell *before* deriving the remainder so
+        // `cell` and `remainder` stay consistent for out-of-range values
+        // (CR-found: the remainder came from the unsaturated cell and silently
+        // misdecoded).
+        let cell_f = floor_f32(value / self.cell_size).clamp(i32::MIN as f32, i32::MAX as f32);
         let cell = cell_f as i32;
         let remainder = value - cell_f * self.cell_size;
         let code = quantize_unsigned(remainder, 0.0, self.cell_size, self.bits);
@@ -530,12 +548,14 @@ impl ScaleQuantizer {
         )
     }
 
-    /// Worst-case absolute per-axis error for a non-unit scale (half of one
-    /// step). Unit-scale values decode exactly.
+    /// Worst-case absolute per-axis error: the larger of half a quantization
+    /// step and the unit fast-path `tolerance` (a value within `tolerance` of
+    /// `1` snaps to exactly `1`, so its error can reach `tolerance`).
     #[inline]
     pub fn max_abs_error(self) -> f32 {
         let levels = ((1u64 << self.bits) - 1) as f32;
-        0.5 * (self.max - self.min) / levels
+        let half_step = 0.5 * (self.max - self.min) / levels;
+        half_step.max(self.tolerance)
     }
 }
 

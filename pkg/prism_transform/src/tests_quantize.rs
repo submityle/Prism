@@ -4,14 +4,45 @@
 //! codec is pinned to an exact code, not just "close enough".
 
 use crate::quantize::{
-    BoundedQuantizer, LayeredQuantizer, PoseQuantizer, QuatQuantized, QuatQuantizer,
-    ScaleQuantizer,
+    BoundedQuantizer, LayeredQuantizer, PoseQuantizer, QuatQuantized, QuatQuantizer, ScaleQuantizer,
 };
 use crate::Transform;
 use prism_math::{vec3, Quat, Vec3};
 
 fn approx(a: f32, b: f32, eps: f32) {
     assert!((a - b).abs() <= eps, "expected {a} ≈ {b} (eps {eps})");
+}
+
+#[test]
+fn zero_quaternion_encodes_to_identity() {
+    // A zero-length quaternion has no rotation; it must not normalize NaNs into
+    // an arbitrary orientation (CR-found).
+    let q = QuatQuantizer::DEFAULT;
+    let decoded = q.decode(q.encode(Quat::from_xyzw(0.0, 0.0, 0.0, 0.0)));
+    assert!(
+        quat_dot(decoded, Quat::IDENTITY).abs() > 0.999,
+        "zero quaternion decoded to {decoded:?}"
+    );
+}
+
+#[test]
+fn layered_quantizer_round_trips_in_range_and_handles_extremes() {
+    let q = LayeredQuantizer::new(1.0, 16);
+    let v = vec3(1234.5, -678.25, 42.0);
+    let d = q.decode(q.encode(v));
+    assert!(
+        (d.x - v.x).abs() <= q.max_abs_error(),
+        "in-range layered round-trip error {} > {}",
+        (d.x - v.x).abs(),
+        q.max_abs_error()
+    );
+    // A value beyond the i32 cell range must not panic nor mix a saturated cell
+    // with an inconsistent remainder (CR-found); the decode stays finite.
+    let d = q.decode(q.encode(vec3(3_000_000_000.0, 0.0, 0.0)));
+    assert!(
+        d.x.is_finite() && d.x.abs() >= 2_147_483_600.0,
+        "extreme decode {d:?}"
+    );
 }
 
 fn quat_dot(a: Quat, b: Quat) -> f32 {
