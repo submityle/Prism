@@ -33,6 +33,7 @@
 
 extern crate alloc;
 
+pub mod aabb_ops;
 pub mod buffer;
 pub mod context;
 pub mod dual;
@@ -73,6 +74,7 @@ pub mod temperature;
 pub mod view;
 pub mod xyz;
 
+pub use aabb_ops::{aabb4, aabb_pair, aabb_point, Aabb4, AabbPair, AabbPoint, GpuAabbOps};
 pub use context::{block_on, GpuContext};
 pub use dual::{DualOp, DualSample, GpuDual, GpuDualResult};
 pub use dual_quat_alg::{DualQuatOp, GpuDualQuatAlg};

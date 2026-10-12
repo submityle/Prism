@@ -2349,3 +2349,45 @@ fn prism_plane_normalized(normal: vec3<f32>, d: f32) -> vec4<f32> {\n\
 fn prism_plane_flipped(normal: vec3<f32>, d: f32) -> vec4<f32> {\n\
     return vec4<f32>(-normal, -d);\n\
 }\n";
+
+/// Single-sourced WGSL for the axis-aligned box query family, mirroring the CPU
+/// [`Aabb3`](crate::geom::aabb::Aabb3) helpers used by BVH build and traversal.
+/// `prism_aabb_center` is `(lo + hi) * 0.5`, `prism_aabb_extents` is `hi - lo`,
+/// `prism_aabb_surface_area` the SAH cost metric `2*(xy + yz + zx)`,
+/// `prism_aabb_closest_point` the component-wise `clamp(p, lo, hi)`,
+/// `prism_aabb_distance_squared` the squared distance from `p` to that point
+/// (zero inside), and `prism_aabb_merge_lo`/`_merge_hi` the component-wise
+/// `min`/`max` of two boxes (the SAH merge). This is the GPU side of BVH
+/// refit/merge and box distance queries. The arithmetic is component-wise
+/// min/max/add/mul, so the device matches the CPU to rounding.
+pub const WGSL_AABB_OPS: &str = "\
+fn prism_aabb_center(lo: vec3<f32>, hi: vec3<f32>) -> vec3<f32> {\n\
+    return (lo + hi) * 0.5;\n\
+}\n\
+\n\
+fn prism_aabb_extents(lo: vec3<f32>, hi: vec3<f32>) -> vec3<f32> {\n\
+    return hi - lo;\n\
+}\n\
+\n\
+fn prism_aabb_surface_area(lo: vec3<f32>, hi: vec3<f32>) -> f32 {\n\
+    let e = hi - lo;\n\
+    return 2.0 * (e.x * e.y + e.y * e.z + e.z * e.x);\n\
+}\n\
+\n\
+fn prism_aabb_closest_point(lo: vec3<f32>, hi: vec3<f32>, p: vec3<f32>) -> vec3<f32> {\n\
+    return clamp(p, lo, hi);\n\
+}\n\
+\n\
+fn prism_aabb_distance_squared(lo: vec3<f32>, hi: vec3<f32>, p: vec3<f32>) -> f32 {\n\
+    let c = clamp(p, lo, hi);\n\
+    let d = p - c;\n\
+    return dot(d, d);\n\
+}\n\
+\n\
+fn prism_aabb_merge_lo(a_lo: vec3<f32>, b_lo: vec3<f32>) -> vec3<f32> {\n\
+    return min(a_lo, b_lo);\n\
+}\n\
+\n\
+fn prism_aabb_merge_hi(a_hi: vec3<f32>, b_hi: vec3<f32>) -> vec3<f32> {\n\
+    return max(a_hi, b_hi);\n\
+}\n";
