@@ -37,7 +37,7 @@ use crate::collections::HashMap;
 use crate::component::{Component, ComponentId};
 use crate::entity::Entity;
 use crate::world::World;
-use prism_reflect::{Reflect, StableTypeId};
+use prism_reflect::{FromReflect, Reflect, StableTypeId};
 
 /// The stable, path-derived type id the bridge keys on (re-exported so callers
 /// need not depend on `prism_reflect` directly).
@@ -65,7 +65,7 @@ struct ReflectComponentOps {
 impl ReflectComponentOps {
     /// Build the operations for `T` by instantiating one monomorphised function
     /// per entry point.
-    fn of<T: Component + Reflect + Clone>(component: ComponentId) -> Self {
+    fn of<T: Component + Reflect + FromReflect + Clone>(component: ComponentId) -> Self {
         fn get<T: Component + Reflect>(world: &World, entity: Entity) -> Option<&dyn Reflect> {
             world.get::<T>(entity).map(|value| value as &dyn Reflect)
         }
@@ -77,14 +77,22 @@ impl ReflectComponentOps {
             // as any `Mut` access does), which is what this fn pointer promises.
             world.get_mut::<T>(entity).map(|value| value.into_inner() as &mut dyn Reflect)
         }
-        fn apply<T: Component + Reflect + Clone>(
+        fn apply<T: Component + Reflect + FromReflect + Clone>(
             world: &mut World,
             entity: Entity,
             value: &dyn Reflect,
         ) -> bool {
-            match value.downcast_ref::<T>() {
+            // Fast path: a concrete value of exactly `T`.
+            if let Some(typed) = value.downcast_ref::<T>() {
+                world.insert(entity, typed.clone());
+                return true;
+            }
+            // Slow path: a `Dynamic*` tree — e.g. one decoded from a save file
+            // or produced by `reflect_clone` — reconstructs through
+            // `FromReflect`, so both forms are accepted at the bridge.
+            match T::from_reflect(value) {
                 Some(typed) => {
-                    world.insert(entity, typed.clone());
+                    world.insert(entity, typed);
                     true
                 }
                 None => false,
@@ -127,11 +135,15 @@ impl World {
     /// Register `T` for dynamic (reflected) access and return its
     /// [`StableTypeId`] (design §16.5 / §24.3). Idempotent.
     ///
-    /// `T` must be [`Reflect`] (so its fields can be walked generically) and
-    /// [`Clone`] (so a dynamically supplied value can be materialised into the
-    /// typed column). `prism_reflect` is the type basis; the ECS stores only the
-    /// monomorphised operations, never a boxed value.
-    pub fn register_reflect_component<T: Component + Reflect + Clone>(&mut self) -> StableTypeId {
+    /// `T` must be [`Reflect`] (so its fields can be walked generically),
+    /// [`FromReflect`] (so a `Dynamic*` tree — e.g. one decoded from a save file
+    /// — can be reconstructed) and [`Clone`] (so a concrete value handed in
+    /// dynamically can be materialised into the typed column). `prism_reflect`
+    /// is the type basis; the ECS stores only the monomorphised operations, never
+    /// a boxed value.
+    pub fn register_reflect_component<T: Component + Reflect + FromReflect + Clone>(
+        &mut self,
+    ) -> StableTypeId {
         let component = self.components_mut().register::<T>();
         let stable = StableTypeId::of_type::<T>();
         self.reflect

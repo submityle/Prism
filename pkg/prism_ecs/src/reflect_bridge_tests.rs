@@ -82,6 +82,31 @@ fn unregistered_or_mismatched_values_are_rejected() {
     assert!(world.get_reflect(e, health).is_some());
 }
 
+/// A `Dynamic*` tree (what a save-file decoder produces, and what
+/// `reflect_clone` builds for derived types) must also be insertable: the
+/// concrete fast path is not the only form a caller has.
+#[test]
+fn insert_reflect_accepts_a_dynamic_value() {
+    let mut world = World::new();
+    let id = world.register_reflect_component::<Stats>();
+    let e = world.spawn(Stats { hp: 1, mana: 2 });
+
+    let dynamic = world
+        .get_reflect(e, id)
+        .expect("entity carries Stats")
+        .reflect_clone();
+    // The clone of a derived struct is a `Dynamic*` value, not a `Stats`.
+    assert!(dynamic.downcast_ref::<Stats>().is_none());
+
+    assert!(world.insert_reflect(e, &*dynamic));
+    // Round-tripping through the dynamic form must preserve the values exactly.
+    assert_eq!(world.get::<Stats>(e), Some(&Stats { hp: 1, mana: 2 }));
+
+    // And a concrete value still takes the fast path.
+    assert!(world.insert_reflect(e, &Stats { hp: 7, mana: 8 }));
+    assert_eq!(world.get::<Stats>(e), Some(&Stats { hp: 7, mana: 8 }));
+}
+
 #[test]
 fn stable_and_local_ids_map_both_ways() {
     let mut world = World::new();
