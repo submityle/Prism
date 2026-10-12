@@ -26,6 +26,9 @@
 //!   resync.
 //! - [`aoi`] — interest management: a deterministic uniform spatial grid and the
 //!   enter/leave edges between two interest views (design §8).
+//! - [`prediction`] — client-side prediction and reconciliation: apply a local
+//!   input at once, then roll back to authority and replay the un-acknowledged
+//!   inputs when the correction arrives (design §10).
 //!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
@@ -47,3 +50,5 @@ pub mod delta;
 pub mod quantize;
 
 pub mod snapshot;
+
+pub mod prediction;

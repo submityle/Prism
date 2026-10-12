@@ -212,6 +212,18 @@ impl SnapshotStore {
         self.insert_baseline(revision, record)?;
         Ok(revision)
     }
+
+    /// Drop every retained baseline strictly newer than `revision`, keeping
+    /// `revision` itself when present.
+    ///
+    /// Used to abandon a predicted branch before re-applying the still-unacked
+    /// inputs after an authoritative correction — the stale predictions must not
+    /// stay addressable. A no-op when the ring is already at or below `revision`.
+    pub fn truncate_after(&mut self, revision: u32) {
+        while self.frames.back().is_some_and(|(r, _)| *r > revision) {
+            self.frames.pop_back();
+        }
+    }
 }
 
 #[cfg(test)]
