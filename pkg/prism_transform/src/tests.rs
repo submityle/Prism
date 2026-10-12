@@ -72,6 +72,48 @@ fn composition_associates() {
 }
 
 #[test]
+fn mul_transform_is_exact_under_uniform_scale_and_lossy_otherwise() {
+    let child = Transform::from_xyz(0.5, -1.0, 2.0)
+        .with_rotation(Quat::from_rotation_y(0.7))
+        .with_scale(vec3(3.0, 1.0, 0.5));
+
+    // Uniform parent scale: TRS composition is exact (matches the affine product).
+    let parent_uniform = Transform::from_xyz(1.0, 2.0, 3.0)
+        .with_rotation(Quat::from_rotation_z(0.5))
+        .with_scale(Vec3::splat(2.0));
+    let composed = parent_uniform.mul_transform(&child);
+    let exact = parent_uniform.mul_affine(&child);
+    for p in [vec3(1.0, 0.0, 0.5), vec3(-2.0, 1.0, 0.0)] {
+        assert!(
+            v_approx(composed.transform_point(p), exact.transform_point3(p), 1e-4),
+            "uniform-scale TRS composition must match the affine product"
+        );
+    }
+
+    // Non-uniform parent scale + rotated child: the true linear map
+    // `R_p·S_p·R_c` is not a rotation·diagonal, so the pure-TRS projection drops
+    // shear and diverges from the exact affine (CR #1) — mul_affine is the
+    // lossless path.
+    let parent_shear =
+        Transform::from_rotation(Quat::from_rotation_z(0.3)).with_scale(vec3(2.0, 1.0, 1.0));
+    let child_rot = Transform::from_rotation(Quat::from_rotation_z(0.9));
+    let projected = parent_shear.mul_transform(&child_rot);
+    let exact = parent_shear.mul_affine(&child_rot);
+    let p = vec3(1.0, 1.0, 0.0);
+    let expected = parent_shear
+        .to_affine()
+        .transform_point3(child_rot.to_affine().transform_point3(p));
+    assert!(
+        v_approx(exact.transform_point3(p), expected, 1e-4),
+        "mul_affine must equal the exact affine chain"
+    );
+    assert!(
+        !v_approx(projected.transform_point(p), expected, 1e-3),
+        "expected the documented shear loss for non-uniform parent scale"
+    );
+}
+
+#[test]
 fn global_inverse_round_trip() {
     let t = Transform {
         translation: vec3(3.0, -4.0, 5.0),

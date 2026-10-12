@@ -102,10 +102,10 @@ use prism_math::{Affine3, Mat4, Quat, Vec3};
 
 pub mod bake;
 pub mod change;
-pub mod compute_hierarchy;
-pub mod constraint;
 #[cfg(feature = "compat-bevy")]
 pub mod compat_bevy;
+pub mod compute_hierarchy;
+pub mod constraint;
 #[cfg(feature = "determinism")]
 pub mod determinism;
 pub mod dirty;
@@ -264,11 +264,24 @@ impl Transform {
     /// Compose with a child transform: `self` is the parent, `child` is local
     /// to `self`. The result is expressed in `self`'s parent space.
     ///
-    /// Note: when both parent and child carry non-uniform scale the exact
-    /// result can contain shear, which a pure TRS cannot represent. This
-    /// method composes the TRS components directly (translation/rotation exact,
-    /// scale multiplied component-wise); use [`Transform::mul_affine`] when a
-    /// lossless result is required.
+    /// Composition is the standard engine TRS product
+    /// `(T_p + R_p·(S_p·t_c), R_p·R_c, S_p·S_c)` — matching the network / ECS
+    /// convention (e.g. Bevy's `Transform::mul_transform`). It is **exact**
+    /// whenever the parent scale is uniform or the child has no rotation, and
+    /// bit-for-bit consistent with a serial hierarchy pass.
+    ///
+    /// # Lossy
+    ///
+    /// The *exact* affine product of two TRS transforms is
+    /// `T = T_p + R_p·S_p·t_c`, `L = R_p·S_p·R_c·S_c`. When the parent carries
+    /// **non-uniform** scale *and* the child is rotated, `L` generally contains
+    /// shear (`S_p` and `R_c` do not commute), which [`Transform`]'s pure TRS
+    /// representation cannot hold. This method then returns a TRS *projection*
+    /// (`R_p·R_c` with component-wise `S_p·S_c`) rather than the true affine —
+    /// the rotation is preserved but the shear is dropped. Use
+    /// [`Transform::mul_affine`] (or [`GlobalTransform::mul_transform`]) when
+    /// the lossless affine result is required, e.g. for deep hierarchies whose
+    /// parents mix non-uniform scale with rotated children (CR-found).
     #[inline]
     pub fn mul_transform(&self, child: &Transform) -> Transform {
         Transform {
@@ -644,9 +657,7 @@ pub mod prelude {
     };
     pub use crate::change::{ChangeTicks, Tick};
     pub use crate::compute_hierarchy::{ComputeHierarchyInput, LevelSchedule};
-    pub use crate::constraint::{
-        solve_chain, Aim, Constraint, LookAt, ParentBlend, PositionLimit,
-    };
+    pub use crate::constraint::{solve_chain, Aim, Constraint, LookAt, ParentBlend, PositionLimit};
     #[cfg(feature = "determinism")]
     pub use crate::determinism::{hash_globals, propagate_fixed, FxAffine3, FxMat3};
     pub use crate::dirty::{DirtyPropagator, DirtyStats};
@@ -656,9 +667,9 @@ pub mod prelude {
     pub use crate::gpu_upload::{GpuColumnBuffer, MatrixLayout, UploadRange};
     pub use crate::hierarchy::{Hierarchy, HierarchyError, NodeId};
     pub use crate::interpolation::InterpolationBuffer;
-    pub use crate::observer::{ChangeMask, TransformChange, TransformObserver};
     #[cfg(feature = "f64")]
     pub use crate::large_world::{propagate_hp, FloatingOrigin, GlobalTransformHp, TransformHp};
+    pub use crate::observer::{ChangeMask, TransformChange, TransformObserver};
     #[cfg(feature = "std")]
     pub use crate::parallel::{propagate_parallel, propagate_parallel_with_plan, LevelPlan};
     pub use crate::propagation::propagate;
