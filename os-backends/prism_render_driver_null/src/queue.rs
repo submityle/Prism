@@ -49,4 +49,9 @@ impl rhi::FrameSync for NullQueue {
     fn wait_idle(&self) -> bool {
         true
     }
+
+    fn on_submitted_work_done(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
+        // The null queue is always idle, so completion is immediate.
+        callback();
+    }
 }

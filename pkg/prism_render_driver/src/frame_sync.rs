@@ -52,4 +52,14 @@ pub trait FrameSync {
     /// Used on shutdown and by idle points (e.g. a CPU readback) that need the
     /// GPU fully caught up. Returns `true` on success.
     fn wait_idle(&self) -> bool;
+
+    /// Registers `callback` to run once every submission handed to this queue
+    /// so far has completed on the GPU.
+    ///
+    /// This is the non-blocking counterpart to [`wait_idle`](Self::wait_idle):
+    /// a renderer that tracks GPU work completion (rather than stalling the
+    /// CPU) uses it to advance its bookkeeping when the queue drains. The
+    /// callback runs on a backend-chosen thread, so it must be `Send` and must
+    /// not block.
+    fn on_submitted_work_done(&self, callback: Box<dyn FnOnce() + Send + 'static>);
 }

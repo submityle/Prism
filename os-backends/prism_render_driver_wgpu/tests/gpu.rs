@@ -14,7 +14,10 @@
 
 use prism_render_driver as rhi;
 use prism_render_driver_wgpu::{WgpuDevice, WgpuInstance, WgpuQueue};
-use rhi::{RenderDevice, RenderQueue};
+use rhi::{FrameSync, RenderDevice, RenderQueue};
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Brings up a device/queue pair, or returns `None` when no GPU is available.
 fn device_or_skip() -> Option<(WgpuDevice, WgpuQueue)> {
@@ -163,4 +166,38 @@ fn gpu_trivial_clear_render_pass() {
 
     device.destroy_texture_view(view);
     device.destroy_texture(texture);
+}
+
+#[test]
+fn gpu_completion_callback_fires_after_the_queue_drains() {
+    let Some((device, queue)) = device_or_skip() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    };
+
+    let fired = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&fired);
+    queue.on_submitted_work_done(Box::new(move || {
+        flag.store(true, Ordering::Release);
+    }));
+
+    // Advance the queue's submission index so the registered callback becomes
+    // eligible to run.
+    let mut encoder = rhi::CommandEncoder::labeled("completion-callback");
+    queue.submit(&[encoder.finish()]);
+    assert!(device.poll_wait(), "the device stays healthy");
+
+    for _ in 0..10_000 {
+        if fired.load(Ordering::Acquire) {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert!(
+        fired.load(Ordering::Acquire),
+        "the completion callback ran once the queue drained"
+    );
 }

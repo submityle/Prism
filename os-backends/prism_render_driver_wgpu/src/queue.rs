@@ -651,6 +651,10 @@ impl rhi::FrameSync for WgpuQueue {
     fn wait_idle(&self) -> bool {
         self.wait_idle()
     }
+
+    fn on_submitted_work_done(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
+        self.queue.on_submitted_work_done(callback);
+    }
 }
 
 #[cfg(test)]
