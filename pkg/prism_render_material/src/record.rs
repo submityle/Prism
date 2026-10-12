@@ -97,7 +97,9 @@ pub struct GpuMaterialHeader {
     /// `u32`-word address decoded with `lobe_mask`.
     pub parameter_offset: u32,
     /// Byte length of the packed surface block at `parameter_offset`
-    /// (`packed_size_bytes()` = `(12 + present_lobes*4) * 4`).
+    /// (`packed_size_bytes()` = `(SURFACE_CORE_WORDS + Σ present-lobe
+    /// footprints) * 4`; lobes are variable length, so this is core + the
+    /// present lobes' own word counts, not a fixed stride per lobe).
     pub parameter_size: u32,
     pub texture_offset: u32,
     pub texture_count: u32,
