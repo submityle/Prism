@@ -2483,6 +2483,36 @@ fn prism_affine_transform_vector(q: vec4<f32>, s: vec3<f32>, v: vec3<f32>) -> ve
     return prism_affine_matrix3(q, s, v);\n\
 }\n";
 
+/// Single-sourced WGSL for the bounding-sphere queries, mirroring the CPU
+/// [`BoundingSphere`](crate::geom::sphere::BoundingSphere) helpers used by
+/// spatial structures and broad-phase bounds.
+/// `prism_sphere_contains_point` is the inclusive point test
+/// `dot(p-c, p-c) <= r²` (returns `1u`/`0u`);
+/// `prism_sphere_merge` returns the **smallest sphere enclosing both** inputs
+/// (`vec4(center, radius)`) — if one already swallows the other it is returned
+/// unchanged, otherwise the new radius is `(d + r0 + r1)/2` and the centre is
+/// moved along the axis by `new_radius - r0` (guarding the coincident-centre
+/// case with the `1.0e-20` distance threshold). This is the GPU side of sphere
+/// bounding-volume refit.
+pub const WGSL_SPHERE: &str = "\
+fn prism_sphere_contains_point(center: vec3<f32>, radius: f32, p: vec3<f32>) -> u32 {\n\
+    let d = p - center;\n\
+    if (dot(d, d) <= radius * radius) { return 1u; }\n\
+    return 0u;\n\
+}\n\
+\n\
+fn prism_sphere_merge(c0: vec3<f32>, r0: f32, c1: vec3<f32>, r1: f32) -> vec4<f32> {\n\
+    let offset = c1 - c0;\n\
+    let dist = length(offset);\n\
+    if (dist + r1 <= r0) { return vec4<f32>(c0, r0); }\n\
+    if (dist + r0 <= r1) { return vec4<f32>(c1, r1); }\n\
+    let new_radius = (dist + r0 + r1) * 0.5;\n\
+    var dir = vec3<f32>(0.0, 0.0, 0.0);\n\
+    if (dist > 1.0e-20) { dir = offset * (1.0 / dist); }\n\
+    let center = c0 + dir * (new_radius - r0);\n\
+    return vec4<f32>(center, new_radius);\n\
+}\n";
+
 /// Single-sourced WGSL for the Q16.16 fixed-point scalar
 /// [`I16F16`](crate::fixed::i16f16::I16F16), mirroring its saturating ops on the
 /// raw `i32` bits. Integer fixed-point is the deterministic path (exact,
