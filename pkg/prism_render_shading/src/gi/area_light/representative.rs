@@ -265,7 +265,6 @@ mod tests {
             base_color: base,
             metallic: 0.0,
             perceptual_roughness: 0.5,
-            reflectance: 0.5,
             ..SurfaceSample::default()
         };
         let frame = ShadingFrame {

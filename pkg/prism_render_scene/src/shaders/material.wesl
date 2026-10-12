@@ -26,7 +26,10 @@ struct PrismSurfaceParameters {
     emissive: vec4<f32>,
     metallic: f32,
     perceptual_roughness: f32,
-    reflectance: f32,
+    // `OpenPBR` specular group (see `brdf.wesl::SurfaceSample`).
+    specular_weight: f32,
+    specular_color: vec4<f32>,
+    specular_ior: f32,
     ambient_occlusion: f32,
     normal_scale: f32,
     alpha_cutoff: f32,

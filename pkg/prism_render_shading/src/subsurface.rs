@@ -30,7 +30,9 @@ use core::f32::consts::PI;
 
 use bevy_math::ops;
 
-use crate::lighting::{distribution_ggx, fresnel_schlick, visibility_smith_ggx_correlated};
+use crate::lighting::{
+    dielectric_f0, distribution_ggx, fresnel_schlick, visibility_smith_ggx_correlated,
+};
 use crate::vecmath::{add, dot, mix3, mul, mul_scalar, normalize_or, sub};
 use crate::{DirectLightSample, ShadingFrame, SurfaceSample};
 
@@ -83,9 +85,7 @@ pub fn evaluate_subsurface_direct(
     let metallic = surface.metallic.clamp(0.0, 1.0);
     let roughness = surface.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0);
     let alpha = roughness * roughness;
-    let reflectance = surface.reflectance.clamp(0.0, 1.0);
-    let f0_dielectric = 0.16 * reflectance * reflectance;
-    let f0 = mix3([f0_dielectric; 3], surface.base_color, metallic);
+    let f0 = mix3(dielectric_f0(&surface), surface.base_color, metallic);
     let f = fresnel_schlick(f0, v_dot_h);
 
     // Front-face GGX specular; reuses the principled helpers for exact parity.

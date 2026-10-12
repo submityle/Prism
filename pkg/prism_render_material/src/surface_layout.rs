@@ -8,7 +8,7 @@
 //! checked against — never diverge from — the schema. Edit the schema, not this.
 
 /// Number of `u32` words in the always-present surface core.
-pub const SURFACE_CORE_WORDS: usize = 12;
+pub const SURFACE_CORE_WORDS: usize = 20;
 /// Widest per-lobe word footprint in the schema.
 ///
 /// Lobes are **variable length** (§4.4 "变长打包"):
@@ -28,7 +28,7 @@ pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 12, 4, 8, 4, 4, 4];
 pub const SURFACE_LOBE_COUNT: u32 = 7;
 /// Fully-loaded worst case: core plus every lobe. The WESL decoder gathers into
 /// an `array<u32, SURFACE_MAX_WORDS>`.
-pub const SURFACE_MAX_WORDS: usize = 52;
+pub const SURFACE_MAX_WORDS: usize = 60;
 
 /// One optional lobe's generated identity, in canonical pack order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

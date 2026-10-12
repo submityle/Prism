@@ -58,7 +58,13 @@ struct SurfaceSample {
     diffuse_roughness: f32,
     metallic: f32,
     perceptual_roughness: f32,
-    reflectance: f32,
+    // `OpenPBR` specular group. `specular_weight` scales the dielectric lobe,
+    // `specular_color` tints it and `specular_ior` sets its interface index
+    // (`1.5` = the historical `F0 = 0.04`). Mirrors `SurfaceSample` in
+    // `lighting.rs`; the former `reflectance` IOR proxy is gone.
+    specular_weight: f32,
+    specular_color: vec3<f32>,
+    specular_ior: f32,
     ambient_occlusion: f32,
     emissive: vec3<f32>,
     clearcoat: f32,
@@ -137,6 +143,18 @@ fn fresnel_schlick(f0: vec3<f32>, v_dot_h: f32) -> vec3<f32> {
     let squared = one_minus * one_minus;
     let factor = squared * squared * one_minus;
     return f0 + (vec3<f32>(1.0) - f0) * factor;
+}
+
+// `OpenPBR` specular group dielectric `F0`: the per-channel normal-incidence
+// Fresnel `((ior-1)/(ior+1))^2`, scaled by `specular_weight` and tinted by
+// `specular_color`. Byte-for-byte twin of `lighting.rs::dielectric_f0`; the
+// defaults (ior 1.5, weight 1, white) give `vec3(0.04)`, the value the removed
+// `reflectance = 0.5` proxy produced.
+fn dielectric_f0(surface: SurfaceSample) -> vec3<f32> {
+    let ior = clamp(surface.specular_ior, 1.0, 3.0);
+    let r = (ior - 1.0) / (ior + 1.0);
+    let f0 = r * r * clamp(surface.specular_weight, 0.0, 1.0);
+    return vec3<f32>(f0) * surface.specular_color;
 }
 
 // GGX/Trowbridge-Reitz normal distribution. Mirrors `distribution_ggx`.
@@ -327,9 +345,7 @@ fn principled_direct(
     // `normal_variance == 0` it is an exact identity.
     let base_alpha = roughness * roughness;
     let alpha = sqrt(spec_aa_filter_alpha_sq(base_alpha * base_alpha, surface.normal_variance, SPEC_AA_KAPPA_MAX));
-    let reflectance = clamp(surface.reflectance, 0.0, 1.0);
-    let f0_dielectric = 0.16 * reflectance * reflectance;
-    let f0 = mix(vec3<f32>(f0_dielectric), surface.base_color, metallic);
+    let f0 = mix(dielectric_f0(surface), surface.base_color, metallic);
     // Thin-film iridescence: blend the Schlick Fresnel toward the Airy
     // interference reflectance at the same `v_dot_h`. Byte-identical to
     // `evaluate_principled_direct` in `lighting.rs`; `iridescence == 0` is an
@@ -589,9 +605,7 @@ fn image_based(
     let metallic = clamp(surface.metallic, 0.0, 1.0);
     let roughness = clamp(surface.perceptual_roughness, 0.0, 1.0);
     let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
-    let reflectance = clamp(surface.reflectance, 0.0, 1.0);
-    let f0_dielectric = 0.16 * reflectance * reflectance;
-    let f0 = mix(vec3<f32>(f0_dielectric), surface.base_color, metallic);
+    let f0 = mix(dielectric_f0(surface), surface.base_color, metallic);
 
     // Diffuse: Lambertian albedo lit by cosine-convolved irradiance.
     let irradiance = max(sh_irradiance(env, normal), vec3<f32>(0.0));

@@ -5,10 +5,10 @@
 //!
 //! Byte-exact WESL twin of
 //! `prism_render_material::SurfaceParameterBlock::unpack(mask, words).to_full()`:
-//! the scene packs each surface as an über-BSDF core (12 words) followed by
+//! the scene packs each surface as an über-BSDF core (20 words) followed by
 //! only the lobes named in `lobe_mask`, written low bit first. Readers gather the
 //! material's `parameter_size / 4` words out of the shared `array<u32>` heap into a
-//! fixed `array<u32, 52>` (the fully-loaded worst case) and expand them back to
+//! fixed `array<u32, 60>` (the fully-loaded worst case) and expand them back to
 //! a full `PrismSurfaceParameters`, filling absent lobes with neutral defaults.
 //!
 //! Kept as a single generated source so all five consumers (opaque, transparent,
@@ -25,7 +25,7 @@ const PRISM_LOBE_TRANSMISSION: u32 = 32u; // 1 << 5
 const PRISM_LOBE_FACE: u32 = 64u;         // 1 << 6
 const PRISM_LOBE_ALL: u32 = 127u;         // (1 << 7) - 1
 
-const PRISM_SURFACE_CORE_WORDS: u32 = 12u;
+const PRISM_SURFACE_CORE_WORDS: u32 = 20u;
 /// Widest per-lobe word footprint (a documentation constant; the pack cursor
 /// advances by each lobe's own `PRISM_LOBE_WORDS_*`, never this value).
 const PRISM_SURFACE_LOBE_WORDS: u32 = 12u;
@@ -40,8 +40,8 @@ const PRISM_LOBE_WORDS_SUBSURFACE: u32 = 4u;
 const PRISM_LOBE_WORDS_TRANSMISSION: u32 = 4u;
 const PRISM_LOBE_WORDS_FACE: u32 = 4u;
 
-/// Fully-loaded worst case: core + every lobe (12 + sum of 7 lobe footprints).
-const PRISM_SURFACE_MAX_WORDS: u32 = 52u;
+/// Fully-loaded worst case: core + every lobe (20 + sum of 7 lobe footprints).
+const PRISM_SURFACE_MAX_WORDS: u32 = 60u;
 
 /// Packed word count for a mask: core plus each present lobe's own footprint.
 /// Mirrors `SurfaceParameterBlock::packed_len_words`.
@@ -65,12 +65,14 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
     s.base_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     s.metallic = 0.0;
     s.perceptual_roughness = 0.5;
-    s.reflectance = 0.5;
+    s.specular_weight = 1.0;
     s.ambient_occlusion = 1.0;
     s.normal_scale = 1.0;
     s.alpha_cutoff = 0.5;
     s.base_weight = 1.0;
     s.diffuse_roughness = 0.0;
+    s.specular_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    s.specular_ior = 1.5;
     s.emissive = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     s.clearcoat = 0.0;
     s.clearcoat_roughness = 0.5;
@@ -95,11 +97,11 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
 /// using `lobe_mask`. Words beyond the packed length are ignored; absent lobes keep
 /// their neutral default. Byte-exact twin of
 /// `SurfaceParameterBlock::unpack(mask, words).to_full()`.
-fn prism_unpack_surface(words: array<u32, 52>, lobe_mask: u32) -> PrismSurfaceParameters {
+fn prism_unpack_surface(words: array<u32, 60>, lobe_mask: u32) -> PrismSurfaceParameters {
     var w = words;
     var s = prism_neutral_surface();
 
-    // Core (12 words).
+    // Core (20 words); w[17] and w[18] and w[19] are padding.
     s.base_color = vec4<f32>(
         bitcast<f32>(w[0]),
         bitcast<f32>(w[1]),
@@ -108,12 +110,19 @@ fn prism_unpack_surface(words: array<u32, 52>, lobe_mask: u32) -> PrismSurfacePa
     );
     s.metallic = bitcast<f32>(w[4]);
     s.perceptual_roughness = bitcast<f32>(w[5]);
-    s.reflectance = bitcast<f32>(w[6]);
+    s.specular_weight = bitcast<f32>(w[6]);
     s.ambient_occlusion = bitcast<f32>(w[7]);
     s.normal_scale = bitcast<f32>(w[8]);
     s.alpha_cutoff = bitcast<f32>(w[9]);
     s.base_weight = bitcast<f32>(w[10]);
     s.diffuse_roughness = bitcast<f32>(w[11]);
+    s.specular_color = vec4<f32>(
+        bitcast<f32>(w[12]),
+        bitcast<f32>(w[13]),
+        bitcast<f32>(w[14]),
+        bitcast<f32>(w[15]),
+    );
+    s.specular_ior = bitcast<f32>(w[16]);
 
     // Present lobes, canonical low-bit-first order, each its own footprint.
     var cursor: u32 = PRISM_SURFACE_CORE_WORDS;

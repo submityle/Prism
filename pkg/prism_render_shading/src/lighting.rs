@@ -25,7 +25,16 @@ pub struct SurfaceSample {
     pub diffuse_roughness: f32,
     pub metallic: f32,
     pub perceptual_roughness: f32,
-    pub reflectance: f32,
+    /// `OpenPBR` `specular_weight`: scales the dielectric specular lobe.
+    /// Replaces the former `reflectance` IOR proxy; the default `1.0` is an
+    /// exact identity.
+    pub specular_weight: f32,
+    /// `OpenPBR` `specular_color`: per-channel tint of the dielectric specular
+    /// (white = identity; metals use `base_color`).
+    pub specular_color: [f32; 3],
+    /// `OpenPBR` `specular_ior`: relative index of the dielectric specular
+    /// interface. `1.5` reproduces the historical `F0 = 0.04`.
+    pub specular_ior: f32,
     pub ambient_occlusion: f32,
     pub emissive: [f32; 3],
     pub clearcoat: f32,
@@ -108,7 +117,9 @@ impl Default for SurfaceSample {
             diffuse_roughness: 0.0,
             metallic: 0.0,
             perceptual_roughness: 0.5,
-            reflectance: 0.5,
+            specular_weight: 1.0,
+            specular_color: [1.0; 3],
+            specular_ior: 1.5,
             ambient_occlusion: 1.0,
             emissive: [0.0; 3],
             clearcoat: 0.0,
@@ -182,9 +193,7 @@ pub fn evaluate_principled_direct(
         crate::gi::specular_aa::DEFAULT_KAPPA_MAX,
     )
     .sqrt();
-    let reflectance = surface.reflectance.clamp(0.0, 1.0);
-    let f0_dielectric = 0.16 * reflectance * reflectance;
-    let f0 = mix3([f0_dielectric; 3], surface.base_color, metallic);
+    let f0 = mix3(dielectric_f0(&surface), surface.base_color, metallic);
     // Thin-film iridescence: blend the Schlick Fresnel toward the Airy
     // interference reflectance of a dielectric film over the substrate
     // (glTF `KHR_materials_iridescence`), evaluated at the same `v_dot_h`
@@ -422,6 +431,25 @@ pub(crate) fn fresnel_schlick(f0: [f32; 3], v_dot_h: f32) -> [f32; 3] {
     let squared = one_minus * one_minus;
     let factor = squared * squared * one_minus;
     add(f0, mul_scalar(sub([1.0; 3], f0), factor))
+}
+
+/// The `OpenPBR` specular group's dielectric `F0`: the per-channel normal
+/// incidence Fresnel of the dielectric interface, `((ior-1)/(ior+1))^2`, scaled
+/// by `specular_weight` and tinted by `specular_color`.
+///
+/// The defaults (`specular_ior = 1.5`, weight `1`, white color) give
+/// `[0.04; 3]`, exactly the value the removed `reflectance = 0.5` proxy
+/// produced, so a default material's Fresnel is unchanged.
+#[inline]
+pub(crate) fn dielectric_f0(surface: &SurfaceSample) -> [f32; 3] {
+    let ior = surface.specular_ior.clamp(1.0, 3.0);
+    let r = (ior - 1.0) / (ior + 1.0);
+    let f0 = r * r * surface.specular_weight.clamp(0.0, 1.0);
+    [
+        f0 * surface.specular_color[0],
+        f0 * surface.specular_color[1],
+        f0 * surface.specular_color[2],
+    ]
 }
 
 /// Denominator offset of the Oren-Nayar `A` (base) coefficient.
@@ -827,7 +855,7 @@ mod tests {
         let smooth = evaluate_principled_direct(
             SurfaceSample {
                 metallic: 0.0,
-                reflectance: 0.0,
+                specular_weight: 0.0,
                 diffuse_roughness: 0.0,
                 ..Default::default()
             },
@@ -837,7 +865,7 @@ mod tests {
         let rough = evaluate_principled_direct(
             SurfaceSample {
                 metallic: 0.0,
-                reflectance: 0.0,
+                specular_weight: 0.0,
                 diffuse_roughness: 1.0,
                 ..Default::default()
             },
@@ -848,5 +876,72 @@ mod tests {
             rough[0] > smooth[0],
             "a rough cavity field must retro-reflect more at grazing: {rough:?} vs {smooth:?}"
         );
+    }
+
+    #[test]
+    fn specular_ior_drives_f0_and_reproduces_the_legacy_default() {
+        // The default `specular_ior = 1.5` lands on 0.04, the value the removed
+        // `reflectance = 0.5` proxy produced. The exact dielectric formula
+        // `((n-1)/(n+1))^2` differs from the old `0.16 * r^2` approximation only
+        // in the last ulp, so compare within a tight tolerance.
+        let default_f0 = dielectric_f0(&SurfaceSample::default());
+        for channel in default_f0 {
+            assert!((channel - 0.04).abs() < 1.0e-7, "{default_f0:?}");
+        }
+        // A denser interface reflects more; a near-vacuum one reflects almost
+        // nothing. Weight scales it linearly; white color is the identity.
+        let dense = dielectric_f0(&SurfaceSample {
+            specular_ior: 3.0,
+            ..Default::default()
+        })[0];
+        let sparse = dielectric_f0(&SurfaceSample {
+            specular_ior: 1.05,
+            ..Default::default()
+        })[0];
+        assert!(dense > 0.24 && sparse < 0.001, "dense={dense} sparse={sparse}");
+        assert_eq!(
+            dielectric_f0(&SurfaceSample {
+                specular_weight: 0.0,
+                ..Default::default()
+            }),
+            [0.0; 3]
+        );
+        let half = dielectric_f0(&SurfaceSample {
+            specular_weight: 0.5,
+            ..Default::default()
+        })[0];
+        assert!((half - default_f0[0] * 0.5).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn specular_color_tints_the_dielectric_specular() {
+        let surface = SurfaceSample {
+            specular_color: [1.0, 0.0, 0.0],
+            ..Default::default()
+        };
+        let f0 = dielectric_f0(&surface);
+        assert!(f0[0] > 0.0, "{f0:?}");
+        assert_eq!(f0[1], 0.0);
+        assert_eq!(f0[2], 0.0);
+    }
+
+    #[test]
+    fn specular_weight_changes_the_highlight() {
+        // Isolate the dielectric specular on a black diffuse base.
+        let base = SurfaceSample {
+            base_color: [0.0; 3],
+            metallic: 0.0,
+            ..Default::default()
+        };
+        let full = evaluate_principled_direct(base, frame(), light());
+        let none = evaluate_principled_direct(
+            SurfaceSample {
+                specular_weight: 0.0,
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        assert!(full[0] > none[0] && none[0] >= 0.0, "full={full:?} none={none:?}");
     }
 }

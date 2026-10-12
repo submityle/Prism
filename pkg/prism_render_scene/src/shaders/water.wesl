@@ -24,6 +24,7 @@ import prism_render_scene::shaders::brdf::{
     ShadingFrame,
     DirectLightSample,
     brdf_normalize_or,
+    dielectric_f0,
     fresnel_schlick,
     distribution_ggx,
     vis_smith,
@@ -77,10 +78,10 @@ fn water_direct(
 
     let roughness = clamp(surface.perceptual_roughness, WATER_MIN_ROUGHNESS, 1.0);
     let alpha = roughness * roughness;
-    let reflectance = clamp(surface.reflectance, 0.0, 1.0);
-    // Dielectric water `F0`; the principled `0.16 * reflectance^2` mapping puts
-    // the default reflectance near water's ~0.02 normal-incidence reflectance.
-    let f0 = 0.16 * reflectance * reflectance;
+    // Dielectric water `F0` from the `OpenPBR` specular group; the water raster
+    // folds its authored reflectance into `specular_ior`, preserving the
+    // interface Fresnel. Water's interface is achromatic, so take red.
+    let f0 = dielectric_f0(surface).x;
 
     // Surface glint: coloured Schlick Fresnel feeds the shared GGX highlight.
     let f_spec = fresnel_schlick(vec3<f32>(f0), v_dot_h);

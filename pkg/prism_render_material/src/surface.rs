@@ -38,7 +38,9 @@ pub struct GpuSurfaceCore {
     pub base_color: [f32; 4],
     pub metallic: f32,
     pub perceptual_roughness: f32,
-    pub reflectance: f32,
+    /// `OpenPBR` `specular_weight`: scales the dielectric specular lobe. It
+    /// replaces the former `reflectance` IOR proxy.
+    pub specular_weight: f32,
     pub ambient_occlusion: f32,
     pub normal_scale: f32,
     pub alpha_cutoff: f32,
@@ -47,6 +49,16 @@ pub struct GpuSurfaceCore {
     /// `OpenPBR` `diffuse_roughness`: micro-slope roughness of the base diffuse
     /// lobe (Oren-Nayar). `0` is exactly Lambert.
     pub diffuse_roughness: f32,
+    /// `OpenPBR` `specular_color`: per-channel tint of the dielectric specular
+    /// (white = the identity; metals use `base_color`).
+    pub specular_color: [f32; 4],
+    /// `OpenPBR` `specular_ior`: relative index of the dielectric specular
+    /// interface. `1.5` gives `F0 = 0.04`, the value the removed
+    /// `reflectance = 0.5` produced.
+    pub specular_ior: f32,
+    pub _pad0: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
 }
 
 impl Default for GpuSurfaceCore {
@@ -55,12 +67,17 @@ impl Default for GpuSurfaceCore {
             base_color: [1.0; 4],
             metallic: 0.0,
             perceptual_roughness: 0.5,
-            reflectance: 0.5,
+            specular_weight: 1.0,
             ambient_occlusion: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.5,
             base_weight: 1.0,
             diffuse_roughness: 0.0,
+            specular_color: [1.0; 4],
+            specular_ior: 1.5,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
         }
     }
 }
@@ -366,12 +383,17 @@ impl SurfaceParameterBlock {
                 base_color: params.base_color,
                 metallic: params.metallic,
                 perceptual_roughness: params.perceptual_roughness,
-                reflectance: params.reflectance,
+                specular_weight: params.specular_weight,
                 ambient_occlusion: params.ambient_occlusion,
                 normal_scale: params.normal_scale,
                 alpha_cutoff: params.alpha_cutoff,
                 base_weight: params.base_weight,
                 diffuse_roughness: params.diffuse_roughness,
+                specular_color: params.specular_color,
+                specular_ior: params.specular_ior,
+                _pad0: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
             },
             lobe_mask,
             emission: GpuEmissionLobe {
@@ -431,12 +453,14 @@ impl SurfaceParameterBlock {
             base_color: self.core.base_color,
             metallic: self.core.metallic,
             perceptual_roughness: self.core.perceptual_roughness,
-            reflectance: self.core.reflectance,
+            specular_weight: self.core.specular_weight,
             ambient_occlusion: self.core.ambient_occlusion,
             normal_scale: self.core.normal_scale,
             alpha_cutoff: self.core.alpha_cutoff,
             base_weight: self.core.base_weight,
             diffuse_roughness: self.core.diffuse_roughness,
+            specular_color: self.core.specular_color,
+            specular_ior: self.core.specular_ior,
             ..GpuSurfaceParameters::default()
         };
         if self.lobe_mask.contains(LobeMask::EMISSION) {
@@ -592,12 +616,14 @@ mod tests {
             emissive: [2.0, 0.0, 0.0, 1.0],
             metallic: 0.25,
             perceptual_roughness: 0.4,
-            reflectance: 0.55,
+            specular_weight: 0.65,
             ambient_occlusion: 0.9,
             normal_scale: 0.8,
             alpha_cutoff: 0.37,
             base_weight: 0.85,
             diffuse_roughness: 0.4,
+            specular_color: [0.95, 0.97, 1.0, 1.0],
+            specular_ior: 1.7,
             transmission: 0.6,
             thickness: 1.5,
             clearcoat: 0.7,
@@ -617,7 +643,7 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 3],
+            _pad_tail: [0.0; 2],
         }
     }
 
@@ -731,8 +757,8 @@ mod tests {
     fn bare_dielectric_packs_core_only() {
         let block = SurfaceParameterBlock::from_full(&authored(), LobeMask::default());
         assert_eq!(block.packed_len_words(), SURFACE_CORE_WORDS);
-        // 48 bytes vs the 96-byte fat struct: half the per-pixel traffic.
-        assert_eq!(block.packed_size_bytes(), 48);
+        // 80 bytes of packed block vs the much larger fat authoring struct.
+        assert_eq!(block.packed_size_bytes(), SURFACE_CORE_WORDS * 4);
         assert!(block.packed_size_bytes() < size_of::<GpuSurfaceParameters>());
     }
 

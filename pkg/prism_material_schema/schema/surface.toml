@@ -27,7 +27,7 @@ abi_version = 5
 # surface carries (doc §3.3). SURFACE_CORE_WORDS = 12.
 # ---------------------------------------------------------------------------
 [core]
-words = 12
+words = 20
 
 [[core.field]]
 name = "base_color"
@@ -63,12 +63,14 @@ energy_policy = "coupled"
 view = "invariant"
 
 [[core.field]]
-name = "reflectance"
+name = "specular_weight"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 6
 consumed_by = ["unpack", "sample", "golden"]
-default = 0.5
+# OpenPBR `specular_weight`: scales the dielectric specular lobe. Replaces the
+# former `reflectance` proxy; the default 1.0 is the identity.
+default = 1.0
 valid = "0.0..=1.0"
 energy_policy = "coupled"
 view = "invariant"
@@ -133,6 +135,57 @@ default = 0.0
 valid = "0.0..=1.0"
 energy_policy = "coupled"
 view = "invariant"
+
+[[core.field]]
+name = "specular_color"
+type = "vec4f"
+bit_region = "KHR"
+pack_slot = 12
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `specular_color`: per-channel tint of the dielectric specular. The
+# default is white (the exact identity); metals use `base_color` instead.
+default = [1.0, 1.0, 1.0, 1.0]
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[core.field]]
+name = "specular_ior"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 16
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `specular_ior`: relative index of the dielectric specular interface,
+# replacing the `reflectance` IOR proxy. The default 1.5 gives F0 = 0.04, the
+# same value the old `reflectance = 0.5` produced, so defaults are unchanged.
+default = 1.5
+valid = "1.0..=3.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[core.field]]
+name = "_pad0"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 17
+consumed_by = []
+default = 0.0
+
+[[core.field]]
+name = "_pad1"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 18
+consumed_by = []
+default = 0.0
+
+[[core.field]]
+name = "_pad2"
+type = "pad"
+bit_region = "KHR"
+pack_slot = 19
+consumed_by = []
+default = 0.0
 
 # ---------------------------------------------------------------------------
 # Optional lobes. Each is a uniform 4-word (16-byte) quantum; `registry_slot`

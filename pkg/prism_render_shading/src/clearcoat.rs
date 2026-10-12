@@ -34,9 +34,9 @@
 use core::f32::consts::PI;
 
 use crate::lighting::{
-    anisotropic_axes, distribution_ggx, distribution_ggx_anisotropic, fresnel_schlick,
-    oren_nayar_factor, visibility_smith_ggx_anisotropic, visibility_smith_ggx_correlated,
-    MIN_ANISOTROPIC_ALPHA,
+    anisotropic_axes, dielectric_f0, distribution_ggx, distribution_ggx_anisotropic,
+    fresnel_schlick, oren_nayar_factor, visibility_smith_ggx_anisotropic,
+    visibility_smith_ggx_correlated, MIN_ANISOTROPIC_ALPHA,
 };
 use crate::vecmath::{add, dot, mix3, mul, mul_scalar, normalize_or, sub};
 use crate::{DirectLightSample, ShadingFrame, SurfaceSample};
@@ -126,9 +126,7 @@ pub fn evaluate_clearcoat_direct(
     let metallic = surface.metallic.clamp(0.0, 1.0);
     let roughness = surface.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0);
     let alpha = roughness * roughness;
-    let reflectance = surface.reflectance.clamp(0.0, 1.0);
-    let f0_dielectric = 0.16 * reflectance * reflectance;
-    let f0 = mix3([f0_dielectric; 3], surface.base_color, metallic);
+    let f0 = mix3(dielectric_f0(&surface), surface.base_color, metallic);
     let f = fresnel_schlick(f0, v_dot_h);
     let d = distribution_ggx(n_dot_h, alpha);
     let g = visibility_smith_ggx_correlated(n_dot_v, n_dot_l, alpha);
@@ -275,7 +273,6 @@ mod tests {
             base_color: [0.2, 0.4, 0.6],
             metallic: 0.0,
             perceptual_roughness: 0.4,
-            reflectance: 0.5,
             clearcoat: 0.8,
             clearcoat_roughness: 0.1,
             ..Default::default()
@@ -297,14 +294,14 @@ mod tests {
         for roughness in [0.045, 0.3, 0.7, 1.0] {
             for clearcoat in [0.0, 0.5, 1.0] {
                 for coat_roughness in [0.045, 0.3, 1.0] {
-                    for reflectance in [0.0, 0.5, 1.0] {
+                    for specular_weight in [0.0, 0.5, 1.0] {
                         for dir in dirs {
                             let value = evaluate_clearcoat_direct(
                                 SurfaceSample {
                                     perceptual_roughness: roughness,
                                     clearcoat,
                                     clearcoat_roughness: coat_roughness,
-                                    reflectance,
+                                    specular_weight,
                                     ..base_surface()
                                 },
                                 frame(),
@@ -315,7 +312,7 @@ mod tests {
                             );
                             assert!(
                                 value.into_iter().all(|c| c.is_finite() && c >= 0.0),
-                                "r={roughness} cc={clearcoat} ccr={coat_roughness} refl={reflectance} dir={dir:?} -> {value:?}"
+                                "r={roughness} cc={clearcoat} ccr={coat_roughness} w={specular_weight} dir={dir:?} -> {value:?}"
                             );
                         }
                     }

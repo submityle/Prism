@@ -29,6 +29,7 @@ import prism_render_scene::shaders::brdf::{
     ShadingFrame,
     DirectLightSample,
     brdf_normalize_or,
+    dielectric_f0,
 };
 import prism_render_scene::shaders::water::{
     water_direct,
@@ -1046,7 +1047,14 @@ fn surface_from(foam: f32) -> SurfaceSample {
     s.diffuse_roughness = 0.0;
     s.metallic = 0.0;
     s.perceptual_roughness = clamp(view.surface_params.x + foam * 0.5, 0.0, 1.0);
-    s.reflectance = clamp(view.surface_params.y, 0.0, 1.0);
+    // Fold the authored interface reflectance (y) into `OpenPBR` `specular_ior`
+    // so the water Fresnel is preserved exactly: the old `F0 = 0.16*r^2` maps to
+    // `ior = (1+sqrt(F0))/(1-sqrt(F0))`, the inverse of the dielectric remap.
+    let water_f0 = 0.16 * clamp(view.surface_params.y, 0.0, 1.0) * clamp(view.surface_params.y, 0.0, 1.0);
+    let water_f0_root = sqrt(water_f0);
+    s.specular_ior = clamp((1.0 + water_f0_root) / (1.0 - water_f0_root), 1.0, 3.0);
+    s.specular_weight = 1.0;
+    s.specular_color = vec3<f32>(1.0);
     s.ambient_occlusion = 1.0;
     s.emissive = vec3<f32>(0.0);
     s.clearcoat = 0.0;
@@ -1483,14 +1491,13 @@ fn water_ibl(surface: SurfaceSample, frame: ShadingFrame, ssr: vec4<f32>, bent_n
     let n_dot_v = max(dot(n, v), 1.0e-4);
     let roughness = clamp(surface.perceptual_roughness, 0.0, 1.0);
     let metallic = clamp(surface.metallic, 0.0, 1.0);
-    let reflectance = clamp(surface.reflectance, 0.0, 1.0);
     // Near-field one-bounce screen-space GI, gathered along the bent normal
     // and added to the diffuse ambient term (metals carry no diffuse bounce).
     let ssgi = water_ssgi_gather(world_position, bent_normal_view, surface.base_color * (1.0 - metallic));
     // Far-field indirect light from the resident world-space probe field,
     // added to the same ambient diffuse budget (metals carry no diffuse bounce).
     let wsgi = water_world_space_gi_gather(world_position, frame.normal, surface.base_color * (1.0 - metallic), frag_pixel);
-    let f0 = mix(vec3<f32>(0.16 * reflectance * reflectance), surface.base_color, metallic);
+    let f0 = mix(dielectric_f0(surface), surface.base_color, metallic);
     let dfg = env_brdf_approx(n_dot_v, roughness);
     // Specular lobe integrates only a narrow cone, so weight it by the
     // Lagarde specular occlusion rather than the full-hemisphere diffuse AO.

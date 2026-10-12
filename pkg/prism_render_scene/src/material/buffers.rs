@@ -232,9 +232,11 @@ mod tests {
             })
             .unwrap();
         buffers.apply_dirty(&mut runtime);
-        // Slot 0 fallback + slot 1 material each packed a 12-word core block.
-        assert_eq!(buffers.allocs[0], Some((0, 12)));
-        assert_eq!(buffers.allocs[1], Some((12, 12)));
+        // Slot 0 fallback + slot 1 material each packed a core-only block whose
+        // word count is the current `SURFACE_CORE_WORDS` (20 since the base,
+        // specular, coat and fuzz groups all grew the core).
+        assert_eq!(buffers.allocs[0], Some((0, 20)));
+        assert_eq!(buffers.allocs[1], Some((20, 20)));
 
         runtime
             .registry
@@ -243,6 +245,6 @@ mod tests {
         buffers.apply_dirty(&mut runtime);
         // The retired material's run is freed; the fallback keeps its block.
         assert_eq!(buffers.allocs[1], None);
-        assert_eq!(buffers.allocs[0], Some((0, 12)));
+        assert_eq!(buffers.allocs[0], Some((0, 20)));
     }
 }

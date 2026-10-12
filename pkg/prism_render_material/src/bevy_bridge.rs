@@ -140,7 +140,13 @@ pub fn lower_standard_material(
             emissive: material.emissive.to_f32_array(),
             metallic: material.metallic,
             perceptual_roughness: material.perceptual_roughness,
-            reflectance: material.reflectance,
+            // `OpenPBR` specular group. Bevy's `reflectance` is the
+            // `KHR_materials_specular`-style `F0 = 0.16*r^2` remap, so invert it
+            // back to a physical IOR (`ior = (1+sqrt(F0))/(1-sqrt(F0))`) and the
+            // authored dielectric F0 is preserved exactly: `reflectance = 0.5`
+            // lands on the `ior = 1.5` default (both `F0 = 0.04`). Bevy's own
+            // `ior` keeps driving refraction through the transmission lobe.
+            specular_ior: ior_from_f0(0.16 * material.reflectance * material.reflectance),
             ambient_occlusion: 1.0,
             normal_scale: 1.0,
             alpha_cutoff,
@@ -167,6 +173,19 @@ fn opaque_class(two_sided: bool) -> MaterialRenderClass {
         MaterialRenderClass::Opaque
     }
 }
+
+/// Inverse of the dielectric `F0 = ((n-1)/(n+1))^2` remap:
+/// `n = (1 + sqrt(F0)) / (1 - sqrt(F0))`, clamped to the `OpenPBR`
+/// `specular_ior` range `[1, 3]`.
+///
+/// Used by [`lower_standard_material`] to fold Bevy's `reflectance` (which is
+/// itself the `0.16 * r^2` KHR-style F0 remap) into a physical IOR without
+/// changing the authored Fresnel.
+fn ior_from_f0(f0: f32) -> f32 {
+    let root = f0.clamp(0.0, 0.96).sqrt();
+    ((1.0 + root) / (1.0 - root)).clamp(1.0, 3.0)
+}
+
 fn closure_mask(material: &StandardMaterial) -> u32 {
     1 | (u32::from(material.clearcoat > 0.0) << 3)
         | (u32::from(material.specular_transmission > 0.0) << 6)

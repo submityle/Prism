@@ -221,7 +221,13 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         diffuse_roughness: parameters.diffuse_roughness,
         metallic: parameters.metallic,
         perceptual_roughness: parameters.perceptual_roughness,
-        reflectance: parameters.reflectance,
+        specular_weight: parameters.specular_weight,
+        specular_color: [
+            parameters.specular_color[0],
+            parameters.specular_color[1],
+            parameters.specular_color[2],
+        ],
+        specular_ior: parameters.specular_ior,
         ambient_occlusion: parameters.ambient_occlusion,
         emissive: [
             parameters.emissive[0],

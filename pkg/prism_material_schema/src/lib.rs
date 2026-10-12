@@ -644,7 +644,7 @@ mod tests {
     fn embedded_schema_parses_and_validates() {
         let schema = surface_schema();
         assert_eq!(schema.schema_version, 1);
-        assert_eq!(schema.core.words, 12);
+        assert_eq!(schema.core.words, 20);
         assert_eq!(schema.lobe_count(), 7);
     }
 
@@ -662,34 +662,34 @@ mod tests {
     #[test]
     fn packed_len_matches_core_plus_present_lobes() {
         let schema = surface_schema();
-        assert_eq!(schema.packed_len_words(0), 12);
+        assert_eq!(schema.packed_len_words(0), 20);
         // Lobes are variable length: core plus the sum of every lobe's words.
-        let all: u32 = 12 + schema.lobes.iter().map(|lobe| lobe.words).sum::<u32>();
+        let all: u32 = 20 + schema.lobes.iter().map(|lobe| lobe.words).sum::<u32>();
         assert_eq!(schema.packed_len_words(0b111_1111), all);
         // Only clearcoat (bit 1) present: core + the coat lobe's own footprint
         // (12 words: clearcoat, clearcoat_roughness, coat_ior, a pad, coat_color,
         // coat_roughness_anisotropy and three trailing pads).
-        assert_eq!(schema.packed_len_words(0b10), 12 + 12);
+        assert_eq!(schema.packed_len_words(0b10), 20 + 12);
         // Only sheen (bit 3) present: core + the fuzz lobe's own footprint
         // (8 words: sheen, fuzz_roughness, two pads, fuzz_color).
-        assert_eq!(schema.packed_len_words(0b1000), 12 + 8);
+        assert_eq!(schema.packed_len_words(0b1000), 20 + 8);
     }
 
     #[test]
     fn transmission_fields_land_at_expected_offsets() {
         let schema = surface_schema();
         let all = 0b111_1111;
-        // Core (12) + emission (4) + clearcoat (12, the full OpenPBR coat group)
-        // + anisotropy (4) + sheen (8, the full OpenPBR fuzz group) + subsurface
-        // (4) = 44 is the transmission base; the transmission lobe then packs
-        // transmission, thickness, index_of_refraction, dispersion at 44..48.
+        // Core (20, now carrying the OpenPBR base + specular groups) + emission
+        // (4) + clearcoat (12) + anisotropy (4) + sheen (8) + subsurface (4) =
+        // 52 is the transmission base; the transmission lobe then packs
+        // transmission, thickness, index_of_refraction, dispersion at 52..56.
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "transmission"),
-            Some(44)
+            Some(52)
         );
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "index_of_refraction"),
-            Some(46)
+            Some(54)
         );
     }
 

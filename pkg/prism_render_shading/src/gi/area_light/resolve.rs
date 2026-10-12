@@ -31,6 +31,7 @@ use bevy_math::Vec3;
 
 use crate::gi::area_light::ltc_lut::LtcLut;
 use crate::gi::area_light::polygon::{quad_form_factor, quad_ltc_evaluate, rectangle_points};
+use crate::lighting::dielectric_f0;
 use crate::{ShadingFrame, SurfaceSample};
 
 /// A planar rectangle (quad) polygonal area light expressed in world space.
@@ -105,9 +106,7 @@ fn normalize_or(value: Vec3, fallback: Vec3) -> Vec3 {
 #[inline]
 fn indirect_f0(surface: &SurfaceSample) -> Vec3 {
     let metallic = surface.metallic.clamp(0.0, 1.0);
-    let reflectance = surface.reflectance.clamp(0.0, 1.0);
-    let f0_dielectric = 0.16 * reflectance * reflectance;
-    Vec3::splat(f0_dielectric).lerp(to_vec3(surface.base_color), metallic)
+    to_vec3(dielectric_f0(surface)).lerp(to_vec3(surface.base_color), metallic)
 }
 
 #[inline]
@@ -240,7 +239,6 @@ mod tests {
             base_color: [0.8, 0.6, 0.4],
             metallic: 0.0,
             perceptual_roughness: 0.5,
-            reflectance: 0.5,
             ..SurfaceSample::default()
         }
     }
@@ -393,7 +391,7 @@ mod tests {
         let lut = bake_ltc_lut_default();
         let mut smooth = test_surface();
         smooth.base_color = [0.0, 0.0, 0.0]; // isolate the specular (f0) lobe.
-        smooth.reflectance = 1.0;
+        smooth.specular_ior = 3.0;
         smooth.perceptual_roughness = 0.1;
         let mut rough = smooth;
         rough.perceptual_roughness = 0.9;

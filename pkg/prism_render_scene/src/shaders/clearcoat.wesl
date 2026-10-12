@@ -28,6 +28,7 @@ import prism_render_scene::shaders::brdf::{
     ShadingFrame,
     DirectLightSample,
     brdf_normalize_or,
+    dielectric_f0,
     fresnel_schlick,
     distribution_ggx,
     distribution_ggx_anisotropic,
@@ -103,9 +104,7 @@ fn clearcoat_direct(
     let metallic = clamp(surface.metallic, 0.0, 1.0);
     let roughness = clamp(surface.perceptual_roughness, CLEARCOAT_MIN_ROUGHNESS, 1.0);
     let alpha = roughness * roughness;
-    let reflectance = clamp(surface.reflectance, 0.0, 1.0);
-    let f0_dielectric = 0.16 * reflectance * reflectance;
-    let f0 = mix(vec3<f32>(f0_dielectric), surface.base_color, metallic);
+    let f0 = mix(dielectric_f0(surface), surface.base_color, metallic);
     let f = fresnel_schlick(f0, v_dot_h);
     let d = distribution_ggx(n_dot_h, alpha);
     let g = vis_smith(n_dot_v, n_dot_l, alpha);

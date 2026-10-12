@@ -29,7 +29,9 @@ use core::f32::consts::PI;
 
 use bevy_math::ops;
 
-use crate::lighting::{distribution_ggx, fresnel_schlick, visibility_smith_ggx_correlated};
+use crate::lighting::{
+    dielectric_f0, distribution_ggx, fresnel_schlick, visibility_smith_ggx_correlated,
+};
 use crate::vecmath::{add, dot, mul, mul_scalar, normalize_or};
 use crate::{DirectLightSample, ShadingFrame, SurfaceSample};
 
@@ -93,10 +95,11 @@ pub fn evaluate_water_direct(
 
     let roughness = surface.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0);
     let alpha = roughness * roughness;
-    let reflectance = surface.reflectance.clamp(0.0, 1.0);
-    // Dielectric water `F0`; the principled `0.16 * reflectance^2` mapping puts
-    // the default reflectance near water's ~0.02 normal-incidence reflectance.
-    let f0 = 0.16 * reflectance * reflectance;
+    // Dielectric water `F0`, taken from the `OpenPBR` specular group (the water
+    // raster folds its authored reflectance into `specular_ior` so the interface
+    // Fresnel is preserved). Water's interface is achromatic, so use the red
+    // channel of the tinted group.
+    let f0 = dielectric_f0(&surface)[0];
 
     // Surface glint: coloured Schlick Fresnel feeds the shared GGX highlight.
     let f_spec = fresnel_schlick([f0; 3], v_dot_h);
@@ -147,7 +150,6 @@ mod tests {
         SurfaceSample {
             base_color: [0.1, 0.3, 0.6],
             perceptual_roughness: 0.3,
-            reflectance: 0.5,
             thickness: 0.3,
             ..Default::default()
         }
@@ -167,13 +169,13 @@ mod tests {
         ];
         for roughness in [0.045, 0.3, 0.7, 1.0] {
             for thickness in [0.0, 0.3, 0.7, 1.0] {
-                for reflectance in [0.0, 0.5, 1.0] {
+                for specular_weight in [0.0, 0.5, 1.0] {
                     for dir in dirs {
                         let value = evaluate_water_direct(
                             SurfaceSample {
                                 perceptual_roughness: roughness,
                                 thickness,
-                                reflectance,
+                                specular_weight,
                                 ..base_surface()
                             },
                             frame(),
@@ -184,7 +186,7 @@ mod tests {
                         );
                         assert!(
                             value.into_iter().all(|c| c.is_finite() && c >= 0.0),
-                            "roughness={roughness} thickness={thickness} reflectance={reflectance} dir={dir:?} -> {value:?}"
+                                "roughness={roughness} thickness={thickness} w={specular_weight} dir={dir:?} -> {value:?}"
                         );
                     }
                 }
@@ -244,7 +246,7 @@ mod tests {
         let shallow = evaluate_water_direct(
             SurfaceSample {
                 thickness: 0.05,
-                reflectance: 0.0,
+                specular_weight: 0.0,
                 ..base_surface()
             },
             frame(),
@@ -253,7 +255,7 @@ mod tests {
         let deep = evaluate_water_direct(
             SurfaceSample {
                 thickness: 1.0,
-                reflectance: 0.0,
+                specular_weight: 0.0,
                 ..base_surface()
             },
             frame(),

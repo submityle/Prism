@@ -140,7 +140,8 @@ pub struct GpuSurfaceParameters {
     pub emissive: [f32; 4],
     pub metallic: f32,
     pub perceptual_roughness: f32,
-    pub reflectance: f32,
+    /// `OpenPBR` `specular_weight`: scales the dielectric specular lobe.
+    pub specular_weight: f32,
     pub ambient_occlusion: f32,
     pub normal_scale: f32,
     pub alpha_cutoff: f32,
@@ -149,6 +150,10 @@ pub struct GpuSurfaceParameters {
     /// `OpenPBR` `diffuse_roughness`: Oren-Nayar micro-slope roughness of the
     /// base diffuse lobe (`0` = Lambert).
     pub diffuse_roughness: f32,
+    /// `OpenPBR` `specular_color`: per-channel tint of the dielectric specular.
+    pub specular_color: [f32; 4],
+    /// `OpenPBR` `specular_ior`: dielectric specular interface index.
+    pub specular_ior: f32,
     pub transmission: f32,
     pub thickness: f32,
     pub clearcoat: f32,
@@ -177,7 +182,7 @@ pub struct GpuSurfaceParameters {
     pub _pad_face2: f32,
     /// Tail padding keeping the fat authoring view a 16-byte multiple as the
     /// coat group grows. Carries no data.
-    pub _pad_tail: [f32; 3],
+    pub _pad_tail: [f32; 2],
 }
 
 impl Default for GpuSurfaceParameters {
@@ -187,12 +192,14 @@ impl Default for GpuSurfaceParameters {
             emissive: [0.0; 4],
             metallic: 0.0,
             perceptual_roughness: 0.5,
-            reflectance: 0.5,
+            specular_weight: 1.0,
             ambient_occlusion: 1.0,
             normal_scale: 1.0,
             alpha_cutoff: 0.5,
             base_weight: 1.0,
             diffuse_roughness: 0.0,
+            specular_color: [1.0; 4],
+            specular_ior: 1.5,
             transmission: 0.0,
             thickness: 0.0,
             clearcoat: 0.0,
@@ -212,7 +219,7 @@ impl Default for GpuSurfaceParameters {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 3],
+            _pad_tail: [0.0; 2],
         }
     }
 }

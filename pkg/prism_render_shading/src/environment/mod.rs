@@ -18,6 +18,7 @@
 
 use bevy_math::ops;
 
+use crate::lighting::dielectric_f0;
 use crate::{ShadingFrame, SurfaceSample};
 
 mod brdf_lut;
@@ -206,12 +207,11 @@ pub fn evaluate_image_based_light(
     let metallic = surface.metallic.clamp(0.0, 1.0);
     let roughness = surface.perceptual_roughness.clamp(0.0, 1.0);
     let occlusion = surface.ambient_occlusion.clamp(0.0, 1.0);
-    let reflectance = surface.reflectance.clamp(0.0, 1.0);
-    let f0_dielectric = 0.16 * reflectance * reflectance;
+    let f0_dielectric = dielectric_f0(&surface);
     let f0 = [
-        mix(f0_dielectric, surface.base_color[0], metallic),
-        mix(f0_dielectric, surface.base_color[1], metallic),
-        mix(f0_dielectric, surface.base_color[2], metallic),
+        mix(f0_dielectric[0], surface.base_color[0], metallic),
+        mix(f0_dielectric[1], surface.base_color[1], metallic),
+        mix(f0_dielectric[2], surface.base_color[2], metallic),
     ];
 
     // Diffuse: Lambertian albedo lit by cosine-convolved irradiance.
@@ -279,12 +279,11 @@ pub fn evaluate_image_based_light_specular(
     let metallic = surface.metallic.clamp(0.0, 1.0);
     let roughness = surface.perceptual_roughness.clamp(0.0, 1.0);
     let occlusion = surface.ambient_occlusion.clamp(0.0, 1.0);
-    let reflectance = surface.reflectance.clamp(0.0, 1.0);
-    let f0_dielectric = 0.16 * reflectance * reflectance;
+    let f0_dielectric = dielectric_f0(&surface);
     let f0 = [
-        mix(f0_dielectric, surface.base_color[0], metallic),
-        mix(f0_dielectric, surface.base_color[1], metallic),
-        mix(f0_dielectric, surface.base_color[2], metallic),
+        mix(f0_dielectric[0], surface.base_color[0], metallic),
+        mix(f0_dielectric[1], surface.base_color[1], metallic),
+        mix(f0_dielectric[2], surface.base_color[2], metallic),
     ];
 
     // Diffuse: Lambertian albedo lit by cosine-convolved irradiance.
@@ -376,7 +375,7 @@ mod tests {
             base_color: [0.6, 0.6, 0.6],
             metallic: 0.0,
             perceptual_roughness: 1.0,
-            reflectance: 0.0,
+            specular_weight: 0.0,
             ..Default::default()
         };
         let frame = ShadingFrame {
@@ -423,7 +422,6 @@ mod tests {
             base_color: [1.0, 1.0, 1.0],
             metallic: 1.0,
             perceptual_roughness: 0.1,
-            reflectance: 0.5,
             ..Default::default()
         };
         let frame = ShadingFrame {
@@ -470,7 +468,6 @@ mod tests {
             base_color: [0.9, 0.8, 0.7],
             perceptual_roughness: roughness,
             metallic,
-            reflectance: 0.5,
             ambient_occlusion: 1.0,
             ..Default::default()
         }

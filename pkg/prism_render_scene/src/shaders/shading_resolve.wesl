@@ -38,6 +38,7 @@ import prism_render_scene::shaders::brdf::{
     ShadingFrame,
     DirectLightSample,
     brdf_normalize_or,
+    dielectric_f0,
     principled_direct,
     stylized_direct,
     face_shadow_light_cosines,
@@ -748,9 +749,7 @@ struct IndirectResult {
 // Grazing-angle F0 for the surface, shared by every indirect path.
 fn indirect_f0(surface: SurfaceSample) -> vec3<f32> {
     let metallic = clamp(surface.metallic, 0.0, 1.0);
-    let reflectance = clamp(surface.reflectance, 0.0, 1.0);
-    let f0_dielectric = 0.16 * reflectance * reflectance;
-    return mix(vec3<f32>(f0_dielectric), surface.base_color, metallic);
+    return mix(dielectric_f0(surface), surface.base_color, metallic);
 }
 
 // Constant-ambient indirect fallback used when no image-based probe is bound.
@@ -837,9 +836,7 @@ fn image_based_prefiltered(
     let metallic = clamp(surface.metallic, 0.0, 1.0);
     let roughness = clamp(surface.perceptual_roughness, 0.0, 1.0);
     let occlusion = clamp(surface.ambient_occlusion, 0.0, 1.0);
-    let reflectance = clamp(surface.reflectance, 0.0, 1.0);
-    let f0_dielectric = 0.16 * reflectance * reflectance;
-    let f0 = mix(vec3<f32>(f0_dielectric), surface.base_color, metallic);
+    let f0 = mix(dielectric_f0(surface), surface.base_color, metallic);
 
     // Diffuse: Lambertian albedo lit by cosine-convolved SH irradiance.
     let irradiance = max(sh_irradiance(env, normal), vec3<f32>(0.0));
@@ -1866,7 +1863,9 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.diffuse_roughness = parameters.diffuse_roughness;
     surface.metallic = sampled.metallic;
     surface.perceptual_roughness = sampled.perceptual_roughness;
-    surface.reflectance = parameters.reflectance;
+    surface.specular_weight = parameters.specular_weight;
+    surface.specular_color = parameters.specular_color.xyz;
+    surface.specular_ior = parameters.specular_ior;
     // Fold the screen-space GTAO visibility into the material occlusion so the
     // indirect/ambient term is darkened in geometric creases, mirroring
     // `resolve_pixel` in the CPU golden. The fallback texture and the disabled
