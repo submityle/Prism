@@ -106,6 +106,28 @@ pub fn triangulate(polygon: &[(f32, f32)]) -> Vec<[usize; 3]> {
     triangles
 }
 
+/// Fallibly triangulate a polygon: `Some(n - 2)` triangles for a **simple**
+/// polygon, `None` otherwise.
+///
+/// This is the strict sibling of [`triangulate`]: it first requires
+/// [`is_simple_polygon`](crate::simplicity::is_simple_polygon), then runs the
+/// same ear clipping and confirms a complete triangulation (`n - 2` triangles).
+/// A self-intersecting ring, fewer than three vertices, a zero-area (collinear)
+/// ring, or a ring where ear clipping cannot finish all return `None`, so a
+/// caller can never mistake a partial or degenerate result for a valid
+/// triangulation.
+#[must_use]
+pub fn try_triangulate(polygon: &[(f32, f32)]) -> Option<Vec<[usize; 3]>> {
+    if !crate::simplicity::is_simple_polygon(polygon) {
+        return None;
+    }
+    if crate::measure::area(polygon) <= 0.0 {
+        return None;
+    }
+    let triangles = triangulate(polygon);
+    (triangles.len() == polygon.len() - 2).then_some(triangles)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -292,5 +314,28 @@ mod tests {
         // A single triangle triangulates to itself.
         let tri = alloc::vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
         assert_eq!(triangulate(&tri).len(), 1);
+    }
+
+    #[test]
+    fn try_triangulate_accepts_simple_and_refuses_the_rest() {
+        // A convex square: exactly two triangles.
+        let square = [(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)];
+        assert_eq!(try_triangulate(&square).expect("simple").len(), 2);
+        // A concave but simple L-shape: n - 2 = 4 triangles.
+        let l = [
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ];
+        assert_eq!(try_triangulate(&l).expect("simple concave").len(), 4);
+        // A self-intersecting bowtie is refused, never a partial result.
+        let bowtie = [(0.0, 0.0), (1.0, 1.0), (1.0, 0.0), (0.0, 1.0)];
+        assert!(try_triangulate(&bowtie).is_none());
+        // Too few vertices, and a degenerate collinear ring.
+        assert!(try_triangulate(&[(0.0, 0.0), (1.0, 1.0)]).is_none());
+        assert!(try_triangulate(&[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)]).is_none());
     }
 }
