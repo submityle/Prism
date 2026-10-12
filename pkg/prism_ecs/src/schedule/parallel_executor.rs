@@ -135,6 +135,9 @@ impl MultiThreadedExecutor {
             let mut windows: Vec<(Tick, Tick)> = Vec::with_capacity(wave.len());
             for (slot, &idx) in wave.iter().enumerate() {
                 if should_run[slot] {
+                    // Reject a cross-world system before the tick is advanced so
+                    // a rejected run leaves the world untouched.
+                    schedule.nodes[idx].system.validate_world(world);
                     let last_run = schedule.nodes[idx].system.get_last_run();
                     let this_run = world.increment_change_tick();
                     windows.push((last_run, this_run));

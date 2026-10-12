@@ -59,6 +59,14 @@ pub trait System: Send + Sync + 'static {
     #[inline]
     fn set_last_run(&mut self, _last_run: Tick) {}
 
+    /// Assert this system may run against `world` — i.e. it was initialized for
+    /// that same world. Called by [`run`](System::run) (and by the executors)
+    /// *before* any mutation, so a cross-world misuse is rejected without side
+    /// effects. Defaults to accepting any world for systems whose state holds no
+    /// world-scoped ids.
+    #[inline]
+    fn validate_world(&self, _world: &World) {}
+
     /// Run the system body, fetching its params from `world`.
     ///
     /// # Safety
@@ -76,6 +84,9 @@ pub trait System: Send + Sync + 'static {
     /// deferred effects. This is the simple, always-sound entry point used by
     /// the sequential schedule.
     fn run(&mut self, world: &mut World) -> Self::Out {
+        // Reject a cross-world run before touching the world (in particular
+        // before advancing its change tick), so a misuse leaves no side effects.
+        self.validate_world(world);
         // Per-system change window: `last_run` is where this system left off,
         // `this_run` is a fresh world tick so writes made during this run (and
         // by systems that ran since) land inside `(last_run, this_run]`.
@@ -201,7 +212,7 @@ where
     /// would reinterpret its storage (undefined behaviour). A safe API must
     /// therefore reject the mismatch rather than proceed.
     #[inline]
-    fn validate_world(&self, world_id: WorldId) {
+    fn assert_world_id(&self, world_id: WorldId) {
         assert_eq!(
             self.world_id,
             Some(world_id),
@@ -225,6 +236,14 @@ where
 
     #[inline]
     fn initialize(&mut self, world: &mut World) {
+        // Re-initializing against a *different* world invalidates the previous
+        // change-detection window: the old `last_run` tick has no meaning in the
+        // new world's tick space, so restart from the origin (which also keeps
+        // `Changed`/`Added` from silently missing the new world's existing
+        // writes). Re-initializing against the *same* world preserves it.
+        if self.world_id != Some(world.id()) {
+            self.last_run = Tick::ZERO;
+        }
         let state = <F::Param as SystemParam>::init_state(world);
         let mut access = Access::new();
         <F::Param as SystemParam>::update_access(&state, &mut access);
@@ -249,10 +268,15 @@ where
     }
 
     #[inline]
+    fn validate_world(&self, world: &World) {
+        self.assert_world_id(world.id());
+    }
+
+    #[inline]
     unsafe fn run_unsafe(&mut self, world: UnsafeWorldCell<'_>) -> Self::Out {
         // SAFETY: the caller guarantees `world` references a live world, so
         // reading its id is sound; the comparison guards the resolved param ids.
-        self.validate_world(unsafe { world.world() }.id());
+        self.assert_world_id(unsafe { world.world() }.id());
         let state = self
             .param_state
             .as_mut()
@@ -265,7 +289,7 @@ where
 
     #[inline]
     fn apply_deferred(&mut self, world: &mut World) {
-        self.validate_world(world.id());
+        self.assert_world_id(world.id());
         if let Some(state) = self.param_state.as_mut() {
             <F::Param as SystemParam>::apply(state, world);
         }

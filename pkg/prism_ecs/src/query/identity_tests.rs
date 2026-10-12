@@ -95,3 +95,18 @@ fn parallel_entry_rejects_a_different_world() {
     let pool = prism_tasks::TaskPool::new();
     state.par_for_each(&b, &pool, 4, |_p| {});
 }
+
+/// The mutable parallel entry shares the guard.
+#[cfg(feature = "multi_thread")]
+#[test]
+#[should_panic(expected = "built for one World but used against another")]
+fn parallel_mut_entry_rejects_a_different_world() {
+    let mut a = World::new();
+    let mut b = World::new();
+    a.spawn(Pos(1));
+    b.spawn(Pos(2));
+
+    let state = a.query::<&mut Pos>();
+    let pool = prism_tasks::TaskPool::new();
+    state.par_for_each_mut(&mut b, &pool, 4, |_p| {});
+}

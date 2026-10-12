@@ -102,9 +102,10 @@ where
         };
         let world_ptr = (world as *const World).cast_mut();
         // SAFETY: `Entity` is a read-only data term, so no `&mut` fetch is
-        // formed and the shared `world` borrow is sufficient. `state` was built
-        // from this same world (the `observe_changed` call site), and the
-        // `WorldId` guard inside `QueryState` would reject any other.
+        // formed and the shared `world` borrow is sufficient. The observer's
+        // state was built from the world that owns this registry, and
+        // `flush_changed_observers` always hands it that same `&self`, so the
+        // raw entry point's "same world as the state" contract holds here.
         let iter = unsafe { state.iter_from_ptr(world_ptr, last_run, this_run) };
         out.extend(iter);
     }

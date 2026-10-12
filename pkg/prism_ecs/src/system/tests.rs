@@ -444,3 +444,65 @@ fn system_rejects_a_different_world() {
     sys.initialize(&mut a);
     sys.run(&mut b);
 }
+
+/// The cross-world rejection must happen *before* the run touches the target
+/// world, so a misuse cannot advance its change tick as a side effect.
+#[test]
+fn rejected_cross_world_run_does_not_advance_the_target_tick() {
+    let mut a = World::new();
+    let mut b = World::new();
+    a.spawn(Health(1));
+    b.spawn(Health(2));
+
+    fn read(_q: Query<&Health>) {}
+    let mut sys = IntoSystem::into_system(read);
+    sys.initialize(&mut a);
+
+    let before = b.change_tick();
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sys.run(&mut b)));
+    assert!(caught.is_err(), "cross-world run must panic");
+    assert_eq!(
+        b.change_tick(),
+        before,
+        "a rejected cross-world run must not advance the target world's tick"
+    );
+}
+
+/// Re-initializing a system for a *different* world restarts its change window,
+/// so `Added`/`Changed` observe that world's existing writes instead of silently
+/// skipping them under a stale `last_run`.
+#[test]
+fn reinitializing_a_system_for_a_new_world_resets_its_change_window() {
+    use crate::query::Changed;
+
+    #[derive(Debug, PartialEq)]
+    struct Marked(i32);
+    impl Component for Marked {}
+
+    #[derive(Default)]
+    struct Seen(usize);
+    impl Resource for Seen {}
+
+    fn count(q: Query<&Marked, Changed<Marked>>, mut seen: ResMut<Seen>) {
+        seen.0 = q.iter().count();
+    }
+
+    let mut a = World::new();
+    let mut b = World::new();
+    a.insert_resource(Seen::default());
+    b.insert_resource(Seen::default());
+    a.spawn(Marked(1));
+    b.spawn(Marked(2)); // stamped at B's origin tick, before the system ever ran
+
+    let mut sys = IntoSystem::into_system(count);
+    sys.initialize(&mut a);
+    sys.run(&mut a);
+
+    sys.initialize(&mut b);
+    sys.run(&mut b);
+    assert_eq!(
+        b.resource::<Seen>().0,
+        1,
+        "B's pre-existing spawn must be seen after re-initializing for B"
+    );
+}

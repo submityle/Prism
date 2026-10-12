@@ -619,10 +619,13 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     /// ever holds a `*mut World` (never a `&mut World`).
     ///
     /// # Safety
-    /// `world` must point to a live [`World`] valid for `'w`, and the caller
-    /// must guarantee that no other live borrow aliases the component columns
-    /// this query's `D`/`F` terms touch — upheld by the per-system access set
-    /// plus the scheduler's conflict analysis, or by an exclusive `&mut World`.
+    /// `world` must point to a live [`World`] valid for `'w` **and must be the
+    /// very world this state was built for** (`self.world_id`) — the resolved
+    /// component/archetype ids are only meaningful there, so a different world
+    /// would be type-confused. The caller must also guarantee that no other live
+    /// borrow aliases the component columns this query's `D`/`F` terms touch —
+    /// upheld by the per-system access set plus the scheduler's conflict
+    /// analysis, or by an exclusive `&mut World`.
     pub(crate) unsafe fn get_from_ptr<'w, 's>(
         &'s self,
         world: *mut World,
@@ -690,10 +693,12 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     /// the kernel's access-conflict discipline (design doc §8.2).
     ///
     /// # Safety
-    /// `world` must point to a live [`World`] that stays valid for `'w`, and the
-    /// caller must guarantee that no other live borrow aliases the component
-    /// columns this query's `D`/`F` terms touch. This is upheld by the
-    /// per-system access set plus the scheduler's conflict analysis.
+    /// `world` must point to a live [`World`] that stays valid for `'w` **and
+    /// must be the very world this state was built for** (`self.world_id`). The
+    /// caller must also guarantee that no other live borrow aliases the
+    /// component columns this query's `D`/`F` terms touch (upheld by the
+    /// per-system access set plus the scheduler's conflict analysis), and that
+    /// no structural modification (`World::restore`) races the iteration.
     #[inline]
     pub(crate) unsafe fn iter_from_ptr<'w, 's>(
         &'s self,
