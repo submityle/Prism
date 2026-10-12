@@ -90,7 +90,13 @@ fn subsurface_direct(
             0.0,
             1.0,
         );
-        let diffuse_cos = subsurface_fd_wrap(raw_n_dot_l, wrap);
+        // Normalise the wrap lobe to unit albedo: its analytic directional albedo is
+        // `E(w) = (1 + 2w)/(1 + w)²` (1 at `w = 0`, 0.75 at `w = 1`), so an
+        // unnormalised wrap silently loses energy per channel. Mirrors
+        // `subsurface.rs` and the specification's `subsurface_albedo_constraint`.
+        let one_plus_w = 1.0 + wrap;
+        let e_wrap = max((1.0 + 2.0 * wrap) / (one_plus_w * one_plus_w), 1.0e-3);
+        let diffuse_cos = subsurface_fd_wrap(raw_n_dot_l, wrap) / e_wrap;
         diffuse[c] = surface.base_color[c]
             * scat_color[c]
             * INV_PI

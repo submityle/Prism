@@ -1080,6 +1080,28 @@ mod conformance {
                 }
             }
         }
+        // The Subsurface class's own white furnace.
+        {
+            let sub = SurfaceSample {
+                base_color: white,
+                subsurface: 1.0,
+                subsurface_color: white,
+                thickness: 0.0,
+                ..coupled(0.0)
+            };
+            let albedo = furnace_albedo_fn(
+                crate::subsurface::evaluate_subsurface_direct,
+                sub,
+                [0.6, 0.8, 0.0],
+                192,
+                192,
+            );
+            let mean = (albedo[0] + albedo[1] + albedo[2]) / 3.0;
+            let err = (mean - 1.0).abs();
+            if err > worst.0 {
+                worst = (err, format!("subsurface class @ mid: {albedo:?}"));
+            }
+        }
         // The Cloth class's own white furnace (its closure is separate).
         {
             let albedo = furnace_albedo_fn(
@@ -1674,3 +1696,4 @@ mod charlie_albedo_gen {
         }
     }
 }
+

@@ -107,7 +107,18 @@ pub fn evaluate_subsurface_direct(
             * surface.subsurface_radius
             * surface.subsurface_radius_scale[channel])
             .clamp(0.0, 1.0);
-        let diffuse_cos = fd_wrap(raw_n_dot_l, wrap);
+        // Normalise the wrap lobe to unit albedo. Its analytic directional
+        // albedo is `E(w) = (1 + 2w)/(1 + w)²` (`∫(1/π)·wrap(cos)·dω`), which is
+        // 1 at `w = 0` (Lambert) but falls to 0.75 at `w = 1` — so an
+        // unnormalised wrap silently *loses* energy, and because the wrap is
+        // per-channel (`subsurface_radius_scale`) it lost it per channel: the
+        // white furnace measured [0.759, 0.892, 0.961] against the closed form's
+        // [0.750, 0.889, 0.960]. Dividing by `E(w)` restores the invariant and
+        // matches the specification's `subsurface_albedo_constraint` (the
+        // authored colour is the *observed* albedo).
+        let one_plus_w = 1.0 + wrap;
+        let e_wrap = ((1.0 + 2.0 * wrap) / (one_plus_w * one_plus_w)).max(1.0e-3);
+        let diffuse_cos = fd_wrap(raw_n_dot_l, wrap) / e_wrap;
         *slot = surface.base_color[channel]
             * scat_color[channel]
             * INV_PI
