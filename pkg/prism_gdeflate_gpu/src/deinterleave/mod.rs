@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 use bytemuck::{Pod, Zeroable};
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BufferBindingType, CommandEncoderDescriptor,
+    BindGroupLayoutEntry, BindingType, BufferBindingType, CommandEncoder, CommandEncoderDescriptor,
     ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, PipelineCompilationOptions,
     PipelineLayoutDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages,
 };
@@ -95,8 +95,31 @@ pub fn reference_deinterleave(interleaved: &[u8]) -> Vec<u8> {
 
 /// Compiled de-interleave pipeline and its bind-group layout.
 pub struct GpuDeinterleave {
-    pipeline: ComputePipeline,
-    layout: BindGroupLayout,
+    pub(crate) pipeline: ComputePipeline,
+    pub(crate) layout: BindGroupLayout,
+}
+
+/// Device resources for one de-interleave dispatch.
+///
+/// The buffers are kept together so a caller can record a following GPU pass
+/// that consumes [`Self::output`] without a device-to-host round trip. This is
+/// intentionally crate-private: the public API remains the simple readback
+/// helper while the stored-block `GDeflate` path can compose both passes in one
+/// submission.
+pub(crate) struct DeinterleaveJob {
+    #[expect(
+        dead_code,
+        reason = "buffers are owned by the bind group and must stay alive"
+    )]
+    pub(crate) params: wgpu::Buffer,
+    #[expect(
+        dead_code,
+        reason = "buffers are owned by the bind group and must stay alive"
+    )]
+    pub(crate) source: wgpu::Buffer,
+    pub(crate) output: wgpu::Buffer,
+    pub(crate) bind_group: wgpu::BindGroup,
+    pub(crate) output_bytes: u64,
 }
 
 impl GpuDeinterleave {
@@ -168,6 +191,32 @@ impl GpuDeinterleave {
         }
         let device = ctx.device();
 
+        let job = self.prepare(ctx, interleaved);
+
+        let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_gdeflate_deinterleave_encoder"),
+        });
+        self.record(&mut enc, &job);
+
+        let stage = buffer::staging(
+            device,
+            "prism_gdeflate_deinterleave_stage",
+            job.output_bytes,
+        );
+        buffer::copy(&mut enc, &job.output, &stage, job.output_bytes);
+        ctx.queue().submit([enc.finish()]);
+
+        let mut out_words = buffer::read_back::<u32>(ctx, &stage);
+        out_words.truncate(interleaved.len() / WORD);
+        from_words_le(&out_words)
+    }
+
+    /// Prepares a device-resident de-interleave job for composition with a
+    /// following compute pass.
+    pub(crate) fn prepare(&self, ctx: &GpuContext, interleaved: &[u8]) -> DeinterleaveJob {
+        debug_assert!(interleaved.len() >= WORD);
+        let device = ctx.device();
+
         let src_words = to_words_le(interleaved);
         let words = src_words.len();
         let rounds = words / LANES as usize;
@@ -208,26 +257,27 @@ impl GpuDeinterleave {
             ],
         });
 
-        let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("prism_gdeflate_deinterleave_encoder"),
-        });
+        DeinterleaveJob {
+            params,
+            source: src_buf,
+            output: out_buf,
+            bind_group: bind,
+            output_bytes: out_bytes,
+        }
+    }
+
+    /// Records the de-interleave dispatch into an existing command encoder.
+    pub(crate) fn record(&self, enc: &mut CommandEncoder, job: &DeinterleaveJob) {
         {
             let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("prism_gdeflate_deinterleave_pass"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(groups(active as u32), 1, 1);
+            pass.set_bind_group(0, &job.bind_group, &[]);
+            let words = (job.output_bytes / WORD as u64) as u32;
+            pass.dispatch_workgroups(groups(words), 1, 1);
         }
-
-        let stage = buffer::staging(device, "prism_gdeflate_deinterleave_stage", out_bytes);
-        buffer::copy(&mut enc, &out_buf, &stage, out_bytes);
-        ctx.queue().submit([enc.finish()]);
-
-        let mut out_words = buffer::read_back::<u32>(ctx, &stage);
-        out_words.truncate(words);
-        from_words_le(&out_words)
     }
 }
 

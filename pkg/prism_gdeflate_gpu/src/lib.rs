@@ -43,6 +43,8 @@ extern crate alloc;
 pub mod buffer;
 pub mod context;
 pub mod deinterleave;
+pub mod stored;
 
 pub use context::GpuContext;
 pub use deinterleave::{reference_deinterleave, GpuDeinterleave, GROUP, LANES, WORD};
+pub use stored::{plan_stored_deflate, GpuStoredGDeflate, StoredBlockPlan, StoredPlanError};
