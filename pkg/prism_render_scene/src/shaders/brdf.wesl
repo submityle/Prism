@@ -843,10 +843,16 @@ fn principled_direct(
     let coat_denom = max(1.0 - coat_f_v * coat_f_l, 1.0e-4);
     let coat_t_slab = (1.0 - coat_f_v) * (1.0 - coat_f_l) / coat_denom;
     let coat_r_slab = coat_f_l + (1.0 - coat_f_l) * (1.0 - coat_f_l) * coat_f_v / coat_denom;
-    let coat_lobe_albedo = max(
-        coat_f0 * ggx_albedo_lookup(n_dot_v, coat_roughness)
-            + (1.0 - coat_f0) * schlick_bias_lookup(n_dot_v, coat_roughness),
-        1.0e-3,
+    // Fast path: with no coat every term below is scaled away, so the table
+    // lookups are skipped entirely for a material that never authors a coat.
+    let coat_lobe_albedo = select(
+        1.0,
+        max(
+            coat_f0 * ggx_albedo_lookup(n_dot_v, coat_roughness)
+                + (1.0 - coat_f0) * schlick_bias_lookup(n_dot_v, coat_roughness),
+            1.0e-3,
+        ),
+        coat > 0.0,
     );
     let coat_specular = coat_specular
         + vec3<f32>(coat * (coat_r_slab - coat_lobe_albedo) * n_dot_l * INV_PI);

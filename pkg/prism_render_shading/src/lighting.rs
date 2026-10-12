@@ -449,11 +449,17 @@ pub fn evaluate_principled_direct(
     // hence the varnish glint — untouched. Without this a white-coated dielectric
     // base measured 0.72 in the white furnace at grazing (the coat withheld the
     // base's energy but never reflected it back).
-    let coat_f_v = fresnel_schlick([coat_f0; 3], n_dot_v)[0].clamp(0.0, 1.0);
-    let coat_f_l = fresnel_schlick([coat_f0; 3], n_dot_l)[0].clamp(0.0, 1.0);
-    let coat_denom = (1.0 - coat_f_v * coat_f_l).max(1.0e-4);
-    let coat_t_slab = (1.0 - coat_f_v) * (1.0 - coat_f_l) / coat_denom;
-    let coat_r_slab = coat_f_l + (1.0 - coat_f_l) * (1.0 - coat_f_l) * coat_f_v / coat_denom;
+    let (coat_t_slab, coat_r_slab) = if coat > 0.0 {
+        let f_v = fresnel_schlick([coat_f0; 3], n_dot_v)[0].clamp(0.0, 1.0);
+        let f_l = fresnel_schlick([coat_f0; 3], n_dot_l)[0].clamp(0.0, 1.0);
+        let denom = (1.0 - f_v * f_l).max(1.0e-4);
+        (
+            (1.0 - f_v) * (1.0 - f_l) / denom,
+            f_l + (1.0 - f_l) * (1.0 - f_l) * f_v / denom,
+        )
+    } else {
+        (1.0, 0.0)
+    };
     // Baked coat-lobe albedo: the standard Schlick split-sum estimate — the
     // hemispherical average Fresnel `F_avg = F0 + (1−F0)/21` times the baked
     // *view-dependent* white-GGX albedo `E(µ, r)`. (The lobe uses Schlick, not
@@ -468,11 +474,17 @@ pub fn evaluate_principled_direct(
     // Exact Schlick split-sum: a Schlick-Fresnel lobe's albedo is
     // `F0·E_white + (1−F0)·B`, with `B` the baked bias-weighted albedo. (The two
     // cheap estimates measured 2.3× low and 6% high in the furnace.)
-    let coat_lobe_albedo = (coat_f0
-        * crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_v, coat_roughness)
-        + (1.0 - coat_f0)
-            * crate::schlick_bias_table::schlick_bias_lookup(n_dot_v, coat_roughness))
-    .max(1.0e-3);
+    // Fast path: with no coat the whole closure below is inert (`coat == 0`
+    // scales every term away), so the two table lookups are skipped entirely —
+    // the overwhelmingly common case for a material that never authors a coat.
+    let coat_lobe_albedo = if coat > 0.0 {
+        (coat_f0 * crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_v, coat_roughness)
+            + (1.0 - coat_f0)
+                * crate::schlick_bias_table::schlick_bias_lookup(n_dot_v, coat_roughness))
+        .max(1.0e-3)
+    } else {
+        1.0
+    };
     // ***Exact*** closure. Multiplying the lobe by `r_slab / A` does *not* give
     // it albedo `r_slab`: the factor varies with the light direction while the
     // lobe weights it, so the product integrates to something else (measured
