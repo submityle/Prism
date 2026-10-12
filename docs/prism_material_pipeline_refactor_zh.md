@@ -218,7 +218,7 @@
 | **transmission** | `transmission` / `thickness` / **`index_of_refraction` / `dispersion`（已消费：principled 折射透射瓣，见 §13.a）** | 部分补全 | `transmission_color`、`transmission_scatter`、`thin_walled` 标志 |
 | **emission** | `emission`（4 words） | ✓ | `emission_luminance` 单位统一（nit / 相对） |
 | **thin_film**（虹彩） | — | **缺整瓣** | 新增 `thin_film_weight` / `thin_film_thickness` / `thin_film_ior`（§10 首个开放瓣示例） |
-| **geometry** | `normal_scale` / `alpha_cutoff` + 法线纹理 | 子集 | `geometry_opacity`、`geometry_thin_walled`、`geometry_coat_normal`（随 coat 补） |
+| **geometry** | `normal_scale` / `alpha_cutoff` / **`thin_walled`（已补，见 §13.a）** + 法线纹理 | ✅ 补齐 | —（`geometry_opacity` 由既有的 `base_color.a` 承担、`geometry_coat_normal` 即 coat 组已补的 `coat_normal`，两者都无需新增字段） |
 | **FACE**（NPR） | `softness`（SDF 面阴影） | ✓ | OpenPBR 之外的 **Prism 私有瓣**，NPR 专用，**不并入 OpenPBR**，与之共存 |
 
 要点：
@@ -578,6 +578,14 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f（geometry 组）OpenPBR `geometry_thin_walled` 落地**（§4.4 / §17.2）
+  - 范围：补上 geometry 组唯一真正缺失的新字段 `thin_walled`——薄壁（开放、单界面）表面在背后没有体积，因此 transmission 瓣应**跳过 Beer-Lambert 深度吸收**，透射不再随 `thickness` 变化。默认 `0.0` 保持实体板路径，故既有材质逐位不变。
+  - **零字长代价**：core 20 字里还剩 3 个填充字，`thin_walled` 直接**复用其中一个**（`_pad0`），`SURFACE_CORE_WORDS` 仍是 20、`SURFACE_MAX_WORDS` 仍是 60；fat `GpuSurfaceParameters` 尺寸也保持 192 B。
+  - 另外两项经核实**无需新增字段**（这是设计结论而非跳过）：`geometry_opacity` 早已由 `base_color.a` 承担（`opaque.wesl` / `transparent.wesl` 都在读它作 alpha）；`geometry_coat_normal` 就是 coat 组上一轮补的 `coat_normal`（纹理输入，非打包字段）。
+  - 代码：schema core `_pad0` → `thin_walled`；`GpuSurfaceCore` / fat 结构同步；regenerated `material_unpack.wesl`；shade-time `SurfaceSample`（CPU + WESL）+ 桥接；transmission 项在 `thin_walled > 0.5` 时把透射率取 1（跳过体积项），CPU `lighting.rs` 与 WESL `brdf.wesl` 逐位孪生；水栅格面显式写 0。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3301 通过**（新增：薄壁透射强于实体板、且结果与 `thickness` 无关）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过）、`cargo test -p prism_material_schema` 13 通过、`cargo test -p prism_render_material` 826+6+2 全绿、`--features bevy` 编译干净；touched 文件 clippy 无告警。
+  - 结果：**geometry 组补齐**（§4.4 该行转 ✅）。
 
 - **P1-f（transmission 瓣落地：消费三个此前"打包了却没人读"的字段）**（§4.4 / §17.2）
   - 发现：审查每个 ABI 字段的消费者时确认，transmission 瓣的 **`transmission` / `index_of_refraction` / `dispersion` 三个字段全仓库没有任何着色消费者**——unpack 把它们写进 `PrismSurfaceParameters`，之后就没有任何 lobe 读它们（而 §4.4 当时把 transmission 标成"较全"，这是个名不副实的记录）。这与上一轮 `coat_normal` 属同一类：**打包了但没接线**。

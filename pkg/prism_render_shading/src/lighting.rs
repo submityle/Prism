@@ -44,6 +44,10 @@ pub struct SurfaceSample {
     /// `OpenPBR` `transmission_dispersion` in `[0, 1]`: spreads the per-channel
     /// index of refraction so transmitted light fringes. `0` is achromatic.
     pub dispersion: f32,
+    /// `OpenPBR` `geometry_thin_walled`: a single-interface open surface whose
+    /// transmission lobe skips the Beer-Lambert volume absorption. `0.0` (the
+    /// default) keeps the solid-slab path, so existing materials are unchanged.
+    pub thin_walled: f32,
     pub ambient_occlusion: f32,
     pub emissive: [f32; 3],
     pub clearcoat: f32,
@@ -132,6 +136,7 @@ impl Default for SurfaceSample {
             transmission: 0.0,
             index_of_refraction: 1.5,
             dispersion: 0.0,
+            thin_walled: 0.0,
             ambient_occlusion: 1.0,
             emissive: [0.0; 3],
             clearcoat: 0.0,
@@ -319,12 +324,19 @@ pub fn evaluate_principled_direct(
     let transmission_term = if transmission > 0.0 {
         let ior = surface.index_of_refraction.clamp(1.0, 3.0);
         let dispersion = surface.dispersion.clamp(0.0, 1.0);
-        let sigma_factor = crate::gi::translucency::transmission::transmittance_from_color(
-            bevy_math::Vec3::from_array(surface.base_color),
-            surface.thickness,
-            1.0,
-        )
-        .to_array();
+        // `geometry_thin_walled` is an open, single-interface surface: there is
+        // no volume behind it, so the Beer-Lambert depth term is skipped and the
+        // slab transmits its colour unattenuated.
+        let sigma_factor = if surface.thin_walled > 0.5 {
+            [1.0; 3]
+        } else {
+            crate::gi::translucency::transmission::transmittance_from_color(
+                bevy_math::Vec3::from_array(surface.base_color),
+                surface.thickness,
+                1.0,
+            )
+            .to_array()
+        };
         let mut out = [0.0f32; 3];
         for (channel, slot) in out.iter_mut().enumerate() {
             let offset = channel as f32 - 1.0;
@@ -1110,5 +1122,38 @@ mod tests {
 
     fn sum3(c: [f32; 3]) -> f32 {
         c[0] + c[1] + c[2]
+    }
+
+    #[test]
+    fn thin_walled_skips_the_volume_absorption() {
+        let base = SurfaceSample {
+            base_color: [0.1, 0.2, 0.3],
+            transmission: 1.0,
+            thickness: 1.0,
+            ..Default::default()
+        };
+        let solid = evaluate_principled_direct(base, frame(), light());
+        let thin = evaluate_principled_direct(
+            SurfaceSample {
+                thin_walled: 1.0,
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        assert!(sum3(thin) > sum3(solid), "thin={thin:?} solid={solid:?}");
+
+        // An open single-interface surface has no volume, so the result must not
+        // depend on `thickness` at all.
+        let thin_zero_depth = evaluate_principled_direct(
+            SurfaceSample {
+                thin_walled: 1.0,
+                thickness: 0.0,
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        assert!((sum3(thin) - sum3(thin_zero_depth)).abs() < 1.0e-6);
     }
 }

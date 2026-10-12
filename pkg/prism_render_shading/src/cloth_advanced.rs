@@ -342,6 +342,7 @@ mod tests {
             transmission: 0.0,
             index_of_refraction: 1.5,
             dispersion: 0.0,
+            thin_walled: 0.0,
             metallic: 0.0,
             perceptual_roughness: 0.6,
             ambient_occlusion: 1.0,

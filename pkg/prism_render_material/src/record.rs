@@ -154,6 +154,8 @@ pub struct GpuSurfaceParameters {
     pub specular_color: [f32; 4],
     /// `OpenPBR` `specular_ior`: dielectric specular interface index.
     pub specular_ior: f32,
+    /// `OpenPBR` `geometry_thin_walled`: single-interface open surface.
+    pub thin_walled: f32,
     pub transmission: f32,
     pub thickness: f32,
     pub clearcoat: f32,
@@ -182,7 +184,7 @@ pub struct GpuSurfaceParameters {
     pub _pad_face2: f32,
     /// Tail padding keeping the fat authoring view a 16-byte multiple as the
     /// coat group grows. Carries no data.
-    pub _pad_tail: [f32; 2],
+    pub _pad_tail: f32,
 }
 
 impl Default for GpuSurfaceParameters {
@@ -200,6 +202,7 @@ impl Default for GpuSurfaceParameters {
             diffuse_roughness: 0.0,
             specular_color: [1.0; 4],
             specular_ior: 1.5,
+            thin_walled: 0.0,
             transmission: 0.0,
             thickness: 0.0,
             clearcoat: 0.0,
@@ -219,7 +222,7 @@ impl Default for GpuSurfaceParameters {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 2],
+            _pad_tail: 0.0,
         }
     }
 }

@@ -1060,6 +1060,7 @@ fn surface_from(foam: f32) -> SurfaceSample {
     s.transmission = 0.0;
     s.index_of_refraction = 1.5;
     s.dispersion = 0.0;
+    s.thin_walled = 0.0;
     s.ambient_occlusion = 1.0;
     s.emissive = vec3<f32>(0.0);
     s.clearcoat = 0.0;

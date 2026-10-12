@@ -30,6 +30,8 @@ struct PrismSurfaceParameters {
     specular_weight: f32,
     specular_color: vec4<f32>,
     specular_ior: f32,
+    // `OpenPBR` `geometry_thin_walled` (single-interface open surface).
+    thin_walled: f32,
     ambient_occlusion: f32,
     normal_scale: f32,
     alpha_cutoff: f32,

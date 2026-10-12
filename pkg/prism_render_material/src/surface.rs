@@ -56,7 +56,9 @@ pub struct GpuSurfaceCore {
     /// interface. `1.5` gives `F0 = 0.04`, the value the removed
     /// `reflectance = 0.5` produced.
     pub specular_ior: f32,
-    pub _pad0: f32,
+    /// `OpenPBR` `geometry_thin_walled`: a single-interface, open surface whose
+    /// transmission lobe skips the volume absorption. `0.0` keeps the solid slab.
+    pub thin_walled: f32,
     pub _pad1: f32,
     pub _pad2: f32,
 }
@@ -75,7 +77,7 @@ impl Default for GpuSurfaceCore {
             diffuse_roughness: 0.0,
             specular_color: [1.0; 4],
             specular_ior: 1.5,
-            _pad0: 0.0,
+            thin_walled: 0.0,
             _pad1: 0.0,
             _pad2: 0.0,
         }
@@ -391,7 +393,7 @@ impl SurfaceParameterBlock {
                 diffuse_roughness: params.diffuse_roughness,
                 specular_color: params.specular_color,
                 specular_ior: params.specular_ior,
-                _pad0: 0.0,
+                thin_walled: params.thin_walled,
                 _pad1: 0.0,
                 _pad2: 0.0,
             },
@@ -461,6 +463,7 @@ impl SurfaceParameterBlock {
             diffuse_roughness: self.core.diffuse_roughness,
             specular_color: self.core.specular_color,
             specular_ior: self.core.specular_ior,
+            thin_walled: self.core.thin_walled,
             ..GpuSurfaceParameters::default()
         };
         if self.lobe_mask.contains(LobeMask::EMISSION) {
@@ -624,6 +627,7 @@ mod tests {
             diffuse_roughness: 0.4,
             specular_color: [0.95, 0.97, 1.0, 1.0],
             specular_ior: 1.7,
+            thin_walled: 0.0,
             transmission: 0.6,
             thickness: 1.5,
             clearcoat: 0.7,
@@ -643,7 +647,7 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 2],
+            _pad_tail: 0.0,
         }
     }
 

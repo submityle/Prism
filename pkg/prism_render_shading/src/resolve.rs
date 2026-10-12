@@ -231,6 +231,7 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         transmission: parameters.transmission,
         index_of_refraction: parameters.index_of_refraction,
         dispersion: parameters.dispersion,
+        thin_walled: parameters.thin_walled,
         ambient_occlusion: parameters.ambient_occlusion,
         emissive: [
             parameters.emissive[0],

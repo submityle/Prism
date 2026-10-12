@@ -30,6 +30,7 @@ fn authored() -> GpuSurfaceParameters {
         diffuse_roughness: 0.4,
         specular_color: [0.95, 0.97, 1.0, 1.0],
         specular_ior: 1.7,
+        thin_walled: 0.0,
         transmission: 0.6,
         thickness: 1.5,
         clearcoat: 0.7,
@@ -49,7 +50,7 @@ fn authored() -> GpuSurfaceParameters {
         _pad_face0: 0.0,
         _pad_face1: 0.0,
         _pad_face2: 0.0,
-        _pad_tail: [0.0; 2],
+        _pad_tail: 0.0,
     }
 }
 
@@ -64,6 +65,7 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
         (None, "specular_weight") => vec![p.specular_weight],
         (None, "specular_color") => p.specular_color.to_vec(),
         (None, "specular_ior") => vec![p.specular_ior],
+        (None, "thin_walled") => vec![p.thin_walled],
         (None, "ambient_occlusion") => vec![p.ambient_occlusion],
         (None, "normal_scale") => vec![p.normal_scale],
         (None, "alpha_cutoff") => vec![p.alpha_cutoff],

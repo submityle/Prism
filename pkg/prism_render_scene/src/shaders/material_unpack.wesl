@@ -73,6 +73,7 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
     s.diffuse_roughness = 0.0;
     s.specular_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     s.specular_ior = 1.5;
+    s.thin_walled = 0.0;
     s.emissive = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     s.clearcoat = 0.0;
     s.clearcoat_roughness = 0.5;
@@ -101,7 +102,7 @@ fn prism_unpack_surface(words: array<u32, 60>, lobe_mask: u32) -> PrismSurfacePa
     var w = words;
     var s = prism_neutral_surface();
 
-    // Core (20 words); w[17] and w[18] and w[19] are padding.
+    // Core (20 words); w[18] and w[19] are padding.
     s.base_color = vec4<f32>(
         bitcast<f32>(w[0]),
         bitcast<f32>(w[1]),
@@ -123,6 +124,7 @@ fn prism_unpack_surface(words: array<u32, 60>, lobe_mask: u32) -> PrismSurfacePa
         bitcast<f32>(w[15]),
     );
     s.specular_ior = bitcast<f32>(w[16]);
+    s.thin_walled = bitcast<f32>(w[17]);
 
     // Present lobes, canonical low-bit-first order, each its own footprint.
     var cursor: u32 = PRISM_SURFACE_CORE_WORDS;

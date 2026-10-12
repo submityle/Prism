@@ -164,12 +164,19 @@ energy_policy = "coupled"
 view = "invariant"
 
 [[core.field]]
-name = "_pad0"
-type = "pad"
+name = "thin_walled"
+type = "f32"
 bit_region = "KHR"
 pack_slot = 17
-consumed_by = []
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `geometry_thin_walled`: a thin-walled (open) surface refracts at a
+# single interface with no volume behind it, so the transmission lobe skips the
+# Beer-Lambert depth attenuation. 0.0 (the default) keeps the solid-slab path,
+# so this reuses a former core padding word and preserves existing behaviour.
 default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "none"
+view = "invariant"
 
 [[core.field]]
 name = "_pad1"

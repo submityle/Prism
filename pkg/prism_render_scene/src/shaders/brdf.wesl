@@ -71,6 +71,8 @@ struct SurfaceSample {
     transmission: f32,
     index_of_refraction: f32,
     dispersion: f32,
+    // `OpenPBR` `geometry_thin_walled`: skip the transmission volume absorption.
+    thin_walled: f32,
     ambient_occlusion: f32,
     emissive: vec3<f32>,
     clearcoat: f32,
@@ -479,6 +481,9 @@ fn principled_direct(
         let ior = clamp(surface.index_of_refraction, 1.0, 3.0);
         let dispersion = clamp(surface.dispersion, 0.0, 1.0);
         let thickness = max(surface.thickness, 0.0);
+        // `geometry_thin_walled`: an open, single-interface surface with no
+        // volume behind it, so the Beer-Lambert depth term is skipped.
+        let thin_walled = surface.thin_walled > 0.5;
         for (var c = 0u; c < 3u; c = c + 1u) {
             let offset = f32(c) - 1.0;
             let ior_c = clamp(
@@ -488,7 +493,10 @@ fn principled_direct(
             );
             let f_view = fresnel_dielectric(n_dot_v, ior_c);
             let f_light = fresnel_dielectric(n_dot_l, ior_c);
-            let transmittance = transmittance_pow(surface.base_color[c], thickness);
+            var transmittance = 1.0;
+            if !thin_walled {
+                transmittance = transmittance_pow(surface.base_color[c], thickness);
+            }
             transmission_term[c] = transmission * (1.0 - f_view) * (1.0 - f_light) * transmittance;
         }
     }
