@@ -11,10 +11,16 @@ mod plan;
 mod residency;
 mod store;
 
+/// GPU-facing shade-cache contracts.
+pub mod gpu;
+
 #[cfg(test)]
 #[path = "gpu/tests.rs"]
 mod gpu_tests;
 
+pub use gpu::page_table::{
+    GpuShadePageEntry, ShadePageTableError, ShadePageTableRecord, ShadePageTableSnapshot,
+};
 pub use key::{ShadeChannel, ShadePageKey};
 pub use plan::{build_shade_plan, ShadePlan, ShadePlanItem};
 pub use residency::{
