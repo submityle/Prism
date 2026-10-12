@@ -9,8 +9,10 @@
 //! exactly as it would be over UDP.
 //!
 //! A message is opaque bytes: the sequencing / delta layers above decide their
-//! own framing, and the link never reorders *within* a delivery tick beyond the
-//! order it stores messages, so runs are reproducible.
+//! own framing. Delivery within a [`poll`](LoopbackLink::poll) is ordered by
+//! `(deliver_at, send order)`, so jitter deliberately reorders messages relative
+//! to send order — and a given configuration always reorders and drops the
+//! *same* messages, so runs are reproducible.
 
 use alloc::vec::Vec;
 
@@ -23,8 +25,8 @@ use alloc::vec::Vec;
 #[derive(Clone, Debug)]
 pub struct LoopbackLink {
     tick: u64,
-    latency: u64,
-    jitter: u64,
+    latency: u32,
+    jitter: u32,
     drop_every: Option<u64>,
     sent: u64,
     dropped: u64,
@@ -44,8 +46,13 @@ struct InFlight {
 impl LoopbackLink {
     /// A link with a base latency of `latency` ticks and up to `jitter` extra
     /// ticks of per-message variation (both in logical ticks).
+    ///
+    /// The delay parameters are `u32` ticks deliberately: it keeps
+    /// `tick + latency + jitter` far from `u64` saturation, so the drain idiom
+    /// `while link.in_flight() > 0 { poll(..) }` always terminates (a `u64`
+    /// latency near `u64::MAX` would pin messages at an unreachable tick).
     #[must_use]
-    pub fn new(latency: u64, jitter: u64) -> Self {
+    pub fn new(latency: u32, jitter: u32) -> Self {
         Self {
             tick: 0,
             latency,
@@ -95,12 +102,15 @@ impl LoopbackLink {
             return false;
         }
         let extra = if self.jitter > 0 {
-            self.rng.next_below(self.jitter + 1)
+            self.rng.next_below(u64::from(self.jitter) + 1)
         } else {
             0
         };
         self.in_flight.push(InFlight {
-            deliver_at: self.tick.saturating_add(self.latency).saturating_add(extra),
+            deliver_at: self
+                .tick
+                .saturating_add(u64::from(self.latency))
+                .saturating_add(extra),
             seq: self.sent,
             to_a: !from_a,
             bytes,
@@ -184,6 +194,21 @@ mod tests {
         assert_eq!(accepted, other_accepted);
     }
 
+    /// The delay parameters are `u32`, so `latency + jitter` stays far below the
+    /// `u64` tick ceiling — the drain idiom always terminates and jitter cannot
+    /// overflow (regression: `jitter + 1` overflowed at `u64::MAX`, and a near-
+    /// `u64::MAX` latency pinned a message at an unreachable tick).
+    #[test]
+    fn extreme_fault_parameters_do_not_overflow() {
+        let mut link = LoopbackLink::new(u32::MAX, u32::MAX);
+        assert!(link.send(true, vec![7]));
+        assert_eq!(
+            link.in_flight(),
+            1,
+            "building the delivery tick did not overflow"
+        );
+    }
+
     /// The delivery window, fed over the lossy/jittery link, restores in-order
     /// delivery up to the first dropped sequence — exactly its contract.
     #[test]
@@ -207,7 +232,8 @@ mod tests {
                 }
             }
         }
-        // Sequence 4 was dropped (the 5th send), so only 0..4 could be delivered.
+        // Sequence 4 was dropped (the 5th send), so frames 0..4 (four of them)
+        // are delivered and everything after waits behind the gap.
         assert_eq!(delivered, 4);
         assert_eq!(window.next(), 4);
         assert!(window.buffered() > 0, "later frames wait behind the gap");
