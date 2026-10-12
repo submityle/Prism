@@ -3,9 +3,10 @@
 //! [`WinitRunner`] is the windowed counterpart to
 //! [`HeadlessRunner`](super::HeadlessRunner). It binds the assembled [`App`] to
 //! the real platform event loop through [`prism_window_winit`], requests the
-//! primary window on first resume, turns the frame's window events into
-//! lifecycle events, runs [`App::update`] once per presented frame (paced by a
-//! [`FramePacer`]), and stops when the primary window closes or a system
+//! requested window(s) on first resume (design §24.9 — one or more, for editor
+//! viewports / multi-monitor), turns the frame's window events into lifecycle
+//! events, runs [`App::update`] once per presented frame (paced by a
+//! [`FramePacer`]), and stops when *every* window has closed or a system
 //! requests exit through [`AppExitRequest`].
 //!
 //! # Testability
@@ -42,35 +43,43 @@ use crate::pacing::{FrameLimit, FramePacer};
 /// An action the windowed runner derives from a frame's window events.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowAction {
-    /// The primary window was closed or destroyed: end the run.
-    Exit,
-    /// The primary window gained (`true`) or lost (`false`) focus.
+    /// A managed window was closed or destroyed.
+    Closed(WindowId),
+    /// A managed window gained (`true`) or lost (`false`) focus.
     Focus(bool),
 }
 
 /// Translate a frame's kernel window events into runner [`WindowAction`]s.
 ///
-/// Only events routed to `primary` produce an action: a `CloseRequested` or
-/// `Destroyed` maps to [`WindowAction::Exit`], and a `Focused` maps to
-/// [`WindowAction::Focus`]. Events for other windows — and resize / scale /
-/// cursor / occlusion events, which input and render plugins consume directly —
-/// produce nothing here. Input order is preserved in the output.
+/// Only events routed to one of the `managed` windows produce an action: a
+/// `CloseRequested` or `Destroyed` maps to [`WindowAction::Closed`], and a
+/// `Focused` maps to [`WindowAction::Focus`]. Events for unmanaged windows — and
+/// resize / scale / cursor / occlusion events, which input and render plugins
+/// consume directly — produce nothing here. Input order is preserved in the
+/// output.
 #[must_use]
-pub fn window_actions(events: &[WindowEventEnvelope], primary: WindowId) -> Vec<WindowAction> {
+pub fn window_actions(events: &[WindowEventEnvelope], managed: &[WindowId]) -> Vec<WindowAction> {
     let mut actions = Vec::new();
     for env in events {
-        if env.window != primary {
+        if !managed.contains(&env.window) {
             continue;
         }
         match env.event {
             KernelWindowEvent::CloseRequested | KernelWindowEvent::Destroyed => {
-                actions.push(WindowAction::Exit);
+                actions.push(WindowAction::Closed(env.window));
             }
             KernelWindowEvent::Focused(focused) => actions.push(WindowAction::Focus(focused)),
             _ => {}
         }
     }
     actions
+}
+
+/// Drop every window named in `closed` from `open`, returning whether no window
+/// is left (the runner exits when the last one goes).
+fn close_windows(open: &mut Vec<WindowId>, closed: &[WindowId]) -> bool {
+    open.retain(|window| !closed.contains(window));
+    open.is_empty()
 }
 
 /// The window the runner requests on first resume.
@@ -91,12 +100,14 @@ impl Default for WindowSettings {
     }
 }
 
-/// The host the platform loop drives: an [`App`] plus the primary window and a
+/// The host the platform loop drives: an [`App`], the windows to open, and a
 /// frame pacer.
 struct WindowedHost {
     app: App,
-    settings: WindowSettings,
-    primary: Option<WindowId>,
+    windows: Vec<WindowSettings>,
+    /// Live windows; empty until the first resume opens them.
+    open: Vec<WindowId>,
+    started: bool,
     pacer: FramePacer,
     first_frame_sent: bool,
     exit: Rc<Cell<Option<AppExit>>>,
@@ -104,28 +115,33 @@ struct WindowedHost {
 
 impl WinitApp for WindowedHost {
     fn resumed(&mut self, backend: &mut WinitBackend) {
-        if self.primary.is_none() {
-            let config = WindowConfig::new(self.settings.title.clone(), self.settings.inner_size);
-            self.primary = Some(backend.request_window(config));
+        if !self.started {
+            self.started = true;
+            for settings in &self.windows {
+                let config = WindowConfig::new(settings.title.clone(), settings.inner_size);
+                self.open.push(backend.request_window(config));
+            }
         }
         self.app.send_event(Resumed);
     }
 
     fn frame(&mut self, backend: &mut WinitBackend) -> FrameOutcome {
         let events = backend.drain_events();
-        if let Some(primary) = self.primary {
-            for action in window_actions(&events, primary) {
-                match action {
-                    WindowAction::Exit => {
-                        if let Some(request) = self.app.world_mut().get_resource_mut::<AppExitRequest>()
-                        {
-                            request.send_success();
-                        }
-                    }
-                    WindowAction::Focus(focused) => {
-                        self.app.send_event(FocusChanged { focused });
-                    }
+        let actions = window_actions(&events, &self.open);
+        let mut closed = Vec::new();
+        for action in actions {
+            match action {
+                WindowAction::Closed(window) => closed.push(window),
+                WindowAction::Focus(focused) => {
+                    self.app.send_event(FocusChanged { focused });
                 }
+            }
+        }
+        if !closed.is_empty() && close_windows(&mut self.open, &closed) {
+            // The last window is gone: request a clean exit (which still passes
+            // through the §24.5 veto gate below).
+            if let Some(request) = self.app.world_mut().get_resource_mut::<AppExitRequest>() {
+                request.send_success();
             }
         }
 
@@ -146,7 +162,7 @@ impl WinitApp for WindowedHost {
     }
 }
 
-/// A windowed runner that opens one primary window and drives an [`App`].
+/// A windowed runner that opens one or more windows and drives an [`App`].
 ///
 /// ```no_run
 /// use prism_app::{App, WinitRunner};
@@ -159,25 +175,35 @@ impl WinitApp for WindowedHost {
 /// Available only with the `winit` feature (it pulls in the platform backend).
 pub struct WinitRunner {
     app: App,
-    settings: WindowSettings,
+    windows: Vec<WindowSettings>,
     limit: FrameLimit,
 }
 
 impl WinitRunner {
-    /// A runner that opens a default 1280×720 window and runs uncapped.
+    /// A runner that opens one default 1280×720 window and runs uncapped.
     #[must_use]
     pub fn new(app: App) -> Self {
         Self {
             app,
-            settings: WindowSettings::default(),
+            windows: vec![WindowSettings::default()],
             limit: FrameLimit::Off,
         }
     }
 
-    /// Override the initial window (title / size). Builder-style.
+    /// Open exactly this window (title / size), replacing the default set.
+    /// Builder-style.
     #[must_use]
     pub fn with_settings(mut self, settings: WindowSettings) -> Self {
-        self.settings = settings;
+        self.windows = vec![settings];
+        self
+    }
+
+    /// Open several windows in order (design §24.9 — editor viewports /
+    /// multi-monitor), replacing the default set. Builder-style. An empty list
+    /// opens no window; the loop then runs until a system requests exit.
+    #[must_use]
+    pub fn with_windows(mut self, windows: Vec<WindowSettings>) -> Self {
+        self.windows = windows;
         self
     }
 
@@ -199,8 +225,9 @@ impl WinitRunner {
         let exit = Rc::new(Cell::new(None));
         let host = WindowedHost {
             app: self.app,
-            settings: self.settings,
-            primary: None,
+            windows: self.windows,
+            open: Vec::new(),
+            started: false,
             pacer: FramePacer::new(self.limit),
             first_frame_sent: false,
             exit: Rc::clone(&exit),
@@ -232,28 +259,31 @@ mod tests {
     }
 
     #[test]
-    fn close_requested_on_primary_requests_exit() {
+    fn close_on_a_managed_window_reports_it() {
         let events = [env(1, Ev::CloseRequested)];
-        assert_eq!(window_actions(&events, WindowId(1)), vec![WindowAction::Exit]);
+        assert_eq!(
+            window_actions(&events, &[WindowId(1)]),
+            vec![WindowAction::Closed(WindowId(1))]
+        );
     }
 
     #[test]
-    fn close_on_a_secondary_window_is_ignored() {
+    fn close_on_an_unmanaged_window_is_ignored() {
         let events = [env(2, Ev::CloseRequested)];
-        assert!(window_actions(&events, WindowId(1)).is_empty());
+        assert!(window_actions(&events, &[WindowId(1)]).is_empty());
     }
 
     #[test]
     fn focus_maps_to_focus_actions_in_order() {
         let events = [env(1, Ev::Focused(true)), env(1, Ev::Focused(false))];
         assert_eq!(
-            window_actions(&events, WindowId(1)),
+            window_actions(&events, &[WindowId(1)]),
             vec![WindowAction::Focus(true), WindowAction::Focus(false)]
         );
     }
 
     #[test]
-    fn destroyed_primary_exits_and_unrelated_events_are_skipped() {
+    fn destroyed_window_and_unrelated_events_are_filtered() {
         let events = [
             env(1, Ev::CursorEntered),
             env(1, Ev::Destroyed),
@@ -261,8 +291,37 @@ mod tests {
             env(1, Ev::Focused(true)),
         ];
         assert_eq!(
-            window_actions(&events, WindowId(1)),
-            vec![WindowAction::Exit, WindowAction::Focus(true)]
+            window_actions(&events, &[WindowId(1)]),
+            vec![WindowAction::Closed(WindowId(1)), WindowAction::Focus(true)]
         );
+    }
+
+    #[test]
+    fn two_managed_windows_both_report_closes() {
+        let events = [
+            env(1, Ev::CloseRequested),
+            env(2, Ev::CloseRequested),
+            env(3, Ev::CloseRequested), // unmanaged
+        ];
+        assert_eq!(
+            window_actions(&events, &[WindowId(1), WindowId(2)]),
+            vec![
+                WindowAction::Closed(WindowId(1)),
+                WindowAction::Closed(WindowId(2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn close_windows_tracks_the_last_window() {
+        let mut open = vec![WindowId(1), WindowId(2)];
+        assert!(!close_windows(&mut open, &[WindowId(1)]));
+        assert_eq!(open, vec![WindowId(2)]);
+        assert!(close_windows(&mut open, &[WindowId(2)]));
+        assert!(open.is_empty());
+        // Closing an id that is not open is a no-op.
+        let mut other = vec![WindowId(1)];
+        assert!(!close_windows(&mut other, &[WindowId(9)]));
+        assert_eq!(other, vec![WindowId(1)]);
     }
 }

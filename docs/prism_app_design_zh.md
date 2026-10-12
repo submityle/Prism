@@ -372,7 +372,7 @@ pkg/prism_app/
 - **M1 调度序 + 状态**（✅）：完整 Main 阶段序、PluginGroup/依赖解析/去重（`plugin_group`/`plugin_graph`）、States/OnEnter/OnExit（`state/*`）、Events 更新（`event`）。
 - **M2 固定步长**（✅）：累加器 + alpha + 死亡螺旋熔断（`fixed`）、`Time<Fixed/Virtual/Real>`（`time`）、FixedMain tick 组。
 - **M3 子应用 + 流水线**（🚧）：`sub_app` 的 extract 接线与 `pipelined` feature 已落地；与 `prism_tasks` 车道（tasks §24.2 / §25.2）的深度接线待对齐。
-- **M4 窗口 Runner + 生命周期**（🚧）：`lifecycle`/`exit`/`pacing`（帧节奏、帧限）已落地；**`WinitRunner` 已落地**（`winit` feature）：开主窗口、把窗口事件转成生命周期事件、每帧驱动 `App::update`、按 `FramePacer` 限帧，主窗口关闭或系统请求退出即停，且无显示器的逻辑已单测。**仍待做**：平台 suspend / low-memory 回调（winit host trait 目前只给一次性 `resumed`）与移动端设备丢失恢复。
+- **M4 窗口 Runner + 生命周期**（🚧）：`lifecycle`/`exit`/`pacing`（帧节奏、帧限）已落地；**`WinitRunner` 已落地**（`winit` feature）：开一个或多个窗口（`with_windows`，§24.9）、把窗口事件转成生命周期事件、每帧驱动 `App::update`、按 `FramePacer` 限帧，全部窗口关闭或系统请求退出即停，且无显示器的逻辑已单测。**仍待做**：每窗口渲染目标 / 统一驱动、平台 suspend / low-memory 回调（winit host trait 目前只给一次性 `resumed`）与移动端设备丢失恢复。
 - **M5 确定性 + 服务器**（🚧）：`determinism`（种子 RNG / 每帧状态哈希 / 逐固定步输入录放）、`DedicatedServerRunner`、`settings` 分层已落地；**world-snapshot 回滚已落地并接入 `App`/`SubApp`**（`rollback::SnapshotHistory` 复用 `prism_ecs` 的 `WorldSnapshot`/`SnapshotRing`，带上界环形历史、`try_capture` 缺 glue 上报、按帧回滚与逐帧状态哈希；`App`/`SubApp` 暴露 `init_snapshot_history` / `capture_snapshot` / `rollback_to`）；**late-input 回滚+重放环已落地**（`rollback_replay::RollbackReplay`：commit 记录快照+输入、rollback 还原到某帧并给出待重放输入序列、`reconcile` 用修正后的输入重放整段、重提交原地覆盖旧分支）；**对端同步编排已落地**（`peer_sync::reconcile_with_peer`：比对本地/对端逐帧帧哈希定位保留窗口内首个分歧帧、取对端权威输入驱动 `reconcile`，对端输入缺失或帧已淘汰则不动作并如实返回 `Unreconciled`）。**仍待做**：真正的网络传输层（收发/回滚窗口协商）。
 - **M6 迁移/工具**（⬜/🚧）：`prelude`（贴近 `bevy_app`）与 `diagnostics`（帧统计/启动耗时）已落地；**`prism_bevy` 退役、阶段火焰图、插件热重载（§24.2）、PIE 多实例未实现**。
 
@@ -473,7 +473,7 @@ AAA 要求「一个系统崩了不拖垮整个进程」:
 
 ### 24.10 诚实边界
 
-本章设计目标以 2026-10 代码为准**大部分已落地**：24.1 插件依赖图（`plugin_graph`）、24.4 运行模式（`run_mode`/`capability`/`platform_tier`）、24.5 优雅生命周期（`exit`/`lifecycle`）、24.6 cvar（`cvar`）、24.7 崩溃隔离 + 看门狗（`crash`/`watchdog`）、24.8 子状态与状态作用域实体（`state/sub`、`state/scoped`）均有实现并可测。**尚未落地**：24.2 系统/模块热重载、24.3 与 `prism_tasks` 车道的深度流水线接线、24.9 多窗口/多世界。本 crate 是地基运行时,勿与上层 `prism_loom_runtime_framework` 职责重叠(后者做更高层游戏流程编排)。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
+本章设计目标以 2026-10 代码为准**大部分已落地**：24.1 插件依赖图（`plugin_graph`）、24.4 运行模式（`run_mode`/`capability`/`platform_tier`）、24.5 优雅生命周期（`exit`/`lifecycle`）、24.6 cvar（`cvar`）、24.7 崩溃隔离 + 看门狗（`crash`/`watchdog`）、24.8 子状态与状态作用域实体（`state/sub`、`state/scoped`）均有实现并可测；24.9 多窗口已支持开多个窗口（`WinitRunner::with_windows`）。**尚未落地**：24.2 系统/模块热重载、24.3 与 `prism_tasks` 车道的深度流水线接线、24.9 的每窗口渲染目标 / 多世界。本 crate 是地基运行时,勿与上层 `prism_loom_runtime_framework` 职责重叠(后者做更高层游戏流程编排)。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
 
 ---
 
