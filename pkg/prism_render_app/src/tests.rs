@@ -1151,7 +1151,7 @@ fn app_on_null_backend(config: RenderAppConfig) -> App {
 }
 
 /// Whether a missing adapter must fail a GPU-gated test instead of skipping it.
-fn require_gpu() -> bool {
+pub(crate) fn require_gpu() -> bool {
     std::env::var_os("PRISM_REQUIRE_GPU").is_some()
 }
 

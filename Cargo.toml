@@ -29,6 +29,7 @@ members = [
   # Engine-neutral camera math (projection/view/frustum) for the RHI render path.
   "pkg/prism_platform_os",
   "pkg/prism_asset",
+  "pkg/prism_mesh",
   "pkg/prism_render_driver",
   "os-backends/prism_render_driver_wgpu",
   "os-backends/prism_render_driver_null",

@@ -67,6 +67,7 @@ pub fn prepare_assets<I, A>(
         &mut extracted,
         &mut prepared,
         runtime.runtime().device(),
+        runtime.runtime().queue(),
     );
 }
 

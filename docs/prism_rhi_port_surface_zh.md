@@ -77,7 +77,8 @@ BufferInitDescriptor / SpecializedRenderPipelines / ShaderType`，
 | 每 view 录制上下文 + `CurrentView` | `renderer::{RenderContext, ViewQuery}` | 72 + 61 | `prism_render_app`（`ViewQuery` 进行中） |
 | extract 层的实体映射 | ~~`sync_world::MainEntity`~~ | 16+5 | **已落**：`prism_render_app::sync_world`（`MainEntity` + `MainEntityHashSet` + `tag_extracted_entities`，接在 `prism_ecs::extract::extract_components` 的 `(main, render)` 对上） |
 | 资源表 `RenderAssets<T>` | ~~`render_asset::RenderAssets`~~ | 11 | **已落**：`prism_render_app::render_asset`（`RenderAsset` trait + `RenderAssets<A>` 表 + `sync_assets`/`drain_and_sync_assets`：Added/Modified 经 `prepare` 写入、Removed 走 `unload` 释放 GPU 对象、`RetryNextUpdate` 保留上一版并下帧重试） |
-| mesh 资源与分配器 | `mesh::{RenderMesh, allocator::MeshAllocator}` | 9 + 8 | `prism_render_architecture` 的 geometry 侧 |
+| mesh 资源 | ~~`mesh::RenderMesh`~~ | 9 | **已落**：新 crate `prism_mesh`（`Mesh` 资产：具名属性 + 类型化值 + 可选 `Indices`（保持 16/32 位原宽）+ 派生交错 `VertexBufferLayout`/顶点字节/模型空间 bounds + `validate`）+ `prism_render_app::mesh::RenderMesh`（`RenderAsset` 实现：分配/复用/释放顶点与索引缓冲、经 `RenderQueue` 上传、`Unpreparable` 报告非法内容）；真机像素级验证（用 mesh 自己派生的 layout 画 quad，中心红、外部黑） |
+| mesh 分配器 | `mesh::allocator::MeshAllocator` | 8 | 待接：当前每 mesh 一缓冲；等有「几何页/子分配」需求时按 `prism_render_driver` 的 suballoc 建 |
 | camera 提取 / MSAA 目标状态 | `camera::ExtractedCamera`、`view::Msaa` | 37 / 33 | **场景侧**（渲染层不收相机，见 §6/2）；`Msaa` 属渲染目标状态 |
 | `ShaderType`、`AtomicPod`、`RawBufferVec` | `render_resource::*` | 9 / 8 / 8 | 已有 `bytemuck` + `prism_render_architecture::abi`；用到再加，不预先造 |
 | `maths::affine3_to_square`、`utils::decompress_vertex_position`、`allocator::*` | 同名模块 | 4 / 3 / 8 | `prism_math` / `prism_render_architecture`，纯函数，随首个使用点搬 |
@@ -88,7 +89,7 @@ BufferInitDescriptor / SpecializedRenderPipelines / ShaderType`，
    + `prism_render_app` 再导出；缺 skip 机制，参数是 `Option<ViewQuery<..>>`，见该模块文档）；
    剩：把 `ExecuteContext` 包成 view 作用域的录制面（外层循环按 view 设 `CurrentView`）。
 2. **S2b extract + 实体映射**：实体映射与资产管线**已落并接进帧**——`extract_assets::<A>`（走 `App::add_extract` 链，新增多段 extract 能力）把主世界 arena 的 Added/Modified 复制进 `ExtractedAssets<A>`、Removed 只传 id；`prepare_assets::<I, A>` 在新增的 `RenderSystems::PrepareAssets` 阶段跑 `prepare_extracted_assets`，`AssetSyncStats<A>` 记录每帧报告；`register_render_assets::<I, A>` 一次注册一族（= 上游 `RenderAssetPlugin<A>`）。剩：把 `RenderMesh`/`GpuImage` 这两族接上（需 S2c 的 mesh 层）。
-3. **S2c mesh 资源层**：`RenderMesh`/`RenderMeshBufferInfo`/`MeshAllocator`。
+3. **S2c mesh 层**：`prism_mesh::Mesh` + `RenderMesh` **已落**（含真机绘制验证）；`MeshAllocator`（几何子分配/页）待有需求再建。
 4. **S2d 资源缝收敛**：逐条目把 `render_resource::*` 换成 RHI 同名类型（§3 第一组，机械但量最大）。
 5. **S2e 小工具**：`affine3_to_square`、`decompress_vertex_position`、`allocator::*`。
 6. **S2f 子系统翻面**：按目录把 `bevy_ecs`/`bevy_app` 系统搬到 `prism_ecs`/`prism_app`

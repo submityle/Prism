@@ -12,6 +12,7 @@ prism_app = { path = "../prism_app" }
 prism_asset = { path = "../prism_asset", features = ["ecs"] }
 prism_ecs = { path = "../prism_ecs" }
 prism_render_architecture = { path = "../prism_render_architecture" }
+prism_mesh = { path = "../prism_mesh" }
 prism_render_material = { path = "../prism_render_material" }
 prism_render_visibility = { path = "../prism_render_visibility" }
 prism_render_driver = { path = "../prism_render_driver", features = ["std"] }

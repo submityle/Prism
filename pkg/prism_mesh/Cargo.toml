@@ -1,0 +1,22 @@
+[package]
+name = "prism_mesh"
+version = "0.1.0"
+edition = "2024"
+description = "Prism's mesh asset: named vertex attributes in a typed value each, optional indices, a derived interleaved vertex layout, and the packed vertex-buffer bytes a renderer uploads. The data half of the renderer's mesh pipeline — mesh-shaped data with no ECS, no GPU handles, and no bevy_mesh/bevy_render dependency."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# Mesh identity is an asset identity: a `Mesh` is stored in an `Assets<Mesh>`
+# arena and prepared by the renderer, so it uses the asset kernel's `Asset`
+# contract rather than inventing a second notion of "asset".
+prism_asset = { path = "../prism_asset" }
+# The vertex vocabulary (formats, buffer layouts, topologies, index formats) is
+# the RHI's: a mesh describes exactly what a pipeline will bind, and duplicating
+# those enums here would be two definitions that can drift.
+prism_render_driver = { path = "../prism_render_driver" }
+# Attribute payloads are POD and are uploaded as raw bytes.
+bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
+
+[lints]
+workspace = true

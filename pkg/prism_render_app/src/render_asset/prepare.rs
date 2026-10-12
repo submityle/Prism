@@ -1,7 +1,7 @@
 //! Keeping the prepared table in step with the source assets.
 
 use prism_asset::{Asset, AssetId};
-use prism_render_driver::RenderDevice;
+use prism_render_driver::{RenderDevice, RenderQueue};
 
 use super::extract::ExtractedAssets;
 use super::{RenderAsset, RenderAssets};
@@ -16,6 +16,14 @@ pub enum PrepareAssetError<A: Asset> {
     /// A dependency is not prepared yet: keep whatever representation exists and
     /// retry after the dependency's own prepare has run.
     RetryNextUpdate(AssetId<A>),
+    /// The asset itself cannot be prepared — its content is invalid (a mesh whose
+    /// indices leave its vertex range, say). Keep whatever representation exists
+    /// and do **not** retry: nothing changes until the source does, so retrying
+    /// every frame would only burn the frame's budget on a content bug.
+    Unpreparable {
+        /// The asset that cannot be prepared.
+        id: AssetId<A>,
+    },
 }
 
 /// What one asset sync did.
@@ -25,6 +33,8 @@ pub struct AssetSyncReport {
     pub prepared: usize,
     /// Assets the prepare asked to retry next update.
     pub retried: usize,
+    /// Assets whose content cannot be prepared at all.
+    pub unpreparable: usize,
     /// Assets whose source went away, whose representations were released.
     pub released: usize,
 }
@@ -56,6 +66,7 @@ pub fn prepare_extracted_assets<A: RenderAsset>(
     extracted: &mut ExtractedAssets<A>,
     prepared: &mut RenderAssets<A>,
     device: &dyn RenderDevice,
+    queue: &dyn RenderQueue,
 ) -> AssetSyncReport {
     let (assets, removed) = extracted.take();
     let mut report = AssetSyncReport::default();
@@ -67,12 +78,13 @@ pub fn prepare_extracted_assets<A: RenderAsset>(
         }
     }
     for (id, source) in assets {
-        match A::prepare(&source, id, device, prepared.get(id)) {
+        match A::prepare(&source, id, device, queue, prepared.get(id)) {
             Ok(value) => {
                 prepared.insert(id, value);
                 report.prepared += 1;
             }
             Err(PrepareAssetError::RetryNextUpdate(_)) => report.retried += 1,
+            Err(PrepareAssetError::Unpreparable { .. }) => report.unpreparable += 1,
         }
     }
     report

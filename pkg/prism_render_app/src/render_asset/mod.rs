@@ -25,7 +25,7 @@ mod tests;
 
 use prism_asset::Asset;
 use prism_asset::AssetId;
-use prism_render_driver::RenderDevice;
+use prism_render_driver::{RenderDevice, RenderQueue};
 
 pub use extract::{ExtractedAssets, extract_assets};
 pub use prepare::{AssetSyncReport, PrepareAssetError, prepare_extracted_assets};
@@ -51,16 +51,31 @@ pub trait RenderAsset: Send + Sync + 'static + Sized {
     ///
     /// `previous` is the representation from the last successful prepare, so an
     /// update can grow an existing buffer instead of reallocating, or keep the
-    /// parts that did not change.
+    /// parts that did not change. `device` creates and destroys objects; `queue`
+    /// is the upload path for their contents (the RHI writes buffers and
+    /// textures through the queue, not the device).
     ///
     /// Returns [`PrepareAssetError::RetryNextUpdate`] when a dependency is not
     /// ready yet (a mesh waiting on its texture, a material waiting on its
     /// pipeline); the sync then leaves the previous representation in place and
     /// retries next frame rather than recording a half-built asset.
+    ///
+    /// # Ownership of the previous representation
+    ///
+    /// `previous` is borrowed, and the value it describes is dropped right after
+    /// a successful prepare returns (the new representation replaces it in the
+    /// table). That makes `prepare` the only place that knows whether the old GPU
+    /// objects are being reused: releasing them anywhere else would double-free a
+    /// reused buffer. So a prepare must **either** reuse the previous objects
+    /// (returning them) **or** release them through `device` — returning a fresh
+    /// representation that ignores `previous` without releasing it leaks its
+    /// objects. A prepare that fails must leave `previous` alone: the table still
+    /// holds it, and the next attempt gets it back.
     fn prepare(
         source: &Self::SourceAsset,
         id: AssetId<Self::SourceAsset>,
         device: &dyn RenderDevice,
+        queue: &dyn RenderQueue,
         previous: Option<&Self>,
     ) -> Result<Self, PrepareAssetError<Self::SourceAsset>>;
 

@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use prism_asset::{Asset, AssetIndex, AssetId, Assets};
 use prism_render_driver::{
     BufferDescriptor, BufferId, BufferUsages, DeviceDescriptor, Instance, RenderDevice,
-    RequestAdapterOptions,
+    RenderQueue, RequestAdapterOptions,
 };
 use prism_render_driver_null::{NullDevice, NullInstance};
 use prism_ecs::world::World;
@@ -39,6 +39,7 @@ impl RenderAsset for GpuBlob {
         source: &Blob,
         id: AssetId<Blob>,
         device: &dyn RenderDevice,
+        _queue: &dyn RenderQueue,
         previous: Option<&Self>,
     ) -> Result<Self, PrepareAssetError<Blob>> {
         let bytes = source.0.len() as u64;
@@ -75,15 +76,14 @@ impl RenderAsset for GpuBlob {
     }
 }
 
-fn null_device() -> NullDevice {
+fn null_device() -> (NullDevice, impl RenderQueue) {
     let options = RequestAdapterOptions::default();
     let adapter = NullInstance::new()
         .request_adapter(&options)
         .expect("the null backend always has an adapter");
-    let (device, _queue) = NullInstance::new()
+    NullInstance::new()
         .create_device(&adapter, &DeviceDescriptor::default())
-        .expect("the null device always comes up");
-    device
+        .expect("the null device always comes up")
 }
 
 /// One extract + prepare pass over `main`, the way the frame runs them.
@@ -91,13 +91,14 @@ fn run_frame<A: RenderAsset>(
     main: &mut World,
     render: &mut World,
     device: &dyn RenderDevice,
+    queue: &dyn RenderQueue,
 ) -> AssetSyncReport {
     extract_assets::<A>(main, render);
     let mut extracted = render
         .remove_resource::<ExtractedAssets<A>>()
         .unwrap_or_default();
     let mut table = render.remove_resource::<RenderAssets<A>>().unwrap_or_default();
-    let report = prepare_extracted_assets::<A>(&mut extracted, &mut table, device);
+    let report = prepare_extracted_assets::<A>(&mut extracted, &mut table, device, queue);
     render.insert_resource(extracted);
     render.insert_resource(table);
     report
@@ -105,7 +106,7 @@ fn run_frame<A: RenderAsset>(
 
 #[test]
 fn preparing_an_asset_creates_its_gpu_representation() {
-    let device = null_device();
+    let (device, queue) = null_device();
     let mut main = World::new();
     let mut render = World::new();
     let mut sources = Assets::new();
@@ -113,7 +114,7 @@ fn preparing_an_asset_creates_its_gpu_representation() {
     let id = handle.id();
     main.insert_resource(sources);
 
-    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device);
+    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
 
     assert_eq!(report.prepared, 1, "the added asset is prepared");
     assert_eq!(report.released, 0);
@@ -130,14 +131,14 @@ fn preparing_an_asset_creates_its_gpu_representation() {
 
 #[test]
 fn re_preparing_reuses_the_buffer_it_already_has() {
-    let device = null_device();
+    let (device, queue) = null_device();
     let mut main = World::new();
     let mut render = World::new();
     let mut sources = Assets::new();
     let handle = sources.insert(Blob(alloc::vec![1, 2, 3, 4]));
     let id = handle.id();
     main.insert_resource(sources);
-    run_frame::<GpuBlob>(&mut main, &mut render, &device);
+    run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
     let first = render.resource::<RenderAssets<GpuBlob>>().get(id).expect("prepared").buffer;
 
     // Modify the source: a payload that still fits the existing buffer.
@@ -145,7 +146,7 @@ fn re_preparing_reuses_the_buffer_it_already_has() {
         .get_mut(id)
         .expect("the asset is live")
         .0 = alloc::vec![9, 9];
-    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device);
+    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
 
     assert_eq!(report.prepared, 1, "the modification re-prepares");
     let table = render.resource::<RenderAssets<GpuBlob>>();
@@ -161,19 +162,19 @@ fn re_preparing_reuses_the_buffer_it_already_has() {
 
 #[test]
 fn a_removed_source_releases_its_gpu_representation() {
-    let device = null_device();
+    let (device, queue) = null_device();
     let mut main = World::new();
     let mut render = World::new();
     let mut sources = Assets::new();
     let handle = sources.insert(Blob(alloc::vec![1, 2, 3]));
     let id = handle.id();
     main.insert_resource(sources);
-    run_frame::<GpuBlob>(&mut main, &mut render, &device);
+    run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
     assert_eq!(device.live_resource_count(), 1);
 
     drop(handle);
     main.resource_mut::<Assets<Blob>>().remove(id);
-    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device);
+    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
 
     assert_eq!(report.released, 1, "the removal releases the representation");
     let table = render.resource::<RenderAssets<GpuBlob>>();
@@ -187,14 +188,14 @@ fn a_removed_source_releases_its_gpu_representation() {
 
 #[test]
 fn a_deferred_prepare_keeps_the_previous_representation() {
-    let device = null_device();
+    let (device, queue) = null_device();
     let mut main = World::new();
     let mut render = World::new();
     let mut sources = Assets::new();
     let handle = sources.insert(Blob(alloc::vec![1, 2, 3]));
     let id = handle.id();
     main.insert_resource(sources);
-    run_frame::<GpuBlob>(&mut main, &mut render, &device);
+    run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
     let prepared = render.resource::<RenderAssets<GpuBlob>>().get(id).expect("prepared").buffer;
 
     // The source is now un-prepared-able (a dependency went away, say).
@@ -203,7 +204,7 @@ fn a_deferred_prepare_keeps_the_previous_representation() {
         .expect("the asset is live")
         .0
         .clear();
-    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device);
+    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
 
     assert_eq!(report.retried, 1, "the prepare asked to retry");
     assert_eq!(report.prepared, 0);
@@ -219,7 +220,7 @@ fn a_deferred_prepare_keeps_the_previous_representation() {
         .get_mut(id)
         .expect("the asset is live")
         .0 = alloc::vec![7; 8];
-    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device);
+    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
     assert_eq!(report.prepared, 1, "the retry succeeded on the next pass");
     let table = render.resource::<RenderAssets<GpuBlob>>();
     assert_eq!(table.get(id).expect("prepared").bytes, 8);
@@ -227,14 +228,14 @@ fn a_deferred_prepare_keeps_the_previous_representation() {
 
 #[test]
 fn a_new_asset_whose_prepare_defers_is_not_in_the_table() {
-    let device = null_device();
+    let (device, queue) = null_device();
     let mut main = World::new();
     let mut render = World::new();
     let mut sources = Assets::new();
     let id = sources.insert(Blob(Vec::new())).id();
     main.insert_resource(sources);
 
-    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device);
+    let report = run_frame::<GpuBlob>(&mut main, &mut render, &device, &queue);
 
     assert_eq!(report.retried, 1);
     let table = render.resource::<RenderAssets<GpuBlob>>();
@@ -381,7 +382,7 @@ fn a_registered_family_prepares_and_releases_across_frames() {
 
 #[test]
 fn the_table_exposes_what_it_holds() {
-    let device = null_device();
+    let (device, _queue) = null_device();
     let mut table = RenderAssets::<GpuBlob>::new();
     assert!(table.is_empty());
     assert_eq!(table.len(), 0);
