@@ -114,26 +114,35 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
 impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> {
     type Item = D::Item<'w>;
 
+    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.row < self.row_len {
                 let row = self.row;
                 self.row += 1;
-                let entity = self.current_entities[row];
-                let filter_fetch = self
-                    .current_filter_fetch
-                    .expect("current_filter_fetch is Some whenever row_len > 0");
-                // SAFETY: `row < self.row_len == archetype.len()` and
-                // `filter_fetch` was built for this archetype. `F::Fetch` is
-                // `Copy`, so passing it by value does not disturb the cursor.
+                // SAFETY: entering an archetype sets `row_len` and *both* fetch
+                // cursors together, so whenever a row remains (`row < row_len`)
+                // the cursors are initialised; and `row < row_len` is exactly
+                // `row < archetype.len() == current_entities.len()`. Taking the
+                // row entity unchecked, and the cursors without the `Option`
+                // discriminant test, keeps the per-row path as tight as the
+                // batch driver's (both `Fetch` types are `Copy`). This is the
+                // hottest loop in the kernel, so the branches that the type
+                // system cannot remove for us are removed here instead.
+                let (entity, filter_fetch, fetch) = unsafe {
+                    (
+                        *self.current_entities.get_unchecked(row),
+                        self.current_filter_fetch.unwrap_unchecked(),
+                        self.current_fetch.unwrap_unchecked(),
+                    )
+                };
+                // SAFETY: `filter_fetch` was built for this archetype and
+                // `row` indexes a live row of it; `F::Fetch` is `Copy`.
                 if !unsafe { F::filter_fetch(filter_fetch, entity, row) } {
                     // Row rejected by `Added`/`Changed`/`With`/`Without`; the
                     // cursor already advanced, so just skip it.
                     continue;
                 }
-                let fetch = self
-                    .current_fetch
-                    .expect("current_fetch is Some whenever row_len > 0");
                 // SAFETY: same row/archetype invariants as the filter gate above.
                 // A sparse-backed required data term (design §6) resolves its
                 // per-entity membership here; table-backed terms always pass.

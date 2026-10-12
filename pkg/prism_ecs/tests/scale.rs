@@ -15,6 +15,7 @@
 //! in `docs/prism_ecs_design_zh.md` as measured evidence.
 
 use std::time::{Duration, Instant};
+use std::hint::black_box;
 
 use prism_ecs::prelude::*;
 
@@ -128,4 +129,66 @@ fn scale_par_propagate_1m_scaling() {
             base.as_secs_f64() / run.as_secs_f64(),
         );
     }
+}
+
+/// Diagnose the serial-vs-batch gap measured in
+/// [`scale_spawn_and_single_thread_propagate_1m`] / [`scale_par_propagate_1m_scaling`]:
+/// split it into read-only vs mutable and serial vs one-worker batch, so we can
+/// tell whether the serial driver loop itself is slow or whether the gap comes
+/// from per-row change-tick stamping (which the batch path amortises).
+#[cfg(feature = "multi_thread")]
+#[test]
+#[ignore = "allocates 1M entities per case; run explicitly with --release --ignored"]
+fn scale_serial_vs_batch_diagnosis() {
+    let pool = prism_tasks::TaskPool::with_threads(1);
+
+    // Read-only: no change-tick store at all.
+    let (mut world, _) = spawn_world();
+    let q_ro = world.query::<(&Vel, &Pos)>();
+    let _ = q_ro.iter(&world).count();
+    let serial_ro = best_of(|| {
+        let mut acc = 0.0f32;
+        for (v, p) in q_ro.iter(&world) {
+            acc += v.0 + p.0;
+        }
+        black_box(acc);
+    });
+    let par_ro = best_of(|| {
+        q_ro.par_for_each(&world, &pool, 1024, |(v, p)| {
+            black_box(v.0 + p.0);
+        });
+    });
+    drop(world);
+
+    // Mutable: each row stamps its change tick.
+    let (mut world, _) = spawn_world();
+    let q_rw = world.query::<(&Vel, &mut Pos)>();
+    let _ = q_rw.iter_mut(&mut world).count();
+    let serial_rw = best_of(|| {
+        for (v, mut p) in q_rw.iter_mut(&mut world) {
+            p.0 += v.0;
+            p.1 += v.1;
+            p.2 += v.2;
+        }
+    });
+    let par_rw = best_of(|| {
+        q_rw.par_for_each_mut(&mut world, &pool, 1024, |(v, mut p)| {
+            p.0 += v.0;
+            p.1 += v.1;
+            p.2 += v.2;
+        });
+    });
+
+    println!(
+        "read-only  serial {:>7.2} ns/entity | par(1) {:>7.2} ns/entity | par/serial {:.2}x",
+        ns_per_entity(serial_ro),
+        ns_per_entity(par_ro),
+        serial_ro.as_secs_f64() / par_ro.as_secs_f64(),
+    );
+    println!(
+        "mutable    serial {:>7.2} ns/entity | par(1) {:>7.2} ns/entity | par/serial {:.2}x",
+        ns_per_entity(serial_rw),
+        ns_per_entity(par_rw),
+        serial_rw.as_secs_f64() / par_rw.as_secs_f64(),
+    );
 }

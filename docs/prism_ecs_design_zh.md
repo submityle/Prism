@@ -390,18 +390,21 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 
 | 场景（100 万实体，`(Pos, Vel)` 两个 f32×3 列） | 耗时 | 单实体 | 吞吐 |
 |---|---|---|---|
-| spawn 100 万 | 236.0 ms | 236 ns | 4.2 M/s |
-| 串行 `(&Vel, &mut Pos)` 传播（`QueryIter`） | 8.72 ms | 8.72 ns | 114.7 M/s |
-| `par_for_each_mut`，1 线程 | 4.06 ms | 4.06 ns | 246.6 M/s |
-| `par_for_each_mut`，2 线程 | 2.64 ms | 2.64 ns | 378.6 M/s（1.54×） |
-| `par_for_each_mut`，4 线程 | 1.83 ms | 1.83 ns | 546.3 M/s（2.22×） |
-| `par_for_each_mut`，8 线程 | 1.70 ms | 1.70 ns | 589.4 M/s（2.39×） |
+| spawn 100 万 | 178 ms | 178 ns | 5.6 M/s |
+| 串行 `(&Vel, &mut Pos)` 传播（`QueryIter`） | 6.6 ms | 6.6 ns | 151 M/s |
+| `par_for_each_mut`，1 线程 | 4.09 ms | 4.09 ns | 245 M/s |
+| `par_for_each_mut`，2 线程 | 2.72 ms | 2.72 ns | 367 M/s（1.50×） |
+| `par_for_each_mut`，4 线程 | 2.40 ms | 2.40 ns | 417 M/s（1.70×） |
+| `par_for_each_mut`，8 线程 | 2.20 ms | 2.20 ns | 455 M/s（1.86×） |
+
+只读/可变 × 串行/批量的对照（`scale_serial_vs_batch_diagnosis`，3 次重复稳定）：只读串行 3.9 ns vs `par(1)` 1.70 ns（**2.3×**）；可变串行 6.6 ns vs `par(1)` 4.0 ns（**1.63×**）。
 
 **实测结论（诚实）**：
 
-- 百万级单线程迭代已在 **~9 ns/实体**量级，规模性不再只是推断。
-- 多核**远非线性**（8 线程仅 2.39×）。本机为共享开发机（测量期间有其它构建/agent 并发），且该场景是**内存带宽受限**的 24 B/实体读写；要给出可信的扩展曲线需独占机器 + NUMA/绑核，仍属 PLANNED。
-- **新发现（待优化）**：串行 `QueryIter` 比「`par_for_each_mut` + 1 线程」**慢约 2.1×**。两者做同样的传播，差异指向串行路径的逐行开销（`QueryIter::next` 每行都要重建 `(fetch, filter_fetch)` 组合并按行落 change-tick，而批量驱动按批落 tick）。这是一个已量化的优化目标，尚未修复。
+- 百万级单线程迭代已在 **~6.6 ns/实体**量级，规模性不再只是推断。
+- 多核**非线性**（8 线程 1.86×）。本机为共享开发机（测量期间有其它构建/agent 并发），且该场景是**内存带宽受限**的 24 B/实体读写；要给出可信的扩展曲线需独占机器 + NUMA/绑核，仍属 PLANNED。
+- **已修复的量化优化**：初测发现串行 `QueryIter` 比「`par_for_each_mut` + 1 线程」慢约 2.1×（可变）。定位为 `QueryIter::next` 的逐行开销：每行都要做两次 `Option` 判别 + 切片边界检查。改为在**已证明的不变量**（进入一个 archetype 时同时设置 `row_len` 与两个 fetch 游标，故 `row < row_len` ⇒ 游标已初始化且 `row < entities.len()`）下用 `get_unchecked`/`unwrap_unchecked` 去掉这两个分支，并给 `next` 加 `inline(always)`；随后实测可变 **9.05 → 6.6 ns/实体（1.37×）**、只读 **5.02 → 3.9 ns/实体（1.29×）**，全量测试无回归。
+- **仍未闭合的差距**：串行仍比 `par(1)` 慢 1.63×（可变）/ 2.3×（只读）。两者每行做的 fetch 完全相同，差距来自迭代器协议本身（逐行 `next()` 返回 + `QueryIter` 结构体字段往返），批量驱动则是紧凑的切片内循环。进一步收敛需要给 `QueryIter` 提供批量化的 `fold`/`for_each` 快路径（`for` 循环不经过它们，收益仅覆盖 `for_each`/`sum`/`count`/`collect`），属 PLANNED。
 
 诚实边界：CPU 单测只能证机制正确；NUMA / GPU 常驻 / 独占机的多核近线性等规模指标仍需真实硬件与大场景压测，仍标注 PLANNED。
 
