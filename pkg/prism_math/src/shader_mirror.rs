@@ -225,21 +225,20 @@ fn prism_look_to_rh(eye: vec3<f32>, dir: vec3<f32>, up: vec3<f32>) -> mat4x4<f32
 fn prism_look_at_rh(eye: vec3<f32>, focus: vec3<f32>, up: vec3<f32>) -> mat4x4<f32> {\n\
     return prism_look_to_rh(eye, focus - eye, up);\n\
 }\n";
-/// The authoritative WGSL source for a 4-influence **dual-quaternion skinning**
-/// (`DLB` / dual-quaternion linear blend) vertex transform, mirroring the CPU
-/// path [`crate::DualQuat::blend_weighted`] followed by
-/// [`crate::DualQuat::transform_point3`] **step for step**: the first
-/// non-zero-weight bone fixes the hemisphere pivot, later bones are flipped into
-/// it before the weighted accumulation, the sum is renormalized to the unit
-/// invariants (`|real| = 1`, `dot(real, dual) = 0`), and the point is finally
-/// mapped by `rotation * p + translation`.
-///
-/// `prism_dq_skin4` depends on `prism_quat_rotate` from [`WGSL_QUAT_ROTATE`];
-/// a consumer composes the two fragments (and never re-types them) so the GPU
-/// skinning twin cannot drift from the CPU reference. Four bone influences is
-/// the standard AAA skinning fan-in; a zero weight contributes nothing (matching
-/// the CPU `w == 0` skip), so narrower fan-ins pad with zero weights.
-pub const WGSL_DUAL_QUAT_SKIN: &str = "\
+/// Single-sourced WGSL for quaternion algebra, mirroring the CPU
+/// [`Quat`](crate::Quat) operators and methods: `prism_quat_mul` is the
+/// Hamilton product (`a * b` = apply `b` then `a`, matching `impl Mul for Quat`
+/// and the scalar backend), `prism_quat_conj` negates the vector part,
+/// `prism_quat_inverse` equals the conjugate for the unit quaternions this API
+/// targets, and `prism_quat_normalize` rescales to unit length.
+/// `prism_quat_op(op, a, b)` dispatches `mul`/`conj`/`inverse`/`normalize` for a
+/// batched kernel (the second operand is ignored by the unary ops). This is the
+/// GPU side of animation blending, IK, and physics-frame quaternion math; the
+/// dual-quaternion skinning fragment ([`WGSL_DUAL_QUAT_SKIN`]) reuses
+/// `prism_quat_mul`/`prism_quat_conj` from here so the product lives in exactly
+/// one place. Mul/normalize are float arithmetic (fast-math tolerance);
+/// conjugate/inverse are exact sign flips.
+pub const WGSL_QUAT_ALG: &str = "\
 fn prism_quat_mul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {\n\
     return vec4<f32>(\n\
         a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,\n\
@@ -253,6 +252,41 @@ fn prism_quat_conj(q: vec4<f32>) -> vec4<f32> {\n\
     return vec4<f32>(-q.x, -q.y, -q.z, q.w);\n\
 }\n\
 \n\
+fn prism_quat_inverse(q: vec4<f32>) -> vec4<f32> {\n\
+    return prism_quat_conj(q);\n\
+}\n\
+\n\
+fn prism_quat_normalize(q: vec4<f32>) -> vec4<f32> {\n\
+    let inv = 1.0 / sqrt(dot(q, q));\n\
+    return q * inv;\n\
+}\n\
+\n\
+fn prism_quat_op(op: u32, a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {\n\
+    switch op {\n\
+        case 0u: { return prism_quat_mul(a, b); }\n\
+        case 1u: { return prism_quat_conj(a); }\n\
+        case 2u: { return prism_quat_inverse(a); }\n\
+        case 3u: { return prism_quat_normalize(a); }\n\
+        default: { return a; }\n\
+    }\n\
+}\n";
+
+/// The authoritative WGSL source for a 4-influence **dual-quaternion skinning**
+/// (`DLB` / dual-quaternion linear blend) vertex transform, mirroring the CPU
+/// path [`crate::DualQuat::blend_weighted`] followed by
+/// [`crate::DualQuat::transform_point3`] **step for step**: the first
+/// non-zero-weight bone fixes the hemisphere pivot, later bones are flipped into
+/// it before the weighted accumulation, the sum is renormalized to the unit
+/// invariants (`|real| = 1`, `dot(real, dual) = 0`), and the point is finally
+/// mapped by `rotation * p + translation`.
+///
+/// `prism_dq_skin4` depends on `prism_quat_rotate` from [`WGSL_QUAT_ROTATE`] and
+/// `prism_quat_mul`/`prism_quat_conj` from [`WGSL_QUAT_ALG`]; a consumer composes
+/// those fragments (and never re-types them) so the GPU skinning twin cannot
+/// drift from the CPU reference. Four bone influences is the standard AAA
+/// skinning fan-in; a zero weight contributes nothing (matching the CPU `w == 0`
+/// skip), so narrower fan-ins pad with zero weights.
+pub const WGSL_DUAL_QUAT_SKIN: &str = "\
 fn prism_dq_skin4(\n\
     r0: vec4<f32>, d0: vec4<f32>,\n\
     r1: vec4<f32>, d1: vec4<f32>,\n\

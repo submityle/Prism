@@ -8,7 +8,8 @@
 //! [`prism_math::DualQuat::transform_point3`]. The blend/normalize/transform
 //! WGSL is **not** duplicated here: the kernel is composed at runtime by
 //! prefixing the single-sourced fragments
-//! [`WGSL_QUAT_ROTATE`](prism_math::shader_mirror::WGSL_QUAT_ROTATE) and
+//! [`WGSL_QUAT_ROTATE`](prism_math::shader_mirror::WGSL_QUAT_ROTATE),
+//! [`WGSL_QUAT_ALG`](prism_math::shader_mirror::WGSL_QUAT_ALG), and
 //! [`WGSL_DUAL_QUAT_SKIN`](prism_math::shader_mirror::WGSL_DUAL_QUAT_SKIN) ahead
 //! of a thin compute wrapper, so the device skinning math cannot silently drift
 //! from the CPU reference — they are literally the same text.
@@ -28,7 +29,7 @@
 use alloc::string::String;
 
 use bytemuck::{Pod, Zeroable};
-use prism_math::shader_mirror::{WGSL_DUAL_QUAT_SKIN, WGSL_QUAT_ROTATE};
+use prism_math::shader_mirror::{WGSL_DUAL_QUAT_SKIN, WGSL_QUAT_ALG, WGSL_QUAT_ROTATE};
 use prism_math::DualQuat;
 use prism_math::Vec3;
 use wgpu::{
@@ -126,6 +127,8 @@ impl GpuDualQuatSkin {
 
         let mut source = String::new();
         source.push_str(WGSL_QUAT_ROTATE);
+        source.push('\n');
+        source.push_str(WGSL_QUAT_ALG);
         source.push('\n');
         source.push_str(WGSL_DUAL_QUAT_SKIN);
         source.push('\n');
