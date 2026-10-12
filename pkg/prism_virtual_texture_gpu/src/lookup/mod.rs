@@ -24,7 +24,9 @@ use wgpu::{
     PipelineLayoutDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages,
 };
 
-use prism_render_architecture::texture_streaming::{GpuPageTable, PageResolution, TexturePageKey};
+use prism_render_architecture::texture_streaming::{
+    GpuPageTable, PageResolution, TexturePageKey, PAGE_TABLE_ENTRY_WORDS,
+};
 
 use crate::buffer;
 use crate::context::GpuContext;
@@ -168,6 +170,7 @@ impl GpuPageLookup {
         table: &GpuPageTable,
         keys: &[TexturePageKey],
     ) -> Vec<u32> {
+        assert_valid_page_table_words(table.words());
         let device = ctx.device();
 
         // Pre-reduce each query to its three compare words via the golden
@@ -313,6 +316,7 @@ impl GpuPageLookup {
         keys: &[TexturePageKey],
         coarsest_mip: u8,
     ) -> Vec<GpuPageResolution> {
+        assert_valid_page_table_words(table.words());
         if keys.is_empty() {
             return Vec::new();
         }
@@ -418,6 +422,25 @@ impl GpuPageLookup {
     }
 }
 
+/// Enforces the page-table ABI before its words cross into a GPU shader.
+/// `MISS` is the lookup kernel's no-resident-page result, so it cannot also be
+/// a physical slot. Keep this check at the consumer boundary even though the
+/// CPU golden table already rejects the value in `from_bindings`.
+fn assert_valid_page_table_words(words: &[u32]) {
+    assert_eq!(
+        words.len() % PAGE_TABLE_ENTRY_WORDS,
+        0,
+        "GPU page table must contain complete entries"
+    );
+    for entry in words.chunks_exact(PAGE_TABLE_ENTRY_WORDS) {
+        assert_ne!(
+            entry[PAGE_TABLE_ENTRY_WORDS - 1],
+            MISS,
+            "GPU page-table physical slots must not use the reserved miss sentinel"
+        );
+    }
+}
+
 fn lookup_layout(device: &wgpu::Device, label: &str) -> BindGroupLayout {
     device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some(label),
@@ -488,5 +511,41 @@ mod tests {
     #[test]
     fn miss_matches_u32_max() {
         assert_eq!(MISS, u32::MAX);
+    }
+
+    #[test]
+    fn page_table_abi_rejects_miss_sentinel_as_a_physical_slot() {
+        let result = std::panic::catch_unwind(|| {
+            assert_valid_page_table_words(&[1, 0, 0, MISS]);
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn page_table_abi_accepts_low_and_high_non_sentinel_slots() {
+        assert_valid_page_table_words(&[1, 0, 0, 0, 2, 0, 0, MISS - 1]);
+    }
+
+    #[test]
+    fn page_table_abi_rejects_partial_entries() {
+        let result = std::panic::catch_unwind(|| {
+            assert_valid_page_table_words(&[1, 0, 0]);
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cpu_golden_constructor_rejects_reserved_physical_slot() {
+        let key = TexturePageKey {
+            texture: 1,
+            mip: 0,
+            layer: 0,
+            x: 0,
+            y: 0,
+        };
+        let result = std::panic::catch_unwind(|| {
+            let _ = GpuPageTable::from_bindings(&[(key, MISS)]);
+        });
+        assert!(result.is_err());
     }
 }
