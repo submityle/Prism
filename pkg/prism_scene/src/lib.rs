@@ -55,6 +55,7 @@ pub mod materialize;
 pub mod overrides;
 pub mod path;
 pub mod plan;
+pub mod plan_codec;
 pub mod remap;
 pub mod residency;
 pub mod template;
@@ -77,6 +78,7 @@ pub use overrides::{
 };
 pub use path::{FieldPath, FieldSegment};
 pub use plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
+pub use plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits};
 pub use remap::RemapTable;
 pub use residency::{ResidencyPlan, ResidencyTier};
 pub use template::{NestedSlot, SceneTemplate};
@@ -103,6 +105,7 @@ pub mod prelude {
     };
     pub use crate::path::{FieldPath, FieldSegment};
     pub use crate::plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
+    pub use crate::plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits};
     pub use crate::remap::RemapTable;
     pub use crate::residency::{ResidencyPlan, ResidencyTier};
     pub use crate::template::{NestedSlot, SceneTemplate};
