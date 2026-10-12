@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use prism_app::{App, Last, Plugin, SubApp};
-use prism_ecs::schedule::{Schedule, Schedules};
+use prism_ecs::schedule::{IntoSystemConfigs, Schedule, Schedules};
 use prism_render_driver::{FrameSync, Instance};
 use prism_render_runtime::RenderRuntime;
 
@@ -12,6 +12,7 @@ use crate::config::RenderAppConfig;
 use crate::label::{Render, RenderApp};
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
+use crate::sets::{RenderSystems, configure_render_sets};
 use crate::stats::RenderFrameStats;
 use crate::systems::{drive_render_schedule, execute_frame, extract_render_record};
 use crate::target::RenderTarget;
@@ -123,12 +124,17 @@ where
             schedules.insert(Render, Schedule::new());
             schedules.insert(Last, Schedule::new());
         }
-        render
-            .world
-            .resource_mut::<Schedules>()
-            .get_mut(Render)
-            .expect("the Render schedule was just inserted")
-            .add_systems(execute_frame::<I>);
+        {
+            let schedule = render
+                .world
+                .resource_mut::<Schedules>()
+                .get_mut(Render)
+                .expect("the Render schedule was just inserted");
+            // Order the render stages/phases first, then hang the frame system
+            // off the record stage so later renderer plugins slot in by set.
+            configure_render_sets(schedule);
+            schedule.add_systems(execute_frame::<I>.in_set(RenderSystems::Phase));
+        }
         render
             .world
             .resource_mut::<Schedules>()

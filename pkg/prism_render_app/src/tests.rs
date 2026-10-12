@@ -21,6 +21,63 @@ use crate::runtime_resource::RenderRuntimeResource;
 use crate::stats::RenderFrameStats;
 use crate::target::RenderTarget;
 
+use crate::sets::{RenderPhase, RenderSystems};
+use prism_ecs::prelude::{ResMut, Resource};
+use prism_ecs::schedule::IntoSystemConfigs;
+
+/// Records the order render systems ran in, for the set-ordering test.
+#[derive(Resource, Default)]
+struct OrderLog(Vec<&'static str>);
+
+fn mark_prepare(mut log: ResMut<OrderLog>) {
+    log.0.push("prepare");
+}
+
+fn mark_queue(mut log: ResMut<OrderLog>) {
+    log.0.push("queue");
+}
+
+fn mark_opaque(mut log: ResMut<OrderLog>) {
+    log.0.push("opaque");
+}
+
+/// The render stages and phases order systems whether or not the registering
+/// plugin knows about the others: `Prepare` precedes `Queue`, and the `Opaque`
+/// phase records after `Queue`.
+#[test]
+fn render_sets_order_stages_and_phases() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    {
+        let render = app
+            .sub_app_mut(RenderApp)
+            .expect("the plugin registers the render sub-app");
+        render.world.insert_resource(OrderLog::default());
+        let schedule = render
+            .world
+            .resource_mut::<Schedules>()
+            .get_mut(Render)
+            .expect("the plugin registers the Render schedule");
+        // Registered out of order on purpose: the sets must impose the order.
+        schedule.add_systems(mark_queue.in_set(RenderSystems::Queue));
+        schedule.add_systems(mark_opaque.in_set(RenderPhase::Opaque));
+        schedule.add_systems(mark_prepare.in_set(RenderSystems::Prepare));
+    }
+
+    app.update();
+
+    let log = app
+        .get_sub_app(RenderApp)
+        .expect("the render sub-app")
+        .world
+        .get_resource::<OrderLog>()
+        .expect("the order log");
+    assert_eq!(
+        log.0,
+        ["prepare", "queue", "opaque"],
+        "Prepare runs before Queue, and the Opaque phase records after Queue"
+    );
+}
+
 /// The frame count the headless tests drive.
 const FRAMES: u64 = 5;
 

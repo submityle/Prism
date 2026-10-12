@@ -61,6 +61,7 @@ mod label;
 mod plugin;
 mod record;
 mod runtime_resource;
+mod sets;
 mod stats;
 mod systems;
 mod target;
@@ -75,6 +76,7 @@ pub use label::{Render, RenderApp};
 pub use plugin::PrismRenderPlugin;
 pub use record::RenderRecord;
 pub use runtime_resource::RenderRuntimeResource;
+pub use sets::{RenderPhase, RenderSystems, configure_render_sets};
 pub use stats::RenderFrameStats;
 pub use target::RenderTarget;
 
@@ -86,6 +88,7 @@ pub mod prelude {
     pub use crate::label::{Render, RenderApp};
     pub use crate::plugin::PrismRenderPlugin;
     pub use crate::record::RenderRecord;
+    pub use crate::sets::{RenderPhase, RenderSystems};
     pub use crate::stats::RenderFrameStats;
     pub use crate::target::RenderTarget;
 }
