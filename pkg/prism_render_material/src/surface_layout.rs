@@ -203,10 +203,22 @@ pub struct ChannelLayout {
     pub id: &'static str,
     /// Globally unique capability id (schema `uid`).
     pub uid: &'static str,
+    /// Header-digest slot (immutable; §5.4).
+    pub registry_slot: u32,
+    /// Governance namespace (schema `namespace`).
+    pub namespace: &'static str,
+    /// Vendor tag (schema `vendor`).
+    pub vendor: &'static str,
+    /// Stability level (schema `stability`).
+    pub stability: &'static str,
     /// Index of the header's `dynamic_*` word carrying the value.
     pub header_word: u32,
     /// Neutral default (the value at which the channel is inert).
     pub default: f32,
+    /// Platform capabilities required beyond the baseline.
+    pub requires_caps: &'static [&'static str],
+    /// Whether the channel's effect changes with the view direction.
+    pub view_dependent: bool,
 }
 
 /// The runtime dynamic channels in header-word order.
@@ -214,26 +226,85 @@ pub const SURFACE_CHANNELS: [ChannelLayout; 4] = [
     ChannelLayout {
         id: "wetness",
         uid: "org.prism.channel.wetness",
+        registry_slot: 19,
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "candidate",
         header_word: 0,
         default: 0.0,
+        requires_caps: &["object_space_cache"],
+        view_dependent: false,
     },
     ChannelLayout {
         id: "snow",
         uid: "org.prism.channel.snow",
+        registry_slot: 20,
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "candidate",
         header_word: 1,
         default: 0.0,
+        requires_caps: &["virtual_texture"],
+        view_dependent: false,
     },
     ChannelLayout {
         id: "damage",
         uid: "org.prism.channel.damage",
+        registry_slot: 21,
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "candidate",
         header_word: 2,
         default: 0.0,
+        requires_caps: &[],
+        view_dependent: false,
     },
     ChannelLayout {
         id: "dissolve",
         uid: "org.prism.channel.dissolve",
+        registry_slot: 22,
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "candidate",
         header_word: 3,
         default: 0.0,
+        requires_caps: &[],
+        view_dependent: false,
+    },
+];
+
+/// One object-space cache auxiliary's generated identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheAuxLayout {
+    /// Human-facing cache-aux id (schema `id`).
+    pub id: &'static str,
+    /// Globally unique capability id (schema `uid`).
+    pub uid: &'static str,
+    /// Header-digest slot (immutable; §5.4).
+    pub registry_slot: u32,
+    /// Governance namespace (schema `namespace`).
+    pub namespace: &'static str,
+    /// Vendor tag (schema `vendor`).
+    pub vendor: &'static str,
+    /// Stability level (schema `stability`).
+    pub stability: &'static str,
+    /// Platform capabilities required beyond the baseline.
+    pub requires_caps: &'static [&'static str],
+    /// Whether the cached quantity changes with the view direction.
+    pub view_dependent: bool,
+}
+
+/// The object-space cache auxiliaries in registry-slot order.
+pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [
+    CacheAuxLayout {
+        id: "surfel",
+        uid: "org.prism.cache_aux.surfel",
+        registry_slot: 26,
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "candidate",
+        requires_caps: &["object_space_cache"],
+        view_dependent: false,
     },
 ];
 

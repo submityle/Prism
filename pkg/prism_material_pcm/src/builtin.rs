@@ -128,11 +128,12 @@ const KHR_LOBES: [(&str, u32, bool); 7] = [
 ///
 /// The extension region is one shared slot space (§5.4), so the kinds must not
 /// interleave: the **lobe sub-range comes first and is dense from
-/// `EXTENSION_SLOT_BASE`** (16, 17 — the schema's `[[lobe]]` table is its
+/// `EXTENSION_SLOT_BASE`** (16..18 — the schema's `[[lobe]]` table is its
 /// allocator), and every other kind allocates *after* the last lobe. That is why
-/// the channels start at 18 rather than 17: `prism_render_material`'s
-/// `tests/pcm_parity.rs` fails the build if any non-lobe slot collides with a
-/// schema lobe slot, so a new lobe can never silently alias a channel.
+/// the channels start at 19: `prism_render_material`'s `tests/pcm_parity.rs`
+/// checks the schema's `registry_slot`s against this catalogue and fails the
+/// build if any non-lobe slot collides with a lobe slot or leaves a gap, so a
+/// new lobe can never silently alias a channel.
 const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 7] = [
     (
         UID_LOBE_FACE,

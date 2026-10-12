@@ -15,7 +15,7 @@ use prism_render_material::capability::{
     lobe_registry, parse_capabilities, SPECIFICATION_NAMESPACE,
 };
 use prism_render_material::{
-    DynamicChannels, Illumination, LobeMask, SURFACE_CHANNELS, SURFACE_LOBES,
+    DynamicChannels, Illumination, LobeMask, SURFACE_CACHE_AUX, SURFACE_CHANNELS, SURFACE_LOBES,
     SURFACE_RESPONSE_MODES,
 };
 
@@ -37,7 +37,11 @@ fn the_committed_catalogue_agrees_with_the_schema_row_for_row() {
         SURFACE_RESPONSE_MODES.len(),
         "response-mode extensions"
     );
-    assert_eq!(count_of(Kind::CacheAux), 1, "object-space cache auxiliaries");
+    assert_eq!(
+        count_of(Kind::CacheAux),
+        SURFACE_CACHE_AUX.len(),
+        "object-space cache auxiliaries"
+    );
     assert_eq!(count_of(Kind::Provider), 2, "bake-time page providers");
     assert_eq!(count_of(Kind::Transfer), 1, "transfer remaps");
     assert_eq!(count_of(Kind::Downgrade), 1, "downgrade policies");
@@ -318,6 +322,34 @@ fn the_schema_channels_match_the_catalogue_and_the_header_words() {
             .manifest_by_uid(channel.uid)
             .unwrap_or_else(|| panic!("catalogue is missing channel {}", channel.uid));
         assert_eq!(row.kind(), Kind::Channel, "{} kind", channel.id);
+        assert_eq!(
+            row.registry_slot(),
+            Some(channel.registry_slot),
+            "{} slot",
+            channel.id
+        );
+        assert_eq!(
+            row.namespace(),
+            Namespace::parse(channel.namespace).expect("schema namespace spelling"),
+            "{} namespace",
+            channel.id
+        );
+        assert_eq!(row.vendor(), channel.vendor, "{} vendor", channel.id);
+        assert_eq!(
+            row.stability(),
+            Stability::parse(channel.stability).expect("schema stability spelling"),
+            "{} stability",
+            channel.id
+        );
+        let requires = parse_capabilities(channel.requires_caps.iter().copied())
+            .unwrap_or_else(|unknown| panic!("{} requires unknown {unknown}", channel.id));
+        assert_eq!(row.requires_caps(), requires, "{} caps", channel.id);
+        assert_eq!(
+            row.view_dependent(),
+            channel.view_dependent,
+            "{} view dependence",
+            channel.id
+        );
         // A channel is inert at its schema default; every declared default is 0,
         // which is what `DynamicChannels::NONE` packs.
         assert_eq!(channel.default, 0.0, "{} default", channel.id);
@@ -332,5 +364,64 @@ fn the_schema_channels_match_the_catalogue_and_the_header_words() {
     assert_eq!(
         DynamicChannels::from_words(DynamicChannels::NONE.to_words()),
         DynamicChannels::NONE
+    );
+}
+
+/// P2-i: the object-space cache auxiliaries are declared by the schema and
+/// mirrored by the PCM catalogue. Unlike channels they hold no per-material
+/// payload, so identity/governance/view-dependence is the whole contract.
+#[test]
+fn the_schema_cache_aux_matches_the_catalogue() {
+    let committed = builtin_registry();
+    let mut slots = Vec::new();
+    for aux in &SURFACE_CACHE_AUX {
+        let row = committed
+            .manifest_by_uid(aux.uid)
+            .unwrap_or_else(|| panic!("catalogue is missing cache aux {}", aux.uid));
+        assert_eq!(row.kind(), Kind::CacheAux, "{} kind", aux.id);
+        assert_eq!(row.registry_slot(), Some(aux.registry_slot), "{} slot", aux.id);
+        assert_eq!(
+            row.namespace(),
+            Namespace::parse(aux.namespace).expect("schema namespace spelling"),
+            "{} namespace",
+            aux.id
+        );
+        assert_eq!(row.vendor(), aux.vendor, "{} vendor", aux.id);
+        assert_eq!(
+            row.stability(),
+            Stability::parse(aux.stability).expect("schema stability spelling"),
+            "{} stability",
+            aux.id
+        );
+        let requires = parse_capabilities(aux.requires_caps.iter().copied())
+            .unwrap_or_else(|unknown| panic!("{} requires unknown {unknown}", aux.id));
+        assert_eq!(row.requires_caps(), requires, "{} caps", aux.id);
+        assert_eq!(
+            row.view_dependent(),
+            aux.view_dependent,
+            "{} view dependence",
+            aux.id
+        );
+        slots.push(aux.registry_slot);
+    }
+    // The schema's header-resident non-lobe rows tile the slot range after the
+    // last extension lobe: channels, then response modes, then cache auxiliaries.
+    let last_lobe_slot = SURFACE_LOBES
+        .iter()
+        .filter(|lobe| lobe.namespace != "KHR")
+        .map(|lobe| lobe.registry_slot)
+        .max()
+        .expect("at least one extension lobe");
+    let mut expected: Vec<u32> = SURFACE_CHANNELS
+        .iter()
+        .map(|channel| channel.registry_slot)
+        .chain(SURFACE_RESPONSE_MODES.iter().map(|mode| mode.registry_slot))
+        .chain(slots)
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(
+        expected,
+        (last_lobe_slot + 1..last_lobe_slot + 1 + expected.len() as u32).collect::<Vec<_>>(),
+        "header-resident non-lobe slots must be dense after the extension lobes"
     );
 }

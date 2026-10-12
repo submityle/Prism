@@ -588,10 +588,22 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     o.push_str("    pub id: &'static str,\n");
     o.push_str("    /// Globally unique capability id (schema `uid`).\n");
     o.push_str("    pub uid: &'static str,\n");
+    o.push_str("    /// Header-digest slot (immutable; §5.4).\n");
+    o.push_str("    pub registry_slot: u32,\n");
+    o.push_str("    /// Governance namespace (schema `namespace`).\n");
+    o.push_str("    pub namespace: &'static str,\n");
+    o.push_str("    /// Vendor tag (schema `vendor`).\n");
+    o.push_str("    pub vendor: &'static str,\n");
+    o.push_str("    /// Stability level (schema `stability`).\n");
+    o.push_str("    pub stability: &'static str,\n");
     o.push_str("    /// Index of the header's `dynamic_*` word carrying the value.\n");
     o.push_str("    pub header_word: u32,\n");
     o.push_str("    /// Neutral default (the value at which the channel is inert).\n");
     o.push_str("    pub default: f32,\n");
+    o.push_str("    /// Platform capabilities required beyond the baseline.\n");
+    o.push_str("    pub requires_caps: &'static [&'static str],\n");
+    o.push_str("    /// Whether the channel's effect changes with the view direction.\n");
+    o.push_str("    pub view_dependent: bool,\n");
     o.push_str("}\n\n");
     let mut channels = schema.channels.clone();
     channels.sort_by_key(|channel| channel.header_word);
@@ -604,9 +616,69 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         o.push_str("    ChannelLayout {\n");
         let _ = writeln!(o, "        id: {:?},", channel.id);
         let _ = writeln!(o, "        uid: {:?},", channel.uid);
+        let _ = writeln!(o, "        registry_slot: {},", channel.registry_slot);
+        let _ = writeln!(o, "        namespace: {:?},", channel.namespace.as_str());
+        let _ = writeln!(o, "        vendor: {:?},", channel.vendor);
+        let _ = writeln!(o, "        stability: {:?},", channel.stability.as_str());
         let _ = writeln!(o, "        header_word: {},", channel.header_word);
         let defaults = channel.default.components();
         let _ = writeln!(o, "        default: {},", float_literal(defaults[0]));
+        let caps: Vec<String> = channel
+            .requires_caps
+            .iter()
+            .map(|capability| format!("{capability:?}"))
+            .collect();
+        let _ = writeln!(o, "        requires_caps: &[{}],", caps.join(", "));
+        let _ = writeln!(o, "        view_dependent: {},", channel.view_dependent);
+        o.push_str("    },\n");
+    }
+    o.push_str("];\n");
+
+    // Object-space cache auxiliary outputs (§14.3): header-resident rows with
+    // no per-material payload, so their generated identity is the whole
+    // declaration.
+    o.push_str("\n/// One object-space cache auxiliary's generated identity.\n");
+    o.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n");
+    o.push_str("pub struct CacheAuxLayout {\n");
+    o.push_str("    /// Human-facing cache-aux id (schema `id`).\n");
+    o.push_str("    pub id: &'static str,\n");
+    o.push_str("    /// Globally unique capability id (schema `uid`).\n");
+    o.push_str("    pub uid: &'static str,\n");
+    o.push_str("    /// Header-digest slot (immutable; §5.4).\n");
+    o.push_str("    pub registry_slot: u32,\n");
+    o.push_str("    /// Governance namespace (schema `namespace`).\n");
+    o.push_str("    pub namespace: &'static str,\n");
+    o.push_str("    /// Vendor tag (schema `vendor`).\n");
+    o.push_str("    pub vendor: &'static str,\n");
+    o.push_str("    /// Stability level (schema `stability`).\n");
+    o.push_str("    pub stability: &'static str,\n");
+    o.push_str("    /// Platform capabilities required beyond the baseline.\n");
+    o.push_str("    pub requires_caps: &'static [&'static str],\n");
+    o.push_str("    /// Whether the cached quantity changes with the view direction.\n");
+    o.push_str("    pub view_dependent: bool,\n");
+    o.push_str("}\n\n");
+    let mut cache_aux = schema.cache_aux.clone();
+    cache_aux.sort_by_key(|aux| aux.registry_slot);
+    let _ = writeln!(
+        o,
+        "/// The object-space cache auxiliaries in registry-slot order.\npub const SURFACE_CACHE_AUX: [CacheAuxLayout; {}] = [",
+        cache_aux.len()
+    );
+    for aux in &cache_aux {
+        o.push_str("    CacheAuxLayout {\n");
+        let _ = writeln!(o, "        id: {:?},", aux.id);
+        let _ = writeln!(o, "        uid: {:?},", aux.uid);
+        let _ = writeln!(o, "        registry_slot: {},", aux.registry_slot);
+        let _ = writeln!(o, "        namespace: {:?},", aux.namespace.as_str());
+        let _ = writeln!(o, "        vendor: {:?},", aux.vendor);
+        let _ = writeln!(o, "        stability: {:?},", aux.stability.as_str());
+        let caps: Vec<String> = aux
+            .requires_caps
+            .iter()
+            .map(|capability| format!("{capability:?}"))
+            .collect();
+        let _ = writeln!(o, "        requires_caps: &[{}],", caps.join(", "));
+        let _ = writeln!(o, "        view_dependent: {},", aux.view_dependent);
         o.push_str("    },\n");
     }
     o.push_str("];\n");
@@ -755,6 +827,10 @@ mod tests {
             "pub const SURFACE_MAX_WORDS: usize = 104;",
             "pub const SURFACE_LOBES: [LobeLayout; 10] = [",
             "pub const SURFACE_LOBE_CLOSURES: [(&str, &str); 3] = [\n    (\"clearcoat\", \"clearcoat\"),\n    (\"sheen\", \"sheen\"),\n    (\"subsurface\", \"subsurface\"),\n];",
+            "    ChannelLayout {\n        id: \"wetness\",\n        uid: \"org.prism.channel.wetness\",\n        registry_slot: 19,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        header_word: 0,\n        default: 0.0,\n        requires_caps: &[\"object_space_cache\"],\n        view_dependent: false,\n    },",
+            "    ChannelLayout {\n        id: \"snow\",\n        uid: \"org.prism.channel.snow\",\n        registry_slot: 20,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        header_word: 1,\n        default: 0.0,\n        requires_caps: &[\"virtual_texture\"],\n        view_dependent: false,\n    },",
+            "pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [",
+            "    CacheAuxLayout {\n        id: \"surfel\",\n        uid: \"org.prism.cache_aux.surfel\",\n        registry_slot: 26,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        requires_caps: &[\"object_space_cache\"],\n        view_dependent: false,\n    },",
             "pub const SURFACE_RESPONSE_MODES: [ResponseModeLayout; 3] = [",
             "    ResponseModeLayout {\n        id: \"stylized\",\n        uid: \"org.prism.response_mode.stylized\",\n        registry_slot: 23,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        illumination: \"stylized\",\n        requires_caps: &[],\n        view_dependent: true,\n    },",
             "    ResponseModeLayout {\n        id: \"unlit\",\n        uid: \"org.prism.response_mode.unlit\",\n        registry_slot: 24,\n        namespace: \"PRISM\",\n        vendor: \"prism\",\n        stability: \"candidate\",\n        illumination: \"unlit\",\n        requires_caps: &[],\n        view_dependent: false,\n    },",

@@ -1097,9 +1097,12 @@ uid = "org.prism.channel.wetness"
 namespace = "PRISM"
 vendor = "prism"
 stability = "candidate"
+registry_slot = 19
 header_word = 0
 default = 0.0
 valid = "0.0..=1.0"
+requires_caps = ["object_space_cache"]
+view_dependent = false
 
 [[channel]]
 id = "snow"
@@ -1107,9 +1110,12 @@ uid = "org.prism.channel.snow"
 namespace = "PRISM"
 vendor = "prism"
 stability = "candidate"
+registry_slot = 20
 header_word = 1
 default = 0.0
 valid = "0.0..=1.0"
+requires_caps = ["virtual_texture"]
+view_dependent = false
 
 [[channel]]
 id = "damage"
@@ -1117,9 +1123,12 @@ uid = "org.prism.channel.damage"
 namespace = "PRISM"
 vendor = "prism"
 stability = "candidate"
+registry_slot = 21
 header_word = 2
 default = 0.0
 valid = "0.0..=1.0"
+requires_caps = []
+view_dependent = false
 
 [[channel]]
 id = "dissolve"
@@ -1127,9 +1136,12 @@ uid = "org.prism.channel.dissolve"
 namespace = "PRISM"
 vendor = "prism"
 stability = "candidate"
+registry_slot = 22
 header_word = 3
 default = 0.0
 valid = "0.0..=1.0"
+requires_caps = []
+view_dependent = false
 
 # Runtime response modes (§5.2, roadmap P2-i/P2-j).
 #
@@ -1171,3 +1183,17 @@ vendor = "prism"
 stability = "experimental"
 requires_caps = []
 view_dependent = true
+
+# Object-space cache auxiliary outputs (§14.3, roadmap P2-i).
+#
+# These are header-resident capabilities that declare what a material may cache
+# in object space; they carry no per-material packed block or dynamic word.
+[[cache_aux]]
+id = "surfel"
+uid = "org.prism.cache_aux.surfel"
+registry_slot = 26
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+requires_caps = ["object_space_cache"]
+view_dependent = false

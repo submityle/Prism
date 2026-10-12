@@ -81,6 +81,9 @@ pub struct SurfaceSchema {
     /// variants; `Lit` is the specification default and is not registered.
     #[serde(default, rename = "response_mode")]
     pub response_modes: Vec<ResponseMode>,
+    /// Object-space cache auxiliary declarations (§14.3).
+    #[serde(default, rename = "cache_aux")]
+    pub cache_aux: Vec<CacheAux>,
 }
 
 /// A runtime dynamic parameter channel (§17.1).
@@ -102,6 +105,12 @@ pub struct Channel {
     pub vendor: String,
     /// Mutable stability level (§5.4).
     pub stability: Stability,
+    /// Header-digest slot (the PCM row's address; §5.2).
+    ///
+    /// This is distinct from `header_word`: the digest slot is the extension
+    /// identity's address, while `header_word` is the index of the per-material
+    /// dynamic scalar inside `GpuMaterialHeader`.
+    pub registry_slot: u32,
     /// Which of the header's `dynamic_*` words carries this channel's value.
     pub header_word: u32,
     /// Neutral default: the value at which the channel is an exact identity.
@@ -109,6 +118,11 @@ pub struct Channel {
     /// Validity predicate over the runtime value.
     #[serde(default)]
     pub valid: Option<String>,
+    /// Platform capabilities required beyond the baseline.
+    #[serde(default)]
+    pub requires_caps: Vec<String>,
+    /// Whether the channel's effect changes with the view direction.
+    pub view_dependent: bool,
 }
 
 /// A runtime response mode declared by the schema (§5.2 / §5.4).
@@ -144,6 +158,33 @@ pub struct ResponseMode {
     #[serde(default)]
     pub requires_caps: Vec<String>,
     /// Whether the response changes with the view direction.
+    pub view_dependent: bool,
+}
+
+/// An object-space cache auxiliary output (§14.3).
+///
+/// A cache-aux row is header-resident and has a registry slot, but carries no
+/// per-material packed block or dynamic word of its own: the runtime reads its
+/// identity from the header digest.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheAux {
+    /// Human-facing cache-aux id.
+    pub id: String,
+    /// Immutable global identity, shared with the PCM registry row.
+    pub uid: String,
+    /// Header-digest slot (immutable; §5.4).
+    pub registry_slot: u32,
+    /// Mutable governance namespace (§5.4).
+    pub namespace: Namespace,
+    /// Mutable vendor tag (§5.4).
+    pub vendor: String,
+    /// Mutable stability level (§5.4).
+    pub stability: Stability,
+    /// Platform capabilities required beyond the baseline.
+    #[serde(default)]
+    pub requires_caps: Vec<String>,
+    /// Whether the cached quantity changes with the view direction.
     pub view_dependent: bool,
 }
 
@@ -640,7 +681,7 @@ impl SurfaceSchema {
         // variant and one header-digest slot. The uid shares the global
         // identity space with lobes and channels, so one kind can never alias
         // another.
-        let mut response_slots = BTreeSet::new();
+        let mut header_slots = BTreeSet::new();
         let mut response_illuminations = BTreeSet::new();
         for mode in &self.response_modes {
             if mode.illumination.is_empty() {
@@ -649,8 +690,8 @@ impl SurfaceSchema {
             if !uids.insert(mode.uid.clone()) {
                 return Err(SchemaError::DuplicateUid(mode.uid.clone()));
             }
-            if !response_slots.insert(mode.registry_slot) {
-                return Err(SchemaError::DuplicateResponseModeSlot(mode.registry_slot));
+            if !header_slots.insert(mode.registry_slot) {
+                return Err(SchemaError::DuplicateHeaderSlot(mode.registry_slot));
             }
             if !response_illuminations.insert(mode.illumination.clone()) {
                 return Err(SchemaError::DuplicateResponseModeIllumination(
@@ -664,6 +705,9 @@ impl SurfaceSchema {
             if !channel_words.insert(channel.header_word) {
                 return Err(SchemaError::DuplicateChannelWord(channel.header_word));
             }
+            if !header_slots.insert(channel.registry_slot) {
+                return Err(SchemaError::DuplicateHeaderSlot(channel.registry_slot));
+            }
             if !uids.insert(channel.uid.clone()) {
                 return Err(SchemaError::DuplicateUid(channel.uid.clone()));
             }
@@ -674,6 +718,18 @@ impl SurfaceSchema {
         for (index, word) in channel_words.iter().enumerate() {
             if *word != index as u32 {
                 return Err(SchemaError::NonContiguousChannelWords);
+            }
+        }
+
+        // Object-space cache auxiliaries: like channels and response modes they
+        // are header-resident, but their payload is a cached render quantity,
+        // not a per-material word. They still share the same slot space.
+        for aux in &self.cache_aux {
+            if !uids.insert(aux.uid.clone()) {
+                return Err(SchemaError::DuplicateUid(aux.uid.clone()));
+            }
+            if !header_slots.insert(aux.registry_slot) {
+                return Err(SchemaError::DuplicateHeaderSlot(aux.registry_slot));
             }
         }
         Ok(())
@@ -757,12 +813,12 @@ pub enum SchemaError {
     DuplicateClosureName(String),
     /// A response mode declared an empty illumination spelling.
     EmptyResponseModeIllumination(String),
-    /// Two response modes claim the same header-digest slot.
-    DuplicateResponseModeSlot(u32),
     /// Two response modes select the same illumination variant.
     DuplicateResponseModeIllumination(String),
     /// Two runtime channels claim the same header word.
     DuplicateChannelWord(u32),
+    /// Two header-resident non-lobe records claim the same registry slot.
+    DuplicateHeaderSlot(u32),
     /// Runtime channel words do not tile `0..channels.len()`.
     NonContiguousChannelWords,
     /// A runtime channel's neutral default is not a single scalar.
@@ -822,9 +878,6 @@ impl fmt::Display for SchemaError {
             Self::EmptyResponseModeIllumination(id) => {
                 write!(f, "response mode {id:?} declares an empty illumination name")
             }
-            Self::DuplicateResponseModeSlot(slot) => {
-                write!(f, "two response modes claim registry slot {slot}")
-            }
             Self::DuplicateResponseModeIllumination(illumination) => {
                 write!(
                     f,
@@ -833,6 +886,9 @@ impl fmt::Display for SchemaError {
             }
             Self::DuplicateChannelWord(word) => {
                 write!(f, "two runtime channels claim header word {word}")
+            }
+            Self::DuplicateHeaderSlot(slot) => {
+                write!(f, "two header-resident records claim registry slot {slot}")
             }
             Self::NonContiguousChannelWords => {
                 write!(f, "runtime channel header words must tile 0..channels.len()")
@@ -909,6 +965,23 @@ mod tests {
         assert_eq!(stylized.stability, Stability::Candidate);
         assert!(stylized.requires_caps.is_empty());
         assert!(stylized.view_dependent);
+
+        let wetness = schema
+            .channels
+            .iter()
+            .find(|channel| channel.id == "wetness")
+            .expect("wetness channel declared");
+        assert_eq!(wetness.registry_slot, 19);
+        assert_eq!(wetness.header_word, 0);
+        assert_eq!(wetness.requires_caps, ["object_space_cache"]);
+        assert!(!wetness.view_dependent);
+
+        assert_eq!(schema.cache_aux.len(), 1);
+        let surfel = &schema.cache_aux[0];
+        assert_eq!(surfel.uid, "org.prism.cache_aux.surfel");
+        assert_eq!(surfel.registry_slot, 26);
+        assert_eq!(surfel.requires_caps, ["object_space_cache"]);
+        assert!(!surfel.view_dependent);
     }
 
     #[test]
@@ -1134,7 +1207,7 @@ view_dependent = false
         );
         assert_eq!(
             SurfaceSchema::parse(&bad).unwrap_err(),
-            SchemaError::DuplicateResponseModeSlot(23)
+            SchemaError::DuplicateHeaderSlot(23)
         );
     }
 
