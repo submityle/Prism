@@ -47,6 +47,37 @@ struct OwnedDepthAttachment {
     stencil: Option<wgpu::Operations<u32>>,
 }
 
+/// Builds a texel copy buffer layout from the RHI's optional block hints.
+fn buffer_layout(
+    offset: u64,
+    bytes_per_row: Option<u32>,
+    rows_per_image: Option<u32>,
+) -> wgpu::TexelCopyBufferLayout {
+    wgpu::TexelCopyBufferLayout {
+        offset,
+        bytes_per_row,
+        rows_per_image,
+    }
+}
+
+/// Builds a texel copy texture region covering the whole `aspect`.
+fn texture_copy_info(
+    texture: &wgpu::Texture,
+    mip_level: u32,
+    origin: [u32; 3],
+) -> wgpu::TexelCopyTextureInfo<'_> {
+    wgpu::TexelCopyTextureInfo {
+        texture,
+        mip_level,
+        origin: wgpu::Origin3d {
+            x: origin[0],
+            y: origin[1],
+            z: origin[2],
+        },
+        aspect: wgpu::TextureAspect::All,
+    }
+}
+
 impl WgpuQueue {
     /// Wraps a ready wgpu queue sharing `inner` with its device.
     #[must_use]
@@ -77,9 +108,109 @@ impl WgpuQueue {
                 rhi::Pass::Compute { label, commands } => {
                     self.encode_compute_pass(&mut encoder, label.as_deref(), commands);
                 }
+                rhi::Pass::Transfer { label, commands } => {
+                    self.encode_transfer_pass(&mut encoder, label.as_deref(), commands);
+                }
             }
         }
         encoder.finish()
+    }
+
+    /// Replays a transfer pass: issues each recorded [`rhi::CopyCommand`] as
+    /// its native wgpu `copy_*` call, in submission order.
+    fn encode_transfer_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        label: Option<&str>,
+        commands: &[rhi::CopyCommand],
+    ) {
+        // wgpu has no first-class "transfer pass"; a debug group bounds the
+        // copies so the label still appears in GPU capture tooling.
+        if let Some(label) = label {
+            encoder.push_debug_group(label);
+        }
+        for command in commands {
+            self.replay_copy_command(encoder, command);
+        }
+        if label.is_some() {
+            encoder.pop_debug_group();
+        }
+    }
+
+    /// Translates one [`rhi::CopyCommand`] into the matching wgpu copy call.
+    fn replay_copy_command(&self, encoder: &mut wgpu::CommandEncoder, command: &rhi::CopyCommand) {
+        match command {
+            rhi::CopyCommand::CopyBufferToBuffer {
+                src,
+                src_offset,
+                dst,
+                dst_offset,
+                size,
+            } => {
+                let src = self.inner.resolve_buffer(*src);
+                let dst = self.inner.resolve_buffer(*dst);
+                encoder.copy_buffer_to_buffer(&src, *src_offset, &dst, *dst_offset, *size);
+            }
+            rhi::CopyCommand::CopyBufferToTexture {
+                src,
+                src_offset,
+                bytes_per_row,
+                rows_per_image,
+                dst,
+                dst_mip_level,
+                dst_origin,
+                size,
+            } => {
+                let src = self.inner.resolve_buffer(*src);
+                let dst = self.inner.resolve_texture(*dst);
+                encoder.copy_buffer_to_texture(
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &src,
+                        layout: buffer_layout(*src_offset, *bytes_per_row, *rows_per_image),
+                    },
+                    texture_copy_info(&dst, *dst_mip_level, *dst_origin),
+                    convert::extent3d(*size),
+                );
+            }
+            rhi::CopyCommand::CopyTextureToBuffer {
+                src,
+                src_mip_level,
+                src_origin,
+                dst,
+                dst_offset,
+                bytes_per_row,
+                rows_per_image,
+                size,
+            } => {
+                let src = self.inner.resolve_texture(*src);
+                let dst = self.inner.resolve_buffer(*dst);
+                encoder.copy_texture_to_buffer(
+                    texture_copy_info(&src, *src_mip_level, *src_origin),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &dst,
+                        layout: buffer_layout(*dst_offset, *bytes_per_row, *rows_per_image),
+                    },
+                    convert::extent3d(*size),
+                );
+            }
+            rhi::CopyCommand::CopyTextureToTexture {
+                src,
+                src_mip_level,
+                src_origin,
+                dst,
+                dst_mip_level,
+                dst_origin,
+                size,
+            } => {
+                let src = self.inner.resolve_texture(*src);
+                let dst = self.inner.resolve_texture(*dst);
+                encoder.copy_texture_to_texture(
+                    texture_copy_info(&src, *src_mip_level, *src_origin),
+                    texture_copy_info(&dst, *dst_mip_level, *dst_origin),
+                    convert::extent3d(*size),
+                );
+            }
+        }
     }
 
     /// Replays a render pass: resolves attachments, opens the pass, and walks
@@ -216,6 +347,9 @@ impl WgpuQueue {
                 let buf = self.inner.resolve_buffer(*buffer);
                 pass.draw_indirect(&buf, *offset);
             }
+            rhi::RenderCommand::SetPushConstants { offset, data, .. } => {
+                pass.set_immediates(*offset, data);
+            }
         }
     }
 
@@ -251,6 +385,9 @@ impl WgpuQueue {
                 rhi::ComputeCommand::DispatchIndirect { buffer, offset } => {
                     let buf = self.inner.resolve_buffer(*buffer);
                     pass.dispatch_workgroups_indirect(&buf, *offset);
+                }
+                rhi::ComputeCommand::SetPushConstants { offset, data } => {
+                    pass.set_immediates(*offset, data);
                 }
             }
         }
@@ -375,5 +512,94 @@ impl WgpuQueue {
         drop(view);
         staging.unmap();
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{WgpuDevice, WgpuInstance};
+    use prism_render_driver::RenderDevice as _;
+
+    /// Brings up a device/queue pair, or `None` when no GPU is available so the
+    /// suite passes without hardware.
+    fn device_or_skip() -> Option<(WgpuDevice, WgpuQueue)> {
+        WgpuInstance::new().request_default_device().ok()
+    }
+
+    #[test]
+    fn gpu_transfer_pass_copies_buffer_to_buffer() {
+        const PAYLOAD: [u8; 16] = [
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+            0x1e, 0x1f,
+        ];
+        let Some((device, queue)) = device_or_skip() else {
+            return;
+        };
+
+        let src = device.create_buffer(&rhi::BufferDescriptor {
+            label: Some("transfer-src".into()),
+            size: PAYLOAD.len() as u64,
+            usage: rhi::BufferUsages::COPY_SRC | rhi::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let dst = device.create_buffer(&rhi::BufferDescriptor {
+            label: Some("transfer-dst".into()),
+            size: PAYLOAD.len() as u64,
+            usage: rhi::BufferUsages::COPY_SRC | rhi::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(src, 0, &PAYLOAD);
+
+        let mut encoder = rhi::CommandEncoder::labeled("transfer-cb");
+        encoder.push_transfer_pass(
+            Some("copy".into()),
+            vec![rhi::CopyCommand::CopyBufferToBuffer {
+                src,
+                src_offset: 0,
+                dst,
+                dst_offset: 0,
+                size: PAYLOAD.len() as u64,
+            }],
+        );
+        queue.submit(&[encoder.finish()]);
+
+        // Copy the RHI destination buffer into a map-read staging buffer so the
+        // bytes the transfer pass wrote can be asserted on the CPU.
+        let staging = queue.inner.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("transfer-readback"),
+            size: PAYLOAD.len() as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let readback_descriptor = wgpu::CommandEncoderDescriptor {
+            label: Some("transfer-readback"),
+        };
+        let mut readback = queue
+            .inner
+            .device
+            .create_command_encoder(&readback_descriptor);
+        let dst_buffer = queue.inner.resolve_buffer(dst);
+        readback.copy_buffer_to_buffer(&dst_buffer, 0, &staging, 0, PAYLOAD.len() as u64);
+        queue.wgpu_queue().submit([readback.finish()]);
+
+        device.poll_wait();
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device.poll_wait();
+
+        let view = staging
+            .slice(..)
+            .get_mapped_range()
+            .expect("readback mapping is available after the device poll");
+        assert_eq!(
+            &view[..],
+            &PAYLOAD[..],
+            "the transfer pass must have copied the source bytes verbatim"
+        );
+        drop(view);
+        staging.unmap();
+
+        device.destroy_buffer(src);
+        device.destroy_buffer(dst);
     }
 }

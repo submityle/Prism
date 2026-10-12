@@ -1,8 +1,12 @@
 //! Render-pass attachments and the recorded draw/dispatch command model.
 
 use crate::color::Color;
-use crate::resource::{BindGroupId, BufferId, ComputePipelineId, RenderPipelineId, TextureViewId};
+use crate::flags::ShaderStages;
+use crate::resource::{
+    BindGroupId, BufferId, ComputePipelineId, RenderPipelineId, TextureId, TextureViewId,
+};
 use crate::state::IndexFormat;
+use crate::texture::Extent3d;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -198,6 +202,21 @@ pub enum RenderCommand {
         /// The byte offset of the arguments.
         offset: u64,
     },
+    /// Upload push constants for the given stages.
+    ///
+    /// The bytes are written verbatim starting at `offset`; the pipeline's
+    /// [`crate::pipeline::PushConstantRange`]s define the legal window and the
+    /// stage visibility. Backends map this to their native immediate/push
+    /// constant mechanism; `stages` is recorded so validation and native
+    /// backends that need an explicit stage mask can honor it.
+    SetPushConstants {
+        /// The stages that may read these constants.
+        stages: ShaderStages,
+        /// The byte offset to write at.
+        offset: u32,
+        /// The constant bytes to upload.
+        data: Vec<u8>,
+    },
 }
 
 /// A single recorded command inside a compute pass.
@@ -230,6 +249,96 @@ pub enum ComputeCommand {
         /// The byte offset of the arguments.
         offset: u64,
     },
+    /// Upload push constants for the compute stage.
+    ///
+    /// The bytes are written verbatim starting at `offset`; the pipeline's
+    /// [`crate::pipeline::PushConstantRange`]s define the legal window.
+    SetPushConstants {
+        /// The byte offset to write at.
+        offset: u32,
+        /// The constant bytes to upload.
+        data: Vec<u8>,
+    },
+}
+
+/// A single recorded copy/transfer command inside a transfer pass.
+///
+/// Transfers move bytes between buffers and textures without running a shader.
+/// They are recorded into a [`Pass::Transfer`], which a backend translates to
+/// its native `copy_*` calls. Buffer regions are expressed in bytes and texture
+/// regions in texels; `bytes_per_row` / `rows_per_image` are optional block
+/// layout hints (`None` means tightly packed / a single row), matching the
+/// RHI's upload layout vocabulary.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CopyCommand {
+    /// Copy `size` bytes from `src` to `dst` at the given byte offsets.
+    CopyBufferToBuffer {
+        /// The buffer to read from.
+        src: BufferId,
+        /// The byte offset into the source buffer.
+        src_offset: u64,
+        /// The buffer to write to.
+        dst: BufferId,
+        /// The byte offset into the destination buffer.
+        dst_offset: u64,
+        /// The number of bytes to copy.
+        size: u64,
+    },
+    /// Copy texels from a buffer into a texture region.
+    CopyBufferToTexture {
+        /// The buffer to read from.
+        src: BufferId,
+        /// The byte offset into the source buffer.
+        src_offset: u64,
+        /// Bytes per row of the source image, or `None` for tightly packed rows.
+        bytes_per_row: Option<u32>,
+        /// Rows per image of the source image, or `None` for a single image.
+        rows_per_image: Option<u32>,
+        /// The texture to write to.
+        dst: TextureId,
+        /// The destination mip level.
+        dst_mip_level: u32,
+        /// The destination texel origin `[x, y, z]`.
+        dst_origin: [u32; 3],
+        /// The texel extent to copy.
+        size: Extent3d,
+    },
+    /// Copy texels from a texture region into a buffer.
+    CopyTextureToBuffer {
+        /// The texture to read from.
+        src: TextureId,
+        /// The source mip level.
+        src_mip_level: u32,
+        /// The source texel origin `[x, y, z]`.
+        src_origin: [u32; 3],
+        /// The buffer to write to.
+        dst: BufferId,
+        /// The byte offset into the destination buffer.
+        dst_offset: u64,
+        /// Bytes per row of the destination image, or `None` for tightly packed rows.
+        bytes_per_row: Option<u32>,
+        /// Rows per image of the destination image, or `None` for a single image.
+        rows_per_image: Option<u32>,
+        /// The texel extent to copy.
+        size: Extent3d,
+    },
+    /// Copy texels from one texture region into another.
+    CopyTextureToTexture {
+        /// The texture to read from.
+        src: TextureId,
+        /// The source mip level.
+        src_mip_level: u32,
+        /// The source texel origin `[x, y, z]`.
+        src_origin: [u32; 3],
+        /// The texture to write to.
+        dst: TextureId,
+        /// The destination mip level.
+        dst_mip_level: u32,
+        /// The destination texel origin `[x, y, z]`.
+        dst_origin: [u32; 3],
+        /// The texel extent to copy.
+        size: Extent3d,
+    },
 }
 
 /// One recorded pass inside a command buffer.
@@ -253,6 +362,13 @@ pub enum Pass {
         label: Option<String>,
         /// The commands recorded in submission order.
         commands: Vec<ComputeCommand>,
+    },
+    /// A transfer pass with recorded copy commands and no shader work.
+    Transfer {
+        /// A debug label surfaced in GPU tooling.
+        label: Option<String>,
+        /// The copy commands recorded in submission order.
+        commands: Vec<CopyCommand>,
     },
 }
 
@@ -319,6 +435,20 @@ impl CommandEncoder {
         self
     }
 
+    /// Records a transfer pass from its copy command list.
+    ///
+    /// Transfer passes carry only [`CopyCommand`]s: no attachments, pipelines,
+    /// or dispatches. A backend translates each command to its native
+    /// buffer/texture copy call in submission order.
+    pub fn push_transfer_pass(
+        &mut self,
+        label: Option<String>,
+        commands: Vec<CopyCommand>,
+    ) -> &mut Self {
+        self.buffer.passes.push(Pass::Transfer { label, commands });
+        self
+    }
+
     /// The number of passes recorded so far.
     #[must_use]
     pub fn pass_count(&self) -> usize {
@@ -329,5 +459,139 @@ impl CommandEncoder {
     #[must_use]
     pub fn finish(self) -> CommandBuffer {
         self.buffer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    #[test]
+    fn transfer_pass_records_copy_commands() {
+        let src = BufferId::from_parts(1, 0);
+        let dst = BufferId::from_parts(2, 0);
+        let texture = TextureId::from_parts(3, 0);
+        let extent = Extent3d::new_2d(4, 4);
+
+        let mut encoder = CommandEncoder::labeled("frame");
+        encoder.push_transfer_pass(
+            Some(String::from("upload")),
+            vec![
+                CopyCommand::CopyBufferToBuffer {
+                    src,
+                    src_offset: 0,
+                    dst,
+                    dst_offset: 256,
+                    size: 1024,
+                },
+                CopyCommand::CopyBufferToTexture {
+                    src,
+                    src_offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                    dst: texture,
+                    dst_mip_level: 0,
+                    dst_origin: [0, 0, 0],
+                    size: extent,
+                },
+                CopyCommand::CopyTextureToBuffer {
+                    src: texture,
+                    src_mip_level: 0,
+                    src_origin: [1, 2, 0],
+                    dst,
+                    dst_offset: 0,
+                    bytes_per_row: None,
+                    rows_per_image: None,
+                    size: extent,
+                },
+                CopyCommand::CopyTextureToTexture {
+                    src: texture,
+                    src_mip_level: 0,
+                    src_origin: [0, 0, 0],
+                    dst: texture,
+                    dst_mip_level: 1,
+                    dst_origin: [0, 0, 0],
+                    size: extent,
+                },
+            ],
+        );
+
+        assert_eq!(encoder.pass_count(), 1);
+        let cb = encoder.finish();
+        match &cb.passes[0] {
+            Pass::Transfer { label, commands } => {
+                assert_eq!(label.as_deref(), Some("upload"));
+                assert_eq!(commands.len(), 4);
+                assert_eq!(
+                    commands[0],
+                    CopyCommand::CopyBufferToBuffer {
+                        src,
+                        src_offset: 0,
+                        dst,
+                        dst_offset: 256,
+                        size: 1024,
+                    }
+                );
+                assert_eq!(
+                    commands[1],
+                    CopyCommand::CopyBufferToTexture {
+                        src,
+                        src_offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(4),
+                        dst: texture,
+                        dst_mip_level: 0,
+                        dst_origin: [0, 0, 0],
+                        size: extent,
+                    }
+                );
+            }
+            other => panic!("expected a transfer pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_constant_commands_round_trip() {
+        let mut encoder = CommandEncoder::new();
+        encoder.push_render_pass(
+            RenderPassDescriptor::default(),
+            vec![RenderCommand::SetPushConstants {
+                stages: ShaderStages::vertex_fragment(),
+                offset: 0,
+                data: vec![1, 2, 3, 4],
+            }],
+        );
+        encoder.push_compute_pass(
+            None,
+            vec![ComputeCommand::SetPushConstants {
+                offset: 16,
+                data: vec![5, 6],
+            }],
+        );
+
+        let cb = encoder.finish();
+        match &cb.passes[0] {
+            Pass::Render { commands, .. } => assert_eq!(
+                commands[0],
+                RenderCommand::SetPushConstants {
+                    stages: ShaderStages::vertex_fragment(),
+                    offset: 0,
+                    data: Vec::from([1u8, 2, 3, 4]),
+                }
+            ),
+            other => panic!("expected a render pass, got {other:?}"),
+        }
+        match &cb.passes[1] {
+            Pass::Compute { commands, .. } => assert_eq!(
+                commands[0],
+                ComputeCommand::SetPushConstants {
+                    offset: 16,
+                    data: Vec::from([5u8, 6]),
+                }
+            ),
+            other => panic!("expected a compute pass, got {other:?}"),
+        }
     }
 }

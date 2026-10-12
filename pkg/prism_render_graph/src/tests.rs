@@ -451,6 +451,7 @@ fn render_pass_carries_its_debug_label() {
         .map(|p| match p {
             Pass::Render { descriptor, .. } => descriptor.label.clone(),
             Pass::Compute { label, .. } => label.clone(),
+            Pass::Transfer { label, .. } => label.clone(),
         })
         .collect();
     assert!(

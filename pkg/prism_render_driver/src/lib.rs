@@ -53,9 +53,9 @@ pub use buffer::BufferDescriptor;
 pub use capabilities::{Backend, DeviceCapabilities, Features, Limits};
 pub use color::Color;
 pub use command::{
-    ColorAttachment, CommandBuffer, CommandEncoder, ComputeCommand, DepthLoadOp, DepthOperations,
-    DepthStencilAttachment, IndexBufferBinding, LoadOp, Pass, RenderCommand, RenderPassDescriptor,
-    ScissorRect, StencilLoadOp, StencilOperations, StoreOp, Viewport,
+    ColorAttachment, CommandBuffer, CommandEncoder, ComputeCommand, CopyCommand, DepthLoadOp,
+    DepthOperations, DepthStencilAttachment, IndexBufferBinding, LoadOp, Pass, RenderCommand,
+    RenderPassDescriptor, ScissorRect, StencilLoadOp, StencilOperations, StoreOp, Viewport,
 };
 pub use compare::CompareFunction;
 pub use device::{ImageDataLayout, RenderDevice, RenderQueue, TextureWrite};
