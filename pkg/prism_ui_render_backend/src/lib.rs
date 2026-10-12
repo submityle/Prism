@@ -111,7 +111,9 @@ pub use nearest::{closest_point_on_polygon, closest_point_on_segment};
 pub use obb::{min_area_obb, Obb};
 pub use point_convex::point_in_convex;
 pub use polygon::{sd_polygon, sd_triangle};
-pub use polyline::{point_at_distance, polyline_length, resample_uniform};
+pub use polyline::{
+    point_at_distance, polyline_length, resample_uniform, tangent_at_distance,
+};
 pub use raster::{rasterize, Framebuffer};
 pub use scene::RetainedScene;
 pub use segment::segment_intersection;

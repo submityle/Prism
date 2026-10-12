@@ -85,6 +85,36 @@ pub fn point_at_distance(points: &[(f32, f32)], distance: f32) -> Option<(f32, f
     Some(last)
 }
 
+/// Unit tangent direction of the open polyline at arc length `distance`.
+///
+/// Returns `None` for an empty input or a polyline with no non-degenerate
+/// segment. `distance` is clamped like [`point_at_distance`]: negatives give the
+/// first segment's direction, values past the total give the last segment's, and
+/// a `NaN` gives the first. At an interior vertex the *incoming* segment's
+/// direction is used, matching the segment that [`point_at_distance`] (which
+/// closes each interval at its end) would interpolate within.
+#[must_use]
+pub fn tangent_at_distance(points: &[(f32, f32)], distance: f32) -> Option<(f32, f32)> {
+    let query = if distance.is_nan() { 0.0 } else { distance };
+    let mut travelled = 0.0_f32;
+    let mut last_dir = None;
+    for w in points.windows(2) {
+        let (dx, dy) = (w[1].0 - w[0].0, w[1].1 - w[0].1);
+        let seg = (dx * dx + dy * dy).sqrt();
+        if seg <= 0.0 {
+            continue;
+        }
+        let dir = (dx / seg, dy / seg);
+        let next = travelled + seg;
+        if query <= next {
+            return Some(dir);
+        }
+        last_dir = Some(dir);
+        travelled = next;
+    }
+    last_dir
+}
+
 /// Upper bound on the interval count [`resample_uniform`] produces in one call.
 ///
 /// A `spacing` so small that it would demand more intervals than this is clamped
@@ -160,8 +190,45 @@ mod tests {
             .collect()
     }
 
+    /// Strictly increasing x (spacing 4), so segment x-ranges are disjoint and a
+    /// point strictly inside one segment has that segment as its unique nearest
+    /// feature.
+    fn monotone_polyline(state: &mut u64, n: usize) -> Vec<(f32, f32)> {
+        (0..n)
+            .map(|i| (i as f32 * 4.0, rand_in(state, -40.0, 40.0)))
+            .collect()
+    }
+
     fn close(a: (f32, f32), b: (f32, f32)) -> bool {
         (a.0 - b.0).abs() < 1e-5 && (a.1 - b.1).abs() < 1e-5
+    }
+
+    /// Normalized direction of the unique nearest non-degenerate segment, or
+    /// `None` when two segments tie (the corner-ambiguity case).
+    fn nearest_segment_dir(p: (f32, f32), pts: &[(f32, f32)]) -> Option<(f32, f32)> {
+        let mut best = f64::INFINITY;
+        let mut second = f64::INFINITY;
+        let mut dir = None;
+        for w in pts.windows(2) {
+            let dx = f64::from(w[1].0) - f64::from(w[0].0);
+            let dy = f64::from(w[1].1) - f64::from(w[0].1);
+            let seg = (dx * dx + dy * dy).sqrt();
+            if seg <= 0.0 {
+                continue;
+            }
+            let d = point_segment_dist(p, w[0], w[1]);
+            if d < best {
+                second = best;
+                best = d;
+                dir = Some((dx / seg, dy / seg));
+            } else if d < second {
+                second = d;
+            }
+        }
+        match dir {
+            Some(v) if second - best > 1e-3 => Some((v.0 as f32, v.1 as f32)),
+            _ => None,
+        }
     }
 
     /// Independent `f64` oracle for the total arc length.
@@ -407,5 +474,66 @@ mod tests {
         assert_eq!(resample_uniform(&pts, -1.0).len(), 2);
         assert_eq!(resample_uniform(&pts, f32::NAN).len(), 2);
         assert_eq!(resample_uniform(&pts, f32::INFINITY).len(), 2);
+    }
+
+    #[test]
+    fn tangent_of_straight_line_and_corners() {
+        let line = [(0.0, 0.0), (10.0, 0.0)];
+        assert!(close(tangent_at_distance(&line, 5.0).unwrap(), (1.0, 0.0)));
+        let bend = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
+        assert!(close(tangent_at_distance(&bend, 5.0).unwrap(), (1.0, 0.0)));
+        assert!(close(tangent_at_distance(&bend, 15.0).unwrap(), (0.0, 1.0)));
+        // Clamping, matching point_at_distance.
+        assert!(close(tangent_at_distance(&bend, -4.0).unwrap(), (1.0, 0.0)));
+        assert!(close(tangent_at_distance(&bend, 99.0).unwrap(), (0.0, 1.0)));
+        // Degenerate inputs: no non-zero segment.
+        assert!(tangent_at_distance(&[], 1.0).is_none());
+        assert!(tangent_at_distance(&[(1.0, 1.0)], 0.0).is_none());
+        assert!(tangent_at_distance(&[(2.0, 2.0), (2.0, 2.0)], 0.5).is_none());
+    }
+
+    #[test]
+    fn tangent_is_unit_length_over_random_polylines() {
+        let mut s = 0x5_C11A_u64;
+        for _ in 0..200 {
+            let n = 2 + (next_rand(&mut s) % 20) as usize;
+            let pts = random_polyline(&mut s, n);
+            let len = polyline_length(&pts);
+            for _ in 0..8 {
+                let d = rand_in(&mut s, -5.0, len + 5.0);
+                let t = tangent_at_distance(&pts, d).unwrap();
+                let mag = (t.0 * t.0 + t.1 * t.1).sqrt();
+                assert!((mag - 1.0).abs() < 1e-4, "|t| = {mag}");
+            }
+        }
+    }
+
+    #[test]
+    fn tangent_matches_containing_segment_on_monotone_polyline() {
+        let mut s = 0x5_C11A_u64;
+        let mut checked = 0;
+        for _ in 0..300 {
+            let n = 2 + (next_rand(&mut s) % 15) as usize;
+            let pts = monotone_polyline(&mut s, n);
+            let len = polyline_length(&pts);
+            for _ in 0..6 {
+                let d = rand_in(&mut s, 0.0, len);
+                let p = point_at_distance(&pts, d).unwrap();
+                // Skip samples sitting on a vertex (corner ambiguity).
+                if pts.iter().any(|v| (v.0 - p.0).abs() < 1e-3) {
+                    continue;
+                }
+                let Some(dir) = nearest_segment_dir(p, &pts) else {
+                    continue;
+                };
+                let t = tangent_at_distance(&pts, d).unwrap();
+                assert!(
+                    (t.0 - dir.0).abs() < 2e-3 && (t.1 - dir.1).abs() < 2e-3,
+                    "t {t:?} vs dir {dir:?} at d={d}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "too few unambiguous samples: {checked}");
     }
 }
