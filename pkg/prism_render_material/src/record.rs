@@ -182,6 +182,107 @@ pub struct GpuMaterialHeader {
     pub extensions_required_low: u32,
     /// PCM extension digest, `required` half, slots `32..64` (§5.3).
     pub extensions_required_high: u32,
+    /// Runtime dynamic channel `wetness` (§17.1), an `f32` bitcast into the word.
+    ///
+    /// The four dynamic words are the **only** part of the header a runtime state
+    /// change touches: the material system rewrites them in place (marking the
+    /// row dirty so the next upload carries them) without republishing the
+    /// record, changing the `generation` the visibility buffer validated, or
+    /// perturbing the compiled permutation. `0.0` is the exact identity for every
+    /// channel, so a material that never drives one is bit-for-bit unchanged.
+    pub dynamic_wetness: u32,
+    /// Runtime dynamic channel `snow` (§17.1), an `f32` bitcast into the word.
+    pub dynamic_snow: u32,
+    /// Runtime dynamic channel `damage` (§17.1), an `f32` bitcast into the word.
+    pub dynamic_damage: u32,
+    /// Runtime dynamic channel `dissolve` (§17.1), an `f32` bitcast into the word.
+    pub dynamic_dissolve: u32,
+}
+
+/// The four runtime dynamic channels of §17.1 — the axes the PCM catalogue
+/// registers as `kind = channel`.
+///
+/// These are *inputs*, not authored über parameters. The bake freezes the static
+/// surface; a runtime state change then rewrites four header words and the
+/// shading path modulates the frozen fields analytically. That is what keeps
+/// "wet car / drying puddle / melting snow / burning away" out of the
+/// permutation space (§8.4) while staying deterministic and branch-free: the
+/// modulation is a closed-form remap of existing fields, not a new lobe.
+///
+/// Channel semantics (all in `[0, 1]`, `0` = exact identity):
+/// * `wetness` — a water film fills the pores and sits on top: darkens the base,
+///   smooths both the diffuse and the specular lobe, raises the specular
+///   interface toward water's index, and mats the fuzz down.
+/// * `snow` — a bright, rough top layer: drives the base toward white, kills
+///   metalness, and coarsens the highlight into a diffuse-dominant response.
+/// * `damage` — chipped/oxidised wear: darkens and desaturates the base, breaks
+///   the metal interface up, and roughens the surface.
+/// * `dissolve` — a coverage cut against a per-pixel mask: shrinks the geometry
+///   opacity and lights an emissive rim along the cut line.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DynamicChannels {
+    /// Water film coverage.
+    pub wetness: f32,
+    /// Snow cover.
+    pub snow: f32,
+    /// Wear/chip coverage.
+    pub damage: f32,
+    /// Dissolve progress against the per-pixel mask.
+    pub dissolve: f32,
+}
+
+impl DynamicChannels {
+    /// Every channel inert. The modulation functions are exact identities here,
+    /// so a material that never drives a channel is bit-for-bit unchanged.
+    pub const NONE: Self = Self {
+        wetness: 0.0,
+        snow: 0.0,
+        damage: 0.0,
+        dissolve: 0.0,
+    };
+
+    /// Sanitise and pack into the header's four dynamic words.
+    ///
+    /// Runtime state is *outside* the schema validators, so the contract is
+    /// enforced here instead: a non-finite channel becomes inert (`0`) and the
+    /// rest are clamped into `[0, 1]`. The shading path can then consume the
+    /// words unguarded — no hot-path `is_nan` per channel.
+    #[must_use]
+    pub fn to_words(self) -> [u32; 4] {
+        [
+            sanitize_channel(self.wetness).to_bits(),
+            sanitize_channel(self.snow).to_bits(),
+            sanitize_channel(self.damage).to_bits(),
+            sanitize_channel(self.dissolve).to_bits(),
+        ]
+    }
+
+    /// Unpack the header's four dynamic words.
+    #[must_use]
+    pub const fn from_words(words: [u32; 4]) -> Self {
+        Self {
+            wetness: f32::from_bits(words[0]),
+            snow: f32::from_bits(words[1]),
+            damage: f32::from_bits(words[2]),
+            dissolve: f32::from_bits(words[3]),
+        }
+    }
+
+    /// Whether every channel is inert.
+    #[must_use]
+    pub fn is_inert(self) -> bool {
+        self == Self::NONE
+    }
+}
+
+/// Clamp one runtime channel into `[0, 1]`, mapping a non-finite value to inert.
+#[must_use]
+fn sanitize_channel(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 impl GpuMaterialHeader {
@@ -516,6 +617,14 @@ impl MaterialRecord {
             extensions_used_high: digest.used_high(),
             extensions_required_low: digest.required_low(),
             extensions_required_high: digest.required_high(),
+            // §17.1 dynamic channels are *runtime* state, not part of the bake,
+            // so a freshly built header starts inert; the registry injects the
+            // live values when it uploads the row (see
+            // `MaterialRegistry::gpu_tables`).
+            dynamic_wetness: 0,
+            dynamic_snow: 0,
+            dynamic_damage: 0,
+            dynamic_dissolve: 0,
         }
     }
 }

@@ -243,7 +243,10 @@ fn gpu_material_rows_match_the_shader_abi() {
     // `extensions_{used,required}_{low,high}`, so the header carries the
     // material's whole registry digest and a load-time negotiator can project it
     // against a target's capabilities without re-deriving the catalogue.
-    assert_eq!(size_of::<GpuMaterialHeader>(), 92);
+    // …plus the four runtime dynamic channel words of §17.1
+    // (`dynamic_wetness/snow/damage/dissolve`), which a runtime state change
+    // rewrites in place.
+    assert_eq!(size_of::<GpuMaterialHeader>(), 108);
     // The v5 OpenPBR field completion (coat/fuzz/base/specular/subsurface/
     // transmission groups, including coat_darkening, scatter_anisotropy and
     // transmission_scatter) sized the fat authoring view, with trailing pad

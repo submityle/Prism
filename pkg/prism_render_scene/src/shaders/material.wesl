@@ -25,6 +25,15 @@ struct PrismMaterialHeader {
     extensions_used_high: u32,
     extensions_required_low: u32,
     extensions_required_high: u32,
+    // Runtime dynamic channels (§17.1), each an `f32` bitcast into the word;
+    // `0.0` is the exact identity. A runtime state change rewrites only
+    // these four words (the row is re-uploaded, the record is not
+    // republished), so wetness/snow/damage/dissolve stay out of the
+    // permutation space.
+    dynamic_wetness: u32,
+    dynamic_snow: u32,
+    dynamic_damage: u32,
+    dynamic_dissolve: u32,
 }
 
 struct PrismSurfaceParameters {

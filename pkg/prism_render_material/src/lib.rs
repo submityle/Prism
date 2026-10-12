@@ -67,7 +67,7 @@ pub use openpbr::{
     openpbr_conformance, project_to_openpbr, DroppedLobe, OpenPbrConformance, OpenPbrProjection,
 };
 pub use record::{
-    fallback_material_header, fallback_material_record, inactive_material_header,
+    fallback_material_header, fallback_material_record, inactive_material_header, DynamicChannels,
     GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain,
     MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, FALLBACK_MATERIAL_HANDLE,
     MATERIAL_ABI_VERSION,

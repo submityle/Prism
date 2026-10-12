@@ -29,6 +29,10 @@ struct MaterialHeader {
     // PCM extension digest (§5.3): used/required, each split low/high.
     extensions_used_low: u32, extensions_used_high: u32,
     extensions_required_low: u32, extensions_required_high: u32,
+    // Runtime dynamic channels (§17.1): wetness / snow / damage / dissolve,
+    // each an `f32` bitcast into the word (`0.0` = exact identity).
+    dynamic_wetness: u32, dynamic_snow: u32,
+    dynamic_damage: u32, dynamic_dissolve: u32,
 }
 struct MaterialTexture { index: u32, generation: u32, semantic: u32, sampler_index: u32 }
 
