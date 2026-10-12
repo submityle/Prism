@@ -15,8 +15,8 @@
 >
 > 本文聚焦「**语义正确 + 数据导向 + 可作者化 + 可调试 + 可网络化**」的工程路线；不复刻 UE/Unity 的对象模型与源码，只借其**状态语义边界、任务生命周期、绑定心智与调试形态**；核心抽象 `no_std + alloc` 友好，ECS/资产/编辑器/调试层需 `std`；**不依赖任何 `bevy_*` crate**。
 
-- 版本: v0.1（设计阶段，未进入编码）
-- 状态: **PLANNED**（本文全部为规划，无 `SHIPPED` 能力；依赖项落地状态见 §2.1）
+- 版本: v0.2（ST0 核心语义内核实现同步版）
+- 状态: **ST0 CORE SHIPPED / ST1–ST8 PLANNED**（仅下方“实现进度”标明的 `prism_state_tree_core` 能力已交付；任务/绑定/ECS/作者工具/网络等仍按路线图推进，依赖项落地状态见 §2.1）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 层级定位: **通用决策运行时，非 AI 专属**。AI 是首要消费者而非所有者。上承 `prism_gameplay_*`（AI/能力/流程/交互）、动画与 UI 流程；内嵌 `prism_ecs` 调度，**不进内核仿真内循环**（ECS 存储遍历、物理 solver、渲染 RG 永远走原生路径）
 - 关键依赖（均为 `pkg/` 下的 prism 原生 crate，落地状态见 §2.1）: `prism_ecs`（observer/reaction/relation/snapshot：迁移事件的即时响应与回滚底座）、`prism_app`（Plugin/Schedule/`fixed`/`determinism`/`state`：相位与固定步）、`prism_reflect`（`path`/`schema`/`dynamic`/`property_bridge`：动态绑定路径、资产 schema、版本迁移）、`prism_tasks`（off-thread 编译、批量并行执行）、`prism_asset`（树资产加载/mtime 监视/热重载）、`prism_diagnostic`（budget/hitch/profiler/replay：调试器与帧预算）、`prism_time`（timeline/recording/确定性时间源）、`prism_ui*` + `prism_editor_framework`（图编辑器宿主与调试 HUD）
@@ -863,6 +863,21 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 每里程碑产出对应 `pkg/<crate>/docs/version/v<X.Y.Z>.md`（仓库 §5.2）并把设计文档状态推进（`PLANNED` → `SHIPPED`，逐段标注）。
 
 §25 各高级功能与里程碑的依赖关系：§25.2/§25.4 → ST4；§25.1/§25.3/§25.5/§25.9 → ST6；§25.6/§25.7/§25.8 → ST7–ST8。
+
+### ST0 实现进度（Implementation Progress）
+
+`pkg/prism_state_tree_core` 已作为根 workspace member 落地，定位为 ST0 的纯语义内核切片（`no_std + alloc`、`#![forbid(unsafe_code)]`、不依赖 ECS/渲染/网络/编辑器）。当前实现拆分为 `model.rs`（定义校验与不可变 `Plan`）、`runtime.rs`（游标运行时）和 `tests.rs`（语义回归），而不是把所有逻辑堆在单文件中。
+
+已交付并由测试覆盖的语义：
+
+- `TreeDef → Plan` 的稠密 ID、父子一致性、单父、连通性、环、初始子状态、Parallel region 和 transition target 校验；
+- Atomic / Compound / Parallel 活跃配置，祖先迁移继承，声明顺序与 priority 的确定性裁决；
+- Event / Eventless 迁移、LCA exit/enter、Internal / External / Self 生命周期差异；
+- Shallow / Deep history、定容 FIFO event queue、微步预算、纯 guard 和生命周期/迁移日志。
+
+当前证据：`cargo test -p prism_state_tree_core --offline` 为 **10 tests + 0 doctest 全绿**；`cargo clippy -p prism_state_tree_core --all-targets --offline -- -D warnings` 通过；`cargo check -p prism_state_tree_core --no-default-features --offline` 通过。
+
+诚实边界：这不是完整 StateTree 产品的假实现，也不宣称 ST0–ST8 全部完成。`Task` / `Evaluator` / Schema 与 Context / typed binding / instance frame / snapshot / ECS 装配 / batch runtime / 热重载 / 调试器 / 网络复制仍未实现；对应路线图保持 `PLANNED`，后续必须以独立模块、测试和版本文档推进。
 
 ---
 

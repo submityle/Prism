@@ -1,0 +1,12 @@
+[package]
+name = "prism_state_tree_core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism's deterministic no_std StateTree ST0 semantic core"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = []
+std = []
