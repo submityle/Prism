@@ -541,7 +541,11 @@ fn random_sweep_matches_oracle() {
     let mut queries = Vec::with_capacity(512);
     let mut op_counts = [0u32; 8];
     while queries.len() < 512 {
-        let op = lcg.next_u32() % 8;
+        // Use the LCG's *high* bits: its low bits have a short period (the low
+        // 3 bits cycle with period 8) and each iteration advances the state 16
+        // times, so `next_u32() % 8` is constant across the whole sweep and the
+        // coverage assertion below can never hold. The high bits vary.
+        let op = lcg.next_u32() >> 29;
         // Unit axes keep the real part a unit quaternion; angles are bounded
         // well away from 0 and pi so the acos domain and the powf
         // pure-translation knee are never reached.
