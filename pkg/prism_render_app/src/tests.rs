@@ -1130,6 +1130,92 @@ fn async_pipeline_cache_bounds_the_in_flight_backlog() {
     assert_eq!(compiler.calls(), 5);
 }
 
+/// Archetype/CI warmup queues hot keys through the same worker path and leaves
+/// them ready for the first real lookup.
+#[test]
+fn pipeline_prewarm_queues_hot_variants() {
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+    let descriptor = RenderPipelineDescriptor {
+        label: Some("prewarm-test".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: None,
+    };
+    let layout = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x3],
+    );
+    let layout = core::slice::from_ref(&layout);
+    let compiler = GateCompiler::new(RenderPipelineId::from_parts(404, 1));
+    let mut cache = PipelineCache::with_compiler(compiler.clone());
+
+    let mut requests = Vec::new();
+    let mut keys = Vec::new();
+    for bit in 0..3 {
+        let specialization = SpecializationId::new(Illumination::Lit, 1 << bit, 0);
+        let variant = MeshPipelineKey {
+            class: specialization.bin_class(),
+            color_format: Some(TextureFormat::Rgba8Unorm),
+            depth_format: None,
+            sample_count: 1,
+            topology: PrimitiveTopology::TriangleList,
+            shader_id: specialization.0,
+        };
+        let fallback = full_lobe_fallback(variant).expect("fallback variant");
+        let key = variant.with_layout(layout);
+        keys.push(key);
+        requests.push((
+            key,
+            descriptor.clone(),
+            fallback.with_layout(layout),
+            descriptor.clone(),
+        ));
+    }
+    cache.prewarm(&device, requests);
+    assert_eq!(cache.pending_len(), 3);
+    assert_eq!(cache.waiting_len(), 0);
+
+    compiler.release();
+    for _ in 0..20_000 {
+        cache.pump(&device);
+        if cache.pending_len() == 0 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    assert_eq!(cache.pending_len(), 0);
+    assert_eq!(compiler.calls(), 3);
+    for key in keys {
+        assert_eq!(
+            cache.resolve_or_request(
+                &device,
+                key,
+                descriptor.clone(),
+                key,
+                descriptor.clone(),
+            ),
+            PipelineResolution::Ready(compiler.result)
+        );
+    }
+}
+
 /// The mesh specializer wires the same fallback/switch behavior around the
 /// provider's descriptors.
 #[test]

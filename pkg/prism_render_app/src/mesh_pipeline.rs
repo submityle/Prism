@@ -232,6 +232,40 @@ impl MeshPipelineSpecializer {
         self.specialize_with(device, variant, layout, |variant| provider.descriptor(variant))
     }
 
+    /// Queues a batch of hot mesh specializations for background compilation.
+    ///
+    /// Archetype/CI warmup supplies the variants and their layouts; `build`
+    /// supplies the provider descriptors. Invalid compact classes stay on the
+    /// synchronous path because they have no legal full-lobe fallback.
+    pub fn prewarm<D, I, F>(
+        &mut self,
+        device: &D,
+        requests: I,
+        build: F,
+    ) where
+        D: RenderDevice,
+        I: IntoIterator<Item = (MeshPipelineKey, Vec<VertexBufferLayout>)>,
+        F: Fn(&MeshPipelineKey) -> RenderPipelineDescriptor,
+    {
+        let mut warm = Vec::new();
+        for (variant, layout) in requests {
+            let Some(fallback_variant) = full_lobe_fallback(variant) else {
+                let descriptor = with_mesh_layout(build(&variant), &layout);
+                let _ = self
+                    .cache
+                    .get_or_create(device, variant.with_layout(&layout), &descriptor);
+                continue;
+            };
+            warm.push((
+                variant.with_layout(&layout),
+                with_mesh_layout(build(&variant), &layout),
+                fallback_variant.with_layout(&layout),
+                with_mesh_layout(build(&fallback_variant), &layout),
+            ));
+        }
+        self.cache.prewarm(device, warm);
+    }
+
     /// Drops one reference to `(variant, layout)`, destroying the pipeline at
     /// zero. Returns whether it was evicted.
     pub fn release<D: RenderDevice>(

@@ -424,6 +424,36 @@ impl PipelineCache {
         PipelineResolution::Ready(id)
     }
 
+    /// Queues a batch of cold specializations without a foreground lookup.
+    ///
+    /// This is the engine-side seam for archetype/CI warmup: the caller owns
+    /// the list of hot `(key, descriptor, fallback)` tuples, and the cache
+    /// compiles them through the same bounded worker path as an on-demand
+    /// request. The fallback is prepared eagerly so the first visible use is
+    /// already correct even if the exact PSO is still compiling.
+    pub fn prewarm<D: RenderDevice>(
+        &mut self,
+        device: &D,
+        requests: impl IntoIterator<
+            Item = (
+                PipelineKey,
+                RenderPipelineDescriptor,
+                PipelineKey,
+                RenderPipelineDescriptor,
+            ),
+        >,
+    ) {
+        for (key, descriptor, fallback_key, fallback_descriptor) in requests {
+            let _ = self.resolve_or_request(
+                device,
+                key,
+                descriptor,
+                fallback_key,
+                fallback_descriptor,
+            );
+        }
+    }
+
     /// Drains completed background compiles.
     ///
     /// A result whose request was canceled is destroyed immediately; a result
