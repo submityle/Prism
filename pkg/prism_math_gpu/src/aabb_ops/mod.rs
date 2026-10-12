@@ -335,3 +335,23 @@ fn buffer_layout(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
         count: None,
     }
 }
+
+/// Device-free gate: every composed kernel (fragment + wrapper) must be a valid
+/// WGSL module on the pinned `naga`, so a wrapper bug fails CI without a GPU.
+#[cfg(test)]
+mod parse_gate {
+    #[test]
+    fn composed_kernels_parse() {
+        for (label, wrapper) in [
+            ("center", super::WRAP_CENTER),
+            ("closest", super::WRAP_CLOSEST),
+            ("dist2", super::WRAP_DIST2),
+            ("merge", super::WRAP_MERGE),
+        ] {
+            let src = alloc::format!("{}\n{}", super::WGSL_AABB_OPS, wrapper);
+            if let Err(err) = wgpu::naga::front::wgsl::parse_str(&src) {
+                panic!("aabb_ops `{label}` failed to parse: {err}\n--- source ---\n{src}");
+            }
+        }
+    }
+}
