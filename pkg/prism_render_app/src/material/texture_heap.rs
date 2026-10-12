@@ -268,6 +268,17 @@ impl TextureSlotHeap {
         true
     }
 
+    /// The image resident at `slot`, if any.
+    ///
+    /// The inverse of [`slot_of`](Self::slot_of), for consumers that walk slots
+    /// (the bindless upload path places a view per occupied slot).
+    #[must_use]
+    pub fn image_at(&self, slot: u32) -> Option<AssetId<Image>> {
+        self.entries
+            .iter()
+            .find_map(|(image, entry)| (entry.slot == slot).then_some(*image))
+    }
+
     /// The resident slot for `image`, without changing its reference count.
     #[must_use]
     pub fn slot_of(&self, image: AssetId<Image>) -> Option<BindlessSlot> {

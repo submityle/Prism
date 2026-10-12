@@ -14,6 +14,7 @@
 //! contains, how a surface packs) stays in `prism_render_material` — this layer
 //! only places and uploads it.
 
+mod binding;
 mod buffers;
 mod parameter_heap;
 mod texture_heap;
@@ -24,6 +25,7 @@ mod stage;
 #[cfg(test)]
 mod tests;
 
+pub use binding::{FallbackTextures, MaterialTextureSlots};
 pub use buffers::{MaterialParameterBuffers, MaterialSyncReport};
 #[cfg(test)]
 pub(crate) use buffers::{header_row_bytes, texture_row_bytes};

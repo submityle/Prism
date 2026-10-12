@@ -242,6 +242,100 @@ fn a_material_with_a_different_illumination_still_lands() {
     );
 }
 
+
+/// The bindless arrays are *dense* and slot-addressed: a resident image's view
+/// sits at its slot, a reserved slot holds its own fallback texture, and a freed
+/// slot goes back to the fallback rather than keeping a stale view.
+#[test]
+fn the_bindless_arrays_place_one_view_and_sampler_per_slot() {
+    use crate::material::texture_heap::{FIRST_DYNAMIC_SLOT, WHITE_SLOT};
+    use crate::material::{FallbackTextures, MaterialTextureSlots, RenderMaterials, TextureRequest};
+    use crate::render_asset::{RenderAsset, RenderAssets};
+    use prism_asset::{AssetId, AssetIndex};
+    use prism_image::Image;
+
+    let (device, queue) = null_device();
+    let fallbacks = FallbackTextures::new(&device, &queue);
+    let image_id = |tag: u32| AssetId::<Image>::new(AssetIndex::from_parts(tag, 1));
+
+    // Two prepared images, as the asset pipeline would have produced them.
+    let mut images = RenderAssets::<crate::GpuImage>::new();
+    for tag in [10_u32, 20] {
+        let source = Image::new(
+            prism_render_driver::Extent3d::new_2d(2, 2),
+            prism_render_driver::TextureFormat::Rgba8Unorm,
+            vec![tag as u8; 16],
+        )
+        .expect("valid");
+        images.insert(
+            image_id(tag),
+            crate::GpuImage::prepare(&source, image_id(tag), &device, &queue, None)
+                .expect("prepares"),
+        );
+    }
+
+    let mut materials = RenderMaterials::new(8);
+    materials.resolve_textures(
+        1,
+        [
+            (0, TextureRequest::Image(image_id(10))),
+            (1, TextureRequest::Fallback(crate::TextureFallback::FlatNormal)),
+            (2, TextureRequest::Image(image_id(20))),
+        ],
+    );
+    // A small capacity so the arrays are cheap to check; re-clamping is allowed
+    // here because the heap holds references but the *capacity* clamp is only
+    // forbidden while images are resident — release first, then clamp.
+    materials.release_textures(1);
+    materials.set_texture_capacity(FIRST_DYNAMIC_SLOT + 4);
+    materials.resolve_textures(
+        1,
+        [
+            (0, TextureRequest::Image(image_id(10))),
+            (1, TextureRequest::Fallback(crate::TextureFallback::FlatNormal)),
+            (2, TextureRequest::Image(image_id(20))),
+        ],
+    );
+
+    let slots = MaterialTextureSlots::build(&device, &images, &fallbacks, materials.textures());
+    assert_eq!(slots.len(), materials.textures().capacity() as usize);
+    assert_eq!(
+        slots.len(),
+        slots.samplers().len(),
+        "every slot gets both a view and a sampler"
+    );
+
+    // Reserved slots hold their own fallback textures.
+    assert_eq!(slots.views()[WHITE_SLOT as usize], fallbacks.white.view);
+    assert_eq!(
+        slots.views()[crate::material::texture_heap::FLAT_NORMAL_SLOT as usize],
+        fallbacks.flat_normal.view,
+        "the flat normal is a *different* texture from white"
+    );
+    assert_eq!(
+        slots.views()[crate::material::texture_heap::BLACK_SLOT as usize],
+        fallbacks.black.view
+    );
+
+    // Resident images sit at their slots, with their own samplers.
+    let first = materials.texture_slot(image_id(10)).expect("resident");
+    let second = materials.texture_slot(image_id(20)).expect("resident");
+    assert_eq!(slots.views()[first.index as usize], images.get(image_id(10)).expect("prepared").view);
+    assert_eq!(
+        slots.samplers()[first.index as usize],
+        images.get(image_id(10)).expect("prepared").sampler
+    );
+    assert_eq!(slots.views()[second.index as usize], images.get(image_id(20)).expect("prepared").view);
+
+    // A freed slot falls back rather than keeping the stale view.
+    materials.release_textures(1);
+    let slots = MaterialTextureSlots::build(&device, &images, &fallbacks, materials.textures());
+    assert_eq!(
+        slots.views()[first.index as usize], fallbacks.white.view,
+        "the freed slot is a fallback again"
+    );
+}
+
 /// Resolving a material's texture requests assigns bindless slots: real images
 /// get dynamic slots (reference counted, so two materials share one), and a
 /// semantic that has no map names its reserved fallback.
