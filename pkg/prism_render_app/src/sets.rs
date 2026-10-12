@@ -83,6 +83,15 @@ impl RenderPhase {
         Self::Custom,
     ];
 
+    /// The number of phases, i.e. the length of [`RenderPhase::ORDER`].
+    pub const COUNT: usize = 4;
+
+    /// This phase's index in [`RenderPhase::ORDER`], for array-indexed queues.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.discriminant() as usize
+    }
+
     const fn discriminant(self) -> u64 {
         match self {
             Self::Opaque => 0,

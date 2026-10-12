@@ -24,10 +24,12 @@ use crate::target::RenderTarget;
 use crate::sets::{RenderPhase, RenderSystems};
 use crate::views::RenderViews;
 use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
+use crate::queue::{PhaseItem, RenderQueues};
 use crate::texture_cache::{TextureCache, TextureKey};
 use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
 use prism_render_architecture::view_family::ViewKind;
+use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_driver::{
     DeviceDescriptor, Instance, MultisampleState, PrimitiveState, RenderDevice,
     RenderPipelineDescriptor, RequestAdapterOptions, PrimitiveTopology, ShaderModuleDescriptor,
@@ -197,6 +199,69 @@ fn texture_cache_dedups_and_evicts_by_key() {
 
     cache.clear(&device);
     assert!(cache.is_empty(), "clear destroys every cached texture");
+}
+
+/// The mesh queue separates phases and sorts each one deterministically.
+#[test]
+fn render_queues_are_phased_and_sort_deterministically() {
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+    let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some("queue-test".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: None,
+    });
+
+    let geometry = GenerationalHandle::new(2, 1);
+    let material = GenerationalHandle::new(3, 1);
+    let scene = GenerationalHandle::new(4, 1);
+    let item = |order: u64| PhaseItem {
+        pipeline,
+        geometry,
+        material,
+        scene,
+        order,
+    };
+
+    let mut queues = RenderQueues::new();
+    // Pushed out of order on purpose: `sort` must impose the order.
+    queues.push(RenderPhase::Opaque, item(5));
+    queues.push(RenderPhase::Opaque, item(1));
+    queues.push(RenderPhase::Transparent, item(0));
+
+    assert_eq!(queues.phase(RenderPhase::Opaque).len(), 2);
+    assert!(
+        queues.phase(RenderPhase::Stylized).is_empty(),
+        "phases are isolated"
+    );
+    assert_eq!(queues.len(), 3);
+
+    queues.sort();
+    let orders: Vec<u64> = queues
+        .phase(RenderPhase::Opaque)
+        .iter()
+        .map(|item| item.order)
+        .collect();
+    assert_eq!(orders, [1, 5], "the phase sorts by its order key");
+
+    queues.clear();
+    assert!(queues.is_empty(), "clear drops every queued item");
 }
 /// The render world materializes the frame's view family from the extracted
 /// viewport, and a minimized frame disables (rather than removes) the view.
