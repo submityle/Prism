@@ -112,6 +112,9 @@ pub fn encode_layout(layout: &DockLayout) -> Result<Vec<u8>, PersistError> {
             out.autohide(&snapshot.autohide)?;
         }
     }
+    if out.0.len() > DecodeLimits::default().max_bytes {
+        return Err(PersistError::ResourceLimit("bytes"));
+    }
     Ok(out.0)
 }
 
@@ -905,6 +908,19 @@ mod tests {
         assert_eq!(
             decode_layout(&bytes, opts(None, None)),
             Err(PersistError::TrailingBytes)
+        );
+    }
+
+    #[test]
+    fn encoder_rejects_snapshots_that_default_decoder_would_reject() {
+        let oversized = "x".repeat(DecodeLimits::default().max_bytes);
+        let layout = DockLayout {
+            root: DockNode::panel(oversized),
+            ..DockLayout::default()
+        };
+        assert_eq!(
+            encode_layout(&layout),
+            Err(PersistError::ResourceLimit("bytes"))
         );
     }
 }

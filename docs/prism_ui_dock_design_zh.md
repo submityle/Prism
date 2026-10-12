@@ -353,7 +353,7 @@ let layout = DockLayout::load(&bytes, &registry)?; // 未知面板丢弃,比例�
 - ✅ **M4 persistence core 已交付**:`pkg/prism_ui_dock::encode_layout`/`decode_layout` 提供带 magic/version 的确定性二进制布局编码、checked 长度/深度/节点预算、UTF-8 与枚举校验、解码后模型不变量校验，以及带已知 panel/document 注册表的未知 ID 过滤和安全分支折叠；主树、浮窗、autohide、maximize restore 均可 round-trip。最大化状态要求当前可见面严格收敛为快照中的唯一面板，并由 model/persistence validation 在进入 renderer 前拒绝非法恢复态。该切片不提供文件 IO、schema 迁移链或自动保存。
 - ✅ **Workspace / Perspective 纯数据管理已交付**:`WorkspaceManager`、`Workspace` 与 `Perspective` 按确定性插入顺序管理命名布局；拒绝空白/重复名称，并以 `DockLayout` 深拷贝隔离保存与切换边界。该切片只负责内存中的选择与快照，不提供文件 IO、自动保存、factory 或 renderer。
 - ✅ **Workspace 持久化 codec 已交付**:`encode_workspace`/`decode_workspace` 提供带 magic/version 的稳定 Workspace/Perspective 快照，逐个复用布局 codec，执行 active 引用、资源上限、UTF-8、枚举、截断和尾随字节校验；`decode_workspace_with_registry` 将 `PanelRegistry` 作为嵌套布局的 panel allow-list。该切片只处理内存字节。
-- ✅ **Workspace 文件存储边界已交付**（`std`）:`WorkspaceFileStore` 通过 sibling temporary file、`sync_all` 与 rename 提交，覆盖 primary 前保留 `last-good`；加载按 primary → last-good → caller default 回退并保留诊断。它不是 autosave middleware，不提供 schema 迁移或 renderer 装配。
+- ✅ **Workspace 文件存储边界已交付**（`std`）:`WorkspaceFileStore` 通过 sibling lock 串行化保存、唯一临时文件、`sync_all` 与 rename 提交，并在 Unix 上同步父目录；覆盖 primary 前先验证旧快照，再以独立临时文件更新 `last-good`，失败路径清理临时文件。加载按 primary → last-good → caller default 回退并保留诊断，并提供 Registry-aware load 防止未知 panel 进入上层。它不是 autosave middleware，不提供 schema 迁移或 renderer 装配；断电语义仍取决于底层文件系统。
 - ✅ **Registry 基础契约已交付**:`PanelDescriptor`/`PanelRegistry` 提供 no_std + alloc 的纯数据贡献点、确定性注册顺序、空白/重复 ID 拒绝、查询和迭代；不包含 Element/factory/renderer。
 - ⬜ **M3–M5 其余能力仍 PLANNED**:`store`、`a11y` 以及动画/多显示器/撤销集成。完整 UI 装配和 renderer 集成仍属于后续工作，不因 M1 计划数据或 persistence core 已存在而视为完成。
 - ⬜ **依赖未落地项**:撤销集成需编辑器命令内核;多显示器校正需平台/`prism_window` 层;动效档位依赖性能分级。

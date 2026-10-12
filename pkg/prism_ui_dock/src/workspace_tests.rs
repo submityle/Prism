@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use crate::{DockLayout, DockNode, NameKind, WorkspaceError, WorkspaceManager};
 

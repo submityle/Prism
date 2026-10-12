@@ -221,7 +221,7 @@ impl<'a> IntoIterator for &'a PanelRegistry {
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec::Vec;
+    use alloc::{string::String, vec::Vec};
 
     use super::{DefaultSlot, Instancing, PanelDescriptor, PanelRegistry, PanelRegistryError};
 

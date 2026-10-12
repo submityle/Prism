@@ -244,7 +244,7 @@ impl State {
 mod tests {
     use super::*;
     use crate::{AutoHideBars, AutoHideEntry, Axis, DockNode, Side, SplitChild};
-    use alloc::vec;
+    use alloc::{boxed::Box, vec};
 
     #[test]
     fn document_and_autohide_entries_obey_their_limits() {

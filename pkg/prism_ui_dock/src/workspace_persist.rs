@@ -163,6 +163,9 @@ pub fn encode_workspace(manager: &WorkspaceManager) -> Result<Vec<u8>, Workspace
             writer.bytes(&bytes);
         }
     }
+    if writer.0.len() > WorkspaceDecodeLimits::default().max_bytes {
+        return Err(WorkspacePersistError::ResourceLimit("bytes"));
+    }
     Ok(writer.0)
 }
 

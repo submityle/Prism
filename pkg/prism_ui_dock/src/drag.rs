@@ -326,6 +326,8 @@ pub fn transition(state: &DragState, event: DragEvent) -> Result<DragState, Drag
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::String;
+
     use super::*;
 
     fn target() -> Target {
