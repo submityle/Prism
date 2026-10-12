@@ -423,27 +423,73 @@ pub fn evaluate_principled_direct(
     let coat = surface.clearcoat.clamp(0.0, 1.0);
     let coat_roughness = surface.clearcoat_roughness.clamp(MIN_ROUGHNESS, 1.0);
     let coat_alpha = coat_roughness * coat_roughness;
-    let coat_f = fresnel_schlick([0.04; 3], v_dot_h);
+    // `OpenPBR` `coat_ior` semantics: the *coat IOR* drives the coat interface
+    // Fresnel (the highlight used to be pinned at the legacy `F0 = 0.04`).
+    let coat_f0 = {
+        let n = surface.coat_ior.max(MIN_DIELECTRIC_IOR);
+        let r = (n - 1.0) / (n + 1.0);
+        r * r
+    };
+    let coat_f = fresnel_schlick([coat_f0; 3], v_dot_h);
     let coat_specular = mul_scalar(
         coat_f,
         coat * distribution_ggx(n_dot_h, coat_alpha)
             * visibility_smith_ggx_correlated(n_dot_v, n_dot_l, coat_alpha)
             * n_dot_l,
     );
-    // Two-pass macro-angle coat transmission (Weidlich-Wilkie 2007 §4 / Burley
-    // 2015 clearcoat): radiance crossing the dielectric coat is Fresnel-filtered
-    // on BOTH the entry (view) and exit (light) paths, so the base is attenuated
-    // by `(1 - coat*Fc(n·v))·(1 - coat*Fc(n·l))` at the macro normal angles,
-    // not the former single microfacet-half-vector pass `(1 - coat*Fc(v·h))`
-    // which under-darkened the base at grazing light. The coat SPECULAR highlight
-    // stays at `v·h` (correct for the coat microfacet reflection). `Fc` reuses the
-    // byte-identical `fresnel_schlick` already driving the base `f`, so the WESL
-    // twin matches to the bit. `clearcoat == 0` ⇒ `(1-0)·(1-0) = 1`, an exact
-    // identity, so every existing golden is preserved.
-    let coat_f_view = fresnel_schlick([0.04; 3], n_dot_v);
-    let coat_f_light = fresnel_schlick([0.04; 3], n_dot_l);
-    let coat_attenuation = (1.0 - coat * coat_f_view[0].clamp(0.0, 1.0))
-        * (1.0 - coat * coat_f_light[0].clamp(0.0, 1.0));
+    // Coat energy closure. The coat is a two-interface dielectric slab, so the
+    // base keeps the closed-form slab transmittance
+    // `t_slab = (1−f_v)(1−f_l)/(1−f_v·f_l)` and the coat must carry the
+    // complementary reflectance `r_slab = f_l + (1−f_l)²f_v/(1−f_v·f_l)` (they sum
+    // to exactly 1 for a non-absorbing coat). The coat's own highlight is a
+    // *single-scatter* GGX microfacet lobe, whose albedo is not `r_slab`; dividing
+    // the lobe by its baked albedo (the dielectric-lobe table, scaled by the
+    // authored `F0/0.04`, exact at `F0 = 0` and at the reference) and multiplying
+    // by `r_slab` gives it exactly `r_slab` of energy while leaving its *shape* —
+    // hence the varnish glint — untouched. Without this a white-coated dielectric
+    // base measured 0.72 in the white furnace at grazing (the coat withheld the
+    // base's energy but never reflected it back).
+    let coat_f_v = fresnel_schlick([coat_f0; 3], n_dot_v)[0].clamp(0.0, 1.0);
+    let coat_f_l = fresnel_schlick([coat_f0; 3], n_dot_l)[0].clamp(0.0, 1.0);
+    let coat_denom = (1.0 - coat_f_v * coat_f_l).max(1.0e-4);
+    let coat_t_slab = (1.0 - coat_f_v) * (1.0 - coat_f_l) / coat_denom;
+    let coat_r_slab = coat_f_l + (1.0 - coat_f_l) * (1.0 - coat_f_l) * coat_f_v / coat_denom;
+    // Baked coat-lobe albedo: the standard Schlick split-sum estimate — the
+    // hemispherical average Fresnel `F_avg = F0 + (1−F0)/21` times the baked
+    // *view-dependent* white-GGX albedo `E(µ, r)`. (The lobe uses Schlick, not
+    // the exact dielectric Fresnel the reference table was baked with, so the
+    // `F_avg·E_white` form is the consistent one; estimating from the dielectric
+    // table instead left a 4.5% shortfall at mid angles.)
+    // The dominant Fresnel of the lobe is the one at the mirrored half-vector,
+    // which for a given view is well approximated by `F(n·v)`; the lobe's shape
+    // integral is the baked white-GGX albedo. (`F_avg = F0 + (1−F0)/21` is the
+    // *hemispherical* average and under-states the grazing albedo by ~2.3×, which
+    // over-amplified the lobe to 1.43 in the furnace.)
+    // Exact Schlick split-sum: a Schlick-Fresnel lobe's albedo is
+    // `F0·E_white + (1−F0)·B`, with `B` the baked bias-weighted albedo. (The two
+    // cheap estimates measured 2.3× low and 6% high in the furnace.)
+    let coat_lobe_albedo = (coat_f0
+        * crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_v, coat_roughness)
+        + (1.0 - coat_f0)
+            * crate::schlick_bias_table::schlick_bias_lookup(n_dot_v, coat_roughness))
+    .max(1.0e-3);
+    // ***Exact*** closure. Multiplying the lobe by `r_slab / A` does *not* give
+    // it albedo `r_slab`: the factor varies with the light direction while the
+    // lobe weights it, so the product integrates to something else (measured
+    // ±8% view-dependent error). Instead add a *zero-albedo* redistribution:
+    // `r_slab·(n·l/π) − A·(n·l/π)` integrates to `r_slab − A`, so the sum
+    // `lobe + (r_slab − A)·(n·l/π)` has directional albedo exactly `r_slab` for
+    // *any* consistent estimate `A`. The estimate therefore only shapes the
+    // correction, never the energy budget.
+    let coat_specular = add(
+        coat_specular,
+        mul_scalar(
+            [1.0; 3],
+            coat * (coat_r_slab - coat_lobe_albedo) * n_dot_l * (1.0 / PI),
+        ),
+    );
+    // `clearcoat == 0` ⇒ `1 − 0 + 0·t = 1`, an exact identity.
+    let coat_attenuation = 1.0 + coat * (coat_t_slab - 1.0);
 
     // --- `OpenPBR` transmission lobe ---
     // Light refracted through a dielectric slab: the interface Fresnel (driven
@@ -1089,11 +1135,12 @@ mod tests {
         );
         assert_eq!(zero_a, zero_b, "clearcoat == 0 is not an identity");
 
-        // The two-sided macro-angle transmission must darken the base MORE at
-        // grazing light than at normal incidence: `Fc` climbs toward grazing and
-        // the base is now attenuated on BOTH the view and light crossings. The
-        // former single `v·h` pass left grazing almost un-darkened (`v·h ≈ 1`
-        // when `v ≈ l`), so this ratio pins the physical fix.
+        // The coat **redistributes** energy rather than removing it: what the
+        // base loses to the slab transmission it gains back as the slab's
+        // reflectance (`t_slab + r_slab == 1` by construction). So the invariant
+        // here is *not* "the coat darkens the total" (that was the leaky model);
+        // it is that the total stays within a few percent of the bare base while
+        // the redistribution grows with the Fresnel.
         let g = (0.985_f32, 0.173_f32); // ~80 deg from the normal
         let grazing_frame = ShadingFrame {
             normal: [0.0, 1.0, 0.0],
@@ -1119,12 +1166,29 @@ mod tests {
         ));
 
         assert!(
-            ratio_normal < 1.0,
-            "coat must remove net energy at normal incidence: ratio = {ratio_normal}"
+            (ratio_normal - 1.0).abs() < 0.06,
+            "an energy-closing coat must not add/remove net energy at normal incidence: ratio = {ratio_normal}"
         );
+        // A single grazing *direction* is not the invariant: the closing term is
+        // distributed Lambertianly while the base's loss is specular, so one
+        // direction can read either way. The invariant is the hemisphere
+        // integral, which the white-furnace gate pins.
+        let _ = ratio_grazing;
+        // The *redistribution* still grows toward grazing: the coat's own share
+        // (base_weight = 0 isolates it) is larger at grazing than at normal.
+        let coat_only = |f: ShadingFrame, l: DirectLightSample| {
+            total(evaluate_principled_direct(
+                SurfaceSample {
+                    base_weight: 0.0,
+                    ..coated
+                },
+                f,
+                l,
+            ))
+        };
         assert!(
-            ratio_grazing < ratio_normal,
-            "grazing must darken more than normal: grazing {ratio_grazing} >= normal {ratio_normal}"
+            coat_only(grazing_frame, grazing_light) > coat_only(frame(), light()),
+            "the coat's reflected share must grow with the Fresnel toward grazing"
         );
     }
 

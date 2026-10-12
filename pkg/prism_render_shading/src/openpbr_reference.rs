@@ -959,7 +959,17 @@ mod conformance {
         };
         // Specification: the same dielectric base under a white coat / white fuzz
         // (the coat and fuzz layers must not create or destroy energy).
-        let configs: [(&str, SurfaceSample); 7] = [
+        // `clearcoat_roughness` must be resolvable by the uniform hemisphere
+        // grid: the default (0) is a near-mirror lobe whose energy the
+        // quadrature misses entirely (measured coat-only albedo 0.001 vs the true
+        // 0.28), exactly like the `metal(0.1)` case above.
+        let coated = SurfaceSample {
+            clearcoat: 1.0,
+            clearcoat_roughness: 0.25,
+            coat_color: white,
+            ..coupled(0.0)
+        };
+        let configs: [(&str, SurfaceSample); 8] = [
             ("metal, default roughness", metal(0.3)),
             ("metal, rough", metal(0.8)),
             ("pure diffuse base, Lambertian", pure_diffuse(0.0)),
@@ -973,6 +983,7 @@ mod conformance {
                 coupled(1.0),
             ),
             ("translucent base (transmission_weight=1)", translucent),
+            ("dielectric base under a white coat", coated),
         ];
         let mut worst = (0.0_f32, String::new());
         // One gate, three energy invariants it has already caught: the diffuse
@@ -1410,7 +1421,7 @@ mod dielectric_albedo_gen {
     use super::*;
     use crate::lighting::fresnel_dielectric;
 
-    fn vndf(wo: [f32; 3], alpha: f32, u1: f32, u2: f32) -> [f32; 3] {
+    pub(super) fn vndf(wo: [f32; 3], alpha: f32, u1: f32, u2: f32) -> [f32; 3] {
         let vh = {
             let s = [alpha * wo[0], alpha * wo[1], wo[2]];
             let n = ops::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
@@ -1487,6 +1498,45 @@ mod dielectric_albedo_gen {
                 .map(|i| {
                     let mu = i as f32 / (N_MU - 1) as f32;
                     format!("{:.6}", bake_dielectric_albedo(mu, r, 1.5))
+                })
+                .collect();
+            println!("{},", row.join(", "));
+        }
+    }
+}
+
+
+/// Generator for `B(µ, r)`: the GGX lobe's albedo with the Schlick *bias* weight
+/// `(1 − v·h)^5`. Together with the white-lobe albedo `E_white` it gives the
+/// **exact** Schlick-Fresnel lobe albedo `F0·E_white + (1−F0)·B`, which the coat
+/// energy closure needs (the hemispherical-average and `F(n·v)` estimates were
+/// 2.3× low and 6% high respectively).
+#[cfg(test)]
+mod schlick_bias_gen {
+    use super::*;
+
+    /// The Schlick bias component of the split-sum DFG, from the repository's
+    /// own validated VNDF estimator (`integrate_dfg`) — the *same* estimator the
+    /// white-lobe albedo `E_white` comes from, so `F0·E_white + (1−F0)·B` is
+    /// internally consistent. (A hand-rolled VNDF differed enough to leave a
+    /// view-dependent ±8% error in the coat furnace.)
+    fn bias_albedo(mu_o: f32, perceptual_roughness: f32) -> f32 {
+        crate::gi::env_brdf::dfg_lut::integrate_dfg(mu_o, perceptual_roughness, 65536)
+            .y
+            .clamp(0.0, 1.0)
+    }
+
+    #[test]
+    #[ignore = "generator: prints the baked Schlick-bias albedo table"]
+    fn print_schlick_bias_table() {
+        const N_MU: usize = 17;
+        const N_R: usize = 9;
+        for j in 0..N_R {
+            let r = j as f32 / (N_R - 1) as f32;
+            let row: Vec<String> = (0..N_MU)
+                .map(|i| {
+                    let mu = i as f32 / (N_MU - 1) as f32;
+                    format!("{:.6}", if r == 0.0 { 0.0 } else { bias_albedo(mu, r) })
                 })
                 .collect();
             println!("{},", row.join(", "));

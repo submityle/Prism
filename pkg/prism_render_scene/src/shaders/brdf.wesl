@@ -448,6 +448,37 @@ const GGX_AVERAGE: array<f32, 9> = array<f32, 9>(
     0.999995, 0.998962, 0.987304, 0.951403, 0.882399, 0.780349, 0.656290, 0.527348, 0.409282,
 );
 
+const BIAS_N_MU: i32 = 17;
+const BIAS_N_R: i32 = 9;
+const SCHLICK_BIAS: array<f32, 153> = array<f32, 153>(
+    0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
+    0.774244, 0.663815, 0.495332, 0.347318, 0.234679, 0.152748, 0.095450, 0.056640, 0.031595, 0.016307, 0.007606, 0.003092, 0.001032, 0.000253, 0.000036, 0.000002, 0.000000,
+    0.508795, 0.431615, 0.362063, 0.281038, 0.203548, 0.139449, 0.090800, 0.056082, 0.032642, 0.017708, 0.008802, 0.003916, 0.001500, 0.000479, 0.000124, 0.000025, 0.000003,
+    0.313340, 0.263798, 0.218489, 0.176234, 0.136619, 0.101114, 0.071250, 0.047687, 0.030196, 0.017975, 0.009964, 0.005073, 0.002328, 0.000937, 0.000319, 0.000085, 0.000012,
+    0.192295, 0.157866, 0.128437, 0.102946, 0.080828, 0.061808, 0.045781, 0.032675, 0.022347, 0.014553, 0.008951, 0.005144, 0.002719, 0.001290, 0.000527, 0.000168, 0.000027,
+    0.122265, 0.096436, 0.076552, 0.060369, 0.047053, 0.036096, 0.027142, 0.019915, 0.014187, 0.009753, 0.006421, 0.004007, 0.002336, 0.001243, 0.000579, 0.000213, 0.000042,
+    0.082617, 0.061668, 0.047356, 0.036463, 0.027948, 0.021230, 0.015922, 0.011744, 0.008483, 0.005970, 0.004066, 0.002656, 0.001641, 0.000940, 0.000479, 0.000199, 0.000048,
+    0.060034, 0.041666, 0.030684, 0.022905, 0.017144, 0.012793, 0.009478, 0.006945, 0.005013, 0.003548, 0.002448, 0.001633, 0.001041, 0.000622, 0.000336, 0.000152, 0.000043,
+    0.046881, 0.029659, 0.020799, 0.014960, 0.010876, 0.007932, 0.005773, 0.004175, 0.002989, 0.002108, 0.001457, 0.000979, 0.000633, 0.000387, 0.000217, 0.000104, 0.000034,
+);
+
+// Bilinear `B(µ, r)`; arguments clamp to `[0, 1]`.
+fn schlick_bias_lookup(n_dot_v: f32, roughness: f32) -> f32 {
+    let x = clamp(n_dot_v, 0.0, 1.0) * f32(BIAS_N_MU - 1);
+    let y = clamp(roughness, 0.0, 1.0) * f32(BIAS_N_R - 1);
+    let i0 = min(i32(x), BIAS_N_MU - 2);
+    let j0 = min(i32(y), BIAS_N_R - 2);
+    let fx = x - f32(i0);
+    let fy = y - f32(j0);
+    let a = SCHLICK_BIAS[j0 * BIAS_N_MU + i0];
+    let b = SCHLICK_BIAS[j0 * BIAS_N_MU + i0 + 1];
+    let c = SCHLICK_BIAS[(j0 + 1) * BIAS_N_MU + i0];
+    let d = SCHLICK_BIAS[(j0 + 1) * BIAS_N_MU + i0 + 1];
+    let top = a + (b - a) * fx;
+    let bottom = c + (d - c) * fx;
+    return clamp(top + (bottom - top) * fy, 0.0, 1.0);
+}
+
 // Bilinear `E(µ, r)`; both arguments clamp to `[0, 1]`. Mirrors
 // `ggx_albedo_table.rs::ggx_albedo_lookup`.
 fn ggx_albedo_lookup(n_dot_v: f32, roughness: f32) -> f32 {
@@ -788,23 +819,38 @@ fn principled_direct(
     let coat = clamp(surface.clearcoat, 0.0, 1.0);
     let coat_roughness = clamp(surface.clearcoat_roughness, MIN_ROUGHNESS, 1.0);
     let coat_alpha = coat_roughness * coat_roughness;
-    let coat_f = fresnel_schlick(vec3<f32>(0.04), v_dot_h);
+    // `OpenPBR` `coat_ior` semantics: the coat IOR drives the coat interface
+    // Fresnel (the highlight used to be pinned at the legacy `F0 = 0.04`).
+    let coat_f0 = pow((clamp(surface.coat_ior, 1.0 + 1.0e-3, 3.0) - 1.0)
+        / (clamp(surface.coat_ior, 1.0 + 1.0e-3, 3.0) + 1.0), 2.0);
+    let coat_f = fresnel_schlick(vec3<f32>(coat_f0), v_dot_h);
     let coat_specular = coat_f
         * (coat
             * distribution_ggx(n_dot_h, coat_alpha)
             * vis_smith(n_dot_v, n_dot_l, coat_alpha)
             * n_dot_l);
-    // Two-pass macro-angle coat transmission (Weidlich-Wilkie 2007 / Burley
-    // 2015): the dielectric coat Fresnel-filters radiance on BOTH the view and
-    // light crossings, so the base is attenuated by
-    // `(1 - coat*Fc(n·v))·(1 - coat*Fc(n·l))` at the macro angles rather than the
-    // former single `v·h` pass. Coat specular stays at `v·h`. Byte-identical to
-    // `evaluate_principled_direct` in `lighting.rs`; `clearcoat == 0` is an exact
-    // identity.
-    let coat_f_view = fresnel_schlick(vec3<f32>(0.04), n_dot_v);
-    let coat_f_light = fresnel_schlick(vec3<f32>(0.04), n_dot_l);
-    let coat_attenuation = (1.0 - coat * clamp(coat_f_view.x, 0.0, 1.0))
-        * (1.0 - coat * clamp(coat_f_light.x, 0.0, 1.0));
+    // Coat energy closure: the base keeps the closed-form slab transmittance
+    // `t_slab = (1−f_v)(1−f_l)/(1−f_v·f_l)` and the coat carries the complementary
+    // reflectance `r_slab = f_l + (1−f_l)²f_v/(1−f_v·f_l)` (they sum to exactly 1
+    // for a non-absorbing coat). The coat's single-scatter lobe is given `r_slab`
+    // of energy by adding a **zero-albedo** redistribution
+    // `(r_slab − A)·(n·l/π)`, where `A = F0·E_white + (1−F0)·B` is the exact
+    // Schlick split-sum albedo — so the estimate `A` shapes the correction but
+    // never the energy budget. Byte-identical to `evaluate_principled_direct` in
+    // `lighting.rs`; `clearcoat == 0` is an exact identity (`1 − 0 + 0·t = 1`).
+    let coat_f_v = clamp(fresnel_schlick(vec3<f32>(coat_f0), n_dot_v).x, 0.0, 1.0);
+    let coat_f_l = clamp(fresnel_schlick(vec3<f32>(coat_f0), n_dot_l).x, 0.0, 1.0);
+    let coat_denom = max(1.0 - coat_f_v * coat_f_l, 1.0e-4);
+    let coat_t_slab = (1.0 - coat_f_v) * (1.0 - coat_f_l) / coat_denom;
+    let coat_r_slab = coat_f_l + (1.0 - coat_f_l) * (1.0 - coat_f_l) * coat_f_v / coat_denom;
+    let coat_lobe_albedo = max(
+        coat_f0 * ggx_albedo_lookup(n_dot_v, coat_roughness)
+            + (1.0 - coat_f0) * schlick_bias_lookup(n_dot_v, coat_roughness),
+        1.0e-3,
+    );
+    let coat_specular = coat_specular
+        + vec3<f32>(coat * (coat_r_slab - coat_lobe_albedo) * n_dot_l * INV_PI);
+    let coat_attenuation = 1.0 + coat * (coat_t_slab - 1.0);
 
     // `OpenPBR` transmission lobe: interface Fresnel (driven by
     // `index_of_refraction`) gating entry and exit, Beer-Lambert over

@@ -55,6 +55,7 @@ mod posterize;
 mod punctual;
 mod quality;
 mod resolve;
+mod schlick_bias_table;
 mod screen_space;
 mod shadow;
 mod stylized;
