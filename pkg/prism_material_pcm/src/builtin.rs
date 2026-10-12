@@ -197,11 +197,12 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 7] =
 /// object-space cache auxiliary set (§14.3).
 ///
 /// `stylized`/`unlit` are `candidate` — the enums and their shaders have shipped
-/// and their layout is frozen, while the class-table registration itself (§5.2,
-/// roadmap P2-j) is still settling. `custom` stays `experimental` because the
-/// injected closure is author-supplied. `unlit` is view independent (it ignores
-/// scene lighting entirely, so the object-space cache may store it); every other
-/// row here changes with the view.
+/// and their layout is frozen; the class-table registration is now derived from
+/// the schema's `response_mode` records and parity-checked below (§5.2, P2-i/
+/// P2-j). `custom` stays `experimental` because the injected closure is
+/// author-supplied. `unlit` is view independent (it ignores scene lighting
+/// entirely, so the object-space cache may store it); every other row here
+/// changes with the view.
 const PRISM_SLOTTED: [(&str, u32, Kind, Stability, CapabilitySet, bool); 4] = [
     (
         UID_MODE_STYLIZED,

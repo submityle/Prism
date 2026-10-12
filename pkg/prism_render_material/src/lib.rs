@@ -81,8 +81,9 @@ pub use surface::{
     SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
 };
 pub use surface_layout::{
-    ChannelLayout, LobeLayout, SURFACE_CHANNELS, SURFACE_LOBES, SURFACE_LOBE_CLOSURES,
-    SURFACE_LOBE_COUNT, SURFACE_LOBE_WORDS_BY_SLOT, SURFACE_MAX_WORDS,
+    ChannelLayout, LobeLayout, ResponseModeLayout, SURFACE_CHANNELS, SURFACE_LOBES,
+    SURFACE_LOBE_CLOSURES, SURFACE_LOBE_COUNT, SURFACE_LOBE_WORDS_BY_SLOT, SURFACE_MAX_WORDS,
+    SURFACE_RESPONSE_MODES,
 };
 pub use texture_addressing::{address_uv, wrap_coord, AddressResult, WrapMode};
 pub use texture_blend::{

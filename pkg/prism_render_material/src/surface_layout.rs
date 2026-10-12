@@ -236,3 +236,66 @@ pub const SURFACE_CHANNELS: [ChannelLayout; 4] = [
         default: 0.0,
     },
 ];
+
+/// One runtime response mode's generated manifest identity.
+///
+/// `illumination` is the schema spelling the shading side resolves; an
+/// unknown spelling is a pipeline-build error, never a silent fallthrough.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResponseModeLayout {
+    /// Human-facing response-mode id (schema `id`).
+    pub id: &'static str,
+    /// Globally unique capability id (schema `uid`).
+    pub uid: &'static str,
+    /// Header-digest slot (immutable; §5.4).
+    pub registry_slot: u32,
+    /// Governance namespace (schema `namespace`).
+    pub namespace: &'static str,
+    /// Vendor tag (schema `vendor`).
+    pub vendor: &'static str,
+    /// Stability level (schema `stability`).
+    pub stability: &'static str,
+    /// The `Illumination` spelling this mode selects.
+    pub illumination: &'static str,
+    /// Platform capabilities required beyond the baseline.
+    pub requires_caps: &'static [&'static str],
+    /// Whether the response changes with the view direction.
+    pub view_dependent: bool,
+}
+
+/// The runtime response modes in registry-slot order.
+pub const SURFACE_RESPONSE_MODES: [ResponseModeLayout; 3] = [
+    ResponseModeLayout {
+        id: "stylized",
+        uid: "org.prism.response_mode.stylized",
+        registry_slot: 23,
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "candidate",
+        illumination: "stylized",
+        requires_caps: &[],
+        view_dependent: true,
+    },
+    ResponseModeLayout {
+        id: "unlit",
+        uid: "org.prism.response_mode.unlit",
+        registry_slot: 24,
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "candidate",
+        illumination: "unlit",
+        requires_caps: &[],
+        view_dependent: false,
+    },
+    ResponseModeLayout {
+        id: "custom",
+        uid: "org.prism.response_mode.custom",
+        registry_slot: 25,
+        namespace: "PRISM",
+        vendor: "prism",
+        stability: "experimental",
+        illumination: "custom",
+        requires_caps: &[],
+        view_dependent: true,
+    },
+];

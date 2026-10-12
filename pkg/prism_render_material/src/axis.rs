@@ -61,6 +61,18 @@ impl Illumination {
         }
     }
 
+    /// Parse the canonical lowercase spelling used by the schema's
+    /// `response_mode.illumination` declaration and by PCM diagnostics.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "lit" => Some(Self::Lit),
+            "stylized" => Some(Self::Stylized),
+            "unlit" => Some(Self::Unlit),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+
     /// Reconstruct from the raw `u32` stored in `GpuMaterialHeader`.
     pub const fn from_u32(raw: u32) -> Option<Self> {
         match raw {
@@ -196,6 +208,19 @@ mod tests {
     fn illumination_from_u32_rejects_out_of_range() {
         assert_eq!(Illumination::from_u32(4), None);
         assert_eq!(Illumination::from_u32(u32::MAX), None);
+    }
+
+    #[test]
+    fn illumination_names_round_trip_and_reject_unknown_spellings() {
+        for illumination in Illumination::ALL {
+            assert_eq!(
+                Illumination::from_name(illumination.as_str()),
+                Some(illumination),
+                "{illumination:?}"
+            );
+        }
+        assert_eq!(Illumination::from_name("npr"), None);
+        assert_eq!(Illumination::from_name(""), None);
     }
 
     #[test]

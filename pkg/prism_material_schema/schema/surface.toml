@@ -1130,3 +1130,44 @@ stability = "candidate"
 header_word = 3
 default = 0.0
 valid = "0.0..=1.0"
+
+# Runtime response modes (§5.2, roadmap P2-i/P2-j).
+#
+# A response mode owns one non-default value of the `Illumination` axis. The
+# schema declares the identity, header slot, attribution and view dependence;
+# the shading side resolves `illumination` against its own axis vocabulary and
+# rejects an unknown spelling at pipeline-build time. `Lit` is the OpenPBR
+# default response and is deliberately absent: it is what a material gets when
+# it registers no response mode at all.
+[[response_mode]]
+id = "stylized"
+uid = "org.prism.response_mode.stylized"
+illumination = "stylized"
+registry_slot = 23
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+requires_caps = []
+view_dependent = true
+
+[[response_mode]]
+id = "unlit"
+uid = "org.prism.response_mode.unlit"
+illumination = "unlit"
+registry_slot = 24
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+requires_caps = []
+view_dependent = false
+
+[[response_mode]]
+id = "custom"
+uid = "org.prism.response_mode.custom"
+illumination = "custom"
+registry_slot = 25
+namespace = "PRISM"
+vendor = "prism"
+stability = "experimental"
+requires_caps = []
+view_dependent = true

@@ -14,7 +14,10 @@ use prism_material_pcm::{Capability, EnergyPolicy, ExtensionSet, Kind, Namespace
 use prism_render_material::capability::{
     lobe_registry, parse_capabilities, SPECIFICATION_NAMESPACE,
 };
-use prism_render_material::{DynamicChannels, Illumination, LobeMask, SURFACE_CHANNELS, SURFACE_LOBES};
+use prism_render_material::{
+    DynamicChannels, Illumination, LobeMask, SURFACE_CHANNELS, SURFACE_LOBES,
+    SURFACE_RESPONSE_MODES,
+};
 
 /// Every schema lobe is registered in the committed catalogue with the same
 /// identity and governance fields, and the bridge agrees with both.
@@ -29,7 +32,11 @@ fn the_committed_catalogue_agrees_with_the_schema_row_for_row() {
     let count_of = |kind: Kind| committed.iter().filter(|m| m.kind() == kind).count();
     assert_eq!(count_of(Kind::Lobe), SURFACE_LOBES.len(), "schema lobes");
     assert_eq!(count_of(Kind::Channel), 4, "dynamic channels");
-    assert_eq!(count_of(Kind::ResponseMode), 3, "response-mode extensions");
+    assert_eq!(
+        count_of(Kind::ResponseMode),
+        SURFACE_RESPONSE_MODES.len(),
+        "response-mode extensions"
+    );
     assert_eq!(count_of(Kind::CacheAux), 1, "object-space cache auxiliaries");
     assert_eq!(count_of(Kind::Provider), 2, "bake-time page providers");
     assert_eq!(count_of(Kind::Transfer), 1, "transfer remaps");
@@ -227,40 +234,66 @@ fn the_specification_core_requires_no_platform_capability() {
 #[test]
 fn the_registry_response_modes_mirror_the_illumination_axis() {
     let committed = builtin_registry();
-    for illumination in Illumination::ALL {
-        let uid = format!("org.prism.response_mode.{}", illumination.as_str());
-        let registered = committed.manifest_by_uid(&uid);
-        if illumination == Illumination::Lit {
-            assert!(
-                registered.is_none(),
-                "`Lit` is the specification default and must not be registered as an extension"
-            );
-            continue;
-        }
-        let manifest =
-            registered.unwrap_or_else(|| panic!("{illumination:?} has no registry row"));
-        assert_eq!(manifest.kind(), Kind::ResponseMode, "{uid} kind");
-        assert_eq!(manifest.namespace(), Namespace::Prism, "{uid} namespace");
-        assert!(manifest.is_header_resident(), "{uid} residency");
+    let mut declared = Vec::new();
+    for mode in &SURFACE_RESPONSE_MODES {
+        let manifest = committed
+            .manifest_by_uid(mode.uid)
+            .unwrap_or_else(|| panic!("catalogue is missing response mode {}", mode.uid));
+        assert_eq!(manifest.kind(), Kind::ResponseMode, "{} kind", mode.id);
+        assert_eq!(
+            manifest.registry_slot(),
+            Some(mode.registry_slot),
+            "{} slot",
+            mode.id
+        );
+        assert_eq!(
+            manifest.namespace(),
+            Namespace::parse(mode.namespace).expect("schema namespace spelling"),
+            "{} namespace",
+            mode.id
+        );
+        assert_eq!(manifest.vendor(), mode.vendor, "{} vendor", mode.id);
+        assert_eq!(
+            manifest.stability(),
+            Stability::parse(mode.stability).expect("schema stability spelling"),
+            "{} stability",
+            mode.id
+        );
         assert_eq!(
             manifest.view_dependent(),
-            illumination != Illumination::Unlit,
-            "{illumination:?} view dependence: `unlit` ignores lighting entirely and may \
-             therefore be cached in object space (§14.3)"
+            mode.view_dependent,
+            "{} view dependence",
+            mode.id
         );
+        let requires = parse_capabilities(mode.requires_caps.iter().copied())
+            .unwrap_or_else(|unknown| panic!("{} requires unknown {unknown}", mode.id));
+        assert_eq!(manifest.requires_caps(), requires, "{} caps", mode.id);
+        let illumination =
+            Illumination::from_name(mode.illumination).expect("schema illumination spelling");
+        assert_ne!(
+            illumination,
+            Illumination::Lit,
+            "{} must select a non-default illumination",
+            mode.id
+        );
+        declared.push(illumination);
     }
-    // The other direction: no registered response mode without a runtime variant.
+    // Every non-default illumination variant has exactly one schema row, in the
+    // axis order the old hard-coded table used.
+    assert_eq!(
+        declared,
+        Illumination::ALL
+            .into_iter()
+            .filter(|illumination| *illumination != Illumination::Lit)
+            .collect::<Vec<_>>()
+    );
+    // The other direction: no registered response mode without a schema row.
     for manifest in committed.iter().filter(|m| m.kind() == Kind::ResponseMode) {
-        let semantic = manifest
-            .uid()
-            .rsplit('.')
-            .next()
-            .expect("a uid has a last segment");
         assert!(
-            Illumination::ALL
+            SURFACE_RESPONSE_MODES
                 .iter()
-                .any(|value| value.as_str() == semantic && *value != Illumination::Lit),
-            "{} has no non-default Illumination variant",
+                .any(|mode| mode.uid == manifest.uid()),
+            "{} has no schema response-mode row",
             manifest.uid()
         );
     }

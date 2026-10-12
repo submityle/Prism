@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use prism_render_material::{
     ClosureKind, GpuMaterialHeader, Illumination, LobeLayout, MaterialRenderClass,
-    SURFACE_LOBE_CLOSURES,
+    ResponseModeLayout, SURFACE_LOBE_CLOSURES, SURFACE_RESPONSE_MODES,
 };
 
 pub const MAX_SHADING_CLASSES: usize = 9;
@@ -161,6 +161,25 @@ pub enum ClassTableError {
     /// bucket without any build failure, so this is a loud pipeline-build
     /// error.
     UnknownClosureName(String),
+    /// A schema response mode named an illumination variant the runtime does
+    /// not implement.
+    UnknownResponseModeIllumination(String),
+    /// A schema response mode has no matching `Kind::ResponseMode` registry row.
+    UnregisteredResponseMode(String),
+    /// The schema and the PCM registry disagree on a response-mode slot.
+    ResponseModeSlotMismatch {
+        /// Response-mode uid.
+        uid: String,
+        /// Slot declared by the schema.
+        schema: u32,
+        /// Slot registered in the PCM catalogue.
+        registry: u32,
+    },
+    /// A schema response mode claims the default `Lit` illumination, which is
+    /// not an extension and must not occupy a class-table row.
+    DefaultResponseModeDeclared(String),
+    /// A non-default illumination variant has no schema response mode.
+    MissingResponseMode(Illumination),
     /// The class set does not tile `0..=class_count` (a bucket id is missing or
     /// duplicated in a way the work plan cannot index).
     NonDenseClassIds {
@@ -186,6 +205,30 @@ impl core::fmt::Display for ClassTableError {
             Self::UnknownClosureName(name) => write!(
                 f,
                 "lobe closure {name:?} is declared by the schema but has no shading implementation"
+            ),
+            Self::UnknownResponseModeIllumination(illumination) => write!(
+                f,
+                "response mode declares illumination {illumination:?}, which the runtime axis does not implement"
+            ),
+            Self::UnregisteredResponseMode(uid) => write!(
+                f,
+                "response mode {uid:?} is declared by the schema but has no PCM registry row"
+            ),
+            Self::ResponseModeSlotMismatch {
+                uid,
+                schema,
+                registry,
+            } => write!(
+                f,
+                "response mode {uid:?} declares slot {schema} but the PCM registry pins slot {registry}"
+            ),
+            Self::DefaultResponseModeDeclared(uid) => write!(
+                f,
+                "response mode {uid:?} claims the default `lit` illumination; `lit` is not an extension"
+            ),
+            Self::MissingResponseMode(illumination) => write!(
+                f,
+                "illumination variant {illumination:?} has no registered response mode"
             ),
             Self::NonDenseClassIds { ids } => {
                 write!(f, "shading-class ids {ids:?} do not tile 0..=max")
@@ -283,6 +326,86 @@ fn closure_rows(
     Ok(rows.into_iter().map(|(_, row)| row).collect())
 }
 
+/// Build the response-mode rows from the schema-generated table and verify the
+/// PCM registry mirrors it in both directions.
+///
+/// The schema owns the declaration and the registry owns the load-time
+/// manifest. A missing row, a wrong slot, an unknown illumination spelling, a
+/// declared `lit` default, or an unclaimed non-default variant are all
+/// pipeline-build errors: any one of them would otherwise silently change the
+/// class table.
+fn response_mode_rows(
+    registry: &prism_material_pcm::ExtensionRegistry,
+    modes: &[ResponseModeLayout],
+) -> Result<Vec<ShadingClassRow>, ClassTableError> {
+    let mut rows = Vec::new();
+    let mut seen = Vec::new();
+    for mode in modes {
+        let manifest = registry
+            .manifest_by_uid(mode.uid)
+            .ok_or_else(|| ClassTableError::UnregisteredResponseMode(mode.uid.to_owned()))?;
+        if manifest.kind() != prism_material_pcm::Kind::ResponseMode {
+            return Err(ClassTableError::UnregisteredResponseMode(
+                mode.uid.to_owned(),
+            ));
+        }
+        let registry_slot = manifest
+            .registry_slot()
+            .ok_or_else(|| ClassTableError::UnregisteredResponseMode(mode.uid.to_owned()))?;
+        if registry_slot != mode.registry_slot {
+            return Err(ClassTableError::ResponseModeSlotMismatch {
+                uid: mode.uid.to_owned(),
+                schema: mode.registry_slot,
+                registry: registry_slot,
+            });
+        }
+        let illumination = Illumination::from_name(mode.illumination).ok_or_else(|| {
+            ClassTableError::UnknownResponseModeIllumination(mode.illumination.to_owned())
+        })?;
+        if illumination == Illumination::Lit {
+            return Err(ClassTableError::DefaultResponseModeDeclared(
+                mode.uid.to_owned(),
+            ));
+        }
+        seen.push(illumination);
+        let (id, name, rule) = match illumination {
+            Illumination::Stylized => (
+                MaterialShadingClass::Npr as u32,
+                "npr",
+                ShadingClassRule::Illumination(Illumination::Stylized),
+            ),
+            Illumination::Unlit => (
+                MaterialShadingClass::Unlit as u32,
+                "unlit",
+                ShadingClassRule::Illumination(Illumination::Unlit),
+            ),
+            Illumination::Custom => (
+                MaterialShadingClass::Custom as u32,
+                "custom",
+                ShadingClassRule::CustomProgram,
+            ),
+            Illumination::Lit => unreachable!(),
+        };
+        rows.push(ShadingClassRow { id, name, rule });
+    }
+    for illumination in Illumination::ALL {
+        if illumination != Illumination::Lit && !seen.contains(&illumination) {
+            return Err(ClassTableError::MissingResponseMode(illumination));
+        }
+    }
+    for manifest in registry
+        .iter()
+        .filter(|manifest| manifest.kind() == prism_material_pcm::Kind::ResponseMode)
+    {
+        if !modes.iter().any(|mode| mode.uid == manifest.uid()) {
+            return Err(ClassTableError::UnhandledResponseMode(
+                manifest.uid().to_owned(),
+            ));
+        }
+    }
+    Ok(rows)
+}
+
 /// The shading-class table (roadmap P2-j).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ShadingClassTable {
@@ -322,38 +445,10 @@ impl ShadingClassTable {
             rule: ShadingClassRule::RenderClass(MaterialRenderClass::Hair),
         });
 
-        // Registered response modes. The mapping from a uid to an illumination
-        // axis is engine knowledge (the engine has to implement the response);
-        // the *set* is the registry's.
-        for manifest in registry.iter().filter(|m| m.kind() == prism_material_pcm::Kind::ResponseMode) {
-            let (id, name, illumination) = match manifest.uid() {
-                prism_material_pcm::builtin::UID_MODE_UNLIT => (
-                    MaterialShadingClass::Unlit as u32,
-                    "unlit",
-                    Illumination::Unlit,
-                ),
-                prism_material_pcm::builtin::UID_MODE_STYLIZED => (
-                    MaterialShadingClass::Npr as u32,
-                    "npr",
-                    Illumination::Stylized,
-                ),
-                prism_material_pcm::builtin::UID_MODE_CUSTOM => (
-                    MaterialShadingClass::Custom as u32,
-                    "custom",
-                    // Marked below: this row tests the program handle too.
-                    Illumination::Custom,
-                ),
-                other => {
-                    return Err(ClassTableError::UnhandledResponseMode(String::from(other)));
-                }
-            };
-            let rule = if id == MaterialShadingClass::Custom as u32 {
-                ShadingClassRule::CustomProgram
-            } else {
-                ShadingClassRule::Illumination(illumination)
-            };
-            rows.push(ShadingClassRow { id, name, rule });
-        }
+        // Registered response modes. The schema owns the set/order/slot; the
+        // shading side resolves the declared illumination name against its own
+        // axis vocabulary and verifies that the PCM registry mirrors the row.
+        rows.extend(response_mode_rows(registry, &SURFACE_RESPONSE_MODES)?);
 
         // `Lit` closure buckets, most specific first — the schema-generated
         // lobe→closure table is the authority for which of them exist.
@@ -901,6 +996,95 @@ mod tests {
         assert_eq!(
             error,
             ClassTableError::UnknownClosureName(String::from("not_a_shading_closure"))
+        );
+    }
+
+    fn response_mode(
+        uid: &'static str,
+        registry_slot: u32,
+        illumination: &'static str,
+    ) -> ResponseModeLayout {
+        ResponseModeLayout {
+            id: "test",
+            uid,
+            registry_slot,
+            namespace: "PRISM",
+            vendor: "prism",
+            stability: "candidate",
+            illumination,
+            requires_caps: &[],
+            view_dependent: true,
+        }
+    }
+
+    #[test]
+    fn a_schema_response_mode_with_an_unknown_illumination_fails_loudly() {
+        let registry = prism_material_pcm::builtin::builtin_registry();
+        let error = response_mode_rows(
+            &registry,
+            &[response_mode(
+                prism_material_pcm::builtin::UID_MODE_STYLIZED,
+                23,
+                "not_an_illumination",
+            )],
+        )
+        .expect_err("an unknown illumination spelling must be rejected");
+        assert_eq!(
+            error,
+            ClassTableError::UnknownResponseModeIllumination(String::from("not_an_illumination"))
+        );
+    }
+
+    #[test]
+    fn a_schema_response_mode_without_a_registry_row_fails_loudly() {
+        let registry = prism_material_pcm::builtin::builtin_registry();
+        let error = response_mode_rows(
+            &registry,
+            &[response_mode(
+                "org.prism.response_mode.watercolor",
+                23,
+                "stylized",
+            )],
+        )
+        .expect_err("a schema row without a registry row must be rejected");
+        assert_eq!(
+            error,
+            ClassTableError::UnregisteredResponseMode(String::from(
+                "org.prism.response_mode.watercolor"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_schema_response_mode_slot_mismatch_fails_loudly() {
+        let registry = prism_material_pcm::builtin::builtin_registry();
+        let error = response_mode_rows(
+            &registry,
+            &[response_mode(
+                prism_material_pcm::builtin::UID_MODE_STYLIZED,
+                99,
+                "stylized",
+            )],
+        )
+        .expect_err("a schema/registry slot mismatch must be rejected");
+        assert_eq!(
+            error,
+            ClassTableError::ResponseModeSlotMismatch {
+                uid: String::from(prism_material_pcm::builtin::UID_MODE_STYLIZED),
+                schema: 99,
+                registry: 23,
+            }
+        );
+    }
+
+    #[test]
+    fn a_missing_response_mode_variant_fails_loudly() {
+        let registry = prism_material_pcm::builtin::builtin_registry();
+        let error = response_mode_rows(&registry, &[])
+            .expect_err("every non-default illumination variant must have a response mode");
+        assert_eq!(
+            error,
+            ClassTableError::MissingResponseMode(Illumination::Stylized)
         );
     }
 
