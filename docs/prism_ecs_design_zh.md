@@ -149,6 +149,8 @@ pub struct ComponentInfo {
 - **Archetype** = 唯一组件集合（含关系 pair），持有一组 **Chunk**。
 - **Chunk** = 固定 16KiB 块，列式 SoA；每列按 SIMD 宽对齐。chunk 槽内嵌 `change_version` + 可选 `ChunkMeta`（AABB / 可见位 / LOD / 批次键 / cell 归属）。
 - `N`（每 chunk 容量）= `floor((16KiB − 元数据) / 单实体列字节和)`。
+
+> **现状诚实注记（chunk 物理布局）**：上两条描述的是**目标形态**。当前 `pkg/prism_ecs` 落地的是**逻辑 chunk**——每个 archetype 仍是一段连续列存，chunk 只是"`rows_per_chunk` 个连续行"的窗口（`rows_per_chunk` 由 `TARGET_CHUNK_BYTES` 与单行字节和推出），每个窗口带一条 `change_version`（`storage/chunk.rs` 开篇即写明这一点）。**物理 16KiB 分块竞技场**（每块内嵌元数据、按块分配/回收、块内 SoA 与 SIMD 对齐）仍是 PLANNED，属 §22 高风险项第 1 条，须分步改造并配基准。
 - 结构性变更 = archetype 间搬迁（swap-remove + append），经并行 ECB 批量化（§9）。
 
 ---
