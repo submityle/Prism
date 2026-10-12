@@ -2,10 +2,15 @@ use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use bevy_ecs::{prelude::*, resource::Resource};
-use bevy_render::renderer::RenderQueue;
+use prism_render_driver::FrameSync;
+use prism_render_driver_wgpu::WgpuQueue;
 use prism_render_architecture::gpu_scene::GpuCompletionValue;
 
-use crate::{diagnostics::GpuSceneDiagnostics, scene::RenderGpuScene};
+use crate::{
+    diagnostics::GpuSceneDiagnostics,
+    gpu::PrismGpu,
+    scene::RenderGpuScene,
+};
 
 /// Tracks submitted and completed queue work without fixed frame delays.
 #[derive(Resource, Clone)]
@@ -32,18 +37,26 @@ impl GpuCompletionTracker {
         GpuCompletionValue(self.completed.load(Ordering::Acquire))
     }
 
-    pub fn track(&self, queue: &RenderQueue) -> GpuCompletionValue {
+    pub fn track(&self, queue: &WgpuQueue) -> GpuCompletionValue {
         let value = self.submitted.fetch_add(1, Ordering::AcqRel) + 1;
         let completed = Arc::clone(&self.completed);
-        queue.on_submitted_work_done(move || {
+        // Non-blocking completion: advance the tracker when the queue drains.
+        queue.on_submitted_work_done(Box::new(move || {
             completed.fetch_max(value, Ordering::Release);
-        });
+        }));
         GpuCompletionValue(value)
     }
 }
 
-pub(crate) fn track_submission(tracker: Res<GpuCompletionTracker>, queue: Res<RenderQueue>) {
-    tracker.track(&queue);
+pub(crate) fn track_submission(
+    tracker: Res<GpuCompletionTracker>,
+    gpu: Option<Res<PrismGpu>>,
+) {
+    // No Prism GPU context (GPU-less host): nothing is submitted through the
+    // Prism queue this frame, so there is nothing to track.
+    if let Some(gpu) = gpu {
+        tracker.track(gpu.queue());
+    }
 }
 
 pub(crate) fn reclaim_completed_handles(

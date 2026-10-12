@@ -15,6 +15,7 @@ mod consumer;
 mod diagnostics;
 mod extract;
 mod geometry;
+mod gpu;
 mod lighting;
 mod material;
 mod opaque;
@@ -43,6 +44,7 @@ pub use geometry::{
     ShadingGeometryBuildError, SHADING_GEOMETRY_FLAG_ACTIVE, SHADING_GEOMETRY_FLAG_INVALID,
     SHADING_GEOMETRY_FLAG_MISSING_NORMAL, SHADING_GEOMETRY_FLAG_MISSING_UV,
 };
+pub use gpu::{PrismGpu, PrismGpuInitError, PrismGpuPlugin};
 pub use lighting::{
     build_cluster_data, cubemap_faces_from_image, project_image_to_sh, ClusterBindGroup,
     ClusterConfig, ClusterCpuData, ClusterGpuBuffers, ClusterViewFit, EnvironmentProbeCache,
