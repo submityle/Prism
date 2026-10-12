@@ -239,7 +239,7 @@
 | | `emission_color` | color3 | `emission_color`（本轮改名） | ✅ |
 | **Thin-film** | `thin_film_weight` / `thin_film_thickness` / `thin_film_ior` | float×3 | 新增 `thin_film` **瓣**（KHR, slot 6）→ shade-time `iridescence*`（µm→nm 换算） | ✅（本轮落地为 ABI 瓣并接到 Airy BSDF） |
 | **Geometry** | `geometry_opacity` | float | `geometry_opacity`（复用一个 core 填充字，乘进 alpha） | ✅（本轮新增为独立字段） |
-| | `geometry_thin_walled` | boolean | `thin_walled` | ✅ |
+| | `geometry_thin_walled` | boolean | schema/ABI 标识符 `geometry_thin_walled`（规范是 boolean，这里用 `f32` 0/1 打包进 core word）；解码后的 Prism 字段经 `surface_field` 保留 `thin_walled` | ✅（标识符 + 行为） |
 | | `geometry_normal` / `geometry_tangent` / `geometry_coat_normal` / `geometry_coat_tangent` | vector3 | **shade-time 输入**（非材质参数）：`ShadingFrame.{normal,tangent}` / `SurfaceSample.coat_normal` / `SurfaceSample.coat_tangent` | ✅（由网格/法线图在着色期提供；`coat_tangent` 本轮补上） |
 | **（规范之外）** | — | — | `face`（`softness`）、`anisotropy_rotation`、`ambient_occlusion`、`normal_scale`、`alpha_cutoff`、`thickness` | Prism 扩展区，计入超集 |
 
@@ -611,6 +611,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 代码：`pkg/prism_render_shading/src/lighting.rs`（新映射 + 注释 + `SurfaceSample.anisotropy` 文档改 `[0,1]`）、`pkg/prism_render_shading/src/clearcoat.rs`（改用共享映射）、`pkg/prism_render_scene/src/shaders/brdf.wesl`、`pkg/prism_render_scene/src/shaders/clearcoat.wesl`。
   - 门禁：`cargo test -p prism_render_shading --lib` **3315 通过**（新增 `openpbr_anisotropy_mapping_matches_the_specification_formula`：把公式独立展开逐位对拍 35 组 `(α, a)`，并钉住 `a==0` 精确塌回、`a==1` 触底、越界钳制），`cargo test -p prism_render_scene --lib` **1602 通过**（brdf / clearcoat / shading_resolve / water 四条 WESL 编译链接门禁）。
   - **未动 `gi::anisotropy::remap`**：那是 GI 侧的独立 clean-room 参考（自证 Burley/Disney 映射，有自己的 `AnisotropicGgxParams` 与 ndf/sample oracle），**不在 OpenPBR 运行时 über 的着色路径上**（全仓无调用点），故保留其 Disney 口径并在模块文档里注明；OpenPBR 一致性以本项新映射为准。
+
+- **P1-f 规范对齐：`geometry_thin_walled` 标识符对齐（最后一处"名不符实"的规范字段）**（§4.4）
+  - 用 `parametrization.md.html` 的 41 个规范 identifier 对 schema `name` 做了一次机器比对（脚本逐项 `in` 检查，非人工目测）：**37 个材质参数全部逐字命中，0 缺失**；其余 4 个（`geometry_normal` / `geometry_tangent` / `geometry_coat_normal` / `geometry_coat_tangent`）在规范里就是 **shade-time 输入**（默认"未扰动法线/切线"），不是材质参数，Prism 侧对应 `ShadingFrame.{normal,tangent}` 与 `SurfaceSample.{coat_normal,coat_tangent}`。
+  - 比对发现的唯一残留：schema `name` 还是 `thin_walled`（规范 identifier 是 `geometry_thin_walled`）。本轮按同一 `surface_field` 模式改名：`name = "geometry_thin_walled"` + `surface_field = "thin_walled"`，**生成物逐字节不变**（`material_unpack.wesl` / `surface_layout.rs` 无 diff）。
+  - 代码：`pkg/prism_material_schema/schema/surface.toml`、`pkg/prism_render_material/tests/schema_parity.rs`（`authored_components` 一条臂）、本文 §4.4 该行。
+  - 门禁：`cargo test -p prism_material_schema` **13 通过**、`cargo test -p prism_render_material --test schema_parity` **6 通过**；`prism-material-codegen write` 后生成物无 diff。
 
 - **P1-f 规范对齐：`transmission_depth` 行为落地（规范长度语义 + `depth==0` 非物理 tint）**（§4.4）
   - 规范定义（`parametrization.md.html` / `reference/open_pbr_surface.mtlx`）：`transmission_depth` 是光线在透明基体内**走到恰好等于 `transmission_color`** 的距离（Beer 定律），`depth == 0` 时 `transmission_color` 退化为**非物理 tint**。此前 Prism 把该值当光学深度**指数**（`slab_color^thickness`），`0` 表示"无吸收"、透射白色——与规范相反。

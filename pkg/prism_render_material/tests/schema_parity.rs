@@ -79,7 +79,7 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
         (None, "specular_weight") => vec![p.specular_weight],
         (None, "specular_color") => p.specular_color.to_vec(),
         (None, "specular_ior") => vec![p.specular_ior],
-        (None, "thin_walled") => vec![p.thin_walled],
+        (None, "geometry_thin_walled") => vec![p.thin_walled],
         (None, "geometry_opacity") => vec![p.geometry_opacity],
         (None, "ambient_occlusion") => vec![p.ambient_occlusion],
         (None, "normal_scale") => vec![p.normal_scale],

@@ -164,15 +164,19 @@ energy_policy = "coupled"
 view = "invariant"
 
 [[core.field]]
-name = "thin_walled"
+name = "geometry_thin_walled"
 type = "f32"
 bit_region = "KHR"
 pack_slot = 17
 consumed_by = ["unpack", "sample", "golden"]
-# OpenPBR `geometry_thin_walled`: a thin-walled (open) surface refracts at a
-# single interface with no volume behind it, so the transmission lobe skips the
-# Beer-Lambert depth attenuation. 0.0 (the default) keeps the solid-slab path,
-# so this reuses a former core padding word and preserves existing behaviour.
+# The `OpenPBR` identifier is `geometry_thin_walled` (a boolean in the spec, an
+# `f32` 0/1 flag here so it packs into a core word); Prism's decoded fat struct
+# keeps the historical short name `thin_walled`. A thin-walled (open) surface
+# refracts at a single interface with no volume behind it, so the transmission
+# lobe skips the Beer-Lambert depth attenuation. 0.0 (the default) keeps the
+# solid-slab path, so this reuses a former core padding word and preserves
+# existing behaviour.
+surface_field = "thin_walled"
 default = 0.0
 valid = "0.0..=1.0"
 energy_policy = "none"
