@@ -6,6 +6,7 @@ extern crate alloc;
 
 mod authoring;
 mod axis;
+pub mod bake;
 #[cfg(feature = "bevy")]
 mod bevy_bridge;
 pub mod capability;
@@ -34,7 +35,11 @@ mod texture_upsample;
 mod validation;
 
 pub use authoring::FACE_SHADOW_SDF_SEMANTIC;
-pub use axis::{Illumination, SpecializationId};
+pub use axis::{BIN_CLASS_BITS, Illumination, SpecializationId};
+pub use bake::{
+    bake_layer_stack, sanitize_weight, ConstantMask, LayerParams, LayerStack, LayerWeights,
+    MaskSource, PageBake, TexelCoord,
+};
 #[cfg(feature = "bevy")]
 pub use bevy_bridge::{
     import_openpbr_surface, import_standard_material, StandardMaterialTextureResolver,

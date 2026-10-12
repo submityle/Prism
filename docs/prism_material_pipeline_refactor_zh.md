@@ -436,6 +436,16 @@ PCM 的全部治理机器（命名空间解析、能力协商、used/required、
 - 混合的是**同一套 über 参数**（base_color/metallic/roughness/…）的 lerp，**无损、线性、可预期**：和"把 clearcoat 近似并进 base"那种异构瓣塌缩完全不同——这里全程同一参数化，插值就是插值，不发明新模型。
 - 瓣存在性（如某层有 coat、某层没有）通过遮罩加权后决定该纹素的 `lobe_mask`：有能量的瓣进 mask，驱动静态置换。
 
+**已落地（P1-c part 2，`pkg/prism_render_material/src/bake.rs`）**：`bake_layer_stack` + `LayerStack`（`bake_texel` / `bake_page`）把上式做实，并把"归一"的口径钉成三条可测规则：
+
+1. **权重**：`w_i = coverage_i × mask_i(纹素)`，统一过 `sanitize_weight`（非有限 / 非正 ⇒ 0，即该层在该纹素不存在）。
+2. **逐瓣归一（不是全局归一）**：核心字段在所有有贡献的层上归一；每个**可选瓣**只在**声明了它的**层上归一。于是"某层没有 coat"绝不会把 coat 的**形状**参数（`coat_ior` / `coat_roughness` / `coat_color`…）往中性默认拖——半覆盖的 coat 仍是 `ior 1.9 / roughness 0.4` 的 coat，只是 `coat_weight` 减半。这既是上式在"瓣拥有的参数"上的字面读法，也是唯一物理上讲得通的读法（把 `coat_ior` 当能量去插值没有意义）。
+3. **存在性 = 并集**：瓣位在"存在某正权重层声明它"时置位，`to_full()` 据此丢弃缺席瓣的值（缺席瓣**永不**进 `pack()`，故不影响 ABI）。唯一的值派生例外是 `ANISOTROPY`：与单层路径 `MaterialRecord::lobe_mask` **同一条规则**——混合后 `anisotropy` / `anisotropy_rotation` 全为 0 则清位（一个叠到各向同性的层栈不该白白背一个各向异性置换）。
+
+**单层恒等（烘焙不发明任何一位）**：`bake_layer_stack(&[layer], &[1.0]) == (layer, layer.lobe_mask)`——**逐位**相等，连"死瓣"（位为 0、`pack`/`to_full` 都不看、但 `from_full` 刻意原样保留以便检视的字段）与填充 word 都一致。由此**块的字节与"是否经过烘焙"无关**，材质块可安全哈希 / 去重，烘焙路径与直接路径可互换（门禁用真实 `MaterialRecord` 断言到 `pack()` 字节）。
+**未覆盖纹素**（所有 `w_i == 0`）烘成**中性面**（`SurfaceParameterBlock::default`：规范默认参数 + 空 mask），不是残留或半混的块。
+**页级产出**：`bake_page` 逐纹素回吐块，并返回 `PageBake { mask, uniform, uncovered_texels }`——`mask` 是页内**并集**（= 材质静态特化 key，任一纹素的瓣都不会被丢），`uniform` 说明是否真的逐纹素一致，`uncovered_texels` 是"未上色 UV 区"的作者侧信号。
+**成本**：`f64` 累加 + 调用方持有的 scratch，逐纹素**零分配**；`f64` 求和让深层栈精确（相对误差远低于 `f32` 分辨率，`n` 层同值的均值原值回绕），且给定层序后**逐位确定**（可缓存 / 可哈希）。
 ### 6.2 产出：开放 über 参数块
 - 规范化产物是**一个变长 OpenPBR über 参数块**（扩展现 `SurfaceParameterBlock` 变长打包为 OpenPBR 全字段 lobe，§4.4）+ `lobe_mask` + VT 页引用。瓣集按材质实际声明，**不受固定 7 瓣上限约束**；OpenPBR 的 base/specular/coat/fuzz/subsurface/transmission/emission/thin_film 各组按需进 mask。
 - 没有 `lod_ladder`、没有 `TierPlan`、没有 `SlabOp`、没有 `MAX_*` 封顶。
@@ -468,6 +478,10 @@ MaterialX/OpenPBR 的程序化节点（noise/curve/blend）在烘焙期**烘到�
 - **高光抗锯齿**（Toksvig / LEAN）：把 mip 下采样丢失的法线细节转成等效 roughness 增量，远处高光不闪烁。
   `α_eff² = α² + 2·σ_normal²`（σ 由法线 mip 的方差估计）。
 - 这替代了塌缩里"法线聚合"的角色，但不改模型、不改瓣数。
+
+**已落地（P1-a 第一片：解析式逐像素纹理 LOD，见 §13.a）**：上面的"带宽随距离下降"在运行层曾有个硬缺口——材质 resolve 是**计算 dispatch**，没有 `dpdx/dpdy`，于是所有材质贴图都用 `textureSampleLevel(..., 0.0)` 采样：任何距离都是满带宽 + 满走样，正好与 §7.1 相反。补法不是"估一个 LOD"，而是**解析求**：resolve 本来就有三角形的三个顶点（位置 + UV）与本帧的 `clip_from_world`，把它们投影到屏幕即可得到屏幕空间三角形，重心坐标在三角形上仿射，所以它的梯度是常量——由 2×2 屏幕边矩阵求逆直接得到精确的 `dUV/dx` / `dUV/dy`，再按标准 GPU 规则 `lod = log2(max(‖dUV/dx·dims‖, ‖dUV/dy·dims‖))` 取级（**按每张贴图自己的尺寸**，所以同一材质上的 256² 查询表和 4K 反照率各自走各自的 mip）。CPU 金标准 `prism_render_shading::texture_lod` 与 WESL 孪生 `material_sample.wesl::prism_uv_gradients` / `prism_texture_lod` 逐式同序，并由**真机 GPU 对拍门禁**（`prism_render_material_gpu/tests/texture_lod_gpu_parity.rs`，直接从 `material_sample.wesl` 抽源码编译）覆盖缩放 / 旋转 / 剪切 / 非方形贴图 / 退化三角形 / 非有限输入。
+
+两点是实测踩出来的，写进代码注释：① **退化三角形**（|det| ≤ 1e-6 px²）与**顶点在眼后**都回落到 mip 0——这正是补丁之前的行为，所以这个改动只可能消除走样/带宽，不可能改变一个正常表面的材质；② 非有限输入必须用**范围比较**（`x > -1e37 && x < 1e37`）而不是 `(x - x) == 0` 这类有限性惯用法——Metal 的 fast-math 会把后者折成常量，实测导致无限 UV 采样出无限 LOD（真机对拍抓到并钉死）。
 
 ### 7.2 性能 LOD = 静态置换 + 采样缩放（无损 / 可控）
 - **静态特征置换**：按 `lobe_mask` 编译期裁掉用不到的瓣（没有 clearcoat 的材质不编 clearcoat 分支）。这是"界"的真正所在——每材质编译成它的确切瓣集，无损,确定。
@@ -608,9 +622,9 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 |---|---|---|---|
 | P0-a | 多散射能量补偿 + furnace CI 门禁 | 无（改 BSDF+测试） | P0 |
 | P0-b | 高光抗锯齿（Toksvig/LEAN）接入 über | 无 | P0 |
-| P1-a | 距离 LOD 全面切到 VT mip（删 `MAX_MATERIAL_TEXTURES`） | 纹理段改 VT 页引用 | P1 |
+| P1-a | 距离 LOD 全面切到 VT mip（`MAX_MATERIAL_TEXTURES` 已随 P1-c 删除）。**第一片：解析式逐像素纹理 LOD 已落地**（compute resolve 无导数 → 由三角形投影解析求 `dUV/dx`/`dUV/dy`，逐贴图取级；真机 GPU 对拍门禁），见 §7.1 / §13.a | 纹理段改 VT 页引用 | P1 |
 | P1-b ✅ | ABI v5：header/分类 shader 字段同步（变长 über，无 tier/MAX）；Rust `GpuMaterialHeader` 与 5 处 WESL 镜像**逐字段同名同序**，平价门禁 `tests/material_header_abi.rs`（已落地，见 §13.a） | **破坏性 v4→v5**（版本标记已随 P1-f 首发 v5-only 字段 bump 到 5，见 §13.a；本项补 header/分类侧） | P1 |
-| P1-c ✅ | 烘焙层：分层 → 纹理空间混合 → 开放 über（删闭包图/所有硬顶）；两处硬顶（闭包 slab 深度、纹理槽数）已删，GPU 纹理表改为变长行堆（已落地，见 §13.a） | 内部，删 `MAX_CLOSURE_SLAB_DEPTH` / `MAX_MATERIAL_TEXTURES` | P1 |
+| P1-c ✅ | 烘焙层：分层 → 纹理空间混合 → 开放 über（删闭包图/所有硬顶）；两处硬顶（闭包 slab 深度、纹理槽数）已删，GPU 纹理表改为变长行堆；分层混合 `bake_layer_stack` / `LayerStack`（任意层数、逐瓣归一、单层逐位恒等、逐纹素零分配）已落地（见 §13.a） | 内部，删 `MAX_CLOSURE_SLAB_DEPTH` / `MAX_MATERIAL_TEXTURES` | P1 |
 | P1-d | 置换治理：内容哈希去重 + 按需编译 + über 回退 | 工具链/PSO 缓存 | P1 |
 | P1-e | 贵瓣采样数按画质档缩放（SSS/透射/多散射） | 无（pass uniform） | P1 |
 | P1-f | über 参数块规范化到 **OpenPBR Surface** 瓣序（补 base_weight/specular_color/coat_color/subsurface_radius 等字段，删 `lower_standard_material`） | 内部布局（随 v5） | P1 |
@@ -641,6 +655,14 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 **✅ 已完成**
 
+- **P1-a 第一片：解析式逐像素纹理 LOD（compute resolve 的 mip 选择）**（§7.1 / §10）
+  - **问题（code-truth）**：材质 resolve 是计算 dispatch，拿不到硬件导数，`sample_texture_slot` 一直用显式 `textureSampleLevel(..., 0.0)` —— 材质贴图**在任何距离都采 mip 0**，即满带宽 + 满走样，与 §7.1"带宽随距离下降"正好相反。
+  - **做法（解析而非估计）**：resolve 已有三角形三顶点（位置 + UV）与本帧 `clip_from_world`；投影到屏幕后，重心坐标在三角形上仿射 ⇒ 其梯度是常量，由 2×2 屏幕边矩阵求逆得到精确 `dUV/dx` / `dUV/dy`，再按标准 GPU 规则 `lod = log2(max(‖dUV/dx·dims‖, ‖dUV/dy·dims‖))` 取级。`dims` 用**每张贴图自己**的 `textureDimensions`，所以同一材质上的 256² 查询表与 4K 反照率各自走各自的 mip 链。
+  - **代码**：CPU 金标准 `pkg/prism_render_shading/src/texture_lod.rs`（`texture_uv_gradients` / `texture_lod` / `triangle_lod`，9 条单测）；WESL 孪生 `pkg/prism_render_scene/src/shaders/material_sample.wesl`（`prism_uv_gradients` / `prism_texture_lod` / `prism_lod_in_range`）与 `sample_texture_slot(record, uv, lod)`；消费点是 `shading_resolve.wesl` 的材质贴图折叠循环。**face-shadow SDF 显式保持 mip 0**（它是几何项用的*蒙版*，被 mip 模糊后是另一个形状的项，而非"更平滑的蒙版"，注释写明）；`ssr_repack.wesl` 保持 mip 0 并注明原因（该 pass 的 uniform 只有 `view_from_world`、没有投影矩阵，取不到屏幕足印；它是次级、时序重投影消费者）。
+  - **两处实测坑（都写进代码注释并由门禁钉死）**：① 退化三角形（|det| ≤ 1e-6 px²）与眼后顶点回落到 mip 0 —— 正是补丁之前的行为，所以此改动只可能减少走样/带宽，不可能改变正常表面的材质；② 非有限输入必须用**范围比较** `x > -1e37 && x < 1e37`，`(x - x) == 0` 这类有限性惯用法会被 Metal 的 fast-math **折成常量**，实测让无限 UV 采出无限 LOD（真机对拍当场抓到）。
+  - **真机门禁**：`pkg/prism_render_material_gpu/tests/texture_lod_gpu_parity.rs` 从 `material_sample.wesl` **抽取真实函数源码**编译成 compute shader，在真机上跑缩放 / 旋转 / 剪切 / 非方形 / 退化 / 非有限输入的网格，与 CPU 金标准对拍（梯度 ≤1e-6 相对、LOD ≤1e-4；非有限输入要求两侧走**同一分支**）。
+  - 门禁：`prism_render_shading --lib` **3342**、`prism_render_scene --lib` **1602**（WESL 全 specialization 编译+链接）、真机 GPU `texture_lod_gpu_parity` **1 通过**（越沙盒 `PRISM_REQUIRE_GPU=1`）。
+
 - **P1-b：ABI v5 header/分类侧对齐 + 一处真实语义漂移的修复 + 逐字段平价门禁**（§8.2 / §8.3）
   - 这是 P1-f 首发 v5-only 字段之后、在**同一个 5** 上补齐 header/分类侧的工作（不再重复 bump）：`GpuMaterialHeader` 的每个 word 与 5 处 WESL `MaterialHeader` / `PrismMaterialHeader` 镜像（`material.wesl` + `opaque.wesl` / `transparent.wesl` / `visibility.wesl` / `material_classification.wesl`）**逐字段同名同序**，绑定位布局一致。
   - **真实漂移（已修）**：Rust ABI 字段写作 `active`，而 WESL 镜像**必须**写作 `is_active`——`active` 是 WGSL **保留字**，naga 直接以 `use of a reserved word` 拒绝编译（`prism_opaque.wesl`）。若只改一侧，要么编译不过，要么（更糟）**位置绑定静默错位**：WESL 按**位置**绑定 storage 字段。统一为 `is_active`（Rust 同步改名，行布局不变）。
@@ -653,6 +675,13 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - **GPU 侧纹理由定长数组升级为变长行堆**：`prism_render_scene/material/buffers.rs` 的纹理表改由第二个 `ParameterHeap` 子分配的**变长行堆**（与参数 word 堆同一套机制），header 用 `texture_offset` / `texture_count` 寻址自己那一段——一个材质可引用**无上限**的 bindless 槽位。着色器早已按 `material_textures[texture_offset .. +texture_count]` 读，故**无需改 shader**。材质退役时行归还空闲表（无泄漏）。
   - **删闭包图（运行时彻底无图）**：header 的 `closure_graph_offset` 字段**删除**。它此前恒为 `0`、无任何 shader 读取、也没有对应的 blob buffer（源码注释直言 "no serialized closure-graph blob buffer yet"，是**占位**）。§6.2 要求"运行时没有图"，§8.5 要求唯一执行路径——deferred/RT 消费者与光栅路径评**同一个**打包 über `SurfaceParameterBlock`，只是光照来源切换——所以 header 不该、也不需要携带图引用。全链同步：Rust 字段 + `header()` 形参 + 5 处 WESL 镜像 + 两处诊断调用点；header 由 24 word 收为 **23 word = 92 B**（存储缓冲数组只需元素自然对齐，且更密集）。
   - 门禁：`prism_render_material --lib` **827**、`prism_render_scene --lib` **1602**、`prism_render_shading --lib` **3333** 全绿（commit 时计数）。
+
+- **P1-c part 2：分层解析为纹理空间混合（`bake_layer_stack` / `LayerStack` / `bake_page`）**（§6.1 / §6.2）
+  - 新增 `pkg/prism_render_material/src/bake.rs`：`bake_layer_stack(layers, weights)` 是纯函数核心（`&[SurfaceParameterBlock]` + 平行权重切片，全 `f32` lane 按 `Group` 分组混合）；`LayerParams` / `LayerStack` 是作者侧外壳——`LayerParams::from_record` 直接吃 `MaterialRecord`，`push` 时把胖视图**投影一次**（`from_full`），`bake_texel` / `bake_page` 逐纹素复用同一份权重 scratch。
+  - **口径**（§6.1 深化）：权重 = `coverage × mask` 采样过 `sanitize_weight`；**逐瓣归一**（可选瓣只在声明它的层上归一 ⇒ 未声明层不稀释瓣形状参数）；存在性 = 正权重层声明的**并集**；`ANISOTROPY` 位与单层路径同规则按**混合值**派生；未覆盖纹素 ⇒ **中性面**；`PageBake.mask` = 页内并集 = 材质静态特化 key。
+  - **单层逐位恒等**：`bake_layer_stack(&[layer], &[1.0]) == (layer, layer.lobe_mask)`（死瓣与填充 word 都一致）⇒ 块字节与"是否经过烘焙"无关，可哈希 / 去重。这条是**实现中被测试抓出来的一处真实不一致**：初版对缺席瓣写的是 `SurfaceParameterBlock::default()` 的中性值（如 `face.softness = 0.0`），而直接路径 `from_full` 保留胖值（`0.1`）——`pack()` / `to_full()` 都不看该字段（运行期行为相同），但块字节会分叉、哈希与去重会失配。已改为"有覆盖时以底层层的视图起手"，并把 mask **重置后**按混合结果重新置位（零权重层的声明不会泄漏）。
+  - **性能 / 精度姿态**：`f64` 累加 + 逐纹素零分配（`LayerStack` 权重 scratch 容量在烘焙中恒定，有断言）、`n` 层同值均值**原值回绕**（3 万层用例）、给定层序**逐位确定**。
+  - 门禁：`bake::tests` **12** 项（单层恒等含死瓣字节 / **逐字段中点平价**（与独立算出的中点逐 lane 比对，漏掉任何字段即红）/ 未声明层不稀释 / 并集存在性 / 未覆盖中性 / `NaN`·负·∞ 权重当 0 / 各向异性位随值 / 3 万层深栈精确且 scratch 不增长 / 页并集·uniform·未覆盖计数 / 权重规则逐位）；`cargo test -p prism_render_material` **848** + 集成门禁（`material_header_abi` / `pcm_parity` / `schema_parity` / `codegen_freshness`）全绿，`clippy -p prism_render_material --all-targets` 对该文件零告警。
 
 - **P1-h 第一片：PCM 地基落地（lobe 类迁入注册表 + 能力协商 + header 4 word 摘要）**（§5 / §5.3 / §8.2）
   - **schema 先行**：`surface.toml` 每条 `[[lobe]]` 加 `requires_caps`，并把 `stability` 收敛为规范口径的三级（`experimental` / `candidate` / `stable`，此前 schema 里的 `draft` / `deprecated` 与 PCM 注册表的词汇表**不一致**，已删除）。codegen 把两者都烘进 `LobeLayout`（`stability` + `requires_caps`），生成物 `surface_layout.rs` 重生成、`material_unpack.wesl` 无变化。
@@ -996,7 +1025,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 门禁：`cargo test -p prism_render_shading --lib glint`（glint CPU 全绿）、`--lib measured_brdf`（18 通过）、`cargo test -p prism_render_scene --lib shading::glint` / `shading::measured_brdf`（link 各 1 通过）；全量 `-p prism_render_shading --lib` 3257 通过。
   - **ABI 接入已具备路径**：`thin_film` 已按"新 lobe = 新 `LobeMask` 位（KHR 低位段）+ 变长字段块 + `prism_unpack_surface` 低位优先聚集"走通（且是规范段新增位、私有瓣走 `EXTENSION_SLOT_BASE = 16` 起的扩展段，由 schema 验证器强制）；开放的 glint / 测量 BRDF 瓣按同一路径接入即可（P2-c）。
 
-**⬜ 未开始（见上表）**：P1-a、P1-d、P2-a~P2-c、P2-e、P2-g、P2-i、P2-j、P3-a~P3-d（**P1-b / P1-c / P1-f / P1-f2 / P1-g 已完成**，见 §13.a）。**P1-h 第一片已完成**（lobe 类迁入 PCM 注册表 + 能力协商 + header 4 word 摘要，见 §13.a），余下的是同一路线图里的**其余八类 kind**（channel / response-mode / transfer / cache-aux / provider / downgrade / author-node / composite）逐类迁入——其中 response-mode 是唯一动热路径结构的项（P2-j，单独立项）；channel 一类已在内置目录中登记（`wetness`/`snow`/`damage`/`dissolve`），但尚未接到运行期参数通道（归 P2-g）。开放瓣（glint / 测量 BRDF）的 CPU 金标准 + WESL 孪生已落地（见上「部分完成」），仅余其 über 开放词汇表 ABI 接入（归 P2-c）；P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（均见上「部分完成」）。
+**⬜ 未开始（见上表）**：P1-d、P2-a~P2-c、P2-e、P2-g、P2-i、P2-j、P3-a~P3-d（**P1-b / P1-c / P1-f / P1-f2 / P1-g 已完成**，见 §13.a）。**P1-a 第一片已完成**（解析式逐像素纹理 LOD：compute resolve 无导数 → 三角形投影解析求 `dUV/dx`/`dUV/dy` + 逐贴图取级 + 真机对拍，见 §7.1 / §13.a），余下的是"纹理段全面切到 VT 页引用"。**P1-h 第一片已完成**（lobe 类迁入 PCM 注册表 + 能力协商 + header 4 word 摘要，见 §13.a），余下的是同一路线图里的**其余八类 kind**（channel / response-mode / transfer / cache-aux / provider / downgrade / author-node / composite）逐类迁入——其中 response-mode 是唯一动热路径结构的项（P2-j，单独立项）；channel 一类已在内置目录中登记（`wetness`/`snow`/`damage`/`dissolve`），但尚未接到运行期参数通道（归 P2-g）。开放瓣（glint / 测量 BRDF）的 CPU 金标准 + WESL 孪生已落地（见上「部分完成」），仅余其 über 开放词汇表 ABI 接入（归 P2-c）；P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（均见上「部分完成」）。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 
@@ -1204,9 +1233,23 @@ pub struct BakedMaterial {
     pub specialization: SpecializationId,// illumination/closure_mask/render_class（无 tier/MAX）
 }
 
-// 烘焙期分层混合（同参数化 lerp，无损；离线、可预览；任意层数）
-pub fn bake_layer_stack(layers: &[LayerParams], masks: &[MaskSource])
-    -> (SurfaceParameterBlock, LobeMask);
+// bake.rs —— 烘焙期分层混合（同参数化 lerp，无损；离线、可预览；任意层数）
+// 权重 = coverage × mask 采样，统一过 sanitize_weight（非有限 / 非正 ⇒ 0）
+pub fn bake_layer_stack(
+    layers: &[SurfaceParameterBlock], // 已投影的分层块（LayerParams::into_block）
+    weights: &[f32],                  // 每层一个权重，与 layers 平行
+) -> (SurfaceParameterBlock, LobeMask);
+
+// 作者侧外壳：持有分层块 + 复用的权重 scratch（逐纹素零分配）
+pub struct LayerStack { /* .. */ }
+impl LayerStack {
+    pub fn bake_texel<M: MaskSource + ?Sized>(&mut self, shade: &M, texel: TexelCoord)
+        -> (SurfaceParameterBlock, LobeMask);
+    pub fn bake_page<M: MaskSource + ?Sized>(
+        &mut self, shade: &M, size: [u32; 2],
+        emit: impl FnMut(u32, u32, SurfaceParameterBlock), // 行主序回吐，落点由调用方定
+    ) -> PageBake;                        // { mask: 页内并集, uniform, uncovered_texels }
+}
 ```
 
 ```rust
