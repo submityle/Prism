@@ -256,6 +256,29 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         }
     }
 
+    /// Iterate a caller-provided entity list with exclusive access, permitting
+    /// `&mut T`. A repeated id yields
+    /// [`QueryEntityError::AliasedMutability`] rather than a second `&mut` into
+    /// the same row.
+    #[inline]
+    pub fn iter_many_mut<I>(&mut self, entities: I) -> QueryManyIter<'_, '_, D, F, I::IntoIter>
+    where
+        I: IntoIterator<Item = Entity>,
+    {
+        // SAFETY: `&mut self` makes this the sole live borrow of the query, and
+        // the system's declared write access guarantees nothing else touches the
+        // columns we write; the iterator's duplicate guard keeps each row
+        // fetched at most once.
+        unsafe {
+            self.state.iter_many_mut_from_ptr(
+                self.world.as_ptr(),
+                entities,
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
+    }
+
     /// Visit every matched row with shared access.
     #[inline]
     pub fn for_each(&self, mut f: impl FnMut(D::Item<'_>))

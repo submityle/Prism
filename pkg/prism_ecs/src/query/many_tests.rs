@@ -205,3 +205,43 @@ fn iter_many_size_hint_is_exact() {
     assert_eq!(iter.size_hint(), (2, Some(2)));
     assert_eq!(iter.count(), 2);
 }
+
+#[test]
+fn iter_many_mut_writes_each_listed_entity_in_list_order() {
+    let mut w = World::new();
+    let a = w.spawn(Pos(1));
+    let b = w.spawn(Pos(2));
+    let c = w.spawn(Pos(3));
+
+    let state = w.query::<&mut Pos>();
+    for (index, item) in state
+        .iter_many_mut(&mut w, [c, a, b])
+        .enumerate()
+    {
+        let mut p = item.expect("all three match");
+        p.0 += 10 * (index as i32 + 1);
+    }
+
+    // List order c, a, b ⇒ +10, +20, +30.
+    assert_eq!(w.get::<Pos>(c).map(|p| p.0), Some(13));
+    assert_eq!(w.get::<Pos>(a).map(|p| p.0), Some(21));
+    assert_eq!(w.get::<Pos>(b).map(|p| p.0), Some(32));
+}
+
+#[test]
+fn iter_many_mut_rejects_a_duplicate_id() {
+    let mut w = World::new();
+    let a = w.spawn(Pos(1));
+    let b = w.spawn(Pos(2));
+
+    let state = w.query::<&mut Pos>();
+    let results: Vec<_> = state.iter_many_mut(&mut w, [a, b, a]).collect();
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].as_ref().map(|p| p.0), Ok(1));
+    assert_eq!(results[1].as_ref().map(|p| p.0), Ok(2));
+    // The second `a` is refused instead of aliasing the first `&mut`.
+    assert!(matches!(
+        results[2],
+        Err(QueryEntityError::AliasedMutability(e)) if e == a
+    ));
+}

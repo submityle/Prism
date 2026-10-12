@@ -506,3 +506,35 @@ fn reinitializing_a_system_for_a_new_world_resets_its_change_window() {
         "B's pre-existing spawn must be seen after re-initializing for B"
     );
 }
+
+/// `Query::iter_many_mut` walks a system-provided id list with exclusive access
+/// and refuses a repeated id instead of handing out a second `&mut`.
+#[test]
+fn query_param_iter_many_mut() {
+    use crate::query::QueryEntityError;
+
+    let mut world = World::new();
+    let a = world.spawn(Health(1));
+    let b = world.spawn(Health(2));
+    world.insert_resource(Ids {
+        list: alloc::vec![a, b, a],
+    });
+
+    fn bump(ids: Res<Ids>, mut q: Query<&mut Health>) {
+        let mut saw_duplicate = false;
+        for item in q.iter_many_mut([ids.list[0], ids.list[1], ids.list[2]]) {
+            match item {
+                Ok(mut h) => h.0 += 10,
+                Err(QueryEntityError::AliasedMutability(_)) => saw_duplicate = true,
+                Err(other) => panic!("unexpected error: {other:?}"),
+            }
+        }
+        assert!(saw_duplicate, "the repeated id must be refused");
+    }
+
+    let mut sys = IntoSystem::into_system(bump);
+    sys.initialize(&mut world);
+    sys.run(&mut world);
+    assert_eq!(world.get::<Health>(a).map(|h| h.0), Some(11));
+    assert_eq!(world.get::<Health>(b).map(|h| h.0), Some(12));
+}

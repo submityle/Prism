@@ -612,6 +612,52 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         unsafe { QueryManyIter::new(self, world, last_run, this_run, entities.into_iter()) }
     }
 
+    /// Iterate a caller-provided entity list with exclusive access, permitting
+    /// `&mut T` (design §7 batched random access).
+    ///
+    /// The mutable dual of [`iter_many`](Self::iter_many). Because the items may
+    /// be `&mut`, a repeated id is **rejected**: the second occurrence yields
+    /// [`QueryEntityError::AliasedMutability`] instead of a second `&mut` into
+    /// the same row. Every other id is resolved exactly as
+    /// [`get_mut`](Self::get_mut) would resolve it.
+    #[inline]
+    pub fn iter_many_mut<'w, 's, I>(
+        &'s self,
+        world: &'w mut World,
+        entities: I,
+    ) -> QueryManyIter<'w, 's, D, F, I::IntoIter>
+    where
+        I: IntoIterator<Item = Entity>,
+    {
+        self.validate_world(world);
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
+        let world_ptr = world as *mut World;
+        // SAFETY: `world` is exclusively borrowed for `'w`, so the raw pointer is
+        // the sole route to it; the iterator's duplicate guard keeps each row
+        // fetched at most once, so its `&mut` items never alias.
+        unsafe { self.iter_many_mut_from_ptr(world_ptr, entities, last_run, this_run) }
+    }
+
+    /// Build a mutable many-entity iterator from a raw `*mut World`.
+    ///
+    /// # Safety
+    /// Identical to [`iter_many_from_ptr`](Self::iter_many_from_ptr), and the
+    /// caller must hold *exclusive* access to `world` for `'w`.
+    pub(crate) unsafe fn iter_many_mut_from_ptr<'w, 's, I>(
+        &'s self,
+        world: *mut World,
+        entities: I,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> QueryManyIter<'w, 's, D, F, I::IntoIter>
+    where
+        I: IntoIterator<Item = Entity>,
+    {
+        // SAFETY: the caller upholds the `QueryManyIter::new_dedup` contract.
+        unsafe { QueryManyIter::new_dedup(self, world, last_run, this_run, entities.into_iter()) }
+    }
+
     /// Random-access fetch of a single `entity` from a raw `*mut World`.
     ///
     /// Shared engine of [`get`](Self::get) / [`get_mut`](Self::get_mut) and the

@@ -24,6 +24,7 @@
 use core::marker::PhantomData;
 
 use crate::change::Tick;
+use crate::collections::HashMap;
 use crate::entity::Entity;
 use crate::query::fetch::{QueryData, ReadOnlyQueryData};
 use crate::query::filter::QueryFilter;
@@ -37,8 +38,12 @@ use crate::world::World;
 /// is live and satisfies the query this frame, `Err(QueryEntityError)`
 /// otherwise. Use [`matched`](Self::matched) to skip the failing entries.
 ///
-/// Created by [`QueryState::iter_many`](crate::query::QueryState::iter_many) and
-/// by the [`Query`](crate::system::Query) system parameter's `iter_many`.
+/// Created by [`QueryState::iter_many`](crate::query::QueryState::iter_many) /
+/// [`QueryState::iter_many_mut`](crate::query::QueryState::iter_many_mut) and by
+/// the [`Query`](crate::system::Query) system parameter's `iter_many` /
+/// `iter_many_mut`. The mutable form rejects a repeated id with
+/// [`QueryEntityError::AliasedMutability`] (two `&mut` items for one row would
+/// alias); the read-only form lets a repeat yield twice.
 pub struct QueryManyIter<'w, 's, D: QueryData, F: QueryFilter, I> {
     /// Resolved query state, borrowed so it stays reusable across iterations.
     state: &'s QueryState<D, F>,
@@ -50,6 +55,15 @@ pub struct QueryManyIter<'w, 's, D: QueryData, F: QueryFilter, I> {
     this_run: Tick,
     /// The caller's entity list.
     entities: I,
+    /// Entities already yielded, consulted only when [`dedup`](Self::dedup) is
+    /// set.
+    seen: HashMap<Entity, ()>,
+    /// Whether a repeated entity is rejected rather than yielded again.
+    ///
+    /// Set by the *mutable* constructor: two `&mut` items for one row would
+    /// alias, so a repeat becomes `Err(AliasedMutability)`. The read-only
+    /// constructor leaves it clear, where a repeat is harmless (shared refs).
+    dedup: bool,
     _marker: PhantomData<(&'w World, fn() -> (D, F))>,
 }
 
@@ -75,12 +89,42 @@ where
         this_run: Tick,
         entities: I,
     ) -> Self {
+        Self::build(state, world, last_run, this_run, entities, false)
+    }
+
+    /// Build a many-entity iterator that rejects repeated ids.
+    ///
+    /// # Safety
+    /// Same contract as [`new`](Self::new); additionally the caller must hold
+    /// *exclusive* access to `world` for `'w` (the mutable entry point), so the
+    /// `&mut` items this yields are unique.
+    pub(crate) unsafe fn new_dedup(
+        state: &'s QueryState<D, F>,
+        world: *mut World,
+        last_run: Tick,
+        this_run: Tick,
+        entities: I,
+    ) -> Self {
+        Self::build(state, world, last_run, this_run, entities, true)
+    }
+
+    #[inline]
+    fn build(
+        state: &'s QueryState<D, F>,
+        world: *mut World,
+        last_run: Tick,
+        this_run: Tick,
+        entities: I,
+        dedup: bool,
+    ) -> Self {
         Self {
             state,
             world,
             last_run,
             this_run,
             entities,
+            seen: HashMap::new(),
+            dedup,
             _marker: PhantomData,
         }
     }
@@ -100,7 +144,7 @@ where
 
 impl<'w, 's, D, F, I> Iterator for QueryManyIter<'w, 's, D, F, I>
 where
-    D: ReadOnlyQueryData,
+    D: QueryData,
     F: QueryFilter,
     I: Iterator<Item = Entity>,
 {
@@ -109,9 +153,15 @@ where
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let entity = self.entities.next()?;
-        // SAFETY: `D: ReadOnlyQueryData`, so `get_from_ptr` only forms shared
-        // fetches; the entry points guarantee the world is borrowed for `'w`
-        // (or reachable only under the scheduler's access discipline).
+        // The mutable constructor sets `dedup`, so a repeated id is refused
+        // before any fetch — without that guard two items could alias one row.
+        if self.dedup && self.seen.insert(entity, ()).is_some() {
+            return Some(Err(QueryEntityError::AliasedMutability(entity)));
+        }
+        // SAFETY: the entry points guarantee `world` is valid for `'w` and that
+        // this state belongs to it; the read-only constructor only ever forms
+        // shared fetches, while the mutable one has the duplicate guard above,
+        // so no two live items can alias one `(archetype, row)`.
         Some(unsafe {
             self.state
                 .get_from_ptr(self.world, entity, self.last_run, self.this_run)
