@@ -60,6 +60,15 @@ impl BlobVec {
         self.len
     }
 
+    /// Elements the backing allocation can hold before it must grow.
+    ///
+    /// Zero-sized element types report [`usize::MAX`]: they never allocate, so
+    /// there is no capacity to run out of.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Whether the column holds no elements.
     #[inline]
     pub fn is_empty(&self) -> bool {

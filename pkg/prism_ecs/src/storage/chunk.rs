@@ -113,6 +113,15 @@ impl ChunkVersions {
         self.rows_per_chunk
     }
 
+    /// Reserve room for the chunk windows of `additional_rows` future rows.
+    ///
+    /// Used by archetype prewarm so a first-frame spawn burst does not grow the
+    /// per-chunk version vector window by window.
+    pub(crate) fn reserve_rows(&mut self, additional_rows: usize) {
+        self.changed
+            .reserve(additional_rows.div_ceil(self.rows_per_chunk));
+    }
+
     /// Number of chunk windows currently tracked (`ceil(len / rpc)`).
     #[inline]
     pub fn chunk_count(&self) -> usize {

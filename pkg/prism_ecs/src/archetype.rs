@@ -137,6 +137,12 @@ impl Archetype {
     pub fn table_mut(&mut self) -> &mut Table {
         &mut self.table
     }
+
+    /// Reserve room for `additional` more rows in this archetype's table
+    /// (design §17 原型预热).
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.table.reserve(additional);
+    }
 }
 
 /// The canonical identity of an archetype: its non-shared [`ComponentSet`]

@@ -2225,6 +2225,68 @@ impl World {
             f(item);
         }
     }
+
+    /// Pre-allocate the archetype a `bundle` of type `B` lands in, so the first
+    /// frame that spawns a burst of them does not pay for growing columns
+    /// incrementally (design §17 原型预热).
+    ///
+    /// Creates the archetype if it does not exist yet and reserves room for
+    /// `entities` rows in every table column, the entity column, and the
+    /// per-chunk version windows. **No entity is spawned** and no hook, observer
+    /// or component constructor runs. Required components (design §16.1) are
+    /// included, so the warmed archetype is exactly the one a later spawn of the
+    /// same bundle targets.
+    ///
+    /// Returns the warmed [`ArchetypeId`].
+    ///
+    /// # Panics
+    /// Panics if `B` names a
+    /// [`shared`](crate::component::StorageType::Shared) component: a shared
+    /// component splits the archetype by its interned value, so which archetype
+    /// a spawn lands in is not knowable from the bundle type alone. Warm such a
+    /// bundle by spawning one entity (or by warming the specific shared value
+    /// through its own path).
+    pub fn prewarm<B: Bundle>(&mut self, entities: usize) -> ArchetypeId {
+        let mut ids = Vec::new();
+        B::component_ids(&mut self.components, &mut ids);
+        assert_eq!(
+            ComponentSet::from_ids(ids.iter().copied()).len(),
+            ids.len(),
+            "a bundle may not contain the same component type twice"
+        );
+
+        let required: Vec<(ComponentId, RequiredCtor)> = if self.components.has_required() {
+            self.collect_required(&ids)
+        } else {
+            Vec::new()
+        };
+        let mut all_ids = ids;
+        all_ids.extend(required.iter().map(|(id, _)| *id));
+
+        let storages = self.classify_storages(&all_ids);
+        assert!(
+            !storages.iter().any(|s| matches!(s, StorageType::Shared)),
+            "prewarm cannot resolve a shared component's archetype without a value; \
+             spawn one entity instead"
+        );
+        self.ensure_sparse_sets(&all_ids, &storages);
+
+        // Only table components fragment the archetype (design §6); sparse ids
+        // are routed out of band and shared ones were rejected above.
+        let table_set = ComponentSet::from_ids(
+            all_ids
+                .iter()
+                .zip(&storages)
+                .filter(|(_, s)| **s == StorageType::Table)
+                .map(|(id, _)| *id),
+        );
+        let archetype_id = self.archetypes.get_or_create(&table_set, &self.components);
+        self.archetypes
+            .get_mut(archetype_id)
+            .expect("archetype just created")
+            .reserve(entities);
+        archetype_id
+    }
 }
 
 mod relations;
@@ -2250,6 +2312,9 @@ pub mod snapshot;
 /// SharedComponent end-to-end behavioural regression tests (design §6).
 #[cfg(test)]
 mod shared_tests;
+
+#[cfg(test)]
+mod prewarm_tests;
 
 #[cfg(test)]
 mod tests {

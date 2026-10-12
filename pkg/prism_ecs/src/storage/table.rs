@@ -70,6 +70,29 @@ impl Column {
         self.data.is_empty()
     }
 
+    /// Rows this column can hold before its backing allocation must grow.
+    ///
+    /// The minimum of the value buffer and the two per-row tick vectors, so it
+    /// is a sound "no reallocation up to here" bound. Zero-sized components
+    /// report [`usize::MAX`] from the value buffer and are bounded by the tick
+    /// vectors instead.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.data
+            .capacity()
+            .min(self.added_ticks.capacity())
+            .min(self.changed_ticks.capacity())
+    }
+
+    /// Reserve room for `additional` more rows in the value buffer, both
+    /// per-row tick vectors, and the chunk-version windows (design §17 预热).
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.data.reserve(additional);
+        self.added_ticks.reserve(additional);
+        self.changed_ticks.reserve(additional);
+        self.chunk.reserve_rows(additional);
+    }
+
     /// Raw pointer to the component value at `row`.
     ///
     /// # Safety
@@ -378,6 +401,27 @@ impl Table {
     #[inline]
     pub fn len(&self) -> usize {
         self.entities.len()
+    }
+
+    /// Rows this table can hold before any of its allocations must grow.
+    ///
+    /// The minimum capacity across the entity column and every component column,
+    /// so it is a sound bound on "push this many rows without reallocating".
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.columns
+            .values()
+            .map(Column::capacity)
+            .fold(self.entities.capacity(), usize::min)
+    }
+
+    /// Reserve room for `additional` more rows in every column and the entity
+    /// column (design §17 原型预热).
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.entities.reserve(additional);
+        for column in self.columns.values_mut() {
+            column.reserve(additional);
+        }
     }
 
     /// Whether the table has no rows.
