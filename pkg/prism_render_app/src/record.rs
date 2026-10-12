@@ -3,7 +3,7 @@
 
 use prism_ecs::prelude::Resource;
 
-use crate::camera::RenderViewport;
+use crate::intent::RenderViewport;
 
 /// A snapshot of the render-relevant state pulled from the main world.
 ///
@@ -14,7 +14,7 @@ use crate::camera::RenderViewport;
 /// being fed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Resource)]
 pub struct RenderRecord {
-    /// The frame size requested by the main world's camera this frame.
+    /// The frame size requested by the main world's render intent this frame.
     pub viewport: RenderViewport,
     /// The number of frames extracted so far, counting this one.
     pub frame_index: u64,

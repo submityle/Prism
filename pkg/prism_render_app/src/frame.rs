@@ -22,7 +22,7 @@ pub const RENDER_TARGET_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 /// writes an externally-owned target whose result no in-graph consumer reads.
 ///
 /// The graph is sized to the target's viewport, so a resize in the main world
-/// (via [`RenderCamera`](crate::RenderCamera)) is reflected in the frame the
+/// (via [`RenderIntent`](crate::RenderIntent)) is reflected in the frame the
 /// graph describes.
 pub(crate) fn clear_target_graph(target: &RenderTarget) -> RenderGraph {
     let mut graph = RenderGraph::new(target.viewport().extent());

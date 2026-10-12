@@ -4,8 +4,8 @@ use prism_ecs::prelude::{Res, ResMut};
 use prism_ecs::world::World;
 use prism_render_driver::{FrameSync, Instance};
 
-use crate::camera::RenderCamera;
 use crate::frame;
+use crate::intent::RenderIntent;
 use crate::label::Render;
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
@@ -15,7 +15,7 @@ use crate::target::RenderTarget;
 /// The one-way extract step: publish the main world's render intent.
 ///
 /// Runs once per frame, before the render sub-app updates, with
-/// `(main_world, render_world)`. It reads the main world's [`RenderCamera`] and
+/// `(main_world, render_world)`. It reads the main world's [`RenderIntent`] and
 /// writes a [`RenderRecord`] into the render world, advancing the record's
 /// `frame_index` so the feed is observable.
 ///
@@ -26,7 +26,7 @@ use crate::target::RenderTarget;
 /// textures survive every extract.
 pub(crate) fn extract_render_record(main: &mut World, render: &mut World) {
     let viewport = main
-        .get_resource::<RenderCamera>()
+        .get_resource::<RenderIntent>()
         .copied()
         .unwrap_or_default()
         .viewport;

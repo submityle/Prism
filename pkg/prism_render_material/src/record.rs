@@ -50,6 +50,30 @@ pub enum MaterialRenderClass {
     Decal,
 }
 
+impl MaterialRenderClass {
+    /// Recovers a render class from its `repr(u32)` discriminant.
+    ///
+    /// The inverse of the `as u32` cast the GPU header stores, so a value read
+    /// back from a header (or decoded from a packed bin class) maps to the enum.
+    #[must_use]
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        Some(match value {
+            0 => Self::Opaque,
+            1 => Self::OpaqueTwoSided,
+            2 => Self::Masked,
+            3 => Self::MaskedTwoSided,
+            4 => Self::Transmissive,
+            5 => Self::Transparent,
+            6 => Self::Additive,
+            7 => Self::Volume,
+            8 => Self::Hair,
+            9 => Self::Water,
+            10 => Self::Decal,
+            _ => return None,
+        })
+    }
+}
+
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MaterialFeatureFlags(pub u32);
@@ -600,6 +624,44 @@ mod tests {
         assert_eq!(header.generation, 5);
         assert_eq!(header.is_active, 0);
         assert_eq!(header.custom_program, u32::MAX);
+    }
+
+    #[test]
+    fn render_class_round_trips_through_its_discriminant() {
+        let classes = [
+            MaterialRenderClass::Opaque,
+            MaterialRenderClass::OpaqueTwoSided,
+            MaterialRenderClass::Masked,
+            MaterialRenderClass::MaskedTwoSided,
+            MaterialRenderClass::Transmissive,
+            MaterialRenderClass::Transparent,
+            MaterialRenderClass::Additive,
+            MaterialRenderClass::Volume,
+            MaterialRenderClass::Hair,
+            MaterialRenderClass::Water,
+            MaterialRenderClass::Decal,
+        ];
+        for (value, class) in classes.into_iter().enumerate() {
+            assert_eq!(
+                class as u32, value as u32,
+                "{class:?} is the {value}th dense discriminant"
+            );
+            assert_eq!(
+                MaterialRenderClass::from_u32(value as u32),
+                Some(class),
+                "{class:?} round trips"
+            );
+        }
+        assert_eq!(
+            MaterialRenderClass::from_u32(classes.len() as u32),
+            None,
+            "unassigned rejected"
+        );
+        assert_eq!(
+            MaterialRenderClass::from_u32(u32::MAX),
+            None,
+            "garbage rejected"
+        );
     }
 
     #[test]

@@ -7,8 +7,8 @@ use prism_ecs::schedule::{IntoSystemConfigs, Schedule, Schedules};
 use prism_render_driver::{FrameSync, Instance};
 use prism_render_runtime::RenderRuntime;
 
-use crate::camera::RenderCamera;
 use crate::config::RenderAppConfig;
+use crate::intent::RenderIntent;
 use crate::label::{Render, RenderApp};
 use crate::pipeline_cache::PipelineCache;
 use crate::queue::RenderQueues;
@@ -33,7 +33,7 @@ use crate::views::{RenderViews, build_view_family};
 /// 2. creates the offscreen [`RenderTarget`] and the record/stats resources;
 /// 3. registers a [`Render`] schedule holding the frame system, driven each
 ///    frame from the render sub-app's `Last` phase;
-/// 4. installs the one-way extract that copies the main world's [`RenderCamera`]
+/// 4. installs the one-way extract that copies the main world's [`RenderIntent`]
 ///    into the render world.
 ///
 /// The plugin is generic over the backend, so a real app passes the shipped
@@ -157,7 +157,7 @@ where
         app.insert_sub_app(RenderApp, render);
 
         // The main world's authoritative render intent, and the one-way feed.
-        app.insert_resource(RenderCamera::from_extent(config.extent));
+        app.insert_resource(RenderIntent::from_extent(config.extent));
         app.set_extract(RenderApp, extract_render_record);
     }
 

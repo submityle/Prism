@@ -2,7 +2,7 @@
 
 use prism_ecs::prelude::Resource;
 
-use crate::camera::RenderViewport;
+use crate::intent::RenderViewport;
 
 /// Counters the render sub-app publishes about the work it has done.
 ///

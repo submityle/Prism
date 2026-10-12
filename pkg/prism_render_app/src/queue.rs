@@ -89,6 +89,20 @@ pub fn phase_for_render_class(class: MaterialRenderClass) -> RenderPhase {
     }
 }
 
+/// The phase a bin belongs to, from the material permutation / bin class the
+/// bin key carries.
+///
+/// A bin key stores the compact
+/// [`SpecializationId::bin_class`](prism_render_material::axis::SpecializationId::bin_class)
+/// (`illumination` 2 bits | `render_class` 8 bits | live lobe set), so the
+/// `render_class` — and therefore the phase — is recoverable without the
+/// material record. Returns `None` for an unassigned/foreign class value.
+#[must_use]
+pub fn phase_for_bin_class(bin_class: u32) -> Option<RenderPhase> {
+    let render_class = (bin_class >> 2) & 0xFF;
+    MaterialRenderClass::from_u32(render_class).map(phase_for_render_class)
+}
+
 /// One queued draw: the pipeline to bind plus the mesh/material it draws.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PhaseItem {

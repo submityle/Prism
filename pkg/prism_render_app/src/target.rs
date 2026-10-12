@@ -6,7 +6,7 @@ use prism_render_driver::{
     TextureViewDescriptor, TextureViewId,
 };
 
-use crate::camera::RenderViewport;
+use crate::intent::RenderViewport;
 
 /// The usages the frame target is created with.
 ///
@@ -23,7 +23,7 @@ pub(crate) const RENDER_TARGET_USAGES: TextureUsages = TextureUsages::RENDER_ATT
 ///
 /// It is an ordinary RHI texture imported into each frame graph, owned here so
 /// it survives across frames (the graph never allocates or frees it). The
-/// render system resizes it when the extracted camera asks for a different
+/// render system resizes it when the extracted intent asks for a different
 /// viewport.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Resource)]
 pub struct RenderTarget {

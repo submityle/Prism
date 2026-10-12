@@ -18,9 +18,9 @@
 //!   resource on the render sub-app's world, together with the offscreen frame
 //!   [`RenderTarget`] and per-frame [`RenderFrameStats`]. The main world never
 //!   names a device, a queue, or a texture.
-//! - **The main world only publishes intent.** A [`RenderCamera`] resource on
-//!   the main world is the single source of truth for the frame; the extract
-//!   step copies it into a [`RenderRecord`] on the render world.
+//! - **The main world only publishes intent.** A [`RenderIntent`] resource on
+//!   the main world is the single source of truth for the frame's size; the
+//!   extract step copies it into a [`RenderRecord`] on the render world.
 //! - **The render world renders.** A [`Render`] schedule holds the system that
 //!   builds and executes the frame graph, and a small driver in the render
 //!   sub-app's `Last` phase runs that schedule each frame.
@@ -56,10 +56,10 @@
 
 extern crate alloc;
 
-mod camera;
 mod config;
 mod draw;
 mod frame;
+mod intent;
 mod label;
 mod mesh_pipeline;
 mod mesh_draw;
@@ -79,16 +79,19 @@ mod views;
 #[cfg(test)]
 mod tests;
 
-pub use camera::{RenderCamera, RenderViewport};
 pub use config::RenderAppConfig;
 pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
 pub use frame::RENDER_TARGET_FORMAT;
+pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp};
 pub use mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer};
 pub use mesh_draw::{mesh_bin_draw, mesh_draw};
 pub use pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
 pub use plugin::PrismRenderPlugin;
-pub use queue::{DrawRequest, IndirectArgs, PhaseItem, RenderQueues, phase_for_render_class};
+pub use queue::{
+    DrawRequest, IndirectArgs, PhaseItem, RenderQueues, phase_for_bin_class,
+    phase_for_render_class,
+};
 pub use record::RenderRecord;
 pub use runtime_resource::RenderRuntimeResource;
 pub use scene::{MeshClass, SceneRegistry, VisibilityWorkList};
@@ -101,15 +104,16 @@ pub use views::RenderViews;
 /// Commonly used exports: the plugin, its labels, and the resources that cross
 /// the main-world/render-world boundary.
 pub mod prelude {
-    pub use crate::camera::{RenderCamera, RenderViewport};
     pub use crate::config::RenderAppConfig;
     pub use crate::draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
+    pub use crate::intent::{RenderIntent, RenderViewport};
     pub use crate::label::{Render, RenderApp};
     pub use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer};
     pub use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
     pub use crate::plugin::PrismRenderPlugin;
     pub use crate::queue::{
-        DrawRequest, IndirectArgs, PhaseItem, RenderQueues, phase_for_render_class,
+        DrawRequest, IndirectArgs, PhaseItem, RenderQueues, phase_for_bin_class,
+        phase_for_render_class,
     };
     pub use crate::record::RenderRecord;
     pub use crate::scene::{MeshClass, SceneRegistry, VisibilityWorkList};

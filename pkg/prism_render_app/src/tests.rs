@@ -12,8 +12,8 @@ use prism_render_driver::{CommandBuffer, Extent3d, ImageDataLayout, RenderQueue,
 use prism_render_driver_null::NullInstance;
 use prism_render_runtime::RenderRuntime;
 
-use crate::camera::{RenderCamera, RenderViewport};
 use crate::config::RenderAppConfig;
+use crate::intent::{RenderIntent, RenderViewport};
 use crate::label::{Render, RenderApp};
 use crate::plugin::PrismRenderPlugin;
 use crate::record::RenderRecord;
@@ -687,6 +687,41 @@ fn filling_the_queue_specializes_and_appends() {
     );
 }
 
+/// A bin's phase is recoverable from the bin class, and the two packings agree —
+/// a drift between `bin_class`'s layout and this decode would alias phases.
+#[test]
+fn phase_for_bin_class_round_trips_the_render_class() {
+    use prism_render_material::{Illumination, SpecializationId};
+
+    let cases = [
+        (MaterialRenderClass::Opaque, RenderPhase::Opaque),
+        (MaterialRenderClass::Hair, RenderPhase::Opaque),
+        (MaterialRenderClass::Transparent, RenderPhase::Transparent),
+        (MaterialRenderClass::Volume, RenderPhase::Custom),
+    ];
+    for (class, phase) in cases {
+        // `illumination` never selects a phase; vary it to prove independence.
+        for illumination in [
+            Illumination::Lit,
+            Illumination::Stylized,
+            Illumination::Unlit,
+            Illumination::Custom,
+        ] {
+            let spec = SpecializationId::new(illumination, 0, class as u32);
+            assert_eq!(
+                crate::phase_for_bin_class(spec.bin_class()),
+                Some(phase),
+                "{class:?} under {illumination:?} phases as {phase:?}"
+            );
+        }
+    }
+    assert_eq!(
+        crate::phase_for_bin_class(0x03FF_FFFF),
+        None,
+        "an unassigned class value is rejected, not guessed"
+    );
+}
+
 /// Surface draws are phased by blend family only — the illumination axis is a
 /// response, not a phase.
 #[test]
@@ -800,7 +835,7 @@ fn render_view_family_tracks_the_frame() {
 
     // A zero-sized frame disables the view but keeps its handle.
     app.world_mut()
-        .resource_mut::<RenderCamera>()
+        .resource_mut::<RenderIntent>()
         .viewport = RenderViewport::new(0, 0);
     app.update();
 
@@ -988,7 +1023,7 @@ fn extract_resizes_the_frame_target_from_the_main_world() {
     }
 
     let resized = RenderViewport::new(32, 96);
-    *app.world_mut().resource_mut::<RenderCamera>() = RenderCamera::new(resized);
+    *app.world_mut().resource_mut::<RenderIntent>() = RenderIntent::new(resized);
     app.update();
 
     let render = app.get_sub_app(RenderApp).expect("render sub-app");
@@ -1012,7 +1047,7 @@ fn extract_resizes_the_frame_target_from_the_main_world() {
 #[test]
 fn empty_viewport_skips_the_frame() {
     let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
-    *app.world_mut().resource_mut::<RenderCamera>() = RenderCamera::new(RenderViewport::new(0, 0));
+    *app.world_mut().resource_mut::<RenderIntent>() = RenderIntent::new(RenderViewport::new(0, 0));
     app.update();
 
     let render = app.get_sub_app(RenderApp).expect("render sub-app");
