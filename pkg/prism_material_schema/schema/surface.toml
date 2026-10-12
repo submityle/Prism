@@ -527,7 +527,7 @@ mask_const = "TRANSMISSION"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
-words = 4
+words = 8
 
 [[lobe.field]]
 name = "transmission"
@@ -573,6 +573,20 @@ default = 0.0
 valid = "0.0..=1.0"
 energy_policy = "none"
 view = "dependent"
+
+[[lobe.field]]
+name = "transmission_color"
+type = "vec4f"
+bit_region = "KHR"
+pack_slot = 4
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `transmission_color`: tint of the light refracted through the slab. It
+# multiplies the base albedo of the transmission term, so the default white is
+# the exact identity.
+default = [1.0, 1.0, 1.0, 1.0]
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
 
 [[lobe]]
 id = "face"

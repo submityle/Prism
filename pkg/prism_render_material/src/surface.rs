@@ -204,13 +204,30 @@ impl Default for GpuSubsurfaceLobe {
 }
 
 /// Transmission lobe: refractive dielectric transport (glass/liquid).
+///
+/// The `OpenPBR` transmission group. `transmission_color` tints the refracted
+/// light (white = identity).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuTransmissionLobe {
     pub transmission: f32,
     pub thickness: f32,
     pub index_of_refraction: f32,
     pub dispersion: f32,
+    /// `OpenPBR` `transmission_color` (white = identity).
+    pub transmission_color: [f32; 4],
+}
+
+impl Default for GpuTransmissionLobe {
+    fn default() -> Self {
+        Self {
+            transmission: 0.0,
+            thickness: 0.0,
+            index_of_refraction: 1.5,
+            dispersion: 0.0,
+            transmission_color: [1.0; 4],
+        }
+    }
 }
 
 /// Face-shadow lobe: stylized SDF-driven directional face shading (anime/toon).
@@ -459,6 +476,7 @@ impl SurfaceParameterBlock {
                 thickness: params.thickness,
                 index_of_refraction: params.index_of_refraction,
                 dispersion: params.dispersion,
+                transmission_color: params.transmission_color,
             },
             face: GpuFaceLobe {
                 softness: params.face_softness,
@@ -518,6 +536,7 @@ impl SurfaceParameterBlock {
             full.thickness = self.transmission.thickness;
             full.index_of_refraction = self.transmission.index_of_refraction;
             full.dispersion = self.transmission.dispersion;
+            full.transmission_color = self.transmission.transmission_color;
         }
         if self.lobe_mask.contains(LobeMask::FACE) {
             full.face_softness = self.face.softness;
@@ -670,6 +689,7 @@ mod tests {
             subsurface_radius: [1.0, 0.6, 0.4, 1.0],
             index_of_refraction: 1.33,
             dispersion: 0.05,
+            transmission_color: [0.85, 0.95, 1.0, 1.0],
             face_softness: 0.25,
             _pad_face0: 0.0,
             _pad_face1: 0.0,

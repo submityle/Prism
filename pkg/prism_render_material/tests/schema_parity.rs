@@ -48,6 +48,7 @@ fn authored() -> GpuSurfaceParameters {
         subsurface_radius: [1.0, 0.6, 0.4, 1.0],
         index_of_refraction: 1.33,
         dispersion: 0.05,
+        transmission_color: [0.85, 0.95, 1.0, 1.0],
         face_softness: 0.25,
         _pad_face0: 0.0,
         _pad_face1: 0.0,
@@ -91,6 +92,7 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
         (Some("transmission"), "thickness") => vec![p.thickness],
         (Some("transmission"), "index_of_refraction") => vec![p.index_of_refraction],
         (Some("transmission"), "dispersion") => vec![p.dispersion],
+        (Some("transmission"), "transmission_color") => p.transmission_color.to_vec(),
         (Some("face"), "softness") => vec![p.face_softness],
         other => panic!("schema field {other:?} has no authored binding"),
     }

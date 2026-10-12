@@ -184,10 +184,10 @@ fn slot_zero_is_a_live_principled_fallback() {
 #[test]
 fn gpu_material_rows_match_the_shader_abi() {
     assert_eq!(size_of::<GpuMaterialHeader>(), 80);
-    // The v5 coat/fuzz/base/specular groups plus subsurface_color and
-    // subsurface_radius grew the fat authoring view, with a trailing pad word
-    // keeping it a 16-byte multiple.
-    assert_eq!(size_of::<GpuSurfaceParameters>(), 224);
+    // The v5 coat/fuzz/base/specular/subsurface groups plus transmission_color
+    // grew the fat authoring view, with a trailing pad word keeping it a 16-byte
+    // multiple.
+    assert_eq!(size_of::<GpuSurfaceParameters>(), 240);
     assert_eq!(size_of::<GpuMaterialTexture>(), 16);
     assert_eq!(size_of::<GpuMaterialHeader>() % 16, 0);
     assert_eq!(size_of::<GpuSurfaceParameters>() % 16, 0);

@@ -73,6 +73,9 @@ struct SurfaceSample {
     dispersion: f32,
     // `OpenPBR` `geometry_thin_walled`: skip the transmission volume absorption.
     thin_walled: f32,
+    // `OpenPBR` `transmission_color`: tint of the refracted light (white =
+    // identity).
+    transmission_color: vec3<f32>,
     ambient_occlusion: f32,
     emissive: vec3<f32>,
     clearcoat: f32,
@@ -499,7 +502,10 @@ fn principled_direct(
             let f_light = fresnel_dielectric(n_dot_l, ior_c);
             var transmittance = 1.0;
             if !thin_walled {
-                transmittance = transmittance_pow(surface.base_color[c], thickness);
+                // `transmission_color` tints the slab (multiplied with the base
+                // albedo), so white is the exact identity.
+                let slab_color = surface.base_color[c] * surface.transmission_color[c];
+                transmittance = transmittance_pow(slab_color, thickness);
             }
             transmission_term[c] = transmission * (1.0 - f_view) * (1.0 - f_light) * transmittance;
         }

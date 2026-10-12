@@ -231,6 +231,7 @@ mod tests {
             subsurface_radius: [1.0, 0.6, 0.4, 1.0],
             index_of_refraction: 1.33,
             dispersion: 0.05,
+            transmission_color: [0.85, 0.95, 1.0, 1.0],
             face_softness: 0.25,
             _pad_face0: 0.0,
             _pad_face1: 0.0,

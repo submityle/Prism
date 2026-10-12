@@ -180,6 +180,8 @@ pub struct GpuSurfaceParameters {
     pub subsurface_radius: [f32; 4],
     pub index_of_refraction: f32,
     pub dispersion: f32,
+    /// `OpenPBR` `transmission_color`: tint of the refracted light.
+    pub transmission_color: [f32; 4],
     /// Stylized face-shadow terminator softness (FACE lobe). Padding keeps the
     /// fat authoring view 16-byte aligned; only `face_softness` is packed.
     pub face_softness: f32,
@@ -224,6 +226,7 @@ impl Default for GpuSurfaceParameters {
             subsurface_radius: [1.0; 4],
             index_of_refraction: 1.5,
             dispersion: 0.0,
+            transmission_color: [1.0; 4],
             face_softness: 0.1,
             _pad_face0: 0.0,
             _pad_face1: 0.0,

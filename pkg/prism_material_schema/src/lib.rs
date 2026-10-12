@@ -683,7 +683,7 @@ mod tests {
         // clearcoat (12) + anisotropy (4) + sheen (8) + subsurface (12, the
         // OpenPBR subsurface group) = 60 is the transmission base; the
         // transmission lobe then packs transmission, thickness,
-        // index_of_refraction, dispersion at 60..64.
+        // index_of_refraction, dispersion and transmission_color at 60..68.
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "transmission"),
             Some(60)

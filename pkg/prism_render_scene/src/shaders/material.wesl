@@ -56,6 +56,8 @@ struct PrismSurfaceParameters {
     subsurface_radius: vec4<f32>,
     index_of_refraction: f32,
     dispersion: f32,
+    // `OpenPBR` `transmission_color`: tint of the refracted light.
+    transmission_color: vec4<f32>,
     face_softness: f32,
 }
 

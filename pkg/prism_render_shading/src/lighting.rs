@@ -48,6 +48,10 @@ pub struct SurfaceSample {
     /// transmission lobe skips the Beer-Lambert volume absorption. `0.0` (the
     /// default) keeps the solid-slab path, so existing materials are unchanged.
     pub thin_walled: f32,
+    /// `OpenPBR` `transmission_color`: tint of the light refracted through the
+    /// slab. It multiplies the base albedo of the transmission term, so the
+    /// default white is the exact identity.
+    pub transmission_color: [f32; 3],
     pub ambient_occlusion: f32,
     pub emissive: [f32; 3],
     pub clearcoat: f32,
@@ -146,6 +150,7 @@ impl Default for SurfaceSample {
             index_of_refraction: 1.5,
             dispersion: 0.0,
             thin_walled: 0.0,
+            transmission_color: [1.0; 3],
             ambient_occlusion: 1.0,
             emissive: [0.0; 3],
             clearcoat: 0.0,
@@ -341,8 +346,15 @@ pub fn evaluate_principled_direct(
         let sigma_factor = if surface.thin_walled > 0.5 {
             [1.0; 3]
         } else {
+            // `transmission_color` tints the slab: the Beer-Lambert colour is the
+            // base albedo multiplied by it, so white is the exact identity.
+            let slab_color = [
+                surface.base_color[0] * surface.transmission_color[0],
+                surface.base_color[1] * surface.transmission_color[1],
+                surface.base_color[2] * surface.transmission_color[2],
+            ];
             crate::gi::translucency::transmission::transmittance_from_color(
-                bevy_math::Vec3::from_array(surface.base_color),
+                bevy_math::Vec3::from_array(slab_color),
                 surface.thickness,
                 1.0,
             )
@@ -1166,5 +1178,29 @@ mod tests {
             light(),
         );
         assert!((sum3(thin) - sum3(thin_zero_depth)).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn transmission_color_tints_the_refracted_light() {
+        // A unit-thickness slab with a white albedo transmits exactly its
+        // `transmission_color`, so a red tint keeps red and absorbs green/blue.
+        let base = SurfaceSample {
+            base_color: [1.0; 3],
+            transmission: 1.0,
+            thickness: 1.0,
+            ..Default::default()
+        };
+        let white = evaluate_principled_direct(base, frame(), light());
+        let red = evaluate_principled_direct(
+            SurfaceSample {
+                transmission_color: [1.0, 0.0, 0.0],
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        assert!(red[0] >= white[0] * 0.999, "red={red:?} white={white:?}");
+        assert!(red[1] < white[1] * 0.5, "green must be absorbed: {red:?} vs {white:?}");
+        assert!(red[2] < white[2] * 0.5, "blue must be absorbed: {red:?} vs {white:?}");
     }
 }
