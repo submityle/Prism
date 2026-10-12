@@ -386,6 +386,17 @@ impl RenderDevice for WgpuDevice {
         &self,
         descriptor: &rhi::BindGroupLayoutDescriptor,
     ) -> rhi::BindGroupLayoutId {
+        // wgpu encodes array-ness as `count`, so an RHI entry that declares an
+        // array type without a length (or the reverse) would silently change
+        // meaning under translation. Reject it instead of translating it.
+        for entry in &descriptor.entries {
+            if let Err(error) = entry.validate() {
+                panic!(
+                    "bind group layout entry @binding({}) is malformed: {error}",
+                    entry.binding
+                );
+            }
+        }
         let entries: Vec<wgpu::BindGroupLayoutEntry> = descriptor
             .entries
             .iter()
@@ -413,47 +424,83 @@ impl RenderDevice for WgpuDevice {
             let buffers = lock(&self.inner.buffers);
             let samplers = lock(&self.inner.samplers);
             let views = lock(&self.inner.texture_views);
+            let resolve_buffer = |id: rhi::BufferId| {
+                buffers
+                    .get(convert::convert_id(id))
+                    .expect("stale BufferId in bind group")
+                    .buffer
+                    .clone()
+            };
+            let resolve_sampler = |id: rhi::SamplerId| {
+                samplers
+                    .get(convert::convert_id(id))
+                    .expect("stale SamplerId in bind group")
+                    .clone()
+            };
+            let resolve_view = |id: rhi::TextureViewId| {
+                views
+                    .get(convert::convert_id(id))
+                    .expect("stale TextureViewId in bind group")
+                    .clone()
+            };
             descriptor
                 .entries
                 .iter()
                 .map(|entry| {
-                    let binding = match entry.resource {
+                    let binding = match &entry.resource {
                         rhi::BindingResource::Buffer {
                             buffer,
                             offset,
                             size,
                         } => OwnedBinding::Buffer {
-                            buffer: buffers
-                                .get(convert::convert_id(buffer))
-                                .expect("stale BufferId in bind group")
-                                .buffer
-                                .clone(),
-                            offset,
+                            buffer: resolve_buffer(*buffer),
+                            offset: *offset,
                             size: size.and_then(NonZeroU64::new),
                         },
-                        rhi::BindingResource::Sampler(sampler) => OwnedBinding::Sampler(
-                            samplers
-                                .get(convert::convert_id(sampler))
-                                .expect("stale SamplerId in bind group")
-                                .clone(),
+                        rhi::BindingResource::BufferArray(elements) => OwnedBinding::BufferArray(
+                            elements
+                                .iter()
+                                .map(|element| OwnedBufferRange {
+                                    buffer: resolve_buffer(element.buffer),
+                                    offset: element.offset,
+                                    size: element.size.and_then(NonZeroU64::new),
+                                })
+                                .collect(),
                         ),
-                        rhi::BindingResource::TextureView(view) => OwnedBinding::TextureView(
-                            views
-                                .get(convert::convert_id(view))
-                                .expect("stale TextureViewId in bind group")
-                                .clone(),
+                        rhi::BindingResource::Sampler(sampler) => {
+                            OwnedBinding::Sampler(resolve_sampler(*sampler))
+                        }
+                        rhi::BindingResource::SamplerArray(samplers) => OwnedBinding::SamplerArray(
+                            samplers.iter().map(|id| resolve_sampler(*id)).collect(),
                         ),
+                        rhi::BindingResource::TextureView(view) => {
+                            OwnedBinding::TextureView(resolve_view(*view))
+                        }
+                        rhi::BindingResource::TextureViewArray(views) => {
+                            OwnedBinding::TextureViewArray(
+                                views.iter().map(|id| resolve_view(*id)).collect(),
+                            )
+                        }
                     };
                     (entry.binding, binding)
                 })
                 .collect()
         };
 
-        let wgpu_entries: Vec<wgpu::BindGroupEntry> = owned
+        // wgpu borrows array elements as slices of handles, so build the
+        // per-binding scratch storage before the borrowed entry list. Both
+        // locals outlive `create_bind_group` below.
+        let scratch: Vec<BindingScratch<'_>> = owned
             .iter()
-            .map(|(binding, resource)| wgpu::BindGroupEntry {
+            .map(|(_, resource)| resource.scratch())
+            .collect();
+
+        let wgpu_entries: Vec<wgpu::BindGroupEntry<'_>> = owned
+            .iter()
+            .zip(&scratch)
+            .map(|((binding, resource), scratch)| wgpu::BindGroupEntry {
                 binding: *binding,
-                resource: resource.as_wgpu(),
+                resource: resource.as_wgpu(scratch),
             })
             .collect();
 
@@ -678,8 +725,23 @@ impl RenderDevice for WgpuDevice {
     }
 }
 
+/// One owned buffer range inside an owned buffer array.
+struct OwnedBufferRange {
+    /// The bound buffer.
+    buffer: wgpu::Buffer,
+    /// The byte offset into the buffer.
+    offset: u64,
+    /// The bound size, or `None` to bind to the end of the buffer.
+    size: Option<NonZeroU64>,
+}
+
 /// An owned binding resource, holding wgpu handles alive while the borrowed
 /// `wgpu::BindGroupEntry`s that reference them are assembled.
+///
+/// The array variants own a variable-length element list; their borrowed wgpu
+/// form is produced through [`BindingScratch`], because
+/// `wgpu::BindingResource::BufferArray`/`SamplerArray`/`TextureViewArray` are
+/// slices of borrowed handles rather than owned vectors.
 enum OwnedBinding {
     /// A buffer range binding.
     Buffer {
@@ -690,27 +752,97 @@ enum OwnedBinding {
         /// The bound size, or `None` to bind to the end of the buffer.
         size: Option<NonZeroU64>,
     },
+    /// A buffer-array binding (one element per `binding_array` slot).
+    BufferArray(Vec<OwnedBufferRange>),
     /// A sampler binding.
     Sampler(wgpu::Sampler),
+    /// A sampler-array binding.
+    SamplerArray(Vec<wgpu::Sampler>),
     /// A texture-view binding.
     TextureView(wgpu::TextureView),
+    /// A texture-view-array binding.
+    TextureViewArray(Vec<wgpu::TextureView>),
+}
+
+/// Borrowed element storage for one bind-group entry.
+///
+/// Built by [`OwnedBinding::scratch`] once the owned handles exist, and handed
+/// back to [`OwnedBinding::as_wgpu`] so the borrowed `wgpu::BindingResource`
+/// stays sound. The variant always matches the resource kind it was built from.
+enum BindingScratch<'a> {
+    /// The resource needs no borrowed element list.
+    None,
+    /// `wgpu::BufferBinding`s backing a buffer array.
+    Buffers(Vec<wgpu::BufferBinding<'a>>),
+    /// Borrowed samplers backing a sampler array.
+    Samplers(Vec<&'a wgpu::Sampler>),
+    /// Borrowed views backing a texture-view array.
+    Views(Vec<&'a wgpu::TextureView>),
 }
 
 impl OwnedBinding {
-    /// Borrows the owned handle as a `wgpu::BindingResource`.
-    fn as_wgpu(&self) -> wgpu::BindingResource<'_> {
+    /// Builds the borrowed element storage this binding needs.
+    fn scratch(&self) -> BindingScratch<'_> {
         match self {
-            Self::Buffer {
-                buffer,
-                offset,
-                size,
-            } => wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            Self::Buffer { .. } | Self::Sampler(_) | Self::TextureView(_) => BindingScratch::None,
+            Self::BufferArray(elements) => BindingScratch::Buffers(
+                elements
+                    .iter()
+                    .map(|element| wgpu::BufferBinding {
+                        buffer: &element.buffer,
+                        offset: element.offset,
+                        size: element.size,
+                    })
+                    .collect(),
+            ),
+            Self::SamplerArray(samplers) => BindingScratch::Samplers(samplers.iter().collect()),
+            Self::TextureViewArray(views) => BindingScratch::Views(views.iter().collect()),
+        }
+    }
+
+    /// Borrows the owned handle(s) as a `wgpu::BindingResource`, using the
+    /// element storage produced by [`Self::scratch`].
+    fn as_wgpu<'a>(&'a self, scratch: &'a BindingScratch<'a>) -> wgpu::BindingResource<'a> {
+        match (self, scratch) {
+            (
+                Self::Buffer {
+                    buffer,
+                    offset,
+                    size,
+                },
+                _,
+            ) => wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                 buffer,
                 offset: *offset,
                 size: *size,
             }),
-            Self::Sampler(sampler) => wgpu::BindingResource::Sampler(sampler),
-            Self::TextureView(view) => wgpu::BindingResource::TextureView(view),
+            (Self::BufferArray(_), BindingScratch::Buffers(elements)) => {
+                wgpu::BindingResource::BufferArray(elements)
+            }
+            (Self::Sampler(sampler), _) => wgpu::BindingResource::Sampler(sampler),
+            (Self::SamplerArray(_), BindingScratch::Samplers(samplers)) => {
+                wgpu::BindingResource::SamplerArray(samplers)
+            }
+            (Self::TextureView(view), _) => wgpu::BindingResource::TextureView(view),
+            (Self::TextureViewArray(_), BindingScratch::Views(views)) => {
+                wgpu::BindingResource::TextureViewArray(views)
+            }
+            (resource, _) => unreachable!(
+                "binding scratch does not match its resource kind: {}",
+                resource.kind_name()
+            ),
+        }
+    }
+
+    /// The resource kind, for assertion messages.
+    fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Buffer { .. } => "buffer",
+            Self::BufferArray(_) => "buffer array",
+            Self::Sampler(_) => "sampler",
+            Self::SamplerArray(_) => "sampler array",
+            Self::TextureView(_) => "texture view",
+            Self::TextureViewArray(_) => "texture view array",
         }
     }
 }

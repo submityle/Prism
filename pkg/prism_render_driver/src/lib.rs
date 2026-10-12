@@ -47,7 +47,8 @@ mod vertex;
 
 pub use binding::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
-    BindingResource, BindingType, BufferBindingType, SamplerBindingType, StorageTextureAccess,
+    BindGroupLayoutEntryError, BindingResource, BindingType, BufferBinding, BufferBindingType,
+    SamplerBindingType, StorageTextureAccess,
 };
 pub use blend::{BlendComponent, BlendFactor, BlendOperation, BlendState};
 pub use buffer::BufferDescriptor;

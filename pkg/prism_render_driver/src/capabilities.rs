@@ -12,7 +12,15 @@ bitflags! {
         const MULTI_DRAW_INDIRECT = 1 << 1;
         /// Hardware-accelerated ray tracing acceleration structures.
         const RAY_TRACING = 1 << 2;
-        /// Bindless / large descriptor arrays.
+        /// The full bindless descriptor-array capability: the device exposes
+        /// every descriptor-array class the RHI models (`BINDLESS_BUFFER_ARRAY`
+        /// | `BINDLESS_TEXTURE_ARRAY` | `BINDLESS_SAMPLER_ARRAY` |
+        /// `BINDLESS_STORAGE_TEXTURE_ARRAY`) and can index those arrays with
+        /// dynamically non-uniform values (`BINDLESS_NON_UNIFORM_INDEXING`).
+        ///
+        /// This is the coarse gate described in the [`binding`](crate::binding)
+        /// module docs; query the granular bits when a renderer needs to know
+        /// *which* array classes are available.
         const BINDLESS = 1 << 3;
         /// 64-bit shader integers.
         const SHADER_INT64 = 1 << 4;
@@ -30,6 +38,22 @@ bitflags! {
         const TEXTURE_COMPRESSION_BC = 1 << 10;
         /// Dual-source blending.
         const DUAL_SOURCE_BLENDING = 1 << 11;
+        /// Descriptor arrays of uniform/storage buffers
+        /// (`binding_array<T, N>` over `BindingType::BufferArray`).
+        const BINDLESS_BUFFER_ARRAY = 1 << 12;
+        /// Descriptor arrays of sampled textures
+        /// (`BindingType::TextureArray`).
+        const BINDLESS_TEXTURE_ARRAY = 1 << 13;
+        /// Descriptor arrays of samplers (`BindingType::SamplerArray`).
+        const BINDLESS_SAMPLER_ARRAY = 1 << 14;
+        /// Descriptor arrays of read/write storage textures
+        /// (`BindingType::StorageTextureArray`).
+        const BINDLESS_STORAGE_TEXTURE_ARRAY = 1 << 15;
+        /// Dynamically non-uniform indexing into descriptor arrays: the shader
+        /// may pick an element with a value that varies across the invocation
+        /// group (e.g. `textures[vertex_data]`), not just with a
+        /// dynamically-uniform value.
+        const BINDLESS_NON_UNIFORM_INDEXING = 1 << 16;
     }
 }
 

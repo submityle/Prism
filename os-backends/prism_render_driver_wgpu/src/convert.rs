@@ -282,41 +282,100 @@ pub(crate) fn storage_texture_access(
     }
 }
 
+/// Translates a buffer binding's element type and range policy.
+fn buffer_binding(
+    ty: rhi::BufferBindingType,
+    has_dynamic_offset: bool,
+    min_binding_size: Option<u64>,
+) -> wgpu::BindingType {
+    wgpu::BindingType::Buffer {
+        ty: buffer_binding_type(ty),
+        has_dynamic_offset,
+        min_binding_size: min_binding_size.and_then(NonZeroU64::new),
+    }
+}
+
+/// Translates a sampled-texture binding's element type.
+fn texture_binding(
+    sample_type: rhi::TextureSampleType,
+    view_dimension: rhi::TextureViewDimension,
+    multisampled: bool,
+) -> wgpu::BindingType {
+    wgpu::BindingType::Texture {
+        sample_type: texture_sample_type(sample_type),
+        view_dimension: texture_view_dimension(view_dimension),
+        multisampled,
+    }
+}
+
+/// Translates a storage-texture binding's element type.
+fn storage_texture_binding(
+    access: rhi::StorageTextureAccess,
+    format: rhi::TextureFormat,
+    view_dimension: rhi::TextureViewDimension,
+) -> wgpu::BindingType {
+    wgpu::BindingType::StorageTexture {
+        access: storage_texture_access(access),
+        format: texture_format(format),
+        view_dimension: texture_view_dimension(view_dimension),
+    }
+}
+
 /// Translates a single binding slot type.
+///
+/// wgpu expresses array-ness with
+/// [`BindGroupLayoutEntry::count`](wgpu::BindGroupLayoutEntry::count) rather
+/// than a distinct element type, so the RHI's `*Array` binding types translate
+/// to the same `wgpu::BindingType` as their single-resource counterparts and
+/// the array length is applied by [`bind_group_layout_entry`]. That keeps the
+/// two halves of the RHI's array invariant
+/// ([`BindGroupLayoutEntry::validate`](rhi::BindGroupLayoutEntry::validate))
+/// enforced in one place instead of two.
 pub(crate) fn binding_type(ty: rhi::BindingType) -> wgpu::BindingType {
     match ty {
         rhi::BindingType::Buffer {
             ty,
             has_dynamic_offset,
             min_binding_size,
-        } => wgpu::BindingType::Buffer {
-            ty: buffer_binding_type(ty),
+        }
+        | rhi::BindingType::BufferArray {
+            ty,
             has_dynamic_offset,
-            min_binding_size: min_binding_size.and_then(NonZeroU64::new),
-        },
-        rhi::BindingType::Sampler(ty) => wgpu::BindingType::Sampler(sampler_binding_type(ty)),
+            min_binding_size,
+        } => buffer_binding(ty, has_dynamic_offset, min_binding_size),
+        rhi::BindingType::Sampler(ty) | rhi::BindingType::SamplerArray(ty) => {
+            wgpu::BindingType::Sampler(sampler_binding_type(ty))
+        }
         rhi::BindingType::Texture {
             sample_type,
             view_dimension,
             multisampled,
-        } => wgpu::BindingType::Texture {
-            sample_type: texture_sample_type(sample_type),
-            view_dimension: texture_view_dimension(view_dimension),
+        }
+        | rhi::BindingType::TextureArray {
+            sample_type,
+            view_dimension,
             multisampled,
-        },
+        } => texture_binding(sample_type, view_dimension, multisampled),
         rhi::BindingType::StorageTexture {
             access,
             format,
             view_dimension,
-        } => wgpu::BindingType::StorageTexture {
-            access: storage_texture_access(access),
-            format: texture_format(format),
-            view_dimension: texture_view_dimension(view_dimension),
-        },
+        }
+        | rhi::BindingType::StorageTextureArray {
+            access,
+            format,
+            view_dimension,
+        } => storage_texture_binding(access, format, view_dimension),
     }
 }
 
 /// Translates a bind group layout entry.
+///
+/// `count` is the descriptor-array length and is forwarded to wgpu's
+/// `count: Option<NonZeroU32>` verbatim; a zero count becomes `None` here, but
+/// the RHI's own validation
+/// ([`BindGroupLayoutEntry::validate`](rhi::BindGroupLayoutEntry::validate))
+/// rejects a zero count before translation.
 pub(crate) fn bind_group_layout_entry(
     entry: &rhi::BindGroupLayoutEntry,
 ) -> wgpu::BindGroupLayoutEntry {
@@ -652,6 +711,88 @@ pub(crate) fn surface_format_from_wgpu(format: wgpu::TextureFormat) -> Option<rh
     })
 }
 
+/// The wgpu features the RHI's bindless descriptor-array bits require.
+///
+/// wgpu splits arrays across four flags: buffer arrays need
+/// `BUFFER_BINDING_ARRAY` (and, for storage elements,
+/// `STORAGE_RESOURCE_BINDING_ARRAY`); texture *and* sampler arrays share
+/// `TEXTURE_BINDING_ARRAY`; storage-texture arrays need `TEXTURE_BINDING_ARRAY`
+/// plus `STORAGE_RESOURCE_BINDING_ARRAY`; and dynamically non-uniform indexing
+/// needs `SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING` for
+/// sampled textures / buffers and
+/// `STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING` for storage textures — the RHI
+/// models non-uniform indexing as one capability, so it requests both.
+///
+/// `Features::BINDLESS` is the umbrella and therefore requests the union of
+/// them all. Two further wgpu array flags are deliberately *not* requested:
+/// `PARTIALLY_BOUND_BINDING_ARRAY` (which would let a bind group under-fill a
+/// layout) and `UNIFORM_BUFFER_BINDING_ARRAYS` (uniform-buffer arrays, a
+/// separate RHI concern); the RHI models neither, so requesting them would
+/// claim capability the type system cannot describe.
+fn bindless_to_wgpu(features: rhi::Features) -> wgpu::Features {
+    let mut out = wgpu::Features::empty();
+    // Buffer arrays cover both uniform and storage elements, so the storage
+    // array flag is folded in: the RHI's `BufferArray` carries a
+    // `BufferBindingType` that may be either.
+    if features.intersects(rhi::Features::BINDLESS_BUFFER_ARRAY | rhi::Features::BINDLESS) {
+        out |=
+            wgpu::Features::BUFFER_BINDING_ARRAY | wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY;
+    }
+    if features.intersects(
+        rhi::Features::BINDLESS_TEXTURE_ARRAY
+            | rhi::Features::BINDLESS_SAMPLER_ARRAY
+            | rhi::Features::BINDLESS_STORAGE_TEXTURE_ARRAY
+            | rhi::Features::BINDLESS,
+    ) {
+        out |= wgpu::Features::TEXTURE_BINDING_ARRAY;
+    }
+    if features.intersects(rhi::Features::BINDLESS_STORAGE_TEXTURE_ARRAY | rhi::Features::BINDLESS)
+    {
+        out |= wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY;
+    }
+    if features.intersects(rhi::Features::BINDLESS_NON_UNIFORM_INDEXING | rhi::Features::BINDLESS) {
+        out |= wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+            | wgpu::Features::STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING;
+    }
+    out
+}
+
+/// The inverse of [`bindless_to_wgpu`]: which RHI bindless bits a device's wgpu
+/// feature set proves.
+///
+/// A bit is reported only when the device exposes *every* wgpu flag that class
+/// needs, so a renderer can trust a set bit without consulting wgpu. Buffer
+/// arrays additionally require `STORAGE_RESOURCE_BINDING_ARRAY` because the RHI
+/// models storage elements; texture and sampler arrays both follow from
+/// `TEXTURE_BINDING_ARRAY`, which is exactly how wgpu gates them.
+fn bindless_from_wgpu(features: wgpu::Features) -> rhi::Features {
+    let mut out = rhi::Features::NONE;
+    let buffer_array = wgpu::Features::BUFFER_BINDING_ARRAY;
+    let texture_array = wgpu::Features::TEXTURE_BINDING_ARRAY;
+    let storage_array = wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY;
+    let non_uniform = wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+    let storage_texture_non_uniform = wgpu::Features::STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING;
+
+    if features.contains(buffer_array | storage_array) {
+        out |= rhi::Features::BINDLESS_BUFFER_ARRAY;
+    }
+    if features.contains(texture_array) {
+        out |= rhi::Features::BINDLESS_TEXTURE_ARRAY | rhi::Features::BINDLESS_SAMPLER_ARRAY;
+    }
+    if features.contains(texture_array | storage_array) {
+        out |= rhi::Features::BINDLESS_STORAGE_TEXTURE_ARRAY;
+    }
+    if features.contains(non_uniform | storage_texture_non_uniform) {
+        out |= rhi::Features::BINDLESS_NON_UNIFORM_INDEXING;
+    }
+    if features.contains(
+        buffer_array | texture_array | storage_array | non_uniform | storage_texture_non_uniform,
+    ) {
+        out |= rhi::Features::BINDLESS;
+    }
+    out
+}
+
 /// Maps the RHI's requested features onto the wgpu features to enable at device
 /// creation. `INDIRECT_DRAW` is core in wgpu and carries no flag.
 pub(crate) fn features_to_wgpu(features: rhi::Features) -> wgpu::Features {
@@ -662,9 +803,7 @@ pub(crate) fn features_to_wgpu(features: rhi::Features) -> wgpu::Features {
     if features.contains(rhi::Features::RAY_TRACING) {
         out |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
     }
-    if features.contains(rhi::Features::BINDLESS) {
-        out |= wgpu::Features::BUFFER_BINDING_ARRAY;
-    }
+    out |= bindless_to_wgpu(features);
     if features.contains(rhi::Features::SHADER_INT64) {
         out |= wgpu::Features::SHADER_INT64;
     }
@@ -702,9 +841,7 @@ pub(crate) fn features_from_wgpu(features: wgpu::Features) -> rhi::Features {
     if features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
         out |= rhi::Features::RAY_TRACING;
     }
-    if features.contains(wgpu::Features::BUFFER_BINDING_ARRAY) {
-        out |= rhi::Features::BINDLESS;
-    }
+    out |= bindless_from_wgpu(features);
     if features.contains(wgpu::Features::SHADER_INT64) {
         out |= rhi::Features::SHADER_INT64;
     }
@@ -801,6 +938,11 @@ mod tests {
             rhi::Features::DEPTH_CLAMP,
             rhi::Features::TEXTURE_COMPRESSION_BC,
             rhi::Features::DUAL_SOURCE_BLENDING,
+            rhi::Features::BINDLESS_BUFFER_ARRAY,
+            rhi::Features::BINDLESS_TEXTURE_ARRAY,
+            rhi::Features::BINDLESS_SAMPLER_ARRAY,
+            rhi::Features::BINDLESS_STORAGE_TEXTURE_ARRAY,
+            rhi::Features::BINDLESS_NON_UNIFORM_INDEXING,
         ];
         for &bit in FEATURES {
             let wgpu_features = features_to_wgpu(bit);
@@ -960,5 +1102,135 @@ mod tests {
         ];
         assert_eq!(immediate_size(&ranges), 48);
         assert_eq!(immediate_size(&[]), 0);
+    }
+
+    /// An RHI array binding type must translate to wgpu's element type carried
+    /// by `count: Some(n)`: wgpu has no separate array element kind, so the
+    /// element mapping is the same as the single-resource case and the length
+    /// rides on the entry.
+    #[test]
+    fn array_binding_types_translate_to_counted_element_types() {
+        let count = NonZeroU32::new(4);
+        let cases = [
+            (
+                rhi::BindingType::BufferArray {
+                    ty: rhi::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            ),
+            (
+                rhi::BindingType::SamplerArray(rhi::SamplerBindingType::Filtering),
+                wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            ),
+            (
+                rhi::BindingType::TextureArray {
+                    sample_type: rhi::TextureSampleType::Float,
+                    view_dimension: rhi::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+            ),
+            (
+                rhi::BindingType::StorageTextureArray {
+                    access: rhi::StorageTextureAccess::WriteOnly,
+                    format: rhi::TextureFormat::Rgba8Unorm,
+                    view_dimension: rhi::TextureViewDimension::D2,
+                },
+                wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+            ),
+        ];
+
+        for (rhi_ty, expected_wgpu_ty) in cases {
+            let entry = rhi::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: rhi::ShaderStages::COMPUTE,
+                ty: rhi_ty,
+                count: Some(4),
+            };
+            assert_eq!(
+                entry.validate(),
+                Ok(()),
+                "an array entry with a count is well formed"
+            );
+            let translated = bind_group_layout_entry(&entry);
+            assert_eq!(translated.binding, 2);
+            assert_eq!(translated.visibility, wgpu::ShaderStages::COMPUTE);
+            assert_eq!(translated.ty, expected_wgpu_ty);
+            assert_eq!(translated.count, count);
+        }
+    }
+
+    #[test]
+    fn single_binding_types_translate_without_a_count() {
+        let entry = rhi::BindGroupLayoutEntry::texture_2d(0, rhi::ShaderStages::FRAGMENT);
+        let translated = bind_group_layout_entry(&entry);
+        assert_eq!(translated.count, None);
+        assert!(matches!(translated.ty, wgpu::BindingType::Texture { .. }));
+    }
+
+    #[test]
+    fn bindless_classes_request_their_wgpu_flags() {
+        let buffer = bindless_to_wgpu(rhi::Features::BINDLESS_BUFFER_ARRAY);
+        assert!(buffer.contains(wgpu::Features::BUFFER_BINDING_ARRAY));
+        assert!(buffer.contains(wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY));
+        assert!(!buffer.contains(wgpu::Features::TEXTURE_BINDING_ARRAY));
+
+        let texture = bindless_to_wgpu(
+            rhi::Features::BINDLESS_TEXTURE_ARRAY | rhi::Features::BINDLESS_SAMPLER_ARRAY,
+        );
+        assert!(texture.contains(wgpu::Features::TEXTURE_BINDING_ARRAY));
+        assert!(!texture.contains(wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY));
+
+        let storage_texture = bindless_to_wgpu(rhi::Features::BINDLESS_STORAGE_TEXTURE_ARRAY);
+        assert!(storage_texture.contains(wgpu::Features::TEXTURE_BINDING_ARRAY));
+        assert!(storage_texture.contains(wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY));
+
+        let non_uniform = bindless_to_wgpu(rhi::Features::BINDLESS_NON_UNIFORM_INDEXING);
+        assert!(non_uniform.contains(
+            wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+        ));
+        assert!(non_uniform.contains(wgpu::Features::STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING));
+
+        // The umbrella is exactly the union of the granular classes.
+        let umbrella = bindless_to_wgpu(rhi::Features::BINDLESS);
+        let union = buffer | texture | storage_texture | non_uniform;
+        assert_eq!(umbrella, union);
+    }
+
+    #[test]
+    fn bindless_capabilities_require_every_flag() {
+        // A device that exposes only *some* of a class's flags must not be
+        // reported as supporting that class.
+        let partial = features_from_wgpu(wgpu::Features::TEXTURE_BINDING_ARRAY);
+        assert!(partial.contains(rhi::Features::BINDLESS_TEXTURE_ARRAY));
+        assert!(partial.contains(rhi::Features::BINDLESS_SAMPLER_ARRAY));
+        assert!(!partial.contains(rhi::Features::BINDLESS_BUFFER_ARRAY));
+        assert!(!partial.contains(rhi::Features::BINDLESS_STORAGE_TEXTURE_ARRAY));
+        assert!(!partial.contains(rhi::Features::BINDLESS));
+
+        let all_array_flags = wgpu::Features::BUFFER_BINDING_ARRAY
+            | wgpu::Features::TEXTURE_BINDING_ARRAY
+            | wgpu::Features::STORAGE_RESOURCE_BINDING_ARRAY
+            | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+            | wgpu::Features::STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING;
+        let full = features_from_wgpu(all_array_flags);
+        assert!(full.contains(rhi::Features::BINDLESS));
+        assert!(full.contains(rhi::Features::BINDLESS_BUFFER_ARRAY));
+        assert!(full.contains(rhi::Features::BINDLESS_STORAGE_TEXTURE_ARRAY));
+        assert!(full.contains(rhi::Features::BINDLESS_NON_UNIFORM_INDEXING));
     }
 }

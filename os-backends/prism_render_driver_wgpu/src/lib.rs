@@ -21,6 +21,10 @@ mod instance;
 mod queue;
 mod surface;
 
+/// GPU-gated bindless descriptor-array conformance tests.
+#[cfg(test)]
+mod bindless_tests;
+
 pub use device::WgpuDevice;
 pub use instance::{DeviceCreationError, WgpuAdapter, WgpuInstance};
 pub use queue::WgpuQueue;
