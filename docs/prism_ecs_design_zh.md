@@ -472,7 +472,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 ## 22. 诚实边界与风险
 
-- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 / 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档）/ 提取契约（`ExtractResource`/`ExtractComponent` + 运行器）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档 / 跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 的渲染侧接线与流水线并行（ECS 侧提取契约已落地），以及独占机多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
+- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 / 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 规范层级关系 ChildOf（作用域命令 + 层级 despawn）/ 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档 + 跨版本 schema 迁移）/ 提取契约（`ExtractResource`/`ExtractComponent` + 运行器）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档 / 跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 的渲染侧接线与流水线并行（ECS 侧提取契约已落地），以及独占机多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
 - 规模与多核扩展性、NUMA、GPU 常驻指标依赖真实硬件压测，单测不能替代。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。
@@ -528,6 +528,8 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 - **作用域命令**：`commands.entity(e).with_children(|b| ...)` 式分层构建，子作业命令归属父作用域，批量应用时按作用域确定序回放（配合 §9 并行 ECB）。
 - **层级 despawn**：`despawn_recursive` 沿 `ChildOf`（排他 + `OnDelete=Delete`，见 23.2/23.3）一致级联，保证不漏不悬垂；与快照/回滚（§16.5）协同保持结构一致。
+
+**已落地（`hierarchy.rs` + `command/`）**：引擎现在有**规范的层级关系** `ChildOf`（`Relation::KIND`：排他 = 一个父节点；`on_delete_target = Delete` = 父死子亡，走 §23.2 级联）。两项操作建立在其上——`EntityCommands::with_children(|children| { children.spawn(bundle); ... })` 是**作用域命令**（子实体在同一个嵌套 builder 里"生成 + 挂到父节点"，队列按书写顺序回放、且保证 spawn 先于关系添加，因此确定序可复现；`ChildBuilder::parent()` 可读出作用域父节点），`EntityCommands::add_child(existing)` 用于把已有实体挂进来（`ChildOf` 排他，重复挂载会**搬家**而不是双亲）。`World::despawn_recursive(entity)` 深度优先收集子树后**由深到浅**删除（先删子再删父，hook/observer 沿途总能看到父节点仍存在），返回**子树规模**——不是"`despawn` 返回 true 的次数"，因为 Delete 级联可能在中途先删掉某个成员，计数不能依赖这种交错；遍历带 visited 集合，畸形环也能终止；对已死实体的调用返回 `0`。这些入口按需自动注册 `ChildOf`（`World::register_child_of()` 幂等），因此不用层级的世界不付注册成本。
 
 ### 23.7 处理器 LOD（MassEntity 形态）
 

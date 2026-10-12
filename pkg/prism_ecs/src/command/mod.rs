@@ -45,4 +45,4 @@ mod queue;
 pub(crate) type Command = Box<dyn FnOnce(&mut World) + Send + Sync>;
 
 pub use parallel::{CommandKey, ParallelCommandBuffers, ParallelCommands, ParallelEntityCommands};
-pub use queue::{CommandQueue, Commands, EntityCommands};
+pub use queue::{ChildBuilder, CommandQueue, Commands, EntityCommands};

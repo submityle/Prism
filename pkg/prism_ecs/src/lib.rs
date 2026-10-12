@@ -67,6 +67,9 @@ mod extract_tests;
 pub mod gpu_batch;
 #[cfg(feature = "gpu_resident")]
 pub mod gpu_resident;
+pub mod hierarchy;
+#[cfg(test)]
+mod hierarchy_tests;
 pub mod observer;
 #[cfg(feature = "partition")]
 pub mod partition;
@@ -94,7 +97,7 @@ pub mod prelude {
     pub use crate::blob::{BlobHandle, BlobStore};
     pub use crate::bundle::Bundle;
     pub use crate::change::{ComponentTicks, DetectChanges, DetectChangesMut, Mut, Ref, Tick};
-    pub use crate::command::{CommandQueue, Commands};
+    pub use crate::command::{ChildBuilder, CommandQueue, Commands};
     pub use crate::component::Component;
     pub use crate::component_hooks::{ComponentHook, ComponentHooks, HookContext};
     pub use crate::entity::Entity;
@@ -102,6 +105,7 @@ pub mod prelude {
     pub use crate::extract::{
         ExtractComponent, ExtractResource, extract_components, extract_resource,
     };
+    pub use crate::hierarchy::ChildOf;
     #[cfg(feature = "gpu_resident")]
     pub use crate::gpu_batch::{
         build_draw_batches, DrawBatch, GpuBatchBuilder, GpuBatchPlan, InstanceVisibility,

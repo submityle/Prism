@@ -115,7 +115,7 @@ pub struct EntityCommands<'a, 'w, 's> {
     commands: &'a mut Commands<'w, 's>,
 }
 
-impl EntityCommands<'_, '_, '_> {
+impl<'a, 'w, 's> EntityCommands<'a, 'w, 's> {
     /// The entity these commands target.
     #[inline]
     pub fn id(&self) -> Entity {
@@ -157,6 +157,94 @@ impl EntityCommands<'_, '_, '_> {
             .push(Box::new(move |world: &mut World| {
                 world.despawn(entity);
             }));
+    }
+
+    /// Queue attaching an existing `child` to this entity with
+    /// [`ChildOf`](crate::hierarchy::ChildOf) (design §23.6).
+    ///
+    /// `ChildOf` is exclusive, so a child that already had a parent is moved
+    /// rather than double-parented (design §23.3).
+    pub fn add_child(&mut self, child: Entity) -> &mut Self {
+        let parent = self.entity;
+        self.commands
+            .queue
+            .commands
+            .push(Box::new(move |world: &mut World| {
+                world.register_child_of();
+                world.add_relation::<crate::hierarchy::ChildOf>(child, parent);
+            }));
+        self
+    }
+
+    /// Queue spawning this entity's children through a nested builder (design
+    /// §23.6 作用域命令).
+    ///
+    /// Everything `f` builds is spawned *and* attached to this entity with
+    /// [`ChildOf`](crate::hierarchy::ChildOf) inside one deferred scope. The
+    /// queue replays a child's spawn before its relation add, and replays the
+    /// whole scope in the order the builder was written, so applying the queue
+    /// yields exactly the tree the code describes.
+    ///
+    /// ```ignore
+    /// commands.entity(root).with_children(|children| {
+    ///     children.spawn(Torso);
+    ///     children.spawn(Head);
+    /// });
+    /// ```
+    pub fn with_children(
+        &mut self,
+        f: impl FnOnce(&mut ChildBuilder<'_, 'w, 's>),
+    ) -> &mut Self {
+        let parent = self.entity;
+        let mut builder = ChildBuilder {
+            parent,
+            commands: self.commands,
+        };
+        f(&mut builder);
+        self
+    }
+}
+
+/// The scoped builder handed to
+/// [`EntityCommands::with_children`] (design §23.6 作用域命令).
+///
+/// Every entity it creates is already tied to the scope's parent, so callers
+/// cannot forget the relation and cannot attach a child to the wrong parent.
+/// The returned [`Entity`] handles are valid immediately for further commands
+/// and for storing, exactly like [`Commands::spawn`].
+pub struct ChildBuilder<'a, 'w, 's> {
+    parent: Entity,
+    commands: &'a mut Commands<'w, 's>,
+}
+
+impl<'w, 's> ChildBuilder<'_, 'w, 's> {
+    /// The parent every entity in this scope is attached to.
+    #[inline]
+    pub fn parent(&self) -> Entity {
+        self.parent
+    }
+
+    /// Reserve a child entity, queue spawning `bundle` on it, and queue
+    /// attaching it to this scope's parent.
+    pub fn spawn<B: Bundle>(&mut self, bundle: B) -> Entity {
+        // `Commands::spawn` queues the spawn; the relation add is queued after
+        // it, so apply order (spawn, then link) is guaranteed by construction.
+        let child = self.commands.spawn(bundle);
+        let parent = self.parent;
+        self.commands
+            .queue
+            .commands
+            .push(Box::new(move |world: &mut World| {
+                world.register_child_of();
+                world.add_relation::<crate::hierarchy::ChildOf>(child, parent);
+            }));
+        child
+    }
+
+    /// Reserve an empty child and queue attaching it to this scope's parent.
+    #[inline]
+    pub fn spawn_empty(&mut self) -> Entity {
+        self.spawn(())
     }
 }
 
