@@ -258,3 +258,41 @@ fn gpu_degenerate_and_empty_inputs() {
         }
     }
 }
+
+/// Boundary saturation: `grid_cell_of` saturates extreme positions to
+/// `i32::MAX`/`MIN`. The 27-cell offset must saturate too — a wrapping
+/// `i32::MAX + 1` would gather the `i32::MIN` bucket, a mismatch the golden's
+/// `saturating_add` never produces (CR-found).
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn gpu_extreme_cells_saturate_not_wrap() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        eprintln!("skipping self-collision grid parity: no wgpu adapter on this host");
+        return;
+    };
+    let gatherer = GpuSelfCollisionGrid::new(&ctx);
+
+    // With cell_size 1.0, floor(3e9) and floor(-3e9) saturate to i32::MAX / MIN.
+    let particles = [particle(3.0e9, 0.0, 0.0), particle(-3.0e9, 0.0, 0.0)];
+    let gpu = assert_parity(&ctx, &gatherer, &particles, 1.0);
+
+    // `assert_parity` already proves the GPU list equals the golden bit-for-bit.
+    // The key anti-wrap property: each extreme particle is alone in its
+    // saturated cell and must NEVER see the opposite extreme. (A wrapping
+    // `i32::MAX + 1` would gather index 1.) The saturated 27-cell offsets
+    // collapse onto the same cell, so the golden repeats the bucket — assert
+    // membership, not exact multiplicity.
+    assert!(
+        gpu[0].iter().all(|&i| i == 0),
+        "particle 0 saw {gpu0:?}",
+        gpu0 = gpu[0]
+    );
+    assert!(
+        gpu[1].iter().all(|&i| i == 1),
+        "particle 1 saw {gpu1:?}",
+        gpu1 = gpu[1]
+    );
+}

@@ -29,12 +29,25 @@
 //! merely to a tolerance. Each thread writes only its own disjoint slice, so
 //! there is no cross-thread contention and no atomics.
 //!
-//! Portability note: the 27-cell offset add uses plain `i32` arithmetic rather
-//! than the golden's `saturating_add`. The parity test constructs cells far
-//! from the `i32` extremes, so `qx ± 1` never overflows; the saturating
-//! boundary contract is exercised by the golden's own unit tests. The kernel
-//! stays in the portable core-`WGSL` subset (no optional device feature), so it
-//! runs unmodified on Metal, Vulkan and DX12.
+//! Portability note: the 27-cell offset add uses [`prism_sat_add_i32`] to match
+//! the golden's `saturating_add` exactly. `grid_cell_of` saturates to
+//! `i32::MAX`/`MIN` for extreme positions, and a plain `qx + 1` would wrap
+//! `i32::MAX` around to `i32::MIN` (gathering the wrong boundary bucket); the
+//! helper saturates instead. It stays in the portable core-`WGSL` subset (no
+//! optional device feature), so it runs unmodified on Metal, Vulkan and DX12.
+
+/// Saturating `i32` addition, matching Rust's `i32::saturating_add`.
+fn prism_sat_add_i32(v: i32, d: i32) -> i32 {
+    let max_v = 2147483647;
+    let min_v = -2147483647 - 1;
+    if (d > 0 && v > max_v - d) {
+        return max_v;
+    }
+    if (d < 0 && v < min_v - d) {
+        return min_v;
+    }
+    return v + d;
+}
 
 /// Gather parameters. `particle_count` bounds the dispatch (one invocation per
 /// particle); `cell_count` bounds the binary search over `cell_keys`. `16`-byte
@@ -135,7 +148,11 @@ fn evaluate(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var dx = -1; dx <= 1; dx = dx + 1) {
         for (var dy = -1; dy <= 1; dy = dy + 1) {
             for (var dz = -1; dz <= 1; dz = dz + 1) {
-                let cell = find_cell(qx + dx, qy + dy, qz + dz);
+                let cell = find_cell(
+                    prism_sat_add_i32(qx, dx),
+                    prism_sat_add_i32(qy, dy),
+                    prism_sat_add_i32(qz, dz),
+                );
                 if cell != NOT_FOUND {
                     let bstart = cell_starts[cell];
                     let bend = cell_starts[cell + 1u];

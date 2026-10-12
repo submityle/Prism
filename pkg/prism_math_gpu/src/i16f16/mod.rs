@@ -90,7 +90,8 @@ pub enum I16F16Op {
     Neg = 6,
     /// Saturating, truncating division (`a / b`; divide-by-zero saturates).
     Div = 7,
-    /// Truncate toward zero to a whole integer (`raw >> 16`).
+    /// Truncate toward zero to a whole integer (like Rust's `raw / 65536`, not
+    /// an arithmetic shift, which would floor negative fractions).
     ToInt = 8,
     /// Build from a whole integer (`int << 16`, saturating). `a` is a plain
     /// integer, not Q16.16 bits.
