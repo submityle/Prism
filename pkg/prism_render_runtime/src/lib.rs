@@ -345,7 +345,15 @@ impl<I: Instance> RenderRuntime<I> {
         );
         build(&mut graph, target);
 
-        self.execute(graph).map_err(FrameError::Compile)?;
+        if let Err(error) = self.execute(graph) {
+            // The frame is acquired but will not be presented. Release its
+            // image instead of leaking the registered swapchain ids.
+            self.surface
+                .as_ref()
+                .expect("surface checked above")
+                .discard(frame);
+            return Err(FrameError::Compile(error));
+        }
 
         self.surface
             .as_ref()

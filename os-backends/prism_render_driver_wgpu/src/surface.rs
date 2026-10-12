@@ -116,6 +116,15 @@ impl WgpuSurface {
     pub fn wgpu_surface(&self) -> &wgpu::Surface<'static> {
         &self.surface
     }
+
+    /// Releases the RHI ids registered for `frame`.
+    ///
+    /// Shared by [`Surface::present`] and [`Surface::discard`], which differ
+    /// only in whether the platform frame is presented or dropped.
+    fn release_frame(&self, frame: &WgpuFrame) {
+        self.inner.release_texture_view(frame.view_id);
+        self.inner.release_texture(frame.texture_id);
+    }
 }
 
 impl Surface for WgpuSurface {
@@ -203,9 +212,14 @@ impl Surface for WgpuSurface {
         }
     }
 
+    fn discard(&self, frame: Self::Frame) {
+        // Release the registered image ids; dropping the `SurfaceTexture`
+        // without presenting discards the frame at the platform level.
+        self.release_frame(&frame);
+    }
+
     fn present(&self, frame: Self::Frame) -> Result<(), rhi::SurfaceError> {
-        self.inner.release_texture_view(frame.view_id);
-        self.inner.release_texture(frame.texture_id);
+        self.release_frame(&frame);
         self.queue.present(frame.texture);
         Ok(())
     }

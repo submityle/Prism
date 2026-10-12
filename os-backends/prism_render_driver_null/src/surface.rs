@@ -103,9 +103,15 @@ impl Surface for NullSurface {
         frame.image
     }
 
-    fn present(&self, frame: NullFrame) -> Result<(), SurfaceError> {
+    fn discard(&self, frame: NullFrame) {
+        // Reclaim the minted ids exactly as `present` does; there is no display
+        // to present to, so discarding is the whole operation.
         self.device.destroy_texture_view(frame.image.view);
         self.device.destroy_texture(frame.image.texture);
+    }
+
+    fn present(&self, frame: NullFrame) -> Result<(), SurfaceError> {
+        self.discard(frame);
         Ok(())
     }
 

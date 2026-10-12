@@ -163,6 +163,14 @@ pub trait Surface {
     /// The RHI image backing `frame`, registered into the surface's device.
     fn image(&self, frame: &Self::Frame) -> SurfaceImage;
 
+    /// Releases `frame` without presenting it.
+    ///
+    /// Call this when a frame was acquired but will not be presented — for
+    /// example a frame-graph compile failure after acquisition — so the
+    /// frame's registered image is reclaimed exactly as
+    /// [`present`](Surface::present) reclaims it, minus the presentation.
+    fn discard(&self, frame: Self::Frame);
+
     /// Presents `frame`, consuming it.
     ///
     /// # Errors

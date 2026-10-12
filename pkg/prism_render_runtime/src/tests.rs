@@ -9,8 +9,8 @@
 use prism_render_driver as rhi;
 use rhi::{
     Adapter, ColorTargetState, FragmentState, Instance, MultisampleState, PrimitiveState,
-    RenderDevice, RenderQueue, ShaderModuleDescriptor, TextureState, TextureUsages, VertexFormat,
-    VertexState, VertexStepMode,
+    RenderDevice, RenderQueue, ShaderModuleDescriptor, Surface, TextureState, TextureUsages,
+    VertexFormat, VertexState, VertexStepMode,
 };
 use prism_render_driver_wgpu::WgpuInstance;
 use prism_render_graph::{ImportedTexture, PassFlags, TextureDesc};
@@ -78,6 +78,29 @@ fn surface_present_loop_runs_headless_on_the_null_backend() {
     assert_eq!(rt.frames_in_flight(), 1, "the presented frame is tracked");
     assert!(rt.wait_idle(), "the paced pipeline drains");
     assert_eq!(rt.frames_in_flight(), 0);
+}
+
+#[test]
+fn discarding_a_frame_reclaims_its_image_ids() {
+    let mut rt = RenderRuntime::headless(NullInstance::new(), rhi::Extent3d::new_2d(SIZE, SIZE))
+        .expect("the null device always comes up");
+    rt.create_surface(Arc::new(FakeWindow))
+        .expect("the null surface is created");
+    rt.configure_surface_default(SIZE, SIZE)
+        .expect("the null surface advertises a usable format");
+
+    let baseline = rt.device().live_resource_count();
+    let frame = rt.surface().expect("surface exists").acquire().expect("acquire");
+    assert!(
+        rt.device().live_resource_count() > baseline,
+        "an acquired frame registers its image on the device"
+    );
+    rt.surface().expect("surface exists").discard(frame);
+    assert_eq!(
+        rt.device().live_resource_count(),
+        baseline,
+        "discarding reclaims the image ids so a failed frame cannot leak"
+    );
 }
 
 #[test]
