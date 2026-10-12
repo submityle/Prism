@@ -357,6 +357,8 @@ mod tests {
             fuzz_roughness: 0.5,
             fuzz_color: [1.0; 3],
             subsurface: 0.0,
+            subsurface_color: [1.0; 3],
+            subsurface_radius: [1.0; 3],
             thickness: 0.3,
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,

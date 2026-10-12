@@ -95,6 +95,10 @@ struct SurfaceSample {
     // achromatic). Mirrors `SurfaceSample::fuzz_roughness` / `fuzz_color`.
     fuzz_color: vec3<f32>,
     subsurface: f32,
+    // `OpenPBR` subsurface group: scattered-light tint (white = identity) and
+    // per-channel scattering extent (white = identity, relative in this lobe).
+    subsurface_color: vec3<f32>,
+    subsurface_radius: vec3<f32>,
     thickness: f32,
     // Signed anisotropy in [-1, 1]; positive elongates the highlight along the
     // tangent, negative along the bitangent. Mirrors `SurfaceSample`.

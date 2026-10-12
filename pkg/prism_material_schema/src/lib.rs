@@ -679,17 +679,18 @@ mod tests {
     fn transmission_fields_land_at_expected_offsets() {
         let schema = surface_schema();
         let all = 0b111_1111;
-        // Core (20, now carrying the OpenPBR base + specular groups) + emission
-        // (4) + clearcoat (12) + anisotropy (4) + sheen (8) + subsurface (4) =
-        // 52 is the transmission base; the transmission lobe then packs
-        // transmission, thickness, index_of_refraction, dispersion at 52..56.
+        // Core (20, carrying the OpenPBR base + specular groups) + emission (4) +
+        // clearcoat (12) + anisotropy (4) + sheen (8) + subsurface (12, the
+        // OpenPBR subsurface group) = 60 is the transmission base; the
+        // transmission lobe then packs transmission, thickness,
+        // index_of_refraction, dispersion at 60..64.
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "transmission"),
-            Some(52)
+            Some(60)
         );
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "index_of_refraction"),
-            Some(54)
+            Some(62)
         );
     }
 

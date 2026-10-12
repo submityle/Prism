@@ -502,14 +502,15 @@ mod tests {
     fn wesl_exposes_the_consumer_api() {
         let wesl = emit_wesl_unpack(&surface_schema());
         for needle in [
-            "fn prism_unpack_surface(words: array<u32, 60>, lobe_mask: u32)",
+            "fn prism_unpack_surface(words: array<u32, 68>, lobe_mask: u32)",
             "fn prism_packed_word_count(lobe_mask: u32) -> u32",
             "fn prism_neutral_surface() -> PrismSurfaceParameters",
-            "const PRISM_SURFACE_MAX_WORDS: u32 = 60u;",
+            "const PRISM_SURFACE_MAX_WORDS: u32 = 68u;",
             "const PRISM_LOBE_WORDS_EMISSION: u32 = 4u;",
             "const PRISM_LOBE_WORDS_FACE: u32 = 4u;",
             "const PRISM_LOBE_WORDS_CLEARCOAT: u32 = 12u;",
             "const PRISM_LOBE_WORDS_SHEEN: u32 = 8u;",
+            "const PRISM_LOBE_WORDS_SUBSURFACE: u32 = 12u;",
             "        cursor += PRISM_LOBE_WORDS_TRANSMISSION;",
             "import prism_render_scene::shaders::material::PrismSurfaceParameters;",
         ] {
@@ -541,9 +542,9 @@ mod tests {
         for needle in [
             "pub const SURFACE_CORE_WORDS: usize = 20;",
             "pub const SURFACE_LOBE_WORDS: usize = 12;",
-            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 12, 4, 8, 4, 4, 4];",
+            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 12, 4, 8, 12, 4, 4];",
             "pub const SURFACE_LOBE_COUNT: u32 = 7;",
-            "pub const SURFACE_MAX_WORDS: usize = 60;",
+            "pub const SURFACE_MAX_WORDS: usize = 68;",
             "pub const SURFACE_LOBES: [LobeLayout; 7] = [",
             "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 4,\n        namespace: \"KHR\",\n    },",
             "    LobeLayout {\n        id: \"face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"FACE\",\n        registry_slot: 6,\n        words: 4,\n        namespace: \"PRISM\",\n    },",

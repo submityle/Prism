@@ -76,16 +76,28 @@ fn subsurface_direct(
     let g = vis_smith(n_dot_v, n_dot_l, alpha);
     let specular = f * (d * g) * n_dot_l;
 
-    // Wrapped diffuse: wrap width is the subsurface weight.
-    let diffuse_cos = subsurface_fd_wrap(raw_n_dot_l, subsurface);
+    // Wrapped diffuse: the wrap width is the subsurface weight scaled by the
+    // per-channel `subsurface_radius` (coloured terminator bleed), tinted by
+    // `subsurface_color`. Both default to the identity.
+    let scat_color = surface.subsurface_color;
     let diffuse_weight = (vec3<f32>(1.0) - f) * (1.0 - metallic);
-    let diffuse = (surface.base_color * (INV_PI * diffuse_cos)) * diffuse_weight;
+    var diffuse = vec3<f32>(0.0);
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        let wrap = clamp(subsurface * surface.subsurface_radius[c], 0.0, 1.0);
+        let diffuse_cos = subsurface_fd_wrap(raw_n_dot_l, wrap);
+        diffuse[c] = surface.base_color[c]
+            * scat_color[c]
+            * INV_PI
+            * diffuse_cos
+            * diffuse_weight[c];
+    }
 
     // Back transmission through thin geometry.
     let h_transmission = brdf_normalize_or(l + n * SUBSURFACE_DISTORTION, n);
     let back = pow(clamp(dot(v, -h_transmission), 0.0, 1.0), SUBSURFACE_POWER);
     let thickness_attenuation = 1.0 - thickness;
-    let transmitted = surface.base_color * (subsurface * back * thickness_attenuation);
+    let transmitted = (surface.base_color * scat_color)
+        * (subsurface * back * thickness_attenuation);
 
     let lit = diffuse + specular + transmitted;
     let radiance = lit * light.illuminance * clamp(light.visibility, 0.0, 1.0);

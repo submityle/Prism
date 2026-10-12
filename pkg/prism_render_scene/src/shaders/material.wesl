@@ -51,6 +51,9 @@ struct PrismSurfaceParameters {
     anisotropy_rotation: f32,
     sheen: f32,
     subsurface: f32,
+    // `OpenPBR` subsurface group (see `brdf.wesl::SurfaceSample`).
+    subsurface_color: vec4<f32>,
+    subsurface_radius: vec4<f32>,
     index_of_refraction: f32,
     dispersion: f32,
     face_softness: f32,

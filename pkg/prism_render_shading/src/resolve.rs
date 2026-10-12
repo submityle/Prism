@@ -259,6 +259,16 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
             parameters.fuzz_color[2],
         ],
         subsurface: parameters.subsurface,
+        subsurface_color: [
+            parameters.subsurface_color[0],
+            parameters.subsurface_color[1],
+            parameters.subsurface_color[2],
+        ],
+        subsurface_radius: [
+            parameters.subsurface_radius[0],
+            parameters.subsurface_radius[1],
+            parameters.subsurface_radius[2],
+        ],
         thickness: parameters.thickness,
         anisotropy: parameters.anisotropy,
         anisotropy_rotation: parameters.anisotropy_rotation,

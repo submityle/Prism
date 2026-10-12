@@ -227,6 +227,8 @@ mod tests {
             fuzz_roughness: 0.3,
             fuzz_color: [0.8, 0.85, 0.9, 1.0],
             subsurface: 0.65,
+            subsurface_color: [0.9, 0.5, 0.4, 1.0],
+            subsurface_radius: [1.0, 0.6, 0.4, 1.0],
             index_of_refraction: 1.33,
             dispersion: 0.05,
             face_softness: 0.25,

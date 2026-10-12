@@ -1889,6 +1889,8 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.fuzz_roughness = parameters.fuzz_roughness;
     surface.fuzz_color = parameters.fuzz_color.xyz;
     surface.subsurface = parameters.subsurface;
+    surface.subsurface_color = parameters.subsurface_color.xyz;
+    surface.subsurface_radius = parameters.subsurface_radius.xyz;
     surface.thickness = parameters.thickness;
     surface.anisotropy = parameters.anisotropy;
     surface.anisotropy_rotation = parameters.anisotropy_rotation;

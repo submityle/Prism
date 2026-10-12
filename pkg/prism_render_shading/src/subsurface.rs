@@ -93,14 +93,22 @@ pub fn evaluate_subsurface_direct(
     let g = visibility_smith_ggx_correlated(n_dot_v, n_dot_l, alpha);
     let specular = mul_scalar(mul_scalar(f, d * g), n_dot_l);
 
-    // Wrapped diffuse: the wrap width is the subsurface weight, so scattering
-    // softens the terminator without altering the base albedo response.
-    let diffuse_cos = fd_wrap(raw_n_dot_l, subsurface);
+    // Wrapped diffuse: the wrap width is the subsurface weight scaled by the
+    // per-channel `subsurface_radius`, so scattering softens the terminator and
+    // a red-heavy radius bleeds red further. `subsurface_color` tints the
+    // scattered light. Both default to the identity.
+    let scat_color = surface.subsurface_color;
     let diffuse_weight = mul_scalar(sub([1.0; 3], f), 1.0 - metallic);
-    let diffuse = mul(
-        mul_scalar(surface.base_color, INV_PI * diffuse_cos),
-        diffuse_weight,
-    );
+    let mut diffuse = [0.0f32; 3];
+    for (channel, slot) in diffuse.iter_mut().enumerate() {
+        let wrap = (subsurface * surface.subsurface_radius[channel]).clamp(0.0, 1.0);
+        let diffuse_cos = fd_wrap(raw_n_dot_l, wrap);
+        *slot = surface.base_color[channel]
+            * scat_color[channel]
+            * INV_PI
+            * diffuse_cos
+            * diffuse_weight[channel];
+    }
 
     // Back transmission: light exiting toward the viewer after travelling
     // through thin geometry. Thin surfaces (thickness -> 0) transmit fully.
@@ -110,9 +118,9 @@ pub fn evaluate_subsurface_direct(
         SSS_POWER,
     );
     let thickness_attenuation = 1.0 - thickness;
-    let transmitted = mul_scalar(
-        surface.base_color,
-        subsurface * back * thickness_attenuation,
+    let transmitted = mul(
+        mul(surface.base_color, scat_color),
+        [subsurface * back * thickness_attenuation; 3],
     );
 
     let lit = add(add(diffuse, specular), transmitted);
@@ -285,5 +293,60 @@ mod tests {
             evaluate_subsurface_direct(surface, frame(), shadowed),
             surface.emissive
         );
+    }
+
+    #[test]
+    fn subsurface_radius_bleeds_channels_independently() {
+        // Light just past the terminator: the wrap width decides how much bleeds
+        // through, and a per-channel radius makes red reach further than blue.
+        // `thickness == 1` kills the back-transmission so only the wrapped
+        // diffuse is measured.
+        let behind = DirectLightSample {
+            direction: [-0.98, -0.2, 0.0],
+            ..light()
+        };
+        let out = evaluate_subsurface_direct(
+            SurfaceSample {
+                base_color: [1.0; 3],
+                perceptual_roughness: 0.5,
+                subsurface: 1.0,
+                subsurface_radius: [1.0, 0.4, 0.05],
+                thickness: 1.0,
+                ..Default::default()
+            },
+            frame(),
+            behind,
+        );
+        assert!(out[0] > out[1], "red must out-bleed green: {out:?}");
+        assert!(out[1] > out[2], "green must out-bleed blue: {out:?}");
+        assert_eq!(out[2], 0.0, "a tiny radius must not reach past the terminator");
+    }
+
+    #[test]
+    fn subsurface_color_tints_the_scattered_light() {
+        let behind = DirectLightSample {
+            direction: [-0.98, -0.2, 0.0],
+            ..light()
+        };
+        let base = SurfaceSample {
+            base_color: [1.0; 3],
+            perceptual_roughness: 0.5,
+            subsurface: 1.0,
+            thickness: 1.0,
+            ..Default::default()
+        };
+        let white = evaluate_subsurface_direct(base, frame(), behind);
+        let red = evaluate_subsurface_direct(
+            SurfaceSample {
+                subsurface_color: [1.0, 0.0, 0.0],
+                ..base
+            },
+            frame(),
+            behind,
+        );
+        // Red is untouched, green and blue are removed: the tint only scales.
+        assert!((red[0] - white[0]).abs() < 1.0e-6, "red={red:?} white={white:?}");
+        assert_eq!(red[1], 0.0);
+        assert_eq!(red[2], 0.0);
     }
 }

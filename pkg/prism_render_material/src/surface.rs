@@ -173,13 +173,34 @@ impl Default for GpuSheenLobe {
 }
 
 /// Subsurface lobe: wrapped diffuse approximation of shallow scattering.
+///
+/// The `OpenPBR` subsurface group. `subsurface_color` tints the scattered light
+/// (white = identity) and `subsurface_radius` is the per-channel scattering
+/// extent (white = identity, documented as *relative* in this real-time lobe).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuSubsurfaceLobe {
     pub subsurface: f32,
     pub _pad0: f32,
     pub _pad1: f32,
     pub _pad2: f32,
+    /// `OpenPBR` `subsurface_color` (white = identity).
+    pub subsurface_color: [f32; 4],
+    /// `OpenPBR` `subsurface_radius` (RGB free path, w unused; white = identity).
+    pub subsurface_radius: [f32; 4],
+}
+
+impl Default for GpuSubsurfaceLobe {
+    fn default() -> Self {
+        Self {
+            subsurface: 0.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+            subsurface_color: [1.0; 4],
+            subsurface_radius: [1.0; 4],
+        }
+    }
 }
 
 /// Transmission lobe: refractive dielectric transport (glass/liquid).
@@ -430,6 +451,8 @@ impl SurfaceParameterBlock {
                 _pad0: 0.0,
                 _pad1: 0.0,
                 _pad2: 0.0,
+                subsurface_color: params.subsurface_color,
+                subsurface_radius: params.subsurface_radius,
             },
             transmission: GpuTransmissionLobe {
                 transmission: params.transmission,
@@ -487,6 +510,8 @@ impl SurfaceParameterBlock {
         }
         if self.lobe_mask.contains(LobeMask::SUBSURFACE) {
             full.subsurface = self.subsurface.subsurface;
+            full.subsurface_color = self.subsurface.subsurface_color;
+            full.subsurface_radius = self.subsurface.subsurface_radius;
         }
         if self.lobe_mask.contains(LobeMask::TRANSMISSION) {
             full.transmission = self.transmission.transmission;
@@ -641,6 +666,8 @@ mod tests {
             fuzz_roughness: 0.3,
             fuzz_color: [0.8, 0.85, 0.9, 1.0],
             subsurface: 0.65,
+            subsurface_color: [0.9, 0.5, 0.4, 1.0],
+            subsurface_radius: [1.0, 0.6, 0.4, 1.0],
             index_of_refraction: 1.33,
             dispersion: 0.05,
             face_softness: 0.25,

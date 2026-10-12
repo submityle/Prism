@@ -83,6 +83,15 @@ pub struct SurfaceSample {
     pub fuzz_color: [f32; 3],
     /// Subsurface scattering weight driving Cloth/Subsurface diffusion in `[0, 1]`.
     pub subsurface: f32,
+    /// `OpenPBR` `subsurface_color`: per-channel colour of the scattered light.
+    /// It multiplies the base albedo of the subsurface terms, so the default
+    /// white is the exact identity.
+    pub subsurface_color: [f32; 3],
+    /// `OpenPBR` `subsurface_radius` (RGB free path). This real-time lobe has no
+    /// scene-unit distance scale, so the authored radius is a *relative*
+    /// per-channel scattering extent scaling the wrap width; white (1.0 per
+    /// channel) reproduces the legacy achromatic terminator exactly.
+    pub subsurface_radius: [f32; 3],
     /// Optical thickness in `[0, 1]` driving Subsurface back-transmission
     /// (0 = paper-thin, full transmission; 1 = opaque, no transmission).
     pub thickness: f32,
@@ -149,6 +158,8 @@ impl Default for SurfaceSample {
             fuzz_roughness: 0.5,
             fuzz_color: [1.0; 3],
             subsurface: 0.0,
+            subsurface_color: [1.0; 3],
+            subsurface_radius: [1.0; 3],
             thickness: 0.0,
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,

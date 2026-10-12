@@ -451,7 +451,7 @@ mask_const = "SUBSURFACE"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
-words = 4
+words = 12
 
 [[lobe.field]]
 name = "subsurface"
@@ -488,6 +488,36 @@ bit_region = "KHR"
 pack_slot = 3
 consumed_by = []
 default = 0.0
+
+[[lobe.field]]
+name = "subsurface_color"
+type = "vec4f"
+bit_region = "KHR"
+pack_slot = 4
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `subsurface_color`: per-channel colour of the scattered light. It
+# multiplies the base albedo of the wrapped-diffuse and back-transmission terms,
+# so the default white is the exact identity.
+default = [1.0, 1.0, 1.0, 1.0]
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
+
+[[lobe.field]]
+name = "subsurface_radius"
+type = "vec4f"
+bit_region = "KHR"
+pack_slot = 8
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `subsurface_radius` (RGB free path, w unused). Prism's real-time lobe
+# has no scene-unit distance scale, so the authored radius is interpreted as a
+# *relative* per-channel scattering extent that scales the wrap width: the
+# default white (1.0 per channel) reproduces the legacy achromatic terminator,
+# while e.g. a red-heavy radius makes red bleed further past the terminator.
+default = [1.0, 1.0, 1.0, 1.0]
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
 
 [[lobe]]
 id = "transmission"

@@ -214,7 +214,7 @@
 | **specular** | **`specular_weight` / `specular_color` / `specular_ior`（已补，取代 `reflectance` 代理，见 §13.a）** / `anisotropy` / `anisotropy_rotation` | ✅ 补齐 | — |
 | **coat** | `clearcoat` / `clearcoat_roughness` / **`coat_ior` / `coat_color` / `coat_roughness_anisotropy`（已补）** / **`coat_normal`（已补：纹理输入，非 ABI 字段，见 §13.a）** | 仅差 `coat_darkening` | `coat_darkening` |
 | **fuzz** | `sheen` / **`fuzz_roughness` / `fuzz_color`（已补，见 §13.a）** | ✅ 补齐 | —（`fuzz_roughness` 与 base roughness 的解耦是刻意的模型修正） |
-| **subsurface** | `subsurface` | 子集 | `subsurface_color`、`subsurface_radius`（vec3，RGB 自由程）、`scatter_anisotropy` |
+| **subsurface** | `subsurface` / **`subsurface_color` / `subsurface_radius`（RGB，已补，见 §13.a）** | 部分补全 | `scatter_anisotropy` |
 | **transmission** | `transmission` / `thickness` / **`index_of_refraction` / `dispersion`（已消费：principled 折射透射瓣，见 §13.a）** | 部分补全 | `transmission_color`、`transmission_scatter`、`thin_walled` 标志 |
 | **emission** | `emission`（4 words） | ✓ | `emission_luminance` 单位统一（nit / 相对） |
 | **thin_film**（虹彩） | — | **缺整瓣** | 新增 `thin_film_weight` / `thin_film_thickness` / `thin_film_ior`（§10 首个开放瓣示例） |
@@ -578,6 +578,13 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f（subsurface 组）OpenPBR `subsurface_color` + `subsurface_radius` 落地**（§4.4 / §17.2）
+  - 范围：给 subsurface 瓣补 `OpenPBR` subsurface 组的颜色与半径——`subsurface_color` 给散射光（wrap 漫反射 + 背透射）逐通道着色；`subsurface_radius`（RGB）按通道缩放 wrap 宽度，于是**红光能比蓝光更深地越过明暗分界**（皮肤那种经典红边）。两项默认都是白（恒等），既有材质逐位不变。
+  - **口径说明（诚实标注）**：OpenPBR 的 `subsurface_radius` 是**场景单位的平均自由程**，而 Prism 这个实时瓣本身没有距离尺度（wrap 宽度是无量纲的）。因此这里把它解释为**相对的逐通道散射范围**（白 = 1.0 = 历史的无彩分界行为），schema 注释与文档都写明了这一点；真正的"距离 × Burley 扩散剖面"路径需要把 `gi/translucency/diffusion.rs` 的剖面接进渲染路径，属后续工作。
+  - 代码：schema subsurface 瓣 4→12 字（新增 `subsurface_color` / `subsurface_radius` 两个 vec4f，w 未用）；`GpuSubsurfaceLobe`（+手写 `Default`：白）与 fat `GpuSurfaceParameters`（192→224 B 仍 16 字节对齐）；`SURFACE_MAX_WORDS` 60→68；regenerated `material_unpack.wesl`；shade-time `SurfaceSample`（CPU + WESL）+ 桥接；BSDF 双线 `subsurface.rs` / `subsurface.wesl`（逐通道 wrap + tint，包含背透射的 tint）；水栅格面显式写中性默认。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3303 通过**（新增：红半径比绿/蓝更越过分界、极小半径完全不越过、`subsurface_color` 只做逐通道缩放）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过）、`cargo test -p prism_material_schema` 13 通过（绝对偏移门禁：transmission 基址 52→60、IOR 62）、`cargo test -p prism_render_material` 826+6+2 全绿、`--features bevy` 编译干净；touched 文件 clippy 无告警。
+  - 诚实边界：`scatter_anisotropy`（Henyey-Greenstein 相位）**未**落地——这个瓣的背透射锐度是一个固定的 Frostbite 常量（`SSS_POWER = 12`），要做成相位函数需要有依据的映射，而不是把默认 0 硬套上去改变既有外观；仓库存有 `gi::translucency::foliage::forward_phase`（HG）可作后续基础。
 
 - **P1-f（geometry 组）OpenPBR `geometry_thin_walled` 落地**（§4.4 / §17.2）
   - 范围：补上 geometry 组唯一真正缺失的新字段 `thin_walled`——薄壁（开放、单界面）表面在背后没有体积，因此 transmission 瓣应**跳过 Beer-Lambert 深度吸收**，透射不再随 `thickness` 变化。默认 `0.0` 保持实体板路径，故既有材质逐位不变。

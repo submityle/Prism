@@ -174,6 +174,10 @@ pub struct GpuSurfaceParameters {
     /// `OpenPBR` `fuzz_color`: per-channel tint of the fuzz lobe.
     pub fuzz_color: [f32; 4],
     pub subsurface: f32,
+    /// `OpenPBR` `subsurface_color`: tint of the scattered light.
+    pub subsurface_color: [f32; 4],
+    /// `OpenPBR` `subsurface_radius`: per-channel scattering extent (RGB).
+    pub subsurface_radius: [f32; 4],
     pub index_of_refraction: f32,
     pub dispersion: f32,
     /// Stylized face-shadow terminator softness (FACE lobe). Padding keeps the
@@ -216,6 +220,8 @@ impl Default for GpuSurfaceParameters {
             fuzz_roughness: 0.5,
             fuzz_color: [1.0; 4],
             subsurface: 0.0,
+            subsurface_color: [1.0; 4],
+            subsurface_radius: [1.0; 4],
             index_of_refraction: 1.5,
             dispersion: 0.0,
             face_softness: 0.1,
