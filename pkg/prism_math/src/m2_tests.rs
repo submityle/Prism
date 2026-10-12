@@ -193,7 +193,25 @@ fn perspective_rh(fovy: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
 #[test]
 fn frustum_cull_in_and_out() {
     let proj = perspective_rh(core::f32::consts::FRAC_PI_2, 1.0, 1.0, 100.0);
-    let frustum = Frustum::from_view_proj(proj);
+    // This helper builds the OpenGL `[-1, 1]` convention, so extract with the
+    // matching `_gl` entry point. The near plane of a `[-1, 1]` matrix is
+    // `row3 + row2`; feeding it to the `[0, 1]` default would misplace it.
+    let frustum = Frustum::from_view_proj_gl(proj);
+
+    // The `[0, 1]` default is the one Prism's own projections use. A point just
+    // in front of the near plane is inside; the same point behind the camera is
+    // not — and the near plane must sit at `z = -near`, not at `z = 0`.
+    let zo = Frustum::from_view_proj(crate::projection::perspective_rh(
+        core::f32::consts::FRAC_PI_2,
+        1.0,
+        1.0,
+        100.0,
+    ));
+    assert!(zo.contains_point(vec3(0.0, 0.0, -5.0)));
+    assert!(
+        !zo.contains_point(vec3(0.0, 0.0, -0.5)),
+        "a point nearer than the near plane is outside"
+    );
 
     // Point in front of the camera is inside.
     assert!(frustum.contains_point(vec3(0.0, 0.0, -5.0)));
