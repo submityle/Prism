@@ -25,7 +25,10 @@
 //! Non-convex rings are **not** supported: offsetting them can self-intersect,
 //! which needs a full polygon-offset algorithm (miter/bevel/round joins plus
 //! self-intersection removal) that this module deliberately does not pretend to
-//! be. [`is_convex`] is checked up front and a concave input returns `None`.
+//! be. [`is_convex`] and
+//! [`is_simple_polygon`](crate::simplicity::is_simple_polygon) are both checked
+//! up front, so a concave *or* self-intersecting ring returns `None` (a star
+//! ring is convex-by-turns but not simple).
 //!
 //! Only `+ - * /` and `sqrt` on `f32` are used — no transcendentals — so the
 //! routine is `no_std`-clean and bit-stable.
@@ -34,6 +37,7 @@ use alloc::vec::Vec;
 
 use crate::convexity::is_convex;
 use crate::measure::signed_area;
+use crate::simplicity::is_simple_polygon;
 
 /// Below this normalized magnitude a turn or direction is treated as degenerate.
 const EPS: f32 = 1e-6;
@@ -93,7 +97,10 @@ pub fn offset_convex(verts: &[(f32, f32)], distance: f32) -> Option<Vec<(f32, f3
         ring.reverse();
     }
     let ring = drop_collinear(&ring)?;
-    if !is_convex(&ring) {
+    // Both guards are required: `is_convex` reports a self-intersecting
+    // "star" ring convex (its own docs warn about this), so a pentagram would
+    // otherwise be offset into nonsense. `is_simple_polygon` rejects it.
+    if !is_convex(&ring) || !is_simple_polygon(&ring) {
         return None;
     }
 
@@ -389,5 +396,26 @@ mod tests {
         let sq = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
         assert!(offset_convex(&sq, f32::NAN).is_none());
         assert!(offset_convex(&sq, f32::INFINITY).is_none());
+    }
+
+    #[test]
+    fn rejects_a_self_intersecting_star_ring() {
+        // A pentagram traced as a star turns the same way at every vertex, so
+        // `is_convex` alone accepts it — the simplicity guard must reject it
+        // rather than offset a self-intersecting ring into nonsense.
+        let pentagon = regular_polygon(5, 10.0);
+        let star = [
+            pentagon[0],
+            pentagon[2],
+            pentagon[4],
+            pentagon[1],
+            pentagon[3],
+        ];
+        assert!(
+            is_convex(&star),
+            "the star ring is convex-by-turns"
+        );
+        assert!(!is_simple_polygon(&star));
+        assert!(offset_convex(&star, 1.0).is_none());
     }
 }
