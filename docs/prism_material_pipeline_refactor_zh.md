@@ -621,7 +621,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P3-b | 先解耦视角无关项（diffuse/SSS/emission/GI 辐照度），高光仍走屏幕空间 | 分离求值 | P3 |
 | P3-c | 缓存失效 + 时序复用 + mip LOD 策略（光照/动态变化时的页重算） | 调度/一致性 | P3 |
 | P1-g | 自描述反射瓣 schema：lobe 定义（字段名/位宽/置换 key）数据化，解包/分类/对拍从 schema 生成（§17.5） | 工具链+内部布局 | P1 |
-| P2-f 🔶 | 超集合规门禁 + 向下投影导出器（§4.5/§17）：**参数块层 + 响应层（独立 oracle + 白炉能量门禁）均已落地**——介电/金属/coat/IOR-ratio/EON 漫反射/transmission 全部对齐到**语义/标识符/能量不变量**；白炉 7 配置 1.00±2%，coat 叠加 0.72 已诊断并记录（含两种实测否决的改法）。余：coat 能量设计、fuzz 叠加、subsurface（独立 class）、`refracted_coat_dir` 角度混合（规范给的另一条等价路径） | 新测试+导出路径 | P2 |
+| P2-f ✅ | 超集合规门禁 + 向下投影导出器（§4.5/§17）：**参数块层 + 响应层均已落地**——独立 oracle（规范逐式转写、与实时零共享）+ **白炉能量门禁覆盖规范 §Testing 全部配置**（principled 8 + Cloth(fuzz) + Subsurface，共 10 个，全部 1.00±2%）+ **真机 GPU 对拍**（`albedo_table_gpu_parity`，4 张表 × 561 采样点）。全部对齐在**语义/标识符/能量不变量**层，不照抄参考计算路径（各向异性宽度映射等仍用引擎统一实现，规范曲线只作对照）。`refracted_coat_dir` 是规范给出的**与 `specular_ior_ratio` 二选一**的等价路径，Prism 选后者，不属缺口 | 新测试+导出路径 | P2 |
 | P2-g | 运行时动态参数通道（wetness/snow/damage/dissolve 等少量动态轴，烘焙静态 über + 运行时解析式调制，§17.1） | header 加动态段 | P2 |
 | P2-h | 原理化分层 BSDF（coat/base 能量耦合 + coat_darkening，§17.2） | 无（改 BSDF+测试） | P2 |
 | P3-d | 光谱提升（hero-wavelength，仅 RT twin / 离线参考，不进实时主线，§17.3） | 无（RT-only 分支） | P3 |
