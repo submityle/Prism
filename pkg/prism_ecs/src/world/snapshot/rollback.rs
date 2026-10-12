@@ -96,6 +96,18 @@ impl SnapshotRing {
         self.frames.iter().map(|(f, _)| *f)
     }
 
+    /// Drop every retained frame strictly newer than `frame`, keeping `frame`
+    /// itself when present.
+    ///
+    /// Frames are stored oldest-first, so this pops the back of the deque. Used
+    /// by a rollback to discard the abandoned future branch, so its snapshots
+    /// can never be addressed again.
+    pub fn truncate_after(&mut self, frame: u64) {
+        while self.frames.back().is_some_and(|(f, _)| *f > frame) {
+            self.frames.pop_back();
+        }
+    }
+
     /// Drop every retained frame.
     pub fn clear(&mut self) {
         self.frames.clear();

@@ -154,6 +154,21 @@ impl SnapshotHistory {
         self.next_frame = frame;
     }
 
+    /// Discard every retained frame strictly newer than `frame` and rebase the
+    /// capture cursor to `frame`, so the next
+    /// [`capture`](Self::capture) records `frame` again.
+    ///
+    /// A rollback abandons the future branch. Truncating is what stops those
+    /// frames from staying addressable through [`contains`](Self::contains) /
+    /// [`state_hash`](Self::state_hash) / a later [`rollback`](Self::rollback)
+    /// and thereby resurrecting state a correction was supposed to replace
+    /// (design §14/§15). `frame` itself is kept: its pre-input snapshot is what a
+    /// re-simulation overwrites.
+    pub fn truncate_after(&mut self, frame: u64) {
+        self.ring.truncate_after(frame);
+        self.next_frame = frame;
+    }
+
     /// The deterministic state hash of a retained frame, for desync comparison
     /// (design §14, 逐帧状态哈希去同步). `None` once the frame is evicted.
     #[must_use]
@@ -241,6 +256,27 @@ mod tests {
             "frame 9 is still retained after the rewind"
         );
         assert!(history.state_hash(9).is_some());
+    }
+
+    /// `truncate_after` drops the abandoned future and rebases the cursor, so the
+    /// next capture records the restore point again (not `old_max + 1`).
+    #[test]
+    fn truncate_after_drops_the_future_and_rebases() {
+        let w = world();
+        let mut history = SnapshotHistory::new(8);
+        for _ in 0..5 {
+            history.capture(&w);
+        }
+        assert_eq!(history.next_frame(), 5);
+
+        history.truncate_after(2);
+        assert_eq!(history.next_frame(), 2);
+        assert!(history.contains(2), "the restore point is kept");
+        assert!(!history.contains(3) && !history.contains(4), "future dropped");
+        assert_eq!(history.oldest_frame(), Some(0));
+
+        assert_eq!(history.capture(&w), 2, "the next capture is frame 2 again");
+        assert_eq!(history.next_frame(), 3);
     }
 
     #[test]

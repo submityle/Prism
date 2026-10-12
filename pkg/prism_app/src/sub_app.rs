@@ -202,13 +202,22 @@ impl SubApp {
 
     /// Restore this sub-app's world to `frame` (design §14).
     ///
+    /// Rolling back abandons the future branch: on success the frames after
+    /// `frame` are dropped and the capture cursor is rebased to `frame`, so a
+    /// later [`capture_snapshot`](SubApp::capture_snapshot) records `frame` again
+    /// rather than appending past the abandoned history (design §14/§15).
+    ///
     /// Returns `false` when no history is installed or `frame` has been evicted
     /// or was never captured; the world is then left untouched.
     pub fn rollback_to(&mut self, frame: u64) -> bool {
-        match self.snapshot_history.as_ref() {
-            Some(history) => history.rollback(&mut self.world, frame),
-            None => false,
+        let Some(history) = self.snapshot_history.as_mut() else {
+            return false;
+        };
+        if !history.rollback(&mut self.world, frame) {
+            return false;
         }
+        history.truncate_after(frame);
+        true
     }
 
     /// Run the startup phases exactly once, in order

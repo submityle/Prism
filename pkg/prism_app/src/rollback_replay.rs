@@ -15,8 +15,10 @@
 //! [`rollback`](RollbackReplay::rollback): it restores the pre-frame-`f` world
 //! and returns the recorded inputs for frames `f..current` to re-simulate (the
 //! caller substitutes the corrected frame's input), re-committing each frame as
-//! it goes. Re-committing overwrites the frame's snapshot and input in place, so
-//! the log never grows a duplicate branch.
+//! it goes. Rolling back **discards the abandoned future**: the snapshots and
+//! inputs after the restore point are dropped and the cursor is rebased, so the
+//! log never grows a duplicate branch and a short (or aborted) re-simulation
+//! cannot leave stale frames behind for a later rollback to resurrect.
 //!
 //! Use a divergence check to decide *where* to roll back to: compare the
 //! per-frame [`FrameHash`](crate::determinism::FrameHash) against a manifest
@@ -111,7 +113,12 @@ impl<F: Clone> RollbackReplay<F> {
         if !self.history.rollback(world, frame) {
             return None;
         }
-        self.history.seek(frame);
+        // Abandon the future branch: drop the snapshots and inputs after `frame`
+        // and rebase the cursor, so a short (or aborted) re-simulation cannot
+        // leave stale frames that a later rollback would resurrect, and
+        // `inputs()` never reports frames past the live cursor.
+        self.history.truncate_after(frame);
+        self.inputs.truncate(frame as usize);
         Some(plan)
     }
 
@@ -222,6 +229,39 @@ mod tests {
         assert_eq!(counter(&w, e), 14); // 1 + 10 + 3
         let inputs: Vec<i32> = rr.inputs().iter().map(|r| r.frame).collect();
         assert_eq!(inputs, vec![1, 10, 3]);
+    }
+
+    /// A rollback discards the abandoned future branch: its snapshots and inputs
+    /// are dropped and the cursor is rebased, so a dropped frame can never be
+    /// rolled back to again (regression: stale frames used to stay addressable
+    /// and a later rollback could resurrect the pre-correction state).
+    #[test]
+    fn rollback_discards_the_abandoned_future() {
+        let (mut w, e) = world(0);
+        let mut rr = RollbackReplay::<i32>::new(8);
+        for input in 1..=4 {
+            forward(&mut rr, &mut w, e, input);
+        }
+        assert_eq!(rr.frame(), 4);
+
+        let plan = rr.rollback(&mut w, 2).expect("frame 2 is retained");
+        assert_eq!(plan, vec![3, 4]);
+
+        assert_eq!(rr.frame(), 2, "the cursor is rebased to the restore point");
+        assert_eq!(rr.inputs().len(), 2, "inputs are truncated to the cursor");
+        assert!(rr.history().contains(2), "the restore point is kept");
+        assert!(!rr.history().contains(3) && !rr.history().contains(4));
+        assert!(
+            rr.rollback(&mut w, 3).is_none(),
+            "a dropped frame can no longer be rolled back to"
+        );
+
+        // Re-committing rebuilds the branch from the restore point.
+        forward(&mut rr, &mut w, e, 100);
+        assert_eq!(rr.frame(), 3);
+        assert_eq!(rr.inputs().len(), 3);
+        assert!(rr.history().contains(2));
+        assert!(!rr.history().contains(4), "frame 4 stays gone");
     }
 
     #[test]

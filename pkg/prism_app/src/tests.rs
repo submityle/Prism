@@ -8475,3 +8475,41 @@ mod multi_thread_tests {
         );
     }
 }
+
+/// `App::rollback_to` restores the world **and** abandons the future branch: the
+/// frames after the restore point are dropped and the next capture records the
+/// restore point again (design §14/§15; regression: the cursor stayed at the old
+/// maximum, leaving stale frames a later rollback could resurrect).
+#[test]
+fn rollback_to_rebases_the_snapshot_cursor() {
+    use prism_ecs::component::Component;
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct Health(i32);
+    impl Component for Health {}
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    struct Marker2;
+    impl Component for Marker2 {}
+
+    let mut app = App::new();
+    app.world_mut().register_snapshot_component_hashable::<Health>();
+    app.world_mut().register_snapshot_component::<Marker2>();
+    let e = app.world_mut().spawn((Health(0), Marker2));
+    app.init_snapshot_history(8);
+
+    // Snapshots: frame 0 -> health 0, frame 1 -> 1, frame 2 -> 2.
+    for value in 0..3 {
+        app.world_mut().get_mut::<Health>(e).unwrap().0 = value;
+        app.capture_snapshot();
+    }
+    assert_eq!(app.capture_snapshot(), Some(3));
+
+    assert!(app.rollback_to(1), "frame 1 is retained");
+    assert_eq!(app.world().get::<Health>(e).unwrap().0, 1);
+    let history = app.main().snapshot_history().expect("history installed");
+    assert!(!history.contains(2) && !history.contains(3), "future dropped");
+    assert!(history.contains(1), "the restore point is kept");
+
+    // The next capture records the restore point again, not frame 4.
+    assert_eq!(app.capture_snapshot(), Some(1));
+}
