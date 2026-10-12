@@ -2075,3 +2075,58 @@ fn prism_interval_unary(op: u32, a: PrismInterval) -> PrismInterval {\n\
         default: { return a; }\n\
     }\n\
 }\n";
+
+/// Single-sourced WGSL for the `PCG32` (XSH-RR) generator, mirroring the CPU
+/// [`Pcg32`](crate::rng::Pcg32) step for step. WGSL has no `u64`, so the
+/// 64-bit LCG state is carried as a `vec2<u32>` `(lo, hi)` lane pair and the
+/// 64-bit multiply is emulated with 32×32 partial products
+/// (`prism_pcg_mul_hi` = Hacker's Delight `mulhi`). `prism_pcg32_first`
+/// reproduces [`Pcg32::with_stream`](crate::rng::Pcg32::with_stream)'s
+/// seeding ritual (`inc = 2*stream + 1`, `state = 0`, step, `state += seed`,
+/// step) and then the XSH-RR output permutation of `Pcg32::next`
+/// (`xorshifted = ((state >> 18) ^ state) >> 27`, `rot = state >> 59`,
+/// rotate-right), returning the first 32-bit draw. Because the emulation is
+/// exact 32-bit integer arithmetic, the device output is **bit-identical** to
+/// the CPU — the same deterministic stream feeds GPU procedural content
+/// (particles / terrain / scattering) and the host.
+pub const WGSL_PCG32: &str = "\
+fn prism_pcg_mul_hi(u: u32, v: u32) -> u32 {\n\
+    let u0 = u & 0xffffu;\n\
+    let u1 = u >> 16u;\n\
+    let v0 = v & 0xffffu;\n\
+    let v1 = v >> 16u;\n\
+    let t0 = u0 * v0;\n\
+    let k = t0 >> 16u;\n\
+    let t1 = u1 * v0 + k;\n\
+    let w1 = t1 & 0xffffu;\n\
+    let w2 = t1 >> 16u;\n\
+    let t2 = u0 * v1 + w1;\n\
+    return u1 * v1 + w2 + (t2 >> 16u);\n\
+}\n\
+\n\
+fn prism_pcg_step(lo: u32, hi: u32, inc_lo: u32, inc_hi: u32) -> vec2<u32> {\n\
+    let mlo = 0x4C957F2Du;\n\
+    let mhi = 0x5851F42Du;\n\
+    let prod_lo = lo * mlo;\n\
+    let prod_hi = prism_pcg_mul_hi(lo, mlo) + lo * mhi + hi * mlo;\n\
+    let sum_lo = prod_lo + inc_lo;\n\
+    let carry = select(0u, 1u, sum_lo < prod_lo);\n\
+    let sum_hi = prod_hi + inc_hi + carry;\n\
+    return vec2<u32>(sum_lo, sum_hi);\n\
+}\n\
+\n\
+fn prism_pcg32_first(seed_lo: u32, seed_hi: u32, stream_lo: u32, stream_hi: u32) -> u32 {\n\
+    let inc_lo = (stream_lo << 1u) | 1u;\n\
+    let inc_hi = (stream_hi << 1u) | (stream_lo >> 31u);\n\
+    let mixed_lo = inc_lo + seed_lo;\n\
+    let carry = select(0u, 1u, mixed_lo < inc_lo);\n\
+    let mixed_hi = inc_hi + seed_hi + carry;\n\
+    let st = prism_pcg_step(mixed_lo, mixed_hi, inc_lo, inc_hi);\n\
+    let sh18_lo = (st.x >> 18u) | (st.y << 14u);\n\
+    let sh18_hi = st.y >> 18u;\n\
+    let x_lo = sh18_lo ^ st.x;\n\
+    let x_hi = sh18_hi ^ st.y;\n\
+    let xorshifted = (x_lo >> 27u) | (x_hi << 5u);\n\
+    let rot = st.y >> 27u;\n\
+    return (xorshifted >> rot) | (xorshifted << ((32u - rot) & 31u));\n\
+}\n";
