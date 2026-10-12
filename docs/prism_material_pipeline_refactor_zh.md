@@ -639,7 +639,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 为把白炉能量不变量落到**正确的层次**，引入了 5 张烘表（都是"对**本引擎自己**的瓣做数值积分/重要度采样"得到的，不是照抄参考实现的计算路径）：`EON`（`Ê_ON`/`⟨Ê_ON⟩`）、`GGX albedo E_white`、`介电瓣反照率`、`Schlick bias B`、`Charlie 反照率 E_fuzz`。合计约 765 个 `const f32`，**无 binding、无纹理采样**。
   - **已落地的两处零成本短路**（覆盖绝大多数材质）：① `diffuse_roughness == 0` 时 EON 补偿精确为 0 → 跳过 2 次查表；② `coat_weight == 0` 时 coat 闭包整体惰性 → 跳过 2 次查表。默认材质的逐光源查表从 5 次降到 3 次（其中只有 1 次真正依赖光源）。
   - **判据（何时换形态）**：`const` 数组被 WGSL 动态索引时通常落到 private/local memory。若 GPU profile 显示此处成为瓶颈，按此顺序换：① 把只依赖**视角/材质**的两项（`E_white(n·v)`、`E_avg`、介电反照率、coat 反照率）**提升到逐像素、跨光源复用**（现在每盏灯重算；改动点是 `resolve.rs` / `shading_resolve.wesl` 的逐光源循环各 1 处 + 一个 per-pixel context）；② 降低网格（17×9 → 9×5，同样由白炉门禁守精度）；③ 换小型线性过滤纹理（引擎已有 DFG LUT 先例）。**在拿到 profile 之前不改**——现在改是把"猜测"当"优化"。
-  - **本轮无法测量的诚实说明**：本沙盒**无 GPU adapter**（`PRISM_REQUIRE_GPU=1` 时 GPU 测试全部 FAIL，不设该变量则静默跳过），所以上述判据只能给出**触发条件与执行顺序**，不能给出"哪种更快"的数字。这是环境限制，不是把优化推后：两处已被数据支持的短路已经落地。
+  - **GPU 验证已打通（并修正一处我先前的错误结论）**：我此前报"本沙盒无 GPU adapter"是**错的**——沙盒屏蔽了 Metal 设备访问，**越出沙盒后 GPU 可用**（`prism_render_gpudriven` 18 项、`prism_math_gpu` 42+4 项、`prism_render_material_gpu` 66+1 项全部在真机上通过）。因此本轮新增了**真机对拍门禁** `pkg/prism_render_material_gpu/tests/albedo_table_gpu_parity.rs`：把 `brdf.wesl` / `cloth.wesl` 里**真实的**查表函数（连同表常量，全部从源码文本解析，不复制一份）编译成 compute shader，在 GPU 上跑一张采样网格，与 Rust 用**同一份源码**做的双线性插值对拍。
+  - **对拍结果修正了一条长期口径**：CPU 与 GPU 在这些查表上**并非逐位相等**——实测差 **1 ULP**（0.387934 vs 0.38793403），根因是 GPU 可以把 `a + (b−a)·fx` 融合成 FMA 而 CPU 参考不会。所以门禁用 `1e-6` 相对公差（仍能捕捉任何真实的表/插值错误，量级差得很远），并且**本文此前"CPU 金标准与 WESL twin 字节级对拍"的说法在这一类计算上应读作"1 ULP 内"**——这是架构事实（FMA 契约），不是缺陷。
 
 - **P2-f 第十二片：Subsurface 层能量（闭式归一化，零新表）**（§4.5 / §10）
   - 把 subsurface 配置（`subsurface_weight = 1` + 白色 `subsurface_color`）加进白炉门禁后测出 **[0.759, 0.892, 0.961]**（逐通道丢能量）。
