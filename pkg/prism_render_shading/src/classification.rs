@@ -142,6 +142,19 @@ pub enum ClassTableError {
     /// whole point: a registered-but-unshaded mode must be a loud error rather
     /// than a material that silently classifies as something else.
     UnhandledResponseMode(String),
+    /// The class set does not tile `0..=class_count` (a bucket id is missing or
+    /// duplicated in a way the work plan cannot index).
+    NonDenseClassIds {
+        /// The ids the table declared, in row order.
+        ids: Vec<u32>,
+    },
+    /// The class set is larger than the shader-side capacity.
+    CapacityExceeded {
+        /// Buckets the table declares.
+        needed: usize,
+        /// The capacity `MAX_SHADING_CLASSES` fixes for the work-plan arrays.
+        capacity: usize,
+    },
 }
 
 impl core::fmt::Display for ClassTableError {
@@ -150,6 +163,13 @@ impl core::fmt::Display for ClassTableError {
             Self::UnhandledResponseMode(uid) => write!(
                 f,
                 "response mode {uid:?} is registered but has no shading implementation"
+            ),
+            Self::NonDenseClassIds { ids } => {
+                write!(f, "shading-class ids {ids:?} do not tile 0..=max")
+            }
+            Self::CapacityExceeded { needed, capacity } => write!(
+                f,
+                "the class set needs {needed} buckets but the shader-side capacity is {capacity}"
             ),
         }
     }
@@ -264,7 +284,65 @@ impl ShadingClassTable {
             name: "principled",
             rule: ShadingClassRule::Default,
         });
-        Ok(Self { rows })
+        let table = Self { rows };
+        table.validate(MAX_SHADING_CLASSES)?;
+        Ok(table)
+    }
+
+    /// Number of shading buckets: `max(id) + 1`, i.e. the width the work plan's
+    /// per-class arrays must cover.
+    ///
+    /// The ids must tile `0..=max` — the work plan indexes by id, so a gap or a
+    /// duplicate would silently fold two buckets together. [`Self::validate`]
+    /// checks that, and [`Self::from_registry`] runs it.
+    ///
+    /// # Panics
+    ///
+    /// Panics on an empty table (a class set with no fallback row is a
+    /// programming error, and `from_registry` always emits one).
+    #[must_use]
+    pub fn class_count(&self) -> u32 {
+        self.rows
+            .iter()
+            .map(|row| row.id)
+            .max()
+            .map(|max_id| max_id + 1)
+            .expect("a shading-class table always has a default row")
+    }
+
+    /// Check the structural invariants the work plan depends on.
+    ///
+    /// # Errors
+    ///
+    /// [`ClassTableError::NonDenseClassIds`] when the ids do not tile
+    /// `0..=class_count`, [`ClassTableError::CapacityExceeded`] when the class
+    /// set does not fit the shader-side capacity (the prefix-sum/scatter arrays
+    /// are fixed-size in WGSL, so the *live* count is table-driven but the
+    /// capacity is a build-time fact).
+    pub fn validate(&self, capacity: usize) -> Result<(), ClassTableError> {
+        let count = self.class_count() as usize;
+        let mut seen = vec![false; count];
+        for row in &self.rows {
+            let index = row.id as usize;
+            if index >= count {
+                return Err(ClassTableError::NonDenseClassIds {
+                    ids: self.rows.iter().map(|row| row.id).collect(),
+                });
+            }
+            seen[index] = true;
+        }
+        if seen.iter().any(|present| !present) {
+            return Err(ClassTableError::NonDenseClassIds {
+                ids: self.rows.iter().map(|row| row.id).collect(),
+            });
+        }
+        if count > capacity {
+            return Err(ClassTableError::CapacityExceeded {
+                needed: count,
+                capacity,
+            });
+        }
+        Ok(())
     }
 
     /// The rows, in evaluation order.
@@ -629,6 +707,36 @@ mod tests {
                 name.to_ascii_uppercase()
             );
         }
+    }
+
+
+    #[test]
+    fn the_class_count_is_derived_and_the_ids_tile_it() {
+        let registry = prism_material_pcm::builtin::builtin_registry();
+        let table = ShadingClassTable::from_registry(
+            &registry,
+            &prism_render_material::SURFACE_LOBES,
+        )
+        .unwrap();
+        // P2-j: the *live* class count comes from the table, not from a magic
+        // constant — and today it happens to fill the shader-side capacity.
+        assert_eq!(table.class_count(), MAX_SHADING_CLASSES as u32);
+        table.validate(MAX_SHADING_CLASSES).unwrap();
+        // The ids are dense, so the work plan can index by id.
+        let mut ids: Vec<u32> = table.rows().iter().map(|row| row.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let dense: Vec<u32> = (0..table.class_count()).collect();
+        assert_eq!(ids, dense);
+        // One row short of the capacity is a build error, not a silent
+        // overwrite: the prefix-sum/scatter arrays are WGSL-fixed.
+        assert_eq!(
+            table.validate(MAX_SHADING_CLASSES - 1),
+            Err(ClassTableError::CapacityExceeded {
+                needed: MAX_SHADING_CLASSES,
+                capacity: MAX_SHADING_CLASSES - 1,
+            })
+        );
     }
 
     #[test]

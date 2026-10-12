@@ -26,6 +26,32 @@ use bytemuck::{Pod, Zeroable};
 use prism_render_shading::MAX_SHADING_CLASSES;
 
 pub const CLASSIFICATION_WORKGROUP_SIZE: u32 = 64;
+
+/// The engine's live shading-class count, derived once from the built-in PCM
+/// catalogue (roadmap P2-j).
+///
+/// The shader's prefix-sum/scatter arrays are fixed-width — WGSL has no dynamic
+/// arrays — so `MAX_SHADING_CLASSES` stays the *capacity*, while the number of
+/// buckets actually dispatched comes from the class table. A catalogue that
+/// would not fit is a construction error, caught where the table is built.
+fn builtin_shading_class_count() -> u32 {
+    use prism_render_shading::ShadingClassTable;
+    use std::sync::OnceLock;
+    static COUNT: OnceLock<u32> = OnceLock::new();
+    *COUNT.get_or_init(|| {
+        let registry = prism_material_pcm::builtin::builtin_registry();
+        let table = ShadingClassTable::from_registry(
+            &registry,
+            &prism_render_material::SURFACE_LOBES,
+        )
+        .expect("the built-in response-mode catalogue must be fully implemented");
+        table
+            .validate(MAX_SHADING_CLASSES)
+            .expect("the built-in class set must fit the shader-side capacity");
+        table.class_count()
+    })
+}
+
 #[cfg(test)]
 const INVALID_CLASS: u32 = u32::MAX;
 
@@ -212,7 +238,10 @@ pub(crate) fn dispatch_material_classification(
         pixel_count: buffers.size.x.saturating_mul(buffers.size.y),
         material_capacity: materials.registry.capacity(),
         work_capacity: buffers.capacity,
-        class_count: MAX_SHADING_CLASSES as u32,
+        // P2-j: the live class count is the table's, not the capacity. The
+        // table is derived once from the built-in registry (which is what the
+        // engine actually implements) and cached, so a pass never rebuilds it.
+        class_count: builtin_shading_class_count(),
     };
     if params.pixel_count == 0 {
         return;

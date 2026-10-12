@@ -29,6 +29,9 @@ bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_render_material = { path = "../prism_render_material", features = ["bevy"] }
 prism_render_shading = { path = "../prism_render_shading" }
+# P2-j: the material-classification pass takes its live class count from the
+# shading-class table, which is derived from the PCM catalogue.
+prism_material_pcm = { path = "../prism_material_pcm" }
 prism_render_visibility = { path = "../prism_render_visibility" }
 # Prism's own RHI. During the `bevy_render` -> Prism RHI port the renderer
 # gains the RHI device/queue here, subsystem by subsystem, until the
