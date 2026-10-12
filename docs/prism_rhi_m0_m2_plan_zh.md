@@ -36,14 +36,19 @@
 - **M1 资源/采样器验收**：`tests/textured_quad.rs` —— 上传纹理 → sampler + bind group → 采样着色 → 离屏回读，4096 像素**精确等值**断言。
 - **M0 窗口呈现**：runtime 的 `render_frame` 走 `acquire → import 交换链 → 构图 → execute → present`；`tools/render_triangle` 是真窗口 demo（真机 8s 无错运行）。
 - **M2 起步**：`prism_render_driver` 补 `DrawIndexedIndirect` + `MultiDrawIndirect`（multi-draw-indirect-count）；新 crate `pkg/prism_render_gpudriven` 做 compute 视锥剔除 → GPU 写间接参数 → indirect 绘制，GPU 结果与 CPU 参考集**完全一致**。
+- **M2 场景 + 基准**：`prism_render_gpudriven` 经 `prism_render_graph` 真绘制 ~1000 物体；`benches/benches/prism_gpu_cull` 实测——GPU-driven 逐帧 CPU 提交 ~290 ns 且与物体数无关，朴素路径 10000 物体 58 µs（**232×**）。顺手修出「剔除原子游标未重置」真 bug。
+- **M2 bindless**：RHI 加 descriptor-array（buffer/texture/sampler/storage-texture 四类）+ wgpu `binding_array` 翻译，四类均真机**精确值**验证；按 wgpu 30 实际能力门控。
+- **集成**：`pkg/prism_render_app` —— runtime 接进 `prism_app` 的 render sub-app（extract + `Render` schedule；GPU 状态只在 render world，`forbid(unsafe_code)`）。
+- **内容层（脱 bevy 的地基）**：`pkg/prism_camera`（投影/视图/视锥）、`pkg/prism_mesh`（顶点/图元/RHI 上传）、`pkg/prism_image`（RGBA8/RHI 纹理上传）——全部无 `bevy_*`，GPU 上传真机验证。
+- **材质路径**：`pkg/prism_render_shading_gpu` 是 CPU golden `evaluate_principled_direct` 的 wgpu twin（GGX + Oren-Nayar + Kulla-Conty/Turquin 多次散射 + 各向异性），111 组配置真机对拍 `max_rel=4.7e-6`；门禁抓出其镜像里一个 Karis 系数写反的真 bug。
+- **CR 修复**：① `prism_math::Frustum::from_view_proj` 原用 OpenGL `[-1,1]` 近平面，与 Prism 自身 `[0,1]` 投影不符——改为 `[0,1]` 默认 + 新增 `_gl`；`prism_camera` 改为委托，单一实现。② `Surface::discard` 补齐：帧已 acquire 但图编译失败时不再泄漏交换链 id。
 
 ## 4. 后续切片（依赖有序）
 
-1. **M2 千物体场景 + 基准**：把 `prism_render_gpudriven` 从「剔除 + 间接参数」推进到真正绘制 ~1000 物体，并测 GPU-driven 与朴素逐物体提交的 CPU 提交/帧时差（基准即规格）。
-2. **M2 bindless 资源表**：RHI 加 descriptor-array 绑定（`binding_array`），按 wgpu 30 实际能力门控，落不到的绑定类显式文档化而非假实现。
+1. **可见目标物 demo**：`tools/render_pbr` —— 用 camera/mesh/image + PBR twin 在真窗口画出带纹理、被光照的物体（M1/M2 的可见验收）。
+2. **`prism_render_scene` 脱 bevy 首片**：把现役渲染器的内容类型换到 `prism_mesh/image/camera` 上（M3 范围，需分片推进）。
 3. **自动屏障可观测**：`StateTracker` 已算屏障；wgpu 阶段为 no-op，补 `validation` 档把推导屏障与后端追踪对拍。
-4. **M1/M2 目标物（内容侧）**：纹理 + PBR 物体需要 mesh/image/camera 内容类型，属 M3 抽取范围，先由 runtime/gpudriven 做最小验证。
-5. **prism_app 渲染 sub-app**：把 runtime 挂进 `prism_app` 的 render sub-app + extract（P1 收尾，脱 Bevy 的落点）。
+4. **`prism_render_app` 接真窗口**：把 render sub-app 的离屏目标换成 `prism_window_winit` 的 surface。
 
 ## 5. 验证门禁
 
