@@ -484,7 +484,7 @@ pkg/prism_math/
 
 > **非有限输入(NaN)不在 parity 契约内**：多轮 CR 发现 `smoothstep`/`smootherstep`、四元数 `slerp` 的 `acos(clamp)`、`Segment3::closest_t` 等处的 `clamp` 在 CPU(Rust `f32::clamp` 保 NaN)与 GPU 间对 NaN 行为不同；**真机实测**：即便把 WGSL `clamp` 换成保 NaN 的分支比较，Metal fast-math 仍会把 `smoothstep(NaN)` 折叠成边界值 0——fast-math 下无法在可移植 WGSL 中保证 NaN 传播，故所有镜像的统一契约是**有限输入**；测试按此规避 NaN。
 
-> **CPU 核心 CR 边界（已记录，多数为退化输入前置条件）**：`to_int` 负值截断、`I16F16::from_fixed` 溢出前饱和、`MIN % -1` 溢出、`Plane::project_point` 非单位法线 4 项**已修复并加回归测试**（`tests_cr_fixes.rs`）；其余为退化/极端输入前置条件：无限远视锥 far 面（`perspective_infinite_rh`）提取零法线→NaN 分类、零方向射线、零半径球法线、非单位射线方向的绝对 epsilon、零向量 `normalize`、极端幅值 `normalize` 上/下溢 —— 记为已知边界（调用方需保证方向非零、法线单位、幅值适中）。
+> **CPU 核心 CR 边界（已记录，多数为退化输入前置条件）**：`to_int` 负值截断、`I16F16::from_fixed` 溢出前饱和、`MIN % -1` 溢出、`Plane::project_point` 非单位法线 4 项**已修复并加回归测试**（`tests_cr_fixes.rs`）；其后又修复 2 项真鲁棒性 bug：**无限远视锥** far 面零 clip 行→NaN 平面（改为恒满足平面 `(0,0,0,1)`）与 **极端幅值 `Vec3`/`Quat::normalize` 上/下溢**（正常范围走原快路径不变，溢出/下溢改按最大分量缩放）；剩余为退化输入前置条件：零方向射线、零半径球法线、非单位射线方向的绝对 epsilon、零向量 `normalize` —— 记为已知边界（调用方需保证方向非零、法线单位）。
 
 > **极端噪声坐标不在 parity 契约内**：Perlin/Simplex 的 `floor→i32` 转换在 CPU(Rust `as i32` 正溢出饱和到 `i32::MAX`=2147483647)与 GPU(naga 30.0.1 钳到 f32 可表示的 2147483520)不同，|坐标|≥2^31 时格点/哈希序列分歧；噪声镜像的精确契约限定在**文档化的中等坐标范围**（测试取 `[-64,64]`），极端坐标属实现边界。
 

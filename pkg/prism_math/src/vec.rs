@@ -259,8 +259,21 @@ impl Vec3 {
     /// Normalize to unit length (panics in debug if non-finite result).
     #[inline]
     pub fn normalize(self) -> Self {
-        let inv = 1.0 / self.length();
-        let n = self * inv;
+        let len = self.length();
+        if len.is_finite() && len > 0.0 {
+            let n = self * (1.0 / len);
+            debug_assert!(n.is_finite(), "normalize of near-zero vector");
+            return n;
+        }
+        // `len` overflowed to +inf, or underflowed to 0 on a non-zero vector:
+        // rescale by the largest component so the square cannot overflow.
+        let m = self.x.abs().max(self.y.abs()).max(self.z.abs());
+        if m > 0.0 && m.is_finite() {
+            let scaled = self * (1.0 / m);
+            return scaled * (1.0 / scaled.length());
+        }
+        // Zero / NaN / non-finite: keep the prior broadcast behaviour.
+        let n = self * (1.0 / len);
         debug_assert!(n.is_finite(), "normalize of near-zero vector");
         n
     }

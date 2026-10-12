@@ -109,7 +109,40 @@ impl Quat {
     /// Normalize to a unit quaternion.
     #[inline]
     pub fn normalize(self) -> Self {
-        let inv = 1.0 / self.length();
+        let len = self.length();
+        if len.is_finite() && len > 0.0 {
+            let inv = 1.0 / len;
+            return Self {
+                x: self.x * inv,
+                y: self.y * inv,
+                z: self.z * inv,
+                w: self.w * inv,
+            };
+        }
+        // Overflowed / underflowed magnitude: rescale by the largest component.
+        let m = self
+            .x
+            .abs()
+            .max(self.y.abs())
+            .max(self.z.abs())
+            .max(self.w.abs());
+        if m > 0.0 && m.is_finite() {
+            let inv_m = 1.0 / m;
+            let q = Self {
+                x: self.x * inv_m,
+                y: self.y * inv_m,
+                z: self.z * inv_m,
+                w: self.w * inv_m,
+            };
+            let inv = 1.0 / q.length();
+            return Self {
+                x: q.x * inv,
+                y: q.y * inv,
+                z: q.z * inv,
+                w: q.w * inv,
+            };
+        }
+        let inv = 1.0 / len;
         Self {
             x: self.x * inv,
             y: self.y * inv,

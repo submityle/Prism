@@ -83,7 +83,18 @@ impl Frustum {
     /// Build a frustum from six `[a, b, c, d]` plane rows, normalizing normals
     /// so signed distances are Euclidean.
     fn from_plane_rows(rows: [[f32; 4]; 6]) -> Self {
-        let plane = |p: [f32; 4]| Plane::new(Vec3::new(p[0], p[1], p[2]), p[3]).normalized();
+        let plane = |p: [f32; 4]| {
+            let n = Vec3::new(p[0], p[1], p[2]);
+            if n.length_squared() <= 1.0e-30 {
+                // A degenerate clip row is an already-satisfied condition (e.g.
+                // the far plane of an infinite projection, where `z <= w` holds
+                // for every point). Normalizing `(0,0,0)` would yield NaN, so
+                // store an always-pass plane `(0,0,0,1)` instead (CR-found).
+                Plane::new(Vec3::ZERO, 1.0)
+            } else {
+                Plane::new(n, p[3]).normalized()
+            }
+        };
         Self {
             planes: [
                 plane(rows[LEFT]),

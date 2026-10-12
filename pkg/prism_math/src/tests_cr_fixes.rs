@@ -2,7 +2,10 @@
 //! truncation/saturation/remainder and unnormalized plane projection).
 
 use crate::fixed::{Fixed, I16F16};
+use crate::geom::frustum::Frustum;
 use crate::geom::plane::Plane;
+use crate::projection::perspective_infinite_rh;
+use crate::quat::Quat;
 use crate::vec::Vec3;
 
 #[test]
@@ -51,4 +54,37 @@ fn plane_project_point_is_orthogonal_for_unnormalized_normal() {
     let unit = Plane::from_point_normal(Vec3::new(2.0, 0.0, 0.0), Vec3::X);
     let q = unit.project_point(Vec3::ZERO);
     assert!((q.x - 2.0).abs() < 1.0e-6, "unit projection = {q:?}");
+}
+
+#[test]
+fn infinite_far_frustum_classifies_visible_points() {
+    // An infinite-far projection has an always-satisfied far plane; its zero
+    // clip row must not become a NaN plane (CR-found).
+    let vp = perspective_infinite_rh(core::f32::consts::FRAC_PI_2, 1.0, 1.0);
+    let f = Frustum::from_view_proj(vp);
+    // In front of the camera (looking down -Z), beyond the near plane: inside.
+    assert!(f.contains_point(Vec3::new(0.0, 0.0, -5.0)));
+    // Behind the camera: outside the near plane.
+    assert!(!f.contains_point(Vec3::new(0.0, 0.0, 5.0)));
+}
+
+#[test]
+fn vec3_normalize_handles_extreme_magnitudes() {
+    // Squared length overflows to +inf: must still yield a unit vector.
+    let n = Vec3::new(1.0e20, 0.0, 0.0).normalize();
+    assert!((n.x - 1.0).abs() < 1.0e-6, "big normalize = {n:?}");
+    // Squared length underflows to 0: must still yield a unit vector.
+    let n = Vec3::new(1.0e-30, 0.0, 0.0).normalize();
+    assert!((n.x - 1.0).abs() < 1.0e-6, "small normalize = {n:?}");
+    // Normal range is unchanged.
+    let n = Vec3::new(3.0, 4.0, 0.0).normalize();
+    assert!((n.x - 0.6).abs() < 1.0e-6 && (n.y - 0.8).abs() < 1.0e-6);
+}
+
+#[test]
+fn quat_normalize_handles_extreme_magnitudes() {
+    let q = Quat::from_xyzw(0.0, 0.0, 0.0, 1.0e20).normalize();
+    assert!((q.w - 1.0).abs() < 1.0e-6, "big quat normalize = {q:?}");
+    let q = Quat::from_xyzw(0.0, 0.0, 0.0, 1.0e-30).normalize();
+    assert!((q.w - 1.0).abs() < 1.0e-6, "small quat normalize = {q:?}");
 }
