@@ -47,6 +47,26 @@ pub fn union(a: Rect, b: Rect) -> Rect {
     )
 }
 
+/// The overlap of `a` and `b`, or `None` when they are disjoint.
+///
+/// A pair that touches only along an edge or at a corner yields a `Some`
+/// zero-size rect (the shared boundary), matching the edge-inclusive
+/// [`intersects`](crate::draw::intersects) predicate.
+#[must_use]
+pub fn intersection(a: Rect, b: Rect) -> Option<Rect> {
+    let x0 = a.left().max(b.left());
+    let x1 = a.right().min(b.right());
+    let y0 = a.top().max(b.top());
+    let y1 = a.bottom().min(b.bottom());
+    if x0 > x1 || y0 > y1 {
+        return None;
+    }
+    Some(Rect::new(
+        Point::new(x0, y0),
+        Size::new(x1 - x0, y1 - y0),
+    ))
+}
+
 /// Grow `rect` by `margin` on every side.
 ///
 /// A negative `margin` shrinks the box; each extent is clamped at zero, so the
@@ -121,5 +141,43 @@ mod tests {
         assert!(contains(r, (0.0, 0.0)) && contains(r, (4.0, 4.0)));
         assert!(contains(r, (2.0, 2.0)));
         assert!(!contains(r, (-0.1, 2.0)) && !contains(r, (2.0, 4.1)));
+    }
+
+    #[test]
+    fn intersection_is_the_overlap_or_none() {
+        let a = rect(0.0, 0.0, 10.0, 10.0);
+        assert_eq!(
+            intersection(a, rect(5.0, 5.0, 10.0, 10.0)),
+            Some(rect(5.0, 5.0, 5.0, 5.0))
+        );
+        // A contained rect is returned whole.
+        assert_eq!(
+            intersection(a, rect(2.0, 2.0, 3.0, 3.0)),
+            Some(rect(2.0, 2.0, 3.0, 3.0))
+        );
+        // Disjoint.
+        assert!(intersection(a, rect(20.0, 20.0, 1.0, 1.0)).is_none());
+        // Edge touch -> a zero-size rect at the shared edge.
+        assert_eq!(
+            intersection(a, rect(10.0, 0.0, 5.0, 5.0)),
+            Some(rect(10.0, 0.0, 0.0, 5.0))
+        );
+        assert_eq!(intersection(a, a), Some(a));
+    }
+
+    #[test]
+    fn intersection_agrees_with_the_intersects_predicate() {
+        let xs = [-5.0_f32, -2.0, 0.0, 2.0, 4.0, 5.0, 6.0, 9.0];
+        for &ax in &xs {
+            for &bx in &xs {
+                let a = rect(ax, 0.0, 5.0, 5.0);
+                let b = rect(bx, 2.0, 5.0, 5.0);
+                assert_eq!(
+                    intersection(a, b).is_some(),
+                    crate::draw::intersects(a, b),
+                    "disagree for {a:?} {b:?}"
+                );
+            }
+        }
     }
 }
