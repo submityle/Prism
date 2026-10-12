@@ -2,18 +2,21 @@
 //!
 //! Byte-for-byte numerical twin of the CPU golden reference
 //! `prism_render_shading::clearcoat::evaluate_clearcoat_direct`. The closure
-//! follows Unreal's `ClearCoatBxDF`: a thin, smooth dielectric coat
-//! (`F0 = 0.04`) over a fully featured isotropic principled base.
+//! follows Unreal's `ClearCoatBxDF`, upgraded to the `OpenPBR` `coat` group: a
+//! thin, smooth dielectric coat of relative index `coat_ior` (default `1.5`,
+//! i.e. the historical `F0 = 0.04`) over a fully featured isotropic principled
+//! base.
 //!
-//! Two effects distinguish it from the shared principled fallback:
+//! Three effects distinguish it from the shared principled fallback:
 //!
 //! * a dedicated coat highlight driven by `clearcoat_roughness`, independent of
 //!   the base roughness, so a rough painted base still carries a tight varnish
 //!   glint,
-//! * double-pass coat absorption: light refracts through the coat on entry and
-//!   again on exit, so the base is gated by the coat Fresnel twice
-//!   (`(1 - clearcoat * Fc)^2`), darkening the base under the coat more strongly
-//!   at grazing angles than the principled single-pass `(1 - clearcoat * Fc)`.
+//! * a per-channel coat tint: `coat_color` scales the highlight, so a tinted
+//!   varnish colours the glint (white is the identity),
+//! * double-pass coat absorption at the view and light angles
+//!   (`(1 - clearcoat*F(n·v)) * (1 - clearcoat*F(n·l))`), darkening the base
+//!   under the coat more strongly at grazing angles than a single-pass term.
 //!
 //! The base is treated as isotropic, so with `clearcoat == 0` and
 //! `anisotropy == 0` it reduces to `principled_direct`. `dot`, `max`, `min`,

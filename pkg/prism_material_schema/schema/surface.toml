@@ -16,9 +16,11 @@
 # on any drift. Byte parity vs `surface.rs` is still guarded by the S1 gate.
 
 schema_version = 1
-# Tracks `MATERIAL_ABI_VERSION`. S1 declares the current v4 layout; the P1 ABI
-# v5 bump will land as a schema diff (doc §17.5.7).
-abi_version = 4
+# Tracks `MATERIAL_ABI_VERSION`. Bumped to 5 by the P1-f `clearcoat` lobe growth
+# (`coat_ior` / `coat_color`, doc §4.4) — the first schema diff that a v4 reader
+# cannot decode. The rest of the v5 work (§8 header/classification) lands on top
+# of this same marker (doc §17.5.7).
+abi_version = 5
 
 # ---------------------------------------------------------------------------
 # Core: the always-present OpenPBR-anchored base every lit/stylized/unlit

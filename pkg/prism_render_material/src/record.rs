@@ -4,7 +4,12 @@ use crate::surface::{LobeMask, SurfaceParameterBlock};
 use core::ops::{BitOr, BitOrAssign};
 use prism_render_architecture::abi::GenerationalHandle;
 
-pub const MATERIAL_ABI_VERSION: u32 = 4;
+/// Material ABI version. Bumped to 5 by the first v5-only layout change: the
+/// `clearcoat` lobe grew to carry the `OpenPBR` `coat_ior` / `coat_color` fields
+/// (design doc §4.4 / P1-f), so a v4 reader can no longer decode the packed
+/// block. The remaining v5 header/classification work (§8, P1-b/P1-h) lands on
+/// top of this marker rather than re-issuing it.
+pub const MATERIAL_ABI_VERSION: u32 = 5;
 pub const MAX_MATERIAL_TEXTURES: usize = 8;
 pub const FALLBACK_MATERIAL_HANDLE: GenerationalHandle = GenerationalHandle {
     index: 0,

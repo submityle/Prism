@@ -548,7 +548,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P0-a | 多散射能量补偿 + furnace CI 门禁 | 无（改 BSDF+测试） | P0 |
 | P0-b | 高光抗锯齿（Toksvig/LEAN）接入 über | 无 | P0 |
 | P1-a | 距离 LOD 全面切到 VT mip（删 `MAX_MATERIAL_TEXTURES`） | 纹理段改 VT 页引用 | P1 |
-| P1-b | ABI v5：header/分类 shader 字段同步（变长 über，无 tier/MAX） | **破坏性 v4→v5** | P1 |
+| P1-b | ABI v5：header/分类 shader 字段同步（变长 über，无 tier/MAX） | **破坏性 v4→v5**（版本标记已随 P1-f 首发 v5-only 字段 bump 到 5，见 §13.a；本项补 header/分类侧） | P1 |
 | P1-c | 烘焙层：分层 → 纹理空间混合 → 开放 über（删闭包图/所有硬顶） | 内部，删 `MAX_CLOSURE_SLAB_DEPTH` | P1 |
 | P1-d | 置换治理：内容哈希去重 + 按需编译 + über 回退 | 工具链/PSO 缓存 | P1 |
 | P1-e | 贵瓣采样数按画质档缩放（SSS/透射/多散射） | 无（pass uniform） | P1 |
@@ -583,6 +583,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 范围：把 clearcoat 瓣从"固定 `F0 = 0.04` 的白 dielectric"升级为 OpenPBR `coat` 组的真参数化子集——`coat_ior` 驱动**精确介质 Fresnel**（含 TIR 分支），`coat_color` 逐通道给 coat 高光着色；同时把 base 衰减从 `(1 - coat·F(v·h))²` 对齐为参考 PT 的**两宏观角**形式 `(1 - coat·F(n·v))·(1 - coat·F(n·l))`。默认 `coat_ior = 1.5`（法向入射恰为 0.04）+ 白色 `coat_color`，故仅"作者改了 IOR/颜色"才改变外观。
   - 依据：仓库自带的 path-traced 参考 `pkg/prism_render_architecture/src/reference_pt/coat.rs`（`CoatLayer` 的 `coat_ior`/`coat_color`/`fresnel_dielectric(cos, 1, ior)`）——实时金标准与 WESL 孪生都照它落地，不臆造公式。
   - 代码（全链五处同步）：schema `schema/surface.toml` clearcoat 瓣 4→8 字（新增 `coat_ior` + `coat_color` vec4f）；`GpuClearCoatLobe`（+手写 `Default`：1.5/白）与 fat `GpuSurfaceParameters`（+尾部 pad 保 16 字节对齐，112→144 B）；regenerated `material_unpack.wesl` / `surface_layout.rs`；shade-time `SurfaceSample`（CPU `lighting.rs` + WESL `brdf.wesl`）与桥接（`resolve.rs` + `shading_resolve.wesl`）；BSDF 双线（CPU `clearcoat.rs` + WESL `clearcoat.wesl`，含 `fresnel_coat_dielectric` 逐位孪生）；水栅格面的 `SurfaceSample` 显式写中性默认。
+  - **ABI 版本**：`MATERIAL_ABI_VERSION` 4→5、schema `abi_version` 4→5——这是首个 v4 读者无法解码的 schema diff（瓣字长变了），版本标记就该诚实地跟着走；§8 的 header/分类侧 v5 工作（P1-b/P1-h）在同一个 5 之上继续，不再重复 bump。
   - 门禁：`cargo test -p prism_render_shading --lib` **3282 通过**（含新增 `coat_ior_default_reproduces_the_legacy_normal_incidence_f0` / `denser_coat_ior_strengthens_the_interface` / `coat_color_tints_only_the_coat_highlight`，且既有 `zero_clearcoat_matches_principled_base`、掠射压暗、峰值加亮等性质门禁全绿）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过，含 brdf/shading_resolve/clearcoat 全链）、`cargo test -p prism_render_material` 826+6+2 全绿；touched 文件 clippy 无告警。
   - 诚实边界：coat 组仍缺 `coat_roughness_anisotropy` / `coat_normal`（需各向异性 coat + coat 法线）与 `coat_darkening`（**参考 PT 亦未实现，公式不确定，拒绝臆造**）。`lower_standard_material` 的删除仍待全部字段补齐后统一收口。
 
