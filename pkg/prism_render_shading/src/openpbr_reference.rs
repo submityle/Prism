@@ -336,6 +336,24 @@ pub fn coat_absorption_rgb(
     out
 }
 
+/// `OpenPBR` equation `specular_ior_ratio` with the TIR fix
+/// (`specular_ior_ratio_with_tir_fix`): the base dielectric's index ratio when a
+/// partial coat makes its surrounding medium statistically the coat,
+/// `η_s = lerp(n_b/n_a, η_bc_fixed, C)` with `n_a = 1` and `η_bc_fixed =
+/// n_c/n_b` when the coat is denser than the base (otherwise `n_b/n_c`).
+///
+/// The fix replaces the naive `n_b/n_c`, which would let a refracted ray reach
+/// the base beyond the critical angle and produce a spurious bright ring near
+/// grazing. Both branches yield `≥ 1`, so the ratio is always physical.
+#[inline]
+#[must_use]
+pub fn coat_specular_ior_ratio(specular_ior: f32, coat_ior: f32, coat_weight: f32) -> f32 {
+    let n_b = specular_ior.clamp(1.0, 3.0);
+    let n_c = coat_ior.max(MIN_IOR);
+    let eta_bc_fixed = if n_c > n_b { n_c / n_b } else { n_b / n_c };
+    (n_b + (eta_bc_fixed - n_b) * coat_weight.clamp(0.0, 1.0)).clamp(1.0, 3.0)
+}
+
 /// `OpenPBR` equation `openpbr-anisotropy-formula`: perceptual roughness `r` and
 /// anisotropy `a ∈ [0, 1]` → the two GGX widths along the tangent and bitangent.
 #[inline]
@@ -879,5 +897,47 @@ mod conformance {
         assert_eq!(coat_absorption_rgb([1.0; 3], 0.1, 0.2, 1.6), [1.0; 3]);
         // Total internal reflection inside the coat blocks transmission entirely.
         assert_eq!(coat_absorption_rgb(color, 0.1, 0.2, 0.5), [0.0; 3]);
+    }
+
+    /// `OpenPBR` equations `specular_ior_ratio` + `specular_ior_ratio_with_tir_fix`:
+    /// a coat shifts the base dielectric's surrounding index, and the real-time
+    /// Clearcoat lobe must apply the TIR-fixed blend rather than the naive ratio.
+    #[test]
+    fn coat_specular_ior_ratio_matches_the_openpbr_reference() {
+        let mut worst = 0.0_f32;
+        for specular_ior in [1.0_f32, 1.2, 1.5, 2.0, 3.0] {
+            for coat_ior in [1.0_f32, 1.3, 1.5, 1.6, 2.4] {
+                for c in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+                    let rt =
+                        crate::clearcoat::coat_specular_ior_ratio(specular_ior, coat_ior, c);
+                    let rf = coat_specular_ior_ratio(specular_ior, coat_ior, c);
+                    worst = worst.max((rt - rf).abs());
+                }
+            }
+        }
+        assert!(worst <= 1.0e-6, "coat IOR ratio deviates by {worst}");
+        // `C == 0` is the exact identity.
+        for n in [1.0_f32, 1.5, 2.7] {
+            assert_eq!(coat_specular_ior_ratio(n, 2.0, 0.0), n);
+        }
+        // The TIR fix: a denser coat inverts the ratio instead of implying a
+        // rarer medium (`n_b/n_c < 1`). At `C == 1` the ratio is the plain
+        // `n_c/n_b` in that case, never below 1.
+        assert!((coat_specular_ior_ratio(1.5, 2.0, 1.0) - 2.0 / 1.5).abs() < 1e-6);
+        // A rarer coat keeps the naive `n_b/n_c` (already `≥ 1`).
+        assert!((coat_specular_ior_ratio(2.0, 1.5, 1.0) - 2.0 / 1.5).abs() < 1e-6);
+        // The blend is a plain `lerp(n_b, η_bc_fixed, C)`, so it moves
+        // monotonically from the authored index toward the fixed ratio in
+        // *either* direction and never leaves the physical `[1, 3]` band.
+        let target = coat_specular_ior_ratio(1.5, 1.9, 1.0);
+        for i in 0..=10 {
+            let c = i as f32 / 10.0;
+            let v = coat_specular_ior_ratio(1.5, 1.9, c);
+            let expected = 1.5 + (target - 1.5) * c;
+            assert!(
+                (v - expected).abs() < 1e-6 && (1.0..=3.0).contains(&v),
+                "not a lerp at C={c}: {v} vs {expected}"
+            );
+        }
     }
 }

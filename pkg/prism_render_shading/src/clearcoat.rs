@@ -12,15 +12,15 @@
 //! * **A dedicated coat highlight.** The coat is a second dielectric GGX lobe
 //!   driven by `clearcoat_roughness` (independent of the base roughness), so a
 //!   rough painted base can still carry a tight, glossy varnish glint.
-//! * **A per-channel coat tint.** `coat_color` scales the coat highlight, so a
-//!   tinted varnish (white for clear lacquer) colours the glint.
-//! * **Double-pass coat absorption.** Light refracts *through* the coat on the
+//! * **Base-tinting absorption.** `OpenPBR`'s `coat_color` is the *square of the
+//!   coat medium's normal-incidence transmittance*, so it tints the light that
+//!   reaches the base — view-dependently, `coat_color^((1/μᵗᵢ + 1/μᵗₒ)/2)`. The
+//!   specification is explicit that the coat's *own* reflection is not tinted.
+//! * **Double-pass coat transmission.** Light refracts *through* the coat on the
 //!   way in and again on the way out, so the base layer is attenuated by the
 //!   coat Fresnel at the **view and light angles**: `(1 - clearcoat * Fc(n·v)) *
-//!   (1 - clearcoat * Fc(n·l))`. The principled fallback applies a comparable
-//!   two-pass term, so this lobe darkens the base under the coat at grazing
-//!   angles - the physically correct behaviour Unreal models for the coat
-//!   interface.
+//!   (1 - clearcoat * Fc(n·l))`, plus the specification's darkening
+//!   `lerp(1, Δ, C·δ)` and roughening `r'_B` of the base beneath it.
 //!
 //! The specialized coat treats the base as **isotropic** (real clear-coat
 //! materials - car paint, lacquered wood - are overwhelmingly isotropic under
@@ -34,9 +34,10 @@
 use core::f32::consts::PI;
 
 use crate::lighting::{
-    anisotropic_axes, dielectric_f0, distribution_ggx, distribution_ggx_anisotropic,
-    fresnel_dielectric, fresnel_schlick, openpbr_anisotropy_to_alpha, oren_nayar_factor,
-    visibility_smith_ggx_anisotropic, visibility_smith_ggx_correlated, MIN_DIELECTRIC_IOR,
+    anisotropic_axes, base_dielectric_fresnel_rgb, base_metal_fresnel_rgb, dielectric_f0,
+    distribution_ggx, distribution_ggx_anisotropic, fresnel_dielectric,
+    openpbr_anisotropy_to_alpha, oren_nayar_factor, visibility_smith_ggx_anisotropic,
+    visibility_smith_ggx_correlated, MIN_DIELECTRIC_IOR,
 };
 use crate::vecmath::{add, cross, dot, mix3, mul, mul_scalar, normalize_or, sub};
 use crate::{DirectLightSample, ShadingFrame, SurfaceSample};
@@ -192,6 +193,30 @@ pub(crate) fn coat_absorption_rgb(
     ]
 }
 
+/// `OpenPBR` equation `specular_ior_ratio`: a partial coat makes the base's
+/// surrounding medium statistically the coat, so the base dielectric's index
+/// ratio becomes `η_s = lerp(n_b/n_a, n_b/n_c, C)`.
+///
+/// The specification's TIR fix (equation `specular_ior_ratio_with_tir_fix`)
+/// replaces `n_b/n_c` with `n_c/n_b` whenever the coat is denser than the base,
+/// which removes the spurious grazing "bright ring" a naive ratio would produce
+/// (the refracted ray inside a denser coat cannot reach the base beyond the
+/// critical angle). The result is therefore always `≥ 1`. `C == 0` returns the
+/// authored `specular_ior` exactly.
+#[inline]
+pub(crate) fn coat_specular_ior_ratio(
+    specular_ior: f32,
+    coat_ior: f32,
+    coat_weight: f32,
+) -> f32 {
+    let n_b = specular_ior.clamp(1.0, 3.0);
+    let n_c = coat_ior.max(MIN_DIELECTRIC_IOR);
+    let n_a = 1.0_f32;
+    let bc = if n_c > n_b { n_c / n_b } else { n_b / n_c };
+    let ratio = (n_b / n_a) + (bc - n_b / n_a) * coat_weight.clamp(0.0, 1.0);
+    ratio.clamp(1.0, 3.0)
+}
+
 /// Reciprocal of pi, matching the GPU `INV_PI` constant.
 const INV_PI: f32 = 1.0 / PI;
 /// Roughness floor shared with the principled lobe (`MIN_ROUGHNESS`).
@@ -286,8 +311,28 @@ pub fn evaluate_clearcoat_direct(
     )
     .clamp(MIN_ROUGHNESS, 1.0);
     let alpha = roughness * roughness;
+    // `OpenPBR` `specular_ior_ratio`: a coat changes the base dielectric's
+    // surrounding index, and therefore its Fresnel. The conductor branch is
+    // driven by `base_color` per the Metal section and is unaffected.
+    let base_eta = coat_specular_ior_ratio(surface.specular_ior, surface.coat_ior, coat);
     let f0 = mix3(dielectric_f0(&surface), surface.base_color, metallic);
-    let f = fresnel_schlick(f0, v_dot_h);
+    // Exact dielectric Fresnel at the (possibly coat-shifted) index, plus the
+    // specification's `F_82`-tint conductor curve — the same pair the
+    // principled lobe uses, so the Clearcoat class never lags the base lobe.
+    let f_dielectric = base_dielectric_fresnel_rgb(
+        v_dot_h,
+        base_eta,
+        surface.specular_weight,
+        surface.specular_color,
+    );
+    let f_metal = base_metal_fresnel_rgb(
+        v_dot_h,
+        surface.base_weight,
+        surface.base_color,
+        surface.specular_weight,
+        surface.specular_color,
+    );
+    let f = mix3(f_dielectric, f_metal, metallic);
     let d = distribution_ggx(n_dot_h, alpha);
     let g = visibility_smith_ggx_correlated(n_dot_v, n_dot_l, alpha);
     let single_scatter = mul_scalar(f, d * g);

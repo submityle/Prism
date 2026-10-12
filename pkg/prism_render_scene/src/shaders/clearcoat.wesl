@@ -12,11 +12,12 @@
 //! * a dedicated coat highlight driven by `clearcoat_roughness`, independent of
 //!   the base roughness, so a rough painted base still carries a tight varnish
 //!   glint,
-//! * a per-channel coat tint: `coat_color` scales the highlight, so a tinted
-//!   varnish colours the glint (white is the identity),
-//! * double-pass coat absorption at the view and light angles
-//!   (`(1 - clearcoat*F(n·v)) * (1 - clearcoat*F(n·l))`), darkening the base
-//!   under the coat more strongly at grazing angles than a single-pass term.
+//! * **base-tinting** absorption: `coat_color` is the square of the coat
+//!   medium's normal-incidence transmittance, so it tints the light reaching the
+//!   base (view-dependent, `coat_color^((1/μᵗᵢ+1/μᵗₒ)/2)`) — the coat's own
+//!   reflection is explicitly *not* tinted (`OpenPBR` §Coat),
+//! * coat darkening (`lerp(1, Δ, C·δ)` from `general_darkening_formula`) and
+//!   roughening (`r'_B`) applied to the base beneath the coat.
 //!
 //! The base is treated as isotropic, so with `clearcoat == 0` and
 //! `anisotropy == 0` it reduces to `principled_direct`. `dot`, `max`, `min`,
@@ -30,6 +31,8 @@ import prism_render_scene::shaders::brdf::{
     brdf_normalize_or,
     dielectric_f0,
     fresnel_schlick,
+    brdf_base_dielectric_fresnel_rgb,
+    brdf_base_metal_fresnel_rgb,
     distribution_ggx,
     distribution_ggx_anisotropic,
     anisotropic_axes,
@@ -176,6 +179,21 @@ fn cc_refracted_cosine(mu: f32, eta_ca: f32) -> f32 {
     return sqrt(s);
 }
 
+// `openpbr` equation `specular_ior_ratio` with the TIR fix
+// (`specular_ior_ratio_with_tir_fix`): a partial coat makes the base's
+// surrounding medium statistically the coat, so the base dielectric index ratio
+// becomes `lerp(n_b, n_b/n_c, C)` — inverting the ratio whenever the coat is
+// denser than the base, which removes the spurious grazing bright ring. The
+// result is always `>= 1`; `C == 0` returns `specular_ior` exactly. Mirrors
+// `clearcoat.rs::coat_specular_ior_ratio`.
+fn cc_specular_ior_ratio(specular_ior: f32, coat_ior: f32, coat_weight: f32) -> f32 {
+    let n_b = clamp(specular_ior, 1.0, 3.0);
+    let n_c = max(coat_ior, BRDF_MIN_DIELECTRIC_IOR);
+    let bc = select(n_b / n_c, n_c / n_b, n_c > n_b);
+    let ratio = n_b + (bc - n_b) * clamp(coat_weight, 0.0, 1.0);
+    return clamp(ratio, 1.0, 3.0);
+}
+
 // Two-layer clear-coat BSDF for a single analytic light. Mirrors
 // `evaluate_clearcoat_direct`.
 fn clearcoat_direct(
@@ -215,8 +233,28 @@ fn clearcoat_direct(
         1.0,
     );
     let alpha = roughness * roughness;
+    // `openpbr` `specular_ior_ratio`: a coat changes the base dielectric's
+    // surrounding index, and therefore its Fresnel. The conductor branch is
+    // driven by `base_color` and is unaffected.
+    let base_eta = cc_specular_ior_ratio(surface.specular_ior, surface.coat_ior, coat);
     let f0 = mix(dielectric_f0(surface), surface.base_color, metallic);
-    let f = fresnel_schlick(f0, v_dot_h);
+    // Exact dielectric Fresnel at the (possibly coat-shifted) index plus the
+    // specification's `F82`-tint conductor curve — the same pair the principled
+    // lobe uses, so the Clearcoat class never lags the base lobe.
+    let f_dielectric = brdf_base_dielectric_fresnel_rgb(
+        v_dot_h,
+        base_eta,
+        surface.specular_weight,
+        surface.specular_color,
+    );
+    let f_metal = brdf_base_metal_fresnel_rgb(
+        v_dot_h,
+        surface.base_weight,
+        surface.base_color,
+        surface.specular_weight,
+        surface.specular_color,
+    );
+    let f = mix(f_dielectric, f_metal, metallic);
     let d = distribution_ggx(n_dot_h, alpha);
     let g = vis_smith(n_dot_v, n_dot_l, alpha);
     let single_scatter = f * (d * g);
