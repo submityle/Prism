@@ -226,6 +226,7 @@ pub mod platform_tier;
 pub mod plugin;
 pub mod plugin_graph;
 pub mod plugin_group;
+pub mod rollback;
 pub mod run_mode;
 pub mod runner;
 pub mod schedule;
@@ -275,6 +276,7 @@ pub use plugin::{Plugin, PluginDependency};
 pub use plugin_graph::PluginGraphError;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 pub use run_mode::RunMode;
+pub use rollback::SnapshotHistory;
 pub use runner::{run_once, HeadlessRunner, ScheduleRunnerOnce};
 #[cfg(feature = "winit")]
 pub use runner::{run_windowed, window_actions, WindowAction, WindowSettings, WinitRunner};
