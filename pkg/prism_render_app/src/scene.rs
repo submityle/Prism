@@ -26,6 +26,57 @@ use crate::frame::RENDER_TARGET_FORMAT;
 use crate::mesh_pipeline::MeshPipelineKey;
 use crate::queue::{DrawRequest, phase_for_render_class};
 
+/// The frame's visible draw work, published by the visibility stage.
+///
+/// A plain holder the visibility stage fills (from culling / binning) and the
+/// queue stage drains into [`crate::RenderQueues`]. Keeping it a data resource
+/// keeps the two stages decoupled.
+#[derive(Resource, Default)]
+pub struct VisibilityWorkList {
+    items: Vec<GpuRenderWorkItem>,
+}
+
+impl VisibilityWorkList {
+    /// An empty work list.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replaces the list's contents for this frame.
+    pub fn set(&mut self, items: Vec<GpuRenderWorkItem>) {
+        self.items = items;
+    }
+
+    /// Appends one work item.
+    pub fn push(&mut self, item: GpuRenderWorkItem) {
+        self.items.push(item);
+    }
+
+    /// The frame's work items.
+    #[must_use]
+    pub fn items(&self) -> &[GpuRenderWorkItem] {
+        &self.items
+    }
+
+    /// Drops the frame's work items.
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
+    /// The number of visible work items.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Whether no draws are visible.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
 /// The pipeline inputs a vertex-buffer class implies: its vertex layouts and
 /// primitive topology.
 ///

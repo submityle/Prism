@@ -204,6 +204,51 @@ impl RenderQueues {
         }
     }
 
+    /// Resolves the frame's visible work and queues it.
+    ///
+    /// This is the queue stage end to end: for each visible
+    /// [`GpuRenderWorkItem`](prism_render_visibility::GpuRenderWorkItem), the
+    /// [`SceneRegistry`](crate::SceneRegistry) resolves it into a
+    /// [`DrawRequest`](crate::DrawRequest), the [`MeshPipelineSpecializer`]
+    /// specializes it, and the item lands in its phase. Returns the number of
+    /// draws queued; a work item whose geometry/material is not resident is
+    /// skipped.
+    pub fn fill_from_visibility<D: RenderDevice, P: crate::MeshPipelineProvider>(
+        &mut self,
+        device: &D,
+        specializer: &mut MeshPipelineSpecializer,
+        registry: &crate::SceneRegistry,
+        work: &[prism_render_visibility::GpuRenderWorkItem],
+        depth_format: Option<prism_render_driver::TextureFormat>,
+        sample_count: u32,
+        draw: DrawFunctionId,
+        provider: &P,
+    ) -> usize {
+        let mut queued = 0;
+        for item in work {
+            let Some(request) = registry.resolve(item, depth_format, sample_count, draw) else {
+                continue;
+            };
+            let descriptor = provider.descriptor(&request.variant);
+            let pipeline =
+                specializer.specialize(device, request.variant, &request.layout, &descriptor);
+            self.push(
+                request.phase,
+                PhaseItem {
+                    pipeline,
+                    draw: request.draw,
+                    geometry: request.geometry,
+                    lod_level: request.lod_level,
+                    material: request.material,
+                    scene: request.scene,
+                    order: request.order,
+                },
+            );
+            queued += 1;
+        }
+        queued
+    }
+
     /// The total number of queued items across every phase.
     #[must_use]
     pub fn len(&self) -> usize {

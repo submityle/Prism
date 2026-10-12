@@ -335,6 +335,120 @@ fn recording_a_phase_invokes_each_draw_function() {
     assert_eq!(recorded, "1;2;");
 }
 
+/// The queue stage end to end: visible work items resolve, specialize, and
+/// land in their phase; a work item with no resident material is skipped.
+#[test]
+fn fill_from_visibility_resolves_and_queues() {
+    use crate::mesh_pipeline::MeshPipelineProvider;
+    use crate::scene::{MeshClass, SceneRegistry};
+    use prism_render_architecture::geometry::{
+        GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
+    };
+    use prism_render_visibility::{GpuRenderWorkItem, WorkSortKey};
+
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+
+    struct Stub {
+        descriptor: RenderPipelineDescriptor,
+    }
+    impl MeshPipelineProvider for Stub {
+        fn descriptor(&self, _: &MeshPipelineKey) -> RenderPipelineDescriptor {
+            self.descriptor.clone()
+        }
+    }
+    let provider = Stub {
+        descriptor: RenderPipelineDescriptor {
+            label: Some("stub".into()),
+            layout: None,
+            vertex: VertexState {
+                module,
+                entry_point: "vs".into(),
+                buffers: vec![],
+            },
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            fragment: None,
+        },
+    };
+
+    let geometry = GenerationalHandle::new(1, 1);
+    let material = GenerationalHandle::new(2, 1);
+    let scene = GenerationalHandle::new(3, 1);
+    let layout = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x3],
+    );
+
+    let mut registry = SceneRegistry::new();
+    registry.insert_geometry(GeometryRecord {
+        handle: geometry,
+        revision: 1,
+        vertex_buffer_class: 5,
+        index_buffer_class: 0,
+        primitive_start: 0,
+        primitive_count: 1,
+        lods: vec![GeometryLodRecord {
+            level: 0,
+            primitive_kind: GeometryPrimitiveKind::Indexed,
+            element_count: 6,
+            first_element: 0,
+            base_vertex: 0,
+            vertex_count: 4,
+            screen_error: 0.0,
+            resident: true,
+            fallback: false,
+        }],
+    });
+    registry.insert_material(prism_render_material::fallback_material_record(material, 1));
+    registry.insert_mesh_class(
+        5,
+        MeshClass::new(vec![layout], PrimitiveTopology::TriangleList),
+    );
+
+    let item = |material: GenerationalHandle| GpuRenderWorkItem {
+        scene,
+        geometry,
+        material,
+        lod_or_cluster: 0,
+        pass_mask: Default::default(),
+        visibility_stages: Default::default(),
+        sort_key: WorkSortKey::new(0, 0, 0, 0, 3),
+    };
+    let work = [item(material), item(GenerationalHandle::new(9, 1))];
+
+    let mut queues = RenderQueues::new();
+    let mut specializer = MeshPipelineSpecializer::new();
+    let queued = queues.fill_from_visibility(
+        &device,
+        &mut specializer,
+        &registry,
+        &work,
+        None,
+        1,
+        DrawFunctionId(0),
+        &provider,
+    );
+
+    assert_eq!(queued, 1, "the non-resident material is skipped");
+    assert_eq!(
+        queues.phase(RenderPhase::Opaque).len(),
+        1,
+        "the draw lands in the opaque phase"
+    );
+    assert_eq!(specializer.pipeline_count(), 1, "one pipeline specialized");
+}
+
 /// The scene registry resolves a visibility work item into a queueable draw,
 /// and skips one whose material is not resident.
 #[test]

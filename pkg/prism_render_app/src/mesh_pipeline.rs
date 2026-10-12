@@ -61,6 +61,17 @@ pub struct MeshPipelineSpecializer {
     cache: PipelineCache,
 }
 
+/// Supplies the pipeline descriptor for a mesh variant.
+///
+/// The queue owns *which* variant to specialize; the descriptor (shader module,
+/// entry points, target state) is the renderer's, so it is injected through this
+/// seam. A real renderer implements it with its mesh/PBR pipelines; a test
+/// implements it with a canned descriptor.
+pub trait MeshPipelineProvider {
+    /// The pipeline descriptor for `variant`.
+    fn descriptor(&self, variant: &MeshPipelineKey) -> RenderPipelineDescriptor;
+}
+
 impl MeshPipelineSpecializer {
     /// An empty specializer.
     #[must_use]
