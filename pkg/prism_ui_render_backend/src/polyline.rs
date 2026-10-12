@@ -85,6 +85,48 @@ pub fn point_at_distance(points: &[(f32, f32)], distance: f32) -> Option<(f32, f
     Some(last)
 }
 
+/// The sub-polyline of `points` between arc lengths `from` and `to`.
+///
+/// Both bounds are clamped to `[0, len]`; if the clamped range is empty, or any
+/// bound is `NaN`, an empty vector is returned. The result starts at
+/// `point_at_distance(points, from)` and ends at `point_at_distance(points, to)`,
+/// keeping every original vertex strictly inside the range so no corner is lost.
+/// Requesting the whole polyline (`from <= 0`, `to >= len`) reproduces the input.
+#[must_use]
+pub fn sub_polyline(points: &[(f32, f32)], from: f32, to: f32) -> Vec<(f32, f32)> {
+    if points.len() < 2 || from.is_nan() || to.is_nan() {
+        return Vec::new();
+    }
+    let total = polyline_length(points);
+    let lo = from.clamp(0.0, total);
+    let hi = to.clamp(0.0, total);
+    if hi <= lo {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if let Some(p) = point_at_distance(points, lo) {
+        out.push(p);
+    }
+    let mut travelled = 0.0_f32;
+    for w in points.windows(2) {
+        let seg = dist(w[0], w[1]);
+        if seg <= 0.0 {
+            continue;
+        }
+        travelled += seg;
+        if travelled > lo && travelled < hi {
+            out.push(w[1]);
+        }
+        if travelled >= hi {
+            break;
+        }
+    }
+    if let Some(p) = point_at_distance(points, hi) {
+        out.push(p);
+    }
+    out
+}
+
 /// Unit tangent direction of the open polyline at arc length `distance`.
 ///
 /// Returns `None` for an empty input or a polyline with no non-degenerate
@@ -367,6 +409,64 @@ mod tests {
             assert!(p.0 + 1e-4 >= prev_x, "x regressed at d={d}");
             prev_x = p.0;
             d += len / 64.0;
+        }
+    }
+
+    #[test]
+    fn sub_polyline_whole_range_reproduces_input() {
+        let pts = [(0.0, 0.0), (3.0, 0.0), (3.0, 4.0)];
+        let len = polyline_length(&pts);
+        let all = sub_polyline(&pts, 0.0, len);
+        assert_eq!(all.len(), pts.len());
+        for (a, b) in all.iter().zip(pts.iter()) {
+            assert!(close(*a, *b));
+        }
+    }
+
+    #[test]
+    fn sub_polyline_endpoints_and_clamping() {
+        let pts = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]; // length 20
+        let s = sub_polyline(&pts, 5.0, 15.0);
+        let expect = [(5.0, 0.0), (10.0, 0.0), (10.0, 5.0)];
+        assert_eq!(s.len(), expect.len());
+        for (a, b) in s.iter().zip(expect) {
+            assert!(close(*a, b));
+        }
+        assert!((polyline_length(&s) - 10.0).abs() < 1e-4);
+        // Clamping to the full span reproduces the whole polyline.
+        assert_eq!(sub_polyline(&pts, -5.0, 99.0).len(), 3);
+        // Empty or reversed ranges, NaN, and short inputs.
+        assert!(sub_polyline(&pts, 10.0, 10.0).is_empty());
+        assert!(sub_polyline(&pts, 15.0, 5.0).is_empty());
+        assert!(sub_polyline(&pts, f32::NAN, 5.0).is_empty());
+        assert!(sub_polyline(&[(1.0, 1.0)], 0.0, 1.0).is_empty());
+    }
+
+    #[test]
+    fn sub_polyline_preserves_length_and_lies_on_input() {
+        let mut s = 0x5_C11A_u64;
+        for _ in 0..200 {
+            let n = 2 + (next_rand(&mut s) % 20) as usize;
+            let pts = random_polyline(&mut s, n);
+            let len = polyline_length(&pts);
+            if len <= 1e-2 {
+                continue;
+            }
+            let a = rand_in(&mut s, 0.0, len);
+            let b = rand_in(&mut s, 0.0, len);
+            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+            if hi - lo <= 1e-3 {
+                continue;
+            }
+            let sub = sub_polyline(&pts, lo, hi);
+            assert!(sub.len() >= 2);
+            // A contiguous sub-path has exactly the arc span as its length.
+            let sl = polyline_length(&sub);
+            let span = hi - lo;
+            assert!((sl - span).abs() <= 1e-2 * (1.0 + span), "len {sl} vs {span}");
+            for &p in &sub {
+                assert!(min_dist_to_polyline(p, &pts) < 1e-3);
+            }
         }
     }
 

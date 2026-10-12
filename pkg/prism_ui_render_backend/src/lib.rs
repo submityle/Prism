@@ -66,6 +66,7 @@ pub mod circle;
 pub mod clip;
 pub mod convexity;
 pub mod curve;
+pub mod dash;
 pub mod draw;
 pub mod ellipse;
 #[cfg(feature = "gpu")]
@@ -98,6 +99,7 @@ pub use circle::{min_enclosing_circle, Circle};
 pub use clip::clip_polygon;
 pub use convexity::is_convex;
 pub use curve::CubicBezier;
+pub use dash::dash_polyline;
 pub use draw::{DrawCommand, DrawList, GlyphCmd, LayerCmd, RectCmd, ShadowCmd};
 pub use ellipse::flatten_ellipse;
 #[cfg(feature = "gpu")]
@@ -114,7 +116,7 @@ pub use offset::offset_convex;
 pub use point_convex::point_in_convex;
 pub use polygon::{sd_polygon, sd_triangle};
 pub use polyline::{
-    point_at_distance, polyline_length, resample_uniform, tangent_at_distance,
+    point_at_distance, polyline_length, resample_uniform, sub_polyline, tangent_at_distance,
 };
 pub use raster::{rasterize, Framebuffer};
 pub use scene::RetainedScene;
