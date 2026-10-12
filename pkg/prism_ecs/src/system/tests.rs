@@ -538,3 +538,42 @@ fn query_param_iter_many_mut() {
     assert_eq!(world.get::<Health>(a).map(|h| h.0), Some(11));
     assert_eq!(world.get::<Health>(b).map(|h| h.0), Some(12));
 }
+
+/// `Query::dirty_chunks` reports the coarse changed windows of the system's own
+/// change window: everything on the mutating run, nothing on a clean rerun.
+#[test]
+fn query_param_dirty_chunks_tracks_this_runs_writes() {
+    /// Covered-rows per run, so the test can compare a dirty run with a clean one.
+    #[derive(Default)]
+    struct DirtyRows(Vec<usize>);
+    impl Resource for DirtyRows {}
+
+    let mut world = World::new();
+    for i in 0..64 {
+        world.spawn(Health(i));
+    }
+    world.insert_resource(DirtyRows::default());
+
+    fn touch(mut q: Query<&mut Health>, mut out: ResMut<DirtyRows>) {
+        // Write only on the first run, so the second has nothing to report.
+        if out.0.is_empty() {
+            for mut h in &mut q {
+                h.0 += 1;
+            }
+        }
+        let covered: usize = q.dirty_chunks().iter().map(|c| c.len()).sum();
+        out.0.push(covered);
+    }
+
+    let mut sys = IntoSystem::into_system(touch);
+    sys.initialize(&mut world);
+    sys.run(&mut world);
+    sys.run(&mut world);
+
+    let runs = &world.resource::<DirtyRows>().0;
+    assert_eq!(runs.len(), 2);
+    // The dirty run's chunks cover at least every written row (the window is the
+    // whole chunk, so it may cover more).
+    assert!(runs[0] >= 64, "dirty run should cover every row: {runs:?}");
+    assert_eq!(runs[1], 0, "a clean rerun must report no dirty window");
+}

@@ -256,6 +256,26 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         }
     }
 
+    /// The chunk windows this query touches that changed within its own
+    /// observation window `(last_run, this_run]` (design §7 脏块访问器 / §10).
+    ///
+    /// The system-param face of
+    /// [`QueryState::dirty_chunks`](crate::query::QueryState::dirty_chunks): it
+    /// uses this run's change window, so a system can drive a GPU upload, a
+    /// spatial-index sync, or a shadow invalidation from the *coarse* layer
+    /// (one chunk version per window) and refine per row only where needed.
+    /// The result is a correct superset of the rows a per-row `Changed<T>` scan
+    /// would visit, never a miss.
+    #[inline]
+    pub fn dirty_chunks(&self) -> alloc::vec::Vec<crate::query::DirtyChunk> {
+        // SAFETY: `self.world` is live for `'w`; `dirty_chunks` only reads
+        // archetype/chunk metadata relevant to this query's declared access,
+        // which the scheduler has already made conflict-free.
+        let world: &World = unsafe { &*self.world.as_ptr() };
+        self.state
+            .dirty_chunks(world, self.world.last_run(), self.world.this_run())
+    }
+
     /// Iterate a caller-provided entity list with exclusive access, permitting
     /// `&mut T`. A repeated id yields
     /// [`QueryEntityError::AliasedMutability`] rather than a second `&mut` into
