@@ -93,6 +93,60 @@ pub fn simplify(points: &[(f32, f32)], epsilon: f32) -> Vec<(f32, f32)> {
         .collect()
 }
 
+/// Simplify a **closed** ring with Ramer-Douglas-Peucker while keeping it closed.
+///
+/// [`simplify`] simplifies an open polyline and always keeps its two endpoints;
+/// a ring has no endpoints, so this picks the ring's farthest-apart vertex pair
+/// as anchors, splits the ring into the two arcs between them, simplifies each
+/// arc with [`simplify`], and joins the results. The two anchors are preserved,
+/// the output vertices are a cyclic subsequence of the input, and every
+/// discarded vertex lies within `epsilon` of the retained ring — the same
+/// fidelity contract [`simplify`] guarantees.
+///
+/// Returns the input unchanged for a ring of three or fewer vertices or an
+/// all-coincident ring. As with [`simplify`], a ring that is nearly collinear can
+/// collapse to fewer than three vertices; callers that need a valid polygon
+/// should check the result.
+#[must_use]
+pub fn simplify_closed(ring: &[(f32, f32)], epsilon: f32) -> Vec<(f32, f32)> {
+    let n = ring.len();
+    if n <= 3 {
+        return ring.to_vec();
+    }
+
+    // Anchors: the farthest-apart vertex pair splits the ring into two arcs that
+    // are both as long as possible (so neither is a single straight edge).
+    let (mut ai, mut bi, mut best) = (0usize, 1usize, -1.0_f32);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let dx = ring[j].0 - ring[i].0;
+            let dy = ring[j].1 - ring[i].1;
+            let d2 = dx * dx + dy * dy;
+            if d2 > best {
+                best = d2;
+                ai = i;
+                bi = j;
+            }
+        }
+    }
+    if best <= 0.0 {
+        return ring.to_vec();
+    }
+
+    // Arc A: `ai -> bi` forward; Arc B: `bi -> ai` forward (wrapping).
+    let arc_a: Vec<(f32, f32)> = ring[ai..=bi].to_vec();
+    let mut arc_b: Vec<(f32, f32)> = ring[bi..].to_vec();
+    arc_b.extend_from_slice(&ring[..=ai]);
+
+    let sa = simplify(&arc_a, epsilon);
+    let sb = simplify(&arc_b, epsilon);
+    // Drop the shared anchor from each arc so the ring closes implicitly.
+    let mut out: Vec<(f32, f32)> = Vec::with_capacity(sa.len() + sb.len() - 2);
+    out.extend_from_slice(&sa[..sa.len() - 1]);
+    out.extend_from_slice(&sb[..sb.len() - 1]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -122,6 +176,72 @@ mod tests {
             best = best.min(point_segment_distance(p, w[0], w[1]));
         }
         best
+    }
+
+    /// Shortest distance from `p` to a closed ring (including the closing edge).
+    fn point_ring_distance(p: (f32, f32), ring: &[(f32, f32)]) -> f32 {
+        let n = ring.len();
+        let mut best = f32::INFINITY;
+        for i in 0..n {
+            best = best.min(point_segment_distance(p, ring[i], ring[(i + 1) % n]));
+        }
+        best
+    }
+
+    fn square_with_midpoints() -> [(f32, f32); 8] {
+        [
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (4.0, 0.0),
+            (4.0, 2.0),
+            (4.0, 4.0),
+            (2.0, 4.0),
+            (0.0, 4.0),
+            (0.0, 2.0),
+        ]
+    }
+
+    #[test]
+    fn closed_simplification_drops_collinear_midpoints() {
+        let out = simplify_closed(&square_with_midpoints(), 1e-4);
+        assert_eq!(out.len(), 4, "collinear edge midpoints should drop");
+    }
+
+    #[test]
+    fn closed_simplification_is_idempotent() {
+        let once = simplify_closed(&square_with_midpoints(), 1e-4);
+        assert_eq!(simplify_closed(&once, 1e-4), once);
+    }
+
+    #[test]
+    fn closed_simplification_preserves_fidelity_on_convex_rings() {
+        let mut s = 0x5_C11A_u64;
+        for _ in 0..200 {
+            let k = 8 + (next_rand(&mut s) % 24) as usize;
+            let pts: Vec<(f32, f32)> = (0..k)
+                .map(|_| (rand_in(&mut s, -20.0, 20.0), rand_in(&mut s, -20.0, 20.0)))
+                .collect();
+            let ring = crate::convex_hull(&pts);
+            if ring.len() < 3 {
+                continue;
+            }
+            let eps = 0.5_f32;
+            let out = simplify_closed(&ring, eps);
+            assert!(out.len() >= 3, "ring collapsed to {} vertices", out.len());
+            // Every original vertex is within `eps` of the retained ring ...
+            for &v in &ring {
+                let d = point_ring_distance(v, &out);
+                assert!(d <= eps + 1e-2, "vertex {v:?} is {d} from the ring");
+            }
+            // ... and no vertex was invented (the output is a subsequence).
+            for &q in &out {
+                assert!(
+                    ring.iter()
+                        .any(|&v| (v.0 - q.0).abs() < 1e-4 && (v.1 - q.1).abs() < 1e-4),
+                    "invented vertex {q:?}"
+                );
+            }
+        }
     }
 
     /// A moderately wiggly random walk — the realistic shape RDP operates on.

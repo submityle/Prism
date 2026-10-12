@@ -132,7 +132,7 @@ pub use raster::{rasterize, Framebuffer};
 pub use scene::RetainedScene;
 pub use segment::segment_intersection;
 pub use segment_clip::clip_segment_rect;
-pub use simplify::simplify;
+pub use simplify::{simplify, simplify_closed};
 pub use simplicity::{first_self_intersection, is_simple_polygon, polyline_self_intersects};
 pub use triangulate::{triangulate, try_triangulate};
 pub use width::convex_width;
