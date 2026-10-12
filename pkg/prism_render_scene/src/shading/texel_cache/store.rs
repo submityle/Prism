@@ -1,6 +1,6 @@
 //! Staging/active double-buffer contract for writable shade pages.
 
-use std::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet};
 
 use super::key::ShadePageKey;
 
@@ -54,6 +54,8 @@ pub enum ShadeStoreError {
     CapacityExhausted,
     /// A write lease is already open for this page.
     WriteAlreadyOpen,
+    /// This page has already been written and committed in this frame.
+    WriteAlreadyCommitted,
     /// A write lease has already been committed or belongs to another frame.
     InvalidWrite,
     /// Publishing would expose a page whose upload has not completed.
@@ -70,7 +72,8 @@ pub struct ShadePageStore {
     free_slots: BTreeSet<u32>,
     active: BTreeMap<ShadePageKey, ShadePageHandle>,
     staging: Option<BTreeMap<ShadePageKey, ShadePageHandle>>,
-    pending_writes: BTreeSet<(ShadePageKey, u64)>,
+    pending_writes: BTreeMap<ShadePageKey, u64>,
+    written_pages: BTreeSet<ShadePageKey>,
     frame_serial: u64,
 }
 
@@ -84,7 +87,8 @@ impl ShadePageStore {
             free_slots: BTreeSet::new(),
             active: BTreeMap::new(),
             staging: None,
-            pending_writes: BTreeSet::new(),
+            pending_writes: BTreeMap::new(),
+            written_pages: BTreeSet::new(),
             frame_serial: 0,
         }
     }
@@ -97,6 +101,7 @@ impl ShadePageStore {
         self.frame_serial = self.frame_serial.saturating_add(1).max(1);
         self.staging = Some(self.active.clone());
         self.pending_writes.clear();
+        self.written_pages.clear();
         Ok(ShadeFrameToken {
             serial: self.frame_serial,
             epoch,
@@ -116,24 +121,24 @@ impl ShadePageStore {
         if token.serial != self.frame_serial {
             return Err(ShadeStoreError::InvalidFrame);
         }
-        if !self.pending_writes.insert((key, generation)) {
+        if self.pending_writes.contains_key(&key) {
             return Err(ShadeStoreError::WriteAlreadyOpen);
         }
+        if self.written_pages.contains(&key) {
+            return Err(ShadeStoreError::WriteAlreadyCommitted);
+        }
 
-        let existing_slot = self
-            .staging
-            .as_ref()
-            .and_then(|staging| staging.get(&key).map(|handle| handle.slot));
-        let slot = if let Some(slot) = existing_slot {
-            slot
-        } else if let Some(slot) = self.free_slots.pop_first() {
+        // An update must never write into the slot currently exposed by the
+        // active table. The sampler may still be consuming that generation
+        // while this frame's compute pass writes the replacement. The old
+        // slot becomes reclaimable only after publish swaps the tables.
+        let slot = if let Some(slot) = self.free_slots.pop_first() {
             slot
         } else if self.next_slot < self.capacity {
             let slot = self.next_slot;
             self.next_slot = self.next_slot.saturating_add(1);
             slot
         } else {
-            self.pending_writes.remove(&(key, generation));
             return Err(ShadeStoreError::CapacityExhausted);
         };
         let handle = ShadePageHandle {
@@ -145,6 +150,7 @@ impl ShadePageStore {
             .as_mut()
             .expect("staging checked above")
             .insert(key, handle);
+        self.pending_writes.insert(key, generation);
         Ok(ShadePageWrite { token, key, handle })
     }
 
@@ -160,12 +166,12 @@ impl ShadePageStore {
                 .as_ref()
                 .and_then(|staging| staging.get(&write.key))
                 != Some(&write.handle)
-            || !self
-                .pending_writes
-                .remove(&(write.key, write.handle.generation))
+            || self.pending_writes.get(&write.key) != Some(&write.handle.generation)
         {
             return Err(ShadeStoreError::InvalidWrite);
         }
+        self.pending_writes.remove(&write.key);
+        self.written_pages.insert(write.key);
         Ok(())
     }
 

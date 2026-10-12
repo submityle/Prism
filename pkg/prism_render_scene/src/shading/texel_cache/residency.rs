@@ -1,6 +1,6 @@
 //! Deterministic shade-page residency state machine.
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
 
 use super::key::ShadePageKey;
 
@@ -101,10 +101,16 @@ struct Entry {
 /// It owns no GPU handles. A render backend can serialize the sorted entries
 /// into a page table while the exact transition protocol and generation checks
 /// remain backend-independent and testable.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ShadeResidencyTable {
     entries: BTreeMap<ShadePageKey, Entry>,
     next_generation: u64,
+}
+
+impl Default for ShadeResidencyTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ShadeResidencyTable {

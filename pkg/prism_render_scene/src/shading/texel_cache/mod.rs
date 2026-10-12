@@ -106,8 +106,14 @@ mod tests {
         let ticket = table.begin_write(page, 3).unwrap();
         table.commit_write(ticket, 1).unwrap();
         table.invalidate(page, 4).unwrap();
-        assert!(matches!(table.lookup(page, 4), ShadePageLookup::Stale { .. }));
-        assert!(matches!(table.lookup(page, 3), ShadePageLookup::Stale { .. }));
+        assert!(matches!(
+            table.lookup(page, 4),
+            ShadePageLookup::Stale { .. }
+        ));
+        assert!(matches!(
+            table.lookup(page, 3),
+            ShadePageLookup::Stale { .. }
+        ));
     }
 
     #[test]
@@ -155,5 +161,76 @@ mod tests {
             ShadeStoreLookup::Ready(second.handle)
         );
         assert_ne!(old.generation, second.handle.generation);
+    }
+
+    #[test]
+    fn replacing_a_published_page_uses_a_different_slot() {
+        let mut store = ShadePageStore::new(2);
+        let page = key(0, 0);
+
+        let first_frame = store.begin_frame(3).unwrap();
+        let first = store.begin_write(first_frame, page, 1).unwrap();
+        store.commit_write(first).unwrap();
+        store.publish(first_frame).unwrap();
+
+        let second_frame = store.begin_frame(4).unwrap();
+        let second = store.begin_write(second_frame, page, 2).unwrap();
+        assert_ne!(first.handle.slot, second.handle.slot);
+        assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Ready(first.handle));
+        store.commit_write(second).unwrap();
+        store.publish(second_frame).unwrap();
+
+        assert_eq!(
+            store.lookup(page, 4),
+            ShadeStoreLookup::Ready(second.handle)
+        );
+    }
+
+    #[test]
+    fn capacity_shortage_keeps_the_active_generation_untouched() {
+        let mut store = ShadePageStore::new(1);
+        let page = key(0, 0);
+
+        let first_frame = store.begin_frame(3).unwrap();
+        let first = store.begin_write(first_frame, page, 1).unwrap();
+        store.commit_write(first).unwrap();
+        store.publish(first_frame).unwrap();
+
+        let second_frame = store.begin_frame(4).unwrap();
+        assert_eq!(
+            store.begin_write(second_frame, page, 2),
+            Err(ShadeStoreError::CapacityExhausted)
+        );
+        assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Ready(first.handle));
+        store.publish(second_frame).unwrap();
+        assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Ready(first.handle));
+    }
+
+    #[test]
+    fn only_one_write_lease_per_page_can_be_open() {
+        let mut store = ShadePageStore::new(3);
+        let page = key(0, 0);
+        let frame = store.begin_frame(3).unwrap();
+        let write = store.begin_write(frame, page, 1).unwrap();
+
+        assert_eq!(
+            store.begin_write(frame, page, 2),
+            Err(ShadeStoreError::WriteAlreadyOpen)
+        );
+        store.commit_write(write).unwrap();
+        assert_eq!(
+            store.begin_write(frame, page, 2),
+            Err(ShadeStoreError::WriteAlreadyCommitted)
+        );
+        store.publish(frame).unwrap();
+    }
+
+    #[test]
+    fn default_residency_table_starts_generations_at_one() {
+        let mut table = ShadeResidencyTable::default();
+        let page = key(2, 2);
+        table.request(request(page, 1, 16), 3);
+        let ticket = table.begin_write(page, 3).unwrap();
+        assert_eq!(ticket.generation, 1);
     }
 }
