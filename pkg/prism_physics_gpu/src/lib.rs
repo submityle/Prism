@@ -54,6 +54,7 @@ pub mod context;
 pub mod fluid;
 pub mod fracture;
 pub mod grid;
+pub mod indirect;
 pub mod island;
 pub mod mpm;
 pub mod narrowphase;
@@ -65,27 +66,27 @@ pub mod xpbd;
 
 pub use broadphase::{cpu_broadphase, BroadphaseConfig, BroadphaseError, CandidatePair, Particle};
 pub use bvh::{
-    cpu_build_lbvh, cpu_bvh_aabb_overlap, cpu_refit_lbvh, cpu_bvh_pairs, cpu_bvh_raycast_any,
-    cpu_bvh_raycast_closest, lbvh_sah_cost, lbvh_sah_cost_weighted, surface_area, Aabb, BvhQueryError,
-    GpuBvhOverlap, GpuBvhQuery, GpuBvhRaycast, GpuBvhRefit, GpuBvhSahCost, GpuLbvh, GpuResidentLbvh,
-    Lbvh,
-    OverlapQueryError, Ray, RayHit, FrameUpdate, RebuildDecision, RefitQualityTracker, ResidentBvhDriver, SceneBounds,
-    UpdateAction, NO_PARENT,
+    cpu_build_lbvh, cpu_bvh_aabb_overlap, cpu_bvh_pairs, cpu_bvh_raycast_any,
+    cpu_bvh_raycast_closest, cpu_refit_lbvh, lbvh_sah_cost, lbvh_sah_cost_weighted, surface_area,
+    Aabb, BvhQueryError, FrameUpdate, GpuBvhOverlap, GpuBvhQuery, GpuBvhRaycast, GpuBvhRefit,
+    GpuBvhSahCost, GpuLbvh, GpuResidentLbvh, Lbvh, OverlapQueryError, Ray, RayHit, RebuildDecision,
+    RefitQualityTracker, ResidentBvhDriver, SceneBounds, UpdateAction, NO_PARENT,
 };
 pub use cfl::{cpu_cfl_dt, cpu_max_speed, CflConfig, GpuCflReduce};
 pub use cloth::{
     build_cloth_aero_prep, build_vertex_triangle_adjacency, colour_bending, colour_long_range,
     colour_strain_limit, cpu_cloth_aero, cpu_cloth_backstops, cpu_cloth_bending,
-    cpu_cloth_body_collision, cpu_cloth_ccd, cpu_cloth_coupling, cpu_cloth_layer_coupling, cpu_cloth_long_range,
-    cpu_cloth_plasticity, cpu_cloth_pressure, cpu_cloth_self_ccd, cpu_cloth_self_collision_jacobi,
-    cpu_cloth_self_collision_point, cpu_cloth_strain_limit, cpu_cloth_tearing, pack_backstops,
-    pack_body_colliders, BendingColoring, ClothAeroParams, ClothAeroPrep, ClothAeroTriangle,
-    ClothBendingConstraint, ClothLongRangeConstraint, ClothPlasticEdge, ClothPrep,
-    ClothSelfCollisionScope, ClothStrainLimitConstraint, ClothTearEdge, GpuBackstop,
-    GpuBodyCollider, GpuClothAero, GpuClothBending, GpuClothBodyCollision, GpuClothCcd,
-    GpuClothCoupling, GpuClothLayerCoupling, GpuClothLongRange, GpuClothPlasticity, GpuClothPressure, GpuClothSelfCcd,
-    GpuClothSelfCollision, GpuClothSelfCollisionPoint, GpuClothStrainLimit, GpuClothTearing,
-    LongRangeColoring, StrainLimitColoring, VertexTriangleAdjacency,
+    cpu_cloth_body_collision, cpu_cloth_ccd, cpu_cloth_coupling, cpu_cloth_layer_coupling,
+    cpu_cloth_long_range, cpu_cloth_plasticity, cpu_cloth_pressure, cpu_cloth_self_ccd,
+    cpu_cloth_self_collision_jacobi, cpu_cloth_self_collision_point, cpu_cloth_strain_limit,
+    cpu_cloth_tearing, pack_backstops, pack_body_colliders, BendingColoring, ClothAeroParams,
+    ClothAeroPrep, ClothAeroTriangle, ClothBendingConstraint, ClothLongRangeConstraint,
+    ClothPlasticEdge, ClothPrep, ClothSelfCollisionScope, ClothStrainLimitConstraint,
+    ClothTearEdge, GpuBackstop, GpuBodyCollider, GpuClothAero, GpuClothBending,
+    GpuClothBodyCollision, GpuClothCcd, GpuClothCoupling, GpuClothLayerCoupling, GpuClothLongRange,
+    GpuClothPlasticity, GpuClothPressure, GpuClothSelfCcd, GpuClothSelfCollision,
+    GpuClothSelfCollisionPoint, GpuClothStrainLimit, GpuClothTearing, LongRangeColoring,
+    StrainLimitColoring, VertexTriangleAdjacency,
 };
 pub use collider::{
     cpu_capsule_trimesh_collide, cpu_obb_trimesh_collide, cpu_obb_trimesh_manifold_collide,
@@ -95,10 +96,9 @@ pub use collider::{
     cpu_trimesh_obb_sweep_bvh, cpu_trimesh_raycast, cpu_trimesh_raycast_built,
     cpu_trimesh_raycast_bvh, cpu_trimesh_sphere_sweep, cpu_trimesh_sphere_sweep_built,
     cpu_trimesh_sphere_sweep_bvh, CapsuleSweep, CapsuleSweepHit, GpuCapsuleTrimeshCollider,
-    GpuObbTrimeshCollider, GpuSphereTrimeshCollider, GpuTrimeshCapsuleSweep, GpuTrimeshClosestPoint,
-    GpuTrimeshObbSweep, GpuTrimeshRayCast, GpuTrimeshSphereSweep, MeshRay, ObbSweep, ObbSweepHit,
-    SphereSweep, Trimesh, TrimeshClosestHit,
-    TrimeshRayHit, TrimeshSweepHit,
+    GpuObbTrimeshCollider, GpuSphereTrimeshCollider, GpuTrimeshCapsuleSweep,
+    GpuTrimeshClosestPoint, GpuTrimeshObbSweep, GpuTrimeshRayCast, GpuTrimeshSphereSweep, MeshRay,
+    ObbSweep, ObbSweepHit, SphereSweep, Trimesh, TrimeshClosestHit, TrimeshRayHit, TrimeshSweepHit,
 };
 pub use contacts::{
     contact_constraints, contact_constraints_with_friction, cpu_resolve_contacts,
@@ -117,6 +117,9 @@ pub use fracture::{
     GpuVoronoiAssign, VoronoiAssignConfig, NO_CELL,
 };
 pub use grid::{cpu_grid_sort, GpuUniformGrid, GridBuild, GridConfig, GridError};
+pub use indirect::{
+    cpu_dispatch_args, DispatchArgs, GpuDispatchArgs, DEFAULT_MAX_WORKGROUPS_PER_DIM,
+};
 pub use island::{build_islands, Island, IslandSet, SleepConfig, SleepState};
 pub use mpm::{
     BoundaryMode, ConstitutiveOutput, G2pParticles, GpuMpmConstitutive, GpuMpmG2p,
@@ -124,22 +127,42 @@ pub use mpm::{
     StepParticles,
 };
 pub use narrowphase::{
-    cpu_capsule_capsule_manifold, cpu_convex_convex_manifold, cpu_capsule_capsule_narrowphase, cpu_capsule_halfspace_manifold, cpu_capsule_heightfield_manifold, cpu_obb_heightfield_manifold,
-    cpu_capsule_narrowphase, cpu_capsule_obb_manifold, cpu_capsule_obb_narrowphase,
-    cpu_capsule_triangle_manifold, cpu_capsule_triangle_narrowphase,
-    cpu_halfspace_narrowphase, cpu_narrowphase, cpu_obb_halfspace_manifold,
-    cpu_obb_halfspace_narrowphase, cpu_obb_narrowphase, cpu_obb_obb_manifold,
-    cpu_obb_obb_narrowphase, cpu_obb_triangle_manifold, cpu_obb_triangle_narrowphase, cast_shape, cast_shape_all, cast_shape_all_bvh, cast_shape_bvh, collide_shape, collide_shape_bvh, CollideShapeHit, GpuBvhCollideShape, collide_point, collide_point_bvh, CollidePointHit, ScenePoint, GpuSceneCollidePoint, ray_cast, ray_cast_all, ray_cast_all_bvh, ray_cast_bvh, RayCastHit, SceneRay, GpuSceneRayCast, sphere_cast, sphere_cast_all, sphere_cast_all_bvh, sphere_cast_bvh, SceneSphereCast, SphereCastHit, GpuSceneSphereCast, capsule_cast, capsule_cast_all, capsule_cast_all_bvh, capsule_cast_bvh, CapsuleCastHit, SceneCapsuleCast, GpuSceneCapsuleCast, box_cast, box_cast_all, box_cast_all_bvh, box_cast_bvh, BoxCastHit, SceneBoxCast, GpuSceneBoxCast, convex_cast, convex_cast_all, convex_cast_all_bvh, convex_cast_bvh, ConvexCastHit, SceneConvexCast, GpuSceneConvexCast, closest_point, closest_point_bvh, ClosestPointHit, SceneClosestPoint, GpuSceneClosestPoint, conservative_advancement_toi, conservative_advancement_toi_rounded, cpu_convex_convex_toi, cpu_convex_convex_toi_rounded, cpu_sphere_heightfield_narrowphase, cpu_sphere_triangle_narrowphase, epa, gjk, support, Capsule, CapsuleCapsulePair, CellRange,
-    CapsuleObbPair, CapsulePlanePair, CapsuleTrianglePair, Contact, ContactManifold,
-    BodyMotion, ConvexConvexPair, ConvexConvexSweepPair, ConvexEdge, ConvexFace, ConvexHull, ConvexPose, GjkStatus, Penetration, SupportPoint, Toi,
-    GpuBvhShapeCast, GpuCapsuleCapsuleManifoldNarrowphase, GpuCapsuleCapsuleNarrowphase,
-    GpuCapsuleHalfspaceNarrowphase, GpuCapsuleNarrowphase, GpuCapsuleObbManifoldNarrowphase,
-    GpuCapsuleHeightfieldManifoldNarrowphase, GpuCapsuleObbNarrowphase, GpuCapsuleTriangleManifoldNarrowphase, GpuCapsuleTriangleNarrowphase, GpuHalfspaceNarrowphase, GpuNarrowphase, GpuSphereHeightfieldNarrowphase,
-    GpuObbHalfspaceManifoldNarrowphase, GpuObbHalfspaceNarrowphase, GpuObbHeightfieldManifoldNarrowphase, GpuObbNarrowphase,
-    GpuConvexConvexManifoldNarrowphase, GpuConvexConvexToiNarrowphase, GpuObbObbManifoldNarrowphase, GpuObbObbNarrowphase, GpuObbTriangleManifoldNarrowphase, GpuObbTriangleNarrowphase, GpuSphereTriangleNarrowphase,
-    Heightfield, HeightfieldCapsulePair, HeightfieldObbPair, HeightfieldSpherePair, ManifoldPoint, Obb, ObbObbPair, ObbTrianglePair,
-    ObbPlanePair, Plane, RoundedConvex, ShapeCastHit, SphereCapsulePair, SphereObbPair, SpherePlanePair, SphereTrianglePair,
-    Triangle, XzAabb, MAX_MANIFOLD_POINTS,
+    box_cast, box_cast_all, box_cast_all_bvh, box_cast_bvh, capsule_cast, capsule_cast_all,
+    capsule_cast_all_bvh, capsule_cast_bvh, cast_shape, cast_shape_all, cast_shape_all_bvh,
+    cast_shape_bvh, closest_point, closest_point_bvh, collide_point, collide_point_bvh,
+    collide_shape, collide_shape_bvh, conservative_advancement_toi,
+    conservative_advancement_toi_rounded, convex_cast, convex_cast_all, convex_cast_all_bvh,
+    convex_cast_bvh, cpu_capsule_capsule_manifold, cpu_capsule_capsule_narrowphase,
+    cpu_capsule_halfspace_manifold, cpu_capsule_heightfield_manifold, cpu_capsule_narrowphase,
+    cpu_capsule_obb_manifold, cpu_capsule_obb_narrowphase, cpu_capsule_triangle_manifold,
+    cpu_capsule_triangle_narrowphase, cpu_convex_convex_manifold, cpu_convex_convex_toi,
+    cpu_convex_convex_toi_rounded, cpu_halfspace_narrowphase, cpu_narrowphase,
+    cpu_obb_halfspace_manifold, cpu_obb_halfspace_narrowphase, cpu_obb_heightfield_manifold,
+    cpu_obb_narrowphase, cpu_obb_obb_manifold, cpu_obb_obb_narrowphase, cpu_obb_triangle_manifold,
+    cpu_obb_triangle_narrowphase, cpu_sphere_heightfield_narrowphase,
+    cpu_sphere_triangle_narrowphase, epa, gjk, ray_cast, ray_cast_all, ray_cast_all_bvh,
+    ray_cast_bvh, sphere_cast, sphere_cast_all, sphere_cast_all_bvh, sphere_cast_bvh, support,
+    BodyMotion, BoxCastHit, Capsule, CapsuleCapsulePair, CapsuleCastHit, CapsuleObbPair,
+    CapsulePlanePair, CapsuleTrianglePair, CellRange, ClosestPointHit, CollidePointHit,
+    CollideShapeHit, Contact, ContactManifold, ConvexCastHit, ConvexConvexPair,
+    ConvexConvexSweepPair, ConvexEdge, ConvexFace, ConvexHull, ConvexPose, GjkStatus,
+    GpuBvhCollideShape, GpuBvhShapeCast, GpuCapsuleCapsuleManifoldNarrowphase,
+    GpuCapsuleCapsuleNarrowphase, GpuCapsuleHalfspaceNarrowphase,
+    GpuCapsuleHeightfieldManifoldNarrowphase, GpuCapsuleNarrowphase,
+    GpuCapsuleObbManifoldNarrowphase, GpuCapsuleObbNarrowphase,
+    GpuCapsuleTriangleManifoldNarrowphase, GpuCapsuleTriangleNarrowphase,
+    GpuConvexConvexManifoldNarrowphase, GpuConvexConvexToiNarrowphase, GpuHalfspaceNarrowphase,
+    GpuNarrowphase, GpuObbHalfspaceManifoldNarrowphase, GpuObbHalfspaceNarrowphase,
+    GpuObbHeightfieldManifoldNarrowphase, GpuObbNarrowphase, GpuObbObbManifoldNarrowphase,
+    GpuObbObbNarrowphase, GpuObbTriangleManifoldNarrowphase, GpuObbTriangleNarrowphase,
+    GpuSceneBoxCast, GpuSceneCapsuleCast, GpuSceneClosestPoint, GpuSceneCollidePoint,
+    GpuSceneConvexCast, GpuSceneRayCast, GpuSceneSphereCast, GpuSphereHeightfieldNarrowphase,
+    GpuSphereTriangleNarrowphase, Heightfield, HeightfieldCapsulePair, HeightfieldObbPair,
+    HeightfieldSpherePair, ManifoldPoint, Obb, ObbObbPair, ObbPlanePair, ObbTrianglePair,
+    Penetration, Plane, RayCastHit, RoundedConvex, SceneBoxCast, SceneCapsuleCast,
+    SceneClosestPoint, SceneConvexCast, ScenePoint, SceneRay, SceneSphereCast, ShapeCastHit,
+    SphereCapsulePair, SphereCastHit, SphereObbPair, SpherePlanePair, SphereTrianglePair,
+    SupportPoint, Toi, Triangle, XzAabb, MAX_MANIFOLD_POINTS,
 };
 pub use radix::{cpu_radix_sort_keys, cpu_radix_sort_pairs, GpuRadixSort};
 pub use rigid::{
