@@ -12,6 +12,9 @@ publish = false
 # (no render/physics double-implementation of the same solver math).
 prism_physics_core = { path = "../prism_physics_core" }
 glam = { version = "0.33.2", default-features = false }
+# POD GPU records are bit-cast to raw bytes and to atomic word arrays; the
+# atomic-POD records module re-exports this for its generated code.
+bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 
 [dev-dependencies]
 # Reference DEFLATE encoder, used only as a round-trip oracle in
@@ -20,4 +23,3 @@ flate2 = "1.0"
 
 [lints]
 workspace = true
-

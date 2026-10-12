@@ -12,6 +12,7 @@
 extern crate alloc;
 
 pub mod abi;
+pub mod atomic_pod;
 pub mod backend;
 pub mod capture;
 pub mod cloth;
