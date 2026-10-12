@@ -154,8 +154,7 @@ impl MaterialGpuBuffers {
                 let offset = self.store_parameters(index, &block);
                 let texture_offset = self.store_textures(index, &record.textures);
                 parameter_bytes += block.packed_size_bytes() as u64;
-                texture_bytes +=
-                    core::mem::size_of_val(record.textures.as_slice()) as u64;
+                texture_bytes += size_of_val(record.textures.as_slice()) as u64;
                 self.headers.grow_and_set(
                     index,
                     MaterialHeaderRow(record.header(offset, texture_offset, epoch)),

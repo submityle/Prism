@@ -34,7 +34,7 @@ mod texture_sample;
 mod texture_upsample;
 mod validation;
 
-pub use authoring::{FACE_SHADOW_SDF_SEMANTIC, MEASURED_BRDF_SEMANTIC};
+pub use authoring::{FACE_SHADOW_SDF_SEMANTIC, ILLUMINATION_MASK_SEMANTIC, MEASURED_BRDF_SEMANTIC};
 pub use axis::{BIN_CLASS_BITS, Illumination, SpecializationId};
 pub use bake::{
     bake_layer_stack, sanitize_weight, ConstantMask, LayerParams, LayerStack, LayerWeights,
@@ -142,8 +142,9 @@ pub use texture_filter::{
 };
 pub use texture_lod::{
     anisotropic_taps, cone_mip_level, mip_from_isotropic_footprint, trilinear_mip, AnisoTaps,
-    AnisotropicMip, PageRequest, RayCone, RayDifferential, TriangleLodConstant, TrilinearMip,
-    VirtualTexture, MAX_ANISO_TAPS, MIN_COS_INCIDENCE,
+    AnisotropicMip, MaterialPageLookup, MaterialPageReference, PageRequest, RayCone,
+    RayDifferential, TriangleLodConstant, TrilinearMip, VirtualTexture, MAX_ANISO_TAPS,
+    MIN_COS_INCIDENCE,
 };
 pub use texture_mipgen::{
     alpha_test_coverage, apply_alpha_scale, box_downsample, gaussian_downsample,
