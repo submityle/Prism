@@ -22,18 +22,19 @@
 - **A 就地 port**：`prism_render_scene` 红若干轮，期间 `--workspace` 构建不可用，port 完成才转绿。
 - **B 隔离 port**：独立 worktree/分支里 port，主工作区始终可编译，完成后合回（推荐）。
 
-### 1.2 接线层必须「材质/管线模型无关」（PBR / NPR / 混合 / 自定义）
+### 1.2 接线层必须对齐既有「四前端 + 正交风格轴」设计（PBR / NPR / 混合 / 自定义）
 
-移植时**不能**把 phase / system-set / pipeline-key / binning 照 bevy 的 `MeshPipelineKey` + `StandardMaterial`（PBR-centric）来写。渲染器要同时服务多种模型，且这些能力 pkg 里**已有**：
+**权威设计**：`prism_material_pipeline_design_zh.md` §1/§7——同一引擎**同时**是顶级 PBR / NPR / 混合 / 自定义引擎，四者皆一等：
+共享 GPU-driven 基底（几何/可见性/material id、光/影/GI 数据、跨切面基底）**算一次**，四条**并存前端**各自取数据、叠自己的响应：
+延迟 PBR 前端 / forward+ 前端 / NPR 风格化前端 / **自定义前端槽**；风格轴 `illumination = Lit / Stylized / Unlit / Custom` 正交叠在任意前端上；
+**混合 = 逐像素 material id + tile 分类路由**（因共享光/影/GI 而连贯，不是各前端各建一套）。
 
-| 模型 | pkg 现有落点 |
-| --- | --- |
-| PBR | `prism_render_material`（OpenPBR IR）+ `prism_render_shading`（GGX/Oren-Nayar/多次散射/各向异性） |
-| NPR / 风格化 | `prism_render_shading`：`stylized.rs`、`stylized_hair.rs`、`outline.rs`、`hatching.rs`、`halftone.rs`、`posterize.rs`、`kuwahara.rs`、`ordered_dither.rs`、`color_grade.rs` |
-| 混合（光栅+光追） | `prism_render_scene/src/raytrace/` + `prism_render_architecture/src/ray_scene/`（加速结构、AABB/alpha-mesh、自适应细分、bezier、backend）+ `prism_render_shading` 的 GI/ReSTIR |
-| 自定义 | `prism_material_schema`（schema→codegen）+ `prism_render_material`（IR/record/authoring） |
+**已 committed 的落地锚点（移植时必须保留语义）**：
+- CPU 分桶：`prism_render_shading/src/classification.rs`——`classify_material_header` 投影到 9 值 `MaterialShadingClass`，`ShadingWorkPlan::build` 分出同 permutation 的 bin。
+- GPU 路由：`prism_render_scene/src/shaders/shading_resolve.wesl`——9 个 `SHADING_CLASS_*` 常量 + `switch params.shading_class` 分派到 `shade_principled`/`shade_toon`(NPR)/`shade_subsurface`/`shade_clearcoat`/`shade_cloth`/`shade_hair`/`shade_water` 等。
+- NPR 描边白送：`prism_render_shading/src/outline.rs::outline_id_edge` 直接吃 vis-buffer 的 material id。
 
-**设计要求**：接线层按**模型注册表**组织——每种模型贡献自己的 pipeline key、shader、binding layout、draw 与排序臂；`prism_render_visibility::binning` 的 `DrawBinKey` 必须能表达模型差异，而不是单一 mesh key。落到具体实现时，`Core3d`/`Opaque3d`/`MeshPipelineKey` 这类 bevy 标签一律换成 Prism 的「模型注册表 + graph pass」。
+**移植约束**：换 `bevy_render` 时，**不能**把 `MeshPipelineKey` + `StandardMaterial`（PBR-only）当成总体管线键；要保持「逐像素 material id + tile 分类 + 9 类前端分派 + 风格轴」这套语义。`Core3d`/`Opaque3d`/`MeshPipelineKey`/`Core3dSystems` 只是 bevy 的**接入点**，替换时按上文设计做等价实现（Prism graph pass + 模型/前端注册 + `prism_render_visibility::binning` 的分批键）。
 
 ## 2. 符号映射（bevy_render → Prism）
 
