@@ -14,6 +14,9 @@
 2. **换 RHI 等于换宿主**：它的渲染世界是 `bevy_ecs + bevy_app + bevy_render::{RenderApp, ExtractSchedule, Render, RenderSystems}` 模型；换 RHI 必须同时换成 `prism_app/prism_ecs` 的 render sub-app（+ `prism_asset` 等）。这是整机架构 port，不是「换依赖行」。
 3. **桥接过渡不通**：bevy 的 `RenderQueue` / `RenderAdapter` 是私有字段（只有 `RenderDevice::wgpu_device()` 暴露 device，queue/adapter 没有），拿不到 wgpu 队列复用同一设备；另开 Prism 设备则是**双设备**，跨设备资源不可用，中途必错。
 
+4. **只删 `bevy_render` 一行做不到（2026-10-12 复核）**：`prism_render_scene` 还依赖 `bevy_pbr` 与 `bevy_core_pipeline`，而这两个 crate **自身直接依赖 `bevy_render`**（`crates/bevy_pbr/Cargo.toml:61`、`crates/bevy_core_pipeline/Cargo.toml:32`）。因此即便把 crate 里的 `bevy_render::*` 全部改掉、删掉那行依赖，`bevy_render` 仍会经 `bevy_pbr`/`bevy_core_pipeline` 传递进来。
+   **推论**：要让 pkg 不再依赖 `bevy_render`，必须同时替换 `bevy_pbr`（PBR 管线）与 `bevy_core_pipeline`（核心 pass），也就是要先把它们的功能落到 Prism 侧（其余 `bevy_mesh/image/camera/light/material/color/asset` 同理，只是它们不直接拉 `bevy_render`）。这已经是「prism_render_scene 整体脱 Bevy」的范围。
+
 **推论**：只能整机 port。工作模式二选一——
 
 - **A 就地 port**：`prism_render_scene` 红若干轮，期间 `--workspace` 构建不可用，port 完成才转绿。
