@@ -15,6 +15,7 @@ mod fragmentation;
 mod iteration;
 mod observers;
 mod param;
+mod prism_baseline;
 mod resources;
 mod scheduling;
 mod world;
@@ -29,6 +30,7 @@ criterion_main!(
     iteration::benches,
     fragmentation::benches,
     observers::benches,
+    prism_baseline::benches,
     resources::benches,
     scheduling::benches,
     world::benches,
