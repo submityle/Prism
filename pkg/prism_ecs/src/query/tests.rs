@@ -175,6 +175,19 @@ fn fold_fast_path_mutates_every_row() {
 }
 
 #[test]
+fn for_each_mut_convenience_mutates_all() {
+    let mut w = World::new();
+    let a = w.spawn(Position(1, 0));
+    let b = w.spawn((Position(2, 0), Velocity(0, 0)));
+
+    let state = w.query::<&mut Position>();
+    state.for_each_mut(&mut w, |mut p| p.0 += 5);
+
+    assert_eq!(w.get::<Position>(a), Some(&Position(6, 0)));
+    assert_eq!(w.get::<Position>(b), Some(&Position(7, 0)));
+}
+
+#[test]
 fn iter_is_empty_when_no_archetype_matches() {
     let mut w = World::new();
     w.spawn(Velocity(1, 1));

@@ -191,13 +191,25 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
 
     /// Visit every matched row over a shared view of `world`.
     #[inline]
-    pub fn for_each(&self, world: &World, mut f: impl FnMut(D::Item<'_>))
+    pub fn for_each(&self, world: &World, f: impl FnMut(D::Item<'_>))
     where
         D: ReadOnlyQueryData,
     {
-        for item in self.iter(world) {
-            f(item);
-        }
+        // Routes through `QueryIter::fold`, the batched fast path (design §17.1).
+        self.iter(world).for_each(f);
+    }
+
+    /// Visit every matched row over an exclusive view of `world`, permitting
+    /// `&mut` data terms (design §7 / §17.1).
+    ///
+    /// The mutable counterpart of [`for_each`](Self::for_each); routes through
+    /// the batched [`QueryIter::fold`](crate::query::QueryIter) fast path, so it
+    /// runs at roughly the parallel driver's single-worker batch speed rather
+    /// than paying the per-row `next()` protocol. Each `&mut T` fetch stamps the
+    /// change ticks of its row exactly as [`iter_mut`](Self::iter_mut) does.
+    #[inline]
+    pub fn for_each_mut(&self, world: &mut World, f: impl FnMut(D::Item<'_>)) {
+        self.iter_mut(world).for_each(f);
     }
 
     /// The ids of archetypes this query matches.

@@ -301,21 +301,18 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
 
     /// Visit every matched row with shared access.
     #[inline]
-    pub fn for_each(&self, mut f: impl FnMut(D::Item<'_>))
+    pub fn for_each(&self, f: impl FnMut(D::Item<'_>))
     where
         D: ReadOnlyQueryData,
     {
-        for item in self.iter() {
-            f(item);
-        }
+        // Routes through `QueryIter::fold`, the batched fast path (design §17.1).
+        self.iter().for_each(f);
     }
 
     /// Visit every matched row with exclusive access, permitting `&mut T`.
     #[inline]
-    pub fn for_each_mut(&mut self, mut f: impl FnMut(D::Item<'_>)) {
-        for item in self.iter_mut() {
-            f(item);
-        }
+    pub fn for_each_mut(&mut self, f: impl FnMut(D::Item<'_>)) {
+        self.iter_mut().for_each(f);
     }
 
     /// The number of entities this query matches.
