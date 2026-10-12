@@ -147,3 +147,22 @@ fn malformed_archives_are_rejected() {
         Err(crate::reflect_archive::ReflectArchiveError::UnsupportedVersion(0xFF))
     ));
 }
+
+/// A tiny hostile blob must not be able to make the loader reserve gigabytes:
+/// the entity count is taken from the blob, so the pre-allocation is bounded by
+/// what the remaining bytes could actually hold.
+#[test]
+fn an_absurd_entity_count_is_rejected_without_huge_allocation() {
+    let mut world = World::new();
+    register(&mut world);
+
+    let mut blob = Vec::new();
+    blob.extend_from_slice(b"PECA");
+    blob.push(1); // version
+    blob.extend_from_slice(&u32::MAX.to_le_bytes()); // entity_count
+    // No records at all: the first read runs out of bytes immediately.
+    assert!(matches!(
+        world.load_reflect_archive(&blob),
+        Err(crate::reflect_archive::ReflectArchiveError::Truncated)
+    ));
+}

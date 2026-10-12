@@ -59,6 +59,12 @@ pub enum ReflectArchiveError {
     Encode(SerializeError),
     /// A component value could not be decoded.
     Decode(DeserializeError),
+    /// The archive cannot be represented: more entities or a larger component
+    /// blob than the `u32` envelope fields can express.
+    TooLarge,
+    /// A decoded value could not be materialised into its component type (the
+    /// decoder and the bridge disagreed about the value shape).
+    Unrepresentable(StableTypeId),
 }
 
 impl core::fmt::Display for ReflectArchiveError {
@@ -73,6 +79,10 @@ impl core::fmt::Display for ReflectArchiveError {
             }
             Self::Encode(e) => write!(f, "component encode failed: {e}"),
             Self::Decode(e) => write!(f, "component decode failed: {e}"),
+            Self::TooLarge => f.write_str("archive would exceed the envelope's u32 size fields"),
+            Self::Unrepresentable(id) => {
+                write!(f, "decoded value is not representable as {:#x}", id.value())
+            }
         }
     }
 }
@@ -162,6 +172,12 @@ impl World {
             }
         }
 
+        // The envelope stores counts and blob lengths as `u32`; refuse rather
+        // than silently truncating a length and writing a corrupt archive.
+        if records.len() > u32::MAX as usize {
+            return Err(ReflectArchiveError::TooLarge);
+        }
+
         let mut out = Vec::new();
         out.extend_from_slice(&MAGIC);
         out.push(VERSION);
@@ -171,6 +187,9 @@ impl World {
             push_u32(&mut out, components.len() as u32);
             for (type_id, value) in components {
                 let blob = prism_reflect::to_binary(value)?;
+                if blob.len() > u32::MAX as usize {
+                    return Err(ReflectArchiveError::TooLarge);
+                }
                 push_u64(&mut out, type_id.value());
                 push_u32(&mut out, blob.len() as u32);
                 out.extend_from_slice(&blob);
@@ -200,7 +219,10 @@ impl World {
         }
         let entity_count = reader.u32()? as usize;
 
-        let mut landed = Vec::with_capacity(entity_count);
+        // The count comes from the blob, so bound the pre-allocation by what the
+        // remaining bytes could actually hold (each record is >= 12 bytes);
+        // otherwise a tiny hostile blob could request gigabytes up front.
+        let mut landed = Vec::with_capacity(entity_count.min(bytes.len() / 12 + 1));
         for _ in 0..entity_count {
             let bits = reader.u64()?;
             let archived = Entity::from_bits(bits).ok_or(ReflectArchiveError::InvalidEntity(bits))?;
@@ -226,7 +248,7 @@ impl World {
                 // The bridge accepts `Dynamic*` trees, which is exactly what the
                 // decoder produces, so no separate downcast path is needed here.
                 if !self.insert_reflect(target, &*decoded) {
-                    return Err(ReflectArchiveError::UnknownType(type_id));
+                    return Err(ReflectArchiveError::Unrepresentable(type_id));
                 }
             }
             landed.push(target);
