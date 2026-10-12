@@ -31,8 +31,10 @@ use hashbrown::HashMap;
 
 use crate::diagnostics::profiler::SystemInstrument;
 use crate::schedule::graph::Schedule;
+use crate::schedule::lane::SystemLane;
 use crate::schedule::set::SystemSetId;
 use crate::world::World;
+use core::time::Duration;
 
 /// The default executor: runs a [`Schedule`]'s systems sequentially on the
 /// calling thread, in the schedule's deterministic topological order, honouring
@@ -54,7 +56,28 @@ impl SingleThreadedExecutor {
     /// schedule's lower-level fields rather than calling back into
     /// [`Schedule::run`], which would recurse forever.
     pub fn run(schedule: &mut Schedule, world: &mut World) {
-        Self::run_inner(schedule, world, &mut ());
+        Self::run_inner(schedule, world, &mut (), None);
+    }
+
+    /// Run every system once, honouring a **frame-time budget** (design §24.1).
+    ///
+    /// [`SystemLane::Critical`] and [`SystemLane::Normal`] systems always run —
+    /// the frame's required work is never dropped. Once `budget` has elapsed,
+    /// every remaining [`SystemLane::Background`] system (deferrable async
+    /// precompute) is **skipped this run and left for a later frame**, exactly
+    /// as design §24.1 specifies. Returns the number of systems deferred.
+    ///
+    /// `std`-gated because it reads the wall clock ([`std::time::Instant`]).
+    /// Budgeted runs are for the deferrable/background tier; a lockstep
+    /// deterministic schedule should use [`run`](SingleThreadedExecutor::run)
+    /// (the `determinism` tier needs a fixed plan, not a wall-clock gate).
+    #[cfg(feature = "std")]
+    pub fn run_with_budget(
+        schedule: &mut Schedule,
+        world: &mut World,
+        budget: Duration,
+    ) -> usize {
+        Self::run_inner(schedule, world, &mut (), Some(budget))
     }
 
     /// Run every system in `schedule` once against `world`, in dependency
@@ -75,7 +98,7 @@ impl SingleThreadedExecutor {
         world: &mut World,
         recorder: &mut crate::diagnostics::profiler::SpanRecorder,
     ) {
-        Self::run_inner(schedule, world, recorder);
+        Self::run_inner(schedule, world, recorder, None);
     }
 
     /// The shared run loop, generic over the [`SystemInstrument`] so the
@@ -86,7 +109,15 @@ impl SingleThreadedExecutor {
         schedule: &mut Schedule,
         world: &mut World,
         instrument: &mut I,
-    ) {
+        budget: Option<Duration>,
+    ) -> usize {
+        #[cfg(not(feature = "std"))]
+        let _ = budget;
+        // A budget deadline, evaluated once so every system sees the same one.
+        #[cfg(feature = "std")]
+        let deadline = budget.map(|b| std::time::Instant::now() + b);
+        let mut deferred = 0usize;
+
         // Set-condition results are memoised for the whole run so a set's
         // shared conditions are evaluated at most once even when many members
         // reference the same set.
@@ -127,6 +158,19 @@ impl SingleThreadedExecutor {
                 }
             }
 
+            // Frame-budget gate (design §24.1): once the budget is spent, a
+            // Background-lane system is deferred to a later frame. Critical and
+            // Normal systems are never dropped by the budget.
+            #[cfg(feature = "std")]
+            if should_run
+                && let Some(deadline) = deadline
+                && schedule.nodes[idx].lane == SystemLane::Background
+                && std::time::Instant::now() >= deadline
+            {
+                should_run = false;
+                deferred += 1;
+            }
+
             if should_run {
                 let system = &mut schedule.nodes[idx].system;
                 // `name()` is a shared reborrow that ends before `run` takes
@@ -137,6 +181,7 @@ impl SingleThreadedExecutor {
                 instrument.end();
             }
         }
+        deferred
     }
 }
 
@@ -204,5 +249,75 @@ mod tests {
         schedule.run(&mut world);
 
         assert_eq!(world.resource::<Log>().0, alloc::vec![1, 2]);
+    }
+
+    /// Per-lane counters for the frame-budget tests.
+    #[derive(Debug, Default)]
+    struct Lanes {
+        critical: u32,
+        normal: u32,
+        background: u32,
+    }
+    impl Resource for Lanes {}
+
+    fn crit(mut c: ResMut<Lanes>) {
+        c.critical += 1;
+    }
+    fn norm(mut c: ResMut<Lanes>) {
+        c.normal += 1;
+    }
+    fn bg(mut c: ResMut<Lanes>) {
+        c.background += 1;
+    }
+
+    fn budgeted_schedule(world: &mut World) -> Schedule {
+        world.insert_resource(Lanes::default());
+        let mut schedule = Schedule::new();
+        schedule.add_systems(crit.lane(crate::schedule::lane::SystemLane::Critical));
+        schedule.add_systems(norm.lane(crate::schedule::lane::SystemLane::Normal));
+        schedule.add_systems(bg.lane(crate::schedule::lane::SystemLane::Background));
+        schedule
+    }
+
+    #[test]
+    fn background_lane_is_deferred_when_the_budget_is_spent() {
+        let mut world = World::new();
+        let mut schedule = budgeted_schedule(&mut world);
+
+        // A zero budget defers the Background system but never Critical/Normal.
+        let deferred = schedule.run_budgeted(&mut world, core::time::Duration::ZERO);
+        assert_eq!(deferred, 1, "exactly the background system is deferred");
+        {
+            let c = world.resource::<Lanes>();
+            assert_eq!((c.critical, c.normal, c.background), (1, 1, 0));
+        }
+
+        // A generous budget runs everything, so the deferred work catches up.
+        let deferred = schedule.run_budgeted(&mut world, core::time::Duration::from_secs(60));
+        assert_eq!(deferred, 0);
+        let c = world.resource::<Lanes>();
+        assert_eq!((c.critical, c.normal, c.background), (2, 2, 1));
+    }
+
+    #[cfg(feature = "multi_thread")]
+    #[test]
+    fn parallel_background_lane_is_deferred_when_the_budget_is_spent() {
+        let mut world = World::new();
+        let mut schedule = budgeted_schedule(&mut world);
+        let pool = prism_tasks::TaskPool::with_threads(2);
+
+        let deferred =
+            schedule.run_parallel_budgeted(&pool, &mut world, core::time::Duration::ZERO);
+        assert_eq!(deferred, 1);
+        {
+            let c = world.resource::<Lanes>();
+            assert_eq!((c.critical, c.normal, c.background), (1, 1, 0));
+        }
+
+        let deferred =
+            schedule.run_parallel_budgeted(&pool, &mut world, core::time::Duration::from_secs(60));
+        assert_eq!(deferred, 0);
+        let c = world.resource::<Lanes>();
+        assert_eq!((c.critical, c.normal, c.background), (2, 2, 1));
     }
 }

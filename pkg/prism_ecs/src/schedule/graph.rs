@@ -273,6 +273,50 @@ impl Schedule {
         }
     }
 
+    /// Initialise if needed, then run under a **frame-time budget** (design
+    /// §24.1) on the single-threaded executor.
+    ///
+    /// [`SystemLane::Critical`](crate::schedule::SystemLane::Critical) and
+    /// [`Normal`](crate::schedule::SystemLane::Normal) systems always run; once
+    /// `budget` elapses, remaining
+    /// [`Background`](crate::schedule::SystemLane::Background) systems are
+    /// deferred to a later frame. Returns the number deferred. Returns the same
+    /// coalesced change-observer flush as [`run`](Self::run).
+    #[cfg(feature = "std")]
+    pub fn run_budgeted(&mut self, world: &mut World, budget: core::time::Duration) -> usize {
+        self.initialize(world);
+        let deferred = crate::schedule::executor::SingleThreadedExecutor::run_with_budget(
+            self, world, budget,
+        );
+        if !world.change_observers.is_empty() {
+            world.flush_changed_observers();
+        }
+        deferred
+    }
+
+    /// Parallel sibling of [`run_budgeted`](Self::run_budgeted): run under a
+    /// frame-time budget on the **parallel conflict-graph executor** (design
+    /// §24.1 / §8.2). Returns the number of deferred Background systems.
+    #[cfg(feature = "multi_thread")]
+    pub fn run_parallel_budgeted(
+        &mut self,
+        pool: &prism_tasks::TaskPool,
+        world: &mut World,
+        budget: core::time::Duration,
+    ) -> usize {
+        self.initialize(world);
+        let deferred = crate::schedule::parallel_executor::MultiThreadedExecutor::run_with_budget(
+            self,
+            pool,
+            world,
+            Some(budget),
+        );
+        if !world.change_observers.is_empty() {
+            world.flush_changed_observers();
+        }
+        deferred
+    }
+
     /// Evaluate (AND) all conditions configured on `set`. A set with no
     /// configured conditions is always `true`.
     pub(crate) fn eval_set_conditions(&mut self, set: SystemSetId, world: &mut World) -> bool {

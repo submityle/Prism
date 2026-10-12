@@ -47,6 +47,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Mutex;
+use core::time::Duration;
 
 use hashbrown::HashMap;
 use prism_tasks::{PriorityGroup, TaskPool};
@@ -98,10 +99,31 @@ impl MultiThreadedExecutor {
     /// public [`Schedule::run_parallel`](crate::schedule::Schedule::run_parallel)
     /// entry point does that before delegating here.
     pub fn run(schedule: &mut Schedule, pool: &TaskPool, world: &mut World) {
+        Self::run_with_budget(schedule, pool, world, None);
+    }
+
+    /// Run the schedule once, honouring a **frame-time budget** (design §24.1).
+    ///
+    /// [`SystemLane::Critical`] and [`SystemLane::Normal`] systems always run;
+    /// once `budget` has elapsed, remaining [`SystemLane::Background`] systems
+    /// are skipped this run and left for a later frame. Returns the number of
+    /// systems deferred. A deferrable background tier is inherently
+    /// timing-dependent, so this is for the non-lockstep quality tiers, not the
+    /// `determinism` one.
+    pub fn run_with_budget(
+        schedule: &mut Schedule,
+        pool: &TaskPool,
+        world: &mut World,
+        budget: Option<Duration>,
+    ) -> usize {
         let n = schedule.nodes.len();
         if n == 0 {
-            return;
+            return 0;
         }
+
+        // A budget deadline, evaluated once so every system sees the same one.
+        let deadline = budget.map(|b| std::time::Instant::now() + b);
+        let mut deferred = 0usize;
 
         // Partition the systems into waves once per run. Access is stable
         // across a run, so the partition only depends on the resolved order and
@@ -122,7 +144,18 @@ impl MultiThreadedExecutor {
             // executor's gating semantics exactly.
             let mut should_run: Vec<bool> = Vec::with_capacity(wave.len());
             for &idx in wave {
-                should_run.push(eval_should_run(schedule, idx, &mut set_cache, world));
+                let mut run = eval_should_run(schedule, idx, &mut set_cache, world);
+                // Frame-budget gate (design §24.1): once the budget is spent, a
+                // Background-lane system is deferred. Critical/Normal always run.
+                if run
+                    && let Some(deadline) = deadline
+                    && schedule.nodes[idx].lane == SystemLane::Background
+                    && std::time::Instant::now() >= deadline
+                {
+                    run = false;
+                    deferred += 1;
+                }
+                should_run.push(run);
             }
 
             // Assign each passing system its own change-detection window, in
@@ -260,6 +293,7 @@ impl MultiThreadedExecutor {
                 }
             }
         }
+        deferred
     }
 }
 

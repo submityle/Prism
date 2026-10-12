@@ -501,7 +501,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 ## 22. 诚实边界与风险
 
-- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 + **物理分块存储**（**DOTS 式单块 chunk**：一个 row 窗口 = 一个物理块，块头 = 每列 change_version cell + `ChunkMeta`，其后是所有列的 SoA 切片，`Table` 持有块、`Column` 是块内视图，块级分配回收 / 稳定地址 / 块局部切片 / 块内嵌元数据）+ **chunk-aware fetch**（每 chunk 解析一次块基址）/ 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 规范层级关系 ChildOf（作用域命令 + 层级 despawn）/ 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档 + 跨版本 schema 迁移）/ 提取契约（`ExtractResource`/`ExtractComponent` + 运行器）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 原型预热 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档 / 跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 的渲染侧接线与流水线并行（ECS 侧提取契约已落地）、大页/NUMA 感知的列分配，以及独占机多核近线性 / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
+- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 + **物理分块存储**（**DOTS 式单块 chunk**：一个 row 窗口 = 一个物理块，块头 = 每列 change_version cell + `ChunkMeta`，其后是所有列的 SoA 切片，`Table` 持有块、`Column` 是块内视图，块级分配回收 / 稳定地址 / 块局部切片 / 块内嵌元数据）+ **chunk-aware fetch**（每 chunk 解析一次块基址）/ 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 规范层级关系 ChildOf（作用域命令 + 层级 despawn）/ 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档 + 跨版本 schema 迁移）/ 提取契约（`ExtractResource`/`ExtractComponent` + 运行器）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 原型预热 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已落地（lane→优先级派发 + 帧预算门控）；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档 / 跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 的渲染侧接线与流水线并行（ECS 侧提取契约已落地）、大页/NUMA 感知的列分配，以及独占机多核近线性 / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
 - 规模与多核扩展性、NUMA、GPU 常驻指标依赖真实硬件压测，单测不能替代。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。
@@ -579,7 +579,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 ECS 冲突图执行器（§8.2）与 fiber 作业图（§8.3）**不自建线程池/优先级**，而是派发到 `prism_tasks`：
 
 - system 与 system 内子作业按关键度映射到 tasks 的**优先级车道**（见 tasks §24.1）：关键路径（物理/提取/传播）走 `Critical`，常规 gameplay 走 `Normal`，异步预计算走 `Background`。
-- 执行受 `prism_time` **帧预算**（time §24.4）约束：预算耗尽时 `Background` system 顺延下帧，关键 system 必达。
+- 执行受 `prism_time` **帧预算**（time §24.4）约束：预算耗尽时 `Background` system 顺延下帧，关键 system 必达。**已落地（ECS 侧）**：`Schedule::run_budgeted(world, budget)` 与 `Schedule::run_parallel_budgeted(pool, world, budget)` 在单线程与并行执行器上实现该门控——`Critical`/`Normal` 无论预算始终执行，预算耗尽后所有 `Background` 系统**本帧跳过并计数**（下帧预算允许时再跑）；`SystemLane` → `prism_tasks::Priority` 的映射与 `PriorityGroup` 派发也已接入（`schedule/{lane,executor,parallel_executor,graph}.rs`，带单线程/并行两条预算测试）。诚实边界：预算是墙钟门控，故只用于可延后的背景档；`determinism` 档仍走不带预算的固定执行序。
 - **单一真相**：并行与调度策略实现在 tasks；时钟/预算在 time；ECS 只声明「访问集 + 顺序 + 车道标注」。确定性并行归并序由 tasks §24.7 保证（见 §24.4）。
 
 ### 24.2 Observer 作为跨系统空间 / 派生更新总线
@@ -624,4 +624,4 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 
 ### 24.5 诚实边界
 
-本章为跨 crate 职责对齐说明：**§24.1 调度执行底座已部分接入**（冲突图执行器把并行波次派发到 `prism_tasks::TaskPool`、lane→优先级映射见 `schedule/{graph,config,lane}.rs`）；**§24.2 的 ECS 侧已落地**（变更观察总线 `change_observers.rs`：`observe_changed` / `flush_changed_observers`，按帧合并 + 确定序 + `Schedule::run` 自动 flush；跨 crate 的 transform 触发点仍待接）；**§24.3 的 ECS 侧已落地**（`reflect` feature + `reflect_bridge.rs` 按 `StableTypeId` 动态读写组件，`serialize` feature + `reflect_archive.rs` 落字段级 diff / 复制策略 / 实体二进制存档 / 跨版本 schema 迁移，见 §24.3）；**§24.4 已有可执行的四环对拍夹具**（`tests/determinism_link.rs`，见 §24.4），但「任意场景确定」仍需各 crate 的确定性档全覆盖。本章不引入 ECS 新机制，仅固定跨 crate 职责边界与引用。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章为跨 crate 职责对齐说明：**§24.1 调度执行底座已落地**（冲突图执行器把并行波次派发到 `prism_tasks::TaskPool`，`SystemLane` → `Priority` 经 `PriorityGroup` 分优先级派发，且帧预算门控 `Background` 系统见 `schedule/{graph,config,lane,executor,parallel_executor}.rs`）；**§24.2 的 ECS 侧已落地**（变更观察总线 `change_observers.rs`：`observe_changed` / `flush_changed_observers`，按帧合并 + 确定序 + `Schedule::run` 自动 flush；跨 crate 的 transform 触发点仍待接）；**§24.3 的 ECS 侧已落地**（`reflect` feature + `reflect_bridge.rs` 按 `StableTypeId` 动态读写组件，`serialize` feature + `reflect_archive.rs` 落字段级 diff / 复制策略 / 实体二进制存档 / 跨版本 schema 迁移，见 §24.3）；**§24.4 已有可执行的四环对拍夹具**（`tests/determinism_link.rs`，见 §24.4），但「任意场景确定」仍需各 crate 的确定性档全覆盖。本章不引入 ECS 新机制，仅固定跨 crate 职责边界与引用。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
