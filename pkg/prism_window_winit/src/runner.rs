@@ -244,8 +244,11 @@ impl WinitBackend {
 
 /// A host engine that the runner drives. The host sees only kernel types.
 pub trait WinitApp {
-    /// Called once, the first time the platform resumes, before any windows
-    /// exist. The host should request its initial window(s) here.
+    /// Called each time the platform resumes. On desktop this fires once, after
+    /// the initial `Init`; on mobile it fires again after every suspend, and
+    /// winit documents that back-to-back resumes are possible, so the host must
+    /// tolerate repeats and guard one-time work (such as creating the initial
+    /// window(s)) with its own flag.
     fn resumed(&mut self, backend: &mut WinitBackend);
 
     /// Called when the platform is about to suspend the process (for example
@@ -271,7 +274,6 @@ pub trait WinitApp {
 pub struct WinitRunner<A: WinitApp> {
     backend: WinitBackend,
     app: A,
-    resumed_once: bool,
 }
 
 impl<A: WinitApp> WinitRunner<A> {
@@ -281,7 +283,6 @@ impl<A: WinitApp> WinitRunner<A> {
         Self {
             backend: WinitBackend::new(),
             app,
-            resumed_once: false,
         }
     }
 
@@ -296,14 +297,14 @@ impl<A: WinitApp> WinitRunner<A> {
         &mut self.backend
     }
 
-    /// Notify the host of a first-time resume, exactly once. Factored out of
-    /// the winit callback so the resume/forwarding logic is testable without a
+    /// Notify the host that the platform has resumed. Called on **every**
+    /// resume — desktop resumes once, mobile apps resume again after each
+    /// suspend — so a suspend/resume cycle always re-delivers the resume
+    /// signal and the app transitions back out of its suspended state. Factored
+    /// out of the winit callback so the forwarding logic is testable without a
     /// live event loop.
     fn handle_resumed(&mut self) {
-        if !self.resumed_once {
-            self.resumed_once = true;
-            self.app.resumed(&mut self.backend);
-        }
+        self.app.resumed(&mut self.backend);
     }
 
     /// Notify the host that the platform is suspending the process. Factored
@@ -435,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn first_resume_notifies_the_host_exactly_once() {
+    fn every_resume_notifies_the_host() {
         let mut runner = WinitRunner::new(CountingApp {
             resumed: 0,
             suspended: 0,
@@ -443,7 +444,10 @@ mod tests {
         });
         runner.handle_resumed();
         runner.handle_resumed();
-        assert_eq!(runner.app.resumed, 1, "resume is one-shot");
+        assert_eq!(
+            runner.app.resumed, 2,
+            "resume after a suspend must be re-delivered"
+        );
     }
 
     #[test]

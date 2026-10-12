@@ -383,4 +383,36 @@ mod tests {
             .resource::<prism_ecs::event::Events<LowMemory>>();
         assert_eq!(events.len(), 1, "memory warning buffers one LowMemory event");
     }
+
+    #[test]
+    fn resume_after_suspend_re_delivers_resumed() {
+        let exit = Rc::new(Cell::new(None));
+        let mut host = WindowedHost {
+            app: App::new(),
+            windows: Vec::new(),
+            open: Vec::new(),
+            started: false,
+            pacer: FramePacer::new(FrameLimit::Off),
+            first_frame_sent: false,
+            exit,
+        };
+        let mut backend = WinitBackend::new();
+        // A suspend/resume cycle must leave the app able to run again: each
+        // resume re-delivers `Resumed`, so a mobile background→foreground
+        // transition is not stuck paused after the first resume.
+        host.suspended(&mut backend);
+        host.resumed(&mut backend);
+        host.suspended(&mut backend);
+        host.resumed(&mut backend);
+        let resumed = host
+            .app
+            .world()
+            .resource::<prism_ecs::event::Events<Resumed>>();
+        let suspended = host
+            .app
+            .world()
+            .resource::<prism_ecs::event::Events<Suspended>>();
+        assert_eq!(resumed.len(), 2, "every resume re-delivers Resumed");
+        assert_eq!(suspended.len(), 2, "every suspend delivers Suspended");
+    }
 }
