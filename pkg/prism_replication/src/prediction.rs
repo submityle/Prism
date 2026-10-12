@@ -85,6 +85,21 @@ impl<F: Clone> Prediction<F> {
         })
     }
 
+    /// Reseed from a fresh authoritative snapshot (a resync): rebuild the store at
+    /// the snapshot's revision, keeping the same schema and ring capacity, and drop
+    /// every un-acknowledged prediction.
+    ///
+    /// # Errors
+    /// [`PredictionError::Snapshot`] for a malformed snapshot.
+    pub fn reseed(&mut self, snapshot: &[u8]) -> Result<u32, PredictionError> {
+        let mut store = SnapshotStore::new(self.store.schema().clone(), self.store.capacity());
+        let acked = store.seed(snapshot)?;
+        self.store = store;
+        self.acked = acked;
+        self.pending.clear();
+        Ok(acked)
+    }
+
     /// The authoritative revision the server has confirmed.
     #[must_use]
     pub fn acked(&self) -> u32 {

@@ -37,6 +37,9 @@ pub struct ServerReplication<S: ServerStrategy> {
     /// app; a rejected command must not panic the frame loop.
     last_error: Option<SessionError>,
     applied: u64,
+    /// Commands that arrived but could not be decoded (a protocol/version
+    /// mismatch). Counted so a silently dropped input is observable.
+    rejected: u64,
 }
 
 impl<S: ServerStrategy> Resource for ServerReplication<S> {}
@@ -59,6 +62,7 @@ impl<S: ServerStrategy> ServerReplication<S> {
             channel: ReliableChannel::new(transport, DEFAULT_MIN_RTO, DEFAULT_WINDOW),
             last_error: None,
             applied: 0,
+            rejected: 0,
         })
     }
 
@@ -67,36 +71,40 @@ impl<S: ServerStrategy> ServerReplication<S> {
     /// commands advanced authority this frame. A rejected command is stored for
     /// [`take_last_error`](Self::take_last_error) and stops the drain rather than
     /// unwinding the frame loop.
+    ///
+    /// Authority is only advanced when its delta can actually be retained for
+    /// delivery: if the outbound window is full the loop stops and leaves the rest
+    /// of the commands queued in the channel (the peer's own send window applies
+    /// backpressure), so a full window can never advance a revision the client is
+    /// never told about. A command that fails [`ServerStrategy::decode`] is counted
+    /// in [`rejected`](Self::rejected) rather than applied.
     pub fn pump(&mut self) -> usize {
         self.last_error = None;
         self.channel.tick();
-        let Self {
-            session,
-            strategy,
-            channel,
-            last_error,
-            applied,
-        } = self;
-        // Collect inbound messages first: `channel.recv` borrows the channel, and
-        // the broadcast below needs it again.
-        let mut inbox = Vec::new();
-        while let Some(bytes) = channel.recv() {
-            inbox.push(bytes);
-        }
         let mut advanced = 0;
-        for bytes in inbox {
-            let Some(command) = strategy.decode(&bytes) else {
+        // Only advance while a window slot is free, so the delta is always retained.
+        while !self.channel.is_full() {
+            let Some(bytes) = self.channel.recv() else {
+                break;
+            };
+            let Some(command) = self.strategy.decode(&bytes) else {
+                self.rejected += 1;
                 continue;
             };
             let mut wire = Vec::new();
-            match session.advance(|record| strategy.apply(record, command), &mut wire) {
+            match self
+                .session
+                .advance(|record| self.strategy.apply(record, command), &mut wire)
+            {
                 Ok(_) => {
-                    channel.send(&wire);
-                    *applied += 1;
+                    // A slot was free (checked above), so the framed delta is accepted.
+                    let sent = self.channel.send(&wire);
+                    debug_assert!(sent.is_some(), "the send window had a free slot");
+                    self.applied += 1;
                     advanced += 1;
                 }
                 Err(error) => {
-                    *last_error = Some(error);
+                    self.last_error = Some(error);
                     break;
                 }
             }
@@ -105,16 +113,23 @@ impl<S: ServerStrategy> ServerReplication<S> {
     }
 
     /// Send the framed full snapshot to the peer — the seed a joining or
-    /// resyncing client applies before any delta.
+    /// resyncing client applies before any delta. Returns the seeded revision, or
+    /// `Ok(None)` when the send window is full (retry on a later frame).
+    ///
+    /// The frame is a full **snapshot**, not a delta, so the client must apply it
+    /// with [`ClientSession::reseed`](crate::session::ClientSession::reseed) rather
+    /// than [`receive`](crate::session::ClientSession::receive).
     ///
     /// # Errors
     /// [`SessionError::NoBaseline`] before any authority exists, or a store error.
-    pub fn seed(&mut self) -> Result<u32, SessionError> {
-        let Self { session, channel, .. } = self;
+    pub fn seed(&mut self) -> Result<Option<u32>, SessionError> {
+        if self.channel.is_full() {
+            return Ok(None);
+        }
         let mut wire = Vec::new();
-        let revision = session.snapshot_frame(&mut wire)?;
-        channel.send(&wire);
-        Ok(revision)
+        let revision = self.session.snapshot_frame(&mut wire)?;
+        self.channel.send(&wire);
+        Ok(Some(revision))
     }
 
     /// Take the error the last [`pump`](Self::pump) stopped on, clearing it.
@@ -138,6 +153,12 @@ impl<S: ServerStrategy> ServerReplication<S> {
     #[must_use]
     pub fn applied(&self) -> u64 {
         self.applied
+    }
+
+    /// How many inbound commands could not be decoded (a protocol mismatch).
+    #[must_use]
+    pub fn rejected(&self) -> u64 {
+        self.rejected
     }
 
     /// Whether the outbound send window is full.
@@ -222,6 +243,7 @@ mod tests {
     use super::*;
     use crate::delta::{FieldKind, FieldValue, encode_snapshot};
     use crate::plugin::{Replication, ReplicationPlugin, ReplicationStrategy};
+    use crate::session::ClientSession;
     use crate::transport::memory::InMemoryTransport;
     use alloc::vec;
 
@@ -361,6 +383,35 @@ mod tests {
         let server = server_app.world().resource::<ServerReplication<AddAuthority>>();
         assert_eq!(server.revision(), Some(0), "the command was ignored");
         assert_eq!(server.applied(), 0);
+        assert_eq!(server.rejected(), 1, "the undecodable command is counted");
+    }
+
+    /// `seed()` produces a full-snapshot frame a client applies with `reseed` — the
+    /// resync path `receive` (which only understands deltas) cannot serve.
+    #[test]
+    fn a_seed_frame_reseeds_a_client_to_the_authoritative_revision() {
+        let (mut client_end, server_end) = InMemoryTransport::pair();
+        let mut server = ServerReplication::new(
+            schema(),
+            8,
+            &snapshot_at(5, 50),
+            AddAuthority,
+            Box::new(server_end),
+        )
+        .unwrap();
+
+        assert_eq!(server.seed().unwrap(), Some(5));
+        // One pump tick transmits the queued seed frame to the peer.
+        server.pump();
+        let packet = client_end.recv().expect("the seed frame reached the peer");
+        let (kind, _seq, snapshot_frame) = crate::reliable::decode(&packet).expect("a packet");
+        assert_eq!(kind, 0, "a data packet");
+
+        // A client seeded at revision 0 resyncs to authority's revision 5.
+        let mut client = ClientSession::<i64>::new(schema(), 8, &snapshot_at(0, 0)).unwrap();
+        assert_eq!(client.reseed(snapshot_frame).unwrap(), 5);
+        assert_eq!(client.acked(), 5);
+        assert_eq!(int(client.state().unwrap()), 50);
     }
 
     /// A **predicted** command whose simulation matches authority is confirmed, not

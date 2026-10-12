@@ -30,6 +30,9 @@ pub enum FrameError {
     /// A length prefix was not a valid LEB128 `usize` (more than
     /// `ceil(usize::BITS / 7)` bytes, or with bits that do not fit a `usize`).
     Malformed,
+    /// A caller required exactly one complete frame but the input ended before one
+    /// was available (used by snapshot reseed, which is not incremental).
+    Truncated,
 }
 
 /// Append `payload` to `out` as a LEB128-length-prefixed frame.
@@ -116,6 +119,36 @@ impl FrameDecoder {
         let frame: Vec<u8> = self.buffer[prefix..end].to_vec();
         self.buffer.drain(..end);
         Ok(Some(frame))
+    }
+
+    /// Like [`next_frame`](Self::next_frame) but leaves the frame buffered: decode
+    /// the next complete frame **without** consuming it, so a caller can act on it
+    /// (and only then drop it with [`next_frame`](Self::next_frame)) or reject it
+    /// while keeping it for a retry.
+    ///
+    /// # Errors
+    /// The same as [`next_frame`](Self::next_frame), and it likewise poisons the
+    /// decoder on a malformed or oversized prefix.
+    pub fn peek_frame(&mut self) -> Result<Option<Vec<u8>>, FrameError> {
+        if let Some(error) = self.poison {
+            return Err(error);
+        }
+        let (len, prefix) = match read_varint(&self.buffer) {
+            Ok(Some(header)) => header,
+            Ok(None) => return Ok(None),
+            Err(error) => return Err(self.poison(error)),
+        };
+        if len > MAX_FRAME_LEN {
+            return Err(self.poison(FrameError::Oversized {
+                len,
+                max: MAX_FRAME_LEN,
+            }));
+        }
+        let end = prefix + len;
+        if self.buffer.len() < end {
+            return Ok(None);
+        }
+        Ok(Some(self.buffer[prefix..end].to_vec()))
     }
 
     /// Latch `error`, drop the buffered bytes, and return it.

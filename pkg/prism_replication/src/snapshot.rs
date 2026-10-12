@@ -166,6 +166,12 @@ impl SnapshotStore {
     /// The delta's declared revision is its **baseline**; the result is stored at
     /// `baseline + 1`.
     ///
+    /// Any retained frame newer than `baseline` is dropped first (`truncate_after`),
+    /// so materializing `baseline + 1` can never leave a newer frame built on a
+    /// now-overwritten interior record — the retained chain stays contiguous. This
+    /// is what lets the prediction path apply an authoritative step over a
+    /// predicted branch.
+    ///
     /// # Errors
     /// [`SnapshotError::Delta`] for a malformed delta, or
     /// [`SnapshotError::UnknownBaseline`] when the baseline has been evicted (the
@@ -183,6 +189,10 @@ impl SnapshotStore {
         // Apply onto a copy first, so a malformed delta cannot corrupt the store.
         let mut next = base;
         apply_delta(&self.schema, &mut next, baseline, bytes)?;
+        // Drop any frames built above `baseline` before materializing `baseline+1`:
+        // overwriting an interior revision in place would leave the newer frames
+        // built on the old record and desynchronize the retained chain.
+        self.truncate_after(baseline);
         self.insert_baseline(next_revision, next)?;
         Ok(next_revision)
     }
@@ -308,6 +318,35 @@ mod tests {
         assert_eq!(store.oldest_revision(), Some(1));
         assert!(!store.contains(0));
         assert!(store.contains(1) && store.contains(2));
+    }
+
+    /// Applying a delta to a retained-but-not-newest baseline drops the frames
+    /// built above it, so the retained chain stays contiguous. Regression: `apply`
+    /// used to overwrite an interior frame in place, leaving newer frames built on
+    /// the old record.
+    #[test]
+    fn applying_an_interior_baseline_keeps_the_chain_contiguous() {
+        let schema = schema();
+        let mut store = SnapshotStore::new(schema.clone(), 8);
+        let base0 = record(false, 0, 0.0, 0);
+        let rec1 = record(false, 10, 0.0, 10);
+        let rec2 = record(false, 20, 0.0, 20);
+        store.insert_baseline(0, base0.clone()).unwrap();
+
+        let mut d01 = Vec::new();
+        encode_delta(&schema, &base0, &rec1, 0, &mut d01).unwrap();
+        assert_eq!(store.apply(&d01).unwrap(), 1);
+        let mut d12 = Vec::new();
+        encode_delta(&schema, &rec1, &rec2, 1, &mut d12).unwrap();
+        assert_eq!(store.apply(&d12).unwrap(), 2);
+        assert_eq!(store.latest_revision(), Some(2));
+        assert_eq!(store.record(2), Some(&rec2));
+
+        // Re-apply 0->1: the newer frames must be dropped, not left stale.
+        assert_eq!(store.apply(&d01).unwrap(), 1);
+        assert_eq!(store.latest_revision(), Some(1), "frames above the baseline go");
+        assert_eq!(store.record(1), Some(&rec1));
+        assert_eq!(store.record(2), None, "the stale 1->2 result is gone");
     }
 
     #[test]

@@ -24,9 +24,12 @@ impl Quantizer {
     ///
     /// # Panics
     /// Panics if `min`/`max` are not finite, if `min >= max`, or if `bits` is 0
-    /// or greater than 24. 24 bits is ~0.06 ppm of the range — already past any
-    /// presentation use — and capping keeps `2^bits` and the reciprocal step
-    /// exactly representable in `f32`, so the round-trip endpoints are exact.
+    /// or greater than 24, or if the span `max - min` does not yield a finite
+    /// positive per-unit step (a range so wide its span overflows `f32`, or so
+    /// narrow the reciprocal step does). 24 bits is ~0.06 ppm of the range —
+    /// already past any presentation use — and capping keeps `2^bits` and the
+    /// reciprocal step exactly representable in `f32`, so the round-trip endpoints
+    /// are exact.
     #[must_use]
     pub fn new(min: f32, max: f32, bits: u8) -> Self {
         assert!(
@@ -35,10 +38,15 @@ impl Quantizer {
         );
         assert!((1..=24).contains(&bits), "quantizer bits must be 1..=24");
         let levels = (1u64 << bits) - 1;
+        let inv_step = levels as f32 / (max - min);
+        assert!(
+            inv_step.is_finite() && inv_step > 0.0,
+            "quantizer range must have a finite, non-degenerate step"
+        );
         Self {
             min,
             max,
-            inv_step: levels as f32 / (max - min),
+            inv_step,
             levels,
             bits,
         }

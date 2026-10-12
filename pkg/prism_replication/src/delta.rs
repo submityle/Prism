@@ -29,6 +29,10 @@ pub enum FieldKind {
     /// A boolean, packed as one bit.
     Bool,
     /// A signed whole number, zigzagged into `bits` bits (1..=64).
+    ///
+    /// A value outside the representable signed range
+    /// `[-(2^(bits-1)), 2^(bits-1) - 1]` (all of `i64` at 64 bits) is reported as
+    /// [`DeltaError::ValueOutOfRange`] by encode rather than silently truncated.
     Int {
         /// Code width in bits (1..=64); an out-of-range width is reported as
         /// [`DeltaError::InvalidKind`] by encode/decode rather than panicking.
@@ -36,8 +40,10 @@ pub enum FieldKind {
     },
     /// A float quantized over `[min, max]` with `bits` of precision.
     ///
-    /// Valid when `min`/`max` are finite with `min < max` and `bits` is `1..=24`
-    /// (the same contract as [`Quantizer::new`]); an invalid kind is reported as
+    /// Valid when `min`/`max` are finite with `min < max`, the span `max - min`
+    /// yields a finite positive per-unit step (so the endpoints cannot collapse to
+    /// `NaN`/`inf`), and `bits` is `1..=24` (the same contract as
+    /// [`Quantizer::new`]); an invalid kind is reported as
     /// [`DeltaError::InvalidKind`] by encode/decode rather than panicking.
     Float {
         /// Range lower bound.
@@ -159,6 +165,12 @@ pub enum DeltaError {
     },
     /// A record field's variant does not match its schema kind.
     KindMismatch {
+        /// The offending field index.
+        index: usize,
+    },
+    /// An integer field value is outside the signed range its `bits`-wide code
+    /// can represent, so encoding it would silently truncate.
+    ValueOutOfRange {
         /// The offending field index.
         index: usize,
     },
@@ -377,8 +389,35 @@ fn check_shape(schema: &Schema, record: &Record) -> Result<(), DeltaError> {
         if !kind.matches(*value) {
             return Err(DeltaError::KindMismatch { index });
         }
+        if !value_fits_kind(*kind, *value) {
+            return Err(DeltaError::ValueOutOfRange { index });
+        }
     }
     Ok(())
+}
+
+/// Whether `value` is representable by `kind`'s wire form. Only integers have a
+/// bounded value domain; a bool or a quantized float always fits (the float's own
+/// range is a schema concern, checked by [`check_kinds`]).
+fn value_fits_kind(kind: FieldKind, value: FieldValue) -> bool {
+    match (kind, value) {
+        (FieldKind::Int { bits }, FieldValue::Int(number)) => int_fits(number, bits),
+        _ => true,
+    }
+}
+
+/// Whether `value` fits the signed range a `bits`-wide zigzag code can represent:
+/// `[-(2^(bits-1)), 2^(bits-1) - 1]` for `bits < 64`, and all of `i64` at 64 bits
+/// (where the high bit carries the sign). A zero width fits nothing.
+fn int_fits(value: i64, bits: u8) -> bool {
+    if bits >= 64 {
+        return true;
+    }
+    if bits == 0 {
+        return false;
+    }
+    let half = 1i64 << (bits - 1);
+    (-half..=half - 1).contains(&value)
 }
 
 /// Validate the schema's own field-kind parameters, so the bit packer and
@@ -389,7 +428,16 @@ fn check_kinds(schema: &Schema) -> Result<(), DeltaError> {
             FieldKind::Bool => true,
             FieldKind::Int { bits } => (1..=64).contains(&bits),
             FieldKind::Float { min, max, bits } => {
-                min.is_finite() && max.is_finite() && min < max && (1..=24).contains(&bits)
+                if (1..=24).contains(&bits) {
+                    // A finite range whose span overflows `f32` (or is so small
+                    // that the per-unit step overflows) makes `Quantizer` collapse
+                    // endpoints to `NaN`/`inf`; require a finite, positive step.
+                    let inv_step = ((1u64 << bits) - 1) as f32 / (max - min);
+                    min.is_finite() && max.is_finite() && min < max && inv_step.is_finite()
+                        && inv_step > 0.0
+                } else {
+                    false
+                }
             }
         };
         if !valid {
@@ -533,7 +581,7 @@ mod tests {
         );
 
         // A truncated body fails rather than zero-filling.
-        let current = record(true, 200, 5.0, 200);
+        let current = record(true, 200, 5.0, 100);
         let mut full = Vec::new();
         encode_delta(&schema, &base, &current, 0, &mut full).unwrap();
         let truncated = &full[..full.len() - 1];
@@ -541,6 +589,69 @@ mod tests {
             decode_delta(&schema, truncated),
             Err(DeltaError::Truncated)
         ));
+    }
+
+    /// An integer past its declared width would silently truncate; encode must
+    /// reject it, and the boundary values must still round-trip exactly.
+    #[test]
+    fn an_integer_out_of_its_declared_width_is_rejected_not_truncated() {
+        // A 12-bit signed field represents `[-2048, 2047]`.
+        let schema = Schema::new(vec![FieldKind::Int { bits: 12 }]);
+        let base = Record::new(vec![FieldValue::Int(0)]);
+
+        for value in [-2048i64, -1, 0, 2047] {
+            let target = Record::new(vec![FieldValue::Int(value)]);
+            let mut bytes = Vec::new();
+            encode_snapshot(&schema, 1, &target, &mut bytes).unwrap();
+            assert_eq!(decode_snapshot(&schema, &bytes).unwrap().1, target);
+        }
+
+        for value in [-2049i64, 2048, 3000] {
+            let target = Record::new(vec![FieldValue::Int(value)]);
+            let mut snapshot = Vec::new();
+            assert_eq!(
+                encode_snapshot(&schema, 1, &target, &mut snapshot),
+                Err(DeltaError::ValueOutOfRange { index: 0 }),
+                "value {value} must be refused, not wrapped"
+            );
+            assert!(snapshot.is_empty(), "nothing is written on rejection");
+            let mut delta = Vec::new();
+            assert_eq!(
+                encode_delta(&schema, &base, &target, 0, &mut delta),
+                Err(DeltaError::ValueOutOfRange { index: 0 })
+            );
+        }
+
+        // A 64-bit field carries the whole `i64` range.
+        let wide = Schema::new(vec![FieldKind::Int { bits: 64 }]);
+        for value in [i64::MIN, -1, 0, i64::MAX] {
+            let target = Record::new(vec![FieldValue::Int(value)]);
+            let mut bytes = Vec::new();
+            encode_snapshot(&wide, 1, &target, &mut bytes).unwrap();
+            assert_eq!(decode_snapshot(&wide, &bytes).unwrap().1, target);
+        }
+    }
+
+    /// A finite float range whose span overflows `f32` would make the quantizer
+    /// collapse every value to `NaN`/`inf`; it is refused as an invalid kind.
+    #[test]
+    fn a_float_range_whose_span_overflows_is_invalid() {
+        let schema = Schema::new(vec![FieldKind::Float {
+            min: -3.0e38,
+            max: 3.0e38,
+            bits: 24,
+        }]);
+        let record = Record::new(vec![FieldValue::Float(0.0)]);
+        let mut bytes = Vec::new();
+        assert_eq!(
+            encode_snapshot(&schema, 1, &record, &mut bytes),
+            Err(DeltaError::InvalidKind { index: 0 })
+        );
+        // Decoding any payload under the same schema is refused up front too.
+        assert_eq!(
+            decode_snapshot(&schema, &[0, 0, 0, 0, 1, 0, 0, 0]),
+            Err(DeltaError::InvalidKind { index: 0 })
+        );
     }
 
     #[test]

@@ -135,8 +135,12 @@ impl ServerSession {
             .ok_or(SessionError::RevisionOverflow(previous))?;
         let mut payload = Vec::new();
         encode_delta(self.store.schema(), &base, &next, previous, &mut payload)?;
+        let mut frame = Vec::new();
+        encode_frame(&payload, &mut frame)?;
+        // Commit only once both the delta and its frame are built, so a framing
+        // error cannot advance authority without emitting the bytes for it.
         self.store.insert_baseline(revision, next)?;
-        encode_frame(&payload, out)?;
+        out.extend_from_slice(&frame);
         Ok(revision)
     }
 
@@ -230,6 +234,12 @@ impl<F: Clone> ClientSession<F> {
     /// Feed received stream bytes and reconcile each complete delta frame,
     /// returning the predicted revision after each applied frame.
     ///
+    /// A frame that fails reconciliation is **left buffered** rather than dropped,
+    /// so a resumed/duplicated stream cannot silently lose an authoritative step:
+    /// the caller can observe [`buffered`](Self::buffered) staying non-zero and
+    /// resync from a fresh snapshot. A stream that carries a stale or gap delta out
+    /// of order therefore stalls (and is visible) instead of diverging.
+    ///
     /// # Errors
     /// [`SessionError::Frame`] for a malformed stream and
     /// [`SessionError::Prediction`] when a frame cannot be reconciled.
@@ -240,10 +250,42 @@ impl<F: Clone> ClientSession<F> {
     ) -> Result<Vec<u32>, SessionError> {
         self.decoder.feed(bytes);
         let mut revisions = Vec::new();
-        while let Some(frame) = self.decoder.next_frame()? {
-            revisions.push(self.prediction.reconcile(&frame, &mut simulate)?);
+        // Peek so a frame that fails reconciliation stays buffered; only a frame
+        // that applied cleanly is consumed.
+        while let Some(frame) = self.decoder.peek_frame()? {
+            let revision = self.prediction.reconcile(&frame, &mut simulate)?;
+            self.decoder.next_frame()?;
+            revisions.push(revision);
         }
         Ok(revisions)
+    }
+
+    /// Bytes still buffered in the frame decoder — non-zero after a
+    /// [`receive`](Self::receive) error means the session is desynchronized and
+    /// needs a fresh snapshot.
+    #[must_use]
+    pub fn buffered(&self) -> usize {
+        self.decoder.buffered()
+    }
+
+    /// Reseed from a fresh authoritative **snapshot** frame — the resync a client
+    /// runs after [`receive`](Self::receive) reports a gap or a desync, using the
+    /// bytes [`ServerReplication::seed`](crate::plugin::ServerReplication::seed)
+    /// produced. Rebuilds the prediction at the snapshot's revision and drops every
+    /// pending input; returns the new acknowledged revision.
+    ///
+    /// # Errors
+    /// [`SessionError::Frame`] when the input is not exactly one complete frame,
+    /// or [`SessionError::Snapshot`] for a malformed snapshot.
+    pub fn reseed(&mut self, snapshot_frame: &[u8]) -> Result<u32, SessionError> {
+        let mut decoder = FrameDecoder::new();
+        decoder.feed(snapshot_frame);
+        let snapshot = decoder
+            .next_frame()?
+            .ok_or(SessionError::Frame(FrameError::Truncated))?;
+        let acked = self.prediction.reseed(&snapshot)?;
+        self.decoder = FrameDecoder::new();
+        Ok(acked)
     }
 }
 
@@ -377,5 +419,42 @@ mod tests {
         let (head, tail) = wire.split_at(wire.len() - 1);
         assert!(client.receive(head, add).unwrap().is_empty());
         assert_eq!(client.receive(tail, add).unwrap(), vec![1]);
+    }
+
+    /// A delta that names a baseline ahead of the client is a gap: it is **kept**
+    /// buffered (so the desync is visible), not silently dropped, and a fresh
+    /// snapshot recovers with `reseed` instead of the client diverging quietly.
+    #[test]
+    fn a_gap_delta_is_left_buffered_and_visible() {
+        let mut server = ServerSession::new(schema(), 8, &snapshot_at(0, 0)).unwrap();
+        let mut first = Vec::new();
+        server
+            .advance(
+                |record| record.set(0, FieldValue::Int(field(record) + 1)),
+                &mut first,
+            )
+            .unwrap();
+        let mut second = Vec::new();
+        server
+            .advance(
+                |record| record.set(0, FieldValue::Int(field(record) + 1)),
+                &mut second,
+            )
+            .unwrap();
+
+        let mut client = ClientSession::<i64>::new(schema(), 8, &snapshot_at(0, 0)).unwrap();
+        // The 1->2 delta arrives first: it names baseline 1, but the client is at 0.
+        assert!(client.receive(&second, add).is_err());
+        assert!(
+            client.buffered() > 0,
+            "the un-applied frame is kept, so the desync is observable"
+        );
+        assert_eq!(client.acked(), 0, "the client did not advance onto a gap");
+
+        // Resyncing from a fresh snapshot frame recovers cleanly.
+        let mut seed = Vec::new();
+        server.snapshot_frame(&mut seed).unwrap();
+        assert_eq!(client.reseed(&seed).unwrap(), 2);
+        assert_eq!(client.buffered(), 0, "reseed discards the stale stream");
     }
 }
