@@ -11,6 +11,8 @@
 //! projection across every edge of a closed loop. Both use only `+ - * /` and
 //! [`f32::clamp`], so they are `no_std`-clean and bit-stable across targets.
 
+use crate::vec2::{dot, lerp, sub};
+
 /// The point on segment `a..b` closest to `p`.
 ///
 /// The perpendicular projection of `p` onto the infinite line through `a` and
@@ -115,6 +117,74 @@ pub fn closest_point_on_polyline(points: &[(f32, f32)], p: (f32, f32)) -> Option
             Some(best)
         }
     }
+}
+
+/// The closest pair of points between segments `a..b` and `c..d`.
+///
+/// Returns the two witness points, one on each segment, whose separation is the
+/// minimum distance between the segments — the segment-to-segment analogue of
+/// [`closest_point_on_segment`]. Crossing segments return a coincident pair; the
+/// algorithm (Ericson, *Real-Time Collision Detection* §5.1.9) handles parallel,
+/// collinear and degenerate segments.
+#[must_use]
+pub fn closest_points_between_segments(
+    a: (f32, f32),
+    b: (f32, f32),
+    c: (f32, f32),
+    d: (f32, f32),
+) -> ((f32, f32), (f32, f32)) {
+    const EPS: f32 = 1e-12;
+    let (d1, d2) = (sub(b, a), sub(d, c));
+    let r = sub(a, c);
+    let aa = dot(d1, d1);
+    let e = dot(d2, d2);
+    let f = dot(d2, r);
+
+    let (s, t);
+    if aa <= EPS && e <= EPS {
+        return (a, c); // both degenerate
+    }
+    if aa <= EPS {
+        s = 0.0;
+        t = (f / e).clamp(0.0, 1.0);
+    } else {
+        let cc = dot(d1, r);
+        if e <= EPS {
+            t = 0.0;
+            s = (-cc / aa).clamp(0.0, 1.0);
+        } else {
+            let bb = dot(d1, d2);
+            let denom = aa * e - bb * bb;
+            s = if denom.abs() > EPS {
+                ((bb * f - cc * e) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let tt = (bb * s + f) / e;
+            if tt < 0.0 {
+                let s2 = (-cc / aa).clamp(0.0, 1.0);
+                return (lerp(a, b, s2), c);
+            }
+            if tt > 1.0 {
+                let s2 = ((bb - cc) / aa).clamp(0.0, 1.0);
+                return (lerp(a, b, s2), d);
+            }
+            t = tt;
+        }
+    }
+    (lerp(a, b, s), lerp(c, d, t))
+}
+
+/// The minimum distance between segments `a..b` and `c..d`.
+///
+/// The separation of the witness pair from
+/// [`closest_points_between_segments`]; zero when the segments touch or overlap.
+#[must_use]
+pub fn segment_segment_distance(a: (f32, f32), b: (f32, f32), c: (f32, f32), d: (f32, f32)) -> f32 {
+    let (p, q) = closest_points_between_segments(a, b, c, d);
+    let dx = p.0 - q.0;
+    let dy = p.1 - q.1;
+    (dx * dx + dy * dy).sqrt()
 }
 
 #[cfg(test)]
@@ -319,6 +389,80 @@ mod tests {
                 (dist - oracle).abs() <= 1e-3 * oracle.max(1.0),
                 "dist {dist} vs sd {oracle}"
             );
+        }
+    }
+
+    fn len(a: (f32, f32), b: (f32, f32)) -> f32 {
+        let (dx, dy) = (a.0 - b.0, a.1 - b.1);
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    #[test]
+    fn crossing_segments_meet_at_a_point() {
+        let (p, q) =
+            closest_points_between_segments((0.0, 0.0), (10.0, 10.0), (0.0, 10.0), (10.0, 0.0));
+        assert!((p.0 - 5.0).abs() < 1e-4 && (p.1 - 5.0).abs() < 1e-4, "{p:?}");
+        assert!((q.0 - 5.0).abs() < 1e-4 && (q.1 - 5.0).abs() < 1e-4, "{q:?}");
+        assert!(segment_segment_distance((0.0, 0.0), (10.0, 10.0), (0.0, 10.0), (10.0, 0.0)) < 1e-4);
+    }
+
+    #[test]
+    fn parallel_and_collinear_cases() {
+        // Two parallel horizontals: the gap is the vertical distance.
+        let gap = segment_segment_distance((0.0, 0.0), (10.0, 0.0), (0.0, 5.0), (10.0, 5.0));
+        assert!((gap - 5.0).abs() < 1e-5);
+        // Disjoint collinear: the gap between the near endpoints.
+        let d = segment_segment_distance((0.0, 0.0), (1.0, 0.0), (5.0, 0.0), (6.0, 0.0));
+        assert!((d - 4.0).abs() < 1e-5);
+        // Overlapping collinear: they touch.
+        assert!(segment_segment_distance((0.0, 0.0), (4.0, 0.0), (2.0, 0.0), (6.0, 0.0)) < 1e-5);
+    }
+
+    #[test]
+    fn degenerate_segment_is_a_point_query() {
+        // Second segment collapses to (3,4); the distance from the origin is 5.
+        let (p, q) =
+            closest_points_between_segments((0.0, 0.0), (0.0, 0.0), (3.0, 4.0), (3.0, 4.0));
+        assert!(p.0 == 0.0 && p.1 == 0.0);
+        assert!((q.0 - 3.0).abs() < 1e-5 && (q.1 - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn segment_distance_is_symmetric_and_matches_bruteforce() {
+        let mut s = 0x5_C11A_u64;
+        for _ in 0..200 {
+            let mut seg = || {
+                (
+                    (rand_in(&mut s, -20.0, 20.0), rand_in(&mut s, -20.0, 20.0)),
+                    (rand_in(&mut s, -20.0, 20.0), rand_in(&mut s, -20.0, 20.0)),
+                )
+            };
+            let (a, b) = seg();
+            let (c, d) = seg();
+            let dist = segment_segment_distance(a, b, c, d);
+            // Symmetry under swapping the segments.
+            assert!((dist - segment_segment_distance(c, d, a, b)).abs() < 1e-3);
+
+            // Brute-force grid min is an upper bound; the exact min is within one
+            // parameter step of it (distance is Lipschitz in each parameter).
+            let mut best = f32::INFINITY;
+            for i in 0..=50 {
+                for j in 0..=50 {
+                    let u = i as f32 / 50.0;
+                    let v = j as f32 / 50.0;
+                    let pa = (a.0 + (b.0 - a.0) * u, a.1 + (b.1 - a.1) * u);
+                    let pc = (c.0 + (d.0 - c.0) * v, c.1 + (d.1 - c.1) * v);
+                    best = best.min(len(pa, pc));
+                }
+            }
+            let spacing = (len(a, b) + len(c, d)) / 50.0;
+            assert!(dist <= best + 1e-3, "dist {dist} > brute {best}");
+            assert!(best - dist <= spacing + 1e-3, "dist {dist} << brute {best}");
+
+            // The witness points lie on their segments.
+            let (p, q) = closest_points_between_segments(a, b, c, d);
+            assert!(len(closest_point_on_segment(p, a, b), p) < 1e-2);
+            assert!(len(closest_point_on_segment(q, c, d), q) < 1e-2);
         }
     }
 }

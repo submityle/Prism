@@ -120,7 +120,10 @@ pub use layer::{Layer, LayerTree};
 pub use line_raster::{raster_line, raster_polyline};
 pub use measure::{area, centroid, signed_area};
 pub use minkowski::minkowski_sum;
-pub use nearest::{closest_point_on_polygon, closest_point_on_polyline, closest_point_on_segment};
+pub use nearest::{
+    closest_point_on_polygon, closest_point_on_polyline, closest_point_on_segment,
+    closest_points_between_segments, segment_segment_distance,
+};
 pub use nine_slice::{nine_slice, split_nine, NineSlice};
 pub use obb::{min_area_obb, Obb};
 pub use offset::offset_convex;
