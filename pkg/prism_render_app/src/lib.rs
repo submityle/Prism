@@ -56,6 +56,7 @@
 
 mod camera;
 mod config;
+mod draw;
 mod frame;
 mod label;
 mod pipeline_cache;
@@ -75,6 +76,7 @@ mod tests;
 
 pub use camera::{RenderCamera, RenderViewport};
 pub use config::RenderAppConfig;
+pub use draw::{DrawFunctionId, DrawFunctions};
 pub use frame::RENDER_TARGET_FORMAT;
 pub use label::{Render, RenderApp};
 pub use pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
@@ -93,6 +95,7 @@ pub use views::RenderViews;
 pub mod prelude {
     pub use crate::camera::{RenderCamera, RenderViewport};
     pub use crate::config::RenderAppConfig;
+    pub use crate::draw::{DrawFunctionId, DrawFunctions};
     pub use crate::label::{Render, RenderApp};
     pub use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
     pub use crate::plugin::PrismRenderPlugin;

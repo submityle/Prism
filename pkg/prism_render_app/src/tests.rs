@@ -25,6 +25,7 @@ use crate::sets::{RenderPhase, RenderSystems};
 use crate::views::RenderViews;
 use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
 use crate::queue::{PhaseItem, RenderQueues};
+use crate::draw::{DrawFunctionId, DrawFunctions};
 use crate::texture_cache::{TextureCache, TextureKey};
 use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
@@ -233,6 +234,7 @@ fn render_queues_are_phased_and_sort_deterministically() {
     let scene = GenerationalHandle::new(4, 1);
     let item = |order: u64| PhaseItem {
         pipeline,
+        draw: DrawFunctionId(0),
         geometry,
         material,
         scene,
@@ -262,6 +264,69 @@ fn render_queues_are_phased_and_sort_deterministically() {
 
     queues.clear();
     assert!(queues.is_empty(), "clear drops every queued item");
+}
+
+/// Recording a phase invokes each item's registered draw function, in queue
+/// order.
+#[test]
+fn recording_a_phase_invokes_each_draw_function() {
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+    let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some("record-test".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: None,
+    });
+
+    // The recording context is a plain buffer here; production passes the
+    // graph's pass recorder instead.
+    let mut functions = DrawFunctions::<String>::new();
+    let draw = functions.register(|item, out: &mut String| {
+        out.push_str(&format!("{};", item.order));
+    });
+
+    let geometry = GenerationalHandle::new(2, 1);
+    let material = GenerationalHandle::new(3, 1);
+    let scene = GenerationalHandle::new(4, 1);
+    let mut queues = RenderQueues::new();
+    for order in [2u64, 1] {
+        queues.push(
+            RenderPhase::Opaque,
+            PhaseItem {
+                pipeline,
+                draw,
+                geometry,
+                material,
+                scene,
+                order,
+            },
+        );
+    }
+    queues.sort();
+
+    let mut recorded = String::new();
+    queues.record(RenderPhase::Opaque, &mut recorded, &functions);
+    assert_eq!(recorded, "1;2;", "items record in sorted order");
+
+    // An unknown id is a no-op, never a panic.
+    functions.call(DrawFunctionId(99), &queues.phase(RenderPhase::Opaque)[0], &mut recorded);
+    assert_eq!(recorded, "1;2;");
 }
 /// The render world materializes the frame's view family from the extracted
 /// viewport, and a minimized frame disables (rather than removes) the view.

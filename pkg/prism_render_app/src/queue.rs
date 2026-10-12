@@ -16,6 +16,7 @@ use prism_ecs::prelude::Resource;
 use prism_render_architecture::gpu_scene::{GeometryHandle, SceneHandle, SceneMaterialHandle};
 use prism_render_driver::RenderPipelineId;
 
+use crate::draw::{DrawFunctionId, DrawFunctions};
 use crate::sets::RenderPhase;
 
 /// One queued draw: the pipeline to bind plus the mesh/material it draws.
@@ -23,6 +24,8 @@ use crate::sets::RenderPhase;
 pub struct PhaseItem {
     /// The specialized pipeline this draw binds.
     pub pipeline: RenderPipelineId,
+    /// The draw function that records this item's commands.
+    pub draw: DrawFunctionId,
     /// The geometry (mesh) to draw.
     pub geometry: GeometryHandle,
     /// The material whose bindings this draw uses.
@@ -88,6 +91,21 @@ impl RenderQueues {
                     item.scene,
                 )
             });
+        }
+    }
+
+    /// Records every queued item of `phase` into `context`.
+    ///
+    /// Items are recorded in queue order (call [`sort`](Self::sort) first to
+    /// make that deterministic), each through its own [`DrawFunctionId`].
+    pub fn record<C>(
+        &self,
+        phase: RenderPhase,
+        context: &mut C,
+        functions: &DrawFunctions<C>,
+    ) {
+        for item in self.phase(phase) {
+            functions.call(item.draw, item, context);
         }
     }
 
