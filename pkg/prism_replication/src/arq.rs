@@ -9,10 +9,13 @@
 //! sockets, no clocks — so it is driven deterministically by a tick counter and
 //! tested against the lossy [`LoopbackLink`](crate::transport::LoopbackLink).
 //!
-//! This is a fixed-window stop-and-go ARQ (retransmit-on-timeout), not a sliding
-//! window with selective repeat: the design's congestion / flow-control work
-//! layers on top. It is deliberately simple and complete — a sent message is
-//! acknowledged or retransmitted forever, so nothing is silently lost.
+//! This is a bounded go-back-N / stop-and-go ARQ (retransmit-on-timeout), not a
+//! sliding window with selective repeat: the design's congestion / flow-control
+//! work layers on top. The sender admits at most `window` unacknowledged messages
+//! at once ([`ReliableSender::send`] refuses beyond that, for backpressure), so a
+//! peer that never acknowledges cannot grow memory without bound. Sequence
+//! numbers are `u64` — the same width as [`crate::sequence::DeliveryWindow`] — so
+//! a session would have to send 2^64 messages to alias one, which is unreachable.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -22,17 +25,18 @@ use crate::sequence::{Delivery, DeliveryWindow};
 /// The sender half of a reliable ordered channel.
 #[derive(Clone, Debug)]
 pub struct ReliableSender {
-    next_seq: u32,
+    next_seq: u64,
+    window: usize,
     min_rto: u32,
     rto: u32,
     srtt: Option<u32>,
-    queued: VecDeque<(u32, Vec<u8>)>,
+    queued: VecDeque<(u64, Vec<u8>)>,
     in_flight: VecDeque<Outgoing>,
 }
 
 #[derive(Clone, Debug)]
 struct Outgoing {
-    seq: u32,
+    seq: u64,
     payload: Vec<u8>,
     first_sent: u64,
     last_sent: u64,
@@ -40,12 +44,14 @@ struct Outgoing {
 }
 
 impl ReliableSender {
-    /// A sender whose retransmit timeout never drops below `min_rto` ticks.
+    /// A sender whose retransmit timeout never drops below `min_rto` ticks and
+    /// that holds at most `window` unacknowledged messages (both floored at 1).
     #[must_use]
-    pub fn new(min_rto: u32) -> Self {
+    pub fn new(min_rto: u32, window: usize) -> Self {
         let min_rto = min_rto.max(1);
         Self {
             next_seq: 0,
+            window: window.max(1),
             min_rto,
             rto: min_rto,
             srtt: None,
@@ -54,12 +60,23 @@ impl ReliableSender {
         }
     }
 
-    /// Queue `payload` for reliable ordered delivery; returns its sequence number.
-    pub fn send(&mut self, payload: Vec<u8>) -> u32 {
+    /// Queue `payload` for reliable ordered delivery, returning its sequence
+    /// number — or `None` when the send window is already full (the caller should
+    /// retry once acknowledgements return; see [`is_full`](Self::is_full)).
+    pub fn send(&mut self, payload: Vec<u8>) -> Option<u64> {
+        if self.is_full() {
+            return None;
+        }
         let seq = self.next_seq;
         self.next_seq = self.next_seq.wrapping_add(1);
         self.queued.push_back((seq, payload));
-        seq
+        Some(seq)
+    }
+
+    /// Whether the send window is full (no room for another message).
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.unacked() >= self.window
     }
 
     /// The number of messages not yet acknowledged.
@@ -82,7 +99,7 @@ impl ReliableSender {
 
     /// Advance to `now`: append every packet to transmit to `out` — new messages
     /// once, then unacknowledged ones whose timeout has elapsed.
-    pub fn tick(&mut self, now: u64, out: &mut Vec<(u32, Vec<u8>)>) {
+    pub fn tick(&mut self, now: u64, out: &mut Vec<(u64, Vec<u8>)>) {
         while let Some((seq, payload)) = self.queued.pop_front() {
             out.push((seq, payload.clone()));
             self.in_flight.push_back(Outgoing {
@@ -110,16 +127,21 @@ impl ReliableSender {
     /// The round-trip time feeds a smoothed estimate (`srtt`) and the timeout
     /// (`rto = 2 * srtt`, never below `min_rto`). A **retransmitted** message is
     /// never sampled (Karn's rule): its ACK could belong to either transmission.
-    pub fn ack(&mut self, seq: u32, now: u64) -> bool {
+    pub fn ack(&mut self, seq: u64, now: u64) -> bool {
         let Some(index) = self.in_flight.iter().position(|message| message.seq == seq) else {
             return false;
         };
         let message = self.in_flight.remove(index).expect("index from position");
         if !message.retransmitted {
             let sample = now.saturating_sub(message.first_sent).min(u64::from(u32::MAX)) as u32;
+            // `srtt = (7 * srtt + sample) / 8`, computed in `u64` so the
+            // intermediate `7 * srtt` cannot saturate (it would bias the estimate
+            // once `srtt > u32::MAX / 7`).
             let smoothed = match self.srtt {
-                // `srtt = (7 * srtt + sample) / 8`.
-                Some(previous) => (previous.saturating_mul(7).saturating_add(sample)) / 8,
+                Some(previous) => {
+                    ((u64::from(previous) * 7 + u64::from(sample)) / 8).min(u64::from(u32::MAX))
+                        as u32
+                }
                 None => sample,
             };
             self.srtt = Some(smoothed);
@@ -157,8 +179,8 @@ impl ReliableReceiver {
     /// ACK was probably lost) so the sender stops retransmitting; a sequence past
     /// the window is not acknowledged, forcing an explicit resync rather than an
     /// unbounded buffer.
-    pub fn receive(&mut self, seq: u32, payload: Vec<u8>) -> (Vec<Vec<u8>>, Option<u32>) {
-        match self.window.insert(u64::from(seq), payload) {
+    pub fn receive(&mut self, seq: u64, payload: Vec<u8>) -> (Vec<Vec<u8>>, Option<u64>) {
+        match self.window.insert(seq, payload) {
             Delivery::Advanced(run) => {
                 let delivered = run.into_iter().map(|(_, payload)| payload).collect();
                 (delivered, Some(seq))
@@ -176,31 +198,31 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    /// Packet codec for the integration test: `[kind: u8][seq: u32 LE][payload]`.
-    fn data_packet(seq: u32, payload: &[u8]) -> Vec<u8> {
+    /// Packet codec for the integration test: `[kind: u8][seq: u64 LE][payload]`.
+    fn data_packet(seq: u64, payload: &[u8]) -> Vec<u8> {
         let mut bytes = vec![0u8];
         bytes.extend_from_slice(&seq.to_le_bytes());
         bytes.extend_from_slice(payload);
         bytes
     }
 
-    fn ack_packet(seq: u32) -> Vec<u8> {
+    fn ack_packet(seq: u64) -> Vec<u8> {
         let mut bytes = vec![1u8];
         bytes.extend_from_slice(&seq.to_le_bytes());
         bytes
     }
 
-    fn decode(bytes: &[u8]) -> (u8, u32, &[u8]) {
-        let seq = u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-        (bytes[0], seq, &bytes[5..])
+    fn decode(bytes: &[u8]) -> (u8, u64, &[u8]) {
+        let seq = u64::from_le_bytes(bytes[1..9].try_into().expect("eight bytes"));
+        (bytes[0], seq, &bytes[9..])
     }
 
     #[test]
     fn in_order_messages_are_acknowledged_and_measured() {
-        let mut sender = ReliableSender::new(2);
+        let mut sender = ReliableSender::new(2, 8);
         let mut out = Vec::new();
-        sender.send(b"a".to_vec());
-        sender.send(b"b".to_vec());
+        assert!(sender.send(b"a".to_vec()).is_some());
+        assert!(sender.send(b"b".to_vec()).is_some());
         sender.tick(0, &mut out);
         assert_eq!(out.len(), 2, "both go out on the first tick");
         assert_eq!(sender.unacked(), 2);
@@ -220,9 +242,9 @@ mod tests {
 
     #[test]
     fn an_unacknowledged_message_is_retransmitted_after_the_timeout() {
-        let mut sender = ReliableSender::new(3);
+        let mut sender = ReliableSender::new(3, 8);
         let mut out = Vec::new();
-        sender.send(b"x".to_vec());
+        assert!(sender.send(b"x".to_vec()).is_some());
         sender.tick(0, &mut out);
         out.clear();
         sender.tick(2, &mut out);
@@ -252,17 +274,36 @@ mod tests {
         assert_eq!(ack, None);
     }
 
+    /// The send window is a hard bound: once `window` messages are unacknowledged,
+    /// `send` refuses instead of growing memory without limit (backpressure).
+    #[test]
+    fn the_send_window_refuses_more_than_it_can_hold() {
+        let mut sender = ReliableSender::new(2, 3);
+        assert!(sender.send(b"a".to_vec()).is_some());
+        assert!(sender.send(b"b".to_vec()).is_some());
+        assert!(sender.send(b"c".to_vec()).is_some());
+        assert!(sender.is_full());
+        assert_eq!(sender.send(b"d".to_vec()), None, "window is full");
+
+        // Acknowledging one frees exactly one slot.
+        let mut out = Vec::new();
+        sender.tick(0, &mut out);
+        assert!(sender.ack(0, 1));
+        assert!(!sender.is_full());
+        assert!(sender.send(b"d".to_vec()).is_some());
+    }
+
     /// End-to-end over a lossy, jittery link: every message is delivered exactly
     /// once and in order, and everything is acknowledged.
     #[test]
     fn the_arq_recovers_every_message_over_a_lossy_link() {
         const N: u32 = 10;
         let mut link = LoopbackLink::new(1, 2).with_drop_every(4);
-        let mut sender = ReliableSender::new(3);
+        let mut sender = ReliableSender::new(3, N as usize);
         let mut receiver = ReliableReceiver::new(32);
 
         for i in 0..N {
-            sender.send(i.to_le_bytes().to_vec());
+            assert!(sender.send(i.to_le_bytes().to_vec()).is_some());
         }
 
         let mut delivered: Vec<u32> = Vec::new();

@@ -2,12 +2,15 @@
 //! the app's frame loop.
 //!
 //! Replication is a plugin on the app shell: [`ReplicationPlugin`] installs a
-//! [`Replication`] resource (a [`ClientSession`] plus its [`Transport`]) and a
-//! `First` system that drains inbound frames into the prediction each frame. The
-//! application supplies a [`ReplicationStrategy`] — how one local input advances
-//! the replicated [`Record`] — so the same plugin drives any replicated field
-//! set. The caller keeps the peer transport endpoint, so it can drive authority
-//! or a test peer.
+//! [`Replication`] resource (a [`ClientSession`] plus a
+//! [`ReliableChannel`] over its [`Transport`]) and a `First` system that advances
+//! the channel one tick and drains the recovered frames into the prediction each
+//! frame. The reliability (sequence, ACK, retransmit) is therefore *in* the frame
+//! loop: a dropped datagram is retransmitted on a later frame rather than lost.
+//! The application supplies a [`ReplicationStrategy`] — how one local input
+//! advances the replicated [`Record`] — so the same plugin drives any replicated
+//! field set. The caller keeps the peer transport endpoint, so it can drive
+//! authority or a test peer with a matching [`ReliableChannel`].
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -18,8 +21,15 @@ use prism_ecs::resource::Resource;
 use prism_ecs::system::ResMut;
 
 use crate::delta::{Record, Schema};
+use crate::reliable::ReliableChannel;
 use crate::session::{ClientSession, SessionError};
 use crate::transport::Transport;
+
+/// The retransmit floor (in frames) and receiver window the plugin uses when it
+/// wraps the caller's transport in a [`ReliableChannel`].
+const DEFAULT_MIN_RTO: u32 = 2;
+/// How many out-of-order frames the receiver buffers before it refuses.
+const DEFAULT_WINDOW: usize = 64;
 
 /// The application's replication strategy: how a local input advances the record.
 pub trait ReplicationStrategy: Send + Sync + 'static {
@@ -33,7 +43,7 @@ pub trait ReplicationStrategy: Send + Sync + 'static {
 pub struct Replication<S: ReplicationStrategy> {
     session: ClientSession<S::Input>,
     strategy: S,
-    transport: Box<dyn Transport>,
+    channel: ReliableChannel<Box<dyn Transport>>,
     /// The first error from the most recent [`pump`](Self::pump), readable by the
     /// app; a malformed or rejected frame must not panic the frame loop.
     last_error: Option<SessionError>,
@@ -56,25 +66,29 @@ impl<S: ReplicationStrategy> Replication<S> {
         Ok(Self {
             session: ClientSession::new(schema, capacity, snapshot)?,
             strategy,
-            transport,
+            channel: ReliableChannel::new(transport, DEFAULT_MIN_RTO, DEFAULT_WINDOW),
             last_error: None,
         })
     }
 
-    /// Drain every inbound frame into the prediction, returning how many
-    /// authoritative frames were applied. A framing or reconciliation error stops
-    /// the drain and is stored for [`take_last_error`](Self::take_last_error)
-    /// rather than propagated, so a bad frame cannot unwind the frame loop.
+    /// Advance one tick and drain every recovered frame into the prediction,
+    /// returning how many authoritative frames were applied. One tick transmits
+    /// new / timed-out messages and reassembles inbound ones; it is called once
+    /// per frame by the plugin's `First` system. A framing or reconciliation
+    /// error stops the drain and is stored for
+    /// [`take_last_error`](Self::take_last_error) rather than propagated, so a bad
+    /// frame cannot unwind the frame loop.
     pub fn pump(&mut self) -> usize {
         self.last_error = None;
+        self.channel.tick();
         let Self {
             session,
             strategy,
-            transport,
+            channel,
             last_error,
         } = self;
         let mut applied = 0;
-        while let Some(bytes) = transport.recv() {
+        while let Some(bytes) = channel.recv() {
             match session.receive(&bytes, |record, input| strategy.simulate(record, input)) {
                 Ok(revisions) => applied += revisions.len(),
                 Err(error) => {
@@ -100,9 +114,18 @@ impl<S: ReplicationStrategy> Replication<S> {
         session.predict(input, |record, input| strategy.simulate(record, input))
     }
 
-    /// Send `bytes` to the peer (the app's outbound path).
-    pub fn send(&mut self, bytes: &[u8]) {
-        self.transport.send(bytes);
+    /// Send `bytes` to the peer reliably: the channel numbers and retains it until
+    /// the peer acknowledges, retransmitting on later frames if a datagram drops.
+    /// Returns the sequence number, or `None` when the send window is full (the
+    /// app should retry a later frame — see [`unacked`](Self::unacked)).
+    pub fn send(&mut self, bytes: &[u8]) -> Option<u64> {
+        self.channel.send(bytes)
+    }
+
+    /// How many outbound messages are still unacknowledged.
+    #[must_use]
+    pub fn unacked(&self) -> usize {
+        self.channel.unacked()
     }
 
     /// The authoritative revision confirmed by the server.
@@ -233,11 +256,16 @@ mod tests {
 
     /// The whole point of the seam: a real `App` with the plugin installed
     /// predicts locally, and its `First` system drains an authoritative frame from
-    /// the peer transport and reconciles the prediction — no manual pumping.
+    /// the peer's reliable channel and reconciles the prediction — no manual
+    /// pumping, and the frame is `ACKed` back to authority.
     #[test]
     fn the_plugin_pumps_authoritative_frames_into_the_prediction() {
-        let (client_end, mut server_end) = InMemoryTransport::pair();
+        let (client_end, server_end) = InMemoryTransport::pair();
+        // The authority speaks the same reliable channel as the client, so the
+        // datagrams on the wire are real ARQ packets.
         let mut server = ServerSession::new(schema(), 8, &snapshot_at(0, 0)).unwrap();
+        let mut server_channel =
+            ReliableChannel::new(server_end, DEFAULT_MIN_RTO, DEFAULT_WINDOW);
 
         let mut app = App::new();
         app.add_plugins(ReplicationPlugin::new(
@@ -253,7 +281,7 @@ mod tests {
             app.world_mut()
                 .resource_mut::<Replication<Add>>()
                 .predict(5)
-                .unwrap(),
+            .unwrap(),
             1
         );
         assert_eq!(
@@ -261,7 +289,8 @@ mod tests {
             5
         );
 
-        // Authority applies +3 and sends the framed delta over the transport.
+        // Authority applies +3 and sends the framed delta over its reliable
+        // channel; one tick puts the packet on the wire.
         let mut wire = Vec::new();
         server
             .advance(
@@ -269,13 +298,23 @@ mod tests {
                 &mut wire,
             )
             .unwrap();
-        server_end.send(&wire);
+        assert!(server_channel.send(&wire).is_some());
+        server_channel.tick();
 
-        // One frame: the plugin's `First` system drains and reconciles.
+        // One frame: the plugin's `First` system ticks the channel, recovers the
+        // frame (ACKing it back), then reconciles the prediction.
         app.update();
 
         let replication = app.world().resource::<Replication<Add>>();
         assert_eq!(replication.acked(), 1, "authority confirmed");
         assert_eq!(int(replication.state().unwrap()), 3, "prediction rolled back");
+
+        // The client's ACK reached authority: one more tick retires the message.
+        server_channel.tick();
+        assert_eq!(
+            server_channel.unacked(),
+            0,
+            "authority's frame was acknowledged over the reliable channel"
+        );
     }
 }

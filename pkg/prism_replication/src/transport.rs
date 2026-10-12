@@ -14,6 +14,7 @@
 //! to send order — and a given configuration always reorders and drops the
 //! *same* messages, so runs are reproducible.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 /// The transport provider seam (design §6): bytes out, bytes in.
@@ -27,6 +28,18 @@ pub trait Transport: Send + Sync {
     fn send(&mut self, bytes: &[u8]);
     /// Take the next inbound message, if any.
     fn recv(&mut self) -> Option<Vec<u8>>;
+}
+
+/// A boxed transport is itself a transport, so a caller can erase the concrete
+/// provider (a [`reliable::ReliableChannel`](crate::reliable::ReliableChannel)
+/// over a `Box<dyn Transport>` still works).
+impl<T: Transport + ?Sized> Transport for Box<T> {
+    fn send(&mut self, bytes: &[u8]) {
+        (**self).send(bytes);
+    }
+    fn recv(&mut self) -> Option<Vec<u8>> {
+        (**self).recv()
+    }
 }
 
 /// A shared in-memory [`Transport`] pair (std): one endpoint's `send` lands in the

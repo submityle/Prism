@@ -37,6 +37,10 @@
 //!   decoder, the boundary a stream transport needs (design §6).
 //! - [`arq`] — reliable ordered delivery over the unreliable transport: sequence,
 //!   acknowledge, retransmit, and an RTT-adapted timeout (design §6 "可靠 UDP").
+//! - [`reliable`] — the **wiring** of that protocol onto a datagram
+//!   [`Transport`](transport::Transport): a [`ReliableChannel`](reliable::ReliableChannel)
+//!   owns an ARQ sender/receiver pair, encodes each message as a small datagram,
+//!   and hands reassembled in-order payloads up to the session (design §6).
 //! - [`session`] — the **wiring**: [`ServerSession`](session::ServerSession)
 //!   (authority: seed snapshots, step deltas, lagging-client catch-up) and
 //!   [`ClientSession`](session::ClientSession) (prediction fed by inbound frames),
@@ -74,6 +78,8 @@ pub mod snapshot;
 pub mod prediction;
 
 pub mod transport;
+
+pub mod reliable;
 
 pub mod frame;
 
