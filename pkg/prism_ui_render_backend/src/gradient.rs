@@ -9,6 +9,8 @@
 //! - [`LinearGradient`]: `t` is the position along an axis (`start` → `end`).
 //! - [`RadialGradient`]: `t` is the distance from `center`, normalised by
 //!   `radius`.
+//! - [`ConicGradient`]: `t` is the angle around `center` over one full turn,
+//!   offset by `start_angle` (pie / hue-wheel fills).
 //!
 //! Stops are normalised once at construction — offsets clamped into `0..=1` and
 //! sorted — so sampling never has to re-order them. All arithmetic is `+ - * /`
@@ -222,6 +224,84 @@ impl RadialGradient {
     }
 }
 
+/// A conic (angular / "sweep") gradient around `center`.
+///
+/// `t` is the sample's polar angle relative to `start_angle`, expressed as a
+/// fraction of a full turn and wrapped into `0..1`: `start_angle` maps to `0`,
+/// a quarter turn later to `0.25`, and so on. Points on the same ray from
+/// `center` share a color; the angle at exactly `center` is defined as
+/// `start_angle` (a zero direction).
+///
+/// `start_angle` is in radians (measured with `+x` as zero, increasing toward
+/// `+y`, i.e. clockwise in a top-left screen space). The polar angle needs
+/// `atan2`, which `f32` bans in this workspace, so it is evaluated in `f64` and
+/// immediately narrowed back to `f32`; the turn fraction is then computed in
+/// `f32` so an axis direction (whose `atan2` result rounds to the same `f32`
+/// constant) aligns exactly with a matching `start_angle`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConicGradient {
+    center: (f32, f32),
+    start_angle: f32,
+    stops: Vec<Stop>,
+}
+
+impl ConicGradient {
+    /// Build a conic gradient, normalising stops exactly like
+    /// [`LinearGradient::new`].
+    #[must_use]
+    pub fn new(center: (f32, f32), start_angle: f32, mut stops: Vec<Stop>) -> Self {
+        normalize_stops(&mut stops);
+        Self {
+            center,
+            start_angle,
+            stops,
+        }
+    }
+
+    /// The gradient center.
+    #[must_use]
+    pub fn center(&self) -> (f32, f32) {
+        self.center
+    }
+
+    /// The angle (radians) that maps to `t = 0`.
+    #[must_use]
+    pub fn start_angle(&self) -> f32 {
+        self.start_angle
+    }
+
+    /// The normalised stops, sorted by offset.
+    #[must_use]
+    pub fn stops(&self) -> &[Stop] {
+        &self.stops
+    }
+
+    /// The conic parameter `t` of point `p`, wrapped into `0..1`.
+    #[must_use]
+    pub fn project(&self, p: (f32, f32)) -> f32 {
+        let dy = f64::from(p.1) - f64::from(self.center.1);
+        let dx = f64::from(p.0) - f64::from(self.center.0);
+        // `atan2` in f64 (the banned call is `f32::atan2`), narrowed so the turn
+        // fraction and `start_angle` share one precision.
+        let angle = dy.atan2(dx) as f32;
+        let turns = (angle - self.start_angle) / core::f32::consts::TAU;
+        turns.rem_euclid(1.0)
+    }
+
+    /// Sample the gradient color at point `p` (equivalent to
+    /// `sample_t(project(p))`).
+    #[must_use]
+    pub fn sample(&self, p: (f32, f32)) -> Color {
+        self.sample_t(self.project(p))
+    }
+
+    /// Sample the gradient color at conic parameter `t` (clamped into `0..=1`).
+    #[must_use]
+    pub fn sample_t(&self, t: f32) -> Color {
+        sample_stops(&self.stops, t)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -361,5 +441,45 @@ mod tests {
         assert!(colors_close(zero.sample((9.0, 9.0)), Color::BLACK));
         let negative = radial_bw((0.0, 0.0), -4.0);
         assert!(colors_close(negative.sample((5.0, 0.0)), Color::BLACK));
+    }
+
+    fn conic_bw(start_angle: f32) -> ConicGradient {
+        ConicGradient::new(
+            (0.0, 0.0),
+            start_angle,
+            vec![Stop::new(0.0, Color::BLACK), Stop::new(1.0, Color::WHITE)],
+        )
+    }
+
+    #[test]
+    fn conic_angle_maps_to_t() {
+        let g = conic_bw(0.0);
+        assert!(colors_close(g.sample((1.0, 0.0)), Color::BLACK));
+        assert!(close(g.sample((0.0, 1.0)).r, 0.25)); // +y is a quarter turn
+        assert!(close(g.sample((-1.0, 0.0)).r, 0.5));
+        assert!(close(g.sample((0.0, -1.0)).r, 0.75));
+    }
+
+    #[test]
+    fn conic_points_on_a_ray_share_a_color() {
+        let g = conic_bw(0.0);
+        // (1,1) and (5,5) lie on the same 45-degree ray.
+        assert!(colors_close(g.sample((1.0, 1.0)), g.sample((5.0, 5.0))));
+    }
+
+    #[test]
+    fn conic_start_angle_rotates_the_map() {
+        let g = conic_bw(core::f32::consts::FRAC_PI_2);
+        // Starting a quarter turn later, +y is now t = 0.
+        assert!(colors_close(g.sample((0.0, 1.0)), Color::BLACK));
+        assert!(close(g.sample((1.0, 0.0)).r, 0.75)); // -1/4 turn wraps to 0.75
+    }
+
+    #[test]
+    fn conic_seam_wraps_from_one_to_zero() {
+        let g = conic_bw(0.0);
+        // Just below the +x axis wraps to t near 1; just above is near 0.
+        assert!(g.sample((1.0, -0.001)).r > 0.99);
+        assert!(g.sample((1.0, 0.001)).r < 0.01);
     }
 }
