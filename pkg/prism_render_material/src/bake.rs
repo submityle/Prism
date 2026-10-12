@@ -304,8 +304,10 @@ pub fn bake_layer_stack(
     for group in Group::ALL {
         let total = denominator[group.index()];
         if total <= 0.0 {
-            // No layer covers this group: the neutral default stands, and an
-            // optional lobe's bit stays clear.
+            // No positive-weight layer declares this group: its bit stays clear
+            // and the value is whatever the seed layer authored (never read
+            // while the bit is clear), so a non-`Core` group left untouched here
+            // is inert rather than blended.
             continue;
         }
         let inverse = 1.0 / total;

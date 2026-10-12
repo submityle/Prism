@@ -5,7 +5,7 @@
 //! now described by independent axes:
 //!
 //! * `domain`        — Surface / Decal / Volume / `PostProcess` (see `record.rs`)
-//! * `closure graph` — *what* the BSDF looks like (`ir::ClosureGraph`)
+//! * `closure graph` — *what* the BSDF looks like (`ir::MaterialGraph`)
 //! * `illumination`  — *how* shared lighting data is interpreted (this module)
 //! * `blend`         — the `MaterialRenderClass` family
 //!
