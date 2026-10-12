@@ -860,6 +860,8 @@ pkg/prism_asset/                 # 身份/存储/依赖/句柄/事件核（no_st
     event.rs                     # AssetEvent（含 Failed/Unused）
   features:
     std / async_io               # AssetServer / LoadScheduler / AssetReader（跑在 prism_tasks）
+    ecs                          # 把 `Assets<A>` 实现为 `prism_ecs::Resource`（§14.2：资产作为资源住进世界）；
+                                 # 默认关闭，核心保持零依赖，只有拥有世界的 crate 打开它
     hot_reload                   # watch + 失效传播 + 重装配
     process                      # AssetProcessor + 内容哈希缓存 + 单文件资产包
     pack                         # ContainerIo（ToC + 压缩分块）+ 挂载优先级
@@ -867,7 +869,12 @@ pkg/prism_asset/                 # 身份/存储/依赖/句柄/事件核（no_st
     retain_cache                 # 保留缓存：KeepAlive/LRU/Pinned 卸载策略（防 load/drop 抖动）
 
 pkg/prism_asset_import/          # 具体格式 loader：glTF/FBX/USD、PNG/KTX2/basis、WAV/OGG、字体
-pkg/prism_asset_bake/            # 平台烘焙：BCn/ASTC 压缩、mesh 优化/量化、虚拟几何/纹理预处理
+# 资产**数据**类型（运行时的 `Assets<Mesh>` / `Assets<Image>`，§14.2）：与底座同纪律——
+# 只借 RHI 的词表（`VertexFormat`/`TextureFormat` 等），不持 GPU 句柄、不依赖 ECS、不链接后端。
+pkg/prism_mesh/                  # Mesh 资产：具名顶点属性 + 索引 + 拓扑 → 派生布局/顶点字节/包围体
+pkg/prism_image/                 # Image 资产：extent + format + texel 数据 + 自带 sampler（尺寸/格式校验）
+# 平台烘焙不在本 crate 树内：算法内核为 pkg/prism_bake_*，DAG/键/DDC/CAS/打包归 pkg/prism_asset_build_*
+# （原 pkg/prism_asset_bake 命名废弃；见 prism_asset_build_design_zh.md §2.7/§6.6）
 pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可被 prism_asset 的 pack 复用）
 ```
 
