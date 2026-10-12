@@ -10,6 +10,51 @@ use core::ops::{
     Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign,
 };
 
+#[inline]
+fn hypot2(x: f32, y: f32) -> f32 {
+    if x.is_nan() || y.is_nan() {
+        return f32::NAN;
+    }
+    let scale = x.abs().max(y.abs());
+    if scale == 0.0 || !scale.is_finite() {
+        return scale;
+    }
+    scale * mf::sqrt((x / scale) * (x / scale) + (y / scale) * (y / scale))
+}
+
+#[inline]
+fn hypot3(x: f32, y: f32, z: f32) -> f32 {
+    if x.is_nan() || y.is_nan() || z.is_nan() {
+        return f32::NAN;
+    }
+    let scale = x.abs().max(y.abs()).max(z.abs());
+    if scale == 0.0 || !scale.is_finite() {
+        return scale;
+    }
+    scale
+        * mf::sqrt(
+            (x / scale) * (x / scale) + (y / scale) * (y / scale) + (z / scale) * (z / scale),
+        )
+}
+
+#[inline]
+fn hypot4(x: f32, y: f32, z: f32, w: f32) -> f32 {
+    if x.is_nan() || y.is_nan() || z.is_nan() || w.is_nan() {
+        return f32::NAN;
+    }
+    let scale = x.abs().max(y.abs()).max(z.abs()).max(w.abs());
+    if scale == 0.0 || !scale.is_finite() {
+        return scale;
+    }
+    scale
+        * mf::sqrt(
+            (x / scale) * (x / scale)
+                + (y / scale) * (y / scale)
+                + (z / scale) * (z / scale)
+                + (w / scale) * (w / scale),
+        )
+}
+
 /// A 2-component `f32` vector.
 #[derive(Clone, Copy, PartialEq, Default)]
 #[repr(C)]
@@ -112,7 +157,7 @@ impl Vec2 {
     /// Euclidean length.
     #[inline]
     pub fn length(self) -> f32 {
-        mf::sqrt(self.length_squared())
+        hypot2(self.x, self.y)
     }
     /// Distance to `rhs`.
     #[inline]
@@ -122,19 +167,35 @@ impl Vec2 {
     /// Normalize to unit length (panics in debug if non-finite result).
     #[inline]
     pub fn normalize(self) -> Self {
-        let inv = 1.0 / self.length();
-        let n = self * inv;
+        let m = self.x.abs().max(self.y.abs());
+        let n = if m > 0.0 && m.is_finite() {
+            let scaled = self / m;
+            scaled / scaled.length()
+        } else {
+            self * (1.0 / self.length())
+        };
         debug_assert!(n.is_finite(), "normalize of near-zero vector");
         n
     }
     /// Normalize, or return zero if the length is too small to normalize.
     #[inline]
     pub fn normalize_or_zero(self) -> Self {
-        let len = self.length();
-        if len > 1.0e-20 {
-            self * (1.0 / len)
+        let m = self.x.abs().max(self.y.abs());
+        if m > 0.0 && m.is_finite() {
+            let scaled = self / m;
+            let scaled_len = scaled.length();
+            if m > 1.0e-20 / scaled_len {
+                scaled / scaled_len
+            } else {
+                Self::ZERO
+            }
         } else {
-            Self::ZERO
+            let len = self.length();
+            if len > 1.0e-20 {
+                self / len
+            } else {
+                Self::ZERO
+            }
         }
     }
     /// True if both components are finite.
@@ -249,7 +310,7 @@ impl Vec3 {
     /// Euclidean length.
     #[inline]
     pub fn length(self) -> f32 {
-        mf::sqrt(self.length_squared())
+        hypot3(self.x, self.y, self.z)
     }
     /// Distance to `rhs`.
     #[inline]
@@ -259,32 +320,37 @@ impl Vec3 {
     /// Normalize to unit length (panics in debug if non-finite result).
     #[inline]
     pub fn normalize(self) -> Self {
-        let len = self.length();
-        if len.is_finite() && len > 0.0 {
-            let n = self * (1.0 / len);
+        let m = self.x.abs().max(self.y.abs()).max(self.z.abs());
+        if m > 0.0 && m.is_finite() {
+            let scaled = self / m;
+            let n = scaled / scaled.length();
             debug_assert!(n.is_finite(), "normalize of near-zero vector");
             return n;
         }
-        // `len` overflowed to +inf, or underflowed to 0 on a non-zero vector:
-        // rescale by the largest component so the square cannot overflow.
-        let m = self.x.abs().max(self.y.abs()).max(self.z.abs());
-        if m > 0.0 && m.is_finite() {
-            let scaled = self * (1.0 / m);
-            return scaled * (1.0 / scaled.length());
-        }
         // Zero / NaN / non-finite: keep the prior broadcast behaviour.
-        let n = self * (1.0 / len);
+        let n = self * (1.0 / self.length());
         debug_assert!(n.is_finite(), "normalize of near-zero vector");
         n
     }
     /// Normalize, or return zero if too short to normalize.
     #[inline]
     pub fn normalize_or_zero(self) -> Self {
-        let len = self.length();
-        if len > 1.0e-20 {
-            self * (1.0 / len)
+        let m = self.x.abs().max(self.y.abs()).max(self.z.abs());
+        if m > 0.0 && m.is_finite() {
+            let scaled = self / m;
+            let scaled_len = scaled.length();
+            if m > 1.0e-20 / scaled_len {
+                scaled / scaled_len
+            } else {
+                Self::ZERO
+            }
         } else {
-            Self::ZERO
+            let len = self.length();
+            if len > 1.0e-20 {
+                self / len
+            } else {
+                Self::ZERO
+            }
         }
     }
     /// True if all components are finite.
@@ -426,12 +492,23 @@ impl Vec3A {
     /// Euclidean length.
     #[inline]
     pub fn length(self) -> f32 {
-        backend::vec3_length(self.to_simd())
+        let scale = self.x.abs().max(self.y.abs()).max(self.z.abs());
+        if scale.is_finite() && scale <= 1.0e19 {
+            backend::vec3_length(self.to_simd())
+        } else {
+            hypot3(self.x, self.y, self.z)
+        }
     }
     /// Normalize to unit length.
     #[inline]
     pub fn normalize(self) -> Self {
-        Self::from_simd(backend::vec3_normalize(self.to_simd()))
+        let m = self.x.abs().max(self.y.abs()).max(self.z.abs());
+        if m > 0.0 && m.is_finite() {
+            let scaled = self / m;
+            scaled / scaled.length()
+        } else {
+            Self::from_simd(backend::vec3_normalize(self.to_simd()))
+        }
     }
     /// Pack into SIMD lane order `[x, y, z, 0]` (padding lane cleared).
     #[inline]
@@ -496,12 +573,33 @@ impl Vec4 {
     /// Euclidean length.
     #[inline]
     pub fn length(self) -> f32 {
-        backend::vec4_length(self.to_simd())
+        let scale = self
+            .x
+            .abs()
+            .max(self.y.abs())
+            .max(self.z.abs())
+            .max(self.w.abs());
+        if scale.is_finite() && scale <= 1.0e19 {
+            backend::vec4_length(self.to_simd())
+        } else {
+            hypot4(self.x, self.y, self.z, self.w)
+        }
     }
     /// Normalize to unit length.
     #[inline]
     pub fn normalize(self) -> Self {
-        Self::from_simd(backend::vec4_normalize(self.to_simd()))
+        let m = self
+            .x
+            .abs()
+            .max(self.y.abs())
+            .max(self.z.abs())
+            .max(self.w.abs());
+        if m > 0.0 && m.is_finite() {
+            let scaled = self / m;
+            scaled / scaled.length()
+        } else {
+            Self::from_simd(backend::vec4_normalize(self.to_simd()))
+        }
     }
     /// Pack into SIMD lane order `[x, y, z, w]`.
     #[inline]

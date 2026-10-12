@@ -52,6 +52,33 @@ fn vec3_normalize_is_unit() {
 }
 
 #[test]
+fn vector_normalization_handles_extreme_finite_magnitudes() {
+    let v2 = Vec2::new(3.0e20, -4.0e20).normalize();
+    assert!(approx(v2.length(), 1.0, 1e-6));
+    assert!(approx(
+        Vec2::new(3.0e20, -4.0e20).normalize_or_zero().length(),
+        1.0,
+        1e-6
+    ));
+
+    let v3 = Vec3::new(3.0e20, 0.0, 4.0e20);
+    assert!(v3.length().is_finite());
+    assert!(approx(v3.normalize_or_zero().length(), 1.0, 1e-6));
+
+    let v3a = Vec3A::new(3.0e20, 0.0, 4.0e20).normalize();
+    assert!(Vec3A::new(3.0e20, 0.0, 4.0e20).length().is_finite());
+    assert!(approx(v3a.length(), 1.0, 1e-6));
+
+    let v4_input = Vec4::new(3.0e20, 0.0, 0.0, 4.0e20);
+    assert!(v4_input.length().is_finite());
+    let v4 = v4_input.normalize();
+    assert!(approx(v4.length(), 1.0, 1e-6));
+
+    assert_eq!(Vec2::splat(1.0e-30).normalize_or_zero(), Vec2::ZERO);
+    assert_eq!(Vec3::splat(1.0e-30).normalize_or_zero(), Vec3::ZERO);
+}
+
+#[test]
 fn mat3_mul_associates() {
     let a = Mat3::from_quat(Quat::from_rotation_z(0.3));
     let b = Mat3::from_scale(vec3(2.0, 3.0, 0.5));
@@ -122,6 +149,18 @@ fn quat_compose_matches_rotation_order() {
     let composed = (a * b) * v;
     let stepwise = a * (b * v);
     assert!(vec3_approx(composed, stepwise, 1e-5));
+}
+
+#[test]
+fn non_unit_quaternion_inverse_is_a_true_inverse() {
+    let q = Quat::from_xyzw(1.0, -2.0, 3.0, 4.0);
+    let identity = q * q.inverse();
+    assert!(identity.abs_diff_eq(Quat::IDENTITY, 1e-6));
+
+    let tiny = Quat::from_xyzw(1.0e-30, 0.0, 0.0, 0.0);
+    let inverse = tiny.inverse();
+    assert!(inverse.is_finite());
+    assert!(approx(inverse.x, -1.0e30, 1.0e24));
 }
 
 #[test]

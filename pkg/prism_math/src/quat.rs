@@ -127,12 +127,11 @@ impl Quat {
             .max(self.z.abs())
             .max(self.w.abs());
         if m > 0.0 && m.is_finite() {
-            let inv_m = 1.0 / m;
             let q = Self {
-                x: self.x * inv_m,
-                y: self.y * inv_m,
-                z: self.z * inv_m,
-                w: self.w * inv_m,
+                x: self.x / m,
+                y: self.y / m,
+                z: self.z / m,
+                w: self.w / m,
             };
             let inv = 1.0 / q.length();
             return Self {
@@ -163,7 +162,37 @@ impl Quat {
     /// Inverse. For unit quaternions this equals [`Quat::conjugate`].
     #[inline]
     pub fn inverse(self) -> Self {
-        self.conjugate()
+        let m = self
+            .x
+            .abs()
+            .max(self.y.abs())
+            .max(self.z.abs())
+            .max(self.w.abs());
+        if m > 0.0 && m.is_finite() {
+            let x = self.x / m;
+            let y = self.y / m;
+            let z = self.z / m;
+            let w = self.w / m;
+            let inv_scaled_len_sq = 1.0 / (x * x + y * y + z * z + w * w);
+            // Divide the components by `m` last. Forming
+            // `inv_scaled_len_sq / m` first can overflow for tiny, but
+            // perfectly invertible, quaternions even when the final result
+            // is representable.
+            Self::from_xyzw(
+                (-x * inv_scaled_len_sq) / m,
+                (-y * inv_scaled_len_sq) / m,
+                (-z * inv_scaled_len_sq) / m,
+                (w * inv_scaled_len_sq) / m,
+            )
+        } else {
+            let inv_len_sq = 1.0 / self.length_squared();
+            Self::from_xyzw(
+                -self.x * inv_len_sq,
+                -self.y * inv_len_sq,
+                -self.z * inv_len_sq,
+                self.w * inv_len_sq,
+            )
+        }
     }
     /// True if all components are finite.
     #[inline]
