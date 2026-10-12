@@ -3,8 +3,8 @@
 use crate::apply::ApplyError;
 use crate::kinds::{Array, Enum, List, Map, Set};
 use crate::type_info::TypeInfo;
-use core::any::Any;
 use alloc::boxed::Box;
+use core::any::Any;
 
 /// The universal reflection trait: a bridge from Rust's static type world to
 /// the dynamic data-driven world (editor/scripting/serialization/network).
@@ -121,6 +121,17 @@ pub trait Struct: Reflect {
     fn field_mut(&mut self, name: &str) -> Option<&mut dyn Reflect>;
     /// Borrow a field by positional index.
     fn field_at(&self, index: usize) -> Option<&dyn Reflect>;
+    /// Mutably borrow a field by positional index.
+    ///
+    /// The default resolves the field name at `index` (a `&'static str`, so no
+    /// borrow of `self` outlives the lookup) and defers to
+    /// [`field_mut`](Struct::field_mut). It powers the index-replay fast path
+    /// in [`AccessPlan`](crate::AccessPlan); concrete derived types may rely on
+    /// it unchanged.
+    fn field_at_mut(&mut self, index: usize) -> Option<&mut dyn Reflect> {
+        let name = self.name_at(index)?;
+        self.field_mut(name)
+    }
     /// The field name at a positional index.
     fn name_at(&self, index: usize) -> Option<&'static str>;
     /// Number of fields.

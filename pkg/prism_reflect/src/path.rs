@@ -16,9 +16,9 @@
 
 use crate::reflect::Reflect;
 use crate::{ReflectMut, ReflectRef};
-use core::fmt;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
 /// A single navigation step into a reflected value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +63,11 @@ impl ParsePathError {
 
 impl fmt::Display for ParsePathError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid access path at byte {}: {}", self.offset, self.message)
+        write!(
+            f,
+            "invalid access path at byte {}: {}",
+            self.offset, self.message
+        )
     }
 }
 
@@ -196,6 +200,23 @@ impl ParsedPath {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
+    }
+
+    /// Split off the final access step, returning the prefix path (every step
+    /// but the last) and the terminal step, or `None` if the path is empty.
+    ///
+    /// This is handy for property bridges that must resolve a field's *parent*
+    /// container to look up its metadata before reading or writing the field
+    /// itself.
+    #[must_use]
+    pub fn split_terminal(&self) -> Option<(ParsedPath, &Access)> {
+        let (last, rest) = self.segments.split_last()?;
+        Some((
+            ParsedPath {
+                segments: rest.to_vec(),
+            },
+            last,
+        ))
     }
 }
 
