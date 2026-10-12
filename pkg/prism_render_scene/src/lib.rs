@@ -63,6 +63,7 @@ pub use opaque::{
 };
 pub use plugin::{GpuSceneMode, PrismGpuScenePlugin};
 pub use scene::RenderGpuScene;
+pub use shading::texel_cache;
 pub use shading::{PrismShadingDiagnostics, PrismShadingPlugin, PrismShadingSettings};
 pub use visibility::{
     PrismVisibilityDiagnostics, PrismVisibilityPlugin, UnifiedVisibilityEnabled,

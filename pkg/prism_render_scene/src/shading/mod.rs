@@ -42,6 +42,7 @@ mod ssgi;
 mod ssr;
 mod surface_cache;
 mod taa;
+pub mod texel_cache;
 mod tonemap;
 mod transparent;
 mod upscale;
