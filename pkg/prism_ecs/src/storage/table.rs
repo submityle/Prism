@@ -12,6 +12,7 @@ use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
+use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
 
 use crate::change::{ComponentTicks, Tick};
@@ -64,20 +65,25 @@ impl Column {
         }
     }
 
-    /// Attach this column's slice of a newly-allocated chunk block.
+    /// Attach this column's change-version cell and value slice of a
+    /// newly-allocated chunk block (design §5.3: the version is embedded in the
+    /// block header next to the data).
     ///
     /// # Safety
-    /// `ptr` must be the aligned slice base inside a live chunk block (see
-    /// [`BlobVec::attach_block`]).
-    unsafe fn attach_block(&mut self, ptr: *mut u8) {
-        // SAFETY: forwarded contract.
-        unsafe { self.data.attach_block(ptr) };
+    /// `cell` must point at an aligned `Tick` and `slice` at the aligned slice
+    /// base, both inside a live chunk block (see [`BlobVec::attach_block`]).
+    unsafe fn attach_chunk(&mut self, cell: *mut Tick, slice: *mut u8) {
+        // SAFETY: forwarded contract for the header cell.
+        unsafe { self.chunk.attach_cell(cell) };
+        // SAFETY: forwarded contract for the value slice.
+        unsafe { self.data.attach_block(slice) };
     }
 
-    /// Detach this column's slice of the trailing chunk block (owned by the
-    /// table, which frees it).
-    fn detach_block(&mut self) {
+    /// Detach this column's value slice and version cell of the trailing chunk
+    /// block (the block is freed by the table).
+    fn detach_chunk(&mut self) {
         self.data.detach_block();
+        self.chunk.detach_cell();
     }
 
     /// Number of elements (equals the owning table's row count).
@@ -387,17 +393,18 @@ pub struct Table {
     /// Shared logical chunk window size for every column (design §7). Stored on
     /// the table so chunk-index/row-window math is identical across columns.
     rows_per_chunk: usize,
-    /// Per-chunk metadata sidecar (design §5.3 `ChunkMeta`), one entry per
-    /// logical chunk window and kept in lockstep with `chunk_count()`. Its
-    /// structural epochs are bumped by the row-membership mutators below.
-    chunk_meta: Vec<ChunkMeta>,
-    /// The owned physical chunk blocks, in row-window order. Declared *after*
-    /// `columns` so the borrowed column views drop before the blocks they point
-    /// into.
+    /// The owned physical chunk blocks, in row-window order. Each block's header
+    /// embeds the per-column `change_version` cells and the chunk's
+    /// [`ChunkMeta`] (design §5.3), so there is no separate metadata allocation.
+    /// Declared *after* `columns` so the borrowed column views drop before the
+    /// blocks they point into.
     chunks: Vec<ChunkBlock>,
-    /// Byte offset of each column's slice inside a chunk block, keyed by
-    /// component id (computed once; the column set is fixed per archetype).
-    column_offsets: Vec<(ComponentId, usize)>,
+    /// Per column: `(component id, byte offset of its change-version cell, byte
+    /// offset of its value slice)` inside a chunk block. Computed once (the
+    /// column set is fixed per archetype).
+    column_slots: Vec<(ComponentId, usize, usize)>,
+    /// Byte offset of the chunk's [`ChunkMeta`] inside a chunk block.
+    meta_offset: usize,
     /// Layout of one chunk block (all columns' slices, cache-line aligned).
     block_layout: Layout,
 }
@@ -463,18 +470,30 @@ impl Table {
         let bytes_per_row: usize = descriptors.iter().map(|(_, layout, _)| layout.size()).sum();
         let rpc = rows_per_chunk(bytes_per_row);
         let mut map = HashMap::default();
-        let mut offsets = Vec::with_capacity(descriptors.len());
-        // Lay every column's slice out inside one chunk block, each aligned to
-        // its own element alignment; the block itself gets a cache-line align.
-        let mut cursor = 0usize;
-        let mut block_align = 64usize;
-        for (id, layout, _) in &descriptors {
-            block_align = block_align.max((*layout).align());
-            cursor = cursor.next_multiple_of((*layout).align());
-            offsets.push((*id, cursor));
-            cursor += layout.size() * rpc;
+        // One chunk block holds: [ per-column change-version cells | ChunkMeta |
+        // column value slices ] (design §5.3: a chunk embeds its change_version
+        // and metadata). Each column slice is aligned to its own element
+        // alignment; the whole block is cache-line aligned.
+        let ncols = descriptors.len();
+        let block_align = descriptors
+            .iter()
+            .map(|(_, layout, _)| layout.align())
+            .max()
+            .unwrap_or(1)
+            .max(64);
+        let tick_size = size_of::<Tick>();
+        let versions_bytes = ncols * tick_size;
+        let meta_offset = versions_bytes.next_multiple_of(align_of::<ChunkMeta>());
+        let values_offset =
+            (meta_offset + size_of::<ChunkMeta>()).next_multiple_of(block_align);
+        let mut rel = 0usize;
+        let mut slots = Vec::with_capacity(ncols);
+        for (i, (id, layout, _)) in descriptors.iter().enumerate() {
+            rel = rel.next_multiple_of(layout.align());
+            slots.push((*id, i * tick_size, values_offset + rel));
+            rel += layout.size() * rpc;
         }
-        let block_layout = Layout::from_size_align(cursor, block_align)
+        let block_layout = Layout::from_size_align(values_offset + rel, block_align)
             .expect("invalid chunk block layout");
         for (id, layout, drop) in descriptors {
             // Columns are borrowed views into the table's chunk blocks.
@@ -484,9 +503,9 @@ impl Table {
             entities: Vec::new(),
             columns: map,
             rows_per_chunk: rpc,
-            chunk_meta: Vec::new(),
             chunks: Vec::new(),
-            column_offsets: offsets,
+            column_slots: slots,
+            meta_offset,
             block_layout,
         }
     }
@@ -530,7 +549,6 @@ impl Table {
         // Chunk blocks are the table's own allocations; grow them up front so
         // the borrowed columns already have their slices attached.
         self.grow_chunks_to(self.entities.len() + additional);
-        self.chunk_meta.reserve(additional.div_ceil(self.rows_per_chunk));
         for column in self.columns.values_mut() {
             column.reserve(additional);
         }
@@ -542,14 +560,24 @@ impl Table {
         let needed = len.div_ceil(self.rows_per_chunk);
         while self.chunks.len() < needed {
             let block = ChunkBlock::alloc(self.block_layout);
-            for (id, offset) in &self.column_offsets {
+            // Embed a default `ChunkMeta` in the block's header.
+            // SAFETY: `meta_offset` is laid out inside `block_layout` and aligned
+            // for `ChunkMeta`; the slot is not yet initialised.
+            unsafe {
+                core::ptr::write(
+                    block.ptr.as_ptr().add(self.meta_offset).cast::<ChunkMeta>(),
+                    ChunkMeta::default(),
+                );
+            }
+            for (id, cell_offset, slice_offset) in &self.column_slots {
                 if let Some(column) = self.columns.get_mut(id) {
-                    // SAFETY: `offset` was laid out inside `block_layout`, so the
-                    // offset base is inside the allocation and aligned for the
+                    // SAFETY: both offsets were laid out inside `block_layout`,
+                    // the cell is aligned for `Tick` and the slice base for the
                     // column's element type; the block is kept alive in `chunks`.
                     unsafe {
-                        let base = block.ptr.as_ptr().add(*offset);
-                        column.attach_block(base);
+                        let cell = block.ptr.as_ptr().add(*cell_offset).cast::<Tick>();
+                        let base = block.ptr.as_ptr().add(*slice_offset);
+                        column.attach_chunk(cell, base);
                     }
                 }
             }
@@ -563,21 +591,33 @@ impl Table {
         let needed = len.div_ceil(self.rows_per_chunk);
         while self.chunks.len() > needed {
             // Detach the columns' views first, then drop (free) the block.
-            for (id, _) in &self.column_offsets {
+            for (id, _, _) in &self.column_slots {
                 if let Some(column) = self.columns.get_mut(id) {
-                    column.detach_block();
+                    column.detach_chunk();
                 }
             }
             self.chunks.pop();
         }
     }
 
-    /// Per-chunk metadata for every logical chunk window, in chunk order
-    /// (design §5.3 `ChunkMeta`). Index `c` covers rows
+    /// Per-chunk metadata for every chunk, in chunk order (design §5.3
+    /// `ChunkMeta`, embedded in each block's header). Index `c` covers rows
     /// `[c * rows_per_chunk, (c + 1) * rows_per_chunk)`.
     #[inline]
-    pub fn chunk_metas(&self) -> &[ChunkMeta] {
-        &self.chunk_meta
+    pub fn chunk_meta_iter(&self) -> impl Iterator<Item = &ChunkMeta> + '_ {
+        let offset = self.meta_offset;
+        self.chunks.iter().map(move |block| {
+            // SAFETY: the block's header embeds a `ChunkMeta` at `offset`.
+            unsafe { &*block.ptr.as_ptr().add(offset).cast::<ChunkMeta>() }
+        })
+    }
+
+    /// The metadata of chunk `chunk`, or `None` if out of range.
+    #[inline]
+    pub fn chunk_meta_checked(&self, chunk: usize) -> Option<&ChunkMeta> {
+        let block = self.chunks.get(chunk)?;
+        // SAFETY: the block's header embeds a `ChunkMeta` at `meta_offset`.
+        Some(unsafe { &*block.ptr.as_ptr().add(self.meta_offset).cast::<ChunkMeta>() })
     }
 
     /// The metadata of chunk `chunk`.
@@ -586,7 +626,7 @@ impl Table {
     /// Panics if `chunk >= chunk_count()`.
     #[inline]
     pub fn chunk_meta(&self, chunk: usize) -> &ChunkMeta {
-        &self.chunk_meta[chunk]
+        self.chunk_meta_checked(chunk).expect("chunk index out of range")
     }
 
     /// Mutable access to chunk `chunk`'s metadata, for consumers that cache
@@ -596,29 +636,33 @@ impl Table {
     /// Panics if `chunk >= chunk_count()`.
     #[inline]
     pub fn chunk_meta_mut(&mut self, chunk: usize) -> &mut ChunkMeta {
-        &mut self.chunk_meta[chunk]
+        let offset = self.meta_offset;
+        let block = self
+            .chunks
+            .get_mut(chunk)
+            .expect("chunk index out of range");
+        // SAFETY: `&mut self` makes this the sole access to the block, whose
+        // header embeds a `ChunkMeta` at `offset`.
+        unsafe { &mut *block.ptr.as_ptr().add(offset).cast::<ChunkMeta>() }
     }
 
-    /// Grow or shrink `chunk_meta` so it holds exactly `ceil(len / rpc)` entries,
-    /// keeping it in lockstep with the row count. New windows start with
-    /// [`ChunkMeta::default`].
-    #[inline]
-    fn resize_chunk_meta(&mut self, len: usize) {
-        let needed = len.div_ceil(self.rows_per_chunk);
-        if self.chunk_meta.len() < needed {
-            self.chunk_meta.resize(needed, ChunkMeta::default());
-        } else if self.chunk_meta.len() > needed {
-            self.chunk_meta.truncate(needed);
-        }
-    }
-
-    /// Bump the structural epoch of the window owning `row`, if that window is
-    /// still live after a resize. Called on every row-membership change.
+    /// Bump the structural epoch of the chunk owning `row`, if it is still live.
+    /// Called on every row-membership change.
     #[inline]
     fn bump_chunk_meta(&mut self, row: usize) {
         let chunk = row / self.rows_per_chunk;
-        if let Some(meta) = self.chunk_meta.get_mut(chunk) {
-            meta.bump_structural();
+        if chunk < self.chunks.len() {
+            // SAFETY: `chunk` is in range and the header embeds a `ChunkMeta`.
+            unsafe {
+                (*self
+                    .chunks
+                    .get_unchecked_mut(chunk)
+                    .ptr
+                    .as_ptr()
+                    .add(self.meta_offset)
+                    .cast::<ChunkMeta>())
+                .bump_structural();
+            }
         }
     }
 
@@ -672,9 +716,8 @@ impl Table {
         // Provide the borrowed columns' slice for this row's window *before* the
         // caller fills them.
         self.grow_chunks_to(self.entities.len());
-        // A brand-new row joins its window: keep the metadata sidecar sized and
-        // bump the window's structural epoch (design §5.3 `ChunkMeta`).
-        self.resize_chunk_meta(self.entities.len());
+        // A brand-new row joins its window: bump the window's structural epoch
+        // (design §5.3 `ChunkMeta`, embedded in the chunk header).
         self.bump_chunk_meta(row);
         row
     }
@@ -767,7 +810,6 @@ impl Table {
         // Drop any chunk block whose last row just left (its columns' views are
         // detached, then the block is freed).
         self.shrink_chunks_to(after);
-        self.resize_chunk_meta(after);
         self.bump_chunk_meta(row);
         if row != last && row / self.rows_per_chunk != last / self.rows_per_chunk {
             self.bump_chunk_meta(last);
@@ -863,8 +905,9 @@ mod tests {
             .get(arch)
             .unwrap()
             .table()
-            .chunk_metas()
-            .is_empty());
+            .chunk_meta_iter()
+            .next()
+            .is_none());
 
         // Fill exactly one window; every spawn changes that window's row set.
         let mut first_window = Vec::new();
@@ -874,7 +917,7 @@ mod tests {
         {
             let t = world.archetypes().get(arch).unwrap().table();
             assert_eq!(t.chunk_count(), 1);
-            assert_eq!(t.chunk_metas().len(), 1);
+            assert_eq!(t.chunk_meta_iter().count(), 1);
             assert_eq!(t.chunk_meta(0).structural_epoch(), 8);
             assert!(t.chunk_meta(0).visible);
             assert!(t.chunk_meta(0).bounds.is_none());
@@ -885,7 +928,7 @@ mod tests {
         {
             let t = world.archetypes().get(arch).unwrap().table();
             assert_eq!(t.chunk_count(), 2);
-            assert_eq!(t.chunk_metas().len(), 2);
+            assert_eq!(t.chunk_meta_iter().count(), 2);
             assert_eq!(t.chunk_meta(0).structural_epoch(), 8, "first window untouched");
             assert_eq!(t.chunk_meta(1).structural_epoch(), 1);
         }
@@ -907,7 +950,7 @@ mod tests {
         {
             let t = world.archetypes().get(arch).unwrap().table();
             assert_eq!(t.chunk_count(), 1);
-            assert_eq!(t.chunk_metas().len(), 1);
+            assert_eq!(t.chunk_meta_iter().count(), 1);
             assert_eq!(t.chunk_meta(0).structural_epoch(), 8);
         }
 
@@ -1025,5 +1068,39 @@ mod tests {
             3,
             "one allocation per chunk, not one per column",
         );
+    }
+
+    /// The chunk's `change_version` cell and its `ChunkMeta` are **embedded in
+    /// the chunk block header** (design §5.3): both live inside the block's
+    /// allocation, not in a separate Vec.
+    #[test]
+    fn chunk_headers_embed_versions_and_meta() {
+        let mut world = World::new();
+        let arch = world.prewarm::<Wide>(0);
+        for _ in 0..8 {
+            world.spawn(Wide([0; 2048]));
+        }
+        let table = world.archetypes().get(arch).unwrap().table();
+        assert_eq!(table.chunk_count(), 1);
+        assert_eq!(table.chunks.len(), 1);
+
+        let block = &table.chunks[0];
+        let lo = block.ptr.as_ptr() as usize;
+        let hi = lo + table.block_layout.size();
+
+        let column = table.columns.values().next().unwrap();
+        // SAFETY: row 0 is live (8 rows) so the chunk cell exists.
+        let cell = unsafe { column.chunk.chunk_changed_ptr(0) } as usize;
+        assert!(
+            (lo..hi).contains(&cell),
+            "the change-version cell must live inside the chunk block",
+        );
+        let meta = table.chunk_meta(0) as *const ChunkMeta as usize;
+        assert!(
+            (lo..hi).contains(&meta),
+            "ChunkMeta must live inside the chunk block",
+        );
+        // They occupy distinct header slots.
+        assert_ne!(cell, meta);
     }
 }

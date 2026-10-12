@@ -35,15 +35,14 @@
 //! A chunk version cell is shared by every row in the chunk, so the `&mut T` /
 //! [`Mut`](crate::change::Mut) fetch cannot thread a `&mut Tick` to it: two
 //! `Mut`s into the same chunk (e.g. `iter_mut().collect()`) would alias the one
-//! cell, which is undefined behaviour. The cells therefore live behind
-//! [`UnsafeCell`] and are bumped through raw `*mut Tick` writes, exactly as the
-//! per-row ticks on [`Column`](crate::storage::Column) are. Single-threaded
-//! iteration writes `this_run` to the shared cell sequentially (idempotent); a
-//! future parallel iterator splits *disjoint* chunks across threads, so each
-//! thread writes a distinct cell.
+//! cell, which is undefined behaviour. Each cell therefore lives **inside its
+//! chunk block's header** (design §5.3) and is reached and bumped through a raw
+//! `*mut Tick`, exactly as the per-row ticks on [`Column`](crate::storage::Column)
+//! are. Single-threaded iteration writes `this_run` to the shared cell
+//! sequentially (idempotent); a parallel iterator splits *disjoint* chunks
+//! across threads, so each thread writes a distinct cell.
 
 use alloc::vec::Vec;
-use core::cell::UnsafeCell;
 
 use crate::change::Tick;
 
@@ -75,21 +74,27 @@ pub fn rows_per_chunk(bytes_per_row: usize) -> usize {
 /// Per-chunk change-versions for one column, partitioning the column's rows into
 /// fixed `rows_per_chunk` windows.
 ///
-/// The vector grows and shrinks in lockstep with the column's row count: it
-/// always holds exactly `ceil(len / rows_per_chunk)` cells.
+/// The cells are **embedded in the owning chunk blocks** (design §5.3: a chunk
+/// carries its own `change_version`): the table attaches each cell pointer when
+/// it allocates a block and detaches it before freeing the block, so this type
+/// never allocates the cells itself. The pointer vector grows and shrinks in
+/// lockstep with the row count — it always holds exactly
+/// `ceil(len / rows_per_chunk)` pointers.
 pub struct ChunkVersions {
     rows_per_chunk: usize,
-    /// One changed-version cell per chunk window. `changed[c]` upper-bounds the
-    /// newest changed-tick among rows `[c * rpc, (c + 1) * rpc)`.
-    changed: Vec<UnsafeCell<Tick>>,
+    /// One pointer per chunk window, into that chunk's header cell. `cells[c]`
+    /// upper-bounds the newest changed-tick among rows
+    /// `[c * rpc, (c + 1) * rpc)`.
+    cells: Vec<*mut Tick>,
 }
 
-// SAFETY: the only non-`Sync` field is the `UnsafeCell<Tick>` version vector.
-// Those cells are mutated under the same unique-per-row discipline that governs
-// the per-row ticks on `Column` (itself `unsafe impl Sync`): a writer stamping a
-// row holds unique access to that row and writes `this_run` through a raw
-// pointer, and no reader observes a cell mid-write. Distinct chunks are distinct
-// cells, so a future parallel split over disjoint chunks never races.
+// SAFETY: the only non-`Sync` field is the raw cell-pointer vector. The cells
+// live in the owning chunk blocks and are mutated under the same unique-per-row
+// discipline that governs the per-row ticks on `Column` (itself `unsafe impl
+// Sync`): a writer stamping a row holds unique access to that row and writes
+// `this_run` through a raw pointer, and no reader observes a cell mid-write.
+// Distinct chunks are distinct cells, so a parallel split over disjoint chunks
+// never races.
 unsafe impl Sync for ChunkVersions {}
 
 impl ChunkVersions {
@@ -103,7 +108,7 @@ impl ChunkVersions {
         assert!(rows_per_chunk > 0, "rows_per_chunk must be non-zero");
         Self {
             rows_per_chunk,
-            changed: Vec::new(),
+            cells: Vec::new(),
         }
     }
 
@@ -113,19 +118,32 @@ impl ChunkVersions {
         self.rows_per_chunk
     }
 
-    /// Reserve room for the chunk windows of `additional_rows` future rows.
+    /// Attach the changed-version cell of a newly-allocated chunk block.
     ///
-    /// Used by archetype prewarm so a first-frame spawn burst does not grow the
-    /// per-chunk version vector window by window.
-    pub(crate) fn reserve_rows(&mut self, additional_rows: usize) {
-        self.changed
-            .reserve(additional_rows.div_ceil(self.rows_per_chunk));
+    /// # Safety
+    /// `cell` must point at a live, aligned `Tick` inside a chunk block the
+    /// owner keeps alive for as long as this column references it.
+    #[inline]
+    pub unsafe fn attach_cell(&mut self, cell: *mut Tick) {
+        self.cells.push(cell);
     }
+
+    /// Detach the trailing chunk's cell (its block is freed by the owner).
+    #[inline]
+    pub fn detach_cell(&mut self) {
+        self.cells
+            .pop()
+            .expect("detach_cell on a version set with no chunks");
+    }
+
+    /// No-op: the cell storage lives in the table's chunk blocks, so the table
+    /// reserves/grows it, not this type.
+    pub(crate) fn reserve_rows(&mut self, _additional_rows: usize) {}
 
     /// Number of chunk windows currently tracked (`ceil(len / rpc)`).
     #[inline]
     pub fn chunk_count(&self) -> usize {
-        self.changed.len()
+        self.cells.len()
     }
 
     /// The chunk index owning `row`.
@@ -146,10 +164,10 @@ impl ChunkVersions {
     /// Panics if `chunk >= chunk_count()`.
     #[inline]
     pub fn version(&self, chunk: usize) -> Tick {
-        // SAFETY: shared read of the cell; any writer holds unique access to the
-        // chunk's rows and writes through the raw pointer, so no `&mut` aliases
-        // this read (mirrors `Column::changed_tick`).
-        unsafe { *self.changed[chunk].get() }
+        // SAFETY: the pointer targets a live chunk-block header cell; any writer
+        // holds unique access to the chunk's rows and writes through the raw
+        // pointer, so no `&mut` aliases this read (mirrors `Column::changed_tick`).
+        unsafe { *self.cells[chunk] }
     }
 
     /// Raw pointer to the changed-version cell owning `row`, for interior-mutable
@@ -164,7 +182,10 @@ impl ChunkVersions {
     /// is the newest tick and so preserves the upper-bound invariant.
     #[inline]
     pub unsafe fn chunk_changed_ptr(&self, row: usize) -> *mut Tick {
-        self.changed[self.chunk_of(row)].get()
+        let chunk = self.chunk_of(row);
+        // SAFETY: the caller guarantees `row < len` of the owning column, so
+        // `chunk < cells.len()`; the pointer targets a live header cell.
+        unsafe { *self.cells.get_unchecked(chunk) }
     }
 
     /// Fold `tick` into the version of the chunk owning `row`, keeping
@@ -184,13 +205,17 @@ impl ChunkVersions {
     /// recent (never lowering the stored upper bound).
     #[inline]
     fn bump_chunk(&mut self, chunk: usize, tick: Tick) {
-        let cell = self.changed[chunk].get_mut();
+        let cell = self.cells[chunk];
         // A newer write wins. Raw comparison is exact while `this_run` has not
         // wrapped past the stored value; `check_ticks` keeps every stored tick
         // within one `MAX_CHANGE_AGE` window so the version can only ever
         // over-approximate (a correct superset), never skip a changed chunk.
-        if tick.get() > cell.get() {
-            *cell = tick;
+        // SAFETY: `cell` is a live chunk-block header cell, mutated under the
+        // unique-per-chunk discipline.
+        unsafe {
+            if tick.get() > (*cell).get() {
+                *cell = tick;
+            }
         }
     }
 
@@ -201,10 +226,10 @@ impl ChunkVersions {
     /// (possibly new) last chunk so the upper-bound invariant holds.
     pub fn on_push(&mut self, new_len: usize, tick: Tick) {
         debug_assert!(new_len >= 1);
-        let needed = self.chunks_for_len(new_len);
-        while self.changed.len() < needed {
-            self.changed.push(UnsafeCell::new(Tick::ZERO));
-        }
+        debug_assert!(
+            self.cells.len() >= self.chunks_for_len(new_len),
+            "the owning table must attach the chunk cell before a row is pushed",
+        );
         let last_row = new_len - 1;
         let chunk = self.chunk_of(last_row);
         self.bump_chunk(chunk, tick);
@@ -225,15 +250,15 @@ impl ChunkVersions {
             let chunk = self.chunk_of(removed_row);
             self.bump_chunk(chunk, moved_tick);
         }
-        let needed = self.chunks_for_len(new_len);
-        self.changed.truncate(needed);
+        // The owning table detaches the trailing cell when it frees the block.
     }
 
     /// Clamp every chunk version against `this_run` so none can wrap around and
     /// masquerade as recent (mirrors [`Column::check_change_ticks`]).
     pub fn check_ticks(&mut self, this_run: Tick) {
-        for cell in &mut self.changed {
-            cell.get_mut().check_tick(this_run);
+        for &cell in &self.cells {
+            // SAFETY: live chunk-block header cell.
+            unsafe { (*cell).check_tick(this_run) };
         }
     }
 }
@@ -366,67 +391,110 @@ mod tests {
         assert_eq!(rows_per_chunk(0), MAX_ROWS_PER_CHUNK);
     }
 
+    /// A backing store for version cells (standing in for the chunk block
+    /// header) plus a `ChunkVersions` whose cells point into it. The backing
+    /// vector is reserved up front so attaching cells never invalidates them.
+    struct Fixture {
+        backing: Vec<Tick>,
+        cv: ChunkVersions,
+    }
+
+    impl Fixture {
+        fn new(rows_per_chunk: usize) -> Self {
+            Self {
+                backing: Vec::with_capacity(32),
+                cv: ChunkVersions::new(rows_per_chunk),
+            }
+        }
+
+        /// Attach header cells so the version set covers `len` rows.
+        fn cover(&mut self, len: usize) {
+            let needed = len.div_ceil(self.cv.rows_per_chunk());
+            while self.backing.len() < needed {
+                self.backing.push(Tick::ZERO);
+            }
+            while self.cv.chunk_count() < needed {
+                let i = self.cv.chunk_count();
+                // SAFETY: the backing vector will not reallocate (reserved), so
+                // the cell pointer stays valid for the fixture's lifetime.
+                let ptr = unsafe { self.backing.as_mut_ptr().add(i) };
+                // SAFETY: `ptr` targets a live, aligned `Tick`.
+                unsafe { self.cv.attach_cell(ptr) };
+            }
+        }
+    }
+
     #[test]
     fn push_grows_chunks_and_bounds_versions() {
         let rpc = 4;
-        let mut cv = ChunkVersions::new(rpc);
-        assert_eq!(cv.chunk_count(), 0);
+        let mut f = Fixture::new(rpc);
+        assert_eq!(f.cv.chunk_count(), 0);
 
         // Fill the first chunk; each push bumps chunk 0 to a newer tick.
         for row in 0..rpc {
-            cv.on_push(row + 1, Tick::new((row + 1) as u32));
+            f.cover(row + 1);
+            f.cv.on_push(row + 1, Tick::new((row + 1) as u32));
         }
-        assert_eq!(cv.chunk_count(), 1);
-        assert_eq!(cv.version(0), Tick::new(rpc as u32));
+        assert_eq!(f.cv.chunk_count(), 1);
+        assert_eq!(f.cv.version(0), Tick::new(rpc as u32));
 
         // One more row spills into a second chunk.
-        cv.on_push(rpc + 1, Tick::new(99));
-        assert_eq!(cv.chunk_count(), 2);
-        assert_eq!(cv.chunk_of(rpc), 1);
-        assert_eq!(cv.version(1), Tick::new(99));
+        f.cover(rpc + 1);
+        f.cv.on_push(rpc + 1, Tick::new(99));
+        assert_eq!(f.cv.chunk_count(), 2);
+        assert_eq!(f.cv.chunk_of(rpc), 1);
+        assert_eq!(f.cv.version(1), Tick::new(99));
         // The first chunk's bound is unchanged.
-        assert_eq!(cv.version(0), Tick::new(rpc as u32));
+        assert_eq!(f.cv.version(0), Tick::new(rpc as u32));
     }
 
     #[test]
     fn bump_never_lowers_the_bound() {
-        let mut cv = ChunkVersions::new(4);
-        cv.on_push(1, Tick::new(10));
+        let mut f = Fixture::new(4);
+        f.cover(1);
+        f.cv.on_push(1, Tick::new(10));
         // A stale (older) tick must not lower the recorded upper bound.
-        cv.on_push(2, Tick::new(3));
-        assert_eq!(cv.version(0), Tick::new(10));
+        f.cover(2);
+        f.cv.on_push(2, Tick::new(3));
+        assert_eq!(f.cv.version(0), Tick::new(10));
     }
 
     #[test]
     fn swap_remove_folds_moved_tick_and_shrinks() {
         let rpc = 4;
-        let mut cv = ChunkVersions::new(rpc);
+        let mut f = Fixture::new(rpc);
         // Two full chunks: rows 0..8.
         for row in 0..(2 * rpc) {
-            cv.on_push(row + 1, Tick::new(1));
+            f.cover(row + 1);
+            f.cv.on_push(row + 1, Tick::new(1));
         }
-        assert_eq!(cv.chunk_count(), 2);
+        assert_eq!(f.cv.chunk_count(), 2);
 
         // Remove row 0; the former last row (tick 42) swaps into chunk 0.
-        cv.on_swap_remove(0, 2 * rpc - 1, Tick::new(42));
-        assert_eq!(cv.version(0), Tick::new(42));
+        f.cv.on_swap_remove(0, 2 * rpc - 1, Tick::new(42));
+        assert_eq!(f.cv.version(0), Tick::new(42));
         // 7 rows still need 2 chunks.
-        assert_eq!(cv.chunk_count(), 2);
+        assert_eq!(f.cv.chunk_count(), 2);
 
         // Drain the second chunk entirely (rows 7,6,5,4 removed as last rows).
         for len in (rpc..(2 * rpc - 1)).rev() {
-            cv.on_swap_remove(len, len, Tick::new(0));
+            f.cv.on_swap_remove(len, len, Tick::new(0));
+            // The owning table detaches the trailing cell when it frees a block.
+            if f.cv.chunk_count() > len.div_ceil(rpc) {
+                f.cv.detach_cell();
+            }
         }
-        assert_eq!(cv.chunk_count(), 1);
+        assert_eq!(f.cv.chunk_count(), 1);
     }
 
     #[test]
     fn check_ticks_clamps_versions() {
-        let mut cv = ChunkVersions::new(4);
-        cv.on_push(1, Tick::new(1));
+        let mut f = Fixture::new(4);
+        f.cover(1);
+        f.cv.on_push(1, Tick::new(1));
         let now = Tick::new(Tick::MAX_CHANGE_AGE + 100);
-        cv.check_ticks(now);
-        assert_eq!(cv.version(0).age_since(now), Tick::MAX_CHANGE_AGE);
+        f.cv.check_ticks(now);
+        assert_eq!(f.cv.version(0).age_since(now), Tick::MAX_CHANGE_AGE);
     }
 
     #[test]

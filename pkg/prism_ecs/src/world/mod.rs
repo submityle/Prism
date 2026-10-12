@@ -227,11 +227,7 @@ impl World {
     /// window is out of range for its current row count.
     #[inline]
     pub fn chunk_meta(&self, archetype: ArchetypeId, chunk: usize) -> Option<&crate::storage::ChunkMeta> {
-        self.archetypes
-            .get(archetype)?
-            .table()
-            .chunk_metas()
-            .get(chunk)
+        self.archetypes.get(archetype)?.table().chunk_meta_checked(chunk)
     }
 
     /// Mutable access to a chunk window's metadata (design §5.3 `ChunkMeta`), so
@@ -249,7 +245,7 @@ impl World {
         chunk: usize,
     ) -> Option<&mut crate::storage::ChunkMeta> {
         let table = self.archetypes.get_mut(archetype)?.table_mut();
-        if chunk < table.chunk_metas().len() {
+        if chunk < table.chunk_count() {
             Some(table.chunk_meta_mut(chunk))
         } else {
             None
