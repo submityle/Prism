@@ -1998,7 +1998,7 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
             var face = face_shadow_disabled();
             if (material_header.feature_flags & MATERIAL_FEATURE_FACE_SHADOW) != 0u {
                 face.enabled = 1u;
-                face.softness = parameters.face_softness;
+                face.softness = parameters.npr_face_softness;
                 face.forward = face_forward;
                 face.right = face_right;
                 face.up = face_up;

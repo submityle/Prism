@@ -41,7 +41,7 @@ use crate::{LobeMask, SurfaceParameterBlock};
 /// report.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DroppedLobe {
-    /// Schema lobe id, e.g. `"face"`.
+    /// Schema lobe id, e.g. `"npr_face"`.
     pub id: &'static str,
     /// Globally unique capability id, stable across promotion (§5.4).
     pub uid: &'static str,
@@ -243,7 +243,7 @@ mod tests {
             thin_film_weight: 0.7,
             thin_film_thickness: 0.35,
             thin_film_ior: 1.55,
-            face_softness: 0.25,
+            npr_face_softness: 0.25,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
@@ -273,15 +273,15 @@ mod tests {
 
     #[test]
     fn extension_lobes_are_dropped_and_flagged() {
-        let input = block(LobeMask::FACE);
+        let input = block(LobeMask::NPR_FACE);
         let projection = project_to_openpbr(&input);
         assert!(!projection.is_lossless());
         assert_eq!(projection.dropped.len(), 1);
         let dropped = projection.dropped[0];
-        assert_eq!(dropped.id, "face");
+        assert_eq!(dropped.id, "npr_face");
         assert_eq!(dropped.uid, "studio.prism.face_shadow");
         assert_eq!(dropped.namespace, "PRISM");
-        assert_eq!(dropped.bit, LobeMask::FACE);
+        assert_eq!(dropped.bit, LobeMask::NPR_FACE);
         // No canonical OpenPBR lobe carries stylized SDF face shading, so the
         // projection reports an outright drop rather than a fake mapping.
         assert_eq!(dropped.approximated_by, None);
@@ -337,8 +337,8 @@ mod tests {
         // A mask carrying several extension lobes reports them low-bit first,
         // long before the next bit is defined. Only FACE exists today, so we
         // also prove undefined high bits never fabricate a named drop.
-        let mut input = block(LobeMask::FACE);
-        input.lobe_mask = LobeMask(LobeMask::FACE.bits() | (1 << 31));
+        let mut input = block(LobeMask::NPR_FACE);
+        input.lobe_mask = LobeMask(LobeMask::NPR_FACE.bits() | (1 << 31));
         let projection = project_to_openpbr(&input);
         assert_eq!(projection.dropped.len(), 1);
         assert_eq!(projection.dropped[0].uid, "studio.prism.face_shadow");

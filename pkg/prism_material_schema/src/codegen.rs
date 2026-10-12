@@ -514,7 +514,7 @@ mod tests {
             "fn prism_neutral_surface() -> PrismSurfaceParameters",
             "const PRISM_SURFACE_MAX_WORDS: u32 = 96u;",
             "const PRISM_LOBE_WORDS_EMISSION: u32 = 8u;",
-            "const PRISM_LOBE_WORDS_FACE: u32 = 4u;",
+            "const PRISM_LOBE_WORDS_NPR_FACE: u32 = 4u;",
             "const PRISM_LOBE_WORDS_CLEARCOAT: u32 = 16u;",
             "const PRISM_LOBE_WORDS_SHEEN: u32 = 8u;",
             "const PRISM_LOBE_WORDS_SUBSURFACE: u32 = 16u;",
@@ -529,7 +529,7 @@ mod tests {
         assert!(wesl.contains("if ((lobe_mask & PRISM_LOBE_CLEARCOAT) != 0u) { words += PRISM_LOBE_WORDS_CLEARCOAT; }"));
         assert!(!wesl.contains("countOneBits(lobe_mask & PRISM_LOBE_ALL) * PRISM_SURFACE_LOBE_WORDS"));
         // The face lobe uses the namespaced fat-struct field.
-        assert!(wesl.contains("s.face_softness = bitcast<f32>(w[cursor]);"));
+        assert!(wesl.contains("s.npr_face_softness = bitcast<f32>(w[cursor]);"));
         // Both twins end with a trailing newline.
         assert!(wesl.ends_with('\n'));
     }
@@ -541,7 +541,7 @@ mod tests {
         // specification default (roadmap P1-f2), not a legacy Prism value.
         assert!(wesl.contains("s.base_color = vec4<f32>(0.8, 0.8, 0.8, 1.0);"));
         assert!(wesl.contains("s.index_of_refraction = 1.5;"));
-        assert!(wesl.contains("s.face_softness = 0.1;"));
+        assert!(wesl.contains("s.npr_face_softness = 0.1;"));
         assert!(wesl.contains("s.specular_roughness = 0.3;"));
         assert!(wesl.contains("s.emission_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);"));
         assert!(wesl.contains("s.emission_luminance = 0.0;"));
@@ -562,7 +562,7 @@ mod tests {
             "pub const SURFACE_MAX_WORDS: usize = 96;",
             "pub const SURFACE_LOBES: [LobeLayout; 8] = [",
             "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 8,\n        namespace: \"KHR\",\n    },",
-            "    LobeLayout {\n        id: \"face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"FACE\",\n        registry_slot: 16,\n        words: 4,\n        namespace: \"PRISM\",\n    },",
+            "    LobeLayout {\n        id: \"npr_face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"NPR_FACE\",\n        registry_slot: 16,\n        words: 4,\n        namespace: \"PRISM\",\n    },",
         ] {
             assert!(rust.contains(needle), "generated Rust missing `{needle}`");
         }

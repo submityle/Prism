@@ -327,7 +327,7 @@ impl Default for GpuThinFilmLobe {
 /// instance world matrix at shade time (no extra per-instance ABI).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct GpuFaceLobe {
+pub struct GpuNprFaceLobe {
     pub softness: f32,
     pub _pad0: f32,
     pub _pad1: f32,
@@ -354,7 +354,7 @@ impl LobeMask {
     /// The stylized SDF face-shadow lobe. It lives at the base of the Prism
     /// extension region (§4.5 constraint 2), so the canonical `KHR` region can
     /// grow through slots 0..16 without ever aliasing a private lobe.
-    pub const FACE: Self = Self(1 << 16);
+    pub const NPR_FACE: Self = Self(1 << 16);
 
     /// The `OpenPBR` specification-core bit region (§4.5 constraint 2).
     ///
@@ -376,7 +376,7 @@ impl LobeMask {
     /// segment. It is disjoint from [`Self::KHR_REGION`], so a private lobe can
     /// never alias a specification-half field, and a downstream pure-OpenPBR
     /// consumer simply ignores anything outside [`Self::KHR_REGION`].
-    pub const EXTENSION_REGION: Self = Self(Self::FACE.0);
+    pub const EXTENSION_REGION: Self = Self(Self::NPR_FACE.0);
 
     /// Number of distinct lobe bits defined; also the number of iterations of
     /// [`Self::iter_present`] over a fully populated mask.
@@ -408,7 +408,7 @@ impl LobeMask {
         // extension base at bit 16, so this is an OR of the defined bits rather
         // than a contiguous `(1 << COUNT) - 1`.
         Self(Self::EMISSION.0 | Self::CLEARCOAT.0 | Self::ANISOTROPY.0 | Self::SHEEN.0
-            | Self::SUBSURFACE.0 | Self::TRANSMISSION.0 | Self::THIN_FILM.0 | Self::FACE.0)
+            | Self::SUBSURFACE.0 | Self::TRANSMISSION.0 | Self::THIN_FILM.0 | Self::NPR_FACE.0)
     }
 
     /// Keep only the bits inside the `OpenPBR` specification-core region.
@@ -459,7 +459,7 @@ impl LobeMask {
             Self::SUBSURFACE,
             Self::TRANSMISSION,
             Self::THIN_FILM,
-            Self::FACE,
+            Self::NPR_FACE,
         ]
     }
 }
@@ -490,7 +490,7 @@ pub struct SurfaceParameterBlock {
     pub subsurface: GpuSubsurfaceLobe,
     pub transmission: GpuTransmissionLobe,
     pub thin_film: GpuThinFilmLobe,
-    pub face: GpuFaceLobe,
+    pub face: GpuNprFaceLobe,
 }
 
 /// Reasons an [`SurfaceParameterBlock::unpack`] can fail.
@@ -601,8 +601,8 @@ impl SurfaceParameterBlock {
                 thin_film_ior: params.thin_film_ior,
                 _pad0: 0.0,
             },
-            face: GpuFaceLobe {
-                softness: params.face_softness,
+            face: GpuNprFaceLobe {
+                softness: params.npr_face_softness,
                 _pad0: 0.0,
                 _pad1: 0.0,
                 _pad2: 0.0,
@@ -676,8 +676,8 @@ impl SurfaceParameterBlock {
             full.thin_film_thickness = self.thin_film.thin_film_thickness;
             full.thin_film_ior = self.thin_film.thin_film_ior;
         }
-        if self.lobe_mask.contains(LobeMask::FACE) {
-            full.face_softness = self.face.softness;
+        if self.lobe_mask.contains(LobeMask::NPR_FACE) {
+            full.npr_face_softness = self.face.softness;
         }
         full
     }
@@ -713,7 +713,7 @@ impl SurfaceParameterBlock {
                 bytemuck::cast_slice(core::slice::from_ref(&self.transmission))
             }
             LobeMask::THIN_FILM => bytemuck::cast_slice(core::slice::from_ref(&self.thin_film)),
-            LobeMask::FACE => bytemuck::cast_slice(core::slice::from_ref(&self.face)),
+            LobeMask::NPR_FACE => bytemuck::cast_slice(core::slice::from_ref(&self.face)),
             _ => &[],
         }
     }
@@ -767,7 +767,7 @@ impl SurfaceParameterBlock {
                 LobeMask::SUBSURFACE => block.subsurface = *bytemuck::from_bytes(slice),
                 LobeMask::TRANSMISSION => block.transmission = *bytemuck::from_bytes(slice),
                 LobeMask::THIN_FILM => block.thin_film = *bytemuck::from_bytes(slice),
-                LobeMask::FACE => block.face = *bytemuck::from_bytes(slice),
+                LobeMask::NPR_FACE => block.face = *bytemuck::from_bytes(slice),
                 _ => {}
             }
             cursor += lobe_len;
@@ -841,7 +841,7 @@ mod tests {
             thin_film_weight: 0.7,
             thin_film_thickness: 0.35,
             thin_film_ior: 1.55,
-            face_softness: 0.25,
+            npr_face_softness: 0.25,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
@@ -917,11 +917,11 @@ mod tests {
     #[test]
     fn pure_openpbr_masks_are_exactly_the_canonical_region() {
         assert!(LobeMask::default().is_pure_openpbr());
-        assert!(LobeMask::all().contains(LobeMask::FACE));
+        assert!(LobeMask::all().contains(LobeMask::NPR_FACE));
         assert!(!LobeMask::all().is_pure_openpbr());
         for bit in LobeMask::canonical() {
-            assert_eq!(bit.is_pure_openpbr(), bit != LobeMask::FACE);
-            assert_eq!(bit.canonical_region() == bit, bit != LobeMask::FACE);
+            assert_eq!(bit.is_pure_openpbr(), bit != LobeMask::NPR_FACE);
+            assert_eq!(bit.canonical_region() == bit, bit != LobeMask::NPR_FACE);
         }
         // Undefined bits must never pass the conformance precondition.
         assert!(!LobeMask(1 << 31).is_pure_openpbr());
@@ -943,7 +943,7 @@ mod tests {
             (LobeMask::SHEEN, size_of::<GpuSheenLobe>()),
             (LobeMask::SUBSURFACE, size_of::<GpuSubsurfaceLobe>()),
             (LobeMask::TRANSMISSION, size_of::<GpuTransmissionLobe>()),
-            (LobeMask::FACE, size_of::<GpuFaceLobe>()),
+            (LobeMask::NPR_FACE, size_of::<GpuNprFaceLobe>()),
         ];
         for (bit, bytes) in expected {
             assert_eq!(

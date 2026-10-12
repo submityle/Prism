@@ -116,9 +116,9 @@ pub const SURFACE_LOBES: [LobeLayout; 8] = [
         namespace: "KHR",
     },
     LobeLayout {
-        id: "face",
+        id: "npr_face",
         uid: "studio.prism.face_shadow",
-        mask_const: "FACE",
+        mask_const: "NPR_FACE",
         registry_slot: 16,
         words: 4,
         namespace: "PRISM",

@@ -855,10 +855,14 @@ consumed_by = []
 default = 0.0
 
 [[lobe]]
-id = "face"
+id = "npr_face"
+# Identity is `uid`-based and immutable once a material has been serialized, so
+# the uid keeps its original spelling even though the human-facing id became
+# `npr_face` (the lobe only serves the `Illumination::Stylized` / NPR line —
+# "face" alone reads as a polygon face or a facing test).
 uid = "studio.prism.face_shadow"
 registry_slot = 16
-mask_const = "FACE"
+mask_const = "NPR_FACE"
 namespace = "PRISM"
 vendor = "prism"
 stability = "experimental"
@@ -866,7 +870,7 @@ words = 4
 
 [[lobe.field]]
 name = "softness"
-surface_field = "face_softness"
+surface_field = "npr_face_softness"
 type = "f32"
 bit_region = "PRISM"
 pack_slot = 0

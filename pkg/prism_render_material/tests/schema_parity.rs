@@ -60,7 +60,7 @@ fn authored() -> GpuSurfaceParameters {
         thin_film_weight: 0.7,
         thin_film_thickness: 0.35,
         thin_film_ior: 1.55,
-        face_softness: 0.25,
+        npr_face_softness: 0.25,
         _pad_face0: 0.0,
         _pad_face1: 0.0,
         _pad_face2: 0.0,
@@ -119,7 +119,7 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
         (Some("thin_film"), "thin_film_weight") => vec![p.thin_film_weight],
         (Some("thin_film"), "thin_film_thickness") => vec![p.thin_film_thickness],
         (Some("thin_film"), "thin_film_ior") => vec![p.thin_film_ior],
-        (Some("face"), "softness") => vec![p.face_softness],
+        (Some("npr_face"), "softness") => vec![p.npr_face_softness],
         other => panic!("schema field {other:?} has no authored binding"),
     }
 }
@@ -134,7 +134,7 @@ fn mask_const_bits(name: &str) -> u32 {
         "SUBSURFACE" => LobeMask::SUBSURFACE.bits(),
         "TRANSMISSION" => LobeMask::TRANSMISSION.bits(),
         "THIN_FILM" => LobeMask::THIN_FILM.bits(),
-        "FACE" => LobeMask::FACE.bits(),
+        "NPR_FACE" => LobeMask::NPR_FACE.bits(),
         other => panic!("unknown mask_const {other}"),
     }
 }

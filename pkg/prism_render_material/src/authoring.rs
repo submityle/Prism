@@ -21,7 +21,7 @@ impl MaterialRecord {
     /// Turns this record into a stylized (NPR) face-shadow producer.
     ///
     /// Sets the [`MaterialFeatureFlags::FACE_SHADOW`] bit (which lights up the
-    /// `LobeMask::FACE` lobe and packs `face_softness` into the parameter
+    /// `LobeMask::NPR_FACE` lobe and packs `npr_face_softness` into the parameter
     /// block), records the terminator half-window `softness`, and appends the
     /// baked SDF map as a [`FACE_SHADOW_SDF_SEMANTIC`] texture row.
     ///
@@ -40,7 +40,7 @@ impl MaterialRecord {
         softness: f32,
     ) -> &mut Self {
         self.features |= MaterialFeatureFlags::FACE_SHADOW;
-        self.surface.face_softness = softness;
+        self.surface.npr_face_softness = softness;
         self.textures.push(GpuMaterialTexture {
             index: sdf_slot,
             generation: sdf_generation,
@@ -77,11 +77,11 @@ mod tests {
         );
 
         // The FACE lobe is present and mirrored into the header lobe mask.
-        assert!(record.lobe_mask().contains(LobeMask::FACE));
+        assert!(record.lobe_mask().contains(LobeMask::NPR_FACE));
         assert_eq!(header.lobe_mask, record.lobe_mask().bits());
 
         // Softness is stored and packed (the FACE lobe adds four words).
-        assert_eq!(record.surface.face_softness, 0.3125);
+        assert_eq!(record.surface.npr_face_softness, 0.3125);
         let words_after = record.packed_parameters().packed_len_words();
         assert_eq!(words_after, words_before + 4);
 
@@ -102,6 +102,6 @@ mod tests {
         record.enable_face_shadow(1, 1, 0, 0.4);
         let block = record.packed_parameters();
         let restored = block.to_full();
-        assert_eq!(restored.face_softness, 0.4);
+        assert_eq!(restored.npr_face_softness, 0.4);
     }
 }

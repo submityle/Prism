@@ -23,7 +23,7 @@ const PRISM_LOBE_SHEEN: u32 = 8u;         // 1 << 3
 const PRISM_LOBE_SUBSURFACE: u32 = 16u;   // 1 << 4
 const PRISM_LOBE_TRANSMISSION: u32 = 32u; // 1 << 5
 const PRISM_LOBE_THIN_FILM: u32 = 64u;    // 1 << 6
-const PRISM_LOBE_FACE: u32 = 65536u;      // 1 << 16
+const PRISM_LOBE_NPR_FACE: u32 = 65536u;  // 1 << 16
 const PRISM_LOBE_ALL: u32 = 65663u;       // (1 << 8) - 1
 
 const PRISM_SURFACE_CORE_WORDS: u32 = 20u;
@@ -40,7 +40,7 @@ const PRISM_LOBE_WORDS_SHEEN: u32 = 8u;
 const PRISM_LOBE_WORDS_SUBSURFACE: u32 = 16u;
 const PRISM_LOBE_WORDS_TRANSMISSION: u32 = 16u;
 const PRISM_LOBE_WORDS_THIN_FILM: u32 = 4u;
-const PRISM_LOBE_WORDS_FACE: u32 = 4u;
+const PRISM_LOBE_WORDS_NPR_FACE: u32 = 4u;
 
 /// Fully-loaded worst case: core + every lobe (20 + sum of 8 lobe footprints).
 const PRISM_SURFACE_MAX_WORDS: u32 = 96u;
@@ -56,7 +56,7 @@ fn prism_packed_word_count(lobe_mask: u32) -> u32 {
     if ((lobe_mask & PRISM_LOBE_SUBSURFACE) != 0u) { words += PRISM_LOBE_WORDS_SUBSURFACE; }
     if ((lobe_mask & PRISM_LOBE_TRANSMISSION) != 0u) { words += PRISM_LOBE_WORDS_TRANSMISSION; }
     if ((lobe_mask & PRISM_LOBE_THIN_FILM) != 0u) { words += PRISM_LOBE_WORDS_THIN_FILM; }
-    if ((lobe_mask & PRISM_LOBE_FACE) != 0u) { words += PRISM_LOBE_WORDS_FACE; }
+    if ((lobe_mask & PRISM_LOBE_NPR_FACE) != 0u) { words += PRISM_LOBE_WORDS_NPR_FACE; }
     return words;
 }
 
@@ -107,7 +107,7 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
     s.thin_film_weight = 0.0;
     s.thin_film_thickness = 0.5;
     s.thin_film_ior = 1.4;
-    s.face_softness = 0.1;
+    s.npr_face_softness = 0.1;
     return s;
 }
 
@@ -231,9 +231,9 @@ fn prism_unpack_surface(words: array<u32, 96>, lobe_mask: u32) -> PrismSurfacePa
         s.thin_film_ior = bitcast<f32>(w[cursor + 2u]);
         cursor += PRISM_LOBE_WORDS_THIN_FILM;
     }
-    if (lobe_mask & PRISM_LOBE_FACE) != 0u {
-        s.face_softness = bitcast<f32>(w[cursor]);
-        cursor += PRISM_LOBE_WORDS_FACE;
+    if (lobe_mask & PRISM_LOBE_NPR_FACE) != 0u {
+        s.npr_face_softness = bitcast<f32>(w[cursor]);
+        cursor += PRISM_LOBE_WORDS_NPR_FACE;
     }
     return s;
 }

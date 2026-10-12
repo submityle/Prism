@@ -152,7 +152,7 @@ pub struct Field {
     /// Target field name in the decoded `PrismSurfaceParameters` /
     /// `GpuSurfaceParameters` fat struct, when it differs from [`Self::name`].
     /// Lobe-local names are terse (e.g. the face lobe's `softness`), but the
-    /// fat struct namespaces them (`face_softness`); codegen (§17.5 S2) uses
+    /// fat struct namespaces them (`npr_face_softness`); codegen (§17.5 S2) uses
     /// this to emit the correct assignment target. Defaults to `name`.
     #[serde(default)]
     pub surface_field: Option<String>,

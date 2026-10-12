@@ -68,7 +68,7 @@ struct PrismSurfaceParameters {
     transmission_dispersion_abbe_number: f32,
     coat_darkening: f32,
     subsurface_scatter_anisotropy: f32,
-    face_softness: f32,
+    npr_face_softness: f32,
 }
 
 struct PrismMaterialTexture {

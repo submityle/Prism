@@ -203,8 +203,8 @@ pub struct GpuSurfaceParameters {
     /// `OpenPBR` `transmission_dispersion_abbe_number` (`V_d`).
     pub transmission_dispersion_abbe_number: f32,
     /// Stylized face-shadow terminator softness (FACE lobe). Padding keeps the
-    /// fat authoring view 16-byte aligned; only `face_softness` is packed.
-    pub face_softness: f32,
+    /// fat authoring view 16-byte aligned; only `npr_face_softness` is packed.
+    pub npr_face_softness: f32,
     pub _pad_face0: f32,
     pub _pad_face1: f32,
     pub _pad_face2: f32,
@@ -261,7 +261,7 @@ impl Default for GpuSurfaceParameters {
             thin_film_ior: 1.4,
             transmission_scatter_anisotropy: 0.0,
             transmission_dispersion_abbe_number: 20.0,
-            face_softness: 0.1,
+            npr_face_softness: 0.1,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
@@ -381,7 +381,7 @@ impl MaterialRecord {
             mask = mask.union(LobeMask::ANISOTROPY);
         }
         if self.features.contains(MaterialFeatureFlags::FACE_SHADOW) {
-            mask = mask.union(LobeMask::FACE);
+            mask = mask.union(LobeMask::NPR_FACE);
         }
         mask
     }
