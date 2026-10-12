@@ -55,6 +55,7 @@
 //! Engine source or derived code.
 #![forbid(unsafe_code)]
 
+pub mod aabb_point_query;
 pub mod aabb_transform;
 pub mod active_pixel;
 pub mod adaptive_step;
@@ -172,6 +173,7 @@ pub mod convex_hull_3d;
 pub mod counting_sort_u16;
 pub mod coupling_apply_resolve;
 pub mod coupling_impulse;
+pub mod cubic_spline_segment;
 pub mod curl;
 pub mod curl_noise;
 pub mod curves;
@@ -193,6 +195,7 @@ pub mod draw_pass_buffers;
 pub mod drucker_prager_friction_alpha;
 pub mod dual_lobe_phase;
 pub mod dual_number;
+pub mod dual_quat_screw;
 pub mod dual_quaternion;
 pub mod ear_clip_triangulate;
 pub mod easing;
@@ -388,6 +391,7 @@ pub mod obb_obb_sat_3d;
 pub mod obb_volume;
 pub mod obb_world_aabb;
 pub mod occlusion;
+pub mod octahedral_encode;
 pub mod octahedral_map;
 pub mod octave;
 pub mod oit;
@@ -410,6 +414,7 @@ pub mod pixel_reconstruction_filter;
 pub mod planckian_locus;
 pub mod plane_aabb_classify;
 pub mod plane_clip;
+pub mod plane_construct;
 pub mod plane_line_intersect;
 pub mod plucker_coord;
 pub mod point_cache;
@@ -562,6 +567,7 @@ pub mod sphere_obb_contact;
 pub mod sphere_plane_contact;
 pub mod sphere_sphere_contact;
 pub mod sphere_sweep;
+pub mod spherical_harmonics_basis;
 pub mod spherical_harmonics_rotate;
 pub mod spline;
 pub mod sprite_stretch;
@@ -662,6 +668,7 @@ pub mod water_pbf_density;
 pub mod water_pbf_kernels;
 pub mod water_pbf_neighbors;
 pub mod water_pbf_plan;
+pub mod water_reconstruct_params;
 pub mod water_shading_npr;
 pub mod water_shading_pbr;
 pub mod water_spectrum_advance;
@@ -687,6 +694,7 @@ pub mod wu_circle;
 pub mod wu_line;
 pub mod ycbcr_bt709;
 
+pub use aabb_point_query::{AabbPointQueryQuery, AabbPointQueryResult, GpuAabbPointQuery};
 pub use aabb_transform::{AabbTransformQuery, AabbTransformResult, GpuAabbTransform};
 pub use active_pixel::{ActivePixelQuery, GpuActivePixel};
 pub use adaptive_step::{AdaptiveStepQuery, GpuAdaptiveStep};
@@ -895,6 +903,7 @@ pub use coupling_apply_resolve::{
 pub use coupling_impulse::{
     GpuCouplingImpulse, GpuCouplingImpulseQuery, GpuCouplingImpulseResult, GpuMat3,
 };
+pub use cubic_spline_segment::{CubicSplineSegmentQuery, CubicSplineSegmentResult, GpuCubicSplineSegment};
 pub use curl::{CurlQuery, GpuCurl};
 pub use curl_noise::{CurlNoiseSample, GpuCurlNoise};
 pub use curves::{CurveSampleQuery, GpuCurve, GpuKeyframe};
@@ -925,6 +934,7 @@ pub use drucker_prager_friction_alpha::{
 };
 pub use dual_lobe_phase::{DualLobePhaseQuery, GpuDualLobePhase};
 pub use dual_number::{DualQuery, DualResult, GpuDual};
+pub use dual_quat_screw::{DualQuatScrewQuery, DualQuatScrewResult, GpuDualQuatScrew};
 pub use dual_quaternion::{DualQuatTransformQuery, GpuDualQuaternion};
 pub use ear_clip_triangulate::{EarClipAnswer, EarClipQuery, GpuEarClipTriangulate};
 pub use easing::{EasingQuery, EasingResult, GpuEasing};
@@ -1266,6 +1276,7 @@ pub use obb_obb_sat_3d::{GpuObbSat3d, ObbSat3dQuery, ObbSat3dResult};
 pub use obb_volume::{GpuObbVolume, ObbVolumeQuery, ObbVolumeResult};
 pub use obb_world_aabb::{GpuObbWorldAabb, ObbWorldAabbQuery, ObbWorldAabbResult};
 pub use occlusion::{GpuOcclusion, GpuOcclusionQuery, GpuOcclusionResult};
+pub use octahedral_encode::{GpuOctahedralEncode, OctahedralEncodeQuery, OctahedralEncodeResult};
 pub use octahedral_map::{GpuOctahedralMap, OctahedralMapQuery, OctahedralMapResult};
 pub use octave::{GpuOctaveScatter, OctaveQuery, OctaveResult};
 pub use oit::{GpuOit, OitQuery, OitResult};
@@ -1292,6 +1303,7 @@ pub use plane_aabb_classify::{GpuPlaneAabbClassify, PlaneAabbClassifyQuery};
 pub use plane_clip::{
     GpuPlaneClip, PlaneClipQuery, PlaneClipResult, SIDE_INSIDE, SIDE_ON, SIDE_OUTSIDE,
 };
+pub use plane_construct::{GpuPlaneConstruct, PlaneConstructQuery, PlaneConstructResult, PlaneOp};
 pub use plane_line_intersect::{
     GpuPlaneLineIntersect, PlaneLineQuery, PlaneLineResult, CLASS_COINCIDENT, CLASS_PARALLEL,
     CLASS_POINT,
@@ -1541,6 +1553,7 @@ pub use sphere_sphere_contact::{
     GpuSphereSphereContact, SphereSphereContactQuery, SphereSphereContactResult,
 };
 pub use sphere_sweep::{GpuSphereSweep, SphereSweepOp, SphereSweepQuery};
+pub use spherical_harmonics_basis::{GpuSphericalHarmonicsBasis, SphericalHarmonicsBasisQuery, SphericalHarmonicsBasisResult};
 pub use spherical_harmonics_rotate::{
     GpuSphericalHarmonicsRotate, ShRotationProbe, ShRotationResult, L2_COEFF_COUNT,
 };
@@ -1707,6 +1720,9 @@ pub use water_pbf_neighbors::{
     GpuWaterPbfNeighbors, WaterPbfNeighborsQuery, WaterPbfNeighborsResult,
 };
 pub use water_pbf_plan::{GpuWaterPbfPlan, WaterPbfPlanQuery, WaterPbfPlanResult};
+pub use water_reconstruct_params::{
+    GpuWaterReconstructParams, ReconstructDomain, WaterReconstructParams,
+};
 pub use water_shading_npr::{GpuWaterShadingNpr, WaterShadingNprQuery, WaterShadingNprResult};
 pub use water_shading_pbr::{GpuWaterShadingPbr, WaterShadingPbrQuery, WaterShadingPbrResult};
 pub use water_spectrum_advance::{
