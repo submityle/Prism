@@ -109,6 +109,31 @@ mod tests {
     use crate::inside::point_in_polygon;
     use crate::measure::centroid;
 
+    fn next_rand(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn rand_in(s: &mut u64, lo: f32, hi: f32) -> f32 {
+        let b = (next_rand(s) >> 40) as u32;
+        lo + (hi - lo) * (b as f32 / 16_777_216.0)
+    }
+
+    /// A random star-shaped (hence simple, usually concave) polygon: `n` points
+    /// at strictly increasing angles with varying radii.
+    fn random_star_shaped(state: &mut u64, n: usize) -> Vec<(f32, f32)> {
+        (0..n)
+            .map(|k| {
+                let a = core::f64::consts::TAU * (k as f64) / (n as f64);
+                let r = f64::from(rand_in(state, 4.0, 10.0));
+                ((r * a.cos()) as f32, (r * a.sin()) as f32)
+            })
+            .collect()
+    }
+
     fn l_shape() -> Vec<(f32, f32)> {
         alloc::vec![
             (0.0, 0.0),
@@ -153,5 +178,26 @@ mod tests {
         assert!(convex_decompose(&[(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)]).is_empty());
         // Too few vertices.
         assert!(convex_decompose(&[(0.0, 0.0), (1.0, 1.0)]).is_empty());
+    }
+
+    #[test]
+    fn random_concave_polygons_decompose_cleanly() {
+        let mut s = 0x5_C11A_u64;
+        for _ in 0..200 {
+            let n = 5 + (next_rand(&mut s) % 20) as usize;
+            let poly = random_star_shaped(&mut s, n);
+            let pieces = convex_decompose(&poly);
+            assert!(!pieces.is_empty());
+            let mut total = 0.0_f32;
+            for piece in &pieces {
+                assert!(is_convex(piece), "piece not convex: {piece:?}");
+                assert!(is_simple_polygon(piece), "piece not simple: {piece:?}");
+                let c = centroid(piece).expect("non-degenerate piece");
+                assert!(point_in_polygon(&poly, c), "centroid escapes: {piece:?}");
+                total += area(piece);
+            }
+            let want = area(&poly);
+            assert!((total - want).abs() <= 1e-2 * want.max(1.0), "{total} vs {want}");
+        }
     }
 }
