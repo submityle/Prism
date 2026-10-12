@@ -1877,6 +1877,12 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         parameters.transmission_dispersion_abbe_number;
     surface.coat_darkening = parameters.coat_darkening;
     surface.scatter_anisotropy = parameters.scatter_anisotropy;
+    // `OpenPBR` thin-film lobe -> Airy BSDF. The ABI stores micrometres (the
+    // specification unit) and the shader evaluates nanometres, so convert here.
+    // Weight 0 (the default) keeps the term inert.
+    surface.iridescence = parameters.thin_film_weight;
+    surface.iridescence_thickness_nm = parameters.thin_film_thickness * 1000.0;
+    surface.iridescence_ior = parameters.thin_film_ior;
     // Fold the screen-space GTAO visibility into the material occlusion so the
     // indirect/ambient term is darkened in geometric creases, mirroring
     // `resolve_pixel` in the CPU golden. The fallback texture and the disabled

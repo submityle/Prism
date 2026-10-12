@@ -292,13 +292,13 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         // surface parameter, so the CPU golden mirrors the GPU resolve and
         // leaves it at the identity `0.0`.
         normal_variance: 0.0,
-        // Thin-film iridescence is likewise a shade-time quantity (authored
-        // factor / iridescence map), not a stable GPU surface parameter, so
-        // the CPU golden mirrors the GPU resolve at the identity weight `0.0`
-        // (thickness / IOR carry the glTF defaults but are inert at weight 0).
-        iridescence: 0.0,
-        iridescence_thickness_nm: 0.0,
-        iridescence_ior: 1.3,
+        // `OpenPBR` thin-film lobe -> Airy BSDF. The ABI carries the film in
+        // micrometres (specification unit) while the shader evaluates in
+        // nanometres, so the thickness is converted here. Weight 0 (the default)
+        // keeps the whole term inert.
+        iridescence: parameters.thin_film_weight,
+        iridescence_thickness_nm: parameters.thin_film_thickness * 1_000.0,
+        iridescence_ior: parameters.thin_film_ior,
     }
 }
 
@@ -708,6 +708,26 @@ mod tests {
     use prism_render_material::{
         fallback_material_header, GpuMaterialHeader, Illumination, MaterialRenderClass,
     };
+
+    /// The `OpenPBR` thin-film lobe must reach the Airy BSDF: the ABI carries the
+    /// film in micrometres while shading evaluates nanometres, and weight 0 stays
+    /// inert.
+    #[test]
+    fn thin_film_lobe_maps_into_the_airy_shade_time_fields() {
+        let inert = surface_sample_from_parameters(&GpuSurfaceParameters::default());
+        assert_eq!(inert.iridescence, 0.0);
+
+        let parameters = GpuSurfaceParameters {
+            thin_film_weight: 0.8,
+            thin_film_thickness: 0.35,
+            thin_film_ior: 1.55,
+            ..Default::default()
+        };
+        let sample = surface_sample_from_parameters(&parameters);
+        assert_eq!(sample.iridescence, 0.8);
+        assert!((sample.iridescence_thickness_nm - 350.0).abs() < 1.0e-3);
+        assert_eq!(sample.iridescence_ior, 1.55);
+    }
 
     fn unit_triangle() -> ([GpuShadingPrimitive; 1], [GpuShadingVertex; 3]) {
         let vertex = |position: [f32; 3], uv: [f32; 2]| GpuShadingVertex {

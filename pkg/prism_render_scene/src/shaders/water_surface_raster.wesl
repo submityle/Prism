@@ -1067,6 +1067,10 @@ fn surface_from(foam: f32) -> SurfaceSample {
     s.transmission_dispersion_abbe_number = 20.0;
     s.coat_darkening = 0.0;
     s.scatter_anisotropy = 0.0;
+    // Water has no thin film; the inert default keeps the Airy term off.
+    s.iridescence = 0.0;
+    s.iridescence_thickness_nm = 0.0;
+    s.iridescence_ior = 1.4;
     s.subsurface_color = vec3<f32>(1.0);
     s.subsurface_radius = 1.0;
     s.subsurface_radius_scale = vec3<f32>(1.0, 0.5, 0.25);

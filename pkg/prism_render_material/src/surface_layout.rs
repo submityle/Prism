@@ -19,16 +19,18 @@ pub const SURFACE_CORE_WORDS: usize = 20;
 /// stride.
 pub const SURFACE_LOBE_WORDS: usize = 16;
 /// Per-lobe `u32` word footprint indexed by `LobeMask` bit index
-/// (`registry_slot`). Slots are dense and low-bit-first, so
+/// (`registry_slot`). The layout is two dense segments (§4.5 constraint 2):
+/// canonical `KHR` slots from 0 and extension slots from
+/// `EXTENSION_SLOT_BASE`, with the gap reserved. Undefined slots read 0, so
 /// `SURFACE_LOBE_WORDS_BY_SLOT[bit.trailing_zeros()]` is the stride for that
 /// lobe. Summing the present entries plus [`SURFACE_CORE_WORDS`] gives
 /// `SurfaceParameterBlock::packed_len_words`.
-pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 16, 4, 8, 16, 16, 4];
+pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 17] = [4, 16, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];
 /// Number of defined optional lobes (equals `LobeMask::COUNT`).
-pub const SURFACE_LOBE_COUNT: u32 = 7;
+pub const SURFACE_LOBE_COUNT: u32 = 8;
 /// Fully-loaded worst case: core plus every lobe. The WESL decoder gathers into
 /// an `array<u32, SURFACE_MAX_WORDS>`.
-pub const SURFACE_MAX_WORDS: usize = 88;
+pub const SURFACE_MAX_WORDS: usize = 92;
 
 /// One optional lobe's generated identity, in canonical pack order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +58,7 @@ pub struct LobeLayout {
 /// the `OpenPBR` bit-region isolation invariant (§4.5 constraint 2):
 /// `surface.rs::LobeMask` derives its region masks from the same schema, and
 /// `layout_matches_generated_table` asserts the two agree.
-pub const SURFACE_LOBES: [LobeLayout; 7] = [
+pub const SURFACE_LOBES: [LobeLayout; 8] = [
     LobeLayout {
         id: "emission",
         uid: "org.khronos.openpbr.emission",
@@ -106,10 +108,18 @@ pub const SURFACE_LOBES: [LobeLayout; 7] = [
         namespace: "KHR",
     },
     LobeLayout {
+        id: "thin_film",
+        uid: "org.khronos.openpbr.thin_film",
+        mask_const: "THIN_FILM",
+        registry_slot: 6,
+        words: 4,
+        namespace: "KHR",
+    },
+    LobeLayout {
         id: "face",
         uid: "studio.prism.face_shadow",
         mask_const: "FACE",
-        registry_slot: 6,
+        registry_slot: 16,
         words: 4,
         namespace: "PRISM",
     },

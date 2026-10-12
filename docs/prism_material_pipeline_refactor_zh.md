@@ -237,13 +237,13 @@
 | **Fuzz** | `fuzz_weight` / `fuzz_color` / `fuzz_roughness` | — | `sheen` / `fuzz_color` / `fuzz_roughness` | ⚠️ `fuzz_weight` 命名不同，其余 ✅ |
 | **Emission** | `emission_luminance`（nits） | float | —（只有 RGB `emissive`） | ❌ 缺亮度单位分离 |
 | | `emission_color` | color3 | `emissive` | ⚠️ 命名不同 |
-| **Thin-film** | `thin_film_weight` / `thin_film_thickness` / `thin_film_ior` | float×3 | —（仅 shade-time `iridescence*`） | ❌ **尚非 ABI 瓣** |
+| **Thin-film** | `thin_film_weight` / `thin_film_thickness` / `thin_film_ior` | float×3 | 新增 `thin_film` **瓣**（KHR, slot 6）→ shade-time `iridescence*`（µm→nm 换算） | ✅（本轮落地为 ABI 瓣并接到 Airy BSDF） |
 | **Geometry** | `geometry_opacity` | float | `base_color.a` | ⚠️ 借位承担，非独立字段 |
 | | `geometry_thin_walled` | boolean | `thin_walled` | ✅ |
 | | `geometry_normal` / `geometry_tangent` / `geometry_coat_normal` / `geometry_coat_tangent` | vector3 | 法线/切线纹理 + `coat_normal` | ❌ 缺向量字段 |
 | **（规范之外）** | — | — | `face`（`softness`）、`anisotropy_rotation`、`ambient_occlusion`、`normal_scale`、`alpha_cutoff`、`thickness` | Prism 扩展区，计入超集 |
 
-**结论（code-truth）**：**参数级尚未补齐。** 已对齐的：`base_weight` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_ior` / `transmission_color` / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_abbe_number` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / `coat_*` 全 6 项 / `fuzz_color` / `fuzz_roughness` / `geometry_thin_walled`。仍缺或需改类型：`transmission_depth`（length vs 归一化 `thickness`）、`emission_luminance`、thin-film 三参数作为 ABI 瓣、`geometry_normal` / `geometry_tangent` / `geometry_coat_tangent`、`geometry_opacity` 独立字段；另有命名与默认值待对齐（见上表 ⚠️ 行）。
+**结论（code-truth）**：**参数级尚未补齐。** 已对齐的：`base_weight` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_ior` / `transmission_color` / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_abbe_number` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / **thin-film 全 3 项（已是 ABI 瓣）** / `coat_*` 全 6 项 / `fuzz_color` / `fuzz_roughness` / `geometry_thin_walled`。仍缺或需改类型：`transmission_depth`（length vs 归一化 `thickness`）、`emission_luminance`、`geometry_normal` / `geometry_tangent` / `geometry_coat_tangent`、`geometry_opacity` 独立字段；另有命名与默认值待对齐（见上表 ⚠️ 行）。
 
 要点：
 - **开放词汇表让补瓣是加法**：新字段扩进对应 lobe 的变长块，位掩码/静态置换天然容纳，老材质不受影响（它们的 lobe_mask 不含新位）。
@@ -258,6 +258,8 @@
 
 1. **纯 OpenPBR 子集合规对拍（Conformance Gate）**：对"只用 OpenPBR 字段、不含任何 Prism 扩展位"的材质，Prism 运行时的 BSDF 响应必须与 OpenPBR 参考实现（ASWF `OpenPBR` reference / MaterialX 节点）在 furnace + 定向光对拍下字节级一致。这进 CI 门禁（§10）——证明"关掉扩展，Prism 就是标准 OpenPBR"，这是"真超集"的充要前提。
 2. **扩展位段隔离（Bit-Region Isolation）**：`LobeMask` 开放枚举按**规范核心区 / Prism 扩展区**静态分段——OpenPBR 规范瓣占低位固定区段（随上游版本演进只增不改语义），FACE 与开放词汇表后续瓣占高位扩展区段。两区位段互不重叠，变长解包 (`prism_unpack_surface`) 按区段路由，杜绝"私有瓣污染规范语义"或"上游新字段撞车扩展位"。
+
+   **已落地（code-truth）**：schema 现为**双密集段**——`KHR` 瓣占 slot `0..6`（emission/clearcoat/anisotropy/sheen/subsurface/transmission/**thin_film**），扩展瓣从 `EXTENSION_SLOT_BASE = 16` 起（FACE 从原来的 bit 6 **迁到 bit 16**）；`prism_material_schema` 的验证器**强制**这条规则（非双段布局直接 `NonContiguousRegistrySlots` 报错），所以"加规范瓣只会往低位段追加、加私有瓣只会往高位段追加"是**编译/校验期事实**而非约定。生成物 `SURFACE_LOBE_WORDS_BY_SLOT` 是按 slot 的 `[usize; 17]`（中段留 0），`LobeMask::all()` 相应改为"已定义位的 OR"。
 3. **向下投影（Lossy Downgrade Projection）**：提供 `project_to_openpbr`——把含扩展瓣的 Prism über **有损投影**成纯 OpenPBR 参数块（丢弃 FACE/私有瓣、把私有效果近似并入最接近的规范瓣），用于导出到外部纯 OpenPBR/MaterialX 消费端。投影是"超集→基集"的单向收敛，须显式标注有损项，不保证视觉等价、只保证"是合法 OpenPBR"。
 
 > **维护义务**：OpenPBR 是活标准（版本演进）。超集定位意味着 Prism 承担"跟随规范核心区"的义务——上游新增/修订字段须在规范核心区加法吸收并过合规门禁；私有扩展只能在扩展区演进，永不侵入核心区语义。
@@ -602,6 +604,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f 规范对齐：`thin_film` 成为 ABI 瓣 + 位区隔离真正落地**（§4.4 / §4.5 约束 2）
+  - **thin_film 整瓣落地**：新增 `thin_film` 瓣（KHR 命名空间，uid `org.khronos.openpbr.thin_film`，4 字），含规范的三个参数 `thin_film_weight` / `thin_film_thickness`（**单位 µm**，规范默认 0.5）/ `thin_film_ior`（规范默认 1.4）。它接到 P2-d 已落地的 Airy 薄膜 BSDF：`resolve.rs` 与 `shading_resolve.wesl` 把瓣映射到 shade-time `iridescence*`，并做 **µm→nm** 换算；`weight = 0`（默认）时整个项惰性。新增桥接测试钉住这条映射（含 0.35µm → 350nm、以及默认惰性）。
+  - **位区隔离（§4.5 约束 2）落地**：为了让 `thin_film` 占 KHR 的低位段，**FACE 从 bit 6 迁到 bit 16**，于是 `LobeMask` 变成文档要求的**双密集段**——KHR 占 `0..6`、扩展从 `EXTENSION_SLOT_BASE = 16` 起。schema 验证器**强制**这条布局（非双段即 `NonContiguousRegistrySlots`），所以"规范瓣只增低位段、私有瓣只增高位段、永不撞车"成了校验期事实。连带：`LobeMask::all()` 由 `(1 << COUNT) - 1` 改为**已定义位的 OR**（稀疏位段下前者会把未定义位也算进来）；生成物 `SURFACE_LOBE_WORDS_BY_SLOT` 变为按 slot 的 `[usize; 17]`（中段留 0）。
+  - 代码：schema（新瓣 + FACE 槽位迁移 + 双段验证器 + `EXTENSION_SLOT_BASE`）、codegen（按 slot 跨度的字长表）、`surface.rs`（`THIN_FILM`/`FACE` 位、区域常量、`all()`、`GpuThinFilmLobe` 与 `SurfaceParameterBlock` 全链 pack/unpack）、fat `GpuSurfaceParameters`（288→**304** B，16 对齐）、`SURFACE_MAX_WORDS` 88→92；regenerated `material_unpack.wesl`；CPU + WESL 双线。
+  - 门禁：`cargo test -p prism_material_schema --lib` **13 通过**（含双段布局验证与新的槽位顺序 `[0,1,2,3,4,5,6,16]`）、`cargo test -p prism_render_material` **826+6+2 全绿**、`cargo test -p prism_render_shading --lib` **3311 通过**（新增桥接测试）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）。
 
 - **P1-f 规范对齐：`transmission_scatter` 改为规范要求的 color3**（§4.4）
   - 规范里 `transmission_scatter` 是 **color3**（逐通道再散射比例），我此前实现成了 `f32`。本轮按规范改成 color3，并让**每个通道独立**参与再散射：`T_c = beer_c + phase · scatter_c · (1 − beer_c)`。

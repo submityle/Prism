@@ -485,16 +485,48 @@ impl SurfaceSchema {
             }
         }
 
-        // `registry_slot` values must be contiguous `0..lobe_count` so the mask
-        // bit layout has no reserved holes at S1.
-        for expected in 0..self.lobe_count() {
-            if !slots.contains(&expected) {
+        // §4.5 constraint 2 (bit-region isolation): the `LobeMask` layout is two
+        // dense segments. Every OpenPBR `KHR` lobe occupies the canonical region
+        // `0..k`; every extension lobe (PRISM/EXT/X_STUDIO) occupies the
+        // extension region `EXTENSION_SLOT_BASE..`. The gap between them is
+        // reserved so new specification lobes can be appended to the canonical
+        // region (and new private lobes to the extension region) without either
+        // ever aliasing the other's slots.
+        let mut canonical: Vec<u32> = self
+            .lobes
+            .iter()
+            .filter(|lobe| lobe.namespace.is_openpbr_core())
+            .map(|lobe| lobe.registry_slot)
+            .collect();
+        let mut extension: Vec<u32> = self
+            .lobes
+            .iter()
+            .filter(|lobe| !lobe.namespace.is_openpbr_core())
+            .map(|lobe| lobe.registry_slot)
+            .collect();
+        canonical.sort_unstable();
+        extension.sort_unstable();
+        for (index, slot) in canonical.iter().enumerate() {
+            if *slot != index as u32 {
+                return Err(SchemaError::NonContiguousRegistrySlots);
+            }
+        }
+        for (index, slot) in extension.iter().enumerate() {
+            if *slot != EXTENSION_SLOT_BASE + index as u32 {
                 return Err(SchemaError::NonContiguousRegistrySlots);
             }
         }
         Ok(())
     }
 }
+
+/// First `registry_slot` of the Prism extension region (§4.5 constraint 2).
+///
+/// The canonical OpenPBR (`KHR`) bit region grows densely from slot `0`; every
+/// non-`KHR` lobe occupies the extension region that starts here, leaving the
+/// slots between as a reserved gap so the two regions can grow independently
+/// without ever colliding.
+pub const EXTENSION_SLOT_BASE: u32 = 16;
 
 /// A borrowed record view so core and lobe records share one validator.
 fn record_view(lobe: &Lobe) -> Record {
@@ -645,7 +677,7 @@ mod tests {
         let schema = surface_schema();
         assert_eq!(schema.schema_version, 1);
         assert_eq!(schema.core.words, 20);
-        assert_eq!(schema.lobe_count(), 7);
+        assert_eq!(schema.lobe_count(), 8);
     }
 
     #[test]
@@ -656,16 +688,22 @@ mod tests {
             .iter()
             .map(|l| l.registry_slot)
             .collect();
-        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6]);
+        // Canonical slots 0..6 then the extension region at 16 (§4.5 constraint 2).
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6, 16]);
     }
 
     #[test]
     fn packed_len_matches_core_plus_present_lobes() {
         let schema = surface_schema();
         assert_eq!(schema.packed_len_words(0), 20);
-        // Lobes are variable length: core plus the sum of every lobe's words.
+        // The lobe mask is two dense segments (§4.5 constraint 2), so "every
+        // lobe" is the OR of the declared slots rather than a contiguous range.
+        let all_mask: u32 = schema
+            .lobes
+            .iter()
+            .fold(0u32, |acc, lobe| acc | (1 << lobe.registry_slot));
         let all: u32 = 20 + schema.lobes.iter().map(|lobe| lobe.words).sum::<u32>();
-        assert_eq!(schema.packed_len_words(0b111_1111), all);
+        assert_eq!(schema.packed_len_words(all_mask), all);
         // Only clearcoat (bit 1) present: core + the coat lobe's own footprint
         // (16 words: the OpenPBR coat group plus trailing pads).
         assert_eq!(schema.packed_len_words(0b10), 20 + 16);
@@ -677,7 +715,10 @@ mod tests {
     #[test]
     fn transmission_fields_land_at_expected_offsets() {
         let schema = surface_schema();
-        let all = 0b111_1111;
+        let all: u32 = schema
+            .lobes
+            .iter()
+            .fold(0u32, |acc, lobe| acc | (1 << lobe.registry_slot));
         // Core (20) + emission (4) + clearcoat (16, the OpenPBR coat group) +
         // anisotropy (4) + sheen (8) + subsurface (16, the OpenPBR subsurface
         // group) = 68 is the transmission base; the transmission lobe then packs

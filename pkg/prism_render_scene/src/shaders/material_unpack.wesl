@@ -8,7 +8,7 @@
 //! the scene packs each surface as an über-BSDF core (20 words) followed by
 //! only the lobes named in `lobe_mask`, written low bit first. Readers gather the
 //! material's `parameter_size / 4` words out of the shared `array<u32>` heap into a
-//! fixed `array<u32, 88>` (the fully-loaded worst case) and expand them back to
+//! fixed `array<u32, 92>` (the fully-loaded worst case) and expand them back to
 //! a full `PrismSurfaceParameters`, filling absent lobes with neutral defaults.
 //!
 //! Kept as a single generated source so all five consumers (opaque, transparent,
@@ -22,8 +22,9 @@ const PRISM_LOBE_ANISOTROPY: u32 = 4u;    // 1 << 2
 const PRISM_LOBE_SHEEN: u32 = 8u;         // 1 << 3
 const PRISM_LOBE_SUBSURFACE: u32 = 16u;   // 1 << 4
 const PRISM_LOBE_TRANSMISSION: u32 = 32u; // 1 << 5
-const PRISM_LOBE_FACE: u32 = 64u;         // 1 << 6
-const PRISM_LOBE_ALL: u32 = 127u;         // (1 << 7) - 1
+const PRISM_LOBE_THIN_FILM: u32 = 64u;    // 1 << 6
+const PRISM_LOBE_FACE: u32 = 65536u;      // 1 << 16
+const PRISM_LOBE_ALL: u32 = 65663u;       // (1 << 8) - 1
 
 const PRISM_SURFACE_CORE_WORDS: u32 = 20u;
 /// Widest per-lobe word footprint (a documentation constant; the pack cursor
@@ -38,10 +39,11 @@ const PRISM_LOBE_WORDS_ANISOTROPY: u32 = 4u;
 const PRISM_LOBE_WORDS_SHEEN: u32 = 8u;
 const PRISM_LOBE_WORDS_SUBSURFACE: u32 = 16u;
 const PRISM_LOBE_WORDS_TRANSMISSION: u32 = 16u;
+const PRISM_LOBE_WORDS_THIN_FILM: u32 = 4u;
 const PRISM_LOBE_WORDS_FACE: u32 = 4u;
 
-/// Fully-loaded worst case: core + every lobe (20 + sum of 7 lobe footprints).
-const PRISM_SURFACE_MAX_WORDS: u32 = 88u;
+/// Fully-loaded worst case: core + every lobe (20 + sum of 8 lobe footprints).
+const PRISM_SURFACE_MAX_WORDS: u32 = 92u;
 
 /// Packed word count for a mask: core plus each present lobe's own footprint.
 /// Mirrors `SurfaceParameterBlock::packed_len_words`.
@@ -53,6 +55,7 @@ fn prism_packed_word_count(lobe_mask: u32) -> u32 {
     if ((lobe_mask & PRISM_LOBE_SHEEN) != 0u) { words += PRISM_LOBE_WORDS_SHEEN; }
     if ((lobe_mask & PRISM_LOBE_SUBSURFACE) != 0u) { words += PRISM_LOBE_WORDS_SUBSURFACE; }
     if ((lobe_mask & PRISM_LOBE_TRANSMISSION) != 0u) { words += PRISM_LOBE_WORDS_TRANSMISSION; }
+    if ((lobe_mask & PRISM_LOBE_THIN_FILM) != 0u) { words += PRISM_LOBE_WORDS_THIN_FILM; }
     if ((lobe_mask & PRISM_LOBE_FACE) != 0u) { words += PRISM_LOBE_WORDS_FACE; }
     return words;
 }
@@ -99,6 +102,9 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
     s.transmission_scatter = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     s.transmission_scatter_anisotropy = 0.0;
     s.transmission_dispersion_abbe_number = 20.0;
+    s.thin_film_weight = 0.0;
+    s.thin_film_thickness = 0.5;
+    s.thin_film_ior = 1.4;
     s.face_softness = 0.1;
     return s;
 }
@@ -107,7 +113,7 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
 /// using `lobe_mask`. Words beyond the packed length are ignored; absent lobes keep
 /// their neutral default. Byte-exact twin of
 /// `SurfaceParameterBlock::unpack(mask, words).to_full()`.
-fn prism_unpack_surface(words: array<u32, 88>, lobe_mask: u32) -> PrismSurfaceParameters {
+fn prism_unpack_surface(words: array<u32, 92>, lobe_mask: u32) -> PrismSurfaceParameters {
     var w = words;
     var s = prism_neutral_surface();
 
@@ -214,6 +220,12 @@ fn prism_unpack_surface(words: array<u32, 88>, lobe_mask: u32) -> PrismSurfacePa
         s.transmission_scatter_anisotropy = bitcast<f32>(w[cursor + 12u]);
         s.transmission_dispersion_abbe_number = bitcast<f32>(w[cursor + 13u]);
         cursor += PRISM_LOBE_WORDS_TRANSMISSION;
+    }
+    if (lobe_mask & PRISM_LOBE_THIN_FILM) != 0u {
+        s.thin_film_weight = bitcast<f32>(w[cursor]);
+        s.thin_film_thickness = bitcast<f32>(w[cursor + 1u]);
+        s.thin_film_ior = bitcast<f32>(w[cursor + 2u]);
+        cursor += PRISM_LOBE_WORDS_THIN_FILM;
     }
     if (lobe_mask & PRISM_LOBE_FACE) != 0u {
         s.face_softness = bitcast<f32>(w[cursor]);

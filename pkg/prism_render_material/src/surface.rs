@@ -270,6 +270,18 @@ impl Default for GpuTransmissionLobe {
     }
 }
 
+/// Thin-film lobe: the `OpenPBR` iridescent film over the base.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuThinFilmLobe {
+    pub thin_film_weight: f32,
+    /// Film thickness in micrometres (specification default 0.5).
+    pub thin_film_thickness: f32,
+    /// Film refractive index (specification default 1.4).
+    pub thin_film_ior: f32,
+    pub _pad0: f32,
+}
+
 /// Face-shadow lobe: stylized SDF-driven directional face shading (anime/toon).
 ///
 /// The lobe carries only the terminator softness; the SDF map itself is a
@@ -300,7 +312,12 @@ impl LobeMask {
     pub const SHEEN: Self = Self(1 << 3);
     pub const SUBSURFACE: Self = Self(1 << 4);
     pub const TRANSMISSION: Self = Self(1 << 5);
-    pub const FACE: Self = Self(1 << 6);
+    /// `OpenPBR` `thin_film`: the iridescent film lobe.
+    pub const THIN_FILM: Self = Self(1 << 6);
+    /// The stylized SDF face-shadow lobe. It lives at the base of the Prism
+    /// extension region (§4.5 constraint 2), so the canonical `KHR` region can
+    /// grow through slots 0..16 without ever aliasing a private lobe.
+    pub const FACE: Self = Self(1 << 16);
 
     /// The `OpenPBR` specification-core bit region (§4.5 constraint 2).
     ///
@@ -314,7 +331,7 @@ impl LobeMask {
     /// schema-parity gate asserts the two never drift.
     pub const KHR_REGION: Self =
         Self(Self::EMISSION.0 | Self::CLEARCOAT.0 | Self::ANISOTROPY.0 | Self::SHEEN.0
-            | Self::SUBSURFACE.0 | Self::TRANSMISSION.0);
+            | Self::SUBSURFACE.0 | Self::TRANSMISSION.0 | Self::THIN_FILM.0);
 
     /// The Prism extension bit region (§4.5 constraint 2).
     ///
@@ -326,7 +343,7 @@ impl LobeMask {
 
     /// Number of distinct lobe bits defined; also the number of iterations of
     /// [`Self::iter_present`] over a fully populated mask.
-    pub const COUNT: u32 = 7;
+    pub const COUNT: u32 = 8;
 
     /// Raw bits.
     pub const fn bits(self) -> u32 {
@@ -350,7 +367,11 @@ impl LobeMask {
 
     /// The mask with every defined lobe bit set.
     pub const fn all() -> Self {
-        Self((1 << Self::COUNT) - 1)
+        // Two dense segments (§4.5 constraint 2): canonical `0..6` plus the
+        // extension base at bit 16, so this is an OR of the defined bits rather
+        // than a contiguous `(1 << COUNT) - 1`.
+        Self(Self::EMISSION.0 | Self::CLEARCOAT.0 | Self::ANISOTROPY.0 | Self::SHEEN.0
+            | Self::SUBSURFACE.0 | Self::TRANSMISSION.0 | Self::THIN_FILM.0 | Self::FACE.0)
     }
 
     /// Keep only the bits inside the `OpenPBR` specification-core region.
@@ -400,6 +421,7 @@ impl LobeMask {
             Self::SHEEN,
             Self::SUBSURFACE,
             Self::TRANSMISSION,
+            Self::THIN_FILM,
             Self::FACE,
         ]
     }
@@ -430,6 +452,7 @@ pub struct SurfaceParameterBlock {
     pub sheen: GpuSheenLobe,
     pub subsurface: GpuSubsurfaceLobe,
     pub transmission: GpuTransmissionLobe,
+    pub thin_film: GpuThinFilmLobe,
     pub face: GpuFaceLobe,
 }
 
@@ -531,6 +554,12 @@ impl SurfaceParameterBlock {
                 _pad3: 0.0,
                 _pad4: 0.0,
             },
+            thin_film: GpuThinFilmLobe {
+                thin_film_weight: params.thin_film_weight,
+                thin_film_thickness: params.thin_film_thickness,
+                thin_film_ior: params.thin_film_ior,
+                _pad0: 0.0,
+            },
             face: GpuFaceLobe {
                 softness: params.face_softness,
                 _pad0: 0.0,
@@ -599,6 +628,11 @@ impl SurfaceParameterBlock {
             full.transmission_dispersion_abbe_number =
                 self.transmission.transmission_dispersion_abbe_number;
         }
+        if self.lobe_mask.contains(LobeMask::THIN_FILM) {
+            full.thin_film_weight = self.thin_film.thin_film_weight;
+            full.thin_film_thickness = self.thin_film.thin_film_thickness;
+            full.thin_film_ior = self.thin_film.thin_film_ior;
+        }
         if self.lobe_mask.contains(LobeMask::FACE) {
             full.face_softness = self.face.softness;
         }
@@ -635,6 +669,7 @@ impl SurfaceParameterBlock {
             LobeMask::TRANSMISSION => {
                 bytemuck::cast_slice(core::slice::from_ref(&self.transmission))
             }
+            LobeMask::THIN_FILM => bytemuck::cast_slice(core::slice::from_ref(&self.thin_film)),
             LobeMask::FACE => bytemuck::cast_slice(core::slice::from_ref(&self.face)),
             _ => &[],
         }
@@ -688,6 +723,7 @@ impl SurfaceParameterBlock {
                 LobeMask::SHEEN => block.sheen = *bytemuck::from_bytes(slice),
                 LobeMask::SUBSURFACE => block.subsurface = *bytemuck::from_bytes(slice),
                 LobeMask::TRANSMISSION => block.transmission = *bytemuck::from_bytes(slice),
+                LobeMask::THIN_FILM => block.thin_film = *bytemuck::from_bytes(slice),
                 LobeMask::FACE => block.face = *bytemuck::from_bytes(slice),
                 _ => {}
             }
@@ -757,11 +793,14 @@ mod tests {
             transmission_scatter: [0.25, 0.15, 0.05, 1.0],
             transmission_scatter_anisotropy: -0.4,
             transmission_dispersion_abbe_number: 35.0,
+            thin_film_weight: 0.7,
+            thin_film_thickness: 0.35,
+            thin_film_ior: 1.55,
             face_softness: 0.25,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 4],
+            _pad_tail: [0.0; 5],
         }
     }
 

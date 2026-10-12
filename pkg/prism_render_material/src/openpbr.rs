@@ -238,11 +238,14 @@ mod tests {
             transmission_scatter: [0.25, 0.15, 0.05, 1.0],
             transmission_scatter_anisotropy: -0.4,
             transmission_dispersion_abbe_number: 35.0,
+            thin_film_weight: 0.7,
+            thin_film_thickness: 0.35,
+            thin_film_ior: 1.55,
             face_softness: 0.25,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 4],
+            _pad_tail: [0.0; 5],
         }
     }
 

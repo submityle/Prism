@@ -190,6 +190,10 @@ pub struct GpuSurfaceParameters {
     pub transmission_color: [f32; 4],
     /// `OpenPBR` `transmission_scatter` (color3, w unused).
     pub transmission_scatter: [f32; 4],
+    /// `OpenPBR` `thin_film_weight` / `_thickness` (µm) / `_ior`.
+    pub thin_film_weight: f32,
+    pub thin_film_thickness: f32,
+    pub thin_film_ior: f32,
     /// `OpenPBR` `transmission_scatter_anisotropy` in `[-1, 1]`.
     pub transmission_scatter_anisotropy: f32,
     /// `OpenPBR` `transmission_dispersion_abbe_number` (`V_d`).
@@ -202,7 +206,7 @@ pub struct GpuSurfaceParameters {
     pub _pad_face2: f32,
     /// Tail padding keeping the fat authoring view a 16-byte multiple as the
     /// coat group grows. Carries no data.
-    pub _pad_tail: [f32; 4],
+    pub _pad_tail: [f32; 5],
 }
 
 impl Default for GpuSurfaceParameters {
@@ -243,13 +247,16 @@ impl Default for GpuSurfaceParameters {
             dispersion: 0.0,
             transmission_color: [1.0; 4],
             transmission_scatter: [0.0, 0.0, 0.0, 1.0],
+            thin_film_weight: 0.0,
+            thin_film_thickness: 0.5,
+            thin_film_ior: 1.4,
             transmission_scatter_anisotropy: 0.0,
             transmission_dispersion_abbe_number: 20.0,
             face_softness: 0.1,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 4],
+            _pad_tail: [0.0; 5],
         }
     }
 }
