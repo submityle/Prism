@@ -78,6 +78,7 @@ pub mod measure;
 pub mod minkowski;
 pub mod nearest;
 pub mod obb;
+pub mod offset;
 pub mod point_convex;
 pub mod polygon;
 pub mod polyline;
@@ -109,6 +110,7 @@ pub use measure::{area, centroid, signed_area};
 pub use minkowski::minkowski_sum;
 pub use nearest::{closest_point_on_polygon, closest_point_on_segment};
 pub use obb::{min_area_obb, Obb};
+pub use offset::offset_convex;
 pub use point_convex::point_in_convex;
 pub use polygon::{sd_polygon, sd_triangle};
 pub use polyline::{
