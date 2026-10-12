@@ -150,6 +150,55 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         &self.access
     }
 
+    /// Whether `entity` is matched by this query (live and satisfying every
+    /// data/filter term in `world` this frame).
+    ///
+    /// The `QueryState` face of [`Query::contains`](crate::system::Query::contains);
+    /// it never forms an item, so it is cheap for a single id.
+    #[inline]
+    pub fn contains(&self, world: &World, entity: Entity) -> bool
+    where
+        D: ReadOnlyQueryData,
+    {
+        self.get(world, entity).is_ok()
+    }
+
+    /// Number of rows this query matches in `world` this frame.
+    ///
+    /// Walks the matched rows (per-row `Added`/`Changed`/sparse gates included),
+    /// so the cost is `O(matched rows)`; it exists so callers need not spell out
+    /// `state.iter(world).count()`.
+    #[inline]
+    pub fn count(&self, world: &World) -> usize
+    where
+        D: ReadOnlyQueryData,
+    {
+        self.iter(world).count()
+    }
+
+    /// Whether this query matches no rows in `world` this frame.
+    ///
+    /// Stops at the first matched row, so it is cheaper than
+    /// [`count`](Self::count) `== 0` when a match is likely early.
+    #[inline]
+    pub fn is_empty(&self, world: &World) -> bool
+    where
+        D: ReadOnlyQueryData,
+    {
+        self.iter(world).next().is_none()
+    }
+
+    /// Visit every matched row over a shared view of `world`.
+    #[inline]
+    pub fn for_each(&self, world: &World, mut f: impl FnMut(D::Item<'_>))
+    where
+        D: ReadOnlyQueryData,
+    {
+        for item in self.iter(world) {
+            f(item);
+        }
+    }
+
     /// The ids of archetypes this query matches.
     ///
     /// Brings the incremental cache up to date under its spin lock (testing only

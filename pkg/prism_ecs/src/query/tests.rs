@@ -225,3 +225,52 @@ fn incremental_cache_is_stable_across_repeated_iters() {
     }
     assert_eq!(first, 2);
 }
+
+#[test]
+fn state_cardinality_helpers_agree_with_iteration() {
+    let mut w = World::new();
+    let a = w.spawn(Position(1, 1));
+    let b = w.spawn((Position(2, 2), Velocity(0, 0)));
+
+    let state = w.query::<&Position>();
+    assert_eq!(state.count(&w), 2);
+    assert!(!state.is_empty(&w));
+    assert!(state.contains(&w, a));
+    assert!(state.contains(&w, b));
+
+    // A live entity that misses the data term fails `contains`.
+    let other = w.spawn(Velocity(1, 1));
+    assert!(!state.contains(&w, other));
+    // A despawned entity fails it too.
+    assert!(w.despawn(a));
+    assert!(!state.contains(&w, a));
+    assert_eq!(state.count(&w), 1);
+
+    let mut heard = 0usize;
+    state.for_each(&w, |_p| heard += 1);
+    assert_eq!(heard, 1);
+
+    // An empty world matches nothing.
+    let mut empty = World::new();
+    let empty_state = empty.query::<&Position>();
+    assert_eq!(empty_state.count(&empty), 0);
+    assert!(empty_state.is_empty(&empty));
+}
+
+#[test]
+fn query_iter_size_hint_bounds_the_remaining_rows() {
+    let mut w = World::new();
+    w.spawn(Position(1, 1));
+    w.spawn((Position(2, 2), Velocity(0, 0)));
+    w.spawn(Velocity(9, 9)); // excluded archetype
+
+    let state = w.query::<&Position>();
+    let mut iter = state.iter(&w);
+    assert_eq!(iter.size_hint(), (0, Some(2)));
+    assert!(iter.next().is_some());
+    // One row consumed: the upper bound drops to the remaining one.
+    assert_eq!(iter.size_hint(), (0, Some(1)));
+    assert!(iter.next().is_some());
+    assert_eq!(iter.size_hint(), (0, Some(0)));
+    assert!(iter.next().is_none());
+}

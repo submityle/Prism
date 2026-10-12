@@ -197,4 +197,24 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
             });
         }
     }
+
+    /// Upper bound on the rows left to yield.
+    ///
+    /// The exact count is unknowable without applying the per-row
+    /// `Added`/`Changed`/sparse gates, but the sum of the remaining archetypes'
+    /// row counts is a sound upper bound (it is exact when those gates admit
+    /// every row). Exposing it lets `collect`/`Vec` size its buffer once.
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // SAFETY: `self.world` is valid for `'w` (the constructor's contract),
+        // and this only forms a shared `&World` to read archetype lengths.
+        let world: &World = unsafe { &*self.world };
+        let mut upper = self.row_len.saturating_sub(self.row);
+        for &id in &self.archetypes[self.arch_cursor..] {
+            if let Some(archetype) = world.archetypes().get(id) {
+                upper += archetype.len();
+            }
+        }
+        (0, Some(upper))
+    }
 }
