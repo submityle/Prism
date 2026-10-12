@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 prism_ecs = { path = "../prism_ecs" }
 prism_time = { path = "../prism_time", default-features = false }
+prism_window = { path = "../prism_window", optional = true }
+prism_window_winit = { path = "../prism_window_winit", optional = true }
 
 [features]
 # `std` is on by default: the Runner / main loop needs std (design §1). The
@@ -34,6 +36,11 @@ pipelined = ["std"]
 # an app opts in only when it needs reproducible runs. World-snapshot rollback
 # stays out until `prism_ecs` grows a snapshot API (documented in the module).
 determinism = []
+
+# Windowed runner (M4, design §10): open a winit window and drive the App on the
+# OS event loop. Pulls in the platform backend, so it is off by default; a
+# headless / no_std build pays nothing for it.
+winit = ["std", "dep:prism_window", "dep:prism_window_winit"]
 
 # AAA lint bar. prism_app contains no `unsafe`, so unlike prism_ecs it can keep
 # the workspace-strength lints as warnings and still hit zero warnings.

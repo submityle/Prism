@@ -11,7 +11,7 @@
 > - **管线/阶段**：flecs pipeline（阶段化 system 分组）
 > 本文为纯经典调度/循环路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.3→v0.4（v0.3 及以前为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：插件依赖图与分组/系统与模块热重载/子应用流水线深化/运行模式(无头服务器/编辑器内嵌/专用服务器)/优雅生命周期/控制台变量(cvar)与配置级联/崩溃隔离与系统恢复/子状态与状态作用域实体/多窗口多世界；v0.2→v0.3 新增第 25 章「跨 crate 契约对齐」：主循环编排 time 帧节奏/VRR/帧预算/挂起恢复 + 向 tasks 车道喂预算 / 子应用流水线以 ECS 提取为边界·tasks 线程类分离为执行·transform 双缓冲保读一致 / 配置与 cvar 经 reflect 特性校验 / 多世界各持独立 time 时间域；v0.3→v0.4 进入实现，并把 §22/§23 从“全部 PLANNED、无代码”回写为与代码一致：M0–M3 主体、M5 骨架、第 24 章大部分已落地，M4 窗口 Runner / M6 工具链 / 多窗口多世界仍待做）
+- 版本: v0.3→v0.4（v0.3 及以前为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：插件依赖图与分组/系统与模块热重载/子应用流水线深化/运行模式(无头服务器/编辑器内嵌/专用服务器)/优雅生命周期/控制台变量(cvar)与配置级联/崩溃隔离与系统恢复/子状态与状态作用域实体/多窗口多世界；v0.2→v0.3 新增第 25 章「跨 crate 契约对齐」：主循环编排 time 帧节奏/VRR/帧预算/挂起恢复 + 向 tasks 车道喂预算 / 子应用流水线以 ECS 提取为边界·tasks 线程类分离为执行·transform 双缓冲保读一致 / 配置与 cvar 经 reflect 特性校验 / 多世界各持独立 time 时间域；v0.3→v0.4 进入实现，并把 §22/§23 从“全部 PLANNED、无代码”回写为与代码一致：M0–M3 主体、M4 窗口 Runner、M5 骨架、第 24 章大部分已落地，平台暂停回调 / M6 工具链 / 多窗口多世界仍待做）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_ecs`（World/Schedule/States）、`prism_tasks`（执行器/流水线）、`prism_time`（时钟/固定步长）、`prism_diagnostic`（可选）、`prism_reflect`（可选，配置/设置反射）
 - 层级定位: ECS 文档 L5「App / Plugin / 固定阶段」；**上层** `prism_loom_runtime_framework`（GameInstance/HUD/路由）跑在本层之上，不要混淆
@@ -372,7 +372,7 @@ pkg/prism_app/
 - **M1 调度序 + 状态**（✅）：完整 Main 阶段序、PluginGroup/依赖解析/去重（`plugin_group`/`plugin_graph`）、States/OnEnter/OnExit（`state/*`）、Events 更新（`event`）。
 - **M2 固定步长**（✅）：累加器 + alpha + 死亡螺旋熔断（`fixed`）、`Time<Fixed/Virtual/Real>`（`time`）、FixedMain tick 组。
 - **M3 子应用 + 流水线**（🚧）：`sub_app` 的 extract 接线与 `pipelined` feature 已落地；与 `prism_tasks` 车道（tasks §24.2 / §25.2）的深度接线待对齐。
-- **M4 窗口 Runner + 生命周期**（🚧）：`lifecycle`/`exit`/`pacing`（帧节奏、帧限）已落地；**`WinitRunner` 未实现**（需 `prism_window`，见 `runner/mod.rs` 注释），随之的移动端 Suspended/Resumed 与设备丢失恢复待做。
+- **M4 窗口 Runner + 生命周期**（🚧）：`lifecycle`/`exit`/`pacing`（帧节奏、帧限）已落地；**`WinitRunner` 已落地**（`winit` feature）：开主窗口、把窗口事件转成生命周期事件、每帧驱动 `App::update`、按 `FramePacer` 限帧，主窗口关闭或系统请求退出即停，且无显示器的逻辑已单测。**仍待做**：平台 suspend / low-memory 回调（winit host trait 目前只给一次性 `resumed`）与移动端设备丢失恢复。
 - **M5 确定性 + 服务器**（🚧）：`determinism`（种子 RNG / 每帧状态哈希 / 逐固定步输入录放）、`DedicatedServerRunner`、`settings` 分层已落地；**world-snapshot 回滚**待 `prism_ecs` 提供 snapshot API。
 - **M6 迁移/工具**（⬜/🚧）：`prelude`（贴近 `bevy_app`）与 `diagnostics`（帧统计/启动耗时）已落地；**`prism_bevy` 退役、阶段火焰图、插件热重载（§24.2）、PIE 多实例未实现**。
 
@@ -382,7 +382,7 @@ pkg/prism_app/
 
 ## 23. 诚实边界与风险
 
-- 本文为设计规格。**截至 2026-10 代码已进入实现**：M0–M3 主体、M5 骨架与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——M4 的 `WinitRunner`、M6 的热重载/`prism_bevy` 退役/PIE、§24.9 多窗口多世界、确定性 world-snapshot 回滚仍未实现。
+- 本文为设计规格。**截至 2026-10 代码已进入实现**：M0–M3 主体、M4 窗口 Runner、M5 骨架与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——M4 的平台 suspend / low-memory 回调、M6 的热重载/`prism_bevy` 退役/PIE、§24.9 多窗口多世界、确定性 world-snapshot 回滚仍未实现。
 - **feature 面尚未对齐**：§20 列出的 `multi_thread`/`winit`/`headless`/`reflect`/`trace` 目前只定义了 `std`/`pipelined`/`determinism`；其余需与真实实现一起落地，**不提前声明空开关**，避免假实现。
 - **高风险项**：
   1. **extract 管线 + 流水线并行（M3）**：跨 World 只读提取 + 跨线程生命周期是正确性要害；须先定义稳定 `ExtractComponent` trait，再上并行；可先串行提取跑通，再开 `pipelined`。这是 `prism_render_scene` 能否干净脱 Bevy 的决定性接缝。

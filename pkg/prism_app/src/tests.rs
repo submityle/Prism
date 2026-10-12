@@ -1448,7 +1448,7 @@ fn fixed_bracket_hooks_wrap_the_inner_loop_in_frame_order() {
     {
         let o = order.clone();
         app.add_systems(BeforeFixedMainLoop, move || {
-            o.lock().unwrap().push("before")
+            o.lock().unwrap().push("before");
         });
     }
     {
@@ -4615,11 +4615,11 @@ mod state_depth_tests {
     fn log_sim_edges(app: &mut App, log: &Log) {
         let l = log.clone();
         app.add_systems(OnEnter(Simulating), move || {
-            l.lock().unwrap().push("enter:sim")
+            l.lock().unwrap().push("enter:sim");
         });
         let l = log.clone();
         app.add_systems(OnExit(Simulating), move || {
-            l.lock().unwrap().push("exit:sim")
+            l.lock().unwrap().push("exit:sim");
         });
     }
 
@@ -5049,7 +5049,7 @@ mod state_depth_tests {
     fn log_transition<S: States>(app: &mut App, from: S, to: S, log: &Log, tag: &'static str) {
         let l = log.clone();
         app.add_systems(OnTransition { from, to }, move || {
-            l.lock().unwrap().push(tag)
+            l.lock().unwrap().push(tag);
         });
     }
 
@@ -5115,7 +5115,7 @@ mod state_depth_tests {
             .add_state_transition_hooks::<AppState>();
         let l = log.clone();
         app.add_systems(OnExit(AppState::Menu), move || {
-            l.lock().unwrap().push("exit:menu")
+            l.lock().unwrap().push("exit:menu");
         });
         let l = log.clone();
         app.add_systems(OnEnter(AppState::InGame), move || {

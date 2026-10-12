@@ -276,6 +276,8 @@ pub use plugin_graph::PluginGraphError;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 pub use run_mode::RunMode;
 pub use runner::{run_once, HeadlessRunner, ScheduleRunnerOnce};
+#[cfg(feature = "winit")]
+pub use runner::{run_windowed, window_actions, WindowAction, WindowSettings, WinitRunner};
 #[cfg(feature = "std")]
 pub use runner::{DedicatedServerRunner, ServerTickDiagnostics};
 pub use schedule::{

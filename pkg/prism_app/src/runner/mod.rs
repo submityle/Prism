@@ -32,15 +32,22 @@
 //!
 //! # Honestly deferred
 //!
-//! The windowed `WinitRunner` (design §10) needs `prism_window`; it is M4's
-//! final increment and is intentionally absent, not stubbed.
+//! The platform *suspend* / low-memory callbacks (design §12) are still absent:
+//! the winit host trait surfaces only a one-shot `resumed`, and `prism_window`
+//! carries no low-memory signal yet, so [`winit::WinitRunner`] forwards
+//! [`Resumed`](crate::lifecycle::Resumed) but cannot yet forward `Suspended` /
+//! `LowMemory`. That seam stays documented rather than stubbed.
 
 #[cfg(feature = "std")]
 mod dedicated_server;
 mod headless;
 mod once;
+#[cfg(feature = "winit")]
+mod winit;
 
 #[cfg(feature = "std")]
 pub use dedicated_server::{DedicatedServerRunner, ServerTickDiagnostics};
 pub use headless::HeadlessRunner;
 pub use once::{run_once, ScheduleRunnerOnce};
+#[cfg(feature = "winit")]
+pub use winit::{run_windowed, window_actions, WindowAction, WindowSettings, WinitRunner};
