@@ -188,6 +188,10 @@ pub struct GpuSurfaceParameters {
     pub transmission_color: [f32; 4],
     /// `OpenPBR` `transmission_scatter` in `[0, 1]`.
     pub transmission_scatter: f32,
+    /// `OpenPBR` `transmission_scatter_anisotropy` in `[-1, 1]`.
+    pub transmission_scatter_anisotropy: f32,
+    /// `OpenPBR` `transmission_dispersion_abbe_number` (`V_d`).
+    pub transmission_dispersion_abbe_number: f32,
     /// Stylized face-shadow terminator softness (FACE lobe). Padding keeps the
     /// fat authoring view 16-byte aligned; only `face_softness` is packed.
     pub face_softness: f32,
@@ -196,7 +200,7 @@ pub struct GpuSurfaceParameters {
     pub _pad_face2: f32,
     /// Tail padding keeping the fat authoring view a 16-byte multiple as the
     /// coat group grows. Carries no data.
-    pub _pad_tail: [f32; 2],
+    pub _pad_tail: [f32; 4],
 }
 
 impl Default for GpuSurfaceParameters {
@@ -236,11 +240,13 @@ impl Default for GpuSurfaceParameters {
             dispersion: 0.0,
             transmission_color: [1.0; 4],
             transmission_scatter: 0.0,
+            transmission_scatter_anisotropy: 0.0,
+            transmission_dispersion_abbe_number: 20.0,
             face_softness: 0.1,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 2],
+            _pad_tail: [0.0; 4],
         }
     }
 }

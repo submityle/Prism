@@ -238,6 +238,8 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
             parameters.transmission_color[2],
         ],
         transmission_scatter: parameters.transmission_scatter,
+        transmission_scatter_anisotropy: parameters.transmission_scatter_anisotropy,
+        transmission_dispersion_abbe_number: parameters.transmission_dispersion_abbe_number,
         coat_darkening: parameters.coat_darkening,
         scatter_anisotropy: parameters.scatter_anisotropy,
         ambient_occlusion: parameters.ambient_occlusion,

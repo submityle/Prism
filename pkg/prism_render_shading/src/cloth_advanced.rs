@@ -345,6 +345,8 @@ mod tests {
             thin_walled: 0.0,
             transmission_color: [1.0; 3],
             transmission_scatter: 0.0,
+            transmission_scatter_anisotropy: 0.0,
+            transmission_dispersion_abbe_number: 20.0,
             coat_darkening: 0.0,
             scatter_anisotropy: 0.0,
             metallic: 0.0,

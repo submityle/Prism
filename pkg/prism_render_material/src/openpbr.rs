@@ -235,11 +235,13 @@ mod tests {
             dispersion: 0.05,
             transmission_color: [0.85, 0.95, 1.0, 1.0],
             transmission_scatter: 0.25,
+            transmission_scatter_anisotropy: -0.4,
+            transmission_dispersion_abbe_number: 35.0,
             face_softness: 0.25,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 2],
+            _pad_tail: [0.0; 4],
         }
     }
 

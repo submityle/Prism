@@ -52,11 +52,13 @@ fn authored() -> GpuSurfaceParameters {
         dispersion: 0.05,
         transmission_color: [0.85, 0.95, 1.0, 1.0],
         transmission_scatter: 0.25,
+        transmission_scatter_anisotropy: -0.4,
+        transmission_dispersion_abbe_number: 35.0,
         face_softness: 0.25,
         _pad_face0: 0.0,
         _pad_face1: 0.0,
         _pad_face2: 0.0,
-        _pad_tail: [0.0; 2],
+        _pad_tail: [0.0; 4],
     }
 }
 
@@ -99,6 +101,12 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
         (Some("transmission"), "dispersion") => vec![p.dispersion],
         (Some("transmission"), "transmission_color") => p.transmission_color.to_vec(),
         (Some("transmission"), "transmission_scatter") => vec![p.transmission_scatter],
+        (Some("transmission"), "transmission_scatter_anisotropy") => {
+            vec![p.transmission_scatter_anisotropy]
+        }
+        (Some("transmission"), "transmission_dispersion_abbe_number") => {
+            vec![p.transmission_dispersion_abbe_number]
+        }
         (Some("face"), "softness") => vec![p.face_softness],
         other => panic!("schema field {other:?} has no authored binding"),
     }

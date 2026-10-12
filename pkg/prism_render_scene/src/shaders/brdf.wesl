@@ -79,6 +79,10 @@ struct SurfaceSample {
     // `OpenPBR` `transmission_scatter`: re-scattered fraction of the absorbed
     // slab energy (0 = pure Beer-Lambert).
     transmission_scatter: f32,
+    // `OpenPBR` `transmission_scatter_anisotropy` in [-1, 1] and
+    // `transmission_dispersion_abbe_number` (V_d).
+    transmission_scatter_anisotropy: f32,
+    transmission_dispersion_abbe_number: f32,
     // `OpenPBR` `coat_darkening`: internal-reflection loss that darkens the base.
     coat_darkening: f32,
     // `OpenPBR` `scatter_anisotropy`: forward/backward bias of the subsurface
@@ -215,6 +219,53 @@ fn transmittance_pow(color: f32, thickness: f32) -> f32 {
         return 0.0;
     }
     return clamp(pow(c, e), 0.0, 1.0);
+}
+
+// `OpenPBR` dispersion: the Abbe `d`-line and `F`/`C` reference wavelengths (µm)
+// and the Prism RGB primaries (nm). Mirrors `lighting.rs` and `thin_film.wesl`.
+const ABBE_LAMBDA_D_UM: f32 = 0.58756;
+const ABBE_LAMBDA_F_UM: f32 = 0.48613;
+const ABBE_LAMBDA_C_UM: f32 = 0.65627;
+const ABBE_MIN_NUMBER: f32 = 1.0;
+const ABBE_PRIMARY_R_NM: f32 = 630.0;
+const ABBE_PRIMARY_G_NM: f32 = 532.0;
+const ABBE_PRIMARY_B_NM: f32 = 465.0;
+
+// Relative refractive offset about the `d`-line in units of `(n_d-1)/V_d`,
+// from `V_d = (n_d-1)/(n_F-n_C)` with linear dispersion in `1/lambda`.
+fn abbe_relative_offset(wavelength_nm: f32) -> f32 {
+    let inv = 1.0 / (wavelength_nm * 1.0e-3);
+    return (inv - 1.0 / ABBE_LAMBDA_D_UM)
+        / (1.0 / ABBE_LAMBDA_F_UM - 1.0 / ABBE_LAMBDA_C_UM);
+}
+
+// Per-channel refractive index of a dispersive dielectric; `scale == 0` (the
+// `transmission_dispersion_scale` default) reproduces `n_d` exactly.
+fn dispersive_ior(n_d: f32, abbe_number: f32, scale: f32, channel: u32) -> f32 {
+    let abbe = clamp(abbe_number, ABBE_MIN_NUMBER, 200.0);
+    let delta = (n_d - 1.0) / abbe * clamp(scale, 0.0, 1.0);
+    var wavelength = ABBE_PRIMARY_R_NM;
+    if channel == 1u {
+        wavelength = ABBE_PRIMARY_G_NM;
+    } else if channel >= 2u {
+        wavelength = ABBE_PRIMARY_B_NM;
+    }
+    return clamp(n_d + delta * abbe_relative_offset(wavelength), 1.0, 3.0);
+}
+
+// Henyey-Greenstein phase function `(1-g^2) / (4pi (1+g^2-2g cos)^1.5)`.
+// Mirrors `gi::translucency::foliage::forward_phase`; `g` is clamped just inside
+// (-1, 1) so the lobe stays finite.
+fn vc_forward_phase(cos_theta: f32, g: f32) -> f32 {
+    let c = clamp(cos_theta, -1.0, 1.0);
+    let gg = clamp(g, -0.999, 0.999);
+    let denom = max(1.0 + gg * gg - 2.0 * gg * c, 1.0e-12);
+    // `INV_4PI` = INV_PI / 4, kept consistent with the lighting constants.
+    let value = (1.0 - gg * gg) * (INV_PI * 0.25) / pow(denom, 1.5);
+    if value >= 0.0 {
+        return value;
+    }
+    return INV_PI * 0.25;
 }
 
 // GGX/Trowbridge-Reitz normal distribution. Mirrors `distribution_ggx`.
@@ -499,12 +550,19 @@ fn principled_direct(
         // `geometry_thin_walled`: an open, single-interface surface with no
         // volume behind it, so the Beer-Lambert depth term is skipped.
         let thin_walled = surface.thin_walled > 0.5;
+        // `OpenPBR` `transmission_scatter_anisotropy`: Henyey-Greenstein shape of
+        // the in-scatter, normalised so `g == 0` reproduces the isotropic term.
+        let scatter_g = clamp(surface.transmission_scatter_anisotropy, -1.0, 1.0);
+        let scatter_cos = -dot(v, l);
+        let phase = vc_forward_phase(scatter_cos, scatter_g) / vc_forward_phase(scatter_cos, 0.0);
         for (var c = 0u; c < 3u; c = c + 1u) {
-            let offset = f32(c) - 1.0;
-            let ior_c = clamp(
-                ior * (1.0 + TRANSMISSION_DISPERSION_SPREAD * dispersion * offset),
-                1.0,
-                3.0,
+            // `OpenPBR` dispersion: the Abbe number sets the per-channel index,
+            // scaled by `transmission_dispersion_scale` (0 = achromatic).
+            let ior_c = dispersive_ior(
+                ior,
+                surface.transmission_dispersion_abbe_number,
+                dispersion,
+                c,
             );
             let f_view = fresnel_dielectric(n_dot_v, ior_c);
             let f_light = fresnel_dielectric(n_dot_l, ior_c);
@@ -517,7 +575,7 @@ fn principled_direct(
                 // `transmission_scatter` re-scatters the absorbed fraction
                 // instead of losing it (0 = pure Beer-Lambert).
                 let scatter = clamp(surface.transmission_scatter, 0.0, 1.0);
-                transmittance = beer + scatter * (1.0 - beer);
+                transmittance = beer + phase * scatter * (1.0 - beer);
             }
             transmission_term[c] = transmission * (1.0 - f_view) * (1.0 - f_light) * transmittance;
         }

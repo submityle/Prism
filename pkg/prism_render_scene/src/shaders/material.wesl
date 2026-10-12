@@ -59,6 +59,8 @@ struct PrismSurfaceParameters {
     // `OpenPBR` `transmission_color`: tint of the refracted light.
     transmission_color: vec4<f32>,
     transmission_scatter: f32,
+    transmission_scatter_anisotropy: f32,
+    transmission_dispersion_abbe_number: f32,
     coat_darkening: f32,
     scatter_anisotropy: f32,
     face_softness: f32,

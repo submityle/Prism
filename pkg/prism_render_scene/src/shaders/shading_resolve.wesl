@@ -1872,6 +1872,9 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.thin_walled = parameters.thin_walled;
     surface.transmission_color = parameters.transmission_color.xyz;
     surface.transmission_scatter = parameters.transmission_scatter;
+    surface.transmission_scatter_anisotropy = parameters.transmission_scatter_anisotropy;
+    surface.transmission_dispersion_abbe_number =
+        parameters.transmission_dispersion_abbe_number;
     surface.coat_darkening = parameters.coat_darkening;
     surface.scatter_anisotropy = parameters.scatter_anisotropy;
     // Fold the screen-space GTAO visibility into the material occlusion so the

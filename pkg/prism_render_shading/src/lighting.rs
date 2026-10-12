@@ -56,6 +56,13 @@ pub struct SurfaceSample {
     /// slab energy re-scattered isotropically instead of lost. `0.0` is pure
     /// Beer-Lambert absorption (the exact identity).
     pub transmission_scatter: f32,
+    /// `OpenPBR` `transmission_scatter_anisotropy` in `[-1, 1]`: Henyey-Greenstein
+    /// bias of the in-scattered transmission. `0.0` is the isotropic identity.
+    pub transmission_scatter_anisotropy: f32,
+    /// `OpenPBR` `transmission_dispersion_abbe_number` (`V_d`, default 20): the
+    /// dispersive power driving the per-channel index, scaled by
+    /// `transmission_dispersion_scale`.
+    pub transmission_dispersion_abbe_number: f32,
     /// `OpenPBR` `coat_darkening` in `[0, 1]`: how much of the coat's internal
     /// reflection is lost inside the coat, darkening the base. `0.0` keeps the
     /// historical two-pass coat response exactly.
@@ -164,6 +171,8 @@ impl Default for SurfaceSample {
             thin_walled: 0.0,
             transmission_color: [1.0; 3],
             transmission_scatter: 0.0,
+            transmission_scatter_anisotropy: 0.0,
+            transmission_dispersion_abbe_number: 20.0,
             coat_darkening: 0.0,
             scatter_anisotropy: 0.0,
             ambient_occlusion: 1.0,
@@ -375,20 +384,30 @@ pub fn evaluate_principled_direct(
             )
             .to_array();
             // `OpenPBR` `transmission_scatter`: the absorbed fraction can be
-            // re-scattered isotropically instead of lost, blending the slab
-            // toward its own colour. `0.0` is pure Beer-Lambert.
+            // re-scattered instead of lost, blending the slab toward its own
+            // colour. `0.0` is pure Beer-Lambert. `transmission_scatter_anisotropy`
+            // shapes that in-scatter with a Henyey-Greenstein phase, normalised so
+            // that `g == 0` reproduces the isotropic term exactly.
             let scatter = surface.transmission_scatter.clamp(0.0, 1.0);
+            let g = surface.transmission_scatter_anisotropy.clamp(-1.0, 1.0);
+            let phase = crate::gi::translucency::foliage::forward_phase(-dot(v, l), g)
+                / crate::gi::translucency::foliage::forward_phase(-dot(v, l), 0.0);
             [
-                beer[0] + scatter * (1.0 - beer[0]),
-                beer[1] + scatter * (1.0 - beer[1]),
-                beer[2] + scatter * (1.0 - beer[2]),
+                beer[0] + phase * scatter * (1.0 - beer[0]),
+                beer[1] + phase * scatter * (1.0 - beer[1]),
+                beer[2] + phase * scatter * (1.0 - beer[2]),
             ]
         };
         let mut out = [0.0f32; 3];
         for (channel, slot) in out.iter_mut().enumerate() {
-            let offset = channel as f32 - 1.0;
-            let ior_c = (ior * (1.0 + TRANSMISSION_DISPERSION_SPREAD * dispersion * offset))
-                .clamp(1.0, 3.0);
+            // `OpenPBR` dispersion: the Abbe number sets the per-channel index,
+            // scaled by `transmission_dispersion_scale` (0 = achromatic).
+            let ior_c = dispersive_ior(
+                ior,
+                surface.transmission_dispersion_abbe_number,
+                dispersion,
+                channel,
+            );
             let f_view = fresnel_dielectric(n_dot_v, ior_c);
             let f_light = fresnel_dielectric(n_dot_l, ior_c);
             *slot = transmission * (1.0 - f_view) * (1.0 - f_light) * sigma_factor[channel];
@@ -564,11 +583,41 @@ pub(crate) fn dielectric_f0(surface: &SurfaceSample) -> [f32; 3] {
 pub(crate) const MIN_DIELECTRIC_IOR: f32 = 1.0 + 1.0e-3;
 
 /// Relative per-channel index spread at `dispersion == 1`, applied as
-/// `ior_c = ior * (1 + SPREAD * dispersion * offset)` with
-/// `offset ∈ {-1, 0, +1}` over R/G/B. This is an explicit authoring convention
-/// (a fixed chromatic spread), not a measured dispersion curve; `dispersion == 0`
-/// is exactly achromatic.
-pub(crate) const TRANSMISSION_DISPERSION_SPREAD: f32 = 0.05;
+/// `OpenPBR` dispersion primaries: the Abbe `d`-line and the `F`/`C` hydrogen
+/// reference wavelengths, in micrometres (the standard `n_d`, `n_F`, `n_C` set).
+const ABBE_LAMBDA_D_UM: f32 = 0.587_56;
+const ABBE_LAMBDA_F_UM: f32 = 0.486_13;
+const ABBE_LAMBDA_C_UM: f32 = 0.656_27;
+
+/// Smallest Abbe number accepted, keeping the derived dispersion finite.
+pub(crate) const MIN_ABBE_NUMBER: f32 = 1.0;
+
+/// Relative refractive offset of one wavelength about the `d`-line, in units of
+/// `(n_d - 1) / V_d`.
+///
+/// Derived from the Abbe-number definition `V_d = (n_d - 1) / (n_F - n_C)`
+/// combined with a linear dispersion in `1/λ`:
+/// `(1/λ - 1/λ_d) / (1/λ_F - 1/λ_C)`. Red primaries come out negative (they
+/// refract less than the `d`-line) and blue positive, as physics requires.
+#[inline]
+pub(crate) fn abbe_relative_offset(wavelength_nm: f32) -> f32 {
+    let inv = 1.0 / (wavelength_nm * 1.0e-3);
+    (inv - 1.0 / ABBE_LAMBDA_D_UM) / (1.0 / ABBE_LAMBDA_F_UM - 1.0 / ABBE_LAMBDA_C_UM)
+}
+
+/// The per-channel refractive index of a dispersive dielectric.
+///
+/// `n_d` is the Abbe `d`-line index, `abbe_number` the `V_d` dispersive power
+/// and `scale` the `OpenPBR` `transmission_dispersion_scale` in `[0, 1]`; the
+/// wavelengths are the Prism RGB primaries. `scale == 0` reproduces `n_d`
+/// exactly in all three channels (the historical achromatic behaviour).
+#[inline]
+pub(crate) fn dispersive_ior(n_d: f32, abbe_number: f32, scale: f32, channel: usize) -> f32 {
+    let abbe = abbe_number.clamp(MIN_ABBE_NUMBER, 200.0);
+    let delta = (n_d - 1.0) / abbe * scale.clamp(0.0, 1.0);
+    let wavelength = crate::gi::material::thin_film::RGB_WAVELENGTHS_NM[channel.min(2)];
+    (n_d + delta * abbe_relative_offset(wavelength)).clamp(1.0, 3.0)
+}
 
 /// Unpolarized dielectric Fresnel reflectance for a direction whose cosine with
 /// the normal is `cos_i`, entering from index 1 into relative index `ior`.
@@ -1250,6 +1299,58 @@ mod tests {
         assert!(
             sum3(scattering) > sum3(absorbed),
             "scattering={scattering:?} absorbed={absorbed:?}"
+        );
+    }
+
+    #[test]
+    fn abbe_number_drives_the_spec_dispersion() {
+        let n = 1.5_f32;
+        // Red refracts less than the d-line, blue more: the physically required
+        // ordering for the RGB primaries.
+        let red = dispersive_ior(n, 20.0, 1.0, 0);
+        let green = dispersive_ior(n, 20.0, 1.0, 1);
+        let blue = dispersive_ior(n, 20.0, 1.0, 2);
+        assert!(red < green && green < blue, "{red} {green} {blue}");
+        // `transmission_dispersion_scale == 0` is exactly achromatic.
+        for channel in 0..3 {
+            assert_eq!(dispersive_ior(n, 20.0, 0.0, channel), n);
+        }
+        // A lower Abbe number (more dispersive glass) spreads further.
+        let spread_20 = blue - red;
+        let spread_10 = dispersive_ior(n, 10.0, 1.0, 2) - dispersive_ior(n, 10.0, 1.0, 0);
+        assert!(spread_10 > spread_20, "{spread_10} vs {spread_20}");
+    }
+
+    #[test]
+    fn scatter_anisotropy_shapes_the_in_scatter() {
+        let base = SurfaceSample {
+            base_color: [0.2, 0.4, 0.6],
+            transmission: 1.0,
+            thickness: 1.0,
+            transmission_scatter: 1.0,
+            ..Default::default()
+        };
+        let forward = evaluate_principled_direct(
+            SurfaceSample {
+                transmission_scatter_anisotropy: 1.0,
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        let backward = evaluate_principled_direct(
+            SurfaceSample {
+                transmission_scatter_anisotropy: -1.0,
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        // Head-on, the phase argument sits at cos = -1: the backward lobe
+        // dominates there, so the two biases must differ materially.
+        assert!(
+            sum3(backward) > sum3(forward),
+            "backward={backward:?} forward={forward:?}"
         );
     }
 }

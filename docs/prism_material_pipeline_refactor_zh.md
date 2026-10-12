@@ -208,18 +208,42 @@
 
 运行时 über 以 **OpenPBR Surface** 为规范核心，终态是其**真超集**：`Prism über = OpenPBR Surface（全字段） ∪ { FACE } ∪ { 开放词汇表后续瓣 }`。现 `surface.rs` 的核心 12 words + 7 瓣只是今天未补齐的**实现子集**；补齐 = 把现有 4-word lobe 扩成 OpenPBR 全字段 lobe，走变长打包 + 静态置换，**是加法，不改模型族**。补齐完成后，OpenPBR 字段构成超集的「规范核心区」，FACE / 后续开放瓣构成「Prism 扩展区」（位段划分见 §4.5）。
 
-| OpenPBR 组 / lobe | 现 über 字段（`surface.rs`） | 状态 | 待补字段（加法） |
-|---|---|---|---|
-| **base**（diffuse+metal） | `base_color` / `metallic` / `perceptual_roughness` / **`base_weight` / `diffuse_roughness`（已补，见 §13.a）** | ✅ 补齐 | — |
-| **specular** | **`specular_weight` / `specular_color` / `specular_ior`（已补，取代 `reflectance` 代理，见 §13.a）** / `anisotropy` / `anisotropy_rotation` | ✅ 补齐 | — |
-| **coat** | `clearcoat` / `clearcoat_roughness` / **`coat_ior` / `coat_color` / `coat_roughness_anisotropy` / `coat_darkening`（已补）** / **`coat_normal`（已补：纹理输入，非 ABI 字段，见 §13.a）** | ✅ 补齐 | — |
-| **fuzz** | `sheen` / **`fuzz_roughness` / `fuzz_color`（已补，见 §13.a）** | ✅ 补齐 | —（`fuzz_roughness` 与 base roughness 的解耦是刻意的模型修正） |
-| **subsurface** | `subsurface` / **`subsurface_color` / `subsurface_radius`（RGB） / `scatter_anisotropy`（已补，见 §13.a）** | ✅ 补齐 | — |
-| **transmission** | `transmission` / `thickness` / **`index_of_refraction` / `dispersion` / `transmission_color` / `transmission_scatter`（已消费：principled 折射透射瓣）** | ✅ 补齐 | —（`thin_walled` 归 geometry 组，已补） |
-| **emission** | `emission`（4 words） | ✓ | `emission_luminance` 单位统一（nit / 相对） |
-| **thin_film**（虹彩） | — | **缺整瓣** | 新增 `thin_film_weight` / `thin_film_thickness` / `thin_film_ior`（§10 首个开放瓣示例） |
-| **geometry** | `normal_scale` / `alpha_cutoff` / **`thin_walled`（已补，见 §13.a）** + 法线纹理 | ✅ 补齐 | —（`geometry_opacity` 由既有的 `base_color.a` 承担、`geometry_coat_normal` 即 coat 组已补的 `coat_normal`，两者都无需新增字段） |
-| **FACE**（NPR） | `softness`（SDF 面阴影） | ✓ | OpenPBR 之外的 **Prism 私有瓣**，NPR 专用，**不并入 OpenPBR**，与之共存 |
+> ⚠️ **本节的对账基线已修正**：此前这里的表是手写的近似，与规范原文有出入（例如把 `subsurface_radius` 记成 vec3、漏了 `subsurface_radius_scale`、把 `transmission_scatter` 当 f32），据此得出的"补齐"是**自证式**的。下面的表改为**逐参数**对照 `AcademySoftwareFoundation/OpenPBR` 的 `parametrization` 表（v1.1.1；1.1.1 相对 1.1 只有说明性修改，**无新增参数**）。**判定"纯 OpenPBR 子集"以本表为准**。
+
+| 规范组 | 规范参数（v1.1.1） | 类型 | Prism 对应 | 状态 |
+|---|---|---|---|---|
+| **Base** | `base_weight` | float | `base_weight` | ✅ |
+| | `base_color` | color3 | `base_color`（vec4，w 为 alpha） | ⚠️ 默认值 1.0 vs 规范 0.8 |
+| | `base_metalness` | float | `metallic` | ⚠️ 仅命名不同 |
+| | `base_diffuse_roughness` | float | `diffuse_roughness` | ✅ |
+| **Specular** | `specular_weight` | float | `specular_weight` | ✅ |
+| | `specular_color` | color3 | `specular_color` | ✅ |
+| | `specular_roughness` | float | `perceptual_roughness` | ⚠️ 命名 + 默认 0.5 vs 0.3 |
+| | `specular_roughness_anisotropy` | float [0,1] | ANISOTROPY 瓣 `anisotropy`（带符号 [-1,1]）+ `anisotropy_rotation` | ⚠️ 类型/编码不一致，且多一个 rotation |
+| | `specular_ior` | float | `specular_ior` | ✅ |
+| **Transmission** | `transmission_weight` | float | `transmission` | ⚠️ 仅命名不同 |
+| | `transmission_color` | color3 | `transmission_color` | ✅ |
+| | `transmission_depth` | float（length） | `thickness`（归一化 [0,1]） | ⚠️ 语义/单位不一致 |
+| | `transmission_scatter` | **color3** | `transmission_scatter`（**f32**） | ❌ 类型不一致 |
+| | `transmission_scatter_anisotropy` | float [-1,1] | `transmission_scatter_anisotropy` | ✅（本轮新增） |
+| | `transmission_dispersion_scale` | float | `dispersion` | ⚠️ 仅命名不同 |
+| | `transmission_dispersion_abbe_number` | float（默认 20） | `transmission_dispersion_abbe_number` | ✅（本轮新增，色散改由 Abbe 推导） |
+| **Subsurface** | `subsurface_weight` | float | `subsurface` | ⚠️ 仅命名不同 |
+| | `subsurface_color` | color3 | `subsurface_color` | ⚠️ 默认白 vs 0.8 |
+| | `subsurface_radius` | **float（length）** | `subsurface_radius`（**vec3**，且被当作相对范围） | ❌ 类型 + 语义不一致 |
+| | `subsurface_radius_scale` | color3 | —（被并进上面的 vec3） | ❌ 缺字段 |
+| | `subsurface_scatter_anisotropy` | float [-1,1] | `scatter_anisotropy` | ⚠️ 仅命名不同 |
+| **Coat** | `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` | — | `clearcoat` / `coat_color` / `clearcoat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` | ⚠️ 命名不同；`coat_ior` 默认 1.5 vs 1.6、`coat_darkening` 默认 0 vs 1 |
+| **Fuzz** | `fuzz_weight` / `fuzz_color` / `fuzz_roughness` | — | `sheen` / `fuzz_color` / `fuzz_roughness` | ⚠️ `fuzz_weight` 命名不同，其余 ✅ |
+| **Emission** | `emission_luminance`（nits） | float | —（只有 RGB `emissive`） | ❌ 缺亮度单位分离 |
+| | `emission_color` | color3 | `emissive` | ⚠️ 命名不同 |
+| **Thin-film** | `thin_film_weight` / `thin_film_thickness` / `thin_film_ior` | float×3 | —（仅 shade-time `iridescence*`） | ❌ **尚非 ABI 瓣** |
+| **Geometry** | `geometry_opacity` | float | `base_color.a` | ⚠️ 借位承担，非独立字段 |
+| | `geometry_thin_walled` | boolean | `thin_walled` | ✅ |
+| | `geometry_normal` / `geometry_tangent` / `geometry_coat_normal` / `geometry_coat_tangent` | vector3 | 法线/切线纹理 + `coat_normal` | ❌ 缺向量字段 |
+| **（规范之外）** | — | — | `face`（`softness`）、`anisotropy_rotation`、`ambient_occlusion`、`normal_scale`、`alpha_cutoff`、`thickness` | Prism 扩展区，计入超集 |
+
+**结论（code-truth）**：**参数级尚未补齐。** 已对齐的：`base_weight` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_ior` / `transmission_color` / `transmission_scatter_anisotropy` / `transmission_dispersion_abbe_number` / `coat_*` 全 6 项 / `fuzz_color` / `fuzz_roughness` / `geometry_thin_walled`。仍缺或需改类型：`transmission_scatter`(f32→color3)、`subsurface_radius`(vec3→float) + `subsurface_radius_scale`(color3)、`emission_luminance`、thin-film 三参数作为 ABI 瓣、`geometry_normal` / `geometry_tangent` / `geometry_coat_tangent`、`geometry_opacity` 独立字段；另有命名与默认值待对齐（见上表 ⚠️ 行）。
 
 要点：
 - **开放词汇表让补瓣是加法**：新字段扩进对应 lobe 的变长块，位掩码/静态置换天然容纳，老材质不受影响（它们的 lobe_mask 不含新位）。
@@ -578,6 +602,15 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f 规范对账修正 + 首批规范缺口补齐（`transmission_scatter_anisotropy` / `transmission_dispersion_abbe_number`）**
+  - **对账修正**：§4.4 的表此前是我手写的近似（把 `subsurface_radius` 记成 vec3、漏 `subsurface_radius_scale`、把 `transmission_scatter` 当 f32），据此得出的"九组补齐"是自证式的。现已改为**逐参数**对照 `AcademySoftwareFoundation/OpenPBR` 的 `parametrization` 表（v1.1.1；该版相对 1.1 只有说明性修改、无新增参数），并明确"纯 OpenPBR 子集"的判定以该表为准。
+  - **本轮补齐的两个规范参数**：
+    - `transmission_scatter_anisotropy` ∈ [-1,1]（默认 0）：给透射的 in-scatter 加 Henyey-Greenstein 相位（复用 `gi::translucency::foliage::forward_phase`，并用 `g=0` 的相位**归一化**，所以 0 逐位复现各向同性）。
+    - `transmission_dispersion_abbe_number`（默认 20）：**把之前那个我自造的"0.05 通道展开"常量换成规范定义的 Abbe 色散**——由 `V_d = (n_d−1)/(n_F−n_C)` 与 `1/λ` 线性色散推出 RGB 主波长（630/532/465nm，复用 `thin_film::RGB_WAVELENGTHS_NM`）的逐通道折射率，红比 d 线低、蓝更高；整体仍由 `transmission_dispersion_scale`（原 `dispersion`）缩放，`scale=0` 逐位无彩。
+  - 代码：schema transmission 瓣 12→16 字（两字段 + 2 pad）；`GpuTransmissionLobe` / fat `GpuSurfaceParameters`（256→**272** B，仍 16 字节对齐）；`SURFACE_MAX_WORDS` 84→88；regenerated `material_unpack.wesl`；shade-time `SurfaceSample` + 桥接；BSDF 双线 `lighting.rs`（新增 `abbe_relative_offset` / `dispersive_ior` / `MIN_ABBE_NUMBER`）与 `brdf.wesl`（同式 + `vc_forward_phase`）。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3309 通过**（新增：Abbe 给出红<绿<蓝、scale=0 逐位无彩、Abbe 越小色散越强；scatter 各向异性后向强于前向）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）、`prism_material_schema` 13、`prism_render_material` 826+6+2 全绿。
+  - **仍缺**（按上表）：`transmission_scatter` 改 color3、`subsurface_radius` 拆成 float + `subsurface_radius_scale`(color3)、`emission_luminance`、thin-film ABI 瓣、`geometry_*` 向量字段与独立 `geometry_opacity`，以及命名/默认值对齐。
 
 - **P1-f（最后一项）删 `lower_standard_material`：外部材质统一走 OpenPBR Surface 导入器**（§4.4）
   - 范围：把原来那个"逐格式 1:1 翻译"的 `lower_standard_material` 拆成一个**单一格式适配层** + 一个**格式无关的打包层**，并删除旧函数：
