@@ -58,6 +58,10 @@ pub struct QueryIter<'w, 's, D: QueryData, F: QueryFilter = ()> {
     row: usize,
     /// Number of rows in the current archetype.
     row_len: usize,
+    /// Chunk-window size of the current archetype (rows per physical block).
+    rows_per_chunk: usize,
+    /// End row (exclusive) of the chunk currently being walked.
+    chunk_end: usize,
     /// The current archetype's resolved fetch cursor (`None` before the first
     /// archetype is entered, or for a zero-row archetype that is skipped).
     current_fetch: Option<D::Fetch<'w>>,
@@ -101,6 +105,8 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
             arch_cursor: 0,
             row: 0,
             row_len: 0,
+            rows_per_chunk: 1,
+            chunk_end: 0,
             current_fetch: None,
             current_filter_fetch: None,
             current_entities: &[],
@@ -138,21 +144,24 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
     {
         let mut acc = init;
         loop {
-            if self.row < self.row_len {
-                // Hoist the archetype-local cursors out of the inner loop.
+            if self.row < self.chunk_end {
+                // Hoist the chunk-local cursors out of the inner loop; a table
+                // term's fetch carries the window's value base, so the inner
+                // loop is pure offset arithmetic (design §5.3).
                 let entities = self.current_entities;
-                // SAFETY: `row < row_len` implies an archetype is entered, so
-                // both cursors are initialised; `row_len == entities.len()`.
+                // SAFETY: `row < chunk_end` implies a chunk is entered, so both
+                // cursors are initialised; `chunk_end <= row_len ==
+                // entities.len()`.
                 let (filter_fetch, fetch) = unsafe {
                     (
                         self.current_filter_fetch.unwrap_unchecked(),
                         self.current_fetch.unwrap_unchecked(),
                     )
                 };
-                while self.row < self.row_len {
+                while self.row < self.chunk_end {
                     let row = self.row;
                     self.row += 1;
-                    // SAFETY: `row < row_len == entities.len()` (the loop
+                    // SAFETY: `row < chunk_end <= row_len == entities.len()` (the loop
                     // condition), so the index is in bounds.
                     let entity = unsafe { *entities.get_unchecked(row) };
                     // SAFETY: `filter_fetch` was built for this archetype and
@@ -172,6 +181,13 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Iterator for QueryIter<'w, 's, D, F> 
                     // `'w`.
                     acc = f(acc, unsafe { D::fetch(fetch, entity, row) });
                 }
+            }
+            // More chunks left in this archetype: resolve the next window's base
+            // once and continue. (Advancing per chunk, not per row, is what makes
+            // chunked storage cheap.)
+            if self.chunk_end < self.row_len {
+                self.enter_chunk(self.chunk_end / self.rows_per_chunk);
+                continue;
             }
             if !self.enter_next_archetype() {
                 return acc;
@@ -210,16 +226,16 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
     #[inline(always)]
     pub(crate) fn next_with_entity(&mut self) -> Option<(Entity, D::Item<'w>)> {
         loop {
-            if self.row < self.row_len {
+            if self.row < self.chunk_end {
                 let row = self.row;
                 self.row += 1;
-                // SAFETY: entering an archetype sets `row_len` and *both* fetch
-                // cursors together, so whenever a row remains (`row < row_len`)
-                // the cursors are initialised; and `row < row_len` is exactly
-                // `row < archetype.len() == current_entities.len()`. Taking the
-                // row entity unchecked, and the cursors without the `Option`
-                // discriminant test, keeps the per-row path as tight as the
-                // batch driver's (both `Fetch` types are `Copy`). This is the
+                // SAFETY: entering a chunk sets `chunk_end` and *both* fetch
+                // cursors together, so whenever a row remains
+                // (`row < chunk_end <= row_len`) the cursors are initialised; and
+                // `row < chunk_end <= archetype.len() == current_entities.len()`.
+                // Taking the row entity unchecked, and the cursors without the
+                // `Option` discriminant test, keeps the per-row path as tight as
+                // the batch driver's (both `Fetch` types are `Copy`). This is the
                 // hottest loop in the kernel, so the branches that the type
                 // system cannot remove for us are removed here instead.
                 let (entity, filter_fetch, fetch) = unsafe {
@@ -252,14 +268,22 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
                 return Some((entity, unsafe { D::fetch(fetch, entity, row) }));
             }
 
+            // Current chunk exhausted: step to the next chunk of this archetype
+            // if it has more rows, else advance to the next archetype. Resolving
+            // the chunk once here (rather than per row in `fetch`) is what keeps
+            // chunked storage cheap.
+            if self.chunk_end < self.row_len {
+                self.enter_chunk(self.chunk_end / self.rows_per_chunk);
+                continue;
+            }
             if !self.enter_next_archetype() {
                 return None;
             }
         }
     }
 
-    /// Advance to the next matched archetype, resetting the row cursor and
-    /// rebuilding the entity column and both fetch cursors for it.
+    /// Advance to the next non-empty matched archetype, resetting the chunk and
+    /// row cursors and rebuilding the entity column and both fetch cursors.
     ///
     /// Returns `false` when no archetype remains (the iterator is then
     /// exhausted). Shared by [`next_with_entity`](Self::next_with_entity) and the
@@ -267,42 +291,71 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
     /// logic — the safety contracts in particular — lives in exactly one place.
     #[inline(always)]
     fn enter_next_archetype(&mut self) -> bool {
-        if self.arch_cursor >= self.archetypes.len() {
-            return false;
-        }
-        let arch_id = self.archetypes[self.arch_cursor];
-        self.arch_cursor += 1;
+        loop {
+            if self.arch_cursor >= self.archetypes.len() {
+                return false;
+            }
+            let arch_id = self.archetypes[self.arch_cursor];
+            self.arch_cursor += 1;
 
-        // SAFETY: `self.world` is valid and borrowed for `'w`; we only form a
-        // shared `&'w World` to read archetype storage. Each matched archetype
-        // id was produced from this same world.
+            // SAFETY: `self.world` is valid and borrowed for `'w`; we only form
+            // a shared `&'w World` to read archetype storage. Each matched
+            // archetype id was produced from this same world.
+            let world: &'w World = unsafe { &*self.world };
+            let archetype: &'w Archetype = world
+                .archetypes()
+                .get(arch_id)
+                .expect("matched archetype id must resolve");
+            let len = archetype.len();
+            if len == 0 {
+                // Nothing to fetch; a zero-row archetype has no chunk.
+                continue;
+            }
+            self.row_len = len;
+            self.current_entities = archetype.table().entities();
+            self.rows_per_chunk = archetype.table().rows_per_chunk().max(1);
+            self.enter_chunk(0);
+            return true;
+        }
+    }
+
+    /// Enter chunk window `chunk` of the current archetype: set the row and
+    /// chunk-end cursors and resolve both fetch cursors for that window.
+    ///
+    /// Table-backed data terms cache the window's value base and
+    /// changed-version cell here (design §5.3), so the per-row
+    /// [`QueryData::fetch`] is plain offset arithmetic.
+    #[inline(always)]
+    fn enter_chunk(&mut self, chunk: usize) {
+        let first = chunk * self.rows_per_chunk;
+        self.row = first;
+        self.chunk_end = (first + self.rows_per_chunk).min(self.row_len);
+
+        // SAFETY: `self.world` is valid and borrowed for `'w`; only a shared
+        // `&'w World` is formed. `arch_cursor - 1` is the archetype just entered.
         let world: &'w World = unsafe { &*self.world };
+        let arch_id = self.archetypes[self.arch_cursor - 1];
         let archetype: &'w Archetype = world
             .archetypes()
             .get(arch_id)
             .expect("matched archetype id must resolve");
-        // Out-of-band sparse storage consulted per row by sparse-backed terms
-        // (design §6); shares the `'w` world borrow.
         let sparse_sets = world.sparse_sets();
-
-        self.row = 0;
-        self.row_len = archetype.len();
-        self.current_entities = archetype.table().entities();
         // SAFETY: `arch_id` came from the matched list, so the archetype
         // satisfies `D::matches` for `data_state` — the contract of
-        // `init_fetch`.
+        // `init_fetch_for_chunk`.
         self.current_fetch = Some(unsafe {
-            D::init_fetch(
+            D::init_fetch_for_chunk(
                 self.data_state,
                 archetype,
                 sparse_sets,
                 self.last_run,
                 self.this_run,
+                chunk,
             )
         });
         // SAFETY: the same `arch_id` also satisfies `F::matches` for
         // `filter_state` (guaranteed by `matched_archetypes`), the contract of
-        // `F::init_fetch`.
+        // `F::init_fetch`. Filters have no per-chunk cursor.
         self.current_filter_fetch = Some(unsafe {
             F::init_fetch(
                 self.filter_state,
@@ -312,7 +365,6 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
                 self.this_run,
             )
         });
-        true
     }
 
 }

@@ -141,27 +141,45 @@ unsafe fn run_batch<D, F, Func>(
 
     // SAFETY: `batch.archetype` satisfies `D::matches`/`F::matches` for the
     // respective states (caller contract) — the precondition of `init_fetch`.
-    let fetch = unsafe { D::init_fetch(data_state, archetype, sparse_sets, last_run, this_run) };
-    // SAFETY: same archetype/state match contract for the filter terms.
+    // The filter has no per-chunk cursor, so it is resolved once for the batch.
     let filter_fetch =
         unsafe { F::init_fetch(filter_state, archetype, sparse_sets, last_run, this_run) };
 
-    for (offset, &entity) in entities[batch.start..batch.end].iter().enumerate() {
-        let row = batch.start + offset;
-        // SAFETY: `row < batch.end <= archetype.len()` and `filter_fetch` was
-        // built for this archetype; `F::Fetch` is `Copy`.
-        if !unsafe { F::filter_fetch(filter_fetch, entity, row) } {
-            continue;
+    // Walk the batch chunk window by chunk window, resolving each table term's
+    // value base once per chunk (design §5.3) — the per-row `fetch` is then pure
+    // offset arithmetic. Batches from `par_for_each` are row-sized and may start
+    // mid-chunk, so we step to the enclosing chunk boundary.
+    let rows_per_chunk = archetype.table().rows_per_chunk().max(1);
+    let mut start = batch.start;
+    while start < batch.end {
+        let chunk = start / rows_per_chunk;
+        let chunk_end = ((chunk + 1) * rows_per_chunk).min(archetype.len());
+        let end = chunk_end.min(batch.end);
+        // SAFETY: `batch.archetype` satisfies `D::matches` (caller contract) —
+        // the precondition of `init_fetch_for_chunk`.
+        let fetch = unsafe {
+            D::init_fetch_for_chunk(
+                data_state, archetype, sparse_sets, last_run, this_run, chunk,
+            )
+        };
+        for (offset, &entity) in entities[start..end].iter().enumerate() {
+            let row = start + offset;
+            // SAFETY: `row < end <= archetype.len()` and `filter_fetch` was built
+            // for this archetype; `F::Fetch` is `Copy`.
+            if !unsafe { F::filter_fetch(filter_fetch, entity, row) } {
+                continue;
+            }
+            // SAFETY: same row/archetype invariants; resolves sparse membership
+            // for sparse-backed required terms. `D::Fetch` is `Copy`.
+            if !unsafe { D::filter_fetch(fetch, entity, row) } {
+                continue;
+            }
+            // SAFETY: `row` lies in this batch's exclusive range and in `fetch`'s
+            // chunk, no other task visits this `(archetype, row)`, so any `&mut`
+            // term yields a unique reference.
+            func(unsafe { D::fetch(fetch, entity, row) });
         }
-        // SAFETY: same row/archetype invariants; resolves sparse membership for
-        // sparse-backed required terms. `D::Fetch` is `Copy`.
-        if !unsafe { D::filter_fetch(fetch, entity, row) } {
-            continue;
-        }
-        // SAFETY: `row` lies in this batch's exclusive range, `fetch` was built
-        // for this archetype, and no other task visits this `(archetype, row)`,
-        // so any `&mut` term yields a unique reference.
-        func(unsafe { D::fetch(fetch, entity, row) });
+        start = end;
     }
 }
 

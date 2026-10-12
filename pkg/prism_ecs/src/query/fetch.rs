@@ -56,10 +56,11 @@ use crate::storage::{Column, ComponentSparseSet, SharedValue, SparseSets};
 /// over table-backed and sparse-backed storage (design §6).
 #[derive(Clone, Copy)]
 pub enum StorageFetch<'w> {
-    /// Table-backed column. `None` only for an `Option<&T>`/`Option<&mut T>`
-    /// term in an archetype that lacks the column; required terms always carry
-    /// `Some` because [`QueryData::matches`] guaranteed the column exists.
-    Table(Option<&'w Column>),
+    /// Table-backed column, resolved to **one chunk window** (design §5.3). `None`
+    /// only for an `Option<&T>`/`Option<&mut T>` term in an archetype that lacks
+    /// the column; required terms always carry `Some` because
+    /// [`QueryData::matches`] guaranteed the column exists.
+    Table(Option<TableFetch<'w>>),
     /// Sparse-backed set. `None` if the sparse component has never been written
     /// (its set was never allocated); otherwise membership is still resolved
     /// per entity by [`QueryData::filter_fetch`].
@@ -70,6 +71,86 @@ pub enum StorageFetch<'w> {
     /// component is immutable and archetype-wide, so there is no per-row
     /// cursor — [`QueryData::fetch`] downcasts the same handle for every row.
     Shared(Option<&'w Arc<dyn SharedValue>>),
+}
+
+/// A table cursor pinned to **one chunk window** of a column (design §5.3).
+///
+/// [`QueryData::init_fetch_for_chunk`] resolves the window's first live row
+/// once, caching the value base and the window's changed-version cell, so the
+/// per-row [`QueryData::fetch`] is a plain `base + (row - first_row) * size`
+/// with **no per-row block lookup and no integer division**. This is the
+/// pattern that lets chunked storage stay cheap: the block is resolved once per
+/// chunk, not once per row.
+#[derive(Clone, Copy)]
+pub struct TableFetch<'w> {
+    column: &'w Column,
+    /// Absolute row of the chunk's first slot.
+    first_row: usize,
+    /// Address of the value at `first_row` (null for an empty chunk).
+    base: *const u8,
+    /// The chunk's changed-version cell, for `&mut T` stamping (null for an
+    /// empty chunk).
+    chunk_cell: *mut Tick,
+}
+
+impl<'w> TableFetch<'w> {
+    /// Resolve the cursor for `chunk` of `column`, whose window is
+    /// `rows_per_chunk` rows wide.
+    #[inline]
+    fn new(column: &'w Column, chunk: usize, rows_per_chunk: usize) -> Self {
+        let first_row = chunk * rows_per_chunk;
+        if first_row < column.len() {
+            Self {
+                column,
+                first_row,
+                // SAFETY: `first_row < len`, so this is a live row.
+                base: unsafe { column.get_ptr(first_row) },
+                // SAFETY: `first_row < len`, so the chunk window exists.
+                chunk_cell: unsafe { column.chunk_changed_ptr(first_row) },
+            }
+        } else {
+            // Empty chunk: never fetched, so dangling sentinels are safe.
+            Self {
+                column,
+                first_row,
+                base: core::ptr::null(),
+                chunk_cell: core::ptr::null_mut(),
+            }
+        }
+    }
+
+    /// Address of the value at `row`, which must lie in this cursor's chunk.
+    #[inline]
+    fn value_ptr<T>(&self, row: usize) -> *mut u8 {
+        debug_assert!(row >= self.first_row);
+        // SAFETY: `row` is in this chunk, so the offset stays inside the window;
+        // the cursor's base is a live value pointer (guaranteed by the non-empty
+        // chunk the caller is iterating).
+        unsafe { (self.base as *mut u8).add((row - self.first_row) * size_of::<T>()) }
+    }
+
+    /// The chunk's changed-version cell (for `&mut T`).
+    #[inline]
+    fn chunk_changed_ptr(&self) -> *mut Tick {
+        self.chunk_cell
+    }
+
+    /// Ticks of the value at `row`.
+    #[inline]
+    fn added_tick(&self, row: usize) -> Tick {
+        self.column.added_tick(row)
+    }
+
+    /// Pointer to the value at `row`'s changed-tick cell.
+    ///
+    /// # Safety
+    /// The caller must hold unique access to `row` (the same discipline as
+    /// [`Column::changed_tick_ptr`]).
+    #[inline]
+    unsafe fn changed_tick_ptr(&self, row: usize) -> *mut Tick {
+        // SAFETY: forwarded contract — `row` is in this chunk, hence `< len`.
+        unsafe { self.column.changed_tick_ptr(row) }
+    }
 }
 
 /// A query term describing the typed data read from each matched row.
@@ -131,6 +212,33 @@ pub unsafe trait QueryData {
         last_run: Tick,
         this_run: Tick,
     ) -> Self::Fetch<'w>;
+
+    /// Resolve the fetch cursor for the **chunk window `chunk`** of `archetype`
+    /// (design §5.3 physical chunks).
+    ///
+    /// The caller is about to read rows `[chunk * rows_per_chunk,
+    /// (chunk + 1) * rows_per_chunk)` of `archetype`, so a table-backed term can
+    /// resolve the chunk's value base and changed-version cell *once* and let
+    /// [`fetch`](QueryData::fetch) do plain offset arithmetic per row (no
+    /// per-row block lookup / division). Terms with no per-row cursor (entity,
+    /// sparse, shared, [`Has`]) ignore the chunk through the default forward to
+    /// [`init_fetch`](QueryData::init_fetch).
+    ///
+    /// # Safety
+    /// Same contract as [`init_fetch`](QueryData::init_fetch): `archetype` must
+    /// satisfy [`QueryData::matches`] for `state`.
+    unsafe fn init_fetch_for_chunk<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
+        last_run: Tick,
+        this_run: Tick,
+        chunk: usize,
+    ) -> Self::Fetch<'w> {
+        let _ = chunk;
+        // SAFETY: forwarded contract.
+        unsafe { Self::init_fetch(state, archetype, sparse_sets, last_run, this_run) }
+    }
 
     /// Per-row presence gate, evaluated **before** [`fetch`](QueryData::fetch).
     ///
@@ -196,13 +304,32 @@ unsafe impl<T: Component> QueryData for &T {
         _last_run: Tick,
         _this_run: Tick,
     ) -> Self::Fetch<'w> {
+        // A whole-archetype cursor starts at the first chunk; callers that walk
+        // a specific chunk use `init_fetch_for_chunk` instead.
+        // SAFETY: `chunk == 0` is the archetype's first window.
+        unsafe { Self::init_fetch_for_chunk(state, archetype, sparse_sets, _last_run, _this_run, 0) }
+    }
+
+    unsafe fn init_fetch_for_chunk<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
+        _last_run: Tick,
+        _this_run: Tick,
+        chunk: usize,
+    ) -> Self::Fetch<'w> {
         match T::STORAGE {
-            StorageType::Table => StorageFetch::Table(Some(
-                archetype
-                    .table()
+            StorageType::Table => {
+                let table = archetype.table();
+                let column = table
                     .column(*state)
-                    .expect("matches() guaranteed the column exists"),
-            )),
+                    .expect("matches() guaranteed the column exists");
+                StorageFetch::Table(Some(TableFetch::new(
+                    column,
+                    chunk,
+                    table.rows_per_chunk(),
+                )))
+            }
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
             StorageType::Shared => StorageFetch::Shared(Some(
                 archetype
@@ -227,9 +354,10 @@ unsafe impl<T: Component> QueryData for &T {
         match fetch {
             // SAFETY: `row < len` per the caller's contract, the column stores
             // `T`, and shared `&T` access cannot alias a mutable borrow
-            // (enforced by the access conflict check). The lifetime is tied to
-            // `'w` — the world borrow held for the whole iteration.
-            StorageFetch::Table(Some(col)) => unsafe { &*col.get_ptr(row).cast::<T>() },
+            // (enforced by the access conflict check); `row` is in the cursor's
+            // chunk, so the offset stays inside the window. The lifetime is tied
+            // to `'w` — the world borrow held for the whole iteration.
+            StorageFetch::Table(Some(t)) => unsafe { &*t.value_ptr::<T>(row).cast::<T>() },
             // SAFETY: `filter_fetch` admitted this row only when the set holds
             // `entity`, so `get` is `Some`; the set stores `T`, and shared `&T`
             // access cannot alias a mutable borrow.
@@ -287,13 +415,33 @@ unsafe impl<T: Component> QueryData for &mut T {
         last_run: Tick,
         this_run: Tick,
     ) -> Self::Fetch<'w> {
+        // Whole-archetype cursor: start at the first chunk.
+        // SAFETY: `chunk == 0` is the archetype's first window.
+        unsafe {
+            Self::init_fetch_for_chunk(state, archetype, sparse_sets, last_run, this_run, 0)
+        }
+    }
+
+    unsafe fn init_fetch_for_chunk<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
+        last_run: Tick,
+        this_run: Tick,
+        chunk: usize,
+    ) -> Self::Fetch<'w> {
         let storage = match T::STORAGE {
-            StorageType::Table => StorageFetch::Table(Some(
-                archetype
-                    .table()
+            StorageType::Table => {
+                let table = archetype.table();
+                let column = table
                     .column(*state)
-                    .expect("matches() guaranteed the column exists"),
-            )),
+                    .expect("matches() guaranteed the column exists");
+                StorageFetch::Table(Some(TableFetch::new(
+                    column,
+                    chunk,
+                    table.rows_per_chunk(),
+                )))
+            }
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
             // `init_state` already rejected a shared component for this term.
             StorageType::Shared => unreachable!("shared storage rejected at init_state"),
@@ -313,22 +461,22 @@ unsafe impl<T: Component> QueryData for &mut T {
     unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
         let (storage, last_run, this_run) = fetch;
         match storage {
-            StorageFetch::Table(Some(col)) => {
-                let added = col.added_tick(row);
+            StorageFetch::Table(Some(t)) => {
+                let added = t.added_tick(row);
                 // SAFETY: `row < len`; the column stores `T`; the write is
                 // exclusive (access check rejects any other borrow) and the
                 // driver fetches each `(archetype, row)` at most once, so this
                 // `&mut T` is unique for `'w`. The value bytes and the
                 // changed-tick cell live in separate allocations, so the two
                 // `&mut` below never alias.
-                let value = unsafe { &mut *col.get_ptr(row).cast::<T>() };
+                let value = unsafe { &mut *t.value_ptr::<T>(row).cast::<T>() };
                 // SAFETY: as above — unique access to this row's changed-tick
                 // cell.
-                let changed = unsafe { &mut *col.changed_tick_ptr(row) };
-                // SAFETY: `row < len`; the raw chunk-version pointer is only
-                // written (with `this_run`) by `Mut`, never turned into an
-                // aliasing `&mut`.
-                let chunk_changed = unsafe { col.chunk_changed_ptr(row) };
+                let changed = unsafe { &mut *t.changed_tick_ptr(row) };
+                // The chunk-version cell was resolved once for this window at
+                // fetch init; it is only ever written (with `this_run`) by
+                // `Mut`, never turned into an aliasing `&mut`.
+                let chunk_changed = t.chunk_changed_ptr();
                 Mut::new(
                     value,
                     changed,
@@ -429,8 +577,29 @@ unsafe impl<T: Component> QueryData for Option<&T> {
         _last_run: Tick,
         _this_run: Tick,
     ) -> Self::Fetch<'w> {
+        // SAFETY: `chunk == 0` is the archetype's first window.
+        unsafe {
+            Self::init_fetch_for_chunk(state, archetype, sparse_sets, _last_run, _this_run, 0)
+        }
+    }
+
+    unsafe fn init_fetch_for_chunk<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
+        _last_run: Tick,
+        _this_run: Tick,
+        chunk: usize,
+    ) -> Self::Fetch<'w> {
         match T::STORAGE {
-            StorageType::Table => StorageFetch::Table(archetype.table().column(*state)),
+            StorageType::Table => {
+                let table = archetype.table();
+                StorageFetch::Table(
+                    table
+                        .column(*state)
+                        .map(|col| TableFetch::new(col, chunk, table.rows_per_chunk())),
+                )
+            }
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
             StorageType::Shared => StorageFetch::Shared(archetype.shared_arc(*state)),
         }
@@ -439,8 +608,14 @@ unsafe impl<T: Component> QueryData for Option<&T> {
     unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
         match fetch {
             // SAFETY: when `Some`, `row < len` and the column stores `T`; shared
-            // access cannot alias a mutable borrow.
-            StorageFetch::Table(opt) => opt.map(|col| unsafe { &*col.get_ptr(row).cast::<T>() }),
+            // access cannot alias a mutable borrow; `row` is in the cursor's
+            // chunk.
+            StorageFetch::Table(opt) => opt.map(|t| {
+                // SAFETY: when `Some`, `row < len` and the cursor's chunk holds
+                // `row`, so `value_ptr` stays inside the window and the column
+                // stores `T`; shared access cannot alias a mutable borrow.
+                unsafe { &*t.value_ptr::<T>(row).cast::<T>() }
+            }),
             // SAFETY: the set stores `T`; `get` validates membership and returns
             // `None` for an absent entity. Shared access cannot alias a mutable
             // borrow.
@@ -486,8 +661,29 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
         last_run: Tick,
         this_run: Tick,
     ) -> Self::Fetch<'w> {
+        // SAFETY: `chunk == 0` is the archetype's first window.
+        unsafe {
+            Self::init_fetch_for_chunk(state, archetype, sparse_sets, last_run, this_run, 0)
+        }
+    }
+
+    unsafe fn init_fetch_for_chunk<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
+        last_run: Tick,
+        this_run: Tick,
+        chunk: usize,
+    ) -> Self::Fetch<'w> {
         let storage = match T::STORAGE {
-            StorageType::Table => StorageFetch::Table(archetype.table().column(*state)),
+            StorageType::Table => {
+                let table = archetype.table();
+                StorageFetch::Table(
+                    table
+                        .column(*state)
+                        .map(|col| TableFetch::new(col, chunk, table.rows_per_chunk())),
+                )
+            }
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
             // `init_state` already rejected a shared component for this term.
             StorageType::Shared => unreachable!("shared storage rejected at init_state"),
@@ -498,20 +694,20 @@ unsafe impl<T: Component> QueryData for Option<&mut T> {
     unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
         let (storage, last_run, this_run) = fetch;
         match storage {
-            StorageFetch::Table(opt) => opt.map(|col| {
-                let added = col.added_tick(row);
+            StorageFetch::Table(opt) => opt.map(|t| {
+                let added = t.added_tick(row);
                 // SAFETY: when `Some`, `row < len`, the column stores `T`, the
                 // write is exclusive, and each row is fetched once — so the
                 // `&mut T` is unique. Value bytes and the changed-tick cell are
                 // distinct allocations, so the two `&mut` below do not alias.
-                let value = unsafe { &mut *col.get_ptr(row).cast::<T>() };
+                let value = unsafe { &mut *t.value_ptr::<T>(row).cast::<T>() };
                 // SAFETY: as above — unique access to this row's changed-tick
                 // cell.
-                let changed = unsafe { &mut *col.changed_tick_ptr(row) };
-                // SAFETY: `row < len`; the raw chunk-version pointer is only
-                // written (with `this_run`) by `Mut`, never turned into an
-                // aliasing `&mut`.
-                let chunk_changed = unsafe { col.chunk_changed_ptr(row) };
+                let changed = unsafe { &mut *t.changed_tick_ptr(row) };
+                // The chunk-version cell was resolved once at fetch init; it is
+                // only ever written (with `this_run`) by `Mut`, never turned
+                // into an aliasing `&mut`.
+                let chunk_changed = t.chunk_changed_ptr();
                 Mut::new(
                     value,
                     changed,
@@ -587,13 +783,32 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
         last_run: Tick,
         this_run: Tick,
     ) -> Self::Fetch<'w> {
+        // SAFETY: `chunk == 0` is the archetype's first window.
+        unsafe {
+            Self::init_fetch_for_chunk(state, archetype, sparse_sets, last_run, this_run, 0)
+        }
+    }
+
+    unsafe fn init_fetch_for_chunk<'w>(
+        state: &Self::State,
+        archetype: &'w Archetype,
+        sparse_sets: &'w SparseSets,
+        last_run: Tick,
+        this_run: Tick,
+        chunk: usize,
+    ) -> Self::Fetch<'w> {
         let storage = match T::STORAGE {
-            StorageType::Table => StorageFetch::Table(Some(
-                archetype
-                    .table()
+            StorageType::Table => {
+                let table = archetype.table();
+                let column = table
                     .column(*state)
-                    .expect("matches() guaranteed the column exists"),
-            )),
+                    .expect("matches() guaranteed the column exists");
+                StorageFetch::Table(Some(TableFetch::new(
+                    column,
+                    chunk,
+                    table.rows_per_chunk(),
+                )))
+            }
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
             // `init_state` already rejected a shared component for this term.
             StorageType::Shared => unreachable!("shared storage rejected at init_state"),
@@ -613,15 +828,15 @@ unsafe impl<T: Component> QueryData for Ref<'_, T> {
     unsafe fn fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> Self::Item<'w> {
         let (storage, last_run, this_run) = fetch;
         match storage {
-            StorageFetch::Table(Some(col)) => {
+            StorageFetch::Table(Some(t)) => {
                 // SAFETY: `row < len`; the column stores `T`; shared `&T` access
                 // cannot alias a mutable borrow (the access check rejects a
-                // conflicting write).
-                let value = unsafe { &*col.get_ptr(row).cast::<T>() };
+                // conflicting write); `row` is in the cursor's chunk.
+                let value = unsafe { &*t.value_ptr::<T>(row).cast::<T>() };
                 Ref::new(
                     value,
-                    col.added_tick(row),
-                    col.changed_tick(row),
+                    t.added_tick(row),
+                    t.column.changed_tick(row),
                     last_run,
                     this_run,
                 )
@@ -722,7 +937,16 @@ unsafe impl<T: Component> QueryData for Has<T> {
         _this_run: Tick,
     ) -> Self::Fetch<'w> {
         match T::STORAGE {
-            StorageType::Table => StorageFetch::Table(archetype.table().column(*state)),
+            StorageType::Table => {
+                // `Has` only reports presence and never reads a value, so the
+                // cursor's chunk is irrelevant; any window works.
+                let table = archetype.table();
+                StorageFetch::Table(
+                    table
+                        .column(*state)
+                        .map(|col| TableFetch::new(col, 0, table.rows_per_chunk())),
+                )
+            }
             StorageType::SparseSet => StorageFetch::Sparse(sparse_sets.get(*state)),
             StorageType::Shared => StorageFetch::Shared(archetype.shared_arc(*state)),
         }
@@ -780,6 +1004,25 @@ macro_rules! impl_query_data_tuple {
                 let ($($T,)+) = state;
                 // SAFETY: forwarded — `matches` held for every element.
                 unsafe { ($($T::init_fetch($T, archetype, sparse_sets, last_run, this_run),)+) }
+            }
+
+            unsafe fn init_fetch_for_chunk<'w>(
+                state: &Self::State,
+                archetype: &'w Archetype,
+                sparse_sets: &'w SparseSets,
+                last_run: Tick,
+                this_run: Tick,
+                chunk: usize,
+            ) -> Self::Fetch<'w> {
+                let ($($T,)+) = state;
+                // SAFETY: forwarded — same chunk window for every element.
+                unsafe {
+                    ($(
+                        $T::init_fetch_for_chunk(
+                            $T, archetype, sparse_sets, last_run, this_run, chunk,
+                        ),
+                    )+)
+                }
             }
 
             unsafe fn filter_fetch<'w>(fetch: Self::Fetch<'w>, entity: Entity, row: usize) -> bool {
@@ -905,6 +1148,30 @@ macro_rules! impl_any_of {
                     ($(
                         if $T::matches($T, archetype) {
                             Some($T::init_fetch($T, archetype, sparse_sets, last_run, this_run))
+                        } else {
+                            None
+                        },
+                    )+)
+                }
+            }
+
+            unsafe fn init_fetch_for_chunk<'w>(
+                state: &Self::State,
+                archetype: &'w Archetype,
+                sparse_sets: &'w SparseSets,
+                last_run: Tick,
+                this_run: Tick,
+                chunk: usize,
+            ) -> Self::Fetch<'w> {
+                let ($($T,)+) = state;
+                // SAFETY: forwarded per element, same chunk window, under the
+                // same per-element `matches` contract as `init_fetch`.
+                unsafe {
+                    ($(
+                        if $T::matches($T, archetype) {
+                            Some($T::init_fetch_for_chunk(
+                                $T, archetype, sparse_sets, last_run, this_run, chunk,
+                            ))
                         } else {
                             None
                         },

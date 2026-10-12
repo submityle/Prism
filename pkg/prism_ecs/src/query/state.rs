@@ -809,14 +809,23 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         }
         let sparse_sets = world_ref.sparse_sets();
         let row = location.row as usize;
+        let chunk = row / archetype.table().rows_per_chunk().max(1);
         debug_assert!(
             row < archetype.len(),
             "entity location row must index a live row of its archetype"
         );
         // SAFETY: `archetype` satisfies `D::matches` (checked above), the
-        // contract of `init_fetch`.
+        // contract of `init_fetch_for_chunk`. Resolving the specific chunk lets a
+        // table term cache the window's value base (design §5.3).
         let fetch = unsafe {
-            D::init_fetch(&self.data_state, archetype, sparse_sets, last_run, this_run)
+            D::init_fetch_for_chunk(
+                &self.data_state,
+                archetype,
+                sparse_sets,
+                last_run,
+                this_run,
+                chunk,
+            )
         };
         // SAFETY: the same archetype also satisfies `F::matches`, the contract
         // of `F::init_fetch`.
