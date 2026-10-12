@@ -606,13 +606,16 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 **✅ 已完成**
 
 - **P1-f 规范对齐：`specular_roughness_anisotropy` / `transmission_depth` 标识符对齐规范**（§4.4）
-  - 依据 `AcademySoftwareFoundation/OpenPBR` 的 `parametrization.md.html`（v1.1.1 全参数表，逐行比对，非自证）复核后，确认**瓣集合本身已齐全**（base / specular / transmission / subsurface / coat / fuzz / emission / thin-film / geometry 九组、共 42 个规范参数全部有对应物），缺口只剩**标识符**与**两处行为语义**。本轮先清掉标识符：
+  - 依据 `AcademySoftwareFoundation/OpenPBR` 的 `parametrization.md.html`（v1.1.1 全参数表，逐行比对，非自证）复核后，确认**瓣集合本身已齐全**（base 4 / specular 5 / transmission 7 / subsurface 5 / coat 6 / fuzz 3 / emission 2 / thin-film 3 / geometry 6，共 **41** 个规范参数全部有对应物），缺口只剩**标识符**与**两处行为语义**。本轮先清掉标识符：
     - `anisotropy` → **`specular_roughness_anisotropy`**（schema `name`）；
     - `thickness` → **`transmission_depth`**（schema `name`）。
   - **零字长 / 零生成物变化**：两者都通过 schema 新增的 `surface_field` 覆盖保留了解码后 fat 结构里的历史短名（`anisotropy` / `thickness`），所以 `GpuAnisotropyLobe` / `GpuTransmissionLobe` 字段布局不变、生成的 `material_unpack.wesl` 与 `surface_layout.rs` **逐字节不变**（`codegen_freshness` 保持绿）。这是把 `surface_field`（原本用于 face 瓣的 `softness`→`face_softness` 命名空间化）推广为"规范标识符 ↔ Prism 内部短名"的解耦点。
   - 代码：`pkg/prism_material_schema/schema/surface.toml`（2 处 `name` + `surface_field` + 语义注释）、`pkg/prism_render_material/tests/schema_parity.rs`（`authored_components` 的两条 match 臂改到规范名）、本文 §4.4 对账表与结论段。
   - 门禁：`cargo test -p prism_material_schema` **13 通过**、`cargo test -p prism_render_material --test schema_parity` **6 通过**；`prism-material-codegen write` 后 `material_unpack.wesl` / `surface_layout.rs` 无 diff。
-  - **仍未完成（诚实边界，不再是"待细化"）**：①`transmission_depth` **行为**——规范是"到达 `transmission_color` 的参考长度"、`depth==0` 退化为非物理 tint，Prism 仍把该值当光学深度指数；②`specular_roughness_anisotropy` 的 GGX 伸长**公式**（Prism `aspect` 映射 vs 规范参考 alpha 公式）；③6 个**默认值**偏差（刻意保旧外观，schema 注释已逐条写明）。
+  - **仍未完成（已定位，不再是"待细化"）**：
+    ① `transmission_depth` **行为**——规范是"到达 `transmission_color` 的参考长度"、`depth==0` 退化为非物理 tint；Prism 仍把该值当光学深度指数。**卡点已查清**：shade-time 的 `SurfaceSample.thickness` 被**一字段两用**——既驱动 transmission 瓣的 Beer-Lambert，又被 `cloth_advanced`（薄织物背光 + 虹彩 sheen 膜厚）当 `[0,1]` 光学膜厚读。所以先把两处拆成独立 shade-time 字段（`transmission_depth` vs cloth film thickness），再改语义，否则会连带改掉织物外观。这是一项独立、有明确边界的工作，不与本次标识符对齐混做。
+    ② `specular_roughness_anisotropy` 的 GGX 伸长**公式**（Prism `aspect = sqrt(1-0.9a)` 映射 vs 规范参考的 alpha 公式）——只影响 `a > 0` 的材质，`a == 0` 逐位不变。
+    ③ 6 个**默认值**偏差（`base_color` 1.0 vs 0.8、`specular_roughness` 0.5 vs 0.3、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1、`subsurface_color` 白 vs 0.8、`emission_luminance` 1 vs 0）——刻意保旧材质外观，schema 注释已逐条写明；改它们会动金标准，属显式的产品决策而非遗漏。
 
 - **P1-f 规范对齐：ABI 字段名统一到 OpenPBR 规范名**（§4.4）
   - 把 11 处"同义不同名"的 ABI 字段改成规范标识符，这是"纯 OpenPBR 子集字节等价"的最后一道命名门槛：
