@@ -38,6 +38,46 @@ pub enum QueryEntityError {
     QueryDoesNotMatch(Entity),
 }
 
+impl core::fmt::Display for QueryEntityError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoSuchEntity(entity) => {
+                write!(f, "entity {entity:?} does not exist (never allocated or despawned)")
+            }
+            Self::QueryDoesNotMatch(entity) => {
+                write!(f, "entity {entity:?} does not match the query")
+            }
+        }
+    }
+}
+
+impl core::error::Error for QueryEntityError {}
+
+/// Why [`QueryState::single`] / [`QueryState::single_mut`] could not produce a
+/// unique item (design §7 cardinality-constrained access).
+///
+/// Carries the query's data-term type name (`core::any::type_name::<D>()`) so a
+/// diagnostic can name the offending query, mirroring Bevy's `QuerySingleError`
+/// shape without pulling in a name-caching dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuerySingleError {
+    /// Nothing matched the query this frame.
+    NoEntities(&'static str),
+    /// More than one entity matched the query.
+    MultipleEntities(&'static str),
+}
+
+impl core::fmt::Display for QuerySingleError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoEntities(name) => write!(f, "no entities fit the query {name}"),
+            Self::MultipleEntities(name) => write!(f, "multiple entities fit the query {name}"),
+        }
+    }
+}
+
+impl core::error::Error for QuerySingleError {}
+
 /// Incrementally-maintained set of archetypes a query matches.
 ///
 /// Archetype component sets are immutable and archetypes are never removed from
@@ -258,6 +298,90 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // is the sole route to the world during the fetch; a `&mut` term
         // therefore yields a unique reference valid for `'w`.
         unsafe { self.get_from_ptr(world_ptr, entity, last_run, this_run) }
+    }
+
+    /// Fetch the single matching row over a shared view of `world`, or report
+    /// why the query does not have exactly one match (design §7
+    /// cardinality-constrained access).
+    ///
+    /// This is the cardinality-constrained companion of [`get`](Self::get):
+    /// instead of naming an entity it asserts "exactly one entity matches". It
+    /// walks the matched archetypes lazily and stops as soon as a second row is
+    /// observed, so the single-match case never scans past the first row and
+    /// the multi-match case never scans past the second.
+    ///
+    /// Only read-only data terms are reachable (the `D: `[`ReadOnlyQueryData`]
+    /// bound), so a shared borrow is sufficient and several concurrent reads
+    /// may coexist.
+    ///
+    /// # Errors
+    /// - [`QuerySingleError::NoEntities`] if nothing matched this frame.
+    /// - [`QuerySingleError::MultipleEntities`] if two or more entities matched
+    ///   (including when a per-row [`Added`](crate::query::Added) /
+    ///   [`Changed`](crate::query::Changed) gate admits more than one).
+    #[inline]
+    pub fn single<'w, 's>(&'s self, world: &'w World) -> Result<D::Item<'w>, QuerySingleError>
+    where
+        D: ReadOnlyQueryData,
+    {
+        Self::single_from_iter(self.iter(world))
+    }
+
+    /// Fetch the single matching row over an exclusive view of `world`,
+    /// permitting `&mut T` terms.
+    ///
+    /// The mutable counterpart of [`single`](Self::single); see it for the
+    /// cardinality contract.
+    ///
+    /// # Errors
+    /// See [`single`](Self::single).
+    #[inline]
+    pub fn single_mut<'w, 's>(
+        &'s self,
+        world: &'w mut World,
+    ) -> Result<D::Item<'w>, QuerySingleError> {
+        Self::single_from_iter(self.iter_mut(world))
+    }
+
+    /// Take the first item of `iter` and reject if a second is present.
+    ///
+    /// Factored out so the shared and exclusive entry points (and the `Query`
+    /// param's raw-pointer path) share one definition of the cardinality check.
+    /// The matched rows are visited disjointly, so holding the first item while
+    /// probing for a second never aliases a `&mut T` term.
+    #[inline]
+    fn single_from_iter<'w, 's>(
+        mut iter: QueryIter<'w, 's, D, F>,
+    ) -> Result<D::Item<'w>, QuerySingleError> {
+        let first = iter.next();
+        let extra = iter.next().is_some();
+        match (first, extra) {
+            (Some(item), false) => Ok(item),
+            (None, _) => Err(QuerySingleError::NoEntities(core::any::type_name::<D>())),
+            (Some(_), _) => {
+                Err(QuerySingleError::MultipleEntities(core::any::type_name::<D>()))
+            }
+        }
+    }
+
+    /// Fetch the single matching row from a raw `*mut World`.
+    ///
+    /// Shared engine of the `Query` system parameter's `single` / `single_mut`,
+    /// which only ever hold a `*mut World`.
+    ///
+    /// # Safety
+    /// Identical to [`iter_from_ptr`](Self::iter_from_ptr): `world` must be
+    /// valid for `'w` and the caller must guarantee that no other live borrow
+    /// aliases the columns this query's `D`/`F` terms touch.
+    pub(crate) unsafe fn single_from_ptr<'w, 's>(
+        &'s self,
+        world: *mut World,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Result<D::Item<'w>, QuerySingleError> {
+        // SAFETY: the caller upholds the `iter_from_ptr` contract.
+        let iter = unsafe { self.iter_from_ptr(world, last_run, this_run) };
+        Self::single_from_iter(iter)
     }
 
     /// Random-access fetch of a single `entity` from a raw `*mut World`.

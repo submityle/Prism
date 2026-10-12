@@ -39,12 +39,14 @@ pub use iter::QueryIter;
 pub use simd::{active, add_assign, axpy_assign, scale_assign, sum, Backend};
 #[cfg(feature = "multi_thread")]
 pub use slice::{ArchetypalFilter, ColumnSliceData};
-pub use state::{QueryEntityError, QueryState};
+pub use state::{QueryEntityError, QuerySingleError, QueryState};
 
 #[cfg(test)]
 mod any_of_tests;
 #[cfg(test)]
 mod get_tests;
+#[cfg(test)]
+mod single_tests;
 #[cfg(test)]
 mod change_detection_tests;
 #[cfg(test)]

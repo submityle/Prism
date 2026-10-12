@@ -16,7 +16,8 @@
 
 use crate::entity::Entity;
 use crate::query::{
-    Access, QueryData, QueryEntityError, QueryFilter, QueryIter, QueryState, ReadOnlyQueryData,
+    Access, QueryData, QueryEntityError, QueryFilter, QueryIter, QuerySingleError, QueryState,
+    ReadOnlyQueryData,
 };
 #[cfg(feature = "multi_thread")]
 use crate::query::{ArchetypalFilter, ColumnSliceData};
@@ -133,6 +134,53 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         D: ReadOnlyQueryData,
     {
         self.get(entity).is_ok()
+    }
+
+    /// Fetch the single matching row with shared access, or report why the
+    /// query does not have exactly one match this frame.
+    ///
+    /// The system-param face of [`QueryState::single`](crate::query::QueryState::single):
+    /// it stops at the first row in the single-match case and at the second in
+    /// the multi-match case.
+    ///
+    /// # Errors
+    /// - [`QuerySingleError::NoEntities`] if nothing matched this frame.
+    /// - [`QuerySingleError::MultipleEntities`] if two or more entities matched.
+    #[inline]
+    pub fn single(&self) -> Result<D::Item<'_>, QuerySingleError>
+    where
+        D: ReadOnlyQueryData,
+    {
+        // SAFETY: `self.world` is live for `'w`; `D: ReadOnlyQueryData` means no
+        // `&mut` fetch is formed, and this system's declared read access
+        // guarantees nothing writes the columns we read.
+        unsafe {
+            self.state.single_from_ptr(
+                self.world.as_ptr(),
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
+    }
+
+    /// Fetch the single matching row with exclusive access, permitting
+    /// `&mut T`. Takes `&mut self` so the borrow checker forbids holding the
+    /// single fetch alongside any other fetch of this query.
+    ///
+    /// # Errors
+    /// See [`single`](Self::single).
+    #[inline]
+    pub fn single_mut(&mut self) -> Result<D::Item<'_>, QuerySingleError> {
+        // SAFETY: `self.world` is live for `'w`; `&mut self` makes this the sole
+        // live fetch of this query, and the system's declared write access
+        // guarantees nothing else touches the columns we write.
+        unsafe {
+            self.state.single_from_ptr(
+                self.world.as_ptr(),
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
     }
 
     /// Visit every matched row with shared access.

@@ -311,3 +311,62 @@ fn query_param_random_access_get_and_contains() {
     );
 
 }
+
+/// `Query::single` / `single_mut` are the cardinality-constrained system-param
+/// accessors: the mutable face writes through the sole match, and the read-only
+/// face surfaces both [`QuerySingleError`] cases (none / several).
+#[test]
+fn query_param_single_and_single_mut() {
+    use crate::query::QuerySingleError;
+
+    // Mutable single: writes through the only match.
+    let mut world = World::new();
+    let sole = world.spawn(Health(5));
+
+    fn bump(mut q: Query<&mut Health>) {
+        let mut h = q.single_mut().expect("exactly one Health");
+        h.0 += 10;
+    }
+
+    let mut bump_sys = IntoSystem::into_system(bump);
+    bump_sys.initialize(&mut world);
+    bump_sys.run(&mut world);
+    assert_eq!(world.get::<Health>(sole).map(|h| h.0), Some(15));
+
+    // Read-only single resolves the sole match.
+    let mut one = World::new();
+    one.spawn(Health(33));
+
+    fn read(q: Query<&Health>) {
+        assert_eq!(q.single().expect("sole match").0, 33);
+    }
+
+    let mut read_sys = IntoSystem::into_system(read);
+    read_sys.initialize(&mut one);
+    read_sys.run(&mut one);
+
+    // No matches -> NoEntities.
+    let mut empty = World::new();
+
+    fn missing(q: Query<&Health>) {
+        assert!(matches!(q.single(), Err(QuerySingleError::NoEntities(_))));
+    }
+
+    let mut missing_sys = IntoSystem::into_system(missing);
+    missing_sys.initialize(&mut empty);
+    missing_sys.run(&mut empty);
+
+    // Two matches -> MultipleEntities.
+    world.spawn(Health(20));
+
+    fn ambiguous(q: Query<&Health>) {
+        assert!(matches!(
+            q.single(),
+            Err(QuerySingleError::MultipleEntities(_))
+        ));
+    }
+
+    let mut ambiguous_sys = IntoSystem::into_system(ambiguous);
+    ambiguous_sys.initialize(&mut world);
+    ambiguous_sys.run(&mut world);
+}
