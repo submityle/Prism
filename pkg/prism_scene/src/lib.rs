@@ -48,6 +48,7 @@ extern crate alloc;
 
 pub mod identity;
 pub mod instance;
+pub mod instantiate;
 pub mod layers;
 pub mod overrides;
 pub mod path;
@@ -58,8 +59,14 @@ pub mod template;
 
 pub use identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
 pub use instance::SceneInstance;
+pub use instantiate::{
+    despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneSpawn, TypedSpawnError,
+    TypedSpawnPlan,
+};
 pub use layers::{compose_layers, OrphanKey, OverrideComposition};
-pub use overrides::{ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride, StructuralOp};
+pub use overrides::{
+    ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride, StructuralOp,
+};
 pub use path::{FieldPath, FieldSegment};
 pub use plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
 pub use remap::RemapTable;
@@ -70,6 +77,10 @@ pub use template::{NestedSlot, SceneTemplate};
 pub mod prelude {
     pub use crate::identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
     pub use crate::instance::SceneInstance;
+    pub use crate::instantiate::{
+        despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneSpawn,
+        TypedSpawnError, TypedSpawnPlan,
+    };
     pub use crate::layers::{compose_layers, OrphanKey, OverrideComposition};
     pub use crate::overrides::{
         ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride,

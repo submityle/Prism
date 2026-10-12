@@ -110,13 +110,20 @@ fn nested_variant_replay_drops_orphans_across_layers() {
         local: LocalEntityId::new(0),
     });
     let dropped = replay.drop_orphans();
-    assert_eq!(dropped.len(), 1, "the removed target's override is orphaned");
+    assert_eq!(
+        dropped.len(),
+        1,
+        "the removed target's override is orphaned"
+    );
     assert_eq!(dropped[0].0, LocalEntityId::new(0));
     assert_eq!(replay.property_count(), 0);
 
     // Entity 1's override in the instance layer is unaffected.
     assert_eq!(instance_layer.property_count(), 2);
-    assert_eq!(instance_layer.removed_entities(), vec![LocalEntityId::new(0)]);
+    assert_eq!(
+        instance_layer.removed_entities(),
+        vec![LocalEntityId::new(0)]
+    );
 }
 
 /// `PersistentId` is stable regardless of where the entity moves within the
@@ -154,7 +161,10 @@ fn template_instance_overrides_compose() {
 
     let root = template.local_of("root").unwrap();
     assert!(template.contains_local(root));
-    assert_eq!(template.nested_at(LocalEntityId::new(1)).unwrap().template, guid(2));
+    assert_eq!(
+        template.nested_at(LocalEntityId::new(1)).unwrap().template,
+        guid(2)
+    );
 
     let mut remap = RemapTable::new();
     for i in 0..template.entity_count() {

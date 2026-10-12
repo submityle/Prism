@@ -10,12 +10,13 @@
 > - **确定性回放**：事件溯源（Event Sourcing，仅借「delta 可确定性重放」形态，不引入其并发真相源）
 > 本文为纯经典数据结构 + 序列化 + 实例化路线，**不含任何 AI/ML 内容**，不含任何 Unreal/Unity 源码或衍生代码。
 
-- 版本： v0.3（设计阶段，未进入编码；本轮 §24 深化为 14 子节：预制体接口暴露参数(§24.1)/构造式参数化预制体(§24.2)/散布规则库(§24.3)/菱形继承 C3 消歧(§24.4)/prefab LOD 链(§24.5)/稳定子对象寻址(§24.6)/引用完整性级联(§24.7)/三方合并软锁(§24.8)/数据层+Level Instance 对称(§24.9)/Prefab Stage apply-revert(§24.10)/HLOD 代理(§24.11)/分帧实例化去重(§24.12)/网络复制+序列绑定(§24.13)/场景查询标签代数(§24.14)；承前深化：§8.5 列去重与缓存微架构、§11.4 HLOD 簇代理、§12.3 预测式预取、§16.4 网络复制对称、§19.7 撤销/重做与安全重命名；clean-slate 全新 crate，无旧 API 需保留。承接 `prism_ecs`/`prism_asset`/`prism_transform` 已定稿设计，向下复用其身份/存储/依赖/句柄/层级核；向上为重做后的世界系统提供「作者内容单元」契约）
+- 版本： v0.3（设计与实现同步版；§24 仍含 14 个 AAA 深化子节；`pkg/prism_scene` 已落地 M0 核心模型及 spawn/despawn typed vertical slice，其余 bake/streaming/hot-reload 等能力仍按路线图推进。clean-slate 全新 crate，无旧 API 需保留。承接 `prism_ecs`/`prism_asset`/`prism_transform` 已定稿设计，向下复用其身份/存储/依赖/句柄/层级核；向上为重做后的世界系统提供「作者内容单元」契约）
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_ecs`（批量预留/chunk 列写入/`serialize`/`determinism`）、`prism_asset`（`StableGuid`/软引用/依赖闭包就绪/EDL/单文件资产包/热重载 `Modified`）、`prism_transform`（关系驱动层级）、`prism_reflect`（字段路径/override 值序列化/编辑器属性枚举）、`prism_tasks`（并行实例化）、`prism_diagnostic`（计数器/trace）
 - 层级定位： 内容层 L5；上接世界系统（流送基座）/渲染/物理/脚本/编辑器，下接 `prism_ecs`/`prism_asset`/`prism_transform`
 - 明确约束： 核心 `no_std + alloc`；`std`/`async_io`/`hot_reload`/`editor`/`determinism`/`persist` 为 feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**
 - 架构立场： **scene 是单一逻辑真相**（作者编辑的实体内容），世界系统降级为架在其上的「空间流送 + 常驻残留 + 持久化」基座，不另立平行真相源（取代旧 `prism_world_system_design_zh.md` 的 WorldDB-as-truth 定位，该文将按本 crate 契约重写为去 Bevy 多 crate 版本）
+- 烘焙归属： 本文所述“烘焙期”产物中，实例化计划 / World Partition Cell / 内容寻址列去重为 `OfflineShipped`，HLOD 簇代理为 `OfflineShipped`（编辑器预览为 `OfflineEditorOnly`），`TransformStatic` 静态变换烘焙为 `OfflineEditorOnly`；离线 DAG、缓存键与 DDC/CAS 归 `Prism Asset Build`（`prism_asset_build_design_zh.md` §2.7/§4.6/§12.8）。逐项契约登记见 `prism_derived_data_contract_zh.md`（A10 / B4 / B8）
 
 ---
 
@@ -1062,13 +1063,13 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 
 ---
 
-> 本文档为 `prism_scene` 的 clean-slate 设计稿（v0.2）。它确立 scene 为 Prism 作者态内容的单一逻辑真相，世界系统降级为架其上的流送/常驻/持久化基座；旧 `prism_world_system_design_zh.md`（仍依赖 Bevy、以 WorldDB 为平行真相）将按本文契约在后续任务中重写为去 Bevy 多 crate 版本。所有性能数字为 design target，须以 §25 基准在真机校准。实现进度见 §27。
+> 本文档为 `prism_scene` 的 clean-slate 设计稿（v0.3）。它确立 scene 为 Prism 作者态内容的单一逻辑真相，世界系统降级为架其上的流送/常驻/持久化基座；旧 `prism_world_system_design_zh.md`（仍依赖 Bevy、以 WorldDB 为平行真相）将按本文契约在后续任务中重写为去 Bevy 多 crate 版本。所有性能数字为 design target，须以 §25 基准在真机校准。实现进度见 §27。
 
 ---
 
 ## 27. 实现进度（Implementation Progress）
 
-**M0 核心模型已落地**——crate [`pkg/prism_scene`](../pkg/prism_scene)（`no_std + alloc`，`#![forbid(unsafe_code)]`，依赖 `prism_asset` + `prism_ecs`，不依赖任何 `bevy_*`）：
+**M0 核心模型及实例化垂直切片已落地**——crate [`pkg/prism_scene`](../pkg/prism_scene)（`no_std + alloc`，`#![forbid(unsafe_code)]`，依赖 `prism_asset` + `prism_ecs`，不依赖任何 `bevy_*`）：
 
 | 模块 | 覆盖章节 | 内容 |
 |---|---|---|
@@ -1081,7 +1082,8 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 | `overrides` | §7 | `ComponentTypeId`、`OverrideValue`（序列化态）、`PropertyOverride`、`StructuralOp`、`ArchetypeSignature`、`OverrideSet`（唯一键 `(target, component, path)` 去重、后写覆盖前写、`RemoveEntity` 孤儿回收） |
 | `remap` | §6.1 | `RemapTable`（基段 + 保留段两段稠密映射，O(1) 查、拒绝间隙） |
 | `template` | §5.1、§9 | `SceneTemplate`（含 `plan: InstantiationPlan` + `tiers: ResidencyPlan`）、`NestedSlot`（嵌套实例槽） |
+| `instantiate` | §8.2、§21.2 | `spawn_plan`/`spawn_typed_plan`/`despawn_instance`；批量预留、确定性 remap、`ChildOf` 重连、typed Bundle/constructor、失败回滚，以及防止外部子实体级联删除 |
 
-验证（本地）：`cargo test -p prism_scene` → **50 unit + 1 doctest 全绿**；`cargo build -p prism_scene --no-default-features`（`no_std`）通过；`cargo clippy -p prism_scene --all-targets` 无告警。
+验证（本地）：`cargo test -p prism_scene --offline` → **58 unit + 1 doctest 全绿**；`cargo fmt --manifest-path pkg/prism_scene/Cargo.toml -- --check` 通过；`cargo check -p prism_scene --offline` 通过。`prism_scene` 自有代码的 clippy 门禁已执行，但当前 workspace 的 `prism_asset/src/scheduler.rs` 存在既有 `std-instead-of-alloc` 告警，导致整条 `cargo clippy -p prism_scene --all-targets -- -D warnings` 尚不能作为绿灯证据。
 
-**尚未落地（后续里程碑，非占位）**：`spawn_scene()` 的 ECS 实例化热路径（§8.2，需 `prism_ecs` 提供批量预留 / 列块装载 API）、SIMD remap 与预取微架构（§8.5）、子场景流送（§12）、热重载传播（§13）、bake 产出的二进制包（§10，归 `prism_scene_bake`）。
+**尚未落地（后续里程碑，非占位）**：列块 payload 的通用 materialization / `spawn_scene()` 完整热路径（§8.2，当前 typed vertical slice 已覆盖实体预留与层级接缝）、SIMD remap 与预取微架构（§8.5）、子场景流送（§12）、热重载传播（§13）、bake 产出的二进制包（§10，归 `prism_scene_bake`）。

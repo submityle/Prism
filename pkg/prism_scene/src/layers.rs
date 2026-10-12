@@ -56,10 +56,7 @@ pub fn compose_layers(layers: &[OverrideSet]) -> OverrideComposition {
         }
     }
     let orphans = effective.drop_orphans();
-    OverrideComposition {
-        effective,
-        orphans,
-    }
+    OverrideComposition { effective, orphans }
 }
 
 #[cfg(test)]

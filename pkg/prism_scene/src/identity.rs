@@ -271,8 +271,14 @@ mod tests {
         assert!(!LocalEntityId::new(0).is_reserved());
         assert!(!LocalEntityId::new(LocalEntityId::RESERVED_BASE - 1).is_reserved());
         assert!(LocalEntityId::reserved(0).is_reserved());
-        assert_eq!(LocalEntityId::reserved(0).index(), LocalEntityId::RESERVED_BASE);
-        assert_eq!(LocalEntityId::reserved(5).index(), LocalEntityId::RESERVED_BASE + 5);
+        assert_eq!(
+            LocalEntityId::reserved(0).index(),
+            LocalEntityId::RESERVED_BASE
+        );
+        assert_eq!(
+            LocalEntityId::reserved(5).index(),
+            LocalEntityId::RESERVED_BASE + 5
+        );
     }
 
     #[test]

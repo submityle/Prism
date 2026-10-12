@@ -95,6 +95,15 @@ impl RemapTable {
         }
     }
 
+    /// Iterates mapped base entities in deterministic local-id order.
+    pub fn base_entities(&self) -> impl ExactSizeIterator<Item = (LocalEntityId, Entity)> + '_ {
+        self.base
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, entity)| (LocalEntityId::new(index as u32), entity))
+    }
+
     /// Number of mapped base entities.
     #[must_use]
     pub fn base_len(&self) -> usize {
@@ -159,14 +168,8 @@ mod tests {
 
         assert!(table.set_reserved(0, entity(100, 2)));
         assert!(table.set_reserved(1, entity(101, 2)));
-        assert_eq!(
-            table.get(LocalEntityId::reserved(0)),
-            Some(entity(100, 2))
-        );
-        assert_eq!(
-            table.get(LocalEntityId::reserved(1)),
-            Some(entity(101, 2))
-        );
+        assert_eq!(table.get(LocalEntityId::reserved(0)), Some(entity(100, 2)));
+        assert_eq!(table.get(LocalEntityId::reserved(1)), Some(entity(101, 2)));
         // Reserved ids do not disturb the base run.
         assert_eq!(table.get(LocalEntityId::new(0)), Some(entity(0, 1)));
         assert_eq!(table.base_len(), 2);

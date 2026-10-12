@@ -280,9 +280,11 @@ impl OverrideSet {
     /// Inserts or replaces the property override for its `(target, component,
     /// path)` key, returning the previous value if one existed (last-write-wins).
     pub fn set_property(&mut self, ov: PropertyOverride) -> Option<PropertyOverride> {
-        if let Some(existing) = self.properties.iter_mut().find(|e| {
-            e.target == ov.target && e.component == ov.component && e.path == ov.path
-        }) {
+        if let Some(existing) = self
+            .properties
+            .iter_mut()
+            .find(|e| e.target == ov.target && e.component == ov.component && e.path == ov.path)
+        {
             return Some(core::mem::replace(existing, ov));
         }
         self.properties.push(ov);
@@ -296,9 +298,10 @@ impl OverrideSet {
         component: ComponentTypeId,
         path: &FieldPath,
     ) -> Option<PropertyOverride> {
-        let index = self.properties.iter().position(|ov| {
-            ov.target == target && ov.component == component && &ov.path == path
-        })?;
+        let index = self
+            .properties
+            .iter()
+            .position(|ov| ov.target == target && ov.component == component && &ov.path == path)?;
         Some(self.properties.remove(index))
     }
 
@@ -365,8 +368,14 @@ mod tests {
 
     #[test]
     fn component_type_id_is_stable_and_distinct() {
-        assert_eq!(ComponentTypeId::of::<Transform>(), ComponentTypeId::of::<Transform>());
-        assert_ne!(ComponentTypeId::of::<Transform>(), ComponentTypeId::of::<Health>());
+        assert_eq!(
+            ComponentTypeId::of::<Transform>(),
+            ComponentTypeId::of::<Transform>()
+        );
+        assert_ne!(
+            ComponentTypeId::of::<Transform>(),
+            ComponentTypeId::of::<Health>()
+        );
         assert_eq!(ComponentTypeId::from_raw(7).raw(), 7);
     }
 

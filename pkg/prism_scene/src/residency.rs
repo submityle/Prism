@@ -95,7 +95,10 @@ mod tests {
     #[test]
     fn default_tier_is_interactive() {
         let plan = ResidencyPlan::new();
-        assert_eq!(plan.tier_of(LocalEntityId::new(0)), ResidencyTier::Interactive);
+        assert_eq!(
+            plan.tier_of(LocalEntityId::new(0)),
+            ResidencyTier::Interactive
+        );
         assert_eq!(ResidencyTier::default(), ResidencyTier::Interactive);
     }
 
@@ -108,7 +111,10 @@ mod tests {
         assert_eq!(plan.len(), 2);
         assert_eq!(plan.tier_of(LocalEntityId::new(3)), ResidencyTier::Proxy);
         assert_eq!(plan.tier_of(LocalEntityId::new(1)), ResidencyTier::Streamed);
-        assert_eq!(plan.tier_of(LocalEntityId::new(2)), ResidencyTier::Interactive);
+        assert_eq!(
+            plan.tier_of(LocalEntityId::new(2)),
+            ResidencyTier::Interactive
+        );
         assert_eq!(plan.explicit(LocalEntityId::new(2)), None);
     }
 

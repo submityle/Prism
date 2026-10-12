@@ -282,10 +282,7 @@ mod tests {
     fn base_plan() -> InstantiationPlan {
         InstantiationPlan {
             entity_count: 3,
-            groups: Box::new([
-                group(&[1, 2], &[0, 1], &[1, 2]),
-                group(&[3], &[2], &[3]),
-            ]),
+            groups: Box::new([group(&[1, 2], &[0, 1], &[1, 2]), group(&[3], &[2], &[3])]),
             entity_valued_fields: Box::new([FieldSlot {
                 local: LocalEntityId::new(0),
                 group: 0,
