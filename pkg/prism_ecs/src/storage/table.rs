@@ -428,6 +428,18 @@ unsafe impl Send for ChunkBlock {}
 // SAFETY: see the `Send` impl above.
 unsafe impl Sync for ChunkBlock {}
 
+/// One chunk window's row range plus its embedded [`ChunkMeta`], as yielded by
+/// [`Table::iter_chunks`] (design §5.3 / §13 / §15).
+#[derive(Clone, Copy)]
+pub struct ChunkInfo<'a> {
+    /// Absolute row of the window's first live entity.
+    pub first_row: usize,
+    /// Number of live rows in the window (`<= rows_per_chunk`).
+    pub rows: usize,
+    /// The window's metadata (bounds / visible / lod / batch_key / cell).
+    pub meta: &'a ChunkMeta,
+}
+
 impl Table {
     /// Create an empty table with a column per `(id, layout, drop)` descriptor.
     ///
@@ -587,6 +599,28 @@ impl Table {
         self.chunks.iter().map(move |block| {
             // SAFETY: the block's header embeds a `ChunkMeta` at `offset`.
             unsafe { &*block.ptr.as_ptr().add(offset).cast::<ChunkMeta>() }
+        })
+    }
+
+    /// Iterate the table's chunks as `(row range, metadata)` pairs — the shape a
+    /// GPU-facing consumer wants (design §5.3 / §13 / §15): each item carries the
+    /// window's first row and row count plus its embedded [`ChunkMeta`], so a
+    /// culling pass can accept or reject a whole window, and an uploader can
+    /// address that window's column slices, without touching per-entity data.
+    #[inline]
+    pub fn iter_chunks(&self) -> impl Iterator<Item = ChunkInfo<'_>> + '_ {
+        let rows_per_chunk = self.rows_per_chunk;
+        let total = self.entities.len();
+        let meta_offset = self.meta_offset;
+        self.chunks.iter().enumerate().map(move |(chunk, block)| {
+            let first_row = chunk * rows_per_chunk;
+            // SAFETY: the block's header embeds a `ChunkMeta` at `meta_offset`.
+            let meta = unsafe { &*block.ptr.as_ptr().add(meta_offset).cast::<ChunkMeta>() };
+            ChunkInfo {
+                first_row,
+                rows: total.saturating_sub(first_row).min(rows_per_chunk),
+                meta,
+            }
         })
     }
 

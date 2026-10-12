@@ -196,6 +196,44 @@ impl GpuBatchBuilder {
                 self.scratch.push((inst.batch_key, inst.slot));
             }
         }
+        self.finish()
+    }
+
+    /// Build the plan **directly from an archetype table's per-chunk metadata**
+    /// (design §5.3 `ChunkMeta` + §13 / §15).
+    ///
+    /// Unlike [`build`](Self::build) this needs no per-instance input buffer: a
+    /// chunk is the unit of classification and culling, so every live row of a
+    /// chunk enters the plan with the chunk's `batch_key` and the chunk's
+    /// `visible` bit. A culling pass that writes one `visible = false` per chunk
+    /// therefore removes that whole window without ever touching entity data.
+    /// `slot` is the entity's row, which the GPU-resident column mirrors 1:1
+    /// (design §15). Hidden chunks contribute nothing, and — exactly as in
+    /// `build` — the result is sorted by `(batch_key, slot)`, so it is a pure
+    /// function of the chunk metadata (design §14).
+    ///
+    /// # Panics
+    /// Panics if a chunk's `batch_key` does not fit the 32-bit
+    /// [`SharedValueId`] space it is interned from.
+    pub fn build_from_table(&mut self, table: &crate::storage::Table) -> &GpuBatchPlan {
+        self.scratch.clear();
+        for chunk in table.iter_chunks() {
+            if !chunk.meta.visible {
+                continue;
+            }
+            let raw = u32::try_from(chunk.meta.batch_key)
+                .expect("a chunk batch_key is an interned shared-value id and must fit u32");
+            let batch_key = SharedValueId::new(raw);
+            for offset in 0..chunk.rows {
+                self.scratch.push((batch_key, (chunk.first_row + offset) as u32));
+            }
+        }
+        self.finish()
+    }
+
+    /// Group the populated `scratch` into the plan: a deterministic
+    /// `(batch_key, slot)` sort followed by a single pass of contiguous runs.
+    fn finish(&mut self) -> &GpuBatchPlan {
         // Deterministic grouping: sorting by (key, slot) makes the plan a pure
         // function of the visible set, independent of input ordering (§14).
         self.scratch.sort_unstable();
@@ -382,5 +420,46 @@ mod tests {
         ]);
         assert_eq!(plan.batch_count(), 1);
         assert_eq!(plan.indices_for(&plan.batches()[0]), &[5, 5]);
+    }
+
+    #[test]
+    fn builds_from_chunk_metadata() {
+        use crate::component::Component;
+        use crate::world::World;
+
+        // 512 B/row -> 32 rows per chunk, so a handful of entities crosses three
+        // chunk windows.
+        #[allow(dead_code)] // the payload only fixes the row size
+        #[derive(Clone, Copy)]
+        struct Big(u64, [u8; 504]);
+        impl Component for Big {}
+
+        let mut world = World::new();
+        let arch = world.prewarm::<Big>(0);
+        for i in 0..(32 * 2 + 5) {
+            world.spawn(Big(i as u64, [0; 504]));
+        }
+        // Windows: 0 -> rows 0..32, 1 -> 32..64, 2 -> 64..69.
+        world.chunk_meta_mut(arch, 0).unwrap().batch_key = 7;
+        world.chunk_meta_mut(arch, 1).unwrap().batch_key = 7;
+        world.chunk_meta_mut(arch, 2).unwrap().batch_key = 9;
+        // Cull the middle window as a unit.
+        world.chunk_meta_mut(arch, 1).unwrap().visible = false;
+
+        let table = world.archetypes().get(arch).unwrap().table();
+        let mut builder = GpuBatchBuilder::new();
+        let plan = builder.build_from_table(table);
+
+        // Chunk 1 is culled wholesale; chunks 0 (key 7) and 2 (key 9) survive.
+        assert_eq!(plan.visible_instance_count(), 37);
+        assert_eq!(plan.batch_count(), 2);
+        assert_eq!(plan.batches()[0].batch_key, key(7));
+        assert_eq!(plan.batches()[0].instance_count, 32);
+        assert_eq!(plan.batches()[1].batch_key, key(9));
+        assert_eq!(plan.batches()[1].instance_count, 5);
+        // Slots are the surviving entities' rows.
+        assert_eq!(plan.indices_for(&plan.batches()[0])[0], 0);
+        assert_eq!(plan.indices_for(&plan.batches()[0])[31], 31);
+        assert_eq!(plan.indices_for(&plan.batches()[1]), &[64, 65, 66, 67, 68]);
     }
 }

@@ -39,4 +39,4 @@ pub use owning_group::{OwningGroup, OwningGroupId, OwningGroupIter};
 pub use shared::{SharedComponents, SharedValue, SharedValueId, SharedValuePool};
 pub use sparse::ComponentSparseSet;
 pub use sparse_sets::SparseSets;
-pub use table::{Column, Table};
+pub use table::{ChunkInfo, Column, Table};

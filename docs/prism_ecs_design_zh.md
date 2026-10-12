@@ -338,7 +338,7 @@ world.observe::<OnRemove, RelationFilter<ChildOf>>(|t| { /* 级联清理 */ });
 
 - 标记"GPU 常驻"组件列（如 `GpuInstance`），列数据持久映射到 GPU 缓冲，按**脏块增量上传**，CPU 不再逐实体打包。
 - 内核提供脏块 + 列指针访问器（增能），实际上传在渲染侧（`prism_render_scene` / `prism_render_driver`）。
-- 对接 GPU 驱动剔除/合批（§6 SharedComponent 批次键 + §13 cell 可见位）。**需真实设备验证，CPU 单测只验脏块产出正确。**
+- 对接 GPU 驱动剔除/合批（§6 SharedComponent 批次键 + §13 cell 可见位）。**CPU 侧已把两者接到 chunk 粒度**：`Table::iter_chunks()` 产出 `(行范围, &ChunkMeta)`，`GpuBatchBuilder::build_from_table(table)` 直接按每 chunk 的 `batch_key`/`visible` 生成 `GpuBatchPlan`——剔除按 chunk 整体命中（一个 `visible = false` 去掉整个窗口，不碰逐实体数据），`slot` 取实体行号（GPU 常驻列逐行镜像表）。**仍缺真实设备验证**：GPU 常驻缓冲映射与上传命令在渲染侧，CPU 单测只能验脏块/批次产出正确。
 
 ---
 
@@ -480,7 +480,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 ## 20. 契约、不变量与版本化
 
 - **下游 API 契约优先**：对接层公共 API 是红线；内部实现随便改，公共 API 改动必须同步迁移依赖方，保持全仓绿。
-- **版本化新增契约（以实际导出名为准）**：`storage::{ChunkVersions, TARGET_CHUNK_BYTES, rows_per_chunk}`（每 chunk 一条变更版本）、`storage::ChunkMeta` + `storage::ChunkBounds`（每块元数据：AABB / 可见位 / LOD / 批次键 / cell 归属 + 结构 epoch，经 `Archetype::table().chunk_metas()` 与 `World::chunk_meta(_mut)` 暴露）、`query::DirtyChunk` + `QueryState::dirty_chunks`（草案名 `ChunkDirtyIndex`）、`WorldSnapshot` / `SnapshotDelta` / `SnapshotRing`（草案名 `EcsSnapshot`/`EcsDelta`）、`OwningGroupId`、`WorldPartitionCell`、`GridCell`/`FloatingOrigin`、`NodeId` / `ReactionGraph`（草案名 `ReactionHandle`）、`JobHandle`（来自 `prism_tasks`）、`WorldSnapshot::state_hash()`（草案名 `StateHash`，实际是逐帧 `u64` 哈希）、`GpuResidentColumn`。列出实际名是有意的：这一节是给别人照抄的契约面，旧稿的草案名与代码不符会让读者找不到对应类型。
+- **版本化新增契约（以实际导出名为准）**：`storage::{ChunkVersions, TARGET_CHUNK_BYTES, rows_per_chunk}`（每 chunk 一条变更版本）、`storage::ChunkMeta` + `storage::ChunkBounds`（每块元数据：AABB / 可见位 / LOD / 批次键 / cell 归属 + 结构 epoch，经 `Archetype::table().chunk_metas()` 与 `World::chunk_meta(_mut)` 暴露）、`query::DirtyChunk` + `QueryState::dirty_chunks`（草案名 `ChunkDirtyIndex`）、`WorldSnapshot` / `SnapshotDelta` / `SnapshotRing`（草案名 `EcsSnapshot`/`EcsDelta`）、`OwningGroupId`、`WorldPartitionCell`、`GridCell`/`FloatingOrigin`、`NodeId` / `ReactionGraph`（草案名 `ReactionHandle`）、`JobHandle`（来自 `prism_tasks`）、`WorldSnapshot::state_hash()`（草案名 `StateHash`，实际是逐帧 `u64` 哈希）、`GpuResidentColumn`（CPU 侧）、`storage::ChunkInfo` + `Table::iter_chunks()`（每 chunk 的行范围 + 内嵌 `ChunkMeta`，供 GPU 剔除/上传与合批消费）、`GpuBatchBuilder::build_from_table`。列出实际名是有意的：这一节是给别人照抄的契约面，旧稿的草案名与代码不符会让读者找不到对应类型。
 - **不变量**：owning group 单一拥有者；chunk 版本单调递增；确定性稳定键；快照 roundtrip 等价；子世界实体迁移保 generation；Entity generation 为 `NonZeroU32`（保留 0、回收自增、回绕跳 0），index 0 为正常可用槽。
 
 ---
