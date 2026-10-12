@@ -8,6 +8,17 @@
 
 `prism_render_scene` 是**一个编译单元**：把某个文件的 `RenderDevice` 换成 RHI trait，会立刻打断所有调用点的类型一致性。因此移植按「切片」推进，每片内部自洽、可独立编译与回归；片内不再用 bevy_render。
 
+### 1.1 已证实的硬约束（2026-10-12 勘察）
+
+1. **不存在「小步可编译」的切法**：crate 是单个编译单元，任何设备/资源类型变更都会打断全 crate 的类型一致；shader 侧的 `bevy_render::maths` / `bevy_render::utils` 也依赖生产着色器系统，无法单独抽走。
+2. **换 RHI 等于换宿主**：它的渲染世界是 `bevy_ecs + bevy_app + bevy_render::{RenderApp, ExtractSchedule, Render, RenderSystems}` 模型；换 RHI 必须同时换成 `prism_app/prism_ecs` 的 render sub-app（+ `prism_asset` 等）。这是整机架构 port，不是「换依赖行」。
+3. **桥接过渡不通**：bevy 的 `RenderQueue` / `RenderAdapter` 是私有字段（只有 `RenderDevice::wgpu_device()` 暴露 device，queue/adapter 没有），拿不到 wgpu 队列复用同一设备；另开 Prism 设备则是**双设备**，跨设备资源不可用，中途必错。
+
+**推论**：只能整机 port。工作模式二选一——
+
+- **A 就地 port**：`prism_render_scene` 红若干轮，期间 `--workspace` 构建不可用，port 完成才转绿。
+- **B 隔离 port**：独立 worktree/分支里 port，主工作区始终可编译，完成后合回（推荐）。
+
 ## 2. 符号映射（bevy_render → Prism）
 
 | bevy_render | Prism 目标 |
