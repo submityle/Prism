@@ -68,6 +68,9 @@ use prism_platform::aio::{AioError, AioQueue, IoPriority, ReadOp, WriteOp};
 /// newly submitted or back-pressured requests. Bounds the latency with which a
 /// fresh submission is noticed while other reads are already in flight.
 const REAP_TIMEOUT: Duration = Duration::from_millis(50);
+/// Back-off for the reactor when every pending op is kernel-back-pressured with
+/// nothing of our own in flight to reap.
+const BACKPRESSURE_BACKOFF: Duration = Duration::from_millis(1);
 
 /// Errors surfaced by the async-I/O bridge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -583,10 +586,23 @@ fn reactor_loop(mut queue: AioQueue, rx: Receiver<Submission>) {
                     Ok(sub) => pending.push_back(sub),
                     Err(_) => break 'main,
                 }
+            } else if disconnected {
+                // Shutting down while every pending read is back-pressured with
+                // nothing in flight to reap: fail them so `IoReactor::drop` does
+                // not hang joining the reactor (CR-found).
+                let err = IoError::ReactorGone;
+                for sub in pending.drain(..) {
+                    complete_slot(&sub.slot, Err(err.clone()));
+                }
+                break 'main;
             } else {
-                // Pending reads are all back-pressured with nothing in flight to
-                // reap; yield and retry rather than busy-spinning.
-                thread::yield_now();
+                // Back-pressured with nothing in flight to reap and the channel
+                // still open: pick up any new submissions and back off briefly
+                // rather than hard busy-spinning on `yield_now` (CR-found).
+                while let Ok(sub) = rx.try_recv() {
+                    pending.push_back(sub);
+                }
+                thread::sleep(BACKPRESSURE_BACKOFF);
             }
             continue;
         }
