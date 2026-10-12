@@ -334,7 +334,7 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 17] = [
+    let deps: [(u128, &str, &str); 18] = [
         (
             0x5052_4953_4d5f_5441_4e47_454e_5400_0002,
             include_str!("../../shaders/tangent.wesl"),
@@ -420,6 +420,14 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             0x5052_4953_4d5f_5446_494c_4d5f_0001,
             include_str!("../../shaders/thin_film.wesl"),
             "embedded://prism_render_scene/shaders/thin_film.wesl",
+        ),
+        // `brdf.wesl` imports the procedural glint twin for the specular lobe's
+        // discrete-microfacet estimator (§17.6), so the resolve importer needs
+        // `glint.wesl` registered under its canonical module path.
+        (
+            0x5052_4953_4d5f_474c_494e_5400_0001,
+            include_str!("../../shaders/glint.wesl"),
+            "embedded://prism_render_scene/shaders/glint.wesl",
         ),
         // Minimal stand-in for Bevy's `bevy_render::maths`: the resolve shader
         // imports `affine3_to_square` from it exactly like `opaque.wesl` and

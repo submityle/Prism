@@ -140,7 +140,8 @@ pub use gamut_map::{
 pub use glint::{
     fresnel_schlick_scalar as glint_fresnel_schlick, ggx_ndf as glint_ggx_ndf,
     glint_bin_solid_angle, glint_half_slope, glint_is_finite, glint_microfacet_count,
-    glint_ndf, glint_ndf_blended, glint_seed, glint_specular_brdf,
+    glint_ndf, glint_ndf_blended, glint_ndf_blended_from_density, glint_ndf_from_density,
+    glint_seed, glint_specular_brdf,
     hash_combine as glint_hash_combine, hash_u32 as glint_hash_u32,
     poisson_gaussian as glint_poisson_gaussian, poisson_knuth as glint_poisson_knuth,
     poisson_sample as glint_poisson_sample, quantize_axis as glint_quantize_axis,
@@ -180,7 +181,8 @@ pub use light_routing::{
 };
 pub use lighting::{
     evaluate_principled_direct, evaluate_principled_direct_with, linear_furnace_response,
-    principled_pre, DirectLightSample, PrincipledPre, ShadingFrame, SurfaceSample,
+    glint_shade_seed, principled_pre, DirectLightSample, PrincipledPre, ShadingFrame,
+    SurfaceSample,
 };
 pub use measured_brdf::{
     directions_to_rusinkiewicz, half_vector, is_non_negative, reciprocity_error,

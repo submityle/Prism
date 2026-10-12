@@ -4,6 +4,10 @@ use bevy_math::ops;
 
 use crate::tangent::orthonormal_basis;
 use crate::vecmath::{add, cross, dot, mix3, mul, mul_scalar, normalize_or, sub};
+use crate::{
+    glint_bin_solid_angle, glint_half_slope, glint_microfacet_count,
+    glint_ndf_blended_from_density, glint_seed,
+};
 
 const MIN_ROUGHNESS: f32 = 0.045;
 const MIN_N_DOT: f32 = 1.0e-5;
@@ -177,6 +181,32 @@ pub struct SurfaceSample {
     /// Refractive index of the iridescent film (glTF default `1.3`). Ignored
     /// when `iridescence == 0`.
     pub iridescence_ior: f32,
+    /// Prism glint lobe weight in `[0, 1]` (§17.6): blends the discrete
+    /// (counting) microfacet NDF into the specular lobe. `0` is an exact
+    /// identity — the estimator is never entered — so every existing golden is
+    /// preserved bit-for-bit.
+    pub glint_weight: f32,
+    /// Orientation roughness of the countable flakes, independent of
+    /// `perceptual_roughness`. Ignored when `glint_weight == 0`.
+    pub glint_roughness: f32,
+    /// Facets per unit² of [`Self::glint_cell`] space. Ignored when
+    /// `glint_weight == 0`.
+    pub glint_density: f32,
+    /// Angular half-width (radians) of the half-vector acceptance bin: narrow
+    /// bins resolve sparser, sharper glints, wide bins average back toward the
+    /// smooth lobe as the estimator's relative variance `1/λ` vanishes.
+    pub glint_bin_half_width: f32,
+    /// Shade-time surface cell the glint seed quantises (UV or a tangent-frame
+    /// projection of the position). Direction *and* position enter the seed,
+    /// which is what makes a facet twinkle only for the narrow range of views
+    /// and lights that align it with the eye. `[0, 0]` is a valid cell.
+    pub glint_cell: [f32; 2],
+    /// Shade-time area of one pixel in [`Self::glint_cell`] space, i.e.
+    /// `|det dUV/d(pixel)|`. Multiplied by [`Self::glint_density`] it gives the
+    /// expected facet count `N` inside the footprint; `0` therefore predicts no
+    /// countable facets and the glint term contributes nothing (the conservative
+    /// reading of "this pixel resolves a whole flake or more").
+    pub glint_footprint_area: f32,
 }
 
 impl Default for SurfaceSample {
@@ -227,6 +257,12 @@ impl Default for SurfaceSample {
             iridescence: 0.0,
             iridescence_thickness_nm: 0.0,
             iridescence_ior: 1.3,
+            glint_weight: 0.0,
+            glint_roughness: 0.1,
+            glint_density: 4.0,
+            glint_bin_half_width: 0.05,
+            glint_cell: [0.0, 0.0],
+            glint_footprint_area: 0.0,
         }
     }
 }
@@ -419,7 +455,30 @@ pub fn evaluate_principled_direct_with(
         surface.anisotropy_rotation,
     );
     let (ax, ay) = openpbr_anisotropy_to_alpha(alpha, surface.anisotropy);
-    let d = distribution_ggx_anisotropic(dot(tangent, h), dot(bitangent, h), n_dot_h, ax, ay);
+    let d_smooth =
+        distribution_ggx_anisotropic(dot(tangent, h), dot(bitangent, h), n_dot_h, ax, ay);
+    // §17.6 discrete (counting) microfacet NDF. The estimator is unbiased *for
+    // whatever density it samples*, so it is fed the lobe's actual `D` — the
+    // anisotropic one included — rather than an isotropic stand-in. At
+    // `glint_weight == 0` the bypass returns `d_smooth` unchanged, so the
+    // smooth-GGX path is bit-for-bit what it was before this lobe existed.
+    //
+    // The estimator needs a *known* footprint: with no pixel area there is no
+    // facet count to draw from, so an unknown footprint keeps the smooth lobe
+    // instead of pretending the pixel resolves no flake at all (which would
+    // blacken the highlight). That also leaves the CPU golden — which does not
+    // track screen-space derivatives — bit-for-bit unchanged.
+    let d = if surface.glint_weight > 0.0 && surface.glint_footprint_area > 0.0 {
+        glint_ndf_blended_from_density(
+            d_smooth,
+            glint_microfacet_count(surface.glint_density, surface.glint_footprint_area),
+            glint_bin_solid_angle(surface.glint_bin_half_width),
+            surface.glint_weight,
+            glint_shade_seed(&surface, h, tangent, bitangent, n),
+        )
+    } else {
+        d_smooth
+    };
     let g = visibility_smith_ggx_anisotropic(
         dot(tangent, v),
         dot(bitangent, v),
@@ -743,6 +802,55 @@ pub(crate) fn distribution_ggx(n_dot_h: f32, alpha: f32) -> f32 {
     let alpha_squared = alpha * alpha;
     let denominator = n_dot_h * n_dot_h * (alpha_squared - 1.0) + 1.0;
     alpha_squared / (PI * denominator * denominator).max(MIN_N_DOT)
+}
+
+/// The glint seed for one light direction (§17.6).
+///
+/// The discrete microfacet estimator is only *unbiased* if its randomness is
+/// decorrelated per (space, direction) cell — otherwise the "sparkle" is a fixed
+/// pattern that sticks to the surface. The seed therefore mixes the shade-time
+/// surface **cell** ([`SurfaceSample::glint_cell`]) with the **half-vector
+/// slope** in the surface tangent frame, quantised at two resolutions:
+///
+/// * `cells_per_unit = sqrt(density)` — a flake lattice with `density` facets per
+///   unit² has spacing `1/sqrt(density)`, so quantising the cell at that
+///   resolution gives one seed bucket per flake.
+/// * `slope_bins_per_unit = 1 / max(roughness², MIN_ALPHA)` — the flake
+///   orientation spread, expressed as a slope resolution. This is the knob that
+///   sets how fast the sparkle pattern decorrelates as the view or light moves
+///   (fine flakes twinkle on a much smaller angular change than broad ones). It
+///   deliberately does **not** change the lobe's energy or the base highlight
+///   width: the estimator samples the base lobe's own NDF, so the ensemble mean
+///   is that NDF exactly (§10's energy contract).
+/// * `level = 0` — a single flake scale. Coarser footprints are already handled
+///   by the expected facet count `N = density · footprint_area`; a multiscale
+///   flake stack would pass its octave here.
+///
+/// Mirrored operation for operation by `brdf.wesl::brdf_glint_shade_seed`.
+#[must_use]
+pub fn glint_shade_seed(
+    surface: &SurfaceSample,
+    h: [f32; 3],
+    tangent: [f32; 3],
+    bitangent: [f32; 3],
+    n: [f32; 3],
+) -> u32 {
+    let density = surface.glint_density.max(0.0);
+    let cells_per_unit = ops::sqrt(density);
+    let roughness = surface.glint_roughness.clamp(0.0, 1.0);
+    let flake_alpha = (roughness * roughness).max(crate::glint::MIN_ALPHA);
+    let h_n = dot(n, h).max(MIN_N_DOT);
+    let slope_x = glint_half_slope(dot(tangent, h), h_n);
+    let slope_y = glint_half_slope(dot(bitangent, h), h_n);
+    glint_seed(
+        surface.glint_cell[0],
+        surface.glint_cell[1],
+        cells_per_unit,
+        slope_x,
+        slope_y,
+        1.0 / flake_alpha,
+        0,
+    )
 }
 
 pub(crate) fn visibility_smith_ggx_correlated(n_dot_v: f32, n_dot_l: f32, alpha: f32) -> f32 {
@@ -1148,6 +1256,178 @@ mod tests {
             tangent: [1.0, 0.0, 0.0],
             bitangent: [0.0, 0.0, -1.0],
         }
+    }
+
+    /// A metallic flake surface with the glint lobe live: `density · area = 0.04`
+    /// expected facets per pixel, which floors to one draw — exactly the sparse
+    /// regime the estimator models (most pixels dark, a few bright).
+    fn glint_surface() -> SurfaceSample {
+        SurfaceSample {
+            base_color: [1.0, 0.6, 0.2],
+            metallic: 1.0,
+            perceptual_roughness: 0.25,
+            glint_weight: 1.0,
+            glint_roughness: 0.15,
+            glint_density: 400.0,
+            glint_bin_half_width: 0.05,
+            glint_cell: [0.0, 0.0],
+            glint_footprint_area: 1.0e-4,
+            ..SurfaceSample::default()
+        }
+    }
+
+    fn total(v: [f32; 3]) -> f32 {
+        v[0] + v[1] + v[2]
+    }
+
+    #[test]
+    fn glint_without_a_known_footprint_is_the_smooth_lobe_bit_for_bit() {
+        // The estimator needs a facet count. An unknown footprint (the CPU
+        // golden's default, since it tracks no screen-space derivatives) must
+        // therefore keep the smooth lobe rather than read as "zero flakes",
+        // which would blacken the highlight instead of degrading to smooth.
+        let smooth = SurfaceSample {
+            glint_weight: 0.0,
+            glint_footprint_area: 0.0,
+            ..glint_surface()
+        };
+        let unknown_footprint = SurfaceSample {
+            glint_footprint_area: 0.0,
+            ..glint_surface()
+        };
+        let a = evaluate_principled_direct(smooth, frame(), light());
+        let b = evaluate_principled_direct(unknown_footprint, frame(), light());
+        assert_eq!(a, b);
+        assert!(total(a) > 0.0);
+    }
+
+    #[test]
+    fn glint_is_deterministic_and_decorrelates_in_space_and_direction() {
+        let surface = glint_surface();
+        let value = |s: SurfaceSample, light: DirectLightSample| {
+            evaluate_principled_direct(s, frame(), light)
+        };
+        // Pure function of its inputs: no hidden state, no time.
+        assert_eq!(
+            value(surface, light()),
+            value(surface, light()),
+            "the estimator must be deterministic"
+        );
+
+        // Space: moving the surface cell must reshuffle the sparkle. With
+        // `lambda < 1` most draws are deterministically dark, so a handful of
+        // cells is enough to find a different evaluation.
+        let cells = (0..16).map(|i| [i as f32 * 0.37, i as f32 * 0.11]);
+        let baseline = value(surface, light());
+        assert!(
+            cells.clone().any(|cell| value(
+                SurfaceSample {
+                    glint_cell: cell,
+                    ..surface
+                },
+                light()
+            ) != baseline),
+            "the sparkle must move with the surface cell"
+        );
+
+        // Direction: a different light direction changes the half-vector slope,
+        // hence the seed — this is what makes a flake twinkle only for the
+        // narrow range of views/lights that align it with the eye.
+        let tilted = DirectLightSample {
+            direction: [0.3, 0.94, 0.16],
+            ..light()
+        };
+        assert_ne!(value(surface, tilted), baseline);
+    }
+
+    #[test]
+    fn glint_ensemble_mean_is_the_smooth_specular_lobe() {
+        // §10 energy contract: the discrete estimator is *unbiased*, so averaged
+        // over the footprint ensemble (here: many surface cells, one draw each)
+        // it must reproduce the smooth lobe's energy — no energy injected, none
+        // lost. Individual evaluations are deliberately sparse/bright.
+        let smooth = SurfaceSample {
+            glint_weight: 0.0,
+            ..glint_surface()
+        };
+        let reference = total(evaluate_principled_direct(smooth, frame(), light()));
+        assert!(reference > 0.0);
+
+        const DRAWS: u32 = 512;
+        let mut sum = 0.0;
+        let mut differing = 0;
+        for index in 0..DRAWS {
+            let cell = [index as f32 * 0.618_034, index as f32 * 0.381_966];
+            let glint = total(evaluate_principled_direct(
+                SurfaceSample {
+                    glint_cell: cell,
+                    ..glint_surface()
+                },
+                frame(),
+                light(),
+            ));
+            sum += glint;
+            if (glint - reference).abs() > 1.0e-6 {
+                differing += 1;
+            }
+        }
+        let mean = sum / DRAWS as f32;
+        let relative = (mean - reference).abs() / reference;
+        assert!(
+            relative < 0.2,
+            "ensemble mean {mean} vs smooth {reference} ({relative:.3} relative)"
+        );
+        // …and it is genuinely the *discrete* estimator doing it, not a silent
+        // bypass: at this density most single evaluations differ from smooth.
+        assert!(
+            differing > DRAWS / 2,
+            "only {differing}/{DRAWS} evaluations differed from the smooth lobe"
+        );
+    }
+
+    #[test]
+    fn glint_roughness_sets_the_sparkle_decorrelation_scale() {
+        // The flake orientation spread decides how fast the pattern reshuffles
+        // as the light moves: fine flakes (small roughness) quantise slopes into
+        // many bins, so a small direction change crosses a bin far more often
+        // than it does for broad flakes. That makes the parameter load-bearing —
+        // it is a real degree of freedom, not a decorative one.
+        let perturbed = DirectLightSample {
+            direction: [0.02, 0.999, 0.0],
+            ..light()
+        };
+        // The seed's direction axis is the half-vector slope in the surface
+        // frame; both directions share the same normal/tangent frame here.
+        let seed_for = |roughness: f32, cell: [f32; 2], direction: [f32; 3]| {
+            let n = [0.0, 1.0, 0.0];
+            let h = normalize_or(add(n, normalize_or(direction, n)), n);
+            glint_shade_seed(
+                &SurfaceSample {
+                    glint_roughness: roughness,
+                    glint_cell: cell,
+                    ..glint_surface()
+                },
+                h,
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, -1.0],
+                n,
+            )
+        };
+        let changed = |roughness: f32| {
+            (0..256)
+                .filter(|index| {
+                    let cell = [*index as f32 * 0.618_034, *index as f32 * 0.381_966];
+                    seed_for(roughness, cell, perturbed.direction)
+                        != seed_for(roughness, cell, light().direction)
+                })
+                .count()
+        };
+        let fine = changed(0.05);
+        let coarse = changed(0.5);
+        assert!(
+            fine > coarse,
+            "fine flakes must decorrelate more often ({fine}) than broad ones ({coarse})"
+        );
     }
 
     #[test]

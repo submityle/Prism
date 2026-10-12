@@ -119,8 +119,13 @@ fn glint_seed(
 /// `half_width` radians, `dw = 2*pi*(1 - cos(half_width))`, floored positive.
 fn glint_bin_solid_angle(half_width: f32) -> f32 {
     let hw = clamp(half_width, 0.0, GLINT_PI);
-    let c = cos(hw);
-    return max(2.0 * GLINT_PI * (1.0 - c), GLINT_MIN_POSITIVE);
+    // Half-angle identity `1 - cos(hw) = 2 sin²(hw/2)`: glint bins are narrow, so
+    // the literal form cancels away most of the significant digits (`hw = 0.01`
+    // yields ~5e-5). Mirrors `prism_render_shading::glint::glint_bin_solid_angle`
+    // and keeps the CPU/GPU pair within ~1e-7 instead of ~1e-4.
+    let half = hw * 0.5;
+    let s = sin(half);
+    return max(4.0 * GLINT_PI * s * s, GLINT_MIN_POSITIVE);
 }
 
 /// Isotropic Trowbridge-Reitz (GGX) normal-distribution function; peaks at
@@ -229,7 +234,28 @@ fn glint_ndf(
     bin_solid_angle: f32,
     seed: u32,
 ) -> f32 {
-    let d_smooth = glint_ggx_ndf(n_dot_h, alpha);
+    return glint_ndf_from_density(
+        glint_ggx_ndf(n_dot_h, alpha),
+        microfacet_count,
+        bin_solid_angle,
+        seed,
+    );
+}
+
+/// Discrete estimator over an *arbitrary* smooth density.
+///
+/// `glint_ndf` bakes in the isotropic GGX NDF, but the über path's specular lobe
+/// can be anisotropic, and the counting model is agnostic to which `D` it
+/// samples: the expected number of aligned facets is `N · D(h) · dω` for
+/// whatever facet-orientation distribution the surface has. Taking `d_smooth` as
+/// an argument keeps the estimator unbiased for the lobe it re-shapes. Mirrors
+/// `prism_render_shading::glint::glint_ndf_from_density`.
+fn glint_ndf_from_density(
+    d_smooth: f32,
+    microfacet_count: f32,
+    bin_solid_angle: f32,
+    seed: u32,
+) -> f32 {
     let n = max(microfacet_count, 1.0);
     let dw = max(bin_solid_angle, GLINT_MIN_POSITIVE);
     let p = clamp(d_smooth * dw, 0.0, 1.0);
@@ -248,12 +274,29 @@ fn glint_ndf_blended(
     strength: f32,
     seed: u32,
 ) -> f32 {
+    return glint_ndf_blended_from_density(
+        glint_ggx_ndf(n_dot_h, alpha),
+        microfacet_count,
+        bin_solid_angle,
+        strength,
+        seed,
+    );
+}
+
+/// [`glint_ndf_blended`] over an arbitrary smooth density (see
+/// `glint_ndf_from_density`).
+fn glint_ndf_blended_from_density(
+    d_smooth: f32,
+    microfacet_count: f32,
+    bin_solid_angle: f32,
+    strength: f32,
+    seed: u32,
+) -> f32 {
     let s = clamp(strength, 0.0, 1.0);
-    let d_smooth = glint_ggx_ndf(n_dot_h, alpha);
     if (s <= 0.0) {
         return d_smooth;
     }
-    let d_glint = glint_ndf(n_dot_h, alpha, microfacet_count, bin_solid_angle, seed);
+    let d_glint = glint_ndf_from_density(d_smooth, microfacet_count, bin_solid_angle, seed);
     return d_smooth + (d_glint - d_smooth) * s;
 }
 

@@ -179,6 +179,14 @@ pub struct ResolveInput<'a> {
     /// material's own occlusion so the indirect/ambient term is darkened in
     /// creases the geometric AO catches. Views without GTAO pass `1.0`.
     pub screen_space_ao: f32,
+    /// Area of one pixel in the reconstructed surface's UV cell space, i.e.
+    /// `|det dUV/d(pixel)|` — the shade-time footprint the glint lobe (§17.6)
+    /// multiplies by its authored facet density to get the expected facet count
+    /// inside the pixel. The GPU resolve derives it analytically from the
+    /// triangle's projected vertices (`shading_resolve.wesl`); a caller that does
+    /// not track screen-space derivatives passes `0.0`, which keeps the glint
+    /// term on the smooth-GGX path (an unknown footprint is not an empty one).
+    pub uv_footprint_area: f32,
     /// Row-major affine `world_from_local` (three rows of `[m, m, m, translation]`)
     /// for this pixel's instance, matching `GpuSceneTransform.world_from_local`
     /// (`mat3x4`).  The reconstructed local-space surface is lifted into world
@@ -304,6 +312,17 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         iridescence: parameters.thin_film_weight,
         iridescence_thickness_nm: parameters.thin_film_thickness * 1_000.0,
         iridescence_ior: parameters.thin_film_ior,
+        // The glint lobe's authored parameters. Its two shade-time inputs (the
+        // surface cell and the per-pixel footprint area) are set by the resolve
+        // once it knows the pixel: `resolve_pixel` takes the footprint from
+        // `ResolveInput::uv_footprint_area` and the cell from the reconstructed
+        // surface UV, mirroring `shading_resolve.wesl`.
+        glint_weight: parameters.glint_weight,
+        glint_roughness: parameters.glint_roughness,
+        glint_density: parameters.glint_density,
+        glint_bin_half_width: parameters.glint_bin_half_width,
+        glint_cell: [0.0, 0.0],
+        glint_footprint_area: 0.0,
     }
 }
 
@@ -398,6 +417,12 @@ pub fn resolve_pixel(
     ];
     surface.clearcoat = sampled.clearcoat;
     surface.clearcoat_roughness = sampled.clearcoat_roughness;
+    // Glint shade-time context (§17.6): the seed's cell is the reconstructed
+    // surface UV and the footprint is the caller's `|det dUV/d(pixel)|`, so the
+    // CPU golden and `shading_resolve.wesl` drive the estimator from the same
+    // two quantities.
+    surface.glint_cell = geometry.uv;
+    surface.glint_footprint_area = input.uv_footprint_area;
 
     let emissive = surface.emissive;
     let base_color = surface.base_color;
@@ -871,6 +896,7 @@ mod tests {
             textures: &[],
             view_position: [0.0, 0.0, 4.0],
             screen_space_ao: 1.0,
+            uv_footprint_area: 0.0,
             world_from_local: IDENTITY_WORLD_FROM_LOCAL,
         }
     }

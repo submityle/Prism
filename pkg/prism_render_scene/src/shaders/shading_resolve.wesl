@@ -1988,6 +1988,18 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.coat_ior = parameters.coat_ior;
     surface.coat_color = parameters.coat_color.xyz;
     surface.coat_roughness_anisotropy = parameters.coat_roughness_anisotropy;
+    // Prism glint lobe (§17.6): the authored block plus the two shade-time
+    // quantities the discrete estimator needs — the surface cell the seed
+    // quantises, and the pixel's footprint area in that cell space, which is
+    // exactly the determinant of the UV Jacobian derived above for the mip LOD.
+    surface.glint_weight = parameters.glint_weight;
+    surface.glint_roughness = parameters.glint_roughness;
+    surface.glint_density = parameters.glint_density;
+    surface.glint_bin_half_width = parameters.glint_bin_half_width;
+    surface.glint_cell = geometry.uv;
+    surface.glint_footprint_area = abs(
+        uv_gradients[0].x * uv_gradients[1].y - uv_gradients[0].y * uv_gradients[1].x,
+    );
     // `geometry_coat_tangent` is a shade-time input, so the coat inherits the
     // base frame tangent by default.
     surface.coat_tangent = vec3<f32>(0.0);

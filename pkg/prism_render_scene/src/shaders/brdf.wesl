@@ -34,6 +34,16 @@ import prism_render_scene::shaders::specular_aa::{
 import prism_render_scene::shaders::thin_film::{
     tf_iridescent_fresnel_rgb,
 };
+// Procedural glint: GPU twin of the discrete-microfacet kernel in
+// `glint.rs` (§17.6).
+import prism_render_scene::shaders::glint::{
+    glint_bin_solid_angle,
+    glint_half_slope,
+    glint_microfacet_count,
+    glint_ndf_blended_from_density,
+    glint_seed,
+    GLINT_MIN_ALPHA,
+};
 
 // Clamp floors mirroring `lighting.rs` (`MIN_ROUGHNESS`, `MIN_N_DOT`).
 const MIN_ROUGHNESS: f32 = 0.045;
@@ -141,6 +151,20 @@ struct SurfaceSample {
     iridescence_thickness_nm: f32,
     // Film refractive index (glTF default 1.3); inert at weight 0.
     iridescence_ior: f32,
+    // Prism glint lobe (§17.6): blends a discrete (counting) microfacet NDF
+    // into the specular lobe. `glint_weight == 0` is an exact identity — the
+    // estimator is never entered. Mirrors `SurfaceSample::glint_*`.
+    glint_weight: f32,
+    // Flake orientation spread (see `brdf_glint_shade_seed`).
+    glint_roughness: f32,
+    // Facets per unit² of the shade-time surface cell, and the angular
+    // half-width of the half-vector acceptance bin (radians).
+    glint_density: f32,
+    glint_bin_half_width: f32,
+    // Shade-time surface cell the seed quantises, and the area of one pixel in
+    // that space (|det dUV/dpixel|).
+    glint_cell: vec2<f32>,
+    glint_footprint_area: f32,
 }
 
 // World-space shading basis. Mirrors `ShadingFrame` in `lighting.rs`.
@@ -740,6 +764,42 @@ fn principled_direct(
     return principled_direct_with(surface, frame, light, principled_pre(surface, frame));
 }
 
+/// Glint seed for one light direction (§17.6) — the GPU twin of
+/// `lighting.rs::glint_shade_seed`.
+///
+/// The discrete estimator is unbiased only if its randomness decorrelates per
+/// (space, direction) cell, so the seed mixes the shade-time surface cell with
+/// the half-vector slope in the surface tangent frame, quantised at two
+/// resolutions: one seed bucket per flake lattice cell (`sqrt(density)` cells
+/// per unit) and one slope bin per flake orientation spread
+/// (`1 / max(roughness², MIN_ALPHA)`). The latter sets how fast the sparkle
+/// pattern decorrelates as the view or light moves; it deliberately does not
+/// change the lobe's energy, because the estimator samples the base lobe's own
+/// NDF (whose ensemble mean it is).
+fn brdf_glint_shade_seed(
+    surface: SurfaceSample,
+    h: vec3<f32>,
+    tangent: vec3<f32>,
+    bitangent: vec3<f32>,
+    n: vec3<f32>,
+) -> u32 {
+    let cells_per_unit = sqrt(max(surface.glint_density, 0.0));
+    let roughness = clamp(surface.glint_roughness, 0.0, 1.0);
+    let flake_alpha = max(roughness * roughness, GLINT_MIN_ALPHA);
+    let h_n = max(dot(n, h), MIN_N_DOT);
+    let slope_x = glint_half_slope(dot(tangent, h), h_n);
+    let slope_y = glint_half_slope(dot(bitangent, h), h_n);
+    return glint_seed(
+        surface.glint_cell.x,
+        surface.glint_cell.y,
+        cells_per_unit,
+        slope_x,
+        slope_y,
+        1.0 / flake_alpha,
+        0u,
+    );
+}
+
 fn principled_direct_with(
     surface: SurfaceSample,
     frame: ShadingFrame,
@@ -820,7 +880,26 @@ fn principled_direct_with(
     let stretch = sqrt(2.0 / (1.0 + one_minus * one_minus));
     let ax = max(alpha * stretch, MIN_ANISOTROPIC_ALPHA);
     let ay = max(one_minus * alpha * stretch, MIN_ANISOTROPIC_ALPHA);
-    let d = distribution_ggx_anisotropic(dot(axes.tangent, h), dot(axes.bitangent, h), n_dot_h, ax, ay);
+    let d_smooth =
+        distribution_ggx_anisotropic(dot(axes.tangent, h), dot(axes.bitangent, h), n_dot_h, ax, ay);
+    // §17.6 discrete (counting) microfacet NDF. The estimator is unbiased for
+    // whatever density it samples, so it is fed the lobe's *actual* `D` (the
+    // anisotropic one included) rather than an isotropic stand-in; at
+    // `glint_weight == 0` the bypass returns `d_smooth` unchanged, so the
+    // smooth-GGX path is byte-for-byte what it was before this lobe existed.
+    // An unknown footprint (no pixel area) keeps the smooth lobe: there is no
+    // facet count to draw from, and treating "unknown" as "zero" would blacken
+    // the highlight instead of degrading to the smooth model.
+    var d = d_smooth;
+    if (surface.glint_weight > 0.0 && surface.glint_footprint_area > 0.0) {
+        d = glint_ndf_blended_from_density(
+            d_smooth,
+            glint_microfacet_count(surface.glint_density, surface.glint_footprint_area),
+            glint_bin_solid_angle(surface.glint_bin_half_width),
+            surface.glint_weight,
+            brdf_glint_shade_seed(surface, h, axes.tangent, axes.bitangent, n),
+        );
+    }
     let g = vis_smith_anisotropic(
         dot(axes.tangent, v),
         dot(axes.bitangent, v),
