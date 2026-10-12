@@ -661,6 +661,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 **✅ 已完成**
 
+- **P2-i 第六类 kind 组：identity-only extensions 声明化（provider / transfer / downgrade / composite + author_node 词表）**（§5.2 / §17.5）
+  - **动机**：`PRISM_IDENTITY_ONLY` 里的 provider / transfer / downgrade / composite 仍完全是 `builtin.rs` 手写表；它们没有 header slot，但身份、namespace/vendor/stability、caps、view-dependence 与 promotion 语义和其他 kind 完全相同，不能因为“不占槽”就留在 schema 之外。
+  - **做法**：新增 `IdentityKind`（provider / transfer / downgrade / author_node / composite）与统一的 `[[identity_extension]]` record；`validate()` 让这些行与 lobe/channel/response_mode/cache_aux 共用同一个全局 uid 空间；codegen 产出 `IdentityExtensionLayout` + `SURFACE_IDENTITY_EXTENSIONS`（按 kind、id 排序），author_node 的 kind 词汇与 hook ABI 就位，实例等待 §4 编辑器前端（显式 TODO）。
+  - **平价门禁**：`pcm_parity` 双向校验 5 条已注册 identity-only 行（2 provider + transfer + downgrade + composite）的 uid、kind、namespace、vendor、stability、requires_caps、view_dependent，并断言它们全部保持 `registry_slot() == None`（identity-only 不得偷占 header 摘要）。
+  - **门禁**：`prism_material_schema` **19**；`prism_render_material` 851+2+1+**7**+6；`prism_material_pcm` 28；`prism_render_shading --lib` 3377；`prism_render_scene --lib` 1602；真机 GPU 全包 **72 passed / 2 ignored**。
+
 - **P2-i 第五类 kind：cache_aux + channel manifest 补全（header 常驻非-lobe 四类统一槽位空间）**（§5.2 / §14.3 / §17.5）
   - **动机**：channel record 此前只声明 uid/header word/default，没有声明它在 PCM header digest 里的 `registry_slot`、namespace/vendor/stability、caps 与 view-dependence；cache_aux 则完全没有 schema record。于是“哪些 runtime-read 非-lobe 行存在、占哪个槽、需要什么能力”仍有一部分只手写在 `builtin.rs`。
   - **做法**：`Channel` 补齐 `registry_slot`/`requires_caps`/`view_dependent`（`ChannelLayout` 同步生成）；新增 `CacheAux` + `[[cache_aux]]`，codegen 产出 `CacheAuxLayout` + `SURFACE_CACHE_AUX`；`validate()` 用一张共享 `header_slots` 表机检 channel/response_mode/cache_aux 三类槽位互不碰撞，uid 仍在全目录唯一。
@@ -1108,7 +1114,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 #### 13.a.1 code-truth 审计（剩余路线图项 · 逐项证据）
 
 下表是"**以代码为准**"的剩余工作清点，每行给出可复现的证据与本轮实测的门禁数（CPU 侧 `prism_render_shading --lib` 3377、
-`prism_render_scene --lib` 1602、`prism_render_material` 851+2+1+5+6、`prism_material_pcm` 28、`prism_material_schema` 18；
+`prism_render_scene --lib` 1602、`prism_render_material` 851+2+1+7+6、`prism_material_pcm` 28、`prism_material_schema` 19；
 真机侧越沙盒 `PRISM_REQUIRE_GPU=1`：硬件解码 66 + 纹理 LOD / glint / 动态通道 / 测量 BRDF / 单瓣采样器 各 1）。
 
 | 项 | 状态 | 证据 | 余下 |
@@ -1121,11 +1127,11 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | **P2-c** | 完成（两个开放瓣） | glint + measured 的 ABI/双线/真机对拍（§17.6、§13.a） | MaterialX 往返（编辑器 TODO） |
 | **P2-e 四线正交运行期** | **部分** | `Illumination` 四值 ✔、分类到 `Npr`/`Unlit`/`Custom` ✔、per-tile 9-way 分类 ✔；**custom 的运行期退化已落地**（见 §13.a）| ① **逐区域 illumination**（遮罩在分类 pass 里选 Lit/Stylized，才符合 §3.5.3 的"per-tile 分波前消发散"）；② 作者侧 `respond_custom` WESL 属编辑器 TODO（契约 §5.4.1） |
 | **P2-g** | 完成 | header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha/OIT + 真机对拍（§17.1、§13.a） | — |
-| **P2-i 全 kind manifest + codegen** | **部分（lobe（含 closure 分类链接）+ channel + response_mode + cache_aux 四类已声明化）** | PCM 九类 kind/hook/常驻-identity 已落地（P1-h 收官）；`prism_material_schema` 现已覆盖 **lobe**、**channel**、**response_mode** 与 **cache_aux**：lobe 的 `closure` 链接生成 `SURFACE_LOBE_CLOSURES` 并驱动分类表，channel 的 uid/slot/word/default/caps/view-dependence 生成 `SURFACE_CHANNELS`，response_mode 的 uid/slot/illumination/attribution/caps/view-dependence 生成 `SURFACE_RESPONSE_MODES`，cache_aux 的 uid/slot/attribution/caps/view-dependence 生成 `SURFACE_CACHE_AUX`；三类非-lobe header 常驻行与 PCM 目录双向对拍且槽位致密（见 §13.a） | 其余五类（transfer / provider / downgrade / author-node / composite）的 manifest+codegen；其中 author-node 归编辑器前端（§4 未起），MaterialX nodedef 往返亦归编辑器 |
+| **P2-i 全 kind manifest + codegen** | **非编辑器完成（8 个有实例的 kind 全部声明化）** | `prism_material_schema` 现已覆盖 lobe（含 closure 分类链接）、channel、response_mode、cache_aux 与 identity-only 的 provider/transfer/downgrade/composite：codegen 产出 `SURFACE_LOBE_CLOSURES`、`SURFACE_CHANNELS`、`SURFACE_RESPONSE_MODES`、`SURFACE_CACHE_AUX`、`SURFACE_IDENTITY_EXTENSIONS`；header 常驻非-lobe 槽位致密、identity-only 行零槽，全部与 PCM 目录双向对拍（见 §13.a）。`author_node` 是第 9 类：kind/hook/词表已就位，唯一实例等待 §4 编辑器前端 | **编辑器部分**：author_node 实例 + MaterialX nodedef 往返（架构未起，显式 TODO） |
 | **P2-j** | 完成 | 类表由 PCM 注册表 + lobe 目录派生、穷举平价门禁、WESL `CLASS_*` 平价门禁、类数由表驱动（§5.2、§13.a） | — |
 | **P3-a~d 解耦着色** | **未开始** | `gi/surface_cache/` 是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统），不是 §14 的 texel-space/对象空间着色缓存；没有把着色结果写进 VT 页的 pass | 按 §14.10 分阶段：texel-space 着色 pass → 视角无关项分离 → 失效/时序复用 → LOD 策略 |
 
-> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P1-d 的异步编译 + über 回退、P2-e 的逐区域 illumination + custom hook、P2-i 的其余四类 codegen（provider / transfer / downgrade / composite）、P3-a~d 整块**。
+> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P1-d 的异步编译 + über 回退、P2-e 的逐区域 illumination、P3-a~d 整块**；作者侧 `respond_custom` / author_node / MaterialX nodedef 归编辑器前端（显式 TODO）。
 > 其余路线图项要么已完成（上表），要么按 goal 明确挂在编辑器前端（MaterialX / 节点图 / 作者 WESL）。
 
 ### 13.5 P3 远期：解耦着色 / texel-space shading（性能上限最高，工程最重）
@@ -1568,7 +1574,7 @@ energy_policy = "coupled"       # 对接 §17.2 分层能量预算
 view          = "invariant"     # §14.3 视角无关 -> 可进对象空间缓存
 ```
 
-字段维度覆盖：**名/类型/位宽/位区(=namespace)/打包偏移/贡献的 SpecializationId 子区/§8.5 消费步骤/默认值/合法谓词/能量策略/视角相关性/调试视图绑定/金标准绑定**；lobe record 另外声明它拥有的 **closure 分类桶**（`closure` 名，分类侧解析，未知名字构建期报错），channel/response_mode/cache_aux record 声明 header 常驻身份与运行时映射（word/slot、illumination、caps、view-dependence），分类侧解析成自己的类型词汇表。schema 之于 PCM 的九类 kind 一视同仁——lobe 声明字段与分类链接，provider 声明页格式，composite 声明 pass I/O，response-mode 声明分类 class 条目，皆同构。
+字段维度覆盖：**名/类型/位宽/位区(=namespace)/打包偏移/贡献的 SpecializationId 子区/§8.5 消费步骤/默认值/合法谓词/能量策略/视角相关性/调试视图绑定/金标准绑定**；lobe record 另外声明它拥有的 **closure 分类桶**（`closure` 名，分类侧解析，未知名字构建期报错），channel/response_mode/cache_aux record 声明 header 常驻身份与运行时映射（word/slot、illumination、caps、view-dependence），`[[identity_extension]]` 声明 bake/pass-time kind 的身份/归属/caps/view-dependence（零 header 槽）。schema 之于 PCM 的九类 kind 一视同仁——lobe 声明字段与分类链接，provider 声明页格式，composite 声明 pass I/O，response-mode 声明分类 class 条目，皆同构。
 
 #### 17.5.3 codegen 管线（从一个源生成什么）
 
