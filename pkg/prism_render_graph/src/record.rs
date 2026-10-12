@@ -20,7 +20,7 @@ use crate::resource::{BufferResource, TextureResource};
 ///
 /// Mirrors the sequential executor's per-kind selection so both executors emit
 /// identical command buffers.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(PartialEq, Debug)]
 pub(crate) enum PassCommands {
     /// Commands recorded by a raster pass.
     Render(Vec<RenderCommand>),

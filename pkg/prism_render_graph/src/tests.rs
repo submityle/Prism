@@ -808,6 +808,36 @@ fn repeated_execution_is_deterministic() {
     assert_eq!(first.len(), 1, "one command buffer is submitted per frame");
 }
 
+/// The worker pool scales to the machine's parallelism without ever spawning
+/// more workers than there are units, and its chunking covers every unit — the
+/// policy the determinism guarantee rests on.
+#[cfg(feature = "parallel")]
+#[test]
+fn worker_pool_partitions_cover_all_units() {
+    let available = std::thread::available_parallelism().map_or(1, core::num::NonZeroUsize::get);
+    assert_eq!(
+        crate::parallel::worker_count(0),
+        1,
+        "the pool never reports zero workers"
+    );
+    for total in [1usize, 2, 7, 64, 1000] {
+        let workers = crate::parallel::worker_count(total);
+        assert!(
+            (1..=total).contains(&workers),
+            "workers stay within 1..=units for {total} units"
+        );
+        assert!(
+            workers <= available,
+            "the pool never exceeds the machine's parallelism"
+        );
+        let chunk_size = total.div_ceil(workers);
+        assert!(
+            chunk_size * (workers - 1) < total,
+            "chunking with {workers} workers covers all {total} units"
+        );
+    }
+}
+
 /// The parallel executor must reproduce the sequential executor's command
 /// buffer exactly for a graph of independent raster/compute/transfer/present
 /// passes, preserving plan order.

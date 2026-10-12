@@ -57,6 +57,10 @@ pub(crate) fn record(
     let chunk_size = total.div_ceil(workers);
 
     let mut recorded: Vec<(usize, usize, PassCommands)> = Vec::with_capacity(total);
+    // A worker panic is re-raised on the calling thread after every handle is
+    // joined, so a failed pass fails the frame loudly instead of silently
+    // producing a command buffer with passes missing.
+    let mut panic_payload: Option<Box<dyn core::any::Any + Send>> = None;
     thread::scope(|scope| {
         let mut rest: &mut [RecordUnit] = units;
         let mut handles = Vec::with_capacity(workers);
@@ -67,13 +71,19 @@ pub(crate) fn record(
             handles.push(scope.spawn(move || record_chunk(chunk, textures, buffers)));
         }
         for handle in handles {
-            recorded.extend(
-                handle
-                    .join()
-                    .expect("a render-graph recording worker panicked"),
-            );
+            match handle.join() {
+                Ok(chunk) => recorded.extend(chunk),
+                Err(payload) => {
+                    if panic_payload.is_none() {
+                        panic_payload = Some(payload);
+                    }
+                }
+            }
         }
     });
+    if let Some(payload) = panic_payload {
+        std::panic::resume_unwind(payload);
+    }
     recorded
 }
 
@@ -95,7 +105,7 @@ fn record_chunk(
 
 /// The number of worker threads: the machine's available parallelism, capped by
 /// the amount of work so a small frame never spawns idle threads.
-fn worker_count(total: usize) -> usize {
+pub(crate) fn worker_count(total: usize) -> usize {
     let available = thread::available_parallelism().map_or(1, core::num::NonZeroUsize::get);
     available.min(total).max(1)
 }
