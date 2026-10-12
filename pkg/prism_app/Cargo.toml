@@ -69,6 +69,13 @@ trace = ["std"]
 # I/O); off by default so a shipped build pays nothing.
 hot-reload = ["std"]
 
+# Roadmap §22 "基准即规格": measure the empty frame-loop cost and assert
+# fixed-timestep determinism under identical jitter input. Custom harness, so it
+# runs as a plain `main` printing timings.
+[[bench]]
+name = "frame_loop"
+harness = false
+
 # AAA lint bar. prism_app contains no `unsafe`, so unlike prism_ecs it can keep
 # the workspace-strength lints as warnings and still hit zero warnings.
 [lints.rust]
