@@ -1,0 +1,13 @@
+[package]
+name = "prism_replication"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism's authority / replication kernel (design docs/prism_network_design_zh.md): the pure, transport-independent core the multiplayer layer builds on — command sequencing (Lamport logical clock + per-source in-order delivery windows) and, as it grows, state-delta replication primitives. Sits above prism_scene/persist/ecs/time as a cross-cutting layer. Contains no Unreal Engine or Unity source or derived code and depends on no bevy_* crate."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

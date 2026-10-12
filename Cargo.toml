@@ -56,6 +56,8 @@ members = [
   "pkg/prism_ecs_macros",
   # Prism in-house application shell (App/SubApp/Plugin/schedules/runner), replaces bevy_app.
   "pkg/prism_app",
+  # Prism's authority / replication kernel (multiplayer core: command sequencing, state deltas).
+  "pkg/prism_replication",
   # Prism's experimental next-generation rendering architecture.
   "pkg/prism_render_architecture",
   "pkg/prism_render_material",
