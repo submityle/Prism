@@ -307,3 +307,16 @@ fn buffer_layout(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
         count: None,
     }
 }
+
+/// Device-free gate: the composed kernel (fragment + wrapper) must be a valid
+/// WGSL module on the pinned `naga`.
+#[cfg(test)]
+mod parse_gate {
+    #[test]
+    fn composed_kernel_parses() {
+        let src = alloc::format!("{}\n{}", super::WGSL_RAYTRI, super::COMPUTE_WRAPPER);
+        if let Err(err) = wgpu::naga::front::wgsl::parse_str(&src) {
+            panic!("raytri failed to parse: {err}\n--- source ---\n{src}");
+        }
+    }
+}
