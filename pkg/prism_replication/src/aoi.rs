@@ -14,6 +14,7 @@
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 
 /// The most cells a radius query will walk before falling back to scanning every
 /// entity. A cell walk is only an acceleration, so capping it trades a little
@@ -134,6 +135,46 @@ impl AoiGrid {
             return Vec::new();
         }
         let radius_sq = radius * radius;
+        self.candidates(x, z, radius, radius_sq)
+    }
+
+    /// Every tracked id within `radius` of `(x, z)`, paired with its **squared**
+    /// distance to that centre.
+    ///
+    /// Membership is identical to [`query_circle`]: same exact-distance rule, same
+    /// degenerate-input rejection (empty [`Vec`] for a non-finite centre, a
+    /// non-finite radius, or `radius <= 0.0`), and the same bounded cell walk with
+    /// the [`MAX_CELLS`] fallback. The only difference is the payload: each id is
+    /// returned as `(distance_squared, id)` and the result is sorted ascending by
+    /// `(distance_squared, id)`, so nearest comes first and equidistant ids are
+    /// broken deterministically by ascending id, independent of insertion order.
+    ///
+    /// `distance_squared` needs no `sqrt`, so this stays `no_std` and free of
+    /// transcendentals.
+    #[must_use]
+    pub fn query_circle_ranked(&self, x: f32, z: f32, radius: f32) -> Vec<(f32, u32)> {
+        if !x.is_finite() || !z.is_finite() || !radius.is_finite() || radius <= 0.0 {
+            return Vec::new();
+        }
+        let radius_sq = radius * radius;
+        let mut ranked: Vec<(f32, u32)> = self
+            .candidates(x, z, radius, radius_sq)
+            .into_iter()
+            .filter_map(|id| {
+                let &(ex, ez) = self.positions.get(&id)?;
+                let (dx, dz) = (ex - x, ez - z);
+                Some((dx * dx + dz * dz, id))
+            })
+            .collect();
+        ranked.sort_by(|a, b| compare_ranked(*a, *b));
+        ranked
+    }
+
+    /// The ids within `radius` of `(x, z)`, ascending and deduplicated.
+    ///
+    /// This is the single bounded cell walk shared by [`query_circle`] and
+    /// [`query_circle_ranked`]; membership is decided solely by [`within`].
+    fn candidates(&self, x: f32, z: f32, radius: f32, radius_sq: f32) -> Vec<u32> {
         let (min_x, min_z) = self.cell_of(x - radius, z - radius);
         let (max_x, max_z) = self.cell_of(x + radius, z + radius);
 
@@ -248,6 +289,33 @@ fn within(ex: f32, ez: f32, x: f32, z: f32, radius: f32, radius_sq: f32) -> bool
         let (nx, nz) = (dx / radius, dz / radius);
         nx * nx + nz * nz <= 1.0
     }
+}
+
+/// Order two ranked entries ascending by `(distance_squared, id)`.
+///
+/// Distances are finite for finite positions, so a non-total `partial_cmp`
+/// comparison is treated as equal rather than unwrapped. This keeps the sort
+/// deterministic and panic-free regardless of the caller's input.
+fn compare_ranked(a: (f32, u32), b: (f32, u32)) -> Ordering {
+    a.0.partial_cmp(&b.0)
+        .unwrap_or(Ordering::Equal)
+        .then(a.1.cmp(&b.1))
+}
+
+/// The `budget` nearest ids from a `(distance_squared, id)` view, nearest first.
+///
+/// The input is treated as an unordered set: a copy is sorted ascending by
+/// `(distance_squared, id)` before truncating, so a caller may pass a view that
+/// is not pre-sorted (even one straight from [`AoiGrid::query_circle_ranked`]).
+/// Ties are broken deterministically by ascending id. A `budget` of `0`, an empty
+/// view, or a `budget` larger than the view all return the correct (possibly
+/// empty) prefix, and only the ids are returned.
+#[must_use]
+pub fn select_within_budget(view: &[(f32, u32)], budget: usize) -> Vec<u32> {
+    let mut ranked: Vec<(f32, u32)> = view.to_vec();
+    ranked.sort_by(|a, b| compare_ranked(*a, *b));
+    ranked.truncate(budget);
+    ranked.into_iter().map(|(_, id)| id).collect()
 }
 
 #[cfg(test)]
@@ -380,5 +448,103 @@ mod tests {
         let unsorted = interest_delta(&[5, 1], &[1, 9]);
         assert_eq!(unsorted.entered, vec![9]);
         assert_eq!(unsorted.left, vec![5]);
+    }
+
+    /// The ranked query must keep exactly the membership of `query_circle`,
+    /// across a range of radii — including the sub-cell cutoff and the huge-radius
+    /// fallback scan.
+    #[test]
+    fn ranked_query_matches_circle_membership() {
+        let mut aoi = grid();
+        aoi.insert(40, 0.0, 5.0).unwrap(); // 25
+        aoi.insert(7, 3.0, 0.0).unwrap(); // 9
+        aoi.insert(2, -4.0, 0.0).unwrap(); // 16
+        aoi.insert(9, 1000.0, 0.0).unwrap(); // far away
+
+        for radius in [1.0_f32, 4.0, 5.0, 25.0, 1.0e9] {
+            let mut circle = aoi.query_circle(0.0, 0.0, radius);
+            circle.sort_unstable();
+            let mut ranked: Vec<u32> = aoi
+                .query_circle_ranked(0.0, 0.0, radius)
+                .into_iter()
+                .map(|(_, id)| id)
+                .collect();
+            ranked.sort_unstable();
+            assert_eq!(circle, ranked, "membership differs at radius {radius}");
+        }
+    }
+
+    /// Nearest-first ordering, with equidistant ids broken by ascending id.
+    #[test]
+    fn ranked_query_orders_by_distance_then_id() {
+        let mut aoi = grid();
+        // Three entities all at squared distance 25, inserted out of id order.
+        aoi.insert(9, 0.0, 5.0).unwrap();
+        aoi.insert(5, 3.0, 4.0).unwrap();
+        aoi.insert(3, 5.0, 0.0).unwrap();
+        // A strictly nearer and a strictly farther entity.
+        aoi.insert(1, 1.0, 0.0).unwrap(); // 1
+        aoi.insert(8, 10.0, 0.0).unwrap(); // 100
+
+        assert_eq!(
+            aoi.query_circle_ranked(0.0, 0.0, 100.0),
+            vec![(1.0, 1), (25.0, 3), (25.0, 5), (25.0, 9), (100.0, 8)]
+        );
+    }
+
+    /// The same entity set inserted in two different orders must rank identically.
+    #[test]
+    fn ranked_query_is_independent_of_insertion_order() {
+        let rows = [
+            (7_u32, 2.0_f32, 1.0_f32),
+            (1, 3.0, 4.0),
+            (9, 0.0, 0.0),
+            (4, 5.0, 0.0),
+            (2, 2.0, 1.0),
+        ];
+
+        let mut forward = grid();
+        for &(id, x, z) in &rows {
+            forward.insert(id, x, z).unwrap();
+        }
+        let mut reverse = grid();
+        for &(id, x, z) in rows.iter().rev() {
+            reverse.insert(id, x, z).unwrap();
+        }
+
+        let a = forward.query_circle_ranked(0.0, 0.0, 10.0);
+        let b = reverse.query_circle_ranked(0.0, 0.0, 10.0);
+        assert_eq!(a, b);
+        // Sanity: the equidistant pair (7, 2) and (2, 2) tie-breaks by id.
+        assert_eq!(a[1], (5.0, 2));
+        assert_eq!(a[2], (5.0, 7));
+    }
+
+    /// Degenerate inputs mirror `query_circle` exactly and return empty.
+    #[test]
+    fn ranked_query_rejects_degenerate_inputs() {
+        let mut aoi = grid();
+        aoi.insert(1, 0.0, 0.0).unwrap();
+        assert!(aoi.query_circle_ranked(0.0, 0.0, 0.0).is_empty());
+        assert!(aoi.query_circle_ranked(0.0, 0.0, -1.0).is_empty());
+        assert!(aoi.query_circle_ranked(f32::NAN, 0.0, 1.0).is_empty());
+        assert!(aoi.query_circle_ranked(0.0, f32::INFINITY, 1.0).is_empty());
+        assert!(aoi.query_circle_ranked(0.0, 0.0, f32::NAN).is_empty());
+    }
+
+    /// `select_within_budget` takes the nearest N, is order-independent, and
+    /// handles `budget == 0`, an over-large budget and an empty view.
+    #[test]
+    fn select_within_budget_takes_the_nearest_n() {
+        let ranked = vec![(1.0, 3), (4.0, 1), (4.0, 2), (9.0, 5)];
+        assert_eq!(select_within_budget(&ranked, 2), vec![3, 1]);
+        assert_eq!(select_within_budget(&ranked, 3), vec![3, 1, 2]);
+        assert!(select_within_budget(&ranked, 0).is_empty());
+        assert_eq!(select_within_budget(&ranked, 10), vec![3, 1, 2, 5]);
+        assert!(select_within_budget(&[], 3).is_empty());
+
+        // An unsorted input must be sorted before truncating.
+        let unsorted = vec![(9.0, 5), (1.0, 3), (4.0, 2), (4.0, 1)];
+        assert_eq!(select_within_budget(&unsorted, 3), vec![3, 1, 2]);
     }
 }
