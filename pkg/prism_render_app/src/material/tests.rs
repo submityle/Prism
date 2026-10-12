@@ -241,6 +241,108 @@ fn a_material_with_a_different_illumination_still_lands() {
         "the packed block matches the record"
     );
 }
+
+/// Resolving a material's texture requests assigns bindless slots: real images
+/// get dynamic slots (reference counted, so two materials share one), and a
+/// semantic that has no map names its reserved fallback.
+#[test]
+fn resolving_textures_assigns_slots_and_counts_references() {
+    use crate::material::texture_heap::FIRST_DYNAMIC_SLOT;
+    use crate::material::{RenderMaterials, TextureRequest};
+    use prism_asset::{AssetId, AssetIndex};
+    use prism_image::Image;
+
+    let image = |tag: u32| AssetId::<Image>::new(AssetIndex::from_parts(tag, 1));
+    let mut materials = RenderMaterials::new(8);
+
+    let rows = materials.resolve_textures(
+        1,
+        [
+            (0, TextureRequest::Image(image(10))),
+            (1, TextureRequest::Fallback(crate::TextureFallback::FlatNormal)),
+            (2, TextureRequest::Image(image(20))),
+        ],
+    );
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].index, FIRST_DYNAMIC_SLOT, "the first image");
+    assert_eq!(rows[0].semantic, 0, "the ABI's semantic number rides the row");
+    assert_eq!(rows[0].sampler_index, rows[0].index, "sampler shares the slot");
+    assert_eq!(
+        rows[1].index,
+        crate::material::texture_heap::FLAT_NORMAL_SLOT,
+        "a missing normal map is the reserved flat normal, not white"
+    );
+    assert_eq!(rows[2].index, FIRST_DYNAMIC_SLOT + 1, "the second image");
+    assert_eq!(materials.textures().refcount(image(10)), 1);
+    assert_eq!(materials.textures().stats().live_images, 2);
+
+    // A second material referencing the same image shares its slot.
+    let shared = materials.resolve_textures(2, [(0, TextureRequest::Image(image(10)))]);
+    assert_eq!(shared[0].index, rows[0].index, "the slot is shared");
+    assert_eq!(materials.textures().refcount(image(10)), 2);
+    assert_eq!(materials.textures().stats().live_images, 2);
+}
+
+/// Republishing a material releases exactly the references it no longer holds,
+/// and retiring it releases the rest — so a slot comes back only when the last
+/// user is done with the image.
+#[test]
+fn republish_and_retire_release_exactly_what_was_held() {
+    use crate::material::{RenderMaterials, TextureRequest};
+    use prism_asset::{AssetId, AssetIndex};
+    use prism_image::Image;
+
+    let image = |tag: u32| AssetId::<Image>::new(AssetIndex::from_parts(tag, 1));
+    let mut materials = RenderMaterials::new(8);
+    materials.resolve_textures(
+        1,
+        [
+            (0, TextureRequest::Image(image(10))),
+            (1, TextureRequest::Image(image(20))),
+        ],
+    );
+    let kept_slot = materials.texture_slot(image(20)).expect("resident");
+
+    // Republish keeping only the second image.
+    let rows = materials.resolve_textures(1, [(0, TextureRequest::Image(image(20)))]);
+    assert_eq!(rows[0].index, kept_slot.index, "the kept image keeps its slot");
+    assert_eq!(
+        materials.textures().refcount(image(10)),
+        0,
+        "the dropped image's reference was released"
+    );
+    assert_eq!(materials.textures().refcount(image(20)), 1);
+
+    assert_eq!(materials.release_textures(1), 1, "one reference was held");
+    assert_eq!(materials.textures().refcount(image(20)), 0, "and now released");
+    assert_eq!(materials.texture_slot(image(20)), None);
+    assert_eq!(
+        materials.release_textures(1),
+        0,
+        "releasing twice is a no-op"
+    );
+}
+
+/// A device-limit re-clamp is only safe while nothing is resident.
+#[test]
+fn the_slot_capacity_can_be_clamped_before_anything_is_published() {
+    use crate::material::{RenderMaterials, TextureRequest};
+    use prism_asset::{AssetId, AssetIndex};
+    use prism_image::Image;
+
+    let mut materials = RenderMaterials::new(8);
+    materials.set_texture_capacity(64);
+    assert_eq!(materials.textures().capacity(), 64);
+    materials.resolve_textures(
+        0,
+        [(0, TextureRequest::Image(AssetId::<Image>::new(AssetIndex::from_parts(1, 1))))],
+    );
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        materials.set_texture_capacity(128);
+    }));
+    assert!(result.is_err(), "clamping under live rows panics");
+}
+
 /// The stage end to end: a material published into the render registry lands in
 /// the ABI buffers during a frame, and retiring it leaves an inactive row.
 #[test]

@@ -105,7 +105,8 @@ pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp, RenderStartup};
 pub use material::{
     BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,
-    ParameterHeap, RenderMaterials, TextureFallback, TextureHeapStats, TextureSlotHeap,
+    ParameterHeap, RenderMaterials, TextureFallback, TextureHeapStats, TextureRequest,
+    TextureSlotHeap,
 };
 pub use mesh_pipeline::{
     MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer, full_lobe_fallback,
@@ -150,7 +151,8 @@ pub mod prelude {
     pub use crate::label::{Render, RenderApp, RenderStartup};
     pub use crate::material::{
         BindlessSlot, MaterialParameterBuffers, MaterialSyncReport, MaterialUploadStats,
-        ParameterHeap, RenderMaterials, TextureFallback, TextureHeapStats, TextureSlotHeap,
+        ParameterHeap, RenderMaterials, TextureFallback, TextureHeapStats, TextureRequest,
+    TextureSlotHeap,
     };
     pub use crate::mesh_pipeline::{
         MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer, full_lobe_fallback,
