@@ -2315,3 +2315,37 @@ fn prism_dq_op(op: u32, a: PrismDualQuat, b: PrismDualQuat) -> PrismDualQuat {\n
         default: { return a; }\n\
     }\n\
 }\n";
+
+/// Single-sourced WGSL for the plane query family, mirroring the CPU
+/// [`Plane`](crate::geom::plane::Plane) methods. A plane is passed as a
+/// `normal: vec3<f32>` plus offset `d`, so the signed distance is
+/// `dot(normal, p) + d` (`normal` unit length gives Euclidean distances):
+/// `prism_plane_signed_distance` is that signed value,
+/// `prism_plane_distance` its magnitude, `prism_plane_project_point` the
+/// orthogonal projection `p - normal * signed_distance(p)`,
+/// `prism_plane_flipped` the negated `(-normal, -d)`, and
+/// `prism_plane_normalized` the copy rescaled to a unit normal (and matching
+/// `d`). This is the GPU side of plane clipping, decal placement, reflection,
+/// and ground-snapping. Signed distance/projection are single dot products;
+/// `normalized` adds a `length` divide.
+pub const WGSL_PLANE: &str = "\
+fn prism_plane_signed_distance(normal: vec3<f32>, d: f32, p: vec3<f32>) -> f32 {\n\
+    return dot(normal, p) + d;\n\
+}\n\
+\n\
+fn prism_plane_distance(normal: vec3<f32>, d: f32, p: vec3<f32>) -> f32 {\n\
+    return abs(dot(normal, p) + d);\n\
+}\n\
+\n\
+fn prism_plane_project_point(normal: vec3<f32>, d: f32, p: vec3<f32>) -> vec3<f32> {\n\
+    return p - normal * (dot(normal, p) + d);\n\
+}\n\
+\n\
+fn prism_plane_normalized(normal: vec3<f32>, d: f32) -> vec4<f32> {\n\
+    let inv = 1.0 / length(normal);\n\
+    return vec4<f32>(normal * inv, d * inv);\n\
+}\n\
+\n\
+fn prism_plane_flipped(normal: vec3<f32>, d: f32) -> vec4<f32> {\n\
+    return vec4<f32>(-normal, -d);\n\
+}\n";
