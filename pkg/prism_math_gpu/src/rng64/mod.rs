@@ -307,3 +307,32 @@ fn buffer_layout(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
         count: None,
     }
 }
+
+/// Device-free gate: every composed kernel (shared u64 emulation + generator
+/// fragment(s) + I/O + wrapper) must be a valid WGSL module on the pinned `naga`.
+#[cfg(test)]
+mod parse_gate {
+    #[test]
+    fn composed_kernels_parse() {
+        let splitmix = alloc::format!(
+            "{}\n{}\n{}\n{}",
+            super::WGSL_U64,
+            super::WGSL_SPLITMIX64,
+            super::IO,
+            super::WRAP_SPLITMIX
+        );
+        let xoshiro = alloc::format!(
+            "{}\n{}\n{}\n{}\n{}",
+            super::WGSL_U64,
+            super::WGSL_SPLITMIX64,
+            super::WGSL_XOSHIRO256SS,
+            super::IO,
+            super::WRAP_XOSHIRO
+        );
+        for (label, src) in [("splitmix", splitmix), ("xoshiro", xoshiro)] {
+            if let Err(err) = wgpu::naga::front::wgsl::parse_str(&src) {
+                panic!("rng64 `{label}` failed to parse: {err}\n--- source ---\n{src}");
+            }
+        }
+    }
+}

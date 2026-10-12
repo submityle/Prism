@@ -253,3 +253,21 @@ fn buffer_layout(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
         count: None,
     }
 }
+
+/// Device-free gate: the composed kernel (quaternion + dual-quaternion
+/// fragments + wrapper) must be a valid WGSL module on the pinned `naga`.
+#[cfg(test)]
+mod parse_gate {
+    #[test]
+    fn composed_kernel_parses() {
+        let src = alloc::format!(
+            "{}\n{}\n{}",
+            super::WGSL_QUAT_ALG,
+            super::WGSL_DUAL_QUAT_ALG,
+            super::WRAP
+        );
+        if let Err(err) = wgpu::naga::front::wgsl::parse_str(&src) {
+            panic!("dual_quat_alg failed to parse: {err}\n--- source ---\n{src}");
+        }
+    }
+}
