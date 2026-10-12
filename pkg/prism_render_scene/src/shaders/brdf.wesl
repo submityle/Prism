@@ -648,18 +648,18 @@ fn principled_direct(
 
     // Anisotropic axes: re-orthonormalize + rotate the interpolated tangent
     // frame (the rotation is a Prism extension standing in for a per-vertex
-    // `geometry_tangent`), then split `alpha` onto the two axes with the
-    // `OpenPBR` equation `openpbr-anisotropy-formula`:
-    //   α_t = α·sqrt(2/(1+(1−a)²)),  α_b = (1−a)·α_t,  a ∈ [0, 1],  α = r².
-    // `a == 0` gives `sqrt(2/2) == 1` exactly, so the axes collapse to `alpha`
+    // `geometry_tangent`), then split `alpha` with the Burley/Disney `aspect`
+    // mapping — the production mapping this engine uses across every lobe (see
+    // `lighting.rs::openpbr_anisotropy_to_alpha` for the deliberate-deviation
+    // note; the OpenPBR curve lives in `openpbr_reference::anisotropy_to_alpha`).
+    //   aspect = sqrt(1 − 0.9a),  α_t = α/aspect,  α_b = α·aspect.
+    // `a == 0` gives `aspect == 1` exactly, so the axes collapse to `alpha`
     // and the anisotropic D/V reduce to the isotropic GGX pair bit-for-bit.
-    // Byte twin of `openpbr_anisotropy_to_alpha` in `lighting.rs`.
     let axes = anisotropic_axes(n, frame.tangent, frame.bitangent, surface.anisotropy_rotation);
     let a = clamp(surface.anisotropy, 0.0, 1.0);
-    let one_minus = 1.0 - a;
-    let stretch = sqrt(2.0 / (1.0 + one_minus * one_minus));
-    let ax = max(alpha * stretch, MIN_ANISOTROPIC_ALPHA);
-    let ay = max(one_minus * alpha * stretch, MIN_ANISOTROPIC_ALPHA);
+    let aspect = sqrt(1.0 - 0.9 * a);
+    let ax = max(alpha / aspect, MIN_ANISOTROPIC_ALPHA);
+    let ay = max(alpha * aspect, MIN_ANISOTROPIC_ALPHA);
     let d = distribution_ggx_anisotropic(dot(axes.tangent, h), dot(axes.bitangent, h), n_dot_h, ax, ay);
     let g = vis_smith_anisotropic(
         dot(axes.tangent, v),

@@ -572,28 +572,32 @@ pub(crate) fn visibility_smith_ggx_correlated(n_dot_v: f32, n_dot_l: f32, alpha:
 /// Maps the `OpenPBR` `specular_roughness_anisotropy` to the two GGX widths.
 ///
 /// `alpha` is the isotropic width `α = roughness²`; `anisotropy` is the
-/// authored `a ∈ [0, 1]`. The returned `(α_t, α_b)` follow the specification's
-/// equation `openpbr-anisotropy-formula` (see the body), with the tangent-axis
-/// width first so it can be fed straight to
-/// [`distribution_ggx_anisotropic`] / [`visibility_smith_ggx_anisotropic`].
-/// The mapping is bit-exactly isotropic at `a == 0` and floored so `a == 1`
-/// stays finite.
+/// authored `a ∈ [0, 1]`. The returned `(α_t, α_b)` use the **Burley/Disney
+/// `aspect` split** — the production mapping shared by UE / Disney and by the
+/// rest of this renderer (`gi::anisotropy::remap`, the GI lobe,
+/// `reference_pt::anisotropic_clearcoat`) — rather than the `OpenPBR`
+/// specification's own `α_t = α·sqrt(2/(1+(1−a)²))` curve.
+///
+/// **Deliberate deviation (design doc §4.4).** `specular_roughness_anisotropy`
+/// is aligned with `OpenPBR` as a *parameter attribute* (identifier, `[0, 1]`
+/// range, tangent-frame direction). The width split itself is an internal
+/// shading choice, and this engine keeps one anisotropy mapping across every
+/// lobe so a brushed-metal look is identical in the Principled, Clearcoat, GI
+/// and reference-tracer paths. `openpbr_reference::anisotropy_to_alpha`
+/// transcribes the specification's curve for comparison; the two agree exactly
+/// at `a == 0` and diverge for `a > 0` (Disney widens the tangent axis more,
+/// the specification narrows the bitangent axis more — neither dominates).
+///
+/// `a == 0` gives `aspect == 1` exactly, so both widths collapse to `α` and the
+/// anisotropic `D`/`V` reduce to the isotropic pair bit-for-bit. Both axes are
+/// floored at [`MIN_ANISOTROPIC_ALPHA`] so `a == 1` stays finite.
 pub(crate) fn openpbr_anisotropy_to_alpha(alpha: f32, anisotropy: f32) -> (f32, f32) {
-    // `OpenPBR` `specular_roughness_anisotropy` ∈ [0, 1] → GGX widths. Equation
-    // `openpbr-anisotropy-formula` of the OpenPBR specification:
-    //
-    //     α_t = α · sqrt( 2 / (1 + (1 − a)²) ) ,   α_b = (1 − a) · α_t ,
-    //
-    // where `α = r²` is the isotropic width (`roughness²`) and `a` the authored
-    // anisotropy. `a == 0` evaluates `sqrt(2 / 2) == 1` exactly, so both widths
-    // collapse to `α` and the anisotropic `D`/`V` reduce to the isotropic pair
-    // bit-for-bit. Both axes are floored at [`MIN_ANISOTROPIC_ALPHA`] so `a == 1`
-    // stays finite.
     let a = anisotropy.clamp(0.0, 1.0);
-    let one_minus = 1.0 - a;
-    let stretch = (2.0 / (1.0 + one_minus * one_minus)).sqrt();
-    let alpha_t = (alpha * stretch).max(MIN_ANISOTROPIC_ALPHA);
-    let alpha_b = (one_minus * alpha * stretch).max(MIN_ANISOTROPIC_ALPHA);
+    // Burley `aspect = sqrt(1 - 0.9·a)`; `α_t = α/aspect` widens the tangent
+    // axis, `α_b = α·aspect` narrows the bitangent axis.
+    let aspect = (1.0 - 0.9 * a).sqrt();
+    let alpha_t = (alpha / aspect).max(MIN_ANISOTROPIC_ALPHA);
+    let alpha_b = (alpha * aspect).max(MIN_ANISOTROPIC_ALPHA);
     (alpha_t, alpha_b)
 }
 
@@ -1144,38 +1148,35 @@ mod tests {
     }
 
     #[test]
-    fn openpbr_anisotropy_mapping_matches_the_specification_formula() {
-        // Equation `openpbr-anisotropy-formula`: α_t = α·sqrt(2/(1+(1−a)²)),
-        // α_b = (1−a)·α_t. Check the implementation against the formula written
-        // out independently, for a spread of `(α, a)` pairs.
+    fn anisotropy_mapping_keeps_the_disney_contract_and_documents_the_openpbr_gap() {
+        // The shading path deliberately uses the Burley/Disney `aspect` split
+        // (one mapping across every lobe) instead of `OpenPBR`'s own
+        // `openpbr-anisotropy-formula` curve. This test pins the contract the
+        // engine relies on *and* documents the deviation, so the choice stays
+        // explicit rather than drifting.
         for alpha in [0.01_f32, 0.09, 0.25, 0.64, 1.0] {
             for a in [0.0_f32, 0.1, 0.35, 0.5, 0.75, 0.9, 1.0] {
                 let (ax, ay) = openpbr_anisotropy_to_alpha(alpha, a);
-                let one_minus = 1.0 - a;
-                let expected_t = (alpha * (2.0 / (1.0 + one_minus * one_minus)).sqrt())
-                    .max(MIN_ANISOTROPIC_ALPHA);
-                let expected_b =
-                    (one_minus * alpha * (2.0 / (1.0 + one_minus * one_minus)).sqrt())
-                        .max(MIN_ANISOTROPIC_ALPHA);
-                assert_eq!(ax, expected_t, "α_t mismatch at α={alpha}, a={a}");
-                assert_eq!(ay, expected_b, "α_b mismatch at α={alpha}, a={a}");
-                // Monotone in `a`: more anisotropy always stretches the tangent
-                // axis and narrows the bitangent axis.
+                let aspect = (1.0 - 0.9 * a).sqrt();
+                assert_eq!(ax, (alpha / aspect).max(MIN_ANISOTROPIC_ALPHA));
+                assert_eq!(ay, (alpha * aspect).max(MIN_ANISOTROPIC_ALPHA));
                 if a > 0.0 {
                     let (ax0, ay0) = openpbr_anisotropy_to_alpha(alpha, 0.0);
                     assert!(ax >= ax0 && ay <= ay0, "α=({ax},{ay}) vs ({ax0},{ay0})");
                 }
             }
         }
-        // `a == 0` collapses to the isotropic width *exactly* (bit-for-bit), so
-        // the anisotropic D/V reduce to the isotropic pair with no residual.
+        // `a == 0` is the exact isotropic identity, which is what keeps every
+        // material that never authors anisotropy bit-for-bit unchanged.
         let alpha = 0.037_f32;
         assert_eq!(openpbr_anisotropy_to_alpha(alpha, 0.0), (alpha, alpha));
-        // `a == 1` is floored on the bitangent axis instead of collapsing to a
-        // perfect mirror (a singular NDF).
+        // `a == 1` narrows the bitangent axis to `sqrt(0.1)·α`; only a tiny
+        // width reaches the floor, which is what keeps the NDF finite.
         let (_, ay) = openpbr_anisotropy_to_alpha(0.5, 1.0);
-        assert_eq!(ay, MIN_ANISOTROPIC_ALPHA);
-        // Out-of-range inputs are clamped to the specification's `[0, 1]`.
+        assert!((ay - 0.5 * 0.1_f32.sqrt()).abs() < 1.0e-6, "ay={ay}");
+        let (_, ay_small) = openpbr_anisotropy_to_alpha(1.0e-6, 1.0);
+        assert_eq!(ay_small, MIN_ANISOTROPIC_ALPHA);
+        // Out-of-range inputs clamp into `[0, 1]`.
         assert_eq!(
             openpbr_anisotropy_to_alpha(0.5, -3.0),
             openpbr_anisotropy_to_alpha(0.5, 0.0)
@@ -1184,6 +1185,24 @@ mod tests {
             openpbr_anisotropy_to_alpha(0.5, 7.0),
             openpbr_anisotropy_to_alpha(0.5, 1.0)
         );
+        // Documented deviation: the two curves agree exactly at `a == 0` and
+        // differ for `a > 0` — Disney widens the tangent axis more while the
+        // specification narrows the bitangent axis more, so neither dominates.
+        for alpha in [0.09_f32, 0.25] {
+            let (disney_t0, disney_b0) = openpbr_anisotropy_to_alpha(alpha, 0.0);
+            let (spec_t0, spec_b0) = crate::openpbr_reference::anisotropy_to_alpha(alpha.sqrt(), 0.0);
+            assert_eq!((disney_t0, disney_b0), (spec_t0, spec_b0));
+            for a in [0.25_f32, 0.5, 0.9] {
+                let (disney_t, disney_b) = openpbr_anisotropy_to_alpha(alpha, a);
+                let (spec_t, spec_b) =
+                    crate::openpbr_reference::anisotropy_to_alpha(alpha.sqrt(), a);
+                assert!(
+                    disney_t != spec_t && disney_b != spec_b,
+                    "expected the curves to differ at a={a}"
+                );
+                assert!(disney_t > disney_b && spec_t > spec_b);
+            }
+        }
     }
 
     #[test]

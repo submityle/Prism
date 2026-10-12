@@ -304,18 +304,17 @@ fn clearcoat_direct(
         let coat_aniso = clamp(surface.coat_roughness_anisotropy, 0.0, 1.0);
         if coat_aniso > 0.0 {
             // `OpenPBR` `coat_roughness_anisotropy`: same shared tangent frame
-            // and `openpbr-anisotropy-formula` split as the base specular lobe
-            // (α_t = α·sqrt(2/(1+(1−a)²)), α_b = (1−a)·α_t).
+            // and same Burley/Disney `aspect` split as the base specular lobe.
             let axes = anisotropic_axes(
                 coat_n,
                 frame.tangent,
                 frame.bitangent,
                 surface.anisotropy_rotation,
             );
-            let one_minus = 1.0 - coat_aniso;
-            let stretch = sqrt(2.0 / (1.0 + one_minus * one_minus));
-            let ax = max(coat_alpha * stretch, MIN_ANISOTROPIC_ALPHA);
-            let ay = max(one_minus * coat_alpha * stretch, MIN_ANISOTROPIC_ALPHA);
+            // Burley/Disney `aspect` split, shared with the base lobe.
+            let aspect = sqrt(1.0 - 0.9 * coat_aniso);
+            let ax = max(coat_alpha / aspect, MIN_ANISOTROPIC_ALPHA);
+            let ay = max(coat_alpha * aspect, MIN_ANISOTROPIC_ALPHA);
             coat_d = distribution_ggx_anisotropic(
                 dot(axes.tangent, h),
                 dot(axes.bitangent, h),
