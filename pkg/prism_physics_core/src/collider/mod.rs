@@ -616,6 +616,8 @@ pub mod critical_state_friction_ratio;
 pub use critical_state_friction_ratio::CriticalStateFrictionRatio;
 pub mod overconsolidation_ratio;
 pub use overconsolidation_ratio::OverconsolidationRatio;
+pub mod rankine_tension_cutoff;
+pub use rankine_tension_cutoff::{RankineTensionCutoff, RankineTensionState};
 
 /// A handle into a [`ShapeRegistry`].
 ///

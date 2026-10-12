@@ -48,7 +48,7 @@ use crate::soft::resolve_two_way_coupling;
 use crate::world::PhysicsWorld;
 
 use super::proxy::{
-    body_collider_from_shape, collider_anchor, collider_overlaps, proxy_inverse_mass, Aabb,
+    body_collider_from_shape_in, collider_anchor, collider_overlaps, proxy_inverse_mass, Aabb,
     RigidProxy,
 };
 
@@ -91,7 +91,9 @@ pub fn gather_rigid_proxies(world: &PhysicsWorld, soft_aabb: &Aabb) -> Vec<Rigid
         };
         let position = world.bodies.position(handle).unwrap_or_default();
         let orientation = world.bodies.orientation(handle).unwrap_or_default();
-        let Some(collider) = body_collider_from_shape(shape, position, orientation) else {
+        let Some(collider) =
+            body_collider_from_shape_in(shape, position, orientation, &world.shapes)
+        else {
             continue;
         };
         if !collider_overlaps(collider, soft_aabb) {

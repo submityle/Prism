@@ -28,9 +28,9 @@
 
 use glam::{Quat, Vec3};
 
-use crate::collider::ColliderShape;
+use crate::collider::{ColliderShape, ShapeRegistry};
 use crate::math::scalar::Real;
-use crate::soft::{BodyCollider, ConvexProxy, CouplingBody};
+use crate::soft::{BodyCollider, ConvexProxy, CouplingBody, Plane};
 use crate::state::body::BodyKind;
 use crate::state::handle::BodyHandle;
 
@@ -94,6 +94,80 @@ pub fn body_collider_from_shape(
             orientation,
             half_extents,
         }),
+        // Convex-hull and triangle-mesh shapes carry their geometry in the
+        // registry's arenas, not inline, so they have no analytic proxy from
+        // this registry-free function. They are dispatched by the
+        // registry-aware [`body_collider_from_shape_in`]; this function handles
+        // the analytic (self-describing) shapes only.
+        ColliderShape::ConvexHull { .. } | ColliderShape::TriangleMesh { .. } => None,
+    }
+}
+
+/// Registry-aware variant of [`body_collider_from_shape`] that can resolve the
+/// arena-backed convex-hull and triangle-mesh shapes.
+///
+/// Analytic shapes (sphere, capsule, plane, cuboid) are delegated verbatim to
+/// [`body_collider_from_shape`], so this function is a strict superset of it.
+/// The arena-backed shapes are resolved through `shapes`:
+///
+/// * [`ColliderShape::ConvexHull`] → [`BodyCollider::ConvexHull`]: the hull's
+///   local outward face half-spaces (from
+///   [`ConvexMeshData::face_half_spaces`](crate::collider::ConvexMeshData::face_half_spaces))
+///   are transformed into world space (normal rotated by `orientation`, offset
+///   shifted by `world_normal · position`) and fed to
+///   [`ConvexProxy::from_planes`]. A hull with more than
+///   [`crate::soft::MAX_CONVEX_PLANES`] faces has no bounded proxy, so
+///   [`ConvexProxy::from_planes`] returns [`None`] and so does this function —
+///   an honest, documented coverage gap rather than a silent truncation.
+/// * [`ColliderShape::TriangleMesh`] → [`None`]: a triangle mesh is immovable
+///   scene geometry with no analytic (bounded, `Copy`) convex proxy, so it is
+///   skipped exactly like any other shape without a proxy.
+///
+/// Returns [`None`] when the shape has no coupling proxy or when the referenced
+/// mesh handle is not present in `shapes`.
+///
+/// # Provenance
+///
+/// The world transform of the face half-spaces is elementary rigid-transform
+/// algebra; this contains **no Unreal Engine source or derived code**.
+#[must_use]
+pub fn body_collider_from_shape_in(
+    shape: &ColliderShape,
+    position: Vec3,
+    orientation: Quat,
+    shapes: &ShapeRegistry,
+) -> Option<BodyCollider> {
+    match *shape {
+        // Analytic, self-describing shapes need no registry lookup.
+        ColliderShape::Sphere { .. }
+        | ColliderShape::Capsule { .. }
+        | ColliderShape::Plane { .. }
+        | ColliderShape::Cuboid { .. } => body_collider_from_shape(shape, position, orientation),
+        ColliderShape::ConvexHull { mesh, .. } => {
+            let data = shapes.convex_mesh(mesh)?;
+            let planes: Vec<Plane> = data
+                .face_half_spaces()
+                .into_iter()
+                .map(|(n_local, off_local)| {
+                    // Transform the local face plane `n_local · x = off_local`
+                    // into world space. A world point `y = R·x + position`
+                    // satisfies `(R·n_local) · y = off_local + (R·n_local) ·
+                    // position`, so the world normal is `orientation * n_local`
+                    // and the world offset shifts by `world_normal · position`.
+                    let world_normal = (orientation * n_local).normalize_or_zero();
+                    let world_offset = off_local + world_normal.dot(position);
+                    Plane {
+                        normal: world_normal,
+                        offset: world_offset,
+                    }
+                })
+                .collect();
+            ConvexProxy::from_planes(position, data.bounding_radius(), &planes)
+                .map(BodyCollider::ConvexHull)
+        }
+        // A triangle mesh is static scene geometry with no bounded analytic
+        // proxy; it is skipped, matching the "no proxy -> None" contract.
+        ColliderShape::TriangleMesh { .. } => None,
     }
 }
 
@@ -587,6 +661,114 @@ mod tests {
         let a = couple_particle_against_body(pos, 1.0, hull, 0.5, 1.0 / 60.0);
         let b = couple_particle_against_body(pos, 1.0, hull, 0.5, 1.0 / 60.0);
         assert_eq!(a, b);
+    }
+
+    /// A registry-backed [`ColliderShape::ConvexHull`] resolves to a bounded
+    /// [`BodyCollider::ConvexHull`] through [`body_collider_from_shape_in`]:
+    /// a box hull yields a six-face proxy centered at the body position.
+    #[test]
+    fn convex_hull_shape_maps_to_bounded_proxy() {
+        use crate::collider::{ConvexMeshData, ShapeRegistry};
+
+        let mut reg = ShapeRegistry::new();
+        let half = Vec3::new(0.5, 0.75, 1.25);
+        let mesh = reg.insert_convex_mesh(ConvexMeshData::from_box(half));
+        let shape = reg
+            .convex_hull_shape(mesh)
+            .expect("convex hull shape from box");
+
+        let position = Vec3::new(2.0, -1.0, 0.5);
+        let got = body_collider_from_shape_in(&shape, position, Quat::IDENTITY, &reg)
+            .expect("convex hull proxy");
+        let BodyCollider::ConvexHull(proxy) = got else {
+            panic!("expected a convex-hull proxy");
+        };
+        // Center is the body position and a box has exactly six faces.
+        assert!((proxy.center() - position).length() < 1e-6);
+        assert!(proxy.planes().len() == 6);
+    }
+
+    /// The world transform of a hull's face planes tracks the body pose: an
+    /// off-origin, rotated box hull resolves to the same projection surface as
+    /// the equivalent [`BodyCollider::Obb`] mapping (cross-validation).
+    #[test]
+    fn convex_hull_shape_tracks_world_pose() {
+        use crate::collider::{ConvexMeshData, ShapeRegistry};
+
+        let mut reg = ShapeRegistry::new();
+        let half = Vec3::new(0.6, 0.3, 0.9);
+        let mesh = reg.insert_convex_mesh(ConvexMeshData::from_box(half));
+        let shape = reg.convex_hull_shape(mesh).expect("convex hull shape");
+
+        let position = Vec3::new(-1.0, 2.0, 0.5);
+        let orientation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_3);
+        let hull = body_collider_from_shape_in(&shape, position, orientation, &reg)
+            .expect("convex hull proxy");
+        let obb = BodyCollider::Obb {
+            center: position,
+            orientation,
+            half_extents: half,
+        };
+        // An interior particle is pushed to the same surface by both arms.
+        let probe = position + orientation * Vec3::new(0.1, 0.2, -0.3);
+        assert!((hull.project(probe) - obb.project(probe)).length() < 1e-5);
+    }
+
+    /// A [`ColliderShape::TriangleMesh`] has no analytic bounded proxy, so the
+    /// registry-aware mapping returns [`None`] (static scene geometry contract).
+    #[test]
+    fn triangle_mesh_shape_has_no_proxy() {
+        use crate::collider::{ShapeRegistry, TriMeshData};
+
+        let mut reg = ShapeRegistry::new();
+        // A unit cube as a triangle mesh (8 vertices, 12 triangles).
+        let verts = vec![
+            Vec3::new(-0.5, -0.5, -0.5),
+            Vec3::new(0.5, -0.5, -0.5),
+            Vec3::new(0.5, 0.5, -0.5),
+            Vec3::new(-0.5, 0.5, -0.5),
+            Vec3::new(-0.5, -0.5, 0.5),
+            Vec3::new(0.5, -0.5, 0.5),
+            Vec3::new(0.5, 0.5, 0.5),
+            Vec3::new(-0.5, 0.5, 0.5),
+        ];
+        let tris = vec![
+            [0u32, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        let mesh = reg.insert_tri_mesh(TriMeshData::new(verts, tris));
+        let shape = reg.tri_mesh_shape(mesh).expect("tri mesh shape");
+        let got =
+            body_collider_from_shape_in(&shape, Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY, &reg);
+        assert!(got.is_none());
+    }
+
+    /// A convex-hull handle that is not present in the registry yields [`None`]
+    /// rather than panicking (the `?` on the arena lookup).
+    #[test]
+    fn convex_hull_missing_handle_is_none() {
+        use crate::collider::{ConvexMeshHandle, ShapeRegistry};
+
+        let reg = ShapeRegistry::new();
+        let shape = ColliderShape::ConvexHull {
+            mesh: ConvexMeshHandle(7),
+            local_aabb_min: Vec3::splat(-0.5),
+            local_aabb_max: Vec3::splat(0.5),
+            volume: 1.0,
+            unit_density_inertia: Vec3::splat(1.0 / 6.0),
+        };
+        let got = body_collider_from_shape_in(&shape, Vec3::ZERO, Quat::IDENTITY, &reg);
+        assert!(got.is_none());
     }
 
     /// The convex anchor is its center and its world AABB encloses that center.
