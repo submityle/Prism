@@ -24,6 +24,8 @@
 //! - [`snapshot`] — the bounded baseline ring that applies those deltas forward
 //!   into new baselines and serves any retained revision for a late-join or a
 //!   resync.
+//! - [`aoi`] — interest management: a deterministic uniform spatial grid and the
+//!   enter/leave edges between two interest views (design §8).
 //!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
@@ -35,6 +37,8 @@
 extern crate alloc;
 
 pub mod sequence;
+
+pub mod aoi;
 
 pub mod bitpack;
 
