@@ -97,6 +97,265 @@ fn has_closure(mask: u32, kind: ClosureKind) -> bool {
     mask & (1 << kind as u32) != 0
 }
 
+/// What makes a material belong to a shading class (roadmap P2-j).
+///
+/// The class set is **registration-driven**: this table is built once at
+/// pipeline-build time from the PCM registry (the response-mode rows) plus the
+/// lobe catalogue (the closures that own a dedicated shading bucket), and the
+/// per-pixel classifier is its verified specialization. Adding a response mode
+/// to the catalogue therefore adds a class row rather than editing a closed
+/// enum tree, while the hot path stays exactly as it is: a priority-ordered
+/// walk of a table that was fixed before the first dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShadingClassRule {
+    /// A dedicated subsystem render class binds its bucket directly, whatever
+    /// the illumination axis says (a stylized water shader is still water work).
+    RenderClass(MaterialRenderClass),
+    /// The illumination axis selects this bucket.
+    Illumination(Illumination),
+    /// A `Lit` surface carrying this dominant closure selects this bucket.
+    Closure(ClosureKind),
+    /// The fallback: a `Lit` surface whose closures name no specialized bucket.
+    Default,
+}
+
+/// One row of the shading-class table, in **evaluation order** (first match
+/// wins, so priority is the row order).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShadingClassRow {
+    /// The bucket's stable id — the `MaterialShadingClass` discriminant the work
+    /// plan and every WESL `CLASS_*` constant use.
+    pub id: u32,
+    /// Display name, for diagnostics and the WESL parity gate.
+    pub name: &'static str,
+    /// The predicate this row tests.
+    pub rule: ShadingClassRule,
+}
+
+/// A failure while deriving the class table from the registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClassTableError {
+    /// A registered response mode with no shading implementation in the engine.
+    ///
+    /// Registration is a *declaration*; without an implementation the class
+    /// table cannot be built. Failing here — at pipeline-build time — is the
+    /// whole point: a registered-but-unshaded mode must be a loud error rather
+    /// than a material that silently classifies as something else.
+    UnhandledResponseMode(String),
+}
+
+impl core::fmt::Display for ClassTableError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnhandledResponseMode(uid) => write!(
+                f,
+                "response mode {uid:?} is registered but has no shading implementation"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ClassTableError {}
+
+/// The shading-class table (roadmap P2-j).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ShadingClassTable {
+    rows: Vec<ShadingClassRow>,
+}
+
+impl ShadingClassTable {
+    /// Derive the class set from the PCM registry and the lobe catalogue.
+    ///
+    /// * Render-class buckets (`Water`, `Hair`) come first, because a dedicated
+    ///   subsystem owns them regardless of the illumination axis.
+    /// * The illumination buckets come from the registry's `Kind::ResponseMode`
+    ///   rows, in slot order, so the registration order is the class order.
+    /// * The `Lit` closure buckets exist only if the corresponding lobe is
+    ///   declared by the schema: a lobe the engine does not carry cannot claim a
+    ///   bucket.
+    ///
+    /// # Errors
+    ///
+    /// [`ClassTableError::UnhandledResponseMode`] when a registered response mode
+    /// has no engine implementation.
+    pub fn from_registry(
+        registry: &prism_material_pcm::ExtensionRegistry,
+        lobes: &[prism_render_material::LobeLayout],
+    ) -> Result<Self, ClassTableError> {
+        let mut rows = Vec::new();
+        // Dedicated subsystem buckets, in the engine's fixed priority order.
+        rows.push(ShadingClassRow {
+            id: MaterialShadingClass::Water as u32,
+            name: "water",
+            rule: ShadingClassRule::RenderClass(MaterialRenderClass::Water),
+        });
+        rows.push(ShadingClassRow {
+            id: MaterialShadingClass::Hair as u32,
+            name: "hair",
+            rule: ShadingClassRule::RenderClass(MaterialRenderClass::Hair),
+        });
+
+        // Registered response modes. The mapping from a uid to an illumination
+        // axis is engine knowledge (the engine has to implement the response);
+        // the *set* is the registry's.
+        for manifest in registry.iter().filter(|m| m.kind() == prism_material_pcm::Kind::ResponseMode) {
+            let (id, name, illumination) = match manifest.uid() {
+                prism_material_pcm::builtin::UID_MODE_UNLIT => (
+                    MaterialShadingClass::Unlit as u32,
+                    "unlit",
+                    Illumination::Unlit,
+                ),
+                prism_material_pcm::builtin::UID_MODE_STYLIZED => (
+                    MaterialShadingClass::Npr as u32,
+                    "npr",
+                    Illumination::Stylized,
+                ),
+                prism_material_pcm::builtin::UID_MODE_CUSTOM => (
+                    MaterialShadingClass::Custom as u32,
+                    "custom",
+                    Illumination::Custom,
+                ),
+                other => {
+                    return Err(ClassTableError::UnhandledResponseMode(String::from(other)));
+                }
+            };
+            rows.push(ShadingClassRow {
+                id,
+                name,
+                rule: ShadingClassRule::Illumination(illumination),
+            });
+        }
+
+        // `Lit` closure buckets, most specific first — the lobe catalogue is the
+        // authority for which of them exist.
+        let has_lobe = |id: &str| lobes.iter().any(|lobe| lobe.id == id);
+        // Hair is a *subsystem* closure with its own render class, not an
+        // über-BSDF lobe: the schema's lobe table never carries it, so this row
+        // is unconditional (the render-class row above already binds the same
+        // bucket for hair materials).
+        rows.push(ShadingClassRow {
+            id: MaterialShadingClass::Hair as u32,
+            name: "hair",
+            rule: ShadingClassRule::Closure(ClosureKind::Hair),
+        });
+        if has_lobe("subsurface") {
+            rows.push(ShadingClassRow {
+                id: MaterialShadingClass::Subsurface as u32,
+                name: "subsurface",
+                rule: ShadingClassRule::Closure(ClosureKind::Subsurface),
+            });
+        }
+        if has_lobe("clearcoat") {
+            rows.push(ShadingClassRow {
+                id: MaterialShadingClass::ClearCoat as u32,
+                name: "clearcoat",
+                rule: ShadingClassRule::Closure(ClosureKind::ClearCoat),
+            });
+        }
+        if has_lobe("sheen") {
+            rows.push(ShadingClassRow {
+                id: MaterialShadingClass::Cloth as u32,
+                name: "cloth",
+                rule: ShadingClassRule::Closure(ClosureKind::Sheen),
+            });
+        }
+        rows.push(ShadingClassRow {
+            id: MaterialShadingClass::Principled as u32,
+            name: "principled",
+            rule: ShadingClassRule::Default,
+        });
+        Ok(Self { rows })
+    }
+
+    /// The rows, in evaluation order.
+    #[must_use]
+    pub fn rows(&self) -> &[ShadingClassRow] {
+        &self.rows
+    }
+
+    /// Number of rows (a lobe/render class may own more than one row).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whether the table has no rows.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// Classify a header by walking the table, first match wins.
+    ///
+    /// Mirrors [`classify_material_header`]'s preconditions exactly; the two are
+    /// pinned against each other over an exhaustive sweep by the tests.
+    ///
+    /// # Errors
+    ///
+    /// [`ClassificationError`] for an inactive material, a non-surface render
+    /// class, or an illumination value the axis does not define.
+    pub fn classify(&self, header: &GpuMaterialHeader) -> Result<u32, ClassificationError> {
+        if header.is_active == 0 {
+            return Err(ClassificationError::Inactive);
+        }
+        if !is_surface_render_class(header.render_class) {
+            return Err(ClassificationError::NonSurfaceClass);
+        }
+        // The illumination axis is parsed lazily: the dedicated render-class rows
+        // come first and bind their bucket whatever the illumination says (a
+        // stylized water shader is still water work), so an unknown value there
+        // must not pre-empt them. Only a row that actually consults the axis can
+        // reject it.
+        let illumination = Illumination::from_u32(header.illumination);
+        for row in &self.rows {
+            let matched = match row.rule {
+                ShadingClassRule::RenderClass(class) => header.render_class == class as u32,
+                ShadingClassRule::Illumination(axis) => {
+                    let Some(actual) = illumination else {
+                        return Err(ClassificationError::UnsupportedIllumination(
+                            header.illumination,
+                        ));
+                    };
+                    actual == axis
+                }
+                ShadingClassRule::Closure(kind) => {
+                    let Some(actual) = illumination else {
+                        return Err(ClassificationError::UnsupportedIllumination(
+                            header.illumination,
+                        ));
+                    };
+                    actual == Illumination::Lit && has_closure(header.closure_mask, kind)
+                }
+                ShadingClassRule::Default => {
+                    let Some(actual) = illumination else {
+                        return Err(ClassificationError::UnsupportedIllumination(
+                            header.illumination,
+                        ));
+                    };
+                    actual == Illumination::Lit
+                }
+            };
+            if matched {
+                return Ok(row.id);
+            }
+        }
+        Err(ClassificationError::NonSurfaceClass)
+    }
+}
+
+/// Whether a render class is one of the surface-domain blend families.
+fn is_surface_render_class(render_class: u32) -> bool {
+    matches!(
+        render_class,
+        x if x == MaterialRenderClass::Opaque as u32
+            || x == MaterialRenderClass::OpaqueTwoSided as u32
+            || x == MaterialRenderClass::Masked as u32
+            || x == MaterialRenderClass::MaskedTwoSided as u32
+            || x == MaterialRenderClass::Hair as u32
+            || x == MaterialRenderClass::Water as u32
+    )
+}
+
 /// Project a `Lit` surface's closure graph onto a coherent shading bucket. The
 /// dominant physically-based closure wins; a plain metal/dielectric surface is
 /// `Principled`. This mirrors the old per-model buckets without forcing the
@@ -276,5 +535,185 @@ mod tests {
         assert_eq!(plan.work.len(), 2);
         assert_eq!(plan.work[0].pixel_index, 3);
         assert_eq!(plan.work[1].pixel_index, 9);
+    }
+
+    #[test]
+    fn the_class_table_is_derived_from_the_registry_and_the_lobe_catalogue() {
+        let registry = prism_material_pcm::builtin::builtin_registry();
+        let table = ShadingClassTable::from_registry(
+            &registry,
+            &prism_render_material::SURFACE_LOBES,
+        )
+        .expect("the built-in catalogue is fully implemented");
+
+        // One row per bucket, plus the second `hair` row (the render class and
+        // the closure both own the same bucket).
+        assert_eq!(table.len(), 10);
+        let mut ids: Vec<u32> = table.rows().iter().map(|row| row.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), MAX_SHADING_CLASSES);
+
+        // Priority is row order: the dedicated render classes first, then the
+        // registered response modes in registration order, then the `Lit`
+        // closure buckets most-specific-first, and the default last.
+        let names: Vec<&str> = table.rows().iter().map(|row| row.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "water",
+                "hair",
+                // The response-mode rows follow the registry's slot order.
+                "npr",
+                "unlit",
+                "custom",
+                "hair",
+                "subsurface",
+                "clearcoat",
+                "cloth",
+                "principled",
+            ]
+        );
+        assert_eq!(table.rows().last().unwrap().rule, ShadingClassRule::Default);
+    }
+
+
+    #[test]
+    fn the_wesl_class_constants_match_the_table_row_for_row() {
+        // The table is the registration-driven source of truth and the shader's
+        // `CLASS_*` constants are the same ids in the same spelling. This gate
+        // reads the shipping WESL, so a class added on either side without the
+        // other is a build failure rather than a silent work-plan mismatch.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../prism_render_scene/src/shaders/material_classification.wesl");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let mut shader: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+        for line in source.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("const CLASS_") else {
+                continue;
+            };
+            let (name, value) = rest
+                .split_once(": u32 = ")
+                .unwrap_or_else(|| panic!("unparsable class constant: {line}"));
+            // WESL spells unsigned literals with a trailing `u` (`0u`).
+            let value: u32 = value
+                .trim_end_matches(';')
+                .trim_end_matches('u')
+                .parse()
+                .unwrap_or_else(|_| panic!("unparsable class id: {line}"));
+            shader.insert(name.to_ascii_lowercase(), value);
+        }
+        assert!(!shader.is_empty(), "parsed no class constants");
+
+        let registry = prism_material_pcm::builtin::builtin_registry();
+        let table = ShadingClassTable::from_registry(
+            &registry,
+            &prism_render_material::SURFACE_LOBES,
+        )
+        .unwrap();
+        for row in table.rows() {
+            let id = shader
+                .get(row.name)
+                .unwrap_or_else(|| panic!("material_classification.wesl has no CLASS_{}", row.name.to_ascii_uppercase()));
+            assert_eq!(*id, row.id, "class `{}`", row.name);
+        }
+        // …and the shader must not carry a class the table has never heard of.
+        let names: std::collections::BTreeSet<&str> =
+            table.rows().iter().map(|row| row.name).collect();
+        for name in shader.keys() {
+            assert!(
+                names.contains(name.as_str()),
+                "the shader declares CLASS_{} with no table row",
+                name.to_ascii_uppercase()
+            );
+        }
+    }
+
+    #[test]
+    fn a_registered_response_mode_without_an_implementation_fails_loudly() {
+        // Registration is a declaration; the engine still has to implement the
+        // response. A catalogue entry with no shading behind it must be a
+        // build-time error, not a material that silently classifies as something
+        // else.
+        let mut registry = prism_material_pcm::builtin::builtin_registry();
+        registry
+            .register(
+                prism_material_pcm::ExtensionManifest::new(
+                    "org.prism.mode.watercolor",
+                    27,
+                    prism_material_pcm::Namespace::Prism,
+                    prism_material_pcm::Kind::ResponseMode,
+                ),
+            )
+            .expect("the Prism region has room");
+        let error = ShadingClassTable::from_registry(
+            &registry,
+            &prism_render_material::SURFACE_LOBES,
+        )
+        .expect_err("an unhandled response mode must be rejected");
+        assert_eq!(
+            error,
+            ClassTableError::UnhandledResponseMode(String::from("org.prism.mode.watercolor"))
+        );
+    }
+
+    #[test]
+    fn the_table_walk_and_the_hot_path_classifier_agree_exhaustively() {
+        // Roadmap P2-j: the table is the registration-driven source of truth and
+        // `classify_material_header` is its allocation-free specialization. The
+        // only way to keep that claim honest is to sweep every combination the
+        // hot path can see.
+        let registry = prism_material_pcm::builtin::builtin_registry();
+        let table = ShadingClassTable::from_registry(
+            &registry,
+            &prism_render_material::SURFACE_LOBES,
+        )
+        .unwrap();
+        let mut base = fallback_material_header(1);
+        base.is_active = 1;
+        for active in [0u32, 1] {
+            for render_class in [
+                MaterialRenderClass::Opaque as u32,
+                MaterialRenderClass::OpaqueTwoSided as u32,
+                MaterialRenderClass::Masked as u32,
+                MaterialRenderClass::MaskedTwoSided as u32,
+                MaterialRenderClass::Hair as u32,
+                MaterialRenderClass::Water as u32,
+                // A non-surface class must be rejected by both.
+                MaterialRenderClass::Decal as u32,
+            ] {
+                for illumination in [0u32, 1, 2, 3, 4, u32::MAX] {
+                    let mut closure_masks = vec![0u32, u32::MAX];
+                    for kind in [
+                        ClosureKind::Hair,
+                        ClosureKind::Subsurface,
+                        ClosureKind::ClearCoat,
+                        ClosureKind::Sheen,
+                    ] {
+                        closure_masks.push(1 << kind as u32);
+                    }
+                    // Every pair of closures, so priority is exercised.
+                    for a in 0..closure_masks.len() {
+                        for b in 0..closure_masks.len() {
+                            closure_masks.push(closure_masks[a] | closure_masks[b]);
+                        }
+                    }
+                    for closure_mask in closure_masks {
+                        let mut header = base;
+                        header.is_active = active;
+                        header.render_class = render_class;
+                        header.illumination = illumination;
+                        header.closure_mask = closure_mask;
+                        let hot = classify_material_header(&header)
+                            .map(|class| class as u32)
+                            .map_err(|error| error);
+                        let walked = table.classify(&header);
+                        assert_eq!(hot, walked, "{header:?}");
+                    }
+                }
+            }
+        }
     }
 }
