@@ -82,7 +82,10 @@ fn every_easing_matches_cpu_reference() {
         assert_eq!(gpu.len(), src.len());
         for (&t, &g) in src.iter().zip(gpu.iter()) {
             let cpu = cpu_fn(t);
-            assert!(close(g, cpu), "drift for {ease:?} at t={t}: gpu={g} cpu={cpu}");
+            assert!(
+                close(g, cpu),
+                "drift for {ease:?} at t={t}: gpu={g} cpu={cpu}"
+            );
         }
     }
 }

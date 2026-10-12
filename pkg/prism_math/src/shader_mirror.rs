@@ -1602,7 +1602,10 @@ fn prism_ridged2(x: f32, y: f32, octaves: u32, lacunarity: f32, gain: f32, frequ
 /// reference uses deterministic `libm`. The §24.1 contract on those is
 /// therefore a small absolute+relative tolerance rather than a bit contract.
 /// The clamp and the `t <= 0`/`t >= 1`/`t < 0.5` branch literals are identical
-/// on both sides, so a given input takes the same branch.
+/// on both sides, so a given input takes the same branch. Non-finite (`NaN`)
+/// inputs are outside the parity contract: Metal's fast-math lowers the clamp
+/// so `smoothstep(NaN)` becomes a bound instead of propagating `NaN` (verified
+/// on device), which cannot be fixed in portable WGSL.
 pub const WGSL_EASING: &str = "\
 fn prism_ease_smoothstep(t0: f32) -> f32 {\n\
     let t = clamp(t0, 0.0, 1.0);\n\
