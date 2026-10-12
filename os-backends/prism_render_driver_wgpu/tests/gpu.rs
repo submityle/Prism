@@ -12,12 +12,15 @@
 //! they never name a `wgpu` type directly, relying on the no-wgpu-types
 //! `request_default_device` entry point.
 
+extern crate alloc;
+
 use prism_render_driver as rhi;
 use prism_render_driver_wgpu::{WgpuDevice, WgpuInstance, WgpuQueue};
 use rhi::{FrameSync, RenderDevice, RenderQueue};
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use alloc::sync::Arc;
 
 /// Brings up a device/queue pair, or returns `None` when no GPU is available.
 fn device_or_skip() -> Option<(WgpuDevice, WgpuQueue)> {
@@ -186,7 +189,7 @@ fn gpu_completion_callback_fires_after_the_queue_drains() {
 
     // Advance the queue's submission index so the registered callback becomes
     // eligible to run.
-    let mut encoder = rhi::CommandEncoder::labeled("completion-callback");
+    let encoder = rhi::CommandEncoder::labeled("completion-callback");
     queue.submit(&[encoder.finish()]);
     assert!(device.poll_wait(), "the device stays healthy");
 
