@@ -143,6 +143,16 @@ pub struct Lobe {
     /// checks the union of these for a material's **required** extensions.
     #[serde(default)]
     pub requires_caps: Vec<String>,
+    /// The shading-closure bucket this lobe owns, when it has one (§5.2).
+    ///
+    /// A lobe is *layout*; a closure bucket is *classification*. Declaring the
+    /// link here is what makes the class table manifest-driven instead of
+    /// matching lobe ids by hand: the schema states "the `subsurface` lobe owns
+    /// the `subsurface` closure", and the shading side resolves that name
+    /// against its own `ClosureKind` set (an unknown name is a loud error, never
+    /// a silently invented bucket).
+    #[serde(default)]
+    pub closure: Option<String>,
     /// Number of `u32` words the lobe occupies. Lobes are **variable length**
     /// (§4.4): the pack cursor advances by each present lobe's own `words`, and
     /// the codegen emits a per-lobe footprint (`SURFACE_LOBE_WORDS_BY_SLOT` /
@@ -574,6 +584,18 @@ impl SurfaceSchema {
         // the words tile `0..channels.len()`, the default is a scalar, and the
         // identity is unique across the whole catalogue (lobes included) so a
         // channel can never alias a lobe's uid.
+        let mut closures = BTreeSet::new();
+        for lobe in &self.lobes {
+            if let Some(closure) = &lobe.closure {
+                if closure.is_empty() {
+                    return Err(SchemaError::EmptyClosureName(lobe.id.clone()));
+                }
+                if !closures.insert(closure.clone()) {
+                    return Err(SchemaError::DuplicateClosureName(closure.clone()));
+                }
+            }
+        }
+
         let mut channel_words = BTreeSet::new();
         for channel in &self.channels {
             if !channel_words.insert(channel.header_word) {
@@ -666,6 +688,10 @@ pub enum SchemaError {
     DuplicateUid(String),
     /// `registry_slot` values are not a contiguous `0..n` range.
     NonContiguousRegistrySlots,
+    /// A lobe declared an empty closure-bucket name.
+    EmptyClosureName(String),
+    /// Two lobes claim the same closure bucket.
+    DuplicateClosureName(String),
     /// Two runtime channels claim the same header word.
     DuplicateChannelWord(u32),
     /// Runtime channel words do not tile `0..channels.len()`.
@@ -718,6 +744,12 @@ impl fmt::Display for SchemaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parse(e) => write!(f, "schema parse error: {e}"),
+            Self::EmptyClosureName(id) => {
+                write!(f, "lobe {id:?} declares an empty closure name")
+            }
+            Self::DuplicateClosureName(name) => {
+                write!(f, "two lobes claim the closure bucket {name:?}")
+            }
             Self::DuplicateChannelWord(word) => {
                 write!(f, "two runtime channels claim header word {word}")
             }
@@ -881,5 +913,78 @@ default = 0.0
             SurfaceSchema::parse(bad),
             Err(SchemaError::IncompleteTiling { .. })
         ));
+    }
+
+    fn schema_with_lobes(lobes: &str) -> String {
+        format!(
+            r#"
+schema_version = 1
+abi_version = 5
+[core]
+words = 1
+[[core.field]]
+name = "value"
+type = "f32"
+bit_region = "KHR"
+pack_slot = 0
+default = 0.0
+{lobes}
+"#
+        )
+    }
+
+    #[test]
+    fn rejects_an_empty_closure_name() {
+        let bad = schema_with_lobes(
+            r#"
+[[lobe]]
+id = "a"
+uid = "org.khronos.openpbr.a"
+closure = ""
+registry_slot = 0
+mask_const = "A"
+namespace = "KHR"
+vendor = "KHR"
+stability = "stable"
+words = 0
+"#,
+        );
+        assert_eq!(
+            SurfaceSchema::parse(&bad).unwrap_err(),
+            SchemaError::EmptyClosureName(String::from("a"))
+        );
+    }
+
+    #[test]
+    fn rejects_two_lobes_claiming_one_closure_bucket() {
+        let bad = schema_with_lobes(
+            r#"
+[[lobe]]
+id = "a"
+uid = "org.khronos.openpbr.a"
+closure = "shared"
+registry_slot = 0
+mask_const = "A"
+namespace = "KHR"
+vendor = "KHR"
+stability = "stable"
+words = 0
+
+[[lobe]]
+id = "b"
+uid = "org.khronos.openpbr.b"
+closure = "shared"
+registry_slot = 1
+mask_const = "B"
+namespace = "KHR"
+vendor = "KHR"
+stability = "stable"
+words = 0
+"#,
+        );
+        assert_eq!(
+            SurfaceSchema::parse(&bad).unwrap_err(),
+            SchemaError::DuplicateClosureName(String::from("shared"))
+        );
     }
 }

@@ -183,6 +183,16 @@ pub const SURFACE_LOBES: [LobeLayout; 10] = [
     },
 ];
 
+/// Lobe id → the shading-closure bucket it owns (§5.2).
+///
+/// Only lobes that declare a `closure` appear: a lobe with no closure
+/// contributes layout but no classification bucket.
+pub const SURFACE_LOBE_CLOSURES: [(&str, &str); 3] = [
+    ("clearcoat", "clearcoat"),
+    ("sheen", "sheen"),
+    ("subsurface", "subsurface"),
+];
+
 /// One runtime dynamic channel's generated identity.
 ///
 /// The value lives in one of the material header's `dynamic_*` words;

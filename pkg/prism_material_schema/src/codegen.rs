@@ -546,6 +546,35 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     }
     o.push_str("];\n");
 
+    // The lobe → closure-bucket link (§5.2): declared by the schema so the
+    // shading side derives its classification rows from the manifest instead of
+    // matching lobe ids by hand.
+    let closures: Vec<String> = lobes
+        .iter()
+        .filter_map(|lobe| {
+            lobe.closure
+                .as_ref()
+                .map(|closure| format!("({:?}, {closure:?})", lobe.id))
+        })
+        .collect();
+    o.push_str("\n/// Lobe id → the shading-closure bucket it owns (§5.2).\n");
+    o.push_str("///\n");
+    o.push_str("/// Only lobes that declare a `closure` appear: a lobe with no closure\n");
+    o.push_str("/// contributes layout but no classification bucket.\n");
+    if closures.is_empty() {
+        o.push_str("pub const SURFACE_LOBE_CLOSURES: [(&str, &str); 0] = [];\n");
+    } else {
+        let _ = writeln!(
+            o,
+            "pub const SURFACE_LOBE_CLOSURES: [(&str, &str); {}] = [",
+            closures.len()
+        );
+        for closure in &closures {
+            let _ = writeln!(o, "    {closure},");
+        }
+        o.push_str("];\n");
+    }
+
     // Runtime dynamic parameter channels (§17.1): declared by the same schema as
     // the lobes, so the ABI mirror gate, the PCM catalogue and this table all
     // read one declaration instead of three hand-written lists.
@@ -670,6 +699,7 @@ mod tests {
             "pub const SURFACE_LOBE_COUNT: u32 = 10;",
             "pub const SURFACE_MAX_WORDS: usize = 104;",
             "pub const SURFACE_LOBES: [LobeLayout; 10] = [",
+            "pub const SURFACE_LOBE_CLOSURES: [(&str, &str); 3] = [\n    (\"clearcoat\", \"clearcoat\"),\n    (\"sheen\", \"sheen\"),\n    (\"subsurface\", \"subsurface\"),\n];",
             "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 8,\n        namespace: \"KHR\",\n        stability: \"stable\",\n        requires_caps: &[],\n        energy_policy: \"independent\",\n    },",
             "    LobeLayout {\n        id: \"npr_face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"NPR_FACE\",\n        registry_slot: 16,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"none\",\n    },",
             "    LobeLayout {\n        id: \"glint\",\n        uid: \"org.prism.lobe.glint\",\n        mask_const: \"GLINT\",\n        registry_slot: 17,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"coupled\",\n    },",

@@ -284,6 +284,8 @@ default = 0.0
 [[lobe]]
 id = "clearcoat"
 uid = "org.khronos.openpbr.coat"
+# The shading-closure bucket this lobe owns (§5.2, classification).
+closure = "clearcoat"
 registry_slot = 1
 mask_const = "CLEARCOAT"
 namespace = "KHR"
@@ -491,6 +493,8 @@ default = 0.0
 [[lobe]]
 id = "sheen"
 uid = "org.khronos.openpbr.fuzz"
+# The shading-closure bucket this lobe owns (§5.2, classification).
+closure = "sheen"
 registry_slot = 3
 mask_const = "SHEEN"
 namespace = "KHR"
@@ -560,6 +564,8 @@ view = "invariant"
 [[lobe]]
 id = "subsurface"
 uid = "org.khronos.openpbr.subsurface"
+# The shading-closure bucket this lobe owns (§5.2, classification).
+closure = "subsurface"
 registry_slot = 4
 mask_const = "SUBSURFACE"
 namespace = "KHR"
