@@ -225,7 +225,7 @@
 - **开放词汇表让补瓣是加法**：新字段扩进对应 lobe 的变长块，位掩码/静态置换天然容纳，老材质不受影响（它们的 lobe_mask 不含新位）。
 - **thin_film 作为开放瓣的首个落地示例**（§10）：验证"新物理项 = 新 lobe 进词汇表"的扩展路径。
 - **FACE 保持 OpenPBR 外**：OpenPBR 是物理 BSDF 标准，不含 NPR；FACE 作为 Prism 私有瓣，由 `Illumination::Stylized` 线消费（§3.5），与 OpenPBR 物理瓣在同一 über 块里共存。
-- **删 `lower_standard_material`**：外部材质（含 Bevy `StandardMaterial`、glTF）统一经 OpenPBR Surface 导入器映射，不再逐格式写 1:1 翻译层。
+- **删 `lower_standard_material`**（✅ 已落地，见 §13.a）：外部材质（含 Bevy `StandardMaterial`、glTF）统一经 OpenPBR Surface 导入器映射，不再逐格式写 1:1 翻译层。
 - **超集 = PCM 的一个 kind**：OpenPBR 补瓣只是 `kind=lobe` 的加法扩展；完整的九类扩展点能力基座（瓣只是其一）见 §5。
 
 ### 4.5 超集成立的三条硬约束（把"是超集"从口号变成可验证契约）
@@ -578,6 +578,14 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f（最后一项）删 `lower_standard_material`：外部材质统一走 OpenPBR Surface 导入器**（§4.4）
+  - 范围：把原来那个"逐格式 1:1 翻译"的 `lower_standard_material` 拆成一个**单一格式适配层** + 一个**格式无关的打包层**，并删除旧函数：
+    - `import_openpbr_surface(&StandardMaterial, alpha_cutoff) -> GpuSurfaceParameters`：唯一一步"外部格式 → 规范 OpenPBR Surface 参数块"的映射（Bevy/glTF/`KHR_*` 今天，MaterialX / USD 未来共用同一出口）。它现在是**公开、可单测**的边界。
+    - `import_standard_material(handle, revision, material, textures) -> MaterialRecord`：只做格式无关的包装（render class / features / closure mask / 纹理行 / Illumination 轴），不再内联任何字段翻译。
+  - 效果：`prism_render_material::lower_standard_material` 已从公共 API 与全部调用点消失（调用点只剩 `material/runtime.rs` 与测试，均已改为导入器命名）；新增的面具测试直接钉住**导入器的 F0 保真**——`reflectance = 0.5 → specular_ior = 1.5 → F0 = 0.04`、`reflectance = 0 → ior = 1.0 → F0 = 0`、`reflectance = 1 → F0 = 0.16`（I 反解在 `[1,3]` 内闭合）。
+  - 门禁：`cargo test -p prism_render_material --features bevy` **828 通过**（含新导入器用例）、`cargo check -p prism_render_scene` 干净（调用点改名后编译通过）、`cargo test -p prism_render_scene --lib` **1602 通过**、`cargo test -p prism_render_material`（默认特性）826+6+2 全绿。
+  - 结果：**P1-f 全项完成**——九组 OpenPBR 字段补齐 + 外部材质统一导入路径。
 
 - **P1-f（收尾）`coat_darkening` / `scatter_anisotropy` / `transmission_scatter` 三项全部落地**（§4.4 / §17.2）
   - 这三项此前被我以"公式不确定/需建模"为由记为待办；本轮按"该实现就实现、该接入就接入"全部做完，且**三项默认都是严格恒等**，既有材质零变化：

@@ -143,7 +143,7 @@ fn standard_material_bridge_preserves_surface_classification() {
         index: 2,
         generation: 1,
     };
-    let record = lower_standard_material(handle, 4, &material, &mut Resolver);
+    let record = import_standard_material(handle, 4, &material, &mut Resolver);
     assert_eq!(record.render_class, MaterialRenderClass::MaskedTwoSided);
     // Clearcoat is a closure lobe, not a shading model: illumination stays Lit
     // and the clearcoat closure bit is set.
@@ -154,6 +154,45 @@ fn standard_material_bridge_preserves_surface_classification() {
     );
     assert_eq!(record.surface.alpha_cutoff, 0.37);
     assert!(record.features.contains(MaterialFeatureFlags::DOUBLE_SIDED));
+}
+
+/// The OpenPBR Surface importer must map an external material's dielectric F0
+/// onto `specular_ior` exactly (design doc §4.4): Bevy's `reflectance` is the
+/// `0.16 * r^2` remap, so `0.5` has to land on the `1.5` default and `0.0` on a
+/// neutral interface, with no per-format 1:1 translation layer in between.
+#[cfg(feature = "bevy")]
+#[test]
+fn openpbr_importer_maps_reflectance_to_a_faithful_ior() {
+    let to_f0 = |ior: f32| {
+        let r = (ior - 1.0) / (ior + 1.0);
+        r * r
+    };
+    let default_like = bevy_pbr::StandardMaterial {
+        reflectance: 0.5,
+        ..Default::default()
+    };
+    let imported = import_openpbr_surface(&default_like, 0.5);
+    assert!((imported.specular_ior - 1.5).abs() < 1.0e-6);
+    assert!((to_f0(imported.specular_ior) - 0.04).abs() < 1.0e-6);
+
+    // A zero reflectance is a fully transparent interface (F0 = 0), which the
+    // inverse remap expresses as an index of exactly one.
+    let no_specular = bevy_pbr::StandardMaterial {
+        reflectance: 0.0,
+        ..Default::default()
+    };
+    let imported = import_openpbr_surface(&no_specular, 0.5);
+    assert!((imported.specular_ior - 1.0).abs() < 1.0e-6);
+    assert!(to_f0(imported.specular_ior) < 1.0e-9);
+
+    // The strongest authored reflectance stays inside the OpenPBR IOR range.
+    let full = bevy_pbr::StandardMaterial {
+        reflectance: 1.0,
+        ..Default::default()
+    };
+    let imported = import_openpbr_surface(&full, 0.5);
+    assert!(imported.specular_ior >= 1.0 && imported.specular_ior <= 3.0);
+    assert!((to_f0(imported.specular_ior) - 0.16).abs() < 1.0e-5);
 }
 
 #[test]

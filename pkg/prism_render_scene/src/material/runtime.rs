@@ -62,12 +62,12 @@ impl RenderMaterialRegistry {
             }
         };
         let revision = self.revisions.get(&id).copied().unwrap_or(0) + 1;
-        // Each `resolve` call during lowering acquires a bindless slot and
+        // Each `resolve` call during the OpenPBR import acquires a bindless slot and
         // records the image here so we can reconcile references afterwards.
         self.pending_textures.clear();
         let record = {
             let mut resolver = self.texture_resolver();
-            prism_render_material::lower_standard_material(
+            prism_render_material::import_standard_material(
                 handle,
                 revision,
                 material,

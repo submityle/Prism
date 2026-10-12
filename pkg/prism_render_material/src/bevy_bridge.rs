@@ -1,3 +1,11 @@
+//! OpenPBR Surface importer for external materials (design doc §4.4).
+//!
+//! External materials — Bevy `StandardMaterial` today, glTF/`KHR_*` material
+//! extensions, MaterialX and USD importers later — are mapped through ONE
+//! format adapter onto the canonical OpenPBR Surface parameter block
+//! ([`import_openpbr_surface`]). The packaging step ([`import_standard_material`])
+//! is format-agnostic, so there is no per-format 1:1 translation layer.
+
 use bevy_asset::{AssetId, Handle};
 use bevy_color::ColorToComponents;
 use bevy_image::Image;
@@ -37,7 +45,55 @@ pub trait StandardMaterialTextureResolver {
     fn resolve(&mut self, image: AssetId<Image>, semantic: TextureSemantic) -> GpuMaterialTexture;
 }
 
-pub fn lower_standard_material(
+/// Import an external `StandardMaterial` (Bevy / glTF / KHR material extensions)
+/// into the canonical **OpenPBR Surface** parameter set (design doc §4.4).
+///
+/// This is the single format-adapter step: every external material — Bevy
+/// `StandardMaterial` today, glTF/MaterialX/USD importers later — is mapped onto
+/// the same über parameter block, and the record plumbing below is
+/// format-agnostic. There is deliberately no per-format 1:1 translation layer.
+///
+/// `alpha_cutoff` is applied to the geometry group's cutout threshold.
+#[must_use]
+pub fn import_openpbr_surface(
+    material: &StandardMaterial,
+    alpha_cutoff: f32,
+) -> GpuSurfaceParameters {
+    GpuSurfaceParameters {
+        base_color: material.base_color.to_linear().to_f32_array(),
+        emissive: material.emissive.to_f32_array(),
+        metallic: material.metallic,
+        perceptual_roughness: material.perceptual_roughness,
+        // `OpenPBR` specular group. Bevy's `reflectance` is the
+        // `KHR_materials_specular`-style `F0 = 0.16*r^2` remap, so invert it
+        // back to a physical IOR (`ior = (1+sqrt(F0))/(1-sqrt(F0))`) and the
+        // authored dielectric F0 is preserved exactly: `reflectance = 0.5`
+        // lands on the `ior = 1.5` default (both `F0 = 0.04`). Bevy's own `ior`
+        // drives refraction through the transmission lobe.
+        specular_ior: ior_from_f0(0.16 * material.reflectance * material.reflectance),
+        ambient_occlusion: 1.0,
+        normal_scale: 1.0,
+        alpha_cutoff,
+        transmission: material
+            .specular_transmission
+            .max(material.diffuse_transmission),
+        thickness: material.thickness,
+        clearcoat: material.clearcoat,
+        clearcoat_roughness: material.clearcoat_perceptual_roughness,
+        anisotropy: material.anisotropy_strength,
+        anisotropy_rotation: material.anisotropy_rotation,
+        index_of_refraction: material.ior,
+        ..Default::default()
+    }
+}
+
+/// Import an external `StandardMaterial` into a runtime [`MaterialRecord`].
+///
+/// The OpenPBR Surface parameters come from [`import_openpbr_surface`]; this
+/// function only adds the format-independent packaging (render class, features,
+/// closure mask, texture rows, illumination axis). It replaces the former
+/// per-format `lower_standard_material` translator (design doc §4.4).
+pub fn import_standard_material(
     handle: GenerationalHandle,
     revision: u32,
     material: &StandardMaterial,
@@ -135,32 +191,7 @@ pub fn lower_standard_material(
         },
         features,
         closure_mask: closure_mask(material),
-        surface: GpuSurfaceParameters {
-            base_color: material.base_color.to_linear().to_f32_array(),
-            emissive: material.emissive.to_f32_array(),
-            metallic: material.metallic,
-            perceptual_roughness: material.perceptual_roughness,
-            // `OpenPBR` specular group. Bevy's `reflectance` is the
-            // `KHR_materials_specular`-style `F0 = 0.16*r^2` remap, so invert it
-            // back to a physical IOR (`ior = (1+sqrt(F0))/(1-sqrt(F0))`) and the
-            // authored dielectric F0 is preserved exactly: `reflectance = 0.5`
-            // lands on the `ior = 1.5` default (both `F0 = 0.04`). Bevy's own
-            // `ior` keeps driving refraction through the transmission lobe.
-            specular_ior: ior_from_f0(0.16 * material.reflectance * material.reflectance),
-            ambient_occlusion: 1.0,
-            normal_scale: 1.0,
-            alpha_cutoff,
-            transmission: material
-                .specular_transmission
-                .max(material.diffuse_transmission),
-            thickness: material.thickness,
-            clearcoat: material.clearcoat,
-            clearcoat_roughness: material.clearcoat_perceptual_roughness,
-            anisotropy: material.anisotropy_strength,
-            anisotropy_rotation: material.anisotropy_rotation,
-            index_of_refraction: material.ior,
-            ..Default::default()
-        },
+        surface: import_openpbr_surface(material, alpha_cutoff),
         textures: texture_rows,
         custom_program: None,
     }
@@ -178,7 +209,7 @@ fn opaque_class(two_sided: bool) -> MaterialRenderClass {
 /// `n = (1 + sqrt(F0)) / (1 - sqrt(F0))`, clamped to the `OpenPBR`
 /// `specular_ior` range `[1, 3]`.
 ///
-/// Used by [`lower_standard_material`] to fold Bevy's `reflectance` (which is
+/// Used by [`import_openpbr_surface`] to fold Bevy's `reflectance` (which is
 /// itself the `0.16 * r^2` KHR-style F0 remap) into a physical IOR without
 /// changing the authored Fresnel.
 fn ior_from_f0(f0: f32) -> f32 {

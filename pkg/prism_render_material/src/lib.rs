@@ -35,7 +35,10 @@ mod validation;
 pub use authoring::FACE_SHADOW_SDF_SEMANTIC;
 pub use axis::{Illumination, SpecializationId};
 #[cfg(feature = "bevy")]
-pub use bevy_bridge::{lower_standard_material, StandardMaterialTextureResolver, TextureSemantic};
+pub use bevy_bridge::{
+    import_openpbr_surface, import_standard_material, StandardMaterialTextureResolver,
+    TextureSemantic,
+};
 pub use handle::{MaterialCapacityError, MaterialHandleAllocator, MaterialHandleError};
 pub use ir::{
     ClosureKind, MaterialGraph, MaterialNode, MaterialNodeId, MaterialValue, NormalizedMaterial,
