@@ -371,7 +371,32 @@ pub fn evaluate_principled_direct(
     )
     .to_array();
     let specular = add(single_scatter, compensation);
-    let diffuse_weight = mul_scalar(sub([1.0; 3], f), 1.0 - metallic);
+    // `OpenPBR` equation `glossy_diffuse_albedo_constraint`: the diffuse slab
+    // beneath the dielectric interface is weighted by **one minus the directional
+    // albedo of the specular lobe**, `1 − E_dielectric(ωo)` — not by the
+    // half-vector Fresnel `1 − F(v·h)`. The two agree near normal incidence but
+    // diverge at grazing angles, where the specular lobe already reflects most of
+    // the energy and the `F(v·h)` weight lets the diffuse over-deliver (the white
+    // furnace measured 1.12 there).
+    //
+    // Prism's dielectric branch evaluates the *exact* Fresnel at the
+    // `specular_weight`-modulated index, so `E_dielectric` is exactly `0` at
+    // `F0 == 0` (no interface) and exactly the baked white-lobe albedo at
+    // `F0 == 1`; the per-channel `F0 · E_white(µo, r)` form is therefore exact at
+    // both endpoints. (A Schlick-split DFG fit would *not* be: its `bias` term is
+    // non-zero at `F0 == 0`, which is why the earlier attempt regressed the pure
+    // diffuse furnace to 0.899.)
+    // The lobe albedo is baked at the specification's default dielectric and
+    // scaled by the authored `F0` ratio: exact at `F0 == 0` (no interface) and at
+    // the default, monotone in between.
+    let e_ref = crate::dielectric_albedo_table::dielectric_albedo_lookup(n_dot_v, roughness);
+    let dielectric_f0 = dielectric_f0(&surface);
+    let e_dielectric = [
+        (e_ref * dielectric_f0[0] / 0.04).clamp(0.0, 1.0),
+        (e_ref * dielectric_f0[1] / 0.04).clamp(0.0, 1.0),
+        (e_ref * dielectric_f0[2] / 0.04).clamp(0.0, 1.0),
+    ];
+    let diffuse_weight = mul_scalar(sub([1.0; 3], e_dielectric), 1.0 - metallic);
     // `OpenPBR` `diffuse_roughness`: the base diffuse lobe is Oren-Nayar rather
     // than Lambert when the surface is microscopically rough. `sigma == 0`
     // collapses the factor to exactly `1.0`, so the legacy Lambert path is

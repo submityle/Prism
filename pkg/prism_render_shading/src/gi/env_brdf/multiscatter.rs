@@ -283,9 +283,13 @@ pub fn multiscatter_direct(
     n_dot_l: f32,
     perceptual_roughness: f32,
 ) -> Vec3 {
-    let e_o = directional_albedo_analytic(n_dot_v, perceptual_roughness);
-    let e_i = directional_albedo_analytic(n_dot_l, perceptual_roughness);
-    let e_avg = average_albedo_analytic(perceptual_roughness);
+    // Baked view-*dependent* albedos of the lobe this shader evaluates. The
+    // analytic `scale + bias` fit is view-independent, which gave the
+    // compensation the right average magnitude but the wrong shape — a white
+    // metal then reflected ≈1.11 instead of 1.0 (see `ggx_albedo_table`).
+    let e_o = crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_v, perceptual_roughness);
+    let e_i = crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_l, perceptual_roughness);
+    let e_avg = crate::ggx_albedo_table::ggx_average_lookup(perceptual_roughness);
     // Achromatic Kulla-Conty two-point lobe (already carries the 1/π).
     let f_ms = kulla_conty_ms(e_o, e_i, e_avg);
     // Turquin colored multiple-bounce Fresnel scale, per channel.
@@ -438,10 +442,14 @@ mod tests {
         // For a lossless white conductor the single-scattering directional
         // albedo E(mu_o) plus the multiple-scattering lobe's directional albedo
         // must reflect all incident energy at every roughness and view angle.
-        // E(mu_o) is taken analytically; only the smooth `f_ms` lobe is
-        // integrated numerically (A_ms = 2*PI * integral_0^1 f_ms * mu_i d mu_i)
-        // so the test never suffers the narrow-peak under-integration that
-        // plagues a direct GGX quadrature at low roughness.
+        //
+        // `E(mu_o)` is measured independently of the compensation (the GGX VNDF
+        // bake `directional_albedo`, not the analytic fit the compensation used
+        // to consume — that fit is view-independent, which is exactly the bug
+        // this test now guards). Only the smooth `f_ms` lobe is integrated
+        // numerically (A_ms = 2*PI * integral_0^1 f_ms * mu_i d mu_i) so the test
+        // never suffers the narrow-peak under-integration that plagues a direct
+        // GGX quadrature at low roughness.
         let n = 256usize;
         for &r in &[0.1f32, 0.25, 0.5, 0.75, 1.0] {
             for &mu_o in &[0.15f32, 0.5, 0.85, 1.0] {
@@ -452,7 +460,7 @@ mod tests {
                     acc += (f_ms * mu_i) as f64;
                 }
                 let a_ms = (2.0 * PI as f64 * acc / n as f64) as f32;
-                let e_o = directional_albedo_analytic(mu_o, r);
+                let e_o = directional_albedo(mu_o, r, 4096);
                 let total = e_o + a_ms;
                 assert!(
                     (total - 1.0).abs() < 2.0e-2,

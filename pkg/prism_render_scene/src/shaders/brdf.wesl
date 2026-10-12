@@ -428,36 +428,102 @@ fn vis_smith_anisotropic(
     return 0.5 / max(lambda_v + lambda_l, MIN_N_DOT);
 }
 
+// `E(µ_i, r_j)`, row-major over roughness (`µ_i = i/16`, `r_j = j/8`).
+const GGX_N_MU: i32 = 17;
+const GGX_N_R: i32 = 9;
+const GGX_ALBEDO: array<f32, 153> = array<f32, 153>(
+    1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000, 1.000000,
+    0.964381, 0.964381, 0.990634, 0.996070, 0.997740, 0.998607, 0.999081, 0.999299, 0.999487, 0.999554, 0.999628, 0.999718, 0.999756, 0.999778, 0.999793, 0.999830, 0.999844,
+    0.888715, 0.888715, 0.910110, 0.941431, 0.961581, 0.973538, 0.980757, 0.985280, 0.988275, 0.990371, 0.991976, 0.993108, 0.993935, 0.994528, 0.995015, 0.995406, 0.995791,
+    0.911760, 0.911760, 0.877837, 0.876056, 0.888036, 0.903585, 0.918350, 0.930953, 0.941175, 0.949317, 0.955872, 0.961098, 0.965282, 0.968609, 0.971358, 0.973665, 0.975570,
+    0.921149, 0.921149, 0.876500, 0.851384, 0.840079, 0.838098, 0.841831, 0.848806, 0.857358, 0.866410, 0.875333, 0.883814, 0.891623, 0.898722, 0.905101, 0.910799, 0.915882,
+    0.911364, 0.911364, 0.860054, 0.824380, 0.799449, 0.782489, 0.771666, 0.765553, 0.763024, 0.763164, 0.765273, 0.768800, 0.773327, 0.778502, 0.784061, 0.789830, 0.795653,
+    0.888982, 0.888982, 0.825800, 0.779841, 0.744536, 0.716752, 0.694690, 0.677148, 0.663252, 0.652352, 0.643936, 0.637587, 0.632968, 0.629821, 0.627890, 0.626996, 0.626978,
+    0.858492, 0.858492, 0.779168, 0.720858, 0.674986, 0.637531, 0.606256, 0.579731, 0.556964, 0.537255, 0.520047, 0.504953, 0.491672, 0.479948, 0.469558, 0.460338, 0.452170,
+    0.823009, 0.823009, 0.725394, 0.653967, 0.597712, 0.551612, 0.512862, 0.479666, 0.450817, 0.425447, 0.402928, 0.382790, 0.364667, 0.348231, 0.333275, 0.319598, 0.307007,
+);
+
+// `E_avg(r_j)`.
+const GGX_AVERAGE: array<f32, 9> = array<f32, 9>(
+    0.999995, 0.998962, 0.987304, 0.951403, 0.882399, 0.780349, 0.656290, 0.527348, 0.409282,
+);
+
+// Bilinear `E(µ, r)`; both arguments clamp to `[0, 1]`. Mirrors
+// `ggx_albedo_table.rs::ggx_albedo_lookup`.
+fn ggx_albedo_lookup(n_dot_v: f32, roughness: f32) -> f32 {
+    let x = clamp(n_dot_v, 0.0, 1.0) * f32(GGX_N_MU - 1);
+    let y = clamp(roughness, 0.0, 1.0) * f32(GGX_N_R - 1);
+    let i0 = min(i32(x), GGX_N_MU - 2);
+    let j0 = min(i32(y), GGX_N_R - 2);
+    let fx = x - f32(i0);
+    let fy = y - f32(j0);
+    let a = GGX_ALBEDO[j0 * GGX_N_MU + i0];
+    let b = GGX_ALBEDO[j0 * GGX_N_MU + i0 + 1];
+    let c = GGX_ALBEDO[(j0 + 1) * GGX_N_MU + i0];
+    let d = GGX_ALBEDO[(j0 + 1) * GGX_N_MU + i0 + 1];
+    let top = a + (b - a) * fx;
+    let bottom = c + (d - c) * fx;
+    return clamp(top + (bottom - top) * fy, 0.0, 1.0);
+}
+
+// Linear `E_avg(r)`; clamped to `[0, 1]`.
+fn ggx_average_lookup(roughness: f32) -> f32 {
+    let y = clamp(roughness, 0.0, 1.0) * f32(GGX_N_R - 1);
+    let j0 = min(i32(y), GGX_N_R - 2);
+    let fy = y - f32(j0);
+    let a = GGX_AVERAGE[j0];
+    let b = GGX_AVERAGE[j0 + 1];
+    return clamp(a + (b - a) * fy, 0.0, 1.0);
+}
+
 // Lower bound on `1 - E_avg` keeping the `f_ms` denominator finite as the
 // single-scattering lobe approaches a mirror. Mirrors `MIN_ENERGY_DEFICIT`.
 const MS_MIN_ENERGY_DEFICIT: f32 = 1.0e-4;
 
-// Single-scattering directional albedo `E(mu, alpha) = scale + bias` of the
-// analytic environment BRDF. Mirrors `multiscatter::directional_albedo`.
-fn ms_directional_albedo(n_dot: f32, perceptual_roughness: f32) -> f32 {
-    let dfg = env_brdf_approx(n_dot, perceptual_roughness);
-    return clamp(dfg.x + dfg.y, 0.0, 1.0);
+const DIEL_N_MU: i32 = 17;
+const DIEL_N_R: i32 = 9;
+const DIELECTRIC_ALBEDO: array<f32, 153> = array<f32, 153>(
+    0.991738, 0.701614, 0.500000, 0.361128, 0.264190, 0.195931, 0.147630, 0.113399, 0.089187, 0.072157, 0.060302, 0.052187, 0.046781, 0.043333, 0.041301, 0.040287, 0.040000,
+    0.764850, 0.644223, 0.484574, 0.355432, 0.261916, 0.195040, 0.147497, 0.113488, 0.089340, 0.072315, 0.060440, 0.052298, 0.046862, 0.043389, 0.041335, 0.040302, 0.040001,
+    0.509576, 0.428823, 0.365235, 0.296800, 0.233476, 0.181438, 0.141125, 0.110840, 0.088530, 0.072355, 0.060806, 0.052732, 0.047223, 0.043644, 0.041473, 0.040305, 0.039882,
+    0.331714, 0.281623, 0.239760, 0.203679, 0.171336, 0.142631, 0.118013, 0.097659, 0.081365, 0.068684, 0.059069, 0.051971, 0.046890, 0.043397, 0.041137, 0.039818, 0.039220,
+    0.223957, 0.189272, 0.161310, 0.138173, 0.118762, 0.102329, 0.088397, 0.076662, 0.066899, 0.058912, 0.052510, 0.047500, 0.043691, 0.040902, 0.038963, 0.037724, 0.037051,
+    0.161297, 0.133988, 0.113894, 0.097904, 0.084905, 0.074226, 0.065410, 0.058119, 0.052102, 0.047164, 0.043150, 0.039931, 0.037400, 0.035462, 0.034037, 0.033049, 0.032436,
+    0.125001, 0.100881, 0.084903, 0.072798, 0.063266, 0.055614, 0.049403, 0.044328, 0.040168, 0.036757, 0.033965, 0.031692, 0.029856, 0.028393, 0.027246, 0.026373, 0.025733,
+    0.103650, 0.080339, 0.066429, 0.056394, 0.048741, 0.042727, 0.037914, 0.034007, 0.030806, 0.028165, 0.025972, 0.024146, 0.022621, 0.021346, 0.020281, 0.019392, 0.018652,
+    0.090763, 0.066837, 0.053940, 0.045021, 0.038412, 0.033320, 0.029293, 0.026045, 0.023387, 0.021183, 0.019337, 0.017776, 0.016445, 0.015302, 0.014314, 0.013455, 0.012703,
+);
+
+// Bilinear `E_dielectric(µ, r)`; arguments clamp to `[0, 1]`. Mirrors
+// `dielectric_albedo_table.rs::dielectric_albedo_lookup`.
+fn dielectric_albedo_lookup(n_dot_v: f32, roughness: f32) -> f32 {
+    let x = clamp(n_dot_v, 0.0, 1.0) * f32(DIEL_N_MU - 1);
+    let y = clamp(roughness, 0.0, 1.0) * f32(DIEL_N_R - 1);
+    let i0 = min(i32(x), DIEL_N_MU - 2);
+    let j0 = min(i32(y), DIEL_N_R - 2);
+    let fx = x - f32(i0);
+    let fy = y - f32(j0);
+    let a = DIELECTRIC_ALBEDO[j0 * DIEL_N_MU + i0];
+    let b = DIELECTRIC_ALBEDO[j0 * DIEL_N_MU + i0 + 1];
+    let c = DIELECTRIC_ALBEDO[(j0 + 1) * DIEL_N_MU + i0];
+    let d = DIELECTRIC_ALBEDO[(j0 + 1) * DIEL_N_MU + i0 + 1];
+    let top = a + (b - a) * fx;
+    let bottom = c + (d - c) * fx;
+    return clamp(top + (bottom - top) * fy, 0.0, 1.0);
 }
 
-// Cosine-weighted hemispherical average albedo
-// `E_avg = 2 * integral_0^1 E(mu) mu d mu` via a fixed 8-node Gauss-Legendre
-// rule whose nodes/weights are shared verbatim with the CPU golden. Mirrors
-// `multiscatter::average_albedo`.
+// Single-scattering directional albedo `E(mu, r)` of the GGX lobe, from the
+// baked table (view-dependent; the analytic `scale + bias` fit is not, which is
+// what made a white metal furnace reflect 1.11 instead of 1.0). Mirrors
+// `multiscatter::multiscatter_direct`.
+fn ms_directional_albedo(n_dot: f32, perceptual_roughness: f32) -> f32 {
+    return ggx_albedo_lookup(n_dot, perceptual_roughness);
+}
+
+// Cosine-weighted hemispherical average albedo `E_avg(r)`, pre-integrated from
+// the same table. Mirrors `multiscatter::multiscatter_direct`.
 fn ms_average_albedo(perceptual_roughness: f32) -> f32 {
-    let nodes = array<f32, 8>(
-        -0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498,
-        0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363,
-    );
-    let weights = array<f32, 8>(
-        0.1012285362903763, 0.2223810344533745, 0.3137066458778873, 0.3626837833783620,
-        0.3626837833783620, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763,
-    );
-    var sum = 0.0;
-    for (var i = 0u; i < 8u; i = i + 1u) {
-        let mu = 0.5 * (nodes[i] + 1.0);
-        sum = sum + weights[i] * ms_directional_albedo(mu, perceptual_roughness) * mu;
-    }
-    return clamp(sum, 0.0, 1.0 - MS_MIN_ENERGY_DEFICIT);
+    return ggx_average_lookup(perceptual_roughness);
 }
 
 // Added multiple-scattering specular BRDF value `f_ms * F_ms` (Kulla-Conty
@@ -680,7 +746,19 @@ fn principled_direct(
     let compensation = multiscatter_direct(f0, n_dot_v, n_dot_l, roughness);
     let specular = single_scatter + compensation;
 
-    let diffuse_weight = (vec3<f32>(1.0) - f) * (1.0 - metallic);
+    // `OpenPBR` `glossy_diffuse_albedo_constraint`: weight the diffuse slab by
+    // one minus the *directional albedo* of the dielectric specular lobe, not by
+    // the half-vector Fresnel. The lobe albedo is baked at the specification's
+    // default dielectric and scaled by the authored `F0` ratio (exact at
+    // `F0 == 0` and at the default). Mirrors `lighting.rs`.
+    let e_ref = dielectric_albedo_lookup(n_dot_v, roughness);
+    let dielectric_f0_vec = dielectric_f0(surface);
+    let e_dielectric = clamp(
+        vec3<f32>(e_ref) * dielectric_f0_vec / vec3<f32>(0.04),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    let diffuse_weight = (vec3<f32>(1.0) - e_dielectric) * (1.0 - metallic);
     // `OpenPBR` `diffuse_roughness`: Oren-Nayar replaces Lambert for
     // microscopically rough diffuse surfaces; `0` collapses the factor to
     // exactly 1.0 and preserves the legacy path.

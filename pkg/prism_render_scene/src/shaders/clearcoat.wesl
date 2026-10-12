@@ -30,6 +30,7 @@ import prism_render_scene::shaders::brdf::{
     DirectLightSample,
     brdf_normalize_or,
     dielectric_f0,
+    dielectric_albedo_lookup,
     fresnel_schlick,
     brdf_base_dielectric_fresnel_rgb,
     brdf_base_metal_fresnel_rgb,
@@ -265,7 +266,16 @@ fn clearcoat_direct(
     let energy = 1.0 - 0.28 * roughness * roughness;
     let compensation = f0 * min((1.0 / max(energy, 0.25)) - 1.0, 1.0);
     let specular = single_scatter + compensation;
-    let diffuse_weight = (vec3<f32>(1.0) - f) * (1.0 - metallic);
+    // `OpenPBR` `glossy_diffuse_albedo_constraint`, same as the principled lobe
+    // (baked dielectric lobe albedo, scaled by the authored `F0` ratio).
+    let e_ref = dielectric_albedo_lookup(n_dot_v, roughness);
+    let dielectric_f0_vec = dielectric_f0(surface);
+    let e_dielectric = clamp(
+        vec3<f32>(e_ref) * dielectric_f0_vec / vec3<f32>(0.04),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    let diffuse_weight = (vec3<f32>(1.0) - e_dielectric) * (1.0 - metallic);
     // `OpenPBR` base group, shared with the principled lobe: `diffuse_roughness`
     // turns the base diffuse into Oren-Nayar (0 = exactly Lambert) and
     // `base_weight` scales the whole base layer (1.0 = exactly the identity).

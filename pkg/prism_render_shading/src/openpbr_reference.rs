@@ -929,8 +929,21 @@ mod conformance {
         // narrower than any affordable uniform hemisphere grid can resolve (the
         // probe in `print_furnace_convergence` shows 0.72 at 384² rising to 1.01
         // at 768²), so measuring it needs importance sampling, not quadrature.
-        // It stays covered by the shader's bounded-invariant test.
-        let configs: [(&str, SurfaceSample); 4] = [
+        // It stays covered by the shader's bounded-invariant test and by
+        // `gi::env_brdf::multiscatter::direct_white_furnace_single_plus_multi_is_one`.
+        // With the dielectric interface present the diffuse *coupling* is under
+        // test as well, which is the invariant the `1 − F(v·h)` weight used to
+        // break at grazing (it measured 1.12).
+        let coupled = |diffuse_roughness: f32| SurfaceSample {
+            base_color: white,
+            metallic: 0.0,
+            perceptual_roughness: 0.3,
+            diffuse_roughness,
+            specular_color: white,
+            specular_weight: 1.0,
+            ..Default::default()
+        };
+        let configs: [(&str, SurfaceSample); 6] = [
             ("metal, default roughness", metal(0.3)),
             ("metal, rough", metal(0.8)),
             ("pure diffuse base, Lambertian", pure_diffuse(0.0)),
@@ -938,14 +951,17 @@ mod conformance {
                 "pure diffuse base, maximum diffuse roughness",
                 pure_diffuse(1.0),
             ),
+            ("dielectric base, Lambertian", coupled(0.0)),
+            (
+                "dielectric base, maximum diffuse roughness",
+                coupled(1.0),
+            ),
         ];
         let mut worst = (0.0_f32, String::new());
-        // The dielectric-diffuse configurations must reach exactly 1: before the
-        // `EON_comp` compensation landed, a white `base_diffuse_roughness == 1`
-        // base reflected only 0.577 of the energy. The metal configurations are
-        // held to the bounded invariant the shader already guarantees while the
-        // multiscatter compensation's analytic albedo is recalibrated (see the
-        // note below) — they are measured, not ignored.
+        // One gate, three energy invariants it has already caught: the diffuse
+        // `EON_comp` gap (white rough diffuse reflected 0.577), the multiscatter
+        // compensation's view-independent albedo (white metal read 1.11), and
+        // the glossy-diffuse coupling weight at grazing.
         for (name, surface) in configs {
             // Normal, mid and near-grazing view directions all have to conserve.
             for view in [[0.0_f32, 1.0, 0.0], [0.6, 0.8, 0.0], [0.95, 0.31, 0.0]] {
@@ -955,16 +971,11 @@ mod conformance {
                 let res = if name.starts_with("metal") { 384 } else { 192 };
                 let albedo = furnace_albedo(surface, view, res, res);
                 let mean = (albedo[0] + albedo[1] + albedo[2]) / 3.0;
-                // Note: the converged metal furnace measures ≈ 1.11, i.e. the
-                // Kulla-Conty compensation over-delivers ~11% because its
-                // analytic directional albedo under-estimates the actual
-                // single-scatter albedo of the lobe. Tracked as the next fix;
-                // the bound here matches the shader's existing guarantee.
-                let err = if name.starts_with("metal") {
-                    (mean - 1.2).max(0.0)
-                } else {
-                    (mean - 1.0).abs()
-                };
+                // Every configuration listed by the specification must reach
+                // 1, metal and dielectric alike: the metal case is what exposed
+                // the compensation's view-independent albedo (it used to read
+                // 1.11), so it is asserted to the same tolerance.
+                let err = (mean - 1.0).abs();
                 if err > worst.0 {
                     worst = (err, format!("{name} @ view {view:?}: {albedo:?}"));
                 }
@@ -1295,5 +1306,155 @@ mod table_gen {
             })
             .collect();
         println!("AVG: {}", avg.join(", "));
+    }
+}
+
+
+/// Generator for the GGX single-scatter albedo table (run with
+/// `--ignored --nocapture`). Uses the repository's own GGX importance-sampled
+/// bake path (`gi::env_brdf::multiscatter`) so the table is the *true* albedo of
+/// the lobe the shader evaluates, not a fit.
+#[cfg(test)]
+mod albedo_table_gen {
+    use super::*;
+
+    #[test]
+    #[ignore = "generator: prints the baked GGX single-scatter albedo table"]
+    fn print_ggx_albedo_table() {
+        use crate::gi::env_brdf::multiscatter::{average_albedo, directional_albedo};
+        const N_MU: usize = 17;
+        const N_R: usize = 9;
+        const SAMPLES: u32 = 32768;
+        println!("N_MU={N_MU} N_R={N_R}");
+        for j in 0..N_R {
+            let r = j as f32 / (N_R - 1) as f32;
+            // `mu = 0` is the grazing ray, where VNDF importance sampling
+            // degenerates (its `taken == 0` fallback reports a mirror, i.e. 1).
+            // The shader floors `n·v` at `MIN_N_DOT`, so clamp the first column
+            // onto the first resolved sample instead of publishing the artifact.
+            let col1 = if r == 0.0 {
+                1.0
+            } else {
+                directional_albedo(1.0 / (N_MU - 1) as f32, r, SAMPLES)
+            };
+            let row: Vec<String> = (0..N_MU)
+                .map(|i| {
+                    let mu = i as f32 / (N_MU - 1) as f32;
+                    // A perfect mirror (`r == 0`) reflects everything at every
+                    // angle; the VNDF estimator is degenerate there.
+                    let e = if r == 0.0 {
+                        1.0
+                    } else if i == 0 {
+                        col1
+                    } else {
+                        directional_albedo(mu, r, SAMPLES)
+                    };
+                    format!("{:.6}", e)
+                })
+                .collect();
+            println!("{},", row.join(", "));
+        }
+        let avg: Vec<String> = (0..N_R)
+            .map(|j| {
+                let r = j as f32 / (N_R - 1) as f32;
+                format!("{:.6}", average_albedo(r, 64, SAMPLES))
+            })
+            .collect();
+        println!("AVG: {}", avg.join(", "));
+    }
+}
+
+/// Generator for the *dielectric* specular lobe's directional albedo
+/// `E_dielectric(µ, r)` — the quantity `OpenPBR`'s
+/// `glossy_diffuse_albedo_constraint` weights the diffuse slab by. Baked with
+/// VNDF importance sampling of the exact-Fresnel lobe at the specification's
+/// default dielectric (`η = 1.5`), because a uniform hemisphere quadrature
+/// cannot resolve a near-mirror GGX lobe.
+#[cfg(test)]
+mod dielectric_albedo_gen {
+    use super::*;
+    use crate::lighting::fresnel_dielectric;
+
+    fn vndf(wo: [f32; 3], alpha: f32, u1: f32, u2: f32) -> [f32; 3] {
+        let vh = {
+            let s = [alpha * wo[0], alpha * wo[1], wo[2]];
+            let n = ops::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+            [s[0] / n, s[1] / n, s[2] / n]
+        };
+        let lensq = vh[0] * vh[0] + vh[1] * vh[1];
+        let t1 = if lensq > 0.0 {
+            let inv = 1.0 / ops::sqrt(lensq);
+            [-vh[1] * inv, vh[0] * inv, 0.0]
+        } else {
+            [1.0, 0.0, 0.0]
+        };
+        let t2 = [
+            vh[1] * t1[2] - vh[2] * t1[1],
+            vh[2] * t1[0] - vh[0] * t1[2],
+            vh[0] * t1[1] - vh[1] * t1[0],
+        ];
+        let r = ops::sqrt(u1);
+        let phi = 2.0 * PI * u2;
+        let p1 = r * ops::cos(phi);
+        let s = 0.5 * (1.0 + vh[2]);
+        let p2 = (1.0 - s) * ops::sqrt((1.0 - p1 * p1).max(0.0)) + s * (r * ops::sin(phi));
+        let pz = ops::sqrt((1.0 - p1 * p1 - p2 * p2).max(0.0));
+        let nh = [
+            p1 * t1[0] + p2 * t2[0] + pz * vh[0],
+            p1 * t1[1] + p2 * t2[1] + pz * vh[1],
+            p1 * t1[2] + p2 * t2[2] + pz * vh[2],
+        ];
+        let s = [alpha * nh[0], alpha * nh[1], nh[2].max(1.0e-6)];
+        let n = ops::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+        [s[0] / n, s[1] / n, s[2] / n]
+    }
+
+    /// `E_dielectric(µ, r)` at relative index `eta`, VNDF-importance-sampled.
+    fn dielectric_albedo(mu_o: f32, perceptual_roughness: f32, eta: f32) -> f32 {
+        const N: u32 = 65536;
+        let alpha = perceptual_roughness * perceptual_roughness;
+        let c = mu_o.clamp(1.0e-3, 1.0);
+        let wo = [(1.0 - c * c).max(0.0).sqrt(), 0.0, c];
+        let g1 = crate::glint::smith_g1(c, alpha).max(1.0e-6);
+        let strata = 256u32;
+        let mut acc = 0.0_f64;
+        for s in 0..N {
+            let i = s / strata;
+            let j = s % strata;
+            let u1 = (i as f32 + 0.5) / strata as f32;
+            let u2 = (j as f32 + 0.5) / strata as f32;
+            let h = vndf(wo, alpha, u1, u2);
+            let v_dot_h = (wo[0] * h[0] + wo[1] * h[1] + wo[2] * h[2]).clamp(0.0, 1.0);
+            let wi = [
+                2.0 * v_dot_h * h[0] - wo[0],
+                2.0 * v_dot_h * h[1] - wo[1],
+                2.0 * v_dot_h * h[2] - wo[2],
+            ];
+            if wi[2] <= 0.0 {
+                continue;
+            }
+            let g2 = crate::glint::smith_g2_height_correlated(c, wi[2], alpha);
+            let weight = (g2 / g1) as f64;
+            let f = fresnel_dielectric(v_dot_h, eta) as f64;
+            acc += f * weight;
+        }
+        (acc / N as f64).clamp(0.0, 1.0) as f32
+    }
+
+    #[test]
+    #[ignore = "generator: prints the baked dielectric specular albedo table"]
+    fn print_dielectric_albedo_table() {
+        const N_MU: usize = 17;
+        const N_R: usize = 9;
+        for j in 0..N_R {
+            let r = j as f32 / (N_R - 1) as f32;
+            let row: Vec<String> = (0..N_MU)
+                .map(|i| {
+                    let mu = i as f32 / (N_MU - 1) as f32;
+                    format!("{:.6}", dielectric_albedo(mu, r, 1.5))
+                })
+                .collect();
+            println!("{},", row.join(", "));
+        }
     }
 }
