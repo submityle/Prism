@@ -17,7 +17,7 @@
 //! (design §7.3), which is what keeps a nested-variant replay from resurrecting
 //! a deleted entity.
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -258,16 +258,31 @@ impl OverrideSet {
     ///
     /// Property targets may refer to a base entity or any entity declared by
     /// an [`StructuralOp::AddEntity`] in this set. Structural operations are
-    /// checked in insertion order: added entities must use reserved ids and
-    /// unique ids, their parents must already exist, removals must name a live
-    /// entity exactly once, and component operations must target a live entity
-    /// without repeating the same add/remove pair.
+    /// checked in insertion order: added entities must use reserved ids in the
+    /// same dense order consumed by [`crate::RemapTable`], their parents must
+    /// already exist, removals must name a live entity exactly once and must
+    /// not leave a live added child behind, and component operations must
+    /// target a live entity without repeating the same add/remove pair.
     ///
     /// This is intentionally a structural validator: `OverrideSet` does not
     /// carry the base template's component inventory, so it cannot establish
     /// whether a removed component exists in the base archetype. It also does
     /// not interpret property paths or validate value/component types.
     pub fn validate_for_template(&self, entity_count: u32) -> Result<(), OverrideError> {
+        self.validate_for_template_with_hierarchy(entity_count, &[])
+    }
+
+    /// Validates an override set with the base template's hierarchy.
+    ///
+    /// [`validate_for_template`](Self::validate_for_template) retains its
+    /// compact count-only API for callers that have not loaded the hierarchy.
+    /// Runtime/template loaders should use this method so removing a base
+    /// parent cannot leave one of its still-live base children dangling.
+    pub fn validate_for_template_with_hierarchy(
+        &self,
+        entity_count: u32,
+        hierarchy: &[(LocalEntityId, LocalEntityId)],
+    ) -> Result<(), OverrideError> {
         let mut declared_added = BTreeSet::new();
         for op in &self.structural {
             if let StructuralOp::AddEntity { local, .. } = op {
@@ -289,6 +304,17 @@ impl OverrideSet {
         let mut removed = BTreeSet::new();
         let mut added_components = BTreeSet::new();
         let mut removed_components = BTreeSet::new();
+        let mut parents = BTreeMap::new();
+
+        for &(child, parent) in hierarchy {
+            if child == LocalEntityId::new(0)
+                || !is_base_entity(child, entity_count)
+                || !is_base_entity(parent, entity_count)
+                || parents.insert(child, parent).is_some()
+            {
+                return Err(OverrideError::BaseHierarchyInvalid { child, parent });
+            }
+        }
 
         for op in &self.structural {
             match op {
@@ -304,6 +330,16 @@ impl OverrideSet {
                     if added.contains(local) {
                         return Err(OverrideError::DuplicateAddedEntity { local: *local });
                     }
+                    let expected_offset = added.len() as u32;
+                    let expected = LocalEntityId::RESERVED_BASE
+                        .checked_add(expected_offset)
+                        .ok_or(OverrideError::ReservedIdOverflow { local: *local })?;
+                    if local.index() != expected {
+                        return Err(OverrideError::ReservedIdNotDense {
+                            expected: LocalEntityId(expected),
+                            found: *local,
+                        });
+                    }
                     if local == parent {
                         return Err(OverrideError::ParentIsSelf { local: *local });
                     }
@@ -314,6 +350,7 @@ impl OverrideSet {
                         });
                     }
                     added.insert(*local);
+                    parents.insert(*local, *parent);
                 }
                 StructuralOp::RemoveEntity { local } => {
                     if removed.contains(local) {
@@ -321,6 +358,15 @@ impl OverrideSet {
                     }
                     if !entity_is_live(*local, entity_count, &added, &removed) {
                         return Err(OverrideError::RemoveEntityMissing { local: *local });
+                    }
+                    if let Some((&child, _)) = parents.iter().find(|(child, parent)| {
+                        **parent == *local
+                            && entity_is_live(**child, entity_count, &added, &removed)
+                    }) {
+                        return Err(OverrideError::RemoveEntityHasLiveChild {
+                            parent: *local,
+                            child,
+                        });
                     }
                     removed.insert(*local);
                 }
@@ -423,18 +469,36 @@ impl OverrideSet {
             .collect()
     }
 
-    /// Evicts property overrides whose target was removed by a `RemoveEntity`
-    /// structural op in this set, returning the evicted `(target, component,
-    /// path)` keys (design §7.3 `OrphanOverride`).
+    /// Evicts property overrides whose target entity or component was removed
+    /// by the structural ops in this set, returning the evicted `(target,
+    /// component, path)` keys (design §7.3 `OrphanOverride`). An
+    /// `AddComponent` later in the operation sequence makes a prior
+    /// `RemoveComponent` live again.
     pub fn drop_orphans(&mut self) -> Vec<(LocalEntityId, ComponentTypeId, FieldPath)> {
         let removed = self.removed_entities();
-        if removed.is_empty() {
+        let mut removed_components = BTreeSet::new();
+        for op in &self.structural {
+            match op {
+                StructuralOp::AddComponent {
+                    target, component, ..
+                } => {
+                    removed_components.remove(&(*target, *component));
+                }
+                StructuralOp::RemoveComponent { target, component } => {
+                    removed_components.insert((*target, *component));
+                }
+                StructuralOp::AddEntity { .. } | StructuralOp::RemoveEntity { .. } => {}
+            }
+        }
+        if removed.is_empty() && removed_components.is_empty() {
             return Vec::new();
         }
         let mut orphans = Vec::new();
         let mut kept = Vec::with_capacity(self.properties.len());
         for ov in self.properties.drain(..) {
-            if removed.contains(&ov.target) {
+            if removed.contains(&ov.target)
+                || removed_components.contains(&(ov.target, ov.component))
+            {
                 orphans.push((ov.target, ov.component, ov.path));
             } else {
                 kept.push(ov);
@@ -458,6 +522,13 @@ pub enum OverrideError {
         /// The non-reserved id used by the add operation.
         local: LocalEntityId,
     },
+    /// An added entity did not use the next dense reserved-segment id.
+    ReservedIdNotDense {
+        /// The next id required by the remap table.
+        expected: LocalEntityId,
+        /// The sparse id supplied by the override.
+        found: LocalEntityId,
+    },
     /// An added entity reused an id already declared by an earlier addition.
     DuplicateAddedEntity {
         /// The id declared more than once.
@@ -474,6 +545,20 @@ pub enum OverrideError {
     ParentIsSelf {
         /// The entity that names itself as parent.
         local: LocalEntityId,
+    },
+    /// The supplied base hierarchy contains an invalid or duplicate edge.
+    BaseHierarchyInvalid {
+        /// The child local id.
+        child: LocalEntityId,
+        /// The parent local id.
+        parent: LocalEntityId,
+    },
+    /// Removing an entity would leave a live child without a parent.
+    RemoveEntityHasLiveChild {
+        /// The entity being removed.
+        parent: LocalEntityId,
+        /// The child that would become dangling.
+        child: LocalEntityId,
     },
     /// A reserved local id has no representable successor (u32 overflow).
     ReservedIdOverflow {
@@ -638,6 +723,21 @@ mod tests {
     }
 
     #[test]
+    fn drop_orphans_evicts_properties_for_removed_components() {
+        let component = ComponentTypeId::from_raw(9);
+        let mut set = OverrideSet::new();
+        set.set_property(ov(0, component, "value", 1.0));
+        set.push_structural(StructuralOp::RemoveComponent {
+            target: LocalEntityId::new(0),
+            component,
+        });
+        let orphans = set.drop_orphans();
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].1, component);
+        assert!(set.properties().is_empty());
+    }
+
+    #[test]
     fn structural_ops_are_ordered_and_non_empty() {
         let h = ComponentTypeId::of::<Health>();
         let mut set = OverrideSet::new();
@@ -749,6 +849,37 @@ mod tests {
             set.validate_for_template(1),
             Err(super::OverrideError::ReservedIdOverflow {
                 local: LocalEntityId::new(u32::MAX)
+            })
+        );
+    }
+
+    #[test]
+    fn validate_rejects_sparse_reserved_id() {
+        let mut set = OverrideSet::new();
+        add_entity(&mut set, LocalEntityId::RESERVED_BASE + 1, 0);
+        assert_eq!(
+            set.validate_for_template(1),
+            Err(super::OverrideError::ReservedIdNotDense {
+                expected: LocalEntityId::reserved(0),
+                found: LocalEntityId::reserved(1),
+            })
+        );
+    }
+
+    #[test]
+    fn hierarchy_aware_validation_rejects_dangling_child() {
+        let mut set = OverrideSet::new();
+        set.push_structural(StructuralOp::RemoveEntity {
+            local: LocalEntityId::new(0),
+        });
+        assert_eq!(
+            set.validate_for_template_with_hierarchy(
+                2,
+                &[(LocalEntityId::new(1), LocalEntityId::new(0))],
+            ),
+            Err(super::OverrideError::RemoveEntityHasLiveChild {
+                parent: LocalEntityId::new(0),
+                child: LocalEntityId::new(1),
             })
         );
     }

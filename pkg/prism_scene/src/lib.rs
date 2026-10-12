@@ -65,7 +65,7 @@ pub use instantiate::{
     despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneSpawn, SpawnContext,
     SpawnContextError, TypedSpawnError, TypedSpawnPlan,
 };
-pub use layers::{compose_layers, OrphanKey, OverrideComposition};
+pub use layers::{compose_layers, OrphanKey, OverrideComposition, OverrideCompositionError};
 #[cfg(feature = "materialize")]
 pub use materialize::{
     materialize_plan, ComponentMaterializer, MaterializeError, MaterializeFailure,
@@ -89,7 +89,9 @@ pub mod prelude {
         despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneSpawn, SpawnContext,
         SpawnContextError, TypedSpawnError, TypedSpawnPlan,
     };
-    pub use crate::layers::{compose_layers, OrphanKey, OverrideComposition};
+    pub use crate::layers::{
+        compose_layers, OrphanKey, OverrideComposition, OverrideCompositionError,
+    };
     #[cfg(feature = "materialize")]
     pub use crate::materialize::{
         materialize_plan, ComponentMaterializer, MaterializeError, MaterializeFailure,

@@ -1075,16 +1075,16 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 |---|---|---|
 | `identity` | §6 | `LocalEntityId`（基段 / 保留段）、`NameTable`（`BTreeMap`，确定性迭代序）、`PersistentId`（FNV-1a-128 确定性派生）、`PersistentIdBuilder` |
 | `instance` | §5.2 | `SceneInstance` 根锚组件（`impl Component`，可挂 ECS 实体；COW override） |
-| `layers` | §7.3 | `compose_layers`：变体 override 层自底向上重放（上层覆盖下层同键、结构操作按层序、孤儿 override 回收 + 报告） |
+| `layers` | §7.3 | `compose_layers`：变体 override 层自底向上重放（上层覆盖下层同键、结构操作按层序、重复结构操作结构化报错且不重复重放、实体/组件删除后的孤儿 override 回收 + 报告） |
 | `residency` | §11.1 | `ResidencyTier`（Interactive / Streamed / Proxy）、`ResidencyPlan`（按 `LocalEntityId` 标注，缺省 Interactive、确定性迭代） |
 | `path` | §7.1 | `FieldPath` / `FieldSegment`，点号文本解析、规范化与往返 |
 | `plan` | §8.1 | `InstantiationPlan`（bake→runtime 契约）、`ArchetypeGroup`、`Column`（`Arc<[u8]>` COW 共享 SoA blob）、`FieldSlot`、`PlanError` + `validate()` 结构化校验 |
-| `overrides` | §7 | `ComponentTypeId`、`OverrideValue`（序列化态）、`PropertyOverride`、`StructuralOp`、`ArchetypeSignature`、`OverrideSet`（唯一键 `(target, component, path)` 去重、后写覆盖前写、`RemoveEntity` 孤儿回收）；`validate_for_template(entity_count)` / `OverrideError` 对属性 target、AddEntity reserved local/顺序父链、RemoveEntity、Add/RemoveComponent 目标及重复操作做无 panic 结构校验 |
+| `overrides` | §7 | `ComponentTypeId`、`OverrideValue`（序列化态）、`PropertyOverride`、`StructuralOp`、`ArchetypeSignature`、`OverrideSet`（唯一键 `(target, component, path)` 去重、后写覆盖前写、实体/组件删除孤儿回收）；`validate_for_template(entity_count)` / `validate_for_template_with_hierarchy` / `OverrideError` 对属性 target、连续 reserved local、顺序父链、层级悬空、RemoveEntity、Add/RemoveComponent 目标及重复操作做无 panic 结构校验 |
 | `remap` | §6.1 | `RemapTable`（基段 + 保留段两段稠密映射，O(1) 查、拒绝间隙） |
 | `template` | §5.1、§9 | `SceneTemplate`（含 `plan: InstantiationPlan` + `tiers: ResidencyPlan`）、`NestedSlot`（嵌套实例槽） |
 | `instantiate` | §8.2、§21.2 | `spawn_plan`/`spawn_typed_plan`/`despawn_instance`；批量预留、确定性 remap、rooted `LocalEntityId(0)` 层级校验、`ChildOf` 重连、typed Bundle/受限 `SpawnContext` constructor（仅当前 owner 可 materialize、拒绝动态环）、返回错误时回收实例自有实体、base/reserved 实体回收，以及防止外部子实体级联删除 |
 | `materialize` | §8.1、§8.2 M1 | `MaterializerRegistry` 按 `ComponentTypeId` 确定性注册安全 decoder；逐列校验 row layout/长度，逐 slot 校验 bounds/重复项/目标 local，解码后通过 `World::insert_reflect` 写入 reserved entity；完整 decode 阶段失败会回收本次实体，禁止静默丢 payload |
 
-验证：`cargo test -p prism_scene --offline -- --test-threads=1` → **80 unit + 1 doctest 全绿**；`cargo check -p prism_scene --offline --no-default-features` 通过；目标 crate `cargo clippy -p prism_scene --offline --all-targets --no-deps -- -D warnings` 通过。全依赖严格 clippy 被未修改的 `pkg/prism_asset/src/server.rs` `clippy::let_and_return` 阻断；override validator 有 12 个边界测试。`materialize` 测试覆盖多行列物化、FieldSlot remap、缺注册与 decoder 失败回滚。
+验证：`cargo test -p prism_scene --offline -- --test-threads=1` → **90 unit + 1 doctest 全绿**；`cargo check -p prism_scene --offline --no-default-features` 通过；目标 crate `cargo clippy -p prism_scene --offline --all-targets --no-deps -- -D warnings` 通过。全依赖严格 clippy 被未修改的 `pkg/prism_asset/src/server.rs` `clippy::let_and_return` 阻断；override validator 覆盖连续 reserved local、层级悬空、组件孤儿与跨层结构冲突。`materialize` 测试覆盖多行列物化、FieldSlot remap、缺注册与 decoder 失败回滚。
 
-**诚实边界 / 尚未落地（后续里程碑，非占位）**：M2 validator 不持有 base archetype 组件清单，不能确认 RemoveComponent 是否命中实际存在的基体组件；属性路径和值只做目标结构校验，不做反射解析、类型匹配或序列化合法性校验。`spawn_scene()` 完整热路径、SIMD remap 与预取微架构（§8.5）、子场景流送（§12）、热重载传播（§13）、bake 产出的二进制包（§10，归 `prism_scene_bake`）仍未落地。M1 列格式仍要求应用为每个组件注册安全 decoder；不支持把任意 opaque bytes 自动 reinterpret 成 Rust 值，也不自动推断任意 Rust 类型的实体字段。decoder/typed constructor panic 或其外部副作用不享有事务回滚保证，API 文档已明示调用契约。
+**诚实边界 / 尚未落地（后续里程碑，非占位）**：M2 validator 现在可在 `SceneTemplate::validate_overrides` 中使用完整 base hierarchy 拒绝悬空子实体，但仍不持有 base archetype 组件清单，不能确认 RemoveComponent 是否命中实际存在的基体组件；属性路径和值只做目标结构校验，不做反射解析、类型匹配或序列化合法性校验。`compose_layers` 对跨层结构冲突返回诊断并保留首个操作，调用方必须把非空错误视为组合失败；它不替代带模板 hierarchy 的最终验证。`spawn_scene()` 完整热路径、SIMD remap 与预取微架构（§8.5）、子场景流送（§12）、热重载传播（§13）、bake 产出的二进制包（§10，归 `prism_scene_bake`）仍未落地。M1 列格式仍要求应用为每个组件注册安全 decoder；不支持把任意 opaque bytes 自动 reinterpret 成 Rust 值，也不自动推断任意 Rust 类型的实体字段。decoder/typed constructor panic 或其外部副作用不享有事务回滚保证，API 文档已明示调用契约。

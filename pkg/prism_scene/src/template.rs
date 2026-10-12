@@ -12,6 +12,7 @@ use alloc::boxed::Box;
 use prism_asset::StableGuid;
 
 use crate::identity::{LocalEntityId, NameTable};
+use crate::overrides::{OverrideError, OverrideSet};
 use crate::plan::InstantiationPlan;
 use crate::residency::{ResidencyPlan, ResidencyTier};
 
@@ -131,6 +132,17 @@ impl SceneTemplate {
     pub fn dependency_count(&self) -> usize {
         self.deps.len()
     }
+
+    /// Validates an instance/variant override against this template's complete
+    /// base hierarchy.
+    ///
+    /// The count-only validator is useful for lightweight callers, but it
+    /// cannot know whether removing a base parent would strand a child. This
+    /// template-owned entry point supplies the authoritative hierarchy from
+    /// the validated instantiation plan.
+    pub fn validate_overrides(&self, overrides: &OverrideSet) -> Result<(), OverrideError> {
+        overrides.validate_for_template_with_hierarchy(self.plan.entity_count, &self.plan.hierarchy)
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +216,22 @@ mod tests {
         assert!(template.tiers.is_empty());
         assert_eq!(template.entity_count(), 0);
         assert!(template.plan.validate().is_ok());
+    }
+
+    #[test]
+    fn validates_overrides_against_the_base_hierarchy() {
+        let template = SceneTemplate::new(guid(8), plan_of(2));
+        let mut overrides = crate::overrides::OverrideSet::new();
+        overrides.push_structural(crate::overrides::StructuralOp::RemoveEntity {
+            local: LocalEntityId::new(0),
+        });
+        assert_eq!(
+            template.validate_overrides(&overrides),
+            Err(crate::overrides::OverrideError::RemoveEntityHasLiveChild {
+                parent: LocalEntityId::new(0),
+                child: LocalEntityId::new(1),
+            })
+        );
     }
 
     #[test]
