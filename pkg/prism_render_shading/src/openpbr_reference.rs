@@ -132,6 +132,60 @@ pub fn base_dielectric_fresnel_rgb(
     ]
 }
 
+/// The `OpenPBR` §*Metal* "F82-tint" conductor Fresnel (Kutz 2021, extending
+/// Hoffman 2019), which the specification stitches from four equations:
+///
+/// ```text
+/// F0            = base_weight · base_color
+/// F_Schlick(μ)  = F0 + (1 − F0)(1 − μ)^5
+/// F(μ̄)          = specular_color · F_Schlick(μ̄)          with μ̄ = 1/7
+/// F82(μ)        = F_Schlick(μ) − μ(1−μ)^6 / (μ̄(1−μ̄)^6) · (F_Schlick(μ̄) − F(μ̄))
+/// F_metal(μ)    = specular_weight · F82(μ)
+/// ```
+///
+/// At the default `specular_weight = 1`, `specular_color = white` the correction
+/// term vanishes and the curve reduces to plain Schlick — the property the
+/// specification calls out, and which the tests pin.
+#[inline]
+#[must_use]
+pub fn base_metal_fresnel_rgb(
+    mu: f32,
+    base_weight: f32,
+    base_color: [f32; 3],
+    specular_weight: f32,
+    specular_color: [f32; 3],
+) -> [f32; 3] {
+    /// The specification's fixed "grazing edge" cosine, `μ̄ = 1/7` (≈ 82°).
+    const MU_BAR: f32 = 1.0 / 7.0;
+    let bw = base_weight.clamp(0.0, 1.0);
+    let f0 = [bw * base_color[0], bw * base_color[1], bw * base_color[2]];
+    let schlick = |mu: f32| -> [f32; 3] {
+        let om = 1.0 - mu.clamp(0.0, 1.0);
+        let om2 = om * om;
+        let f = om2 * om2 * om;
+        [
+            f0[0] + (1.0 - f0[0]) * f,
+            f0[1] + (1.0 - f0[1]) * f,
+            f0[2] + (1.0 - f0[2]) * f,
+        ]
+    };
+    let f_bar_curve = schlick(MU_BAR);
+    let om_bar = 1.0 - MU_BAR;
+    let om_bar2 = om_bar * om_bar;
+    let denom = MU_BAR * om_bar2 * om_bar2 * om_bar2;
+    let mu_c = mu.clamp(0.0, 1.0);
+    let om = 1.0 - mu_c;
+    let om2 = om * om;
+    let weight = mu_c * om2 * om2 * om2 / denom;
+    let mut out = [0.0_f32; 3];
+    for (c, slot) in out.iter_mut().enumerate() {
+        let f_edge = specular_color[c].clamp(0.0, 1.0) * f_bar_curve[c];
+        let f82 = schlick(mu_c)[c] - weight * (f_bar_curve[c] - f_edge);
+        *slot = specular_weight.clamp(0.0, 1.0) * f82;
+    }
+    out
+}
+
 /// `OpenPBR` equation `openpbr-anisotropy-formula`: perceptual roughness `r` and
 /// anisotropy `a ∈ [0, 1]` → the two GGX widths along the tangent and bitangent.
 #[inline]
@@ -363,6 +417,61 @@ mod tests {
             [0.0; 3]
         );
     }
+
+    #[test]
+    fn metal_f82_reduces_to_schlick_and_hits_the_edge_tint() {
+        let base_color = [0.9_f32, 0.8, 0.5];
+        let bw = 0.75_f32;
+        // Default `specular_color` (white) and `specular_weight` (1): the
+        // correction term vanishes and the curve is plain Schlick from
+        // `base_weight · base_color`.
+        for mu in [1.0_f32, 0.9, 0.6, 0.3, 0.1] {
+            let got = base_metal_fresnel_rgb(mu, bw, base_color, 1.0, [1.0; 3]);
+            for c in 0..3 {
+                let f0 = bw * base_color[c];
+                let om = 1.0 - mu;
+                let om2 = om * om;
+                let want = f0 + (1.0 - f0) * (om2 * om2 * om);
+                assert!(approx(got[c], want, 1e-6), "mu={mu} c={c}: {got:?}");
+            }
+        }
+        // The defining property of the F82 fit: at `μ̄ = 1/7` the curve is exactly
+        // `specular_color · F_Schlick(μ̄)`.
+        let tint = [0.6_f32, 0.7, 0.8];
+        let mu_bar = 1.0 / 7.0;
+        let f_bar_curve = {
+            let mut f = [0.0_f32; 3];
+            for c in 0..3 {
+                let f0 = bw * base_color[c];
+                let om = 1.0 - mu_bar;
+                let om2 = om * om;
+                f[c] = f0 + (1.0 - f0) * (om2 * om2 * om);
+            }
+            f
+        };
+        let got = base_metal_fresnel_rgb(mu_bar, bw, base_color, 1.0, tint);
+        for c in 0..3 {
+            assert!(
+                approx(got[c], tint[c] * f_bar_curve[c], 1e-6),
+                "c={c}: {} vs {}",
+                got[c],
+                tint[c] * f_bar_curve[c]
+            );
+        }
+        // The edge tint can only darken the Schlick curve (the spec calls this
+        // out as a guarantee), and `specular_weight == 0` removes the lobe.
+        for mu in [1.0_f32, 0.5, 0.1] {
+            let tinted = base_metal_fresnel_rgb(mu, bw, base_color, 1.0, tint);
+            let schlick = base_metal_fresnel_rgb(mu, bw, base_color, 1.0, [1.0; 3]);
+            for c in 0..3 {
+                assert!(tinted[c] <= schlick[c] + 1e-6);
+            }
+            assert_eq!(
+                base_metal_fresnel_rgb(mu, bw, base_color, 0.0, tint),
+                [0.0; 3]
+            );
+        }
+    }
 }
 
 /// §4.5 constraint-1 conformance gate: the real-time base dielectric specular
@@ -411,6 +520,58 @@ mod conformance {
             "base dielectric Fresnel deviates from the OpenPBR reference by \
              {worst} (at ior={}, weight={}, cos={}); the real-time evaluator must \
              use the exact Fresnel at the modulated index",
+            worst_at.0,
+            worst_at.1,
+            worst_at.2,
+        );
+    }
+
+    /// The conductor branch is the specification's `F_82`-tint model: F0 is
+    /// `base_weight · base_color`, the near-grazing edge is tinted by
+    /// `specular_color` at `μ̄ = 1/7`, and the whole lobe scales by
+    /// `specular_weight`.
+    #[test]
+    fn base_metal_fresnel_matches_the_openpbr_reference() {
+        let mut worst = 0.0_f32;
+        let mut worst_at = (0.0_f32, 0.0_f32, 0.0_f32);
+        for base_color in [[0.9_f32, 0.8, 0.5], [0.2, 0.9, 0.4]] {
+            for base_weight in [0.0_f32, 0.5, 1.0] {
+                for specular_weight in [0.0_f32, 0.5, 1.0] {
+                    for specular_color in [[1.0_f32; 3], [0.6, 0.7, 0.8]] {
+                        for cos in [1.0_f32, 0.9, 0.7, 0.5, 0.3, 0.1, 0.02, 1.0 / 7.0] {
+                            let reference = base_metal_fresnel_rgb(
+                                cos,
+                                base_weight,
+                                base_color,
+                                specular_weight,
+                                specular_color,
+                            );
+                            // What `evaluate_principled_direct` feeds the metal
+                            // branch of the base specular lobe.
+                            let prism = crate::lighting::base_metal_fresnel_rgb(
+                                cos,
+                                base_weight,
+                                base_color,
+                                specular_weight,
+                                specular_color,
+                            );
+                            for c in 0..3 {
+                                let d = (reference[c] - prism[c]).abs();
+                                if d > worst {
+                                    worst = d;
+                                    worst_at = (base_weight, specular_weight, cos);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            worst <= 1.0e-5,
+            "metal Fresnel deviates from the OpenPBR F82-tint reference by \
+             {worst} (at base_weight={}, specular_weight={}, cos={}); the \
+             real-time evaluator must apply the edge tint and the weight",
             worst_at.0,
             worst_at.1,
             worst_at.2,

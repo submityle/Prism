@@ -289,15 +289,22 @@ pub fn evaluate_principled_direct(
     // is not equivalent: it still reaches total reflection at grazing incidence
     // when `specular_weight == 0`, where the specification removes the interface
     // entirely (`η' = 1 ⇒ F ≡ 0`). The conductor branch keeps Schlick from
-    // `base_color`; the specification's `F_82` grazing-tint blend for metals is
-    // not yet transcribed (see the conformance module's coverage note).
+    // `base_color`; the conductor branch is the specification's `F_82`-tint fit
+    // (see [`base_metal_fresnel_rgb`]).
     let f_dielectric = base_dielectric_fresnel_rgb(
         v_dot_h,
         surface.specular_ior,
         surface.specular_weight,
         surface.specular_color,
     );
-    let f_specular = mix3(f_dielectric, fresnel_schlick(surface.base_color, v_dot_h), metallic);
+    let f_metal = base_metal_fresnel_rgb(
+        v_dot_h,
+        surface.base_weight,
+        surface.base_color,
+        surface.specular_weight,
+        surface.specular_color,
+    );
+    let f_specular = mix3(f_dielectric, f_metal, metallic);
     // Thin-film iridescence: blend the base Fresnel toward the Airy interference
     // reflectance of a dielectric film over the substrate (glTF
     // `KHR_materials_iridescence`), evaluated at the same `v_dot_h` cosine so the
@@ -729,6 +736,46 @@ pub(crate) fn base_dielectric_fresnel_rgb(
         f * specular_color[1],
         f * specular_color[2],
     ]
+}
+
+/// The `OpenPBR` §*Metal* "F82-tint" conductor Fresnel (Kutz 2021 / Hoffman
+/// 2019), as stitched by the specification:
+/// `F0 = base_weight · base_color`, `F_Schlick(μ) = F0 + (1 − F0)(1 − μ)^5`,
+/// `F(μ̄) = specular_color · F_Schlick(μ̄)` at `μ̄ = 1/7`,
+/// `F82(μ) = F_Schlick(μ) − μ(1−μ)^6/(μ̄(1−μ̄)^6) · (F_Schlick(μ̄) − F(μ̄))`,
+/// and finally an overall `· specular_weight`.
+///
+/// White `specular_color` with `specular_weight = 1` collapses the correction
+/// term and leaves plain Schlick, the specification's stated reduction.
+#[inline]
+pub(crate) fn base_metal_fresnel_rgb(
+    cos_i: f32,
+    base_weight: f32,
+    base_color: [f32; 3],
+    specular_weight: f32,
+    specular_color: [f32; 3],
+) -> [f32; 3] {
+    /// The specification's fixed grazing-edge cosine, `μ̄ = 1/7`.
+    const MU_BAR: f32 = 1.0 / 7.0;
+    let bw = base_weight.clamp(0.0, 1.0);
+    let f0 = [bw * base_color[0], bw * base_color[1], bw * base_color[2]];
+    let schlick = |mu: f32| fresnel_schlick(f0, mu);
+    let f_bar_curve = schlick(MU_BAR);
+    let om_bar = 1.0 - MU_BAR;
+    let om_bar2 = om_bar * om_bar;
+    let denom = MU_BAR * om_bar2 * om_bar2 * om_bar2;
+    let mu = cos_i.clamp(0.0, 1.0);
+    let om = 1.0 - mu;
+    let om2 = om * om;
+    let correction = mu * om2 * om2 * om2 / denom;
+    let curve = schlick(mu);
+    let scale = specular_weight.clamp(0.0, 1.0);
+    let mut out = [0.0_f32; 3];
+    for (c, slot) in out.iter_mut().enumerate() {
+        let f_edge = specular_color[c].clamp(0.0, 1.0) * f_bar_curve[c];
+        *slot = scale * (curve[c] - correction * (f_bar_curve[c] - f_edge));
+    }
+    out
 }
 
 /// Relative per-channel index spread at `dispersion == 1`, applied as

@@ -264,7 +264,9 @@
 
    **该门禁当场抓到并修掉一个真实偏差**：实时瓣此前用 **Schlick** 近似基底介电 Fresnel，且把 `specular_weight` 当作 `F0` 的线性缩放——于是 `specular_weight == 0` 时掠射角仍收敛到全反射（"幽灵边缘"），与规范"ξ_s=0 即界面消失、F≡0"直接冲突；对照 oracle 的最大偏差达 **0.904**。现已改为规范口径：`η′ = (1+ε)/(1−ε)`、`ε = sgn(η−1)·√(ξ_s F_s)`，再喂 Walter-2007 精确 Fresnel（CPU 与 WESL 双线同改）。
 
-   **覆盖边界（门禁自己声明，不允许静默超范围）**：当前响应层门禁覆盖**基底介电镜面 Fresnel 因子**（`specular_color`/`specular_weight`/`specular_ior` 的正确交互）。尚未转写：金属的 `F_82` 掠射 tint 混合、coat 分层（`interfaced_lambertian_albedo` / `general_darkening_formula`）、fuzz/subsurface/transmission/thin_film 的规范节点图，以及 furnace 白炉的**收敛值**对拍。下一片按瓣逐一补齐。
+   **第二片（同轮）**：金属分支也抓到了偏差——实时瓣用 `base_color` 的裸 Schlick，而规范是 **F82-tint**（Kutz 2021 / Hoffman 2019）：`F0 = base_weight·base_color`、掠射边缘由 `specular_color` 在 `μ̄ = 1/7` 处 tint、整体再乘 `specular_weight`。现已按规范落地（CPU `base_metal_fresnel_rgb` + WESL `brdf_base_metal_fresnel_rgb`），并加 `base_metal_fresnel_matches_the_openpbr_reference` 对拍（含 `F82(μ̄) ≡ specular_color·F_Schlick(μ̄)` 这条定义性质）。
+
+   **覆盖边界（门禁自己声明，不允许静默超范围）**：当前响应层门禁覆盖**基底介电镜面 Fresnel 因子**（`specular_color`/`specular_weight`/`specular_ior` 的正确交互）与**金属 F82-tint Fresnel**。尚未转写：coat 分层（`interfaced_lambertian_albedo` / `general_darkening_formula` / `specular_ior_ratio`）、fuzz/subsurface/transmission/thin_film 的规范节点图，以及 furnace 白炉的**收敛值**对拍（规范给出了一份应当通过的配置清单）。下一片按瓣逐一补齐。
 2. **扩展位段隔离（Bit-Region Isolation）**：`LobeMask` 开放枚举按**规范核心区 / Prism 扩展区**静态分段——OpenPBR 规范瓣占低位固定区段（随上游版本演进只增不改语义），FACE 与开放词汇表后续瓣占高位扩展区段。两区位段互不重叠，变长解包 (`prism_unpack_surface`) 按区段路由，杜绝"私有瓣污染规范语义"或"上游新字段撞车扩展位"。
 
    **已落地（code-truth）**：schema 现为**双密集段**——`KHR` 瓣占 slot `0..6`（emission/clearcoat/anisotropy/sheen/subsurface/transmission/**thin_film**），扩展瓣从 `EXTENSION_SLOT_BASE = 16` 起（FACE 从原来的 bit 6 **迁到 bit 16**）；`prism_material_schema` 的验证器**强制**这条规则（非双段布局直接 `NonContiguousRegistrySlots` 报错），所以"加规范瓣只会往低位段追加、加私有瓣只会往高位段追加"是**编译/校验期事实**而非约定。生成物 `SURFACE_LOBE_WORDS_BY_SLOT` 是按 slot 的 `[usize; 17]`（中段留 0），`LobeMask::all()` 相应改为"已定义位的 OR"。
@@ -621,7 +623,9 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - **门禁抓到真实偏差**：实时基底介电 Fresnel 是 **Schlick 近似** + `specular_weight` 线性缩放 `F0`。于是 `specular_weight == 0` 时掠射仍 →1（幽灵边缘），与规范 ξ_s=0 时界面消失（`η′=1 ⇒ F≡0`）冲突。**对 oracle 的最大偏差 0.904**（ior=1.2, weight=0, cos=0.02）。
   - **修复（CPU + WESL 双线）**：`lighting.rs` 新增 `modulated_ior` / `base_dielectric_fresnel_rgb`，`evaluate_principled_direct` 的介电分支改走"规范调制 IOR + 精确 Fresnel + `specular_color` tint"；`brdf.wesl` 加同构的 `brdf_modulated_ior` / `brdf_base_dielectric_fresnel_rgb` 并同改求值路径（`η′=1` 的非界面分支显式返回 0，避免被 `MIN_IOR` 钳出假反射）。金属分支仍走 Schlick（`F_82` 待转写）。
   - 门禁：`cargo test -p prism_render_shading --lib` **3323 通过**（新增 6 条 oracle 自检 + 1 条响应级对拍），`cargo test -p prism_render_scene --lib` **1602 通过**（brdf 的 WESL 编译链接门禁），touched 文件 clippy 干净。
-  - **覆盖边界（门禁自声明）**：响应层目前覆盖基底介电镜面 Fresnel 因子；金属 `F_82`、coat 分层、fuzz/subsurface/transmission/thin_film 的规范节点图、以及 furnace 收敛值对拍尚未覆盖，按瓣逐片补齐。
+  - **第二片（同轮）金属 `F82-tint`**：oracle 补上规范 §Metal 的四条方程（`F0 = base_weight·base_color`、`F_Schlick`、边缘 `F(μ̄) = specular_color·F_Schlick(μ̄)`、`F82` 修正项、末乘 `specular_weight`），实时侧同步落地 CPU `base_metal_fresnel_rgb` + WESL `brdf_base_metal_fresnel_rgb`（此前实时金属分支是 `base_color` 的**裸 Schlick**：漏了 `base_weight`、漏了掠射 tint、漏了 `specular_weight`）。新增对拍 `base_metal_fresnel_matches_the_openpbr_reference`（3×3×2×8 组参数）与 oracle 自检 `metal_f82_reduces_to_schlick_and_hits_the_edge_tint`（白 tint + 权重 1 必须退化为 Schlick；`F82(μ̄)` 必须精确等于边缘 tint；tint 只能压暗；权重 0 必须归零）。
+  - **覆盖边界（门禁自声明）**：响应层目前覆盖基底**介电**与**金属**两条 Fresnel 支路；coat 分层（`interfaced_lambertian_albedo` / `general_darkening_formula` / `specular_ior_ratio`）、fuzz/subsurface/transmission/thin_film 的规范节点图、以及 furnace 收敛值对拍尚未覆盖，按瓣逐片补齐。
+  - 门禁（第二片后）：`prism_render_shading --lib` **3325 通过**、`prism_render_scene --lib` **1602 通过**。
 
 - **P1-f2 OpenPBR 默认值对齐（8 处）+ 顺带修掉一个 CPU/WESL 发射不一致 bug**（§4.4）
   - **动机**：`OpenPBR` 超集的约束 1（纯 OpenPBR 子集字节等价）要求"材质不作者某字段"时也走规范的默认值；机器比对 `parametrization` 表后发现 schema `default` 有 **8 处**偏离（`base_color` 1.0、`specular_roughness` 0.5、`coat_roughness` 0.5、`coat_ior` 1.5、`coat_darkening` 0、`subsurface_color` 白、`emission_luminance` 1、`emission_color` 黑）。

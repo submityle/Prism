@@ -231,6 +231,38 @@ fn brdf_base_dielectric_fresnel_rgb(
     return vec3<f32>(f) * specular_color;
 }
 
+// `OpenPBR` §Metal "F82-tint" conductor Fresnel (Kutz 2021 / Hoffman 2019):
+//   F0 = base_weight·base_color
+//   F_Schlick(μ) = F0 + (1 − F0)(1 − μ)^5
+//   F(μ̄) = specular_color·F_Schlick(μ̄)                     with μ̄ = 1/7
+//   F82(μ) = F_Schlick(μ) − μ(1−μ)^6/(μ̄(1−μ̄)^6)·(F_Schlick(μ̄) − F(μ̄))
+//   F_metal(μ) = specular_weight · F82(μ)
+// White `specular_color` at `specular_weight == 1` collapses the correction
+// term to plain Schlick. Byte-for-byte twin of
+// `lighting.rs::base_metal_fresnel_rgb`.
+const BRDF_METAL_MU_BAR: f32 = 1.0 / 7.0;
+fn brdf_base_metal_fresnel_rgb(
+    cos_i: f32,
+    base_weight: f32,
+    base_color: vec3<f32>,
+    specular_weight: f32,
+    specular_color: vec3<f32>,
+) -> vec3<f32> {
+    let bw = clamp(base_weight, 0.0, 1.0);
+    let f0 = vec3<f32>(bw) * base_color;
+    let f_bar_curve = fresnel_schlick(f0, BRDF_METAL_MU_BAR);
+    let om_bar = 1.0 - BRDF_METAL_MU_BAR;
+    let om_bar2 = om_bar * om_bar;
+    let denom = BRDF_METAL_MU_BAR * om_bar2 * om_bar2 * om_bar2;
+    let mu = clamp(cos_i, 0.0, 1.0);
+    let om = 1.0 - mu;
+    let om2 = om * om;
+    let correction = mu * om2 * om2 * om2 / denom;
+    let curve = fresnel_schlick(f0, mu);
+    let f_edge = clamp(specular_color, vec3<f32>(0.0), vec3<f32>(1.0)) * f_bar_curve;
+    return clamp(specular_weight, 0.0, 1.0) * (curve - correction * (f_bar_curve - f_edge));
+}
+
 // Unpolarized dielectric Fresnel reflectance for a direction whose normal
 // cosine is `cos_i`, entering from index 1 into relative index `ior`. Exact twin
 // of `lighting.rs::fresnel_dielectric` and the path-traced reference
@@ -518,7 +550,14 @@ fn principled_direct(
         surface.specular_weight,
         surface.specular_color,
     );
-    let f_specular = mix(f_dielectric, fresnel_schlick(surface.base_color, v_dot_h), metallic);
+    let f_metal = brdf_base_metal_fresnel_rgb(
+        v_dot_h,
+        surface.base_weight,
+        surface.base_color,
+        surface.specular_weight,
+        surface.specular_color,
+    );
+    let f_specular = mix(f_dielectric, f_metal, metallic);
     // Thin-film iridescence: blend the base Fresnel toward the Airy interference
     // reflectance at the same `v_dot_h`; `iridescence == 0` is an exact identity.
     let iridescence = clamp(surface.iridescence, 0.0, 1.0);
