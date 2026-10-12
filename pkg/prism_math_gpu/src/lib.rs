@@ -36,6 +36,7 @@ extern crate alloc;
 pub mod buffer;
 pub mod context;
 pub mod dual;
+pub mod dual_quat_alg;
 pub mod easing;
 pub mod f16;
 pub mod fractal;
@@ -72,6 +73,7 @@ pub mod xyz;
 
 pub use context::{block_on, GpuContext};
 pub use dual::{DualOp, DualSample, GpuDual, GpuDualResult};
+pub use dual_quat_alg::{DualQuatOp, GpuDualQuatAlg};
 pub use easing::{Ease, GpuEasing};
 pub use f16::GpuF16Pack;
 pub use fractal::{GpuFractal, NoiseSource};

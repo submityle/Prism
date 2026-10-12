@@ -2267,3 +2267,51 @@ fn prism_sh_cosine_factor(j: u32) -> f32 {\n\
 fn prism_sh_convolve_cosine(c: f32, j: u32) -> f32 {\n\
     return c * prism_sh_cosine_factor(j);\n\
 }\n";
+
+/// Single-sourced WGSL for dual-quaternion algebra, mirroring the CPU
+/// [`DualQuat`](crate::DualQuat) operators and methods on top of the quaternion
+/// product from [`WGSL_QUAT_ALG`]:
+/// `prism_dq_mul` composes two rigid transforms (`real = a.real*b.real`,
+/// `dual = a.real*b.dual + a.dual*b.real`, i.e. `a * b` applies `b` then `a`),
+/// `prism_dq_conjugate` quaternion-conjugates both parts,
+/// `prism_dq_inverse` equals the conjugate for unit dual quaternions, and
+/// `prism_dq_normalize` restores the unit invariants `|real| = 1` and
+/// `dot(real, dual) = 0`. `prism_dq_op(op, a, b)` dispatches
+/// `mul`/`conj`/`inverse`/`normalize` for a batched kernel. This is the GPU side
+/// of skeletal animation composition and rigid-motion blending; the quaternion
+/// product is reused, so it lives in exactly one place.
+pub const WGSL_DUAL_QUAT_ALG: &str = "\
+struct PrismDualQuat {\n\
+    real: vec4<f32>,\n\
+    dual: vec4<f32>,\n\
+};\n\
+\n\
+fn prism_dq_mul(a: PrismDualQuat, b: PrismDualQuat) -> PrismDualQuat {\n\
+    let real = prism_quat_mul(a.real, b.real);\n\
+    let dual = prism_quat_mul(a.real, b.dual) + prism_quat_mul(a.dual, b.real);\n\
+    return PrismDualQuat(real, dual);\n\
+}\n\
+\n\
+fn prism_dq_conjugate(q: PrismDualQuat) -> PrismDualQuat {\n\
+    return PrismDualQuat(prism_quat_conj(q.real), prism_quat_conj(q.dual));\n\
+}\n\
+\n\
+fn prism_dq_normalize(q: PrismDualQuat) -> PrismDualQuat {\n\
+    let mag = sqrt(dot(q.real, q.real));\n\
+    let inv = 1.0 / mag;\n\
+    let real = q.real * inv;\n\
+    var dual = q.dual * inv;\n\
+    let d = dot(real, dual);\n\
+    dual = dual - real * d;\n\
+    return PrismDualQuat(real, dual);\n\
+}\n\
+\n\
+fn prism_dq_op(op: u32, a: PrismDualQuat, b: PrismDualQuat) -> PrismDualQuat {\n\
+    switch op {\n\
+        case 0u: { return prism_dq_mul(a, b); }\n\
+        case 1u: { return prism_dq_conjugate(a); }\n\
+        case 2u: { return prism_dq_conjugate(a); }\n\
+        case 3u: { return prism_dq_normalize(a); }\n\
+        default: { return a; }\n\
+    }\n\
+}\n";
