@@ -52,6 +52,25 @@ pub fn area(verts: &[(f32, f32)]) -> f32 {
     signed_area(verts).abs()
 }
 
+/// Perimeter of the closed polygon `verts`.
+///
+/// The sum of the edge lengths, including the closing edge from the last vertex
+/// back to the first. Returns `0.0` for fewer than three vertices (a ring that
+/// cannot bound an area), consistent with [`area`] and [`centroid`], and is
+/// independent of winding direction.
+#[must_use]
+pub fn perimeter(verts: &[(f32, f32)]) -> f32 {
+    let n = verts.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let first = verts[0];
+    let last = verts[n - 1];
+    let dx = first.0 - last.0;
+    let dy = first.1 - last.1;
+    crate::polyline::polyline_length(verts) + (dx * dx + dy * dy).sqrt()
+}
+
 /// Area that is treated as degenerate for centroid purposes. A twice-area below
 /// this magnitude means the vertices are (near-)collinear and the area-weighted
 /// centroid would be numerically unstable, so [`centroid`] returns `None`.
@@ -295,5 +314,47 @@ mod tests {
         let line = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)];
         assert_eq!(centroid(&line), None);
         assert!(area(&line).abs() < 1e-6);
+    }
+
+    #[test]
+    fn perimeter_of_known_shapes() {
+        assert!((perimeter(&[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]) - 4.0).abs() < 1e-5);
+        // A 3-4-5 right triangle has perimeter 12.
+        assert!((perimeter(&[(0.0, 0.0), (3.0, 0.0), (0.0, 4.0)]) - 12.0).abs() < 1e-5);
+        // Fewer than three vertices: no ring.
+        assert_eq!(perimeter(&[]), 0.0);
+        assert_eq!(perimeter(&[(0.0, 0.0)]), 0.0);
+        assert_eq!(perimeter(&[(0.0, 0.0), (1.0, 1.0)]), 0.0);
+    }
+
+    #[test]
+    fn perimeter_matches_an_independent_edge_sum_and_scales() {
+        let mut s = 0x5_C11A_u64;
+        for _ in 0..100 {
+            let n = 5 + (next_rand(&mut s) % 20) as usize;
+            let pts: Vec<(f32, f32)> = (0..n)
+                .map(|_| (rand_in(&mut s, -20.0, 20.0), rand_in(&mut s, -20.0, 20.0)))
+                .collect();
+            let poly = convex_hull(&pts);
+            let m = poly.len();
+            if m < 3 {
+                continue;
+            }
+            // Independent f64 oracle: sum of the m edge lengths (incl. closing).
+            let mut oracle = 0.0_f64;
+            for i in 0..m {
+                let (x0, y0) = poly[i];
+                let (x1, y1) = poly[(i + 1) % m];
+                let dx = f64::from(x1) - f64::from(x0);
+                let dy = f64::from(y1) - f64::from(y0);
+                oracle += (dx * dx + dy * dy).sqrt();
+            }
+            let got = perimeter(&poly);
+            assert!((got - oracle as f32).abs() <= 1e-3 * (oracle as f32).max(1.0));
+
+            // Perimeter scales linearly with the polygon.
+            let scaled: Vec<(f32, f32)> = poly.iter().map(|&(x, y)| (x * 2.0, y * 2.0)).collect();
+            assert!((perimeter(&scaled) - 2.0 * got).abs() <= 1e-3 * got.max(1.0));
+        }
     }
 }

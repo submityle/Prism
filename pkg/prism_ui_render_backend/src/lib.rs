@@ -118,7 +118,7 @@ pub use hull::convex_hull;
 pub use inside::{point_in_polygon, point_in_polygon_nonzero, winding_number};
 pub use layer::{Layer, LayerTree};
 pub use line_raster::{raster_line, raster_polyline};
-pub use measure::{area, centroid, signed_area};
+pub use measure::{area, centroid, perimeter, signed_area};
 pub use minkowski::minkowski_sum;
 pub use nearest::{
     closest_point_on_polygon, closest_point_on_polyline, closest_point_on_segment,
