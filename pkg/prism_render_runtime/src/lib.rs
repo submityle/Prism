@@ -234,6 +234,15 @@ impl<I: Instance> RenderRuntime<I> {
         self.surface.as_mut()
     }
 
+    /// The configuration the surface was last configured with, if any.
+    ///
+    /// Callers use this to build pipelines whose color targets match the
+    /// swapchain format chosen by [`Surface::capabilities`].
+    #[must_use]
+    pub fn surface_config(&self) -> Option<&SurfaceConfig> {
+        self.surface_config.as_ref()
+    }
+
     /// (Re)configures the current surface and adopts its extent for future
     /// frame graphs.
     ///
@@ -422,6 +431,10 @@ impl<I: Instance> RenderRuntime<I> {
         all_confirmed && idle
     }
 }
+
+/// The default (wgpu) backend's runtime, so callers need not name the backend
+/// crate to select it.
+pub type WgpuRuntime = RenderRuntime<prism_render_driver_wgpu::WgpuInstance>;
 
 impl RenderRuntime<prism_render_driver_wgpu::WgpuInstance> {
     /// Brings up a headless runtime on the default wgpu adapter.
