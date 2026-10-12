@@ -285,4 +285,10 @@ mod parse_gate {
             }
         }
     }
+
+    #[test]
+    fn mat4_uniform_matches_four_wgsl_vec4_columns() {
+        assert_eq!(size_of::<super::Mat4Cols>(), 64);
+        assert_eq!(size_of::<super::Mat4Cols>() % 16, 0);
+    }
 }

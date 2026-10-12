@@ -151,6 +151,13 @@ fn batch_dispatch_regressions_remain_guarded() {
     }
 
     let frustum = include_str!("../src/frustum_cull/mod.rs");
+    for name in ["boxes", "result"] {
+        assert!(
+            frustum.contains(&format!("arrayLength(&{name})")),
+            "frustum_cull AABB wrapper lost its {name} storage-length guard"
+        );
+    }
+
     assert!(frustum.contains("planes: [[f32; 4]; 6],\n    count: u32,\n    _pad: [u32; 3]"));
 
     // Every standard batch dispatch must use the checked host conversion;

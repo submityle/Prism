@@ -294,4 +294,10 @@ mod parse_gate {
             }
         }
     }
+
+    #[test]
+    fn frustum_uniform_has_the_wgsl_struct_size() {
+        assert_eq!(size_of::<super::FrustumParams>(), 112);
+        assert_eq!(size_of::<super::FrustumParams>() % 16, 0);
+    }
 }
