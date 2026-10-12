@@ -10,3 +10,6 @@ pub mod shade;
 
 #[cfg(test)]
 mod shade_tests;
+
+#[cfg(test)]
+mod material_vt_tests;

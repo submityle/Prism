@@ -607,6 +607,15 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - furnace / 能量守恒 / VT 寻址一致性作为回归门禁。
 - 注意：这与旧文档"两套并行物理栈"无关——物理侧已收敛（`prism_render_architecture` 依赖 `prism_physics_core`，cloth 为薄 façade）。
 
+- **Material-VT GPU ABI 门禁（2026-10-13）**：`prism_render_scene` 新增真实设备测试
+  `gpu_material_vt_page_table_words_match_shader_binary_search`。测试把
+  `MaterialVirtualTexturePageTableSnapshot::gpu_words()` 的实际四词 entry 上传到
+  `storage` buffer，在 GPU 上执行与 `material_virtual_texture.wesl` 同序的无符号字典序二分，
+  覆盖两个命中和一个缺页，并回读物理 slot / `MATERIAL_VT_MISS`。该门禁已在扩展权限下的
+  Metal 实机通过；无 adapter 时仅允许显式安全跳过，设置 `PRISM_REQUIRE_GPU=1` 则会把
+  adapter/device 失败升级为测试失败。它验证的是 Material-VT page-table ABI 与搜索契约，
+  **不等价于**主 render pass、材质响应、residency producer 或 atlas 采样已经接线。
+
 ---
 
 ## 12. 性能 / 效果 / 易用性权衡总表
