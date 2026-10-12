@@ -18,6 +18,8 @@ mod render_plan;
 mod validate;
 mod workspace;
 mod workspace_persist;
+#[cfg(feature = "std")]
+mod workspace_store;
 
 pub use drag::{
     calculate_drop_zone, map_drop_action, tab_insertion_index, transition, DragError, DragEvent,
@@ -44,6 +46,10 @@ pub use workspace::{NameKind, Perspective, Workspace, WorkspaceError, WorkspaceM
 pub use workspace_persist::{
     decode_workspace, decode_workspace_with_registry, encode_workspace, WorkspaceDecodeLimits,
     WorkspaceDecodeOptions, WorkspacePersistError,
+};
+#[cfg(feature = "std")]
+pub use workspace_store::{
+    LoadedWorkspace, WorkspaceFileStore, WorkspaceLoadSource, WorkspaceStoreError,
 };
 
 #[cfg(test)]
