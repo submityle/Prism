@@ -21,6 +21,10 @@ pub trait ReplicationStrategy: Send + Sync + 'static {
     type Input: Clone + Send + Sync + 'static;
     /// Advance `record` by one local `input`.
     fn simulate(&self, record: &mut Record, input: &Self::Input);
+    /// Encode a local input as the command bytes authority decodes
+    /// ([`ServerStrategy::decode`](super::ServerStrategy::decode)); this is the
+    /// client end of the command wire format.
+    fn encode(&self, input: &Self::Input) -> Vec<u8>;
 }
 
 /// The app-facing replication resource.
@@ -96,6 +100,32 @@ impl<S: ReplicationStrategy> Replication<S> {
     pub fn predict(&mut self, input: S::Input) -> Result<u32, SessionError> {
         let Self { session, strategy, .. } = self;
         session.predict(input, |record, input| strategy.simulate(record, input))
+    }
+
+    /// Predict `input` locally **and** send it to authority in one call — the
+    /// client half of the command path.
+    ///
+    /// Returns the sent sequence number, or `Ok(None)` when the send window is
+    /// full (backpressure). A full window predicts nothing, so a caller that
+    /// retries the same input cannot double-predict it; check
+    /// [`is_full`](Self::is_full) to avoid the `None` case. Prediction is local
+    /// and independent of delivery — authority will confirm or correct it later.
+    ///
+    /// # Errors
+    /// [`SessionError::Prediction`] when the predicted state is not retained.
+    pub fn predict_and_send(&mut self, input: S::Input) -> Result<Option<u64>, SessionError> {
+        if self.channel.is_full() {
+            return Ok(None);
+        }
+        let bytes = self.strategy.encode(&input);
+        let Self {
+            session,
+            strategy,
+            channel,
+            ..
+        } = self;
+        session.predict(input, |record, input| strategy.simulate(record, input))?;
+        Ok(channel.send(&bytes))
     }
 
     /// Send `bytes` to the peer reliably: the channel numbers and retains it until
@@ -222,6 +252,9 @@ mod tests {
             };
             record.set(0, FieldValue::Int(current + input));
         }
+        fn encode(&self, input: &i64) -> Vec<u8> {
+            input.to_le_bytes().to_vec()
+        }
     }
 
     pub(crate) fn schema() -> Schema {
@@ -309,5 +342,59 @@ mod tests {
             0,
             "authority's frame was acknowledged over the reliable channel"
         );
+    }
+
+    /// `predict_and_send` is the client half of the command path: it predicts the
+    /// input locally and puts the `encode`d command on the wire in one call.
+    #[test]
+    fn predict_and_send_predicts_and_puts_the_encoded_command_on_the_wire() {
+        let (client_end, mut server_end) = InMemoryTransport::pair();
+        let mut app = App::new();
+        app.add_plugins(ReplicationPlugin::new(
+            schema(),
+            8,
+            snapshot_at(0, 0),
+            Add,
+            Box::new(client_end),
+        ));
+
+        let replication = app.world_mut().resource_mut::<Replication<Add>>();
+        assert_eq!(replication.predict_and_send(3).unwrap(), Some(0));
+        assert_eq!(replication.predicted(), 1, "predicted locally");
+        assert_eq!(int(replication.state().unwrap()), 3);
+
+        // One frame ticks the channel, putting the command packet on the wire.
+        app.update();
+        let packet = server_end.recv().expect("the command reached the peer");
+        let (kind, _seq, payload) = crate::reliable::decode(&packet).expect("a packet");
+        assert_eq!(kind, 0, "a data packet");
+        assert_eq!(payload, &3i64.to_le_bytes(), "the command's wire format");
+    }
+
+    /// Backpressure: a full send window refuses the command **without** predicting
+    /// it, so a caller that retries the same input cannot double-predict it.
+    #[test]
+    fn predict_and_send_refuses_without_predicting_when_the_window_is_full() {
+        let (client_end, _server_end) = InMemoryTransport::pair();
+        let mut app = App::new();
+        app.add_plugins(ReplicationPlugin::new(
+            schema(),
+            8,
+            snapshot_at(0, 0),
+            Add,
+            Box::new(client_end),
+        ));
+
+        let replication = app.world_mut().resource_mut::<Replication<Add>>();
+        for _ in 0..DEFAULT_WINDOW {
+            assert!(replication.send(b"x").is_some());
+        }
+        assert!(replication.is_full());
+        assert_eq!(
+            replication.predict_and_send(3).unwrap(),
+            None,
+            "the window is full: nothing sent"
+        );
+        assert_eq!(replication.predicted(), 0, "and nothing predicted either");
     }
 }

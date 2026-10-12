@@ -267,6 +267,9 @@ mod tests {
         fn simulate(&self, record: &mut Record, input: &i64) {
             record.set(0, FieldValue::Int(int(record).saturating_add(*input)));
         }
+        fn encode(&self, input: &i64) -> Vec<u8> {
+            input.to_le_bytes().to_vec()
+        }
     }
 
     /// The full loop, both halves as real `prism_app` plugins over one reliable
@@ -358,5 +361,48 @@ mod tests {
         let server = server_app.world().resource::<ServerReplication<AddAuthority>>();
         assert_eq!(server.revision(), Some(0), "the command was ignored");
         assert_eq!(server.applied(), 0);
+    }
+
+    /// A **predicted** command whose simulation matches authority is confirmed, not
+    /// rolled back: the client predicts +3, authority applies +3, and after
+    /// reconciliation the client is still at the predicted value with nothing
+    /// pending.
+    #[test]
+    fn a_predicted_command_that_matches_authority_is_not_rolled_back() {
+        let (client_end, server_end) = InMemoryTransport::pair();
+        let mut client_app = App::new();
+        client_app.add_plugins(ReplicationPlugin::new(
+            schema(),
+            8,
+            snapshot_at(0, 0),
+            AddClient,
+            Box::new(client_end),
+        ));
+        let mut server_app = App::new();
+        server_app.add_plugins(ReplicationServerPlugin::new(
+            schema(),
+            8,
+            snapshot_at(0, 0),
+            AddAuthority,
+            Box::new(server_end),
+        ));
+
+        // The client predicts and sends in one call.
+        let replication = client_app
+            .world_mut()
+            .resource_mut::<Replication<AddClient>>();
+        assert_eq!(replication.predict_and_send(3).unwrap(), Some(0));
+        assert_eq!(replication.predicted(), 1);
+        assert_eq!(int(replication.state().unwrap()), 3);
+
+        for _ in 0..8 {
+            client_app.update();
+            server_app.update();
+        }
+
+        let replication = client_app.world().resource::<Replication<AddClient>>();
+        assert_eq!(replication.acked(), 1, "authority confirmed the prediction");
+        assert_eq!(replication.predicted(), 1, "no replay left pending");
+        assert_eq!(int(replication.state().unwrap()), 3, "not rolled back");
     }
 }
