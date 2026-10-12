@@ -14,6 +14,9 @@
 //!   a per-source in-order delivery window, so a reliable-ordered or unreliable
 //!   transport delivering commands out of order / twice still yields one agreed,
 //!   gap-free order at every peer (design §9 / §13).
+//! - [`bitpack`] / [`quantize`] — the delta layer's wire primitives: a
+//!   bit-width-addressable stream and a uniform scalar quantizer, so a replicated
+//!   field costs the bits it needs (design §15).
 //!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
@@ -25,3 +28,7 @@
 extern crate alloc;
 
 pub mod sequence;
+
+pub mod bitpack;
+
+pub mod quantize;
