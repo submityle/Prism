@@ -22,6 +22,7 @@
 //!   archetype into one variant per distinct shared-value binding — is still
 //!   pending; the store is the substrate it builds on.
 
+mod arena;
 mod blob_vec;
 mod chunk;
 mod owning_group;

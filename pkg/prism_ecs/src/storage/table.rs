@@ -8,7 +8,6 @@
 //! refinement layered on top of this representation; the row/column model and
 //! its invariants are unchanged by that work.
 
-use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
@@ -19,6 +18,7 @@ use crate::change::{ComponentTicks, Tick};
 use crate::collections::HashMap;
 use crate::component::{ComponentId, DropFn};
 use crate::entity::Entity;
+use crate::storage::arena::ChunkArena;
 use crate::storage::blob_vec::BlobVec;
 use crate::storage::chunk::{rows_per_chunk, ChunkMeta, ChunkVersions};
 
@@ -405,34 +405,17 @@ pub struct Table {
     column_slots: Vec<(ComponentId, usize, usize)>,
     /// Byte offset of the chunk's [`ChunkMeta`] inside a chunk block.
     meta_offset: usize,
-    /// Layout of one chunk block (all columns' slices, cache-line aligned).
-    block_layout: Layout,
+    /// Owns (and recycles) the chunk block allocations. With the `vm` feature
+    /// this is a page-aligned (and where available huge-page-backed) arena;
+    /// otherwise it is a thin global-allocator wrapper.
+    arena: ChunkArena,
 }
 
 /// One physical chunk: a single allocation holding every column's slice for one
-/// row window (design §5.3 DOTS chunk). Its `Drop` frees the allocation.
+/// row window (design §5.3 DOTS chunk). The allocation is owned by the table's
+/// [`ChunkArena`](crate::storage::arena::ChunkArena), which frees it.
 struct ChunkBlock {
     ptr: NonNull<u8>,
-    layout: Layout,
-}
-
-impl ChunkBlock {
-    fn alloc(layout: Layout) -> Self {
-        if layout.size() == 0 {
-            // An all-ZST table allocates nothing; the dangling base is never
-            // dereferenced.
-            return Self {
-                ptr: NonNull::dangling(),
-                layout,
-            };
-        }
-        // SAFETY: `layout.size() != 0`, as `alloc` requires.
-        let ptr = unsafe { alloc(layout) };
-        Self {
-            ptr: NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout)),
-            layout,
-        }
-    }
 }
 
 // SAFETY: a chunk block only holds component data for `Component: Send + Sync`
@@ -444,16 +427,6 @@ impl ChunkBlock {
 unsafe impl Send for ChunkBlock {}
 // SAFETY: see the `Send` impl above.
 unsafe impl Sync for ChunkBlock {}
-
-impl Drop for ChunkBlock {
-    fn drop(&mut self) {
-        if self.layout.size() != 0 {
-            // SAFETY: allocated by `ChunkBlock::alloc` with this exact layout and
-            // not yet freed.
-            unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
-        }
-    }
-}
 
 impl Table {
     /// Create an empty table with a column per `(id, layout, drop)` descriptor.
@@ -506,7 +479,7 @@ impl Table {
             chunks: Vec::new(),
             column_slots: slots,
             meta_offset,
-            block_layout,
+            arena: ChunkArena::new(block_layout),
         }
     }
 
@@ -559,7 +532,9 @@ impl Table {
     fn grow_chunks_to(&mut self, len: usize) {
         let needed = len.div_ceil(self.rows_per_chunk);
         while self.chunks.len() < needed {
-            let block = ChunkBlock::alloc(self.block_layout);
+            let block = ChunkBlock {
+                ptr: self.arena.alloc(),
+            };
             // Embed a default `ChunkMeta` in the block's header.
             // SAFETY: `meta_offset` is laid out inside `block_layout` and aligned
             // for `ChunkMeta`; the slot is not yet initialised.
@@ -596,7 +571,10 @@ impl Table {
                     column.detach_chunk();
                 }
             }
-            self.chunks.pop();
+            let block = self.chunks.pop().expect("a block was just checked to exist");
+            // SAFETY: the block came from `self.arena` and every column has been
+            // detached, so no live reference into it remains.
+            unsafe { self.arena.free(block.ptr) };
         }
     }
 
@@ -1086,7 +1064,7 @@ mod tests {
 
         let block = &table.chunks[0];
         let lo = block.ptr.as_ptr() as usize;
-        let hi = lo + table.block_layout.size();
+        let hi = lo + table.arena.block_size();
 
         let column = table.columns.values().next().unwrap();
         // SAFETY: row 0 is live (8 rows) so the chunk cell exists.

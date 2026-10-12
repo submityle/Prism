@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
 prism_ecs_macros = { path = "../prism_ecs_macros" }
+prism_platform = { path = "../prism_platform", optional = true }
 prism_reflect = { path = "../prism_reflect", optional = true }
 prism_tasks = { path = "../prism_tasks", optional = true }
 
@@ -33,6 +34,13 @@ multi_thread = ["std", "dep:prism_tasks"]
 # enumerate it *dynamically* by `StableTypeId`, without naming the Rust type.
 # Pulls in `prism_reflect` (and `std`), so the base kernel stays free of it.
 reflect = ["std", "dep:prism_reflect"]
+
+# VM-backed chunk arena (design §17 大页竞技场分配): the table's chunk blocks are
+# carved from one large, page-aligned — and, where the platform supports it,
+# huge-page-backed — reservation per arena instead of one global allocation per
+# chunk. Pulls in `prism_platform` and `std`; the base kernel keeps its plain
+# per-block global allocation.
+vm = ["std", "dep:prism_platform"]
 
 # Reflect-driven binary archives (design §16.5 / §24.3): save/load an entity
 # set's reflected components through `prism_reflect`'s binary format, so a

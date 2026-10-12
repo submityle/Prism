@@ -388,7 +388,7 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 - **owning group**：超热查询完美打包，迭代线性零分支。
 - **命令排序回放**：并行录制 + 确定键排序批量应用，合并同原型迁移。
 - **fiber 作业图**：重 system 内 chunk 子作业并行，近零同步点，多核近线性。
-- **内存**：原型预热**已落地**为 `World::prewarm::<B>(entities) -> ArchetypeId`——按 bundle（**含 required components**）解析/创建目标 archetype，并预留每个表列、实体列与 chunk 版本窗口的容量；**不生成实体、不跑 hook/observer/构造器**，因此可以安全地在关卡加载时把首帧会 burst 的 bundle 先热起来（有测试断言预热后同 bundle 的 spawn 落在同一 archetype，且第二次预热只会扩大容量）。共享组件 bundle 会**明确 panic**：共享组件的 archetype 由 interned 值决定，光凭 bundle 类型无法解析（文档写明替代做法）。实体/原型空槽回收已落地（free list + 空原型复用）。**大页竞技场分配与 NUMA 就近分配仍为 PLANNED**（后者在 `prism_tasks` 侧已有 NUMA 拓扑支持，尚未与 ECS 列分配打通）。
+- **内存**：原型预热**已落地**为 `World::prewarm::<B>(entities) -> ArchetypeId`——按 bundle（**含 required components**）解析/创建目标 archetype，并预留每个表列、实体列与 chunk 版本窗口的容量；**不生成实体、不跑 hook/observer/构造器**，因此可以安全地在关卡加载时把首帧会 burst 的 bundle 先热起来（有测试断言预热后同 bundle 的 spawn 落在同一 archetype，且第二次预热只会扩大容量）。共享组件 bundle 会**明确 panic**：共享组件的 archetype 由 interned 值决定，光凭 bundle 类型无法解析（文档写明替代做法）。实体/原型空槽回收已落地（free list + 空原型复用）。**大页竞技场分配已落地**（`vm` feature，见 `storage/arena.rs`）：`ChunkArena` 从 `prism_platform` 的 VM 层预留**大块页对齐（平台支持时大页/巨页支撑）**的 segment 并 bump 切块，释放的块进 free list 复用，不再每 chunk 一次全局分配（无 `vm`/无 VM 后端时回退逐块全局分配，行为等价）。**NUMA**：当前是**first-touch 就近**——块由首次写它的线程所在节点物理支撑（经典默认策略，天然把热点 chunk 留在流入它的 worker 本地）；**显式绑定某节点（mbind/set_mempolicy）仍为 PLANNED**，因为 `prism_platform` 尚未暴露该接口，文档如实说明而非假装绑定。
 - **GPU 常驻列直传**：脏块增量上传，省 CPU 打包。
 - **成本 ∝ 变化量**：脏块访问器 + push 反应图把增量路径设为默认，禁止全表扫描成为常态。
 
@@ -466,14 +466,14 @@ pkg/prism_ecs/                     # no_std + alloc 内核
     change.rs bundle.rs resource.rs prefab.rs blob.rs snapshot.rs
     partition/{ cell, lod, dormant, floating_origin }
     gpu_resident.rs diagnostics.rs reflect_bridge.rs
-  features = ["std","multi_thread","simd","serialize","reflect","trace","determinism","partition","gpu_resident"]
+  features = ["std","multi_thread","simd","serialize","reflect","trace","determinism","partition","gpu_resident","vm"]
 
 pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource/Event/SystemParam/Relation 已实现
 ```
 
-> **feature 现状诚实注记**：上方 feature 清单为**目标形态**。`pkg/prism_ecs/Cargo.toml` 当前**已落地**的 feature 为 `std` / `multi_thread` / `simd` / `partition` / `gpu_resident` / `determinism` / `trace` / **`reflect`** / **`serialize`**（均有真实 `cfg` 门控代码与测试，`determinism` 见 `world/snapshot/determinism.rs`，`trace` 见 `diagnostics/trace/`）。`reflect` 已按 §16.5 / §24.3 接入 `prism_reflect`：`src/reflect_bridge.rs` 提供 `World::register_reflect_component::<T>()`（登记 `StableTypeId → 单态化操作` 表）与 `get_reflect` / `get_reflect_mut` / `insert_reflect` / `remove_reflect` / `reflect_component_id` / `reflect_stable_id` / `reflect_entity`，热路径为一次哈希探测 + 一次间接调用，不把活组件装箱（`T: Reflect + FromReflect + Clone`；`get_reflect_mut` 走 `Mut`，因此会像直接 `get_mut` 一样标记 changed）。`serialize` 已落地为反射驱动的实体二进制存档（`src/reflect_archive.rs`，信封与语义见 §24.3）：`save_reflect_archive` 产出**字节确定**的存档，`load_reflect_archive` 同 id 存活则覆盖、缺失则新开实体并返回落地实体表。**跨版本读取已接通**：记录里带写入时的具体类型名，加载经 `World::reflect_schemas_mut()` 的 `SchemaRegistry` 解析到写入版本、按该版 `TypeInfo` 解码、跑 `Migration` 链升级后再落到今天的类型（见 §24.3）。`trace` 已落地为「结构化事件流 + Chrome/Perfetto 时间线导出」——作为 §16.6 火焰图 profiler 的对偶（profiler 折叠自时间树，trace 保留有序事件流），共用 `SystemInstrument` 捕获钩子、core `no_std + alloc`、`TraceRecorder` 实时捕获层 `std` 门控，非薄壳。
+> **feature 现状诚实注记**：上方 feature 清单为**目标形态**。`pkg/prism_ecs/Cargo.toml` 当前**已落地**的 feature 为 `std` / `multi_thread` / `simd` / `partition` / `gpu_resident` / `determinism` / `trace` / **`reflect`** / **`serialize`** / **`vm`**（均有真实 `cfg` 门控代码与测试；`vm` 见 `storage/arena.rs`：VM 竞技场把 chunk 块从 `prism_platform` 的页对齐/大页 segment 里 bump 切出并回收，无 `vm` 时回退逐块全局分配。`determinism` 见 `world/snapshot/determinism.rs`，`trace` 见 `diagnostics/trace/`）。`reflect` 已按 §16.5 / §24.3 接入 `prism_reflect`：`src/reflect_bridge.rs` 提供 `World::register_reflect_component::<T>()`（登记 `StableTypeId → 单态化操作` 表）与 `get_reflect` / `get_reflect_mut` / `insert_reflect` / `remove_reflect` / `reflect_component_id` / `reflect_stable_id` / `reflect_entity`，热路径为一次哈希探测 + 一次间接调用，不把活组件装箱（`T: Reflect + FromReflect + Clone`；`get_reflect_mut` 走 `Mut`，因此会像直接 `get_mut` 一样标记 changed）。`serialize` 已落地为反射驱动的实体二进制存档（`src/reflect_archive.rs`，信封与语义见 §24.3）：`save_reflect_archive` 产出**字节确定**的存档，`load_reflect_archive` 同 id 存活则覆盖、缺失则新开实体并返回落地实体表。**跨版本读取已接通**：记录里带写入时的具体类型名，加载经 `World::reflect_schemas_mut()` 的 `SchemaRegistry` 解析到写入版本、按该版 `TypeInfo` 解码、跑 `Migration` 链升级后再落到今天的类型（见 §24.3）。`trace` 已落地为「结构化事件流 + Chrome/Perfetto 时间线导出」——作为 §16.6 火焰图 profiler 的对偶（profiler 折叠自时间树，trace 保留有序事件流），共用 `SystemInstrument` 捕获钩子、core `no_std + alloc`、`TraceRecorder` 实时捕获层 `std` 门控，非薄壳。
 
-依赖：仅 `prism_math`、`prism_tasks`（std）、`prism_reflect`（可选）。**不碰任何 `bevy_*`。**
+依赖：仅 `prism_math`、`prism_tasks`（std）、`prism_reflect`（可选）、`prism_platform`（可选，`vm` feature 的 VM 竞技场）。**不碰任何 `bevy_*`。**
 
 ---
 
@@ -501,7 +501,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 ## 22. 诚实边界与风险
 
-- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 + **物理分块存储**（**DOTS 式单块 chunk**：一个 row 窗口 = 一个物理块，块头 = 每列 change_version cell + `ChunkMeta`，其后是所有列的 SoA 切片，`Table` 持有块、`Column` 是块内视图，块级分配回收 / 稳定地址 / 块局部切片 / 块内嵌元数据）+ **chunk-aware fetch**（每 chunk 解析一次块基址）/ 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 规范层级关系 ChildOf（作用域命令 + 层级 despawn）/ 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档 + 跨版本 schema 迁移）/ 提取契约（`ExtractResource`/`ExtractComponent` + 运行器）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 原型预热 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已落地（lane→优先级派发 + 帧预算门控）；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档 / 跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 的渲染侧接线与流水线并行（ECS 侧提取契约已落地）、大页/NUMA 感知的列分配，以及独占机多核近线性 / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
+- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 + **物理分块存储**（**DOTS 式单块 chunk**：一个 row 窗口 = 一个物理块，块头 = 每列 change_version cell + `ChunkMeta`，其后是所有列的 SoA 切片，`Table` 持有块、`Column` 是块内视图，块级分配回收 / 稳定地址 / 块局部切片 / 块内嵌元数据）+ **chunk-aware fetch**（每 chunk 解析一次块基址）/ 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 规范层级关系 ChildOf（作用域命令 + 层级 despawn）/ 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档 + 跨版本 schema 迁移）/ 提取契约（`ExtractResource`/`ExtractComponent` + 运行器）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 原型预热 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已落地（lane→优先级派发 + 帧预算门控）；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档 / 跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 的渲染侧接线与流水线并行（ECS 侧提取契约已落地）、**显式 NUMA 绑定（`mbind`/`set_mempolicy`；当前为 first-touch 就近，大页竞技场已落地）**，以及独占机多核近线性 / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
 - 规模与多核扩展性、NUMA、GPU 常驻指标依赖真实硬件压测，单测不能替代。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。
