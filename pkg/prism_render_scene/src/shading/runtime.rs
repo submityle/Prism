@@ -387,7 +387,7 @@ pub(crate) fn prepare_shading_work(
             materials
                 .registry
                 .get(work.material)
-                .map(|record| record.header(0, 0, 0, 0))
+                .map(|record| record.header(0, 0, 0))
         }),
     );
     diagnostics.gpu_classification = gpu_classification;

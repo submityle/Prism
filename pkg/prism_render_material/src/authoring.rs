@@ -70,7 +70,7 @@ mod tests {
 
         // Feature bit is live in the record and its serialized header.
         assert!(record.features.contains(MaterialFeatureFlags::FACE_SHADOW));
-        let header = record.header(0, 0, 0, 0);
+        let header = record.header(0, 0, 0);
         assert_eq!(
             header.feature_flags & MaterialFeatureFlags::FACE_SHADOW.0,
             MaterialFeatureFlags::FACE_SHADOW.0,

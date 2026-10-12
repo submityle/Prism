@@ -158,14 +158,7 @@ impl MaterialGpuBuffers {
                     core::mem::size_of_val(record.textures.as_slice()) as u64;
                 self.headers.grow_and_set(
                     index,
-                    MaterialHeaderRow(record.header(
-                        offset,
-                        texture_offset,
-                        // No serialized closure-graph blob buffer yet; RT/deferred
-                        // consumers fall back to the packed axes until it lands.
-                        0,
-                        epoch,
-                    )),
+                    MaterialHeaderRow(record.header(offset, texture_offset, epoch)),
                 );
             } else if index == 0 {
                 // Slot zero is the permanent principled fallback; it always

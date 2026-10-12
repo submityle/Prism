@@ -15,7 +15,6 @@ struct PrismMaterialHeader {
     is_active: u32,
     material_epoch_low: u32,
     material_epoch_high: u32,
-    closure_graph_offset: u32,
     specialization_low: u32,
     specialization_high: u32,
     lobe_mask: u32,

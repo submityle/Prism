@@ -373,7 +373,7 @@ PCM 的全部治理机器（命名空间解析、能力协商、used/required、
 
 **§4.5 三约束落为字段谓词**：命名空间升为字段后，§4.5 的全局不变量从“人工审读的约定”变成**可机检的字段谓词**——合规对拍（约束 1）= “凡 `namespace==KHR` 必与 OpenPBR 参考实现字节对拍一致”；位区隔离（约束 2）= 位分配以 `namespace` 为分区键静态控制；晋升闸门 = 一台只允许 `X_studio→EXT→KHR` 单向跃迁的字段状态机。CI 直接枚举字段即可守门，无需人工审读。
 
-每类 kind 有类型化 hook 签名（lobe: unpack/classify/sample/respond；provider: produce_page；transfer: remap；composite: record 等）。受限 Rust 瓣（§5.4.1）编译期由 `proc-macro` 产出 WESL 孪生、CPU 金标准即作者原生 Rust → `golden="auto"`，任何 kind 自动获 twin 对拍（算术 ≤1 ULP，§11）；裸 WESL 为不安全逃生口（`golden="none"`、CI 标红、**仅烘焙期**，运行时永不加载任意 shader——安全边界）。ABI header 加 4 word 扩展摘要 `extensions_{used,required}_{low,high}`（§8.2）——`used`/`required` 各 32 位覆盖 64 个注册槽位，且保持 header 的 16 字节对齐；OpenPBR 核心位与 PCM 注册扩展位走双命名空间 / 双版本轴，结构性不撞车（根除 §15 一条风险）。
+每类 kind 有类型化 hook 签名（lobe: unpack/classify/sample/respond；provider: produce_page；transfer: remap；composite: record 等）。受限 Rust 瓣（§5.4.1）编译期由 `proc-macro` 产出 WESL 孪生、CPU 金标准即作者原生 Rust → `golden="auto"`，任何 kind 自动获 twin 对拍（算术 ≤1 ULP，§11）；裸 WESL 为不安全逃生口（`golden="none"`、CI 标红、**仅烘焙期**，运行时永不加载任意 shader——安全边界）。ABI header 加 4 word 扩展摘要 `extensions_{used,required}_{low,high}`（§8.2）——`used`/`required` 各 32 位覆盖 64 个注册槽位；OpenPBR 核心位与 PCM 注册扩展位走双命名空间 / 双版本轴，结构性不撞车（根除 §15 一条风险）。
 
 #### 5.4.1 行为作者模型：节点图组合 → 受限 Rust 瓣 → 裸 WESL（取代"受限 DSL"）
 
@@ -507,7 +507,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - NPR_FACE（NPR 私有瓣）在 OpenPBR 物理瓣之后排布，由 `Illumination::Stylized` 消费（§3.5）；`custom_program` 字段承接自定义线（§3.5）。
 - 纹理段 `texture_offset/texture_count` → **VT 页引用**（指向 `texture_streaming` 的页表句柄），不再是固定 8 槽索引，数量不限。
 - 删除一切 `MAX_*` 常量语义（`MAX_MATERIAL_TEXTURES` / `MAX_CLOSURE_SLAB_DEPTH`）。
-- **PCM 扩展摘要（4 word，P1-h）**：`extensions_used_low/high` + `extensions_required_low/high`，由 `lobe_mask` 按 namespace/stability 派生（§5.3），覆盖 64 个注册槽位并把 header 保持在 16 字节对齐（20 word 基础字段 + 4 word 摘要 = 96 B，WESL 各 `MaterialHeader` 镜像逐字段同步）。
+- **PCM 扩展摘要（4 word，P1-h）**：`extensions_used_low/high` + `extensions_required_low/high`，由 `lobe_mask` 按 namespace/stability 派生（§5.3），覆盖 64 个注册槽位（19 word 基础字段 + 4 word 摘要 = **92 B**，WESL 各 `MaterialHeader` 镜像逐字段同步）。
 - `MATERIAL_ABI_VERSION = 5`。
 - `material_classification.wesl` 的 `MaterialHeader` 镜像同步更新字段名（现仍是 v4 布局：`parameter_offset/parameter_size/lobe_mask`）。
 
@@ -651,14 +651,14 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - **闭包 slab 深度上限删除**：`ir.rs` 去掉 `MAX_CLOSURE_SLAB_DEPTH`、`slab_depth` 计数与 `MaterialGraph::normalize` 的深度检查；`validation.rs` 删掉随之不可达的 `ClosureSlabTooDeep`。烘焙层把任意层数的 `Layer` / `Mix` 解析成**纹理空间混合**（§6.1 "任意层数"），那个有界 slab 是**静默的性能悬崖**而不是语义极限。新门禁断言 **64 层链正常归一化**而非报错。
   - **纹理槽上限删除**：`record.rs` / `registry.rs` 去掉 `MAX_MATERIAL_TEXTURES` 与发布期的 `TooManyTextures` 拒绝；`MaterialRecord::fixed_texture_rows` 退场。
   - **GPU 侧纹理由定长数组升级为变长行堆**：`prism_render_scene/material/buffers.rs` 的纹理表改由第二个 `ParameterHeap` 子分配的**变长行堆**（与参数 word 堆同一套机制），header 用 `texture_offset` / `texture_count` 寻址自己那一段——一个材质可引用**无上限**的 bindless 槽位。着色器早已按 `material_textures[texture_offset .. +texture_count]` 读，故**无需改 shader**。材质退役时行归还空闲表（无泄漏）。
-  - **诚实边界**：`closure_graph_offset` 字段仍在，它指向**为 RT/deferred 消费**序列化的闭包 IR，是**另一条消费线**的产物，不属 P1-c 的运行时 über 路径——删掉它是 RT 侧的工作，不是本项的缺口。
+  - **删闭包图（运行时彻底无图）**：header 的 `closure_graph_offset` 字段**删除**。它此前恒为 `0`、无任何 shader 读取、也没有对应的 blob buffer（源码注释直言 "no serialized closure-graph blob buffer yet"，是**占位**）。§6.2 要求"运行时没有图"，§8.5 要求唯一执行路径——deferred/RT 消费者与光栅路径评**同一个**打包 über `SurfaceParameterBlock`，只是光照来源切换——所以 header 不该、也不需要携带图引用。全链同步：Rust 字段 + `header()` 形参 + 5 处 WESL 镜像 + 两处诊断调用点；header 由 24 word 收为 **23 word = 92 B**（存储缓冲数组只需元素自然对齐，且更密集）。
   - 门禁：`prism_render_material --lib` **827**、`prism_render_scene --lib` **1602**、`prism_render_shading --lib` **3333** 全绿（commit 时计数）。
 
 - **P1-h 第一片：PCM 地基落地（lobe 类迁入注册表 + 能力协商 + header 4 word 摘要）**（§5 / §5.3 / §8.2）
   - **schema 先行**：`surface.toml` 每条 `[[lobe]]` 加 `requires_caps`，并把 `stability` 收敛为规范口径的三级（`experimental` / `candidate` / `stable`，此前 schema 里的 `draft` / `deprecated` 与 PCM 注册表的词汇表**不一致**，已删除）。codegen 把两者都烘进 `LobeLayout`（`stability` + `requires_caps`），生成物 `surface_layout.rs` 重生成、`material_unpack.wesl` 无变化。
   - **唯一策略源**：`required`/`optional` 不是作者字段，而是由 `stability` 决定——`stable` 的非 `KHR` 瓣存在即 required（弱平台上是**加载期硬错**），`experimental` 的则是 used-only（**graceful ignore**，投影回不含它的变体并报告）。这样 header 不可能声称一个材质不携带的扩展，也堵掉了"作者随手把私有瓣标 required、弱平台直接崩"的路径。
   - **一张注册表**：协商本体在 `prism_material_pcm`（九类 kind 同一张表，含命名空间位区、晋升状态机、`used`/`required` 摘要）。`prism_render_material::capability` 不再自带第二套 `Capability` 枚举，改为纯桥接：`lobe_registry()`（schema 表 → `ExtensionRegistry`）、`digest_for()`（`lobe_mask` → 摘要）、`negotiate_digest()`。`parse_capabilities` 对**未知能力名报错**而非当成"已满足"。
-  - **ABI（随 v5）**：`GpuMaterialHeader` 加 4 word 摘要 `extensions_{used,required}_{low,high}`（20 基础 word + 4 = **96 B**，保持 16 字节对齐；原 80 B）。WESL 侧 5 处 `MaterialHeader` / `PrismMaterialHeader` 镜像逐字段同步。顺带修掉一处**真实漂移**：WESL 镜像把字段写作 `active`，而 WGSL 保留 `active`，naga 直接拒绝编译（`use of a reserved word`）——统一为 `is_active`（Rust ABI 字段同步改名，行布局不变）。
+  - **ABI（随 v5）**：`GpuMaterialHeader` 加 4 word 摘要 `extensions_{used,required}_{low,high}`（19 基础 word + 4 = **92 B**；原 80 B）。WESL 侧 5 处 `MaterialHeader` / `PrismMaterialHeader` 镜像逐字段同步。顺带修掉一处**真实漂移**：WESL 镜像把字段写作 `active`，而 WGSL 保留 `active`，naga 直接拒绝编译（`use of a reserved word`）——统一为 `is_active`（Rust ABI 字段同步改名，行布局不变）。
   - **单一真相源的门禁**：新增 `pkg/prism_render_material/tests/pcm_parity.rs`——内置目录（`prism_material_pcm::builtin`）与 schema 派生表**双向**逐行比对（槽位 / `uid` / `kind` / 命名空间 / 稳定级 / `requires_caps`），并断言 `KHR` 瓣**永不**声明能力需求（否则 `OpenPBR` 就不再"到处都能跑"）。另修掉内置目录里 `npr_face` 的 `uid` 用了自带拼写（`org.prism.lobe.face`）而不是 schema 的不可变身份 `studio.prism.face_shadow` 的漂移——identity 不因改名而改写（§5.4）。
   - **诚实边界**：今天**没有任何**注册瓣声明能力需求（全部 pure ALU + 标准绑定），所以协商机制由合成 registry 用例（required 缺失 ⇒ 硬错；used-only 缺失 ⇒ 忽略并报告）+ 上述平价门禁覆盖，不往真实表里塞假需求。
   - 门禁：`prism_material_schema` **13**、`prism_material_pcm` **15**、`prism_render_material` **833 + 2 + 1 + 6 + 3(pcm_parity)**、`--features bevy` **830**、`prism_render_scene --lib` **1602**（WESL 头镜像全 specialization 编译+链接）、`prism_render_shading --lib` **3333**；真机 GPU 侧 `prism_render_material_gpu` 越沙盒复验。
@@ -1221,11 +1221,13 @@ pub struct GpuMaterialHeader {
     pub parameter_offset: u32, pub parameter_size: u32, // 单一变长 über 块（长度随瓣集）
     pub vt_page_offset: u32, pub vt_page_count: u32,     // 取代 texture_offset/count，数量不限
     pub sampler_offset: u32, pub sampler_count: u32,
-    pub custom_program: u32, pub active: u32,
+    pub custom_program: u32, pub is_active: u32,          // `active` 是 WGSL 保留字
     pub material_epoch_low: u32, pub material_epoch_high: u32,
-    pub closure_graph_offset: u32,                       // 仅 RT/离线消费，可为 0
     pub specialization_low: u32, pub specialization_high: u32,
     pub lobe_mask: u32,                                  // 开放位掩码
+    // PCM 扩展摘要（§5.3/§8.2）：`used`/`required` 各 32 位，覆盖 64 个注册槽位
+    pub extensions_used_low: u32, pub extensions_used_high: u32,
+    pub extensions_required_low: u32, pub extensions_required_high: u32,
 }
 ```
 

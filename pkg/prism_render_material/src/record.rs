@@ -82,8 +82,12 @@ impl BitOrAssign for MaterialFeatureFlags {
 /// GPU-visible material header. The former `shading_model` field is gone;
 /// style is carried by `illumination`, and the compiled permutation identity is
 /// carried by `specialization_low`/`specialization_high` (a split
-/// [`SpecializationId`]). `closure_graph_offset` points at the serialized
-/// closure IR for RT/deferred consumption.
+/// [`SpecializationId`]).
+///
+/// The runtime is **graph-free** (design §6.2): there is no serialized closure
+/// IR. Deferred/RT consumers evaluate the same packed über
+/// [`SurfaceParameterBlock`] the raster path does — one execution path, only the
+/// *light source* switches (§8.5) — so the header carries no graph reference.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuMaterialHeader {
@@ -120,7 +124,6 @@ pub struct GpuMaterialHeader {
     pub is_active: u32,
     pub material_epoch_low: u32,
     pub material_epoch_high: u32,
-    pub closure_graph_offset: u32,
     pub specialization_low: u32,
     pub specialization_high: u32,
     /// Which optional über-BSDF lobes this material carries
@@ -140,7 +143,7 @@ pub struct GpuMaterialHeader {
     ///
     /// The digest is four words — `used` and `required`, each split low/high
     /// ([`prism_material_pcm::HEADER_DIGEST_WORDS`]) — so all 64 registry slots
-    /// are addressable and the header stays a 16-byte multiple.
+    /// are addressable.
     pub extensions_used_low: u32,
     /// PCM extension digest, `used` half, slots `32..64` (§5.3).
     pub extensions_used_high: u32,
@@ -437,7 +440,6 @@ impl MaterialRecord {
         &self,
         parameter_offset: u32,
         texture_offset: u32,
-        closure_graph_offset: u32,
         epoch: u64,
     ) -> GpuMaterialHeader {
         let spec = self.specialization();
@@ -459,7 +461,6 @@ impl MaterialRecord {
             is_active: 1,
             material_epoch_low: epoch as u32,
             material_epoch_high: (epoch >> 32) as u32,
-            closure_graph_offset,
             specialization_low: spec.low(),
             specialization_high: spec.high(),
             lobe_mask: self.lobe_mask().bits(),
@@ -567,13 +568,12 @@ mod tests {
         let handle = GenerationalHandle::new(2, 7);
         let value = record(handle, closure_bit(ClosureKind::ClearCoat), 2);
         let epoch = 0x1_0000_0002_u64;
-        let header = value.header(64, 128, 256, epoch);
+        let header = value.header(64, 128, epoch);
         assert_eq!(header.is_active, 1);
         assert_eq!(header.generation, 7);
         assert_eq!(header.texture_count, 2);
         assert_eq!(header.parameter_offset, 64);
         assert_eq!(header.texture_offset, 128);
-        assert_eq!(header.closure_graph_offset, 256);
         assert_eq!(header.custom_program, u32::MAX);
         // The split epoch and specialization key survive the round trip.
         let rebuilt_epoch =

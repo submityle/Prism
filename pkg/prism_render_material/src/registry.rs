@@ -149,7 +149,7 @@ impl MaterialRegistry {
             if let Some(slot) = slot {
                 headers[index] =
                     slot.record
-                        .header(index as u32, textures.len() as u32, 0, self.epoch);
+                        .header(index as u32, textures.len() as u32, self.epoch);
                 parameters[index] = slot.record.surface;
                 textures.extend_from_slice(&slot.record.textures);
             }

@@ -243,14 +243,17 @@ fn gpu_material_rows_match_the_shader_abi() {
     // `extensions_{used,required}_{low,high}`, so the header carries the
     // material's whole registry digest and a load-time negotiator can project it
     // against a target's capabilities without re-deriving the catalogue.
-    assert_eq!(size_of::<GpuMaterialHeader>(), 96);
+    assert_eq!(size_of::<GpuMaterialHeader>(), 92);
     // The v5 OpenPBR field completion (coat/fuzz/base/specular/subsurface/
     // transmission groups, including coat_darkening, scatter_anisotropy and
     // transmission_scatter) sized the fat authoring view, with trailing pad
     // words keeping it a 16-byte multiple.
     assert_eq!(size_of::<GpuSurfaceParameters>(), 320);
     assert_eq!(size_of::<GpuMaterialTexture>(), 16);
-    assert_eq!(size_of::<GpuMaterialHeader>() % 16, 0);
+    // A storage-buffer array requires only the element's natural alignment
+    // (4 for a struct of `u32`s); the header was never padded to 16, and
+    // dropping the vestigial closure-graph word made it denser (23 words).
+    assert_eq!(size_of::<GpuMaterialHeader>() % 4, 0);
     assert_eq!(size_of::<GpuSurfaceParameters>() % 16, 0);
     assert_eq!(size_of::<GpuMaterialTexture>() % 16, 0);
 }
