@@ -5,10 +5,12 @@
 //! [`prism_math::rng::Pcg32::with_stream`] **on a real device**: each input
 //! carries a `(seed, stream)` pair, and the kernel runs the PCG seeding ritual
 //! followed by the XSH-RR output permutation. The math is **not** duplicated
-//! here: the kernel is composed at runtime by prefixing the single-sourced
-//! fragment [`WGSL_PCG32`](prism_math::shader_mirror::WGSL_PCG32) ahead of a
-//! thin compute wrapper, so the device draw cannot silently drift from the CPU
-//! reference — it is literally the same text.
+//! here: the kernel is composed at runtime by prefixing the shared
+//! [`WGSL_U64`](prism_math::shader_mirror::WGSL_U64) emulation plus the
+//! single-sourced generator fragment
+//! [`WGSL_PCG32`](prism_math::shader_mirror::WGSL_PCG32) ahead of a thin compute
+//! wrapper, so the device draw cannot silently drift from the CPU reference —
+//! it is literally the same text.
 //!
 //! # Exact parity
 //!
@@ -26,7 +28,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use bytemuck::{Pod, Zeroable};
-use prism_math::shader_mirror::WGSL_PCG32;
+use prism_math::shader_mirror::{WGSL_PCG32, WGSL_U64};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, CommandEncoder,
@@ -141,6 +143,8 @@ impl GpuPcg32 {
             immediate_size: 0,
         });
         let mut source = String::new();
+        source.push_str(WGSL_U64);
+        source.push('\n');
         source.push_str(WGSL_PCG32);
         source.push('\n');
         source.push_str(WRAP);

@@ -2076,21 +2076,14 @@ fn prism_interval_unary(op: u32, a: PrismInterval) -> PrismInterval {\n\
     }\n\
 }\n";
 
-/// Single-sourced WGSL for the `PCG32` (XSH-RR) generator, mirroring the CPU
-/// [`Pcg32`](crate::rng::Pcg32) step for step. WGSL has no `u64`, so the
-/// 64-bit LCG state is carried as a `vec2<u32>` `(lo, hi)` lane pair and the
-/// 64-bit multiply is emulated with 32×32 partial products
-/// (`prism_pcg_mul_hi` = Hacker's Delight `mulhi`). `prism_pcg32_first`
-/// reproduces [`Pcg32::with_stream`](crate::rng::Pcg32::with_stream)'s
-/// seeding ritual (`inc = 2*stream + 1`, `state = 0`, step, `state += seed`,
-/// step) and then the XSH-RR output permutation of `Pcg32::next`
-/// (`xorshifted = ((state >> 18) ^ state) >> 27`, `rot = state >> 59`,
-/// rotate-right), returning the first 32-bit draw. Because the emulation is
-/// exact 32-bit integer arithmetic, the device output is **bit-identical** to
-/// the CPU — the same deterministic stream feeds GPU procedural content
-/// (particles / terrain / scattering) and the host.
-pub const WGSL_PCG32: &str = "\
-fn prism_pcg_mul_hi(u: u32, v: u32) -> u32 {\n\
+/// Single-sourced WGSL for exact 64-bit integer emulation on a device with no
+/// `u64`: a `u64` is a `vec2<u32>` `(lo, hi)` lane pair, and the multiply is
+/// built from 32×32 partial products (`prism_u64_mul_hi` = Hacker's Delight
+/// `mulhi`). The generator fragments ([`WGSL_PCG32`], [`WGSL_SPLITMIX64`],
+/// [`WGSL_XOSHIRO256SS`]) are composed on top of this shared fragment so the
+/// 64-bit arithmetic lives in exactly one place.
+pub const WGSL_U64: &str = "\
+fn prism_u64_mul_hi(u: u32, v: u32) -> u32 {\n\
     let u0 = u & 0xffffu;\n\
     let u1 = u >> 16u;\n\
     let v0 = v & 0xffffu;\n\
@@ -2104,24 +2097,55 @@ fn prism_pcg_mul_hi(u: u32, v: u32) -> u32 {\n\
     return u1 * v1 + w2 + (t2 >> 16u);\n\
 }\n\
 \n\
-fn prism_pcg_step(lo: u32, hi: u32, inc_lo: u32, inc_hi: u32) -> vec2<u32> {\n\
-    let mlo = 0x4C957F2Du;\n\
-    let mhi = 0x5851F42Du;\n\
+fn prism_u64_mul_const(lo: u32, hi: u32, mlo: u32, mhi: u32) -> vec2<u32> {\n\
     let prod_lo = lo * mlo;\n\
-    let prod_hi = prism_pcg_mul_hi(lo, mlo) + lo * mhi + hi * mlo;\n\
-    let sum_lo = prod_lo + inc_lo;\n\
-    let carry = select(0u, 1u, sum_lo < prod_lo);\n\
-    let sum_hi = prod_hi + inc_hi + carry;\n\
-    return vec2<u32>(sum_lo, sum_hi);\n\
+    let prod_hi = prism_u64_mul_hi(lo, mlo) + lo * mhi + hi * mlo;\n\
+    return vec2<u32>(prod_lo, prod_hi);\n\
+}\n\
+\n\
+fn prism_u64_add(alo: u32, ahi: u32, blo: u32, bhi: u32) -> vec2<u32> {\n\
+    let lo = alo + blo;\n\
+    let carry = select(0u, 1u, lo < alo);\n\
+    return vec2<u32>(lo, ahi + bhi + carry);\n\
+}\n\
+\n\
+fn prism_u64_shr(lo: u32, hi: u32, k: u32) -> vec2<u32> {\n\
+    if (k == 0u) { return vec2<u32>(lo, hi); }\n\
+    if (k >= 32u) { return vec2<u32>(hi >> (k - 32u), 0u); }\n\
+    return vec2<u32>((lo >> k) | (hi << (32u - k)), hi >> k);\n\
+}\n\
+\n\
+fn prism_u64_rotl(lo: u32, hi: u32, k: u32) -> vec2<u32> {\n\
+    if (k == 0u) { return vec2<u32>(lo, hi); }\n\
+    if (k == 32u) { return vec2<u32>(hi, lo); }\n\
+    if (k < 32u) {\n\
+        return vec2<u32>((lo << k) | (hi >> (32u - k)), (hi << k) | (lo >> (32u - k)));\n\
+    }\n\
+    let k2 = k - 32u;\n\
+    return vec2<u32>((hi << k2) | (lo >> (32u - k2)), (lo << k2) | (hi >> (32u - k2)));\n\
+}\n";
+
+/// Single-sourced WGSL for the `PCG32` (XSH-RR) generator, mirroring the CPU
+/// [`Pcg32`](crate::rng::Pcg32) step for step on top of the shared
+/// [`WGSL_U64`] emulation. `prism_pcg32_first` reproduces
+/// [`Pcg32::with_stream`](crate::rng::Pcg32::with_stream)'s seeding ritual
+/// (`inc = 2*stream + 1`, `state = 0`, step, `state += seed`, step) and then the
+/// XSH-RR output permutation of `Pcg32::next` (`xorshifted = ((state >> 18) ^
+/// state) >> 27`, `rot = state >> 59`, rotate-right), returning the first 32-bit
+/// draw. Because the emulation is exact 32-bit integer arithmetic, the device
+/// output is **bit-identical** to the CPU — the same deterministic stream feeds
+/// GPU procedural content (particles / terrain / scattering) and the host.
+pub const WGSL_PCG32: &str = "\
+fn prism_pcg_step(lo: u32, hi: u32, inc_lo: u32, inc_hi: u32) -> vec2<u32> {\n\
+    let prod = prism_u64_mul_const(lo, hi, 0x4C957F2Du, 0x5851F42Du);\n\
+    return prism_u64_add(prod.x, prod.y, inc_lo, inc_hi);\n\
 }\n\
 \n\
 fn prism_pcg32_first(seed_lo: u32, seed_hi: u32, stream_lo: u32, stream_hi: u32) -> u32 {\n\
     let inc_lo = (stream_lo << 1u) | 1u;\n\
     let inc_hi = (stream_hi << 1u) | (stream_lo >> 31u);\n\
-    let mixed_lo = inc_lo + seed_lo;\n\
-    let carry = select(0u, 1u, mixed_lo < inc_lo);\n\
-    let mixed_hi = inc_hi + seed_hi + carry;\n\
-    let st = prism_pcg_step(mixed_lo, mixed_hi, inc_lo, inc_hi);\n\
+    let mixed = prism_u64_add(inc_lo, inc_hi, seed_lo, seed_hi);\n\
+    let st = prism_pcg_step(mixed.x, mixed.y, inc_lo, inc_hi);\n\
     let sh18_lo = (st.x >> 18u) | (st.y << 14u);\n\
     let sh18_hi = st.y >> 18u;\n\
     let x_lo = sh18_lo ^ st.x;\n\
@@ -2129,4 +2153,58 @@ fn prism_pcg32_first(seed_lo: u32, seed_hi: u32, stream_lo: u32, stream_hi: u32)
     let xorshifted = (x_lo >> 27u) | (x_hi << 5u);\n\
     let rot = st.y >> 27u;\n\
     return (xorshifted >> rot) | (xorshifted << ((32u - rot) & 31u));\n\
+}\n";
+
+/// Single-sourced WGSL for `SplitMix64`, mirroring the CPU
+/// [`SplitMix64`](crate::rng::SplitMix64) on top of the shared [`WGSL_U64`]
+/// emulation. `prism_splitmix64_next` returns `(output_lo, output_hi,
+/// state_lo, state_hi)` for one step: it advances the state by the golden-ratio
+/// constant `0x9E3779B97F4A7C15`, then applies the two xor-shift-multiply rounds
+/// (`z ^= z >> 30`, `z *= 0xBF58476D1CE4E5B9`, `z ^= z >> 27`,
+/// `z *= 0x94D049BB133111EB`, `z ^= z >> 31`). `prism_splitmix64_first`
+/// returns just the first `u64` draw. The arithmetic is exact 32-bit integer
+/// emulation, so the device draw is bit-identical to the CPU.
+pub const WGSL_SPLITMIX64: &str = "\
+fn prism_splitmix64_next(state_lo: u32, state_hi: u32) -> vec4<u32> {\n\
+    let st = prism_u64_add(state_lo, state_hi, 0x7F4A7C15u, 0x9E3779B9u);\n\
+    var z_lo = st.x;\n\
+    var z_hi = st.y;\n\
+    let s30 = prism_u64_shr(z_lo, z_hi, 30u);\n\
+    z_lo = z_lo ^ s30.x;\n\
+    z_hi = z_hi ^ s30.y;\n\
+    let m1 = prism_u64_mul_const(z_lo, z_hi, 0x1CE4E5B9u, 0xBF58476Du);\n\
+    z_lo = m1.x;\n\
+    z_hi = m1.y;\n\
+    let s27 = prism_u64_shr(z_lo, z_hi, 27u);\n\
+    z_lo = z_lo ^ s27.x;\n\
+    z_hi = z_hi ^ s27.y;\n\
+    let m2 = prism_u64_mul_const(z_lo, z_hi, 0x133111EBu, 0x94D049BBu);\n\
+    z_lo = m2.x;\n\
+    z_hi = m2.y;\n\
+    let s31 = prism_u64_shr(z_lo, z_hi, 31u);\n\
+    return vec4<u32>(z_lo ^ s31.x, z_hi ^ s31.y, st.x, st.y);\n\
+}\n\
+\n\
+fn prism_splitmix64_first(seed_lo: u32, seed_hi: u32) -> vec2<u32> {\n\
+    let r = prism_splitmix64_next(seed_lo, seed_hi);\n\
+    return vec2<u32>(r.x, r.y);\n\
+}\n";
+
+/// Single-sourced WGSL for `xoshiro256**` first draw, mirroring the CPU
+/// [`Xoshiro256StarStar::new`](crate::rng::Xoshiro256StarStar::new) followed by
+/// `next`. The state is seeded by expanding the `u64` seed through four
+/// `SplitMix64` draws — [`prism_splitmix64_next`] is reused, so this fragment
+/// must be composed **after** [`WGSL_SPLITMIX64`] (itself after [`WGSL_U64`]).
+/// Only `s1` (the second `SplitMix64` draw) feeds the `**` scrambler, so
+/// `prism_xoshiro256ss_first` returns `rotl(s1 * 5, 7) * 9`. The arithmetic is
+/// exact 32-bit integer emulation, so the device draw is bit-identical to the
+/// CPU.
+pub const WGSL_XOSHIRO256SS: &str = "\
+fn prism_xoshiro256ss_first(seed_lo: u32, seed_hi: u32) -> vec2<u32> {\n\
+    let r0 = prism_splitmix64_next(seed_lo, seed_hi);\n\
+    let r1 = prism_splitmix64_next(r0.z, r0.w);\n\
+    let m5 = prism_u64_mul_const(r1.x, r1.y, 5u, 0u);\n\
+    let rot = prism_u64_rotl(m5.x, m5.y, 7u);\n\
+    let m9 = prism_u64_mul_const(rot.x, rot.y, 9u, 0u);\n\
+    return vec2<u32>(m9.x, m9.y);\n\
 }\n";
