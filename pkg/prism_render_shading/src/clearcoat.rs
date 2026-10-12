@@ -206,8 +206,15 @@ pub fn evaluate_clearcoat_direct(
     // departure from the principled single-pass fallback.
     let throughput = (1.0 - coat * fresnel_dielectric(n_dot_v, coat_ior))
         * (1.0 - coat * fresnel_dielectric(n_dot_l, coat_ior));
+    // `OpenPBR` `coat_darkening`: light internally reflected at the coat/air
+    // interface is partly lost inside the coat instead of escaping, which
+    // darkens the base by the trapped fraction (the coat's own interface
+    // Fresnel at the view angle) scaled by `coat_darkening`. `0.0` is the exact
+    // identity, so the historical two-pass response is preserved.
+    let coat_darkening = surface.coat_darkening.clamp(0.0, 1.0);
+    let darkening = 1.0 - coat * coat_darkening * fresnel_dielectric(n_dot_v, coat_ior);
 
-    let reflected = add(mul_scalar(base, throughput), coat_specular);
+    let reflected = add(mul_scalar(base, throughput * darkening), coat_specular);
     let radiance = mul(reflected, light.illuminance);
     add(mul_scalar(radiance, visibility), surface.emissive)
 }
@@ -717,5 +724,52 @@ mod tests {
             rough[0] > smooth[0],
             "a rough coated base must retro-reflect more: {rough:?} vs {smooth:?}"
         );
+    }
+
+    #[test]
+    fn coat_darkening_darkens_the_base_under_the_coat() {
+        // `coat_darkening = 0` is the historical identity; raising it traps more
+        // internally reflected light and darkens the base.
+        let none = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 1.0,
+                coat_darkening: 0.0,
+                ..base_surface()
+            },
+            frame(),
+            light(),
+        );
+        let full = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 1.0,
+                coat_darkening: 1.0,
+                ..base_surface()
+            },
+            frame(),
+            light(),
+        );
+        assert!(sum(full) < sum(none), "darkened={full:?} plain={none:?}");
+        // A weightless coat cannot darken anything.
+        let no_coat = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 0.0,
+                coat_darkening: 1.0,
+                ..base_surface()
+            },
+            frame(),
+            light(),
+        );
+        let no_coat_plain = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 0.0,
+                coat_darkening: 0.0,
+                ..base_surface()
+            },
+            frame(),
+            light(),
+        );
+        for c in 0..3 {
+            assert!((no_coat[c] - no_coat_plain[c]).abs() < 1.0e-6);
+        }
     }
 }

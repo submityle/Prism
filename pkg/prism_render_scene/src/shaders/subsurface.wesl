@@ -94,7 +94,13 @@ fn subsurface_direct(
 
     // Back transmission through thin geometry.
     let h_transmission = brdf_normalize_or(l + n * SUBSURFACE_DISTORTION, n);
-    let back = pow(clamp(dot(v, -h_transmission), 0.0, 1.0), SUBSURFACE_POWER);
+    // `OpenPBR` `scatter_anisotropy` shapes the transmitted lobe: forward (+)
+    // sharpens, backward (-) broadens. `0.0` is the historical constant.
+    let sharpness = max(
+        SUBSURFACE_POWER * (1.0 + clamp(surface.scatter_anisotropy, -1.0, 1.0)),
+        SUBSURFACE_MIN_N_DOT,
+    );
+    let back = pow(clamp(dot(v, -h_transmission), 0.0, 1.0), sharpness);
     let thickness_attenuation = 1.0 - thickness;
     let transmitted = (surface.base_color * scat_color)
         * (subsurface * back * thickness_attenuation);

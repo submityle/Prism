@@ -221,6 +221,7 @@ mod tests {
             coat_ior: 1.45,
             coat_color: [0.9, 0.95, 1.0, 1.0],
             coat_roughness_anisotropy: 0.35,
+            coat_darkening: 0.6,
             anisotropy: 0.3,
             anisotropy_rotation: 0.2,
             sheen: 0.45,
@@ -229,14 +230,16 @@ mod tests {
             subsurface: 0.65,
             subsurface_color: [0.9, 0.5, 0.4, 1.0],
             subsurface_radius: [1.0, 0.6, 0.4, 1.0],
+            scatter_anisotropy: 0.7,
             index_of_refraction: 1.33,
             dispersion: 0.05,
             transmission_color: [0.85, 0.95, 1.0, 1.0],
+            transmission_scatter: 0.25,
             face_softness: 0.25,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: 0.0,
+            _pad_tail: [0.0; 2],
         }
     }
 

@@ -113,9 +113,14 @@ pub fn evaluate_subsurface_direct(
     // Back transmission: light exiting toward the viewer after travelling
     // through thin geometry. Thin surfaces (thickness -> 0) transmit fully.
     let h_transmission = normalize_or(add(l, mul_scalar(n, SSS_DISTORTION)), n);
+    // `OpenPBR` `scatter_anisotropy` shapes the transmitted lobe: positive
+    // (forward) sharpens it, negative (backward) broadens it. It scales the
+    // historical constant, so `0.0` reproduces the legacy lobe exactly.
+    let sharpness = (SSS_POWER * (1.0 + surface.scatter_anisotropy.clamp(-1.0, 1.0)))
+        .max(MIN_N_DOT);
     let back = ops::powf(
         dot(v, mul_scalar(h_transmission, -1.0)).clamp(0.0, 1.0),
-        SSS_POWER,
+        sharpness,
     );
     let thickness_attenuation = 1.0 - thickness;
     let transmitted = mul(
@@ -348,5 +353,44 @@ mod tests {
         assert!((red[0] - white[0]).abs() < 1.0e-6, "red={red:?} white={white:?}");
         assert_eq!(red[1], 0.0);
         assert_eq!(red[2], 0.0);
+    }
+
+    #[test]
+    fn scatter_anisotropy_shapes_the_transmission_lobe() {
+        // Forward bias (+) sharpens the transmitted lobe, backward bias (-)
+        // broadens it, and 0 reproduces the historical constant exactly.
+        let behind = DirectLightSample {
+            direction: [-0.6, -0.8, 0.0],
+            ..light()
+        };
+        let base = SurfaceSample {
+            base_color: [1.0; 3],
+            perceptual_roughness: 0.5,
+            subsurface: 1.0,
+            thickness: 0.0,
+            ..Default::default()
+        };
+        let forward = evaluate_subsurface_direct(
+            SurfaceSample {
+                scatter_anisotropy: 1.0,
+                ..base
+            },
+            frame(),
+            behind,
+        );
+        let isotropic = evaluate_subsurface_direct(base, frame(), behind);
+        let backward = evaluate_subsurface_direct(
+            SurfaceSample {
+                scatter_anisotropy: -1.0,
+                ..base
+            },
+            frame(),
+            behind,
+        );
+        let sum = |c: [f32; 3]| c[0] + c[1] + c[2];
+        assert!(
+            sum(forward) < sum(isotropic) && sum(isotropic) < sum(backward),
+            "forward={forward:?} isotropic={isotropic:?} backward={backward:?}"
+        );
     }
 }

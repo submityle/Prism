@@ -52,6 +52,18 @@ pub struct SurfaceSample {
     /// slab. It multiplies the base albedo of the transmission term, so the
     /// default white is the exact identity.
     pub transmission_color: [f32; 3],
+    /// `OpenPBR` `transmission_scatter` in `[0, 1]`: fraction of the absorbed
+    /// slab energy re-scattered isotropically instead of lost. `0.0` is pure
+    /// Beer-Lambert absorption (the exact identity).
+    pub transmission_scatter: f32,
+    /// `OpenPBR` `coat_darkening` in `[0, 1]`: how much of the coat's internal
+    /// reflection is lost inside the coat, darkening the base. `0.0` keeps the
+    /// historical two-pass coat response exactly.
+    pub coat_darkening: f32,
+    /// `OpenPBR` `scatter_anisotropy` in `[-1, 1]`: forward (+) / backward (-)
+    /// bias of the subsurface transmitted lobe. `0.0` keeps the historical
+    /// constant sharpness.
+    pub scatter_anisotropy: f32,
     pub ambient_occlusion: f32,
     pub emissive: [f32; 3],
     pub clearcoat: f32,
@@ -151,6 +163,9 @@ impl Default for SurfaceSample {
             dispersion: 0.0,
             thin_walled: 0.0,
             transmission_color: [1.0; 3],
+            transmission_scatter: 0.0,
+            coat_darkening: 0.0,
+            scatter_anisotropy: 0.0,
             ambient_occlusion: 1.0,
             emissive: [0.0; 3],
             clearcoat: 0.0,
@@ -353,12 +368,21 @@ pub fn evaluate_principled_direct(
                 surface.base_color[1] * surface.transmission_color[1],
                 surface.base_color[2] * surface.transmission_color[2],
             ];
-            crate::gi::translucency::transmission::transmittance_from_color(
+            let beer = crate::gi::translucency::transmission::transmittance_from_color(
                 bevy_math::Vec3::from_array(slab_color),
                 surface.thickness,
                 1.0,
             )
-            .to_array()
+            .to_array();
+            // `OpenPBR` `transmission_scatter`: the absorbed fraction can be
+            // re-scattered isotropically instead of lost, blending the slab
+            // toward its own colour. `0.0` is pure Beer-Lambert.
+            let scatter = surface.transmission_scatter.clamp(0.0, 1.0);
+            [
+                beer[0] + scatter * (1.0 - beer[0]),
+                beer[1] + scatter * (1.0 - beer[1]),
+                beer[2] + scatter * (1.0 - beer[2]),
+            ]
         };
         let mut out = [0.0f32; 3];
         for (channel, slot) in out.iter_mut().enumerate() {
@@ -1202,5 +1226,30 @@ mod tests {
         assert!(red[0] >= white[0] * 0.999, "red={red:?} white={white:?}");
         assert!(red[1] < white[1] * 0.5, "green must be absorbed: {red:?} vs {white:?}");
         assert!(red[2] < white[2] * 0.5, "blue must be absorbed: {red:?} vs {white:?}");
+    }
+
+    #[test]
+    fn transmission_scatter_brightens_the_slab() {
+        // Re-scattering the absorbed fraction brightens the slab toward its own
+        // colour; 0 is pure Beer-Lambert absorption.
+        let base = SurfaceSample {
+            base_color: [0.2, 0.4, 0.6],
+            transmission: 1.0,
+            thickness: 1.0,
+            ..Default::default()
+        };
+        let absorbed = evaluate_principled_direct(base, frame(), light());
+        let scattering = evaluate_principled_direct(
+            SurfaceSample {
+                transmission_scatter: 1.0,
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        assert!(
+            sum3(scattering) > sum3(absorbed),
+            "scattering={scattering:?} absorbed={absorbed:?}"
+        );
     }
 }

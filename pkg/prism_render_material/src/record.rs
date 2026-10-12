@@ -166,6 +166,8 @@ pub struct GpuSurfaceParameters {
     pub coat_color: [f32; 4],
     /// `OpenPBR` `coat_roughness_anisotropy` in `[0, 1]`.
     pub coat_roughness_anisotropy: f32,
+    /// `OpenPBR` `coat_darkening` in `[0, 1]`.
+    pub coat_darkening: f32,
     pub anisotropy: f32,
     pub anisotropy_rotation: f32,
     pub sheen: f32,
@@ -178,10 +180,14 @@ pub struct GpuSurfaceParameters {
     pub subsurface_color: [f32; 4],
     /// `OpenPBR` `subsurface_radius`: per-channel scattering extent (RGB).
     pub subsurface_radius: [f32; 4],
+    /// `OpenPBR` `scatter_anisotropy` in `[-1, 1]`.
+    pub scatter_anisotropy: f32,
     pub index_of_refraction: f32,
     pub dispersion: f32,
     /// `OpenPBR` `transmission_color`: tint of the refracted light.
     pub transmission_color: [f32; 4],
+    /// `OpenPBR` `transmission_scatter` in `[0, 1]`.
+    pub transmission_scatter: f32,
     /// Stylized face-shadow terminator softness (FACE lobe). Padding keeps the
     /// fat authoring view 16-byte aligned; only `face_softness` is packed.
     pub face_softness: f32,
@@ -190,7 +196,7 @@ pub struct GpuSurfaceParameters {
     pub _pad_face2: f32,
     /// Tail padding keeping the fat authoring view a 16-byte multiple as the
     /// coat group grows. Carries no data.
-    pub _pad_tail: f32,
+    pub _pad_tail: [f32; 2],
 }
 
 impl Default for GpuSurfaceParameters {
@@ -216,6 +222,7 @@ impl Default for GpuSurfaceParameters {
             coat_ior: 1.5,
             coat_color: [1.0; 4],
             coat_roughness_anisotropy: 0.0,
+            coat_darkening: 0.0,
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
             sheen: 0.0,
@@ -224,14 +231,16 @@ impl Default for GpuSurfaceParameters {
             subsurface: 0.0,
             subsurface_color: [1.0; 4],
             subsurface_radius: [1.0; 4],
+            scatter_anisotropy: 0.0,
             index_of_refraction: 1.5,
             dispersion: 0.0,
             transmission_color: [1.0; 4],
+            transmission_scatter: 0.0,
             face_softness: 0.1,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: 0.0,
+            _pad_tail: [0.0; 2],
         }
     }
 }

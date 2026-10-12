@@ -17,18 +17,18 @@ pub const SURFACE_CORE_WORDS: usize = 20;
 /// per slot in [`SURFACE_LOBE_WORDS_BY_SLOT`]. This constant is therefore
 /// the largest quantum, useful for worst-case bounds — never a packing
 /// stride.
-pub const SURFACE_LOBE_WORDS: usize = 12;
+pub const SURFACE_LOBE_WORDS: usize = 16;
 /// Per-lobe `u32` word footprint indexed by `LobeMask` bit index
 /// (`registry_slot`). Slots are dense and low-bit-first, so
 /// `SURFACE_LOBE_WORDS_BY_SLOT[bit.trailing_zeros()]` is the stride for that
 /// lobe. Summing the present entries plus [`SURFACE_CORE_WORDS`] gives
 /// `SurfaceParameterBlock::packed_len_words`.
-pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 12, 4, 8, 12, 8, 4];
+pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 16, 4, 8, 16, 12, 4];
 /// Number of defined optional lobes (equals `LobeMask::COUNT`).
 pub const SURFACE_LOBE_COUNT: u32 = 7;
 /// Fully-loaded worst case: core plus every lobe. The WESL decoder gathers into
 /// an `array<u32, SURFACE_MAX_WORDS>`.
-pub const SURFACE_MAX_WORDS: usize = 72;
+pub const SURFACE_MAX_WORDS: usize = 84;
 
 /// One optional lobe's generated identity, in canonical pack order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +70,7 @@ pub const SURFACE_LOBES: [LobeLayout; 7] = [
         uid: "org.khronos.openpbr.coat",
         mask_const: "CLEARCOAT",
         registry_slot: 1,
-        words: 12,
+        words: 16,
         namespace: "KHR",
     },
     LobeLayout {
@@ -94,7 +94,7 @@ pub const SURFACE_LOBES: [LobeLayout; 7] = [
         uid: "org.khronos.openpbr.subsurface",
         mask_const: "SUBSURFACE",
         registry_slot: 4,
-        words: 12,
+        words: 16,
         namespace: "KHR",
     },
     LobeLayout {
@@ -102,7 +102,7 @@ pub const SURFACE_LOBES: [LobeLayout; 7] = [
         uid: "org.khronos.openpbr.transmission",
         mask_const: "TRANSMISSION",
         registry_slot: 5,
-        words: 8,
+        words: 12,
         namespace: "KHR",
     },
     LobeLayout {

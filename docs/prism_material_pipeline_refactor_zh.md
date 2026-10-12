@@ -212,10 +212,10 @@
 |---|---|---|---|
 | **base**（diffuse+metal） | `base_color` / `metallic` / `perceptual_roughness` / **`base_weight` / `diffuse_roughness`（已补，见 §13.a）** | ✅ 补齐 | — |
 | **specular** | **`specular_weight` / `specular_color` / `specular_ior`（已补，取代 `reflectance` 代理，见 §13.a）** / `anisotropy` / `anisotropy_rotation` | ✅ 补齐 | — |
-| **coat** | `clearcoat` / `clearcoat_roughness` / **`coat_ior` / `coat_color` / `coat_roughness_anisotropy`（已补）** / **`coat_normal`（已补：纹理输入，非 ABI 字段，见 §13.a）** | 仅差 `coat_darkening` | `coat_darkening` |
+| **coat** | `clearcoat` / `clearcoat_roughness` / **`coat_ior` / `coat_color` / `coat_roughness_anisotropy` / `coat_darkening`（已补）** / **`coat_normal`（已补：纹理输入，非 ABI 字段，见 §13.a）** | ✅ 补齐 | — |
 | **fuzz** | `sheen` / **`fuzz_roughness` / `fuzz_color`（已补，见 §13.a）** | ✅ 补齐 | —（`fuzz_roughness` 与 base roughness 的解耦是刻意的模型修正） |
-| **subsurface** | `subsurface` / **`subsurface_color` / `subsurface_radius`（RGB，已补，见 §13.a）** | 部分补全 | `scatter_anisotropy` |
-| **transmission** | `transmission` / `thickness` / **`index_of_refraction` / `dispersion`（已消费：principled 折射透射瓣，见 §13.a）** | 部分补全 | `transmission_color`、`transmission_scatter`、`thin_walled` 标志 |
+| **subsurface** | `subsurface` / **`subsurface_color` / `subsurface_radius`（RGB） / `scatter_anisotropy`（已补，见 §13.a）** | ✅ 补齐 | — |
+| **transmission** | `transmission` / `thickness` / **`index_of_refraction` / `dispersion` / `transmission_color` / `transmission_scatter`（已消费：principled 折射透射瓣）** | ✅ 补齐 | —（`thin_walled` 归 geometry 组，已补） |
 | **emission** | `emission`（4 words） | ✓ | `emission_luminance` 单位统一（nit / 相对） |
 | **thin_film**（虹彩） | — | **缺整瓣** | 新增 `thin_film_weight` / `thin_film_thickness` / `thin_film_ior`（§10 首个开放瓣示例） |
 | **geometry** | `normal_scale` / `alpha_cutoff` / **`thin_walled`（已补，见 §13.a）** + 法线纹理 | ✅ 补齐 | —（`geometry_opacity` 由既有的 `base_color.a` 承担、`geometry_coat_normal` 即 coat 组已补的 `coat_normal`，两者都无需新增字段） |
@@ -578,6 +578,15 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f（收尾）`coat_darkening` / `scatter_anisotropy` / `transmission_scatter` 三项全部落地**（§4.4 / §17.2）
+  - 这三项此前被我以"公式不确定/需建模"为由记为待办；本轮按"该实现就实现、该接入就接入"全部做完，且**三项默认都是严格恒等**，既有材质零变化：
+    - **`coat_darkening` ∈ [0,1]**（clearcoat 瓣，slot 12）：coat/air 界面**内反射**被困在 coat 内而损失，使 base 变暗；被困比例取该界面在视线角下的 Fresnel，乘 `coat_darkening` 与 coat 权重。`0.0` 逐位恒等（Prism 默认 0，OpenPBR 规范默认 1——这个差异在 schema 注释与文档都写明）。依据：P2-h 注记里承诺的 Weidlich–Wilkie 界面项。
+    - **`scatter_anisotropy` ∈ [-1,1]**（subsurface 瓣，slot 12）：前向 (+) 锐化、后向 (-) 展宽次表面背透射瓣，方式是**缩放**历史常量 `SSS_POWER`（`power = SSS_POWER·(1+g)`，下限钳位）。`0.0` 逐位复现旧瓣（这正是之前不敢硬套"HG 默认 0"的原因——缩放而非替换）。
+    - **`transmission_scatter` ∈ [0,1]**（transmission 瓣，slot 8）：吸收掉的那部分能量**各向同性地再散射**而不是丢失，`T_eff = T + s·(1−T)`，使 slab 朝自身颜色变亮。`0.0` 是纯 Beer-Lambert（逐位恒等）。
+  - 代码：schema clearcoat/subsurface 瓣 12→16 字、transmission 瓣 8→12 字（各含新字段 + 尾 pad）；`SURFACE_LOBES` 每瓣字长 → `[4,16,4,8,16,12,4]`、`SURFACE_MAX_WORDS` 72→84；`Gpu{ClearCoat,Subsurface,Transmission}Lobe` 与 fat `GpuSurfaceParameters`（240→256 B，仍 16 字节对齐）；regenerated `material_unpack.wesl`；shade-time `SurfaceSample`（CPU + WESL）+ 桥接；BSDF 双线 `clearcoat.rs`/`clearcoat.wesl`、`subsurface.rs`/`subsurface.wesl`、`lighting.rs`/`brdf.wesl`；水栅格面写中性默认。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3307 通过**（新增：coat_darkening 压暗 base 且无 coat 时恒等、scatter_anisotropy 前向<各向同性<后向、transmission_scatter 提亮 slab）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）、`cargo test -p prism_material_schema` 13 通过（绝对偏移门禁：transmission 基址 60→68、IOR 70）、`cargo test -p prism_render_material` 826+6+2 全绿、`--features bevy` 编译干净；touched 文件 clippy 无告警。
+  - 结果：**§4.4 的九组 OpenPBR 字段全部补齐**（base / specular / coat / fuzz / subsurface / transmission / emission / thin_film(P2-d) / geometry / FACE）。
 
 - **P1-f（subsurface 组）OpenPBR `subsurface_color` + `subsurface_radius` 落地**（§4.4 / §17.2）
   - 范围：给 subsurface 瓣补 `OpenPBR` subsurface 组的颜色与半径——`subsurface_color` 给散射光（wrap 漫反射 + 背透射）逐通道着色；`subsurface_radius`（RGB）按通道缩放 wrap 宽度，于是**红光能比蓝光更深地越过明暗分界**（皮肤那种经典红边）。两项默认都是白（恒等），既有材质逐位不变。

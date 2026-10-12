@@ -115,6 +115,13 @@ pub struct GpuClearCoatLobe {
     pub _pad1: f32,
     pub _pad2: f32,
     pub _pad3: f32,
+    /// `OpenPBR` `coat_darkening` in `[0, 1]`: how much of the coat's internal
+    /// reflection is lost, darkening the base. `0.0` keeps the historical
+    /// two-pass coat response exactly.
+    pub coat_darkening: f32,
+    pub _pad4: f32,
+    pub _pad5: f32,
+    pub _pad6: f32,
 }
 
 impl Default for GpuClearCoatLobe {
@@ -129,6 +136,10 @@ impl Default for GpuClearCoatLobe {
             _pad1: 0.0,
             _pad2: 0.0,
             _pad3: 0.0,
+            coat_darkening: 0.0,
+            _pad4: 0.0,
+            _pad5: 0.0,
+            _pad6: 0.0,
         }
     }
 }
@@ -188,6 +199,12 @@ pub struct GpuSubsurfaceLobe {
     pub subsurface_color: [f32; 4],
     /// `OpenPBR` `subsurface_radius` (RGB free path, w unused; white = identity).
     pub subsurface_radius: [f32; 4],
+    /// `OpenPBR` `scatter_anisotropy` in `[-1, 1]`: forward (+) / backward (-)
+    /// bias of the transmitted lobe. `0.0` is the historical constant.
+    pub scatter_anisotropy: f32,
+    pub _pad3: f32,
+    pub _pad4: f32,
+    pub _pad5: f32,
 }
 
 impl Default for GpuSubsurfaceLobe {
@@ -199,6 +216,10 @@ impl Default for GpuSubsurfaceLobe {
             _pad2: 0.0,
             subsurface_color: [1.0; 4],
             subsurface_radius: [1.0; 4],
+            scatter_anisotropy: 0.0,
+            _pad3: 0.0,
+            _pad4: 0.0,
+            _pad5: 0.0,
         }
     }
 }
@@ -216,6 +237,13 @@ pub struct GpuTransmissionLobe {
     pub dispersion: f32,
     /// `OpenPBR` `transmission_color` (white = identity).
     pub transmission_color: [f32; 4],
+    /// `OpenPBR` `transmission_scatter` in `[0, 1]`: fraction of the absorbed
+    /// energy re-scattered isotropically instead of lost. `0.0` is pure
+    /// Beer-Lambert absorption.
+    pub transmission_scatter: f32,
+    pub _pad0: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
 }
 
 impl Default for GpuTransmissionLobe {
@@ -226,6 +254,10 @@ impl Default for GpuTransmissionLobe {
             index_of_refraction: 1.5,
             dispersion: 0.0,
             transmission_color: [1.0; 4],
+            transmission_scatter: 0.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
         }
     }
 }
@@ -449,6 +481,10 @@ impl SurfaceParameterBlock {
                 _pad1: 0.0,
                 _pad2: 0.0,
                 _pad3: 0.0,
+                coat_darkening: params.coat_darkening,
+                _pad4: 0.0,
+                _pad5: 0.0,
+                _pad6: 0.0,
             },
             anisotropy: GpuAnisotropyLobe {
                 anisotropy: params.anisotropy,
@@ -470,6 +506,10 @@ impl SurfaceParameterBlock {
                 _pad2: 0.0,
                 subsurface_color: params.subsurface_color,
                 subsurface_radius: params.subsurface_radius,
+                scatter_anisotropy: params.scatter_anisotropy,
+                _pad3: 0.0,
+                _pad4: 0.0,
+                _pad5: 0.0,
             },
             transmission: GpuTransmissionLobe {
                 transmission: params.transmission,
@@ -477,6 +517,10 @@ impl SurfaceParameterBlock {
                 index_of_refraction: params.index_of_refraction,
                 dispersion: params.dispersion,
                 transmission_color: params.transmission_color,
+                transmission_scatter: params.transmission_scatter,
+                _pad0: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
             },
             face: GpuFaceLobe {
                 softness: params.face_softness,
@@ -516,6 +560,7 @@ impl SurfaceParameterBlock {
             full.coat_ior = self.clearcoat.coat_ior;
             full.coat_color = self.clearcoat.coat_color;
             full.coat_roughness_anisotropy = self.clearcoat.coat_roughness_anisotropy;
+            full.coat_darkening = self.clearcoat.coat_darkening;
         }
         if self.lobe_mask.contains(LobeMask::ANISOTROPY) {
             full.anisotropy = self.anisotropy.anisotropy;
@@ -530,6 +575,7 @@ impl SurfaceParameterBlock {
             full.subsurface = self.subsurface.subsurface;
             full.subsurface_color = self.subsurface.subsurface_color;
             full.subsurface_radius = self.subsurface.subsurface_radius;
+            full.scatter_anisotropy = self.subsurface.scatter_anisotropy;
         }
         if self.lobe_mask.contains(LobeMask::TRANSMISSION) {
             full.transmission = self.transmission.transmission;
@@ -537,6 +583,7 @@ impl SurfaceParameterBlock {
             full.index_of_refraction = self.transmission.index_of_refraction;
             full.dispersion = self.transmission.dispersion;
             full.transmission_color = self.transmission.transmission_color;
+            full.transmission_scatter = self.transmission.transmission_scatter;
         }
         if self.lobe_mask.contains(LobeMask::FACE) {
             full.face_softness = self.face.softness;
@@ -679,6 +726,7 @@ mod tests {
             coat_ior: 1.45,
             coat_color: [0.9, 0.95, 1.0, 1.0],
             coat_roughness_anisotropy: 0.35,
+            coat_darkening: 0.6,
             anisotropy: 0.3,
             anisotropy_rotation: 0.2,
             sheen: 0.45,
@@ -687,14 +735,16 @@ mod tests {
             subsurface: 0.65,
             subsurface_color: [0.9, 0.5, 0.4, 1.0],
             subsurface_radius: [1.0, 0.6, 0.4, 1.0],
+            scatter_anisotropy: 0.7,
             index_of_refraction: 1.33,
             dispersion: 0.05,
             transmission_color: [0.85, 0.95, 1.0, 1.0],
+            transmission_scatter: 0.25,
             face_softness: 0.25,
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: 0.0,
+            _pad_tail: [0.0; 2],
         }
     }
 

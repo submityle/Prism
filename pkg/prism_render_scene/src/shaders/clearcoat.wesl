@@ -169,8 +169,14 @@ fn clearcoat_direct(
     // `CoatLayer` form): the base is gated entering and leaving the coat.
     let throughput = (1.0 - coat * fresnel_dielectric(n_dot_v, coat_ior))
         * (1.0 - coat * fresnel_dielectric(n_dot_l, coat_ior));
+    // `OpenPBR` `coat_darkening`: internally reflected light is partly lost
+    // inside the coat, darkening the base by the trapped fraction (the coat's
+    // own interface Fresnel at the view angle) times `coat_darkening`.
+    // `0.0` is the exact identity.
+    let darkening = 1.0
+        - coat * clamp(surface.coat_darkening, 0.0, 1.0) * fresnel_dielectric(n_dot_v, coat_ior);
 
-    let reflected = base * throughput + coat_specular;
+    let reflected = base * (throughput * darkening) + coat_specular;
     let radiance = reflected * light.illuminance;
     return radiance * visibility + surface.emissive;
 }

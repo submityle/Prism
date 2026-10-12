@@ -1871,6 +1871,9 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.dispersion = parameters.dispersion;
     surface.thin_walled = parameters.thin_walled;
     surface.transmission_color = parameters.transmission_color.xyz;
+    surface.transmission_scatter = parameters.transmission_scatter;
+    surface.coat_darkening = parameters.coat_darkening;
+    surface.scatter_anisotropy = parameters.scatter_anisotropy;
     // Fold the screen-space GTAO visibility into the material occlusion so the
     // indirect/ambient term is darkened in geometric creases, mirroring
     // `resolve_pixel` in the CPU golden. The fallback texture and the disabled

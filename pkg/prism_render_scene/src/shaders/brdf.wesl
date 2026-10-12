@@ -76,6 +76,14 @@ struct SurfaceSample {
     // `OpenPBR` `transmission_color`: tint of the refracted light (white =
     // identity).
     transmission_color: vec3<f32>,
+    // `OpenPBR` `transmission_scatter`: re-scattered fraction of the absorbed
+    // slab energy (0 = pure Beer-Lambert).
+    transmission_scatter: f32,
+    // `OpenPBR` `coat_darkening`: internal-reflection loss that darkens the base.
+    coat_darkening: f32,
+    // `OpenPBR` `scatter_anisotropy`: forward/backward bias of the subsurface
+    // transmitted lobe (0 = the historical constant sharpness).
+    scatter_anisotropy: f32,
     ambient_occlusion: f32,
     emissive: vec3<f32>,
     clearcoat: f32,
@@ -505,7 +513,11 @@ fn principled_direct(
                 // `transmission_color` tints the slab (multiplied with the base
                 // albedo), so white is the exact identity.
                 let slab_color = surface.base_color[c] * surface.transmission_color[c];
-                transmittance = transmittance_pow(slab_color, thickness);
+                let beer = transmittance_pow(slab_color, thickness);
+                // `transmission_scatter` re-scatters the absorbed fraction
+                // instead of losing it (0 = pure Beer-Lambert).
+                let scatter = clamp(surface.transmission_scatter, 0.0, 1.0);
+                transmittance = beer + scatter * (1.0 - beer);
             }
             transmission_term[c] = transmission * (1.0 - f_view) * (1.0 - f_light) * transmittance;
         }

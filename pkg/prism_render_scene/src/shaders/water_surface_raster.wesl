@@ -1062,6 +1062,9 @@ fn surface_from(foam: f32) -> SurfaceSample {
     s.dispersion = 0.0;
     s.thin_walled = 0.0;
     s.transmission_color = vec3<f32>(1.0);
+    s.transmission_scatter = 0.0;
+    s.coat_darkening = 0.0;
+    s.scatter_anisotropy = 0.0;
     s.subsurface_color = vec3<f32>(1.0);
     s.subsurface_radius = vec3<f32>(1.0);
     s.ambient_occlusion = 1.0;

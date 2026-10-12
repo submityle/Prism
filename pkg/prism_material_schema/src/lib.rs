@@ -667,9 +667,8 @@ mod tests {
         let all: u32 = 20 + schema.lobes.iter().map(|lobe| lobe.words).sum::<u32>();
         assert_eq!(schema.packed_len_words(0b111_1111), all);
         // Only clearcoat (bit 1) present: core + the coat lobe's own footprint
-        // (12 words: clearcoat, clearcoat_roughness, coat_ior, a pad, coat_color,
-        // coat_roughness_anisotropy and three trailing pads).
-        assert_eq!(schema.packed_len_words(0b10), 20 + 12);
+        // (16 words: the OpenPBR coat group plus trailing pads).
+        assert_eq!(schema.packed_len_words(0b10), 20 + 16);
         // Only sheen (bit 3) present: core + the fuzz lobe's own footprint
         // (8 words: sheen, fuzz_roughness, two pads, fuzz_color).
         assert_eq!(schema.packed_len_words(0b1000), 20 + 8);
@@ -679,18 +678,18 @@ mod tests {
     fn transmission_fields_land_at_expected_offsets() {
         let schema = surface_schema();
         let all = 0b111_1111;
-        // Core (20, carrying the OpenPBR base + specular groups) + emission (4) +
-        // clearcoat (12) + anisotropy (4) + sheen (8) + subsurface (12, the
-        // OpenPBR subsurface group) = 60 is the transmission base; the
-        // transmission lobe then packs transmission, thickness,
-        // index_of_refraction, dispersion and transmission_color at 60..68.
+        // Core (20) + emission (4) + clearcoat (16, the OpenPBR coat group) +
+        // anisotropy (4) + sheen (8) + subsurface (16, the OpenPBR subsurface
+        // group) = 68 is the transmission base; the transmission lobe then packs
+        // transmission, thickness, index_of_refraction, dispersion,
+        // transmission_color and transmission_scatter at 68..80.
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "transmission"),
-            Some(60)
+            Some(68)
         );
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "index_of_refraction"),
-            Some(62)
+            Some(70)
         );
     }
 
