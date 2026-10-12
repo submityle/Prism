@@ -134,6 +134,15 @@ impl SnapshotHistory {
         }
     }
 
+    /// Move the frame cursor so the next [`capture`](Self::capture) records
+    /// `frame`, overwriting that frame's retained snapshot (used when
+    /// re-simulating forward after a [`rollback`](Self::rollback)). Retained
+    /// snapshots are untouched, and seeking past the last frame is the caller's
+    /// responsibility (it would leave a gap the ring never fills).
+    pub fn seek(&mut self, frame: u64) {
+        self.next_frame = frame;
+    }
+
     /// The deterministic state hash of a retained frame, for desync comparison
     /// (design §14, 逐帧状态哈希去同步). `None` once the frame is evicted.
     #[must_use]

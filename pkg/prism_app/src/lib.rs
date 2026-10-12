@@ -227,6 +227,8 @@ pub mod plugin;
 pub mod plugin_graph;
 pub mod plugin_group;
 pub mod rollback;
+#[cfg(feature = "determinism")]
+pub mod rollback_replay;
 pub mod run_mode;
 pub mod runner;
 pub mod schedule;
@@ -277,6 +279,8 @@ pub use plugin_graph::PluginGraphError;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 pub use run_mode::RunMode;
 pub use rollback::SnapshotHistory;
+#[cfg(feature = "determinism")]
+pub use rollback_replay::RollbackReplay;
 pub use runner::{run_once, HeadlessRunner, ScheduleRunnerOnce};
 #[cfg(feature = "winit")]
 pub use runner::{run_windowed, window_actions, WindowAction, WindowSettings, WinitRunner};
