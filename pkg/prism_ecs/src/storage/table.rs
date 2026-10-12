@@ -824,6 +824,40 @@ impl Table {
         }
     }
 
+    /// Cull this table's chunk windows against `frustum`, writing each window's
+    /// [`ChunkMeta::visible`] bit (design §13 / §15).
+    ///
+    /// A window that has computed [`bounds`](ChunkMeta::bounds) is culled exactly
+    /// when its AABB lies fully outside the frustum (a conservative test: a box
+    /// that merely touches a plane stays visible). A window whose bounds have not
+    /// been produced yet is left **visible** — a render pass must never silently
+    /// drop work it has not classified. Pair this with
+    /// [`recompute_chunk_bounds`](Table::recompute_chunk_bounds) so the bounds are
+    /// current, then feed the table to
+    /// [`GpuBatchBuilder::build_from_table`](crate::gpu_batch::GpuBatchBuilder::build_from_table).
+    pub fn cull_chunks(&mut self, frustum: &crate::culling::Frustum) -> crate::culling::ChunkCullStats {
+        let meta_offset = self.meta_offset;
+        let mut stats = crate::culling::ChunkCullStats::default();
+        for block in self.chunks.iter_mut() {
+            // SAFETY: the block header embeds a `ChunkMeta` at `meta_offset`, and
+            // `&mut self` makes this the only access to it.
+            let meta = unsafe { &mut *block.ptr.as_ptr().add(meta_offset).cast::<ChunkMeta>() };
+            stats.tested += 1;
+            let visible = match meta.bounds {
+                Some(bounds) => frustum.intersects_aabb(bounds.min, bounds.max),
+                // Unclassified window: keep it (conservative).
+                None => true,
+            };
+            meta.visible = visible;
+            if visible {
+                stats.visible += 1;
+            } else {
+                stats.culled += 1;
+            }
+        }
+        stats
+    }
+
     /// Whether the table has no rows.
     #[inline]
     pub fn is_empty(&self) -> bool {

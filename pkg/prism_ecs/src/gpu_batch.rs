@@ -462,4 +462,60 @@ mod tests {
         assert_eq!(plan.indices_for(&plan.batches()[0])[31], 31);
         assert_eq!(plan.indices_for(&plan.batches()[1]), &[64, 65, 66, 67, 68]);
     }
+
+    /// The full CPU-side pipeline (design §13 / §15): produce per-chunk AABBs,
+    /// cull them against a frustum, then build the draw plan straight from the
+    /// surviving windows — no GPU required.
+    #[test]
+    fn frustum_cull_feeds_the_draw_plan() {
+        use crate::component::Component;
+        use crate::culling::{Frustum, Plane};
+        use crate::world::World;
+
+        // 512 B/row -> 32 rows per chunk.
+        #[allow(dead_code)] // the pad only fixes the row size
+        #[derive(Clone, Copy)]
+        struct Pos([f32; 3], [u8; 500]);
+        impl Component for Pos {}
+
+        let mut world = World::new();
+        let arch = world.prewarm::<Pos>(0);
+        for i in 0..96 {
+            // x = i, so the three windows cover x in [0,31], [32,63], [64,95].
+            world.spawn(Pos([i as f32, 0.0, 0.0], [0; 500]));
+        }
+        for chunk in 0..3 {
+            world.chunk_meta_mut(arch, chunk).unwrap().batch_key = 3;
+        }
+
+        // Give every window a current AABB.
+        let now = world.change_tick();
+        let mut point = |p: &Pos| p.0;
+        assert_eq!(
+            world.recompute_chunk_bounds::<Pos>(arch, now, &mut point, false),
+            3,
+        );
+
+        // A frustum keeping x in [0, 40]: window 0 is inside, window 1 straddles
+        // (kept — the test is conservative), window 2 is fully outside.
+        let frustum = Frustum::from_planes([
+            Plane::new([1.0, 0.0, 0.0], 0.0),   // x >= 0
+            Plane::new([-1.0, 0.0, 0.0], 40.0), // x <= 40
+            Plane::new([0.0, 1.0, 0.0], 1.0),   // y >= -1
+            Plane::new([0.0, -1.0, 0.0], 1.0),  // y <= 1
+            Plane::new([0.0, 0.0, 1.0], 1.0),   // z >= -1
+            Plane::new([0.0, 0.0, -1.0], 1.0),  // z <= 1
+        ]);
+        let stats = world.cull_chunks(arch, &frustum).expect("live archetype");
+        assert_eq!((stats.tested, stats.visible, stats.culled), (3, 2, 1));
+
+        // The surviving windows drive the draw plan directly.
+        let table = world.archetypes().get(arch).unwrap().table();
+        let mut builder = GpuBatchBuilder::new();
+        let plan = builder.build_from_table(table);
+        assert_eq!(plan.batch_count(), 1);
+        assert_eq!(plan.visible_instance_count(), 64);
+        assert_eq!(plan.indices_for(&plan.batches()[0])[0], 0);
+        assert_eq!(plan.indices_for(&plan.batches()[0])[63], 63);
+    }
 }

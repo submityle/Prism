@@ -280,6 +280,21 @@ impl World {
         table.recompute_chunk_bounds::<T>(id, now, point, force)
     }
 
+    /// Cull `archetype`'s chunk windows against `frustum`, writing every window's
+    /// [`ChunkMeta::visible`](crate::storage::ChunkMeta::visible) bit (design §13
+    /// / §15). Returns `None` if the archetype is not live.
+    ///
+    /// Pair with [`recompute_chunk_bounds`](Self::recompute_chunk_bounds) so the
+    /// windows' AABBs are current; windows with no computed bounds stay visible.
+    pub fn cull_chunks(
+        &mut self,
+        archetype: ArchetypeId,
+        frustum: &crate::culling::Frustum,
+    ) -> Option<crate::culling::ChunkCullStats> {
+        let table = self.archetypes.get_mut(archetype)?.table_mut();
+        Some(table.cull_chunks(frustum))
+    }
+
     /// The out-of-band sparse-component registry (design §6).
     ///
     /// Sparse components live here keyed by [`Entity`], not inside archetype

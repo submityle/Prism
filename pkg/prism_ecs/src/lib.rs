@@ -70,6 +70,7 @@ mod change_observers_tests;
 pub mod command;
 pub mod component;
 pub mod component_hooks;
+pub mod culling;
 #[cfg(test)]
 mod component_hooks_tests;
 pub mod diagnostics;
@@ -115,6 +116,7 @@ pub mod prelude {
     pub use crate::command::{ChildBuilder, CommandQueue, Commands};
     pub use crate::component::Component;
     pub use crate::component_hooks::{ComponentHook, ComponentHooks, HookContext};
+    pub use crate::culling::{ChunkCullStats, Frustum, Plane};
     pub use crate::entity::Entity;
     pub use crate::event::{Event, EventCursor, EventId, Events};
     pub use crate::extract::{
