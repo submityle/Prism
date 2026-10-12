@@ -50,6 +50,8 @@ pub mod identity;
 pub mod instance;
 pub mod instantiate;
 pub mod layers;
+#[cfg(feature = "materialize")]
+pub mod materialize;
 pub mod overrides;
 pub mod path;
 pub mod plan;
@@ -60,10 +62,15 @@ pub mod template;
 pub use identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
 pub use instance::SceneInstance;
 pub use instantiate::{
-    despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneSpawn, TypedSpawnError,
-    TypedSpawnPlan,
+    despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneSpawn, SpawnContext,
+    SpawnContextError, TypedSpawnError, TypedSpawnPlan,
 };
 pub use layers::{compose_layers, OrphanKey, OverrideComposition};
+#[cfg(feature = "materialize")]
+pub use materialize::{
+    materialize_plan, ComponentMaterializer, MaterializeError, MaterializeFailure,
+    MaterializerRegistry, RemappedEntityField, RowLayout,
+};
 pub use overrides::{
     ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride, StructuralOp,
 };
@@ -78,10 +85,15 @@ pub mod prelude {
     pub use crate::identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
     pub use crate::instance::SceneInstance;
     pub use crate::instantiate::{
-        despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneSpawn,
-        TypedSpawnError, TypedSpawnPlan,
+        despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneSpawn, SpawnContext,
+        SpawnContextError, TypedSpawnError, TypedSpawnPlan,
     };
     pub use crate::layers::{compose_layers, OrphanKey, OverrideComposition};
+    #[cfg(feature = "materialize")]
+    pub use crate::materialize::{
+        materialize_plan, ComponentMaterializer, MaterializeError, MaterializeFailure,
+        MaterializerRegistry, RemappedEntityField, RowLayout,
+    };
     pub use crate::overrides::{
         ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride,
         StructuralOp,

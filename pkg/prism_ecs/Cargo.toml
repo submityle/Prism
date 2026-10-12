@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
+libm = "0.2"
 prism_ecs_macros = { path = "../prism_ecs_macros" }
 prism_platform = { path = "../prism_platform", optional = true }
 prism_reflect = { path = "../prism_reflect", optional = true }

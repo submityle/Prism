@@ -11,6 +11,7 @@ extern crate alloc;
 mod drag;
 mod model;
 mod reducer;
+mod render_plan;
 mod validate;
 
 pub use drag::{
@@ -22,7 +23,16 @@ pub use model::{
     MaximizeRestore, PanelId, Ratio, Rect, Side, SplitChild,
 };
 pub use reducer::{reduce, Action, Placement, Target};
+pub use render_plan::{
+    solve, solve_with, AutoHideBarLayout, AutoHideButton, AutoHideLayout, AutoHideReveal,
+    DocumentLayout, FloatingLayout, FocusMetadata, FocusReason, FocusTarget, LayoutMetrics,
+    MaximizedLayout, NodePath, PanelLayout, PanelVisibility, RenderPlan, RenderPlanError,
+    SizeRequirement, SplitterLayout, SurfaceId, TabHeader, TabId, Viewport,
+};
 pub use validate::{LayoutError, Limits, ValidationIssue};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod render_plan_tests;

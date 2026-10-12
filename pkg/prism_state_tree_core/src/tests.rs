@@ -229,6 +229,157 @@ fn external_transition_to_ancestor_exits_and_reenters_ancestor() {
 }
 
 #[test]
+fn external_transition_to_strict_descendant_keeps_source_active() {
+    let root = StateNode::compound(StateId(0), None, vec![StateId(1)], StateId(1), None);
+    let parent = StateNode::compound(
+        StateId(1),
+        Some(StateId(0)),
+        vec![StateId(2), StateId(3)],
+        StateId(2),
+        None,
+    )
+    .with_transition(Transition::new(
+        StateId(1),
+        TransitionTarget::State(StateId(3)),
+        Trigger::Event(EventId(8)),
+        None,
+        0,
+        TransitionKind::External,
+    ));
+    let first = StateNode::atomic(StateId(2), Some(StateId(1)));
+    let second = StateNode::atomic(StateId(3), Some(StateId(1)));
+    let plan = TreeDef {
+        root: StateId(0),
+        nodes: vec![root, parent, first, second],
+    }
+    .compile()
+    .unwrap();
+    let mut instance = Instance::new(plan, 1, MicrostepLimit(2)).unwrap();
+    let mut recorder = Recorder::default();
+    instance.start(&mut recorder).unwrap();
+    instance.send(Event::new(EventId(8))).unwrap();
+    instance.run(&mut recorder).unwrap();
+
+    assert_eq!(recorder.0, ["root+", "a+", "b+", "b-", "c+"]);
+    assert_eq!(
+        instance.active_states(),
+        &[StateId(0), StateId(1), StateId(3)]
+    );
+}
+
+#[test]
+fn cross_parallel_region_transition_exits_stale_target_region_configuration() {
+    let root = StateNode::compound(StateId(0), None, vec![StateId(1)], StateId(1), None);
+    let parallel = StateNode::parallel(
+        StateId(1),
+        Some(StateId(0)),
+        vec![StateId(2), StateId(4)],
+        vec![StateId(2), StateId(4)],
+        None,
+    );
+    let source_region = StateNode::compound(
+        StateId(2),
+        Some(StateId(1)),
+        vec![StateId(3)],
+        StateId(3),
+        None,
+    );
+    let source = StateNode::atomic(StateId(3), Some(StateId(2))).with_transition(Transition::new(
+        StateId(3),
+        TransitionTarget::State(StateId(6)),
+        Trigger::Event(EventId(10)),
+        None,
+        0,
+        TransitionKind::External,
+    ));
+    let target_region = StateNode::compound(
+        StateId(4),
+        Some(StateId(1)),
+        vec![StateId(5), StateId(6)],
+        StateId(5),
+        None,
+    );
+    let stale = StateNode::atomic(StateId(5), Some(StateId(4)));
+    let target = StateNode::atomic(StateId(6), Some(StateId(4)));
+    let plan = TreeDef {
+        root: StateId(0),
+        nodes: vec![
+            root,
+            parallel,
+            source_region,
+            source,
+            target_region,
+            stale,
+            target,
+        ],
+    }
+    .compile()
+    .unwrap();
+    let mut instance = Instance::new(plan, 1, MicrostepLimit(3)).unwrap();
+    let mut callback = NoopLifecycle;
+    instance.start(&mut callback).unwrap();
+    instance.send(Event::new(EventId(10))).unwrap();
+    instance.run(&mut callback).unwrap();
+
+    assert_eq!(
+        instance.active_states(),
+        &[
+            StateId(0),
+            StateId(1),
+            StateId(2),
+            StateId(3),
+            StateId(4),
+            StateId(6)
+        ]
+    );
+    assert!(!instance.is_active(StateId(5)));
+}
+
+#[test]
+fn compiler_rejects_duplicate_regions_and_invalid_history_owner() {
+    let root = StateNode::parallel(
+        StateId(0),
+        None,
+        vec![StateId(1), StateId(2)],
+        vec![StateId(1), StateId(1)],
+        None,
+    );
+    let a = StateNode::atomic(StateId(1), Some(StateId(0)));
+    let b = StateNode::atomic(StateId(2), Some(StateId(0)));
+    assert!(matches!(
+        (TreeDef {
+            root: StateId(0),
+            nodes: vec![root, a, b]
+        })
+        .compile(),
+        Err(PlanError::InvalidRegions(StateId(0))) | Err(PlanError::DuplicateRegion { .. })
+    ));
+
+    let root = StateNode::compound(StateId(0), None, vec![StateId(1)], StateId(1), None)
+        .with_transition(Transition::new(
+            StateId(0),
+            TransitionTarget::History {
+                owner: StateId(1),
+                depth: HistoryMode::Deep,
+            },
+            Trigger::Event(EventId(1)),
+            None,
+            0,
+            TransitionKind::External,
+        ));
+    let atomic = StateNode::atomic(StateId(1), Some(StateId(0)));
+    assert_eq!(
+        (TreeDef {
+            root: StateId(0),
+            nodes: vec![root, atomic]
+        })
+        .compile()
+        .unwrap_err(),
+        PlanError::InvalidHistoryOwner(StateId(1))
+    );
+}
+
+#[test]
 fn eventless_cascade_is_bounded_and_events_do_not_insert() {
     let root = StateNode::compound(
         StateId(0),
@@ -267,6 +418,21 @@ fn eventless_cascade_is_bounded_and_events_do_not_insert() {
     );
     assert_eq!(i.send(Event::new(EventId(9))), Ok(()));
     assert_eq!(i.send(Event::new(EventId(9))), Err(EventQueueError::Full));
+}
+
+#[test]
+fn budget_exhaustion_retains_unprocessed_event_and_clears_event_context() {
+    let mut instance = Instance::new(basic_plan(), 2, MicrostepLimit(0)).unwrap();
+    let mut callback = NoopLifecycle;
+    instance.start(&mut callback).unwrap();
+    instance.send(Event::new(EventId(1))).unwrap();
+
+    assert_eq!(
+        instance.run(&mut callback),
+        Err(RuntimeError::MicrostepLimit(MicrostepLimit(0)))
+    );
+    assert_eq!(instance.queued_events(), 1);
+    assert_eq!(instance.active_states(), &[StateId(0), StateId(1)]);
 }
 
 #[test]
@@ -321,6 +487,106 @@ fn shallow_and_deep_history_restore() {
     i.send(Event::new(EventId(3))).unwrap();
     i.run(&mut cb).unwrap();
     assert!(i.is_active(StateId(3)));
+}
+
+#[test]
+fn deep_history_on_parallel_does_not_leave_default_region_states() {
+    let root = StateNode::compound(
+        StateId(0),
+        None,
+        vec![StateId(1), StateId(8)],
+        StateId(1),
+        None,
+    );
+    let parallel = StateNode::parallel(
+        StateId(1),
+        Some(StateId(0)),
+        vec![StateId(2), StateId(5)],
+        vec![StateId(2), StateId(5)],
+        Some(HistoryMode::Deep),
+    );
+    let left = StateNode::compound(
+        StateId(2),
+        Some(StateId(1)),
+        vec![StateId(3), StateId(4)],
+        StateId(3),
+        None,
+    );
+    let left_initial =
+        StateNode::atomic(StateId(3), Some(StateId(2))).with_transition(Transition::new(
+            StateId(3),
+            TransitionTarget::State(StateId(4)),
+            Trigger::Event(EventId(20)),
+            None,
+            0,
+            TransitionKind::External,
+        ));
+    let right = StateNode::compound(
+        StateId(5),
+        Some(StateId(1)),
+        vec![StateId(6), StateId(7)],
+        StateId(6),
+        None,
+    );
+    let right_initial = StateNode::atomic(StateId(6), Some(StateId(5)));
+    let right_other = StateNode::atomic(StateId(7), Some(StateId(5)));
+    let outside = StateNode::atomic(StateId(8), Some(StateId(0))).with_transition(Transition::new(
+        StateId(8),
+        TransitionTarget::History {
+            owner: StateId(1),
+            depth: HistoryMode::Deep,
+        },
+        Trigger::Event(EventId(22)),
+        None,
+        0,
+        TransitionKind::External,
+    ));
+    let leave = StateNode::atomic(StateId(4), Some(StateId(2))).with_transition(Transition::new(
+        StateId(4),
+        TransitionTarget::State(StateId(8)),
+        Trigger::Event(EventId(21)),
+        None,
+        0,
+        TransitionKind::External,
+    ));
+    let plan = TreeDef {
+        root: StateId(0),
+        nodes: vec![
+            root,
+            parallel,
+            left,
+            left_initial,
+            leave,
+            right,
+            right_initial,
+            right_other,
+            outside,
+        ],
+    }
+    .compile()
+    .unwrap();
+    let mut instance = Instance::new(plan, 4, MicrostepLimit(8)).unwrap();
+    let mut callback = NoopLifecycle;
+    instance.start(&mut callback).unwrap();
+    instance.send(Event::new(EventId(20))).unwrap();
+    instance.run(&mut callback).unwrap();
+    instance.send(Event::new(EventId(21))).unwrap();
+    instance.run(&mut callback).unwrap();
+    instance.send(Event::new(EventId(22))).unwrap();
+    instance.run(&mut callback).unwrap();
+
+    assert_eq!(instance.active_states().len(), 6);
+    for state in [
+        StateId(0),
+        StateId(1),
+        StateId(2),
+        StateId(4),
+        StateId(5),
+        StateId(6),
+    ] {
+        assert!(instance.is_active(state));
+    }
+    assert!(!instance.is_active(StateId(3)));
 }
 
 #[test]

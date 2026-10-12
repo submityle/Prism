@@ -1069,7 +1069,7 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 
 ## 27. 实现进度（Implementation Progress）
 
-**M0 核心模型及实例化垂直切片已落地**——crate [`pkg/prism_scene`](../pkg/prism_scene)（`no_std + alloc`，`#![forbid(unsafe_code)]`，依赖 `prism_asset` + `prism_ecs`，不依赖任何 `bevy_*`）：
+**M0 核心模型及 M1 通用列物化垂直切片已落地**——crate [`pkg/prism_scene`](../pkg/prism_scene)（`no_std + alloc`，`#![forbid(unsafe_code)]`，依赖 `prism_asset` + `prism_ecs`，不依赖任何 `bevy_*`）：
 
 | 模块 | 覆盖章节 | 内容 |
 |---|---|---|
@@ -1082,8 +1082,9 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 | `overrides` | §7 | `ComponentTypeId`、`OverrideValue`（序列化态）、`PropertyOverride`、`StructuralOp`、`ArchetypeSignature`、`OverrideSet`（唯一键 `(target, component, path)` 去重、后写覆盖前写、`RemoveEntity` 孤儿回收） |
 | `remap` | §6.1 | `RemapTable`（基段 + 保留段两段稠密映射，O(1) 查、拒绝间隙） |
 | `template` | §5.1、§9 | `SceneTemplate`（含 `plan: InstantiationPlan` + `tiers: ResidencyPlan`）、`NestedSlot`（嵌套实例槽） |
-| `instantiate` | §8.2、§21.2 | `spawn_plan`/`spawn_typed_plan`/`despawn_instance`；批量预留、确定性 remap、`ChildOf` 重连、typed Bundle/constructor、失败回滚，以及防止外部子实体级联删除 |
+| `instantiate` | §8.2、§21.2 | `spawn_plan`/`spawn_typed_plan`/`despawn_instance`；批量预留、确定性 remap、rooted `LocalEntityId(0)` 层级校验、`ChildOf` 重连、typed Bundle/受限 `SpawnContext` constructor（仅当前 owner 可 materialize、拒绝动态环）、返回错误时回收实例自有实体、base/reserved 实体回收，以及防止外部子实体级联删除 |
+| `materialize` | §8.1、§8.2 M1 | `MaterializerRegistry` 按 `ComponentTypeId` 确定性注册安全 decoder；逐列校验 row layout/长度，逐 slot 校验 bounds/重复项/目标 local，解码后通过 `World::insert_reflect` 写入 reserved entity；完整 decode 阶段失败会回收本次实体，禁止静默丢 payload |
 
-验证（本地）：`cargo test -p prism_scene --offline` → **58 unit + 1 doctest 全绿**；`cargo fmt --manifest-path pkg/prism_scene/Cargo.toml -- --check` 通过；`cargo check -p prism_scene --offline` 通过。`prism_scene` 自有代码的 clippy 门禁已执行，但当前 workspace 的 `prism_asset/src/scheduler.rs` 存在既有 `std-instead-of-alloc` 告警，导致整条 `cargo clippy -p prism_scene --all-targets -- -D warnings` 尚不能作为绿灯证据。
+验证（本地）：本次同步 `cargo test -p prism_scene --offline -- --test-threads=1` → **68 unit + 1 doctest 全绿**。`materialize` 测试覆盖多行列物化、FieldSlot remap、缺注册与 decoder 失败回滚。`prism_scene` 自有代码的 clippy 门禁曾通过 `--no-deps -D warnings`，完整 workspace clippy 受 `prism_asset/src/scheduler.rs` lint 阻塞。
 
-**尚未落地（后续里程碑，非占位）**：列块 payload 的通用 materialization / `spawn_scene()` 完整热路径（§8.2，当前 typed vertical slice 已覆盖实体预留与层级接缝）、SIMD remap 与预取微架构（§8.5）、子场景流送（§12）、热重载传播（§13）、bake 产出的二进制包（§10，归 `prism_scene_bake`）。
+**尚未落地（后续里程碑，非占位）**：`spawn_scene()` 完整热路径、SIMD remap 与预取微架构（§8.5）、子场景流送（§12）、热重载传播（§13）、bake 产出的二进制包（§10，归 `prism_scene_bake`）。M1 的列格式仍要求应用为每个组件注册安全 decoder；不支持把任意 opaque bytes 自动 reinterpret 成 Rust 值，也不自动推断任意 Rust 类型的实体字段。decoder/typed constructor panic 或其外部副作用不享有事务回滚保证，API 文档已明示调用契约。

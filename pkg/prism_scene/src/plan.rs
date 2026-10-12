@@ -178,6 +178,28 @@ pub enum PlanError {
         /// The value found in the plan.
         found: u32,
     },
+    /// A non-empty plan does not contain local zero, its root.
+    MissingRoot,
+    /// Local zero is declared as a child of another entity.
+    RootHasParent,
+    /// A hierarchy child is declared more than once.
+    DuplicateHierarchyChild {
+        /// The duplicated child local id.
+        child: LocalEntityId,
+    },
+    /// A base entity is not connected to local zero.
+    DisconnectedLocal {
+        /// The disconnected local id.
+        local: LocalEntityId,
+    },
+    /// The base hierarchy contains a cycle.
+    HierarchyCycle {
+        /// A local id participating in the cycle.
+        local: LocalEntityId,
+    },
+    /// Validation could not reserve the scratch memory required for the
+    /// declared entity count.
+    AllocationFailed,
 }
 
 impl InstantiationPlan {
@@ -190,16 +212,19 @@ impl InstantiationPlan {
             });
         }
 
-        let mut seen: Vec<LocalEntityId> = Vec::with_capacity(self.entity_count as usize);
+        let entity_count = self.entity_count as usize;
+        let mut local_groups = try_filled(entity_count, None)?;
+        let mut local_count = 0usize;
         for (group_index, group) in self.groups.iter().enumerate() {
             for &local in group.locals.iter() {
                 if local.is_reserved() || local.index() >= self.entity_count {
                     return Err(PlanError::LocalOutOfRange { local });
                 }
-                if seen.contains(&local) {
+                let owner = &mut local_groups[local.index() as usize];
+                if owner.replace(group_index as u32).is_some() {
                     return Err(PlanError::DuplicateLocal { local });
                 }
-                seen.push(local);
+                local_count += 1;
             }
             for column in group.columns.iter() {
                 if !group.signature.contains(column.component) {
@@ -211,28 +236,87 @@ impl InstantiationPlan {
             }
         }
 
-        if seen.len() as u32 != self.entity_count {
+        if local_count as u32 != self.entity_count {
             return Err(PlanError::LocalCountMismatch {
                 expected: self.entity_count,
-                found: seen.len() as u32,
+                found: local_count as u32,
             });
+        }
+
+        if self.entity_count != 0 && local_groups[0].is_none() {
+            return Err(PlanError::MissingRoot);
         }
 
         for &slot in self.entity_valued_fields.iter() {
             let Some(group) = self.groups.get(slot.group as usize) else {
                 return Err(PlanError::FieldSlotOutOfRange { slot });
             };
-            if slot.column as usize >= group.columns.len() {
+            if slot.column as usize >= group.columns.len()
+                || local_groups
+                    .get(slot.local.index() as usize)
+                    .copied()
+                    .flatten()
+                    != Some(slot.group)
+            {
                 return Err(PlanError::FieldSlotOutOfRange { slot });
             }
         }
 
+        let mut parents: Vec<Option<LocalEntityId>> = try_filled(entity_count, None)?;
         for &(child, parent) in self.hierarchy.iter() {
-            if !seen.contains(&child) {
+            if child.is_reserved()
+                || local_groups
+                    .get(child.index() as usize)
+                    .copied()
+                    .flatten()
+                    .is_none()
+            {
                 return Err(PlanError::HierarchyUnknownLocal { local: child });
             }
-            if !seen.contains(&parent) {
+            if parent.is_reserved()
+                || local_groups
+                    .get(parent.index() as usize)
+                    .copied()
+                    .flatten()
+                    .is_none()
+            {
                 return Err(PlanError::HierarchyUnknownLocal { local: parent });
+            }
+            if child == LocalEntityId::new(0) {
+                return Err(PlanError::RootHasParent);
+            }
+            if parents[child.index() as usize].replace(parent).is_some() {
+                return Err(PlanError::DuplicateHierarchyChild { child });
+            }
+        }
+
+        if self.entity_count != 0 {
+            let mut colors = try_filled(entity_count, 0u8)?;
+            colors[0] = 2;
+            for index in 1..self.entity_count as usize {
+                if colors[index] == 2 {
+                    continue;
+                }
+                let start = LocalEntityId::new(index as u32);
+                let mut path = Vec::new();
+                let mut cursor = start;
+                loop {
+                    let cursor_index = cursor.index() as usize;
+                    match colors[cursor_index] {
+                        2 => break,
+                        1 => return Err(PlanError::HierarchyCycle { local: cursor }),
+                        _ => {}
+                    }
+                    colors[cursor_index] = 1;
+                    path.push(cursor);
+                    let Some(parent) = parents[cursor_index] else {
+                        return Err(PlanError::DisconnectedLocal { local: start });
+                    };
+                    cursor = parent;
+                }
+                for local in path {
+                    colors[local.index() as usize] = 2;
+                }
             }
         }
 
@@ -253,6 +337,15 @@ impl InstantiationPlan {
             .position(|group| group.locals.contains(&local))
             .map(|index| index as u32)
     }
+}
+
+fn try_filled<T: Clone>(len: usize, value: T) -> Result<Vec<T>, PlanError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(len)
+        .map_err(|_| PlanError::AllocationFailed)?;
+    values.resize(len, value);
+    Ok(values)
 }
 
 #[cfg(test)]
@@ -289,7 +382,10 @@ mod tests {
                 column: 1,
                 byte_offset: 0,
             }]),
-            hierarchy: Box::new([(LocalEntityId::new(1), LocalEntityId::new(0))]),
+            hierarchy: Box::new([
+                (LocalEntityId::new(1), LocalEntityId::new(0)),
+                (LocalEntityId::new(2), LocalEntityId::new(0)),
+            ]),
             reserved_local_base: LocalEntityId::RESERVED_BASE,
         }
     }
@@ -398,6 +494,60 @@ mod tests {
         assert_eq!(
             plan.validate(),
             Err(PlanError::ReservedBaseMismatch { found: 0 })
+        );
+    }
+
+    #[test]
+    fn requires_one_rooted_hierarchy() {
+        let mut plan = base_plan();
+        plan.hierarchy = Box::new([(LocalEntityId::new(2), LocalEntityId::new(1))]);
+        assert_eq!(
+            plan.validate(),
+            Err(PlanError::DisconnectedLocal {
+                local: LocalEntityId::new(1)
+            })
+        );
+
+        let mut plan = base_plan();
+        plan.hierarchy = Box::new([
+            (LocalEntityId::new(1), LocalEntityId::new(0)),
+            (LocalEntityId::new(2), LocalEntityId::new(0)),
+        ]);
+        assert_eq!(plan.validate(), Ok(()));
+    }
+
+    #[test]
+    fn rejects_root_parent_duplicate_parent_and_cycle() {
+        let mut plan = base_plan();
+        plan.hierarchy = Box::new([
+            (LocalEntityId::new(0), LocalEntityId::new(1)),
+            (LocalEntityId::new(1), LocalEntityId::new(0)),
+        ]);
+        assert_eq!(plan.validate(), Err(PlanError::RootHasParent));
+
+        let mut plan = base_plan();
+        plan.hierarchy = Box::new([
+            (LocalEntityId::new(1), LocalEntityId::new(0)),
+            (LocalEntityId::new(1), LocalEntityId::new(2)),
+            (LocalEntityId::new(2), LocalEntityId::new(0)),
+        ]);
+        assert_eq!(
+            plan.validate(),
+            Err(PlanError::DuplicateHierarchyChild {
+                child: LocalEntityId::new(1)
+            })
+        );
+
+        let mut plan = base_plan();
+        plan.hierarchy = Box::new([
+            (LocalEntityId::new(1), LocalEntityId::new(2)),
+            (LocalEntityId::new(2), LocalEntityId::new(1)),
+        ]);
+        assert_eq!(
+            plan.validate(),
+            Err(PlanError::HierarchyCycle {
+                local: LocalEntityId::new(1)
+            })
         );
     }
 }

@@ -32,7 +32,7 @@ impl RemapTable {
 
     /// An empty table with room for `base_capacity` base entries.
     #[must_use]
-    pub fn with_base_capacity(base_capacity: usize) -> Self {
+    pub(crate) fn with_base_capacity(base_capacity: usize) -> Self {
         Self {
             base: Vec::with_capacity(base_capacity),
             reserved: Vec::new(),
@@ -41,7 +41,7 @@ impl RemapTable {
 
     /// Appends the next base-segment mapping (id = current base length),
     /// returning the local id it was assigned.
-    pub fn push_base(&mut self, entity: Entity) -> LocalEntityId {
+    pub(crate) fn push_base(&mut self, entity: Entity) -> LocalEntityId {
         let id = LocalEntityId::new(self.base.len() as u32);
         self.base.push(entity);
         id
@@ -50,7 +50,7 @@ impl RemapTable {
     /// Records a reserved-segment mapping at `offset` (0-based). The offset must
     /// be at most the current reserved length; a larger offset is rejected so a
     /// gap can never be silently introduced.
-    pub fn set_reserved(&mut self, offset: u32, entity: Entity) -> bool {
+    pub(crate) fn set_reserved(&mut self, offset: u32, entity: Entity) -> bool {
         let index = offset as usize;
         if index < self.reserved.len() {
             self.reserved[index] = entity;
@@ -66,7 +66,14 @@ impl RemapTable {
     /// Sets the mapping for `local`, routing to the base or reserved run by its
     /// segment. A base id must be within the current base length (or exactly
     /// one past it, which appends). Returns whether the mapping was stored.
-    pub fn set(&mut self, local: LocalEntityId, entity: Entity) -> bool {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "reserved-segment writers are consumed by future structural overrides"
+        )
+    )]
+    pub(crate) fn set(&mut self, local: LocalEntityId, entity: Entity) -> bool {
         if local.is_reserved() {
             self.set_reserved(local.index() - LocalEntityId::RESERVED_BASE, entity)
         } else {
@@ -104,6 +111,20 @@ impl RemapTable {
             .map(|(index, entity)| (LocalEntityId::new(index as u32), entity))
     }
 
+    /// Iterates structural-override entities in deterministic local-id order.
+    pub fn reserved_entities(&self) -> impl ExactSizeIterator<Item = (LocalEntityId, Entity)> + '_ {
+        self.reserved
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, entity)| (LocalEntityId::reserved(index as u32), entity))
+    }
+
+    /// Iterates all entities owned by this instance.
+    pub fn entities(&self) -> impl Iterator<Item = (LocalEntityId, Entity)> + '_ {
+        self.base_entities().chain(self.reserved_entities())
+    }
+
     /// Number of mapped base entities.
     #[must_use]
     pub fn base_len(&self) -> usize {
@@ -126,12 +147,6 @@ impl RemapTable {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.base.is_empty() && self.reserved.is_empty()
-    }
-
-    /// Clears all mappings, keeping capacity.
-    pub fn clear(&mut self) {
-        self.base.clear();
-        self.reserved.clear();
     }
 }
 

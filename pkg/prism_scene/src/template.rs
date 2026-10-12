@@ -158,7 +158,9 @@ mod tests {
                 Box::new([]),
             )]),
             entity_valued_fields: Box::new([]),
-            hierarchy: Box::new([]),
+            hierarchy: (1..n)
+                .map(|local| (LocalEntityId::new(local), LocalEntityId::new(0)))
+                .collect(),
             reserved_local_base: LocalEntityId::RESERVED_BASE,
         }
     }

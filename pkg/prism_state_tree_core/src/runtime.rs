@@ -226,7 +226,15 @@ impl Instance {
         Ok(report)
     }
 
-    /// Consumes queued events FIFO and runs all eventless cascades to completion.
+    /// Consumes queued events FIFO and runs eventless cascades until completion
+    /// or the configured microstep budget is exhausted.
+    ///
+    /// A budget error is deliberately not a transaction rollback: transitions
+    /// already applied remain applied. If an event was selected before the
+    /// budget was exhausted, it is counted as consumed; an event rejected
+    /// before its transition starts remains at the FIFO head for retry. Callers
+    /// can inspect [`Self::queued_events`] and the log before retrying with a
+    /// larger budget. A budget error does not carry a partial [`StepReport`].
     pub fn run<C: LifecycleCallback>(
         &mut self,
         callback: &mut C,
@@ -241,14 +249,25 @@ impl Instance {
         };
         while let Some(event) = self.queue.pop_front() {
             self.current_event = Some(event);
-            if let Some(transition) = self.select(Trigger::Event(event.id)) {
-                self.apply(transition, &mut report, callback)?;
-                self.current_event = None;
-                self.run_eventless(callback, &mut report)?;
+            let selected = self.select(Trigger::Event(event.id));
+            let result = if let Some(transition) = selected {
+                if report.microsteps >= self.microstep_limit.0 {
+                    // The transition budget applies before the event is
+                    // consumed. Keep the event at the head of the FIFO so a
+                    // caller can raise the budget and retry without loss.
+                    self.queue.push_front(event);
+                    Err(RuntimeError::MicrostepLimit(self.microstep_limit))
+                } else {
+                    report.events_processed += 1;
+                    self.apply(transition, &mut report, callback)
+                        .and_then(|()| self.run_eventless(callback, &mut report))
+                }
             } else {
-                self.current_event = None;
-            }
-            report.events_processed += 1;
+                report.events_processed += 1;
+                Ok(())
+            };
+            self.current_event = None;
+            result?;
         }
         self.run_eventless(callback, &mut report)?;
         report.queued_events = self.queue.len();
@@ -335,17 +354,39 @@ impl Instance {
         };
         if transition.kind == TransitionKind::External {
             let boundary = if self.plan.is_descendant(effective_target, source) {
-                self.plan.parent(source)
+                // A transition to a strict descendant keeps its source active;
+                // an explicit self transition restarts the source.
+                if effective_target == source {
+                    self.plan.parent(source)
+                } else {
+                    Some(source)
+                }
             } else if self.plan.is_descendant(source, effective_target) {
                 // An external transition to an ancestor exits and re-enters
                 // that ancestor, not merely the source's branch beneath it.
                 self.plan.parent(effective_target)
             } else {
-                Some(self.plan.lca(source, effective_target))
+                let lca = self.plan.lca(source, effective_target);
+                if matches!(
+                    self.plan.nodes[lca.0 as usize].kind,
+                    NodeKind::Parallel { .. }
+                ) {
+                    // A cross-region transition exits the complete parallel
+                    // configuration so the target region cannot retain a
+                    // stale active branch.
+                    self.plan.parent(lca)
+                } else {
+                    Some(lca)
+                }
             };
-            let exit_root = self.exit_root(source, boundary);
-            self.capture_histories(exit_root);
-            self.exit_subtree(exit_root, callback, report.microsteps);
+            if boundary == Some(source) && effective_target != source {
+                self.capture_histories(source);
+                self.exit_descendants(source, callback, report.microsteps);
+            } else {
+                let exit_root = self.exit_root(source, boundary);
+                self.capture_histories(exit_root);
+                self.exit_subtree(exit_root, callback, report.microsteps);
+            }
             self.enter_target(
                 effective_target,
                 boundary,
@@ -426,6 +467,33 @@ impl Instance {
         self.active.retain(|id| !self.plan.is_descendant(*id, root));
     }
 
+    fn exit_descendants<C: LifecycleCallback>(
+        &mut self,
+        boundary: StateId,
+        callback: &mut C,
+        microstep: usize,
+    ) {
+        let exiting: Vec<StateId> = self
+            .active
+            .iter()
+            .copied()
+            .filter(|id| *id != boundary && self.plan.is_descendant(*id, boundary))
+            .collect();
+        for &state in exiting.iter().rev() {
+            callback.on_exit(state);
+            self.log.push(LogEntry {
+                kind: LogKind::Exit,
+                microstep,
+                state,
+                source: None,
+                target: None,
+                event: self.current_event,
+            });
+        }
+        self.active
+            .retain(|id| *id == boundary || !self.plan.is_descendant(*id, boundary));
+    }
+
     fn exit_root(&self, source: StateId, boundary: Option<StateId>) -> StateId {
         let Some(boundary) = boundary else {
             return self.plan.root();
@@ -463,15 +531,21 @@ impl Instance {
         path.reverse();
         for &state in &path {
             self.enter_one(state, microstep, callback);
-            if matches!(
-                self.plan.nodes[state.0 as usize].kind,
-                NodeKind::Parallel { .. }
-            ) {
-                let regions = match &self.plan.nodes[state.0 as usize].kind {
-                    NodeKind::Parallel { regions, .. } => regions.clone(),
-                    _ => Vec::new(),
+            if history.is_none()
+                && matches!(
+                    self.plan.nodes[state.0 as usize].kind,
+                    NodeKind::Parallel { .. }
+                )
+            {
+                let region_count = match &self.plan.nodes[state.0 as usize].kind {
+                    NodeKind::Parallel { regions, .. } => regions.len(),
+                    _ => 0,
                 };
-                for region in regions {
+                for index in 0..region_count {
+                    let region = match &self.plan.nodes[state.0 as usize].kind {
+                        NodeKind::Parallel { regions, .. } => regions[index],
+                        _ => continue,
+                    };
                     if !self.plan.is_descendant(target, region) && !self.is_active(region) {
                         self.enter_state_default(region, microstep, callback);
                     }
@@ -514,6 +588,9 @@ impl Instance {
         microstep: usize,
         callback: &mut C,
     ) {
+        if self.is_active(state) {
+            return;
+        }
         self.enter_one(state, microstep, callback);
         self.initialize_children(state, microstep, callback);
     }

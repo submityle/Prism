@@ -10,6 +10,8 @@ pub struct Limits {
     pub max_nodes: usize,
     /// Maximum number of distinct tool panels.
     pub max_panels: usize,
+    /// Maximum number of distinct documents.
+    pub max_documents: usize,
     /// Maximum number of floating windows.
     pub max_floating: usize,
 }
@@ -19,6 +21,7 @@ impl Default for Limits {
             max_depth: 128,
             max_nodes: 16_384,
             max_panels: 4_096,
+            max_documents: 4_096,
             max_floating: 256,
         }
     }
@@ -114,6 +117,9 @@ impl DockLayout {
             if !state.panels.insert(e.panel.clone()) {
                 return state.fail(ValidationIssue::PanelInMultipleLocations(e.panel.clone()));
             }
+            if state.panels.len() > limits.max_panels {
+                return state.fail(ValidationIssue::ResourceLimit("panels"));
+            }
         }
         if let Some(active) = &self.autohide.active
             && !hidden.contains(active)
@@ -195,6 +201,9 @@ impl State {
                     if !self.docs.insert(d.clone()) {
                         return self.fail(ValidationIssue::DuplicateDocument(d.clone()));
                     }
+                    if self.docs.len() > self.limits.max_documents {
+                        return self.fail(ValidationIssue::ResourceLimit("documents"));
+                    }
                 }
                 Ok(())
             }
@@ -218,5 +227,69 @@ impl State {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AutoHideBars, AutoHideEntry, Axis, DockNode, Side, SplitChild};
+    use alloc::vec;
+
+    #[test]
+    fn document_and_autohide_entries_obey_their_limits() {
+        let layout = DockLayout {
+            root: DockNode::Document {
+                tabs: vec!["doc.a".into(), "doc.b".into()],
+                active: 0,
+            },
+            ..DockLayout::default()
+        };
+        let limits = Limits {
+            max_documents: 1,
+            ..Limits::default()
+        };
+        assert!(matches!(
+            layout.validate_with(limits).unwrap_err().issue,
+            ValidationIssue::ResourceLimit("documents")
+        ));
+
+        let layout = DockLayout {
+            root: DockNode::Split {
+                axis: Axis::Horizontal,
+                children: vec![
+                    SplitChild {
+                        ratio: Ratio::HALF,
+                        node: DockNode::panel("visible"),
+                    },
+                    SplitChild {
+                        ratio: Ratio::HALF,
+                        node: DockNode::panel("other"),
+                    },
+                ],
+            },
+            floating: vec![],
+            autohide: AutoHideBars {
+                entries: vec![AutoHideEntry {
+                    side: Side::Left,
+                    panel: "hidden".into(),
+                }],
+                active: None,
+            },
+            maximized: None,
+        };
+        let limits = Limits {
+            max_panels: 2,
+            ..Limits::default()
+        };
+        assert!(matches!(
+            layout.validate_with(limits).unwrap_err().issue,
+            ValidationIssue::ResourceLimit("panels")
+        ));
+        let valid_limits = Limits {
+            max_panels: 3,
+            ..Limits::default()
+        };
+        layout.validate_with(valid_limits).unwrap();
     }
 }

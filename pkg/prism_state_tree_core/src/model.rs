@@ -284,13 +284,41 @@ impl Plan {
                             child: *initial,
                         });
                     }
+                    for (index, child) in children.iter().enumerate() {
+                        if children[..index].contains(child) {
+                            return Err(PlanError::DuplicateChild {
+                                owner: node.id,
+                                child: *child,
+                            });
+                        }
+                    }
                 }
                 NodeKind::Parallel {
                     children, regions, ..
                 } => {
-                    if regions.is_empty() || regions.iter().any(|region| !children.contains(region))
+                    if regions.is_empty()
+                        || children.is_empty()
+                        || regions.len() != children.len()
+                        || regions.iter().any(|region| !children.contains(region))
+                        || children.iter().any(|child| !regions.contains(child))
                     {
                         return Err(PlanError::InvalidRegions(node.id));
+                    }
+                    for (index, child) in children.iter().enumerate() {
+                        if children[..index].contains(child) {
+                            return Err(PlanError::DuplicateChild {
+                                owner: node.id,
+                                child: *child,
+                            });
+                        }
+                    }
+                    for (index, region) in regions.iter().enumerate() {
+                        if regions[..index].contains(region) {
+                            return Err(PlanError::DuplicateRegion {
+                                owner: node.id,
+                                region: *region,
+                            });
+                        }
                     }
                 }
             }
@@ -352,10 +380,25 @@ impl Plan {
         for node in &nodes {
             for transition in &node.transitions {
                 match transition.target {
-                    TransitionTarget::State(id) | TransitionTarget::History { owner: id, .. }
-                        if id.0 as usize >= count =>
-                    {
-                        return Err(PlanError::UnknownState(id))
+                    TransitionTarget::State(id) if id.0 as usize >= count => {
+                        return Err(PlanError::UnknownState(id));
+                    }
+                    TransitionTarget::History { owner, .. } => {
+                        if owner.0 as usize >= count {
+                            return Err(PlanError::UnknownState(owner));
+                        }
+                        if !matches!(
+                            nodes[owner.0 as usize].kind,
+                            NodeKind::Compound {
+                                history: Some(_),
+                                ..
+                            } | NodeKind::Parallel {
+                                history: Some(_),
+                                ..
+                            }
+                        ) {
+                            return Err(PlanError::InvalidHistoryOwner(owner));
+                        }
                     }
                     _ => {}
                 }
@@ -448,6 +491,22 @@ pub enum PlanError {
     },
     /// A parallel node has no valid region roots.
     InvalidRegions(StateId),
+    /// A compound or parallel node repeats a direct child.
+    DuplicateChild {
+        /// Node declaring the repeated child.
+        owner: StateId,
+        /// Repeated child identity.
+        child: StateId,
+    },
+    /// A parallel node repeats a region root.
+    DuplicateRegion {
+        /// Parallel node declaring the repeated region.
+        owner: StateId,
+        /// Repeated region root.
+        region: StateId,
+    },
+    /// A history transition targets a node without configured history.
+    InvalidHistoryOwner(StateId),
     /// A transition source differs from the node containing it.
     TransitionSourceMismatch(StateId),
     /// A node is not reachable from the root.

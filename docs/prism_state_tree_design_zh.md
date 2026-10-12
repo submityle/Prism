@@ -25,7 +25,7 @@
 - 明确约束:
   - 语义内核（定义模型 / 编译 / `TreePlan` / 游标运行时 / 确定性 / 快照）`no_std + alloc` 友好；ECS/资产/编辑器/调试需 `std`。
   - **守卫纯函数铁律**：迁移守卫与选择策略只读上下文、零副作用；一切写操作经延迟命令队列。
-  - **热路径零分配、无锁、无 panic**：帧内不堆分配、不持锁、不 panic（错误经 `Result` 或状态降级）。
+  - **目标：热路径零分配、无锁、无 panic**：这是完整运行时与基准门槛，不是当前 ST0 已兑现保证。当前 ST0 的配置切换/日志仍会分配；调用者提供的 guard/callback 也可自行 panic。实现进度与实测边界见 §20。
   - **默认零成本**：未启用任何 `prism_state_tree*` crate 时，引擎侧无决策运行时开销。
   - **不做规划器**（GOAP/HTN 只留扩展点）与**通用工作流引擎**（后者是 `prism_visual_scripting` durable 的职责）。
 
@@ -110,9 +110,9 @@ TreeDef(文本/图资产) ──compile(off-thread)──> TreePlan(不可变·�
 | 图 IR / durable / 画布 | `prism_visual_scripting` | **未就绪**（PLANNED） | 仅设计文档，无 `pkg/prism_visual_script` |
 | 响应式绑定内核 | `prism_loom` | **未就绪**（PLANNED） | 仅设计文档，无 `pkg/prism_loom` |
 | GameplayTag 门控 | `prism_gameplay_tags` | **未就绪**（PLANNED） | 仅设计文档 |
-| 决策运行时本体 | `prism_state_tree*` | **本文 PLANNED** | 无代码 |
+| 决策运行时本体 | `prism_state_tree_core` | **ST0 CORE SHIPPED**；ST1–ST8 PLANNED | `pkg/prism_state_tree_core`；当前核心能力见 §20 ST0 实现进度 |
 
-> **诚实边界**：上表「已有代码」指模块存在，其完整能力以各 crate 自身文档与测试为准；`prism_visual_scripting` / `prism_loom` / `prism_gameplay_tags` 三项未就绪，对应 feature 在落地前为**前置待建**，不阻塞 ST0–ST4 核心（它们只影响 `graph` / `reactive` / AI 域 `GameplayTag` 门控）。
+> **诚实边界**：上表「已有代码」指模块存在，其完整能力以各 crate 自身文档与测试为准；StateTree 仅 ST0 语义核心已落地，不等于完整决策产品；`prism_visual_scripting` / `prism_loom` / `prism_gameplay_tags` 三项未就绪，对应 feature 在落地前为**前置待建**，不阻塞 ST0–ST4 核心（它们只影响 `graph` / `reactive` / AI 域 `GameplayTag` 门控）。
 
 ### 2.2 为什么不复用现成方案
 
@@ -866,18 +866,20 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 
 ### ST0 实现进度（Implementation Progress）
 
-`pkg/prism_state_tree_core` 已作为根 workspace member 落地，定位为 ST0 的纯语义内核切片（`no_std + alloc`、`#![forbid(unsafe_code)]`、不依赖 ECS/渲染/网络/编辑器）。当前实现拆分为 `model.rs`（定义校验与不可变 `Plan`）、`runtime.rs`（游标运行时）和 `tests.rs`（语义回归），而不是把所有逻辑堆在单文件中。
+`pkg/prism_state_tree_core` 已作为根 workspace member 落地，定位为 ST0 的纯语义内核切片（`no_std + alloc`、`#![forbid(unsafe_code)]`、不依赖 ECS/渲染/网络/编辑器）。当前实现拆分为 `model.rs`（定义校验与不可变 `Plan`）、`runtime.rs`（游标运行时）、`snapshot.rs`（快照编解码与校验恢复）和 `tests.rs`（语义回归），而不是把所有逻辑堆在单文件中。
 
 已交付并由测试覆盖的语义：
 
-- `TreeDef → Plan` 的稠密 ID、父子一致性、单父、连通性、环、初始子状态、Parallel region 和 transition target 校验；
+- `TreeDef → Plan` 的稠密 ID、父子一致性、单父、连通性、环、初始子状态、Parallel region 去重和 History owner 校验；
 - Atomic / Compound / Parallel 活跃配置，祖先迁移继承，声明顺序与 priority 的确定性裁决；
 - Event / Eventless 迁移、LCA exit/enter、Internal / External / Self 生命周期差异；
-- Shallow / Deep history、定容 FIFO event queue、微步预算、纯 guard 和生命周期/迁移日志。
+- Shallow / Deep history、定容 FIFO event queue、微步预算（超限时保留尚未执行的事件）、纯 guard 和生命周期/迁移日志；
+- 确定性语义快照编码、针对 plan 的配置/history 校验、容量受限队列恢复；恢复错误不改变实例状态，且保留已安装 guards。
+- Parallel Deep History 恢复会跳过默认 region 初始化，避免历史子状态与默认子状态叠加；微步预算错误不返回部分 `StepReport`，调用者应检查队列与日志后重试。
 
-当前证据：`cargo test -p prism_state_tree_core --offline` 为 **10 tests + 0 doctest 全绿**；`cargo clippy -p prism_state_tree_core --all-targets --offline -- -D warnings` 通过；`cargo check -p prism_state_tree_core --no-default-features --offline` 通过。
+当前证据：实现同步时 `cargo test -p prism_state_tree_core --offline -- --test-threads=1` 为 **24 tests + 0 doctest 全绿**。迁移/历史热路径目前使用临时 `Vec` 且日志无界增长，零分配仍是尚未满足的设计目标；完整 SCXML 一致性套件和分配计数基准也尚未交付。
 
-诚实边界：这不是完整 StateTree 产品的假实现，也不宣称 ST0–ST8 全部完成。`Task` / `Evaluator` / Schema 与 Context / typed binding / instance frame / snapshot / ECS 装配 / batch runtime / 热重载 / 调试器 / 网络复制仍未实现；对应路线图保持 `PLANNED`，后续必须以独立模块、测试和版本文档推进。
+诚实边界：这不是完整 StateTree 产品的假实现，也不宣称 ST0–ST8 全部完成。`Task` / `Evaluator` / Schema 与 Context / typed binding / instance frame / ECS 装配 / batch runtime / 热重载 / 调试器 / 网络复制仍未实现；对应路线图保持 `PLANNED`，后续必须以独立模块、测试和版本文档推进。当前 ST0 同样不承诺 transition 期间无堆分配或外部 callback panic 可恢复。
 
 ---
 

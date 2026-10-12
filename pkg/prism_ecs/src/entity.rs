@@ -321,6 +321,13 @@ impl Entities {
         *self.reserved.get_mut() != 0
     }
 
+    /// Whether deferred entity reservations are outstanding, without requiring
+    /// exclusive access to the allocator.
+    #[inline]
+    pub fn has_outstanding_reservations(&self) -> bool {
+        self.reserved.load(Ordering::Relaxed) != 0
+    }
+
     /// Materialise every handle produced by [`Entities::reserve_entity`] since
     /// the last flush, giving each a live metadata slot with an
     /// [`EntityLocation::EMPTY`] location.

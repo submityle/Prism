@@ -24,7 +24,10 @@ pub struct SceneInstance {
     /// The source template's identity (design §5.2 soft handle, by GUID).
     pub template: StableGuid,
     /// `LocalEntityId -> Entity` map for *this* instance (design §6.1).
-    pub remap: RemapTable,
+    ///
+    /// The map is immutable to consumers after construction; structural
+    /// ownership is established only by the scene instantiation pipeline.
+    remap: RemapTable,
     /// This instance's override set; `None` until a field is first overridden.
     pub overrides: Option<Box<OverrideSet>>,
     /// Cross-session / network locator (design §6.2, §15).
@@ -37,7 +40,7 @@ impl SceneInstance {
     /// Builds an instance anchor from a template identity, its remap table and a
     /// residency tier.
     #[must_use]
-    pub fn new(template: StableGuid, remap: RemapTable, tier: ResidencyTier) -> Self {
+    pub(crate) fn new(template: StableGuid, remap: RemapTable, tier: ResidencyTier) -> Self {
         Self {
             template,
             remap,
@@ -58,6 +61,12 @@ impl SceneInstance {
     #[must_use]
     pub fn resolve(&self, local: LocalEntityId) -> Option<Entity> {
         self.remap.get(local)
+    }
+
+    /// Returns the instance mapping for read-only inspection.
+    #[must_use]
+    pub fn remap(&self) -> &RemapTable {
+        &self.remap
     }
 
     /// The override set, if the instance has been customized.

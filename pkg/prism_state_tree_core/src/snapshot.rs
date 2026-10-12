@@ -125,7 +125,9 @@ impl Snapshot {
 ///
 /// Validation is completed before the instance is mutated. Consequently an
 /// error from [`Instance::restore`] leaves every observable runtime field
-/// unchanged, including the queue and installed guards.
+/// unchanged, including the queue and installed guards. This atomicity covers
+/// all validation errors; allocation failure is a process-level Rust abort and
+/// is outside the `Result` contract of this `no_std + alloc` crate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RestoreError {
     /// A state identity is outside the instance's plan.
@@ -391,6 +393,10 @@ fn validate_history(
             state: owner,
         });
     }
+    // A deep entry is a complete active configuration, not merely a set of
+    // direct children. Validate every remembered compound/parallel node as a
+    // recursive configuration so a damaged nested region cannot be restored
+    // into a partially active tree.
     if !history_children_match(plan, owner, &seen) {
         return Err(RestoreError::InvalidHistoryChildren {
             owner,

@@ -255,9 +255,56 @@ fn move_panel(
     if matches!(target, Target::Panel(p) if p == panel) {
         return Ok(());
     }
+    // `TabAt` is expressed in the destination stack before the move.  When
+    // source and target are in that same stack, removing the source shifts
+    // every boundary to its right by one.
+    let placement = match (target, placement) {
+        (Target::Panel(target), Placement::TabAt(index)) => {
+            let Some((source_index, stack_len)) =
+                same_tab_stack_source_index(&layout.root, panel, target).or_else(|| {
+                    layout
+                        .floating
+                        .iter()
+                        .find_map(|window| same_tab_stack_source_index(&window.root, panel, target))
+                })
+            else {
+                return Err(err(ValidationIssue::TargetNotFound));
+            };
+            if index > stack_len {
+                return Err(err(ValidationIssue::TargetNotFound));
+            }
+            let adjusted = if source_index < index {
+                index.saturating_sub(1)
+            } else {
+                index
+            };
+            Placement::TabAt(adjusted)
+        }
+        (_, placement) => placement,
+    };
     let node = take_panel_node(layout, panel)
         .ok_or_else(|| err(ValidationIssue::PanelNotFound(panel.into())))?;
     insert_layout_target(layout, target, node, placement)
+}
+
+fn same_tab_stack_source_index(
+    node: &DockNode,
+    source: &str,
+    target: &str,
+) -> Option<(usize, usize)> {
+    match node {
+        DockNode::TabStack { tabs, .. }
+            if tabs.iter().any(|tab| tab == source) && tabs.iter().any(|tab| tab == target) =>
+        {
+            tabs.iter()
+                .position(|tab| tab == source)
+                .map(|index| (index, tabs.len()))
+        }
+        DockNode::Split { children, .. } => children
+            .iter()
+            .find_map(|child| same_tab_stack_source_index(&child.node, source, target)),
+        _ => None,
+    }
 }
 
 fn insert_layout_target(
@@ -548,4 +595,65 @@ fn node_at_mut<'a>(root: &'a mut DockNode, path: &[usize]) -> Option<&'a mut Doc
         }
     }
     Some(node)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn same_stack_tab_reorder_adjusts_boundaries_after_removal() {
+        let layout = DockLayout {
+            root: DockNode::TabStack {
+                tabs: vec!["a".into(), "b".into(), "c".into()],
+                active: 0,
+            },
+            ..DockLayout::default()
+        };
+
+        let moved = reduce(
+            &layout,
+            Action::Move {
+                panel: "a".into(),
+                target: Target::Panel("c".into()),
+                placement: Placement::TabAt(3),
+            },
+        )
+        .expect("moving the first tab to the end is valid");
+        assert_eq!(
+            moved.root,
+            DockNode::TabStack {
+                tabs: vec!["b".into(), "c".into(), "a".into()],
+                active: 0,
+            }
+        );
+
+        assert!(reduce(
+            &moved,
+            Action::Move {
+                panel: "a".into(),
+                target: Target::Panel("c".into()),
+                placement: Placement::TabAt(4),
+            },
+        )
+        .is_err());
+
+        let moved = reduce(
+            &moved,
+            Action::Move {
+                panel: "a".into(),
+                target: Target::Panel("b".into()),
+                placement: Placement::TabAt(0),
+            },
+        )
+        .expect("moving a tab to the beginning is valid");
+        assert_eq!(
+            moved.root,
+            DockNode::TabStack {
+                tabs: vec!["a".into(), "b".into(), "c".into()],
+                active: 1,
+            }
+        );
+    }
 }

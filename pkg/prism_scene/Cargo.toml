@@ -9,15 +9,17 @@ publish = false
 [dependencies]
 prism_asset = { path = "../prism_asset", default-features = false }
 prism_ecs = { path = "../prism_ecs", default-features = false }
+prism_reflect = { path = "../prism_reflect", optional = true }
 
 [dev-dependencies]
 prism_scene = { path = "." }
 
 [features]
-default = ["std"]
+default = ["std", "materialize"]
 # Unlocks std-backed facilities and the std test harness; the identity /
 # override / remap core is fully `no_std + alloc`.
-std = ["prism_asset/std", "prism_ecs/std"]
+std = ["prism_asset/std", "prism_ecs/std", "prism_ecs/reflect"]
+materialize = ["std", "dep:prism_reflect", "prism_ecs/reflect"]
 
 [lints]
 workspace = true

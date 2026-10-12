@@ -17,8 +17,97 @@ use prism_ecs::entity::Entity;
 use prism_ecs::hierarchy::ChildOf;
 use prism_ecs::world::World;
 
-type SpawnFn =
-    Box<dyn FnOnce(&mut World, Entity, &RemapTable) -> Result<(), TypedSpawnError> + Send + Sync>;
+type SpawnFn = Box<
+    dyn FnOnce(&mut SpawnContext<'_>, Entity, &RemapTable) -> Result<(), TypedSpawnError>
+        + Send
+        + Sync,
+>;
+
+/// Restricted world access granted to a typed scene constructor.
+///
+/// A constructor can materialize its own reserved entity and add a
+/// `ChildOf` relation between entities in the same instance. It cannot spawn,
+/// despawn, reserve, or mutate arbitrary external entities, which keeps a
+/// returned constructor error transactional for the instance-owned state.
+pub struct SpawnContext<'a> {
+    world: &'a mut World,
+    owned: &'a RemapTable,
+    owner: Entity,
+}
+
+impl SpawnContext<'_> {
+    /// Materializes one entity reserved for this scene instance.
+    pub fn spawn_at<B: Bundle>(
+        &mut self,
+        entity: Entity,
+        bundle: B,
+    ) -> Result<(), SpawnContextError> {
+        if entity != self.owner {
+            return Err(SpawnContextError::EntityNotCurrent(entity));
+        }
+        if !self.owned.entities().any(|(_, owned)| owned == entity)
+            || !self.world.entities().contains(entity)
+        {
+            return Err(SpawnContextError::EntityNotOwned(entity));
+        }
+        if !self
+            .world
+            .entities()
+            .location(entity)
+            .is_some_and(prism_ecs::entity::EntityLocation::is_empty)
+        {
+            return Err(SpawnContextError::EntityAlreadyMaterialized(entity));
+        }
+        self.world.spawn_at(entity, bundle);
+        Ok(())
+    }
+
+    /// Adds an instance-local `ChildOf` relation.
+    pub fn add_child_of(&mut self, child: Entity, parent: Entity) -> Result<(), SpawnContextError> {
+        if !self.owned.entities().any(|(_, owned)| owned == child)
+            || !self.owned.entities().any(|(_, owned)| owned == parent)
+            || !self.world.entities().contains(child)
+            || !self.world.entities().contains(parent)
+            || self
+                .world
+                .entities()
+                .location(child)
+                .is_none_or(prism_ecs::entity::EntityLocation::is_empty)
+            || self
+                .world
+                .entities()
+                .location(parent)
+                .is_none_or(prism_ecs::entity::EntityLocation::is_empty)
+        {
+            return Err(SpawnContextError::EntityNotOwned(child));
+        }
+        if child == parent || would_create_child_cycle(self.world, child, parent) {
+            return Err(SpawnContextError::HierarchyCycle { child, parent });
+        }
+        self.world.register_child_of();
+        self.world.add_relation::<ChildOf>(child, parent);
+        Ok(())
+    }
+}
+
+/// Error returned when a restricted constructor addresses an external entity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpawnContextError {
+    /// The entity is not owned by the scene instance being materialized.
+    EntityNotOwned(Entity),
+    /// The instance-owned entity was already materialized by an earlier
+    /// constructor invocation.
+    EntityAlreadyMaterialized(Entity),
+    /// The constructor attempted to materialize a different local entity.
+    EntityNotCurrent(Entity),
+    /// The relation would make the instance hierarchy cyclic.
+    HierarchyCycle {
+        /// Proposed child entity.
+        child: Entity,
+        /// Proposed parent entity.
+        parent: Entity,
+    },
+}
 
 /// Explicit failure returned by a typed entity constructor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,20 +134,26 @@ impl TypedSpawnPlan {
     pub fn with_bundle<B: Bundle>(mut self, local: LocalEntityId, bundle: B) -> Self {
         self.entries.push((
             local,
-            Box::new(move |world, entity, _| {
-                world.spawn_at(entity, bundle);
-                Ok(())
+            Box::new(move |context, entity, _| {
+                context
+                    .spawn_at(entity, bundle)
+                    .map_err(|_| TypedSpawnError { code: u32::MAX })
             }),
         ));
         self
     }
 
     /// Adds a constructor with access to the complete remap.
+    ///
+    /// The constructor is expected to return errors rather than panic. Since
+    /// this crate is `no_std`, unwinding cannot be caught portably; a panic
+    /// during materialization does not provide the rollback guarantee of a
+    /// returned [`TypedSpawnError`].
     #[must_use]
     pub fn with_constructor(
         mut self,
         local: LocalEntityId,
-        constructor: impl FnOnce(&mut World, Entity, &RemapTable) -> Result<(), TypedSpawnError>
+        constructor: impl FnOnce(&mut SpawnContext<'_>, Entity, &RemapTable) -> Result<(), TypedSpawnError>
             + Send
             + Sync
             + 'static,
@@ -73,16 +168,36 @@ impl TypedSpawnPlan {
 pub struct SceneSpawn {
     /// Local zero is the root; empty plans have no root.
     pub root: Option<Entity>,
-    /// The independent local-to-world mapping.
-    pub remap: RemapTable,
+    /// The private local-to-world mapping. Use [`Self::resolve`] or
+    /// [`Self::remap`] for read-only access; callers cannot register arbitrary
+    /// entities as instance-owned through the spawn result.
+    remap: RemapTable,
 }
 
 impl SceneSpawn {
+    #[cfg(feature = "materialize")]
+    pub(crate) fn from_remap(remap: RemapTable) -> Self {
+        let root = remap.get(LocalEntityId::new(0));
+        Self { root, remap }
+    }
+
     /// Builds the instance anchor once the caller supplies the template identity
     /// that is intentionally absent from `InstantiationPlan`.
     #[must_use]
     pub fn scene_instance(&self, template: StableGuid, tier: ResidencyTier) -> SceneInstance {
         SceneInstance::new(template, self.remap.clone(), tier)
+    }
+
+    /// Resolves one local entity to its live handle.
+    #[must_use]
+    pub fn resolve(&self, local: LocalEntityId) -> Option<Entity> {
+        self.remap.get(local)
+    }
+
+    /// Returns the immutable local-to-world mapping for inspection.
+    #[must_use]
+    pub fn remap(&self) -> &RemapTable {
+        &self.remap
     }
 }
 
@@ -113,6 +228,9 @@ pub enum InstantiateError {
         /// Local entity missing from, or unexpectedly present in, the constructors.
         local: LocalEntityId,
     },
+    /// The World already has deferred entity reservations, so this spawn
+    /// cannot safely establish ownership of the reservation range.
+    OutstandingReservations,
     /// Constructor failed; all reserved instance entities were rolled back.
     TypedSpawnFailed {
         /// Local entity whose constructor failed.
@@ -120,28 +238,13 @@ pub enum InstantiateError {
         /// Caller-defined constructor error code.
         code: u32,
     },
-}
-
-fn validate_hierarchy(plan: &InstantiationPlan) -> Result<(), InstantiateError> {
-    let mut parents = Vec::with_capacity(plan.hierarchy.len());
-    for &(child, parent) in plan.hierarchy.iter() {
-        if parents.iter().any(|(seen, _)| *seen == child) {
-            return Err(InstantiateError::MultipleParents { child });
-        }
-        parents.push((child, parent));
-    }
-    for &(start, _) in parents.iter() {
-        let mut cursor = start;
-        let mut steps = 0usize;
-        while let Some((_, parent)) = parents.iter().find(|(child, _)| *child == cursor) {
-            cursor = *parent;
-            steps += 1;
-            if cursor == start || steps > parents.len() {
-                return Err(InstantiateError::HierarchyCycle { local: start });
-            }
-        }
-    }
-    Ok(())
+    /// A constructor relation conflicts with the plan's hierarchy.
+    DynamicHierarchyCycle {
+        /// The child local id.
+        child: LocalEntityId,
+        /// The parent local id.
+        parent: LocalEntityId,
+    },
 }
 
 /// Spawns a plan with no opaque component payloads or entity-reference slots.
@@ -150,7 +253,6 @@ pub fn spawn_plan(
     plan: &InstantiationPlan,
 ) -> Result<SceneSpawn, InstantiateError> {
     plan.validate().map_err(InstantiateError::InvalidPlan)?;
-    validate_hierarchy(plan)?;
     if let Some(column) = plan
         .groups
         .iter()
@@ -172,9 +274,10 @@ pub fn spawn_plan(
     {
         typed.entries.push((
             local,
-            Box::new(|world, entity, _| {
-                world.spawn_at(entity, ());
-                Ok(())
+            Box::new(|context, entity, _| {
+                context
+                    .spawn_at(entity, ())
+                    .map_err(|_| TypedSpawnError { code: u32::MAX })
             }),
         ));
     }
@@ -189,51 +292,65 @@ pub fn spawn_typed_plan(
     mut typed: TypedSpawnPlan,
 ) -> Result<SceneSpawn, InstantiateError> {
     plan.validate().map_err(InstantiateError::InvalidPlan)?;
-    validate_hierarchy(plan)?;
-    let locals: Vec<_> = plan
+    // The current materializer is deliberately typed-only: accepting a plan
+    // with opaque columns or entity-valued byte slots here would silently drop
+    // payloads and references. Keep that contract explicit at this boundary.
+    if let Some(column) = plan
+        .groups
+        .iter()
+        .flat_map(|group| group.columns.iter())
+        .next()
+    {
+        return Err(InstantiateError::TypedSpawnRequired {
+            component: column.component,
+        });
+    }
+    if !plan.entity_valued_fields.is_empty() {
+        return Err(InstantiateError::TypedFieldRemapRequired);
+    }
+    if world.entities().has_outstanding_reservations() {
+        return Err(InstantiateError::OutstandingReservations);
+    }
+    let mut locals: Vec<_> = plan
         .groups
         .iter()
         .flat_map(|group| group.locals.iter().copied())
         .collect();
-    if typed.entries.len() != locals.len() {
-        let local = locals
-            .iter()
-            .copied()
-            .find(|id| !typed.entries.iter().any(|(have, _)| have == id))
-            .or_else(|| {
-                typed
-                    .entries
-                    .iter()
-                    .map(|(id, _)| *id)
-                    .find(|id| !locals.contains(id))
-            })
-            .unwrap_or(LocalEntityId::new(0));
-        return Err(InstantiateError::TypedLocalsMismatch { local });
-    }
-    for &local in &locals {
-        if typed.entries.iter().filter(|(id, _)| *id == local).count() != 1 {
-            return Err(InstantiateError::TypedLocalsMismatch { local });
+    locals.sort_unstable();
+    typed.entries.sort_unstable_by_key(|(id, _)| *id);
+    let mut planned = locals.iter().copied();
+    let mut provided = typed.entries.iter().map(|(id, _)| *id);
+    loop {
+        match (planned.next(), provided.next()) {
+            (Some(expected), Some(actual)) if expected == actual => {}
+            (Some(expected), Some(actual)) => {
+                return Err(InstantiateError::TypedLocalsMismatch {
+                    local: expected.min(actual),
+                });
+            }
+            (Some(local), None) | (None, Some(local)) => {
+                return Err(InstantiateError::TypedLocalsMismatch { local });
+            }
+            (None, None) => break,
         }
     }
-    if !plan.entity_valued_fields.is_empty() && typed.entries.is_empty() {
-        return Err(InstantiateError::TypedFieldRemapRequired);
-    }
-
     let mut remap = RemapTable::with_base_capacity(plan.entity_count as usize);
     for _ in 0..plan.entity_count {
         remap.push_base(world.entities().reserve_entity());
     }
     world.flush_reserved();
 
-    for &local in &locals {
+    for (local, constructor) in typed.entries {
         let entity = remap.get(local).expect("validated plan local has mapping");
-        let index = typed
-            .entries
-            .iter()
-            .position(|(id, _)| *id == local)
-            .expect("prevalidated typed local");
-        let (_, constructor) = typed.entries.swap_remove(index);
-        if let Err(error) = constructor(world, entity, &remap) {
+        let result = {
+            let mut context = SpawnContext {
+                world,
+                owned: &remap,
+                owner: entity,
+            };
+            constructor(&mut context, entity, &remap)
+        };
+        if let Err(error) = result {
             rollback(world, &remap, plan);
             return Err(InstantiateError::TypedSpawnFailed {
                 local,
@@ -250,14 +367,30 @@ pub fn spawn_typed_plan(
     }
     world.register_child_of();
     for &(child, parent) in plan.hierarchy.iter() {
-        world.add_relation::<ChildOf>(
-            remap.get(child).expect("validated child"),
-            remap.get(parent).expect("validated parent"),
-        );
+        let child_entity = remap.get(child).expect("validated child");
+        let parent_entity = remap.get(parent).expect("validated parent");
+        if would_create_child_cycle(world, child_entity, parent_entity) {
+            rollback(world, &remap, plan);
+            return Err(InstantiateError::DynamicHierarchyCycle { child, parent });
+        }
+        world.add_relation::<ChildOf>(child_entity, parent_entity);
     }
 
     let root = remap.get(LocalEntityId::new(0));
     Ok(SceneSpawn { root, remap })
+}
+
+pub(crate) fn would_create_child_cycle(world: &World, child: Entity, parent: Entity) -> bool {
+    let mut cursor = parent;
+    loop {
+        if cursor == child {
+            return true;
+        }
+        let Some(next) = world.relation_targets::<ChildOf>(cursor).first().copied() else {
+            return false;
+        };
+        cursor = next;
+    }
 }
 
 fn rollback(world: &mut World, remap: &RemapTable, plan: &InstantiationPlan) {
@@ -266,14 +399,14 @@ fn rollback(world: &mut World, remap: &RemapTable, plan: &InstantiationPlan) {
             world.remove_relation::<ChildOf>(child, parent);
         }
     }
-    for (_, entity) in remap.base_entities() {
+    for (_, entity) in remap.entities() {
         world.despawn(entity);
     }
 }
 
 /// Despawns exactly the entities owned by the instance.
 pub fn despawn_instance(world: &mut World, spawn: &SceneSpawn) -> usize {
-    for (_, child) in spawn.remap.base_entities() {
+    for (_, child) in spawn.remap.entities() {
         let parents: Vec<_> = world.relation_targets::<ChildOf>(child).to_vec();
         for parent in parents {
             world.remove_relation::<ChildOf>(child, parent);
@@ -281,14 +414,14 @@ pub fn despawn_instance(world: &mut World, spawn: &SceneSpawn) -> usize {
     }
     // ChildOf deletes children when its target is destroyed. Detach external
     // children first so this operation cannot cascade outside the instance.
-    for (_, parent) in spawn.remap.base_entities() {
+    for (_, parent) in spawn.remap.entities() {
         let children: Vec<_> = world.relation_sources::<ChildOf>(parent).to_vec();
         for child in children {
             world.remove_relation::<ChildOf>(child, parent);
         }
     }
     let mut removed = 0;
-    for (_, entity) in spawn.remap.base_entities() {
+    for (_, entity) in spawn.remap.entities() {
         if world.despawn(entity) {
             removed += 1;
         }
@@ -327,10 +460,19 @@ mod tests {
                 )])
             },
             entity_valued_fields: Box::new([]),
-            hierarchy: hierarchy
-                .iter()
-                .map(|&(c, p)| (LocalEntityId::new(c), LocalEntityId::new(p)))
-                .collect(),
+            hierarchy: if hierarchy.is_empty() && !locals.is_empty() {
+                locals
+                    .iter()
+                    .copied()
+                    .filter(|&local| local != 0)
+                    .map(|local| (LocalEntityId::new(local), LocalEntityId::new(0)))
+                    .collect()
+            } else {
+                hierarchy
+                    .iter()
+                    .map(|&(c, p)| (LocalEntityId::new(c), LocalEntityId::new(p)))
+                    .collect()
+            },
             reserved_local_base: LocalEntityId::RESERVED_BASE,
         }
     }
@@ -348,9 +490,9 @@ mod tests {
     fn entity_only_hierarchy_is_remapped_and_despawned() {
         let mut world = World::new();
         let spawned = spawn_plan(&mut world, &plan(&[0, 1, 2], &[(1, 0), (2, 1)])).unwrap();
-        let root = spawned.remap.get(LocalEntityId::new(0)).unwrap();
-        let child = spawned.remap.get(LocalEntityId::new(1)).unwrap();
-        let grandchild = spawned.remap.get(LocalEntityId::new(2)).unwrap();
+        let root = spawned.resolve(LocalEntityId::new(0)).unwrap();
+        let child = spawned.resolve(LocalEntityId::new(1)).unwrap();
+        let grandchild = spawned.resolve(LocalEntityId::new(2)).unwrap();
         assert_eq!(spawned.root, Some(root));
         assert!(world.has_relation::<ChildOf>(child, root));
         assert!(world.has_relation::<ChildOf>(grandchild, child));
@@ -380,8 +522,8 @@ mod tests {
                 .with_bundle(LocalEntityId::new(1), Marker(21)),
         )
         .unwrap();
-        let a0 = a.remap.get(LocalEntityId::new(0)).unwrap();
-        let b0 = b.remap.get(LocalEntityId::new(0)).unwrap();
+        let a0 = a.resolve(LocalEntityId::new(0)).unwrap();
+        let b0 = b.resolve(LocalEntityId::new(0)).unwrap();
         assert_ne!(a0, b0);
         assert_eq!(world.get::<Marker>(a0), Some(&Marker(10)));
         assert_eq!(world.get::<Marker>(b0), Some(&Marker(20)));
@@ -397,17 +539,102 @@ mod tests {
             &mut world,
             &plan,
             TypedSpawnPlan::new()
-                .with_constructor(LocalEntityId::new(0), |world, entity, remap| {
+                .with_constructor(LocalEntityId::new(0), |context, entity, remap| {
                     let target = remap.get(LocalEntityId::new(1)).unwrap();
-                    world.spawn_at(entity, Link(target));
+                    context.spawn_at(entity, Link(target)).unwrap();
                     Ok(())
                 })
                 .with_bundle(LocalEntityId::new(1), Marker(7)),
         )
         .unwrap();
-        let source = spawned.remap.get(LocalEntityId::new(0)).unwrap();
-        let target = spawned.remap.get(LocalEntityId::new(1)).unwrap();
+        let source = spawned.resolve(LocalEntityId::new(0)).unwrap();
+        let target = spawned.resolve(LocalEntityId::new(1)).unwrap();
         assert_eq!(world.get::<Link>(source), Some(&Link(target)));
+    }
+
+    #[test]
+    fn constructor_can_only_materialize_its_current_local() {
+        let mut world = World::new();
+        let result = spawn_typed_plan(
+            &mut world,
+            &plan(&[0, 1], &[]),
+            TypedSpawnPlan::new()
+                .with_constructor(LocalEntityId::new(0), |context, _, remap| {
+                    let other = remap.get(LocalEntityId::new(1)).unwrap();
+                    assert!(matches!(
+                        context.spawn_at(other, Marker(1)),
+                        Err(SpawnContextError::EntityNotCurrent(_))
+                    ));
+                    Err(TypedSpawnError { code: 7 })
+                })
+                .with_bundle(LocalEntityId::new(1), Marker(2)),
+        );
+        assert_eq!(
+            result,
+            Err(InstantiateError::TypedSpawnFailed {
+                local: LocalEntityId::new(0),
+                code: 7,
+            })
+        );
+        assert_eq!(world.entity_count(), 0);
+    }
+
+    #[test]
+    fn constructor_hierarchy_cycle_is_rejected_and_rolled_back() {
+        let mut world = World::new();
+        let result = spawn_typed_plan(
+            &mut world,
+            &plan(&[0, 1], &[(1, 0)]),
+            TypedSpawnPlan::new()
+                .with_bundle(LocalEntityId::new(0), Marker(0))
+                .with_constructor(LocalEntityId::new(1), |context, entity, remap| {
+                    context.spawn_at(entity, Marker(1)).unwrap();
+                    context
+                        .add_child_of(remap.get(LocalEntityId::new(0)).unwrap(), entity)
+                        .unwrap();
+                    Ok(())
+                }),
+        );
+        assert!(matches!(
+            result,
+            Err(InstantiateError::DynamicHierarchyCycle { .. })
+        ));
+        assert_eq!(world.entity_count(), 0);
+    }
+
+    #[test]
+    fn typed_materializer_rejects_opaque_plan_payloads() {
+        let mut payload_plan = plan(&[0], &[]);
+        payload_plan.groups[0].signature =
+            ArchetypeSignature::new(vec![ComponentTypeId::of::<Marker>()]);
+        payload_plan.groups[0].columns = Box::new([crate::plan::Column::new(
+            ComponentTypeId::of::<Marker>(),
+            vec![0; size_of::<Marker>()].into_boxed_slice(),
+        )]);
+        let mut world = World::new();
+        let result = spawn_typed_plan(
+            &mut world,
+            &payload_plan,
+            TypedSpawnPlan::new().with_bundle(LocalEntityId::new(0), Marker(5)),
+        );
+        assert!(matches!(
+            result,
+            Err(InstantiateError::TypedSpawnRequired { .. })
+        ));
+        assert_eq!(world.entity_count(), 0);
+    }
+
+    #[test]
+    fn spawn_refuses_to_flush_reservations_owned_by_the_caller() {
+        let mut world = World::new();
+        let pending = world.entities().reserve_entity();
+        assert_eq!(
+            spawn_plan(&mut world, &plan(&[0], &[])),
+            Err(InstantiateError::OutstandingReservations)
+        );
+        assert!(world.entities().has_outstanding_reservations());
+        world.flush_reserved();
+        assert!(world.contains(pending));
     }
 
     #[test]
@@ -425,12 +652,24 @@ mod tests {
     }
 
     #[test]
+    fn despawn_removes_reserved_entities_owned_by_instance() {
+        let mut world = World::new();
+        let mut spawned = spawn_plan(&mut world, &plan(&[0], &[])).unwrap();
+        let reserved = world.spawn(Marker(99));
+        assert!(spawned.remap.set(LocalEntityId::reserved(0), reserved));
+
+        assert_eq!(despawn_instance(&mut world, &spawned), 2);
+        assert!(!world.contains(spawned.root.unwrap()));
+        assert!(!world.contains(reserved));
+    }
+
+    #[test]
     fn constructor_failure_rolls_back_every_reserved_entity() {
         let mut world = World::new();
         let before = world.entity_count();
         let result = spawn_typed_plan(
             &mut world,
-            &plan(&[0, 1, 2], &[(1, 0)]),
+            &plan(&[0, 1, 2], &[(1, 0), (2, 0)]),
             TypedSpawnPlan::new()
                 .with_bundle(LocalEntityId::new(0), Marker(0))
                 .with_constructor(LocalEntityId::new(1), |_, _, _| {

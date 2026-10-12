@@ -295,8 +295,8 @@ features: `std`(持久化落盘)/ `anim`(动效)/ `snapshot_tests`。核心 mode
 | 里程碑 | 内容 | 依赖 |
 |---|---|---|
 | **M0** | model + reduce(split/tabify/close/resize)+ 不变量 + 属性测试 | — |
-| **M1** | render(layout 解算 + DockPanel 装配 + tab 栏) | prism_ui_layout ✅ / DockPanel ✅ |
-| **M2** | 拖拽状态机 + 五向 drop zone + overlay 预览 | prism_ui_input ✅ / prism_ui_overlay ✅ |
+| **M1** | renderer-independent 几何解算 + render plan + tab/header/splitter 元数据 | Dock model ✅ / DockPanel ✅；Element 装配仍待完成 |
+| **M2** | 拖拽状态机 + 五向 drop zone + overlay 预览 | 状态机/drop-zone/reducer action 已交付；renderer overlay 预览仍待集成 |
 | **M3** | 浮窗 + autohide 边栏 + maximize | M1/M2 |
 | **M4** | 持久化(序列化/校验/迁移)+ Workspace + 自动保存 | prism_ui_store ✅ |
 | **M5** | 动效 + 可达性 + 撤销集成 + 多显示器校正 | 平台层 / 命令内核 |
@@ -343,10 +343,13 @@ let layout = DockLayout::load(&bytes, &registry)?; // 未知面板丢弃,比例�
 ## 18. 诚实边界(SHIPPED vs PLANNED)
 
 - ✅ **已存在底座(非本 crate)**:`prism_ui_layout`(确定性 flexbox,`no_std`)、`prism_ui_overlay`(OverlayKind z 序 + FocusTrap + portal 渲染)、`prism_ui_store`(Store/select/middleware)、`prism_ui_virtual`(视口窗口化 + overscan + spacer)、`prism_ui_input`(hit_test z 序/pointer-events、FocusRing tabindex、gesture/velocity/swipe/multitap)、`prism_ui_scoped`、`prism_ui_snapshot`(serialize_tree/parse_tree 可逆编码)、`prism_ui_anim`/`prism_ui_motion`、`prism_ui_component_kit::editor::DockPanel`(**仅视觉外壳**:标题栏 + 内容区 + DockSide 修饰类 + role=Group,无任何布局逻辑)。
-- ✅ **M0 已交付**:`pkg/prism_ui_dock` 的 `model` / `validate` / `reduce`：纯数据 `DockNode`/`DockLayout`、split/tab/document/floating/autohide/maximize 模型、资源上限与唯一归属校验，以及确定性 split/tabify/move/close/resize/float/dock/maximize/restore/autohide reducer。当前已由 11 个单元测试覆盖，且通过 `no_std` 检查与 `clippy -D warnings`。
-- ⬜ **M1–M5 仍 PLANNED**:`drag`、`render`、`persist`、`registry`、`store`、`a11y` 以及动画/多显示器/撤销集成。本文其余 API、drop zone/状态机和渲染代码块仍是设计意图，不代表已实现。
+- ✅ **M0 已交付**:`pkg/prism_ui_dock` 的 `model` / `validate` / `reduce`：纯数据 `DockNode`/`DockLayout`、split/tab/document/floating/autohide/maximize 模型、资源上限与唯一归属校验，以及确定性 split/tabify/move/close/resize/float/dock/maximize/restore/autohide reducer。
+- ✅ **M1 几何/计划垂直切片已交付**:`render_plan` 暴露确定性 `solve`/`solve_with`，输入经校验的模型、逻辑 viewport 和显式 metrics，输出主区/浮窗/auto-hide/maximize 的面板与文档矩形、tab headers、splitter/hit rect、active/focus 元数据。比例使用固定点整数分配与最大余数稳定舍入；最小尺寸不足、无效模型、bar/reveal 溢出均结构化报错，不静默钳制比例或几何。
+- ⬜ **M1 Element 装配与真实渲染仍未交付**:`RenderPlan` 是未来 renderer 可消费的纯数据，不会创建 `Element`/`DockPanel`，也不含字体测量、主题样式、GPU 绘制、overlay portal、命中测试接线或增量渲染缓存。M1 不等同于 GPU renderer 已完成。
+- ✅ **M2 纯数据拖拽内核已交付**:`drag` 提供确定性拖拽状态机、五向 drop zone、tab 插入边界和 reducer action 映射；当前测试覆盖状态机与边界行为。overlay 预览和真实 UI hit-test/render 集成尚未交付。
+- ⬜ **M3–M5 仍 PLANNED**:`persist`、`registry`、`store`、`a11y` 以及动画/多显示器/撤销集成。完整 UI 装配和 renderer 集成仍属于后续工作，不因 M1 计划数据已存在而视为完成。
 - ⬜ **依赖未落地项**:撤销集成需编辑器命令内核;多显示器校正需平台/`prism_window` 层;动效档位依赖性能分级。
-- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心；`DockPanel` 仍仅负责视觉外壳，拖拽、渲染装配、持久化和注册表等能力尚待后续里程碑补齐。
+- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核及 M1 renderer-independent render plan；`DockPanel` 仍仅负责视觉外壳。Element 装配、GPU/renderer、overlay 预览、持久化和注册表等能力尚未交付。
 
 ---
 

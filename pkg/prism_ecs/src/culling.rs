@@ -41,7 +41,7 @@ impl Plane {
     #[inline]
     pub fn normalized(self) -> Self {
         let [a, b, c] = self.normal;
-        let len = (a * a + b * b + c * c).sqrt();
+        let len = libm::sqrtf(a * a + b * b + c * c);
         if len > 0.0 {
             Self::new([a / len, b / len, c / len], self.d / len)
         } else {
@@ -97,9 +97,21 @@ impl Frustum {
             // The AABB's "positive vertex" — the corner furthest along the plane
             // normal. If even that corner is behind the plane the whole box is.
             let positive = [
-                if plane.normal[0] >= 0.0 { max[0] } else { min[0] },
-                if plane.normal[1] >= 0.0 { max[1] } else { min[1] },
-                if plane.normal[2] >= 0.0 { max[2] } else { min[2] },
+                if plane.normal[0] >= 0.0 {
+                    max[0]
+                } else {
+                    min[0]
+                },
+                if plane.normal[1] >= 0.0 {
+                    max[1]
+                } else {
+                    min[1]
+                },
+                if plane.normal[2] >= 0.0 {
+                    max[2]
+                } else {
+                    min[2]
+                },
             ];
             if plane.signed_distance(positive) < 0.0 {
                 return false;
@@ -165,7 +177,7 @@ mod tests {
         let f = Frustum::from_view_projection(&identity);
         for plane in f.planes() {
             let n = plane.normal;
-            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            let len = libm::sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
             // Each plane's unit-normal distance from the origin is 1, and the
             // outward normal points away from the origin.
             assert!((plane.d / len - 1.0).abs() < 1e-5);
