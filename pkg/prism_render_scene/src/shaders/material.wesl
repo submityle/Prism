@@ -75,6 +75,13 @@ struct PrismSurfaceParameters {
     coat_darkening: f32,
     subsurface_scatter_anisotropy: f32,
     npr_face_softness: f32,
+    // Prism glint lobe (§17.6): a discrete microfacet estimator blended into the
+    // specular lobe. `glint_weight == 0` (the default) keeps it inert, so the
+    // fields cost 4 words of übers only for materials that declare the lobe.
+    glint_weight: f32,
+    glint_roughness: f32,
+    glint_density: f32,
+    glint_bin_half_width: f32,
 }
 
 struct PrismMaterialTexture {

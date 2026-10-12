@@ -91,6 +91,36 @@ fn the_committed_catalogue_agrees_with_the_schema_row_for_row() {
             manifest.registry_slot()
         );
     }
+
+    // The extension region is **one** slot space (§5.4), so the kinds must not
+    // interleave: the schema's `[[lobe]]` table owns the dense lobe sub-range
+    // from `EXTENSION_SLOT_BASE`, and every other kind allocates after the last
+    // lobe. Without this the next lobe would silently alias a dynamic channel.
+    let last_lobe_slot = SURFACE_LOBES
+        .iter()
+        .filter(|lobe| lobe.namespace != "KHR")
+        .map(|lobe| lobe.registry_slot)
+        .max()
+        .expect("the schema declares at least one extension lobe");
+    for manifest in committed.iter().filter(|m| m.kind() != Kind::Lobe) {
+        assert!(
+            manifest.registry_slot() > last_lobe_slot,
+            "{} (slot {}) is not a lobe but sits inside the schema's lobe sub-range 16..={last_lobe_slot}",
+            manifest.uid(),
+            manifest.registry_slot()
+        );
+    }
+    // …and the lobes are exactly that dense sub-range, not merely a subset.
+    let extension_slots: Vec<u32> = SURFACE_LOBES
+        .iter()
+        .filter(|lobe| lobe.namespace != "KHR")
+        .map(|lobe| lobe.registry_slot)
+        .collect();
+    assert_eq!(
+        extension_slots,
+        (16..16 + extension_slots.len() as u32).collect::<Vec<u32>>(),
+        "extension lobes are dense from the region base (§4.5 constraint 2)"
+    );
 }
 
 /// The four header words and the derivation are the same function, so a

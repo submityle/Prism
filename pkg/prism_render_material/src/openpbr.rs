@@ -247,7 +247,11 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 7],
+            glint_weight: 0.6,
+            glint_roughness: 0.22,
+            glint_density: 12.0,
+            glint_bin_half_width: 0.031,
+            _pad_tail: [0.0; 3],
         }
     }
 
@@ -294,8 +298,16 @@ mod tests {
     fn projection_preserves_every_canonical_lobe_verbatim() {
         let input = block(LobeMask::all());
         let projection = project_to_openpbr(&input);
-        // Only FACE is an extension lobe today.
-        assert_eq!(projection.dropped.len(), 1);
+        // Every non-`KHR` lobe is dropped, and nothing else is: the count comes
+        // from the schema table so registering a new extension lobe cannot leave
+        // this gate behind.
+        let extension_lobes: Vec<&str> = SURFACE_LOBES
+            .iter()
+            .filter(|lobe| lobe.namespace != "KHR")
+            .map(|lobe| lobe.id)
+            .collect();
+        let dropped_ids: Vec<&str> = projection.dropped.iter().map(|drop| drop.id).collect();
+        assert_eq!(dropped_ids, extension_lobes);
         assert_eq!(projection.block.lobe_mask, LobeMask::KHR_REGION);
         // Kept lobes are value-identical after projection.
         assert_eq!(projection.block.emission, input.emission);

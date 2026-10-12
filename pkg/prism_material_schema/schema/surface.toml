@@ -928,3 +928,79 @@ bit_region = "PRISM"
 pack_slot = 3
 consumed_by = []
 default = 0.0
+
+[[lobe]]
+id = "glint"
+# Identity is `uid`-based and immutable once a material has been serialized.
+# The glint lobe is Prism-private: it is the discrete (counting) microfacet
+# estimator of §17.6 — a *re-shaping* of the specular NDF for materials whose
+# microfacets are countable (metallic flake, snow, sand, glitter, frosted
+# glass), not a new energy source. Its ensemble mean is the smooth NDF, so it
+# shares the specular energy budget instead of adding to it.
+uid = "org.prism.lobe.glint"
+registry_slot = 17
+mask_const = "GLINT"
+namespace = "PRISM"
+vendor = "prism"
+stability = "experimental"
+# Platform capabilities this lobe needs beyond the shared über path (§5.3).
+# Empty: the estimator is pure ALU (hash + Poisson + the shared GGX helpers) on
+# the standard bindings.
+requires_caps = []
+words = 4
+
+[[lobe.field]]
+name = "glint_weight"
+type = "f32"
+bit_region = "PRISM"
+pack_slot = 0
+spec_subfield = "closure_mask"
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = 0.0
+valid = "0.0..=1.0"
+# Blends the discrete NDF into the specular lobe, which already owns an energy
+# budget (§17.2) — hence `coupled`, not `independent`: the estimator is
+# unbiased, so it re-shapes the highlight without changing its energy.
+energy_policy = "coupled"
+view = "dependent"
+
+[[lobe.field]]
+name = "glint_roughness"
+type = "f32"
+bit_region = "PRISM"
+pack_slot = 1
+consumed_by = ["unpack", "sample", "golden"]
+# Orientation roughness of the *flakes* (the GGX-shaped distribution the
+# discrete estimator samples), independent of the base `specular_roughness`.
+default = 0.1
+valid = "0.0..=1.0"
+energy_policy = "none"
+view = "dependent"
+
+[[lobe.field]]
+name = "glint_density"
+type = "f32"
+bit_region = "PRISM"
+pack_slot = 2
+consumed_by = ["unpack", "sample", "golden"]
+# Facets per unit² of the shade-time surface-cell space (the UV cell the seed
+# quantises). Multiplied by the per-pixel footprint area to get the expected
+# facet count `N` inside one pixel.
+default = 4.0
+valid = "0.0..=1000000.0"
+energy_policy = "none"
+view = "dependent"
+
+[[lobe.field]]
+name = "glint_bin_half_width"
+type = "f32"
+bit_region = "PRISM"
+pack_slot = 3
+consumed_by = ["unpack", "sample", "golden"]
+# Angular half-width (radians) of the half-vector acceptance bin. Narrow bins
+# resolve sparser, sharper glints; wide bins average back toward the smooth
+# lobe (and the estimator's variance `1/lambda` vanishes with them).
+default = 0.05
+valid = "0.0..=1.5707964"
+energy_policy = "none"
+view = "dependent"

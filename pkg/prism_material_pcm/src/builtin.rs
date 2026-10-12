@@ -50,6 +50,13 @@ pub const UID_LOBE_THIN_FILM: &str = "org.khronos.openpbr.thin_film";
 /// (`PRISM_lobe_npr_face`) when the lobe was renamed — see
 /// `prism_material_schema/schema/surface.toml`.
 pub const UID_LOBE_FACE: &str = "studio.prism.face_shadow";
+/// `uid` of the procedural glint lobe (`PRISM`).
+///
+/// The discrete (counting) microfacet estimator of §17.6: countable flakes
+/// (metallic flake, snow, sand, glitter) twinkle instead of forming a smooth
+/// statistical highlight. Unbiased in expectation, so it re-shapes the specular
+/// lobe without changing its energy.
+pub const UID_LOBE_GLINT: &str = "org.prism.lobe.glint";
 /// `uid` of the wetness dynamic channel (`PRISM`).
 pub const UID_CHANNEL_WETNESS: &str = "org.prism.channel.wetness";
 /// `uid` of the snow-cover dynamic channel (`PRISM`).
@@ -93,7 +100,17 @@ const KHR_LOBES: [(&str, u32, bool); 7] = [
 /// landing, §5.5), while the dynamic channels are `candidate` (layout frozen,
 /// response settling). `tests/pcm_parity.rs` in `prism_render_material` asserts
 /// the two catalogues agree row for row, so this column cannot drift.
-const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 5] = [
+///
+/// # Slot sub-allocation inside the extension region
+///
+/// The extension region is one shared slot space (§5.4), so the kinds must not
+/// interleave: the **lobe sub-range comes first and is dense from
+/// `EXTENSION_SLOT_BASE`** (16, 17 — the schema's `[[lobe]]` table is its
+/// allocator), and every other kind allocates *after* the last lobe. That is why
+/// the channels start at 18 rather than 17: `prism_render_material`'s
+/// `tests/pcm_parity.rs` fails the build if any non-lobe slot collides with a
+/// schema lobe slot, so a new lobe can never silently alias a channel.
+const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 6] = [
     (
         UID_LOBE_FACE,
         16,
@@ -103,8 +120,16 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 5] =
         true,
     ),
     (
-        UID_CHANNEL_WETNESS,
+        UID_LOBE_GLINT,
         17,
+        Kind::Lobe,
+        Stability::Experimental,
+        CapabilitySet::EMPTY,
+        true,
+    ),
+    (
+        UID_CHANNEL_WETNESS,
+        18,
         Kind::Channel,
         Stability::Candidate,
         CapabilitySet::of(Capability::ObjectSpaceCache),
@@ -112,7 +137,7 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 5] =
     ),
     (
         UID_CHANNEL_SNOW,
-        18,
+        19,
         Kind::Channel,
         Stability::Candidate,
         CapabilitySet::of(Capability::VirtualTexture),
@@ -120,7 +145,7 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 5] =
     ),
     (
         UID_CHANNEL_DAMAGE,
-        19,
+        20,
         Kind::Channel,
         Stability::Candidate,
         CapabilitySet::EMPTY,
@@ -128,7 +153,7 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 5] =
     ),
     (
         UID_CHANNEL_DISSOLVE,
-        20,
+        21,
         Kind::Channel,
         Stability::Candidate,
         CapabilitySet::EMPTY,

@@ -266,9 +266,20 @@ pub struct GpuSurfaceParameters {
     pub _pad_face0: f32,
     pub _pad_face1: f32,
     pub _pad_face2: f32,
+    /// Prism glint lobe (§17.6): blends a discrete (counting) microfacet NDF
+    /// into the specular lobe. `glint_weight == 0` is an exact identity.
+    pub glint_weight: f32,
+    /// Orientation roughness of the countable flakes (independent of the base
+    /// `specular_roughness`).
+    pub glint_roughness: f32,
+    /// Facets per unit² of the shade-time surface-cell space (the UV cell the
+    /// glint seed quantises); multiplied by the per-pixel footprint area.
+    pub glint_density: f32,
+    /// Angular half-width (radians) of the half-vector acceptance bin.
+    pub glint_bin_half_width: f32,
     /// Tail padding keeping the fat authoring view a 16-byte multiple as the
     /// coat group grows. Carries no data.
-    pub _pad_tail: [f32; 7],
+    pub _pad_tail: [f32; 3],
 }
 
 impl Default for GpuSurfaceParameters {
@@ -323,7 +334,14 @@ impl Default for GpuSurfaceParameters {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 7],
+            // Glint defaults: weight 0 keeps the lobe inert, density 4/unit² and
+            // a ~2.9° acceptance bin are the values the shading-module tests are
+            // baselined against.
+            glint_weight: 0.0,
+            glint_roughness: 0.1,
+            glint_density: 4.0,
+            glint_bin_half_width: 0.05,
+            _pad_tail: [0.0; 3],
         }
     }
 }

@@ -58,8 +58,9 @@ use core::mem::size_of;
 
 use crate::record::{GpuSurfaceParameters, MaterialRecord};
 use crate::surface::{
-    GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe, GpuNprFaceLobe, GpuSheenLobe,
-    GpuSubsurfaceLobe, GpuSurfaceCore, GpuThinFilmLobe, GpuTransmissionLobe, LobeMask,
+    GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe, GpuGlintLobe, GpuNprFaceLobe,
+    GpuSheenLobe, GpuSubsurfaceLobe, GpuSurfaceCore, GpuThinFilmLobe, GpuTransmissionLobe,
+    LobeMask,
     SurfaceParameterBlock,
 };
 
@@ -97,11 +98,12 @@ enum Group {
     Transmission,
     ThinFilm,
     Face,
+    Glint,
 }
 
 impl Group {
     /// Canonical order: core first, then the lobes low-bit-first.
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Core,
         Self::Emission,
         Self::Clearcoat,
@@ -111,11 +113,12 @@ impl Group {
         Self::Transmission,
         Self::ThinFilm,
         Self::Face,
+        Self::Glint,
     ];
 
     /// `f32` lanes each group contributes to the flat accumulator, in
     /// [`Self::ALL`] order.
-    const LANES: [usize; 9] = [
+    const LANES: [usize; 10] = [
         lanes::<GpuSurfaceCore>(),
         lanes::<GpuEmissionLobe>(),
         lanes::<GpuClearCoatLobe>(),
@@ -125,6 +128,7 @@ impl Group {
         lanes::<GpuTransmissionLobe>(),
         lanes::<GpuThinFilmLobe>(),
         lanes::<GpuNprFaceLobe>(),
+        lanes::<GpuGlintLobe>(),
     ];
 
     const fn index(self) -> usize {
@@ -160,6 +164,7 @@ impl Group {
             Self::Transmission => Some(LobeMask::TRANSMISSION),
             Self::ThinFilm => Some(LobeMask::THIN_FILM),
             Self::Face => Some(LobeMask::NPR_FACE),
+            Self::Glint => Some(LobeMask::GLINT),
         }
     }
 
@@ -177,6 +182,7 @@ impl Group {
             }
             Self::ThinFilm => bytemuck::cast_slice(core::slice::from_ref(&block.thin_film)),
             Self::Face => bytemuck::cast_slice(core::slice::from_ref(&block.face)),
+            Self::Glint => bytemuck::cast_slice(core::slice::from_ref(&block.glint)),
         }
     }
 
@@ -200,6 +206,7 @@ impl Group {
             }
             Self::ThinFilm => bytemuck::cast_slice_mut(core::slice::from_mut(&mut block.thin_film)),
             Self::Face => bytemuck::cast_slice_mut(core::slice::from_mut(&mut block.face)),
+            Self::Glint => bytemuck::cast_slice_mut(core::slice::from_mut(&mut block.glint)),
         }
     }
 }

@@ -21,7 +21,11 @@ fn caps(list: impl IntoIterator<Item = Capability>) -> CapabilitySet {
 #[test]
 fn the_builtin_catalogue_registers_every_core_lobe_as_a_khr_item() {
     let registry = builtin_registry();
-    assert_eq!(registry.len(), 7 + 5, "7 KHR lobes + 5 Prism extensions");
+    assert_eq!(
+        registry.len(),
+        7 + 6,
+        "7 KHR lobes + 2 Prism lobes + 4 Prism channels"
+    );
     for (index, slot) in [0u32, 1, 2, 3, 4, 5, 6].into_iter().enumerate() {
         let manifest = registry.manifest_at(slot).expect("core lobe slot");
         assert_eq!(manifest.namespace(), Namespace::Khr);
@@ -85,7 +89,7 @@ fn channel_and_lobe_kinds_share_one_namespace_partitioned_slot_space() {
         .manifest_by_uid(UID_CHANNEL_WETNESS)
         .expect("wetness channel");
     assert_eq!(wetness.kind(), Kind::Channel);
-    assert_eq!(wetness.registry_slot(), 17);
+    assert_eq!(wetness.registry_slot(), 18);
     assert_eq!(wetness.region(), Region::Prism);
     let snow = registry
         .manifest_by_uid(UID_CHANNEL_SNOW)
@@ -98,14 +102,14 @@ fn channel_and_lobe_kinds_share_one_namespace_partitioned_slot_space() {
 #[test]
 fn register_allocates_from_the_namespace_region_and_never_recycles() {
     let mut registry = builtin_registry();
-    // The Prism region already holds slots 16..21, so the next fresh Prism
-    // extension lands at 21 and the one after at 22.
-    let first = register_prism_extension(&mut registry, "org.prism.lobe.glint", Kind::Lobe)
+    // The Prism region already holds slots 16..21 (2 lobes + 4 channels), so the
+    // next fresh Prism extension lands at 22 and the one after at 23.
+    let first = register_prism_extension(&mut registry, "org.prism.lobe.watercolor", Kind::Lobe)
         .expect("prism region has room");
-    assert_eq!(first.registry_slot(), 21);
+    assert_eq!(first.registry_slot(), 22);
     let second = register_prism_extension(&mut registry, "org.prism.pass.outline", Kind::Composite)
         .expect("prism region has room");
-    assert_eq!(second.registry_slot(), 22);
+    assert_eq!(second.registry_slot(), 23);
     // A studio extension allocates from its own region, not the Prism one.
     let studio = registry
         .register_new("com.studio.lobe.watercolor", Namespace::Studio, Kind::Lobe)
@@ -235,13 +239,13 @@ fn negotiation_errors_on_a_missing_required_capability() {
     let registry = builtin_registry();
     let mut requested = ExtensionSet::EMPTY;
     // `snow` needs virtual texturing.
-    requested.insert_used(18).unwrap();
-    requested.insert_required(18).unwrap();
+    requested.insert_used(19).unwrap();
+    requested.insert_required(19).unwrap();
 
     let weak = caps([Capability::BindlessTextures]);
     let error = negotiate(&registry, requested, weak).expect_err("snow is unsatisfiable");
     assert_eq!(error.unsupported.len(), 1);
-    assert_eq!(error.unsupported[0].slot, 18);
+    assert_eq!(error.unsupported[0].slot, 19);
     assert_eq!(
         error.unsupported[0].uid.as_deref(),
         Some("org.prism.channel.snow")
@@ -263,29 +267,29 @@ fn negotiation_gracefully_ignores_an_unsatisfiable_used_only_extension() {
     let registry = builtin_registry();
     let mut requested = ExtensionSet::EMPTY;
     requested.insert_used(16).unwrap(); // face lobe: no caps needed
-    requested.insert_used(18).unwrap(); // snow: needs VT
-    requested.insert_used(19).unwrap(); // damage: no caps needed
+    requested.insert_used(19).unwrap(); // snow: needs VT
+    requested.insert_used(20).unwrap(); // damage: no caps needed
 
     let weak = caps([Capability::BindlessTextures]);
     let negotiation = negotiate(&registry, requested, weak).expect("nothing is required");
     assert!(!negotiation.is_lossless());
     assert_eq!(negotiation.ignored().len(), 1);
-    assert_eq!(negotiation.ignored()[0].slot, 18);
+    assert_eq!(negotiation.ignored()[0].slot, 19);
     let kept = negotiation.extensions();
     assert!(kept.contains_used(16));
-    assert!(kept.contains_used(19));
+    assert!(kept.contains_used(20));
     assert!(
-        !kept.contains_used(18),
+        !kept.contains_used(19),
         "the unsatisfiable extension is dropped"
     );
-    assert!(!kept.contains_required(18));
+    assert!(!kept.contains_required(19));
 }
 
 #[test]
 fn required_is_always_a_subset_of_used_in_the_digest() {
     let mut set = ExtensionSet::EMPTY;
-    set.insert_required(18).unwrap();
-    assert!(set.contains_used(18) && set.contains_required(18));
+    set.insert_required(19).unwrap();
+    assert!(set.contains_used(19) && set.contains_required(19));
     // A caller cannot construct required without used through the safe API.
     assert!(set.required_is_subset_of(set));
     // A slot outside the digest is rejected by the fallible mutators.

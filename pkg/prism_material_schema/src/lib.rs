@@ -698,7 +698,21 @@ mod tests {
         let schema = surface_schema();
         assert_eq!(schema.schema_version, 1);
         assert_eq!(schema.core.words, 20);
-        assert_eq!(schema.lobe_count(), 8);
+        assert_eq!(schema.lobe_count(), 9);
+        // The open-vocabulary glint lobe (§17.6) is a first-class member of the
+        // same table as the specification core: it just lives in the extension
+        // region with its own uid and a 4-word block.
+        let glint = schema
+            .lobes
+            .iter()
+            .find(|lobe| lobe.id == "glint")
+            .expect("glint lobe declared");
+        assert_eq!(glint.uid, "org.prism.lobe.glint");
+        assert_eq!(glint.registry_slot, EXTENSION_SLOT_BASE + 1);
+        assert_eq!(glint.mask_const, "GLINT");
+        assert_eq!(glint.namespace, Namespace::Prism);
+        assert_eq!(glint.words, 4);
+        assert!(glint.requires_caps.is_empty());
     }
 
     #[test]
@@ -709,8 +723,9 @@ mod tests {
             .iter()
             .map(|l| l.registry_slot)
             .collect();
-        // Canonical slots 0..6 then the extension region at 16 (§4.5 constraint 2).
-        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6, 16]);
+        // Canonical slots 0..6 then the extension region from 16 (§4.5
+        // constraint 2): the private lobes are dense from the extension base.
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6, 16, 17]);
     }
 
     #[test]

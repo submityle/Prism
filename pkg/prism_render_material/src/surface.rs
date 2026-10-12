@@ -334,6 +334,44 @@ pub struct GpuNprFaceLobe {
     pub _pad2: f32,
 }
 
+/// Glint lobe: the discrete (counting) microfacet estimator of §17.6.
+///
+/// Real metallic flake, snow, sand and glitter expose a *finite* number of
+/// mirror-like facets per pixel footprint, so the highlight twinkles instead of
+/// being a smooth statistical lobe. The estimator counts how many facets land in
+/// the half-vector query bin, which is **unbiased** — its ensemble mean is the
+/// smooth GGX NDF — so `glint_weight` re-shapes the specular lobe without adding
+/// or removing energy. It is view- and space-dependent by construction, so it is
+/// never an object-space-cacheable field.
+///
+/// The two quantities the estimator needs that are *not* authored parameters —
+/// the surface cell the seed quantises and the per-pixel footprint area — are
+/// shade-time inputs supplied alongside the frame (see
+/// `prism_render_shading::lighting::SurfaceSample`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuGlintLobe {
+    pub glint_weight: f32,
+    pub glint_roughness: f32,
+    pub glint_density: f32,
+    pub glint_bin_half_width: f32,
+}
+
+impl Default for GpuGlintLobe {
+    fn default() -> Self {
+        // Exactly the schema defaults (`surface.toml`), so an absent lobe reads
+        // back as its true neutral value rather than a zeroed struct — the same
+        // three-way alignment (`schema` ↔ `GpuSurfaceParameters` ↔ lobe struct)
+        // the P1-f2 default-alignment gate checks for every other lobe.
+        Self {
+            glint_weight: 0.0,
+            glint_roughness: 0.1,
+            glint_density: 4.0,
+            glint_bin_half_width: 0.05,
+        }
+    }
+}
+
 /// Bitset recording which optional lobes a surface carries.
 ///
 /// The bit order is the canonical serialization order used by
@@ -355,6 +393,10 @@ impl LobeMask {
     /// extension region (§4.5 constraint 2), so the canonical `KHR` region can
     /// grow through slots 0..16 without ever aliasing a private lobe.
     pub const NPR_FACE: Self = Self(1 << 16);
+    /// The procedural glint lobe (§17.6): a discrete (counting) microfacet
+    /// estimator blended into the specular lobe. Slot 17 keeps the extension
+    /// region dense from its base.
+    pub const GLINT: Self = Self(1 << 17);
 
     /// The `OpenPBR` specification-core bit region (§4.5 constraint 2).
     ///
@@ -376,11 +418,11 @@ impl LobeMask {
     /// segment. It is disjoint from [`Self::KHR_REGION`], so a private lobe can
     /// never alias a specification-half field, and a downstream pure-OpenPBR
     /// consumer simply ignores anything outside [`Self::KHR_REGION`].
-    pub const EXTENSION_REGION: Self = Self(Self::NPR_FACE.0);
+    pub const EXTENSION_REGION: Self = Self(Self::NPR_FACE.0 | Self::GLINT.0);
 
     /// Number of distinct lobe bits defined; also the number of iterations of
     /// [`Self::iter_present`] over a fully populated mask.
-    pub const COUNT: u32 = 8;
+    pub const COUNT: u32 = 9;
 
     /// Raw bits.
     pub const fn bits(self) -> u32 {
@@ -408,7 +450,8 @@ impl LobeMask {
         // extension base at bit 16, so this is an OR of the defined bits rather
         // than a contiguous `(1 << COUNT) - 1`.
         Self(Self::EMISSION.0 | Self::CLEARCOAT.0 | Self::ANISOTROPY.0 | Self::SHEEN.0
-            | Self::SUBSURFACE.0 | Self::TRANSMISSION.0 | Self::THIN_FILM.0 | Self::NPR_FACE.0)
+            | Self::SUBSURFACE.0 | Self::TRANSMISSION.0 | Self::THIN_FILM.0 | Self::NPR_FACE.0
+            | Self::GLINT.0)
     }
 
     /// Keep only the bits inside the `OpenPBR` specification-core region.
@@ -460,6 +503,7 @@ impl LobeMask {
             Self::TRANSMISSION,
             Self::THIN_FILM,
             Self::NPR_FACE,
+            Self::GLINT,
         ]
     }
 }
@@ -491,6 +535,7 @@ pub struct SurfaceParameterBlock {
     pub transmission: GpuTransmissionLobe,
     pub thin_film: GpuThinFilmLobe,
     pub face: GpuNprFaceLobe,
+    pub glint: GpuGlintLobe,
 }
 
 /// Reasons an [`SurfaceParameterBlock::unpack`] can fail.
@@ -607,6 +652,12 @@ impl SurfaceParameterBlock {
                 _pad1: 0.0,
                 _pad2: 0.0,
             },
+            glint: GpuGlintLobe {
+                glint_weight: params.glint_weight,
+                glint_roughness: params.glint_roughness,
+                glint_density: params.glint_density,
+                glint_bin_half_width: params.glint_bin_half_width,
+            },
         }
     }
 
@@ -679,6 +730,12 @@ impl SurfaceParameterBlock {
         if self.lobe_mask.contains(LobeMask::NPR_FACE) {
             full.npr_face_softness = self.face.softness;
         }
+        if self.lobe_mask.contains(LobeMask::GLINT) {
+            full.glint_weight = self.glint.glint_weight;
+            full.glint_roughness = self.glint.glint_roughness;
+            full.glint_density = self.glint.glint_density;
+            full.glint_bin_half_width = self.glint.glint_bin_half_width;
+        }
         full
     }
 
@@ -714,6 +771,7 @@ impl SurfaceParameterBlock {
             }
             LobeMask::THIN_FILM => bytemuck::cast_slice(core::slice::from_ref(&self.thin_film)),
             LobeMask::NPR_FACE => bytemuck::cast_slice(core::slice::from_ref(&self.face)),
+            LobeMask::GLINT => bytemuck::cast_slice(core::slice::from_ref(&self.glint)),
             _ => &[],
         }
     }
@@ -768,6 +826,7 @@ impl SurfaceParameterBlock {
                 LobeMask::TRANSMISSION => block.transmission = *bytemuck::from_bytes(slice),
                 LobeMask::THIN_FILM => block.thin_film = *bytemuck::from_bytes(slice),
                 LobeMask::NPR_FACE => block.face = *bytemuck::from_bytes(slice),
+                LobeMask::GLINT => block.glint = *bytemuck::from_bytes(slice),
                 _ => {}
             }
             cursor += lobe_len;
@@ -845,7 +904,11 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 7],
+            glint_weight: 0.6,
+            glint_roughness: 0.22,
+            glint_density: 12.0,
+            glint_bin_half_width: 0.031,
+            _pad_tail: [0.0; 3],
         }
     }
 
@@ -917,11 +980,14 @@ mod tests {
     #[test]
     fn pure_openpbr_masks_are_exactly_the_canonical_region() {
         assert!(LobeMask::default().is_pure_openpbr());
-        assert!(LobeMask::all().contains(LobeMask::NPR_FACE));
+        assert!(LobeMask::all().contains(LobeMask::EXTENSION_REGION));
         assert!(!LobeMask::all().is_pure_openpbr());
+        // Derived from the region partition rather than a lobe name list, so a
+        // newly-registered extension lobe cannot silently fail to be covered.
         for bit in LobeMask::canonical() {
-            assert_eq!(bit.is_pure_openpbr(), bit != LobeMask::NPR_FACE);
-            assert_eq!(bit.canonical_region() == bit, bit != LobeMask::NPR_FACE);
+            let canonical = LobeMask::region_of(bit) == Some(LobeRegion::Canonical);
+            assert_eq!(bit.is_pure_openpbr(), canonical, "{bit:?}");
+            assert_eq!(bit.canonical_region() == bit, canonical, "{bit:?}");
         }
         // Undefined bits must never pass the conformance precondition.
         assert!(!LobeMask(1 << 31).is_pure_openpbr());
