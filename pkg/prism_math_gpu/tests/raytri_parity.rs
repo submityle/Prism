@@ -17,9 +17,9 @@
 //! passes on a device-less CI image while running the full dispatch on a real
 //! `GPU`.
 
-use prism_math::Vec3;
 use prism_math::geom::ray::Ray3;
 use prism_math::intersect::{ray_triangle, ray_triangle_bary};
+use prism_math::Vec3;
 use prism_math_gpu::{GpuContext, GpuRay, GpuRayTri, GpuTri, GpuTriHit};
 
 /// Acquires a device, or prints a skip note and returns `None` on hosts without
@@ -69,7 +69,11 @@ fn sample() -> (Vec<GpuRay>, Vec<GpuTri>, Vec<Ray3>, Vec<(Vec3, Vec3, Vec3)>) {
     let mut cpu_tris = Vec::new();
     for (o, d) in rays {
         gpu_rays.push(GpuRay::new([o.x, o.y, o.z], [d.x, d.y, d.z]));
-        gpu_tris.push(GpuTri::new([a.x, a.y, a.z], [b.x, b.y, b.z], [c.x, c.y, c.z]));
+        gpu_tris.push(GpuTri::new(
+            [a.x, a.y, a.z],
+            [b.x, b.y, b.z],
+            [c.x, c.y, c.z],
+        ));
         cpu_rays.push(Ray3::new(o, d));
         cpu_tris.push((a, b, c));
     }
@@ -93,7 +97,10 @@ fn assert_hit(gpu: GpuTriHit, ray: Ray3, tri: (Vec3, Vec3, Vec3), tag: &str) {
                 .zip([cpu_hit.normal.x, cpu_hit.normal.y, cpu_hit.normal.z])
                 .enumerate()
             {
-                assert!(close(*g, c), "{tag}: normal[{axis}] mismatch gpu={g} cpu={c}");
+                assert!(
+                    close(*g, c),
+                    "{tag}: normal[{axis}] mismatch gpu={g} cpu={c}"
+                );
             }
         }
     }
@@ -133,7 +140,11 @@ fn large_batch_crosses_workgroups() {
         let o = Vec3::new(x, y, 10.0);
         let d = Vec3::new(0.0, 0.0, -1.0);
         gr.push(GpuRay::new([o.x, o.y, o.z], [d.x, d.y, d.z]));
-        gt.push(GpuTri::new([a.x, a.y, a.z], [b.x, b.y, b.z], [c.x, c.y, c.z]));
+        gt.push(GpuTri::new(
+            [a.x, a.y, a.z],
+            [b.x, b.y, b.z],
+            [c.x, c.y, c.z],
+        ));
         cr.push(Ray3::new(o, d));
         ct.push((a, b, c));
     }
@@ -142,6 +153,31 @@ fn large_batch_crosses_workgroups() {
     for i in 0..gr.len() {
         assert_hit(hits[i], cr[i], ct[i], &format!("batch[{i}]"));
     }
+}
+
+#[test]
+fn ray_triangle_nan_direction_rejected_like_cpu() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let caster = GpuRayTri::new(&ctx);
+    // A NaN ray direction makes the barycentric `u` NaN; the CPU range
+    // containment rejects it, so the shader must use the equivalent
+    // `!(u >= 0 && u <= 1)` test (CR-found regression).
+    let o = Vec3::new(0.0, 0.0, 1.0);
+    let d = Vec3::new(f32::NAN, 0.0, -1.0);
+    let a = Vec3::new(-1.0, -1.0, 0.0);
+    let b = Vec3::new(1.0, -1.0, 0.0);
+    let c = Vec3::new(0.0, 1.0, 0.0);
+    let gr = vec![GpuRay::new([o.x, o.y, o.z], [d.x, d.y, d.z])];
+    let gt = vec![GpuTri::new(
+        [a.x, a.y, a.z],
+        [b.x, b.y, b.z],
+        [c.x, c.y, c.z],
+    )];
+
+    let hits = caster.cast(&ctx, &gr, &gt);
+    assert_hit(hits[0], Ray3::new(o, d), (a, b, c), "nan_dir");
 }
 
 #[test]

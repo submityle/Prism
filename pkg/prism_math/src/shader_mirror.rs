@@ -606,9 +606,10 @@ fn prism_oct_unpack_snorm(bits: u32) -> vec3<f32> {\n\
 /// (sphere) and slab method (AABB) are reproduced exactly, so the device
 /// agrees with the CPU within fast-math rounding on `t`/point and matches the
 /// discrete hit flag and axis-aligned normal for geometry with a comfortable
-/// margin from a tangent/edge grazing case (the standard conservative caveat;
-/// the AABB slab bounds use a large finite sentinel in place of CPU infinity,
-/// identical for finite well-separated geometry).
+/// margin from a tangent/edge grazing case (the standard conservative caveat).
+/// The AABB slab bounds use real `±inf` (via `bitcast<f32>` of the IEEE bit
+/// patterns), matching the CPU `NEG_INFINITY`/`INFINITY` so arbitrarily large
+/// `t` values are not clipped by a finite sentinel.
 pub const WGSL_RAYCAST: &str = "\
 struct PrismRayHit {\n\
     hit: f32,\n\
@@ -661,8 +662,8 @@ fn prism_ray_aabb(origin: vec3<f32>, dir: vec3<f32>, lo: vec3<f32>, hi: vec3<f32
     out.t = 0.0;\n\
     out.point = vec3<f32>(0.0, 0.0, 0.0);\n\
     out.normal = vec3<f32>(0.0, 0.0, 0.0);\n\
-    var t_enter = -1e30;\n\
-    var t_exit = 1e30;\n\
+    var t_enter = bitcast<f32>(0xff800000u);\n\
+    var t_exit = bitcast<f32>(0x7f800000u);\n\
     var enter_axis = 0u;\n\
     var enter_sign = 1.0;\n\
     for (var axis = 0u; axis < 3u; axis = axis + 1u) {\n\
@@ -699,7 +700,7 @@ fn prism_ray_aabb(origin: vec3<f32>, dir: vec3<f32>, lo: vec3<f32>, hi: vec3<f32
         sign_out = enter_sign;\n\
     } else {\n\
         var exit_axis = 0u;\n\
-        var exit_t = 1e30;\n\
+        var exit_t = bitcast<f32>(0x7f800000u);\n\
         var exit_sign = 1.0;\n\
         for (var axis = 0u; axis < 3u; axis = axis + 1u) {\n\
             let d = dir[axis];\n\
@@ -841,7 +842,7 @@ fn prism_ray_triangle(origin: vec3<f32>, dir: vec3<f32>, a: vec3<f32>, b: vec3<f
     let inv_det = 1.0 / det;\n\
     let tvec = origin - a;\n\
     let u = dot(tvec, pvec) * inv_det;\n\
-    if (u < 0.0 || u > 1.0) { return out; }\n\
+    if (!(u >= 0.0 && u <= 1.0)) { return out; }\n\
     let qvec = cross(tvec, edge1);\n\
     let v = dot(dir, qvec) * inv_det;\n\
     if (v < 0.0 || u + v > 1.0) { return out; }\n\

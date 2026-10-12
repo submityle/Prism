@@ -223,6 +223,26 @@ fn empty_batches_return_empty() {
     assert!(caster.cast_planes(&ctx, &[], &[]).is_empty());
 }
 
+/// A ray whose exit parameter is far beyond any finite slab sentinel: the AABB
+/// kernel must use real infinities (CR-found regression, `±1e30` clipped it).
+#[test]
+fn ray_aabb_large_t_matches_cpu() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let caster = GpuRayCast::new(&ctx);
+    let o = Vec3::new(1.0e31, 0.0, 0.0);
+    let d = Vec3::new(-1.0, 0.0, 0.0);
+    let lo = Vec3::new(-1.0, -1.0, -1.0);
+    let hi = Vec3::new(1.0, 1.0, 1.0);
+    let gpu_rays = vec![GpuRay::new([o.x, o.y, o.z], [d.x, d.y, d.z])];
+    let gpu_boxes = vec![GpuAabb::new([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z])];
+
+    let got = caster.cast_aabbs(&ctx, &gpu_rays, &gpu_boxes);
+    let cpu = ray_aabb(Ray3::new(o, d), Aabb3::new(lo, hi));
+    assert_hit(got[0], cpu, "large_t");
+}
+
 /// Small heap tag so panic messages identify the failing element.
 fn alloc_tag(kind: &str, i: usize) -> String {
     format!("{kind}[{i}]")
