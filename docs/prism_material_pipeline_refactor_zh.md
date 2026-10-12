@@ -543,6 +543,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - **置换缓存**：以内容哈希为键落盘，跨进程/跨机复用（CI 预热）。
 - 这样"无界"落在作者/模型层，permutation 数量落在可治理的工程层——而不是用一个全局 MAX 去粗暴封顶。
 
+**已落地（P1-d 运行时第一片）**：`prism_render_app::PipelineCache` 现是 ready/pending/waiting/canceled 状态机，`PipelineCompiler` worker 在后台编译精确 PSO，冷请求绑定 `full_lobe_fallback` 的全瓣 über PSO 后继续绘制；`MAX_IN_FLIGHT_COMPILES` 对描述符 backlog 做有界背压，每帧 `pump_pipeline_compiles` 把完成项切换成 `Ready`。CI/archetype 热门置换预热依赖 §4.2 编辑器模板，归 P2-a 编辑器线。
+
 ### 8.5 运行层统一执行模型（一条执行路径，四线共用，光照来源可切换）
 
 关键定调：**运行层只有一条执行路径**。四线（PBR/NPR/混合/自定义）的差异只落在"采样期响应函数"（步骤 5），缓存命中与否只改"光照来源"（步骤 4），降级只改"输入纹理 mip/采样数"——这三者**都不新增 PSO、不改分类 key、不产生并行着色栈**。这是把 §3.5（四线正交）、§8.3（分类）、§14（解耦着色）、§7（降级）收敛成单一执行契约的落点。
@@ -660,6 +662,14 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-d 第一片：后台按需编译 + 冷置换全瓣 über 回退 + 有界编译队列**（§8.4）
+  - **动机**：内容定义开放后，冷 permutation 不应在首个可见帧同步阻塞渲染线程；未命中时也不能丢画面。原 `PipelineCache` 只有同步 `get_or_create`，`MeshPipelineSpecializer` 直接在同帧编译。
+  - **做法**：`PipelineCache` 变成 **ready / pending / waiting / canceled / failed** 状态机；`PipelineCompiler` 是独立 seam，生产实现把 `Arc<Device>` 交给单 worker 线程，worker 只做 `create_render_pipeline`。`resolve_or_request` 命中特殊置换就返回 `Ready`；未命中先同步准备/复用一个 **全瓣 über fallback PSO**，返回 `Fallback`，同时把精确 PSO 放入按 `MAX_IN_FLIGHT_COMPILES` 限制的队列。每帧 `pump_pipeline_compiles` 在 `PrepareResources` 取回完成项，下一次 lookup 自动切到 `Ready`。
+  - **回退语义**：`full_lobe_fallback` 保持 `Illumination` + `render_class`，把 live lobe set 扩到 `LobeMask::all()`；fallback 的 shader identity 也来自完整 `SpecializationId`，因此 provider 可据此选择全瓣 über 入口。精确 PSO 未就绪时绘 fallback，绝不跳 draw；完成后按 content key 精确切换。
+  - **安全/性能边界**：后台在飞编译数有界（排队而非无界 channel 堆积）；worker 拥有自己的 device `Arc`，runtime 仍拥有生命周期；drop 时关闭 channel、等待在飞编译；取消/过期结果立即 `destroy_render_pipeline`，不泄漏。archetype 热门置换预热是 P2-a 编辑器模板的消费者，留在编辑器线。
+  - **顺带修掉真实 bug（bin-class 丢瓣）**：`SpecializationId::bin_class` 原先只保留 17 个 lobe bit（`0x1_FFFF`），而开放词汇表已到 `MEASURED_BRDF` bit 18；glint/measured_brdf 的置换会在 bin 路径被折叠。现扩为 19 bit / `BIN_CLASS_BITS = 29`，并用 `1 << 18` round-trip 门禁钉死。
+  - **门禁**：`prism_render_material` **851+2+1+7+6**；`prism_render_app --lib` **109**（含异步 fallback→ready、4-job 背压、full-lobe 展开、真机 worker cold-compile 验证）；`prism_render_visibility` **122**、`prism_render_runtime` **12+1**；`prism_render_scene --lib` 1602；真机 `PRISM_REQUIRE_GPU=1` 下 `wgpu_pipeline_worker_compiles_a_cold_specialization_in_the_background` 跑真实设备。材质 GPU 全包复验 **72 passed / 2 ignored**。
 
 - **P2-i 第六类 kind 组：identity-only extensions 声明化（provider / transfer / downgrade / composite + author_node 词表）**（§5.2 / §17.5）
   - **动机**：`PRISM_IDENTITY_ONLY` 里的 provider / transfer / downgrade / composite 仍完全是 `builtin.rs` 手写表；它们没有 header slot，但身份、namespace/vendor/stability、caps、view-dependence 与 promotion 语义和其他 kind 完全相同，不能因为“不占槽”就留在 schema 之外。
@@ -1114,7 +1124,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 #### 13.a.1 code-truth 审计（剩余路线图项 · 逐项证据）
 
 下表是"**以代码为准**"的剩余工作清点，每行给出可复现的证据与本轮实测的门禁数（CPU 侧 `prism_render_shading --lib` 3377、
-`prism_render_scene --lib` 1602、`prism_render_material` 851+2+1+7+6、`prism_material_pcm` 28、`prism_material_schema` 19；
+`prism_render_scene --lib` 1602、`prism_render_app --lib` 109、`prism_render_material` 851+2+1+7+6、
+`prism_material_pcm` 28、`prism_material_schema` 19；
 真机侧越沙盒 `PRISM_REQUIRE_GPU=1`：硬件解码 66 + 纹理 LOD / glint / 动态通道 / 测量 BRDF / 单瓣采样器 各 1）。
 
 | 项 | 状态 | 证据 | 余下 |
@@ -1122,7 +1133,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | **P1-a 距离 LOD** | 第一片完成 | `texture_lod.rs`（解析 UV 雅可比 + 逐贴图取级）、`material_sample.wesl::sample_texture_slot(record, uv, lod)`、真机 `texture_lod_gpu_parity` | 纹理段"全面切到 VT 页引用"（今天是 bindless 2D + 显式 LOD） |
 | **P1-b** | 完成 | `material_header_abi.rs` 逐字段镜像门禁；§13.a 记录 | — |
 | **P1-c** | 完成 | `bake.rs`（层栈 → 纹理空间混合）、硬顶删除记录 | — |
-| **P1-d 置换治理** | **未完成** | `prism_render_app/pipeline_cache.rs`：内容键（`SpecializationId` 类 + 固定功能状态 + 顶点布局哈希）去重 + 引用计数回收 ✔；**但没有任何异步/按需编译、也没有 über 回退 PSO**（grep `fallback`/async 无命中；`prism_render_driver` 无 naga/异步编译路径） | ① 后台按需编译；② 冷 permutation 未就绪时的全瓣 über 回退 PSO；③ 与 §8.4 的 archetype 聚类联动 |
+| **P1-d 置换治理** | **运行时完成** | `pipeline_cache.rs`：内容键 + 引用计数 ✔、后台 `PipelineCompiler` worker、ready/pending/waiting/canceled 状态机、全瓣 über fallback、`MAX_IN_FLIGHT_COMPILES` 背压、每帧 `pump_pipeline_compiles` 接线；`bin_class` 扩到 19-bit lobe set ✔。真机 cold-compile 测试已落地 | ③ **archetype 热门置换预热/聚类**：由 P2-a 编辑器模板提供锚点后接入（§4.2/§8.4；编辑器架构未起，显式 TODO） |
 | **P2-a / P2-b** | 编辑器 TODO | goal 明确：编辑器架构未起 | 归 `prism_render_material_authoring`（未建） |
 | **P2-c** | 完成（两个开放瓣） | glint + measured 的 ABI/双线/真机对拍（§17.6、§13.a） | MaterialX 往返（编辑器 TODO） |
 | **P2-e 四线正交运行期** | **部分** | `Illumination` 四值 ✔、分类到 `Npr`/`Unlit`/`Custom` ✔、per-tile 9-way 分类 ✔；**custom 的运行期退化已落地**（见 §13.a）| ① **逐区域 illumination**（遮罩在分类 pass 里选 Lit/Stylized，才符合 §3.5.3 的"per-tile 分波前消发散"）；② 作者侧 `respond_custom` WESL 属编辑器 TODO（契约 §5.4.1） |
@@ -1131,7 +1142,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | **P2-j** | 完成 | 类表由 PCM 注册表 + lobe 目录派生、穷举平价门禁、WESL `CLASS_*` 平价门禁、类数由表驱动（§5.2、§13.a） | — |
 | **P3-a~d 解耦着色** | **未开始** | `gi/surface_cache/` 是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统），不是 §14 的 texel-space/对象空间着色缓存；没有把着色结果写进 VT 页的 pass | 按 §14.10 分阶段：texel-space 着色 pass → 视角无关项分离 → 失效/时序复用 → LOD 策略 |
 
-> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P1-d 的异步编译 + über 回退、P2-e 的逐区域 illumination、P3-a~d 整块**；作者侧 `respond_custom` / author_node / MaterialX nodedef 归编辑器前端（显式 TODO）。
+> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P2-e 的逐区域 illumination、P3-a~d 整块**；archetype 热门置换预热、作者侧 `respond_custom` / author_node / MaterialX nodedef 归编辑器前端（显式 TODO）。
 > 其余路线图项要么已完成（上表），要么按 goal 明确挂在编辑器前端（MaterialX / 节点图 / 作者 WESL）。
 
 ### 13.5 P3 远期：解耦着色 / texel-space shading（性能上限最高，工程最重）
