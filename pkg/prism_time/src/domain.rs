@@ -145,7 +145,8 @@ impl TimeScaleDomain {
         } else if s == 0.0 {
             Duration::ZERO
         } else {
-            parent_delta.mul_f64(s)
+            // Saturating scale (see `crate::scale_duration`).
+            crate::scale_duration(parent_delta, s)
         }
     }
 

@@ -182,7 +182,11 @@ impl SuspendableClock {
             return Duration::ZERO;
         };
         let raw = w.saturating_sub(last);
-        self.last_wall = Some(w);
+        // Only advance the baseline on a non-decreasing wall timestamp so a
+        // backward sample cannot rebase and double-count later (CR-found).
+        if w >= last {
+            self.last_wall = Some(w);
+        }
         let applied = match self.max_delta {
             Some(cap) if raw > cap => {
                 self.total_clamped = self.total_clamped.saturating_add(raw - cap);

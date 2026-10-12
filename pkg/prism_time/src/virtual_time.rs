@@ -70,7 +70,8 @@ impl Time<Virtual> {
         let scaled = if effective == 1.0 {
             clamped
         } else {
-            clamped.mul_f64(effective)
+            // Saturating scale: a huge finite speed must not panic `mul_f64`.
+            crate::scale_duration(clamped, effective)
         };
         self.advance_generic(scaled);
     }

@@ -131,7 +131,8 @@ impl TickClock {
         let num = self.step.nanos_num() as u128;
         if self.accum >= num {
             self.accum -= num;
-            self.tick += 1;
+            // Saturate rather than overflow on an absurd tick counter (CR-found).
+            self.tick = self.tick.saturating_add(1);
             true
         } else {
             false
@@ -155,7 +156,7 @@ impl TickClock {
     /// authoritative externally supplied tick count.
     #[inline]
     pub fn step_once(&mut self) {
-        self.tick += 1;
+        self.tick = self.tick.saturating_add(1);
     }
 
     /// Leftover accumulated time in sub-units of `1/den` nanoseconds (`< num`
@@ -325,6 +326,19 @@ impl TickSnapshot {
 mod tests {
     use super::{TickClock, TickSnapshot};
     use crate::{Duration, RationalStep};
+
+    #[test]
+    fn tick_counter_saturates_at_u64_max() {
+        // An absurd tick snapshot must not overflow `tick += 1` (CR-found).
+        let clock = TickClock::from_hz(1000);
+        let mut snap = clock.snapshot();
+        snap.tick = u64::MAX;
+        // Exactly one step (`accum` is in 1/step_den-ns sub-units).
+        snap.accum = snap.step_num as u128;
+        let mut clock = TickClock::from_snapshot(&snap);
+        assert!(clock.expend());
+        assert_eq!(clock.tick(), u64::MAX);
+    }
 
     #[test]
     fn exact_nanos_step_has_no_drift_over_millions_of_ticks() {

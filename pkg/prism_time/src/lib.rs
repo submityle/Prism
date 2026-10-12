@@ -57,6 +57,20 @@
 
 extern crate alloc;
 
+/// Scale `d` by `factor`, saturating instead of panicking. Non-finite or
+/// non-positive factors yield [`Duration::ZERO`]; an overflowing product
+/// saturates at [`Duration::MAX`]. (`Duration::mul_f64` panics on overflow, which
+/// a large finite time scale could trigger — CR-found.)
+pub(crate) fn scale_duration(d: Duration, factor: f64) -> Duration {
+    if !factor.is_finite() || factor <= 0.0 {
+        return Duration::ZERO;
+    }
+    match Duration::try_from_secs_f64(d.as_secs_f64() * factor) {
+        Ok(scaled) => scaled,
+        Err(_) => Duration::MAX,
+    }
+}
+
 pub mod adaptive_quality;
 mod clock;
 #[cfg(feature = "compat-bevy")]
@@ -224,7 +238,8 @@ impl Time<Real> {
     /// friendly; the backbone of the `update` convenience and of tests.
     #[inline]
     pub fn update_with_instant(&mut self, instant: Instant) {
-        let delta = match self.context.last_update {
+        let last = self.context.last_update;
+        let delta = match last {
             // Monotonic clock: never report a negative delta.
             Some(last) => instant.saturating_duration_since(last),
             None => {
@@ -232,7 +247,11 @@ impl Time<Real> {
                 Duration::ZERO
             }
         };
-        self.context.last_update = Some(instant);
+        // Only advance the baseline on a non-decreasing instant, so a backward
+        // timestamp cannot rebase and double-count later (CR-found).
+        if last.is_none_or(|last| instant >= last) {
+            self.context.last_update = Some(instant);
+        }
         self.advance_generic(delta);
     }
 

@@ -66,6 +66,9 @@ impl Add<Duration> for Instant {
     type Output = Instant;
     #[inline]
     fn add(self, rhs: Duration) -> Instant {
-        Instant(self.0.saturating_add(rhs.as_nanos() as u64))
+        // Saturate a duration that exceeds `u64` nanos before adding, rather
+        // than truncating the `u128` first (CR-found).
+        let add = u64::try_from(rhs.as_nanos()).unwrap_or(u64::MAX);
+        Instant(self.0.saturating_add(add))
     }
 }

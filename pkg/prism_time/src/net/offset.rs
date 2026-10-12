@@ -66,7 +66,9 @@ impl OffsetSample {
         let server_interval = server_send.saturating_sub(server_recv);
         let rtt = total.saturating_sub(server_interval);
         Self {
-            offset_nanos: offset as i64,
+            // Saturate rather than wrap across the i64 boundary for very large
+            // (or malformed) epoch separations (CR-found).
+            offset_nanos: offset.clamp(i64::MIN as i128, i64::MAX as i128) as i64,
             rtt_nanos: rtt,
         }
     }
@@ -363,6 +365,14 @@ fn round_to_i64(v: f64) -> i64 {
 mod tests {
     use super::{ClockOffsetEstimator, ClockSync, OffsetSample};
     use crate::Duration;
+
+    #[test]
+    fn offset_saturates_instead_of_wrapping() {
+        // A huge epoch separation must not wrap the i128 -> i64 conversion to a
+        // small/negative offset (CR-found).
+        let s = OffsetSample::from_round_trip(0, u64::MAX, u64::MAX, 0);
+        assert!(s.offset_nanos > 0);
+    }
 
     #[test]
     fn round_trip_recovers_known_offset() {
