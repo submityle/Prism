@@ -13,8 +13,12 @@ use crate::draw::{DrawCommand, DrawList};
 #[cfg(doc)]
 use crate::draw::TextRef;
 
-/// A node in the compositing tree. The implicit root layer has `opacity == 1`
-/// and `bounds == None` (unbounded).
+/// A node in the compositing tree. The implicit root layer has `opacity == 1`.
+///
+/// A `LayerCmd` also carries a clip/compositing `bounds`, but this tree folds
+/// only the group opacity. The bounds are preserved through batching
+/// ([`Batch::PushLayer`](crate::batch::Batch)) for a future scissor/clip pass;
+/// neither the reference nor the GPU rasteriser applies them yet.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layer {
     /// Group opacity declared for this layer.
