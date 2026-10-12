@@ -451,9 +451,26 @@ impl<'w, 's, D: ReadOnlyQueryData, F: QueryFilter> IntoIterator for &Query<'w, '
     }
 }
 
-impl<'w, 's, D: QueryData, F: QueryFilter> IntoIterator for &mut Query<'w, 's, D, F> {
-    type Item = D::Item<'w>;
-    type IntoIter = QueryIter<'w, 's, D, F>;
+/// The `&mut Query` iterator is tied to the *mutable borrow of the param* `'i`,
+/// not to the world lifetime `'w`: otherwise `(&mut q).into_iter()` could be
+/// called twice and two aliasing `&mut` iterators over one world would coexist
+/// in safe code. This is a compile-fail regression guard for exactly that:
+///
+/// ```compile_fail
+/// use prism_ecs::prelude::*;
+///
+/// struct Marker;
+/// impl Component for Marker {}
+///
+/// fn two_aliasing_iterators<'w, 's>(mut q: Query<'w, 's, &'static mut Marker>) {
+///     let mut first = (&mut q).into_iter();
+///     let mut second = (&mut q).into_iter(); // ERROR: `q` is already mutably borrowed
+///     let _ = (first.next(), second.next());
+/// }
+/// ```
+impl<'i, 'w, 's, D: QueryData, F: QueryFilter> IntoIterator for &'i mut Query<'w, 's, D, F> {
+    type Item = D::Item<'i>;
+    type IntoIter = QueryIter<'i, 's, D, F>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -485,7 +502,7 @@ where
 
     #[inline]
     fn init_state(world: &mut World) -> Self::State {
-        QueryState::new(world.components_mut())
+        QueryState::new(world)
     }
 
     #[inline]

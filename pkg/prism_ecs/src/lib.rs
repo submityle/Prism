@@ -146,7 +146,7 @@ pub mod prelude {
     pub use crate::world::snapshot::{
         FrameHash, FrameHashLog, SnapshotDivergence, TickDivergence, locate_divergence,
     };
-    pub use crate::world::{EntityRef, World};
+    pub use crate::world::{EntityRef, World, WorldId};
     // Derive macros. These live in the macro namespace and coexist with the
     // same-named traits (`Component`, `Bundle`) re-exported above.
     pub use prism_ecs_macros::{Bundle, Component, Event, Relation, Resource, SystemParam, SystemSet};

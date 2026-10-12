@@ -15,7 +15,6 @@ use core::marker::PhantomData;
 use crate::archetype::ArchetypeId;
 use crate::change::Tick;
 use crate::entity::Entity;
-use crate::component::Components;
 use crate::query::access::Access;
 use crate::query::fetch::{QueryData, ReadOnlyQueryData};
 use crate::query::filter::QueryFilter;
@@ -23,7 +22,7 @@ use crate::query::filter::QueryFilter;
 use crate::query::slice::{ArchetypalFilter, ColumnSliceData};
 use crate::query::iter::QueryIter;
 use crate::query::many::QueryManyIter;
-use crate::world::World;
+use crate::world::{World, WorldId};
 
 /// Why [`QueryState::get`] / [`QueryState::get_mut`] could not resolve an
 /// entity's query terms.
@@ -100,10 +99,19 @@ struct MatchedArchetypes {
     /// Number of the world's archetypes already tested. Archetypes with index
     /// `< checked` have a settled (permanent) match decision.
     checked: usize,
+    /// The structural generation (`World::archetype_generation`) these `ids`
+    /// and `checked` were computed against. A snapshot `restore` bumps the
+    /// world's generation, so a stale cache is rebuilt from scratch rather than
+    /// trusting archetype ids that now name different (or freed) columns.
+    generation: u64,
 }
 
 /// The resolved, reusable state of a `Query<D, F>`.
 pub struct QueryState<D: QueryData, F: QueryFilter = ()> {
+    /// Identity of the world this state was built from. Every safe entry point
+    /// verifies the world it is handed carries this id before dereferencing any
+    /// column, so a state can never reinterpret a different world's storage.
+    world_id: WorldId,
     data_state: D::State,
     filter_state: F::State,
     access: Access,
@@ -129,28 +137,48 @@ where
 }
 
 impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
-    /// Build the state against `components`, registering every named component
-    /// type and computing the access set.
+    /// Build the state against `world`, registering every named component type,
+    /// computing the access set, and recording the world's [`WorldId`] so the
+    /// state can never be used against a different world.
     ///
     /// # Panics
     /// Panics if the query's own terms conflict (e.g. `&mut A` with `&A`, or
     /// `&mut A` twice) — see [`Access`].
-    pub fn new(components: &mut Components) -> Self {
-        let data_state = D::init_state(components);
-        let filter_state = F::init_state(components);
+    pub fn new(world: &mut World) -> Self {
+        let world_id = world.id();
+        let data_state = D::init_state(world.components_mut());
+        let filter_state = F::init_state(world.components_mut());
         let mut access = Access::new();
         D::update_access(&data_state, &mut access);
         F::update_access(&filter_state, &mut access);
         Self {
+            world_id,
             data_state,
             filter_state,
             access,
             matched: UnsafeCell::new(MatchedArchetypes {
                 ids: Vec::new(),
                 checked: 0,
+                generation: world.archetype_generation(),
             }),
             _marker: PhantomData,
         }
+    }
+
+    /// Assert that `world` is the world this state was built from.
+    ///
+    /// Every safe entry point runs this before touching the world: a mismatch
+    /// would let `D::matches`/`D::fetch` reinterpret another world's dense
+    /// component ids as this query's types, which is undefined behaviour.
+    /// Panicking on misuse is the only sound option for a safe API.
+    #[inline]
+    fn validate_world(&self, world: &World) {
+        assert_eq!(
+            self.world_id,
+            world.id(),
+            "QueryState was built for one World but used against another; \
+             build a fresh state with World::query on the target world"
+        );
     }
 
     /// The component read/write access this query requires.
@@ -169,6 +197,15 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // impl), so this is the only live borrow of the cache cell; the `&mut`
         // does not alias and is dropped before this method returns.
         let cache = unsafe { &mut *self.matched.get() };
+        // A wholesale archetype-registry replacement (snapshot restore) bumps
+        // the world's structural generation; the cached ids then name freed or
+        // renumbered archetypes, so drop them and re-scan from scratch.
+        let generation = world.archetype_generation();
+        if cache.generation != generation {
+            cache.ids.clear();
+            cache.checked = 0;
+            cache.generation = generation;
+        }
         let total = world.archetypes().len();
         if cache.checked >= total {
             return;
@@ -206,6 +243,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     where
         D: ReadOnlyQueryData,
     {
+        self.validate_world(world);
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let archetypes = self.matched_archetypes(world);
@@ -230,6 +268,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     /// permitting `&mut T` terms.
     #[inline]
     pub fn iter_mut<'w, 's>(&'s self, world: &'w mut World) -> QueryIter<'w, 's, D, F> {
+        self.validate_world(world);
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let archetypes = self.matched_archetypes(world);
@@ -277,6 +316,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     where
         D: ReadOnlyQueryData,
     {
+        self.validate_world(world);
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let world_ptr = (world as *const World).cast_mut();
@@ -299,6 +339,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         world: &'w mut World,
         entity: Entity,
     ) -> Result<D::Item<'w>, QueryEntityError> {
+        self.validate_world(world);
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let world_ptr = world as *mut World;
@@ -415,6 +456,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     where
         D: ReadOnlyQueryData,
     {
+        self.validate_world(world);
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let world_ptr = (world as *const World).cast_mut();
@@ -442,6 +484,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         world: &mut World,
         entities: [Entity; N],
     ) -> Result<[D::Item<'_>; N], QueryEntityError> {
+        self.validate_world(world);
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let world_ptr = world as *mut World;
@@ -521,6 +564,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         D: ReadOnlyQueryData,
         I: IntoIterator<Item = Entity>,
     {
+        self.validate_world(world);
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let world_ptr = (world as *const World).cast_mut();

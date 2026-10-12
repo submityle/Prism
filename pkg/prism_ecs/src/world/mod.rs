@@ -32,6 +32,18 @@ use crate::storage::{OwningGroupId, SharedComponents, SharedValueId, SparseSets}
 
 /// The authoritative container of all ECS state.
 pub struct World {
+    /// Process-unique identity of this world (design §7 / §20). Stamped once on
+    /// construction; [`QueryState`](crate::query::QueryState) records it and
+    /// rejects use against any other world, so a state can never reinterpret a
+    /// different world's component/archetype columns.
+    id: WorldId,
+    /// Monotonic structural generation (design §10 / §14 rollback). Bumped
+    /// whenever the archetype registry is wholesale replaced (snapshot
+    /// [`restore`](World::restore)), which invalidates every
+    /// [`QueryState`](crate::query::QueryState) match cache keyed on archetype
+    /// ids. Ordinary archetype *creation* does not bump it (the cache appends
+    /// incrementally).
+    archetype_generation: u64,
     entities: Entities,
     components: Components,
     archetypes: Archetypes,
@@ -93,6 +105,8 @@ impl World {
     /// system whose `last_run` defaults to [`Tick::ZERO`].
     pub fn new() -> Self {
         Self {
+            id: WorldId::next(),
+            archetype_generation: 0,
             entities: Entities::new(),
             components: Components::new(),
             archetypes: Archetypes::new(),
@@ -108,6 +122,33 @@ impl World {
             non_send: non_send::NonSendResources::new(),
             owning_groups: OwningGroupRegistry::new(),
         }
+    }
+
+    /// This world's process-unique [`WorldId`].
+    ///
+    /// Recorded by every [`QueryState`](crate::query::QueryState) built from
+    /// this world; the safe query entry points verify it before dereferencing
+    /// any column, so a state can never be used against a different world.
+    #[inline]
+    pub fn id(&self) -> WorldId {
+        self.id
+    }
+
+    /// The current structural generation (design §10 / §14).
+    ///
+    /// Bumped only when the archetype registry is wholesale replaced (snapshot
+    /// restore). A [`QueryState`](crate::query::QueryState) match cache is valid
+    /// only for the generation it was built against; a mismatch makes it rebuild.
+    #[inline]
+    pub fn archetype_generation(&self) -> u64 {
+        self.archetype_generation
+    }
+
+    /// Advance the structural generation, invalidating archetype-id-keyed
+    /// caches (called by snapshot `restore` after replacing the registry).
+    #[inline]
+    pub(crate) fn bump_archetype_generation(&mut self) {
+        self.archetype_generation = self.archetype_generation.wrapping_add(1);
     }
 
     /// The world's current change tick (the tick new writes are stamped with).
@@ -2153,14 +2194,14 @@ impl World {
     /// [`QueryState::iter_mut`] and reused across frames.
     #[inline]
     pub fn query<D: QueryData>(&mut self) -> QueryState<D> {
-        QueryState::new(&mut self.components)
+        QueryState::new(self)
     }
 
     /// Build a reusable [`QueryState`] over data terms `D` narrowed by filter
     /// `F` (e.g. [`With`](crate::query::With) / [`Without`](crate::query::Without)).
     #[inline]
     pub fn query_filtered<D: QueryData, F: QueryFilter>(&mut self) -> QueryState<D, F> {
-        QueryState::new(&mut self.components)
+        QueryState::new(self)
     }
 
     /// Convenience: build a read-only query state and immediately collect its
@@ -2175,6 +2216,9 @@ impl World {
 }
 
 mod relations;
+
+mod id;
+pub use id::WorldId;
 
 /// Borrowed single-entity read handle ([`EntityRef`]).
 mod entity_ref;

@@ -31,6 +31,10 @@ pub(super) fn restore(world: &mut World, snapshot: &WorldSnapshot) {
     //    freeing every live component value exactly once; the empty archetype is
     //    re-seeded by `Archetypes::new`.
     world.archetypes = Archetypes::new();
+    // The registry was wholesale replaced, so every archetype id a
+    // `QueryState` cached is now stale; bump the structural generation so those
+    // caches rebuild instead of dereferencing freed/renumbered columns.
+    world.bump_archetype_generation();
     world.sparse_sets = SparseSets::new();
     // Reset the shared-value pools too: restore re-interns every captured shared
     // value below (`insert_boxed`), so a stale pool would compound reference
