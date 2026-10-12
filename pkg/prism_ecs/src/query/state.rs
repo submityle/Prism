@@ -159,28 +159,45 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     /// of. The copy is `O(matched)`, while the full `D::matches`/`F::matches`
     /// scan it replaces was `O(total archetypes)`.
     pub(crate) fn matched_archetypes(&self, world: &World) -> Vec<ArchetypeId> {
-        let mut cache = self.matched.lock();
-        // A wholesale archetype-registry replacement (snapshot restore) bumps
-        // the world's structural generation; the cached ids then name freed or
-        // renumbered archetypes, so drop them and re-scan from scratch.
+        // Snapshot the scan cursor under the lock (applying any structural
+        // generation reset), then release it *before* calling `D::matches` /
+        // `F::matches`: those are user-implementable, so holding the cache lock
+        // across them risks a re-entrant deadlock, and a panic mid-scan would
+        // otherwise leave a half-updated cache that duplicates ids on retry.
         let generation = world.archetype_generation();
-        if cache.generation != generation {
-            cache.ids.clear();
-            cache.checked = 0;
-            cache.generation = generation;
-        }
-        let total = world.archetypes().len();
-        if cache.checked < total {
-            // Relies on the archetype invariants (immutable component sets,
-            // never removed within a generation) so an id tested once never
-            // needs retesting.
-            for archetype in world.archetypes().iter().skip(cache.checked) {
-                if D::matches(&self.data_state, archetype)
-                    && F::matches(&self.filter_state, archetype)
-                {
-                    cache.ids.push(archetype.id());
-                }
+        let checked = {
+            let mut cache = self.matched.lock();
+            // A wholesale archetype-registry replacement (snapshot restore)
+            // bumps the structural generation; the cached ids then name freed
+            // or renumbered archetypes, so drop them and re-scan from scratch.
+            if cache.generation != generation {
+                cache.ids.clear();
+                cache.checked = 0;
+                cache.generation = generation;
             }
+            cache.checked
+        };
+
+        let total = world.archetypes().len();
+        if checked >= total {
+            return self.matched.lock().ids.clone();
+        }
+
+        // Resolve the newly-created archetypes with the lock released. Relies on
+        // the archetype invariants (immutable component sets, never removed
+        // within a generation) so an id tested once never needs retesting.
+        let mut appended: Vec<ArchetypeId> = Vec::new();
+        for archetype in world.archetypes().iter().skip(checked) {
+            if D::matches(&self.data_state, archetype) && F::matches(&self.filter_state, archetype) {
+                appended.push(archetype.id());
+            }
+        }
+
+        // Commit atomically. If another thread already advanced the cursor, keep
+        // its (identical, deterministic) result and drop ours.
+        let mut cache = self.matched.lock();
+        if cache.generation == generation && cache.checked == checked {
+            cache.ids.extend(appended);
             cache.checked = total;
         }
         cache.ids.clone()
@@ -729,6 +746,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         D: ReadOnlyQueryData,
         Func: Fn(D::Item<'_>) + Send + Sync,
     {
+        self.validate_world(world);
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let world_ptr = (world as *const World).cast_mut();
@@ -757,6 +775,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     ) where
         Func: Fn(D::Item<'_>) + Send + Sync,
     {
+        self.validate_world(world);
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let world_ptr = world as *mut World;
@@ -839,6 +858,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     {
         <D as ColumnSliceData>::assert_sliceable();
         <F as ArchetypalFilter>::assert_archetypal();
+        self.validate_world(world);
         let this_run = world.change_tick();
         let world_ptr = (world as *const World).cast_mut();
         // SAFETY: `D: ReadOnlyQueryData`, so no `&mut [T]` slice is ever formed
@@ -872,6 +892,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
     {
         <D as ColumnSliceData>::assert_sliceable();
         <F as ArchetypalFilter>::assert_archetypal();
+        self.validate_world(world);
         let this_run = world.change_tick();
         let world_ptr = world as *mut World;
         // SAFETY: `world` is exclusively borrowed, so the raw pointer is the sole

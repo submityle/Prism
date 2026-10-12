@@ -14,7 +14,7 @@ use crate::change::Tick;
 use crate::query::Access;
 use crate::system::param::{SystemParam, SystemParamItem};
 use crate::system::world_cell::UnsafeWorldCell;
-use crate::world::World;
+use crate::world::{World, WorldId};
 
 /// Something the scheduler can run against a [`World`].
 ///
@@ -167,6 +167,11 @@ where
     name: &'static str,
     /// Tick this system last completed at; threaded into its change window.
     last_run: Tick,
+    /// Identity of the world whose components/resources `param_state` resolved
+    /// against. Captured by [`initialize`](System::initialize); every run then
+    /// verifies the target world carries the same id, so a system can never
+    /// replay world A's resolved ids against world B's storage.
+    world_id: Option<WorldId>,
     _marker: PhantomData<fn() -> Marker>,
 }
 
@@ -184,8 +189,25 @@ where
             access: Access::new(),
             name: type_name::<F>(),
             last_run: Tick::ZERO,
+            world_id: None,
             _marker: PhantomData,
         }
+    }
+
+    /// Assert `world_id` is the world this system resolved its params against.
+    ///
+    /// The param states hold dense component/resource ids that are only
+    /// meaningful within the initialising world; running against another world
+    /// would reinterpret its storage (undefined behaviour). A safe API must
+    /// therefore reject the mismatch rather than proceed.
+    #[inline]
+    fn validate_world(&self, world_id: WorldId) {
+        assert_eq!(
+            self.world_id,
+            Some(world_id),
+            "system was initialized for one World but run against another; \
+             re-initialize it (or build a fresh system) for the target world"
+        );
     }
 }
 
@@ -208,6 +230,7 @@ where
         <F::Param as SystemParam>::update_access(&state, &mut access);
         self.param_state = Some(state);
         self.access = access;
+        self.world_id = Some(world.id());
     }
 
     #[inline]
@@ -227,6 +250,9 @@ where
 
     #[inline]
     unsafe fn run_unsafe(&mut self, world: UnsafeWorldCell<'_>) -> Self::Out {
+        // SAFETY: the caller guarantees `world` references a live world, so
+        // reading its id is sound; the comparison guards the resolved param ids.
+        self.validate_world(unsafe { world.world() }.id());
         let state = self
             .param_state
             .as_mut()
@@ -239,6 +265,7 @@ where
 
     #[inline]
     fn apply_deferred(&mut self, world: &mut World) {
+        self.validate_world(world.id());
         if let Some(state) = self.param_state.as_mut() {
             <F::Param as SystemParam>::apply(state, world);
         }

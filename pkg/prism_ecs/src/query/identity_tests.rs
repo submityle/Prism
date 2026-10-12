@@ -79,3 +79,19 @@ fn query_state_cache_is_invalidated_by_snapshot_restore() {
     let values: Vec<i32> = state.iter(&w).map(|p| p.0).collect();
     assert_eq!(values, [1]);
 }
+
+/// The parallel entry points must run the same world-identity guard as the
+/// serial ones instead of dereferencing another world's columns.
+#[cfg(feature = "multi_thread")]
+#[test]
+#[should_panic(expected = "built for one World but used against another")]
+fn parallel_entry_rejects_a_different_world() {
+    let mut a = World::new();
+    let mut b = World::new();
+    a.spawn(Pos(1));
+    b.spawn(Pos(2));
+
+    let state = a.query::<&Pos>();
+    let pool = prism_tasks::TaskPool::new();
+    state.par_for_each(&b, &pool, 4, |_p| {});
+}

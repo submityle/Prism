@@ -427,3 +427,20 @@ fn query_param_many_access() {
     probe_sys.initialize(&mut world);
     probe_sys.run(&mut world);
 }
+
+/// A system resolves its param ids (components/resources) against the world it
+/// was initialized for. Running it against a *different* world would reinterpret
+/// that world's storage, so the run must panic rather than proceed.
+#[test]
+#[should_panic(expected = "initialized for one World but run against another")]
+fn system_rejects_a_different_world() {
+    let mut a = World::new();
+    let mut b = World::new();
+    a.spawn(Health(1));
+    b.spawn(Health(2));
+
+    fn read(_q: Query<&Health>) {}
+    let mut sys = IntoSystem::into_system(read);
+    sys.initialize(&mut a);
+    sys.run(&mut b);
+}
