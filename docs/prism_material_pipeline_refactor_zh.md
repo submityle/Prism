@@ -1140,9 +1140,9 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | **P2-g** | 完成 | header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha/OIT + 真机对拍（§17.1、§13.a） | — |
 | **P2-i 全 kind manifest + codegen** | **非编辑器完成（8 个有实例的 kind 全部声明化）** | `prism_material_schema` 现已覆盖 lobe（含 closure 分类链接）、channel、response_mode、cache_aux 与 identity-only 的 provider/transfer/downgrade/composite：codegen 产出 `SURFACE_LOBE_CLOSURES`、`SURFACE_CHANNELS`、`SURFACE_RESPONSE_MODES`、`SURFACE_CACHE_AUX`、`SURFACE_IDENTITY_EXTENSIONS`；header 常驻非-lobe 槽位致密、identity-only 行零槽，全部与 PCM 目录双向对拍（见 §13.a）。`author_node` 是第 9 类：kind/hook/词表已就位，唯一实例等待 §4 编辑器前端 | **编辑器部分**：author_node 实例 + MaterialX nodedef 往返（架构未起，显式 TODO） |
 | **P2-j** | 完成 | 类表由 PCM 注册表 + lobe 目录派生、穷举平价门禁、WESL `CLASS_*` 平价门禁、类数由表驱动（§5.2、§13.a） | — |
-| **P3-a~d 解耦着色** | **未开始** | `gi/surface_cache/` 是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统），不是 §14 的 texel-space/对象空间着色缓存；没有把着色结果写进 VT 页的 pass | 按 §14.10 分阶段：texel-space 着色 pass → 视角无关项分离 → 失效/时序复用 → LOD 策略 |
+| **P3-a~d 解耦着色** | **P3-a 逻辑地基已落地；P3-b~d 未开始** | `shading/texel_cache/` 已提供稳定 texel key、可复现可见性预算、generation/epoch 校验、Stale 生命周期与 active/staging 原子页表；仍不是 GPU VT atlas 写入 pass。`gi/surface_cache/` 仍是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统） | 下一步按 §14.10 接入 texel-space compute/atlas，再做视角无关项分离、失效/时序复用、LOD 策略 |
 
-> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P2-e 的逐区域 illumination、P3-a~d 整块**；archetype 热门置换预热、作者侧 `respond_custom` / author_node / MaterialX nodedef 归编辑器前端（显式 TODO）。
+> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P2-e 的逐区域 illumination、P3-a 的 GPU atlas/pass 接线及 P3-b~d**；P3-a 的 CPU 逻辑地基已落地。archetype 热门置换预热、作者侧 `respond_custom` / author_node / MaterialX nodedef 归编辑器前端（显式 TODO）。
 > 其余路线图项要么已完成（上表），要么按 goal 明确挂在编辑器前端（MaterialX / 节点图 / 作者 WESL）。
 
 ### 13.5 P3 远期：解耦着色 / texel-space shading（性能上限最高，工程最重）
@@ -1286,7 +1286,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 | 阶段 | 内容 | 门禁 |
 |---|---|---|
-| P3-a 地基 | 着色缓存 = 可写 VT 页：扩 `residency` 加 `Stale`、页表 `w1` 存 generation/valid、着色 compute pass 写 `atlas` tile | 命中/未命中回退正确；无裂帧（粗 mip 兜底）CI |
+| P3-a 地基 | **CPU 逻辑地基已落地**：`shading/texel_cache/` 提供稳定 key、请求预算、`Stale`/generation/epoch 状态机与 active/staging 页表；**待接线**：页表 `w1`、GPU atlas tile 写入与 compute pass | 当前已覆盖命中/未命中、预算确定性、代际/epoch 隔离、无半写可见；GPU atlas/pass 与粗 mip 兜底仍是后续门禁 |
 | P3-b 视角无关项 | 先缓存 diffuse/SSS/emission/GI 辐照度（PBR+NPR 可缓存项），高光走屏幕空间 split-sum | 与纯屏幕空间抽样对拍误差阈值；furnace 不回归 |
 | P3-c 失效摊销 | generation/epoch 局部失效 + 分帧预算重着 + 时序累积 | 动态光场景帧时稳定、无档跳；staleness 上限 CI |
 | P3-d seam/一致性 | per-face tile + gutter + 无锁双代 + disocclusion 屏幕回退 | seam 视觉零裂；骤转无黑块 CI |
