@@ -287,6 +287,29 @@ mod tests {
     use crate::{ComponentTypeId, LocalEntityId};
     use alloc::{boxed::Box, vec};
 
+    const ENTITY_COUNT_OFFSET: usize = 6;
+    const GROUPS_LEN_OFFSET: usize = 14;
+    const FIRST_GROUP_SIGNATURE_LEN_OFFSET: usize = 18;
+    const FIRST_GROUP_SIGNATURE_OFFSET: usize = 22;
+    const FIRST_GROUP_LOCALS_LEN_OFFSET: usize = 30;
+    const FIRST_GROUP_COLUMNS_LEN_OFFSET: usize = 42;
+    const FIRST_GROUP_COLUMN_COMPONENT_OFFSET: usize = 46;
+    const FIRST_GROUP_COLUMN_BYTES_LEN_OFFSET: usize = 54;
+    const SLOTS_LEN_OFFSET: usize = 62;
+    const HIERARCHY_LEN_OFFSET: usize = 82;
+
+    fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
     fn plan() -> InstantiationPlan {
         let component = ComponentTypeId::from_raw(7);
         InstantiationPlan {
@@ -295,6 +318,30 @@ mod tests {
                 ArchetypeSignature::new(vec![component]),
                 Box::new([LocalEntityId::new(0), LocalEntityId::new(1)]),
                 Box::new([Column::new(component, vec![1, 2, 3, 4].into_boxed_slice())]),
+            )]),
+            entity_valued_fields: Box::new([FieldSlot {
+                local: LocalEntityId::new(0),
+                group: 0,
+                column: 0,
+                byte_offset: 0,
+            }]),
+            hierarchy: Box::new([(LocalEntityId::new(1), LocalEntityId::new(0))]),
+            reserved_local_base: LocalEntityId::RESERVED_BASE,
+        }
+    }
+
+    fn plan_with_two_components() -> InstantiationPlan {
+        let first = ComponentTypeId::from_raw(7);
+        let second = ComponentTypeId::from_raw(11);
+        InstantiationPlan {
+            entity_count: 2,
+            groups: Box::new([ArchetypeGroup::new(
+                ArchetypeSignature::new(vec![second, first]),
+                Box::new([LocalEntityId::new(0), LocalEntityId::new(1)]),
+                Box::new([
+                    Column::new(first, vec![1, 2].into_boxed_slice()),
+                    Column::new(second, vec![3, 4].into_boxed_slice()),
+                ]),
             )]),
             entity_valued_fields: Box::new([FieldSlot {
                 local: LocalEntityId::new(0),
@@ -318,29 +365,60 @@ mod tests {
     }
 
     #[test]
-    fn rejects_truncation_trailing_bytes_and_bad_version() {
+    fn rejects_every_strict_wire_prefix_as_truncated() {
         let bytes = encode_plan(&plan()).unwrap();
-        assert_eq!(
-            decode_plan(&bytes[..bytes.len() - 1], PlanDecodeLimits::default()),
-            Err(PlanCodecError::Truncated)
-        );
+        for length in 0..bytes.len() {
+            assert_eq!(
+                decode_plan(&bytes[..length], PlanDecodeLimits::default()),
+                Err(PlanCodecError::Truncated),
+                "strict prefix of length {length} must be truncated"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_trailing_bytes() {
+        let bytes = encode_plan(&plan()).unwrap();
         let mut trailing = bytes.clone();
-        trailing.push(0);
+        trailing.extend_from_slice(&[0, 0xff, 0x7f]);
         assert_eq!(
             decode_plan(&trailing, PlanDecodeLimits::default()),
             Err(PlanCodecError::TrailingBytes)
         );
+    }
+
+    #[test]
+    fn rejects_bad_magic_and_unsupported_version_before_payload_decode() {
+        let bytes = encode_plan(&plan()).unwrap();
+        let mut bad_magic = bytes.clone();
+        bad_magic[0] ^= 0xff;
+        assert_eq!(
+            decode_plan(&bad_magic, PlanDecodeLimits::default()),
+            Err(PlanCodecError::BadMagic)
+        );
+
         let mut version = bytes;
-        version[4..6].copy_from_slice(&9u16.to_le_bytes());
+        put_u16(&mut version, 4, u16::MAX);
         assert_eq!(
             decode_plan(&version, PlanDecodeLimits::default()),
-            Err(PlanCodecError::UnsupportedVersion(9))
+            Err(PlanCodecError::UnsupportedVersion(u16::MAX))
         );
     }
 
     #[test]
-    fn limits_apply_before_allocation() {
+    fn byte_and_column_length_limits_accept_exact_boundary_and_reject_overflow() {
         let bytes = encode_plan(&plan()).unwrap();
+
+        assert!(decode_plan(
+            &bytes,
+            PlanDecodeLimits {
+                max_bytes: bytes.len(),
+                max_column_bytes: 4,
+                ..PlanDecodeLimits::default()
+            }
+        )
+        .is_ok());
+
         let limits = PlanDecodeLimits {
             max_bytes: bytes.len() - 1,
             ..PlanDecodeLimits::default()
@@ -349,6 +427,7 @@ mod tests {
             decode_plan(&bytes, limits),
             Err(PlanCodecError::ResourceLimit("bytes"))
         );
+
         let limits = PlanDecodeLimits {
             max_column_bytes: 3,
             ..PlanDecodeLimits::default()
@@ -357,17 +436,183 @@ mod tests {
             decode_plan(&bytes, limits),
             Err(PlanCodecError::ResourceLimit("column bytes"))
         );
+
+        let mut overlong_column = bytes;
+        put_u32(
+            &mut overlong_column,
+            FIRST_GROUP_COLUMN_BYTES_LEN_OFFSET,
+            u32::MAX,
+        );
+        assert_eq!(
+            decode_plan(
+                &overlong_column,
+                PlanDecodeLimits {
+                    max_column_bytes: 4,
+                    ..PlanDecodeLimits::default()
+                }
+            ),
+            Err(PlanCodecError::ResourceLimit("column bytes"))
+        );
     }
 
     #[test]
-    fn invalid_plan_is_rejected_after_wire_decode() {
+    fn every_wire_count_limit_accepts_exact_boundary_and_rejects_one_more() {
+        let bytes = encode_plan(&plan()).unwrap();
+
+        assert!(decode_plan(
+            &bytes,
+            PlanDecodeLimits {
+                max_groups: 1,
+                max_components_per_group: 1,
+                max_field_slots: 1,
+                max_hierarchy_edges: 1,
+                ..PlanDecodeLimits::default()
+            }
+        )
+        .is_ok());
+
+        let mut groups = bytes.clone();
+        put_u32(&mut groups, GROUPS_LEN_OFFSET, 2);
+        assert_eq!(
+            decode_plan(
+                &groups,
+                PlanDecodeLimits {
+                    max_groups: 1,
+                    ..PlanDecodeLimits::default()
+                }
+            ),
+            Err(PlanCodecError::ResourceLimit("groups"))
+        );
+
+        let mut columns = bytes.clone();
+        put_u32(&mut columns, FIRST_GROUP_COLUMNS_LEN_OFFSET, 2);
+        assert_eq!(
+            decode_plan(
+                &columns,
+                PlanDecodeLimits {
+                    max_components_per_group: 1,
+                    ..PlanDecodeLimits::default()
+                }
+            ),
+            Err(PlanCodecError::ResourceLimit("components"))
+        );
+
+        let mut signature = bytes.clone();
+        put_u32(&mut signature, FIRST_GROUP_SIGNATURE_LEN_OFFSET, 2);
+        assert_eq!(
+            decode_plan(
+                &signature,
+                PlanDecodeLimits {
+                    max_components_per_group: 1,
+                    ..PlanDecodeLimits::default()
+                }
+            ),
+            Err(PlanCodecError::ResourceLimit("components"))
+        );
+
+        let mut slots = bytes.clone();
+        put_u32(&mut slots, SLOTS_LEN_OFFSET, 2);
+        assert_eq!(
+            decode_plan(
+                &slots,
+                PlanDecodeLimits {
+                    max_field_slots: 1,
+                    ..PlanDecodeLimits::default()
+                }
+            ),
+            Err(PlanCodecError::ResourceLimit("field slots"))
+        );
+
+        let mut hierarchy = bytes;
+        put_u32(&mut hierarchy, HIERARCHY_LEN_OFFSET, 2);
+        assert_eq!(
+            decode_plan(
+                &hierarchy,
+                PlanDecodeLimits {
+                    max_hierarchy_edges: 1,
+                    ..PlanDecodeLimits::default()
+                }
+            ),
+            Err(PlanCodecError::ResourceLimit("hierarchy"))
+        );
+    }
+
+    #[test]
+    fn entity_count_and_entity_list_limits_are_checked_at_their_boundaries() {
+        let bytes = encode_plan(&plan()).unwrap();
+        let exact = PlanDecodeLimits {
+            max_entities: 2,
+            ..PlanDecodeLimits::default()
+        };
+        assert!(decode_plan(&bytes, exact).is_ok());
+
+        let mut over_budget_entity_count = bytes.clone();
+        put_u32(&mut over_budget_entity_count, ENTITY_COUNT_OFFSET, 3);
+        assert_eq!(
+            decode_plan(&over_budget_entity_count, exact),
+            Err(PlanCodecError::ResourceLimit("entities"))
+        );
+
+        let mut over_budget_locals = bytes;
+        put_u32(&mut over_budget_locals, FIRST_GROUP_LOCALS_LEN_OFFSET, 3);
+        assert_eq!(
+            decode_plan(&over_budget_locals, exact),
+            Err(PlanCodecError::ResourceLimit("entities"))
+        );
+    }
+
+    #[test]
+    fn rejects_unsorted_and_duplicate_signature_wire_values() {
+        let encoded = encode_plan(&plan_with_two_components()).unwrap();
+
+        let mut unsorted = encoded.clone();
+        put_u64(&mut unsorted, FIRST_GROUP_SIGNATURE_OFFSET, 11);
+        put_u64(&mut unsorted, FIRST_GROUP_SIGNATURE_OFFSET + 8, 7);
+        assert_eq!(
+            decode_plan(&unsorted, PlanDecodeLimits::default()),
+            Err(PlanCodecError::InvalidValue(
+                "unsorted or duplicate signature"
+            ))
+        );
+
+        let mut duplicate = encoded;
+        put_u64(&mut duplicate, FIRST_GROUP_SIGNATURE_OFFSET + 8, 7);
+        assert_eq!(
+            decode_plan(&duplicate, PlanDecodeLimits::default()),
+            Err(PlanCodecError::InvalidValue(
+                "unsorted or duplicate signature"
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_column_component_that_is_absent_from_signature() {
         let bytes = encode_plan(&plan()).unwrap();
         let mut malformed = bytes;
-        let last = malformed.len() - 8;
-        malformed[last..last + 4].copy_from_slice(&0u32.to_le_bytes());
+        put_u64(&mut malformed, FIRST_GROUP_COLUMN_COMPONENT_OFFSET, 99);
         assert!(matches!(
             decode_plan(&malformed, PlanDecodeLimits::default()),
-            Err(PlanCodecError::InvalidPlan(_))
+            Err(PlanCodecError::InvalidPlan(
+                crate::PlanError::ColumnNotInSignature {
+                    group: 0,
+                    component
+                }
+            )) if component == ComponentTypeId::from_raw(99)
+        ));
+    }
+
+    #[test]
+    fn rejects_wire_entity_count_mismatch_after_budget_checks() {
+        let mut malformed = encode_plan(&plan()).unwrap();
+        put_u32(&mut malformed, ENTITY_COUNT_OFFSET, 3);
+        assert!(matches!(
+            decode_plan(&malformed, PlanDecodeLimits::default()),
+            Err(PlanCodecError::InvalidPlan(
+                crate::PlanError::LocalCountMismatch {
+                    expected: 3,
+                    found: 2
+                }
+            ))
         ));
     }
 }
