@@ -1055,6 +1055,11 @@ fn surface_from(foam: f32) -> SurfaceSample {
     s.specular_ior = clamp((1.0 + water_f0_root) / (1.0 - water_f0_root), 1.0, 3.0);
     s.specular_weight = 1.0;
     s.specular_color = vec3<f32>(1.0);
+    // Water's translucency is handled by the dedicated water lobe, not the
+    // shared principled transmission term.
+    s.transmission = 0.0;
+    s.index_of_refraction = 1.5;
+    s.dispersion = 0.0;
     s.ambient_occlusion = 1.0;
     s.emissive = vec3<f32>(0.0);
     s.clearcoat = 0.0;

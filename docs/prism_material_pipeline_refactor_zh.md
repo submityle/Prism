@@ -215,7 +215,7 @@
 | **coat** | `clearcoat` / `clearcoat_roughness` / **`coat_ior` / `coat_color` / `coat_roughness_anisotropy`（已补）** / **`coat_normal`（已补：纹理输入，非 ABI 字段，见 §13.a）** | 仅差 `coat_darkening` | `coat_darkening` |
 | **fuzz** | `sheen` / **`fuzz_roughness` / `fuzz_color`（已补，见 §13.a）** | ✅ 补齐 | —（`fuzz_roughness` 与 base roughness 的解耦是刻意的模型修正） |
 | **subsurface** | `subsurface` | 子集 | `subsurface_color`、`subsurface_radius`（vec3，RGB 自由程）、`scatter_anisotropy` |
-| **transmission** | `transmission` / `thickness` / `index_of_refraction` / `dispersion` | 较全 | `transmission_color`、`transmission_scatter`、`thin_walled` 标志 |
+| **transmission** | `transmission` / `thickness` / **`index_of_refraction` / `dispersion`（已消费：principled 折射透射瓣，见 §13.a）** | 部分补全 | `transmission_color`、`transmission_scatter`、`thin_walled` 标志 |
 | **emission** | `emission`（4 words） | ✓ | `emission_luminance` 单位统一（nit / 相对） |
 | **thin_film**（虹彩） | — | **缺整瓣** | 新增 `thin_film_weight` / `thin_film_thickness` / `thin_film_ior`（§10 首个开放瓣示例） |
 | **geometry** | `normal_scale` / `alpha_cutoff` + 法线纹理 | 子集 | `geometry_opacity`、`geometry_thin_walled`、`geometry_coat_normal`（随 coat 补） |
@@ -509,7 +509,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - **原理化分层 BSDF（coat/base 能量耦合，非瓣求和）**（§17.2）：coat 对其下 base 的能量不是简单叠加，而是按 Fresnel 透射做能量预算耦合（coat 反射掉的能量不再喂给 base），并统一 coat 吸收/变暗（`coat_darkening`）。取代"各瓣独立求和"的能量不自洽；进 furnace 门禁与双线对拍。
 - **NPR**（`Illumination::Stylized`，§3.5）：ramp 量化 / SDF 面部阴影（Prism 私有 FACE 瓣，OpenPBR 之外）/ 描边，作为对**同一 OpenPBR über 输入**的正交非物理响应；不进物理 furnace 门禁，但进 ramp/描边视觉回归。
 - **thin_film 虹彩（OpenPBR thin_film 瓣，开放瓣首个落地示例）**：薄膜干涉随 `thin_film_thickness` / `thin_film_ior` 产生彩虹色高光（肥皂泡、氧化金属、涂层）。按 OpenPBR 作为新 lobe 加入开放词汇表——新增 `LobeMask::THIN_FILM` 位 + 3-word 块，`prism_unpack_surface` 低位优先循环自动容纳，老材质 mask 不含该位、零影响。这是"新物理项 = 加法补瓣"路径的验证用例（§4.4）。
-- **其余待补 OpenPBR 字段**（subsurface_color/radius、transmission 组，以及 coat 组剩余的 `coat_darkening`）以加法扩字段方式逐个补齐，各进 furnace / 对拍门禁；coat 组（`coat_ior` / `coat_color` / `coat_roughness_anisotropy` / `coat_normal`）、整个 fuzz 组（`fuzz_color` / `fuzz_roughness`）、整个 base 组（`base_weight` / `diffuse_roughness`）与整个 specular 组（`specular_weight` / `specular_color` / `specular_ior`，取代 `reflectance`）已落地（§13.a）。
+- **其余待补 OpenPBR 字段**（subsurface_color/radius、transmission 的 color/scatter/thin_walled，以及 coat 组剩余的 `coat_darkening`）以加法扩字段方式逐个补齐，各进 furnace / 对拍门禁；coat 组（`coat_ior` / `coat_color` / `coat_roughness_anisotropy` / `coat_normal`）、整个 fuzz 组（`fuzz_color` / `fuzz_roughness`）、整个 base 组（`base_weight` / `diffuse_roughness`）、整个 specular 组（`specular_weight` / `specular_color` / `specular_ior`，取代 `reflectance`）以及 transmission 瓣的**消费者**（消费 `transmission` / `index_of_refraction` / `dispersion`）已落地（§13.a）。
 - **开放瓣扩展机制**：任何新物理项（如各向异性 SSS）走同一路径——新位 + 变长字段 + 静态置换，不冲击现有材质、不加全局硬顶。
 
 ---
@@ -578,6 +578,15 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f（transmission 瓣落地：消费三个此前"打包了却没人读"的字段）**（§4.4 / §17.2）
+  - 发现：审查每个 ABI 字段的消费者时确认，transmission 瓣的 **`transmission` / `index_of_refraction` / `dispersion` 三个字段全仓库没有任何着色消费者**——unpack 把它们写进 `PrismSurfaceParameters`，之后就没有任何 lobe 读它们（而 §4.4 当时把 transmission 标成"较全"，这是个名不副实的记录）。这与上一轮 `coat_normal` 属同一类：**打包了但没接线**。
+  - 落地：按 OpenPBR 的语义把 transmission 当作 **base BSDF 的一个瓣**（不是独立 shading class，和 clearcoat 一样）接进 principled 路径——进入/离开界面的**精确介质 Fresnel**（由 `index_of_refraction` 驱动）分别门控，`thickness` 上做 **Beer-Lambert** 吸收（单位厚度透出 `base_color`），`dispersion` 按通道展开折射率（`ior_c = ior·(1 + 0.05·disp·offset)`）产生色边，整体乘 `transmission` 权重。
+  - **零回归**：`transmission` 默认 `0.0`，该项**逐位为 0**，所有既有材质与金标准不变（新测试直接断言"transmission=0 的像素 == 默认像素"）。
+  - 复用与去重：Beer-Lambert 复用 `gi::translucency::transmission::transmittance_from_color`（已有测试）；期间把 dielectric Fresnel 从 clearcoat 私有实现**提取为共享** `lighting.rs::fresnel_dielectric` / `brdf.wesl::fresnel_dielectric`，coat 与 transmission 现在共用同一份（去掉了一份重复实现）。
+  - 代码：`lighting.rs`（+`fresnel_dielectric` / `MIN_DIELECTRIC_IOR` / `TRANSMISSION_DISPERSION_SPREAD` / `SurfaceSample` 新增 3 字段 + principled 透射项）、`brdf.wesl`（逐位孪生 + `transmittance_pow`）、`clearcoat.rs` / `clearcoat.wesl` 改用共享 Fresnel、`resolve.rs` + `shading_resolve.wesl` 桥接、水栅格面显式写中性默认。**无 ABI 改动**（三个字段本就在 `GpuTransmissionLobe` 里）。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3300 通过**（新增：transmission=0 逐位等价、透射随厚度单调下降、无 dispersion 保持无彩、有 dispersion 分离通道）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过，含 brdf/clearcoat/shading_resolve 全链）、`prism_material_schema` 13、`prism_render_material` 826+6+2 全绿；touched 文件 clippy 无告警。
+  - 诚实边界：①`dispersion` 的通道折射率展开幅度（0.05）与 `thickness` 的"单位厚度 = 参考厚度"都是**显式的作者口径约定**，代码与文档都注明；②透射项是**直接光近似**（Fresnel + Beer-Lambert × 入射余弦），不是屏幕空间折射/体散射——`transmission_color` / `transmission_scatter` / `thin_walled` 与真正的折射方向弯曲仍待后续（那需要体散射/屏幕空间路径）。
 
 - **P1-f（第四个 lobe 组）OpenPBR specular 组：`specular_weight` + `specular_color` + `specular_ior` 端到端落地（取代 `reflectance` 代理）**（§4.4 / §17.2）
   - 范围：把 base 的 dielectric specular 从"`reflectance` 标量代理（`F0 = 0.16·r²`）"换成 `OpenPBR` specular 组的真参数化——`specular_ior` 经**精确** `F0 = ((n−1)/(n+1))²` 驱动界面 Fresnel，`specular_weight` 缩放该瓣，`specular_color` 逐通道 tint（金属仍用 `base_color`）。旧的 `reflectance` 字段从 core **移除**（文档 §4.4 明说它是被取代的代理）。

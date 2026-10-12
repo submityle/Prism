@@ -65,6 +65,12 @@ struct SurfaceSample {
     specular_weight: f32,
     specular_color: vec3<f32>,
     specular_ior: f32,
+    // `OpenPBR` transmission lobe: weight, refracting index and chromatic
+    // dispersion. Mirrors `SurfaceSample` in `lighting.rs`; `transmission == 0`
+    // is an exact no-op.
+    transmission: f32,
+    index_of_refraction: f32,
+    dispersion: f32,
     ambient_occlusion: f32,
     emissive: vec3<f32>,
     clearcoat: f32,
@@ -155,6 +161,43 @@ fn dielectric_f0(surface: SurfaceSample) -> vec3<f32> {
     let r = (ior - 1.0) / (ior + 1.0);
     let f0 = r * r * clamp(surface.specular_weight, 0.0, 1.0);
     return vec3<f32>(f0) * surface.specular_color;
+}
+
+// Unpolarized dielectric Fresnel reflectance for a direction whose normal
+// cosine is `cos_i`, entering from index 1 into relative index `ior`. Exact twin
+// of `lighting.rs::fresnel_dielectric` and the path-traced reference
+// `reference_pt::dielectric::fresnel_dielectric(cos_i, 1.0, ior)` (including the
+// total-internal-reflection branch). At `cos_i == 1`, `ior == 1.5` it is `0.04`.
+const BRDF_MIN_DIELECTRIC_IOR: f32 = 1.0 + 1.0e-3;
+// Relative per-channel index spread at `dispersion == 1`; mirrors
+// `lighting.rs::TRANSMISSION_DISPERSION_SPREAD`.
+const TRANSMISSION_DISPERSION_SPREAD: f32 = 0.05;
+fn fresnel_dielectric(cos_i: f32, ior: f32) -> f32 {
+    let c = clamp(cos_i, 0.0, 1.0);
+    let eta_t = max(ior, BRDF_MIN_DIELECTRIC_IOR);
+    let eta = 1.0 / eta_t;
+    let sin2_i = max(1.0 - c * c, 0.0);
+    let sin2_t = eta * eta * sin2_i;
+    if sin2_t >= 1.0 {
+        return 1.0;
+    }
+    let cos_t = sqrt(max(1.0 - sin2_t, 0.0));
+    let r_parl = (eta_t * c - cos_t) / (eta_t * c + cos_t);
+    let r_perp = (c - eta_t * cos_t) / (c + eta_t * cos_t);
+    return 0.5 * (r_parl * r_parl + r_perp * r_perp);
+}
+
+// Beer-Lambert transmittance `color^{thickness}` per channel; mirrors
+// `gi::translucency::transmission::{transmittance_from_color, channel_pow}` with
+// a unit reference thickness.
+fn transmittance_pow(color: f32, thickness: f32) -> f32 {
+    let c = clamp(color, 0.0, 1.0);
+    let e = max(thickness, 0.0);
+    if c <= 0.0 {
+        if e <= 0.0 { return 1.0; }
+        return 0.0;
+    }
+    return clamp(pow(c, e), 0.0, 1.0);
 }
 
 // GGX/Trowbridge-Reitz normal distribution. Mirrors `distribution_ggx`.
@@ -425,7 +468,32 @@ fn principled_direct(
     let coat_f_light = fresnel_schlick(vec3<f32>(0.04), n_dot_l);
     let coat_attenuation = (1.0 - coat * clamp(coat_f_view.x, 0.0, 1.0))
         * (1.0 - coat * clamp(coat_f_light.x, 0.0, 1.0));
-    let reflected = base * coat_attenuation + coat_specular;
+
+    // `OpenPBR` transmission lobe: interface Fresnel (driven by
+    // `index_of_refraction`) gating entry and exit, Beer-Lambert over
+    // `thickness`, and a per-channel index spread from `dispersion`. Byte twin
+    // of the same block in `lighting.rs`; `transmission == 0` is exactly zero.
+    var transmission_term = vec3<f32>(0.0);
+    let transmission = clamp(surface.transmission, 0.0, 1.0);
+    if transmission > 0.0 {
+        let ior = clamp(surface.index_of_refraction, 1.0, 3.0);
+        let dispersion = clamp(surface.dispersion, 0.0, 1.0);
+        let thickness = max(surface.thickness, 0.0);
+        for (var c = 0u; c < 3u; c = c + 1u) {
+            let offset = f32(c) - 1.0;
+            let ior_c = clamp(
+                ior * (1.0 + TRANSMISSION_DISPERSION_SPREAD * dispersion * offset),
+                1.0,
+                3.0,
+            );
+            let f_view = fresnel_dielectric(n_dot_v, ior_c);
+            let f_light = fresnel_dielectric(n_dot_l, ior_c);
+            let transmittance = transmittance_pow(surface.base_color[c], thickness);
+            transmission_term[c] = transmission * (1.0 - f_view) * (1.0 - f_light) * transmittance;
+        }
+    }
+
+    let reflected = base * coat_attenuation + coat_specular + transmission_term * n_dot_l;
 
     let radiance = reflected * light.illuminance;
     return radiance * clamp(light.visibility, 0.0, 1.0) + surface.emissive;

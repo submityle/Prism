@@ -32,9 +32,18 @@ pub struct SurfaceSample {
     /// `OpenPBR` `specular_color`: per-channel tint of the dielectric specular
     /// (white = identity; metals use `base_color`).
     pub specular_color: [f32; 3],
-    /// `OpenPBR` `specular_ior`: relative index of the dielectric specular
+/// `OpenPBR` `specular_ior`: relative index of the dielectric specular
     /// interface. `1.5` reproduces the historical `F0 = 0.04`.
     pub specular_ior: f32,
+    /// `OpenPBR` transmission weight in `[0, 1]`: how much of the light is
+    /// refracted through the slab. The default `0.0` makes the transmission
+    /// lobe an exact no-op.
+    pub transmission: f32,
+    /// `OpenPBR` `transmission_ior`: relative index of the refracting interface.
+    pub index_of_refraction: f32,
+    /// `OpenPBR` `transmission_dispersion` in `[0, 1]`: spreads the per-channel
+    /// index of refraction so transmitted light fringes. `0` is achromatic.
+    pub dispersion: f32,
     pub ambient_occlusion: f32,
     pub emissive: [f32; 3],
     pub clearcoat: f32,
@@ -120,6 +129,9 @@ impl Default for SurfaceSample {
             specular_weight: 1.0,
             specular_color: [1.0; 3],
             specular_ior: 1.5,
+            transmission: 0.0,
+            index_of_refraction: 1.5,
+            dispersion: 0.0,
             ambient_occlusion: 1.0,
             emissive: [0.0; 3],
             clearcoat: 0.0,
@@ -294,7 +306,43 @@ pub fn evaluate_principled_direct(
     let coat_f_light = fresnel_schlick([0.04; 3], n_dot_l);
     let coat_attenuation = (1.0 - coat * coat_f_view[0].clamp(0.0, 1.0))
         * (1.0 - coat * coat_f_light[0].clamp(0.0, 1.0));
-    let reflected = add(mul_scalar(base, coat_attenuation), coat_specular);
+
+    // --- `OpenPBR` transmission lobe ---
+    // Light refracted through a dielectric slab: the interface Fresnel (driven
+    // by `index_of_refraction`) gates the transmitted energy on entry and exit,
+    // Beer-Lambert attenuates it over `thickness` (the slab transmits
+    // `base_color` at unit thickness), and `dispersion` spreads the per-channel
+    // index so the transmitted colour fringes. `transmission == 0` — the default
+    // — makes the whole term exactly zero, so every existing material is
+    // preserved bit-for-bit.
+    let transmission = surface.transmission.clamp(0.0, 1.0);
+    let transmission_term = if transmission > 0.0 {
+        let ior = surface.index_of_refraction.clamp(1.0, 3.0);
+        let dispersion = surface.dispersion.clamp(0.0, 1.0);
+        let sigma_factor = crate::gi::translucency::transmission::transmittance_from_color(
+            bevy_math::Vec3::from_array(surface.base_color),
+            surface.thickness,
+            1.0,
+        )
+        .to_array();
+        let mut out = [0.0f32; 3];
+        for (channel, slot) in out.iter_mut().enumerate() {
+            let offset = channel as f32 - 1.0;
+            let ior_c = (ior * (1.0 + TRANSMISSION_DISPERSION_SPREAD * dispersion * offset))
+                .clamp(1.0, 3.0);
+            let f_view = fresnel_dielectric(n_dot_v, ior_c);
+            let f_light = fresnel_dielectric(n_dot_l, ior_c);
+            *slot = transmission * (1.0 - f_view) * (1.0 - f_light) * sigma_factor[channel];
+        }
+        mul_scalar(out, n_dot_l)
+    } else {
+        [0.0; 3]
+    };
+
+    let reflected = add(
+        add(mul_scalar(base, coat_attenuation), coat_specular),
+        transmission_term,
+    );
     let radiance = mul(reflected, light.illuminance);
     add(
         mul_scalar(radiance, light.visibility.clamp(0.0, 1.0)),
@@ -450,6 +498,44 @@ pub(crate) fn dielectric_f0(surface: &SurfaceSample) -> [f32; 3] {
         f0 * surface.specular_color[1],
         f0 * surface.specular_color[2],
     ]
+}
+
+/// Smallest relative dielectric index accepted by [`fresnel_dielectric`],
+/// keeping the interface from degenerating to an invisible index of one.
+pub(crate) const MIN_DIELECTRIC_IOR: f32 = 1.0 + 1.0e-3;
+
+/// Relative per-channel index spread at `dispersion == 1`, applied as
+/// `ior_c = ior * (1 + SPREAD * dispersion * offset)` with
+/// `offset ∈ {-1, 0, +1}` over R/G/B. This is an explicit authoring convention
+/// (a fixed chromatic spread), not a measured dispersion curve; `dispersion == 0`
+/// is exactly achromatic.
+pub(crate) const TRANSMISSION_DISPERSION_SPREAD: f32 = 0.05;
+
+/// Unpolarized dielectric Fresnel reflectance for a direction whose cosine with
+/// the normal is `cos_i`, entering from index 1 into relative index `ior`.
+///
+/// This is the exact Fresnel reflectance shared with the path-traced reference
+/// (`reference_pt::dielectric::fresnel_dielectric(cos_i, 1.0, ior)`), including
+/// the total-internal-reflection branch. At `cos_i == 1` and `ior == 1.5` it
+/// returns `0.04`, the historical fixed dielectric `F0`. Only `sqrt`, a divide
+/// and two squares are used, so it stays inside the transcendental budget of the
+/// shading path.
+#[inline]
+pub(crate) fn fresnel_dielectric(cos_i: f32, ior: f32) -> f32 {
+    let cos_i = cos_i.clamp(0.0, 1.0);
+    let ior = ior.max(MIN_DIELECTRIC_IOR);
+    // Snell's law in squared-sine form with eta_i = 1, eta_t = ior.
+    let eta = 1.0 / ior;
+    let sin2_i = (1.0 - cos_i * cos_i).max(0.0);
+    let sin2_t = eta * eta * sin2_i;
+    if sin2_t >= 1.0 {
+        // Beyond the critical angle: all energy is reflected.
+        return 1.0;
+    }
+    let cos_t = (1.0 - sin2_t).max(0.0).sqrt();
+    let r_parl = (ior * cos_i - cos_t) / (ior * cos_i + cos_t);
+    let r_perp = (cos_i - ior * cos_t) / (cos_i + ior * cos_t);
+    0.5 * (r_parl * r_parl + r_perp * r_perp)
 }
 
 /// Denominator offset of the Oren-Nayar `A` (base) coefficient.
@@ -943,5 +1029,86 @@ mod tests {
             light(),
         );
         assert!(full[0] > none[0] && none[0] >= 0.0, "full={full:?} none={none:?}");
+    }
+
+    #[test]
+    fn transmission_zero_is_an_exact_no_op() {
+        // The transmission lobe must contribute exactly nothing at its default
+        // weight, so every pre-existing material is preserved bit-for-bit.
+        let opaque = SurfaceSample::default();
+        let zero_transmission = SurfaceSample {
+            transmission: 0.0,
+            index_of_refraction: 2.7,
+            dispersion: 0.9,
+            thickness: 0.8,
+            ..opaque
+        };
+        assert_eq!(
+            evaluate_principled_direct(zero_transmission, frame(), light()),
+            evaluate_principled_direct(opaque, frame(), light())
+        );
+    }
+
+    #[test]
+    fn transmission_adds_light_through_the_slab() {
+        let base = SurfaceSample {
+            base_color: [0.4, 0.6, 0.8],
+            ..Default::default()
+        };
+        let opaque = evaluate_principled_direct(base, frame(), light());
+        let glassy = evaluate_principled_direct(
+            SurfaceSample {
+                transmission: 1.0,
+                thickness: 0.0, // zero optical depth: pure interface
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        assert!(sum3(glassy) > sum3(opaque), "glassy={glassy:?} opaque={opaque:?}");
+
+        // A thicker slab absorbs more, so transmittance falls monotonically.
+        let thick = evaluate_principled_direct(
+            SurfaceSample {
+                transmission: 1.0,
+                thickness: 1.0,
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        assert!(sum3(thick) < sum3(glassy), "thick={thick:?} thin={glassy:?}");
+    }
+
+    #[test]
+    fn transmission_dispersion_fringes_the_spectrum() {
+        let base = SurfaceSample {
+            base_color: [1.0; 3],
+            transmission: 1.0,
+            thickness: 0.0,
+            index_of_refraction: 1.6,
+            ..Default::default()
+        };
+        let achromatic = evaluate_principled_direct(base, frame(), light());
+        assert!(
+            (achromatic[0] - achromatic[2]).abs() < 1.0e-6,
+            "no dispersion must stay achromatic: {achromatic:?}"
+        );
+        let dispersive = evaluate_principled_direct(
+            SurfaceSample {
+                dispersion: 1.0,
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        assert!(
+            (dispersive[0] - dispersive[2]).abs() > 1.0e-4,
+            "dispersion must separate the channels: {dispersive:?}"
+        );
+    }
+
+    fn sum3(c: [f32; 3]) -> f32 {
+        c[0] + c[1] + c[2]
     }
 }

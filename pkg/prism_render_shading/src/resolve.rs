@@ -228,6 +228,9 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
             parameters.specular_color[2],
         ],
         specular_ior: parameters.specular_ior,
+        transmission: parameters.transmission,
+        index_of_refraction: parameters.index_of_refraction,
+        dispersion: parameters.dispersion,
         ambient_occlusion: parameters.ambient_occlusion,
         emissive: [
             parameters.emissive[0],

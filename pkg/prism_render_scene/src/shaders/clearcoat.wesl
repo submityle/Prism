@@ -34,6 +34,8 @@ import prism_render_scene::shaders::brdf::{
     distribution_ggx_anisotropic,
     anisotropic_axes,
     oren_nayar_factor,
+    fresnel_dielectric,
+    BRDF_MIN_DIELECTRIC_IOR,
     vis_smith,
     vis_smith_anisotropic,
     MIN_ANISOTROPIC_ALPHA,
@@ -45,28 +47,8 @@ import prism_render_scene::shaders::lighting::{
 // Floors / weights mirroring `clearcoat.rs`.
 const CLEARCOAT_MIN_ROUGHNESS: f32 = 0.045;
 const CLEARCOAT_MIN_N_DOT: f32 = 1.0e-5;
-// Smallest relative coat index accepted; mirrors `clearcoat.rs::MIN_COAT_IOR`
-// and `reference_pt::coat::MIN_COAT_IOR`.
-const CLEARCOAT_MIN_IOR: f32 = 1.0 + 1.0e-3;
-
-// Unpolarized dielectric Fresnel reflectance of the coat interface, exact twin
-// of `clearcoat.rs::fresnel_coat_dielectric` / the path-traced reference
-// `dielectric::fresnel_dielectric(cos_i, 1.0, coat_ior)`. At normal incidence
-// with `coat_ior == 1.5` it returns exactly 0.04, the legacy fixed F0.
-fn clearcoat_fresnel_dielectric(cos_i: f32, coat_ior: f32) -> f32 {
-    let c = clamp(cos_i, 0.0, 1.0);
-    let ior = max(coat_ior, CLEARCOAT_MIN_IOR);
-    let eta = 1.0 / ior;
-    let sin2_i = max(1.0 - c * c, 0.0);
-    let sin2_t = eta * eta * sin2_i;
-    if sin2_t >= 1.0 {
-        return 1.0;
-    }
-    let cos_t = sqrt(max(1.0 - sin2_t, 0.0));
-    let r_parl = (ior * c - cos_t) / (ior * c + cos_t);
-    let r_perp = (c - ior * cos_t) / (c + ior * cos_t);
-    return 0.5 * (r_parl * r_parl + r_perp * r_perp);
-}
+// The coat interface now shares `brdf.wesl::fresnel_dielectric` with the
+// transmission lobe (single dielectric-Fresnel implementation).
 
 // The coat interface normal: `OpenPBR` `coat_normal` when authored, else the
 // base shading normal. Twin of `clearcoat.rs::coat_interface_normal`; the zero
@@ -132,8 +114,8 @@ fn clearcoat_direct(
     let coat_alpha = coat_roughness * coat_roughness;
     // The coat's Fresnel is achromatic (driven solely by `coat_ior`), so the
     // scalar `Fc` drives both the highlight and the base attenuation.
-    let coat_ior = max(surface.coat_ior, CLEARCOAT_MIN_IOR);
-    let coat_f = clearcoat_fresnel_dielectric(v_dot_h, coat_ior);
+    let coat_ior = max(surface.coat_ior, BRDF_MIN_DIELECTRIC_IOR);
+    let coat_f = fresnel_dielectric(v_dot_h, coat_ior);
     // `OpenPBR` `coat_normal`: the coat layer's own interface normal when a
     // clearcoat normal map is authored; it drives the coat microfacet geometry
     // only, while the base keeps the base normal.
@@ -185,8 +167,8 @@ fn clearcoat_direct(
 
     // Double-pass transmission at the view and light angles (the reference PT
     // `CoatLayer` form): the base is gated entering and leaving the coat.
-    let throughput = (1.0 - coat * clearcoat_fresnel_dielectric(n_dot_v, coat_ior))
-        * (1.0 - coat * clearcoat_fresnel_dielectric(n_dot_l, coat_ior));
+    let throughput = (1.0 - coat * fresnel_dielectric(n_dot_v, coat_ior))
+        * (1.0 - coat * fresnel_dielectric(n_dot_l, coat_ior));
 
     let reflected = base * throughput + coat_specular;
     let radiance = reflected * light.illuminance;

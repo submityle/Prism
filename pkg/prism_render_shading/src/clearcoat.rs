@@ -35,8 +35,8 @@ use core::f32::consts::PI;
 
 use crate::lighting::{
     anisotropic_axes, dielectric_f0, distribution_ggx, distribution_ggx_anisotropic,
-    fresnel_schlick, oren_nayar_factor, visibility_smith_ggx_anisotropic,
-    visibility_smith_ggx_correlated, MIN_ANISOTROPIC_ALPHA,
+    fresnel_dielectric, fresnel_schlick, oren_nayar_factor, visibility_smith_ggx_anisotropic,
+    visibility_smith_ggx_correlated, MIN_ANISOTROPIC_ALPHA, MIN_DIELECTRIC_IOR,
 };
 use crate::vecmath::{add, dot, mix3, mul, mul_scalar, normalize_or, sub};
 use crate::{DirectLightSample, ShadingFrame, SurfaceSample};
@@ -47,40 +47,6 @@ const INV_PI: f32 = 1.0 / PI;
 const MIN_ROUGHNESS: f32 = 0.045;
 /// Dot-product floor shared with the principled lobe (`MIN_N_DOT`).
 const MIN_N_DOT: f32 = 1.0e-5;
-/// Smallest relative coat index accepted, keeping the coat a genuine dielectric
-/// interface. Mirrors `reference_pt::coat::MIN_COAT_IOR`.
-const MIN_COAT_IOR: f32 = 1.0 + 1.0e-3;
-
-/// Unpolarized dielectric Fresnel reflectance of the coat interface for a
-/// direction whose cosine with the normal is `cos_i`, with the relative index
-/// `eta_t / eta_i = coat_ior` and the exterior medium at index 1.
-///
-/// This is the exact Fresnel reflectance shared with the path-traced reference
-/// (`reference_pt::dielectric::fresnel_dielectric(cos_i, 1.0, coat_ior)`),
-/// including the total-internal-reflection branch. At `cos_i == 1` and
-/// `coat_ior == 1.5` it returns exactly `0.04`, reproducing the legacy fixed
-/// `F0`. Only `sqrt`, a divide and two squares are used, so it stays inside the
-/// transcendental budget of the shading path.
-#[inline]
-fn fresnel_coat_dielectric(cos_i: f32, coat_ior: f32) -> f32 {
-    let cos_i = cos_i.clamp(0.0, 1.0);
-    let ior = coat_ior.max(MIN_COAT_IOR);
-    // Snell's law in squared-sine form with eta_i = 1, eta_t = ior.
-    let eta = 1.0 / ior;
-    let sin2_i = (1.0 - cos_i * cos_i).max(0.0);
-    let sin2_t = eta * eta * sin2_i;
-    if sin2_t >= 1.0 {
-        // Beyond the critical angle: all energy is reflected.
-        return 1.0;
-    }
-    let cos_t = (1.0 - sin2_t).max(0.0).sqrt();
-    // Parallel- and perpendicular-polarized amplitude reflection coefficients
-    // for eta_i = 1 and eta_t = ior.
-    let r_parl = (ior * cos_i - cos_t) / (ior * cos_i + cos_t);
-    let r_perp = (cos_i - ior * cos_t) / (cos_i + ior * cos_t);
-    0.5 * (r_parl * r_parl + r_perp * r_perp)
-}
-
 /// The coat interface normal: `OpenPBR` `coat_normal` when authored, else the
 /// base shading normal.
 ///
@@ -169,8 +135,8 @@ pub fn evaluate_clearcoat_direct(
     let coat_alpha = coat_roughness * coat_roughness;
     // The coat's Fresnel is achromatic (driven solely by `coat_ior`), so the
     // scalar `Fc` drives both the highlight and the base attenuation.
-    let coat_ior = surface.coat_ior.max(MIN_COAT_IOR);
-    let coat_f = fresnel_coat_dielectric(v_dot_h, coat_ior);
+    let coat_ior = surface.coat_ior.max(MIN_DIELECTRIC_IOR);
+    let coat_f = fresnel_dielectric(v_dot_h, coat_ior);
     // OpenPBR `coat_normal`: the coat layer has its own interface normal when a
     // clearcoat normal map is authored. It drives the coat's microfacet
     // geometry only; the base layer and its attenuation keep the base normal.
@@ -238,8 +204,8 @@ pub fn evaluate_clearcoat_direct(
     // and again on exit, so the base is gated by the coat Fresnel at the view
     // and light angles (the reference PT `CoatLayer` form). This is the physical
     // departure from the principled single-pass fallback.
-    let throughput = (1.0 - coat * fresnel_coat_dielectric(n_dot_v, coat_ior))
-        * (1.0 - coat * fresnel_coat_dielectric(n_dot_l, coat_ior));
+    let throughput = (1.0 - coat * fresnel_dielectric(n_dot_v, coat_ior))
+        * (1.0 - coat * fresnel_dielectric(n_dot_l, coat_ior));
 
     let reflected = add(mul_scalar(base, throughput), coat_specular);
     let radiance = mul(reflected, light.illuminance);
@@ -467,14 +433,14 @@ mod tests {
         // The exact dielectric Fresnel must reduce to the historical fixed
         // `F0 = 0.04` at normal incidence and index 1.5, so a default material
         // keeps the same interface reflectance it had before `coat_ior` existed.
-        assert!((fresnel_coat_dielectric(1.0, 1.5) - 0.04).abs() < 1.0e-6);
+        assert!((fresnel_dielectric(1.0, 1.5) - 0.04).abs() < 1.0e-6);
         // Fresnel grows toward grazing and never leaves [0, 1].
-        let grazing = fresnel_coat_dielectric(0.05, 1.5);
-        let normal = fresnel_coat_dielectric(1.0, 1.5);
+        let grazing = fresnel_dielectric(0.05, 1.5);
+        let normal = fresnel_dielectric(1.0, 1.5);
         assert!(grazing > normal);
         for cos in [0.0, 0.25, 0.5, 0.75, 1.0] {
             for ior in [1.001, 1.3, 1.5, 2.0, 3.0] {
-                let f = fresnel_coat_dielectric(cos, ior);
+                let f = fresnel_dielectric(cos, ior);
                 assert!(f.is_finite() && (0.0..=1.0).contains(&f), "cos={cos} ior={ior} -> {f}");
             }
         }
