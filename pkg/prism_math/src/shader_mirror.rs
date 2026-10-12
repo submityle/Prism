@@ -878,14 +878,36 @@ fn prism_ray_triangle(origin: vec3<f32>, dir: vec3<f32>, a: vec3<f32>, b: vec3<f
 /// (`|x| > 65504`) plus `NaN`, which the WGSL spec leaves implementation-defined
 /// for `pack2x16float`. Those are documented as a reconstruction-tolerance
 /// boundary rather than a bit contract. The `f16 -> f32` unpack direction is
-/// exact on both sides.
+/// implemented **bitwise** (`prism_f16_to_f32`) rather than via the built-in, so
+/// it reproduces the CPU `f16_bits_to_f32` exactly — including subnormal
+/// renormalization and NaN-payload preservation, which the built-in
+/// canonicalizes (CR-found).
 pub const WGSL_F16: &str = "\
 fn prism_f16_pack2(a: f32, b: f32) -> u32 {\n\
     return pack2x16float(vec2<f32>(a, b));\n\
 }\n\
 \n\
+fn prism_f16_to_f32(i: u32) -> f32 {\n\
+    let h = i & 0xffffu;\n\
+    if ((h & 0x7fffu) == 0u) { return bitcast<f32>(h << 16u); }\n\
+    let sign = (h & 0x8000u) << 16u;\n\
+    let exp = h & 0x7c00u;\n\
+    let man = h & 0x03ffu;\n\
+    if (exp == 0x7c00u) {\n\
+        if (man == 0u) { return bitcast<f32>(sign | 0x7f800000u); }\n\
+        return bitcast<f32>(sign | 0x7fc00000u | (man << 13u));\n\
+    }\n\
+    if (exp == 0u) {\n\
+        let e = countLeadingZeros(man) - 22u;\n\
+        let m = (man << (14u + e)) & 0x7fffffu;\n\
+        return bitcast<f32>(sign | ((112u - e) << 23u) | m);\n\
+    }\n\
+    let expn = ((h >> 10u) & 0x1fu) + 112u;\n\
+    return bitcast<f32>(sign | (expn << 23u) | (man << 13u));\n\
+}\n\
+\n\
 fn prism_f16_unpack2(bits: u32) -> vec2<f32> {\n\
-    return unpack2x16float(bits);\n\
+    return vec2<f32>(prism_f16_to_f32(bits & 0xffffu), prism_f16_to_f32(bits >> 16u));\n\
 }\n";
 
 /// Single-sourced WGSL for the sRGB electro-optical transfer functions

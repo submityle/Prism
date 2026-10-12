@@ -124,8 +124,35 @@ fn unpack2_matches_cpu_reference_in_normal_range() {
     for (&k, got) in keys.iter().zip(gpu.iter()) {
         let lo = F16::from_bits(k as u16).to_f32();
         let hi = F16::from_bits((k >> 16) as u16).to_f32();
-        assert_eq!(got[0].to_bits(), lo.to_bits(), "unpack2 low drift for {k:#010x}");
-        assert_eq!(got[1].to_bits(), hi.to_bits(), "unpack2 high drift for {k:#010x}");
+        assert_eq!(
+            got[0].to_bits(),
+            lo.to_bits(),
+            "unpack2 low drift for {k:#010x}"
+        );
+        assert_eq!(
+            got[1].to_bits(),
+            hi.to_bits(),
+            "unpack2 high drift for {k:#010x}"
+        );
+    }
+}
+
+#[test]
+fn unpack2_matches_cpu_for_all_16_bit_patterns() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let kernel = GpuF16Pack::new(&ctx);
+
+    // Every 16-bit pattern in the low lane (high lane zero): subnormals, ±0,
+    // inf, and NaN payloads must widen bit-for-bit like the CPU (CR-found: the
+    // built-in `unpack2x16float` canonicalized NaN payloads).
+    let keys: Vec<u32> = (0u32..=0xffff).collect();
+    let gpu = kernel.unpack2(&ctx, &keys);
+    assert_eq!(gpu.len(), keys.len());
+    for (k, got) in (0u32..=0xffff).zip(gpu.iter()) {
+        let want = F16::from_bits(k as u16).to_f32().to_bits();
+        assert_eq!(got[0].to_bits(), want, "unpack2 low drift for {k:#06x}");
     }
 }
 
