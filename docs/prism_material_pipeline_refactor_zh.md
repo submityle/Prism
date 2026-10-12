@@ -241,7 +241,7 @@
 | **Geometry** | `geometry_opacity` | float | `geometry_opacity`（复用一个 core 填充字，乘进 alpha） | ✅（本轮新增为独立字段） |
 | | `geometry_thin_walled` | boolean | schema/ABI 标识符 `geometry_thin_walled`（规范是 boolean，这里用 `f32` 0/1 打包进 core word）；解码后的 Prism 字段经 `surface_field` 保留 `thin_walled` | ✅（标识符 + 行为） |
 | | `geometry_normal` / `geometry_tangent` / `geometry_coat_normal` / `geometry_coat_tangent` | vector3 | **shade-time 输入**（非材质参数）：`ShadingFrame.{normal,tangent}` / `SurfaceSample.coat_normal` / `SurfaceSample.coat_tangent` | ✅（由网格/法线图在着色期提供；`coat_tangent` 本轮补上） |
-| **（规范之外）** | — | — | `face`（`softness`）、`anisotropy_rotation`、`ambient_occlusion`、`normal_scale`、`alpha_cutoff`、`thickness` | Prism 扩展区，计入超集 |
+| **（规范之外）** | — | — | `npr_face`（`npr_face_softness`，NPR 线的 SDF 面阴影）、`anisotropy_rotation`、`ambient_occlusion`、`normal_scale`、`alpha_cutoff`、`transmission_depth`（规范标识符，实时瓣把「路径 = 1 场景单位」作为显式口径） | Prism 扩展区，计入超集 |
 
 **结论（code-truth）**：**规范参数已全部有对应物，标识符与行为已全部对齐规范；剩余只有一批「刻意保留的默认值偏差」。** 已对齐（名字 + 含义 + 公式）：`base_weight` / `base_color` / `base_metalness` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_roughness` / **`specular_roughness_anisotropy`（标识符 + [0,1] + 规范 `openpbr-anisotropy-formula` 伸长公式，base/coat 共用，`a==0` 逐位各向同性）** / `specular_ior` / `transmission_weight` / `transmission_color` / **`transmission_depth`（路径=1 场景单位口径下的完整规范语义，含 `depth==0` 非物理 tint）** / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_scale` / `transmission_dispersion_abbe_number` / `subsurface_weight` / `subsurface_color` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / `subsurface_scatter_anisotropy` / `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` / `fuzz_weight` / `fuzz_color` / `fuzz_roughness` / `emission_color` / `emission_luminance` / **thin-film 全 3 项（ABI 瓣）** / `geometry_opacity` / `geometry_thin_walled` / 四个 geometry 向量字段（shade-time 输入）。
 
@@ -613,7 +613,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P3-b | 先解耦视角无关项（diffuse/SSS/emission/GI 辐照度），高光仍走屏幕空间 | 分离求值 | P3 |
 | P3-c | 缓存失效 + 时序复用 + mip LOD 策略（光照/动态变化时的页重算） | 调度/一致性 | P3 |
 | P1-g | 自描述反射瓣 schema：lobe 定义（字段名/位宽/置换 key）数据化，解包/分类/对拍从 schema 生成（§17.5） | 工具链+内部布局 | P1 |
-| P2-f 🔶 | 超集合规门禁 + 向下投影导出器（纯 OpenPBR 对拍 + `project_to_openpbr`，§4.5/§17）：**参数块层 + 响应层基底介电镜面已落地**（独立 oracle + 抓到并修掉 Schlick/`specular_weight` 偏差，见 §13.a）；余下金属 `F_82`、coat 分层、fuzz/subsurface/transmission/thin_film 节点图、furnace 收敛对拍 | 新测试+导出路径 | P2 |
+| P2-f 🔶 | 超集合规门禁 + 向下投影导出器（§4.5/§17）：**参数块层 + 响应层（独立 oracle + 白炉能量门禁）均已落地**——介电/金属/coat/IOR-ratio/EON 漫反射/transmission 全部对齐到**语义/标识符/能量不变量**；白炉 7 配置 1.00±2%，coat 叠加 0.72 已诊断并记录（含两种实测否决的改法）。余：coat 能量设计、fuzz 叠加、subsurface（独立 class）、`refracted_coat_dir` 角度混合（规范给的另一条等价路径） | 新测试+导出路径 | P2 |
 | P2-g | 运行时动态参数通道（wetness/snow/damage/dissolve 等少量动态轴，烘焙静态 über + 运行时解析式调制，§17.1） | header 加动态段 | P2 |
 | P2-h | 原理化分层 BSDF（coat/base 能量耦合 + coat_darkening，§17.2） | 无（改 BSDF+测试） | P2 |
 | P3-d | 光谱提升（hero-wavelength，仅 RT twin / 离线参考，不进实时主线，§17.3） | 无（RT-only 分支） | P3 |
