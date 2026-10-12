@@ -12,6 +12,7 @@ mod ao;
 mod bloom;
 mod cas;
 mod chromatic_aberration;
+mod charlie_albedo_table;
 mod classification;
 mod clearcoat;
 mod cloth;

@@ -821,6 +821,51 @@ mod conformance {
     /// `f·(n·l)` under a unit uniform environment, i.e. exactly what the
     /// specification's **white furnace test** checks. Deterministic stratified
     /// quadrature in `(θ, φ)` with a cosine-friendly midpoint rule.
+    /// Same quadrature for any direct-lighting closure (the Cloth and
+    /// Subsurface shading classes have their own entry points).
+    fn furnace_albedo_fn(
+        f: impl Fn(SurfaceSample, ShadingFrame, DirectLightSample) -> [f32; 3],
+        surface: SurfaceSample,
+        view: [f32; 3],
+        n_theta: usize,
+        n_phi: usize,
+    ) -> [f32; 3] {
+        let n = [0.0_f32, 1.0, 0.0];
+        let len = (view[0] * view[0] + view[1] * view[1] + view[2] * view[2]).sqrt();
+        let v = [view[0] / len, view[1] / len, view[2] / len];
+        let frame = ShadingFrame {
+            normal: n,
+            view: v,
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, -1.0],
+        };
+        let d_theta = core::f32::consts::FRAC_PI_2 / n_theta as f32;
+        let d_phi = 2.0 * PI / n_phi as f32;
+        let mut sum = [0.0_f32; 3];
+        for i in 0..n_theta {
+            let theta = (i as f32 + 0.5) * d_theta;
+            let (sin_t, cos_t) = (ops::sin(theta), ops::cos(theta));
+            for j in 0..n_phi {
+                let phi = (j as f32 + 0.5) * d_phi;
+                let l = [sin_t * ops::cos(phi), cos_t, sin_t * ops::sin(phi)];
+                let r = f(
+                    surface,
+                    frame,
+                    DirectLightSample {
+                        direction: l,
+                        illuminance: [1.0; 3],
+                        visibility: 1.0,
+                    },
+                );
+                let w = sin_t * d_theta * d_phi;
+                for c in 0..3 {
+                    sum[c] += r[c] * w;
+                }
+            }
+        }
+        sum
+    }
+
     /// Quadrature with an explicit resolution, so tests can demonstrate
     /// convergence for a peaked (low-roughness) lobe.
     fn furnace_albedo(
@@ -969,6 +1014,14 @@ mod conformance {
             coat_color: white,
             ..coupled(0.0)
         };
+        // Specification: fuzz on top (`fuzz_weight > 0`, white `fuzz_color`). In
+        // Prism the fuzz layer lives in the Cloth shading class, so it has its own
+        // closure and its own furnace check below.
+        let fuzzy = SurfaceSample {
+            fuzz_color: white,
+            sheen: 1.0,
+            ..coupled(0.0)
+        };
         let configs: [(&str, SurfaceSample); 8] = [
             ("metal, default roughness", metal(0.3)),
             ("metal, rough", metal(0.8)),
@@ -1025,6 +1078,21 @@ mod conformance {
                 if err > worst.0 {
                     worst = (err, format!("{name} @ view {view:?}: {albedo:?}"));
                 }
+            }
+        }
+        // The Cloth class's own white furnace (its closure is separate).
+        {
+            let albedo = furnace_albedo_fn(
+                crate::cloth::evaluate_cloth_direct,
+                fuzzy,
+                [0.6, 0.8, 0.0],
+                192,
+                192,
+            );
+            let mean = (albedo[0] + albedo[1] + albedo[2]) / 3.0;
+            let err = (mean - 1.0).abs();
+            if err > worst.0 {
+                worst = (err, format!("cloth class (fuzz) @ mid: {albedo:?}"));
             }
         }
         assert!(
@@ -1544,3 +1612,65 @@ mod schlick_bias_gen {
     }
 }
 
+
+/// Generator for the Charlie (fuzz) lobe's directional albedo `E_fuzz(µ, r)`,
+/// needed by the specification's `fuzz-layering-approx`
+/// (`layer = F·f_fuzz + (1 − F·E_fuzz)·f_base`). Prism's fuzz lobe is Charlie +
+/// Ashikhmin visibility (broad, so a direct 2-D quadrature is accurate).
+#[cfg(test)]
+mod charlie_albedo_gen {
+    use super::*;
+
+    fn charlie_albedo(mu_o: f32, roughness: f32) -> f32 {
+        use crate::cloth::{distribution_charlie, visibility_ashikhmin};
+        const N_THETA: usize = 256;
+        const N_PHI: usize = 256;
+        let cos_o = mu_o.clamp(1.0e-3, 1.0);
+        let sin_o = (1.0 - cos_o * cos_o).max(0.0).sqrt();
+        let d_theta = core::f32::consts::FRAC_PI_2 / N_THETA as f32;
+        let d_phi = 2.0 * PI / N_PHI as f32;
+        let mut sum = 0.0_f32;
+        for i in 0..N_THETA {
+            let theta = (i as f32 + 0.5) * d_theta;
+            let (sin_i, cos_i) = (ops::sin(theta), ops::cos(theta));
+            let n_dot_h = {
+                let hy = cos_i + cos_o;
+                let hx = sin_i * ops::cos((0.0f32).max(0.0)) + sin_o;
+                let hz = sin_i * ops::sin(0.0);
+                let len = ops::sqrt(hx * hx + hy * hy + hz * hz);
+                (hy / len.max(1.0e-6)).clamp(0.0, 1.0)
+            };
+            for j in 0..N_PHI {
+                let phi = (j as f32 + 0.5) * d_phi;
+                // Half-vector between the fixed view and this light direction.
+                let l = [sin_i * ops::cos(phi), cos_i, sin_i * ops::sin(phi)];
+                let v = [sin_o, cos_o, 0.0];
+                let s = [v[0] + l[0], v[1] + l[1], v[2] + l[2]];
+                let len = ops::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).max(1.0e-6);
+                let n_dot_h = ((s[1] / len).clamp(0.0, 1.0)).max(1.0e-5);
+                let _ = n_dot_h;
+                let d = distribution_charlie(roughness.clamp(1.0e-2, 1.0), n_dot_h);
+                let vis = visibility_ashikhmin(cos_o, cos_i.max(1.0e-5));
+                sum += d * vis * cos_i * sin_i * d_theta * d_phi;
+            }
+        }
+        sum
+    }
+
+    #[test]
+    #[ignore = "generator: prints the baked Charlie (fuzz) albedo table"]
+    fn print_charlie_albedo_table() {
+        const N_MU: usize = 17;
+        const N_R: usize = 9;
+        for j in 0..N_R {
+            let r = j as f32 / (N_R - 1) as f32;
+            let row: Vec<String> = (0..N_MU)
+                .map(|i| {
+                    let mu = i as f32 / (N_MU - 1) as f32;
+                    format!("{:.6}", charlie_albedo(mu, r))
+                })
+                .collect();
+            println!("{},", row.join(", "));
+        }
+    }
+}

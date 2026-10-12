@@ -41,7 +41,7 @@ const MIN_SIN2: f32 = 0.007_812_5;
 const WRAP_WIDTH: f32 = 0.5;
 
 /// Estevez-Kulla *Charlie* sheen distribution. Mirrors `cloth_distribution_charlie`.
-fn distribution_charlie(roughness: f32, n_dot_h: f32) -> f32 {
+pub(crate) fn distribution_charlie(roughness: f32, n_dot_h: f32) -> f32 {
     let inv_r = 1.0 / roughness;
     let sin2h = (1.0 - n_dot_h * n_dot_h).max(MIN_SIN2);
     (2.0 + inv_r) * ops::powf(sin2h, inv_r * 0.5) * (1.0 / (2.0 * PI))
@@ -49,7 +49,7 @@ fn distribution_charlie(roughness: f32, n_dot_h: f32) -> f32 {
 
 /// Ashikhmin/Neubelt visibility term for the sheen lobe. Mirrors
 /// `cloth_visibility_ashikhmin`.
-fn visibility_ashikhmin(n_dot_v: f32, n_dot_l: f32) -> f32 {
+pub(crate) fn visibility_ashikhmin(n_dot_v: f32, n_dot_l: f32) -> f32 {
     1.0 / (4.0 * (n_dot_l + n_dot_v - n_dot_l * n_dot_v)).max(MIN_N_DOT)
 }
 
@@ -92,6 +92,13 @@ pub fn evaluate_cloth_direct(
     let vis = visibility_ashikhmin(n_dot_v, n_dot_l);
     let sheen_specular = mul(surface.fuzz_color, [sheen * d * vis; 3]);
 
+    // `OpenPBR` equation `fuzz-layering-approx`: the fuzz layer's albedo
+    // `F·E_fuzz` is *taken out of the substrate*, so adding the sheen on top
+    // cannot over-reflect (without this the white furnace read 1.147). `E_fuzz`
+    // is the baked Charlie lobe albedo — the same quantity the spec calls for.
+    let e_fuzz = crate::charlie_albedo_table::fuzz_albedo_lookup(n_dot_v, fuzz_roughness);
+    let base_scale = (1.0 - sheen * e_fuzz).clamp(0.0, 1.0);
+
     // Diffuse: Lambertian base, optionally softened by the subsurface wrap and
     // tinted toward the base color to fake short-range scattering.
     let subsurface = surface.subsurface.clamp(0.0, 1.0);
@@ -107,7 +114,10 @@ pub fn evaluate_cloth_direct(
     }
 
     let radiance = mul_scalar(
-        mul(add(diffuse, sheen_specular), light.illuminance),
+        mul(
+            add(mul_scalar(diffuse, base_scale), sheen_specular),
+            light.illuminance,
+        ),
         n_dot_l * light.visibility.clamp(0.0, 1.0),
     );
     add(radiance, surface.emissive)
