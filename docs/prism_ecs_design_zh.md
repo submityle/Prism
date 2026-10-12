@@ -480,6 +480,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
   4. **大世界流送（M5）**：卸载/重载实体引用悬垂，靠稳定 ID + 弱句柄解析。
   5. **关系 fragmenting vs non-fragmenting**：高基数关系勿 fragment（原型爆炸），走旁路索引。
   6. **冲突图执行器（M1）**：正确性要害，改动最保守。
+- **未复现的并发观察（待跟进）**：一次 `--features multi_thread` 全量运行中 `system::job_dag_tests::fan_out_fan_in` 失败（该测试断言语义序与拓扑序）。随后做了 40 次单测隔离运行 + 10 次全量 multi_thread 运行 + 8 次早期复跑，共 58 次均通过；`JobDag::dispatch` 的入度计数、`fetch_sub(AcqRel)` 与「最后一个前驱负责派发」经静态复核未发现缺口。结论：**未能复现，也未定位到根因**；保留为待跟进项，若再次出现需抓取失败断言（是 `len` 还是 `assert_before`）以缩小范围。
 - 与既有 `prism_ecs_refactor_plan_zh.md`（原地改写 bevy_ecs 的 Fork-and-Own 方案）为两条候选路线：本文是"从零自研（greenfield chunked-archetype）"，前者是"原地演化"。二者可择一，或先 Fork-and-Own 启动、再按本文 chunk/关系/作业/流送/确定性设计逐步替换内部实现，最终形态一致。
 
 ---
