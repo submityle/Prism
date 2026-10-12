@@ -86,8 +86,8 @@ impl Illumination {
 }
 
 /// The bit width of a compact [`SpecializationId::bin_class`] value:
-/// `illumination` 2 bits, `render_class` 8, live lobe set 17.
-pub const BIN_CLASS_BITS: u32 = 27;
+/// `illumination` 2 bits, `render_class` 8, live lobe set 19.
+pub const BIN_CLASS_BITS: u32 = 29;
 
 /// Deterministic identity of one compiled shader permutation.
 ///
@@ -148,10 +148,10 @@ impl SpecializationId {
     /// The compact `u32` form of this key used as a draw-bin class.
     ///
     /// Layout (LSB → MSB): `illumination` `0..2`, `render_class` `2..10`, live
-    /// lobe set `10..27`. A legal lobe mask uses only bits `0..17` — the `LobeMask`
-    /// vocabulary has eight kinds and the highest, `NPR_FACE`, sits at bit `16` —
-    /// so the projection is collision-free for any legal material: a bin keyed on
-    /// this class carries the **full** permutation, not just the
+    /// lobe set `10..29`. A legal lobe mask uses bits `0..19` — the `LobeMask`
+    /// vocabulary currently reaches `MEASURED_BRDF` at bit `18` — so the
+    /// projection is collision-free for any legal material: a bin keyed on this
+    /// class carries the **full** permutation, not just the
     /// illumination/render-class pair.
     ///
     /// Binning is therefore correct for materials that differ only in their live
@@ -162,7 +162,7 @@ impl SpecializationId {
     pub const fn bin_class(self) -> u32 {
         (self.illumination_bits() & 0x3)
             | ((self.render_class_bits() & 0xFF) << 2)
-            | ((self.closure_mask() & 0x1_FFFF) << 10)
+            | ((self.closure_mask() & 0x7_FFFF) << 10)
     }
 
     /// Reconstructs the canonical key from a compact [`bin_class`] value.
@@ -171,7 +171,7 @@ impl SpecializationId {
     ///
     /// This is the exact inverse of [`bin_class`](Self::bin_class) for every
     /// material whose live lobe set fits the `LobeMask` vocabulary (bits
-    /// `0..17`) — which every legal material does. Binning stores only the
+    /// `0..19`) — which every legal material does. Binning stores only the
     /// compact class, so recovering the full key is what lets the GPU-driven bin
     /// path and the CPU direct path land on the **same** pipeline instead of one
     /// keyed on the raw `u64` and one on the compact `u32`.
@@ -187,7 +187,7 @@ impl SpecializationId {
         let illumination = Illumination::from_u32(bin_class & 0x3)?;
         let render_class = (bin_class >> 2) & 0xFF;
         MaterialRenderClass::from_u32(render_class)?;
-        let closure_mask = (bin_class >> 10) & 0x1_FFFF;
+        let closure_mask = (bin_class >> 10) & 0x7_FFFF;
         Some(Self::new(illumination, closure_mask, render_class))
     }
 }
@@ -270,15 +270,18 @@ mod tests {
     #[test]
     fn bin_class_carries_the_live_lobe_set() {
         let plain = SpecializationId::new(Illumination::Lit, 0, 0);
-        // `LobeMask::CLEARCOAT` (bit 1) and `LobeMask::NPR_FACE` (bit 16).
+        // `LobeMask::CLEARCOAT` (bit 1), `NPR_FACE` (bit 16) and
+        // `MEASURED_BRDF` (bit 18).
         let clearcoat = SpecializationId::new(Illumination::Lit, 1 << 1, 0);
         let face_shadow = SpecializationId::new(Illumination::Lit, 1 << 16, 0);
+        let measured = SpecializationId::new(Illumination::Lit, 1 << 18, 0);
         assert_ne!(
             plain.bin_class(),
             clearcoat.bin_class(),
             "a differing lobe yields a different bin class"
         );
         assert_ne!(plain.bin_class(), face_shadow.bin_class());
+        assert_ne!(plain.bin_class(), measured.bin_class());
         assert_eq!(
             plain.bin_class(),
             SpecializationId::new(Illumination::Lit, 0, 0).bin_class(),
@@ -295,8 +298,8 @@ mod tests {
             SpecializationId::new(Illumination::Lit, 0, 1).bin_class()
         );
 
-        // The projection fits the documented field widths (27 bits total).
-        let widest = SpecializationId::new(Illumination::Custom, 0x1_FFFF, 0xFF);
+        // The projection fits the documented field widths (29 bits total).
+        let widest = SpecializationId::new(Illumination::Custom, 0x7_FFFF, 0xFF);
         assert_eq!(
             widest.bin_class() >> BIN_CLASS_BITS,
             0,
@@ -314,7 +317,16 @@ mod tests {
             Illumination::Unlit,
             Illumination::Custom,
         ] {
-            for closure_mask in [0_u32, 1, 1 << 1, 1 << 16, 0x1_FFFF, 0b1010_1001_0110_0101] {
+            for closure_mask in [
+                0_u32,
+                1,
+                1 << 1,
+                1 << 16,
+                1 << 18,
+                0x1_FFFF,
+                0x7_FFFF,
+                0b1010_1001_0110_0101,
+            ] {
                 for render_class in [0_u32, 1, 4, 7, 10] {
                     let id = SpecializationId::new(illumination, closure_mask, render_class);
                     assert_eq!(
