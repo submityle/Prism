@@ -13,23 +13,16 @@
 //! headless run is direct evidence the water subsystem can turn solved surface
 //! parameters into visible pixels — not merely compute scalar fields.
 
-use alloc::vec::Vec;
-use std::io;
-use std::path::Path;
-
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
-    BindingType, BlendState, BufferBindingType, BufferDescriptor, BufferUsages, Color,
-    ColorTargetState, ColorWrites, CommandEncoderDescriptor, CompareFunction, DepthBiasState,
-    DepthStencilState, Extent3d, FragmentState, FrontFace, LoadOp, MapMode, MultisampleState,
-    Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PrimitiveState,
-    PrimitiveTopology, RenderPassColorAttachment, RenderPassDepthStencilAttachment,
-    RenderPassDescriptor, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource,
-    ShaderStages, StencilState, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout,
-    TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages, TextureViewDescriptor, VertexState,
+    BindingType, BlendState, BufferBindingType, BufferUsages, Color, ColorTargetState, ColorWrites,
+    CompareFunction, DepthBiasState, DepthStencilState, FragmentState, FrontFace, LoadOp,
+    MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor,
+    PolygonMode, PrimitiveState, PrimitiveTopology, RenderPassColorAttachment,
+    RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
+    ShaderModuleDescriptor, ShaderSource, ShaderStages, StencilState, StoreOp, VertexState,
 };
 
 use prism_render_architecture::water::spectrum::dispersion;
@@ -37,16 +30,7 @@ use prism_render_architecture::water::WATER_ARCHITECTURE_VERSION;
 
 use crate::camera::Camera;
 use crate::context::GpuContext;
-use crate::png;
-
-/// Row alignment, in bytes, required for `copy_texture_to_buffer` destinations.
-const ROW_ALIGNMENT: u32 = 256;
-
-/// The colour format of the offscreen render target and the read-back image.
-const COLOR_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
-
-/// The depth format used for hidden-surface removal.
-const DEPTH_FORMAT: TextureFormat = TextureFormat::Depth32Float;
+use crate::frame::{self, RenderedFrame, COLOR_FORMAT, DEPTH_FORMAT};
 
 /// A described water-surface scene ready to rasterise.
 #[derive(Clone, Copy, Debug)]
@@ -120,46 +104,6 @@ impl WaterSurfaceScene {
     }
 }
 
-/// A rendered frame read back to host memory as tightly packed `RGBA8`.
-#[derive(Clone, Debug)]
-pub struct RenderedFrame {
-    /// Image width in pixels.
-    pub width: u32,
-    /// Image height in pixels.
-    pub height: u32,
-    /// Row-major `RGBA8` pixels, top row first (`width * height * 4` bytes).
-    pub rgba: Vec<u8>,
-}
-
-impl RenderedFrame {
-    /// Encodes the frame as a `PNG` and writes it to `path`.
-    ///
-    /// # Errors
-    ///
-    /// Returns any `io` error raised while creating or writing the file.
-    pub fn save_png(&self, path: &Path) -> io::Result<()> {
-        let bytes = png::encode_rgba8(self.width, self.height, &self.rgba);
-        std::fs::write(path, bytes)
-    }
-
-    /// Counts the number of distinct `RGBA` pixel values in the frame.
-    ///
-    /// A flat clear produces `1`; any rasterised, shaded geometry produces many.
-    /// Tests use this as device-independent evidence that the pipeline actually
-    /// drew and shaded the surface rather than clearing to a single colour.
-    #[must_use]
-    pub fn distinct_colors(&self) -> usize {
-        let mut seen = Vec::new();
-        for px in self.rgba.chunks_exact(4) {
-            let key = u32::from_le_bytes([px[0], px[1], px[2], px[3]]);
-            if let Err(idx) = seen.binary_search(&key) {
-                seen.insert(idx, key);
-            }
-        }
-        seen.len()
-    }
-}
-
 /// Rasterises `scene` on `ctx` and reads the frame back to host memory.
 ///
 /// # Panics
@@ -169,7 +113,6 @@ impl RenderedFrame {
 #[must_use]
 pub fn render(ctx: &GpuContext, scene: &WaterSurfaceScene) -> RenderedFrame {
     let device = ctx.device();
-    let queue = ctx.queue();
 
     let width = scene.width.max(1);
     let height = scene.height.max(1);
@@ -259,54 +202,14 @@ pub fn render(ctx: &GpuContext, scene: &WaterSurfaceScene) -> RenderedFrame {
         }],
     });
 
-    let extent = Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
-    };
-    let color_tex = device.create_texture(&TextureDescriptor {
-        label: Some("water-surface-color"),
-        size: extent,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format: COLOR_FORMAT,
-        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let color_view = color_tex.create_view(&TextureViewDescriptor::default());
-
-    let depth_tex = device.create_texture(&TextureDescriptor {
-        label: Some("water-surface-depth"),
-        size: extent,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format: DEPTH_FORMAT,
-        usage: TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let depth_view = depth_tex.create_view(&TextureViewDescriptor::default());
-
-    let bytes_per_row = align_up(width * 4, ROW_ALIGNMENT);
-    let readback = device.create_buffer(&BufferDescriptor {
-        label: Some("water-surface-readback"),
-        size: u64::from(bytes_per_row) * u64::from(height),
-        usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
     let vertex_count = 6 * scene.grid_resolution.max(1) * scene.grid_resolution.max(1);
+    let clear = scene.background;
 
-    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-        label: Some("water-surface-encoder"),
-    });
-    {
-        let clear = scene.background;
+    frame::render_offscreen(ctx, width, height, |encoder, color_view, depth_view| {
         let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("water-surface-pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
-                view: &color_view,
+                view: color_view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: Operations {
@@ -320,7 +223,7 @@ pub fn render(ctx: &GpuContext, scene: &WaterSurfaceScene) -> RenderedFrame {
                 },
             })],
             depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
-                view: &depth_view,
+                view: depth_view,
                 depth_ops: Some(Operations {
                     load: LoadOp::Clear(1.0),
                     store: StoreOp::Store,
@@ -332,61 +235,7 @@ pub fn render(ctx: &GpuContext, scene: &WaterSurfaceScene) -> RenderedFrame {
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..vertex_count, 0..1);
-    }
-
-    encoder.copy_texture_to_buffer(
-        TexelCopyTextureInfo {
-            texture: &color_tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: TextureAspect::All,
-        },
-        TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bytes_per_row),
-                rows_per_image: Some(height),
-            },
-        },
-        extent,
-    );
-
-    queue.submit([encoder.finish()]);
-
-    readback.slice(..).map_async(MapMode::Read, |_| {});
-    ctx.wait();
-
-    let rgba = unpack_rows(&readback, width, height, bytes_per_row);
-    readback.unmap();
-
-    RenderedFrame {
-        width,
-        height,
-        rgba,
-    }
-}
-
-/// Copies a mapped, row-padded staging buffer into a tight `RGBA8` vector.
-fn unpack_rows(readback: &wgpu::Buffer, width: u32, height: u32, bytes_per_row: u32) -> Vec<u8> {
-    let view = readback
-        .slice(..)
-        .get_mapped_range()
-        .expect("read-back buffer should map after the device completes the copy");
-    let row_bytes = (width * 4) as usize;
-    let padded = bytes_per_row as usize;
-    let mut out = Vec::with_capacity(row_bytes * height as usize);
-    for row in 0..height as usize {
-        let start = row * padded;
-        out.extend_from_slice(&view[start..start + row_bytes]);
-    }
-    drop(view);
-    out
-}
-
-/// Rounds `value` up to the next multiple of `align` (a power of two).
-fn align_up(value: u32, align: u32) -> u32 {
-    value.div_ceil(align) * align
+    })
 }
 
 /// The `std140`-compatible uniform block the shader reads from `@binding(0)`.

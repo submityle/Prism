@@ -31,10 +31,14 @@ extern crate alloc;
 
 pub mod camera;
 pub mod context;
+pub mod frame;
+pub mod ocean;
 pub mod png;
 pub mod surface;
 
 pub use camera::Camera;
 pub use context::{block_on, GpuContext};
+pub use frame::RenderedFrame;
+pub use ocean::{render_ocean, OceanScene};
 pub use png::encode_rgba8;
-pub use surface::{render, RenderedFrame, WaterSurfaceScene};
+pub use surface::{render, WaterSurfaceScene};
