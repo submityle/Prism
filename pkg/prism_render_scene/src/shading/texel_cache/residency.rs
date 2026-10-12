@@ -84,6 +84,8 @@ pub enum ShadeResidencyError {
     UnknownPage,
     /// A write token does not match the currently owned write.
     InvalidWrite,
+    /// The monotonic generation space is exhausted; reusing one would alias tickets.
+    GenerationExhausted,
     /// An operation would violate the state machine.
     InvalidTransition { from: ShadePageState },
 }
@@ -93,6 +95,7 @@ struct Entry {
     state: ShadePageState,
     priority: u64,
     byte_cost: u64,
+    request_frame: u64,
     last_used_frame: u64,
 }
 
@@ -105,6 +108,7 @@ struct Entry {
 pub struct ShadeResidencyTable {
     entries: BTreeMap<ShadePageKey, Entry>,
     next_generation: u64,
+    generation_exhausted: bool,
 }
 
 impl Default for ShadeResidencyTable {
@@ -120,19 +124,39 @@ impl ShadeResidencyTable {
         Self {
             entries: BTreeMap::new(),
             next_generation: 1,
+            generation_exhausted: false,
         }
     }
 
     /// Records a visible page request without making it sampleable.
+    ///
+    /// Requests are accumulated within their observation frame: duplicate
+    /// requests take the maximum priority and cost so planning is independent
+    /// of traversal order. A newer frame replaces that metadata; late work
+    /// from an older frame is ignored. A request whose key epoch does not
+    /// match `epoch` is ignored because it cannot describe this plan.
     pub fn request(&mut self, request: ShadePageRequest, epoch: u64) {
+        if request.key.material_epoch != epoch {
+            return;
+        }
         let entry = self.entries.entry(request.key).or_insert(Entry {
             state: ShadePageState::Missing,
-            priority: 0,
+            priority: request.priority,
             byte_cost: request.byte_cost,
+            request_frame: request.frame,
             last_used_frame: request.frame,
         });
-        entry.priority = entry.priority.max(request.priority);
-        entry.byte_cost = request.byte_cost;
+        if request.frame < entry.request_frame {
+            return;
+        }
+        if request.frame > entry.request_frame {
+            entry.priority = request.priority;
+            entry.byte_cost = request.byte_cost;
+            entry.request_frame = request.frame;
+        } else {
+            entry.priority = entry.priority.max(request.priority);
+            entry.byte_cost = entry.byte_cost.max(request.byte_cost);
+        }
         entry.last_used_frame = entry.last_used_frame.max(request.frame);
         if let ShadePageState::Ready {
             generation,
@@ -159,6 +183,9 @@ impl ShadeResidencyTable {
         key: ShadePageKey,
         epoch: u64,
     ) -> Result<ShadeWriteTicket, ShadeResidencyError> {
+        if self.generation_exhausted {
+            return Err(ShadeResidencyError::GenerationExhausted);
+        }
         let entry = self
             .entries
             .get_mut(&key)
@@ -170,7 +197,11 @@ impl ShadeResidencyTable {
             return Err(ShadeResidencyError::InvalidTransition { from: entry.state });
         }
         let generation = self.next_generation;
-        self.next_generation = self.next_generation.saturating_add(1).max(1);
+        if let Some(next_generation) = self.next_generation.checked_add(1) {
+            self.next_generation = next_generation;
+        } else {
+            self.generation_exhausted = true;
+        }
         entry.state = ShadePageState::Writing { generation, epoch };
         Ok(ShadeWriteTicket {
             key,
@@ -266,5 +297,50 @@ impl ShadeResidencyTable {
         self.entries
             .iter()
             .map(|(key, entry)| (*key, entry.state, entry.priority, entry.byte_cost))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generation_exhaustion_never_reuses_a_ticket_generation() {
+        let key = ShadePageKey {
+            object_id: 1,
+            material_id: 2,
+            material_epoch: 3,
+            face: 0,
+            mip: 0,
+            channel: super::super::key::ShadeChannel::LitDiffuse,
+            page_x: 0,
+            page_y: 0,
+        };
+        let mut table = ShadeResidencyTable::new();
+        table.next_generation = u64::MAX;
+        table.request(
+            ShadePageRequest {
+                key,
+                priority: 1,
+                byte_cost: 16,
+                frame: 1,
+            },
+            3,
+        );
+        assert_eq!(table.begin_write(key, 3).unwrap().generation, u64::MAX);
+        table.evict(key).unwrap();
+        table.request(
+            ShadePageRequest {
+                key,
+                priority: 1,
+                byte_cost: 16,
+                frame: 1,
+            },
+            3,
+        );
+        assert_eq!(
+            table.begin_write(key, 3),
+            Err(ShadeResidencyError::GenerationExhausted)
+        );
     }
 }

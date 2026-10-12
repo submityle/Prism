@@ -52,6 +52,10 @@ pub enum ShadeStoreError {
     InvalidFrame,
     /// The atlas has no free slot.
     CapacityExhausted,
+    /// A page key belongs to a different material epoch than the frame.
+    EpochMismatch,
+    /// The frame serial space is exhausted; reusing a serial would alias tokens.
+    FrameSerialExhausted,
     /// A write lease is already open for this page.
     WriteAlreadyOpen,
     /// This page has already been written and committed in this frame.
@@ -98,7 +102,10 @@ impl ShadePageStore {
         if self.staging.is_some() {
             return Err(ShadeStoreError::FrameAlreadyOpen);
         }
-        self.frame_serial = self.frame_serial.saturating_add(1).max(1);
+        self.frame_serial = self
+            .frame_serial
+            .checked_add(1)
+            .ok_or(ShadeStoreError::FrameSerialExhausted)?;
         self.staging = Some(self.active.clone());
         self.pending_writes.clear();
         self.written_pages.clear();
@@ -109,6 +116,10 @@ impl ShadePageStore {
     }
 
     /// Reserves a physical slot and records a pending staging write.
+    ///
+    /// The key's material epoch must match the frame epoch. This keeps a
+    /// physically valid upload from becoming visible under the wrong logical
+    /// identity.
     pub fn begin_write(
         &mut self,
         token: ShadeFrameToken,
@@ -120,6 +131,9 @@ impl ShadePageStore {
         }
         if token.serial != self.frame_serial {
             return Err(ShadeStoreError::InvalidFrame);
+        }
+        if key.material_epoch != token.epoch {
+            return Err(ShadeStoreError::EpochMismatch);
         }
         if self.pending_writes.contains_key(&key) {
             return Err(ShadeStoreError::WriteAlreadyOpen);
@@ -211,5 +225,41 @@ impl ShadePageStore {
     #[must_use]
     pub fn active_len(&self) -> usize {
         self.active.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shading::texel_cache::ShadeChannel;
+
+    fn key(epoch: u64) -> ShadePageKey {
+        ShadePageKey {
+            object_id: 1,
+            material_id: 2,
+            material_epoch: epoch,
+            face: 0,
+            mip: 0,
+            channel: ShadeChannel::LitDiffuse,
+            page_x: 0,
+            page_y: 0,
+        }
+    }
+
+    #[test]
+    fn epoch_mismatch_is_rejected_and_serial_exhaustion_does_not_alias_tokens() {
+        let mut store = ShadePageStore::new(1);
+        let frame = store.begin_frame(4).unwrap();
+        assert_eq!(
+            store.begin_write(frame, key(3), 1),
+            Err(ShadeStoreError::EpochMismatch)
+        );
+        store.publish(frame).unwrap();
+
+        store.frame_serial = u64::MAX;
+        assert_eq!(
+            store.begin_frame(4),
+            Err(ShadeStoreError::FrameSerialExhausted)
+        );
     }
 }

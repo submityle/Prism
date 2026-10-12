@@ -137,6 +137,62 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_requests_are_order_independent_and_reserve_worst_case_cost() {
+        let page = key(0, 0);
+        let requests = [request(page, 3, 32), request(page, 9, 64)];
+        let mut forward = ShadeResidencyTable::new();
+        let mut reverse = ShadeResidencyTable::new();
+        let a = build_shade_plan(&mut forward, requests, 3, 63);
+        let b = build_shade_plan(&mut reverse, requests.into_iter().rev(), 3, 63);
+
+        assert_eq!(a, b);
+        assert!(a.selected.is_empty());
+        assert_eq!(a.deferred[0].priority, 9);
+        assert_eq!(a.deferred[0].byte_cost, 64);
+    }
+
+    #[test]
+    fn request_metadata_is_refreshed_each_frame_and_old_requests_are_ignored() {
+        let page = key(1, 0);
+        let mut table = ShadeResidencyTable::new();
+        table.request(
+            ShadePageRequest {
+                frame: 7,
+                ..request(page, 100, 64)
+            },
+            3,
+        );
+        table.request(
+            ShadePageRequest {
+                frame: 8,
+                ..request(page, 2, 16)
+            },
+            3,
+        );
+        table.request(
+            ShadePageRequest {
+                frame: 7,
+                ..request(page, 1000, 128)
+            },
+            3,
+        );
+        let plan = build_shade_plan(&mut table, [], 3, 16);
+
+        assert_eq!(plan.selected.len(), 1);
+        assert_eq!(plan.selected[0].priority, 2);
+        assert_eq!(plan.selected[0].byte_cost, 16);
+    }
+
+    #[test]
+    fn request_with_mismatched_material_epoch_is_ignored() {
+        let page = key(0, 0);
+        let mut table = ShadeResidencyTable::new();
+        table.request(request(page, 10, 16), 4);
+        assert_eq!(table.state(page), ShadePageState::Missing);
+        assert!(build_shade_plan(&mut table, [], 4, 16).selected.is_empty());
+    }
+
+    #[test]
     fn staging_writes_are_not_visible_until_publish_and_old_generation_survives() {
         let mut store = ShadePageStore::new(2);
         let page = key(0, 0);
@@ -150,14 +206,14 @@ mod tests {
             ShadeStoreLookup::Fallback => panic!("published page missing"),
         };
 
-        let second_frame = store.begin_frame(4).unwrap();
+        let second_frame = store.begin_frame(3).unwrap();
         let second = store.begin_write(second_frame, page, 2).unwrap();
         store.commit_write(second).unwrap();
         assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Ready(old));
         assert_eq!(store.lookup(page, 4), ShadeStoreLookup::Fallback);
         store.publish(second_frame).unwrap();
         assert_eq!(
-            store.lookup(page, 4),
+            store.lookup(page, 3),
             ShadeStoreLookup::Ready(second.handle)
         );
         assert_ne!(old.generation, second.handle.generation);
@@ -173,7 +229,7 @@ mod tests {
         store.commit_write(first).unwrap();
         store.publish(first_frame).unwrap();
 
-        let second_frame = store.begin_frame(4).unwrap();
+        let second_frame = store.begin_frame(3).unwrap();
         let second = store.begin_write(second_frame, page, 2).unwrap();
         assert_ne!(first.handle.slot, second.handle.slot);
         assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Ready(first.handle));
@@ -181,7 +237,7 @@ mod tests {
         store.publish(second_frame).unwrap();
 
         assert_eq!(
-            store.lookup(page, 4),
+            store.lookup(page, 3),
             ShadeStoreLookup::Ready(second.handle)
         );
     }
@@ -196,7 +252,7 @@ mod tests {
         store.commit_write(first).unwrap();
         store.publish(first_frame).unwrap();
 
-        let second_frame = store.begin_frame(4).unwrap();
+        let second_frame = store.begin_frame(3).unwrap();
         assert_eq!(
             store.begin_write(second_frame, page, 2),
             Err(ShadeStoreError::CapacityExhausted)
