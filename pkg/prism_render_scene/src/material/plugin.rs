@@ -3,18 +3,21 @@ use super::{
     buffers::MaterialGpuBuffers,
     runtime::{PrismMaterialDiagnostics, RenderMaterialRegistry},
     systems::{
-        configure_material_texture_capacity, extract_standard_materials,
-        prepare_material_bind_group, rebuild_material_buffers, reclaim_completed_materials,
-        stage_material_uploads, write_material_buffers,
+        configure_material_texture_capacity, extract_material_vt_sources,
+        extract_standard_materials, prepare_material_bind_group, rebuild_material_buffers,
+        reclaim_completed_materials, stage_material_uploads, write_material_buffers,
     },
     texture_upload::{prepare_material_texture_arrays, MaterialTextureArrays},
     virtual_texture::MaterialVirtualTextureGpuBundle,
+    vt_producer::{prepare_material_virtual_texture, MaterialVtProducer},
+    vt_source::{MaterialVtMaterialSourceQueries, MaterialVtSourceRegistry},
 };
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_render::{
     init_gpu_resource,
+    render_asset::AssetExtractionSystems,
     renderer::{RenderGraph, RenderGraphSystems},
     ExtractSchedule, Render, RenderApp, RenderStartup, RenderSystems,
 };
@@ -33,6 +36,9 @@ impl Plugin for PrismMaterialPlugin {
         render_app
             .init_resource::<crate::completion::GpuCompletionTracker>()
             .init_resource::<RenderMaterialRegistry>()
+            .init_resource::<MaterialVtSourceRegistry>()
+            .init_resource::<MaterialVtMaterialSourceQueries>()
+            .init_resource::<MaterialVtProducer>()
             .init_resource::<PrismMaterialDiagnostics>()
             .add_systems(
                 RenderStartup,
@@ -48,10 +54,16 @@ impl Plugin for PrismMaterialPlugin {
                 )
                     .chain(),
             )
-            .add_systems(ExtractSchedule, extract_standard_materials)
+            .add_systems(
+                ExtractSchedule,
+                (extract_material_vt_sources, extract_standard_materials)
+                    .chain()
+                    .before(AssetExtractionSystems),
+            )
             .add_systems(
                 Render,
                 (
+                    prepare_material_virtual_texture.in_set(RenderSystems::PrepareResources),
                     stage_material_uploads.in_set(RenderSystems::PrepareResources),
                     prepare_material_texture_arrays.in_set(RenderSystems::PrepareResources),
                     write_material_buffers.in_set(RenderSystems::PrepareResourcesFlush),

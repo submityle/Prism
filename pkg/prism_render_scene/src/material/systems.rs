@@ -3,10 +3,15 @@ use super::{
     buffers::MaterialGpuBuffers,
     runtime::{PrismMaterialDiagnostics, RenderMaterialRegistry},
     texture_upload::MaterialTextureArrays,
+    vt_source::{
+        MaterialVtMaterialSourceQueries, MaterialVtSourceError, MaterialVtSourceQuery,
+        MaterialVtSourceRegistry,
+    },
 };
 use crate::completion::GpuCompletionTracker;
-use bevy_asset::AssetEvent;
+use bevy_asset::{AssetEvent, Assets};
 use bevy_ecs::{message::MessageReader, prelude::*};
+use bevy_image::Image;
 use bevy_pbr::StandardMaterial;
 use bevy_render::{
     render_resource::{
@@ -17,9 +22,62 @@ use bevy_render::{
     Extract,
 };
 
+/// Captures changed main-world images before the generic `GpuImage` extractor
+/// is allowed to move CPU bytes out of `Image::data`.
+pub(crate) fn extract_material_vt_sources(
+    mut events: Extract<MessageReader<AssetEvent<Image>>>,
+    images: Extract<Res<Assets<Image>>>,
+    mut sources: ResMut<MaterialVtSourceRegistry>,
+) {
+    if !sources.initial_scan_complete() {
+        for (id, image) in images.iter() {
+            sources.upsert_asset_image(id, image);
+        }
+        sources.mark_initial_scan_complete();
+    }
+    for event in events.read() {
+        sync_material_vt_source_event(*event, &images, &mut sources);
+    }
+}
+
+fn sync_material_vt_source_event(
+    event: AssetEvent<Image>,
+    images: &Assets<Image>,
+    sources: &mut MaterialVtSourceRegistry,
+) {
+    match event {
+        AssetEvent::Added { id }
+        | AssetEvent::Modified { id }
+        | AssetEvent::LoadedWithDependencies { id } => {
+            if let Some(image) = images.get(id) {
+                sources.upsert_asset_image(id, image);
+            } else {
+                sources.upsert_unavailable(id, MaterialVtSourceError::MissingAsset);
+            }
+        }
+        AssetEvent::Unused { id } | AssetEvent::Removed { id } => {
+            sources.remove(id);
+        }
+    }
+}
+
+/// Returns the source state of all image inputs referenced by a material.
+///
+/// This is intentionally a query-only bridge. It does not allocate a bindless
+/// slot, publish a page-table entry, or claim atlas residency; those actions
+/// remain the responsibility of the future material-VT producer.
+pub(crate) fn query_standard_material_vt_sources(
+    material: &StandardMaterial,
+    sources: &MaterialVtSourceRegistry,
+) -> MaterialVtSourceQuery {
+    sources.query_material(material)
+}
+
 pub(crate) fn extract_standard_materials(
     mut events: Extract<MessageReader<AssetEvent<StandardMaterial>>>,
-    materials: Extract<Res<bevy_asset::Assets<StandardMaterial>>>,
+    materials: Extract<Res<Assets<StandardMaterial>>>,
+    sources: Res<MaterialVtSourceRegistry>,
+    mut source_queries: ResMut<MaterialVtMaterialSourceQueries>,
     completion: Res<GpuCompletionTracker>,
     mut runtime: ResMut<RenderMaterialRegistry>,
     mut diagnostics: ResMut<PrismMaterialDiagnostics>,
@@ -35,8 +93,16 @@ pub(crate) fn extract_standard_materials(
                 let Some(material) = materials.get(id) else {
                     continue;
                 };
+                // Keep source lookup adjacent to material publication. The
+                // query is observational until the real producer consumes the
+                // immutable snapshot and publishes residency.
                 let exists = runtime.material_handle(id).is_some();
-                if runtime.publish_asset(id, material).is_ok() {
+                let source_query = query_standard_material_vt_sources(material, &sources);
+                if runtime
+                    .publish_asset(id, material, completion.next_submission_value())
+                    .is_ok()
+                {
+                    source_queries.update(id, source_query);
                     if exists {
                         diagnostics.updated += 1;
                     } else {
@@ -47,6 +113,7 @@ pub(crate) fn extract_standard_materials(
                 }
             }
             AssetEvent::Unused { id } | AssetEvent::Removed { id } => {
+                source_queries.remove(id);
                 match runtime.retire_asset(id, completion.next_submission_value()) {
                     Ok(Some(_)) => {
                         diagnostics.retired += 1;
@@ -89,14 +156,16 @@ pub(crate) fn invalidate_scene_materials(
 
 #[cfg(test)]
 mod tests {
-    use bevy_asset::Assets;
+    use bevy_asset::{uuid::Uuid, AssetId, Assets, Handle, RenderAssetUsages};
     use bevy_ecs::world::World;
+    use bevy_image::Image;
     use bevy_pbr::StandardMaterial;
+    use bevy_render::render_resource::{Extent3d, TextureDimension, TextureFormat};
     use prism_render_material::{Illumination, FALLBACK_MATERIAL_HANDLE};
 
     use super::*;
 
-    fn asset_world() -> (World, bevy_asset::AssetId<StandardMaterial>) {
+    fn asset_world() -> (World, AssetId<StandardMaterial>) {
         let mut world = World::new();
         let mut assets = Assets::<StandardMaterial>::default();
         let handle = assets.add(StandardMaterial::default());
@@ -106,13 +175,105 @@ mod tests {
         (world, id)
     }
 
+    fn complete_image(value: u8) -> Image {
+        let mut image = Image::new(
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            vec![value; 16],
+            TextureFormat::R8Unorm,
+            RenderAssetUsages::default(),
+        );
+        image.texture_descriptor.mip_level_count = 3;
+        image.data = Some(vec![value; 21]);
+        image
+    }
+
+    #[test]
+    fn image_events_capture_snapshot_and_remove_it_without_claiming_residency() {
+        let id: AssetId<Image> = Handle::from(Uuid::from_u128(0xA1)).id();
+        let mut images = Assets::<Image>::default();
+        images.insert(id, complete_image(7)).unwrap();
+        let mut sources = MaterialVtSourceRegistry::default();
+
+        sync_material_vt_source_event(AssetEvent::Added { id }, &images, &mut sources);
+        let query = sources.query_images([id]);
+        assert_eq!(query.referenced, 1);
+        assert_eq!(query.available, 1);
+        assert_eq!(query.missing, 0);
+        assert_eq!(query.unavailable, 0);
+        assert_eq!(sources.len(), 1);
+
+        sync_material_vt_source_event(AssetEvent::Removed { id }, &images, &mut sources);
+        assert!(matches!(
+            sources.lookup(id),
+            super::super::vt_source::MaterialVtSourceLookup::Missing
+        ));
+    }
+
+    #[test]
+    fn image_event_without_asset_records_explicit_unavailable_state() {
+        let id: AssetId<Image> = Handle::from(Uuid::from_u128(0xA5)).id();
+        let images = Assets::<Image>::default();
+        let mut sources = MaterialVtSourceRegistry::default();
+
+        sync_material_vt_source_event(AssetEvent::Modified { id }, &images, &mut sources);
+
+        assert!(matches!(
+            sources.lookup(id),
+            super::super::vt_source::MaterialVtSourceLookup::Unavailable {
+                error: MaterialVtSourceError::MissingAsset,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn material_texture_query_distinguishes_available_missing_and_unavailable_sources() {
+        let available: Handle<Image> = Handle::from(Uuid::from_u128(0xA2));
+        let unavailable: Handle<Image> = Handle::from(Uuid::from_u128(0xA3));
+        let missing: Handle<Image> = Handle::from(Uuid::from_u128(0xA4));
+        let material = StandardMaterial {
+            base_color_texture: Some(available.clone()),
+            normal_map_texture: Some(unavailable.clone()),
+            occlusion_texture: Some(missing.clone()),
+            ..StandardMaterial::default()
+        };
+        let mut sources = MaterialVtSourceRegistry::default();
+        sources.upsert_asset_image(available.id(), &complete_image(1));
+        sources.upsert_unavailable(unavailable.id(), MaterialVtSourceError::MissingData);
+
+        let query = query_standard_material_vt_sources(&material, &sources);
+        assert_eq!(query.referenced, 3);
+        assert_eq!(query.available, 1);
+        assert_eq!(query.unavailable, 1);
+        assert_eq!(query.missing, 1);
+        assert_eq!(
+            query.availability(),
+            super::super::vt_source::MaterialVtSourceAvailability::Missing
+        );
+
+        let mut cached = MaterialVtMaterialSourceQueries::default();
+        cached.update(AssetId::default(), query);
+        assert_eq!(cached.get(AssetId::default()), Some(query));
+        cached.remove(AssetId::default());
+        assert_eq!(cached.len(), 0);
+    }
+
     #[test]
     fn asset_lifecycle_updates_retires_and_reuses_after_completion() {
         let (mut world, id) = asset_world();
         world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
             let materials = world.resource::<Assets<StandardMaterial>>();
             runtime
-                .publish_asset(id, materials.get(id).unwrap())
+                .publish_asset(
+                    id,
+                    materials.get(id).unwrap(),
+                    prism_render_architecture::gpu_scene::GpuCompletionValue(0),
+                )
                 .unwrap();
         });
         let first = world
@@ -149,7 +310,11 @@ mod tests {
         world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
             let materials = world.resource::<Assets<StandardMaterial>>();
             runtime
-                .publish_asset(id, materials.get(id).unwrap())
+                .publish_asset(
+                    id,
+                    materials.get(id).unwrap(),
+                    prism_render_architecture::gpu_scene::GpuCompletionValue(0),
+                )
                 .unwrap();
         });
         let second = world
@@ -166,7 +331,7 @@ mod tests {
         use bevy_image::Image;
 
         fn image_handle(tag: u128) -> Handle<Image> {
-            Handle::<Image>::from(bevy_asset::uuid::Uuid::from_u128(tag))
+            Handle::<Image>::from(Uuid::from_u128(tag))
         }
 
         let base = image_handle(0xB0);
@@ -187,7 +352,11 @@ mod tests {
         world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
             let materials = world.resource::<Assets<StandardMaterial>>();
             runtime
-                .publish_asset(id, materials.get(id).unwrap())
+                .publish_asset(
+                    id,
+                    materials.get(id).unwrap(),
+                    prism_render_architecture::gpu_scene::GpuCompletionValue(0),
+                )
                 .unwrap();
         });
         assert_eq!(
@@ -198,9 +367,9 @@ mod tests {
             2
         );
 
-        // Drop the normal map and republish: the stale reference is released so
-        // exactly one image stays resident, and the freed slot returns to the
-        // free list rather than leaking.
+        // Drop the normal map and republish: the stale reference is retired
+        // until the GPU completion proof, so exactly one image is live while
+        // the old slot remains quarantined.
         world
             .resource_mut::<Assets<StandardMaterial>>()
             .get_mut(id)
@@ -209,17 +378,42 @@ mod tests {
         world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
             let materials = world.resource::<Assets<StandardMaterial>>();
             runtime
-                .publish_asset(id, materials.get(id).unwrap())
+                .publish_asset(
+                    id,
+                    materials.get(id).unwrap(),
+                    prism_render_architecture::gpu_scene::GpuCompletionValue(0),
+                )
                 .unwrap();
         });
         let stats = world
             .resource::<RenderMaterialRegistry>()
             .texture_heap_stats();
         assert_eq!(
-            stats.live_images, 1,
-            "the dropped normal map must be released"
+            stats.live_images, 2,
+            "the dropped normal map remains resident until GPU completion"
         );
-        assert_eq!(stats.free_slots, 1, "its slot must return to the free list");
+        assert_eq!(
+            stats.pending_releases, 2,
+            "both the old shared base reference and normal reference are quarantined"
+        );
+        assert_eq!(
+            stats.free_slots, 0,
+            "a GPU-visible slot must not be reused early"
+        );
+
+        world
+            .resource_mut::<RenderMaterialRegistry>()
+            .reclaim_completed_textures(prism_render_architecture::gpu_scene::GpuCompletionValue(
+                0,
+            ));
+        assert_eq!(
+            world
+                .resource::<RenderMaterialRegistry>()
+                .texture_heap_stats()
+                .free_slots,
+            1,
+            "the retired slot becomes reusable only after completion"
+        );
 
         // Retiring the material releases its remaining textures.
         let completion = prism_render_architecture::gpu_scene::GpuCompletionValue(3);
@@ -227,6 +421,9 @@ mod tests {
             .resource_mut::<RenderMaterialRegistry>()
             .retire_asset(id, completion)
             .unwrap();
+        world
+            .resource_mut::<RenderMaterialRegistry>()
+            .reclaim_completed_textures(completion);
         assert_eq!(
             world
                 .resource::<RenderMaterialRegistry>()
@@ -308,6 +505,9 @@ pub(crate) fn reclaim_completed_materials(
             .registry
             .reclaim_completed(tracker.completed_value()),
     );
+    diagnostics.reclaimed = diagnostics
+        .reclaimed
+        .saturating_add(runtime.reclaim_completed_textures(tracker.completed_value()));
 }
 
 pub(crate) fn prepare_material_bind_group(
