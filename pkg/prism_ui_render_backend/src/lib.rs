@@ -61,6 +61,7 @@ extern crate alloc;
 
 pub mod arc;
 pub mod batch;
+pub mod bounds;
 pub mod calipers;
 pub mod circle;
 pub mod clip;
@@ -100,6 +101,7 @@ pub mod width;
 
 pub use arc::{arc_segment_count, flatten_arc};
 pub use batch::{batch, instance_count, Batch, GlyphInstance, RectInstance, ShadowInstance};
+pub use bounds::{bounds, contains, expand, union};
 pub use calipers::{convex_diameter, convex_diameter_pair};
 pub use circle::{min_enclosing_circle, Circle};
 pub use clip::clip_polygon;
