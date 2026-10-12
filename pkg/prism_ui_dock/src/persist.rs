@@ -7,7 +7,7 @@
 
 use crate::{
     AutoHideBars, AutoHideEntry, Axis, DockLayout, DockNode, FloatingWindow, Limits,
-    MaximizeRestore, Ratio, Rect, Side, SplitChild,
+    MaximizeRestore, PanelRegistry, Ratio, Rect, Side, SplitChild,
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
 
@@ -220,6 +220,31 @@ pub fn decode_layout(bytes: &[u8], options: DecodeOptions<'_>) -> Result<DockLay
         .validate_with(options.limits.layout)
         .map_err(PersistError::InvalidLayout)?;
     Ok(layout)
+}
+
+/// Decodes a layout using a typed [`PanelRegistry`] as the panel allow-list.
+///
+/// This convenience boundary preserves the existing slice-based API while
+/// ensuring registry users do not duplicate IDs into a second allow-list.
+/// Document IDs remain an independent optional allow-list.
+pub fn decode_layout_with_registry(
+    bytes: &[u8],
+    registry: &PanelRegistry,
+    known_documents: Option<&[&str]>,
+    limits: DecodeLimits,
+) -> Result<DockLayout, PersistError> {
+    let panel_ids: Vec<&str> = registry
+        .iter()
+        .map(|descriptor| descriptor.id.as_str())
+        .collect();
+    decode_layout(
+        bytes,
+        DecodeOptions {
+            known_panels: Some(&panel_ids),
+            known_documents,
+            limits,
+        },
+    )
 }
 
 fn filter_autohide(bars: &mut AutoHideBars, known: Option<&[&str]>) {
@@ -723,6 +748,26 @@ mod tests {
         let panels = ["tool"];
         let docs = ["missing"];
         let decoded = decode_layout(&bytes, opts(Some(&panels), Some(&docs))).unwrap();
+        assert_eq!(decoded.root, DockNode::panel("tool"));
+        assert!(decoded.floating.is_empty());
+        assert!(decoded.autohide.active.is_none());
+    }
+
+    #[test]
+    fn typed_registry_entry_filters_unknown_panels_without_manual_id_slice() {
+        let bytes = encode_layout(&rich_layout()).unwrap();
+        let mut registry = PanelRegistry::new();
+        registry
+            .register(crate::PanelDescriptor::new("tool", "Tool"))
+            .unwrap();
+        let documents: [&str; 0] = [];
+        let decoded = decode_layout_with_registry(
+            &bytes,
+            &registry,
+            Some(&documents),
+            DecodeLimits::default(),
+        )
+        .unwrap();
         assert_eq!(decoded.root, DockNode::panel("tool"));
         assert!(decoded.floating.is_empty());
         assert!(decoded.autohide.active.is_none());

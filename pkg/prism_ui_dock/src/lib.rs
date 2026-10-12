@@ -25,7 +25,10 @@ pub use model::{
     AutoHideBars, AutoHideEntry, Axis, DockLayout, DockNode, DocumentId, FloatingWindow,
     MaximizeRestore, PanelId, Ratio, Rect, Side, SplitChild,
 };
-pub use persist::{decode_layout, encode_layout, DecodeLimits, DecodeOptions, PersistError};
+pub use persist::{
+    decode_layout, decode_layout_with_registry, encode_layout, DecodeLimits, DecodeOptions,
+    PersistError,
+};
 pub use reducer::{reduce, Action, Placement, Target};
 pub use registry::{DefaultSlot, Instancing, PanelDescriptor, PanelRegistry, PanelRegistryError};
 pub use render_plan::{
