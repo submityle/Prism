@@ -2,9 +2,9 @@
 //! BVH refit/merge and box-distance queries on device).
 //!
 //! [`GpuAabbOps`] batch-evaluates the box helpers **on a real device**,
-//! mirroring the CPU [`prism_math::Aabb3`] methods: the center, the closest
-//! point, the squared distance to a point, and the SAH `merge` of two boxes. The
-//! math is **not** duplicated here: each kernel is composed at runtime by
+//! mirroring the CPU [`prism_math::Aabb3`] methods: the center, the extents, the
+//! surface area, the closest point, the squared distance to a point, and the SAH
+//! `merge` of two boxes. The math is **not** duplicated here: each kernel is composed at runtime by
 //! prefixing the single-sourced fragment
 //! [`WGSL_AABB_OPS`](prism_math::shader_mirror::WGSL_AABB_OPS) ahead of a thin
 //! compute wrapper, so the device query cannot silently drift from the CPU
@@ -52,6 +52,36 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     if (i >= params.count) { return; }\n\
     let b = src[i];\n\
     dst[i] = vec4<f32>(prism_aabb_center(b.lo.xyz, b.hi.xyz), 0.0);\n\
+}\n";
+
+/// Extents wrapper: one box in, `vec4(extents.xyz, 0)` out.
+const WRAP_EXTENTS: &str = "\
+struct Params { count: u32 };\n\
+struct AabbIn { lo: vec4<f32>, hi: vec4<f32> };\n\
+@group(0) @binding(0) var<uniform> params: Params;\n\
+@group(0) @binding(1) var<storage, read> src: array<AabbIn>;\n\
+@group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;\n\
+@compute @workgroup_size(64)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.x;\n\
+    if (i >= params.count) { return; }\n\
+    let b = src[i];\n\
+    dst[i] = vec4<f32>(prism_aabb_extents(b.lo.xyz, b.hi.xyz), 0.0);\n\
+}\n";
+
+/// Surface-area wrapper: one box in, `f32` out.
+const WRAP_SURFACE: &str = "\
+struct Params { count: u32 };\n\
+struct AabbIn { lo: vec4<f32>, hi: vec4<f32> };\n\
+@group(0) @binding(0) var<uniform> params: Params;\n\
+@group(0) @binding(1) var<storage, read> src: array<AabbIn>;\n\
+@group(0) @binding(2) var<storage, read_write> dst: array<f32>;\n\
+@compute @workgroup_size(64)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.x;\n\
+    if (i >= params.count) { return; }\n\
+    let b = src[i];\n\
+    dst[i] = prism_aabb_surface_area(b.lo.xyz, b.hi.xyz);\n\
 }\n";
 
 /// Closest-point wrapper: one box + one point in, `vec4(closest.xyz, 0)` out.
@@ -120,20 +150,22 @@ pub type AabbPoint = [[f32; 4]; 3];
 /// A pair of boxes input element (64 bytes).
 pub type AabbPair = [[f32; 4]; 4];
 
-/// Packs a box from `lo`/`hi` corners.
+/// Packs a box from two arbitrary corners, component-wise sorting them exactly
+/// like the CPU `Aabb3::new` so inverted `lo`/`hi` inputs still produce a valid
+/// box and cannot diverge from the CPU `clamp`-based queries.
 #[must_use]
 pub fn aabb4(lo: [f32; 3], hi: [f32; 3]) -> Aabb4 {
-    [[lo[0], lo[1], lo[2], 0.0], [hi[0], hi[1], hi[2], 0.0]]
+    [
+        [lo[0].min(hi[0]), lo[1].min(hi[1]), lo[2].min(hi[2]), 0.0],
+        [lo[0].max(hi[0]), lo[1].max(hi[1]), lo[2].max(hi[2]), 0.0],
+    ]
 }
 
-/// Packs a box + query point.
+/// Packs a box (component-wise sorted like [`aabb4`]) plus a query point.
 #[must_use]
 pub fn aabb_point(lo: [f32; 3], hi: [f32; 3], p: [f32; 3]) -> AabbPoint {
-    [
-        [lo[0], lo[1], lo[2], 0.0],
-        [hi[0], hi[1], hi[2], 0.0],
-        [p[0], p[1], p[2], 0.0],
-    ]
+    let b = aabb4(lo, hi);
+    [b[0], b[1], [p[0], p[1], p[2], 0.0]]
 }
 
 /// Packs a pair of boxes.
@@ -147,6 +179,8 @@ pub fn aabb_pair(a: Aabb4, b: Aabb4) -> AabbPair {
 pub struct GpuAabbOps {
     layout: BindGroupLayout,
     center: ComputePipeline,
+    extents: ComputePipeline,
+    surface: ComputePipeline,
     closest: ComputePipeline,
     dist2: ComputePipeline,
     merge: ComputePipeline,
@@ -211,6 +245,8 @@ impl GpuAabbOps {
         };
         GpuAabbOps {
             center: build("prism_math_aabb_center", WRAP_CENTER),
+            extents: build("prism_math_aabb_extents", WRAP_EXTENTS),
+            surface: build("prism_math_aabb_surface", WRAP_SURFACE),
             closest: build("prism_math_aabb_closest", WRAP_CLOSEST),
             dist2: build("prism_math_aabb_dist2", WRAP_DIST2),
             merge: build("prism_math_aabb_merge", WRAP_MERGE),
@@ -225,6 +261,21 @@ impl GpuAabbOps {
             .into_iter()
             .map(|v| [v[0], v[1], v[2]])
             .collect()
+    }
+
+    /// Batch box extents (`hi - lo`), mirroring [`prism_math::Aabb3::extents`].
+    #[must_use]
+    pub fn extents(&self, ctx: &GpuContext, boxes: &[Aabb4]) -> Vec<[f32; 3]> {
+        self.run::<Aabb4, [f32; 4]>(ctx, &self.extents, boxes)
+            .into_iter()
+            .map(|v| [v[0], v[1], v[2]])
+            .collect()
+    }
+
+    /// Batch box surface areas, mirroring [`prism_math::Aabb3::surface_area`].
+    #[must_use]
+    pub fn surface_area(&self, ctx: &GpuContext, boxes: &[Aabb4]) -> Vec<f32> {
+        self.run::<Aabb4, f32>(ctx, &self.surface, boxes)
     }
 
     /// Batch closest points, mirroring [`prism_math::Aabb3::closest_point`].
@@ -344,6 +395,8 @@ mod parse_gate {
     fn composed_kernels_parse() {
         for (label, wrapper) in [
             ("center", super::WRAP_CENTER),
+            ("extents", super::WRAP_EXTENTS),
+            ("surface", super::WRAP_SURFACE),
             ("closest", super::WRAP_CLOSEST),
             ("dist2", super::WRAP_DIST2),
             ("merge", super::WRAP_MERGE),

@@ -69,11 +69,24 @@ fn aabb_center_and_merge_match_cpu() {
         .collect();
 
     let centers = kernel.center(&ctx, &gb);
+    let extents = kernel.extents(&ctx, &gb);
+    let areas = kernel.surface_area(&ctx, &gb);
     for (i, (lo, hi)) in bx.iter().enumerate() {
-        let c = Aabb3::new(*lo, *hi).center();
+        let a = Aabb3::new(*lo, *hi);
+        let c = a.center();
         for (axis, (g, e)) in centers[i].iter().zip([c.x, c.y, c.z]).enumerate() {
             assert!(close(*g, e), "center[{i}][{axis}] gpu={g} cpu={e}");
         }
+        let e = a.extents();
+        for (axis, (g, cpu)) in extents[i].iter().zip([e.x, e.y, e.z]).enumerate() {
+            assert!(close(*g, cpu), "extents[{i}][{axis}] gpu={g} cpu={cpu}");
+        }
+        assert!(
+            close(areas[i], a.surface_area()),
+            "surface_area[{i}] gpu={} cpu={}",
+            areas[i],
+            a.surface_area()
+        );
     }
 
     // Merge consecutive boxes.
@@ -140,6 +153,41 @@ fn aabb_closest_and_distance_match_cpu() {
             dist2[i],
             a.distance_squared(*p)
         );
+    }
+}
+
+#[test]
+fn aabb_inverted_corners_match_cpu() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let kernel = GpuAabbOps::new(&ctx);
+    // `lo > hi` component-wise; the CPU `Aabb3::new` sorts the corners, and the
+    // `aabb4`/`aabb_point` helpers must do the same or the clamp-based query
+    // diverges (regression guard).
+    let lo = Vec3::new(2.0, 5.0, -1.0);
+    let hi = Vec3::new(1.0, 3.0, 4.0);
+    let p = Vec3::new(1.5, 4.0, 0.0);
+    let a = Aabb3::new(lo, hi);
+
+    let q = aabb_point([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z], [p.x, p.y, p.z]);
+    let closest = kernel.closest_point(&ctx, &[q]);
+    let dist2 = kernel.distance_squared(&ctx, &[q]);
+    let c = a.closest_point(p);
+    for (axis, (g, e)) in closest[0].iter().zip([c.x, c.y, c.z]).enumerate() {
+        assert!(close(*g, e), "inverted closest[{axis}] gpu={g} cpu={e}");
+    }
+    assert!(
+        close(dist2[0], a.distance_squared(p)),
+        "inverted dist2 gpu={} cpu={}",
+        dist2[0],
+        a.distance_squared(p)
+    );
+
+    let bc = kernel.center(&ctx, &[aabb4([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z])]);
+    let cc = a.center();
+    for (axis, (g, e)) in bc[0].iter().zip([cc.x, cc.y, cc.z]).enumerate() {
+        assert!(close(*g, e), "inverted center[{axis}] gpu={g} cpu={e}");
     }
 }
 
