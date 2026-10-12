@@ -9,10 +9,11 @@
 //! The test also records two current production seams rather than hiding them:
 //!
 //! * `material_sample.wesl` declares the bindless generation table at binding
-//!   9. `MaterialBindGroup` has the layout/storage plumbing, but its current
-//!   bind-group population still omits that entry. The integration harness
-//!   binds the table so the shader's generation guard is exercised, while the
-//!   production bind-group contract remains an explicit failing gate below.
+//!   9. The main harness obtains group 1 from the production
+//!   `MaterialBindGroup` layout and binds every production resource slot, but
+//!   the wrapper entry point and resource allocation remain test-owned. This
+//!   is production-layout parity, not a claim that the full main resolve pass
+//!   has been dispatched.
 //! * `MaterialVirtualTextureLifecycle` is currently private to the library.
 //!   The public integration surface therefore cannot drive its publish/reclaim
 //!   state machine.  The completion test below uses the public
@@ -21,13 +22,19 @@
 //!   production visibility (which is outside this test-only request).
 
 use bevy_asset::{uuid::Uuid, AssetId};
+use bevy_ecs::{world::FromWorld, world::World};
 use bevy_image::Image;
 use bevy_platform::future::block_on;
-use bevy_shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
+use bevy_render::renderer::{RenderAdapterInfo, RenderDevice, RenderQueue};
+use bevy_shader::{
+    Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ShaderDefVal, ValidateShader,
+};
 use bytemuck::{Pod, Zeroable};
 use prism_render_architecture::gpu_scene::GpuCompletionValue;
-use prism_render_scene::{BindlessTextureHeap, MaterialVirtualTextureGpuConfig};
-use std::num::NonZero;
+use prism_render_material::{GpuMaterialHeader, GpuMaterialTexture};
+use prism_render_scene::{
+    BindlessTextureHeap, MaterialBindGroup, MaterialTextureArrays, MaterialVirtualTextureGpuConfig,
+};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -39,9 +46,9 @@ use wgpu::{
     BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor,
     Device, DeviceDescriptor, Extent3d, Features, FilterMode, Instance, InstanceDescriptor,
     InstanceFlags, MapMode, PipelineCompilationOptions, PipelineLayoutDescriptor, PollType, Queue,
-    RequestAdapterOptions, SamplerBindingType, SamplerDescriptor, ShaderModuleDescriptor,
-    ShaderSource, ShaderStages, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension,
+    RequestAdapterOptions, SamplerDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    TextureViewDescriptor, TextureViewDimension,
 };
 
 const MATERIAL_SAMPLE_UUID: u128 = 0x5052_4953_4d5f_4d41_5456_5458_5041;
@@ -61,19 +68,6 @@ struct SampleCase {
     uv: [f32; 2],
     lod: f32,
     _pad: f32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct GpuConfig {
-    enabled: u32,
-    entry_count: u32,
-    page_size: u32,
-    tile_extent_px: u32,
-    tiles_per_row: u32,
-    atlas_layers: u32,
-    gutter_px: u32,
-    coarsest_mip: u32,
 }
 
 const WRAPPER_WESL: &str = r#"
@@ -152,18 +146,18 @@ fn compile_material_sample_wgsl() -> String {
     );
 
     (*cache
-        .get(0, wrapper, &[])
+        .get(
+            0,
+            wrapper,
+            &[ShaderDefVal::Bool("MATERIAL_BINDLESS".into(), true)],
+        )
         .unwrap_or_else(|error| panic!("Material-VT WESL failed to compile/link: {error}")))
     .clone()
 }
 
-fn require_gpu() -> bool {
-    std::env::var_os("PRISM_REQUIRE_GPU").is_some()
-}
-
-/// Acquire a real adapter.  No adapter/device skips by repository convention;
-/// `PRISM_REQUIRE_GPU=1` turns either failure into a hard test failure.
-fn try_device(require_bindless: bool) -> Option<(Instance, Device, Queue)> {
+/// Acquire a real adapter. A missing adapter is a hard failure for this suite:
+/// a skipped test cannot be reported as GPU parity evidence.
+fn try_device(require_bindless: bool) -> (Instance, wgpu::Adapter, Device, Queue) {
     let instance = Instance::new(InstanceDescriptor {
         backends: Backends::METAL | Backends::VULKAN | Backends::DX12,
         flags: InstanceFlags::default(),
@@ -173,14 +167,7 @@ fn try_device(require_bindless: bool) -> Option<(Instance, Device, Queue)> {
     });
     let adapter = match block_on(instance.request_adapter(&RequestAdapterOptions::default())) {
         Ok(adapter) => adapter,
-        Err(error) => {
-            assert!(
-                !require_gpu(),
-                "PRISM_REQUIRE_GPU set: adapter request failed: {error}"
-            );
-            eprintln!("material_vt_gpu_parity: no wgpu adapter; skipping");
-            return None;
-        }
+        Err(error) => panic!("Material-VT GPU parity requires a real adapter: {error}"),
     };
     if require_bindless && !adapter.features().contains(bindless_features()) {
         panic!(
@@ -202,16 +189,9 @@ fn try_device(require_bindless: bool) -> Option<(Instance, Device, Queue)> {
         ..Default::default()
     })) {
         Ok(device_queue) => device_queue,
-        Err(error) => {
-            assert!(
-                !require_gpu(),
-                "PRISM_REQUIRE_GPU set: device request failed: {error}"
-            );
-            eprintln!("material_vt_gpu_parity: device request failed; skipping");
-            return None;
-        }
+        Err(error) => panic!("Material-VT GPU parity device creation failed: {error}"),
     };
-    Some((instance, device_queue.0, device_queue.1))
+    (instance, adapter, device_queue.0, device_queue.1)
 }
 
 fn buffer_layout(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
@@ -224,54 +204,6 @@ fn buffer_layout(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
             min_binding_size: None,
         },
         count: None,
-    }
-}
-
-fn uniform_layout(binding: u32) -> BindGroupLayoutEntry {
-    BindGroupLayoutEntry {
-        binding,
-        visibility: ShaderStages::COMPUTE,
-        ty: BindingType::Buffer {
-            ty: BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
-    }
-}
-
-fn texture_layout(binding: u32, dimension: TextureViewDimension) -> BindGroupLayoutEntry {
-    BindGroupLayoutEntry {
-        binding,
-        visibility: ShaderStages::COMPUTE,
-        ty: BindingType::Texture {
-            sample_type: TextureSampleType::Float { filterable: true },
-            view_dimension: dimension,
-            multisampled: false,
-        },
-        count: None,
-    }
-}
-
-fn array_texture_layout(binding: u32, count: u32) -> BindGroupLayoutEntry {
-    BindGroupLayoutEntry {
-        binding,
-        visibility: ShaderStages::COMPUTE,
-        ty: BindingType::Texture {
-            sample_type: TextureSampleType::Float { filterable: true },
-            view_dimension: TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: NonZero::new(count),
-    }
-}
-
-fn array_sampler_layout(binding: u32, count: u32) -> BindGroupLayoutEntry {
-    BindGroupLayoutEntry {
-        binding,
-        visibility: ShaderStages::COMPUTE,
-        ty: BindingType::Sampler(SamplerBindingType::Filtering),
-        count: NonZero::new(count),
     }
 }
 
@@ -309,8 +241,18 @@ fn assert_rgba(actual: [f32; 4], expected: [f32; 4], label: &str) {
 }
 
 fn sample_case(generation: u32, virtual_texture_id: u32, uv: [f32; 2], lod: f32) -> SampleCase {
+    sample_case_with_index(0, generation, virtual_texture_id, uv, lod)
+}
+
+fn sample_case_with_index(
+    index: u32,
+    generation: u32,
+    virtual_texture_id: u32,
+    uv: [f32; 2],
+    lod: f32,
+) -> SampleCase {
     SampleCase {
-        texture_record: [0, generation, 0, 0, virtual_texture_id, 4, 4, 2],
+        texture_record: [index, generation, 0, 0, virtual_texture_id, 4, 4, 2],
         uv,
         lod,
         _pad: 0.0,
@@ -374,37 +316,47 @@ fn create_atlas(device: &Device, queue: &Queue) -> Texture {
     reason = "The complete device setup, dispatch, readback, and parity assertions are kept in one auditable integration gate"
 )]
 fn material_vt_sampling_gpu_matches_expected_fallback_contract() {
-    let Some((_instance, device, queue)) = try_device(true) else {
-        return;
+    let (_instance, adapter, device, queue) = try_device(true);
+
+    let reclaimed_image = AssetId::<Image>::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5654_5245_434c_0001),
     };
+    let replacement_image = AssetId::<Image>::Uuid {
+        uuid: Uuid::from_u128(0x5052_4953_4d5f_5654_5245_434c_0002),
+    };
+    let mut heap = BindlessTextureHeap::new(4);
+    let stale_slot = heap.acquire(reclaimed_image);
+    assert!(heap.retire(reclaimed_image, GpuCompletionValue(1)));
+    assert_eq!(heap.reclaim_completed(GpuCompletionValue(1)), 1);
+    let current_slot = heap.acquire(replacement_image);
+    assert_eq!(current_slot.index, stale_slot.index);
+    assert_ne!(current_slot.generation, stale_slot.generation);
+    assert!(!heap.is_current(stale_slot));
 
     let wgsl = compile_material_sample_wgsl();
     let module = device.create_shader_module(ShaderModuleDescriptor {
         label: Some("material-vt parity shipping consumer"),
         source: ShaderSource::Wgsl(wgsl.into()),
     });
-    let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-        label: Some("material-vt parity layout"),
-        entries: &[
-            buffer_layout(0, true),
-            buffer_layout(1, false),
-            array_texture_layout(3, 1),
-            array_sampler_layout(4, 1),
-            buffer_layout(5, true),
-            uniform_layout(6),
-            texture_layout(7, TextureViewDimension::D2Array),
-            BindGroupLayoutEntry {
-                binding: 8,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                count: None,
-            },
-            buffer_layout(9, true),
-        ],
+    let mut world = World::new();
+    world.insert_resource(RenderDevice::from(device.clone()));
+    world.insert_resource(RenderQueue::new(queue.clone()));
+    world.insert_resource(RenderAdapterInfo::new(adapter.get_info()));
+    let arrays = MaterialTextureArrays::from_world(&mut world);
+    let capacity = arrays.capacity();
+    world.insert_resource(arrays);
+    world.init_resource::<MaterialBindGroup>();
+    let material_layout = world.resource::<MaterialBindGroup>().layout.clone();
+
+    // Group 0 is test-owned only: it supplies the wrapper's cases/output. The
+    // production MaterialBindGroup layout is used unchanged at group 1.
+    let cases_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some("material-vt parity test-owned wrapper layout"),
+        entries: &[buffer_layout(0, true), buffer_layout(1, false)],
     });
     let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
         label: Some("material-vt parity pipeline layout"),
-        bind_group_layouts: &[Some(&layout)],
+        bind_group_layouts: &[Some(&cases_layout), Some(&material_layout)],
         immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
@@ -427,6 +379,17 @@ fn material_vt_sampling_gpu_matches_expected_fallback_contract() {
         sample_case(1, u32::MAX, [0.25, 0.25], 0.0),
         // generation 2 does not match generation table slot 0 == 1
         sample_case(2, 7, [0.25, 0.25], 0.0),
+        // an out-of-range bindless index must be rejected before array access
+        sample_case_with_index(u32::MAX, 1, 7, [0.25, 0.25], 0.0),
+        // this pair came from a reclaimed heap slot and must not sample the
+        // replacement resident at the same physical index
+        sample_case_with_index(
+            stale_slot.index,
+            stale_slot.generation,
+            7,
+            [0.25, 0.25],
+            0.0,
+        ),
     ];
     let cases_buffer = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("material-vt parity cases"),
@@ -470,9 +433,11 @@ fn material_vt_sampling_gpu_matches_expected_fallback_contract() {
         contents: bytemuck::bytes_of(&config),
         usage: BufferUsages::UNIFORM,
     });
+    let mut generation_words = vec![1_u32; capacity as usize];
+    generation_words[current_slot.index as usize] = current_slot.generation;
     let generation_buffer = device.create_buffer_init(&BufferInitDescriptor {
         label: Some("material-vt parity generation table"),
-        contents: bytemuck::cast_slice(&[1_u32]),
+        contents: bytemuck::cast_slice(&generation_words),
         usage: BufferUsages::STORAGE,
     });
     let direct_texture = create_rgba_texture(
@@ -498,9 +463,26 @@ fn material_vt_sampling_gpu_matches_expected_fallback_contract() {
         mipmap_filter: wgpu::MipmapFilterMode::Nearest,
         ..Default::default()
     });
-    let bind_group = device.create_bind_group(&BindGroupDescriptor {
-        label: Some("material-vt parity bind group"),
-        layout: &layout,
+    let material_headers = device.create_buffer(&BufferDescriptor {
+        label: Some("material-vt parity material headers"),
+        size: size_of::<GpuMaterialHeader>() as u64,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let material_parameters = device.create_buffer(&BufferDescriptor {
+        label: Some("material-vt parity material parameters"),
+        size: size_of::<u32>() as u64,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let material_textures = device.create_buffer_init(&BufferInitDescriptor {
+        label: Some("material-vt parity material textures"),
+        contents: bytemuck::bytes_of(&GpuMaterialTexture::default()),
+        usage: BufferUsages::STORAGE,
+    });
+    let cases_bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("material-vt parity test-owned wrapper bind group"),
+        layout: &cases_layout,
         entries: &[
             BindGroupEntry {
                 binding: 0,
@@ -510,13 +492,33 @@ fn material_vt_sampling_gpu_matches_expected_fallback_contract() {
                 binding: 1,
                 resource: output_buffer.as_entire_binding(),
             },
+        ],
+    });
+    let texture_views = vec![&direct_view; capacity as usize];
+    let samplers = vec![&sampler; capacity as usize];
+    let material_bind_group = device.create_bind_group(&BindGroupDescriptor {
+        label: Some("material-vt parity production-layout harness bind group"),
+        layout: &material_layout,
+        entries: &[
+            BindGroupEntry {
+                binding: 0,
+                resource: material_headers.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 1,
+                resource: material_parameters.as_entire_binding(),
+            },
+            BindGroupEntry {
+                binding: 2,
+                resource: material_textures.as_entire_binding(),
+            },
             BindGroupEntry {
                 binding: 3,
-                resource: BindingResource::TextureViewArray(&[&direct_view]),
+                resource: BindingResource::TextureViewArray(&texture_views),
             },
             BindGroupEntry {
                 binding: 4,
-                resource: BindingResource::SamplerArray(&[&sampler]),
+                resource: BindingResource::SamplerArray(&samplers),
             },
             BindGroupEntry {
                 binding: 5,
@@ -550,7 +552,8 @@ fn material_vt_sampling_gpu_matches_expected_fallback_contract() {
             timestamp_writes: None,
         });
         pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(0, &cases_bind_group, &[]);
+        pass.set_bind_group(1, &material_bind_group, &[]);
         pass.dispatch_workgroups(cases.len() as u32, 1, 1);
     }
     encoder.copy_buffer_to_buffer(&output_buffer, 0, &readback_buffer, 0, output_size);
@@ -577,29 +580,39 @@ fn material_vt_sampling_gpu_matches_expected_fallback_contract() {
         [10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0, 1.0],
         "non-VT unchanged",
     );
-    assert_rgba(
-        output[4],
-        [1.0, 1.0, 1.0, 1.0],
-        "generation mismatch fallback",
-    );
+    assert_rgba(output[4], [1.0, 1.0, 1.0, 1.0], "stale generation fallback");
+    assert_rgba(output[5], [1.0, 1.0, 1.0, 1.0], "invalid index fallback");
+    assert_rgba(output[6], [1.0, 1.0, 1.0, 1.0], "reclaimed slot fallback");
 }
 
-/// Failing production-integration gate for generation mismatch.
+/// Records the boundary of the minimal production-layout harness.
 ///
-/// The shader-side mismatch behavior above is real GPU evidence, but its bind
-/// group is test-owned because `MaterialBindGroup` has not wired binding 9 yet.
-/// Keep this failure visible until the test can bind the production
-/// `MaterialBindGroup` through the real resolve path.
+/// The shader-side mismatch behavior above is dispatched with a bind group
+/// whose layout is produced by `MaterialBindGroup::from_world`; the actual
+/// `MaterialBindGroup::prepare` path remains crate-private and therefore
+/// cannot be driven from this integration test without a production API
+/// change. This assertion makes that limitation explicit instead of treating
+/// the layout harness as the main resolve pass.
 #[test]
-fn material_vt_generation_mismatch_requires_production_binding_9() {
-    let Some((_instance, _device, _queue)) = try_device(false) else {
-        return;
-    };
-
-    panic!(
-        "GPU parity gate: MaterialBindGroup/resolve does not yet wire \
-         material_texture_generation_table at group 1/binding 9; replace the \
-         test-owned bind group with the production path once binding 9 is connected"
+fn material_vt_production_layout_harness_marks_main_resolve_boundary() {
+    let (_instance, adapter, device, queue) = try_device(true);
+    let mut world = World::new();
+    world.insert_resource(RenderDevice::from(device));
+    world.insert_resource(RenderQueue::new(queue));
+    world.insert_resource(RenderAdapterInfo::new(adapter.get_info()));
+    let arrays = MaterialTextureArrays::from_world(&mut world);
+    let capacity = arrays.capacity();
+    world.insert_resource(arrays);
+    let material = MaterialBindGroup::from_world(&mut world);
+    assert!(material
+        .layout_descriptor
+        .entries
+        .iter()
+        .any(|entry| entry.binding == 9));
+    assert!(material.bind_group.is_none());
+    assert!(
+        capacity > 3,
+        "the production bindless layout needs dynamic slots"
     );
 }
 
@@ -609,9 +622,7 @@ fn material_vt_generation_mismatch_requires_production_binding_9() {
 /// reuse.
 #[test]
 fn material_vt_gpu_submission_gates_completion_and_reclaim() {
-    let Some((_instance, device, queue)) = try_device(false) else {
-        return;
-    };
+    let (_instance, _adapter, device, queue) = try_device(false);
     let completed = Arc::new(AtomicBool::new(false));
     queue.on_submitted_work_done({
         let completed = Arc::clone(&completed);

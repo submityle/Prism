@@ -59,6 +59,8 @@ use crate::source::{AssetReader, AssetSources};
 use crate::stores::AssetStores;
 use crate::type_id::AssetTypeId;
 use crate::watch::{AssetChangeKind, ChangeBatch};
+#[cfg(feature = "file_watcher")]
+use crate::watch::{AssetWatchHandle, WatchStartError};
 use crate::{Asset, LoaderId, SuffixConflict};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -162,6 +164,23 @@ impl AssetServer {
     /// `priority` (higher wins when the same path exists in several sources).
     pub fn mount(&self, name: &str, reader: Arc<dyn AssetReader>, priority: i32) {
         self.lock().sources.mount(name, reader, priority);
+    }
+
+    /// Starts a managed platform watcher for a filesystem source.
+    ///
+    /// The returned handle owns the watcher consumer and must be retained for
+    /// as long as hot reload is desired. Dropping it synchronously stops the
+    /// consumer and the underlying debouncer. Event collection and batch
+    /// application happen off the caller thread; unknown paths remain ignored
+    /// by [`Self::apply_change_batch`].
+    #[cfg(feature = "file_watcher")]
+    pub fn watch(
+        self: &Arc<Self>,
+        root: impl Into<std::path::PathBuf>,
+        source: impl Into<String>,
+        window: std::time::Duration,
+    ) -> Result<AssetWatchHandle, WatchStartError> {
+        AssetWatchHandle::spawn(Arc::clone(self), root, source, window)
     }
 
     /// Unmounts the source previously mounted under `name`, returning whether a
