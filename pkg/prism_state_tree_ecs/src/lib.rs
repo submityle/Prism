@@ -11,6 +11,7 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use prism_ecs::{component::Component, entity::Entity, world::World};
@@ -170,6 +171,110 @@ pub fn tick_entity(world: &mut World, entity: Entity) -> Option<Result<StepRepor
     world
         .get_mut::<StateTreeInstance>(entity)
         .map(|mut instance| instance.step())
+}
+
+/// The outcome of one entry in an explicit [`tick_entities`] request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchTickOutcome {
+    /// The entity had a `StateTreeInstance` and its tick completed.
+    Completed(StepReport),
+    /// The entity was stale, despawned, or did not carry a state-tree instance.
+    /// No world state was changed for this entry.
+    Missing,
+    /// The entity had a state-tree instance, but its tick returned a runtime
+    /// error. The error is scoped to this entry; later entries are still run.
+    Failed(RuntimeError),
+}
+
+/// One ordered entity/outcome pair produced by [`tick_entities`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BatchTickEntry {
+    /// The entity handle supplied by the caller.
+    pub entity: Entity,
+    /// The outcome of ticking `entity`.
+    pub outcome: BatchTickOutcome,
+}
+
+/// Deterministic result of an explicit batch tick.
+///
+/// Entries have exactly the same order, length, and multiplicity as the input
+/// slice. In particular, duplicate handles are processed once per occurrence;
+/// the function does not sort, deduplicate, query, or schedule them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchTickReport {
+    entries: Vec<BatchTickEntry>,
+    completed: usize,
+    missing: usize,
+    failed: usize,
+}
+
+impl BatchTickReport {
+    /// Returns the per-entity results in caller-supplied order.
+    pub fn entries(&self) -> &[BatchTickEntry] {
+        &self.entries
+    }
+
+    /// Returns the number of input entries that completed successfully.
+    pub const fn completed_count(&self) -> usize {
+        self.completed
+    }
+
+    /// Returns the number of input entries that were safe no-ops.
+    pub const fn missing_count(&self) -> usize {
+        self.missing
+    }
+
+    /// Returns the number of input entries whose runtime tick failed.
+    pub const fn failed_count(&self) -> usize {
+        self.failed
+    }
+
+    /// Returns the number of input entities, including duplicates.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns whether the input slice was empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Ticks the requested entities exactly once each, in the supplied order.
+///
+/// This is an explicit exclusive-world operation. It does not discover
+/// entities through a query, schedule work, invoke observers, or deduplicate
+/// handles. A stale/dead entity or an entity without [`StateTreeInstance`] is
+/// reported as [`BatchTickOutcome::Missing`] and is otherwise a no-op. Runtime
+/// errors are retained per entry so one failed entity cannot suppress later
+/// requested ticks.
+pub fn tick_entities(world: &mut World, entities: &[Entity]) -> BatchTickReport {
+    let mut report = BatchTickReport {
+        entries: Vec::with_capacity(entities.len()),
+        completed: 0,
+        missing: 0,
+        failed: 0,
+    };
+
+    for &entity in entities {
+        let outcome = match tick_entity(world, entity) {
+            Some(Ok(step)) => {
+                report.completed += 1;
+                BatchTickOutcome::Completed(step)
+            }
+            Some(Err(error)) => {
+                report.failed += 1;
+                BatchTickOutcome::Failed(error)
+            }
+            None => {
+                report.missing += 1;
+                BatchTickOutcome::Missing
+            }
+        };
+        report.entries.push(BatchTickEntry { entity, outcome });
+    }
+
+    report
 }
 
 #[cfg(test)]

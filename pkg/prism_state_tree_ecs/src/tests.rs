@@ -8,7 +8,8 @@ use prism_state_tree_core::{
 };
 
 use crate::{
-    queue_spawn, tick_entity, validate_context, StateTreeAsset, StateTreeInstance, ValidatedContext,
+    queue_spawn, tick_entities, tick_entity, validate_context, BatchTickOutcome, StateTreeAsset,
+    StateTreeInstance, ValidatedContext,
 };
 
 struct TestContext<'w> {
@@ -250,6 +251,116 @@ fn tick_of_missing_or_despawned_entity_is_a_safe_noop() {
     let entity = world.spawn(StateTreeInstance::new(asset(), 1, MicrostepLimit(8)).unwrap());
     assert!(world.despawn(entity));
     assert!(tick_entity(&mut world, entity).is_none());
+}
+
+#[test]
+fn batch_tick_preserves_input_order_and_reports_missing_entities() {
+    let mut world = World::new();
+    let first = world.spawn(StateTreeInstance::new(asset(), 4, MicrostepLimit(8)).unwrap());
+    let second = world.spawn(StateTreeInstance::new(asset(), 4, MicrostepLimit(8)).unwrap());
+    let missing = world.entities().reserve_entity();
+    world.flush_reserved();
+
+    let report = tick_entities(&mut world, &[second, missing, first, second]);
+    assert_eq!(report.len(), 4);
+    assert_eq!(report.completed_count(), 3);
+    assert_eq!(report.missing_count(), 1);
+    assert_eq!(report.failed_count(), 0);
+    assert_eq!(
+        report.entries(),
+        &[
+            crate::BatchTickEntry {
+                entity: second,
+                outcome: BatchTickOutcome::Completed(prism_state_tree_core::StepReport {
+                    events_processed: 0,
+                    microsteps: 0,
+                    queued_events: 0,
+                }),
+            },
+            crate::BatchTickEntry {
+                entity: missing,
+                outcome: BatchTickOutcome::Missing,
+            },
+            crate::BatchTickEntry {
+                entity: first,
+                outcome: BatchTickOutcome::Completed(prism_state_tree_core::StepReport {
+                    events_processed: 0,
+                    microsteps: 0,
+                    queued_events: 0,
+                }),
+            },
+            crate::BatchTickEntry {
+                entity: second,
+                outcome: BatchTickOutcome::Completed(prism_state_tree_core::StepReport {
+                    events_processed: 0,
+                    microsteps: 0,
+                    queued_events: 0,
+                }),
+            },
+        ]
+    );
+}
+
+#[test]
+fn batch_tick_keeps_instances_independent_and_continues_after_error() {
+    let mut world = World::new();
+    let failing = world.spawn(StateTreeInstance::new(asset(), 4, MicrostepLimit(0)).unwrap());
+    let healthy = world.spawn(StateTreeInstance::new(asset(), 4, MicrostepLimit(8)).unwrap());
+
+    let initial = tick_entities(&mut world, &[healthy, failing]);
+    assert_eq!(initial.completed_count(), 2);
+
+    world
+        .get_mut::<StateTreeInstance>(failing)
+        .unwrap()
+        .request_event(Event::new(EventId(7)))
+        .expect("event fits bounded queue");
+    world
+        .get_mut::<StateTreeInstance>(healthy)
+        .unwrap()
+        .request_event(Event::new(EventId(7)))
+        .expect("event fits bounded queue");
+
+    let report = tick_entities(&mut world, &[failing, healthy]);
+    assert_eq!(report.completed_count(), 1);
+    assert_eq!(report.failed_count(), 1);
+    assert_eq!(report.entries()[0].entity, failing);
+    assert_eq!(
+        report.entries()[0].outcome,
+        BatchTickOutcome::Failed(prism_state_tree_core::RuntimeError::MicrostepLimit(
+            MicrostepLimit(0)
+        ))
+    );
+    assert_eq!(report.entries()[1].entity, healthy);
+    assert!(matches!(
+        report.entries()[1].outcome,
+        BatchTickOutcome::Completed(report) if report.events_processed == 1 && report.microsteps == 1
+    ));
+    assert_eq!(
+        world
+            .get::<StateTreeInstance>(failing)
+            .unwrap()
+            .active_states(),
+        &[StateId(0), StateId(1)]
+    );
+    assert_eq!(
+        world
+            .get::<StateTreeInstance>(healthy)
+            .unwrap()
+            .active_states(),
+        &[StateId(0), StateId(2)]
+    );
+}
+
+#[test]
+fn empty_batch_is_a_structured_noop() {
+    let mut world = World::new();
+    let report = tick_entities(&mut world, &[]);
+    assert!(report.is_empty());
+    assert_eq!(report.entries(), &[]);
+    assert_eq!(report.completed_count(), 0);
+    assert_eq!(report.missing_count(), 0);
+    assert_eq!(report.failed_count(), 0);
 }
 
 #[test]

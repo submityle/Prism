@@ -3,7 +3,7 @@
 //! This crate deliberately contains no renderer, widget factory, or
 //! window-system integration. It provides a deterministic layout model,
 //! reducer, validation, and a versioned persistence core; it does not provide
-//! workspace integration or autosave orchestration.
+//! application-level workspace integration or autosave orchestration.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
@@ -16,6 +16,7 @@ mod reducer;
 mod registry;
 mod render_plan;
 mod validate;
+mod workspace;
 
 pub use drag::{
     calculate_drop_zone, map_drop_action, tab_insertion_index, transition, DragError, DragEvent,
@@ -38,9 +39,13 @@ pub use render_plan::{
     SizeRequirement, SplitterLayout, SurfaceId, TabHeader, TabId, Viewport,
 };
 pub use validate::{LayoutError, Limits, ValidationIssue};
+pub use workspace::{NameKind, Perspective, Workspace, WorkspaceError, WorkspaceManager};
 
 #[cfg(test)]
 mod tests;
 
 #[cfg(test)]
 mod render_plan_tests;
+
+#[cfg(test)]
+mod workspace_tests;
