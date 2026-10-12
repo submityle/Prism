@@ -22,6 +22,7 @@ use crate::query::filter::QueryFilter;
 #[cfg(feature = "multi_thread")]
 use crate::query::slice::{ArchetypalFilter, ColumnSliceData};
 use crate::query::iter::QueryIter;
+use crate::query::many::QueryManyIter;
 use crate::world::World;
 
 /// Why [`QueryState::get`] / [`QueryState::get_mut`] could not resolve an
@@ -36,6 +37,10 @@ pub enum QueryEntityError {
     /// state fails an [`Added`](crate::query::Added) / [`Changed`](crate::query::Changed)
     /// filter this frame.
     QueryDoesNotMatch(Entity),
+    /// The same entity was requested mutably more than once in one call (for
+    /// example a duplicate in [`QueryState::get_many_mut`]), which would create
+    /// two aliasing `&mut` references to one row. Rejected before any fetch.
+    AliasedMutability(Entity),
 }
 
 impl core::fmt::Display for QueryEntityError {
@@ -46,6 +51,9 @@ impl core::fmt::Display for QueryEntityError {
             }
             Self::QueryDoesNotMatch(entity) => {
                 write!(f, "entity {entity:?} does not match the query")
+            }
+            Self::AliasedMutability(entity) => {
+                write!(f, "entity {entity:?} was requested mutably more than once")
             }
         }
     }
@@ -382,6 +390,163 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         // SAFETY: the caller upholds the `iter_from_ptr` contract.
         let iter = unsafe { self.iter_from_ptr(world, last_run, this_run) };
         Self::single_from_iter(iter)
+    }
+
+    /// Fetch the query terms for a fixed list of `entities`, in list order
+    /// (design §7 batched random access).
+    ///
+    /// The batched dual of [`get`](Self::get): every entity is resolved exactly
+    /// as a single `get` would resolve it, and the first entity that fails (not
+    /// live, or not matching) short-circuits with its [`QueryEntityError`]; the
+    /// entities after it are not touched. The returned array preserves the
+    /// input order, so it pairs with parallel index arrays (ids / weights).
+    ///
+    /// Only read-only data terms are reachable (the `D: `[`ReadOnlyQueryData`]
+    /// bound), so a shared borrow is sufficient.
+    ///
+    /// # Errors
+    /// See [`QueryEntityError`]; duplicate ids are permitted here (shared refs).
+    #[inline]
+    pub fn get_many<const N: usize>(
+        &self,
+        world: &World,
+        entities: [Entity; N],
+    ) -> Result<[D::Item<'_>; N], QueryEntityError>
+    where
+        D: ReadOnlyQueryData,
+    {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
+        let world_ptr = (world as *const World).cast_mut();
+        // SAFETY: `D: ReadOnlyQueryData`, so only shared fetches are formed and
+        // the shared `&World` borrow is sufficient; `world_ptr` stays valid.
+        unsafe { self.get_many_from_ptr(world_ptr, entities, last_run, this_run) }
+    }
+
+    /// Fetch the query terms for a fixed list of `entities` with exclusive
+    /// access, permitting `&mut T` terms (design §7 batched random access).
+    ///
+    /// The mutable batched dual of [`get`](Self::get): the array is built from
+    /// per-entity fetches valid for `'w`, which only stays sound if no entity is
+    /// named twice. A duplicate is therefore rejected up front with
+    /// [`QueryEntityError::AliasedMutability`] before any `&mut` is created;
+    /// otherwise the returned array preserves the input order.
+    ///
+    /// # Errors
+    /// - [`QueryEntityError::AliasedMutability`] if `entities` repeats an id.
+    /// - The other [`QueryEntityError`] variants for a dead or non-matching
+    ///   entity (the first one in list order wins).
+    #[inline]
+    pub fn get_many_mut<const N: usize>(
+        &self,
+        world: &mut World,
+        entities: [Entity; N],
+    ) -> Result<[D::Item<'_>; N], QueryEntityError> {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
+        let world_ptr = world as *mut World;
+        // SAFETY: `world` is exclusively borrowed, so the raw pointer is the
+        // sole route to it; the duplicate check inside rejects aliasing ids.
+        unsafe { self.get_many_mut_from_ptr(world_ptr, entities, last_run, this_run) }
+    }
+
+    /// Random-access fetch of a fixed entity list from a raw `*mut World`.
+    ///
+    /// # Safety
+    /// Identical to [`get_from_ptr`](Self::get_from_ptr): `world` must be valid
+    /// for `'w` and the caller must guarantee no other live borrow aliases the
+    /// columns this query's `D`/`F` terms touch.
+    pub(crate) unsafe fn get_many_from_ptr<'w, 's, const N: usize>(
+        &'s self,
+        world: *mut World,
+        entities: [Entity; N],
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Result<[D::Item<'w>; N], QueryEntityError> {
+        let mut slots: [Option<D::Item<'w>>; N] = core::array::from_fn(|_| None);
+        for (slot, entity) in slots.iter_mut().zip(entities) {
+            // SAFETY: the caller upholds the `get_from_ptr` contract.
+            let item = unsafe { self.get_from_ptr(world, entity, last_run, this_run) }?;
+            *slot = Some(item);
+        }
+        Ok(slots.map(|slot| slot.expect("every slot is filled when no error short-circuits")))
+    }
+
+    /// Random-access mutable fetch of a fixed entity list from a raw
+    /// `*mut World`, rejecting duplicate ids before any `&mut` is created.
+    ///
+    /// # Safety
+    /// Identical to [`get_from_ptr`](Self::get_from_ptr); the duplicate guard
+    /// inside enforces the intra-call part of the mutable aliasing contract.
+    pub(crate) unsafe fn get_many_mut_from_ptr<'w, 's, const N: usize>(
+        &'s self,
+        world: *mut World,
+        entities: [Entity; N],
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Result<[D::Item<'w>; N], QueryEntityError> {
+        // Reject duplicates before forming any `&mut`: naming one entity twice
+        // would mint two aliasing mutable references.
+        for i in 0..N {
+            for j in 0..i {
+                if entities[i] == entities[j] {
+                    return Err(QueryEntityError::AliasedMutability(entities[i]));
+                }
+            }
+        }
+        // SAFETY: the caller upholds the `get_from_ptr` contract; the duplicate
+        // guard above means each entity is fetched at most once.
+        unsafe { self.get_many_from_ptr(world, entities, last_run, this_run) }
+    }
+
+    /// Iterate the query terms for a caller-provided entity list, in list order
+    /// (design §7 batched random access).
+    ///
+    /// Unlike [`iter`](Self::iter), which walks every matched archetype, this
+    /// walks exactly the supplied entities and yields one
+    /// `Result<D::Item, QueryEntityError>` per entry, so a caller that already
+    /// has an id list (children, a selection set, a snapshot delta) can resolve
+    /// it without an archetype scan. Errors are surfaced rather than skipped;
+    /// use [`QueryManyIter::matched`] to skip the non-matching entries.
+    ///
+    /// Only read-only data terms are reachable (the `D: `[`ReadOnlyQueryData`]
+    /// bound), so a shared borrow is sufficient and duplicates are harmless.
+    #[inline]
+    pub fn iter_many<'w, 's, I>(
+        &'s self,
+        world: &'w World,
+        entities: I,
+    ) -> QueryManyIter<'w, 's, D, F, I::IntoIter>
+    where
+        D: ReadOnlyQueryData,
+        I: IntoIterator<Item = Entity>,
+    {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
+        let world_ptr = (world as *const World).cast_mut();
+        // SAFETY: `D: ReadOnlyQueryData`, so only shared fetches are formed and
+        // the shared `&'w World` borrow is sufficient; `world_ptr` stays valid.
+        unsafe { self.iter_many_from_ptr(world_ptr, entities, last_run, this_run) }
+    }
+
+    /// Build a many-entity iterator from a raw `*mut World`.
+    ///
+    /// # Safety
+    /// Identical to [`get_from_ptr`](Self::get_from_ptr): `world` must be valid
+    /// for `'w` and the caller must guarantee no other live borrow aliases the
+    /// columns this query's `D`/`F` terms touch for the whole iteration.
+    pub(crate) unsafe fn iter_many_from_ptr<'w, 's, I>(
+        &'s self,
+        world: *mut World,
+        entities: I,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> QueryManyIter<'w, 's, D, F, I::IntoIter>
+    where
+        I: IntoIterator<Item = Entity>,
+    {
+        // SAFETY: the caller upholds the `QueryManyIter::new` contract.
+        unsafe { QueryManyIter::new(self, world, last_run, this_run, entities.into_iter()) }
     }
 
     /// Random-access fetch of a single `entity` from a raw `*mut World`.

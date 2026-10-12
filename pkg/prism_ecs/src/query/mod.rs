@@ -22,6 +22,7 @@ mod dirty;
 mod fetch;
 mod filter;
 mod iter;
+mod many;
 #[cfg(feature = "multi_thread")]
 mod par;
 #[cfg(feature = "multi_thread")]
@@ -35,6 +36,7 @@ pub use dirty::DirtyChunk;
 pub use fetch::{AnyOf, Has, QueryData, ReadOnlyQueryData};
 pub use filter::{Added, Changed, Or, QueryFilter, With, Without};
 pub use iter::QueryIter;
+pub use many::{QueryManyIter, QueryManyMatchedIter};
 #[cfg(feature = "simd")]
 pub use simd::{active, add_assign, axpy_assign, scale_assign, sum, Backend};
 #[cfg(feature = "multi_thread")]
@@ -45,6 +47,8 @@ pub use state::{QueryEntityError, QuerySingleError, QueryState};
 mod any_of_tests;
 #[cfg(test)]
 mod get_tests;
+#[cfg(test)]
+mod many_tests;
 #[cfg(test)]
 mod single_tests;
 #[cfg(test)]

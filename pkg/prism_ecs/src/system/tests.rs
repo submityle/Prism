@@ -370,3 +370,60 @@ fn query_param_single_and_single_mut() {
     ambiguous_sys.initialize(&mut world);
     ambiguous_sys.run(&mut world);
 }
+
+/// Entity ids handed to the batched-access systems below.
+struct Ids {
+    list: Vec<Entity>,
+}
+impl Resource for Ids {}
+
+/// `Query::get_many` / `get_many_mut` / `iter_many` are the system-param faces
+/// of batched random access: the mutable form writes every listed entity and
+/// rejects duplicate ids, while the read-only form resolves an id list in order.
+#[test]
+fn query_param_many_access() {
+    use crate::query::QueryEntityError;
+
+    let mut world = World::new();
+    let a = world.spawn(Health(1));
+    let b = world.spawn(Health(2));
+    let c = world.spawn(Health(3));
+    world.insert_resource(Ids {
+        list: alloc::vec![a, b, c],
+    });
+
+    fn bump(ids: Res<Ids>, mut q: Query<&mut Health>) {
+        let [a, b, c] = [ids.list[0], ids.list[1], ids.list[2]];
+        {
+            let mut items = q.get_many_mut([a, b, c]).expect("distinct live matches");
+            items[0].0 += 10;
+            items[1].0 += 20;
+            items[2].0 += 30;
+        }
+        // A duplicate id is rejected before it can alias.
+        assert!(matches!(
+            q.get_many_mut([a, a]),
+            Err(QueryEntityError::AliasedMutability(e)) if e == a
+        ));
+    }
+
+    let mut bump_sys = IntoSystem::into_system(bump);
+    bump_sys.initialize(&mut world);
+    bump_sys.run(&mut world);
+    assert_eq!(world.get::<Health>(a).map(|h| h.0), Some(11));
+    assert_eq!(world.get::<Health>(b).map(|h| h.0), Some(22));
+    assert_eq!(world.get::<Health>(c).map(|h| h.0), Some(33));
+
+    fn probe(ids: Res<Ids>, q: Query<&Health>) {
+        let listed = [ids.list[0], ids.list[1], ids.list[2]];
+        let many = q.get_many(listed).expect("all live and matching");
+        assert_eq!([many[0].0, many[1].0, many[2].0], [11, 22, 33]);
+
+        let streamed: Vec<i32> = q.iter_many(listed).matched().map(|h| h.0).collect();
+        assert_eq!(streamed, [11, 22, 33]);
+    }
+
+    let mut probe_sys = IntoSystem::into_system(probe);
+    probe_sys.initialize(&mut world);
+    probe_sys.run(&mut world);
+}

@@ -16,8 +16,8 @@
 
 use crate::entity::Entity;
 use crate::query::{
-    Access, QueryData, QueryEntityError, QueryFilter, QueryIter, QuerySingleError, QueryState,
-    ReadOnlyQueryData,
+    Access, QueryData, QueryEntityError, QueryFilter, QueryIter, QueryManyIter, QuerySingleError,
+    QueryState, ReadOnlyQueryData,
 };
 #[cfg(feature = "multi_thread")]
 use crate::query::{ArchetypalFilter, ColumnSliceData};
@@ -177,6 +177,79 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         unsafe {
             self.state.single_from_ptr(
                 self.world.as_ptr(),
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
+    }
+
+    /// Fetch the query terms for a fixed list of entities, in list order. The
+    /// first entity that fails short-circuits with its [`QueryEntityError`].
+    ///
+    /// # Errors
+    /// See [`QueryEntityError`]; duplicate ids are permitted (shared fetches).
+    #[inline]
+    pub fn get_many<const N: usize>(
+        &self,
+        entities: [Entity; N],
+    ) -> Result<[D::Item<'_>; N], QueryEntityError>
+    where
+        D: ReadOnlyQueryData,
+    {
+        // SAFETY: `self.world` is live for `'w`; `D: ReadOnlyQueryData` means no
+        // `&mut` fetch is formed, and this system's declared read access
+        // guarantees nothing writes the columns we read.
+        unsafe {
+            self.state.get_many_from_ptr(
+                self.world.as_ptr(),
+                entities,
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
+    }
+
+    /// Fetch the query terms for a fixed list of entities with exclusive
+    /// access, permitting `&mut T`.
+    ///
+    /// # Errors
+    /// - [`QueryEntityError::AliasedMutability`] if `entities` repeats an id.
+    /// - The other [`QueryEntityError`] variants otherwise.
+    #[inline]
+    pub fn get_many_mut<const N: usize>(
+        &mut self,
+        entities: [Entity; N],
+    ) -> Result<[D::Item<'_>; N], QueryEntityError> {
+        // SAFETY: `self.world` is live for `'w`; `&mut self` makes this the sole
+        // live fetch of this query and the duplicate guard inside rejects
+        // aliasing ids, while the system's declared write access guarantees
+        // nothing else touches the columns we write.
+        unsafe {
+            self.state.get_many_mut_from_ptr(
+                self.world.as_ptr(),
+                entities,
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
+    }
+
+    /// Iterate a caller-provided entity list, yielding one
+    /// `Result<D::Item, QueryEntityError>` per entity in list order. Use
+    /// [`QueryManyIter::matched`] to skip the non-matching entries.
+    #[inline]
+    pub fn iter_many<I>(&self, entities: I) -> QueryManyIter<'_, '_, D, F, I::IntoIter>
+    where
+        D: ReadOnlyQueryData,
+        I: IntoIterator<Item = Entity>,
+    {
+        // SAFETY: `self.world` is live for `'w`; `D: ReadOnlyQueryData` means no
+        // `&mut` fetch is formed, and this system's declared read access
+        // guarantees nothing writes the columns we read for the iteration.
+        unsafe {
+            self.state.iter_many_from_ptr(
+                self.world.as_ptr(),
+                entities,
                 self.world.last_run(),
                 self.world.this_run(),
             )
