@@ -1,8 +1,9 @@
 //! Pure-data docking model and deterministic layout reducer.
 //!
-//! This crate deliberately contains no renderer, widget factory, window-system
-//! integration, or serialization format. Layouts can be validated and changed
-//! without a GUI or GPU.
+//! This crate deliberately contains no renderer, widget factory, or
+//! window-system integration. It provides a deterministic layout model,
+//! reducer, validation, and a versioned persistence core; it does not provide
+//! workspace integration or autosave orchestration.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
@@ -10,6 +11,7 @@ extern crate alloc;
 
 mod drag;
 mod model;
+mod persist;
 mod reducer;
 mod render_plan;
 mod validate;
@@ -22,6 +24,7 @@ pub use model::{
     AutoHideBars, AutoHideEntry, Axis, DockLayout, DockNode, DocumentId, FloatingWindow,
     MaximizeRestore, PanelId, Ratio, Rect, Side, SplitChild,
 };
+pub use persist::{decode_layout, encode_layout, DecodeLimits, DecodeOptions, PersistError};
 pub use reducer::{reduce, Action, Placement, Target};
 pub use render_plan::{
     solve, solve_with, AutoHideBarLayout, AutoHideButton, AutoHideLayout, AutoHideReveal,
