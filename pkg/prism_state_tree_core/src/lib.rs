@@ -13,6 +13,7 @@ extern crate alloc;
 
 mod model;
 mod runtime;
+mod schema;
 mod snapshot;
 
 pub use model::{
@@ -22,6 +23,9 @@ pub use model::{
 pub use runtime::{
     AlwaysGuard, Event, EventQueueError, Guard, GuardContext, Instance, LifecycleCallback,
     LogEntry, LogKind, MicrostepLimit, NoopLifecycle, RuntimeError, StepReport,
+};
+pub use schema::{
+    ContextRef, Schema, SchemaCapabilities, SchemaDescriptor, SchemaError, SchemaId, SchemaVersion,
 };
 pub use snapshot::{RestoreError, Snapshot, SnapshotCodecError};
 
