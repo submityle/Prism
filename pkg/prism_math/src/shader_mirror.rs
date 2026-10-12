@@ -504,6 +504,127 @@ fn prism_hilbert_decode2(index: u32) -> vec2<u32> {\n\
     }\n\
     return vec2<u32>(x, y);\n\
 }\n";
+
+/// Single-sourced WGSL for the 3D Hilbert curve (Skilling's transpose
+/// algorithm), mirroring the CPU [`hilbert_encode3`](crate::spatial::hilbert_encode3)
+/// / [`hilbert_decode3`](crate::spatial::hilbert_decode3).
+///
+/// WGSL has no 64-bit integer type, so the 63-bit Hilbert index (`21` bits per
+/// axis) is carried as a `vec2<u32>(lo, hi)` pair; the only 64-bit operations
+/// needed are the 1-bit left-shift accumulate (`transpose_to_index`) and the
+/// per-bit extract (`index_to_transpose`), both emulated on the two lanes. Every
+/// other op is pure `u32`. Because the index math is integer-only, the GPU and
+/// CPU agree **bit-for-bit** (see `prism_math_gpu`'s Hilbert parity test).
+pub const WGSL_HILBERT3: &str = r#"
+const PRISM_HILBERT3_BITS: u32 = 21u;
+const PRISM_HILBERT3_MASK: u32 = 2097151u;
+
+fn prism_hilbert3_axes_to_transpose(axes_in: array<u32, 3>) -> array<u32, 3> {
+    var axes = axes_in;
+    let top = 1u << (PRISM_HILBERT3_BITS - 1u);
+    var q = top;
+    while (q > 1u) {
+        let p = q - 1u;
+        for (var i = 0u; i < 3u; i = i + 1u) {
+            if ((axes[i] & q) != 0u) {
+                axes[0] = axes[0] ^ p;
+            } else {
+                let t = (axes[0] ^ axes[i]) & p;
+                axes[0] = axes[0] ^ t;
+                axes[i] = axes[i] ^ t;
+            }
+        }
+        q = q >> 1u;
+    }
+    axes[1] = axes[1] ^ axes[0];
+    axes[2] = axes[2] ^ axes[1];
+    var fix = 0u;
+    var q2 = top;
+    while (q2 > 1u) {
+        if ((axes[2] & q2) != 0u) {
+            fix = fix ^ (q2 - 1u);
+        }
+        q2 = q2 >> 1u;
+    }
+    axes[0] = axes[0] ^ fix;
+    axes[1] = axes[1] ^ fix;
+    axes[2] = axes[2] ^ fix;
+    return axes;
+}
+
+fn prism_hilbert3_transpose_to_index(axes: array<u32, 3>) -> vec2<u32> {
+    var lo = 0u;
+    var hi = 0u;
+    var b = PRISM_HILBERT3_BITS;
+    loop {
+        if (b == 0u) { break; }
+        b = b - 1u;
+        for (var i = 0u; i < 3u; i = i + 1u) {
+            let bit = (axes[i] >> b) & 1u;
+            hi = (hi << 1u) | (lo >> 31u);
+            lo = (lo << 1u) | bit;
+        }
+    }
+    return vec2<u32>(lo, hi);
+}
+
+fn prism_hilbert3_index_to_transpose(index: vec2<u32>) -> array<u32, 3> {
+    var axes = array<u32, 3>(0u, 0u, 0u);
+    let total = PRISM_HILBERT3_BITS * 3u;
+    var bit = total;
+    loop {
+        if (bit == 0u) { break; }
+        bit = bit - 1u;
+        var value = (index.x >> bit) & 1u;
+        if (bit >= 32u) {
+            value = (index.y >> (bit - 32u)) & 1u;
+        }
+        let pos = total - 1u - bit;
+        let b = (PRISM_HILBERT3_BITS - 1u) - (pos / 3u);
+        let i = pos % 3u;
+        axes[i] = axes[i] | (value << b);
+    }
+    return axes;
+}
+
+fn prism_hilbert3_transpose_to_axes(axes_in: array<u32, 3>) -> array<u32, 3> {
+    var axes = axes_in;
+    let t0 = axes[2] >> 1u;
+    axes[2] = axes[2] ^ axes[1];
+    axes[1] = axes[1] ^ axes[0];
+    axes[0] = axes[0] ^ t0;
+    var q = 2u;
+    loop {
+        if (q == (1u << PRISM_HILBERT3_BITS)) { break; }
+        let p = q - 1u;
+        for (var i2 = 3u; i2 > 0u; i2 = i2 - 1u) {
+            let i = i2 - 1u;
+            if ((axes[i] & q) != 0u) {
+                axes[0] = axes[0] ^ p;
+            } else {
+                let tt = (axes[0] ^ axes[i]) & p;
+                axes[0] = axes[0] ^ tt;
+                axes[i] = axes[i] ^ tt;
+            }
+        }
+        q = q << 1u;
+    }
+    return axes;
+}
+
+fn prism_hilbert_encode3(p: vec3<u32>) -> vec2<u32> {
+    let m = PRISM_HILBERT3_MASK;
+    let axes = prism_hilbert3_axes_to_transpose(array<u32, 3>(p.x & m, p.y & m, p.z & m));
+    return prism_hilbert3_transpose_to_index(axes);
+}
+
+fn prism_hilbert_decode3(index: vec2<u32>) -> vec3<u32> {
+    let axes = prism_hilbert3_index_to_transpose(index);
+    let out = prism_hilbert3_transpose_to_axes(axes);
+    return vec3<u32>(out[0], out[1], out[2]);
+}
+"#;
+
 /// Single-sourced WGSL for GPU-driven view-frustum culling, mirroring the CPU
 /// classifiers [`crate::intersect::frustum_sphere`] /
 /// [`crate::intersect::frustum_aabb`]. Each plane is passed as a `vec4<f32>`
@@ -2584,7 +2705,12 @@ fn prism_i16f16_mul(a: i32, b: i32) -> i32 {\n\
 }\n\
 \n\
 fn prism_i16f16_to_int(a: i32) -> i32 {\n\
-    return a >> 16u;\n\
+    let floored = a >> 16u;\n\
+    let frac = bitcast<u32>(a) & 0xffffu;\n\
+    if ((a < 0) && (frac != 0u)) {\n\
+        return floored + 1;\n\
+    }\n\
+    return floored;\n\
 }\n\
 \n\
 fn prism_i16f16_from_int(n: i32) -> i32 {\n\

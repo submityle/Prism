@@ -127,3 +127,105 @@ fn empty_batch_is_empty() {
     assert!(kernel.encode2(&ctx, &[]).is_empty());
     assert!(kernel.decode2(&ctx, &[]).is_empty());
 }
+
+// ---- 3D Hilbert (63-bit key carried as vec2<u32> lo/hi) --------------------
+
+use prism_math::spatial::{hilbert_decode3, hilbert_encode3};
+use prism_math_gpu::hilbert::MAX_COORD_3D;
+
+fn split(index: u64) -> [u32; 2] {
+    [index as u32, (index >> 32) as u32]
+}
+
+#[test]
+fn encode3_matches_cpu_reference() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let kernel = GpuHilbert::new(&ctx);
+
+    let mut coords: Vec<[u32; 3]> = vec![
+        [0, 0, 0],
+        [MAX_COORD_3D, MAX_COORD_3D, MAX_COORD_3D],
+        [MAX_COORD_3D, 0, 0],
+        [0, MAX_COORD_3D, 0],
+        [1, 2, 3],
+    ];
+    let mut seed = 0x0051_eed0u32;
+    for _ in 0..500 {
+        coords.push([
+            lcg(&mut seed) & MAX_COORD_3D,
+            lcg(&mut seed) & MAX_COORD_3D,
+            lcg(&mut seed) & MAX_COORD_3D,
+        ]);
+    }
+
+    let gpu = kernel.encode3(&ctx, &coords);
+    assert_eq!(gpu.len(), coords.len());
+    for (c, &g) in coords.iter().zip(gpu.iter()) {
+        let cpu = split(hilbert_encode3(c[0], c[1], c[2]));
+        assert_eq!(g, cpu, "encode3 drift at ({}, {}, {})", c[0], c[1], c[2]);
+    }
+}
+
+#[test]
+fn decode3_inverts_encode3() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let kernel = GpuHilbert::new(&ctx);
+
+    let mut coords: Vec<[u32; 3]> = vec![
+        [0, 0, 0],
+        [MAX_COORD_3D, MAX_COORD_3D, MAX_COORD_3D],
+        [7, 11, 13],
+    ];
+    let mut seed = 0x0bad_f00du32;
+    for _ in 0..500 {
+        coords.push([
+            lcg(&mut seed) & MAX_COORD_3D,
+            lcg(&mut seed) & MAX_COORD_3D,
+            lcg(&mut seed) & MAX_COORD_3D,
+        ]);
+    }
+
+    let keys = kernel.encode3(&ctx, &coords);
+    let back = kernel.decode3(&ctx, &keys);
+    assert_eq!(back.len(), coords.len());
+    for (orig, got) in coords.iter().zip(back.iter()) {
+        assert_eq!(got, orig, "decode3 round-trip drift");
+    }
+    for (orig, &k) in coords.iter().zip(keys.iter()) {
+        let index = (k[0] as u64) | ((k[1] as u64) << 32);
+        let (cx, cy, cz) = hilbert_decode3(index);
+        assert_eq!([cx, cy, cz], *orig, "cpu decode3 mismatch");
+    }
+}
+
+#[test]
+fn consecutive_keys3_are_lattice_neighbours() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let kernel = GpuHilbert::new(&ctx);
+
+    let keys: Vec<[u32; 2]> = (0u64..4096).map(split).collect();
+    let pts = kernel.decode3(&ctx, &keys);
+    assert_eq!(pts.len(), keys.len());
+    for pair in pts.windows(2) {
+        let d = pair[0][0].abs_diff(pair[1][0])
+            + pair[0][1].abs_diff(pair[1][1])
+            + pair[0][2].abs_diff(pair[1][2]);
+        assert_eq!(d, 1, "non-neighbour step {:?} -> {:?}", pair[0], pair[1]);
+    }
+}
+
+#[test]
+fn empty_batch3_is_empty() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let kernel = GpuHilbert::new(&ctx);
+    assert!(kernel.encode3(&ctx, &[]).is_empty());
+    assert!(kernel.decode3(&ctx, &[]).is_empty());
+}

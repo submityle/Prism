@@ -31,7 +31,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use bytemuck::{Pod, Zeroable};
-use prism_math::shader_mirror::WGSL_HILBERT2;
+use prism_math::shader_mirror::{WGSL_HILBERT2, WGSL_HILBERT3};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, CommandEncoder,
@@ -47,6 +47,12 @@ use crate::context::GpuContext;
 pub const BITS_2D: u32 = 16;
 /// Inclusive maximum per-axis coordinate accepted by [`GpuHilbert::encode2`].
 pub const MAX_COORD_2D: u32 = (1 << BITS_2D) - 1;
+
+/// Axis bit width consumed by the GPU 3D Hilbert encoder (`21` bits per axis,
+/// a `63`-bit key carried as a `vec2<u32>`).
+pub const BITS_3D: u32 = 21;
+/// Inclusive maximum per-axis coordinate accepted by [`GpuHilbert::encode3`].
+pub const MAX_COORD_3D: u32 = (1 << BITS_3D) - 1;
 
 /// Threads per workgroup; a standard 1D batch tiling.
 const WORKGROUP: u32 = 64;
@@ -79,6 +85,35 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     coords[i] = vec4<u32>(d.x, d.y, 0u, 0u);\n\
 }\n";
 
+/// Compute wrapper for 3D Hilbert encoding (input `vec4<u32>` `(x,y,z,_)`,
+/// output `vec2<u32>` `(lo,hi)`).
+const WRAP_ENCODE3: &str = "\
+struct Params { count: u32 };\n\
+@group(0) @binding(0) var<uniform> params: Params;\n\
+@group(0) @binding(1) var<storage, read> coords: array<vec4<u32>>;\n\
+@group(0) @binding(2) var<storage, read_write> keys: array<vec2<u32>>;\n\
+@compute @workgroup_size(64)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.x;\n\
+    if (i >= params.count) { return; }\n\
+    let c = coords[i];\n\
+    keys[i] = prism_hilbert_encode3(vec3<u32>(c.x, c.y, c.z));\n\
+}\n";
+
+/// Compute wrapper for 3D Hilbert decoding.
+const WRAP_DECODE3: &str = "\
+struct Params { count: u32 };\n\
+@group(0) @binding(0) var<uniform> params: Params;\n\
+@group(0) @binding(1) var<storage, read> keys: array<vec2<u32>>;\n\
+@group(0) @binding(2) var<storage, read_write> coords: array<vec4<u32>>;\n\
+@compute @workgroup_size(64)\n\
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+    let i = gid.x;\n\
+    if (i >= params.count) { return; }\n\
+    let d = prism_hilbert_decode3(keys[i]);\n\
+    coords[i] = vec4<u32>(d.x, d.y, d.z, 0u);\n\
+}\n";
+
 /// Uniform block carrying the valid element count for the batch bounds check.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -92,6 +127,8 @@ pub struct GpuHilbert {
     layout: BindGroupLayout,
     encode2: ComputePipeline,
     decode2: ComputePipeline,
+    encode3: ComputePipeline,
+    decode3: ComputePipeline,
 }
 
 impl GpuHilbert {
@@ -134,9 +171,9 @@ impl GpuHilbert {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let build = |label: &str, wrapper: &str| -> ComputePipeline {
+        let build = |label: &str, fragment: &str, wrapper: &str| -> ComputePipeline {
             let mut source = String::new();
-            source.push_str(WGSL_HILBERT2);
+            source.push_str(fragment);
             source.push('\n');
             source.push_str(wrapper);
             let module = device.create_shader_module(ShaderModuleDescriptor {
@@ -153,8 +190,10 @@ impl GpuHilbert {
             })
         };
         GpuHilbert {
-            encode2: build("prism_math_hilbert_encode2", WRAP_ENCODE2),
-            decode2: build("prism_math_hilbert_decode2", WRAP_DECODE2),
+            encode2: build("prism_math_hilbert_encode2", WGSL_HILBERT2, WRAP_ENCODE2),
+            decode2: build("prism_math_hilbert_decode2", WGSL_HILBERT2, WRAP_DECODE2),
+            encode3: build("prism_math_hilbert_encode3", WGSL_HILBERT3, WRAP_ENCODE3),
+            decode3: build("prism_math_hilbert_decode3", WGSL_HILBERT3, WRAP_DECODE3),
             layout,
         }
     }
@@ -174,6 +213,25 @@ impl GpuHilbert {
         self.run_decode(ctx, &self.decode2, keys)
             .into_iter()
             .map(|c| [c[0], c[1]])
+            .collect()
+    }
+
+    /// Batch-encodes `(x, y, z)` lattice points into 3D Hilbert keys
+    /// (`vec2<u32>(lo, hi)`) on the device, mirroring
+    /// [`prism_math::spatial::hilbert_encode3`] bit-for-bit at 21 bits per axis.
+    #[must_use]
+    pub fn encode3(&self, ctx: &GpuContext, coords: &[[u32; 3]]) -> Vec<[u32; 2]> {
+        let padded: Vec<[u32; 4]> = coords.iter().map(|c| [c[0], c[1], c[2], 0]).collect();
+        self.run_encode3(ctx, &self.encode3, &padded)
+    }
+
+    /// Batch-decodes 3D Hilbert keys back into `(x, y, z)` lattice points,
+    /// mirroring [`prism_math::spatial::hilbert_decode3`].
+    #[must_use]
+    pub fn decode3(&self, ctx: &GpuContext, keys: &[[u32; 2]]) -> Vec<[u32; 3]> {
+        self.run_decode3(ctx, &self.decode3, keys)
+            .into_iter()
+            .map(|c| [c[0], c[1], c[2]])
             .collect()
     }
 
@@ -229,6 +287,64 @@ impl GpuHilbert {
         });
         dispatch(&mut enc, pipeline, &bind_group, n);
         let stage = buffer::staging(device, "prism_math_hilbert_stage", out_bytes);
+        buffer::copy(&mut enc, &out_buf, &stage, out_bytes);
+        ctx.queue().submit([enc.finish()]);
+
+        buffer::read_back::<[u32; 4]>(ctx, &stage)
+    }
+
+    /// Uploads a `vec4<u32>` coordinate batch, dispatches `pipeline`, and reads
+    /// back one `vec2<u32>` `(lo, hi)` 3D key per input.
+    fn run_encode3(
+        &self,
+        ctx: &GpuContext,
+        pipeline: &ComputePipeline,
+        coords: &[[u32; 4]],
+    ) -> Vec<[u32; 2]> {
+        let n = coords.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let device = ctx.device();
+        let in_buf = buffer::storage_read(device, "prism_math_hilbert3_in", coords);
+        let out_bytes = (n * size_of::<[u32; 2]>()) as u64;
+        let out_buf = buffer::storage_rw_zeroed(device, "prism_math_hilbert3_out", out_bytes);
+        let bind_group = self.bind(device, n, &in_buf, &out_buf);
+
+        let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_math_hilbert3_encode_encoder"),
+        });
+        dispatch(&mut enc, pipeline, &bind_group, n);
+        let stage = buffer::staging(device, "prism_math_hilbert3_stage", out_bytes);
+        buffer::copy(&mut enc, &out_buf, &stage, out_bytes);
+        ctx.queue().submit([enc.finish()]);
+
+        buffer::read_back::<[u32; 2]>(ctx, &stage)
+    }
+
+    /// Uploads a `vec2<u32>` 3D-key batch, dispatches `pipeline`, and reads back
+    /// one `vec4<u32>` coordinate per input.
+    fn run_decode3(
+        &self,
+        ctx: &GpuContext,
+        pipeline: &ComputePipeline,
+        keys: &[[u32; 2]],
+    ) -> Vec<[u32; 4]> {
+        let n = keys.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        let device = ctx.device();
+        let in_buf = buffer::storage_read(device, "prism_math_hilbert3_in", keys);
+        let out_bytes = (n * size_of::<[u32; 4]>()) as u64;
+        let out_buf = buffer::storage_rw_zeroed(device, "prism_math_hilbert3_out", out_bytes);
+        let bind_group = self.bind(device, n, &in_buf, &out_buf);
+
+        let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("prism_math_hilbert3_decode_encoder"),
+        });
+        dispatch(&mut enc, pipeline, &bind_group, n);
+        let stage = buffer::staging(device, "prism_math_hilbert3_stage", out_bytes);
         buffer::copy(&mut enc, &out_buf, &stage, out_bytes);
         ctx.queue().submit([enc.finish()]);
 
@@ -304,8 +420,15 @@ mod parse_gate {
         for (label, wrapper) in [
             ("encode2", super::WRAP_ENCODE2),
             ("decode2", super::WRAP_DECODE2),
+            ("encode3", super::WRAP_ENCODE3),
+            ("decode3", super::WRAP_DECODE3),
         ] {
-            let src = alloc::format!("{}\n{}", super::WGSL_HILBERT2, wrapper);
+            let fragment = if label.ends_with('3') {
+                super::WGSL_HILBERT3
+            } else {
+                super::WGSL_HILBERT2
+            };
+            let src = alloc::format!("{fragment}\n{wrapper}");
             if let Err(err) = wgpu::naga::front::wgsl::parse_str(&src) {
                 panic!("hilbert `{label}` failed to parse: {err}\n--- source ---\n{src}");
             }

@@ -16,12 +16,12 @@ use wgpu::naga::valid::{Capabilities, ValidationFlags, Validator};
 
 use prism_math::shader_mirror::{
     WGSL_AABB_OPS, WGSL_DUAL, WGSL_DUAL_QUAT_ALG, WGSL_DUAL_QUAT_SKIN, WGSL_EASING, WGSL_F16,
-    WGSL_FRACTAL, WGSL_FRUSTUM_CULL, WGSL_HILBERT2, WGSL_HSL, WGSL_I16F16, WGSL_INTERVAL,
-    WGSL_LOOK_AT_RH, WGSL_MORTON, WGSL_OCTAHEDRAL, WGSL_OKLAB, WGSL_OVERLAP, WGSL_PACK16,
-    WGSL_PACK8, WGSL_PCG32, WGSL_PERLIN, WGSL_PLANE, WGSL_PROJECTION_RH, WGSL_QUAT_ALG,
-    WGSL_QUAT_INTERP, WGSL_QUAT_ROTATE, WGSL_RAYCAST, WGSL_RAYTRI, WGSL_SEGMENT, WGSL_SH3_EVAL,
-    WGSL_SH_COSINE, WGSL_SIMPLEX, WGSL_SPLINE, WGSL_SPLITMIX64, WGSL_SRGB, WGSL_SURFACE,
-    WGSL_TEMPERATURE, WGSL_U64, WGSL_XOSHIRO256SS, WGSL_XYZ,
+    WGSL_FRACTAL, WGSL_FRUSTUM_CULL, WGSL_HILBERT2, WGSL_HILBERT3, WGSL_HSL, WGSL_I16F16,
+    WGSL_INTERVAL, WGSL_LOOK_AT_RH, WGSL_MORTON, WGSL_OCTAHEDRAL, WGSL_OKLAB, WGSL_OVERLAP,
+    WGSL_PACK16, WGSL_PACK8, WGSL_PCG32, WGSL_PERLIN, WGSL_PLANE, WGSL_PROJECTION_RH,
+    WGSL_QUAT_ALG, WGSL_QUAT_INTERP, WGSL_QUAT_ROTATE, WGSL_RAYCAST, WGSL_RAYTRI, WGSL_SEGMENT,
+    WGSL_SH3_EVAL, WGSL_SH_COSINE, WGSL_SIMPLEX, WGSL_SPLINE, WGSL_SPLITMIX64, WGSL_SRGB,
+    WGSL_SURFACE, WGSL_TEMPERATURE, WGSL_U64, WGSL_XOSHIRO256SS, WGSL_XYZ,
 };
 
 /// The two-line base-noise forwarding alias the fractal host prepends (inlined
@@ -70,6 +70,7 @@ fn composed_sources() -> Vec<(&'static str, String)> {
         ("octahedral", WGSL_OCTAHEDRAL.into()),
         ("morton", WGSL_MORTON.into()),
         ("hilbert2", WGSL_HILBERT2.into()),
+        ("hilbert3", WGSL_HILBERT3.into()),
         ("f16", WGSL_F16.into()),
         ("srgb", WGSL_SRGB.into()),
         ("pack8", WGSL_PACK8.into()),
@@ -97,7 +98,7 @@ fn composed_sources() -> Vec<(&'static str, String)> {
 #[test]
 fn every_fragment_parses_on_the_pinned_naga() {
     let sources = composed_sources();
-    assert_eq!(sources.len(), 40, "update the count when adding a fragment");
+    assert_eq!(sources.len(), 41, "update the count when adding a fragment");
     for (label, source) in sources {
         match wgpu::naga::front::wgsl::parse_str(&source) {
             Err(err) => {
