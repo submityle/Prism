@@ -243,8 +243,13 @@ impl Fixed {
     /// Round to the nearest integer (ties toward `+∞`).
     #[inline]
     pub const fn round(self) -> Self {
+        // Widen before adding the half-unit: saturating the intermediate raw
+        // value first can round MAX down to the previous integer instead of
+        // rounding then saturating the unrepresentable integer result.
+        let rounded =
+            ((self.raw as i128) + (Self::ONE_BITS as i128 >> 1)) & !((Self::ONE_BITS as i128) - 1);
         Self {
-            raw: (self.raw.saturating_add(Self::ONE_BITS >> 1)) & !(Self::ONE_BITS - 1),
+            raw: saturate_i128(rounded),
         }
     }
 
@@ -533,5 +538,34 @@ impl From<i32> for Fixed {
     #[inline]
     fn from(n: i32) -> Self {
         Self::from_int(n as i64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Fixed;
+
+    #[test]
+    fn round_saturates_after_rounding_at_positive_limit() {
+        assert_eq!(Fixed::MAX.round(), Fixed::MAX);
+        assert_eq!(
+            Fixed::from_bits(i64::MAX - (Fixed::ONE_BITS / 2) + 1).round(),
+            Fixed::MAX
+        );
+        assert_eq!(
+            Fixed::from_bits(i64::MAX - (Fixed::ONE_BITS / 2)).round(),
+            Fixed::from_int(i32::MAX as i64)
+        );
+    }
+
+    #[test]
+    fn round_ties_toward_positive_infinity_on_both_signs() {
+        let half = Fixed::ONE_BITS / 2;
+        assert_eq!(Fixed::from_bits(half).round(), Fixed::ONE);
+        assert_eq!(Fixed::from_bits(-half).round(), Fixed::ZERO);
+        assert_eq!(
+            Fixed::from_bits(-Fixed::ONE_BITS - half).round(),
+            Fixed::from_int(-1)
+        );
     }
 }

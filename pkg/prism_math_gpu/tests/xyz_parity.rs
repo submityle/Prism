@@ -152,3 +152,53 @@ fn empty_batch_is_empty() {
     assert!(kernel.linear_to_xyz(&ctx, &[]).is_empty());
     assert!(kernel.xyz_to_linear(&ctx, &[]).is_empty());
 }
+
+#[test]
+fn linear_to_xyz_covers_workgroup_boundaries_and_extended_values() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let kernel = GpuXyz::new(&ctx);
+
+    // Exercise both partial and exact workgroups, especially the final lane of
+    // a partial group where off-by-one dispatch/readback errors tend to hide.
+    for count in [1, 63, 64, 65] {
+        let mut src = vec![[0.0; 4]; count];
+        for (i, value) in src.iter_mut().enumerate() {
+            let x = i as f32;
+            *value = [
+                x * 0.125 - 2.0,
+                1.0 - x * 0.0625,
+                x * 0.25,
+                (i % 7) as f32 / 6.0,
+            ];
+        }
+        // Include negative and HDR linear-light components, which are valid
+        // inputs to the matrix conversion even though they are outside the
+        // display-referred [0, 1] range.
+        src[0] = [-4.0, 0.0, 12.0, -0.5];
+        if count > 1 {
+            src[count - 1] = [16.0, -8.0, 0.5, 1.5];
+        }
+
+        let gpu = kernel.linear_to_xyz(&ctx, &src);
+        assert_eq!(gpu.len(), count, "readback count at batch size {count}");
+        for (i, (&input, &actual)) in src.iter().zip(&gpu).enumerate() {
+            let expected = LinearRgba::new(input[0], input[1], input[2], input[3])
+                .to_xyz()
+                .to_array();
+            for lane in 0..3 {
+                assert!(
+                    close(actual[lane], expected[lane], 1.0e-5),
+                    "boundary batch {count}, item {i}, lane {lane}: gpu {} cpu {} input {input:?}",
+                    actual[lane],
+                    expected[lane]
+                );
+            }
+            assert_eq!(
+                actual[3], expected[3],
+                "alpha readback mismatch at batch {count}, item {i}"
+            );
+        }
+    }
+}

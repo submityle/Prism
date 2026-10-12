@@ -48,14 +48,14 @@ impl Containment {
 /// Works for any (non-zero) ray direction length; the returned normal points
 /// outward from the sphere, flipped if the ray starts inside.
 pub fn ray_sphere(ray: Ray3, sphere: BoundingSphere) -> Option<RayHit> {
-    // A point (zero-radius) sphere has no well-defined surface normal (CR-found:
-    // the `1/radius` below produced a NaN normal). Reject it.
-    if sphere.radius == 0.0 {
+    // A point sphere has no unique surface normal. Public fields also allow
+    // malformed values, which must not turn a miss into a NaN hit.
+    if !valid_ray(ray) || !sphere.is_finite() || sphere.radius == 0.0 {
         return None;
     }
     let oc = ray.origin - sphere.center;
     let a = ray.direction.dot(ray.direction);
-    if a <= 0.0 {
+    if a <= 0.0 || !a.is_finite() {
         return None;
     }
     let b = 2.0 * oc.dot(ray.direction);
@@ -81,7 +81,7 @@ pub fn ray_sphere(ray: Ray3, sphere: BoundingSphere) -> Option<RayHit> {
     if inside {
         normal = -normal;
     }
-    Some(RayHit { t, point, normal })
+    valid_hit(RayHit { t, point, normal })
 }
 
 /// Intersect a ray with an axis-aligned box using the slab method.
@@ -89,6 +89,9 @@ pub fn ray_sphere(ray: Ray3, sphere: BoundingSphere) -> Option<RayHit> {
 /// Returns the entry hit (or the exit hit when the origin is inside). The
 /// normal is axis-aligned and points against the ray.
 pub fn ray_aabb(ray: Ray3, aabb: Aabb3) -> Option<RayHit> {
+    if !valid_ray(ray) || !valid_aabb(aabb) {
+        return None;
+    }
     let origin = [ray.origin.x, ray.origin.y, ray.origin.z];
     let dir = [ray.direction.x, ray.direction.y, ray.direction.z];
     let lo = [aabb.min.x, aabb.min.y, aabb.min.z];
@@ -96,7 +99,7 @@ pub fn ray_aabb(ray: Ray3, aabb: Aabb3) -> Option<RayHit> {
 
     // A zero-length direction has no valid intersection (CR-found: the
     // all-parallel branch produced `t = inf` and a NaN hit point).
-    if ray.direction.length_squared() == 0.0 {
+    if ray.direction.x == 0.0 && ray.direction.y == 0.0 && ray.direction.z == 0.0 {
         return None;
     }
 
@@ -106,7 +109,7 @@ pub fn ray_aabb(ray: Ray3, aabb: Aabb3) -> Option<RayHit> {
     let mut enter_sign = 1.0f32;
 
     for axis in 0..3 {
-        if mf::abs(dir[axis]) <= 1.0e-20 {
+        if dir[axis] == 0.0 {
             // Ray is parallel to this slab: miss if the origin is outside it.
             if origin[axis] < lo[axis] || origin[axis] > hi[axis] {
                 return None;
@@ -145,7 +148,7 @@ pub fn ray_aabb(ray: Ray3, aabb: Aabb3) -> Option<RayHit> {
         let mut exit_t = f32::INFINITY;
         let mut exit_sign = 1.0f32;
         for axis in 0..3 {
-            if mf::abs(dir[axis]) <= 1.0e-20 {
+            if dir[axis] == 0.0 {
                 continue;
             }
             let inv = 1.0 / dir[axis];
@@ -167,7 +170,7 @@ pub fn ray_aabb(ray: Ray3, aabb: Aabb3) -> Option<RayHit> {
         1 => normal.y = sign,
         _ => normal.z = sign,
     }
-    Some(RayHit {
+    valid_hit(RayHit {
         t,
         point: ray.at(t),
         normal,
@@ -179,8 +182,11 @@ pub fn ray_aabb(ray: Ray3, aabb: Aabb3) -> Option<RayHit> {
 /// Returns [`None`] when the ray is parallel to the plane. The normal is
 /// oriented against the ray direction.
 pub fn ray_plane(ray: Ray3, plane: Plane) -> Option<RayHit> {
+    if !valid_ray(ray) || !plane.is_finite() {
+        return None;
+    }
     let denom = plane.normal.dot(ray.direction);
-    if mf::abs(denom) <= 1.0e-20 {
+    if denom == 0.0 || !denom.is_finite() {
         return None;
     }
     let t = -plane.signed_distance(ray.origin) / denom;
@@ -191,8 +197,9 @@ pub fn ray_plane(ray: Ray3, plane: Plane) -> Option<RayHit> {
         -plane.normal
     } else {
         plane.normal
-    };
-    Some(RayHit {
+    }
+    .normalize();
+    valid_hit(RayHit {
         t,
         point: ray.at(t),
         normal,
@@ -206,12 +213,17 @@ pub fn ray_plane(ray: Ray3, plane: Plane) -> Option<RayHit> {
 /// is `1 - u - v`. Returns [`None`] on a miss, a back-parallel ray, or a
 /// degenerate triangle. Both faces are considered hittable.
 pub fn ray_triangle_bary(ray: Ray3, a: Vec3, b: Vec3, c: Vec3) -> Option<(f32, f32, f32)> {
-    const EPS: f32 = 1.0e-8;
+    if !valid_ray(ray) || !a.is_finite() || !b.is_finite() || !c.is_finite() {
+        return None;
+    }
     let edge1 = b - a;
     let edge2 = c - a;
     let pvec = ray.direction.cross(edge2);
     let det = edge1.dot(pvec);
-    if mf::abs(det) < EPS {
+    // An absolute epsilon incorrectly rejects small triangles and rays with
+    // small direction magnitudes. The determinant is scale-dependent; only
+    // an exactly parallel/degenerate configuration is certainly singular.
+    if det == 0.0 || !det.is_finite() {
         return None;
     }
     let inv_det = 1.0 / det;
@@ -229,7 +241,11 @@ pub fn ray_triangle_bary(ray: Ray3, a: Vec3, b: Vec3, c: Vec3) -> Option<(f32, f
     if t < 0.0 {
         return None;
     }
-    Some((t, u, v))
+    if t.is_finite() && u.is_finite() && v.is_finite() {
+        Some((t, u, v))
+    } else {
+        None
+    }
 }
 
 /// Intersect a ray with a triangle, returning a [`RayHit`] with a geometric
@@ -240,7 +256,7 @@ pub fn ray_triangle(ray: Ray3, a: Vec3, b: Vec3, c: Vec3) -> Option<RayHit> {
     if normal.dot(ray.direction) > 0.0 {
         normal = -normal;
     }
-    Some(RayHit {
+    valid_hit(RayHit {
         t,
         point: ray.at(t),
         normal,
@@ -250,6 +266,9 @@ pub fn ray_triangle(ray: Ray3, a: Vec3, b: Vec3, c: Vec3) -> Option<RayHit> {
 /// True if two axis-aligned boxes overlap (touching counts as overlap).
 #[inline]
 pub fn aabb_aabb(a: Aabb3, b: Aabb3) -> bool {
+    if !valid_aabb(a) || !valid_aabb(b) {
+        return false;
+    }
     a.min.x <= b.max.x
         && a.max.x >= b.min.x
         && a.min.y <= b.max.y
@@ -261,6 +280,9 @@ pub fn aabb_aabb(a: Aabb3, b: Aabb3) -> bool {
 /// True if two spheres overlap (touching counts as overlap).
 #[inline]
 pub fn sphere_sphere(a: BoundingSphere, b: BoundingSphere) -> bool {
+    if !a.is_finite() || !b.is_finite() {
+        return false;
+    }
     let r = a.radius + b.radius;
     (a.center - b.center).length_squared() <= r * r
 }
@@ -268,11 +290,17 @@ pub fn sphere_sphere(a: BoundingSphere, b: BoundingSphere) -> bool {
 /// True if a sphere overlaps an axis-aligned box.
 #[inline]
 pub fn sphere_aabb(sphere: BoundingSphere, aabb: Aabb3) -> bool {
+    if !sphere.is_finite() || !valid_aabb(aabb) {
+        return false;
+    }
     aabb.distance_squared(sphere.center) <= sphere.radius * sphere.radius
 }
 
 /// Classify a sphere against a frustum for culling.
 pub fn frustum_sphere(frustum: &Frustum, sphere: BoundingSphere) -> Containment {
+    if !sphere.is_finite() || frustum.planes.iter().any(|p| !p.is_finite()) {
+        return Containment::Outside;
+    }
     let mut result = Containment::Inside;
     for plane in &frustum.planes {
         let dist = plane.signed_distance(sphere.center);
@@ -289,6 +317,9 @@ pub fn frustum_sphere(frustum: &Frustum, sphere: BoundingSphere) -> Containment 
 /// Classify an axis-aligned box against a frustum for culling using the
 /// positive/negative vertex ("p-vertex / n-vertex") test.
 pub fn frustum_aabb(frustum: &Frustum, aabb: Aabb3) -> Containment {
+    if !valid_aabb(aabb) || frustum.planes.iter().any(|p| !p.is_finite()) {
+        return Containment::Outside;
+    }
     let center = aabb.center();
     let extent = aabb.half_extents();
     let mut result = Containment::Inside;
@@ -306,6 +337,25 @@ pub fn frustum_aabb(frustum: &Frustum, aabb: Aabb3) -> Containment {
         }
     }
     result
+}
+
+#[inline]
+fn valid_ray(ray: Ray3) -> bool {
+    ray.origin.is_finite() && ray.direction.is_finite()
+}
+
+#[inline]
+fn valid_aabb(aabb: Aabb3) -> bool {
+    aabb.min.is_finite()
+        && aabb.max.is_finite()
+        && aabb.min.x <= aabb.max.x
+        && aabb.min.y <= aabb.max.y
+        && aabb.min.z <= aabb.max.z
+}
+
+#[inline]
+fn valid_hit(hit: RayHit) -> Option<RayHit> {
+    (hit.t.is_finite() && hit.point.is_finite() && hit.normal.is_finite()).then_some(hit)
 }
 
 /// Convenience: true if `aabb` is at least partially inside `frustum`.

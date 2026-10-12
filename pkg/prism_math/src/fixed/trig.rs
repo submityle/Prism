@@ -63,6 +63,14 @@ fn fold_to_half_pi(x: Fixed) -> Fixed {
     Fixed::from_bits(r)
 }
 
+/// Reduce first, then shift by a bounded amount. Shifting an unreduced `x`
+/// with saturating addition would change the phase for inputs near `MIN/MAX`.
+#[inline]
+fn fold_cos_to_half_pi(x: Fixed) -> Fixed {
+    let reduced = x.to_bits() % Fixed::TAU.to_bits();
+    fold_to_half_pi(Fixed::from_bits(reduced + Fixed::FRAC_PI_2.to_bits()))
+}
+
 impl Fixed {
     /// Sine of an angle in radians.
     #[inline]
@@ -73,8 +81,9 @@ impl Fixed {
     /// Cosine of an angle in radians.
     #[inline]
     pub fn cos(self) -> Self {
-        // cos(x) = sin(x + π/2); fold the shifted angle.
-        sin_core(fold_to_half_pi(self.saturating_add(Self::FRAC_PI_2)))
+        // cos(x) = sin(x + π/2). Reduce before adding so extreme raw values
+        // cannot saturate and lose their periodic phase.
+        sin_core(fold_cos_to_half_pi(self))
     }
 
     /// Sine and cosine together.
@@ -99,13 +108,15 @@ impl Fixed {
         if x.is_zero() && y.is_zero() {
             return Self::ZERO;
         }
-        let ax = x.abs();
-        let ay = y.abs();
+        // Unsigned magnitudes represent |i64::MIN| exactly (it is one raw
+        // unit larger than Fixed::MAX), unlike Fixed::abs(), which saturates.
+        let ax = x.to_bits().unsigned_abs();
+        let ay = y.to_bits().unsigned_abs();
         // First-octant angle in [0, π/2].
         let a = if ax >= ay {
-            atan_unit(ay.saturating_div(ax))
+            atan_unit(Fixed::from_bits(ratio_q32(ay, ax)))
         } else {
-            Self::FRAC_PI_2.saturating_sub(atan_unit(ax.saturating_div(ay)))
+            Self::FRAC_PI_2.saturating_sub(atan_unit(Fixed::from_bits(ratio_q32(ax, ay))))
         };
         // Place into the correct quadrant from the signs of x and y.
         let a = if x.is_negative() {
@@ -121,6 +132,13 @@ impl Fixed {
     }
 }
 
+/// Return `(numerator / denominator)` as a Q32.32 raw ratio, rounded down.
+/// Preconditions: denominator > 0 and numerator <= denominator.
+#[inline]
+fn ratio_q32(numerator: u64, denominator: u64) -> i64 {
+    (((numerator as u128) << 32) / denominator as u128) as i64
+}
+
 /// `atan(z)` for `z ∈ [0, 1]` via an odd minimax polynomial.
 #[inline]
 fn atan_unit(z: Fixed) -> Fixed {
@@ -132,4 +150,42 @@ fn atan_unit(z: Fixed) -> Fixed {
     acc = ATAN_C1.saturating_add(z2.saturating_mul(acc));
     acc = ATAN_C0.saturating_add(z2.saturating_mul(acc));
     z.saturating_mul(acc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cosine_of_extreme_raw_angles_preserves_phase_shift() {
+        for raw in [i64::MIN, i64::MIN + 1, i64::MAX - 1, i64::MAX] {
+            let angle = Fixed::from_bits(raw);
+            let reduced = raw % Fixed::TAU.to_bits();
+            let expected = sin_core(fold_to_half_pi(Fixed::from_bits(
+                reduced + Fixed::FRAC_PI_2.to_bits(),
+            )));
+            assert_eq!(angle.cos(), expected, "raw angle {raw}");
+        }
+        assert_ne!(Fixed::MAX.cos(), Fixed::MAX.sin());
+    }
+
+    #[test]
+    fn atan2_uses_exact_minimum_magnitude() {
+        let diagonal = Fixed::from_bits(i64::MIN).atan2(Fixed::from_bits(i64::MIN));
+        assert_eq!(diagonal, Fixed::NEG_ONE.atan2(Fixed::NEG_ONE));
+
+        let near_diagonal = Fixed::from_bits(i64::MIN + 1).atan2(Fixed::from_bits(i64::MIN));
+        assert_ne!(near_diagonal, diagonal);
+        assert!(near_diagonal.to_bits().abs_diff(diagonal.to_bits()) <= 2);
+        assert_ne!(
+            Fixed::MAX.atan2(Fixed::from_bits(i64::MIN)),
+            diagonal,
+            "MIN and MAX magnitudes must not collapse to the same ratio"
+        );
+        assert_eq!(
+            Fixed::from_bits(i64::MIN).atan2(Fixed::ZERO),
+            -Fixed::FRAC_PI_2
+        );
+        assert_eq!(Fixed::ZERO.atan2(Fixed::from_bits(i64::MIN)), Fixed::PI);
+    }
 }

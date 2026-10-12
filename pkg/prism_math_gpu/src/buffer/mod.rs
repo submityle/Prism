@@ -14,6 +14,7 @@
 //! code.
 
 use bytemuck::Pod;
+use std::sync::mpsc;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Device, MapMode};
 
@@ -79,12 +80,31 @@ pub fn copy(encoder: &mut CommandEncoder, source: &Buffer, staging: &Buffer, len
 /// indicate the submitted copy never completed.
 #[must_use]
 pub fn read_back<T: Pod>(ctx: &GpuContext, staging: &Buffer) -> Vec<T> {
-    staging.slice(..).map_async(MapMode::Read, |_| {});
+    let (mapped_tx, mapped_rx) = mpsc::channel();
+    staging.slice(..).map_async(MapMode::Read, move |result| {
+        let _ = mapped_tx.send(result);
+    });
     ctx.wait();
+    mapped_rx
+        .recv()
+        .expect("GPU readback map callback should run after device poll")
+        .unwrap_or_else(|err| panic!("GPU readback map failed: {err}"));
     let view = staging
         .slice(..)
         .get_mapped_range()
-        .expect("mapped readback range should be available after poll");
+        .unwrap_or_else(|err| panic!("GPU readback mapped range unavailable: {err}"));
+    assert_ne!(
+        size_of::<T>(),
+        0,
+        "GPU readback element type must not be zero-sized"
+    );
+    assert_eq!(
+        view.len() % size_of::<T>(),
+        0,
+        "GPU readback byte length {} is not a multiple of element size {}",
+        view.len(),
+        size_of::<T>()
+    );
     let values = bytemuck::cast_slice::<u8, T>(&view).to_vec();
     drop(view);
     staging.unmap();

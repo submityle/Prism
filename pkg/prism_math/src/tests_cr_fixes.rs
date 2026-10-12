@@ -7,7 +7,9 @@ use crate::geom::frustum::Frustum;
 use crate::geom::plane::Plane;
 use crate::geom::ray::Ray3;
 use crate::geom::sphere::BoundingSphere;
-use crate::intersect::{ray_aabb, ray_sphere};
+use crate::intersect::{
+    aabb_aabb, ray_aabb, ray_plane, ray_sphere, ray_triangle_bary, sphere_aabb, sphere_sphere,
+};
 use crate::projection::perspective_infinite_rh;
 use crate::quat::Quat;
 use crate::vec::Vec3;
@@ -104,4 +106,68 @@ fn degenerate_rays_are_rejected() {
         BoundingSphere::new(Vec3::ZERO, 0.0),
     )
     .is_none());
+}
+
+#[test]
+fn intersections_preserve_small_nonzero_scale() {
+    let bounds = Aabb3::new(-Vec3::ONE, Vec3::ONE);
+    let ray = Ray3::new(Vec3::new(-2.0, 0.0, 0.0), Vec3::new(1.0e-21, 0.0, 0.0));
+    let hit = ray_aabb(ray, bounds).expect("small but non-zero direction intersects");
+    assert!((hit.t - 1.0e21).abs() < 1.0e15);
+    assert_eq!(hit.point, Vec3::new(-1.0, 0.0, 0.0));
+    assert_eq!(hit.normal, Vec3::NEG_X);
+
+    let a = Vec3::ZERO;
+    let b = Vec3::new(1.0e-5, 0.0, 0.0);
+    let c = Vec3::new(0.0, 1.0e-5, 0.0);
+    let ray = Ray3::new(
+        Vec3::new(2.0e-6, 3.0e-6, -1.0e-5),
+        Vec3::new(0.0, 0.0, 1.0e-5),
+    );
+    let (t, u, v) = ray_triangle_bary(ray, a, b, c).expect("small triangle hit");
+    assert!((t - 1.0).abs() < 1.0e-5);
+    assert!((u - 0.2).abs() < 1.0e-5);
+    assert!((v - 0.3).abs() < 1.0e-5);
+}
+
+#[test]
+fn invalid_public_geometry_inputs_fail_closed() {
+    let ray = Ray3::new(Vec3::ZERO, Vec3::X);
+    let nan = f32::NAN;
+    let invalid_box = Aabb3 {
+        min: Vec3::ZERO,
+        max: Vec3::new(nan, 1.0, 1.0),
+    };
+    assert!(ray_aabb(ray, invalid_box).is_none());
+    assert!(!aabb_aabb(invalid_box, Aabb3::new(Vec3::ZERO, Vec3::ONE)));
+
+    let invalid_sphere = BoundingSphere::new(Vec3::ZERO, -1.0);
+    assert!(ray_sphere(ray, invalid_sphere).is_none());
+    assert!(!sphere_sphere(
+        invalid_sphere,
+        BoundingSphere::new(Vec3::ZERO, 1.0)
+    ));
+    assert!(!sphere_aabb(
+        invalid_sphere,
+        Aabb3::new(-Vec3::ONE, Vec3::ONE)
+    ));
+
+    let invalid_plane = Plane::new(Vec3::new(nan, 0.0, 0.0), 0.0);
+    assert!(ray_plane(ray, invalid_plane).is_none());
+}
+
+#[test]
+fn zero_normal_plane_has_no_ray_intersection() {
+    let plane = Plane::new(Vec3::ZERO, 0.0);
+    assert!(ray_plane(Ray3::new(Vec3::ZERO, Vec3::X), plane).is_none());
+}
+
+#[test]
+fn ray_plane_returns_unit_normal_for_raw_plane_coefficients() {
+    let plane = Plane::new(Vec3::new(0.0, 3.0, 0.0), -6.0);
+    let ray = Ray3::new(Vec3::new(0.0, 0.0, 0.0), Vec3::Y);
+    let hit = ray_plane(ray, plane).expect("plane hit");
+    assert_eq!(hit.t, 2.0);
+    assert_eq!(hit.point, Vec3::new(0.0, 2.0, 0.0));
+    assert_eq!(hit.normal, Vec3::NEG_Y);
 }

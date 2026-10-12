@@ -19,6 +19,21 @@ use wgpu::{
     InstanceFlags, PollType, Queue, RequestAdapterOptions,
 };
 
+/// When set to a non-empty value other than `0`, adapter/device acquisition
+/// failures become hard errors. GPU CI should set this to prevent a green run
+/// that only exercised the device-free parse tests.
+const REQUIRE_GPU_ENV: &str = "PRISM_MATH_GPU_REQUIRED";
+/// When set, prints the selected adapter name, backend, and device type.
+const GPU_DIAGNOSTICS_ENV: &str = "PRISM_MATH_GPU_DIAGNOSTICS";
+
+fn env_flag(name: &str) -> bool {
+    flag_value(std::env::var_os(name))
+}
+
+fn flag_value(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some_and(|value| value != "0" && !value.is_empty())
+}
+
 /// Blocks the current thread until `future` resolves.
 ///
 /// A thin re-export of [`futures_lite::future::block_on`] so callers do not
@@ -48,6 +63,10 @@ impl GpuContext {
     /// Returns [`None`] when no adapter or device can be obtained so callers can
     /// skip `GPU` work instead of panicking on a host without a usable adapter.
     #[must_use]
+    #[expect(
+        clippy::print_stderr,
+        reason = "opt-in adapter diagnostics are intentionally written to stderr"
+    )]
     pub fn try_headless() -> Option<GpuContext> {
         let instance = Instance::new(InstanceDescriptor {
             backends: Backends::METAL | Backends::VULKAN | Backends::DX12,
@@ -56,12 +75,39 @@ impl GpuContext {
             display: None,
             backend_options: BackendOptions::default(),
         });
-        let adapter = block_on(instance.request_adapter(&RequestAdapterOptions::default())).ok()?;
-        let (device, queue) = block_on(adapter.request_device(&DeviceDescriptor {
+        let required = env_flag(REQUIRE_GPU_ENV);
+        let adapter = match block_on(instance.request_adapter(&RequestAdapterOptions::default())) {
+            Ok(adapter) => adapter,
+            Err(err) => {
+                if required {
+                    panic!("{REQUIRE_GPU_ENV} is enabled, but no GPU adapter is available: {err}");
+                }
+                return None;
+            }
+        };
+        let info = adapter.get_info();
+        let (device, queue) = match block_on(adapter.request_device(&DeviceDescriptor {
             required_limits: adapter.limits(),
             ..Default::default()
-        }))
-        .ok()?;
+        })) {
+            Ok(device_queue) => device_queue,
+            Err(err) => {
+                if required {
+                    panic!(
+                        "{REQUIRE_GPU_ENV} is enabled, but requesting a device from {} ({:?}) failed: {err}",
+                        info.name,
+                        info.backend
+                    );
+                }
+                return None;
+            }
+        };
+        if env_flag(GPU_DIAGNOSTICS_ENV) {
+            eprintln!(
+                "prism_math_gpu selected adapter: {} ({:?}, {:?})",
+                info.name, info.backend, info.device_type
+            );
+        }
         Some(GpuContext {
             instance,
             adapter,
@@ -92,5 +138,17 @@ impl GpuContext {
         self.device
             .poll(PollType::wait_indefinitely())
             .expect("device poll should complete the submitted work");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn env_flag_accepts_nonzero_values_only() {
+        assert!(!super::flag_value(None));
+        assert!(!super::flag_value(Some("".into())));
+        assert!(!super::flag_value(Some("0".into())));
+        assert!(super::flag_value(Some("1".into())));
+        assert!(super::flag_value(Some("true".into())));
     }
 }
