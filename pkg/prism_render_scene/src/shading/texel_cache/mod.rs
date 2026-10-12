@@ -19,7 +19,7 @@ pub use residency::{
 };
 pub use store::{
     ShadeFrameToken, ShadePageHandle, ShadePageStore, ShadePageWrite, ShadeStoreError,
-    ShadeStoreLookup,
+    ShadeStoreLookup, ShadeSubmission,
 };
 
 #[cfg(test)]
@@ -198,7 +198,8 @@ mod tests {
         let page = key(0, 0);
         let first_frame = store.begin_frame(3).unwrap();
         let first = store.begin_write(first_frame, page, 1).unwrap();
-        store.commit_write(first).unwrap();
+        let first_submission = store.submit_write(first).unwrap();
+        store.complete_write(first_submission).unwrap();
         assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Fallback);
         store.publish(first_frame).unwrap();
         let old = match store.lookup(page, 3) {
@@ -208,7 +209,8 @@ mod tests {
 
         let second_frame = store.begin_frame(3).unwrap();
         let second = store.begin_write(second_frame, page, 2).unwrap();
-        store.commit_write(second).unwrap();
+        let second_submission = store.submit_write(second).unwrap();
+        store.complete_write(second_submission).unwrap();
         assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Ready(old));
         assert_eq!(store.lookup(page, 4), ShadeStoreLookup::Fallback);
         store.publish(second_frame).unwrap();
@@ -226,14 +228,16 @@ mod tests {
 
         let first_frame = store.begin_frame(3).unwrap();
         let first = store.begin_write(first_frame, page, 1).unwrap();
-        store.commit_write(first).unwrap();
+        let first_submission = store.submit_write(first).unwrap();
+        store.complete_write(first_submission).unwrap();
         store.publish(first_frame).unwrap();
 
         let second_frame = store.begin_frame(3).unwrap();
         let second = store.begin_write(second_frame, page, 2).unwrap();
         assert_ne!(first.handle.slot, second.handle.slot);
         assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Ready(first.handle));
-        store.commit_write(second).unwrap();
+        let second_submission = store.submit_write(second).unwrap();
+        store.complete_write(second_submission).unwrap();
         store.publish(second_frame).unwrap();
 
         assert_eq!(
@@ -249,7 +253,8 @@ mod tests {
 
         let first_frame = store.begin_frame(3).unwrap();
         let first = store.begin_write(first_frame, page, 1).unwrap();
-        store.commit_write(first).unwrap();
+        let first_submission = store.submit_write(first).unwrap();
+        store.complete_write(first_submission).unwrap();
         store.publish(first_frame).unwrap();
 
         let second_frame = store.begin_frame(3).unwrap();
@@ -273,7 +278,8 @@ mod tests {
             store.begin_write(frame, page, 2),
             Err(ShadeStoreError::WriteAlreadyOpen)
         );
-        store.commit_write(write).unwrap();
+        let submission = store.submit_write(write).unwrap();
+        store.complete_write(submission).unwrap();
         assert_eq!(
             store.begin_write(frame, page, 2),
             Err(ShadeStoreError::WriteAlreadyCommitted)
