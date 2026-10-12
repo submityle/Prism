@@ -35,7 +35,8 @@ use core::f32::consts::PI;
 
 use crate::lighting::{
     anisotropic_axes, distribution_ggx, distribution_ggx_anisotropic, fresnel_schlick,
-    visibility_smith_ggx_anisotropic, visibility_smith_ggx_correlated, MIN_ANISOTROPIC_ALPHA,
+    oren_nayar_factor, visibility_smith_ggx_anisotropic, visibility_smith_ggx_correlated,
+    MIN_ANISOTROPIC_ALPHA,
 };
 use crate::vecmath::{add, dot, mix3, mul, mul_scalar, normalize_or, sub};
 use crate::{DirectLightSample, ShadingFrame, SurfaceSample};
@@ -148,8 +149,21 @@ pub fn evaluate_clearcoat_direct(
     .to_array();
     let specular = add(single_scatter, compensation);
     let diffuse_weight = mul_scalar(sub([1.0; 3], f), 1.0 - metallic);
-    let diffuse = mul(mul_scalar(surface.base_color, INV_PI), diffuse_weight);
-    let base = mul_scalar(add(diffuse, specular), n_dot_l);
+    // `OpenPBR` base group, shared with the principled lobe: `diffuse_roughness`
+    // turns the base diffuse into Oren-Nayar (`0` = exactly Lambert) and
+    // `base_weight` scales the whole base layer (`1.0` = exactly the identity).
+    // Both are identity at their defaults, so a material that never authors them
+    // keeps the historical coat response bit-for-bit.
+    let diffuse_factor =
+        oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
+    let diffuse = mul(
+        mul_scalar(surface.base_color, INV_PI * diffuse_factor),
+        diffuse_weight,
+    );
+    let base = mul_scalar(
+        add(diffuse, specular),
+        n_dot_l * surface.base_weight.clamp(0.0, 1.0),
+    );
 
     // --- Coat layer: a second smooth dielectric GGX lobe ---
     let coat = surface.clearcoat.clamp(0.0, 1.0);
@@ -676,6 +690,69 @@ mod tests {
         assert!(
             (sum(along_tangent) - sum(along_bitangent)).abs() > 1.0e-4,
             "rotating the coat anisotropy axis must move the glint: {along_tangent:?} vs {along_bitangent:?}"
+        );
+    }
+
+    #[test]
+    fn base_weight_zero_removes_the_coated_base_layer() {
+        // Shared `OpenPBR` base group: a zero `base_weight` drops the base layer
+        // under the coat. With no coat either, only emission is left.
+        let surface = SurfaceSample {
+            clearcoat: 0.0,
+            base_weight: 0.0,
+            emissive: [0.02, 0.03, 0.04],
+            ..base_surface()
+        };
+        assert_eq!(evaluate_clearcoat_direct(surface, frame(), light()), surface.emissive);
+
+        // The coat highlight itself is unaffected by `base_weight`.
+        let coat_only = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 1.0,
+                base_weight: 0.0,
+                ..base_surface()
+            },
+            frame(),
+            light(),
+        );
+        assert!(sum(coat_only) > 0.0, "the coat glint must survive: {coat_only:?}");
+    }
+
+    #[test]
+    fn diffuse_roughness_roughs_the_base_under_the_coat() {
+        // Grezing geometry where Oren-Nayar's cavity inter-reflection shows up;
+        // the coat is left on so the base is evaluated through its attenuation.
+        let grazing = ShadingFrame {
+            view: normalize_or([0.99, 0.14, 0.0], [0.0, 1.0, 0.0]),
+            ..frame()
+        };
+        let grazing_light = DirectLightSample {
+            direction: normalize_or([0.99, 0.14, 0.0], [0.0, 1.0, 0.0]),
+            ..light()
+        };
+        let smooth = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 1.0,
+                metallic: 0.0,
+                diffuse_roughness: 0.0,
+                ..base_surface()
+            },
+            grazing,
+            grazing_light,
+        );
+        let rough = evaluate_clearcoat_direct(
+            SurfaceSample {
+                clearcoat: 1.0,
+                metallic: 0.0,
+                diffuse_roughness: 1.0,
+                ..base_surface()
+            },
+            grazing,
+            grazing_light,
+        );
+        assert!(
+            rough[0] > smooth[0],
+            "a rough coated base must retro-reflect more: {rough:?} vs {smooth:?}"
         );
     }
 }

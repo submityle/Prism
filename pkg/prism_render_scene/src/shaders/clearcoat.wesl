@@ -32,6 +32,7 @@ import prism_render_scene::shaders::brdf::{
     distribution_ggx,
     distribution_ggx_anisotropic,
     anisotropic_axes,
+    oren_nayar_factor,
     vis_smith,
     vis_smith_anisotropic,
     MIN_ANISOTROPIC_ALPHA,
@@ -116,8 +117,13 @@ fn clearcoat_direct(
     let compensation = f0 * min((1.0 / max(energy, 0.25)) - 1.0, 1.0);
     let specular = single_scatter + compensation;
     let diffuse_weight = (vec3<f32>(1.0) - f) * (1.0 - metallic);
-    let diffuse = (surface.base_color * INV_PI) * diffuse_weight;
-    let base = (diffuse + specular) * n_dot_l;
+    // `OpenPBR` base group, shared with the principled lobe: `diffuse_roughness`
+    // turns the base diffuse into Oren-Nayar (0 = exactly Lambert) and
+    // `base_weight` scales the whole base layer (1.0 = exactly the identity).
+    let diffuse_factor =
+        oren_nayar_factor(n_dot_v, n_dot_l, dot(v, l), surface.diffuse_roughness);
+    let diffuse = (surface.base_color * (INV_PI * diffuse_factor)) * diffuse_weight;
+    let base = (diffuse + specular) * (n_dot_l * clamp(surface.base_weight, 0.0, 1.0));
 
     // Coat layer: a second smooth dielectric GGX lobe. The coat is an
     // index-matched white dielectric, so its Fresnel is achromatic; the scalar

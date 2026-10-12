@@ -452,7 +452,12 @@ const OREN_MAX_SIGMA: f32 = core::f32::consts::FRAC_PI_2;
 /// coupling and `t = max(cos_o, cos_i)` when `s > 0`, else `1`. At
 /// `diffuse_roughness == 0` the factor is exactly `1.0` (Lambert).
 #[inline]
-fn oren_nayar_factor(n_dot_v: f32, n_dot_l: f32, v_dot_l: f32, diffuse_roughness: f32) -> f32 {
+pub(crate) fn oren_nayar_factor(
+    n_dot_v: f32,
+    n_dot_l: f32,
+    v_dot_l: f32,
+    diffuse_roughness: f32,
+) -> f32 {
     let sigma = diffuse_roughness.clamp(0.0, 1.0) * OREN_MAX_SIGMA;
     let sigma_sq = sigma * sigma;
     let a = 1.0 - OREN_A_SCALE * sigma_sq / (sigma_sq + OREN_A_OFFSET);

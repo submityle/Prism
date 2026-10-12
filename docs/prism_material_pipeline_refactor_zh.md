@@ -586,7 +586,13 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - **依据**：Oren-Nayar 走仓库自带 path-traced oracle `pkg/prism_render_architecture/src/reference_pt/oren_nayar.rs` 的 trig-free "qualitative"（Gotanda/Fujii）形式——同样的 A/B 系数（0.33/0.09/0.5/0.45）、同样的 `s = v·l − cos_o·cos_i` 与 Fujii `t` 分母、同样的 `MIN_T` 地板。作者侧 `diffuse_roughness ∈ [0,1]` 到 σ(弧度) 的映射取 `σ = rough · π/2`，这是**显式的单位约定**（文档注明），不是物理断言；σ=0 一定是 Lambert。
   - 代码：schema core 两 pad → 两字段（字长不变）；`GpuSurfaceCore` 同步换位、fat `GpuSurfaceParameters` +2 字段（`_pad_tail` 变 `[f32;3]`，144→176 B 仍 16 字节对齐）；regenerated `material_unpack.wesl`；shade-time `SurfaceSample`（CPU + WESL）+ 桥接；BSDF 双线 **principled**（`lighting.rs` / `brdf.wesl`，含逐位孪生的 `oren_nayar_factor`）。
   - 门禁：`cargo test -p prism_render_shading --lib` **3292 通过**（新增：σ=0 在任意几何上恰为 1.0 且全域有限非负、`base_weight = 0` 正好只剩 emissive、掠射下粗糙腔体回射更强）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）、`cargo test -p prism_material_schema` 13 通过、`cargo test -p prism_render_material` 826+6+2 全绿、`--features bevy` 编译干净；touched 文件 clippy 无告警。
-  - 诚实边界：目前只有 **principled über base** 消费这两项；Cloth / Clearcoat / Subsurface 是各自的 shading class、有自己的 diffuse law（cloth 的 wrap/subsurface、clearcoat 的两程、subsurface 的 wrap+back-transmission），把 `base_weight` 一并路由进它们留作后续（`diffuse_roughness` 是 V-cavity matte 模型，本就不适用于织物）。
+  - 延伸：**Clearcoat 瓣的 base 层也已消费这两项**（见下一条），所以"有 coat 的材质"同样受 `base_weight` / `diffuse_roughness` 控制。Cloth / Subsurface 是各自的 shading class、有自己的 diffuse law（cloth 的 wrap/subsurface、subsurface 的 wrap+back-transmission），不套 V-cavity matte 模型，故不接 `diffuse_roughness`。
+
+- **P1-f（base 组延伸）把 `base_weight` / `diffuse_roughness` 接进 Clearcoat 瓣的 base 层**（§4.4 / §17.2）
+  - 范围：上一项只让 **principled über base** 消费 base 组；但车漆/漆木这类"base + coat"材质走的是 Clearcoat shading class，其 base 层当时仍不受 `base_weight`/`diffuse_roughness` 控制。本项把同一对参数接进 Clearcoat 瓣的 base 层：`diffuse_roughness` 走同一个 `oren_nayar_factor`（CPU/WESL 逐位孪生），`base_weight` 同样按 `1.0` 恒等缩放。
+  - 代码：`pkg/prism_render_shading/src/clearcoat.rs` 与 `pkg/prism_render_scene/src/shaders/clearcoat.wesl`（后者 import `brdf.wesl` 的 `oren_nayar_factor`）；`lighting.rs::oren_nayar_factor` 提为 `pub(crate)` 供同 crate 复用。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3294 通过**（新增：`base_weight = 0` 且无 coat 时正好只剩 emissive、有 coat 时 coat 高光不受 `base_weight` 影响；掠射下粗糙的**带 coat** base 回射更强）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48）；touched 文件 clippy 无告警。
+  - 诚实边界：`diffuse_roughness` **不**接进 Cloth / Subsurface——织物与次表面有各自的漫反射律（wrap、wrap+back-transmission），硬套 V-cavity matte 是错的模型，不是"待补"。
 
 - **P1-f（第二个 lobe 组）OpenPBR fuzz 组：`fuzz_color` + `fuzz_roughness` 端到端落地**（§4.4 / §17.2）
   - 范围：给 `sheen` 瓣补 `OpenPBR` fuzz 组两项——`fuzz_roughness`（fuzz 高光**自身**的宽度）与 `fuzz_color`（逐通道 tint）。顺手修掉一处**假的耦合**：Cloth / ClothAdvanced 之前都拿 base `perceptual_roughness` 当 fuzz 宽度、写死白色 tint，等于"fuzz 永远跟 base 一样糙且只能是白的"，OpenPBR fuzz 的独立参数化根本无从表达。现在 fuzz 宽度只读 `fuzz_roughness`、tint 只读 `fuzz_color`。
