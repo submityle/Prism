@@ -29,6 +29,7 @@ mod compare;
 mod device;
 mod flags;
 mod format;
+mod instance;
 mod pipeline;
 mod reclaim;
 mod resource;
@@ -37,6 +38,7 @@ mod shader;
 mod slotmap;
 mod state;
 mod suballoc;
+mod surface;
 mod sync;
 mod texture;
 mod tracker;
@@ -59,6 +61,10 @@ pub use compare::CompareFunction;
 pub use device::{ImageDataLayout, RenderDevice, RenderQueue, TextureWrite};
 pub use flags::{BufferUsages, ColorWrites, ShaderStages, TextureUsages};
 pub use format::{FormatAspects, TextureFormat, TextureSampleType, VertexFormat};
+pub use instance::{
+    Adapter, AdapterInfo, DeviceDescriptor, DeviceError, DeviceType, Instance, PowerPreference,
+    RequestAdapterOptions,
+};
 pub use pipeline::{
     ColorTargetState, ComputePipelineDescriptor, FragmentState, PipelineLayoutDescriptor,
     PushConstantRange, RenderPipelineDescriptor, VertexState,
@@ -72,6 +78,10 @@ pub use shader::{ShaderModuleDescriptor, ShaderSource};
 pub use state::{
     DepthBiasState, DepthStencilState, Face, FrontFace, IndexFormat, MultisampleState, PolygonMode,
     PrimitiveState, PrimitiveTopology, StencilFaceState, StencilOperation, StencilState,
+};
+pub use surface::{
+    CompositeAlphaMode, PresentMode, Surface, SurfaceCapabilities, SurfaceConfig, SurfaceError,
+    SurfaceImage,
 };
 pub use texture::{
     Extent3d, TextureAspect, TextureDescriptor, TextureDimension, TextureViewDescriptor,

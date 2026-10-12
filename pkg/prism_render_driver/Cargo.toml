@@ -8,6 +8,10 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+# The window-handle ABI a backend turns into a surface. This is the standard
+# `raw-window-handle` interface, not a windowing system: the RHI never creates
+# or owns a window, it only accepts a handle the platform layer produced.
+raw-window-handle = { version = "0.6", default-features = false }
 
 [features]
 default = ["std"]
