@@ -37,6 +37,30 @@ pub enum Illumination {
 }
 
 impl Illumination {
+    /// Every value on the axis, in the order [`Self::from_u32`] decodes them.
+    ///
+    /// `Lit` is index 0 and the [`Default`]: it is the `OpenPBR`
+    /// specification's own response, i.e. what a material gets when it uses no
+    /// response-mode extension at all, which is why the PCM catalogue registers
+    /// an extension for every *other* variant and none for `Lit` (§5.2).
+    pub const ALL: [Self; 4] = [Self::Lit, Self::Stylized, Self::Unlit, Self::Custom];
+
+    /// This variant's raw `u32`, the value the header carries.
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// The canonical lowercase spelling, shared with the PCM catalogue's
+    /// response-mode `uid`s (§5.2) and with diagnostics.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lit => "lit",
+            Self::Stylized => "stylized",
+            Self::Unlit => "unlit",
+            Self::Custom => "custom",
+        }
+    }
+
     /// Reconstruct from the raw `u32` stored in `GpuMaterialHeader`.
     pub const fn from_u32(raw: u32) -> Option<Self> {
         match raw {

@@ -1,5 +1,5 @@
 //! The built-in PCM catalogue: the `OpenPBR` specification core registered as
-//! `KHR` items plus Prism's own `PRISM` lobe and channel extensions (§5.1).
+//! `KHR` items plus Prism's own `PRISM` extensions of every kind (§5.1).
 //!
 //! # Dogfooding (§5.1)
 //!
@@ -21,7 +21,7 @@
 use crate::manifest::ExtensionManifest;
 use crate::namespace::{Kind, Namespace, Stability};
 use crate::registry::{ExtensionRegistry, RegistryError};
-use crate::{Capability, CapabilitySet};
+use crate::{Capability, CapabilitySet, EnergyPolicy};
 
 /// The `OpenPBR` specification namespace vendor string.
 pub const VENDOR_KHRONOS: &str = "khronos";
@@ -65,6 +65,24 @@ pub const UID_CHANNEL_SNOW: &str = "org.prism.channel.snow";
 pub const UID_CHANNEL_DAMAGE: &str = "org.prism.channel.damage";
 /// `uid` of the dissolve dynamic channel (`PRISM`).
 pub const UID_CHANNEL_DISSOLVE: &str = "org.prism.channel.dissolve";
+/// `uid` of the stylized (`NPR`) light-response mode (`PRISM`).
+pub const UID_MODE_STYLIZED: &str = "org.prism.response_mode.stylized";
+/// `uid` of the emissive-only response mode (`PRISM`).
+pub const UID_MODE_UNLIT: &str = "org.prism.response_mode.unlit";
+/// `uid` of the project-injected custom response mode (`PRISM`).
+pub const UID_MODE_CUSTOM: &str = "org.prism.response_mode.custom";
+/// `uid` of the object-space cache auxiliary output (`PRISM`).
+pub const UID_CACHE_AUX_SURFEL: &str = "org.prism.cache_aux.surfel";
+/// `uid` of the baked face-shadow SDF page provider (`PRISM`).
+pub const UID_PROVIDER_FACE_SHADOW_SDF: &str = "studio.prism.provider.face_shadow_sdf";
+/// `uid` of the measured-BRDF/BTF page provider (`PRISM`).
+pub const UID_PROVIDER_MEASURED_BRDF: &str = "org.prism.provider.measured_brdf";
+/// `uid` of the sRGB transfer remap (`PRISM`).
+pub const UID_TRANSFER_SRGB: &str = "org.prism.transfer.srgb";
+/// `uid` of the expensive-lobe sample-budget downgrade policy (`PRISM`).
+pub const UID_DOWNGRADE_SAMPLE_BUDGET: &str = "org.prism.downgrade.sample_budget";
+/// `uid` of the outline composite pass (`PRISM`).
+pub const UID_COMPOSITE_OUTLINE: &str = "org.prism.composite.outline";
 
 /// The specification-core lobe slots, in schema order.
 ///
@@ -161,6 +179,138 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 6] =
     ),
 ];
 
+/// The Prism-private extensions that the runtime reads per material, after the
+/// dynamic channels: the response modes (the §5.2 classification input) and the
+/// object-space cache auxiliary set (§14.3).
+///
+/// `stylized`/`unlit` are `candidate` — the enums and their shaders have shipped
+/// and their layout is frozen, while the class-table registration itself (§5.2,
+/// roadmap P2-j) is still settling. `custom` stays `experimental` because the
+/// injected closure is author-supplied. `unlit` is view independent (it ignores
+/// scene lighting entirely, so the object-space cache may store it); every other
+/// row here changes with the view.
+const PRISM_SLOTTED: [(&str, u32, Kind, Stability, CapabilitySet, bool); 4] = [
+    (
+        UID_MODE_STYLIZED,
+        22,
+        Kind::ResponseMode,
+        Stability::Candidate,
+        CapabilitySet::EMPTY,
+        true,
+    ),
+    (
+        UID_MODE_UNLIT,
+        23,
+        Kind::ResponseMode,
+        Stability::Candidate,
+        CapabilitySet::EMPTY,
+        false,
+    ),
+    (
+        UID_MODE_CUSTOM,
+        24,
+        Kind::ResponseMode,
+        Stability::Experimental,
+        CapabilitySet::EMPTY,
+        true,
+    ),
+    (
+        UID_CACHE_AUX_SURFEL,
+        25,
+        Kind::CacheAux,
+        Stability::Candidate,
+        CapabilitySet::of(Capability::ObjectSpaceCache),
+        false,
+    ),
+];
+
+/// The Prism-private extensions that resolve at bake/pass time and therefore
+/// hold **no** header-digest address (§5.2: they fold into the bake-time
+/// permutation key or the frame/pass graph, so a per-material bit would have no
+/// reader — the whole point of the identity-only half of
+/// [`Kind::header_resident`]).
+///
+/// Each row is anchored to the implementation it registers:
+///
+/// * `face_shadow_sdf` — [`prism_render_material::authoring::enable_face_shadow`]
+///   appends the baked map as a `TextureSemantic::FaceShadowSdf` row;
+/// * `measured_brdf` — the measured BTF/BRDF sampler of `prism_render_shading`
+///   (`MeasuredBrdf`), which needs the `HeavySampling` capability;
+/// * `srgb` — the IEC 61966-2-1 OETF/EOTF pair (`linear_to_srgb` /
+///   `srgb_to_linear`), the transfer §14.3 remaps through;
+/// * `sample_budget` — the §7.2/§13 P1-e quality knob that scales the expensive
+///   lobes' sample counts without touching the permutation key;
+/// * `outline` — the §8.5 step-6 composite pass.
+///
+/// The `author_node` kind is deliberately absent: §4's authoring front-end
+/// (`prism_render_material_authoring`) is a separate roadmap item, so there is
+/// no node type to register yet. The kind and its hook ABI exist ([`Kind`],
+/// [`crate::hooks`]) so that front-end registers into the same table when it
+/// lands, instead of inventing a tenth mechanism.
+///
+/// [`prism_render_material::authoring::enable_face_shadow`]: https://docs.rs/prism_render_material
+const PRISM_IDENTITY_ONLY: [(&str, Kind, Stability, CapabilitySet, bool); 5] = [
+    (
+        UID_PROVIDER_FACE_SHADOW_SDF,
+        Kind::Provider,
+        Stability::Experimental,
+        CapabilitySet::EMPTY,
+        false,
+    ),
+    (
+        UID_PROVIDER_MEASURED_BRDF,
+        Kind::Provider,
+        Stability::Experimental,
+        CapabilitySet::of(Capability::HeavySampling),
+        true,
+    ),
+    (
+        UID_TRANSFER_SRGB,
+        Kind::Transfer,
+        Stability::Stable,
+        CapabilitySet::EMPTY,
+        false,
+    ),
+    (
+        UID_DOWNGRADE_SAMPLE_BUDGET,
+        Kind::Downgrade,
+        Stability::Candidate,
+        CapabilitySet::EMPTY,
+        false,
+    ),
+    (
+        UID_COMPOSITE_OUTLINE,
+        Kind::Composite,
+        Stability::Stable,
+        CapabilitySet::EMPTY,
+        false,
+    ),
+];
+
+/// The §17.2 energy policy of a built-in extension.
+///
+/// This is the lobe-level rollup ([`EnergyPolicy::roll_up`]) of the schema's
+/// *field*-level `energy_policy` column, which is where the rule lives: the
+/// `OpenPBR` core lobes that layer over base share its coupled budget, emission
+/// adds radiance on its own, and the stylized face terminator carries no energy
+/// parameter at all. The built-in values are asserted against that column by the
+/// crate's tests, and §17.5's codegen will make the rollup a generated constant
+/// rather than a hand-copied one.
+///
+/// Only a lobe may carry energy (§17.2: the budget is a lobe concern), so every
+/// other kind is [`EnergyPolicy::None`] by construction rather than by a
+/// caller's discipline.
+pub fn builtin_energy_policy(kind: Kind, uid: &str) -> EnergyPolicy {
+    if kind != Kind::Lobe {
+        return EnergyPolicy::None;
+    }
+    match uid {
+        UID_LOBE_EMISSION => EnergyPolicy::Independent,
+        UID_LOBE_FACE => EnergyPolicy::None,
+        _ => EnergyPolicy::Coupled,
+    }
+}
+
 /// Build a registry containing the full built-in catalogue.
 ///
 /// The function is allocation-free on the success path and returns a value (not
@@ -178,6 +328,7 @@ pub fn builtin_registry() -> ExtensionRegistry {
         let manifest = ExtensionManifest::new(uid, slot, Namespace::Khr, Kind::Lobe)
             .with_vendor(VENDOR_KHRONOS)
             .with_stability(Stability::Stable)
+            .with_energy_policy(builtin_energy_policy(Kind::Lobe, uid))
             .with_view_dependent(view_dependent);
         registry
             .register(manifest)
@@ -188,15 +339,42 @@ pub fn builtin_registry() -> ExtensionRegistry {
             .with_vendor(VENDOR_PRISM)
             .with_stability(stability)
             .with_requires_caps(requires_caps)
+            .with_energy_policy(builtin_energy_policy(kind, uid))
             .with_view_dependent(view_dependent);
         registry
             .register(manifest)
             .expect("the built-in Prism extension catalogue is valid");
     }
+    for (uid, slot, kind, stability, requires_caps, view_dependent) in PRISM_SLOTTED {
+        let manifest = ExtensionManifest::new(uid, slot, Namespace::Prism, kind)
+            .with_vendor(VENDOR_PRISM)
+            .with_stability(stability)
+            .with_requires_caps(requires_caps)
+            .with_view_dependent(view_dependent);
+        registry
+            .register(manifest)
+            .expect("the built-in Prism response-mode/cache-aux catalogue is valid");
+    }
+    for (uid, kind, stability, requires_caps, view_dependent) in PRISM_IDENTITY_ONLY {
+        let manifest = ExtensionManifest::new_identity_only(uid, Namespace::Prism, kind)
+            .with_vendor(VENDOR_PRISM)
+            .with_stability(stability)
+            .with_requires_caps(requires_caps)
+            .with_view_dependent(view_dependent);
+        registry
+            .register(manifest)
+            .expect("the built-in Prism bake/pass-time catalogue is valid");
+    }
     registry
 }
 
 /// Register a brand-new Prism extension into `registry`, allocating its slot.
+///
+/// The residency rule of §5.2 picks the path: a kind the runtime reads per
+/// material takes the lowest free slot of the Prism region
+/// ([`ExtensionRegistry::register_new`], a loud exhaustion when the region is
+/// full), while a bake/pass-time kind registers identity-only and cannot exhaust
+/// anything.
 ///
 /// # Errors
 ///
@@ -208,7 +386,11 @@ pub fn register_prism_extension(
     uid: &'static str,
     kind: Kind,
 ) -> Result<ExtensionManifest, RegistryError> {
-    registry.register_new(uid, Namespace::Prism, kind)
+    if kind.header_resident() {
+        registry.register_new(uid, Namespace::Prism, kind)
+    } else {
+        registry.register_identity_only(uid, Namespace::Prism, kind)
+    }
 }
 
 /// The capability set a fully-featured Prism target offers.

@@ -13,7 +13,7 @@ use prism_material_pcm::{Capability, ExtensionSet, Kind, Namespace, Stability};
 use prism_render_material::capability::{
     lobe_registry, parse_capabilities, SPECIFICATION_NAMESPACE,
 };
-use prism_render_material::{LobeMask, SURFACE_LOBES};
+use prism_render_material::{Illumination, LobeMask, SURFACE_LOBES};
 
 /// Every schema lobe is registered in the committed catalogue with the same
 /// identity and governance fields, and the bridge agrees with both.
@@ -22,11 +22,23 @@ fn the_committed_catalogue_agrees_with_the_schema_row_for_row() {
     let bridged = lobe_registry();
     let committed = builtin_registry();
 
+    // The lobe direction is exhaustive (asserted below); the non-lobe rows are
+    // counted per kind so this gate does not have to be re-typed every time a
+    // response mode, provider or pass is added to the catalogue.
+    let count_of = |kind: Kind| committed.iter().filter(|m| m.kind() == kind).count();
+    assert_eq!(count_of(Kind::Lobe), SURFACE_LOBES.len(), "schema lobes");
+    assert_eq!(count_of(Kind::Channel), 4, "dynamic channels");
+    assert_eq!(count_of(Kind::ResponseMode), 3, "response-mode extensions");
+    assert_eq!(count_of(Kind::CacheAux), 1, "object-space cache auxiliaries");
+    assert_eq!(count_of(Kind::Provider), 2, "bake-time page providers");
+    assert_eq!(count_of(Kind::Transfer), 1, "transfer remaps");
+    assert_eq!(count_of(Kind::Downgrade), 1, "downgrade policies");
     assert_eq!(
-        committed.len(),
-        SURFACE_LOBES.len() + 4,
-        "7 KHR lobes + 1 PRISM lobe + the 4 dynamic channels"
+        count_of(Kind::AuthorNode),
+        0,
+        "§4's authoring front-end does not exist yet, so no author node can be registered"
     );
+    assert_eq!(count_of(Kind::Composite), 1, "composite passes");
 
     for lobe in &SURFACE_LOBES {
         let schema_row = bridged
@@ -66,7 +78,7 @@ fn the_committed_catalogue_agrees_with_the_schema_row_for_row() {
         );
         assert_eq!(
             committed_row.registry_slot(),
-            lobe.registry_slot,
+            Some(lobe.registry_slot),
             "{} slot",
             lobe.id
         );
@@ -81,14 +93,16 @@ fn the_committed_catalogue_agrees_with_the_schema_row_for_row() {
     // And nothing in the committed catalogue claims a lobe slot the schema does
     // not define — the direction that would hide an unreviewed extension.
     for manifest in committed.iter().filter(|m| m.kind() == Kind::Lobe) {
+        let slot = manifest
+            .registry_slot()
+            .expect("a lobe is header resident and carries a slot");
         assert!(
             SURFACE_LOBES
                 .iter()
-                .any(|lobe| lobe.registry_slot == manifest.registry_slot()
-                    && lobe.uid == manifest.uid()),
+                .any(|lobe| lobe.registry_slot == slot && lobe.uid == manifest.uid()),
             "committed lobe {} at slot {} has no schema row",
             manifest.uid(),
-            manifest.registry_slot()
+            slot
         );
     }
 
@@ -96,18 +110,36 @@ fn the_committed_catalogue_agrees_with_the_schema_row_for_row() {
     // interleave: the schema's `[[lobe]]` table owns the dense lobe sub-range
     // from `EXTENSION_SLOT_BASE`, and every other kind allocates after the last
     // lobe. Without this the next lobe would silently alias a dynamic channel.
+    // Only header-resident rows hold an address at all; the bake/pass-time rows
+    // (`provider`, `transfer`, `downgrade`, `composite`) resolve before the
+    // runtime and are registered identity-only (§5.2).
     let last_lobe_slot = SURFACE_LOBES
         .iter()
         .filter(|lobe| lobe.namespace != "KHR")
         .map(|lobe| lobe.registry_slot)
         .max()
         .expect("the schema declares at least one extension lobe");
-    for manifest in committed.iter().filter(|m| m.kind() != Kind::Lobe) {
+    for manifest in committed
+        .iter()
+        .filter(|m| m.kind() != Kind::Lobe && m.is_header_resident())
+    {
+        let slot = manifest
+            .registry_slot()
+            .expect("header-resident rows carry a slot");
         assert!(
-            manifest.registry_slot() > last_lobe_slot,
+            slot > last_lobe_slot,
             "{} (slot {}) is not a lobe but sits inside the schema's lobe sub-range 16..={last_lobe_slot}",
             manifest.uid(),
-            manifest.registry_slot()
+            slot
+        );
+    }
+    // …and a bake/pass-time row must not hold one.
+    for manifest in committed.iter().filter(|m| !m.kind().header_resident()) {
+        assert_eq!(
+            manifest.registry_slot(),
+            None,
+            "{} resolves at bake/pass time and must not consume a digest slot",
+            manifest.uid()
         );
     }
     // …and the lobes are exactly that dense sub-range, not merely a subset.
@@ -167,4 +199,56 @@ fn the_specification_core_requires_no_platform_capability() {
     for capability in Capability::ALL {
         assert_eq!(Capability::parse(capability.as_str()), Some(capability));
     }
+}
+
+/// §5.2: the registry's response modes *are* the runtime's illumination axis —
+/// one extension per non-default variant, and none for `Lit`, which is the
+/// specification response a material gets when it uses no response-mode
+/// extension at all.
+#[test]
+fn the_registry_response_modes_mirror_the_illumination_axis() {
+    let committed = builtin_registry();
+    for illumination in Illumination::ALL {
+        let uid = format!("org.prism.response_mode.{}", illumination.as_str());
+        let registered = committed.manifest_by_uid(&uid);
+        if illumination == Illumination::Lit {
+            assert!(
+                registered.is_none(),
+                "`Lit` is the specification default and must not be registered as an extension"
+            );
+            continue;
+        }
+        let manifest =
+            registered.unwrap_or_else(|| panic!("{illumination:?} has no registry row"));
+        assert_eq!(manifest.kind(), Kind::ResponseMode, "{uid} kind");
+        assert_eq!(manifest.namespace(), Namespace::Prism, "{uid} namespace");
+        assert!(manifest.is_header_resident(), "{uid} residency");
+        assert_eq!(
+            manifest.view_dependent(),
+            illumination != Illumination::Unlit,
+            "{illumination:?} view dependence: `unlit` ignores lighting entirely and may \
+             therefore be cached in object space (§14.3)"
+        );
+    }
+    // The other direction: no registered response mode without a runtime variant.
+    for manifest in committed.iter().filter(|m| m.kind() == Kind::ResponseMode) {
+        let semantic = manifest
+            .uid()
+            .rsplit('.')
+            .next()
+            .expect("a uid has a last segment");
+        assert!(
+            Illumination::ALL
+                .iter()
+                .any(|value| value.as_str() == semantic && *value != Illumination::Lit),
+            "{} has no non-default Illumination variant",
+            manifest.uid()
+        );
+    }
+    // The raw `u32` the header carries and the spelling the registry uses are the
+    // same fact, and the decode is total over the axis and rejects the rest.
+    for illumination in Illumination::ALL {
+        assert_eq!(Illumination::from_u32(illumination.as_u32()), Some(illumination));
+    }
+    assert!(Illumination::from_u32(Illumination::ALL.len() as u32).is_none());
 }

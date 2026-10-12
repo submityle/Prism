@@ -1,17 +1,23 @@
 //! Behavioural gates for the PCM foundation (§5).
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use crate::builtin::{
-    builtin_registry, full_capabilities, register_prism_extension, UID_CHANNEL_SNOW,
-    UID_CHANNEL_WETNESS, UID_LOBE_CLEARCOAT, UID_LOBE_FACE,
+    builtin_energy_policy, builtin_registry, full_capabilities, register_prism_extension,
+    UID_CACHE_AUX_SURFEL, UID_CHANNEL_DAMAGE, UID_CHANNEL_DISSOLVE, UID_CHANNEL_SNOW,
+    UID_CHANNEL_WETNESS, UID_COMPOSITE_OUTLINE, UID_DOWNGRADE_SAMPLE_BUDGET, UID_LOBE_ANISOTROPY,
+    UID_LOBE_CLEARCOAT, UID_LOBE_EMISSION, UID_LOBE_FACE, UID_LOBE_GLINT, UID_LOBE_SHEEN,
+    UID_LOBE_SUBSURFACE, UID_LOBE_THIN_FILM, UID_LOBE_TRANSMISSION, UID_MODE_CUSTOM,
+    UID_MODE_STYLIZED, UID_MODE_UNLIT, UID_PROVIDER_FACE_SHADOW_SDF, UID_PROVIDER_MEASURED_BRDF,
+    UID_TRANSFER_SRGB,
 };
 use crate::namespace::Region;
 use crate::negotiate::negotiate;
 use crate::registry::is_specification_region;
 use crate::{
-    Capability, CapabilitySet, ExtensionRegistry, ExtensionSet, Kind, Namespace, RegistryError,
-    Stability, HEADER_DIGEST_SLOTS,
+    Capability, CapabilitySet, EnergyPolicy, ExtensionManifest, ExtensionRegistry, ExtensionSet,
+    Kind, Namespace, RegistryError, Stability, Stage, HEADER_DIGEST_SLOTS,
 };
 
 fn caps(list: impl IntoIterator<Item = Capability>) -> CapabilitySet {
@@ -23,15 +29,16 @@ fn the_builtin_catalogue_registers_every_core_lobe_as_a_khr_item() {
     let registry = builtin_registry();
     assert_eq!(
         registry.len(),
-        7 + 6,
-        "7 KHR lobes + 2 Prism lobes + 4 Prism channels"
+        7 + 6 + 4 + 5,
+        "7 KHR lobes + 2 Prism lobes + 4 channels + 3 response modes + 1 cache aux \
+         + 5 bake/pass-time rows"
     );
     for (index, slot) in [0u32, 1, 2, 3, 4, 5, 6].into_iter().enumerate() {
         let manifest = registry.manifest_at(slot).expect("core lobe slot");
         assert_eq!(manifest.namespace(), Namespace::Khr);
         assert_eq!(manifest.kind(), Kind::Lobe);
         assert_eq!(manifest.stability(), Stability::Stable);
-        assert_eq!(manifest.registry_slot(), slot);
+        assert_eq!(manifest.registry_slot(), Some(slot));
         assert_eq!(manifest.origin(), Namespace::Khr);
         assert_eq!(manifest.region(), Region::Specification);
         assert_eq!(manifest.version(), 1, "slot {index} version");
@@ -60,13 +67,19 @@ fn the_prism_face_lobe_sits_at_the_extension_region_base() {
     let face = registry
         .manifest_by_uid(UID_LOBE_FACE)
         .expect("PRISM face lobe");
-    assert_eq!(face.registry_slot(), 16, "extension region base (§4.5)");
+    assert_eq!(
+        face.registry_slot(),
+        Some(16),
+        "extension region base (§4.5)"
+    );
     assert_eq!(face.region(), Region::Prism);
     assert_eq!(face.namespace(), Namespace::Prism);
     assert_eq!(face.kind(), Kind::Lobe);
     // Pure-OpenPBR projection uses the bit-region predicate, so the face lobe
     // is outside the specification region and is projected away.
-    assert!(!is_specification_region(face.registry_slot()));
+    assert!(!is_specification_region(
+        face.registry_slot().expect("the face lobe is header resident")
+    ));
     assert!(is_specification_region(0));
 }
 
@@ -89,7 +102,7 @@ fn channel_and_lobe_kinds_share_one_namespace_partitioned_slot_space() {
         .manifest_by_uid(UID_CHANNEL_WETNESS)
         .expect("wetness channel");
     assert_eq!(wetness.kind(), Kind::Channel);
-    assert_eq!(wetness.registry_slot(), 18);
+    assert_eq!(wetness.registry_slot(), Some(18));
     assert_eq!(wetness.region(), Region::Prism);
     let snow = registry
         .manifest_by_uid(UID_CHANNEL_SNOW)
@@ -102,35 +115,56 @@ fn channel_and_lobe_kinds_share_one_namespace_partitioned_slot_space() {
 #[test]
 fn register_allocates_from_the_namespace_region_and_never_recycles() {
     let mut registry = builtin_registry();
-    // The Prism region already holds slots 16..21 (2 lobes + 4 channels), so the
-    // next fresh Prism extension lands at 22 and the one after at 23.
+    // The Prism region already holds 16..25 (2 lobes + 4 channels + 3 response
+    // modes + the cache aux), so the next fresh Prism extension lands at 26 and
+    // the one after at 27.
     let first = register_prism_extension(&mut registry, "org.prism.lobe.watercolor", Kind::Lobe)
         .expect("prism region has room");
-    assert_eq!(first.registry_slot(), 22);
-    let second = register_prism_extension(&mut registry, "org.prism.pass.outline", Kind::Composite)
+    assert_eq!(first.registry_slot(), Some(26));
+    let second =
+        register_prism_extension(&mut registry, "org.prism.mode.watercolor", Kind::ResponseMode)
         .expect("prism region has room");
-    assert_eq!(second.registry_slot(), 23);
+    assert_eq!(second.registry_slot(), Some(27));
+    // A bake/pass-time kind needs no address at all, so it cannot exhaust the
+    // region and does not move the allocator (§5.2).
+    let outline = register_prism_extension(
+        &mut registry,
+        "org.prism.composite.watercolor_edges",
+        Kind::Composite,
+    )
+    .expect("an identity-only registration never runs out of slots");
+    assert_eq!(outline.registry_slot(), None);
+    assert_eq!(registry.allocate_slot(Namespace::Prism).unwrap(), 28);
+    assert_eq!(
+        registry
+            .manifest_by_uid("org.prism.composite.watercolor_edges")
+            .expect("identity-only rows are registered, just unaddressed")
+            .id()
+            .as_str(),
+        "PRISM_composite_watercolor_edges"
+    );
     // A studio extension allocates from its own region, not the Prism one.
     let studio = registry
         .register_new("com.studio.lobe.watercolor", Namespace::Studio, Kind::Lobe)
         .expect("studio region has room");
-    assert_eq!(studio.registry_slot(), 48);
+    assert_eq!(studio.registry_slot(), Some(48));
     assert_eq!(studio.region(), Region::Studio);
 }
 
 #[test]
 fn a_full_region_is_an_explicit_pool_exhaustion_not_a_silent_fold_in() {
     let mut registry = ExtensionRegistry::new();
-    // Region capacity is 16 slots; the 17th KHR-origin item must fail loudly.
+    // Region capacity is 16 slots; the 17th slot-resident Ext-origin item must
+    // fail loudly. (`Kind::Lobe` is header resident, so it needs a slot.)
     for index in 0..Region::SLOTS_PER_REGION {
         let uid = alloc::format!("org.test.namespace_partition_fill.{index}");
         let uid: &'static str = Box::leak(uid.into_boxed_str());
         registry
-            .register_new(uid, Namespace::Ext, Kind::Transfer)
+            .register_new(uid, Namespace::Ext, Kind::Lobe)
             .expect("region has room");
     }
     let error = registry
-        .register_new("org.test.one_too_many", Namespace::Ext, Kind::Transfer)
+        .register_new("org.test.one_too_many", Namespace::Ext, Kind::Lobe)
         .expect_err("the cross-vendor region is full");
     match error {
         RegistryError::PoolExhausted(exhausted) => {
@@ -208,7 +242,6 @@ fn illegal_and_regressing_promotions_are_rejected() {
 
 #[test]
 fn manifest_predicates_reject_region_and_capability_violations() {
-    use crate::ExtensionManifest;
     // A Prism-origin manifest placed in the specification region is rejected:
     // the bit-region partition is a machine-checked predicate, not a convention.
     let misplaced = ExtensionManifest::new("org.prism.lobe.oops", 3, Namespace::Prism, Kind::Lobe);
@@ -351,4 +384,282 @@ fn unknown_slots_negotiate_as_absent_rather_than_breaking_the_digest() {
         .expect_err("an unregistered required slot cannot be shaded");
     assert_eq!(error.unsupported[0].slot, 40);
     assert!(error.unsupported[0].uid.is_none());
+}
+
+/// §5.2: the header digest is per-material runtime state, so only a kind the
+/// runtime reads may hold a slot — and every such kind must hold one.
+#[test]
+fn residency_is_a_machine_checked_predicate_in_both_directions() {
+    // A bake/pass-time kind with a slot is rejected…
+    let addressed = ExtensionManifest::new(
+        "org.prism.composite.oops",
+        17,
+        Namespace::Prism,
+        Kind::Composite,
+    );
+    assert!(matches!(
+        addressed.validate(),
+        Err(crate::ManifestError::SlotForIdentityOnlyKind {
+            kind: Kind::Composite
+        })
+    ));
+    // …and a runtime-read kind without one is rejected too: silently addressing
+    // nothing would make the material's digest claim a fact it cannot carry.
+    let unaddressed = ExtensionManifest::new_identity_only(
+        "org.prism.mode.oops",
+        Namespace::Prism,
+        Kind::ResponseMode,
+    );
+    assert!(matches!(
+        unaddressed.validate(),
+        Err(crate::ManifestError::MissingSlotForHeaderResidentKind {
+            kind: Kind::ResponseMode
+        })
+    ));
+    // The two legal shapes validate.
+    assert!(addressed_slot_manifest().validate().is_ok());
+    assert!(identity_only_manifest().validate().is_ok());
+}
+
+fn addressed_slot_manifest() -> ExtensionManifest {
+    // A header-resident kind with a slot in its origin's own region.
+    ExtensionManifest::new(
+        "org.prism.cache_aux.surfel",
+        Region::Prism.base(),
+        Namespace::Prism,
+        Kind::CacheAux,
+    )
+}
+
+fn identity_only_manifest() -> ExtensionManifest {
+    ExtensionManifest::new_identity_only(
+        "org.prism.composite.outline",
+        Namespace::Prism,
+        Kind::Composite,
+    )
+}
+
+/// §17.2: only a lobe carries energy, and the lobe-level policy is the rollup of
+/// the schema's field-level column.
+#[test]
+fn energy_policies_are_lobe_only_and_roll_up_by_priority() {
+    // The rollup is order independent and `coupled` dominates.
+    assert_eq!(
+        EnergyPolicy::roll_up([
+            EnergyPolicy::None,
+            EnergyPolicy::Independent,
+            EnergyPolicy::Coupled
+        ]),
+        EnergyPolicy::Coupled
+    );
+    assert_eq!(
+        EnergyPolicy::roll_up([EnergyPolicy::Independent, EnergyPolicy::None]),
+        EnergyPolicy::Independent
+    );
+    assert_eq!(EnergyPolicy::roll_up([]), EnergyPolicy::None);
+    assert_eq!(
+        EnergyPolicy::roll_up([EnergyPolicy::None, EnergyPolicy::None]),
+        EnergyPolicy::None
+    );
+
+    // A non-lobe kind may not declare energy: the budget is a lobe concern.
+    let composite = ExtensionManifest::new_identity_only(
+        "org.prism.composite.oops",
+        Namespace::Prism,
+        Kind::Composite,
+    )
+    .with_energy_policy(EnergyPolicy::Coupled);
+    assert!(matches!(
+        composite.validate(),
+        Err(crate::ManifestError::EnergyPolicyOutsideLobe {
+            kind: Kind::Composite,
+            policy: EnergyPolicy::Coupled
+        })
+    ));
+
+    // The built-in column, row for row: emission adds its own radiance, the
+    // stylized face terminator carries none, and every physical lobe that layers
+    // over base shares the coupled budget.
+    let independent = [UID_LOBE_EMISSION];
+    let none = [UID_LOBE_FACE];
+    let coupled = [
+        UID_LOBE_CLEARCOAT,
+        UID_LOBE_ANISOTROPY,
+        UID_LOBE_SHEEN,
+        UID_LOBE_SUBSURFACE,
+        UID_LOBE_TRANSMISSION,
+        UID_LOBE_THIN_FILM,
+        UID_LOBE_GLINT,
+    ];
+    for uid in independent {
+        assert_eq!(
+            builtin_energy_policy(Kind::Lobe, uid),
+            EnergyPolicy::Independent,
+            "{uid}"
+        );
+    }
+    for uid in none {
+        assert_eq!(builtin_energy_policy(Kind::Lobe, uid), EnergyPolicy::None, "{uid}");
+    }
+    for uid in coupled {
+        assert_eq!(
+            builtin_energy_policy(Kind::Lobe, uid),
+            EnergyPolicy::Coupled,
+            "{uid}"
+        );
+    }
+    // A non-lobe kind is `None` by construction, so a caller cannot accidentally
+    // hand a channel an energy budget.
+    for kind in Kind::ALL.into_iter().filter(|kind| *kind != Kind::Lobe) {
+        assert_eq!(
+            builtin_energy_policy(kind, UID_LOBE_CLEARCOAT),
+            EnergyPolicy::None,
+            "{kind}"
+        );
+    }
+
+    // …and the registry carries that column, so a consumer never re-derives it.
+    let registry = builtin_registry();
+    for lobe in registry.iter().filter(|m| m.kind() == Kind::Lobe) {
+        assert_eq!(
+            lobe.energy_policy(),
+            builtin_energy_policy(lobe.kind(), lobe.uid()),
+            "{} energy policy",
+            lobe.uid()
+        );
+        assert_eq!(
+            lobe.energy_policy() != EnergyPolicy::None,
+            lobe.energy_policy().is_energy_carrying()
+        );
+    }
+    // A non-lobe row never carries energy.
+    for other in registry.iter().filter(|m| m.kind() != Kind::Lobe) {
+        assert_eq!(other.energy_policy(), EnergyPolicy::None, "{}", other.uid());
+    }
+}
+
+/// Every extension-point kind is represented in the catalogue by at least one
+/// real extension — except `author_node`, whose front-end (§4) does not exist
+/// yet, so there is nothing honest to register.
+#[test]
+fn the_catalogue_covers_every_kind_that_has_an_implementation() {
+    let registry = builtin_registry();
+    for kind in Kind::ALL {
+        let rows: Vec<&str> = registry
+            .iter()
+            .filter(|m| m.kind() == kind)
+            .map(ExtensionManifest::uid)
+            .collect();
+        if kind == Kind::AuthorNode {
+            assert!(
+                rows.is_empty(),
+                "§4's authoring front-end does not exist yet, so an author_node \
+                 registration would be a placeholder: {rows:?}"
+            );
+            continue;
+        }
+        assert!(!rows.is_empty(), "{kind} has no registered extension");
+    }
+
+    // The residency split, kind by kind: an identity-only row is registered but
+    // holds no header address.
+    for uid in [
+        UID_PROVIDER_FACE_SHADOW_SDF,
+        UID_PROVIDER_MEASURED_BRDF,
+        UID_TRANSFER_SRGB,
+        UID_DOWNGRADE_SAMPLE_BUDGET,
+        UID_COMPOSITE_OUTLINE,
+    ] {
+        let manifest = registry.manifest_by_uid(uid).expect("registered");
+        assert_eq!(manifest.registry_slot(), None, "{uid} must be unaddressed");
+        assert!(!manifest.is_header_resident());
+        assert!(registry.slot_of_uid(uid).is_none());
+    }
+    for uid in [
+        UID_MODE_STYLIZED,
+        UID_MODE_UNLIT,
+        UID_MODE_CUSTOM,
+        UID_CACHE_AUX_SURFEL,
+        UID_CHANNEL_WETNESS,
+        UID_CHANNEL_SNOW,
+        UID_CHANNEL_DAMAGE,
+        UID_CHANNEL_DISSOLVE,
+    ] {
+        let manifest = registry.manifest_by_uid(uid).expect("registered");
+        assert!(manifest.is_header_resident(), "{uid} must own a slot");
+        assert!(manifest.registry_slot().is_some_and(|slot| slot < 32));
+    }
+
+    // The response modes mirror the runtime's `Illumination` classes one for
+    // one: `prism_render_material`'s parity gate asserts the other direction.
+    let modes: Vec<&str> = registry
+        .iter()
+        .filter(|m| m.kind() == Kind::ResponseMode)
+        .map(ExtensionManifest::uid)
+        .collect();
+    assert_eq!(modes, [UID_MODE_STYLIZED, UID_MODE_UNLIT, UID_MODE_CUSTOM]);
+}
+
+/// A bake/pass-time row still negotiates its capabilities — just by name,
+/// because it has no slot to be requested by (§5.2/§5.3).
+#[test]
+fn bake_time_rows_negotiate_capabilities_by_uid() {
+    let registry = builtin_registry();
+    let needs = registry.required_caps_of_uids([UID_PROVIDER_MEASURED_BRDF]);
+    assert!(needs.contains(Capability::HeavySampling));
+    assert!(needs.is_subset_of(full_capabilities()));
+    // An unknown name contributes nothing rather than panicking: the caller that
+    // asks for a uid it cannot find has a bug, and the registry's job is to make
+    // the *requirement* visible, not to guess.
+    assert!(registry
+        .required_caps_of_uids(["org.prism.provider.nobody"])
+        .is_empty());
+}
+
+/// The extension region still has room after the whole catalogue lands — the
+/// identity-only split exists precisely so that a kind cannot eat the digest.
+#[test]
+fn the_catalogue_leaves_header_digest_headroom_for_growth() {
+    let mut registry = builtin_registry();
+    let prism_used = registry
+        .iter()
+        .filter_map(ExtensionManifest::registry_slot)
+        .filter(|slot| Region::Prism.contains(*slot))
+        .count();
+    assert!(
+        prism_used < Region::SLOTS_PER_REGION as usize,
+        "the Prism region must keep at least one address free"
+    );
+    // Prove it: a fresh header-resident Prism extension still registers.
+    let fresh = register_prism_extension(&mut registry, "org.prism.lobe.reserve_probe", Kind::Lobe)
+        .expect("the Prism region has headroom");
+    assert!(fresh.is_header_resident());
+}
+
+/// The hook ABI and the residency predicate come from the same table: a kind
+/// with a runtime hook the runtime never reads would be a contradiction.
+#[test]
+fn runtime_hooks_and_header_residency_agree_for_every_kind() {
+    for kind in Kind::ALL {
+        for hook in kind.hooks() {
+            if hook.stage() == Stage::Runtime {
+                assert!(
+                    kind.header_resident() || kind == Kind::Provider,
+                    "{kind}::{} runs at runtime but the runtime never reads it",
+                    hook.name()
+                );
+            }
+        }
+    }
+    // `transfer`/`downgrade`/`author_node`/`composite` are bake-time through and
+    // through, which is exactly why they need no header address.
+    for kind in [
+        Kind::Transfer,
+        Kind::Downgrade,
+        Kind::AuthorNode,
+        Kind::Composite,
+    ] {
+        assert_eq!(kind.runtime_hook_count(), 0);
+        assert!(!kind.header_resident());
+    }
 }

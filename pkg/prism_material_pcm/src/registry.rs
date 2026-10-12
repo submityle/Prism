@@ -6,6 +6,7 @@ use crate::manifest::{ExtensionManifest, ManifestError};
 use crate::namespace::{Kind, Namespace, Region, Stability};
 use crate::{CapabilitySet, HEADER_DIGEST_SLOTS};
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 /// A namespace's slot region is full.
@@ -77,6 +78,11 @@ impl From<ManifestError> for RegistryError {
 #[derive(Clone, Debug)]
 pub struct ExtensionRegistry {
     slots: [Option<ExtensionManifest>; HEADER_DIGEST_SLOTS as usize],
+    /// Extensions that resolve at bake/pass time and hold no header-digest
+    /// address (§5.2). They share every other governance machine with the
+    /// slot-resident rows — identity, promotion, capability needs — and are kept
+    /// in registration order.
+    identity_only: Vec<ExtensionManifest>,
     /// Per-region first-fit cursor, so a fresh extension takes the lowest free
     /// slot of its region and slots are never recycled.
     cursors: [u32; Region::ALL.len()],
@@ -93,12 +99,14 @@ impl ExtensionRegistry {
     pub const fn new() -> Self {
         Self {
             slots: [None; HEADER_DIGEST_SLOTS as usize],
+            identity_only: Vec::new(),
             cursors: [0; Region::ALL.len()],
         }
     }
 
-    /// Register an extension whose slot is already pinned (the specification
-    /// core comes from the schema, which declares its slots).
+    /// Register an extension whose identity and slot come from a declaration
+    /// (the specification core comes from the schema, which pins its slots; a
+    /// bake/pass-time extension arrives identity-only).
     ///
     /// # Errors
     ///
@@ -107,24 +115,40 @@ impl ExtensionRegistry {
     /// identity collision.
     pub fn register(&mut self, manifest: ExtensionManifest) -> Result<(), RegistryError> {
         manifest.validate()?;
-        if self.slot_of_uid(manifest.uid()).is_some() {
+        if self.manifest_by_uid(manifest.uid()).is_some() {
             return Err(RegistryError::DuplicateUid(String::from(manifest.uid())));
         }
-        let slot = manifest.registry_slot() as usize;
+        let Some(registry_slot) = manifest.registry_slot() else {
+            self.identity_only.push(manifest);
+            return Ok(());
+        };
+        let slot = registry_slot as usize;
         if self.slots[slot].is_some() {
-            return Err(RegistryError::SlotInUse(manifest.registry_slot()));
+            return Err(RegistryError::SlotInUse(registry_slot));
         }
         self.slots[slot] = Some(manifest);
+        // Keep the region's first-fit cursor monotone past a *pinned* slot, so a
+        // later `register_new` can never hand out an address the schema (or the
+        // catalogue) has already spoken for — even when the pinned slots are not
+        // dense from the region base.
+        let region = manifest.origin().region();
+        let index = region as usize;
+        let local = registry_slot - region.base() + 1;
+        if local > self.cursors[index] {
+            self.cursors[index] = local;
+        }
         Ok(())
     }
 
     /// Allocate the lowest free slot in `origin`'s region and register a new
-    /// extension there, returning the pinned manifest.
+    /// **header-resident** extension there, returning the pinned manifest.
     ///
     /// # Errors
     ///
     /// Returns [`RegistryError::PoolExhausted`] when the region is full — an
-    /// explicit, diagnosable failure instead of a silent fold-in.
+    /// explicit, diagnosable failure instead of a silent fold-in — and
+    /// [`RegistryError::Manifest`] when `kind` is not header resident (that kind
+    /// registers identity-only, see [`Self::register_identity_only`]).
     pub fn register_new(
         &mut self,
         uid: &'static str,
@@ -133,6 +157,27 @@ impl ExtensionRegistry {
     ) -> Result<ExtensionManifest, RegistryError> {
         let slot = self.allocate_slot(origin)?;
         let manifest = ExtensionManifest::new(uid, slot, origin, kind);
+        self.register(manifest)?;
+        Ok(manifest)
+    }
+
+    /// Register a new **identity-only** extension: one that resolves at
+    /// bake/pass time and therefore holds no header-digest address (§5.2).
+    ///
+    /// No slot is allocated, so this can never exhaust a region.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistryError::Manifest`] when `kind` is header resident (such
+    /// a kind must pin a slot, see [`Self::register_new`]) or
+    /// [`RegistryError::DuplicateUid`] on an identity collision.
+    pub fn register_identity_only(
+        &mut self,
+        uid: &'static str,
+        origin: Namespace,
+        kind: Kind,
+    ) -> Result<ExtensionManifest, RegistryError> {
+        let manifest = ExtensionManifest::new_identity_only(uid, origin, kind);
         self.register(manifest)?;
         Ok(manifest)
     }
@@ -199,10 +244,9 @@ impl ExtensionRegistry {
         self.iter().find(|manifest| manifest.uid() == uid)
     }
 
-    /// The slot `uid` was allocated, if it is registered.
+    /// The slot `uid` was allocated, if it is registered *and* header resident.
     pub fn slot_of_uid(&self, uid: &str) -> Option<u32> {
-        self.manifest_by_uid(uid)
-            .map(ExtensionManifest::registry_slot)
+        self.manifest_by_uid(uid)?.registry_slot()
     }
 
     /// Whether `slot` is registered.
@@ -210,9 +254,9 @@ impl ExtensionRegistry {
         self.manifest_at(slot).is_some()
     }
 
-    /// Number of registered extensions.
+    /// Number of registered extensions, header resident and identity-only alike.
     pub fn len(&self) -> usize {
-        self.slots.iter().flatten().count()
+        self.slots.iter().flatten().count() + self.identity_only.len()
     }
 
     /// Whether the registry holds no extension.
@@ -220,9 +264,18 @@ impl ExtensionRegistry {
         self.len() == 0
     }
 
-    /// Iterate the registered extensions, lowest slot first.
+    /// Iterate the registered extensions: lowest slot first, then the
+    /// identity-only rows in registration order.
     pub fn iter(&self) -> impl Iterator<Item = &ExtensionManifest> {
-        self.slots.iter().flatten()
+        self.slots
+            .iter()
+            .flatten()
+            .chain(self.identity_only.iter())
+    }
+
+    /// The bake/pass-time extensions that hold no header-digest address.
+    pub fn identity_only(&self) -> &[ExtensionManifest] {
+        &self.identity_only
     }
 
     /// The capabilities required by every extension in `slots` that is
@@ -231,6 +284,27 @@ impl ExtensionRegistry {
         let mut caps = CapabilitySet::EMPTY;
         for slot in slots {
             if let Some(manifest) = self.manifest_at(slot) {
+                caps = caps.union(manifest.requires_caps());
+            }
+        }
+        caps
+    }
+
+    /// The capabilities required by the extensions registered under `uids` — the
+    /// **bake/pass-level** counterpart of [`Self::required_caps_of`].
+    ///
+    /// Identity-only extensions resolve before the material reaches the runtime,
+    /// so they are negotiated by the baker or the pass-graph builder that
+    /// consumes them, by name rather than by slot. An unknown name is skipped
+    /// rather than assumed present: a requirement nobody can satisfy must not
+    /// evaporate silently.
+    pub fn required_caps_of_uids<'a>(
+        &self,
+        uids: impl IntoIterator<Item = &'a str>,
+    ) -> CapabilitySet {
+        let mut caps = CapabilitySet::EMPTY;
+        for uid in uids {
+            if let Some(manifest) = self.manifest_by_uid(uid) {
                 caps = caps.union(manifest.requires_caps());
             }
         }

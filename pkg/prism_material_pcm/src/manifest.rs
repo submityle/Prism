@@ -6,13 +6,22 @@
 //! |---|---|---|
 //! | identity | [`uid`](ExtensionManifest::uid), [`registry_slot`](ExtensionManifest::registry_slot), [`origin`](ExtensionManifest::origin) | permanent |
 //! | attribution | [`namespace`](ExtensionManifest::namespace), [`vendor`](ExtensionManifest::vendor), [`stability`](ExtensionManifest::stability) | promoted |
-//! | capability | [`kind`](ExtensionManifest::kind), `version`, `requires_caps`, `view_dependent`, `replaces_core` | per release |
+//! | capability | [`kind`](ExtensionManifest::kind), `version`, `requires_caps`, [`energy_policy`](ExtensionManifest::energy_policy), `view_dependent`, `replaces_core` | per release |
 //!
 //! The display [`id`](ExtensionManifest::id) is **derived** from the namespace
 //! and the semantic name and is *not* an identity anchor — which is what lets
 //! promotion (`PRISM → KHR`) flip attribution without breaking a single
 //! cross-reference, the failure mode the early "namespace as `id` prefix"
 //! draft had.
+//!
+//! The identity group has two shapes, and the difference is a §5.2 fact rather
+//! than a bookkeeping one: a manifest either pins a
+//! [`registry_slot`](ExtensionManifest::registry_slot) in the material header
+//! digest ([`ExtensionManifest::new`]) because the runtime reads a per-material
+//! fact about it, or it is *identity-only*
+//! ([`ExtensionManifest::new_identity_only`]) because it resolves at bake/pass
+//! time and a per-material bit would have no reader. Both are registered,
+//! promoted and negotiated the same way; see [`Kind::header_resident`].
 
 use crate::namespace::{Kind, Namespace, Region, Stability};
 use crate::CapabilitySet;
@@ -47,6 +56,23 @@ pub enum ManifestError {
     },
     /// A zero `version`.
     ZeroVersion,
+    /// A kind that resolves at bake/pass time was given a header-digest slot.
+    SlotForIdentityOnlyKind {
+        /// The offending kind.
+        kind: Kind,
+    },
+    /// A kind the runtime reads per material was registered without a slot.
+    MissingSlotForHeaderResidentKind {
+        /// The offending kind.
+        kind: Kind,
+    },
+    /// A non-lobe kind declared an energy policy.
+    EnergyPolicyOutsideLobe {
+        /// The offending kind.
+        kind: Kind,
+        /// The policy it asked for.
+        policy: EnergyPolicy,
+    },
     /// The requested promotion is not on the `Studio → Ext → KHR` chain.
     IllegalPromotion {
         /// Current namespace.
@@ -83,6 +109,20 @@ impl fmt::Display for ManifestError {
                 "a KHR specification-core item may not require the {capability} capability"
             ),
             Self::ZeroVersion => write!(f, "an extension version starts at 1"),
+            Self::SlotForIdentityOnlyKind { kind } => write!(
+                f,
+                "a {kind} extension resolves at bake/pass time and must not consume \
+                 a header-digest slot"
+            ),
+            Self::MissingSlotForHeaderResidentKind { kind } => write!(
+                f,
+                "a {kind} extension is read per material and must pin a registry slot"
+            ),
+            Self::EnergyPolicyOutsideLobe { kind, policy } => write!(
+                f,
+                "a {kind} extension cannot declare the {policy} energy policy: only a \
+                 lobe carries energy (§17.2)"
+            ),
             Self::IllegalPromotion { from, to } => {
                 write!(f, "illegal extension promotion {from} -> {to}")
             }
@@ -114,11 +154,87 @@ impl fmt::Display for ExtensionId {
     }
 }
 
+/// How an extension participates in the layered energy budget (§17.2).
+///
+/// This is the manifest-level rollup of the schema's *field*-level
+/// `energy_policy`: a lobe that owns at least one `coupled` field shares a
+/// budget with the lobes it layers over (the `OpenPBR` coat/base coupling, an
+/// alternative to a plain sum of lobes), an `independent` one adds its own
+/// energy (emission), and `None` marks a lobe that carries no energy parameter
+/// at all (the stylized face terminator). [`Self::roll_up`] is the exact rule,
+/// and it is order independent — the schema may declare fields in any order.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum EnergyPolicy {
+    /// Shares a coupled energy budget with the lobes it layers over (§17.2).
+    Coupled,
+    /// Contributes energy on its own, independent of the other lobes.
+    Independent,
+    /// Carries no energy parameter (the default for every non-lobe kind).
+    #[default]
+    None,
+}
+
+impl EnergyPolicy {
+    /// Every policy, most coupled first.
+    pub const ALL: [Self; 3] = [Self::Coupled, Self::Independent, Self::None];
+
+    /// The canonical lowercase spelling used in manifests and the schema.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Coupled => "coupled",
+            Self::Independent => "independent",
+            Self::None => "none",
+        }
+    }
+
+    /// Parse the canonical spelling (case-insensitive).
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|policy| policy.as_str().eq_ignore_ascii_case(text))
+    }
+
+    /// Roll a lobe's per-field policies up into the lobe-level policy:
+    /// `coupled` dominates `independent` dominates `none`.
+    ///
+    /// The rollup is a maximum over a priority order rather than a fold, so it
+    /// does not depend on the order the schema declares the fields in.
+    pub fn roll_up(policies: impl IntoIterator<Item = Self>) -> Self {
+        let mut rolled = Self::None;
+        for policy in policies {
+            if policy.rank() > rolled.rank() {
+                rolled = policy;
+            }
+        }
+        rolled
+    }
+
+    /// Priority inside [`Self::roll_up`] (higher couples harder).
+    const fn rank(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Independent => 1,
+            Self::Coupled => 2,
+        }
+    }
+
+    /// Whether the policy carries energy at all.
+    pub const fn is_energy_carrying(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+impl fmt::Display for EnergyPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One registered extension point.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExtensionManifest {
     uid: &'static str,
-    registry_slot: u32,
+    registry_slot: Option<u32>,
     origin: Namespace,
     namespace: Namespace,
     vendor: &'static str,
@@ -126,16 +242,19 @@ pub struct ExtensionManifest {
     kind: Kind,
     version: u32,
     requires_caps: CapabilitySet,
+    energy_policy: EnergyPolicy,
     view_dependent: bool,
     replaces_core: bool,
 }
 
 impl ExtensionManifest {
-    /// Begin a manifest for the given immutable identity and kind.
+    /// Begin a manifest for a **header-resident** extension: one the runtime
+    /// reads a per-material fact about, so its `registry_slot` is pinned in the
+    /// material header digest.
     pub const fn new(uid: &'static str, registry_slot: u32, origin: Namespace, kind: Kind) -> Self {
         Self {
             uid,
-            registry_slot,
+            registry_slot: Some(registry_slot),
             origin,
             namespace: origin,
             vendor: "",
@@ -143,6 +262,30 @@ impl ExtensionManifest {
             kind,
             version: 1,
             requires_caps: CapabilitySet::EMPTY,
+            energy_policy: EnergyPolicy::None,
+            view_dependent: false,
+            replaces_core: false,
+        }
+    }
+
+    /// Begin a manifest for an **identity-only** extension: one that resolves at
+    /// bake/pass time and therefore consumes no header-digest address (§5.2).
+    ///
+    /// It keeps the same identity, attribution and capability contract as any
+    /// other manifest; only the per-material slot is absent, because the runtime
+    /// would never read it.
+    pub const fn new_identity_only(uid: &'static str, origin: Namespace, kind: Kind) -> Self {
+        Self {
+            uid,
+            registry_slot: None,
+            origin,
+            namespace: origin,
+            vendor: "",
+            stability: Stability::Experimental,
+            kind,
+            version: 1,
+            requires_caps: CapabilitySet::EMPTY,
+            energy_policy: EnergyPolicy::None,
             view_dependent: false,
             replaces_core: false,
         }
@@ -184,6 +327,15 @@ impl ExtensionManifest {
         self
     }
 
+    /// Declare how the extension participates in the layered energy budget
+    /// (§17.2). Only a lobe may carry energy; every other kind stays
+    /// [`EnergyPolicy::None`], which [`Self::validate`] enforces.
+    #[must_use]
+    pub const fn with_energy_policy(mut self, energy_policy: EnergyPolicy) -> Self {
+        self.energy_policy = energy_policy;
+        self
+    }
+
     /// Mark the extension's response as view dependent (it cannot be cached in
     /// the object-space shading cache of §14.3).
     #[must_use]
@@ -205,9 +357,23 @@ impl ExtensionManifest {
         self.uid
     }
 
-    /// Permanently-pinned registry slot / bit index. Never recycled.
-    pub const fn registry_slot(&self) -> u32 {
+    /// Permanently-pinned registry slot / bit index, or `None` for an
+    /// identity-only extension that consumes no header-digest address.
+    ///
+    /// Never recycled when present, and never reassigned by a promotion.
+    pub const fn registry_slot(&self) -> Option<u32> {
         self.registry_slot
+    }
+
+    /// Whether this extension is header resident (has a registry slot) or
+    /// resolves entirely at bake/pass time (identity-only, §5.2).
+    pub const fn is_header_resident(&self) -> bool {
+        self.registry_slot.is_some()
+    }
+
+    /// How the extension participates in the layered energy budget (§17.2).
+    pub const fn energy_policy(&self) -> EnergyPolicy {
+        self.energy_policy
     }
 
     /// The namespace this extension was *allocated* under. Together with the
@@ -301,18 +467,39 @@ impl ExtensionManifest {
         if self.version == 0 {
             return Err(ManifestError::ZeroVersion);
         }
-        let Some(actual) = Region::of(self.registry_slot) else {
-            return Err(ManifestError::SlotOutOfDigest {
-                slot: self.registry_slot,
-                width: crate::HEADER_DIGEST_SLOTS,
-            });
-        };
-        let expected = self.origin.region();
-        if actual != expected {
-            return Err(ManifestError::SlotOutsideOriginRegion {
-                slot: self.registry_slot,
-                expected,
-                actual,
+        // §5.2: a slot is per-material runtime state, so only a kind the runtime
+        // actually reads may hold one — and every such kind must hold one.
+        match (self.kind.header_resident(), self.registry_slot) {
+            (false, Some(_)) => {
+                return Err(ManifestError::SlotForIdentityOnlyKind { kind: self.kind });
+            }
+            (true, None) => {
+                return Err(ManifestError::MissingSlotForHeaderResidentKind {
+                    kind: self.kind,
+                });
+            }
+            _ => {}
+        }
+        if let Some(slot) = self.registry_slot {
+            let Some(actual) = Region::of(slot) else {
+                return Err(ManifestError::SlotOutOfDigest {
+                    slot,
+                    width: crate::HEADER_DIGEST_SLOTS,
+                });
+            };
+            let expected = self.origin.region();
+            if actual != expected {
+                return Err(ManifestError::SlotOutsideOriginRegion {
+                    slot,
+                    expected,
+                    actual,
+                });
+            }
+        }
+        if self.energy_policy.is_energy_carrying() && self.kind != Kind::Lobe {
+            return Err(ManifestError::EnergyPolicyOutsideLobe {
+                kind: self.kind,
+                policy: self.energy_policy,
             });
         }
         if self.namespace == Namespace::Khr && !self.requires_caps.is_empty() {

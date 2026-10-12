@@ -47,6 +47,7 @@ extern crate alloc;
 pub mod builtin;
 pub mod capability;
 pub mod extension_set;
+pub mod hooks;
 pub mod manifest;
 pub mod namespace;
 pub mod negotiate;
@@ -57,7 +58,8 @@ mod tests;
 
 pub use capability::{Capability, CapabilitySet};
 pub use extension_set::{ExtensionSet, ExtensionSetError};
-pub use manifest::{ExtensionId, ExtensionManifest, ManifestError};
+pub use hooks::{Hook, Stage, Twin};
+pub use manifest::{EnergyPolicy, ExtensionId, ExtensionManifest, ManifestError};
 pub use namespace::{Kind, Namespace, Region, Stability};
 pub use negotiate::{Negotiation, NegotiationError, UnsupportedExtension};
 pub use registry::{ExtensionRegistry, RegistryError, RegistryPoolExhausted};
