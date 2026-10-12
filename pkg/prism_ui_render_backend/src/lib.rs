@@ -85,6 +85,7 @@ pub mod offset;
 pub mod point_convex;
 pub mod polygon;
 pub mod polyline;
+pub mod polyline_sdf;
 pub mod raster;
 pub mod scene;
 pub mod segment;
@@ -124,6 +125,7 @@ pub use polygon::{sd_polygon, sd_triangle};
 pub use polyline::{
     point_at_distance, polyline_length, resample_uniform, sub_polyline, tangent_at_distance,
 };
+pub use polyline_sdf::sd_polyline;
 pub use raster::{rasterize, Framebuffer};
 pub use scene::RetainedScene;
 pub use segment::segment_intersection;
