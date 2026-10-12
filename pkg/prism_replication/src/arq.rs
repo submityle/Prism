@@ -197,28 +197,10 @@ impl ReliableReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reliable::{ack_packet, data_packet, decode};
     use crate::transport::LoopbackLink;
     use alloc::vec;
     use alloc::vec::Vec;
-
-    /// Packet codec for the integration test: `[kind: u8][seq: u64 LE][payload]`.
-    fn data_packet(seq: u64, payload: &[u8]) -> Vec<u8> {
-        let mut bytes = vec![0u8];
-        bytes.extend_from_slice(&seq.to_le_bytes());
-        bytes.extend_from_slice(payload);
-        bytes
-    }
-
-    fn ack_packet(seq: u64) -> Vec<u8> {
-        let mut bytes = vec![1u8];
-        bytes.extend_from_slice(&seq.to_le_bytes());
-        bytes
-    }
-
-    fn decode(bytes: &[u8]) -> (u8, u64, &[u8]) {
-        let seq = u64::from_le_bytes(bytes[1..9].try_into().expect("eight bytes"));
-        (bytes[0], seq, &bytes[9..])
-    }
 
     #[test]
     fn in_order_messages_are_acknowledged_and_measured() {
@@ -341,7 +323,9 @@ mod tests {
                 link.send(true, data_packet(seq, &payload));
             }
             for packet in link.poll(false) {
-                let (kind, seq, payload) = decode(&packet);
+                let Some((kind, seq, payload)) = decode(&packet) else {
+                    continue;
+                };
                 if kind != 0 {
                     continue;
                 }
@@ -354,8 +338,9 @@ mod tests {
                 }
             }
             for packet in link.poll(true) {
-                let (kind, seq, _) = decode(&packet);
-                if kind == 1 {
+                if let Some((kind, seq, _)) = decode(&packet)
+                    && kind == 1
+                {
                     sender.ack(seq, now);
                 }
             }

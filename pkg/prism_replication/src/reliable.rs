@@ -28,8 +28,9 @@ const KIND_ACK: u8 = 1;
 /// Every packet starts with a kind byte and a `u64` sequence number.
 const HEADER_LEN: usize = 9;
 
-/// Encode a data packet: `[0][seq: u64 LE][payload..]`.
-fn data_packet(seq: u64, payload: &[u8]) -> Vec<u8> {
+/// Encode a data packet: `[0][seq: u64 LE][payload..]`. `pub(crate)` so the
+/// protocol tests exercise the exact production codec.
+pub(crate) fn data_packet(seq: u64, payload: &[u8]) -> Vec<u8> {
     let mut packet = Vec::with_capacity(HEADER_LEN + payload.len());
     packet.push(KIND_DATA);
     packet.extend_from_slice(&seq.to_le_bytes());
@@ -38,7 +39,7 @@ fn data_packet(seq: u64, payload: &[u8]) -> Vec<u8> {
 }
 
 /// Encode an ACK packet: `[1][seq: u64 LE]`.
-fn ack_packet(seq: u64) -> Vec<u8> {
+pub(crate) fn ack_packet(seq: u64) -> Vec<u8> {
     let mut packet = Vec::with_capacity(HEADER_LEN);
     packet.push(KIND_ACK);
     packet.extend_from_slice(&seq.to_le_bytes());
@@ -47,7 +48,7 @@ fn ack_packet(seq: u64) -> Vec<u8> {
 
 /// Decode a packet header, or `None` when it is too short to be one (a truncated
 /// or hostile datagram is ignored, never a panic).
-fn decode(packet: &[u8]) -> Option<(u8, u64, &[u8])> {
+pub(crate) fn decode(packet: &[u8]) -> Option<(u8, u64, &[u8])> {
     let header = packet.get(..HEADER_LEN)?;
     let seq = u64::from_le_bytes(header[1..].try_into().expect("eight bytes"));
     Some((header[0], seq, &packet[HEADER_LEN..]))
@@ -91,8 +92,9 @@ impl<D: Transport> ReliableChannel<D> {
         self.sender.send(payload.to_vec())
     }
 
-    /// Advance one tick and move bytes both ways: transmit new / timed-out
-    /// messages, drain inbound datagrams, and reassemble what is now deliverable.
+    /// Advance one tick and move bytes both ways: drain inbound datagrams (and
+    /// their ACKs), transmit new / timed-out messages, and reassemble what is now
+    /// deliverable.
     pub fn tick(&mut self) {
         let now = self.now.saturating_add(1);
         self.tick_at(now);
@@ -101,7 +103,10 @@ impl<D: Transport> ReliableChannel<D> {
     /// Advance to an explicit `now` and move bytes both ways (for a caller whose
     /// clock is not a simple per-frame counter, and for deterministic tests).
     pub fn tick_at(&mut self, now: u64) {
-        self.now = now;
+        // The clock must be monotonic; clamp so a jittery or regressing source
+        // (or a `now` at the very top of the range) cannot move time backwards and
+        // corrupt the RTO math.
+        self.now = now.max(self.now);
         self.pump();
     }
 
@@ -110,10 +115,24 @@ impl<D: Transport> ReliableChannel<D> {
         self.inbound.pop_front()
     }
 
+    /// The current logical tick (monotonic; a regressing [`tick_at`](Self::tick_at)
+    /// is clamped forward).
+    #[must_use]
+    pub fn now(&self) -> u64 {
+        self.now
+    }
+
     /// How many messages are still unacknowledged.
     #[must_use]
     pub fn unacked(&self) -> usize {
         self.sender.unacked()
+    }
+
+    /// Whether the send window is full (a [`send`](Self::send) would return
+    /// `None`); the caller should wait for acknowledgements before retrying.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.sender.is_full()
     }
 
     /// The current retransmit timeout, in ticks.
@@ -134,14 +153,13 @@ impl<D: Transport> ReliableChannel<D> {
         &mut self.datagram
     }
 
-    /// One exchange step: retransmit what is due, then consume inbound datagrams.
+    /// One exchange step: consume inbound datagrams (and their ACKs), then
+    /// retransmit what is due and send new messages.
     fn pump(&mut self) {
         let now = self.now;
-        let mut outgoing = Vec::new();
-        self.sender.tick(now, &mut outgoing);
-        for (seq, payload) in outgoing {
-            self.datagram.send(&data_packet(seq, &payload));
-        }
+        // Drain inbound first, so an ACK that is already waiting retires its
+        // message before the transmit phase decides what to retransmit — this
+        // avoids a same-tick, off-by-one spurious resend.
         while let Some(packet) = self.datagram.recv() {
             let Some((kind, seq, payload)) = decode(&packet) else {
                 continue;
@@ -159,6 +177,12 @@ impl<D: Transport> ReliableChannel<D> {
                 }
                 _ => {}
             }
+        }
+        // Then transmit new messages and any retransmissions that are now due.
+        let mut outgoing = Vec::new();
+        self.sender.tick(now, &mut outgoing);
+        for (seq, payload) in outgoing {
+            self.datagram.send(&data_packet(seq, &payload));
         }
     }
 }
@@ -297,6 +321,19 @@ mod tests {
         a.datagram_mut().inbox.push_back(vec![0xFF; 2]);
         a.tick();
         assert!(a.recv().is_none(), "the junk produced nothing");
+    }
+
+    /// A regressing clock is clamped forward, so a jittery external source cannot
+    /// move time backwards and corrupt the RTO math.
+    #[test]
+    fn the_clock_never_moves_backwards() {
+        let mut a: ReliableChannel<MockTransport> = ReliableChannel::new(MockTransport::default(), 2, 8);
+        a.tick_at(10);
+        assert_eq!(a.now(), 10);
+        a.tick_at(3);
+        assert_eq!(a.now(), 10, "a regressing clock is clamped");
+        a.tick();
+        assert_eq!(a.now(), 11, "the per-frame tick still advances");
     }
 }
 

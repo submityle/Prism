@@ -105,7 +105,7 @@ impl ServerSession {
         let revision = self.revision().ok_or(SessionError::NoBaseline)?;
         let mut payload = Vec::new();
         self.store.encode_snapshot(revision, &mut payload)?;
-        encode_frame(&payload, out);
+        encode_frame(&payload, out)?;
         Ok(revision)
     }
 
@@ -136,7 +136,7 @@ impl ServerSession {
         let mut payload = Vec::new();
         encode_delta(self.store.schema(), &base, &next, previous, &mut payload)?;
         self.store.insert_baseline(revision, next)?;
-        encode_frame(&payload, out);
+        encode_frame(&payload, out)?;
         Ok(revision)
     }
 
@@ -173,7 +173,7 @@ impl ServerSession {
             .ok_or(SessionError::NoBaseline)?;
         let mut payload = Vec::new();
         encode_delta(self.store.schema(), &base, &current, from, &mut payload)?;
-        encode_frame(&payload, out);
+        encode_frame(&payload, out)?;
         Ok(true)
     }
 }

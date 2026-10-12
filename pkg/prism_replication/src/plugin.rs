@@ -117,9 +117,18 @@ impl<S: ReplicationStrategy> Replication<S> {
     /// Send `bytes` to the peer reliably: the channel numbers and retains it until
     /// the peer acknowledges, retransmitting on later frames if a datagram drops.
     /// Returns the sequence number, or `None` when the send window is full (the
-    /// app should retry a later frame — see [`unacked`](Self::unacked)).
+    /// app should retry a later frame — check [`is_full`](Self::is_full) or
+    /// [`unacked`](Self::unacked) first).
     pub fn send(&mut self, bytes: &[u8]) -> Option<u64> {
         self.channel.send(bytes)
+    }
+
+    /// Whether the outbound send window is full (a [`send`](Self::send) would
+    /// return `None`); the app should not produce more input until
+    /// acknowledgements return.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.channel.is_full()
     }
 
     /// How many outbound messages are still unacknowledged.
