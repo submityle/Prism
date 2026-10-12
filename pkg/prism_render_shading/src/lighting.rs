@@ -140,9 +140,12 @@ pub struct SurfaceSample {
     /// material drives at most one of those paths, so the two readings never
     /// conflict (the transmission lobe is inert whenever `transmission == 0`).
     pub thickness: f32,
-    /// Signed anisotropy in `[-1, 1]`. Positive elongates the specular
-    /// highlight along the tangent, negative along the bitangent, `0` is
-    /// isotropic (Disney/Burley `aspect` mapping).
+    /// `OpenPBR` `specular_roughness_anisotropy` in `[0, 1]`: stretches the
+    /// specular highlight along the (rotated) tangent direction. `0` is exactly
+    /// isotropic — the widths collapse to `α` and the anisotropic GGX `D`/`V`
+    /// reduce bit-for-bit to the isotropic pair. The `[0, 1]` → `(α_t, α_b)`
+    /// mapping is the specification's `openpbr-anisotropy-formula`
+    /// ([`openpbr_anisotropy_to_alpha`]), not the Disney/Burley `aspect` split.
     pub anisotropy: f32,
     /// Rotation of the anisotropy axes around the surface normal, in radians
     /// (UE `AnisotropyRotation`). `0` keeps the authored tangent as the major
@@ -298,19 +301,24 @@ pub fn evaluate_principled_direct(
 
     // Anisotropic axes. The tangent frame is re-orthonormalized against the
     // shaded normal (interpolation drifts it) and rotated around the normal by
-    // `anisotropy_rotation` before the Burley `aspect` split maps `alpha` onto
-    // the two axes. With `anisotropy == 0` the axes collapse to `alpha` and the
-    // anisotropic `D`/`V` reduce exactly to the isotropic GGX pair.
+    // `anisotropy_rotation` (a Prism extension standing in for a per-vertex
+    // `geometry_tangent` frame). The widths follow the `OpenPBR` specification's
+    // mapping (eq. `openpbr-anisotropy-formula`), with `a =
+    // specular_roughness_anisotropy ∈ [0, 1]` and `α = r²`:
+    //
+    //     α_t = α · sqrt( 2 / (1 + (1 − a)²) ) ,   α_b = (1 − a) · α_t .
+    //
+    // `a == 0` gives `α_t == α_b == α` (`sqrt(2/2) == 1` exactly), so the
+    // anisotropic `D`/`V` collapse to the isotropic GGX pair bit-for-bit; the
+    // derived `α_b` is floored at `MIN_ANISOTROPIC_ALPHA` so `a == 1` stays
+    // finite instead of driving a perfect mirror.
     let (tangent, bitangent) = anisotropic_axes(
         n,
         frame.tangent,
         frame.bitangent,
         surface.anisotropy_rotation,
     );
-    let anisotropy = surface.anisotropy.clamp(-1.0, 1.0);
-    let aspect = (1.0 - 0.9 * anisotropy).sqrt();
-    let ax = (alpha / aspect).max(MIN_ANISOTROPIC_ALPHA);
-    let ay = (alpha * aspect).max(MIN_ANISOTROPIC_ALPHA);
+    let (ax, ay) = openpbr_anisotropy_to_alpha(alpha, surface.anisotropy);
     let d = distribution_ggx_anisotropic(dot(tangent, h), dot(bitangent, h), n_dot_h, ax, ay);
     let g = visibility_smith_ggx_anisotropic(
         dot(tangent, v),
@@ -524,6 +532,34 @@ pub(crate) fn visibility_smith_ggx_correlated(n_dot_v: f32, n_dot_l: f32, alpha:
     let gv = n_dot_l * ((n_dot_v - n_dot_v * alpha_squared) * n_dot_v + alpha_squared).sqrt();
     let gl = n_dot_v * ((n_dot_l - n_dot_l * alpha_squared) * n_dot_l + alpha_squared).sqrt();
     0.5 / (gv + gl).max(MIN_N_DOT)
+}
+
+/// Maps the `OpenPBR` `specular_roughness_anisotropy` to the two GGX widths.
+///
+/// `alpha` is the isotropic width `α = roughness²`; `anisotropy` is the
+/// authored `a ∈ [0, 1]`. The returned `(α_t, α_b)` follow the specification's
+/// equation `openpbr-anisotropy-formula` (see the body), with the tangent-axis
+/// width first so it can be fed straight to
+/// [`distribution_ggx_anisotropic`] / [`visibility_smith_ggx_anisotropic`].
+/// The mapping is bit-exactly isotropic at `a == 0` and floored so `a == 1`
+/// stays finite.
+pub(crate) fn openpbr_anisotropy_to_alpha(alpha: f32, anisotropy: f32) -> (f32, f32) {
+    // `OpenPBR` `specular_roughness_anisotropy` ∈ [0, 1] → GGX widths. Equation
+    // `openpbr-anisotropy-formula` of the OpenPBR specification:
+    //
+    //     α_t = α · sqrt( 2 / (1 + (1 − a)²) ) ,   α_b = (1 − a) · α_t ,
+    //
+    // where `α = r²` is the isotropic width (`roughness²`) and `a` the authored
+    // anisotropy. `a == 0` evaluates `sqrt(2 / 2) == 1` exactly, so both widths
+    // collapse to `α` and the anisotropic `D`/`V` reduce to the isotropic pair
+    // bit-for-bit. Both axes are floored at [`MIN_ANISOTROPIC_ALPHA`] so `a == 1`
+    // stays finite.
+    let a = anisotropy.clamp(0.0, 1.0);
+    let one_minus = 1.0 - a;
+    let stretch = (2.0 / (1.0 + one_minus * one_minus)).sqrt();
+    let alpha_t = (alpha * stretch).max(MIN_ANISOTROPIC_ALPHA);
+    let alpha_b = (one_minus * alpha * stretch).max(MIN_ANISOTROPIC_ALPHA);
+    (alpha_t, alpha_b)
 }
 
 /// Re-orthonormalizes the interpolated tangent frame against `normal` and
@@ -929,9 +965,7 @@ mod tests {
         // half-vector tilted along the tangent stays brighter than the same
         // tilt along the bitangent.
         let alpha = 0.3_f32;
-        let aspect = (1.0 - 0.9 * 0.8_f32).sqrt();
-        let ax = alpha / aspect;
-        let ay = alpha * aspect;
+        let (ax, ay) = openpbr_anisotropy_to_alpha(alpha, 0.8);
         assert!(ax > ay);
         let sin = 0.5_f32;
         let cos = (1.0 - sin * sin).sqrt();
@@ -940,6 +974,49 @@ mod tests {
         // Bitangent-aligned tilt: XoH = 0, YoH = sin.
         let d_bitangent = distribution_ggx_anisotropic(0.0, sin, cos, ax, ay);
         assert!(d_tangent > d_bitangent, "{d_tangent} !> {d_bitangent}");
+    }
+
+    #[test]
+    fn openpbr_anisotropy_mapping_matches_the_specification_formula() {
+        // Equation `openpbr-anisotropy-formula`: α_t = α·sqrt(2/(1+(1−a)²)),
+        // α_b = (1−a)·α_t. Check the implementation against the formula written
+        // out independently, for a spread of `(α, a)` pairs.
+        for alpha in [0.01_f32, 0.09, 0.25, 0.64, 1.0] {
+            for a in [0.0_f32, 0.1, 0.35, 0.5, 0.75, 0.9, 1.0] {
+                let (ax, ay) = openpbr_anisotropy_to_alpha(alpha, a);
+                let one_minus = 1.0 - a;
+                let expected_t = (alpha * (2.0 / (1.0 + one_minus * one_minus)).sqrt())
+                    .max(MIN_ANISOTROPIC_ALPHA);
+                let expected_b =
+                    (one_minus * alpha * (2.0 / (1.0 + one_minus * one_minus)).sqrt())
+                        .max(MIN_ANISOTROPIC_ALPHA);
+                assert_eq!(ax, expected_t, "α_t mismatch at α={alpha}, a={a}");
+                assert_eq!(ay, expected_b, "α_b mismatch at α={alpha}, a={a}");
+                // Monotone in `a`: more anisotropy always stretches the tangent
+                // axis and narrows the bitangent axis.
+                if a > 0.0 {
+                    let (ax0, ay0) = openpbr_anisotropy_to_alpha(alpha, 0.0);
+                    assert!(ax >= ax0 && ay <= ay0, "α=({ax},{ay}) vs ({ax0},{ay0})");
+                }
+            }
+        }
+        // `a == 0` collapses to the isotropic width *exactly* (bit-for-bit), so
+        // the anisotropic D/V reduce to the isotropic pair with no residual.
+        let alpha = 0.037_f32;
+        assert_eq!(openpbr_anisotropy_to_alpha(alpha, 0.0), (alpha, alpha));
+        // `a == 1` is floored on the bitangent axis instead of collapsing to a
+        // perfect mirror (a singular NDF).
+        let (_, ay) = openpbr_anisotropy_to_alpha(0.5, 1.0);
+        assert_eq!(ay, MIN_ANISOTROPIC_ALPHA);
+        // Out-of-range inputs are clamped to the specification's `[0, 1]`.
+        assert_eq!(
+            openpbr_anisotropy_to_alpha(0.5, -3.0),
+            openpbr_anisotropy_to_alpha(0.5, 0.0)
+        );
+        assert_eq!(
+            openpbr_anisotropy_to_alpha(0.5, 7.0),
+            openpbr_anisotropy_to_alpha(0.5, 1.0)
+        );
     }
 
     #[test]

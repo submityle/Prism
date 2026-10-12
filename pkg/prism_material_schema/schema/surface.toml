@@ -432,7 +432,10 @@ spec_subfield = "closure_mask"
 consumed_by = ["unpack", "classify", "sample", "golden"]
 # The `OpenPBR` identifier is `specular_roughness_anisotropy`; Prism's decoded fat
 # struct keeps the historical short name `anisotropy` (the elongation direction
-# comes from `geometry_tangent`, so there is no separate rotation in the spec).
+# comes from `geometry_tangent`, so there is no separate rotation in the spec; the
+# optional `anisotropy_rotation` field below is a Prism extension). The shading
+# path maps `[0,1]` to the two GGX widths via the specification's
+# `openpbr-anisotropy-formula`: `α_t = r²·sqrt(2/(1+(1−a)²))`, `α_b = (1−a)·α_t`.
 surface_field = "anisotropy"
 default = 0.0
 valid = "0.0..=1.0"

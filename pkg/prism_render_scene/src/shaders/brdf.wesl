@@ -121,8 +121,9 @@ struct SurfaceSample {
     subsurface_radius: f32,
     subsurface_radius_scale: vec3<f32>,
     thickness: f32,
-    // Signed anisotropy in [-1, 1]; positive elongates the highlight along the
-    // tangent, negative along the bitangent. Mirrors `SurfaceSample`.
+    // `OpenPBR` `specular_roughness_anisotropy` in [0, 1]: stretches the
+    // highlight along the (rotated) tangent; 0 is exactly isotropic. Mirrors
+    // `SurfaceSample::anisotropy` in `lighting.rs`.
     anisotropy: f32,
     // Rotation of the anisotropy axes around the normal, in radians.
     anisotropy_rotation: f32,
@@ -482,14 +483,19 @@ fn principled_direct(
     }
 
     // Anisotropic axes: re-orthonormalize + rotate the interpolated tangent
-    // frame, then split `alpha` onto the two axes via Burley's aspect ratio.
-    // With `anisotropy == 0` the axes collapse to `alpha` and the anisotropic
-    // D/V reduce exactly to the isotropic GGX pair.
+    // frame (the rotation is a Prism extension standing in for a per-vertex
+    // `geometry_tangent`), then split `alpha` onto the two axes with the
+    // `OpenPBR` equation `openpbr-anisotropy-formula`:
+    //   α_t = α·sqrt(2/(1+(1−a)²)),  α_b = (1−a)·α_t,  a ∈ [0, 1],  α = r².
+    // `a == 0` gives `sqrt(2/2) == 1` exactly, so the axes collapse to `alpha`
+    // and the anisotropic D/V reduce to the isotropic GGX pair bit-for-bit.
+    // Byte twin of `openpbr_anisotropy_to_alpha` in `lighting.rs`.
     let axes = anisotropic_axes(n, frame.tangent, frame.bitangent, surface.anisotropy_rotation);
-    let anisotropy = clamp(surface.anisotropy, -1.0, 1.0);
-    let aspect = sqrt(1.0 - 0.9 * anisotropy);
-    let ax = max(alpha / aspect, MIN_ANISOTROPIC_ALPHA);
-    let ay = max(alpha * aspect, MIN_ANISOTROPIC_ALPHA);
+    let a = clamp(surface.anisotropy, 0.0, 1.0);
+    let one_minus = 1.0 - a;
+    let stretch = sqrt(2.0 / (1.0 + one_minus * one_minus));
+    let ax = max(alpha * stretch, MIN_ANISOTROPIC_ALPHA);
+    let ay = max(one_minus * alpha * stretch, MIN_ANISOTROPIC_ALPHA);
     let d = distribution_ggx_anisotropic(dot(axes.tangent, h), dot(axes.bitangent, h), n_dot_h, ax, ay);
     let g = vis_smith_anisotropic(
         dot(axes.tangent, v),

@@ -35,8 +35,8 @@ use core::f32::consts::PI;
 
 use crate::lighting::{
     anisotropic_axes, dielectric_f0, distribution_ggx, distribution_ggx_anisotropic,
-    fresnel_dielectric, fresnel_schlick, oren_nayar_factor, visibility_smith_ggx_anisotropic,
-    visibility_smith_ggx_correlated, MIN_ANISOTROPIC_ALPHA, MIN_DIELECTRIC_IOR,
+    fresnel_dielectric, fresnel_schlick, openpbr_anisotropy_to_alpha, oren_nayar_factor,
+    visibility_smith_ggx_anisotropic, visibility_smith_ggx_correlated, MIN_DIELECTRIC_IOR,
 };
 use crate::vecmath::{add, cross, dot, mix3, mul, mul_scalar, normalize_or, sub};
 use crate::{DirectLightSample, ShadingFrame, SurfaceSample};
@@ -183,7 +183,8 @@ pub fn evaluate_clearcoat_direct(
         if coat_aniso > 0.0 {
             // `OpenPBR` `coat_roughness_anisotropy`: elongate the coat highlight
             // along the shared surface tangent frame, exactly as the base
-            // specular lobe does (same axes, same Burley aspect split).
+            // specular lobe does (same axes, same specification
+            // `openpbr-anisotropy-formula` split).
             let (coat_t, coat_b) = anisotropic_axes(
                 coat_n,
                 coat_tangent_or(surface.coat_tangent, frame.tangent),
@@ -195,9 +196,7 @@ pub fn evaluate_clearcoat_direct(
                 ),
                 surface.anisotropy_rotation,
             );
-            let aspect = (1.0 - 0.9 * coat_aniso).sqrt();
-            let ax = (coat_alpha / aspect).max(MIN_ANISOTROPIC_ALPHA);
-            let ay = (coat_alpha * aspect).max(MIN_ANISOTROPIC_ALPHA);
+            let (ax, ay) = openpbr_anisotropy_to_alpha(coat_alpha, coat_aniso);
             (
                 distribution_ggx_anisotropic(
                     dot(coat_t, h),
