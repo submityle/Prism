@@ -53,7 +53,8 @@ struct PrismSurfaceParameters {
     subsurface: f32,
     // `OpenPBR` subsurface group (see `brdf.wesl::SurfaceSample`).
     subsurface_color: vec4<f32>,
-    subsurface_radius: vec4<f32>,
+    subsurface_radius: f32,
+    subsurface_radius_scale: vec4<f32>,
     index_of_refraction: f32,
     dispersion: f32,
     // `OpenPBR` `transmission_color`: tint of the refracted light.

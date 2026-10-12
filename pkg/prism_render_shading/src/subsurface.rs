@@ -101,7 +101,12 @@ pub fn evaluate_subsurface_direct(
     let diffuse_weight = mul_scalar(sub([1.0; 3], f), 1.0 - metallic);
     let mut diffuse = [0.0f32; 3];
     for (channel, slot) in diffuse.iter_mut().enumerate() {
-        let wrap = (subsurface * surface.subsurface_radius[channel]).clamp(0.0, 1.0);
+        // `subsurface_radius` (scalar) times `subsurface_radius_scale` (color3)
+        // gives the per-channel scattering extent.
+        let wrap = (subsurface
+            * surface.subsurface_radius
+            * surface.subsurface_radius_scale[channel])
+            .clamp(0.0, 1.0);
         let diffuse_cos = fd_wrap(raw_n_dot_l, wrap);
         *slot = surface.base_color[channel]
             * scat_color[channel]
@@ -315,7 +320,8 @@ mod tests {
                 base_color: [1.0; 3],
                 perceptual_roughness: 0.5,
                 subsurface: 1.0,
-                subsurface_radius: [1.0, 0.4, 0.05],
+                subsurface_radius: 1.0,
+                subsurface_radius_scale: [1.0, 0.4, 0.05],
                 thickness: 1.0,
                 ..Default::default()
             },
@@ -392,5 +398,43 @@ mod tests {
             sum(forward) < sum(isotropic) && sum(isotropic) < sum(backward),
             "forward={forward:?} isotropic={isotropic:?} backward={backward:?}"
         );
+    }
+
+    #[test]
+    fn radius_and_scale_split_the_per_channel_extent() {
+        // Light just past the terminator, no back-transmission: only the wrapped
+        // diffuse carries the radius.
+        let behind = DirectLightSample {
+            direction: [-0.98, -0.2, 0.0],
+            ..light()
+        };
+        let base = SurfaceSample {
+            base_color: [1.0; 3],
+            perceptual_roughness: 0.5,
+            subsurface: 1.0,
+            thickness: 1.0,
+            ..Default::default()
+        };
+        // The specification default split (1.0, 0.5, 0.25) makes red bleed
+        // further than green, which bleeds further than blue.
+        let default_split = evaluate_subsurface_direct(base, frame(), behind);
+        assert!(
+            default_split[0] > default_split[1] && default_split[1] > default_split[2],
+            "{default_split:?}"
+        );
+
+        // The scalar radius scales every channel together, so a zero radius
+        // switches the bleed off entirely regardless of the per-channel split.
+        let zero_radius = evaluate_subsurface_direct(
+            SurfaceSample {
+                subsurface_radius: 0.0,
+                ..base
+            },
+            frame(),
+            behind,
+        );
+        for channel in zero_radius {
+            assert_eq!(channel, 0.0, "{zero_radius:?}");
+        }
     }
 }

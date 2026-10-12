@@ -178,8 +178,10 @@ pub struct GpuSurfaceParameters {
     pub subsurface: f32,
     /// `OpenPBR` `subsurface_color`: tint of the scattered light.
     pub subsurface_color: [f32; 4],
-    /// `OpenPBR` `subsurface_radius`: per-channel scattering extent (RGB).
-    pub subsurface_radius: [f32; 4],
+    /// `OpenPBR` `subsurface_radius`: scalar scattering radius.
+    pub subsurface_radius: f32,
+    /// `OpenPBR` `subsurface_radius_scale`: per-channel split (color3).
+    pub subsurface_radius_scale: [f32; 4],
     /// `OpenPBR` `scatter_anisotropy` in `[-1, 1]`.
     pub scatter_anisotropy: f32,
     pub index_of_refraction: f32,
@@ -200,7 +202,7 @@ pub struct GpuSurfaceParameters {
     pub _pad_face2: f32,
     /// Tail padding keeping the fat authoring view a 16-byte multiple as the
     /// coat group grows. Carries no data.
-    pub _pad_tail: [f32; 4],
+    pub _pad_tail: [f32; 3],
 }
 
 impl Default for GpuSurfaceParameters {
@@ -234,7 +236,8 @@ impl Default for GpuSurfaceParameters {
             fuzz_color: [1.0; 4],
             subsurface: 0.0,
             subsurface_color: [1.0; 4],
-            subsurface_radius: [1.0; 4],
+            subsurface_radius: 1.0,
+            subsurface_radius_scale: [1.0, 0.5, 0.25, 1.0],
             scatter_anisotropy: 0.0,
             index_of_refraction: 1.5,
             dispersion: 0.0,
@@ -246,7 +249,7 @@ impl Default for GpuSurfaceParameters {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 4],
+            _pad_tail: [0.0; 3],
         }
     }
 }

@@ -193,18 +193,21 @@ impl Default for GpuSheenLobe {
 pub struct GpuSubsurfaceLobe {
     pub subsurface: f32,
     pub _pad0: f32,
+    /// `OpenPBR` `subsurface_radius`: scalar scattering radius (relative in this
+    /// real-time lobe; the specification default is 1).
+    pub subsurface_radius: f32,
     pub _pad1: f32,
-    pub _pad2: f32,
     /// `OpenPBR` `subsurface_color` (white = identity).
     pub subsurface_color: [f32; 4],
-    /// `OpenPBR` `subsurface_radius` (RGB free path, w unused; white = identity).
-    pub subsurface_radius: [f32; 4],
+    /// `OpenPBR` `subsurface_radius_scale` (color3, w unused): the per-channel
+    /// split of the radius, default (1.0, 0.5, 0.25) per the specification.
+    pub subsurface_radius_scale: [f32; 4],
     /// `OpenPBR` `scatter_anisotropy` in `[-1, 1]`: forward (+) / backward (-)
     /// bias of the transmitted lobe. `0.0` is the historical constant.
     pub scatter_anisotropy: f32,
+    pub _pad2: f32,
     pub _pad3: f32,
     pub _pad4: f32,
-    pub _pad5: f32,
 }
 
 impl Default for GpuSubsurfaceLobe {
@@ -212,14 +215,14 @@ impl Default for GpuSubsurfaceLobe {
         Self {
             subsurface: 0.0,
             _pad0: 0.0,
+            subsurface_radius: 1.0,
             _pad1: 0.0,
-            _pad2: 0.0,
             subsurface_color: [1.0; 4],
-            subsurface_radius: [1.0; 4],
+            subsurface_radius_scale: [1.0, 0.5, 0.25, 1.0],
             scatter_anisotropy: 0.0,
+            _pad2: 0.0,
             _pad3: 0.0,
             _pad4: 0.0,
-            _pad5: 0.0,
         }
     }
 }
@@ -513,14 +516,14 @@ impl SurfaceParameterBlock {
             subsurface: GpuSubsurfaceLobe {
                 subsurface: params.subsurface,
                 _pad0: 0.0,
-                _pad1: 0.0,
-                _pad2: 0.0,
-                subsurface_color: params.subsurface_color,
                 subsurface_radius: params.subsurface_radius,
+                _pad1: 0.0,
+                subsurface_color: params.subsurface_color,
+                subsurface_radius_scale: params.subsurface_radius_scale,
                 scatter_anisotropy: params.scatter_anisotropy,
+                _pad2: 0.0,
                 _pad3: 0.0,
                 _pad4: 0.0,
-                _pad5: 0.0,
             },
             transmission: GpuTransmissionLobe {
                 transmission: params.transmission,
@@ -590,6 +593,7 @@ impl SurfaceParameterBlock {
             full.subsurface = self.subsurface.subsurface;
             full.subsurface_color = self.subsurface.subsurface_color;
             full.subsurface_radius = self.subsurface.subsurface_radius;
+            full.subsurface_radius_scale = self.subsurface.subsurface_radius_scale;
             full.scatter_anisotropy = self.subsurface.scatter_anisotropy;
         }
         if self.lobe_mask.contains(LobeMask::TRANSMISSION) {
@@ -753,7 +757,8 @@ mod tests {
             fuzz_color: [0.8, 0.85, 0.9, 1.0],
             subsurface: 0.65,
             subsurface_color: [0.9, 0.5, 0.4, 1.0],
-            subsurface_radius: [1.0, 0.6, 0.4, 1.0],
+            subsurface_radius: 0.8,
+            subsurface_radius_scale: [1.0, 0.6, 0.4, 1.0],
             scatter_anisotropy: 0.7,
             index_of_refraction: 1.33,
             dispersion: 0.05,
@@ -765,7 +770,7 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 4],
+            _pad_tail: [0.0; 3],
         }
     }
 

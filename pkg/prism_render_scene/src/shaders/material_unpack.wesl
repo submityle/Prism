@@ -87,8 +87,9 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
     s.fuzz_roughness = 0.5;
     s.fuzz_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     s.subsurface = 0.0;
+    s.subsurface_radius = 1.0;
     s.subsurface_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
-    s.subsurface_radius = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    s.subsurface_radius_scale = vec4<f32>(1.0, 0.5, 0.25, 1.0);
     s.scatter_anisotropy = 0.0;
     s.transmission = 0.0;
     s.thickness = 0.0;
@@ -177,13 +178,14 @@ fn prism_unpack_surface(words: array<u32, 88>, lobe_mask: u32) -> PrismSurfacePa
     }
     if (lobe_mask & PRISM_LOBE_SUBSURFACE) != 0u {
         s.subsurface = bitcast<f32>(w[cursor]);
+        s.subsurface_radius = bitcast<f32>(w[cursor + 2u]);
         s.subsurface_color = vec4<f32>(
             bitcast<f32>(w[cursor + 4u]),
             bitcast<f32>(w[cursor + 5u]),
             bitcast<f32>(w[cursor + 6u]),
             bitcast<f32>(w[cursor + 7u]),
         );
-        s.subsurface_radius = vec4<f32>(
+        s.subsurface_radius_scale = vec4<f32>(
             bitcast<f32>(w[cursor + 8u]),
             bitcast<f32>(w[cursor + 9u]),
             bitcast<f32>(w[cursor + 10u]),

@@ -46,7 +46,8 @@ fn authored() -> GpuSurfaceParameters {
         fuzz_color: [0.8, 0.85, 0.9, 1.0],
         subsurface: 0.65,
         subsurface_color: [0.9, 0.5, 0.4, 1.0],
-        subsurface_radius: [1.0, 0.6, 0.4, 1.0],
+        subsurface_radius: 0.8,
+        subsurface_radius_scale: [1.0, 0.6, 0.4, 1.0],
         scatter_anisotropy: 0.7,
         index_of_refraction: 1.33,
         dispersion: 0.05,
@@ -58,7 +59,7 @@ fn authored() -> GpuSurfaceParameters {
         _pad_face0: 0.0,
         _pad_face1: 0.0,
         _pad_face2: 0.0,
-        _pad_tail: [0.0; 4],
+        _pad_tail: [0.0; 3],
     }
 }
 
@@ -93,7 +94,8 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
         (Some("sheen"), "fuzz_color") => p.fuzz_color.to_vec(),
         (Some("subsurface"), "subsurface") => vec![p.subsurface],
         (Some("subsurface"), "subsurface_color") => p.subsurface_color.to_vec(),
-        (Some("subsurface"), "subsurface_radius") => p.subsurface_radius.to_vec(),
+        (Some("subsurface"), "subsurface_radius") => vec![p.subsurface_radius],
+        (Some("subsurface"), "subsurface_radius_scale") => p.subsurface_radius_scale.to_vec(),
         (Some("subsurface"), "scatter_anisotropy") => vec![p.scatter_anisotropy],
         (Some("transmission"), "transmission") => vec![p.transmission],
         (Some("transmission"), "thickness") => vec![p.thickness],

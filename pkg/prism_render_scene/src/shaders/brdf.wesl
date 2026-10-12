@@ -113,7 +113,10 @@ struct SurfaceSample {
     // `OpenPBR` subsurface group: scattered-light tint (white = identity) and
     // per-channel scattering extent (white = identity, relative in this lobe).
     subsurface_color: vec3<f32>,
-    subsurface_radius: vec3<f32>,
+    // `OpenPBR` `subsurface_radius` (scalar, relative here) and
+    // `subsurface_radius_scale` (color3 per-channel split).
+    subsurface_radius: f32,
+    subsurface_radius_scale: vec3<f32>,
     thickness: f32,
     // Signed anisotropy in [-1, 1]; positive elongates the highlight along the
     // tangent, negative along the bitangent. Mirrors `SurfaceSample`.

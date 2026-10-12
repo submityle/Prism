@@ -83,7 +83,13 @@ fn subsurface_direct(
     let diffuse_weight = (vec3<f32>(1.0) - f) * (1.0 - metallic);
     var diffuse = vec3<f32>(0.0);
     for (var c = 0u; c < 3u; c = c + 1u) {
-        let wrap = clamp(subsurface * surface.subsurface_radius[c], 0.0, 1.0);
+        // `subsurface_radius` (scalar) times `subsurface_radius_scale` (color3)
+        // gives the per-channel scattering extent.
+        let wrap = clamp(
+            subsurface * surface.subsurface_radius * surface.subsurface_radius_scale[c],
+            0.0,
+            1.0,
+        );
         let diffuse_cos = subsurface_fd_wrap(raw_n_dot_l, wrap);
         diffuse[c] = surface.base_color[c]
             * scat_color[c]
