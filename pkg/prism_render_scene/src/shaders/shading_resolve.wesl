@@ -96,6 +96,8 @@ import prism_render_scene::shaders::material_sample::{
     sampled_material_defaults,
     sample_texture_slot,
     fold_material_texel,
+    prism_uv_gradients,
+    prism_texture_lod,
 };
 import prism_render_scene::shaders::tangent::{
     TangentBasis,
@@ -1399,7 +1401,11 @@ fn face_shadow_sample_sdf(tex_offset: u32, tex_count: u32, uv: vec2<f32>) -> f32
     for (var i = tex_offset; i < tex_end && i < tex_physical; i = i + 1u) {
         let record = material_textures[i];
         if record.semantic == SEMANTIC_FACE_SDF {
-            return sample_texture_slot(record, uv).x;
+            // The face-shadow SDF is an authored *mask*, not a filtered albedo:
+            // it is evaluated as a geometric term against the surface frame, so
+            // it stays on the base level (a mip-blurred mask would be a
+            // differently-shaped term, not a smoother one).
+            return sample_texture_slot(record, uv, 0.0).x;
         }
     }
     return 1.0;
@@ -1859,6 +1865,52 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
+    // Analytic per-pixel texture footprint (§7.1 distance LOD, roadmap P1-a).
+    //
+    // This is a compute dispatch, so the hardware cannot supply `dpdx`/`dpdy`
+    // and every material map used to be sampled at an explicit LOD 0 — full
+    // bandwidth and full aliasing at every distance. The footprint is still
+    // available: project the triangle's three vertices through the frame's
+    // `clip_from_world` and differentiate the barycentric UV interpolation,
+    // which gives the exact per-pixel `dUV/dx` / `dUV/dy` (barycentric
+    // gradients are constant over a triangle). Each record then picks its own
+    // level from *its own* texel count, so a 256² lookup table and a 4K albedo
+    // on the same material filter differently, as they should.
+    //
+    // Degenerate triangles and vertices behind the eye keep zero gradients,
+    // which maps to the base level — exactly the previous behaviour, so this can
+    // only ever remove aliasing/bandwidth, never change a well-formed surface's
+    // material.
+    var uv_gradients = array<vec2<f32>, 2>(vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 0.0));
+    if scene_index < arrayLength(&scene_current_transforms) {
+        let world_from_local =
+            affine3_to_square(scene_current_transforms[scene_index].world_from_local);
+        let clip_from_world = motion_matrices.clip_from_world;
+        let projected_a = project_world_to_uv(
+            clip_from_world,
+            (world_from_local * vec4<f32>(vertex_a.position, 1.0)).xyz,
+        );
+        let projected_b = project_world_to_uv(
+            clip_from_world,
+            (world_from_local * vec4<f32>(vertex_b.position, 1.0)).xyz,
+        );
+        let projected_c = project_world_to_uv(
+            clip_from_world,
+            (world_from_local * vec4<f32>(vertex_c.position, 1.0)).xyz,
+        );
+        if projected_a.z > 0.0 && projected_b.z > 0.0 && projected_c.z > 0.0 {
+            let resolution = vec2<f32>(f32(params.width), f32(params.height));
+            uv_gradients = prism_uv_gradients(
+                array<vec2<f32>, 3>(vertex_a.uv, vertex_b.uv, vertex_c.uv),
+                array<vec2<f32>, 3>(
+                    projected_a.xy * resolution,
+                    projected_b.xy * resolution,
+                    projected_c.xy * resolution,
+                ),
+            );
+        }
+    }
+
     // Resolve and generation-validate the material record.
     let material_index = metadata.x;
     if material_index >= arrayLength(&material_headers) {
@@ -1884,7 +1936,11 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let tex_physical = arrayLength(&material_textures);
     for (var i = material_header.texture_offset; i < tex_end && i < tex_physical; i = i + 1u) {
         let record = material_textures[i];
-        let texel = sample_texture_slot(record, geometry.uv);
+        // Per-record mip: the footprint is shared (one pixel), the texel count
+        // is not, so each map converts the same UV gradients with its own size.
+        let texel_dimensions = vec2<f32>(textureDimensions(material_texture_heap[record.index]));
+        let lod = prism_texture_lod(uv_gradients, texel_dimensions);
+        let texel = sample_texture_slot(record, geometry.uv, lod);
         sampled = fold_material_texel(record, texel, parameters.normal_scale, sampled);
     }
 

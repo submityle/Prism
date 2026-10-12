@@ -378,7 +378,14 @@ fn repack_sample(ids: vec4<u32>, metadata: vec4<u32>) -> RepackSample {
             let record = material_textures[i];
             if record.semantic == SEMANTIC_METALLIC_ROUGHNESS
                 || record.semantic == SEMANTIC_NORMAL {
-                let texel = sample_texture_slot(record, uv);
+                // Level 0: this pass's parameter block carries `view_from_world`
+                // but no projection matrix, so it cannot project the hit
+                // triangle to screen space and derive a footprint the way the
+                // primary resolve does (`shading_resolve.wesl`). It re-samples
+                // the metallic-roughness/normal maps for a *secondary*,
+                // temporally reprojected consumer, so it stays on the base level
+                // rather than guessing a level from view distance.
+                let texel = sample_texture_slot(record, uv, 0.0);
                 sampled = fold_material_texel(record, texel, parameters.normal_scale, sampled);
             }
         }

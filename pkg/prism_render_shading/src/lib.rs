@@ -65,6 +65,7 @@ mod subsurface;
 mod surface;
 mod taa;
 mod tangent;
+mod texture_lod;
 mod texture_sample;
 mod tonemap;
 pub mod upscale;
@@ -278,6 +279,11 @@ pub use taa::{
 };
 pub use tangent::{
     apply_tangent_space_normal, orthonormal_basis, resolve_tangent_basis, TangentBasis,
+};
+pub use texture_lod::{
+    in_finite_range as texture_lod_in_finite_range, texture_lod, triangle_lod,
+    uv_gradients as texture_uv_gradients, FINITE_RANGE as TEXTURE_LOD_FINITE_RANGE,
+    MIN_SCREEN_AREA,
 };
 pub use texture_sample::{
     decode_tangent_normal, fold_material_texel, sample_material, sampled_material_defaults,

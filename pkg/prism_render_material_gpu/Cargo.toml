@@ -13,6 +13,9 @@ futures-lite = "2"
 
 [dev-dependencies]
 prism_render_material_gpu = { path = "." }
+# The analytic texture-LOD parity gate diffs the shipping WESL footprint maths
+# against the CPU golden the resolve's contract is written against.
+prism_render_shading = { path = "../prism_render_shading" }
 
 [features]
 default = []

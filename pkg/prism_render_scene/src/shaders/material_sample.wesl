@@ -119,16 +119,115 @@ fn sampled_material_defaults(parameters: PrismSurfaceParameters) -> SampledMater
     return out;
 }
 
-// Samples one bound texture record from the bindless heap at LOD 0. The slot
-// and sampler indices are the ones the CPU `BindlessTextureHeap` assigned; an
-// unbound semantic points at a reserved default slot, never out of range.
-fn sample_texture_slot(record: PrismMaterialTexture, uv: vec2<f32>) -> vec4<f32> {
+// Samples one bound texture record from the bindless heap at an explicit level
+// of detail. The slot and sampler indices are the ones the CPU
+// `BindlessTextureHeap` assigned; an unbound semantic points at a reserved
+// default slot, never out of range.
+//
+// The resolve is a compute dispatch, so there are no `dpdx`/`dpdy` derivatives
+// for the hardware to pick a mip with: the caller passes the level it derived
+// analytically (`prism_texture_lod` below, §7.1). Callers that look up a
+// *data* map rather than a filtered albedo pass `0.0` explicitly.
+fn sample_texture_slot(
+    record: PrismMaterialTexture,
+    uv: vec2<f32>,
+    lod: f32,
+) -> vec4<f32> {
     return textureSampleLevel(
         material_texture_heap[record.index],
         material_sampler_heap[record.sampler_index],
         uv,
-        0.0,
+        lod,
     );
+}
+
+// Screen-space triangles at or below this area (px²) are treated as degenerate
+// and fall back to the base level. Mirrors `MIN_SCREEN_AREA` in
+// `prism_render_shading::texture_lod`.
+const PRISM_MIN_SCREEN_AREA: f32 = 1.0e-6;
+
+// Inputs outside ±`PRISM_FINITE_RANGE` are treated as non-finite and keep the
+// base level. Expressed as range comparisons rather than a `(x - x) == 0`
+// finiteness idiom because Metal's fast-math folds the latter to a constant
+// (measured: an infinite UV then sampled at an infinite LOD). Mirrors
+// `FINITE_RANGE` in `prism_render_shading::texture_lod`.
+const PRISM_FINITE_RANGE: f32 = 1.0e37;
+
+fn prism_lod_in_range(value: f32) -> bool {
+    return value > -PRISM_FINITE_RANGE && value < PRISM_FINITE_RANGE;
+}
+
+/// Per-pixel UV gradients `[dUV/dx, dUV/dy]` of the reconstructed triangle, in
+/// UV units per pixel.
+///
+/// Barycentric coordinates are affine over a triangle, so their gradients are
+/// constant across it and come from the inverse of the 2x2 screen-space edge
+/// matrix; differentiating the UV interpolation then gives the exact per-pixel
+/// texture footprint without any derivative hardware. A degenerate triangle
+/// (|det| <= `PRISM_MIN_SCREEN_AREA`) yields zero gradients, which maps to the
+/// base level — the resolve's behaviour before this existed.
+///
+/// Mirrors `prism_render_shading::texture_lod::uv_gradients` operation for
+/// operation, so the CPU golden and the GPU twin stay within 1 ULP.
+fn prism_uv_gradients(
+    uv: array<vec2<f32>, 3>,
+    screen: array<vec2<f32>, 3>,
+) -> array<vec2<f32>, 2> {
+    // Guard the inputs before any arithmetic can turn a malformed vertex into
+    // an infinite level.
+    for (var vertex = 0u; vertex < 3u; vertex = vertex + 1u) {
+        if !prism_lod_in_range(uv[vertex].x)
+            || !prism_lod_in_range(uv[vertex].y)
+            || !prism_lod_in_range(screen[vertex].x)
+            || !prism_lod_in_range(screen[vertex].y) {
+            return array<vec2<f32>, 2>(vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 0.0));
+        }
+    }
+    let e1 = screen[1] - screen[0];
+    let e2 = screen[2] - screen[0];
+    let det = e1.x * e2.y - e1.y * e2.x;
+    if !(abs(det) > PRISM_MIN_SCREEN_AREA) {
+        return array<vec2<f32>, 2>(vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 0.0));
+    }
+    let inv_det = 1.0 / det;
+    let d_lambda_b_dx = e2.y * inv_det;
+    let d_lambda_c_dx = -e1.y * inv_det;
+    let d_lambda_b_dy = -e2.x * inv_det;
+    let d_lambda_c_dy = e1.x * inv_det;
+    let d_uv_b = uv[1] - uv[0];
+    let d_uv_c = uv[2] - uv[0];
+    return array<vec2<f32>, 2>(
+        d_uv_b * d_lambda_b_dx + d_uv_c * d_lambda_c_dx,
+        d_uv_b * d_lambda_b_dy + d_uv_c * d_lambda_c_dy,
+    );
+}
+
+/// Isotropic mip level for a `dimensions`-texel map sampled with `gradients`.
+///
+/// The standard GPU rule — the longer texel-space gradient axis wins — so the
+/// level tracks distance continuously instead of snapping. Magnified or exactly
+/// 1:1 footprints stay on the base level. Mirrors
+/// `prism_render_shading::texture_lod::texture_lod`.
+fn prism_texture_lod(gradients: array<vec2<f32>, 2>, dimensions: vec2<f32>) -> f32 {
+    if !prism_lod_in_range(dimensions.x)
+        || !prism_lod_in_range(dimensions.y)
+        || !prism_lod_in_range(gradients[0].x)
+        || !prism_lod_in_range(gradients[0].y)
+        || !prism_lod_in_range(gradients[1].x)
+        || !prism_lod_in_range(gradients[1].y) {
+        return 0.0;
+    }
+    let d_x = gradients[0] * dimensions;
+    let d_y = gradients[1] * dimensions;
+    let len_x = length(d_x);
+    let len_y = length(d_y);
+    let extent = max(len_x, len_y);
+    // Magnified / exactly 1:1: the base level is already correct, and log2 of a
+    // sub-unit extent would be negative.
+    if !(extent > 1.0) {
+        return 0.0;
+    }
+    return log2(extent);
 }
 
 // Folds a single sampled texel into `sampled` according to its semantic,
