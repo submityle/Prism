@@ -40,6 +40,12 @@ const GENERATED_BANNER_LINE: &str =
 const REGEN_COMMAND: &str =
     "cargo run -p prism_material_schema --bin prism-material-codegen -- write";
 
+/// `rustfmt`'s default `max_width`. The generated Rust is emitted in the shape
+/// `rustfmt` would leave it in (see the `SURFACE_LOBE_WORDS_BY_SLOT` emission),
+/// so `cargo fmt` is a no-op over the generated file and the committed-vs-
+/// regenerated freshness gate stays exact.
+const RUSTFMT_MAX_WIDTH: usize = 100;
+
 /// Format an `f32` default as a source float literal with a mandatory decimal
 /// point, identical for both WESL and Rust (`1 -> 1.0`, `0.1 -> 0.1`). A plain
 /// `{}` can drop the point (`1`), which is a type error in WESL `f32` context,
@@ -418,15 +424,22 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         );
         slot_words[slot] = lobe.words as usize;
     }
-    let _ = writeln!(
-        o,
-        "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; {slot_span}] = [{}];",
-        slot_words
-            .iter()
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    // Emit the array in the shape `rustfmt` would leave it in, so running
+    // `cargo fmt` over the generated file is a no-op and the freshness gate
+    // (`tests/codegen_freshness.rs`) keeps meaning "committed == regenerated".
+    let slot_words = slot_words
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let declaration = format!("pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; {slot_span}] =");
+    let one_line = format!("{declaration} [{slot_words}];");
+    if one_line.chars().count() > RUSTFMT_MAX_WIDTH {
+        let _ = writeln!(o, "{declaration}");
+        let _ = writeln!(o, "    [{slot_words}];");
+    } else {
+        let _ = writeln!(o, "{one_line}");
+    }
     o.push_str("/// Number of defined optional lobes (equals `LobeMask::COUNT`).\n");
     let _ = writeln!(o, "pub const SURFACE_LOBE_COUNT: u32 = {count};");
     o.push_str(
@@ -571,7 +584,9 @@ mod tests {
         for needle in [
             "pub const SURFACE_CORE_WORDS: usize = 20;",
             "pub const SURFACE_LOBE_WORDS: usize = 16;",
-            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 17] = [8, 16, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];",
+            // Emitted wrapped, exactly where `rustfmt` would wrap it, so
+            // `cargo fmt` over the generated file is a no-op.
+            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 17] =\n    [8, 16, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];",
             "pub const SURFACE_LOBE_COUNT: u32 = 8;",
             "pub const SURFACE_MAX_WORDS: usize = 96;",
             "pub const SURFACE_LOBES: [LobeLayout; 8] = [",
@@ -603,7 +618,7 @@ mod tests {
         assert!(rust.contains("pub const SURFACE_LOBE_WORDS: usize = 20;"));
         // Two dense segments with a reserved gap: canonical 0..6, extension 16.
         assert!(rust.contains(
-            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 17] = [8, 20, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];"
+            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 17] =\n    [8, 20, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4];"
         ));
         // Worst case grows with the widened lobe; derive it from the schema so
         // the test does not re-hardcode the other lobes' footprints.
