@@ -18,8 +18,11 @@
 //!   disable every render-requiring member for a non-rendering run mode.
 //! - [`set`](PluginGroupBuilder::set) — replace a member's instance in place.
 //!
-//! Each member is keyed by its concrete type, so a type appears at most once
-//! and every edit is idempotent in position. When the builder is finished, its
+//! Each member is keyed by its concrete type, so a type appears at most once.
+//! [`set`](PluginGroupBuilder::set) / [`disable`](PluginGroupBuilder::disable) /
+//! [`enable`](PluginGroupBuilder::enable) keep the member's position; the
+//! `add*` editors instead [panic](PluginGroupBuilder::add) when the type is
+//! already a member. When the builder is finished, its
 //! enabled members are topologically ordered by their declared
 //! [`dependencies`](crate::plugin::Plugin::dependencies)
 //! (see [`crate::plugin_graph`]); the explicit order is the stable tie-break.
@@ -107,7 +110,10 @@ impl PluginGroupBuilder {
     // Named `add` for parity with `bevy_app`'s PluginGroupBuilder; it is a group
     // editor, not an arithmetic op, so the `std::ops::Add` confusion lint does
     // not apply.
-    #[allow(clippy::should_implement_trait)]
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "group-editor `add` mirrors bevy_app's PluginGroupBuilder, not std::ops::Add"
+    )]
     pub fn add<P: Plugin>(mut self, plugin: P) -> Self {
         let at = self.order.len();
         self.insert_at(at, plugin);

@@ -47,9 +47,10 @@ pub enum PluginGraphError {
         /// The depended-on plugin type that is missing from the group.
         missing: &'static str,
     },
-    /// The dependency edges contain a cycle. `members` lists the names of the
-    /// plugins that remained unresolved (i.e. participate in or feed the
-    /// cycle), in the group's explicit order.
+    /// The dependency edges contain a cycle. `members` lists the names of every
+    /// plugin left unresolved — the cycle's own members *and* the plugins that
+    /// transitively depend on them (they can never build either) — in the
+    /// group's explicit order.
     Cycle {
         /// Names of the plugins left unresolved by the cycle.
         members: Vec<&'static str>,

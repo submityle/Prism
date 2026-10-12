@@ -181,6 +181,11 @@ impl App {
     /// plugins, or a [`PluginGroup`]. Each plugin's [`build`](Plugin::build)
     /// runs immediately.
     ///
+    /// A tuple is added in declaration order and does **not** topologically
+    /// reorder by [`dependencies`](Plugin::dependencies) — use a
+    /// [`PluginGroup`] when you want dependency-ordered assembly (and
+    /// assembly-time cycle / missing-dependency detection).
+    ///
     /// # Panics
     ///
     /// Panics if a unique plugin (default) is added twice, or if called after
