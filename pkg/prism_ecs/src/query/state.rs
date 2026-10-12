@@ -14,6 +14,7 @@ use core::marker::PhantomData;
 
 use crate::archetype::ArchetypeId;
 use crate::change::Tick;
+use crate::entity::Entity;
 use crate::component::Components;
 use crate::query::access::Access;
 use crate::query::fetch::{QueryData, ReadOnlyQueryData};
@@ -22,6 +23,20 @@ use crate::query::filter::QueryFilter;
 use crate::query::slice::{ArchetypalFilter, ColumnSliceData};
 use crate::query::iter::QueryIter;
 use crate::world::World;
+
+/// Why [`QueryState::get`] / [`QueryState::get_mut`] could not resolve an
+/// entity's query terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryEntityError {
+    /// The entity is not live: it was never spawned, has been despawned, or the
+    /// handle's generation is stale.
+    NoSuchEntity(Entity),
+    /// The entity is live but does not match this query — its component set
+    /// lacks a required term or carries an excluded one, or its per-row change
+    /// state fails an [`Added`](crate::query::Added) / [`Changed`](crate::query::Changed)
+    /// filter this frame.
+    QueryDoesNotMatch(Entity),
+}
 
 /// Incrementally-maintained set of archetypes a query matches.
 ///
@@ -185,6 +200,134 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 this_run,
             )
         }
+    }
+
+    /// Fetch the query terms for a single `entity` over a shared view of
+    /// `world`, or report why it does not resolve (design §7 random access).
+    ///
+    /// This is the random-access dual of [`iter`](Self::iter): instead of
+    /// walking every matched row it jumps straight to `entity`'s storage
+    /// location, re-checks the archetype against the query's data/filter terms,
+    /// and applies the same per-row gate (`Added`/`Changed`/`With`/`Without`
+    /// plus any sparse-presence requirement) that iteration uses. Cost is
+    /// independent of the number of matched archetypes.
+    ///
+    /// Only read-only data terms are reachable (the `D: `[`ReadOnlyQueryData`]
+    /// bound), so a shared borrow is sufficient and several concurrent reads may
+    /// coexist. Use [`get_mut`](Self::get_mut) for `&mut T` terms.
+    ///
+    /// # Errors
+    /// - [`QueryEntityError::NoSuchEntity`] if `entity` is not live.
+    /// - [`QueryEntityError::QueryDoesNotMatch`] if `entity` is live but its
+    ///   component set (or per-row change state) does not satisfy the query.
+    #[inline]
+    pub fn get<'w, 's>(
+        &'s self,
+        world: &'w World,
+        entity: Entity,
+    ) -> Result<D::Item<'w>, QueryEntityError>
+    where
+        D: ReadOnlyQueryData,
+    {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
+        let world_ptr = (world as *const World).cast_mut();
+        // SAFETY: `D: ReadOnlyQueryData`, so no `&mut` fetch is ever formed and
+        // the shared `&'w World` borrow is sufficient; `world_ptr` stays valid
+        // for `'w`.
+        unsafe { self.get_from_ptr(world_ptr, entity, last_run, this_run) }
+    }
+
+    /// Fetch the query terms for a single `entity` over an exclusive view of
+    /// `world`, permitting `&mut T` terms.
+    ///
+    /// The mutable dual of [`get`](Self::get); see it for the lookup contract.
+    ///
+    /// # Errors
+    /// See [`get`](Self::get).
+    #[inline]
+    pub fn get_mut<'w, 's>(
+        &'s self,
+        world: &'w mut World,
+        entity: Entity,
+    ) -> Result<D::Item<'w>, QueryEntityError> {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
+        let world_ptr = world as *mut World;
+        // SAFETY: `world` is exclusively borrowed for `'w`, so the raw pointer
+        // is the sole route to the world during the fetch; a `&mut` term
+        // therefore yields a unique reference valid for `'w`.
+        unsafe { self.get_from_ptr(world_ptr, entity, last_run, this_run) }
+    }
+
+    /// Random-access fetch of a single `entity` from a raw `*mut World`.
+    ///
+    /// Shared engine of [`get`](Self::get) / [`get_mut`](Self::get_mut) and the
+    /// entry point used by the scheduler's `Query` system parameter, which only
+    /// ever holds a `*mut World` (never a `&mut World`).
+    ///
+    /// # Safety
+    /// `world` must point to a live [`World`] valid for `'w`, and the caller
+    /// must guarantee that no other live borrow aliases the component columns
+    /// this query's `D`/`F` terms touch — upheld by the per-system access set
+    /// plus the scheduler's conflict analysis, or by an exclusive `&mut World`.
+    pub(crate) unsafe fn get_from_ptr<'w, 's>(
+        &'s self,
+        world: *mut World,
+        entity: Entity,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Result<D::Item<'w>, QueryEntityError> {
+        // SAFETY: the caller guarantees `world` is live for `'w`; forming a
+        // shared `&World` is all that is needed to resolve the entity location
+        // and read archetype storage.
+        let world_ref: &'w World = unsafe { &*world };
+        let location = world_ref
+            .entities()
+            .location(entity)
+            .filter(|loc| !loc.is_empty())
+            .ok_or(QueryEntityError::NoSuchEntity(entity))?;
+        let archetype = world_ref
+            .archetypes()
+            .get(location.archetype_id)
+            .ok_or(QueryEntityError::NoSuchEntity(entity))?;
+        if !(D::matches(&self.data_state, archetype)
+            && F::matches(&self.filter_state, archetype))
+        {
+            return Err(QueryEntityError::QueryDoesNotMatch(entity));
+        }
+        let sparse_sets = world_ref.sparse_sets();
+        let row = location.row as usize;
+        debug_assert!(
+            row < archetype.len(),
+            "entity location row must index a live row of its archetype"
+        );
+        // SAFETY: `archetype` satisfies `D::matches` (checked above), the
+        // contract of `init_fetch`.
+        let fetch = unsafe {
+            D::init_fetch(&self.data_state, archetype, sparse_sets, last_run, this_run)
+        };
+        // SAFETY: the same archetype also satisfies `F::matches`, the contract
+        // of `F::init_fetch`.
+        let filter_fetch = unsafe {
+            F::init_fetch(&self.filter_state, archetype, sparse_sets, last_run, this_run)
+        };
+        // Per-row gate mirroring `QueryIter::next`: a rejected filter row or a
+        // missing sparse data term means the entity does not match this frame.
+        // SAFETY: `row` indexes a live row of this archetype and both fetches
+        // were built for it; `F::Fetch`/`D::Fetch` are `Copy`.
+        if !unsafe { F::filter_fetch(filter_fetch, entity, row) } {
+            return Err(QueryEntityError::QueryDoesNotMatch(entity));
+        }
+        // SAFETY: as above; a sparse-backed required data term resolves its
+        // per-entity membership here.
+        if !unsafe { D::filter_fetch(fetch, entity, row) } {
+            return Err(QueryEntityError::QueryDoesNotMatch(entity));
+        }
+        // SAFETY: this `(archetype, row)` is fetched exactly once for this call,
+        // so a `&mut` term yields a unique reference valid for `'w` (the world
+        // is exclusively borrowed for `'w` in the `&mut` entry points).
+        Ok(unsafe { D::fetch(fetch, entity, row) })
     }
 
     /// Iterate the rows matched by this query from a raw `*mut World`.

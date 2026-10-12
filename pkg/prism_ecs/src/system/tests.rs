@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 
 use crate::command::Commands;
 use crate::component::Component;
+use crate::entity::Entity;
 use crate::query::Access;
 use crate::resource::Resource;
 use crate::system::{IntoSystem, Local, Query, Res, ResMut, System};
@@ -218,4 +219,95 @@ fn exclusive_system_has_whole_world_access() {
     sys.run(&mut world);
     assert_eq!(world.resource::<Config>(), &Config(99));
     assert_eq!(world.query::<&Health>().iter(&world).count(), 1);
+}
+
+/// Entities handed to the random-access query systems below.
+#[derive(Debug)]
+struct Targets {
+    present: Entity,
+    other: Entity,
+    without_health: Entity,
+    dead: Entity,
+}
+impl Resource for Targets {}
+
+/// Collected outcome of the read-only probe system, so the test can assert on
+/// what the system observed through `Query::get` / `Query::contains`.
+#[derive(Debug, Default, PartialEq)]
+struct Probe {
+    present: Option<i32>,
+    without_is_err: bool,
+    dead_is_err: bool,
+    contains_present: bool,
+    contains_without: bool,
+}
+impl Resource for Probe {}
+
+/// `Query::get_mut` reaches a single entity by id from inside a system and
+/// writes through the returned reference; `Query::get` / `contains` resolve the
+/// read-only random-access path and surface the two error cases.
+#[test]
+fn query_param_random_access_get_and_contains() {
+    use crate::query::QueryEntityError;
+
+    let mut world = World::new();
+    let present = world.spawn(Health(10));
+    let other = world.spawn(Health(20));
+    let without_health = world.spawn(Spawned);
+    let dead = world.spawn(Health(99));
+    assert!(world.despawn(dead));
+    world.insert_resource(Targets {
+        present,
+        other,
+        without_health,
+        dead,
+    });
+    world.insert_resource(Probe::default());
+
+    fn mutate(targets: Res<Targets>, mut q: Query<&mut Health>) {
+        let mut h = q.get_mut(targets.present).expect("present matches");
+        h.0 += 100;
+        // A stale handle must not resolve even from the mutable path.
+        assert!(matches!(
+            q.get_mut(targets.dead),
+            Err(QueryEntityError::NoSuchEntity(e)) if e == targets.dead
+        ));
+    }
+
+    fn read(targets: Res<Targets>, q: Query<&Health>, mut probe: ResMut<Probe>) {
+        probe.present = q.get(targets.present).ok().map(|h| h.0);
+        probe.without_is_err = matches!(
+            q.get(targets.without_health),
+            Err(QueryEntityError::QueryDoesNotMatch(_))
+        );
+        probe.dead_is_err = matches!(
+            q.get(targets.dead),
+            Err(QueryEntityError::NoSuchEntity(_))
+        );
+        probe.contains_present = q.contains(targets.present);
+        probe.contains_without = q.contains(targets.without_health);
+        // `other` is a distinct live match, proving lookup is not pinned to one row.
+        assert_eq!(q.get(targets.other).map(|h| h.0), Ok(20));
+    }
+
+    let mut mutate_sys = IntoSystem::into_system(mutate);
+    mutate_sys.initialize(&mut world);
+    mutate_sys.run(&mut world);
+    assert_eq!(world.get::<Health>(present).map(|h| h.0), Some(110));
+
+    let mut read_sys = IntoSystem::into_system(read);
+    read_sys.initialize(&mut world);
+    read_sys.run(&mut world);
+
+    assert_eq!(
+        world.resource::<Probe>(),
+        &Probe {
+            present: Some(110),
+            without_is_err: true,
+            dead_is_err: true,
+            contains_present: true,
+            contains_without: false,
+        }
+    );
+
 }

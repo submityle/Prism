@@ -14,7 +14,10 @@
 //! several disjoint params of one system (or several compatible systems) touch
 //! the same world at once under the kernel's access-conflict discipline.
 
-use crate::query::{Access, QueryData, QueryFilter, QueryIter, QueryState, ReadOnlyQueryData};
+use crate::entity::Entity;
+use crate::query::{
+    Access, QueryData, QueryEntityError, QueryFilter, QueryIter, QueryState, ReadOnlyQueryData,
+};
 #[cfg(feature = "multi_thread")]
 use crate::query::{ArchetypalFilter, ColumnSliceData};
 use crate::system::param::SystemParam;
@@ -74,6 +77,62 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
                 self.world.this_run(),
             )
         }
+    }
+
+    /// Fetch this query's terms for a single `entity` with shared access, or
+    /// report why it does not resolve. The random-access dual of
+    /// [`iter`](Self::iter); available only when every data term is read-only
+    /// (`D: `[`ReadOnlyQueryData`]).
+    ///
+    /// # Errors
+    /// See [`QueryEntityError`].
+    #[inline]
+    pub fn get(&self, entity: Entity) -> Result<D::Item<'_>, QueryEntityError>
+    where
+        D: ReadOnlyQueryData,
+    {
+        // SAFETY: `self.world` is live for `'w`; `D: ReadOnlyQueryData` means no
+        // `&mut` fetch is formed, and this system's declared read access
+        // guarantees nothing writes the columns we read.
+        unsafe {
+            self.state.get_from_ptr(
+                self.world.as_ptr(),
+                entity,
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
+    }
+
+    /// Fetch this query's terms for a single `entity` with exclusive access,
+    /// permitting `&mut T`. Takes `&mut self` so the borrow checker forbids
+    /// holding two mutable fetches of one query at once.
+    ///
+    /// # Errors
+    /// See [`QueryEntityError`].
+    #[inline]
+    pub fn get_mut(&mut self, entity: Entity) -> Result<D::Item<'_>, QueryEntityError> {
+        // SAFETY: `self.world` is live for `'w`; `&mut self` makes this the sole
+        // live fetch of this query, and the system's declared write access
+        // guarantees nothing else touches the columns we write.
+        unsafe {
+            self.state.get_from_ptr(
+                self.world.as_ptr(),
+                entity,
+                self.world.last_run(),
+                self.world.this_run(),
+            )
+        }
+    }
+
+    /// Whether `entity` is matched by this query (live and satisfying every
+    /// data/filter term this frame).
+    #[inline]
+    pub fn contains(&self, entity: Entity) -> bool
+    where
+        D: ReadOnlyQueryData,
+    {
+        self.get(entity).is_ok()
     }
 
     /// Visit every matched row with shared access.
