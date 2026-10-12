@@ -64,6 +64,11 @@ reflect = ["std", "dep:prism_reflect"]
 # default so an un-observed build pays nothing.
 trace = ["std"]
 
+# Dev-time configuration hot-reload (design §24.2): re-apply a config file
+# through the `User` cascade layer whenever its contents change. std-only (file
+# I/O); off by default so a shipped build pays nothing.
+hot-reload = ["std"]
+
 # AAA lint bar. prism_app contains no `unsafe`, so unlike prism_ecs it can keep
 # the workspace-strength lints as warnings and still hit zero warnings.
 [lints.rust]

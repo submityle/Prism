@@ -223,6 +223,8 @@ pub mod fixed;
 pub mod lifecycle;
 #[cfg(feature = "std")]
 pub mod pacing;
+#[cfg(feature = "hot-reload")]
+pub mod hot_reload;
 #[cfg(feature = "pipelined")]
 pub mod pipelined;
 pub mod platform_tier;
@@ -351,6 +353,8 @@ pub mod prelude {
     };
     #[cfg(feature = "pipelined")]
     pub use crate::pipelined::PipelinedExecutor;
+    #[cfg(feature = "hot-reload")]
+    pub use crate::hot_reload::{ConfigHotReload, ReloadOutcome};
     pub use crate::platform_tier::PlatformTierProfile;
     pub use crate::plugin::{Plugin, PluginDependency};
     pub use crate::plugin_graph::PluginGraphError;
