@@ -131,6 +131,51 @@ fn cc_modulated_darkening(coat_weight: f32, coat_darkening: f32, delta: f32) -> 
     return 1.0 + (clamp(delta, 0.0, 1.0) - 1.0) * (c * d);
 }
 
+// `openpbr` §Coat *Roughening*: `r'_B = lerp(r_B, min(1, r_B⁴ + 2·r_C⁴)^(1/4), C)`.
+// Mirrors `clearcoat.rs::coat_roughened_base_roughness`.
+fn cc_roughened_base_roughness(r_base: f32, r_coat: f32, coat_weight: f32) -> f32 {
+    let rb = clamp(r_base, 0.0, 1.0);
+    let rc = clamp(r_coat, 0.0, 1.0);
+    let c = clamp(coat_weight, 0.0, 1.0);
+    let rb2 = rb * rb;
+    let rc2 = rc * rc;
+    let convolved = sqrt(sqrt(min(rb2 * rb2 + 2.0 * rc2 * rc2, 1.0)));
+    return rb + (convolved - rb) * c;
+}
+
+// `openpbr` §Coat *View-dependent absorption*: the two-way transmittance through
+// the coating along the input and output rays,
+// `coat_color^((1/μᵗᵢ + 1/μᵗₒ)/2)` with `μᵗ = sqrt(1 − (1 − μ²)/η²_ca)`.
+// A totally internally reflected ray travels an unbounded path and contributes
+// zero. Mirrors `clearcoat.rs::coat_absorption_rgb`.
+fn cc_absorption_rgb(
+    coat_color: vec3<f32>,
+    mu_i: f32,
+    mu_o: f32,
+    eta_ca: f32,
+) -> vec3<f32> {
+    let ti = cc_refracted_cosine(mu_i, eta_ca);
+    let to = cc_refracted_cosine(mu_o, eta_ca);
+    if ti <= 0.0 || to <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let exponent = 0.5 * (1.0 / ti + 1.0 / to);
+    return pow(clamp(coat_color, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(exponent));
+}
+
+// The angle cosine after refraction into the coat,
+// `μᵗ = sqrt(1 − (1 − μ²)/η²_ca)` (specification eq. `refracted_coat_dir`).
+// Zero encodes total internal reflection inside the coating. WESL has no
+// closures, so this is a plain helper rather than a lambda.
+fn cc_refracted_cosine(mu: f32, eta_ca: f32) -> f32 {
+    let m = clamp(mu, 0.0, 1.0);
+    let s = 1.0 - (1.0 - m * m) / (eta_ca * eta_ca);
+    if s <= 0.0 {
+        return 0.0;
+    }
+    return sqrt(s);
+}
+
 // Two-layer clear-coat BSDF for a single analytic light. Mirrors
 // `evaluate_clearcoat_direct`.
 fn clearcoat_direct(
@@ -155,7 +200,20 @@ fn clearcoat_direct(
 
     // Base layer: isotropic principled dielectric/metal.
     let metallic = clamp(surface.metallic, 0.0, 1.0);
-    let roughness = clamp(surface.perceptual_roughness, CLEARCOAT_MIN_ROUGHNESS, 1.0);
+    // `OpenPBR` §Coat *Roughening*: a rough coat convolves the base NDF, so the
+    // base specular lobe uses `r'_B = lerp(r_B, min(1, r_B⁴+2r_C⁴)^(1/4), C)`.
+    // `coat_weight == 0` reduces it to the exact identity. Mirrors `clearcoat.rs`.
+    let coat = clamp(surface.clearcoat, 0.0, 1.0);
+    let coat_roughness = clamp(
+        surface.clearcoat_roughness,
+        CLEARCOAT_MIN_ROUGHNESS,
+        1.0,
+    );
+    let roughness = clamp(
+        cc_roughened_base_roughness(surface.perceptual_roughness, surface.clearcoat_roughness, coat),
+        CLEARCOAT_MIN_ROUGHNESS,
+        1.0,
+    );
     let alpha = roughness * roughness;
     let f0 = mix(dielectric_f0(surface), surface.base_color, metallic);
     let f = fresnel_schlick(f0, v_dot_h);
@@ -180,8 +238,6 @@ fn clearcoat_direct(
     // Coat layer: a second smooth dielectric GGX lobe. The coat is an
     // index-matched white dielectric, so its Fresnel is achromatic; the scalar
     // `Fc` drives both the coat highlight and the base attenuation.
-    let coat = clamp(surface.clearcoat, 0.0, 1.0);
-    let coat_roughness = clamp(surface.clearcoat_roughness, CLEARCOAT_MIN_ROUGHNESS, 1.0);
     let coat_alpha = coat_roughness * coat_roughness;
     // The coat's Fresnel is achromatic (driven solely by `coat_ior`), so the
     // scalar `Fc` drives both the highlight and the base attenuation.
@@ -235,8 +291,10 @@ fn clearcoat_direct(
             coat_g = vis_smith(max(coat_n_dot_v, CLEARCOAT_MIN_N_DOT), coat_n_dot_l, coat_alpha);
         }
     }
-    // `OpenPBR` `coat_color` tints the highlight; white is the exact identity.
-    let coat_specular = surface.coat_color * (coat * coat_f * coat_d * coat_g * coat_n_dot_l);
+    // The coat's own specular reflection is *not* tinted by `coat_color`: the
+    // specification reserves `coat_color` for the absorbing medium, which tints
+    // the base instead (see the transmission factor below).
+    let coat_specular = vec3<f32>(coat * coat_f * coat_d * coat_g * coat_n_dot_l);
 
     // Double-pass transmission at the view and light angles (the reference PT
     // `CoatLayer` form): the base is gated entering and leaving the coat.
@@ -261,8 +319,14 @@ fn clearcoat_direct(
     );
     let delta = cc_darkening_delta(e_b, k);
     let darkening = cc_modulated_darkening(coat, clamp(surface.coat_darkening, 0.0, 1.0), delta);
+    // `OpenPBR` §Coat *View-dependent absorption*: the absorbing medium tints the
+    // light that reaches the base and returns, so the base — and only the base —
+    // is multiplied by the two-way transmittance. `lerp(1, ·, C)` keeps
+    // `coat_weight == 0` an exact identity.
+    let absorption = cc_absorption_rgb(surface.coat_color, n_dot_v, n_dot_l, coat_ior);
+    let tinted_base = base * (vec3<f32>(1.0) + (absorption - vec3<f32>(1.0)) * coat);
 
-    let reflected = base * (throughput * darkening) + coat_specular;
+    let reflected = tinted_base * (throughput * darkening) + coat_specular;
     let radiance = reflected * light.illuminance;
     return radiance * visibility + surface.emissive;
 }

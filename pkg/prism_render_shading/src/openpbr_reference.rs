@@ -277,6 +277,65 @@ pub fn modulated_darkening_factor(coat_weight: f32, coat_darkening: f32, delta: 
     1.0 + (delta.clamp(0.0, 1.0) - 1.0) * (c * d)
 }
 
+/// `OpenPBR` §Coat *Roughening*: a rough coat convolves the base NDF, so the
+/// base's effective roughness becomes
+/// `r'_B = lerp(r_B, min(1, r_B⁴ + 2·r_C⁴)^(1/4), C)`.
+///
+/// `C == 0` is the exact identity and `r_C == 0` leaves the base untouched.
+#[inline]
+#[must_use]
+pub fn coat_roughened_base_roughness(r_base: f32, r_coat: f32, coat_weight: f32) -> f32 {
+    let rb = r_base.clamp(0.0, 1.0);
+    let rc = r_coat.clamp(0.0, 1.0);
+    let c = coat_weight.clamp(0.0, 1.0);
+    let rb2 = rb * rb;
+    let rc2 = rc * rc;
+    let convolved = ops::sqrt(ops::sqrt((rb2 * rb2 + 2.0 * rc2 * rc2).min(1.0)));
+    rb + (convolved - rb) * c
+}
+
+/// `OpenPBR` §Coat *View-dependent absorption*: the volumetric transmittance
+/// along the input and output rays,
+/// `T_coat^(1/μᵗᵢ + 1/μᵗₒ)` with the ray cosines refracted into the coat,
+/// `μᵗ = sqrt(1 − (1 − μ²)/η²_ca)`.
+///
+/// `coat_color` is the *two-way* normal-incidence transmittance (the
+/// specification's `T²_coat`), so the per-pass transmittance is its square root;
+/// at normal incidence the factor is exactly `coat_color`. A ray that is totally
+/// internally reflected inside the coat (`μᵗ ≤ 0`) travels an unbounded path and
+/// therefore contributes no transmittance (`0`).
+#[inline]
+#[must_use]
+pub fn coat_absorption_rgb(
+    coat_color: [f32; 3],
+    mu_i: f32,
+    mu_o: f32,
+    eta_ca: f32,
+) -> [f32; 3] {
+    let mu_t = |mu: f32| -> f32 {
+        let m = mu.clamp(0.0, 1.0);
+        let s = 1.0 - (1.0 - m * m) / (eta_ca * eta_ca);
+        if s <= 0.0 {
+            0.0
+        } else {
+            ops::sqrt(s)
+        }
+    };
+    let ti = mu_t(mu_i);
+    let to = mu_t(mu_o);
+    if ti <= 0.0 || to <= 0.0 {
+        return [0.0; 3];
+    }
+    // The per-pass transmittance is `sqrt(coat_color)`, so the two-way exponent
+    // halves: `coat_color^((1/μᵗᵢ + 1/μᵗₒ)/2)`.
+    let exponent = 0.5 * (1.0 / ti + 1.0 / to);
+    let mut out = [0.0_f32; 3];
+    for (c, slot) in out.iter_mut().enumerate() {
+        *slot = ops::powf(coat_color[c].clamp(0.0, 1.0), exponent);
+    }
+    out
+}
+
 /// `OpenPBR` equation `openpbr-anisotropy-formula`: perceptual roughness `r` and
 /// anisotropy `a ∈ [0, 1]` → the two GGX widths along the tangent and bitangent.
 #[inline]
@@ -757,5 +816,68 @@ mod conformance {
             }
         }
         assert!(worst_r <= 1.0e-6, "base roughness estimate deviates by {worst_r}");
+    }
+
+    /// `OpenPBR` §Coat *Roughening*: the real-time base roughness under the coat
+    /// must be the specification's convolution `lerp(r_B, min(1, r_B⁴+2r_C⁴)^¼, C)`.
+    #[test]
+    fn coat_roughening_matches_the_openpbr_reference() {
+        let mut worst = 0.0_f32;
+        for r_base in [0.0_f32, 0.15, 0.4, 0.75, 1.0] {
+            for r_coat in [0.0_f32, 0.1, 0.35, 0.8, 1.0] {
+                for c in [0.0_f32, 0.25, 0.5, 1.0] {
+                    let rt = crate::clearcoat::coat_roughened_base_roughness(r_base, r_coat, c);
+                    let rf = coat_roughened_base_roughness(r_base, r_coat, c);
+                    worst = worst.max((rt - rf).abs());
+                }
+            }
+        }
+        assert!(worst <= 1.0e-6, "coat roughening deviates by {worst}");
+        // Defining reductions: no coat ⇒ identity; smooth coat ⇒ identity; and
+        // the roughened base never gets smoother than the authored base.
+        for r in [0.0_f32, 0.3, 0.9] {
+            assert_eq!(coat_roughened_base_roughness(r, 0.7, 0.0), r);
+            assert_eq!(coat_roughened_base_roughness(r, 0.0, 1.0), r);
+            assert!(coat_roughened_base_roughness(r, 0.7, 1.0) >= r);
+        }
+    }
+
+    /// `OpenPBR` §Coat *View-dependent absorption*: the base beneath an absorbing
+    /// coat is tinted by the two-way transmittance, and the coat's own highlight
+    /// is not.
+    #[test]
+    fn coat_absorption_matches_the_openpbr_reference() {
+        let mut worst = 0.0_f32;
+        for coat_color in [[1.0_f32; 3], [0.8, 0.5, 0.2], [0.0; 3]] {
+            for eta in [1.0_f32, 1.3, 1.6, 2.0] {
+                for mu_i in [1.0_f32, 0.8, 0.5, 0.2, 0.05] {
+                    for mu_o in [1.0_f32, 0.6, 0.1] {
+                        let rt =
+                            crate::clearcoat::coat_absorption_rgb(coat_color, mu_i, mu_o, eta);
+                        let rf = coat_absorption_rgb(coat_color, mu_i, mu_o, eta);
+                        for c in 0..3 {
+                            worst = worst.max((rt[c] - rf[c]).abs());
+                        }
+                    }
+                }
+            }
+        }
+        assert!(worst <= 1.0e-5, "coat absorption deviates by {worst}");
+        // At normal incidence the two-way transmittance is exactly `coat_color`
+        // (the specification's definition of the parameter).
+        let color = [0.8_f32, 0.5, 0.2];
+        let normal = coat_absorption_rgb(color, 1.0, 1.0, 1.6);
+        for c in 0..3 {
+            assert!((normal[c] - color[c]).abs() < 1.0e-5, "{normal:?} vs {color:?}");
+        }
+        // A grazing view travels a longer path through the medium, so it can only
+        // darken further (never brighten), and white is the exact identity.
+        let grazing = coat_absorption_rgb(color, 0.1, 0.1, 1.6);
+        for c in 0..3 {
+            assert!(grazing[c] <= normal[c] + 1e-6);
+        }
+        assert_eq!(coat_absorption_rgb([1.0; 3], 0.1, 0.2, 1.6), [1.0; 3]);
+        // Total internal reflection inside the coat blocks transmission entirely.
+        assert_eq!(coat_absorption_rgb(color, 0.1, 0.2, 0.5), [0.0; 3]);
     }
 }

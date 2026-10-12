@@ -143,6 +143,55 @@ fn base_normal_albedo(base_color: [f32; 3]) -> f32 {
     ((base_color[0] + base_color[1] + base_color[2]) / 3.0).clamp(0.0, 1.0)
 }
 
+/// `OpenPBR` §Coat *Roughening*: a rough coat convolves the base NDF, so the
+/// base's effective specular roughness becomes
+/// `r'_B = lerp(r_B, min(1, r_B⁴ + 2·r_C⁴)^(1/4), C)`. `C == 0` is the exact
+/// identity and `r_C == 0` leaves the base untouched.
+#[inline]
+pub(crate) fn coat_roughened_base_roughness(r_base: f32, r_coat: f32, coat_weight: f32) -> f32 {
+    let rb = r_base.clamp(0.0, 1.0);
+    let rc = r_coat.clamp(0.0, 1.0);
+    let c = coat_weight.clamp(0.0, 1.0);
+    let rb2 = rb * rb;
+    let rc2 = rc * rc;
+    let convolved = (rb2 * rb2 + 2.0 * rc2 * rc2).min(1.0).sqrt().sqrt();
+    rb + (convolved - rb) * c
+}
+
+/// `OpenPBR` §Coat *View-dependent absorption*: `coat_color` is the **two-way**
+/// normal-incidence transmittance through the coating, so the base beneath is
+/// tinted by `coat_color^((1/μᵗᵢ + 1/μᵗₒ)/2)` with the ray cosines refracted
+/// into the coat, `μᵗ = sqrt(1 − (1 − μ²)/η²_ca)`. A totally internally
+/// reflected ray travels an unbounded path and contributes no transmittance.
+#[inline]
+pub(crate) fn coat_absorption_rgb(
+    coat_color: [f32; 3],
+    mu_i: f32,
+    mu_o: f32,
+    eta_ca: f32,
+) -> [f32; 3] {
+    let mu_t = |mu: f32| -> f32 {
+        let m = mu.clamp(0.0, 1.0);
+        let s = 1.0 - (1.0 - m * m) / (eta_ca * eta_ca);
+        if s <= 0.0 {
+            0.0
+        } else {
+            s.sqrt()
+        }
+    };
+    let ti = mu_t(mu_i);
+    let to = mu_t(mu_o);
+    if ti <= 0.0 || to <= 0.0 {
+        return [0.0; 3];
+    }
+    let exponent = 0.5 * (1.0 / ti + 1.0 / to);
+    [
+        bevy_math::ops::powf(coat_color[0].clamp(0.0, 1.0), exponent),
+        bevy_math::ops::powf(coat_color[1].clamp(0.0, 1.0), exponent),
+        bevy_math::ops::powf(coat_color[2].clamp(0.0, 1.0), exponent),
+    ]
+}
+
 /// Reciprocal of pi, matching the GPU `INV_PI` constant.
 const INV_PI: f32 = 1.0 / PI;
 /// Roughness floor shared with the principled lobe (`MIN_ROUGHNESS`).
@@ -224,7 +273,18 @@ pub fn evaluate_clearcoat_direct(
 
     // --- Base layer: isotropic principled dielectric/metal ---
     let metallic = surface.metallic.clamp(0.0, 1.0);
-    let roughness = surface.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0);
+    // `OpenPBR` §Coat *Roughening*: the coat's own NDF convolves the base's, so
+    // the base specular lobe below uses `r'_B` rather than the authored
+    // `specular_roughness`. `coat_weight == 0` reduces it to the exact identity,
+    // which is what keeps the no-coat path bit-identical to the principled lobe.
+    let coat = surface.clearcoat.clamp(0.0, 1.0);
+    let coat_roughness = surface.clearcoat_roughness.clamp(MIN_ROUGHNESS, 1.0);
+    let roughness = coat_roughened_base_roughness(
+        surface.perceptual_roughness,
+        surface.clearcoat_roughness,
+        coat,
+    )
+    .clamp(MIN_ROUGHNESS, 1.0);
     let alpha = roughness * roughness;
     let f0 = mix3(dielectric_f0(&surface), surface.base_color, metallic);
     let f = fresnel_schlick(f0, v_dot_h);
@@ -264,8 +324,6 @@ pub fn evaluate_clearcoat_direct(
     );
 
     // --- Coat layer: a second smooth dielectric GGX lobe ---
-    let coat = surface.clearcoat.clamp(0.0, 1.0);
-    let coat_roughness = surface.clearcoat_roughness.clamp(MIN_ROUGHNESS, 1.0);
     let coat_alpha = coat_roughness * coat_roughness;
     // The coat's Fresnel is achromatic (driven solely by `coat_ior`), so the
     // scalar `Fc` drives both the highlight and the base attenuation.
@@ -332,11 +390,10 @@ pub fn evaluate_clearcoat_direct(
     } else {
         (0.0, 0.0)
     };
-    // OpenPBR `coat_color` tints the highlight; white is the exact identity.
-    let coat_specular = mul(
-        surface.coat_color,
-        [coat * coat_f * coat_d * coat_g * coat_n_dot_l; 3],
-    );
+    // The coat's own specular reflection is *not* tinted by `coat_color`: the
+    // specification reserves `coat_color` for the absorbing medium, which tints
+    // the base instead (see the transmission factor below).
+    let coat_specular = [coat * coat_f * coat_d * coat_g * coat_n_dot_l; 3];
 
     // Double-pass transmission: light is refracted through the coat on entry
     // and again on exit, so the base is gated by the coat Fresnel at the view
@@ -363,6 +420,19 @@ pub fn evaluate_clearcoat_direct(
     let e_b = base_normal_albedo(surface.base_color);
     let delta = coat_darkening_delta(e_b, k);
     let darkening = coat_modulated_darkening(coat, coat_darkening, delta);
+    // `OpenPBR` §Coat *View-dependent absorption*: the absorbing medium tints the
+    // light that reaches the base and returns, so the base — and only the base —
+    // is multiplied by the two-way transmittance. `lerp(1, ·, C)` keeps
+    // `coat_weight == 0` an exact identity.
+    let absorption = coat_absorption_rgb(surface.coat_color, n_dot_v, n_dot_l, coat_ior);
+    let base = mul(
+        base,
+        [
+            1.0 + (absorption[0] - 1.0) * coat,
+            1.0 + (absorption[1] - 1.0) * coat,
+            1.0 + (absorption[2] - 1.0) * coat,
+        ],
+    );
 
     let reflected = add(mul_scalar(base, throughput * darkening), coat_specular);
     let radiance = mul(reflected, light.illuminance);
@@ -637,21 +707,42 @@ mod tests {
     }
 
     #[test]
-    fn coat_color_tints_only_the_coat_highlight() {
-        // A red coat keeps the red channel of the highlight and drops green and
-        // blue; the base and its attenuation are untouched by the tint.
-        let white = evaluate_clearcoat_direct(base_surface(), frame(), light());
+    fn coat_color_tints_the_base_not_the_highlight() {
+        // `OpenPBR` §Coat *View-dependent absorption*: `coat_color` describes the
+        // **absorbing medium** of the coat, so it tints the light that reaches
+        // the base. The specification is explicit that the specular reflection
+        // from the coat itself is *not* tinted.
+        let base = base_surface();
+        let white = evaluate_clearcoat_direct(base, frame(), light());
         let red = evaluate_clearcoat_direct(
             SurfaceSample {
                 coat_color: [1.0, 0.0, 0.0],
-                ..base_surface()
+                ..base
             },
             frame(),
             light(),
         );
-        assert!(red[0] >= white[0], "red coat must keep the red highlight: {red:?} vs {white:?}");
-        assert!(red[1] < white[1], "red coat must drop green: {red:?} vs {white:?}");
-        assert!(red[2] < white[2], "red coat must drop blue: {red:?} vs {white:?}");
+        // The base beneath the red coat loses green and blue.
+        assert!(red[1] < white[1], "red coat must absorb green: {red:?} vs {white:?}");
+        assert!(red[2] < white[2], "red coat must absorb blue: {red:?} vs {white:?}");
+        // Isolating the coat with `base_weight = 0` proves the highlight is
+        // untouched: white and red `coat_color` give byte-identical results.
+        let coat_only = |color: [f32; 3]| {
+            evaluate_clearcoat_direct(
+                SurfaceSample {
+                    base_weight: 0.0,
+                    coat_color: color,
+                    ..base
+                },
+                frame(),
+                light(),
+            )
+        };
+        assert_eq!(
+            coat_only([1.0; 3]),
+            coat_only([1.0, 0.0, 0.0]),
+            "coat_color must not tint the coat's own highlight"
+        );
     }
 
     #[test]
@@ -720,31 +811,49 @@ mod tests {
     #[test]
     fn coat_normal_facing_away_zeroes_only_the_highlight() {
         // A coat normal pointing away from the light reflects nothing into it.
-        // That must leave the base attenuation intact: the same surface with a
-        // black `coat_color` (highlight zeroed, attenuation kept) is the exact
-        // reference.
-        let away = evaluate_clearcoat_direct(
-            SurfaceSample {
-                clearcoat: 1.0,
-                coat_normal: [0.0, -1.0, 0.0],
-                ..base_surface()
-            },
-            frame(),
-            light(),
-        );
-        let black_highlight = evaluate_clearcoat_direct(
-            SurfaceSample {
-                clearcoat: 1.0,
-                coat_color: [0.0; 3],
-                ..base_surface()
-            },
-            frame(),
-            light(),
-        );
+        // `base_weight = 0` removes the whole base layer, leaving the coat's own
+        // reflection: facing away it must be exactly zero, facing the light it
+        // must be positive. (`coat_color` is the *absorbing medium's* tint and
+        // does not touch the highlight, so it cannot be used to zero it here.)
+        let coat_only = |normal: [f32; 3]| {
+            evaluate_clearcoat_direct(
+                SurfaceSample {
+                    clearcoat: 1.0,
+                    coat_normal: normal,
+                    base_weight: 0.0,
+                    ..base_surface()
+                },
+                frame(),
+                light(),
+            )
+        };
+        let toward = coat_only([0.0; 3]);
+        let away = coat_only([0.0, -1.0, 0.0]);
+        assert!(sum(toward) > 0.0, "coat highlight missing: {toward:?}");
+        assert_eq!(away, [0.0; 3], "facing-away coat still reflects: {away:?}");
+
+        // And the orientation changes *only* the highlight: the difference
+        // between the full surfaces equals the difference between the
+        // coat-only surfaces, i.e. the base contribution cancels exactly.
+        let full = |normal: [f32; 3]| {
+            evaluate_clearcoat_direct(
+                SurfaceSample {
+                    clearcoat: 1.0,
+                    coat_normal: normal,
+                    ..base_surface()
+                },
+                frame(),
+                light(),
+            )
+        };
+        let (full_toward, full_away) = (full([0.0; 3]), full([0.0, -1.0, 0.0]));
         for c in 0..3 {
+            let base_delta = full_away[c] - full_toward[c];
+            let coat_delta = away[c] - toward[c];
             assert!(
-                (away[c] - black_highlight[c]).abs() < 1.0e-6,
-                "channel {c}: away={away:?} black={black_highlight:?}"
+                (base_delta - coat_delta).abs() < 1.0e-6,
+                "channel {c}: base leaked through the coat normal, \
+                 full={full_toward:?}/{full_away:?} coat={toward:?}/{away:?}"
             );
         }
     }
