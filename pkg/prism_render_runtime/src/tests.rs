@@ -17,8 +17,60 @@ use prism_render_graph::{ImportedTexture, PassFlags, TextureDesc};
 
 use crate::RenderRuntime;
 
+use prism_render_driver_null::NullInstance;
+use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
+
+use alloc::sync::Arc;
+
 /// The offscreen target edge length used by the readback test.
 const SIZE: u32 = 64;
+
+/// A window handle that always reports "unavailable". The null surface never
+/// inspects it, so the headless present loop needs no real OS window.
+struct FakeWindow;
+
+impl HasWindowHandle for FakeWindow {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, HandleError> {
+        Err(HandleError::Unavailable)
+    }
+}
+
+impl HasDisplayHandle for FakeWindow {
+    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, HandleError> {
+        Err(HandleError::Unavailable)
+    }
+}
+
+#[test]
+fn surface_present_loop_runs_headless_on_the_null_backend() {
+    let mut rt = RenderRuntime::headless(NullInstance::new(), rhi::Extent3d::new_2d(SIZE, SIZE))
+        .expect("the null device always comes up");
+
+    // Presenting without a surface is a clear error, not a panic.
+    assert_eq!(rt.render_frame(|_, _| {}), Err(crate::FrameError::NoSurface));
+
+    rt.create_surface(Arc::new(FakeWindow))
+        .expect("the null surface is created for any handle");
+    rt.configure_surface_default(SIZE, SIZE)
+        .expect("the null surface advertises a usable format");
+    assert_eq!(
+        rt.extent(),
+        rhi::Extent3d::new_2d(SIZE, SIZE),
+        "configuring adopts the surface extent"
+    );
+
+    rt.render_frame(|graph, target| {
+        graph.add_raster_pass("present-clear", PassFlags::SIDE_EFFECT, move |b| {
+            let _ = b.color_attachment(target);
+            |_ctx| {}
+        });
+    })
+    .expect("the frame is acquired, drawn, and presented");
+
+    assert_eq!(rt.frames_in_flight(), 1, "the presented frame is tracked");
+    assert!(rt.wait_idle(), "the paced pipeline drains");
+    assert_eq!(rt.frames_in_flight(), 0);
+}
 
 #[test]
 fn instance_enumerates_adapters_through_the_rhi() {

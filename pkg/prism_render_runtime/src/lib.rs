@@ -30,13 +30,17 @@
 extern crate alloc;
 
 use core::fmt;
+use alloc::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 
 use prism_render_driver::{
     Adapter, AdapterInfo, DeviceDescriptor, Extent3d, Instance, PowerPreference,
-    RequestAdapterOptions,
+    RequestAdapterOptions, Surface, SurfaceConfig, SurfaceError, TextureState, TextureUsages,
 };
-use prism_render_graph::{CompileError, RenderGraph};
+use prism_render_graph::{
+    CompileError, ImportedTexture, RenderGraph, TextureDesc, TextureHandle,
+};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 mod capture;
 mod frame_pacing;
@@ -59,6 +63,28 @@ pub enum RenderInitError {
     Device(String),
 }
 
+/// Why a [`RenderRuntime::render_frame`] call did not produce a presented frame.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum FrameError {
+    /// No surface has been created; call
+    /// [`RenderRuntime::create_surface`] first.
+    NoSurface,
+    /// The surface reported a failure acquiring or presenting the frame.
+    Surface(SurfaceError),
+    /// The frame graph failed to compile; no GPU work was submitted.
+    Compile(CompileError),
+}
+
+impl fmt::Display for FrameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoSurface => f.write_str("no surface is configured for this runtime"),
+            Self::Surface(error) => write!(f, "surface error while presenting: {error}"),
+            Self::Compile(error) => write!(f, "frame graph failed to compile: {error:?}"),
+        }
+    }
+}
+
 impl fmt::Display for RenderInitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -78,6 +104,11 @@ pub struct RenderRuntime<I: Instance> {
     extent: Extent3d,
     /// The frames-in-flight bound and its outstanding completion tokens.
     pacer: Mutex<FramePacer<CompletionToken>>,
+    /// The window surface, once created.
+    surface: Option<I::Surface>,
+    /// The configuration the surface was last configured with, so an
+    /// `Outdated` surface can be reconfigured without the caller re-supplying it.
+    surface_config: Option<SurfaceConfig>,
 }
 
 impl<I: Instance> RenderRuntime<I> {
@@ -124,6 +155,8 @@ impl<I: Instance> RenderRuntime<I> {
             queue,
             extent,
             pacer: Mutex::new(FramePacer::new(max_in_flight)),
+            surface: None,
+            surface_config: None,
         })
     }
 
@@ -167,6 +200,149 @@ impl<I: Instance> RenderRuntime<I> {
     #[must_use]
     pub fn new_graph(&self) -> RenderGraph {
         RenderGraph::new(self.extent)
+    }
+
+    /// Creates a window surface for `window`, replacing any existing one.
+    ///
+    /// The window is held by the surface, so the runtime owns the presentation
+    /// target for its whole lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns the backend's [`SurfaceError`] when the platform cannot create a
+    /// surface for the handle.
+    pub fn create_surface<W>(&mut self, window: Arc<W>) -> Result<(), SurfaceError>
+    where
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+    {
+        let surface = self
+            .instance
+            .create_surface(window, &self.device, &self.queue)?;
+        self.surface = Some(surface);
+        self.surface_config = None;
+        Ok(())
+    }
+
+    /// The current window surface, if one has been created.
+    #[must_use]
+    pub fn surface(&self) -> Option<&I::Surface> {
+        self.surface.as_ref()
+    }
+
+    /// Mutable access to the current window surface.
+    pub fn surface_mut(&mut self) -> Option<&mut I::Surface> {
+        self.surface.as_mut()
+    }
+
+    /// (Re)configures the current surface and adopts its extent for future
+    /// frame graphs.
+    ///
+    /// # Errors
+    ///
+    /// [`SurfaceError::Unsupported`] when no surface exists or the
+    /// configuration cannot be satisfied.
+    pub fn configure_surface(&mut self, config: SurfaceConfig) -> Result<(), SurfaceError> {
+        let surface = self.surface.as_mut().ok_or(SurfaceError::Unsupported)?;
+        surface.configure(&config)?;
+        self.extent = Extent3d::new_2d(config.width, config.height);
+        self.surface_config = Some(config);
+        Ok(())
+    }
+
+    /// Configures the current surface with its first supported format and a
+    /// v-synced, double-buffered swapchain of `width`×`height`.
+    ///
+    /// The convenience most callers want at startup and after a resize.
+    ///
+    /// # Errors
+    ///
+    /// [`SurfaceError::Unsupported`] when no surface exists or it advertises no
+    /// usable swapchain format.
+    pub fn configure_surface_default(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<(), SurfaceError> {
+        let format = {
+            let surface = self.surface.as_ref().ok_or(SurfaceError::Unsupported)?;
+            *surface
+                .capabilities()
+                .formats
+                .first()
+                .ok_or(SurfaceError::Unsupported)?
+        };
+        self.configure_surface(SurfaceConfig::new(format, width, height))
+    }
+
+    /// Re-applies the last surface configuration after the surface reported it
+    /// outdated (typically a resize).
+    fn reconfigure_surface(&mut self) -> Result<(), SurfaceError> {
+        let config = self.surface_config.ok_or(SurfaceError::Unsupported)?;
+        self.configure_surface(config)
+    }
+
+    /// Renders and presents one windowed frame.
+    ///
+    /// Acquires the next swapchain image, imports it into a fresh frame graph as
+    /// the presentable target, hands it to `build` to declare passes, executes
+    /// the graph through the frames-in-flight bound, then presents the frame.
+    ///
+    /// An occluded window (e.g. minimized) is a successful no-op: the frame is
+    /// skipped and `Ok(())` is returned. An outdated surface is reconfigured and
+    /// reported as [`FrameError::Surface`] so the caller can retry next frame.
+    ///
+    /// # Errors
+    ///
+    /// See [`FrameError`]; no GPU work is submitted when the graph fails to
+    /// compile.
+    pub fn render_frame<F>(&mut self, build: F) -> Result<(), FrameError>
+    where
+        F: FnOnce(&mut RenderGraph, TextureHandle),
+        I::Queue: FrameSync,
+    {
+        let acquired = {
+            let surface = self.surface.as_ref().ok_or(FrameError::NoSurface)?;
+            surface.acquire()
+        };
+        let frame = match acquired {
+            Ok(frame) => frame,
+            // A minimized window has nothing to present; skipping is success.
+            Err(SurfaceError::Occluded) => return Ok(()),
+            Err(SurfaceError::Outdated) => {
+                self.reconfigure_surface().map_err(FrameError::Surface)?;
+                return Err(FrameError::Surface(SurfaceError::Outdated));
+            }
+            Err(error) => return Err(FrameError::Surface(error)),
+        };
+
+        let image = self
+            .surface
+            .as_ref()
+            .expect("surface checked above")
+            .image(&frame);
+
+        let mut graph = RenderGraph::new(image.size);
+        let target = graph.import_texture(
+            "swapchain",
+            TextureDesc::color(image.format).with_usage(TextureUsages::RENDER_ATTACHMENT),
+            ImportedTexture {
+                texture: image.texture,
+                default_view: image.view,
+                entry_state: TextureState::initial(),
+                exit_state: TextureState::present(),
+                mip_levels: 1,
+                array_layers: 1,
+            },
+        );
+        build(&mut graph, target);
+
+        self.execute(graph).map_err(FrameError::Compile)?;
+
+        self.surface
+            .as_ref()
+            .expect("surface checked above")
+            .present(frame)
+            .map_err(FrameError::Surface)
     }
 
     /// Locks and returns the frame pacer, tolerating a poisoned mutex.
