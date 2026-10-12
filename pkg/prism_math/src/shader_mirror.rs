@@ -2442,6 +2442,47 @@ fn prism_mat4_transform_vector(m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: 
     return (m0 * v.x + m1 * v.y + m2 * v.z).xyz;\n\
 }\n";
 
+/// Single-sourced WGSL for the scale/rotation/translation (`TRS`) affine
+/// transform, mirroring the CPU
+/// [`Affine3::from_scale_rotation_translation`](crate::Affine3::from_scale_rotation_translation)
+/// followed by [`transform_point3`](crate::Affine3::transform_point3) /
+/// [`transform_vector3`](crate::Affine3::transform_vector3) **step for step**.
+/// The linear part is the rotation matrix from the unit quaternion
+/// `prism_mat3_from_quat` (matching CPU `Mat3::from_quat`) with each column
+/// scaled by the corresponding `scale` component (i.e. `R * diag(scale)`);
+/// `prism_affine_transform_point` then computes `matrix3·p + t` and
+/// `prism_affine_transform_vector` omits the translation. This is the GPU side
+/// of TRS instance / bone transforms, where the compact `(scale, quat, t)`
+/// triple is stored instead of a full matrix.
+pub const WGSL_AFFINE: &str = "\
+fn prism_affine_matrix3(q: vec4<f32>, s: vec3<f32>, p: vec3<f32>) -> vec3<f32> {\n\
+    let x = q.x;\n\
+    let y = q.y;\n\
+    let z = q.z;\n\
+    let w = q.w;\n\
+    let xx = x * x;\n\
+    let yy = y * y;\n\
+    let zz = z * z;\n\
+    let xy = x * y;\n\
+    let xz = x * z;\n\
+    let yz = y * z;\n\
+    let wx = w * x;\n\
+    let wy = w * y;\n\
+    let wz = w * z;\n\
+    let c0 = vec3<f32>(1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy)) * s.x;\n\
+    let c1 = vec3<f32>(2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx)) * s.y;\n\
+    let c2 = vec3<f32>(2.0 * (xz + wy), 2.0 * (yz - wx), 1.0 - 2.0 * (xx + yy)) * s.z;\n\
+    return c0 * p.x + c1 * p.y + c2 * p.z;\n\
+}\n\
+\n\
+fn prism_affine_transform_point(q: vec4<f32>, s: vec3<f32>, t: vec3<f32>, p: vec3<f32>) -> vec3<f32> {\n\
+    return prism_affine_matrix3(q, s, p) + t;\n\
+}\n\
+\n\
+fn prism_affine_transform_vector(q: vec4<f32>, s: vec3<f32>, v: vec3<f32>) -> vec3<f32> {\n\
+    return prism_affine_matrix3(q, s, v);\n\
+}\n";
+
 /// Single-sourced WGSL for the Q16.16 fixed-point scalar
 /// [`I16F16`](crate::fixed::i16f16::I16F16), mirroring its saturating ops on the
 /// raw `i32` bits. Integer fixed-point is the deterministic path (exact,
