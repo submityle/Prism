@@ -254,6 +254,11 @@ pub trait WinitApp {
     /// them. Defaults to a no-op for desktop platforms that never suspend.
     fn suspended(&mut self, _backend: &mut WinitBackend) {}
 
+    /// Called when the OS reports memory pressure (iOS / Android). The host
+    /// should release caches and other reclaimable resources. Defaults to a
+    /// no-op on platforms that never report it.
+    fn low_memory(&mut self, _backend: &mut WinitBackend) {}
+
     /// Called once per event-loop iteration after the frame's platform events
     /// have been collected and coalesced. The host reads events, mutates
     /// desired window state, and may request or destroy windows. Returning
@@ -308,6 +313,12 @@ impl<A: WinitApp> WinitRunner<A> {
         self.app.suspended(&mut self.backend);
     }
 
+    /// Notify the host of OS memory pressure. Factored out of the winit
+    /// callback so the forwarding logic is testable without a live event loop.
+    fn handle_low_memory(&mut self) {
+        self.app.low_memory(&mut self.backend);
+    }
+
     /// Creates the OS event loop and runs it to completion on the calling
     /// thread. Blocks until the host returns [`FrameOutcome::Exit`] or the OS
     /// terminates the loop. Must be called on the main thread.
@@ -335,6 +346,10 @@ impl<A: WinitApp> ApplicationHandler for WinitRunner<A> {
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         self.handle_suspended();
+    }
+
+    fn memory_warning(&mut self, _event_loop: &ActiveEventLoop) {
+        self.handle_low_memory();
     }
 
     fn window_event(
@@ -398,6 +413,7 @@ mod tests {
     struct CountingApp {
         resumed: usize,
         suspended: usize,
+        low_memory: usize,
     }
 
     impl WinitApp for CountingApp {
@@ -407,6 +423,10 @@ mod tests {
 
         fn suspended(&mut self, _backend: &mut WinitBackend) {
             self.suspended += 1;
+        }
+
+        fn low_memory(&mut self, _backend: &mut WinitBackend) {
+            self.low_memory += 1;
         }
 
         fn frame(&mut self, _backend: &mut WinitBackend) -> FrameOutcome {
@@ -419,6 +439,7 @@ mod tests {
         let mut runner = WinitRunner::new(CountingApp {
             resumed: 0,
             suspended: 0,
+            low_memory: 0,
         });
         runner.handle_resumed();
         runner.handle_resumed();
@@ -430,10 +451,24 @@ mod tests {
         let mut runner = WinitRunner::new(CountingApp {
             resumed: 0,
             suspended: 0,
+            low_memory: 0,
         });
         runner.handle_suspended();
         runner.handle_suspended();
         assert_eq!(runner.app.suspended, 2, "each suspend is forwarded");
+    }
+
+    #[test]
+    fn every_memory_warning_notifies_the_host() {
+        let mut runner = WinitRunner::new(CountingApp {
+            resumed: 0,
+            suspended: 0,
+            low_memory: 0,
+        });
+        runner.handle_low_memory();
+        runner.handle_low_memory();
+        runner.handle_low_memory();
+        assert_eq!(runner.app.low_memory, 3, "each memory warning is forwarded");
     }
 
     #[test]

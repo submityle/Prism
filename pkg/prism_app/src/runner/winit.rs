@@ -16,16 +16,15 @@
 //! covered by unit tests; only [`WinitRunner::run`] touches the live loop. This
 //! mirrors the split inside [`prism_window_winit`] itself.
 //!
-//! # Honestly deferred
+//! # Lifecycle forwarding
 //!
-//! The winit host trait now surfaces both a one-shot `resumed` and a repeatable
-//! `suspended`, so this runner forwards [`Resumed`] and [`Suspended`] (design
-//! §12/§25.1 — a suspend pauses virtual time and the app's
-//! [`AppLifecycle`](crate::lifecycle::AppLifecycle) moves to
-//! [`Suspended`](crate::lifecycle::AppLifecycle::Suspended)). A platform
-//! *low-memory* signal is still absent from [`prism_window`], so [`LowMemory`]
-//! is not forwarded yet; that remains an M4 follow-up rather than being faked
-//! here.
+//! The winit host trait surfaces a one-shot `resumed`, a repeatable
+//! `suspended`, and a repeatable `low_memory`, so this runner forwards
+//! [`Resumed`], [`Suspended`], and [`LowMemory`] (design §12/§25.1). A suspend
+//! pauses virtual time and moves the app's
+//! [`AppLifecycle`](crate::lifecycle::AppLifecycle) to
+//! [`Suspended`](crate::lifecycle::AppLifecycle::Suspended); a memory warning
+//! is forwarded so subsystems can release reclaimable resources.
 
 use core::cell::Cell;
 use std::rc::Rc;
@@ -41,7 +40,7 @@ use prism_window_winit::{
 
 use crate::app::App;
 use crate::exit::{AppExit, AppExitRequest};
-use crate::lifecycle::{FocusChanged, Resumed, Suspended, WillRenderFirstFrame};
+use crate::lifecycle::{FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame};
 use crate::pacing::{FrameLimit, FramePacer};
 
 /// An action the windowed runner derives from a frame's window events.
@@ -135,6 +134,12 @@ impl WinitApp for WindowedHost {
         // pauses virtual time, and stops advancing the fixed accumulator until
         // the matching `Resumed` (design §12/§25.1).
         self.app.send_event(Suspended);
+    }
+
+    fn low_memory(&mut self, _backend: &mut WinitBackend) {
+        // Forward OS memory pressure so streaming/asset subsystems can drop
+        // reclaimable caches (design §12, §24.7).
+        self.app.send_event(LowMemory);
     }
 
     fn frame(&mut self, backend: &mut WinitBackend) -> FrameOutcome {
@@ -356,5 +361,26 @@ mod tests {
             .world()
             .resource::<prism_ecs::event::Events<Suspended>>();
         assert_eq!(events.len(), 1, "suspend buffers one Suspended event");
+    }
+
+    #[test]
+    fn platform_memory_warning_forwards_one_low_memory_event() {
+        let exit = Rc::new(Cell::new(None));
+        let mut host = WindowedHost {
+            app: App::new(),
+            windows: Vec::new(),
+            open: Vec::new(),
+            started: false,
+            pacer: FramePacer::new(FrameLimit::Off),
+            first_frame_sent: false,
+            exit,
+        };
+        let mut backend = WinitBackend::new();
+        host.low_memory(&mut backend);
+        let events = host
+            .app
+            .world()
+            .resource::<prism_ecs::event::Events<LowMemory>>();
+        assert_eq!(events.len(), 1, "memory warning buffers one LowMemory event");
     }
 }
