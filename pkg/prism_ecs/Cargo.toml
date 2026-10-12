@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
 prism_ecs_macros = { path = "../prism_ecs_macros" }
+prism_reflect = { path = "../prism_reflect", optional = true }
 prism_tasks = { path = "../prism_tasks", optional = true }
 
 [dev-dependencies]
@@ -26,6 +27,12 @@ std = []
 # The parallel conflict-graph executor (§8.2): dispatches conflict-free waves
 # onto a `prism_tasks` work-stealing pool. Pulls in `prism_tasks` and `std`.
 multi_thread = ["std", "dep:prism_tasks"]
+
+# Reflection bridge (design §16.5 / §24.3): register a component type so an
+# editor / scene loader / replication layer can read, overwrite, remove and
+# enumerate it *dynamically* by `StableTypeId`, without naming the Rust type.
+# Pulls in `prism_reflect` (and `std`), so the base kernel stays free of it.
+reflect = ["std", "dep:prism_reflect"]
 
 # SIMD-accelerated bulk column kernels (design §7/§17). Hot component columns
 # are iterated through per-arch `core::arch` intrinsics (SSE2 on x86_64, NEON on

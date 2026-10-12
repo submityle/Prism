@@ -70,6 +70,10 @@ pub mod partition;
 pub mod prefab;
 pub mod query;
 pub mod reaction;
+#[cfg(feature = "reflect")]
+pub mod reflect_bridge;
+#[cfg(all(test, feature = "reflect"))]
+mod reflect_bridge_tests;
 pub mod relation;
 pub mod resource;
 pub mod schedule;

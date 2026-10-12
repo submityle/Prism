@@ -73,6 +73,11 @@ pub struct World {
     /// deterministic derived-update bus flushed once per schedule run (or on
     /// demand). Empty by default.
     pub(crate) change_observers: crate::change_observers::ChangeObservers,
+    /// Reflected-component registry (design §16.5 / §24.3): dynamic component
+    /// access by `prism_reflect::StableTypeId`. Empty unless the `reflect`
+    /// feature registered a type.
+    #[cfg(feature = "reflect")]
+    pub(crate) reflect: crate::reflect_bridge::ReflectRegistry,
     /// Monotonic counter backing [`ObserverId`](crate::observer::ObserverId)
     /// allocation so every registered observer gets a stable, process-unique
     /// id even across remove/re-add churn.
@@ -120,6 +125,8 @@ impl World {
             relations: Relations::new(),
             observers: Observers::new(),
             change_observers: crate::change_observers::ChangeObservers::default(),
+            #[cfg(feature = "reflect")]
+            reflect: crate::reflect_bridge::ReflectRegistry::default(),
             next_observer_id: 0,
             change_tick: Tick::new(1),
             last_change_tick: Tick::ZERO,

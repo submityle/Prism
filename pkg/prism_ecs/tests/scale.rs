@@ -15,7 +15,6 @@
 //! in `docs/prism_ecs_design_zh.md` as measured evidence.
 
 use std::time::{Duration, Instant};
-use std::hint::black_box;
 
 use prism_ecs::prelude::*;
 
@@ -140,6 +139,8 @@ fn scale_par_propagate_1m_scaling() {
 #[test]
 #[ignore = "allocates 1M entities per case; run explicitly with --release --ignored"]
 fn scale_serial_vs_batch_diagnosis() {
+    use std::hint::black_box;
+
     let pool = prism_tasks::TaskPool::with_threads(1);
 
     // Read-only: no change-tick store at all.
