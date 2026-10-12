@@ -127,6 +127,16 @@ impl DockLayout {
             return state.fail(ValidationIssue::InvalidAutohideActive);
         }
         if let Some(snapshot) = &self.maximized {
+            let current_is_snapshot_panel = matches!(
+                &self.root,
+                DockNode::TabStack { tabs, active: 0 }
+                    if tabs.len() == 1 && tabs.first() == Some(&snapshot.panel)
+            ) && self.floating.is_empty()
+                && self.autohide.entries.is_empty()
+                && self.autohide.active.is_none();
+            if !current_is_snapshot_panel {
+                return state.fail(ValidationIssue::MaximizeSnapshotInvalid);
+            }
             let mut snap = Self {
                 root: snapshot.root.clone(),
                 floating: snapshot.floating.clone(),
@@ -291,5 +301,23 @@ mod tests {
             ..Limits::default()
         };
         layout.validate_with(valid_limits).unwrap();
+    }
+
+    #[test]
+    fn maximized_layout_must_show_the_snapshot_panel_as_the_only_surface() {
+        let mut layout = DockLayout {
+            root: DockNode::panel("other"),
+            ..DockLayout::default()
+        };
+        layout.maximized = Some(Box::new(crate::MaximizeRestore {
+            panel: "max".into(),
+            root: DockNode::panel("before"),
+            floating: Vec::new(),
+            autohide: AutoHideBars::default(),
+        }));
+        assert_eq!(
+            layout.validate().unwrap_err().issue,
+            ValidationIssue::MaximizeSnapshotInvalid
+        );
     }
 }

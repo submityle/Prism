@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn roundtrip_preserves_maximize_restore() {
         let mut layout = rich_layout();
-        layout.maximized = Some(Box::new(MaximizeRestore {
+        let restore = MaximizeRestore {
             panel: "tool".into(),
             root: DockNode::panel("old"),
             floating: vec![FloatingWindow {
@@ -665,9 +665,31 @@ mod tests {
                 z: 2,
             }],
             autohide: AutoHideBars::default(),
-        }));
+        };
+        layout.root = DockNode::panel("tool");
+        layout.floating.clear();
+        layout.autohide = AutoHideBars::default();
+        layout.maximized = Some(Box::new(MaximizeRestore { ..restore }));
         let bytes = encode_layout(&layout).unwrap();
         assert_eq!(decode_layout(&bytes, opts(None, None)).unwrap(), layout);
+    }
+
+    #[test]
+    fn rejects_malformed_maximize_state_before_renderer_consumption() {
+        let mut layout = rich_layout();
+        layout.maximized = Some(Box::new(MaximizeRestore {
+            panel: "max".into(),
+            root: DockNode::panel("old"),
+            floating: vec![],
+            autohide: AutoHideBars::default(),
+        }));
+        assert!(matches!(
+            encode_layout(&layout),
+            Err(PersistError::InvalidLayout(crate::LayoutError {
+                issue: crate::ValidationIssue::MaximizeSnapshotInvalid,
+                ..
+            }))
+        ));
     }
 
     #[test]

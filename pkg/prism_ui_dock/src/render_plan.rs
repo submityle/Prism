@@ -1622,7 +1622,10 @@ mod tests {
         }));
         assert!(matches!(
             solve(&layout, Viewport::new(800, 600)),
-            Err(RenderPlanError::InvalidMaximizedState(_))
+            Err(RenderPlanError::InvalidLayout(LayoutError {
+                issue: ValidationIssue::MaximizeSnapshotInvalid,
+                ..
+            }))
         ));
     }
 

@@ -347,10 +347,10 @@ let layout = DockLayout::load(&bytes, &registry)?; // 未知面板丢弃,比例�
 - ✅ **M1 几何/计划垂直切片已交付**:`render_plan` 暴露确定性 `solve`/`solve_with`，输入经校验的模型、逻辑 viewport 和显式 metrics，输出主区/浮窗/auto-hide/maximize 的面板与文档矩形、tab headers、splitter/hit rect、active/focus 元数据。比例使用固定点整数分配与最大余数稳定舍入；最小尺寸不足、无效模型、bar/reveal 溢出均结构化报错，不静默钳制比例或几何。
 - ⬜ **M1 Element 装配与真实渲染仍未交付**:`RenderPlan` 是未来 renderer 可消费的纯数据，不会创建 `Element`/`DockPanel`，也不含字体测量、主题样式、GPU 绘制、overlay portal、命中测试接线或增量渲染缓存。M1 不等同于 GPU renderer 已完成。
 - ✅ **M2 纯数据拖拽内核已交付**:`drag` 提供确定性拖拽状态机、五向 drop zone、tab 插入边界和 reducer action 映射；当前测试覆盖状态机与边界行为。overlay 预览和真实 UI hit-test/render 集成尚未交付。
-- ✅ **M4 persistence core 已交付**:`pkg/prism_ui_dock::encode_layout`/`decode_layout` 提供带 magic/version 的确定性二进制布局编码、checked 长度/深度/节点预算、UTF-8 与枚举校验、解码后模型不变量校验，以及带已知 panel/document 注册表的未知 ID 过滤和安全分支折叠；主树、浮窗、autohide、maximize restore 均可 round-trip。该切片不提供文件 IO、Workspace、自动保存或迁移链。
+- ✅ **M4 persistence core 已交付**:`pkg/prism_ui_dock::encode_layout`/`decode_layout` 提供带 magic/version 的确定性二进制布局编码、checked 长度/深度/节点预算、UTF-8 与枚举校验、解码后模型不变量校验，以及带已知 panel/document 注册表的未知 ID 过滤和安全分支折叠；主树、浮窗、autohide、maximize restore 均可 round-trip。最大化状态要求当前可见面严格收敛为快照中的唯一面板，并由 model/persistence validation 在进入 renderer 前拒绝非法恢复态。该切片不提供文件 IO、Workspace、自动保存或迁移链。
 - ⬜ **M3–M5 其余能力仍 PLANNED**:`registry`、`store`、`a11y` 以及动画/多显示器/撤销集成。完整 UI 装配和 renderer 集成仍属于后续工作，不因 M1 计划数据或 persistence core 已存在而视为完成。
 - ⬜ **依赖未落地项**:撤销集成需编辑器命令内核;多显示器校正需平台/`prism_window` 层;动效档位依赖性能分级。
-- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核、M1 renderer-independent render plan 及 M4 persistence core；`DockPanel` 仍仅负责视觉外壳。Element 装配、GPU/renderer、overlay 预览、Workspace/自动保存和注册表等能力尚未交付。
+- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核、M1 renderer-independent render plan 及 M4 persistence core；布局校验会在 renderer 消费前拒绝非法 maximize 恢复态。`DockPanel` 仍仅负责视觉外壳。Element 装配、GPU/renderer、overlay 预览、Workspace/自动保存和注册表等能力尚未交付。
 
 ---
 
