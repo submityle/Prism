@@ -233,6 +233,17 @@ fn tlsf_honours_alignment_and_exhaustion() {
     assert!(t.allocate(1 << 20).is_none());
 }
 
+#[test]
+fn tlsf_rejects_overflowing_request() {
+    // CR-found: `round_up(usize::MAX, 8)` used to wrap to 8 and match a tiny
+    // free block, so a `usize::MAX` request falsely succeeded (release) or
+    // panicked (debug). It must fail cleanly, and the allocator stay usable.
+    let mut t = TlsfAllocator::new(4096);
+    assert!(t.allocate(usize::MAX).is_none());
+    assert!(t.allocate_aligned(usize::MAX - 4, 64).is_none());
+    assert!(t.allocate(64).is_some(), "allocator must remain usable");
+}
+
 // --- Bevy migration aliases (feature-gated). --------------------------------
 
 #[cfg(feature = "compat-bevy")]

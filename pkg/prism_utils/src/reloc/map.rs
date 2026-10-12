@@ -59,6 +59,29 @@ fn decode_header<K: Reloc, V: Reloc>(
     Ok((keys.len(), keys, vals))
 }
 
+/// Verify that the map's decoded keys are strictly increasing — the invariant
+/// [`RelocMapView::get`]'s binary search relies on. `from_pairs` writes sorted
+/// keys, but a corrupt or forged blob could present an unsorted key region and
+/// otherwise be accepted, making `get` silently return wrong answers instead of
+/// an error (CR-found).
+fn validate_sorted<K: Reloc + Ord>(blob: &[u8], keys: OffsetSlice<K>) -> Result<(), RelocError> {
+    let mut prev: Option<K> = None;
+    for index in 0..keys.len() {
+        let key = keys
+            .get(blob, KEYS_FIELD_POS, index)
+            .ok()
+            .flatten()
+            .ok_or(RelocError::OutOfBounds)?;
+        if let Some(previous) = prev
+            && previous >= key
+        {
+            return Err(RelocError::NotSorted);
+        }
+        prev = Some(key);
+    }
+    Ok(())
+}
+
 /// An owned, immutable, sorted, relocatable map.
 ///
 /// Build it with [`from_pairs`](RelocMap::from_pairs), hand
@@ -191,7 +214,8 @@ impl<K: Reloc + Ord, V: Reloc> RelocMap<K, V> {
 
     /// Re-open an owned map from a (possibly copied) blob, validating it.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RelocError> {
-        decode_header::<K, V>(bytes)?;
+        let (_, keys, _) = decode_header::<K, V>(bytes)?;
+        validate_sorted::<K>(bytes, keys)?;
         Ok(Self {
             blob: bytes.to_vec(),
             marker: PhantomData,
@@ -220,6 +244,7 @@ impl<'a, K: Reloc + Ord, V: Reloc> RelocMapView<'a, K, V> {
     /// Validate `blob` as a [`RelocMap`] blob and borrow a view over it.
     pub fn new(blob: &'a [u8]) -> Result<Self, RelocError> {
         let (len, keys, vals) = decode_header::<K, V>(blob)?;
+        validate_sorted::<K>(blob, keys)?;
         Ok(Self {
             blob,
             len,

@@ -97,12 +97,19 @@ impl<T> Drop for Inner<T> {
 /// one producer.
 pub struct SpscProducer<T> {
     inner: Arc<Inner<T>>,
+    /// Negative `Sync` marker: `Cell<()>` is `Send` but `!Sync`, so the endpoint
+    /// keeps its `Send` yet is no longer auto-`Sync`. Without it safe code could
+    /// share one endpoint behind an `Arc` and drive two threads through the same
+    /// cursor/slot — a data race and double-free (CR-found).
+    _not_sync: core::marker::PhantomData<core::cell::Cell<()>>,
 }
 
 /// The consuming endpoint of an [`SpscQueue`]. Not clonable: there is only ever
 /// one consumer.
 pub struct SpscConsumer<T> {
     inner: Arc<Inner<T>>,
+    /// See [`SpscProducer::_not_sync`]: keep the consumer `!Sync` too.
+    _not_sync: core::marker::PhantomData<core::cell::Cell<()>>,
 }
 
 // SAFETY: `SpscProducer`/`SpscConsumer` are thin owners of the shared `Inner`,
@@ -151,8 +158,12 @@ impl<T> SpscQueue<T> {
         (
             SpscProducer {
                 inner: Arc::clone(&inner),
+                _not_sync: core::marker::PhantomData,
             },
-            SpscConsumer { inner },
+            SpscConsumer {
+                inner,
+                _not_sync: core::marker::PhantomData,
+            },
         )
     }
 }

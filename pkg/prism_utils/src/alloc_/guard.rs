@@ -15,9 +15,15 @@
 //! - **Double-free detection** (best effort): each live block carries a header
 //!   magic that is flipped to a freed sentinel on release, so freeing the same
 //!   pointer twice trips an assertion instead of corrupting the inner
-//!   allocator. Once the inner allocator recycles the freed block the magic may
-//!   read back as generic corruption rather than the freed sentinel; both paths
-//!   still abort the duplicate free.
+//!   allocator. An *immediate* duplicate free is caught by the freed sentinel,
+//!   and a stale free whose block the inner allocator has **not** yet reused is
+//!   caught as header corruption (bad magic). **Limitation:** this raw-pointer
+//!   API carries no allocation generation/token, so if the inner allocator
+//!   recycles the *same address* for a new allocation with the *same layout*,
+//!   the new header is indistinguishable from the old one and a stale free of
+//!   the previous pointer would release the new block. Detecting that needs a
+//!   generational handle (out of scope here); treat this as debug-tier
+//!   best-effort detection, not a proof of correctness.
 //!
 //! This decorator is intended for debug / validation builds (it adds a header
 //! plus two redzones per allocation and touches the whole block on free). In

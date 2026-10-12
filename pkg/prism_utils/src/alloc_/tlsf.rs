@@ -49,10 +49,15 @@ fn fls(x: usize) -> usize {
     (usize::BITS - 1 - x.leading_zeros()) as usize
 }
 
-/// Round `x` up to a multiple of the power-of-two `align`.
+/// Round `x` up to a multiple of the power-of-two `align`, **saturating** to the
+/// largest aligned value on overflow instead of wrapping to a small value.
+///
+/// The old `(x + align - 1) & !(align - 1)` wrapped `x == usize::MAX` down to
+/// `align`, so a request for `usize::MAX` bytes matched a tiny free block and
+/// reported success (CR-found).
 #[inline]
 fn round_up(x: usize, align: usize) -> usize {
-    (x + align - 1) & !(align - 1)
+    x.saturating_add(align - 1) & !(align - 1)
 }
 
 /// A physical block in the region. Blocks tile the region with no gaps; the
@@ -168,7 +173,8 @@ impl TlsfAllocator {
         let adjusted = round_up(size, ALIGN).max(ALIGN);
         // Over-request so a block always contains an aligned sub-block.
         let search = if align > ALIGN {
-            adjusted + align - ALIGN
+            // A request that cannot be padded without overflowing can never fit.
+            adjusted.checked_add(align - ALIGN)?
         } else {
             adjusted
         };
@@ -369,7 +375,9 @@ fn mapping_search(size: usize) -> (usize, usize) {
     if size >= SMALL {
         let f = fls(size);
         let round = (1 << (f - SL_LOG2)) - 1;
-        mapping_insert(size + round)
+        // Saturate instead of overflowing: a saturated size maps to a
+        // first-level class past the bitmap, so `find_suitable` returns `None`.
+        mapping_insert(size.saturating_add(round))
     } else {
         mapping_insert(size)
     }

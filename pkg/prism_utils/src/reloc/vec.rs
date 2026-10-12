@@ -84,7 +84,9 @@ impl<T: Reloc> RelocVec<T> {
     #[must_use]
     pub fn from_slice(items: &[T]) -> Self {
         let mut v = Self::new();
-        v.blob.reserve(items.len() * T::SIZE);
+        if let Some(bytes) = items.len().checked_mul(T::SIZE) {
+            v.blob.reserve(bytes);
+        }
         for item in items {
             v.push(*item);
         }
@@ -92,14 +94,25 @@ impl<T: Reloc> RelocVec<T> {
     }
 
     /// Append one element, growing the blob by [`T::SIZE`](Reloc::SIZE) bytes.
+    ///
+    /// # Panics
+    /// Panics if the element count would exceed `u32::MAX` (the header stores
+    /// the count as a `u32`) or the blob length would overflow the address
+    /// space. Both are unreachable for real assets but are refused explicitly
+    /// rather than silently wrapping the length header (CR-found).
     pub fn push(&mut self, value: T) {
         let start = self.blob.len();
-        self.blob.resize(start + T::SIZE, 0);
-        value.encode(&mut self.blob[start..start + T::SIZE]);
+        let end = start
+            .checked_add(T::SIZE)
+            .expect("RelocVec blob length overflowed the address space");
+        self.blob.resize(end, 0);
+        value.encode(&mut self.blob[start..end]);
         // Bump the length field (the second u32 of the data OffsetSlice at
         // byte 12), which never overflows a real asset.
         let new_len = self.len() + 1;
-        let len_bytes = (new_len as u32).to_le_bytes();
+        let len_bytes = u32::try_from(new_len)
+            .expect("RelocVec length exceeds u32::MAX")
+            .to_le_bytes();
         self.blob[DATA_FIELD_POS + 4..HEADER_LEN].copy_from_slice(&len_bytes);
     }
 

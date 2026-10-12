@@ -14,6 +14,40 @@ use std::thread;
 use super::epoch::{pin_with, Collector};
 use super::{CachePadded, ConcurrentHashMap, MpmcQueue, SpscQueue, TreiberStack};
 
+// --- SPSC: endpoint thread-safety markers ----------------------------------
+
+/// Autoref-specialization probe: the inherent `is_not_sync` (returning `false`)
+/// only applies when `T: Sync`; otherwise the trait fallback (returning `true`)
+/// is selected. This asserts a *negative* auto-trait bound on stable Rust.
+struct Probe<T>(core::marker::PhantomData<T>);
+trait NotSyncFallback {
+    fn is_not_sync(&self) -> bool {
+        true
+    }
+}
+impl<T> NotSyncFallback for Probe<T> {}
+// The `Sync` arm is intentionally never instantiated (the endpoints must be
+// `!Sync`); it only exists so the fallback is selected.
+#[expect(dead_code, reason = "the Sync arm is never instantiated by design")]
+impl<T: Sync> Probe<T> {
+    fn is_not_sync(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn spsc_endpoints_are_send_but_not_sync() {
+    // A single-producer/single-consumer endpoint must move across threads
+    // (`Send`) but never be shared by `&self` (`!Sync`), or two threads could
+    // drive the same cursor and double-free a slot (CR-found).
+    fn assert_send<T: Send>() {}
+    assert_send::<super::SpscProducer<u8>>();
+    assert_send::<super::SpscConsumer<u8>>();
+
+    assert!(Probe::<super::SpscProducer<u8>>(core::marker::PhantomData).is_not_sync());
+    assert!(Probe::<super::SpscConsumer<u8>>(core::marker::PhantomData).is_not_sync());
+}
+
 // --- CachePadded -----------------------------------------------------------
 
 #[test]

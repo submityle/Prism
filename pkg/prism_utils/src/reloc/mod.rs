@@ -79,6 +79,9 @@ pub enum RelocError {
     /// A resolved offset was negative or a region length overflowed the
     /// pointer-sized address space.
     Overflow,
+    /// A map blob's key region is not strictly increasing, breaking the sorted
+    /// ordering its binary-search lookup depends on.
+    NotSorted,
 }
 
 impl RelocError {
@@ -90,6 +93,7 @@ impl RelocError {
             Self::BadMagic => "relocatable blob: magic tag does not match this container kind",
             Self::SizeMismatch => "relocatable blob: element size does not match the element type",
             Self::Overflow => "relocatable blob: offset/length overflowed the address space",
+            Self::NotSorted => "relocatable blob: map keys are not strictly increasing",
         }
     }
 }

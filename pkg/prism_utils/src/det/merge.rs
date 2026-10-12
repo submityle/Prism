@@ -95,12 +95,15 @@ impl<K: Ord, V> DeterministicMerge<K, V> {
     /// `combine`, returning one `(key, value)` per distinct key in ascending
     /// key order.
     ///
-    /// Within a key group the values are folded left-to-right **in a
-    /// deterministic order** (the contributions are first stably sorted by
-    /// key), so the result is a pure function of the contribution multiset.
-    /// The fold is order-independent across the whole run **iff** `combine` is
-    /// commutative and associative; a non-associative `combine` still produces
-    /// a deterministic result here, but one that depends on this grouping.
+    /// Within a key group the values are folded left-to-right; the contributions
+    /// are first stably sorted by key, so the *grouping* and the ascending key
+    /// order are canonical. The fold itself is independent of arrival order
+    /// **iff** `combine` is commutative and associative (the module contract):
+    /// a stable sort preserves the within-key arrival order, so a
+    /// non-commutative `combine` yields a result that still depends on arrival
+    /// order. Callers needing a canonical fold for an arbitrary `combine`
+    /// should canonicalise with [`into_sorted`](DeterministicMerge::into_sorted)
+    /// first (which sorts by the whole `(key, value)` pair).
     #[must_use]
     pub fn reduce<F>(self, mut combine: F) -> Vec<(K, V)>
     where

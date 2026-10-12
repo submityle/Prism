@@ -288,6 +288,35 @@ fn reloc_map_last_duplicate_wins() {
 }
 
 #[test]
+fn reloc_map_rejects_unsorted_keys() {
+    // A blob whose key region is not strictly increasing would break the
+    // binary-search invariant and silently return wrong answers; `from_bytes`
+    // and `RelocMapView::new` must reject it (CR-found). The keys start right
+    // after the 28-byte header, so swap the two 4-byte little-endian keys.
+    let m = RelocMap::<u32, u32>::from_pairs(&[(1, 10), (2, 20)]);
+    let mut bytes = m.as_bytes().to_vec();
+    for i in 0..4 {
+        bytes.swap(28 + i, 32 + i);
+    }
+    assert_eq!(
+        RelocMap::<u32, u32>::from_bytes(&bytes).err(),
+        Some(RelocError::NotSorted)
+    );
+    assert_eq!(
+        RelocMapView::<u32, u32>::new(&bytes).err(),
+        Some(RelocError::NotSorted)
+    );
+    // A duplicate key is also rejected (strictly increasing, not non-decreasing).
+    let dup = RelocMap::<u32, u32>::from_pairs(&[(1, 10), (2, 20)]);
+    let mut dup_bytes = dup.as_bytes().to_vec();
+    dup_bytes[28..32].copy_from_slice(&2u32.to_le_bytes());
+    assert_eq!(
+        RelocMap::<u32, u32>::from_bytes(&dup_bytes).err(),
+        Some(RelocError::NotSorted)
+    );
+}
+
+#[test]
 fn reloc_map_survives_memcpy() {
     let m = RelocMap::<u32, i32>::from_pairs(&[(1, -10), (2, -20), (3, -30), (4, -40)]);
     let copied = m.as_bytes().to_vec();
