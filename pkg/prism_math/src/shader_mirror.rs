@@ -2422,6 +2422,26 @@ fn prism_aabb_merge_hi(a_hi: vec3<f32>, b_hi: vec3<f32>) -> vec3<f32> {\n\
     return max(a_hi, b_hi);\n\
 }\n";
 
+/// Single-sourced WGSL for the 4x4 affine transforms, mirroring the CPU
+/// [`Mat4::transform_point3`](crate::mat::Mat4::transform_point3) and
+/// [`Mat4::transform_vector3`](crate::mat::Mat4::transform_vector3). The matrix
+/// is passed as its four **columns** `m0..m3` (the CPU `Mat4` is column-major:
+/// `x_axis`,`y_axis`,`z_axis`,`w_axis`). `prism_mat4_transform_point` computes
+/// `m0·x + m1·y + m2·z + m3` (implicit `w = 1`) and applies the perspective
+/// divide by the resulting `w`; `prism_mat4_transform_vector` omits the
+/// translation column (implicit `w = 0`). This is the GPU side of instance /
+/// skinning / normal transforms and camera unprojection.
+pub const WGSL_TRANSFORM: &str = "\
+fn prism_mat4_transform_point(m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: vec4<f32>, p: vec3<f32>) -> vec3<f32> {\n\
+    let r = m0 * p.x + m1 * p.y + m2 * p.z + m3;\n\
+    let inv_w = 1.0 / r.w;\n\
+    return r.xyz * inv_w;\n\
+}\n\
+\n\
+fn prism_mat4_transform_vector(m0: vec4<f32>, m1: vec4<f32>, m2: vec4<f32>, m3: vec4<f32>, v: vec3<f32>) -> vec3<f32> {\n\
+    return (m0 * v.x + m1 * v.y + m2 * v.z).xyz;\n\
+}\n";
+
 /// Single-sourced WGSL for the Q16.16 fixed-point scalar
 /// [`I16F16`](crate::fixed::i16f16::I16F16), mirroring its saturating ops on the
 /// raw `i32` bits. Integer fixed-point is the deterministic path (exact,
