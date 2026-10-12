@@ -25,6 +25,7 @@ use crate::sets::{RenderPhase, RenderSystems};
 use crate::views::RenderViews;
 use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
 use crate::queue::{PhaseItem, RenderQueues};
+use crate::queue::DrawRequest;
 use crate::queue::phase_for_render_class;
 use prism_render_material::MaterialRenderClass;
 use crate::draw::{DrawFunctionId, DrawFunctions};
@@ -330,6 +331,82 @@ fn recording_a_phase_invokes_each_draw_function() {
     // An unknown id is a no-op, never a panic.
     functions.call(DrawFunctionId(99), &queues.phase(RenderPhase::Opaque)[0], &mut recorded);
     assert_eq!(recorded, "1;2;");
+}
+
+/// Filling the queue specializes each resolved draw and appends it to its phase.
+#[test]
+fn filling_the_queue_specializes_and_appends() {
+    let options = RequestAdapterOptions::default();
+    let adapter = NullInstance::new()
+        .request_adapter(&options)
+        .expect("the null backend always has an adapter");
+    let (device, _queue) = NullInstance::new()
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null device always comes up");
+    let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+        "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+    ));
+    let descriptor = RenderPipelineDescriptor {
+        label: Some("fill-test".into()),
+        layout: None,
+        vertex: VertexState {
+            module,
+            entry_point: "vs".into(),
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: None,
+    };
+
+    let variant = MeshPipelineKey {
+        class: 1,
+        color_format: Some(TextureFormat::Rgba8Unorm),
+        depth_format: None,
+        sample_count: 1,
+        topology: PrimitiveTopology::TriangleList,
+        shader_id: 9,
+    };
+    let layout_a = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x3],
+    );
+    let layout_b = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x2],
+    );
+    let geometry = GenerationalHandle::new(2, 1);
+    let material = GenerationalHandle::new(3, 1);
+    let scene = GenerationalHandle::new(4, 1);
+    let request = |layout: prism_render_driver::VertexBufferLayout, order: u64| DrawRequest {
+        phase: RenderPhase::Opaque,
+        variant,
+        layout: vec![layout],
+        geometry,
+        material,
+        scene,
+        order,
+        draw: DrawFunctionId(0),
+    };
+
+    let mut specializer = MeshPipelineSpecializer::new();
+    let mut queues = RenderQueues::new();
+    queues.fill(
+        &device,
+        &mut specializer,
+        [request(layout_a.clone(), 0), request(layout_a, 1), request(layout_b, 2)],
+        |_| descriptor.clone(),
+    );
+
+    assert_eq!(queues.phase(RenderPhase::Opaque).len(), 3, "every draw queues");
+    assert_eq!(
+        specializer.pipeline_count(),
+        2,
+        "two distinct layouts specialize two pipelines"
+    );
 }
 
 /// Surface draws are phased by blend family only — the illumination axis is a

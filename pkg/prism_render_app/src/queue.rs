@@ -14,11 +14,37 @@
 
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::gpu_scene::{GeometryHandle, SceneHandle, SceneMaterialHandle};
-use prism_render_driver::RenderPipelineId;
+use prism_render_driver::{RenderDevice, RenderPipelineDescriptor, RenderPipelineId, VertexBufferLayout};
 use prism_render_material::MaterialRenderClass;
 
 use crate::draw::{DrawFunctionId, DrawFunctions};
+use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineSpecializer};
 use crate::sets::RenderPhase;
+
+/// A resolved visible draw ready to queue: the scene has already resolved the
+/// work item's geometry layout and material into a variant + phase.
+///
+/// The queue specializes it to a pipeline (through
+/// [`MeshPipelineSpecializer`]) and appends a [`PhaseItem`].
+pub struct DrawRequest {
+    /// The phase the draw belongs to (from
+    /// [`phase_for_render_class`]).
+    pub phase: RenderPhase,
+    /// The mesh pipeline variant (material class + fixed-function state).
+    pub variant: MeshPipelineKey,
+    /// The mesh's vertex layouts, folded into the pipeline key.
+    pub layout: Vec<VertexBufferLayout>,
+    /// The geometry to draw.
+    pub geometry: GeometryHandle,
+    /// The material whose bindings the draw uses.
+    pub material: SceneMaterialHandle,
+    /// The scene instance the draw came from.
+    pub scene: SceneHandle,
+    /// The caller's ordering key within the phase.
+    pub order: u64,
+    /// The draw function that records the item's commands.
+    pub draw: DrawFunctionId,
+}
 
 /// The phase a surface draw belongs to, from its material's blend family.
 ///
@@ -135,6 +161,41 @@ impl RenderQueues {
     ) {
         for item in self.phase(phase) {
             functions.call(item.draw, item, context);
+        }
+    }
+
+    /// Specializes and queues each resolved request.
+    ///
+    /// `build` supplies the pipeline descriptor for a variant (it needs the
+    /// renderer's shader and target state, which the queue does not own). The
+    /// specializer dedups per `(variant, layout)`, so two meshes that share a
+    /// variant and layout share one pipeline.
+    pub fn fill<D: RenderDevice>(
+        &mut self,
+        device: &D,
+        specializer: &mut MeshPipelineSpecializer,
+        requests: impl IntoIterator<Item = DrawRequest>,
+        build: impl Fn(&MeshPipelineKey) -> RenderPipelineDescriptor,
+    ) {
+        for request in requests {
+            let descriptor = build(&request.variant);
+            let pipeline = specializer.specialize(
+                device,
+                request.variant,
+                &request.layout,
+                &descriptor,
+            );
+            self.push(
+                request.phase,
+                PhaseItem {
+                    pipeline,
+                    draw: request.draw,
+                    geometry: request.geometry,
+                    material: request.material,
+                    scene: request.scene,
+                    order: request.order,
+                },
+            );
         }
     }
 
