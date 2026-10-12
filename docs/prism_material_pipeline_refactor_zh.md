@@ -8,7 +8,7 @@
 > 核心命题：**没有全局硬顶，不做运行时塌缩，也不做 per-pixel 预算裁剪。模型开放可扩展，每材质按声明静态特化成它确切需要的瓣集与特征——"界"是每材质编译期事实，不是全局天花板。分层在烘焙期解析成同参数化纹理空间混合（层数天然不限）；距离/性能靠纹理预过滤 + 高光抗锯齿 + 静态置换 + 采样缩放，全程无损、确定、跨平台。**
 > 规范参数化：**运行时 über 以 OpenPBR Surface（ASWF/Adobe/Autodesk 2024）为规范核心，Prism über 是 OpenPBR 的真超集**——`Prism über = OpenPBR Surface（全字段） ∪ { NPR_FACE 私有瓣 } ∪ { 开放词汇表后续瓣 }`。现有 7 瓣只是今天未补齐的实现子集；补齐缺口（thin_film 虹彩、coat/fuzz/subsurface 全字段等）是对开放词汇表的**加法扩充**，不是改架构。超集成立的三条硬约束见 §4.5（纯 OpenPBR 子集合规对拍 / 扩展位段隔离 / 向下投影）。NPR_FACE 作为 OpenPBR 之外的 Prism 私有瓣服务 NPR。
 > 四线正交：**PBR / NPR / 混合 / 自定义不是四条管线，而是同一条 OpenPBR über 上的正交响应模式**，由 `axis.rs` 的 `illumination` 轴 + `render_class` + 可选 `custom_program` 钩子选择；共享同一套参数解包、per-tile 分类与降级。
-> 最后更新：2026-10-10（v10 结构性重构：PCM 能力基座从“升级方向”提升为顶层 §5（“超集”的完整模型）；原 §5–§15 顺延为 §6–§16；原 §16“设计升级方向”收敛为纯可选演进并顺延为 §17；全文章节与交叉引用整体重编号。）
+> 最后更新：2026-10-12（v10 结构性重构 + P2-i 第三类 kind：PCM 能力基座从“升级方向”提升为顶层 §5（“超集”的完整模型）；原 §5–§15 顺延为 §6–§16；原 §16“设计升级方向”收敛为纯可选演进并顺延为 §17；全文章节与交叉引用整体重编号。）
 
 ---
 
@@ -349,7 +349,7 @@ OpenPBR 的 base/specular/coat/... 本身也注册为 `kind=lobe` 能力，命�
 
 ### 5.2 性能不变量：烘焙期单态化，不是运行时分发（对九类一视同仁）
 PCM 的全部治理机器（命名空间解析、能力协商、used/required、位区分配）在**烘焙/加载期**求值完毕并蒸发；运行时只剩**已特化好的那一份 WESL**，零 dispatch、零解释、零注册表查询——这是与"插件 VM"划清界限的红线。严守 §8.5"permutation 边界只由步骤1/3 决定"：transfer/cache-aux/provider/downgrade/composite 全部编入烘焙期置换 key 或 pass 图，运行时无新增 PSO、不改分类 key。置换聚类按"扩展组合原型"做（§8.4）。
-**已落地（P2-j 第一片，见 §13.a）**：类集**已经**是注册驱动——`ShadingClassTable::from_registry(PCM 注册表, lobe 目录)` 在管线构建期建表：先放专属子系统的 render-class 桶（`Water`/`Hair`，它们不看 illumination），再按**注册槽顺序**放 `Kind::ResponseMode` 的行（unlit/npr/custom，**类数来自注册表**），然后按『最具体优先』放 `Lit` 的闭包桶（`subsurface`/`clearcoat`/`cloth`，**只在该 lobe 被 schema 声明时存在**），最后是 default 行；表里没有、注册表里有的 response-mode 会让建表**报错**（注册是声明，没有实现就必须在构建期响亮地失败，而不是把材质悄悄归到别的类）。热路径不变：`classify_material_header` 仍是零分配的特化实现，而它与表走的**穷举平价门禁**（is_active × render-class × illumination × 闭包位组合）保证两者永不漂移；WESL 的 `CLASS_*` 常量与表逐行对拍的平价门禁也已落地（闸门读**出货 WESL 源码**）。**类数与容量已分离（第二片）**：shader 侧 prefix-sum/scatter 的数组本来就是**定宽**的（WGSL 没有动态数组），所以 `MAX_SHADING_CLASSES` 保留为**容量**，而**实际派发的桶数**取自类表——`ShadingClassTable::class_count()`（= `max(id)+1`，并要求 id **致密铺满** `0..count`，因为 work plan 按 id 索引），构建期用 `validate(capacity)` 同时机检**致密性**与**容量**（放不下就是构建错误，而不是静默覆盖）；分类 pass 的 `class_count` 改为读**一次构建、缓存**的表。今天类数正好等于容量，所以行为逐位不变（`prism_render_scene --lib` 1602 全绿）。§8.5 波前 occupancy 不受影响：桶数、每个桶的求值分支与逐像素分类**一字未改**，变的只是『策略来源』（注册表 → 表 → pass 参数）。
+**已落地（P2-j 第一片，见 §13.a）**：类集**已经**是注册驱动——`ShadingClassTable::from_registry(PCM 注册表, lobe 目录)` 在管线构建期建表：先放专属子系统的 render-class 桶（`Water`/`Hair`，它们不看 illumination），再按**注册槽顺序**放 `Kind::ResponseMode` 的行（unlit/npr/custom，**类数来自注册表**），然后按『最具体优先』放 `Lit` 的闭包桶（`subsurface`/`clearcoat`/`cloth`，**只在该 lobe 被 schema 声明时存在**），最后是 default 行；闭包桶与 lobe 的绑定本身也由 schema 的 `closure` 字段生成 `SURFACE_LOBE_CLOSURES`，shading 侧只把名字解析成自己的 `ClosureKind`，未知名字在管线构建期**响亮报错**（P2-i 第三类 kind，见 §13.a）。表里没有、注册表里有的 response-mode 会让建表**报错**（注册是声明，没有实现就必须在构建期响亮地失败，而不是把材质悄悄归到别的类）。热路径不变：`classify_material_header` 仍是零分配的特化实现，而它与表走的**穷举平价门禁**（is_active × render-class × illumination × 闭包位组合）保证两者永不漂移；WESL 的 `CLASS_*` 常量与表逐行对拍的平价门禁也已落地（闸门读**出货 WESL 源码**）。**类数与容量已分离（第二片）**：shader 侧 prefix-sum/scatter 的数组本来就是**定宽**的（WGSL 没有动态数组），所以 `MAX_SHADING_CLASSES` 保留为**容量**，而**实际派发的桶数**取自类表——`ShadingClassTable::class_count()`（= `max(id)+1`，并要求 id **致密铺满** `0..count`，因为 work plan 按 id 索引），构建期用 `validate(capacity)` 同时机检**致密性**与**容量**（放不下就是构建错误，而不是静默覆盖）；分类 pass 的 `class_count` 改为读**一次构建、缓存**的表。今天类数正好等于容量，所以行为逐位不变（`prism_render_scene --lib` 1602 全绿）。§8.5 波前 occupancy 不受影响：桶数、每个桶的求值分支与逐像素分类**一字未改**，变的只是『策略来源』（注册表 → 表 → pass 参数）。
 > **唯一热路径结构改动——response-mode**：步骤 2 的 9-way 分类今天是定值（`material_classification.wesl`）；开放响应模式意味着**类数本身变成注册驱动**（prefix-sum/scatter 跑在"注册的 class 集"上）。它仍是**烘焙期确定的固定表**，非运行时动态分支——分类表在管线构建期生成。这是本升级唯一触碰热路径结构的点，须单独立项并验证不回归 §8.5 波前 occupancy。
 
 > **地址空间是稀缺资源：摘要的"读写分离"（P1-h 深化，见 §13.a）**。上一段的红线有个必然推论：既然运行时只有**零分发**的一条路，那么一条 per-material 事实要在运行时可见，唯一的载体就是 header 里那 4 word 摘要——64 个槽位（4 命名空间 × 16）。给一个 **运行时永远不会读**的 kind 发一个槽，等于往热路径塞一份死状态，同时挤掉真正需要地址的扩展；Prism 区只有 16 槽，第一版目录（加满 22 行）就会把它吃干净，下一个本体扩展立刻 `PoolExhausted`。所以 `registry_slot` 的语义收紧为**"运行时读得到 = 才给地址"**：`Kind::header_resident()` 为真的 `lobe`/`channel`/`response_mode`/`cache_aux` 常驻摘要；`transfer`/`provider`/`downgrade`/`author_node`/`composite` 按本段开头那句"编入烘焙期置换 key 或 pass 图"**登记为 identity-only**（`uid` + kind + 命名空间 + 稳定级 + 能力需求照旧，能力协商按 `uid` 进行），只是没有槽。两个方向都由 `validate()` 机检（缺槽/多槽各自一个具名错误），所以"哪个 kind 占摘要"是可枚举、可 CI 守门的事实。代价与边界说清：这**不**放宽任何能力/晋升/位区隔离语义，只是把 64 槽花在有读者的地方；`author_node` 因 §4 前端未落地而无实例（kind 与 hook ABI 已就位，落地即进同一张表）。
@@ -660,6 +660,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P2-i 第三类 kind：closure 声明化（lobe → shading bucket 的链接进 schema + codegen + 响亮错误）**（§5.2 / §17.5）
+  - **动机**：分类表里 `subsurface`/`clearcoat`/`sheen` 三个闭包桶仍靠 `has_lobe("...")` 手写 lobe id 匹配；schema 已经拥有 lobe 目录，却让分类侧再写一份身份字符串，正是 §17.5 要消灭的漂移面（改 lobe id / 增闭包时两边不会同时失败）。
+  - **做法**：`Lobe` 增 `#[serde(default)] closure: Option<String>`；`clearcoat`/`sheen`/`subsurface` 三个规范瓣在 `surface.toml` 声明自己的 closure 名；`validate()` 机检名字**非空**且**全局唯一**（一个 closure 只能有一个 owner）；codegen 新增 `SURFACE_LOBE_CLOSURES: [(&str, &str); N]`（按 lobe 规范顺序发射），并在生成后由 freshness 门禁守字节稳定。
+  - **分类接线**：`ShadingClassTable::from_registry` 不再硬编码 lobe id，而是遍历 `SURFACE_LOBE_CLOSURES`，用 shading 侧自己的 `closure_from_name` 把声明名解析成 `ClosureKind` + `MaterialShadingClass`；行序仍按引擎的 most-specific-first（subsystem hair 行无条件保留，然后 subsurface → clearcoat → cloth）稳定。未知名字新增 `ClassTableError::UnknownClosureName`，在**管线构建期**响亮失败，绝不静默把一个声明过的桶丢进 default。
+  - **门禁**：`prism_material_schema` **15**（新增空 closure / 重复 closure owner / codegen 表形状）；`prism_render_shading --lib` **3373**（新增未知 closure 名响亮报错；既有穷举平价与 WESL `CLASS_*` 平价全部保持）；`prism_render_material` 850+2+1+5+6（含 codegen freshness）；`prism_material_pcm` 28；`prism_render_scene --lib` 1602。真机（越沙盒 `PRISM_REQUIRE_GPU=1`）：硬件解码 66 + 纹理 LOD / glint / 动态通道 / 测量 BRDF / 单瓣采样器各 1。
 
 - **P2-i 第一片：channel 类声明化（lobe 之外的第二类进 schema + codegen + 三向平价门禁）**（§17.5 / §17.1）
   - **动机**：运行时动态通道的四个事实（uid、落在哪个 header word、中性默认、有效域）此前分散在三处手写——PCM 内置目录、`GpuMaterialHeader` 的 `dynamic_*` 字段、`DynamicChannels` 的默认值——正是 §17.5 要消灭的那类漂移面。
@@ -1089,8 +1095,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 #### 13.a.1 code-truth 审计（剩余路线图项 · 逐项证据）
 
-下表是"**以代码为准**"的剩余工作清点，每行给出可复现的证据与本轮实测的门禁数（CPU 侧 `prism_render_shading --lib` 3372、
-`prism_render_scene --lib` 1602、`prism_render_material` 850+2+1+4+6、`prism_material_pcm` 28、`prism_material_schema` 13；
+下表是"**以代码为准**"的剩余工作清点，每行给出可复现的证据与本轮实测的门禁数（CPU 侧 `prism_render_shading --lib` 3373、
+`prism_render_scene --lib` 1602、`prism_render_material` 850+2+1+5+6、`prism_material_pcm` 28、`prism_material_schema` 15；
 真机侧越沙盒 `PRISM_REQUIRE_GPU=1`：硬件解码 66 + 纹理 LOD / glint / 动态通道 / 测量 BRDF / 单瓣采样器 各 1）。
 
 | 项 | 状态 | 证据 | 余下 |
@@ -1103,11 +1109,11 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | **P2-c** | 完成（两个开放瓣） | glint + measured 的 ABI/双线/真机对拍（§17.6、§13.a） | MaterialX 往返（编辑器 TODO） |
 | **P2-e 四线正交运行期** | **部分** | `Illumination` 四值 ✔、分类到 `Npr`/`Unlit`/`Custom` ✔、per-tile 9-way 分类 ✔；**custom 的运行期退化已落地**（见 §13.a）| ① **逐区域 illumination**（遮罩在分类 pass 里选 Lit/Stylized，才符合 §3.5.3 的"per-tile 分波前消发散"）；② 作者侧 `respond_custom` WESL 属编辑器 TODO（契约 §5.4.1） |
 | **P2-g** | 完成 | header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha/OIT + 真机对拍（§17.1、§13.a） | — |
-| **P2-i 全 kind manifest + codegen** | **部分（lobe + channel 两类已声明化）** | PCM 九类 kind/hook/常驻-identity 已落地（P1-h 收官）；`prism_material_schema` 现已覆盖 **lobe** 与 **channel** 两类：channel 的 uid/header word/中性默认由 schema 声明，codegen 产出 `SURFACE_CHANNELS`，并与 PCM 目录 + header 的四个 `dynamic_*` word 三向对拍（见 §13.a） | 其余七类（response-mode / transfer / cache-aux / provider / downgrade / author-node / composite）的 manifest+codegen；MaterialX nodedef 往返归编辑器 |
+| **P2-i 全 kind manifest + codegen** | **部分（lobe（含 closure 分类链接）+ channel 两类已声明化）** | PCM 九类 kind/hook/常驻-identity 已落地（P1-h 收官）；`prism_material_schema` 现已覆盖 **lobe** 与 **channel** 两类：lobe 的 `closure` 链接生成 `SURFACE_LOBE_CLOSURES` 并驱动分类表（未知名字构建期报错），channel 的 uid/header word/中性默认由 schema 声明，codegen 产出 `SURFACE_CHANNELS` 并与 PCM 目录 + header 的四个 `dynamic_*` word 三向对拍（见 §13.a） | 其余七类（response-mode / transfer / cache-aux / provider / downgrade / author-node / composite）的 manifest+codegen；MaterialX nodedef 往返归编辑器 |
 | **P2-j** | 完成 | 类表由 PCM 注册表 + lobe 目录派生、穷举平价门禁、WESL `CLASS_*` 平价门禁、类数由表驱动（§5.2、§13.a） | — |
 | **P3-a~d 解耦着色** | **未开始** | `gi/surface_cache/` 是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统），不是 §14 的 texel-space/对象空间着色缓存；没有把着色结果写进 VT 页的 pass | 按 §14.10 分阶段：texel-space 着色 pass → 视角无关项分离 → 失效/时序复用 → LOD 策略 |
 
-> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P1-d 的异步编译 + über 回退、P2-e 的逐区域 illumination + custom hook、P2-i 的其余八类 codegen、P3-a~d 整块**。
+> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P1-d 的异步编译 + über 回退、P2-e 的逐区域 illumination + custom hook、P2-i 的其余七类 codegen、P3-a~d 整块**。
 > 其余路线图项要么已完成（上表），要么按 goal 明确挂在编辑器前端（MaterialX / 节点图 / 作者 WESL）。
 
 ### 13.5 P3 远期：解耦着色 / texel-space shading（性能上限最高，工程最重）
@@ -1550,7 +1556,7 @@ energy_policy = "coupled"       # 对接 §17.2 分层能量预算
 view          = "invariant"     # §14.3 视角无关 -> 可进对象空间缓存
 ```
 
-字段维度覆盖：**名/类型/位宽/位区(=namespace)/打包偏移/贡献的 SpecializationId 子区/§8.5 消费步骤/默认值/合法谓词/能量策略/视角相关性/调试视图绑定/金标准绑定**。schema 之于 PCM 的九类 kind 一视同仁——lobe 声明字段，provider 声明页格式，composite 声明 pass I/O，response-mode 声明分类 class 条目，皆同构。
+字段维度覆盖：**名/类型/位宽/位区(=namespace)/打包偏移/贡献的 SpecializationId 子区/§8.5 消费步骤/默认值/合法谓词/能量策略/视角相关性/调试视图绑定/金标准绑定**；lobe record 另外声明它拥有的 **closure 分类桶**（`closure` 名，分类侧解析，未知名字构建期报错）。schema 之于 PCM 的九类 kind 一视同仁——lobe 声明字段与分类链接，provider 声明页格式，composite 声明 pass I/O，response-mode 声明分类 class 条目，皆同构。
 
 #### 17.5.3 codegen 管线（从一个源生成什么）
 
