@@ -2271,6 +2271,46 @@ mod pipelined_tests {
             );
         }
     }
+
+    /// The render lane is one persistent worker thread reused across frames —
+    /// not a fresh OS thread spawned every frame.
+    #[test]
+    fn render_lane_reuses_one_thread() {
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+
+        let ids: Arc<Mutex<HashSet<std::thread::ThreadId>>> = Arc::new(Mutex::new(HashSet::new()));
+        let record = Arc::clone(&ids);
+
+        let mut render = SubApp::new();
+        render
+            .world
+            .resource_mut::<prism_ecs::schedule::Schedules>()
+            .insert(Update, prism_ecs::schedule::Schedule::new());
+        render
+            .world
+            .resource_mut::<prism_ecs::schedule::Schedules>()
+            .get_mut(Update)
+            .unwrap()
+            .add_systems(move || {
+                record.lock().unwrap().insert(std::thread::current().id());
+            });
+
+        let mut app = App::new();
+        app.insert_sub_app(RenderApp, render);
+        app.enable_pipelined_rendering();
+
+        for _ in 0..8 {
+            app.update();
+        }
+        app.sync_sub_apps();
+
+        assert_eq!(
+            ids.lock().unwrap().len(),
+            1,
+            "the render lane must reuse one worker thread across frames"
+        );
+    }
 }
 
 // ---- M4 Inc2: platform lifecycle events + graceful shutdown ------------
