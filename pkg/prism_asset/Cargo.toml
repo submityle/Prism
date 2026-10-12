@@ -8,9 +8,15 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+prism_ecs = { path = "../prism_ecs", optional = true }
 
 [features]
 default = ["std"]
+# `ecs` bridges this crate's identity and storage into the ECS: it implements
+# `prism_ecs`'s `Resource` for `Assets<A>`, so an asset arena can live in a world
+# and be reached by systems. Off by default, so the no_std core stays
+# dependency-free; a world-owning crate turns it on.
+ecs = ["dep:prism_ecs"]
 # `std` unlocks the virtual-file-system data sources (AssetReader / FsSource /
 # MemSource / AssetSources) that back the loader IO half. The identity /
 # storage / dependency / loader-policy core is fully `no_std + alloc`.

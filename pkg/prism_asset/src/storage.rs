@@ -447,3 +447,9 @@ impl<A: Asset> Default for Assets<A> {
         Self::new()
     }
 }
+
+// A world-owning crate turns on the `ecs` feature to put the arena in an ECS
+// world: the arena is then a resource a system can read (`Res<Assets<Mesh>>`),
+// which is what lets the simulation own assets and a renderer prepare from them.
+#[cfg(feature = "ecs")]
+impl<A: Asset> prism_ecs::resource::Resource for Assets<A> {}

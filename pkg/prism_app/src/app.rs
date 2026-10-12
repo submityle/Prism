@@ -300,6 +300,30 @@ impl App {
         self
     }
 
+    /// Append a one-way extract step to the sub-app under `label`.
+    ///
+    /// The step runs after the ones already installed, which is what lets
+    /// independently authored renderer plugins each contribute their own
+    /// extraction (the frame record, a render-asset family, the scene) instead
+    /// of one plugin owning the whole extract.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no sub-app is registered under `label`; insert the sub-app
+    /// with [`insert_sub_app`](App::insert_sub_app) first.
+    pub fn add_extract<F>(&mut self, label: impl SubAppLabel, extract: F) -> &mut Self
+    where
+        F: FnMut(&mut World, &mut World) + Send + Sync + 'static,
+    {
+        let desc = format!("{label:?}");
+        let sub_app = self
+            .sub_apps
+            .get_mut(label)
+            .unwrap_or_else(|| panic!("add_extract: no sub-app registered under {desc}"));
+        sub_app.add_extract(extract);
+        self
+    }
+
     // ---- time -------------------------------------------------------------
 
     /// Set how the frame loop advances the real clock each frame (design §8).

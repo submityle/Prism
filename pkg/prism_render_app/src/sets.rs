@@ -32,6 +32,8 @@ use prism_render_graph::RenderGraphSystems;
 pub enum RenderSystems {
     /// Pull the frame's inputs out of the main world.
     Extract,
+    /// Prepare the GPU form of the assets the extract carried across.
+    PrepareAssets,
     /// Create the frame's views (its view family) before anything is queued or
     /// prepared against them.
     CreateViews,
@@ -66,8 +68,9 @@ impl RenderSystems {
     /// them (see [`configure_render_sets`]), so a system registered in
     /// [`QueueMeshes`](Self::QueueMeshes) needs no edge to one in
     /// [`PrepareResources`](Self::PrepareResources).
-    pub const ORDER: [Self; 7] = [
+    pub const ORDER: [Self; 8] = [
         Self::Extract,
+        Self::PrepareAssets,
         Self::CreateViews,
         Self::PrepareViews,
         Self::Queue,
@@ -79,16 +82,17 @@ impl RenderSystems {
     const fn discriminant(self) -> u64 {
         match self {
             Self::Extract => 0,
-            Self::CreateViews => 1,
-            Self::PrepareViews => 2,
-            Self::Queue => 3,
-            Self::QueueMeshes => 4,
-            Self::Prepare => 5,
-            Self::PrepareResources => 6,
-            Self::PrepareResourcesFlush => 7,
-            Self::PrepareBindGroups => 8,
-            Self::Phase => 9,
-            Self::Cleanup => 10,
+            Self::PrepareAssets => 1,
+            Self::CreateViews => 2,
+            Self::PrepareViews => 3,
+            Self::Queue => 4,
+            Self::QueueMeshes => 5,
+            Self::Prepare => 6,
+            Self::PrepareResources => 7,
+            Self::PrepareResourcesFlush => 8,
+            Self::PrepareBindGroups => 9,
+            Self::Phase => 10,
+            Self::Cleanup => 11,
         }
     }
 }

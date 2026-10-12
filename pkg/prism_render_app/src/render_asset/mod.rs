@@ -15,7 +15,9 @@
 //! The table is keyed by [`AssetId`], so the identity that a render-side phase
 //! item or bind group carries is the same one the simulation uses.
 
+mod extract;
 mod prepare;
+mod stage;
 mod table;
 
 #[cfg(test)]
@@ -25,7 +27,9 @@ use prism_asset::Asset;
 use prism_asset::AssetId;
 use prism_render_driver::RenderDevice;
 
-pub use prepare::{AssetSyncReport, PrepareAssetError, drain_and_sync_assets, sync_assets};
+pub use extract::{ExtractedAssets, extract_assets};
+pub use prepare::{AssetSyncReport, PrepareAssetError, prepare_extracted_assets};
+pub use stage::{AssetSyncStats, prepare_assets, register_render_assets};
 pub use table::RenderAssets;
 
 /// An asset the renderer keeps a separate GPU form of.
@@ -38,7 +42,10 @@ pub use table::RenderAssets;
 /// asks for it.
 pub trait RenderAsset: Send + Sync + 'static + Sized {
     /// The simulation-side asset this prepares from.
-    type SourceAsset: Asset;
+    ///
+    /// `Clone` because the render world receives a *copy* of what changed this
+    /// frame (the simulation keeps its asset; see [`extract_assets`]).
+    type SourceAsset: Asset + Clone;
 
     /// Prepares (or re-prepares) the GPU form of `source`.
     ///

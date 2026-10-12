@@ -102,8 +102,8 @@ pub use queue::{
 };
 pub use record::RenderRecord;
 pub use render_asset::{
-    AssetSyncReport, PrepareAssetError, RenderAsset, RenderAssets, drain_and_sync_assets,
-    sync_assets,
+    AssetSyncReport, AssetSyncStats, ExtractedAssets, PrepareAssetError, RenderAsset, RenderAssets,
+    extract_assets, prepare_assets, prepare_extracted_assets, register_render_assets,
 };
 pub use runtime_resource::RenderRuntimeResource;
 pub use scene::{MeshClass, SceneRegistry, VisibilityWorkList};
@@ -136,8 +136,9 @@ pub mod prelude {
     };
     pub use crate::record::RenderRecord;
     pub use crate::render_asset::{
-        AssetSyncReport, PrepareAssetError, RenderAsset, RenderAssets, drain_and_sync_assets,
-        sync_assets,
+        AssetSyncReport, AssetSyncStats, ExtractedAssets, PrepareAssetError, RenderAsset,
+        RenderAssets, extract_assets, prepare_assets, prepare_extracted_assets,
+        register_render_assets,
     };
     pub use crate::scene::{MeshClass, SceneRegistry, VisibilityWorkList};
     pub use crate::sets::{

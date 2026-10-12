@@ -87,7 +87,7 @@ BufferInitDescriptor / SpecializedRenderPipelines / ShaderType`，
 1. **S2a 每 view 录制上下文**：`CurrentView` + `ViewQuery` **已落**（`prism_ecs::system::view_query`
    + `prism_render_app` 再导出；缺 skip 机制，参数是 `Option<ViewQuery<..>>`，见该模块文档）；
    剩：把 `ExecuteContext` 包成 view 作用域的录制面（外层循环按 view 设 `CurrentView`）。
-2. **S2b extract + 实体映射**：实体映射与 `RenderAssets<T>` **已落**；剩：把两者接进 `RenderSystems::PrepareAssets` 的常驻系统（含跨世界的事件传递）。
+2. **S2b extract + 实体映射**：实体映射与资产管线**已落并接进帧**——`extract_assets::<A>`（走 `App::add_extract` 链，新增多段 extract 能力）把主世界 arena 的 Added/Modified 复制进 `ExtractedAssets<A>`、Removed 只传 id；`prepare_assets::<I, A>` 在新增的 `RenderSystems::PrepareAssets` 阶段跑 `prepare_extracted_assets`，`AssetSyncStats<A>` 记录每帧报告；`register_render_assets::<I, A>` 一次注册一族（= 上游 `RenderAssetPlugin<A>`）。剩：把 `RenderMesh`/`GpuImage` 这两族接上（需 S2c 的 mesh 层）。
 3. **S2c mesh 资源层**：`RenderMesh`/`RenderMeshBufferInfo`/`MeshAllocator`。
 4. **S2d 资源缝收敛**：逐条目把 `render_resource::*` 换成 RHI 同名类型（§3 第一组，机械但量最大）。
 5. **S2e 小工具**：`affine3_to_square`、`decompress_vertex_position`、`allocator::*`。
