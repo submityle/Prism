@@ -15,11 +15,16 @@ glam = { version = "0.33.2", default-features = false }
 # POD GPU records are bit-cast to raw bytes and to atomic word arrays; the
 # atomic-POD records module re-exports this for its generated code.
 bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
+# The sparse GPU-scene buffers upload through the Prism RHI, so the retained
+# scene's buffer storage no longer depends on `bevy_render`.
+prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
 
 [dev-dependencies]
 # Reference DEFLATE encoder, used only as a round-trip oracle in
 # `compression::deflate` tests; never linked into the shipped library.
 flate2 = "1.0"
+# The wgpu backend, used only by the sparse-buffer upload test's real-device path.
+prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
 
 [lints]
 workspace = true

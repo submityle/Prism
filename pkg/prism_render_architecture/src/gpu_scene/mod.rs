@@ -2,6 +2,7 @@
 
 mod allocator;
 mod mirror;
+mod sparse_buffer;
 mod transaction;
 mod upload;
 
@@ -15,6 +16,7 @@ pub use allocator::{
 pub use mirror::{
     CpuRenderScene, DirtySceneSlot, SceneApplyError, SceneApplyReport, SceneFieldMask,
 };
+pub use sparse_buffer::SparseBufferVec;
 pub use transaction::{
     merge_transactions, MergeIssue, MergeIssueKind, MergeReport, SceneOperation, SceneTransaction,
     SceneTransactionBuilder,
