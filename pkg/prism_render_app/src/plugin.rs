@@ -205,6 +205,9 @@ where
         // extract, its prepared table, and its prepare stage. Registering it
         // again elsewhere is a no-op.
         crate::render_asset::register_render_assets::<I, crate::RenderMesh>(app);
+        // Images reach the GPU the same way: the spine owns the family so a
+        // material can bind a texture without the app wiring a second pipeline.
+        crate::render_asset::register_render_assets::<I, crate::GpuImage>(app);
     }
 
     fn finish(&self, app: &mut App) {

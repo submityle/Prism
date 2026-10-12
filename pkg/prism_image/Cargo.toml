@@ -1,0 +1,19 @@
+[package]
+name = "prism_image"
+version = "0.1.0"
+edition = "2024"
+description = "Prism's image asset: texel data with the extent, format, and sampler it must be uploaded with, validated up front. The data half of the renderer's texture path — no ECS, no GPU handles, no bevy_image/bevy_render dependency."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# An image is an asset: it lives in an `Assets<Image>` arena and is prepared by
+# the renderer, so it uses the asset kernel's contract.
+prism_asset = { path = "../prism_asset" }
+# The texel vocabulary is the RHI's: an image must be uploaded as exactly the
+# format and extents a pipeline will bind, and a second set of enums here would
+# be a second truth that can drift.
+prism_render_driver = { path = "../prism_render_driver" }
+
+[lints]
+workspace = true

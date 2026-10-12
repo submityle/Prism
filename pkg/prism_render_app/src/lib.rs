@@ -62,6 +62,7 @@ mod config;
 mod device_loss;
 mod draw;
 mod frame;
+mod image;
 mod intent;
 mod label;
 mod mesh_pipeline;
@@ -89,6 +90,8 @@ mod view_query;
 mod views;
 
 #[cfg(test)]
+mod image_tests;
+#[cfg(test)]
 mod tests;
 
 pub use bin_queue::{BinQueueOutcome, bin_indirect_args};
@@ -96,6 +99,7 @@ pub use config::RenderAppConfig;
 pub use device_loss::DeviceLossSignal;
 pub use draw::{DrawFunctionId, DrawFunctions, MeshRecorder};
 pub use frame::{RENDER_DEPTH_FORMAT, RENDER_TARGET_FORMAT};
+pub use image::GpuImage;
 pub use intent::{RenderIntent, RenderViewport};
 pub use label::{Render, RenderApp, RenderStartup};
 pub use mesh_pipeline::{MeshPipelineKey, MeshPipelineProvider, MeshPipelineSpecializer};
