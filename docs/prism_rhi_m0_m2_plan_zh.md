@@ -39,16 +39,15 @@
 - **M2 场景 + 基准**：`prism_render_gpudriven` 经 `prism_render_graph` 真绘制 ~1000 物体；`benches/benches/prism_gpu_cull` 实测——GPU-driven 逐帧 CPU 提交 ~290 ns 且与物体数无关，朴素路径 10000 物体 58 µs（**232×**）。顺手修出「剔除原子游标未重置」真 bug。
 - **M2 bindless**：RHI 加 descriptor-array（buffer/texture/sampler/storage-texture 四类）+ wgpu `binding_array` 翻译，四类均真机**精确值**验证；按 wgpu 30 实际能力门控。
 - **集成**：`pkg/prism_render_app` —— runtime 接进 `prism_app` 的 render sub-app（extract + `Render` schedule；GPU 状态只在 render world，`forbid(unsafe_code)`）。
-- **内容层（脱 bevy 的地基）**：`pkg/prism_camera`（投影/视图/视锥）、`pkg/prism_mesh`（顶点/图元/RHI 上传）、`pkg/prism_image`（RGBA8/RHI 纹理上传）——全部无 `bevy_*`，GPU 上传真机验证。
-- **材质路径**：`pkg/prism_render_shading_gpu` 是 CPU golden `evaluate_principled_direct` 的 wgpu twin（GGX + Oren-Nayar + Kulla-Conty/Turquin 多次散射 + 各向异性），111 组配置真机对拍 `max_rel=4.7e-6`；门禁抓出其镜像里一个 Karis 系数写反的真 bug。
-- **CR 修复**：① `prism_math::Frustum::from_view_proj` 原用 OpenGL `[-1,1]` 近平面，与 Prism 自身 `[0,1]` 投影不符——改为 `[0,1]` 默认 + 新增 `_gl`；`prism_camera` 改为委托，单一实现。② `Surface::discard` 补齐：帧已 acquire 但图编译失败时不再泄漏交换链 id。
+- **CR 修复**：① `prism_math::Frustum::from_view_proj` 原用 OpenGL `[-1,1]` 近平面，与 Prism 自身 `[0,1]` 投影不符——改为 `[0,1]` 默认 + 新增 `_gl`。② `Surface::discard` 补齐：帧已 acquire 但图编译失败时不再泄漏交换链 id。
 
 ## 4. 后续切片（依赖有序）
 
-1. **可见目标物 demo**：`tools/render_pbr` —— 用 camera/mesh/image + PBR twin 在真窗口画出带纹理、被光照的物体（M1/M2 的可见验收）。
-2. **`prism_render_scene` 脱 bevy 首片**：把现役渲染器的内容类型换到 `prism_mesh/image/camera` 上（M3 范围，需分片推进）。
-3. **自动屏障可观测**：`StateTracker` 已算屏障；wgpu 阶段为 no-op，补 `validation` 档把推导屏障与后端追踪对拍。
-4. **`prism_render_app` 接真窗口**：把 render sub-app 的离屏目标换成 `prism_window_winit` 的 surface。
+> 范围约定：当前只做 **RHI 接入**。已有材质/渲染系统（`prism_render_material` / `prism_render_scene` / `prism_render_shading` / `prism_render_architecture`）不替换、不重建。
+
+1. **自动屏障可观测**：`StateTracker` 已算屏障；wgpu 阶段为 no-op，补 `validation` 档把推导屏障与后端追踪对拍。
+2. **`prism_render_app` 接真窗口**：把 render sub-app 的离屏目标换成 `prism_window_winit` 的 surface。
+3. **RHI 接入已有渲染系统**：把现役 `prism_render_scene` 的设备/命令面收敛到 RHI（只换地基，不改其材质/逻辑）。
 
 ## 5. 验证门禁
 

@@ -27,7 +27,6 @@ members = [
   "pkg/prism_math_gpu",
   "pkg/prism_transform_gpu",
   # Engine-neutral camera math (projection/view/frustum) for the RHI render path.
-  "pkg/prism_camera",
   "pkg/prism_platform_os",
   "pkg/prism_asset",
   "pkg/prism_render_driver",
@@ -43,9 +42,7 @@ members = [
   "pkg/prism_render_gpudriven",
   # Engine-neutral mesh geometry (vertex model + primitives + RHI upload),
   # replacing bevy_mesh's mesh types on the RHI render path.
-  "pkg/prism_mesh",
   # Engine-neutral image data + RHI upload (the bevy_image replacement).
-  "pkg/prism_image",
   "pkg/prism_input",
   "pkg/prism_shader",
   "pkg/prism_window",
@@ -67,7 +64,6 @@ members = [
   "pkg/prism_render_scene",
   "pkg/prism_render_shading",
   # Device twin of the CPU direct-lighting golden (WGSL base-lobe mirror + PBR surface pass).
-  "pkg/prism_render_shading_gpu",
   "pkg/prism_render_visibility",
   # Prism Bevy integration bridge for the GPU-driven renderer (phased-out once prism_app lands).
   "pkg/prism_bevy",
