@@ -4,8 +4,9 @@
 //! [`GpuI16F16`] batch-evaluates the saturating Q16.16 ops **on a real device**,
 //! mirroring the CPU
 //! [`I16F16`](prism_math::fixed::i16f16::I16F16) methods on the raw `i32` bits:
-//! `add`/`sub`/`neg`/`abs` (i32 saturating), `min`/`max`, and the rounding
-//! saturating `mul`. Integer fixed-point is the deterministic path, so the
+//! `add`/`sub`/`neg`/`abs` (i32 saturating), `min`/`max`, the rounding
+//! saturating `mul`, the truncating saturating `div`, and the `to_int`/
+//! `from_int` conversions. Integer fixed-point is the deterministic path, so the
 //! device result is **bit-identical** to the CPU. The math is **not** duplicated
 //! here: the kernel is composed at runtime from the shared
 //! [`WGSL_U64`](prism_math::shader_mirror::WGSL_U64) emulation plus the
@@ -17,10 +18,9 @@
 //! # Exact parity
 //!
 //! Every op is exact integer arithmetic (the `mul` widens to a 64-bit product
-//! then rounds), so the parity suite compares with **strict equality**. `div`
-//! (needing a 64-bit divide) is not mirrored. The suite skips gracefully when no
-//! adapter is available; the device-free WGSL parse gate and a real `GPU` cover
-//! the rest.
+//! then rounds; the `div` is a 48-bit long division), so the parity suite
+//! compares with **strict equality**. The suite skips gracefully when no adapter
+//! is available; the device-free WGSL parse gate and a real `GPU` cover the rest.
 //!
 //! Standard `wgpu` compute orchestration. No Unreal Engine or Unity source or
 //! derived code.
@@ -62,7 +62,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     else if (params.op == 3u) { r = prism_i16f16_min(s.a, s.b); }\n\
     else if (params.op == 4u) { r = prism_i16f16_max(s.a, s.b); }\n\
     else if (params.op == 5u) { r = prism_i16f16_abs(s.a); }\n\
-    else { r = prism_i16f16_neg(s.a); }\n\
+    else if (params.op == 6u) { r = prism_i16f16_neg(s.a); }\n\
+    else if (params.op == 7u) { r = prism_i16f16_div(s.a, s.b); }\n\
+    else if (params.op == 8u) { r = prism_i16f16_to_int(s.a); }\n\
+    else { r = prism_i16f16_from_int(s.a); }\n\
     dst[i] = r;\n\
 }\n";
 
@@ -85,6 +88,13 @@ pub enum I16F16Op {
     Abs = 5,
     /// Saturating negation.
     Neg = 6,
+    /// Saturating, truncating division (`a / b`; divide-by-zero saturates).
+    Div = 7,
+    /// Truncate toward zero to a whole integer (`raw >> 16`).
+    ToInt = 8,
+    /// Build from a whole integer (`int << 16`, saturating). `a` is a plain
+    /// integer, not Q16.16 bits.
+    FromInt = 9,
 }
 
 /// Uniform block: count + op, padded to 16 bytes.

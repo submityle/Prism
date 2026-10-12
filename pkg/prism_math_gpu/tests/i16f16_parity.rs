@@ -58,6 +58,17 @@ fn pairs() -> Vec<[i32; 2]> {
     v.push([i32::MAX, i32::MIN]);
     v.push([3 << 16, 5 << 16]);
     v.push([-(3 << 16), 5 << 16]);
+    // Division edge cases: divide-by-zero (sign-saturating), signs, and a
+    // numerator that overflows on `<< 16`.
+    v.push([1, 0]);
+    v.push([-1, 0]);
+    v.push([0, 0]);
+    v.push([5 << 16, 2 << 16]);
+    v.push([-(5 << 16), 2 << 16]);
+    v.push([5 << 16, -(2 << 16)]);
+    v.push([i32::MAX, 1]);
+    v.push([i32::MIN, 1]);
+    v.push([i32::MIN, -1]);
     v
 }
 
@@ -81,6 +92,10 @@ fn i16f16_binary_ops_match_cpu_bits() {
         (
             I16F16Op::Mul,
             I16F16::saturating_mul as fn(I16F16, I16F16) -> I16F16,
+        ),
+        (
+            I16F16Op::Div,
+            I16F16::saturating_div as fn(I16F16, I16F16) -> I16F16,
         ),
         (I16F16Op::Min, I16F16::min as fn(I16F16, I16F16) -> I16F16),
         (I16F16Op::Max, I16F16::max as fn(I16F16, I16F16) -> I16F16),
@@ -116,6 +131,33 @@ fn i16f16_unary_ops_match_cpu_bits() {
             neg[i],
             I16F16::from_bits(a).saturating_neg().to_bits(),
             "neg[{i}]"
+        );
+    }
+}
+
+#[test]
+fn i16f16_conversions_match_cpu_bits() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let kernel = GpuI16F16::new(&ctx);
+
+    // `to_int` truncates the raw bits; `a` only.
+    let ps: Vec<[i32; 2]> = RAWS.iter().map(|&a| [a, 0]).collect();
+    let to_int = kernel.apply(&ctx, I16F16Op::ToInt, &ps);
+    for (i, &a) in RAWS.iter().enumerate() {
+        assert_eq!(to_int[i], I16F16::from_bits(a).to_int(), "to_int[{i}]");
+    }
+
+    // `from_int` takes a plain integer (saturating on the `<<16`).
+    let ints: [i32; 8] = [0, 1, -1, 2, -2, 32767, i32::MAX, i32::MIN];
+    let ips: Vec<[i32; 2]> = ints.iter().map(|&n| [n, 0]).collect();
+    let from_int = kernel.apply(&ctx, I16F16Op::FromInt, &ips);
+    for (i, &n) in ints.iter().enumerate() {
+        assert_eq!(
+            from_int[i],
+            I16F16::from_int(n).to_bits(),
+            "from_int[{i}] n={n}"
         );
     }
 }

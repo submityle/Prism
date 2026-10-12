@@ -2400,9 +2400,11 @@ fn prism_aabb_merge_hi(a_hi: vec3<f32>, b_hi: vec3<f32>) -> vec3<f32> {\n\
 /// semantics (`MIN` negates to `MAX`); `_min`/`_max` are comparisons; `_mul`
 /// widens to an exact 64-bit two's-complement product (via the shared
 /// [`WGSL_U64`] emulation), adds the Q16.16 rounding bias `1<<15`, arithmetic-
-/// shifts right 16, and saturates back to `i32`. `div` (needing a 64-bit
-/// divide) is not mirrored here. This is the GPU side of deterministic
-/// fixed-point simulation.
+/// shifts right 16, and saturates back to `i32`. `_div` reproduces the signed
+/// truncating division (`(a<<16)/b`, divide-by-zero saturating by sign, `0/0 = 0`)
+/// with a 48-bit shift-subtract long division; `_to_int`/`_from_int` truncate and
+/// scale by `2^16`. This is the GPU side of deterministic fixed-point
+/// simulation.
 pub const WGSL_I16F16: &str = "\
 fn prism_i16f16_add(a: i32, b: i32) -> i32 {\n\
     let mx = 2147483647;\n\
@@ -2439,17 +2441,69 @@ fn prism_i16f16_mul_u64(alo: u32, ahi: u32, blo: u32, bhi: u32) -> vec2<u32> {\n
     return vec2<u32>(lo, hi);\n\
 }\n\
 \n\
+fn prism_i16f16_sat_i64(lo: u32, hi: u32) -> i32 {\n\
+    if (hi == select(0u, 0xffffffffu, (lo >> 31u) == 1u)) {\n\
+        return bitcast<i32>(lo);\n\
+    }\n\
+    if ((hi >> 31u) == 1u) { return bitcast<i32>(0x80000000u); }\n\
+    return 2147483647;\n\
+}\n\
+\n\
 fn prism_i16f16_mul(a: i32, b: i32) -> i32 {\n\
     let a_hi = select(0u, 0xffffffffu, a < 0);\n\
     let b_hi = select(0u, 0xffffffffu, b < 0);\n\
     let p = prism_i16f16_mul_u64(bitcast<u32>(a), a_hi, bitcast<u32>(b), b_hi);\n\
     let r = prism_u64_add(p.x, p.y, 0x8000u, 0u);\n\
     let sign = select(0u, 0xffff0000u, (r.y >> 31u) == 1u);\n\
-    let lo = (r.x >> 16u) | (r.y << 16u);\n\
-    let hi = (r.y >> 16u) | sign;\n\
-    if (hi == select(0u, 0xffffffffu, (lo >> 31u) == 1u)) {\n\
-        return bitcast<i32>(lo);\n\
+    return prism_i16f16_sat_i64((r.x >> 16u) | (r.y << 16u), (r.y >> 16u) | sign);\n\
+}\n\
+\n\
+fn prism_i16f16_to_int(a: i32) -> i32 {\n\
+    return a >> 16u;\n\
+}\n\
+\n\
+fn prism_i16f16_from_int(n: i32) -> i32 {\n\
+    let n_hi = select(0u, 0xffffffffu, n < 0);\n\
+    let n_lo = bitcast<u32>(n);\n\
+    return prism_i16f16_sat_i64(n_lo << 16u, (n_hi << 16u) | (n_lo >> 16u));\n\
+}\n\
+\n\
+fn prism_i16f16_div(a: i32, b: i32) -> i32 {\n\
+    if (b == 0) {\n\
+        if (a > 0) { return 2147483647; }\n\
+        if (a < 0) { return bitcast<i32>(0x80000000u); }\n\
+        return 0;\n\
     }\n\
-    if ((hi >> 31u) == 1u) { return bitcast<i32>(0x80000000u); }\n\
-    return 2147483647;\n\
+    let a_bits = bitcast<u32>(a);\n\
+    let b_bits = bitcast<u32>(b);\n\
+    let ua = select(a_bits, 0u - a_bits, a < 0);\n\
+    let ub = select(b_bits, 0u - b_bits, b < 0);\n\
+    let n_lo = ua << 16u;\n\
+    let n_hi = ua >> 16u;\n\
+    var rem_lo = 0u;\n\
+    var rem_hi = 0u;\n\
+    var q_lo = 0u;\n\
+    var q_hi = 0u;\n\
+    for (var i = 0u; i < 48u; i = i + 1u) {\n\
+        let bit = 47u - i;\n\
+        var nb = 0u;\n\
+        if (bit >= 32u) { nb = (n_hi >> (bit - 32u)) & 1u; }\n\
+        else { nb = (n_lo >> bit) & 1u; }\n\
+        rem_hi = (rem_hi << 1u) | (rem_lo >> 31u);\n\
+        rem_lo = (rem_lo << 1u) | nb;\n\
+        if (rem_hi > 0u || rem_lo >= ub) {\n\
+            let borrow = select(0u, 1u, rem_lo < ub);\n\
+            rem_lo = rem_lo - ub;\n\
+            rem_hi = rem_hi - borrow;\n\
+            if (bit >= 32u) { q_hi = q_hi | (1u << (bit - 32u)); }\n\
+            else { q_lo = q_lo | (1u << bit); }\n\
+        }\n\
+    }\n\
+    let negative = (a < 0) != (b < 0);\n\
+    if (negative) {\n\
+        if (q_hi > 0u || q_lo > 0x80000000u) { return bitcast<i32>(0x80000000u); }\n\
+        return bitcast<i32>(0u - q_lo);\n\
+    }\n\
+    if (q_hi > 0u || q_lo > 0x7fffffffu) { return 2147483647; }\n\
+    return bitcast<i32>(q_lo);\n\
 }\n";
