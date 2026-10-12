@@ -14,7 +14,7 @@ use prism_material_pcm::{Capability, EnergyPolicy, ExtensionSet, Kind, Namespace
 use prism_render_material::capability::{
     lobe_registry, parse_capabilities, SPECIFICATION_NAMESPACE,
 };
-use prism_render_material::{Illumination, LobeMask, SURFACE_LOBES};
+use prism_render_material::{DynamicChannels, Illumination, LobeMask, SURFACE_CHANNELS, SURFACE_LOBES};
 
 /// Every schema lobe is registered in the committed catalogue with the same
 /// identity and governance fields, and the bridge agrees with both.
@@ -270,4 +270,34 @@ fn the_registry_response_modes_mirror_the_illumination_axis() {
         assert_eq!(Illumination::from_u32(illumination.as_u32()), Some(illumination));
     }
     assert!(Illumination::from_u32(Illumination::ALL.len() as u32).is_none());
+}
+
+/// P2-i: the runtime dynamic channels are declared by the *schema* and
+/// registered by the PCM catalogue. This gate ties the two together (uid, order
+/// and inert default), and ties both to the header words the ABI ships — the
+/// three lists that used to be hand-maintained separately.
+#[test]
+fn the_schema_channels_match_the_catalogue_and_the_header_words() {
+    let committed = builtin_registry();
+    for (index, channel) in SURFACE_CHANNELS.iter().enumerate() {
+        assert_eq!(channel.header_word, index as u32, "{} word", channel.id);
+        let row = committed
+            .manifest_by_uid(channel.uid)
+            .unwrap_or_else(|| panic!("catalogue is missing channel {}", channel.uid));
+        assert_eq!(row.kind(), Kind::Channel, "{} kind", channel.id);
+        // A channel is inert at its schema default; every declared default is 0,
+        // which is what `DynamicChannels::NONE` packs.
+        assert_eq!(channel.default, 0.0, "{} default", channel.id);
+    }
+    // The header's four dynamic words are exactly the declared channels, in
+    // declaration order.
+    assert_eq!(SURFACE_CHANNELS.len(), 4);
+    assert_eq!(
+        SURFACE_CHANNELS.map(|channel| channel.id),
+        ["wetness", "snow", "damage", "dissolve"]
+    );
+    assert_eq!(
+        DynamicChannels::from_words(DynamicChannels::NONE.to_words()),
+        DynamicChannels::NONE
+    );
 }

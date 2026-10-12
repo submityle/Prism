@@ -73,6 +73,38 @@ pub struct SurfaceSchema {
     /// and pack order, not declaration order).
     #[serde(default, rename = "lobe")]
     pub lobes: Vec<Lobe>,
+    /// Runtime dynamic parameter channels (§17.1). Not lobes: a channel carries
+    /// no packed block, it owns one of the header's `dynamic_*` words.
+    #[serde(default, rename = "channel")]
+    pub channels: Vec<Channel>,
+}
+
+/// A runtime dynamic parameter channel (§17.1).
+///
+/// The value itself is a per-frame scalar in the material header; the schema
+/// declares its identity, which header word carries it, and its neutral default
+/// (a channel is at its identity value there, so a material that never drives it
+/// is bit-for-bit unchanged).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Channel {
+    /// Human-facing channel id (display only).
+    pub id: String,
+    /// Immutable global identity, shared with the PCM registry row.
+    pub uid: String,
+    /// Mutable governance namespace (§5.4).
+    pub namespace: Namespace,
+    /// Mutable vendor tag (§5.4).
+    pub vendor: String,
+    /// Mutable stability level (§5.4).
+    pub stability: Stability,
+    /// Which of the header's `dynamic_*` words carries this channel's value.
+    pub header_word: u32,
+    /// Neutral default: the value at which the channel is an exact identity.
+    pub default: DefaultValue,
+    /// Validity predicate over the runtime value.
+    #[serde(default)]
+    pub valid: Option<String>,
 }
 
 /// A record is a fixed-width group of `u32` words tiled by its fields.
@@ -537,6 +569,28 @@ impl SurfaceSchema {
                 return Err(SchemaError::NonContiguousRegistrySlots);
             }
         }
+
+        // Runtime dynamic channels (§17.1): each owns exactly one header word,
+        // the words tile `0..channels.len()`, the default is a scalar, and the
+        // identity is unique across the whole catalogue (lobes included) so a
+        // channel can never alias a lobe's uid.
+        let mut channel_words = BTreeSet::new();
+        for channel in &self.channels {
+            if !channel_words.insert(channel.header_word) {
+                return Err(SchemaError::DuplicateChannelWord(channel.header_word));
+            }
+            if !uids.insert(channel.uid.clone()) {
+                return Err(SchemaError::DuplicateUid(channel.uid.clone()));
+            }
+            if channel.default.components().len() != 1 {
+                return Err(SchemaError::ChannelDefaultNotScalar(channel.id.clone()));
+            }
+        }
+        for (index, word) in channel_words.iter().enumerate() {
+            if *word != index as u32 {
+                return Err(SchemaError::NonContiguousChannelWords);
+            }
+        }
         Ok(())
     }
 }
@@ -612,6 +666,12 @@ pub enum SchemaError {
     DuplicateUid(String),
     /// `registry_slot` values are not a contiguous `0..n` range.
     NonContiguousRegistrySlots,
+    /// Two runtime channels claim the same header word.
+    DuplicateChannelWord(u32),
+    /// Runtime channel words do not tile `0..channels.len()`.
+    NonContiguousChannelWords,
+    /// A runtime channel's neutral default is not a single scalar.
+    ChannelDefaultNotScalar(String),
     /// A record declared the same field name twice.
     DuplicateFieldName {
         /// Owning record (core or lobe id).
@@ -658,6 +718,15 @@ impl fmt::Display for SchemaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parse(e) => write!(f, "schema parse error: {e}"),
+            Self::DuplicateChannelWord(word) => {
+                write!(f, "two runtime channels claim header word {word}")
+            }
+            Self::NonContiguousChannelWords => {
+                write!(f, "runtime channel header words must tile 0..channels.len()")
+            }
+            Self::ChannelDefaultNotScalar(id) => {
+                write!(f, "runtime channel {id:?} needs a scalar default")
+            }
             Self::DuplicateRegistrySlot(slot) => {
                 write!(f, "duplicate registry_slot {slot}")
             }

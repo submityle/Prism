@@ -182,3 +182,47 @@ pub const SURFACE_LOBES: [LobeLayout; 10] = [
         energy_policy: "independent",
     },
 ];
+
+/// One runtime dynamic channel's generated identity.
+///
+/// The value lives in one of the material header's `dynamic_*` words;
+/// `header_word` is that word's index, in declaration order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChannelLayout {
+    /// Human-facing channel id (schema `id`).
+    pub id: &'static str,
+    /// Globally unique capability id (schema `uid`).
+    pub uid: &'static str,
+    /// Index of the header's `dynamic_*` word carrying the value.
+    pub header_word: u32,
+    /// Neutral default (the value at which the channel is inert).
+    pub default: f32,
+}
+
+/// The runtime dynamic channels in header-word order.
+pub const SURFACE_CHANNELS: [ChannelLayout; 4] = [
+    ChannelLayout {
+        id: "wetness",
+        uid: "org.prism.channel.wetness",
+        header_word: 0,
+        default: 0.0,
+    },
+    ChannelLayout {
+        id: "snow",
+        uid: "org.prism.channel.snow",
+        header_word: 1,
+        default: 0.0,
+    },
+    ChannelLayout {
+        id: "damage",
+        uid: "org.prism.channel.damage",
+        header_word: 2,
+        default: 0.0,
+    },
+    ChannelLayout {
+        id: "dissolve",
+        uid: "org.prism.channel.dissolve",
+        header_word: 3,
+        default: 0.0,
+    },
+];

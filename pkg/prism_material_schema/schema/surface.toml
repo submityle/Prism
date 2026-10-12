@@ -1076,3 +1076,51 @@ bit_region = "PRISM"
 pack_slot = 3
 consumed_by = []
 default = 0.0
+
+# Runtime dynamic parameter channels (§17.1, roadmap P2-g/P2-i).
+#
+# A channel is not a lobe: it carries no packed block. Its value lives in one of
+# the header's `dynamic_*` words, which the material system rewrites in place
+# (see `GpuMaterialHeader`) and the shading path remaps analytically. The schema
+# owns the channel's identity (`uid`), its header word index and its neutral
+# default, so the ABI mirror gate, the PCM catalogue and the codegen'd table all
+# agree on one declaration instead of three hand-written lists.
+[[channel]]
+id = "wetness"
+uid = "org.prism.channel.wetness"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+header_word = 0
+default = 0.0
+valid = "0.0..=1.0"
+
+[[channel]]
+id = "snow"
+uid = "org.prism.channel.snow"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+header_word = 1
+default = 0.0
+valid = "0.0..=1.0"
+
+[[channel]]
+id = "damage"
+uid = "org.prism.channel.damage"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+header_word = 2
+default = 0.0
+valid = "0.0..=1.0"
+
+[[channel]]
+id = "dissolve"
+uid = "org.prism.channel.dissolve"
+namespace = "PRISM"
+vendor = "prism"
+stability = "candidate"
+header_word = 3
+default = 0.0
+valid = "0.0..=1.0"

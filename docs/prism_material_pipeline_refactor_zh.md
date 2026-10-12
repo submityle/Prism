@@ -661,6 +661,12 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 **✅ 已完成**
 
+- **P2-i 第一片：channel 类声明化（lobe 之外的第二类进 schema + codegen + 三向平价门禁）**（§17.5 / §17.1）
+  - **动机**：运行时动态通道的四个事实（uid、落在哪个 header word、中性默认、有效域）此前分散在三处手写——PCM 内置目录、`GpuMaterialHeader` 的 `dynamic_*` 字段、`DynamicChannels` 的默认值——正是 §17.5 要消灭的那类漂移面。
+  - **做法**：`surface.toml` 新增 `[[channel]]` 记录（`id`/`uid`/`namespace`/`vendor`/`stability`/`header_word`/`default`/`valid`），`SurfaceSchema` 增加 `channels` 与 `Channel` 模型，`validate()` 机检：**word 唯一且致密铺满 `0..n`**、uid 在**全目录**（含 lobe）唯一、默认必须是标量；codegen 新增 `ChannelLayout` + `SURFACE_CHANNELS`（按 header word 排序），生成物仍受 freshness 门禁约束。
+  - **三向平价门禁**（`tests/pcm_parity.rs`）：schema 的 channel uid ↔ PCM 内置目录的 `Kind::Channel` 行（uid/kind）、word 顺序 ↔ `SURFACE_CHANNELS` 的 `header_word`、声明默认 ↔ `DynamicChannels::NONE`（四个 0）——三者任一漂移即构建失败。
+  - 门禁：`prism_material_schema` **13**、`prism_render_material` 850+2+1+**5**+6、`prism_material_pcm` 28、`prism_render_shading --lib` 3372、`prism_render_scene --lib` 1602（生成的 `material_unpack.wesl` 未变，通道不进参数块）。
+
 - **P2-e 第一片：custom 响应的运行期退化（`custom_program` 的第一个读者）**（§3.5.4 / §5.2）
   - **规范语义**：§3.5.4 说"不实现 `respond_custom` → 自动全屏幕空间安全退化"。此前 `Illumination::Custom` 一律分类进 `Custom` 桶，而 `custom_program`（header 里那个句柄）**没有任何 shader 读者**——也就是说，一个没有程序的 custom 材质会占用一个"名字叫 custom、实际跑的是同一条 principled 积分器"的桶，既浪费分桶也误导诊断。
   - **修法**：类表新增 `ShadingClassRule::CustomProgram`——`Illumination::Custom` **且** `custom_program != u32::MAX` 才进 `Custom` 桶；没有句柄时**落到 default 行**（即共享的屏幕空间 über 路径，与它本会跑到的那条完全一致）。`classify_material_header`（热路径特化）与出货 `material_classification.wesl` 同步实现同一语义。
@@ -1097,7 +1103,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | **P2-c** | 完成（两个开放瓣） | glint + measured 的 ABI/双线/真机对拍（§17.6、§13.a） | MaterialX 往返（编辑器 TODO） |
 | **P2-e 四线正交运行期** | **部分** | `Illumination` 四值 ✔、分类到 `Npr`/`Unlit`/`Custom` ✔、per-tile 9-way 分类 ✔；**custom 的运行期退化已落地**（见 §13.a）| ① **逐区域 illumination**（遮罩在分类 pass 里选 Lit/Stylized，才符合 §3.5.3 的"per-tile 分波前消发散"）；② 作者侧 `respond_custom` WESL 属编辑器 TODO（契约 §5.4.1） |
 | **P2-g** | 完成 | header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha/OIT + 真机对拍（§17.1、§13.a） | — |
-| **P2-i 全 kind manifest + codegen** | **部分** | PCM 的九类 kind、hook ABI、`header_resident`、能量轮转已落地（P1-h 收官）；`prism_material_schema` 的 codegen 仍只覆盖 **lobe** 一类 | 把 manifest/codegen 扩到其余八类（channel/response-mode/transfer/cache-aux/provider/downgrade/author-node/composite）；MaterialX nodedef 往返归编辑器 |
+| **P2-i 全 kind manifest + codegen** | **部分（lobe + channel 两类已声明化）** | PCM 九类 kind/hook/常驻-identity 已落地（P1-h 收官）；`prism_material_schema` 现已覆盖 **lobe** 与 **channel** 两类：channel 的 uid/header word/中性默认由 schema 声明，codegen 产出 `SURFACE_CHANNELS`，并与 PCM 目录 + header 的四个 `dynamic_*` word 三向对拍（见 §13.a） | 其余七类（response-mode / transfer / cache-aux / provider / downgrade / author-node / composite）的 manifest+codegen；MaterialX nodedef 往返归编辑器 |
 | **P2-j** | 完成 | 类表由 PCM 注册表 + lobe 目录派生、穷举平价门禁、WESL `CLASS_*` 平价门禁、类数由表驱动（§5.2、§13.a） | — |
 | **P3-a~d 解耦着色** | **未开始** | `gi/surface_cache/` 是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统），不是 §14 的 texel-space/对象空间着色缓存；没有把着色结果写进 VT 页的 pass | 按 §14.10 分阶段：texel-space 着色 pass → 视角无关项分离 → 失效/时序复用 → LOD 策略 |
 

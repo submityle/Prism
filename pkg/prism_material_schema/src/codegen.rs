@@ -545,6 +545,42 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
         o.push_str("    },\n");
     }
     o.push_str("];\n");
+
+    // Runtime dynamic parameter channels (§17.1): declared by the same schema as
+    // the lobes, so the ABI mirror gate, the PCM catalogue and this table all
+    // read one declaration instead of three hand-written lists.
+    o.push_str("\n/// One runtime dynamic channel's generated identity.\n");
+    o.push_str("///\n");
+    o.push_str("/// The value lives in one of the material header's `dynamic_*` words;\n");
+    o.push_str("/// `header_word` is that word's index, in declaration order.\n");
+    o.push_str("#[derive(Clone, Copy, Debug, PartialEq)]\n");
+    o.push_str("pub struct ChannelLayout {\n");
+    o.push_str("    /// Human-facing channel id (schema `id`).\n");
+    o.push_str("    pub id: &'static str,\n");
+    o.push_str("    /// Globally unique capability id (schema `uid`).\n");
+    o.push_str("    pub uid: &'static str,\n");
+    o.push_str("    /// Index of the header's `dynamic_*` word carrying the value.\n");
+    o.push_str("    pub header_word: u32,\n");
+    o.push_str("    /// Neutral default (the value at which the channel is inert).\n");
+    o.push_str("    pub default: f32,\n");
+    o.push_str("}\n\n");
+    let mut channels = schema.channels.clone();
+    channels.sort_by_key(|channel| channel.header_word);
+    let _ = writeln!(
+        o,
+        "/// The runtime dynamic channels in header-word order.\npub const SURFACE_CHANNELS: [ChannelLayout; {}] = [",
+        channels.len()
+    );
+    for channel in &channels {
+        o.push_str("    ChannelLayout {\n");
+        let _ = writeln!(o, "        id: {:?},", channel.id);
+        let _ = writeln!(o, "        uid: {:?},", channel.uid);
+        let _ = writeln!(o, "        header_word: {},", channel.header_word);
+        let defaults = channel.default.components();
+        let _ = writeln!(o, "        default: {},", float_literal(defaults[0]));
+        o.push_str("    },\n");
+    }
+    o.push_str("];\n");
     o
 }
 
