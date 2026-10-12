@@ -66,6 +66,89 @@ impl Default for DMat4 {
     }
 }
 
+#[cfg(test)]
+mod numerical_edge_tests {
+    use super::*;
+
+    #[test]
+    fn inverses_handle_small_and_large_finite_scales() {
+        let small = DMat2::from_cols(DVec2::new(1.0e-200, 0.0), DVec2::new(0.0, 2.0e-200));
+        let inv2 = small.try_inverse().expect("small diagonal inverse");
+        assert!((inv2.x_axis.x / 1.0e200 - 1.0).abs() < 1e-14);
+        assert!((inv2.y_axis.y / 5.0e199 - 1.0).abs() < 1e-14);
+
+        let small3 = DMat3::from_diagonal(DVec3::splat(1.0e-200));
+        assert!(small3.try_inverse().unwrap().x_axis.x.is_finite());
+        let large4 = DMat4::from_scale(DVec3::splat(1.0e200));
+        assert!(large4.try_inverse().unwrap().x_axis.x.is_finite());
+    }
+
+    #[test]
+    fn singular_and_non_finite_matrices_have_no_inverse() {
+        assert!(DMat2::ZERO.try_inverse().is_none());
+        assert!(DMat3::ZERO.try_inverse().is_none());
+        assert!(DMat4::ZERO.try_inverse().is_none());
+        let invalid = DMat2::from_cols(DVec2::new(f64::NAN, 0.0), DVec2::Y);
+        assert!(invalid.try_inverse().is_none());
+    }
+}
+
+/// Invert a small row-major matrix with scaled partial pivoting. Row scaling
+/// avoids determinant/cofactor underflow for finite, very small matrices.
+fn invert_small(input: [[f64; 4]; 4], n: usize) -> Option<[[f64; 4]; 4]> {
+    let mut a = [[0.0; 8]; 4];
+    for row in 0..n {
+        let scale = input[row][..n]
+            .iter()
+            .copied()
+            .map(f64::abs)
+            .fold(0.0, f64::max);
+        if scale == 0.0 || !scale.is_finite() {
+            return None;
+        }
+        for col in 0..n {
+            a[row][col] = input[row][col] / scale;
+            a[row][n + col] = if row == col { 1.0 / scale } else { 0.0 };
+        }
+    }
+    for col in 0..n {
+        let mut pivot = col;
+        for row in (col + 1)..n {
+            if a[row][col].abs() > a[pivot][col].abs() {
+                pivot = row;
+            }
+        }
+        if a[pivot][col] == 0.0 || !a[pivot][col].is_finite() {
+            return None;
+        }
+        a.swap(pivot, col);
+        let pivot_value = a[col][col];
+        for value in &mut a[col][..(2 * n)] {
+            *value /= pivot_value;
+        }
+        for row in 0..n {
+            if row == col {
+                continue;
+            }
+            let factor = a[row][col];
+            let pivot_row = a[col];
+            for (value, pivot_value) in a[row][..(2 * n)].iter_mut().zip(&pivot_row[..(2 * n)]) {
+                *value -= factor * pivot_value;
+            }
+        }
+    }
+    let mut result = [[0.0; 4]; 4];
+    for row in 0..n {
+        for col in 0..n {
+            if !a[row][n + col].is_finite() {
+                return None;
+            }
+            result[row][col] = a[row][n + col];
+        }
+    }
+    Some(result)
+}
+
 impl DMat2 {
     /// The zero matrix.
     pub const ZERO: Self = Self {
@@ -104,13 +187,25 @@ impl DMat2 {
     /// Inverse (panics in debug if singular).
     #[inline]
     pub fn inverse(self) -> Self {
-        let det = self.determinant();
-        debug_assert!(det != 0.0, "DMat2::inverse of singular matrix");
-        let inv = 1.0 / det;
-        Self {
-            x_axis: DVec2::new(self.y_axis.y * inv, -self.x_axis.y * inv),
-            y_axis: DVec2::new(-self.y_axis.x * inv, self.x_axis.x * inv),
-        }
+        self.try_inverse()
+            .expect("DMat2::inverse of singular or non-finite matrix")
+    }
+    /// Invert a finite, nonsingular matrix, returning `None` otherwise.
+    #[inline]
+    pub fn try_inverse(self) -> Option<Self> {
+        let inv = invert_small(
+            [
+                [self.x_axis.x, self.y_axis.x, 0.0, 0.0],
+                [self.x_axis.y, self.y_axis.y, 0.0, 0.0],
+                [0.0; 4],
+                [0.0; 4],
+            ],
+            2,
+        )?;
+        Some(Self::from_cols(
+            DVec2::new(inv[0][0], inv[1][0]),
+            DVec2::new(inv[0][1], inv[1][1]),
+        ))
     }
     /// Lossy conversion to the `f32` [`Mat2`].
     #[inline]
@@ -191,22 +286,26 @@ impl DMat3 {
     /// Inverse (panics in debug if singular).
     #[inline]
     pub fn inverse(self) -> Self {
-        let a = self.x_axis;
-        let b = self.y_axis;
-        let c = self.z_axis;
-        // Rows of the adjugate are the cross products of the column pairs.
-        let r0 = b.cross(c);
-        let r1 = c.cross(a);
-        let r2 = a.cross(b);
-        let det = a.dot(r0);
-        debug_assert!(det != 0.0, "DMat3::inverse of singular matrix");
-        let inv = 1.0 / det;
-        // `[r0; r1; r2]` are the adjugate rows; transpose into columns.
-        Self::from_cols(
-            DVec3::new(r0.x, r1.x, r2.x) * inv,
-            DVec3::new(r0.y, r1.y, r2.y) * inv,
-            DVec3::new(r0.z, r1.z, r2.z) * inv,
-        )
+        self.try_inverse()
+            .expect("DMat3::inverse of singular or non-finite matrix")
+    }
+    /// Invert a finite, nonsingular matrix, returning `None` otherwise.
+    #[inline]
+    pub fn try_inverse(self) -> Option<Self> {
+        let inv = invert_small(
+            [
+                [self.x_axis.x, self.y_axis.x, self.z_axis.x, 0.0],
+                [self.x_axis.y, self.y_axis.y, self.z_axis.y, 0.0],
+                [self.x_axis.z, self.y_axis.z, self.z_axis.z, 0.0],
+                [0.0; 4],
+            ],
+            3,
+        )?;
+        Some(Self::from_cols(
+            DVec3::new(inv[0][0], inv[1][0], inv[2][0]),
+            DVec3::new(inv[0][1], inv[1][1], inv[2][1]),
+            DVec3::new(inv[0][2], inv[1][2], inv[2][2]),
+        ))
     }
     /// Lossy conversion to the `f32` [`Mat3`].
     #[inline]
@@ -350,68 +449,27 @@ impl DMat4 {
     /// Inverse (panics in debug if singular). Full 4x4 cofactor inverse.
     #[inline]
     pub fn inverse(self) -> Self {
-        let m = self;
-        let (m00, m01, m02, m03) = (m.x_axis.x, m.x_axis.y, m.x_axis.z, m.x_axis.w);
-        let (m10, m11, m12, m13) = (m.y_axis.x, m.y_axis.y, m.y_axis.z, m.y_axis.w);
-        let (m20, m21, m22, m23) = (m.z_axis.x, m.z_axis.y, m.z_axis.z, m.z_axis.w);
-        let (m30, m31, m32, m33) = (m.w_axis.x, m.w_axis.y, m.w_axis.z, m.w_axis.w);
-
-        let coef00 = m22 * m33 - m32 * m23;
-        let coef02 = m12 * m33 - m32 * m13;
-        let coef03 = m12 * m23 - m22 * m13;
-        let coef04 = m21 * m33 - m31 * m23;
-        let coef06 = m11 * m33 - m31 * m13;
-        let coef07 = m11 * m23 - m21 * m13;
-        let coef08 = m21 * m32 - m31 * m22;
-        let coef10 = m11 * m32 - m31 * m12;
-        let coef11 = m11 * m22 - m21 * m12;
-        let coef12 = m20 * m33 - m30 * m23;
-        let coef14 = m10 * m33 - m30 * m13;
-        let coef15 = m10 * m23 - m20 * m13;
-        let coef16 = m20 * m32 - m30 * m22;
-        let coef18 = m10 * m32 - m30 * m12;
-        let coef19 = m10 * m22 - m20 * m12;
-        let coef20 = m20 * m31 - m30 * m21;
-        let coef22 = m10 * m31 - m30 * m11;
-        let coef23 = m10 * m21 - m20 * m11;
-
-        let fac0 = DVec4::new(coef00, coef00, coef02, coef03);
-        let fac1 = DVec4::new(coef04, coef04, coef06, coef07);
-        let fac2 = DVec4::new(coef08, coef08, coef10, coef11);
-        let fac3 = DVec4::new(coef12, coef12, coef14, coef15);
-        let fac4 = DVec4::new(coef16, coef16, coef18, coef19);
-        let fac5 = DVec4::new(coef20, coef20, coef22, coef23);
-
-        let vec0 = DVec4::new(m10, m00, m00, m00);
-        let vec1 = DVec4::new(m11, m01, m01, m01);
-        let vec2 = DVec4::new(m12, m02, m02, m02);
-        let vec3 = DVec4::new(m13, m03, m03, m03);
-
-        let inv0 = vec1 * fac0 - vec2 * fac1 + vec3 * fac2;
-        let inv1 = vec0 * fac0 - vec2 * fac3 + vec3 * fac4;
-        let inv2 = vec0 * fac1 - vec1 * fac3 + vec3 * fac5;
-        let inv3 = vec0 * fac2 - vec1 * fac4 + vec2 * fac5;
-
-        let sign_a = DVec4::new(1.0, -1.0, 1.0, -1.0);
-        let sign_b = DVec4::new(-1.0, 1.0, -1.0, 1.0);
-
-        let inverse = DMat4::from_cols(inv0 * sign_a, inv1 * sign_b, inv2 * sign_a, inv3 * sign_b);
-
-        let col0 = DVec4::new(
-            inverse.x_axis.x,
-            inverse.y_axis.x,
-            inverse.z_axis.x,
-            inverse.w_axis.x,
-        );
-        let det = m.x_axis.dot(col0);
-        debug_assert!(det != 0.0, "DMat4::inverse of singular matrix");
-        let inv_det = 1.0 / det;
-        DMat4::from_cols(
-            inverse.x_axis * inv_det,
-            inverse.y_axis * inv_det,
-            inverse.z_axis * inv_det,
-            inverse.w_axis * inv_det,
-        )
+        self.try_inverse()
+            .expect("DMat4::inverse of singular or non-finite matrix")
+    }
+    /// Invert a finite, nonsingular matrix, returning `None` otherwise.
+    #[inline]
+    pub fn try_inverse(self) -> Option<Self> {
+        let inv = invert_small(
+            [
+                [self.x_axis.x, self.y_axis.x, self.z_axis.x, self.w_axis.x],
+                [self.x_axis.y, self.y_axis.y, self.z_axis.y, self.w_axis.y],
+                [self.x_axis.z, self.y_axis.z, self.z_axis.z, self.w_axis.z],
+                [self.x_axis.w, self.y_axis.w, self.z_axis.w, self.w_axis.w],
+            ],
+            4,
+        )?;
+        Some(Self::from_cols(
+            DVec4::new(inv[0][0], inv[1][0], inv[2][0], inv[3][0]),
+            DVec4::new(inv[0][1], inv[1][1], inv[2][1], inv[3][1]),
+            DVec4::new(inv[0][2], inv[1][2], inv[2][2], inv[3][2]),
+            DVec4::new(inv[0][3], inv[1][3], inv[2][3], inv[3][3]),
+        ))
     }
     /// Lossy conversion to the `f32` [`Mat4`].
     #[inline]
@@ -560,5 +618,43 @@ impl core::fmt::Debug for DMat4 {
             "DMat4[{:?}, {:?}, {:?}, {:?}]",
             self.x_axis, self.y_axis, self.z_axis, self.w_axis
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DMat2, DMat3, DMat4};
+    use crate::f64::dvec::{DVec2, DVec3, DVec4};
+
+    #[test]
+    fn inverses_handle_uniform_extreme_scales() {
+        let tiny = 1.0e-200;
+        let large = 1.0e200;
+
+        let m2 = DMat2::from_cols(DVec2::new(tiny, 0.0), DVec2::new(0.0, tiny));
+        let i2 = m2.try_inverse().expect("representable DMat2 inverse");
+        assert!((i2.x_axis.x - 1.0 / tiny).abs() / (1.0 / tiny) < 1.0e-14);
+
+        let m3 = DMat3::from_diagonal(DVec3::splat(large));
+        let i3 = m3.try_inverse().expect("representable DMat3 inverse");
+        assert!((i3.x_axis.x - 1.0 / large).abs() / (1.0 / large) < 1.0e-14);
+
+        let m4 = DMat4::from_cols(
+            DVec4::new(tiny, 0.0, 0.0, 0.0),
+            DVec4::new(0.0, tiny, 0.0, 0.0),
+            DVec4::new(0.0, 0.0, tiny, 0.0),
+            DVec4::new(0.0, 0.0, 0.0, tiny),
+        );
+        let i4 = m4.try_inverse().expect("representable DMat4 inverse");
+        assert!((i4.x_axis.x - 1.0 / tiny).abs() / (1.0 / tiny) < 1.0e-14);
+    }
+
+    #[test]
+    fn try_inverse_rejects_singular_and_non_finite_matrices() {
+        assert!(DMat2::ZERO.try_inverse().is_none());
+        assert!(DMat3::ZERO.try_inverse().is_none());
+        assert!(DMat4::ZERO.try_inverse().is_none());
+        let invalid = DMat2::from_cols(DVec2::X, DVec2::new(f64::NAN, 1.0));
+        assert!(invalid.try_inverse().is_none());
     }
 }
