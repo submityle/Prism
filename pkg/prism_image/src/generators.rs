@@ -38,7 +38,11 @@ pub fn checkerboard(
             data.extend_from_slice(if even { &color_a } else { &color_b });
         }
     }
-    Image::from_parts(Extent3d::new_2d(width, height), ImageFormat::Rgba8Unorm, data)
+    Image::from_parts(
+        Extent3d::new_2d(width, height),
+        ImageFormat::Rgba8Unorm,
+        data,
+    )
 }
 
 /// Builds a horizontal, black-to-white, opaque [`ImageFormat::Rgba8Unorm`]
@@ -76,7 +80,11 @@ fn gradient(width: u32, height: u32, axis: Axis) -> Image {
             data.extend_from_slice(&[level, level, level, 255]);
         }
     }
-    Image::from_parts(Extent3d::new_2d(width, height), ImageFormat::Rgba8Unorm, data)
+    Image::from_parts(
+        Extent3d::new_2d(width, height),
+        ImageFormat::Rgba8Unorm,
+        data,
+    )
 }
 
 /// The `0..=255` level for position `index` of `length` samples, inclusive of

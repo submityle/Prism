@@ -31,5 +31,5 @@ mod tests;
 
 pub use format::ImageFormat;
 pub use generators::{checkerboard, gradient_horizontal, gradient_vertical};
-pub use gpu::{GpuImage, upload};
+pub use gpu::{upload, GpuImage};
 pub use image::{Image, ImageError};

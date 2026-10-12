@@ -26,6 +26,8 @@ members = [
   "pkg/prism_math",
   "pkg/prism_math_gpu",
   "pkg/prism_transform_gpu",
+  # Engine-neutral camera math (projection/view/frustum) for the RHI render path.
+  "pkg/prism_camera",
   "pkg/prism_platform_os",
   "pkg/prism_asset",
   "pkg/prism_render_driver",

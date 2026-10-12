@@ -57,7 +57,11 @@ fn from_rgba8_round_trips_external_bytes() {
     assert_eq!(image.data(), bytes.as_slice(), "bytes are stored verbatim");
     assert_eq!(image.texel(0, 0), [0, 1, 2, 3]);
     assert_eq!(image.texel(1, 0), [4, 5, 6, 7]);
-    assert_eq!(image.texel(0, 1), [8, 9, 10, 11], "row 1 starts after row_stride");
+    assert_eq!(
+        image.texel(0, 1),
+        [8, 9, 10, 11],
+        "row 1 starts after row_stride"
+    );
     assert_eq!(image.texel(1, 1), [12, 13, 14, 15]);
 }
 
@@ -117,11 +121,19 @@ fn gradients_hit_both_endpoints() {
         [127, 127, 127, 255],
         "middle steps evenly",
     );
-    assert_eq!(horizontal.texel(2, 0), [255, 255, 255, 255], "right is white");
+    assert_eq!(
+        horizontal.texel(2, 0),
+        [255, 255, 255, 255],
+        "right is white"
+    );
 
     let vertical = gradient_vertical(1, 3);
     assert_eq!(vertical.texel(0, 0), [0, 0, 0, 255], "top is black");
-    assert_eq!(vertical.texel(0, 2), [255, 255, 255, 255], "bottom is white");
+    assert_eq!(
+        vertical.texel(0, 2),
+        [255, 255, 255, 255],
+        "bottom is white"
+    );
 
     let degenerate = gradient_horizontal(1, 1);
     assert_eq!(
