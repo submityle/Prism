@@ -309,6 +309,12 @@ impl Column {
         }
     }
 
+    /// Byte size of one element of this column's component type.
+    #[inline]
+    pub fn item_size(&self) -> usize {
+        self.data.item_layout().size()
+    }
+
     /// Raw pointer to the changed-tick cell at `row`, for interior-mutable
     /// stamping through a shared `&Column` (the `&mut T` / `Mut<T>` fetch).
     ///
@@ -438,6 +444,25 @@ pub struct ChunkInfo<'a> {
     pub rows: usize,
     /// The window's metadata (bounds / visible / lod / batch_key / cell).
     pub meta: &'a ChunkMeta,
+}
+
+/// One contiguous span of a table column that must be re-uploaded to a
+/// GPU-resident **mirror of that column** (design §15).
+///
+/// The mirror is a flat `row * element_size` buffer; each chunk's slice is a
+/// separate block, so an upload is a small list of `(buffer_offset, src, len)`
+/// copies rather than one whole-column copy. Only chunks whose per-chunk
+/// `change_version` falls in the `(last_upload, now]` window are emitted, so the
+/// cost is proportional to the changed chunks, not the column size.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ColumnUploadSpan {
+    /// Byte offset of the span in the column's linear mirror
+    /// (`first_row_in_chunk * element_size`).
+    pub buffer_offset: usize,
+    /// Host address of the span's first byte (the chunk block's slice start).
+    pub src: *const u8,
+    /// Bytes to copy for this span (`rows_in_chunk * element_size`).
+    pub len: usize,
 }
 
 impl Table {
@@ -622,6 +647,64 @@ impl Table {
                 meta,
             }
         })
+    }
+
+    /// Append the **dirty upload spans** of table column `id` to `out`, for a
+    /// GPU-resident mirror of that column (design §15).
+    ///
+    /// A chunk contributes a span exactly when its embedded `change_version`
+    /// falls in the `(last_upload, now]` change-detection window (the same
+    /// predicate the query-side dirty-chunk accessor uses), so a frame that
+    /// touched a few chunks re-uploads a few chunk-sized copies instead of the
+    /// whole column. Returns the number of spans appended. Columns not present
+    /// in this archetype (or zero-sized ones) append nothing.
+    ///
+    /// The span's `buffer_offset` addresses the *linear* mirror while `src`
+    /// addresses the chunk block, so the caller's copy is
+    /// `dst[buffer_offset .. buffer_offset + len] = src[..len]`.
+    pub fn column_upload_spans(
+        &self,
+        id: ComponentId,
+        last_upload: Tick,
+        now: Tick,
+        out: &mut Vec<ColumnUploadSpan>,
+    ) -> usize {
+        let Some(column) = self.columns.get(&id) else {
+            return 0;
+        };
+        let stride = column.item_size();
+        if stride == 0 {
+            return 0; // a marker component owns no bytes to upload
+        }
+        let Some(&(_, _, slice_offset)) = self
+            .column_slots
+            .iter()
+            .find(|(component, _, _)| *component == id)
+        else {
+            return 0;
+        };
+        let before = out.len();
+        let rows_per_chunk = self.rows_per_chunk;
+        let total = self.entities.len();
+        for (chunk, block) in self.chunks.iter().enumerate() {
+            if !column.chunk_version(chunk).is_newer_than(last_upload, now) {
+                continue;
+            }
+            let first_row = chunk * rows_per_chunk;
+            let rows = total.saturating_sub(first_row).min(rows_per_chunk);
+            if rows == 0 {
+                continue;
+            }
+            out.push(ColumnUploadSpan {
+                buffer_offset: first_row * stride,
+                // SAFETY: the block layout places this column's slice at
+                // `slice_offset`, inside the block's allocation; the caller only
+                // reads `len` bytes from it.
+                src: unsafe { block.ptr.as_ptr().add(slice_offset).cast_const() },
+                len: rows * stride,
+            });
+        }
+        out.len() - before
     }
 
     /// The metadata of chunk `chunk`, or `None` if out of range.
@@ -1114,5 +1197,67 @@ mod tests {
         );
         // They occupy distinct header slots.
         assert_ne!(cell, meta);
+    }
+
+    /// The GPU-resident upload feed (design §15): only chunks whose per-chunk
+    /// `change_version` falls in the window produce a span, and each span
+    /// addresses that chunk's slice of the column in the linear mirror.
+    #[test]
+    fn column_upload_spans_track_dirty_chunks() {
+        let mut world = World::new();
+        let arch = world.prewarm::<Big>(0);
+        // Big is 512 B -> 32 rows per chunk; spawn exactly three windows.
+        let mut entities = Vec::new();
+        for i in 0..96u64 {
+            entities.push(world.spawn(Big(i, [0; 504])));
+        }
+        let id = world.components().id_of::<Big>().expect("Big is registered");
+
+        // Nothing has been uploaded, so every window is dirty.
+        let now = world.change_tick();
+        let mut spans = Vec::new();
+        let n = world
+            .archetypes()
+            .get(arch)
+            .unwrap()
+            .table()
+            .column_upload_spans(id, Tick::ZERO, now, &mut spans);
+        assert_eq!(n, 3);
+        assert_eq!(spans.len(), 3);
+        for (chunk, span) in spans.iter().enumerate() {
+            assert_eq!(span.buffer_offset, chunk * 32 * 512);
+            assert_eq!(span.len, 32 * 512);
+            assert!(!span.src.is_null());
+        }
+
+        // Open a fresh observer window, touch one row in the middle window, then
+        // close it: only that window's change_version lands in (last, now].
+        let last = world.change_tick();
+        world.increment_change_tick();
+        world.get_mut::<Big>(entities[40]).unwrap().0 = 999;
+        let now = world.change_tick();
+        spans.clear();
+        let n = world
+            .archetypes()
+            .get(arch)
+            .unwrap()
+            .table()
+            .column_upload_spans(id, last, now, &mut spans);
+        assert_eq!(n, 1, "only the touched window re-uploads");
+        assert_eq!(spans[0].buffer_offset, 32 * 512);
+        assert_eq!(spans[0].len, 32 * 512);
+
+        // A following window with no writes in it emits nothing.
+        let before_quiet = now;
+        world.increment_change_tick();
+        spans.clear();
+        let quiet = world.change_tick();
+        let n = world
+            .archetypes()
+            .get(arch)
+            .unwrap()
+            .table()
+            .column_upload_spans(id, before_quiet, quiet, &mut spans);
+        assert_eq!(n, 0, "no writes means no upload spans");
     }
 }
