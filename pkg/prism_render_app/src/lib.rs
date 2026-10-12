@@ -76,7 +76,7 @@ pub use camera::{RenderCamera, RenderViewport};
 pub use config::RenderAppConfig;
 pub use frame::RENDER_TARGET_FORMAT;
 pub use label::{Render, RenderApp};
-pub use pipeline_cache::{PipelineCache, PipelineKey};
+pub use pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
 pub use plugin::PrismRenderPlugin;
 pub use record::RenderRecord;
 pub use runtime_resource::RenderRuntimeResource;
@@ -92,7 +92,7 @@ pub mod prelude {
     pub use crate::camera::{RenderCamera, RenderViewport};
     pub use crate::config::RenderAppConfig;
     pub use crate::label::{Render, RenderApp};
-    pub use crate::pipeline_cache::{PipelineCache, PipelineKey};
+    pub use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
     pub use crate::plugin::PrismRenderPlugin;
     pub use crate::record::RenderRecord;
     pub use crate::sets::{RenderPhase, RenderSystems};

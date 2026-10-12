@@ -17,7 +17,7 @@
 use prism_ecs::prelude::Resource;
 use prism_render_driver::{
     CacheStats, ContentCache, RenderDevice, RenderPipelineDescriptor, RenderPipelineId,
-    PrimitiveTopology, TextureFormat,
+    PrimitiveTopology, TextureFormat, VertexBufferLayout,
 };
 
 /// The content key of one render pipeline.
@@ -31,8 +31,9 @@ use prism_render_driver::{
 ///
 /// Covered: the material permutation class (which folds every material-driven
 /// state — blend, depth test/write, culling — that the material layer already
-/// keys), the color/depth attachment formats, the sample count, the vertex
-/// stride, the primitive topology, and the shader identity.
+/// keys), the color/depth attachment formats, the sample count, the full vertex
+/// layout (a hash of the strides, step modes, and attributes), the primitive
+/// topology, and the shader identity.
 ///
 /// Not covered: per-pipeline fixed-function overrides that no material class
 /// keys (e.g. an explicit depth-bias). A pipeline that needs those must fold
@@ -51,8 +52,13 @@ pub struct PipelineKey {
     depth_format: u32,
     /// The MSAA sample count (`1` for no multisampling).
     pub sample_count: u32,
-    /// The total vertex stride, which fixes the vertex layout the PSO bakes in.
-    pub vertex_stride: u32,
+    /// A deterministic hash of the **full** vertex layout set the PSO bakes in.
+    ///
+    /// A single stride is not enough: two pipelines whose buffers have the same
+    /// total stride but different attribute formats, offsets, step modes, or
+    /// buffer counts compile to different vertex stages. Use
+    /// [`hash_vertex_layouts`] to derive this.
+    vertex_layout_hash: u64,
     /// The primitive topology, encoded as the RHI enum's discriminant.
     topology: u32,
     /// A stable identity for the shader module **and its entry points**.
@@ -72,7 +78,7 @@ impl PipelineKey {
         color_format: Option<TextureFormat>,
         depth_format: Option<TextureFormat>,
         sample_count: u32,
-        vertex_stride: u32,
+        vertex_layout_hash: u64,
         topology: PrimitiveTopology,
         shader_id: u64,
     ) -> Self {
@@ -81,12 +87,51 @@ impl PipelineKey {
             color_format: encode_format(color_format),
             depth_format: encode_format(depth_format),
             sample_count,
-            vertex_stride,
+            vertex_layout_hash,
             topology: topology as u32,
             shader_id,
         }
     }
 
+}
+
+/// A deterministic 64-bit hash of a vertex layout set (FNV-1a).
+///
+/// Encodes the buffer count, then each buffer's stride, step mode, and every
+/// attribute's format, offset, and shader location, so two layout sets hash
+/// equal exactly when they describe the same vertex stage. Used to fold the
+/// layout into a [`PipelineKey`].
+#[must_use]
+pub fn hash_vertex_layouts(layouts: &[VertexBufferLayout]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn write(hash: &mut u64, bytes: u64) {
+        for byte in bytes.to_le_bytes() {
+            *hash ^= u64::from(byte);
+            *hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+
+    let mut hash = FNV_OFFSET;
+    write(&mut hash, layouts.len() as u64);
+    for layout in layouts {
+        write(&mut hash, layout.array_stride);
+        write(
+            &mut hash,
+            match layout.step_mode {
+                prism_render_driver::VertexStepMode::Vertex => 0,
+                prism_render_driver::VertexStepMode::Instance => 1,
+            },
+        );
+        write(&mut hash, layout.attributes.len() as u64);
+        for attribute in &layout.attributes {
+            write(&mut hash, attribute.format as u64);
+            write(&mut hash, attribute.offset);
+            write(&mut hash, u64::from(attribute.shader_location));
+        }
+    }
+    hash
 }
 
 

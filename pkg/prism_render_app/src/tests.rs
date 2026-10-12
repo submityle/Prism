@@ -23,7 +23,7 @@ use crate::target::RenderTarget;
 
 use crate::sets::{RenderPhase, RenderSystems};
 use crate::views::RenderViews;
-use crate::pipeline_cache::{PipelineCache, PipelineKey};
+use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
 use crate::texture_cache::{TextureCache, TextureKey};
 use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
@@ -63,13 +63,20 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
         fragment: None,
     };
 
+    let layout = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x3, prism_render_driver::VertexFormat::Float32x2],
+    );
+    let layout_hash = hash_vertex_layouts(core::slice::from_ref(&layout));
+
     let mut cache = PipelineCache::new();
     let key = PipelineKey::new(
         7,
         Some(TextureFormat::Rgba8Unorm),
         None,
         1,
-        32,
+        layout_hash,
         PrimitiveTopology::TriangleList,
         0xABCD,
     );
@@ -83,7 +90,7 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
         Some(TextureFormat::Rgba8Unorm),
         None,
         1,
-        32,
+        layout_hash,
         PrimitiveTopology::TriangleList,
         0xABCD,
     );
@@ -98,7 +105,7 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
         Some(TextureFormat::Rgba8Unorm),
         None,
         1,
-        32,
+        layout_hash,
         PrimitiveTopology::TriangleStrip,
         0xABCD,
     );
@@ -108,11 +115,33 @@ fn pipeline_cache_dedups_and_evicts_by_key() {
         Some(TextureFormat::Rgba8Unorm),
         None,
         1,
-        32,
+        layout_hash,
         PrimitiveTopology::TriangleList,
         0x1234,
     );
     assert_ne!(other_shader, key, "the shader identity is part of the key");
+
+    // A layout with the same total stride but different attributes must not
+    // hash equal: a single stride would alias these two vertex stages.
+    let same_stride_other_attrs = prism_render_driver::VertexBufferLayout::packed(
+        prism_render_driver::VertexStepMode::Vertex,
+        0,
+        &[prism_render_driver::VertexFormat::Float32x2, prism_render_driver::VertexFormat::Float32x3],
+    );
+    assert_eq!(
+        same_stride_other_attrs.array_stride, layout.array_stride,
+        "the layouts share a stride"
+    );
+    assert_ne!(
+        hash_vertex_layouts(core::slice::from_ref(&same_stride_other_attrs)),
+        layout_hash,
+        "different attributes must hash differently"
+    );
+    assert_eq!(
+        hash_vertex_layouts(core::slice::from_ref(&layout)),
+        layout_hash,
+        "the vertex layout hash is deterministic"
+    );
 
     assert!(
         !cache.release(&device, &key),
