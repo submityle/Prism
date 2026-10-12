@@ -384,7 +384,26 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 - **GPU 常驻列直传**：脏块增量上传，省 CPU 打包。
 - **成本 ∝ 变化量**：脏块访问器 + push 反应图把增量路径设为默认，禁止全表扫描成为常态。
 
-诚实边界：CPU 单测只能证机制正确；百万级实体 / 多核近线性 / NUMA / GPU 常驻等规模指标需真实硬件与大场景压测，均标注 PLANNED。
+### 17.1 实测（本机，release，2026-10）
+
+量具：[`pkg/prism_ecs/tests/scale.rs`]，显式运行 `cargo test -p prism_ecs --release --features multi_thread --test scale -- --ignored --nocapture`。每档取 3 次中最快一次；测试**断言数值正确**、只**打印**耗时（不设墙钟阈值，避免在任意机器上变成 flaky）。
+
+| 场景（100 万实体，`(Pos, Vel)` 两个 f32×3 列） | 耗时 | 单实体 | 吞吐 |
+|---|---|---|---|
+| spawn 100 万 | 236.0 ms | 236 ns | 4.2 M/s |
+| 串行 `(&Vel, &mut Pos)` 传播（`QueryIter`） | 8.72 ms | 8.72 ns | 114.7 M/s |
+| `par_for_each_mut`，1 线程 | 4.06 ms | 4.06 ns | 246.6 M/s |
+| `par_for_each_mut`，2 线程 | 2.64 ms | 2.64 ns | 378.6 M/s（1.54×） |
+| `par_for_each_mut`，4 线程 | 1.83 ms | 1.83 ns | 546.3 M/s（2.22×） |
+| `par_for_each_mut`，8 线程 | 1.70 ms | 1.70 ns | 589.4 M/s（2.39×） |
+
+**实测结论（诚实）**：
+
+- 百万级单线程迭代已在 **~9 ns/实体**量级，规模性不再只是推断。
+- 多核**远非线性**（8 线程仅 2.39×）。本机为共享开发机（测量期间有其它构建/agent 并发），且该场景是**内存带宽受限**的 24 B/实体读写；要给出可信的扩展曲线需独占机器 + NUMA/绑核，仍属 PLANNED。
+- **新发现（待优化）**：串行 `QueryIter` 比「`par_for_each_mut` + 1 线程」**慢约 2.1×**。两者做同样的传播，差异指向串行路径的逐行开销（`QueryIter::next` 每行都要重建 `(fetch, filter_fetch)` 组合并按行落 change-tick，而批量驱动按批落 tick）。这是一个已量化的优化目标，尚未修复。
+
+诚实边界：CPU 单测只能证机制正确；NUMA / GPU 常驻 / 独占机的多核近线性等规模指标仍需真实硬件与大场景压测，仍标注 PLANNED。
 
 ---
 
