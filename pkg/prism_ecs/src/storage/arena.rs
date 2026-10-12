@@ -26,6 +26,7 @@
 //! behind [`ChunkArena`] without touching the table.
 
 use alloc::alloc::{alloc, dealloc, handle_alloc_error};
+#[cfg(feature = "vm")]
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::ptr::NonNull;
@@ -42,6 +43,7 @@ pub(crate) struct ChunkArena {
     layout: Layout,
     /// Distance between consecutive block slots: the block size rounded up to
     /// the block alignment, so every slot is correctly aligned.
+    #[cfg_attr(not(feature = "vm"), allow(dead_code))]
     stride: usize,
     backend: Backend,
 }
@@ -233,6 +235,7 @@ fn round_up(n: usize, align: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     fn arena_for(size: usize, align: usize) -> ChunkArena {
         ChunkArena::new(Layout::from_size_align(size, align).unwrap())

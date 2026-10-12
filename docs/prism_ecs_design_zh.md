@@ -432,7 +432,7 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 **实测结论（诚实）**：
 
 - 百万级单线程迭代已在 **~6.6 ns/实体**量级，规模性不再只是推断。
-- 多核**非线性**（8 线程 1.86×）。本机为共享开发机（测量期间有其它构建/agent 并发），且该场景是**内存带宽受限**的 24 B/实体读写；要给出可信的扩展曲线需独占机器 + NUMA/绑核，仍属 PLANNED。
+- 多核**非线性**（早前 8 线程约 1.86×）。本机为共享开发机（测量期间有其它构建/agent 并发），且该场景是**内存带宽受限**的 24 B/实体读写。**已提供可复现的扩展曲线量具** `scale_parallel_speedup_curve`（`tests/scale.rs`）：对 [1,2,4,8,主机并行度] 各取 **9 次**采样，输出**中位数 ns/实体**、**均值 ± 95% 置信区间**、相对 1 worker 的 **speedup** 与 **parallel efficiency**（speedup / 线程数），并在表头打印"需独占空闲机器"的注意事项——它在共享机上会把宽置信区间与悲观 speedup 直接暴露出来，而不是掩盖。跑法：`cargo test -p prism_ecs --release --features multi_thread --test scale -- --ignored --nocapture scale_parallel_speedup_curve`。共享机上测到的曲线（1→2→4→8 线程 speedup ≈ 1.56×/1.90×/0.46×，8 线程点 CI 极宽）**不是可信曲线**，只说明共享机的干扰有多大；可信的近线性曲线仍需**独占机器 + NUMA/绑核**，仍属 PLANNED。
 - **已修复的量化优化**：初测发现串行 `QueryIter` 比「`par_for_each_mut` + 1 线程」慢约 2.1×（可变）。定位为 `QueryIter::next` 的逐行开销：每行都要做两次 `Option` 判别 + 切片边界检查。改为在**已证明的不变量**（进入一个 archetype 时同时设置 `row_len` 与两个 fetch 游标，故 `row < row_len` ⇒ 游标已初始化且 `row < entities.len()`）下用 `get_unchecked`/`unwrap_unchecked` 去掉这两个分支，并给 `next` 加 `inline(always)`；随后实测可变 **9.05 → 6.6 ns/实体（1.37×）**、只读 **5.02 → 3.9 ns/实体（1.29×）**，全量测试无回归。
 - **批量消费者快路径（`fold` 重写，原 PLANNED 现落地）+ 分块后的再测**：`for` 循环必须走 `Iterator::next`；给 `QueryIter` 实现了批量化的 `Iterator::fold` 重写（chunk 内紧凑内循环、实体列与 fetch 游标提到局部变量），`for_each`/`sum`/`count`/显式 `fold` 全部改走它，行序与访问集合与 `next` 完全一致（排序 / 计数 / 写回三条测试守护）。**连续列存时代**实测只读 `iter.for_each` 比 `for-next` 快约 **4–5×**（1.1–1.5 vs 4.5–6.6 ns/实体）。**改为物理分块列存 + chunk-aware fetch 后这条优势收窄到 ~1.1×**（只读 `iter.for_each` 3.5 vs `for-next` 3.9；可变 6.7 vs 6.9 ns/实体）：逐行成本此时由 chunk 局部 fetch 主导，迭代器协议不再是瓶颈，两条路径趋同——`fold` 快路径仍保留（它优化的是协议开销，存储/迭代策略变化时自动让位），但文档不再宣称固定倍数。绝对吞吐与基线相当（下表为最近一次实测）。
 

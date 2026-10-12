@@ -31,6 +31,7 @@ use hashbrown::HashMap;
 
 use crate::diagnostics::profiler::SystemInstrument;
 use crate::schedule::graph::Schedule;
+#[cfg(feature = "std")]
 use crate::schedule::lane::SystemLane;
 use crate::schedule::set::SystemSetId;
 use crate::world::World;
@@ -116,6 +117,7 @@ impl SingleThreadedExecutor {
         // A budget deadline, evaluated once so every system sees the same one.
         #[cfg(feature = "std")]
         let deadline = budget.map(|b| std::time::Instant::now() + b);
+        #[cfg_attr(not(feature = "std"), allow(unused_mut))]
         let mut deferred = 0usize;
 
         // Set-condition results are memoised for the whole run so a set's

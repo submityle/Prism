@@ -62,6 +62,48 @@ fn ns_per_entity(elapsed: Duration) -> f64 {
     elapsed.as_nanos() as f64 / ENTITIES as f64
 }
 
+/// Wall-clock samples from repeated timed runs — the raw material for a
+/// reproducible scaling curve. Unlike [`best_of`] (which reports the fastest
+/// run, the least noisy single number for a *cost* measurement), the curve needs
+/// the spread so it can report a confidence interval.
+#[cfg(feature = "multi_thread")]
+struct Samples(Vec<Duration>);
+
+#[cfg(feature = "multi_thread")]
+impl Samples {
+    /// Run `body` `n` times, collecting each wall-clock duration.
+    fn collect(n: usize, mut body: impl FnMut()) -> Self {
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let start = Instant::now();
+            body();
+            out.push(start.elapsed());
+        }
+        Self(out)
+    }
+
+    /// The `ns`-per-entity median (robust to a single descheduled run).
+    fn median_ns_per_entity(&self) -> f64 {
+        let mut ns: Vec<f64> = self.0.iter().map(|d| ns_per_entity(*d)).collect();
+        ns.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        ns[ns.len() / 2]
+    }
+
+    /// Mean and 95% confidence-interval half-width (normal approximation) of the
+    /// `ns`-per-entity samples, so a curve point can say how sure it is.
+    fn mean_and_ci95_ns_per_entity(&self) -> (f64, f64) {
+        let ns: Vec<f64> = self.0.iter().map(|d| ns_per_entity(*d)).collect();
+        let n = ns.len() as f64;
+        let mean = ns.iter().sum::<f64>() / n;
+        if ns.len() < 2 {
+            return (mean, 0.0);
+        }
+        let var = ns.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        let se = (var / n).sqrt();
+        (mean, 1.96 * se)
+    }
+}
+
 #[test]
 #[ignore = "allocates 1M entities; run explicitly with --release --ignored"]
 fn scale_spawn_and_single_thread_propagate_1m() {
@@ -129,6 +171,78 @@ fn scale_par_propagate_1m_scaling() {
             base.as_secs_f64() / run.as_secs_f64(),
         );
     }
+}
+
+/// Reproducible **multi-core scaling curve** (design §17 / §22: the
+/// near-linear-scaling claim needs an exclusive machine).
+///
+/// Reports, for a set of pool sizes, the median ns/entity, its 95% confidence
+/// interval, the speedup over one worker and the parallel efficiency
+/// (`speedup / threads`). The numbers are only meaningful on an idle, exclusive
+/// host — on a shared dev box other agents' builds dominate the variance, which
+/// is exactly why the curve is `#[ignore]`d and prints its own caveat — but the
+/// *procedure* is fixed here so it can be reproduced verbatim on a dedicated
+/// machine, and the confidence intervals make a noisy run self-evident.
+///
+/// Run with:
+/// `cargo test -p prism_ecs --release --features multi_thread --test scale \
+///  -- --ignored --nocapture scale_parallel_speedup_curve`
+#[cfg(feature = "multi_thread")]
+#[test]
+#[ignore = "allocates 1M entities; run explicitly with --release --ignored"]
+fn scale_parallel_speedup_curve() {
+    const SAMPLES: usize = 9;
+    let host = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    println!(
+        "parallel speedup curve: {ENTITIES} entities, {SAMPLES} samples/point, host_parallelism={host}"
+    );
+    println!("NOTE: an idle, exclusive host is required for a trustworthy curve; on a shared");
+    println!("      machine the 95% CI below will be wide and the speedups pessimistic.");
+    println!();
+    println!("threads | median ns/ent | mean ns/ent ± 95% CI | speedup | efficiency");
+
+    // One world, reused across every pool size, so the pool is the only variable.
+    let (mut world, first) = spawn_world();
+    let q = world.query::<(&Vel, &mut Pos)>();
+    let _ = q.iter_mut(&mut world).count(); // warm the match cache
+
+    let mut sizes: Vec<usize> = vec![1, 2, 4, 8];
+    if !sizes.contains(&host) {
+        sizes.push(host);
+    }
+    sizes.sort_unstable();
+    sizes.dedup();
+
+    let mut total_runs = 0usize;
+    let mut baseline = None;
+    for threads in sizes {
+        let pool = prism_tasks::TaskPool::with_threads(threads);
+        let samples = Samples::collect(SAMPLES, || {
+            q.par_for_each_mut(&mut world, &pool, 1024, |(v, mut p)| {
+                p.0 += v.0;
+                p.1 += v.1;
+                p.2 += v.2;
+            });
+        });
+        total_runs += SAMPLES;
+        let median = samples.median_ns_per_entity();
+        let (mean, ci) = samples.mean_and_ci95_ns_per_entity();
+        let base = *baseline.get_or_insert(mean);
+        println!(
+            "{threads:>7} | {median:>13.2} | {mean:>8.2} ± {ci:>6.2}        | {:>6.2}x  | {:>5.1}%",
+            base / mean,
+            100.0 * base / mean / threads as f64,
+        );
+    }
+
+    // Correctness: every sample propagated every entity, so the first entity was
+    // advanced by the total number of runs (one propagate each).
+    let runs = total_runs as f32;
+    let p = world.get::<Pos>(first).expect("first entity is live");
+    assert!(p.0.is_finite() && p.1.is_finite() && p.2.is_finite());
+    assert_eq!(p.0, 1.0 * runs);
 }
 
 /// Diagnose the serial-vs-batch gap measured in
