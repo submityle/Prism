@@ -62,10 +62,17 @@ pub struct SubApp {
     /// The ECS world this sub-app simulates. Its [`Schedules`] resource owns
     /// the phase schedules.
     pub world: World,
-    /// The one-way extract step pulling data in from the main world, run once
-    /// per frame before [`update`](SubApp::update). `None` on the main sub-app
-    /// and on any secondary sub-app that does not need to read the main world.
-    extract: Option<ExtractFn>,
+    /// The one-way extract steps pulling data in from the main world, run in
+    /// order once per frame before [`update`](SubApp::update). Empty on the main
+    /// sub-app and on any secondary sub-app that does not need to read the main
+    /// world.
+    ///
+    /// A list rather than one closure because every renderer plugin brings its
+    /// own slice of extraction (the frame record, each render-asset family, the
+    /// scene), and independently authored plugins could not otherwise all be
+    /// installed. [`set_extract`](SubApp::set_extract) replaces the list;
+    /// [`add_extract`](SubApp::add_extract) appends to it.
+    extracts: Vec<ExtractFn>,
     /// Optional bounded world-snapshot history for rollback (design §14 / M5).
     /// `None` until [`init_snapshot_history`](SubApp::init_snapshot_history).
     snapshot_history: Option<SnapshotHistory>,
@@ -85,32 +92,46 @@ impl SubApp {
         world.init_resource::<Schedules>();
         Self {
             world,
-            extract: None,
+            extracts: Vec::new(),
             snapshot_history: None,
         }
     }
 
-    /// Set this sub-app's one-way [`ExtractFn`], replacing any previous one.
+    /// Set this sub-app's one-way [`ExtractFn`], replacing any previous ones.
     pub fn set_extract<F>(&mut self, extract: F) -> &mut Self
     where
         F: FnMut(&mut World, &mut World) + Send + Sync + 'static,
     {
-        self.extract = Some(Box::new(extract));
+        self.extracts.clear();
+        self.extracts.push(Box::new(extract));
         self
     }
 
-    /// Whether this sub-app has an extract step installed.
-    #[must_use]
-    pub fn has_extract(&self) -> bool {
-        self.extract.is_some()
+    /// Append a one-way [`ExtractFn`], keeping the ones already installed.
+    ///
+    /// Steps run in the order they were added, so a plugin that needs another
+    /// plugin's extraction first declares that dependency instead of relying on
+    /// registration order.
+    pub fn add_extract<F>(&mut self, extract: F) -> &mut Self
+    where
+        F: FnMut(&mut World, &mut World) + Send + Sync + 'static,
+    {
+        self.extracts.push(Box::new(extract));
+        self
     }
 
-    /// Run this sub-app's extract step (if any) against `main_world`.
+    /// Whether this sub-app has at least one extract step installed.
+    #[must_use]
+    pub fn has_extract(&self) -> bool {
+        !self.extracts.is_empty()
+    }
+
+    /// Run this sub-app's extract steps (in order) against `main_world`.
     ///
-    /// A no-op when no [`ExtractFn`] is installed, so a secondary sub-app that
-    /// does not read the main world still participates in the frame.
+    /// A no-op when none is installed, so a secondary sub-app that does not read
+    /// the main world still participates in the frame.
     pub fn run_extract(&mut self, main_world: &mut World) {
-        if let Some(extract) = self.extract.as_mut() {
+        for extract in &mut self.extracts {
             extract(main_world, &mut self.world);
         }
     }
@@ -608,11 +629,18 @@ impl SubApps {
     /// Opt into cross-thread pipelined execution that renders each frame on the
     /// given [`prism_tasks`] worker pool instead of a dedicated lane (design
     /// §24.3): the pipeline runs on the engine's unified work-stealing task
-    /// graph. Pass a shared engine pool here. Replaces any existing pipeline
-    /// (and its in-flight state). Only available under the `pipelined-tasks`
-    /// feature.
+    /// graph. Pass a shared engine pool here. Only available under the
+    /// `pipelined-tasks` feature.
+    ///
+    /// If a frame is already in flight on the current lane it is brought home
+    /// first (via [`sync`](SubApps::sync)) before the lane is replaced, so the
+    /// secondary sub-apps are never lost — only the render lane changes.
     #[cfg(feature = "pipelined-tasks")]
     pub fn enable_pipelining_with_task_pool(&mut self, pool: prism_tasks::TaskPool) {
+        // The secondaries live in the current lane while a frame is in flight;
+        // collect them before swapping the lane so replacing it cannot drop
+        // them on the floor.
+        self.sync();
         self.pipeline = Some(crate::pipelined::PipelinedExecutor::with_task_pool(pool));
     }
 

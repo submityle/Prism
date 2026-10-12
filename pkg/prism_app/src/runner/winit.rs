@@ -170,6 +170,10 @@ impl WinitApp for WindowedHost {
         self.app.update();
 
         if let Some(exit) = self.app.poll_exit() {
+            // Honor the pipeline contract: bring the final in-flight render home
+            // before the loop ends. A no-op when nothing is pipelined
+            // (design §9 — runners sync once the frame loop ends).
+            self.app.sync_sub_apps();
             self.exit.set(Some(exit));
             return FrameOutcome::Exit;
         }

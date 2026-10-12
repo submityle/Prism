@@ -2356,6 +2356,88 @@ mod pipelined_tests {
         // Sanity: 6 frames × +5 = 30 in both worlds, 6 renders.
         assert_eq!(pooled, (30, 30, 6));
     }
+
+    /// Switching the render lane mid-flight must bring the in-flight frame home
+    /// (so the secondary sub-apps survive) instead of dropping it with the old
+    /// lane. Regression for a lane swap destroying every secondary.
+    #[cfg(feature = "pipelined-tasks")]
+    #[test]
+    fn switching_to_task_pool_lane_preserves_secondaries() {
+        let render_count = Arc::new(AtomicU64::new(0));
+        let mut app = App::new();
+        app.insert_sub_app(RenderApp, make_render_sub_app(render_count.clone()));
+        app.enable_pipelined_rendering();
+
+        app.update();
+        // Frame 0's render is in flight; the secondary is parked on the lane.
+        assert!(app.get_sub_app(RenderApp).is_none());
+
+        // Switch lanes: the in-flight frame is collected first, so the
+        // secondary sub-app comes home instead of being dropped with the lane.
+        app.enable_pipelined_rendering_with_task_pool(prism_tasks::TaskPool::new());
+        assert!(
+            app.get_sub_app(RenderApp).is_some(),
+            "switching lanes must not destroy the secondary sub-apps"
+        );
+        assert_eq!(
+            render_count.load(Ordering::Relaxed),
+            1,
+            "frame 0 still rendered before the swap"
+        );
+
+        // The new lane keeps rendering subsequent frames.
+        app.update();
+        app.update();
+        app.sync_sub_apps();
+        assert_eq!(render_count.load(Ordering::Relaxed), 3);
+        assert!(app.get_sub_app(RenderApp).is_some());
+    }
+
+    /// A panic on the task-pool lane surfaces on the main thread too (same
+    /// catch → channel → re-raise path as the dedicated lane).
+    #[cfg(feature = "pipelined-tasks")]
+    #[test]
+    #[should_panic(expected = "pool render boom")]
+    fn task_pool_lane_panic_propagates() {
+        let mut app = App::new();
+        let mut render = SubApp::new();
+        render
+            .world
+            .resource_mut::<prism_ecs::schedule::Schedules>()
+            .insert(Update, prism_ecs::schedule::Schedule::new());
+        render
+            .world
+            .resource_mut::<prism_ecs::schedule::Schedules>()
+            .get_mut(Update)
+            .unwrap()
+            .add_systems(|| panic!("pool render boom"));
+        app.insert_sub_app(RenderApp, render);
+        app.enable_pipelined_rendering_with_task_pool(prism_tasks::TaskPool::new());
+
+        // Frame 0 kicks the render (which panics); frame 1 joins it and the
+        // panic surfaces on the main thread.
+        app.update();
+        app.update();
+    }
+
+    /// Dropping an app with a render frame in flight tears the lane down
+    /// cleanly (no hang, no panic) after the in-flight frame finishes.
+    #[test]
+    fn drop_with_in_flight_frame_is_clean() {
+        let render_count = Arc::new(AtomicU64::new(0));
+        let mut app = App::new();
+        app.insert_sub_app(RenderApp, make_render_sub_app(render_count.clone()));
+        app.enable_pipelined_rendering();
+
+        app.update();
+        // Render 0 is in flight as the app goes away.
+        drop(app);
+        assert_eq!(
+            render_count.load(Ordering::Relaxed),
+            1,
+            "the in-flight frame still rendered before teardown returned"
+        );
+    }
 }
 
 // ---- M4 Inc2: platform lifecycle events + graceful shutdown ------------

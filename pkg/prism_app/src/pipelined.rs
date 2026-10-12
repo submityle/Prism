@@ -66,8 +66,11 @@
 //! inspect or mutate a secondary must first bring it home with
 //! [`PipelinedExecutor::sync`] (exposed as
 //! [`App::sync_sub_apps`](crate::app::App::sync_sub_apps)). Runners call this
-//! once the frame loop ends, and [`PipelinedExecutor`]'s [`Drop`] joins the
-//! worker so a dropped app never detaches or leaks the thread.
+//! once the frame loop ends. [`PipelinedExecutor`]'s [`Drop`] tears the lane
+//! down safely: the dedicated lane closes its job channel and joins its worker;
+//! the task-pool lane owns no thread of its own, and an in-flight render job —
+//! if any — still owns its frame and simply runs to completion on the pool
+//! (its discarded result is neither leaked nor left dangling).
 
 use std::panic::AssertUnwindSafe;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -171,9 +174,11 @@ impl Drop for DedicatedLane {
 struct TaskLane {
     /// The shared work-stealing pool the render jobs run on.
     pool: prism_tasks::TaskPool,
-    /// Tracks the outstanding render job (one at a time). We block on the
-    /// result channel rather than the counter, but every submitted job must be
-    /// registered so the pool's fork-join bookkeeping stays honest.
+    /// Tracks the outstanding render job (one at a time) so [`collect`] can use
+    /// the pool's help-on-wait: the main thread helps run queued jobs instead of
+    /// idling while the render competes for a worker on a shared pool.
+    ///
+    /// [`collect`]: TaskLane::collect
     counter: prism_tasks::Counter,
     /// Cloned into each render job to ship its outcome back.
     results_tx: Sender<RenderOutcome>,
@@ -209,7 +214,13 @@ impl TaskLane {
     }
 
     /// Block until the pool answers with the in-flight frame's outcome.
+    ///
+    /// [`TaskPool::wait`](prism_tasks::TaskPool::wait) runs first so a saturated
+    /// / shared pool does not leave the main thread idle while the render job is
+    /// queued behind other work (help-on-wait); the result channel then yields
+    /// the finished frame.
     fn collect(&self) -> Option<RenderOutcome> {
+        self.pool.wait(&self.counter);
         self.results_rx.recv().ok()
     }
 }
