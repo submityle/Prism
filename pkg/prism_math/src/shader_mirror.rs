@@ -1974,3 +1974,104 @@ fn prism_dual_apply(op: u32, x: f32, p: f32) -> PrismDual {\n\
         default: { return d; }\n\
     }\n\
 }\n";
+
+/// Single-sourced WGSL for conservatively-rounded interval arithmetic,
+/// mirroring the CPU [`Interval`](crate::interval::Interval) enclosure ops.
+/// `PrismInterval { lo, hi }` is a closed `[lo, hi]` enclosure;
+/// `prism_next_up` / `prism_next_down` step one ULP outward via `bitcast`
+/// (positive values increase/decrease the bit pattern, negatives the reverse;
+/// signed zeros step to the smallest subnormal, NaN/±inf pass through), exactly
+/// as the CPU helpers do. `prism_interval_add`/`_sub`/`_mul`/`_div` round the
+/// lower bound down and the upper bound up, `_div` returns the whole line when
+/// the divisor straddles zero, and `_abs`/`_sqrt` clamp the sign-split / domain.
+/// This is the GPU side of "never miss" bounding volumes for culling and CCD
+/// broad-phase — every result provably encloses the exact real result, so a
+/// device culling decision can never reject a visible primitive.
+pub const WGSL_INTERVAL: &str = "\
+struct PrismInterval {\n\
+    lo: f32,\n\
+    hi: f32,\n\
+};\n\
+\n\
+fn prism_next_up(x: f32) -> f32 {\n\
+    let pos_inf = bitcast<f32>(0x7f800000u);\n\
+    if (isNan(x) || x == pos_inf) { return x; }\n\
+    if (x == 0.0) { return bitcast<f32>(1u); }\n\
+    let bits = bitcast<u32>(x);\n\
+    let stepped = select(bits - 1u, bits + 1u, (bits >> 31u) == 0u);\n\
+    return bitcast<f32>(stepped);\n\
+}\n\
+\n\
+fn prism_next_down(x: f32) -> f32 {\n\
+    let neg_inf = bitcast<f32>(0xff800000u);\n\
+    if (isNan(x) || x == neg_inf) { return x; }\n\
+    if (x == 0.0) { return bitcast<f32>(0x80000001u); }\n\
+    let bits = bitcast<u32>(x);\n\
+    let stepped = select(bits + 1u, bits - 1u, (bits >> 31u) == 0u);\n\
+    return bitcast<f32>(stepped);\n\
+}\n\
+\n\
+fn prism_interval_new(a: f32, b: f32) -> PrismInterval {\n\
+    return PrismInterval(min(a, b), max(a, b));\n\
+}\n\
+\n\
+fn prism_interval_add(a: PrismInterval, b: PrismInterval) -> PrismInterval {\n\
+    return PrismInterval(prism_next_down(a.lo + b.lo), prism_next_up(a.hi + b.hi));\n\
+}\n\
+\n\
+fn prism_interval_sub(a: PrismInterval, b: PrismInterval) -> PrismInterval {\n\
+    return PrismInterval(prism_next_down(a.lo - b.hi), prism_next_up(a.hi - b.lo));\n\
+}\n\
+\n\
+fn prism_interval_mul(a: PrismInterval, b: PrismInterval) -> PrismInterval {\n\
+    let p0 = a.lo * b.lo;\n\
+    let p1 = a.lo * b.hi;\n\
+    let p2 = a.hi * b.lo;\n\
+    let p3 = a.hi * b.hi;\n\
+    let lo = min(min(p0, p1), min(p2, p3));\n\
+    let hi = max(max(p0, p1), max(p2, p3));\n\
+    return PrismInterval(prism_next_down(lo), prism_next_up(hi));\n\
+}\n\
+\n\
+fn prism_interval_div(a: PrismInterval, b: PrismInterval) -> PrismInterval {\n\
+    if (b.lo <= 0.0 && b.hi >= 0.0) {\n\
+        return PrismInterval(bitcast<f32>(0xff800000u), bitcast<f32>(0x7f800000u));\n\
+    }\n\
+    let q0 = a.lo / b.lo;\n\
+    let q1 = a.lo / b.hi;\n\
+    let q2 = a.hi / b.lo;\n\
+    let q3 = a.hi / b.hi;\n\
+    let lo = min(min(q0, q1), min(q2, q3));\n\
+    let hi = max(max(q0, q1), max(q2, q3));\n\
+    return PrismInterval(prism_next_down(lo), prism_next_up(hi));\n\
+}\n\
+\n\
+fn prism_interval_abs(a: PrismInterval) -> PrismInterval {\n\
+    if (a.lo >= 0.0) { return a; }\n\
+    if (a.hi <= 0.0) { return PrismInterval(-a.hi, -a.lo); }\n\
+    return PrismInterval(0.0, max(abs(a.lo), abs(a.hi)));\n\
+}\n\
+\n\
+fn prism_interval_sqrt(a: PrismInterval) -> PrismInterval {\n\
+    let lo = sqrt(max(a.lo, 0.0));\n\
+    let hi = sqrt(max(a.hi, 0.0));\n\
+    return PrismInterval(prism_next_down(lo), prism_next_up(hi));\n\
+}\n\
+\n\
+fn prism_interval_binary(op: u32, a: PrismInterval, b: PrismInterval) -> PrismInterval {\n\
+    switch op {\n\
+        case 0u: { return prism_interval_add(a, b); }\n\
+        case 1u: { return prism_interval_sub(a, b); }\n\
+        case 2u: { return prism_interval_mul(a, b); }\n\
+        case 3u: { return prism_interval_div(a, b); }\n\
+        default: { return a; }\n\
+    }\n\
+}\n\
+\n\
+fn prism_interval_unary(op: u32, a: PrismInterval) -> PrismInterval {\n\
+    switch op {\n\
+        case 0u: { return prism_interval_abs(a); }\n\
+        case 1u: { return prism_interval_sqrt(a); }\n\
+        default: { return a; }\n\
+    }\n\
+}\n";
