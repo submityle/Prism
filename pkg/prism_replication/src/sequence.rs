@@ -82,6 +82,9 @@ pub struct DeliveryWindow<T> {
     next: u64,
     capacity: usize,
     buffered: BTreeMap<u64, T>,
+    /// Set once `u64::MAX` has been delivered: the sequence space is exhausted,
+    /// so nothing more can be accepted (there is no "next" to advance to).
+    closed: bool,
 }
 
 impl<T> DeliveryWindow<T> {
@@ -95,6 +98,7 @@ impl<T> DeliveryWindow<T> {
             next: 0,
             capacity: capacity.max(1),
             buffered: BTreeMap::new(),
+            closed: false,
         }
     }
 
@@ -117,7 +121,7 @@ impl<T> DeliveryWindow<T> {
     /// valid early arrival, and one of the rejection variants otherwise. A
     /// rejected offer consumes `item`.
     pub fn insert(&mut self, seq: u64, item: T) -> Delivery<T> {
-        if seq < self.next {
+        if self.closed || seq < self.next {
             return Delivery::Stale;
         }
         // `seq - next` is the distance ahead; anything at or past `capacity` is
@@ -135,12 +139,25 @@ impl<T> DeliveryWindow<T> {
             let mut ready = Vec::new();
             while let Some(item) = self.buffered.remove(&self.next) {
                 ready.push((self.next, item));
+                if self.next == u64::MAX {
+                    // No larger sequence exists; close the window so the top
+                    // frame is delivered exactly once.
+                    self.closed = true;
+                    break;
+                }
                 self.next = self.next.saturating_add(1);
             }
             Delivery::Advanced(ready)
         } else {
             Delivery::Buffered
         }
+    }
+
+    /// Jump the window's cursor (test-only: the top-of-space case cannot be
+    /// reached by inserting 2^64 items).
+    #[cfg(test)]
+    fn seek_for_test(&mut self, next: u64) {
+        self.next = next;
     }
 }
 
@@ -221,5 +238,18 @@ mod tests {
             one.insert(0, "a"),
             Delivery::Advanced(alloc::vec![(0, "a")])
         );
+    }
+
+    #[test]
+    fn the_top_sequence_is_delivered_exactly_once() {
+        let mut window = DeliveryWindow::new(4);
+        window.seek_for_test(u64::MAX);
+        assert_eq!(
+            window.insert(u64::MAX, "last"),
+            Delivery::Advanced(alloc::vec![(u64::MAX, "last")])
+        );
+        // The space is exhausted: re-offering the top frame is stale, not a
+        // re-delivery, so the no-duplicate guarantee holds at the boundary.
+        assert_eq!(window.insert(u64::MAX, "again"), Delivery::Stale);
     }
 }

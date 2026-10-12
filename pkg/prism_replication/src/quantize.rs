@@ -75,6 +75,15 @@ impl Quantizer {
         // `NaN` maps to code 0 (the saturating cast). Round half up without
         // `f32::round` (std-only): add 0.5 and let the truncating cast do it.
         let clamped = value.clamp(self.min, self.max);
+        // Pin the endpoints: `inv_step` is a rounded `f32`, so for an extreme
+        // range the computed top code can land one short of `levels`; forcing it
+        // keeps both ends exact and the interior error within `max_error`.
+        if clamped >= self.max {
+            return self.levels;
+        }
+        if clamped <= self.min {
+            return 0;
+        }
         let code = ((clamped - self.min) * self.inv_step + 0.5) as u64;
         code.min(self.levels)
     }
@@ -149,6 +158,22 @@ mod tests {
         assert_eq!(q.quantize(0.1), 0);
         assert_eq!(q.quantize(0.9), 1);
         assert!((q.max_error() - 0.5).abs() < EPSILON);
+    }
+
+    /// Both endpoints pin exactly to the top/bottom code across benign and
+    /// extreme ranges (regression: the top code could land one short).
+    #[test]
+    fn endpoints_are_exact_across_ranges() {
+        for (min, max, bits) in [
+            (-1.0_f32, 1.0_f32, 16),
+            (0.0, 100.0, 12),
+            (-1.0e6, 3.5, 24),
+            (0.0, 0.001, 8),
+        ] {
+            let q = Quantizer::new(min, max, bits);
+            assert_eq!(q.quantize(min), 0, "min of {min}..{max}");
+            assert_eq!(q.quantize(max), q.levels(), "max of {min}..{max}");
+        }
     }
 
 }

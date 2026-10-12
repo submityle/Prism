@@ -29,6 +29,14 @@ pub enum SnapshotError {
     UnknownBaseline(u32),
     /// `baseline + 1` overflowed `u32` (the revision space is exhausted).
     RevisionOverflow(u32),
+    /// A new baseline revision was not newer than the current newest (the store
+    /// is fed in increasing order).
+    OutOfOrder {
+        /// The newest retained revision.
+        latest: u32,
+        /// The rejected revision.
+        found: u32,
+    },
 }
 
 impl From<DeltaError> for SnapshotError {
@@ -114,17 +122,33 @@ impl SnapshotStore {
     /// Store a full baseline at `revision`.
     ///
     /// Re-storing an already-retained revision overwrites it in place (idempotent
-    /// re-confirmation); a new revision must be newer than the current newest (the
-    /// store is fed in order), and evicts the oldest past `capacity`.
+    /// re-confirmation). A **new** revision must be newer than the current newest —
+    /// the store is fed in increasing order, and appending an older one would
+    /// break the ascending invariant the ring's eviction relies on
+    /// ([`SnapshotError::OutOfOrder`]). A new revision past `capacity` evicts the
+    /// oldest.
     ///
     /// # Errors
-    /// [`DeltaError::Shape`] / [`DeltaError::KindMismatch`] when `record` does not
-    /// match the schema.
-    pub fn insert_baseline(&mut self, revision: u32, record: Record) -> Result<(), DeltaError> {
+    /// [`SnapshotError::Delta`] ([`DeltaError::Shape`] / [`DeltaError::KindMismatch`]
+    /// / [`DeltaError::InvalidKind`]) when `record` does not match the schema, or
+    /// [`SnapshotError::OutOfOrder`].
+    pub fn insert_baseline(
+        &mut self,
+        revision: u32,
+        record: Record,
+    ) -> Result<(), SnapshotError> {
         self.schema.validate(&record)?;
         if let Some(slot) = self.frames.iter_mut().find(|(r, _)| *r == revision) {
             slot.1 = record;
             return Ok(());
+        }
+        if let Some((latest, _)) = self.frames.back()
+            && *latest >= revision
+        {
+            return Err(SnapshotError::OutOfOrder {
+                latest: *latest,
+                found: revision,
+            });
         }
         if self.frames.len() == self.capacity {
             self.frames.pop_front();
@@ -264,11 +288,32 @@ mod tests {
         let short = Record::new(vec![FieldValue::Bool(true)]);
         assert_eq!(
             store.insert_baseline(0, short),
-            Err(DeltaError::Shape {
+            Err(SnapshotError::Delta(DeltaError::Shape {
                 expected: 4,
                 found: 1
-            })
+            }))
         );
         assert!(store.is_empty());
+    }
+
+    /// A new baseline older than the newest is refused, so the ring's ascending
+    /// order (which `latest`/`oldest`/eviction rely on) cannot be corrupted.
+    #[test]
+    fn a_non_increasing_baseline_revision_is_refused() {
+        let mut store = SnapshotStore::new(schema(), 4);
+        store.insert_baseline(5, record(false, 5, 0.0, 5)).unwrap();
+        assert_eq!(
+            store.insert_baseline(3, record(false, 3, 0.0, 3)),
+            Err(SnapshotError::OutOfOrder {
+                latest: 5,
+                found: 3
+            })
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.latest_revision(), Some(5));
+        assert_eq!(store.oldest_revision(), Some(5));
+        // Re-confirming the existing revision in place is still allowed.
+        store.insert_baseline(5, record(true, 5, 0.0, 5)).unwrap();
+        assert_eq!(store.latest_revision(), Some(5));
     }
 }

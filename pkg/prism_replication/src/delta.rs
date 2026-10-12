@@ -30,13 +30,15 @@ pub enum FieldKind {
     Bool,
     /// A signed whole number, zigzagged into `bits` bits (1..=64).
     Int {
-        /// Code width in bits.
+        /// Code width in bits (1..=64); an out-of-range width is reported as
+        /// [`DeltaError::InvalidKind`] by encode/decode rather than panicking.
         bits: u8,
     },
-    /// A float quantized over `[min, max]` with `bits` of precision (1..=24).
+    /// A float quantized over `[min, max]` with `bits` of precision.
     ///
-    /// `min`/`max` must be finite with `min < max`, and `bits` in `1..=24` — the
-    /// same contract as [`Quantizer::new`], which panics otherwise.
+    /// Valid when `min`/`max` are finite with `min < max` and `bits` is `1..=24`
+    /// (the same contract as [`Quantizer::new`]); an invalid kind is reported as
+    /// [`DeltaError::InvalidKind`] by encode/decode rather than panicking.
     Float {
         /// Range lower bound.
         min: f32,
@@ -160,6 +162,13 @@ pub enum DeltaError {
         /// The offending field index.
         index: usize,
     },
+    /// A schema field kind has out-of-range parameters (an `Int`/`Float` width
+    /// outside `1..=64` / `1..=24`, or a non-increasing/ non-finite `Float`
+    /// range) — reported instead of panicking inside the bit packer / quantizer.
+    InvalidKind {
+        /// The offending field index.
+        index: usize,
+    },
     /// The encoded field count does not match the schema being decoded with.
     SchemaMismatch {
         /// Fields the schema declares.
@@ -247,6 +256,7 @@ pub fn encode_delta(
 /// [`DeltaError::SchemaMismatch`] when the payload was encoded with a different
 /// schema width, [`DeltaError::Truncated`] when it ends early.
 pub fn decode_delta(schema: &Schema, bytes: &[u8]) -> Result<Delta, DeltaError> {
+    check_kinds(schema)?;
     if bytes.len() < 5 {
         return Err(DeltaError::Truncated);
     }
@@ -299,6 +309,7 @@ pub fn apply_delta(
 }
 
 fn check_shape(schema: &Schema, record: &Record) -> Result<(), DeltaError> {
+    check_kinds(schema)?;
     if record.values.len() != schema.len() {
         return Err(DeltaError::Shape {
             expected: schema.len(),
@@ -308,6 +319,24 @@ fn check_shape(schema: &Schema, record: &Record) -> Result<(), DeltaError> {
     for (index, (kind, value)) in schema.kinds.iter().zip(&record.values).enumerate() {
         if !kind.matches(*value) {
             return Err(DeltaError::KindMismatch { index });
+        }
+    }
+    Ok(())
+}
+
+/// Validate the schema's own field-kind parameters, so the bit packer and
+/// quantizer are never handed a width or range they would panic on.
+fn check_kinds(schema: &Schema) -> Result<(), DeltaError> {
+    for (index, kind) in schema.kinds.iter().enumerate() {
+        let valid = match *kind {
+            FieldKind::Bool => true,
+            FieldKind::Int { bits } => (1..=64).contains(&bits),
+            FieldKind::Float { min, max, bits } => {
+                min.is_finite() && max.is_finite() && min < max && (1..=24).contains(&bits)
+            }
+        };
+        if !valid {
+            return Err(DeltaError::InvalidKind { index });
         }
     }
     Ok(())
@@ -503,6 +532,41 @@ mod tests {
     fn zigzag_round_trips_every_extreme() {
         for value in [0, 1, -1, i64::MAX, i64::MIN, 12345, -12345] {
             assert_eq!(unzigzag(zigzag(value)), value, "value {value}");
+        }
+    }
+
+    /// An invalid field kind is a reported error, never a panic inside the bit
+    /// packer / quantizer, and it is caught before any header is appended.
+    #[test]
+    fn invalid_field_kinds_are_reported_not_panicked() {
+        let base = Record::new(vec![FieldValue::Int(1)]);
+        for kind in [
+            FieldKind::Int { bits: 0 },
+            FieldKind::Int { bits: 65 },
+            FieldKind::Float {
+                min: 1.0,
+                max: 0.0,
+                bits: 8,
+            },
+            FieldKind::Float {
+                min: 0.0,
+                max: 1.0,
+                bits: 25,
+            },
+        ] {
+            let schema = Schema::new(vec![kind]);
+            let mut bytes = Vec::new();
+            assert_eq!(
+                encode_delta(&schema, &base, &base, 0, &mut bytes),
+                Err(DeltaError::InvalidKind { index: 0 }),
+                "encode kind {kind:?}"
+            );
+            assert!(bytes.is_empty(), "no header is written for an invalid kind");
+            assert_eq!(
+                decode_delta(&schema, &[0, 0, 0, 0, 1, 0]),
+                Err(DeltaError::InvalidKind { index: 0 }),
+                "decode kind {kind:?}"
+            );
         }
     }
 }
