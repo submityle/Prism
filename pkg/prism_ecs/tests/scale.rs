@@ -285,3 +285,83 @@ fn scale_dirty_chunks_vs_changed_scan_1m() {
         );
     }
 }
+
+/// The `simd` feature ships bulk column kernels against a scalar ground truth;
+/// the correctness dual-run lives in the crate, this measures what the vector
+/// path is actually worth on this host.
+#[cfg(feature = "simd")]
+#[test]
+#[ignore = "allocates 4 MiB of f32; run explicitly with --release --ignored"]
+fn scale_simd_kernels_vs_scalar() {
+    use prism_ecs::query::{active, add_assign, axpy_assign, scale_assign, sum};
+
+    println!("simd backend: {:?}", active());
+
+    // Two working-set sizes per operand: 4 KiB stays L1-resident (ALU-bound,
+    // where the explicit lanes help) and 4 MiB streams past cache
+    // (bandwidth-bound, where a scalar loop is already memory-limited and the
+    // vector path has no headroom). Reporting both keeps the claim honest.
+    for &n in &[1usize << 10, 1 << 20] {
+        let mut dst = vec![1.0f32; n];
+        let src = vec![2.0f32; n];
+
+        // Warm every path once so first-touch page faults are not measured.
+        add_assign(&mut dst, &src);
+        for (d, s) in dst.iter_mut().zip(&src) {
+            *d += *s;
+        }
+        scale_assign(&mut dst, 0.5);
+        axpy_assign(&mut dst, &src, 0.25);
+        black_box(sum(&dst));
+        let mut warm = 0.0f32;
+        for v in &dst {
+            warm += *v;
+        }
+        black_box(warm);
+
+        let vector_add = best_of(|| add_assign(&mut dst, &src));
+        let scalar_add = best_of(|| {
+            for (d, s) in dst.iter_mut().zip(&src) {
+                *d += *s;
+            }
+        });
+        let vector_scale = best_of(|| scale_assign(&mut dst, 0.5));
+        let vector_axpy = best_of(|| axpy_assign(&mut dst, &src, 0.25));
+        let vector_sum = best_of(|| {
+            black_box(sum(&dst));
+        });
+        let scalar_sum = best_of(|| {
+            let mut acc = 0.0f32;
+            for v in &dst {
+                acc += *v;
+            }
+            black_box(acc);
+        });
+
+        let ns_per = |d: Duration| d.as_nanos() as f64 / n as f64;
+        let kib = (n * size_of::<f32>()) as f64 / 1024.0;
+        println!(
+            "n={n} ({kib:.0} KiB) add: vec {:?} ({:.3} ns/elem) | scalar {:?} ({:.3} ns/elem) | {:.2}x",
+            vector_add,
+            ns_per(vector_add),
+            scalar_add,
+            ns_per(scalar_add),
+            scalar_add.as_secs_f64() / vector_add.as_secs_f64(),
+        );
+        println!(
+            "n={n} ({kib:.0} KiB) scale: vec {:?} ({:.3} ns/elem) | axpy: vec {:?} ({:.3} ns/elem)",
+            vector_scale,
+            ns_per(vector_scale),
+            vector_axpy,
+            ns_per(vector_axpy),
+        );
+        println!(
+            "n={n} ({kib:.0} KiB) sum: vec {:?} ({:.3} ns/elem) | scalar {:?} ({:.3} ns/elem) | {:.2}x",
+            vector_sum,
+            ns_per(vector_sum),
+            scalar_sum,
+            ns_per(scalar_sum),
+            scalar_sum.as_secs_f64() / vector_sum.as_secs_f64(),
+        );
+    }
+}
