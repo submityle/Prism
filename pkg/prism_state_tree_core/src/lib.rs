@@ -13,6 +13,7 @@ extern crate alloc;
 
 mod model;
 mod runtime;
+mod snapshot;
 
 pub use model::{
     EventId, GuardId, HistoryMode, NodeKind, Plan, PlanError, StateId, StateNode, Transition,
@@ -22,6 +23,7 @@ pub use runtime::{
     AlwaysGuard, Event, EventQueueError, Guard, GuardContext, Instance, LifecycleCallback,
     LogEntry, LogKind, MicrostepLimit, NoopLifecycle, RuntimeError, StepReport,
 };
+pub use snapshot::{RestoreError, Snapshot, SnapshotCodecError};
 
 #[cfg(test)]
 extern crate std;

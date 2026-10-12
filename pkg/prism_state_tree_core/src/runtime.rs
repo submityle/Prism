@@ -126,16 +126,16 @@ pub struct StepReport {
 
 /// A validated plan's mutable cursor and bounded input queue.
 pub struct Instance {
-    plan: Plan,
-    active: Vec<StateId>,
-    history: Vec<Option<Vec<StateId>>>,
-    queue: VecDeque<Event>,
-    guards: Vec<Option<Box<dyn Guard>>>,
-    log: Vec<LogEntry>,
-    event_capacity: usize,
-    microstep_limit: MicrostepLimit,
-    started: bool,
-    current_event: Option<Event>,
+    pub(crate) plan: Plan,
+    pub(crate) active: Vec<StateId>,
+    pub(crate) history: Vec<Option<Vec<StateId>>>,
+    pub(crate) queue: VecDeque<Event>,
+    pub(crate) guards: Vec<Option<Box<dyn Guard>>>,
+    pub(crate) log: Vec<LogEntry>,
+    pub(crate) event_capacity: usize,
+    pub(crate) microstep_limit: MicrostepLimit,
+    pub(crate) started: bool,
+    pub(crate) current_event: Option<Event>,
 }
 
 impl Instance {
