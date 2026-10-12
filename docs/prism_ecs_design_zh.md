@@ -472,7 +472,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 ## 22. 诚实边界与风险
 
-- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 / 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档，仅剩跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 渲染提取管线，以及独占机多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
+- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 / 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 反射桥（动态访问 + 字段级 diff/复制策略 + 实体二进制存档）/ 提取契约（`ExtractResource`/`ExtractComponent` + 运行器）/ 快照+回滚 / 分区流送 / GPU 常驻列 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`；§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续；§24.3 已落地动态访问 / 字段级 diff 复制 / 实体存档，仅剩跨版本 schema 迁移；§24.4 已有四环对拍夹具，见 §24.4/§24.5）、§23.5 的渲染侧接线与流水线并行（ECS 侧提取契约已落地），以及独占机多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标（百万级单线程迭代已实测，见 §17.1）。
 - 规模与多核扩展性、NUMA、GPU 常驻指标依赖真实硬件压测，单测不能替代。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。
@@ -521,6 +521,8 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 - 契约：渲染侧只依赖稳定的"提取 trait"（`ExtractComponent`/`ExtractResource`），不反向依赖仿真内部布局。
 - 收益：仿真/渲染双 World 隔离，使 `prism_render_scene` 脱 Bevy 时只需实现提取 trait，而非耦合整套存储；也为 §15 GPU 常驻直传提供自然边界。
+
+**ECS 侧已落地（提取契约 + 运行器）**：`pkg/prism_ecs/src/extract.rs` 提供文档承诺的两个稳定 trait——`ExtractResource`（主世界资源 → 次世界资源：`extract(&self, &World) -> Option<Out>`，返回 `None` 即本帧不覆盖，次世界保留上一帧值）与 `ExtractComponent`（`type QueryData: ReadOnlyQueryData` / `type QueryFilter` / `extract(item) -> Option<Out>`；提取器自己声明读哪些组件，次世界代码里**从不出现仿真组件名**）；配套运行器 `extract_resource::<R>(main, secondary) -> bool` 与 `extract_components::<C>(main, secondary) -> Vec<(Entity, Entity)>`。契约是**单向只读**：运行器只以 `&World` 读主世界、查询数据一律 `ReadOnlyQueryData`，所以提取既不会改写仿真状态，也不会被变更检测当成写（有专门用例断言 `Changed` 不因提取而触发）；匹配行沿用普通迭代器，`Added`/`Changed`/稀疏在场门一个不少。次世界实体由**它自己的分配器**新建，运行器返回 `(主实体, 次实体)` 映射，调用方按需存成 `RenderEntity` 式标记——不强行让两个分配器 id 相同。接入点已经现成：`prism_app` 的 `App::set_extract(sub_app, FnMut(&mut World, &mut World))` 正是本契约的形状（其文档写明"更丰富的 trait 驱动 `ExtractComponent` 管线尚未在 `prism_ecs` 提供"），现在可直接由两个运行器组合而成。**仍未做**：流水线并行的双缓冲渲染世界（M3 Inc2）与渲染侧实际改接——属渲染/App 侧工作。
 
 ### 23.6 作用域命令队列与层级 despawn
 
