@@ -277,9 +277,14 @@ impl RenderGraph {
                     let label = Some(self.passes[pidx].name.clone());
                     encoder.push_compute_pass(label, ctx.take_compute_commands());
                 }
-                // Transfer/present contribute only state tracking until the
-                // driver gains copy/present encoder commands.
-                PassKind::Transfer | PassKind::Present => {}
+                PassKind::Transfer => {
+                    let label = Some(self.passes[pidx].name.clone());
+                    encoder.push_transfer_pass(label, ctx.take_copy_commands());
+                }
+                // Present contributes only state tracking: handing the
+                // swapchain image to the surface is driven by the runtime, not
+                // the command buffer.
+                PassKind::Present => {}
             }
         }
 

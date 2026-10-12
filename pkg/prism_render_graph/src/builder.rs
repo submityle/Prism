@@ -11,9 +11,9 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use prism_render_driver::{
-    BindGroupId, BufferId, Color, ComputeCommand, ComputePipelineId, IndexBufferBinding,
-    IndexFormat, RenderCommand, RenderPipelineId, ScissorRect, SubresourceRange, TextureId,
-    TextureViewId, Viewport,
+    BindGroupId, BufferId, Color, ComputeCommand, ComputePipelineId, CopyCommand, Extent3d,
+    IndexBufferBinding, IndexFormat, RenderCommand, RenderPipelineId, ScissorRect,
+    SubresourceRange, TextureId, TextureViewId, Viewport,
 };
 
 use crate::access::{full_range, BufferUse, TextureUse};
@@ -318,6 +318,7 @@ pub struct ExecuteContext<'e> {
     kind: PassKind,
     render_commands: Vec<RenderCommand>,
     compute_commands: Vec<ComputeCommand>,
+    copy_commands: Vec<CopyCommand>,
 }
 
 impl<'e> ExecuteContext<'e> {
@@ -332,6 +333,7 @@ impl<'e> ExecuteContext<'e> {
             kind,
             render_commands: Vec::new(),
             compute_commands: Vec::new(),
+            copy_commands: Vec::new(),
         }
     }
 
@@ -524,6 +526,112 @@ impl<'e> ExecuteContext<'e> {
         self
     }
 
+    // --- transfer recording ----------------------------------------------
+
+    /// Records a buffer-to-buffer copy, resolving both handles to their
+    /// realized driver buffers.
+    pub fn copy_buffer_to_buffer(
+        &mut self,
+        src: BufferHandle,
+        src_offset: u64,
+        dst: BufferHandle,
+        dst_offset: u64,
+        size: u64,
+    ) -> &mut Self {
+        let src = self.buffer(src);
+        let dst = self.buffer(dst);
+        self.copy_commands.push(CopyCommand::CopyBufferToBuffer {
+            src,
+            src_offset,
+            dst,
+            dst_offset,
+            size,
+        });
+        self
+    }
+
+    /// Records a buffer-to-texture copy, resolving the source buffer and
+    /// destination texture handles to their realized driver objects.
+    pub fn copy_buffer_to_texture(
+        &mut self,
+        src: BufferHandle,
+        src_offset: u64,
+        bytes_per_row: Option<u32>,
+        rows_per_image: Option<u32>,
+        dst: TextureHandle,
+        dst_mip_level: u32,
+        dst_origin: [u32; 3],
+        size: Extent3d,
+    ) -> &mut Self {
+        let src = self.buffer(src);
+        let dst = self.texture(dst);
+        self.copy_commands.push(CopyCommand::CopyBufferToTexture {
+            src,
+            src_offset,
+            bytes_per_row,
+            rows_per_image,
+            dst,
+            dst_mip_level,
+            dst_origin,
+            size,
+        });
+        self
+    }
+
+    /// Records a texture-to-buffer copy, resolving the source texture and
+    /// destination buffer handles to their realized driver objects.
+    pub fn copy_texture_to_buffer(
+        &mut self,
+        src: TextureHandle,
+        src_mip_level: u32,
+        src_origin: [u32; 3],
+        dst: BufferHandle,
+        dst_offset: u64,
+        bytes_per_row: Option<u32>,
+        rows_per_image: Option<u32>,
+        size: Extent3d,
+    ) -> &mut Self {
+        let src = self.texture(src);
+        let dst = self.buffer(dst);
+        self.copy_commands.push(CopyCommand::CopyTextureToBuffer {
+            src,
+            src_mip_level,
+            src_origin,
+            dst,
+            dst_offset,
+            bytes_per_row,
+            rows_per_image,
+            size,
+        });
+        self
+    }
+
+    /// Records a texture-to-texture copy, resolving both handles to their
+    /// realized driver textures.
+    pub fn copy_texture_to_texture(
+        &mut self,
+        src: TextureHandle,
+        src_mip_level: u32,
+        src_origin: [u32; 3],
+        dst: TextureHandle,
+        dst_mip_level: u32,
+        dst_origin: [u32; 3],
+        size: Extent3d,
+    ) -> &mut Self {
+        let src = self.texture(src);
+        let dst = self.texture(dst);
+        self.copy_commands.push(CopyCommand::CopyTextureToTexture {
+            src,
+            src_mip_level,
+            src_origin,
+            dst,
+            dst_mip_level,
+            dst_origin,
+            size,
+        });
+        self
+    }
+
     /// Drains the recorded render commands.
     pub(crate) fn take_render_commands(&mut self) -> Vec<RenderCommand> {
         core::mem::take(&mut self.render_commands)
@@ -532,5 +640,10 @@ impl<'e> ExecuteContext<'e> {
     /// Drains the recorded compute commands.
     pub(crate) fn take_compute_commands(&mut self) -> Vec<ComputeCommand> {
         core::mem::take(&mut self.compute_commands)
+    }
+
+    /// Drains the recorded copy commands.
+    pub(crate) fn take_copy_commands(&mut self) -> Vec<CopyCommand> {
+        core::mem::take(&mut self.copy_commands)
     }
 }

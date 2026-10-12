@@ -32,8 +32,7 @@ pub enum PassKind {
     Raster,
     /// A compute pass: records dispatch commands.
     Compute,
-    /// A transfer pass: copies/blits (state-tracked; records no encoder pass
-    /// until the driver gains copy commands).
+    /// A transfer pass: records copy/blit commands into a driver transfer pass.
     Transfer,
     /// A present pass: hands an imported swapchain image to the surface.
     Present,
@@ -41,10 +40,11 @@ pub enum PassKind {
 
 impl PassKind {
     /// Whether passes of this kind are candidates for a recorded encoder pass
-    /// (raster/compute). Transfer and present contribute only state tracking.
+    /// (raster/compute/transfer). Present contributes only state tracking: the
+    /// surface, not the command buffer, performs the actual presentation.
     #[must_use]
     pub const fn records_commands(self) -> bool {
-        matches!(self, Self::Raster | Self::Compute)
+        matches!(self, Self::Raster | Self::Compute | Self::Transfer)
     }
 }
 

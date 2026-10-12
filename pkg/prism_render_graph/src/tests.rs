@@ -12,19 +12,19 @@ use core::cell::{Cell, RefCell};
 
 use prism_render_driver::{
     Backend, BindGroupDescriptor, BindGroupId, BindGroupLayoutDescriptor, BindGroupLayoutId,
-    BufferDescriptor, BufferId, Color, CommandBuffer, ComputePipelineDescriptor, ComputePipelineId,
-    DeviceCapabilities, Extent3d, Features, ImageDataLayout, Limits, LoadOp, Pass,
-    PipelineLayoutDescriptor, PipelineLayoutId, RenderDevice, RenderPipelineDescriptor,
-    RenderPipelineId, RenderQueue, SamplerDescriptor, SamplerId, ShaderModuleDescriptor,
-    ShaderModuleId, StoreOp, TextureDescriptor, TextureFormat, TextureId, TextureState,
-    TextureUsages, TextureViewDescriptor, TextureViewId, TextureWrite,
+    BufferDescriptor, BufferId, BufferState, BufferUsages, Color, CommandBuffer,
+    ComputePipelineDescriptor, ComputePipelineId, CopyCommand, DeviceCapabilities, Extent3d,
+    Features, ImageDataLayout, Limits, LoadOp, Pass, PipelineLayoutDescriptor, PipelineLayoutId,
+    RenderDevice, RenderPipelineDescriptor, RenderPipelineId, RenderQueue, SamplerDescriptor,
+    SamplerId, ShaderModuleDescriptor, ShaderModuleId, StoreOp, TextureDescriptor, TextureFormat,
+    TextureId, TextureState, TextureUsages, TextureViewDescriptor, TextureViewId, TextureWrite,
 };
 
-use crate::desc::TextureDesc;
+use crate::desc::{BufferDesc, TextureDesc};
 use crate::graph::RenderGraph;
 use crate::handle::TextureHandle;
 use crate::pass::PassFlags;
-use crate::resource::ImportedTexture;
+use crate::resource::{ImportedBuffer, ImportedTexture};
 
 // --- mock backend ---------------------------------------------------------
 
@@ -450,12 +450,221 @@ fn render_pass_carries_its_debug_label() {
         .iter()
         .map(|p| match p {
             Pass::Render { descriptor, .. } => descriptor.label.clone(),
-            Pass::Compute { label, .. } => label.clone(),
-            Pass::Transfer { label, .. } => label.clone(),
+            Pass::Compute { label, .. } | Pass::Transfer { label, .. } => label.clone(),
         })
         .collect();
     assert!(
         labels.contains(&Some(String::from("A"))) && labels.contains(&Some(String::from("B"))),
         "pass names flow through to driver pass labels: {labels:?}"
+    );
+}
+
+// --- transfer recording ---------------------------------------------------
+
+/// A transfer pass over imported source/destination buffers must record exactly
+/// one driver `Pass::Transfer` whose `CopyCommand` matches what the pass
+/// declared, with virtual handles resolved to the imported driver ids.
+#[test]
+fn transfer_pass_records_copy_commands() {
+    let mut g = RenderGraph::new(swap());
+    let src = g.import_buffer(
+        "src",
+        BufferDesc::new(256, BufferUsages::COPY_SRC),
+        ImportedBuffer {
+            buffer: BufferId::from_parts(2000, 0),
+            entry_state: BufferState::initial(),
+        },
+    );
+    let dst = g.import_buffer(
+        "dst",
+        BufferDesc::new(256, BufferUsages::COPY_DST),
+        ImportedBuffer {
+            buffer: BufferId::from_parts(2001, 0),
+            entry_state: BufferState::initial(),
+        },
+    );
+
+    g.add_transfer_pass("copy", PassFlags::EMPTY, move |b| {
+        let src = b.copy_src_buffer(src);
+        let dst = b.copy_dst_buffer(dst);
+        move |ctx| {
+            ctx.copy_buffer_to_buffer(src, 0, dst, 0, 256);
+        }
+    });
+
+    let device = MockDevice::new();
+    let queue = MockQueue::new();
+    g.execute(&device, &queue).expect("transfer graph executes");
+
+    let submitted = queue.submitted.borrow();
+    assert_eq!(submitted.len(), 1, "execution submits exactly one buffer");
+    let cb = &submitted[0];
+    assert_eq!(cb.passes.len(), 1, "one transfer pass becomes one GPU pass");
+    let Pass::Transfer { label, commands } = &cb.passes[0] else {
+        panic!("a transfer pass must record a Pass::Transfer");
+    };
+    assert_eq!(
+        label.as_deref(),
+        Some("copy"),
+        "the pass name flows through to the driver label"
+    );
+    assert_eq!(
+        commands,
+        &vec![CopyCommand::CopyBufferToBuffer {
+            src: BufferId::from_parts(2000, 0),
+            src_offset: 0,
+            dst: BufferId::from_parts(2001, 0),
+            dst_offset: 0,
+            size: 256,
+        }],
+        "the recorded copy matches the declared handles and offsets"
+    );
+}
+
+/// A transfer pass with an unconsumed output survives culling when flagged
+/// [`PassFlags::SIDE_EFFECT`] and is recorded; one with no flag and no consumer
+/// is culled and records nothing — mirroring the raster culling tests.
+#[test]
+fn culls_unconsumed_transfer_pass_unless_side_effecting() {
+    let mut g = RenderGraph::new(swap());
+
+    // Dead: copies into transients nobody reads, with no side-effect flag.
+    g.add_transfer_pass("dead", PassFlags::EMPTY, |b| {
+        let src = b.create_buffer("dead_src", BufferDesc::new(64, BufferUsages::COPY_SRC));
+        let dst = b.create_buffer("dead_dst", BufferDesc::new(64, BufferUsages::COPY_DST));
+        let src = b.copy_src_buffer(src);
+        let dst = b.copy_dst_buffer(dst);
+        move |ctx| {
+            ctx.copy_buffer_to_buffer(src, 0, dst, 0, 64);
+        }
+    });
+
+    // Kept: declared side-effecting, so it is a root even though nothing reads
+    // its output.
+    g.add_transfer_pass("kept", PassFlags::SIDE_EFFECT, |b| {
+        let src = b.create_buffer("kept_src", BufferDesc::new(64, BufferUsages::COPY_SRC));
+        let dst = b.create_buffer("kept_dst", BufferDesc::new(64, BufferUsages::COPY_DST));
+        let src = b.copy_src_buffer(src);
+        let dst = b.copy_dst_buffer(dst);
+        move |ctx| {
+            ctx.copy_buffer_to_buffer(src, 0, dst, 0, 64);
+        }
+    });
+
+    let device = MockDevice::new();
+    let queue = MockQueue::new();
+    g.execute(&device, &queue).expect("transfer graph executes");
+
+    let submitted = queue.submitted.borrow();
+    assert_eq!(submitted.len(), 1);
+    let cb = &submitted[0];
+    assert_eq!(
+        cb.passes.len(),
+        1,
+        "only the side-effecting transfer is recorded"
+    );
+    let Pass::Transfer { label, commands } = &cb.passes[0] else {
+        panic!("expected a single recorded Pass::Transfer");
+    };
+    assert_eq!(label.as_deref(), Some("kept"));
+    assert_eq!(commands.len(), 1, "the surviving pass recorded its copy");
+}
+
+/// Every transfer variant resolves its virtual handles to the realized driver
+/// ids, including the texture forms, and records them in declaration order.
+#[test]
+fn transfer_pass_records_every_copy_variant() {
+    fn imported_color(texture: u32, view: u32) -> ImportedTexture {
+        ImportedTexture {
+            texture: TextureId::from_parts(texture, 0),
+            default_view: TextureViewId::from_parts(view, 0),
+            entry_state: TextureState::initial(),
+            exit_state: TextureState::present(),
+            mip_levels: 1,
+            array_layers: 1,
+        }
+    }
+
+    let extent = Extent3d {
+        width: 4,
+        height: 4,
+        depth_or_array_layers: 1,
+    };
+
+    let mut g = RenderGraph::new(swap());
+    let src_tex = g.import_texture(
+        "src_tex",
+        TextureDesc::color(TextureFormat::Rgba8Unorm),
+        imported_color(3000, 3001),
+    );
+    let dst_tex = g.import_texture(
+        "dst_tex",
+        TextureDesc::color(TextureFormat::Rgba8Unorm),
+        imported_color(3002, 3003),
+    );
+    let buf = g.import_buffer(
+        "staging",
+        BufferDesc::new(64, BufferUsages::COPY_SRC.union(BufferUsages::COPY_DST)),
+        ImportedBuffer {
+            buffer: BufferId::from_parts(2002, 0),
+            entry_state: BufferState::initial(),
+        },
+    );
+
+    g.add_transfer_pass("blit", PassFlags::EMPTY, move |b| {
+        let src_tex = b.copy_src_texture(src_tex);
+        let dst_tex = b.copy_dst_texture(dst_tex);
+        let copy_src_buf = b.copy_src_buffer(buf);
+        b.copy_dst_buffer(buf);
+        move |ctx| {
+            ctx.copy_buffer_to_texture(buf, 0, None, None, dst_tex, 0, [0, 0, 0], extent)
+                .copy_texture_to_buffer(src_tex, 0, [0, 0, 0], copy_src_buf, 8, None, None, extent)
+                .copy_texture_to_texture(src_tex, 0, [0, 0, 0], dst_tex, 0, [0, 0, 0], extent);
+        }
+    });
+
+    let device = MockDevice::new();
+    let queue = MockQueue::new();
+    g.execute(&device, &queue).expect("transfer graph executes");
+
+    let submitted = queue.submitted.borrow();
+    let cb = &submitted[0];
+    let Pass::Transfer { commands, .. } = &cb.passes[0] else {
+        panic!("expected a recorded Pass::Transfer");
+    };
+    assert_eq!(
+        commands,
+        &vec![
+            CopyCommand::CopyBufferToTexture {
+                src: BufferId::from_parts(2002, 0),
+                src_offset: 0,
+                bytes_per_row: None,
+                rows_per_image: None,
+                dst: TextureId::from_parts(3002, 0),
+                dst_mip_level: 0,
+                dst_origin: [0, 0, 0],
+                size: extent,
+            },
+            CopyCommand::CopyTextureToBuffer {
+                src: TextureId::from_parts(3000, 0),
+                src_mip_level: 0,
+                src_origin: [0, 0, 0],
+                dst: BufferId::from_parts(2002, 0),
+                dst_offset: 8,
+                bytes_per_row: None,
+                rows_per_image: None,
+                size: extent,
+            },
+            CopyCommand::CopyTextureToTexture {
+                src: TextureId::from_parts(3000, 0),
+                src_mip_level: 0,
+                src_origin: [0, 0, 0],
+                dst: TextureId::from_parts(3002, 0),
+                dst_mip_level: 0,
+                dst_origin: [0, 0, 0],
+                size: extent,
+            },
+        ],
+        "all three texture-touching variants resolve to the imported driver ids"
     );
 }
