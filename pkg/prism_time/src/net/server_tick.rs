@@ -81,7 +81,11 @@ impl ServerTick {
         self.clock.elapsed()
     }
 
-    /// The exact duration of one server tick.
+    /// The duration of one server tick, floored to whole nanoseconds.
+    ///
+    /// For a non-exact rate (e.g. 60 Hz) this truncates, so `n * tick_duration`
+    /// drifts from `n` ticks; use [`time_of_tick`](Self::time_of_tick) for the
+    /// drift-free tick-to-time conversion.
     #[inline]
     #[must_use]
     pub fn tick_duration(&self) -> Duration {

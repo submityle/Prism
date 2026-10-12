@@ -146,7 +146,14 @@ impl VrrWindow {
         if multiplier < 2 {
             multiplier = 2;
         }
-        let sub_interval_ns = desired_interval_ns / multiplier;
+        // The exact divisor can fall *below* the panel's minimum interval (the
+        // window is narrower than the desired/multiplier grid); LFC must never
+        // request a refresh outside `[min, max]`, so clamp up to the fastest
+        // allowed interval (CR-found).
+        let mut sub_interval_ns = desired_interval_ns / multiplier;
+        if sub_interval_ns < self.min_interval_ns {
+            sub_interval_ns = self.min_interval_ns;
+        }
         VrrPresent::Lfc {
             multiplier: if multiplier > u32::MAX as u64 {
                 u32::MAX
@@ -169,6 +176,29 @@ impl VrrWindow {
             ready_ns
         } else {
             floor
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VrrPresent, VrrWindow};
+
+    #[test]
+    fn lfc_sub_interval_stays_in_window() {
+        // A window narrower than the desired/multiplier grid must still report
+        // an in-range sub-interval (CR-found).
+        let w = VrrWindow::from_hz(120, 144);
+        match w.classify(9_000_000) {
+            VrrPresent::Lfc {
+                sub_interval_ns, ..
+            } => {
+                assert!(
+                    w.contains(sub_interval_ns),
+                    "LFC sub-interval {sub_interval_ns} is outside the VRR window"
+                );
+            }
+            _ => panic!("expected an LFC classification for a slower desired interval"),
         }
     }
 }

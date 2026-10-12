@@ -187,13 +187,16 @@ impl TickClock {
     /// interpolation alpha for the presentation layer (`f32`).
     #[inline]
     pub fn overstep_fraction(self) -> f32 {
-        self.overstep_fraction_f64() as f32
+        // The f64 ratio can round to 1.0 and then widen to `1.0f32`; keep the
+        // documented `[0, 1)` contract.
+        (self.overstep_fraction_f64() as f32).clamp(0.0, 1.0_f32.next_down())
     }
 
     /// Overstep fraction as `f64`.
     #[inline]
     pub fn overstep_fraction_f64(self) -> f64 {
-        self.accum as f64 / self.step.nanos_num() as f64
+        let frac = self.accum as f64 / self.step.nanos_num() as f64;
+        frac.clamp(0.0, 1.0_f64.next_down())
     }
 
     /// Elapsed time as a [`Duration`] (`tick * step`), flooring to whole

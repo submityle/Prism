@@ -175,12 +175,15 @@ impl Time<Fixed> {
     /// interpolation alpha for the presentation layer (`f32`).
     #[inline]
     pub fn overstep_fraction(&self) -> f32 {
-        self.context.overstep.as_secs_f32() / self.context.timestep.as_secs_f32()
+        // Rounding can reach 1.0; keep the documented `[0, 1)` contract.
+        let frac = self.context.overstep.as_secs_f32() / self.context.timestep.as_secs_f32();
+        frac.clamp(0.0, 1.0_f32.next_down())
     }
 
     /// Overstep fraction as `f64`.
     #[inline]
     pub fn overstep_fraction_f64(&self) -> f64 {
-        self.context.overstep.as_secs_f64() / self.context.timestep.as_secs_f64()
+        let frac = self.context.overstep.as_secs_f64() / self.context.timestep.as_secs_f64();
+        frac.clamp(0.0, 1.0_f64.next_down())
     }
 }
