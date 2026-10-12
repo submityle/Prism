@@ -128,6 +128,11 @@ impl StateTreeInstance {
         self.runtime.active_states()
     }
 
+    /// Returns the number of queued events that have not been consumed.
+    pub fn queued_events(&self) -> usize {
+        self.runtime.queued_events()
+    }
+
     /// Queues an input event. It cannot cause a transition until the next tick.
     pub fn request_event(&mut self, event: Event) -> Result<(), EventQueueError> {
         self.runtime.send(event)
@@ -174,7 +179,19 @@ pub fn tick_entity(world: &mut World, entity: Entity) -> Option<Result<StepRepor
 }
 
 /// The outcome of one entry in an explicit [`tick_entities`] request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchTickFailure {
+    /// The runtime error returned by the failed tick.
+    pub error: RuntimeError,
+    /// Active configuration after the error. A failed tick is not transactional
+    /// and may have already applied transitions before reporting the error.
+    pub active_states: Vec<StateId>,
+    /// Events still queued after the failed tick.
+    pub queued_events: usize,
+}
+
+/// Outcome of one entry in an explicit [`tick_entities`] request.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BatchTickOutcome {
     /// The entity had a `StateTreeInstance` and its tick completed.
     Completed(StepReport),
@@ -183,11 +200,13 @@ pub enum BatchTickOutcome {
     Missing,
     /// The entity had a state-tree instance, but its tick returned a runtime
     /// error. The error is scoped to this entry; later entries are still run.
-    Failed(RuntimeError),
+    /// The failure snapshot describes the post-failure state because core
+    /// runtime errors do not roll back transitions already applied.
+    Failed(BatchTickFailure),
 }
 
 /// One ordered entity/outcome pair produced by [`tick_entities`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BatchTickEntry {
     /// The entity handle supplied by the caller.
     pub entity: Entity,
@@ -247,7 +266,9 @@ impl BatchTickReport {
 /// handles. A stale/dead entity or an entity without [`StateTreeInstance`] is
 /// reported as [`BatchTickOutcome::Missing`] and is otherwise a no-op. Runtime
 /// errors are retained per entry so one failed entity cannot suppress later
-/// requested ticks.
+/// requested ticks. A [`BatchTickOutcome::Failed`] entry does not imply a
+/// rollback: inspect its post-failure snapshot to observe state changes that
+/// happened before the core returned the error.
 pub fn tick_entities(world: &mut World, entities: &[Entity]) -> BatchTickReport {
     let mut report = BatchTickReport {
         entries: Vec::with_capacity(entities.len()),
@@ -264,7 +285,19 @@ pub fn tick_entities(world: &mut World, entities: &[Entity]) -> BatchTickReport 
             }
             Some(Err(error)) => {
                 report.failed += 1;
-                BatchTickOutcome::Failed(error)
+                let failure = world
+                    .get::<StateTreeInstance>(entity)
+                    .map(|instance| BatchTickFailure {
+                        error,
+                        active_states: instance.active_states().to_vec(),
+                        queued_events: instance.queued_events(),
+                    })
+                    .unwrap_or(BatchTickFailure {
+                        error,
+                        active_states: Vec::new(),
+                        queued_events: 0,
+                    });
+                BatchTickOutcome::Failed(failure)
             }
             None => {
                 report.missing += 1;

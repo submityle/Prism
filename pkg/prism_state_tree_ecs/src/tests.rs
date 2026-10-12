@@ -8,8 +8,8 @@ use prism_state_tree_core::{
 };
 
 use crate::{
-    queue_spawn, tick_entities, tick_entity, validate_context, BatchTickOutcome, StateTreeAsset,
-    StateTreeInstance, ValidatedContext,
+    queue_spawn, tick_entities, tick_entity, validate_context, BatchTickFailure, BatchTickOutcome,
+    StateTreeAsset, StateTreeInstance, ValidatedContext,
 };
 
 struct TestContext<'w> {
@@ -302,6 +302,36 @@ fn batch_tick_preserves_input_order_and_reports_missing_entities() {
 }
 
 #[test]
+fn batch_tick_executes_duplicate_entity_handles_twice() {
+    let mut world = World::new();
+    let entity = world.spawn(StateTreeInstance::new(asset(), 4, MicrostepLimit(8)).unwrap());
+    tick_entity(&mut world, entity)
+        .expect("instance exists")
+        .expect("initial tick");
+    let mut instance = world.get_mut::<StateTreeInstance>(entity).unwrap();
+    instance.request_event(Event::new(EventId(7))).unwrap();
+    instance.request_event(Event::new(EventId(7))).unwrap();
+
+    let report = tick_entities(&mut world, &[entity, entity]);
+    assert_eq!(report.completed_count(), 2);
+    assert!(matches!(
+        &report.entries()[0].outcome,
+        BatchTickOutcome::Completed(step) if step.events_processed == 2 && step.microsteps == 1
+    ));
+    assert!(matches!(
+        &report.entries()[1].outcome,
+        BatchTickOutcome::Completed(step) if step.events_processed == 0 && step.microsteps == 0
+    ));
+    assert_eq!(
+        world
+            .get::<StateTreeInstance>(entity)
+            .unwrap()
+            .queued_events(),
+        0
+    );
+}
+
+#[test]
 fn batch_tick_keeps_instances_independent_and_continues_after_error() {
     let mut world = World::new();
     let failing = world.spawn(StateTreeInstance::new(asset(), 4, MicrostepLimit(0)).unwrap());
@@ -325,12 +355,17 @@ fn batch_tick_keeps_instances_independent_and_continues_after_error() {
     assert_eq!(report.completed_count(), 1);
     assert_eq!(report.failed_count(), 1);
     assert_eq!(report.entries()[0].entity, failing);
-    assert_eq!(
-        report.entries()[0].outcome,
-        BatchTickOutcome::Failed(prism_state_tree_core::RuntimeError::MicrostepLimit(
-            MicrostepLimit(0)
-        ))
-    );
+    match &report.entries()[0].outcome {
+        BatchTickOutcome::Failed(failure) => {
+            assert_eq!(
+                failure.error,
+                prism_state_tree_core::RuntimeError::MicrostepLimit(MicrostepLimit(0))
+            );
+            assert_eq!(failure.active_states, [StateId(0), StateId(1)]);
+            assert_eq!(failure.queued_events, 1);
+        }
+        other => panic!("expected a failed tick, got {other:?}"),
+    }
     assert_eq!(report.entries()[1].entity, healthy);
     assert!(matches!(
         report.entries()[1].outcome,
@@ -346,6 +381,72 @@ fn batch_tick_keeps_instances_independent_and_continues_after_error() {
     assert_eq!(
         world
             .get::<StateTreeInstance>(healthy)
+            .unwrap()
+            .active_states(),
+        &[StateId(0), StateId(2)]
+    );
+}
+
+#[test]
+fn batch_tick_failure_reports_post_transition_state() {
+    let event_transition = Transition::new(
+        StateId(1),
+        TransitionTarget::State(StateId(2)),
+        Trigger::Event(EventId(7)),
+        None,
+        0,
+        TransitionKind::External,
+    );
+    let eventless_transition = Transition::new(
+        StateId(2),
+        TransitionTarget::State(StateId(3)),
+        Trigger::Eventless,
+        None,
+        0,
+        TransitionKind::External,
+    );
+    let plan = TreeDef {
+        root: StateId(0),
+        nodes: vec![
+            StateNode::compound(
+                StateId(0),
+                None,
+                vec![StateId(1), StateId(2), StateId(3)],
+                StateId(1),
+                None,
+            ),
+            StateNode::atomic(StateId(1), Some(StateId(0))).with_transition(event_transition),
+            StateNode::atomic(StateId(2), Some(StateId(0))).with_transition(eventless_transition),
+            StateNode::atomic(StateId(3), Some(StateId(0))),
+        ],
+    }
+    .compile()
+    .expect("partial-failure plan is valid");
+    let asset = StateTreeAsset::new(plan);
+    let mut world = World::new();
+    let entity = world.spawn(StateTreeInstance::new(asset, 4, MicrostepLimit(1)).unwrap());
+    tick_entity(&mut world, entity)
+        .expect("instance exists")
+        .expect("initial tick");
+    world
+        .get_mut::<StateTreeInstance>(entity)
+        .unwrap()
+        .request_event(Event::new(EventId(7)))
+        .unwrap();
+
+    let report = tick_entities(&mut world, &[entity]);
+    assert_eq!(report.failed_count(), 1);
+    assert_eq!(
+        report.entries()[0].outcome,
+        BatchTickOutcome::Failed(BatchTickFailure {
+            error: prism_state_tree_core::RuntimeError::MicrostepLimit(MicrostepLimit(1)),
+            active_states: vec![StateId(0), StateId(2)],
+            queued_events: 0,
+        })
+    );
+    assert_eq!(
+        world
+            .get::<StateTreeInstance>(entity)
             .unwrap()
             .active_states(),
         &[StateId(0), StateId(2)]

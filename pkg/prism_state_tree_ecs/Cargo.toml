@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-prism_ecs = { path = "../prism_ecs" }
+prism_ecs = { path = "../prism_ecs", default-features = false }
 prism_state_tree_core = { path = "../prism_state_tree_core" }
 
 [features]
