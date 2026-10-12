@@ -1,0 +1,12 @@
+[package]
+name = "prism_material_pcm"
+version = "0.1.0"
+edition = "2024"
+description = "PCM: the unified capability/extension-point registry for the Prism material pipeline (design doc §5)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true
