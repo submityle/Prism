@@ -72,6 +72,10 @@ mod loader;
 #[cfg(feature = "std")]
 mod loader_exec;
 mod path;
+mod reload;
+mod reload_plan;
+#[cfg(feature = "std")]
+mod scheduler;
 #[cfg(feature = "std")]
 mod server;
 #[cfg(feature = "std")]
@@ -79,6 +83,8 @@ mod source;
 mod storage;
 mod stores;
 mod type_id;
+#[cfg(feature = "std")]
+mod watch;
 
 #[cfg(test)]
 mod tests;
@@ -98,6 +104,10 @@ pub use loader_exec::{
     LoadError, LoadedAsset,
 };
 pub use path::AssetPath;
+pub use reload::{ReloadCommit, ReloadCommitGuard, ReloadEpoch};
+pub use reload_plan::{plan_reload, ReloadPlan, ReloadPlanError};
+#[cfg(feature = "std")]
+pub use scheduler::{LoadFailure, LoadScheduler, LoadTicket, ScheduleError, ScheduleOutcome};
 #[cfg(feature = "std")]
 pub use server::AssetServer;
 #[cfg(feature = "std")]
@@ -105,15 +115,23 @@ pub use source::{AssetMeta, AssetReader, AssetSources, FsSource, MemSource, Read
 pub use storage::Assets;
 pub use stores::{AssetStores, ErasedAssetStore, StoreError};
 pub use type_id::AssetTypeId;
+#[cfg(feature = "file_watcher")]
+pub use watch::FileWatcher;
+#[cfg(feature = "std")]
+pub use watch::{AssetChange, AssetChangeKind, ChangeBatch, ChangeBatchBuilder};
 
 /// Convenient re-exports for downstream crates.
 pub mod prelude {
     #[cfg(feature = "std")]
     pub use crate::AssetServer;
     pub use crate::{
-        Asset, AssetError, AssetErrorId, AssetEvent, AssetId, AssetIndex, AssetPath, AssetStores,
-        AssetTypeId, Assets, DependencyGraph, ErrorRegistry, Handle, LoadState, LoaderId,
-        LoaderRegistry, SoftHandle, StableGuid, SuffixConflict, UntypedAssetId, UntypedHandle,
+        plan_reload, Asset, AssetError, AssetErrorId, AssetEvent, AssetId, AssetIndex, AssetPath,
+        AssetStores, AssetTypeId, Assets, DependencyGraph, ErrorRegistry, Handle, LoadState,
+        LoaderId, LoaderRegistry, ReloadCommit, ReloadCommitGuard, ReloadEpoch, ReloadPlan,
+        ReloadPlanError, SoftHandle, StableGuid, SuffixConflict, UntypedAssetId, UntypedHandle,
         UntypedWeakHandle, WeakHandle,
     };
 }
+
+#[cfg(test)]
+mod reload_plan_tests;

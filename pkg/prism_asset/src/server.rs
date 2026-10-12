@@ -53,14 +53,19 @@ use crate::id::UntypedAssetId;
 use crate::load_state::{LoadState, RecursiveDependencyLoadState};
 use crate::loader_exec::{AssetLoader, AssetLoaders, ErasedLoadedAsset, FullLoadOutput};
 use crate::path::AssetPath;
+use crate::reload::{ReloadCommit, ReloadEpoch};
+use crate::reload_plan::ReloadPlan;
 use crate::source::{AssetReader, AssetSources};
 use crate::stores::AssetStores;
 use crate::type_id::AssetTypeId;
+use crate::watch::{AssetChangeKind, ChangeBatch};
 use crate::{Asset, LoaderId, SuffixConflict};
-use alloc::collections::BTreeMap;
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Mutex;
 
 /// The runtime asset front door (design §9.2).
@@ -94,6 +99,21 @@ struct AssetServerInner {
     /// successfully wired dependencies, transitively). Replacing an entry on
     /// reload drops the previous closure's strong refs.
     retained: BTreeMap<UntypedAssetId, Vec<UntypedHandle>>,
+    /// Epoch arbitration for reload results. It is also useful to async
+    /// callers that decode outside this server's state mutex.
+    reload_epoch: ReloadEpoch,
+}
+
+/// A labeled value held outside storage until the complete reload assembly has
+/// passed dependency, cycle, identity, and type validation. Keeping this
+/// staging record separate from [`AssetServerInner::graph`] prevents one bad
+/// label from committing a partially revised sub-asset set.
+struct StagedLabeledAsset {
+    path: AssetPath,
+    id: UntypedAssetId,
+    value: Box<dyn core::any::Any + Send>,
+    dependencies: Vec<UntypedHandle>,
+    handle: UntypedHandle,
 }
 
 impl AssetServer {
@@ -111,12 +131,21 @@ impl AssetServer {
                 interned: BTreeMap::new(),
                 catalog: BTreeMap::new(),
                 retained: BTreeMap::new(),
+                reload_epoch: ReloadEpoch::new(),
             }),
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, AssetServerInner> {
-        self.inner.lock().expect("asset server mutex poisoned")
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            // A loader/source is third-party code and must not permanently
+            // brick the server if it panics at the boundary. The load path
+            // catches such panics and records a failure; this recovery also
+            // makes diagnostics and subsequent requests usable if a panic
+            // escaped an older/custom entry point.
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     /// Registers a typed [`AssetLoader`] and the arena for the asset type it
@@ -154,9 +183,9 @@ impl AssetServer {
         let mut inner = self.lock();
         inner.stores.register::<A>();
         match inner.load_path(path, Some(AssetTypeId::of::<A>())) {
-            Some(handle) => handle
-                .typed::<A>()
-                .expect("load_path honored the requested asset type"),
+            Some(handle) => handle.typed::<A>().unwrap_or_else(|| {
+                inner.reserve_failed::<A>("asset path is already interned with another type")
+            }),
             // Only reachable if the arena vanished between registration and
             // reservation, which cannot happen under the held lock; fail
             // defensively rather than panic.
@@ -192,9 +221,9 @@ impl AssetServer {
         };
         inner.stores.register::<A>();
         match inner.load_path(path, Some(AssetTypeId::of::<A>())) {
-            Some(handle) => handle
-                .typed::<A>()
-                .expect("load_path honored the requested asset type"),
+            Some(handle) => handle.typed::<A>().unwrap_or_else(|| {
+                inner.reserve_failed::<A>("soft asset path is already interned with another type")
+            }),
             None => inner.reserve_failed::<A>("asset arena unavailable"),
         }
     }
@@ -206,22 +235,132 @@ impl AssetServer {
     /// handle to the (re)loaded asset, or `None` if it was neither resident nor
     /// loadable.
     pub fn reload(&self, path: impl Into<AssetPath>) -> Option<UntypedHandle> {
-        let path = path.into();
+        let requested_path = path.into();
         let mut inner = self.lock();
-        if let Some(handle) = inner
-            .interned
-            .get(&path)
-            .and_then(UntypedWeakHandle::upgrade)
-        {
-            let id = handle.id();
-            let _ = inner.graph.invalidate(id);
-            inner.graph.clear_stale(id);
-            let _ = inner.graph.set_self_state(id, LoadState::Loading);
-            inner.finalize(path, id, id.type_id());
-            Some(handle)
-        } else {
-            inner.load_path(path, None)
+        // A label is an output of its source loader, not an independently
+        // reloadable file. Reloading `scene.gltf#Mesh0` must therefore use the
+        // primary source as the transaction root; otherwise the old code
+        // marked the label stale, skipped it in the reload loop, and left the
+        // source loader's complete labeled revision untouched.
+        let path = requested_path.clone().without_label();
+        let guard = inner.reload_epoch.begin();
+        let result = match guard.commit(|| {
+            if let Some(handle) = inner
+                .interned
+                .get(&path)
+                .and_then(UntypedWeakHandle::upgrade)
+            {
+                let id = handle.id();
+                let affected = inner.graph.invalidate(id);
+                let affected: BTreeSet<_> = affected.into_iter().collect();
+                let order = ReloadPlan::build(&inner.graph, affected.iter().copied())
+                    .expect("the live dependency graph is acyclic");
+                for affected_id in order {
+                    if !affected.contains(&affected_id) {
+                        continue;
+                    }
+                    // Labeled sub-assets are committed by reloading their
+                    // owning source asset; decoding a label directly would
+                    // route the source loader's primary value into the wrong
+                    // typed slot. The owning source is included in the graph
+                    // closure when it depends on this sub-asset.
+                    let Some((affected_path, affected_handle)) =
+                        inner.interned.iter().find_map(|(candidate, weak)| {
+                            weak.upgrade()
+                                .filter(|candidate_handle| candidate_handle.id() == affected_id)
+                                .map(|candidate_handle| (candidate.clone(), candidate_handle))
+                        })
+                    else {
+                        continue;
+                    };
+                    if affected_path.has_label() {
+                        inner.graph.clear_stale(affected_id);
+                        continue;
+                    }
+                    inner.graph.clear_stale(affected_id);
+                    let _ = inner.graph.set_self_state(affected_id, LoadState::Loading);
+                    inner.finalize_safe(affected_path, affected_id, affected_id.type_id());
+                    drop(affected_handle);
+                }
+                Some(handle)
+            } else {
+                // Preserve the public contract for an unknown label: loading
+                // the source is allowed to intern the label, but the return
+                // value is the exact requested handle when it exists.
+                let source_handle = inner.load_path(path.clone(), None)?;
+                if requested_path.has_label() {
+                    inner
+                        .interned
+                        .get(&requested_path)
+                        .and_then(UntypedWeakHandle::upgrade)
+                } else {
+                    Some(source_handle)
+                }
+            }
+        }) {
+            ReloadCommit::Committed(handle) => handle.and_then(|handle| {
+                if requested_path.has_label() {
+                    inner
+                        .interned
+                        .get(&requested_path)
+                        .and_then(UntypedWeakHandle::upgrade)
+                } else {
+                    Some(handle)
+                }
+            }),
+            ReloadCommit::Superseded => None,
+        };
+        result
+    }
+
+    /// Applies one debounced watcher batch to resident assets.
+    ///
+    /// The watcher deliberately does not own an [`AssetServer`], which keeps
+    /// platform event collection independent from loader execution. This
+    /// method is the concrete hand-off between the two: every change is
+    /// processed in stable batch order and each affected source is reloaded
+    /// through the same dependency-aware, atomic assembly path as manual
+    /// [`AssetServer::reload`]. Unknown paths are ignored because a filesystem
+    /// watcher must not implicitly load every file in a project. A rename
+    /// reloads both the old resident path (so a removed source is diagnosed)
+    /// and the new resident path; it does not silently change stable identity.
+    pub fn apply_change_batch(&self, batch: &ChangeBatch) -> Vec<UntypedHandle> {
+        let mut handles = Vec::new();
+        for change in batch.changes() {
+            let path = qualify_change_path(&change.source, &change.path);
+            match &change.kind {
+                AssetChangeKind::Created | AssetChangeKind::Modified | AssetChangeKind::Removed => {
+                    if self.is_resident_source(&path)
+                        && let Some(handle) = self.reload(path)
+                    {
+                        handles.push(handle);
+                    }
+                }
+                AssetChangeKind::Renamed { from, to } => {
+                    let from = qualify_change_path(&change.source, from);
+                    let to = qualify_change_path(&change.source, to);
+                    if self.is_resident_source(&from)
+                        && let Some(handle) = self.reload(from)
+                    {
+                        handles.push(handle);
+                    }
+                    if self.is_resident_source(&to)
+                        && let Some(handle) = self.reload(to)
+                    {
+                        handles.push(handle);
+                    }
+                }
+            }
         }
+        handles
+    }
+
+    fn is_resident_source(&self, path: &AssetPath) -> bool {
+        let source_path = path.clone().without_label();
+        let inner = self.lock();
+        inner.interned.iter().any(|(candidate, weak)| {
+            candidate.clone().without_label() == source_path && weak.strong_count() > 0
+        })
     }
 
     /// The [`LoadState`] of `id` (its own state, not its dependency closure).
@@ -287,6 +426,14 @@ impl AssetServer {
     }
 }
 
+fn qualify_change_path(source: &str, path: &AssetPath) -> AssetPath {
+    if source.is_empty() || path.has_scheme() {
+        path.clone()
+    } else {
+        path.clone().with_scheme(source)
+    }
+}
+
 impl Default for AssetServer {
     fn default() -> Self {
         Self::new()
@@ -302,18 +449,35 @@ impl AssetServerInner {
         path: AssetPath,
         requested: Option<AssetTypeId>,
     ) -> Option<UntypedHandle> {
-        // 1. Dedup / cycle guard: an already-interned path (resident or
-        //    in-flight) short-circuits to the existing handle.
+        // A label names an output produced by its source asset's loader, not a
+        // file with an independently selectable suffix. Resolve an existing
+        // label before suffix dispatch, or load the source first so its labels
+        // are registered, then return the exact interned sub-asset handle.
         if let Some(handle) = self
             .interned
             .get(&path)
             .and_then(UntypedWeakHandle::upgrade)
         {
-            return Some(handle);
+            return requested
+                .is_none_or(|type_id| handle.id().type_id() == type_id)
+                .then_some(handle);
+        }
+        if path.has_label() {
+            let source_path = path.clone().without_label();
+            self.load_path(source_path, None)?;
+            let handle = self
+                .interned
+                .get(&path)
+                .and_then(UntypedWeakHandle::upgrade)?;
+            return requested
+                .is_none_or(|type_id| handle.id().type_id() == type_id)
+                .then_some(handle);
         }
 
-        // 2. Resolve the produced type: the caller's request wins; otherwise ask
-        //    loader selection what this path would decode to.
+        // Resolve the requested type before deduplication. A path may be
+        // requested through two typed APIs; returning the first path's handle
+        // and letting a later typed downcast panic would turn a content error
+        // into process failure.
         let type_id = match requested {
             Some(ty) => ty,
             None => {
@@ -322,6 +486,8 @@ impl AssetServerInner {
             }
         };
 
+        // 1. Dedup / cycle guard: an already-interned path (resident or
+        //    in-flight) short-circuits to the existing handle.
         // 3. Reserve the slot before any I/O so a dependency cycling back to
         //    this path finds the in-flight handle in step 1.
         let handle = self.stores.reserve_by_type(type_id)?;
@@ -337,15 +503,27 @@ impl AssetServerInner {
         let _ = self.graph.set_self_state(id, LoadState::Loading);
 
         // 6. Read, decode, wire dependencies and sub-assets, fulfill.
-        self.finalize(path, id, type_id);
+        self.finalize_safe(path, id, type_id);
         Some(handle)
+    }
+
+    /// Executes format/plugin code behind a panic boundary. A panic is a load
+    /// failure, never a reason to poison the server mutex or leave a reserved
+    /// slot looking permanently in-flight.
+    fn finalize_safe(&mut self, path: AssetPath, id: UntypedAssetId, type_id: AssetTypeId) {
+        let failure_path = path.clone();
+        if catch_unwind(AssertUnwindSafe(|| self.finalize(path, id, type_id))).is_err() {
+            self.fail(id, &failure_path, "asset source or loader panicked");
+        }
     }
 
     /// Reads bytes for `path`, decodes them as `type_id`, interns labeled
     /// sub-assets, recursively loads dependencies and wires the graph, then
-    /// fulfills the reserved slot `id`. Any failure transitions `id` to
-    /// [`LoadState::Failed`] with a recorded [`AssetError`].
+    /// fulfills the reserved slot `id`. A first-load failure transitions the
+    /// slot to [`LoadState::Failed`] with a recorded [`AssetError`]; a reload
+    /// failure keeps the existing ready payload and restores `Loaded` state.
     fn finalize(&mut self, path: AssetPath, id: UntypedAssetId, type_id: AssetTypeId) {
+        let had_ready_value = matches!(self.stores.load_state(id), LoadState::Loaded);
         let bytes = match self.sources.read(&path) {
             Ok(bytes) => bytes,
             Err(err) => {
@@ -379,15 +557,11 @@ impl AssetServerInner {
         // retained entries).
         let mut retained: Vec<UntypedHandle> = Vec::new();
 
-        // Intern labeled sub-assets first; they are fully decoded leaves of
-        // this load and are owned by this asset.
-        for sub in labeled {
-            if let Some(sub_handle) = self.intern_labeled(&path, sub, &mut retained) {
-                retained.push(sub_handle);
-            }
-        }
-
-        // Recursively resolve declared dependencies and wire the graph.
+        // Resolve all dependencies first, but do not mutate graph edges one by
+        // one. Reloads may remove dependencies, so the edge set is committed
+        // as one replacement after every dependency has been resolved.
+        let mut dependency_handles: Vec<UntypedHandle> = Vec::new();
+        let mut dependency_ids: Vec<UntypedAssetId> = Vec::new();
         for dep in dependencies {
             let Some(dep_handle) = self.load_path(dep.path.clone(), dep.expected_type) else {
                 self.fail(
@@ -397,22 +571,153 @@ impl AssetServerInner {
                 );
                 return;
             };
-            match self.graph.try_add_dependency(id, dep_handle.id()) {
-                Ok(()) => retained.push(dep_handle),
-                Err(DependencyError::Cycle { participants }) => {
-                    // Record a diagnostic but drop the handle: retaining a
-                    // cycle-closing edge would form a reference-counting leak.
-                    let eid = self.errors.record(AssetError::new(
-                        path.path(),
-                        alloc::format!(
-                            "dependency cycle rejected ({} asset(s)): {}",
-                            participants.len(),
-                            dep.path
-                        ),
-                    ));
-                    let _ = eid;
+            if self.stores.load_state(dep_handle.id()).is_failed() {
+                self.fail(
+                    id,
+                    &path,
+                    alloc::format!("dependency failed to load: {}", dep.path),
+                );
+                return;
+            }
+            dependency_ids.push(dep_handle.id());
+            dependency_handles.push(dep_handle);
+        }
+        // Stage every labeled value and its dependency set before changing the
+        // real graph or replacing any existing labeled payload. In
+        // particular, a type change at `path#label` must reject the complete
+        // parent revision instead of silently retaining the old typed handle.
+        let mut staged_labels = Vec::with_capacity(labeled.len());
+        let mut label_paths = BTreeSet::new();
+        for sub in labeled {
+            let sub_path = path.clone().with_label(sub.label.clone());
+            if !label_paths.insert(sub_path.clone()) {
+                self.fail(id, &path, "loader emitted a duplicate labeled asset");
+                return;
+            }
+            let handle = if let Some(existing) = self
+                .interned
+                .get(&sub_path)
+                .and_then(UntypedWeakHandle::upgrade)
+            {
+                if existing.id().type_id() != sub.type_id {
+                    self.fail(
+                        id,
+                        &path,
+                        alloc::format!("labeled asset type changed at {} during reload", sub_path),
+                    );
+                    return;
+                }
+                existing
+            } else {
+                self.stores.register_erased(sub.type_id, sub.make_store);
+                let Some(handle) = self.stores.reserve_by_type(sub.type_id) else {
+                    self.fail(id, &path, "labeled asset arena unavailable");
+                    return;
+                };
+                self.interned.insert(sub_path.clone(), handle.downgrade());
+                self.catalog.insert(
+                    StableGuid::from_path(&sub_path.to_string()),
+                    sub_path.clone(),
+                );
+                handle
+            };
+
+            let mut label_dependencies = Vec::new();
+            let mut label_dependency_ids = Vec::new();
+            for dep in sub.dependencies {
+                let Some(dep_handle) = self.load_path(dep.path.clone(), dep.expected_type) else {
+                    self.fail(
+                        id,
+                        &path,
+                        alloc::format!("labeled dependency could not be resolved: {}", dep.path),
+                    );
+                    return;
+                };
+                if self.stores.load_state(dep_handle.id()).is_failed() {
+                    self.fail(
+                        id,
+                        &path,
+                        alloc::format!("labeled dependency failed to load: {}", dep.path),
+                    );
+                    return;
+                }
+                label_dependency_ids.push(dep_handle.id());
+                label_dependencies.push(dep_handle);
+            }
+            staged_labels.push(StagedLabeledAsset {
+                path: sub_path,
+                id: handle.id(),
+                value: sub.value,
+                dependencies: label_dependencies,
+                handle,
+            });
+        }
+
+        // Nested dependency loads may have extended the live graph while the
+        // values above were being decoded. Clone only now, then apply the
+        // complete candidate revision to that latest graph snapshot.
+        let mut candidate_graph = self.graph.clone();
+        match candidate_graph.replace_dependencies(id, dependency_ids.clone()) {
+            Ok(()) => retained.extend(dependency_handles),
+            Err(DependencyError::Cycle { participants }) if had_ready_value => {
+                self.fail(
+                    id,
+                    &path,
+                    alloc::format!(
+                        "dependency cycle rejected during reload assembly ({} asset(s))",
+                        participants.len()
+                    ),
+                );
+                return;
+            }
+            Err(DependencyError::Cycle { .. }) => {
+                // Initial loads tolerate a cycle by dropping offending edges;
+                // reloads above reject the new revision transactionally.
+                for (dependency_id, dependency_handle) in
+                    dependency_ids.iter().copied().zip(dependency_handles)
+                {
+                    if candidate_graph
+                        .try_add_dependency(id, dependency_id)
+                        .is_ok()
+                    {
+                        retained.push(dependency_handle);
+                    }
                 }
             }
+        }
+        for staged in &staged_labels {
+            if let Err(DependencyError::Cycle { participants }) = candidate_graph
+                .replace_dependencies(staged.id, staged.dependencies.iter().map(UntypedHandle::id))
+            {
+                self.fail(
+                    id,
+                    &path,
+                    alloc::format!(
+                        "labeled asset dependency cycle rejected ({} asset(s))",
+                        participants.len()
+                    ),
+                );
+                return;
+            }
+        }
+
+        // All graph changes are now known to be valid. Publish the graph as a
+        // single revision, then fulfill the staged values. The type checks
+        // above make fulfillment infallible for well-formed loaders.
+        self.graph = candidate_graph;
+        for staged in staged_labels {
+            if self.stores.fulfill_erased(staged.id, staged.value).is_err() {
+                self.fail(
+                    staged.id,
+                    &staged.path,
+                    "staged labeled asset type mismatch",
+                );
+                self.fail(id, &path, "staged labeled asset could not be committed");
+                return;
+            }
+            let _ = self.graph.set_self_state(staged.id, LoadState::Loaded);
+            retained.extend(staged.dependencies);
+            retained.push(staged.handle);
         }
 
         match self.stores.fulfill_erased(id, value) {
@@ -426,92 +731,17 @@ impl AssetServerInner {
         }
     }
 
-    /// Interns one labeled sub-asset under `parent#label`, registering its arena
-    /// lazily (the sub-asset's concrete type may have no standalone loader),
-    /// inserting the decoded value, wiring the graph, and resolving the
-    /// sub-asset's own declared dependencies into `retained`. Returns the strong
-    /// handle for the parent to retain, or `None` if routing the value failed
-    /// (a diagnostic is recorded in that case).
-    fn intern_labeled(
-        &mut self,
-        parent: &AssetPath,
-        sub: ErasedLoadedAsset,
-        retained: &mut Vec<UntypedHandle>,
-    ) -> Option<UntypedHandle> {
-        let ErasedLoadedAsset {
-            type_id,
-            value,
-            dependencies,
-            label,
-            make_store,
-        } = sub;
-        let sub_path = parent.clone().with_label(label);
-
-        // On reload the sub-path may already be interned: overwrite in place.
-        let handle = if let Some(existing) = self
-            .interned
-            .get(&sub_path)
-            .and_then(UntypedWeakHandle::upgrade)
-        {
-            let sid = existing.id();
-            match self.stores.fulfill_erased(sid, value) {
-                Ok(_) => existing,
-                Err(err) => {
-                    self.fail(sid, &sub_path, err.to_string());
-                    return None;
-                }
-            }
-        } else {
-            self.stores.register_erased(type_id, make_store);
-            let handle = match self.stores.insert_erased(type_id, value) {
-                Ok(handle) => handle,
-                Err(err) => {
-                    let eid = self
-                        .errors
-                        .record(AssetError::new(sub_path.path(), err.to_string()));
-                    let _ = eid;
-                    return None;
-                }
-            };
-            self.interned.insert(sub_path.clone(), handle.downgrade());
-            self.catalog.insert(
-                StableGuid::from_path(&sub_path.to_string()),
-                sub_path.clone(),
-            );
-            handle
-        };
-
-        let sid = handle.id();
-        self.graph.add_asset(sid);
-        let _ = self.graph.set_self_state(sid, LoadState::Loaded);
-
-        // Wire the sub-asset's own dependencies; the parent retains them.
-        for dep in dependencies {
-            if let Some(dep_handle) = self.load_path(dep.path.clone(), dep.expected_type) {
-                match self.graph.try_add_dependency(sid, dep_handle.id()) {
-                    Ok(()) => retained.push(dep_handle),
-                    Err(DependencyError::Cycle { participants }) => {
-                        let eid = self.errors.record(AssetError::new(
-                            sub_path.path(),
-                            alloc::format!(
-                                "sub-asset dependency cycle rejected ({} asset(s)): {}",
-                                participants.len(),
-                                dep.path
-                            ),
-                        ));
-                        let _ = eid;
-                    }
-                }
-            }
-        }
-
-        Some(handle)
-    }
-
     /// Records an [`AssetError`] and transitions `id` to
     /// [`LoadState::Failed`].
     fn fail(&mut self, id: UntypedAssetId, path: &AssetPath, reason: impl Into<String>) {
         let eid = self.errors.record(AssetError::new(path.path(), reason));
+        // A failed reload must not destroy the last known-good payload. The
+        // graph was marked Loading before reassembly, but the storage slot is
+        // still Ready until a successful fulfill replaces it.
+        if matches!(self.stores.load_state(id), LoadState::Loaded) {
+            let _ = self.graph.set_self_state(id, LoadState::Loaded);
+            return;
+        }
         self.stores.fail_erased(id, eid);
         let _ = self.graph.set_self_state(id, LoadState::Failed(eid));
     }

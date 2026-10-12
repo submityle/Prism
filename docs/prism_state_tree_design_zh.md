@@ -877,7 +877,7 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 - 确定性语义快照编码、针对 plan 的配置/history 校验、容量受限队列恢复；恢复错误不改变实例状态，且保留已安装 guards。
 - Parallel Deep History 恢复会跳过默认 region 初始化，避免历史子状态与默认子状态叠加；微步预算错误不返回部分 `StepReport`，调用者应检查队列与日志后重试。
 
-当前证据：实现同步时 `cargo test -p prism_state_tree_core --offline -- --test-threads=1` 为 **24 tests + 0 doctest 全绿**。迁移/历史热路径目前使用临时 `Vec` 且日志无界增长，零分配仍是尚未满足的设计目标；完整 SCXML 一致性套件和分配计数基准也尚未交付。
+当前证据：实现同步时 `cargo test -p prism_state_tree_core --offline -- --test-threads=1` 为 **26 tests + 0 doctest 全绿**；`prism_state_tree_ecs` 的集成单测为 **4 tests + 0 doctest 全绿**。迁移/历史热路径目前使用临时 `Vec` 且日志无界增长，零分配仍是尚未满足的设计目标；完整 SCXML 一致性套件和分配计数基准也尚未交付。
 
 ST1 最小装配切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句柄、持有独立且长期存活 core cursor 的 `StateTreeInstance` ECS 组件、经 `CommandQueue` deferred spawn 的 `queue_spawn`，以及显式逐实体 `tick_entity` / `step` 和有界事件请求 API。core `Guard` 已增加 `Send + Sync` 约束，允许运行时组件满足 ECS 线程安全边界；集成测试验证 spawn 应用后初始进入，再请求事件并在后续 tick 切换状态。该 crate 保持 `no_std + alloc`。
 

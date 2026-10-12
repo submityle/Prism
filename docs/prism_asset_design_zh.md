@@ -14,6 +14,19 @@
 - 关键依赖： `prism_utils`（稳定哈希/句柄位打包/小容器）、`prism_tasks`（异步作业图/优先级/背压）、`prism_reflect`（导入设置/元数据序列化）、`prism_diagnostic`（计数器/trace）、可选 `prism_gdeflate_gpu`（GPU 解压）
 - 层级定位： 内容层 L5；上接场景/渲染/音频/动画/UI，下接 `prism_tasks`/`prism_vfs`/平台 I/O
 - 明确约束： 身份/存储/依赖/句柄核 `no_std + alloc`；`std`/`async_io`/`hot_reload`/`process`/`pack`/`gpu_stream`/`retain_cache` 为 feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**
+- 烘焙/打包归属： 离线烘焙、缓存键、DDC/CAS、Revision、打包与 Patch 的唯一持有者是 `Prism Asset Build`（`docs/prism_asset_build_design_zh.md` §2.7/§4.6/§10/§14）；本 crate 只提供运行时消费契约（§13）与进程内重烘适配。派生数据分类与登记见 `docs/prism_derived_data_contract_zh.md`
+
+### 实施状态（2026-10-13）
+
+以下状态只记录仓库中已存在、可运行并有测试覆盖的能力，不把设计文字当作实现：
+
+- **已完成**：`prism_asset` M0/M1 核（稳定身份、句柄、代际存储、依赖图、加载状态、错误注册、loader 选择与同步 `AssetServer`/VFS）；`prism_asset_container` 的 v1 原始 payload 容器读写、严格 ToC/哈希校验、范围读取与优先级 overlay。
+- **部分完成**：M2 已有同步装配之上的 bounded scheduler facade；它能做线程池投递、同路径合并、优先级提升、容量背压、消费者取消、waiter 生命周期清理和完成通知竞态防护，并有并发测试，但底层 `AssetServer` 仍由单 mutex 串行，尚不是设计中的 EDL/I/O-CPU 分离调度。
+- **部分完成**：Asset Build 已有确定性串行 `BuildGraph`/`Processor`、ArtifactKey、BLAKE3 CAS、持久化本地 DDC 描述符索引、本地 manifest revision 与进程内事务发布；`BuildExecutor` 已把图执行、DDC/CAS 校验和、缓存损坏重建及事务发布接成单机串行核心闭环，但仍缺完整 Recipe/Importer 主链、并行调度、跨进程 DDC 写入协调、远程 CAS、CLI 和真实纹理垂直链。
+- **部分完成**：M5 容器已有 v1 raw reader/writer、严格 ToC/哈希校验、范围读取、overlay、Runtime Manifest 路由索引、实现 `AssetReader` 的 `ManifestAssetReader`，以及 ChunkPlanner 驱动的 v2 raw 物理布局读写；仍未接入 `AssetServer` 的异步 EDL/I/O-CPU 调度，也没有 Cook/发行闭环。
+- **未完成**：M3 已有文件 watcher/去抖事件模型、可由调用方驱动的 `AssetServer::apply_change_batch` 接线、依赖闭包重装配计划、失败依赖门禁及 labeled 子资产候选图校验；但 watcher 尚无自动后台消费循环，重载仍在同步 server 锁内执行，失败 staging 的 provisional ID/catalog 回滚也未闭环。M4 预算驱动流送、压缩/加密容器、DirectStorage 形态队列和完整 GPU 解压仍未实现（`prism_gdeflate_gpu` 仍有 CPU Huffman fallback）；M5/M6 的 BakeService、ECS/渲染/编辑器集成、发行闭包/patch/DLC、签名与 Provenance 仍未完成。
+
+因此本文下方路线图仍是目标规格；任何“已支持”表述均以上述实现状态和对应测试为准。
 
 ---
 
@@ -90,7 +103,7 @@
 | **核（Core）** | 默认 `no_std+alloc` | 身份 / 句柄 / 代际存储 / 依赖图 / 加载状态 / 事件 | 服务器、工具、确定性测试 |
 | **标准 I/O** | `std` + `async_io` | VFS 文件读、`AssetServer`、异步加载作业图、loader 注册 | 开发期桌面运行 |
 | **热重载** | `hot_reload` | 文件系统 watch + 依赖失效传播 + 重装配 | 编辑器 / 快速迭代 |
-| **处理** | `process` | 导入设置（单文件资产包内嵌）+ 内容哈希缓存 + 离线烘焙 | 内容流水线 / CI |
+| **处理** | `process` | 资产包读取契约（导入设置内嵌）+ 进程内重烘适配（离线烘焙/缓存键/DDC 见 `prism_asset_build_design_zh.md`） | 编辑器预览 / 运行时局部重烘 |
 | **打包** | `pack` | 容器化分块 I/O（pak/IoStore 形态）+ 压缩 + 挂载优先级 | 发行包 |
 | **GPU 流送** | `gpu_stream`（+ `prism_gdeflate_gpu`） | DirectStorage 形态批量队列 + GPU 解压直灌 | 主机/高端 PC |
 
@@ -600,7 +613,7 @@ NVMe ──(批量队列, DirectStorage 形态)──▶ 显存暂存 ──(GPU
 ```
 
 - **批量队列**：成百上千小请求（mip/page）打包提交，摊薄每请求开销；完成走 fence/回调驱动 §9.3 作业图。
-- **GPU 解压**：压缩 blob 直灌显存暂存区，`prism_gdeflate_gpu` 的计算着色器就地解压，CPU 不碰资产字节。
+- **GPU 解压（目标规格，尚未完整实现）**：目标是压缩 blob 直灌显存暂存区并由计算着色器解压。当前 `prism_gdeflate_gpu` 的通用路径只 GPU 去交错、CPU 执行 Huffman inflate；另有 stored-block 专用 GPU fast path，仍由 CPU 解析 raw-DEFLATE block 边界，且 fixed/dynamic Huffman 块拒绝进入该路径。
 - **优雅降级**：平台无 DirectStorage/无 GPU 解压则回退 CPU 路径（`async_io` + CPU zstd/gdeflate），上层无感——档位铁律（§3）。
 
 ### 11.3 与渲染驻留的边界
@@ -656,15 +669,17 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 
 ---
 
-## 13. 离线烘焙 / 导入 / 打包管线
+## 13. 资产包与制品消费契约
 
-`feature = "process"`（烘焙）+ `pack`（打包）。把「源资产」变成「平台最优的运行时资产」，对标 Unreal cook + Unity import/Addressables build。
+> **归属声明**：离线烘焙、缓存键、DDC/CAS、Revision、打包与 Patch 的唯一持有者是 `Prism Asset Build`（`docs/prism_asset_build_design_zh.md` §2.7/§4.6/§10/§14）。本节只定义 `prism_asset` 侧的**消费契约**：读取编辑态资产包（§13.1）、适配进程内重烘（§13.2）、运行时容器与挂载（§13.3）；缓存键与 DDC 分层已收敛（§13.4）。
+
+`feature = "process"`（资产包与制品消费 + 进程内重烘适配）+ `pack`（运行时容器挂载）。「源资产 → 平台最优的运行时资产」的**生产**在 Asset Build，本 crate 负责**消费**与**挂载**，对标 Unreal cook 之后的运行时 IoStore 侧。
 
 ### 13.1 单文件资产包（UE 形态：一个资产一个文件，无旁车）
 
 采用 **UE 的「单文件资产包」模型**：编辑器里每个资产就是**一个自包含文件**（`.prism` 资产包），导入设置、身份、源引用、可编辑载荷全部**内嵌在同一个文件里**——没有 `.meta` 旁车，没有散落的隐藏清单。目录里「一个文件 = 一个资产」，所见即所有。这是对标 Unreal 的 `.uasset`/`.umap`：把原始源文件（psd/fbx/wav）**导入**成引擎自己的资产包后，包就是资产的唯一真相。
 
-**资产包的内嵌布局（单文件自描述）：**
+**资产包内嵌布局（非规范摘录；权威定义见 `docs/prism_asset_build_design_zh.md` §5.2，两处若有冲突以该文为准）：**
 
 ```
 ┌─ Header ──────────────────────────────────────────────┐
@@ -689,46 +704,38 @@ NotResident ─▶ Promoting(目标层级,后台解码中) ─▶ Resident(level
 
 **④ 编辑态与运行态分离（和 UE 一致）。** `.prism` 资产包是**编辑/作者态**的单位，**不随游戏发行**；打包（§13.3）把资产包闭包 cook 成运行时容器 `.ucas`（§10.3/§10.5，ToC + 压缩分块，无逐文件开销）。即「编辑期一资产一文件、运行期合并进容器」——两头各取所需。
 
-> 诚实权衡：单文件是**二进制自包含**，不可逐行 diff，合并冲突按**整资产粒度**解决（UE 同款局限）。缓解：① 资产级独占签出/锁（内容索引记锁位），团队按资产而非按行协作；② 序列化**确定性**（§13.4：字段定序、无时间戳/无不定并行序）——同编辑产同字节，减少伪冲突；③ 可选把纯参数型小资产导出为文本旁视图供 review，真相仍以包为准。相比旁车/中心清单，单文件换来的是**目录干净 + 身份稳健 + 读写原子**，这正是你要的 UE 手感。
+> 诚实权衡：单文件是**二进制自包含**，不可逐行 diff，合并冲突按**整资产粒度**解决（UE 同款局限）。缓解：① 资产级独占签出/锁（内容索引记锁位），团队按资产而非按行协作；② 序列化**确定性**（纪律见 `prism_asset_build_design_zh.md` §18.1：字段定序、无时间戳/无不定并行序）——同编辑产同字节，减少伪冲突；③ 可选把纯参数型小资产导出为文本旁视图供 review，真相仍以包为准。相比旁车/中心清单，单文件换来的是**目录干净 + 身份稳健 + 读写原子**，这正是你要的 UE 手感。
 
-### 13.2 处理器与内容哈希缓存
+### 13.2 进程内重烘适配（`BakeService`）
 
-```rust
-pub trait AssetProcessor: Send + Sync {
-    type Settings: Default;
-    async fn process(&self, input: &mut dyn AssetReader, settings: &Self::Settings,
-                     out: &mut ProcessOutput) -> Result<(), ProcessError>;
-}
-```
+离线烘焙的处理器、缓存键与 DDC 归 `Prism Asset Build`（其 `Processor` trait 见该文 §6）。本 crate 只保留**进程内调度适配**，供编辑器实时预览与运行时 dirty 重烘调用同一个 Bake Kernel（`DerivationClass::RuntimeDerived`）：
 
-- **增量**：缓存键 = `hash(源内容) + hash(settings) + 处理器版本`。键命中则跳过（直接复用上次产物）——改一个资产不必重烘全库。对标 Unreal DDC（Derived Data Cache）/ Bazel 内容寻址，但以 `StableGuid`+内容哈希自建，不绑外部系统。
-- **确定性**：同输入同设置同版本 → 逐字节相同产物（便于 CI 缓存共享、便于「双跑一致」回归）。处理器须声明版本号，逻辑变更即 bump，自动失效旧缓存。
-- **产物身份**：烘焙产物 `StableGuid` 由内容哈希派生 → 相同产物自动去重（两材质引用同一处理后纹理，容器里只存一份）。
+- **同一内核**：适配层不做任何格式解析或算法实现，只负责把场景/资产 IR 喂给 `prism_bake_*` 内核（Asset Build §6.6），并把产物装入本地 runtime cache。
+- **不写 DDC/CAS**：`RuntimeDerived` 产物不进内容寻址存储、不进 Manifest；仅可持久化为本地可弃缓存。
+- **失效驱动**：编辑器内重烘的失效由场景 Revision / 资产 `Modified` / `Unused` 等事件驱动（§14.1、§12），不复制 Asset Build 的 `ArtifactKey`。
+- **确定性**：仍受 `prism_asset_build_design_zh.md` §18.1 纪律约束；同一输入下进程内重烘与离线烘焙必须产出一致（声明为 `Deterministic-not-byte` 者按其容差，见 `docs/prism_derived_data_contract_zh.md`）。
+- **归属边界**：`BakeService` 不持有编译期插件、不写发布目录、不改 Registry；它只决定“由谁调度、产物放哪”。
 
-### 13.3 打包
+### 13.3 运行时容器与挂载
 
-- 扫描「发行所需资产闭包」（从入口场景/清单经依赖图求传递闭包，剔除仅编辑期资产）。
-- 按**分组/chunk 策略**（对标 Addressables groups）切成多个容器：基础包、按关卡/区域、按 DLC。
-- 产出 §10.3 容器（ToC + 压缩分块 blob）+ 内容目录（`StableGuid → ChunkId → 容器`），运行时据目录定位。
-- 支持 patch 包（增量容器 + 高优先级挂载覆盖），不重发全量。
+**生产侧（发行闭包扫描、chunk 规划、容器与 patch 产出）归 `Prism Asset Build`**（`docs/prism_asset_build_design_zh.md` §14）；本 crate 的 `pack` 档只负责**运行时侧**读取同一容器格式：
+
+- 发行闭包扫描、分组与 chunk 规划：Asset Build §14.1–§14.4。
+- 容器格式（ToC + 压缩分块 blob）与 patch/DLC：Asset Build §14.3/§14.5。
+- 本 crate 侧：按内容目录（`StableGuid → ChunkId → 容器`）定位、挂载优先级（§10.4）、按段异步读取（§10.3/§10.5）、解压与 GPU 直通（§11.2）。
 
 ---
 
-### 13.4 派生数据缓存（DDC）与确定性纪律
+### 13.4 派生数据缓存（DDC）——已收敛至 Asset Build
 
-增量烘焙（§13.2）要在**团队与 CI 间共享**才有 AAA 价值——一人烘过，全队命中。借鉴 UE DDC2 / Bazel 远程缓存的内容寻址思想：
+本 crate **不再定义**缓存键与 DDC 分层。此前本节自建的三级 DDC（本地内存 → 本地磁盘 → 共享远程）与 §13.2 的缓存键定义，与 `Prism Asset Build` §10 的 `ArtifactKey → DDC → CAS` 及 L0–L3 分层缓存重复，构成两套互不相认的缓存协议，是本轮收敛的对象：
 
-- **三级缓存**：本地内存 → 本地磁盘（`~/.prism/ddc`）→ 共享远程（CI/团队 CDN，只读或读写）。缓存键 = `blake3(源内容 ⊕ settings 规范化 ⊕ 处理器版本 ⊕ 目标平台)`，键即内容地址，产物按键寻址存取。
-- **拉取而非重算**：命中远程即下载产物，miss 才本地烘焙并回写——改一个资产、换一个平台，大多数产物直接命中，CI 烘焙从「全量数小时」降到「增量数分钟」。
-- **确定性纪律（硬约束）**：处理器 `process` 必须是纯函数——
-  - 禁时间戳/随机数/未排序并行序/绝对路径/浮点非确定（指定舍入、禁 FMA 差异）混入产物；
-  - 需随机则用**内容派生种子**（`hash(input)`），保证同输入同输出；
-  - 并行处理结果须**排序归并**后写出，消除线程完成序影响。
-- **版本门控**：每处理器声明 `PROCESSOR_VERSION`，逻辑变更必 bump → 自动失效旧键，不会误用过期产物。
-- **双跑对拍**：CI 对关键资产**跑两次比对逐字节**(§25)，任何不一致即判「处理器非确定」失败——把确定性退化挡在合入前。
-- **产物去重**：产物身份由内容哈希派生（§5.2），两资产烘出相同产物自动共享一份（容器只存一份，ChunkId 相同）。
+- **键与分层**：唯一真相为 `docs/prism_asset_build_design_zh.md` §10（CAS/DDC 职责分离、分层缓存、负缓存、GC、性能设计）。
+- **确定性纪律**：唯一真相为 `docs/prism_asset_build_design_zh.md` §18.1；本 crate 若实现任何处理器逻辑，必须服从同一纪律，并以同一双跑对拍验收。
+- **运行时只消费**：本 crate 通过 Asset Build 产出的 Runtime Manifest 解析制品（`prism_asset_build_design_zh.md` §15.1），不参与键计算。
+- **保留的本地缓存**：`retain_cache` 档的驻留/内存缓存（§7、§11.4）与 DDC 不是一回事——前者是运行时驻留策略，不跨机构共享，随进程生命周期回收，不属于本节收敛范围。
 
-> 收益：确定性 + 内容寻址 = 增量 + 可共享 + 可去重 + 可回归，四者同根。这是 AAA 内容管线「几万资产、几十人协作、每日构建」能转起来的地基。
+> 收益不变、契约唯一：内容寻址 + 确定性 = 增量 + 可共享 + 可去重 + 可回归。这四者由 Asset Build 的键协议一次给出，而不是两处各写一半。
 
 ---
 
@@ -771,7 +778,7 @@ pub enum AssetEvent<A: ?Sized> {
 ## 16. 确定性保证
 
 - **拓扑序确定**：有序容器 + 最小就绪 id 选择，双跑一致（网络/回归基石）。
-- **烘焙确定**：同输入逐字节同产物（§13.2），CI 可共享缓存。
+- **烘焙确定**：同输入逐字节同产物——纪律与实现归 `prism_asset_build_design_zh.md` §18.1；本 crate 不定义缓存键（§13）。
 - **身份确定**：`StableGuid` 由规范化路径/内容哈希派生，跨构建/平台一致。
 - **回收点确定**：延迟回收集中在 `collect_releases`，不受 drop 时序/线程调度影响最终可见状态。
 
@@ -901,16 +908,16 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 - **M2 加载管线（`std`+`async_io`）**：`AssetServer`（path↔guid↔index interning + load 去重）、`AssetLoader` trait + `LoadContext`（子资产/依赖）、`LoadScheduler` EDL 作业图（跑 `prism_tasks`）、`AssetSource`/`AssetReader`（`FsSource`/`MemSource`）、优先级 + 背压。
 - **M3 热重载（`hot_reload`）**：`watch` + 去抖、失效反向传播、后台重装配 + 原子 swap + `Modified`、依赖结构变更处理。
 - **M4 流送（`gpu_stream` 可选）**：`StreamingManager` 预算驱动 mip/LOD 驻留 + 请求打分 + 滞回 + 预取；`read_range` bulk 流送；DirectStorage 形态队列 + GDeflate GPU 解压（`prism_gdeflate_gpu`）+ CPU 回退。
-- **M5 烘焙/打包（`process`+`pack`）**：单文件资产包（内嵌导入设置）、`AssetProcessor` + 内容哈希缓存（增量+确定）、`ContainerIo`（ToC+压缩分块）+ 挂载优先级 + 内容目录、依赖闭包打包 + 分组 + patch 包。
-- **M6 集成**：ECS 资源/事件接线、渲染驻留事件桥、`prism_scene` 软引用实例化、编辑器/脚本经 `prism_reflect` 暴露、`prism_asset_import`/`prism_asset_bake` 对接。
+- **M5 资产包消费与容器挂载（`process`+`pack`）**：单文件资产包读取契约（内嵌导入设置，布局权威定义见 Asset Build §5.2）、`BakeService` 进程内重烘适配、`ContainerIo`（ToC+压缩分块）+ 挂载优先级 + 内容目录；当前已有 raw 容器/Manifest/overlay、独立确定性 ChunkPlanner 及其驱动的 v2 raw 物理布局，但尚未接入完整 Cook/发行闭包、分组与 patch 生产链，后者归 Asset Build §14。
+- **M6 集成**：ECS 资源/事件接线、渲染驻留事件桥、`prism_scene` 软引用实例化、编辑器/脚本经 `prism_reflect` 暴露、`prism_asset_import` 与 Asset Build 制品（`prism_asset_build_*`/`prism_bake_*`）对接。
 
-**基准即规格**：每里程碑以基准验收——M2 加载吞吐与加载墙、M3 热重载往返时延、M4 流送换入延迟/命中率/无卡顿、M5 增量烘焙耗时与打包体积/读放大。核心价值在 **M2（异步装配）+ M4（流送）+ M5（烘焙打包）**。
+**基准即规格**：每里程碑以基准验收——M2 加载吞吐与加载墙、M3 热重载往返时延、M4 流送换入延迟/命中率/无卡顿、M5 容器挂载开销与读放大（增量烘焙耗时与打包体积属 Asset Build 基准）。核心价值在 **M2（异步装配）+ M4（流送）+ M5（资产包消费与挂载）**。
 
 ---
 
 ## 22. 诚实边界与风险
 
-- **现状**：仅 M0 内核落地（身份/存储/依赖/事件/加载态，单测绿、`no_std`、无 `unsafe`）。M1–M6 为本文蓝图，**尚未实现**；本文是重构方向而非既成事实。
+- **现状**：M0/M1 核与同步 AssetServer/VFS 已落地并有单测；构建核心有 CAS/ArtifactKey/Revision、串行 BuildGraph/Processor、本地 DDC 描述符索引和独立质量门禁；容器 v1 有 Runtime Manifest 路由读取、`AssetReader` 适配、overlay，且 ChunkPlanner 已接入 v2 raw 物理布局；有界异步调度 facade 已覆盖容量、去重、取消和通知竞态，AssetServer 已提供 watcher 批次应用入口（不是自动后台 watcher）。M2 仍非 EDL 完整实现；M3–M6（自动 watcher 热重载闭环、流送/GPU 完整解压、BakeService、ECS/渲染/编辑器集成和发行生产链）仍未完成。本文是实施规格而非对未交付能力的宣称。
 - **高风险项**：
   1. **StableGuid 冻结（M1/M5）**：派生规则一旦发行即不可变，变则旧存档/容器目录失效。须早定早冻、哈希算法与规范化规则定死并测「跨构建一致」。
   2. **异步装配正确性（M2）**：EDL 作业图 + 依赖增量就绪的竞态（并发 load 去重、依赖边并发更新、失败半装配回滚）是最易出错处，须压测并发加载 + 乱序完成。
@@ -918,7 +925,7 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
   4. **GPU 直通可移植（M4）**：DirectStorage/GDeflate 平台差异大，CPU 回退路径必须始终可用且经测，不能让「高端路径」成为唯一路径。
   5. **烘焙确定性（M5）**：处理器非确定（浮点/并行序/时间戳混入）会毁掉增量缓存与 CI 共享；须纪律性地禁非确定输入并双跑对拍。
   6. **热重载依赖结构变更（M3）**：重装配后依赖集变化的增量图更新 + 环重检测，边界多，须覆盖「新增/删除依赖、变环」用例。
-- **与既有文档关系**：本 crate 是渲染（网格/纹理/材质/着色器驻留）、音频、`prism_scene`、动画、UI 的内容基座；软引用/依赖闭包就绪/热重载 `Modified` 的契约须与这些消费方一致。身份/存储核已对齐 `prism_engine_component_gap_zh.md` §3.3 的 `prism_asset` 定位（句柄/异步加载/依赖图/热重载/引用计数/生命周期），导入/烘焙按该文拆 `prism_asset_import`/`prism_asset_bake`。
+- **与既有文档关系**：本 crate 是渲染（网格/纹理/材质/着色器驻留）、音频、`prism_scene`、动画、UI 的内容基座；软引用/依赖闭包就绪/热重载 `Modified` 的契约须与这些消费方一致。身份/存储核已对齐 `prism_engine_component_gap_zh.md` §3.3 的 `prism_asset` 定位（句柄/异步加载/依赖图/热重载/引用计数/生命周期）；导入器按该文拆 `prism_asset_import`，**离线烘焙不再拆为 `prism_asset_bake`**——算法内核为 `prism_bake_*`，DAG/键/DDC/CAS/打包归 `Prism Asset Build`（`prism_asset_build_design_zh.md` §2.7/§4.6），本 crate 只消费其制品。
 - 所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。本文无任何 AI/ML 内容。
 
 ---
@@ -982,7 +989,7 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 
 - **单元/属性测试**：身份往返（`path↔guid↔index`）、代际失效、依赖图拓扑/环检测、递归状态折叠。用属性测试（`proptest` 形态）对「随机依赖图 → 拓扑序合法 + 环必被检出」做大样本覆盖。
 - **并发交错（loom）**:§9.4 调度内核的关键交错——并发 `load` 去重、乱序完成、取消/完成竞争、`ReleaseQueue` MPSC、epoch 失配丢弃——用 `loom` 穷举小规模交错，把「只在特定线程时序出现」的竞态挡在合入前。
-- **确定性双跑**：烘焙对关键资产跑两次比对逐字节（§13.4）；拓扑序双跑对拍（§16）。任何不一致即判非确定失败。
+- **确定性双跑**：烘焙对关键资产跑两次比对逐字节——纪律与流程唯一真相为 `prism_asset_build_design_zh.md` §18.1，逐项登记见 `docs/prism_derived_data_contract_zh.md`；拓扑序双跑对拍（§16）。任何不一致即判非确定失败。
 - **模糊测试（fuzz）**：对容器 ToC 解析、`read_range` 边界、解压入口喂**畸形/截断/恶意**字节（§23.7），断言「只返 `AssetErrorId`，绝不 panic/OOM/越界/解压炸弹」。CI 常驻 fuzz 语料库 + 崩溃回归。
 - **耐久/浸泡（soak）**：长时间随机 load/drop/stream in-out，监控内存不泄漏、碎片不膨胀（§7.4）、句柄计数守恒、无悬垂。模拟开放世界来回穿梭的流送抖动。
 - **故障注入**:I/O 失败/超时、依赖缺失、半截字节、磁盘满、远程 404，断言失败路径走兜底（§23.3）+ 诊断（§15），不崩运行时。

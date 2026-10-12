@@ -121,7 +121,10 @@ pub trait AssetReader: Send + Sync {
         if end > size {
             return Err(ReadError::OutOfRange { offset, len, size });
         }
-        Ok(bytes[offset as usize..end as usize].to_vec())
+        let start =
+            usize::try_from(offset).map_err(|_| ReadError::OutOfRange { offset, len, size })?;
+        let end = usize::try_from(end).map_err(|_| ReadError::OutOfRange { offset, len, size })?;
+        Ok(bytes[start..end].to_vec())
     }
 
     /// Returns metadata for `path`.
@@ -324,6 +327,19 @@ impl FsSource {
         let mut full = self.root.clone();
         for seg in clean.split('/').filter(|s| !s.is_empty()) {
             full.push(seg);
+            // A lexical `..` check is not sufficient: a symlink below the
+            // mount root could redirect a seemingly-safe relative path outside
+            // the root. Reject symlink components before the eventual open or
+            // metadata operation. Missing components are left for the caller's
+            // normal NotFound handling.
+            match std::fs::symlink_metadata(&full) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(ReadError::InvalidPath);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => return Err(Self::map_io(&error)),
+            }
         }
         // Defense in depth: ensure no symlink/`.` trickery re-introduced a
         // parent escape in the composed path.
@@ -359,9 +375,11 @@ impl AssetReader for FsSource {
         if end > size {
             return Err(ReadError::OutOfRange { offset, len, size });
         }
+        let buffer_len =
+            usize::try_from(len).map_err(|_| ReadError::OutOfRange { offset, len, size })?;
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| Self::map_io(&e))?;
-        let mut buf = alloc::vec![0u8; len as usize];
+        let mut buf = alloc::vec![0u8; buffer_len];
         file.read_exact(&mut buf).map_err(|e| Self::map_io(&e))?;
         Ok(buf)
     }

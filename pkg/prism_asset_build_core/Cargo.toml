@@ -1,0 +1,18 @@
+[package]
+name = "prism_asset_build_core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Deterministic asset-build protocol primitives, local CAS, and atomic manifest publication."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+blake3 = "1.8"
+prism_asset = { path = "../prism_asset" }
+prism_asset_container = { path = "../prism_asset_container" }
+rustix = { version = "1.1.5", features = ["fs"] }
+tempfile = "3.27"
+
+[lints]
+workspace = true

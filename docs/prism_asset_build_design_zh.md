@@ -8,7 +8,20 @@
 - 目标：顶级次世代 AAA 内容规模，同时兼顾中小项目的渐进采用
 - 核心取向：效果不被工具链限制、离线换运行时性能、增量优先、确定性优先、可诊断优先
 - 参考形态：Unreal Asset Registry / Cook / DDC / IoStore、Unity Importer / Addressables、Bazel/Nix 内容寻址、DirectStorage/GDeflate、现代虚拟纹理与虚拟几何流水线
-- 关联文档：`docs/prism_asset_design_zh.md`、`docs/prism_material_pipeline_design_zh.md`、`docs/prism_rendering_architecture_zh.md`、`docs/prism_platform_design_zh.md`
+- 关联文档：`docs/prism_asset_design_zh.md`、`docs/prism_material_pipeline_design_zh.md`、`docs/prism_rendering_architecture_zh.md`、`docs/prism_platform_design_zh.md`、`docs/prism_derived_data_contract_zh.md`（派生数据契约登记表）
+
+## 实施状态（2026-10-12）
+
+当前仓库已交付一个可验证的 M0 垂直切片，但距离本文定义的 AAA 构建系统仍有明确缺口：
+
+- **已完成（核心切片）**：`pkg/prism_asset_build_core` 已实现显式输入的确定性 `ArtifactKey`、内容哈希、BLAKE3 本地 CAS、确定性串行 `BuildGraph`/`Processor` 契约（节点依赖、拓扑、环/缺失依赖诊断、失败传播），以及本地 revision 事务。`BuildExecutor` 将这些组件接成单机串行闭环：按显式 Processor/设置/Profile/工具链/环境/输出契约生成 key，校验 DDC descriptor 与 CAS 字节，缓存损坏时失效并重建，全部节点成功后才发布新 Revision。发布前现验证 Artifact dependency closure（缺失、自依赖、重复边、环）且拒绝重复 AssetId；Unix 上使用安全封装的 advisory file lock 串行化独立 store handle，并在替换 `CURRENT` 前再次核对期望 Revision。
+- **部分完成**：本地 DDC 已提供持久化 `ArtifactKey -> ArtifactDescriptor` 索引、确定性编码/校验和原子文件替换，与 CAS 分离；仍无跨进程 DDC 写协调、DDC 分层/驱逐策略、并行图调度与完整失效分析。发布事务的 Unix 跨进程锁与 CURRENT 目录同步已接入，但 CAS/Manifest 所有目录项持久化、事务日志、启动恢复和崩溃恢复演练仍未完成；非 Unix 发布目前明确 fail-closed，不提供跨进程并发发布。
+- **部分完成**：`pkg/prism_asset_container` 已实现 v1 raw 容器 writer/reader、严格 ToC/范围/哈希校验、overlay、确定性 Runtime Manifest、`ManifestAssetReader`，以及独立确定性 `ChunkPlanner`（硬依赖闭包、环/缺失依赖、对齐、容量和优先级）。`prism_asset_build_core::package_runtime` 已将 Build Manifest/CAS 字节桥接为 Runtime Manifest 与 raw 容器，并将 `ChunkPlanner` 接入实际容器布局（支持 v2 计划布局的写入与严格回读）；但路由 priority 仍固定为 0，压缩/加密/签名、Provenance、Patch/DLC 和发布回滚未实现。v1/v2 alignment 与计划布局的 wire-compatibility/version 策略仍需冻结。
+- **未完成的构建主链**：Source/Importer 插件、IR、完整 Recipe/Processor 规划、字段级失效、并行单机调度、DDC L0–L3、远程 CAS/worker、CLI（plan/import/build/inspect）、双跑确定性门禁、完整崩溃恢复与质量报告。当前 executor 是受显式 ArtifactSpec 驱动的串行核心，不是生产导入/Cook 系统。
+- **未完成的发行链**：构建侧 Runtime Manifest 生产协议仍需稳定化，压缩/加密/签名、Provenance、patch/DLC、平台 profile/能力矩阵及发布回滚仍未完成；当前 ChunkPlanner 到 raw 容器写入的垂直切片已接通，但还不是完整 Cook/发行链。
+- **未完成的 AAA 规模能力**：VT/VG/HLOD/World Partition/长音频分块、遥测回灌、Build Farm、百万资产 Registry、插件隔离/准入和多项目 Artifact 治理。
+
+本文的 M0/M1…路线图是验收目标，不代表这些能力已经存在；只有有代码、测试和运行时对接的切片才可标为完成。
 
 ---
 
@@ -101,6 +114,18 @@ FBX/USD ─ Scene IR ─ Mesh IR ────────┼─ Render Mesh ─ 
 - 策略：纹理质量、LOD 误差、平台格式、包分组、验证严重度。
 
 策略由 Profile 和 Recipe 声明，不散落在处理器的 `if platform == ...` 分支中。
+
+### 2.7 离线制品与进程内派生：一条内核，两种调度
+
+“烘焙”不是一种资产类型，而是把可离线化的计算换成运行时成本。一份派生数据是否进入本系统，由 `DerivationClass`（§4.6）判定，而不是由“它是不是烘焙”判定：
+
+- **离线制品（`OfflineShipped` / `OfflineEditorOnly`）**：输出只由 `源字节 + ImportSettings + Profile/平台 + Schema + 工具链指纹` 决定，可字节复现、可共享 DDC、可进发行包——必须作为本系统的 Recipe/Processor，其 DAG、缓存键、CAS、DDC、Revision、事务与 Provenance 全部由本系统持有。
+- **进程内派生（`RuntimeDerived`）**：输出依赖运行时/会话状态（视点、破坏、编辑脏区），或必须在交互时延内重算——不进 DDC、不进 Manifest，由编辑器/运行时的进程内调度器执行，但必须复用同一 Bake Kernel（§6.6）。
+- **驱动本地缓存（`DriverLocal`）**：键含驱动/GPU/设备信息，非内容寻址，永不进 DDC/Manifest（如 PSO/Pipeline Cache）。
+
+边界两侧共享同一内核与同一确定性纪律（§18.1）：编辑器预览烘焙与发行烘焙必须是同一份算法代码的两种调度，不允许“编辑器专用近似分支”。这是 §2.5 在烘焙场景下的具体化，也是 `prism_asset` 只做消费、`prism_bake_*` 只做算法内核的职责依据。
+
+每一种派生数据都必须在本系统与 `docs/prism_derived_data_contract_zh.md` 登记五元组：输入集合 / 键材料 / 失效触发 / `DerivationClass` / 确定性等级。
 
 ---
 
@@ -267,6 +292,25 @@ FBX/USD/glTF 内部的 Mesh、Skeleton、Animation 等子资产不能只按数�
 - 重导入时输出子资产匹配报告：保留、增加、删除、疑似重命名。
 - 删除仍被引用的子资产时阻断提交，或要求显式重定向。
 
+### 4.6 `DerivationClass`
+
+每一份派生数据（烘焙产物、缓存、代理、预计算场）都必须在 Recipe/Processor 描述符与 `docs/prism_derived_data_contract_zh.md` 中声明其调度与持久化等级：
+
+```rust
+pub enum DerivationClass {
+    /// 离线构建、进发行包、可共享 DDC；必须字节可复现。
+    OfflineShipped,
+    /// 离线构建、仅编辑期消费；可缓存，不随包发行。
+    OfflineEditorOnly,
+    /// 进程内重算（脏区/dirty-set 驱动）；可持久化为本地 cache，不进 DDC/Manifest。
+    RuntimeDerived,
+    /// 键含驱动/GPU/设备，非内容寻址；永不进 DDC/Manifest。
+    DriverLocal,
+}
+```
+
+判定顺序即 §2.7 的三条：纯函数性 → 是否值得发行/共享 → 时延容忍。任一不满足就不得标记为 `OfflineShipped`；误标会让非确定或会话相关的产物污染共享 DDC，是 §1.3 确定性与 §26 可靠性风险的直接来源。
+
 ---
 
 ## 5. Source、Editable Asset 与中间表示
@@ -402,6 +446,16 @@ begin_output
 3. **Remote worker**：高成本烘焙或 Build Farm；只接触声明的输入 Blob。
 
 第三方格式解析默认建议 Worker Process，避免恶意/损坏资产破坏编辑器主进程。插件必须声明许可证、工具链指纹、目标架构与可用平台。
+
+### 6.6 Bake Kernel 与两种调度
+
+算法与调度分离，是“源资产烘焙”与“场景派生烘焙”收敛为一条线的关键：
+
+- **Bake Kernel**：`prism_bake_*` crate，纯算法核心——无 I/O、无调度、无全局状态；输入为 IR/结构化参数，输出为字节或结构化产物。必须存在 CPU 金标准，GPU 实现（若有）与之逐元素对拍（范式见 `pkg/prism_micromap_gpu/tests/gpu_parity.rs`）。
+- **离线调度**：本系统的 `Processor` 包一层 Kernel，负责 `analyze` 声明输入与键材料、选择 `ArtifactKind`、经 `ArtifactWriter` 流式写入并提交事务。
+- **进程内调度**：编辑器/运行时的 `BakeService`（跑在 `prism_tasks`）以 dirty-set 驱动同一个 Kernel，产物进本地 runtime cache，不写 CAS/DDC（见 `prism_asset_design_zh.md` §13.2）。
+
+禁止在 Kernel 之外复制算法：任何“编辑器专用”或“运行时专用”的第二实现，都属于 §2.5 所禁止的行为不一致链，也是 `docs/prism_derived_data_contract_zh.md` 中 `OfflineShipped` 与 `RuntimeDerived` 必须指出同一内核的原因。
 
 ---
 
@@ -750,6 +804,26 @@ Cell 边界构建需要依赖提升规则：跨 Cell 强依赖提升到共享组
 - 地形：高度/材质/植被页、Clipmap、HLOD、物理与导航数据。
 - 体积：稀疏体素砖、压缩、mip、光照缓存和流送目录。
 - 电影：高码率序列、代理、镜头依赖、预缓存和可选独立内容包。
+
+### 12.8 派生场景数据（GI / 导航 / SDF / HLOD / PCG / 地形）
+
+场景与世界派生的数据不是“资产导入”的附属，而是同一 Artifact DAG 上的一等 Recipe。它们此前分散在 `prism_world_system_design_zh.md`、`prism_scene_design_zh.md`、`prism_terrain_world_design_zh.md`、`prism_gi_lumen_design_zh.md` 中各自定义为“烘焙期”，本节给出统一归属：
+
+| 派生数据 | 键材料（除源内容外） | DerivationClass | 说明 |
+|---|---|---|---|
+| 烘焙 GI / 光照缓存 | scene 内容 + 种子 + 光照规则 + schema | `OfflineShipped` | GI 主路径为实时无烘焙；此项为可选离线缓存 |
+| 导航网格 | scene 内容 + 代理半径/高度 + 区域代价 + schema | `OfflineShipped`（按流送分块） | 运行时破坏/编辑触发的局部重烘为 `RuntimeDerived` |
+| 全局/局部 SDF | scene 内容 + 体素尺寸 + 带宽 + schema | `OfflineShipped` | 运行时动态物体的场更新为 `RuntimeDerived` |
+| HLOD 代理 | scene 内容 + 成簇规则 + 种子 + 屏幕误差 | `OfflineShipped` | 编辑器预览代理为 `OfflineEditorOnly` |
+| PCG 散布 proxy 列 | scene 内容 + 节点图 + 种子 + 规则版本 | `OfflineShipped` | 运行时局部重算为 `RuntimeDerived` |
+| 地形侵蚀 / 远景底图 / RVT 烘底 | 高度/掩码 + 迭代参数 + 种子 + schema | `OfflineShipped` | 编辑器局部编辑与破坏触发的重烘为 `RuntimeDerived` |
+
+硬约束：
+
+- 每一项必须在 `docs/prism_derived_data_contract_zh.md` 填写完整五元组，并声明确定性等级（Byte Reproducible / Deterministic-not-byte / Best-effort）。
+- 同一内核两种调度（§2.7、§6.6）：`OfflineShipped` 项与其对应的 `RuntimeDerived` 重烘必须调用同一 Bake Kernel，且在同一输入上产出一致；声明为 Deterministic-not-byte 者，差异必须显式列出并落在声明的容差内。
+- 成簇/散布/侵蚀等所用“种子”必须是内容派生种子（§18.1），禁止时间戳、未排序并行序或机器状态进入键材料。
+- `OfflineShipped` 的场景派生节点与资产节点共用同一失效传播（§8.3）、同一 DDC（§10）与同一事务提交（§17.1）；不得为“场景烘焙”另建一条绕过事务的写入路径。
 
 ---
 

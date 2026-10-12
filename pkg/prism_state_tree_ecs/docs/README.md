@@ -9,4 +9,6 @@ StateTree ST1 的最小 ECS 装配 crate。它让共享、不可变 `Plan` 可�
 3. 调用 `tick_entity` 做初始进入；之后可通过 `World::get_mut::<StateTreeInstance>` 调用 `request_event`。
 4. 下一个 `tick_entity` 才消费事件并应用迁移。
 
+带守卫的迁移可在实例上调用 `set_guard(GuardId, guard)` 安装实现 `Guard + Send + Sync` 的纯谓词；未安装的 guard id 按 core 语义拒绝该迁移。Guard 属于逐实例运行时状态，不会写回共享资产 `Plan`。
+
 迁移属于 core runtime 的数据状态更新，不在迁移回调中改 ECS 结构。调用方需在自己的独占 tick 边界显式调用 `tick_entity`。完整自动 Schedule、批量 query、Schema/Context、guard 安装/保留、observer 通知与 asset server 集成尚未实现，见 `docs/version/v0.1.0.md`。

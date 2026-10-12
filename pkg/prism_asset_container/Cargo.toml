@@ -1,0 +1,15 @@
+[package]
+name = "prism_asset_container"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Deterministic runtime container writer/reader with strict validation, range reads, and priority overlays for Prism assets."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+blake3 = "1.8"
+prism_asset = { path = "../prism_asset" }
+
+[lints]
+workspace = true

@@ -14,8 +14,8 @@ use alloc::sync::Arc;
 
 use prism_ecs::{component::Component, entity::Entity, world::World};
 use prism_state_tree_core::{
-    Event, EventQueueError, Instance, MicrostepLimit, NoopLifecycle, Plan, RuntimeError, StateId,
-    StepReport,
+    Event, EventQueueError, Guard, GuardId, Instance, MicrostepLimit, NoopLifecycle, Plan,
+    RuntimeError, StateId, StepReport,
 };
 
 /// Shared immutable compiled tree asset.
@@ -74,6 +74,15 @@ impl StateTreeInstance {
     /// Queues an input event. It cannot cause a transition until the next tick.
     pub fn request_event(&mut self, event: Event) -> Result<(), EventQueueError> {
         self.runtime.send(event)
+    }
+
+    /// Installs or replaces an immutable transition guard for this entity.
+    ///
+    /// Guard state must be thread-safe (`Send + Sync`) because the owning
+    /// runtime is stored as an ECS component. Guard evaluation happens during
+    /// [`Self::step`] and receives only the core's read-only `GuardContext`.
+    pub fn set_guard<G: Guard + 'static>(&mut self, id: GuardId, guard: G) {
+        self.runtime.set_guard(id, guard);
     }
 
     /// Executes one run-to-completion tick, including initial entry if needed.

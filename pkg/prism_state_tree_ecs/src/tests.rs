@@ -2,8 +2,8 @@ use alloc::vec;
 
 use prism_ecs::{command::CommandQueue, world::World};
 use prism_state_tree_core::{
-    Event, EventId, MicrostepLimit, NodeKind, StateId, StateNode, Transition, TransitionKind,
-    TransitionTarget, TreeDef, Trigger,
+    Event, EventId, Guard, GuardContext, GuardId, MicrostepLimit, NodeKind, StateId, StateNode,
+    Transition, TransitionKind, TransitionTarget, TreeDef, Trigger,
 };
 
 use crate::{queue_spawn, tick_entity, StateTreeAsset, StateTreeInstance};
@@ -120,4 +120,58 @@ fn instances_share_plan_but_keep_cursor_and_event_queue_independent() {
     assert_eq!(first.active_states(), &[StateId(0), StateId(2)]);
     second.step().expect("second initial tick");
     assert_eq!(second.active_states(), &[StateId(0), StateId(1)]);
+}
+
+#[test]
+fn entity_guard_is_evaluated_by_its_persistent_runtime() {
+    struct MatchEvent(EventId);
+    impl Guard for MatchEvent {
+        fn evaluate(&self, context: GuardContext) -> bool {
+            context.event.is_some_and(|event| event.id == self.0)
+        }
+    }
+
+    let transition = Transition::new(
+        StateId(1),
+        TransitionTarget::State(StateId(2)),
+        Trigger::Event(EventId(7)),
+        Some(GuardId(3)),
+        0,
+        TransitionKind::External,
+    );
+    let plan = TreeDef {
+        root: StateId(0),
+        nodes: vec![
+            StateNode::compound(
+                StateId(0),
+                None,
+                vec![StateId(1), StateId(2)],
+                StateId(1),
+                None,
+            ),
+            StateNode::atomic(StateId(1), Some(StateId(0))).with_transition(transition),
+            StateNode::atomic(StateId(2), Some(StateId(0))),
+        ],
+    }
+    .compile()
+    .expect("guard plan is valid");
+    let mut instance = StateTreeInstance::new(StateTreeAsset::new(plan), 4, MicrostepLimit(8))
+        .expect("runtime setup");
+    instance
+        .set_guard(GuardId(3), MatchEvent(EventId(9)));
+    instance.step().expect("initial tick");
+    instance
+        .request_event(Event::new(EventId(7)))
+        .expect("event fits bounded queue");
+    let report = instance.step().expect("guarded tick");
+    assert_eq!(report.events_processed, 1);
+    assert_eq!(report.microsteps, 0);
+    assert_eq!(instance.active_states(), &[StateId(0), StateId(1)]);
+
+    instance.set_guard(GuardId(3), MatchEvent(EventId(7)));
+    instance
+        .request_event(Event::new(EventId(7)))
+        .expect("event fits bounded queue");
+    assert_eq!(instance.step().unwrap().microsteps, 1);
+    assert_eq!(instance.active_states(), &[StateId(0), StateId(2)]);
 }

@@ -93,6 +93,53 @@ impl DependencyGraph {
         let _ = self.propagate_from([asset]);
     }
 
+    /// Replaces all direct dependencies of `asset` as one graph transaction.
+    ///
+    /// Existing edges that are absent from `dependencies` are removed, new
+    /// edges are added, and recursive readiness is repaired after the complete
+    /// set is installed. If the replacement introduces a cycle, the graph is
+    /// restored byte-for-byte and the cycle is returned. This is the operation
+    /// reload assembly must use; repeatedly calling [`add_dependency`] cannot
+    /// remove edges left over from a previous revision.
+    pub fn replace_dependencies(
+        &mut self,
+        asset: UntypedAssetId,
+        dependencies: impl IntoIterator<Item = UntypedAssetId>,
+    ) -> Result<(), DependencyError> {
+        let snapshot = self.clone();
+        let desired: BTreeSet<_> = dependencies
+            .into_iter()
+            .filter(|&dependency| dependency != asset)
+            .collect();
+        self.nodes.insert(asset);
+        self.nodes.extend(desired.iter().copied());
+
+        if let Some(previous) = self.deps.remove(&asset) {
+            for dependency in previous {
+                if let Some(dependents) = self.dependents.get_mut(&dependency) {
+                    dependents.remove(&asset);
+                    if dependents.is_empty() {
+                        self.dependents.remove(&dependency);
+                    }
+                }
+            }
+        }
+        for dependency in &desired {
+            self.deps.entry(asset).or_default().insert(*dependency);
+            self.dependents
+                .entry(*dependency)
+                .or_default()
+                .insert(asset);
+        }
+
+        if let Err(error) = self.topological_order() {
+            *self = snapshot;
+            return Err(error);
+        }
+        let _ = self.propagate_from([asset]);
+        Ok(())
+    }
+
     /// Like [`add_dependency`](Self::add_dependency) but refuses an edge that
     /// would close a cycle, detected *at assembly time* (design §8.3) rather
     /// than deferred to [`topological_order`](Self::topological_order). The

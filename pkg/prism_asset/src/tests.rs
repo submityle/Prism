@@ -1430,6 +1430,36 @@ mod vfs {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn fs_source_rejects_symlinks_that_escape_its_mount_root() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(alloc::format!(
+            "prism_asset_symlink_{}_{}",
+            std::process::id(),
+            now_nanos()
+        ));
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+
+        let source = FsSource::new(&root);
+        assert_eq!(
+            source.read("escape/secret.txt"),
+            Err(ReadError::InvalidPath)
+        );
+        assert_eq!(
+            source.metadata("escape/secret.txt"),
+            Err(ReadError::InvalidPath)
+        );
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     fn now_nanos() -> u128 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1637,8 +1667,9 @@ mod loader_exec {
 #[cfg(feature = "std")]
 mod server {
     use crate::{
-        Asset, AssetLoader, AssetPath, AssetServer, AssetTypeId, LoadContext, LoadError, LoadState,
-        MemSource, SoftHandle,
+        Asset, AssetChange, AssetChangeKind, AssetIndex, AssetLoader, AssetPath, AssetServer,
+        AssetTypeId, ChangeBatch, DependencyError, DependencyGraph, LoadContext, LoadError,
+        LoadState, MemSource, SoftHandle, UntypedAssetId,
     };
     use alloc::string::ToString;
     use alloc::sync::Arc;
@@ -1768,6 +1799,28 @@ mod server {
     }
 
     #[test]
+    fn dependency_replacement_removes_old_edges_and_rolls_back_cycles() {
+        let mut graph = DependencyGraph::new();
+        let a = UntypedAssetId::new(AssetIndex::from_parts(1, 0), AssetTypeId::of::<Mesh>());
+        let b = UntypedAssetId::new(AssetIndex::from_parts(2, 0), AssetTypeId::of::<Image>());
+        let c = UntypedAssetId::new(AssetIndex::from_parts(3, 0), AssetTypeId::of::<Chunk>());
+        graph.replace_dependencies(a, [b]).unwrap();
+        graph.replace_dependencies(a, [c]).unwrap();
+        assert_eq!(graph.dependencies(a), vec![c]);
+        assert_eq!(graph.dependents(b), Vec::<UntypedAssetId>::new());
+        assert_eq!(graph.dependents(c), vec![a]);
+
+        let before = graph.clone();
+        assert!(matches!(
+            graph.replace_dependencies(c, [a]),
+            Err(DependencyError::Cycle { .. })
+        ));
+        assert_eq!(graph.dependencies(a), before.dependencies(a));
+        assert_eq!(graph.dependencies(c), before.dependencies(c));
+        assert_eq!(graph.dependents(a), before.dependents(a));
+    }
+
+    #[test]
     fn labeled_subasset_interned_under_label() {
         let server = server();
         let _mesh = server.load::<Mesh>("hero.scene");
@@ -1776,6 +1829,58 @@ mod server {
             .expect("sub-asset interned under its label");
         assert_eq!(server.load_state(chunk.id()), LoadState::Loaded);
         assert!(chunk.id().is::<Chunk>());
+    }
+
+    #[test]
+    fn reloading_a_label_reassembles_its_source_revision() {
+        let server = server();
+        let mesh = server.load::<Mesh>("hero.scene");
+        let label = server
+            .load_untyped("hero.scene#chunk0")
+            .expect("scene loader interns its labeled output");
+        assert_eq!(
+            server.with_asset(label.id().typed::<Chunk>().unwrap(), |chunk| chunk.tag),
+            Some(b'A')
+        );
+
+        let mut revised = MemSource::new();
+        revised.insert("hero.scene", b"Z".to_vec());
+        revised.insert("tex.img", b"img".to_vec());
+        revised.insert("a.cyc", b"b.cyc".to_vec());
+        revised.insert("b.cyc", b"a.cyc".to_vec());
+        server.mount("mem", Arc::new(revised), 0);
+
+        let reloaded = server
+            .reload("hero.scene#chunk0")
+            .expect("label reload returns the labeled handle");
+        assert_eq!(reloaded.id(), label.id());
+        assert_eq!(
+            server.with_asset(label.id().typed::<Chunk>().unwrap(), |chunk| chunk.tag),
+            Some(b'Z')
+        );
+        assert_eq!(server.with_asset(mesh.id(), |mesh| mesh.verts), Some(1));
+    }
+
+    #[test]
+    fn watcher_batch_reloads_only_resident_assets() {
+        let server = server();
+        let mesh = server.load::<Mesh>("mem://hero.scene");
+        let mut revised = MemSource::new();
+        revised.insert("hero.scene", b"Q".to_vec());
+        revised.insert("tex.img", b"img".to_vec());
+        revised.insert("a.cyc", b"b.cyc".to_vec());
+        revised.insert("b.cyc", b"a.cyc".to_vec());
+        server.mount("mem", Arc::new(revised), 0);
+
+        let batch = ChangeBatch::new([AssetChange {
+            source: "mem".to_string(),
+            path: AssetPath::parse("hero.scene"),
+            kind: AssetChangeKind::Modified,
+        }]);
+        let handles = server.apply_change_batch(&batch);
+        assert_eq!(handles.len(), 1);
+        assert_eq!(handles[0].id(), mesh.untyped_id());
+        assert_eq!(server.with_asset(mesh.id(), |mesh| mesh.verts), Some(1));
     }
 
     #[test]
@@ -1807,6 +1912,33 @@ mod server {
         let handle = server.reload("hero.scene").expect("resident path reloads");
         assert_eq!(handle.id(), before.untyped());
         assert_eq!(server.load_state(mesh.untyped_id()), LoadState::Loaded);
+    }
+
+    #[test]
+    fn failed_reload_preserves_last_known_good_value() {
+        let server = server();
+        let mesh = server.load::<Mesh>("hero.scene");
+        let id = mesh.id();
+        assert_eq!(
+            server.with_asset::<Mesh, _>(id, |value| value.verts),
+            Some(4)
+        );
+
+        // Replace the source with malformed bytes. The reload must leave both
+        // the ready payload and its public load state intact.
+        let mut broken = MemSource::new();
+        broken.insert("hero.scene", Vec::<u8>::new());
+        server.mount("mem", Arc::new(broken), 0);
+        assert_eq!(
+            server.reload("hero.scene").map(|handle| handle.id()),
+            Some(id.untyped())
+        );
+
+        assert_eq!(server.load_state(id.untyped()), LoadState::Loaded);
+        assert_eq!(
+            server.with_asset::<Mesh, _>(id, |value| value.verts),
+            Some(4)
+        );
     }
 
     #[test]
