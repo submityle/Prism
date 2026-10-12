@@ -21,6 +21,7 @@ mod kuwahara;
 mod lens_flare;
 mod light_routing;
 mod lobe_budget;
+pub mod lobe_sampling;
 mod motion_blur;
 mod ordered_dither;
 mod outline;

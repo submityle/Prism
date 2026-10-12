@@ -85,10 +85,10 @@ pub const LOBE_SAMPLING_SEQUENCE_PERIOD: u32 = 1 << 16;
 pub const LOBE_SAMPLING_SEQUENCE_MASK: u32 = LOBE_SAMPLING_SEQUENCE_PERIOD - 1;
 
 /// First R2 additive stride `1/p`, where `p` is the plastic constant.
-pub const LOBE_SAMPLING_R2_A1: f32 = 0.754_877_666_246_692_8;
+pub const LOBE_SAMPLING_R2_A1: f32 = 0.754_877_7;
 
 /// Second R2 additive stride `1/p^2`.
-pub const LOBE_SAMPLING_R2_A2: f32 = 0.569_840_290_998_040_3;
+pub const LOBE_SAMPLING_R2_A2: f32 = 0.569_840_3;
 
 /// Smallest weight treated as a usable probability mass.
 pub const LOBE_SAMPLING_MIN_WEIGHT: f32 = f32::MIN_POSITIVE;
@@ -408,10 +408,10 @@ pub fn lobe_pixel_seed(pixel_x: u32, pixel_y: u32, seed: u32) -> u32 {
     )
 }
 
-/// Manual rotate-left by 16, matching the WESL bit operation.
+/// Rotate-left by 16, matching the WESL twin's `(x << 16) | (x >> 16)`.
 #[inline]
 pub fn lobe_rotate_left_16(x: u32) -> u32 {
-    (x << 16) | (x >> 16)
+    x.rotate_left(16)
 }
 
 /// Per-pixel odd temporal stride.

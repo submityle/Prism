@@ -625,6 +625,16 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 **🟡 部分完成**
 
+- **P3-e 随机单瓣采样（blue-noise 低差异序列 + TAA，§17.4，shading 域内落地）**（§17.4 / §13 表 P3-e）
+  - 范围：贵瓣组在全额采样代价过高时**不塌缩瓣集**，改为按预算**随机选一个瓣**求值、以 `1/p` 权重保持无偏，并配逐帧去相关的确定性低差异序列供 TAA 累积收敛。本阶段落地其**着色数学核 + GPU 孪生**：
+    - 权重归一：`lobe_write_probabilities` / `lobe_weight_probability` / `lobe_estimator_weight`（`1/pdf`）、`lobe_sanitize_weight`、全零权重的退化处理；
+    - 确定性去相关序列：R2 低差异二维序列（`lobe_r2_sample_2d`，`LOBE_SAMPLING_R2_A1/A2` = 塑料常数倒数）+ 逐像素 seed（`lobe_pixel_seed`）+ 奇 temporal stride（`lobe_temporal_stride`）+ 旋转的左移 16（`lobe_rotate_left_16`，与 WESL `(x<<16)|(x>>16)` 同结果）；
+    - 选择/估计：`lobe_select` / `lobe_select_blue_noise`（简单 CDF 游走）/ `lobe_estimate` / `lobe_full_sum`（全额参考），以及 `LobeSamplingPolicy`/`LobeSample`/`LobeSamplingMode` 与 P1-e `LobeSampleBudget` 的耦合——Low/Medium 走单瓣、High/Ultra 回退全额，`with_global_scale` 下压后 High 亦自动转单瓣。
+    - WESL 孪生 `pkg/prism_render_scene/src/shaders/lobe_sampling.wesl`（逐位同算术/常量/参序）+ `@compute` link-test `pkg/prism_render_scene/src/shading/lobe_sampling/{mod,shader_tests}.rs`。
+  - 代码：`pkg/prism_render_shading/src/lobe_sampling.rs`（CPU 金标准，1015 行）、`pkg/prism_render_scene/src/shaders/lobe_sampling.wesl`（276 行）。提交 `324d1c767`（数学核+孪生）。
+  - 门禁：`cargo test -p prism_render_shading --lib lobe_sampling`（**22 通过**：无偏性收敛、确定性、去相关、全零/单瓣/退化有限性、概率归一等）、`cargo test -p prism_render_scene --lib shading::lobe_sampling`（link 1 通过）、全量 `-p prism_render_shading --lib` **3279 通过**零回归；touched 文件 clippy 干净。
+  - 诚实边界：尚未接线的是**实际渲染 pass**（贵瓣数组的 GPU 遍历/绑定、pass uniform 上传、真实材质着色路径调用、TAA history/reprojection 对估计值的最终消费）。WESL 侧目前验证的是编译/可见性/签名/类型；CPU fixture 已冻结精确 bits，但 **GPU readback 逐位对拍**仍需一个 dispatch/readback 测试才成立——与 P0-b/P2-d 同为分阶段诚实接线。
+
 - **P2-f 超集合规门禁 + 向下投影导出器（§4.5 约束 1/2/3，结构/契约半边）**（§4.5 / §17.5.3 ⑥）
   - 范围：把 §4.5 的三条硬约束从"人工审读约定"落成**可机检的代码契约**。本阶段落地其中不依赖外部 OpenPBR 参考实现的**结构半边**：
     - **位区隔离（约束 2）**：`LobeMask` 新增 `KHR_REGION`（OpenPBR 规范核心区）与 `EXTENSION_REGION`（扩展区），及其 `canonical_region` / `extension_region` / `is_pure_openpbr` / `region_of` / `LobeRegion`；两区位段互斥且恰好铺满已定义瓣。位区的**数据来源是 schema**（`pkg/prism_material_schema/schema/surface.toml` 的 `namespace` 列），codegen 生成的 `LobeLayout` 新增 `uid` + `namespace` 字段；`surface.rs::region_masks_match_the_schema_namespaces` 与 `tests/schema_parity.rs::schema_namespaces_match_lobe_mask_regions` 对拍 schema↔生成表↔手写区，任一处漂移即 CI 标红。
@@ -652,7 +662,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 门禁：`cargo test -p prism_render_shading --lib glint`（glint CPU 全绿）、`--lib measured_brdf`（18 通过）、`cargo test -p prism_render_scene --lib shading::glint` / `shading::measured_brdf`（link 各 1 通过）；全量 `-p prism_render_shading --lib` 3257 通过。
   - 诚实边界：本阶段落地的是 shading 域内、ABI 中性的瓣**数学核 + GPU 孪生**，尚**未**接入 über 开放词汇表 ABI（新 `LobeMask` 位 + 变长字段打包 + 静态置换、`prism_unpack_surface` 聚集），该 ABI 一等成员接入属 P2-c，随基础设施线统一推进。
 
-**⬜ 未开始（见上表）**：P1-a~P1-d、P1-f、P1-h（PCM 地基）、P2-a~P2-c、P2-e、P2-g、P2-i、P2-j、P3-a~P3-e。开放瓣（glint / 测量 BRDF）的 CPU 金标准 + WESL 孪生已落地（见上「部分完成」），仅余其 über 开放词汇表 ABI 接入（归 P2-c）；P2-f 的位区隔离 + 向下投影 + 布局级合规门禁已落地，余"对拍 OpenPBR 参考实现"的响应级半边（见上「部分完成」）。
+**⬜ 未开始（见上表）**：P1-a~P1-d、P1-f、P1-h（PCM 地基）、P2-a~P2-c、P2-e、P2-g、P2-i、P2-j、P3-a~P3-d。开放瓣（glint / 测量 BRDF）的 CPU 金标准 + WESL 孪生已落地（见上「部分完成」），仅余其 über 开放词汇表 ABI 接入（归 P2-c）；P2-f 的位区隔离 + 向下投影 + 布局级合规门禁已落地，余"对拍 OpenPBR 参考实现"的响应级半边；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（均见上「部分完成」）。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 

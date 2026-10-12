@@ -37,6 +37,7 @@ mod kuwahara;
 mod lens_flare;
 mod light_routing;
 mod lighting;
+mod lobe_sampling;
 mod measured_brdf;
 mod motion_blur;
 mod oit;
@@ -196,6 +197,18 @@ pub use posterize::{
 };
 pub use punctual::PunctualLight;
 pub use quality::{LobeSampleBudget, ShadingQuality};
+pub use lobe_sampling::{
+    lobe_blue_noise_1d, lobe_blue_noise_2d, lobe_clamp_unit, lobe_estimate,
+    lobe_estimator_weight, lobe_full_sum, lobe_hash_combine, lobe_hash_u32, lobe_is_finite,
+    lobe_make_sample, lobe_pixel_seed, lobe_r2_sample_2d, lobe_rotate_left_16,
+    lobe_sample_quality_sum, lobe_sanitize_weight, lobe_select, lobe_select_blue_noise,
+    lobe_temporal_stride, lobe_uniform_at, lobe_uniform_from_hash, lobe_weight_probability,
+    lobe_write_probabilities, LobeSample, LobeSamplingMode, LobeSamplingPolicy,
+    LOBE_SAMPLING_GOLDEN_STRIDE, LOBE_SAMPLING_MIN_WEIGHT, LOBE_SAMPLING_NO_LOBE,
+    LOBE_SAMPLING_ONE_MINUS_EPSILON, LOBE_SAMPLING_R2_A1, LOBE_SAMPLING_R2_A2,
+    LOBE_SAMPLING_SEED_SALT, LOBE_SAMPLING_SEQUENCE_MASK, LOBE_SAMPLING_SEQUENCE_PERIOD,
+    LOBE_SAMPLING_TEMPORAL_SALT,
+};
 
 // Crate-root re-exports of the expensive-lobe `*_for_budget` adapters, so a
 // host driving `ShadingQuality`/`LobeSampleBudget` can reach every tier-scaled
