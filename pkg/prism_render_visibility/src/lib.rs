@@ -7,6 +7,9 @@
 
 extern crate alloc;
 
+#[cfg(feature = "bevy")]
+pub mod bevy_bridge;
+
 mod benchmark;
 mod binning;
 mod cull_hzb;

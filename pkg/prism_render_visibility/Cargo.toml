@@ -9,6 +9,11 @@ publish = false
 [features]
 default = ["std"]
 std = []
+# Optional Bevy ECS bridge. Converts Bevy camera `Frustum` + entity `Aabb` /
+# `GlobalTransform` into the engine-neutral visibility ABI (`GpuViewRecord`,
+# `SceneBounds`, `InstanceRecord`) so `bevy_render` can adopt Prism's
+# GPU-driven visibility without leaking Bevy types into the frozen ABI.
+bevy = ["dep:bevy_camera", "dep:bevy_transform"]
 
 [dependencies]
 bevy_math = { path = "../../crates/bevy_math", version = "0.20.0-dev", default-features = false, features = ["nostd-libm"] }
@@ -16,5 +21,19 @@ bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_render_material = { path = "../prism_render_material" }
 
+[dependencies.bevy_camera]
+path = "../../crates/bevy_camera"
+version = "0.20.0-dev"
+optional = true
+
+
+[dependencies.bevy_transform]
+path = "../../crates/bevy_transform"
+version = "0.20.0-dev"
+optional = true
+
 [lints]
 workspace = true
+
+[dev-dependencies]
+bevy_shape = { path = "../../crates/bevy_shape", version = "0.20.0-dev" }
