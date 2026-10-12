@@ -157,6 +157,10 @@ pub struct GpuSurfaceParameters {
     pub anisotropy: f32,
     pub anisotropy_rotation: f32,
     pub sheen: f32,
+    /// `OpenPBR` `fuzz_roughness`: independent width of the fuzz highlight.
+    pub fuzz_roughness: f32,
+    /// `OpenPBR` `fuzz_color`: per-channel tint of the fuzz lobe.
+    pub fuzz_color: [f32; 4],
     pub subsurface: f32,
     pub index_of_refraction: f32,
     pub dispersion: f32,
@@ -168,7 +172,7 @@ pub struct GpuSurfaceParameters {
     pub _pad_face2: f32,
     /// Tail padding keeping the fat authoring view a 16-byte multiple as the
     /// coat group grows. Carries no data.
-    pub _pad_tail: [f32; 2],
+    pub _pad_tail: f32,
 }
 
 impl Default for GpuSurfaceParameters {
@@ -192,6 +196,8 @@ impl Default for GpuSurfaceParameters {
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
             sheen: 0.0,
+            fuzz_roughness: 0.5,
+            fuzz_color: [1.0; 4],
             subsurface: 0.0,
             index_of_refraction: 1.5,
             dispersion: 0.0,
@@ -199,7 +205,7 @@ impl Default for GpuSurfaceParameters {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 2],
+            _pad_tail: 0.0,
         }
     }
 }

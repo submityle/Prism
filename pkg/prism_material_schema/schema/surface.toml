@@ -313,7 +313,7 @@ mask_const = "SHEEN"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
-words = 4
+words = 8
 
 [[lobe.field]]
 name = "sheen"
@@ -328,15 +328,22 @@ energy_policy = "coupled"
 view = "invariant"
 
 [[lobe.field]]
-name = "_pad0"
-type = "pad"
+name = "fuzz_roughness"
+type = "f32"
 bit_region = "KHR"
 pack_slot = 1
-consumed_by = []
-default = 0.0
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `fuzz_roughness`. Decouples the fuzz highlight width from the base
+# `perceptual_roughness` (the two were accidentally coupled, which made an
+# independent fabric fuzz impossible). The default 0.5 matches the base default,
+# so a material that never authors it keeps the same look at default roughness.
+default = 0.5
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
 
 [[lobe.field]]
-name = "_pad1"
+name = "_pad0"
 type = "pad"
 bit_region = "KHR"
 pack_slot = 2
@@ -344,12 +351,25 @@ consumed_by = []
 default = 0.0
 
 [[lobe.field]]
-name = "_pad2"
+name = "_pad1"
 type = "pad"
 bit_region = "KHR"
 pack_slot = 3
 consumed_by = []
 default = 0.0
+
+[[lobe.field]]
+name = "fuzz_color"
+type = "vec4f"
+bit_region = "KHR"
+pack_slot = 4
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `fuzz_color`: per-channel tint of the fuzz lobe (white = achromatic
+# fuzz, the historical behaviour, hence the identity default).
+default = [1.0, 1.0, 1.0, 1.0]
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "invariant"
 
 [[lobe]]
 id = "subsurface"

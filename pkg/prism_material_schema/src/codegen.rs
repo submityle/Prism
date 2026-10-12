@@ -502,13 +502,14 @@ mod tests {
     fn wesl_exposes_the_consumer_api() {
         let wesl = emit_wesl_unpack(&surface_schema());
         for needle in [
-            "fn prism_unpack_surface(words: array<u32, 48>, lobe_mask: u32)",
+            "fn prism_unpack_surface(words: array<u32, 52>, lobe_mask: u32)",
             "fn prism_packed_word_count(lobe_mask: u32) -> u32",
             "fn prism_neutral_surface() -> PrismSurfaceParameters",
-            "const PRISM_SURFACE_MAX_WORDS: u32 = 48u;",
+            "const PRISM_SURFACE_MAX_WORDS: u32 = 52u;",
             "const PRISM_LOBE_WORDS_EMISSION: u32 = 4u;",
             "const PRISM_LOBE_WORDS_FACE: u32 = 4u;",
             "const PRISM_LOBE_WORDS_CLEARCOAT: u32 = 12u;",
+            "const PRISM_LOBE_WORDS_SHEEN: u32 = 8u;",
             "        cursor += PRISM_LOBE_WORDS_TRANSMISSION;",
             "import prism_render_scene::shaders::material::PrismSurfaceParameters;",
         ] {
@@ -540,9 +541,9 @@ mod tests {
         for needle in [
             "pub const SURFACE_CORE_WORDS: usize = 12;",
             "pub const SURFACE_LOBE_WORDS: usize = 12;",
-            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 12, 4, 4, 4, 4, 4];",
+            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 12, 4, 8, 4, 4, 4];",
             "pub const SURFACE_LOBE_COUNT: u32 = 7;",
-            "pub const SURFACE_MAX_WORDS: usize = 48;",
+            "pub const SURFACE_MAX_WORDS: usize = 52;",
             "pub const SURFACE_LOBES: [LobeLayout; 7] = [",
             "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 4,\n        namespace: \"KHR\",\n    },",
             "    LobeLayout {\n        id: \"face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"FACE\",\n        registry_slot: 6,\n        words: 4,\n        namespace: \"PRISM\",\n    },",
@@ -564,20 +565,33 @@ mod tests {
             .iter_mut()
             .find(|lobe| lobe.id == "clearcoat")
             .expect("clearcoat lobe present")
-            .words = 6;
+            .words = 14;
+
+        let slots: Vec<String> = schema
+            .canonical_lobes()
+            .iter()
+            .map(|lobe| lobe.words.to_string())
+            .collect();
+        let expected_max = schema.packed_len_words(all_lobe_bits(&schema));
 
         let rust = emit_rust_layout(&schema);
-        assert!(rust.contains("pub const SURFACE_LOBE_WORDS: usize = 6;"));
-        assert!(rust.contains(
-            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 6, 4, 4, 4, 4, 4];"
-        ));
-        // Worst case grows with the widened lobe.
-        assert!(rust.contains("pub const SURFACE_MAX_WORDS: usize = 42;"));
+        assert!(rust.contains("pub const SURFACE_LOBE_WORDS: usize = 14;"));
+        assert!(rust.contains(&format!(
+            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [{}];",
+            slots.join(", ")
+        )));
+        // Worst case grows with the widened lobe; derive it from the schema so
+        // the test does not re-hardcode the other lobes' footprints.
+        assert!(rust.contains(&format!(
+            "pub const SURFACE_MAX_WORDS: usize = {expected_max};"
+        )));
 
         let wesl = emit_wesl_unpack(&schema);
-        assert!(wesl.contains("const PRISM_LOBE_WORDS_CLEARCOAT: u32 = 6u;"));
+        assert!(wesl.contains("const PRISM_LOBE_WORDS_CLEARCOAT: u32 = 14u;"));
         assert!(wesl.contains("words += PRISM_LOBE_WORDS_CLEARCOAT;"));
         assert!(wesl.contains("cursor += PRISM_LOBE_WORDS_CLEARCOAT;"));
-        assert!(wesl.contains("fn prism_unpack_surface(words: array<u32, 42>, lobe_mask: u32)"));
+        assert!(wesl.contains(&format!(
+            "fn prism_unpack_surface(words: array<u32, {expected_max}>, lobe_mask: u32)"
+        )));
     }
 }

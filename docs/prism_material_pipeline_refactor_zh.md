@@ -213,7 +213,7 @@
 | **base**（diffuse+metal） | `base_color` / `metallic` / `perceptual_roughness` | 子集 | `base_weight`、`diffuse_roughness`（Oren-Nayar 糙漫反射） |
 | **specular** | `reflectance`（IOR 代理）/ `anisotropy` / `anisotropy_rotation` | 子集 | `specular_weight`、`specular_color`、显式 `specular_ior`（取代 reflectance 代理） |
 | **coat** | `clearcoat` / `clearcoat_roughness` / **`coat_ior` / `coat_color` / `coat_roughness_anisotropy`（已补）** / **`coat_normal`（已补：纹理输入，非 ABI 字段，见 §13.a）** | 仅差 `coat_darkening` | `coat_darkening` |
-| **fuzz** | `sheen` | 子集 | `fuzz_color`、`fuzz_roughness` |
+| **fuzz** | `sheen` / **`fuzz_roughness` / `fuzz_color`（已补，见 §13.a）** | ✅ 补齐 | —（`fuzz_roughness` 与 base roughness 的解耦是刻意的模型修正） |
 | **subsurface** | `subsurface` | 子集 | `subsurface_color`、`subsurface_radius`（vec3，RGB 自由程）、`scatter_anisotropy` |
 | **transmission** | `transmission` / `thickness` / `index_of_refraction` / `dispersion` | 较全 | `transmission_color`、`transmission_scatter`、`thin_walled` 标志 |
 | **emission** | `emission`（4 words） | ✓ | `emission_luminance` 单位统一（nit / 相对） |
@@ -509,7 +509,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - **原理化分层 BSDF（coat/base 能量耦合，非瓣求和）**（§17.2）：coat 对其下 base 的能量不是简单叠加，而是按 Fresnel 透射做能量预算耦合（coat 反射掉的能量不再喂给 base），并统一 coat 吸收/变暗（`coat_darkening`）。取代"各瓣独立求和"的能量不自洽；进 furnace 门禁与双线对拍。
 - **NPR**（`Illumination::Stylized`，§3.5）：ramp 量化 / SDF 面部阴影（Prism 私有 FACE 瓣，OpenPBR 之外）/ 描边，作为对**同一 OpenPBR über 输入**的正交非物理响应；不进物理 furnace 门禁，但进 ramp/描边视觉回归。
 - **thin_film 虹彩（OpenPBR thin_film 瓣，开放瓣首个落地示例）**：薄膜干涉随 `thin_film_thickness` / `thin_film_ior` 产生彩虹色高光（肥皂泡、氧化金属、涂层）。按 OpenPBR 作为新 lobe 加入开放词汇表——新增 `LobeMask::THIN_FILM` 位 + 3-word 块，`prism_unpack_surface` 低位优先循环自动容纳，老材质 mask 不含该位、零影响。这是"新物理项 = 加法补瓣"路径的验证用例（§4.4）。
-- **其余待补 OpenPBR 字段**（fuzz_color、subsurface_radius vec3、specular_color/weight、diffuse_roughness，以及 coat 组剩余的 coat_roughness_anisotropy / coat_darkening）以加法扩字段方式逐个补齐，各进 furnace / 对拍门禁；coat 组的 `coat_ior` / `coat_color` / `coat_normal` 已落地为首个示例（§13.a）。
+- **其余待补 OpenPBR 字段**（subsurface_radius vec3、specular_color/weight、diffuse_roughness，以及 coat 组剩余的 `coat_darkening`）以加法扩字段方式逐个补齐，各进 furnace / 对拍门禁；coat 组的 `coat_ior` / `coat_color` / `coat_roughness_anisotropy` / `coat_normal` 与整个 fuzz 组（`fuzz_color` / `fuzz_roughness`）已落地（§13.a）。
 - **开放瓣扩展机制**：任何新物理项（如各向异性 SSS）走同一路径——新位 + 变长字段 + 静态置换，不冲击现有材质、不加全局硬顶。
 
 ---
@@ -578,6 +578,13 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f（第二个 lobe 组）OpenPBR fuzz 组：`fuzz_color` + `fuzz_roughness` 端到端落地**（§4.4 / §17.2）
+  - 范围：给 `sheen` 瓣补 `OpenPBR` fuzz 组两项——`fuzz_roughness`（fuzz 高光**自身**的宽度）与 `fuzz_color`（逐通道 tint）。顺手修掉一处**假的耦合**：Cloth / ClothAdvanced 之前都拿 base `perceptual_roughness` 当 fuzz 宽度、写死白色 tint，等于"fuzz 永远跟 base 一样糙且只能是白的"，OpenPBR fuzz 的独立参数化根本无从表达。现在 fuzz 宽度只读 `fuzz_roughness`、tint 只读 `fuzz_color`。
+  - **行为变化（刻意且已文档化）**：默认值 `fuzz_roughness = 0.5` / 白 `fuzz_color`，与 base 默认 rough 一致，所以"默认材质 + 默认 rough"外观不变；只有 **base rough ≠ 0.5 且 sheen > 0** 的材质其 fuzz 高光宽度会改变——这是把它从"跟 base 联动"修正为 OpenPBR/Bevy 的独立参数，不是回归。新测试 `fuzz_roughness_drives_the_sheen_width_independently` 直接把"Cloth 瓣不再读 base `perceptual_roughness`"钉成不变量。
+  - 代码：schema `sheen` 瓣 4→8 字（`fuzz_roughness` + 2 pad + `fuzz_color` vec4f），ABI 仍在 v5；`GpuSheenLobe`（+手写 `Default`：0.5/白）与 fat `GpuSurfaceParameters`（+`fuzz_roughness` + `fuzz_color`，`_pad_tail` 收为 1 word，fat 尺寸 144→160 B 仍 16 字节对齐）；regenerated `material_unpack.wesl`（`array<u32,52>`）/ `surface_layout.rs`（`[4,12,4,8,4,4,4]`）；shade-time `SurfaceSample`（CPU + WESL）与桥接（`resolve.rs` + `shading_resolve.wesl`）；BSDF 双线 **Cloth**（`cloth.rs` / `cloth.wesl`）与 **ClothAdvanced**（`cloth_advanced.rs` / `cloth_advanced.wesl`，其 woven thread 粗糙度仍走 base，只有 sheen 部分改用 fuzz 参数）；水栅格面写中性默认。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3289 通过**（新增：fuzz 宽度独立驱动 + base rough 不再泄漏、fuzz_color 只染 sheen）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过，含 ClothAdvanced 的独立编译门禁——它当场抓出了我第一版把 sheen 宽度改错函数的问题）、`cargo test -p prism_material_schema` 13 通过（绝对偏移门禁：transmission 基址 40→44、IOR 46）、`cargo test -p prism_render_material` 826+6+2 全绿；touched 文件 clippy 无告警。
+  - 结果：**fuzz 组全部补齐**（§4.4 该行转 ✅）。
 
 - **P1-f（coat 组续）OpenPBR `coat_roughness_anisotropy` 端到端落地**（§4.4 / §17.2）
   - 范围：给 coat 瓣补 `OpenPBR` `coat_roughness_anisotropy ∈ [0,1]`——沿**共享**表面切线系（由 `anisotropy_rotation` 旋转）拉长 coat 高光；伸长轴与 base specular 用同一套 `anisotropic_axes` + Burley `aspect` 拆分。`0` 走**逐位不变**的各向同性老路径（不是"近似相等"，是分支保持）。

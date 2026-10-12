@@ -240,6 +240,12 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         coat_normal: [0.0; 3],
         coat_roughness_anisotropy: parameters.coat_roughness_anisotropy,
         sheen: parameters.sheen,
+        fuzz_roughness: parameters.fuzz_roughness,
+        fuzz_color: [
+            parameters.fuzz_color[0],
+            parameters.fuzz_color[1],
+            parameters.fuzz_color[2],
+        ],
         subsurface: parameters.subsurface,
         thickness: parameters.thickness,
         anisotropy: parameters.anisotropy,

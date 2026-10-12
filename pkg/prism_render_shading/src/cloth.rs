@@ -80,14 +80,17 @@ pub fn evaluate_cloth_direct(
     }
     let n_dot_v = dot(n, v).max(MIN_N_DOT);
     let n_dot_h = dot(n, h).max(MIN_N_DOT);
-    let roughness = surface.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0);
+    // Fuzz geometry uses the lobe's own `OpenPBR` `fuzz_roughness`, not the
+    // base `perceptual_roughness`: the two were accidentally coupled, which
+    // made an independently rough fabric fuzz impossible.
+    let fuzz_roughness = surface.fuzz_roughness.clamp(MIN_ROUGHNESS, 1.0);
 
     // Sheen specular: Charlie distribution * Ashikhmin visibility, tinted by
-    // the scalar sheen weight (sheen_color = vec3(sheen)); no Fresnel term.
+    // the `OpenPBR` `fuzz_color` scaled by the fuzz weight; no Fresnel term.
     let sheen = surface.sheen.clamp(0.0, 1.0);
-    let d = distribution_charlie(roughness, n_dot_h);
+    let d = distribution_charlie(fuzz_roughness, n_dot_h);
     let vis = visibility_ashikhmin(n_dot_v, n_dot_l);
-    let sheen_specular = [sheen * d * vis; 3];
+    let sheen_specular = mul(surface.fuzz_color, [sheen * d * vis; 3]);
 
     // Diffuse: Lambertian base, optionally softened by the subsurface wrap and
     // tinted toward the base color to fake short-range scattering.
@@ -254,5 +257,80 @@ mod tests {
             without, with,
             "subsurface weight must alter the diffuse term"
         );
+    }
+
+    #[test]
+    fn fuzz_roughness_drives_the_sheen_width_independently() {
+        // The sheen lobe must now take its width from `fuzz_roughness`, and the
+        // base `perceptual_roughness` (a Lambertian base carries no specular
+        // roughness) must no longer leak into the fuzz highlight.
+        let off_peak = DirectLightSample {
+            direction: normalize_or([0.6, 0.8, 0.0], [0.0, 1.0, 0.0]),
+            ..light()
+        };
+        let glossy = evaluate_cloth_direct(
+            SurfaceSample {
+                fuzz_roughness: 0.05,
+                ..base_surface()
+            },
+            frame(),
+            off_peak,
+        );
+        let rough = evaluate_cloth_direct(
+            SurfaceSample {
+                fuzz_roughness: 0.9,
+                ..base_surface()
+            },
+            frame(),
+            off_peak,
+        );
+        assert!(
+            (sum3(glossy) - sum3(rough)).abs() > 1.0e-4,
+            "fuzz_roughness must change the off-peak sheen: {glossy:?} vs {rough:?}"
+        );
+
+        // Same fuzz_roughness, very different base roughness: identical result.
+        let base_rough = evaluate_cloth_direct(
+            SurfaceSample {
+                perceptual_roughness: 0.05,
+                ..base_surface()
+            },
+            frame(),
+            off_peak,
+        );
+        let base_smooth = evaluate_cloth_direct(
+            SurfaceSample {
+                perceptual_roughness: 0.95,
+                ..base_surface()
+            },
+            frame(),
+            off_peak,
+        );
+        assert_eq!(
+            base_rough, base_smooth,
+            "the cloth lobe must not read base perceptual_roughness any more"
+        );
+    }
+
+    #[test]
+    fn fuzz_color_tints_the_sheen_lobe() {
+        let white = evaluate_cloth_direct(base_surface(), frame(), light());
+        let red = evaluate_cloth_direct(
+            SurfaceSample {
+                fuzz_color: [1.0, 0.0, 0.0],
+                ..base_surface()
+            },
+            frame(),
+            light(),
+        );
+        // The Lambertian diffuse is untouched, so a red fuzz keeps red and drops
+        // green / blue.
+        assert!(red[0] >= white[0], "red fuzz must keep red: {red:?} vs {white:?}");
+        assert!(red[1] < white[1], "red fuzz must drop green: {red:?} vs {white:?}");
+        assert!(red[2] < white[2], "red fuzz must drop blue: {red:?} vs {white:?}");
+    }
+
+    fn sum3(c: [f32; 3]) -> f32 {
+        c[0] + c[1] + c[2]
     }
 }

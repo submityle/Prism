@@ -219,6 +219,8 @@ mod tests {
             anisotropy: 0.3,
             anisotropy_rotation: 0.2,
             sheen: 0.45,
+            fuzz_roughness: 0.3,
+            fuzz_color: [0.8, 0.85, 0.9, 1.0],
             subsurface: 0.65,
             index_of_refraction: 1.33,
             dispersion: 0.05,
@@ -226,7 +228,7 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 2],
+            _pad_tail: 0.0,
         }
     }
 

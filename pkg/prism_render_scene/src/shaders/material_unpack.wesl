@@ -8,7 +8,7 @@
 //! the scene packs each surface as an über-BSDF core (12 words) followed by
 //! only the lobes named in `lobe_mask`, written low bit first. Readers gather the
 //! material's `parameter_size / 4` words out of the shared `array<u32>` heap into a
-//! fixed `array<u32, 48>` (the fully-loaded worst case) and expand them back to
+//! fixed `array<u32, 52>` (the fully-loaded worst case) and expand them back to
 //! a full `PrismSurfaceParameters`, filling absent lobes with neutral defaults.
 //!
 //! Kept as a single generated source so all five consumers (opaque, transparent,
@@ -35,13 +35,13 @@ const PRISM_SURFACE_LOBE_WORDS: u32 = 12u;
 const PRISM_LOBE_WORDS_EMISSION: u32 = 4u;
 const PRISM_LOBE_WORDS_CLEARCOAT: u32 = 12u;
 const PRISM_LOBE_WORDS_ANISOTROPY: u32 = 4u;
-const PRISM_LOBE_WORDS_SHEEN: u32 = 4u;
+const PRISM_LOBE_WORDS_SHEEN: u32 = 8u;
 const PRISM_LOBE_WORDS_SUBSURFACE: u32 = 4u;
 const PRISM_LOBE_WORDS_TRANSMISSION: u32 = 4u;
 const PRISM_LOBE_WORDS_FACE: u32 = 4u;
 
 /// Fully-loaded worst case: core + every lobe (12 + sum of 7 lobe footprints).
-const PRISM_SURFACE_MAX_WORDS: u32 = 48u;
+const PRISM_SURFACE_MAX_WORDS: u32 = 52u;
 
 /// Packed word count for a mask: core plus each present lobe's own footprint.
 /// Mirrors `SurfaceParameterBlock::packed_len_words`.
@@ -78,6 +78,8 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
     s.anisotropy = 0.0;
     s.anisotropy_rotation = 0.0;
     s.sheen = 0.0;
+    s.fuzz_roughness = 0.5;
+    s.fuzz_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     s.subsurface = 0.0;
     s.transmission = 0.0;
     s.thickness = 0.0;
@@ -91,7 +93,7 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
 /// using `lobe_mask`. Words beyond the packed length are ignored; absent lobes keep
 /// their neutral default. Byte-exact twin of
 /// `SurfaceParameterBlock::unpack(mask, words).to_full()`.
-fn prism_unpack_surface(words: array<u32, 48>, lobe_mask: u32) -> PrismSurfaceParameters {
+fn prism_unpack_surface(words: array<u32, 52>, lobe_mask: u32) -> PrismSurfaceParameters {
     var w = words;
     var s = prism_neutral_surface();
 
@@ -140,6 +142,13 @@ fn prism_unpack_surface(words: array<u32, 48>, lobe_mask: u32) -> PrismSurfacePa
     }
     if (lobe_mask & PRISM_LOBE_SHEEN) != 0u {
         s.sheen = bitcast<f32>(w[cursor]);
+        s.fuzz_roughness = bitcast<f32>(w[cursor + 1u]);
+        s.fuzz_color = vec4<f32>(
+            bitcast<f32>(w[cursor + 4u]),
+            bitcast<f32>(w[cursor + 5u]),
+            bitcast<f32>(w[cursor + 6u]),
+            bitcast<f32>(w[cursor + 7u]),
+        );
         cursor += PRISM_LOBE_WORDS_SHEEN;
     }
     if (lobe_mask & PRISM_LOBE_SUBSURFACE) != 0u {

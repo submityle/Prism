@@ -62,13 +62,15 @@ fn cloth_direct(
     }
     let n_dot_v = max(dot(n, v), CLOTH_MIN_N_DOT);
     let n_dot_h = max(dot(n, h), CLOTH_MIN_N_DOT);
-    let roughness = clamp(surface.perceptual_roughness, CLOTH_MIN_ROUGHNESS, 1.0);
+    // Fuzz geometry uses the lobe's own `OpenPBR` `fuzz_roughness`; the base is
+    // Lambertian and its `perceptual_roughness` no longer leaks into the fuzz.
+    let fuzz_roughness = clamp(surface.fuzz_roughness, CLOTH_MIN_ROUGHNESS, 1.0);
 
-    // Sheen specular lobe (no Fresnel); sheen_color = vec3(sheen).
+    // Sheen specular lobe (no Fresnel), tinted by `OpenPBR` `fuzz_color`.
     let sheen = clamp(surface.sheen, 0.0, 1.0);
-    let d = cloth_distribution_charlie(roughness, n_dot_h);
+    let d = cloth_distribution_charlie(fuzz_roughness, n_dot_h);
     let vis = cloth_visibility_ashikhmin(n_dot_v, n_dot_l);
-    let sheen_specular = vec3<f32>(sheen * d * vis);
+    let sheen_specular = surface.fuzz_color * (sheen * d * vis);
 
     // Diffuse lobe, optionally softened + tinted by the subsurface weight.
     let subsurface = clamp(surface.subsurface, 0.0, 1.0);

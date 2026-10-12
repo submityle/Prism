@@ -1057,6 +1057,9 @@ fn surface_from(foam: f32) -> SurfaceSample {
     s.coat_normal = vec3<f32>(0.0);
     s.coat_roughness_anisotropy = 0.0;
     s.sheen = 0.0;
+    // Fuzz is disabled for water (`sheen == 0`); keep the neutral fuzz params.
+    s.fuzz_roughness = 0.5;
+    s.fuzz_color = vec3<f32>(1.0);
     s.subsurface = 0.0;
     s.thickness = clamp(view.surface_params.z, 0.0, 1.0);
     s.anisotropy = 0.0;

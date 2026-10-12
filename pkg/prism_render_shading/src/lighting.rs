@@ -43,6 +43,14 @@ pub struct SurfaceSample {
     pub coat_roughness_anisotropy: f32,
     /// Sheen (fuzz) intensity driving the Cloth Charlie sheen lobe in `[0, 1]`.
     pub sheen: f32,
+    /// `OpenPBR` `fuzz_roughness` in `[0, 1]`: the fuzz lobe's own highlight
+    /// width, independent of `perceptual_roughness`. The default `0.5` matches
+    /// the base default, so a material that never authors it is unchanged at
+    /// default roughness.
+    pub fuzz_roughness: f32,
+    /// `OpenPBR` `fuzz_color`: per-channel tint of the fuzz lobe (white =
+    /// achromatic fuzz, the historical behaviour, hence the identity default).
+    pub fuzz_color: [f32; 3],
     /// Subsurface scattering weight driving Cloth/Subsurface diffusion in `[0, 1]`.
     pub subsurface: f32,
     /// Optical thickness in `[0, 1]` driving Subsurface back-transmission
@@ -100,6 +108,8 @@ impl Default for SurfaceSample {
             coat_normal: [0.0; 3],
             coat_roughness_anisotropy: 0.0,
             sheen: 0.0,
+            fuzz_roughness: 0.5,
+            fuzz_color: [1.0; 3],
             subsurface: 0.0,
             thickness: 0.0,
             anisotropy: 0.0,

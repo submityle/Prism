@@ -266,29 +266,28 @@ pub fn evaluate_cloth_advanced_direct(
     let n_dot_l = dot(n, l).max(0.0);
     let n_dot_v = dot(n, v).max(MIN_N_DOT);
     let n_dot_h_raw = dot(n, h).max(MIN_N_DOT);
-    let roughness = surface.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0);
+    // The sheen (fuzz) parts take their width from `OpenPBR` `fuzz_roughness`,
+    // independently of the Lambertian base roughness; the woven thread
+    // roughness below keeps using `perceptual_roughness`.
+    let fuzz_roughness = surface.fuzz_roughness.clamp(MIN_ROUGHNESS, 1.0);
     let sheen = surface.sheen.clamp(0.0, 1.0);
     let visibility = light.visibility.clamp(0.0, 1.0);
 
     // Tension-driven wrinkle blend on the half-vector cosine.
     let n_dot_h = wrinkle_normal_blend(n_dot_h_raw, surface.anisotropy);
 
-    // Energy-conserving Charlie sheen (white fuzz), plus its multiple-scatter
-    // compensation and the diffuse-darkening directional albedo.
-    let d = distribution_charlie_ec(roughness, n_dot_h);
+    // Energy-conserving Charlie sheen, tinted by `OpenPBR` `fuzz_color`, plus
+    // its multiple-scatter compensation and the diffuse-darkening albedo.
+    let d = distribution_charlie_ec(fuzz_roughness, n_dot_h);
     let vis = visibility_ashikhmin(n_dot_v, n_dot_l);
-    let e = sheen_albedo(n_dot_v, roughness);
+    let e = sheen_albedo(n_dot_v, fuzz_roughness);
     let ms = multiscatter_comp(e, sheen);
-    let sheen_lobe = sheen * d * vis * ms;
+    let sheen_lobe = mul(surface.fuzz_color, [sheen * d * vis * ms; 3]);
 
     // Woven warp/weft anisotropic threads, tinted by the thin-film interference.
     let woven = anisotropic_woven(surface, frame, n, v, h, n_dot_h, n_dot_v, n_dot_l);
     let film = thin_film_fresnel(n_dot_v, surface.thickness);
-    let specular = [
-        sheen_lobe + woven * film[0],
-        sheen_lobe + woven * film[1],
-        sheen_lobe + woven * film[2],
-    ];
+    let specular = add(sheen_lobe, mul_scalar(film, woven));
 
     // Diffuse: Lambertian base darkened by the sheen directional albedo so the
     // sheen + diffuse energy stays bounded (Filament sheen scaling).
@@ -347,6 +346,8 @@ mod tests {
             coat_normal: [0.0; 3],
             coat_roughness_anisotropy: 0.0,
             sheen: 0.5,
+            fuzz_roughness: 0.5,
+            fuzz_color: [1.0; 3],
             subsurface: 0.0,
             thickness: 0.3,
             anisotropy: 0.0,

@@ -670,23 +670,26 @@ mod tests {
         // (12 words: clearcoat, clearcoat_roughness, coat_ior, a pad, coat_color,
         // coat_roughness_anisotropy and three trailing pads).
         assert_eq!(schema.packed_len_words(0b10), 12 + 12);
+        // Only sheen (bit 3) present: core + the fuzz lobe's own footprint
+        // (8 words: sheen, fuzz_roughness, two pads, fuzz_color).
+        assert_eq!(schema.packed_len_words(0b1000), 12 + 8);
     }
 
     #[test]
     fn transmission_fields_land_at_expected_offsets() {
         let schema = surface_schema();
         let all = 0b111_1111;
-        // Core (12) + emission (4) + clearcoat (12, now carrying the full OpenPBR
-        // coat group) + anisotropy (4) + sheen (4) + subsurface (4) = 40 is the
-        // transmission base; the transmission lobe then packs transmission,
-        // thickness, index_of_refraction, dispersion at 40..44.
+        // Core (12) + emission (4) + clearcoat (12, the full OpenPBR coat group)
+        // + anisotropy (4) + sheen (8, the full OpenPBR fuzz group) + subsurface
+        // (4) = 44 is the transmission base; the transmission lobe then packs
+        // transmission, thickness, index_of_refraction, dispersion at 44..48.
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "transmission"),
-            Some(40)
+            Some(44)
         );
         assert_eq!(
             schema.lobe_field_offset(all, "transmission", "index_of_refraction"),
-            Some(42)
+            Some(46)
         );
     }
 

@@ -70,6 +70,11 @@ struct SurfaceSample {
     // identity. Mirrors `SurfaceSample::coat_roughness_anisotropy`.
     coat_roughness_anisotropy: f32,
     sheen: f32,
+    // `OpenPBR` `fuzz_roughness` in [0, 1]: the fuzz lobe's own highlight width.
+    fuzz_roughness: f32,
+    // `OpenPBR` `fuzz_color`: per-channel tint of the fuzz lobe (white =
+    // achromatic). Mirrors `SurfaceSample::fuzz_roughness` / `fuzz_color`.
+    fuzz_color: vec3<f32>,
     subsurface: f32,
     thickness: f32,
     // Signed anisotropy in [-1, 1]; positive elongates the highlight along the

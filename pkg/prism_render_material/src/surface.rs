@@ -121,14 +121,33 @@ pub struct GpuAnisotropyLobe {
     pub _pad1: f32,
 }
 
-/// Sheen lobe: retro-reflective fabric rim response.
+/// Sheen (fuzz) lobe: retro-reflective fabric rim response.
+///
+/// The `OpenPBR` `fuzz` group. `sheen` is the fuzz weight, `fuzz_roughness` the
+/// independent highlight width (default `0.5`) and `fuzz_color` the per-channel
+/// tint (default white = achromatic, the historical behaviour).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuSheenLobe {
     pub sheen: f32,
+    /// `OpenPBR` `fuzz_roughness` in `[0, 1]`.
+    pub fuzz_roughness: f32,
     pub _pad0: f32,
     pub _pad1: f32,
-    pub _pad2: f32,
+    /// `OpenPBR` `fuzz_color` (white = achromatic fuzz).
+    pub fuzz_color: [f32; 4],
+}
+
+impl Default for GpuSheenLobe {
+    fn default() -> Self {
+        Self {
+            sheen: 0.0,
+            fuzz_roughness: 0.5,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            fuzz_color: [1.0; 4],
+        }
+    }
 }
 
 /// Subsurface lobe: wrapped diffuse approximation of shallow scattering.
@@ -374,9 +393,10 @@ impl SurfaceParameterBlock {
             },
             sheen: GpuSheenLobe {
                 sheen: params.sheen,
+                fuzz_roughness: params.fuzz_roughness,
                 _pad0: 0.0,
                 _pad1: 0.0,
-                _pad2: 0.0,
+                fuzz_color: params.fuzz_color,
             },
             subsurface: GpuSubsurfaceLobe {
                 subsurface: params.subsurface,
@@ -430,6 +450,8 @@ impl SurfaceParameterBlock {
         }
         if self.lobe_mask.contains(LobeMask::SHEEN) {
             full.sheen = self.sheen.sheen;
+            full.fuzz_roughness = self.sheen.fuzz_roughness;
+            full.fuzz_color = self.sheen.fuzz_color;
         }
         if self.lobe_mask.contains(LobeMask::SUBSURFACE) {
             full.subsurface = self.subsurface.subsurface;
@@ -579,6 +601,8 @@ mod tests {
             anisotropy: 0.3,
             anisotropy_rotation: 0.2,
             sheen: 0.45,
+            fuzz_roughness: 0.3,
+            fuzz_color: [0.8, 0.85, 0.9, 1.0],
             subsurface: 0.65,
             index_of_refraction: 1.33,
             dispersion: 0.05,
@@ -586,7 +610,7 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
-            _pad_tail: [0.0; 2],
+            _pad_tail: 0.0,
         }
     }
 

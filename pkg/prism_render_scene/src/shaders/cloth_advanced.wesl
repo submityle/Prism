@@ -185,24 +185,26 @@ fn cloth_advanced_direct(
     let n_dot_l = max(dot(n, l), 0.0);
     let n_dot_v = max(dot(n, v), CLOTH_ADV_MIN_N_DOT);
     let n_dot_h_raw = max(dot(n, h), CLOTH_ADV_MIN_N_DOT);
-    let roughness = clamp(surface.perceptual_roughness, CLOTH_ADV_MIN_ROUGHNESS, 1.0);
+    // The sheen (fuzz) parts take their width from `OpenPBR` `fuzz_roughness`,
+    // independently of the Lambertian base roughness.
+    let fuzz_roughness = clamp(surface.fuzz_roughness, CLOTH_ADV_MIN_ROUGHNESS, 1.0);
     let sheen = clamp(surface.sheen, 0.0, 1.0);
     let visibility = clamp(light.visibility, 0.0, 1.0);
 
     // Tension-driven wrinkle blend on the half-vector cosine.
     let n_dot_h = cloth_advanced_wrinkle_normal_blend(n_dot_h_raw, surface.anisotropy);
 
-    // Energy-conserving Charlie sheen (white fuzz).
-    let d = cloth_advanced_distribution_charlie_ec(roughness, n_dot_h);
+    // Energy-conserving Charlie sheen, tinted by `OpenPBR` `fuzz_color`.
+    let d = cloth_advanced_distribution_charlie_ec(fuzz_roughness, n_dot_h);
     let vis = cloth_advanced_visibility_ashikhmin(n_dot_v, n_dot_l);
-    let e = cloth_advanced_sheen_albedo(n_dot_v, roughness);
+    let e = cloth_advanced_sheen_albedo(n_dot_v, fuzz_roughness);
     let ms = cloth_advanced_multiscatter_comp(e, sheen);
     let sheen_lobe = sheen * d * vis * ms;
 
     // Woven warp/weft anisotropic threads, tinted by the thin-film interference.
     let woven = cloth_advanced_anisotropic_woven(surface, frame, n, v, h, n_dot_h, n_dot_v, n_dot_l);
     let film = cloth_advanced_thin_film_fresnel(n_dot_v, surface.thickness);
-    let specular = vec3<f32>(sheen_lobe) + woven * film;
+    let specular = surface.fuzz_color * sheen_lobe + woven * film;
 
     // Diffuse: Lambertian base darkened by the sheen directional albedo.
     let diff_scale = clamp(1.0 - sheen * e, 0.0, 1.0);
