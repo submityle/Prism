@@ -157,6 +157,10 @@ impl HeadlessRunner {
         let watchdog = self.watchdog.map(WatchdogConfig::start);
         let mut frame: u64 = 0;
         let exit = loop {
+            // Async-ready gate (design §6): finish + start up once every plugin
+            // reports ready. A plugin still initializing is waited for across
+            // frames instead of aborting the app.
+            app.try_finish();
             // Time only the frame's work (not the pacing sleep) so the adaptive
             // limiter sees headroom, not the cadence already in force.
             #[cfg(feature = "std")]

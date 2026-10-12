@@ -81,6 +81,10 @@ pub struct App {
     /// Whether [`run_shutdown`](App::run_shutdown) has already run, so a runner
     /// (or a double call) runs the graceful-shutdown path exactly once.
     shutdown_ran: bool,
+    /// Whether the one-time startup schedules have run. Set by
+    /// [`try_finish`](App::try_finish) at the assembly→running transition, so a
+    /// runner polling readiness never re-runs `Startup` (design §6).
+    startup_ran: bool,
 }
 
 impl Default for App {
@@ -173,6 +177,7 @@ impl App {
             initialized_states: HashSet::new(),
             added_events: HashSet::new(),
             shutdown_ran: false,
+            startup_ran: false,
         }
     }
 
@@ -527,7 +532,7 @@ impl App {
         }
         assert!(
             self.all_plugins_ready(),
-            "App::finish called while a plugin is not ready; async readiness waiting is an M1 runner feature"
+            "App::finish called while a plugin is not ready; use App::try_finish (polled by the runners) to wait for the ready gate"
         );
         self.plugins_state = PluginsState::Ready;
         let plugins = core::mem::take(&mut self.plugins);
@@ -685,14 +690,44 @@ impl App {
         outcome
     }
 
+    /// Finish, clean up, and run startup **iff** every plugin reports
+    /// [`ready`](Plugin::ready), returning whether the app is now finished.
+    ///
+    /// Unlike [`finish`](App::finish) this never panics while a plugin is still
+    /// initializing: it returns `false`, and the caller tries again next frame.
+    /// Runners call it at the top of every frame, so a plugin waiting on an
+    /// asynchronous dependency (a device handle, an asset backend) is *waited
+    /// for* rather than aborting the app — the two-stage ready/finish gate of
+    /// design §6. Once finished it is a single state check.
+    ///
+    /// Startup schedules run at most once, at the transition, so polling this
+    /// every frame never re-runs them.
+    pub fn try_finish(&mut self) -> bool {
+        if self.plugins_state == PluginsState::Adding {
+            if !self.all_plugins_ready() {
+                return false;
+            }
+            self.finish();
+        }
+        if self.plugins_state == PluginsState::Finished {
+            self.cleanup();
+        }
+        if !self.startup_ran {
+            self.run_startup();
+            self.startup_ran = true;
+        }
+        true
+    }
+
     /// Finalize plugins, run startup once, then hand the app to its runner.
     ///
     /// If no runner was set, defaults to [`run_once`](crate::runner::run_once),
     /// which drives exactly one frame. Returns the runner's [`AppExit`].
     pub fn run(&mut self) -> AppExit {
-        self.finish();
-        self.cleanup();
-        self.run_startup();
+        // Async-ready gate (design §6): finish + start up now when every plugin
+        // is already ready (the common case); a plugin still initializing is
+        // finished by the runner's first ready frame (see `try_finish`).
+        self.try_finish();
 
         let mut app = core::mem::replace(self, App::empty());
         let runner = app

@@ -21,6 +21,10 @@ impl ScheduleRunnerOnce {
 /// Run exactly one [`update`](App::update) frame, then return the app's exit
 /// request (defaulting to [`AppExit::Success`]).
 pub fn run_once(mut app: App) -> AppExit {
+    // Wait for the async-ready plugin gate before the frame (design §6): a
+    // plugin still initializing keeps the app in its adding state rather than
+    // panicking, though a single-frame runner gives it one chance.
+    app.try_finish();
     app.update();
     // Bring any pipelined render frame home before reading final state
     // (no-op without the `pipelined` feature / unless pipelining was enabled).

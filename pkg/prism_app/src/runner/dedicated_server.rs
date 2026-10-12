@@ -282,6 +282,9 @@ impl DedicatedServerRunner {
         let mut pacer = FramePacer::new(limit);
 
         let exit = loop {
+            // Async-ready gate (design §6): finish + start up once every plugin
+            // reports ready; a still-initializing plugin is waited for.
+            app.try_finish();
             let started = Instant::now();
             app.update();
             let work = Instant::now().saturating_duration_since(started);

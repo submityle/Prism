@@ -348,6 +348,68 @@ fn plugin_lifecycle_runs_in_order() {
     );
 }
 
+/// `try_finish` honours the async-ready gate: it waits (returning `false`)
+/// while a plugin is not ready, then finishes once and runs the startup
+/// schedules exactly once (design §6).
+#[test]
+fn try_finish_waits_for_ready_and_starts_up_once() {
+    #[derive(Default)]
+    struct Ready(bool);
+    impl Resource for Ready {}
+
+    #[derive(Default)]
+    struct Startups(u32);
+    impl Resource for Startups {}
+
+    struct GatePlugin;
+    impl Plugin for GatePlugin {
+        fn build(&self, app: &mut App) {
+            app.insert_resource(Ready(false));
+            app.insert_resource(Startups(0));
+            app.add_systems(Startup, |mut n: ResMut<Startups>| n.0 += 1);
+        }
+        fn ready(&self, app: &App) -> bool {
+            app.world().resource::<Ready>().0
+        }
+    }
+
+    let mut app = App::new();
+    app.add_plugins(GatePlugin);
+    assert!(!app.all_plugins_ready());
+    assert!(!app.try_finish(), "a not-ready plugin blocks finishing");
+    assert_eq!(app.plugins_state(), PluginsState::Adding);
+    assert_eq!(app.world().resource::<Startups>().0, 0, "startup not yet run");
+
+    // Opening the gate lets it finish; startup runs once at the transition.
+    app.world_mut().resource_mut::<Ready>().0 = true;
+    assert!(app.try_finish());
+    assert_eq!(app.plugins_state(), PluginsState::Cleaned);
+    assert_eq!(app.world().resource::<Startups>().0, 1);
+
+    // Idempotent: polling again neither re-finishes nor re-runs startup.
+    assert!(app.try_finish());
+    assert_eq!(app.world().resource::<Startups>().0, 1);
+}
+
+/// `App::run` no longer aborts when a plugin is not yet ready: the runner drives
+/// frames and re-checks the gate each frame, so an app whose plugin never
+/// becomes ready still exits cleanly instead of panicking (design §6).
+#[test]
+fn run_waits_instead_of_panicking_when_a_plugin_is_not_ready() {
+    struct NeverReady;
+    impl Plugin for NeverReady {
+        fn build(&self, _app: &mut App) {}
+        fn ready(&self, _app: &App) -> bool {
+            false
+        }
+    }
+
+    let mut app = App::new();
+    app.add_plugins(NeverReady);
+    app.set_runner(crate::runner::ScheduleRunnerOnce::run);
+    assert_eq!(app.run(), AppExit::Success);
+}
+
 struct NoopPlugin;
 impl Plugin for NoopPlugin {
     fn build(&self, _app: &mut App) {}

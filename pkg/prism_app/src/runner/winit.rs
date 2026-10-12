@@ -167,6 +167,9 @@ impl WinitApp for WindowedHost {
             self.first_frame_sent = true;
         }
 
+        // Async-ready gate (design §6): finish + start up once every plugin
+        // reports ready; a still-initializing plugin is waited for.
+        self.app.try_finish();
         self.app.update();
 
         if let Some(exit) = self.app.poll_exit() {
