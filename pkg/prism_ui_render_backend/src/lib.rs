@@ -107,7 +107,7 @@ pub use draw::{DrawCommand, DrawList, GlyphCmd, LayerCmd, RectCmd, ShadowCmd};
 pub use ellipse::flatten_ellipse;
 #[cfg(feature = "gpu")]
 pub use gpu::GpuRasterizer;
-pub use gradient::{LinearGradient, Stop};
+pub use gradient::{LinearGradient, RadialGradient, Stop};
 pub use hull::convex_hull;
 pub use inside::point_in_polygon;
 pub use layer::{Layer, LayerTree};

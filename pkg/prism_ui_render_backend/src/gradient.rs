@@ -1,11 +1,14 @@
-//! Linear gradients: project a point onto an axis and blend the color stops.
+//! Gradients: linear and radial, sampling ordered color stops.
 //!
 //! A modern UI surface almost never paints a flat fill — buttons, cards,
-//! progress bars and backdrops use a gradient. [`LinearGradient`] is the core
-//! primitive: an axis (`start` → `end`) plus ordered [`Stop`]s. Sampling a point
-//! projects it onto the axis to a parameter `t` in `0..=1` (clamped) and blends
-//! the surrounding stops with [`Color::lerp`](prism_ui_style::Color::lerp), so
-//! the shading reuses the same linear-space color math as everything else.
+//! progress bars and backdrops use a gradient. Both primitives reduce a sample
+//! point to a parameter `t` in `0..=1` and blend the surrounding [`Stop`]s with
+//! [`Color::lerp`](prism_ui_style::Color::lerp), so the shading reuses the same
+//! linear-space color math as everything else — only the projection differs:
+//!
+//! - [`LinearGradient`]: `t` is the position along an axis (`start` → `end`).
+//! - [`RadialGradient`]: `t` is the distance from `center`, normalised by
+//!   `radius`.
 //!
 //! Stops are normalised once at construction — offsets clamped into `0..=1` and
 //! sorted — so sampling never has to re-order them. All arithmetic is `+ - * /`
@@ -33,6 +36,48 @@ impl Stop {
     }
 }
 
+/// Clamp each offset into `0..=1` (a `NaN` becomes `0`) and sort the stops by
+/// offset with a **stable** sort, so equal offsets keep their given order.
+fn normalize_stops(stops: &mut [Stop]) {
+    for stop in stops.iter_mut() {
+        stop.offset = if stop.offset.is_nan() {
+            0.0
+        } else {
+            stop.offset.clamp(0.0, 1.0)
+        };
+    }
+    stops.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+}
+
+/// Sample a normalised stop slice at `t` (clamped into `0..=1`).
+///
+/// Shared by every gradient kind: before the first stop the first color is
+/// returned, after the last stop the last color, and between two stops the
+/// colors blend by [`Color::lerp`](prism_ui_style::Color::lerp). Two stops
+/// sharing an offset form a hard break (the first ramp ends there; the later
+/// stop's color begins strictly after). No stops yields [`Color::TRANSPARENT`].
+fn sample_stops(stops: &[Stop], t: f32) -> Color {
+    let t = if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) };
+    let Some((first, rest)) = stops.split_first() else {
+        return Color::TRANSPARENT;
+    };
+    if t <= first.offset {
+        return first.color;
+    }
+    let mut prev = *first;
+    for stop in rest {
+        if t <= stop.offset {
+            let span = stop.offset - prev.offset;
+            if span <= 0.0 {
+                return stop.color;
+            }
+            return prev.color.lerp(stop.color, (t - prev.offset) / span);
+        }
+        prev = *stop;
+    }
+    prev.color
+}
+
 /// A linear gradient from `start` to `end`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinearGradient {
@@ -48,14 +93,7 @@ impl LinearGradient {
     /// two-stop pair at the same offset act as a hard color break).
     #[must_use]
     pub fn new(start: (f32, f32), end: (f32, f32), mut stops: Vec<Stop>) -> Self {
-        for stop in &mut stops {
-            stop.offset = if stop.offset.is_nan() {
-                0.0
-            } else {
-                stop.offset.clamp(0.0, 1.0)
-            };
-        }
-        stops.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+        normalize_stops(&mut stops);
         Self { start, end, stops }
     }
 
@@ -105,32 +143,82 @@ impl LinearGradient {
     ///
     /// Before the first stop the first color is returned, after the last stop
     /// the last color, and between two stops the colors are blended by
-    /// [`Color::lerp`](prism_ui_style::Color::lerp). Two stops sharing an offset
-    /// produce a hard break: up to and including the offset the earlier
-    /// interval's end color is used, and strictly after it the later stop's
-    /// color begins. No stops yields [`Color::TRANSPARENT`]. The scan is linear
-    /// in the stop count, which is a handful in practice.
+    /// [`Color::lerp`](prism_ui_style::Color::lerp); see that helper for the
+    /// hard-break and empty cases.
     #[must_use]
     pub fn sample_t(&self, t: f32) -> Color {
-        let t = if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) };
-        let Some((first, rest)) = self.stops.split_first() else {
-            return Color::TRANSPARENT;
-        };
-        if t <= first.offset {
-            return first.color;
+        sample_stops(&self.stops, t)
+    }
+}
+
+/// A radial gradient centered at `center` with `radius`.
+///
+/// Sampling `t` is the sample point's distance from the center divided by
+/// `radius`, clamped into `0..=1`, so every point on a circle around `center`
+/// shares a color. A non-positive or non-finite `radius` maps every point to `0`
+/// (the first stop's color), which is the natural degenerate behavior.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RadialGradient {
+    center: (f32, f32),
+    radius: f32,
+    stops: Vec<Stop>,
+}
+
+impl RadialGradient {
+    /// Build a radial gradient, normalising stops exactly like
+    /// [`LinearGradient::new`].
+    #[must_use]
+    pub fn new(center: (f32, f32), radius: f32, mut stops: Vec<Stop>) -> Self {
+        normalize_stops(&mut stops);
+        Self {
+            center,
+            radius,
+            stops,
         }
-        let mut prev = *first;
-        for stop in rest {
-            if t <= stop.offset {
-                let span = stop.offset - prev.offset;
-                if span <= 0.0 {
-                    return stop.color;
-                }
-                return prev.color.lerp(stop.color, (t - prev.offset) / span);
-            }
-            prev = *stop;
+    }
+
+    /// The gradient center.
+    #[must_use]
+    pub fn center(&self) -> (f32, f32) {
+        self.center
+    }
+
+    /// The gradient radius.
+    #[must_use]
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+
+    /// The normalised stops, sorted by offset.
+    #[must_use]
+    pub fn stops(&self) -> &[Stop] {
+        &self.stops
+    }
+
+    /// The radial parameter `t` of point `p`, clamped into `0..=1`.
+    ///
+    /// A non-positive or non-finite `radius` maps every point to `0`.
+    #[must_use]
+    pub fn project(&self, p: (f32, f32)) -> f32 {
+        if !self.radius.is_finite() || self.radius <= 0.0 {
+            return 0.0;
         }
-        prev.color
+        let dx = p.0 - self.center.0;
+        let dy = p.1 - self.center.1;
+        ((dx * dx + dy * dy).sqrt() / self.radius).clamp(0.0, 1.0)
+    }
+
+    /// Sample the gradient color at point `p` (equivalent to
+    /// `sample_t(project(p))`).
+    #[must_use]
+    pub fn sample(&self, p: (f32, f32)) -> Color {
+        self.sample_t(self.project(p))
+    }
+
+    /// Sample the gradient color at radial parameter `t` (clamped into `0..=1`).
+    #[must_use]
+    pub fn sample_t(&self, t: f32) -> Color {
+        sample_stops(&self.stops, t)
     }
 }
 
@@ -235,5 +323,43 @@ mod tests {
         let g = bw((3.0, 3.0), (3.0, 3.0));
         assert_eq!(g.project((9.0, -2.0)), 0.0);
         assert!(colors_close(g.sample((9.0, -2.0)), Color::BLACK));
+    }
+
+    fn radial_bw(center: (f32, f32), radius: f32) -> RadialGradient {
+        RadialGradient::new(
+            center,
+            radius,
+            vec![Stop::new(0.0, Color::BLACK), Stop::new(1.0, Color::WHITE)],
+        )
+    }
+
+    #[test]
+    fn radial_center_is_first_and_the_edge_is_last() {
+        let g = radial_bw((0.0, 0.0), 10.0);
+        assert!(colors_close(g.sample((0.0, 0.0)), Color::BLACK));
+        assert!(colors_close(g.sample((10.0, 0.0)), Color::WHITE));
+        assert!(colors_close(g.sample((0.0, -10.0)), Color::WHITE));
+        // Beyond the radius clamps to the last color.
+        assert!(colors_close(g.sample((100.0, 0.0)), Color::WHITE));
+    }
+
+    #[test]
+    fn radial_concentric_points_share_a_color() {
+        let g = radial_bw((0.0, 0.0), 10.0);
+        // (3,4) and (0,5) are both distance 5, i.e. t = 0.5.
+        assert!(colors_close(g.sample((3.0, 4.0)), g.sample((0.0, 5.0))));
+        assert!(colors_close(
+            g.sample((3.0, 4.0)),
+            Color::BLACK.lerp(Color::WHITE, 0.5)
+        ));
+    }
+
+    #[test]
+    fn radial_degenerate_radius_is_constant() {
+        let zero = radial_bw((1.0, 1.0), 0.0);
+        assert_eq!(zero.project((9.0, 9.0)), 0.0);
+        assert!(colors_close(zero.sample((9.0, 9.0)), Color::BLACK));
+        let negative = radial_bw((0.0, 0.0), -4.0);
+        assert!(colors_close(negative.sample((5.0, 0.0)), Color::BLACK));
     }
 }
