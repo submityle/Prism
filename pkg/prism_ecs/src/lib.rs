@@ -49,6 +49,9 @@ pub mod archetype;
 pub mod blob;
 pub mod bundle;
 pub mod change;
+pub mod change_observers;
+#[cfg(test)]
+mod change_observers_tests;
 pub mod command;
 pub mod component;
 pub mod component_hooks;
@@ -96,6 +99,7 @@ pub mod prelude {
     pub use crate::observer::{
         EventContext, LifecycleEvent, ObserverContext, ObserverId, Observers,
     };
+    pub use crate::change_observers::ChangeContext;
     #[cfg(feature = "partition")]
     pub use crate::partition::cell::{
         CellCoord, CellState, CellStreamer, StreamingDelta, WorldPartitionCell,

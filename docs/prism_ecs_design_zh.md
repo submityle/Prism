@@ -288,6 +288,7 @@ world.observe::<OnRemove, RelationFilter<ChildOf>>(|t| { /* 级联清理 */ });
 ```
 
 - 支持针对组件、关系、自定义事件触发；可沿 `ChildOf` 向上冒泡（UI/游戏事件）。
+- **变更观察总线（§24.2）**：`World::observe_changed::<T>(cb)` 订阅**变更检测**（`Changed<T>` 语义）而非结构变更。`World::flush_changed_observers()` 每个观察者每次 flush **至多回调一次**，携带**合并去重、按实体索引升序**的变更集合，观察者按注册序触发，保证确定序回放；`Schedule::run` / `run_parallel` 在每次运行末尾自动 flush（也可手动控制节奏）。回调内对同组件的写入会被安排到**下一次** flush（窗口先推进再回调），不会被本次窗口吞掉。
 
 ---
 
@@ -446,7 +447,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 
 ## 22. 诚实边界与风险
 
-- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 / 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 快照+回滚 / 分区流送 / GPU 常驻列 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`）、§23.5 渲染提取管线，以及百万级实体 / 多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标。
+- 本文含设计规格与现状：**M0–M5 内核及第 23 章增补已在 `pkg/prism_ecs/` 落地实现**（代际 Entity / 原型 chunk 列存 / 四态存储 / 查询+脏块访问器 / 调度+冲突图执行器 / fiber 作业图 / 关系+Observer+Hook / push 反应图 / 变更观察总线 / 快照+回滚 / 分区流送 / GPU 常驻列 / 诊断接口均有实现与测试）；**仍为 PLANNED 的是** M6 迁移对接、第 24 章跨 crate 契约对齐（§24.1 已部分接入 `prism_tasks`，§24.2 的 ECS 侧变更观察总线已落地、跨 crate 接线待续）、§23.5 渲染提取管线，以及百万级实体 / 多核近线性 / NUMA / GPU 真机常驻 / 跨平台浮点确定性等需硬件压测的指标。
 - 规模与多核扩展性、NUMA、GPU 常驻指标依赖真实硬件压测，单测不能替代。
 - **高风险项**：
   1. **chunk 变更版本 + 脏块访问器（M2）**：触存储/原型/变更检测三核心，最复杂，须充分基准 + 等价测试，严禁一次性大改。
@@ -529,6 +530,8 @@ ECS §12 Observer 是其他 crate 派生更新的统一入口，避免轮询：
 - `prism_transform` 的 `OnChanged<GlobalTransform>`（transform §24.4）、空间加速结构增量同步（transform §24.5）均经 ECS Observer 触发。
 - ECS 保证 Observer **批量合并**（本帧多次变化只回调一次）与**确定序回放**（配合 §14 确定性），使空间索引/音频重定位/阴影失效的触发可预测、可回滚。
 
+**ECS 侧已落地**：`World::observe_changed::<T>(cb)` / `World::flush_changed_observers()`（见 `change_observers.rs`）实现上述两条保证——按帧合并（同一实体多次变化只投递一次）与确定序（观察者按注册序、变更集合按实体索引升序）；回调经 `ChangeContext` 拿到 `&mut World` 与合并后的变更集合，可安全做结构变更，且回调自身的写入顺延到下一次 flush，天然避免「回调触发自己」的抖动。`Schedule::run`/`run_parallel` 末尾自动 flush。「跨 crate 的 `prism_transform` 触发点接线」仍待 transform 侧 v0.2 契约落地后接入。
+
 ### 24.3 反射驱动的动态组件 / 快照 / 网络增量
 
 ECS §16 的动态组件、snapshot、prefab 继承、反射桥**以 `prism_reflect` v0.2 为类型基座**：
@@ -552,4 +555,4 @@ ECS 确定性仿真（§14）不是孤立的，必须与三个地基 crate 的�
 
 ### 24.5 诚实边界
 
-本章为跨 crate 职责对齐说明：**§24.1 调度执行底座已部分接入**（冲突图执行器把并行波次派发到 `prism_tasks::TaskPool`、lane→优先级映射见 `schedule/{graph,config,lane}.rs`）；**§24.2 / §24.3 / §24.4 仍为 PLANNED**（分别随 M4 Observer 层、reflect/M2 资产、M5 确定性/网络落地）。本章不引入 ECS 新机制，仅固定跨 crate 职责边界与引用。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章为跨 crate 职责对齐说明：**§24.1 调度执行底座已部分接入**（冲突图执行器把并行波次派发到 `prism_tasks::TaskPool`、lane→优先级映射见 `schedule/{graph,config,lane}.rs`）；**§24.2 的 ECS 侧已落地**（变更观察总线 `change_observers.rs`：`observe_changed` / `flush_changed_observers`，按帧合并 + 确定序 + `Schedule::run` 自动 flush；跨 crate 的 transform 触发点仍待接）；**§24.3 / §24.4 仍为 PLANNED**（随 reflect/M2 资产、M5 确定性/网络落地）。本章不引入 ECS 新机制，仅固定跨 crate 职责边界与引用。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。

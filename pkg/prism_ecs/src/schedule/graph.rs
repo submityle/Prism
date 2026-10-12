@@ -239,6 +239,11 @@ impl Schedule {
     pub fn run(&mut self, world: &mut World) {
         self.initialize(world);
         crate::schedule::executor::SingleThreadedExecutor::run(self, world);
+        // Change-driven observers (design §24.2) fire once per schedule run with
+        // the coalesced set of components changed during it.
+        if !world.change_observers.is_empty() {
+            world.flush_changed_observers();
+        }
     }
 
     /// Initialise if needed, then run every system using the **parallel
@@ -261,6 +266,11 @@ impl Schedule {
     pub fn run_parallel(&mut self, pool: &prism_tasks::TaskPool, world: &mut World) {
         self.initialize(world);
         crate::schedule::parallel_executor::MultiThreadedExecutor::run(self, pool, world);
+        // Same coalesced change-observer flush as the single-threaded path; the
+        // delivery order is registration-then-ascending-entity either way.
+        if !world.change_observers.is_empty() {
+            world.flush_changed_observers();
+        }
     }
 
     /// Evaluate (AND) all conditions configured on `set`. A set with no

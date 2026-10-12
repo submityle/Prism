@@ -279,7 +279,9 @@ impl World {
     /// Remove a previously registered observer (lifecycle or custom-event).
     /// Returns whether an observer with that id existed.
     pub fn remove_observer(&mut self, id: ObserverId) -> bool {
-        self.observers_mut().remove(id)
+        // Also covers the change-driven bus (design §24.2), whose ids come from
+        // the same allocator and are interchangeable with `remove_change_observer`.
+        self.observers_mut().remove(id) || self.change_observers.remove(id)
     }
 
     /// Raise a custom event of marker type `E` against `target` (design §12),
@@ -334,7 +336,7 @@ impl World {
     }
 
     /// Allocate the next process-unique observer id.
-    fn alloc_observer_id(&mut self) -> ObserverId {
+    pub(crate) fn alloc_observer_id(&mut self) -> ObserverId {
         let id = ObserverId(self.next_observer_id);
         self.next_observer_id += 1;
         id

@@ -69,6 +69,10 @@ pub struct World {
     /// event-driven reactions fired at structural-change sites, layered on
     /// top of the low-level component-hook layer. Empty by default.
     pub(crate) observers: Observers,
+    /// Change-driven observer registry (design §24.2): a coalesced,
+    /// deterministic derived-update bus flushed once per schedule run (or on
+    /// demand). Empty by default.
+    pub(crate) change_observers: crate::change_observers::ChangeObservers,
     /// Monotonic counter backing [`ObserverId`](crate::observer::ObserverId)
     /// allocation so every registered observer gets a stable, process-unique
     /// id even across remove/re-add churn.
@@ -115,6 +119,7 @@ impl World {
             resources: Resources::new(),
             relations: Relations::new(),
             observers: Observers::new(),
+            change_observers: crate::change_observers::ChangeObservers::default(),
             next_observer_id: 0,
             change_tick: Tick::new(1),
             last_change_tick: Tick::ZERO,
