@@ -18,10 +18,14 @@
 //!
 //! # Honestly deferred
 //!
-//! The winit host trait surfaces only a one-shot `resumed` callback, so this
-//! runner forwards [`Resumed`] but has no platform *suspend* hook to forward
-//! [`Suspended`]; likewise [`prism_window`] does not carry a low-memory signal
-//! yet. Those remain M4 follow-ups rather than being faked here.
+//! The winit host trait now surfaces both a one-shot `resumed` and a repeatable
+//! `suspended`, so this runner forwards [`Resumed`] and [`Suspended`] (design
+//! §12/§25.1 — a suspend pauses virtual time and the app's
+//! [`AppLifecycle`](crate::lifecycle::AppLifecycle) moves to
+//! [`Suspended`](crate::lifecycle::AppLifecycle::Suspended)). A platform
+//! *low-memory* signal is still absent from [`prism_window`], so [`LowMemory`]
+//! is not forwarded yet; that remains an M4 follow-up rather than being faked
+//! here.
 
 use core::cell::Cell;
 use std::rc::Rc;
@@ -37,7 +41,7 @@ use prism_window_winit::{
 
 use crate::app::App;
 use crate::exit::{AppExit, AppExitRequest};
-use crate::lifecycle::{FocusChanged, Resumed, WillRenderFirstFrame};
+use crate::lifecycle::{FocusChanged, Resumed, Suspended, WillRenderFirstFrame};
 use crate::pacing::{FrameLimit, FramePacer};
 
 /// An action the windowed runner derives from a frame's window events.
@@ -123,6 +127,14 @@ impl WinitApp for WindowedHost {
             }
         }
         self.app.send_event(Resumed);
+    }
+
+    fn suspended(&mut self, _backend: &mut WinitBackend) {
+        // A platform suspend pauses the app: `drive_app_lifecycle` (installed
+        // by `App::add_lifecycle_events`) moves `AppLifecycle` to `Suspended`,
+        // pauses virtual time, and stops advancing the fixed accumulator until
+        // the matching `Resumed` (design §12/§25.1).
+        self.app.send_event(Suspended);
     }
 
     fn frame(&mut self, backend: &mut WinitBackend) -> FrameOutcome {
@@ -323,5 +335,26 @@ mod tests {
         let mut other = vec![WindowId(1)];
         assert!(!close_windows(&mut other, &[WindowId(9)]));
         assert_eq!(other, vec![WindowId(1)]);
+    }
+
+    #[test]
+    fn platform_suspend_forwards_one_suspended_event() {
+        let exit = Rc::new(Cell::new(None));
+        let mut host = WindowedHost {
+            app: App::new(),
+            windows: Vec::new(),
+            open: Vec::new(),
+            started: false,
+            pacer: FramePacer::new(FrameLimit::Off),
+            first_frame_sent: false,
+            exit,
+        };
+        let mut backend = WinitBackend::new();
+        host.suspended(&mut backend);
+        let events = host
+            .app
+            .world()
+            .resource::<prism_ecs::event::Events<Suspended>>();
+        assert_eq!(events.len(), 1, "suspend buffers one Suspended event");
     }
 }

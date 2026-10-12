@@ -248,6 +248,12 @@ pub trait WinitApp {
     /// exist. The host should request its initial window(s) here.
     fn resumed(&mut self, backend: &mut WinitBackend);
 
+    /// Called when the platform is about to suspend the process (for example
+    /// when a mobile app is backgrounded). The host should pause simulation and
+    /// release transient resources; a later [`resumed`](Self::resumed) rebuilds
+    /// them. Defaults to a no-op for desktop platforms that never suspend.
+    fn suspended(&mut self, _backend: &mut WinitBackend) {}
+
     /// Called once per event-loop iteration after the frame's platform events
     /// have been collected and coalesced. The host reads events, mutates
     /// desired window state, and may request or destroy windows. Returning
@@ -285,6 +291,23 @@ impl<A: WinitApp> WinitRunner<A> {
         &mut self.backend
     }
 
+    /// Notify the host of a first-time resume, exactly once. Factored out of
+    /// the winit callback so the resume/forwarding logic is testable without a
+    /// live event loop.
+    fn handle_resumed(&mut self) {
+        if !self.resumed_once {
+            self.resumed_once = true;
+            self.app.resumed(&mut self.backend);
+        }
+    }
+
+    /// Notify the host that the platform is suspending the process. Factored
+    /// out of the winit callback so the forwarding logic is testable without a
+    /// live event loop.
+    fn handle_suspended(&mut self) {
+        self.app.suspended(&mut self.backend);
+    }
+
     /// Creates the OS event loop and runs it to completion on the calling
     /// thread. Blocks until the host returns [`FrameOutcome::Exit`] or the OS
     /// terminates the loop. Must be called on the main thread.
@@ -303,14 +326,15 @@ impl<A: WinitApp> WinitRunner<A> {
 
 impl<A: WinitApp> ApplicationHandler for WinitRunner<A> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if !self.resumed_once {
-            self.resumed_once = true;
-            self.app.resumed(&mut self.backend);
-        }
+        self.handle_resumed();
         // Build any windows the host requested (either in `resumed` just now or
         // queued earlier). On Android a resume can recur; `request_window`
         // queueing plus this drain tolerates that.
         self.backend.process_pending_create(event_loop);
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.handle_suspended();
     }
 
     fn window_event(
@@ -369,6 +393,48 @@ impl<A: WinitApp> ApplicationHandler for WinitRunner<A> {
 mod tests {
     use super::*;
     use prism_window::geometry::PhysicalSize;
+
+    /// A host that counts the lifecycle callbacks it receives.
+    struct CountingApp {
+        resumed: usize,
+        suspended: usize,
+    }
+
+    impl WinitApp for CountingApp {
+        fn resumed(&mut self, _backend: &mut WinitBackend) {
+            self.resumed += 1;
+        }
+
+        fn suspended(&mut self, _backend: &mut WinitBackend) {
+            self.suspended += 1;
+        }
+
+        fn frame(&mut self, _backend: &mut WinitBackend) -> FrameOutcome {
+            FrameOutcome::Continue
+        }
+    }
+
+    #[test]
+    fn first_resume_notifies_the_host_exactly_once() {
+        let mut runner = WinitRunner::new(CountingApp {
+            resumed: 0,
+            suspended: 0,
+        });
+        runner.handle_resumed();
+        runner.handle_resumed();
+        assert_eq!(runner.app.resumed, 1, "resume is one-shot");
+    }
+
+    #[test]
+    fn every_suspend_notifies_the_host() {
+        let mut runner = WinitRunner::new(CountingApp {
+            resumed: 0,
+            suspended: 0,
+        });
+        runner.handle_suspended();
+        runner.handle_suspended();
+        assert_eq!(runner.app.suspended, 2, "each suspend is forwarded");
+    }
 
     #[test]
     fn request_window_allocates_distinct_ids() {
