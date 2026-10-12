@@ -15,9 +15,38 @@
 use prism_ecs::prelude::Resource;
 use prism_render_architecture::gpu_scene::{GeometryHandle, SceneHandle, SceneMaterialHandle};
 use prism_render_driver::RenderPipelineId;
+use prism_render_material::MaterialRenderClass;
 
 use crate::draw::{DrawFunctionId, DrawFunctions};
 use crate::sets::RenderPhase;
+
+/// The phase a surface draw belongs to, from its material's blend family.
+///
+/// Selection is by [`MaterialRenderClass`] **only**. `illumination`
+/// (Lit / Stylized / Unlit / Custom) is the *response* axis
+/// (`prism_material_pipeline_refactor_zh.md` §3.5/§8.5), not a phase: a stylized
+/// or custom surface draws in the same opaque/transparent phase as a lit one and
+/// differs only in the response its shader dispatches to. The
+/// [`RenderPhase::Stylized`] and [`RenderPhase::Custom`] phases host extra
+/// *passes* (an NPR outline pass, a project-injected pass), not the surface
+/// draws of those materials.
+#[must_use]
+pub fn phase_for_render_class(class: MaterialRenderClass) -> RenderPhase {
+    match class {
+        MaterialRenderClass::Opaque
+        | MaterialRenderClass::OpaqueTwoSided
+        | MaterialRenderClass::Masked
+        | MaterialRenderClass::MaskedTwoSided
+        | MaterialRenderClass::Hair
+        | MaterialRenderClass::Water => RenderPhase::Opaque,
+        MaterialRenderClass::Transmissive
+        | MaterialRenderClass::Transparent
+        | MaterialRenderClass::Additive
+        | MaterialRenderClass::Decal => RenderPhase::Transparent,
+        // A volume is not a surface mesh draw; it is a project-injected pass.
+        MaterialRenderClass::Volume => RenderPhase::Custom,
+    }
+}
 
 /// One queued draw: the pipeline to bind plus the mesh/material it draws.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

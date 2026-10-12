@@ -25,6 +25,8 @@ use crate::sets::{RenderPhase, RenderSystems};
 use crate::views::RenderViews;
 use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
 use crate::queue::{PhaseItem, RenderQueues};
+use crate::queue::phase_for_render_class;
+use prism_render_material::MaterialRenderClass;
 use crate::draw::{DrawFunctionId, DrawFunctions};
 use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineSpecializer};
 use crate::texture_cache::{TextureCache, TextureKey};
@@ -328,6 +330,35 @@ fn recording_a_phase_invokes_each_draw_function() {
     // An unknown id is a no-op, never a panic.
     functions.call(DrawFunctionId(99), &queues.phase(RenderPhase::Opaque)[0], &mut recorded);
     assert_eq!(recorded, "1;2;");
+}
+
+/// Surface draws are phased by blend family only — the illumination axis is a
+/// response, not a phase.
+#[test]
+fn material_render_class_selects_the_phase() {
+    use MaterialRenderClass::{
+        Additive, Decal, Hair, Masked, MaskedTwoSided, Opaque, OpaqueTwoSided, Transmissive,
+        Transparent, Volume, Water,
+    };
+    for class in [Opaque, OpaqueTwoSided, Masked, MaskedTwoSided, Hair, Water] {
+        assert_eq!(
+            phase_for_render_class(class),
+            RenderPhase::Opaque,
+            "{class:?} is opaque-family"
+        );
+    }
+    for class in [Transmissive, Transparent, Additive, Decal] {
+        assert_eq!(
+            phase_for_render_class(class),
+            RenderPhase::Transparent,
+            "{class:?} is transparent-family"
+        );
+    }
+    assert_eq!(
+        phase_for_render_class(Volume),
+        RenderPhase::Custom,
+        "a volume is a project-injected pass, not a surface draw"
+    );
 }
 
 /// Mesh specialization builds one pipeline per `(variant, layout)` pair and

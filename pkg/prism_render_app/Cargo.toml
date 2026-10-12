@@ -11,6 +11,7 @@ publish = false
 prism_app = { path = "../prism_app" }
 prism_ecs = { path = "../prism_ecs" }
 prism_render_architecture = { path = "../prism_render_architecture" }
+prism_render_material = { path = "../prism_render_material" }
 prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
 prism_render_graph = { path = "../prism_render_graph" }
 prism_render_runtime = { path = "../prism_render_runtime" }

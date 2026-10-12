@@ -83,7 +83,7 @@ pub use label::{Render, RenderApp};
 pub use mesh_pipeline::{MeshPipelineKey, MeshPipelineSpecializer};
 pub use pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
 pub use plugin::PrismRenderPlugin;
-pub use queue::{PhaseItem, RenderQueues};
+pub use queue::{PhaseItem, RenderQueues, phase_for_render_class};
 pub use record::RenderRecord;
 pub use runtime_resource::RenderRuntimeResource;
 pub use sets::{RenderPhase, RenderSystems, configure_render_sets};
@@ -102,7 +102,7 @@ pub mod prelude {
     pub use crate::mesh_pipeline::{MeshPipelineKey, MeshPipelineSpecializer};
     pub use crate::pipeline_cache::{PipelineCache, PipelineKey, hash_vertex_layouts};
     pub use crate::plugin::PrismRenderPlugin;
-    pub use crate::queue::{PhaseItem, RenderQueues};
+    pub use crate::queue::{PhaseItem, RenderQueues, phase_for_render_class};
     pub use crate::record::RenderRecord;
     pub use crate::sets::{RenderPhase, RenderSystems};
     pub use crate::stats::RenderFrameStats;
