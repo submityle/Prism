@@ -2391,3 +2391,65 @@ fn prism_aabb_merge_lo(a_lo: vec3<f32>, b_lo: vec3<f32>) -> vec3<f32> {\n\
 fn prism_aabb_merge_hi(a_hi: vec3<f32>, b_hi: vec3<f32>) -> vec3<f32> {\n\
     return max(a_hi, b_hi);\n\
 }\n";
+
+/// Single-sourced WGSL for the Q16.16 fixed-point scalar
+/// [`I16F16`](crate::fixed::i16f16::I16F16), mirroring its saturating ops on the
+/// raw `i32` bits. Integer fixed-point is the deterministic path (exact,
+/// platform-independent), so the device result is **bit-identical** to the CPU.
+/// `prism_i16f16_add`/`_sub`/`_neg`/`_abs` reproduce the `i32` saturating
+/// semantics (`MIN` negates to `MAX`); `_min`/`_max` are comparisons; `_mul`
+/// widens to an exact 64-bit two's-complement product (via the shared
+/// [`WGSL_U64`] emulation), adds the Q16.16 rounding bias `1<<15`, arithmetic-
+/// shifts right 16, and saturates back to `i32`. `div` (needing a 64-bit
+/// divide) is not mirrored here. This is the GPU side of deterministic
+/// fixed-point simulation.
+pub const WGSL_I16F16: &str = "\
+fn prism_i16f16_add(a: i32, b: i32) -> i32 {\n\
+    let mx = 2147483647;\n\
+    let mn = bitcast<i32>(0x80000000u);\n\
+    if (b > 0 && a > mx - b) { return mx; }\n\
+    if (b < 0 && a < mn - b) { return mn; }\n\
+    return a + b;\n\
+}\n\
+\n\
+fn prism_i16f16_sub(a: i32, b: i32) -> i32 {\n\
+    let mx = 2147483647;\n\
+    let mn = bitcast<i32>(0x80000000u);\n\
+    if (b > 0 && a < mn + b) { return mn; }\n\
+    if (b < 0 && a > mx + b) { return mx; }\n\
+    return a - b;\n\
+}\n\
+\n\
+fn prism_i16f16_neg(a: i32) -> i32 {\n\
+    if (a == bitcast<i32>(0x80000000u)) { return 2147483647; }\n\
+    return -a;\n\
+}\n\
+\n\
+fn prism_i16f16_abs(a: i32) -> i32 {\n\
+    if (a < 0) { return prism_i16f16_neg(a); }\n\
+    return a;\n\
+}\n\
+\n\
+fn prism_i16f16_min(a: i32, b: i32) -> i32 { return min(a, b); }\n\
+fn prism_i16f16_max(a: i32, b: i32) -> i32 { return max(a, b); }\n\
+\n\
+fn prism_i16f16_mul_u64(alo: u32, ahi: u32, blo: u32, bhi: u32) -> vec2<u32> {\n\
+    let lo = alo * blo;\n\
+    let hi = prism_u64_mul_hi(alo, blo) + alo * bhi + ahi * blo;\n\
+    return vec2<u32>(lo, hi);\n\
+}\n\
+\n\
+fn prism_i16f16_mul(a: i32, b: i32) -> i32 {\n\
+    let a_hi = select(0u, 0xffffffffu, a < 0);\n\
+    let b_hi = select(0u, 0xffffffffu, b < 0);\n\
+    let p = prism_i16f16_mul_u64(bitcast<u32>(a), a_hi, bitcast<u32>(b), b_hi);\n\
+    let r = prism_u64_add(p.x, p.y, 0x8000u, 0u);\n\
+    let sign = select(0u, 0xffff0000u, (r.y >> 31u) == 1u);\n\
+    let lo = (r.x >> 16u) | (r.y << 16u);\n\
+    let hi = (r.y >> 16u) | sign;\n\
+    if (hi == select(0u, 0xffffffffu, (lo >> 31u) == 1u)) {\n\
+        return bitcast<i32>(lo);\n\
+    }\n\
+    if ((hi >> 31u) == 1u) { return bitcast<i32>(0x80000000u); }\n\
+    return 2147483647;\n\
+}\n";
