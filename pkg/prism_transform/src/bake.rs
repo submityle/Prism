@@ -64,6 +64,11 @@ pub struct StaticBaker {
     baked: Vec<GlobalTransform>,
     /// `valid[i]` ⇒ `baked[i]` is a fresh, usable frozen world transform.
     valid: Vec<bool>,
+    /// `seed[i]` records the external seed (the dynamic parent's world, or
+    /// identity for a world root) that produced `baked[i]`, meaningful only for
+    /// a static component root. When the dynamic parent moves, this differs
+    /// from the current seed and the whole frozen component is re-baked.
+    seed: Vec<GlobalTransform>,
     /// Bumped on every mutation that stales baked data, so a downstream cache
     /// (merged batches, GPU residency) can cheaply detect it must rebuild.
     generation: u64,
@@ -78,6 +83,7 @@ impl StaticBaker {
             is_static: Vec::new(),
             baked: Vec::new(),
             valid: Vec::new(),
+            seed: Vec::new(),
             generation: 0,
         }
     }
@@ -121,6 +127,7 @@ impl StaticBaker {
             self.is_static.resize(len, false);
             self.baked.resize(len, GlobalTransform::IDENTITY);
             self.valid.resize(len, false);
+            self.seed.resize(len, GlobalTransform::IDENTITY);
         }
     }
 
@@ -147,7 +154,10 @@ impl StaticBaker {
     /// # Panics
     /// Panics if `node` is out of bounds.
     pub fn clear_static(&mut self, node: NodeId) -> bool {
-        assert!(node.index() < self.len(), "clear_static: node out of bounds");
+        assert!(
+            node.index() < self.len(),
+            "clear_static: node out of bounds"
+        );
         let was = self.is_static[node.index()];
         if was {
             self.is_static[node.index()] = false;
@@ -245,9 +255,13 @@ impl StaticBaker {
     ///
     /// Baking is **incremental**: only nodes whose cached freeze is invalid
     /// (newly [`StaticBaker::mark_static`]ed or [`StaticBaker::invalidate_subtree`]d)
-    /// are recomputed; a component that is already fresh is traversed but
-    /// performs zero compositions, so re-baking an unchanged scene reports
-    /// `baked == 0`.
+    /// are recomputed, and recomputing a node forces all of its static
+    /// descendants to recompute as well. In addition, a static component whose
+    /// root hangs off a **dynamic** parent is re-baked whenever that parent's
+    /// world differs from the seed used by the previous bake (a moved dynamic
+    /// parent must not leave a frozen child stale). A component that is already
+    /// fresh — and whose dynamic seed is unchanged — is traversed but performs
+    /// zero compositions, so re-baking an unchanged scene reports `baked == 0`.
     ///
     /// `parent_globals` must have exactly one entry per node (pass
     /// [`crate::propagation::identity_globals`] for a fully static scene whose
@@ -275,18 +289,35 @@ impl StaticBaker {
         let roots = self.static_roots(hierarchy);
         let mut baked = 0usize;
         // Reusable parent-before-child queue so a child reads an already-fresh
-        // parent. We recompute only *invalid* nodes (newly marked or
-        // invalidated); a node whose cached bake is still valid is left as-is,
-        // so re-baking an unchanged scene performs zero compositions.
-        let mut queue: Vec<NodeId> = Vec::new();
+        // parent. Each entry carries a `force` flag: once an ancestor is
+        // (re)computed, every static descendant must be recomputed too, even if
+        // it still reads valid — its world depends on the ancestor (CR-found:
+        // a valid descendant kept a stale world after its static ancestor was
+        // recomputed). We otherwise recompute only *invalid* nodes, so
+        // re-baking an unchanged, fully-static scene performs zero
+        // compositions.
+        let mut queue: Vec<(NodeId, bool)> = Vec::new();
         for &root in &roots {
+            // A component root's world is seeded from outside the static set:
+            // identity for a world root, or the dynamic parent's world. If that
+            // seed changed since the last bake the whole frozen component is
+            // stale even though every node is still marked valid (CR-found:
+            // incremental bake ignored a moved dynamic parent).
+            let external = match hierarchy.parent(root) {
+                None => GlobalTransform::IDENTITY,
+                Some(parent) => parent_globals[parent.index()],
+            };
+            let seed_changed = external != self.seed[root.index()];
+            self.seed[root.index()] = external;
+            let force_root = seed_changed || !self.valid[root.index()];
             queue.clear();
-            queue.push(root);
+            queue.push((root, force_root));
             let mut head = 0;
             while head < queue.len() {
-                let node = queue[head];
+                let (node, force) = queue[head];
                 head += 1;
-                if !self.valid[node.index()] {
+                let recompute = force || !self.valid[node.index()];
+                if recompute {
                     // The invalid set is subtree-closed, so this node's parent
                     // is either dynamic, or static-and-already-fresh, or a
                     // static node recomputed earlier in this same sweep —
@@ -306,7 +337,7 @@ impl StaticBaker {
                 }
                 for &child in hierarchy.children(node) {
                     if self.is_static[child.index()] {
-                        queue.push(child);
+                        queue.push((child, recompute));
                     }
                 }
             }

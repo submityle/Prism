@@ -2,9 +2,7 @@
 //! batch merging groups and world-bakes correctly, and invalidate/unfreeze
 //! behave as documented, plus boundary cases.
 
-use crate::bake::{
-    merge_instances, merge_meshes, BatchKey, MeshSource, StaticBaker,
-};
+use crate::bake::{merge_instances, merge_meshes, BatchKey, MeshSource, StaticBaker};
 use crate::hierarchy::{HierarchyError, NodeId};
 use crate::propagation::identity_globals;
 use crate::{GlobalTransform, Transform, TransformGraph};
@@ -39,10 +37,19 @@ fn build_graph() -> (TransformGraph, [NodeId; 6]) {
             .with_rotation(rot_z(30.0))
             .with_scale(vec3(2.0, 2.0, 2.0)),
     );
-    let a = g.spawn_child(root, Transform::from_xyz(1.0, 0.0, 0.0).with_rotation(rot_z(15.0)));
-    let b = g.spawn_child(root, Transform::from_xyz(0.0, 1.0, 0.0).with_scale(vec3(0.5, 1.0, 1.0)));
+    let a = g.spawn_child(
+        root,
+        Transform::from_xyz(1.0, 0.0, 0.0).with_rotation(rot_z(15.0)),
+    );
+    let b = g.spawn_child(
+        root,
+        Transform::from_xyz(0.0, 1.0, 0.0).with_scale(vec3(0.5, 1.0, 1.0)),
+    );
     let a0 = g.spawn_child(a, Transform::from_xyz(0.0, 0.5, 0.0));
-    let a1 = g.spawn_child(a, Transform::from_xyz(0.0, 0.0, 0.5).with_rotation(rot_z(45.0)));
+    let a1 = g.spawn_child(
+        a,
+        Transform::from_xyz(0.0, 0.0, 0.5).with_rotation(rot_z(45.0)),
+    );
     let b0 = g.spawn_child(b, Transform::from_xyz(0.3, 0.0, 0.0));
     g.propagate();
     (g, [root, a, b, a0, a1, b0])
@@ -62,8 +69,9 @@ fn bake_whole_tree_matches_full_propagation_oracle() {
 
     // Fully static scene: all static roots are world roots, so identity seeds.
     let seeds = identity_globals(g.hierarchy());
-    let locals: Vec<Transform> =
-        (0..g.len()).map(|i| g.local(NodeId::new(i as u32))).collect();
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
     let stats = baker.bake(g.hierarchy(), &locals, &seeds).unwrap();
 
     assert_eq!(stats.baked, g.len());
@@ -91,8 +99,9 @@ fn bake_static_subtree_hanging_off_dynamic_parent_seeds_from_parent_world() {
     baker.mark_static(a1);
 
     // The static root `a` has a *dynamic* parent (root); seed from its world.
-    let locals: Vec<Transform> =
-        (0..g.len()).map(|i| g.local(NodeId::new(i as u32))).collect();
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
     let stats = baker.bake(g.hierarchy(), &locals, g.globals()).unwrap();
 
     assert_eq!(stats.roots, 1);
@@ -116,8 +125,9 @@ fn two_disjoint_static_components_bake_independently() {
     for id in [a, a0, a1, b, b0] {
         baker.mark_static(id);
     }
-    let locals: Vec<Transform> =
-        (0..g.len()).map(|i| g.local(NodeId::new(i as u32))).collect();
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
     let stats = baker.bake(g.hierarchy(), &locals, g.globals()).unwrap();
 
     assert_eq!(stats.roots, 2);
@@ -128,6 +138,97 @@ fn two_disjoint_static_components_bake_independently() {
     for id in [a, a0, a1, b, b0] {
         assert!(g_approx(baker.baked(id), g.global(id), 1e-4));
     }
+}
+
+// ---- incremental correctness under dynamic movement / ancestor recompute ---
+
+#[test]
+fn rebake_refreshes_static_subtree_when_dynamic_parent_moves() {
+    // CR #2: the frozen component hangs off a *dynamic* parent; when that
+    // parent moves, re-baking must recompute the frozen children even though
+    // every node still reads valid.
+    let (mut g, ids) = build_graph();
+    let [root, a, _b, a0, a1, _b0] = ids;
+
+    let mut baker = StaticBaker::with_len(g.len());
+    for id in [a, a0, a1] {
+        baker.mark_static(id);
+    }
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
+    baker.bake(g.hierarchy(), &locals, g.globals()).unwrap();
+    for &id in &[a, a0, a1] {
+        assert!(g_approx(baker.baked(id), g.global(id), 1e-4));
+    }
+
+    // Move the dynamic root and re-propagate; the frozen subtree must follow.
+    let moved = g.local(root).with_translation(vec3(-7.0, 5.0, 2.0));
+    g.set_local(root, moved);
+    g.propagate();
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
+    let stats = baker.bake(g.hierarchy(), &locals, g.globals()).unwrap();
+
+    assert_eq!(
+        stats.baked, 3,
+        "a moved dynamic parent must re-bake its frozen component"
+    );
+    for &id in &[a, a0, a1] {
+        assert!(
+            g_approx(baker.baked(id), g.global(id), 1e-4),
+            "frozen world must track the moved dynamic parent"
+        );
+    }
+}
+
+#[test]
+fn recomputing_a_static_ancestor_invalidates_its_valid_descendants() {
+    // CR #3: a static node that becomes static later (or is otherwise
+    // recomputed) must force its still-valid static descendants to recompute —
+    // otherwise a valid descendant keeps the world computed from the ancestor's
+    // *previous* (dynamic) value.
+    let mut g = TransformGraph::new();
+    let r = g.spawn_root(Transform::from_xyz(1.0, 0.0, 0.0).with_rotation(rot_z(20.0)));
+    let a = g.spawn_child(r, Transform::from_xyz(0.0, 2.0, 0.0));
+    let c = g.spawn_child(
+        a,
+        Transform::from_xyz(1.0, 0.0, 0.0).with_rotation(rot_z(10.0)),
+    );
+    let b = g.spawn_child(c, Transform::from_xyz(0.0, 0.5, 0.0));
+    g.propagate();
+
+    let mut baker = StaticBaker::with_len(g.len());
+    baker.mark_static(a);
+    baker.mark_static(b);
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
+    baker.bake(g.hierarchy(), &locals, g.globals()).unwrap();
+    assert!(g_approx(baker.baked(b), g.global(b), 1e-4));
+
+    // Move the middle dynamic node `c`, then freeze it. `b` was valid but its
+    // world depended on `c`; it must be recomputed alongside `c`.
+    let moved = g.local(c).with_translation(vec3(4.0, -1.0, 0.0));
+    g.set_local(c, moved);
+    g.propagate();
+    baker.mark_static(c);
+
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
+    let stats = baker.bake(g.hierarchy(), &locals, g.globals()).unwrap();
+
+    assert_eq!(
+        stats.baked, 2,
+        "`c` recomputes and `b` (its valid descendant) must too"
+    );
+    assert!(
+        g_approx(baker.baked(b), g.global(b), 1e-4),
+        "valid descendant must not keep the ancestor's stale world"
+    );
+    assert!(g_approx(baker.baked(c), g.global(c), 1e-4));
 }
 
 // ---- invalidate / unfreeze -------------------------------------------------
@@ -141,14 +242,18 @@ fn invalidate_subtree_stales_only_that_component_and_rebakes() {
     for id in [a, a0, a1, b, b0] {
         baker.mark_static(id);
     }
-    let locals: Vec<Transform> =
-        (0..g.len()).map(|i| g.local(NodeId::new(i as u32))).collect();
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
     baker.bake(g.hierarchy(), &locals, g.globals()).unwrap();
 
     let gen_before = baker.generation();
     let invalidated = baker.invalidate_subtree(g.hierarchy(), a);
     assert_eq!(invalidated, 3, "a, a0, a1");
-    assert!(baker.generation() > gen_before, "invalidation bumps generation");
+    assert!(
+        baker.generation() > gen_before,
+        "invalidation bumps generation"
+    );
 
     // The `a` component is now stale; the `b` component is untouched.
     assert!(baker.try_baked(a).is_none());
@@ -171,8 +276,9 @@ fn unfreeze_subtree_returns_nodes_to_dynamic_set() {
     for id in [a, a0, a1] {
         baker.mark_static(id);
     }
-    let locals: Vec<Transform> =
-        (0..g.len()).map(|i| g.local(NodeId::new(i as u32))).collect();
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
     baker.bake(g.hierarchy(), &locals, g.globals()).unwrap();
 
     let unfrozen = baker.unfreeze_subtree(g.hierarchy(), a);
@@ -195,8 +301,9 @@ fn rebaking_an_unchanged_scene_is_idempotent() {
         baker.mark_static(id);
     }
     let seeds = identity_globals(g.hierarchy());
-    let locals: Vec<Transform> =
-        (0..g.len()).map(|i| g.local(NodeId::new(i as u32))).collect();
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
     let first = baker.bake(g.hierarchy(), &locals, &seeds).unwrap();
     assert_eq!(first.baked, g.len(), "first bake freezes everything");
     // Re-baking an unchanged (still-valid) scene recomputes nothing.
@@ -219,16 +326,13 @@ fn merge_instances_groups_by_key_and_world_bakes() {
     for id in [a, a0, a1, b, b0] {
         baker.mark_static(id);
     }
-    let locals: Vec<Transform> =
-        (0..g.len()).map(|i| g.local(NodeId::new(i as u32))).collect();
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
     baker.bake(g.hierarchy(), &locals, g.globals()).unwrap();
 
     // Key 7: {a0, a1}, key 3: {b0}; `b` offered but with a *dynamic*-only key 3.
-    let keyed = [
-        (a0, BatchKey(7)),
-        (b0, BatchKey(3)),
-        (a1, BatchKey(7)),
-    ];
+    let keyed = [(a0, BatchKey(7)), (b0, BatchKey(3)), (a1, BatchKey(7))];
     let batches = merge_instances(&baker, &keyed);
 
     // Sorted by ascending key: 3 then 7.
@@ -260,8 +364,9 @@ fn merge_instances_skips_unbaked_sources() {
     let mut baker = StaticBaker::with_len(g.len());
     baker.mark_static(a);
     baker.mark_static(a0);
-    let locals: Vec<Transform> =
-        (0..g.len()).map(|i| g.local(NodeId::new(i as u32))).collect();
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
     baker.bake(g.hierarchy(), &locals, g.globals()).unwrap();
 
     // `root` is dynamic (never baked) and must be dropped from the batch.
@@ -282,15 +387,24 @@ fn merge_meshes_bakes_vertices_to_world_and_records_ranges() {
     for id in [a, a0, a1] {
         baker.mark_static(id);
     }
-    let locals: Vec<Transform> =
-        (0..g.len()).map(|i| g.local(NodeId::new(i as u32))).collect();
+    let locals: Vec<Transform> = (0..g.len())
+        .map(|i| g.local(NodeId::new(i as u32)))
+        .collect();
     baker.bake(g.hierarchy(), &locals, g.globals()).unwrap();
 
     let a0_verts = [vec3(0.0, 0.0, 0.0), vec3(1.0, 0.0, 0.0)];
     let a1_verts = [vec3(0.0, 1.0, 0.0)];
     let sources = [
-        MeshSource { node: a0, key: BatchKey(5), vertices: &a0_verts },
-        MeshSource { node: a1, key: BatchKey(5), vertices: &a1_verts },
+        MeshSource {
+            node: a0,
+            key: BatchKey(5),
+            vertices: &a0_verts,
+        },
+        MeshSource {
+            node: a1,
+            key: BatchKey(5),
+            vertices: &a1_verts,
+        },
     ];
     let merged = merge_meshes(&baker, &sources);
 
