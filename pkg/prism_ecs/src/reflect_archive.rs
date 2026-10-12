@@ -13,12 +13,19 @@
 //! ```text
 //! magic "PECA" | version u8 | entity_count u32le
 //! per entity:  entity_bits u64le | component_count u32le
-//! per comp:    stable_id u64le | blob_len u32le | blob (prism_reflect to_binary)
+//! per comp:    name_len u16le | name bytes | stable_id u64le
+//!              | blob_len u32le | blob (prism_reflect to_binary)
 //! ```
 //!
-//! Components are written in ascending [`StableTypeId`] order, so the same world
-//! always produces byte-identical archives (they can be hashed, diffed, or
-//! cached by content). Entities with no reflected component are skipped.
+//! Each record carries the component's **concrete type name** as well as its
+//! [`StableTypeId`], which is what makes a save file readable after the type
+//! moved on: the loader resolves that name through the world's
+//! [`SchemaRegistry`](prism_reflect::SchemaRegistry) to find the *version* that
+//! wrote it. (The name is also what `prism_reflect`'s own `DynamicScene`
+//! stores, for the same reason.) Components are written in ascending
+//! `StableTypeId` order, so the same world always produces byte-identical
+//! archives (they can be hashed, diffed, or cached by content); entities with no
+//! reflected component are skipped.
 //!
 //! # Load semantics
 //!
@@ -29,17 +36,25 @@
 //! rebinding) can build one. Ids are therefore preserved when loading back into
 //! the world they came from, and new ids are handed out when loading into an
 //! empty one.
+//!
+//! A component whose registered shape changed between builds goes through the
+//! schema path: the value is decoded against **the shape that wrote it**, run
+//! through the registered `vN -> vN+1` migration chain, and only then matched to
+//! the concrete type this build registered. Ones with no schema registered
+//! decode straight against the current shape.
 
 use alloc::vec::Vec;
+use alloc::string::{String, ToString};
 
 use crate::entity::Entity;
 use crate::world::World;
-use prism_reflect::{DeserializeError, SerializeError, StableTypeId};
+use prism_reflect::{DeserializeError, MigrateError, SerializeError, StableTypeId};
 
 /// The archive envelope's magic bytes.
 const MAGIC: [u8; 4] = *b"PECA";
-/// The envelope format version.
-const VERSION: u8 = 1;
+/// The envelope format version. `1` was a name-less format, so it is refused
+/// rather than misread.
+const VERSION: u8 = 2;
 
 /// Why an archive could not be written or read.
 #[derive(Debug)]
@@ -52,9 +67,16 @@ pub enum ReflectArchiveError {
     Truncated,
     /// An archived entity id is not a valid [`Entity`] handle.
     InvalidEntity(u64),
+    /// A record's stored name and `StableTypeId` disagree — the blob is corrupt
+    /// or was written by a byte-swapped/partial writer.
+    NameIdMismatch(String),
+    /// A record's type name is not valid UTF-8.
+    MalformedName,
     /// The blob names a component type this world has not registered for
     /// reflection, so it cannot be reconstructed.
     UnknownType(StableTypeId),
+    /// A registered migration chain could not be composed or applied.
+    Migrate(MigrateError),
     /// A component value could not be encoded.
     Encode(SerializeError),
     /// A component value could not be decoded.
@@ -74,9 +96,14 @@ impl core::fmt::Display for ReflectArchiveError {
             Self::UnsupportedVersion(v) => write!(f, "unsupported archive version {v}"),
             Self::Truncated => f.write_str("archive ended mid-record"),
             Self::InvalidEntity(bits) => write!(f, "archive entity bits {bits:#x} are not a valid handle"),
+            Self::NameIdMismatch(name) => {
+                write!(f, "archive record for `{name}` does not match its stable id")
+            }
+            Self::MalformedName => f.write_str("archive record has a malformed type name"),
             Self::UnknownType(id) => {
                 write!(f, "archive names unregistered reflected type {:#x}", id.value())
             }
+            Self::Migrate(e) => write!(f, "schema migration failed: {e}"),
             Self::Encode(e) => write!(f, "component encode failed: {e}"),
             Self::Decode(e) => write!(f, "component decode failed: {e}"),
             Self::TooLarge => f.write_str("archive would exceed the envelope's u32 size fields"),
@@ -101,8 +128,18 @@ impl From<DeserializeError> for ReflectArchiveError {
     }
 }
 
+impl From<MigrateError> for ReflectArchiveError {
+    fn from(error: MigrateError) -> Self {
+        Self::Migrate(error)
+    }
+}
+
 /// Little-endian prefix helpers, kept local so the envelope stays explicit.
 fn push_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u16(out: &mut Vec<u8>, value: u16) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -141,6 +178,11 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    fn u16(&mut self) -> Result<u16, ReflectArchiveError> {
+        let bytes = self.take(2)?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
     fn u64(&mut self) -> Result<u64, ReflectArchiveError> {
         let bytes = self.take(8)?;
         let mut raw = [0u8; 8];
@@ -163,10 +205,14 @@ impl World {
         entities: impl IntoIterator<Item = Entity>,
     ) -> Result<Vec<u8>, ReflectArchiveError> {
         // Collect first so the writer can emit the entity count up front.
-        let mut records: Vec<(Entity, Vec<(StableTypeId, &dyn prism_reflect::Reflect)>)> =
+        let mut records: Vec<(Entity, Vec<(StableTypeId, &str, &dyn prism_reflect::Reflect)>)> =
             Vec::new();
         for entity in entities {
-            let components = self.reflect_entity(entity);
+            let components: Vec<(StableTypeId, &str, &dyn prism_reflect::Reflect)> = self
+                .reflect_entity(entity)
+                .into_iter()
+                .map(|(type_id, value)| (type_id, value.type_name(), value))
+                .collect();
             if !components.is_empty() {
                 records.push((entity, components));
             }
@@ -185,11 +231,16 @@ impl World {
         for (entity, components) in records {
             push_u64(&mut out, entity.to_bits());
             push_u32(&mut out, components.len() as u32);
-            for (type_id, value) in components {
+            for (type_id, name, value) in components {
                 let blob = prism_reflect::to_binary(value)?;
                 if blob.len() > u32::MAX as usize {
                     return Err(ReflectArchiveError::TooLarge);
                 }
+                let name_bytes = name.as_bytes();
+                let name_len = u16::try_from(name_bytes.len())
+                    .map_err(|_| ReflectArchiveError::TooLarge)?;
+                push_u16(&mut out, name_len);
+                out.extend_from_slice(name_bytes);
                 push_u64(&mut out, type_id.value());
                 push_u32(&mut out, blob.len() as u32);
                 out.extend_from_slice(&blob);
@@ -237,22 +288,98 @@ impl World {
             };
 
             for _ in 0..component_count {
+                let name_len = reader.u16()? as usize;
+                let name_bytes = reader.take(name_len)?;
+                let name = core::str::from_utf8(name_bytes)
+                    .map_err(|_| ReflectArchiveError::MalformedName)?
+                    .to_string();
                 let raw_id = reader.u64()?;
                 let blob_len = reader.u32()? as usize;
                 let blob = reader.take(blob_len)?;
                 let type_id = StableTypeId::from_raw(raw_id);
-                let decoded = self
-                    .reflect
-                    .decode(type_id, blob)
-                    .ok_or(ReflectArchiveError::UnknownType(type_id))??;
-                // The bridge accepts `Dynamic*` trees, which is exactly what the
-                // decoder produces, so no separate downcast path is needed here.
-                if !self.insert_reflect(target, &*decoded) {
+                if StableTypeId::of_path(&name) != type_id {
+                    return Err(ReflectArchiveError::NameIdMismatch(name));
+                }
+
+                // `load_component` owns the version/schema resolution; it returns
+                // whether the record was applied to `target`.
+                if !self.load_archived_component(target, &name, type_id, blob)? {
                     return Err(ReflectArchiveError::Unrepresentable(type_id));
                 }
             }
             landed.push(target);
         }
         Ok(landed)
+    }
+
+    /// Reconstruct one archived component and apply it to `target`.
+    ///
+    /// Resolves `name` through the schema catalogue: when it names a registered
+    /// version, the blob is decoded against **that** version's shape, run
+    /// through the `vN -> vN+1` chain, and then matched to the concrete type the
+    /// current build registered. Otherwise it is decoded against the current
+    /// shape directly. Returns `false` when the record cannot be applied.
+    fn load_archived_component(
+        &mut self,
+        target: Entity,
+        name: &str,
+        type_id: StableTypeId,
+        blob: &[u8],
+    ) -> Result<bool, ReflectArchiveError> {
+        // Resolve which component type this record belongs to *now*: a schema
+        // entry maps the archived concrete name to a logical name plus the
+        // version that wrote it, and the current version names today's type.
+        let resolved = self
+            .reflect
+            .schemas()
+            .locate(name)
+            .map(|(logical, wrote_version)| (String::from(logical), wrote_version));
+
+        let (ops_id, decoded) = match resolved {
+            Some((logical, wrote_version)) => {
+                let schemas = self.reflect.schemas();
+                let writer_schema = schemas
+                    .schema(&logical, wrote_version)
+                    .ok_or(ReflectArchiveError::UnknownType(type_id))?;
+                // The blob's root id is the *writer's* concrete type name; decode
+                // against exactly that version's shape.
+                let mut decoded = prism_reflect::from_binary(
+                    blob,
+                    self.reflect.types(),
+                    writer_schema.info(),
+                )?;
+                for step in schemas.chain(&logical, wrote_version)? {
+                    let value = decoded
+                        .downcast_mut::<prism_reflect::DynamicStruct>()
+                        .ok_or(ReflectArchiveError::Unrepresentable(type_id))?;
+                    step.apply(value)?;
+                }
+                let current = schemas
+                    .current_schema(&logical)
+                    .ok_or(ReflectArchiveError::UnknownType(type_id))?;
+                (
+                    StableTypeId::of_path(current.type_name()),
+                    decoded,
+                )
+            }
+            None => {
+                // No schema: the blob's shape is today's shape.
+                let registration = self
+                    .reflect
+                    .types()
+                    .get_with_name(name)
+                    .ok_or(ReflectArchiveError::UnknownType(type_id))?;
+                let decoded =
+                    prism_reflect::from_binary(blob, self.reflect.types(), registration.type_info())?;
+                (type_id, decoded)
+            }
+        };
+
+        let Some(ops) = self.reflect.ops_for(ops_id) else {
+            return Err(ReflectArchiveError::UnknownType(ops_id));
+        };
+        // `apply` downcasts to the concrete type, falling back to `FromReflect`
+        // for the `Dynamic*` tree the decoder produced.
+        Ok(ops.apply_from_reflect(self, target, &*decoded))
     }
 }

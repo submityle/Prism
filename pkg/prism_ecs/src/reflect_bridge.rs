@@ -33,16 +33,13 @@
 //! a modification made through reflection must be visible to `Changed<T>`,
 //! dirty chunks and the replication layer.
 
-#[cfg(feature = "serialize")]
-use alloc::boxed::Box;
-
 use crate::collections::HashMap;
 use crate::component::{Component, ComponentId};
 use crate::entity::Entity;
 use crate::world::World;
 use prism_reflect::{FromReflect, GetTypeRegistration, Reflect, StableTypeId};
 #[cfg(feature = "serialize")]
-use prism_reflect::{DeserializeError, TypeRegistry};
+use prism_reflect::{SchemaRegistry, TypeRegistry};
 
 /// The stable, path-derived type id the bridge keys on (re-exported so callers
 /// need not depend on `prism_reflect` directly).
@@ -53,7 +50,7 @@ pub use prism_reflect::StableTypeId as ReflectTypeId;
 /// Each entry is a monomorphised `fn` pointer, so the bridge costs one indirect
 /// call per operation and never boxes the live component value.
 #[derive(Clone, Copy)]
-struct ReflectComponentOps {
+pub(crate) struct ReflectComponentOps {
     /// The component's dense id in this world's registry.
     component: ComponentId,
     /// `Some(&T)` for a live entity that carries `T`.
@@ -65,10 +62,6 @@ struct ReflectComponentOps {
     apply: fn(&mut World, Entity, &dyn Reflect) -> bool,
     /// Remove `T` from `entity`; `false` when the entity did not carry it.
     remove: fn(&mut World, Entity) -> bool,
-    /// Decode a `prism_reflect` binary blob back into a reflected value, which
-    /// [`World::insert_reflect`] then lands through `FromReflect` (design §24.3).
-    #[cfg(feature = "serialize")]
-    decode: fn(&[u8], &TypeRegistry) -> Result<Box<dyn Reflect>, DeserializeError>,
 }
 
 impl ReflectComponentOps {
@@ -112,28 +105,27 @@ impl ReflectComponentOps {
         fn remove<T: Component>(world: &mut World, entity: Entity) -> bool {
             world.remove::<T>(entity)
         }
-        #[cfg(feature = "serialize")]
-        fn decode<T: Reflect + GetTypeRegistration>(
-            bytes: &[u8],
-            registry: &TypeRegistry,
-        ) -> Result<Box<dyn Reflect>, DeserializeError> {
-            // The registration is inserted by `register_reflect_component`
-            // before this op can be reached, so the lookup cannot miss.
-            let registration = registry
-                .get_with_name(core::any::type_name::<T>())
-                .expect("reflect registration added at register_reflect_component");
-            prism_reflect::from_binary(bytes, registry, registration.type_info())
-        }
-
         Self {
             component,
             get: get::<T>,
             get_mut: get_mut::<T>,
             apply: apply::<T>,
             remove: remove::<T>,
-            #[cfg(feature = "serialize")]
-            decode: decode::<T>,
         }
+    }
+
+    /// Overwrite (or insert) this type's component on `entity` from a reflected
+    /// value of the same shape — the archive loader's write path, which resolves
+    /// the type through the schema catalogue rather than through the value's own
+    /// type name.
+    #[inline]
+    pub(crate) fn apply_from_reflect(
+        &self,
+        world: &mut World,
+        entity: Entity,
+        value: &dyn Reflect,
+    ) -> bool {
+        (self.apply)(world, entity, value)
     }
 }
 
@@ -150,6 +142,12 @@ pub(crate) struct ReflectRegistry {
     /// drive binary decoding (design §24.3).
     #[cfg(feature = "serialize")]
     types: TypeRegistry,
+    /// The logical-type schema catalogue (design §24.3 跨版本读取): a component
+    /// whose shape changed between builds registers each version's `TypeSchema`
+    /// plus the `vN -> vN+1` migrations, and the archive loader walks that chain
+    /// before reconstructing the current type.
+    #[cfg(feature = "serialize")]
+    schemas: SchemaRegistry,
 }
 
 impl ReflectRegistry {
@@ -159,16 +157,23 @@ impl ReflectRegistry {
         self.by_component.get(&component).copied()
     }
 
-    /// Decode `bytes` into the reflected value of the type registered under
-    /// `type_id`, or `None` when this world has no such registration.
+    /// The schema catalogue backing cross-version archive loads.
     #[cfg(feature = "serialize")]
-    pub(crate) fn decode(
-        &self,
-        type_id: StableTypeId,
-        bytes: &[u8],
-    ) -> Option<Result<Box<dyn Reflect>, DeserializeError>> {
-        let ops = self.ops.get(&type_id)?;
-        Some((ops.decode)(bytes, &self.types))
+    pub(crate) fn schemas(&self) -> &SchemaRegistry {
+        &self.schemas
+    }
+
+    /// The `prism_reflect` registrations backing this world's bridge.
+    #[cfg(feature = "serialize")]
+    pub(crate) fn types(&self) -> &TypeRegistry {
+        &self.types
+    }
+
+    /// A copy of the operations registered for `type_id`, if any.
+    #[cfg(feature = "serialize")]
+    #[inline]
+    pub(crate) fn ops_for(&self, type_id: StableTypeId) -> Option<ReflectComponentOps> {
+        self.ops.get(&type_id).copied()
     }
 }
 
@@ -282,6 +287,21 @@ impl World {
     #[inline]
     pub fn reflect_component_id(&self, type_id: StableTypeId) -> Option<ComponentId> {
         self.reflect.ops.get(&type_id).map(|ops| ops.component)
+    }
+
+    /// The logical-type schema catalogue used by archive loads (design §24.3
+    /// 跨版本读取).
+    ///
+    /// Register each version of a component whose shape will change with
+    /// [`SchemaRegistry::register_version`] (naming the *concrete* struct type
+    /// that backs that version) and each `vN -> vN+1` step with
+    /// [`SchemaRegistry::register_migration`]. On load, an archive that names an
+    /// older version is decoded against that version's shape, upgraded through
+    /// the chain, and only then matched to the component type this build
+    /// registered — so a save file survives a component gaining fields.
+    #[cfg(feature = "serialize")]
+    pub fn reflect_schemas_mut(&mut self) -> &mut SchemaRegistry {
+        &mut self.reflect.schemas
     }
 
     /// Diff a live component against an authoritative reflected value (design

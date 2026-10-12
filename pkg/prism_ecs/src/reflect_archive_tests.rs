@@ -29,6 +29,21 @@ fn register(world: &mut World) -> (prism_reflect::StableTypeId, prism_reflect::S
     )
 }
 
+/// The **old build's** shape of the health component (no `shield` yet).
+#[derive(Reflect, Clone, Copy, Debug, PartialEq, Eq)]
+struct HealthV1 {
+    hp: i32,
+}
+impl Component for HealthV1 {}
+
+/// The **new build's** shape: `shield` was added.
+#[derive(Reflect, Clone, Copy, Debug, PartialEq, Eq)]
+struct HealthV2 {
+    hp: i32,
+    shield: i32,
+}
+impl Component for HealthV2 {}
+
 #[test]
 fn save_then_load_into_an_empty_world_round_trips_every_component() {
     let mut source = World::new();
@@ -158,11 +173,86 @@ fn an_absurd_entity_count_is_rejected_without_huge_allocation() {
 
     let mut blob = Vec::new();
     blob.extend_from_slice(b"PECA");
-    blob.push(1); // version
+    blob.push(2); // current envelope version
     blob.extend_from_slice(&u32::MAX.to_le_bytes()); // entity_count
     // No records at all: the first read runs out of bytes immediately.
     assert!(matches!(
         world.load_reflect_archive(&blob),
         Err(crate::reflect_archive::ReflectArchiveError::Truncated)
+    ));
+}
+
+/// A save written before a component gained a field must still load: the archive
+/// names the concrete type that wrote it, the schema catalogue resolves that to
+/// a version, the blob is decoded against *that* shape, and the registered
+/// migration chain upgrades it before it meets today's type.
+#[test]
+fn an_older_schema_version_is_migrated_on_load() {
+    use prism_reflect::{DynamicStruct, Migration, Typed, TypeSchema};
+
+    // ---- the build that wrote the save: only V1 exists ----
+    let mut old = World::new();
+    old.register_reflect_component::<HealthV1>();
+    let e = old.spawn(HealthV1 { hp: 7 });
+    let bytes = old.save_reflect_archive([e]).expect("encodes");
+
+    // ---- today's build: V2 is live, and the catalogue knows both shapes ----
+    let mut new = World::new();
+    new.register_reflect_component::<HealthV2>();
+    {
+        let schemas = new.reflect_schemas_mut();
+        schemas.register_version(
+            "Health",
+            TypeSchema::new(
+                core::any::type_name::<HealthV1>(),
+                1,
+                <HealthV1 as Typed>::type_info(),
+            ),
+        );
+        schemas.register_version(
+            "Health",
+            TypeSchema::new(
+                core::any::type_name::<HealthV2>(),
+                2,
+                <HealthV2 as Typed>::type_info(),
+            ),
+        );
+        schemas
+            .register_migration(
+                "Health",
+                Migration::new(1, 2, |value: &mut DynamicStruct| {
+                    value.insert("shield", 0i32);
+                    Ok(())
+                }),
+            )
+            .expect("a single-version step");
+    }
+
+    let landed = new.load_reflect_archive(&bytes).expect("migrates on load");
+    assert_eq!(landed.len(), 1);
+    assert_eq!(
+        new.get::<HealthV2>(landed[0]),
+        Some(&HealthV2 { hp: 7, shield: 0 }),
+        "the old value must arrive as today's type, with the new field defaulted"
+    );
+    // The old type is not a component in this world at all.
+    assert!(new.get::<HealthV1>(landed[0]).is_none());
+}
+
+/// Without a registered catalogue, the same old-shape save cannot be matched to
+/// today's component — the loader must say so rather than guess.
+#[test]
+fn an_unknown_old_shape_is_rejected() {
+    let mut old = World::new();
+    old.register_reflect_component::<HealthV1>();
+    let e = old.spawn(HealthV1 { hp: 1 });
+    let bytes = old.save_reflect_archive([e]).expect("encodes");
+
+    // Today's world knows V2 but nothing maps V1's name to it.
+    let mut new = World::new();
+    new.register_reflect_component::<HealthV2>();
+    assert!(matches!(
+        new.load_reflect_archive(&bytes),
+        Err(crate::reflect_archive::ReflectArchiveError::UnknownType(_))
     ));
 }
