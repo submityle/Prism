@@ -284,7 +284,7 @@
    - **缺陷**：我最初的做法是把 coat 瓣**乘**上 `r_slab / A`（`A` = 瓣反照率估计）——这个比值随光方向变化而瓣又给它加权，**积分后并不等于** `r_slab`（这正是 ±8% 的来源；两种估计量分别偏 2.3× 与 6%）。
    - **正确构造（精确闭合）**：加一个**零反照率的再分配项** `(r_slab − A)·(n·l/π)`——它的半球积分恰好是 `r_slab − A`，于是 `lobe + (r_slab − A)·(n·l/π)` 的方向反照率**精确等于 `r_slab`**，与估计量 `A` 的精度无关（`A` 只影响修正项的**形状**，不影响能量预算）。`A` 用**精确的 Schlick 分瓣反照率** `F0·E_white + (1−F0)·B`（`B` = 用 `(1−v·h)^5` 加权的瓣反照率，从仓库自己的 `integrate_dfg` 烘出，与 `E_white` 同源）。基底则拿闭式 slab 透射 `t_slab`；`t_slab + r_slab = 1` 精确成立。
    - **结果**：白炉含 coat 的配置 **grazing 0.984 / mid 1.001 / normal 1.002**，全部落在 1.00 ± 2% 内。顺带对齐了一个**语义**：coat 高光的 Fresnel 现在由 `coat_ior` 驱动（此前被钉在旧常量 `F0 = 0.04`）。
-   - **覆盖**：白炉门禁现为 **9 配置**（metal ×2 / 纯漫反射 ×2 / 带介电界面 ×2 / translucent / **coat** / **fuzz（Cloth class）**），全部 1.00 ± 2%。`subsurface`（独立 shading class）尚未进门禁——它还需要该层的能量模型。
+   - **覆盖**：白炉门禁现覆盖**全部三类 shading class**——principled（metal ×2 / 纯漫反射 ×2 / 带介电界面 ×2 / translucent / **coat**）、**Cloth（fuzz）**、**Subsurface**，全部 1.00 ± 2%。规范 §Testing 列出的配置已全部进门禁。
 
 2. **扩展位段隔离（Bit-Region Isolation）**：`LobeMask` 开放枚举按**规范核心区 / Prism 扩展区**静态分段——OpenPBR 规范瓣占低位固定区段（随上游版本演进只增不改语义），NPR_FACE 与开放词汇表后续瓣占高位扩展区段。两区位段互不重叠，变长解包 (`prism_unpack_surface`) 按区段路由，杜绝"私有瓣污染规范语义"或"上游新字段撞车扩展位"。
 
@@ -634,6 +634,13 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P2-f 第十二片：Subsurface 层能量（闭式归一化，零新表）**（§4.5 / §10）
+  - 把 subsurface 配置（`subsurface_weight = 1` + 白色 `subsurface_color`）加进白炉门禁后测出 **[0.759, 0.892, 0.961]**（逐通道丢能量）。
+  - 根因是**闭式可解**的：`fd_wrap` 的方向反照率是 `E(w) = (1 + 2w)/(1 + w)²`——`w = 0` 时为 1（Lambert），`w = 1` 时降到 0.75。而 `subsurface_radius_scale` 默认 `(1, 0.5, 0.25)` 是**逐通道**的，所以三个通道按各自的 wrap 丢不同的能量：闭式预测 `[0.750, 0.889, 0.960]` **与实测逐通道精确吻合**。
+  - 修法：把 wrap 漫反射除以 `E(w)`，回到单位反照率——同时符合规范的 `subsurface_albedo_constraint`（作者给的 `subsurface_color` 就是**观测到的**反照率）。**没有新增任何表**（先按惯例烘了一张背瓣反照率表，发现闭式解足够后把生成器删了，不留死代码）。
+  - 代码：`subsurface.rs` + `subsurface.wesl` 双线。
+  - 门禁：白炉覆盖 **principled / Cloth / Subsurface 三类，共 10 个配置**，全部 1.00 ± 2%；`prism_render_shading --lib` **3333 通过**、`prism_render_scene --lib` **1602 通过**、`prism_render_material` **826+2+6 通过**。
 
 - **P2-f 第十一片：fuzz 层能量（Cloth class）**（§4.5 / §10）
   - 把 fuzz 配置（`fuzz_weight = 1` + 白色 `fuzz_color`）加进白炉门禁后测出 **1.147**：基础 Cloth class 把 sheen **直接加**在满强度 Lambert 基底上，**没有**规范 `fuzz-layering-approx` 里"基底层要扣掉 `F·E_fuzz`"那一半。
