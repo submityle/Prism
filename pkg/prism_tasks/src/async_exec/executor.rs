@@ -187,6 +187,26 @@ impl ThreadNotify {
         *signaled = false;
     }
 
+    /// Wait up to `timeout` for a signal, clearing and returning `true` if one
+    /// arrived. Used by the single-threaded `block_on` to allow an *external*
+    /// waker (e.g. the `IoReactor` thread) to make progress while still
+    /// bounding a genuinely stalled future.
+    fn wait_timeout(&self, timeout: core::time::Duration) -> bool {
+        let mut signaled = self.signaled.lock().unwrap();
+        if *signaled {
+            *signaled = false;
+            return true;
+        }
+        let (guard, _timed_out) = self.cvar.wait_timeout(signaled, timeout).unwrap();
+        signaled = guard;
+        if *signaled {
+            *signaled = false;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Take and clear the current signal state without blocking.
     fn take_signal(&self) -> bool {
         let mut signaled = self.signaled.lock().unwrap();
@@ -281,14 +301,28 @@ impl TaskPool {
             if let Poll::Ready(output) = future.as_mut().poll(cx) {
                 return output;
             }
-            // Nothing ran and the future did not wake itself: it is waiting on
-            // something the single-threaded executor can never deliver.
             if shared.async_ready_is_empty() && !notify.take_signal() {
-                panic!(
-                    "block_on stalled: the future is pending with no runnable \
-                     tasks (single-threaded executor cannot make progress)"
-                );
+                // Nothing runnable and no pending wake. Wait (bounded) for an
+                // external waker — e.g. the `IoReactor` thread — to fire before
+                // declaring a stall, so an externally-driven future can make
+                // progress without the "never hangs" guarantee being lost: a
+                // genuinely stuck future still panics after the timeout.
+                if !notify.wait_timeout(block_on_stall_timeout())
+                    && shared.async_ready_is_empty()
+                    && !notify.take_signal()
+                {
+                    panic!(
+                        "block_on stalled: the future is pending with no runnable \
+                         tasks (single-threaded executor cannot make progress)"
+                    );
+                }
             }
         }
     }
+}
+
+/// How long the single-threaded `block_on` waits for an external waker before
+/// declaring the future stalled.
+fn block_on_stall_timeout() -> core::time::Duration {
+    core::time::Duration::from_secs(5)
 }

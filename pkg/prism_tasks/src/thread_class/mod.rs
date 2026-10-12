@@ -138,14 +138,25 @@ impl ThreadClassPool {
     /// how many compute / I/O jobs are admitted per dispatch for backpressure).
     #[must_use]
     pub fn with_budget(pool: TaskPool, named: NamedThreads, budget: LaneBudget) -> Self {
+        // A single-threaded `TaskPool` has no workers to run the named lanes'
+        // queues, so keep the consistent inline backend instead of a threaded
+        // one whose `dispatch_blocking` would trip `TaskPool::wait`'s
+        // single-thread debug assert (CR-found).
+        let backend = if pool.is_single_threaded() {
+            Backend::Inline {
+                main_queue: VecDeque::new(),
+            }
+        } else {
+            Backend::Threaded {
+                compute: pool,
+                named,
+            }
+        };
         Self {
             router: ClassRouter::new(),
             budget,
             inflight: Counter::new(),
-            backend: Backend::Threaded {
-                compute: pool,
-                named,
-            },
+            backend,
         }
     }
 

@@ -316,6 +316,7 @@ fn deferred_work_carries_over_to_the_next_wave() {
 // ----------------------------------------------------------------------------
 
 #[test]
+#[cfg(not(feature = "single"))]
 fn facade_routes_to_pool_io_and_main_pump() {
     let pool = TaskPool::with_threads(4);
     let named = NamedThreads::new();
