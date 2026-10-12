@@ -20,6 +20,14 @@
 //! callers that need diffraction fills on shadowed lines keep using
 //! [`prism_audio_geometry`].
 //!
+//! Beyond diffraction, three further CPU stages are out of scope here and are
+//! not silently approximated: **source directivity** (needs a per-path
+//! *departure* direction the device result does not carry), **higher-order
+//! reflections/diffraction** (`max_*_order >= 2`), and **coupled
+//! reflect-and-bend** sequences (`coupled_enabled`). Receiver directivity and
+//! atmospheric air absorption *are* applied to the decoded paths, matching the
+//! golden.
+//!
 //! # Provenance
 //!
 //! Original work; standard `wgpu` compute mirroring the classic image-source /
@@ -294,6 +302,23 @@ fn assemble(
         }
         paths.extend(reflections);
         paths.truncate(MAX_PROPAGATION_PATHS);
+
+        // The CPU backend weights every arrival by the receiver directivity and,
+        // when enabled, tilts its spectrum with atmospheric air absorption. Both
+        // touch only `bands`/`cutoff_hz` (never the scalar `gain`), so applying
+        // them after the loudest-first ordering keeps that order and matches the
+        // golden (CR-found). Source directivity is deliberately not applied: the
+        // device result carries no per-path *departure* direction (only the final
+        // arrival direction), so a source-directivity config is out of scope on
+        // this backend (see the module "Honest division of labour").
+        if config.receiver_directivity_enabled {
+            for path in paths.iter_mut() {
+                prism_audio_geometry::receiver_directivity::weight_path(path, config);
+            }
+        }
+        if config.air_absorption_enabled {
+            prism_audio_geometry::air_absorption::apply_air_absorption(&mut paths, config);
+        }
 
         resolved.push(ResolvedQuery {
             direct: factors,

@@ -47,7 +47,8 @@ use prism_audio_geometry::{AcousticScene, GeometricBackend, GeometricConfig, Mat
 use prism_audio_geometry_gpu::{GpuContext, GpuGeometryBackend, GpuScene, ResolvedQuery};
 use prism_audio_spatial::geometry::{Emitter, Listener};
 use prism_audio_spatial::propagation::{
-    AcousticMaterial, PathKind, PropagationBackend, PropagationPath, MAX_PROPAGATION_PATHS,
+    AcousticMaterial, PathKind, PropagationBackend, PropagationPath, FULL_BAND_CUTOFF_HZ,
+    MAX_PROPAGATION_PATHS,
 };
 
 /// Absolute tolerance for comparing the device against an independent `f32`
@@ -92,12 +93,30 @@ fn emitter_at(position: Vec3) -> Emitter {
 /// reflection geometry. Each endpoint stays above the floor.
 fn batch() -> Vec<(Listener, Emitter)> {
     Vec::from([
-        (listener_at(Vec3::new(-4.0, 2.0, 0.0)), emitter_at(Vec3::new(4.0, 2.0, 0.0))),
-        (listener_at(Vec3::new(-6.0, 1.0, 3.0)), emitter_at(Vec3::new(5.0, 3.0, -2.0))),
-        (listener_at(Vec3::new(-1.0, 5.0, -8.0)), emitter_at(Vec3::new(2.0, 1.5, 9.0))),
-        (listener_at(Vec3::new(-10.0, 0.5, 1.0)), emitter_at(Vec3::new(10.0, 4.0, 1.0))),
-        (listener_at(Vec3::new(0.0, 3.0, 0.0)), emitter_at(Vec3::new(0.0, 3.0, 7.0))),
-        (listener_at(Vec3::new(7.0, 2.5, -5.0)), emitter_at(Vec3::new(-7.0, 2.5, 5.0))),
+        (
+            listener_at(Vec3::new(-4.0, 2.0, 0.0)),
+            emitter_at(Vec3::new(4.0, 2.0, 0.0)),
+        ),
+        (
+            listener_at(Vec3::new(-6.0, 1.0, 3.0)),
+            emitter_at(Vec3::new(5.0, 3.0, -2.0)),
+        ),
+        (
+            listener_at(Vec3::new(-1.0, 5.0, -8.0)),
+            emitter_at(Vec3::new(2.0, 1.5, 9.0)),
+        ),
+        (
+            listener_at(Vec3::new(-10.0, 0.5, 1.0)),
+            emitter_at(Vec3::new(10.0, 4.0, 1.0)),
+        ),
+        (
+            listener_at(Vec3::new(0.0, 3.0, 0.0)),
+            emitter_at(Vec3::new(0.0, 3.0, 7.0)),
+        ),
+        (
+            listener_at(Vec3::new(7.0, 2.5, -5.0)),
+            emitter_at(Vec3::new(-7.0, 2.5, 5.0)),
+        ),
     ])
 }
 
@@ -238,4 +257,57 @@ fn empty_batch_is_empty() {
 
     assert!(backend.resolve(&ctx, &gpu_scene, &config, &[]).is_empty());
     assert!(backend.resolve_cpu(&gpu_scene, &config, &[]).is_empty());
+}
+
+/// Receiver directivity and atmospheric air absorption must be applied to the
+/// decoded paths (the CPU backend applies both). This compares the device
+/// against the host twin *and* asserts air absorption actually low-passed at
+/// least one arrival — the earlier backend silently dropped both stages
+/// (CR-found).
+#[test]
+fn receiver_directivity_and_air_absorption_are_applied() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        return;
+    };
+    let scene = floor_scene();
+    let mut config = GeometricConfig::new(48_000);
+    config.receiver_directivity_enabled = true;
+    config.air_absorption_enabled = true;
+
+    let gpu_scene = GpuScene::upload(&ctx, &scene);
+    let backend = GpuGeometryBackend::new(&ctx);
+    let queries = batch();
+
+    let device = backend.resolve(&ctx, &gpu_scene, &config, &queries);
+    let twin = backend.resolve_cpu(&gpu_scene, &config, &queries);
+    assert_eq!(device.len(), twin.len());
+
+    for (index, (got, want)) in device.iter().zip(twin.iter()).enumerate() {
+        assert_resolved_close(got, want, TWIN_TOL);
+        // The post-processing must match the twin band-for-band and corner-for-
+        // corner, not just in gain/delay/direction.
+        for (g, w) in got.paths.iter().zip(want.paths.iter()) {
+            // Device vs twin differ only by shader FMA, so compare the three
+            // bands and the corner to a tight tolerance, not bit-for-bit.
+            for (gb, wb) in g.bands.bands().iter().zip(w.bands.bands().iter()) {
+                assert!((gb - wb).abs() < TWIN_TOL, "slot {index} band");
+            }
+            assert!(
+                (g.cutoff_hz - w.cutoff_hz).abs() < 1.0,
+                "slot {index} cutoff {} vs {}",
+                g.cutoff_hz,
+                w.cutoff_hz
+            );
+        }
+    }
+
+    // Air absorption tilts the spectrum: at least one arrival's corner drops
+    // below the full band.
+    assert!(
+        device
+            .iter()
+            .flat_map(|r| r.paths.iter())
+            .any(|p| p.cutoff_hz < FULL_BAND_CUTOFF_HZ),
+        "air absorption should have low-passed at least one path"
+    );
 }
