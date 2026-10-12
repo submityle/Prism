@@ -1892,3 +1892,85 @@ fn prism_segment_distance_squared(start: vec3<f32>, end: vec3<f32>, p: vec3<f32>
     let diff = p - c;\n\
     return dot(diff, diff);\n\
 }\n";
+
+/// Single-sourced WGSL for forward-mode automatic differentiation via dual
+/// numbers, mirroring the scalar carrier [`Dual`](crate::dual::Dual) and its
+/// analytic-derivative op set. `PrismDual { re, du }` carries the value `f(t)`
+/// and the first derivative `f'(t)`; `prism_dual_apply(op, x, p)` seeds the
+/// independent variable as `Dual::variable(x)` (`re = x`, `du = 1`), applies
+/// the op selected by `op` (matching the CPU ordering `recip`/`sqrt`/`squared`/
+/// `powf`/`exp`/`ln`/`sin`/`cos`/`tan`/`abs`), and returns both components.
+/// This is the GPU side of analytic SDF normals, curve tangents, and physics
+/// Jacobian columns — strictly forward mode, first order, with no reverse pass.
+/// The value/derivative pairs are reproduced operator for operator; the
+/// transcendental ops evaluate device `exp`/`log`/`sin`/`cos`/`tan`/`pow`
+/// builtins against the CPU `libm` reference, so the device agrees within
+/// fast-math rounding.
+pub const WGSL_DUAL: &str = "\
+struct PrismDual {\n\
+    re: f32,\n\
+    du: f32,\n\
+};\n\
+\n\
+fn prism_dual_recip(d: PrismDual) -> PrismDual {\n\
+    let inv = 1.0 / d.re;\n\
+    return PrismDual(inv, -d.du * inv * inv);\n\
+}\n\
+\n\
+fn prism_dual_sqrt(d: PrismDual) -> PrismDual {\n\
+    let r = sqrt(d.re);\n\
+    return PrismDual(r, d.du / (2.0 * r));\n\
+}\n\
+\n\
+fn prism_dual_squared(d: PrismDual) -> PrismDual {\n\
+    return PrismDual(d.re * d.re, 2.0 * d.re * d.du);\n\
+}\n\
+\n\
+fn prism_dual_powf(d: PrismDual, p: f32) -> PrismDual {\n\
+    return PrismDual(pow(d.re, p), p * pow(d.re, p - 1.0) * d.du);\n\
+}\n\
+\n\
+fn prism_dual_exp(d: PrismDual) -> PrismDual {\n\
+    let e = exp(d.re);\n\
+    return PrismDual(e, e * d.du);\n\
+}\n\
+\n\
+fn prism_dual_ln(d: PrismDual) -> PrismDual {\n\
+    return PrismDual(log(d.re), d.du / d.re);\n\
+}\n\
+\n\
+fn prism_dual_sin(d: PrismDual) -> PrismDual {\n\
+    return PrismDual(sin(d.re), cos(d.re) * d.du);\n\
+}\n\
+\n\
+fn prism_dual_cos(d: PrismDual) -> PrismDual {\n\
+    return PrismDual(cos(d.re), -sin(d.re) * d.du);\n\
+}\n\
+\n\
+fn prism_dual_tan(d: PrismDual) -> PrismDual {\n\
+    let t = tan(d.re);\n\
+    return PrismDual(t, (1.0 + t * t) * d.du);\n\
+}\n\
+\n\
+fn prism_dual_abs(d: PrismDual) -> PrismDual {\n\
+    var s = 0.0;\n\
+    if (d.re > 0.0) { s = 1.0; } else if (d.re < 0.0) { s = -1.0; }\n\
+    return PrismDual(abs(d.re), s * d.du);\n\
+}\n\
+\n\
+fn prism_dual_apply(op: u32, x: f32, p: f32) -> PrismDual {\n\
+    let d = PrismDual(x, 1.0);\n\
+    switch op {\n\
+        case 0u: { return prism_dual_recip(d); }\n\
+        case 1u: { return prism_dual_sqrt(d); }\n\
+        case 2u: { return prism_dual_squared(d); }\n\
+        case 3u: { return prism_dual_powf(d, p); }\n\
+        case 4u: { return prism_dual_exp(d); }\n\
+        case 5u: { return prism_dual_ln(d); }\n\
+        case 6u: { return prism_dual_sin(d); }\n\
+        case 7u: { return prism_dual_cos(d); }\n\
+        case 8u: { return prism_dual_tan(d); }\n\
+        case 9u: { return prism_dual_abs(d); }\n\
+        default: { return d; }\n\
+    }\n\
+}\n";
