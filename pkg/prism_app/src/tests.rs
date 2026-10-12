@@ -2311,6 +2311,51 @@ mod pipelined_tests {
             "the render lane must reuse one worker thread across frames"
         );
     }
+
+    /// The `prism_tasks`-pool render lane (design §24.3) yields the same
+    /// observable result as the serial path, exactly like the dedicated lane.
+    #[cfg(feature = "pipelined-tasks")]
+    #[test]
+    fn task_pool_lane_matches_serial() {
+        fn drive(use_pool: bool, frames: u64) -> (u64, u64, u64) {
+            let render_count = Arc::new(AtomicU64::new(0));
+            let mut app = App::new();
+            app.world_mut().insert_resource(Counter::default());
+            app.add_systems(Update, |mut c: ResMut<Counter>| {
+                c.0 += 5;
+            });
+            app.insert_sub_app(RenderApp, make_render_sub_app(render_count.clone()));
+            app.set_extract(
+                RenderApp,
+                |main: &mut prism_ecs::world::World, sub: &mut prism_ecs::world::World| {
+                    let value = main.resource::<Counter>().0;
+                    sub.resource_mut::<Counter>().0 = value;
+                },
+            );
+            if use_pool {
+                app.enable_pipelined_rendering_with_task_pool(prism_tasks::TaskPool::new());
+            }
+            for _ in 0..frames {
+                app.update();
+            }
+            app.sync_sub_apps();
+            (
+                app.world().resource::<Counter>().0,
+                app.get_sub_app(RenderApp)
+                    .unwrap()
+                    .world
+                    .resource::<Counter>()
+                    .0,
+                render_count.load(Ordering::Relaxed),
+            )
+        }
+
+        let serial = drive(false, 6);
+        let pooled = drive(true, 6);
+        assert_eq!(serial, pooled);
+        // Sanity: 6 frames × +5 = 30 in both worlds, 6 renders.
+        assert_eq!(pooled, (30, 30, 6));
+    }
 }
 
 // ---- M4 Inc2: platform lifecycle events + graceful shutdown ------------

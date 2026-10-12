@@ -34,7 +34,10 @@
 //!   (design §9/§24.3/§25.2, `PipelinedExecutor`). The pipeline keeps the
 //!   serial extract semantics (extract still runs on the main thread, one-way,
 //!   against a complete frame), so a pipelined run is bit-for-bit equivalent to
-//!   the serial run — only the timing overlaps.
+//!   the serial run — only the timing overlaps. The render lane is a dedicated
+//!   long-lived thread by default; under the `pipelined-tasks` feature it can
+//!   instead run on a `prism_tasks` pool via
+//!   `App::enable_pipelined_rendering_with_task_pool` (design §24.3).
 //! - The [`Plugin`] trait (`build` / `ready` / `finish` / `cleanup`, plus
 //!   declared [`dependencies`](crate::plugin::Plugin::dependencies)) and an
 //!   editable [`PluginGroup`]: [`PluginGroupBuilder`] supports ordered,

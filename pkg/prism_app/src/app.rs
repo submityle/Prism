@@ -548,6 +548,19 @@ impl App {
         self
     }
 
+    /// Like [`enable_pipelined_rendering`](App::enable_pipelined_rendering) but
+    /// renders each frame on the given [`prism_tasks`] pool (design §24.3),
+    /// seating the pipeline on the engine's unified work-stealing task graph.
+    /// Only available under the `pipelined-tasks` feature.
+    #[cfg(feature = "pipelined-tasks")]
+    pub fn enable_pipelined_rendering_with_task_pool(
+        &mut self,
+        pool: prism_tasks::TaskPool,
+    ) -> &mut Self {
+        self.sub_apps.enable_pipelining_with_task_pool(pool);
+        self
+    }
+
     /// Whether cross-thread pipelined rendering is enabled.
     #[cfg(feature = "pipelined")]
     #[must_use]

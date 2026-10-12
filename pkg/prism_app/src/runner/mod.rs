@@ -30,13 +30,16 @@
 )]
 //!   simulation heartbeat with no rendering (design §10 / §24.4, `std`-only).
 //!
-//! # Honestly deferred
+//! # Lifecycle forwarding
 //!
-//! The platform *suspend* / low-memory callbacks (design §12) are still absent:
-//! the winit host trait surfaces only a one-shot `resumed`, and `prism_window`
-//! carries no low-memory signal yet, so [`winit::WinitRunner`] forwards
-//! [`Resumed`](crate::lifecycle::Resumed) but cannot yet forward `Suspended` /
-//! `LowMemory`. That seam stays documented rather than stubbed.
+//! The windowed runner forwards the platform lifecycle events (design §12): the
+//! winit host trait's one-shot `resumed` and repeatable `suspended` /
+//! `low_memory` callbacks become [`Resumed`](crate::lifecycle::Resumed),
+//! [`Suspended`](crate::lifecycle::Suspended), and
+//! [`LowMemory`](crate::lifecycle::LowMemory) app events. A platform
+//! *device-loss* signal (GPU context loss / swapchain recreation) is still
+//! absent from the renderer seam, so device-loss recovery remains deferred
+//! rather than stubbed.
 
 #[cfg(feature = "std")]
 mod dedicated_server;

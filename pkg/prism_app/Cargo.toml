@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 prism_ecs = { path = "../prism_ecs" }
 prism_time = { path = "../prism_time", default-features = false }
+prism_tasks = { path = "../prism_tasks", optional = true }
 prism_window = { path = "../prism_window", optional = true }
 prism_window_winit = { path = "../prism_window_winit", optional = true }
 # Schema validation / range clamping for reflected configuration (§25.3).
@@ -31,6 +32,13 @@ std = ["prism_time/std"]
 # the default and is the only path when this feature is off. Needs `std`
 # (threads), so it implies it.
 pipelined = ["std"]
+
+# M3/§24.3: seat the pipelined render lane on a `prism_tasks` work-stealing
+# pool (the engine's unified task graph) instead of a dedicated thread. Opt-in:
+# the default `pipelined` lane stays a dedicated thread (lowest latency, render
+# cadence independent of the compute pool); this feature adds a pool-backed lane
+# and lets a caller inject a shared `TaskPool`. Implies `pipelined` (and `std`).
+pipelined-tasks = ["pipelined", "dep:prism_tasks"]
 
 # Determinism & replay (design §15, §22 M5): a seeded reproducible RNG, a
 # per-frame state hash for dual-run divergence detection, and transparent

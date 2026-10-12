@@ -605,6 +605,17 @@ impl SubApps {
         }
     }
 
+    /// Opt into cross-thread pipelined execution that renders each frame on the
+    /// given [`prism_tasks`] worker pool instead of a dedicated lane (design
+    /// §24.3): the pipeline runs on the engine's unified work-stealing task
+    /// graph. Pass a shared engine pool here. Replaces any existing pipeline
+    /// (and its in-flight state). Only available under the `pipelined-tasks`
+    /// feature.
+    #[cfg(feature = "pipelined-tasks")]
+    pub fn enable_pipelining_with_task_pool(&mut self, pool: prism_tasks::TaskPool) {
+        self.pipeline = Some(crate::pipelined::PipelinedExecutor::with_task_pool(pool));
+    }
+
     /// Whether cross-thread pipelining is enabled on this collection.
     #[cfg(feature = "pipelined")]
     #[must_use]
