@@ -27,7 +27,7 @@ impl Frustum {
     #[must_use]
     pub fn from_view_proj(view_proj: Mat4) -> Self {
         Self {
-            planes: extract(view_proj, false),
+            planes: prism_math::geom::frustum::Frustum::from_view_proj(view_proj).planes,
         }
     }
 
@@ -36,7 +36,7 @@ impl Frustum {
     #[must_use]
     pub fn from_view_proj_gl(view_proj: Mat4) -> Self {
         Self {
-            planes: extract(view_proj, true),
+            planes: prism_math::geom::frustum::Frustum::from_view_proj_gl(view_proj).planes,
         }
     }
 
@@ -92,39 +92,4 @@ impl Frustum {
     pub fn intersects_aabb(self, min: Vec3, max: Vec3) -> bool {
         self.contains_aabb(min, max).is_visible()
     }
-}
-
-/// Gribb–Hartmann plane extraction from the matrix rows. `gl_depth` selects the
-/// `[-1, 1]` near plane (`row3 + row2`) instead of the `[0, 1]` one (`row2`).
-fn extract(view_proj: Mat4, gl_depth: bool) -> [Plane; 6] {
-    // Rows of the column-major matrix: row `r` gathers component `r` from each
-    // column vector.
-    let c0 = view_proj.x_axis;
-    let c1 = view_proj.y_axis;
-    let c2 = view_proj.z_axis;
-    let c3 = view_proj.w_axis;
-    let row0 = [c0.x, c1.x, c2.x, c3.x];
-    let row1 = [c0.y, c1.y, c2.y, c3.y];
-    let row2 = [c0.z, c1.z, c2.z, c3.z];
-    let row3 = [c0.w, c1.w, c2.w, c3.w];
-
-    let add = |p: [f32; 4], q: [f32; 4]| [p[0] + q[0], p[1] + q[1], p[2] + q[2], p[3] + q[3]];
-    let sub = |p: [f32; 4], q: [f32; 4]| [p[0] - q[0], p[1] - q[1], p[2] - q[2], p[3] - q[3]];
-    let plane = |p: [f32; 4]| Plane::new(Vec3::new(p[0], p[1], p[2]), p[3]).normalized();
-
-    let left = add(row3, row0);
-    let right = sub(row3, row0);
-    let bottom = add(row3, row1);
-    let top = sub(row3, row1);
-    let near = if gl_depth { add(row3, row2) } else { row2 };
-    let far = sub(row3, row2);
-
-    [
-        plane(left),
-        plane(right),
-        plane(bottom),
-        plane(top),
-        plane(near),
-        plane(far),
-    ]
 }
