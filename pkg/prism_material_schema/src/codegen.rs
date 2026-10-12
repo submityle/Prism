@@ -29,7 +29,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use crate::{FieldType, SurfaceSchema};
+use crate::{EnergyPolicy, FieldType, Lobe, SurfaceSchema};
 
 /// A machine-readable banner marking a file as generated. Both emitters start
 /// with it so humans and tooling can detect a hand edit at a glance.
@@ -359,6 +359,39 @@ fn emit_wesl_read(o: &mut String, field: &crate::Field, base_is_cursor: bool, sl
 // Rust layout emitter
 // ---------------------------------------------------------------------------
 
+/// The §17.2 lobe-level energy policy: the rollup of the lobe's field-level
+/// `energy_policy` column, `coupled` dominating `independent` dominating
+/// `none`.
+///
+/// This is the *generator* side of the rule
+/// `prism_material_pcm::EnergyPolicy::roll_up` applies at runtime — one rule,
+/// so a hand-copied built-in catalogue cannot drift from the schema.
+#[must_use]
+fn lobe_energy_policy(lobe: &Lobe) -> EnergyPolicy {
+    let mut rolled = EnergyPolicy::None;
+    for field in &lobe.fields {
+        rolled = match (rolled, field.energy_policy) {
+            (EnergyPolicy::Coupled, _) | (_, EnergyPolicy::Coupled) => EnergyPolicy::Coupled,
+            (EnergyPolicy::Independent, _) | (_, EnergyPolicy::Independent) => {
+                EnergyPolicy::Independent
+            }
+            (EnergyPolicy::None, EnergyPolicy::None) => EnergyPolicy::None,
+        };
+    }
+    rolled
+}
+
+/// The schema spelling of an energy policy, as it appears in the generated
+/// table (`prism_material_pcm::EnergyPolicy::parse` reads it back).
+#[must_use]
+const fn energy_policy_str(policy: EnergyPolicy) -> &'static str {
+    match policy {
+        EnergyPolicy::Coupled => "coupled",
+        EnergyPolicy::Independent => "independent",
+        EnergyPolicy::None => "none",
+    }
+}
+
 /// Emit the generated Rust layout module consumed by
 /// `prism_render_material::surface` (constants + the canonical lobe table).
 ///
@@ -473,6 +506,10 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     o.push_str("    /// Platform capabilities this lobe needs beyond the shared über path\n");
     o.push_str("    /// (§5.3). Empty means \"runs on the baseline über path\".\n");
     o.push_str("    pub requires_caps: &'static [&'static str],\n");
+    o.push_str("    /// §17.2 lobe-level energy policy: the rollup of the lobe's\n");
+    o.push_str("    /// field-level `energy_policy` column (`coupled` > `independent`\n");
+    o.push_str("    /// > `none`). `prism_material_pcm::EnergyPolicy::parse` reads it.\n");
+    o.push_str("    pub energy_policy: &'static str,\n");
     o.push_str("}\n\n");
     o.push_str("/// The defined lobes in canonical low-bit-first pack order.\n");
     o.push_str("///\n");
@@ -500,6 +537,11 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
             .collect();
         let _ = writeln!(o, "        stability: {:?},", lobe.stability.as_str());
         let _ = writeln!(o, "        requires_caps: &[{}],", caps.join(", "));
+        let _ = writeln!(
+            o,
+            "        energy_policy: {:?},",
+            energy_policy_str(lobe_energy_policy(lobe))
+        );
         o.push_str("    },\n");
     }
     o.push_str("];\n");
@@ -591,9 +633,9 @@ mod tests {
             "pub const SURFACE_LOBE_COUNT: u32 = 9;",
             "pub const SURFACE_MAX_WORDS: usize = 100;",
             "pub const SURFACE_LOBES: [LobeLayout; 9] = [",
-            "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 8,\n        namespace: \"KHR\",\n        stability: \"stable\",\n        requires_caps: &[],\n    },",
-            "    LobeLayout {\n        id: \"npr_face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"NPR_FACE\",\n        registry_slot: 16,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n    },",
-            "    LobeLayout {\n        id: \"glint\",\n        uid: \"org.prism.lobe.glint\",\n        mask_const: \"GLINT\",\n        registry_slot: 17,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n    },",
+            "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 8,\n        namespace: \"KHR\",\n        stability: \"stable\",\n        requires_caps: &[],\n        energy_policy: \"independent\",\n    },",
+            "    LobeLayout {\n        id: \"npr_face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"NPR_FACE\",\n        registry_slot: 16,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"none\",\n    },",
+            "    LobeLayout {\n        id: \"glint\",\n        uid: \"org.prism.lobe.glint\",\n        mask_const: \"GLINT\",\n        registry_slot: 17,\n        words: 4,\n        namespace: \"PRISM\",\n        stability: \"experimental\",\n        requires_caps: &[],\n        energy_policy: \"coupled\",\n    },",
         ] {
             assert!(rust.contains(needle), "generated Rust missing `{needle}`");
         }

@@ -293,9 +293,10 @@ const PRISM_IDENTITY_ONLY: [(&str, Kind, Stability, CapabilitySet, bool); 5] = [
 /// *field*-level `energy_policy` column, which is where the rule lives: the
 /// `OpenPBR` core lobes that layer over base share its coupled budget, emission
 /// adds radiance on its own, and the stylized face terminator carries no energy
-/// parameter at all. The built-in values are asserted against that column by the
-/// crate's tests, and §17.5's codegen will make the rollup a generated constant
-/// rather than a hand-copied one.
+/// parameter at all. §17.5's codegen emits that same rollup into
+/// `LobeLayout::energy_policy` (from the field-level column, never hand-copied),
+/// and `prism_render_material`'s `pcm_parity` gate asserts this function agrees
+/// with it row for row — so the two cannot drift.
 ///
 /// Only a lobe may carry energy (§17.2: the budget is a lobe concern), so every
 /// other kind is [`EnergyPolicy::None`] by construction rather than by a

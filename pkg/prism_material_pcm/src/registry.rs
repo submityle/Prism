@@ -210,12 +210,17 @@ impl ExtensionRegistry {
     /// Promote a registered extension's attribution (§5.4).
     ///
     /// The `uid`, `registry_slot` and `origin` are untouched, so nothing that
-    /// binds on identity changes.
+    /// binds on identity changes. Both identity shapes promote: a
+    /// header-resident row is rewritten in its slot, an identity-only row in
+    /// place among its peers. `registry_slot` stays `None` across the promotion
+    /// of a bake/pass-time extension, so residency is a `Kind` fact that
+    /// promotion can never quietly change.
     ///
     /// # Errors
     ///
-    /// Returns [`RegistryError::UnknownUid`] when `uid` is not registered, or
-    /// the [`ManifestError`]s of [`ExtensionManifest::promote`].
+    /// Returns [`RegistryError::UnknownUid`] when `uid` is not registered in
+    /// **either** shape, or the [`ManifestError`]s of
+    /// [`ExtensionManifest::promote`].
     pub fn promote(
         &mut self,
         uid: &str,
@@ -223,15 +228,27 @@ impl ExtensionRegistry {
         vendor: &'static str,
         stability: Stability,
     ) -> Result<ExtensionManifest, RegistryError> {
-        let slot = self
-            .slot_of_uid(uid)
-            .ok_or_else(|| RegistryError::UnknownUid(String::from(uid)))?;
-        let current = self.slots[slot as usize]
-            .as_ref()
-            .expect("slot_of_uid returned an occupied slot");
-        let promoted = current.promote(to, vendor, stability)?;
-        self.slots[slot as usize] = Some(promoted);
-        Ok(promoted)
+        if let Some(slot) = self.slot_of_uid(uid) {
+            let current = self.slots[slot as usize]
+                .as_ref()
+                .expect("slot_of_uid returned an occupied slot");
+            let promoted = current.promote(to, vendor, stability)?;
+            self.slots[slot as usize] = Some(promoted);
+            return Ok(promoted);
+        }
+        // A registered identity-only row is not an unknown uid: reporting one
+        // would hide a real extension behind a false diagnostic and make a
+        // bake/pass-time extension impossible to promote.
+        if let Some(index) = self
+            .identity_only
+            .iter()
+            .position(|manifest| manifest.uid() == uid)
+        {
+            let promoted = self.identity_only[index].promote(to, vendor, stability)?;
+            self.identity_only[index] = promoted;
+            return Ok(promoted);
+        }
+        Err(RegistryError::UnknownUid(String::from(uid)))
     }
 
     /// The extension registered at `slot`, if any.

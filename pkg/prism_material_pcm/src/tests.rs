@@ -208,6 +208,52 @@ fn promotion_flips_attribution_and_keeps_identity_bits() {
 }
 
 #[test]
+fn identity_only_rows_promote_in_place_without_gaining_a_slot() {
+    let mut registry = builtin_registry();
+    let before = registry
+        .manifest_by_uid(UID_TRANSFER_SRGB)
+        .expect("the srgb transfer is registered")
+        .to_owned();
+    assert_eq!(
+        before.registry_slot(),
+        None,
+        "a transfer resolves at bake/pass time and holds no digest slot"
+    );
+
+    // A registered identity-only row promotes — it must not be reported as an
+    // unknown uid, which would hide a real extension behind a false diagnostic
+    // and make every bake/pass-time kind un-promotable.
+    let promoted = registry
+        .promote(
+            UID_TRANSFER_SRGB,
+            Namespace::Khr,
+            "khronos",
+            Stability::Stable,
+        )
+        .expect("a registered identity-only row is promotable");
+
+    // Identity and residency are pinned: promotion flips attribution only.
+    assert_eq!(promoted.uid(), before.uid());
+    assert_eq!(promoted.origin(), Namespace::Prism);
+    assert_eq!(promoted.registry_slot(), None, "promotion never mints a slot");
+    assert_eq!(promoted.kind(), Kind::Transfer);
+    // Attribution flipped.
+    assert_eq!(promoted.namespace(), Namespace::Khr);
+    assert_eq!(promoted.stability(), Stability::Stable);
+    // The identity-only store was rewritten in place, not shadowed: the row is
+    // still discoverable by uid, the count is unchanged, and no slot appeared.
+    assert_eq!(
+        registry
+            .manifest_by_uid(UID_TRANSFER_SRGB)
+            .map(ExtensionManifest::namespace),
+        Some(Namespace::Khr)
+    );
+    assert_eq!(registry.identity_only().len(), 5);
+    assert_eq!(registry.len(), 22);
+    assert_eq!(registry.slot_of_uid(UID_TRANSFER_SRGB), None);
+}
+
+#[test]
 fn illegal_and_regressing_promotions_are_rejected() {
     let mut registry = builtin_registry();
     // EXT -> PRISM is not on the Studio -> Ext -> KHR chain.

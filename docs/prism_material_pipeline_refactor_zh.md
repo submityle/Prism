@@ -356,7 +356,7 @@ PCM 的全部治理机器（命名空间解析、能力协商、used/required、
 ### 5.3 能力协商（capability）：跨平台确定性降级
 借 Vulkan feature/limit 模型。每条 manifest 声明 `requires_caps`（对象空间缓存 / VT / f16 / compute scatter 等），目标平台广播 caps，**烘焙/加载期**协商：`required` 不满足 → 烘焙/加载期**显式报错**（如 VK required ext），不留运行时惊喜；`used`（非 required）不满足 → **graceful ignore**（glTF 式），材质投影回不含此扩展的变体。弱平台由此从 §8.5"关缓存只走步骤4(b)"升级为**全管线能力感知的确定性降级**——一条材质在 Web/移动上特化成什么，是烘焙期可枚举、可 CI 的事实。
 
-**已落地（P1-h 首批，见 §13.a）**：schema `[[lobe]]` 增 `requires_caps`，codegen 烘进 `LobeLayout`；`stability` 是 `required`/`optional` 的**唯一策略源**（`stable` ⇒ 存在即 required；`experimental` ⇒ graceful ignore），所以作者不需要、也不能自己填一个"我要 required"的字段；`GpuMaterialHeader` 加 4 word 摘要 `extensions_{used,required}_{low,high}`（§8.2），由 `lobe_mask` **派生**而非可写——header 永远不可能声称一个材质并不携带的扩展。协商本体在 `prism_material_pcm`（九类 kind 一张注册表），`prism_render_material::capability` 只做 schema→注册表的桥 + 摘要派生；`tests/pcm_parity.rs` 双向断言内置目录与 schema 派生表**逐行一致**（槽位 / `uid` / 命名空间 / 稳定级 / `requires_caps`）。今天没有任何瓣声明能力需求（全部 pure ALU + 标准绑定），所以机制由合成用例 + 平价门禁覆盖，而不是往真实表里塞假需求充数。
+**已落地（P1-h 首批，见 §13.a）**：schema `[[lobe]]` 增 `requires_caps`，codegen 烘进 `LobeLayout`；`stability` 是 `required`/`optional` 的**唯一策略源**（`stable` ⇒ 存在即 required；`experimental` ⇒ graceful ignore），所以作者不需要、也不能自己填一个"我要 required"的字段；`GpuMaterialHeader` 加 4 word 摘要 `extensions_{used,required}_{low,high}`（§8.2），由 `lobe_mask` **派生**而非可写——header 永远不可能声称一个材质并不携带的扩展。协商本体在 `prism_material_pcm`（九类 kind 一张注册表），`prism_render_material::capability` 只做 schema→注册表的桥 + 摘要派生；`tests/pcm_parity.rs` 双向断言内置目录与 schema 派生表**逐行一致**（槽位 / `uid` / 命名空间 / 稳定级 / `requires_caps` / §17.2 能量策略——后者由 codegen 从字段级列轮转生成，非手抄）。今天没有任何瓣声明能力需求（全部 pure ALU + 标准绑定），所以机制由合成用例 + 平价门禁覆盖，而不是往真实表里塞假需求充数。
 
 ### 5.4 manifest 与 hook ABI（声明式、codeless）
 每条扩展 = 一份 TOML manifest（codeless）。字段分**不可变身份**与**可变归属**两组，是本节相较早期草案的关键升级——命名空间不再是 `id` 的前缀，而是独立字段，晋升只翻字段、不改身份：
@@ -590,6 +590,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - **thin_film 虹彩（OpenPBR thin_film 瓣，开放瓣首个落地示例）**：薄膜干涉随 `thin_film_thickness` / `thin_film_ior` 产生彩虹色高光（肥皂泡、氧化金属、涂层）。按 OpenPBR 作为新 lobe 加入开放词汇表——新增 `LobeMask::THIN_FILM` 位 + 3-word 块，`prism_unpack_surface` 低位优先循环自动容纳，老材质 mask 不含该位、零影响。这是"新物理项 = 加法补瓣"路径的验证用例（§4.4）。
 - **OpenPBR 字段已全部补齐**（§13.a）：base 组（`base_weight` / `base_diffuse_roughness`）、specular 组（`specular_weight` / `specular_color` / `specular_ior`，取代 `reflectance` / `specular_roughness_anisotropy`）、coat 全 6 项、fuzz 全 3 项、subsurface 全 5 项、transmission 全 7 项、emission 2 项、thin_film 3 项、geometry 全 6 项，全部以加法扩字段方式落地，各带 furnace / 对拍门禁。**白炉能量不变量**（规范 §Testing 的 7 个配置）已到 1.00 ± 2%。
 - **开放瓣扩展机制**：任何新物理项（如各向异性 SSS）走同一路径——新位 + 变长字段 + 静态置换，不冲击现有材质、不加全局硬顶。
+- **glint 离散闪烁瓣（Prism 私有，开放瓣第二个落地示例）**：车漆金属片/雪/沙/闪粉这类表面在一个像素足印里只有**有限个**镜面小片，高光是稀疏、随视角与光照瞬时对齐而闪的，连续 GGX 表达不出来。已作为一等 ABI 瓣落地（schema 第 17 槽、4 word 块、`PRISM` 命名空间）并接进 über 高光：估计量是**计数式**的（`k ~ Poisson(N·D·dω)`，`D_glint = k/(N·dω)`），**期望等于光滑 NDF**，所以它是"重塑高光形状"而不是"加一份能量"，`glint_weight` 属于耦合能量预算而非独立瓣。
 
 ---
 
@@ -647,7 +648,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P2-h | 原理化分层 BSDF（coat/base 能量耦合 + coat_darkening，§17.2） | 无（改 BSDF+测试） | P2 |
 | P3-d | 光谱提升（hero-wavelength，仅 RT twin / 离线参考，不进实时主线，§17.3） | 无（RT-only 分支） | P3 |
 | P3-e | 随机单瓣采样（blue-noise，贵瓣按预算随机选瓣 + TAA，§17.4） | 无（pass uniform） | P3 |
-| 开放瓣 | glint / 测量 BRDF·BTF 瓣作为开放词汇表成员落地（§17.6） | 内部 enum 开放化 | P2+ |
+| 开放瓣 | glint / 测量 BRDF·BTF 瓣作为开放词汇表成员落地（§17.6）。**glint 已全链落地**（schema 槽 17 + 4 word ABI + 计数式估计量接进 über 高光 + CPU 集成门禁 + 真机对拍，见 §13.a）；测量 BRDF·BTF 尚余（需 provider/表寻址） | 内部 enum 开放化 | P2+ |
 | P1-h ✅ | **PCM 地基**：ABI v5 加 4 word 扩展摘要 `extensions_{used,required}_{low,high}`；OpenPBR 核心瓣自举为 `KHR` 命名空间项（§5）。**已全部落地**（见 §13.a）：九类 kind 统一进注册表 —— `lobe`(8)/`channel`(4)/`response_mode`(3)/`cache_aux`(1) 为 **header 常驻**（占 64 槽摘要），`provider`(2)/`transfer`(1)/`downgrade`(1)/`composite`(1) 为 **identity-only**（烘焙/pass 期解析，零摘要槽，§5.2）；`author_node` 因 §4 前端尚未落地而无实例（不造假条目，kind 与 hook ABI 已就位）。每类带类型化 hook ABI（`hooks.rs`：stage + 对拍义务）与 §17.2 能量策略；能力协商 + 单源平价门禁 + response-mode↔`Illumination` 平价门禁 | **随 v5**（header 加摘要） | P1 |
 | P2-i | 全 kind manifest 格式（§17.5 schema 升级）+ codegen（解包/分类/对拍从 manifest 生成）+ MaterialX nodedef 往返 | 工具链+内部布局 | P2 |
 | P2-j | **response-mode 分类注册化**（步骤 2 类数从定值改为注册驱动固定表，§5.2；唯一动热路径项，单独立项） | 分类 shader/运行时 | P2 |
@@ -658,6 +659,13 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P2-c 第一片：glint 开放瓣全链落地（ABI → 双线着色 → 真机对拍）**（§10 / §17.6）
+  - **ABI（第一次提交，`a6b4a8639`）**：glint 成为 schema 一等 lobe——`uid = org.prism.lobe.glint`、`PRISM` 槽 17、`words = 4`、`stability = experimental`；四个字段 `glint_weight`（`coupled`）/`glint_roughness`/`glint_density`/`glint_bin_half_width` 全部 `view = dependent`。codegen 生成 9 瓣/18 槽表与 `material_unpack.wesl`，material crate 加 `GpuGlintLobe`（`Default` 与 schema 默认逐字一致）、`LobeMask::GLINT`、参数块装/卸臂，bake 层的 `Group` 同步学会新瓣。
+  - **顺带修掉两处结构性隐患**：① 扩展区是**一个**槽空间，kind 不能交错——schema 的 `[[lobe]]` 表拥有从 `EXTENSION_SLOT_BASE` 起的**致密瓣子区**，其它 kind 必须在最后一个瓣之后分配，四个动态通道因此从 17..20 移到 18..21；`pcm_parity` 新增断言：任何非 lobe 槽落进瓣子区、或瓣子区不再致密，直接构建失败（这类"新瓣悄悄与通道撞位"的 bug 不可能再静默发生）。② 三处"只有 FACE 是扩展瓣"的硬编码断言改为从位区划分 / schema 表推导，下一个瓣不会把它们落下。
+  - **着色接入（第二次提交，`6b33cd7e7`）**：估计量泛化为**任意密度驱动**（`glint_ndf_from_density` / `glint_ndf_blended_from_density`），über 的**各向异性**高光也保持无偏；`SurfaceSample` 增四个授权字段 + 两个 shade-time 输入（`glint_cell`、`glint_footprint_area`），GPU resolve 从 `geometry.uv` 与 **P1-a 的解析 UV 雅可比行列式**填充，CPU 金标准经 `ResolveInput::uv_footprint_area`；足印未知或权重 0 都逐位退回光滑瓣，老金标准零回归。
+  - **真机门禁抓到的两个真 bug**：① `glint_bin_solid_angle` 的字面 `1−cos` 在几毫弧度的窄锥上灾难性相消（丢 3–4 位有效数字），改半角恒等式 `2sin²(hw/2)` 后 CPU/GPU 全链一致性从 ~1e-4 提到 ~1e-7；② WGSL 里 `array<vec3<f32>>` 的元素步长是 **16 字节**而非 12，对拍测试自己先踩中（每个元素之后全部错位）——测试改为 vec4 传参并在注释里记录。
+  - 门禁：`prism_render_shading --lib` **3346**（含 4 条新集成门禁：足印恒等 / 确定性与空间·方向去相关 / §10 能量契约 512 cell 集合均值 20% 内等于光滑瓣且过半单次求值不同 / 小片粗糙度去相关旋钮）、`prism_render_scene --lib` **1602**（WESL 含 glint import 全 specialization 编译+链接）、`prism_render_material` **848+2+1+4+6**；真机（越沙盒 `PRISM_REQUIRE_GPU=1`）`prism_render_material_gpu` **66** + glint 对拍 **1** + 纹理 LOD 对拍 **1**。
 
 - **P1-a 第一片：解析式逐像素纹理 LOD（compute resolve 的 mip 选择）**（§7.1 / §10）
   - **问题（code-truth）**：材质 resolve 是计算 dispatch，拿不到硬件导数，`sample_texture_slot` 一直用显式 `textureSampleLevel(..., 0.0)` —— 材质贴图**在任何距离都采 mip 0**，即满带宽 + 满走样，与 §7.1"带宽随距离下降"正好相反。
@@ -704,6 +712,11 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - **目录（余下八类的实际迁入）**：`response_mode` 3 行（`stylized` 22 / `unlit` 23 / `custom` 24，与 `Illumination` 的**非默认**变体一一对应；`Lit` 即规范默认响应，故**不**注册为扩展）；`cache_aux` 1 行（`org.prism.cache_aux.surfel` ↔ 对象空间缓存的 `GpuSurfel` 48 B 契约）；`provider` 2 行（`face_shadow_sdf` ↔ `authoring::FACE_SHADOW_SDF_SEMANTIC` + 烘焙 SDF 图集；`measured_brdf` ↔ `prism_render_shading::measured_brdf`，需 `heavy_sampling`）；`transfer` 1 行（`srgb` ↔ IEC 61966-2-1 OETF/EOTF 对）；`downgrade` 1 行（`sample_budget` ↔ §7.2/P1-e 的 `LobeSampleBudget`）；`composite` 1 行（`outline` ↔ §8.5 步骤 6 描边 pass）。**`author_node` 故意不注册**：§4 的作者前端（`prism_render_material_authoring`）是独立路线图项、尚未落地，此刻登记任何 `author_node` 都只能是占位——kind 与 hook ABI 已就位，前端落地时进同一张表，而不是另起第十套机制。
   - **新门禁**：`pcm_parity.rs` 增 `the_registry_response_modes_mirror_the_illumination_axis`（双向：每个非默认 `Illumination` 有登记行、每个登记行有运行期变体，且 `unlit` 的 view-invariance 与 §14.3 一致）并把"目录行数"从魔数改为**逐 kind 计数**；`prism_material_pcm` 增 residency 双向谓词、能量轮转、identity-only 协商、目录覆盖（含 `author_node` 为空的显式断言）与 Prism 区余量等用例。
   - 门禁：`prism_material_pcm` **27**、`prism_render_material` **848 + 2(header ABI) + 1(schema parity) + 6(codegen freshness) + 4(pcm_parity)**。
+
+- **P1-h 第三片（CR 修复）：identity-only 行可晋升 + 能量策略单源门禁**（§5.2 / §5.4 / §17.2）
+  - **真缺陷 1（晋升撒谎）**：`ExtensionRegistry::promote` 先查 `slot_of_uid`，对 identity-only 行返回 `None`，于是一条**已注册**的扩展被报成 `UnknownUid("…")`——诊断撒谎，且烘焙/pass 期 kind（`transfer`/`provider`/`downgrade`/`composite`）**永远无法晋升**。修法：两条身份形态都晋升，常驻行改槽内、identity-only 行**原地重写**（`registry_slot` 仍为 `None`：residency 是 `Kind` 事实，晋升不会悄悄 mint 一个槽）；新增回归 `identity_only_rows_promote_in_place_without_gaining_a_slot`。
+  - **真缺陷 2（能量策略漂移洞）**：`builtin_energy_policy` 是**手抄**的瓣级能量列，而"schema 是唯一声明源"的说法此前**没有兑现**——parity 门禁只比了槽位/`uid`/命名空间/稳定级/`requires_caps`，独独漏掉 §17.2 的能量列。修法：让 codegen 生成它——`emit_rust_layout` 新增 `lobe_energy_policy()`（对瓣的**字段级** `energy_policy` 做 `coupled > independent > none` 轮转，与运行期 `EnergyPolicy::roll_up` **同一条规则**），输出 `LobeLayout::energy_policy`（9 行全部有值）；`capability::lobe_registry()` 把它**投影**进桥接 manifest；`pcm_parity` 双向断言内置目录 / schema 桥 / 生成表三者逐行一致（`emission` = independent、`npr_face` = none、其余 7 瓣 = coupled，全部由 schema 推出而非硬编码）。
+  - **门禁**：`prism_material_pcm` **28**、`prism_material_schema` **13**（含 codegen freshness 字节对比）、`prism_render_material` **848 + 2(header ABI) + 1(schema parity) + 6(codegen freshness) + 4(pcm_parity)**；`prism-material-codegen -- check` 保持 `up to date (2 products)`。
 
 - **P2-f 第十三片：能量不变量的性能姿态（表清单 + 判据，不拍脑袋换形态）**（§4.5 / §10）
   - 为把白炉能量不变量落到**正确的层次**，引入了 5 张烘表（都是"对**本引擎自己**的瓣做数值积分/重要度采样"得到的，不是照抄参考实现的计算路径）：`EON`（`Ê_ON`/`⟨Ê_ON⟩`）、`GGX albedo E_white`、`介电瓣反照率`、`Schlick bias B`、`Charlie 反照率 E_fuzz`。合计约 765 个 `const f32`，**无 binding、无纹理采样**。
@@ -1038,7 +1051,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 门禁：`cargo test -p prism_render_shading --lib glint`（glint CPU 全绿）、`--lib measured_brdf`（18 通过）、`cargo test -p prism_render_scene --lib shading::glint` / `shading::measured_brdf`（link 各 1 通过）；全量 `-p prism_render_shading --lib` 3257 通过。
   - **ABI 接入已具备路径**：`thin_film` 已按"新 lobe = 新 `LobeMask` 位（KHR 低位段）+ 变长字段块 + `prism_unpack_surface` 低位优先聚集"走通（且是规范段新增位、私有瓣走 `EXTENSION_SLOT_BASE = 16` 起的扩展段，由 schema 验证器强制）；开放的 glint / 测量 BRDF 瓣按同一路径接入即可（P2-c）。
 
-**⬜ 未开始（见上表）**：P1-d、P2-a~P2-c、P2-e、P2-g、P2-i、P2-j、P3-a~P3-d（**P1-b / P1-c / P1-f / P1-f2 / P1-g / P1-h 已完成**，见 §13.a）。**P1-a 第一片已完成**（解析式逐像素纹理 LOD：compute resolve 无导数 → 三角形投影解析求 `dUV/dx`/`dUV/dy` + 逐贴图取级 + 真机对拍，见 §7.1 / §13.a），余下的是"纹理段全面切到 VT 页引用"。**P1-h 已完成**（九类 kind 全部迁入 PCM 注册表：`lobe`/`channel`/`response_mode`/`cache_aux` 常驻 64 槽摘要，`provider`/`transfer`/`downgrade`/`composite` 为 identity-only；每类带类型化 hook ABI 与 §17.2 能量策略；能力协商 + header 4 word 摘要 + 单源平价门禁，见 §13.a）——其中 response-mode 的**分类表注册化**仍是唯一动热路径结构的项（P2-j，单独立项）：本项只把 `stylized`/`unlit`/`custom` 三类登记进注册表并与 `Illumination` 双向平价，9-way class 表本身仍在管线构建期写死。channel 一类已登记（`wetness`/`snow`/`damage`/`dissolve`），但尚未接到运行期参数通道（归 P2-g）；`author_node` 因 §4 前端未落地而无实例（kind 与 hook ABI 已就位，不造假条目）。开放瓣（glint / 测量 BRDF）的 CPU 金标准 + WESL 孪生已落地（见上「部分完成」），仅余其 über 开放词汇表 ABI 接入（归 P2-c）；P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（均见上「部分完成」）。
+**⬜ 未开始（见上表）**：P1-d、P2-a~P2-c、P2-e、P2-g、P2-i、P2-j、P3-a~P3-d（**P1-b / P1-c / P1-f / P1-f2 / P1-g / P1-h 已完成**，见 §13.a）。**P1-a 第一片已完成**（解析式逐像素纹理 LOD：compute resolve 无导数 → 三角形投影解析求 `dUV/dx`/`dUV/dy` + 逐贴图取级 + 真机对拍，见 §7.1 / §13.a），余下的是"纹理段全面切到 VT 页引用"。**P2-c 第一片已完成**：**glint 开放瓣全链落地**（schema 槽 17 + 4 word ABI + 计数式无偏估计量接进 über 高光 + shade-time 足印契约 + CPU 集成门禁 + 真机对拍，见 §17.6 / §13.a）；P2-c 余下的是测量 BRDF·BTF 瓣（需 provider / 表寻址设计）与 MaterialX 往返（编辑器前端未起，按 goal 留 TODO）。**P1-h 已完成**（九类 kind 全部迁入 PCM 注册表：`lobe`/`channel`/`response_mode`/`cache_aux` 常驻 64 槽摘要，`provider`/`transfer`/`downgrade`/`composite` 为 identity-only；每类带类型化 hook ABI 与 §17.2 能量策略；能力协商 + header 4 word 摘要 + 单源平价门禁，见 §13.a）——其中 response-mode 的**分类表注册化**仍是唯一动热路径结构的项（P2-j，单独立项）：本项只把 `stylized`/`unlit`/`custom` 三类登记进注册表并与 `Illumination` 双向平价，9-way class 表本身仍在管线构建期写死。channel 一类已登记（`wetness`/`snow`/`damage`/`dissolve`），但尚未接到运行期参数通道（归 P2-g）；`author_node` 因 §4 前端未落地而无实例（kind 与 hook ABI 已就位，不造假条目）。P2-f 的位区隔离 + 向下投影 + **参数块层与响应层合规门禁（独立 oracle + 白炉能量门禁）**已落地；P3-e 的随机单瓣采样数学核 + 孪生已落地，余 pass/TAA 接线（见上「部分完成」）——它的"贵瓣"消费者现在真的存在了（glint），所以接线不再是空转。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 
@@ -1535,6 +1548,14 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 - **glint / 闪光瓣**：车漆金属片、雪、沙的离散闪烁，现 GGX 微表面模型无法表达。作为开放词汇表新瓣（解析 glint，如 Zirr/Jakob 多尺度法线分布），走 §4.4 加法路径。
 - **测量 BRDF / BTF 瓣**：对无法解析建模的真实材质（织物、复杂涂层），引入**测量数据瓣**（表格化 BRDF/BTF），作为开放瓣的"数据驱动但非 AI"成员——纯查表插值，确定性、可对拍。
 - **MaterialX 往返（round-trip）**：作者层（§4）不止"导入"MaterialX，还支持**导出**——结合 §4.5 向下投影，Prism über ↔ MaterialX 可往返（扩展瓣标注为私有节点），打通外部 DCC 协作。
+
+**已落地（glint 全链，见 §13.a）**：上条"解析 glint"不再是数学核，而是**一等 ABI 瓣 + 真实着色路径**：
+
+- **ABI（4 word，`PRISM` 槽 17）**：`glint_weight`（`coupled`：重塑高光、不加能量）、`glint_roughness`（小片取向散布）、`glint_density`（小片数/单位²，乘像素足印面积得期望小片数 `N`）、`glint_bin_half_width`（半向量接受锥半角，弧度）。四个字都由 schema 声明、codegen 生成布局，`prism_unpack_surface` 低位优先自动聚集。
+- **估计量泛化到任意密度**：计数模型其实不关心采样的是**哪一个** `D`——期望对齐小片数就是 `N·D(h)·dω`。所以新增 `glint_ndf_from_density` / `glint_ndf_blended_from_density`，把"光滑密度"当参数传入，über 高光**各向异性**时也保持无偏，而不是偷偷把各向异性瓣换成各向同性 NDF。
+- **shade-time 契约（两个估计量发明不出来的量）**：`glint_cell`（种子量化的表面单元，取 `geometry.uv`）与 `glint_footprint_area = |det dUV/dpixel|`（**由 P1-a 的解析 UV 雅可比直接给出**）。二者合起来决定种子：`cells_per_unit = √density`（一片一格）、`slope_bins_per_unit = 1/α_flake`（方向去相关尺度，即"多细的片在视角轻动时就开始闪"）、`level = 0`（单尺度；更粗足印已由 `N = density·面积` 表达）。**足印未知（=0）时保持光滑瓣**而不是当成"零片"（后者会把高光变黑），所以权重 0 与足印未知都是逐位恒等，老金标准不动。
+- **精度（真机门禁逼出来的）**：`glint_bin_solid_angle` 改用半角恒等式 `1−cos(hw) = 2sin²(hw/2)`。glint 的接受锥只有几毫弧度，字面形式在 `1−cos` 上做相近数相减、丢掉 3–4 位有效数字（`hw = 0.01` 时 `cos` 的最后一个 ULP 就是 ~1e-3 的*相对*误差）；恒等式把 CPU/GPU 全链一致性从 ~1e-4 提到 ~1e-7。
+- **门禁**：CPU `SurfaceSample` 侧 4 条集成门禁（足印恒等 / 确定性 + 空间·方向去相关 / **§10 能量契约**：512 个 cell 的集合均值 20% 内等于光滑瓣、且过半单次求值与光滑值不同——证明估计量真的在跑而不是被旁路 / 小片粗糙度确实是去相关旋钮）；真机对拍 `prism_render_material_gpu/tests/glint_gpu_parity.rs` 从**出货 WESL 抽源码**（含 `brdf.wesl` 的真实 `SurfaceSample` 结构）编译成 compute kernel，种子要求**逐位相等**、两条估计量入口 ≤1e-5。
 
 > 优先级：glint **中**（视觉收益明确）；测量瓣 **中低**（场景特定）；MaterialX 往返 **中**（协作价值，依赖 §4.5 投影）。
 

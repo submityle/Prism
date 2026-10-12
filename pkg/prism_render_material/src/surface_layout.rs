@@ -58,6 +58,10 @@ pub struct LobeLayout {
     /// Platform capabilities this lobe needs beyond the shared über path
     /// (§5.3). Empty means "runs on the baseline über path".
     pub requires_caps: &'static [&'static str],
+    /// §17.2 lobe-level energy policy: the rollup of the lobe's
+    /// field-level `energy_policy` column (`coupled` > `independent`
+    /// > `none`). `prism_material_pcm::EnergyPolicy::parse` reads it.
+    pub energy_policy: &'static str,
 }
 
 /// The defined lobes in canonical low-bit-first pack order.
@@ -76,6 +80,7 @@ pub const SURFACE_LOBES: [LobeLayout; 9] = [
         namespace: "KHR",
         stability: "stable",
         requires_caps: &[],
+        energy_policy: "independent",
     },
     LobeLayout {
         id: "clearcoat",
@@ -86,6 +91,7 @@ pub const SURFACE_LOBES: [LobeLayout; 9] = [
         namespace: "KHR",
         stability: "stable",
         requires_caps: &[],
+        energy_policy: "coupled",
     },
     LobeLayout {
         id: "anisotropy",
@@ -96,6 +102,7 @@ pub const SURFACE_LOBES: [LobeLayout; 9] = [
         namespace: "KHR",
         stability: "stable",
         requires_caps: &[],
+        energy_policy: "coupled",
     },
     LobeLayout {
         id: "sheen",
@@ -106,6 +113,7 @@ pub const SURFACE_LOBES: [LobeLayout; 9] = [
         namespace: "KHR",
         stability: "stable",
         requires_caps: &[],
+        energy_policy: "coupled",
     },
     LobeLayout {
         id: "subsurface",
@@ -116,6 +124,7 @@ pub const SURFACE_LOBES: [LobeLayout; 9] = [
         namespace: "KHR",
         stability: "stable",
         requires_caps: &[],
+        energy_policy: "coupled",
     },
     LobeLayout {
         id: "transmission",
@@ -126,6 +135,7 @@ pub const SURFACE_LOBES: [LobeLayout; 9] = [
         namespace: "KHR",
         stability: "stable",
         requires_caps: &[],
+        energy_policy: "coupled",
     },
     LobeLayout {
         id: "thin_film",
@@ -136,6 +146,7 @@ pub const SURFACE_LOBES: [LobeLayout; 9] = [
         namespace: "KHR",
         stability: "stable",
         requires_caps: &[],
+        energy_policy: "coupled",
     },
     LobeLayout {
         id: "npr_face",
@@ -146,6 +157,7 @@ pub const SURFACE_LOBES: [LobeLayout; 9] = [
         namespace: "PRISM",
         stability: "experimental",
         requires_caps: &[],
+        energy_policy: "none",
     },
     LobeLayout {
         id: "glint",
@@ -156,5 +168,6 @@ pub const SURFACE_LOBES: [LobeLayout; 9] = [
         namespace: "PRISM",
         stability: "experimental",
         requires_caps: &[],
+        energy_policy: "coupled",
     },
 ];

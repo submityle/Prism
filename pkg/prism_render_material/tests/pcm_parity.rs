@@ -6,10 +6,11 @@
 //! does not pull in the codegen toolchain. That makes drift *possible*; this
 //! gate makes it impossible to merge. It is the §5.4 "single source of truth"
 //! claim reduced to an assertion: slot, `uid`, namespace, stability and
-//! `requires_caps` must agree row for row, in both directions.
+//! `requires_caps` — and the §17.2 `energy_policy`, the rollup of the schema's
+//! field-level column — must agree row for row, in both directions.
 
 use prism_material_pcm::builtin::builtin_registry;
-use prism_material_pcm::{Capability, ExtensionSet, Kind, Namespace, Stability};
+use prism_material_pcm::{Capability, EnergyPolicy, ExtensionSet, Kind, Namespace, Stability};
 use prism_render_material::capability::{
     lobe_registry, parse_capabilities, SPECIFICATION_NAMESPACE,
 };
@@ -67,6 +68,24 @@ fn the_committed_catalogue_agrees_with_the_schema_row_for_row() {
             .unwrap_or_else(|unknown| panic!("{} requires unknown {unknown}", lobe.id));
         assert_eq!(committed_row.requires_caps(), requires, "{} caps", lobe.id);
         assert_eq!(schema_row.requires_caps(), requires, "{} caps", lobe.id);
+
+        // §17.2: the lobe-level energy policy is generated from the schema's
+        // field-level column (codegen `lobe_energy_policy`), so the hand-copied
+        // built-in catalogue cannot drift from it.
+        let energy_policy = EnergyPolicy::parse(lobe.energy_policy)
+            .unwrap_or_else(|| panic!("{} energy-policy spelling", lobe.id));
+        assert_eq!(
+            committed_row.energy_policy(),
+            energy_policy,
+            "{} energy policy",
+            lobe.id
+        );
+        assert_eq!(
+            schema_row.energy_policy(),
+            energy_policy,
+            "{} energy policy",
+            lobe.id
+        );
 
         // §4.5 constraint 2: the slot is pinned to the *origin* region, so a
         // promotion can never move a bit and never alias the core.

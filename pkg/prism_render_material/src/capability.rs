@@ -41,7 +41,7 @@ use alloc::vec::Vec;
 
 use prism_material_pcm::negotiate::negotiate;
 use prism_material_pcm::{
-    CapabilitySet, ExtensionManifest, ExtensionRegistry, ExtensionSet, Kind, Namespace,
+    CapabilitySet, EnergyPolicy, ExtensionManifest, ExtensionRegistry, ExtensionSet, Kind, Namespace,
     Negotiation, NegotiationError, Stability,
 };
 
@@ -81,9 +81,10 @@ pub fn parse_capabilities<'a>(
 /// [`crate::surface_layout::SURFACE_LOBES`].
 ///
 /// This is a *projection*, not a second source of truth — it reads `uid`,
-/// `registry_slot`, `namespace`, `stability` and `requires_caps` straight out of
-/// the generated table, and `tests/pcm_parity.rs` asserts the committed PCM
-/// catalogue agrees with it row for row.
+/// `registry_slot`, `namespace`, `stability`, `requires_caps` and the §17.2
+/// `energy_policy` straight out of the generated table, and
+/// `tests/pcm_parity.rs` asserts the committed PCM catalogue agrees with it row
+/// for row.
 ///
 /// # Panics
 ///
@@ -112,9 +113,16 @@ pub fn lobe_registry() -> ExtensionRegistry {
             parse_capabilities(lobe.requires_caps.iter().copied()).unwrap_or_else(|unknown| {
                 panic!("lobe {:?} requires unknown capability {unknown:?}", lobe.id)
             });
+        let energy_policy = EnergyPolicy::parse(lobe.energy_policy).unwrap_or_else(|| {
+            panic!(
+                "lobe {:?} declares unknown PCM energy policy {:?}",
+                lobe.id, lobe.energy_policy
+            )
+        });
         let manifest = ExtensionManifest::new(lobe.uid, lobe.registry_slot, origin, Kind::Lobe)
             .with_stability(stability)
-            .with_requires_caps(requires_caps);
+            .with_requires_caps(requires_caps)
+            .with_energy_policy(energy_policy);
         registry
             .register(manifest)
             .unwrap_or_else(|error| panic!("lobe {:?} is not registrable: {error}", lobe.id));
@@ -208,6 +216,12 @@ mod tests {
             assert_eq!(manifest.namespace().as_str(), lobe.namespace);
             assert_eq!(manifest.kind(), Kind::Lobe);
             assert_eq!(manifest.stability().as_str(), lobe.stability);
+            assert_eq!(
+                manifest.energy_policy(),
+                EnergyPolicy::parse(lobe.energy_policy).expect("schema energy-policy spelling"),
+                "{} energy policy is projected, not re-derived",
+                lobe.id
+            );
         }
     }
 
