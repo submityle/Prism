@@ -633,6 +633,11 @@ fn oren_nayar_energy_compensation(
     diffuse_roughness: f32,
 ) -> vec3<f32> {
     let sigma01 = clamp(diffuse_roughness, 0.0, 1.0);
+    // Fast path: at `diffuse_roughness == 0` the compensation is *exactly* zero
+    // (`Ê_ON ≡ 1`), so the table lookups are skipped for the common case.
+    if sigma01 <= 0.0 {
+        return vec3<f32>(0.0);
+    }
     let e_avg = clamp(eon_average_lookup(sigma01), 0.0, 1.0 - 1.0e-4);
     let e_i = eon_albedo_lookup(max(n_dot_v, 0.0), sigma01);
     let e_o = eon_albedo_lookup(max(n_dot_l, 0.0), sigma01);

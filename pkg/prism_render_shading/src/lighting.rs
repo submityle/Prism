@@ -950,6 +950,12 @@ pub(crate) fn oren_nayar_energy_compensation(
 ) -> [f32; 3] {
     use crate::eon_albedo_table::{eon_albedo_lookup, eon_average_lookup};
     let sigma01 = diffuse_roughness.clamp(0.0, 1.0);
+    // Fast path: at `diffuse_roughness == 0` the compensation is *exactly* zero
+    // (`Ê_ON ≡ 1`), which is the overwhelmingly common case, so the two table
+    // lookups are skipped entirely rather than evaluated and multiplied by zero.
+    if sigma01 <= 0.0 {
+        return [0.0; 3];
+    }
     let e_avg = eon_average_lookup(sigma01).clamp(0.0, 1.0 - 1.0e-4);
     let e_i = eon_albedo_lookup(n_dot_v.max(0.0), sigma01);
     let e_o = eon_albedo_lookup(n_dot_l.max(0.0), sigma01);

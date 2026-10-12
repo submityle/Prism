@@ -962,6 +962,16 @@ mod conformance {
         // `EON_comp` gap (white rough diffuse reflected 0.577), the multiscatter
         // compensation's view-independent albedo (white metal read 1.11), and
         // the glossy-diffuse coupling weight at grazing.
+        //
+        // Still missing from the specification's list, and *measured* while
+        // wiring this gate: the translucent base (`transmission_weight = 1`,
+        // white `transmission_color` at `transmission_depth == 0`) reads **3.74**
+        // rather than 1. Diagnosis: the transmission lobe is *added* to the
+        // reflective base instead of being a statistical mixture with it
+        // (`transmission_weight` is a slab weight), and its term is a radiance
+        // factor with no `1/π` normalisation, so its own albedo is `(1−f)²·π`.
+        // Subsurface (a separate shading class) and the coat/fuzz-on-top cases
+        // are likewise not covered yet.
         for (name, surface) in configs {
             // Normal, mid and near-grazing view directions all have to conserve.
             for view in [[0.0_f32, 1.0, 0.0], [0.6, 0.8, 0.0], [0.95, 0.31, 0.0]] {
@@ -1410,7 +1420,7 @@ mod dielectric_albedo_gen {
     }
 
     /// `E_dielectric(µ, r)` at relative index `eta`, VNDF-importance-sampled.
-    fn dielectric_albedo(mu_o: f32, perceptual_roughness: f32, eta: f32) -> f32 {
+    pub(super) fn bake_dielectric_albedo(mu_o: f32, perceptual_roughness: f32, eta: f32) -> f32 {
         const N: u32 = 65536;
         let alpha = perceptual_roughness * perceptual_roughness;
         let c = mu_o.clamp(1.0e-3, 1.0);
@@ -1451,10 +1461,11 @@ mod dielectric_albedo_gen {
             let row: Vec<String> = (0..N_MU)
                 .map(|i| {
                     let mu = i as f32 / (N_MU - 1) as f32;
-                    format!("{:.6}", dielectric_albedo(mu, r, 1.5))
+                    format!("{:.6}", bake_dielectric_albedo(mu, r, 1.5))
                 })
                 .collect();
             println!("{},", row.join(", "));
         }
     }
 }
+
