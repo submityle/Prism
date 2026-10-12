@@ -198,3 +198,17 @@ fn moderate_overlap_large_scene_matches_the_twin() {
     let boxes: Vec<Aabb> = (0..4000).map(|_| random_box(&mut rng, 30.0, 0.8)).collect();
     assert_query_matches(&query, &ctx, &boxes, 1 << 20);
 }
+
+/// `capacity == 0` with no overlapping pairs must return empty, not attempt a
+/// `[u32; 2]` readback from a 4-byte padded staging buffer (CR-found).
+#[test]
+fn zero_capacity_with_no_pairs_returns_empty() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        return;
+    };
+    let query = GpuBvhQuery::new(&ctx);
+    let boxes = [box_at(0.0, 0.0, 0.0), box_at(10.0, 0.0, 0.0)];
+    let tree = cpu_build_lbvh(&boxes);
+    let got = query.query(&ctx, &tree, 0).expect("empty query is Ok");
+    assert!(got.is_empty(), "no pairs fit a zero-capacity query");
+}

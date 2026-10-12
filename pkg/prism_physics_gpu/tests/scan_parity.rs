@@ -186,3 +186,19 @@ fn large_compact_matches_twin() {
     assert_eq!(got.len(), want.len(), "compact length mismatch");
     assert_eq!(got, want, "large compact mismatch");
 }
+
+/// The scanned keep-flags must be 0/1: a raw nonzero flag (e.g. `2`) must not
+/// add extra offset and leave a gap — the CPU treats any nonzero flag as keep
+/// (CR-found).
+#[test]
+fn compact_treats_any_nonzero_flag_as_keep() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        return;
+    };
+    let scan = GpuScan::new(&ctx);
+    let data = vec![10u32, 20, 30];
+    let flags = vec![2u32, 0, 1];
+    let want = cpu_compact(&data, &flags);
+    assert_eq!(want, vec![10, 30], "cpu golden keeps nonzero flags");
+    assert_eq!(scan.compact(&ctx, &data, &flags), want);
+}

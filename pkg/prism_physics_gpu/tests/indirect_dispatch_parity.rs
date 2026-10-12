@@ -76,6 +76,10 @@ fn device_dispatch_args_match_the_cpu_twin() {
 /// An empty `counts` slice must not create a zero-sized storage binding: the
 /// convenience `compute` returns the empty grid instead (CR-found).
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
 fn empty_counts_returns_empty_args() {
     let Some(ctx) = GpuContext::try_headless() else {
         eprintln!("no GPU adapter; skipping indirect-dispatch empty case");
@@ -90,6 +94,10 @@ fn empty_counts_returns_empty_args() {
 }
 
 #[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
 fn gpu_count_drives_a_real_indirect_dispatch() {
     let Some(ctx) = GpuContext::try_headless() else {
         eprintln!("no GPU adapter; skipping indirect-dispatch end-to-end");

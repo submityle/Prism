@@ -171,3 +171,21 @@ fn scales_to_many_velocities() {
         elapsed.as_secs_f64() * 1.0e3
     );
 }
+
+/// A NaN velocity must not collapse the finite maximum: the CPU's `f32::max`
+/// ignores NaN (CR-found).
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log"
+)]
+fn nan_velocity_matches_cpu() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        eprintln!("no GPU adapter; skipping nan_velocity_matches_cpu");
+        return;
+    };
+    let vel = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(f32::NAN, 0.0, 0.0)];
+    let cpu = cpu_max_speed(&vel);
+    let gpu = GpuCflReduce::new(&ctx).max_speed(&ctx, &vel);
+    assert!(close(gpu, cpu), "nan velocity: cpu {cpu} vs gpu {gpu}");
+}

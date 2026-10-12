@@ -47,7 +47,9 @@ fn assign(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     if (params.n_sites == 0u) {
         out_cell[idx] = NO_CELL;
-        out_clearance[idx] = 1e30;
+        // +Inf, matching the CPU golden's `f32::INFINITY` exactly (a finite
+        // sentinel would differ under `is_infinite()`/bit comparison) (CR-found).
+        out_clearance[idx] = bitcast<f32>(0x7f800000u);
         return;
     }
 
@@ -93,6 +95,6 @@ fn assign(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (found_wall) {
         out_clearance[idx] = -worst_sd;
     } else {
-        out_clearance[idx] = 1e30;
+        out_clearance[idx] = bitcast<f32>(0x7f800000u);
     }
 }

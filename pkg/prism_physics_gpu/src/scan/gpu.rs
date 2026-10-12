@@ -261,7 +261,13 @@ impl GpuScan {
 
         // One flags copy is scanned in place into destination offsets; a second,
         // read-only copy feeds the scatter's keep test.
-        let offsets_buf = buffer::storage_rw_init(device, "prism_scan_compact_offsets", flags);
+        // The *scanned* copy must be 0/1: a raw nonzero flag (e.g. `2`) would
+        // add 2 to the running offset and leave a gap, whereas the CPU treats
+        // any nonzero flag as "keep" (CR-found). The scatter still reads the raw
+        // `flags` for its keep test.
+        let scan_flags: Vec<u32> = flags.iter().map(|&f| u32::from(f != 0)).collect();
+        let offsets_buf =
+            buffer::storage_rw_init(device, "prism_scan_compact_offsets", &scan_flags);
         let flags_buf = buffer::storage_read(device, "prism_scan_compact_flags", flags);
         let data_buf = buffer::storage_read(device, "prism_scan_compact_data", data);
         // Worst case keeps every element, so the dense output is sized to `n`.

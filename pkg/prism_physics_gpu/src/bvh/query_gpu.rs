@@ -181,7 +181,11 @@ impl GpuBvhQuery {
         let indices_buf =
             buffer::storage_read(device, "prism_bvh_pairs_indices", &lbvh.sorted_indices);
         let count_buf = buffer::storage_rw_zeroed(device, "prism_bvh_pairs_count", 4);
-        let pairs_bytes = u64::from(capacity) * 8;
+        // Allocate at least one pair slot: with `capacity == 0` a zero-sized
+        // (padded to 4 B) storage binding would be smaller than the shader's
+        // 8-byte `array<vec2<u32>>` element and fail validation (CR-found). The
+        // `total > capacity` check still rejects any real pair.
+        let pairs_bytes = u64::from(capacity.max(1)) * 8;
         let pairs_buf = buffer::storage_rw_zeroed(device, "prism_bvh_pairs_out", pairs_bytes);
 
         let bind = device.create_bind_group(&BindGroupDescriptor {
@@ -217,6 +221,12 @@ impl GpuBvhQuery {
         let total = buffer::read_back::<u32>(ctx, &count_stage)[0];
         if total > capacity {
             return Err(BvhQueryError::PairCapacityExceeded { capacity });
+        }
+        if total == 0 {
+            // With `capacity == 0` the staging buffer is padded to 4 bytes,
+            // which cannot be reinterpreted as `[u32; 2]`; there are no pairs,
+            // so return empty (CR-found).
+            return Ok(Vec::new());
         }
         let raw = buffer::read_back::<[u32; 2]>(ctx, &pairs_stage);
         let pairs = raw
@@ -268,7 +278,11 @@ impl GpuBvhQuery {
 
         let params_buf = buffer::uniform(device, "prism_bvh_pairs_resident_params", &params);
         let count_buf = buffer::storage_rw_zeroed(device, "prism_bvh_pairs_resident_count", 4);
-        let pairs_bytes = u64::from(capacity) * 8;
+        // Allocate at least one pair slot: with `capacity == 0` a zero-sized
+        // (padded to 4 B) storage binding would be smaller than the shader's
+        // 8-byte `array<vec2<u32>>` element and fail validation (CR-found). The
+        // `total > capacity` check still rejects any real pair.
+        let pairs_bytes = u64::from(capacity.max(1)) * 8;
         let pairs_buf =
             buffer::storage_rw_zeroed(device, "prism_bvh_pairs_resident_out", pairs_bytes);
 
@@ -306,6 +320,9 @@ impl GpuBvhQuery {
         let total = buffer::read_back::<u32>(ctx, &count_stage)[0];
         if total > capacity {
             return Err(BvhQueryError::PairCapacityExceeded { capacity });
+        }
+        if total == 0 {
+            return Ok(Vec::new());
         }
         let raw = buffer::read_back::<[u32; 2]>(ctx, &pairs_stage);
         let pairs = raw

@@ -195,3 +195,22 @@ fn scales_to_many_points() {
         assert!(a.cell < sites.len() as u32, "point escaped the site set");
     }
 }
+
+/// With no sites the clearance must be a true `+Inf` (matching the CPU golden's
+/// `f32::INFINITY`), not a finite sentinel (CR-found).
+#[test]
+fn empty_sites_clearance_is_positive_infinity() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        return;
+    };
+    let solver = GpuVoronoiAssign::new(&ctx);
+    let sites: Vec<Vec3> = Vec::new();
+    let points = vec![Vec3::ZERO];
+    let cfg = VoronoiAssignConfig::default();
+    let gpu = solver.assign(&ctx, &sites, &points, &cfg);
+    assert!(
+        gpu[0].clearance.is_infinite() && gpu[0].clearance > 0.0,
+        "expected +Inf clearance, got {}",
+        gpu[0].clearance
+    );
+}

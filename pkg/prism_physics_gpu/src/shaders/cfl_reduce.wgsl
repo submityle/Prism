@@ -56,7 +56,16 @@ fn reduce(
         let v = vel[gid.x].xyz;
         s = dot(v, v);
     }
-    scratch[lid.x] = bitcast<u32>(s);
+    // The fold runs on the IEEE bit pattern via `u32::max` because WGSL has no
+    // f32 atomic-max; a NaN's bit pattern is larger than any finite value's, so
+    // it would win and then collapse to 0 at `NaN.max(0.0)`. The CPU golden uses
+    // `f32::max`, which ignores NaN — filter NaN out here to match (CR-found).
+    // Use `> 0x7f800000` (not `>=`) so +/-Inf still propagates like `f32::max`.
+    var bits = bitcast<u32>(s);
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        bits = 0u;
+    }
+    scratch[lid.x] = bits;
     workgroupBarrier();
 
     // Halving tree reduction. `stride` is uniform across the workgroup, so the
