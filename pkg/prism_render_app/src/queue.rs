@@ -157,7 +157,12 @@ pub struct IndirectArgs {
 }
 
 /// The frame's queued draws, one list per [`RenderPhase`].
-#[derive(Resource)]
+///
+/// Cloning is cheap (the items are plain value structs), which is what lets a
+/// pass closure own the queue it records from instead of borrowing it: a pass
+/// outlives the borrow, and the frame graph must not hold a reference into the
+/// render world.
+#[derive(Clone, Resource)]
 pub struct RenderQueues {
     phases: [Vec<PhaseItem>; RenderPhase::COUNT],
 }

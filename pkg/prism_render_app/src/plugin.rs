@@ -18,7 +18,7 @@ use crate::scene::SceneRegistry;
 use crate::sets::{RenderSystems, configure_render_sets};
 use crate::stats::RenderFrameStats;
 use crate::startup::ensure_render_startup;
-use crate::systems::{drive_render_schedule, execute_frame, extract_render_record};
+use crate::systems::{clear_queues, drive_render_schedule, execute_frame, extract_render_record};
 use crate::target::RenderTarget;
 use crate::texture_cache::TextureCache;
 use crate::views::{RenderViews, build_view_family};
@@ -131,6 +131,9 @@ where
         render.world.insert_resource(PipelineCache::new());
         render.world.insert_resource(TextureCache::new());
         render.world.insert_resource(RenderQueues::new());
+        render
+            .world
+            .insert_resource(crate::draw::canonical::registry());
         render.world.insert_resource(SceneRegistry::new());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
@@ -152,6 +155,7 @@ where
             // Materialize the view family before the record stage consumes it.
             schedule.add_systems(build_view_family.in_set(RenderSystems::CreateViews));
             schedule.add_systems(execute_frame::<I>.in_set(RenderSystems::Phase));
+            schedule.add_systems(clear_queues.in_set(RenderSystems::Cleanup));
         }
         render
             .world

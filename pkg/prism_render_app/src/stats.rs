@@ -20,6 +20,8 @@ pub struct RenderFrameStats {
     pub frames_skipped: u64,
     /// The total number of passes declared across every recorded frame.
     pub passes_declared: u64,
+    /// The total number of queued draws recorded across every recorded frame.
+    pub draws_recorded: u64,
     /// The viewport of the most recently recorded frame, empty or not.
     pub last_viewport: RenderViewport,
 }

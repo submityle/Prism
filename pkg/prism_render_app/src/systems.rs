@@ -54,6 +54,16 @@ pub(crate) fn drive_render_schedule(world: &mut World) {
     world.run_schedule(Render);
 }
 
+/// Drops the frame's queued draws once they have been recorded.
+///
+/// Runs in [`RenderSystems::Cleanup`], after the record stage: the queue is
+/// per-frame state (the queue stage fills it from this frame's visible set), so
+/// leaving it populated would make the next frame draw the previous frame's
+/// items again — and forever.
+pub(crate) fn clear_queues(mut queues: ResMut<crate::RenderQueues>) {
+    queues.clear();
+}
+
 /// The render system: record and submit one frame through the RHI runtime.
 ///
 /// Registered in the [`Render`] schedule, it reads the extracted
@@ -66,6 +76,8 @@ pub(crate) fn drive_render_schedule(world: &mut World) {
 /// nothing is recorded and the frame is counted as skipped.
 pub(crate) fn execute_frame<I>(
     record: Res<RenderRecord>,
+    queues: Res<crate::RenderQueues>,
+    functions: Res<crate::DrawFunctions>,
     runtime: Res<RenderRuntimeResource<I>>,
     mut target: ResMut<RenderTarget>,
     mut stats: ResMut<RenderFrameStats>,
@@ -92,12 +104,14 @@ pub(crate) fn execute_frame<I>(
         target.resize(runtime.device(), viewport);
     }
 
-    let graph = frame::clear_target_graph(&target);
+    let graph = frame::target_graph(&target, &queues, &functions);
     let passes = graph.pass_count() as u64;
+    let draws = queues.len() as u64;
     match runtime.execute(graph) {
         Ok(()) => {
             stats.frames_submitted += 1;
             stats.passes_declared += passes;
+            stats.draws_recorded += draws;
         }
         Err(_) => {
             // A compile failure is the only error `execute` can return; the

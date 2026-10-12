@@ -2251,3 +2251,237 @@ fn assert_startup_value_present(world: &mut prism_ecs::world::World) {
         "RenderStartup ran before the Render schedule, with its value"
     );
 }
+/// The frame records what the queue holds: one pass per non-empty phase, every
+/// queued draw inside it, and the queue is per-frame state that resets.
+#[test]
+fn the_frame_records_the_queued_draws() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+
+    // A pipeline and geometry from the app's own device, so the ids the queue
+    // carries are the ones the frame's runtime knows.
+    let (pipeline, vertices, indices) = {
+        let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+        let runtime = render
+            .world
+            .resource::<RenderRuntimeResource<NullInstance>>();
+        let device = runtime.runtime().device();
+        let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+            "@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0); }",
+        ));
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("queued-draw".into()),
+            layout: None,
+            vertex: VertexState {
+                module,
+                entry_point: "vs".into(),
+                buffers: vec![],
+            },
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            fragment: None,
+        });
+        (
+            pipeline,
+            null_vertex_buffer(device),
+            device.create_buffer(&BufferDescriptor {
+                label: Some("queued-indices".into()),
+                size: 64,
+                usage: BufferUsages::INDEX,
+                mapped_at_creation: false,
+            }),
+        )
+    };
+    let item = |pipeline, index| PhaseItem {
+        pipeline,
+        draw: crate::draw::canonical::MESH,
+        geometry: GenerationalHandle::new(1, 1),
+        vertices,
+        indices: Some((indices, prism_render_driver::IndexFormat::Uint16)),
+        first: 0,
+        count: 3,
+        base_vertex: 0,
+        indirect: None,
+        lod_level: 0,
+        material: GenerationalHandle::new(2, 1),
+        scene: GenerationalHandle::new(3, 1),
+        order: index,
+    };
+    {
+        let render = app
+            .sub_app_mut(RenderApp)
+            .expect("the render sub-app");
+        let queues = render.world.resource_mut::<RenderQueues>();
+        queues.push(RenderPhase::Opaque, item(pipeline, 0));
+        queues.push(RenderPhase::Transparent, item(pipeline, 1));
+    }
+
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+    let stats = render.world.resource::<RenderFrameStats>();
+    assert_eq!(stats.draws_recorded, 2, "both queued draws were recorded");
+    assert_eq!(
+        stats.passes_declared, 3,
+        "the clear plus one pass per non-empty phase"
+    );
+    assert!(
+        render.world.resource::<RenderQueues>().is_empty(),
+        "the queue is per-frame state and resets after recording"
+    );
+}
+
+/// The spine draws on hardware: a mesh prepared into GPU buffers is queued as a
+/// phase item, the frame's opaque pass records it with the layout the mesh
+/// derived, and the pixels land where the mesh's vertices say.
+///
+/// A cleared target is uniformly black, so a red center can only come from the
+/// queued draw actually rasterizing the quad.
+#[test]
+fn the_frame_draws_a_queued_mesh_on_a_gpu() {
+    use crate::render_asset::RenderAsset;
+    use prism_mesh::{Indices, Mesh, MeshVertexAttribute, VertexAttributeValues};
+
+    const SIZE: u32 = 8;
+    let extent = Extent3d::new_2d(SIZE, SIZE);
+    if RenderRuntime::<prism_render_driver_wgpu::WgpuInstance>::wgpu(extent).is_err() {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    }
+
+    let mut app = App::new();
+    app.add_plugins(PrismRenderPlugin::with_config(
+        prism_render_driver_wgpu::WgpuInstance::new(),
+        RenderAppConfig::new(extent),
+    ));
+
+    let (pipeline, vertices, indices, index_count) = {
+        let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+        let runtime = render
+            .world
+            .resource::<RenderRuntimeResource<prism_render_driver_wgpu::WgpuInstance>>();
+        let device = runtime.runtime().device();
+        let queue = runtime.runtime().queue();
+
+        let mesh = Mesh::new(PrimitiveTopology::TriangleList)
+            .with_attribute(
+                MeshVertexAttribute::new(
+                    "Vertex_Position",
+                    prism_render_driver::VertexFormat::Float32x3,
+                    0,
+                ),
+                VertexAttributeValues::Float32x3(vec![
+                    [-0.5, -0.5, 0.0],
+                    [0.5, -0.5, 0.0],
+                    [0.5, 0.5, 0.0],
+                    [-0.5, 0.5, 0.0],
+                ]),
+            )
+            .expect("positions fit")
+            .indexed(Indices::Uint16(vec![0, 1, 2, 0, 2, 3]));
+        let prepared = crate::RenderMesh::prepare(
+            &mesh,
+            prism_asset::AssetId::new(prism_asset::AssetIndex::from_parts(0, 1)),
+            device,
+            queue,
+            None,
+        )
+        .expect("the quad prepares");
+
+        let module = device.create_shader_module(&ShaderModuleDescriptor::wgsl(
+            "@vertex fn vs(@location(0) pos: vec3<f32>) -> @builtin(position) vec4<f32> {\n\
+                 return vec4<f32>(pos, 1.0);\n\
+             }\n\
+             @fragment fn fs() -> @location(0) vec4<f32> {\n\
+                 return vec4<f32>(1.0, 0.0, 0.0, 1.0);\n\
+             }",
+        ));
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("spine-draw".into()),
+            layout: None,
+            vertex: VertexState {
+                module,
+                entry_point: "vs".into(),
+                buffers: vec![prepared.layout.clone()],
+            },
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            fragment: Some(prism_render_driver::FragmentState {
+                module,
+                entry_point: "fs".into(),
+                targets: vec![Some(prism_render_driver::ColorTargetState::opaque(
+                    crate::RENDER_TARGET_FORMAT,
+                ))],
+            }),
+        });
+        let (vertices, indices) = (
+            prepared.buffers.vertices,
+            prepared.buffers.indices.expect("the quad is indexed").0,
+        );
+        (pipeline, vertices, indices, prepared.element_count())
+    };
+
+    {
+        let render = app.sub_app_mut(RenderApp).expect("the render sub-app");
+        render.world.resource_mut::<RenderQueues>().push(
+            RenderPhase::Opaque,
+            PhaseItem {
+                pipeline,
+                draw: crate::draw::canonical::MESH,
+                geometry: GenerationalHandle::new(1, 1),
+                vertices,
+                indices: Some((indices, prism_render_driver::IndexFormat::Uint16)),
+                first: 0,
+                count: index_count,
+                base_vertex: 0,
+                indirect: None,
+                lod_level: 0,
+                material: GenerationalHandle::new(2, 1),
+                scene: GenerationalHandle::new(3, 1),
+                order: 0,
+            },
+        );
+    }
+
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+    let runtime = render
+        .world
+        .resource::<RenderRuntimeResource<prism_render_driver_wgpu::WgpuInstance>>();
+    assert_eq!(
+        render.world.resource::<RenderFrameStats>().draws_recorded,
+        1,
+        "the frame recorded the queued mesh"
+    );
+    assert!(runtime.runtime().wait_idle(), "the draw completes on the GPU");
+
+    let target = *render.world.resource::<RenderTarget>();
+    let pixels = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba8(target.texture(), SIZE, SIZE);
+    let pixel = |x: u32, y: u32| {
+        let index = ((y * SIZE + x) * 4) as usize;
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
+    };
+    assert_eq!(
+        pixel(SIZE / 2, SIZE / 2),
+        [255, 0, 0, 255],
+        "the queued mesh rasterized in the frame's target"
+    );
+    assert_eq!(
+        pixel(0, 0),
+        [0, 0, 0, 255],
+        "outside the quad the frame's clear is what remains"
+    );
+}
