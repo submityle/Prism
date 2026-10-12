@@ -145,6 +145,8 @@ impl SnapshotHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::App;
+    use crate::sub_app::SubApp;
     use prism_ecs::component::Component;
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -236,5 +238,39 @@ mod tests {
         let history = SnapshotHistory::new(2);
         assert!(!history.rollback(&mut w, 99));
         assert_eq!(w.get::<Counter>(e).unwrap().0, 7);
+    }
+
+    #[test]
+    fn sub_app_capture_and_rollback() {
+        let mut sub = SubApp::new();
+        sub.world.register_snapshot_component_hashable::<Counter>();
+        sub.world.register_snapshot_component::<Marker>();
+        let e = sub.world.spawn((Counter(1), Marker));
+        sub.init_snapshot_history(4);
+        let frame = sub.capture_snapshot().expect("history installed");
+        sub.world.get_mut::<Counter>(e).unwrap().0 = 5;
+        assert!(sub.rollback_to(frame));
+        assert_eq!(sub.world.get::<Counter>(e).unwrap().0, 1);
+    }
+
+    #[test]
+    fn capture_and_rollback_without_history_report_absence() {
+        let mut sub = SubApp::new();
+        assert!(sub.capture_snapshot().is_none());
+        assert!(!sub.rollback_to(0));
+    }
+
+    #[test]
+    fn app_snapshot_rollback_roundtrip() {
+        let mut app = App::new();
+        app.world_mut().register_snapshot_component_hashable::<Counter>();
+        app.world_mut().register_snapshot_component::<Marker>();
+        let e = app.world_mut().spawn((Counter(2), Marker));
+        app.init_snapshot_history(4);
+        let frame = app.capture_snapshot().expect("history installed");
+        app.world_mut().get_mut::<Counter>(e).unwrap().0 = 9;
+        assert_eq!(app.world().get::<Counter>(e).unwrap().0, 9);
+        assert!(app.rollback_to(frame));
+        assert_eq!(app.world().get::<Counter>(e).unwrap().0, 2);
     }
 }

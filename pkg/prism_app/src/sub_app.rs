@@ -25,6 +25,7 @@
 //! here, not stubbed.
 
 use prism_ecs::schedule::{ScheduleLabel, Schedules};
+use crate::rollback::SnapshotHistory;
 use prism_ecs::world::World;
 
 use crate::time::{EngineClocks, TimeUpdateStrategy};
@@ -65,6 +66,9 @@ pub struct SubApp {
     /// per frame before [`update`](SubApp::update). `None` on the main sub-app
     /// and on any secondary sub-app that does not need to read the main world.
     extract: Option<ExtractFn>,
+    /// Optional bounded world-snapshot history for rollback (design §14 / M5).
+    /// `None` until [`init_snapshot_history`](SubApp::init_snapshot_history).
+    snapshot_history: Option<SnapshotHistory>,
 }
 
 impl Default for SubApp {
@@ -82,6 +86,7 @@ impl SubApp {
         Self {
             world,
             extract: None,
+            snapshot_history: None,
         }
     }
 
@@ -117,6 +122,58 @@ impl SubApp {
     /// systems to, say, `PreUpdate`.
     pub fn run_schedule(&mut self, label: impl ScheduleLabel) {
         self.world.run_schedule(label);
+    }
+
+    // ---- rollback history (design §14 / M5) --------------------------------
+
+    /// Install a bounded world-snapshot history retaining `capacity` frames,
+    /// replacing any previous history (design §14, §22 M5).
+    ///
+    /// # Panics
+    /// Panics if `capacity` is zero.
+    pub fn init_snapshot_history(&mut self, capacity: usize) -> &mut Self {
+        self.snapshot_history = Some(SnapshotHistory::new(capacity));
+        self
+    }
+
+    /// This sub-app's snapshot history, if one was installed.
+    #[must_use]
+    pub fn snapshot_history(&self) -> Option<&SnapshotHistory> {
+        self.snapshot_history.as_ref()
+    }
+
+    /// Capture this sub-app's world at the next history frame.
+    ///
+    /// Returns `None` when no history is installed.
+    ///
+    /// # Panics
+    /// Panics (via [`SnapshotHistory::capture`]) if a resident component has no
+    /// snapshot clone glue; use
+    /// [`try_capture_snapshot`](SubApp::try_capture_snapshot) to report it.
+    pub fn capture_snapshot(&mut self) -> Option<u64> {
+        let history = self.snapshot_history.as_mut()?;
+        Some(history.capture(&self.world))
+    }
+
+    /// Fallible [`capture_snapshot`](SubApp::capture_snapshot): `None` when no
+    /// history is installed, otherwise `Ok(frame)` or `Err(missing component
+    /// ids)`.
+    pub fn try_capture_snapshot(
+        &mut self,
+    ) -> Option<Result<u64, Vec<prism_ecs::component::ComponentId>>> {
+        let history = self.snapshot_history.as_mut()?;
+        Some(history.try_capture(&self.world))
+    }
+
+    /// Restore this sub-app's world to `frame` (design §14).
+    ///
+    /// Returns `false` when no history is installed or `frame` has been evicted
+    /// or was never captured; the world is then left untouched.
+    pub fn rollback_to(&mut self, frame: u64) -> bool {
+        match self.snapshot_history.as_ref() {
+            Some(history) => history.rollback(&mut self.world, frame),
+            None => false,
+        }
     }
 
     /// Run the startup phases exactly once, in order

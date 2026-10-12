@@ -762,6 +762,34 @@ impl App {
         &mut self.sub_apps.main.world
     }
 
+    // ---- rollback history (design §14 / M5) -------------------------------
+
+    /// Install a bounded world-snapshot history on the main sub-app, retaining
+    /// `capacity` frames (design §14, §22 M5).
+    ///
+    /// # Panics
+    /// Panics if `capacity` is zero.
+    pub fn init_snapshot_history(&mut self, capacity: usize) -> &mut Self {
+        self.sub_apps.main.init_snapshot_history(capacity);
+        self
+    }
+
+    /// Capture the main world at the next rollback frame.
+    ///
+    /// Returns `None` until [`init_snapshot_history`](App::init_snapshot_history)
+    /// is called. Panics if a resident component has no snapshot clone glue.
+    pub fn capture_snapshot(&mut self) -> Option<u64> {
+        self.sub_apps.main.capture_snapshot()
+    }
+
+    /// Restore the main world to a retained rollback frame (design §14).
+    ///
+    /// Returns `false` when no history is installed or `frame` has been evicted
+    /// or was never captured.
+    pub fn rollback_to(&mut self, frame: u64) -> bool {
+        self.sub_apps.main.rollback_to(frame)
+    }
+
     // ---- capability tiering (design §3, §24.4) ----------------------------
 
     /// The capabilities probed at construction (design §3).
