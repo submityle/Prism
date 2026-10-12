@@ -1004,3 +1004,75 @@ default = 0.05
 valid = "0.0..=1.5707964"
 energy_policy = "none"
 view = "dependent"
+
+[[lobe]]
+id = "measured_brdf"
+# Identity is `uid`-based and immutable once a material has been serialized.
+# The measured lobe is Prism-private: it is the *data-driven but non-AI* member
+# of the open vocabulary (§17.6) — a tabulated BRDF/BTF (MERL et al.) sampled
+# trilinearly in Rusinkiewicz coordinates. The table itself is a material
+# texture (a `provider`), so this lobe only carries the authored response
+# parameters; the data's own energy is what it is, which is why its weight is an
+# `independent` energy policy rather than a coupled re-shaping of the analytic
+# specular lobe.
+uid = "org.prism.lobe.measured_brdf"
+registry_slot = 18
+mask_const = "MEASURED_BRDF"
+namespace = "PRISM"
+vendor = "prism"
+stability = "experimental"
+# Platform capabilities this lobe needs beyond the shared über path (§5.3).
+# Empty for the *response*: the fetch is a plain texture load on the standard
+# material texture heap. The `provider` row that ships the table is the one that
+# declares `HeavySampling`, so a platform without it drops the data, not the lobe.
+requires_caps = []
+words = 4
+
+[[lobe.field]]
+name = "measured_weight"
+type = "f32"
+bit_region = "PRISM"
+pack_slot = 0
+spec_subfield = "closure_mask"
+consumed_by = ["unpack", "classify", "sample", "golden"]
+default = 0.0
+valid = "0.0..=1.0"
+energy_policy = "independent"
+view = "dependent"
+
+[[lobe.field]]
+name = "measured_phi_d"
+type = "f32"
+bit_region = "PRISM"
+pack_slot = 1
+consumed_by = ["unpack", "sample", "golden"]
+# Difference-azimuth resolution of the bound table's atlas (MERL default 180).
+# Together with the texture's dimensions it fixes the tabulated grid:
+# width = theta_h, height = theta_d * phi_d, so `theta_d` follows from the
+# texture size and this field.
+default = 180.0
+valid = "2.0..=4096.0"
+energy_policy = "none"
+view = "dependent"
+
+[[lobe.field]]
+name = "measured_scale"
+type = "f32"
+bit_region = "PRISM"
+pack_slot = 2
+consumed_by = ["unpack", "sample", "golden"]
+# Table-to-radiance scale. Measured data carries its own normalisation, so this
+# is the one knob that puts it into the renderer's units without touching the
+# table (default 1.0 is the identity).
+default = 1.0
+valid = "0.0..=1000000.0"
+energy_policy = "none"
+view = "dependent"
+
+[[lobe.field]]
+name = "_pad0"
+type = "pad"
+bit_region = "PRISM"
+pack_slot = 3
+consumed_by = []
+default = 0.0

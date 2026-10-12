@@ -25,13 +25,13 @@ pub const SURFACE_LOBE_WORDS: usize = 16;
 /// `SURFACE_LOBE_WORDS_BY_SLOT[bit.trailing_zeros()]` is the stride for that
 /// lobe. Summing the present entries plus [`SURFACE_CORE_WORDS`] gives
 /// `SurfaceParameterBlock::packed_len_words`.
-pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 18] =
-    [8, 16, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4];
+pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 19] =
+    [8, 16, 4, 8, 16, 16, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4];
 /// Number of defined optional lobes (equals `LobeMask::COUNT`).
-pub const SURFACE_LOBE_COUNT: u32 = 9;
+pub const SURFACE_LOBE_COUNT: u32 = 10;
 /// Fully-loaded worst case: core plus every lobe. The WESL decoder gathers into
 /// an `array<u32, SURFACE_MAX_WORDS>`.
-pub const SURFACE_MAX_WORDS: usize = 100;
+pub const SURFACE_MAX_WORDS: usize = 104;
 
 /// One optional lobe's generated identity, in canonical pack order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +70,7 @@ pub struct LobeLayout {
 /// the `OpenPBR` bit-region isolation invariant (§4.5 constraint 2):
 /// `surface.rs::LobeMask` derives its region masks from the same schema, and
 /// `layout_matches_generated_table` asserts the two agree.
-pub const SURFACE_LOBES: [LobeLayout; 9] = [
+pub const SURFACE_LOBES: [LobeLayout; 10] = [
     LobeLayout {
         id: "emission",
         uid: "org.khronos.openpbr.emission",
@@ -169,5 +169,16 @@ pub const SURFACE_LOBES: [LobeLayout; 9] = [
         stability: "experimental",
         requires_caps: &[],
         energy_policy: "coupled",
+    },
+    LobeLayout {
+        id: "measured_brdf",
+        uid: "org.prism.lobe.measured_brdf",
+        mask_const: "MEASURED_BRDF",
+        registry_slot: 18,
+        words: 4,
+        namespace: "PRISM",
+        stability: "experimental",
+        requires_caps: &[],
+        energy_policy: "independent",
     },
 ];

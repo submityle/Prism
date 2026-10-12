@@ -91,6 +91,11 @@ struct PrismSurfaceParameters {
     glint_roughness: f32,
     glint_density: f32,
     glint_bin_half_width: f32,
+    // Measured (tabulated) BRDF/BTF lobe (§17.6). The table itself is a material
+    // texture (a provider); these are the authored response parameters.
+    measured_weight: f32,
+    measured_phi_d: f32,
+    measured_scale: f32,
 }
 
 struct PrismMaterialTexture {

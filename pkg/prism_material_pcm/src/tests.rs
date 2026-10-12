@@ -29,8 +29,8 @@ fn the_builtin_catalogue_registers_every_core_lobe_as_a_khr_item() {
     let registry = builtin_registry();
     assert_eq!(
         registry.len(),
-        7 + 6 + 4 + 5,
-        "7 KHR lobes + 2 Prism lobes + 4 channels + 3 response modes + 1 cache aux \
+        7 + 7 + 4 + 5,
+        "7 KHR lobes + 3 Prism lobes + 4 channels + 3 response modes + 1 cache aux \
          + 5 bake/pass-time rows"
     );
     for (index, slot) in [0u32, 1, 2, 3, 4, 5, 6].into_iter().enumerate() {
@@ -102,7 +102,7 @@ fn channel_and_lobe_kinds_share_one_namespace_partitioned_slot_space() {
         .manifest_by_uid(UID_CHANNEL_WETNESS)
         .expect("wetness channel");
     assert_eq!(wetness.kind(), Kind::Channel);
-    assert_eq!(wetness.registry_slot(), Some(18));
+    assert_eq!(wetness.registry_slot(), Some(19));
     assert_eq!(wetness.region(), Region::Prism);
     let snow = registry
         .manifest_by_uid(UID_CHANNEL_SNOW)
@@ -115,16 +115,16 @@ fn channel_and_lobe_kinds_share_one_namespace_partitioned_slot_space() {
 #[test]
 fn register_allocates_from_the_namespace_region_and_never_recycles() {
     let mut registry = builtin_registry();
-    // The Prism region already holds 16..25 (2 lobes + 4 channels + 3 response
-    // modes + the cache aux), so the next fresh Prism extension lands at 26 and
-    // the one after at 27.
+    // The Prism region already holds 16..26 (3 lobes + 4 channels + 3 response
+    // modes + the cache aux), so the next fresh Prism extension lands at 27 and
+    // the one after at 28.
     let first = register_prism_extension(&mut registry, "org.prism.lobe.watercolor", Kind::Lobe)
         .expect("prism region has room");
-    assert_eq!(first.registry_slot(), Some(26));
+    assert_eq!(first.registry_slot(), Some(27));
     let second =
         register_prism_extension(&mut registry, "org.prism.mode.watercolor", Kind::ResponseMode)
         .expect("prism region has room");
-    assert_eq!(second.registry_slot(), Some(27));
+    assert_eq!(second.registry_slot(), Some(28));
     // A bake/pass-time kind needs no address at all, so it cannot exhaust the
     // region and does not move the allocator (§5.2).
     let outline = register_prism_extension(
@@ -134,7 +134,7 @@ fn register_allocates_from_the_namespace_region_and_never_recycles() {
     )
     .expect("an identity-only registration never runs out of slots");
     assert_eq!(outline.registry_slot(), None);
-    assert_eq!(registry.allocate_slot(Namespace::Prism).unwrap(), 28);
+    assert_eq!(registry.allocate_slot(Namespace::Prism).unwrap(), 29);
     assert_eq!(
         registry
             .manifest_by_uid("org.prism.composite.watercolor_edges")
@@ -249,7 +249,7 @@ fn identity_only_rows_promote_in_place_without_gaining_a_slot() {
         Some(Namespace::Khr)
     );
     assert_eq!(registry.identity_only().len(), 5);
-    assert_eq!(registry.len(), 22);
+    assert_eq!(registry.len(), 23);
     assert_eq!(registry.slot_of_uid(UID_TRANSFER_SRGB), None);
 }
 
@@ -318,13 +318,13 @@ fn negotiation_errors_on_a_missing_required_capability() {
     let registry = builtin_registry();
     let mut requested = ExtensionSet::EMPTY;
     // `snow` needs virtual texturing.
-    requested.insert_used(19).unwrap();
-    requested.insert_required(19).unwrap();
+    requested.insert_used(20).unwrap();
+    requested.insert_required(20).unwrap();
 
     let weak = caps([Capability::BindlessTextures]);
     let error = negotiate(&registry, requested, weak).expect_err("snow is unsatisfiable");
     assert_eq!(error.unsupported.len(), 1);
-    assert_eq!(error.unsupported[0].slot, 19);
+    assert_eq!(error.unsupported[0].slot, 20);
     assert_eq!(
         error.unsupported[0].uid.as_deref(),
         Some("org.prism.channel.snow")
@@ -346,29 +346,29 @@ fn negotiation_gracefully_ignores_an_unsatisfiable_used_only_extension() {
     let registry = builtin_registry();
     let mut requested = ExtensionSet::EMPTY;
     requested.insert_used(16).unwrap(); // face lobe: no caps needed
-    requested.insert_used(19).unwrap(); // snow: needs VT
-    requested.insert_used(20).unwrap(); // damage: no caps needed
+    requested.insert_used(20).unwrap(); // snow: needs VT
+    requested.insert_used(21).unwrap(); // damage: no caps needed
 
     let weak = caps([Capability::BindlessTextures]);
     let negotiation = negotiate(&registry, requested, weak).expect("nothing is required");
     assert!(!negotiation.is_lossless());
     assert_eq!(negotiation.ignored().len(), 1);
-    assert_eq!(negotiation.ignored()[0].slot, 19);
+    assert_eq!(negotiation.ignored()[0].slot, 20);
     let kept = negotiation.extensions();
     assert!(kept.contains_used(16));
-    assert!(kept.contains_used(20));
+    assert!(kept.contains_used(21));
     assert!(
-        !kept.contains_used(19),
+        !kept.contains_used(20),
         "the unsatisfiable extension is dropped"
     );
-    assert!(!kept.contains_required(19));
+    assert!(!kept.contains_required(20));
 }
 
 #[test]
 fn required_is_always_a_subset_of_used_in_the_digest() {
     let mut set = ExtensionSet::EMPTY;
-    set.insert_required(19).unwrap();
-    assert!(set.contains_used(19) && set.contains_required(19));
+    set.insert_required(20).unwrap();
+    assert!(set.contains_used(20) && set.contains_required(20));
     // A caller cannot construct required without used through the safe API.
     assert!(set.required_is_subset_of(set));
     // A slot outside the digest is rejected by the fallible mutators.

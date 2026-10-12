@@ -68,7 +68,9 @@ fn authored() -> GpuSurfaceParameters {
         glint_roughness: 0.22,
         glint_density: 12.0,
         glint_bin_half_width: 0.031,
-        _pad_tail: [0.0; 3],
+        measured_weight: 0.45,
+        measured_phi_d: 128.0,
+        measured_scale: 2.5,
     }
 }
 
@@ -128,6 +130,9 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
         (Some("glint"), "glint_roughness") => vec![p.glint_roughness],
         (Some("glint"), "glint_density") => vec![p.glint_density],
         (Some("glint"), "glint_bin_half_width") => vec![p.glint_bin_half_width],
+        (Some("measured_brdf"), "measured_weight") => vec![p.measured_weight],
+        (Some("measured_brdf"), "measured_phi_d") => vec![p.measured_phi_d],
+        (Some("measured_brdf"), "measured_scale") => vec![p.measured_scale],
         other => panic!("schema field {other:?} has no authored binding"),
     }
 }
@@ -144,6 +149,7 @@ fn mask_const_bits(name: &str) -> u32 {
         "THIN_FILM" => LobeMask::THIN_FILM.bits(),
         "NPR_FACE" => LobeMask::NPR_FACE.bits(),
         "GLINT" => LobeMask::GLINT.bits(),
+        "MEASURED_BRDF" => LobeMask::MEASURED_BRDF.bits(),
         other => panic!("unknown mask_const {other}"),
     }
 }

@@ -251,7 +251,9 @@ mod tests {
             glint_roughness: 0.22,
             glint_density: 12.0,
             glint_bin_half_width: 0.031,
-            _pad_tail: [0.0; 3],
+            measured_weight: 0.45,
+            measured_phi_d: 128.0,
+            measured_scale: 2.5,
         }
     }
 

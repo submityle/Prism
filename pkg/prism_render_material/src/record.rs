@@ -378,9 +378,11 @@ pub struct GpuSurfaceParameters {
     pub glint_density: f32,
     /// Angular half-width (radians) of the half-vector acceptance bin.
     pub glint_bin_half_width: f32,
-    /// Tail padding keeping the fat authoring view a 16-byte multiple as the
-    /// coat group grows. Carries no data.
-    pub _pad_tail: [f32; 3],
+    /// Measured (tabulated) BRDF/BTF lobe (§17.6): blend weight, the bound
+    /// table's difference-azimuth resolution, and the table-to-radiance scale.
+    pub measured_weight: f32,
+    pub measured_phi_d: f32,
+    pub measured_scale: f32,
 }
 
 impl Default for GpuSurfaceParameters {
@@ -442,7 +444,9 @@ impl Default for GpuSurfaceParameters {
             glint_roughness: 0.1,
             glint_density: 4.0,
             glint_bin_half_width: 0.05,
-            _pad_tail: [0.0; 3],
+            measured_weight: 0.0,
+            measured_phi_d: 180.0,
+            measured_scale: 1.0,
         }
     }
 }

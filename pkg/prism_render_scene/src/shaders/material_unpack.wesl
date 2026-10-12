@@ -8,7 +8,7 @@
 //! the scene packs each surface as an über-BSDF core (20 words) followed by
 //! only the lobes named in `lobe_mask`, written low bit first. Readers gather the
 //! material's `parameter_size / 4` words out of the shared `array<u32>` heap into a
-//! fixed `array<u32, 100>` (the fully-loaded worst case) and expand them back to
+//! fixed `array<u32, 104>` (the fully-loaded worst case) and expand them back to
 //! a full `PrismSurfaceParameters`, filling absent lobes with neutral defaults.
 //!
 //! Kept as a single generated source so all five consumers (opaque, transparent,
@@ -16,16 +16,17 @@
 
 import prism_render_scene::shaders::material::PrismSurfaceParameters;
 
-const PRISM_LOBE_EMISSION: u32 = 1u;      // 1 << 0
-const PRISM_LOBE_CLEARCOAT: u32 = 2u;     // 1 << 1
-const PRISM_LOBE_ANISOTROPY: u32 = 4u;    // 1 << 2
-const PRISM_LOBE_SHEEN: u32 = 8u;         // 1 << 3
-const PRISM_LOBE_SUBSURFACE: u32 = 16u;   // 1 << 4
-const PRISM_LOBE_TRANSMISSION: u32 = 32u; // 1 << 5
-const PRISM_LOBE_THIN_FILM: u32 = 64u;    // 1 << 6
-const PRISM_LOBE_NPR_FACE: u32 = 65536u;  // 1 << 16
-const PRISM_LOBE_GLINT: u32 = 131072u;    // 1 << 17
-const PRISM_LOBE_ALL: u32 = 196735u;      // (1 << 9) - 1
+const PRISM_LOBE_EMISSION: u32 = 1u;           // 1 << 0
+const PRISM_LOBE_CLEARCOAT: u32 = 2u;          // 1 << 1
+const PRISM_LOBE_ANISOTROPY: u32 = 4u;         // 1 << 2
+const PRISM_LOBE_SHEEN: u32 = 8u;              // 1 << 3
+const PRISM_LOBE_SUBSURFACE: u32 = 16u;        // 1 << 4
+const PRISM_LOBE_TRANSMISSION: u32 = 32u;      // 1 << 5
+const PRISM_LOBE_THIN_FILM: u32 = 64u;         // 1 << 6
+const PRISM_LOBE_NPR_FACE: u32 = 65536u;       // 1 << 16
+const PRISM_LOBE_GLINT: u32 = 131072u;         // 1 << 17
+const PRISM_LOBE_MEASURED_BRDF: u32 = 262144u; // 1 << 18
+const PRISM_LOBE_ALL: u32 = 458879u;           // (1 << 10) - 1
 
 const PRISM_SURFACE_CORE_WORDS: u32 = 20u;
 /// Widest per-lobe word footprint (a documentation constant; the pack cursor
@@ -43,9 +44,10 @@ const PRISM_LOBE_WORDS_TRANSMISSION: u32 = 16u;
 const PRISM_LOBE_WORDS_THIN_FILM: u32 = 4u;
 const PRISM_LOBE_WORDS_NPR_FACE: u32 = 4u;
 const PRISM_LOBE_WORDS_GLINT: u32 = 4u;
+const PRISM_LOBE_WORDS_MEASURED_BRDF: u32 = 4u;
 
-/// Fully-loaded worst case: core + every lobe (20 + sum of 9 lobe footprints).
-const PRISM_SURFACE_MAX_WORDS: u32 = 100u;
+/// Fully-loaded worst case: core + every lobe (20 + sum of 10 lobe footprints).
+const PRISM_SURFACE_MAX_WORDS: u32 = 104u;
 
 /// Packed word count for a mask: core plus each present lobe's own footprint.
 /// Mirrors `SurfaceParameterBlock::packed_len_words`.
@@ -60,6 +62,7 @@ fn prism_packed_word_count(lobe_mask: u32) -> u32 {
     if ((lobe_mask & PRISM_LOBE_THIN_FILM) != 0u) { words += PRISM_LOBE_WORDS_THIN_FILM; }
     if ((lobe_mask & PRISM_LOBE_NPR_FACE) != 0u) { words += PRISM_LOBE_WORDS_NPR_FACE; }
     if ((lobe_mask & PRISM_LOBE_GLINT) != 0u) { words += PRISM_LOBE_WORDS_GLINT; }
+    if ((lobe_mask & PRISM_LOBE_MEASURED_BRDF) != 0u) { words += PRISM_LOBE_WORDS_MEASURED_BRDF; }
     return words;
 }
 
@@ -115,6 +118,9 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
     s.glint_roughness = 0.1;
     s.glint_density = 4.0;
     s.glint_bin_half_width = 0.05;
+    s.measured_weight = 0.0;
+    s.measured_phi_d = 180.0;
+    s.measured_scale = 1.0;
     return s;
 }
 
@@ -122,7 +128,7 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
 /// using `lobe_mask`. Words beyond the packed length are ignored; absent lobes keep
 /// their neutral default. Byte-exact twin of
 /// `SurfaceParameterBlock::unpack(mask, words).to_full()`.
-fn prism_unpack_surface(words: array<u32, 100>, lobe_mask: u32) -> PrismSurfaceParameters {
+fn prism_unpack_surface(words: array<u32, 104>, lobe_mask: u32) -> PrismSurfaceParameters {
     var w = words;
     var s = prism_neutral_surface();
 
@@ -248,6 +254,12 @@ fn prism_unpack_surface(words: array<u32, 100>, lobe_mask: u32) -> PrismSurfaceP
         s.glint_density = bitcast<f32>(w[cursor + 2u]);
         s.glint_bin_half_width = bitcast<f32>(w[cursor + 3u]);
         cursor += PRISM_LOBE_WORDS_GLINT;
+    }
+    if (lobe_mask & PRISM_LOBE_MEASURED_BRDF) != 0u {
+        s.measured_weight = bitcast<f32>(w[cursor]);
+        s.measured_phi_d = bitcast<f32>(w[cursor + 1u]);
+        s.measured_scale = bitcast<f32>(w[cursor + 2u]);
+        cursor += PRISM_LOBE_WORDS_MEASURED_BRDF;
     }
     return s;
 }

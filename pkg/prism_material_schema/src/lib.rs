@@ -698,7 +698,7 @@ mod tests {
         let schema = surface_schema();
         assert_eq!(schema.schema_version, 1);
         assert_eq!(schema.core.words, 20);
-        assert_eq!(schema.lobe_count(), 9);
+        assert_eq!(schema.lobe_count(), 10);
         // The open-vocabulary glint lobe (§17.6) is a first-class member of the
         // same table as the specification core: it just lives in the extension
         // region with its own uid and a 4-word block.
@@ -725,7 +725,7 @@ mod tests {
             .collect();
         // Canonical slots 0..6 then the extension region from 16 (§4.5
         // constraint 2): the private lobes are dense from the extension base.
-        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6, 16, 17]);
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 6, 16, 17, 18]);
     }
 
     #[test]

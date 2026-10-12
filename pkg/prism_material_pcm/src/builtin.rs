@@ -57,6 +57,11 @@ pub const UID_LOBE_FACE: &str = "studio.prism.face_shadow";
 /// statistical highlight. Unbiased in expectation, so it re-shapes the specular
 /// lobe without changing its energy.
 pub const UID_LOBE_GLINT: &str = "org.prism.lobe.glint";
+/// `uid` of the measured (tabulated) BRDF/BTF lobe (`PRISM`).
+///
+/// The *response* half of the measured-material story: a trilinear lookup in
+/// Rusinkiewicz coordinates. The table itself is the `provider` row below.
+pub const UID_LOBE_MEASURED_BRDF: &str = "org.prism.lobe.measured_brdf";
 /// `uid` of the wetness dynamic channel (`PRISM`).
 pub const UID_CHANNEL_WETNESS: &str = "org.prism.channel.wetness";
 /// `uid` of the snow-cover dynamic channel (`PRISM`).
@@ -128,7 +133,7 @@ const KHR_LOBES: [(&str, u32, bool); 7] = [
 /// the channels start at 18 rather than 17: `prism_render_material`'s
 /// `tests/pcm_parity.rs` fails the build if any non-lobe slot collides with a
 /// schema lobe slot, so a new lobe can never silently alias a channel.
-const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 6] = [
+const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 7] = [
     (
         UID_LOBE_FACE,
         16,
@@ -146,8 +151,16 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 6] =
         true,
     ),
     (
-        UID_CHANNEL_WETNESS,
+        UID_LOBE_MEASURED_BRDF,
         18,
+        Kind::Lobe,
+        Stability::Experimental,
+        CapabilitySet::EMPTY,
+        true,
+    ),
+    (
+        UID_CHANNEL_WETNESS,
+        19,
         Kind::Channel,
         Stability::Candidate,
         CapabilitySet::of(Capability::ObjectSpaceCache),
@@ -155,7 +168,7 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 6] =
     ),
     (
         UID_CHANNEL_SNOW,
-        19,
+        20,
         Kind::Channel,
         Stability::Candidate,
         CapabilitySet::of(Capability::VirtualTexture),
@@ -163,7 +176,7 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 6] =
     ),
     (
         UID_CHANNEL_DAMAGE,
-        20,
+        21,
         Kind::Channel,
         Stability::Candidate,
         CapabilitySet::EMPTY,
@@ -171,7 +184,7 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 6] =
     ),
     (
         UID_CHANNEL_DISSOLVE,
-        21,
+        22,
         Kind::Channel,
         Stability::Candidate,
         CapabilitySet::EMPTY,
@@ -192,7 +205,7 @@ const PRISM_EXTENSIONS: [(&str, u32, Kind, Stability, CapabilitySet, bool); 6] =
 const PRISM_SLOTTED: [(&str, u32, Kind, Stability, CapabilitySet, bool); 4] = [
     (
         UID_MODE_STYLIZED,
-        22,
+        23,
         Kind::ResponseMode,
         Stability::Candidate,
         CapabilitySet::EMPTY,
@@ -200,7 +213,7 @@ const PRISM_SLOTTED: [(&str, u32, Kind, Stability, CapabilitySet, bool); 4] = [
     ),
     (
         UID_MODE_UNLIT,
-        23,
+        24,
         Kind::ResponseMode,
         Stability::Candidate,
         CapabilitySet::EMPTY,
@@ -208,7 +221,7 @@ const PRISM_SLOTTED: [(&str, u32, Kind, Stability, CapabilitySet, bool); 4] = [
     ),
     (
         UID_MODE_CUSTOM,
-        24,
+        25,
         Kind::ResponseMode,
         Stability::Experimental,
         CapabilitySet::EMPTY,
@@ -216,7 +229,7 @@ const PRISM_SLOTTED: [(&str, u32, Kind, Stability, CapabilitySet, bool); 4] = [
     ),
     (
         UID_CACHE_AUX_SURFEL,
-        25,
+        26,
         Kind::CacheAux,
         Stability::Candidate,
         CapabilitySet::of(Capability::ObjectSpaceCache),
@@ -308,6 +321,11 @@ pub fn builtin_energy_policy(kind: Kind, uid: &str) -> EnergyPolicy {
     match uid {
         UID_LOBE_EMISSION => EnergyPolicy::Independent,
         UID_LOBE_FACE => EnergyPolicy::None,
+        // The measured lobe adds a *tabulated* response: the data carries its own
+        // energy, so it is not a re-shaping of the analytic specular budget the
+        // way glint is. The parity gate compares this against the schema's
+        // field-level column, so it cannot drift.
+        UID_LOBE_MEASURED_BRDF => EnergyPolicy::Independent,
         _ => EnergyPolicy::Coupled,
     }
 }

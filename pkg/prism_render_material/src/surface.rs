@@ -372,6 +372,36 @@ impl Default for GpuGlintLobe {
     }
 }
 
+/// Measured (tabulated) BRDF/BTF lobe: the data-driven, non-AI member of the
+/// open vocabulary (§17.6).
+///
+/// The table itself is *not* in the ABI: it ships as an ordinary material
+/// texture (a `provider`, bound with the measured-BRDF semantic), and the shader
+/// fetches its eight trilinear corners with integer texel loads. What the lobe
+/// carries is only the authored response: the blend weight, the table's
+/// difference-azimuth resolution, and a scale that puts the measured data's own
+/// normalisation into the renderer's units.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuMeasuredBrdfLobe {
+    pub measured_weight: f32,
+    pub measured_phi_d: f32,
+    pub measured_scale: f32,
+    pub _pad0: f32,
+}
+
+impl Default for GpuMeasuredBrdfLobe {
+    fn default() -> Self {
+        // Exactly the schema defaults, so an absent lobe reads back neutral.
+        Self {
+            measured_weight: 0.0,
+            measured_phi_d: 180.0,
+            measured_scale: 1.0,
+            _pad0: 0.0,
+        }
+    }
+}
+
 /// Bitset recording which optional lobes a surface carries.
 ///
 /// The bit order is the canonical serialization order used by
@@ -397,6 +427,9 @@ impl LobeMask {
     /// estimator blended into the specular lobe. Slot 17 keeps the extension
     /// region dense from its base.
     pub const GLINT: Self = Self(1 << 17);
+    /// The measured (tabulated) BRDF/BTF lobe (§17.6): trilinear table lookup in
+    /// Rusinkiewicz coordinates. Slot 18 keeps the extension region dense.
+    pub const MEASURED_BRDF: Self = Self(1 << 18);
 
     /// The `OpenPBR` specification-core bit region (§4.5 constraint 2).
     ///
@@ -418,11 +451,12 @@ impl LobeMask {
     /// segment. It is disjoint from [`Self::KHR_REGION`], so a private lobe can
     /// never alias a specification-half field, and a downstream pure-OpenPBR
     /// consumer simply ignores anything outside [`Self::KHR_REGION`].
-    pub const EXTENSION_REGION: Self = Self(Self::NPR_FACE.0 | Self::GLINT.0);
+    pub const EXTENSION_REGION: Self =
+        Self(Self::NPR_FACE.0 | Self::GLINT.0 | Self::MEASURED_BRDF.0);
 
     /// Number of distinct lobe bits defined; also the number of iterations of
     /// [`Self::iter_present`] over a fully populated mask.
-    pub const COUNT: u32 = 9;
+    pub const COUNT: u32 = 10;
 
     /// Raw bits.
     pub const fn bits(self) -> u32 {
@@ -451,7 +485,7 @@ impl LobeMask {
         // than a contiguous `(1 << COUNT) - 1`.
         Self(Self::EMISSION.0 | Self::CLEARCOAT.0 | Self::ANISOTROPY.0 | Self::SHEEN.0
             | Self::SUBSURFACE.0 | Self::TRANSMISSION.0 | Self::THIN_FILM.0 | Self::NPR_FACE.0
-            | Self::GLINT.0)
+            | Self::GLINT.0 | Self::MEASURED_BRDF.0)
     }
 
     /// Keep only the bits inside the `OpenPBR` specification-core region.
@@ -504,6 +538,7 @@ impl LobeMask {
             Self::THIN_FILM,
             Self::NPR_FACE,
             Self::GLINT,
+            Self::MEASURED_BRDF,
         ]
     }
 }
@@ -536,6 +571,7 @@ pub struct SurfaceParameterBlock {
     pub thin_film: GpuThinFilmLobe,
     pub face: GpuNprFaceLobe,
     pub glint: GpuGlintLobe,
+    pub measured: GpuMeasuredBrdfLobe,
 }
 
 /// Reasons an [`SurfaceParameterBlock::unpack`] can fail.
@@ -658,6 +694,12 @@ impl SurfaceParameterBlock {
                 glint_density: params.glint_density,
                 glint_bin_half_width: params.glint_bin_half_width,
             },
+            measured: GpuMeasuredBrdfLobe {
+                measured_weight: params.measured_weight,
+                measured_phi_d: params.measured_phi_d,
+                measured_scale: params.measured_scale,
+                _pad0: 0.0,
+            },
         }
     }
 
@@ -736,6 +778,11 @@ impl SurfaceParameterBlock {
             full.glint_density = self.glint.glint_density;
             full.glint_bin_half_width = self.glint.glint_bin_half_width;
         }
+        if self.lobe_mask.contains(LobeMask::MEASURED_BRDF) {
+            full.measured_weight = self.measured.measured_weight;
+            full.measured_phi_d = self.measured.measured_phi_d;
+            full.measured_scale = self.measured.measured_scale;
+        }
         full
     }
 
@@ -772,6 +819,9 @@ impl SurfaceParameterBlock {
             LobeMask::THIN_FILM => bytemuck::cast_slice(core::slice::from_ref(&self.thin_film)),
             LobeMask::NPR_FACE => bytemuck::cast_slice(core::slice::from_ref(&self.face)),
             LobeMask::GLINT => bytemuck::cast_slice(core::slice::from_ref(&self.glint)),
+            LobeMask::MEASURED_BRDF => {
+                bytemuck::cast_slice(core::slice::from_ref(&self.measured))
+            }
             _ => &[],
         }
     }
@@ -827,6 +877,7 @@ impl SurfaceParameterBlock {
                 LobeMask::THIN_FILM => block.thin_film = *bytemuck::from_bytes(slice),
                 LobeMask::NPR_FACE => block.face = *bytemuck::from_bytes(slice),
                 LobeMask::GLINT => block.glint = *bytemuck::from_bytes(slice),
+                LobeMask::MEASURED_BRDF => block.measured = *bytemuck::from_bytes(slice),
                 _ => {}
             }
             cursor += lobe_len;
@@ -908,7 +959,9 @@ mod tests {
             glint_roughness: 0.22,
             glint_density: 12.0,
             glint_bin_half_width: 0.031,
-            _pad_tail: [0.0; 3],
+            measured_weight: 0.45,
+            measured_phi_d: 128.0,
+            measured_scale: 2.5,
         }
     }
 

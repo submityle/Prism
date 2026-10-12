@@ -75,9 +75,10 @@ pub use record::{
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};
 pub use surface::{
-    GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe, GpuSheenLobe, GpuSubsurfaceLobe,
-    GpuSurfaceCore, GpuTransmissionLobe, LobeMask, LobeRegion, SurfaceParameterBlock,
-    SurfaceUnpackError, SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
+    GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe, GpuGlintLobe, GpuMeasuredBrdfLobe,
+    GpuNprFaceLobe, GpuSheenLobe, GpuSubsurfaceLobe, GpuSurfaceCore, GpuThinFilmLobe,
+    GpuTransmissionLobe, LobeMask, LobeRegion, SurfaceParameterBlock, SurfaceUnpackError,
+    SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
 };
 pub use surface_layout::{
     LobeLayout, SURFACE_LOBES, SURFACE_LOBE_COUNT, SURFACE_LOBE_WORDS_BY_SLOT, SURFACE_MAX_WORDS,
