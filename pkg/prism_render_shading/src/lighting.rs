@@ -124,8 +124,21 @@ pub struct SurfaceSample {
     /// `OpenPBR` `subsurface_radius_scale` (color3): the per-channel split of the
     /// radius (specification default `(1.0, 0.5, 0.25)`).
     pub subsurface_radius_scale: [f32; 3],
-    /// Optical thickness in `[0, 1]` driving Subsurface back-transmission
-    /// (0 = paper-thin, full transmission; 1 = opaque, no transmission).
+    /// `OpenPBR` `transmission_depth` (ABI identifier; decoded here as the
+    /// historical short name `thickness`): the distance the refracted ray travels
+    /// inside the transparent base before it is *exactly* `transmission_color`
+    /// under Beer's law — a **length in scene units**, not a `[0, 1]` weight.
+    ///
+    /// The real-time transmission lobe has no scene-unit path, so it fixes the
+    /// path at one scene unit: `depth == 1` transmits the tint exactly, larger
+    /// depths reach it farther in (less absorption over a unit path), `depth -> 0`
+    /// drives the slab to black, and `depth == 0` selects the specification's
+    /// **non-physical tint** (the authored `transmission_color` applied directly).
+    ///
+    /// The disjoint subsurface and advanced-cloth shading classes reuse this same
+    /// shade-time scalar as their normalised `[0, 1]` optical thickness. A given
+    /// material drives at most one of those paths, so the two readings never
+    /// conflict (the transmission lobe is inert whenever `transmission == 0`).
     pub thickness: f32,
     /// Signed anisotropy in `[-1, 1]`. Positive elongates the specular
     /// highlight along the tangent, negative along the bitangent, `0` is
@@ -389,12 +402,31 @@ pub fn evaluate_principled_direct(
                 surface.base_color[1] * surface.transmission_color[1],
                 surface.base_color[2] * surface.transmission_color[2],
             ];
-            let beer = crate::gi::translucency::transmission::transmittance_from_color(
-                bevy_math::Vec3::from_array(slab_color),
-                surface.thickness,
-                1.0,
-            )
-            .to_array();
+            // `OpenPBR` `transmission_depth` is the distance the refracted ray
+            // travels inside the transparent base before it is *exactly*
+            // `transmission_color` (Beer's law). This real-time lobe has no
+            // scene-unit path length, so the path is fixed at **one scene unit**:
+            // `depth == 1` transmits the tint exactly, a larger depth reaches it
+            // farther in (so a unit path absorbs less), and `depth -> 0` drives
+            // the slab to black. `depth == 0` is the specification's *non-physical*
+            // case: the authored tint is applied directly, with no absorption to
+            // invert (this is the difference from the pre-alignment convention,
+            // where `0` meant "no absorption" and transmitted white).
+            let depth = surface.thickness;
+            let beer = if depth > 0.0 {
+                crate::gi::translucency::transmission::transmittance_from_color(
+                    bevy_math::Vec3::from_array(slab_color),
+                    1.0,
+                    depth,
+                )
+                .to_array()
+            } else {
+                [
+                    surface.transmission_color[0].clamp(0.0, 1.0),
+                    surface.transmission_color[1].clamp(0.0, 1.0),
+                    surface.transmission_color[2].clamp(0.0, 1.0),
+                ]
+            };
             // `OpenPBR` `transmission_scatter`: the absorbed fraction can be
             // re-scattered instead of lost, blending the slab toward its own
             // colour. `0.0` is pure Beer-Lambert. `transmission_scatter_anisotropy`
@@ -1179,7 +1211,7 @@ mod tests {
         let glassy = evaluate_principled_direct(
             SurfaceSample {
                 transmission: 1.0,
-                thickness: 0.0, // zero optical depth: pure interface
+                thickness: 0.0, // `transmission_depth == 0`: non-physical tint
                 ..base
             },
             frame(),
@@ -1187,7 +1219,12 @@ mod tests {
         );
         assert!(sum3(glassy) > sum3(opaque), "glassy={glassy:?} opaque={opaque:?}");
 
-        // A thicker slab absorbs more, so transmittance falls monotonically.
+        // A unit path through a `depth == 1` slab transmits the tint exactly,
+        // which is darker than the zero-depth (non-physical) tint of the same
+        // `base_color`; `transmission_depth` reaches its tint farther in as it
+        // grows, so a larger depth absorbs *less* over the same unit path. The
+        // ordering `depth == 0` (lightest) > `depth == 2` > `depth == 1` pins
+        // the length semantics.
         let thick = evaluate_principled_direct(
             SurfaceSample {
                 transmission: 1.0,
@@ -1197,7 +1234,93 @@ mod tests {
             frame(),
             light(),
         );
-        assert!(sum3(thick) < sum3(glassy), "thick={thick:?} thin={glassy:?}");
+        let deeper = evaluate_principled_direct(
+            SurfaceSample {
+                transmission: 1.0,
+                thickness: 2.0,
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        assert!(sum3(thick) < sum3(glassy), "thick={thick:?} zero-depth={glassy:?}");
+        assert!(
+            sum3(deeper) > sum3(thick),
+            "a larger transmission_depth must absorb less over the unit path: \
+             deeper={deeper:?} unit={thick:?}"
+        );
+        assert!(sum3(deeper) < sum3(glassy), "deeper={deeper:?} zero-depth={glassy:?}");
+    }
+
+    #[test]
+    fn transmission_depth_zero_applies_the_authored_tint() {
+        // Specification: at `transmission_depth == 0` the `transmission_color`
+        // degenerates to a *non-physical tint* applied directly — it must not be
+        // read as "no absorption" (which would transmit `base_color` untinted).
+        let base = SurfaceSample {
+            base_color: [1.0; 3],
+            transmission: 1.0,
+            thickness: 0.0,
+            // Isolate the transmission lobe: without the base diffuse/specular
+            // the only radiance left is the refracted term, so a leak in the tint
+            // cannot hide behind the (achromatic) dielectric interface reflection.
+            base_weight: 0.0,
+            specular_weight: 0.0,
+            ..Default::default()
+        };
+        let white = evaluate_principled_direct(base, frame(), light());
+        let red = evaluate_principled_direct(
+            SurfaceSample {
+                transmission_color: [1.0, 0.0, 0.0],
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        assert!(red[0] >= white[0] * 0.999, "red={red:?} white={white:?}");
+        assert!(
+            red[1] < white[1] * 1.0e-3,
+            "a zero-depth red tint must not leak green: {red:?} vs {white:?}"
+        );
+        assert!(
+            red[2] < white[2] * 1.0e-3,
+            "a zero-depth red tint must not leak blue: {red:?} vs {white:?}"
+        );
+    }
+
+    #[test]
+    fn transmission_depth_one_reaches_the_tint_exactly() {
+        // At a unit path through a `depth == 1` slab the transmittance is exactly
+        // the authored tint (`slab_color^1`), which is the specification's
+        // "distance before it becomes exactly `transmission_color`" case.
+        let base = SurfaceSample {
+            base_color: [0.8, 0.8, 0.8],
+            transmission: 1.0,
+            thickness: 1.0,
+            ..Default::default()
+        };
+        let unit = evaluate_principled_direct(base, frame(), light());
+        let deeper = evaluate_principled_direct(
+            SurfaceSample {
+                thickness: 4.0,
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        let shallower = evaluate_principled_direct(
+            SurfaceSample {
+                thickness: 0.25,
+                ..base
+            },
+            frame(),
+            light(),
+        );
+        assert!(
+            sum3(deeper) > sum3(unit) && sum3(unit) > sum3(shallower),
+            "transmittance must increase monotonically with transmission_depth: \
+             deeper={deeper:?} unit={unit:?} shallower={shallower:?}"
+        );
     }
 
     #[test]

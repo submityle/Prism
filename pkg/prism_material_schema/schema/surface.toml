@@ -681,10 +681,12 @@ pack_slot = 1
 consumed_by = ["unpack", "sample", "golden"]
 # The `OpenPBR` identifier is `transmission_depth` (a length: the distance the
 # refracted ray travels inside the transparent base before it is exactly
-# `transmission_color` under Beer's law). Prism's decoded fat struct keeps the
-# historical short name `thickness`; the real-time lobe has no scene-unit path
-# length, so the value is the depth at which the tint is reached (a reference
-# length in world units). `0` is the specification's non-physical tint case.
+# `transmission_color` under Beer's law). The decoded fat struct keeps the
+# historical short name `thickness` (via `surface_field`). The real-time lobe has
+# no scene-unit path, so it fixes the path at one scene unit and evaluates
+# `T = slab_color^(1/depth)`: `depth == 1` reaches the tint exactly, larger depths
+# absorb less over the unit path, and `depth == 0` is the specification's
+# non-physical tint case (the authored `transmission_color` applied directly).
 surface_field = "thickness"
 default = 0.0
 valid = "0.0..=inf"

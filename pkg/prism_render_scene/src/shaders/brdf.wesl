@@ -552,7 +552,12 @@ fn principled_direct(
     if transmission > 0.0 {
         let ior = clamp(surface.index_of_refraction, 1.0, 3.0);
         let dispersion = clamp(surface.dispersion, 0.0, 1.0);
-        let thickness = max(surface.thickness, 0.0);
+        // `OpenPBR` `transmission_depth`: distance at which the slab is exactly
+        // `transmission_color` (a length). The path is fixed at one scene unit,
+        // so a unit path transmits `slab_color^(1/t_depth)`; `t_depth == 0` is
+        // the specification's non-physical tint case (authored tint applied
+        // directly). (`depth` is a WGSL reserved word, hence the `t_depth` local.)
+        let t_depth = max(surface.thickness, 0.0);
         // `geometry_thin_walled`: an open, single-interface surface with no
         // volume behind it, so the Beer-Lambert depth term is skipped.
         let thin_walled = surface.thin_walled > 0.5;
@@ -577,7 +582,13 @@ fn principled_direct(
                 // `transmission_color` tints the slab (multiplied with the base
                 // albedo), so white is the exact identity.
                 let slab_color = surface.base_color[c] * surface.transmission_color[c];
-                let beer = transmittance_pow(slab_color, thickness);
+                // `t_depth == 0` is the specification's non-physical tint case:
+                // apply the authored tint directly. Otherwise Beer-Lambert with
+                // the path fixed at one scene unit ⇒ `slab_color^(1/t_depth)`.
+                var beer = clamp(surface.transmission_color[c], 0.0, 1.0);
+                if t_depth > 0.0 {
+                    beer = transmittance_pow(slab_color, 1.0 / t_depth);
+                }
                 // `transmission_scatter` re-scatters the absorbed fraction
                 // instead of losing it (0 = pure Beer-Lambert).
                 let scatter = clamp(surface.transmission_scatter[c], 0.0, 1.0);

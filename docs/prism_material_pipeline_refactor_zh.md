@@ -223,7 +223,7 @@
 | | `specular_ior` | float | `specular_ior` | ✅ |
 | **Transmission** | `transmission_weight` | float | `transmission_weight`（本轮改名） | ✅ |
 | | `transmission_color` | color3 | `transmission_color` | ✅ |
-| | `transmission_depth` | float（length） | schema/ABI 标识符已改名 `transmission_depth`，解码后的 Prism 字段经 `surface_field` 保留 `thickness` | ⚠️ 标识符 ✅（本轮对齐）；**语义仍不符**：规范是"到达 `transmission_color` 的参考长度"且 `depth==0` 退化为非物理 tint，Prism 仍把该值当光学深度指数 |
+| | `transmission_depth` | float（length） | schema/ABI 标识符 `transmission_depth`，解码后的 Prism 字段经 `surface_field` 保留 `thickness` | ✅ 标识符 + **行为**（本轮对齐）：规范语义"到达 `transmission_color` 的参考长度"，`depth==1` 在单位路径上恰好给出该 tint、`depth` 越大同一单位路径吸收越少、`depth==0` 走规范的**非物理 tint** 分支。实时瓣无场景单位路径，故**显式约定路径 = 1 场景单位**（`T = slab_color^(1/depth)`），单位口径写在 `SurfaceSample` 文档里 |
 | | `transmission_scatter` | color3 | `transmission_scatter`（vec4，w 未用） | ✅（本轮修正类型） |
 | | `transmission_scatter_anisotropy` | float [-1,1] | `transmission_scatter_anisotropy` | ✅（本轮新增） |
 | | `transmission_dispersion_scale` | float | `transmission_dispersion_scale`（本轮改名） | ✅ |
@@ -243,7 +243,7 @@
 | | `geometry_normal` / `geometry_tangent` / `geometry_coat_normal` / `geometry_coat_tangent` | vector3 | **shade-time 输入**（非材质参数）：`ShadingFrame.{normal,tangent}` / `SurfaceSample.coat_normal` / `SurfaceSample.coat_tangent` | ✅（由网格/法线图在着色期提供；`coat_tangent` 本轮补上） |
 | **（规范之外）** | — | — | `face`（`softness`）、`anisotropy_rotation`、`ambient_occlusion`、`normal_scale`、`alpha_cutoff`、`thickness` | Prism 扩展区，计入超集 |
 
-**结论（code-truth）**：**规范参数已全部有对应物，标识符已全部统一到规范；剩余只有一处行为语义与一批默认值。** 已对齐（名字与含义）：`base_weight` / `base_color` / `base_metalness` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_roughness` / `specular_ior` / `transmission_weight` / `transmission_color` / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_scale` / `transmission_dispersion_abbe_number` / `subsurface_weight` / `subsurface_color` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / `subsurface_scatter_anisotropy` / `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` / `fuzz_weight` / `fuzz_color` / `fuzz_roughness` / `emission_color` / `emission_luminance` / **thin-film 全 3 项（ABI 瓣）** / `geometry_opacity` / `geometry_thin_walled` / 四个 geometry 向量字段（shade-time 输入）。**仍待处理**：①`transmission_depth` **行为**——规范语义是"到达 `transmission_color` 的参考长度"、`depth==0` 时退化为非物理 tint，Prism 目前把该值当光学深度指数（`color^thickness`），需改真实长度口径或显式声明近似；②`specular_roughness_anisotropy` 的 GGX 伸长**公式**（Prism `aspect` 映射 vs 规范参考的 alpha 公式）；③若干**默认值**（`base_color` 1.0 vs 0.8、`specular_roughness` 0.5 vs 0.3、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1、`subsurface_color` 白 vs 0.8、`emission_luminance` 1 vs 0，多数为"保旧材质外观"的刻意偏差，已在 schema 注释逐条写明）。
+**结论（code-truth）**：**规范参数已全部有对应物，标识符已全部统一到规范；剩余只有一处伸长公式与一批默认值。** 已对齐（名字与含义）：`base_weight` / `base_color` / `base_metalness` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_roughness` / `specular_ior` / `transmission_weight` / `transmission_color` / **`transmission_depth`（路径=1 场景单位口径下的完整规范语义，含 `depth==0` 非物理 tint）** / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_scale` / `transmission_dispersion_abbe_number` / `subsurface_weight` / `subsurface_color` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / `subsurface_scatter_anisotropy` / `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` / `fuzz_weight` / `fuzz_color` / `fuzz_roughness` / `emission_color` / `emission_luminance` / **thin-film 全 3 项（ABI 瓣）** / `geometry_opacity` / `geometry_thin_walled` / 四个 geometry 向量字段（shade-time 输入）。**仍待处理**：①`specular_roughness_anisotropy` 的 GGX 伸长**公式**（Prism `aspect = sqrt(1-0.9a)` 映射 vs 规范参考的 alpha 公式；只影响 `a > 0`）；②若干**默认值**（`base_color` 1.0 vs 0.8、`specular_roughness` 0.5 vs 0.3、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1、`subsurface_color` 白 vs 0.8、`emission_luminance` 1 vs 0，多数为"保旧材质外观"的刻意偏差，已在 schema 注释逐条写明）。
 
 要点：
 - **开放词汇表让补瓣是加法**：新字段扩进对应 lobe 的变长块，位掩码/静态置换天然容纳，老材质不受影响（它们的 lobe_mask 不含新位）。
@@ -605,6 +605,13 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 **✅ 已完成**
 
+- **P1-f 规范对齐：`transmission_depth` 行为落地（规范长度语义 + `depth==0` 非物理 tint）**（§4.4）
+  - 规范定义（`parametrization.md.html` / `reference/open_pbr_surface.mtlx`）：`transmission_depth` 是光线在透明基体内**走到恰好等于 `transmission_color`** 的距离（Beer 定律），`depth == 0` 时 `transmission_color` 退化为**非物理 tint**。此前 Prism 把该值当光学深度**指数**（`slab_color^thickness`），`0` 表示"无吸收"、透射白色——与规范相反。
+  - **实现（CPU golden 与 WESL twin 双线同时改）**：实时瓣没有场景单位路径，故**显式约定路径 = 1 场景单位**，透射率 `T = slab_color^(1/depth)`；`depth == 1` 在单位路径上恰好给出 authored tint（= 规范的"走到该距离即恰好变色"），`depth` 越大同一单位路径吸收越少，`depth -> 0` 趋于全黑，`depth == 0` 走规范的**非物理 tint** 分支（直接取 `transmission_color`）。`thin_walled` 的单界面路径不变（不参与体积衰减）。
+  - 代码：`pkg/prism_render_shading/src/lighting.rs::evaluate_principled_direct`（transmission 块 + `SurfaceSample.thickness` 文档写明"这是 `transmission_depth` 的长度语义"）+ `pkg/prism_render_scene/src/shaders/brdf.wesl`（`prism_direct` 的同一块；局部量改名 `t_depth`，因为 `depth` 是 WGSL 保留字）。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3314 通过**（新增 2 条：`transmission_depth_zero_applies_the_authored_tint`（在 `base_weight=specular_weight=0` 隔离下，零深红 tint 不泄漏绿/蓝）、`transmission_depth_one_reaches_the_tint_exactly`（`depth` 4 > 1 > 0.25 单调）），`cargo test -p prism_render_scene --lib` **1602 通过**（含 brdf/shading_resolve/water 三条 WESL 编译链接门禁——第一版用 `if` 表达式与 `depth` 局部名被它当场抓出，改成 `var` + `if` 语句 + `t_depth` 后通过）。
+  - **共享口径已文档化**：shade-time 的同一个标量被 `subsurface.wesl` / `cloth_advanced.wesl` 当归一化 `[0,1]` 光学厚度复用。三者属于**互斥的 shading class**（透射玻璃 / 次表面 / 高级织物），一份材质最多驱动其中一条路径，且 `transmission == 0` 时透射瓣整体惰性，所以两种读法不会在同一材质上冲突；该约定写在 `SurfaceSample.thickness` 的文档注释里。
+
 - **P1-f 规范对齐：`specular_roughness_anisotropy` / `transmission_depth` 标识符对齐规范**（§4.4）
   - 依据 `AcademySoftwareFoundation/OpenPBR` 的 `parametrization.md.html`（v1.1.1 全参数表，逐行比对，非自证）复核后，确认**瓣集合本身已齐全**（base 4 / specular 5 / transmission 7 / subsurface 5 / coat 6 / fuzz 3 / emission 2 / thin-film 3 / geometry 6，共 **41** 个规范参数全部有对应物），缺口只剩**标识符**与**两处行为语义**。本轮先清掉标识符：
     - `anisotropy` → **`specular_roughness_anisotropy`**（schema `name`）；
@@ -613,9 +620,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 代码：`pkg/prism_material_schema/schema/surface.toml`（2 处 `name` + `surface_field` + 语义注释）、`pkg/prism_render_material/tests/schema_parity.rs`（`authored_components` 的两条 match 臂改到规范名）、本文 §4.4 对账表与结论段。
   - 门禁：`cargo test -p prism_material_schema` **13 通过**、`cargo test -p prism_render_material --test schema_parity` **6 通过**；`prism-material-codegen write` 后 `material_unpack.wesl` / `surface_layout.rs` 无 diff。
   - **仍未完成（已定位，不再是"待细化"）**：
-    ① `transmission_depth` **行为**——规范是"到达 `transmission_color` 的参考长度"、`depth==0` 退化为非物理 tint；Prism 仍把该值当光学深度指数。**卡点已查清**：shade-time 的 `SurfaceSample.thickness` 被**一字段两用**——既驱动 transmission 瓣的 Beer-Lambert，又被 `cloth_advanced`（薄织物背光 + 虹彩 sheen 膜厚）当 `[0,1]` 光学膜厚读。所以先把两处拆成独立 shade-time 字段（`transmission_depth` vs cloth film thickness），再改语义，否则会连带改掉织物外观。这是一项独立、有明确边界的工作，不与本次标识符对齐混做。
-    ② `specular_roughness_anisotropy` 的 GGX 伸长**公式**（Prism `aspect = sqrt(1-0.9a)` 映射 vs 规范参考的 alpha 公式）——只影响 `a > 0` 的材质，`a == 0` 逐位不变。
-    ③ 6 个**默认值**偏差（`base_color` 1.0 vs 0.8、`specular_roughness` 0.5 vs 0.3、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1、`subsurface_color` 白 vs 0.8、`emission_luminance` 1 vs 0）——刻意保旧材质外观，schema 注释已逐条写明；改它们会动金标准，属显式的产品决策而非遗漏。
+    ① `specular_roughness_anisotropy` 的 GGX 伸长**公式**（Prism `aspect = sqrt(1-0.9a)` 映射 vs 规范参考的 alpha 公式）——只影响 `a > 0` 的材质，`a == 0` 逐位不变。
+    ② 6 个**默认值**偏差（`base_color` 1.0 vs 0.8、`specular_roughness` 0.5 vs 0.3、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1、`subsurface_color` 白 vs 0.8、`emission_luminance` 1 vs 0）——刻意保旧材质外观，schema 注释已逐条写明；改它们会动金标准，属显式的产品决策而非遗漏。
 
 - **P1-f 规范对齐：ABI 字段名统一到 OpenPBR 规范名**（§4.4）
   - 把 11 处"同义不同名"的 ABI 字段改成规范标识符，这是"纯 OpenPBR 子集字节等价"的最后一道命名门槛：
