@@ -394,6 +394,8 @@ pkg/prism_math/
 
 **交付状态（本次）**：可移植、device-free 的镜像契约层已落地于 `shader_mirror` 模块（`no_std`，纯 `core`）：
 
+> **硬件验证证据边界（当前审计）**：下文逐 kernel 所述的“Apple M2 Metal 全绿 / 真机 parity 全绿”是文档中的历史验证记录；仓库当前没有与这些记录对应、可追溯到提交和测试命令的 adapter/device 运行日志，不能据此认定为本次或当前硬件验证结果。当前可由代码直接确认的是 GPU kernel、parity 测试及 device-free WGSL parse gate 存在；parse gate 只验证 shader 解析/验证，不执行 GPU。parity 集成测试在 `GpuContext::try_headless()` 返回 `None` 时会跳过；`PRISM_MATH_GPU_REQUIRED=1` 仅在实际运行这些会申请 GPU 的测试时，将 adapter/device 获取失败转为失败，因此 CI 应运行完整 `cargo test -p prism_math_gpu --tests` 并设置该变量，且以 `PRISM_MATH_GPU_DIAGNOSTICS=1` 输出的 adapter/backend/device type 与通过结果作为硬件 parity 证据。当前 `pkg/prism_math_gpu/Cargo.toml` 只启用 wgpu 的 `wgsl`/`metal` feature；源码虽把 Vulkan/DX12 列入 backend 探测掩码，但本 crate 当前构建并不提供这些 backend，不能把它们当作已验证的可移植门禁。本文 §23 记录的当前状态仍适用：本机无可用 Metal adapter，真实 GPU parity 尚未完成当前环境验证。
+
 - **std140/wgpu 字节布局常量**：`MAT4_STD140_SIZE=64`、`MAT3_STD140_SIZE=48`、`VEC4_SIZE=16`、`VEC3_STD140_SIZE=16`、`QUAT_SIZE=16`、`NDC_DEPTH_RANGE=(0.0, 1.0)`。
 - **列主序 / std140 打包器**（小端）：`pack_vec4`、`pack_vec3_std140`（xyz + 4B pad）、`pack_quat`（xyzw）、`pack_mat4`（4 列各 `vec4`=64B）、`pack_mat3_std140`（3 列各 `vec3` pad 到 16B=48B），逐字节与 WGSL/HLSL uniform 布局对齐。
 - **镜像 CPU 参考 op**：`quat_rotate_vec3(q, v)`，与 `Quat::mul_vec3` 跨多轴位对位 parity（oracle 测试覆盖）。
