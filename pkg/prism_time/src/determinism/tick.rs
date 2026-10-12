@@ -102,6 +102,12 @@ impl TickClock {
     #[inline]
     pub fn set_max_substeps(&mut self, max_substeps: u32) {
         self.max_substeps = max_substeps;
+        // Re-clamp the existing backlog so lowering the cap takes effect now
+        // rather than after the next `accumulate` (CR-found).
+        let cap = (self.step.nanos_num() as u128).saturating_mul(max_substeps as u128);
+        if self.accum > cap {
+            self.accum = cap;
+        }
     }
 
     /// Feed a delta into the accumulator using exact integer arithmetic.

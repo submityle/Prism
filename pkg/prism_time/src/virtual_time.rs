@@ -50,28 +50,34 @@ impl Time<Virtual> {
 
     /// Advance the virtual clock from a real frame delta.
     ///
-    /// The real delta is first clamped to [`Virtual::max_delta`], then scaled by
-    /// the effective speed (`0.0` while paused, otherwise the relative speed).
+    /// The real delta is scaled by the effective speed (`0.0` while paused,
+    /// otherwise the relative speed) and then clamped to [`Virtual::max_delta`]
+    /// (the design's scale-then-clamp order, so a large speed cannot bypass the
+    /// spiral guard). `effective_speed` reports the ratio actually applied.
     /// A paused clock therefore reports a zero delta while `elapsed` holds.
     #[inline]
     pub fn advance_by(&mut self, real_delta: Duration) {
         let max_delta = self.context.max_delta;
-        let clamped = if real_delta > max_delta {
-            max_delta
-        } else {
-            real_delta
-        };
-        let effective = if self.context.paused {
+        let requested = if self.context.paused {
             0.0
         } else {
             self.context.relative_speed.max(0.0)
         };
-        self.context.effective_speed = effective;
-        let scaled = if effective == 1.0 {
-            clamped
+        let scaled_raw = if requested == 1.0 {
+            real_delta
         } else {
             // Saturating scale: a huge finite speed must not panic `mul_f64`.
-            crate::scale_duration(clamped, effective)
+            crate::scale_duration(real_delta, requested)
+        };
+        let scaled = if scaled_raw > max_delta {
+            max_delta
+        } else {
+            scaled_raw
+        };
+        self.context.effective_speed = if real_delta.is_zero() {
+            requested
+        } else {
+            scaled.as_secs_f64() / real_delta.as_secs_f64()
         };
         self.advance_generic(scaled);
     }

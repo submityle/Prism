@@ -99,6 +99,9 @@ impl Timer {
     #[inline]
     pub fn set_duration(&mut self, duration: Duration) {
         self.duration = duration;
+        // Recompute the completed latch so `finished` reflects the new target
+        // (a shorter duration may already be satisfied) — CR-found.
+        self.finished = self.stopwatch.elapsed() >= duration;
     }
 
     /// The timer mode.
@@ -111,10 +114,11 @@ impl Timer {
     /// latched finished flag so the timer keeps running.
     #[inline]
     pub fn set_mode(&mut self, mode: TimerMode) {
-        if self.mode == TimerMode::Once && mode == TimerMode::Repeating && self.finished {
-            self.finished = false;
-        }
         self.mode = mode;
+        // Recompute the latch for the new mode: a repeating timer's latch is
+        // per-cycle, so switching to `Once` must not carry a stale `finished`
+        // over (which would ignore every later tick) — CR-found.
+        self.finished = self.stopwatch.elapsed() >= self.duration;
     }
 
     /// Whether the timer is paused.
@@ -241,6 +245,29 @@ fn nanos_to_duration(nanos: u128) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_duration_recomputes_finished() {
+        // Shrinking the duration below the elapsed time must latch `finished`
+        // immediately (CR-found: it stayed false while remaining() was 0).
+        let mut t = Timer::from_seconds(2.0, TimerMode::Once);
+        t.tick(Duration::from_secs(1));
+        t.set_duration(Duration::from_millis(500));
+        assert!(t.finished());
+    }
+
+    #[test]
+    fn switching_repeating_to_once_clears_stale_latch() {
+        // A repeating timer that completed a cycle must not carry its latch into
+        // `Once`, which would ignore every later tick (CR-found).
+        let mut t = Timer::from_seconds(1.0, TimerMode::Repeating);
+        t.tick(Duration::from_secs(1));
+        assert!(t.finished());
+        t.set_mode(TimerMode::Once);
+        assert!(!t.finished());
+        t.tick(Duration::from_millis(600));
+        assert!(!t.finished());
+    }
 
     #[test]
     fn once_latches_and_clamps() {

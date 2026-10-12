@@ -110,15 +110,18 @@ fn virtual_pause_freezes_delta_but_holds_elapsed() {
 fn virtual_max_delta_clamps_a_huge_frame() {
     let mut t = Time::<Virtual>::new();
     assert_eq!(t.max_delta(), Virtual::DEFAULT_MAX_DELTA);
-    // A 10 s hitch is clamped to the 0.25 s max before scaling.
+    // A 10 s hitch scales (1x) and is then clamped to the 0.25 s max.
     t.advance_by(Duration::from_secs(10));
     assert_eq!(t.delta(), Duration::from_millis(250));
 
-    // Clamp happens before scaling, so 2x of the clamp is 0.5 s.
+    // Scale-then-clamp (design order): 2x of 10 s is 20 s, clamped to 0.25 s,
+    // so a large speed cannot bypass the spiral guard.
     let mut t2 = Time::<Virtual>::new();
     t2.set_relative_speed(2.0);
     t2.advance_by(Duration::from_secs(10));
-    assert_eq!(t2.delta(), Duration::from_millis(500));
+    assert_eq!(t2.delta(), Duration::from_millis(250));
+    // The reported effective speed reflects the ratio actually applied.
+    assert!((t2.effective_speed_f64() - 0.025).abs() < 1.0e-9);
 }
 
 #[test]

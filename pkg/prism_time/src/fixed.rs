@@ -84,6 +84,12 @@ impl Time<Fixed> {
     pub fn set_timestep(&mut self, timestep: Duration) {
         assert!(!timestep.is_zero(), "fixed timestep must be non-zero");
         self.context.timestep = timestep;
+        // Re-clamp any queued backlog to the new step size (CR-found: a
+        // shrunken step could otherwise exceed the substep cap).
+        let cap = timestep.saturating_mul(self.context.max_substeps);
+        if self.context.overstep > cap {
+            self.context.overstep = cap;
+        }
     }
 
     /// Set the fixed timestep from a rate in hertz.
@@ -106,6 +112,12 @@ impl Time<Fixed> {
     #[inline]
     pub fn set_max_substeps(&mut self, max_substeps: u32) {
         self.context.max_substeps = max_substeps;
+        // Re-clamp the existing backlog so lowering the cap takes effect now
+        // rather than after the next `accumulate` (CR-found).
+        let cap = self.context.timestep.saturating_mul(max_substeps);
+        if self.context.overstep > cap {
+            self.context.overstep = cap;
+        }
     }
 
     /// Feed a virtual delta into the accumulator.
