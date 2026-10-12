@@ -194,9 +194,9 @@ Query<Relations<ChildOf>>                 // §11
 - **查询状态便捷访问**：`QueryState` 提供只读的 `contains`/`count`/`is_empty`/`for_each`（与 `Query` 系统参数同形），免去手写 `iter(world).count()` 之类；`QueryIter::size_hint` 返回剩余行的**紧上界**（剩余原型行数之和，逐行门全通过时即精确），使 `collect`/`Vec` 一次定容。
 - **系统 / raw 入口的 world 契约（补强）**：`System::validate_world` 钩子在 `System::run` **递增 world tick 之前**校验（并行执行器也在分配 change 窗口前校验），所以被拒绝的跨 world 调用不留副作用；为**不同 world 重新 `initialize`** 会重置 `last_run`，避免用旧世界的 tick 下界漏掉新世界的既有变更。所有 raw `*_from_ptr` 入口（含 `par_*_from_ptr`）的 safety 契约写明「world 必须是构造该 state 的 world」且迭代期间禁止并发结构修改（`World::restore`）。
 - **脏块访问器**（核心）：`q.dirty_chunks()` 仅遍历 `chunk.change_version > last_run` 的块，把提取/剔除/宽相从 O(匹配实体) 降到 O(脏块)。
-- **SIMD 迭代**：`q.simd_iter::<8>()` 按 chunk 分块向量化（`simd` feature，基于 `core::simd`），标量路径作为 golden 对拍。
+- **SIMD 批量核**（已落地）：`simd` feature 提供 `add_assign`/`scale_assign`/`axpy_assign`/`sum` 等列批量核（`core::arch` SSE2/NEON，标量路径作为 golden 对拍），并与 `par_chunks`/`ColumnSliceData` 组合成 chunk 对齐的并行切片迭代（§8.3）。**`q.simd_iter::<K>()` 这一"SIMD 迭代器"命名仍为 PLANNED**——当前 SIMD 以批量核 + 切片并行形态提供，尚未包成逐 chunk 的迭代器适配器。
 - **par_iter**：按 chunk 切分投递到 `prism_tasks`（见 §8），work-stealing 负载均衡。
-- **disjoint 查询**：同 system 多个不冲突查询共存，`ParamSet` 处理潜在别名。
+- **disjoint 查询**：同 system 多个**不冲突**查询可共存（各自声明访问集，冲突在 `init_state` 期即 panic）。**`ParamSet`（让同 system 内可冲突查询逐个访问）仍为 PLANNED**：其成员类型要求 `D: 'static`（`SystemParam::State: 'static`），嵌套省略寿命的 `Query<&mut T>` 会被拒绝，需要先把 `QueryData` 的生命周期从类型参数中移除（Bevy 的 `QueryData for &mut T` 形态）或引入等价的 `IterQueryData` 拆分后才能提供符合人体工学的签名。
 
 ---
 
