@@ -1049,6 +1049,10 @@ fn surface_from(foam: f32) -> SurfaceSample {
     s.emissive = vec3<f32>(0.0);
     s.clearcoat = 0.0;
     s.clearcoat_roughness = 0.0;
+    // Coat is disabled for water (`clearcoat == 0`); keep the interface at its
+    // neutral defaults so a future coat enable cannot read a zero IOR.
+    s.coat_ior = 1.5;
+    s.coat_color = vec3<f32>(1.0);
     s.sheen = 0.0;
     s.subsurface = 0.0;
     s.thickness = clamp(view.surface_params.z, 0.0, 1.0);

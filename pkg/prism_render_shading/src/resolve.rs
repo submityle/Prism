@@ -228,6 +228,12 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         ],
         clearcoat: parameters.clearcoat,
         clearcoat_roughness: parameters.clearcoat_roughness,
+        coat_ior: parameters.coat_ior,
+        coat_color: [
+            parameters.coat_color[0],
+            parameters.coat_color[1],
+            parameters.coat_color[2],
+        ],
         sheen: parameters.sheen,
         subsurface: parameters.subsurface,
         thickness: parameters.thickness,

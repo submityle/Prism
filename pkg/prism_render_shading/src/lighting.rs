@@ -22,6 +22,14 @@ pub struct SurfaceSample {
     pub emissive: [f32; 3],
     pub clearcoat: f32,
     pub clearcoat_roughness: f32,
+    /// `OpenPBR` `coat_ior`: relative index of refraction of the coat interface
+    /// driving its Fresnel reflectance. The neutral default `1.5` reproduces
+    /// the historical fixed `F0 = 0.04`, so a surface that never authors a coat
+    /// IOR shades bit-for-bit as before.
+    pub coat_ior: f32,
+    /// `OpenPBR` `coat_color`: per-channel tint of the coat highlight (white for
+    /// clear lacquer, hence the identity default).
+    pub coat_color: [f32; 3],
     /// Sheen (fuzz) intensity driving the Cloth Charlie sheen lobe in `[0, 1]`.
     pub sheen: f32,
     /// Subsurface scattering weight driving Cloth/Subsurface diffusion in `[0, 1]`.
@@ -76,6 +84,8 @@ impl Default for SurfaceSample {
             emissive: [0.0; 3],
             clearcoat: 0.0,
             clearcoat_roughness: 0.25,
+            coat_ior: 1.5,
+            coat_color: [1.0; 3],
             sheen: 0.0,
             subsurface: 0.0,
             thickness: 0.0,

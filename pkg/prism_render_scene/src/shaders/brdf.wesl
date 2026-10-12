@@ -58,6 +58,10 @@ struct SurfaceSample {
     emissive: vec3<f32>,
     clearcoat: f32,
     clearcoat_roughness: f32,
+    // OpenPBR `coat_ior` (relative coat index) and `coat_color` (highlight
+    // tint). Mirrors `SurfaceSample::coat_ior` / `coat_color` in `lighting.rs`.
+    coat_ior: f32,
+    coat_color: vec3<f32>,
     sheen: f32,
     subsurface: f32,
     thickness: f32,

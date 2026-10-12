@@ -30,6 +30,8 @@ fn authored() -> GpuSurfaceParameters {
         thickness: 1.5,
         clearcoat: 0.7,
         clearcoat_roughness: 0.15,
+        coat_ior: 1.45,
+        coat_color: [0.9, 0.95, 1.0, 1.0],
         anisotropy: 0.3,
         anisotropy_rotation: 0.2,
         sheen: 0.45,
@@ -40,6 +42,9 @@ fn authored() -> GpuSurfaceParameters {
         _pad_face0: 0.0,
         _pad_face1: 0.0,
         _pad_face2: 0.0,
+        _pad_tail0: 0.0,
+        _pad_tail1: 0.0,
+        _pad_tail2: 0.0,
     }
 }
 
@@ -58,6 +63,8 @@ fn authored_components(lobe: Option<&str>, field: &str, p: &GpuSurfaceParameters
         (Some("emission"), "emissive") => p.emissive.to_vec(),
         (Some("clearcoat"), "clearcoat") => vec![p.clearcoat],
         (Some("clearcoat"), "clearcoat_roughness") => vec![p.clearcoat_roughness],
+        (Some("clearcoat"), "coat_ior") => vec![p.coat_ior],
+        (Some("clearcoat"), "coat_color") => p.coat_color.to_vec(),
         (Some("anisotropy"), "anisotropy") => vec![p.anisotropy],
         (Some("anisotropy"), "anisotropy_rotation") => vec![p.anisotropy_rotation],
         (Some("sheen"), "sheen") => vec![p.sheen],

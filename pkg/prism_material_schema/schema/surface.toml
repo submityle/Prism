@@ -156,7 +156,7 @@ mask_const = "CLEARCOAT"
 namespace = "KHR"
 vendor = "khronos"
 stability = "stable"
-words = 4
+words = 8
 
 [[lobe.field]]
 name = "clearcoat"
@@ -182,20 +182,39 @@ energy_policy = "coupled"
 view = "invariant"
 
 [[lobe.field]]
-name = "_pad0"
-type = "pad"
+name = "coat_ior"
+type = "f32"
 bit_region = "KHR"
 pack_slot = 2
-consumed_by = []
-default = 0.0
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `coat_ior`. The default 1.5 reproduces the legacy fixed
+# `CLEARCOAT_F0 = 0.04` (varnish/lacquer), so a material that never authors a
+# coat IOR is bit-for-bit unchanged.
+default = 1.5
+valid = "1.0..=3.0"
+energy_policy = "coupled"
+view = "dependent"
 
 [[lobe.field]]
-name = "_pad1"
+name = "_pad0"
 type = "pad"
 bit_region = "KHR"
 pack_slot = 3
 consumed_by = []
 default = 0.0
+
+[[lobe.field]]
+name = "coat_color"
+type = "vec4f"
+bit_region = "KHR"
+pack_slot = 4
+consumed_by = ["unpack", "sample", "golden"]
+# OpenPBR `coat_color`: per-channel tint of the coat highlight (white for clear
+# lacquer), so the default is the exact identity.
+default = [1.0, 1.0, 1.0, 1.0]
+valid = "0.0..=1.0"
+energy_policy = "coupled"
+view = "dependent"
 
 [[lobe]]
 id = "anisotropy"

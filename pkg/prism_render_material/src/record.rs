@@ -143,6 +143,10 @@ pub struct GpuSurfaceParameters {
     pub thickness: f32,
     pub clearcoat: f32,
     pub clearcoat_roughness: f32,
+    /// `OpenPBR` `coat_ior`: relative index of refraction of the coat interface.
+    pub coat_ior: f32,
+    /// `OpenPBR` `coat_color`: per-channel tint of the coat highlight.
+    pub coat_color: [f32; 4],
     pub anisotropy: f32,
     pub anisotropy_rotation: f32,
     pub sheen: f32,
@@ -155,6 +159,11 @@ pub struct GpuSurfaceParameters {
     pub _pad_face0: f32,
     pub _pad_face1: f32,
     pub _pad_face2: f32,
+    /// Tail padding keeping the fat authoring view a 16-byte multiple after the
+    /// coat group grew it by `coat_ior` + `coat_color`. Carries no data.
+    pub _pad_tail0: f32,
+    pub _pad_tail1: f32,
+    pub _pad_tail2: f32,
 }
 
 impl Default for GpuSurfaceParameters {
@@ -172,6 +181,8 @@ impl Default for GpuSurfaceParameters {
             thickness: 0.0,
             clearcoat: 0.0,
             clearcoat_roughness: 0.5,
+            coat_ior: 1.5,
+            coat_color: [1.0; 4],
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
             sheen: 0.0,
@@ -182,6 +193,9 @@ impl Default for GpuSurfaceParameters {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
+            _pad_tail0: 0.0,
+            _pad_tail1: 0.0,
+            _pad_tail2: 0.0,
         }
     }
 }

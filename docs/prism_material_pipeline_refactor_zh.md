@@ -212,7 +212,7 @@
 |---|---|---|---|
 | **base**（diffuse+metal） | `base_color` / `metallic` / `perceptual_roughness` | 子集 | `base_weight`、`diffuse_roughness`（Oren-Nayar 糙漫反射） |
 | **specular** | `reflectance`（IOR 代理）/ `anisotropy` / `anisotropy_rotation` | 子集 | `specular_weight`、`specular_color`、显式 `specular_ior`（取代 reflectance 代理） |
-| **coat** | `clearcoat` / `clearcoat_roughness` | 子集 | `coat_color`、`coat_ior`、`coat_roughness_anisotropy`、`coat_normal`、`coat_darkening` |
+| **coat** | `clearcoat` / `clearcoat_roughness` / **`coat_ior` / `coat_color`（已补，见 §13.a）** | 部分补全 | `coat_roughness_anisotropy`、`coat_normal`、`coat_darkening` |
 | **fuzz** | `sheen` | 子集 | `fuzz_color`、`fuzz_roughness` |
 | **subsurface** | `subsurface` | 子集 | `subsurface_color`、`subsurface_radius`（vec3，RGB 自由程）、`scatter_anisotropy` |
 | **transmission** | `transmission` / `thickness` / `index_of_refraction` / `dispersion` | 较全 | `transmission_color`、`transmission_scatter`、`thin_walled` 标志 |
@@ -509,7 +509,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 - **原理化分层 BSDF（coat/base 能量耦合，非瓣求和）**（§17.2）：coat 对其下 base 的能量不是简单叠加，而是按 Fresnel 透射做能量预算耦合（coat 反射掉的能量不再喂给 base），并统一 coat 吸收/变暗（`coat_darkening`）。取代"各瓣独立求和"的能量不自洽；进 furnace 门禁与双线对拍。
 - **NPR**（`Illumination::Stylized`，§3.5）：ramp 量化 / SDF 面部阴影（Prism 私有 FACE 瓣，OpenPBR 之外）/ 描边，作为对**同一 OpenPBR über 输入**的正交非物理响应；不进物理 furnace 门禁，但进 ramp/描边视觉回归。
 - **thin_film 虹彩（OpenPBR thin_film 瓣，开放瓣首个落地示例）**：薄膜干涉随 `thin_film_thickness` / `thin_film_ior` 产生彩虹色高光（肥皂泡、氧化金属、涂层）。按 OpenPBR 作为新 lobe 加入开放词汇表——新增 `LobeMask::THIN_FILM` 位 + 3-word 块，`prism_unpack_surface` 低位优先循环自动容纳，老材质 mask 不含该位、零影响。这是"新物理项 = 加法补瓣"路径的验证用例（§4.4）。
-- **其余待补 OpenPBR 字段**（coat_color/coat_ior、fuzz_color、subsurface_radius vec3、specular_color/weight、diffuse_roughness）同样以加法扩字段方式补齐，各进 furnace / 对拍门禁。
+- **其余待补 OpenPBR 字段**（fuzz_color、subsurface_radius vec3、specular_color/weight、diffuse_roughness，以及 coat 组剩余的 coat_roughness_anisotropy / coat_normal / coat_darkening）以加法扩字段方式逐个补齐，各进 furnace / 对拍门禁；coat 组的 `coat_ior` / `coat_color` 已落地为首个示例（§13.a）。
 - **开放瓣扩展机制**：任何新物理项（如各向异性 SSS）走同一路径——新位 + 变长字段 + 静态置换，不冲击现有材质、不加全局硬顶。
 
 ---
@@ -579,6 +579,13 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 **✅ 已完成**
 
+- **P1-f（首个 lobe 组）OpenPBR coat 字段：`coat_ior` + `coat_color` 端到端落地**（§4.4 / §17.2）
+  - 范围：把 clearcoat 瓣从"固定 `F0 = 0.04` 的白 dielectric"升级为 OpenPBR `coat` 组的真参数化子集——`coat_ior` 驱动**精确介质 Fresnel**（含 TIR 分支），`coat_color` 逐通道给 coat 高光着色；同时把 base 衰减从 `(1 - coat·F(v·h))²` 对齐为参考 PT 的**两宏观角**形式 `(1 - coat·F(n·v))·(1 - coat·F(n·l))`。默认 `coat_ior = 1.5`（法向入射恰为 0.04）+ 白色 `coat_color`，故仅"作者改了 IOR/颜色"才改变外观。
+  - 依据：仓库自带的 path-traced 参考 `pkg/prism_render_architecture/src/reference_pt/coat.rs`（`CoatLayer` 的 `coat_ior`/`coat_color`/`fresnel_dielectric(cos, 1, ior)`）——实时金标准与 WESL 孪生都照它落地，不臆造公式。
+  - 代码（全链五处同步）：schema `schema/surface.toml` clearcoat 瓣 4→8 字（新增 `coat_ior` + `coat_color` vec4f）；`GpuClearCoatLobe`（+手写 `Default`：1.5/白）与 fat `GpuSurfaceParameters`（+尾部 pad 保 16 字节对齐，112→144 B）；regenerated `material_unpack.wesl` / `surface_layout.rs`；shade-time `SurfaceSample`（CPU `lighting.rs` + WESL `brdf.wesl`）与桥接（`resolve.rs` + `shading_resolve.wesl`）；BSDF 双线（CPU `clearcoat.rs` + WESL `clearcoat.wesl`，含 `fresnel_coat_dielectric` 逐位孪生）；水栅格面的 `SurfaceSample` 显式写中性默认。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3282 通过**（含新增 `coat_ior_default_reproduces_the_legacy_normal_incidence_f0` / `denser_coat_ior_strengthens_the_interface` / `coat_color_tints_only_the_coat_highlight`，且既有 `zero_clearcoat_matches_principled_base`、掠射压暗、峰值加亮等性质门禁全绿）、`cargo test -p prism_render_scene --lib` **1602 通过**（shader link 48 通过，含 brdf/shading_resolve/clearcoat 全链）、`cargo test -p prism_render_material` 826+6+2 全绿；touched 文件 clippy 无告警。
+  - 诚实边界：coat 组仍缺 `coat_roughness_anisotropy` / `coat_normal`（需各向异性 coat + coat 法线）与 `coat_darkening`（**参考 PT 亦未实现，公式不确定，拒绝臆造**）。`lower_standard_material` 的删除仍待全部字段补齐后统一收口。
+
 - **变长 lobe 打包（P1-f 的前置基建，§4.4/§17.5）**
   - 范围：把"每个瓣统一 4-word 量子、按 `present_count * SURFACE_LOBE_WORDS` 定步长"这一硬编码，泛化为**按每瓣自身字长推进**的变长打包——这是 §4.4 把现有 4-word 瓣扩成 OpenPBR 全字段瓣（`P1-f`）的必要前提；在全部瓣目前仍为 4 字时，生成物与运行时行为、字节完全不变（既有穷举子集对拍/字节平价门禁全绿）。
   - 代码：
@@ -619,7 +626,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
     - WESL twin `pkg/prism_render_scene/src/shaders/brdf.wesl::principled_direct`（与 CPU 逐位同算术、同常量、同参序）。
     - 顺带修复：专用 clearcoat 瓣 `pkg/prism_render_shading/src/clearcoat.rs::evaluate_clearcoat_direct` 的 base 多散射补偿此前仍是 P0-a 之前的粗糙 `1 - 0.28·rough²` 标量，与升级后的主瓣脱钩；现统一改走 `multiscatter::multiscatter_direct`，恢复「无 coat 时 base == 原理化瓣」不变量（`zero_clearcoat_matches_principled_base` 对拍）。
   - 门禁：`cargo test -p prism_render_shading --lib`（3192 通过，含新增 `clearcoat_two_pass_coupling_identity_and_grazing_darkening`：coat=0 恒等 + 掠射压暗强于正入射，及回绿的 `zero_clearcoat_matches_principled_base`）、`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过，编译 brdf.wesl 两程路径）；touched 文件 clippy 干净、已 rustfmt。
-  - 诚实边界：OpenPBR `coat_darkening`（内反射回收项）**未**纳入——该公式不确定，拒绝臆造并冠名 OpenPBR；本项只落地无歧义、可引用的「两程透射」能量耦合半边，`coat_darkening` 留待有可靠 `R_i` 推导（Weidlich–Wilkie 几何级数）时再加，届时同样保持 coat=0 恒等、不新增 ABI 字段。
+  - 诚实边界：OpenPBR `coat_darkening`（内反射回收项）**未**纳入——该公式不确定，拒绝臆造并冠名 OpenPBR（仓库自带 path-traced 参考 `reference_pt::CoatLayer` 亦未实现它）；本项只落地无歧义、可引用的「两程透射」能量耦合半边，`coat_darkening` 留待有可靠 `R_i` 推导（Weidlich–Wilkie 几何级数）时再加，届时同样保持 coat=0 恒等。
 
 - **P1-e 贵瓣采样数按画质档缩放（SSS / 透射 / 多次散射，ABI 中性 pass uniform）**（§7.2 / §13 表 P1-e）
   - 范围：把 SSS 预积分 / 可分离卷积、屏幕空间透射扩散归一、天空多次散射 LUT 的**采样数**统一由画质档驱动，模型/布局/置换 key 全部不变，采样数以**普通 pass uniform** 上传（非 PSO 置换键），档间切换平滑、无弹跳/瓣塌缩。High 档 = 历史内置采样数，**无视觉回归**。

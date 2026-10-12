@@ -36,7 +36,28 @@ import prism_render_scene::shaders::lighting::{
 // Floors / weights mirroring `clearcoat.rs`.
 const CLEARCOAT_MIN_ROUGHNESS: f32 = 0.045;
 const CLEARCOAT_MIN_N_DOT: f32 = 1.0e-5;
-const CLEARCOAT_F0: f32 = 0.04;
+// Smallest relative coat index accepted; mirrors `clearcoat.rs::MIN_COAT_IOR`
+// and `reference_pt::coat::MIN_COAT_IOR`.
+const CLEARCOAT_MIN_IOR: f32 = 1.0 + 1.0e-3;
+
+// Unpolarized dielectric Fresnel reflectance of the coat interface, exact twin
+// of `clearcoat.rs::fresnel_coat_dielectric` / the path-traced reference
+// `dielectric::fresnel_dielectric(cos_i, 1.0, coat_ior)`. At normal incidence
+// with `coat_ior == 1.5` it returns exactly 0.04, the legacy fixed F0.
+fn clearcoat_fresnel_dielectric(cos_i: f32, coat_ior: f32) -> f32 {
+    let c = clamp(cos_i, 0.0, 1.0);
+    let ior = max(coat_ior, CLEARCOAT_MIN_IOR);
+    let eta = 1.0 / ior;
+    let sin2_i = max(1.0 - c * c, 0.0);
+    let sin2_t = eta * eta * sin2_i;
+    if sin2_t >= 1.0 {
+        return 1.0;
+    }
+    let cos_t = sqrt(max(1.0 - sin2_t, 0.0));
+    let r_parl = (ior * c - cos_t) / (ior * c + cos_t);
+    let r_perp = (c - ior * cos_t) / (c + ior * cos_t);
+    return 0.5 * (r_parl * r_parl + r_perp * r_perp);
+}
 
 // Two-layer clear-coat BSDF for a single analytic light. Mirrors
 // `evaluate_clearcoat_direct`.
@@ -87,14 +108,19 @@ fn clearcoat_direct(
     let coat = clamp(surface.clearcoat, 0.0, 1.0);
     let coat_roughness = clamp(surface.clearcoat_roughness, CLEARCOAT_MIN_ROUGHNESS, 1.0);
     let coat_alpha = coat_roughness * coat_roughness;
-    let coat_f = clamp(fresnel_schlick(vec3<f32>(CLEARCOAT_F0), v_dot_h).x, 0.0, 1.0);
+    // The coat's Fresnel is achromatic (driven solely by `coat_ior`), so the
+    // scalar `Fc` drives both the highlight and the base attenuation.
+    let coat_ior = max(surface.coat_ior, CLEARCOAT_MIN_IOR);
+    let coat_f = clearcoat_fresnel_dielectric(v_dot_h, coat_ior);
     let coat_d = distribution_ggx(n_dot_h, coat_alpha);
     let coat_g = vis_smith(n_dot_v, n_dot_l, coat_alpha);
-    let coat_specular = vec3<f32>(coat * coat_f * coat_d * coat_g * n_dot_l);
+    // OpenPBR `coat_color` tints the highlight; white is the exact identity.
+    let coat_specular = surface.coat_color * (coat * coat_f * coat_d * coat_g * n_dot_l);
 
-    // Double-pass transmission: the base is gated by the coat Fresnel twice.
-    let transmission = 1.0 - coat * coat_f;
-    let throughput = transmission * transmission;
+    // Double-pass transmission at the view and light angles (the reference PT
+    // `CoatLayer` form): the base is gated entering and leaving the coat.
+    let throughput = (1.0 - coat * clearcoat_fresnel_dielectric(n_dot_v, coat_ior))
+        * (1.0 - coat * clearcoat_fresnel_dielectric(n_dot_l, coat_ior));
 
     let reflected = base * throughput + coat_specular;
     let radiance = reflected * light.illuminance;

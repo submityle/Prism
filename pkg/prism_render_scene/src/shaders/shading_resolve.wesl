@@ -1877,6 +1877,8 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     surface.emissive = sampled.emissive;
     surface.clearcoat = sampled.clearcoat;
     surface.clearcoat_roughness = sampled.clearcoat_roughness;
+    surface.coat_ior = parameters.coat_ior;
+    surface.coat_color = parameters.coat_color.xyz;
     surface.sheen = parameters.sheen;
     surface.subsurface = parameters.subsurface;
     surface.thickness = parameters.thickness;

@@ -70,13 +70,35 @@ pub struct GpuEmissionLobe {
 }
 
 /// Clearcoat lobe: a second, smoother specular layer over the base.
+///
+/// The `OpenPBR` `coat` group. `coat_ior` drives the coat interface Fresnel
+/// (default `1.5`, reproducing the historical fixed `F0 = 0.04`) and
+/// `coat_color` tints the coat highlight (default white = identity). This is
+/// the first lobe completed against the `OpenPBR` field set (§4.4); the remaining
+/// coat parameters (`coat_darkening`, `coat_roughness_anisotropy`,
+/// `coat_normal`) are still to be added.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuClearCoatLobe {
     pub clearcoat: f32,
     pub clearcoat_roughness: f32,
+    /// `OpenPBR` relative index of refraction of the coat interface.
+    pub coat_ior: f32,
     pub _pad0: f32,
-    pub _pad1: f32,
+    /// `OpenPBR` per-channel tint of the coat highlight (white = clear lacquer).
+    pub coat_color: [f32; 4],
+}
+
+impl Default for GpuClearCoatLobe {
+    fn default() -> Self {
+        Self {
+            clearcoat: 0.0,
+            clearcoat_roughness: 0.5,
+            coat_ior: 1.5,
+            _pad0: 0.0,
+            coat_color: [1.0; 4],
+        }
+    }
 }
 
 /// Anisotropy lobe: directional roughness for brushed metal / hair-like highlights.
@@ -326,8 +348,9 @@ impl SurfaceParameterBlock {
             clearcoat: GpuClearCoatLobe {
                 clearcoat: params.clearcoat,
                 clearcoat_roughness: params.clearcoat_roughness,
+                coat_ior: params.coat_ior,
                 _pad0: 0.0,
-                _pad1: 0.0,
+                coat_color: params.coat_color,
             },
             anisotropy: GpuAnisotropyLobe {
                 anisotropy: params.anisotropy,
@@ -383,6 +406,8 @@ impl SurfaceParameterBlock {
         if self.lobe_mask.contains(LobeMask::CLEARCOAT) {
             full.clearcoat = self.clearcoat.clearcoat;
             full.clearcoat_roughness = self.clearcoat.clearcoat_roughness;
+            full.coat_ior = self.clearcoat.coat_ior;
+            full.coat_color = self.clearcoat.coat_color;
         }
         if self.lobe_mask.contains(LobeMask::ANISOTROPY) {
             full.anisotropy = self.anisotropy.anisotropy;
@@ -533,6 +558,8 @@ mod tests {
             thickness: 1.5,
             clearcoat: 0.7,
             clearcoat_roughness: 0.15,
+            coat_ior: 1.45,
+            coat_color: [0.9, 0.95, 1.0, 1.0],
             anisotropy: 0.3,
             anisotropy_rotation: 0.2,
             sheen: 0.45,
@@ -543,6 +570,9 @@ mod tests {
             _pad_face0: 0.0,
             _pad_face1: 0.0,
             _pad_face2: 0.0,
+            _pad_tail0: 0.0,
+            _pad_tail1: 0.0,
+            _pad_tail2: 0.0,
         }
     }
 

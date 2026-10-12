@@ -34,6 +34,10 @@ struct PrismSurfaceParameters {
     thickness: f32,
     clearcoat: f32,
     clearcoat_roughness: f32,
+    // OpenPBR `coat_ior` (relative coat index) and `coat_color` (highlight
+    // tint). Mirrors `GpuSurfaceParameters::coat_ior` / `coat_color`.
+    coat_ior: f32,
+    coat_color: vec4<f32>,
     anisotropy: f32,
     anisotropy_rotation: f32,
     sheen: f32,

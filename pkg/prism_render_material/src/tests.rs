@@ -184,7 +184,8 @@ fn slot_zero_is_a_live_principled_fallback() {
 #[test]
 fn gpu_material_rows_match_the_shader_abi() {
     assert_eq!(size_of::<GpuMaterialHeader>(), 80);
-    assert_eq!(size_of::<GpuSurfaceParameters>(), 112);
+    // 112 + coat_ior (1 word) + coat_color (4 words) + 3 tail pad words.
+    assert_eq!(size_of::<GpuSurfaceParameters>(), 144);
     assert_eq!(size_of::<GpuMaterialTexture>(), 16);
     assert_eq!(size_of::<GpuMaterialHeader>() % 16, 0);
     assert_eq!(size_of::<GpuSurfaceParameters>() % 16, 0);

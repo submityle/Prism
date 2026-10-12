@@ -3,19 +3,24 @@
 //! Backend-neutral golden reference for the `ClearCoat` shading class and the
 //! byte-for-byte numerical twin of `clearcoat.wesl` (`clearcoat_direct`).
 //!
-//! The closure follows Unreal's *`ClearCoatBxDF`*: a thin, smooth dielectric
-//! coat (index-matched `F0 = 0.04`) sits above a fully featured principled base
-//! layer. Two effects distinguish it from the shared principled fallback:
+//! The closure follows Unreal's *`ClearCoatBxDF`*, upgraded to the `OpenPBR`
+//! `coat` group (§4.4): a thin, smooth dielectric coat of relative index
+//! `coat_ior` (default `1.5`, i.e. the historical `F0 = 0.04`) sits above a
+//! fully featured principled base layer. Three effects distinguish it from the
+//! shared principled fallback:
 //!
 //! * **A dedicated coat highlight.** The coat is a second dielectric GGX lobe
 //!   driven by `clearcoat_roughness` (independent of the base roughness), so a
 //!   rough painted base can still carry a tight, glossy varnish glint.
+//! * **A per-channel coat tint.** `coat_color` scales the coat highlight, so a
+//!   tinted varnish (white for clear lacquer) colours the glint.
 //! * **Double-pass coat absorption.** Light refracts *through* the coat on the
 //!   way in and again on the way out, so the base layer is attenuated by the
-//!   coat Fresnel **twice**: `(1 - clearcoat * Fc)^2`. The principled fallback
-//!   only applies a single `(1 - clearcoat * Fc)` pass, so this lobe darkens the
-//!   base under the coat more strongly at grazing angles - the physically
-//!   correct behaviour Unreal models for the coat interface.
+//!   coat Fresnel at the **view and light angles**: `(1 - clearcoat * Fc(n·v)) *
+//!   (1 - clearcoat * Fc(n·l))`. The principled fallback applies a comparable
+//!   two-pass term, so this lobe darkens the base under the coat at grazing
+//!   angles - the physically correct behaviour Unreal models for the coat
+//!   interface.
 //!
 //! The specialized coat treats the base as **isotropic** (real clear-coat
 //! materials - car paint, lacquered wood - are overwhelmingly isotropic under
@@ -38,10 +43,39 @@ const INV_PI: f32 = 1.0 / PI;
 const MIN_ROUGHNESS: f32 = 0.045;
 /// Dot-product floor shared with the principled lobe (`MIN_N_DOT`).
 const MIN_N_DOT: f32 = 1.0e-5;
-/// Normal-incidence reflectance of the dielectric coat interface. `0.04`
-/// matches an index of refraction of ~1.5 (varnish/lacquer). Mirrors
-/// `CLEARCOAT_F0`.
-const CLEARCOAT_F0: f32 = 0.04;
+/// Smallest relative coat index accepted, keeping the coat a genuine dielectric
+/// interface. Mirrors `reference_pt::coat::MIN_COAT_IOR`.
+const MIN_COAT_IOR: f32 = 1.0 + 1.0e-3;
+
+/// Unpolarized dielectric Fresnel reflectance of the coat interface for a
+/// direction whose cosine with the normal is `cos_i`, with the relative index
+/// `eta_t / eta_i = coat_ior` and the exterior medium at index 1.
+///
+/// This is the exact Fresnel reflectance shared with the path-traced reference
+/// (`reference_pt::dielectric::fresnel_dielectric(cos_i, 1.0, coat_ior)`),
+/// including the total-internal-reflection branch. At `cos_i == 1` and
+/// `coat_ior == 1.5` it returns exactly `0.04`, reproducing the legacy fixed
+/// `F0`. Only `sqrt`, a divide and two squares are used, so it stays inside the
+/// transcendental budget of the shading path.
+#[inline]
+fn fresnel_coat_dielectric(cos_i: f32, coat_ior: f32) -> f32 {
+    let cos_i = cos_i.clamp(0.0, 1.0);
+    let ior = coat_ior.max(MIN_COAT_IOR);
+    // Snell's law in squared-sine form with eta_i = 1, eta_t = ior.
+    let eta = 1.0 / ior;
+    let sin2_i = (1.0 - cos_i * cos_i).max(0.0);
+    let sin2_t = eta * eta * sin2_i;
+    if sin2_t >= 1.0 {
+        // Beyond the critical angle: all energy is reflected.
+        return 1.0;
+    }
+    let cos_t = (1.0 - sin2_t).max(0.0).sqrt();
+    // Parallel- and perpendicular-polarized amplitude reflection coefficients
+    // for eta_i = 1 and eta_t = ior.
+    let r_parl = (ior * cos_i - cos_t) / (ior * cos_i + cos_t);
+    let r_perp = (cos_i - ior * cos_t) / (cos_i + ior * cos_t);
+    0.5 * (r_parl * r_parl + r_perp * r_perp)
+}
 
 /// Evaluates the two-layer clear-coat BSDF for a single analytic light.
 ///
@@ -102,18 +136,24 @@ pub fn evaluate_clearcoat_direct(
     let coat = surface.clearcoat.clamp(0.0, 1.0);
     let coat_roughness = surface.clearcoat_roughness.clamp(MIN_ROUGHNESS, 1.0);
     let coat_alpha = coat_roughness * coat_roughness;
-    // The coat is index-matched white dielectric, so its Fresnel is achromatic;
-    // the scalar `Fc` drives both the coat highlight and the base attenuation.
-    let coat_f = fresnel_schlick([CLEARCOAT_F0; 3], v_dot_h)[0].clamp(0.0, 1.0);
+    // The coat's Fresnel is achromatic (driven solely by `coat_ior`), so the
+    // scalar `Fc` drives both the highlight and the base attenuation.
+    let coat_ior = surface.coat_ior.max(MIN_COAT_IOR);
+    let coat_f = fresnel_coat_dielectric(v_dot_h, coat_ior);
     let coat_d = distribution_ggx(n_dot_h, coat_alpha);
     let coat_g = visibility_smith_ggx_correlated(n_dot_v, n_dot_l, coat_alpha);
-    let coat_specular = [coat * coat_f * coat_d * coat_g * n_dot_l; 3];
+    // OpenPBR `coat_color` tints the highlight; white is the exact identity.
+    let coat_specular = mul(
+        surface.coat_color,
+        [coat * coat_f * coat_d * coat_g * n_dot_l; 3],
+    );
 
     // Double-pass transmission: light is refracted through the coat on entry
-    // and again on exit, so the base is gated by the coat Fresnel twice. This
-    // is the physical departure from the principled single-pass fallback.
-    let transmission = 1.0 - coat * coat_f;
-    let throughput = transmission * transmission;
+    // and again on exit, so the base is gated by the coat Fresnel at the view
+    // and light angles (the reference PT `CoatLayer` form). This is the physical
+    // departure from the principled single-pass fallback.
+    let throughput = (1.0 - coat * fresnel_coat_dielectric(n_dot_v, coat_ior))
+        * (1.0 - coat * fresnel_coat_dielectric(n_dot_l, coat_ior));
 
     let reflected = add(mul_scalar(base, throughput), coat_specular);
     let radiance = mul(reflected, light.illuminance);
@@ -335,5 +375,67 @@ mod tests {
             sum(glossy) < sum(rough),
             "glossy off-peak coat {glossy:?} should be dimmer than rough {rough:?}"
         );
+    }
+
+    #[test]
+    fn coat_ior_default_reproduces_the_legacy_normal_incidence_f0() {
+        // The exact dielectric Fresnel must reduce to the historical fixed
+        // `F0 = 0.04` at normal incidence and index 1.5, so a default material
+        // keeps the same interface reflectance it had before `coat_ior` existed.
+        assert!((fresnel_coat_dielectric(1.0, 1.5) - 0.04).abs() < 1.0e-6);
+        // Fresnel grows toward grazing and never leaves [0, 1].
+        let grazing = fresnel_coat_dielectric(0.05, 1.5);
+        let normal = fresnel_coat_dielectric(1.0, 1.5);
+        assert!(grazing > normal);
+        for cos in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            for ior in [1.001, 1.3, 1.5, 2.0, 3.0] {
+                let f = fresnel_coat_dielectric(cos, ior);
+                assert!(f.is_finite() && (0.0..=1.0).contains(&f), "cos={cos} ior={ior} -> {f}");
+            }
+        }
+    }
+
+    #[test]
+    fn denser_coat_ior_strengthens_the_interface() {
+        // A denser coat reflects more at the interface, which both brightens the
+        // peak highlight and deepens the base attenuation.
+        let light_coat = evaluate_clearcoat_direct(
+            SurfaceSample {
+                coat_ior: 1.1,
+                ..base_surface()
+            },
+            frame(),
+            light(),
+        );
+        let dense_coat = evaluate_clearcoat_direct(
+            SurfaceSample {
+                coat_ior: 2.4,
+                ..base_surface()
+            },
+            frame(),
+            light(),
+        );
+        assert!(
+            sum(dense_coat) > sum(light_coat),
+            "denser coat {dense_coat:?} should out-reflect lighter {light_coat:?} at the peak"
+        );
+    }
+
+    #[test]
+    fn coat_color_tints_only_the_coat_highlight() {
+        // A red coat keeps the red channel of the highlight and drops green and
+        // blue; the base and its attenuation are untouched by the tint.
+        let white = evaluate_clearcoat_direct(base_surface(), frame(), light());
+        let red = evaluate_clearcoat_direct(
+            SurfaceSample {
+                coat_color: [1.0, 0.0, 0.0],
+                ..base_surface()
+            },
+            frame(),
+            light(),
+        );
+        assert!(red[0] >= white[0], "red coat must keep the red highlight: {red:?} vs {white:?}");
+        assert!(red[1] < white[1], "red coat must drop green: {red:?} vs {white:?}");
+        assert!(red[2] < white[2], "red coat must drop blue: {red:?} vs {white:?}");
     }
 }
