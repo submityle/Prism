@@ -191,15 +191,18 @@ pub struct PanelDescriptor {
     pub default_slot: DefaultSlot,  // LeftBar | RightBar | Bottom | Document | Floating
     pub factory: PanelFactory,      // 懒构建:() -> Element 内容
 }
-pub trait PanelRegistry {
-    fn register(&mut self, desc: PanelDescriptor);
+pub struct PanelRegistry {
+    // 真实实现保持注册顺序；注册时拒绝空白 ID 与重复 ID。
+}
+impl PanelRegistry {
+    pub fn register(&mut self, desc: PanelDescriptor) -> Result<(), PanelRegistryError>;
     fn resolve(&self, id: &PanelId) -> Option<&PanelDescriptor>; // 持久化白名单
 }
 ```
 
 - **贡献点**:插件/域编辑器注册面板,不改停靠内核。对齐编辑器 D3「贡献点而非硬编码」。
 - **单例 vs 多例**:Inspector 单例;文档/图表可多例。
-- **懒工厂**:内容只在面板首次可见时构建(§9/K4)。
+- **纯数据边界**:当前 core registry 只保存稳定 ID、标题、图标/提示键、实例策略、默认槽位和初始可见性；不伪造 `Element`、GPU 句柄或 factory。懒构建仍由上层 UI 装配层负责。
 - **白名单**:持久化只认注册过的 id,反序列化未知 id 优雅丢弃(§11)。
 
 ---
@@ -348,9 +351,10 @@ let layout = DockLayout::load(&bytes, &registry)?; // 未知面板丢弃,比例�
 - ⬜ **M1 Element 装配与真实渲染仍未交付**:`RenderPlan` 是未来 renderer 可消费的纯数据，不会创建 `Element`/`DockPanel`，也不含字体测量、主题样式、GPU 绘制、overlay portal、命中测试接线或增量渲染缓存。M1 不等同于 GPU renderer 已完成。
 - ✅ **M2 纯数据拖拽内核已交付**:`drag` 提供确定性拖拽状态机、五向 drop zone、tab 插入边界和 reducer action 映射；当前测试覆盖状态机与边界行为。overlay 预览和真实 UI hit-test/render 集成尚未交付。
 - ✅ **M4 persistence core 已交付**:`pkg/prism_ui_dock::encode_layout`/`decode_layout` 提供带 magic/version 的确定性二进制布局编码、checked 长度/深度/节点预算、UTF-8 与枚举校验、解码后模型不变量校验，以及带已知 panel/document 注册表的未知 ID 过滤和安全分支折叠；主树、浮窗、autohide、maximize restore 均可 round-trip。最大化状态要求当前可见面严格收敛为快照中的唯一面板，并由 model/persistence validation 在进入 renderer 前拒绝非法恢复态。该切片不提供文件 IO、Workspace、自动保存或迁移链。
-- ⬜ **M3–M5 其余能力仍 PLANNED**:`registry`、`store`、`a11y` 以及动画/多显示器/撤销集成。完整 UI 装配和 renderer 集成仍属于后续工作，不因 M1 计划数据或 persistence core 已存在而视为完成。
+- ✅ **Registry 基础契约已交付**:`PanelDescriptor`/`PanelRegistry` 提供 no_std + alloc 的纯数据贡献点、确定性注册顺序、空白/重复 ID 拒绝、查询和迭代；不包含 Element/factory/renderer。
+- ⬜ **M3–M5 其余能力仍 PLANNED**:`store`、`a11y` 以及动画/多显示器/撤销集成。完整 UI 装配和 renderer 集成仍属于后续工作，不因 M1 计划数据或 persistence core 已存在而视为完成。
 - ⬜ **依赖未落地项**:撤销集成需编辑器命令内核;多显示器校正需平台/`prism_window` 层;动效档位依赖性能分级。
-- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核、M1 renderer-independent render plan 及 M4 persistence core；布局校验会在 renderer 消费前拒绝非法 maximize 恢复态。`DockPanel` 仍仅负责视觉外壳。Element 装配、GPU/renderer、overlay 预览、Workspace/自动保存和注册表等能力尚未交付。
+- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核、M1 renderer-independent render plan、M4 persistence core 及 Registry 基础契约；布局校验会在 renderer 消费前拒绝非法 maximize 恢复态。`DockPanel` 仍仅负责视觉外壳。Element 装配、GPU/renderer、overlay 预览、Workspace/自动保存和上层 factory 仍未交付。
 
 ---
 

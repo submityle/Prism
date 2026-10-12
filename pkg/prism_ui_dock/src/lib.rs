@@ -13,6 +13,7 @@ mod drag;
 mod model;
 mod persist;
 mod reducer;
+mod registry;
 mod render_plan;
 mod validate;
 
@@ -26,6 +27,7 @@ pub use model::{
 };
 pub use persist::{decode_layout, encode_layout, DecodeLimits, DecodeOptions, PersistError};
 pub use reducer::{reduce, Action, Placement, Target};
+pub use registry::{DefaultSlot, Instancing, PanelDescriptor, PanelRegistry, PanelRegistryError};
 pub use render_plan::{
     solve, solve_with, AutoHideBarLayout, AutoHideButton, AutoHideLayout, AutoHideReveal,
     DocumentLayout, FloatingLayout, FocusMetadata, FocusReason, FocusTarget, LayoutMetrics,
