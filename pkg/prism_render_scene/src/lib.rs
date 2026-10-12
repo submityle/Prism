@@ -54,8 +54,12 @@ pub use lighting::{
 };
 pub use material::{
     BindlessHeapStats, BindlessSlot, BindlessTextureHeap, MaterialBindGroup,
-    MaterialBufferBindings, MaterialReader, MaterialTextureArrays, PrismMaterialDiagnostics,
-    PrismMaterialPlugin, MAX_BINDLESS_TEXTURES,
+    MaterialBufferBindings, MaterialReader, MaterialTextureArrays,
+    MaterialVirtualTextureAtlasConfig, MaterialVirtualTextureAtlasError,
+    MaterialVirtualTextureGpuBundle, MaterialVirtualTextureGpuConfig,
+    MaterialVirtualTextureResourceSizes, PrismMaterialDiagnostics, PrismMaterialPlugin,
+    MATERIAL_VIRTUAL_TEXTURE_ENTRY_STRIDE, MATERIAL_VIRTUAL_TEXTURE_ENTRY_WORDS,
+    MAX_BINDLESS_TEXTURES,
 };
 pub use opaque::{
     GpuSceneDebugView, GpuSceneOpaqueEnabled, GpuSceneOpaqueIndirectEnabled,
