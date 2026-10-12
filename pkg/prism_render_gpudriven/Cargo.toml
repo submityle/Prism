@@ -9,9 +9,18 @@ publish = false
 
 [dependencies]
 prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
+# The frame graph the GPU-driven scene is declared through: the reset + cull +
+# draw passes are all graph passes, so the slice exercises the M2 headline
+# ("prism_render_graph + GPU-driven") rather than a hand-rolled encoder.
+prism_render_graph = { path = "../prism_render_graph" }
 # The shipped RHI backend this slice is verified against. The stage APIs
 # themselves take the RHI traits; only the readback hook names the backend.
 prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
+
+[dev-dependencies]
+# The headless RHI backend, so the declared frame graph can be compiled and
+# checked on any host without a GPU (the GPU tests skip in the base sandbox).
+prism_render_driver_null = { path = "../../os-backends/prism_render_driver_null" }
 
 [lints]
 workspace = true

@@ -481,10 +481,56 @@ impl<'e> ExecuteContext<'e> {
         self
     }
 
-    /// Records an indirect draw.
-    pub fn draw_indirect(&mut self, buffer: BufferId, offset: u64) -> &mut Self {
+    // --- indirect recording ----------------------------------------------
+    //
+    // Every indirect command takes a [`BufferHandle`] and resolves it through
+    // [`Self::buffer`], the same realized table a pass's declared accesses were
+    // checked against. That keeps the graph's "declared accesses only" contract
+    // unbroken: a pass cannot drive an indirect draw from a buffer it never
+    // declared (and therefore never synchronized against), because it has no
+    // handle for it.
+
+    /// Records an indirect (non-indexed) draw from a declared argument buffer.
+    pub fn draw_indirect(&mut self, args: BufferHandle, offset: u64) -> &mut Self {
+        let buffer = self.buffer(args);
         self.render_commands
             .push(RenderCommand::DrawIndirect { buffer, offset });
+        self
+    }
+
+    /// Records an indexed indirect draw from a declared argument buffer.
+    ///
+    /// The buffer holds one packed
+    /// [`DRAW_INDEXED_INDIRECT_ARGS_SIZE`](prism_render_driver::DRAW_INDEXED_INDIRECT_ARGS_SIZE)-byte
+    /// record; letting a compute pass author its `instance_count` is what makes
+    /// the draw GPU-driven.
+    pub fn draw_indexed_indirect(&mut self, args: BufferHandle, offset: u64) -> &mut Self {
+        let buffer = self.buffer(args);
+        self.render_commands
+            .push(RenderCommand::DrawIndexedIndirect { buffer, offset });
+        self
+    }
+
+    /// Records `count` packed indexed indirect draws from a declared argument
+    /// array.
+    ///
+    /// `stride` is the byte distance between consecutive records. This is the
+    /// multi-draw primitive that collapses many GPU-authored draws into one
+    /// command.
+    pub fn multi_draw_indirect(
+        &mut self,
+        args: BufferHandle,
+        offset: u64,
+        count: u32,
+        stride: u32,
+    ) -> &mut Self {
+        let buffer = self.buffer(args);
+        self.render_commands.push(RenderCommand::MultiDrawIndirect {
+            buffer,
+            offset,
+            count,
+            stride,
+        });
         self
     }
 
@@ -519,8 +565,9 @@ impl<'e> ExecuteContext<'e> {
         self
     }
 
-    /// Dispatches with workgroup counts sourced from a buffer.
-    pub fn dispatch_indirect(&mut self, buffer: BufferId, offset: u64) -> &mut Self {
+    /// Dispatches with workgroup counts sourced from a declared argument buffer.
+    pub fn dispatch_indirect(&mut self, args: BufferHandle, offset: u64) -> &mut Self {
+        let buffer = self.buffer(args);
         self.compute_commands
             .push(ComputeCommand::DispatchIndirect { buffer, offset });
         self

@@ -6,7 +6,8 @@
 //! reference. Without an adapter it returns early, so the suite still passes on
 //! a GPU-less host (the base CI sandbox).
 
-use prism_render_driver::{CommandEncoder, RenderQueue};
+use prism_render_driver::{DeviceDescriptor, Instance as _, RenderQueue, RequestAdapterOptions};
+use prism_render_driver_null::NullInstance;
 use prism_render_driver_wgpu::{WgpuDevice, WgpuInstance, WgpuQueue};
 
 use crate::camera::{FrameUniform, OrthoCamera};
@@ -19,7 +20,7 @@ use crate::naive::NaiveStage;
 use crate::readback::{count_lit_pixels, pixel_at};
 use crate::reference::{cull_cpu, projected_center_pixel};
 use crate::scene;
-use crate::scene_draw::SceneDrawStage;
+use crate::scene_draw::{IndirectMode, SceneDrawStage};
 
 /// One instance draws a four-index triangle strip (the quad), matching the
 /// draw stage's geometry.
@@ -262,6 +263,7 @@ fn render_gpu_driven(
     instances: &[Instance],
     frustum: &Frustum,
     camera: &OrthoCamera,
+    mode: IndirectMode,
 ) -> (Vec<u8>, Vec<u32>) {
     let capacity = aabbs.len() as u32;
     let cull = CullStage::new(
@@ -278,10 +280,9 @@ fn render_gpu_driven(
     scene.upload(queue, &FrameUniform::new(*camera, INDEX_COUNT), instances);
 
     let output = cull.run(queue);
-    let mut encoder = CommandEncoder::labeled("gpudriven-frame");
-    cull.record(&mut encoder);
-    scene.record_indexed_indirect(&mut encoder, cull.draw_args(), 0);
-    queue.submit(&[encoder.finish()]);
+    scene
+        .render_graph(device, queue, &cull, mode)
+        .expect("the GPU-driven frame graph compiles");
     assert!(
         device.poll_wait(),
         "the device stays healthy after the GPU-driven scene draw"
@@ -323,8 +324,15 @@ fn gpu_scene_draw_paints_each_survivor_at_its_projected_center() {
         "the plane view keeps exactly one full 10x10 lattice layer"
     );
 
-    let (pixels, visible) =
-        render_gpu_driven(&device, &queue, &aabbs, &instances, &frustum, &camera);
+    let (pixels, visible) = render_gpu_driven(
+        &device,
+        &queue,
+        &aabbs,
+        &instances,
+        &frustum,
+        &camera,
+        IndirectMode::Single,
+    );
 
     let mut gpu_sorted = visible.clone();
     gpu_sorted.sort_unstable();
@@ -377,8 +385,15 @@ fn gpu_scene_draw_leaves_culled_instances_at_background() {
     let reference = cull_cpu(&frustum, &aabbs);
     assert_eq!(reference.len(), 4, "the centre view keeps a 2x2 block");
 
-    let (pixels, visible) =
-        render_gpu_driven(&device, &queue, &aabbs, &instances, &frustum, &camera);
+    let (pixels, visible) = render_gpu_driven(
+        &device,
+        &queue,
+        &aabbs,
+        &instances,
+        &frustum,
+        &camera,
+        IndirectMode::Single,
+    );
 
     let mut gpu_sorted = visible.clone();
     gpu_sorted.sort_unstable();
@@ -439,8 +454,15 @@ fn naive_and_gpu_driven_paths_render_identical_images() {
     let camera = lattice_camera();
     let visible = cull_cpu(&frustum, &aabbs);
 
-    let (driven_pixels, _) =
-        render_gpu_driven(&device, &queue, &aabbs, &instances, &frustum, &camera);
+    let (driven_pixels, _) = render_gpu_driven(
+        &device,
+        &queue,
+        &aabbs,
+        &instances,
+        &frustum,
+        &camera,
+        IndirectMode::Single,
+    );
 
     let naive = NaiveStage::new(&device, SCENE_RESOLUTION, aabbs.len() as u32);
     naive.upload(&queue, &FrameUniform::new(camera, INDEX_COUNT), &instances);
@@ -549,10 +571,9 @@ fn gpu_scene_draw_coverage_is_stable_across_resubmissions() {
     for _ in 0..3 {
         let output = cull.run(&queue);
         counts.push(output.args.instance_count);
-        let mut encoder = CommandEncoder::labeled("gpudriven-frame");
-        cull.record(&mut encoder);
-        scene.record_indexed_indirect(&mut encoder, cull.draw_args(), 0);
-        queue.submit(&[encoder.finish()]);
+        scene
+            .render_graph(&device, &queue, &cull, IndirectMode::Single)
+            .expect("the resubmitted frame graph compiles");
         assert!(device.poll_wait(), "the device stays healthy across frames");
         let pixels = queue.read_texture_rgba8(scene.target(), SCENE_RESOLUTION, SCENE_RESOLUTION);
         coverage.push(count_lit_pixels(&pixels));
@@ -570,4 +591,113 @@ fn gpu_scene_draw_coverage_is_stable_across_resubmissions() {
 
     scene.destroy(&device);
     cull.destroy(&device);
+}
+
+/// The declared frame is well-formed and correctly ordered without a GPU.
+///
+/// This runs on the null backend, so it holds on a GPU-less host: the graph is
+/// exactly the three passes the slice describes, and the compiler schedules
+/// them reset -> cull -> draw from the SSA versions alone (no manual edges).
+#[test]
+fn graph_frame_orders_reset_cull_and_draw() {
+    let instance = NullInstance::new();
+    let adapter = instance
+        .request_adapter(&RequestAdapterOptions::default())
+        .expect("the null instance always has an adapter");
+    let (device, _queue) = instance
+        .create_device(&adapter, &DeviceDescriptor::default())
+        .expect("the null adapter accepts the default device request");
+
+    let capacity = scene::DEFAULT_GRID.pow(3);
+    let cull = CullStage::new(
+        &device,
+        capacity,
+        CullParams {
+            index_count: INDEX_COUNT,
+            first_index: 0,
+            base_vertex: 0,
+        },
+    );
+    let scene = SceneDrawStage::new(&device, SCENE_RESOLUTION, cull.visible(), capacity);
+
+    let survivors = scene::DEFAULT_GRID * scene::DEFAULT_GRID;
+    for mode in [
+        IndirectMode::Single,
+        IndirectMode::Multi { records: survivors },
+    ] {
+        let graph = scene.graph_frame(&cull, mode);
+        assert_eq!(graph.pass_count(), 3, "the frame is reset + cull + draw");
+        let plan = graph.compile().expect("the declared frame compiles");
+        assert_eq!(
+            plan.order,
+            vec![0, 1, 2],
+            "SSA versioning orders reset, then cull, then draw"
+        );
+        assert_eq!(plan.pass_count(), 3, "no pass is culled");
+    }
+
+    scene.destroy(&device);
+    cull.destroy(&device);
+}
+
+/// The graph's two indirect primitives paint the same frame.
+///
+/// The single-draw path takes the surviving count from the GPU-authored
+/// argument record; the multi-draw path is driven by the packed records. Both
+/// go through the graph, so this proves the graph's `draw_indexed_indirect` and
+/// `multi_draw_indirect` recorders agree end-to-end on real hardware.
+#[test]
+fn gpu_graph_multi_draw_matches_the_single_draw_path() {
+    let Some((device, queue)) = device_or_skip() else {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    };
+
+    let aabbs = scene::lattice_instances(
+        scene::DEFAULT_GRID,
+        scene::DEFAULT_SPACING,
+        scene::DEFAULT_HALF_EXTENT,
+    );
+    let instances = scene::instance_records(&aabbs);
+    let frustum = scene::plane_view_frustum();
+    let camera = lattice_camera();
+    let survivors = cull_cpu(&frustum, &aabbs).len() as u32;
+    assert!(survivors > 0, "the plane view keeps a full layer");
+
+    let (single_pixels, single_visible) = render_gpu_driven(
+        &device,
+        &queue,
+        &aabbs,
+        &instances,
+        &frustum,
+        &camera,
+        IndirectMode::Single,
+    );
+    let (multi_pixels, multi_visible) = render_gpu_driven(
+        &device,
+        &queue,
+        &aabbs,
+        &instances,
+        &frustum,
+        &camera,
+        IndirectMode::Multi { records: survivors },
+    );
+
+    assert_eq!(
+        single_visible.len(),
+        survivors as usize,
+        "the single-draw frame culled the expected set"
+    );
+    assert_eq!(
+        multi_visible.len(),
+        single_visible.len(),
+        "both frames cull the same number of survivors"
+    );
+    assert_eq!(
+        single_pixels, multi_pixels,
+        "the graph's multi-draw path must paint the same frame as the single draw"
+    );
 }

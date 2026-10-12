@@ -341,6 +341,43 @@ impl CullStage {
         self.capacity
     }
 
+    /// How many workgroups the cull dispatch covers, mirroring the shader's
+    /// workgroup size.
+    #[must_use]
+    pub(crate) const fn dispatch_groups(&self) -> u32 {
+        self.capacity.div_ceil(WORKGROUP_SIZE)
+    }
+
+    /// The frustum uniform buffer, so a graph pass can declare it.
+    pub(crate) const fn frustum_buffer(&self) -> BufferId {
+        self.frustum
+    }
+
+    /// The AABB storage buffer bound as the cull shader's instance array.
+    pub(crate) const fn instance_buffer(&self) -> BufferId {
+        self.instances
+    }
+
+    /// The cull parameter uniform buffer.
+    pub(crate) const fn params_buffer(&self) -> BufferId {
+        self.cull_params
+    }
+
+    /// The reset compute pipeline (zeroes the append cursor).
+    pub(crate) const fn reset_pipeline(&self) -> ComputePipelineId {
+        self.reset_pipeline
+    }
+
+    /// The cull compute pipeline.
+    pub(crate) const fn cull_pipeline(&self) -> ComputePipelineId {
+        self.pipeline
+    }
+
+    /// The bind group both cull dispatches bind.
+    pub(crate) const fn cull_bind_group(&self) -> BindGroupId {
+        self.bind_group
+    }
+
     /// Releases every resource the stage owns.
     pub fn destroy(&self, device: &impl RenderDevice) {
         device.destroy_buffer(self.frustum);

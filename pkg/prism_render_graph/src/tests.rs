@@ -13,13 +13,13 @@ use core::cell::{Cell, RefCell};
 
 use prism_render_driver::{
     Backend, BindGroupDescriptor, BindGroupId, BindGroupLayoutDescriptor, BindGroupLayoutId,
-    BufferDescriptor, BufferId, BufferState, BufferUsages, Color, CommandBuffer,
+    BufferDescriptor, BufferId, BufferState, BufferUsages, Color, CommandBuffer, ComputeCommand,
     ComputePipelineDescriptor, ComputePipelineId, CopyCommand, DeviceCapabilities, Extent3d,
     Features, ImageDataLayout, Limits, LoadOp, Pass, PipelineLayoutDescriptor, PipelineLayoutId,
-    RenderDevice, RenderPipelineDescriptor, RenderPipelineId, RenderQueue, SamplerDescriptor,
-    SamplerId, ShaderModuleDescriptor, ShaderModuleId, StoreOp, TextureDescriptor, TextureFormat,
-    TextureId, TextureState, TextureUsages, TextureViewDescriptor, TextureViewId, TextureWrite,
-    Viewport,
+    RenderCommand, RenderDevice, RenderPipelineDescriptor, RenderPipelineId, RenderQueue,
+    SamplerDescriptor, SamplerId, ShaderModuleDescriptor, ShaderModuleId, StoreOp,
+    TextureDescriptor, TextureFormat, TextureId, TextureState, TextureUsages,
+    TextureViewDescriptor, TextureViewId, TextureWrite, Viewport, DRAW_INDEXED_INDIRECT_ARGS_SIZE,
 };
 
 use crate::desc::{BufferDesc, TextureDesc};
@@ -906,5 +906,106 @@ fn parallel_recording_matches_sequential_for_large_graph() {
         recorded.last().and_then(Clone::clone),
         Some(String::from("transfer-62")),
         "the last recorded pass is the last declared recording pass"
+    );
+}
+
+// --- indirect recording ---------------------------------------------------
+
+/// An imported indirect-argument buffer, as a GPU-authored cull would leave it.
+fn imported_args(buffer: u32) -> (BufferDesc, ImportedBuffer) {
+    (
+        BufferDesc::new(
+            64,
+            BufferUsages::STORAGE
+                .union(BufferUsages::INDIRECT)
+                .union(BufferUsages::COPY_DST),
+        ),
+        ImportedBuffer {
+            buffer: BufferId::from_parts(buffer, 0),
+            entry_state: BufferState::storage_write(
+                prism_render_driver::PipelineStages::COMPUTE_SHADER,
+            ),
+        },
+    )
+}
+
+/// A raster pass records both indexed-indirect primitives, resolving the
+/// declared argument handle to the imported driver buffer.
+#[test]
+fn raster_pass_records_indexed_and_multi_indirect_draws() {
+    let mut g = RenderGraph::new(swap());
+    let sc = import_sc(&mut g);
+    let (args_desc, args_import) = imported_args(4000);
+    let args = g.import_buffer("args", args_desc, args_import);
+
+    g.add_raster_pass("indirect", PassFlags::EMPTY, move |b| {
+        b.read_indirect(args);
+        b.color_attachment(sc);
+        move |ctx| {
+            ctx.draw_indexed_indirect(args, 8);
+            ctx.multi_draw_indirect(args, 0, 4, DRAW_INDEXED_INDIRECT_ARGS_SIZE);
+        }
+    });
+
+    let device = MockDevice::new();
+    let queue = MockQueue::new();
+    g.execute(&device, &queue).expect("indirect graph executes");
+
+    let submitted = queue.submitted.borrow();
+    let cb = &submitted[0];
+    let Pass::Render { commands, .. } = &cb.passes[0] else {
+        panic!("a raster pass must record a Pass::Render");
+    };
+    assert_eq!(
+        commands,
+        &vec![
+            RenderCommand::DrawIndexedIndirect {
+                buffer: BufferId::from_parts(4000, 0),
+                offset: 8,
+            },
+            RenderCommand::MultiDrawIndirect {
+                buffer: BufferId::from_parts(4000, 0),
+                offset: 0,
+                count: 4,
+                stride: DRAW_INDEXED_INDIRECT_ARGS_SIZE,
+            },
+        ],
+        "both indirect recorders resolve the declared handle to the imported buffer"
+    );
+}
+
+/// A compute pass records an indirect dispatch from a declared argument buffer,
+/// so a GPU-authored workgroup count reaches the command stream through the
+/// graph.
+#[test]
+fn compute_pass_records_indirect_dispatch() {
+    let mut g = RenderGraph::new(swap());
+    let (args_desc, args_import) = imported_args(4100);
+    let args = g.import_buffer("args", args_desc, args_import);
+
+    g.add_compute_pass("indirect-dispatch", PassFlags::SIDE_EFFECT, move |b| {
+        b.read_indirect(args);
+        move |ctx| {
+            ctx.dispatch_indirect(args, 16);
+        }
+    });
+
+    let device = MockDevice::new();
+    let queue = MockQueue::new();
+    g.execute(&device, &queue)
+        .expect("indirect dispatch executes");
+
+    let submitted = queue.submitted.borrow();
+    let cb = &submitted[0];
+    let Pass::Compute { commands, .. } = &cb.passes[0] else {
+        panic!("a compute pass must record a Pass::Compute");
+    };
+    assert_eq!(
+        commands,
+        &vec![ComputeCommand::DispatchIndirect {
+            buffer: BufferId::from_parts(4100, 0),
+            offset: 16,
+        }],
+        "the indirect dispatch resolves the declared handle to the imported buffer"
     );
 }

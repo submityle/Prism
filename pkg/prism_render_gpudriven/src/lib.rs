@@ -28,16 +28,19 @@
 //! capability (the RHI is fire-and-forget), implemented here for the shipped
 //! wgpu backend and used only by the GPU test and by [`cull::CullStage::run`].
 //!
-//! ## Why a direct encoder rather than a frame graph
+//! ## The frame graph
 //!
-//! The slice records straight into [`prism_render_driver`] command buffers and
-//! assembles its whole frame into one of them. Routing it through a frame graph
-//! would add virtual-handle import plumbing for the cull's GPU-authored argument
-//! buffer and for the render target, without changing a single thing the GPU is
-//! asked to do — and the point of this prototype is the RHI primitives
-//! themselves: a compute append feeding an indirect draw, with no CPU readback
-//! anywhere in the loop. A full renderer's pass graph belongs one level up (see
-//! the render runtime); this slice deliberately stays below it.
+//! The GPU-driven scene is declared through [`prism_render_graph`]: the frame is
+//! a reset compute pass, a cull compute pass, and a raster pass, all bound to
+//! resources the stages own and *imported* into the graph rather than
+//! reallocated. The graph's SSA versioning orders them without a single manual
+//! barrier — the cull reads the argument version the reset wrote, and the draw
+//! reads the visible-list and argument versions the cull wrote.
+//!
+//! The naive per-object baseline deliberately stays on the direct encoder. It is
+//! the comparison point that shows what the graph-driven, GPU-authored
+//! submission removes, and keeping it below the graph leaves the two submission
+//! paths independent.
 //!
 //! ## Layout
 //!
@@ -49,8 +52,10 @@
 //! - [`quad`]: the shared instance quad both draw paths rasterize.
 //! - [`camera`]: the orthographic view and its uniform.
 //! - [`cull`] / [`draw`]: the compute cull and the coverage draw it feeds.
-//! - [`scene_draw`]: the GPU-driven scene draw, reading instance storage.
-//! - [`naive`]: the per-object submission baseline the benchmark compares to.
+//! - [`scene_draw`]: the GPU-driven scene draw, declared as a render graph and
+//!   reading instance storage.
+//! - [`naive`]: the per-object submission baseline the benchmark compares to,
+//!   kept on the direct encoder.
 //! - [`gpu`]: the RHI assembly helpers every stage shares.
 //! - [`readback`]: backend readback and pixel-coverage counting.
 
@@ -84,7 +89,7 @@ pub use scene::{
     candidate_lattice, instance_records, lattice_instances, layer_slab, plane_view_center_frustum,
     plane_view_frustum, view_box_frustum, DEFAULT_GRID, DEFAULT_HALF_EXTENT, DEFAULT_SPACING,
 };
-pub use scene_draw::SceneDrawStage;
+pub use scene_draw::{IndirectMode, SceneDrawStage};
 
 #[cfg(test)]
 mod tests;
