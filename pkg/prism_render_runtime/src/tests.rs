@@ -3,12 +3,14 @@
 //! Each test first attempts to bring up a real device. When no adapter is
 //! present (the usual GPU-less CI sandbox) the test returns early and is a
 //! no-op, so the suite always passes without hardware. On a machine with a GPU
-//! it exercises the full declare -> compile -> realize -> submit -> readback
-//! path through the frozen RHI, which is exactly the ground the Bevy render
-//! stack used to provide.
+//! it exercises the full facade -> graph -> readback path through the frozen
+//! RHI, which is exactly the ground the Bevy render stack used to provide.
 
 use prism_render_driver as rhi;
-use rhi::{RenderDevice, TextureState, TextureUsages};
+use rhi::{
+    Adapter, Instance, RenderDevice, TextureState, TextureUsages,
+};
+use prism_render_driver_wgpu::WgpuInstance;
 use prism_render_graph::{ImportedTexture, PassFlags, TextureDesc};
 
 use crate::RenderRuntime;
@@ -17,8 +19,21 @@ use crate::RenderRuntime;
 const SIZE: u32 = 64;
 
 #[test]
+fn instance_enumerates_adapters_through_the_rhi() {
+    let instance = WgpuInstance::new();
+    let adapters = <WgpuInstance as Instance>::enumerate_adapters(&instance);
+    // A GPU-less sandbox legitimately reports nothing; skip in that case.
+    for adapter in &adapters {
+        let info = adapter.info();
+        assert!(!info.name.is_empty(), "adapter reports a name");
+        let caps = adapter.capabilities();
+        assert_eq!(caps.backend, info.backend, "caps and info agree on backend");
+    }
+}
+
+#[test]
 fn rhi_graph_clears_imported_target() {
-    let Some(rt) = RenderRuntime::headless(rhi::Extent3d::new_2d(SIZE, SIZE)).ok() else {
+    let Some(rt) = RenderRuntime::wgpu(rhi::Extent3d::new_2d(SIZE, SIZE)).ok() else {
         return;
     };
     let device = rt.device();
@@ -51,7 +66,7 @@ fn rhi_graph_clears_imported_target() {
     });
 
     rt.execute(graph).expect("graph executes on the RHI");
-    assert!(rt.wait(), "the device stays healthy through the frame");
+    assert!(rt.device().poll_wait(), "the device stays healthy");
 
     let pixels = rt.queue().read_texture_rgba8(texture, SIZE, SIZE);
     assert_eq!(pixels.len(), (SIZE * SIZE * 4) as usize);

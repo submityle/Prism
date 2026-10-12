@@ -19,11 +19,9 @@ mod convert;
 mod device;
 mod instance;
 mod queue;
-#[cfg(feature = "surface")]
 mod surface;
 
 pub use device::WgpuDevice;
-pub use instance::{DeviceCreationError, WgpuInstance};
+pub use instance::{DeviceCreationError, WgpuAdapter, WgpuInstance};
 pub use queue::WgpuQueue;
-#[cfg(feature = "surface")]
-pub use surface::{SurfaceAcquireError, SurfaceConfigureError, WgpuFrame, WgpuSurface};
+pub use surface::{SurfaceCreateError, WgpuFrame, WgpuSurface};

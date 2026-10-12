@@ -1,175 +1,220 @@
-//! Optional window-surface/swapchain support (behind the `surface` feature).
+//! wgpu window-surface support (behind the `surface` feature).
 //!
-//! Wraps `wgpu::Surface` with a complete configure → acquire → present cycle.
-//! Window handles are accepted through `raw-window-handle` (wgpu's safe
+//! [`WgpuSurface`] owns a `wgpu::Surface` for the lifetime of its window
+//! (the window is held as an `Arc`, so the surface is `'static`) and implements
+//! the frozen [`rhi::Surface`] contract: configure → acquire → image →
+//! present. Acquired swapchain images are registered into the shared device
+//! slot maps and exposed as ordinary RHI texture/view ids, so the render graph
+//! imports a swapchain image exactly like any other external texture.
+//!
+//! Window handles arrive through `raw-window-handle` (wgpu's safe
 //! `create_surface` path), so no `unsafe` is required.
 
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::fmt;
 
-use crate::device::WgpuDevice;
+use prism_render_driver as rhi;
+use rhi::Surface;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+use crate::convert;
+use crate::device::DeviceInner;
 use crate::instance::WgpuInstance;
-use crate::queue::WgpuQueue;
 
 /// A presentable window surface and its swapchain.
-pub struct WgpuSurface<'window> {
-    /// The underlying wgpu surface.
-    surface: wgpu::Surface<'window>,
+pub struct WgpuSurface {
+    /// The underlying wgpu surface, owning its window for `'static`.
+    surface: wgpu::Surface<'static>,
+    /// The device whose slot maps external swapchain images are registered in.
+    inner: Arc<DeviceInner>,
+    /// The queue frames are presented on.
+    queue: wgpu::Queue,
+    /// A debug label surfaced in GPU tooling.
+    label: Option<String>,
+    /// The current swapchain extent (updated on every `configure`).
+    size: rhi::Extent3d,
+    /// The swapchain format frames are acquired in, once configured.
+    format: Option<wgpu::TextureFormat>,
 }
 
-/// An error raised while configuring a [`WgpuSurface`].
+/// An error raised while creating a [`WgpuSurface`].
 #[derive(Debug)]
-pub enum SurfaceConfigureError {
-    /// The adapter exposes no format/present-mode combination compatible with
-    /// the surface, so a default configuration could not be derived.
-    Unsupported,
-}
+pub struct SurfaceCreateError(pub wgpu::CreateSurfaceError);
 
-impl fmt::Display for SurfaceConfigureError {
+impl fmt::Display for SurfaceCreateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unsupported => f.write_str("surface is not compatible with the adapter"),
-        }
+        write!(f, "failed to create wgpu surface: {}", self.0)
     }
 }
 
-impl std::error::Error for SurfaceConfigureError {}
-
-/// A non-success outcome of [`WgpuSurface::acquire`].
-///
-/// Each variant mirrors a `wgpu::CurrentSurfaceTexture` status that did not
-/// yield a usable frame; callers typically skip the frame or reconfigure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SurfaceAcquireError {
-    /// Acquiring the next frame timed out; try again later.
-    Timeout,
-    /// The window is occluded (e.g. minimized); skip this frame.
-    Occluded,
-    /// The surface configuration is outdated; reconfigure and retry.
-    Outdated,
-    /// The surface was lost and must be recreated.
-    Lost,
-    /// A validation error was raised while acquiring the frame.
-    Validation,
-}
-
-impl fmt::Display for SurfaceAcquireError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let reason = match self {
-            Self::Timeout => "timed out",
-            Self::Occluded => "window is occluded",
-            Self::Outdated => "surface configuration is outdated",
-            Self::Lost => "surface was lost",
-            Self::Validation => "surface acquisition raised a validation error",
-        };
-        write!(f, "failed to acquire surface frame: {reason}")
+impl std::error::Error for SurfaceCreateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
     }
 }
-
-impl std::error::Error for SurfaceAcquireError {}
 
 /// An acquired swapchain frame.
 ///
-/// Hold it while recording and submitting the frame's commands, then call
-/// [`WgpuFrame::present`] (or drop it to discard the frame).
+/// Hold it while recording and submitting the frame's commands, then pass it to
+/// [`Surface::present`] (or drop it to discard the frame). Dropping without
+/// presenting leaks the registered image ids for the device's lifetime, so
+/// callers should always present or discard explicitly.
 pub struct WgpuFrame {
     /// The acquired surface texture, consumed on present.
     texture: wgpu::SurfaceTexture,
+    /// The RHI id the frame's texture was registered under.
+    texture_id: rhi::TextureId,
+    /// The RHI id the frame's default view was registered under.
+    view_id: rhi::TextureViewId,
+    /// The frame's texel format.
+    format: rhi::TextureFormat,
+    /// The frame's extent.
+    size: rhi::Extent3d,
     /// Whether the surface reported the frame as suboptimal.
     suboptimal: bool,
 }
 
 impl WgpuFrame {
-    /// Borrows the frame's backing texture, e.g. to create a render target
-    /// view.
-    #[must_use]
-    pub fn texture(&self) -> &wgpu::Texture {
-        &self.texture.texture
-    }
-
-    /// Creates a default view over the frame's texture for use as a color
-    /// attachment.
-    #[must_use]
-    pub fn create_view(&self) -> wgpu::TextureView {
-        self.texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default())
-    }
-
     /// Whether the frame was acquired but no longer matches the surface's
     /// properties; the surface should be reconfigured for optimal performance.
     #[must_use]
     pub fn is_suboptimal(&self) -> bool {
         self.suboptimal
     }
-
-    /// Presents the frame on `queue`, consuming it.
-    pub fn present(self, queue: &WgpuQueue) {
-        queue.wgpu_queue().present(self.texture);
-    }
 }
 
-impl<'window> WgpuSurface<'window> {
-    /// Creates a surface targeting `window` (any `raw-window-handle` target).
-    ///
-    /// # Errors
-    ///
-    /// Returns the wgpu error if the platform surface could not be created.
-    pub fn create(
+impl WgpuSurface {
+    /// Creates a surface targeting `window`, registered against `inner`/`queue`.
+    pub(crate) fn create<W>(
         instance: &WgpuInstance,
-        window: impl Into<wgpu::SurfaceTarget<'window>>,
-    ) -> Result<Self, wgpu::CreateSurfaceError> {
-        let surface = instance.wgpu_instance().create_surface(window)?;
-        Ok(Self { surface })
+        window: Arc<W>,
+        inner: Arc<DeviceInner>,
+        queue: wgpu::Queue,
+        label: Option<String>,
+    ) -> Result<Self, SurfaceCreateError>
+    where
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+    {
+        let surface = instance
+            .wgpu_instance()
+            .create_surface(window)
+            .map_err(SurfaceCreateError)?;
+        Ok(Self {
+            surface,
+            inner,
+            queue,
+            label,
+            size: rhi::Extent3d::new_2d(1, 1),
+            format: None,
+        })
     }
 
     /// Borrows the underlying wgpu surface.
     #[must_use]
-    pub fn wgpu_surface(&self) -> &wgpu::Surface<'window> {
+    pub fn wgpu_surface(&self) -> &wgpu::Surface<'static> {
         &self.surface
     }
+}
 
-    /// Configures (or reconfigures) the swapchain for `width`×`height` using
-    /// the adapter's preferred format and present mode.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SurfaceConfigureError::Unsupported`] if the adapter exposes no
-    /// compatible configuration for this surface.
-    pub fn configure(
-        &self,
-        device: &WgpuDevice,
-        width: u32,
-        height: u32,
-    ) -> Result<(), SurfaceConfigureError> {
-        let config = self
-            .surface
-            .get_default_config(device.wgpu_adapter(), width, height)
-            .ok_or(SurfaceConfigureError::Unsupported)?;
-        self.surface.configure(device.wgpu_device(), &config);
+impl Surface for WgpuSurface {
+    type Frame = WgpuFrame;
+
+    fn capabilities(&self) -> rhi::SurfaceCapabilities {
+        let caps = self.surface.get_capabilities(&self.inner.adapter);
+        rhi::SurfaceCapabilities {
+            formats: caps
+                .formats
+                .iter()
+                .filter_map(|f| convert::surface_format_from_wgpu(*f))
+                .collect(),
+            present_modes: caps
+                .present_modes
+                .iter()
+                .filter_map(|m| convert::present_mode_from_wgpu(*m))
+                .collect(),
+            alpha_modes: caps
+                .alpha_modes
+                .iter()
+                .map(|m| convert::alpha_mode_from_wgpu(*m))
+                .collect(),
+        }
+    }
+
+    fn configure(&mut self, config: &rhi::SurfaceConfig) -> Result<(), rhi::SurfaceError> {
+        let wgpu_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: convert::texture_format(config.format),
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            width: config.width.max(1),
+            height: config.height.max(1),
+            present_mode: convert::present_mode_to_wgpu(config.present_mode),
+            desired_maximum_frame_latency: config.desired_maximum_frame_latency.max(1),
+            alpha_mode: convert::alpha_mode_to_wgpu(config.alpha_mode),
+            view_formats: Vec::new(),
+        };
+        // wgpu panics if the chosen present mode is unsupported; validate it
+        // against the surface's advertised set first and report cleanly.
+        let caps = self.surface.get_capabilities(&self.inner.adapter);
+        if !caps.present_modes.contains(&wgpu_config.present_mode) {
+            return Err(rhi::SurfaceError::Unsupported);
+        }
+        self.surface.configure(&self.inner.device, &wgpu_config);
+        self.format = Some(wgpu_config.format);
+        self.size = rhi::Extent3d::new_2d(wgpu_config.width, wgpu_config.height);
         Ok(())
     }
 
-    /// Acquires the next swapchain frame to render into.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`SurfaceAcquireError`] if no usable frame was available
-    /// (timeout, occlusion, an outdated/lost surface, or a validation error).
-    pub fn acquire(&self) -> Result<WgpuFrame, SurfaceAcquireError> {
-        match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(texture) => Ok(WgpuFrame {
-                texture,
-                suboptimal: false,
-            }),
-            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Ok(WgpuFrame {
-                texture,
-                suboptimal: true,
-            }),
-            wgpu::CurrentSurfaceTexture::Timeout => Err(SurfaceAcquireError::Timeout),
-            wgpu::CurrentSurfaceTexture::Occluded => Err(SurfaceAcquireError::Occluded),
-            wgpu::CurrentSurfaceTexture::Outdated => Err(SurfaceAcquireError::Outdated),
-            wgpu::CurrentSurfaceTexture::Lost => Err(SurfaceAcquireError::Lost),
-            wgpu::CurrentSurfaceTexture::Validation => Err(SurfaceAcquireError::Validation),
+    fn acquire(&self) -> Result<Self::Frame, rhi::SurfaceError> {
+        let format = self.format.ok_or(rhi::SurfaceError::Unsupported)?;
+        let surface_texture = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
+            wgpu::CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
+            wgpu::CurrentSurfaceTexture::Timeout => return Err(rhi::SurfaceError::Timeout),
+            wgpu::CurrentSurfaceTexture::Occluded => return Err(rhi::SurfaceError::Occluded),
+            wgpu::CurrentSurfaceTexture::Outdated => return Err(rhi::SurfaceError::Outdated),
+            wgpu::CurrentSurfaceTexture::Lost => return Err(rhi::SurfaceError::Lost),
+            wgpu::CurrentSurfaceTexture::Validation => return Err(rhi::SurfaceError::Validation),
+        };
+        let (texture, suboptimal) = surface_texture;
+        let view = texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let texture_id = self.inner.register_texture(texture.texture.clone());
+        let view_id = self.inner.register_texture_view(view);
+        Ok(WgpuFrame {
+            texture,
+            texture_id,
+            view_id,
+            format: convert::surface_format_from_wgpu(format)
+                .ok_or(rhi::SurfaceError::Unsupported)?,
+            size: self.size,
+            suboptimal,
+        })
+    }
+
+    fn image(&self, frame: &Self::Frame) -> rhi::SurfaceImage {
+        rhi::SurfaceImage {
+            texture: frame.texture_id,
+            view: frame.view_id,
+            format: frame.format,
+            size: frame.size,
         }
+    }
+
+    fn present(&self, frame: Self::Frame) -> Result<(), rhi::SurfaceError> {
+        self.inner.release_texture_view(frame.view_id);
+        self.inner.release_texture(frame.texture_id);
+        self.queue.present(frame.texture);
+        Ok(())
+    }
+
+    fn size(&self) -> rhi::Extent3d {
+        self.size
+    }
+
+    fn label(&self) -> Option<&str> {
+        self.label.as_deref()
     }
 }

@@ -1,0 +1,18 @@
+[package]
+name = "prism_render_driver_null"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Null/headless reference backend for Prism's render hardware interface (prism_render_driver). Implements the frozen Instance/Adapter/RenderDevice/RenderQueue/Surface traits with no GPU: adapter enumeration reports a single CPU/Noop device, create_* mints generation-checked RHI ids in slot maps, destroy_* releases them, the queue's writes and submissions are no-ops, and acquire/present cycle a CPU-side swapchain that mints and releases RHI texture/view ids. Used by CI and GPU-less hosts so the render graph and upper layers can be exercised without hardware; std is required only for the Send+Sync Mutex around the resource tables."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_driver = { path = "../../pkg/prism_render_driver", features = ["std"] }
+# The window-handle ABI the shared `Instance::create_surface` signature names.
+# The null backend never inspects the handle, but it must accept the same
+# bound the frozen trait declares.
+raw-window-handle = { version = "0.6", default-features = false }
+
+[lints]
+workspace = true

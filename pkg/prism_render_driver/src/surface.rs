@@ -151,7 +151,7 @@ pub trait Surface {
     ///
     /// Returns [`SurfaceError::Unsupported`] when the configuration cannot be
     /// satisfied.
-    fn configure(&self, config: &SurfaceConfig) -> Result<(), SurfaceError>;
+    fn configure(&mut self, config: &SurfaceConfig) -> Result<(), SurfaceError>;
 
     /// Acquires the next frame to render into.
     ///

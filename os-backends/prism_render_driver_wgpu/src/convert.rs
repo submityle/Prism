@@ -569,6 +569,89 @@ pub(crate) fn backend_from_wgpu(backend: wgpu::Backend) -> rhi::Backend {
     }
 }
 
+/// Maps a wgpu physical-device type to the RHI enum.
+pub(crate) fn device_type_from_wgpu(kind: wgpu::DeviceType) -> rhi::DeviceType {
+    match kind {
+        wgpu::DeviceType::Other => rhi::DeviceType::Other,
+        wgpu::DeviceType::IntegratedGpu => rhi::DeviceType::IntegratedGpu,
+        wgpu::DeviceType::DiscreteGpu => rhi::DeviceType::DiscreteGpu,
+        wgpu::DeviceType::VirtualGpu => rhi::DeviceType::VirtualGpu,
+        wgpu::DeviceType::Cpu => rhi::DeviceType::Cpu,
+    }
+}
+
+/// Maps an RHI power preference to its wgpu equivalent.
+pub(crate) fn power_preference_to_wgpu(preference: rhi::PowerPreference) -> wgpu::PowerPreference {
+    match preference {
+        rhi::PowerPreference::None => wgpu::PowerPreference::None,
+        rhi::PowerPreference::LowPower => wgpu::PowerPreference::LowPower,
+        rhi::PowerPreference::HighPerformance => wgpu::PowerPreference::HighPerformance,
+    }
+}
+
+/// Maps an RHI present mode to its wgpu equivalent.
+pub(crate) fn present_mode_to_wgpu(mode: rhi::PresentMode) -> wgpu::PresentMode {
+    match mode {
+        rhi::PresentMode::Fifo => wgpu::PresentMode::Fifo,
+        rhi::PresentMode::FifoRelaxed => wgpu::PresentMode::FifoRelaxed,
+        rhi::PresentMode::Immediate => wgpu::PresentMode::Immediate,
+        rhi::PresentMode::Mailbox => wgpu::PresentMode::Mailbox,
+    }
+}
+
+/// Maps a wgpu present mode to the RHI enum, or `None` for the automatic
+/// fallback modes the RHI does not model explicitly.
+pub(crate) fn present_mode_from_wgpu(mode: wgpu::PresentMode) -> Option<rhi::PresentMode> {
+    match mode {
+        wgpu::PresentMode::Fifo => Some(rhi::PresentMode::Fifo),
+        wgpu::PresentMode::FifoRelaxed => Some(rhi::PresentMode::FifoRelaxed),
+        wgpu::PresentMode::Immediate => Some(rhi::PresentMode::Immediate),
+        wgpu::PresentMode::Mailbox => Some(rhi::PresentMode::Mailbox),
+        _ => None,
+    }
+}
+
+/// Maps an RHI composite-alpha mode to its wgpu equivalent.
+pub(crate) fn alpha_mode_to_wgpu(mode: rhi::CompositeAlphaMode) -> wgpu::CompositeAlphaMode {
+    match mode {
+        rhi::CompositeAlphaMode::Auto => wgpu::CompositeAlphaMode::Auto,
+        rhi::CompositeAlphaMode::Opaque => wgpu::CompositeAlphaMode::Opaque,
+        rhi::CompositeAlphaMode::Premultiplied => wgpu::CompositeAlphaMode::PreMultiplied,
+        rhi::CompositeAlphaMode::Postmultiplied => wgpu::CompositeAlphaMode::PostMultiplied,
+        rhi::CompositeAlphaMode::Inherit => wgpu::CompositeAlphaMode::Inherit,
+    }
+}
+
+/// Maps a wgpu composite-alpha mode to the RHI enum.
+pub(crate) fn alpha_mode_from_wgpu(mode: wgpu::CompositeAlphaMode) -> rhi::CompositeAlphaMode {
+    match mode {
+        wgpu::CompositeAlphaMode::Auto => rhi::CompositeAlphaMode::Auto,
+        wgpu::CompositeAlphaMode::Opaque => rhi::CompositeAlphaMode::Opaque,
+        wgpu::CompositeAlphaMode::PreMultiplied => rhi::CompositeAlphaMode::Premultiplied,
+        wgpu::CompositeAlphaMode::PostMultiplied => rhi::CompositeAlphaMode::Postmultiplied,
+        wgpu::CompositeAlphaMode::Inherit => rhi::CompositeAlphaMode::Inherit,
+    }
+}
+
+/// Maps a wgpu swapchain format back into the RHI enum.
+///
+/// Only the formats a swapchain can realistically advertise are covered; an
+/// unmapped format is dropped from the reported [`rhi::SurfaceCapabilities`]
+/// rather than guessed at.
+pub(crate) fn surface_format_from_wgpu(format: wgpu::TextureFormat) -> Option<rhi::TextureFormat> {
+    use rhi::TextureFormat as F;
+    use wgpu::TextureFormat as W;
+    Some(match format {
+        W::Rgba8Unorm => F::Rgba8Unorm,
+        W::Rgba8UnormSrgb => F::Rgba8UnormSrgb,
+        W::Bgra8Unorm => F::Bgra8Unorm,
+        W::Bgra8UnormSrgb => F::Bgra8UnormSrgb,
+        W::Rgb10a2Unorm => F::Rgb10a2Unorm,
+        W::Rgba16Float => F::Rgba16Float,
+        _ => return None,
+    })
+}
+
 /// Maps the RHI's requested features onto the wgpu features to enable at device
 /// creation. `INDIRECT_DRAW` is core in wgpu and carries no flag.
 pub(crate) fn features_to_wgpu(features: rhi::Features) -> wgpu::Features {

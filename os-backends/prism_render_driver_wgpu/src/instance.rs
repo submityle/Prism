@@ -5,13 +5,73 @@
 //! driven to completion with [`futures_lite::future::block_on`].
 
 use alloc::vec::Vec;
+use alloc::sync::Arc;
 use core::fmt;
 
 use prism_render_driver as rhi;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::convert;
 use crate::device::WgpuDevice;
 use crate::queue::WgpuQueue;
+use crate::surface::WgpuSurface;
+
+/// A wgpu physical device behind the frozen [`rhi::Adapter`] trait.
+pub struct WgpuAdapter {
+    /// The underlying wgpu adapter.
+    adapter: wgpu::Adapter,
+    /// The RHI-facing adapter description.
+    info: rhi::AdapterInfo,
+    /// The features/limits the adapter can offer.
+    caps: rhi::DeviceCapabilities,
+}
+
+impl WgpuAdapter {
+    /// Wraps a wgpu adapter and derives its RHI description and capabilities.
+    #[must_use]
+    pub fn new(adapter: wgpu::Adapter) -> Self {
+        let info = adapter.get_info();
+        let backend = convert::backend_from_wgpu(info.backend);
+        let rhi_info = rhi::AdapterInfo {
+            name: info.name,
+            backend,
+            device_type: convert::device_type_from_wgpu(info.device_type),
+            vendor_id: info.vendor,
+            device_id: info.device,
+            driver: if info.driver.is_empty() {
+                None
+            } else {
+                Some(info.driver)
+            },
+        };
+        let caps = rhi::DeviceCapabilities {
+            backend,
+            features: convert::features_from_wgpu(adapter.features()),
+            limits: convert::limits_from_wgpu(&adapter.limits()),
+        };
+        Self {
+            adapter,
+            info: rhi_info,
+            caps,
+        }
+    }
+
+    /// Borrows the underlying wgpu adapter.
+    #[must_use]
+    pub fn wgpu_adapter(&self) -> &wgpu::Adapter {
+        &self.adapter
+    }
+}
+
+impl rhi::Adapter for WgpuAdapter {
+    fn info(&self) -> &rhi::AdapterInfo {
+        &self.info
+    }
+
+    fn capabilities(&self) -> &rhi::DeviceCapabilities {
+        &self.caps
+    }
+}
 
 /// A wgpu instance: the entry point for enumerating adapters and bringing up a
 /// [`WgpuDevice`]/[`WgpuQueue`] pair.
@@ -89,11 +149,23 @@ impl WgpuInstance {
         power_preference: wgpu::PowerPreference,
         force_fallback_adapter: bool,
     ) -> Option<wgpu::Adapter> {
+        self.request_adapter_with_surface(power_preference, force_fallback_adapter, None)
+    }
+
+    /// Requests an adapter that can present to `compatible_surface` (when
+    /// given), blocking until the request resolves.
+    #[must_use]
+    pub fn request_adapter_with_surface(
+        &self,
+        power_preference: wgpu::PowerPreference,
+        force_fallback_adapter: bool,
+        compatible_surface: Option<&wgpu::Surface<'_>>,
+    ) -> Option<wgpu::Adapter> {
         futures_lite::future::block_on(self.instance.request_adapter(
             &wgpu::RequestAdapterOptions {
                 power_preference,
                 force_fallback_adapter,
-                compatible_surface: None,
+                compatible_surface,
                 apply_limit_buckets: false,
             },
         ))
@@ -121,7 +193,7 @@ impl WgpuInstance {
             required_features |= wgpu::Features::IMMEDIATES;
         }
 
-        self.bring_up(adapter, required_features, adapter.limits())
+        self.bring_up(adapter, required_features, adapter.limits(), None)
     }
 
     /// Brings up a device constrained to the RHI `features` and `limits` the
@@ -139,7 +211,7 @@ impl WgpuInstance {
         limits: rhi::Limits,
     ) -> Result<(WgpuDevice, WgpuQueue), DeviceCreationError> {
         let required_features = convert::features_to_wgpu(features) & adapter.features();
-        self.bring_up(adapter, required_features, convert::limits_to_wgpu(limits))
+        self.bring_up(adapter, required_features, convert::limits_to_wgpu(limits), None)
     }
 
     /// Shared device/queue bring-up: issues the blocking `request_device`,
@@ -150,10 +222,11 @@ impl WgpuInstance {
         adapter: &wgpu::Adapter,
         required_features: wgpu::Features,
         required_limits: wgpu::Limits,
+        label: Option<&str>,
     ) -> Result<(WgpuDevice, WgpuQueue), DeviceCreationError> {
         let (device, queue) =
             futures_lite::future::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("prism_render_driver_wgpu device"),
+                label: label.or(Some("prism_render_driver_wgpu device")),
                 required_features,
                 required_limits,
                 ..Default::default()
@@ -193,5 +266,71 @@ impl WgpuInstance {
     /// and never name a `wgpu` type directly.
     pub fn request_default_device(&self) -> Result<(WgpuDevice, WgpuQueue), DeviceCreationError> {
         self.request_device(wgpu::PowerPreference::HighPerformance)
+    }
+}
+
+impl rhi::Instance for WgpuInstance {
+    type Adapter = WgpuAdapter;
+    type Device = WgpuDevice;
+    type Queue = WgpuQueue;
+    type Surface = WgpuSurface;
+
+    fn enumerate_adapters(&self) -> Vec<WgpuAdapter> {
+        self.enumerate_adapters()
+            .into_iter()
+            .map(WgpuAdapter::new)
+            .collect()
+    }
+
+    fn request_adapter(&self, options: &rhi::RequestAdapterOptions) -> Option<WgpuAdapter> {
+        let preference = convert::power_preference_to_wgpu(options.power_preference);
+        self.request_adapter(preference, options.force_fallback)
+            .map(WgpuAdapter::new)
+    }
+
+    fn request_adapter_for_surface(
+        &self,
+        options: &rhi::RequestAdapterOptions,
+        surface: &WgpuSurface,
+    ) -> Option<WgpuAdapter> {
+        let preference = convert::power_preference_to_wgpu(options.power_preference);
+        self.request_adapter_with_surface(
+            preference,
+            options.force_fallback,
+            Some(surface.wgpu_surface()),
+        )
+        .map(WgpuAdapter::new)
+    }
+
+    fn create_device(
+        &self,
+        adapter: &WgpuAdapter,
+        descriptor: &rhi::DeviceDescriptor,
+    ) -> Result<(WgpuDevice, WgpuQueue), rhi::DeviceError> {
+        // Intersect the request with what the adapter supports so an
+        // over-specified descriptor degrades instead of failing the request.
+        let features = convert::features_to_wgpu(descriptor.required_features)
+            & adapter.adapter.features();
+        let limits = convert::limits_to_wgpu(descriptor.required_limits);
+        self.bring_up(
+            &adapter.adapter,
+            features,
+            limits,
+            descriptor.label.as_deref(),
+        )
+        .map_err(|error| rhi::DeviceError::Request(alloc::format!("{error}")))
+    }
+
+    fn create_surface<W>(
+        &self,
+        window: Arc<W>,
+        device: &WgpuDevice,
+        queue: &WgpuQueue,
+    ) -> Result<WgpuSurface, rhi::SurfaceError>
+    where
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
+    {
+        WgpuSurface::create(self, window, device.inner(), queue.wgpu_queue().clone(), None)
+            .map_err(|_| rhi::SurfaceError::Unsupported)
     }
 }

@@ -22,8 +22,6 @@ default = []
 vulkan = ["wgpu/vulkan"]
 dx12 = ["wgpu/dx12"]
 gles = ["wgpu/gles"]
-# Surface/window integration (pulls raw-window-handle paths in wgpu).
-surface = []
 
 [lints]
 workspace = true

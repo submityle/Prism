@@ -148,6 +148,36 @@ impl DeviceInner {
             .clone()
     }
 
+    /// Registers an externally-created texture (e.g. a swapchain image) into the
+    /// slot map and returns its RHI id.
+    ///
+    /// The caller owns the lifetime: an id registered here must be released with
+    /// [`release_texture`](Self::release_texture) once it is no longer needed,
+    /// or its slot leaks for the device's lifetime.
+    pub(crate) fn register_texture(&self, texture: wgpu::Texture) -> rhi::TextureId {
+        let id = lock(&self.textures).insert(StoredTexture { texture });
+        convert::convert_id(id)
+    }
+
+    /// Registers an externally-created texture view into the slot map and
+    /// returns its RHI id. See [`register_texture`](Self::register_texture) for
+    /// the lifetime contract.
+    pub(crate) fn register_texture_view(&self, view: wgpu::TextureView) -> rhi::TextureViewId {
+        let id = lock(&self.texture_views).insert(view);
+        convert::convert_id(id)
+    }
+
+    /// Releases a texture registered with [`register_texture`](Self::register_texture).
+    pub(crate) fn release_texture(&self, id: rhi::TextureId) {
+        lock(&self.textures).remove(convert::convert_id(id));
+    }
+
+    /// Releases a texture view registered with
+    /// [`register_texture_view`](Self::register_texture_view).
+    pub(crate) fn release_texture_view(&self, id: rhi::TextureViewId) {
+        lock(&self.texture_views).remove(convert::convert_id(id));
+    }
+
     /// Resolves a bind-group id to a cloned wgpu handle.
     pub(crate) fn resolve_bind_group(&self, id: rhi::BindGroupId) -> wgpu::BindGroup {
         lock(&self.bind_groups)
