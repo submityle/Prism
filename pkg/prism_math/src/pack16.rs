@@ -1,9 +1,12 @@
 //! 16-bit-per-channel vertex-attribute packing (`unorm16x2` / `snorm16x2`).
 //!
 //! These fold a two-component value into one `u32` of two 16-bit channels and
-//! widen it back, matching the WGSL built-ins `pack2x16unorm` / `pack2x16snorm`
-//! (and their `unpack` inverses) **bit-for-bit** so a CPU-produced buffer can be
-//! consumed verbatim by a shader and vice versa. This is the canonical
+//! widen it back, following the WGSL **spec formula** for `pack2x16unorm` /
+//! `pack2x16snorm` (and their `unpack` inverses) so a CPU-produced buffer can be
+//! consumed verbatim by a shader and vice versa. (The device *built-ins* may
+//! round ties differently from the spec formula on some backends, so the GPU
+//! shader mirror implements the formula explicitly rather than calling the
+//! built-in.) This is the canonical
 //! high-precision compact encoding for texture coordinates (`unorm16x2` UVs,
 //! where 8-bit would visibly swim) and for packed tangent-frame or motion-vector
 //! pairs (`snorm16x2`), where a full `f32x2` would waste half the bandwidth yet

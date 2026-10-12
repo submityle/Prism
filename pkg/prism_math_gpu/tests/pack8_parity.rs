@@ -8,18 +8,16 @@
 //! back (`unpack4x8unorm` / `unpack4x8snorm`). Both are diffed against the CPU
 //! reference [`prism_math::pack8`].
 //!
-//! WGSL defines the quantizers as `⌊0.5 + N·clamp(c)⌋` (`N` = 255 unorm /
-//! 127 snorm), exactly like the CPU reference, so for **exactly-representable
-//! quantized** inputs the packed bytes match [`prism_math::pack8`]
-//! **byte-for-byte**; the byte-exact sweeps assert that. Arbitrary inputs may
-//! differ by at most one code at a rounding tie (implementations may round
-//! halves differently), a documented honest boundary checked with a one-code
-//! tolerance. The widening (`unpack`) direction is exact on both sides. The
-//! suite skips gracefully when no adapter is available.
+//! The shader implements the quantizers **explicitly** as
+//! `⌊0.5 + N·clamp(c)⌋` (`N` = 255 unorm / 127 snorm), exactly like the CPU
+//! reference, so the packed bytes match [`prism_math::pack8`]
+//! **byte-for-byte** for all inputs (the device built-ins are intentionally not
+//! used because Metal's tie rounding differs — CR-found). The byte-exact sweeps
+//! and the arbitrary-input sweeps both assert equality. The widening (`unpack`)
+//! direction is exact on both sides. The suite skips gracefully when no adapter
+//! is available.
 
-use prism_math::pack8::{
-    pack_snorm4x8, pack_unorm4x8, unpack_snorm4x8, unpack_unorm4x8,
-};
+use prism_math::pack8::{pack_snorm4x8, pack_unorm4x8, unpack_snorm4x8, unpack_unorm4x8};
 use prism_math_gpu::GpuContext;
 use prism_math_gpu::GpuPack8;
 
@@ -43,30 +41,6 @@ fn with_gpu() -> Option<GpuContext> {
 fn lcg(seed: &mut u32) -> u32 {
     *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
     *seed
-}
-
-/// Maximum absolute difference, in integer codes, between two packed `u32`s,
-/// taken channel-by-channel on the raw bytes (`unorm` interpretation).
-fn max_unorm_code_diff(a: u32, b: u32) -> i32 {
-    let mut m = 0;
-    for s in [0, 8, 16, 24] {
-        let x = ((a >> s) & 0xFF) as i32;
-        let y = ((b >> s) & 0xFF) as i32;
-        m = m.max((x - y).abs());
-    }
-    m
-}
-
-/// Maximum absolute difference, in integer codes, between two packed `u32`s,
-/// interpreting each byte as a two's-complement `i8` (`snorm` interpretation).
-fn max_snorm_code_diff(a: u32, b: u32) -> i32 {
-    let mut m = 0;
-    for s in [0, 8, 16, 24] {
-        let x = i32::from(((a >> s) & 0xFF) as u8 as i8);
-        let y = i32::from(((b >> s) & 0xFF) as u8 as i8);
-        m = m.max((x - y).abs());
-    }
-    m
 }
 
 #[test]
@@ -207,10 +181,7 @@ fn pack_unorm_arbitrary_within_one_code() {
     assert_eq!(gpu.len(), src.len());
     for (v, &g) in src.iter().zip(gpu.iter()) {
         let cpu = pack_unorm4x8(*v);
-        assert!(
-            max_unorm_code_diff(g, cpu) <= 1,
-            "unorm pack off by >1 code at {v:?}: gpu {g:#010x} cpu {cpu:#010x}"
-        );
+        assert_eq!(g, cpu, "unorm pack mismatch at {v:?}");
     }
 }
 
@@ -233,10 +204,7 @@ fn pack_snorm_arbitrary_within_one_code() {
     assert_eq!(gpu.len(), src.len());
     for (v, &g) in src.iter().zip(gpu.iter()) {
         let cpu = pack_snorm4x8(*v);
-        assert!(
-            max_snorm_code_diff(g, cpu) <= 1,
-            "snorm pack off by >1 code at {v:?}: gpu {g:#010x} cpu {cpu:#010x}"
-        );
+        assert_eq!(g, cpu, "snorm pack mismatch at {v:?}");
     }
 }
 

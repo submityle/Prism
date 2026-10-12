@@ -920,16 +920,16 @@ fn prism_linear_to_srgb(c: f32) -> f32 {\n\
 ///
 /// `prism_pack_unorm4x8` / `prism_pack_snorm4x8` fold a `vec4<f32>` into one
 /// `u32` of four 8-bit channels (component 0 in the low byte) and the `unpack`
-/// inverses widen them back, wrapping the WGSL built-ins `pack4x8unorm` /
-/// `pack4x8snorm` / `unpack4x8unorm` / `unpack4x8snorm`. The WGSL spec defines
-/// the quantizers as `⌊0.5 + N·clamp(c)⌋` (`N` = 255 unorm / 127 snorm), the
-/// same rounding the CPU reference uses, so for exactly-representable quantized
-/// inputs the packed bytes match the CPU path **byte-for-byte**; arbitrary
-/// inputs may differ by at most one code at a rounding tie (a documented honest
-/// boundary). The widening (`unpack`) direction is exact on both sides.
+/// inverses widen them back. The quantizers are implemented **explicitly** as
+/// `⌊0.5 + N·clamp(c)⌋` (`N` = 255 unorm / 127 snorm), matching the CPU
+/// reference byte-for-byte; the device built-ins `pack4x8unorm`/`pack4x8snorm`
+/// are deliberately **not** used because Metal's rounding differs from the spec
+/// formula at ties (CR-found). The widening uses the built-in `unpack`, which is
+/// exact on both sides.
 pub const WGSL_PACK8: &str = "\
 fn prism_pack_unorm4x8(v: vec4<f32>) -> u32 {\n\
-    return pack4x8unorm(v);\n\
+    let q = vec4<u32>(floor(0.5 + 255.0 * clamp(v, vec4<f32>(0.0), vec4<f32>(1.0))));\n\
+    return q.x | (q.y << 8u) | (q.z << 16u) | (q.w << 24u);\n\
 }\n\
 \n\
 fn prism_unpack_unorm4x8(bits: u32) -> vec4<f32> {\n\
@@ -937,7 +937,9 @@ fn prism_unpack_unorm4x8(bits: u32) -> vec4<f32> {\n\
 }\n\
 \n\
 fn prism_pack_snorm4x8(v: vec4<f32>) -> u32 {\n\
-    return pack4x8snorm(v);\n\
+    let s = vec4<i32>(floor(0.5 + 127.0 * clamp(v, vec4<f32>(-1.0), vec4<f32>(1.0))));\n\
+    let b = bitcast<vec4<u32>>(s) & vec4<u32>(0xffu, 0xffu, 0xffu, 0xffu);\n\
+    return b.x | (b.y << 8u) | (b.z << 16u) | (b.w << 24u);\n\
 }\n\
 \n\
 fn prism_unpack_snorm4x8(bits: u32) -> vec4<f32> {\n\
@@ -949,16 +951,16 @@ fn prism_unpack_snorm4x8(bits: u32) -> vec4<f32> {\n\
 ///
 /// The `pack` helpers fold a `vec2<f32>` into one `u32` of two 16-bit channels
 /// (component 0 in the low half-word) and the `unpack` inverses widen them
-/// back, wrapping the WGSL built-ins `pack2x16unorm` / `pack2x16snorm` /
-/// `unpack2x16unorm` / `unpack2x16snorm`. The WGSL spec defines the quantizers
-/// as `⌊0.5 + N·clamp(c)⌋` (`N` = 65535 unorm / 32767 snorm), the same rounding
-/// the CPU reference uses, so for exactly-representable quantized inputs the
-/// packed half-words match the CPU path **bit-for-bit**; arbitrary inputs may
-/// differ by at most one code at a rounding tie (a documented honest boundary).
-/// The widening (`unpack`) direction is exact on both sides.
+/// back. The quantizers are implemented **explicitly** as
+/// `⌊0.5 + N·clamp(c)⌋` (`N` = 65535 unorm / 32767 snorm), matching the CPU
+/// reference bit-for-bit; the device built-ins `pack2x16unorm`/`pack2x16snorm`
+/// are deliberately **not** used because their tie rounding differs from the
+/// spec formula on Metal (CR-found). The widening uses the built-in `unpack`,
+/// which is exact on both sides.
 pub const WGSL_PACK16: &str = "\
 fn prism_pack_unorm2x16(v: vec2<f32>) -> u32 {\n\
-    return pack2x16unorm(v);\n\
+    let q = vec2<u32>(floor(0.5 + 65535.0 * clamp(v, vec2<f32>(0.0), vec2<f32>(1.0))));\n\
+    return q.x | (q.y << 16u);\n\
 }\n\
 \n\
 fn prism_unpack_unorm2x16(bits: u32) -> vec2<f32> {\n\
@@ -966,7 +968,9 @@ fn prism_unpack_unorm2x16(bits: u32) -> vec2<f32> {\n\
 }\n\
 \n\
 fn prism_pack_snorm2x16(v: vec2<f32>) -> u32 {\n\
-    return pack2x16snorm(v);\n\
+    let s = vec2<i32>(floor(0.5 + 32767.0 * clamp(v, vec2<f32>(-1.0), vec2<f32>(1.0))));\n\
+    let b = bitcast<vec2<u32>>(s) & vec2<u32>(0xffffu, 0xffffu);\n\
+    return b.x | (b.y << 16u);\n\
 }\n\
 \n\
 fn prism_unpack_snorm2x16(bits: u32) -> vec2<f32> {\n\

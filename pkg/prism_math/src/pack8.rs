@@ -1,9 +1,12 @@
 //! 8-bit-per-channel vertex-attribute packing (`unorm8x4` / `snorm8x4`).
 //!
 //! These fold a four-component value into one `u32` of four 8-bit channels and
-//! widen it back, matching the WGSL built-ins `pack4x8unorm` / `pack4x8snorm`
-//! (and their `unpack` inverses) **byte-for-byte** so a CPU-produced buffer can
-//! be consumed verbatim by a shader and vice versa. This is the canonical
+//! widen it back, following the WGSL **spec formula** for `pack4x8unorm` /
+//! `pack4x8snorm` (and their `unpack` inverses) so a CPU-produced buffer can be
+//! consumed verbatim by a shader and vice versa. (The device *built-ins* may
+//! round ties differently from the spec formula on some backends, so the GPU
+//! shader mirror implements the formula explicitly rather than calling the
+//! built-in.) This is the canonical
 //! compact encoding for vertex colors (`unorm`), and for normals / tangents and
 //! other direction-ish attributes (`snorm`), where a full `f32x4` would waste
 //! three quarters of the bandwidth.
