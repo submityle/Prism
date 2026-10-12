@@ -233,9 +233,9 @@
 | | `subsurface_radius` | float（length） | `subsurface_radius`（float；本实时瓣无场景距离尺度，作相对值） | ✅（本轮拆出） |
 | | `subsurface_radius_scale` | color3 | `subsurface_radius_scale`（vec4，w 未用） | ✅（本轮新增，默认 `(1.0, 0.5, 0.25)` 与规范一致） |
 | | `subsurface_scatter_anisotropy` | float [-1,1] | `subsurface_scatter_anisotropy`（本轮改名） | ✅ |
-| **Coat** | `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` | — | 全部同名（`coat_weight` / `coat_roughness` 本轮改名） | ⚠️ 仅默认值：`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1 |
+| **Coat** | `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` | — | 全部同名（`coat_weight` / `coat_roughness` 本轮改名） | ⚠️ 仅默认值：`coat_roughness` 0.5 vs 0、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1 |
 | **Fuzz** | `fuzz_weight` / `fuzz_color` / `fuzz_roughness` | — | `fuzz_weight`（本轮改名）/ `fuzz_color` / `fuzz_roughness` | ✅ |
-| **Emission** | `emission_luminance` | float（nits） | `emission_luminance`（默认 1 以保持旧材质外观；乘积语义与规范一致） | ✅（本轮新增） |
+| **Emission** | `emission_luminance` | float（nits） | `emission_luminance`（默认 1 以保持旧材质外观；乘积语义与规范一致） | ✅（本轮新增；默认值见结论段，与 `emission_color` 的默认差异**乘积等价**为零辐亮度） |
 | | `emission_color` | color3 | `emission_color`（本轮改名） | ✅ |
 | **Thin-film** | `thin_film_weight` / `thin_film_thickness` / `thin_film_ior` | float×3 | 新增 `thin_film` **瓣**（KHR, slot 6）→ shade-time `iridescence*`（µm→nm 换算） | ✅（本轮落地为 ABI 瓣并接到 Airy BSDF） |
 | **Geometry** | `geometry_opacity` | float | `geometry_opacity`（复用一个 core 填充字，乘进 alpha） | ✅（本轮新增为独立字段） |
@@ -243,7 +243,9 @@
 | | `geometry_normal` / `geometry_tangent` / `geometry_coat_normal` / `geometry_coat_tangent` | vector3 | **shade-time 输入**（非材质参数）：`ShadingFrame.{normal,tangent}` / `SurfaceSample.coat_normal` / `SurfaceSample.coat_tangent` | ✅（由网格/法线图在着色期提供；`coat_tangent` 本轮补上） |
 | **（规范之外）** | — | — | `face`（`softness`）、`anisotropy_rotation`、`ambient_occlusion`、`normal_scale`、`alpha_cutoff`、`thickness` | Prism 扩展区，计入超集 |
 
-**结论（code-truth）**：**规范参数已全部有对应物，标识符与行为已全部对齐规范；剩余只有一批"刻意保留的默认值偏差"。** 已对齐（名字 + 含义 + 公式）：`base_weight` / `base_color` / `base_metalness` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_roughness` / **`specular_roughness_anisotropy`（标识符 + [0,1] + 规范 `openpbr-anisotropy-formula` 伸长公式，base/coat 共用，`a==0` 逐位各向同性）** / `specular_ior` / `transmission_weight` / `transmission_color` / **`transmission_depth`（路径=1 场景单位口径下的完整规范语义，含 `depth==0` 非物理 tint）** / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_scale` / `transmission_dispersion_abbe_number` / `subsurface_weight` / `subsurface_color` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / `subsurface_scatter_anisotropy` / `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` / `fuzz_weight` / `fuzz_color` / `fuzz_roughness` / `emission_color` / `emission_luminance` / **thin-film 全 3 项（ABI 瓣）** / `geometry_opacity` / `geometry_thin_walled` / 四个 geometry 向量字段（shade-time 输入）。**仍待处理（唯一一类）**：若干**默认值**偏差（`base_color` 1.0 vs 0.8、`specular_roughness` 0.5 vs 0.3、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1、`subsurface_color` 白 vs 0.8、`emission_luminance` 1 vs 0）——刻意保旧材质外观，schema 注释逐条写明；改它们会整体平移金标准，属显式的产品决策而非遗漏，故**不并入"规范对齐"清单**。
+**结论（code-truth）**：**规范参数已全部有对应物，标识符与行为已全部对齐规范；剩余只有一批「刻意保留的默认值偏差」。** 已对齐（名字 + 含义 + 公式）：`base_weight` / `base_color` / `base_metalness` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_roughness` / **`specular_roughness_anisotropy`（标识符 + [0,1] + 规范 `openpbr-anisotropy-formula` 伸长公式，base/coat 共用，`a==0` 逐位各向同性）** / `specular_ior` / `transmission_weight` / `transmission_color` / **`transmission_depth`（路径=1 场景单位口径下的完整规范语义，含 `depth==0` 非物理 tint）** / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_scale` / `transmission_dispersion_abbe_number` / `subsurface_weight` / `subsurface_color` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / `subsurface_scatter_anisotropy` / `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` / `fuzz_weight` / `fuzz_color` / `fuzz_roughness` / `emission_color` / `emission_luminance` / **thin-film 全 3 项（ABI 瓣）** / `geometry_opacity` / `geometry_thin_walled` / 四个 geometry 向量字段（shade-time 输入）。
+
+**仍待处理（唯一一类，逐项已列全）**：**默认值**偏差共 **8** 处（机器比对 schema `default` vs `parametrization` 表得出，非人工目测）——`base_color` 1.0 vs (0.8,0.8,0.8)、`specular_roughness` 0.5 vs 0.3、`coat_roughness` 0.5 vs 0、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1、`subsurface_color` 白 vs (0.8,0.8,0.8)、`emission_luminance` 1 vs 0、`emission_color` 黑 vs (1,1,1)。其中 emission 两项**乘积等价**（0 × 1 = (1,1,1) × 0 = 零辐亮度）；其余 6 项只在"材质不作者该字段"时可见。**这不是遗漏也不是推后**：改它们会整体平移金标准与所有未作者该字段的材质外观，属显式产品决策，故作为一项**独立、有明确验收（schema/AST/`GpuSurfaceParameters::default` 同步 + 金标准重基线 + furnace 复跑）**的任务推进。
 
 要点：
 - **开放词汇表让补瓣是加法**：新字段扩进对应 lobe 的变长块，位掩码/静态置换天然容纳，老材质不受影响（它们的 lobe_mask 不含新位）。
@@ -579,6 +581,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P1-d | 置换治理：内容哈希去重 + 按需编译 + über 回退 | 工具链/PSO 缓存 | P1 |
 | P1-e | 贵瓣采样数按画质档缩放（SSS/透射/多散射） | 无（pass uniform） | P1 |
 | P1-f | über 参数块规范化到 **OpenPBR Surface** 瓣序（补 base_weight/specular_color/coat_color/subsurface_radius 等字段，删 `lower_standard_material`） | 内部布局（随 v5） | P1 |
+| P1-f2 | **OpenPBR 默认值对齐**（6 项可见：`base_color` 0.8、`specular_roughness` 0.3、`coat_roughness` 0、`coat_ior` 1.6、`coat_darkening` 1、`subsurface_color` 0.8；emission 两项乘积已等价）：schema `default` ↔ `GpuSurfaceParameters::default` ↔ `SurfaceSample::default` 三处同步 + 金标准重基线 + furnace 复跑，使"未作者字段"也规范一致（§4.4） | 内部（改默认值） | P1 |
 | P2-d | **thin_film 虹彩瓣**落地（开放瓣首验：新位 + 3-word 块 + furnace/对拍） | 内部 enum 开放化 | P2 |
 | P2-e | 四线正交落地：`Illumination` 四值 + `custom_program` 钩子 + 混合线逐区域 illumination（per-tile 分类消化发散） | 运行时/分类 | P2 |
 | P2-a | OpenPBR/MaterialX 作者前端 + archetype 模板（兼作置换聚类锚点） | 新 crate | P2 |
