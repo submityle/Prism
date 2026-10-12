@@ -8,8 +8,8 @@ use prism_state_tree_core::{
 };
 
 use crate::{
-    queue_spawn, tick_entities, tick_entity, validate_context, BatchTickFailure, BatchTickOutcome,
-    StateTreeAsset, StateTreeInstance, ValidatedContext,
+    queue_spawn, tick_entities, tick_entity, validate_context, BatchTickFailure,
+    BatchTickMissingReason, BatchTickOutcome, StateTreeAsset, StateTreeInstance, ValidatedContext,
 };
 
 struct TestContext<'w> {
@@ -279,7 +279,7 @@ fn batch_tick_preserves_input_order_and_reports_missing_entities() {
             },
             crate::BatchTickEntry {
                 entity: missing,
-                outcome: BatchTickOutcome::Missing,
+                outcome: BatchTickOutcome::Missing(BatchTickMissingReason::NotMaterialized),
             },
             crate::BatchTickEntry {
                 entity: first,
@@ -298,6 +298,34 @@ fn batch_tick_preserves_input_order_and_reports_missing_entities() {
                 }),
             },
         ]
+    );
+}
+
+#[test]
+fn batch_tick_classifies_missing_entity_reasons() {
+    let mut world = World::new();
+    let reserved = world.entities().reserve_entity();
+    world.flush_reserved();
+    let materialized_without_instance = world.spawn(());
+    let stale = world.entities().reserve_entity();
+    world.flush_reserved();
+    assert!(world.despawn(stale));
+
+    let report = tick_entities(
+        &mut world,
+        &[reserved, materialized_without_instance, stale],
+    );
+    assert_eq!(
+        report.entries()[0].outcome,
+        BatchTickOutcome::Missing(BatchTickMissingReason::NotMaterialized)
+    );
+    assert_eq!(
+        report.entries()[1].outcome,
+        BatchTickOutcome::Missing(BatchTickMissingReason::MissingComponent)
+    );
+    assert_eq!(
+        report.entries()[2].outcome,
+        BatchTickOutcome::Missing(BatchTickMissingReason::StaleEntity)
     );
 }
 

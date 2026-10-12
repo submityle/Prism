@@ -14,7 +14,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use prism_ecs::{component::Component, entity::Entity, world::World};
+use prism_ecs::{
+    component::Component,
+    entity::{Entity, EntityLocation},
+    world::World,
+};
 use prism_state_tree_core::{
     ContextRef, Event, EventQueueError, Guard, GuardId, Instance, MicrostepLimit, NoopLifecycle,
     Plan, RuntimeError, Schema, SchemaError, StateId, StepReport,
@@ -190,14 +194,25 @@ pub struct BatchTickFailure {
     pub queued_events: usize,
 }
 
+/// Reason an explicit batch tick could not find a runnable state-tree
+/// component.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchTickMissingReason {
+    /// The handle is stale, freed, or belongs to a different generation.
+    StaleEntity,
+    /// The handle is live but has not been placed in an archetype yet.
+    NotMaterialized,
+    /// The live, materialized entity does not carry `StateTreeInstance`.
+    MissingComponent,
+}
+
 /// Outcome of one entry in an explicit [`tick_entities`] request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BatchTickOutcome {
     /// The entity had a `StateTreeInstance` and its tick completed.
     Completed(StepReport),
-    /// The entity was stale, despawned, or did not carry a state-tree instance.
-    /// No world state was changed for this entry.
-    Missing,
+    /// The entity was not runnable. No world state was changed for this entry.
+    Missing(BatchTickMissingReason),
     /// The entity had a state-tree instance, but its tick returned a runtime
     /// error. The error is scoped to this entry; later entries are still run.
     /// The failure snapshot describes the post-failure state because core
@@ -301,7 +316,18 @@ pub fn tick_entities(world: &mut World, entities: &[Entity]) -> BatchTickReport 
             }
             None => {
                 report.missing += 1;
-                BatchTickOutcome::Missing
+                let reason = if !world.contains(entity) {
+                    BatchTickMissingReason::StaleEntity
+                } else if world
+                    .entities()
+                    .location(entity)
+                    .is_some_and(|location| location == EntityLocation::EMPTY)
+                {
+                    BatchTickMissingReason::NotMaterialized
+                } else {
+                    BatchTickMissingReason::MissingComponent
+                };
+                BatchTickOutcome::Missing(reason)
             }
         };
         report.entries.push(BatchTickEntry { entity, outcome });
