@@ -36,6 +36,9 @@ impl LocalEntityId {
     /// First index of the reserved segment used for structurally-added entities.
     pub const RESERVED_BASE: u32 = 0x8000_0000;
 
+    /// Largest offset that can be represented in the reserved segment.
+    pub const MAX_RESERVED_OFFSET: u32 = u32::MAX - Self::RESERVED_BASE;
+
     /// Builds a base-segment id from its `0`-based index.
     #[must_use]
     pub const fn new(index: u32) -> Self {
@@ -43,9 +46,35 @@ impl LocalEntityId {
     }
 
     /// Builds a reserved-segment id from a `0`-based offset.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `offset` is greater than [`Self::MAX_RESERVED_OFFSET`].
+    /// Call [`Self::checked_reserved`] when the offset comes from untrusted,
+    /// decoded, or otherwise fallible input. The panic is intentional: this
+    /// infallible legacy constructor cannot represent an invalid offset, and
+    /// silently wrapping it into the base segment would violate the ID
+    /// partition in release builds.
     #[must_use]
     pub const fn reserved(offset: u32) -> Self {
-        Self(Self::RESERVED_BASE + offset)
+        match Self::checked_reserved(offset) {
+            Some(id) => id,
+            None => panic!("reserved local entity offset is out of range"),
+        }
+    }
+
+    /// Checks and builds a reserved-segment id from a `0`-based offset.
+    ///
+    /// `None` means that no `LocalEntityId` can represent the requested
+    /// offset. In particular, this method never wraps an invalid offset into
+    /// the base segment.
+    #[must_use]
+    pub const fn checked_reserved(offset: u32) -> Option<Self> {
+        if offset <= Self::MAX_RESERVED_OFFSET {
+            Some(Self(Self::RESERVED_BASE + offset))
+        } else {
+            None
+        }
     }
 
     /// The raw index.
@@ -279,6 +308,21 @@ mod tests {
             LocalEntityId::reserved(5).index(),
             LocalEntityId::RESERVED_BASE + 5
         );
+    }
+
+    #[test]
+    fn checked_reserved_rejects_offsets_that_would_overflow() {
+        assert_eq!(
+            LocalEntityId::checked_reserved(LocalEntityId::MAX_RESERVED_OFFSET),
+            Some(LocalEntityId::new(u32::MAX))
+        );
+        assert_eq!(LocalEntityId::checked_reserved(u32::MAX), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved local entity offset is out of range")]
+    fn reserved_rejects_offsets_that_would_wrap() {
+        let _ = LocalEntityId::reserved(u32::MAX);
     }
 
     #[test]
