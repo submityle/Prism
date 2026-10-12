@@ -57,8 +57,11 @@ pub enum ReconcileOutcome {
 ///
 /// The scan only covers frames still retained in the session's snapshot window
 /// (older frames cannot be rolled back to), and it stops at the first frame where
-/// *both* sides have a hash and those hashes differ; frames with no peer hash yet
-/// are skipped.
+/// *both* sides have a hash and those hashes differ; a frame missing a hash on
+/// **either** side (the peer has not sent one yet, or the local hash ring's
+/// window is narrower than the snapshot window) is skipped — so keep the local
+/// hash window at least as wide as the snapshot window to compare every retained
+/// frame.
 pub fn reconcile_with_peer<F, P>(
     session: &mut RollbackReplay<F>,
     world: &mut World,

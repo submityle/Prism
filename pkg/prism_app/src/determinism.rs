@@ -522,10 +522,13 @@ impl FrameHashManifest {
 
     /// One past the last recorded absolute frame index: the manifest covers the
     /// range `start_frame()..end_frame()`.
+    ///
+    /// Saturates rather than overflowing for an absurd `start_frame` near
+    /// `u64::MAX` (a caller-supplied value); the covered range is then empty.
     #[inline]
     #[must_use]
     pub fn end_frame(&self) -> u64 {
-        self.start_frame + self.hashes.len() as u64
+        self.start_frame.saturating_add(self.hashes.len() as u64)
     }
 
     /// The recorded golden hashes, in frame order.
