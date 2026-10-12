@@ -93,12 +93,13 @@ impl SnapshotHistory {
 
     /// The oldest retained frame, or `None` before the first capture.
     ///
-    /// Retained frames are contiguous (`oldest..=last`), so this is
-    /// `next_frame - len` while the window is full, and `0` before it fills.
+    /// This is the ring's own oldest entry, so it stays correct after a
+    /// [`seek`](Self::seek) rewind: seeking moves the *capture cursor* back
+    /// without evicting anything, after which the retained window no longer ends
+    /// at `next_frame - 1` and cannot be derived from the cursor.
     #[must_use]
     pub fn oldest_frame(&self) -> Option<u64> {
-        let len = self.ring.len() as u64;
-        self.next_frame.checked_sub(len).filter(|_| len > 0)
+        self.ring.oldest().map(|(frame, _)| frame)
     }
 
     /// Whether `frame` is still retained (not yet evicted).
@@ -216,6 +217,30 @@ mod tests {
         // Rolling back to an evicted frame is reported, not silently ignored.
         assert!(!history.rollback(&mut w, 0));
         assert!(history.rollback(&mut w, 2));
+    }
+
+    /// `oldest_frame` survives a rewind: seeking the cursor back does not evict
+    /// anything, so the oldest retained frame stays the ring's front (regression:
+    /// it was derived from `next_frame - len` and returned `None` after a rewind,
+    /// which made peer reconciliation silently report agreement).
+    #[test]
+    fn oldest_frame_is_correct_after_a_rewind() {
+        let w = world();
+        let mut history = SnapshotHistory::new(8);
+        for _ in 0..10 {
+            history.capture(&w);
+        }
+        assert_eq!(history.next_frame(), 10);
+        assert_eq!(history.oldest_frame(), Some(2), "capacity 8 retains 2..=9");
+
+        // Rewind the capture cursor, as a rollback + re-simulate does.
+        history.seek(2);
+        assert_eq!(history.oldest_frame(), Some(2), "no frame was evicted");
+        assert!(
+            history.contains(9),
+            "frame 9 is still retained after the rewind"
+        );
+        assert!(history.state_hash(9).is_some());
     }
 
     #[test]
