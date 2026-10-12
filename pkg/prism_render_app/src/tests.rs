@@ -22,8 +22,50 @@ use crate::stats::RenderFrameStats;
 use crate::target::RenderTarget;
 
 use crate::sets::{RenderPhase, RenderSystems};
+use crate::views::RenderViews;
 use prism_ecs::prelude::{ResMut, Resource};
 use prism_ecs::schedule::IntoSystemConfigs;
+use prism_render_architecture::view_family::ViewKind;
+
+/// The render world materializes the frame's view family from the extracted
+/// viewport, and a minimized frame disables (rather than removes) the view.
+#[test]
+fn render_view_family_tracks_the_frame() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    app.update();
+
+    let render = app
+        .get_sub_app(RenderApp)
+        .expect("the plugin registers the render sub-app");
+    let views = render
+        .world
+        .get_resource::<RenderViews>()
+        .expect("the plugin installs the view family");
+    assert_eq!(views.registry().len(), 1, "one primary view");
+    let handle = views.primary_view().expect("the primary view was built");
+    let entry = views.registry().get(handle).expect("the view is registered");
+    assert_eq!(entry.kind, ViewKind::Main, "the primary view is the Main kind");
+    assert!(entry.enabled, "a non-empty frame enables the view");
+
+    // A zero-sized frame disables the view but keeps its handle.
+    app.world_mut()
+        .resource_mut::<RenderCamera>()
+        .viewport = RenderViewport::new(0, 0);
+    app.update();
+
+    let views = app
+        .get_sub_app(RenderApp)
+        .expect("the render sub-app")
+        .world
+        .get_resource::<RenderViews>()
+        .expect("the view family");
+    assert_eq!(views.registry().len(), 1, "the view is kept, not removed");
+    let entry = views
+        .registry()
+        .get(views.primary_view().expect("the handle survives"))
+        .expect("the view is still registered");
+    assert!(!entry.enabled, "a minimized frame disables the view");
+}
 
 /// Records the order render systems ran in, for the set-ordering test.
 #[derive(Resource, Default)]

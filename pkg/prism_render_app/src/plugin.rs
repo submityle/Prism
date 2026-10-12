@@ -16,6 +16,7 @@ use crate::sets::{RenderSystems, configure_render_sets};
 use crate::stats::RenderFrameStats;
 use crate::systems::{drive_render_schedule, execute_frame, extract_render_record};
 use crate::target::RenderTarget;
+use crate::views::{RenderViews, build_view_family};
 
 /// Wires the RHI render runtime into a [`prism_app::App`] as a dedicated render
 /// sub-app.
@@ -117,6 +118,7 @@ where
         render.world.insert_resource(target);
         render.world.insert_resource(RenderRecord::default());
         render.world.insert_resource(RenderFrameStats::default());
+        render.world.insert_resource(RenderViews::new());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
         {
@@ -133,6 +135,8 @@ where
             // Order the render stages/phases first, then hang the frame system
             // off the record stage so later renderer plugins slot in by set.
             configure_render_sets(schedule);
+            // Materialize the view family before the record stage consumes it.
+            schedule.add_systems(build_view_family.in_set(RenderSystems::Prepare));
             schedule.add_systems(execute_frame::<I>.in_set(RenderSystems::Phase));
         }
         render

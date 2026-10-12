@@ -65,6 +65,7 @@ mod sets;
 mod stats;
 mod systems;
 mod target;
+mod views;
 
 #[cfg(test)]
 mod tests;
@@ -79,6 +80,7 @@ pub use runtime_resource::RenderRuntimeResource;
 pub use sets::{RenderPhase, RenderSystems, configure_render_sets};
 pub use stats::RenderFrameStats;
 pub use target::RenderTarget;
+pub use views::RenderViews;
 
 /// Commonly used exports: the plugin, its labels, and the resources that cross
 /// the main-world/render-world boundary.
@@ -91,4 +93,5 @@ pub mod prelude {
     pub use crate::sets::{RenderPhase, RenderSystems};
     pub use crate::stats::RenderFrameStats;
     pub use crate::target::RenderTarget;
+    pub use crate::views::RenderViews;
 }
