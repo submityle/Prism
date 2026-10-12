@@ -5,8 +5,9 @@
 //! `M`-series Metal) the decode kernel runs for real and is compared against the
 //! device-free CPU golden
 //! [`decode_feedback`](prism_render_architecture::texture_streaming::decode_feedback);
-//! where no adapter exists the test prints a skip note and returns, so CI
-//! without a `GPU` stays green.
+//! where no adapter exists the test prints a skip note and returns by default.
+//! Setting `PRISM_REQUIRE_GPU` turns adapter/device acquisition failure into a
+//! test failure, so GPU CI cannot silently skip these checks.
 //!
 //! The per-cell map is integer-only, so the device result must equal the golden
 //! result *exactly* — these tests assert bit-for-bit equality of the decoded

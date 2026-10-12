@@ -39,4 +39,4 @@ pub mod lookup;
 
 pub use context::GpuContext;
 pub use feedback::{CellMap, GpuFeedbackDecode, REQ_NONE};
-pub use lookup::{GpuPageLookup, MISS};
+pub use lookup::{GpuPageLookup, GpuPageResolution, MISS};

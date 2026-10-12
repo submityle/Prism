@@ -75,6 +75,16 @@ impl GpuPageTable {
     /// pre-sort; the resulting buffer still matches the shader compare order.
     #[must_use]
     pub fn from_bindings(bindings: &[(TexturePageKey, u32)]) -> Self {
+        // The device ABI uses `u32::MAX` as the lookup-miss sentinel. A
+        // physical slot with that value would be indistinguishable from a
+        // miss in both the lookup and resolve kernels, so reject malformed
+        // external bindings at the contract boundary. The real pool allocator
+        // cannot produce this slot (`capacity` slots are indexed 0..capacity),
+        // but this constructor is also used by upload/publish adapters.
+        assert!(
+            bindings.iter().all(|&(_, slot)| slot != u32::MAX),
+            "GPU page-table bindings must not use u32::MAX (reserved miss sentinel)"
+        );
         let mut sorted: Vec<(TexturePageKey, u32)> = bindings.to_vec();
         sorted.sort_unstable_by_key(|entry| entry.0);
         let mut words = Vec::with_capacity(sorted.len() * PAGE_TABLE_ENTRY_WORDS);
@@ -361,9 +371,17 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "reserved miss sentinel")]
+    fn from_bindings_rejects_miss_sentinel_slot() {
+        let _ = GpuPageTable::from_bindings(&[(key(1, 0, 0, 0, 0), u32::MAX)]);
+    }
+
+    #[test]
     fn resolve_returns_exact_hit_with_zero_bias() {
         let table = GpuPageTable::from_bindings(&[(key(3, 2, 1, 7, 9), 42)]);
-        let hit = table.resolve(key(3, 2, 1, 7, 9), 10).expect("exact page resident");
+        let hit = table
+            .resolve(key(3, 2, 1, 7, 9), 10)
+            .expect("exact page resident");
         assert_eq!(hit.key, key(3, 2, 1, 7, 9));
         assert_eq!(hit.slot, 42);
         assert_eq!(hit.mip_bias, 0);
@@ -374,7 +392,9 @@ mod tests {
         // Fine page (mip 0, x=6, y=10) is absent; its mip-2 cover is (6>>2, 10>>2)
         // = (1, 2), which IS resident.
         let table = GpuPageTable::from_bindings(&[(key(1, 2, 0, 1, 2), 5)]);
-        let res = table.resolve(key(1, 0, 0, 6, 10), 4).expect("coarser cover resident");
+        let res = table
+            .resolve(key(1, 0, 0, 6, 10), 4)
+            .expect("coarser cover resident");
         assert_eq!(res.key, key(1, 2, 0, 1, 2));
         assert_eq!(res.slot, 5);
         assert_eq!(res.mip_bias, 2);
@@ -387,7 +407,9 @@ mod tests {
             (key(1, 1, 0, 3, 3), 11), // cover of (mip0, 6,6) at d=1 -> (3,3)
             (key(1, 2, 0, 1, 1), 22), // cover at d=2 -> (1,1)
         ]);
-        let res = table.resolve(key(1, 0, 0, 6, 6), 5).expect("a cover resident");
+        let res = table
+            .resolve(key(1, 0, 0, 6, 6), 5)
+            .expect("a cover resident");
         assert_eq!(res.key, key(1, 1, 0, 3, 3));
         assert_eq!(res.slot, 11);
         assert_eq!(res.mip_bias, 1);
@@ -399,7 +421,9 @@ mod tests {
         let table = GpuPageTable::from_bindings(&[(key(1, 3, 0, 0, 0), 7)]);
         assert_eq!(table.resolve(key(1, 0, 0, 4, 4), 2), None);
         // Raising the cap to 3 lets the same request resolve.
-        let res = table.resolve(key(1, 0, 0, 4, 4), 3).expect("cover within raised cap");
+        let res = table
+            .resolve(key(1, 0, 0, 4, 4), 3)
+            .expect("cover within raised cap");
         assert_eq!(res.key, key(1, 3, 0, 0, 0));
         assert_eq!(res.mip_bias, 3);
     }
@@ -422,7 +446,9 @@ mod tests {
     fn resolve_cap_below_request_still_probes_exact_page() {
         // coarsest_mip < key.mip is clamped up so the exact page is still tried.
         let table = GpuPageTable::from_bindings(&[(key(1, 5, 0, 2, 2), 8)]);
-        let res = table.resolve(key(1, 5, 0, 2, 2), 0).expect("exact page probed");
+        let res = table
+            .resolve(key(1, 5, 0, 2, 2), 0)
+            .expect("exact page probed");
         assert_eq!(res.key, key(1, 5, 0, 2, 2));
         assert_eq!(res.mip_bias, 0);
     }

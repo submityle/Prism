@@ -5,8 +5,9 @@
 //! `M`-series Metal) the lookup kernel runs for real and is compared against the
 //! device-free CPU golden
 //! [`GpuPageTable::lookup`](prism_render_architecture::texture_streaming::GpuPageTable::lookup);
-//! where no adapter exists the test prints a skip note and returns, so CI
-//! without a `GPU` stays green.
+//! where no adapter exists the test prints a skip note and returns by default.
+//! Setting `PRISM_REQUIRE_GPU` turns adapter/device acquisition failure into a
+//! test failure, so GPU CI cannot silently skip these checks.
 //!
 //! The lookup is integer-only, so the device result must equal the golden
 //! result *exactly* — these tests assert bit-for-bit equality, including the
@@ -131,4 +132,46 @@ fn lookup_against_empty_table_is_all_miss() {
         assert_eq!(table.lookup(k), None, "golden must miss on empty table");
         assert_eq!(device[i], MISS, "device must report MISS for {k:?}");
     }
+}
+
+#[test]
+fn resolve_finds_nearest_coarse_resident_page_and_matches_cpu() {
+    let Some(ctx) = with_gpu() else { return };
+    let requested = key(3, 0, 1, 13, 7);
+    let table = GpuPageTable::from_bindings(&[(key(3, 2, 1, 3, 1), 27), (key(3, 4, 1, 0, 0), 49)]);
+    let gpu = GpuPageLookup::new(&ctx);
+    let result = gpu.resolve(&ctx, &table, requested, 5);
+    assert_eq!(result, table.resolve(requested, 5));
+    assert_eq!(result.unwrap().key, key(3, 2, 1, 3, 1));
+    assert_eq!(result.unwrap().slot, 27);
+    assert_eq!(result.unwrap().mip_bias, 2);
+}
+
+#[test]
+fn resolve_reports_original_request_for_tail_refinement_and_miss() {
+    let Some(ctx) = with_gpu() else { return };
+    let requested = key(3, 0, 1, 13, 7);
+    let table = GpuPageTable::from_bindings(&[(key(3, 2, 1, 3, 1), 27)]);
+    let gpu = GpuPageLookup::new(&ctx);
+    let tail = gpu.resolve_with_feedback(&ctx, &table, requested, 5);
+    assert_eq!(tail.resolution.unwrap().slot, 27);
+    assert_eq!(tail.feedback, Some(requested));
+
+    let missing_key = key(8, 0, 0, 0, 0);
+    let missing = gpu.resolve_with_feedback(&ctx, &table, missing_key, 5);
+    assert_eq!(missing.resolution, None);
+    assert_eq!(missing.feedback, Some(missing_key));
+}
+
+#[test]
+fn resolve_preserves_miss_when_no_tail_is_resident() {
+    let Some(ctx) = with_gpu() else { return };
+    let requested = key(3, 0, 1, 13, 7);
+    let table = GpuPageTable::from_bindings(&[(key(4, 2, 1, 3, 1), 27)]);
+    let gpu = GpuPageLookup::new(&ctx);
+    assert_eq!(gpu.resolve(&ctx, &table, requested, 5), None);
+    assert_eq!(
+        gpu.resolve(&ctx, &table, requested, 5),
+        table.resolve(requested, 5)
+    );
 }

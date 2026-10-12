@@ -171,7 +171,8 @@ impl GpuFeedbackDecode {
         // directly without unpacking; `storage_read` is happy with a non-empty
         // slice (guaranteed, since an empty grid returned above).
         let cell_words: Vec<u32> = grid.iter().map(|&b| u32::from(b)).collect();
-        let cell_count = cell_words.len() as u32;
+        let cell_count = u32::try_from(cell_words.len())
+            .expect("virtual-texture feedback grid exceeds the GPU u32 cell-count ABI");
 
         let params = buffer::uniform(
             device,

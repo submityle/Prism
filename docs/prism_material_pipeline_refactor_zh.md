@@ -4,6 +4,7 @@
 > 面向版本：Prism 下一代渲染底座（Bevy fork，`pkg/` workspace）
 > Shader 语言：**WESL**（经 naga → WGSL/SPIR-V/Metal/DXIL），不引入 Slang
 > 运行时后端：**wgpu**（Metal/Vulkan/D3D12/WebGPU/主机/移动全覆盖）
+> 烘焙归属： 材质层栈烘焙（§6）与打包期瓣单态化（§5.4.2「打包即烘焙」）为 `OfflineShipped`；编辑器热重载预览走同一内核的进程内调度（`RuntimeDerived`），不允许编辑器专用近似分支。离线 DAG、缓存键与 DDC/CAS 归 `Prism Asset Build`（`prism_asset_build_design_zh.md` §2.7/§6.6）；逐项契约登记见 `prism_derived_data_contract_zh.md`（A3 / A4）。
 > 本文依据：对 `pkg/prism_render_material`、`prism_render_shading`、`prism_render_scene/src/shaders/*.wesl`、`prism_render_architecture` 的静态阅读（以代码为准）
 > 核心命题：**没有全局硬顶，不做运行时塌缩，也不做 per-pixel 预算裁剪。模型开放可扩展，每材质按声明静态特化成它确切需要的瓣集与特征——"界"是每材质编译期事实，不是全局天花板。分层在烘焙期解析成同参数化纹理空间混合（层数天然不限）；距离/性能靠纹理预过滤 + 高光抗锯齿 + 静态置换 + 采样缩放，全程无损、确定、跨平台。**
 > 规范参数化：**运行时 über 以 OpenPBR Surface（ASWF/Adobe/Autodesk 2024）为规范核心，Prism über 是 OpenPBR 的真超集**——`Prism über = OpenPBR Surface（全字段） ∪ { NPR_FACE 私有瓣 } ∪ { 开放词汇表后续瓣 }`。现有 7 瓣只是今天未补齐的实现子集；补齐缺口（thin_film 虹彩、coat/fuzz/subsurface 全字段等）是对开放词汇表的**加法扩充**，不是改架构。超集成立的三条硬约束见 §4.5（纯 OpenPBR 子集合规对拍 / 扩展位段隔离 / 向下投影）。NPR_FACE 作为 OpenPBR 之外的 Prism 私有瓣服务 NPR。
@@ -1140,9 +1141,9 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | **P2-g** | 完成 | header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha/OIT + 真机对拍（§17.1、§13.a） | — |
 | **P2-i 全 kind manifest + codegen** | **非编辑器完成（8 个有实例的 kind 全部声明化）** | `prism_material_schema` 现已覆盖 lobe（含 closure 分类链接）、channel、response_mode、cache_aux 与 identity-only 的 provider/transfer/downgrade/composite：codegen 产出 `SURFACE_LOBE_CLOSURES`、`SURFACE_CHANNELS`、`SURFACE_RESPONSE_MODES`、`SURFACE_CACHE_AUX`、`SURFACE_IDENTITY_EXTENSIONS`；header 常驻非-lobe 槽位致密、identity-only 行零槽，全部与 PCM 目录双向对拍（见 §13.a）。`author_node` 是第 9 类：kind/hook/词表已就位，唯一实例等待 §4 编辑器前端 | **编辑器部分**：author_node 实例 + MaterialX nodedef 往返（架构未起，显式 TODO） |
 | **P2-j** | 完成 | 类表由 PCM 注册表 + lobe 目录派生、穷举平价门禁、WESL `CLASS_*` 平价门禁、类数由表驱动（§5.2、§13.a） | — |
-| **P3-a~d 解耦着色** | **P3-a 逻辑地基已落地；P3-b~d 未开始** | `shading/texel_cache/` 已提供稳定 texel key、可复现可见性预算、generation/epoch 校验、Stale 生命周期与 active/staging 原子页表；仍不是 GPU VT atlas 写入 pass。`gi/surface_cache/` 仍是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统） | 下一步按 §14.10 接入 texel-space compute/atlas，再做视角无关项分离、失效/时序复用、LOD 策略 |
+| **P3-a~d 解耦着色** | **P3-a 逻辑地基已落地；GPU VT page lookup/feedback 基础设施已落地；P3-b~d 未开始** | `shading/texel_cache/` 已提供稳定 texel key、可复现可见性预算、generation/epoch 校验、Stale 生命周期与 active/staging 原子页表；`prism_virtual_texture_gpu` 已提供真实 wgpu page-table lookup、coarse-mip resolve、refinement feedback 与 sampler-feedback map 的 CPU/GPU parity 门禁；仍不是 shade-page atlas 写入、材质/光照 compute pass 或 `render_scene` 接线。`gi/surface_cache/` 仍是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统） | 下一步按 §14.10 接入真实 shade-page atlas/compute pass（需 completion fence 后发布），再做视角无关项分离、失效/时序复用、LOD 策略 |
 
-> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P2-e 的逐区域 illumination、P3-a 的 GPU atlas/pass 接线及 P3-b~d**；P3-a 的 CPU 逻辑地基已落地。archetype 热门置换预热、作者侧 `respond_custom` / author_node / MaterialX nodedef 归编辑器前端（显式 TODO）。
+> **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P2-e 的逐区域 illumination、P3-a 的 shade-page GPU atlas/pass 接线及 P3-b~d**；P3-a 的 CPU 逻辑地基与独立 VT GPU lookup/feedback 基础设施已落地，但两者尚未接成实际材质/光照渲染闭环。archetype 热门置换预热、作者侧 `respond_custom` / author_node / MaterialX nodedef 归编辑器前端（显式 TODO）。
 > 其余路线图项要么已完成（上表），要么按 goal 明确挂在编辑器前端（MaterialX / 节点图 / 作者 WESL）。
 
 ### 13.5 P3 远期：解耦着色 / texel-space shading（性能上限最高，工程最重）

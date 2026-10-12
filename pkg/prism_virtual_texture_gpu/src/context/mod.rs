@@ -2,10 +2,10 @@
 //!
 //! [`GpuContext`] wraps the four long-lived `wgpu` handles (`Instance`,
 //! `Adapter`, `Device`, `Queue`) that every kernel dispatch needs. Acquisition
-//! is deliberately *best-effort*: [`GpuContext::try_headless`] returns [`None`]
-//! on a host with no usable adapter (some `CI` images) so a test suite can skip
-//! gracefully rather than fail, while still exercising the full dispatch on any
-//! machine with a real device such as an Apple `M`-series `GPU`.
+//! is best-effort by default: [`GpuContext::try_headless`] returns [`None`] on
+//! a host with no usable adapter so a test suite can skip gracefully. Setting
+//! `PRISM_REQUIRE_GPU` (to any value) makes adapter or device acquisition
+//! failures panic, allowing CI to require real `GPU` execution explicitly.
 //!
 //! This is a deliberate local copy of the identical helper in
 //! `prism_physics_gpu::context`: each `*_gpu` twin owns its own tiny device
@@ -19,6 +19,22 @@ use wgpu::{
     Adapter, BackendOptions, Backends, Device, DeviceDescriptor, Instance, InstanceDescriptor,
     InstanceFlags, PollType, Queue, RequestAdapterOptions,
 };
+
+const REQUIRE_GPU_ENV: &str = "PRISM_REQUIRE_GPU";
+
+fn gpu_resource_or_skip<T, E: std::fmt::Display>(
+    result: Result<T, E>,
+    stage: &'static str,
+    required: bool,
+) -> Option<T> {
+    match result {
+        Ok(resource) => Some(resource),
+        Err(error) if required => panic!(
+            "[prism_virtual_texture_gpu] {REQUIRE_GPU_ENV} is set, but {stage} acquisition failed: {error}"
+        ),
+        Err(_) => None,
+    }
+}
 
 /// Blocks the current thread until `future` resolves.
 ///
@@ -46,10 +62,12 @@ pub struct GpuContext {
 impl GpuContext {
     /// Attempts to acquire a headless compute device across the native backends.
     ///
-    /// Returns [`None`] when no adapter or device can be obtained so callers can
-    /// skip `GPU` work instead of panicking on a host without a usable adapter.
+    /// Returns [`None`] when no adapter or device can be obtained, unless
+    /// `PRISM_REQUIRE_GPU` is set (to any value), in which case acquisition
+    /// failure panics with a diagnostic identifying the failed stage.
     #[must_use]
     pub fn try_headless() -> Option<GpuContext> {
+        let required = std::env::var_os(REQUIRE_GPU_ENV).is_some();
         let instance = Instance::new(InstanceDescriptor {
             backends: Backends::METAL | Backends::VULKAN | Backends::DX12,
             flags: InstanceFlags::default(),
@@ -57,12 +75,19 @@ impl GpuContext {
             display: None,
             backend_options: BackendOptions::default(),
         });
-        let adapter = block_on(instance.request_adapter(&RequestAdapterOptions::default())).ok()?;
-        let (device, queue) = block_on(adapter.request_device(&DeviceDescriptor {
-            required_limits: adapter.limits(),
-            ..Default::default()
-        }))
-        .ok()?;
+        let adapter = gpu_resource_or_skip(
+            block_on(instance.request_adapter(&RequestAdapterOptions::default())),
+            "adapter",
+            required,
+        )?;
+        let (device, queue) = gpu_resource_or_skip(
+            block_on(adapter.request_device(&DeviceDescriptor {
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })),
+            "device",
+            required,
+        )?;
         Some(GpuContext {
             instance,
             adapter,
@@ -93,5 +118,24 @@ impl GpuContext {
         self.device
             .poll(PollType::wait_indefinitely())
             .expect("device poll should complete the submitted work");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gpu_resource_or_skip;
+
+    #[test]
+    fn unavailable_gpu_resource_skips_in_best_effort_mode() {
+        assert_eq!(
+            gpu_resource_or_skip::<(), _>(Err("adapter unavailable"), "adapter", false),
+            None
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "PRISM_REQUIRE_GPU is set, but device acquisition failed")]
+    fn unavailable_gpu_resource_fails_in_required_mode() {
+        let _ = gpu_resource_or_skip::<(), _>(Err("device unavailable"), "device", true);
     }
 }
