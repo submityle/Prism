@@ -5,9 +5,13 @@ use bevy_math::ops;
 use crate::tangent::orthonormal_basis;
 use crate::vecmath::{add, cross, dot, mix3, mul, mul_scalar, normalize_or, sub};
 use crate::{
-    glint_bin_solid_angle, glint_half_slope, glint_microfacet_count,
-    glint_ndf_blended_from_density, glint_seed,
+    glint_bin_solid_angle, glint_half_slope, glint_microfacet_count, glint_ndf_from_density,
+    glint_seed,
 };
+
+/// [`SurfaceSample::glint_state`] sentinel: the pixel did not sample the glint
+/// mixture, so the authored weight is the blend factor (the exact path).
+pub const GLINT_STATE_AUTHORED: f32 = -1.0;
 
 const MIN_ROUGHNESS: f32 = 0.045;
 const MIN_N_DOT: f32 = 1.0e-5;
@@ -201,6 +205,20 @@ pub struct SurfaceSample {
     /// which is what makes a facet twinkle only for the narrow range of views
     /// and lights that align it with the eye. `[0, 0]` is a valid cell.
     pub glint_cell: [f32; 2],
+    /// Glint **mixture state** for the single-lobe sampler (§17.4, P3-e).
+    ///
+    /// Glint is a *convex blend* — `mix(smooth, discrete, weight)` — not an
+    /// additive term, so it cannot be amortised by scaling a signed delta by
+    /// `1/p`: that lets the blended NDF go negative, i.e. negative radiance. The
+    /// blend weight *is* the mixture probability, so the sampler instead draws
+    /// the state itself: evaluate the discrete NDF when `u < weight`, the smooth
+    /// one otherwise, and **do not scale**. The expectation of the drawn state is
+    /// exactly the blend, every individual evaluation is a genuine non-negative
+    /// NDF, and the variance is the mixture's own — which TAA converges.
+    ///
+    /// `< 0` (the default [`GLINT_STATE_AUTHORED`]) means "use the authored
+    /// weight", the exact blend; a value in `[0, 1]` is the drawn state.
+    pub glint_state: f32,
     /// Shade-time area of one pixel in [`Self::glint_cell`] space, i.e.
     /// `|det dUV/d(pixel)|`. Multiplied by [`Self::glint_density`] it gives the
     /// expected facet count `N` inside the footprint; `0` therefore predicts no
@@ -261,6 +279,7 @@ impl Default for SurfaceSample {
             glint_roughness: 0.1,
             glint_density: 4.0,
             glint_bin_half_width: 0.05,
+            glint_state: GLINT_STATE_AUTHORED,
             glint_cell: [0.0, 0.0],
             glint_footprint_area: 0.0,
         }
@@ -469,13 +488,25 @@ pub fn evaluate_principled_direct_with(
     // blacken the highlight). That also leaves the CPU golden — which does not
     // track screen-space derivatives — bit-for-bit unchanged.
     let d = if surface.glint_weight > 0.0 && surface.glint_footprint_area > 0.0 {
-        glint_ndf_blended_from_density(
-            d_smooth,
-            glint_microfacet_count(surface.glint_density, surface.glint_footprint_area),
-            glint_bin_solid_angle(surface.glint_bin_half_width),
-            surface.glint_weight,
-            glint_shade_seed(&surface, h, tangent, bitangent, n),
-        )
+        // The single-lobe sampler (§17.4) hands us the *mixture state* it drew;
+        // `GLINT_STATE_AUTHORED` means "no sampling happened, use the weight".
+        // Either way this is a convex blend, so the NDF can never go negative.
+        let mix = if surface.glint_state < 0.0 {
+            surface.glint_weight.clamp(0.0, 1.0)
+        } else {
+            surface.glint_state.clamp(0.0, 1.0)
+        };
+        if mix <= 0.0 {
+            d_smooth
+        } else {
+            let d_glint = glint_ndf_from_density(
+                d_smooth,
+                glint_microfacet_count(surface.glint_density, surface.glint_footprint_area),
+                glint_bin_solid_angle(surface.glint_bin_half_width),
+                glint_shade_seed(&surface, h, tangent, bitangent, n),
+            );
+            d_smooth + (d_glint - d_smooth) * mix
+        }
     } else {
         d_smooth
     };
@@ -1338,6 +1369,114 @@ mod tests {
             ..light()
         };
         assert_ne!(value(surface, tilted), baseline);
+    }
+
+
+    #[test]
+    fn glint_state_samples_the_mixture_without_ever_going_negative() {
+        // §17.4 (P3-e) prerequisite. Glint is a convex blend, so the single-lobe
+        // sampler draws the *state* rather than scaling a signed delta by 1/p:
+        // a weighted delta can exceed 1, which drives the blended NDF negative —
+        // i.e. negative radiance, which no resolve can consume.
+        let smooth = SurfaceSample {
+            glint_weight: 0.0,
+            ..glint_surface()
+        };
+        let reference = evaluate_principled_direct(smooth, frame(), light());
+
+        // The sentinel means "not sampled": exactly the authored blend, which is
+        // what every golden in this crate was baselined against.
+        let authored = SurfaceSample {
+            glint_state: GLINT_STATE_AUTHORED,
+            ..glint_surface()
+        };
+        assert_eq!(
+            evaluate_principled_direct(authored, frame(), light()),
+            evaluate_principled_direct(glint_surface(), frame(), light())
+        );
+
+        // State 0 is the smooth endpoint and state 1 the discrete one; the
+        // endpoints are exact (a convex blend with t == 0 / t == 1).
+        let smooth_state = SurfaceSample {
+            glint_state: 0.0,
+            ..glint_surface()
+        };
+        assert_eq!(
+            evaluate_principled_direct(smooth_state, frame(), light()),
+            reference
+        );
+        let discrete_state = SurfaceSample {
+            glint_state: 1.0,
+            ..glint_surface()
+        };
+        assert_ne!(
+            evaluate_principled_direct(discrete_state, frame(), light()),
+            reference
+        );
+
+        // Every reachable state is a genuine non-negative evaluation: this is the
+        // property the 1/p form violated, and it is why the sampler draws states.
+        for state in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            for cell in [[0.0_f32, 0.0], [0.37, 0.11], [3.5, -1.25]] {
+                let value = evaluate_principled_direct(
+                    SurfaceSample {
+                        glint_state: state,
+                        glint_cell: cell,
+                        ..glint_surface()
+                    },
+                    frame(),
+                    light(),
+                );
+                assert!(
+                    value.iter().all(|v| v.is_finite() && *v >= 0.0),
+                    "state {state} cell {cell:?}: {value:?}"
+                );
+            }
+        }
+
+        // The mixture identity, per pixel: drawing the state with probability
+        // equal to the authored weight and averaging (what TAA accumulates on a
+        // fixed pixel) reproduces the authored blend exactly. A partial weight
+        // makes this non-trivial — the two states differ by the sparkle delta.
+        let cell = [0.42_f32, 0.17];
+        let blended = SurfaceSample {
+            glint_weight: 0.35,
+            glint_cell: cell,
+            ..glint_surface()
+        };
+        let authored_value = evaluate_principled_direct(blended, frame(), light());
+        let mut sum = [0.0_f32; 3];
+        let draws = 1024;
+        let mut discrete_draws = 0;
+        for index in 0..draws {
+            // Deterministic low-discrepancy `u` in [0, 1).
+            let u = (index as f32 + 0.5) / draws as f32;
+            let state = if u < 0.35 { 1.0 } else { 0.0 };
+            discrete_draws += usize::from(state == 1.0);
+            let value = evaluate_principled_direct(
+                SurfaceSample {
+                    glint_state: state,
+                    ..blended
+                },
+                frame(),
+                light(),
+            );
+            for channel in 0..3 {
+                sum[channel] += value[channel];
+            }
+        }
+        assert!(
+            (discrete_draws as f32 / draws as f32 - 0.35).abs() < 0.02,
+            "the drawn states must match the mixture weight"
+        );
+        for channel in 0..3 {
+            let mean = sum[channel] / draws as f32;
+            let want = authored_value[channel];
+            assert!(
+                (mean - want).abs() <= 0.05 * want.abs().max(1.0),
+                "channel {channel}: mean {mean} vs authored {want}"
+            );
+        }
     }
 
     #[test]

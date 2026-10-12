@@ -379,6 +379,7 @@ mod tests {
             glint_roughness: 0.1,
             glint_density: 4.0,
             glint_bin_half_width: 0.05,
+            glint_state: crate::lighting::GLINT_STATE_AUTHORED,
             glint_cell: [0.0, 0.0],
             glint_footprint_area: 0.0,
         }

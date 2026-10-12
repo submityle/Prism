@@ -40,7 +40,7 @@ import prism_render_scene::shaders::glint::{
     glint_bin_solid_angle,
     glint_half_slope,
     glint_microfacet_count,
-    glint_ndf_blended_from_density,
+    glint_ndf_from_density,
     glint_seed,
     GLINT_MIN_ALPHA,
 };
@@ -161,6 +161,12 @@ struct SurfaceSample {
     // half-width of the half-vector acceptance bin (radians).
     glint_density: f32,
     glint_bin_half_width: f32,
+    // Glint *mixture state* for the single-lobe sampler (§17.4, P3-e): `< 0`
+    // means "use the authored weight" (the exact blend), `[0, 1]` is the state
+    // this pixel drew. Sampling the state rather than scaling a signed delta by
+    // `1/p` keeps every evaluation a genuine non-negative NDF. Mirrors
+    // `SurfaceSample::glint_state`.
+    glint_state: f32,
     // Shade-time surface cell the seed quantises, and the area of one pixel in
     // that space (|det dUV/dpixel|).
     glint_cell: vec2<f32>,
@@ -892,13 +898,23 @@ fn principled_direct_with(
     // the highlight instead of degrading to the smooth model.
     var d = d_smooth;
     if (surface.glint_weight > 0.0 && surface.glint_footprint_area > 0.0) {
-        d = glint_ndf_blended_from_density(
-            d_smooth,
-            glint_microfacet_count(surface.glint_density, surface.glint_footprint_area),
-            glint_bin_solid_angle(surface.glint_bin_half_width),
-            surface.glint_weight,
-            brdf_glint_shade_seed(surface, h, axes.tangent, axes.bitangent, n),
+        // The single-lobe sampler (§17.4) hands us the mixture state it drew;
+        // `< 0` means "no sampling happened, use the authored weight". Either way
+        // this stays a convex blend, so the NDF can never go negative.
+        let mix = select(
+            clamp(surface.glint_state, 0.0, 1.0),
+            clamp(surface.glint_weight, 0.0, 1.0),
+            surface.glint_state < 0.0,
         );
+        if (mix > 0.0) {
+            let d_glint = glint_ndf_from_density(
+                d_smooth,
+                glint_microfacet_count(surface.glint_density, surface.glint_footprint_area),
+                glint_bin_solid_angle(surface.glint_bin_half_width),
+                brdf_glint_shade_seed(surface, h, axes.tangent, axes.bitangent, n),
+            );
+            d = d_smooth + (d_glint - d_smooth) * mix;
+        }
     }
     let g = vis_smith_anisotropic(
         dot(axes.tangent, v),

@@ -328,6 +328,7 @@ pub fn surface_sample_from_parameters(parameters: &GpuSurfaceParameters) -> Surf
         glint_roughness: parameters.glint_roughness,
         glint_density: parameters.glint_density,
         glint_bin_half_width: parameters.glint_bin_half_width,
+        glint_state: crate::lighting::GLINT_STATE_AUTHORED,
         glint_cell: [0.0, 0.0],
         glint_footprint_area: 0.0,
     }

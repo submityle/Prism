@@ -478,6 +478,30 @@ mod tests {
 
     const EPS: f32 = 1.0e-6;
 
+
+    #[test]
+    fn the_explicit_delta_form_matches_the_blend_helper_bit_for_bit() {
+        // §17.4 (P3-e) needs to scale glint's *delta* by `1/p`, which the blend
+        // helper cannot express (it clamps its strength to `[0, 1]`). The
+        // explicit form must nevertheless be bit-for-bit the helper on the
+        // full-quality range, or the amortised path would perturb pixels that
+        // never opted into it.
+        for n_dot_h in [0.2_f32, 0.55, 0.9, 1.0] {
+            for alpha in [0.05_f32, 0.2, 0.6] {
+                for strength in [0.0_f32, 0.25, 0.5, 1.0] {
+                    for seed in [0u32, 7, 0xdead_beef] {
+                        let d_smooth = ggx_ndf(n_dot_h, alpha);
+                        let d_glint = glint_ndf_from_density(d_smooth, 64.0, 0.02, seed);
+                        let explicit = d_smooth + (d_glint - d_smooth) * strength;
+                        let helper =
+                            glint_ndf_blended(n_dot_h, alpha, 64.0, 0.02, strength, seed);
+                        assert_eq!(explicit, helper, "h={n_dot_h} a={alpha} s={strength}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn hash_is_deterministic_and_diffuses() {
         // Pure function: identical input -> identical output.
