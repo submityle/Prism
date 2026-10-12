@@ -16,11 +16,11 @@ use core::ptr::NonNull;
 
 use crate::change::{ComponentTicks, Tick};
 use crate::collections::HashMap;
-use crate::component::{ComponentId, DropFn};
+use crate::component::{Component, ComponentId, DropFn};
 use crate::entity::Entity;
 use crate::storage::arena::ChunkArena;
 use crate::storage::blob_vec::BlobVec;
-use crate::storage::chunk::{rows_per_chunk, ChunkMeta, ChunkVersions};
+use crate::storage::chunk::{rows_per_chunk, ChunkBounds, ChunkMeta, ChunkVersions};
 
 /// A single type-erased component column within a [`Table`].
 ///
@@ -707,6 +707,69 @@ impl Table {
         out.len() - before
     }
 
+    /// Recompute the per-chunk `bounds` of table column `id` from its values
+    /// (design §5.3 `ChunkMeta` AABB; feeds §13 culling / §15 GPU upload).
+    ///
+    /// `point` projects a component value to a world-space point; each chunk's
+    /// bounds is the union of its rows' points. A window is recomputed **only
+    /// when it is stale** — its cached `bounds_epoch` no longer matches the
+    /// chunk's structural epoch (a row moved in/out), or the chunk's
+    /// `change_version` moved past the version the bounds were computed at (some
+    /// value changed) — so an untouched frame costs one staleness test per chunk
+    /// and nothing else. Pass `force` to recompute every window regardless.
+    /// Returns the number of windows recomputed.
+    pub fn recompute_chunk_bounds<T: Component>(
+        &mut self,
+        id: ComponentId,
+        now: Tick,
+        point: &mut impl FnMut(&T) -> [f32; 3],
+        force: bool,
+    ) -> usize {
+        let Some(column) = self.columns.get(&id) else {
+            return 0; // this archetype has no such column
+        };
+        debug_assert_eq!(
+            column.item_size(),
+            size_of::<T>(),
+            "the component type must match the column",
+        );
+        let rows_per_chunk = self.rows_per_chunk;
+        let total = self.entities.len();
+        let meta_offset = self.meta_offset;
+        let mut recomputed = 0usize;
+        for (chunk, block) in self.chunks.iter().enumerate() {
+            // SAFETY: the block header embeds a `ChunkMeta` at `meta_offset`;
+            // `&mut self` makes this the only access to it.
+            let meta = unsafe { &mut *block.ptr.as_ptr().add(meta_offset).cast::<ChunkMeta>() };
+            let version = column.chunk_version(chunk);
+            let stale = force
+                || meta.bounds_epoch() != meta.structural_epoch()
+                || version.is_newer_than(meta.bounds_version(), now);
+            if !stale {
+                continue;
+            }
+            let first_row = chunk * rows_per_chunk;
+            let rows = total.saturating_sub(first_row).min(rows_per_chunk);
+            if rows == 0 {
+                continue;
+            }
+            let mut bounds: Option<ChunkBounds> = None;
+            for row in first_row..first_row + rows {
+                // SAFETY: `row < total == column.len()` and the column stores `T`
+                // (checked above), so this reads a live value of the right type.
+                let p = point(unsafe { column.get::<T>(row) });
+                match &mut bounds {
+                    Some(b) => b.union(&ChunkBounds::new(p, p)),
+                    None => bounds = Some(ChunkBounds::new(p, p)),
+                }
+            }
+            let epoch = meta.structural_epoch();
+            meta.set_bounds(bounds, epoch, version);
+            recomputed += 1;
+        }
+        recomputed
+    }
+
     /// The metadata of chunk `chunk`, or `None` if out of range.
     #[inline]
     pub fn chunk_meta_checked(&self, chunk: usize) -> Option<&ChunkMeta> {
@@ -1259,5 +1322,67 @@ mod tests {
             .table()
             .column_upload_spans(id, before_quiet, quiet, &mut spans);
         assert_eq!(n, 0, "no writes means no upload spans");
+    }
+
+    /// A 512-byte component carrying a world-space point, so a chunk holds 32
+    /// rows and a small test spans several windows.
+    #[allow(dead_code)] // the pad only fixes the row size
+    #[derive(Clone, Copy)]
+    struct Pt([f32; 3], [u8; 500]);
+    impl Component for Pt {}
+
+    #[test]
+    fn recompute_chunk_bounds_produces_and_caches_aabbs() {
+        let mut world = World::new();
+        let arch = world.prewarm::<Pt>(0);
+        let mut entities = Vec::new();
+        for i in 0..96 {
+            // x ascends, y descends, z stays 0.
+            entities.push(world.spawn(Pt([i as f32, -(i as f32), 0.0], [0; 500])));
+        }
+        let mut point = |p: &Pt| p.0;
+
+        // The first pass computes all three windows.
+        let now = world.change_tick();
+        let n = world.recompute_chunk_bounds::<Pt>(arch, now, &mut point, false);
+        assert_eq!(n, 3);
+        {
+            let table = world.archetypes().get(arch).unwrap().table();
+            assert_eq!(
+                table.chunk_meta(0).bounds,
+                Some(ChunkBounds::new([0.0, -31.0, 0.0], [31.0, 0.0, 0.0])),
+            );
+            assert_eq!(
+                table.chunk_meta(2).bounds,
+                Some(ChunkBounds::new([64.0, -95.0, 0.0], [95.0, -64.0, 0.0])),
+            );
+        }
+
+        // Nothing moved: every window's cache is still valid.
+        let n = world.recompute_chunk_bounds::<Pt>(arch, now, &mut point, false);
+        assert_eq!(n, 0, "clean windows are skipped");
+
+        // Move one row in the middle window: only that window is stale.
+        world.increment_change_tick();
+        world.get_mut::<Pt>(entities[40]).unwrap().0 = [1000.0, 0.0, 0.0];
+        let now = world.change_tick();
+        let n = world.recompute_chunk_bounds::<Pt>(arch, now, &mut point, false);
+        assert_eq!(n, 1, "only the window whose value moved is recomputed");
+        assert_eq!(
+            world.archetypes().get(arch).unwrap().table().chunk_meta(1).bounds,
+            Some(ChunkBounds::new([32.0, -63.0, 0.0], [1000.0, 0.0, 0.0])),
+        );
+
+        // A structural change (a row entering a window) invalidates that window
+        // via its structural epoch, even though no value changed.
+        world.increment_change_tick();
+        world.spawn(Pt([-5.0, 0.0, 0.0], [0; 500]));
+        let now = world.change_tick();
+        let n = world.recompute_chunk_bounds::<Pt>(arch, now, &mut point, false);
+        assert_eq!(n, 1, "the window that gained a row is recomputed");
+        assert_eq!(
+            world.archetypes().get(arch).unwrap().table().chunk_meta(3).bounds,
+            Some(ChunkBounds::new([-5.0, 0.0, 0.0], [-5.0, 0.0, 0.0])),
+        );
     }
 }

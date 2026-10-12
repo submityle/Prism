@@ -252,6 +252,34 @@ impl World {
         }
     }
 
+    /// Recompute the per-chunk `bounds` of component `T`'s column in `archetype`
+    /// (design §5.3 `ChunkMeta` AABB / §15), projecting each value to a
+    /// world-space point with `point` and unioning a window's points into an
+    /// AABB.
+    ///
+    /// Only **stale** windows are recomputed — those whose cached bounds no
+    /// longer match the chunk's structural epoch, or whose change-version moved
+    /// past the version the bounds were computed at — so a frame that touched
+    /// nothing costs one test per chunk. `force` recomputes every window.
+    /// Returns 0 when the archetype or the column is absent.
+    ///
+    /// See [`Table::recompute_chunk_bounds`](crate::storage::Table::recompute_chunk_bounds).
+    pub fn recompute_chunk_bounds<T: Component>(
+        &mut self,
+        archetype: ArchetypeId,
+        now: Tick,
+        point: &mut impl FnMut(&T) -> [f32; 3],
+        force: bool,
+    ) -> usize {
+        let Some(id) = self.components.id_of::<T>() else {
+            return 0;
+        };
+        let Some(table) = self.archetypes.get_mut(archetype).map(|a| a.table_mut()) else {
+            return 0;
+        };
+        table.recompute_chunk_bounds::<T>(id, now, point, force)
+    }
+
     /// The out-of-band sparse-component registry (design §6).
     ///
     /// Sparse components live here keyed by [`Entity`], not inside archetype

@@ -331,6 +331,13 @@ impl ChunkBounds {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChunkMeta {
     structural_epoch: u64,
+    /// The `structural_epoch` value `bounds` was computed at (or 0 before the
+    /// first computation), so a producer can tell whether its cached bounds
+    /// still correspond to this window's row set.
+    bounds_epoch: u64,
+    /// The chunk's `change_version` when `bounds` was computed, so a producer can
+    /// tell whether any value moved since (design §15 fat-bounds update).
+    bounds_version: Tick,
     /// Cached world-space bounds for this window, or `None` when a consumer has
     /// not (re)computed them for the current epoch.
     pub bounds: Option<ChunkBounds>,
@@ -351,6 +358,8 @@ impl Default for ChunkMeta {
     fn default() -> Self {
         Self {
             structural_epoch: 0,
+            bounds_epoch: 0,
+            bounds_version: Tick::default(),
             bounds: None,
             visible: true,
             lod: 0,
@@ -374,6 +383,28 @@ impl ChunkMeta {
     #[inline]
     pub(crate) fn bump_structural(&mut self) {
         self.structural_epoch = self.structural_epoch.wrapping_add(1);
+    }
+
+    /// The `structural_epoch` at which [`bounds`](Self::bounds) was computed.
+    #[inline]
+    pub fn bounds_epoch(&self) -> u64 {
+        self.bounds_epoch
+    }
+
+    /// The chunk change-version at which [`bounds`](Self::bounds) was computed.
+    #[inline]
+    pub fn bounds_version(&self) -> Tick {
+        self.bounds_version
+    }
+
+    /// Store freshly computed bounds together with the structural epoch and
+    /// change-version they were computed from, so a later pass can skip this
+    /// window while nothing has moved.
+    #[inline]
+    pub fn set_bounds(&mut self, bounds: Option<ChunkBounds>, epoch: u64, version: Tick) {
+        self.bounds = bounds;
+        self.bounds_epoch = epoch;
+        self.bounds_version = version;
     }
 }
 
