@@ -290,6 +290,16 @@ pub fn multiscatter_direct(
     let e_o = crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_v, perceptual_roughness);
     let e_i = crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_l, perceptual_roughness);
     let e_avg = crate::ggx_albedo_table::ggx_average_lookup(perceptual_roughness);
+    multiscatter_direct_parts(f0, e_o, e_i, e_avg)
+}
+
+/// Same value as [`multiscatter_direct`] with the three albedos supplied by the
+/// caller, so a shading loop can hoist the **view- and material-only** parts
+/// (`E_white(n·v)` and `E_avg`, neither of which depends on the light) out of its
+/// per-light loop and evaluate only `E_white(n·l)` per light.
+#[inline]
+#[must_use]
+pub fn multiscatter_direct_parts(f0: Vec3, e_o: f32, e_i: f32, e_avg: f32) -> Vec3 {
     // Achromatic Kulla-Conty two-point lobe (already carries the 1/π).
     let f_ms = kulla_conty_ms(e_o, e_i, e_avg);
     // Turquin colored multiple-bounce Fresnel scale, per channel.

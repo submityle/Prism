@@ -248,10 +248,85 @@ pub struct DirectLightSample {
     pub visibility: f32,
 }
 
+/// The view- and material-only terms of the principled lobe, computed once per
+/// pixel and reused across every analytic light.
+///
+/// All four are baked-table lookups or tiny polynomials that depend only on the
+/// **view** and the material — *not* on the light direction — so a shading loop
+/// that evaluates `N` lights was paying for them `N` times. Hoisting them here
+/// (`evaluate_principled_direct_with`) removes `4·(N−1)` table lookups per pixel;
+/// the measured table throughput is ~3 Glookup/s on the dev GPU (see
+/// `prism_render_material_gpu/tests/albedo_table_gpu_parity.rs`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PrincipledPre {
+    /// `E_white(n·v, roughness)` — baked GGX albedo at the view angle.
+    pub e_ggx_view: f32,
+    /// `E_avg(roughness)` — baked cosine-weighted average albedo.
+    pub e_ggx_avg: f32,
+    /// `F0 · E_diel_ref(n·v, roughness)` — the dielectric lobe's directional
+    /// albedo, used by the glossy-diffuse coupling weight.
+    pub e_dielectric: [f32; 3],
+    /// The coat lobe's albedo (`F0·E_white + (1−F0)·B`) when a coat is present,
+    /// `1.0` when it is not (making the closure inert).
+    pub coat_lobe_albedo: f32,
+}
+
+/// Computes the per-pixel [`PrincipledPre`] for `surface` under `frame`.
+///
+/// The view cosine is derived here (with the same normalization and floor the
+/// lobe uses internally) so a caller cannot accidentally hoist with a slightly
+/// different clamp than the per-light path.
+#[must_use]
+pub fn principled_pre(surface: &SurfaceSample, frame: &ShadingFrame) -> PrincipledPre {
+    let n = normalize_or(frame.normal, [0.0, 1.0, 0.0]);
+    let v = normalize_or(frame.view, n);
+    let n_dot_v = dot(n, v).max(MIN_N_DOT);
+    let roughness = surface.perceptual_roughness.clamp(MIN_ROUGHNESS, 1.0);
+    let coat = surface.clearcoat.clamp(0.0, 1.0);
+    let coat_roughness = surface.clearcoat_roughness.clamp(MIN_ROUGHNESS, 1.0);
+    let coat_f0 = {
+        let n = surface.coat_ior.max(MIN_DIELECTRIC_IOR);
+        let r = (n - 1.0) / (n + 1.0);
+        r * r
+    };
+    let coat_lobe_albedo = if coat > 0.0 {
+        (coat_f0 * crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_v, coat_roughness)
+            + (1.0 - coat_f0)
+                * crate::schlick_bias_table::schlick_bias_lookup(n_dot_v, coat_roughness))
+        .max(1.0e-3)
+    } else {
+        1.0
+    };
+    let e_ref = crate::dielectric_albedo_table::dielectric_albedo_lookup(n_dot_v, roughness);
+    let dielectric_f0 = dielectric_f0(surface);
+    PrincipledPre {
+        e_ggx_view: crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_v, roughness),
+        e_ggx_avg: crate::ggx_albedo_table::ggx_average_lookup(roughness),
+        e_dielectric: [
+            (e_ref * dielectric_f0[0] / 0.04).clamp(0.0, 1.0),
+            (e_ref * dielectric_f0[1] / 0.04).clamp(0.0, 1.0),
+            (e_ref * dielectric_f0[2] / 0.04).clamp(0.0, 1.0),
+        ],
+        coat_lobe_albedo,
+    }
+}
+
 pub fn evaluate_principled_direct(
     surface: SurfaceSample,
     frame: ShadingFrame,
     light: DirectLightSample,
+) -> [f32; 3] {
+    let pre = principled_pre(&surface, &frame);
+    evaluate_principled_direct_with(surface, frame, light, &pre)
+}
+
+/// [`evaluate_principled_direct`] with the per-pixel [`PrincipledPre`] supplied
+/// by the caller — the per-light-loop entry point.
+pub fn evaluate_principled_direct_with(
+    surface: SurfaceSample,
+    frame: ShadingFrame,
+    light: DirectLightSample,
+    pre: &PrincipledPre,
 ) -> [f32; 3] {
     let n = normalize_or(frame.normal, [0.0, 1.0, 0.0]);
     let v = normalize_or(frame.view, n);
@@ -363,11 +438,11 @@ pub fn evaluate_principled_direct(
     // inter-reflections instead of the former crude `1 - 0.28*rough^2` scalar;
     // see `crate::gi::env_brdf::multiscatter` for the derivation and the
     // white-furnace conservation proof.
-    let compensation = crate::gi::env_brdf::multiscatter::multiscatter_direct(
+    let compensation = crate::gi::env_brdf::multiscatter::multiscatter_direct_parts(
         bevy_math::Vec3::from_array(f0),
-        n_dot_v,
-        n_dot_l,
-        roughness,
+        pre.e_ggx_view,
+        crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_l, roughness),
+        pre.e_ggx_avg,
     )
     .to_array();
     let specular = add(single_scatter, compensation);
@@ -389,14 +464,7 @@ pub fn evaluate_principled_direct(
     // The lobe albedo is baked at the specification's default dielectric and
     // scaled by the authored `F0` ratio: exact at `F0 == 0` (no interface) and at
     // the default, monotone in between.
-    let e_ref = crate::dielectric_albedo_table::dielectric_albedo_lookup(n_dot_v, roughness);
-    let dielectric_f0 = dielectric_f0(&surface);
-    let e_dielectric = [
-        (e_ref * dielectric_f0[0] / 0.04).clamp(0.0, 1.0),
-        (e_ref * dielectric_f0[1] / 0.04).clamp(0.0, 1.0),
-        (e_ref * dielectric_f0[2] / 0.04).clamp(0.0, 1.0),
-    ];
-    let diffuse_weight = mul_scalar(sub([1.0; 3], e_dielectric), 1.0 - metallic);
+    let diffuse_weight = mul_scalar(sub([1.0; 3], pre.e_dielectric), 1.0 - metallic);
     // `OpenPBR` `diffuse_roughness`: the base diffuse lobe is Oren-Nayar rather
     // than Lambert when the surface is microscopically rough. `sigma == 0`
     // collapses the factor to exactly `1.0`, so the legacy Lambert path is
@@ -477,14 +545,7 @@ pub fn evaluate_principled_direct(
     // Fast path: with no coat the whole closure below is inert (`coat == 0`
     // scales every term away), so the two table lookups are skipped entirely —
     // the overwhelmingly common case for a material that never authors a coat.
-    let coat_lobe_albedo = if coat > 0.0 {
-        (coat_f0 * crate::ggx_albedo_table::ggx_albedo_lookup(n_dot_v, coat_roughness)
-            + (1.0 - coat_f0)
-                * crate::schlick_bias_table::schlick_bias_lookup(n_dot_v, coat_roughness))
-        .max(1.0e-3)
-    } else {
-        1.0
-    };
+    let coat_lobe_albedo = pre.coat_lobe_albedo;
     // ***Exact*** closure. Multiplying the lobe by `r_slab / A` does *not* give
     // it albedo `r_slab`: the factor varies with the light direction while the
     // lobe weights it, so the product integrates to something else (measured
@@ -608,7 +669,7 @@ pub fn evaluate_principled_direct(
             let one_minus_light = 1.0 - f_light;
             let r_slab = f_light
                 + one_minus_light * one_minus_light * f_view / denom;
-            *slot = transmission * (r_slab + t_slab * bevy_math::ops::powf(sigma_factor[channel], path_scale));
+            *slot = transmission * (r_slab + t_slab * ops::powf(sigma_factor[channel], path_scale));
         }
         // Lambertian (diffuse) transmission: the term is a BRDF, so it carries
         // the `1/π` that a radiance factor would not. Without it the lobe's

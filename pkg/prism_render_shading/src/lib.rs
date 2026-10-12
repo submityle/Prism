@@ -178,8 +178,8 @@ pub use light_routing::{
     MAX_LIGHTING_CHANNELS, MAX_LIGHT_LAYERS,
 };
 pub use lighting::{
-    evaluate_principled_direct, linear_furnace_response, DirectLightSample, ShadingFrame,
-    SurfaceSample,
+    evaluate_principled_direct, evaluate_principled_direct_with, linear_furnace_response,
+    principled_pre, DirectLightSample, PrincipledPre, ShadingFrame, SurfaceSample,
 };
 pub use measured_brdf::{
     directions_to_rusinkiewicz, half_vector, is_non_negative, reciprocity_error,

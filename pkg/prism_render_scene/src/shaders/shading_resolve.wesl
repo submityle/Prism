@@ -40,6 +40,8 @@ import prism_render_scene::shaders::brdf::{
     brdf_normalize_or,
     dielectric_f0,
     principled_direct,
+    principled_direct_with,
+    principled_pre,
     stylized_direct,
     face_shadow_light_cosines,
     face_shadow_flip_u,
@@ -1323,11 +1325,16 @@ fn shade_principled(
     slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
+    // The view- and material-only albedo terms are identical for every light, so
+    // they are computed **once per pixel** and threaded into each per-light
+    // evaluation instead of being recomputed per light. Mirrors
+    // `resolve.rs::shade_principled`.
+    let pre = principled_pre(lit, frame);
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
         let sample = sample_directional_shadowed(i, frame, world_position);
-        accumulated = accumulated + principled_direct(lit, frame, to_direct_sample(sample));
+        accumulated = accumulated + principled_direct_with(lit, frame, to_direct_sample(sample), pre);
     }
 
     let punctual_total = min(env.punctual_count, arrayLength(&punctual_lights));
@@ -1344,7 +1351,7 @@ fn shade_principled(
         if sample.valid == 0.0 {
             continue;
         }
-        accumulated = accumulated + principled_direct(lit, frame, to_direct_sample(sample));
+        accumulated = accumulated + principled_direct_with(lit, frame, to_direct_sample(sample), pre);
     }
 
     accumulated = accumulated + accumulate_area_lights(lit, frame, world_position);
@@ -1475,6 +1482,11 @@ fn shade_cloth(
     slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
+    // The view- and material-only albedo terms are identical for every light, so
+    // they are computed **once per pixel** and threaded into each per-light
+    // evaluation instead of being recomputed per light. Mirrors
+    // `resolve.rs::shade_principled`.
+    let pre = principled_pre(lit, frame);
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
@@ -1516,6 +1528,11 @@ fn shade_subsurface(
     slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
+    // The view- and material-only albedo terms are identical for every light, so
+    // they are computed **once per pixel** and threaded into each per-light
+    // evaluation instead of being recomputed per light. Mirrors
+    // `resolve.rs::shade_principled`.
+    let pre = principled_pre(lit, frame);
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
@@ -1558,6 +1575,11 @@ fn shade_hair(
     slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
+    // The view- and material-only albedo terms are identical for every light, so
+    // they are computed **once per pixel** and threaded into each per-light
+    // evaluation instead of being recomputed per light. Mirrors
+    // `resolve.rs::shade_principled`.
+    let pre = principled_pre(lit, frame);
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
@@ -1608,6 +1630,11 @@ fn shade_water(
     slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
+    // The view- and material-only albedo terms are identical for every light, so
+    // they are computed **once per pixel** and threaded into each per-light
+    // evaluation instead of being recomputed per light. Mirrors
+    // `resolve.rs::shade_principled`.
+    let pre = principled_pre(lit, frame);
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {
@@ -1654,6 +1681,11 @@ fn shade_clearcoat(
     slice: ClusterSlice,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
+    // The view- and material-only albedo terms are identical for every light, so
+    // they are computed **once per pixel** and threaded into each per-light
+    // evaluation instead of being recomputed per light. Mirrors
+    // `resolve.rs::shade_principled`.
+    let pre = principled_pre(lit, frame);
 
     let directional_total = min(env.directional_count, arrayLength(&directional_lights));
     for (var i = 0u; i < directional_total; i = i + 1u) {

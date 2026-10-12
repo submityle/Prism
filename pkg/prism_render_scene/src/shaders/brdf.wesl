@@ -570,6 +570,14 @@ fn multiscatter_direct(
     let e_o = ms_directional_albedo(n_dot_v, perceptual_roughness);
     let e_i = ms_directional_albedo(n_dot_l, perceptual_roughness);
     let e_avg = ms_average_albedo(perceptual_roughness);
+    return multiscatter_direct_parts(f0, e_o, e_i, e_avg);
+}
+
+// Same value with the three albedos supplied by the caller, so a shading loop
+// can hoist the view- and material-only parts out of its per-light loop (only
+// `E_white(n·l)` actually depends on the light). Mirrors
+// `multiscatter::multiscatter_direct_parts`.
+fn multiscatter_direct_parts(f0: vec3<f32>, e_o: f32, e_i: f32, e_avg: f32) -> vec3<f32> {
     let f_ms = (1.0 - e_o) * (1.0 - e_i) * INV_PI / (1.0 - e_avg);
     let f_avg = f0 + (vec3<f32>(1.0) - f0) * (1.0 / 21.0);
     let f_ms_color =
@@ -683,10 +691,60 @@ fn oren_nayar_energy_compensation(
 // Physically based direct lighting for one analytic light, including a
 // Kulla-Conty energy-compensation term and a clearcoat lobe. Mirrors
 // `evaluate_principled_direct`.
+// View- and material-only terms of the principled lobe, computed once per pixel
+// and reused across every analytic light (`4·(N−1)` fewer table lookups per
+// pixel). Mirrors `lighting.rs::PrincipledPre`.
+struct PrincipledPre {
+    e_ggx_view: f32,
+    e_ggx_avg: f32,
+    e_dielectric: vec3<f32>,
+    coat_lobe_albedo: f32,
+}
+
+fn principled_pre(surface: SurfaceSample, frame: ShadingFrame) -> PrincipledPre {
+    let n = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
+    let v = brdf_normalize_or(frame.view, n);
+    let n_dot_v = max(dot(n, v), MIN_N_DOT);
+    let roughness = clamp(surface.perceptual_roughness, MIN_ROUGHNESS, 1.0);
+    let coat = clamp(surface.clearcoat, 0.0, 1.0);
+    let coat_roughness = clamp(surface.clearcoat_roughness, MIN_ROUGHNESS, 1.0);
+    let coat_ior = max(surface.coat_ior, 1.0 + 1.0e-3);
+    let coat_f0 = pow((coat_ior - 1.0) / (coat_ior + 1.0), 2.0);
+    var coat_lobe_albedo = 1.0;
+    if coat > 0.0 {
+        coat_lobe_albedo = max(
+            coat_f0 * ggx_albedo_lookup(n_dot_v, coat_roughness)
+                + (1.0 - coat_f0) * schlick_bias_lookup(n_dot_v, coat_roughness),
+            1.0e-3,
+        );
+    }
+    let e_ref = dielectric_albedo_lookup(n_dot_v, roughness);
+    let dielectric_f0_vec = dielectric_f0(surface);
+    return PrincipledPre(
+        ggx_albedo_lookup(n_dot_v, roughness),
+        ggx_average_lookup(roughness),
+        clamp(
+            vec3<f32>(e_ref) * dielectric_f0_vec / vec3<f32>(0.04),
+            vec3<f32>(0.0),
+            vec3<f32>(1.0),
+        ),
+        coat_lobe_albedo,
+    );
+}
+
 fn principled_direct(
     surface: SurfaceSample,
     frame: ShadingFrame,
     light: DirectLightSample,
+) -> vec3<f32> {
+    return principled_direct_with(surface, frame, light, principled_pre(surface, frame));
+}
+
+fn principled_direct_with(
+    surface: SurfaceSample,
+    frame: ShadingFrame,
+    light: DirectLightSample,
+    pre: PrincipledPre,
 ) -> vec3<f32> {
     let n = brdf_normalize_or(frame.normal, vec3<f32>(0.0, 1.0, 0.0));
     let v = brdf_normalize_or(frame.view, n);
@@ -779,7 +837,12 @@ fn principled_direct(
     // + Turquin 2019 colored multiple-bounce Fresnel). Byte-for-byte twin of
     // `multiscatter::multiscatter_direct`; restores the energy the single-
     // scattering GGX lobe loses to unresolved microfacet inter-reflections.
-    let compensation = multiscatter_direct(f0, n_dot_v, n_dot_l, roughness);
+    let compensation = multiscatter_direct_parts(
+        f0,
+        pre.e_ggx_view,
+        ggx_albedo_lookup(n_dot_l, roughness),
+        pre.e_ggx_avg,
+    );
     let specular = single_scatter + compensation;
 
     // `OpenPBR` `glossy_diffuse_albedo_constraint`: weight the diffuse slab by
@@ -787,14 +850,7 @@ fn principled_direct(
     // the half-vector Fresnel. The lobe albedo is baked at the specification's
     // default dielectric and scaled by the authored `F0` ratio (exact at
     // `F0 == 0` and at the default). Mirrors `lighting.rs`.
-    let e_ref = dielectric_albedo_lookup(n_dot_v, roughness);
-    let dielectric_f0_vec = dielectric_f0(surface);
-    let e_dielectric = clamp(
-        vec3<f32>(e_ref) * dielectric_f0_vec / vec3<f32>(0.04),
-        vec3<f32>(0.0),
-        vec3<f32>(1.0),
-    );
-    let diffuse_weight = (vec3<f32>(1.0) - e_dielectric) * (1.0 - metallic);
+    let diffuse_weight = (vec3<f32>(1.0) - pre.e_dielectric) * (1.0 - metallic);
     // `OpenPBR` `diffuse_roughness`: Oren-Nayar replaces Lambert for
     // microscopically rough diffuse surfaces; `0` collapses the factor to
     // exactly 1.0 and preserves the legacy path.
@@ -845,15 +901,7 @@ fn principled_direct(
     let coat_r_slab = coat_f_l + (1.0 - coat_f_l) * (1.0 - coat_f_l) * coat_f_v / coat_denom;
     // Fast path: with no coat every term below is scaled away, so the table
     // lookups are skipped entirely for a material that never authors a coat.
-    let coat_lobe_albedo = select(
-        1.0,
-        max(
-            coat_f0 * ggx_albedo_lookup(n_dot_v, coat_roughness)
-                + (1.0 - coat_f0) * schlick_bias_lookup(n_dot_v, coat_roughness),
-            1.0e-3,
-        ),
-        coat > 0.0,
-    );
+    let coat_lobe_albedo = pre.coat_lobe_albedo;
     let coat_specular = coat_specular
         + vec3<f32>(coat * (coat_r_slab - coat_lobe_albedo) * n_dot_l * INV_PI);
     let coat_attenuation = 1.0 + coat * (coat_t_slab - 1.0);

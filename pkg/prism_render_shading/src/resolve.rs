@@ -454,18 +454,29 @@ pub fn resolve_pixel(
     // based classes (Principled and, until their specialized lobes land,
     // Subsurface/ClearCoat/Cloth/Hair/Water/Custom).
     let shade_principled = || {
+        // The view- and material-only albedo terms are identical for every
+        // light, so they are computed **once per pixel** here and threaded into
+        // each per-light evaluation (`evaluate_principled_direct_with`) instead
+        // of being recomputed per light — the tables cost ~3 Glookup/s on the dev
+        // GPU, so a 4-light pixel was paying for 12 lookups where 3 suffice.
+        let pre = crate::principled_pre(&lit_surface, &frame);
         let mut accumulated = [0.0; 3];
         for light in lights.directional {
             accumulated = add(
                 accumulated,
-                crate::evaluate_principled_direct(lit_surface, frame, direct_sample(*light)),
+                crate::evaluate_principled_direct_with(
+                    lit_surface,
+                    frame,
+                    direct_sample(*light),
+                    &pre,
+                ),
             );
         }
         for light in lights.punctual {
             if let Some(sample) = light.sample(geometry.position) {
                 accumulated = add(
                     accumulated,
-                    crate::evaluate_principled_direct(lit_surface, frame, sample),
+                    crate::evaluate_principled_direct_with(lit_surface, frame, sample, &pre),
                 );
             }
         }
