@@ -150,6 +150,13 @@ impl ReplayRecord {
         let mut cursor = 5;
         let seed = read_u64(bytes, &mut cursor)?;
         let count = read_u64(bytes, &mut cursor)? as usize;
+        // Each event is two `u64`s; reject a declared count that cannot fit in
+        // the remaining payload before preallocating from an untrusted length
+        // (CR-found: `Vec::with_capacity` panicked on `count = u64::MAX`).
+        let remaining = bytes.len().saturating_sub(cursor);
+        if count > remaining / 16 {
+            return Err(ReplayError::Truncated);
+        }
         let mut events = Vec::with_capacity(count);
         for _ in 0..count {
             let len = read_u64(bytes, &mut cursor)? as usize;

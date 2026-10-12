@@ -208,8 +208,12 @@ fn refill(rate: &Rate, state: &mut State) {
 fn token_wait(rate: &Rate, state: &State) -> Duration {
     let needed = (1.0 - state.tokens).max(0.0);
     let secs = needed / rate.per_sec;
-    let wait = Duration::from_secs_f64(secs.max(0.0));
-    wait.min(MAX_TOKEN_WAIT)
+    // A subnormal `per_sec` makes `secs` overflow to +inf (or NaN), which
+    // `Duration::from_secs_f64` panics on (CR-found) — clamp to the cap first.
+    if !secs.is_finite() || secs >= MAX_TOKEN_WAIT.as_secs_f64() {
+        return MAX_TOKEN_WAIT;
+    }
+    Duration::from_secs_f64(secs.max(0.0))
 }
 
 /// A held throttle permit. Releasing it (on drop) frees a concurrency slot and
@@ -292,6 +296,25 @@ mod tests {
         assert!(t.try_acquire().is_none());
         drop(p);
         assert!(t.try_acquire().is_some());
+    }
+
+    #[test]
+    fn tiny_rate_token_wait_is_finite() {
+        use super::{token_wait, Rate, State, MAX_TOKEN_WAIT};
+        use std::time::Instant;
+        // A subnormal `per_sec` makes `needed / per_sec` overflow to +inf, which
+        // `Duration::from_secs_f64` used to panic on (CR-found). The wait is now
+        // clamped to the cap instead.
+        let rate = Rate {
+            capacity: 2.0,
+            per_sec: f64::MIN_POSITIVE,
+        };
+        let state = State {
+            available: 2,
+            tokens: 0.0,
+            last_refill: Instant::now(),
+        };
+        assert!(token_wait(&rate, &state) <= MAX_TOKEN_WAIT);
     }
 
     #[test]

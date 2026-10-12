@@ -113,7 +113,14 @@ impl FixedPartition {
             return None;
         }
         let start = index * self.grain;
-        let end = (start + self.grain).min(self.len);
+        // `start + grain` can overflow near `usize::MAX` (CR-found); derive the
+        // end from the remaining length instead.
+        let remaining = self.len - start;
+        let end = if self.grain >= remaining {
+            self.len
+        } else {
+            start + self.grain
+        };
         Some(start..end)
     }
 
@@ -123,7 +130,12 @@ impl FixedPartition {
     pub fn chunks(&self) -> impl Iterator<Item = Range<usize>> + '_ {
         (0..self.chunk_count()).map(move |i| {
             let start = i * self.grain;
-            let end = (start + self.grain).min(self.len);
+            let remaining = self.len - start;
+            let end = if self.grain >= remaining {
+                self.len
+            } else {
+                start + self.grain
+            };
             start..end
         })
     }
@@ -141,6 +153,17 @@ mod tests {
         assert_eq!(p.chunk(1), Some(4..8));
         assert_eq!(p.chunk(2), Some(8..10));
         assert_eq!(p.chunk(3), None);
+    }
+
+    #[test]
+    fn chunk_end_does_not_overflow_near_usize_max() {
+        // `start + grain` overflowed for a huge grain near `usize::MAX`
+        // (CR-found); the last chunk must still cover the tail.
+        let grain = usize::MAX / 2 + 1;
+        let p = FixedPartition::with_grain(usize::MAX, grain);
+        assert_eq!(p.chunk_count(), 2);
+        assert_eq!(p.chunk(0), Some(0..grain));
+        assert_eq!(p.chunk(1), Some(grain..usize::MAX));
     }
 
     #[test]

@@ -264,7 +264,9 @@ impl ExecutionOrder {
             .ok_or(ReplayOrderError::BadHeader)?;
         let len: usize = len_str.parse().map_err(|_| ReplayOrderError::BadHeader)?;
 
-        let mut order = Vec::with_capacity(len);
+        // Do not preallocate from the untrusted header length (CR-found: a huge
+        // declared `len` panicked `Vec::with_capacity` before validation).
+        let mut order = Vec::new();
         for line in lines {
             let id: u32 = line
                 .trim()
