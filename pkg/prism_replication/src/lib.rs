@@ -77,3 +77,6 @@ pub mod session;
 
 #[cfg(feature = "app")]
 pub mod plugin;
+
+#[cfg(feature = "std")]
+pub mod udp;
