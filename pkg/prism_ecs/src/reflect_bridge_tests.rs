@@ -22,6 +22,14 @@ impl Component for Speed {}
 struct Opaque(i32);
 impl Component for Opaque {}
 
+/// A multi-field component, for field-level diffing.
+#[derive(Reflect, Clone, Copy, Debug, PartialEq, Eq)]
+struct Stats {
+    hp: i32,
+    mana: i32,
+}
+impl Component for Stats {}
+
 #[test]
 fn register_then_get_apply_and_remove_round_trips() {
     let mut world = World::new();
@@ -136,6 +144,51 @@ fn dynamic_access_composes_with_filters_and_other_components() {
             .and_then(|v| v.downcast_ref::<Health>())
             .copied(),
         Some(Health(8))
+    );
+}
+
+#[test]
+fn field_level_patch_writes_only_the_changed_fields() {
+    let mut world = World::new();
+    let id = world.register_reflect_component::<Stats>();
+    let e = world.spawn(Stats { hp: 10, mana: 20 });
+
+    let authoritative = Stats { hp: 10, mana: 99 };
+    let patch = world
+        .diff_reflect(e, id, &authoritative)
+        .expect("entity carries Stats");
+    assert!(
+        matches!(patch, prism_reflect::Patch::Struct(_)),
+        "a two-field component with one change must yield a struct patch, got {patch:?}"
+    );
+
+    assert!(world.apply_reflect_patch(e, id, &patch));
+    assert_eq!(world.get::<Stats>(e), Some(&authoritative));
+}
+
+#[test]
+fn an_unchanged_patch_is_a_true_no_op() {
+    let mut world = World::new();
+    let id = world.register_reflect_component::<Stats>();
+    let e = world.spawn(Stats { hp: 1, mana: 2 });
+
+    // Advance a frame so the spawn tick is in the past.
+    let now = world.change_tick();
+    world.set_last_change_tick(now);
+    world.increment_change_tick();
+
+    let patch = world
+        .diff_reflect(e, id, &Stats { hp: 1, mana: 2 })
+        .expect("entity carries Stats");
+    assert!(matches!(patch, prism_reflect::Patch::Unchanged));
+    assert!(world.apply_reflect_patch(e, id, &patch));
+
+    // Applying "nothing changed" must not mark the component changed, or every
+    // replication tick would spuriously re-send it.
+    let changed = world.query_filtered::<Entity, Changed<Stats>>();
+    assert_eq!(
+        changed.get(&world, e),
+        Err(crate::query::QueryEntityError::QueryDoesNotMatch(e))
     );
 }
 

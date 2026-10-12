@@ -208,6 +208,47 @@ impl World {
         self.reflect.ops.get(&type_id).map(|ops| ops.component)
     }
 
+    /// Diff a live component against an authoritative reflected value (design
+    /// §24.3 / §24.4): the result names only the fields that differ, so a
+    /// replication layer ships `patch` instead of the whole component.
+    ///
+    /// Returns `None` for an unregistered type or an entity without the
+    /// component.
+    pub fn diff_reflect(
+        &self,
+        entity: Entity,
+        type_id: StableTypeId,
+        authoritative: &dyn Reflect,
+    ) -> Option<prism_reflect::Patch> {
+        let live = self.get_reflect(entity, type_id)?;
+        Some(prism_reflect::diff(live, authoritative))
+    }
+
+    /// Apply a field-level [`Patch`](prism_reflect::Patch) to a live component
+    /// (design §24.3 / §24.5).
+    ///
+    /// Only the fields the patch names are written. `Patch::Unchanged` is a
+    /// true no-op: it neither writes nor marks the component changed, so a
+    /// replication receiver that is already up to date does not spuriously
+    /// re-trigger `Changed<T>` / dirty chunks. Any real patch goes through the
+    /// change-detection handle and therefore marks the component changed.
+    /// Returns `false` for an unregistered type, a missing component, or a patch
+    /// whose kind does not match the live value.
+    pub fn apply_reflect_patch(
+        &mut self,
+        entity: Entity,
+        type_id: StableTypeId,
+        patch: &prism_reflect::Patch,
+    ) -> bool {
+        if matches!(patch, prism_reflect::Patch::Unchanged) {
+            return self.get_reflect(entity, type_id).is_some();
+        }
+        let Some(value) = self.get_reflect_mut(entity, type_id) else {
+            return false;
+        };
+        patch.apply(value).is_ok()
+    }
+
     /// Remove `entity`'s component of reflected type `type_id`.
     ///
     /// Returns `false` for an unregistered type or an entity that does not carry

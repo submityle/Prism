@@ -565,7 +565,7 @@ ECS §16 的动态组件、snapshot、prefab 继承、反射桥**以 `prism_refl
 - snapshot/存档走 reflect §24.3 二进制零拷贝；跨版本读取走 schema 迁移。
 - 字段级网络增量（配合 `prism_replication`）走 reflect §24.4 diff + §24.5 字段级复制 + ECS §10 变更检测；`StableTypeId` 为跨会话/跨机组件标识。
 
-**ECS 侧已落地（第一段：动态组件访问）**：`reflect` feature 下的 `src/reflect_bridge.rs` 把「按类型名动态读写组件」变成真实可用的 API——`register_reflect_component::<T>()` 登记 `StableTypeId → {get, get_mut, apply, remove}` 单态化函数指针表，随后 `get_reflect` / `get_reflect_mut` / `insert_reflect` / `remove_reflect` 全部只认 `&dyn Reflect` 与 `StableTypeId`，调用点不再出现 Rust 类型名（编辑器检视器、场景装载、存档迁移、复制层正是这种用法）。`StableTypeId` 由类型路径派生，因此可安全写进存档/网络流；`reflect_component_id` / `reflect_stable_id` 提供「世界内 dense id ↔ 稳定 id」双向映射，供内部通过列/脏块/快照发现组件后用稳定 id 命名它。**尚未接**：snapshot 走 reflect 二进制零拷贝与 schema 迁移、字段级 diff 复制——这两段依赖 `serialize` feature，仍为 PLANNED。
+**ECS 侧已落地**：`reflect` feature 下的 `src/reflect_bridge.rs` 把「按类型名动态读写组件」变成真实可用的 API——`register_reflect_component::<T>()` 登记 `StableTypeId → {get, get_mut, apply, remove}` 单态化函数指针表，随后 `get_reflect` / `get_reflect_mut` / `insert_reflect` / `remove_reflect` 全部只认 `&dyn Reflect` 与 `StableTypeId`，调用点不再出现 Rust 类型名（编辑器检视器、场景装载、存档迁移、复制层正是这种用法）。`StableTypeId` 由类型路径派生，因此可安全写进存档/网络流；`reflect_component_id` / `reflect_stable_id` 提供「世界内 dense id ↔ 稳定 id」双向映射。**字段级增量也已接上第一段**：`diff_reflect(entity, id, authoritative)` 直接产出 `prism_reflect::Patch`（只含变化字段），`apply_reflect_patch(entity, id, &patch)` 把补丁写回活组件；`Patch::Unchanged` 是**真 no-op**（既不写也不标 changed），所以已经同步的接收端不会因「空补丁」反复触发 `Changed<T>`/脏块。**尚未接**：snapshot 走 reflect 二进制零拷贝与 schema 迁移——依赖 `serialize` feature，仍为 PLANNED。
 
 ### 24.4 确定性链路四方对齐
 
