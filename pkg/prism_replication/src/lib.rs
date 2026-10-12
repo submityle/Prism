@@ -29,6 +29,10 @@
 //! - [`prediction`] — client-side prediction and reconciliation: apply a local
 //!   input at once, then roll back to authority and replay the un-acknowledged
 //!   inputs when the correction arrives (design §10).
+//! - [`transport`] — the transport seam and a deterministic in-memory
+//!   [`LoopbackLink`](transport::LoopbackLink) with latency, jitter and loss, so
+//!   the sequencing layer can be exercised against a real reordering/lossy channel
+//!   without a socket (design §6).
 //!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
@@ -52,3 +56,5 @@ pub mod quantize;
 pub mod snapshot;
 
 pub mod prediction;
+
+pub mod transport;
