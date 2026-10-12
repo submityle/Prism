@@ -14,7 +14,8 @@
 //! `surface` feature.
 //!
 //! Device loss (a driver reset or crash, or an explicit `destroy`) is reported
-//! through [`WgpuDevice::take_device_lost`]; see [`DeviceLostReason`].
+//! through [`RenderDevice::take_device_lost`](prism_render_driver::RenderDevice::take_device_lost);
+//! see [`DeviceLostReason`].
 
 extern crate alloc;
 
@@ -31,6 +32,6 @@ mod bindless_tests;
 
 pub use device::WgpuDevice;
 pub use instance::{DeviceCreationError, WgpuAdapter, WgpuInstance};
-pub use loss::DeviceLostReason;
+pub use prism_render_driver::DeviceLostReason;
 pub use queue::WgpuQueue;
 pub use surface::{SurfaceCreateError, WgpuFrame, WgpuSurface};

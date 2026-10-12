@@ -15,6 +15,7 @@ use crate::binding::{BindGroupDescriptor, BindGroupLayoutDescriptor};
 use crate::buffer::BufferDescriptor;
 use crate::capabilities::DeviceCapabilities;
 use crate::command::CommandBuffer;
+use crate::loss::DeviceLostReason;
 use crate::pipeline::{
     ComputePipelineDescriptor, PipelineLayoutDescriptor, RenderPipelineDescriptor,
 };
@@ -89,6 +90,17 @@ pub trait RenderDevice {
     fn create_render_pipeline(&self, descriptor: &RenderPipelineDescriptor) -> RenderPipelineId;
     /// Creates a compute pipeline.
     fn create_compute_pipeline(&self, descriptor: &ComputePipelineDescriptor) -> ComputePipelineId;
+
+    /// Returns why the device was lost, clearing the record so a caller acts on
+    /// it once, or `None` when no loss has been reported since the last call.
+    ///
+    /// Loss is edge-triggered: a backend records the reason when the driver
+    /// reports it and this drains it. Backends that cannot observe loss keep the
+    /// default (`None`) — a null/headless backend legitimately never loses a
+    /// device, so the default is honest rather than a stub.
+    fn take_device_lost(&self) -> Option<DeviceLostReason> {
+        None
+    }
 
     /// Releases a buffer. Using its id afterwards is a stale-id error.
     fn destroy_buffer(&self, id: BufferId);

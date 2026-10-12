@@ -31,6 +31,7 @@ mod flags;
 mod format;
 mod frame_sync;
 mod instance;
+mod loss;
 mod pipeline;
 mod reclaim;
 mod resource;
@@ -69,6 +70,7 @@ pub use instance::{
     Adapter, AdapterInfo, DeviceDescriptor, DeviceError, DeviceType, Instance, PowerPreference,
     RequestAdapterOptions,
 };
+pub use loss::DeviceLostReason;
 pub use pipeline::{
     ColorTargetState, ComputePipelineDescriptor, FragmentState, PipelineLayoutDescriptor,
     PushConstantRange, RenderPipelineDescriptor, VertexState,

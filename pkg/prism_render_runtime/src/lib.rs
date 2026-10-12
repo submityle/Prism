@@ -34,8 +34,9 @@ use alloc::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 
 use prism_render_driver::{
-    Adapter, AdapterInfo, DeviceDescriptor, Extent3d, Instance, PowerPreference,
-    RequestAdapterOptions, Surface, SurfaceConfig, SurfaceError, TextureState, TextureUsages,
+    Adapter, AdapterInfo, DeviceDescriptor, DeviceLostReason, Extent3d, Instance, PowerPreference,
+    RenderDevice, RequestAdapterOptions, Surface, SurfaceConfig, SurfaceError, TextureState,
+    TextureUsages,
 };
 use prism_render_graph::{
     CompileError, ImportedTexture, RenderGraph, TextureDesc, TextureHandle,
@@ -182,6 +183,19 @@ impl<I: Instance> RenderRuntime<I> {
     #[must_use]
     pub fn device(&self) -> &I::Device {
         &self.device
+    }
+
+    /// Returns why the GPU device was lost, clearing the record so a caller acts
+    /// on it once, or `None` when no loss has been reported.
+    ///
+    /// Delegates to the backend device's
+    /// [`RenderDevice::take_device_lost`](prism_render_driver::RenderDevice::take_device_lost).
+    /// A backend that cannot observe loss (a null/headless backend) returns
+    /// `None`; the host layer polls this to drive device-loss recovery
+    /// (design §24.3).
+    #[must_use]
+    pub fn device_lost(&self) -> Option<DeviceLostReason> {
+        self.device.take_device_lost()
     }
 
     /// The RHI render queue.

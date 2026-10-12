@@ -19,10 +19,11 @@ use core::num::NonZeroU64;
 use std::sync::Mutex;
 
 use prism_render_driver as rhi;
+use prism_render_driver::DeviceLostReason;
 use rhi::RenderDevice;
 
 use crate::convert;
-use crate::loss::DeviceLostReason;
+use crate::loss::map_device_lost;
 
 /// Private marker for buffer slots.
 enum BufferMarker {}
@@ -150,7 +151,7 @@ impl DeviceInner {
         self.device
             .set_device_lost_callback(move |reason, _message| {
                 if let Some(inner) = inner.upgrade() {
-                    *lock(&inner.device_lost) = Some(DeviceLostReason::from_wgpu(reason));
+                    *lock(&inner.device_lost) = Some(map_device_lost(reason));
                 }
             });
     }
@@ -298,22 +299,6 @@ impl WgpuDevice {
         &self.inner.adapter
     }
 
-    /// Returns why the device was lost, clearing the record so a caller acts on
-    /// it once.
-    ///
-    /// wgpu reports a lost device (a driver reset or crash, or an explicit
-    /// `wgpu::Device::destroy`) through a callback instead of an error return,
-    /// so loss is edge-triggered: the callback records the reason and this
-    /// drains it. `None` means no loss has been reported since the previous
-    /// call.
-    ///
-    /// Once a reason is returned the device's resources are unusable, so a
-    /// caller must stop submitting work and rebuild the device; device rebuild
-    /// is out of scope for this backend.
-    pub fn take_device_lost(&self) -> Option<DeviceLostReason> {
-        lock(&self.inner.device_lost).take()
-    }
-
     /// Blocks the calling thread until every previously submitted operation on
     /// this device has completed.
     ///
@@ -345,6 +330,10 @@ impl WgpuDevice {
 impl RenderDevice for WgpuDevice {
     fn capabilities(&self) -> &rhi::DeviceCapabilities {
         &self.inner.caps
+    }
+
+    fn take_device_lost(&self) -> Option<DeviceLostReason> {
+        lock(&self.inner.device_lost).take()
     }
 
     fn create_buffer(&self, descriptor: &rhi::BufferDescriptor) -> rhi::BufferId {

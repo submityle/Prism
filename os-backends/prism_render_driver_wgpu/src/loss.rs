@@ -1,48 +1,33 @@
-//! Device-loss reporting surfaced by [`crate::WgpuDevice`].
+//! Maps wgpu's device-lost reason onto the RHI's backend-agnostic one.
 //!
-//! wgpu signals a lost device (a driver reset or crash, or an explicit
-//! `wgpu::Device::destroy`) through a callback rather than an error return, so
-//! the backend records the reason and lets callers poll it. The public reason
-//! is a backend-agnostic copy of wgpu's, so consumers of this crate classify a
-//! loss without depending on a specific `wgpu` version.
+//! [`DeviceLostReason`](prism_render_driver::DeviceLostReason) itself lives in
+//! the RHI crate, next to the
+//! [`RenderDevice::take_device_lost`](prism_render_driver::RenderDevice::take_device_lost)
+//! contract every backend serves; this module only translates wgpu's copy, which
+//! is the one thing that depends on a specific `wgpu` version.
 
-/// Why a [`crate::WgpuDevice`] was lost.
-///
-/// Returned by [`crate::WgpuDevice::take_device_lost`]. Once a device is lost
-/// its resources are unusable; a caller must rebuild the device rather than
-/// keep submitting work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum DeviceLostReason {
-    /// The device was lost for an unspecified reason, including driver resets
-    /// and crashes.
-    Unknown,
-    /// The device's `destroy` method was called.
-    Destroyed,
-}
+use prism_render_driver::DeviceLostReason;
 
-impl DeviceLostReason {
-    /// Converts wgpu's reason into the backend-agnostic copy.
-    pub(crate) fn from_wgpu(reason: wgpu::DeviceLostReason) -> Self {
-        match reason {
-            wgpu::DeviceLostReason::Unknown => Self::Unknown,
-            wgpu::DeviceLostReason::Destroyed => Self::Destroyed,
-        }
+/// Converts wgpu's reason into the RHI's backend-agnostic copy.
+pub(crate) fn map_device_lost(reason: wgpu::DeviceLostReason) -> DeviceLostReason {
+    match reason {
+        wgpu::DeviceLostReason::Unknown => DeviceLostReason::Unknown,
+        wgpu::DeviceLostReason::Destroyed => DeviceLostReason::Destroyed,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DeviceLostReason;
+    use super::*;
 
     #[test]
     fn maps_every_wgpu_reason() {
         assert_eq!(
-            DeviceLostReason::from_wgpu(wgpu::DeviceLostReason::Unknown),
+            map_device_lost(wgpu::DeviceLostReason::Unknown),
             DeviceLostReason::Unknown
         );
         assert_eq!(
-            DeviceLostReason::from_wgpu(wgpu::DeviceLostReason::Destroyed),
+            map_device_lost(wgpu::DeviceLostReason::Destroyed),
             DeviceLostReason::Destroyed
         );
     }

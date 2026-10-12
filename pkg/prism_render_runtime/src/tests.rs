@@ -381,3 +381,15 @@ fn rhi_graph_draws_a_triangle() {
     device.destroy_texture_view(target_view);
     device.destroy_texture(target_texture);
 }
+
+/// A null/headless backend never reports device loss: the default
+/// [`RenderDevice::take_device_lost`](prism_render_driver::RenderDevice::take_device_lost)
+/// returns `None`, so the runtime's [`device_lost`](RenderRuntime::device_lost)
+/// accessor does too. The accessor is the seam a host layer polls to drive
+/// device-loss recovery.
+#[test]
+fn headless_backend_reports_no_device_loss() {
+    let rt = RenderRuntime::headless(NullInstance::new(), rhi::Extent3d::new_2d(SIZE, SIZE))
+        .expect("the null device always comes up");
+    assert!(rt.device_lost().is_none());
+}
