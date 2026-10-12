@@ -55,6 +55,15 @@ pub struct BlobVec {
     /// `[b * rows_per_block, (b + 1) * rows_per_block)`.
     blocks: Vec<Block>,
     drop: Option<DropFn>,
+    /// Whether this column owns (allocates and frees) its blocks.
+    ///
+    /// A standalone column owns them. A column that is one facet of a
+    /// [`Table`](crate::storage::Table) **does not**: the table allocates one
+    /// physical chunk block holding every column of a row window (design §5.3
+    /// DOTS chunk) and *attaches* each column's slice of it, so growing or
+    /// shrinking is driven by the table and this column never calls the global
+    /// allocator.
+    owns_blocks: bool,
 }
 
 /// A single allocated block: `rows_per_block` element slots, contiguous.
@@ -109,7 +118,71 @@ impl BlobVec {
             len: 0,
             blocks: Vec::new(),
             drop,
+            owns_blocks: true,
         }
+    }
+
+    /// Create an empty column whose blocks are **attached by an external owner**
+    /// (a [`Table`](crate::storage::Table) chunk block) rather than allocated
+    /// here.
+    ///
+    /// In this mode [`reserve`](BlobVec::reserve) and the swap-remove shrink path
+    /// never touch the global allocator — the owner grows and shrinks the chunk
+    /// blocks and calls [`attach_block`](BlobVec::attach_block) /
+    /// [`detach_block`](BlobVec::detach_block) — and dropping the column frees
+    /// nothing.
+    pub fn new_borrowed(
+        item_layout: Layout,
+        drop: Option<DropFn>,
+        rows_per_block: usize,
+    ) -> Self {
+        let mut this = Self::new_with_rows_per_block(item_layout, drop, rows_per_block);
+        this.owns_blocks = false;
+        this
+    }
+
+    /// Whether this column owns its block allocations.
+    #[inline]
+    pub fn owns_blocks(&self) -> bool {
+        self.owns_blocks
+    }
+
+    /// Attach the base pointer of this column's slice of a new chunk block.
+    ///
+    /// Only valid for a borrowed column (see [`new_borrowed`](BlobVec::new_borrowed));
+    /// the owner must pass the slice base for the chunk it is appending, so the
+    /// block list stays in row-window order. Zero-sized columns hold no bytes
+    /// and ignore the pointer.
+    ///
+    /// # Safety
+    /// `ptr` must be non-null and aligned for this column's element type, and
+    /// must point at a live slice of at least `rows_per_block` slots inside a
+    /// chunk block the owner keeps alive for this column's lifetime.
+    pub unsafe fn attach_block(&mut self, ptr: *mut u8) {
+        debug_assert!(!self.owns_blocks, "attach_block on an owning column");
+        debug_assert!(
+            ptr.is_null() || (ptr as usize).is_multiple_of(self.item_layout.align()),
+            "attached block must be aligned for the column's element type",
+        );
+        if self.item_layout.size() == 0 {
+            return;
+        }
+        self.blocks.push(Block {
+            // SAFETY: the caller guarantees `ptr` is non-null and aligned (a
+            // slice base inside a chunk block it owns); it is never dereferenced
+            // past the live rows.
+            ptr: unsafe { NonNull::new_unchecked(ptr) },
+        });
+    }
+
+    /// Detach the trailing chunk block (its storage is owned by the table, so it
+    /// is not freed here) after the block's last live row was removed.
+    pub fn detach_block(&mut self) {
+        debug_assert!(!self.owns_blocks, "detach_block on an owning column");
+        if self.item_layout.size() == 0 {
+            return;
+        }
+        self.blocks.pop().expect("detach_block on a column with no blocks");
     }
 
     /// Number of live elements.
@@ -201,6 +274,16 @@ impl BlobVec {
             return; // no blocks are ever needed for a ZST
         }
         let required = self.len + additional;
+        if !self.owns_blocks {
+            // The owning table grew the chunk blocks before filling; assert the
+            // capacity is in place instead of allocating here.
+            debug_assert!(
+                self.capacity() >= required,
+                "borrowed column under-provisioned: capacity {} < required {required}",
+                self.capacity(),
+            );
+            return;
+        }
         let needed_blocks = required.div_ceil(self.rows_per_block);
         while self.blocks.len() < needed_blocks {
             self.push_block();
@@ -210,8 +293,8 @@ impl BlobVec {
     /// Free every trailing block that no longer holds a live row.
     #[inline]
     fn shrink_blocks_to_len(&mut self) {
-        if self.item_layout.size() == 0 {
-            return;
+        if self.item_layout.size() == 0 || !self.owns_blocks {
+            return; // borrowed blocks are detached by the owning table
         }
         let needed = self.len.div_ceil(self.rows_per_block);
         while self.blocks.len() > needed {
@@ -536,7 +619,8 @@ impl BlobVec {
 impl Drop for BlobVec {
     fn drop(&mut self) {
         self.clear();
-        if self.item_layout.size() == 0 {
+        if self.item_layout.size() == 0 || !self.owns_blocks {
+            // Borrowed blocks are owned (and freed) by the table.
             return;
         }
         let layout = self.block_layout();

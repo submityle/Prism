@@ -8,9 +8,11 @@
 //! refinement layered on top of this representation; the row/column model and
 //! its invariants are unchanged by that work.
 
+use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
+use core::ptr::NonNull;
 
 use crate::change::{ComponentTicks, Tick};
 use crate::collections::HashMap;
@@ -49,16 +51,33 @@ pub struct Column {
 unsafe impl Sync for Column {}
 
 impl Column {
+    /// Create a column whose value bytes are a **borrowed slice of the owning
+    /// table's chunk blocks** (design §5.3 DOTS chunk): the table allocates one
+    /// block per chunk holding all columns and attaches each column's slice via
+    /// [`Column::attach_block`].
     fn new(layout: Layout, drop: Option<DropFn>, rows_per_chunk: usize) -> Self {
         Self {
-            // The value blocks and the change-version windows share the table's
-            // `rows_per_chunk`, so value block `c` is exactly chunk window `c`
-            // (design §5.3 physical chunks).
-            data: BlobVec::new_with_rows_per_block(layout, drop, rows_per_chunk),
+            data: BlobVec::new_borrowed(layout, drop, rows_per_chunk),
             added_ticks: Vec::new(),
             changed_ticks: Vec::new(),
             chunk: ChunkVersions::new(rows_per_chunk),
         }
+    }
+
+    /// Attach this column's slice of a newly-allocated chunk block.
+    ///
+    /// # Safety
+    /// `ptr` must be the aligned slice base inside a live chunk block (see
+    /// [`BlobVec::attach_block`]).
+    unsafe fn attach_block(&mut self, ptr: *mut u8) {
+        // SAFETY: forwarded contract.
+        unsafe { self.data.attach_block(ptr) };
+    }
+
+    /// Detach this column's slice of the trailing chunk block (owned by the
+    /// table, which frees it).
+    fn detach_block(&mut self) {
+        self.data.detach_block();
     }
 
     /// Number of elements (equals the owning table's row count).
@@ -355,6 +374,13 @@ impl Column {
 }
 
 /// Columnar storage for one archetype.
+///
+/// Values live in **physical chunk blocks** (design §5.3): one allocation per
+/// row window holds *every* column's slice for that window (a DOTS-style chunk),
+/// plus the per-chunk metadata sidecar. The [`Column`]s are borrowed views into
+/// those blocks — they never call the global allocator; [`Table::allocate`] and
+/// [`Table::swap_remove_row`] grow and shrink the blocks and attach/detach each
+/// column's slice.
 pub struct Table {
     entities: Vec<Entity>,
     columns: HashMap<ComponentId, Column>,
@@ -365,6 +391,61 @@ pub struct Table {
     /// logical chunk window and kept in lockstep with `chunk_count()`. Its
     /// structural epochs are bumped by the row-membership mutators below.
     chunk_meta: Vec<ChunkMeta>,
+    /// The owned physical chunk blocks, in row-window order. Declared *after*
+    /// `columns` so the borrowed column views drop before the blocks they point
+    /// into.
+    chunks: Vec<ChunkBlock>,
+    /// Byte offset of each column's slice inside a chunk block, keyed by
+    /// component id (computed once; the column set is fixed per archetype).
+    column_offsets: Vec<(ComponentId, usize)>,
+    /// Layout of one chunk block (all columns' slices, cache-line aligned).
+    block_layout: Layout,
+}
+
+/// One physical chunk: a single allocation holding every column's slice for one
+/// row window (design §5.3 DOTS chunk). Its `Drop` frees the allocation.
+struct ChunkBlock {
+    ptr: NonNull<u8>,
+    layout: Layout,
+}
+
+impl ChunkBlock {
+    fn alloc(layout: Layout) -> Self {
+        if layout.size() == 0 {
+            // An all-ZST table allocates nothing; the dangling base is never
+            // dereferenced.
+            return Self {
+                ptr: NonNull::dangling(),
+                layout,
+            };
+        }
+        // SAFETY: `layout.size() != 0`, as `alloc` requires.
+        let ptr = unsafe { alloc(layout) };
+        Self {
+            ptr: NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout)),
+            layout,
+        }
+    }
+}
+
+// SAFETY: a chunk block only holds component data for `Component: Send + Sync`
+// types (or dynamically-registered data the caller promises is `Send + Sync`)
+// plus the chunk's change-version cells; it is aliased and mutated under the
+// same unique-per-row discipline the columns that view it already uphold (see
+// the `Sync` impl on `Column`). The raw pointer is an owning allocation, not
+// shared mutable state on its own.
+unsafe impl Send for ChunkBlock {}
+// SAFETY: see the `Send` impl above.
+unsafe impl Sync for ChunkBlock {}
+
+impl Drop for ChunkBlock {
+    fn drop(&mut self) {
+        if self.layout.size() != 0 {
+            // SAFETY: allocated by `ChunkBlock::alloc` with this exact layout and
+            // not yet freed.
+            unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
+        }
+    }
 }
 
 impl Table {
@@ -382,7 +463,21 @@ impl Table {
         let bytes_per_row: usize = descriptors.iter().map(|(_, layout, _)| layout.size()).sum();
         let rpc = rows_per_chunk(bytes_per_row);
         let mut map = HashMap::default();
+        let mut offsets = Vec::with_capacity(descriptors.len());
+        // Lay every column's slice out inside one chunk block, each aligned to
+        // its own element alignment; the block itself gets a cache-line align.
+        let mut cursor = 0usize;
+        let mut block_align = 64usize;
+        for (id, layout, _) in &descriptors {
+            block_align = block_align.max((*layout).align());
+            cursor = cursor.next_multiple_of((*layout).align());
+            offsets.push((*id, cursor));
+            cursor += layout.size() * rpc;
+        }
+        let block_layout = Layout::from_size_align(cursor, block_align)
+            .expect("invalid chunk block layout");
         for (id, layout, drop) in descriptors {
+            // Columns are borrowed views into the table's chunk blocks.
             map.insert(id, Column::new(layout, drop, rpc));
         }
         Self {
@@ -390,6 +485,9 @@ impl Table {
             columns: map,
             rows_per_chunk: rpc,
             chunk_meta: Vec::new(),
+            chunks: Vec::new(),
+            column_offsets: offsets,
+            block_layout,
         }
     }
 
@@ -429,9 +527,48 @@ impl Table {
     /// column (design §17 原型预热).
     pub(crate) fn reserve(&mut self, additional: usize) {
         self.entities.reserve(additional);
+        // Chunk blocks are the table's own allocations; grow them up front so
+        // the borrowed columns already have their slices attached.
+        self.grow_chunks_to(self.entities.len() + additional);
         self.chunk_meta.reserve(additional.div_ceil(self.rows_per_chunk));
         for column in self.columns.values_mut() {
             column.reserve(additional);
+        }
+    }
+
+    /// Allocate chunk blocks until the table can hold `len` rows, attaching each
+    /// column's slice of every new block (design §5.3 DOTS chunk).
+    fn grow_chunks_to(&mut self, len: usize) {
+        let needed = len.div_ceil(self.rows_per_chunk);
+        while self.chunks.len() < needed {
+            let block = ChunkBlock::alloc(self.block_layout);
+            for (id, offset) in &self.column_offsets {
+                if let Some(column) = self.columns.get_mut(id) {
+                    // SAFETY: `offset` was laid out inside `block_layout`, so the
+                    // offset base is inside the allocation and aligned for the
+                    // column's element type; the block is kept alive in `chunks`.
+                    unsafe {
+                        let base = block.ptr.as_ptr().add(*offset);
+                        column.attach_block(base);
+                    }
+                }
+            }
+            self.chunks.push(block);
+        }
+    }
+
+    /// Detach and free trailing chunk blocks until the table holds exactly
+    /// `ceil(len / rows_per_chunk)` of them.
+    fn shrink_chunks_to(&mut self, len: usize) {
+        let needed = len.div_ceil(self.rows_per_chunk);
+        while self.chunks.len() > needed {
+            // Detach the columns' views first, then drop (free) the block.
+            for (id, _) in &self.column_offsets {
+                if let Some(column) = self.columns.get_mut(id) {
+                    column.detach_block();
+                }
+            }
+            self.chunks.pop();
         }
     }
 
@@ -532,6 +669,9 @@ impl Table {
     pub fn allocate(&mut self, entity: Entity) -> usize {
         let row = self.entities.len();
         self.entities.push(entity);
+        // Provide the borrowed columns' slice for this row's window *before* the
+        // caller fills them.
+        self.grow_chunks_to(self.entities.len());
         // A brand-new row joins its window: keep the metadata sidecar sized and
         // bump the window's structural epoch (design §5.3 `ChunkMeta`).
         self.resize_chunk_meta(self.entities.len());
@@ -624,6 +764,9 @@ impl Table {
         // last row's window lost a row. Bump each distinct affected window once
         // and drop any window that no longer holds rows (design §5.3 `ChunkMeta`).
         let after = self.entities.len();
+        // Drop any chunk block whose last row just left (its columns' views are
+        // detached, then the block is freed).
+        self.shrink_chunks_to(after);
         self.resize_chunk_meta(after);
         self.bump_chunk_meta(row);
         if row != last && row / self.rows_per_chunk != last / self.rows_per_chunk {
@@ -852,5 +995,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The DOTS-layout invariant (design §5.3): one chunk is **one** allocation
+    /// holding every column's slice, so the table's block count equals its chunk
+    /// count — not chunk count × column count.
+    #[test]
+    fn one_block_per_chunk_holds_every_column() {
+        let mut world = World::new();
+        let arch = world.prewarm::<(Wide, Big)>(0);
+        // Wide 2048 B + Big 512 B = 2560 B/row -> floor(16 KiB / 2560) = 6 rows.
+        let rows_per_chunk = world
+            .archetypes()
+            .get(arch)
+            .unwrap()
+            .table()
+            .rows_per_chunk();
+        assert_eq!(rows_per_chunk, 6);
+        assert!(world.archetypes().get(arch).unwrap().table().chunks.is_empty());
+
+        // Cross three chunk boundaries.
+        for _ in 0..(rows_per_chunk * 3) {
+            world.spawn((Wide([1; 2048]), Big(7, [0; 504])));
+        }
+        let table = world.archetypes().get(arch).unwrap().table();
+        assert_eq!(table.chunk_count(), 3);
+        assert_eq!(
+            table.chunks.len(),
+            3,
+            "one allocation per chunk, not one per column",
+        );
     }
 }
