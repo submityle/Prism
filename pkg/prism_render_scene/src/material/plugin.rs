@@ -8,6 +8,7 @@ use super::{
         stage_material_uploads, write_material_buffers,
     },
     texture_upload::{prepare_material_texture_arrays, MaterialTextureArrays},
+    virtual_texture::MaterialVirtualTextureGpuBundle,
 };
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
@@ -38,6 +39,9 @@ impl Plugin for PrismMaterialPlugin {
                 (
                     init_gpu_resource::<MaterialGpuBuffers>,
                     init_gpu_resource::<MaterialTextureArrays>,
+                    init_gpu_resource::<MaterialVirtualTextureGpuBundle>,
+                    // MaterialBindGroup consumes the disabled-safe VT bundle
+                    // even before a residency producer enables it.
                     init_gpu_resource::<MaterialBindGroup>,
                     configure_material_texture_capacity,
                     rebuild_material_buffers,

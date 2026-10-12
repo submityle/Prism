@@ -314,10 +314,11 @@ pub(crate) fn prepare_material_bind_group(
     buffers: Res<MaterialGpuBuffers>,
     runtime: Res<RenderMaterialRegistry>,
     arrays: Res<MaterialTextureArrays>,
+    virtual_texture: Res<super::virtual_texture::MaterialVirtualTextureGpuBundle>,
     mut bindings: ResMut<MaterialBindGroup>,
     device: Res<RenderDevice>,
 ) {
-    bindings.prepare(&device, &buffers, &runtime, &arrays);
+    bindings.prepare(&device, &buffers, &runtime, &arrays, &virtual_texture);
 }
 
 /// Clamps the bindless texture heap to the device-supported binding-array

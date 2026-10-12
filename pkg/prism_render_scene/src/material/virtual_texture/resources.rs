@@ -1,12 +1,13 @@
 //! Device-owned material-VT atlas, page-table, config, and sampler resources.
 
+use bevy_ecs::{prelude::Resource, world::FromWorld};
 use bevy_render::{
     render_resource::{
         AddressMode, Buffer, BufferDescriptor, BufferUsages, Extent3d, Sampler, SamplerDescriptor,
         Texture, TextureDescriptor, TextureDimension, TextureUsages, TextureView,
         TextureViewDescriptor, TextureViewDimension,
     },
-    renderer::RenderDevice,
+    renderer::{RenderDevice, RenderQueue},
 };
 
 use super::{
@@ -34,6 +35,7 @@ pub struct MaterialVirtualTextureResourceSizes {
 /// No shade-cache buffer, texture, view, or sampler is accepted here. The
 /// page table is a dedicated `STORAGE | COPY_DST` allocation and the atlas is
 /// a dedicated `D2Array | TEXTURE_BINDING | COPY_DST` allocation.
+#[derive(Resource)]
 pub struct MaterialVirtualTextureGpuBundle {
     atlas_texture: Texture,
     atlas_view: TextureView,
@@ -42,6 +44,26 @@ pub struct MaterialVirtualTextureGpuBundle {
     sampler: Sampler,
     atlas_config: MaterialVirtualTextureAtlasConfig,
     sizes: MaterialVirtualTextureResourceSizes,
+}
+
+impl FromWorld for MaterialVirtualTextureGpuBundle {
+    fn from_world(world: &mut bevy_ecs::world::World) -> Self {
+        let device = world.resource::<RenderDevice>().clone();
+        let queue = world.resource::<RenderQueue>().clone();
+        let atlas_config = MaterialVirtualTextureAtlasConfig::new(
+            1,
+            0,
+            1,
+            1,
+            prism_render_material::MaterialVtFormat::Rgba8Unorm,
+        )
+        .expect("the material-VT dummy atlas geometry is valid");
+        let bundle = Self::new(&device, atlas_config, 1)
+            .expect("the material-VT dummy GPU bundle must be constructible");
+        let disabled = MaterialVirtualTextureGpuConfig::new(false, 0, 1, 1, 1, 1, 0, 0);
+        queue.write_buffer(bundle.config_buffer(), 0, bytemuck::bytes_of(&disabled));
+        bundle
+    }
 }
 
 impl MaterialVirtualTextureGpuBundle {

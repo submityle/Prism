@@ -1,7 +1,10 @@
 use bevy_ecs::{prelude::*, world::FromWorld};
 use bevy_material::{
     bind_group_layout_entries::{
-        binding_types::{sampler, storage_buffer_read_only_sized, texture_2d},
+        binding_types::{
+            sampler, storage_buffer_read_only_sized, texture_2d, texture_2d_array,
+            uniform_buffer_sized,
+        },
         BindGroupLayoutEntries,
     },
     descriptor::BindGroupLayoutDescriptor,
@@ -17,8 +20,10 @@ use core::num::NonZero;
 use prism_render_material::{GpuMaterialHeader, GpuMaterialTexture};
 
 use super::{
-    buffers::MaterialGpuBuffers, runtime::RenderMaterialRegistry,
+    buffers::MaterialGpuBuffers,
+    runtime::RenderMaterialRegistry,
     texture_upload::MaterialTextureArrays,
+    virtual_texture::{MaterialVirtualTextureGpuBundle, MaterialVirtualTextureGpuConfig},
 };
 
 /// Shared binding contract for raster, visibility, shadows, GI, ray, and
@@ -28,8 +33,9 @@ use super::{
 /// When the device supports bindless textures the layout is extended with
 /// bindings 3/4 — the `binding_array<texture_2d<f32>>` and
 /// `binding_array<sampler>` that `material_sample.wesl` samples — sized to the
-/// heap's device-clamped capacity. On non-bindless devices only the three
-/// storage bindings are present.
+/// heap's device-clamped capacity. Bindings 5–8 are always present for the
+/// dedicated Material-VT page table, config, atlas, and sampler; the disabled
+/// resource bundle supplies a valid fallback until residency is enabled.
 #[derive(Resource)]
 pub struct MaterialBindGroup {
     pub layout: BindGroupLayout,
@@ -37,6 +43,7 @@ pub struct MaterialBindGroup {
     pub bind_group: Option<BindGroup>,
     bindless: bool,
     buffer_ids: Option<[BufferId; 3]>,
+    virtual_texture_buffer_ids: Option<[BufferId; 2]>,
     buffer_version: u32,
     texture_version: u32,
 }
@@ -64,6 +71,14 @@ impl FromWorld for MaterialBindGroup {
             false,
             NonZero::new(size_of::<GpuMaterialTexture>() as u64),
         );
+        let virtual_texture_page_table =
+            storage_buffer_read_only_sized(false, NonZero::new(size_of::<u32>() as u64));
+        let virtual_texture_config = uniform_buffer_sized(
+            false,
+            NonZero::new(MaterialVirtualTextureGpuConfig::byte_size()),
+        );
+        let virtual_texture_atlas = texture_2d_array(TextureSampleType::Float { filterable: true });
+        let virtual_texture_sampler = sampler(SamplerBindingType::Filtering);
 
         let (layout, layout_descriptor) = if bindless {
             let count = NonZero::new(capacity)
@@ -76,6 +91,10 @@ impl FromWorld for MaterialBindGroup {
                     texture,
                     texture_2d(TextureSampleType::Float { filterable: true }).count(count),
                     sampler(SamplerBindingType::Filtering).count(count),
+                    virtual_texture_page_table,
+                    virtual_texture_config,
+                    virtual_texture_atlas,
+                    virtual_texture_sampler,
                 ),
             );
             (
@@ -83,7 +102,18 @@ impl FromWorld for MaterialBindGroup {
                 BindGroupLayoutDescriptor::new("prism materials", &entries),
             )
         } else {
-            let entries = BindGroupLayoutEntries::sequential(stages, (header, parameter, texture));
+            let entries = BindGroupLayoutEntries::with_indices(
+                stages,
+                (
+                    (0, header),
+                    (1, parameter),
+                    (2, texture),
+                    (5, virtual_texture_page_table),
+                    (6, virtual_texture_config),
+                    (7, virtual_texture_atlas),
+                    (8, virtual_texture_sampler),
+                ),
+            );
             (
                 device.create_bind_group_layout("prism materials", &entries),
                 BindGroupLayoutDescriptor::new("prism materials", &entries),
@@ -96,6 +126,7 @@ impl FromWorld for MaterialBindGroup {
             bind_group: None,
             bindless,
             buffer_ids: None,
+            virtual_texture_buffer_ids: None,
             buffer_version: 0,
             texture_version: 0,
         }
@@ -103,12 +134,19 @@ impl FromWorld for MaterialBindGroup {
 }
 
 impl MaterialBindGroup {
+    /// Whether the bound layout carries the bindless texture/sampler arrays.
+    #[must_use]
+    pub(crate) const fn bindless(&self) -> bool {
+        self.bindless
+    }
+
     pub(crate) fn prepare(
         &mut self,
         device: &RenderDevice,
         buffers: &MaterialGpuBuffers,
         runtime: &RenderMaterialRegistry,
         arrays: &MaterialTextureArrays,
+        virtual_texture: &MaterialVirtualTextureGpuBundle,
     ) {
         let Some((headers, parameters, textures)) = buffers.buffers() else {
             return;
@@ -116,7 +154,12 @@ impl MaterialBindGroup {
         let ids = [headers.id(), parameters.id(), textures.id()];
         let version = runtime.registry.snapshot().buffer_version;
         let texture_version = arrays.version();
+        let virtual_texture_buffer_ids = [
+            virtual_texture.page_table_buffer().id(),
+            virtual_texture.config_buffer().id(),
+        ];
         if self.buffer_ids == Some(ids)
+            && self.virtual_texture_buffer_ids == Some(virtual_texture_buffer_ids)
             && self.buffer_version == version
             && self.texture_version == texture_version
         {
@@ -138,20 +181,29 @@ impl MaterialBindGroup {
                     textures.as_entire_binding(),
                     views.as_slice(),
                     samplers.as_slice(),
+                    virtual_texture.page_table_buffer().as_entire_binding(),
+                    virtual_texture.config_buffer().as_entire_binding(),
+                    virtual_texture.atlas_view(),
+                    virtual_texture.sampler(),
                 )),
             )
         } else {
             device.create_bind_group(
                 "prism materials",
                 &self.layout,
-                &BindGroupEntries::sequential((
-                    headers.as_entire_binding(),
-                    parameters.as_entire_binding(),
-                    textures.as_entire_binding(),
+                &BindGroupEntries::with_indices((
+                    (0, headers.as_entire_binding()),
+                    (1, parameters.as_entire_binding()),
+                    (2, textures.as_entire_binding()),
+                    (5, virtual_texture.page_table_buffer().as_entire_binding()),
+                    (6, virtual_texture.config_buffer().as_entire_binding()),
+                    (7, virtual_texture.atlas_view()),
+                    (8, virtual_texture.sampler()),
                 )),
             )
         });
         self.buffer_ids = Some(ids);
+        self.virtual_texture_buffer_ids = Some(virtual_texture_buffer_ids);
         self.buffer_version = version;
         self.texture_version = texture_version;
     }
