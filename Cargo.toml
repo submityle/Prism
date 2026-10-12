@@ -71,6 +71,7 @@ members = [
   # Device twin of the CPU direct-lighting golden (WGSL base-lobe mirror + PBR surface pass).
   "pkg/prism_render_visibility",
   "pkg/prism_scene",
+  "pkg/prism_ui_dock",
   # Prism Bevy integration bridge for the GPU-driven renderer (phased-out once prism_app lands).
   "pkg/prism_bevy",
   # Prism experimental next-generation physics engine.

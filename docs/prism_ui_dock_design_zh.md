@@ -20,7 +20,7 @@
 >
 > 本文为**设计规格**。地基层(`prism_ui_layout` 确定性 flexbox 解算、`prism_ui_overlay` portal/浮层 + FocusTrap、
 > `prism_ui_store` 响应式状态、`prism_ui_virtual` 虚拟化、`prism_ui_input` hit_test/focus/gesture、
-> `prism_ui_component_kit::DockPanel` 面板外观)为**已交付**(SHIPPED);**`prism_ui_dock` 本体为全新规划项(PLANNED)**。
+> `prism_ui_component_kit::DockPanel` 面板外观)为**已交付**(SHIPPED);**`prism_ui_dock` 当前已交付 M0 核心(模型/校验/reducer)，其余集成能力仍为 PLANNED**。
 > 全文严格区分「已实现并通过测试」与「规划中」。
 >
 > **非目标**:不含 AI/ML/LLM;不做窗口管理器(多显示器/原生窗口由平台/`prism_window` 层承载,本层只给布局模型);
@@ -30,7 +30,7 @@
 - 适用: Prism / Loom UI 生态(编辑器外壳 + 任意 Loom 工具应用)
 - Crate 名: `prism_ui_dock`
 - 关键地基 — 已就绪(SHIPPED): `prism_ui_layout`(确定性 flexbox,`no_std`)、`prism_ui_overlay`(OverlayKind z 序 + FocusTrap,浮动/预览层)、`prism_ui_store`(响应式状态 + select + middleware)、`prism_ui_virtual`(列表虚拟化)、`prism_ui_input`(hit_test z 序/pointer-events、FocusRing、gesture/velocity/swipe)、`prism_ui_scoped`(作用域样式)、`prism_ui_component_kit::editor::DockPanel`(面板外观)、`prism_ui_snapshot`(可逆文本编码,持久化参照)、`prism_ui_anim`/`prism_ui_motion`(拖拽/贴靠动效)
-- 前置待建(本 crate 落地): 见 §15 路线图 M0–M5
+- 前置待建(本 crate 后续落地): 见 §15 路线图 M1–M5；M0 已完成并在 §18 登记
 - 核心契约: 继承 Loom「**成本 ∝ 变化量**」;布局是**纯数据树**,一切改动走**确定性 reducer**,一切持久化**可校验可迁移**,一切可见面板**懒构建 + 虚拟化**。
 
 ---
@@ -343,9 +343,10 @@ let layout = DockLayout::load(&bytes, &registry)?; // 未知面板丢弃,比例�
 ## 18. 诚实边界(SHIPPED vs PLANNED)
 
 - ✅ **已存在底座(非本 crate)**:`prism_ui_layout`(确定性 flexbox,`no_std`)、`prism_ui_overlay`(OverlayKind z 序 + FocusTrap + portal 渲染)、`prism_ui_store`(Store/select/middleware)、`prism_ui_virtual`(视口窗口化 + overscan + spacer)、`prism_ui_input`(hit_test z 序/pointer-events、FocusRing tabindex、gesture/velocity/swipe/multitap)、`prism_ui_scoped`、`prism_ui_snapshot`(serialize_tree/parse_tree 可逆编码)、`prism_ui_anim`/`prism_ui_motion`、`prism_ui_component_kit::editor::DockPanel`(**仅视觉外壳**:标题栏 + 内容区 + DockSide 修饰类 + role=Group,无任何布局逻辑)。
-- ⬜ **全部 PLANNED(本 crate 尚未创建)**:`prism_ui_dock` 的 model / reduce / drag / render / persist / registry / store / a11y。本文所有 `rust` 代码块、API、drop zone/状态机均为**设计意图**,不代表已实现。
+- ✅ **M0 已交付**:`pkg/prism_ui_dock` 的 `model` / `validate` / `reduce`：纯数据 `DockNode`/`DockLayout`、split/tab/document/floating/autohide/maximize 模型、资源上限与唯一归属校验，以及确定性 split/tabify/move/close/resize/float/dock/maximize/restore/autohide reducer。当前已由 11 个单元测试覆盖，且通过 `no_std` 检查与 `clippy -D warnings`。
+- ⬜ **M1–M5 仍 PLANNED**:`drag`、`render`、`persist`、`registry`、`store`、`a11y` 以及动画/多显示器/撤销集成。本文其余 API、drop zone/状态机和渲染代码块仍是设计意图，不代表已实现。
 - ⬜ **依赖未落地项**:撤销集成需编辑器命令内核;多显示器校正需平台/`prism_window` 层;动效档位依赖性能分级。
-- 现状复核(本次已核验):`pkg` 全局搜 dock 布局管理、split/tab/float/持久化**均无实现**;唯一相关是 `DockPanel` 展示组件。本设计不推翻它,而是在其上补「宿主」层。
+- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心；`DockPanel` 仍仅负责视觉外壳，拖拽、渲染装配、持久化和注册表等能力尚待后续里程碑补齐。
 
 ---
 

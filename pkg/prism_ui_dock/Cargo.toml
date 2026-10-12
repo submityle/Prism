@@ -1,0 +1,14 @@
+[package]
+name = "prism_ui_dock"
+version = "0.1.0"
+edition = "2024"
+description = "Deterministic, validated, no_std-capable dock layout model and reducer for Prism."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = ["std"]
+std = []
+
+[lints]
+workspace = true
