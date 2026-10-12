@@ -132,3 +132,27 @@ fn empty_upload_reads_all_zero() {
     assert_eq!(gpu, cpu);
     assert_eq!(gpu, vec![0, 0, 0], "an untouched pool reads all zero");
 }
+
+/// Duplicate slots in one batch: the CPU reference applies uploads sequentially
+/// so the LAST write wins; the GPU must fold duplicates host-side to keep that
+/// semantics instead of racing two invocations on the same pool word
+/// (CR-found).
+#[test]
+fn duplicate_slots_keep_the_last_upload() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        return;
+    };
+    let storage = GpuPageStorage::new(&ctx);
+
+    let page_words = 3u32;
+    let capacity = 2u32;
+    let uploads: &[(u32, &[u32])] = &[(0, &[1, 1, 1]), (1, &[9, 9, 9]), (0, &[2, 2, 2])];
+    let fetches: &[(u32, u32)] = &[(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)];
+
+    let gpu = storage.round_trip(&ctx, page_words, capacity, uploads, fetches);
+    let cpu = cpu_round_trip(page_words, capacity, uploads, fetches);
+    assert_eq!(gpu, cpu, "GPU must match the last-wins CPU golden");
+    // Slot 0's final content is the last upload ([2,2,2]), not [1,1,1].
+    assert_eq!(gpu[..3], [2, 2, 2]);
+    assert_eq!(gpu[3..], [9, 9, 9]);
+}

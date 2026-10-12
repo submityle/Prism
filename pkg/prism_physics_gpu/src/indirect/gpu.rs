@@ -179,6 +179,12 @@ impl GpuDispatchArgs {
         workgroup_size: u32,
         max_dim: u32,
     ) -> DispatchArgs {
+        // An empty `counts` would create a zero-sized storage binding, which the
+        // wgpu validator rejects; there is no count to expand, so return the
+        // empty grid directly (CR-found).
+        if counts.is_empty() {
+            return DispatchArgs::EMPTY;
+        }
         let device = ctx.device();
         let counts_buf = buffer::storage_read(device, "prism_indirect_args_counts", counts);
         let args = GpuDispatchArgs::args_buffer(device, "prism_indirect_args_out");

@@ -26,7 +26,9 @@ struct Params {
 fn build_args() {
     let count = counts[params.count_offset];
     let wg = max(params.workgroup_size, 1u);
-    let total = (count + wg - 1u) / wg;
+    // Ceil-div via quotient/remainder: `(count + wg - 1u) / wg` would wrap for
+    // `count` near `u32::MAX` and disagree with Rust's `div_ceil` (CR-found).
+    let total = count / wg + select(0u, 1u, (count % wg) != 0u);
     if (total == 0u) {
         args[0] = 0u;
         args[1] = 1u;
@@ -42,7 +44,8 @@ fn build_args() {
         args[3] = total;
     } else {
         let x = max_dim;
-        let y = (total + max_dim - 1u) / max_dim;
+        // Same overflow-safe ceil-div for the row count.
+        let y = total / max_dim + select(0u, 1u, (total % max_dim) != 0u);
         args[0] = x;
         args[1] = y;
         args[2] = 1u;

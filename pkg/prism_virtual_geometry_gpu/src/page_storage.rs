@@ -214,11 +214,24 @@ impl GpuPageStorage {
     ) {
         let device = ctx.device();
 
+        // Fold duplicate slots, keeping only the LAST upload for each. The CPU
+        // reference applies uploads sequentially, so the final pool state is the
+        // last write per slot; emitting duplicates would instead let two
+        // invocations race on the same `pool[slot]` word with a nondeterministic
+        // winner (CR-found).
+        let mut folded: Vec<(u32, &[u32])> = Vec::with_capacity(uploads.len());
+        for &(slot, page) in uploads {
+            match folded.iter_mut().find(|(s, _)| *s == slot) {
+                Some(entry) => entry.1 = page,
+                None => folded.push((slot, page)),
+            }
+        }
+
         // A storage buffer must never be zero-sized. With no uploads the pass
         // still runs with `count` = 0 so the shader does nothing; a single
         // padded element in each input keeps the bindings valid.
-        let mut slots: Vec<u32> = uploads.iter().map(|(slot, _)| *slot).collect();
-        let mut data: Vec<u32> = uploads
+        let mut slots: Vec<u32> = folded.iter().map(|(slot, _)| *slot).collect();
+        let mut data: Vec<u32> = folded
             .iter()
             .flat_map(|(_, page)| page.iter().copied())
             .collect();
@@ -230,7 +243,7 @@ impl GpuPageStorage {
         }
 
         let params = Params {
-            count: uploads.len() as u32,
+            count: folded.len() as u32,
             page_words,
             capacity,
             pad0: 0,

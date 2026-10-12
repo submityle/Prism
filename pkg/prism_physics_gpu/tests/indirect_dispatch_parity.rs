@@ -58,6 +58,9 @@ fn device_dispatch_args_match_the_cpu_twin() {
         (vec![9 * 64], 0, 64, tiling_cap),
         // tiling at a non-multiple to exercise the ceil in both dimensions.
         (vec![1000], 0, 64, tiling_cap),
+        // `count + wg - 1` wraps at the u32 top: the kernel must use the
+        // overflow-safe ceil-div to match `u32::div_ceil` (CR-found).
+        (vec![u32::MAX], 0, 2, max_dim),
     ];
 
     for (counts, offset, wg, cap) in cases {
@@ -68,6 +71,22 @@ fn device_dispatch_args_match_the_cpu_twin() {
             "indirect args mismatch for counts={counts:?} offset={offset} wg={wg} cap={cap}"
         );
     }
+}
+
+/// An empty `counts` slice must not create a zero-sized storage binding: the
+/// convenience `compute` returns the empty grid instead (CR-found).
+#[test]
+fn empty_counts_returns_empty_args() {
+    let Some(ctx) = GpuContext::try_headless() else {
+        eprintln!("no GPU adapter; skipping indirect-dispatch empty case");
+        return;
+    };
+    let pipeline = GpuDispatchArgs::new(&ctx);
+    let max_dim = GpuDispatchArgs::device_max_dim(&ctx);
+    assert_eq!(
+        pipeline.compute(&ctx, &[], 0, WORKGROUP, max_dim),
+        prism_physics_gpu::indirect::args::DispatchArgs::EMPTY
+    );
 }
 
 #[test]
