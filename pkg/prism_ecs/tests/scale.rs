@@ -221,3 +221,67 @@ fn scale_spawn_batch_vs_individual_1m() {
         individual.as_secs_f64() / batched.as_secs_f64(),
     );
 }
+
+/// The design's headline claim is that the incremental path costs in proportion
+/// to what *changed*, not to world size. This measures both halves on 1M rows:
+/// the coarse `dirty_chunks` pass against a per-row `Changed<T>` scan, with the
+/// touched rows clustered (the case the chunk layer is built for) and scattered
+/// (the case where chunk granularity cannot help).
+#[test]
+#[ignore = "allocates 1M entities twice; run explicitly with --release --ignored"]
+fn scale_dirty_chunks_vs_changed_scan_1m() {
+    use prism_ecs::entity::Entity;
+
+    const TOUCHED: usize = 10_000; // 1% of the world
+
+    fn run_scenario(clustered: bool) -> (Duration, Duration, usize, usize) {
+        let mut world = World::new();
+        let entities: Vec<Entity> = world.spawn_batch(
+            (0..ENTITIES).map(|i| (Pos(i as f32, 0.0, 0.0), Vel(1.0, 2.0, 3.0))),
+        );
+
+        // Baseline the change window, then touch the selected rows.
+        let last_run = world.change_tick();
+        world.set_last_change_tick(last_run);
+        world.increment_change_tick();
+        let stride = ENTITIES / TOUCHED;
+        for k in 0..TOUCHED {
+            let index = if clustered { k } else { k * stride };
+            world.get_mut::<Vel>(entities[index]).expect("live").0 += 1.0;
+        }
+        let this_run = world.change_tick();
+
+        // Per-row change-detection scan: visits every matched row.
+        let changed = world.query_filtered::<&Vel, Changed<Vel>>();
+        world.set_last_change_tick(last_run);
+        let scan_start = Instant::now();
+        let changed_rows = changed.iter(&world).count();
+        let scan = scan_start.elapsed();
+
+        // Coarse chunk-granular pass: touches one version per chunk window.
+        let any = world.query::<&Vel>();
+        let dirty_start = Instant::now();
+        let dirty_rows: usize = any
+            .dirty_chunks(&world, last_run, this_run)
+            .iter()
+            .map(|chunk| chunk.len())
+            .sum();
+        let dirty = dirty_start.elapsed();
+
+        let chunks = world
+            .archetypes()
+            .iter()
+            .map(|a| a.table().chunk_count())
+            .sum::<usize>();
+        assert!(chunks > 0);
+        (scan, dirty, changed_rows, dirty_rows)
+    }
+
+    for (label, clustered) in [("clustered", true), ("scattered", false)] {
+        let (scan, dirty, changed_rows, dirty_rows) = run_scenario(clustered);
+        println!(
+            "{label:>9}: Changed<T> scan {scan:?} ({changed_rows} rows) | dirty_chunks {dirty:?} ({dirty_rows} rows covered) | {:.1}x",
+            scan.as_secs_f64() / dirty.as_secs_f64(),
+        );
+    }
+}
