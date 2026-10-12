@@ -22,7 +22,10 @@
 - **无全局硬顶**：没有 `MAX_LOBE`、`MAX_TEXTURE`、`MAX_DEPTH`、`MAX_LAYER` 这类人为上限；模型是开放可扩展的词汇表。
 - **一条线**：作者 → 烘焙 → 运行只有一条管线，一个 über-BSDF 模型族；没有"固定深度 slab 线"与"不计数 über 线"的二分。
 - **无损降级**：靠纹理预过滤（mip/VT）+ 高光抗锯齿自动降细节，**瓣数/特征在距离上恒定**；绝不做有损的瓣/层塌缩。
-- **双线可测**：保留 CPU 金标准（`prism_render_shading`）+ WESL GPU twin 的字节级对拍，作为确定性与回归门禁。
+- **双线可测**：保留 CPU 金标准（`prism_render_shading`）+ WESL GPU twin 的**双线对拍**，作为确定性与回归门禁。
+  > **口径（2026-10 实测修正）**：本文早期写作"**字节级**对拍"。经真机验证（`pkg/prism_render_material_gpu/tests/albedo_table_gpu_parity.rs`），GPU 有权把 `a + (b−a)·fx` 融合成 **FMA** 而 CPU 金标准不会，因此**算术类**结果在 CPU/GPU 之间**做不到逐位相等**（实测差 **1 ULP**，如 0.387934 vs 0.38793403）。所以本文此后：
+  > - **布局/字节**（打包、解包、变长聚集、bit 域）——同源 codegen，**仍是逐字节相等**，相关表述保留"字节级"；
+  > - **算术结果**（BSDF 响应、查表插值）——门禁按 **≤1 ULP** 或文档化的相对公差验收，"字节级对拍"在这类上下文一律读作"1 ULP 内对拍"。这是 FMA 契约的架构事实，不是回归。
 
 ### 非目标（主动不做）
 - **不做 BSDF 塌缩阶梯**（offline/runtime 把多瓣合成少瓣）：有损、档位跳变、不可预期——明确否决。
@@ -258,7 +261,7 @@
 
 "Prism über 是 OpenPBR 超集"要可验证、可维护，必须满足三条硬约束，缺一则退化为"又一个私有材质模型"：
 
-1. **纯 OpenPBR 子集合规对拍（Conformance Gate）**：对"只用 OpenPBR 字段、不含任何 Prism 扩展位"的材质，Prism 运行时的 BSDF 响应必须与 OpenPBR 参考实现（ASWF `OpenPBR` reference / MaterialX 节点）在 furnace + 定向光对拍下字节级一致。这进 CI 门禁（§10）——证明"关掉扩展，Prism 就是标准 OpenPBR"，这是"真超集"的充要前提。
+1. **纯 OpenPBR 子集合规对拍（Conformance Gate）**：对"只用 OpenPBR 字段、不含任何 Prism 扩展位"的材质，Prism 运行时的 BSDF 响应必须与 OpenPBR 参考实现（ASWF `OpenPBR` reference / MaterialX 节点）在 furnace + 定向光对拍下一致（**算术类 ≤1 ULP**，见开篇口径；布局类才要求逐字节）。这进 CI 门禁（§10）——证明"关掉扩展，Prism 就是标准 OpenPBR"，这是"真超集"的充要前提。
 
    **已落地（code-truth，2026-10 P2-f 第一片）**：门禁的**两层**各自到位——① **参数块层**：`prism_render_material::openpbr_conformance` 断言"只含 `KHR` 位的材质是 `project_to_openpbr` 的不动点"（结构不变量）；② **响应层**：`prism_render_shading::openpbr_reference` 是**从规范逐式转写**的独立 oracle（GGX NDF 各向同性/各向异性、Heitz-2014 高度相关 Smith、`openpbr-anisotropy-formula` 宽度映射、`unmodulated_fresnel`/`modulated_ior` 与 Walter-2007 精确介电 Fresnel），**与本仓实时着色器零共享代码**——若复用实时 helper 就只是"自证"，这正是该门禁要消灭的失效模式。`conformance::base_dielectric_fresnel_matches_the_openpbr_reference` 在 5 个 IOR × 4 个 `specular_weight` × 2 个 tint × 7 个入射角上把实时求值对着 oracle 卡到 `1e-4`。
 
@@ -342,7 +345,7 @@
 **九个点、九套定界 → 一个注册表**：`PRISM_lobe_face` 只是 `kind=lobe` 的一条 manifest；新增响应模式（`X_studio_mode_watercolor`）、动态通道（`PRISM_channel_wetness`）、描边 pass（`PRISM_pass_outline`）流程完全同构，走注册表而非改封闭 enum。超集（加瓣）由此降为 PCM 的一个 kind。
 
 ### 5.1 核心自举（dogfood）：消灭"核心 vs 扩展"特判
-OpenPBR 的 base/specular/coat/... 本身也注册为 `kind=lobe` 能力，命名空间 `KHR`（规范核心）；NPR_FACE 为 `PRISM`，私有瓣为 `X_studio_`。代码里不再有"核心瓣硬编码、扩展瓣走注册"的二分——只有一个注册表，区别仅在**命名空间 + 稳定级 + 位区**（§4.5 位段隔离）。这是 Vulkan（core 由 EXT 晋升）与 USD（内置 schema 也只是 schema）的红利：**唯一真相源 + codegen**，把 §17.5 自描述 schema 升为**所有 kind 的 manifest 格式**，`surface.rs`↔WESL 手写漂移从结构上消失。§4.5 三约束自然成为 PCM 全局不变量（合规对拍 = 只用 `KHR` 项 → 字节级等于 OpenPBR 参考；位区隔离 = 命名空间各占独立位/槽区、永不回收；向下投影 = 丢非 `KHR` 项投影回纯 OpenPBR）。
+OpenPBR 的 base/specular/coat/... 本身也注册为 `kind=lobe` 能力，命名空间 `KHR`（规范核心）；NPR_FACE 为 `PRISM`，私有瓣为 `X_studio_`。代码里不再有"核心瓣硬编码、扩展瓣走注册"的二分——只有一个注册表，区别仅在**命名空间 + 稳定级 + 位区**（§4.5 位段隔离）。这是 Vulkan（core 由 EXT 晋升）与 USD（内置 schema 也只是 schema）的红利：**唯一真相源 + codegen**，把 §17.5 自描述 schema 升为**所有 kind 的 manifest 格式**，`surface.rs`↔WESL 手写漂移从结构上消失。§4.5 三约束自然成为 PCM 全局不变量（合规对拍 = 只用 `KHR` 项 → 响应等于 OpenPBR 参考，算术 ≤1 ULP（见开篇口径）；位区隔离 = 命名空间各占独立位/槽区、永不回收；向下投影 = 丢非 `KHR` 项投影回纯 OpenPBR）。
 
 ### 5.2 性能不变量：烘焙期单态化，不是运行时分发（对九类一视同仁）
 PCM 的全部治理机器（命名空间解析、能力协商、used/required、位区分配）在**烘焙/加载期**求值完毕并蒸发；运行时只剩**已特化好的那一份 WESL**，零 dispatch、零解释、零注册表查询——这是与"插件 VM"划清界限的红线。严守 §8.5"permutation 边界只由步骤1/3 决定"：transfer/cache-aux/provider/downgrade/composite 全部编入烘焙期置换 key 或 pass 图，运行时无新增 PSO、不改分类 key。置换聚类按"扩展组合原型"做（§8.4）。
@@ -368,7 +371,7 @@ PCM 的全部治理机器（命名空间解析、能力协商、used/required、
 
 **§4.5 三约束落为字段谓词**：命名空间升为字段后，§4.5 的全局不变量从“人工审读的约定”变成**可机检的字段谓词**——合规对拍（约束 1）= “凡 `namespace==KHR` 必与 OpenPBR 参考实现字节对拍一致”；位区隔离（约束 2）= 位分配以 `namespace` 为分区键静态控制；晋升闸门 = 一台只允许 `X_studio→EXT→KHR` 单向跃迁的字段状态机。CI 直接枚举字段即可守门，无需人工审读。
 
-每类 kind 有类型化 hook 签名（lobe: unpack/classify/sample/respond；provider: produce_page；transfer: remap；composite: record 等）。受限 Rust 瓣（§5.4.1）编译期由 `proc-macro` 产出 WESL 孪生、CPU 金标准即作者原生 Rust → `golden="auto"`，任何 kind 自动获字节级 twin 对拍（§11）；裸 WESL 为不安全逃生口（`golden="none"`、CI 标红、**仅烘焙期**，运行时永不加载任意 shader——安全边界）。ABI header 加 `extensions_used_mask`/`extensions_required_mask`；OpenPBR 核心位与 PCM 注册扩展位走双命名空间 / 双版本轴，结构性不撞车（根除 §15 一条风险）。
+每类 kind 有类型化 hook 签名（lobe: unpack/classify/sample/respond；provider: produce_page；transfer: remap；composite: record 等）。受限 Rust 瓣（§5.4.1）编译期由 `proc-macro` 产出 WESL 孪生、CPU 金标准即作者原生 Rust → `golden="auto"`，任何 kind 自动获 twin 对拍（算术 ≤1 ULP，§11）；裸 WESL 为不安全逃生口（`golden="none"`、CI 标红、**仅烘焙期**，运行时永不加载任意 shader——安全边界）。ABI header 加 `extensions_used_mask`/`extensions_required_mask`；OpenPBR 核心位与 PCM 注册扩展位走双命名空间 / 双版本轴，结构性不撞车（根除 §15 一条风险）。
 
 #### 5.4.1 行为作者模型：节点图组合 → 受限 Rust 瓣 → 裸 WESL（取代"受限 DSL"）
 
@@ -571,7 +574,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 ## 11. 双线确定性（保留，这是优势）
 
-- CPU 金标准（`prism_render_shading`）+ WESL GPU twin 字节级对拍，重构中保留并扩展覆盖：
+- CPU 金标准（`prism_render_shading`）+ WESL GPU twin 双线对拍（算术 ≤1 ULP），重构中保留并扩展覆盖：
   - über BSDF、多散射补偿、高光抗锯齿、VT 页寻址（`indirection::lookup` 已 CPU/shader 同序）、烘焙期分层混合、变长解包，均 CPU/WESL 双实现对拍。
   - furnace / 能量守恒 / VT 寻址一致性作为回归门禁。
 - 注意：这与旧文档"两套并行物理栈"无关——物理侧已收敛（`prism_render_architecture` 依赖 `prism_physics_core`，cloth 为薄 façade）。
@@ -1147,7 +1150,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | 多散射补偿与 WESL twin 对不齐 | furnace CI + 查表字节对拍 |
 | VT 缺页抖动 | 回退到已驻留高 mip（降细节不卡顿）；复用现有 residency 优先级 |
 | 采样缩放在低档出现噪点 | 配合 TAA/时序累积；缩放曲线可调 |
-| 变长 über 解包边界错误 | CPU/WESL twin 字节级对拍覆盖变长路径 |
+| 变长 über 解包边界错误 | CPU/WESL twin 双线对拍覆盖变长路径（布局逐字节、算术 ≤1 ULP） |
 | 破坏性 ABI 迁移面大 | 一次性迁移 + WESL twin 对拍兜底,分阶段 P0→P2 |
 | 解耦着色缓存失效/一致性（P3） | 作为独立子系统推进；首期只缓存视角无关项，高光仍屏幕空间；光照/动态变化触发页重算 + 时序复用兜底 |
 | 运行时动态通道破坏确定性/双线对拍（§17.1） | 动态轴限定为少量解析式调制（无分支爆炸）；调制函数 CPU/WESL 双实现字节对拍；动态段进 ABI 显式声明，不走隐式状态 |
@@ -1465,7 +1468,7 @@ schema **只声明布局 + 元数据 + 契约**（在哪、多宽、谁消费、
 - **纹理空间分层混合**：层栈在烘焙期按遮罩逐纹素 lerp 同参数化 über（无损，任意层数），运行时不留图。Frostbite 模型。
 - **高光抗锯齿**：Toksvig/LEAN，把法线细节丢失转成等效 roughness，远处不闪烁。
 - **置换治理**：内容哈希去重 + archetype 聚类 + 按需异步编译 + 全瓣 über 回退，用来吸收"无界"带来的 permutation 成本。
-- **双线对拍**：CPU 金标准 + WESL GPU twin 字节级对拍（这是测试双线，刻意保留）。
+- **双线对拍**：CPU 金标准 + WESL GPU twin 双线对拍（布局逐字节、算术 ≤1 ULP；这是测试双线，刻意保留）。
 - **OpenPBR Surface**：ASWF/Adobe/Autodesk 2024 统一 PBR 作者 + BSDF 规范（base/specular/coat/fuzz/subsurface/transmission/emission/thin_film/geometry 分组）。Prism 运行时 über 的权威参数化，现 7 瓣是其子集，缺口加法补齐。
 - **四线正交**：PBR/NPR/混合/自定义不是四条管线，而是同一条 OpenPBR über 上由 `Illumination` 轴 + `render_class` + `custom_program` 选择的四种响应模式；共享解包/分类/降级/对拍。
 - **补瓣加法**：开放词汇表下，新物理瓣 = 新 mask 位 + 变长字段 + 静态置换，不影响老材质、不加全局硬顶。thin_film 虹彩是首个示例。
