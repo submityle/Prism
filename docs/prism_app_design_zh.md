@@ -11,7 +11,7 @@
 > - **管线/阶段**：flecs pipeline（阶段化 system 分组）
 > 本文为纯经典调度/循环路线，**不含任何 AI/ML 内容**。
 
-- 版本: v0.3（设计阶段，未进入编码；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：插件依赖图与分组/系统与模块热重载/子应用流水线深化/运行模式(无头服务器/编辑器内嵌/专用服务器)/优雅生命周期/控制台变量(cvar)与配置级联/崩溃隔离与系统恢复/子状态与状态作用域实体/多窗口多世界；均为 PLANNED，无代码；v0.2→v0.3 新增第 25 章「跨 crate 契约对齐」：主循环编排 time 帧节奏/VRR/帧预算/挂起恢复 + 向 tasks 车道喂预算 / 子应用流水线以 ECS 提取为边界·tasks 线程类分离为执行·transform 双缓冲保读一致 / 配置与 cvar 经 reflect 特性校验 / 多世界各持独立 time 时间域）
+- 版本: v0.3→v0.4（v0.3 及以前为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：插件依赖图与分组/系统与模块热重载/子应用流水线深化/运行模式(无头服务器/编辑器内嵌/专用服务器)/优雅生命周期/控制台变量(cvar)与配置级联/崩溃隔离与系统恢复/子状态与状态作用域实体/多窗口多世界；v0.2→v0.3 新增第 25 章「跨 crate 契约对齐」：主循环编排 time 帧节奏/VRR/帧预算/挂起恢复 + 向 tasks 车道喂预算 / 子应用流水线以 ECS 提取为边界·tasks 线程类分离为执行·transform 双缓冲保读一致 / 配置与 cvar 经 reflect 特性校验 / 多世界各持独立 time 时间域；v0.3→v0.4 进入实现，并把 §22/§23 从“全部 PLANNED、无代码”回写为与代码一致：M0–M3 主体、M5 骨架、第 24 章大部分已落地，M4 窗口 Runner / M6 工具链 / 多窗口多世界仍待做）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 关键依赖: `prism_ecs`（World/Schedule/States）、`prism_tasks`（执行器/流水线）、`prism_time`（时钟/固定步长）、`prism_diagnostic`（可选）、`prism_reflect`（可选，配置/设置反射）
 - 层级定位: ECS 文档 L5「App / Plugin / 固定阶段」；**上层** `prism_loom_runtime_framework`（GameInstance/HUD/路由）跑在本层之上，不要混淆
@@ -366,21 +366,24 @@ pkg/prism_app/
 
 ## 22. 路线图（M0–M6）与基准即规格
 
-- **M0 外壳**：App + SubApp(单 main) + Plugin + `HeadlessRunner`/`ScheduleRunnerOnce` + Startup/Update 阶段 → 跑通空 World 的帧循环 + 单测。
-- **M1 调度序 + 状态**：完整 Main 阶段序、PluginGroup/依赖解析/去重、States/OnEnter/OnExit、Events 更新。
-- **M2 固定步长**：累加器 + alpha + 死亡螺旋熔断、`Time<Fixed/Virtual/Real>`、FixedMain tick 组。
-- **M3 子应用 + 流水线**：Render SubApp + extract 接线 + `pipelined` 并行（接 ECS §23.5）。
-- **M4 窗口 Runner + 生命周期**：`WinitRunner`、Suspended/Resumed/LowMemory/AppExit、frame pacing/帧限。
-- **M5 确定性 + 服务器**：固定序/录制重放/回滚编排、`DedicatedServerRunner`、设置分层。
-- **M6 迁移/工具**：bevy_app 兼容 prelude；`prism_bevy` 退役；阶段火焰图/帧统计/诊断 HUD；插件热重载 + PIE 多实例。
+> 落地状态以 2026-10 代码为准：✅ 已落地 · 🚧 部分 · ⬜ 未开始。
 
-**基准即规格**：每里程碑以微基准红绿为完成判据——空帧循环开销、固定步长在 jitter 输入下步数正确、流水线重叠率、无头与窗口行为对拍一致、确定性双跑帧哈希一致。核心价值集中在 **M2（确定性心跳）+ M3（流水线/提取）+ M5（确定性/服务器）**。
+- **M0 外壳**（✅）：App + SubApp(单 main) + Plugin + `HeadlessRunner`/`ScheduleRunnerOnce` + Startup/Update 阶段 → 跑通空 World 的帧循环 + 单测。
+- **M1 调度序 + 状态**（✅）：完整 Main 阶段序、PluginGroup/依赖解析/去重（`plugin_group`/`plugin_graph`）、States/OnEnter/OnExit（`state/*`）、Events 更新（`event`）。
+- **M2 固定步长**（✅）：累加器 + alpha + 死亡螺旋熔断（`fixed`）、`Time<Fixed/Virtual/Real>`（`time`）、FixedMain tick 组。
+- **M3 子应用 + 流水线**（🚧）：`sub_app` 的 extract 接线与 `pipelined` feature 已落地；与 `prism_tasks` 车道（tasks §24.2 / §25.2）的深度接线待对齐。
+- **M4 窗口 Runner + 生命周期**（🚧）：`lifecycle`/`exit`/`pacing`（帧节奏、帧限）已落地；**`WinitRunner` 未实现**（需 `prism_window`，见 `runner/mod.rs` 注释），随之的移动端 Suspended/Resumed 与设备丢失恢复待做。
+- **M5 确定性 + 服务器**（🚧）：`determinism`（种子 RNG / 每帧状态哈希 / 逐固定步输入录放）、`DedicatedServerRunner`、`settings` 分层已落地；**world-snapshot 回滚**待 `prism_ecs` 提供 snapshot API。
+- **M6 迁移/工具**（⬜/🚧）：`prelude`（贴近 `bevy_app`）与 `diagnostics`（帧统计/启动耗时）已落地；**`prism_bevy` 退役、阶段火焰图、插件热重载（§24.2）、PIE 多实例未实现**。
+
+**基准即规格**：每里程碑以微基准红绿为完成判据——空帧循环开销、固定步长在 jitter 输入下步数正确、流水线重叠率、无头与窗口行为对拍一致、确定性双跑帧哈希一致。核心价值集中在 **M2（确定性心跳）+ M3（流水线/提取）+ M5（确定性/服务器）**。**上述基准目前尚未采集**，因此里程碑的“完成”只表示 API 与机制落地，性能判据仍待补。
 
 ---
 
 ## 23. 诚实边界与风险
 
-- 本文为设计规格，**当前无代码**；M0–M6 均为 PLANNED。
+- 本文为设计规格。**截至 2026-10 代码已进入实现**：M0–M3 主体、M5 骨架与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——M4 的 `WinitRunner`、M6 的热重载/`prism_bevy` 退役/PIE、§24.9 多窗口多世界、确定性 world-snapshot 回滚仍未实现。
+- **feature 面尚未对齐**：§20 列出的 `multi_thread`/`winit`/`headless`/`reflect`/`trace` 目前只定义了 `std`/`pipelined`/`determinism`；其余需与真实实现一起落地，**不提前声明空开关**，避免假实现。
 - **高风险项**：
   1. **extract 管线 + 流水线并行（M3）**：跨 World 只读提取 + 跨线程生命周期是正确性要害；须先定义稳定 `ExtractComponent` trait，再上并行；可先串行提取跑通，再开 `pipelined`。这是 `prism_render_scene` 能否干净脱 Bevy 的决定性接缝。
   2. **固定步长熔断（M2）**：死亡螺旋参数（max_frame_dt/max_substeps）需按内容压测标定，错配会在卡顿时放大为慢放或卡死。
@@ -470,7 +473,7 @@ AAA 要求「一个系统崩了不拖垮整个进程」:
 
 ### 24.10 诚实边界
 
-本章全部为 PLANNED 设计目标,无代码。**24.1 插件依赖图 + 24.3 子应用流水线**是框架骨架能力,建议随 M0/M1 优先落地;24.4 运行模式(尤其无头服务器)随脱 Bevy 清理渲染耦合时自然成立;24.6 cvar、24.8 子状态随 gameplay/编辑器落地;24.2 热重载、24.7 崩溃隔离是开发期生产力/稳定性增强,随工具链(M6)落地。本 crate 是地基运行时,勿与上层 `prism_loom_runtime_framework` 职责重叠(后者做更高层游戏流程编排)。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
+本章设计目标以 2026-10 代码为准**大部分已落地**：24.1 插件依赖图（`plugin_graph`）、24.4 运行模式（`run_mode`/`capability`/`platform_tier`）、24.5 优雅生命周期（`exit`/`lifecycle`）、24.6 cvar（`cvar`）、24.7 崩溃隔离 + 看门狗（`crash`/`watchdog`）、24.8 子状态与状态作用域实体（`state/sub`、`state/scoped`）均有实现并可测。**尚未落地**：24.2 系统/模块热重载、24.3 与 `prism_tasks` 车道的深度流水线接线、24.9 多窗口/多世界。本 crate 是地基运行时,勿与上层 `prism_loom_runtime_framework` 职责重叠(后者做更高层游戏流程编排)。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
 
 ---
 
@@ -509,5 +512,4 @@ App 多世界（§24.9）与 ECS 多 World（ECS §16）协同时，每个 World
 
 ### 25.5 诚实边界
 
-本章全部为 PLANNED 对齐说明，无代码；不改变 App 已有机制，仅固定编排职责与引用。落地时序：25.1 随 M2 主循环/平台接线；25.2 随 M3 渲染子应用；25.3 随 M1 配置/编辑器；25.4 随多世界/服务器模式落地。App 是地基运行时编排者，更高层游戏流程编排仍归 `prism_loom_runtime_framework`。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
-
+本章为跨 crate 契约对齐说明，**部分已随实现落地**：25.1 主循环编排 `prism_time`（`time`/`fixed`/`pacing` 已接线）、25.2 `sub_app` 的 ECS 提取边界与 `pipelined` 执行已落地。**仍为 PLANNED**：25.3 配置/cvar 经 `prism_reflect` 的类型化读写与校验、25.4 多世界各持独立 time 时间域。落地时序：25.1 随 M2 主循环/平台接线；25.2 随 M3 渲染子应用；25.3 随 M1 配置/编辑器；25.4 随多世界/服务器模式落地。App 是地基运行时编排者，更高层游戏流程编排仍归 `prism_loom_runtime_framework`。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
