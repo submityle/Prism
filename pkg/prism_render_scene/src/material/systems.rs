@@ -99,7 +99,12 @@ pub(crate) fn extract_standard_materials(
                 let exists = runtime.material_handle(id).is_some();
                 let source_query = query_standard_material_vt_sources(material, &sources);
                 if runtime
-                    .publish_asset(id, material, completion.next_submission_value())
+                    .publish_asset_with_sources(
+                        id,
+                        material,
+                        completion.next_submission_value(),
+                        Some(&sources),
+                    )
                     .is_ok()
                 {
                     source_queries.update(id, source_query);
@@ -192,6 +197,23 @@ mod tests {
         image
     }
 
+    fn complete_rgba_image(value: u8) -> Image {
+        let mut image = Image::new(
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            vec![value; 4 * 4 * 4],
+            TextureFormat::Rgba8Unorm,
+            RenderAssetUsages::default(),
+        );
+        image.texture_descriptor.mip_level_count = 3;
+        image.data = Some(vec![value; (4 * 4 * 4) + (2 * 2 * 4) + 4]);
+        image
+    }
+
     #[test]
     fn image_events_capture_snapshot_and_remove_it_without_claiming_residency() {
         let id: AssetId<Image> = Handle::from(Uuid::from_u128(0xA1)).id();
@@ -261,6 +283,106 @@ mod tests {
         assert_eq!(cached.get(AssetId::default()), Some(query));
         cached.remove(AssetId::default());
         assert_eq!(cached.len(), 0);
+    }
+
+    #[test]
+    fn material_rows_advertise_vt_only_when_the_default_producer_accepts_the_source() {
+        let compatible: Handle<Image> = Handle::from(Uuid::from_u128(0xB1));
+        let incompatible: Handle<Image> = Handle::from(Uuid::from_u128(0xB2));
+        let mut sources = MaterialVtSourceRegistry::default();
+        sources.upsert_asset_image(compatible.id(), &complete_rgba_image(1));
+        // Advance the source identity independently of the bindless heap. The
+        // two counters intentionally have different ownership/lifetime
+        // semantics; a resolver that copies the source revision into the GPU
+        // row would be stale as soon as this source is refreshed in place.
+        sources.upsert_asset_image(compatible.id(), &complete_rgba_image(3));
+        sources.upsert_asset_image(incompatible.id(), &complete_image(2));
+
+        let mut world = World::new();
+        let mut assets = Assets::<StandardMaterial>::default();
+        let material = assets.add(StandardMaterial {
+            base_color_texture: Some(compatible.clone()),
+            ..StandardMaterial::default()
+        });
+        let material_id = material.id();
+        world.insert_resource(assets);
+        world.insert_resource(RenderMaterialRegistry::default());
+        world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
+            let materials = world.resource::<Assets<StandardMaterial>>();
+            runtime
+                .publish_asset_with_sources(
+                    material_id,
+                    materials.get(material_id).unwrap(),
+                    prism_render_architecture::gpu_scene::GpuCompletionValue(1),
+                    Some(&sources),
+                )
+                .unwrap();
+        });
+        let handle = world
+            .resource::<RenderMaterialRegistry>()
+            .material_handle(material_id)
+            .unwrap();
+        let record = world
+            .resource::<RenderMaterialRegistry>()
+            .registry
+            .get(handle)
+            .unwrap();
+        assert_eq!(record.textures.len(), 1);
+        assert_ne!(
+            record.textures[0].virtual_texture_id,
+            prism_render_material::NO_VIRTUAL_TEXTURE
+        );
+        let texture = record.textures[0];
+        let runtime = world.resource::<RenderMaterialRegistry>();
+        assert_eq!(
+            texture.generation,
+            runtime.texture_generation_table()[texture.index as usize],
+            "VT rows must use the bindless heap generation, not the source revision"
+        );
+        let source_revision = match sources.lookup(compatible.id()) {
+            super::super::vt_source::MaterialVtSourceLookup::Available { identity, .. } => {
+                identity.revision()
+            }
+            other => panic!("expected compatible source, got {other:?}"),
+        };
+        assert_ne!(
+            texture.generation as u64, source_revision,
+            "the regression fixture must distinguish heap generations from source revisions"
+        );
+
+        let mut world = World::new();
+        let mut assets = Assets::<StandardMaterial>::default();
+        let material = assets.add(StandardMaterial {
+            base_color_texture: Some(incompatible.clone()),
+            ..StandardMaterial::default()
+        });
+        let material_id = material.id();
+        world.insert_resource(assets);
+        world.insert_resource(RenderMaterialRegistry::default());
+        world.resource_scope(|world, mut runtime: Mut<RenderMaterialRegistry>| {
+            let materials = world.resource::<Assets<StandardMaterial>>();
+            runtime
+                .publish_asset_with_sources(
+                    material_id,
+                    materials.get(material_id).unwrap(),
+                    prism_render_architecture::gpu_scene::GpuCompletionValue(1),
+                    Some(&sources),
+                )
+                .unwrap();
+        });
+        let handle = world
+            .resource::<RenderMaterialRegistry>()
+            .material_handle(material_id)
+            .unwrap();
+        let record = world
+            .resource::<RenderMaterialRegistry>()
+            .registry
+            .get(handle)
+            .unwrap();
+        assert_eq!(
+            record.textures[0].virtual_texture_id,
+            prism_render_material::NO_VIRTUAL_TEXTURE
+        );
     }
 
     #[test]
@@ -517,8 +639,16 @@ pub(crate) fn prepare_material_bind_group(
     virtual_texture: Res<super::virtual_texture::MaterialVirtualTextureGpuBundle>,
     mut bindings: ResMut<MaterialBindGroup>,
     device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
 ) {
-    bindings.prepare(&device, &buffers, &runtime, &arrays, &virtual_texture);
+    bindings.prepare(
+        &device,
+        &buffers,
+        &runtime,
+        &arrays,
+        &virtual_texture,
+        &queue,
+    );
 }
 
 /// Clamps the bindless texture heap to the device-supported binding-array

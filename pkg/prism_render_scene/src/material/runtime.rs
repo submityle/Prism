@@ -10,6 +10,7 @@ use prism_render_material::{
 };
 
 use super::texture_heap::{BindlessHeapStats, BindlessTextureHeap};
+use super::vt_source::{MaterialVtSourceLookup, MaterialVtSourceRegistry};
 
 #[derive(Resource)]
 pub(crate) struct RenderMaterialRegistry {
@@ -49,6 +50,17 @@ impl RenderMaterialRegistry {
         &mut self,
         id: AssetId<StandardMaterial>,
         material: &StandardMaterial,
+        completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
+    ) -> Result<GenerationalHandle, MaterialRegistryError> {
+        self.publish_asset_with_sources(id, material, completion, None)
+    }
+
+    pub fn publish_asset_with_sources(
+        &mut self,
+        id: AssetId<StandardMaterial>,
+        material: &StandardMaterial,
+        completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
+        sources: Option<&MaterialVtSourceRegistry>,
     ) -> Result<GenerationalHandle, MaterialRegistryError> {
         let (handle, allocated) = match self.assets.get(&id).copied() {
             Some(handle) => (handle, false),
@@ -66,7 +78,7 @@ impl RenderMaterialRegistry {
         // records the image here so we can reconcile references afterwards.
         self.pending_textures.clear();
         let record = {
-            let mut resolver = self.texture_resolver();
+            let mut resolver = self.texture_resolver_with_sources(sources);
             prism_render_material::import_standard_material(
                 handle,
                 revision,
@@ -95,7 +107,11 @@ impl RenderMaterialRegistry {
             .insert(id, new_set)
             .unwrap_or_default();
         for image in previous {
-            self.textures.release(image);
+            // The previous material row may still be referenced by the GPU.
+            // Keep its slot quarantined until the submission that could read
+            // that row has completed; immediate release would allow a new
+            // image to reuse the slot and create a use-after-republish.
+            self.textures.retire(image, completion);
         }
         self.revisions.insert(id, revision);
         self.dirty_assets.insert(id);
@@ -106,27 +122,54 @@ impl RenderMaterialRegistry {
         id: AssetId<StandardMaterial>,
         completion: prism_render_architecture::gpu_scene::GpuCompletionValue,
     ) -> Result<Option<GenerationalHandle>, prism_render_material::MaterialHandleError> {
-        let Some(handle) = self.assets.remove(&id) else {
+        let Some(handle) = self.assets.get(&id).copied() else {
             return Ok(None);
         };
         self.registry.retire(handle, completion)?;
+        self.assets.remove(&id);
         self.revisions.remove(&id);
         if let Some(images) = self.material_textures.remove(&id) {
             for image in images {
-                self.textures.release(image);
+                self.textures.retire(image, completion);
             }
         }
         self.dirty_assets.insert(id);
         Ok(Some(handle))
     }
     pub fn texture_resolver(&mut self) -> TextureResolver<'_> {
-        TextureResolver { registry: self }
+        self.texture_resolver_with_sources(None)
+    }
+
+    fn texture_resolver_with_sources<'a>(
+        &'a mut self,
+        sources: Option<&'a MaterialVtSourceRegistry>,
+    ) -> TextureResolver<'a> {
+        TextureResolver {
+            registry: self,
+            sources,
+        }
     }
 
     /// Current bindless texture-heap occupancy, surfaced for diagnostics and
     /// consumed by the bindless upload system when it sizes its slot arrays.
     pub fn texture_heap_stats(&self) -> BindlessHeapStats {
         self.textures.stats()
+    }
+
+    pub(crate) fn texture_generation_table(&self) -> &[u32] {
+        self.textures.generation_table()
+    }
+
+    pub(crate) fn texture_generation_version(&self) -> u32 {
+        self.textures.generation_version()
+    }
+
+    /// Reclaims texture slots whose GPU completion proof has arrived.
+    pub fn reclaim_completed_textures(
+        &mut self,
+        completed: prism_render_architecture::gpu_scene::GpuCompletionValue,
+    ) -> u32 {
+        self.textures.reclaim_completed(completed)
     }
 
     /// High-water bound of live bindless slots. The upload path only needs to
@@ -153,6 +196,7 @@ impl RenderMaterialRegistry {
 
 pub(crate) struct TextureResolver<'a> {
     registry: &'a mut RenderMaterialRegistry,
+    sources: Option<&'a MaterialVtSourceRegistry>,
 }
 impl StandardMaterialTextureResolver for TextureResolver<'_> {
     fn resolve(&mut self, image: AssetId<Image>, semantic: TextureSemantic) -> GpuMaterialTexture {
@@ -160,15 +204,41 @@ impl StandardMaterialTextureResolver for TextureResolver<'_> {
         // owning material releases exactly what it took on republish/retire.
         let slot = self.registry.textures.acquire(image);
         self.registry.pending_textures.push(image);
-        GpuMaterialTexture {
-            index: slot.index,
-            generation: slot.generation,
-            semantic: semantic as u32,
-            // The sampler heap is bound in parallel with the texture heap, so a
-            // texture's sampler lives at the same bindless slot as the texture
-            // itself. Reserved slots 0/1/2 carry the default filtering sampler.
-            sampler_index: slot.index,
-        }
+        // The sampler heap is bound in parallel with the texture heap, so a
+        // texture's sampler lives at the same bindless slot as the texture
+        // itself. Reserved slots 0/1/2 carry the default filtering sampler.
+        let Some(MaterialVtSourceLookup::Available { snapshot, .. }) = self
+            .sources
+            .filter(|sources| sources.eligible_for_default_producer(image))
+            .and_then(|sources| match sources.lookup(image) {
+                MaterialVtSourceLookup::Available { identity, snapshot } => {
+                    Some(MaterialVtSourceLookup::Available { identity, snapshot })
+                }
+                _ => None,
+            })
+        else {
+            return GpuMaterialTexture::non_virtual(
+                slot.index,
+                slot.generation,
+                semantic as u32,
+                slot.index,
+            );
+        };
+        let descriptor = snapshot.descriptor();
+        GpuMaterialTexture::with_virtual_texture(
+            slot.index,
+            // `generation` guards the bindless heap slot in the shader. The
+            // source revision identifies the CPU snapshot and may advance
+            // while the image remains resident in the same heap slot; using
+            // that revision here would make an otherwise live VT row stale.
+            slot.generation,
+            semantic as u32,
+            slot.index,
+            descriptor.texture_id(),
+            descriptor.width(),
+            descriptor.height(),
+            descriptor.page_size(),
+        )
     }
 }
 
