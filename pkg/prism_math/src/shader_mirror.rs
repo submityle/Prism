@@ -1860,3 +1860,35 @@ fn prism_overlap_sphere_aabb(center: vec3<f32>, radius: f32, b_min: vec3<f32>, b
     if (dot(d, d) <= radius * radius) { return 1u; }\n\
     return 0u;\n\
 }\n";
+
+/// Single-sourced WGSL for the finite-segment closest-point query, mirroring
+/// [`Segment3::closest_t`](crate::geom::segment::Segment3::closest_t),
+/// [`closest_point`](crate::geom::segment::Segment3::closest_point), and
+/// [`distance_squared`](crate::geom::segment::Segment3::distance_squared).
+/// `prism_segment_closest_t` projects `p` onto the segment axis, guards the
+/// degenerate (zero-length) case with the `1.0e-20` squared-length threshold,
+/// and clamps the parameter to `[0, 1]`; `prism_segment_closest_point`
+/// evaluates `start + (end - start) * t`; `prism_segment_distance_squared`
+/// returns the squared distance from that point. This is the GPU side of
+/// capsule/sphere-cast support, nearest-point-on-bone for GPU skinning, and
+/// cloth/rope distance constraints. The arithmetic is a projection divide plus
+/// a dot product, so the device agrees with the CPU within fast-math rounding.
+pub const WGSL_SEGMENT: &str = "\
+fn prism_segment_closest_t(start: vec3<f32>, end: vec3<f32>, p: vec3<f32>) -> f32 {\n\
+    let d = end - start;\n\
+    let len2 = dot(d, d);\n\
+    if (len2 <= 1.0e-20) { return 0.0; }\n\
+    let t = dot(p - start, d) / len2;\n\
+    return clamp(t, 0.0, 1.0);\n\
+}\n\
+\n\
+fn prism_segment_closest_point(start: vec3<f32>, end: vec3<f32>, p: vec3<f32>) -> vec3<f32> {\n\
+    let t = prism_segment_closest_t(start, end, p);\n\
+    return start + (end - start) * t;\n\
+}\n\
+\n\
+fn prism_segment_distance_squared(start: vec3<f32>, end: vec3<f32>, p: vec3<f32>) -> f32 {\n\
+    let c = prism_segment_closest_point(start, end, p);\n\
+    let diff = p - c;\n\
+    return dot(diff, diff);\n\
+}\n";
