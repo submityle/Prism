@@ -243,3 +243,14 @@ fn hotspot_diff_sorts_by_cost_and_flags_regressions() {
     assert_eq!(newcomer.baseline_nanos, 0);
     assert_eq!(newcomer.ratio, 0.0);
 }
+
+#[test]
+fn disabled_frame_budget_reports_unbounded_headroom() {
+    // `frame_budget_nanos == 0` disables the frame decision; background headroom
+    // must then be unbounded (not 0, which the scheduler would read as "no
+    // room") (CR-found).
+    let reg = BudgetRegistry::new(0);
+    let report = reg.evaluate_frame(&[("render", 5_000_000)]);
+    assert!(!report.over_frame);
+    assert_eq!(report.remaining_background_nanos, u64::MAX);
+}

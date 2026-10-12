@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use crate::trace::{current_thread_id, prune_finished_threads, registered_threads};
 use alloc::sync::Arc;
 
 extern crate alloc;
@@ -83,4 +84,24 @@ fn timing_guards_are_not_send() {
     // original thread's nesting (CR-found). Assert `!Send`.
     assert!(SendProbe::<Scope>(core::marker::PhantomData).is_not_send());
     assert!(SendProbe::<ProfiledZone>(core::marker::PhantomData).is_not_send());
+}
+
+#[test]
+fn finished_threads_are_reclaimable() {
+    // A finished thread's track stays readable for a later export, but must be
+    // reclaimable so a process churning short-lived threads does not leak a
+    // ThreadTrace + ring per thread forever (CR-found).
+    let dead_id = std::thread::spawn(|| {
+        let _scope = Scope::new("probe");
+        current_thread_id()
+    })
+    .join()
+    .unwrap();
+    let has = |id: u64| registered_threads().iter().any(|t| t.thread_id == id);
+    assert!(
+        has(dead_id),
+        "a finished thread is retained until reclaimed"
+    );
+    assert!(prune_finished_threads() >= 1);
+    assert!(!has(dead_id), "after pruning the finished track is gone");
 }

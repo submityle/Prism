@@ -35,6 +35,13 @@ use crate::trace::ring::RingBuffer;
 /// Default capacity of the resolved-span ring.
 pub const DEFAULT_RESOLVED_CAPACITY: usize = 4096;
 
+/// Default cap on in-flight (unresolved) queries. A backend that loses the
+/// device (or a `disjoint`/query reset it cannot read back) would otherwise grow
+/// the pending queue without bound (CR-found); the oldest unresolved query is
+/// evicted past this cap and counted in
+/// [`GpuReadbackRing::dropped_pending`].
+pub const DEFAULT_PENDING_CAPACITY: usize = 4096;
+
 /// Handle to an in-flight timestamp query returned by
 /// [`GpuReadbackRing::issue`] and passed back to
 /// [`GpuReadbackRing::resolve`].
@@ -66,6 +73,8 @@ pub struct GpuReadbackRing {
     latency_frames: u64,
     next_id: u64,
     pending: VecDeque<PendingQuery>,
+    pending_capacity: usize,
+    pending_dropped: u64,
     resolved: RingBuffer<GpuSpan>,
 }
 
@@ -84,8 +93,19 @@ impl GpuReadbackRing {
             latency_frames,
             next_id: 1,
             pending: VecDeque::new(),
+            pending_capacity: DEFAULT_PENDING_CAPACITY,
+            pending_dropped: 0,
             resolved: RingBuffer::with_capacity(resolved_capacity),
         }
+    }
+
+    /// Override the in-flight query cap (clamped to at least 1). Past it, the
+    /// oldest unresolved query is evicted so an un-readable-back device cannot
+    /// grow the queue without bound.
+    #[must_use]
+    pub fn with_pending_capacity(mut self, capacity: usize) -> Self {
+        self.pending_capacity = capacity.max(1);
+        self
     }
 
     /// The configured readback latency in frames.
@@ -106,6 +126,13 @@ impl GpuReadbackRing {
     ) -> GpuQueryId {
         let id = GpuQueryId(self.next_id);
         self.next_id += 1;
+        // Bound the pending set: if a query is never resolved (device lost,
+        // disjoint/reset queries) the queue must not grow forever. Evict the
+        // oldest unresolved query and record it (CR-found).
+        if self.pending.len() >= self.pending_capacity {
+            self.pending.pop_front();
+            self.pending_dropped += 1;
+        }
         self.pending.push_back(PendingQuery {
             id,
             frame,
@@ -115,6 +142,18 @@ impl GpuReadbackRing {
             depth,
         });
         id
+    }
+
+    /// Forget a still-pending query without resolving it (e.g. the backend
+    /// reports a device-lost / reset query it can never read back), returning
+    /// whether it was pending. Its id will no longer resolve.
+    pub fn cancel(&mut self, id: GpuQueryId) -> bool {
+        if let Some(pos) = self.pending.iter().position(|q| q.id == id) {
+            self.pending.remove(pos);
+            true
+        } else {
+            false
+        }
     }
 
     /// Resolve a previously issued query with the ticks the backend read back,
@@ -194,6 +233,13 @@ impl GpuReadbackRing {
     pub fn dropped_resolved(&self) -> u64 {
         self.resolved.dropped()
     }
+
+    /// Count of in-flight queries evicted because the pending cap was reached
+    /// (a backend that keeps issuing but never resolves is dropping readbacks).
+    #[must_use]
+    pub fn dropped_pending(&self) -> u64 {
+        self.pending_dropped
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +266,27 @@ mod tests {
         let snap = ring.resolved_snapshot();
         assert_eq!(snap[0].label, "Depth");
         assert_eq!(snap[1].label, "Color");
+    }
+
+    #[test]
+    fn pending_is_bounded_and_cancelable() {
+        // A backend that keeps issuing but never resolves must not grow the
+        // pending queue forever: past the cap the oldest is evicted and counted
+        // (CR-found), and a never-readable query can be cancelled explicitly.
+        let mut ring = GpuReadbackRing::new(2).with_pending_capacity(2);
+        let a = ring.issue(1, "A", GpuQueueId::GRAPHICS, None, 0);
+        let b = ring.issue(1, "B", GpuQueueId::GRAPHICS, None, 0);
+        assert_eq!(ring.pending_len(), 2);
+
+        let c = ring.issue(1, "C", GpuQueueId::GRAPHICS, None, 0); // evicts A
+        assert_eq!(ring.pending_len(), 2);
+        assert_eq!(ring.dropped_pending(), 1);
+        assert!(ring.pending().iter().all(|q| q.id != a));
+
+        assert!(ring.cancel(b));
+        assert!(!ring.cancel(a), "A was already evicted");
+        assert_eq!(ring.pending_len(), 1);
+        assert_eq!(ring.pending()[0].id, c);
     }
 
     #[test]

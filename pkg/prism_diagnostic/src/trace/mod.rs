@@ -17,6 +17,6 @@ pub use flow::{
     clear_flow, flow_len, flow_records, record_flow, FlowPhase, FlowRecord, DEFAULT_FLOW_CAPACITY,
 };
 pub use ring::{
-    clear_current_thread, current_thread_id, current_thread_spans, registered_threads, RingBuffer,
-    SpanRecord, ThreadTrace, DEFAULT_CAPACITY,
+    clear_current_thread, current_thread_id, current_thread_spans, prune_finished_threads,
+    registered_threads, RingBuffer, SpanRecord, ThreadTrace, DEFAULT_CAPACITY,
 };

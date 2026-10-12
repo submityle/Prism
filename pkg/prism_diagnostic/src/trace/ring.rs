@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::cell::Cell;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 
 /// Default per-thread ring capacity: the number of completed spans retained
@@ -129,7 +129,17 @@ pub struct ThreadTrace {
     pub thread_name: String,
     /// This thread's completed-span ring buffer.
     pub buffer: Mutex<RingBuffer>,
+    /// Cleared when the owning thread's TLS state drops. A finished track stays
+    /// readable for a later export, but once the registry exceeds its retention
+    /// cap the finished tracks are reclaimed so a process that churns through
+    /// short-lived threads does not leak a ring per thread forever (CR-found).
+    alive: AtomicBool,
 }
+
+/// Soft cap on retained thread tracks. Under it, finished threads keep their
+/// spans so a trace export still shows them; above it, finished tracks are
+/// reclaimed on the next registration.
+const MAX_RETAINED_THREADS: usize = 1024;
 
 fn registry() -> &'static RwLock<Vec<Arc<ThreadTrace>>> {
     static REG: OnceLock<RwLock<Vec<Arc<ThreadTrace>>>> = OnceLock::new();
@@ -141,9 +151,26 @@ fn next_thread_id() -> u64 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Snapshot shared handles to every registered thread's track.
+/// Snapshot shared handles to every registered thread's track, including
+/// finished threads whose spans have not yet been reclaimed (so a trace export
+/// still shows work done by short-lived worker threads).
 pub fn registered_threads() -> Vec<Arc<ThreadTrace>> {
     registry().read().map(|r| r.clone()).unwrap_or_default()
+}
+
+/// Reclaim the tracks of threads that have exited. Returns the number removed.
+///
+/// Called automatically once the registry exceeds its retention cap; call it
+/// explicitly to drop finished threads' spans eagerly (CR-found: without any
+/// reclamation the registry grew without bound).
+pub fn prune_finished_threads() -> usize {
+    if let Ok(mut reg) = registry().write() {
+        let before = reg.len();
+        reg.retain(|t| t.alive.load(Ordering::Acquire));
+        before - reg.len()
+    } else {
+        0
+    }
 }
 
 struct ThreadState {
@@ -162,14 +189,29 @@ impl ThreadState {
             thread_id,
             thread_name,
             buffer: Mutex::new(RingBuffer::new()),
+            alive: AtomicBool::new(true),
         });
         if let Ok(mut reg) = registry().write() {
             reg.push(Arc::clone(&trace));
+            // Bound retention: once over the cap, reclaim finished tracks so
+            // churning through short-lived threads cannot grow the registry
+            // without bound (CR-found).
+            if reg.len() > MAX_RETAINED_THREADS {
+                reg.retain(|t| t.alive.load(Ordering::Acquire));
+            }
         }
         Self {
             trace,
             depth: Cell::new(0),
         }
+    }
+}
+
+impl Drop for ThreadState {
+    fn drop(&mut self) {
+        // Mark this thread's track as finished. Its spans remain readable until
+        // the registry reclaims it (over the cap or via an explicit prune).
+        self.trace.alive.store(false, Ordering::Release);
     }
 }
 

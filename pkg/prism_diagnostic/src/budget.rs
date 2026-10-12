@@ -82,7 +82,11 @@ pub struct FrameBudgetReport {
     pub over_frame: bool,
     /// Headroom left under the frame budget after measured foreground work,
     /// saturating at `0`. Feeds `prism_tasks` frame-budget scheduling so
-    /// background jobs yield when the frame is tight.
+    /// background jobs yield when the frame is tight. When the frame budget is
+    /// disabled (`frame_budget_nanos == 0`) this is [`u64::MAX`] (unbounded),
+    /// **not** `0` — reporting `0` would make the scheduler read "budget
+    /// disabled" as "no background headroom" and starve background jobs
+    /// (CR-found).
     pub remaining_background_nanos: u64,
 }
 
@@ -232,8 +236,13 @@ impl BudgetRegistry {
             .fold(0u64, u64::saturating_add);
         let over_frame =
             self.frame_budget_nanos != 0 && total_measured_nanos > self.frame_budget_nanos;
-        let remaining_background_nanos =
-            self.frame_budget_nanos.saturating_sub(total_measured_nanos);
+        let remaining_background_nanos = if self.frame_budget_nanos == 0 {
+            // Budget disabled: no frame-level cap on background work, so report
+            // unbounded headroom (CR-found).
+            u64::MAX
+        } else {
+            self.frame_budget_nanos.saturating_sub(total_measured_nanos)
+        };
 
         FrameBudgetReport {
             statuses,
