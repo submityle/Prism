@@ -90,6 +90,15 @@ impl Schema {
     pub fn kinds(&self) -> &[FieldKind] {
         &self.kinds
     }
+
+    /// Validate that `record` matches this schema: the same field count, and a
+    /// value variant matching each field's kind.
+    ///
+    /// # Errors
+    /// [`DeltaError::Shape`] / [`DeltaError::KindMismatch`].
+    pub fn validate(&self, record: &Record) -> Result<(), DeltaError> {
+        check_shape(self, record)
+    }
 }
 
 /// One field's typed value; the variant must match the schema kind.

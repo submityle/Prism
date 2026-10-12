@@ -19,6 +19,9 @@
 //!   field costs the bits it needs (design §15).
 //! - [`delta`] — baseline-relative field deltas: a schema, a changed-field mask,
 //!   and only the changed values, with the baseline revision checked on apply.
+//! - [`snapshot`] — the bounded baseline ring that applies those deltas forward
+//!   into new baselines and serves any retained revision for a late-join or a
+//!   resync.
 //!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
@@ -36,3 +39,5 @@ pub mod bitpack;
 pub mod delta;
 
 pub mod quantize;
+
+pub mod snapshot;
