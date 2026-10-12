@@ -23,7 +23,7 @@ mod tests;
 
 pub use buffers::{MaterialParameterBuffers, MaterialSyncReport};
 #[cfg(test)]
-pub(crate) use buffers::header_row_bytes;
+pub(crate) use buffers::{header_row_bytes, texture_row_bytes};
 pub(crate) use stage::sync_material_buffers;
 pub use stage::{MaterialUploadStats, RenderMaterials};
 pub use parameter_heap::ParameterHeap;

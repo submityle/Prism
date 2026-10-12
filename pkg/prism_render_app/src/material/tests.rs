@@ -23,6 +23,17 @@ fn null_device() -> (prism_render_driver_null::NullDevice, impl prism_render_dri
         .expect("the null device always comes up")
 }
 
+/// A texture reference as the ABI carries it: the image's slot identity plus the
+/// semantic it is bound as.
+fn texture_entry(index: u32, semantic: u32) -> prism_render_material::GpuMaterialTexture {
+    prism_render_material::GpuMaterialTexture {
+        index,
+        generation: 1,
+        semantic,
+        sampler_index: 0,
+    }
+}
+
 /// A record whose packed block is wider than a plain dielectric's, so a test can
 /// make a material change block size.
 fn record_with_lobes(index: u32, lobes: u32) -> MaterialRecord {
@@ -37,7 +48,7 @@ fn syncing_materials_places_their_blocks_and_writes_their_rows() {
     let (device, queue) = null_device();
     // Sized generously so the assertions below are about *placement*, not about
     // the growth path (which its own test covers).
-    let mut buffers = MaterialParameterBuffers::new(&device, 4, 512, BufferUsages::NONE);
+    let mut buffers = MaterialParameterBuffers::new(&device, 4, 512, 64, BufferUsages::NONE);
     assert_eq!(buffers.header_capacity(), 4);
 
     let first = record_with_lobes(0, 1);
@@ -93,7 +104,7 @@ fn syncing_materials_places_their_blocks_and_writes_their_rows() {
 #[test]
 fn an_unchanged_sync_writes_nothing() {
     let (device, queue) = null_device();
-    let mut buffers = MaterialParameterBuffers::new(&device, 2, 32, BufferUsages::NONE);
+    let mut buffers = MaterialParameterBuffers::new(&device, 2, 32, 16, BufferUsages::NONE);
     let record = record_with_lobes(0, 1);
     buffers.sync(&device, &queue, [(0, record.clone())], 7);
 
@@ -109,7 +120,7 @@ fn an_unchanged_sync_writes_nothing() {
 #[test]
 fn a_wider_block_relocates_and_frees_the_old_run() {
     let (device, queue) = null_device();
-    let mut buffers = MaterialParameterBuffers::new(&device, 2, 64, BufferUsages::NONE);
+    let mut buffers = MaterialParameterBuffers::new(&device, 2, 64, 16, BufferUsages::NONE);
     buffers.sync(&device, &queue, [(0, record_with_lobes(0, 1))], 1);
     let narrow_words = buffers.used_words();
     assert_eq!(buffers.header(0).expect("row").parameter_offset, 0);
@@ -137,7 +148,7 @@ fn a_wider_block_relocates_and_frees_the_old_run() {
 #[test]
 fn a_higher_index_grows_and_refills() {
     let (device, queue) = null_device();
-    let mut buffers = MaterialParameterBuffers::new(&device, 2, 8, BufferUsages::NONE);
+    let mut buffers = MaterialParameterBuffers::new(&device, 2, 8, 16, BufferUsages::NONE);
     buffers.sync(&device, &queue, [(0, record_with_lobes(0, 1))], 1);
 
     let report = buffers.sync(
@@ -167,7 +178,7 @@ fn a_higher_index_grows_and_refills() {
 #[test]
 fn removing_a_material_frees_its_run_and_retires_its_row() {
     let (device, queue) = null_device();
-    let mut buffers = MaterialParameterBuffers::new(&device, 2, 64, BufferUsages::NONE);
+    let mut buffers = MaterialParameterBuffers::new(&device, 2, 64, 16, BufferUsages::NONE);
     buffers.sync(
         &device,
         &queue,
@@ -199,9 +210,13 @@ fn removing_a_material_frees_its_run_and_retires_its_row() {
 #[test]
 fn releasing_frees_both_buffers() {
     let (device, queue) = null_device();
-    let mut buffers = MaterialParameterBuffers::new(&device, 2, 32, BufferUsages::NONE);
+    let mut buffers = MaterialParameterBuffers::new(&device, 2, 32, 16, BufferUsages::NONE);
     buffers.sync(&device, &queue, [(0, record_with_lobes(0, 1))], 1);
-    assert_eq!(device.live_resource_count(), 2, "headers + parameters");
+    assert_eq!(
+        device.live_resource_count(),
+        3,
+        "headers + parameters + texture rows"
+    );
 
     buffers.release(&device);
     assert_eq!(device.live_resource_count(), 0);
@@ -212,7 +227,7 @@ fn releasing_frees_both_buffers() {
 #[test]
 fn a_material_with_a_different_illumination_still_lands() {
     let (device, queue) = null_device();
-    let mut buffers = MaterialParameterBuffers::new(&device, 1, 32, BufferUsages::NONE);
+    let mut buffers = MaterialParameterBuffers::new(&device, 1, 32, 16, BufferUsages::NONE);
     let mut record = fallback_material_record(GenerationalHandle::new(0, 1), 1);
     record.illumination = Illumination::Stylized;
 
@@ -315,6 +330,88 @@ fn the_frame_packs_published_materials_into_the_buffers() {
         "and its words went back to the heap"
     );
 }
+/// A material's texture references own their own run in the texture table, and the
+/// header's `texture_offset` / `texture_count` name exactly that run — the two
+/// have to agree, or a shader reads another material's textures.
+#[test]
+fn texture_rows_are_placed_and_named_by_the_header() {
+    let (device, queue) = null_device();
+    let mut buffers = MaterialParameterBuffers::new(&device, 4, 512, 64, BufferUsages::NONE);
+
+    let mut first = record_with_lobes(0, 1);
+    first.textures = vec![texture_entry(3, 1), texture_entry(4, 2)];
+    let mut second = record_with_lobes(1, 1);
+    second.textures = vec![texture_entry(7, 1)];
+
+    let report = buffers.sync(&device, &queue, [(0, first.clone()), (1, second.clone())], 1);
+    assert_eq!(report.textures_written, 2, "both materials' rows");
+    assert_eq!(buffers.used_texture_rows(), 3, "2 + 1 rows");
+
+    let first_row = buffers.header(0).expect("row 0");
+    assert_eq!(first_row.texture_count, 2);
+    let first_texture_offset = first_row.texture_offset;
+    let first_texture_count = first_row.texture_count;
+    assert_eq!(
+        buffers.textures_of(0).expect("material 0's rows"),
+        first.textures.as_slice()
+    );
+    let second_row = buffers.header(1).expect("row 1");
+    assert_eq!(second_row.texture_count, 1);
+    assert_eq!(
+        second_row.texture_offset,
+        first_texture_offset + first_texture_count,
+        "the second material's rows follow the first's"
+    );
+    assert_eq!(
+        buffers.textures_of(1).expect("material 1's rows"),
+        second.textures.as_slice()
+    );
+    assert_eq!(
+        second_row.sampler_offset, second_row.texture_offset,
+        "the sampler table shares the texture run's addresses today"
+    );
+
+    // Retiring the first material frees its rows for the next one.
+    buffers.remove(&queue, 0, 1);
+    assert!(buffers.textures_of(0).is_none());
+    // Two rows, so they fit the hole the retired material left (a three-row
+    // request would not, and would bump the table's high-water mark instead).
+    let mut third = record_with_lobes(2, 1);
+    third.textures = vec![texture_entry(9, 1), texture_entry(10, 2)];
+    buffers.sync(&device, &queue, [(2, third.clone())], 2);
+    assert_eq!(
+        buffers.header(2).expect("row 2").texture_offset,
+        first_texture_offset,
+        "the freed rows were reused"
+    );
+    assert_eq!(
+        buffers.textures_of(2).expect("material 2's rows"),
+        third.textures.as_slice()
+    );
+    assert_eq!(
+        buffers.used_texture_rows(),
+        3,
+        "the freed rows were reused rather than the table growing"
+    );
+}
+
+/// A material with no textures names an *empty* run rather than pointing at
+/// somebody else's rows.
+#[test]
+fn a_material_without_textures_gets_an_empty_run() {
+    let (device, queue) = null_device();
+    let mut buffers = MaterialParameterBuffers::new(&device, 2, 512, 16, BufferUsages::NONE);
+    buffers.sync(&device, &queue, [(0, record_with_lobes(0, 1))], 1);
+
+    let row = buffers.header(0).expect("row");
+    assert_eq!(row.texture_count, 0);
+    assert_eq!(
+        buffers.textures_of(0).expect("an empty run"),
+        &[][..],
+        "a zero-length run, not the fallback's rows"
+    );
+}
+
 /// The ABI lands byte-exact on hardware: after a frame packs the registry's
 /// materials, the header rows read back from the GPU *are* the headers the ABI
 /// builds at those offsets, and the word heap read back is their packed surface
@@ -354,14 +451,18 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
         let materials = render.world.resource_mut::<RenderMaterials>();
         let first = materials.registry_mut().allocate().expect("capacity for two");
         let second = materials.registry_mut().allocate().expect("capacity for two");
+        let mut first_record = record_with_lobes(first.index, 1);
+        first_record.textures = vec![texture_entry(3, 1), texture_entry(4, 2)];
         materials
-            .publish(record_with_lobes(first.index, 1))
+            .publish(first_record)
             .expect("the first record publishes");
+        let mut second_record = record_with_lobes(
+            second.index,
+            1 | (1 << ClosureKind::ClearCoat as u32),
+        );
+        second_record.textures = vec![texture_entry(7, 1)];
         materials
-            .publish(record_with_lobes(
-                second.index,
-                1 | (1 << ClosureKind::ClearCoat as u32),
-            ))
+            .publish(second_record)
             .expect("the second record publishes");
         (first, second)
     };
@@ -376,6 +477,7 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
             device,
             CAPACITY,
             512,
+            64,
             BufferUsages::COPY_SRC,
         ));
         render
@@ -395,6 +497,13 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
             buffers.parameters().expect("the word heap"),
             buffers.used_words(),
             render.world.resource::<RenderMaterials>().snapshot().epoch,
+        )
+    };
+    let (textures, texture_rows) = {
+        let buffers = render.world.resource::<MaterialParameterBuffers>();
+        (
+            buffers.textures(),
+            buffers.texture_capacity_rows(),
         )
     };
     let runtime = render
@@ -441,11 +550,38 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
 
     // Each published material: the row names an offset, and the words at that
     // offset *are* its packed block — and the row is what the ABI builds for it.
-    for (handle, lobes) in [
-        (first, 1_u32),
-        (second, 1 | (1 << ClosureKind::ClearCoat as u32)),
+    let texture_bytes_read = queue.read_buffer(
+        textures.expect("the texture table"),
+        crate::material::texture_row_bytes() * u64::from(texture_rows),
+    );
+    let texture_row = |row: u32| -> prism_render_material::GpuMaterialTexture {
+        let row_bytes = crate::material::texture_row_bytes() as usize;
+        let start = row as usize * row_bytes;
+        bytemuck::pod_read_unaligned(&texture_bytes_read[start..start + row_bytes])
+    };
+    for (handle, lobes, expected_textures) in [
+        (first, 1_u32, 2_u32),
+        (second, 1 | (1 << ClosureKind::ClearCoat as u32), 1_u32),
     ] {
-        let record = record_with_lobes(handle.index, lobes);
+        let mut record = record_with_lobes(handle.index, lobes);
+        record.textures = match handle.index {
+            i if i == first.index => vec![texture_entry(3, 1), texture_entry(4, 2)],
+            _ => vec![texture_entry(7, 1)],
+        };
+        assert_eq!(
+            row(handle.index).texture_count,
+            expected_textures,
+            "the header names the material's texture rows"
+        );
+        let offset = row(handle.index).texture_offset;
+        let read: Vec<prism_render_material::GpuMaterialTexture> = (0..expected_textures)
+            .map(|i| texture_row(offset + i))
+            .collect();
+        assert_eq!(
+            read,
+            record.textures,
+            "the texture rows read back are the ABI's entries"
+        );
         let block = record.packed_parameters().pack();
         let gpu_row = row(handle.index);
         assert_eq!(gpu_row.is_active, 1, "material {} is live", handle.index);
@@ -462,7 +598,11 @@ fn the_abi_lands_byte_exact_on_a_gpu() {
         );
         assert_eq!(
             gpu_row,
-            record.header(gpu_row.parameter_offset, 0, epoch),
+            record.header(
+                gpu_row.parameter_offset,
+                gpu_row.texture_offset,
+                epoch
+            ),
             "the row read from the GPU is the ABI's header for that material"
         );
     }

@@ -141,6 +141,7 @@ where
             runtime.device(),
             config.material_capacity,
             config.material_parameter_words,
+            config.material_texture_rows,
             prism_render_driver::BufferUsages::NONE,
         );
         let mut render = SubApp::new();

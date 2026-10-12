@@ -2787,16 +2787,23 @@ fn an_empty_stage_does_not_break_the_stage_chain() {
 }
 /// A provider that gives one colour per material permutation class, so a test
 /// can tell two draws apart by their pixels.
-struct ClassColourPipeline {
-    descriptors: alloc::collections::BTreeMap<u32, RenderPipelineDescriptor>,
+struct IlluminationColourPipeline {
+    lit: RenderPipelineDescriptor,
+    stylized: RenderPipelineDescriptor,
 }
 
-impl crate::mesh_pipeline::MeshPipelineProvider for ClassColourPipeline {
+impl crate::mesh_pipeline::MeshPipelineProvider for IlluminationColourPipeline {
     fn descriptor(&self, variant: &MeshPipelineKey) -> RenderPipelineDescriptor {
-        self.descriptors
-            .get(&variant.class)
-            .expect("the test registered a descriptor for every class it draws")
-            .clone()
+        // Keyed on the *illumination axis*, not the exact permutation class: the
+        // renderer may resolve a cold class through a fallback permutation (the
+        // full-lobe über shader) before the exact one exists, and the colour a
+        // draw shows must not depend on which of the two pipelines ran.
+        match prism_render_material::SpecializationId::from_bin_class(variant.class)
+            .and_then(|specialization| specialization.illumination())
+        {
+            Some(prism_render_material::Illumination::Stylized) => self.stylized.clone(),
+            _ => self.lit.clone(),
+        }
     }
 }
 
@@ -2915,11 +2922,9 @@ fn depth_resolves_occlusion_on_a_gpu() {
         };
         (
             device,
-            ClassColourPipeline {
-                descriptors: alloc::collections::BTreeMap::from([
-                    (near_class, descriptor("1.0, 0.0, 0.0, 1.0")),
-                    (far_class, descriptor("0.0, 0.0, 1.0, 1.0")),
-                ]),
+            IlluminationColourPipeline {
+                lit: descriptor("1.0, 0.0, 0.0, 1.0"),
+                stylized: descriptor("0.0, 0.0, 1.0, 1.0"),
             },
         )
     };
