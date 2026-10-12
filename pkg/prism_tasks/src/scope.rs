@@ -72,9 +72,25 @@ impl<'scope, 'env> Scope<'scope, 'env> {
         self.enqueue(&inner, move || {
             *rb_ref.lock().unwrap() = Some(b());
         });
-        let ra = a();
+        // `rb_ref` borrows the stack-local `rb_slot`; if `a()` panics we must
+        // still join `b` before unwinding past the slot, or the queued job could
+        // write through a dangling reference (CR-found use-after-free).
+        let ra = match panic::catch_unwind(AssertUnwindSafe(a)) {
+            Ok(ra) => ra,
+            Err(payload) => {
+                self.pool.wait(&inner);
+                panic::resume_unwind(payload);
+            }
+        };
         self.pool.wait(&inner);
-        let rb = rb_slot.lock().unwrap().take().expect("b did not complete");
+        // `Some(rb)` on the normal path; otherwise `b` panicked, so re-raise its
+        // original payload instead of masking it with a generic panic (CR-found).
+        let Some(rb) = rb_slot.lock().unwrap().take() else {
+            if let Some(payload) = self.panic.lock().unwrap().take() {
+                panic::resume_unwind(payload);
+            }
+            panic!("b did not complete");
+        };
         (ra, rb)
     }
 
@@ -174,5 +190,46 @@ impl TaskPool {
             }
             Err(payload) => panic::resume_unwind(payload),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::TaskPool;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::time::Duration;
+
+    #[test]
+    fn join_with_panicking_a_still_joins_b() {
+        // `a()` panicking must not unwind past `b`'s borrowed result slot
+        // (CR-found use-after-free) or hang the scope.
+        let pool = TaskPool::with_threads(2);
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            pool.scope(|s| {
+                let _: ((), i32) = s.join(
+                    || -> () { panic!("a boom") },
+                    || {
+                        std::thread::sleep(Duration::from_millis(20));
+                        1
+                    },
+                );
+            });
+        }));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn join_propagates_child_panic_payload() {
+        // A panic in `b` must surface as its original payload, not a generic
+        // "b did not complete" (CR-found).
+        let pool = TaskPool::with_threads(2);
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            pool.scope(|s| {
+                let _: ((), ()) = s.join(|| (), || panic!("original boom"));
+            });
+        }));
+        let payload = r.expect_err("expected a panic");
+        let msg = payload.downcast_ref::<&str>().copied().unwrap_or("");
+        assert_eq!(msg, "original boom");
     }
 }

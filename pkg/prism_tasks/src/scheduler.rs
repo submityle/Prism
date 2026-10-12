@@ -122,14 +122,19 @@ impl Shared {
     /// ordinary deques by [`Self::find_task`], giving high-priority groups
     /// precedence and letting in-place boosts implement priority inheritance.
     pub(crate) fn push_prioritized(&self, cell: Arc<PriorityCell>, job: Job) {
-        self.priority_inbox.push(cell, job);
+        // Reserve the count *before* publishing so a worker cannot pop the job
+        // and `fetch_sub` before the `fetch_add`, which underflowed `queued` to
+        // `usize::MAX` and wedged shutdown (CR-found).
         self.queued.fetch_add(1, Ordering::Release);
+        self.priority_inbox.push(cell, job);
         self.cvar.notify_one();
     }
 
     /// Push a job onto the local worker deque if the caller is a worker of this
     /// pool, otherwise onto the global injector. Wakes one idle worker.
     pub(crate) fn push(&self, job: Job) {
+        // Reserve before publishing (see `push_prioritized`).
+        self.queued.fetch_add(1, Ordering::Release);
         let local = WORKER.with(Cell::get);
         match local {
             Some((pid, idx)) if pid == self.pool_id() && idx < self.deques.len() => {
@@ -139,7 +144,6 @@ impl Shared {
                 self.injector.lock().unwrap().push_back(job);
             }
         }
-        self.queued.fetch_add(1, Ordering::Release);
         self.cvar.notify_one();
     }
 
