@@ -34,6 +34,8 @@ members = [
   "pkg/prism_render_graph",
   # Prism RHI-backed render spine (device/queue + frame-graph execution).
   "pkg/prism_render_runtime",
+  # GPU-driven culling vertical slice (compute cull + indirect draw) on the RHI.
+  "pkg/prism_render_gpudriven",
   "pkg/prism_input",
   "pkg/prism_shader",
   "pkg/prism_window",

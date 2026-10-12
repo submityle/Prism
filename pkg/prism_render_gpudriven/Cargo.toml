@@ -1,0 +1,17 @@
+[package]
+name = "prism_render_gpudriven"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "GPU-driven culling vertical slice for Prism's RHI: a compute pass frustum-culls a batch of instance AABBs, appends the survivors through an atomic counter, and authors the indirect-draw arguments on the GPU; a render pass then consumes those GPU-written arguments through DrawIndexedIndirect/MultiDrawIndirect so the CPU never learns the surviving count. Ships a CPU reference cull and a GPU test that asserts the two agree. The prototype drives the frozen prism_render_driver RHI through its wgpu backend."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
+# The shipped RHI backend this slice is verified against. The stage APIs
+# themselves take the RHI traits; only the readback hook names the backend.
+prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
+
+[lints]
+workspace = true

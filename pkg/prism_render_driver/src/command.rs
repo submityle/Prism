@@ -11,6 +11,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+/// The byte size of one packed indirect-draw argument record, shared by
+/// [`RenderCommand::DrawIndexedIndirect`] (a single record) and
+/// [`RenderCommand::MultiDrawIndirect`] (a tightly packed array of records).
+///
+/// A record is the five 32-bit fields the GPU consumes when resolving a draw:
+/// `index_count`, `instance_count`, `first_index`, `base_vertex` and
+/// `first_instance` — 20 bytes in that order. Backends that require tightly
+/// packed records (wgpu does) treat this as the mandatory
+/// [`RenderCommand::MultiDrawIndirect::stride`].
+pub const DRAW_INDEXED_INDIRECT_ARGS_SIZE: u32 = 20;
+
 /// What to do with an attachment's existing contents at the start of a pass.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum LoadOp {
@@ -195,12 +206,56 @@ pub enum RenderCommand {
         /// The instance range.
         instances: Range<u32>,
     },
+    /// Draw indexed, sourcing the arguments from a buffer instead of the
+    /// command stream.
+    ///
+    /// The buffer holds one packed `DRAW_INDEXED_INDIRECT_ARGS_SIZE`-byte
+    /// record — `index_count`, `instance_count`, `first_index`, `base_vertex`,
+    /// `first_instance` — at `offset`. Letting the GPU fill those bytes (a
+    /// compute pass writing them is the usual producer) is what makes a draw
+    /// "GPU-driven": the CPU never learns the instance count, so the work it
+    /// dispatches is bounded by a readback or by a budget rather than by the
+    /// exact surviving set. Requires the
+    /// `Features::INDIRECT_DRAW` capability and an index buffer bound with
+    /// [`SetIndexBuffer`](Self::SetIndexBuffer).
+    DrawIndexedIndirect {
+        /// The buffer holding the packed argument record.
+        buffer: BufferId,
+        /// The byte offset of the record.
+        offset: u64,
+    },
     /// Issue an indirect draw sourced from a buffer.
     DrawIndirect {
         /// The buffer holding draw arguments.
         buffer: BufferId,
         /// The byte offset of the arguments.
         offset: u64,
+    },
+    /// Issue `count` indexed indirect draws from one tightly packed array.
+    ///
+    /// This is the multi-draw-indexed-indirect primitive: starting at `offset`,
+    /// `count` records of `stride` bytes are read in order and each resolved as
+    /// an indexed draw (exactly what
+    /// [`DrawIndexedIndirect`](Self::DrawIndexedIndirect) does for one record).
+    /// It collapses many small GPU-authored draws into a single command, which
+    /// is the point of a GPU-driven pipeline: the CPU emits one call regardless
+    /// of how many batches the GPU decided to draw.
+    ///
+    /// `stride` is the byte distance between records. Backends that cannot
+    /// honor an arbitrary stride require the tightly packed
+    /// `DRAW_INDEXED_INDIRECT_ARGS_SIZE`; passing any other value there is a
+    /// validation error. Requires
+    /// `Features::MULTI_DRAW_INDIRECT` and an index buffer bound with
+    /// [`SetIndexBuffer`](Self::SetIndexBuffer).
+    MultiDrawIndirect {
+        /// The buffer holding the packed argument array.
+        buffer: BufferId,
+        /// The byte offset of the first record.
+        offset: u64,
+        /// The number of records (draws) to issue.
+        count: u32,
+        /// The byte distance between consecutive records.
+        stride: u32,
     },
     /// Upload push constants for the given stages.
     ///
@@ -593,5 +648,50 @@ mod tests {
             ),
             other => panic!("expected a compute pass, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn indirect_draw_commands_round_trip() {
+        let buffer = BufferId::from_parts(7, 1);
+        let mut encoder = CommandEncoder::labeled("indirect");
+        encoder.push_render_pass(
+            RenderPassDescriptor::default(),
+            vec![
+                RenderCommand::DrawIndexedIndirect { buffer, offset: 0 },
+                RenderCommand::MultiDrawIndirect {
+                    buffer,
+                    offset: 256,
+                    count: 3,
+                    stride: DRAW_INDEXED_INDIRECT_ARGS_SIZE,
+                },
+            ],
+        );
+
+        let cb = encoder.finish();
+        match &cb.passes[0] {
+            Pass::Render { commands, .. } => {
+                assert_eq!(
+                    commands[0],
+                    RenderCommand::DrawIndexedIndirect { buffer, offset: 0 }
+                );
+                assert_eq!(
+                    commands[1],
+                    RenderCommand::MultiDrawIndirect {
+                        buffer,
+                        offset: 256,
+                        count: 3,
+                        stride: DRAW_INDEXED_INDIRECT_ARGS_SIZE,
+                    }
+                );
+            }
+            other => panic!("expected a render pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn packed_indirect_args_record_is_twenty_bytes() {
+        // Five 32-bit fields: index_count, instance_count, first_index,
+        // base_vertex, first_instance.
+        assert_eq!(DRAW_INDEXED_INDIRECT_ARGS_SIZE, 5 * 4);
     }
 }

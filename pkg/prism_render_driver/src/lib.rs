@@ -57,6 +57,7 @@ pub use command::{
     ColorAttachment, CommandBuffer, CommandEncoder, ComputeCommand, CopyCommand, DepthLoadOp,
     DepthOperations, DepthStencilAttachment, IndexBufferBinding, LoadOp, Pass, RenderCommand,
     RenderPassDescriptor, ScissorRect, StencilLoadOp, StencilOperations, StoreOp, Viewport,
+    DRAW_INDEXED_INDIRECT_ARGS_SIZE,
 };
 pub use compare::CompareFunction;
 pub use device::{ImageDataLayout, RenderDevice, RenderQueue, TextureWrite};

@@ -1,0 +1,61 @@
+//! # `prism_render_gpudriven`
+//!
+//! The GPU-driven culling vertical slice for Prism's RHI: the first piece of
+//! the M2 milestone ("compute culling + indirect draw") built directly on the
+//! frozen [`prism_render_driver`] interface.
+//!
+//! ## What the slice does
+//!
+//! 1. [`cull::CullStage`] uploads a batch of instance AABBs and a view frustum,
+//!    then dispatches one compute pass. The pass classifies each AABB against
+//!    the six frustum planes, appends the survivors to a visible-index list
+//!    through an atomic counter, and authors the indirect-draw arguments —
+//!    including the surviving instance count.
+//! 2. [`draw::DrawStage`] records indexed draws that consume those GPU-authored
+//!    arguments ([`draw::DrawStage::encode_indexed_indirect`] for the single
+//!    draw, [`draw::DrawStage::encode_multi_indirect`] for the packed
+//!    multi-draw array), so the CPU never supplies the count.
+//!
+//! The point of the slice is what the CPU *does not* do: it never learns how
+//! many instances survive. A production caller hands the GPU-authored argument
+//! buffer straight to the draw; [`cull::CullStage::run`] adds a readback only
+//! so a test can prove the GPU's answer matches [`reference::cull_cpu`].
+//!
+//! ## Backend
+//!
+//! The stages are written against the RHI traits, so they are backend-agnostic.
+//! The one exception is readback — [`readback::ReadBuffer`] is a backend
+//! capability (the RHI is fire-and-forget), implemented here for the shipped
+//! wgpu backend and used only by the GPU test and by [`cull::CullStage::run`].
+//!
+//! ## Layout
+//!
+//! - [`frustum`]: planes, AABBs, and the classification test the shader mirrors.
+//! - [`scene`]: the deterministic test lattice and view volume.
+//! - [`reference`]: the CPU cull the GPU result is checked against.
+//! - [`encoding`]: the little-endian layouts shared with the WGSL shaders.
+//! - [`cull`] / [`draw`]: the compute cull and the indirect draw it feeds.
+//! - [`readback`]: backend readback and pixel-coverage counting.
+
+extern crate alloc;
+
+pub mod cull;
+pub mod draw;
+pub mod encoding;
+pub mod frustum;
+pub mod readback;
+pub mod reference;
+pub mod scene;
+
+pub use cull::{CullOutput, CullParams, CullStage};
+pub use draw::DrawStage;
+pub use encoding::IndirectArgs;
+pub use frustum::{aabb_inside, signed_distance, Aabb, Frustum, Plane};
+pub use readback::{count_lit_pixels, ReadBuffer};
+pub use reference::cull_cpu;
+pub use scene::{
+    lattice_instances, view_box_frustum, DEFAULT_GRID, DEFAULT_HALF_EXTENT, DEFAULT_SPACING,
+};
+
+#[cfg(test)]
+mod tests;

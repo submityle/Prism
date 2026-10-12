@@ -344,9 +344,31 @@ impl WgpuQueue {
             } => {
                 pass.draw_indexed(indices.clone(), *base_vertex, instances.clone());
             }
+            rhi::RenderCommand::DrawIndexedIndirect { buffer, offset } => {
+                let buf = self.inner.resolve_buffer(*buffer);
+                pass.draw_indexed_indirect(&buf, *offset);
+            }
             rhi::RenderCommand::DrawIndirect { buffer, offset } => {
                 let buf = self.inner.resolve_buffer(*buffer);
                 pass.draw_indirect(&buf, *offset);
+            }
+            rhi::RenderCommand::MultiDrawIndirect {
+                buffer,
+                offset,
+                count,
+                stride,
+            } => {
+                // wgpu has no stride parameter: it always reads tightly packed
+                // `DrawIndexedIndirectArgs`. Anything else would silently read
+                // the wrong offsets, so surface the mismatch in debug builds
+                // (release builds keep the RHI's documented status quo).
+                debug_assert_eq!(
+                    *stride,
+                    rhi::DRAW_INDEXED_INDIRECT_ARGS_SIZE,
+                    "wgpu requires tightly packed indirect draw arguments"
+                );
+                let buf = self.inner.resolve_buffer(*buffer);
+                pass.multi_draw_indexed_indirect(&buf, *offset, *count);
             }
             rhi::RenderCommand::SetPushConstants { offset, data, .. } => {
                 pass.set_immediates(*offset, data);
@@ -566,6 +588,53 @@ impl WgpuQueue {
         staging.unmap();
         out
     }
+
+    /// Reads `size` bytes back from a buffer into a tightly packed `Vec<u8>`.
+    ///
+    /// Blocks the calling thread until the copy completes. The buffer must be
+    /// created with [`rhi::BufferUsages::COPY_SRC`]; `size` is rounded up to
+    /// wgpu's 4-byte copy alignment internally, and only the first `size` bytes
+    /// are returned. This is the backend hook compute/indirect tests use to
+    /// observe what the RHI actually produced on the GPU (a culling result, a
+    /// GPU-written draw argument record); it is not a hot-path API.
+    #[must_use]
+    pub fn read_buffer(&self, buffer: rhi::BufferId, size: u64) -> Vec<u8> {
+        if size == 0 {
+            return Vec::new();
+        }
+        // Buffer copies must be a multiple of `COPY_BUFFER_ALIGNMENT` (4).
+        let copy_size = size.next_multiple_of(4);
+        let buffer = self.inner.resolve_buffer(buffer);
+        let staging = self.inner.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rhi-buffer-readback"),
+            size: copy_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder =
+            self.inner
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("rhi-buffer-readback"),
+                });
+        encoder.copy_buffer_to_buffer(&buffer, 0, &staging, 0, copy_size);
+        self.queue.submit([encoder.finish()]);
+        let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
+
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
+
+        let view = staging
+            .slice(..)
+            .get_mapped_range()
+            .expect("readback range is available after the device poll");
+        let mut out = Vec::with_capacity(size as usize);
+        out.extend_from_slice(&view[..size as usize]);
+        drop(view);
+        staging.unmap();
+        out
+    }
 }
 
 impl rhi::FrameSync for WgpuQueue {
@@ -633,40 +702,19 @@ mod tests {
         );
         queue.submit(&[encoder.finish()]);
 
-        // Copy the RHI destination buffer into a map-read staging buffer so the
-        // bytes the transfer pass wrote can be asserted on the CPU.
-        let staging = queue.inner.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("transfer-readback"),
-            size: PAYLOAD.len() as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let readback_descriptor = wgpu::CommandEncoderDescriptor {
-            label: Some("transfer-readback"),
-        };
-        let mut readback = queue
-            .inner
-            .device
-            .create_command_encoder(&readback_descriptor);
-        let dst_buffer = queue.inner.resolve_buffer(dst);
-        readback.copy_buffer_to_buffer(&dst_buffer, 0, &staging, 0, PAYLOAD.len() as u64);
-        queue.wgpu_queue().submit([readback.finish()]);
-
-        device.poll_wait();
-        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        device.poll_wait();
-
-        let view = staging
-            .slice(..)
-            .get_mapped_range()
-            .expect("readback mapping is available after the device poll");
+        // Read the destination back through the queue's readback hook: the
+        // bytes the transfer pass wrote must survive verbatim.
         assert_eq!(
-            &view[..],
-            &PAYLOAD[..],
+            queue.read_buffer(dst, PAYLOAD.len() as u64),
+            PAYLOAD.to_vec(),
             "the transfer pass must have copied the source bytes verbatim"
         );
-        drop(view);
-        staging.unmap();
+        // A short read returns exactly the requested prefix.
+        assert_eq!(
+            queue.read_buffer(dst, 6),
+            PAYLOAD[..6].to_vec(),
+            "the readback honors a partial size"
+        );
 
         device.destroy_buffer(src);
         device.destroy_buffer(dst);
