@@ -37,6 +37,17 @@ fn strictly_inside(p: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)) -
     !(has_neg && has_pos)
 }
 
+/// Whether `p` lies inside triangle `a, b, c` **or on its boundary**.
+/// Winding-independent.
+fn inside_or_on(p: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> bool {
+    let d1 = cross(a, b, p);
+    let d2 = cross(b, c, p);
+    let d3 = cross(c, a, p);
+    let has_neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let has_pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(has_neg && has_pos)
+}
+
 /// Triangulates the simple polygon `polygon` by ear clipping, returning
 /// `n - 2` triangles as index triples `[i, j, k]` into `polygon`.
 ///
@@ -59,6 +70,20 @@ pub fn triangulate(polygon: &[(f32, f32)]) -> Vec<[usize; 3]> {
     // of the polygon's winding.
     let sign = if signed_area(polygon) >= 0.0 { 1.0_f32 } else { -1.0 };
 
+    // A vertex is *reflex* when it turns against the winding. Only a reflex
+    // vertex can block an ear — and a reflex vertex lying *on* the candidate
+    // diagonal blocks it too (the diagonal would leave the polygon), so reflex
+    // vertices are tested against the **closed** triangle, not merely its
+    // interior.
+    let reflex: Vec<bool> = (0..n)
+        .map(|i| {
+            let u = polygon[(i + n - 1) % n];
+            let v = polygon[i];
+            let w = polygon[(i + 1) % n];
+            sign * cross(u, v, w) < 0.0
+        })
+        .collect();
+
     let mut indices: Vec<usize> = (0..n).collect();
     let mut triangles: Vec<[usize; 3]> = Vec::with_capacity(n - 2);
 
@@ -79,7 +104,9 @@ pub fn triangulate(polygon: &[(f32, f32)]) -> Vec<[usize; 3]> {
                 if ix == iu || ix == iv || ix == iw {
                     continue;
                 }
-                if strictly_inside(polygon[ix], u, v, w) {
+                if strictly_inside(polygon[ix], u, v, w)
+                    || (reflex[ix] && inside_or_on(polygon[ix], u, v, w))
+                {
                     is_ear = false;
                     break;
                 }
@@ -225,6 +252,30 @@ mod tests {
                 area(&poly)
             );
         }
+    }
+
+    /// Regression: a reflex vertex lying exactly on a candidate diagonal must
+    /// block that ear, or the emitted triangle leaves the polygon and the area
+    /// overshoots. The L-shape's inner corner `(1,1)` sits on the diagonal
+    /// `(0,2)-(2,0)`.
+    #[test]
+    fn reflex_vertex_on_a_diagonal_blocks_the_ear() {
+        let l = [
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ];
+        let tris = triangulate(&l);
+        assert_eq!(tris.len(), 4);
+        assert!(
+            approx(total_tri_area(&l, &tris), area(&l)),
+            "area {} != {}",
+            total_tri_area(&l, &tris),
+            area(&l)
+        );
     }
 
     /// Coverage oracle: a point strictly inside the polygon lies inside exactly
