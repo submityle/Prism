@@ -69,6 +69,7 @@ mod pipeline_cache;
 mod plugin;
 mod queue;
 mod record;
+mod render_asset;
 mod runtime_resource;
 mod scene;
 mod sets;
@@ -100,6 +101,10 @@ pub use queue::{
     phase_for_render_class,
 };
 pub use record::RenderRecord;
+pub use render_asset::{
+    AssetSyncReport, PrepareAssetError, RenderAsset, RenderAssets, drain_and_sync_assets,
+    sync_assets,
+};
 pub use runtime_resource::RenderRuntimeResource;
 pub use scene::{MeshClass, SceneRegistry, VisibilityWorkList};
 pub use sets::{
@@ -130,6 +135,10 @@ pub mod prelude {
         phase_for_render_class,
     };
     pub use crate::record::RenderRecord;
+    pub use crate::render_asset::{
+        AssetSyncReport, PrepareAssetError, RenderAsset, RenderAssets, drain_and_sync_assets,
+        sync_assets,
+    };
     pub use crate::scene::{MeshClass, SceneRegistry, VisibilityWorkList};
     pub use crate::sets::{
         RenderGraphSet, RenderPhase, RenderSystems, configure_render_graph_sets,

@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 prism_app = { path = "../prism_app" }
+prism_asset = { path = "../prism_asset" }
 prism_ecs = { path = "../prism_ecs" }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_render_material = { path = "../prism_render_material" }
