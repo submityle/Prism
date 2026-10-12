@@ -212,6 +212,35 @@ pub enum Namespace {
     XStudio,
 }
 
+impl Namespace {
+    /// Canonical schema spelling of this governance namespace.
+    ///
+    /// This is identity metadata (§5.4): the value never changes on promotion
+    /// (`X_studio → EXT → KHR` only flips this string, not the `uid`/slot), and
+    /// it is the bit-region partition key that keeps OpenPBR-spec fields from
+    /// colliding with Prism-private ones (§4.5 constraint 2).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Khr => "KHR",
+            Self::Ext => "EXT",
+            Self::Prism => "PRISM",
+            Self::XStudio => "X_STUDIO",
+        }
+    }
+
+    /// Whether this namespace belongs to the OpenPBR specification core, i.e.
+    /// the canonical bit region a pure-OpenPBR material may occupy.
+    ///
+    /// Only `KHR` is spec core: `EXT` is a ratified *cross-vendor* extension
+    /// that still leaves the OpenPBR baseline, so it lives in the extension
+    /// region alongside `PRISM`/`X_STUDIO` (§4.5 constraint 2).
+    #[must_use]
+    pub const fn is_openpbr_core(self) -> bool {
+        matches!(self, Self::Khr)
+    }
+}
+
 /// Stability level of a capability (§5.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]

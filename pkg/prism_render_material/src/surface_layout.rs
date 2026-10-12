@@ -22,56 +22,82 @@ pub const SURFACE_MAX_WORDS: usize = 40;
 pub struct LobeLayout {
     /// Human-facing lobe id (schema `id`).
     pub id: &'static str,
+    /// Globally unique capability id (schema `uid`), stable across
+    /// namespace promotion (§5.4).
+    pub uid: &'static str,
     /// Matching `LobeMask` associated-constant name.
     pub mask_const: &'static str,
     /// Immutable `LobeMask` bit index and low-bit-first pack order.
     pub registry_slot: u32,
     /// `u32` word footprint of the lobe.
     pub words: usize,
+    /// Governance namespace / bit-region partition key (§5.4).
+    /// `"KHR"` is the `OpenPBR` specification core; every other value
+    /// lives in the Prism extension region (§4.5 constraint 2).
+    pub namespace: &'static str,
 }
 
 /// The defined lobes in canonical low-bit-first pack order.
+///
+/// The `KHR`/extension split of this table is the machine-checked form of
+/// the `OpenPBR` bit-region isolation invariant (§4.5 constraint 2):
+/// `surface.rs::LobeMask` derives its region masks from the same schema, and
+/// `layout_matches_generated_table` asserts the two agree.
 pub const SURFACE_LOBES: [LobeLayout; 7] = [
     LobeLayout {
         id: "emission",
+        uid: "org.khronos.openpbr.emission",
         mask_const: "EMISSION",
         registry_slot: 0,
         words: 4,
+        namespace: "KHR",
     },
     LobeLayout {
         id: "clearcoat",
+        uid: "org.khronos.openpbr.coat",
         mask_const: "CLEARCOAT",
         registry_slot: 1,
         words: 4,
+        namespace: "KHR",
     },
     LobeLayout {
         id: "anisotropy",
+        uid: "org.khronos.openpbr.specular_anisotropy",
         mask_const: "ANISOTROPY",
         registry_slot: 2,
         words: 4,
+        namespace: "KHR",
     },
     LobeLayout {
         id: "sheen",
+        uid: "org.khronos.openpbr.fuzz",
         mask_const: "SHEEN",
         registry_slot: 3,
         words: 4,
+        namespace: "KHR",
     },
     LobeLayout {
         id: "subsurface",
+        uid: "org.khronos.openpbr.subsurface",
         mask_const: "SUBSURFACE",
         registry_slot: 4,
         words: 4,
+        namespace: "KHR",
     },
     LobeLayout {
         id: "transmission",
+        uid: "org.khronos.openpbr.transmission",
         mask_const: "TRANSMISSION",
         registry_slot: 5,
         words: 4,
+        namespace: "KHR",
     },
     LobeLayout {
         id: "face",
+        uid: "studio.prism.face_shadow",
         mask_const: "FACE",
         registry_slot: 6,
         words: 4,
+        namespace: "PRISM",
     },
 ];

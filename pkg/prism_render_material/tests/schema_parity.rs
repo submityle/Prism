@@ -9,7 +9,8 @@
 
 use prism_material_schema::{surface_schema, FieldType, SurfaceSchema};
 use prism_render_material::{
-    GpuSurfaceParameters, LobeMask, SurfaceParameterBlock, SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
+    openpbr_conformance, project_to_openpbr, GpuSurfaceParameters, LobeMask, LobeRegion,
+    OpenPbrConformance, SurfaceParameterBlock, SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
 };
 
 /// The same authored fat parameters used by the `surface.rs` unit tests, so the
@@ -196,5 +197,78 @@ fn schema_defaults_match_neutral_surface() {
                 field.name
             );
         }
+    }
+}
+
+/// §4.5 constraint 2 (bit-region isolation) parity gate, end to end from the
+/// schema: every lobe's declared `namespace` must place its bit in the matching
+/// `LobeMask` region, the two regions must exactly tile the defined lobes, and
+/// the §4.5 constraint 1 conformance gate must hold for every schema-derived
+/// pure-OpenPBR mask. This is the machine-checkable form of the "Prism über is
+/// a real OpenPBR superset" contract — drift between the schema, the generated
+/// lobe table, and the hand-written regions fails here.
+#[test]
+fn schema_namespaces_match_lobe_mask_regions() {
+    let schema = surface_schema();
+
+    let mut khr = LobeMask::default();
+    let mut extension = LobeMask::default();
+    for lobe in &schema.lobes {
+        let bit = LobeMask(1 << lobe.registry_slot);
+        let core = lobe.namespace.is_openpbr_core();
+        assert_eq!(
+            LobeMask::region_of(bit),
+            Some(if core {
+                LobeRegion::Canonical
+            } else {
+                LobeRegion::Extension
+            }),
+            "schema lobe {:?} namespace {:?} disagrees with its region",
+            lobe.id,
+            lobe.namespace
+        );
+        if core {
+            khr = khr.union(bit);
+        } else {
+            extension = extension.union(bit);
+        }
+    }
+
+    assert_eq!(LobeMask::KHR_REGION, khr);
+    assert_eq!(LobeMask::EXTENSION_REGION, extension);
+    assert_eq!(
+        LobeMask::KHR_REGION.union(LobeMask::EXTENSION_REGION),
+        LobeMask::all(),
+        "regions must tile every defined lobe exactly"
+    );
+    assert_eq!(
+        LobeMask::KHR_REGION.bits() & LobeMask::EXTENSION_REGION.bits(),
+        0,
+        "regions must be disjoint"
+    );
+
+    // Constraint 1, end to end: every pure-OpenPBR lobe subset is a lossless
+    // fixed point of the downgrade projection.
+    let authored = authored();
+    for raw in 0..=khr.bits() {
+        let mask = LobeMask(raw & khr.bits());
+        let block = SurfaceParameterBlock::from_full(&authored, mask);
+        assert_eq!(openpbr_conformance(&block), OpenPbrConformance::Conformant);
+        let projection = project_to_openpbr(&block);
+        assert!(projection.is_lossless());
+        assert_eq!(projection.block.pack(), block.pack());
+    }
+
+    // Every extension lobe must be reported (never silently dropped).
+    for lobe in &schema.lobes {
+        if lobe.namespace.is_openpbr_core() {
+            continue;
+        }
+        let bit = LobeMask(1 << lobe.registry_slot);
+        let block = SurfaceParameterBlock::from_full(&authored, bit);
+        let projection = project_to_openpbr(&block);
+        assert_eq!(projection.dropped.len(), 1, "lobe {:?} not reported", lobe.id);
+        assert_eq!(projection.dropped[0].uid, lobe.uid);
+        assert!(!projection.is_lossless());
     }
 }

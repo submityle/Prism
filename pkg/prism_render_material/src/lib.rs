@@ -11,6 +11,7 @@ mod bevy_bridge;
 mod handle;
 mod ir;
 mod normal_map;
+mod openpbr;
 mod record;
 mod registry;
 mod resources;
@@ -64,8 +65,11 @@ pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};
 pub use surface::{
     GpuAnisotropyLobe, GpuClearCoatLobe, GpuEmissionLobe, GpuSheenLobe, GpuSubsurfaceLobe,
-    GpuSurfaceCore, GpuTransmissionLobe, LobeMask, SurfaceParameterBlock, SurfaceUnpackError,
-    SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
+    GpuSurfaceCore, GpuTransmissionLobe, LobeMask, LobeRegion, SurfaceParameterBlock,
+    SurfaceUnpackError, SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
+};
+pub use openpbr::{
+    openpbr_conformance, project_to_openpbr, DroppedLobe, OpenPbrConformance, OpenPbrProjection,
 };
 pub use surface_layout::{LobeLayout, SURFACE_LOBES, SURFACE_LOBE_COUNT, SURFACE_MAX_WORDS};
 pub use texture_addressing::{address_uv, wrap_coord, AddressResult, WrapMode};

@@ -387,14 +387,26 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     o.push_str("pub struct LobeLayout {\n");
     o.push_str("    /// Human-facing lobe id (schema `id`).\n");
     o.push_str("    pub id: &'static str,\n");
+    o.push_str("    /// Globally unique capability id (schema `uid`), stable across\n");
+    o.push_str("    /// namespace promotion (§5.4).\n");
+    o.push_str("    pub uid: &'static str,\n");
     o.push_str("    /// Matching `LobeMask` associated-constant name.\n");
     o.push_str("    pub mask_const: &'static str,\n");
     o.push_str("    /// Immutable `LobeMask` bit index and low-bit-first pack order.\n");
     o.push_str("    pub registry_slot: u32,\n");
     o.push_str("    /// `u32` word footprint of the lobe.\n");
     o.push_str("    pub words: usize,\n");
+    o.push_str("    /// Governance namespace / bit-region partition key (§5.4).\n");
+    o.push_str("    /// `\"KHR\"` is the `OpenPBR` specification core; every other value\n");
+    o.push_str("    /// lives in the Prism extension region (§4.5 constraint 2).\n");
+    o.push_str("    pub namespace: &'static str,\n");
     o.push_str("}\n\n");
     o.push_str("/// The defined lobes in canonical low-bit-first pack order.\n");
+    o.push_str("///\n");
+    o.push_str("/// The `KHR`/extension split of this table is the machine-checked form of\n");
+    o.push_str("/// the `OpenPBR` bit-region isolation invariant (§4.5 constraint 2):\n");
+    o.push_str("/// `surface.rs::LobeMask` derives its region masks from the same schema, and\n");
+    o.push_str("/// `layout_matches_generated_table` asserts the two agree.\n");
     let _ = writeln!(o, "pub const SURFACE_LOBES: [LobeLayout; {count}] = [");
     // Emit the rustfmt-canonical multi-line struct literal (rustfmt's default
     // `struct_lit_width = 18` expands these named-field literals), so the
@@ -403,9 +415,11 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     for lobe in &lobes {
         o.push_str("    LobeLayout {\n");
         let _ = writeln!(o, "        id: {:?},", lobe.id);
+        let _ = writeln!(o, "        uid: {:?},", lobe.uid);
         let _ = writeln!(o, "        mask_const: {:?},", lobe.mask_const);
         let _ = writeln!(o, "        registry_slot: {},", lobe.registry_slot);
         let _ = writeln!(o, "        words: {},", lobe.words);
+        let _ = writeln!(o, "        namespace: {:?},", lobe.namespace.as_str());
         o.push_str("    },\n");
     }
     o.push_str("];\n");
@@ -475,8 +489,8 @@ mod tests {
             "pub const SURFACE_LOBE_COUNT: u32 = 7;",
             "pub const SURFACE_MAX_WORDS: usize = 40;",
             "pub const SURFACE_LOBES: [LobeLayout; 7] = [",
-            "    LobeLayout {\n        id: \"emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 4,\n    },",
-            "    LobeLayout {\n        id: \"face\",\n        mask_const: \"FACE\",\n        registry_slot: 6,\n        words: 4,\n    },",
+            "    LobeLayout {\n        id: \"emission\",\n        uid: \"org.khronos.openpbr.emission\",\n        mask_const: \"EMISSION\",\n        registry_slot: 0,\n        words: 4,\n        namespace: \"KHR\",\n    },",
+            "    LobeLayout {\n        id: \"face\",\n        uid: \"studio.prism.face_shadow\",\n        mask_const: \"FACE\",\n        registry_slot: 6,\n        words: 4,\n        namespace: \"PRISM\",\n    },",
         ] {
             assert!(rust.contains(needle), "generated Rust missing `{needle}`");
         }

@@ -625,6 +625,15 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 **🟡 部分完成**
 
+- **P2-f 超集合规门禁 + 向下投影导出器（§4.5 约束 1/2/3，结构/契约半边）**（§4.5 / §17.5.3 ⑥）
+  - 范围：把 §4.5 的三条硬约束从"人工审读约定"落成**可机检的代码契约**。本阶段落地其中不依赖外部 OpenPBR 参考实现的**结构半边**：
+    - **位区隔离（约束 2）**：`LobeMask` 新增 `KHR_REGION`（OpenPBR 规范核心区）与 `EXTENSION_REGION`（扩展区），及其 `canonical_region` / `extension_region` / `is_pure_openpbr` / `region_of` / `LobeRegion`；两区位段互斥且恰好铺满已定义瓣。位区的**数据来源是 schema**（`pkg/prism_material_schema/schema/surface.toml` 的 `namespace` 列），codegen 生成的 `LobeLayout` 新增 `uid` + `namespace` 字段；`surface.rs::region_masks_match_the_schema_namespaces` 与 `tests/schema_parity.rs::schema_namespaces_match_lobe_mask_regions` 对拍 schema↔生成表↔手写区，任一处漂移即 CI 标红。
+    - **向下投影（约束 3）**：`project_to_openpbr(&SurfaceParameterBlock) -> OpenPbrProjection`——保留核心 + 全部 `KHR` 区瓣、丢弃扩展瓣，并**逐瓣显式记录** `DroppedLobe{ id, uid, namespace, bit, approximated_by }`。`approximated_by` 走一张 `CORE_CARRIERS` 表，当前为空：FACE（PRISM 风格化 SDF 面阴影）在 OpenPBR 无对等瓣，故**诚实标注为 outright drop（`None`）而非臆造近似**；另设 `unknown_bits` 承接损坏/未定义位，保证投影**全函数不 panic**。投影单向（超集→基集）、幂等（对投影结果再投影即无损恒等）。
+    - **合规门禁（约束 1 的身份半边）**：`openpbr_conformance(&SurfaceParameterBlock) -> OpenPbrConformance{Conformant|NotApplicable|Breached}`——对纯 `KHR` 面，断言投影是**逐字节恒等**（`projection.block.pack() == block.pack()`），即"关掉扩展，Prism 就是 OpenPBR"；非纯面返回 `NotApplicable`（先投影再判）；纯面被改动则 `Breached`（内部不变量破坏，CI 失败）。
+  - 代码：`pkg/prism_render_material/src/openpbr.rs`（新模块，投影 + 门禁 + 7 用例）、`surface.rs`（位区常量/方法 + 2 用例）、`tests/schema_parity.rs`（schema↔区 端到端门禁）、`pkg/prism_material_schema/{src/lib.rs,src/codegen.rs,schema/surface.toml}`（`Namespace::as_str`/`is_openpbr_core` + 生成 `uid`/`namespace`）、生成物 `surface_layout.rs` 重生成。
+  - 门禁：`cargo test -p prism_render_material`（**826 lib + 6 schema_parity + 2 codegen_freshness 全绿**）、`cargo test -p prism_material_schema`（12 通过）、`cargo check -p prism_render_material_gpu -p prism_render_shading` 干净；touched 文件 clippy 无告警。
+  - **诚实边界（未完成的另半边）**：约束 1 的**响应级对拍**——"纯 OpenPBR 材质的 BSDF 响应与 OpenPBR 参考实现（ASWF reference / MaterialX nodedef）在 furnace + 定向光下字节级一致"——仍需接入一份外部 OpenPBR 参考实现/金标准数据后才成立，本阶段只落地了**布局/身份层**的合规（`KHR` 区字段枚举 + 投影恒等），不是完整响应对拍。故标 🟡 而非 ✅。
+
 - **P2-d thin_film 虹彩瓣：Airy 反射率 GPU twin + 原理化高光 Fresnel 接线（shade-time，ABI 中性）**（§10 / §13 表 P2-d）
   - 范围：薄膜干涉（Belcour–Barla 2017 单膜 Airy 反射率）已有完整带测试的 CPU 金标准 `pkg/prism_render_shading/src/gi/material/thin_film.rs`。本阶段在其基础上：①补齐 metal 逐通道基底 IOR 变体；②落地 WESL 孪生；③把虹彩**真实混入原理化高光 Fresnel**（CPU + brdf.wesl 逐位孪生），以 **shade-time `SurfaceSample` 字段**驱动（照搬 P0-b `normal_variance` 恒等旁路范式），权重 0 时逐位恒等。此接线**不碰** über GPU 材质 ABI 打包（`LobeMask::THIN_FILM` 新位 + 3-word 块），属 shading 域内、与基础设施线不冲突。
   - 代码：
@@ -643,7 +652,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - 门禁：`cargo test -p prism_render_shading --lib glint`（glint CPU 全绿）、`--lib measured_brdf`（18 通过）、`cargo test -p prism_render_scene --lib shading::glint` / `shading::measured_brdf`（link 各 1 通过）；全量 `-p prism_render_shading --lib` 3257 通过。
   - 诚实边界：本阶段落地的是 shading 域内、ABI 中性的瓣**数学核 + GPU 孪生**，尚**未**接入 über 开放词汇表 ABI（新 `LobeMask` 位 + 变长字段打包 + 静态置换、`prism_unpack_surface` 聚集），该 ABI 一等成员接入属 P2-c，随基础设施线统一推进。
 
-**⬜ 未开始（见上表）**：P1-a~P1-d、P1-f、P1-h（PCM 地基）、P2-a~P2-c、P2-e~P2-g、P2-i、P2-j、P3-a~P3-e。开放瓣（glint / 测量 BRDF）的 CPU 金标准 + WESL 孪生已落地（见上「部分完成」），仅余其 über 开放词汇表 ABI 接入（归 P2-c）。
+**⬜ 未开始（见上表）**：P1-a~P1-d、P1-f、P1-h（PCM 地基）、P2-a~P2-c、P2-e、P2-g、P2-i、P2-j、P3-a~P3-e。开放瓣（glint / 测量 BRDF）的 CPU 金标准 + WESL 孪生已落地（见上「部分完成」），仅余其 über 开放词汇表 ABI 接入（归 P2-c）；P2-f 的位区隔离 + 向下投影 + 布局级合规门禁已落地，余"对拍 OpenPBR 参考实现"的响应级半边（见上「部分完成」）。
 
 **破坏性说明**：P1-b 一次性弃 v4，不做兼容垫片；旧 `MaterialRecord`/`GpuMaterialHeader`/`lower_standard_material`/所有 `MAX_*` 常量直接改写或删除。
 

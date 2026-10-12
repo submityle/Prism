@@ -149,6 +149,28 @@ impl LobeMask {
     pub const TRANSMISSION: Self = Self(1 << 5);
     pub const FACE: Self = Self(1 << 6);
 
+    /// The `OpenPBR` specification-core bit region (§4.5 constraint 2).
+    ///
+    /// Canonical (`namespace == "KHR"`) lobes occupy this low, fixed segment.
+    /// A mask that fits entirely inside [`Self::KHR_REGION`] describes a
+    /// *pure `OpenPBR`* surface, so pruning it to this region is the identity
+    /// (see [`crate::project_to_openpbr`]) and its BSDF response is the
+    /// conformance reference the `OpenPBR` gate compares against.
+    ///
+    /// This mask is the runtime mirror of the schema's `namespace` column; the
+    /// schema-parity gate asserts the two never drift.
+    pub const KHR_REGION: Self =
+        Self(Self::EMISSION.0 | Self::CLEARCOAT.0 | Self::ANISOTROPY.0 | Self::SHEEN.0
+            | Self::SUBSURFACE.0 | Self::TRANSMISSION.0);
+
+    /// The Prism extension bit region (§4.5 constraint 2).
+    ///
+    /// Every non-`KHR` lobe (`PRISM`/`EXT`/`X_STUDIO`) occupies this high
+    /// segment. It is disjoint from [`Self::KHR_REGION`], so a private lobe can
+    /// never alias a specification-half field, and a downstream pure-OpenPBR
+    /// consumer simply ignores anything outside [`Self::KHR_REGION`].
+    pub const EXTENSION_REGION: Self = Self(Self::FACE.0);
+
     /// Number of distinct lobe bits defined; also the number of iterations of
     /// [`Self::iter_present`] over a fully populated mask.
     pub const COUNT: u32 = 7;
@@ -178,6 +200,44 @@ impl LobeMask {
         Self((1 << Self::COUNT) - 1)
     }
 
+    /// Keep only the bits inside the `OpenPBR` specification-core region.
+    ///
+    /// This is the loss-free half of [`crate::project_to_openpbr`]'s projection
+    /// and the identity on any [`Self::is_pure_openpbr`] mask.
+    pub const fn canonical_region(self) -> Self {
+        Self(self.0 & Self::KHR_REGION.0)
+    }
+
+    /// Keep only the bits outside the `OpenPBR` specification-core region,
+    /// i.e. the Prism/extension lobes a pure-OpenPBR downgrade must drop.
+    pub const fn extension_region(self) -> Self {
+        Self(self.0 & !Self::KHR_REGION.0)
+    }
+
+    /// Whether every set bit lives in the `OpenPBR` specification-core region.
+    ///
+    /// This is the precondition for the `OpenPBR` conformance gate (§4.5
+    /// constraint 1): a pure-OpenPBR surface must reproduce the reference
+    /// response bit-for-bit, and [`crate::project_to_openpbr`] must leave it
+    /// untouched. Undefined bits are treated as non-conformant, so a corrupted
+    /// mask can never masquerade as pure `OpenPBR`.
+    pub const fn is_pure_openpbr(self) -> bool {
+        self.0 & !Self::KHR_REGION.0 == 0
+    }
+
+    /// Which defined region `bit` belongs to, or `None` when `bit` is not a
+    /// single defined lobe bit.
+    pub const fn region_of(bit: Self) -> Option<LobeRegion> {
+        if bit.0.count_ones() != 1 || bit.0 & Self::all().0 == 0 {
+            return None;
+        }
+        if bit.0 & Self::KHR_REGION.0 != 0 {
+            Some(LobeRegion::Canonical)
+        } else {
+            Some(LobeRegion::Extension)
+        }
+    }
+
     /// Canonical low-bit-first ordering of the defined lobes.
     const fn canonical() -> [Self; Self::COUNT as usize] {
         [
@@ -190,6 +250,15 @@ impl LobeMask {
             Self::FACE,
         ]
     }
+}
+
+/// Which of the two disjoint bit regions a lobe belongs to (§4.5 constraint 2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LobeRegion {
+    /// The `OpenPBR` specification core (`namespace == "KHR"`).
+    Canonical,
+    /// The Prism extension region (`PRISM`/`EXT`/`X_STUDIO`).
+    Extension,
 }
 
 /// The decoded über-BSDF surface: the always-present core plus every lobe value.
@@ -462,6 +531,58 @@ mod tests {
             .iter()
             .fold(0u32, |acc, l| acc | (1 << l.registry_slot));
         assert_eq!(LobeMask::all().bits(), generated_all);
+    }
+
+    #[test]
+    fn region_masks_match_the_schema_namespaces() {
+        use crate::surface_layout::SURFACE_LOBES;
+
+        // §4.5 constraint 2: the hand-written region masks must be exactly the
+        // `KHR` (canonical) and non-`KHR` (extension) partitions of the
+        // schema-generated lobe table. Drift here would let a private lobe
+        // alias the specification region, or let the OpenPBR conformance gate
+        // accept a non-OpenPBR field.
+        let mut khr = LobeMask::default();
+        let mut extension = LobeMask::default();
+        for lobe in SURFACE_LOBES {
+            let bit = LobeMask(1 << lobe.registry_slot);
+            assert_eq!(LobeMask::region_of(bit), Some(expected_region(lobe.namespace)));
+            if lobe.namespace == "KHR" {
+                khr = khr.union(bit);
+            } else {
+                extension = extension.union(bit);
+            }
+        }
+        assert_eq!(LobeMask::KHR_REGION, khr);
+        assert_eq!(LobeMask::EXTENSION_REGION, extension);
+        // The two regions are disjoint and together tile the defined bits.
+        assert_eq!(LobeMask::KHR_REGION.bits() & LobeMask::EXTENSION_REGION.bits(), 0);
+        assert_eq!(
+            LobeMask::KHR_REGION.union(LobeMask::EXTENSION_REGION),
+            LobeMask::all()
+        );
+    }
+
+    fn expected_region(namespace: &str) -> LobeRegion {
+        if namespace == "KHR" {
+            LobeRegion::Canonical
+        } else {
+            LobeRegion::Extension
+        }
+    }
+
+    #[test]
+    fn pure_openpbr_masks_are_exactly_the_canonical_region() {
+        assert!(LobeMask::default().is_pure_openpbr());
+        assert!(LobeMask::all().contains(LobeMask::FACE));
+        assert!(!LobeMask::all().is_pure_openpbr());
+        for bit in LobeMask::canonical() {
+            assert_eq!(bit.is_pure_openpbr(), bit != LobeMask::FACE);
+            assert_eq!(bit.canonical_region() == bit, bit != LobeMask::FACE);
+        }
+        // Undefined bits must never pass the conformance precondition.
+        assert!(!LobeMask(1 << 31).is_pure_openpbr());
+        assert!(!LobeMask(1 << LobeMask::COUNT).is_pure_openpbr());
     }
 
     #[test]
