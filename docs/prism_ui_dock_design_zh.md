@@ -301,7 +301,7 @@ features: `std`(持久化落盘)/ `anim`(动效)/ `snapshot_tests`。核心 mode
 | **M1** | renderer-independent 几何解算 + render plan + tab/header/splitter 元数据 | Dock model ✅ / DockPanel ✅；Element 装配仍待完成 |
 | **M2** | 拖拽状态机 + 五向 drop zone + overlay 预览 | 状态机/drop-zone/reducer action 已交付；renderer overlay 预览仍待集成 |
 | **M3** | 浮窗 + autohide 边栏 + maximize | M1/M2 |
-| **M4** | 持久化(序列化/校验/迁移)+ Workspace + 自动保存 | persistence core ✅ / Workspace 纯数据管理 ✅；自动保存仍待完成 |
+| **M4** | 持久化(序列化/校验/迁移)+ Workspace + 自动保存 | persistence core ✅ / Workspace 纯数据与 codec ✅；自动保存仍待完成 |
 | **M5** | 动效 + 可达性 + 撤销集成 + 多显示器校正 | 平台层 / 命令内核 |
 
 ---
@@ -352,10 +352,11 @@ let layout = DockLayout::load(&bytes, &registry)?; // 未知面板丢弃,比例�
 - ✅ **M2 纯数据拖拽内核已交付**:`drag` 提供确定性拖拽状态机、五向 drop zone、tab 插入边界和 reducer action 映射；当前测试覆盖状态机与边界行为。overlay 预览和真实 UI hit-test/render 集成尚未交付。
 - ✅ **M4 persistence core 已交付**:`pkg/prism_ui_dock::encode_layout`/`decode_layout` 提供带 magic/version 的确定性二进制布局编码、checked 长度/深度/节点预算、UTF-8 与枚举校验、解码后模型不变量校验，以及带已知 panel/document 注册表的未知 ID 过滤和安全分支折叠；主树、浮窗、autohide、maximize restore 均可 round-trip。最大化状态要求当前可见面严格收敛为快照中的唯一面板，并由 model/persistence validation 在进入 renderer 前拒绝非法恢复态。该切片不提供文件 IO、schema 迁移链或自动保存。
 - ✅ **Workspace / Perspective 纯数据管理已交付**:`WorkspaceManager`、`Workspace` 与 `Perspective` 按确定性插入顺序管理命名布局；拒绝空白/重复名称，并以 `DockLayout` 深拷贝隔离保存与切换边界。该切片只负责内存中的选择与快照，不提供文件 IO、自动保存、factory 或 renderer。
+- ✅ **Workspace 持久化 codec 已交付**:`encode_workspace`/`decode_workspace` 提供带 magic/version 的稳定 Workspace/Perspective 快照，逐个复用布局 codec，执行 active 引用、资源上限、UTF-8、枚举、截断和尾随字节校验；`decode_workspace_with_registry` 将 `PanelRegistry` 作为嵌套布局的 panel allow-list。该切片只处理内存字节，不提供文件 IO 或自动保存。
 - ✅ **Registry 基础契约已交付**:`PanelDescriptor`/`PanelRegistry` 提供 no_std + alloc 的纯数据贡献点、确定性注册顺序、空白/重复 ID 拒绝、查询和迭代；不包含 Element/factory/renderer。
 - ⬜ **M3–M5 其余能力仍 PLANNED**:`store`、`a11y` 以及动画/多显示器/撤销集成。完整 UI 装配和 renderer 集成仍属于后续工作，不因 M1 计划数据或 persistence core 已存在而视为完成。
 - ⬜ **依赖未落地项**:撤销集成需编辑器命令内核;多显示器校正需平台/`prism_window` 层;动效档位依赖性能分级。
-- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核、M1 renderer-independent render plan、M4 persistence core、Workspace/Perspective 纯数据管理及 Registry 基础契约；布局校验会在 renderer 消费前拒绝非法 maximize 恢复态。`DockPanel` 仍仅负责视觉外壳。Element 装配、GPU/renderer、overlay 预览、文件 IO、自动保存和上层 factory 仍未交付。
+- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核、M1 renderer-independent render plan、M4 persistence core、Workspace/Perspective 纯数据管理与 codec 及 Registry 基础契约；布局校验会在 renderer 消费前拒绝非法 maximize 恢复态。`DockPanel` 仍仅负责视觉外壳。Element 装配、GPU/renderer、overlay 预览、文件 IO、自动保存和上层 factory 仍未交付。
 
 ---
 

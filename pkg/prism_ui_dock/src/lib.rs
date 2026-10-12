@@ -17,6 +17,7 @@ mod registry;
 mod render_plan;
 mod validate;
 mod workspace;
+mod workspace_persist;
 
 pub use drag::{
     calculate_drop_zone, map_drop_action, tab_insertion_index, transition, DragError, DragEvent,
@@ -40,6 +41,10 @@ pub use render_plan::{
 };
 pub use validate::{LayoutError, Limits, ValidationIssue};
 pub use workspace::{NameKind, Perspective, Workspace, WorkspaceError, WorkspaceManager};
+pub use workspace_persist::{
+    decode_workspace, decode_workspace_with_registry, encode_workspace, WorkspaceDecodeLimits,
+    WorkspaceDecodeOptions, WorkspacePersistError,
+};
 
 #[cfg(test)]
 mod tests;
