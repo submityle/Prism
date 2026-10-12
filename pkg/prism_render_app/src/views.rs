@@ -13,13 +13,39 @@
 //! owns. The registry's per-view [`ViewImportance`] is what the shared
 //! virtual-resource budget aggregates, so building it here is the render side of
 //! the view contract.
+//!
+//! Each live registry entry gets one **render entity** carrying [`RenderView`].
+//! That entity is what [`CurrentView`](crate::CurrentView) names while the view's
+//! work records (see [`view_driver`](crate::view_driver)), which is what lets a
+//! ported render system read the view it is recording for through
+//! [`ViewQuery`](crate::ViewQuery) — Bevy's shape, with the registry as the
+//! source of the views.
 
-use prism_ecs::prelude::{Res, ResMut, Resource};
+use alloc::collections::BTreeMap;
+
+use prism_ecs::prelude::{Commands, Component, Entity, Res, ResMut, Resource};
 use prism_render_architecture::view_family::{
     ViewHandle, ViewImportance, ViewKind, ViewRegistry,
 };
 
 use crate::record::RenderRecord;
+
+/// The render entity backing one view.
+///
+/// The render world's view family is a [`ViewRegistry`] keyed by generational
+/// [`ViewHandle`]; this component is what gives each entry an entity of its own,
+/// so per-view work has something to hang off and [`CurrentView`](crate::CurrentView)
+/// has something to name. Mirrors Bevy's `ExtractedView` role, minus the camera:
+/// the transform/projection a camera owns live scene-side.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RenderView {
+    /// The registry entry this entity backs.
+    pub handle: ViewHandle,
+    /// What the view is for (main / stereo eye / shadow / reflection / capture).
+    pub kind: ViewKind,
+    /// Whether the view participates in this frame's budget, culling, and work.
+    pub enabled: bool,
+}
 
 /// The views the current frame renders, keyed by generational [`ViewHandle`].
 #[derive(Resource)]
@@ -28,6 +54,9 @@ pub struct RenderViews {
     registry: ViewRegistry,
     /// The primary view's handle, once the frame has built the family.
     primary: Option<ViewHandle>,
+    /// The render entity backing each live view, and the component last written
+    /// to it (so an unchanged view is not rewritten every frame).
+    entities: BTreeMap<ViewHandle, (Entity, RenderView)>,
 }
 
 impl RenderViews {
@@ -37,6 +66,7 @@ impl RenderViews {
         Self {
             registry: ViewRegistry::new(),
             primary: None,
+            entities: BTreeMap::new(),
         }
     }
 
@@ -55,6 +85,23 @@ impl RenderViews {
     #[must_use]
     pub fn primary_view(&self) -> Option<ViewHandle> {
         self.primary
+    }
+
+    /// The render entity backing `handle`, if the frame materialized one.
+    #[must_use]
+    pub fn entity(&self, handle: ViewHandle) -> Option<Entity> {
+        self.entities.get(&handle).map(|(entity, _)| *entity)
+    }
+
+    /// The live view entities and their components, in handle order.
+    pub fn entities(&self) -> impl Iterator<Item = (Entity, RenderView)> + '_ {
+        self.entities.values().copied()
+    }
+
+    /// The number of materialized view entities.
+    #[must_use]
+    pub fn entity_count(&self) -> usize {
+        self.entities.len()
     }
 
     /// Registers the primary view on first use, then refreshes its importance.
@@ -91,7 +138,7 @@ impl Default for RenderViews {
 
 /// Materializes the frame's view family from the extracted render record.
 ///
-/// Runs in [`RenderSystems::Prepare`](crate::RenderSystems::Prepare), before the
+/// Runs in [`RenderSystems::CreateViews`](crate::RenderSystems::CreateViews), before the
 /// queue stage consumes the family. An empty viewport disables the primary view
 /// rather than removing it, so a minimized frame does not churn the registry.
 ///
@@ -99,10 +146,69 @@ impl Default for RenderViews {
 /// specs (stereo / shadow / reflection / capture, each with its own importance)
 /// arrive with scene-side view extraction, and the registry already models them
 /// via [`ViewKind`].
-pub(crate) fn build_view_family(record: Res<RenderRecord>, mut views: ResMut<RenderViews>) {
+///
+/// Every live entry is backed by one render entity carrying [`RenderView`]; a
+/// view that goes away takes its entity with it, and a view that merely stops
+/// being enabled keeps both, so its handle and its entity survive skipped frames.
+pub(crate) fn build_view_family(
+    record: Res<RenderRecord>,
+    mut views: ResMut<RenderViews>,
+    mut commands: Commands,
+) {
     if record.viewport.is_empty() {
         views.disable_primary();
-        return;
+    } else {
+        views.upsert_primary(ViewImportance::uniform(1.0));
     }
-    views.upsert_primary(ViewImportance::uniform(1.0));
+    sync_view_entities(&mut views, &mut commands);
+}
+
+/// Spawns, updates, or despawns the render entity backing each live view.
+///
+/// The commands land after the system returns, so a view created this frame has
+/// its entity by the time the record stage runs. An unchanged view is not
+/// rewritten: the component last written is kept beside the entity.
+fn sync_view_entities(views: &mut RenderViews, commands: &mut Commands) {
+    let live: Vec<(ViewHandle, RenderView)> = views
+        .registry
+        .iter()
+        .map(|(handle, entry)| {
+            (
+                handle,
+                RenderView {
+                    handle,
+                    kind: entry.kind,
+                    enabled: entry.enabled,
+                },
+            )
+        })
+        .collect();
+
+    let stale: Vec<ViewHandle> = views
+        .entities
+        .keys()
+        .copied()
+        .filter(|handle| !views.registry.contains(*handle))
+        .collect();
+    for handle in stale {
+        if let Some((entity, _)) = views.entities.remove(&handle) {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    for (handle, view) in live {
+        match views.entities.get(&handle) {
+            // Already materialized and unchanged: nothing to write this frame.
+            Some((_, written)) if *written == view => {}
+            Some((entity, _)) => {
+                let entity = *entity;
+                commands.entity(entity).insert(view);
+                views.entities.insert(handle, (entity, view));
+            }
+            None => {
+                let entity = commands.spawn(view);
+                views.entities.insert(handle, (entity, view));
+            }
+        }
+    }
 }

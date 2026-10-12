@@ -78,6 +78,7 @@ mod sync_world;
 mod systems;
 mod target;
 mod texture_cache;
+mod view_driver;
 mod view_query;
 mod views;
 
@@ -109,8 +110,9 @@ pub use stats::RenderFrameStats;
 pub use sync_world::{MainEntity, MainEntityHashSet, tag_extracted_entities};
 pub use target::RenderTarget;
 pub use texture_cache::{GpuTexture, TextureCache, TextureKey};
+pub use view_driver::{for_each_view, with_current_view};
 pub use view_query::{CurrentView, ViewQuery, ViewQueryState};
-pub use views::RenderViews;
+pub use views::{RenderView, RenderViews};
 
 /// Commonly used exports: the plugin, its labels, and the resources that cross
 /// the main-world/render-world boundary.
@@ -138,6 +140,7 @@ pub mod prelude {
     pub use crate::sync_world::{MainEntity, MainEntityHashSet, tag_extracted_entities};
     pub use crate::target::RenderTarget;
     pub use crate::texture_cache::{GpuTexture, TextureCache, TextureKey};
+    pub use crate::view_driver::{for_each_view, with_current_view};
     pub use crate::view_query::{CurrentView, ViewQuery, ViewQueryState};
-    pub use crate::views::RenderViews;
+    pub use crate::views::{RenderView, RenderViews};
 }

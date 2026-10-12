@@ -1020,6 +1020,126 @@ fn render_graph_sets_order_node_systems() {
     );
 }
 
+/// The handles of the views a per-view system saw, in the order it saw them.
+#[derive(Default, Resource)]
+struct ViewLog(Vec<prism_render_architecture::view_family::ViewHandle>);
+
+/// A render system in the ported style: it reads the view it is recording for
+/// through the view query instead of looking the view up itself.
+fn record_view(mut log: ResMut<ViewLog>, view: Option<crate::ViewQuery<&crate::RenderView>>) {
+    let Some(view) = view else {
+        return;
+    };
+    log.0.push(view.into_inner().handle);
+}
+
+/// Each live view is backed by one render entity, and the entity outlives a
+/// frame that merely stops rendering the view.
+#[test]
+fn the_view_family_materializes_a_render_entity_per_view() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+    let primary = render
+        .world
+        .resource::<RenderViews>()
+        .primary_view()
+        .expect("the frame built a primary view");
+    let entity = render
+        .world
+        .resource::<RenderViews>()
+        .entity(primary)
+        .expect("the primary view has a render entity");
+    let view = render
+        .world
+        .resource::<RenderViews>()
+        .entities()
+        .find(|(candidate, _)| *candidate == entity)
+        .map(|(_, view)| view)
+        .expect("the entity is in the family");
+    assert_eq!(view.handle, primary);
+    assert_eq!(view.kind, ViewKind::Main);
+    assert!(view.enabled, "a non-empty frame enables the view");
+
+    // A zero-sized frame disables the view but keeps its entity.
+    app.world_mut().resource_mut::<RenderIntent>().viewport = RenderViewport::new(0, 0);
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+    let views = render.world.resource::<RenderViews>();
+    assert_eq!(
+        views.entity(primary),
+        Some(entity),
+        "the entity survives a skipped frame"
+    );
+    assert!(
+        !views
+            .entities()
+            .find(|(candidate, _)| *candidate == entity)
+            .expect("the entity is still in the family")
+            .1
+            .enabled,
+        "the view's entity records that it is not rendering this frame"
+    );
+}
+
+/// Per-view work runs once per view with that view as the current one: a system
+/// taking the view query sees its own view, and no view is left current after the
+/// walk (a later system must not read a stale one).
+#[test]
+fn per_view_work_sees_its_own_view_and_clears_it_afterwards() {
+    use crate::view_driver::for_each_view;
+    use crate::view_query::CurrentView;
+    use prism_render_architecture::view_family::ViewKind;
+
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    {
+        // A second view of another kind, on top of the primary one.
+        let render = app
+            .sub_app_mut(RenderApp)
+            .expect("the plugin registers the render sub-app");
+        render
+            .world
+            .resource_mut::<RenderViews>()
+            .registry_mut()
+            .register(ViewKind::Shadow);
+    }
+    app.update();
+
+    let world = &mut app
+        .sub_app_mut(RenderApp)
+        .expect("the render sub-app")
+        .world;
+    world.insert_resource(ViewLog::default());
+    let mut schedule = prism_ecs::schedule::Schedule::new();
+    schedule.add_systems(record_view);
+
+    let seen = std::cell::Cell::new(0_usize);
+    for_each_view(world, |world, _entity, _view| {
+        schedule.run(world);
+        seen.set(seen.get() + 1);
+    });
+
+    assert_eq!(seen.get(), 2, "the walk visits every materialized view");
+    let log = world.resource::<ViewLog>();
+    assert_eq!(log.0.len(), 2, "the system ran once per view");
+    log.0.iter().for_each(|handle| {
+        assert!(
+            world
+                .resource::<RenderViews>()
+                .registry()
+                .contains(*handle),
+            "each recorded handle is a live view"
+        );
+    });
+    assert_ne!(log.0[0], log.0[1], "the two views are distinct");
+    assert!(
+        world.get_resource::<CurrentView>().is_none(),
+        "no view is left current after the walk"
+    );
+}
+
 /// A small, non-square frame so a swapped axis cannot pass by accident.
 const EXTENT: Extent3d = Extent3d::new_2d(64, 48);
 
