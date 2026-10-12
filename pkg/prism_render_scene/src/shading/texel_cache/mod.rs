@@ -25,6 +25,9 @@ pub use store::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prism_render_architecture::gpu_scene::GpuCompletionValue;
+
+    const COMPLETION: GpuCompletionValue = GpuCompletionValue(1);
 
     fn key(x: u16, y: u16) -> ShadePageKey {
         ShadePageKey {
@@ -198,10 +201,10 @@ mod tests {
         let page = key(0, 0);
         let first_frame = store.begin_frame(3).unwrap();
         let first = store.begin_write(first_frame, page, 1).unwrap();
-        let first_submission = store.submit_write(first).unwrap();
-        store.complete_write(first_submission).unwrap();
+        let first_submission = store.submit_write(first, COMPLETION).unwrap();
+        store.complete_write(first_submission, COMPLETION).unwrap();
         assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Fallback);
-        store.publish(first_frame).unwrap();
+        store.publish_after(first_frame, COMPLETION).unwrap();
         let old = match store.lookup(page, 3) {
             ShadeStoreLookup::Ready(handle) => handle,
             ShadeStoreLookup::Fallback => panic!("published page missing"),
@@ -209,11 +212,11 @@ mod tests {
 
         let second_frame = store.begin_frame(3).unwrap();
         let second = store.begin_write(second_frame, page, 2).unwrap();
-        let second_submission = store.submit_write(second).unwrap();
-        store.complete_write(second_submission).unwrap();
+        let second_submission = store.submit_write(second, COMPLETION).unwrap();
+        store.complete_write(second_submission, COMPLETION).unwrap();
         assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Ready(old));
         assert_eq!(store.lookup(page, 4), ShadeStoreLookup::Fallback);
-        store.publish(second_frame).unwrap();
+        store.publish_after(second_frame, COMPLETION).unwrap();
         assert_eq!(
             store.lookup(page, 3),
             ShadeStoreLookup::Ready(second.handle)
@@ -228,17 +231,17 @@ mod tests {
 
         let first_frame = store.begin_frame(3).unwrap();
         let first = store.begin_write(first_frame, page, 1).unwrap();
-        let first_submission = store.submit_write(first).unwrap();
-        store.complete_write(first_submission).unwrap();
-        store.publish(first_frame).unwrap();
+        let first_submission = store.submit_write(first, COMPLETION).unwrap();
+        store.complete_write(first_submission, COMPLETION).unwrap();
+        store.publish_after(first_frame, COMPLETION).unwrap();
 
         let second_frame = store.begin_frame(3).unwrap();
         let second = store.begin_write(second_frame, page, 2).unwrap();
         assert_ne!(first.handle.slot, second.handle.slot);
         assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Ready(first.handle));
-        let second_submission = store.submit_write(second).unwrap();
-        store.complete_write(second_submission).unwrap();
-        store.publish(second_frame).unwrap();
+        let second_submission = store.submit_write(second, COMPLETION).unwrap();
+        store.complete_write(second_submission, COMPLETION).unwrap();
+        store.publish_after(second_frame, COMPLETION).unwrap();
 
         assert_eq!(
             store.lookup(page, 3),
@@ -253,9 +256,9 @@ mod tests {
 
         let first_frame = store.begin_frame(3).unwrap();
         let first = store.begin_write(first_frame, page, 1).unwrap();
-        let first_submission = store.submit_write(first).unwrap();
-        store.complete_write(first_submission).unwrap();
-        store.publish(first_frame).unwrap();
+        let first_submission = store.submit_write(first, COMPLETION).unwrap();
+        store.complete_write(first_submission, COMPLETION).unwrap();
+        store.publish_after(first_frame, COMPLETION).unwrap();
 
         let second_frame = store.begin_frame(3).unwrap();
         assert_eq!(
@@ -263,7 +266,7 @@ mod tests {
             Err(ShadeStoreError::CapacityExhausted)
         );
         assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Ready(first.handle));
-        store.publish(second_frame).unwrap();
+        store.publish_after(second_frame, COMPLETION).unwrap();
         assert_eq!(store.lookup(page, 3), ShadeStoreLookup::Ready(first.handle));
     }
 
@@ -278,13 +281,13 @@ mod tests {
             store.begin_write(frame, page, 2),
             Err(ShadeStoreError::WriteAlreadyOpen)
         );
-        let submission = store.submit_write(write).unwrap();
-        store.complete_write(submission).unwrap();
+        let submission = store.submit_write(write, COMPLETION).unwrap();
+        store.complete_write(submission, COMPLETION).unwrap();
         assert_eq!(
             store.begin_write(frame, page, 2),
             Err(ShadeStoreError::WriteAlreadyCommitted)
         );
-        store.publish(frame).unwrap();
+        store.publish_after(frame, COMPLETION).unwrap();
     }
 
     #[test]

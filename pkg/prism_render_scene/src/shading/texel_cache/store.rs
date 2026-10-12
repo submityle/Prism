@@ -2,6 +2,8 @@
 
 use alloc::collections::{BTreeMap, BTreeSet};
 
+use prism_render_architecture::gpu_scene::GpuCompletionValue;
+
 use super::key::ShadePageKey;
 
 /// A physical page handle published to the active sampler.
@@ -40,11 +42,17 @@ pub struct ShadePageWrite {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShadeSubmission {
     token: ShadeFrameToken,
+    id: u64,
+    /// Queue timeline value assigned to the submission.
+    pub completion: GpuCompletionValue,
     /// Page identity carried through the completion boundary.
     pub key: ShadePageKey,
     /// Staging handle written by the submitted GPU work.
     pub handle: ShadePageHandle,
 }
+
+/// GPU writes that have been submitted but have not reached their queue
+/// completion value yet remain in this state and cannot be published.
 
 /// Active page lookup result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +86,8 @@ pub enum ShadeStoreError {
     InvalidWrite,
     /// Publishing would expose a page whose upload has not completed.
     PendingWrites,
+    /// Submission ids must never wrap and alias an older completion.
+    SubmissionSerialExhausted,
 }
 
 /// Double-buffered logical page table. The active map is read-only until
@@ -91,8 +101,13 @@ pub struct ShadePageStore {
     active: BTreeMap<ShadePageKey, ShadePageHandle>,
     staging: Option<BTreeMap<ShadePageKey, ShadePageHandle>>,
     pending_writes: BTreeMap<ShadePageKey, u64>,
-    submitted_writes: BTreeMap<ShadePageKey, u64>,
+    submitted_writes: BTreeMap<ShadePageKey, ShadeSubmission>,
     written_pages: BTreeSet<ShadePageKey>,
+    /// Slots no longer referenced by the active table but still readable by
+    /// an in-flight GPU submission.
+    retired_slots: BTreeMap<u32, GpuCompletionValue>,
+    next_submission_id: u64,
+    completed_value: GpuCompletionValue,
     frame_serial: u64,
 }
 
@@ -109,6 +124,9 @@ impl ShadePageStore {
             pending_writes: BTreeMap::new(),
             submitted_writes: BTreeMap::new(),
             written_pages: BTreeSet::new(),
+            retired_slots: BTreeMap::new(),
+            next_submission_id: 0,
+            completed_value: GpuCompletionValue(0),
             frame_serial: 0,
         }
     }
@@ -193,6 +211,7 @@ impl ShadePageStore {
     pub fn submit_write(
         &mut self,
         write: ShadePageWrite,
+        completion: GpuCompletionValue,
     ) -> Result<ShadeSubmission, ShadeStoreError> {
         if self.staging.is_none() {
             return Err(ShadeStoreError::NoOpenFrame);
@@ -207,14 +226,20 @@ impl ShadePageStore {
         {
             return Err(ShadeStoreError::InvalidWrite);
         }
-        self.pending_writes.remove(&write.key);
-        self.submitted_writes
-            .insert(write.key, write.handle.generation);
-        Ok(ShadeSubmission {
+        self.next_submission_id = self
+            .next_submission_id
+            .checked_add(1)
+            .ok_or(ShadeStoreError::SubmissionSerialExhausted)?;
+        let submission = ShadeSubmission {
             token: write.token,
+            id: self.next_submission_id,
+            completion,
             key: write.key,
             handle: write.handle,
-        })
+        };
+        self.pending_writes.remove(&write.key);
+        self.submitted_writes.insert(write.key, submission);
+        Ok(submission)
     }
 
     /// Marks a submitted GPU write complete and makes it eligible for publish.
@@ -223,7 +248,11 @@ impl ShadePageStore {
     /// to invoke this only after the backend reports completion. Keeping this
     /// as a separate transition prevents an encode/submit call from being
     /// accidentally treated as shader completion.
-    pub fn complete_write(&mut self, submission: ShadeSubmission) -> Result<(), ShadeStoreError> {
+    pub fn complete_write(
+        &mut self,
+        submission: ShadeSubmission,
+        completed: GpuCompletionValue,
+    ) -> Result<(), ShadeStoreError> {
         if self.staging.is_none() {
             return Err(ShadeStoreError::NoOpenFrame);
         }
@@ -233,7 +262,8 @@ impl ShadePageStore {
                 .as_ref()
                 .and_then(|staging| staging.get(&submission.key))
                 != Some(&submission.handle)
-            || self.submitted_writes.get(&submission.key) != Some(&submission.handle.generation)
+            || self.submitted_writes.get(&submission.key) != Some(&submission)
+            || completed < submission.completion
         {
             return Err(ShadeStoreError::InvalidWrite);
         }
@@ -253,13 +283,18 @@ impl ShadePageStore {
         let Some(staging) = self.staging.take() else {
             return Err(ShadeStoreError::NoOpenFrame);
         };
-        for handle in staging.values() {
+        for (key, handle) in &staging {
             if !self
                 .active
                 .values()
                 .any(|candidate| candidate.slot == handle.slot)
             {
-                self.free_slots.insert(handle.slot);
+                if let Some(submission) = self.submitted_writes.get(key) {
+                    self.retired_slots
+                        .insert(handle.slot, submission.completion);
+                } else {
+                    self.free_slots.insert(handle.slot);
+                }
             }
         }
         self.pending_writes.clear();
@@ -269,7 +304,15 @@ impl ShadePageStore {
     }
 
     /// Atomically publishes the complete staging page table.
-    pub fn publish(&mut self, token: ShadeFrameToken) -> Result<(), ShadeStoreError> {
+    ///
+    /// Old active slots are retired until `retire_after` is observed by the
+    /// queue completion tracker. This prevents a subsequent frame from
+    /// overwriting a page while an earlier render submission still samples it.
+    pub fn publish_after(
+        &mut self,
+        token: ShadeFrameToken,
+        retire_after: GpuCompletionValue,
+    ) -> Result<(), ShadeStoreError> {
         if token.serial != self.frame_serial {
             return Err(ShadeStoreError::InvalidFrame);
         }
@@ -284,11 +327,26 @@ impl ShadePageStore {
                 .values()
                 .any(|candidate| candidate.slot == handle.slot)
             {
-                self.free_slots.insert(handle.slot);
+                self.retired_slots.insert(handle.slot, retire_after);
             }
         }
         self.active = staging;
         Ok(())
+    }
+
+    /// Returns retired slots to the allocator once their GPU readers are done.
+    pub fn reclaim_completed(&mut self, completed: GpuCompletionValue) -> usize {
+        self.completed_value = self.completed_value.max(completed);
+        let reusable: Vec<u32> = self
+            .retired_slots
+            .iter()
+            .filter_map(|(&slot, &required)| (required <= self.completed_value).then_some(slot))
+            .collect();
+        for slot in &reusable {
+            self.retired_slots.remove(slot);
+            self.free_slots.insert(*slot);
+        }
+        reusable.len()
     }
 
     /// Reads only the active generation. Staging writes are invisible here.
@@ -325,6 +383,8 @@ mod tests {
         }
     }
 
+    const COMPLETION: GpuCompletionValue = GpuCompletionValue(1);
+
     #[test]
     fn epoch_mismatch_is_rejected_and_serial_exhaustion_does_not_alias_tokens() {
         let mut store = ShadePageStore::new(1);
@@ -333,7 +393,7 @@ mod tests {
             store.begin_write(frame, key(3), 1),
             Err(ShadeStoreError::EpochMismatch)
         );
-        store.publish(frame).unwrap();
+        store.publish_after(frame, COMPLETION).unwrap();
 
         store.frame_serial = u64::MAX;
         assert_eq!(
@@ -348,11 +408,18 @@ mod tests {
         let page = key(4);
         let frame = store.begin_frame(4).unwrap();
         let write = store.begin_write(frame, page, 1).unwrap();
-        let submission = store.submit_write(write).unwrap();
+        let submission = store.submit_write(write, COMPLETION).unwrap();
 
-        assert_eq!(store.publish(frame), Err(ShadeStoreError::PendingWrites));
-        store.complete_write(submission).unwrap();
-        store.publish(frame).unwrap();
+        assert_eq!(
+            store.publish_after(frame, COMPLETION),
+            Err(ShadeStoreError::PendingWrites)
+        );
+        assert_eq!(
+            store.complete_write(submission, GpuCompletionValue(0)),
+            Err(ShadeStoreError::InvalidWrite)
+        );
+        store.complete_write(submission, COMPLETION).unwrap();
+        store.publish_after(frame, COMPLETION).unwrap();
         assert_eq!(store.lookup(page, 4), ShadeStoreLookup::Ready(write.handle));
     }
 
@@ -362,11 +429,11 @@ mod tests {
         let page = key(4);
         let frame = store.begin_frame(4).unwrap();
         let write = store.begin_write(frame, page, 1).unwrap();
-        let submission = store.submit_write(write).unwrap();
+        let submission = store.submit_write(write, COMPLETION).unwrap();
 
-        store.complete_write(submission).unwrap();
+        store.complete_write(submission, COMPLETION).unwrap();
         assert_eq!(
-            store.complete_write(submission),
+            store.complete_write(submission, COMPLETION),
             Err(ShadeStoreError::InvalidWrite)
         );
     }
@@ -391,9 +458,11 @@ mod tests {
         let page = key(4);
         let initial_frame = store.begin_frame(4).unwrap();
         let initial = store.begin_write(initial_frame, page, 1).unwrap();
-        let initial_submission = store.submit_write(initial).unwrap();
-        store.complete_write(initial_submission).unwrap();
-        store.publish(initial_frame).unwrap();
+        let initial_submission = store.submit_write(initial, COMPLETION).unwrap();
+        store
+            .complete_write(initial_submission, COMPLETION)
+            .unwrap();
+        store.publish_after(initial_frame, COMPLETION).unwrap();
 
         let aborted_frame = store.begin_frame(4).unwrap();
         assert_eq!(
@@ -419,21 +488,56 @@ mod tests {
 
     #[test]
     fn stale_submission_cannot_complete_a_reused_slot() {
-        let mut store = ShadePageStore::new(1);
+        let mut store = ShadePageStore::new(2);
         let page = key(4);
         let first_frame = store.begin_frame(4).unwrap();
         let first = store.begin_write(first_frame, page, 1).unwrap();
-        let stale_submission = store.submit_write(first).unwrap();
+        let stale_submission = store.submit_write(first, COMPLETION).unwrap();
         store.abort_frame(first_frame).unwrap();
 
         let second_frame = store.begin_frame(4).unwrap();
         let second = store.begin_write(second_frame, page, 2).unwrap();
         assert_eq!(
-            store.complete_write(stale_submission),
+            store.complete_write(stale_submission, COMPLETION),
             Err(ShadeStoreError::InvalidWrite)
         );
-        let second_submission = store.submit_write(second).unwrap();
-        store.complete_write(second_submission).unwrap();
-        store.publish(second_frame).unwrap();
+        let second_submission = store.submit_write(second, COMPLETION).unwrap();
+        store.complete_write(second_submission, COMPLETION).unwrap();
+        store.publish_after(second_frame, COMPLETION).unwrap();
+    }
+
+    #[test]
+    fn retired_slots_are_reusable_only_after_timeline_reclaim() {
+        let mut store = ShadePageStore::new(2);
+        let page = key(4);
+
+        let first_frame = store.begin_frame(4).unwrap();
+        let first = store.begin_write(first_frame, page, 1).unwrap();
+        let first_submission = store.submit_write(first, COMPLETION).unwrap();
+        store.complete_write(first_submission, COMPLETION).unwrap();
+        store.publish_after(first_frame, COMPLETION).unwrap();
+
+        let second_frame = store.begin_frame(4).unwrap();
+        let second = store.begin_write(second_frame, page, 2).unwrap();
+        assert_ne!(second.handle.slot, first.handle.slot);
+        let second_submission = store.submit_write(second, COMPLETION).unwrap();
+        store.complete_write(second_submission, COMPLETION).unwrap();
+        store.publish_after(second_frame, COMPLETION).unwrap();
+
+        let blocked_frame = store.begin_frame(4).unwrap();
+        assert_eq!(
+            store.begin_write(blocked_frame, page, 3),
+            Err(ShadeStoreError::CapacityExhausted)
+        );
+        store.abort_frame(blocked_frame).unwrap();
+
+        assert_eq!(store.reclaim_completed(GpuCompletionValue(0)), 0);
+        assert_eq!(store.reclaim_completed(COMPLETION), 1);
+        let reusable_frame = store.begin_frame(4).unwrap();
+        let reusable = store.begin_write(reusable_frame, page, 3).unwrap();
+        assert!(
+            reusable.handle.slot == first.handle.slot || reusable.handle.slot == second.handle.slot
+        );
+        store.abort_frame(reusable_frame).unwrap();
     }
 }

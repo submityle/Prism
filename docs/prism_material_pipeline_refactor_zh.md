@@ -1287,7 +1287,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 | 阶段 | 内容 | 门禁 |
 |---|---|---|
-| P3-a 地基 | **CPU 逻辑地基已落地**：`shading/texel_cache/` 提供稳定 key、请求预算、`Stale`/generation/epoch 状态机、active/staging 页表，以及 `submit_write`→GPU completion→`complete_write` 的发布协议和 `abort_frame` 槽位回收；**待接线**：页表 `w1`、GPU atlas tile 写入与 compute pass | 当前已覆盖命中/未命中、预算确定性、代际/epoch 隔离、无半写可见和未完成 GPU 写入不可发布；GPU atlas/pass 与粗 mip 兜底仍是后续门禁 |
+| P3-a 地基 | **CPU 逻辑地基已落地**：`shading/texel_cache/` 提供稳定 key、请求预算、`Stale`/generation/epoch 状态机、active/staging 页表，以及带 `GpuCompletionValue` 的 `submit_write`→completion→`complete_write` 发布协议；旧 active 槽位经 `publish_after` retired，只有 `reclaim_completed` 后才可复用，abort 对已提交写入同样延迟回收；**待接线**：页表 `w1`、GPU atlas tile 写入与 compute pass | 当前已覆盖命中/未命中、预算确定性、代际/epoch 隔离、无半写可见、未完成 GPU 写入不可发布和 in-flight 槽位不复用；GPU atlas/pass 与粗 mip 兜底仍是后续门禁 |
 | P3-b 视角无关项 | 先缓存 diffuse/SSS/emission/GI 辐照度（PBR+NPR 可缓存项），高光走屏幕空间 split-sum | 与纯屏幕空间抽样对拍误差阈值；furnace 不回归 |
 | P3-c 失效摊销 | generation/epoch 局部失效 + 分帧预算重着 + 时序累积 | 动态光场景帧时稳定、无档跳；staleness 上限 CI |
 | P3-d seam/一致性 | per-face tile + gutter + 无锁双代 + disocclusion 屏幕回退 | seam 视觉零裂；骤转无黑块 CI |
