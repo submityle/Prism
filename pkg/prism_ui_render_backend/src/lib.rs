@@ -71,6 +71,7 @@ pub mod draw;
 pub mod ellipse;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod gradient;
 pub mod hull;
 pub mod inside;
 pub mod layer;
@@ -105,6 +106,7 @@ pub use draw::{DrawCommand, DrawList, GlyphCmd, LayerCmd, RectCmd, ShadowCmd};
 pub use ellipse::flatten_ellipse;
 #[cfg(feature = "gpu")]
 pub use gpu::GpuRasterizer;
+pub use gradient::{LinearGradient, Stop};
 pub use hull::convex_hull;
 pub use inside::point_in_polygon;
 pub use layer::{Layer, LayerTree};
