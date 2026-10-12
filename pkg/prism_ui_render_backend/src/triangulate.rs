@@ -21,11 +21,7 @@
 use crate::measure::signed_area;
 use alloc::vec::Vec;
 
-/// Twice the signed area of triangle `a, b, c`; its sign gives the winding and
-/// its magnitude is twice the area.
-fn cross(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
-    (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
-}
+use crate::vec2::cross3 as cross;
 
 /// Returns `true` when `p` lies strictly inside triangle `a, b, c` (not on an
 /// edge or vertex). Winding-independent.

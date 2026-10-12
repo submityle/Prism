@@ -180,10 +180,7 @@ pub fn shadow_alpha(dist: f32, blur: f32) -> f32 {
     1.0 - s
 }
 
-#[inline]
-fn length(x: f32, y: f32) -> f32 {
-    (x * x + y * y).sqrt()
-}
+use crate::vec2::length_xy as length;
 
 #[inline]
 fn abs(v: f32) -> f32 {

@@ -38,21 +38,7 @@ use crate::measure::signed_area;
 /// Below this normalized magnitude a turn or direction is treated as degenerate.
 const EPS: f32 = 1e-6;
 
-fn sub(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
-    (a.0 - b.0, a.1 - b.1)
-}
-
-fn cross(a: (f32, f32), b: (f32, f32)) -> f32 {
-    a.0 * b.1 - a.1 * b.0
-}
-
-fn dot(a: (f32, f32), b: (f32, f32)) -> f32 {
-    a.0 * b.0 + a.1 * b.1
-}
-
-fn length(v: (f32, f32)) -> f32 {
-    (v.0 * v.0 + v.1 * v.1).sqrt()
-}
+use crate::vec2::{cross, dot, length, sub};
 
 /// Drop vertices whose two incident edges are (near-)collinear or zero-length,
 /// preserving order. Returns `None` when fewer than three vertices survive.

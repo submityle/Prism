@@ -23,17 +23,7 @@
 
 use alloc::vec::Vec;
 
-/// Euclidean distance between two points.
-fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
-    let dx = b.0 - a.0;
-    let dy = b.1 - a.1;
-    (dx * dx + dy * dy).sqrt()
-}
-
-/// Point `t` of the way from `a` to `b`, with `t` normally in `[0, 1]`.
-fn lerp(a: (f32, f32), b: (f32, f32), t: f32) -> (f32, f32) {
-    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
-}
+use crate::vec2::{distance as dist, lerp};
 
 /// Total arc length of the open polyline `points`.
 ///

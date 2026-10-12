@@ -19,14 +19,7 @@
 
 use alloc::vec::Vec;
 
-/// Twice the signed area of triangle `o -> a -> b`.
-///
-/// Positive when `o -> a -> b` turns counter-clockwise, negative for a
-/// clockwise turn, and exactly zero when the three points are collinear.
-#[inline]
-fn cross(o: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
-    (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
-}
+use crate::vec2::cross3 as cross;
 
 /// Computes the convex hull of `points`, returned as its vertices in
 /// counter-clockwise order starting from the lexicographically smallest point

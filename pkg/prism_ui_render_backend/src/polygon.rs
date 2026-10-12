@@ -116,10 +116,7 @@ fn point_segment_distance(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32
     length(wx - ex * t, wy - ey * t)
 }
 
-#[inline]
-fn length(x: f32, y: f32) -> f32 {
-    (x * x + y * y).sqrt()
-}
+use crate::vec2::length_xy as length;
 
 #[inline]
 fn min(a: f32, b: f32) -> f32 {

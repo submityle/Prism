@@ -24,11 +24,7 @@ pub struct Circle {
     pub radius: f32,
 }
 
-fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
-    let dx = a.0 - b.0;
-    let dy = a.1 - b.1;
-    (dx * dx + dy * dy).sqrt()
-}
+use crate::vec2::distance as dist;
 
 /// Whether `p` lies within circle `c`, with a small relative tolerance so that
 /// the points defining the circle reliably test as enclosed under `f32`

@@ -23,21 +23,7 @@
 //! `sqrt` are used, so the routine is `no_std`-clean and bit-stable across
 //! targets.
 
-/// Twice the signed area of triangle `a b c`; equivalently the cross product
-/// `(b - a) × (c - a)`. Its magnitude divided by the length of edge `a -> b` is
-/// the perpendicular distance of `c` from the line through `a` and `b`.
-#[inline]
-fn tri_area2(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
-    (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
-}
-
-/// Euclidean distance between two points.
-#[inline]
-fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
-    let dx = a.0 - b.0;
-    let dy = a.1 - b.1;
-    (dx * dx + dy * dy).sqrt()
-}
+use crate::vec2::{cross3 as tri_area2, distance as dist};
 
 /// The minimum width of a convex polygon: the thinnest slab of parallel lines
 /// that contains it.

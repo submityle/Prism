@@ -90,6 +90,7 @@ pub mod segment_clip;
 pub mod simplify;
 pub mod sdf;
 pub mod triangulate;
+mod vec2;
 pub mod width;
 
 pub use arc::{arc_segment_count, flatten_arc};

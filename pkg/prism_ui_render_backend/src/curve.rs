@@ -127,10 +127,7 @@ impl CubicBezier {
     }
 }
 
-#[inline]
-fn lerp(a: (f32, f32), b: (f32, f32), t: f32) -> (f32, f32) {
-    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
-}
+use crate::vec2::lerp;
 
 #[inline]
 fn clamp01(v: f32) -> f32 {

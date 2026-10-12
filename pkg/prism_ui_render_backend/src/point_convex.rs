@@ -16,11 +16,7 @@ use alloc::vec::Vec;
 
 use crate::measure::signed_area;
 
-/// Twice the signed area of triangle `o`, `a`, `b`; its sign tells which side of
-/// the directed line `o->a` the point `b` lies on (positive for the left side).
-fn cross(o: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
-    (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
-}
+use crate::vec2::cross3 as cross;
 
 /// Tests `p` against a counter-clockwise convex `poly` (at least three vertices)
 /// by fanning from `poly[0]` and binary-searching the containing wedge.

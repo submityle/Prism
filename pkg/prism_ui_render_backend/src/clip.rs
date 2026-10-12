@@ -23,11 +23,7 @@
 use crate::measure::signed_area;
 use alloc::vec::Vec;
 
-/// Cross product of the vectors `a->b` and `a->p`; its sign tells which side of
-/// the directed line `a->b` the point `p` lies on (positive for the left side).
-fn cross(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> f32 {
-    (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)
-}
+use crate::vec2::cross3 as cross;
 
 /// Intersection of the segment `prev->cur` with the **infinite** line through
 /// `a->b`.
