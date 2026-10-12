@@ -303,7 +303,9 @@ impl TaskPool {
         counter.add(1);
         let counter = counter.clone();
         let job = move || {
-            f();
+            // A panicking raw job must not unwind the worker or leave the
+            // counter armed (CR-found). Use `spawn_catch` to observe the panic.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
             counter.finish_one();
         };
         if self.single {

@@ -256,7 +256,9 @@ impl TaskPool {
         counter.add(1);
         let counter = counter.clone();
         let job = move || {
-            f();
+            // Isolate a panicking throttled job: the permit is still released
+            // and the counter completes (CR-found).
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
             drop(permit);
             counter.finish_one();
         };

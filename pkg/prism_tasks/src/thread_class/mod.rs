@@ -347,7 +347,9 @@ impl ThreadClassPool {
                 self.inflight.add(1);
                 let inflight = self.inflight.clone();
                 let _lane = named.dispatch(ThreadCategory::Io, move || {
-                    payload();
+                    // Isolate a panicking I/O job so the named lane survives and
+                    // the inflight counter still completes (CR-found).
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(payload));
                     inflight.finish_one();
                 });
             }

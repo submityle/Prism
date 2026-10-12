@@ -239,7 +239,9 @@ impl TaskPool {
         group.counter.add(1);
         let counter = group.counter.clone();
         let job = move || {
-            f();
+            // Isolate a panicking prioritized job so the worker survives and the
+            // group counter still completes (CR-found).
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
             counter.finish_one();
         };
         if self.is_single_threaded() {

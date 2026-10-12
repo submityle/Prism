@@ -121,7 +121,9 @@ impl NamedThreads {
         counter.add(1);
         let tracked = counter.clone();
         let job: Job = Box::new(move || {
-            f();
+            // Isolate a panicking lane job so the named thread survives and the
+            // counter still completes (CR-found).
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
             tracked.finish_one();
         });
         match category {

@@ -129,6 +129,21 @@ mod tests {
     }
 
     #[test]
+    fn raw_spawn_panic_does_not_wedge_wait() {
+        // A panicking raw job must not leave its counter armed (which would make
+        // `wait` spin forever) nor take down the worker (CR-found).
+        use crate::Counter;
+        let pool = TaskPool::with_threads(2);
+        let c = Counter::new();
+        pool.spawn(&c, || panic!("raw boom"));
+        pool.wait(&c);
+        // The pool is still usable afterward.
+        let c2 = Counter::new();
+        pool.spawn(&c2, || {});
+        pool.wait(&c2);
+    }
+
+    #[test]
     fn panic_is_captured_and_pool_survives() {
         let pool = TaskPool::with_threads(2);
         let handle = pool.spawn_catch(|| {
