@@ -19,6 +19,8 @@
 //! - [`identity`] — the four id kinds (design §6): [`LocalEntityId`] within a
 //!   template, the template [`NameTable`], and the deterministic cross-session
 //!   [`PersistentId`] derived from a template-GUID chain plus a local path.
+//! - [`instance`] — [`SceneInstance`], the root anchor component of a live
+//!   instance, and the [`ResidencyTier`] vocabulary (design §5.2, §11).
 //! - [`path`] — [`FieldPath`], the reflect-style field path an override targets
 //!   (`"transform.translation.x"`).
 //! - [`overrides`] — the crown (design §7): sparse [`PropertyOverride`] and
@@ -40,12 +42,14 @@
 extern crate alloc;
 
 pub mod identity;
+pub mod instance;
 pub mod overrides;
 pub mod path;
 pub mod remap;
 pub mod template;
 
 pub use identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
+pub use instance::{ResidencyTier, SceneInstance};
 pub use overrides::{ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride, StructuralOp};
 pub use path::{FieldPath, FieldSegment};
 pub use remap::RemapTable;
@@ -54,6 +58,7 @@ pub use template::{NestedSlot, SceneTemplate};
 /// The common types most consumers import.
 pub mod prelude {
     pub use crate::identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
+    pub use crate::instance::{ResidencyTier, SceneInstance};
     pub use crate::overrides::{
         ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride,
         StructuralOp,
