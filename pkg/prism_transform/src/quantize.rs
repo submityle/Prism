@@ -28,7 +28,11 @@
 //! bit-identical across platforms and the round-trip error never exceeds the
 //! advertised bound. Decoding a value that was produced by [`BoundedQuantizer`]
 //! on the exact grid is exact; off-grid values are snapped to the nearest grid
-//! point, so the maximum absolute error is half of one quantization step.
+//! point, so the grid error is at most half of one quantization step. The
+//! advertised bounds ([`BoundedQuantizer::max_abs_error`],
+//! [`ScaleQuantizer::max_abs_error`], [`QuatQuantizer::max_component_error`])
+//! additionally fold in the `f32` decode rounding so they hold as true worst
+//! cases, not just the ideal grid half-step.
 
 use prism_math::{Quat, Vec3};
 
@@ -96,6 +100,22 @@ fn dequantize_unsigned(code: u32, min: f32, max: f32, bits: u32) -> f32 {
         return min;
     }
     min + (code as f32 / levels) * span
+}
+
+/// Conservative upper bound on the `f32` rounding that decoding `min + (code /
+/// levels) * span` introduces for a coordinate whose largest magnitude is
+/// `max_magnitude`.
+///
+/// Evaluating `span = max - min`, rounding `code`/`levels` to `f32`, forming the
+/// product `(code / levels) * span`, and the final `min + ...` add each round.
+/// With `u = ε/2` (round-to-nearest) every intermediate has magnitude at most
+/// about `2·|coordinate|`, so the accumulated absolute error is bounded by
+/// roughly `9·u·m = 4.5·ε·m`; `8·ε·m` is a sound, comfortably conservative
+/// bound. This term is what makes an advertised error bound honest far from the
+/// origin, where it dwarfs the quantization half-step (CR-found).
+#[inline]
+fn f32_decode_slack(max_magnitude: f32) -> f32 {
+    8.0 * f32::EPSILON * abs_f32(max_magnitude)
 }
 
 // ---------------------------------------------------------------------------
@@ -247,13 +267,23 @@ impl QuatQuantizer {
         Quat::from_xyzw(comps[0], comps[1], comps[2], comps[3]).normalize()
     }
 
-    /// Worst-case absolute error of any single stored component after a
-    /// round-trip: half of one quantization step over `[-1/sqrt(2),
-    /// 1/sqrt(2)]`.
+    /// Worst-case absolute error of **any** component after a round-trip —
+    /// including the dropped component, not just the three stored ones.
+    ///
+    /// The three stored components each carry at most half a quantization step
+    /// of grid error, `h = (1/sqrt(2)) / (2^bits - 1)`. The dropped component is
+    /// reconstructed on decode as `sqrt(1 - Σ stored²)`; a first-order analysis
+    /// (`|stored| <= 1/sqrt(2)`, `dropped >= 1/2`) bounds its error by
+    /// `3·sqrt(2)·h`, which is `≈ 4.24×` the stored-component step — so quoting
+    /// only the half-step understates the worst component (CR-found). The
+    /// nested `f32` decode rounding of the stored components (each `<= 1/sqrt(2)`
+    /// in magnitude) is folded into the same first-order term.
     #[inline]
     pub fn max_component_error(self) -> f32 {
         let levels = ((1u64 << self.bits) - 1) as f32;
-        INV_SQRT2 / levels
+        let half_step = INV_SQRT2 / levels;
+        let slack = f32_decode_slack(INV_SQRT2);
+        3.0 * core::f32::consts::SQRT_2 * (half_step + slack)
     }
 }
 
@@ -357,16 +387,28 @@ impl BoundedQuantizer {
         )
     }
 
-    /// Worst-case absolute per-axis error after a round-trip (half of one
-    /// step).
+    /// Worst-case absolute per-axis error after a round-trip: half of one
+    /// quantization step plus the `f32` decode rounding of
+    /// [`dequantize_unsigned`].
+    ///
+    /// The bare half-step `0.5·span/levels` is only the grid error. Decoding is
+    /// evaluated in `f32`, so for a box far from the origin the representation
+    /// error of `min + (code/levels)·span` (≈ `8·ε·max(|min|,|max|)`) dominates
+    /// the step — the bound includes it so it is an actual worst case, not just
+    /// the grid half-step (CR-found).
     #[inline]
     pub fn max_abs_error(self) -> Vec3 {
         let levels = ((1u64 << self.bits) - 1) as f32;
         let span = self.max - self.min;
+        let magnitude = Vec3::new(
+            abs_f32(self.min.x).max(abs_f32(self.max.x)),
+            abs_f32(self.min.y).max(abs_f32(self.max.y)),
+            abs_f32(self.min.z).max(abs_f32(self.max.z)),
+        );
         Vec3::new(
-            0.5 * span.x / levels,
-            0.5 * span.y / levels,
-            0.5 * span.z / levels,
+            0.5 * span.x / levels + f32_decode_slack(magnitude.x),
+            0.5 * span.y / levels + f32_decode_slack(magnitude.y),
+            0.5 * span.z / levels + f32_decode_slack(magnitude.z),
         )
     }
 }
@@ -441,8 +483,17 @@ impl LayeredQuantizer {
         )
     }
 
-    /// Worst-case absolute per-axis error after a round-trip (half of one fine
-    /// step).
+    /// Worst-case absolute per-axis **grid** error after a round-trip (half of
+    /// one fine step).
+    ///
+    /// The layered codec's whole point is uniform precision, but its decode is
+    /// still `cell·cell_size + remainder` in `f32`, so the *total* error also
+    /// carries a term proportional to the decoded magnitude
+    /// (≈ `8·ε·|value|`). That term is not a property of the quantizer config
+    /// alone (the cell is unbounded), so it is not folded into this value: a
+    /// caller near the origin can use this bound directly, while a caller far
+    /// from the origin should add `8·ε·|value|`. This is recorded rather than
+    /// silently understated (CR-found).
     #[inline]
     pub fn max_abs_error(self) -> f32 {
         let levels = ((1u64 << self.bits) - 1) as f32;
@@ -548,14 +599,17 @@ impl ScaleQuantizer {
         )
     }
 
-    /// Worst-case absolute per-axis error: the larger of half a quantization
-    /// step and the unit fast-path `tolerance` (a value within `tolerance` of
-    /// `1` snaps to exactly `1`, so its error can reach `tolerance`).
+    /// Worst-case absolute per-axis error: the larger of the bounded-quantizer
+    /// error (half a step **plus** the `f32` decode rounding — see
+    /// [`BoundedQuantizer::max_abs_error`]) and the unit fast-path `tolerance`
+    /// (a value within `tolerance` of `1` snaps to exactly `1`, so its error can
+    /// reach `tolerance`).
     #[inline]
     pub fn max_abs_error(self) -> f32 {
         let levels = ((1u64 << self.bits) - 1) as f32;
         let half_step = 0.5 * (self.max - self.min) / levels;
-        half_step.max(self.tolerance)
+        let magnitude = abs_f32(self.min).max(abs_f32(self.max));
+        (half_step + f32_decode_slack(magnitude)).max(self.tolerance)
     }
 }
 

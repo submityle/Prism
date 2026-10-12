@@ -78,8 +78,41 @@ fn bounded_off_grid_matches_hand_computed_code() {
 
     // The round-trip error must respect the advertised half-step bound.
     let bound = q.max_abs_error();
-    approx(bound.x, 0.5 * 10.0 / 255.0, 1.0e-6);
-    assert!((dec.x - 5.0).abs() <= bound.x + 1.0e-6);
+    let half_step = 0.5 * 10.0 / 255.0;
+    assert!(bound.x >= half_step, "bound {} < half-step", bound.x);
+    assert!(
+        bound.x <= half_step + 1.0e-4,
+        "f32 slack should be tiny for a [0,10] box, got {}",
+        bound.x
+    );
+    assert!((dec.x - 5.0).abs() <= bound.x);
+}
+
+#[test]
+fn bounded_error_bound_covers_f32_decode_far_from_origin() {
+    // A 32-bit quantizer over a ±1e6 box has a sub-millimetric grid half-step,
+    // but the f32 decode near magnitude 1e6 rounds to ~0.1 — the advertised
+    // bound must cover the f32 rounding, not just the bare half-step (CR #5).
+    let q = BoundedQuantizer::new(vec3(-1.0e6, -1.0e6, -1.0e6), vec3(1.0e6, 1.0e6, 1.0e6), 32);
+    let bound = q.max_abs_error();
+    let half_step = 0.5 * 2.0e6 / 4_294_967_295.0;
+    assert!(
+        bound.x > half_step * 100.0,
+        "bound {} must include the f32 term, not only the half-step {}",
+        bound.x,
+        half_step
+    );
+    for &v in &[0.0f32, 123.456, -987_654.3, 999_999.0] {
+        let dec = q.decode(q.encode(vec3(v, v, v)));
+        for (got, want) in [(dec.x, v), (dec.y, v), (dec.z, v)] {
+            assert!(
+                (got - want).abs() <= bound.x,
+                "round-trip error {} > advertised bound {}",
+                (got - want).abs(),
+                bound.x
+            );
+        }
+    }
 }
 
 #[test]
@@ -118,12 +151,63 @@ fn quat_rotation_round_trips_within_component_bound() {
         let d = quat_dot(dec, orig.normalize()).abs();
         assert!(d > 0.9999, "dot {d} too small for {orig:?}");
     }
-    // 10 bits over [-1/sqrt2, 1/sqrt2]: half-step bound.
-    approx(
-        q.max_component_error(),
-        core::f32::consts::FRAC_1_SQRT_2 / 1023.0,
-        1.0e-7,
+    // 10 bits over [-1/sqrt2, 1/sqrt2]: the stored-component half-step is
+    // `1/sqrt2 / 1023`; the advertised bound must additionally cover the
+    // reconstructed (dropped) component, i.e. be at least `3*sqrt(2)` larger.
+    let half_step = core::f32::consts::FRAC_1_SQRT_2 / 1023.0;
+    let bound = q.max_component_error();
+    assert!(
+        bound >= half_step,
+        "bound {bound} must cover at least the stored half-step {half_step}"
     );
+    approx(bound, 3.0 * core::f32::consts::SQRT_2 * half_step, 1.0e-5);
+}
+
+#[test]
+fn quat_component_error_bound_covers_all_four_components() {
+    // CR #8: the dropped component is reconstructed from the three stored ones,
+    // so its error can reach ~4.24x the stored half-step. Every component of a
+    // decoded quaternion (including the dropped one) must sit inside the
+    // advertised bound.
+    let q = QuatQuantizer::DEFAULT;
+    for &orig in &[
+        Quat::from_rotation_z(core::f32::consts::FRAC_PI_2),
+        Quat::from_rotation_x(0.7),
+        Quat::from_axis_angle(vec3(1.0, 2.0, 3.0).normalize(), 1.23),
+        // 120° about (1,1,1): all four components are 0.5, so the dropped
+        // component sits at the reconstruction-amplifying corner and its error
+        // clearly exceeds the bare stored half-step.
+        Quat::from_axis_angle(
+            vec3(1.0, 1.0, 1.0).normalize(),
+            2.0 * core::f32::consts::FRAC_PI_3,
+        ),
+    ] {
+        let orig = orig.normalize();
+        // Canonicalize the sign so the components are directly comparable (a
+        // quaternion and its negation are the same rotation).
+        let dec = {
+            let d = q.decode(q.encode(orig));
+            if quat_dot(d, orig) < 0.0 {
+                -d
+            } else {
+                d
+            }
+        };
+        let bound = q.max_component_error();
+        for (got, want) in [
+            (dec.x, orig.x),
+            (dec.y, orig.y),
+            (dec.z, orig.z),
+            (dec.w, orig.w),
+        ] {
+            assert!(
+                (got - want).abs() <= bound,
+                "component error {} exceeds advertised bound {} for {orig:?}",
+                (got - want).abs(),
+                bound
+            );
+        }
+    }
 }
 
 #[test]
@@ -160,10 +244,15 @@ fn scale_non_unit_respects_bound() {
     assert!(!enc.is_unit);
     let dec = q.decode(enc);
     let bound = q.max_abs_error();
-    approx(bound, 0.5 * 4.0 / 255.0, 1.0e-6);
-    assert!((dec.x - 2.0).abs() <= bound + 1.0e-6);
-    assert!((dec.y - 3.0).abs() <= bound + 1.0e-6);
-    assert!((dec.z - 0.5).abs() <= bound + 1.0e-6);
+    let half_step = 0.5 * 4.0 / 255.0;
+    assert!(bound >= half_step);
+    assert!(
+        bound <= half_step + 1.0e-4,
+        "f32 slack should be tiny for a [0,4] range, got {bound}"
+    );
+    assert!((dec.x - 2.0).abs() <= bound);
+    assert!((dec.y - 3.0).abs() <= bound);
+    assert!((dec.z - 0.5).abs() <= bound);
 }
 
 // ---- layered big-world translation -----------------------------------------
