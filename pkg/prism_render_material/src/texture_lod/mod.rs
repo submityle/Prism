@@ -35,6 +35,8 @@
 //! * Ewins et al., "MIP-Map Level Selection for Texture Mapping", 1998.
 
 mod aniso;
+mod material_vt;
+mod material_vt_atlas;
 mod math;
 mod mip;
 mod page_lookup;
@@ -44,6 +46,15 @@ mod residency;
 mod triangle;
 
 pub use aniso::{anisotropic_taps, AnisoTaps, MAX_ANISO_TAPS};
+pub use material_vt::{
+    MaterialVtError, MaterialVtFormat, MaterialVtMipMetadata, MaterialVtPage,
+    MaterialVtPageKeyIter, MaterialVtPageMetadata, MaterialVtPageRow, MaterialVtPageRows,
+    MaterialVtRow, MaterialVtSourceDescriptor, MaterialVtSourceSnapshot,
+};
+pub use material_vt_atlas::{
+    build_material_vt_atlas_tile, MaterialVtAtlasConfig, MaterialVtAtlasTile,
+    MaterialVtAtlasUploadError,
+};
 pub use mip::{cone_mip_level, mip_from_isotropic_footprint, AnisotropicMip, MIN_COS_INCIDENCE};
 pub use page_lookup::{MaterialPageLookup, MaterialPageReference};
 pub use ray_cone::RayCone;

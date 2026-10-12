@@ -35,7 +35,7 @@ mod texture_upsample;
 mod validation;
 
 pub use authoring::{FACE_SHADOW_SDF_SEMANTIC, ILLUMINATION_MASK_SEMANTIC, MEASURED_BRDF_SEMANTIC};
-pub use axis::{BIN_CLASS_BITS, Illumination, SpecializationId};
+pub use axis::{Illumination, SpecializationId, BIN_CLASS_BITS};
 pub use bake::{
     bake_layer_stack, sanitize_weight, ConstantMask, LayerParams, LayerStack, LayerWeights,
     MaskSource, PageBake, TexelCoord,
@@ -70,7 +70,7 @@ pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header, DynamicChannels,
     GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain,
     MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, FALLBACK_MATERIAL_HANDLE,
-    MATERIAL_ABI_VERSION,
+    MATERIAL_ABI_VERSION, NO_VIRTUAL_TEXTURE,
 };
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};
@@ -141,10 +141,13 @@ pub use texture_filter::{
     MITCHELL_B, MITCHELL_C,
 };
 pub use texture_lod::{
-    anisotropic_taps, cone_mip_level, mip_from_isotropic_footprint, trilinear_mip, AnisoTaps,
-    AnisotropicMip, MaterialPageLookup, MaterialPageReference, PageRequest, RayCone,
-    RayDifferential, TriangleLodConstant, TrilinearMip, VirtualTexture, MAX_ANISO_TAPS,
-    MIN_COS_INCIDENCE,
+    anisotropic_taps, build_material_vt_atlas_tile, cone_mip_level, mip_from_isotropic_footprint,
+    trilinear_mip, AnisoTaps, AnisotropicMip, MaterialPageLookup, MaterialPageReference,
+    MaterialVtAtlasConfig, MaterialVtAtlasTile, MaterialVtAtlasUploadError, MaterialVtError,
+    MaterialVtFormat, MaterialVtMipMetadata, MaterialVtPage, MaterialVtPageKeyIter,
+    MaterialVtPageMetadata, MaterialVtPageRow, MaterialVtPageRows, MaterialVtRow,
+    MaterialVtSourceDescriptor, MaterialVtSourceSnapshot, PageRequest, RayCone, RayDifferential,
+    TriangleLodConstant, TrilinearMip, VirtualTexture, MAX_ANISO_TAPS, MIN_COS_INCIDENCE,
 };
 pub use texture_mipgen::{
     alpha_test_coverage, apply_alpha_scale, box_downsample, gaussian_downsample,
