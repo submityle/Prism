@@ -38,7 +38,7 @@ use prism_render_architecture::abi::GenerationalHandle;
 use prism_render_architecture::gpu_scene::{CpuRenderScene, GeometryHandle, SceneHandle};
 use prism_render_visibility::GpuRenderWorkItem;
 
-use crate::scene::SceneRegistry;
+use crate::scene::{SceneRegistry, VisibilityWorkList};
 use prism_render_driver::{
     BufferDescriptor, BufferId, BufferUsages, DeviceDescriptor, Instance, MultisampleState,
     PrimitiveState, PrimitiveTopology, RenderDevice, RenderPipelineDescriptor,
@@ -839,12 +839,12 @@ fn mesh_specialization_dedups_by_variant_and_layout() {
     );
 
     let mut specializer = MeshPipelineSpecializer::new();
-    let a1 = specializer.specialize(&device, variant, core::slice::from_ref(&layout_a), &descriptor);
-    let a2 = specializer.specialize(&device, variant, core::slice::from_ref(&layout_a), &descriptor);
+    let a1 = specializer.specialize(&device, variant, core::slice::from_ref(&layout_a), descriptor.clone());
+    let a2 = specializer.specialize(&device, variant, core::slice::from_ref(&layout_a), descriptor.clone());
     assert_eq!(a1, a2, "the same variant + layout reuses the pipeline");
     assert_eq!(specializer.pipeline_count(), 1);
 
-    let b = specializer.specialize(&device, variant, core::slice::from_ref(&layout_b), &descriptor);
+    let b = specializer.specialize(&device, variant, core::slice::from_ref(&layout_b), descriptor.clone());
     assert_ne!(a1, b, "a different layout specializes a new pipeline");
     assert_eq!(specializer.pipeline_count(), 2);
 
@@ -2483,5 +2483,206 @@ fn the_frame_draws_a_queued_mesh_on_a_gpu() {
         pixel(0, 0),
         [0, 0, 0, 255],
         "outside the quad the frame's clear is what remains"
+    );
+}
+/// The scene fixture the queue-stage tests draw: a mesh in the simulation's
+/// arena, a geometry + material + binding in the render world's registry, and a
+/// visible work item naming the instance.
+fn queue_scene_fixture(app: &mut App) -> GenerationalHandle {
+    use prism_mesh::{Indices, Mesh, MeshVertexAttribute, VertexAttributeValues};
+    use prism_render_architecture::geometry::{
+        GeometryLodRecord, GeometryPrimitiveKind, GeometryRecord,
+    };
+    use prism_render_visibility::{GpuRenderWorkItem, RenderPassMask, VisibilityStageMask, WorkSortKey};
+
+    let mesh = Mesh::new(PrimitiveTopology::TriangleList)
+        .with_attribute(
+            MeshVertexAttribute::new("Vertex_Position", prism_render_driver::VertexFormat::Float32x3, 0),
+            VertexAttributeValues::Float32x3(vec![
+                [-0.5, -0.5, 0.0],
+                [0.5, -0.5, 0.0],
+                [0.5, 0.5, 0.0],
+                [-0.5, 0.5, 0.0],
+            ]),
+        )
+        .expect("positions fit")
+        .indexed(Indices::Uint16(vec![0, 1, 2, 0, 2, 3]));
+    let mut meshes = prism_asset::Assets::new();
+    let mesh_id = meshes.insert(mesh).id();
+    app.world_mut().insert_resource(meshes);
+
+    let geometry = GenerationalHandle::new(1, 1);
+    let material = GenerationalHandle::new(2, 1);
+    let scene = GenerationalHandle::new(3, 1);
+    let render = app
+        .sub_app_mut(RenderApp)
+        .expect("the plugin registers the render sub-app");
+    {
+        let registry = render.world.resource_mut::<SceneRegistry>();
+        registry.insert_geometry(GeometryRecord {
+            handle: geometry,
+            revision: 1,
+            vertex_buffer_class: 5,
+            index_buffer_class: 0,
+            primitive_start: 0,
+            primitive_count: 1,
+            lods: vec![GeometryLodRecord {
+                level: 0,
+                primitive_kind: GeometryPrimitiveKind::Indexed,
+                element_count: 6,
+                first_element: 0,
+                base_vertex: 0,
+                vertex_count: 4,
+                screen_error: 0.0,
+                resident: true,
+                fallback: false,
+            }],
+        });
+        registry.insert_material(prism_render_material::fallback_material_record(material, 1));
+        registry.bind_geometry_mesh(geometry, mesh_id);
+    }
+    let work = render.world.resource_mut::<VisibilityWorkList>();
+    work.push(GpuRenderWorkItem {
+        scene,
+        geometry,
+        material,
+        lod_or_cluster: 0,
+        pass_mask: RenderPassMask::OPAQUE,
+        visibility_stages: VisibilityStageMask::EARLY,
+        sort_key: WorkSortKey::new(0, 0, 0, 0, 3),
+    });
+    geometry
+}
+
+#[test]
+fn the_queue_stage_turns_the_visible_set_into_draws() {
+    let extent = Extent3d::new_2d(8, 8);
+    let mut app = app_on_null_backend(RenderAppConfig::new(extent));
+    let geometry = queue_scene_fixture(&mut app);
+
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+    let registry = render.world.resource::<SceneRegistry>();
+    assert!(
+        registry.mesh_class(5).is_some(),
+        "the mesh class was derived from the prepared mesh"
+    );
+    assert!(
+        registry.geometry_mesh(geometry).is_some(),
+        "the geometry keeps its mesh binding"
+    );
+    let stats = render.world.resource::<RenderFrameStats>();
+    assert_eq!(stats.draws_queued, 1, "the visible item became a draw");
+    assert_eq!(stats.draws_recorded, 1, "and the frame recorded it");
+    assert!(stats.passes_declared >= 2, "clear plus the opaque pass");
+}
+/// The whole spine on hardware: a visible work item in the scene becomes a
+/// queued draw, the frame records it with the pipeline the mesh's own layout
+/// specialized, and the pixels land in the frame target — no test pushing items
+/// into the queue and no test registering a mesh class by hand.
+#[test]
+fn the_spine_draws_the_visible_set_on_a_gpu() {
+    const SIZE: u32 = 8;
+    let extent = Extent3d::new_2d(SIZE, SIZE);
+    if RenderRuntime::<prism_render_driver_wgpu::WgpuInstance>::wgpu(extent).is_err() {
+        assert!(
+            !require_gpu(),
+            "PRISM_REQUIRE_GPU is set but no adapter was found"
+        );
+        return;
+    }
+
+    let mut app = App::new();
+    app.add_plugins(PrismRenderPlugin::with_config(
+        prism_render_driver_wgpu::WgpuInstance::new(),
+        RenderAppConfig::new(extent),
+    ));
+    queue_scene_fixture(&mut app);
+
+    app.update();
+
+    let render = app.get_sub_app(RenderApp).expect("the render sub-app");
+    let stats = render.world.resource::<RenderFrameStats>();
+    assert_eq!(stats.draws_queued, 1, "the visible item became a draw");
+    assert_eq!(stats.draws_recorded, 1, "the frame recorded it");
+    let runtime = render
+        .world
+        .resource::<RenderRuntimeResource<prism_render_driver_wgpu::WgpuInstance>>();
+    assert!(runtime.runtime().wait_idle(), "the draw completes on the GPU");
+
+    let target = *render.world.resource::<RenderTarget>();
+    let pixels = runtime
+        .runtime()
+        .queue()
+        .read_texture_rgba8(target.texture(), SIZE, SIZE);
+    let pixel = |x: u32, y: u32| {
+        let index = ((y * SIZE + x) * 4) as usize;
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
+    };
+    assert_eq!(
+        pixel(SIZE / 2, SIZE / 2),
+        [255, 255, 255, 255],
+        "the visible mesh was drawn (the spine's flat pipeline)"
+    );
+    assert_eq!(
+        pixel(0, 0),
+        [0, 0, 0, 255],
+        "outside the mesh the frame's clear remains"
+    );
+}
+fn mark_prepare_assets(mut log: ResMut<OrderLog>) {
+    log.0.push("prepare-assets");
+}
+
+/// A stage with no systems in it must not break the chain around it.
+///
+/// Set-ordering edges expand against concrete members, so an adjacent-only chain
+/// would silently disconnect the stages on either side of an empty one — which is
+/// not hypothetical: `PrepareAssets` and `PrepareViews` are usually empty, and the
+/// asset stage must still run before the queue stage.
+#[test]
+fn an_empty_stage_does_not_break_the_stage_chain() {
+    let mut app = app_on_null_backend(RenderAppConfig::new(EXTENT));
+    {
+        let render = app
+            .sub_app_mut(RenderApp)
+            .expect("the plugin registers the render sub-app");
+        render.world.insert_resource(OrderLog::default());
+        let schedule = render
+            .world
+            .resource_mut::<Schedules>()
+            .get_mut(Render)
+            .expect("the plugin registers the Render schedule");
+        // Nothing is registered in CreateViews or PrepareViews here.
+        schedule.add_systems(mark_queue.in_set(RenderSystems::Queue));
+        schedule.add_systems(mark_prepare_assets.in_set(RenderSystems::PrepareAssets));
+    }
+
+    app.update();
+
+    let log = app
+        .get_sub_app(RenderApp)
+        .expect("the render sub-app")
+        .world
+        .resource::<OrderLog>();
+    let prepare = log
+        .0
+        .iter()
+        .position(|entry| *entry == "prepare-assets")
+        .expect("the asset stage ran");
+    let queue = log
+        .0
+        .iter()
+        .position(|entry| *entry == "queue")
+        .expect("the queue stage ran");
+    assert!(
+        prepare < queue,
+        "the asset stage still precedes the queue stage across the empty stages"
     );
 }

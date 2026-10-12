@@ -170,52 +170,95 @@ impl SystemSet for RenderPhase {
 /// [`PrepareBindGroups`](RenderSystems::PrepareBindGroups) inside
 /// [`Prepare`](RenderSystems::Prepare).
 pub fn configure_render_sets(schedule: &mut Schedule) {
-    for pair in RenderSystems::ORDER.windows(2) {
-        schedule.configure_set(pair[1], SetConfig::new().after(pair[0]));
+    // Every stage runs after *every* earlier stage, not just the immediately
+    // preceding one. Set-ordering edges are expanded against concrete members
+    // (`prism_ecs`'s schedule graph), and a stage with no systems in this build
+    // contributes none — so an adjacent-only chain would silently disconnect the
+    // stages on either side of an empty one. The core frame phases declare all
+    // pairs for exactly this reason; the render stages do the same.
+    for (index, &later) in RenderSystems::ORDER.iter().enumerate() {
+        for &earlier in &RenderSystems::ORDER[..index] {
+            schedule.configure_set(later, SetConfig::new().after(earlier));
+        }
     }
-    // Mesh queueing is part of queueing.
-    schedule.configure_set(
+
+    // Sub-stages nest inside their owner: after everything up to and including
+    // it, before everything after it, plus any sibling they follow.
+    order_sub_stage(
+        schedule,
         RenderSystems::QueueMeshes,
-        SetConfig::new().after(RenderSystems::Queue),
+        RenderSystems::Queue,
+        &[],
     );
-    schedule.configure_set(
-        RenderSystems::QueueMeshes,
-        SetConfig::new().before(RenderSystems::Prepare),
+    order_sub_stage(
+        schedule,
+        RenderSystems::PrepareResources,
+        RenderSystems::Prepare,
+        &[],
     );
-    // Resources → flush → bind groups, all inside prepare.
-    for (before, after) in [
-        (
+    order_sub_stage(
+        schedule,
+        RenderSystems::PrepareResourcesFlush,
+        RenderSystems::Prepare,
+        &[RenderSystems::PrepareResources],
+    );
+    order_sub_stage(
+        schedule,
+        RenderSystems::PrepareBindGroups,
+        RenderSystems::Prepare,
+        &[
             RenderSystems::PrepareResources,
             RenderSystems::PrepareResourcesFlush,
-        ),
-        (
+        ],
+    );
+
+    // A phase records inside the record stage, and therefore after every stage
+    // and sub-stage that prepared for it.
+    let record_index = RenderSystems::ORDER
+        .iter()
+        .position(|stage| *stage == RenderSystems::Prepare)
+        .expect("Prepare is a stage");
+    for phase in RenderPhase::ORDER {
+        for &earlier in &RenderSystems::ORDER[..=record_index] {
+            schedule.configure_set(phase, SetConfig::new().after(earlier));
+        }
+        for &prepared in &[
+            RenderSystems::PrepareResources,
             RenderSystems::PrepareResourcesFlush,
             RenderSystems::PrepareBindGroups,
-        ),
-    ] {
-        schedule.configure_set(after, SetConfig::new().after(before));
-    }
-    for sub in [
-        RenderSystems::PrepareResources,
-        RenderSystems::PrepareResourcesFlush,
-        RenderSystems::PrepareBindGroups,
-    ] {
-        schedule.configure_set(sub, SetConfig::new().after(RenderSystems::Prepare));
-        schedule.configure_set(sub, SetConfig::new().before(RenderSystems::Phase));
-    }
-    for pair in RenderPhase::ORDER.windows(2) {
-        schedule.configure_set(pair[1], SetConfig::new().after(pair[0]));
-    }
-    // Phases run inside the record stage, which is *after* every prepare
-    // sub-stage: a phase item records with the bind groups preparation built, so
-    // ordering against `Prepare` alone would leave the sub-stages unordered
-    // against the record.
-    for phase in RenderPhase::ORDER {
+        ] {
+            schedule.configure_set(phase, SetConfig::new().after(prepared));
+        }
         schedule.configure_set(
             phase,
-            SetConfig::new().after(RenderSystems::PrepareBindGroups),
+            SetConfig::new().before(RenderSystems::Cleanup),
         );
-        schedule.configure_set(phase, SetConfig::new().before(RenderSystems::Cleanup));
+    }
+}
+
+/// Orders one sub-stage inside its owner: after every stage up to and including
+/// `owner`, before every stage after it, and after the siblings it follows.
+///
+/// All-pairs rather than adjacent, because an empty set contributes no edges
+/// (see [`configure_render_sets`]).
+fn order_sub_stage(
+    schedule: &mut Schedule,
+    sub: RenderSystems,
+    owner: RenderSystems,
+    siblings_before: &[RenderSystems],
+) {
+    let owner_index = RenderSystems::ORDER
+        .iter()
+        .position(|stage| *stage == owner)
+        .expect("a sub-stage's owner is a stage");
+    for &earlier in &RenderSystems::ORDER[..=owner_index] {
+        schedule.configure_set(sub, SetConfig::new().after(earlier));
+    }
+    for &later in &RenderSystems::ORDER[owner_index + 1..] {
+        schedule.configure_set(sub, SetConfig::new().before(later));
+    }
+    for &sibling in siblings_before {
+        schedule.configure_set(sub, SetConfig::new().after(sibling));
     }
 }
 

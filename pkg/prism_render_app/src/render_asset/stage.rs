@@ -78,6 +78,10 @@ pub fn prepare_assets<I, A>(
 /// [`RenderSystems::PrepareAssets`]. Call it for every `RenderAsset` the
 /// renderer draws: this is the `RenderAssetPlugin<A>` of the Prism renderer.
 ///
+/// Registering a family twice is a no-op: the spine registers the mesh family
+/// itself (its frame draws meshes), and a caller that registers it again — or a
+/// plugin added twice — must not end up with the prepare system running twice.
+///
 /// # Panics
 ///
 /// Panics if the render sub-app is not registered yet, i.e. if this runs before
@@ -92,10 +96,19 @@ where
     I::Surface: Send + Sync + 'static,
     A: RenderAsset,
 {
+    let already_registered = app
+        .get_sub_app(RenderApp)
+        .expect("register_render_assets: add PrismRenderPlugin first")
+        .world
+        .get_resource::<RenderAssets<A>>()
+        .is_some();
+    if already_registered {
+        return;
+    }
     app.add_extract(RenderApp, extract_assets::<A>);
     let render = app
         .sub_app_mut(RenderApp)
-        .expect("register_render_assets: add PrismRenderPlugin first");
+        .expect("the render sub-app was just checked");
     render.world.insert_resource(ExtractedAssets::<A>::new());
     render.world.insert_resource(RenderAssets::<A>::new());
     render.world.insert_resource(AssetSyncStats::<A>::default());

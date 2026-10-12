@@ -123,9 +123,14 @@ pub struct MeshBuffers {
 /// The render side's geometry / material / mesh-class tables.
 #[derive(Resource, Default)]
 pub struct SceneRegistry {
-    geometries: BTreeMap<GeometryHandle, GeometryRecord>,
+    // `pub(crate)` on the tables the sibling `mesh_source` module drives (the
+    // asset-facing half of the registry); the accessors stay the public API.
+    pub(crate) geometries: BTreeMap<GeometryHandle, GeometryRecord>,
     materials: BTreeMap<SceneMaterialHandle, MaterialRecord>,
-    mesh_classes: BTreeMap<u32, MeshClass>,
+    pub(crate) mesh_classes: BTreeMap<u32, MeshClass>,
+    /// The mesh asset each geometry draws, when the scene named one (see
+    /// [`mesh_source`](crate::mesh_source)).
+    pub(crate) mesh_bindings: BTreeMap<GeometryHandle, prism_asset::AssetId<prism_mesh::Mesh>>,
 }
 
 impl SceneRegistry {

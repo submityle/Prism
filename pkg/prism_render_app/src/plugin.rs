@@ -9,12 +9,15 @@ use prism_render_runtime::RenderRuntime;
 
 use crate::config::RenderAppConfig;
 use crate::intent::RenderIntent;
+use crate::mesh_pipeline::MeshPipelineSpecializer;
+use crate::mesh_pipelines::MeshPipelines;
+use crate::queue_stage::fill_queues;
 use crate::label::{Render, RenderApp, RenderStartup};
 use crate::pipeline_cache::PipelineCache;
 use crate::queue::RenderQueues;
 use crate::record::RenderRecord;
 use crate::runtime_resource::RenderRuntimeResource;
-use crate::scene::SceneRegistry;
+use crate::scene::{SceneRegistry, VisibilityWorkList};
 use crate::sets::{RenderSystems, configure_render_sets};
 use crate::stats::RenderFrameStats;
 use crate::startup::ensure_render_startup;
@@ -120,6 +123,9 @@ where
 
         // The GPU state the render world owns for the app's lifetime.
         let target = RenderTarget::new(runtime.device(), config.extent);
+        // The spine's default mesh pipelines are built against the device, so
+        // they are created before the runtime moves into the render world.
+        let mesh_pipelines = MeshPipelines::spine(runtime.device(), crate::RENDER_TARGET_FORMAT);
         let mut render = SubApp::new();
         render
             .world
@@ -134,7 +140,10 @@ where
         render
             .world
             .insert_resource(crate::draw::canonical::registry());
+        render.world.insert_resource(MeshPipelineSpecializer::new());
+        render.world.insert_resource(mesh_pipelines);
         render.world.insert_resource(SceneRegistry::new());
+        render.world.insert_resource(VisibilityWorkList::new());
 
         // The render schedule, plus the `Last` phase that runs it each frame.
         {
@@ -154,6 +163,8 @@ where
             configure_render_sets(schedule);
             // Materialize the view family before the record stage consumes it.
             schedule.add_systems(build_view_family.in_set(RenderSystems::CreateViews));
+            // The visible set becomes this frame's queue before anything records.
+            schedule.add_systems(fill_queues::<I>.in_set(RenderSystems::Queue));
             schedule.add_systems(execute_frame::<I>.in_set(RenderSystems::Phase));
             schedule.add_systems(clear_queues.in_set(RenderSystems::Cleanup));
         }
@@ -166,9 +177,17 @@ where
 
         app.insert_sub_app(RenderApp, render);
 
-        // The main world's authoritative render intent, and the one-way feed.
+        // The main world's authoritative render intent, and the one-way feeds.
+        //
+        // Both are *appended*: the render world's extract is a chain (the frame
+        // record, then one step per render-asset family), and replacing it here
+        // would drop a family registered by another plugin.
         app.insert_resource(RenderIntent::from_extent(config.extent));
-        app.set_extract(RenderApp, extract_render_record);
+        app.add_extract(RenderApp, extract_render_record);
+        // The spine's frame draws meshes, so the plugin owns that family: its
+        // extract, its prepared table, and its prepare stage. Registering it
+        // again elsewhere is a no-op.
+        crate::render_asset::register_render_assets::<I, crate::RenderMesh>(app);
     }
 
     fn finish(&self, app: &mut App) {

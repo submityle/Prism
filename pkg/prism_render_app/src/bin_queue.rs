@@ -127,7 +127,7 @@ impl RenderQueues {
             };
             let descriptor = provider.descriptor(&variant);
             let pipeline =
-                specializer.specialize(device, variant, &mesh_class.layout, &descriptor);
+                specializer.specialize(device, variant, &mesh_class.layout, descriptor);
             self.push(
                 phase,
                 PhaseItem {

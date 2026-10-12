@@ -249,12 +249,8 @@ impl RenderQueues {
     ) {
         for request in requests {
             let descriptor = build(&request.variant);
-            let pipeline = specializer.specialize(
-                device,
-                request.variant,
-                &request.layout,
-                &descriptor,
-            );
+            let pipeline =
+                specializer.specialize(device, request.variant, &request.layout, descriptor);
             self.push(
                 request.phase,
                 PhaseItem {
@@ -303,7 +299,7 @@ impl RenderQueues {
             };
             let descriptor = provider.descriptor(&request.variant);
             let pipeline =
-                specializer.specialize(device, request.variant, &request.layout, &descriptor);
+                specializer.specialize(device, request.variant, &request.layout, descriptor);
             self.push(
                 request.phase,
                 PhaseItem {

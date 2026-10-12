@@ -56,7 +56,7 @@ impl MeshPipelineKey {
 }
 
 /// Specializes and caches a pipeline per `(variant, vertex layout)` pair.
-#[derive(Default)]
+#[derive(Default, prism_ecs::prelude::Resource)]
 pub struct MeshPipelineSpecializer {
     cache: PipelineCache,
 }
@@ -69,7 +69,28 @@ pub struct MeshPipelineSpecializer {
 /// implements it with a canned descriptor.
 pub trait MeshPipelineProvider {
     /// The pipeline descriptor for `variant`.
+    ///
+    /// The descriptor's *vertex stage* is not the provider's to decide: the
+    /// specializer fills it from the mesh layout it keyed the pipeline on (see
+    /// [`MeshPipelineSpecializer::specialize`]), so a provider cannot
+    /// accidentally build a pipeline whose vertex stage disagrees with its own
+    /// cache key.
     fn descriptor(&self, variant: &MeshPipelineKey) -> RenderPipelineDescriptor;
+}
+
+/// Fills `descriptor`'s vertex stage from the mesh's layout.
+///
+/// A specialized pipeline is cached under `(variant, layout)`, so the pipeline
+/// that is built has to *be* that pair: whatever buffers a provider put in the
+/// descriptor are replaced by the layout the key hashed. Without this the cache
+/// would claim one thing and the GPU would be configured with another.
+#[must_use]
+pub fn with_mesh_layout(
+    mut descriptor: RenderPipelineDescriptor,
+    layout: &[VertexBufferLayout],
+) -> RenderPipelineDescriptor {
+    descriptor.vertex.buffers = layout.to_vec();
+    descriptor
 }
 
 impl MeshPipelineSpecializer {
@@ -89,15 +110,20 @@ impl MeshPipelineSpecializer {
 
     /// Returns the pipeline for `(variant, layout)`, compiling `descriptor` on
     /// first use.
+    ///
+    /// `descriptor` supplies the shader, target state, and fixed-function state;
+    /// its vertex stage is replaced by [`with_mesh_layout`], because the mesh
+    /// owns the vertex layout and the cache key hashes it.
     pub fn specialize<D: RenderDevice>(
         &mut self,
         device: &D,
         variant: MeshPipelineKey,
         layout: &[VertexBufferLayout],
-        descriptor: &RenderPipelineDescriptor,
+        descriptor: RenderPipelineDescriptor,
     ) -> RenderPipelineId {
+        let descriptor = with_mesh_layout(descriptor, layout);
         self.cache
-            .get_or_create(device, variant.with_layout(layout), descriptor)
+            .get_or_create(device, variant.with_layout(layout), &descriptor)
     }
 
     /// Drops one reference to `(variant, layout)`, destroying the pipeline at
