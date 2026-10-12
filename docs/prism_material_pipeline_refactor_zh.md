@@ -1469,7 +1469,7 @@ RGB 渲染在**强色散、薄膜虹彩、荧光**下与真值有偏差。全实
 **已落地（P3-e 前置：贵瓣的两种摊销形态，见 §13.a）**：把"贵瓣按预算随机选瓣 + TAA"接到真实着色路径时，实测暴露了一个设计错误，值得写进文档：**贵瓣不是一种东西，摊销方式也不同**。
 - **加性贵瓣**（测量 BRDF：`表面 = 解析高光 + w·表驱动项`）用经典单样本估计——按权重概率选一个、乘 `1/p`。加性项非负，所以 `1/p` 只会放大正值，绝不会产生负辐亮度。
 - **混合型贵瓣**（glint：`高光 = mix(光滑, 离散, w)`）**不能**这么做：`1/p` 缩放的是带符号的 delta，一旦 `p < 1` 就可能把混合后的 NDF 拉成负数——本机实测得到 `[-10.19, -6.11, -2.04]` 的负辐亮度。正确做法是认识到**混合权重本身就是要采样的概率**：以概率 `w` 取离散状态、否则取光滑状态，**不做任何缩放**。于是期望恒等于原混合（无偏）、单次求值恒为非负 NDF、方差恰是混合本身的方差（由 TAA 收敛；`LobeSamplingPolicy::temporal_accumulation_frames` 给的正是收敛帧数）。
-- 该状态由 `SurfaceSample::glint_state` 承载，默认 `GLINT_STATE_AUTHORED = -1.0` 表示"未采样，用作者权重"，因而是**逐位恒等**；两条线（`lighting.rs` / `brdf.wesl`）语义同构。剩下的接线（pass 参数携带画质/预算/帧序号 + 选择器 + 把两个因子喂进积分器）是下一片。
+- 该状态由 `SurfaceSample::glint_state` 承载，默认 `GLINT_STATE_AUTHORED = -1.0` 表示"未采样，用作者权重"，因而是**逐位恒等**；两条线（`lighting.rs` / `brdf.wesl`）语义同构。**接线已落地**：`select_expensive_lobe_factors`（CPU）/ `ls_select_expensive_lobe_factors`（WESL）按策略产出一对因子——glint 的**混合状态**与加性组的 **1/p 因子**；解析器把它们喂进两条积分器（`resolve_pixel` 的 `lit_surface.glint_state` + measured 项的门控 / `shading_resolve.wesl` 同一处），画质与帧序号经 **pass immediate** 下发（`PrismShadingSettings::shading_quality` + `frame_index` → `GpuShadingResolveParams::max_full_lobes`/`frame_index`，策略在 Rust 侧**只推导一次**再作为**一个 word** 进 shader，两边不可能对画质档各说各话）。**TAA 收敛门禁**（CPU 端到端）：`Low` 档下 512 帧中过半与全质量不同，而其均值收敛到全质量值 12% 内——这正是"无偏 + 方差由 TAA 收敛"的可执行证据。**待补**：采样器（蓝噪声抽样 + 状态判决）的真机对拍（同 glint/测量/纹理 LOD 的套路）。
 
 ### 17.5 自描述 schema：PCM 的单一声明源与全链路代码生成（深化设计）
 

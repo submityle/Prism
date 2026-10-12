@@ -86,12 +86,20 @@ pub(crate) fn dispatch_shading_resolve(
     if prefilter_bind_groups.source.is_some() {
         flags |= RESOLVE_FLAG_IBL_SPECULAR;
     }
+    // §17.4 single-lobe sampling: the policy is derived once per pass from the
+    // host's tier (P1-e budget) and reaches the shader as one word, so the CPU
+    // and GPU cannot disagree about which tier is active.
+    let lobe_policy = prism_render_shading::LobeSamplingPolicy::for_quality(
+        settings.shading_quality,
+    );
     let mut params = GpuShadingResolveParams {
         shading_class: 0,
         width: buffers.size.x,
         height: buffers.size.y,
         flags,
         view_position: [translation.x, translation.y, translation.z, 0.0],
+        max_full_lobes: lobe_policy.max_full_lobes(),
+        frame_index: settings.frame_index,
     };
     if params.width == 0 || params.height == 0 {
         return;

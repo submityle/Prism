@@ -173,6 +173,11 @@ pub struct ResolveInput<'a> {
     /// sampled at the interpolated surface UV; an empty slice shades from the
     /// authored factors alone (the bindless heap's white/flat-normal defaults).
     pub textures: &'a [SampledTextureBinding],
+    /// Single-lobe sampling state for this pixel (§17.4, P3-e): the quality/budget
+    /// policy, the frame index and the pixel's integer coordinate. The defaults
+    /// are `High` (full evaluation, an exact identity) at frame/pixel zero, so a
+    /// caller that does not care about the amortised path is unchanged.
+    pub lobe_sampling: crate::lobe_sampling::LobeSamplingSettings,
     /// The material's measured (tabulated) BRDF/BTF table, when it binds one
     /// (§17.6). The table itself is *data*: in the shipping renderer it is a
     /// material texture bound with the measured-BRDF semantic, and the GPU fetch
@@ -479,11 +484,24 @@ pub fn resolve_pixel(
         tangent: geometry.tangent,
         bitangent: geometry.bitangent,
     };
+    // §17.4 single-lobe sampling: one draw per pixel decides the glint mixture
+    // state and whether the additive measured lobe is evaluated this frame. On
+    // the full-quality tiers both factors are the exact identity.
+    let lobe_factors = crate::lobe_sampling::select_expensive_lobe_factors(
+        input.lobe_sampling.policy,
+        [input.parameters.glint_weight, input.parameters.measured_weight],
+        input.lobe_sampling.pixel,
+        input.lobe_sampling.frame_index,
+        0,
+    );
     // Per-light evaluation must not re-add self-illumination.
-    let lit_surface = SurfaceSample {
+    let mut lit_surface = SurfaceSample {
         emissive: [0.0; 3],
         ..surface
     };
+    // §17.4: the drawn glint mixture state rides on the surface the integrator
+    // evaluates (the sentinel means "no sampling happened").
+    lit_surface.glint_state = lobe_factors.glint_state;
 
     // Indirect term: prefer the image-based light when the view supplies an
     // environment probe, otherwise fall back to the constant ambient term.
@@ -508,10 +526,11 @@ pub fn resolve_pixel(
         .filter(|_| input.parameters.measured_weight > 0.0);
     let measured_weight = input.parameters.measured_weight;
     let measured_scale = input.parameters.measured_scale;
+    let measured_gate = lobe_factors.measured;
     let measured_term = |light: DirectLightSample| match measured_table {
         Some(table) => crate::evaluate_measured_direct(
             table,
-            measured_scale,
+            measured_scale * measured_gate,
             measured_weight,
             &frame,
             &light,
@@ -940,12 +959,113 @@ mod tests {
             view_position: [0.0, 0.0, 4.0],
             screen_space_ao: 1.0,
             uv_footprint_area: 0.0,
+            lobe_sampling: crate::lobe_sampling::LobeSamplingSettings::default(),
             measured_brdf: None,
             world_from_local: IDENTITY_WORLD_FROM_LOCAL,
         }
     }
 
 
+
+
+    #[test]
+    fn single_lobe_sampling_converges_to_the_full_evaluation_under_taa() {
+        // §17.4 (P3-e) end-to-end gate. Both expensive lobes live: glint (a
+        // mixture, amortised by drawing its state) and the measured table (an
+        // additive term). On a low tier the pixel samples both instead of
+        // evaluating them exactly; averaging over frames — what TAA does to a
+        // fixed pixel — must converge to the full-quality image, i.e. the
+        // estimator is unbiased and its variance is what TAA is for.
+        let (primitives, vertices) = unit_triangle();
+        let table = crate::measured_brdf::MeasuredBrdf::from_analytic(
+            crate::measured_brdf::MeasuredBrdfDims::MERL,
+            crate::measured_brdf::SyntheticBrdfParams::default(),
+        );
+        let parameters = GpuSurfaceParameters {
+            base_color: [0.5, 0.45, 0.4, 1.0],
+            specular_roughness: 0.4,
+            glint_weight: 0.35,
+            glint_roughness: 0.15,
+            glint_density: 400.0,
+            glint_bin_half_width: 0.05,
+            measured_weight: 0.6,
+            measured_phi_d: crate::measured_brdf::MB_DEFAULT_PHI_D as f32,
+            measured_scale: 1.0,
+            ..Default::default()
+        };
+        let light = DirectionalLight {
+            direction: [0.0, 0.0, 1.0],
+            illuminance: [10.0; 3],
+            visibility: 1.0,
+        };
+        let resolve = |sampling: crate::lobe_sampling::LobeSamplingSettings, footprint: f32| {
+            let mut input = base_input(&primitives, &vertices, principled_header(), parameters);
+            input.measured_brdf = Some(&table);
+            input.uv_footprint_area = footprint;
+            input.lobe_sampling = sampling;
+            resolve_pixel(
+                input,
+                LightingEnvironment {
+                    directional: &[light],
+                    punctual: &[],
+                    image_based: None,
+                    ambient: [5.0; 3],
+                    stylized: StylizedParams::with_bands(4),
+                    area: &[],
+                    ltc_lut: None,
+                },
+            )
+            .unwrap()
+            .color
+        };
+
+        let pixel = [37u32, 19u32];
+        let footprint = 1.0e-3;
+        let full = resolve(
+            crate::lobe_sampling::LobeSamplingSettings {
+                policy: crate::LobeSamplingPolicy::for_quality(crate::ShadingQuality::High),
+                frame_index: 0,
+                pixel,
+            },
+            footprint,
+        );
+
+        // Low tier: one stochastic representative.
+        let policy = crate::LobeSamplingPolicy::for_quality(crate::ShadingQuality::Low);
+        assert_eq!(policy.mode(), crate::LobeSamplingMode::Stochastic);
+        let frames = 512u32;
+        let mut sum = [0.0f32; 3];
+        let mut differing = 0usize;
+        for frame in 0..frames {
+            let value = resolve(
+                crate::lobe_sampling::LobeSamplingSettings {
+                    policy,
+                    frame_index: frame,
+                    pixel,
+                },
+                footprint,
+            );
+            if (0..3).any(|c| (value[c] - full[c]).abs() > 1.0e-5) {
+                differing += 1;
+            }
+            for channel in 0..3 {
+                sum[channel] += value[channel];
+            }
+        }
+        assert!(
+            differing > frames as usize / 2,
+            "the amortised path must actually differ per frame ({differing}/{frames})"
+        );
+        for channel in 0..3 {
+            let mean = sum[channel] / frames as f32;
+            let tolerance = 0.12 * full[channel].abs().max(1.0);
+            assert!(
+                (mean - full[channel]).abs() <= tolerance,
+                "channel {channel}: TAA mean {mean} vs full {}",
+                full[channel]
+            );
+        }
+    }
 
     #[test]
     fn a_bound_measured_table_reaches_the_resolved_pixel() {

@@ -38,6 +38,11 @@ pub(crate) struct GpuShadingResolveParams {
     pub flags: u32,
     /// World-space camera position; `w` is unused padding.
     pub view_position: [f32; 4],
+    /// §17.4 single-lobe sampling: the tier's deterministic lobe budget
+    /// (`LOBE_SAMPLING_NO_LOBE` = evaluate every expensive lobe) and the frame
+    /// index that decorrelates the blue-noise draw for TAA.
+    pub max_full_lobes: u32,
+    pub frame_index: u32,
 }
 
 /// `flags` bit selecting the screen-space GTAO occlusion multiply in the
@@ -207,8 +212,10 @@ mod tests {
     #[test]
     fn resolve_params_layout_matches_the_wgsl_immediate_block() {
         // vec4<f32> forces 16-byte alignment; the four leading u32 scalars fill
-        // the first 16 bytes exactly, so the whole block is 32 bytes.
-        assert_eq!(size_of::<GpuShadingResolveParams>(), 32);
+        // the first 16 bytes exactly, and §17.4's two single-lobe sampling words
+        // follow the `vec4`, so the block is 40 bytes (a 4-byte multiple, which
+        // is what `set_immediates` requires).
+        assert_eq!(size_of::<GpuShadingResolveParams>(), 40);
         assert_eq!(align_of::<GpuShadingResolveParams>(), 4);
         assert_eq!(RESOLVE_WORKGROUP_SIZE, 64);
     }

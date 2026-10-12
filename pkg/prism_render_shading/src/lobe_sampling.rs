@@ -664,6 +664,127 @@ pub fn lobe_sample_quality_sum(
     (value, selected)
 }
 
+/// The resolve's single-lobe sampling state for one pixel (§17.4, P3-e).
+///
+/// `policy` comes from the host's quality tier (P1-e budget applied); `frame`
+/// and `pixel` seed the blue-noise draw. The default is `High` — the full
+/// evaluation, i.e. an exact identity — so a caller that does not opt into the
+/// amortised path shades bit-for-bit as before.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LobeSamplingSettings {
+    /// Quality/budget plan derived by the host.
+    pub policy: LobeSamplingPolicy,
+    /// Frame index driving the temporal decorrelation (TAA accumulates it).
+    pub frame_index: u32,
+    /// The pixel's integer coordinate (`x`, `y`).
+    pub pixel: [u32; 2],
+}
+
+impl Default for LobeSamplingSettings {
+    fn default() -> Self {
+        Self {
+            policy: LobeSamplingPolicy::for_quality(crate::ShadingQuality::High),
+            frame_index: 0,
+            pixel: [0, 0],
+        }
+    }
+}
+
+/// Per-pixel factors for the two *shapes* of expensive lobe (§17.4).
+///
+/// The shapes need different estimators, and the difference is a property of the
+/// lobe, not a taste:
+///
+/// * **Blend-shaped** (glint: `mix(smooth, discrete, weight)`) — the weight *is*
+///   the mixture probability, so the sampler draws the **state** and applies no
+///   scaling. Scaling a signed delta by `1/p` would drive the blended NDF
+///   negative, i.e. negative radiance.
+/// * **Additive** (measured BRDF: `surface = analytic + w·table`) — the classic
+///   single-sample estimator: pick one lobe with probability `p` and scale its
+///   (non-negative) response by `1/p`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExpensiveLobeFactors {
+    /// `GLINT_STATE_AUTHORED` when the pixel did not sample glint, else the
+    /// drawn mixture state in `[0, 1]`.
+    pub glint_state: f32,
+    /// Estimator factor for the additive lobe group: `1/p` when this pixel
+    /// evaluates the measured lobe, `0` when it does not.
+    pub measured: f32,
+}
+
+impl ExpensiveLobeFactors {
+    /// The exact, un-amortised factors: the authored blend and the full additive
+    /// term. Every golden baseline is this value.
+    pub const FULL: Self = Self {
+        glint_state: crate::lighting::GLINT_STATE_AUTHORED,
+        measured: 1.0,
+    };
+}
+
+/// Draw this pixel's expensive-lobe factors from the sampling policy.
+///
+/// `weights` are the authored lobe weights (`[glint, measured]`); an inert lobe
+/// is never selected. With the policy in [`LobeSamplingMode::Full`] — or with
+/// nothing expensive live — this returns [`ExpensiveLobeFactors::FULL`], so the
+/// full-quality path is an exact identity.
+///
+/// `pixel` is the pixel's integer coordinate, `frame` the frame index and
+/// `sample` a per-pixel sequence index (a second sample per frame is available
+/// if a host wants to derive two decisions); the blue-noise draw is spatially
+/// decorrelated and changes every frame, which is what lets TAA converge the
+/// estimator at `LobeSamplingPolicy::temporal_accumulation_frames`.
+#[must_use]
+pub fn select_expensive_lobe_factors(
+    policy: LobeSamplingPolicy,
+    weights: [f32; 2],
+    pixel: [u32; 2],
+    frame: u32,
+    sample: u32,
+) -> ExpensiveLobeFactors {
+    let glint_live = lobe_sanitize_weight(weights[0]) > LOBE_SAMPLING_MIN_WEIGHT;
+    let measured_live = lobe_sanitize_weight(weights[1]) > LOBE_SAMPLING_MIN_WEIGHT;
+    let live = usize::from(glint_live) + usize::from(measured_live);
+    if !policy.should_use_stochastic(live) {
+        return ExpensiveLobeFactors::FULL;
+    }
+
+    let mut factors = ExpensiveLobeFactors::FULL;
+
+    // Blend-shaped: draw the state, never scale it.
+    if glint_live {
+        let u = lobe_blue_noise_1d(
+            pixel[0],
+            pixel[1],
+            frame,
+            sample,
+            LOBE_SAMPLING_SEED_SALT,
+        );
+        factors.glint_state = f32::from(lobe_sanitize_weight(weights[0]) > u);
+    }
+
+    // Additive: pick one with probability proportional to its weight and use the
+    // `1/p` estimator. With a single live additive lobe the selection is
+    // degenerate (`p == 1`), which is the honest state of the catalogue today.
+    if measured_live {
+        let sanitized = [lobe_sanitize_weight(weights[1])];
+        let u = lobe_blue_noise_1d(
+            pixel[0],
+            pixel[1],
+            frame,
+            sample.wrapping_add(1),
+            LOBE_SAMPLING_SEED_SALT,
+        );
+        let picked = lobe_select(&sanitized, u);
+        factors.measured = if picked.is_valid() {
+            lobe_estimator_weight(picked.probability)
+        } else {
+            1.0
+        };
+    }
+
+    factors
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1002,6 +1123,145 @@ mod tests {
         let empty: [f32; 0] = [];
         let mut output = [0.0f32; 0];
         assert_eq!(lobe_write_probabilities(&empty, &mut output), 0);
+    }
+
+
+    #[test]
+    fn full_quality_is_an_exact_identity() {
+        // §17.4: the amortised path must never perturb a pixel that did not opt
+        // into it. `High` evaluates everything, so the factors are the sentinel
+        // plus the full additive weight.
+        for quality in [ShadingQuality::High, ShadingQuality::Ultra] {
+            let policy = LobeSamplingPolicy::for_quality(quality);
+            let factors =
+                select_expensive_lobe_factors(policy, [0.9, 0.7], [3, 4], 11, 0);
+            assert_eq!(factors, ExpensiveLobeFactors::FULL, "{quality:?}");
+        }
+        // …and an inert material is never sampled, whatever the tier says.
+        let policy = LobeSamplingPolicy::for_quality(ShadingQuality::Low);
+        assert_eq!(
+            select_expensive_lobe_factors(policy, [0.0, 0.0], [0, 0], 0, 0),
+            ExpensiveLobeFactors::FULL
+        );
+    }
+
+    #[test]
+    fn the_glint_state_draws_with_the_authored_weight() {
+        // The mixture identity in action: over pixels and frames the drawn state
+        // is `1` exactly as often as the authored weight, and it is never scaled.
+        // Both expensive lobes live, so the tier's one-lobe budget makes the
+        // group stochastic. With a *single* live lobe the canonical tiers stay
+        // on the deterministic path — that case is covered separately.
+        let policy = LobeSamplingPolicy::for_quality(ShadingQuality::Low);
+        let weight = 0.35_f32;
+        let mut ones = 0u32;
+        let mut total = 0u32;
+        for frame in 0..64u32 {
+            for y in 0..8u32 {
+                for x in 0..8u32 {
+                    let factors =
+                        select_expensive_lobe_factors(policy, [weight, 0.5], [x, y], frame, 0);
+                    assert!(
+                        factors.glint_state == 0.0 || factors.glint_state == 1.0,
+                        "the state must be a draw, not a factor: {}",
+                        factors.glint_state
+                    );
+                    ones += u32::from(factors.glint_state == 1.0);
+                    total += 1;
+                }
+            }
+        }
+        let fraction = ones as f32 / total as f32;
+        assert!(
+            (fraction - weight).abs() < 0.03,
+            "drawn state fraction {fraction} vs weight {weight}"
+        );
+    }
+
+    #[test]
+    fn a_single_live_lobe_stays_deterministic_at_the_canonical_tiers() {
+        // The catalogue carries one additive heavy lobe (measured) and one
+        // blend-shaped one (glint); `Low`'s budget is one lobe, so a material
+        // with only one of them is never sampled. Nothing is scaled down, and
+        // neither lobe needs a special case to say so.
+        let policy = LobeSamplingPolicy::for_quality(ShadingQuality::Low);
+        for frame in 0..16u32 {
+            let only_measured =
+                select_expensive_lobe_factors(policy, [0.0, 0.8], [1, 2], frame, 0);
+            assert_eq!(only_measured, ExpensiveLobeFactors::FULL);
+            let only_glint =
+                select_expensive_lobe_factors(policy, [0.6, 0.0], [1, 2], frame, 0);
+            assert_eq!(only_glint, ExpensiveLobeFactors::FULL);
+        }
+    }
+
+    #[test]
+    fn the_additive_group_uses_the_inverse_probability_estimator() {
+        // Drive the estimator with an explicit two-lobe group: equal weights, so
+        // the selected lobe is weighted by 2 and the ensemble mean of
+        // `factor · response` is the plain sum.
+        let weights = [1.0_f32, 1.0_f32];
+        let mut sums = [0.0_f32; 2];
+        let mut picks = [0u32; 2];
+        let draws = 4096u32;
+        for index in 0..draws {
+            let pixel = [index % 64, index / 64];
+            let u = lobe_blue_noise_1d(
+                pixel[0],
+                pixel[1],
+                0,
+                1,
+                LOBE_SAMPLING_SEED_SALT,
+            );
+            let picked = lobe_select(&weights, u);
+            assert!(picked.is_valid());
+            let factor = lobe_estimator_weight(picked.probability);
+            picks[picked.index as usize] += 1;
+            sums[picked.index as usize] += factor * weights[picked.index as usize];
+        }
+        assert!(picks[0] > 0 && picks[1] > 0, "both lobes must be picked");
+        // `E[1_{pick i}/p_i · w_i] = w_i`, so each lobe's accumulated estimate is
+        // its weight times the number of draws.
+        for lobe in 0..2 {
+            let mean = sums[lobe] / draws as f32;
+            assert!(
+                (mean - weights[lobe]).abs() < 0.05,
+                "lobe {lobe}: {mean} vs {}",
+                weights[lobe]
+            );
+        }
+    }
+
+
+    #[test]
+    fn a_downscaled_budget_samples_where_full_quality_would_not() {
+        // `LobeSampleBudget::with_global_scale` is the host's "shed samples"
+        // lever: below the tier's canonical total, `High` drops from "evaluate
+        // everything" to the one-lobe budget, so a two-heavy-lobe material is
+        // sampled even on the highest tier.
+        let policy = LobeSamplingPolicy::for_quality(ShadingQuality::High);
+        assert_eq!(policy.mode(), LobeSamplingMode::Full);
+        assert_eq!(
+            select_expensive_lobe_factors(policy, [0.5, 0.5], [0, 0], 0, 0),
+            ExpensiveLobeFactors::FULL
+        );
+
+        let budget = ShadingQuality::High.budget().with_global_scale(0.5);
+        let downscaled = LobeSamplingPolicy::for_budget(ShadingQuality::High, budget);
+        assert_eq!(downscaled.mode(), LobeSamplingMode::Stochastic);
+        let mut states = [0u32; 2];
+        for frame in 0..32u32 {
+            let factors = select_expensive_lobe_factors(
+                downscaled,
+                [0.5, 0.5],
+                [frame % 7, frame / 7],
+                frame,
+                0,
+            );
+            assert!(factors.glint_state == 0.0 || factors.glint_state == 1.0);
+            states[usize::from(factors.glint_state == 1.0)] += 1;
+        }
+        assert!(states[0] > 0 && states[1] > 0, "both states must occur");
     }
 
     #[test]

@@ -266,6 +266,52 @@ fn ls_select_bucket(cdf_target: f32, cumulative_after: f32) -> bool {
     return cdf_target < cumulative_after;
 }
 
+/// Per-pixel factors for the two shapes of expensive lobe (§17.4).
+///
+/// Returns `(glint_state, measured_factor)`: the glint **mixture state** (`< 0`
+/// means "not sampled, use the authored weight") and the additive group's `1/p`
+/// estimator factor. Mirrors
+/// `prism_render_shading::lobe_sampling::select_expensive_lobe_factors`: a
+/// blend-shaped lobe draws its state (scaling a signed delta by `1/p` would make
+/// the NDF negative), while additive lobes use the classic single-sample
+/// estimator.
+fn ls_select_expensive_lobe_factors(
+    weights: vec2<f32>,
+    max_full_lobes: u32,
+    pixel: vec2<u32>,
+    frame: u32,
+    sample: u32,
+    seed: u32,
+) -> vec2<f32> {
+    let glint_weight = ls_sanitize_weight(weights.x);
+    let measured_weight = ls_sanitize_weight(weights.y);
+    let glint_live = glint_weight > LS_MIN_WEIGHT;
+    let measured_live = measured_weight > LS_MIN_WEIGHT;
+    var live = 0u;
+    if (glint_live) { live = live + 1u; }
+    if (measured_live) { live = live + 1u; }
+
+    // Full quality (or nothing expensive live): the exact identity, i.e. the
+    // authored blend and the unweighted additive term.
+    if (!ls_should_use_stochastic(max_full_lobes, live)) {
+        return vec2<f32>(-1.0, 1.0);
+    }
+
+    var factors = vec2<f32>(-1.0, 1.0);
+    if (glint_live) {
+        let u = ls_blue_noise_1d(pixel.x, pixel.y, frame, sample, seed);
+        factors.x = select(0.0, 1.0, glint_weight > u);
+    }
+    if (measured_live) {
+        // A single additive lobe is always selected, so its estimator factor is
+        // exactly 1 — the code says so explicitly rather than pretending to draw.
+        // A second additive lobe turns this into a real CDF over the group (the
+        // CPU twin already calls `lobe_select` over the group).
+        factors.y = 1.0;
+    }
+    return factors;
+}
+
 /// Uniform fallback index used when every supplied weight is unusable.
 fn ls_uniform_fallback_index(u: f32, lobe_count: u32) -> u32 {
     if (lobe_count == 0u) {

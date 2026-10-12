@@ -4,6 +4,12 @@ use prism_render_shading::{classify_material_header, MAX_SHADING_CLASSES};
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct PrismShadingSettings {
     pub max_visible_pixels: u32,
+    /// §17.4 (P3-e) quality tier driving the single-lobe sampling budget. `High`
+    /// (the default) evaluates every expensive lobe, i.e. the exact path.
+    pub shading_quality: prism_render_shading::ShadingQuality,
+    /// Frame index fed to the single-lobe sampler's blue-noise sequence; the
+    /// caller advances it once per frame so TAA can accumulate the estimator.
+    pub frame_index: u32,
     pub enable_visibility_buffer: bool,
     pub enable_compute_resolve: bool,
     /// Enables the GTAO ambient-occlusion prepass + compute pass. Requires the
@@ -235,6 +241,8 @@ impl Default for PrismShadingSettings {
     fn default() -> Self {
         Self {
             max_visible_pixels: 3840 * 2160,
+            shading_quality: prism_render_shading::ShadingQuality::High,
+            frame_index: 0,
             enable_visibility_buffer: false,
             enable_compute_resolve: false,
             enable_gtao: false,

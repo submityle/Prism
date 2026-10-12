@@ -99,6 +99,10 @@ import prism_render_scene::shaders::material_sample::{
     prism_uv_gradients,
     prism_texture_lod,
 };
+import prism_render_scene::shaders::lobe_sampling::{
+    ls_select_expensive_lobe_factors,
+    LS_SEED_SALT,
+};
 import prism_render_scene::shaders::measured_lobe::{
     measured_direct,
     SEMANTIC_MEASURED_BRDF,
@@ -152,6 +156,11 @@ struct ResolveParams {
     // image-based specular path over the low-frequency SH-radiance fallback.
     flags: u32,
     view_position: vec4<f32>,
+    // §17.4 single-lobe sampling: the tier's deterministic lobe budget
+    // (`LOBE_SAMPLING_NO_LOBE` = evaluate everything) and the frame index that
+    // decorrelates the blue-noise draw across frames for TAA.
+    max_full_lobes: u32,
+    frame_index: u32,
 }
 
 // `ResolveParams.flags` masks, mirroring `RESOLVE_FLAG_*` in `resolve/abi.rs`.
@@ -1335,7 +1344,7 @@ fn shade_principled(
     // §17.6 measured lobe: the bound table's heap slot (`u32::MAX` when the
     // material binds none) and its authored (weight, phi_d, scale).
     measured_slot: u32,
-    measured_params: vec3<f32>,
+    measured_params: vec4<f32>,
 ) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
     // The view- and material-only albedo terms are identical for every light, so
@@ -1350,7 +1359,7 @@ fn shade_principled(
         let direct = to_direct_sample(sample);
         accumulated = accumulated + principled_direct_with(lit, frame, direct, pre);
         if measured_slot != 0xFFFFFFFFu && measured_params.x > 0.0 {
-            accumulated = accumulated + measured_direct(
+            accumulated = accumulated + measured_params.w * measured_direct(
                 measured_slot,
                 measured_params.y,
                 measured_params.z,
@@ -1378,7 +1387,7 @@ fn shade_principled(
         let direct = to_direct_sample(sample);
         accumulated = accumulated + principled_direct_with(lit, frame, direct, pre);
         if measured_slot != 0xFFFFFFFFu && measured_params.x > 0.0 {
-            accumulated = accumulated + measured_direct(
+            accumulated = accumulated + measured_params.w * measured_direct(
                 measured_slot,
                 measured_params.y,
                 measured_params.z,
@@ -2144,10 +2153,22 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
         material_header.texture_offset,
         material_header.texture_count,
     );
-    let measured_params = vec3<f32>(
+    // §17.4 single-lobe sampling: one draw per pixel decides the glint mixture
+    // state and (with more than one additive heavy lobe) which one is evaluated.
+    let lobe_factors = ls_select_expensive_lobe_factors(
+        vec2<f32>(parameters.glint_weight, parameters.measured_weight),
+        params.max_full_lobes,
+        vec2<u32>(u32(coord.x), u32(coord.y)),
+        params.frame_index,
+        0u,
+        LS_SEED_SALT,
+    );
+    lit.glint_state = lobe_factors.x;
+    let measured_params = vec4<f32>(
         parameters.measured_weight,
         parameters.measured_phi_d,
         parameters.measured_scale,
+        lobe_factors.y,
     );
     var color: vec3<f32>;
     switch params.shading_class {
