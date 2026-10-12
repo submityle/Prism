@@ -778,4 +778,79 @@ mod tests {
             assert_eq!(t.chunk_meta(0).structural_epoch(), 9);
         }
     }
+
+    /// A `Big` row is 512 B, so a `Big`-only table has
+    /// `TARGET_CHUNK_BYTES / 512 == 32` rows per chunk — a handful of entities
+    /// crosses several block boundaries.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct Big(u64, [u8; 504]);
+    impl Component for Big {}
+
+    /// A sparse-free marker used to force archetype moves (insert/remove).
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    struct Tag(u8);
+    impl Component for Tag {}
+
+    /// Differential test across many chunk windows: random spawns, despawns and
+    /// component inserts/removes must leave every live entity's `Big` value equal
+    /// to a reference map, however rows shuffle across block boundaries and
+    /// archetype moves.
+    #[test]
+    fn world_structural_churn_matches_a_reference() {
+        use crate::collections::HashMap;
+
+        let mut world = World::new();
+        let mut reference: HashMap<Entity, u64> = HashMap::default();
+        let mut live: Vec<Entity> = Vec::new();
+        let mut rng: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            rng >> 33
+        };
+        let mut tag: u64 = 0;
+
+        for step in 0..4_000u64 {
+            match next() % 4 {
+                // Spawn a fresh entity holding the tag we remember.
+                0 | 1 => {
+                    tag += 1;
+                    let e = world.spawn(Big(tag, [0; 504]));
+                    reference.insert(e, tag);
+                    live.push(e);
+                }
+                // Despawn a random live entity (swap-removes a row, possibly
+                // across blocks).
+                2 if !live.is_empty() => {
+                    let i = (next() as usize) % live.len();
+                    let e = live.swap_remove(i);
+                    assert!(world.despawn(e), "live entity must despawn");
+                    assert!(reference.remove(&e).is_some());
+                }
+                // Force an archetype move by toggling `Tag`.
+                3 if !live.is_empty() => {
+                    let i = (next() as usize) % live.len();
+                    let e = live[i];
+                    if world.get::<Tag>(e).is_some() {
+                        assert!(world.remove::<Tag>(e));
+                    } else {
+                        assert!(world.insert(e, Tag(1)));
+                    }
+                }
+                _ => {}
+            }
+
+            assert_eq!(reference.len(), live.len());
+            if step % 37 == 0 {
+                for (&e, &expect) in &reference {
+                    assert_eq!(
+                        world.get::<Big>(e).map(|b| b.0),
+                        Some(expect),
+                        "entity {e:?} diverged at step {step}",
+                    );
+                }
+            }
+        }
+    }
 }

@@ -794,4 +794,108 @@ mod tests {
         // SAFETY: row 0 holds a live u32.
         assert_eq!(unsafe { *after.cast::<u32>() }, 0);
     }
+
+    /// Deterministic differential test: a long pseudo-random sequence of pushes,
+    /// swap-removes and replaces must leave the block column byte-for-byte equal
+    /// to a plain `Vec` reference, with the block count always exactly
+    /// `ceil(len / rows_per_block)`. This exercises every block boundary,
+    /// cross-block moves and block reclamation.
+    #[test]
+    fn randomized_ops_match_a_reference_vec() {
+        // A tiny block (4 slots) makes boundaries and reclaims frequent.
+        const RPB: usize = 4;
+        let mut col = BlobVec::new_with_rows_per_block(layout_of::<u64>(), None, RPB);
+        let mut reference: Vec<u64> = Vec::new();
+        let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            rng >> 33
+        };
+        let mut counter: u64 = 0;
+
+        for _ in 0..3_000 {
+            match next() % 3 {
+                // Push a fresh value.
+                0 | 1 => {
+                    counter += 1;
+                    // SAFETY: pushing a valid u64.
+                    unsafe { col.push((&counter as *const u64).cast::<u8>()) };
+                    reference.push(counter);
+                }
+                // Swap-remove a random live row.
+                _ => {
+                    if reference.is_empty() {
+                        continue;
+                    }
+                    let idx = (next() as usize) % reference.len();
+                    // SAFETY: `idx < len`.
+                    unsafe { col.swap_remove_and_drop(idx) };
+                    reference.swap_remove(idx);
+                }
+            }
+
+            assert_eq!(col.len(), reference.len());
+            assert_eq!(
+                col.block_count(),
+                reference.len().div_ceil(RPB),
+                "block count must track the live row count",
+            );
+            for (row, expected) in reference.iter().enumerate() {
+                // SAFETY: `row < len` and the column holds u64.
+                let got = unsafe { *col.get_ptr(row).cast::<u64>() };
+                assert_eq!(got, *expected, "row {row} diverged at len {}", reference.len());
+            }
+        }
+    }
+
+    /// Differential test for `push_from` + `swap_remove_forget` (the archetype
+    /// relocation pair): moving rows between two block columns must reproduce
+    /// the same values as moving them between two plain `Vec`s.
+    #[test]
+    fn randomized_relocations_match_a_reference() {
+        const RPB: usize = 4;
+        let mut src = BlobVec::new_with_rows_per_block(layout_of::<u64>(), None, RPB);
+        let mut dst = BlobVec::new_with_rows_per_block(layout_of::<u64>(), None, RPB);
+        let mut src_ref: Vec<u64> = Vec::new();
+        let mut dst_ref: Vec<u64> = Vec::new();
+        let mut rng: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            rng >> 33
+        };
+        for i in 0..40u64 {
+            // SAFETY: valid u64.
+            unsafe { src.push((&i as *const u64).cast::<u8>()) };
+            src_ref.push(i);
+        }
+
+        for _ in 0..500 {
+            if src_ref.is_empty() {
+                break;
+            }
+            let idx = (next() as usize) % src_ref.len();
+            // Move `src[idx]` into `dst` (copy out, then forget the hole).
+            // SAFETY: identical layouts and `idx < src.len()`.
+            unsafe { dst.push_from(&src, idx) };
+            dst_ref.push(src_ref[idx]);
+            // SAFETY: `idx < src.len()` and the value was just moved out.
+            unsafe { src.swap_remove_forget(idx) };
+            src_ref.swap_remove(idx);
+
+            assert_eq!(src.len(), src_ref.len());
+            assert_eq!(dst.len(), dst_ref.len());
+            for (row, expected) in src_ref.iter().enumerate() {
+                // SAFETY: `row < len`.
+                assert_eq!(unsafe { *src.get_ptr(row).cast::<u64>() }, *expected);
+            }
+            for (row, expected) in dst_ref.iter().enumerate() {
+                // SAFETY: `row < len`.
+                assert_eq!(unsafe { *dst.get_ptr(row).cast::<u64>() }, *expected);
+            }
+        }
+    }
 }
