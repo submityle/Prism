@@ -135,3 +135,29 @@ fn blocky_mask_repeat_wrap_matches_cpu_golden() {
         }
     });
 }
+
+/// A level-11 micromap has `4^11 = 4_194_304` micro-triangles, i.e. 65_536
+/// classify workgroups — one past the common 65_535 per-axis cap. The launch
+/// must tile into 2D instead of failing validation (CR-found). This checks the
+/// dispatch itself (no CPU golden) so it stays fast.
+#[test]
+fn level_11_tiles_the_dispatch_without_exceeding_the_group_cap() {
+    with_gpu(|ctx, baker| {
+        let mask = TextureAlphaMask::with_wrap(2, 2, vec![1.0; 4], 0.5, WrapMode::Clamp);
+        let uv = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        let level = SubdivisionLevel::new(11).expect("level in range");
+        let micro = level.micro_triangle_count();
+
+        let gpu = baker.bake(ctx, uv, level, OmmFormat::TwoState, 1, &mask);
+        assert_eq!(
+            gpu.states.len() as u32,
+            micro,
+            "every micro-triangle must be classified"
+        );
+        assert_eq!(
+            gpu.data.len() as u32,
+            micro / 8,
+            "two-state packs 1 bit per micro-triangle"
+        );
+    });
+}

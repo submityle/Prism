@@ -72,3 +72,40 @@ fn gpu_broadphase_matches_cpu_golden() {
         "GPU pair set must equal the CPU golden set"
     );
 }
+
+/// A bucket that overflows `max_per_bucket` must be reported as
+/// `BucketOverflow` on both sides; the GPU must not silently drop the excess
+/// particles and return a partial pair set (CR-found).
+#[test]
+#[expect(
+    clippy::print_stderr,
+    reason = "the skip notice must reach the test log on hosts without a wgpu adapter"
+)]
+fn bucket_overflow_is_reported_not_silently_dropped() {
+    // Nine coincident particles, a one-bucket table and an 8-entry bucket.
+    let particles: Vec<Particle> = (0..9).map(|_| Particle::new(Vec3::ZERO, 0.1)).collect();
+    let config = BroadphaseConfig::new(1.0, 1, 8, 64);
+
+    let cpu = cpu_broadphase(&particles, &config);
+    assert!(
+        matches!(
+            cpu,
+            Err(prism_physics_gpu::BroadphaseError::BucketOverflow { .. })
+        ),
+        "cpu golden must report the overflow"
+    );
+
+    let Some(ctx) = GpuContext::try_headless() else {
+        eprintln!("skipping GPU broad-phase overflow: no wgpu adapter on this host");
+        return;
+    };
+    let gpu = GpuBroadphase::new(&ctx);
+    let got = gpu.run(&ctx, &particles, &config);
+    assert!(
+        matches!(
+            got,
+            Err(prism_physics_gpu::BroadphaseError::BucketOverflow { .. })
+        ),
+        "gpu must report the overflow, got {got:?}"
+    );
+}

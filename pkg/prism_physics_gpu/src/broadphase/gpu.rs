@@ -185,6 +185,10 @@ impl GpuBroadphase {
         let pair_count_stage = buffer::staging(device, "broadphase_pair_count_stage", 4);
         let pairs_bytes = u64::from(config.pair_capacity) * 8;
         let pairs_stage = buffer::staging(device, "broadphase_pairs_stage", pairs_bytes);
+        // Bucket occupancy is read back so a true per-bucket overflow is
+        // reported instead of silently dropping the excess particles (CR-found).
+        let counts_bytes = u64::from(config.table_size) * 4;
+        let counts_stage = buffer::staging(device, "broadphase_counts_stage", counts_bytes);
 
         let workgroups = count.div_ceil(64).max(1);
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
@@ -210,8 +214,23 @@ impl GpuBroadphase {
         }
         buffer::copy(&mut encoder, &pair_count_buf, &pair_count_stage, 4);
         buffer::copy(&mut encoder, &pairs_buf, &pairs_stage, pairs_bytes);
+        buffer::copy(&mut encoder, &counts_buf, &counts_stage, counts_bytes);
         ctx.queue().submit([encoder.finish()]);
 
+        // The shader still atomicAdds past `max_per_bucket` (it only guards the
+        // entry *write*), so any count above the cap is a real overflow; the CPU
+        // golden returns `BucketOverflow` for the same input (CR-found).
+        let counts = buffer::read_back::<u32>(ctx, &counts_stage);
+        if let Some((bucket, _)) = counts
+            .iter()
+            .enumerate()
+            .find(|&(_, &n)| n > config.max_per_bucket)
+        {
+            return Err(BroadphaseError::BucketOverflow {
+                bucket: bucket as u32,
+                capacity: config.max_per_bucket,
+            });
+        }
         let total = buffer::read_back::<u32>(ctx, &pair_count_stage)[0];
         if total > config.pair_capacity {
             return Err(BroadphaseError::PairCapacityExceeded {

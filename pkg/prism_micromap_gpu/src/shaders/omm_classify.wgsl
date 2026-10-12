@@ -27,7 +27,9 @@ struct Params {
     wrap: u32,
     threshold: f32,
     micro_count: u32,
-    pad0: u32,
+    // Row width of the 2D classify dispatch; `idx` is decoded from both axes so
+    // a large micromap tiles instead of overflowing the per-axis group cap.
+    groups_x: u32,
     pad1: u32,
 };
 
@@ -87,7 +89,7 @@ fn lattice_uv(w0: u32, w1: u32, w2: u32, inv_n: f32) -> vec2<f32> {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+    let idx = gid.y * params.groups_x + gid.x;
     if idx >= params.micro_count {
         return;
     }

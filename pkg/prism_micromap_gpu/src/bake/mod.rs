@@ -66,8 +66,10 @@ struct Params {
     threshold: f32,
     /// Number of micro-triangles (`4^level`).
     micro_count: u32,
-    /// Padding to a 16-word uniform block.
-    pad0: u32,
+    /// Row width (`x` dimension) of the classify dispatch; the kernel decodes
+    /// `idx = gid.y * groups_x + gid.x` so a level-11/12 launch tiles into two
+    /// dimensions instead of overflowing the per-axis workgroup cap (CR-found).
+    groups_x: u32,
     /// Padding to a 16-word uniform block.
     pad1: u32,
 }
@@ -254,6 +256,15 @@ impl GpuOmmBaker {
             WrapMode::Clamp => 1u32,
         };
 
+        // Tile the classify launch into 2D so no axis exceeds the device cap: a
+        // level-11 micromap is 4^11 = 4_194_304 micro-triangles -> 65_536
+        // groups, one past the common 65_535 Metal cap (CR-found).
+        let classify_groups = micro_count.div_ceil(64);
+        let (classify_x, classify_y) = split_2d(
+            classify_groups,
+            device.limits().max_compute_workgroups_per_dimension,
+        );
+
         let params = Params {
             ux0: uv[0][0],
             uy0: uv[0][1],
@@ -269,7 +280,7 @@ impl GpuOmmBaker {
             wrap: wrap_code,
             threshold: AlphaThreshold::of(mask),
             micro_count,
-            pad0: 0,
+            groups_x: classify_x,
             pad1: 0,
         };
 
@@ -288,7 +299,6 @@ impl GpuOmmBaker {
             ],
         });
 
-        let classify_groups = micro_count.div_ceil(64);
         let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_omm_classify_encoder"),
         });
@@ -297,7 +307,8 @@ impl GpuOmmBaker {
             "prism_omm_classify_pass",
             &self.classify,
             &classify_bind,
-            classify_groups,
+            classify_x,
+            classify_y,
         );
         ctx.queue().submit([enc.finish()]);
 
@@ -335,12 +346,17 @@ impl GpuOmmBaker {
         let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_omm_pack_encoder"),
         });
+        let (pack_x, pack_y) = split_2d(
+            pack_groups,
+            device.limits().max_compute_workgroups_per_dimension,
+        );
         dispatch(
             &mut enc,
             "prism_omm_pack_pass",
             &self.pack,
             &pack_bind,
-            pack_groups,
+            pack_x,
+            pack_y,
         );
         buffer::copy(
             &mut enc,
@@ -387,7 +403,8 @@ fn dispatch(
     label: &str,
     pipeline: &ComputePipeline,
     bind: &BindGroup,
-    groups: u32,
+    groups_x: u32,
+    groups_y: u32,
 ) {
     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some(label),
@@ -395,5 +412,14 @@ fn dispatch(
     });
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bind, &[]);
-    pass.dispatch_workgroups(groups.max(1), 1, 1);
+    pass.dispatch_workgroups(groups_x.max(1), groups_y.max(1), 1);
+}
+
+/// Splits a 1D group count into a 2D `(x, y)` grid so neither axis exceeds
+/// `max_dim` (the per-dimension `dispatch_workgroups` cap).
+fn split_2d(groups: u32, max_dim: u32) -> (u32, u32) {
+    let max_dim = max_dim.max(1);
+    let x = groups.min(max_dim).max(1);
+    let y = groups.div_ceil(x).max(1);
+    (x, y)
 }
