@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 prism_app = { path = "../prism_app" }
 prism_asset = { path = "../prism_asset", features = ["ecs"] }
+# The material ABI is a dense `u32` array; the buffers upload it as bytes.
+bytemuck = { version = "1.5", features = ["derive", "must_cast"] }
 prism_ecs = { path = "../prism_ecs" }
 prism_render_architecture = { path = "../prism_render_architecture" }
 prism_image = { path = "../prism_image" }
