@@ -342,10 +342,19 @@ pub struct MaterialRecord {
 
 impl MaterialRecord {
     /// The deterministic specialization identity for this record's axes.
+    ///
+    /// Keyed on the **derived** [`lobe_mask`](Self::lobe_mask), not the raw
+    /// authored `closure_mask`: feature flags fold extra lobes into the live set
+    /// (`EMISSIVE` / `TRANSMISSION` / `FACE_SHADOW`), and the shader permutation
+    /// must follow the live lobes. Keying on the raw closure bits let two
+    /// materials that differ only in such a flag collide on one permutation
+    /// (e.g. one with a face-shadow lobe and one without), which is exactly what
+    /// the "key = lobe set + feature flags" invariant forbids
+    /// (`prism_material_pipeline_refactor_zh.md` §8.5).
     pub fn specialization(&self) -> SpecializationId {
         SpecializationId::new(
             self.illumination,
-            self.closure_mask,
+            self.lobe_mask().bits(),
             self.render_class as u32,
         )
     }
@@ -476,6 +485,38 @@ mod tests {
         assert!(mask.contains(LobeMask::EMISSION));
         assert!(mask.contains(LobeMask::ANISOTROPY));
         assert!(!mask.contains(LobeMask::SHEEN));
+    }
+
+    #[test]
+    fn specialization_follows_the_derived_lobe_set_not_the_raw_closure_bits() {
+        // Two records with identical axes/closure bits but a differing feature
+        // flag differ in their live lobe set, so they must not share a
+        // permutation: keying on the raw `closure_mask` collided them.
+        let handle = GenerationalHandle::new(1, 1);
+        let plain = record(handle, 0, 0);
+        let mut face_shadow = record(handle, 0, 0);
+        face_shadow.features |= MaterialFeatureFlags::FACE_SHADOW;
+
+        assert_ne!(
+            plain.lobe_mask(),
+            face_shadow.lobe_mask(),
+            "the feature flag adds a live lobe"
+        );
+        assert_ne!(
+            plain.specialization(),
+            face_shadow.specialization(),
+            "a differing live lobe set yields a different permutation key"
+        );
+
+        // A feature-driven lobe that also has a closure bit keys the same way.
+        let mut emissive = record(handle, 0, 0);
+        emissive.features |= MaterialFeatureFlags::EMISSIVE;
+        let by_closure = record(handle, closure_bit(ClosureKind::Emission), 0);
+        assert_eq!(
+            emissive.specialization(),
+            by_closure.specialization(),
+            "the same live lobe keys identically however it was authored"
+        );
     }
 
     #[test]
