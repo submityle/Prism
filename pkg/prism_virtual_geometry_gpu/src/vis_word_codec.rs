@@ -117,12 +117,14 @@ pub struct GpuVisWordCodec {
 impl GpuVisWordCodec {
     /// Compiles the 64-bit word-codec kernel on `ctx`.
     ///
-    /// Returns [`None`] when `ctx` was not created with the 64-bit integer
-    /// features (see [`GpuContext::supports_u64_atomics`]); the `u64` kernel
-    /// would fail to compile on such a device, so callers skip instead.
+    /// Returns [`None`] when `ctx` was not created with the plain 64-bit integer
+    /// feature (see [`GpuContext::supports_shader_int64`]). The codec only
+    /// shifts/ors/truncates `u64` — it uses **no** 64-bit atomics — so it does
+    /// not require [`GpuContext::supports_u64_atomics`] (CR-found); the `u64`
+    /// kernel would fail to compile without the integer feature, so callers skip.
     #[must_use]
     pub fn new(ctx: &GpuContext) -> Option<GpuVisWordCodec> {
-        if !ctx.supports_u64_atomics() {
+        if !ctx.supports_shader_int64() {
             return None;
         }
         let device = ctx.device();

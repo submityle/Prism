@@ -26,6 +26,19 @@
 //! the true count. When the launch fits in one dimension the width equals `x`,
 //! so the same linearisation is correct in both regimes.
 //!
+//! # Known boundary
+//!
+//! The tiling is **two-dimensional**: `x` saturates at the per-dimension cap
+//! and `y` carries the rows. It therefore only covers up to
+//! `max_dim * max_dim` workgroups; past that, `y` would itself exceed the
+//! device cap (`total > max_dim^2` — reachable only with `workgroup_size == 1`
+//! and a count within `~131k` of `u32::MAX` under the default `65_535` cap) and
+//! the indirect dispatch would be rejected. Covering the full `u32` range needs
+//! a third grid dimension plus a matching `groups_xy` stride for the consumer
+//! linearisation, which would change the consumer contract; until that lands the
+//! caller must split such a launch. This is an honest limitation, not covered up
+//! by a wrong `y`.
+//!
 //! # Provenance
 //!
 //! Indirect compute dispatch and ceil-division grid sizing are standard,

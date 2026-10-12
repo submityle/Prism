@@ -59,6 +59,9 @@ pub struct GpuContext {
     /// Whether the device was created with the 64-bit atomic-maximum features
     /// the payload vis-buffer key requires.
     supports_u64_atomics: bool,
+    /// Whether the device was created with plain [`Features::SHADER_INT64`]
+    /// (needed by the depth-only `u64` word codec, which does not use atomics).
+    supports_shader_int64: bool,
 }
 
 impl GpuContext {
@@ -80,15 +83,20 @@ impl GpuContext {
             backend_options: BackendOptions::default(),
         });
         let adapter = block_on(instance.request_adapter(&RequestAdapterOptions::default())).ok()?;
-        // Enable the 64-bit atomic features only when the adapter has them, so
-        // the device request never fails on a backend without the extension.
-        let wanted = u64_atomic_features();
-        let supports_u64_atomics = adapter.features().contains(wanted);
-        let required_features = if supports_u64_atomics {
-            wanted
-        } else {
-            Features::empty()
-        };
+        // Enable each 64-bit feature independently, only when the adapter has
+        // it, so the device request never fails and a device with plain
+        // `SHADER_INT64` but no 64-bit atomics can still run the atomic-free
+        // word codec (CR-found).
+        let supports_shader_int64 = adapter.features().contains(Features::SHADER_INT64);
+        let wanted_atomics = u64_atomic_features();
+        let supports_u64_atomics = adapter.features().contains(wanted_atomics);
+        let mut required_features = Features::empty();
+        if supports_shader_int64 {
+            required_features |= Features::SHADER_INT64;
+        }
+        if supports_u64_atomics {
+            required_features |= wanted_atomics;
+        }
         let (device, queue) = block_on(adapter.request_device(&DeviceDescriptor {
             required_features,
             required_limits: adapter.limits(),
@@ -101,6 +109,7 @@ impl GpuContext {
             device,
             queue,
             supports_u64_atomics,
+            supports_shader_int64,
         })
     }
 
@@ -125,6 +134,16 @@ impl GpuContext {
     #[must_use]
     pub fn supports_u64_atomics(&self) -> bool {
         self.supports_u64_atomics
+    }
+
+    /// Whether this device can run the atomic-free `u64` depth word codec.
+    ///
+    /// `true` when the adapter advertised, and the device enabled,
+    /// [`Features::SHADER_INT64`] — independent of whether 64-bit atomics are
+    /// available (see [`GpuContext::supports_u64_atomics`]).
+    #[must_use]
+    pub fn supports_shader_int64(&self) -> bool {
+        self.supports_shader_int64
     }
 
     /// Blocks until all previously submitted work on this device completes.
