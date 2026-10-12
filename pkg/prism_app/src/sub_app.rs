@@ -307,13 +307,18 @@ impl SubApp {
         // is present on this world, run the timed path; otherwise run the plain
         // phase sequence so an un-observed frame pays nothing.
         #[cfg(feature = "std")]
-        if self
-            .world
-            .get_resource::<crate::diagnostics::FrameDiagnostics>()
-            .is_some()
         {
-            self.update_instrumented();
-            return;
+            let instrument = self
+                .world
+                .get_resource::<crate::diagnostics::FrameDiagnostics>()
+                .is_some();
+            #[cfg(feature = "trace")]
+            let instrument =
+                instrument || self.world.get_resource::<crate::trace::PhaseTrace>().is_some();
+            if instrument {
+                self.update_instrumented();
+                return;
+            }
         }
         self.update_phases();
     }
@@ -343,6 +348,10 @@ impl SubApp {
         use std::time::Instant;
 
         let frame_start = Instant::now();
+        #[cfg(feature = "trace")]
+        if let Some(trace) = self.world.get_resource_mut::<crate::trace::PhaseTrace>() {
+            trace.begin_frame();
+        }
         crate::time::advance_time(&mut self.world);
 
         self.run_phase_timed(First, "First");
@@ -352,6 +361,10 @@ impl SubApp {
         let fixed_elapsed = fixed_start.elapsed();
         if let Some(diag) = self.world.get_resource_mut::<FrameDiagnostics>() {
             diag.record_phase("RunFixedMainLoop", fixed_elapsed);
+        }
+        #[cfg(feature = "trace")]
+        if let Some(trace) = self.world.get_resource_mut::<crate::trace::PhaseTrace>() {
+            trace.record_phase("RunFixedMainLoop", fixed_elapsed);
         }
 
         self.run_phase_timed(PreUpdate, "PreUpdate");
@@ -363,6 +376,10 @@ impl SubApp {
         let frame_elapsed = frame_start.elapsed();
         if let Some(diag) = self.world.get_resource_mut::<FrameDiagnostics>() {
             diag.record_frame(frame_elapsed);
+        }
+        #[cfg(feature = "trace")]
+        if let Some(trace) = self.world.get_resource_mut::<crate::trace::PhaseTrace>() {
+            trace.end_frame(frame_elapsed);
         }
     }
 
@@ -378,6 +395,10 @@ impl SubApp {
             .get_resource_mut::<crate::diagnostics::FrameDiagnostics>()
         {
             diag.record_phase(phase, elapsed);
+        }
+        #[cfg(feature = "trace")]
+        if let Some(trace) = self.world.get_resource_mut::<crate::trace::PhaseTrace>() {
+            trace.record_phase(phase, elapsed);
         }
     }
 }

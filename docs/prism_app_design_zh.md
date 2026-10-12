@@ -374,7 +374,7 @@ pkg/prism_app/
 - **M3 子应用 + 流水线**（🚧）：`sub_app` 的 extract 接线与 `pipelined` feature 已落地；与 `prism_tasks` 车道（tasks §24.2 / §25.2）的深度接线待对齐。
 - **M4 窗口 Runner + 生命周期**（🚧）：`lifecycle`/`exit`/`pacing`（帧节奏、帧限）已落地；**`WinitRunner` 已落地**（`winit` feature）：开一个或多个窗口（`with_windows`，§24.9）、把窗口事件转成生命周期事件、每帧驱动 `App::update`、按 `FramePacer` 限帧，全部窗口关闭或系统请求退出即停，且无显示器的逻辑已单测。**仍待做**：每窗口渲染目标 / 统一驱动、平台 suspend / low-memory 回调（winit host trait 目前只给一次性 `resumed`）与移动端设备丢失恢复。
 - **M5 确定性 + 服务器**（🚧）：`determinism`（种子 RNG / 每帧状态哈希 / 逐固定步输入录放）、`DedicatedServerRunner`、`settings` 分层已落地；**world-snapshot 回滚已落地并接入 `App`/`SubApp`**（`rollback::SnapshotHistory` 复用 `prism_ecs` 的 `WorldSnapshot`/`SnapshotRing`，带上界环形历史、`try_capture` 缺 glue 上报、按帧回滚与逐帧状态哈希；`App`/`SubApp` 暴露 `init_snapshot_history` / `capture_snapshot` / `rollback_to`）；**late-input 回滚+重放环已落地**（`rollback_replay::RollbackReplay`：commit 记录快照+输入、rollback 还原到某帧并给出待重放输入序列、`reconcile` 用修正后的输入重放整段、重提交原地覆盖旧分支）；**对端同步编排已落地**（`peer_sync::reconcile_with_peer`：比对本地/对端逐帧帧哈希定位保留窗口内首个分歧帧、取对端权威输入驱动 `reconcile`，对端输入缺失或帧已淘汰则不动作并如实返回 `Unreconciled`）。**仍待做**：真正的网络传输层（收发/回滚窗口协商）。
-- **M6 迁移/工具**（⬜/🚧）：`prelude`（贴近 `bevy_app`）与 `diagnostics`（帧统计/启动耗时）已落地；**`prism_bevy` 退役、阶段火焰图、插件热重载（§24.2）、PIE 多实例未实现**。
+- **M6 迁移/工具**（🚧）：`prelude`（贴近 `bevy_app`）、`diagnostics`（帧统计/启动耗时）与**阶段火焰图**（`trace` feature 的 `PhaseTrace`，逐帧逐阶段事件 + Chrome trace JSON 导出）已落地；**`prism_bevy` 退役、插件热重载（§24.2）、PIE 多实例未实现**。
 
 **基准即规格**：每里程碑以微基准红绿为完成判据——空帧循环开销、固定步长在 jitter 输入下步数正确、流水线重叠率、无头与窗口行为对拍一致、确定性双跑帧哈希一致。核心价值集中在 **M2（确定性心跳）+ M3（流水线/提取）+ M5（确定性/服务器）**。**上述基准目前尚未采集**，因此里程碑的“完成”只表示 API 与机制落地，性能判据仍待补。
 
@@ -383,7 +383,7 @@ pkg/prism_app/
 ## 23. 诚实边界与风险
 
 - 本文为设计规格。**截至 2026-10 代码已进入实现**：M0–M3 主体、M4 窗口 Runner、M5 确定性+回滚+重放+对端同步与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——M4 的平台 suspend / low-memory 回调、M6 的热重载/`prism_bevy` 退役/PIE、§24.9 多窗口多世界、网络传输层仍未实现。
-- **feature 面尚未完全对齐**：已按真实实现定义 `std`/`pipelined`/`determinism`/`winit`/`reflect`；§20 里的 `multi_thread`/`headless`/`trace` 仍未定义，需与真实实现一起落地，**不提前声明空开关**，避免假实现。
+- **feature 面尚未完全对齐**：已按真实实现定义 `std`/`pipelined`/`determinism`/`winit`/`reflect`/`trace`；§20 里的 `multi_thread`/`headless` 仍未定义，需与真实实现一起落地，**不提前声明空开关**，避免假实现。
 - **高风险项**：
   1. **extract 管线 + 流水线并行（M3）**：跨 World 只读提取 + 跨线程生命周期是正确性要害；须先定义稳定 `ExtractComponent` trait，再上并行；可先串行提取跑通，再开 `pipelined`。这是 `prism_render_scene` 能否干净脱 Bevy 的决定性接缝。
   2. **固定步长熔断（M2）**：死亡螺旋参数（max_frame_dt/max_substeps）需按内容压测标定，错配会在卡顿时放大为慢放或卡死。

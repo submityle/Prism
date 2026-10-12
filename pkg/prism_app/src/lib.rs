@@ -241,6 +241,8 @@ pub mod state;
 pub mod sub_app;
 pub mod sub_app_label;
 pub mod time;
+#[cfg(feature = "trace")]
+pub mod trace;
 #[cfg(feature = "std")]
 pub mod watchdog;
 
@@ -299,6 +301,8 @@ pub use schedule::{
     Startup, StateTransition, Update,
 };
 pub use settings::{SettingChange, SettingChanged, SettingValue, Settings, SettingsLayer};
+#[cfg(feature = "trace")]
+pub use trace::{PhaseEvent, PhaseTrace};
 pub use state::{
     ComputeDepth, ComputedStates, OnTransition, StateScoped, StateTransitionSet, SubStates,
 };

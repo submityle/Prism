@@ -51,6 +51,11 @@ winit = ["std", "dep:prism_window", "dep:prism_window_winit"]
 # default.
 reflect = ["std", "dep:prism_reflect"]
 
+# Phase-trace (flamegraph) export (design §16, M6 tooling): a bounded per-frame
+# phase log with a Chrome-trace JSON dump. std-only (wall-clock timing), off by
+# default so an un-observed build pays nothing.
+trace = ["std"]
+
 # AAA lint bar. prism_app contains no `unsafe`, so unlike prism_ecs it can keep
 # the workspace-strength lints as warnings and still hit zero warnings.
 [lints.rust]
