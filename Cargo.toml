@@ -31,6 +31,8 @@ members = [
   "pkg/prism_render_driver",
   "os-backends/prism_render_driver_wgpu",
   "pkg/prism_render_graph",
+  # Prism RHI-backed render spine (device/queue + frame-graph execution).
+  "pkg/prism_render_runtime",
   "pkg/prism_input",
   "pkg/prism_shader",
   "pkg/prism_window",

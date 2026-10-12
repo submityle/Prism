@@ -1,0 +1,18 @@
+[package]
+name = "prism_render_runtime"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.0"
+description = "Prism's RHI-backed render spine: brings up the wgpu render device/queue and drives prism_render_graph frames through the frozen prism_render_driver RHI. Phase 1 is headless (offscreen targets + readback); window/surface acquisition, swapchain import, present, and the prism_app render sub-app land next. Contains no Unreal Engine or Unity source or derived code."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
+prism_render_graph = { path = "../prism_render_graph" }
+# The default (and, for now, only) RHI backend. Additional `os-backends`
+# backends can be selected behind features as they land.
+prism_render_driver_wgpu = { path = "../../os-backends/prism_render_driver_wgpu" }
+
+[lints]
+workspace = true

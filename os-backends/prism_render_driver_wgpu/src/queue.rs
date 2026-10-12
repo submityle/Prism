@@ -297,3 +297,83 @@ impl RenderQueue for WgpuQueue {
         self.queue.submit(encoded);
     }
 }
+
+impl WgpuQueue {
+    /// Reads an `Rgba8Unorm` 2D texture back into tightly-packed RGBA bytes.
+    ///
+    /// Blocks the calling thread until the copy completes and returns
+    /// `width * height * 4` bytes in row-major order with the GPU's row padding
+    /// stripped. The texture must be a single-mip, single-layer 2D texture in an
+    /// 8-bit-per-channel RGBA format created with [`rhi::TextureUsages::COPY_SRC`].
+    ///
+    /// This is the backend hook golden-image and headless tests use to observe
+    /// what the RHI actually rendered; it is not a hot-path API.
+    #[must_use]
+    pub fn read_texture_rgba8(
+        &self,
+        texture: rhi::TextureId,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        const BYTES_PER_TEXEL: u32 = 4;
+        let unpadded_bytes_per_row = width * BYTES_PER_TEXEL;
+        let padded_bytes_per_row =
+            unpadded_bytes_per_row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
+
+        let texture = self.inner.resolve_texture(texture);
+        let staging = self.inner.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rhi-texture-readback"),
+            size: buffer_size.max(4),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder =
+            self.inner
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("rhi-texture-readback"),
+                });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
+
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.inner.device.poll(wgpu::PollType::wait_indefinitely());
+
+        let view = staging
+            .slice(..)
+            .get_mapped_range()
+            .expect("readback range is available after the device poll");
+        let mut out = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
+        for row in 0..height {
+            let start = (row * padded_bytes_per_row) as usize;
+            out.extend_from_slice(&view[start..start + unpadded_bytes_per_row as usize]);
+        }
+        drop(view);
+        staging.unmap();
+        out
+    }
+}
