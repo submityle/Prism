@@ -48,6 +48,11 @@ impl Containment {
 /// Works for any (non-zero) ray direction length; the returned normal points
 /// outward from the sphere, flipped if the ray starts inside.
 pub fn ray_sphere(ray: Ray3, sphere: BoundingSphere) -> Option<RayHit> {
+    // A point (zero-radius) sphere has no well-defined surface normal (CR-found:
+    // the `1/radius` below produced a NaN normal). Reject it.
+    if sphere.radius == 0.0 {
+        return None;
+    }
     let oc = ray.origin - sphere.center;
     let a = ray.direction.dot(ray.direction);
     if a <= 0.0 {
@@ -88,6 +93,12 @@ pub fn ray_aabb(ray: Ray3, aabb: Aabb3) -> Option<RayHit> {
     let dir = [ray.direction.x, ray.direction.y, ray.direction.z];
     let lo = [aabb.min.x, aabb.min.y, aabb.min.z];
     let hi = [aabb.max.x, aabb.max.y, aabb.max.z];
+
+    // A zero-length direction has no valid intersection (CR-found: the
+    // all-parallel branch produced `t = inf` and a NaN hit point).
+    if ray.direction.length_squared() == 0.0 {
+        return None;
+    }
 
     let mut t_enter = f32::NEG_INFINITY;
     let mut t_exit = f32::INFINITY;

@@ -243,6 +243,31 @@ fn ray_aabb_large_t_matches_cpu() {
     assert_hit(got[0], cpu, "large_t");
 }
 
+#[test]
+fn degenerate_inputs_match_cpu() {
+    let Some(ctx) = with_gpu() else {
+        return;
+    };
+    let caster = GpuRayCast::new(&ctx);
+    let z = Vec3::ZERO;
+
+    // Zero-length direction vs a box: both reject (was `t = inf` / NaN point).
+    let gpu_rays = vec![GpuRay::new([z.x, z.y, z.z], [z.x, z.y, z.z])];
+    let gpu_boxes = vec![GpuAabb::new([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])];
+    let got = caster.cast_aabbs(&ctx, &gpu_rays, &gpu_boxes);
+    let cpu = ray_aabb(Ray3::new(z, z), Aabb3::new(-Vec3::ONE, Vec3::ONE));
+    assert_hit(got[0], cpu, "zero-dir aabb");
+
+    // Zero-radius sphere: both reject (was a NaN surface normal).
+    let o = Vec3::new(0.0, 0.0, 5.0);
+    let d = Vec3::new(0.0, 0.0, -1.0);
+    let gpu_rays = vec![GpuRay::new([o.x, o.y, o.z], [d.x, d.y, d.z])];
+    let gpu_spheres = vec![[0.0, 0.0, 0.0, 0.0]];
+    let got = caster.cast_spheres(&ctx, &gpu_rays, &gpu_spheres);
+    let cpu = ray_sphere(Ray3::new(o, d), BoundingSphere::new(Vec3::ZERO, 0.0));
+    assert_hit(got[0], cpu, "zero-radius sphere");
+}
+
 /// Small heap tag so panic messages identify the failing element.
 fn alloc_tag(kind: &str, i: usize) -> String {
     format!("{kind}[{i}]")

@@ -2,8 +2,12 @@
 //! truncation/saturation/remainder and unnormalized plane projection).
 
 use crate::fixed::{Fixed, I16F16};
+use crate::geom::aabb::Aabb3;
 use crate::geom::frustum::Frustum;
 use crate::geom::plane::Plane;
+use crate::geom::ray::Ray3;
+use crate::geom::sphere::BoundingSphere;
+use crate::intersect::{ray_aabb, ray_sphere};
 use crate::projection::perspective_infinite_rh;
 use crate::quat::Quat;
 use crate::vec::Vec3;
@@ -87,4 +91,17 @@ fn quat_normalize_handles_extreme_magnitudes() {
     assert!((q.w - 1.0).abs() < 1.0e-6, "big quat normalize = {q:?}");
     let q = Quat::from_xyzw(0.0, 0.0, 0.0, 1.0e-30).normalize();
     assert!((q.w - 1.0).abs() < 1.0e-6, "small quat normalize = {q:?}");
+}
+
+#[test]
+fn degenerate_rays_are_rejected() {
+    // Zero-length direction vs a box: no valid hit (was `t = inf`, NaN point).
+    let z = Vec3::ZERO;
+    assert!(ray_aabb(Ray3::new(z, z), Aabb3::new(-Vec3::ONE, Vec3::ONE)).is_none());
+    // Zero-radius sphere: no valid hit (was a NaN surface normal).
+    assert!(ray_sphere(
+        Ray3::new(Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0)),
+        BoundingSphere::new(Vec3::ZERO, 0.0),
+    )
+    .is_none());
 }

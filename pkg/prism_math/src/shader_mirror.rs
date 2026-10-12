@@ -624,6 +624,7 @@ fn prism_ray_sphere(origin: vec3<f32>, dir: vec3<f32>, center: vec3<f32>, radius
     out.t = 0.0;\n\
     out.point = vec3<f32>(0.0, 0.0, 0.0);\n\
     out.normal = vec3<f32>(0.0, 0.0, 0.0);\n\
+    if (radius == 0.0) { return out; }\n\
     let oc = origin - center;\n\
     let a = dot(dir, dir);\n\
     if (a <= 0.0) { return out; }\n\
@@ -662,6 +663,7 @@ fn prism_ray_aabb(origin: vec3<f32>, dir: vec3<f32>, lo: vec3<f32>, hi: vec3<f32
     out.t = 0.0;\n\
     out.point = vec3<f32>(0.0, 0.0, 0.0);\n\
     out.normal = vec3<f32>(0.0, 0.0, 0.0);\n\
+    if (dot(dir, dir) == 0.0) { return out; }\n\
     var t_enter = bitcast<f32>(0xff800000u);\n\
     var t_exit = bitcast<f32>(0x7f800000u);\n\
     var enter_axis = 0u;\n\
