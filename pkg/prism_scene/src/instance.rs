@@ -16,23 +16,7 @@ use prism_ecs::entity::Entity;
 use crate::identity::{LocalEntityId, PersistentId};
 use crate::overrides::OverrideSet;
 use crate::remap::RemapTable;
-
-/// A scene content residency tier (design §11.1).
-///
-/// The same scene may mix tiers. A **live** [`SceneInstance`] is
-/// [`Interactive`](Self::Interactive) or [`Streamed`](Self::Streamed);
-/// [`Proxy`](Self::Proxy) describes content that is *not* instantiated in the
-/// ECS (the flat `SoA` proxy stream), named here so residency plans and the
-/// materialize/dematerialize transitions share one vocabulary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ResidencyTier {
-    /// Tier A — fully instantiated as live entities (interactive objects).
-    Interactive,
-    /// Tier B — a sub-scene block instantiated only while in range.
-    Streamed,
-    /// Tier C — flat proxy stream contributing GPU-resident instances; not ECS.
-    Proxy,
-}
+use crate::residency::ResidencyTier;
 
 /// Root anchor of a live scene instance (design §5.2).
 #[derive(Clone, Debug, PartialEq)]

@@ -11,6 +11,7 @@ use alloc::boxed::Box;
 use prism_asset::StableGuid;
 
 use crate::identity::{LocalEntityId, NameTable};
+use crate::residency::{ResidencyPlan, ResidencyTier};
 
 /// A nested instance slot inside a template (design §9.1).
 ///
@@ -50,6 +51,8 @@ pub struct SceneTemplate {
     pub names: NameTable,
     /// Nested instance slots, in author order.
     pub nested: Box<[NestedSlot]>,
+    /// Per-entity residency annotations (design §5.1 `ResidencyPlan`, §11.1).
+    pub tiers: ResidencyPlan,
     /// The dependency closure (nested sub-templates and referenced assets), by
     /// identity.
     pub deps: Box<[StableGuid]>,
@@ -64,8 +67,16 @@ impl SceneTemplate {
             entity_count,
             names: NameTable::new(),
             nested: Box::new([]),
+            tiers: ResidencyPlan::new(),
             deps: Box::new([]),
         }
+    }
+
+    /// Annotates one local entity's residency tier (builder style).
+    #[must_use]
+    pub fn with_tier(mut self, local: LocalEntityId, tier: ResidencyTier) -> Self {
+        self.tiers.set(local, tier);
+        self
     }
 
     /// Whether `local` is a base-segment entity of this template.
@@ -103,6 +114,7 @@ impl SceneTemplate {
 mod tests {
     use super::{NestedSlot, SceneTemplate};
     use crate::identity::LocalEntityId;
+    use crate::residency::ResidencyTier;
     use alloc::boxed::Box;
     use alloc::vec;
     use prism_asset::StableGuid;
@@ -146,6 +158,21 @@ mod tests {
         assert_eq!(template.nested_count(), 0);
         assert_eq!(template.dependency_count(), 0);
         assert!(template.names.is_empty());
+        assert!(template.tiers.is_empty());
         assert_eq!(template.nested, Box::<[NestedSlot]>::from(vec![]));
+    }
+
+    #[test]
+    fn carries_residency_tiers() {
+        let template = SceneTemplate::new(guid(1), 3)
+            .with_tier(LocalEntityId::new(2), ResidencyTier::Proxy);
+        assert_eq!(
+            template.tiers.tier_of(LocalEntityId::new(2)),
+            ResidencyTier::Proxy
+        );
+        assert_eq!(
+            template.tiers.tier_of(LocalEntityId::new(0)),
+            ResidencyTier::Interactive
+        );
     }
 }

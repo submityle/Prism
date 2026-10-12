@@ -46,25 +46,28 @@ pub mod instance;
 pub mod overrides;
 pub mod path;
 pub mod remap;
+pub mod residency;
 pub mod template;
 
 pub use identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
-pub use instance::{ResidencyTier, SceneInstance};
+pub use instance::SceneInstance;
 pub use overrides::{ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride, StructuralOp};
 pub use path::{FieldPath, FieldSegment};
 pub use remap::RemapTable;
+pub use residency::{ResidencyPlan, ResidencyTier};
 pub use template::{NestedSlot, SceneTemplate};
 
 /// The common types most consumers import.
 pub mod prelude {
     pub use crate::identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
-    pub use crate::instance::{ResidencyTier, SceneInstance};
+    pub use crate::instance::SceneInstance;
     pub use crate::overrides::{
         ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride,
         StructuralOp,
     };
     pub use crate::path::{FieldPath, FieldSegment};
     pub use crate::remap::RemapTable;
+    pub use crate::residency::{ResidencyPlan, ResidencyTier};
     pub use crate::template::{NestedSlot, SceneTemplate};
 }
 
