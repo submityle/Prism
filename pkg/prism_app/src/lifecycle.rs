@@ -8,10 +8,11 @@
 //!
 //! 1. **Lifecycle events** — plain [`Event`] types
 //!    ([`Suspended`], [`Resumed`], [`LowMemory`], [`FocusChanged`],
-//!    [`WillRenderFirstFrame`]) a platform runner emits and systems read, plus
+//!    [`WillRenderFirstFrame`], plus the GPU-recovery pair [`DeviceLost`] /
+//!    [`DeviceRestored`]) a runner or render layer emits and systems read, plus
 //!    an [`AppLifecycle`] resource tracking the coarse run state. The
-//!    `drive_app_lifecycle` handler turns [`Suspended`] / [`Resumed`] into
-//!    run-state transitions and pauses/unpauses the virtual clock.
+//!    `drive_app_lifecycle` handler turns those edges into run-state
+//!    transitions and pauses/unpauses the virtual clock.
 //! 2. **Graceful shutdown** — [`App::run_shutdown`](crate::app::App::run_shutdown)
 //!    runs the dedicated [`Shutdown`](crate::schedule::Shutdown) schedule once,
 //!    drains deferred work, and tears plugins down in reverse registration order
@@ -19,14 +20,13 @@
 //!
 //! # Who emits lifecycle events
 //!
-//! The events are *defined and deliverable* here, but the authoritative emitter
-//! is a platform runner. The windowed `WinitRunner` (design §10) that forwards
-//! real OS suspend/resume/focus/low-memory notifications is a later M4
-//! increment and is **honestly absent** today — not stubbed. In the meantime a
-//! runner, a test, or an integration layer can emit any lifecycle event through
-//! [`App::send_event`](crate::app::App::send_event), and systems can react to it
-//! exactly as they will under the real platform runner. The seam is real; only
-//! the OS wiring is deferred and documented as such.
+//! The windowed runner (design §10) forwards the real OS suspend / resume /
+//! focus / low-memory notifications through [`Suspended`], [`Resumed`],
+//! [`FocusChanged`], and [`LowMemory`]. [`DeviceLost`] / [`DeviceRestored`] are
+//! emitted by the **render layer** — the RHI reports a lost device/context and
+//! the render plugin relays it — so a GPU-resource recovery window pauses
+//! simulation exactly as a suspend does. Any runner, plugin, or test can also
+//! emit a lifecycle event through [`App::send_event`](crate::app::App::send_event).
 //!
 //! # `cleanup` vs. `shutdown`
 //!
@@ -90,6 +90,29 @@ pub struct FocusChanged {
 
 impl Event for FocusChanged {}
 
+/// The GPU device (or rendering context) was lost and must be rebuilt
+/// (design §12 / §24.3 device-loss recovery).
+///
+/// Emitted by the render plugin when the RHI reports a lost device/context.
+/// The `drive_app_lifecycle` handler moves [`AppLifecycle`] to
+/// [`Recovering`](AppLifecycle::Recovering) and pauses the virtual clock while
+/// GPU resources are rebuilt, then back to
+/// [`Running`](AppLifecycle::Running) on the matching [`DeviceRestored`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceLost;
+
+impl Event for DeviceLost {}
+
+/// The GPU device/context was rebuilt after a [`DeviceLost`]; rendering resumes.
+///
+/// Emitted by the render plugin once it has recreated the device and its
+/// resources — the closing edge of the device-loss recovery window (design
+/// §12 / §24.3).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceRestored;
+
+impl Event for DeviceRestored {}
+
 /// Emitted once, immediately before the first rendered frame (design §12).
 ///
 /// A dismiss-the-splash / start-the-clock hook: systems that must run exactly
@@ -109,9 +132,11 @@ impl Event for WillRenderFirstFrame {}
 /// [`WillExit`](AppLifecycle::WillExit) by
 /// [`App::run_shutdown`](crate::app::App::run_shutdown). The
 /// `drive_app_lifecycle` handler (also registered by `add_lifecycle_events`)
-/// moves it in and out of [`Suspended`](AppLifecycle::Suspended) as
-/// [`Suspended`] / [`Resumed`] events arrive; systems can read it to gate work
-/// (e.g. skip rendering while suspended).
+/// moves it between [`Running`](AppLifecycle::Running),
+/// [`Suspended`](AppLifecycle::Suspended), and
+/// [`Recovering`](AppLifecycle::Recovering) as the suspend/resume and
+/// device-lost/restored edges arrive; systems can read it to gate work (e.g.
+/// skip rendering while suspended or while the GPU device is being rebuilt).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AppLifecycle {
     /// Not yet started (pre-first-frame).
@@ -121,6 +146,10 @@ pub enum AppLifecycle {
     Running,
     /// Suspended by the host; simulation paused, transient resources released.
     Suspended,
+    /// The GPU device/context was lost; simulation is paused while the render
+    /// layer rebuilds it (design §12 / §24.3). Entered on [`DeviceLost`] and
+    /// left on [`DeviceRestored`].
+    Recovering,
     /// A graceful exit is in progress; shutdown systems and plugin teardown run.
     WillExit,
 }
@@ -138,6 +167,13 @@ impl AppLifecycle {
     #[must_use]
     pub fn is_suspended(self) -> bool {
         matches!(self, AppLifecycle::Suspended)
+    }
+
+    /// Whether the app is [`Recovering`](AppLifecycle::Recovering) from a lost
+    /// GPU device.
+    #[must_use]
+    pub fn is_recovering(self) -> bool {
+        matches!(self, AppLifecycle::Recovering)
     }
 
     /// Whether a graceful exit is in progress
@@ -165,6 +201,14 @@ impl AppLifecycle {
 /// * A [`Resumed`] event (while
 ///   [`Suspended`](AppLifecycle::Suspended)) moves the state back to
 ///   [`Running`](AppLifecycle::Running) and **unpauses** the virtual clock.
+/// * A [`DeviceLost`] event moves the state to
+///   [`Recovering`](AppLifecycle::Recovering) and pauses the virtual clock while
+///   the render layer rebuilds the GPU device; the matching [`DeviceRestored`]
+///   moves it back to [`Running`](AppLifecycle::Running) and unpauses.
+///
+/// A *restoring* edge (process [`Resumed`] or [`DeviceRestored`]) wins over a
+/// *pausing* edge ([`Suspended`] or [`DeviceLost`]) in the same frame, so a
+/// transient blip never leaves the app wedged in a paused state.
 ///
 /// # Who owns the pause
 ///
@@ -196,26 +240,52 @@ pub(crate) fn drive_app_lifecycle(
     suspended_events: Res<Events<Suspended>>,
     mut resumed_cursor: Local<EventCursor<Resumed>>,
     resumed_events: Res<Events<Resumed>>,
+    mut lost_cursor: Local<EventCursor<DeviceLost>>,
+    lost_events: Res<Events<DeviceLost>>,
+    mut restored_cursor: Local<EventCursor<DeviceRestored>>,
+    restored_events: Res<Events<DeviceRestored>>,
     mut lifecycle: ResMut<AppLifecycle>,
     clocks: Option<ResMut<EngineClocks>>,
     mut we_paused: Local<bool>,
 ) {
-    // Always drain both cursors so they stay current frame to frame, even on
+    // Always drain every cursor so they stay current frame to frame, even on
     // frames where no transition results.
     let want_suspend = suspended_cursor.read(&suspended_events).count() > 0;
     let want_resume = resumed_cursor.read(&resumed_events).count() > 0;
+    let want_lost = lost_cursor.read(&lost_events).count() > 0;
+    let want_restored = restored_cursor.read(&restored_events).count() > 0;
 
     // A graceful shutdown already underway is terminal: do not resurrect it.
-    if lifecycle.is_exiting() || (!want_suspend && !want_resume) {
+    if lifecycle.is_exiting() {
         return;
     }
 
-    let mut clocks = clocks;
+    // Resolve this frame's target state. A *restoring* edge (process resume or
+    // device restored) wins over a *pausing* edge in the same frame, so a
+    // transient blip never leaves the app wedged in a paused state.
+    // [`AppLifecycle::Suspended`] and [`AppLifecycle::Recovering`] are both
+    // "paused" states with distinct causes.
+    let target = if want_resume || want_restored {
+        Some(AppLifecycle::Running)
+    } else if want_lost {
+        Some(AppLifecycle::Recovering)
+    } else if want_suspend {
+        Some(AppLifecycle::Suspended)
+    } else {
+        None
+    };
+    let Some(target) = target else {
+        return;
+    };
+    if *lifecycle == target {
+        return;
+    }
+    *lifecycle = target;
 
-    // Resume wins when both edges land in the same frame.
-    if want_resume {
-        if lifecycle.is_suspended() {
-            *lifecycle = AppLifecycle::Running;
+    let mut clocks = clocks;
+    match target {
+        AppLifecycle::Running => {
+            // Only unpause a clock *we* paused; a game pause-menu pause is kept.
             if *we_paused {
                 if let Some(clocks) = clocks.as_mut() {
                     clocks.virtual_time_mut().unpause();
@@ -223,13 +293,14 @@ pub(crate) fn drive_app_lifecycle(
                 *we_paused = false;
             }
         }
-    } else if want_suspend && !lifecycle.is_suspended() {
-        *lifecycle = AppLifecycle::Suspended;
-        if let Some(clocks) = clocks.as_mut()
-            && !clocks.virtual_time().is_paused()
-        {
-            clocks.virtual_time_mut().pause();
-            *we_paused = true;
+        AppLifecycle::Suspended | AppLifecycle::Recovering => {
+            if let Some(clocks) = clocks.as_mut()
+                && !clocks.virtual_time().is_paused()
+            {
+                clocks.virtual_time_mut().pause();
+                *we_paused = true;
+            }
         }
+        AppLifecycle::Idle | AppLifecycle::WillExit => {}
     }
 }

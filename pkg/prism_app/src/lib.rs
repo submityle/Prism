@@ -345,7 +345,8 @@ pub mod prelude {
         FixedPreUpdate, FixedUpdate,
     };
     pub use crate::lifecycle::{
-        AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+        AppLifecycle, DeviceLost, DeviceRestored, FocusChanged, LowMemory, Resumed, Suspended,
+        WillRenderFirstFrame,
     };
     #[cfg(feature = "std")]
     pub use crate::pacing::{

@@ -28,7 +28,8 @@ use crate::fixed::{
     FixedPreUpdate, FixedUpdate,
 };
 use crate::lifecycle::{
-    AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+    AppLifecycle, DeviceLost, DeviceRestored, FocusChanged, LowMemory, Resumed, Suspended,
+    WillRenderFirstFrame,
 };
 use crate::plugin::Plugin;
 use crate::plugin_group::PluginGroup;
@@ -839,6 +840,8 @@ impl App {
             .add_event::<Resumed>()
             .add_event::<LowMemory>()
             .add_event::<FocusChanged>()
+            .add_event::<DeviceLost>()
+            .add_event::<DeviceRestored>()
             .add_event::<WillRenderFirstFrame>();
         if self
             .sub_apps
@@ -848,9 +851,9 @@ impl App {
             .is_none()
         {
             self.insert_resource(AppLifecycle::Running);
-            // Wire the suspend/resume -> run-state + virtual-clock-pause
-            // handler exactly once, alongside the first install of the
-            // run-state resource it drives (design §12, §25.1).
+            // Wire the suspend/resume + device-lost/restored -> run-state +
+            // virtual-clock-pause handler exactly once, alongside the first
+            // install of the run-state resource it drives (design §12, §25.1).
             self.add_systems(First, crate::lifecycle::drive_app_lifecycle);
         }
         self

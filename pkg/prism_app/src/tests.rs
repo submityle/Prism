@@ -2484,12 +2484,13 @@ mod pipelined_tests {
 // ---- M4 Inc2: platform lifecycle events + graceful shutdown ------------
 
 use crate::lifecycle::{
-    AppLifecycle, FocusChanged, LowMemory, Resumed, Suspended, WillRenderFirstFrame,
+    AppLifecycle, DeviceLost, DeviceRestored, FocusChanged, LowMemory, Resumed, Suspended,
+    WillRenderFirstFrame,
 };
 use crate::schedule::Shutdown;
 
-/// `add_lifecycle_events` registers all five lifecycle event types and installs
-/// the `AppLifecycle` resource defaulting to `Running`.
+/// `add_lifecycle_events` registers every lifecycle event type and installs the
+/// `AppLifecycle` resource defaulting to `Running`.
 #[test]
 fn add_lifecycle_events_registers_events_and_installs_running_state() {
     let mut app = App::new();
@@ -2500,6 +2501,8 @@ fn add_lifecycle_events_registers_events_and_installs_running_state() {
     assert!(app.world().get_resource::<Events<Resumed>>().is_some());
     assert!(app.world().get_resource::<Events<LowMemory>>().is_some());
     assert!(app.world().get_resource::<Events<FocusChanged>>().is_some());
+    assert!(app.world().get_resource::<Events<DeviceLost>>().is_some());
+    assert!(app.world().get_resource::<Events<DeviceRestored>>().is_some());
     assert!(app
         .world()
         .get_resource::<Events<WillRenderFirstFrame>>()
@@ -2866,6 +2869,93 @@ fn resume_event_unpauses_and_restores_running() {
         .virtual_time()
         .elapsed_secs_f64();
     assert!(after > before, "virtual time advances again after resume");
+}
+
+/// A `DeviceLost` event enters `Recovering` and pauses the virtual clock, so
+/// simulation freezes while the render layer rebuilds the GPU device.
+#[test]
+fn device_lost_pauses_and_enters_recovering() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+
+    // Baseline running frame.
+    app.update();
+    app.send_event(DeviceLost);
+    app.update();
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Recovering,
+        "the DeviceLost event moves the run state to Recovering",
+    );
+    assert!(
+        app.world()
+            .resource::<EngineClocks>()
+            .virtual_time()
+            .is_paused(),
+        "device loss pauses the virtual clock",
+    );
+
+    let after_loss = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    app.update();
+    app.update();
+    let frozen = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    assert_eq!(
+        frozen, after_loss,
+        "virtual time stays frozen across recovering frames",
+    );
+}
+
+/// A `DeviceRestored` event returns to `Running` and unpauses the clock.
+#[test]
+fn device_restored_resumes_running() {
+    let mut app = App::new();
+    app.add_lifecycle_events();
+    app.set_time_update_strategy(TimeUpdateStrategy::ManualDelta(Duration::from_millis(10)));
+
+    app.send_event(DeviceLost);
+    app.update();
+    assert!(app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .is_paused());
+
+    app.send_event(DeviceRestored);
+    app.update();
+    assert_eq!(
+        *app.world().resource::<AppLifecycle>(),
+        AppLifecycle::Running,
+        "the DeviceRestored event restores the Running state",
+    );
+    assert!(
+        !app.world()
+            .resource::<EngineClocks>()
+            .virtual_time()
+            .is_paused(),
+        "device restore unpauses the virtual clock",
+    );
+
+    let before = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    app.update();
+    let after = app
+        .world()
+        .resource::<EngineClocks>()
+        .virtual_time()
+        .elapsed_secs_f64();
+    assert!(after > before, "virtual time advances after device restore");
 }
 
 /// The handler only unpauses a clock *it* paused: a pause the game set itself
