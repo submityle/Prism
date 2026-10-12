@@ -89,6 +89,34 @@ pub fn closest_point_on_polygon(verts: &[(f32, f32)], p: (f32, f32)) -> Option<(
     Some(best)
 }
 
+/// The point on the **open** polyline `points` nearest to `p`.
+///
+/// The polyline is open — the last vertex is **not** joined back to the first —
+/// so this is the open-run companion to
+/// [`closest_point_on_polygon`]. Returns the lone vertex for a single-point
+/// input and the nearest point over the edges otherwise; `None` for an empty
+/// input. Its distance to `p` equals [`sd_polyline`](crate::polyline_sdf::sd_polyline)`(p)`.
+#[must_use]
+pub fn closest_point_on_polyline(points: &[(f32, f32)], p: (f32, f32)) -> Option<(f32, f32)> {
+    match points {
+        [] => None,
+        [only] => Some(*only),
+        _ => {
+            let mut best = closest_point_on_segment(p, points[0], points[1]);
+            let mut best_d2 = dist2(p, best);
+            for w in points.windows(2) {
+                let q = closest_point_on_segment(p, w[0], w[1]);
+                let d2 = dist2(p, q);
+                if d2 < best_d2 {
+                    best_d2 = d2;
+                    best = q;
+                }
+            }
+            Some(best)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -256,5 +284,41 @@ mod tests {
         ];
         let q = closest_point_on_polygon(&l, (5.0, 1.0)).unwrap();
         assert!(approx(q.0, 4.0) && approx(q.1, 1.0), "got {q:?}");
+    }
+
+    #[test]
+    fn closest_point_on_polyline_fixed_cases() {
+        let line = [(0.0, 0.0), (10.0, 0.0)];
+        assert!(closest_point_on_polyline(&line, (4.0, 3.0)) == Some((4.0, 0.0)));
+        // Past the open end, the nearest point is the endpoint.
+        assert!(closest_point_on_polyline(&line, (-5.0, 2.0)) == Some((0.0, 0.0)));
+        let bend = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)];
+        assert!(closest_point_on_polyline(&bend, (13.0, 5.0)) == Some((10.0, 5.0)));
+        assert!(closest_point_on_polyline(&[(3.0, -4.0)], (0.0, 0.0)) == Some((3.0, -4.0)));
+        assert!(closest_point_on_polyline(&[], (0.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn closest_point_on_polyline_matches_sd_polyline() {
+        let mut s = 0x5_C11A_u64;
+        for _ in 0..200 {
+            let n = 2 + (next_rand(&mut s) % 12) as usize;
+            let pts: Vec<(f32, f32)> = (0..n)
+                .map(|_| (rand_in(&mut s, -30.0, 30.0), rand_in(&mut s, -30.0, 30.0)))
+                .collect();
+            let p = (rand_in(&mut s, -40.0, 40.0), rand_in(&mut s, -40.0, 40.0));
+            let q = closest_point_on_polyline(&pts, p).unwrap();
+            // The returned point lies on the polyline, and its distance equals the
+            // field distance (independent implementation, same contract).
+            let sd_q = crate::polyline_sdf::sd_polyline(q.0, q.1, &pts);
+            assert!(sd_q < 1e-3, "returned point off the polyline: {sd_q}");
+            let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+            let dist = (dx * dx + dy * dy).sqrt();
+            let oracle = crate::polyline_sdf::sd_polyline(p.0, p.1, &pts);
+            assert!(
+                (dist - oracle).abs() <= 1e-3 * oracle.max(1.0),
+                "dist {dist} vs sd {oracle}"
+            );
+        }
     }
 }
