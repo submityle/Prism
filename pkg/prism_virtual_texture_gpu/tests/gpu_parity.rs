@@ -175,3 +175,34 @@ fn resolve_preserves_miss_when_no_tail_is_resident() {
         table.resolve(requested, 5)
     );
 }
+
+#[test]
+fn resolve_batch_matches_cpu_for_exact_coarse_and_miss_queries() {
+    let Some(ctx) = with_gpu() else { return };
+    let exact = key(3, 2, 1, 3, 1);
+    let coarse_request = key(3, 0, 1, 13, 7);
+    let miss = key(8, 0, 0, 0xFFFF, 0xFFFF);
+    let table = GpuPageTable::from_bindings(&[(exact, 27), (key(3, 4, 1, 0, 0), 49)]);
+    let gpu = GpuPageLookup::new(&ctx);
+    let keys = [exact, coarse_request, miss];
+    let got = gpu.resolve_with_feedback_batch(&ctx, &table, &keys, 5);
+
+    assert_eq!(got.len(), keys.len());
+    assert_eq!(got[0].resolution, table.resolve(exact, 5));
+    assert_eq!(
+        got[0].feedback, None,
+        "exact hits need no refinement request"
+    );
+    assert_eq!(got[1].resolution, table.resolve(coarse_request, 5));
+    assert_eq!(got[1].feedback, Some(coarse_request));
+    assert_eq!(got[2].resolution, None);
+    assert_eq!(got[2].feedback, Some(miss));
+}
+
+#[test]
+fn resolve_batch_empty_input_does_not_require_a_gpu_dispatch() {
+    let Some(ctx) = with_gpu() else { return };
+    let gpu = GpuPageLookup::new(&ctx);
+    let result = gpu.resolve_with_feedback_batch(&ctx, &GpuPageTable::new(), &[], 0);
+    assert!(result.is_empty());
+}

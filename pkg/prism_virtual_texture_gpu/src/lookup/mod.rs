@@ -293,16 +293,48 @@ impl GpuPageLookup {
         key: TexturePageKey,
         coarsest_mip: u8,
     ) -> GpuPageResolution {
+        self.resolve_with_feedback_batch(ctx, table, &[key], coarsest_mip)
+            .into_iter()
+            .next()
+            .expect("single-page resolve must return one result")
+    }
+
+    /// Resolves a batch of requested pages in one GPU dispatch and readback.
+    ///
+    /// The result is parallel to `keys`. Reusing one page-table upload and one
+    /// command submission is important for material workloads, where a frame
+    /// commonly resolves many page samples. An empty batch returns immediately
+    /// without touching the device.
+    #[must_use]
+    pub fn resolve_with_feedback_batch(
+        &self,
+        ctx: &GpuContext,
+        table: &GpuPageTable,
+        keys: &[TexturePageKey],
+        coarsest_mip: u8,
+    ) -> Vec<GpuPageResolution> {
+        if keys.is_empty() {
+            return Vec::new();
+        }
         let device = ctx.device();
         let entry_count = u32::try_from(table.len())
             .expect("virtual-texture page table exceeds the GPU u32 entry-count ABI");
-        let [w0, w1, w2] = GpuPageTable::compare_words(key);
+        let query_count = u32::try_from(keys.len())
+            .expect("virtual-texture resolve batch exceeds the GPU u32 query-count ABI");
+        let query_word_count = keys
+            .len()
+            .checked_mul(3)
+            .expect("virtual-texture resolve query word count overflowed usize");
+        let mut query_words = Vec::with_capacity(query_word_count);
+        for &key in keys {
+            query_words.extend_from_slice(&GpuPageTable::compare_words(key));
+        }
         let params = buffer::uniform(
             device,
             "prism_vt_resolve_params",
             &ResolveParams {
                 entry_count,
-                query_count: 1,
+                query_count,
                 coarsest_mip: u32::from(coarsest_mip),
                 pad0: 0,
             },
@@ -313,8 +345,10 @@ impl GpuPageLookup {
             table.words()
         };
         let table_buf = buffer::storage_read(device, "prism_vt_resolve_table", table_words);
-        let query_buf = buffer::storage_read(device, "prism_vt_resolve_query", &[w0, w1, w2]);
-        let out_bytes = 3 * size_of::<u32>() as u64;
+        let query_buf = buffer::storage_read(device, "prism_vt_resolve_query", &query_words);
+        let out_bytes = u64::from(query_count)
+            .checked_mul(3 * size_of::<u32>() as u64)
+            .expect("virtual-texture resolve output byte count overflowed u64");
         let out_buf = buffer::storage_rw_zeroed(device, "prism_vt_resolve_result", out_bytes);
         let bind = device.create_bind_group(&BindGroupDescriptor {
             label: Some("prism_vt_resolve_bind"),
@@ -348,33 +382,39 @@ impl GpuPageLookup {
             });
             pass.set_pipeline(&self.resolve_pipeline);
             pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
+            pass.dispatch_workgroups(groups(query_count), 1, 1);
         }
         let stage = buffer::staging(device, "prism_vt_resolve_stage", out_bytes);
         buffer::copy(&mut enc, &out_buf, &stage, out_bytes);
         ctx.queue().submit([enc.finish()]);
         let words = buffer::read_back::<u32>(ctx, &stage);
-        let slot = words.first().copied().unwrap_or(MISS);
-        let resolved_mip = words.get(1).copied().unwrap_or(MISS);
-        let resolution = (slot != MISS && resolved_mip != MISS).then(|| {
-            let delta = resolved_mip.saturating_sub(u32::from(key.mip));
-            let shift = delta.min(16);
-            PageResolution {
-                key: TexturePageKey {
-                    texture: key.texture,
-                    mip: u8::try_from(resolved_mip).unwrap_or(u8::MAX),
-                    layer: key.layer,
-                    x: key.x.checked_shr(shift).unwrap_or(0),
-                    y: key.y.checked_shr(shift).unwrap_or(0),
-                },
-                slot,
-                mip_bias: u8::try_from(delta).unwrap_or(u8::MAX),
-            }
-        });
-        GpuPageResolution {
-            feedback: (words.get(2).copied().unwrap_or(1) != 0).then_some(key),
-            resolution,
-        }
+        keys.iter()
+            .enumerate()
+            .map(|(index, &key)| {
+                let base = index * 3;
+                let slot = words.get(base).copied().unwrap_or(MISS);
+                let resolved_mip = words.get(base + 1).copied().unwrap_or(MISS);
+                let resolution = (slot != MISS && resolved_mip != MISS).then(|| {
+                    let delta = resolved_mip.saturating_sub(u32::from(key.mip));
+                    let shift = delta.min(16);
+                    PageResolution {
+                        key: TexturePageKey {
+                            texture: key.texture,
+                            mip: u8::try_from(resolved_mip).unwrap_or(u8::MAX),
+                            layer: key.layer,
+                            x: key.x.checked_shr(shift).unwrap_or(0),
+                            y: key.y.checked_shr(shift).unwrap_or(0),
+                        },
+                        slot,
+                        mip_bias: u8::try_from(delta).unwrap_or(u8::MAX),
+                    }
+                });
+                GpuPageResolution {
+                    feedback: (words.get(base + 2).copied().unwrap_or(1) != 0).then_some(key),
+                    resolution,
+                }
+            })
+            .collect()
     }
 }
 
