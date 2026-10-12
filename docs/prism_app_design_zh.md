@@ -13,6 +13,7 @@
 
 - 版本: v0.3→v0.4（v0.3 及以前为设计阶段；v0.1→v0.2 新增第 24 章「AAA 高级功能增补」：插件依赖图与分组/系统与模块热重载/子应用流水线深化/运行模式(无头服务器/编辑器内嵌/专用服务器)/优雅生命周期/控制台变量(cvar)与配置级联/崩溃隔离与系统恢复/子状态与状态作用域实体/多窗口多世界；v0.2→v0.3 新增第 25 章「跨 crate 契约对齐」：主循环编排 time 帧节奏/VRR/帧预算/挂起恢复 + 向 tasks 车道喂预算 / 子应用流水线以 ECS 提取为边界·tasks 线程类分离为执行·transform 双缓冲保读一致 / 配置与 cvar 经 reflect 特性校验 / 多世界各持独立 time 时间域；v0.3→v0.4 进入实现，并把 §22/§23 从“全部 PLANNED、无代码”回写为与代码一致：M0–M3 主体、M4 窗口 Runner、M5 骨架、第 24 章大部分已落地，平台暂停回调 / M6 工具链 / 多窗口多世界仍待做）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
+- 状态补记（2026-10 复核）: v0.3→v0.4 列出的「仍待做」项里，M6 工具链（`trace` 阶段火焰图）、§24.9 多窗口（`WinitRunner::with_windows`）与多世界（`SubApp` 各持独立 World 与独立 time 域，§25.4）均已随后落地；当前仍待做的是平台 suspend / low-memory 回调、§24.2 系统/模块热重载、PIE 多实例、网络传输层、§24.9 每窗口渲染目标。
 - 关键依赖: `prism_ecs`（World/Schedule/States）、`prism_tasks`（执行器/流水线）、`prism_time`（时钟/固定步长）、`prism_diagnostic`（可选）、`prism_reflect`（可选，配置/设置反射）
 - 层级定位: ECS 文档 L5「App / Plugin / 固定阶段」；**上层** `prism_loom_runtime_framework`（GameInstance/HUD/路由）跑在本层之上，不要混淆
 - 明确约束: 应用图(App graph/Plugin 注册)核心 `no_std + alloc` 可行；**Runner/主循环/帧节奏需 `std`**；`multi_thread` / `pipelined` / `winit` / `headless` / `determinism` / `reflect` / `trace` 为 feature；**不依赖任何 `bevy_*` crate**
@@ -382,7 +383,7 @@ pkg/prism_app/
 
 ## 23. 诚实边界与风险
 
-- 本文为设计规格。**截至 2026-10 代码已进入实现**：M0–M3 主体、M4 窗口 Runner、M5 确定性+回滚+重放+对端同步与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——M4 的平台 suspend / low-memory 回调、M6 的热重载/`prism_bevy` 退役/PIE、§24.9 多窗口多世界、网络传输层仍未实现。
+- 本文为设计规格。**截至 2026-10 代码已进入实现**：M0–M3 主体、M4 窗口 Runner、M5 确定性+回滚+重放+对端同步与第 24 章大部分已落地（见 §22 的状态标注），但**并非全部完成**——M4 的平台 suspend / low-memory 回调、M6 的热重载/`prism_bevy` 退役/PIE、§24.9 的每窗口渲染目标、网络传输层仍未实现（多窗口与多世界已落地，见 §24.10/§25.5）。
 - **feature 面尚未完全对齐**：已按真实实现定义 `std`/`pipelined`/`determinism`/`winit`/`reflect`/`trace`；§20 里的 `multi_thread`/`headless` 仍未定义，需与真实实现一起落地，**不提前声明空开关**，避免假实现。
 - **高风险项**：
   1. **extract 管线 + 流水线并行（M3）**：跨 World 只读提取 + 跨线程生命周期是正确性要害；须先定义稳定 `ExtractComponent` trait，再上并行；可先串行提取跑通，再开 `pipelined`。这是 `prism_render_scene` 能否干净脱 Bevy 的决定性接缝。
@@ -473,7 +474,7 @@ AAA 要求「一个系统崩了不拖垮整个进程」:
 
 ### 24.10 诚实边界
 
-本章设计目标以 2026-10 代码为准**大部分已落地**：24.1 插件依赖图（`plugin_graph`）、24.4 运行模式（`run_mode`/`capability`/`platform_tier`）、24.5 优雅生命周期（`exit`/`lifecycle`）、24.6 cvar（`cvar`）、24.7 崩溃隔离 + 看门狗（`crash`/`watchdog`）、24.8 子状态与状态作用域实体（`state/sub`、`state/scoped`）均有实现并可测；24.9 多窗口已支持开多个窗口（`WinitRunner::with_windows`）。**尚未落地**：24.2 系统/模块热重载、24.3 与 `prism_tasks` 车道的深度流水线接线、24.9 的每窗口渲染目标 / 多世界。本 crate 是地基运行时,勿与上层 `prism_loom_runtime_framework` 职责重叠(后者做更高层游戏流程编排)。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
+本章设计目标以 2026-10 代码为准**大部分已落地**：24.1 插件依赖图（`plugin_graph`）、24.4 运行模式（`run_mode`/`capability`/`platform_tier`）、24.5 优雅生命周期（`exit`/`lifecycle`）、24.6 cvar（`cvar`）、24.7 崩溃隔离 + 看门狗（`crash`/`watchdog`）、24.8 子状态与状态作用域实体（`state/sub`、`state/scoped`）均有实现并可测；24.9 多窗口已支持开多个窗口（`WinitRunner::with_windows`），多世界亦已落地（`SubApp` 各持独立 ECS World，经 `App::init_sub_app_time_domain` 各持独立 time 域，见 §25.4）。**尚未落地**：24.2 系统/模块热重载、24.3 与 `prism_tasks` 车道的深度流水线接线、24.9 的每窗口渲染目标。本 crate 是地基运行时,勿与上层 `prism_loom_runtime_framework` 职责重叠(后者做更高层游戏流程编排)。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码;仅借鉴公开架构形态与经典数值。
 
 ---
 
@@ -512,4 +513,4 @@ App 多世界（§24.9）与 ECS 多 World（ECS §16）协同时，每个 World
 
 ### 25.5 诚实边界
 
-本章为跨 crate 契约对齐说明，**部分已随实现落地**：25.1 主循环编排 `prism_time`（`time`/`fixed`/`pacing` 已接线）、25.2 `sub_app` 的 ECS 提取边界与 `pipelined` 执行已落地、25.3 配置的 `prism_reflect` 范围钳制 + 校验已有 seam（`reflect` feature 的 `reflect_config::clamp_and_validate`，非法输入按安全边界拒绝而非崩溃）。**仍为 PLANNED**：25.3 的改名兼容 / 默认值落盘与类型化反序列化级联、25.4 多世界各持独立 time 时间域。落地时序：25.1 随 M2 主循环/平台接线；25.2 随 M3 渲染子应用；25.3 随 M1 配置/编辑器；25.4 随多世界/服务器模式落地。App 是地基运行时编排者，更高层游戏流程编排仍归 `prism_loom_runtime_framework`。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
+本章为跨 crate 契约对齐说明，**部分已随实现落地**：25.1 主循环编排 `prism_time`（`time`/`fixed`/`pacing` 已接线）、25.2 `sub_app` 的 ECS 提取边界与 `pipelined` 执行已落地、25.3 配置的 `prism_reflect` 范围钳制 + 校验已有 seam（`reflect` feature 的 `reflect_config::clamp_and_validate`，非法输入按安全边界拒绝而非崩溃）。**25.4 已落地**：`SubApp` 可经 `App::init_sub_app_time_domain` / `set_sub_app_time_update_strategy` / `set_sub_app_fixed_timestep(_hz)` 各持独立 `EngineClocks`，逐帧由 `advance_time` 独立推进，一个世界暂停/缩放不冻结另一个（见 `prism_app` 内 §24.9/§25.4 测试）。**仍为 PLANNED**：25.3 的改名兼容 / 默认值落盘与类型化反序列化级联。落地时序：25.1 随 M2 主循环/平台接线；25.2 随 M3 渲染子应用；25.3 随 M1 配置/编辑器。App 是地基运行时编排者，更高层游戏流程编排仍归 `prism_loom_runtime_framework`。所有 Prism crate 不含任何 Unreal Engine / Unity 源码或衍生代码；仅借鉴公开架构形态与经典数值。
