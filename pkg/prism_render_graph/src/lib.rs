@@ -37,15 +37,25 @@
 //! through the [`prism_render_driver`] traits, so the graph is fully
 //! deterministic and testable against a mock device with no real GPU.
 //!
+//! ## Parallel recording
+//!
+//! The optional `parallel` feature (which pulls in `std`) records a frame's
+//! surviving passes concurrently on a scoped worker pool, then assembles their
+//! commands in the compiled plan's deterministic order. The assembled
+//! [`CommandBuffer`] is byte-for-byte identical to the sequential one, and the
+//! feature is off by default so the crate stays `no_std`.
+//!
 //! [`prism_render_driver`]: prism_render_driver
 //! [`TlsfAllocator`]: prism_render_driver::TlsfAllocator
 //! [`StateTracker`]: prism_render_driver::StateTracker
 //! [`CommandBuffer`]: prism_render_driver::CommandBuffer
 
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(all(not(test), not(feature = "parallel")), no_std)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 extern crate alloc;
+#[cfg(feature = "parallel")]
+extern crate std;
 
 pub mod access;
 pub mod blackboard;
@@ -58,6 +68,11 @@ pub mod pass;
 pub mod plan;
 pub mod resource;
 
+mod record;
+
+#[cfg(feature = "parallel")]
+mod parallel;
+
 pub use access::{full_range, BufferUse, TextureUse};
 pub use blackboard::Blackboard;
 pub use builder::{ExecuteContext, PassBuilder};
@@ -66,7 +81,9 @@ pub use graph::{ExecuteFn, RenderGraph};
 pub use handle::{
     BufferHandle, BufferMarker, ResourceHandle, ResourceIndex, TextureHandle, TextureMarker,
 };
-pub use pass::{BufferAccessRecord, PassFlags, PassKind, PassNode, TextureAccessRecord};
+pub use pass::{
+    BufferAccessRecord, PassFlags, PassKind, PassNode, TextureAccessRecord, ThreadBound,
+};
 pub use plan::{
     AliasPlan, AliasSlot, ColorAttachmentPlan, CompileError, DepthAttachmentPlan, ExecutionPlan,
     GraphBarrier, RasterAttachments,

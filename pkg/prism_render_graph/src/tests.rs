@@ -5,6 +5,7 @@
 //! scheduling, lifetime/alias analysis, barrier planning, attachment
 //! derivation, and command recording — is exercised with no real GPU.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -18,6 +19,7 @@ use prism_render_driver::{
     RenderDevice, RenderPipelineDescriptor, RenderPipelineId, RenderQueue, SamplerDescriptor,
     SamplerId, ShaderModuleDescriptor, ShaderModuleId, StoreOp, TextureDescriptor, TextureFormat,
     TextureId, TextureState, TextureUsages, TextureViewDescriptor, TextureViewId, TextureWrite,
+    Viewport,
 };
 
 use crate::desc::{BufferDesc, TextureDesc};
@@ -153,14 +155,31 @@ fn swap() -> Extent3d {
 
 /// A fresh imported swapchain image seeded with distinctive ids.
 fn imported_swapchain() -> ImportedTexture {
+    imported_texture(1000, 1000)
+}
+
+/// An imported texture seeded with distinctive ids.
+fn imported_texture(texture: u32, view: u32) -> ImportedTexture {
     ImportedTexture {
-        texture: TextureId::from_parts(1000, 0),
-        default_view: TextureViewId::from_parts(1000, 0),
+        texture: TextureId::from_parts(texture, 0),
+        default_view: TextureViewId::from_parts(view, 0),
         entry_state: TextureState::initial(),
         exit_state: TextureState::present(),
         mip_levels: 1,
         array_layers: 1,
     }
+}
+
+/// The debug label of every recorded GPU pass, in submission order.
+fn labels(buffer: &CommandBuffer) -> Vec<Option<String>> {
+    buffer
+        .passes
+        .iter()
+        .map(|p| match p {
+            Pass::Render { descriptor, .. } => descriptor.label.clone(),
+            Pass::Compute { label, .. } | Pass::Transfer { label, .. } => label.clone(),
+        })
+        .collect()
 }
 
 fn import_sc(g: &mut RenderGraph) -> TextureHandle {
@@ -445,17 +464,10 @@ fn render_pass_carries_its_debug_label() {
 
     let submitted = queue.submitted.borrow();
     let cb = &submitted[0];
-    let labels: Vec<Option<String>> = cb
-        .passes
-        .iter()
-        .map(|p| match p {
-            Pass::Render { descriptor, .. } => descriptor.label.clone(),
-            Pass::Compute { label, .. } | Pass::Transfer { label, .. } => label.clone(),
-        })
-        .collect();
+    let recorded = labels(cb);
     assert!(
-        labels.contains(&Some(String::from("A"))) && labels.contains(&Some(String::from("B"))),
-        "pass names flow through to driver pass labels: {labels:?}"
+        recorded.contains(&Some(String::from("A"))) && recorded.contains(&Some(String::from("B"))),
+        "pass names flow through to driver pass labels: {recorded:?}"
     );
 }
 
@@ -666,5 +678,203 @@ fn transfer_pass_records_every_copy_variant() {
             },
         ],
         "all three texture-touching variants resolve to the imported driver ids"
+    );
+}
+
+// --- parallel recording ---------------------------------------------------
+
+/// Builds a graph of `passes` mutually independent passes cycling through every
+/// pass kind — raster, compute, transfer, present. Each pass owns its own
+/// imported resources, so the compiler derives no cross-pass dependencies and
+/// the schedule is exactly declaration order; this is the fixture the two
+/// executors must agree on byte for byte.
+fn mixed_fixture(passes: usize) -> RenderGraph {
+    let mut g = RenderGraph::new(swap());
+    for i in 0..passes {
+        let id = i as u32;
+        match i % 4 {
+            0 => {
+                let target = g.import_texture(
+                    format!("raster-target-{i}"),
+                    TextureDesc::color(TextureFormat::Rgba8Unorm),
+                    imported_texture(7_000 + id, 8_000 + id),
+                );
+                g.add_raster_pass(format!("raster-{i}"), PassFlags::EMPTY, move |b| {
+                    b.color_attachment(target);
+                    move |ctx| {
+                        ctx.set_viewport(Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 32.0,
+                            height: 32.0,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        });
+                        ctx.set_blend_constant(Color::WHITE);
+                        ctx.draw(0..3, 0..1);
+                    }
+                });
+            }
+            1 => {
+                g.add_compute_pass(format!("compute-{i}"), PassFlags::SIDE_EFFECT, move |_b| {
+                    move |ctx| {
+                        ctx.dispatch(id + 1, 2, 3);
+                    }
+                });
+            }
+            2 => {
+                let src = g.import_buffer(
+                    format!("transfer-src-{i}"),
+                    BufferDesc::new(256, BufferUsages::COPY_SRC),
+                    ImportedBuffer {
+                        buffer: BufferId::from_parts(9_000 + id, 0),
+                        entry_state: BufferState::initial(),
+                    },
+                );
+                let dst = g.import_buffer(
+                    format!("transfer-dst-{i}"),
+                    BufferDesc::new(256, BufferUsages::COPY_DST),
+                    ImportedBuffer {
+                        buffer: BufferId::from_parts(10_000 + id, 0),
+                        entry_state: BufferState::initial(),
+                    },
+                );
+                g.add_transfer_pass(format!("transfer-{i}"), PassFlags::EMPTY, move |b| {
+                    let src = b.copy_src_buffer(src);
+                    let dst = b.copy_dst_buffer(dst);
+                    move |ctx| {
+                        ctx.copy_buffer_to_buffer(src, 0, dst, 8, 128);
+                    }
+                });
+            }
+            _ => {
+                let target = g.import_texture(
+                    format!("present-target-{i}"),
+                    TextureDesc::color(TextureFormat::Bgra8Unorm),
+                    imported_texture(11_000 + id, 12_000 + id),
+                );
+                g.add_present_pass(format!("present-{i}"), PassFlags::EMPTY, move |b| {
+                    b.present_texture(target);
+                    |_ctx| {}
+                });
+            }
+        }
+    }
+    g
+}
+
+/// Runs `graph` through the feature-selected executor and returns what it
+/// submitted.
+fn submitted_by_active(graph: RenderGraph) -> Vec<CommandBuffer> {
+    let device = MockDevice::new();
+    let queue = MockQueue::new();
+    graph
+        .execute(&device, &queue)
+        .expect("the active executor runs the graph");
+    queue.submitted.borrow().clone()
+}
+
+#[cfg(feature = "parallel")]
+fn submitted_sequentially(graph: RenderGraph) -> Vec<CommandBuffer> {
+    let device = MockDevice::new();
+    let queue = MockQueue::new();
+    graph
+        .execute_sequential(&device, &queue)
+        .expect("the sequential executor runs the graph");
+    queue.submitted.borrow().clone()
+}
+
+#[cfg(feature = "parallel")]
+fn submitted_in_parallel(graph: RenderGraph) -> Vec<CommandBuffer> {
+    let device = MockDevice::new();
+    let queue = MockQueue::new();
+    graph
+        .execute_parallel(&device, &queue)
+        .expect("the parallel executor runs the graph");
+    queue.submitted.borrow().clone()
+}
+
+/// The feature-selected executor is deterministic: recording the same graph
+/// twice yields identical command buffers. Compiles and runs with `parallel`
+/// both on and off.
+#[test]
+fn repeated_execution_is_deterministic() {
+    let first = submitted_by_active(mixed_fixture(9));
+    let second = submitted_by_active(mixed_fixture(9));
+    assert_eq!(
+        first, second,
+        "recording the same graph twice must be deterministic"
+    );
+    assert_eq!(first.len(), 1, "one command buffer is submitted per frame");
+}
+
+/// The parallel executor must reproduce the sequential executor's command
+/// buffer exactly for a graph of independent raster/compute/transfer/present
+/// passes, preserving plan order.
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_recording_matches_sequential() {
+    let parallel = submitted_in_parallel(mixed_fixture(8));
+    let sequential = submitted_sequentially(mixed_fixture(8));
+    assert_eq!(
+        parallel, sequential,
+        "parallel assembly must equal sequential recording byte for byte"
+    );
+    assert_eq!(
+        parallel.len(),
+        1,
+        "one command buffer is submitted per frame"
+    );
+    assert_eq!(
+        parallel[0].passes.len(),
+        6,
+        "8 passes, two of each kind; present records no GPU pass"
+    );
+    assert_eq!(
+        labels(&parallel[0]),
+        vec![
+            Some(String::from("raster-0")),
+            Some(String::from("compute-1")),
+            Some(String::from("transfer-2")),
+            Some(String::from("raster-4")),
+            Some(String::from("compute-5")),
+            Some(String::from("transfer-6")),
+        ],
+        "assembly follows the plan's deterministic declaration order"
+    );
+}
+
+/// A stress-sized graph (well past 50 passes) must also assemble identically,
+/// proving the worker-pool chunking preserves determinism at scale.
+#[cfg(feature = "parallel")]
+#[test]
+fn parallel_recording_matches_sequential_for_large_graph() {
+    const PASSES: usize = 64;
+    let parallel = submitted_in_parallel(mixed_fixture(PASSES));
+    let sequential = submitted_sequentially(mixed_fixture(PASSES));
+    assert_eq!(
+        parallel, sequential,
+        "the stress graph must assemble identically in parallel"
+    );
+    assert_eq!(
+        parallel.len(),
+        1,
+        "one command buffer is submitted per frame"
+    );
+    assert_eq!(
+        parallel[0].passes.len(),
+        PASSES / 4 * 3,
+        "64 passes, three quarters record a GPU pass"
+    );
+    let recorded = labels(&parallel[0]);
+    assert_eq!(
+        recorded.first().and_then(Clone::clone),
+        Some(String::from("raster-0")),
+        "the first recorded pass is the first declared pass"
+    );
+    assert_eq!(
+        recorded.last().and_then(Clone::clone),
+        Some(String::from("transfer-62")),
+        "the last recorded pass is the last declared recording pass"
     );
 }

@@ -12,6 +12,10 @@ prism_render_driver = { path = "../prism_render_driver", features = ["std"] }
 
 [features]
 default = []
+# Multi-threaded pass recording: records a frame's surviving passes on a
+# `std`-backed worker pool, then assembles their commands in the plan's
+# deterministic order. Off by default so the crate stays `no_std + alloc`.
+parallel = []
 
 [lints]
 workspace = true

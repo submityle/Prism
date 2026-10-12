@@ -20,7 +20,40 @@ use crate::handle::ResourceIndex;
 
 /// The boxed, move-only closure a pass runs during execution to record its
 /// draw/dispatch commands against the resolved [`ExecuteContext`].
+///
+/// With the `parallel` feature enabled the closure must be [`Send`], because
+/// the executor may record the pass on a worker thread; the default build
+/// carries no such bound.
+#[cfg(feature = "parallel")]
+pub type BoxedExecute = Box<dyn FnOnce(&mut ExecuteContext<'_>) + Send>;
+
+/// The boxed, move-only closure a pass runs during execution to record its
+/// draw/dispatch commands against the resolved [`ExecuteContext`].
+#[cfg(not(feature = "parallel"))]
 pub type BoxedExecute = Box<dyn FnOnce(&mut ExecuteContext<'_>)>;
+
+/// The threading bound an execute closure must satisfy in this build.
+///
+/// With the `parallel` feature the graph records surviving passes on worker
+/// threads, so [`RenderGraph::add_raster_pass`] and friends require their
+/// closure to be [`Send`]. Without the feature every type satisfies this trait,
+/// so the default single-threaded build accepts exactly the closures it did
+/// before.
+///
+/// [`RenderGraph::add_raster_pass`]: crate::RenderGraph::add_raster_pass
+#[cfg(feature = "parallel")]
+pub trait ThreadBound: Send {}
+#[cfg(feature = "parallel")]
+impl<T: Send + ?Sized> ThreadBound for T {}
+
+/// The threading bound an execute closure must satisfy in this build.
+///
+/// Without the `parallel` feature this is satisfied by every type, so the
+/// default build places no thread-safety requirement on execute closures.
+#[cfg(not(feature = "parallel"))]
+pub trait ThreadBound {}
+#[cfg(not(feature = "parallel"))]
+impl<T: ?Sized> ThreadBound for T {}
 
 /// What kind of work a pass performs.
 ///

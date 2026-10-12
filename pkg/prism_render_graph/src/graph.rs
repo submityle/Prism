@@ -27,11 +27,17 @@ use crate::builder::{ExecuteContext, PassBuilder};
 use crate::compile;
 use crate::desc::{BufferDesc, TextureDesc};
 use crate::handle::{BufferHandle, ResourceIndex, TextureHandle};
-use crate::pass::{BoxedExecute, PassFlags, PassKind, PassNode};
+use crate::pass::{BoxedExecute, PassFlags, PassKind, PassNode, ThreadBound};
 use crate::plan::{CompileError, ExecutionPlan, RasterAttachments};
+use crate::record::PassCommands;
 use crate::resource::{
     BufferResource, ImportedBuffer, ImportedTexture, Lifetime, RealizedTexture, TextureResource,
 };
+
+#[cfg(feature = "parallel")]
+use crate::parallel::{self, RecordUnit};
+#[cfg(any(test, not(feature = "parallel")))]
+use crate::record;
 
 /// The move-only closure a pass runs during execution to record its commands.
 ///
@@ -151,7 +157,7 @@ impl RenderGraph {
         setup: Setup,
     ) where
         Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
-        Exec: FnOnce(&mut ExecuteContext<'_>) + 'static,
+        Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
         self.add_pass(name, PassKind::Raster, flags, setup);
     }
@@ -164,7 +170,7 @@ impl RenderGraph {
         setup: Setup,
     ) where
         Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
-        Exec: FnOnce(&mut ExecuteContext<'_>) + 'static,
+        Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
         self.add_pass(name, PassKind::Compute, flags, setup);
     }
@@ -177,7 +183,7 @@ impl RenderGraph {
         setup: Setup,
     ) where
         Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
-        Exec: FnOnce(&mut ExecuteContext<'_>) + 'static,
+        Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
         self.add_pass(name, PassKind::Transfer, flags, setup);
     }
@@ -191,7 +197,7 @@ impl RenderGraph {
         setup: Setup,
     ) where
         Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
-        Exec: FnOnce(&mut ExecuteContext<'_>) + 'static,
+        Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
         self.add_pass(name, PassKind::Present, flags, setup);
     }
@@ -207,7 +213,7 @@ impl RenderGraph {
         setup: Setup,
     ) where
         Setup: FnOnce(&mut PassBuilder<'_>) -> Exec,
-        Exec: FnOnce(&mut ExecuteContext<'_>) + 'static,
+        Exec: FnOnce(&mut ExecuteContext<'_>) + ThreadBound + 'static,
     {
         let mut builder = PassBuilder::new(
             &mut self.textures,
@@ -243,10 +249,37 @@ impl RenderGraph {
     /// Consumes the graph: a frame's execute closures are move-only and run
     /// exactly once.
     ///
+    /// The recording strategy is selected by the `parallel` feature: without it
+    /// passes are recorded in order on the calling thread; with it they are
+    /// recorded concurrently on a worker pool and assembled in order. Both
+    /// produce the same command buffer.
+    ///
     /// # Errors
     /// Returns [`CompileError`] when compilation fails; no GPU work is issued in
     /// that case.
     pub fn execute<D: RenderDevice, Q: RenderQueue>(
+        self,
+        device: &D,
+        queue: &Q,
+    ) -> Result<(), CompileError> {
+        #[cfg(feature = "parallel")]
+        {
+            self.execute_parallel(device, queue)
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            self.execute_sequential(device, queue)
+        }
+    }
+
+    /// Records every surviving pass in plan order on the calling thread, then
+    /// submits one command buffer.
+    ///
+    /// This is the reference executor: the parallel executor must produce a
+    /// byte-for-byte identical command buffer, so this path stays available
+    /// under the `parallel` feature for testing and comparison.
+    #[cfg(any(test, not(feature = "parallel")))]
+    pub(crate) fn execute_sequential<D: RenderDevice, Q: RenderQueue>(
         mut self,
         device: &D,
         queue: &Q,
@@ -259,37 +292,86 @@ impl RenderGraph {
             let kind = self.passes[pidx].kind;
             // Take the move-only closure before the shared borrows below.
             let exec = self.passes[pidx].execute.take();
-
-            let mut ctx = ExecuteContext::new(&self.textures, &self.buffers, kind);
-            if let Some(exec) = exec {
-                exec(&mut ctx);
-            }
-
-            match kind {
-                PassKind::Raster => {
-                    let descriptor = self.raster_descriptor(
-                        plan.attachments[pos].as_ref(),
-                        self.passes[pidx].name.as_str(),
-                    );
-                    encoder.push_render_pass(descriptor, ctx.take_render_commands());
-                }
-                PassKind::Compute => {
-                    let label = Some(self.passes[pidx].name.clone());
-                    encoder.push_compute_pass(label, ctx.take_compute_commands());
-                }
-                PassKind::Transfer => {
-                    let label = Some(self.passes[pidx].name.clone());
-                    encoder.push_transfer_pass(label, ctx.take_copy_commands());
-                }
-                // Present contributes only state tracking: handing the
-                // swapchain image to the surface is driven by the runtime, not
-                // the command buffer.
-                PassKind::Present => {}
-            }
+            let recorded = record::record_pass(exec, kind, &self.textures, &self.buffers);
+            self.encode_recorded(&mut encoder, &plan, pos, pidx, recorded);
         }
 
         queue.submit(&[encoder.finish()]);
         Ok(())
+    }
+
+    /// Records every surviving pass concurrently on a worker pool, then
+    /// assembles their commands in plan order and submits one command buffer.
+    ///
+    /// Only available with the `parallel` feature. See [`Self::execute`] for the
+    /// determinism guarantee this upholds.
+    #[cfg(feature = "parallel")]
+    pub(crate) fn execute_parallel<D: RenderDevice, Q: RenderQueue>(
+        mut self,
+        device: &D,
+        queue: &Q,
+    ) -> Result<(), CompileError> {
+        let plan = self.compile()?;
+        self.realize(&plan, device);
+
+        // Move every execute closure out of the graph up front so recording
+        // reads the (now frozen) resource tables through shared borrows only
+        // and each worker owns exactly the closures it records.
+        let mut units: Vec<RecordUnit> = Vec::with_capacity(plan.order.len());
+        for (pos, &pidx) in plan.order.iter().enumerate() {
+            units.push(RecordUnit {
+                pos,
+                pidx,
+                kind: self.passes[pidx].kind,
+                execute: self.passes[pidx].execute.take(),
+            });
+        }
+
+        let recorded = parallel::record(&mut units, &self.textures, &self.buffers);
+
+        let mut encoder = CommandEncoder::new();
+        for (pos, pidx, commands) in recorded {
+            self.encode_recorded(&mut encoder, &plan, pos, pidx, commands);
+        }
+
+        queue.submit(&[encoder.finish()]);
+        Ok(())
+    }
+
+    /// Encodes one pass's recorded commands into `encoder` in plan order.
+    ///
+    /// Shared by both executors so assembly is identical by construction: the
+    /// descriptor, label, and pass kind come from the same `plan` and pass
+    /// table regardless of where the commands were recorded.
+    fn encode_recorded(
+        &self,
+        encoder: &mut CommandEncoder,
+        plan: &ExecutionPlan,
+        pos: usize,
+        pidx: usize,
+        recorded: PassCommands,
+    ) {
+        match recorded {
+            PassCommands::Render(commands) => {
+                let descriptor = self.raster_descriptor(
+                    plan.attachments[pos].as_ref(),
+                    self.passes[pidx].name.as_str(),
+                );
+                encoder.push_render_pass(descriptor, commands);
+            }
+            PassCommands::Compute(commands) => {
+                let label = Some(self.passes[pidx].name.clone());
+                encoder.push_compute_pass(label, commands);
+            }
+            PassCommands::Transfer(commands) => {
+                let label = Some(self.passes[pidx].name.clone());
+                encoder.push_transfer_pass(label, commands);
+            }
+            // Present contributes only state tracking: handing the swapchain
+            // image to the surface is driven by the runtime, not the command
+            // buffer.
+            PassCommands::None => {}
+        }
     }
 
     /// Creates the driver objects backing every used, not-yet-realized
