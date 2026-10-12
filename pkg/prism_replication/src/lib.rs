@@ -35,6 +35,10 @@
 //!   without a socket (design §6).
 //! - [`frame`] — LEB128 length-prefixed message framing with an incremental
 //!   decoder, the boundary a stream transport needs (design §6).
+//! - [`session`] — the **wiring**: [`ServerSession`](session::ServerSession)
+//!   (authority: seed snapshots, step deltas, lagging-client catch-up) and
+//!   [`ClientSession`](session::ClientSession) (prediction fed by inbound frames),
+//!   exchanging framed bytes over any transport.
 //!
 //! Later blocks (state-snapshot delta encoding, interest management, prediction
 //! and reconciliation, the transport providers) build on this and are added as
@@ -62,3 +66,5 @@ pub mod prediction;
 pub mod transport;
 
 pub mod frame;
+
+pub mod session;
