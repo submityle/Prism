@@ -114,6 +114,40 @@ impl<F: Clone> RollbackReplay<F> {
         self.history.seek(frame);
         Some(plan)
     }
+
+    /// Reconcile a divergence at `frame`: roll back and re-simulate the frames
+    /// it replaces with the `corrected` inputs.
+    ///
+    /// `corrected` must hold exactly one input per frame being replaced
+    /// (`self.frame() - frame` entries); each is committed and then applied by
+    /// `simulate` (which advances the world by one frame). Returns the new
+    /// current frame.
+    ///
+    /// Returns `None` — with **no side effects on `world`** — when `frame` is
+    /// not strictly before the current frame, its snapshot has been evicted, or
+    /// `corrected.len()` does not match the number of frames replaced.
+    pub fn reconcile(
+        &mut self,
+        world: &mut World,
+        frame: u64,
+        corrected: &[F],
+        mut simulate: impl FnMut(&mut World, &F),
+    ) -> Option<u64> {
+        let current = self.history.next_frame();
+        if frame >= current || corrected.len() as u64 != current - frame {
+            return None;
+        }
+        if !self.history.contains(frame) {
+            return None;
+        }
+        // Restore the pre-frame state (and seek the cursor back to `frame`).
+        self.rollback(world, frame)?;
+        for input in corrected {
+            self.commit(world, input.clone());
+            simulate(world, input);
+        }
+        Some(self.frame())
+    }
 }
 
 #[cfg(test)]
@@ -215,5 +249,51 @@ mod tests {
         assert_eq!(counter(&w, e), 6);
         let plan = rr.rollback(&mut w, 1).expect("frame 1 is retained");
         assert_eq!(plan, vec![2, 3]);
+    }
+
+    #[test]
+    fn reconcile_replays_with_corrected_inputs() {
+        let (mut w, e) = world(0);
+        let mut rr = RollbackReplay::<i32>::new(8);
+        forward(&mut rr, &mut w, e, 1);
+        forward(&mut rr, &mut w, e, 2);
+        forward(&mut rr, &mut w, e, 3);
+        // Frame 1's late input is 10 (not the recorded 2): reconcile 1..3.
+        let frame = rr
+            .reconcile(&mut w, 1, &[10, 3], |w, input| sim(w, e, *input))
+            .expect("reconcile succeeds");
+        assert_eq!(frame, 3);
+        assert_eq!(counter(&w, e), 14); // 1 + 10 + 3
+        let inputs: Vec<i32> = rr.inputs().iter().map(|r| r.frame).collect();
+        assert_eq!(inputs, vec![1, 10, 3]);
+    }
+
+    #[test]
+    fn reconcile_rejects_a_wrong_length_correction_without_side_effects() {
+        let (mut w, e) = world(0);
+        let mut rr = RollbackReplay::<i32>::new(8);
+        forward(&mut rr, &mut w, e, 1);
+        forward(&mut rr, &mut w, e, 2);
+        forward(&mut rr, &mut w, e, 3);
+        // Two frames need correcting (1 and 2), but only one input is supplied.
+        assert!(rr
+            .reconcile(&mut w, 1, &[10], |w, input| sim(w, e, *input))
+            .is_none());
+        assert_eq!(counter(&w, e), 6);
+        assert_eq!(rr.frame(), 3);
+    }
+
+    #[test]
+    fn reconcile_refuses_an_evicted_frame() {
+        let (mut w, e) = world(0);
+        let mut rr = RollbackReplay::<i32>::new(2);
+        forward(&mut rr, &mut w, e, 1);
+        forward(&mut rr, &mut w, e, 2);
+        forward(&mut rr, &mut w, e, 3);
+        // frame 0 was evicted, so its correction cannot be applied.
+        assert!(rr
+            .reconcile(&mut w, 0, &[9, 9, 9], |w, input| sim(w, e, *input))
+            .is_none());
+        assert_eq!(counter(&w, e), 6);
     }
 }
