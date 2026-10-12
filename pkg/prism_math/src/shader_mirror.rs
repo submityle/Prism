@@ -2242,3 +2242,28 @@ fn prism_xoshiro256ss_first(seed_lo: u32, seed_hi: u32) -> vec2<u32> {\n\
     let m9 = prism_u64_mul_const(rot.x, rot.y, 9u, 0u);\n\
     return vec2<u32>(m9.x, m9.y);\n\
 }\n";
+
+/// Single-sourced WGSL for the clamped-cosine convolution of real SH
+/// coefficients, mirroring the CPU
+/// [`Sh2::convolve_cosine`](crate::spherical::Sh2::convolve_cosine) /
+/// [`Sh3::convolve_cosine`](crate::spherical::Sh3::convolve_cosine) —
+/// radiance → diffuse-irradiance probe conversion. Each coefficient `c[j]` is
+/// scaled by the per-band Ramsey factor
+/// `A0 = π` (band 0), `A1 = 2π/3` (band 1), `A2 = π/4` (band 2), and `0` for
+/// band 3 — `prism_sh_cosine_factor(j)` reproduces the CPU band split exactly
+/// (indices `0; 1..=3; 4..=8; >=9`), so evaluating the result in a normal `n`
+/// yields the irradiance `E(n)`. `prism_sh_convolve_cosine(c, j)` is the single
+/// coefficient scale; a batched kernel walks each coefficient set. The factors
+/// are single multiplies of the identical literals, so the device matches the
+/// CPU reference to rounding.
+pub const WGSL_SH_COSINE: &str = "\
+fn prism_sh_cosine_factor(j: u32) -> f32 {\n\
+    if (j == 0u) { return 3.141592653589793; }\n\
+    if (j <= 3u) { return 2.0943951023931953; }\n\
+    if (j <= 8u) { return 0.7853981633974483; }\n\
+    return 0.0;\n\
+}\n\
+\n\
+fn prism_sh_convolve_cosine(c: f32, j: u32) -> f32 {\n\
+    return c * prism_sh_cosine_factor(j);\n\
+}\n";
