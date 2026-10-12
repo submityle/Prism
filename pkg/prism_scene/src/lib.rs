@@ -23,6 +23,9 @@
 //!   instance, and the [`ResidencyTier`] vocabulary (design §5.2, §11).
 //! - [`path`] — [`FieldPath`], the reflect-style field path an override targets
 //!   (`"transform.translation.x"`).
+//! - [`plan`] — [`InstantiationPlan`], the flattened bake-to-runtime contract
+//!   (archetype groups + columnar payloads + entity-valued field slots) and its
+//!   structural validation (design §8.1).
 //! - [`overrides`] — the crown (design §7): sparse [`PropertyOverride`] and
 //!   [`StructuralOp`] deltas in an [`OverrideSet`], with unique-key dedup and
 //!   orphan detection.
@@ -45,6 +48,7 @@ pub mod identity;
 pub mod instance;
 pub mod overrides;
 pub mod path;
+pub mod plan;
 pub mod remap;
 pub mod residency;
 pub mod template;
@@ -53,6 +57,7 @@ pub use identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
 pub use instance::SceneInstance;
 pub use overrides::{ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride, StructuralOp};
 pub use path::{FieldPath, FieldSegment};
+pub use plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
 pub use remap::RemapTable;
 pub use residency::{ResidencyPlan, ResidencyTier};
 pub use template::{NestedSlot, SceneTemplate};
@@ -66,6 +71,7 @@ pub mod prelude {
         StructuralOp,
     };
     pub use crate::path::{FieldPath, FieldSegment};
+    pub use crate::plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
     pub use crate::remap::RemapTable;
     pub use crate::residency::{ResidencyPlan, ResidencyTier};
     pub use crate::template::{NestedSlot, SceneTemplate};

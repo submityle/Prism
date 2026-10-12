@@ -2,15 +2,17 @@
 //!
 //! A template is the runtime-resident form of a scene asset: it is created by
 //! the bake pipeline, loaded through `prism_asset`, and shared by any number of
-//! instances. It is deliberately ECS-free — it holds only identity, counts, the
-//! local name table, the nested-instance slots and the dependency closure, all
-//! keyed by [`StableGuid`] so it carries no live handles.
+//! instances. It is deliberately ECS-free — it holds only identity, the
+//! flattened [`InstantiationPlan`], the local name table, the nested-instance
+//! slots and the dependency closure, all keyed by [`StableGuid`] (and, in the
+//! plan, by [`LocalEntityId`]) so it carries no live handles.
 
 use alloc::boxed::Box;
 
 use prism_asset::StableGuid;
 
 use crate::identity::{LocalEntityId, NameTable};
+use crate::plan::InstantiationPlan;
 use crate::residency::{ResidencyPlan, ResidencyTier};
 
 /// A nested instance slot inside a template (design §9.1).
@@ -45,8 +47,8 @@ impl NestedSlot {
 pub struct SceneTemplate {
     /// The template's stable asset identity (design §6 `StableGuid`).
     pub guid: StableGuid,
-    /// Number of base-segment entities the template instantiates.
-    pub entity_count: u32,
+    /// The flattened instantiation plan (design §5.1, §8.1).
+    pub plan: InstantiationPlan,
     /// Template-local `name -> LocalEntityId` table.
     pub names: NameTable,
     /// Nested instance slots, in author order.
@@ -59,17 +61,32 @@ pub struct SceneTemplate {
 }
 
 impl SceneTemplate {
-    /// Builds a bare template with a guid and entity count.
+    /// Builds a bare template around a validated instantiation plan.
     #[must_use]
-    pub fn new(guid: StableGuid, entity_count: u32) -> Self {
+    pub fn new(guid: StableGuid, plan: InstantiationPlan) -> Self {
         Self {
             guid,
-            entity_count,
+            plan,
             names: NameTable::new(),
             nested: Box::new([]),
             tiers: ResidencyPlan::new(),
             deps: Box::new([]),
         }
+    }
+
+    /// Builds an entity-less template (a valid empty plan).
+    #[must_use]
+    pub fn empty(guid: StableGuid) -> Self {
+        Self::new(
+            guid,
+            InstantiationPlan {
+                entity_count: 0,
+                groups: Box::new([]),
+                entity_valued_fields: Box::new([]),
+                hierarchy: Box::new([]),
+                reserved_local_base: LocalEntityId::RESERVED_BASE,
+            },
+        )
     }
 
     /// Annotates one local entity's residency tier (builder style).
@@ -82,7 +99,13 @@ impl SceneTemplate {
     /// Whether `local` is a base-segment entity of this template.
     #[must_use]
     pub fn contains_local(&self, local: LocalEntityId) -> bool {
-        !local.is_reserved() && local.index() < self.entity_count
+        !local.is_reserved() && local.index() < self.plan.entity_count
+    }
+
+    /// Number of base-segment entities the template instantiates.
+    #[must_use]
+    pub fn entity_count(&self) -> u32 {
+        self.plan.entity_count
     }
 
     /// Resolves a local name through the template's [`NameTable`].
@@ -114,28 +137,46 @@ impl SceneTemplate {
 mod tests {
     use super::{NestedSlot, SceneTemplate};
     use crate::identity::LocalEntityId;
+    use crate::overrides::ArchetypeSignature;
+    use crate::plan::{ArchetypeGroup, InstantiationPlan};
     use crate::residency::ResidencyTier;
     use alloc::boxed::Box;
-    use alloc::vec;
     use prism_asset::StableGuid;
 
     fn guid(seed: u128) -> StableGuid {
         StableGuid::from_u128(seed)
     }
 
+    /// A valid plan with `n` entities in one empty-signature group.
+    fn plan_of(n: u32) -> InstantiationPlan {
+        let locals: Box<[LocalEntityId]> = (0..n).map(LocalEntityId::new).collect();
+        InstantiationPlan {
+            entity_count: n,
+            groups: Box::new([ArchetypeGroup::new(
+                ArchetypeSignature::default(),
+                locals,
+                Box::new([]),
+            )]),
+            entity_valued_fields: Box::new([]),
+            hierarchy: Box::new([]),
+            reserved_local_base: LocalEntityId::RESERVED_BASE,
+        }
+    }
+
     #[test]
     fn contains_local_bounds_base_segment_only() {
-        let template = SceneTemplate::new(guid(1), 3);
+        let template = SceneTemplate::new(guid(1), plan_of(3));
         assert!(template.contains_local(LocalEntityId::new(0)));
         assert!(template.contains_local(LocalEntityId::new(2)));
         assert!(!template.contains_local(LocalEntityId::new(3)));
         // Reserved ids are never part of the base set.
         assert!(!template.contains_local(LocalEntityId::reserved(0)));
+        assert_eq!(template.entity_count(), 3);
     }
 
     #[test]
     fn names_and_nested_slots_resolve() {
-        let mut template = SceneTemplate::new(guid(1), 4);
+        let mut template = SceneTemplate::new(guid(1), plan_of(4));
         template.names.insert("root", LocalEntityId::new(0));
         template.names.insert("wheel", LocalEntityId::new(3));
         template.nested = Box::new([NestedSlot::new(LocalEntityId::new(1), guid(2))]);
@@ -154,17 +195,18 @@ mod tests {
 
     #[test]
     fn new_template_starts_empty() {
-        let template = SceneTemplate::new(guid(7), 0);
+        let template = SceneTemplate::empty(guid(7));
         assert_eq!(template.nested_count(), 0);
         assert_eq!(template.dependency_count(), 0);
         assert!(template.names.is_empty());
         assert!(template.tiers.is_empty());
-        assert_eq!(template.nested, Box::<[NestedSlot]>::from(vec![]));
+        assert_eq!(template.entity_count(), 0);
+        assert!(template.plan.validate().is_ok());
     }
 
     #[test]
     fn carries_residency_tiers() {
-        let template = SceneTemplate::new(guid(1), 3)
+        let template = SceneTemplate::new(guid(1), plan_of(3))
             .with_tier(LocalEntityId::new(2), ResidencyTier::Proxy);
         assert_eq!(
             template.tiers.tier_of(LocalEntityId::new(2)),

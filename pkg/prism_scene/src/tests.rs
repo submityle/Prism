@@ -7,8 +7,11 @@ use prism_asset::StableGuid;
 use prism_ecs::entity::Entity;
 
 use crate::identity::{LocalEntityId, PersistentId, PersistentIdBuilder};
-use crate::overrides::{ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride, StructuralOp};
+use crate::overrides::{
+    ArchetypeSignature, ComponentTypeId, OverrideSet, OverrideValue, PropertyOverride, StructuralOp,
+};
 use crate::path::FieldPath;
+use crate::plan::{ArchetypeGroup, InstantiationPlan};
 use crate::remap::RemapTable;
 use crate::template::{NestedSlot, SceneTemplate};
 
@@ -18,6 +21,23 @@ fn entity(index: u32, generation: u32) -> Entity {
 
 fn guid(seed: u128) -> StableGuid {
     StableGuid::from_u128(seed)
+}
+
+/// A valid plan with `n` entities in one empty-signature group.
+fn plan_of(n: u32) -> InstantiationPlan {
+    use alloc::boxed::Box;
+    let locals: Box<[LocalEntityId]> = (0..n).map(LocalEntityId::new).collect();
+    InstantiationPlan {
+        entity_count: n,
+        groups: Box::new([ArchetypeGroup::new(
+            ArchetypeSignature::default(),
+            locals,
+            Box::new([]),
+        )]),
+        entity_valued_fields: Box::new([]),
+        hierarchy: Box::new([]),
+        reserved_local_base: LocalEntityId::RESERVED_BASE,
+    }
 }
 
 /// The invariant from design §6.1: instantiating the same template twice yields
@@ -127,7 +147,7 @@ fn persistent_id_is_template_and_path_scoped() {
 /// override set, and a remap table compose into a coherent instance description.
 #[test]
 fn template_instance_overrides_compose() {
-    let mut template = SceneTemplate::new(guid(1), 3);
+    let mut template = SceneTemplate::new(guid(1), plan_of(3));
     template.names.insert("root", LocalEntityId::new(0));
     template.names.insert("camera", LocalEntityId::new(2));
     template.nested = vec![NestedSlot::new(LocalEntityId::new(1), guid(2))].into_boxed_slice();
@@ -137,7 +157,7 @@ fn template_instance_overrides_compose() {
     assert_eq!(template.nested_at(LocalEntityId::new(1)).unwrap().template, guid(2));
 
     let mut remap = RemapTable::new();
-    for i in 0..template.entity_count {
+    for i in 0..template.entity_count() {
         remap.push_base(entity(i, 1));
     }
     assert_eq!(remap.get(root), Some(entity(0, 1)));
