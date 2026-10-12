@@ -17,7 +17,6 @@ pub enum MaterialRegistryError {
     CapacityExceeded,
     InvalidHandle(GenerationalHandle),
     StaleRevision { current: u32, incoming: u32 },
-    TooManyTextures { count: usize, maximum: usize },
 }
 
 #[derive(Clone)]
@@ -52,12 +51,6 @@ impl MaterialRegistry {
     pub fn publish(&mut self, record: MaterialRecord) -> Result<(), MaterialRegistryError> {
         if !self.allocator.validate(record.handle) {
             return Err(MaterialRegistryError::InvalidHandle(record.handle));
-        }
-        if record.textures.len() > crate::MAX_MATERIAL_TEXTURES {
-            return Err(MaterialRegistryError::TooManyTextures {
-                count: record.textures.len(),
-                maximum: crate::MAX_MATERIAL_TEXTURES,
-            });
         }
         let index = record.handle.index as usize;
         self.generations

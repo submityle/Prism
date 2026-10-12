@@ -42,7 +42,6 @@ pub use bevy_bridge::{
 pub use handle::{MaterialCapacityError, MaterialHandleAllocator, MaterialHandleError};
 pub use ir::{
     ClosureKind, MaterialGraph, MaterialNode, MaterialNodeId, MaterialValue, NormalizedMaterial,
-    MAX_CLOSURE_SLAB_DEPTH,
 };
 pub use normal_map::{
     anisotropic_ggx_from_covariance, average_unit_normals, blend_linear, blend_rnm,
@@ -62,7 +61,7 @@ pub use record::{
     fallback_material_header, fallback_material_record, inactive_material_header,
     GpuMaterialHeader, GpuMaterialTexture, GpuSurfaceParameters, MaterialDomain,
     MaterialFeatureFlags, MaterialRecord, MaterialRenderClass, FALLBACK_MATERIAL_HANDLE,
-    MATERIAL_ABI_VERSION, MAX_MATERIAL_TEXTURES,
+    MATERIAL_ABI_VERSION,
 };
 pub use registry::{MaterialRegistry, MaterialRegistryError, MaterialSnapshot};
 pub use resources::{MaterialResourceHandle, MaterialResourceKind, MaterialResourceTable};

@@ -10,7 +10,6 @@ use prism_render_architecture::abi::GenerationalHandle;
 /// block. The remaining v5 header/classification work (§8, P1-b/P1-h) lands on
 /// top of this marker rather than re-issuing it.
 pub const MATERIAL_ABI_VERSION: u32 = 5;
-pub const MAX_MATERIAL_TEXTURES: usize = 8;
 pub const FALLBACK_MATERIAL_HANDLE: GenerationalHandle = GenerationalHandle {
     index: 0,
     generation: 0,
@@ -433,13 +432,6 @@ impl MaterialRecord {
             lobe_mask: self.lobe_mask().bits(),
         }
     }
-
-    pub fn fixed_texture_rows(&self) -> [GpuMaterialTexture; MAX_MATERIAL_TEXTURES] {
-        let mut rows = [GpuMaterialTexture::default(); MAX_MATERIAL_TEXTURES];
-        let count = self.textures.len().min(MAX_MATERIAL_TEXTURES);
-        rows[..count].copy_from_slice(&self.textures[..count]);
-        rows
-    }
 }
 
 #[cfg(test)]
@@ -545,14 +537,6 @@ mod tests {
             (u64::from(header.material_epoch_high) << 32) | u64::from(header.material_epoch_low);
         assert_eq!(rebuilt_epoch, epoch);
         assert_eq!(header.specialization(), value.specialization());
-    }
-
-    #[test]
-    fn fixed_texture_rows_truncate_without_panicking() {
-        let handle = GenerationalHandle::new(3, 1);
-        let value = record(handle, 0, MAX_MATERIAL_TEXTURES + 3);
-        let rows = value.fixed_texture_rows();
-        assert_eq!(rows.len(), MAX_MATERIAL_TEXTURES);
     }
 
     #[test]

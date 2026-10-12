@@ -2,12 +2,6 @@ use crate::axis::{Illumination, SpecializationId};
 use crate::{MaterialFeatureFlags, MaterialRenderClass, MaterialValidationError};
 use alloc::collections::{BTreeMap, BTreeSet};
 
-/// Maximum number of `Layer`/`Mix` nodes on any path from the output. The
-/// closure stack is a *bounded slab* (design doc §3.2), never an unbounded
-/// Substrate; exceeding this is a validation error rather than a silent
-/// performance cliff.
-pub const MAX_CLOSURE_SLAB_DEPTH: u32 = 4;
-
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MaterialNodeId(pub u32);
 
@@ -82,16 +76,6 @@ impl MaterialGraph {
         crate::validate_graph(self)?;
         let output = self.output.expect("validated output");
 
-        // Enforce the bounded closure slab depth on the live output cone.
-        let slab_depth = self.slab_depth(output, &mut BTreeMap::new());
-        if slab_depth > MAX_CLOSURE_SLAB_DEPTH {
-            return Err(MaterialValidationError::ClosureSlabTooDeep {
-                node: output,
-                depth: slab_depth,
-                max: MAX_CLOSURE_SLAB_DEPTH,
-            });
-        }
-
         let mut live = BTreeSet::new();
         collect_live(self, output, &mut live);
         let nodes = live
@@ -150,37 +134,6 @@ impl MaterialGraph {
             closure_mask,
             specialization_id,
         })
-    }
-
-    /// Longest chain of `Layer`/`Mix` nodes on any path from `id`, memoized.
-    fn slab_depth(&self, id: MaterialNodeId, memo: &mut BTreeMap<MaterialNodeId, u32>) -> u32 {
-        if let Some(cached) = memo.get(&id) {
-            return *cached;
-        }
-        // Guard against cycles (already rejected by validation, but keep the
-        // recursion total): seed with 0 before descending.
-        memo.insert(id, 0);
-        let depth = match &self.nodes[&id] {
-            MaterialNode::TextureSample { uv, .. } => self.slab_depth(*uv, memo),
-            MaterialNode::Add(a, b) | MaterialNode::Multiply(a, b) => {
-                self.slab_depth(*a, memo).max(self.slab_depth(*b, memo))
-            }
-            MaterialNode::Closure { kind, inputs } => {
-                let child = inputs
-                    .iter()
-                    .map(|input| self.slab_depth(*input, memo))
-                    .max()
-                    .unwrap_or(0);
-                if matches!(kind, ClosureKind::Layer | ClosureKind::Mix) {
-                    child + 1
-                } else {
-                    child
-                }
-            }
-            _ => 0,
-        };
-        memo.insert(id, depth);
-        depth
     }
 }
 

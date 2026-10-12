@@ -76,9 +76,12 @@ fn graph_normalization_removes_dead_nodes_and_classifies_npr() {
 }
 
 #[test]
-fn graph_normalization_rejects_over_deep_closure_slab() {
+fn graph_normalization_accepts_an_arbitrarily_deep_closure_slab() {
     use alloc::collections::BTreeMap;
-    // Build a chain of Layer nodes deeper than MAX_CLOSURE_SLAB_DEPTH.
+    // ABI v5 / P1-c deletes the bounded closure slab (design §6.1): the bake
+    // layer resolves *any* number of `Layer`/`Mix` nodes into a texture-space
+    // blend, so a chain far deeper than the old `MAX_CLOSURE_SLAB_DEPTH` of 4
+    // must normalize without a cap instead of erroring.
     let leaf = MaterialNodeId(0);
     let mut nodes = BTreeMap::from([(
         leaf,
@@ -93,7 +96,7 @@ fn graph_normalization_rejects_over_deep_closure_slab() {
     );
     let mut prev = leaf;
     let mut last = leaf;
-    for i in 1..=(MAX_CLOSURE_SLAB_DEPTH + 1) {
+    for i in 1..=64u32 {
         let id = MaterialNodeId(1000 + i);
         nodes.insert(
             id,
@@ -109,10 +112,8 @@ fn graph_normalization_rejects_over_deep_closure_slab() {
         nodes,
         output: Some(last),
     };
-    assert!(matches!(
-        graph.normalize(),
-        Err(MaterialValidationError::ClosureSlabTooDeep { .. })
-    ));
+    let normalized = graph.normalize().expect("a 64-deep layer chain is unbounded");
+    assert!(normalized.features.contains(MaterialFeatureFlags::COMPLEX_CLOSURE));
 }
 
 #[cfg(feature = "bevy")]
@@ -196,16 +197,28 @@ fn openpbr_importer_maps_reflectance_to_a_faithful_ior() {
 }
 
 #[test]
-fn registry_tracks_sparse_rows_and_rejects_texture_overflow() {
+fn registry_tracks_sparse_rows_and_accepts_an_unbounded_texture_set() {
+    // ABI v5 removed the fixed `MAX_MATERIAL_TEXTURES` slot cap (§8.2): a
+    // material may reference any number of bindless texture slots, so a record
+    // with far more rows than the old 8-slot window must publish cleanly.
     let mut registry = MaterialRegistry::new(8);
     let handle = registry.allocate().unwrap();
     let mut value = record(handle, 1);
-    value.textures = vec![GpuMaterialTexture::default(); MAX_MATERIAL_TEXTURES + 1];
-    assert!(matches!(
-        registry.publish(value),
-        Err(MaterialRegistryError::TooManyTextures { .. })
-    ));
-    registry.publish(record(handle, 1)).unwrap();
+    value.textures = (0..64)
+        .map(|index| GpuMaterialTexture {
+            index,
+            generation: 1,
+            semantic: 0,
+            sampler_index: index,
+        })
+        .collect();
+    registry.publish(value).unwrap();
+    let (headers, _, textures) = registry.gpu_tables();
+    assert_eq!(textures.len(), 64, "every authored texture row is retained");
+    assert_eq!(headers[handle.index as usize].texture_offset, 0);
+    assert_eq!(headers[handle.index as usize].texture_count, 64);
+
+    registry.publish(record(handle, 2)).unwrap();
     assert_eq!(registry.take_dirty(), vec![0, handle.index]);
     assert!(registry.take_dirty().is_empty());
 }
