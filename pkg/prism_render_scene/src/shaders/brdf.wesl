@@ -191,6 +191,46 @@ fn dielectric_f0(surface: SurfaceSample) -> vec3<f32> {
     return vec3<f32>(f0) * surface.specular_color;
 }
 
+// `OpenPBR` equation `modulated_ior`: the index ratio `η' = (1 + ε)/(1 − ε)`
+// with `ε = sgn(η − 1)·sqrt(ξ_s·F_s)`. `ξ_s == 0` removes the interface
+// (`η' == 1`, i.e. `F ≡ 0` at every angle — not a grazing rim); `ξ_s == 1`
+// returns the authored index. Byte-for-byte twin of `lighting.rs::modulated_ior`.
+fn brdf_modulated_ior(eta: f32, specular_weight: f32) -> f32 {
+    let w = max(specular_weight, 0.0);
+    if w == 0.0 {
+        return 1.0;
+    }
+    let r = (1.0 - eta) / (1.0 + eta);
+    let f_s = r * r;
+    let sign = select(-1.0, 1.0, eta >= 1.0);
+    let epsilon = clamp(sign * sqrt(w * f_s), -(1.0 - 1.0e-4), 1.0 - 1.0e-4);
+    let one_minus = 1.0 - epsilon;
+    let eta_prime = (1.0 + epsilon) / one_minus;
+    if !(eta_prime > 0.0) || !(abs(eta_prime) < 1.0e30) {
+        return BRDF_MIN_DIELECTRIC_IOR;
+    }
+    return eta_prime;
+}
+
+// The `OpenPBR` dielectric base specular Fresnel factor: the exact angle-
+// dependent Fresnel at the modulated index, tinted by `specular_color`.
+// Byte-for-byte twin of `lighting.rs::base_dielectric_fresnel_rgb`. `η' == 1` is
+// a non-interface, so the guard returns zero rather than the spurious grazing
+// reflection `fresnel_dielectric` would report for a clamped index.
+fn brdf_base_dielectric_fresnel_rgb(
+    cos_i: f32,
+    specular_ior: f32,
+    specular_weight: f32,
+    specular_color: vec3<f32>,
+) -> vec3<f32> {
+    let eta = brdf_modulated_ior(clamp(specular_ior, 1.0, 3.0), clamp(specular_weight, 0.0, 1.0));
+    var f = 0.0;
+    if abs(eta - 1.0) > 1.0e-7 {
+        f = fresnel_dielectric(cos_i, eta);
+    }
+    return vec3<f32>(f) * specular_color;
+}
+
 // Unpolarized dielectric Fresnel reflectance for a direction whose normal
 // cosine is `cos_i`, entering from index 1 into relative index `ior`. Exact twin
 // of `lighting.rs::fresnel_dielectric` and the path-traced reference
@@ -463,14 +503,26 @@ fn principled_direct(
     // `normal_variance == 0` it is an exact identity.
     let base_alpha = roughness * roughness;
     let alpha = sqrt(spec_aa_filter_alpha_sq(base_alpha * base_alpha, surface.normal_variance, SPEC_AA_KAPPA_MAX));
+    // `OpenPBR` dielectric base specular: the exact angle-dependent Fresnel at
+    // the `specular_weight`-modulated index ratio (equations
+    // `unmodulated_fresnel` / `modulated_ior`), tinted by `specular_color`. A
+    // plain Schlick curve is not equivalent — it reaches total reflection at
+    // grazing incidence even at `specular_weight == 0`, where the specification
+    // removes the interface. The conductor branch keeps Schlick from
+    // `base_color`. Byte-identical to `evaluate_principled_direct` in
+    // `lighting.rs`.
     let f0 = mix(dielectric_f0(surface), surface.base_color, metallic);
-    // Thin-film iridescence: blend the Schlick Fresnel toward the Airy
-    // interference reflectance at the same `v_dot_h`. Byte-identical to
-    // `evaluate_principled_direct` in `lighting.rs`; `iridescence == 0` is an
-    // exact identity because `mix` returns the Schlick term unchanged.
-    let f_schlick = fresnel_schlick(f0, v_dot_h);
+    let f_dielectric = brdf_base_dielectric_fresnel_rgb(
+        v_dot_h,
+        surface.specular_ior,
+        surface.specular_weight,
+        surface.specular_color,
+    );
+    let f_specular = mix(f_dielectric, fresnel_schlick(surface.base_color, v_dot_h), metallic);
+    // Thin-film iridescence: blend the base Fresnel toward the Airy interference
+    // reflectance at the same `v_dot_h`; `iridescence == 0` is an exact identity.
     let iridescence = clamp(surface.iridescence, 0.0, 1.0);
-    var f = f_schlick;
+    var f = f_specular;
     if iridescence > 0.0 {
         let f_irid = tf_iridescent_fresnel_rgb(
             1.0,
@@ -479,7 +531,7 @@ fn principled_direct(
             v_dot_h,
             surface.iridescence_thickness_nm,
         );
-        f = mix(f_schlick, f_irid, iridescence);
+        f = mix(f_specular, f_irid, iridescence);
     }
 
     // Anisotropic axes: re-orthonormalize + rotate the interpolated tangent

@@ -41,6 +41,11 @@ mod lobe_sampling;
 mod measured_brdf;
 mod motion_blur;
 mod oit;
+// The conformance oracle is a *test* artifact (§4.5 constraint 1 / roadmap
+// P2-f): it exists to be compared against, so it is compiled only for tests and
+// adds nothing to the shipping shading binary.
+#[cfg(test)]
+mod openpbr_reference;
 mod ordered_dither;
 mod outline;
 mod posterize;

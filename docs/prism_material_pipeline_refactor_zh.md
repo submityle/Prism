@@ -259,6 +259,12 @@
 "Prism über 是 OpenPBR 超集"要可验证、可维护，必须满足三条硬约束，缺一则退化为"又一个私有材质模型"：
 
 1. **纯 OpenPBR 子集合规对拍（Conformance Gate）**：对"只用 OpenPBR 字段、不含任何 Prism 扩展位"的材质，Prism 运行时的 BSDF 响应必须与 OpenPBR 参考实现（ASWF `OpenPBR` reference / MaterialX 节点）在 furnace + 定向光对拍下字节级一致。这进 CI 门禁（§10）——证明"关掉扩展，Prism 就是标准 OpenPBR"，这是"真超集"的充要前提。
+
+   **已落地（code-truth，2026-10 P2-f 第一片）**：门禁的**两层**各自到位——① **参数块层**：`prism_render_material::openpbr_conformance` 断言"只含 `KHR` 位的材质是 `project_to_openpbr` 的不动点"（结构不变量）；② **响应层**：`prism_render_shading::openpbr_reference` 是**从规范逐式转写**的独立 oracle（GGX NDF 各向同性/各向异性、Heitz-2014 高度相关 Smith、`openpbr-anisotropy-formula` 宽度映射、`unmodulated_fresnel`/`modulated_ior` 与 Walter-2007 精确介电 Fresnel），**与本仓实时着色器零共享代码**——若复用实时 helper 就只是"自证"，这正是该门禁要消灭的失效模式。`conformance::base_dielectric_fresnel_matches_the_openpbr_reference` 在 5 个 IOR × 4 个 `specular_weight` × 2 个 tint × 7 个入射角上把实时求值对着 oracle 卡到 `1e-4`。
+
+   **该门禁当场抓到并修掉一个真实偏差**：实时瓣此前用 **Schlick** 近似基底介电 Fresnel，且把 `specular_weight` 当作 `F0` 的线性缩放——于是 `specular_weight == 0` 时掠射角仍收敛到全反射（"幽灵边缘"），与规范"ξ_s=0 即界面消失、F≡0"直接冲突；对照 oracle 的最大偏差达 **0.904**。现已改为规范口径：`η′ = (1+ε)/(1−ε)`、`ε = sgn(η−1)·√(ξ_s F_s)`，再喂 Walter-2007 精确 Fresnel（CPU 与 WESL 双线同改）。
+
+   **覆盖边界（门禁自己声明，不允许静默超范围）**：当前响应层门禁覆盖**基底介电镜面 Fresnel 因子**（`specular_color`/`specular_weight`/`specular_ior` 的正确交互）。尚未转写：金属的 `F_82` 掠射 tint 混合、coat 分层（`interfaced_lambertian_albedo` / `general_darkening_formula`）、fuzz/subsurface/transmission/thin_film 的规范节点图，以及 furnace 白炉的**收敛值**对拍。下一片按瓣逐一补齐。
 2. **扩展位段隔离（Bit-Region Isolation）**：`LobeMask` 开放枚举按**规范核心区 / Prism 扩展区**静态分段——OpenPBR 规范瓣占低位固定区段（随上游版本演进只增不改语义），FACE 与开放词汇表后续瓣占高位扩展区段。两区位段互不重叠，变长解包 (`prism_unpack_surface`) 按区段路由，杜绝"私有瓣污染规范语义"或"上游新字段撞车扩展位"。
 
    **已落地（code-truth）**：schema 现为**双密集段**——`KHR` 瓣占 slot `0..6`（emission/clearcoat/anisotropy/sheen/subsurface/transmission/**thin_film**），扩展瓣从 `EXTENSION_SLOT_BASE = 16` 起（FACE 从原来的 bit 6 **迁到 bit 16**）；`prism_material_schema` 的验证器**强制**这条规则（非双段布局直接 `NonContiguousRegistrySlots` 报错），所以"加规范瓣只会往低位段追加、加私有瓣只会往高位段追加"是**编译/校验期事实**而非约定。生成物 `SURFACE_LOBE_WORDS_BY_SLOT` 是按 slot 的 `[usize; 17]`（中段留 0），`LobeMask::all()` 相应改为"已定义位的 OR"。
@@ -591,7 +597,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P3-b | 先解耦视角无关项（diffuse/SSS/emission/GI 辐照度），高光仍走屏幕空间 | 分离求值 | P3 |
 | P3-c | 缓存失效 + 时序复用 + mip LOD 策略（光照/动态变化时的页重算） | 调度/一致性 | P3 |
 | P1-g | 自描述反射瓣 schema：lobe 定义（字段名/位宽/置换 key）数据化，解包/分类/对拍从 schema 生成（§17.5） | 工具链+内部布局 | P1 |
-| P2-f | 超集合规门禁 + 向下投影导出器（纯 OpenPBR 对拍 + `project_to_openpbr`，§4.5/§17） | 新测试+导出路径 | P2 |
+| P2-f 🔶 | 超集合规门禁 + 向下投影导出器（纯 OpenPBR 对拍 + `project_to_openpbr`，§4.5/§17）：**参数块层 + 响应层基底介电镜面已落地**（独立 oracle + 抓到并修掉 Schlick/`specular_weight` 偏差，见 §13.a）；余下金属 `F_82`、coat 分层、fuzz/subsurface/transmission/thin_film 节点图、furnace 收敛对拍 | 新测试+导出路径 | P2 |
 | P2-g | 运行时动态参数通道（wetness/snow/damage/dissolve 等少量动态轴，烘焙静态 über + 运行时解析式调制，§17.1） | header 加动态段 | P2 |
 | P2-h | 原理化分层 BSDF（coat/base 能量耦合 + coat_darkening，§17.2） | 无（改 BSDF+测试） | P2 |
 | P3-d | 光谱提升（hero-wavelength，仅 RT twin / 离线参考，不进实时主线，§17.3） | 无（RT-only 分支） | P3 |
@@ -607,6 +613,15 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P2-f 第一片：§4.5 约束 1 的「响应层」合规门禁 + 独立 OpenPBR oracle（并修掉一处真实偏差）**（§4.5 / §13）
+  - **问题定位**：`openpbr_conformance` 此前只做"参数块投影不动点"，它**根本不碰 BSDF 响应**；而 §4.5 约束 1 要的是"与规范参考实现在定向光/furnace 下一致"。也就是说该约束长期只有结构半，没有响应半——属于"自证式"达标。
+  - **做法**：新增 `pkg/prism_render_shading/src/openpbr_reference.rs`（`#[cfg(test)]`，只进测试构建），把规范里基底瓣涉及的公式**逐式独立转写**——`microfacet_brdf_ss` 的 `F·D·G` 分解、`GGX` 的 NDF（含各向异性形式）、Heitz-2014 高度相关 Smith `G2`、`openpbr-anisotropy-formula`、`unmodulated_fresnel`、`modulated_ior`、Walter-2007 精确介电 Fresnel。**与本仓实时 helper 零共享代码**：若复用实时实现，门禁就退化成"代码与自身对比"。
+  - **oracle 自检**：`unmodulated_fresnel` 命中规范的 η=1.5 ⇒ 0.04；`modulated_ior` 两端点（ξ=1 恒等、ξ=0 ⇒ η′=1 且全角 F≈0）；精确 Fresnel **明确不等于** Schlick（把"近似 vs 精确"钉成事实）；GGX NDF 数值积分 `∫D·(n·h) dω = 1`（在 `u=cos²θ` 上积，规避 θ 采样的窄脊）；Smith `G2` 有界 + 互易；microfacet BRDF 互易且非负有限。
+  - **门禁抓到真实偏差**：实时基底介电 Fresnel 是 **Schlick 近似** + `specular_weight` 线性缩放 `F0`。于是 `specular_weight == 0` 时掠射仍 →1（幽灵边缘），与规范 ξ_s=0 时界面消失（`η′=1 ⇒ F≡0`）冲突。**对 oracle 的最大偏差 0.904**（ior=1.2, weight=0, cos=0.02）。
+  - **修复（CPU + WESL 双线）**：`lighting.rs` 新增 `modulated_ior` / `base_dielectric_fresnel_rgb`，`evaluate_principled_direct` 的介电分支改走"规范调制 IOR + 精确 Fresnel + `specular_color` tint"；`brdf.wesl` 加同构的 `brdf_modulated_ior` / `brdf_base_dielectric_fresnel_rgb` 并同改求值路径（`η′=1` 的非界面分支显式返回 0，避免被 `MIN_IOR` 钳出假反射）。金属分支仍走 Schlick（`F_82` 待转写）。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3323 通过**（新增 6 条 oracle 自检 + 1 条响应级对拍），`cargo test -p prism_render_scene --lib` **1602 通过**（brdf 的 WESL 编译链接门禁），touched 文件 clippy 干净。
+  - **覆盖边界（门禁自声明）**：响应层目前覆盖基底介电镜面 Fresnel 因子；金属 `F_82`、coat 分层、fuzz/subsurface/transmission/thin_film 的规范节点图、以及 furnace 收敛值对拍尚未覆盖，按瓣逐片补齐。
 
 - **P1-f2 OpenPBR 默认值对齐（8 处）+ 顺带修掉一个 CPU/WESL 发射不一致 bug**（§4.4）
   - **动机**：`OpenPBR` 超集的约束 1（纯 OpenPBR 子集字节等价）要求"材质不作者某字段"时也走规范的默认值；机器比对 `parametrization` 表后发现 schema `default` 有 **8 处**偏离（`base_color` 1.0、`specular_roughness` 0.5、`coat_roughness` 0.5、`coat_ior` 1.5、`coat_darkening` 0、`subsurface_color` 白、`emission_luminance` 1、`emission_color` 黑）。

@@ -282,12 +282,27 @@ pub fn evaluate_principled_direct(
     )
     .sqrt();
     let f0 = mix3(dielectric_f0(&surface), surface.base_color, metallic);
-    // Thin-film iridescence: blend the Schlick Fresnel toward the Airy
-    // interference reflectance of a dielectric film over the substrate
-    // (glTF `KHR_materials_iridescence`), evaluated at the same `v_dot_h`
-    // cosine so the two agree where thickness -> 0. With `iridescence == 0`
-    // the `mix3` returns the Schlick term unchanged, an exact identity.
-    let f_schlick = fresnel_schlick(f0, v_dot_h);
+    // `OpenPBR` dielectric base specular: the specification's Fresnel factor is
+    // the *exact* angle-dependent dielectric Fresnel (Walter 2007) evaluated at
+    // the `specular_weight`-modulated index ratio (equations `unmodulated_fresnel`
+    // / `modulated_ior`), then tinted by `specular_color`. A plain Schlick curve
+    // is not equivalent: it still reaches total reflection at grazing incidence
+    // when `specular_weight == 0`, where the specification removes the interface
+    // entirely (`η' = 1 ⇒ F ≡ 0`). The conductor branch keeps Schlick from
+    // `base_color`; the specification's `F_82` grazing-tint blend for metals is
+    // not yet transcribed (see the conformance module's coverage note).
+    let f_dielectric = base_dielectric_fresnel_rgb(
+        v_dot_h,
+        surface.specular_ior,
+        surface.specular_weight,
+        surface.specular_color,
+    );
+    let f_specular = mix3(f_dielectric, fresnel_schlick(surface.base_color, v_dot_h), metallic);
+    // Thin-film iridescence: blend the base Fresnel toward the Airy interference
+    // reflectance of a dielectric film over the substrate (glTF
+    // `KHR_materials_iridescence`), evaluated at the same `v_dot_h` cosine so the
+    // two agree where thickness -> 0. With `iridescence == 0` the `mix3` returns
+    // the base Fresnel unchanged, an exact identity.
     let iridescence = surface.iridescence.clamp(0.0, 1.0);
     let f = if iridescence > 0.0 {
         let f_irid = crate::gi::material::thin_film::iridescent_fresnel_rgb(
@@ -297,9 +312,9 @@ pub fn evaluate_principled_direct(
             v_dot_h,
             surface.iridescence_thickness_nm,
         );
-        mix3(f_schlick, f_irid, iridescence)
+        mix3(f_specular, f_irid, iridescence)
     } else {
-        f_schlick
+        f_specular
     };
 
     // Anisotropic axes. The tangent frame is re-orthonormalized against the
@@ -664,6 +679,57 @@ pub(crate) fn dielectric_f0(surface: &SurfaceSample) -> [f32; 3] {
 /// Smallest relative dielectric index accepted by [`fresnel_dielectric`],
 /// keeping the interface from degenerating to an invisible index of one.
 pub(crate) const MIN_DIELECTRIC_IOR: f32 = 1.0 + 1.0e-3;
+
+/// `OpenPBR` equation `modulated_ior`: the index ratio whose exact Fresnel
+/// reproduces the `specular_weight`-scaled reflectance,
+/// `η' = (1 + ε)/(1 − ε)` with `ε = sgn(η − 1)·sqrt(ξ_s·F_s)`.
+///
+/// `ξ_s == 0` removes the interface (`η' == 1`, `F ≡ 0` at every angle — *not* a
+/// grazing rim); `ξ_s == 1` returns the authored index; `ξ_s > 1` (legal per the
+/// spec) raises the index, saturating at the total-reflection limit.
+#[inline]
+pub(crate) fn modulated_ior(eta: f32, specular_weight: f32) -> f32 {
+    let w = specular_weight.max(0.0);
+    if w == 0.0 {
+        return 1.0;
+    }
+    let r = (1.0 - eta) / (1.0 + eta);
+    let f_s = r * r;
+    let sign = if eta >= 1.0 { 1.0 } else { -1.0 };
+    let epsilon = (sign * ops::sqrt(w * f_s)).clamp(-(1.0 - 1.0e-4), 1.0 - 1.0e-4);
+    let one_minus = 1.0 - epsilon;
+    let eta_prime = (1.0 + epsilon) / one_minus;
+    if eta_prime.is_finite() && eta_prime > 0.0 {
+        eta_prime
+    } else {
+        MIN_DIELECTRIC_IOR
+    }
+}
+
+/// The `OpenPBR` dielectric base specular Fresnel factor for a color3 tint: the
+/// exact angle-dependent Fresnel [`fresnel_dielectric`] at the
+/// [`modulated_ior`], multiplied by `specular_color`.
+#[inline]
+pub(crate) fn base_dielectric_fresnel_rgb(
+    cos_i: f32,
+    specular_ior: f32,
+    specular_weight: f32,
+    specular_color: [f32; 3],
+) -> [f32; 3] {
+    let eta = modulated_ior(specular_ior.clamp(1.0, 3.0), specular_weight.clamp(0.0, 1.0));
+    // `η' == 1` is a non-interface: `fresnel_dielectric` would clamp such an
+    // index to a tiny positive one and report a spurious grazing reflection.
+    let f = if (eta - 1.0).abs() <= f32::EPSILON {
+        0.0
+    } else {
+        fresnel_dielectric(cos_i, eta)
+    };
+    [
+        f * specular_color[0],
+        f * specular_color[1],
+        f * specular_color[2],
+    ]
+}
 
 /// Relative per-channel index spread at `dispersion == 1`, applied as
 /// `OpenPBR` dispersion primaries: the Abbe `d`-line and the `F`/`C` hydrogen
