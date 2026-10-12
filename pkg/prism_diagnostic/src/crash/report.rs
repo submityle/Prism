@@ -169,12 +169,20 @@ fn write_registers(w: &mut ByteWriter, regs: &RegisterSnapshot) {
     }
 }
 
+/// Bound a pre-allocation by the bytes that remain: every element costs at least
+/// one byte, so a declared count larger than `remaining` is a corrupt/truncated
+/// frame and reserving from it would risk a multi-GiB allocation (CR-found).
+/// The loop still errors on the real end of input.
+fn capped(count: usize, r: &ByteReader<'_>) -> usize {
+    count.min(r.remaining())
+}
+
 fn read_registers(r: &mut ByteReader<'_>) -> Result<RegisterSnapshot, WireError> {
     let instruction_pointer = r.get_u64()?;
     let stack_pointer = r.get_u64()?;
     let frame_pointer = r.get_u64()?;
     let count = r.get_u32()? as usize;
-    let mut general = Vec::with_capacity(count);
+    let mut general = Vec::with_capacity(capped(count, r));
     for _ in 0..count {
         let name = r.get_str()?;
         let value = r.get_u64()?;
@@ -237,7 +245,7 @@ fn read_thread(r: &mut ByteReader<'_>) -> Result<ThreadContext, WireError> {
     let thread_name = read_opt_str(r)?;
     let registers = read_registers(r)?;
     let count = r.get_u32()? as usize;
-    let mut frames = Vec::with_capacity(count);
+    let mut frames = Vec::with_capacity(capped(count, r));
     for _ in 0..count {
         frames.push(read_frame(r)?);
     }
@@ -274,13 +282,13 @@ fn read_context(r: &mut ByteReader<'_>) -> Result<CrashContext, WireError> {
     let crashing_thread = read_thread(r)?;
 
     let other_count = r.get_u32()? as usize;
-    let mut other_threads = Vec::with_capacity(other_count);
+    let mut other_threads = Vec::with_capacity(capped(other_count, r));
     for _ in 0..other_count {
         other_threads.push(read_thread(r)?);
     }
 
     let module_count = r.get_u32()? as usize;
-    let mut modules = Vec::with_capacity(module_count);
+    let mut modules = Vec::with_capacity(capped(module_count, r));
     for _ in 0..module_count {
         modules.push(read_module(r)?);
     }
@@ -289,7 +297,7 @@ fn read_context(r: &mut ByteReader<'_>) -> Result<CrashContext, WireError> {
     let build_id = r.get_str()?;
 
     let note_count = r.get_u32()? as usize;
-    let mut notes = Vec::with_capacity(note_count);
+    let mut notes = Vec::with_capacity(capped(note_count, r));
     for _ in 0..note_count {
         let key = r.get_str()?;
         let value = r.get_str()?;

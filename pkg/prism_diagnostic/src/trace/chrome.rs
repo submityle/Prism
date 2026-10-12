@@ -190,13 +190,25 @@ pub fn export_string_with_gpu(gpu_spans: &[crate::gpu::ProjectedGpuSpan]) -> Str
     for span in gpu_spans {
         queues.insert(span.queue.0);
     }
+    // After truncating the closing `]`, the prefix ends with `[` when there were
+    // no CPU events at all; emitting a leading comma then would produce invalid
+    // JSON (`[, ...`). Track whether anything has been written yet (CR-found).
+    let mut first = !out.ends_with('[');
     for queue in queues {
-        out.push(',');
+        if first {
+            first = false;
+        } else {
+            out.push(',');
+        }
         let tid = GPU_TRACK_TID_BASE + queue as u64;
         write_thread_name_event(&mut out, tid, &format!("GPU Queue {queue}"));
     }
     for span in gpu_spans {
-        out.push(',');
+        if first {
+            first = false;
+        } else {
+            out.push(',');
+        }
         let tid = GPU_TRACK_TID_BASE + span.queue.0 as u64;
         write_gpu_complete_event(&mut out, tid, span);
     }

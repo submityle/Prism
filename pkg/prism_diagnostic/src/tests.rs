@@ -58,3 +58,29 @@ fn level_ordering_is_correct() {
     assert!(Level::Trace < Level::Info);
     assert!(Level::Error > Level::Warn);
 }
+
+/// Autoref-specialization probe: the inherent `is_not_send` (returning `false`)
+/// applies only when `T: Send`; otherwise the trait fallback (`true`) is used —
+/// a stable-Rust negative `Send` assertion.
+struct SendProbe<T>(core::marker::PhantomData<T>);
+trait NotSendFallback {
+    fn is_not_send(&self) -> bool {
+        true
+    }
+}
+impl<T> NotSendFallback for SendProbe<T> {}
+#[expect(dead_code, reason = "the Send arm is never instantiated by design")]
+impl<T: Send> SendProbe<T> {
+    fn is_not_send(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn timing_guards_are_not_send() {
+    // `Scope` and `ProfiledZone` capture the constructing thread's depth/ring
+    // and write back on `Drop`; moving one to another thread would corrupt the
+    // original thread's nesting (CR-found). Assert `!Send`.
+    assert!(SendProbe::<Scope>(core::marker::PhantomData).is_not_send());
+    assert!(SendProbe::<ProfiledZone>(core::marker::PhantomData).is_not_send());
+}

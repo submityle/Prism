@@ -172,6 +172,10 @@ pub struct ProfiledZone {
     thread_id: u64,
     depth: u32,
     start: prism_platform::MonotonicNanos,
+    /// The guard increments a thread-local `DEPTH` on construction and
+    /// decrements it on drop, so dropping it on another thread would corrupt the
+    /// original thread's depth (`!Send`). See [`crate::span::Scope`].
+    _not_send: core::marker::PhantomData<*const ()>,
 }
 
 impl ProfiledZone {
@@ -190,6 +194,7 @@ impl ProfiledZone {
             depth,
             // Read the clock last so setup is excluded from the interval.
             start: now(),
+            _not_send: core::marker::PhantomData,
         }
     }
 

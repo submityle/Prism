@@ -26,6 +26,12 @@ pub struct Scope {
     start: MonotonicNanos,
     depth: u32,
     thread_id: u64,
+    /// `Scope` captures this thread's depth/ring on construction and writes back
+    /// to that thread's ring on `Drop`, so it must not be moved to another
+    /// thread (`!Send`): a cross-thread drop would decrement the wrong depth and
+    /// record into the wrong ring (CR-found). A raw-pointer `PhantomData` is
+    /// `!Send + !Sync` without needing `alloc` or `unsafe`.
+    _not_send: core::marker::PhantomData<*const ()>,
 }
 
 impl Scope {
@@ -42,6 +48,7 @@ impl Scope {
             start: now(),
             depth,
             thread_id,
+            _not_send: core::marker::PhantomData,
         }
     }
 

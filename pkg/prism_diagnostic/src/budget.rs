@@ -195,24 +195,35 @@ impl BudgetRegistry {
     /// declaration coverage.
     #[must_use]
     pub fn evaluate_frame(&self, measured: &[(&str, u64)]) -> FrameBudgetReport {
+        // Sum *every* entry for a name, so a category reported more than once
+        // (e.g. two render passes) is billed with its true total instead of just
+        // its first entry — matching the frame total (CR-found).
+        let sum_for = |name: &str| -> u64 {
+            measured
+                .iter()
+                .filter(|(n, _)| *n == name)
+                .map(|(_, v)| *v)
+                .fold(0u64, u64::saturating_add)
+        };
         let mut statuses = Vec::with_capacity(self.budgets.len());
         // Declared categories first, in declaration order.
         for budget in &self.budgets {
-            let measured_nanos = measured
-                .iter()
-                .find(|(name, _)| *name == budget.category)
-                .map_or(0, |(_, v)| *v);
             statuses.push(status(
                 &budget.category,
-                measured_nanos,
+                sum_for(&budget.category),
                 budget.budget_nanos,
             ));
         }
-        // Undeclared-but-measured categories afterwards, with a zero budget.
-        for (name, measured_nanos) in measured {
-            if !self.budgets.iter().any(|b| b.category == *name) {
-                statuses.push(status(name, *measured_nanos, 0));
+        // Undeclared-but-measured categories afterwards, with a zero budget —
+        // one status per distinct name, carrying the summed measurement.
+        for (name, _) in measured {
+            if self.budgets.iter().any(|b| b.category == *name) {
+                continue;
             }
+            if statuses.iter().any(|s| s.category == *name) {
+                continue;
+            }
+            statuses.push(status(name, sum_for(name), 0));
         }
 
         let total_measured_nanos = measured

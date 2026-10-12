@@ -10,9 +10,12 @@
 //!
 //! This is the only part of M5 that uses `std::net`/`std::thread`, and it is
 //! gated behind the `remote` feature so the default build neither opens sockets
-//! nor spawns threads. The hot path (`broadcast`) never blocks on a slow or dead
-//! client: a write error simply drops that client (design §16's "drop, don't
-//! block" backpressure stance).
+//! nor spawns threads. The hot path (`broadcast`) never blocks *indefinitely* on
+//! a slow or dead client: every delivery is bounded by a short write timeout, so
+//! a client whose socket buffer is full fails the write within
+//! [`WRITE_TIMEOUT`](self) and is dropped (design §16's "drop, don't block"
+//! backpressure stance). A stuck client can therefore hold the client lock for at
+//! most one timeout, never forever (CR-found).
 
 extern crate alloc;
 
@@ -27,6 +30,11 @@ use std::thread::{self, JoinHandle};
 
 use super::command::{CommandOutcome, RemoteCommand, RuntimeControls};
 use super::protocol::{self, RemoteEvent};
+
+/// Per-delivery socket write timeout. A panel that cannot accept a frame within
+/// this window is treated as dead and pruned, bounding how long `broadcast` can
+/// hold the client lock (CR-found). Kept well under a frame at 60 Hz.
+const WRITE_TIMEOUT: core::time::Duration = core::time::Duration::from_millis(50);
 
 /// Shared server state, held behind an `Arc` so the accept thread, per-client
 /// reader threads, and the owning handle all observe the same truth.
@@ -46,6 +54,9 @@ impl ServerInner {
 
     fn register_client(self: &Arc<Self>, stream: TcpStream) {
         let _ = stream.set_nodelay(true);
+        // Bound each delivery so a stalled panel cannot block `broadcast` (and
+        // the client lock) indefinitely.
+        let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
         let Ok(reader_stream) = stream.try_clone() else {
             return;
         };

@@ -227,12 +227,19 @@ impl TagLeakReport {
     }
 }
 
-/// Signed difference `a - b` without `i64` overflow for `u64` inputs.
+/// Signed difference `a - b` for `u64` inputs, **saturating** at the `i64`
+/// bounds instead of truncating.
+///
+/// `(a - b) as i64` silently wraps a difference larger than `i64::MAX` (e.g.
+/// `0 - u64::MAX` used to report `-1`), inverting the leak sign (CR-found).
 fn diff(a: u64, b: u64) -> i64 {
     if a >= b {
-        (a - b) as i64
+        i64::try_from(a - b).unwrap_or(i64::MAX)
     } else {
-        -((b - a) as i64)
+        match i64::try_from(b - a) {
+            Ok(magnitude) => -magnitude,
+            Err(_) => i64::MIN,
+        }
     }
 }
 

@@ -451,13 +451,22 @@ fn ratio_expected_keep() {
 #[test]
 fn sampler_bucket_pinned_and_salted() {
     let s = TelemetrySampler::new(SampleRatio::always());
-    // Pinned bucket for ("crash", "sess-1").
-    assert_eq!(s.bucket("crash", "sess-1"), 0x2075_b8dc_d282_adec);
+    // Pinned bucket for ("crash", "sess-1") — length-prefixed fold (the old
+    // NUL-joined form is gone; see the collision test below).
+    assert_eq!(s.bucket("crash", "sess-1"), 0xf5a3_e742_e41b_59e1);
     // Name-salting: the same key under a different event name differs.
     assert_ne!(
         s.bucket("crash", "sess-1"),
         s.bucket("frame_stats", "sess-1")
     );
+}
+
+#[test]
+fn sampler_bucket_has_no_nul_collision() {
+    // The old `name || NUL || key` fold made these two distinct pairs hash
+    // identically, correlating independent streams (CR-found).
+    let s = TelemetrySampler::new(SampleRatio::always());
+    assert_ne!(s.bucket("a\0b", "c"), s.bucket("a", "b\0c"));
 }
 
 #[test]
@@ -474,21 +483,21 @@ fn sampler_should_sample_deterministic() {
         .with_event_rate("crash", SampleRatio::always());
     // crash is always kept.
     assert!(s.should_sample("crash", "sess-1"));
-    // frame_stats under 1/10: bucket%10 == 0 keeps sess-1, == 9 drops sess-2.
-    assert!(s.should_sample("frame_stats", "sess-1"));
-    assert!(!s.should_sample("frame_stats", "sess-2"));
+    // frame_stats under 1/10: bucket % 10 == 0 keeps sess-0; sess-1 drops.
+    assert!(s.should_sample("frame_stats", "sess-0"));
+    assert!(!s.should_sample("frame_stats", "sess-1"));
     // Repeat calls are stable.
     assert_eq!(
-        s.should_sample("frame_stats", "sess-2"),
-        s.should_sample("frame_stats", "sess-2")
+        s.should_sample("frame_stats", "sess-1"),
+        s.should_sample("frame_stats", "sess-1")
     );
 }
 
 #[test]
 fn sampler_decide_outcome() {
     let s = TelemetrySampler::new(SampleRatio::one_in(10));
-    let out = s.decide("frame_stats", "sess-1");
-    assert_eq!(out.bucket, 0x4439_0139_5af1_c2a2);
+    let out = s.decide("frame_stats", "sess-0");
+    assert_eq!(out.bucket, 0x0dc6_6d87_ba0e_e7fe);
     assert_eq!(out.ratio, SampleRatio::one_in(10));
     assert!(out.kept); // bucket % 10 == 0 < 1
 }
@@ -500,8 +509,8 @@ fn sampler_sample_event() {
     let s = TelemetrySampler::new(SampleRatio::one_in(10));
     // sample_event routes through the event name.
     assert_eq!(
-        s.sample_event(&ev, "sess-1"),
-        s.should_sample("frame_stats", "sess-1")
+        s.sample_event(&ev, "sess-0"),
+        s.should_sample("frame_stats", "sess-0")
     );
-    assert!(s.sample_event(&ev, "sess-1"));
+    assert!(s.sample_event(&ev, "sess-0"));
 }

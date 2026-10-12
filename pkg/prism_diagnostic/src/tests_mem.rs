@@ -202,3 +202,19 @@ fn occupancy_map_buckets_report_coverage_percentage() {
     assert!(occupancy_map(0, &[Span::new(0, 10)], 4).is_empty());
     assert!(occupancy_map(100, &[], 0).is_empty());
 }
+
+#[test]
+fn leak_residual_saturates_instead_of_wrapping() {
+    // CR-found: `(a - b) as i64` wrapped a difference larger than `i64::MAX`,
+    // so `0 - u64::MAX` reported `-1` (a tiny "over-freed") instead of a huge
+    // positive leak. The sign must stay correct by saturating.
+    let report = LeakCheckpoint::new(0, 0).reconcile(LeakCheckpoint::new(u64::MAX, 2));
+    assert_eq!(report.residual_bytes, i64::MAX);
+    assert!(report.leaked());
+    assert!(!report.over_freed());
+
+    let over = LeakCheckpoint::new(u64::MAX, 1).reconcile(LeakCheckpoint::new(0, 0));
+    assert_eq!(over.residual_bytes, i64::MIN);
+    assert!(over.over_freed());
+    assert!(!over.leaked());
+}

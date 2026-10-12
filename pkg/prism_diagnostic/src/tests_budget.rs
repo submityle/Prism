@@ -70,6 +70,45 @@ fn frame_report_rolls_up_and_feeds_scheduler_headroom() {
 }
 
 #[test]
+fn frame_report_sums_duplicate_category_entries() {
+    // A category reported twice (e.g. two render passes) must be billed with its
+    // summed total, not just its first entry, and any duplicate undeclared name
+    // must yield exactly one status (CR-found).
+    let mut reg = BudgetRegistry::fps_120();
+    reg.declare("render", 8_000_000);
+    let report = reg.evaluate_frame(&[
+        ("render", 5_000_000),
+        ("render", 5_000_000),
+        ("misc", 1_000_000),
+        ("misc", 2_000_000),
+    ]);
+    let render = report
+        .statuses
+        .iter()
+        .find(|s| s.category == "render")
+        .unwrap();
+    assert_eq!(render.measured_nanos, 10_000_000);
+    assert!(render.over_budget);
+    assert_eq!(render.overspend_nanos, 2_000_000);
+    // One status per distinct name.
+    assert_eq!(
+        report
+            .statuses
+            .iter()
+            .filter(|s| s.category == "misc")
+            .count(),
+        1
+    );
+    let misc = report
+        .statuses
+        .iter()
+        .find(|s| s.category == "misc")
+        .unwrap();
+    assert_eq!(misc.measured_nanos, 3_000_000);
+    assert_eq!(report.total_measured_nanos, 13_000_000);
+}
+
+#[test]
 fn frame_over_budget_zeroes_background_headroom() {
     let mut reg = BudgetRegistry::fps_120(); // 8.333ms frame
     reg.declare("render", 6_000_000);

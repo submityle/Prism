@@ -158,8 +158,12 @@ impl TelemetrySampler {
     #[must_use]
     pub fn bucket(&self, name: &str, key: &str) -> u64 {
         let mut hasher = StateHasher::new();
+        // Length-prefix each field: the old `name || NUL || key` form made
+        // `("a\0b", "c")` and `("a", "b\0c")` hash identically, correlating two
+        // otherwise independent event streams (CR-found).
+        hasher.write_u64(name.len() as u64);
         hasher.write_bytes(name.as_bytes());
-        hasher.write_u8(0);
+        hasher.write_u64(key.len() as u64);
         hasher.write_bytes(key.as_bytes());
         hasher.finish()
     }

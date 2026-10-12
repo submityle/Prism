@@ -209,19 +209,30 @@ pub(crate) fn record_free(size: usize) {
 }
 
 /// Add `size` to the per-tag live residency for `tag` (no-op when untagged or
-/// out of range). Called by [`LiveTrackingAllocator`] on allocation.
+/// out of range, or while tracking is disabled — mirroring
+/// [`record_alloc`]). Called by [`LiveTrackingAllocator`] on allocation.
 #[inline]
 pub(crate) fn record_tag_live_alloc(tag: usize, size: usize) {
+    // Per-tag live bytes must honour the same enable gate as the global
+    // counters, or they drift across an enable/disable boundary while the rest
+    // of the accounting stands still (CR-found).
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     if tag < MAX_TAGS {
         TAG_LIVE_BYTES[tag].fetch_add(size as u64, Ordering::Relaxed);
     }
 }
 
 /// Subtract `size` from the per-tag live residency for `tag`, saturating at
-/// zero (no-op when untagged or out of range). Called by
+/// zero (no-op when untagged, out of range, or while tracking is disabled).
+/// Called by
 /// [`LiveTrackingAllocator`] on deallocation of a block stamped with `tag`.
 #[inline]
 pub(crate) fn record_tag_live_free(tag: usize, size: usize) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     if tag >= MAX_TAGS {
         return;
     }
