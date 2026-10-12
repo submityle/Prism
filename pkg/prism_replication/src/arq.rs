@@ -177,8 +177,11 @@ impl ReliableReceiver {
     ///
     /// A duplicate or already-delivered sequence is re-acknowledged (the original
     /// ACK was probably lost) so the sender stops retransmitting; a sequence past
-    /// the window is not acknowledged, forcing an explicit resync rather than an
-    /// unbounded buffer.
+    /// the window is not acknowledged, so it is neither delivered nor buffered
+    /// (the receiver never grows without bound). A sender is bounded by its own
+    /// window ([`ReliableSender::send`]) and only ever retransmits unacknowledged
+    /// messages, so it always resends the missing head rather than running past
+    /// the receiver; the caller does not need a separate resync handshake.
     pub fn receive(&mut self, seq: u64, payload: Vec<u8>) -> (Vec<Vec<u8>>, Option<u64>) {
         match self.window.insert(seq, payload) {
             Delivery::Advanced(run) => {
@@ -291,6 +294,26 @@ mod tests {
         assert!(sender.ack(0, 1));
         assert!(!sender.is_full());
         assert!(sender.send(b"d".to_vec()).is_some());
+    }
+
+    /// Regression: numbering is `u64`. A sequence past the old `u32` range must be
+    /// distinct, not truncated/wrapped and mistaken for a stale or duplicate one.
+    #[test]
+    fn sequences_past_the_u32_range_stay_distinct() {
+        let mut sender = ReliableSender::new(2, 4);
+        sender.next_seq = u64::from(u32::MAX) + 1;
+        assert_eq!(sender.send(b"p".to_vec()), Some(u64::from(u32::MAX) + 1));
+        assert_eq!(sender.send(b"q".to_vec()), Some(u64::from(u32::MAX) + 2));
+
+        let mut out = Vec::new();
+        sender.tick(0, &mut out);
+        assert_eq!(out[0].0, u64::from(u32::MAX) + 1);
+        assert_eq!(out[1].0, u64::from(u32::MAX) + 2);
+
+        // Each is acknowledged by its own full-width sequence.
+        assert!(sender.ack(u64::from(u32::MAX) + 1, 1));
+        assert!(sender.ack(u64::from(u32::MAX) + 2, 1));
+        assert_eq!(sender.unacked(), 0);
     }
 
     /// End-to-end over a lossy, jittery link: every message is delivered exactly
