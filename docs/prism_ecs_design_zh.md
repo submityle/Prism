@@ -402,6 +402,8 @@ prefab 作为实体模板；实例通过 `IsA` 关系继承其组件并可逐字
 
 只读/可变 × 串行/批量的对照（`scale_serial_vs_batch_diagnosis`，3 次重复稳定）：只读串行 3.9 ns vs `par(1)` 1.70 ns（**2.3×**）；可变串行 6.6 ns vs `par(1)` 4.0 ns（**1.63×**）。
 
+**批量生成（`World::spawn_batch`）**：同机同场景 `spawn_batch` 稳定在 **50–78 ns/实体**，而逐个 `spawn` 在负载下于 **252–576 ns/实体** 波动 → **3.4–7.4×**。差异说明逐实体开销的大头确实是**每实体的 archetype 解析**（bundle id 收集 + required 展开 + 存储分类 + `get_or_create`）——批量把这件事只做一次，而 hooks / observers / required 默认值仍逐实体执行（有测试专门断言这三件事没有被"优化掉"）。含共享组件的 bundle 会回退到逐实体路径（共享值决定 archetype，无法一次解析），行为有测试覆盖。
+
 **实测结论（诚实）**：
 
 - 百万级单线程迭代已在 **~6.6 ns/实体**量级，规模性不再只是推断。
@@ -453,7 +455,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
 ## 20. 契约、不变量与版本化
 
 - **下游 API 契约优先**：对接层公共 API 是红线；内部实现随便改，公共 API 改动必须同步迁移依赖方，保持全仓绿。
-- **版本化新增契约**：`ChunkMeta`、`ChunkDirtyIndex`、`EcsSnapshot`/`EcsDelta`、`OwningGroupId`、`WorldPartitionCell`、`GridCell`/`FloatingOrigin`、`ReactionHandle`、`JobHandle`、`StateHash`、`GpuResidentColumn`。
+- **版本化新增契约（以实际导出名为准）**：`storage::{ChunkVersions, TARGET_CHUNK_BYTES, rows_per_chunk}`（每 chunk 一条变更版本；草案里的 **`ChunkMeta`——每块元数据（AABB / 可见位 / LOD / 批次键 / cell 归属）——尚未落地**，见 §5 的 chunk 诚实注记）、`query::DirtyChunk` + `QueryState::dirty_chunks`（草案名 `ChunkDirtyIndex`）、`WorldSnapshot` / `SnapshotDelta` / `SnapshotRing`（草案名 `EcsSnapshot`/`EcsDelta`）、`OwningGroupId`、`WorldPartitionCell`、`GridCell`/`FloatingOrigin`、`NodeId` / `ReactionGraph`（草案名 `ReactionHandle`）、`JobHandle`（来自 `prism_tasks`）、`WorldSnapshot::state_hash()`（草案名 `StateHash`，实际是逐帧 `u64` 哈希）、`GpuResidentColumn`。列出实际名是有意的：这一节是给别人照抄的契约面，旧稿的草案名与代码不符会让读者找不到对应类型。
 - **不变量**：owning group 单一拥有者；chunk 版本单调递增；确定性稳定键；快照 roundtrip 等价；子世界实体迁移保 generation；Entity generation 为 `NonZeroU32`（保留 0、回收自增、回绕跳 0），index 0 为正常可用槽。
 
 ---

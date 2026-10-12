@@ -14,6 +14,7 @@
 //! stay informative on any machine instead of flaky. The numbers are recorded
 //! in `docs/prism_ecs_design_zh.md` as measured evidence.
 
+use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use prism_ecs::prelude::*;
@@ -139,8 +140,6 @@ fn scale_par_propagate_1m_scaling() {
 #[test]
 #[ignore = "allocates 1M entities per case; run explicitly with --release --ignored"]
 fn scale_serial_vs_batch_diagnosis() {
-    use std::hint::black_box;
-
     let pool = prism_tasks::TaskPool::with_threads(1);
 
     // Read-only: no change-tick store at all.
@@ -191,5 +190,34 @@ fn scale_serial_vs_batch_diagnosis() {
         ns_per_entity(serial_rw),
         ns_per_entity(par_rw),
         serial_rw.as_secs_f64() / par_rw.as_secs_f64(),
+    );
+}
+
+/// `World::spawn_batch` resolves the archetype once per run instead of once per
+/// entity; this measures what that is worth on a mass-spawn.
+#[test]
+#[ignore = "allocates 1M entities twice; run explicitly with --release --ignored"]
+fn scale_spawn_batch_vs_individual_1m() {
+    let individual = best_of(|| {
+        let mut world = World::new();
+        for i in 0..ENTITIES {
+            world.spawn((Pos(i as f32, 0.0, 0.0), Vel(1.0, 2.0, 3.0)));
+        }
+        black_box(world.entity_count());
+    });
+
+    let batched = best_of(|| {
+        let mut world = World::new();
+        let spawned = world.spawn_batch(
+            (0..ENTITIES).map(|i| (Pos(i as f32, 0.0, 0.0), Vel(1.0, 2.0, 3.0))),
+        );
+        black_box(spawned.len());
+    });
+
+    println!(
+        "spawn 1M: individual {individual:?} ({:.0} ns/entity) | spawn_batch {batched:?} ({:.0} ns/entity) | {:.2}x",
+        ns_per_entity(individual),
+        ns_per_entity(batched),
+        individual.as_secs_f64() / batched.as_secs_f64(),
     );
 }

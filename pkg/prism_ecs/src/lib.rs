@@ -8,21 +8,36 @@
 //!
 //! # Milestone status
 //!
-//! This crate is built up in milestones (see the design doc, §21):
+//! The design doc's roadmap (§21) is **M0–M5 plus the §23 additions**: all of it
+//! is implemented here, with tests, and there are no `todo!()`,
+//! `unimplemented!()`, or hollow stubs on the public surface.
 //!
-//! - **M0 (this module set)** — generational [`Entity`] + allocator, the
-//!   [`Component`] registry, the archetype graph with columnar
-//!   Structure-of-Arrays [storage](crate::storage), ergonomic
-//!   [`World`](crate::world::World) spawn/get/insert/remove/despawn, basic
-//!   [queries](crate::query) with `With`/`Without`/`Option` filters, and a
-//!   deferred [`Commands`](crate::command::Commands) buffer.
+//! - **M0 core** — generational [`Entity`] + allocator, the [`Component`]
+//!   registry, the archetype graph with columnar Structure-of-Arrays
+//!   [storage](crate::storage), [`World`](crate::world::World)
+//!   spawn/get/insert/remove/despawn (plus `prewarm` for first-frame bursts),
+//!   basic [queries](crate::query), and deferred
+//!   [`Commands`](crate::command::Commands).
+//! - **M1 scheduling** — [`System`](crate::system::System) param derivation, the
+//!   conflict-graph executor, resources, events, run conditions and
+//!   [`SystemSet`](crate::schedule::SystemSet)s.
+//! - **M2 performance core** — double-layer change detection with the dirty
+//!   [chunk](crate::storage::ChunkVersions) accessor, sparse sets, SIMD column
+//!   kernels, owning groups, the query match cache, and ordered command replay.
+//! - **M3 jobs** — the [fiber job graph](crate::system::JobGraph) and
+//!   system-internal chunk parallelism on [`prism_tasks`].
+//! - **M4 relations and reactivity** — fragmenting relations with transitive
+//!   queries, the canonical [`ChildOf`](crate::hierarchy::ChildOf) hierarchy,
+//!   [observers](crate::observer) and hooks, the push reaction graph, required
+//!   components, prefabs, and blobs.
+//! - **M5 scale / determinism / GPU** — world-partition streaming with entity
+//!   LOD and a 64-bit floating origin, snapshots with rollback, the
+//!   `determinism`/`trace` diagnostics, and GPU-resident columns.
 //!
-//! Everything here is a **real, working implementation** — there are no
-//! `todo!()`, `unimplemented!()`, or hollow stubs on the public M0 surface.
-//! Later milestones (chunk change-versions, SparseSet storage, SIMD iteration,
-//! the fiber job graph, relations, reactivity, world partitioning,
-//! determinism/rollback, and GPU-resident columns) layer on top of these
-//! foundations without rewriting them.
+//! Still **PLANNED** (and recorded as such in the design doc): M6 migration and
+//! tooling, physical 16 KiB chunk arenas, large-page / NUMA-aware column
+//! allocation, the render side of the §23.5 extraction pipeline, and the
+//! `ParamSet` system param.
 //!
 //! # `no_std`
 //!

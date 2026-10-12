@@ -494,6 +494,81 @@ impl World {
         self.place_new_entity(entity, bundle);
     }
 
+    /// Spawn many entities of one bundle type, resolving the target archetype
+    /// **once** for the whole run (design §5 / §17 mass spawning).
+    ///
+    /// Every entity receives the same per-entity treatment a single
+    /// [`spawn`](Self::spawn) gives it: required components are added with fresh
+    /// defaults, `on_add`/`on_insert` hooks and the matching observers fire, and
+    /// owning groups are maintained. What is hoisted out of the loop is the
+    /// *type-level* work — component-id collection, required-component
+    /// expansion, storage classification and the archetype lookup — which is
+    /// identical for every item of a concrete bundle type.
+    ///
+    /// A bundle containing a
+    /// [`shared`](crate::component::StorageType::Shared) component falls back to
+    /// the per-item path: the interned shared value decides the archetype, so it
+    /// cannot be resolved once for the batch.
+    ///
+    /// Returns the spawned entities in input order.
+    pub fn spawn_batch<B: Bundle>(&mut self, bundles: impl IntoIterator<Item = B>) -> Vec<Entity> {
+        let mut ids = Vec::new();
+        B::component_ids(&mut self.components, &mut ids);
+        assert_eq!(
+            ComponentSet::from_ids(ids.iter().copied()).len(),
+            ids.len(),
+            "a bundle may not contain the same component type twice"
+        );
+
+        // Required components (design §16.1) are a property of the bundle type,
+        // so the expansion and its constructors are shared by every item; each
+        // row still calls the constructor, so no default value is reused.
+        let required: Vec<(ComponentId, RequiredCtor)> = if self.components.has_required() {
+            self.collect_required(&ids)
+        } else {
+            Vec::new()
+        };
+        let explicit_len = ids.len();
+        let mut all_ids = ids;
+        all_ids.extend(required.iter().map(|(id, _)| *id));
+
+        let storages = self.classify_storages(&all_ids);
+        if storages.iter().any(|s| matches!(s, StorageType::Shared)) {
+            return bundles.into_iter().map(|bundle| self.spawn(bundle)).collect();
+        }
+        self.ensure_sparse_sets(&all_ids, &storages);
+
+        let table_set = ComponentSet::from_ids(
+            all_ids
+                .iter()
+                .zip(&storages)
+                .filter(|(_, s)| **s == StorageType::Table)
+                .map(|(id, _)| *id),
+        );
+        let archetype_id = self.archetypes.get_or_create(&table_set, &self.components);
+        // Sampled once: a single `spawn` also stamps every component of one
+        // entity with the same world tick, and nothing here advances it.
+        let change_tick = self.change_tick;
+
+        let mut spawned = Vec::new();
+        for bundle in bundles {
+            let entity = self.entities.alloc();
+            let row = self.fill_row(
+                entity,
+                bundle,
+                archetype_id,
+                &all_ids,
+                &storages,
+                &required,
+                explicit_len,
+                change_tick,
+            );
+            self.finish_spawn(entity, archetype_id, row as u32, &all_ids);
+            spawned.push(entity);
+        }
+        spawned
+    }
+
     /// Shared spawn core: compute `bundle`'s archetype, allocate a row, move its
     /// values into the columns, and record `entity`'s location. `entity` must be
     /// live and currently unplaced.
@@ -556,112 +631,154 @@ impl World {
             );
             let archetype_id = self.archetypes.get_or_create(&table_set, &self.components);
 
-            let row = {
-                let World {
-                    archetypes,
-                    sparse_sets,
-                    ..
-                } = &mut *self;
-                let table = archetypes
-                    .get_mut(archetype_id)
-                    .expect("archetype just created")
-                    .table_mut();
-                let row = table.allocate(entity);
-                let mut i = 0usize;
-                // SAFETY: `get_components` yields one pointer per explicit id in
-                // `all_ids[..explicit_len]` order, each a valid owned component
-                // value routed exactly once into its matching table column or
-                // sparse set, restoring both invariants.
-                unsafe {
-                    bundle.get_components(&mut |ptr| {
-                        let id = all_ids[i];
-                        let storage = storages[i];
-                        i += 1;
-                        match storage {
-                            StorageType::Table => {
-                                table.column_for_fill(id).push(ptr, change_tick);
-                            }
-                            StorageType::SparseSet => {
-                                sparse_sets
-                                    .get_mut(id)
-                                    .expect("sparse set pre-created")
-                                    .insert(entity, ptr, change_tick);
-                            }
-                            // Unreachable: this branch runs only when no id
-                            // classifies as `Shared`; shared spawns take the
-                            // staged helper above.
-                            StorageType::Shared => {
-                                unreachable!("shared component routed through staged spawn")
-                            }
-                        }
-                    });
-                }
-                debug_assert_eq!(i, explicit_len);
-                // Required default values occupy the tail of `all_ids`.
-                for (k, (rid, ctor)) in required.iter().enumerate() {
-                    let storage = storages[explicit_len + k];
-                    let ctor_fn: &(dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync) = &**ctor;
-                    ctor_fn(&mut |ptr| {
-                        // SAFETY: the ctor hands back one freshly constructed `rid`
-                        // value, moved exactly once into its (empty) table column at
-                        // the just-allocated row or its pre-created sparse set, and
-                        // never dropped by the ctor itself.
-                        unsafe {
-                            match storage {
-                                StorageType::Table => {
-                                    table.column_for_fill(*rid).push(ptr, change_tick);
-                                }
-                                StorageType::SparseSet => {
-                                    sparse_sets
-                                        .get_mut(*rid)
-                                        .expect("sparse set pre-created")
-                                        .insert(entity, ptr, change_tick);
-                                }
-                                // Unreachable: see the explicit-fill arm above.
-                                StorageType::Shared => {
-                                    unreachable!("shared component routed through staged spawn")
-                                }
-                            }
-                        }
-                    });
-                }
-                row
-            };
+            let row = self.fill_row(
+                entity,
+                bundle,
+                archetype_id,
+                &all_ids,
+                &storages,
+                &required,
+                explicit_len,
+                change_tick,
+            );
             (archetype_id, row)
         };
 
-        self.entities.set_location(
-            entity,
-            EntityLocation {
-                archetype_id,
-                row: row as u32,
-            },
-        );
+        self.finish_spawn(entity, archetype_id, row as u32, &all_ids);
+    }
 
-        // Lifecycle hooks (design §12): a fresh spawn newly adds every
-        // component (explicit and required), so fire on_add then on_insert for
-        // all of them with the world fully consistent. Gated so hook-free
-        // spawns pay nothing.
-        let fire_obs = self.observers.watches_any_lifecycle(&all_ids);
-        if self.any_hooks(&all_ids) || fire_obs {
-            let add = self.collect_hooks(&all_ids, crate::component_hooks::ComponentHooks::on_add);
+    /// Allocate a row of `archetype_id` and move `bundle`'s component values
+    /// (followed by the `required` defaults) into its columns and sparse sets,
+    /// returning the row index.
+    ///
+    /// `bundle` must contain no shared component: a shared value has to be
+    /// interned, and its id decides the archetype, so those spawns go through
+    /// [`place_new_entity_shared`](Self::place_new_entity_shared) instead.
+    ///
+    /// Split out of [`place_new_entity`](Self::place_new_entity) so
+    /// [`spawn_batch`](Self::spawn_batch) can resolve the archetype once for a
+    /// whole run of entities.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_row<B: Bundle>(
+        &mut self,
+        entity: Entity,
+        bundle: B,
+        archetype_id: ArchetypeId,
+        all_ids: &[ComponentId],
+        storages: &[StorageType],
+        required: &[(ComponentId, RequiredCtor)],
+        explicit_len: usize,
+        change_tick: Tick,
+    ) -> usize {
+        let World {
+            archetypes,
+            sparse_sets,
+            ..
+        } = &mut *self;
+        let table = archetypes
+            .get_mut(archetype_id)
+            .expect("archetype just created")
+            .table_mut();
+        let row = table.allocate(entity);
+        let mut i = 0usize;
+        // SAFETY: `get_components` yields one pointer per explicit id in
+        // `all_ids[..explicit_len]` order, each a valid owned component value
+        // routed exactly once into its matching table column or sparse set,
+        // restoring both invariants.
+        unsafe {
+            bundle.get_components(&mut |ptr| {
+                let id = all_ids[i];
+                let storage = storages[i];
+                i += 1;
+                match storage {
+                    StorageType::Table => {
+                        table.column_for_fill(id).push(ptr, change_tick);
+                    }
+                    StorageType::SparseSet => {
+                        sparse_sets
+                            .get_mut(id)
+                            .expect("sparse set pre-created")
+                            .insert(entity, ptr, change_tick);
+                    }
+                    // Unreachable: this path runs only when no id classifies as
+                    // `Shared`; shared spawns take the staged helper.
+                    StorageType::Shared => {
+                        unreachable!("shared component routed through staged spawn")
+                    }
+                }
+            });
+        }
+        debug_assert_eq!(i, explicit_len);
+        // Required default values occupy the tail of `all_ids`.
+        for (k, (rid, ctor)) in required.iter().enumerate() {
+            let storage = storages[explicit_len + k];
+            let ctor_fn: &(dyn Fn(&mut dyn FnMut(*mut u8)) + Send + Sync) = &**ctor;
+            ctor_fn(&mut |ptr| {
+                // SAFETY: the ctor hands back one freshly constructed `rid`
+                // value, moved exactly once into its (empty) table column at the
+                // just-allocated row or its pre-created sparse set, and never
+                // dropped by the ctor itself.
+                unsafe {
+                    match storage {
+                        StorageType::Table => {
+                            table.column_for_fill(*rid).push(ptr, change_tick);
+                        }
+                        StorageType::SparseSet => {
+                            sparse_sets
+                                .get_mut(*rid)
+                                .expect("sparse set pre-created")
+                                .insert(entity, ptr, change_tick);
+                        }
+                        // Unreachable: see the explicit-fill arm above.
+                        StorageType::Shared => {
+                            unreachable!("shared component routed through staged spawn")
+                        }
+                    }
+                }
+            });
+        }
+        row
+    }
+
+    /// Record `entity`'s location in `archetype_id` and run the spawn-time
+    /// lifecycle bookkeeping: `on_add`/`on_insert` hooks, the matching
+    /// observers, and owning-group maintenance (design §12 / §6 / §17).
+    ///
+    /// Split out of [`place_new_entity`](Self::place_new_entity) so
+    /// [`spawn_batch`](Self::spawn_batch) gives every entity the same
+    /// per-entity bookkeeping a single spawn would.
+    fn finish_spawn(
+        &mut self,
+        entity: Entity,
+        archetype_id: ArchetypeId,
+        row: u32,
+        all_ids: &[ComponentId],
+    ) {
+        self.entities
+            .set_location(entity, EntityLocation { archetype_id, row });
+
+        // Lifecycle hooks (design §12): a fresh spawn newly adds every component
+        // (explicit and required), so fire on_add then on_insert for all of them
+        // with the world fully consistent. Gated so hook-free spawns pay nothing.
+        let fire_obs = self.observers.watches_any_lifecycle(all_ids);
+        if self.any_hooks(all_ids) || fire_obs {
+            let add = self.collect_hooks(all_ids, crate::component_hooks::ComponentHooks::on_add);
             let insert =
-                self.collect_hooks(&all_ids, crate::component_hooks::ComponentHooks::on_insert);
+                self.collect_hooks(all_ids, crate::component_hooks::ComponentHooks::on_insert);
             self.run_hooks(entity, &add);
             if fire_obs {
-                self.fire_lifecycle_observers(LifecycleEvent::Add, entity, &all_ids);
+                self.fire_lifecycle_observers(LifecycleEvent::Add, entity, all_ids);
             }
             self.run_hooks(entity, &insert);
             if fire_obs {
-                self.fire_lifecycle_observers(LifecycleEvent::Insert, entity, &all_ids);
+                self.fire_lifecycle_observers(LifecycleEvent::Insert, entity, all_ids);
             }
         }
 
-        // Owning-group maintenance (design §6 / §17): a fresh spawn newly
-        // holds every id in `all_ids`, which may complete one or more
-        // owning groups.
+        // Owning-group maintenance (design §6 / §17): a fresh spawn newly holds
+        // every id in `all_ids`, which may complete one or more owning groups.
         if !self.owning_groups.is_empty() {
-            self.update_owning_groups(entity, &all_ids);
+            self.update_owning_groups(entity, all_ids);
         }
     }
 
@@ -2315,6 +2432,9 @@ mod shared_tests;
 
 #[cfg(test)]
 mod prewarm_tests;
+
+#[cfg(test)]
+mod spawn_batch_tests;
 
 #[cfg(test)]
 mod tests {
