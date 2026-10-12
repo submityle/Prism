@@ -37,7 +37,10 @@ pub fn uninstall() {
 /// registered handler — returning the same context for convenience. The stored
 /// context is afterwards retrievable via [`super::last_context`].
 pub fn simulate(signal: Signal, fault_address: usize) -> CrashContext {
-    let ctx = context::build(signal, signal.raw(), fault_address, super::metadata());
+    // The mock backend is not inside a real signal handler, so there is no
+    // interrupted `ucontext`: pass `(0, 0)` and let the backtrace fall back to
+    // the calling thread's frame walk.
+    let ctx = context::build(signal, signal.raw(), fault_address, super::metadata(), 0, 0);
     super::dispatch(ctx);
     ctx
 }

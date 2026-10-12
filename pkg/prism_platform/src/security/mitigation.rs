@@ -94,19 +94,31 @@ impl Mitigation {
     pub const fn platform_default(self, os: Os) -> MitigationStatus {
         use MitigationStatus::{Enforced, NotApplicable, Unknown};
         match self {
-            // ASLR, DEP/NX (W^X), and the stack canary are all on by default on
-            // every modern native OS (kernel for ASLR/NX, the toolchain default
-            // — MSVC `/GS`, clang/gcc `-fstack-protector-strong` — for the
-            // canary) and are not applicable to the Web/unknown targets.
-            Mitigation::Aslr | Mitigation::DepNx | Mitigation::StackCanary => match os {
+            // ASLR and DEP/NX (W^X) are kernel-enforced on every modern native
+            // OS, so they can be reported as enforced; neither applies to the
+            // Web/unknown targets.
+            Mitigation::Aslr | Mitigation::DepNx => match os {
                 Os::Windows | Os::Apple | Os::Linux | Os::Android => Enforced,
                 Os::Web | Os::Unknown => NotApplicable,
             },
 
-            // PIE: mandatory on Apple and Android, default on modern Linux
-            // distros. Windows uses image ASLR rather than ELF-style PIE.
+            // The stack canary depends on the toolchain flag
+            // (`-fstack-protector*` / MSVC `/GS`), which a given binary need not
+            // have been built with — the OS cannot guarantee it, so it is
+            // `Unknown` rather than `Enforced` absent a real ELF/PE/Mach-O probe
+            // (CR-found).
+            Mitigation::StackCanary => match os {
+                Os::Windows | Os::Apple | Os::Linux | Os::Android => Unknown,
+                Os::Web | Os::Unknown => NotApplicable,
+            },
+
+            // PIE: mandatory (OS policy) on Apple and Android. On Linux it is a
+            // link flag that modern distros default to but a given binary may
+            // omit, so it is `Unknown` there. Windows uses image ASLR rather
+            // than ELF-style PIE.
             Mitigation::Pie => match os {
-                Os::Apple | Os::Android | Os::Linux => Enforced,
+                Os::Apple | Os::Android => Enforced,
+                Os::Linux => Unknown,
                 Os::Windows | Os::Web | Os::Unknown => NotApplicable,
             },
 
@@ -114,17 +126,19 @@ impl Mitigation {
             // shadow stack / return-address PAC) plus pointer authentication all
             // depend on opt-in build flags (`/guard:cf`, `-mbranch-protection`)
             // and/or hardware, so none can be assumed on a native target.
-            Mitigation::ControlFlowGuard
-            | Mitigation::ShadowStack
-            | Mitigation::PointerAuth => match os {
-                Os::Web | Os::Unknown => NotApplicable,
-                Os::Windows | Os::Apple | Os::Linux | Os::Android => Unknown,
-            },
+            Mitigation::ControlFlowGuard | Mitigation::ShadowStack | Mitigation::PointerAuth => {
+                match os {
+                    Os::Web | Os::Unknown => NotApplicable,
+                    Os::Windows | Os::Apple | Os::Linux | Os::Android => Unknown,
+                }
+            }
 
-            // Full RELRO and _FORTIFY_SOURCE are ELF/libc concepts and distro
-            // defaults on Linux/Android; they do not apply elsewhere.
+            // Full RELRO and _FORTIFY_SOURCE are ELF/libc concepts. They are
+            // build/link flags (a binary may be linked without `-z relro` or
+            // built without `_FORTIFY_SOURCE`), so they are `Unknown` on
+            // Linux/Android (CR-found) and do not apply elsewhere.
             Mitigation::Relro | Mitigation::FortifySource => match os {
-                Os::Linux | Os::Android => Enforced,
+                Os::Linux | Os::Android => Unknown,
                 Os::Windows | Os::Apple | Os::Web | Os::Unknown => NotApplicable,
             },
 

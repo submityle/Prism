@@ -247,18 +247,25 @@ pub(crate) fn build(
     signal_number: i32,
     fault_address: usize,
     metadata: BuildMetadata,
+    fault_pc: usize,
+    fault_fp: usize,
 ) -> CrashContext {
     CrashContext {
         signal,
         signal_number,
         fault_address,
         thread_id: current_thread_id(),
-        backtrace: capture_backtrace(),
+        backtrace: capture_backtrace_from(fault_pc, fault_fp),
         metadata,
     }
 }
 
 /// Capture an instruction-pointer backtrace by walking the frame-pointer chain.
+///
+/// The real `POSIX` trampoline seeds the walk with the *faulting* `pc` (read
+/// from the signal `ucontext`) so the innermost frame is the faulting
+/// instruction, not the handler; this handler-thread variant is the fallback
+/// used when the register layout is not wired up.
 ///
 /// Returns an empty backtrace on architectures without a well-defined
 /// frame-record layout (or where frame pointers are omitted), which is an
@@ -291,6 +298,38 @@ pub(crate) fn capture_backtrace() -> Backtrace {
     }
 }
 
+/// Capture a backtrace seeded with the *faulting* instruction pointer, then
+/// continue through the interrupted frame chain (`fault_fp`).
+///
+/// When `fault_pc` is 0 (an architecture/target where the signal `ucontext`
+/// register layout is not wired up) this falls back to the handler-thread frame
+/// walk, which is an honest degradation rather than a guess.
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    not(target_family = "wasm")
+))]
+#[must_use]
+pub(crate) fn capture_backtrace_from(fault_pc: usize, fault_fp: usize) -> Backtrace {
+    if fault_pc == 0 {
+        return capture_backtrace();
+    }
+    let mut bt = Backtrace::empty();
+    bt.frames[bt.len] = fault_pc;
+    bt.len += 1;
+    walk_frames_into(fault_fp, &mut bt);
+    bt
+}
+
+/// The cross-arch fallback when the argument seeds are unavailable.
+#[cfg(not(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    not(target_family = "wasm")
+)))]
+#[must_use]
+pub(crate) fn capture_backtrace_from(_fault_pc: usize, _fault_fp: usize) -> Backtrace {
+    capture_backtrace()
+}
+
 /// Walk a System V / `AAPCS` frame-record chain starting at `frame_pointer`.
 ///
 /// On both `x86_64` and `aarch64` the frame record is a pair of pointer-sized
@@ -306,9 +345,19 @@ pub(crate) fn capture_backtrace() -> Backtrace {
     not(target_family = "wasm")
 ))]
 #[must_use]
-fn walk_frames(mut frame_pointer: usize) -> Backtrace {
-    const PTR: usize = size_of::<usize>();
+fn walk_frames(frame_pointer: usize) -> Backtrace {
     let mut bt = Backtrace::empty();
+    walk_frames_into(frame_pointer, &mut bt);
+    bt
+}
+
+/// Append the frame-record chain starting at `frame_pointer` to `bt`.
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    not(target_family = "wasm")
+))]
+fn walk_frames_into(mut frame_pointer: usize, bt: &mut Backtrace) {
+    const PTR: usize = size_of::<usize>();
     let mut previous = 0usize;
     while bt.len < MAX_FRAMES
         && frame_pointer != 0
@@ -331,7 +380,6 @@ fn walk_frames(mut frame_pointer: usize) -> Backtrace {
         previous = frame_pointer;
         frame_pointer = saved_fp;
     }
-    bt
 }
 
 /// Best-effort async-signal-safe thread identifier.
@@ -352,5 +400,32 @@ fn current_thread_id() -> u64 {
     #[cfg(not(all(unix, not(target_family = "wasm"))))]
     {
         0
+    }
+}
+
+#[cfg(all(
+    test,
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    not(target_family = "wasm")
+))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backtrace_from_seeds_the_faulting_pc_and_walks_the_chain() {
+        // A synthesized frame record: [saved fp = 0 (end), return address].
+        let frame = [0usize, 0xDEAD_BEEF_usize];
+        let fp = frame.as_ptr() as usize;
+        let bt = capture_backtrace_from(0xABCD, fp);
+        assert_eq!(bt.as_slice(), &[0xABCD, 0xDEAD_BEEF]);
+    }
+
+    #[test]
+    fn backtrace_from_zero_pc_falls_back_without_panicking() {
+        // `0` means "no verified register layout" -> handler-thread walk.
+        let bt = capture_backtrace_from(0, 0);
+        // The walk is bounded; regardless of frames found it must not panic and
+        // must stay within the fixed capacity.
+        assert!(bt.len() <= MAX_FRAMES);
     }
 }

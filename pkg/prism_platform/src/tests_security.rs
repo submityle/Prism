@@ -24,17 +24,18 @@ fn mitigation_all_is_complete_and_unique() {
 
 #[test]
 fn linux_baseline_matches_hand_table() {
-    // Hand-derived from modern Linux distro release defaults.
+    // Hand-derived: only the kernel-enforced mitigations are `Enforced`; the
+    // build/link-flag ones are `Unknown` (the OS cannot guarantee them) (CR).
     let expect = [
         (Mitigation::Aslr, MitigationStatus::Enforced),
         (Mitigation::DepNx, MitigationStatus::Enforced),
-        (Mitigation::Pie, MitigationStatus::Enforced),
-        (Mitigation::StackCanary, MitigationStatus::Enforced),
+        (Mitigation::Pie, MitigationStatus::Unknown),
+        (Mitigation::StackCanary, MitigationStatus::Unknown),
         (Mitigation::ControlFlowGuard, MitigationStatus::Unknown),
         (Mitigation::ShadowStack, MitigationStatus::Unknown),
         (Mitigation::PointerAuth, MitigationStatus::Unknown),
-        (Mitigation::Relro, MitigationStatus::Enforced),
-        (Mitigation::FortifySource, MitigationStatus::Enforced),
+        (Mitigation::Relro, MitigationStatus::Unknown),
+        (Mitigation::FortifySource, MitigationStatus::Unknown),
         (Mitigation::CodeSigningEnforced, MitigationStatus::Unknown),
     ];
     for (m, want) in expect {
@@ -99,7 +100,14 @@ fn web_mitigations_are_not_applicable() {
 
 #[test]
 fn baseline_posture_is_never_marked_probed() {
-    for os in [Os::Windows, Os::Apple, Os::Linux, Os::Android, Os::Web, Os::Unknown] {
+    for os in [
+        Os::Windows,
+        Os::Apple,
+        Os::Linux,
+        Os::Android,
+        Os::Web,
+        Os::Unknown,
+    ] {
         let p = SecurityPosture::baseline(os);
         assert!(!p.is_probed(), "baseline must not claim to be probed");
         assert_eq!(p.os(), os);
@@ -123,7 +131,10 @@ fn probed_notenforced_is_a_weakness() {
         .build();
     assert!(p.is_probed());
     assert!(p.has_weakness());
-    assert_eq!(p.mitigation(Mitigation::Aslr), MitigationStatus::NotEnforced);
+    assert_eq!(
+        p.mitigation(Mitigation::Aslr),
+        MitigationStatus::NotEnforced
+    );
     // Unchanged entries keep the Linux baseline.
     assert_eq!(p.mitigation(Mitigation::DepNx), MitigationStatus::Enforced);
 }
@@ -137,13 +148,19 @@ fn mitigations_iter_is_stable_and_full() {
 
 #[test]
 fn sandbox_defaults_are_conservative() {
-    assert_eq!(SandboxModel::default_for(Os::Android), SandboxModel::AndroidAppSandbox);
+    assert_eq!(
+        SandboxModel::default_for(Os::Android),
+        SandboxModel::AndroidAppSandbox
+    );
     assert_eq!(SandboxModel::default_for(Os::Web), SandboxModel::WebBrowser);
     // Desktop is unsandboxed unless a real probe says otherwise.
     assert_eq!(SandboxModel::default_for(Os::Windows), SandboxModel::None);
     assert_eq!(SandboxModel::default_for(Os::Apple), SandboxModel::None);
     assert_eq!(SandboxModel::default_for(Os::Linux), SandboxModel::None);
-    assert_eq!(SandboxModel::default_for(Os::Unknown), SandboxModel::Unknown);
+    assert_eq!(
+        SandboxModel::default_for(Os::Unknown),
+        SandboxModel::Unknown
+    );
 }
 
 #[test]
@@ -190,7 +207,10 @@ fn integrity_reject_bad_default() {
     assert_eq!(p.strictness, SigningStrictness::RejectBad);
     assert!(p.allow_unknown);
     assert_eq!(p.decision(SigningStatus::Trusted), LoadDecision::Allow);
-    assert_eq!(p.decision(SigningStatus::SignedUntrusted), LoadDecision::Allow);
+    assert_eq!(
+        p.decision(SigningStatus::SignedUntrusted),
+        LoadDecision::Allow
+    );
     assert_eq!(p.decision(SigningStatus::Unknown), LoadDecision::Allow);
     assert_eq!(
         p.decision(SigningStatus::Invalid),
@@ -261,7 +281,10 @@ fn posture_integrates_sandbox_and_integrity() {
         p.module_load_decision(SigningStatus::Unsigned),
         LoadDecision::Reject(RejectReason::Unsigned)
     );
-    assert_eq!(p.module_load_decision(SigningStatus::Trusted), LoadDecision::Allow);
+    assert_eq!(
+        p.module_load_decision(SigningStatus::Trusted),
+        LoadDecision::Allow
+    );
 }
 
 #[test]

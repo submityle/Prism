@@ -199,10 +199,11 @@ impl Drop for LockGuard {
 
 /// Async-signal-safe `SA_SIGINFO` trampoline.
 ///
-/// Reads the faulting address, builds the pre-allocated [`CrashContext`], hands
-/// it to the registered handler, then restores the default disposition and
-/// re-raises so the process dies with the correct signal.
-extern "C" fn trampoline(sig: i32, info: *mut c_void, _ucontext: *mut c_void) {
+/// Reads the faulting address and the interrupted `pc`/`fp` (where the register
+/// layout is wired up), builds the pre-allocated [`CrashContext`], hands it to
+/// the registered handler, then restores the default disposition and re-raises
+/// so the process dies with the correct signal.
+extern "C" fn trampoline(sig: i32, info: *mut c_void, ucontext: *mut c_void) {
     let fault_address = if info.is_null() {
         0
     } else {
@@ -211,8 +212,16 @@ extern "C" fn trampoline(sig: i32, info: *mut c_void, _ucontext: *mut c_void) {
         // `SI_ADDR_OFFSET` within it. We read exactly that one word.
         unsafe { *info.cast::<u8>().add(SI_ADDR_OFFSET).cast::<usize>() }
     };
+    let (fault_pc, fault_fp) = fault_registers(ucontext);
 
-    let ctx = context::build(Signal::from_raw(sig), sig, fault_address, super::metadata());
+    let ctx = context::build(
+        Signal::from_raw(sig),
+        sig,
+        fault_address,
+        super::metadata(),
+        fault_pc,
+        fault_fp,
+    );
     super::dispatch(ctx);
 
     // Restore the default disposition and re-raise. `signal` and `raise` are
@@ -224,6 +233,41 @@ extern "C" fn trampoline(sig: i32, info: *mut c_void, _ucontext: *mut c_void) {
         signal(sig, SIG_DFL);
         raise(sig);
     }
+}
+
+/// The interrupted thread's `(faulting_pc, faulting_fp)` read from the signal
+/// `ucontext`, or `(0, 0)` on targets whose register layout is not wired up.
+///
+/// The macOS arm64 offsets were verified on an Apple M2 by raising a real
+/// `SIGSEGV` and confirming the extracted `pc` lands inside the faulting
+/// function: `ucontext.uc_mcontext` is the pointer field at byte 48, and within
+/// the `mcontext64` the arm thread state places `__fp` at byte 248 and `__pc` at
+/// byte 272 (after a 16-byte exception state and `__x[29]`).
+#[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
+fn fault_registers(ucontext: *mut c_void) -> (usize, usize) {
+    if ucontext.is_null() {
+        return (0, 0);
+    }
+    // SAFETY: for a kernel-delivered `SA_SIGINFO` signal the third handler
+    // argument is a valid `ucontext_t`; `uc_mcontext` (byte 48) points at a
+    // valid `mcontext64` whose `__pc`/`__fp` live at the verified offsets. A null
+    // `mcontext` is handled explicitly.
+    unsafe {
+        let mcontext = *(ucontext.cast::<u8>().add(48).cast::<*const u8>());
+        if mcontext.is_null() {
+            return (0, 0);
+        }
+        let pc = *(mcontext.add(272).cast::<u64>()) as usize;
+        let fp = *(mcontext.add(248).cast::<u64>()) as usize;
+        (pc, fp)
+    }
+}
+
+/// No verified register layout for this target: report no faulting PC (an
+/// honest degradation) rather than read a guessed offset.
+#[cfg(not(all(target_vendor = "apple", target_arch = "aarch64")))]
+fn fault_registers(_ucontext: *mut c_void) -> (usize, usize) {
+    (0, 0)
 }
 
 // --- Install / uninstall. ---------------------------------------------------
