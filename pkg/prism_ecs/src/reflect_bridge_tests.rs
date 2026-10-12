@@ -217,6 +217,32 @@ fn an_unchanged_patch_is_a_true_no_op() {
     );
 }
 
+/// The replication policy — not the diff — decides which fields may travel.
+#[test]
+fn replicated_diff_honours_the_field_plan() {
+    let mut world = World::new();
+    let id = world.register_reflect_component::<Stats>();
+    let e = world.spawn(Stats { hp: 5, mana: 6 });
+
+    // Only `mana` is replicable for this type.
+    let plan = prism_reflect::ReplicationPlan::new(["mana"]);
+    // The authoritative value differs in *both* fields.
+    let patch = world
+        .replicated_diff_reflect(e, id, &Stats { hp: 999, mana: 42 }, &plan)
+        .expect("entity carries Stats")
+        .expect("Stats reflects as a struct");
+
+    assert!(
+        matches!(&patch, prism_reflect::Patch::Struct(fields)
+            if !fields.is_empty() && fields.iter().all(|(name, _)| name == "mana")),
+        "the plan must exclude `hp` from the patch, got {patch:?}"
+    );
+
+    assert!(world.apply_reflect_patch(e, id, &patch));
+    // `mana` followed the authority; `hp` kept the receiver's own value.
+    assert_eq!(world.get::<Stats>(e), Some(&Stats { hp: 5, mana: 42 }));
+}
+
 /// A shared reflected read must *not* mark the component changed — only the
 /// mutable view does.
 #[test]

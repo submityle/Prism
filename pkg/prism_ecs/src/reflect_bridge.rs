@@ -236,6 +236,31 @@ impl World {
         Some(prism_reflect::diff(live, authoritative))
     }
 
+    /// Diff a live component against an authoritative value **through a
+    /// replication plan** (design §24.3 / §24.4 / §24.5).
+    ///
+    /// [`diff_reflect`](Self::diff_reflect) patches every differing field; this
+    /// one emits a patch covering only the fields `plan` selects — the "字段级
+    /// 复制" policy a game sets per component type (e.g. never replicate a
+    /// server-only field). The returned [`Patch`](prism_reflect::Patch) is
+    /// applied with [`apply_reflect_patch`](Self::apply_reflect_patch), so a
+    /// receiver that is already in sync still sees a true no-op.
+    ///
+    /// The outer `Option` is `None` when the type is unregistered or the entity
+    /// does not carry the component; the inner `Result` is
+    /// [`ReplicationError`](prism_reflect::ReplicationError) when the plan and
+    /// the component's reflected shape disagree.
+    pub fn replicated_diff_reflect(
+        &self,
+        entity: Entity,
+        type_id: StableTypeId,
+        authoritative: &dyn Reflect,
+        plan: &prism_reflect::ReplicationPlan,
+    ) -> Option<Result<prism_reflect::Patch, prism_reflect::ReplicationError>> {
+        let live = self.get_reflect(entity, type_id)?;
+        Some(prism_reflect::replicated_diff(live, authoritative, plan))
+    }
+
     /// Apply a field-level [`Patch`](prism_reflect::Patch) to a live component
     /// (design §24.3 / §24.5).
     ///

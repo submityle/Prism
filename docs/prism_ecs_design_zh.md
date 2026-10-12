@@ -480,7 +480,7 @@ pkg/prism_ecs_macros/              # derive: Component/Bundle/SystemSet/Resource
   4. **大世界流送（M5）**：卸载/重载实体引用悬垂，靠稳定 ID + 弱句柄解析。
   5. **关系 fragmenting vs non-fragmenting**：高基数关系勿 fragment（原型爆炸），走旁路索引。
   6. **冲突图执行器（M1）**：正确性要害，改动最保守。
-- **未复现的并发观察（待跟进）**：一次 `--features multi_thread` 全量运行中 `system::job_dag_tests::fan_out_fan_in` 失败（该测试断言语义序与拓扑序）。随后做了 40 次单测隔离运行 + 10 次全量 multi_thread 运行 + 8 次早期复跑，共 58 次均通过；`JobDag::dispatch` 的入度计数、`fetch_sub(AcqRel)` 与「最后一个前驱负责派发」经静态复核未发现缺口。结论：**未能复现，也未定位到根因**；保留为待跟进项，若再次出现需抓取失败断言（是 `len` 还是 `assert_before`）以缩小范围。
+- **未复现的偶发失败（待跟进）**：全量测试下见过两次 `test result: FAILED`——一次 `--features multi_thread` 时 `system::job_dag_tests::fan_out_fan_in`（断言语义序/拓扑序），另一次 `--all-features` 时**未捕获到用例名**。复现尝试：40 次单测隔离 + 10 次 multi_thread 全量 + 8 次早期复跑 + 6 次 all-features + 12 次 multi_thread，共约 80 次复跑**零复现**。静态复核过 `JobDag::dispatch`（入度计数、`fetch_sub(AcqRel)`、最后一个前驱派发）与 `prism_tasks` 侧 `Counter::register_waker`/`finish_one` 竞态（已在同一把锁内闭合）、`Shared::push`/`find_task`（先增计数后入队、弹出后才减计数、泊车自带 10ms 兜底唤醒），均未发现缺口。结论：**未能复现也未定位根因**；保留为待跟进项——再次出现时必须先抓失败用例名与失败断言（`len` 还是 `assert_before`），否则无法缩小范围。
 - 与既有 `prism_ecs_refactor_plan_zh.md`（原地改写 bevy_ecs 的 Fork-and-Own 方案）为两条候选路线：本文是"从零自研（greenfield chunked-archetype）"，前者是"原地演化"。二者可择一，或先 Fork-and-Own 启动、再按本文 chunk/关系/作业/流送/确定性设计逐步替换内部实现，最终形态一致。
 
 ---
@@ -566,6 +566,8 @@ ECS §16 的动态组件、snapshot、prefab 继承、反射桥**以 `prism_refl
 - 字段级网络增量（配合 `prism_replication`）走 reflect §24.4 diff + §24.5 字段级复制 + ECS §10 变更检测；`StableTypeId` 为跨会话/跨机组件标识。
 
 **ECS 侧已落地**：`reflect` feature 下的 `src/reflect_bridge.rs` 把「按类型名动态读写组件」变成真实可用的 API——`register_reflect_component::<T>()` 登记 `StableTypeId → {get, get_mut, apply, remove}` 单态化函数指针表，随后 `get_reflect` / `get_reflect_mut` / `insert_reflect` / `remove_reflect` 全部只认 `&dyn Reflect` 与 `StableTypeId`，调用点不再出现 Rust 类型名（编辑器检视器、场景装载、存档迁移、复制层正是这种用法）。`insert_reflect` 同时接受**具体值**（`downcast` 快路径）与 **`Dynamic*` 树**（存档解码/`reflect_clone` 的产物，经 `FromReflect` 还原）；`StableTypeId` 由类型路径派生，因此可安全写进存档/网络流；`reflect_component_id` / `reflect_stable_id` 提供「世界内 dense id ↔ 稳定 id」双向映射。**字段级增量也已接上第一段**：`diff_reflect(entity, id, authoritative)` 直接产出 `prism_reflect::Patch`（只含变化字段），`apply_reflect_patch(entity, id, &patch)` 把补丁写回活组件；`Patch::Unchanged` 是**真 no-op**（既不写也不标 changed），所以已经同步的接收端不会因「空补丁」反复触发 `Changed<T>`/脏块。**尚未接**：snapshot 走 reflect 二进制零拷贝与 schema 迁移——依赖 `serialize` feature，仍为 PLANNED。
+
+**复制策略一层**：`replicated_diff_reflect(entity, id, authoritative, &ReplicationPlan)` 在 `diff_reflect` 之上叠加 `prism_reflect::ReplicationPlan` 的字段许可——补丁只覆盖策略选中的字段（例如服务端专有字段永不下发），再交给 `apply_reflect_patch` 落地，构成「按策略只发差异字段」的完整收发回路。
 
 ### 24.4 确定性链路四方对齐
 
