@@ -213,12 +213,12 @@
 | 规范组 | 规范参数（v1.1.1） | 类型 | Prism 对应 | 状态 |
 |---|---|---|---|---|
 | **Base** | `base_weight` | float | `base_weight` | ✅ |
-| | `base_color` | color3 | `base_color`（vec4，w 为 alpha） | ⚠️ 默认值 1.0 vs 规范 0.8 |
+| | `base_color` | color3 | `base_color`（vec4，w 为 alpha） | ✅ 默认 `(0.8, 0.8, 0.8)`（P1-f2 对齐；alpha 是 Prism 覆盖率通道，默认 1） |
 | | `base_metalness` | float | `base_metalness`（本轮改名） | ✅ |
 | | `base_diffuse_roughness` | float | `base_diffuse_roughness`（本轮改名） | ✅ |
 | **Specular** | `specular_weight` | float | `specular_weight` | ✅ |
 | | `specular_color` | color3 | `specular_color` | ✅ |
-| | `specular_roughness` | float | `specular_roughness`（本轮改名） | ⚠️ 仅默认 0.5 vs 0.3 |
+| | `specular_roughness` | float | `specular_roughness`（本轮改名） | ✅ 默认 `0.3`（P1-f2 对齐） |
 | | `specular_roughness_anisotropy` | float [0,1] | ANISOTROPY 瓣：schema/ABI 标识符 `specular_roughness_anisotropy`（值域 [0,1]），解码后的 Prism 字段经 `surface_field` 保留短名 `anisotropy`；方向来自 `geometry_tangent`，`anisotropy_rotation` 是 Prism 扩展 | ✅ 标识符 + 值域 + **伸长公式**（本轮对齐）：用规范 `openpbr-anisotropy-formula` `α_t = r²·sqrt(2/(1+(1−a)²))`、`α_b = (1−a)·α_t` 取代旧的 Disney `aspect` 映射；`a == 0` 逐位退化为各向同性。base specular 与 coat 共用同一映射 |
 | | `specular_ior` | float | `specular_ior` | ✅ |
 | **Transmission** | `transmission_weight` | float | `transmission_weight`（本轮改名） | ✅ |
@@ -229,13 +229,13 @@
 | | `transmission_dispersion_scale` | float | `transmission_dispersion_scale`（本轮改名） | ✅ |
 | | `transmission_dispersion_abbe_number` | float（默认 20） | `transmission_dispersion_abbe_number` | ✅（本轮新增，色散改由 Abbe 推导） |
 | **Subsurface** | `subsurface_weight` | float | `subsurface_weight`（本轮改名） | ✅ |
-| | `subsurface_color` | color3 | `subsurface_color` | ⚠️ 默认白 vs 0.8 |
+| | `subsurface_color` | color3 | `subsurface_color` | ✅ 默认 `(0.8, 0.8, 0.8)`（P1-f2 对齐） |
 | | `subsurface_radius` | float（length） | `subsurface_radius`（float；本实时瓣无场景距离尺度，作相对值） | ✅（本轮拆出） |
 | | `subsurface_radius_scale` | color3 | `subsurface_radius_scale`（vec4，w 未用） | ✅（本轮新增，默认 `(1.0, 0.5, 0.25)` 与规范一致） |
 | | `subsurface_scatter_anisotropy` | float [-1,1] | `subsurface_scatter_anisotropy`（本轮改名） | ✅ |
-| **Coat** | `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` | — | 全部同名（`coat_weight` / `coat_roughness` 本轮改名） | ⚠️ 仅默认值：`coat_roughness` 0.5 vs 0、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1 |
+| **Coat** | `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` | — | 全部同名（`coat_weight` / `coat_roughness` 本轮改名） | ✅ 默认值 `coat_roughness 0` / `coat_ior 1.6` / `coat_darkening 1`（P1-f2 对齐） |
 | **Fuzz** | `fuzz_weight` / `fuzz_color` / `fuzz_roughness` | — | `fuzz_weight`（本轮改名）/ `fuzz_color` / `fuzz_roughness` | ✅ |
-| **Emission** | `emission_luminance` | float（nits） | `emission_luminance`（默认 1 以保持旧材质外观；乘积语义与规范一致） | ✅（本轮新增；默认值见结论段，与 `emission_color` 的默认差异**乘积等价**为零辐亮度） |
+| **Emission** | `emission_luminance` | float（nits） | `emission_luminance`（默认 `0`；乘积语义与规范一致） | ✅（默认 `0` + `emission_color` 默认白，P1-f2 对齐；中性面零辐亮度） |
 | | `emission_color` | color3 | `emission_color`（本轮改名） | ✅ |
 | **Thin-film** | `thin_film_weight` / `thin_film_thickness` / `thin_film_ior` | float×3 | 新增 `thin_film` **瓣**（KHR, slot 6）→ shade-time `iridescence*`（µm→nm 换算） | ✅（本轮落地为 ABI 瓣并接到 Airy BSDF） |
 | **Geometry** | `geometry_opacity` | float | `geometry_opacity`（复用一个 core 填充字，乘进 alpha） | ✅（本轮新增为独立字段） |
@@ -245,7 +245,7 @@
 
 **结论（code-truth）**：**规范参数已全部有对应物，标识符与行为已全部对齐规范；剩余只有一批「刻意保留的默认值偏差」。** 已对齐（名字 + 含义 + 公式）：`base_weight` / `base_color` / `base_metalness` / `base_diffuse_roughness` / `specular_weight` / `specular_color` / `specular_roughness` / **`specular_roughness_anisotropy`（标识符 + [0,1] + 规范 `openpbr-anisotropy-formula` 伸长公式，base/coat 共用，`a==0` 逐位各向同性）** / `specular_ior` / `transmission_weight` / `transmission_color` / **`transmission_depth`（路径=1 场景单位口径下的完整规范语义，含 `depth==0` 非物理 tint）** / `transmission_scatter`(color3) / `transmission_scatter_anisotropy` / `transmission_dispersion_scale` / `transmission_dispersion_abbe_number` / `subsurface_weight` / `subsurface_color` / `subsurface_radius`(float) / `subsurface_radius_scale`(color3) / `subsurface_scatter_anisotropy` / `coat_weight` / `coat_color` / `coat_roughness` / `coat_roughness_anisotropy` / `coat_ior` / `coat_darkening` / `fuzz_weight` / `fuzz_color` / `fuzz_roughness` / `emission_color` / `emission_luminance` / **thin-film 全 3 项（ABI 瓣）** / `geometry_opacity` / `geometry_thin_walled` / 四个 geometry 向量字段（shade-time 输入）。
 
-**仍待处理（唯一一类，逐项已列全）**：**默认值**偏差共 **8** 处（机器比对 schema `default` vs `parametrization` 表得出，非人工目测）——`base_color` 1.0 vs (0.8,0.8,0.8)、`specular_roughness` 0.5 vs 0.3、`coat_roughness` 0.5 vs 0、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1、`subsurface_color` 白 vs (0.8,0.8,0.8)、`emission_luminance` 1 vs 0、`emission_color` 黑 vs (1,1,1)。其中 emission 两项**乘积等价**（0 × 1 = (1,1,1) × 0 = 零辐亮度）；其余 6 项只在"材质不作者该字段"时可见。**这不是遗漏也不是推后**：改它们会整体平移金标准与所有未作者该字段的材质外观，属显式产品决策，故作为一项**独立、有明确验收（schema/AST/`GpuSurfaceParameters::default` 同步 + 金标准重基线 + furnace 复跑）**的任务推进。
+**默认值也已对齐（P1-f2，本轮）**：机器比对发现 **8** 处 `default` 偏差（`base_color`、`specular_roughness`、`coat_roughness`、`coat_ior`、`coat_darkening`、`subsurface_color`、`emission_luminance`、`emission_color`），现已把 schema `default` ↔ `GpuSurfaceParameters::default` ↔ 各 lobe/`SurfaceSample::default` 四处同步到规范默认值（`emission_color` 白 × `emission_luminance` 0 = 零辐亮度，与规范同构）。**副作用暴露并修掉了一个真实 bug**：CPU resolve 桥接只做了 `surface.emissive = sampled.emissive`，漏乘 `emission_luminance`，与 WESL twin（`shading_resolve.wesl` 里乘了）**行为不一致**——旧默认（luminance=1）把它掩盖了，新默认（luminance=0）当场暴露。已按 WESL 口径修正并加回归测试 `resolved_pixel_scales_emission_by_luminance`。
 
 要点：
 - **开放词汇表让补瓣是加法**：新字段扩进对应 lobe 的变长块，位掩码/静态置换天然容纳，老材质不受影响（它们的 lobe_mask 不含新位）。
@@ -581,7 +581,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | P1-d | 置换治理：内容哈希去重 + 按需编译 + über 回退 | 工具链/PSO 缓存 | P1 |
 | P1-e | 贵瓣采样数按画质档缩放（SSS/透射/多散射） | 无（pass uniform） | P1 |
 | P1-f | über 参数块规范化到 **OpenPBR Surface** 瓣序（补 base_weight/specular_color/coat_color/subsurface_radius 等字段，删 `lower_standard_material`） | 内部布局（随 v5） | P1 |
-| P1-f2 | **OpenPBR 默认值对齐**（6 项可见：`base_color` 0.8、`specular_roughness` 0.3、`coat_roughness` 0、`coat_ior` 1.6、`coat_darkening` 1、`subsurface_color` 0.8；emission 两项乘积已等价）：schema `default` ↔ `GpuSurfaceParameters::default` ↔ `SurfaceSample::default` 三处同步 + 金标准重基线 + furnace 复跑，使"未作者字段"也规范一致（§4.4） | 内部（改默认值） | P1 |
+| P1-f2 ✅ | **OpenPBR 默认值对齐**（8 项：`base_color` 0.8、`specular_roughness` 0.3、`coat_roughness` 0、`coat_ior` 1.6、`coat_darkening` 1、`subsurface_color` 0.8、`emission_luminance` 0、`emission_color` 白）：schema `default` ↔ `GpuSurfaceParameters::default` ↔ 各 lobe / `SurfaceSample::default` 四处同步 + 金标准重基线，使"未作者字段"也规范一致（§4.4；已落地，见 §13.a） | 内部（改默认值） | P1 |
 | P2-d | **thin_film 虹彩瓣**落地（开放瓣首验：新位 + 3-word 块 + furnace/对拍） | 内部 enum 开放化 | P2 |
 | P2-e | 四线正交落地：`Illumination` 四值 + `custom_program` 钩子 + 混合线逐区域 illumination（per-tile 分类消化发散） | 运行时/分类 | P2 |
 | P2-a | OpenPBR/MaterialX 作者前端 + archetype 模板（兼作置换聚类锚点） | 新 crate | P2 |
@@ -607,6 +607,13 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > 下表只记录**已落地到代码并带测试门禁**的项；设计未动工的项一律按上面的路线图状态为「未开始」。实现以仓库代码为准，与本文叙述冲突时以代码为准。
 
 **✅ 已完成**
+
+- **P1-f2 OpenPBR 默认值对齐（8 处）+ 顺带修掉一个 CPU/WESL 发射不一致 bug**（§4.4）
+  - **动机**：`OpenPBR` 超集的约束 1（纯 OpenPBR 子集字节等价）要求"材质不作者某字段"时也走规范的默认值；机器比对 `parametrization` 表后发现 schema `default` 有 **8 处**偏离（`base_color` 1.0、`specular_roughness` 0.5、`coat_roughness` 0.5、`coat_ior` 1.5、`coat_darkening` 0、`subsurface_color` 白、`emission_luminance` 1、`emission_color` 黑）。
+  - **落地**：把 schema `default`、`GpuSurfaceParameters::default`（`record.rs`）、各 lobe 的 `Default`（`GpuSurfaceCore` / `GpuEmissionLobe` / `GpuClearCoatLobe` / `GpuSubsurfaceLobe` / `GpuThinFilmLobe`，后者此前 `derive(Default)` 给的是 `thin_film_thickness = 0`，与规范 0.5 不符，改为手写）以及 shade-time `SurfaceSample::default`（`lighting.rs`）**全部同步到规范默认值**。`emission_color` 白 × `emission_luminance` 0 = 零辐亮度，与规范同构而不再是 Prism 的私有分解。
+  - **顺带发现的真实 bug（本轮修复）**：CPU resolve 桥接只写 `surface.emissive = sampled.emissive`，**漏乘 `emission_luminance`**；而 WESL twin 写的是 `surface.emissive = sampled.emissive * parameters.emission_luminance`。旧默认 `emission_luminance == 1` 把这条不一致完全掩盖（乘 1 无差），新默认 0 让 5 个 resolve 测试当场转红（未打光的像素解析出 `[1,1,1]`）。**这正说明 P1-f2 不只是"改数字"**：它是一次把"默认值掩盖的语义错误"翻出来的对拍。已按 WESL 口径修正 `resolve.rs`，并新增 `resolved_pixel_scales_emission_by_luminance`（直接断言解析后的像素 = `emission_color × emission_luminance`，堵死旧的只测中间量的盲区）。
+  - 代码：`pkg/prism_material_schema/schema/surface.toml`、`pkg/prism_material_schema/src/codegen.rs`（中性面 spot-check 改规范默认）、`pkg/prism_render_material/src/{record.rs,surface.rs}`、`pkg/prism_render_shading/src/{lighting.rs,resolve.rs,subsurface.rs}`（后两者是金标准重基线与新回归测试）。
+  - 门禁：`cargo test -p prism_render_shading --lib` **3316 通过**（新增 1 条），`cargo test -p prism_render_scene --lib` **1602 通过**，`cargo test -p prism_render_material` **826+2+6**、`--features bevy` **829+2+6**，`cargo test -p prism_material_schema` **13 通过**，`cargo test -p prism_render_visibility` **122 通过**；`prism-material-codegen write` 后生成物符合预期（中性面按新默认更新）。
 
 - **P1-f 规范对齐：`specular_roughness_anisotropy` 伸长公式落地（规范 `openpbr-anisotropy-formula`）**（§4.4）
   - 规范定义（`index.html` 的 equation `openpbr-anisotropy-formula`，`reference/open_pbr_surface.mtlx` 的 `open_pbr_anisotropy` 节点）：`α_t = r²·sqrt(2 / (1 + (1 − a)²))`、`α_b = (1 − a)·α_t`，其中 `a = specular_roughness_anisotropy ∈ [0,1]`、`r` 是 `specular_roughness`。此前 Prism 用的是 Disney/Burley 的 `aspect = sqrt(1 − 0.9a)`、`α_t = α/aspect`、`α_b = α·aspect`——**只在 `a == 0` 与规范重合**，`a > 0` 的伸长量完全不同（例如 `a = 0.8`：规范给 `α_t/α = sqrt(2/1.04) ≈ 1.387`，旧映射给 `1/sqrt(0.28) ≈ 1.890`）。
@@ -635,9 +642,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   - **零字长 / 零生成物变化**：两者都通过 schema 新增的 `surface_field` 覆盖保留了解码后 fat 结构里的历史短名（`anisotropy` / `thickness`），所以 `GpuAnisotropyLobe` / `GpuTransmissionLobe` 字段布局不变、生成的 `material_unpack.wesl` 与 `surface_layout.rs` **逐字节不变**（`codegen_freshness` 保持绿）。这是把 `surface_field`（原本用于 face 瓣的 `softness`→`face_softness` 命名空间化）推广为"规范标识符 ↔ Prism 内部短名"的解耦点。
   - 代码：`pkg/prism_material_schema/schema/surface.toml`（2 处 `name` + `surface_field` + 语义注释）、`pkg/prism_render_material/tests/schema_parity.rs`（`authored_components` 的两条 match 臂改到规范名）、本文 §4.4 对账表与结论段。
   - 门禁：`cargo test -p prism_material_schema` **13 通过**、`cargo test -p prism_render_material --test schema_parity` **6 通过**；`prism-material-codegen write` 后 `material_unpack.wesl` / `surface_layout.rs` 无 diff。
-  - **仍未完成（已定位，不再是"待细化"）**：
-    ① `specular_roughness_anisotropy` 的 GGX 伸长**公式**（Prism `aspect = sqrt(1-0.9a)` 映射 vs 规范参考的 alpha 公式）——只影响 `a > 0` 的材质，`a == 0` 逐位不变。
-    ② 6 个**默认值**偏差（`base_color` 1.0 vs 0.8、`specular_roughness` 0.5 vs 0.3、`coat_ior` 1.5 vs 1.6、`coat_darkening` 0 vs 1、`subsurface_color` 白 vs 0.8、`emission_luminance` 1 vs 0）——刻意保旧材质外观，schema 注释已逐条写明；改它们会动金标准，属显式的产品决策而非遗漏。
+  - **该轮后续已全部完成**：① `specular_roughness_anisotropy` 的 GGX 伸长公式 → 见上面的 `openpbr-anisotropy-formula` 条目；② 默认值偏差（机器比对为 **8** 处）→ 见上面的 **P1-f2** 条目。至此 §4.4 对账表**全绿**，唯一仍在的是 §4.5 约束 1 的**响应级**对拍（`P2-f`）。
 
 - **P1-f 规范对齐：ABI 字段名统一到 OpenPBR 规范名**（§4.4）
   - 把 11 处"同义不同名"的 ABI 字段改成规范标识符，这是"纯 OpenPBR 子集字节等价"的最后一道命名门槛：

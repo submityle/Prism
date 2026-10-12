@@ -537,11 +537,18 @@ mod tests {
     #[test]
     fn wesl_neutral_matches_schema_defaults() {
         let wesl = emit_wesl_unpack(&surface_schema());
-        // Spot-check a few defaults the hand-written file is known to carry.
-        assert!(wesl.contains("s.base_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);"));
+        // Spot-check the neutral surface: every default is the `OpenPBR`
+        // specification default (roadmap P1-f2), not a legacy Prism value.
+        assert!(wesl.contains("s.base_color = vec4<f32>(0.8, 0.8, 0.8, 1.0);"));
         assert!(wesl.contains("s.index_of_refraction = 1.5;"));
         assert!(wesl.contains("s.face_softness = 0.1;"));
-        assert!(wesl.contains("s.specular_roughness = 0.5;"));
+        assert!(wesl.contains("s.specular_roughness = 0.3;"));
+        assert!(wesl.contains("s.emission_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);"));
+        assert!(wesl.contains("s.emission_luminance = 0.0;"));
+        assert!(wesl.contains("s.coat_roughness = 0.0;"));
+        assert!(wesl.contains("s.coat_ior = 1.6;"));
+        assert!(wesl.contains("s.coat_darkening = 1.0;"));
+        assert!(wesl.contains("s.subsurface_color = vec4<f32>(0.8, 0.8, 0.8, 1.0);"));
     }
 
     #[test]

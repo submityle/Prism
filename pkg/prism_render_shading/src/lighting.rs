@@ -181,12 +181,15 @@ pub struct SurfaceSample {
 
 impl Default for SurfaceSample {
     fn default() -> Self {
+        // Mirrors the `OpenPBR` default surface (`GpuSurfaceParameters::default`,
+        // design doc §4.4 / roadmap P1-f2): the untextured / missing-material
+        // fallback renders as the specification's neutral surface.
         Self {
-            base_color: [1.0; 3],
+            base_color: [0.8; 3],
             base_weight: 1.0,
             diffuse_roughness: 0.0,
             metallic: 0.0,
-            perceptual_roughness: 0.5,
+            perceptual_roughness: 0.3,
             specular_weight: 1.0,
             specular_color: [1.0; 3],
             specular_ior: 1.5,
@@ -199,13 +202,13 @@ impl Default for SurfaceSample {
             transmission_scatter: [0.0; 3],
             transmission_scatter_anisotropy: 0.0,
             transmission_dispersion_abbe_number: 20.0,
-            coat_darkening: 0.0,
+            coat_darkening: 1.0,
             scatter_anisotropy: 0.0,
             ambient_occlusion: 1.0,
             emissive: [0.0; 3],
             clearcoat: 0.0,
-            clearcoat_roughness: 0.25,
-            coat_ior: 1.5,
+            clearcoat_roughness: 0.0,
+            coat_ior: 1.6,
             coat_color: [1.0; 3],
             coat_normal: [0.0; 3],
             coat_roughness_anisotropy: 0.0,
@@ -214,7 +217,7 @@ impl Default for SurfaceSample {
             fuzz_roughness: 0.5,
             fuzz_color: [1.0; 3],
             subsurface: 0.0,
-            subsurface_color: [1.0; 3],
+            subsurface_color: [0.8; 3],
             subsurface_radius: 1.0,
             subsurface_radius_scale: [1.0, 0.5, 0.25],
             thickness: 0.0,

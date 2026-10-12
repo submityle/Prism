@@ -67,10 +67,13 @@ pub struct GpuSurfaceCore {
 
 impl Default for GpuSurfaceCore {
     fn default() -> Self {
+        // `OpenPBR` default surface (design doc §4.4 / roadmap P1-f2): the core
+        // carries the specification defaults so an authoring-free material is
+        // spec-conformant.
         Self {
-            base_color: [1.0; 4],
+            base_color: [0.8, 0.8, 0.8, 1.0],
             base_metalness: 0.0,
-            specular_roughness: 0.5,
+            specular_roughness: 0.3,
             specular_weight: 1.0,
             ambient_occlusion: 1.0,
             normal_scale: 1.0,
@@ -103,8 +106,8 @@ pub struct GpuEmissionLobe {
 impl Default for GpuEmissionLobe {
     fn default() -> Self {
         Self {
-            emission_color: [0.0; 4],
-            emission_luminance: 1.0,
+            emission_color: [1.0; 4],
+            emission_luminance: 0.0,
             _pad0: 0.0,
             _pad1: 0.0,
             _pad2: 0.0,
@@ -149,15 +152,15 @@ impl Default for GpuClearCoatLobe {
     fn default() -> Self {
         Self {
             coat_weight: 0.0,
-            coat_roughness: 0.5,
-            coat_ior: 1.5,
+            coat_roughness: 0.0,
+            coat_ior: 1.6,
             _pad0: 0.0,
             coat_color: [1.0; 4],
             coat_roughness_anisotropy: 0.0,
             _pad1: 0.0,
             _pad2: 0.0,
             _pad3: 0.0,
-            coat_darkening: 0.0,
+            coat_darkening: 1.0,
             _pad4: 0.0,
             _pad5: 0.0,
             _pad6: 0.0,
@@ -238,7 +241,7 @@ impl Default for GpuSubsurfaceLobe {
             _pad0: 0.0,
             subsurface_radius: 1.0,
             _pad1: 0.0,
-            subsurface_color: [1.0; 4],
+            subsurface_color: [0.8, 0.8, 0.8, 1.0],
             subsurface_radius_scale: [1.0, 0.5, 0.25, 1.0],
             subsurface_scatter_anisotropy: 0.0,
             _pad2: 0.0,
@@ -293,7 +296,7 @@ impl Default for GpuTransmissionLobe {
 
 /// Thin-film lobe: the `OpenPBR` iridescent film over the base.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuThinFilmLobe {
     pub thin_film_weight: f32,
     /// Film thickness in micrometres (specification default 0.5).
@@ -301,6 +304,19 @@ pub struct GpuThinFilmLobe {
     /// Film refractive index (specification default 1.4).
     pub thin_film_ior: f32,
     pub _pad0: f32,
+}
+
+impl Default for GpuThinFilmLobe {
+    fn default() -> Self {
+        // `OpenPBR` thin-film defaults: weight 0 (inert), thickness 0.5 µm,
+        // IOR 1.4. `weight == 0` keeps the whole lobe inert regardless.
+        Self {
+            thin_film_weight: 0.0,
+            thin_film_thickness: 0.5,
+            thin_film_ior: 1.4,
+            _pad0: 0.0,
+        }
+    }
 }
 
 /// Face-shadow lobe: stylized SDF-driven directional face shading (anime/toon).

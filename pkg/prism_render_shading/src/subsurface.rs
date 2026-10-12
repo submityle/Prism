@@ -344,6 +344,9 @@ mod tests {
             perceptual_roughness: 0.5,
             subsurface: 1.0,
             thickness: 1.0,
+            // Compare against an explicitly white tint: the `OpenPBR` default
+            // `subsurface_color` is `(0.8, 0.8, 0.8)`, not white.
+            subsurface_color: [1.0; 3],
             ..Default::default()
         };
         let white = evaluate_subsurface_direct(base, frame(), behind);

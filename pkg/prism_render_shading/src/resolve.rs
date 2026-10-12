@@ -386,7 +386,16 @@ pub fn resolve_pixel(
     surface.metallic = sampled.metallic;
     surface.perceptual_roughness = sampled.perceptual_roughness;
     surface.ambient_occlusion = sampled.occlusion;
-    surface.emissive = sampled.emissive;
+    // `OpenPBR` emission radiance is `emission_color * emission_luminance`, and
+    // the texture-modulated `sampled.emissive` carries the colour (times any
+    // emissive map), so the luminance scale is applied here. Mirrors
+    // `shading_resolve.wesl`: `surface.emissive = sampled.emissive *
+    // parameters.emission_luminance`.
+    surface.emissive = [
+        sampled.emissive[0] * input.parameters.emission_luminance,
+        sampled.emissive[1] * input.parameters.emission_luminance,
+        sampled.emissive[2] * input.parameters.emission_luminance,
+    ];
     surface.clearcoat = sampled.clearcoat;
     surface.clearcoat_roughness = sampled.clearcoat_roughness;
 
@@ -749,6 +758,45 @@ mod tests {
         assert_eq!(sample.geometry_opacity, 0.4);
     }
 
+    /// The *resolved pixel* — not just the intermediate sample — must carry
+    /// `emission_color * emission_luminance`. This pins the CPU golden to the
+    /// WESL twin (`shading_resolve.wesl`:
+    /// `surface.emissive = sampled.emissive * parameters.emission_luminance`),
+    /// which the pre-P1-f2 default (`emission_luminance == 1`) could not
+    /// distinguish from a plain `sampled.emissive`.
+    #[test]
+    fn resolved_pixel_scales_emission_by_luminance() {
+        let (primitives, vertices) = unit_triangle();
+        let header = principled_header();
+        let parameters = GpuSurfaceParameters {
+            emission_color: [1.0, 0.5, 0.25, 1.0],
+            emission_luminance: 4.0,
+            ..Default::default()
+        };
+        let dark = LightingEnvironment {
+            directional: &[],
+            punctual: &[],
+            image_based: None,
+            ambient: [0.0; 3],
+            stylized: StylizedParams::with_bands(4),
+            area: &[],
+            ltc_lut: None,
+        };
+        let resolved = resolve_pixel(
+            base_input(&primitives, &vertices, header, parameters),
+            dark,
+        )
+        .unwrap()
+        .color;
+        for (channel, want) in [4.0_f32, 2.0, 1.0].iter().enumerate() {
+            assert!(
+                (resolved[channel] - want).abs() < 1.0e-6,
+                "channel {channel}: {} vs {want}",
+                resolved[channel]
+            );
+        }
+    }
+
     fn unit_triangle() -> ([GpuShadingPrimitive; 1], [GpuShadingVertex; 3]) {
         let vertex = |position: [f32; 3], uv: [f32; 2]| GpuShadingVertex {
             position,
@@ -824,6 +872,9 @@ mod tests {
         let parameters = GpuSurfaceParameters {
             base_color: [0.2, 0.4, 0.6, 1.0],
             emission_color: [0.1, 0.0, 0.0, 0.0],
+            // `OpenPBR` emission radiance is `emission_color * emission_luminance`,
+            // and the specification default luminance is 0 (no emission).
+            emission_luminance: 1.0,
             ..Default::default()
         };
         let light = DirectionalLight {
@@ -855,6 +906,7 @@ mod tests {
         let parameters = GpuSurfaceParameters {
             base_color: [0.5, 0.5, 0.5, 1.0],
             emission_color: [2.0, 2.0, 2.0, 0.0],
+            emission_luminance: 1.0,
             ..Default::default()
         };
         let light = DirectionalLight {
@@ -1071,6 +1123,7 @@ mod tests {
         let parameters = GpuSurfaceParameters {
             base_color: [0.2, 0.4, 0.6, 1.0],
             emission_color: [0.1, 0.0, 0.0, 0.0],
+            emission_luminance: 1.0,
             ..Default::default()
         };
         // A mid-grey sRGB base-color texel decodes to linear ~0.214 and scales

@@ -216,11 +216,14 @@ pub struct GpuSurfaceParameters {
 impl Default for GpuSurfaceParameters {
     fn default() -> Self {
         Self {
-            base_color: [1.0; 4],
-            emission_color: [0.0; 4],
-            emission_luminance: 1.0,
+            // The neutral surface is the `OpenPBR` default surface: every field
+            // below takes the specification default so a material that authors
+            // nothing is spec-conformant (design doc §4.4 / roadmap P1-f2).
+            base_color: [0.8, 0.8, 0.8, 1.0],
+            emission_color: [1.0; 4],
+            emission_luminance: 0.0,
             base_metalness: 0.0,
-            specular_roughness: 0.5,
+            specular_roughness: 0.3,
             specular_weight: 1.0,
             ambient_occlusion: 1.0,
             normal_scale: 1.0,
@@ -234,18 +237,18 @@ impl Default for GpuSurfaceParameters {
             transmission_weight: 0.0,
             thickness: 0.0,
             coat_weight: 0.0,
-            coat_roughness: 0.5,
-            coat_ior: 1.5,
+            coat_roughness: 0.0,
+            coat_ior: 1.6,
             coat_color: [1.0; 4],
             coat_roughness_anisotropy: 0.0,
-            coat_darkening: 0.0,
+            coat_darkening: 1.0,
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
             fuzz_weight: 0.0,
             fuzz_roughness: 0.5,
             fuzz_color: [1.0; 4],
             subsurface_weight: 0.0,
-            subsurface_color: [1.0; 4],
+            subsurface_color: [0.8, 0.8, 0.8, 1.0],
             subsurface_radius: 1.0,
             subsurface_radius_scale: [1.0, 0.5, 0.25, 1.0],
             subsurface_scatter_anisotropy: 0.0,

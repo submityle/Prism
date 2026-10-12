@@ -35,7 +35,9 @@ type = "vec4f"
 bit_region = "KHR"
 pack_slot = 0
 consumed_by = ["unpack", "classify", "sample", "golden"]
-default = [1.0, 1.0, 1.0, 1.0]
+# `OpenPBR` `base_color` default `(0.8, 0.8, 0.8)`; the alpha is Prism's own
+# coverage channel (opaque = 1).
+default = [0.8, 0.8, 0.8, 1.0]
 valid = "0.0..=1.0"
 energy_policy = "coupled"
 view = "invariant"
@@ -57,7 +59,8 @@ type = "f32"
 bit_region = "KHR"
 pack_slot = 5
 consumed_by = ["unpack", "classify", "sample", "golden"]
-default = 0.5
+# `OpenPBR` `specular_roughness` default `0.3`.
+default = 0.3
 valid = "0.0..=1.0"
 energy_policy = "coupled"
 view = "invariant"
@@ -227,7 +230,10 @@ type = "vec4f"
 bit_region = "KHR"
 pack_slot = 0
 consumed_by = ["unpack", "classify", "sample", "golden"]
-default = [0.0, 0.0, 0.0, 0.0]
+# `OpenPBR` `emission_color` default `(1, 1, 1)`; with the specification's
+# `emission_luminance == 0` default the emitted radiance is exactly zero, so the
+# factorisation matches the spec without changing the neutral surface's output.
+default = [1.0, 1.0, 1.0, 1.0]
 valid = "0.0..=inf"
 energy_policy = "independent"
 view = "invariant"
@@ -239,11 +245,11 @@ bit_region = "KHR"
 pack_slot = 4
 consumed_by = ["unpack", "sample", "golden"]
 # OpenPBR `emission_luminance` in nits. Emission radiance is
-# `emissive (emission_color) * emission_luminance`. Prism defaults the scale to
-# 1 so a legacy material that authored bare radiance in `emissive` keeps its
-# look; the product semantics match the specification exactly (a pure-OpenPBR
-# material with luminance 0 emits nothing).
-default = 1.0
+# `emission_color * emission_luminance`. Prism now takes the specification's
+# default `0` (the neutral surface emits nothing); the importer factors a legacy
+# material's authored radiance into colour × luminance so its look is preserved
+# explicitly rather than through a non-spec default.
+default = 0.0
 valid = "0.0..=inf"
 energy_policy = "independent"
 view = "invariant"
@@ -300,7 +306,8 @@ type = "f32"
 bit_region = "KHR"
 pack_slot = 1
 consumed_by = ["unpack", "sample", "golden"]
-default = 0.5
+# `OpenPBR` `coat_roughness` default `0` (a smooth coat).
+default = 0.0
 valid = "0.0..=1.0"
 energy_policy = "coupled"
 view = "invariant"
@@ -311,10 +318,9 @@ type = "f32"
 bit_region = "KHR"
 pack_slot = 2
 consumed_by = ["unpack", "sample", "golden"]
-# OpenPBR `coat_ior`. The default 1.5 reproduces the legacy fixed
-# `CLEARCOAT_F0 = 0.04` (varnish/lacquer), so a material that never authors a
-# coat IOR is bit-for-bit unchanged.
-default = 1.5
+# `OpenPBR` `coat_ior`: relative index of refraction of the coat interface.
+# The specification default is `1.6` (a varnish/lacquer-like coat).
+default = 1.6
 valid = "1.0..=3.0"
 energy_policy = "coupled"
 view = "dependent"
@@ -385,10 +391,10 @@ bit_region = "KHR"
 pack_slot = 12
 consumed_by = ["unpack", "sample", "golden"]
 # OpenPBR `coat_darkening` in [0, 1]: how much of the light internally reflected
-# at the coat/air interface is lost inside the coat, darkening the base. 0.0
-# (Prism's default; OpenPBR's own default is 1) keeps the historical two-pass
-# coat response exactly, so no existing material changes.
-default = 0.0
+# at the coat/air interface is lost inside the coat, darkening the base. The
+# `OpenPBR` default is `1` (fully darkening the base by the coat's internal
+# reflection); Prism now matches it.
+default = 1.0
 valid = "0.0..=1.0"
 energy_policy = "coupled"
 view = "dependent"
@@ -599,9 +605,9 @@ bit_region = "KHR"
 pack_slot = 4
 consumed_by = ["unpack", "sample", "golden"]
 # OpenPBR `subsurface_color`: per-channel colour of the scattered light. It
-# multiplies the base albedo of the wrapped-diffuse and back-transmission terms,
-# so the default white is the exact identity.
-default = [1.0, 1.0, 1.0, 1.0]
+# multiplies the base albedo of the wrapped-diffuse and back-transmission terms.
+# `OpenPBR` default `(0.8, 0.8, 0.8)`.
+default = [0.8, 0.8, 0.8, 1.0]
 valid = "0.0..=1.0"
 energy_policy = "coupled"
 view = "invariant"

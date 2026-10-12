@@ -65,9 +65,9 @@ fn prism_packed_word_count(lobe_mask: u32) -> u32 {
 /// range does not fit the bound heap.
 fn prism_neutral_surface() -> PrismSurfaceParameters {
     var s: PrismSurfaceParameters;
-    s.base_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    s.base_color = vec4<f32>(0.8, 0.8, 0.8, 1.0);
     s.base_metalness = 0.0;
-    s.specular_roughness = 0.5;
+    s.specular_roughness = 0.3;
     s.specular_weight = 1.0;
     s.ambient_occlusion = 1.0;
     s.normal_scale = 1.0;
@@ -78,14 +78,14 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
     s.specular_ior = 1.5;
     s.thin_walled = 0.0;
     s.geometry_opacity = 1.0;
-    s.emission_color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    s.emission_luminance = 1.0;
+    s.emission_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    s.emission_luminance = 0.0;
     s.coat_weight = 0.0;
-    s.coat_roughness = 0.5;
-    s.coat_ior = 1.5;
+    s.coat_roughness = 0.0;
+    s.coat_ior = 1.6;
     s.coat_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     s.coat_roughness_anisotropy = 0.0;
-    s.coat_darkening = 0.0;
+    s.coat_darkening = 1.0;
     s.anisotropy = 0.0;
     s.anisotropy_rotation = 0.0;
     s.fuzz_weight = 0.0;
@@ -93,7 +93,7 @@ fn prism_neutral_surface() -> PrismSurfaceParameters {
     s.fuzz_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
     s.subsurface_weight = 0.0;
     s.subsurface_radius = 1.0;
-    s.subsurface_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    s.subsurface_color = vec4<f32>(0.8, 0.8, 0.8, 1.0);
     s.subsurface_radius_scale = vec4<f32>(1.0, 0.5, 0.25, 1.0);
     s.subsurface_scatter_anisotropy = 0.0;
     s.transmission_weight = 0.0;
