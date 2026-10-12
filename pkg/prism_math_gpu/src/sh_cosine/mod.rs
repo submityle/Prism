@@ -51,7 +51,7 @@ pub const SH3_COEFFS: usize = 16;
 /// Compute wrapper convolving a flat batch of coefficient sets. `params.stride`
 /// is the per-set coefficient count (9 for order 2, 16 for order 3).
 const WRAP: &str = "\
-struct Params { count: u32, stride: u32 };\n\
+struct Params { count: u32, stride: u32, _pad0: u32, _pad1: u32 };\n\
 @group(0) @binding(0) var<uniform> params: Params;\n\
 @group(0) @binding(1) var<storage, read> src: array<f32>;\n\
 @group(0) @binding(2) var<storage, read_write> dst: array<f32>;\n\
@@ -65,12 +65,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
     }\n\
 }\n";
 
-/// Uniform block carrying the set count and the per-set stride.
+/// Uniform block carrying the set count and the per-set stride, padded to the
+/// 16-byte minimum WebGPU uniform binding size.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Params {
     count: u32,
     stride: u32,
+    _pad: [u32; 2],
 }
 
 /// A real-device batched SH cosine-convolution kernel, composed from the
@@ -191,6 +193,7 @@ impl GpuShCosine {
             &Params {
                 count: count as u32,
                 stride,
+                _pad: [0; 2],
             },
         );
         let in_buf = buffer::storage_read(device, "prism_math_sh_cosine_in", flat);

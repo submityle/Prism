@@ -2028,19 +2028,19 @@ struct PrismInterval {\n\
 };\n\
 \n\
 fn prism_next_up(x: f32) -> f32 {\n\
-    let pos_inf = bitcast<f32>(0x7f800000u);\n\
-    if (isNan(x) || x == pos_inf) { return x; }\n\
-    if (x == 0.0) { return bitcast<f32>(1u); }\n\
     let bits = bitcast<u32>(x);\n\
+    let is_nan = (bits & 0x7fffffffu) > 0x7f800000u;\n\
+    if (is_nan || x == bitcast<f32>(0x7f800000u)) { return x; }\n\
+    if (x == 0.0) { return bitcast<f32>(1u); }\n\
     let stepped = select(bits - 1u, bits + 1u, (bits >> 31u) == 0u);\n\
     return bitcast<f32>(stepped);\n\
 }\n\
 \n\
 fn prism_next_down(x: f32) -> f32 {\n\
-    let neg_inf = bitcast<f32>(0xff800000u);\n\
-    if (isNan(x) || x == neg_inf) { return x; }\n\
-    if (x == 0.0) { return bitcast<f32>(0x80000001u); }\n\
     let bits = bitcast<u32>(x);\n\
+    let is_nan = (bits & 0x7fffffffu) > 0x7f800000u;\n\
+    if (is_nan || x == bitcast<f32>(0xff800000u)) { return x; }\n\
+    if (x == 0.0) { return bitcast<f32>(0x80000001u); }\n\
     let stepped = select(bits + 1u, bits - 1u, (bits >> 31u) == 0u);\n\
     return bitcast<f32>(stepped);\n\
 }\n\
