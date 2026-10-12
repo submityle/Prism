@@ -103,4 +103,6 @@
 
 **不变量**：步骤 2 的 per-tile 9-way 分类、步骤 5 的单一 `respond()` 分派、`binning` 的 `pipeline_class` 只是同一个 key 的三种视图——迁移后**仍是那条唯一执行路径**，不按 PBR/NPR/混合/自定义拆 PSO。
 
-**第 ④ 条顺带修的真 bug（2026-10-12）**：`MaterialRecord::specialization()`（permutation key）原先用**原始 `closure_mask`**，而活瓣集是**派生 `lobe_mask`**（会把 `EMISSIVE`/`TRANSMISSION`/`FACE_SHADOW` 折进来）。于是「只有 `FACE_SHADOW` 不同」的两个材质撞同一个 key（同一个 PSO），违反 §8.5 的「key = 瓣集 + 特征 flags」。已改为 key 取派生 `lobe_mask`，并加回归测试（`specialization_follows_the_derived_lobe_set_not_the_raw_closure_bits`）。
+**第 ④ 条顺带修的两个真 bug（2026-10-12）**：
+1. `MaterialRecord::specialization()`（permutation key）原先用**原始 `closure_mask`**，而活瓣集是**派生 `lobe_mask`**（会把 `EMISSIVE`/`TRANSMISSION`/`FACE_SHADOW` 折进来）。于是「只有 `FACE_SHADOW` 不同」的两个材质撞同一个 key（同一个 PSO），违反 §8.5 的「key = 瓣集 + 特征 flags」。已改为 key 取派生 `lobe_mask`（`3a50e4f4f`，回归测试 `specialization_follows_the_derived_lobe_set_not_the_raw_closure_bits`）。
+2. **bin 的 `pipeline_class` 只放 `illumination|render_class`、没放活瓣集**（`prism_render_scene::visibility::systems`），不同瓣的材质会进同一个 bin（跨管线合批）。已加 `SpecializationId::bin_class()`（紧凑 `u32`：`illumination` 2b | `render_class` 8b | 活瓣集 17b，对合法瓣集无碰撞），即 ④ 的「key → bin 类」映射，并让 bin 生产者改用它（`c789a8ccd`）。
