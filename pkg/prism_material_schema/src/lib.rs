@@ -86,7 +86,7 @@ pub struct Record {
     pub fields: Vec<Field>,
 }
 
-/// An optional lobe: a uniform 4-word quantum plus its manifest identity.
+/// An optional lobe: a variable-length word record plus its manifest identity.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lobe {
@@ -105,7 +105,11 @@ pub struct Lobe {
     pub vendor: String,
     /// Mutable stability level (§5.4 promotion flips mutable fields only).
     pub stability: Stability,
-    /// Number of `u32` words the lobe occupies (currently always 4).
+    /// Number of `u32` words the lobe occupies. Lobes are **variable length**
+    /// (§4.4): the pack cursor advances by each present lobe's own `words`, and
+    /// the codegen emits a per-lobe footprint (`SURFACE_LOBE_WORDS_BY_SLOT` /
+    /// `PRISM_LOBE_WORDS_*`). Today every lobe happens to be 4 words; growing a
+    /// lobe to its full `OpenPBR` field set changes only this number.
     pub words: u32,
     /// Fields, which must tile `[0, words)` exactly with no gaps or overlaps.
     #[serde(default, rename = "field")]
@@ -229,11 +233,11 @@ impl Namespace {
         }
     }
 
-    /// Whether this namespace belongs to the OpenPBR specification core, i.e.
-    /// the canonical bit region a pure-OpenPBR material may occupy.
+    /// Whether this namespace belongs to the `OpenPBR` specification core, i.e.
+    /// the canonical bit region a pure-`OpenPBR` material may occupy.
     ///
     /// Only `KHR` is spec core: `EXT` is a ratified *cross-vendor* extension
-    /// that still leaves the OpenPBR baseline, so it lives in the extension
+    /// that still leaves the `OpenPBR` baseline, so it lives in the extension
     /// region alongside `PRISM`/`X_STUDIO` (§4.5 constraint 2).
     #[must_use]
     pub const fn is_openpbr_core(self) -> bool {

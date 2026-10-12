@@ -21,8 +21,8 @@
 //!
 //! The emitters are intentionally *textual*: they never shell out to `rustfmt`
 //! or a WESL formatter, so output is reproducible on any host with no toolchain
-//! beyond this crate. The layout they encode is small and regular (a 4-word
-//! lobe quantum, low-bit-first), which keeps the generated text review-friendly.
+//! beyond this crate. The layout they encode is small and regular (variable-length
+//! lobes packed low-bit-first), which keeps the generated text review-friendly.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -53,25 +53,15 @@ fn float_literal(v: f32) -> String {
     }
 }
 
-/// Assert the schema uses a single uniform lobe word count. Both twins encode
-/// the stride as one constant (`PRISM_SURFACE_LOBE_WORDS` / `SURFACE_LOBE_WORDS`)
-/// and advance a cursor by it per present lobe; a non-uniform schema would make
-/// that constant a lie. The schema validator already fixes 4-word lobes, so this
-/// is a defensive guard for a future schema change, surfaced as a clear panic in
-/// the generator rather than silently wrong code.
-fn uniform_lobe_words(schema: &SurfaceSchema) -> u32 {
-    let mut words: Option<u32> = None;
-    for lobe in &schema.lobes {
-        match words {
-            None => words = Some(lobe.words),
-            Some(w) => assert_eq!(
-                w, lobe.words,
-                "codegen requires a uniform lobe word count; lobe `{}` has {} (expected {})",
-                lobe.id, lobe.words, w
-            ),
-        }
-    }
-    words.unwrap_or(0)
+/// The widest per-lobe word footprint in the schema.
+///
+/// Lobes are **variable length** (§4.4 "变长打包"): the pack cursor advances by
+/// each present lobe's own `words`, never a shared stride. This maximum is used
+/// only for the human-facing "worst-case quantum" note and for the legacy
+/// `SURFACE_LOBE_WORDS` / `PRISM_SURFACE_LOBE_WORDS` constant, which documents
+/// the widest lobe rather than a packing stride.
+fn max_lobe_words(schema: &SurfaceSchema) -> u32 {
+    schema.lobes.iter().map(|lobe| lobe.words).max().unwrap_or(0)
 }
 
 /// All defined lobe bits OR-ed together (`(1 << count) - 1` for contiguous
@@ -96,7 +86,7 @@ fn all_lobe_bits(schema: &SurfaceSchema) -> u32 {
 #[must_use]
 pub fn emit_wesl_unpack(schema: &SurfaceSchema) -> String {
     let core_words = schema.core.words;
-    let lobe_words = uniform_lobe_words(schema);
+    let max_lobe_words = max_lobe_words(schema);
     let count = schema.lobe_count();
     let max_words = schema.packed_len_words(all_lobe_bits(schema));
     let lobes = schema.canonical_lobes();
@@ -165,20 +155,39 @@ pub fn emit_wesl_unpack(schema: &SurfaceSchema) -> String {
 
     // --- word counts ------------------------------------------------------
     let _ = writeln!(o, "const PRISM_SURFACE_CORE_WORDS: u32 = {core_words}u;");
-    let _ = writeln!(o, "const PRISM_SURFACE_LOBE_WORDS: u32 = {lobe_words}u;");
+    o.push_str("/// Widest per-lobe word footprint (a documentation constant; the pack cursor\n");
+    o.push_str("/// advances by each lobe's own `PRISM_LOBE_WORDS_*`, never this value).\n");
+    let _ = writeln!(o, "const PRISM_SURFACE_LOBE_WORDS: u32 = {max_lobe_words}u;");
+    o.push('\n');
+    o.push_str("// Per-lobe word footprints (variable length, §4.4). The decoder advances a\n");
+    o.push_str("// cursor by exactly the present lobe's footprint, so lobes may differ in size.\n");
+    for lobe in &lobes {
+        let _ = writeln!(
+            o,
+            "const PRISM_LOBE_WORDS_{}: u32 = {}u;",
+            lobe.mask_const, lobe.words
+        );
+    }
     let _ = writeln!(
         o,
-        "/// Fully-loaded worst case: core + every lobe ({core_words} + {count}*{lobe_words})."
+        "\n/// Fully-loaded worst case: core + every lobe ({core_words} + sum of {count} lobe footprints)."
     );
     let _ = writeln!(o, "const PRISM_SURFACE_MAX_WORDS: u32 = {max_words}u;");
     o.push('\n');
 
     // --- prism_packed_word_count -----------------------------------------
-    o.push_str("/// Packed word count for a mask: core plus the uniform lobe stride per present\n");
-    o.push_str("/// lobe. Mirrors `SurfaceParameterBlock::packed_len_words`.\n");
+    o.push_str("/// Packed word count for a mask: core plus each present lobe's own footprint.\n");
+    o.push_str("/// Mirrors `SurfaceParameterBlock::packed_len_words`.\n");
     o.push_str("fn prism_packed_word_count(lobe_mask: u32) -> u32 {\n");
-    o.push_str("    return PRISM_SURFACE_CORE_WORDS\n");
-    o.push_str("        + countOneBits(lobe_mask & PRISM_LOBE_ALL) * PRISM_SURFACE_LOBE_WORDS;\n");
+    o.push_str("    var words: u32 = PRISM_SURFACE_CORE_WORDS;\n");
+    for lobe in &lobes {
+        let _ = writeln!(
+            o,
+            "    if ((lobe_mask & PRISM_LOBE_{}) != 0u) {{ words += PRISM_LOBE_WORDS_{}; }}",
+            lobe.mask_const, lobe.mask_const
+        );
+    }
+    o.push_str("    return words;\n");
     o.push_str("}\n\n");
 
     // --- prism_neutral_surface -------------------------------------------
@@ -239,7 +248,7 @@ pub fn emit_wesl_unpack(schema: &SurfaceSchema) -> String {
         emit_wesl_core_read(&mut o, field);
     }
     o.push('\n');
-    o.push_str("    // Present lobes, canonical low-bit-first order, uniform stride each.\n");
+    o.push_str("    // Present lobes, canonical low-bit-first order, each its own footprint.\n");
     o.push_str("    var cursor: u32 = PRISM_SURFACE_CORE_WORDS;\n");
     for lobe in &lobes {
         let _ = writeln!(
@@ -250,7 +259,11 @@ pub fn emit_wesl_unpack(schema: &SurfaceSchema) -> String {
         for field in &lobe.fields {
             emit_wesl_lobe_read(&mut o, field);
         }
-        o.push_str("        cursor += PRISM_SURFACE_LOBE_WORDS;\n");
+        let _ = writeln!(
+            o,
+            "        cursor += PRISM_LOBE_WORDS_{};",
+            lobe.mask_const
+        );
         o.push_str("    }\n");
     }
     o.push_str("    return s;\n");
@@ -351,7 +364,7 @@ fn emit_wesl_read(o: &mut String, field: &crate::Field, base_is_cursor: bool, sl
 #[must_use]
 pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     let core_words = schema.core.words;
-    let lobe_words = uniform_lobe_words(schema);
+    let max_lobe_words = max_lobe_words(schema);
     let count = schema.lobe_count();
     let max_words = schema.packed_len_words(all_lobe_bits(schema));
     let lobes = schema.canonical_lobes();
@@ -372,8 +385,41 @@ pub fn emit_rust_layout(schema: &SurfaceSchema) -> String {
     o.push('\n');
     o.push_str("/// Number of `u32` words in the always-present surface core.\n");
     let _ = writeln!(o, "pub const SURFACE_CORE_WORDS: usize = {core_words};");
-    o.push_str("/// Number of `u32` words in every uniform per-lobe quantum.\n");
-    let _ = writeln!(o, "pub const SURFACE_LOBE_WORDS: usize = {lobe_words};");
+    o.push_str("/// Widest per-lobe word footprint in the schema.\n");
+    o.push_str("///\n");
+    o.push_str("/// Lobes are **variable length** (§4.4 \"变长打包\"):\n");
+    o.push_str("/// [`crate::SurfaceParameterBlock::pack`]\n");
+    o.push_str("/// advances the write cursor by each present lobe's own footprint, exposed\n");
+    o.push_str("/// per slot in [`SURFACE_LOBE_WORDS_BY_SLOT`]. This constant is therefore\n");
+    o.push_str("/// the largest quantum, useful for worst-case bounds — never a packing\n");
+    o.push_str("/// stride.\n");
+    let _ = writeln!(o, "pub const SURFACE_LOBE_WORDS: usize = {max_lobe_words};");
+    o.push_str("/// Per-lobe `u32` word footprint indexed by `LobeMask` bit index\n");
+    o.push_str("/// (`registry_slot`). Slots are dense and low-bit-first, so\n");
+    o.push_str("/// `SURFACE_LOBE_WORDS_BY_SLOT[bit.trailing_zeros()]` is the stride for that\n");
+    o.push_str("/// lobe. Summing the present entries plus [`SURFACE_CORE_WORDS`] gives\n");
+    o.push_str("/// `SurfaceParameterBlock::packed_len_words`.\n");
+    let mut slot_words = alloc::vec![0usize; count as usize];
+    for lobe in &lobes {
+        let slot = lobe.registry_slot as usize;
+        assert!(
+            slot < slot_words.len(),
+            "lobe `{}` registry_slot {} exceeds the lobe count {}; LobeMask requires dense slots",
+            lobe.id,
+            lobe.registry_slot,
+            count
+        );
+        slot_words[slot] = lobe.words as usize;
+    }
+    let _ = writeln!(
+        o,
+        "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; {count}] = [{}];",
+        slot_words
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     o.push_str("/// Number of defined optional lobes (equals `LobeMask::COUNT`).\n");
     let _ = writeln!(o, "pub const SURFACE_LOBE_COUNT: u32 = {count};");
     o.push_str(
@@ -460,10 +506,17 @@ mod tests {
             "fn prism_packed_word_count(lobe_mask: u32) -> u32",
             "fn prism_neutral_surface() -> PrismSurfaceParameters",
             "const PRISM_SURFACE_MAX_WORDS: u32 = 40u;",
+            "const PRISM_LOBE_WORDS_EMISSION: u32 = 4u;",
+            "const PRISM_LOBE_WORDS_FACE: u32 = 4u;",
+            "        cursor += PRISM_LOBE_WORDS_TRANSMISSION;",
             "import prism_render_scene::shaders::material::PrismSurfaceParameters;",
         ] {
             assert!(wesl.contains(needle), "generated WESL missing `{needle}`");
         }
+        // The packed-word counter accumulates each present lobe's own footprint
+        // rather than a shared uniform stride (§4.4 variable-length packing).
+        assert!(wesl.contains("if ((lobe_mask & PRISM_LOBE_CLEARCOAT) != 0u) { words += PRISM_LOBE_WORDS_CLEARCOAT; }"));
+        assert!(!wesl.contains("countOneBits(lobe_mask & PRISM_LOBE_ALL) * PRISM_SURFACE_LOBE_WORDS"));
         // The face lobe uses the namespaced fat-struct field.
         assert!(wesl.contains("s.face_softness = bitcast<f32>(w[cursor]);"));
         // Both twins end with a trailing newline.
@@ -486,6 +539,7 @@ mod tests {
         for needle in [
             "pub const SURFACE_CORE_WORDS: usize = 12;",
             "pub const SURFACE_LOBE_WORDS: usize = 4;",
+            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 4, 4, 4, 4, 4, 4];",
             "pub const SURFACE_LOBE_COUNT: u32 = 7;",
             "pub const SURFACE_MAX_WORDS: usize = 40;",
             "pub const SURFACE_LOBES: [LobeLayout; 7] = [",
@@ -495,5 +549,34 @@ mod tests {
             assert!(rust.contains(needle), "generated Rust missing `{needle}`");
         }
         assert!(rust.ends_with('\n'));
+    }
+
+    #[test]
+    fn non_uniform_lobes_get_per_lobe_strides() {
+        // §4.4: lobes are variable length. Widen one lobe and prove both twins
+        // advance by that lobe's own footprint instead of a shared stride — the
+        // generalization that lets P1-f grow each lobe to its full OpenPBR field
+        // set without a 16-byte-quantum ceiling.
+        let mut schema = surface_schema();
+        schema
+            .lobes
+            .iter_mut()
+            .find(|lobe| lobe.id == "clearcoat")
+            .expect("clearcoat lobe present")
+            .words = 6;
+
+        let rust = emit_rust_layout(&schema);
+        assert!(rust.contains("pub const SURFACE_LOBE_WORDS: usize = 6;"));
+        assert!(rust.contains(
+            "pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 6, 4, 4, 4, 4, 4];"
+        ));
+        // Worst case grows with the widened lobe.
+        assert!(rust.contains("pub const SURFACE_MAX_WORDS: usize = 42;"));
+
+        let wesl = emit_wesl_unpack(&schema);
+        assert!(wesl.contains("const PRISM_LOBE_WORDS_CLEARCOAT: u32 = 6u;"));
+        assert!(wesl.contains("words += PRISM_LOBE_WORDS_CLEARCOAT;"));
+        assert!(wesl.contains("cursor += PRISM_LOBE_WORDS_CLEARCOAT;"));
+        assert!(wesl.contains("fn prism_unpack_surface(words: array<u32, 42>, lobe_mask: u32)"));
     }
 }

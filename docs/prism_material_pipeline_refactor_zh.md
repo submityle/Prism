@@ -579,6 +579,14 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 **✅ 已完成**
 
+- **变长 lobe 打包（P1-f 的前置基建，§4.4/§17.5）**
+  - 范围：把"每个瓣统一 4-word 量子、按 `present_count * SURFACE_LOBE_WORDS` 定步长"这一硬编码，泛化为**按每瓣自身字长推进**的变长打包——这是 §4.4 把现有 4-word 瓣扩成 OpenPBR 全字段瓣（`P1-f`）的必要前提；在全部瓣目前仍为 4 字时，生成物与运行时行为、字节完全不变（既有穷举子集对拍/字节平价门禁全绿）。
+  - 代码：
+    - codegen（`pkg/prism_material_schema/src/codegen.rs`）：`uniform_lobe_words` 守卫删除，改为 `max_lobe_words`；WESL 侧按瓣生成 `PRISM_LOBE_WORDS_<LOBE>`，`prism_packed_word_count` 改为逐瓣累加，`prism_unpack_surface` 游标按各瓣 footprint 前进；Rust 侧生成 `SURFACE_LOBE_WORDS_BY_SLOT[registry_slot]`（每瓣字长），`SURFACE_LOBE_WORDS` 语义改为"最宽瓣 footprint"（不再是统一步长）；`SURFACE_MAX_WORDS` 仍为精确最坏值（core + Σ 全部瓣字长）。
+    - CPU（`pkg/prism_render_material/src/surface.rs`）：`packed_len_words` / `pack` / `unpack` 全部改为按 `SURFACE_LOBE_WORDS_BY_SLOT` 求和与推进；新增 `lobe_word_count(bit)` 单点查询。新增不变量测试：每个 typed lobe 结构体字节数 == 其 schema footprint × 4。
+  - 门禁：`cargo test -p prism_material_schema --lib`（13 通过，含新增 `non_uniform_lobes_get_per_lobe_strides`：把 clearcoat 加宽到 6 字后断言两侧孪生各自用 6 字步长、`SURFACE_MAX_WORDS` 随之变 42）、`cargo test -p prism_render_material`（826 lib + 6 schema_parity + 2 codegen_freshness 全绿）、`cargo test -p prism_render_scene --lib shading::resolve::shader_tests`（48 通过，重生成的 `material_unpack.wesl` 编译/链接全链验证）。
+  - 说明：这是"无全局硬顶"在打包层的落实——瓣字长由 schema 每瓣声明、生成物与运行时同步，`P1-f` 逐瓣补 OpenPBR 全字段时不再受 16 字节量子天花板约束。
+
 - **P1-g（S1 + S2）自描述反射瓣 schema + codegen**（§17.5）
   - 提交：`399db87e2`（self-describing lobe schema + S1 对拍门禁）、`cd13ba525`（WESL unpack + Rust layout codegen，S2）。
   - 落地：`pkg/prism_material_schema`（schema crate）+ `prism-material-codegen` 二进制；由 schema 生成 `material_unpack.wesl` / `surface_layout.rs`；新鲜度（generated-vs-committed）+ CPU/WESL 对拍门禁。

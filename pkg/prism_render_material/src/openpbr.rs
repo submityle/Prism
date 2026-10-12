@@ -276,10 +276,16 @@ mod tests {
         assert_eq!(projection.block.emission, input.emission);
         assert_eq!(projection.block.transmission, input.transmission);
         assert_eq!(projection.block.clearcoat, input.clearcoat);
-        // The projection packs as core + six canonical lobes.
+        // The projection packs as core + six canonical lobes, each with its own
+        // variable-length footprint.
+        let canonical_words: usize = SURFACE_LOBES
+            .iter()
+            .filter(|lobe| lobe.namespace == "KHR")
+            .map(|lobe| lobe.words)
+            .sum();
         assert_eq!(
             projection.block.packed_len_words(),
-            crate::SURFACE_CORE_WORDS + 6 * crate::SURFACE_LOBE_WORDS
+            crate::SURFACE_CORE_WORDS + canonical_words
         );
     }
 

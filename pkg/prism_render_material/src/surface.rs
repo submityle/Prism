@@ -23,7 +23,9 @@ use crate::GpuSurfaceParameters;
 // long-standing public path `prism_render_material::SURFACE_CORE_WORDS` stable
 // while making the schema the single source of truth; the typed structs below
 // are checked against this layout by `layout_matches_generated_table`.
-pub use crate::surface_layout::{SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS};
+pub use crate::surface_layout::{
+    SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS, SURFACE_LOBE_WORDS_BY_SLOT,
+};
 
 /// The compact über-BSDF core carried by every surface.
 ///
@@ -406,7 +408,12 @@ impl SurfaceParameterBlock {
 
     /// Number of `u32` words [`Self::pack`] will emit for this block's mask.
     pub fn packed_len_words(&self) -> usize {
-        SURFACE_CORE_WORDS + self.lobe_mask.present_count() as usize * SURFACE_LOBE_WORDS
+        SURFACE_CORE_WORDS
+            + LobeMask::canonical()
+                .into_iter()
+                .filter(|bit| self.lobe_mask.contains(*bit))
+                .map(lobe_word_count)
+                .sum::<usize>()
     }
 
     /// Serialized byte size (always a multiple of 16).
@@ -414,7 +421,11 @@ impl SurfaceParameterBlock {
         self.packed_len_words() * size_of::<u32>()
     }
 
-    /// The four words of a lobe, selected by its mask bit.
+    /// The words of a lobe, selected by its mask bit.
+    ///
+    /// The slice length is the lobe's own `u32` footprint (its typed struct size
+    /// equals the schema's `words`), so the pack cursor walks variable-length
+    /// lobes correctly (§4.4 variable-length packing).
     fn lobe_words(&self, bit: LobeMask) -> &[u32] {
         match bit {
             LobeMask::EMISSION => bytemuck::cast_slice(core::slice::from_ref(&self.emission)),
@@ -445,7 +456,12 @@ impl SurfaceParameterBlock {
     /// Reverse [`Self::pack`]: read the core, then each present lobe in
     /// canonical order. Absent lobes decode to their neutral defaults.
     pub fn unpack(lobe_mask: LobeMask, words: &[u32]) -> Result<Self, SurfaceUnpackError> {
-        let expected = SURFACE_CORE_WORDS + lobe_mask.present_count() as usize * SURFACE_LOBE_WORDS;
+        let expected = SURFACE_CORE_WORDS
+            + LobeMask::canonical()
+                .into_iter()
+                .filter(|bit| lobe_mask.contains(*bit))
+                .map(lobe_word_count)
+                .sum::<usize>();
         if words.len() != expected {
             return Err(SurfaceUnpackError::WrongLength {
                 expected,
@@ -464,7 +480,8 @@ impl SurfaceParameterBlock {
             if !lobe_mask.contains(bit) {
                 continue;
             }
-            let slice = bytemuck::cast_slice(&words[cursor..cursor + SURFACE_LOBE_WORDS]);
+            let lobe_len = lobe_word_count(bit);
+            let slice = bytemuck::cast_slice(&words[cursor..cursor + lobe_len]);
             match bit {
                 LobeMask::EMISSION => block.emission = *bytemuck::from_bytes(slice),
                 LobeMask::CLEARCOAT => block.clearcoat = *bytemuck::from_bytes(slice),
@@ -475,10 +492,27 @@ impl SurfaceParameterBlock {
                 LobeMask::FACE => block.face = *bytemuck::from_bytes(slice),
                 _ => {}
             }
-            cursor += SURFACE_LOBE_WORDS;
+            cursor += lobe_len;
         }
         Ok(block)
     }
+}
+
+/// The `u32` word footprint of the lobe whose mask bit is `bit`.
+///
+/// Slots are dense and low-bit-first (schema invariant, asserted by
+/// `layout_matches_generated_table`), so a single defined bit indexes the
+/// generated per-slot table directly. Callers always pass a single defined bit;
+/// an undefined bit maps to slot `32`, which the table saturates to `0`.
+fn lobe_word_count(bit: LobeMask) -> usize {
+    debug_assert!(
+        bit.bits().count_ones() == 1,
+        "lobe_word_count expects a single lobe bit, got {bit:?}"
+    );
+    SURFACE_LOBE_WORDS_BY_SLOT
+        .get(bit.bits().trailing_zeros() as usize)
+        .copied()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -514,7 +548,7 @@ mod tests {
 
     #[test]
     fn layout_matches_generated_table() {
-        use crate::surface_layout::{SURFACE_LOBES, SURFACE_LOBE_COUNT};
+        use crate::surface_layout::{SURFACE_LOBES, SURFACE_LOBE_COUNT, SURFACE_LOBE_WORDS_BY_SLOT};
 
         // The hand-written typed enum must agree with the schema-generated
         // table in count, bit order, and per-lobe stride — this is the S2
@@ -524,7 +558,13 @@ mod tests {
         for (mask, lobe) in LobeMask::canonical().iter().zip(SURFACE_LOBES.iter()) {
             // Canonical ordering is low-bit-first, so bit index == pack slot.
             assert_eq!(mask.bits(), 1 << lobe.registry_slot);
-            assert_eq!(lobe.words, SURFACE_LOBE_WORDS);
+            // The per-slot stride is the source of truth for variable-length
+            // packing; `SURFACE_LOBE_WORDS` is only the widest quantum.
+            assert_eq!(
+                lobe.words,
+                SURFACE_LOBE_WORDS_BY_SLOT[lobe.registry_slot as usize]
+            );
+            assert!(lobe.words <= SURFACE_LOBE_WORDS);
         }
         // The all-lobes mask is exactly the OR of every generated slot.
         let generated_all = SURFACE_LOBES
@@ -589,13 +629,27 @@ mod tests {
     fn core_and_lobes_are_sixteen_byte_quanta() {
         assert_eq!(size_of::<GpuSurfaceCore>(), SURFACE_CORE_WORDS * 4);
         assert_eq!(size_of::<GpuSurfaceCore>() % 16, 0);
-        assert_eq!(size_of::<GpuEmissionLobe>(), SURFACE_LOBE_WORDS * 4);
-        assert_eq!(size_of::<GpuClearCoatLobe>(), SURFACE_LOBE_WORDS * 4);
-        assert_eq!(size_of::<GpuAnisotropyLobe>(), SURFACE_LOBE_WORDS * 4);
-        assert_eq!(size_of::<GpuSheenLobe>(), SURFACE_LOBE_WORDS * 4);
-        assert_eq!(size_of::<GpuSubsurfaceLobe>(), SURFACE_LOBE_WORDS * 4);
-        assert_eq!(size_of::<GpuTransmissionLobe>(), SURFACE_LOBE_WORDS * 4);
-        assert_eq!(size_of::<GpuFaceLobe>(), SURFACE_LOBE_WORDS * 4);
+        // Every typed lobe struct's byte size must equal its schema-declared
+        // per-slot footprint: this is the invariant that lets the pack cursor
+        // advance by `SURFACE_LOBE_WORDS_BY_SLOT[slot]` (variable length) and
+        // stay byte-exact with the WESL decoder's `PRISM_LOBE_WORDS_*`.
+        let expected = [
+            (LobeMask::EMISSION, size_of::<GpuEmissionLobe>()),
+            (LobeMask::CLEARCOAT, size_of::<GpuClearCoatLobe>()),
+            (LobeMask::ANISOTROPY, size_of::<GpuAnisotropyLobe>()),
+            (LobeMask::SHEEN, size_of::<GpuSheenLobe>()),
+            (LobeMask::SUBSURFACE, size_of::<GpuSubsurfaceLobe>()),
+            (LobeMask::TRANSMISSION, size_of::<GpuTransmissionLobe>()),
+            (LobeMask::FACE, size_of::<GpuFaceLobe>()),
+        ];
+        for (bit, bytes) in expected {
+            assert_eq!(
+                bytes,
+                lobe_word_count(bit) * 4,
+                "lobe {bit:?} struct size disagrees with its schema footprint"
+            );
+            assert_eq!(bytes % 16, 0);
+        }
     }
 
     #[test]
@@ -612,7 +666,10 @@ mod tests {
         let block = SurfaceParameterBlock::from_full(&authored(), LobeMask::all());
         assert_eq!(
             block.packed_len_words(),
-            SURFACE_CORE_WORDS + LobeMask::COUNT as usize * SURFACE_LOBE_WORDS
+            SURFACE_CORE_WORDS
+                + crate::surface_layout::SURFACE_LOBE_WORDS_BY_SLOT
+                    .iter()
+                    .sum::<usize>()
         );
         assert_eq!(block.pack().len(), block.packed_len_words());
     }

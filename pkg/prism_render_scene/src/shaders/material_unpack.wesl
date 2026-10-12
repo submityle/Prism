@@ -26,15 +26,35 @@ const PRISM_LOBE_FACE: u32 = 64u;         // 1 << 6
 const PRISM_LOBE_ALL: u32 = 127u;         // (1 << 7) - 1
 
 const PRISM_SURFACE_CORE_WORDS: u32 = 12u;
+/// Widest per-lobe word footprint (a documentation constant; the pack cursor
+/// advances by each lobe's own `PRISM_LOBE_WORDS_*`, never this value).
 const PRISM_SURFACE_LOBE_WORDS: u32 = 4u;
-/// Fully-loaded worst case: core + every lobe (12 + 7*4).
+
+// Per-lobe word footprints (variable length, §4.4). The decoder advances a
+// cursor by exactly the present lobe's footprint, so lobes may differ in size.
+const PRISM_LOBE_WORDS_EMISSION: u32 = 4u;
+const PRISM_LOBE_WORDS_CLEARCOAT: u32 = 4u;
+const PRISM_LOBE_WORDS_ANISOTROPY: u32 = 4u;
+const PRISM_LOBE_WORDS_SHEEN: u32 = 4u;
+const PRISM_LOBE_WORDS_SUBSURFACE: u32 = 4u;
+const PRISM_LOBE_WORDS_TRANSMISSION: u32 = 4u;
+const PRISM_LOBE_WORDS_FACE: u32 = 4u;
+
+/// Fully-loaded worst case: core + every lobe (12 + sum of 7 lobe footprints).
 const PRISM_SURFACE_MAX_WORDS: u32 = 40u;
 
-/// Packed word count for a mask: core plus the uniform lobe stride per present
-/// lobe. Mirrors `SurfaceParameterBlock::packed_len_words`.
+/// Packed word count for a mask: core plus each present lobe's own footprint.
+/// Mirrors `SurfaceParameterBlock::packed_len_words`.
 fn prism_packed_word_count(lobe_mask: u32) -> u32 {
-    return PRISM_SURFACE_CORE_WORDS
-        + countOneBits(lobe_mask & PRISM_LOBE_ALL) * PRISM_SURFACE_LOBE_WORDS;
+    var words: u32 = PRISM_SURFACE_CORE_WORDS;
+    if ((lobe_mask & PRISM_LOBE_EMISSION) != 0u) { words += PRISM_LOBE_WORDS_EMISSION; }
+    if ((lobe_mask & PRISM_LOBE_CLEARCOAT) != 0u) { words += PRISM_LOBE_WORDS_CLEARCOAT; }
+    if ((lobe_mask & PRISM_LOBE_ANISOTROPY) != 0u) { words += PRISM_LOBE_WORDS_ANISOTROPY; }
+    if ((lobe_mask & PRISM_LOBE_SHEEN) != 0u) { words += PRISM_LOBE_WORDS_SHEEN; }
+    if ((lobe_mask & PRISM_LOBE_SUBSURFACE) != 0u) { words += PRISM_LOBE_WORDS_SUBSURFACE; }
+    if ((lobe_mask & PRISM_LOBE_TRANSMISSION) != 0u) { words += PRISM_LOBE_WORDS_TRANSMISSION; }
+    if ((lobe_mask & PRISM_LOBE_FACE) != 0u) { words += PRISM_LOBE_WORDS_FACE; }
+    return words;
 }
 
 /// The canonical neutral surface (`GpuSurfaceParameters::default`): the base an
@@ -86,7 +106,7 @@ fn prism_unpack_surface(words: array<u32, 40>, lobe_mask: u32) -> PrismSurfacePa
     s.normal_scale = bitcast<f32>(w[8]);
     s.alpha_cutoff = bitcast<f32>(w[9]);
 
-    // Present lobes, canonical low-bit-first order, uniform stride each.
+    // Present lobes, canonical low-bit-first order, each its own footprint.
     var cursor: u32 = PRISM_SURFACE_CORE_WORDS;
     if (lobe_mask & PRISM_LOBE_EMISSION) != 0u {
         s.emissive = vec4<f32>(
@@ -95,36 +115,36 @@ fn prism_unpack_surface(words: array<u32, 40>, lobe_mask: u32) -> PrismSurfacePa
             bitcast<f32>(w[cursor + 2u]),
             bitcast<f32>(w[cursor + 3u]),
         );
-        cursor += PRISM_SURFACE_LOBE_WORDS;
+        cursor += PRISM_LOBE_WORDS_EMISSION;
     }
     if (lobe_mask & PRISM_LOBE_CLEARCOAT) != 0u {
         s.clearcoat = bitcast<f32>(w[cursor]);
         s.clearcoat_roughness = bitcast<f32>(w[cursor + 1u]);
-        cursor += PRISM_SURFACE_LOBE_WORDS;
+        cursor += PRISM_LOBE_WORDS_CLEARCOAT;
     }
     if (lobe_mask & PRISM_LOBE_ANISOTROPY) != 0u {
         s.anisotropy = bitcast<f32>(w[cursor]);
         s.anisotropy_rotation = bitcast<f32>(w[cursor + 1u]);
-        cursor += PRISM_SURFACE_LOBE_WORDS;
+        cursor += PRISM_LOBE_WORDS_ANISOTROPY;
     }
     if (lobe_mask & PRISM_LOBE_SHEEN) != 0u {
         s.sheen = bitcast<f32>(w[cursor]);
-        cursor += PRISM_SURFACE_LOBE_WORDS;
+        cursor += PRISM_LOBE_WORDS_SHEEN;
     }
     if (lobe_mask & PRISM_LOBE_SUBSURFACE) != 0u {
         s.subsurface = bitcast<f32>(w[cursor]);
-        cursor += PRISM_SURFACE_LOBE_WORDS;
+        cursor += PRISM_LOBE_WORDS_SUBSURFACE;
     }
     if (lobe_mask & PRISM_LOBE_TRANSMISSION) != 0u {
         s.transmission = bitcast<f32>(w[cursor]);
         s.thickness = bitcast<f32>(w[cursor + 1u]);
         s.index_of_refraction = bitcast<f32>(w[cursor + 2u]);
         s.dispersion = bitcast<f32>(w[cursor + 3u]);
-        cursor += PRISM_SURFACE_LOBE_WORDS;
+        cursor += PRISM_LOBE_WORDS_TRANSMISSION;
     }
     if (lobe_mask & PRISM_LOBE_FACE) != 0u {
         s.face_softness = bitcast<f32>(w[cursor]);
-        cursor += PRISM_SURFACE_LOBE_WORDS;
+        cursor += PRISM_LOBE_WORDS_FACE;
     }
     return s;
 }

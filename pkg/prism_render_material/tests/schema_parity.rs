@@ -11,6 +11,7 @@ use prism_material_schema::{surface_schema, FieldType, SurfaceSchema};
 use prism_render_material::{
     openpbr_conformance, project_to_openpbr, GpuSurfaceParameters, LobeMask, LobeRegion,
     OpenPbrConformance, SurfaceParameterBlock, SURFACE_CORE_WORDS, SURFACE_LOBE_WORDS,
+    SURFACE_LOBE_WORDS_BY_SLOT,
 };
 
 /// The same authored fat parameters used by the `surface.rs` unit tests, so the
@@ -93,9 +94,17 @@ fn core_and_lobe_word_counts_match_surface_rs() {
     let schema = schema();
     assert_eq!(schema.core.words as usize, SURFACE_CORE_WORDS);
     for lobe in &schema.lobes {
+        // Per-slot footprint is the packing stride (variable length, §4.4); the
+        // schema's per-lobe `words` must match it exactly.
         assert_eq!(
-            lobe.words as usize, SURFACE_LOBE_WORDS,
-            "lobe {} is not a 4-word quantum",
+            lobe.words as usize,
+            SURFACE_LOBE_WORDS_BY_SLOT[lobe.registry_slot as usize],
+            "lobe {} footprint disagrees with the generated per-slot table",
+            lobe.id
+        );
+        assert!(
+            lobe.words as usize <= SURFACE_LOBE_WORDS,
+            "lobe {} exceeds the widest quantum",
             lobe.id
         );
     }

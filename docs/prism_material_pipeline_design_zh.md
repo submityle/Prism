@@ -158,7 +158,7 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 **`GpuMaterialHeader`（`#[repr(C)]` + `bytemuck::Pod`，20 个 u32 字段）**：旧 `shading_model` 字段已删除，风格由 `illumination` 承载，编译期 permutation 身份由 `specialization_low`/`specialization_high`（切分的 `SpecializationId`）承载。关键字段：
 
 - `parameter_offset`：**变长字堆里本材质打包 surface block 的 u32 字地址**（不再是定长 `GpuSurfaceParameters` 数组的元素下标）——因为块是变长的，场景只打包 über 核心 + 存在的瓣。
-- `parameter_size`：该块字节长度 = `(12 + present_lobes*4) * 4`（`packed_size_bytes()`）。
+- `parameter_size`：该块字节长度 = `(SURFACE_CORE_WORDS + Σ(存在瓣字长)) * 4`（`packed_size_bytes()`）；瓣为变长（见下），当前每个瓣均为 4 字时即 `(12 + present_lobes*4) * 4`。
 - `lobe_mask`：本材质携带哪些可选 über 瓣（`LobeMask` 位），驱动打包参数解码——shader 在 `parameter_offset` 读 `parameter_size/4` 个字，用此 mask 把核心+存在瓣展开回完整 surface。
 - `closure_graph_offset`：指向序列化闭包 IR，供 RT/延迟消费；`closure_mask` 保留（RT/分类用）。
 - 其余：generation/revision/illumination/render_class/feature_flags/texture_offset/texture_count/sampler_offset/sampler_count/custom_program/active/material_epoch_{low,high}；`specialization()` 由 low|high 重组回 u64。
@@ -166,9 +166,9 @@ specialization_id: u64   // 由上面轴的合法排列特化产出
 **变长打包核心（`surface.rs`）**：
 
 - `SURFACE_CORE_WORDS = 12`：`GpuSurfaceCore`（base_color[4]/metallic/perceptual_roughness/reflectance/ambient_occlusion/normal_scale/alpha_cutoff + 2 pad），每个 lit/stylized/unlit 面都带的 OpenPBR 基座，**不含** clearcoat/sheen/subsurface/transmission/anisotropy。
-- `SURFACE_LOBE_WORDS = 4`：每个瓣 blob 统一 16 字节量子，打包/解包按每个 set bit 定步长。
+- `SURFACE_LOBE_WORDS = 4`：**最宽瓣 footprint**（当前所有瓣恰好都是 4 字 / 16 字节）。瓣本身**变长**——每瓣实际字长由 schema 的 `words` 声明，生成到 `SURFACE_LOBE_WORDS_BY_SLOT[registry_slot]`；打包/解包按**每个存在瓣自身的字长**推进游标，而非统一步长（§4.4 变长打包，P1-f 补 OpenPBR 全字段的前提）。
 - `LobeMask`（6 个瓣，`COUNT = 6`）：`EMISSION=1<<0` / `CLEARCOAT=1<<1` / `ANISOTROPY=1<<2` / `SHEEN=1<<3` / `SUBSURFACE=1<<4` / `TRANSMISSION=1<<5`。瓣结构分别为 `GpuEmissionLobe`(emissive[4]) / `GpuClearCoatLobe` / `GpuAnisotropyLobe` / `GpuSheenLobe` / `GpuSubsurfaceLobe` / `GpuTransmissionLobe`(transmission/thickness/ior/dispersion)。
-- `SurfaceParameterBlock::pack()`：先写 12 字核心，再**按 canonical 低位优先顺序只写存在的瓣**；`unpack(lobe_mask, words)` 逆向读回，缺席瓣解码为各自中性 `Default`（如 IOR 回到 1.5，绝不泄漏陈旧字段）。`packed_len_words() = CORE + present*LOBE`。
+- `SurfaceParameterBlock::pack()`：先写 12 字核心，再**按 canonical 低位优先顺序只写存在的瓣**（每瓣写其自身字长）；`unpack(lobe_mask, words)` 逆向读回，缺席瓣解码为各自中性 `Default`（如 IOR 回到 1.5，绝不泄漏陈旧字段）。`packed_len_words() = CORE + Σ(存在瓣字长)`。
 - **示例**：纯电介质（无瓣）= 12 字，而非旧的 24 字（18 字段 f32 对齐）。
 
 **WESL 孪生（字节精确镜像）**：`material_unpack.wesl::prism_unpack_surface` 是 `SurfaceParameterBlock::unpack` 的字节精确 GPU 镜像——同样的核心 12 字 + canonical 低位优先瓣顺序。CPU 打包 / GPU 解包必须逐字节一致，否则材质错读。

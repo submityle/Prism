@@ -9,8 +9,21 @@
 
 /// Number of `u32` words in the always-present surface core.
 pub const SURFACE_CORE_WORDS: usize = 12;
-/// Number of `u32` words in every uniform per-lobe quantum.
+/// Widest per-lobe word footprint in the schema.
+///
+/// Lobes are **variable length** (§4.4 "变长打包"):
+/// [`crate::SurfaceParameterBlock::pack`]
+/// advances the write cursor by each present lobe's own footprint, exposed
+/// per slot in [`SURFACE_LOBE_WORDS_BY_SLOT`]. This constant is therefore
+/// the largest quantum, useful for worst-case bounds — never a packing
+/// stride.
 pub const SURFACE_LOBE_WORDS: usize = 4;
+/// Per-lobe `u32` word footprint indexed by `LobeMask` bit index
+/// (`registry_slot`). Slots are dense and low-bit-first, so
+/// `SURFACE_LOBE_WORDS_BY_SLOT[bit.trailing_zeros()]` is the stride for that
+/// lobe. Summing the present entries plus [`SURFACE_CORE_WORDS`] gives
+/// `SurfaceParameterBlock::packed_len_words`.
+pub const SURFACE_LOBE_WORDS_BY_SLOT: [usize; 7] = [4, 4, 4, 4, 4, 4, 4];
 /// Number of defined optional lobes (equals `LobeMask::COUNT`).
 pub const SURFACE_LOBE_COUNT: u32 = 7;
 /// Fully-loaded worst case: core plus every lobe. The WESL decoder gathers into

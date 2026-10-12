@@ -71,7 +71,9 @@ pub use surface::{
 pub use openpbr::{
     openpbr_conformance, project_to_openpbr, DroppedLobe, OpenPbrConformance, OpenPbrProjection,
 };
-pub use surface_layout::{LobeLayout, SURFACE_LOBES, SURFACE_LOBE_COUNT, SURFACE_MAX_WORDS};
+pub use surface_layout::{
+    LobeLayout, SURFACE_LOBES, SURFACE_LOBE_COUNT, SURFACE_LOBE_WORDS_BY_SLOT, SURFACE_MAX_WORDS,
+};
 pub use texture_addressing::{address_uv, wrap_coord, AddressResult, WrapMode};
 pub use texture_blend::{
     blend_channel, blend_nonseparable, blend_nonseparable_rgba8, blend_rgba8, BlendMode,
