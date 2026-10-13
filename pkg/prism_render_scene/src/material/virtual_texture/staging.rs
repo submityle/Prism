@@ -1,6 +1,7 @@
 //! CPU staging and Bevy queue upload for material-VT resources.
 
 use alloc::vec::Vec;
+use core::mem::size_of;
 use core::ops::Range;
 
 use bevy_render::{
@@ -120,10 +121,26 @@ impl MaterialVirtualTextureStaging {
         atlas_config: MaterialVirtualTextureAtlasConfig,
         tile: &MaterialVtAtlasTile,
     ) -> Result<(), MaterialVirtualTextureStagingError> {
-        self.atlas_uploads.push(
-            MaterialVirtualTextureAtlasUpload::from_tile(atlas_config, tile)
-                .map_err(MaterialVirtualTextureStagingError::AtlasUpload)?,
-        );
+        let upload = MaterialVirtualTextureAtlasUpload::from_tile(atlas_config, tile)
+            .map_err(MaterialVirtualTextureStagingError::AtlasUpload)?;
+        if self
+            .atlas_uploads
+            .iter()
+            .any(|existing| existing.key == upload.key)
+        {
+            return Err(MaterialVirtualTextureStagingError::DuplicatePageKey);
+        }
+        if self
+            .atlas_uploads
+            .iter()
+            .any(|existing| existing.slot == upload.slot)
+        {
+            return Err(MaterialVirtualTextureStagingError::DuplicatePhysicalSlot);
+        }
+        if self.atlas_uploads.len() >= self.config.entry_count as usize {
+            return Err(MaterialVirtualTextureStagingError::TooManyAtlasUploads);
+        }
+        self.atlas_uploads.push(upload);
         Ok(())
     }
 
@@ -189,6 +206,12 @@ pub enum MaterialVirtualTextureStagingError {
     AtlasUpload(MaterialVirtualTextureAtlasAtlasError),
     /// The config entry count disagrees with the validated snapshot.
     EntryCountMismatch,
+    /// Two uploads address the same virtual page.
+    DuplicatePageKey,
+    /// Two uploads claim the same physical atlas slot.
+    DuplicatePhysicalSlot,
+    /// More atlas uploads were supplied than page-table entries.
+    TooManyAtlasUploads,
     /// The source page has no readable rows.
     SourcePage,
     /// The source-to-atlas conversion failed.
@@ -198,6 +221,8 @@ pub enum MaterialVirtualTextureStagingError {
 /// Exact queue-write ranges returned by one upload.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterialVirtualTextureUploadRanges {
+    /// Resource slice receiving this complete update.
+    pub resource_slot: u8,
     /// Page-table byte range written in the dedicated table buffer.
     pub page_table: Range<u64>,
     /// Config byte range written in the config buffer.
@@ -220,10 +245,11 @@ pub struct MaterialVirtualTextureAtlasUploadRange {
 }
 
 impl MaterialVirtualTextureGpuBundle {
-    /// Enqueues all writes in `staging` against this bundle's independent GPU resources.
-    pub fn upload_staging(
+    /// Validates a staging payload and computes the exact queue-write ranges
+    /// without recording any GPU writes. Callers that need a recoverable
+    /// lifecycle reservation use this before [`Self::upload_staging`].
+    pub fn plan_upload(
         &self,
-        queue: &RenderQueue,
         staging: &MaterialVirtualTextureStaging,
     ) -> Result<MaterialVirtualTextureUploadRanges, MaterialVirtualTextureUploadError> {
         let capacity = self.sizes().page_table_entry_capacity;
@@ -233,19 +259,55 @@ impl MaterialVirtualTextureGpuBundle {
                 capacity,
             });
         }
+        if staging.config.enabled != 0
+            && staging.atlas_uploads.len() != staging.config.entry_count as usize
+        {
+            return Err(MaterialVirtualTextureUploadError::IncompleteAtlasUploads {
+                expected: staging.config.entry_count,
+                actual: staging.atlas_uploads.len() as u32,
+            });
+        }
+        let atlas = staging
+            .atlas_uploads
+            .iter()
+            .map(|upload| MaterialVirtualTextureAtlasUploadRange {
+                key: upload.key,
+                slot: upload.slot,
+                destination: upload.destination,
+                byte_len: upload.bytes.len() as u64,
+            })
+            .collect();
+        Ok(MaterialVirtualTextureUploadRanges {
+            resource_slot: self.staging_slot(),
+            page_table: 0..(staging.page_table_words.len() * size_of::<u32>()) as u64,
+            config: 0..MaterialVirtualTextureGpuConfig::byte_size(),
+            atlas,
+        })
+    }
+
+    /// Enqueues all writes in `staging` against this bundle's independent GPU resources.
+    pub fn upload_staging(
+        &self,
+        queue: &RenderQueue,
+        staging: &MaterialVirtualTextureStaging,
+    ) -> Result<MaterialVirtualTextureUploadRanges, MaterialVirtualTextureUploadError> {
+        let ranges = self.plan_upload(staging)?;
         if !staging.page_table_words.is_empty() {
             queue.write_buffer(
-                self.page_table_buffer(),
+                self.staging_page_table_buffer(),
                 0,
                 bytemuck::cast_slice(&staging.page_table_words),
             );
         }
-        queue.write_buffer(self.config_buffer(), 0, bytemuck::bytes_of(&staging.config));
-        let mut atlas = Vec::with_capacity(staging.atlas_uploads.len());
+        queue.write_buffer(
+            self.staging_config_buffer(),
+            0,
+            bytemuck::bytes_of(&staging.config),
+        );
         for upload in &staging.atlas_uploads {
             queue.write_texture(
                 TexelCopyTextureInfo {
-                    texture: self.atlas_texture(),
+                    texture: self.staging_atlas_texture(),
                     mip_level: 0,
                     origin: Origin3d {
                         x: upload.destination.origin_x_px,
@@ -266,18 +328,8 @@ impl MaterialVirtualTextureGpuBundle {
                     depth_or_array_layers: 1,
                 },
             );
-            atlas.push(MaterialVirtualTextureAtlasUploadRange {
-                key: upload.key,
-                slot: upload.slot,
-                destination: upload.destination,
-                byte_len: upload.bytes.len() as u64,
-            });
         }
-        Ok(MaterialVirtualTextureUploadRanges {
-            page_table: 0..(staging.page_table_words.len() * core::mem::size_of::<u32>()) as u64,
-            config: 0..MaterialVirtualTextureGpuConfig::byte_size(),
-            atlas,
-        })
+        Ok(ranges)
     }
 }
 
@@ -286,4 +338,6 @@ impl MaterialVirtualTextureGpuBundle {
 pub enum MaterialVirtualTextureUploadError {
     /// The bundle's dedicated page-table allocation is too small.
     PageTableTooLarge { entries: u32, capacity: u32 },
+    /// An enabled table was not accompanied by one atlas tile per entry.
+    IncompleteAtlasUploads { expected: u32, actual: u32 },
 }

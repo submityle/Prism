@@ -1,14 +1,15 @@
 //! Independent material virtual-texture GPU resource bundle.
 //!
-//! This module is intentionally not wired into the material plugin yet. It is
-//! a complete, standalone seam for a future render-world integration: the
-//! caller creates a validated atlas, builds a staging update from material-VT
-//! source rows and the existing page-table snapshot, writes it through a real
-//! Bevy `RenderQueue`, and supplies the renderer's completion proof before
-//! publishing or reclaiming CPU metadata.
+//! The material plugin owns one disabled-safe GPU bundle and binds it into the
+//! shared material group at bindings 5–8. Runtime residency is still a
+//! separate producer: callers create a validated atlas, build a staging update
+//! from material-VT source rows and the existing page-table snapshot, write it
+//! through a real Bevy `RenderQueue`, and supply the renderer's completion
+//! proof before publishing or reclaiming CPU metadata.
 
 mod abi;
 mod atlas;
+mod demand;
 mod lifecycle;
 mod resources;
 mod staging;
@@ -18,6 +19,10 @@ pub use abi::{
     MATERIAL_VIRTUAL_TEXTURE_ENTRY_WORDS,
 };
 pub use atlas::{MaterialVirtualTextureAtlasConfig, MaterialVirtualTextureAtlasError};
+pub use demand::{
+    aggregate_material_vt_demands, MaterialVtDemandError, MaterialVtDemandMaterial,
+    MaterialVtDemandRegistry, MaterialVtVisibilitySample,
+};
 pub use lifecycle::{
     MaterialVirtualTextureLifecycle, MaterialVirtualTextureLifecycleError,
     MaterialVirtualTextureReadyToPublish, MaterialVirtualTextureSubmission,
@@ -140,6 +145,7 @@ mod tests {
         )
         .unwrap();
         let ranges = MaterialVirtualTextureUploadRanges {
+            resource_slot: 1,
             page_table: 0..16,
             config: 0..32,
             atlas: Vec::new(),
@@ -182,6 +188,7 @@ mod tests {
                 staging,
                 newer,
                 MaterialVirtualTextureUploadRanges {
+                    resource_slot: 0,
                     page_table: 0..16,
                     config: 0..32,
                     atlas: Vec::new(),
@@ -198,5 +205,154 @@ mod tests {
         assert_eq!(lifecycle.retired_len(), 1);
         assert_eq!(lifecycle.reclaim(GpuCompletionValue(7)), 0);
         assert_eq!(lifecycle.reclaim(GpuCompletionValue(8)), 1);
+    }
+
+    #[test]
+    fn lifecycle_rejects_mismatched_staging_and_supports_pre_submission_abort() {
+        let config =
+            MaterialVirtualTextureAtlasConfig::new(4, 0, 2, 4, MaterialVtFormat::Rgba8Unorm)
+                .unwrap();
+        let first_snapshot = snapshot();
+        let staging = MaterialVirtualTextureStaging::new(
+            config,
+            &first_snapshot,
+            MaterialVirtualTextureGpuConfig::new(false, 1, 4, 4, 2, 1, 0, 2),
+        )
+        .unwrap();
+        let ranges = MaterialVirtualTextureUploadRanges {
+            resource_slot: 1,
+            page_table: 0..16,
+            config: 0..32,
+            atlas: Vec::new(),
+        };
+        let mut lifecycle = MaterialVirtualTextureLifecycle::new();
+        assert_eq!(
+            lifecycle.enqueue(staging, first_snapshot, ranges.clone()),
+            Err(MaterialVirtualTextureLifecycleError::InvalidStaging)
+        );
+
+        let second_snapshot = snapshot();
+        let staging = MaterialVirtualTextureStaging::new(
+            config,
+            &second_snapshot,
+            MaterialVirtualTextureGpuConfig::new(true, 1, 4, 4, 2, 1, 0, 2),
+        )
+        .unwrap();
+        let serial = lifecycle.enqueue(staging, second_snapshot, ranges).unwrap();
+        assert_eq!(lifecycle.abort(serial), Ok(()));
+        assert!(lifecycle.uploaded_ranges(serial).is_none());
+    }
+
+    #[test]
+    fn lifecycle_keeps_submitted_update_until_valid_publication() {
+        let config =
+            MaterialVirtualTextureAtlasConfig::new(4, 0, 2, 4, MaterialVtFormat::Rgba8Unorm)
+                .unwrap();
+        let snapshot = snapshot();
+        let staging = MaterialVirtualTextureStaging::new(
+            config,
+            &snapshot,
+            MaterialVirtualTextureGpuConfig::new(true, 1, 4, 4, 2, 1, 0, 2),
+        )
+        .unwrap();
+        let mut lifecycle = MaterialVirtualTextureLifecycle::new();
+        let serial = lifecycle
+            .enqueue(
+                staging,
+                snapshot,
+                MaterialVirtualTextureUploadRanges {
+                    resource_slot: 1,
+                    page_table: 0..16,
+                    config: 0..32,
+                    atlas: Vec::new(),
+                },
+            )
+            .unwrap();
+        let submission = lifecycle
+            .mark_submitted(serial, GpuCompletionValue(4))
+            .unwrap();
+        assert_eq!(
+            lifecycle.abort(serial),
+            Err(MaterialVirtualTextureLifecycleError::SubmissionInFlight)
+        );
+        let ready = lifecycle
+            .complete(submission, GpuCompletionValue(4))
+            .unwrap();
+        assert_eq!(
+            lifecycle.publish(ready.clone(), GpuCompletionValue(3)),
+            Err(MaterialVirtualTextureLifecycleError::InvalidCompletion)
+        );
+        assert!(lifecycle.active().is_none());
+        lifecycle.publish(ready, GpuCompletionValue(4)).unwrap();
+        assert_eq!(
+            lifecycle.active().map(|active| active.serial()),
+            Some(serial)
+        );
+    }
+
+    #[test]
+    fn lifecycle_publishes_empty_snapshot_as_disabled_source_removal() {
+        let config =
+            MaterialVirtualTextureAtlasConfig::new(4, 0, 2, 4, MaterialVtFormat::Rgba8Unorm)
+                .unwrap();
+        let first = snapshot();
+        let staging = MaterialVirtualTextureStaging::new(
+            config,
+            &first,
+            MaterialVirtualTextureGpuConfig::new(true, 1, 4, 4, 2, 1, 0, 2),
+        )
+        .unwrap();
+        let mut lifecycle = MaterialVirtualTextureLifecycle::new();
+        let serial = lifecycle
+            .enqueue(
+                staging,
+                first,
+                MaterialVirtualTextureUploadRanges {
+                    resource_slot: 1,
+                    page_table: 0..16,
+                    config: 0..32,
+                    atlas: Vec::new(),
+                },
+            )
+            .unwrap();
+        let submission = lifecycle
+            .mark_submitted(serial, GpuCompletionValue(1))
+            .unwrap();
+        let ready = lifecycle
+            .complete(submission, GpuCompletionValue(1))
+            .unwrap();
+        lifecycle.publish(ready, GpuCompletionValue(1)).unwrap();
+
+        let empty = MaterialVirtualTexturePageTableSnapshot::try_from_records(3, 2, [])
+            .expect("empty source set is a valid snapshot");
+        let staging = MaterialVirtualTextureStaging::new(
+            config,
+            &empty,
+            MaterialVirtualTextureGpuConfig::new(false, 0, 4, 4, 2, 1, 0, 0),
+        )
+        .unwrap();
+        let serial = lifecycle
+            .enqueue(
+                staging,
+                empty,
+                MaterialVirtualTextureUploadRanges {
+                    resource_slot: 0,
+                    page_table: 0..0,
+                    config: 0..32,
+                    atlas: Vec::new(),
+                },
+            )
+            .unwrap();
+        let submission = lifecycle
+            .mark_submitted(serial, GpuCompletionValue(2))
+            .unwrap();
+        let ready = lifecycle
+            .complete(submission, GpuCompletionValue(2))
+            .unwrap();
+        lifecycle.publish(ready, GpuCompletionValue(2)).unwrap();
+        let active = lifecycle.active().unwrap();
+        assert!(active.snapshot().is_empty());
+        assert_eq!(active.config().enabled, 0);
+        assert_eq!(active.config().entry_count, 0);
     }
 }

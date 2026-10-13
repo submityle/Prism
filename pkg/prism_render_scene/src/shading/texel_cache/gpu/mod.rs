@@ -5,6 +5,8 @@
 //! epoch proofs before touching its atlas, so a stale material or an atlas
 //! slot from another cache cannot become sampleable by accident.
 
+pub mod atlas;
+pub mod dispatch;
 pub mod page_table;
 pub mod shade;
 

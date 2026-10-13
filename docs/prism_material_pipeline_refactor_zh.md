@@ -614,7 +614,9 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   覆盖两个命中和一个缺页，并回读物理 slot / `MATERIAL_VT_MISS`。该门禁已在扩展权限下的
   Metal 实机通过；无 adapter 时仅允许显式安全跳过，设置 `PRISM_REQUIRE_GPU=1` 则会把
   adapter/device 失败升级为测试失败。它验证的是 Material-VT page-table ABI 与搜索契约，
-  **不等价于**主 render pass、材质响应、residency producer 或 atlas 采样已经接线。
+  **不等价于该测试本身证明**主 render pass、材质响应、residency producer 或 atlas 采样的
+  生产硬件端到端门禁；其中 Material-VT 页表消费已经在 `shading_resolve` 接线，尚未接入
+  生产 resolve 的是独立 P3 shade-cache atlas/page-table。
 
 - **当前工作树的 Material-VT 接线证据（2026-10-13）**：已提交的
   `07cd064cc` 接入材质主 bind group 的 VT 资源绑定，`a51547db6` 接入
@@ -622,10 +624,17 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   `material_sample.wesl` 的真实 wgpu dispatch/readback parity gate。当前工作树还包含
   未提交的 `pkg/prism_render_scene/src/material/vt_producer.rs` 及相关接线：它按稳定
   source identity 做受限的确定性全源 residency，构造 page table/atlas staging，执行
-  `RenderQueue` 写入并以 completion proof 发布。该 producer 尚无独立提交引用，且其
-  parity 测试仍使用 test-owned bind group；测试文件保留的
-  `material_vt_generation_mismatch_requires_production_binding_9` 明确失败门禁因此仍是
-  当前事实，不能据此宣称主 `MaterialBindGroup`/resolve 已完成硬件验证。
+  `RenderQueue` 写入并以 completion proof 发布。当前未提交接线还提供了
+  `MaterialVtDemandRegistry` 和 typed UV/derivative demand aggregation，并在有真实
+  demand 时接入 shared cross-frame streamer 的 debounce、priority、budget、pool 和
+  partial residency；空 feedback 不会伪造可见页。Image source revision 变化也会令引用
+  该 image 的 material row 重新发布，避免旧尺寸/identity 残留。该 producer 尚无独立提交
+  引用，且其 parity 测试仍使用 test-owned bind group；当前已有的 generation/layout 门禁
+ 只能证明 ABI/搜索契约，不能据此宣称主 `MaterialBindGroup`/resolve 已完成真实 adapter
+ 端到端硬件验证；这不表示 `shading_resolve` 缺少 Material-VT 页表消费，该消费已经接线。
+ 仍未接入生产 resolve 的是独立 P3 shade-cache atlas/page-table。
+  当前仍未完成的是由主 render/visibility pass 自动产生并回填 demand 的 GPU feedback
+  readback，以及真实 adapter 上的主材质渲染端到端门禁。
 
 ---
 
@@ -1150,10 +1159,15 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 #### 13.a.1 code-truth 审计（剩余路线图项 · 逐项证据）
 
-下表是"**以代码为准**"的剩余工作清点，每行给出可复现的证据与本轮实测的门禁数（CPU 侧 `prism_render_shading --lib` 3377、
-`prism_render_scene --lib` 1602、`prism_render_app --lib` 114、`prism_render_material` 851+2+1+7+6、
-`prism_material_pcm` 28、`prism_material_schema` 19；
-真机侧越沙盒 `PRISM_REQUIRE_GPU=1`：硬件解码 66 + 纹理 LOD / glint / 动态通道 / 测量 BRDF / 单瓣采样器 各 1）。
+下表是"**以代码为准**"的剩余工作清点。历史实现记录中的
+`prism_render_scene --lib` **1602** 是 **2026-10-13 的记录时快照**，不是当前工作树的
+测试总数；本轮尝试以 `cargo test -p prism_render_scene --lib -- --list` 重新枚举时，当前
+工作树在测试列表构建阶段即因 `texel_cache::gpu::dispatch` 重复模块声明及重复导出而失败，
+因此本节不伪造一个新的总数。其余门禁记录为当时记录的快照：CPU 侧
+`prism_render_shading --lib` 3377、`prism_render_app --lib` 114、
+`prism_render_material` 851+2+1+7+6、`prism_material_pcm` 28、
+`prism_material_schema` 19；真机侧越沙盒 `PRISM_REQUIRE_GPU=1`：硬件解码 66 +
+纹理 LOD / glint / 动态通道 / 测量 BRDF / 单瓣采样器各 1。
 
 | 项 | 状态 | 证据 | 余下 |
 | --- | --- | --- | --- |
@@ -1168,7 +1182,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 | **P2-g** | 完成 | header 4 word 动态段 + 四轴解析调制 + dissolve 覆盖度进 alpha/OIT + 真机对拍（§17.1、§13.a） | — |
 | **P2-i 全 kind manifest + codegen** | **非编辑器完成（8 个有实例的 kind 全部声明化）** | `prism_material_schema` 现已覆盖 lobe（含 closure 分类链接）、channel、response_mode、cache_aux 与 identity-only 的 provider/transfer/downgrade/composite：codegen 产出 `SURFACE_LOBE_CLOSURES`、`SURFACE_CHANNELS`、`SURFACE_RESPONSE_MODES`、`SURFACE_CACHE_AUX`、`SURFACE_IDENTITY_EXTENSIONS`；header 常驻非-lobe 槽位致密、identity-only 行零槽，全部与 PCM 目录双向对拍（见 §13.a）。`author_node` 是第 9 类：kind/hook/词表已就位，唯一实例等待 §4 编辑器前端 | **编辑器部分**：author_node 实例 + MaterialX nodedef 往返（架构未起，显式 TODO） |
 | **P2-j** | 完成 | 类表由 PCM 注册表 + lobe 目录派生、穷举平价门禁、WESL `CLASS_*` 平价门禁、类数由表驱动（§5.2、§13.a） | — |
-| **P3-a~d 解耦着色** | **P3-a 逻辑地基、独立 GPU atlas/write protocol、独立 shade page-table snapshot、per-face UV chart contract、真实 texture-space irradiance compute slice、Material-VT source→atlas staging producer、独立 Material-VT GPU resource/lifecycle seam、真实 source→residency→queue upload→completion publish producer，以及材质主 bind group 的 VT 5–8 接线已落地；主 render pass 可见性反馈与 P3-b~d 未开始** | `shading/texel_cache/` 已提供稳定 texel key、可复现可见性预算、generation/epoch 校验、Stale 生命周期、active/staging 原子页表与不可伪造的 completion proof；`gpu/atlas.wgsl` + `gpu/shade.wgsl` 已分别验证页写入协议与真实三角形 UV→barycentric→法线/方向光 irradiance 写入，包含 stale proof、三角形外 sentinel、atlas clipping 的真实 GPU parity；`gpu/page_table.rs` 以稳定 `page_index` 生成独立 `(atlas_x, atlas_y, generation, epoch)` writer ABI，并拒绝普通材质 VT slot 混入；`chart.rs` 直接消费 `RenderShadingGeometry` 的真实三角形 UV，拒绝非有限/退化输入并提供 per-face UV→local texel 映射。`texture_streaming::atlas` 提供逻辑页/存储 tile 分离、3×3 邻页/角页 gutter 构建与 copy-layout contract；`prism_render_material::texture_lod::material_vt_atlas` 现可从完整 mip-chain source snapshot 真实提取固定尺寸页，按驻留邻页构建 gutter，缺邻页执行中心页边缘扩展，并生成 wgpu 256-byte 对齐的 staging rows。`material/virtual_texture/` 现有独立的 32-byte config、专用 page-table/atlas/sampler resource bundle、真实 queue staging write ranges，以及 completion-gated publish/reclaim 生命周期；材质 plugin 已捕获主世界 CPU source，按稳定纹理 ID 生成确定性的受限全源 residency，真实构造 page table 与 gutter tile 并写入 RenderQueue，随后用 completion proof 发布 active snapshot；主材质 bind group 已真实绑定 page table/config/atlas/sampler（5–8）。当前 producer 是无反馈的全源预算策略，超出 atlas budget 时保持 disabled fallback；材质/视角可见性反馈、主 render pass 运行期反馈驱动与 P3-b~d 仍未完成。`gi/surface_cache/` 仍是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统） | 下一步按 §14.10 接入真实 object/material/face/UV/chart 输入与主 render plugin shade dispatch（需 completion proof 后发布），再做 feedback 驱动的粗 mip/fallback、失效/时序复用、LOD 策略 |
+| **P3-a~d 解耦着色** | **P3-a 逻辑地基、独立 GPU atlas/write protocol、独立 shade page-table snapshot、per-face UV chart contract、真实 texture-space irradiance compute slice、Material-VT source→atlas staging producer、独立 Material-VT GPU resource/lifecycle seam、真实 source→residency→queue upload→completion publish producer，以及材质主 bind group 的 VT 5–8 接线已落地；Material-VT 页表消费已接入 `shading_resolve`；主 render pass 可见性反馈与 P3-b~d 未开始** | `shading/texel_cache/` 已提供稳定 texel key、可复现可见性预算、generation/epoch 校验、Stale 生命周期、active/staging 原子页表与不可伪造的 completion proof；`gpu/atlas.wgsl` + `gpu/shade.wgsl` 已分别验证页写入协议与真实三角形 UV→barycentric→法线/方向光 irradiance 写入，包含 stale proof、三角形外 sentinel、atlas clipping 的真实 GPU parity；`gpu/page_table.rs` 以稳定 `page_index` 生成**独立于 Material-VT**的 `(atlas_x, atlas_y, generation, epoch)` shade-page writer ABI，并拒绝普通材质 VT slot 混入；`chart.rs` 直接消费 `RenderShadingGeometry` 的真实三角形 UV，拒绝非有限/退化输入并提供 per-face UV→local texel 映射。`texture_streaming::atlas` 提供逻辑页/存储 tile 分离、3×3 邻页/角页 gutter 构建与 copy-layout contract；`prism_render_material::texture_lod::material_vt_atlas` 现可从完整 mip-chain source snapshot 真实提取固定尺寸页，按驻留邻页构建 gutter，缺邻页执行中心页边缘扩展，并生成 wgpu 256-byte 对齐的 staging rows。`material/virtual_texture/` 现有独立的 32-byte config、专用 page-table/atlas/sampler resource bundle、真实 queue staging write ranges，以及 completion-gated publish/reclaim 生命周期；材质 plugin 已捕获主世界 CPU source，按稳定纹理 ID 生成确定性的受限全源 residency，真实构造 page table 与 gutter tile 并写入 RenderQueue，随后用 completion proof 发布 active snapshot；主材质 bind group 已真实绑定 page table/config/atlas/sampler（5–8），且 `shading_resolve.wesl` 经 `sample_texture_slot`→`material_vt_resolve` 实际消费这组 Material-VT 资源。**独立 P3 shade-cache 的 atlas/page-table 尚未接入生产 render graph/resolve**。当前 producer 是无反馈的全源预算策略，超出 atlas budget 时保持 disabled fallback；材质/视角可见性反馈、主 render pass 运行期反馈驱动与 P3-b~d 仍未完成。`gi/surface_cache/` 仍是 **Lumen 式世界空间 surfel 辐照度缓存**（另一子系统） | 下一步按 §14.10 接入真实 object/material/face/UV/chart 输入与主 render plugin shade dispatch（需 completion proof 后发布），再做 feedback 驱动的粗 mip/fallback、失效/时序复用、LOD 策略 |
 
 > **审计结论（本轮口径）**：**非编辑器**的剩余 = **P1-a 的 VT 切片、P2-e 的逐区域 illumination、P3-a 的真实材质/光照 shade pass 接线及 P3-b~d**；P3-a 已有 CPU 生命周期地基和独立 GPU atlas/write protocol 验证，但尚未接成实际材质/光照渲染闭环，不能宣称完整 GPU shade cache。archetype 热门置换预热、作者侧 `respond_custom` / author_node / MaterialX nodedef 归编辑器前端（显式 TODO）。
 > 其余路线图项要么已完成（上表），要么按 goal 明确挂在编辑器前端（MaterialX / 节点图 / 作者 WESL）。
@@ -1314,7 +1328,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 | 阶段 | 内容 | 门禁 |
 |---|---|---|
-| P3-a 地基 | **CPU 逻辑地基、独立 GPU atlas/write protocol、独立 shade page-table snapshot、per-face UV chart contract、邻页 gutter CPU contract、Material-VT source→atlas staging producer、独立 Material-VT GPU resource/lifecycle seam、source→residency→queue upload→completion publish producer 与材质主 bind group 5–8 接线已落地**：`shading/texel_cache/` 提供稳定 key、请求预算、`Stale`/generation/epoch 状态机、active/staging 页表，以及 `submit_write`→completion proof→`complete_write` 发布协议；旧 active 槽位经 `publish_after` retired，只有 `reclaim_completed` 后才可复用，abort 对已提交写入同样延迟回收；epoch 切换时旧页保留到 publish 并按 GPU timeline 安全退役。`gpu/atlas.wgsl` 的真实 wgpu gate 覆盖多页隔离、越界 invocation、元数据失配与 atlas 边界；无 adapter 时安全跳过，`PRISM_REQUIRE_GPU=1` 时明确失败。`gpu/page_table.rs` 生成独立 writer ABI，不能当作普通材质 VT page table；`chart.rs` 从 `RenderShadingGeometry` 建立真实 per-face UV→local texel 映射，并拒绝非有限/退化 UV。`texture_streaming::atlas` 提供邻页/角页 gutter 构建与块压缩布局校验，缺邻页时边缘扩展、邻页到达后须重建相邻 tile。`material_vt_atlas` 从完整 mip-chain source snapshot 提取固定逻辑页、按驻留邻页生成实际 gutter，并输出 256-byte 行对齐 staging tile。`material/virtual_texture/` 提供专用 32-byte config、page-table/atlas/sampler resources、真实 queue write ranges 与 completion-gated publication/reclaim；材质 plugin 现在捕获主世界 CPU source，按稳定纹理 ID 和固定 atlas budget 生成确定性全源 residency，真实写入 page table/atlas/config 并在 queue completion 后发布 active snapshot；材质 texture rows 对有完整 source 的图像写入 VT identity，缺失或不兼容 source 明确回退 non-VT。当前 producer 尚未消费可见性 feedback，超预算 source 保持 disabled fallback。**待接线**：最终主 pass 的有效页表消费、object/material/face/chart 的可见性 producer、材质/光照 shade compute、feedback 驱动粗 mip 兜底与 render plugin 集成 | 当前已覆盖命中/未命中、预算确定性、代际/epoch 隔离、无半写可见、未完成 GPU 写入不可发布、in-flight 槽位不复用、独立 page-table writer ABI、真实 per-face UV chart 校验、atlas write protocol、CPU gutter layout 与 source→atlas staging tile、VT source capture/registry、source→residency producer、真实 RenderQueue upload、completion-gated publish 单测；完整材质/光照 GPU shade pass、feedback residency、粗 mip 兜底和硬件材质 parity 仍是后续门禁 |
+| P3-a 地基 | **CPU 逻辑地基、独立 GPU atlas/write protocol、独立 shade page-table snapshot、per-face UV chart contract、邻页 gutter CPU contract、Material-VT source→atlas staging producer、独立 Material-VT GPU resource/lifecycle seam、source→residency→queue upload→completion publish producer 与材质主 bind group 5–8 接线已落地；Material-VT 有效页表消费已接入 `shading_resolve`**：`shading/texel_cache/` 提供稳定 key、请求预算、`Stale`/generation/epoch 状态机、active/staging 页表，以及 `submit_write`→completion proof→`complete_write` 发布协议；旧 active 槽位经 `publish_after` retired，只有 `reclaim_completed` 后才可复用，abort 对已提交写入同样延迟回收；epoch 切换时旧页保留到 publish 并按 GPU timeline 安全退役。`gpu/atlas.wgsl` 的真实 wgpu gate 覆盖多页隔离、越界 invocation、元数据失配与 atlas 边界；无 adapter 时安全跳过，`PRISM_REQUIRE_GPU=1` 时明确失败。`gpu/page_table.rs` 生成的是**独立的 P3 shade-cache page-table writer ABI**，不能当作普通材质 VT page table；`chart.rs` 从 `RenderShadingGeometry` 建立真实 per-face UV→local texel 映射，并拒绝非有限/退化 UV。`texture_streaming::atlas` 提供邻页/角页 gutter 构建与块压缩布局校验，缺邻页时边缘扩展、邻页到达后须重建相邻 tile。`material_vt_atlas` 从完整 mip-chain source snapshot 提取固定逻辑页、按驻留邻页生成实际 gutter，并输出 256-byte 行对齐 staging tile。`material/virtual_texture/` 提供专用 32-byte config、page-table/atlas/sampler resources、真实 queue write ranges 与 completion-gated publication/reclaim；材质 plugin 现在捕获主世界 CPU source，按稳定纹理 ID 和固定 atlas budget 生成确定性全源 residency，真实写入 page table/atlas/config 并在 queue completion 后发布 active snapshot；材质 texture rows 对有完整 source 的图像写入 VT identity，缺失或不兼容 source 明确回退 non-VT。`shading_resolve.wesl` 通过 `sample_texture_slot`→`material_vt_resolve` 读取 Material-VT page table/config/atlas/sampler。当前 producer 尚未消费可见性 feedback，超预算 source 保持 disabled fallback。**待接线（仅指独立 P3 shade-cache）**：该 shade-cache 的 production atlas/page-table consumer、object/material/face/chart 的可见性 producer、材质/光照 shade compute、feedback 驱动粗 mip 兜底与 render plugin 集成 | 当前已覆盖命中/未命中、预算确定性、代际/epoch 隔离、无半写可见、未完成 GPU 写入不可发布、in-flight 槽位不复用、独立 page-table writer ABI、真实 per-face UV chart 校验、atlas write protocol、CPU gutter layout 与 source→atlas staging tile、VT source capture/registry、source→residency producer、真实 RenderQueue upload、completion-gated publish 单测；完整材质/光照 GPU shade pass、feedback residency、粗 mip 兜底和硬件材质 parity 仍是后续门禁 |
 | P3-b 视角无关项 | 先缓存 diffuse/SSS/emission/GI 辐照度（PBR+NPR 可缓存项），高光走屏幕空间 split-sum | 与纯屏幕空间抽样对拍误差阈值；furnace 不回归 |
 | P3-c 失效摊销 | generation/epoch 局部失效 + 分帧预算重着 + 时序累积 | 动态光场景帧时稳定、无档跳；staleness 上限 CI |
 | P3-d seam/一致性 | per-face tile + gutter + 无锁双代 + disocclusion 屏幕回退 | seam 视觉零裂；骤转无黑块 CI |
@@ -1399,8 +1413,9 @@ impl LayerStack {
 ```rust
 // 目标布局草案；当前代码的 MATERIAL_ABI_VERSION = 6。
 // 当前已有 Material-VT source capture、受限 residency producer、page-table/
-// atlas/config/sampler 上传与 completion-gated publish；主材质 resolve 的
-// production parity、feedback 驱动 residency 与非 bindless 直接纹理路径仍未完成。
+// atlas/config/sampler 上传与 completion-gated publish；typed demand aggregation
+// 可驱动 shared streamer 的 partial residency，但主 render/visibility feedback
+// readback、production parity 与非 bindless 直接纹理路径仍未完成。
 pub const MATERIAL_ABI_VERSION: u32 = 6;
 
 #[repr(C)]

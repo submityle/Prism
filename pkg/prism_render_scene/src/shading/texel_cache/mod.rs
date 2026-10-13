@@ -20,6 +20,11 @@ pub mod gpu;
 mod gpu_tests;
 
 pub use chart::{build_face_chart, FaceChart, FaceChartError};
+pub use gpu::atlas::{ShadeAtlas, ShadeAtlasError, SHADE_ATLAS_FORMAT};
+pub use gpu::dispatch::{
+    PreparedShadeDispatch, ShadeDispatch, ShadeDispatchConfig, ShadeDispatchError,
+    ShadeDispatchStats, SHADE_WORKGROUP_SIZE,
+};
 pub use gpu::page_table::{
     GpuShadePageEntry, ShadePageTableError, ShadePageTableRecord, ShadePageTableSnapshot,
 };

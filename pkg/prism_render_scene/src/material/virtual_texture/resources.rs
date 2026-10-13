@@ -9,6 +9,7 @@ use bevy_render::{
     },
     renderer::{RenderDevice, RenderQueue},
 };
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::{
     abi::{page_table_buffer_size, MaterialVirtualTextureGpuConfig},
@@ -37,13 +38,21 @@ pub struct MaterialVirtualTextureResourceSizes {
 /// a dedicated `D2Array | TEXTURE_BINDING | COPY_DST` allocation.
 #[derive(Resource)]
 pub struct MaterialVirtualTextureGpuBundle {
+    slices: [MaterialVirtualTextureGpuSlice; 2],
+    active_slot: AtomicU8,
+    sampler: Sampler,
+    atlas_config: MaterialVirtualTextureAtlasConfig,
+    sizes: MaterialVirtualTextureResourceSizes,
+}
+
+/// One complete bindable resource set. A set is never modified while it is
+/// active; queue uploads target the other set and publication flips the slot
+/// only after the upload's real completion proof has been observed.
+struct MaterialVirtualTextureGpuSlice {
     atlas_texture: Texture,
     atlas_view: TextureView,
     page_table_buffer: Buffer,
     config_buffer: Buffer,
-    sampler: Sampler,
-    atlas_config: MaterialVirtualTextureAtlasConfig,
-    sizes: MaterialVirtualTextureResourceSizes,
 }
 
 impl FromWorld for MaterialVirtualTextureGpuBundle {
@@ -51,17 +60,33 @@ impl FromWorld for MaterialVirtualTextureGpuBundle {
         let device = world.resource::<RenderDevice>().clone();
         let queue = world.resource::<RenderQueue>().clone();
         let atlas_config = MaterialVirtualTextureAtlasConfig::new(
+            128,
             1,
-            0,
-            1,
-            1,
+            8,
+            super::super::vt_producer::DEFAULT_MATERIAL_VT_PAGE_CAPACITY,
             prism_render_material::MaterialVtFormat::Rgba8Unorm,
         )
         .expect("the material-VT dummy atlas geometry is valid");
-        let bundle = Self::new(&device, atlas_config, 1)
-            .expect("the material-VT dummy GPU bundle must be constructible");
-        let disabled = MaterialVirtualTextureGpuConfig::new(false, 0, 1, 1, 1, 1, 0, 0);
-        queue.write_buffer(bundle.config_buffer(), 0, bytemuck::bytes_of(&disabled));
+        let bundle = Self::new(
+            &device,
+            atlas_config,
+            super::super::vt_producer::DEFAULT_MATERIAL_VT_PAGE_CAPACITY,
+        )
+        .expect("the material-VT dummy GPU bundle must be constructible");
+        let geometry = atlas_config
+            .geometry()
+            .expect("the material-VT dummy atlas geometry must remain valid");
+        let disabled = MaterialVirtualTextureGpuConfig::new(
+            false,
+            0,
+            atlas_config.page_size(),
+            geometry.tile_extent_px(),
+            atlas_config.tiles_per_row(),
+            bundle.sizes.atlas_layers,
+            atlas_config.gutter_px(),
+            0,
+        );
+        bundle.write_disabled_configs(&queue, disabled);
         bundle
     }
 }
@@ -82,43 +107,10 @@ impl MaterialVirtualTextureGpuBundle {
             atlas_extent_px,
             atlas_layers,
         };
-        let atlas_texture = device.create_texture(&TextureDescriptor {
-            label: Some("prism material VT atlas"),
-            size: Extent3d {
-                width: atlas_extent_px,
-                height: atlas_extent_px,
-                depth_or_array_layers: atlas_layers,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: atlas_config.texture_format(),
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let atlas_view = atlas_texture.create_view(&TextureViewDescriptor {
-            label: Some("prism material VT atlas view"),
-            format: Some(atlas_config.texture_format()),
-            dimension: Some(TextureViewDimension::D2Array),
-            aspect: bevy_render::render_resource::TextureAspect::All,
-            base_mip_level: 0,
-            mip_level_count: Some(1),
-            base_array_layer: 0,
-            array_layer_count: Some(atlas_layers),
-            ..Default::default()
-        });
-        let page_table_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("prism material VT page table"),
-            size: sizes.page_table_bytes,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let config_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some("prism material VT config"),
-            size: sizes.config_bytes,
-            usage: BufferUsages::UNIFORM | BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let slices = [
+            Self::create_slice(device, atlas_config, &sizes, "active"),
+            Self::create_slice(device, atlas_config, &sizes, "staging"),
+        ];
         let (mag_filter, min_filter, mipmap_filter) = atlas_config.sampler_filter();
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("prism material VT sampler"),
@@ -131,10 +123,8 @@ impl MaterialVirtualTextureGpuBundle {
             ..Default::default()
         });
         Ok(Self {
-            atlas_texture,
-            atlas_view,
-            page_table_buffer,
-            config_buffer,
+            slices,
+            active_slot: AtomicU8::new(0),
             sampler,
             atlas_config,
             sizes,
@@ -144,25 +134,25 @@ impl MaterialVirtualTextureGpuBundle {
     /// Atlas texture owner.
     #[must_use]
     pub fn atlas_texture(&self) -> &Texture {
-        &self.atlas_texture
+        &self.active_slice().atlas_texture
     }
 
     /// D2-array sampling view for the atlas.
     #[must_use]
     pub fn atlas_view(&self) -> &TextureView {
-        &self.atlas_view
+        &self.active_slice().atlas_view
     }
 
     /// Dedicated material-VT page-table storage buffer.
     #[must_use]
     pub fn page_table_buffer(&self) -> &Buffer {
-        &self.page_table_buffer
+        &self.active_slice().page_table_buffer
     }
 
     /// Config uniform/storage buffer.
     #[must_use]
     pub fn config_buffer(&self) -> &Buffer {
-        &self.config_buffer
+        &self.active_slice().config_buffer
     }
 
     /// Atlas sampler.
@@ -181,5 +171,92 @@ impl MaterialVirtualTextureGpuBundle {
     #[must_use]
     pub const fn sizes(&self) -> MaterialVirtualTextureResourceSizes {
         self.sizes
+    }
+
+    fn create_slice(
+        device: &RenderDevice,
+        atlas_config: MaterialVirtualTextureAtlasConfig,
+        sizes: &MaterialVirtualTextureResourceSizes,
+        label: &str,
+    ) -> MaterialVirtualTextureGpuSlice {
+        let atlas_texture = device.create_texture(&TextureDescriptor {
+            label: Some(label),
+            size: Extent3d {
+                width: sizes.atlas_extent_px,
+                height: sizes.atlas_extent_px,
+                depth_or_array_layers: sizes.atlas_layers,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: atlas_config.texture_format(),
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let atlas_view = atlas_texture.create_view(&TextureViewDescriptor {
+            label: Some(label),
+            format: Some(atlas_config.texture_format()),
+            dimension: Some(TextureViewDimension::D2Array),
+            aspect: bevy_render::render_resource::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 0,
+            array_layer_count: Some(sizes.atlas_layers),
+            ..Default::default()
+        });
+        let page_table_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some(label),
+            size: sizes.page_table_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let config_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some(label),
+            size: sizes.config_bytes,
+            usage: BufferUsages::UNIFORM | BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        MaterialVirtualTextureGpuSlice {
+            atlas_texture,
+            atlas_view,
+            page_table_buffer,
+            config_buffer,
+        }
+    }
+
+    fn active_slice(&self) -> &MaterialVirtualTextureGpuSlice {
+        &self.slices[self.active_slot() as usize]
+    }
+
+    pub(crate) fn active_slot(&self) -> u8 {
+        self.active_slot.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn staging_slot(&self) -> u8 {
+        self.active_slot() ^ 1
+    }
+
+    pub(crate) fn staging_atlas_texture(&self) -> &Texture {
+        &self.slices[self.staging_slot() as usize].atlas_texture
+    }
+
+    pub(crate) fn staging_page_table_buffer(&self) -> &Buffer {
+        &self.slices[self.staging_slot() as usize].page_table_buffer
+    }
+
+    pub(crate) fn staging_config_buffer(&self) -> &Buffer {
+        &self.slices[self.staging_slot() as usize].config_buffer
+    }
+
+    pub(crate) fn publish_slot(&self, slot: u8) {
+        debug_assert!(slot < 2);
+        debug_assert_ne!(slot, self.active_slot());
+        self.active_slot.store(slot, Ordering::Release);
+    }
+
+    fn write_disabled_configs(&self, queue: &RenderQueue, config: MaterialVirtualTextureGpuConfig) {
+        for slice in &self.slices {
+            queue.write_buffer(&slice.config_buffer, 0, bytemuck::bytes_of(&config));
+        }
     }
 }

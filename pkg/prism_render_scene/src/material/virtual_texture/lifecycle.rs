@@ -26,6 +26,12 @@ pub enum MaterialVirtualTextureLifecycleError {
     InvalidPublication,
     /// A table generation/epoch rolled backwards.
     SnapshotRollback,
+    /// The staging payload or resource slice cannot be paired with this update.
+    InvalidResourceSlot,
+    /// The staging bytes/config do not describe the supplied page-table snapshot.
+    InvalidStaging,
+    /// A submitted update cannot be aborted because the GPU may still consume it.
+    SubmissionInFlight,
 }
 
 /// External queue completion proof associated with one upload.
@@ -33,6 +39,7 @@ pub enum MaterialVirtualTextureLifecycleError {
 pub struct MaterialVirtualTextureSubmission {
     serial: u64,
     completion: GpuCompletionValue,
+    resource_slot: u8,
 }
 
 impl MaterialVirtualTextureSubmission {
@@ -47,14 +54,22 @@ impl MaterialVirtualTextureSubmission {
     pub const fn completion(self) -> GpuCompletionValue {
         self.completion
     }
+
+    /// Resource slice that received the queue writes for this submission.
+    #[must_use]
+    pub const fn resource_slot(self) -> u8 {
+        self.resource_slot
+    }
 }
 
 /// Data that may be published after the submission's completion is observed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterialVirtualTextureReadyToPublish {
     serial: u64,
+    completion: GpuCompletionValue,
     snapshot: MaterialVirtualTexturePageTableSnapshot,
     config: MaterialVirtualTextureGpuConfig,
+    resource_slot: u8,
 }
 
 impl MaterialVirtualTextureReadyToPublish {
@@ -74,6 +89,12 @@ impl MaterialVirtualTextureReadyToPublish {
     #[must_use]
     pub const fn config(&self) -> MaterialVirtualTextureGpuConfig {
         self.config
+    }
+
+    /// Resource slice whose complete upload is now safe to publish.
+    #[must_use]
+    pub const fn resource_slot(&self) -> u8 {
+        self.resource_slot
     }
 }
 
@@ -118,7 +139,12 @@ impl MaterialVirtualTextureLifecycle {
         }
     }
 
-    /// Enqueues a staged update after its queue writes were recorded.
+    /// Reserves a staged update before its queue writes are recorded.
+    ///
+    /// The caller must either call [`mark_submitted`](Self::mark_submitted)
+    /// after the queue writes succeed, or call [`abort`](Self::abort) while
+    /// no writes have been recorded. This ordering keeps a failed upload from
+    /// releasing ownership of a resource slot that the GPU may still read.
     pub fn enqueue(
         &mut self,
         staging: MaterialVirtualTextureStaging,
@@ -128,12 +154,27 @@ impl MaterialVirtualTextureLifecycle {
         if self.in_flight.is_some() {
             return Err(MaterialVirtualTextureLifecycleError::UploadInFlight);
         }
+        if ranges.resource_slot >= 2 {
+            return Err(MaterialVirtualTextureLifecycleError::InvalidResourceSlot);
+        }
+        let config = staging.config();
+        let expected_entry_count = u32::try_from(snapshot.len())
+            .map_err(|_| MaterialVirtualTextureLifecycleError::InvalidStaging)?;
+        if config.entry_count != expected_entry_count
+            || config.enabled != u32::from(!snapshot.is_empty())
+            || staging.page_table_words() != snapshot.gpu_words()
+        {
+            return Err(MaterialVirtualTextureLifecycleError::InvalidStaging);
+        }
         if let Some(active) = &self.active {
             if snapshot.epoch() < active.snapshot.epoch()
                 || (snapshot.epoch() == active.snapshot.epoch()
                     && snapshot.generation() <= active.snapshot.generation())
             {
                 return Err(MaterialVirtualTextureLifecycleError::SnapshotRollback);
+            }
+            if ranges.resource_slot == active.resource_slot {
+                return Err(MaterialVirtualTextureLifecycleError::InvalidResourceSlot);
             }
         }
         self.next_serial = self
@@ -167,7 +208,15 @@ impl MaterialVirtualTextureLifecycle {
         if in_flight.serial != serial || in_flight.submission.is_some() {
             return Err(MaterialVirtualTextureLifecycleError::InvalidToken);
         }
-        let submission = MaterialVirtualTextureSubmission { serial, completion };
+        let resource_slot = in_flight.ranges.resource_slot;
+        if resource_slot >= 2 {
+            return Err(MaterialVirtualTextureLifecycleError::InvalidResourceSlot);
+        }
+        let submission = MaterialVirtualTextureSubmission {
+            serial,
+            completion,
+            resource_slot,
+        };
         in_flight.submission = Some(submission);
         Ok(submission)
     }
@@ -187,9 +236,6 @@ impl MaterialVirtualTextureLifecycle {
         submission: MaterialVirtualTextureSubmission,
         completed: GpuCompletionValue,
     ) -> Result<MaterialVirtualTextureReadyToPublish, MaterialVirtualTextureLifecycleError> {
-        if completed.0 < submission.completion.0 {
-            return Err(MaterialVirtualTextureLifecycleError::CompletionNotReached);
-        }
         let in_flight = self
             .in_flight
             .as_ref()
@@ -197,15 +243,42 @@ impl MaterialVirtualTextureLifecycle {
         if in_flight.submission != Some(submission) {
             return Err(MaterialVirtualTextureLifecycleError::InvalidToken);
         }
-        let in_flight = self
-            .in_flight
-            .take()
-            .ok_or(MaterialVirtualTextureLifecycleError::InvalidToken)?;
+        if completed.0 < submission.completion.0 {
+            return Err(MaterialVirtualTextureLifecycleError::CompletionNotReached);
+        }
+        // Do not consume `in_flight` here. Publication is a second state
+        // transition and may fail validation (for example when a caller
+        // supplies an invalid retirement proof). Keeping the submission
+        // owned by the lifecycle makes that failure retryable instead of
+        // leaving the producer with a pending token that can never complete.
         Ok(MaterialVirtualTextureReadyToPublish {
             serial: in_flight.serial,
-            snapshot: in_flight.snapshot,
+            completion: submission.completion,
+            snapshot: in_flight.snapshot.clone(),
             config: in_flight.staging.config(),
+            resource_slot: submission.resource_slot,
         })
+    }
+
+    /// Aborts an update before a queue completion proof has been recorded.
+    ///
+    /// Once [`mark_submitted`](Self::mark_submitted) succeeds, the queue may
+    /// still read the staging slice. Such an update must remain owned by this
+    /// lifecycle until completion and publication; callers must not drop it as
+    /// a way to recover from a later publication error.
+    pub fn abort(&mut self, serial: u64) -> Result<(), MaterialVirtualTextureLifecycleError> {
+        let in_flight = self
+            .in_flight
+            .as_ref()
+            .ok_or(MaterialVirtualTextureLifecycleError::InvalidToken)?;
+        if in_flight.serial != serial {
+            return Err(MaterialVirtualTextureLifecycleError::InvalidToken);
+        }
+        if in_flight.submission.is_some() {
+            return Err(MaterialVirtualTextureLifecycleError::SubmissionInFlight);
+        }
+        self.in_flight = None;
+        Ok(())
     }
 
     /// Publishes a completion-verified table and retires the old one.
@@ -217,12 +290,37 @@ impl MaterialVirtualTextureLifecycle {
         if retire_after.0 == 0 {
             return Err(MaterialVirtualTextureLifecycleError::InvalidCompletion);
         }
+        let in_flight = self
+            .in_flight
+            .as_ref()
+            .filter(|in_flight| in_flight.serial == ready.serial)
+            .ok_or(MaterialVirtualTextureLifecycleError::InvalidPublication)?;
+        let Some(submission) = in_flight.submission else {
+            return Err(MaterialVirtualTextureLifecycleError::InvalidPublication);
+        };
+        if submission.completion != ready.completion
+            || submission.resource_slot != ready.resource_slot
+            || ready.snapshot != in_flight.snapshot
+            || ready.config != in_flight.staging.config()
+        {
+            return Err(MaterialVirtualTextureLifecycleError::InvalidPublication);
+        }
+        if retire_after.0 < submission.completion.0 {
+            return Err(MaterialVirtualTextureLifecycleError::InvalidCompletion);
+        }
         if self
             .active
             .as_ref()
             .is_some_and(|active| ready.serial <= active.serial)
         {
             return Err(MaterialVirtualTextureLifecycleError::InvalidPublication);
+        }
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.resource_slot == ready.resource_slot)
+        {
+            return Err(MaterialVirtualTextureLifecycleError::InvalidResourceSlot);
         }
         if let Some(active) = self.active.replace(ready.clone()) {
             self.retired.push(RetiredPublication {
@@ -231,6 +329,7 @@ impl MaterialVirtualTextureLifecycle {
                 snapshot: active.snapshot,
             });
         }
+        self.in_flight = None;
         Ok(())
     }
 
