@@ -74,12 +74,12 @@ impl AsyncStreamIoExecutor {
     #[must_use]
     pub fn new(
         sources: Arc<AssetSources>,
-        controller: Arc<Mutex<StreamingController>>,
+        controller: StreamingController,
         pool: TaskPool,
     ) -> Self {
         Self {
             sources,
-            controller,
+            controller: Arc::new(Mutex::new(controller)),
             pool,
             gates: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -87,13 +87,14 @@ impl AsyncStreamIoExecutor {
 
     /// Submits a request without admitting or reading it.
     pub fn submit(&self, request: StreamRequest) -> Result<StreamRequestId, SubmitError> {
+        // Publish the controller record and its gate as one operation. All
+        // paths that need a gate take the gate-table lock before the
+        // controller lock, so no caller can observe a request without its
+        // cancellation state.
+        let mut gates = self.gates.lock().unwrap();
         let mut controller = self.controller.lock().unwrap();
         let id = controller.submit(request)?;
-        drop(controller);
-        self.gates
-            .lock()
-            .unwrap()
-            .insert(id, Arc::new(RequestGate::default()));
+        gates.insert(id, Arc::new(RequestGate::default()));
         Ok(id)
     }
 
@@ -207,11 +208,16 @@ impl AsyncStreamIoExecutor {
         }
     }
 
-    /// Returns a clone of the shared controller for inspection and explicit
-    /// lifecycle operations that are outside this executor's I/O path.
+    /// Returns the current state of a request.
     #[must_use]
-    pub fn controller(&self) -> Arc<Mutex<StreamingController>> {
-        Arc::clone(&self.controller)
+    pub fn state(&self, id: StreamRequestId) -> Option<StreamState> {
+        self.controller.lock().unwrap().state(id)
+    }
+
+    /// Returns the current aggregate residency accounting.
+    #[must_use]
+    pub fn used(&self) -> super::Residency {
+        self.controller.lock().unwrap().used()
     }
 
     /// Returns the task pool used by this executor.
@@ -237,7 +243,6 @@ mod tests {
     use prism_tasks::Priority;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex as StdMutex};
-
     fn request(path: &str, len: u64) -> StreamRequest {
         StreamRequest {
             path: path.into(),
@@ -372,9 +377,7 @@ mod tests {
 
         let executor = AsyncStreamIoExecutor::new(
             Arc::new(sources),
-            Arc::new(Mutex::new(StreamingController::new(ResidencyLimits::new(
-                16, 16, 16,
-            )))),
+            StreamingController::new(ResidencyLimits::new(16, 16, 16)),
             pool.clone(),
         );
         let id = executor.submit(request("counting://hero.bin", 3)).unwrap();
@@ -395,9 +398,7 @@ mod tests {
     fn successful_async_range_read_commits_resident_after_io() {
         let executor = AsyncStreamIoExecutor::new(
             sources_with("hero.bin", b"abcdef"),
-            Arc::new(Mutex::new(StreamingController::new(ResidencyLimits::new(
-                16, 16, 16,
-            )))),
+            StreamingController::new(ResidencyLimits::new(16, 16, 16)),
             TaskPool::with_threads(2),
         );
         let id = executor
@@ -412,10 +413,8 @@ mod tests {
             .unwrap();
         let task = executor.execute(id).unwrap();
         assert_eq!(executor.pool().block_on(task).unwrap(), b"cde");
-        let controller = executor.controller();
-        let controller = controller.lock().unwrap();
-        assert_eq!(controller.state(id), Some(StreamState::Resident));
-        assert_eq!(controller.used(), Residency::new(3, 3, 3));
+        assert_eq!(executor.state(id), Some(StreamState::Resident));
+        assert_eq!(executor.used(), Residency::new(3, 3, 3));
     }
 
     #[test]
@@ -435,9 +434,7 @@ mod tests {
         );
         let executor = AsyncStreamIoExecutor::new(
             Arc::new(sources),
-            Arc::new(Mutex::new(StreamingController::new(ResidencyLimits::new(
-                16, 16, 16,
-            )))),
+            StreamingController::new(ResidencyLimits::new(16, 16, 16)),
             TaskPool::with_threads(2),
         );
         let id = executor.submit(request("blocking://hero.bin", 7)).unwrap();
@@ -451,7 +448,7 @@ mod tests {
         // The source is blocked, yet the controller remains available to
         // unrelated callers. This proves the blocking read is outside the
         // controller mutex critical section.
-        assert!(executor.controller().try_lock().is_ok());
+        assert!(executor.controller.try_lock().is_ok());
         executor.cancel(id).unwrap();
         let (release_lock, release_wake) = &*release;
         *release_lock.lock().unwrap() = true;
@@ -462,19 +459,15 @@ mod tests {
             Err(StreamIoError::Cancelled { id })
         );
         assert_eq!(reads.load(Ordering::SeqCst), 1);
-        let controller = executor.controller();
-        let controller = controller.lock().unwrap();
-        assert_eq!(controller.state(id), Some(StreamState::Cancelled));
-        assert_eq!(controller.used(), Residency::default());
+        assert_eq!(executor.state(id), Some(StreamState::Cancelled));
+        assert_eq!(executor.used(), Residency::default());
     }
 
     #[test]
     fn concurrent_cancel_and_execute_have_one_deterministic_commit() {
         let executor = AsyncStreamIoExecutor::new(
             sources_with("hero.bin", b"abcdef"),
-            Arc::new(Mutex::new(StreamingController::new(ResidencyLimits::new(
-                16, 16, 16,
-            )))),
+            StreamingController::new(ResidencyLimits::new(16, 16, 16)),
             TaskPool::with_threads(2),
         );
         let id = executor.submit(request("mem://hero.bin", 3)).unwrap();
@@ -514,9 +507,7 @@ mod tests {
         );
         let executor = AsyncStreamIoExecutor::new(
             Arc::new(sources),
-            Arc::new(Mutex::new(StreamingController::new(ResidencyLimits::new(
-                16, 16, 16,
-            )))),
+            StreamingController::new(ResidencyLimits::new(16, 16, 16)),
             TaskPool::with_threads(2),
         );
         let id = executor.submit(request("counting://hero.bin", 9)).unwrap();
@@ -525,10 +516,8 @@ mod tests {
             executor.pool().block_on(task),
             Err(StreamIoError::Read { id: actual, .. }) if actual == id
         ));
-        let controller = executor.controller();
-        let controller = controller.lock().unwrap();
-        assert_eq!(controller.state(id), Some(StreamState::Failed));
-        assert_eq!(controller.used(), Residency::default());
+        assert_eq!(executor.state(id), Some(StreamState::Failed));
+        assert_eq!(executor.used(), Residency::default());
         assert_eq!(reads.load(Ordering::SeqCst), 1);
     }
 
@@ -546,9 +535,7 @@ mod tests {
         );
         let executor = AsyncStreamIoExecutor::new(
             Arc::new(sources),
-            Arc::new(Mutex::new(StreamingController::new(ResidencyLimits::new(
-                2, 2, 2,
-            )))),
+            StreamingController::new(ResidencyLimits::new(2, 2, 2)),
             TaskPool::with_threads(2),
         );
         let id = executor.submit(request("counting://hero.bin", 3)).unwrap();
@@ -557,10 +544,6 @@ mod tests {
             Err(StreamIoError::AdmissionRejected { id: actual, .. }) if actual == id
         ));
         assert_eq!(reads.load(Ordering::SeqCst), 0);
-        let controller = executor.controller();
-        assert_eq!(
-            controller.lock().unwrap().state(id),
-            Some(StreamState::Pending)
-        );
+        assert_eq!(executor.state(id), Some(StreamState::Pending));
     }
 }
