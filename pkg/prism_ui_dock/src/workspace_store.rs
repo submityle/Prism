@@ -232,7 +232,10 @@ impl WorkspaceFileStore {
     ///
     /// The previous primary is copied to last-good before the new temporary
     /// file is atomically renamed into the primary path. A failed encode,
-    /// validation, copy, or write leaves the existing primary untouched.
+    /// validation, copy, or write before the corresponding rename leaves the
+    /// existing primary untouched. After a rename, a directory-sync failure
+    /// returns an error even though the new snapshot may already be committed;
+    /// callers must treat that result as commit status unknown and reload.
     pub fn save(&self, manager: &WorkspaceManager) -> Result<(), WorkspaceStoreError> {
         let bytes = encode_workspace(manager)?;
         if let Some(parent) = self
