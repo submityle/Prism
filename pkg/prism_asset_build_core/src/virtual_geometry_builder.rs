@@ -446,9 +446,9 @@ fn cluster_bounds(vertices: &[[f32; 3]]) -> SceneBounds {
 fn normal_cone(vertices: &[[f32; 3]], indices: &[u16]) -> [f32; 4] {
     let mut normals = Vec::new();
     for triangle in indices.chunks_exact(3) {
-        let a = vertices[triangle[0] as usize];
-        let b = vertices[triangle[1] as usize];
-        let c = vertices[triangle[2] as usize];
+        let a = vertices[triangle[0] as usize].map(f64::from);
+        let b = vertices[triangle[1] as usize].map(f64::from);
+        let c = vertices[triangle[2] as usize].map(f64::from);
         let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
         let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
         let n = [
@@ -457,7 +457,7 @@ fn normal_cone(vertices: &[[f32; 3]], indices: &[u16]) -> [f32; 4] {
             ab[0] * ac[1] - ab[1] * ac[0],
         ];
         let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-        if length > f32::EPSILON {
+        if length > f64::EPSILON {
             normals.push([n[0] / length, n[1] / length, n[2] / length]);
         }
     }
@@ -471,7 +471,7 @@ fn normal_cone(vertices: &[[f32; 3]], indices: &[u16]) -> [f32; 4] {
         }
     }
     let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
-    if length <= f32::EPSILON {
+    if length <= f64::EPSILON {
         return [0.0, 0.0, 1.0, -1.0];
     }
     for component in &mut axis {
@@ -480,9 +480,14 @@ fn normal_cone(vertices: &[[f32; 3]], indices: &[u16]) -> [f32; 4] {
     let cosine = normals
         .iter()
         .map(|normal| axis[0] * normal[0] + axis[1] * normal[1] + axis[2] * normal[2])
-        .fold(1.0, f32::min)
+        .fold(1.0, f64::min)
         .clamp(-1.0, 1.0);
-    [axis[0], axis[1], axis[2], cosine]
+    [
+        axis[0] as f32,
+        axis[1] as f32,
+        axis[2] as f32,
+        cosine as f32,
+    ]
 }
 
 fn settings_hash(settings: StaticClusterBuildSettings) -> [u8; 32] {
@@ -609,6 +614,34 @@ mod tests {
             assert!(bound.radius.is_finite());
         }
         assert_eq!(asset.header.bounds.half_extents[0], f32::MAX * 0.25);
+        assert!(asset
+            .clusters
+            .iter()
+            .flat_map(|cluster| cluster.normal_cone)
+            .all(f32::is_finite));
+    }
+
+    #[test]
+    fn normal_cone_stays_finite_for_extreme_finite_triangles() {
+        let max = f32::MAX;
+        let source = Mesh::new(PrimitiveTopology::TriangleList)
+            .with_attribute(
+                MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float32x3, 0),
+                VertexAttributeValues::Float32x3(vec![
+                    [max, 0.0, 0.0],
+                    [-max, 0.0, 0.0],
+                    [0.0, max, 0.0],
+                ]),
+            )
+            .expect("positions fit")
+            .indexed(Indices::Uint32(vec![0, 1, 2]));
+        let asset =
+            build_static_virtual_geometry(12, &source, StaticClusterBuildSettings::default())
+                .expect("extreme finite triangle remains valid");
+        assert!(asset.clusters[0]
+            .normal_cone
+            .iter()
+            .all(|value| value.is_finite()));
     }
 
     #[test]
