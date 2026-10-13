@@ -87,6 +87,7 @@ pub struct ShadeDispatchProductionGpu {
     in_flight: Option<InFlightShadeDispatch>,
     status: ShadeDispatchProductionStatus,
     active_page_count: u32,
+    active_chart_count: u32,
 }
 
 impl Default for ShadeDispatchProductionGpu {
@@ -97,6 +98,7 @@ impl Default for ShadeDispatchProductionGpu {
             in_flight: None,
             status: ShadeDispatchProductionStatus::Disabled,
             active_page_count: 0,
+            active_chart_count: 0,
         }
     }
 }
@@ -116,9 +118,18 @@ impl ShadeDispatchProductionGpu {
         (self.active_page_count != 0).then(|| ShadeDispatchBinding {
             page_table: dispatch.page_table_buffer().clone(),
             page_lookup: dispatch.page_lookup_buffer().clone(),
+            resolve_pages: dispatch.resolve_page_buffer().clone(),
+            chart_infos: dispatch.chart_info_buffer().clone(),
             atlas: dispatch.atlas_view().clone(),
             page_count: self.active_page_count,
+            chart_count: self.active_chart_count,
+            atlas_extent: dispatch.config().atlas_extent,
         })
+    }
+
+    fn deactivate_snapshot(&mut self) {
+        self.active_page_count = 0;
+        self.active_chart_count = 0;
     }
 
     fn ensure_dispatch(&mut self, device: &RenderDevice, config: ShadeDispatchConfig) {
@@ -165,29 +176,43 @@ impl ShadeDispatchProductionGpu {
             return;
         }
         let Some(dispatch) = self.dispatch.as_mut() else {
+            self.deactivate_snapshot();
             self.status = ShadeDispatchProductionStatus::Error;
             return;
         };
         let batch = match build_shade_dispatch_batch(inputs, geometry, lights) {
             Ok(batch) => batch,
             Err(ShadeDispatchBuildError::NoInput) => {
+                self.deactivate_snapshot();
                 self.status = ShadeDispatchProductionStatus::NoInput;
                 return;
             }
             Err(_) => {
+                self.deactivate_snapshot();
                 self.status = ShadeDispatchProductionStatus::Error;
                 return;
             }
         };
-        match dispatch.prepare(queue, &batch.jobs, &batch.page_table, &batch.vertices) {
+        match dispatch.prepare(
+            queue,
+            &batch.jobs,
+            &batch.page_table,
+            &batch.resolve_pages,
+            &batch.chart_infos,
+            &batch.vertices,
+        ) {
             Ok(prepared) => {
                 self.active_page_count = batch.page_table.len() as u32;
+                self.active_chart_count = batch.chart_infos.len() as u32;
                 self.status = ShadeDispatchProductionStatus::Prepared {
                     job_count: prepared.job_count(),
                 };
                 self.prepared = Some(prepared);
             }
-            Err(_) => self.status = ShadeDispatchProductionStatus::Error,
+            Err(_) => {
+                self.deactivate_snapshot();
+                self.status = ShadeDispatchProductionStatus::Error;
+            }
         }
     }
 
@@ -196,6 +221,7 @@ impl ShadeDispatchProductionGpu {
             return;
         };
         let Some(dispatch) = self.dispatch.as_mut() else {
+            self.deactivate_snapshot();
             self.status = ShadeDispatchProductionStatus::Error;
             return;
         };
@@ -212,7 +238,10 @@ impl ShadeDispatchProductionGpu {
                     job_count: stats.job_count,
                 });
             }
-            Err(_) => self.status = ShadeDispatchProductionStatus::Error,
+            Err(_) => {
+                self.deactivate_snapshot();
+                self.status = ShadeDispatchProductionStatus::Error;
+            }
         }
     }
 }
@@ -222,8 +251,12 @@ impl ShadeDispatchProductionGpu {
 pub(crate) struct ShadeDispatchBinding {
     pub(crate) page_table: Buffer,
     pub(crate) page_lookup: Buffer,
+    pub(crate) resolve_pages: Buffer,
+    pub(crate) chart_infos: Buffer,
     pub(crate) atlas: TextureView,
     pub(crate) page_count: u32,
+    pub(crate) chart_count: u32,
+    pub(crate) atlas_extent: [u32; 2],
 }
 
 /// Copies the main-world producer's explicit frame input into the render
@@ -251,6 +284,7 @@ pub(crate) fn prepare_shade_dispatch(
     if !settings.enabled {
         if production.in_flight.is_none() {
             production.cancel_prepared();
+            production.deactivate_snapshot();
             production.status = ShadeDispatchProductionStatus::Disabled;
         }
         return;

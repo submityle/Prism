@@ -622,6 +622,35 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
         });
     }
 }
+
+#[test]
+fn shading_resolve_declares_the_independent_shade_cache_consumer_contract() {
+    let source = include_str!("../../shaders/shading_resolve.wesl");
+    for declaration in [
+        "@group(8) @binding(0)",
+        "@group(8) @binding(1)",
+        "@group(8) @binding(2)",
+        "@group(8) @binding(3)",
+        "@group(8) @binding(4)",
+        "@group(8) @binding(5)",
+        "fn shade_find_chart(",
+        "fn shade_find_page(",
+        "fn shade_cache_sample(",
+        "page.generation",
+        "page.epoch",
+        "page.channel",
+        "page.mip",
+    ] {
+        assert!(
+            source.contains(declaration),
+            "missing shade-cache contract: {declaration}"
+        );
+    }
+    assert!(
+        source.contains("indirect = indirect - current_diffuse + cached_diffuse"),
+        "cache hit must replace only the diffuse indirect contribution"
+    );
+}
 /// Registers `material.wesl` under its canonical module path and compiles
 /// `material_sample.wesl`, forcing the importer to resolve the
 /// `prism_render_scene::shaders::material::{PrismMaterialHeader,

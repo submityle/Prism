@@ -103,6 +103,33 @@ pub struct GpuShadePageLookup {
     pub page_index: u32,
 }
 
+/// Chart metadata used to derive a logical page coordinate in the resolve
+/// consumer before the page-key lookup runs.
+///
+/// This is deliberately a separate ABI from [`GpuShadePageLookup`]. A page
+/// lookup row identifies one resident page; a chart row identifies the stable
+/// face/channel parameterisation shared by all mips and pages of that chart.
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+#[repr(C)]
+pub struct GpuShadeChartInfo {
+    /// Stable render-object identity.
+    pub object_id: u32,
+    /// Stable material identity.
+    pub material_id: u32,
+    /// Low/high words of the material epoch.
+    pub material_epoch_low: u32,
+    pub material_epoch_high: u32,
+    /// Packed `(face: u16, channel: u8)` identity.
+    pub face_channel: u32,
+    /// Base-mip chart extent in texels.
+    pub chart_extent: [u32; 2],
+    /// Logical page size in texels.
+    pub page_size: u32,
+    /// Face-local UV bounds used by the chart.
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
+}
+
 impl GpuShadePageLookup {
     /// Creates the GPU key row for one sorted page-table record.
     #[must_use]
@@ -153,6 +180,12 @@ pub struct GpuShadeResolvePage {
     /// Logical page size and channel identity for shader-side validation.
     pub page_size: u32,
     pub channel: u32,
+    /// Logical mip represented by this page; lower values are preferred by the
+    /// resolve lookup when several resident pages cover the same chart UV.
+    pub mip: u32,
+    /// Reserved for future cache encoding/quality flags. Must remain zero for
+    /// the current ABI.
+    pub reserved: u32,
 }
 
 impl GpuShadeResolvePage {
@@ -173,6 +206,38 @@ impl GpuShadeResolvePage {
             epoch: entry.epoch,
             page_size,
             channel,
+            mip: 0,
+            reserved: 0,
+        }
+    }
+
+    /// Builds a resolve row for a page at an explicit mip. Chart geometry is
+    /// authored at mip zero; every coarser row keeps the same UV domain and
+    /// uses the corresponding clamped texel extent.
+    #[must_use]
+    pub const fn from_entry_at_mip(
+        entry: GpuShadePageEntry,
+        chart: FaceChart,
+        page_size: u32,
+        channel: u32,
+        mip: u8,
+    ) -> Self {
+        let shift = if mip < 31 { mip } else { 31 };
+        let shifted_x = chart.texel_extent[0] >> shift;
+        let shifted_y = chart.texel_extent[1] >> shift;
+        let extent_x = if shifted_x == 0 { 1 } else { shifted_x };
+        let extent_y = if shifted_y == 0 { 1 } else { shifted_y };
+        Self {
+            atlas_origin: [entry.atlas_x, entry.atlas_y],
+            chart_extent: [extent_x, extent_y],
+            uv_min: chart.uv_min,
+            uv_max: chart.uv_max,
+            generation: entry.generation,
+            epoch: entry.epoch,
+            page_size,
+            channel,
+            mip: mip as u32,
+            reserved: 0,
         }
     }
 }
@@ -1038,7 +1103,7 @@ impl MaterialVirtualTexturePageTableAdapter {
 
 #[cfg(test)]
 mod tests {
-    use core::mem::size_of;
+    use core::mem::{offset_of, size_of};
 
     use super::super::super::key::ShadeChannel;
     use super::*;
@@ -1096,7 +1161,7 @@ mod tests {
             texel_extent: [128, 96],
         };
         let row = GpuShadeResolvePage::from_entry(entry, chart, 128, 0);
-        assert_eq!(size_of::<GpuShadeResolvePage>(), 48);
+        assert_eq!(size_of::<GpuShadeResolvePage>(), 56);
         assert_eq!(row.atlas_origin, [32, 64]);
         assert_eq!(row.chart_extent, [128, 96]);
         assert_eq!(row.uv_min, chart.uv_min);
@@ -1105,6 +1170,44 @@ mod tests {
             (row.generation, row.epoch, row.page_size, row.channel),
             (9, 7, 128, 0)
         );
+        assert_eq!(row.mip, 0);
+        assert_eq!(row.reserved, 0);
+    }
+
+    #[test]
+    fn shade_cache_storage_rows_have_explicit_stable_offsets() {
+        assert_eq!(size_of::<GpuShadePageLookup>(), 32);
+        assert_eq!(size_of::<GpuShadeChartInfo>(), 48);
+        assert_eq!(size_of::<GpuShadeResolvePage>(), 56);
+        assert_eq!(offset_of!(GpuShadeChartInfo, chart_extent), 20);
+        assert_eq!(offset_of!(GpuShadeChartInfo, page_size), 28);
+        assert_eq!(offset_of!(GpuShadeChartInfo, uv_min), 32);
+        assert_eq!(offset_of!(GpuShadeChartInfo, uv_max), 40);
+        assert_eq!(offset_of!(GpuShadeResolvePage, chart_extent), 8);
+        assert_eq!(offset_of!(GpuShadeResolvePage, uv_min), 16);
+        assert_eq!(offset_of!(GpuShadeResolvePage, uv_max), 24);
+        assert_eq!(offset_of!(GpuShadeResolvePage, mip), 48);
+        assert_eq!(offset_of!(GpuShadeResolvePage, reserved), 52);
+    }
+
+    #[test]
+    fn resolve_page_row_scales_chart_extent_for_a_coarser_mip() {
+        let entry = GpuShadePageEntry {
+            atlas_x: 32,
+            atlas_y: 64,
+            generation: 9,
+            epoch: 7,
+        };
+        let chart = super::super::super::chart::FaceChart {
+            face: 4,
+            uv: [[0.1, 0.2], [0.9, 0.2], [0.1, 0.8]],
+            uv_min: [0.1, 0.2],
+            uv_max: [0.9, 0.8],
+            texel_extent: [128, 96],
+        };
+        let row = GpuShadeResolvePage::from_entry_at_mip(entry, chart, 32, 0, 2);
+        assert_eq!(row.chart_extent, [32, 24]);
+        assert_eq!(row.mip, 2);
     }
 
     #[test]

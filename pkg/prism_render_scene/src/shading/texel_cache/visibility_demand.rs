@@ -4,6 +4,8 @@
 //! buffer and the validated per-face chart extent. This module performs only
 //! deterministic LOD/page math; it never invents visibility or geometry.
 
+use std::collections::BTreeMap;
+
 use bevy_ecs::prelude::Resource;
 use prism_render_visibility::texture_lod;
 
@@ -57,6 +59,30 @@ pub struct ShadeDemandRecord {
     pub chart: FaceChart,
 }
 
+/// One epoch-homogeneous visibility batch.
+///
+/// The shade page-table ABI is intentionally single-epoch.  A visibility
+/// readback can contain pages from several material revisions, so callers must
+/// consume this grouped form one batch at a time instead of flattening all
+/// records into one snapshot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShadeDemandEpochBatch {
+    /// Material/light epoch represented by every record in the batch.
+    pub epoch: u64,
+    /// Deduplicated records in stable page-key order.
+    pub records: Vec<ShadeDemandRecord>,
+}
+
+/// Errors found while normalizing visibility provenance into epoch batches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShadeDemandBatchError {
+    /// The registry was populated with requests but without the geometry/chart
+    /// provenance required by the production shade job builder.
+    MissingProvenance,
+    /// One logical page was observed with incompatible geometry/chart data.
+    ConflictingDuplicate,
+}
+
 /// Render-world handoff for real visibility-derived shade requests.
 #[derive(Resource, Clone, Debug, Default)]
 pub struct ShadeDemandRegistry {
@@ -104,6 +130,43 @@ impl ShadeDemandRegistry {
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Normalizes the current visibility frame into single-epoch batches.
+    ///
+    /// Identical duplicate observations are collapsed.  A duplicate page with
+    /// different geometry/chart provenance is rejected rather than allowing
+    /// traversal order to select an arbitrary chart.  The returned batches and
+    /// their records are ordered by the stable page key, making the result
+    /// independent of GPU readback order.
+    pub fn epoch_batches(&self) -> Result<Vec<ShadeDemandEpochBatch>, ShadeDemandBatchError> {
+        if self.demands.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.records.is_empty() {
+            return Err(ShadeDemandBatchError::MissingProvenance);
+        }
+
+        let mut grouped: BTreeMap<u64, BTreeMap<ShadePageKey, ShadeDemandRecord>> = BTreeMap::new();
+        for record in &self.records {
+            let epoch = record.request.key.material_epoch;
+            let pages = grouped.entry(epoch).or_default();
+            if let Some(existing) = pages.get(&record.request.key) {
+                if existing != record {
+                    return Err(ShadeDemandBatchError::ConflictingDuplicate);
+                }
+                continue;
+            }
+            pages.insert(record.request.key, *record);
+        }
+
+        Ok(grouped
+            .into_iter()
+            .map(|(epoch, records)| ShadeDemandEpochBatch {
+                epoch,
+                records: records.into_values().collect(),
+            })
+            .collect())
     }
 }
 
@@ -257,5 +320,81 @@ mod tests {
             1,
         );
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn groups_mixed_epochs_without_cross_epoch_flattening() {
+        let chart = FaceChart {
+            face: 0,
+            uv: [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+            uv_min: [0.0, 0.0],
+            uv_max: [1.0, 1.0],
+            texel_extent: [128, 128],
+        };
+        let record = |epoch, page_x| ShadeDemandRecord {
+            request: ShadePageRequest {
+                key: ShadePageKey {
+                    object_id: 1,
+                    material_id: 2,
+                    material_epoch: epoch,
+                    face: 0,
+                    mip: 0,
+                    channel: ShadeChannel::LitDiffuse,
+                    page_x,
+                    page_y: 0,
+                },
+                priority: 1,
+                byte_cost: 64,
+                frame: 1,
+            },
+            geometry_index: 3,
+            chart,
+        };
+        let mut registry = ShadeDemandRegistry::default();
+        registry.replace_records([record(7, 1), record(3, 0), record(7, 1)]);
+
+        let batches = registry.epoch_batches().unwrap();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].epoch, 3);
+        assert_eq!(batches[1].epoch, 7);
+        assert_eq!(batches[1].records.len(), 1);
+    }
+
+    #[test]
+    fn rejects_conflicting_duplicate_provenance() {
+        let mut registry = ShadeDemandRegistry::default();
+        let request = ShadePageRequest {
+            key: ShadePageKey {
+                object_id: 1,
+                material_id: 2,
+                material_epoch: 3,
+                face: 0,
+                mip: 0,
+                channel: ShadeChannel::LitDiffuse,
+                page_x: 0,
+                page_y: 0,
+            },
+            priority: 1,
+            byte_cost: 64,
+            frame: 1,
+        };
+        let base = ShadeDemandRecord {
+            request,
+            geometry_index: 3,
+            chart: FaceChart {
+                face: 0,
+                uv: [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                uv_min: [0.0, 0.0],
+                uv_max: [1.0, 1.0],
+                texel_extent: [128, 128],
+            },
+        };
+        let mut conflicting = base;
+        conflicting.geometry_index = 4;
+        registry.replace_records([base, conflicting]);
+        assert_eq!(
+            registry.epoch_batches(),
+            Err(ShadeDemandBatchError::ConflictingDuplicate)
+        );
     }
 }

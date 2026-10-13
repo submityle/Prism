@@ -27,6 +27,7 @@ use bevy_render::{
 
 use prism_render_shading::ReceiverProjection;
 
+use crate::shading::texel_cache::ShadeDispatchProductionGpu;
 use crate::{GpuSceneBuffers, RenderShadingGeometryBuffers};
 
 use super::super::ao::ViewGtaoTextures;
@@ -38,7 +39,7 @@ use super::super::runtime::PrismShadingSettings;
 use super::super::virtual_shadow::{
     PrismVirtualShadowSettings, ViewVsmPhysicalAtlas, VsmPrimaryLight,
 };
-use super::abi::GpuVsmResolveParams;
+use super::abi::{GpuShadeCacheResolveParams, GpuVsmResolveParams};
 use super::motion::ViewMotionUniform;
 use super::pipeline::ShadingResolvePipeline;
 
@@ -95,6 +96,9 @@ pub(crate) struct ViewResolveBindGroups {
     /// every dispatch; the shader skips degenerate records when the subsystem
     /// is off.
     pub(crate) area: BindGroup,
+    /// group 8: independent P3 shade-cache lookup/page/chart metadata and
+    /// atlas. Always bound with real or disabled fallback resources.
+    pub(crate) shade_cache: BindGroup,
 }
 
 /// `PrepareBindGroups` system building [`ViewResolveBindGroups`] for every view
@@ -114,6 +118,7 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
     primary_light: Option<Res<VsmPrimaryLight>>,
     area_lut: Option<Res<AreaLightLtcLut>>,
     area_buffer: Option<Res<AreaLightGpuBuffer>>,
+    shade_cache: Res<ShadeDispatchProductionGpu>,
     views: Query<(
         Entity,
         &ViewVisibilityBuffer,
@@ -307,11 +312,65 @@ pub(crate) fn prepare_shading_resolve_bind_groups(
             &BindGroupEntries::sequential((area_lights_binding, area_coeffs, area_amp)),
         );
 
+        // group 8: independent P3 shade-cache resources. The disabled fallback
+        // is a complete, format-correct bind group; the shader additionally
+        // checks the explicit enabled/count uniform before reading it.
+        let cache_binding = shade_cache.binding();
+        let cache_params = GpuShadeCacheResolveParams {
+            enabled: u32::from(cache_binding.is_some()),
+            page_count: cache_binding.as_ref().map_or(0, |value| value.page_count),
+            chart_count: cache_binding.as_ref().map_or(0, |value| value.chart_count),
+            atlas_width: cache_binding
+                .as_ref()
+                .map_or(1, |value| value.atlas_extent[0]),
+            atlas_height: cache_binding
+                .as_ref()
+                .map_or(1, |value| value.atlas_extent[1]),
+            _padding: [0; 3],
+        };
+        let cache_params_buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("prism resolve shade cache params"),
+            contents: bytemuck::bytes_of(&cache_params),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+        let cache_lookup = cache_binding.as_ref().map_or_else(
+            || pipeline.shade_cache_dummy_lookup.as_entire_binding(),
+            |value| value.page_lookup.as_entire_binding(),
+        );
+        let cache_page_table = cache_binding.as_ref().map_or_else(
+            || pipeline.shade_cache_dummy_page_table.as_entire_binding(),
+            |value| value.page_table.as_entire_binding(),
+        );
+        let cache_pages = cache_binding.as_ref().map_or_else(
+            || pipeline.shade_cache_dummy_pages.as_entire_binding(),
+            |value| value.resolve_pages.as_entire_binding(),
+        );
+        let cache_charts = cache_binding.as_ref().map_or_else(
+            || pipeline.shade_cache_dummy_charts.as_entire_binding(),
+            |value| value.chart_infos.as_entire_binding(),
+        );
+        let cache_atlas = cache_binding
+            .as_ref()
+            .map_or(&pipeline.shade_cache_dummy_atlas, |value| &value.atlas);
+        let shade_cache = device.create_bind_group(
+            "prism resolve shade cache",
+            &pipeline.shade_cache_layout,
+            &BindGroupEntries::sequential((
+                cache_lookup,
+                cache_page_table,
+                cache_pages,
+                cache_charts,
+                cache_atlas,
+                cache_params_buffer.as_entire_binding(),
+            )),
+        );
+
         commands.entity(entity).insert(ViewResolveBindGroups {
             view,
             scene: scene_group,
             vsm,
             area,
+            shade_cache,
         });
     }
 }

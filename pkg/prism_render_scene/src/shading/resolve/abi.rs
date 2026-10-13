@@ -55,6 +55,22 @@ pub(crate) const RESOLVE_FLAG_GTAO: u32 = 1 << 0;
 /// `RESOLVE_FLAG_IBL_SPECULAR` in `shading_resolve.wesl`.
 pub(crate) const RESOLVE_FLAG_IBL_SPECULAR: u32 = 1 << 1;
 
+/// Uniform gate and bounds for the independent P3 shade-cache consumer.
+///
+/// A zero `enabled` value selects the screen-space/analytic path without
+/// touching the cache resources. The dimensions are carried explicitly so the
+/// shader can guard malformed atlas coordinates before `textureLoad`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable, PartialEq)]
+pub(crate) struct GpuShadeCacheResolveParams {
+    pub enabled: u32,
+    pub page_count: u32,
+    pub chart_count: u32,
+    pub atlas_width: u32,
+    pub atlas_height: u32,
+    pub _padding: [u32; 3],
+}
+
 /// Uniform block bound at group 6 of the shading-resolve pass, carrying the
 /// virtual-shadow-map (VSM) sampling state consumed by the inline
 /// `sample_virtual_shadow` twin in `shading_resolve.wesl`.
@@ -207,7 +223,21 @@ impl GpuVsmResolveParams {
 
 #[cfg(test)]
 mod tests {
+    use core::mem::{align_of, offset_of, size_of};
+
     use super::*;
+
+    #[test]
+    fn shade_cache_uniform_layout_matches_the_wesl_block() {
+        assert_eq!(size_of::<GpuShadeCacheResolveParams>(), 32);
+        assert_eq!(offset_of!(GpuShadeCacheResolveParams, enabled), 0);
+        assert_eq!(offset_of!(GpuShadeCacheResolveParams, page_count), 4);
+        assert_eq!(offset_of!(GpuShadeCacheResolveParams, chart_count), 8);
+        assert_eq!(offset_of!(GpuShadeCacheResolveParams, atlas_width), 12);
+        assert_eq!(offset_of!(GpuShadeCacheResolveParams, atlas_height), 16);
+        assert_eq!(offset_of!(GpuShadeCacheResolveParams, _padding), 20);
+        assert_eq!(align_of::<GpuShadeCacheResolveParams>(), 4);
+    }
 
     #[test]
     fn resolve_params_layout_matches_the_wgsl_immediate_block() {

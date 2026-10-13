@@ -9,8 +9,9 @@
 use prism_render_architecture::gpu_scene::GpuCompletionValue;
 
 use super::{
-    build_shade_plan, ShadeDemandRegistry, ShadePageRequest, ShadePageState, ShadePageStore,
-    ShadeResidencyError, ShadeResidencyTable, ShadeStoreError, ShadeSubmission, ShadeWriteTicket,
+    build_shade_plan, ShadeDemandEpochBatch, ShadeDemandRegistry, ShadePageRequest, ShadePageState,
+    ShadePageStore, ShadeResidencyError, ShadeResidencyTable, ShadeStoreError, ShadeSubmission,
+    ShadeWriteTicket,
 };
 
 /// Errors raised while opening or submitting a transactional shade batch.
@@ -20,6 +21,13 @@ pub enum ShadeWriteProducerError {
     Residency(ShadeResidencyError),
     /// The physical page store rejected a transition.
     Store(ShadeStoreError),
+    /// The registry contains no validated geometry/chart provenance.
+    MissingProvenance,
+    /// The caller attempted to feed one transaction with multiple material
+    /// epochs, which the page-table ABI cannot represent safely.
+    MixedEpoch,
+    /// The same page was observed with conflicting chart provenance.
+    ConflictingDuplicate,
 }
 
 /// A prepared set of residency/store writes that has not been submitted.
@@ -94,11 +102,37 @@ pub fn begin_shade_writes_from_registry(
     epoch: u64,
     byte_budget: u64,
 ) -> Result<PreparedShadeWrites, ShadeWriteProducerError> {
+    let batches = registry.epoch_batches().map_err(|error| match error {
+        super::ShadeDemandBatchError::MissingProvenance => {
+            ShadeWriteProducerError::MissingProvenance
+        }
+        super::ShadeDemandBatchError::ConflictingDuplicate => {
+            ShadeWriteProducerError::ConflictingDuplicate
+        }
+    })?;
+    let batch = batches
+        .into_iter()
+        .find(|batch| batch.epoch == epoch)
+        .ok_or(ShadeWriteProducerError::MixedEpoch)?;
+    begin_shade_writes_from_epoch_batch(residency, store, &batch, byte_budget)
+}
+
+/// Opens a transaction from one already normalized, epoch-homogeneous batch.
+///
+/// Keeping this function separate from the registry lookup makes the
+/// single-epoch invariant explicit at the call site and lets a scheduler hold
+/// the remaining epoch batches for later frames without losing demand.
+pub fn begin_shade_writes_from_epoch_batch(
+    residency: &mut ShadeResidencyTable,
+    store: &mut ShadePageStore,
+    batch: &ShadeDemandEpochBatch,
+    byte_budget: u64,
+) -> Result<PreparedShadeWrites, ShadeWriteProducerError> {
     begin_shade_writes(
         residency,
         store,
-        registry.demands().iter().copied(),
-        epoch,
+        batch.records.iter().map(|record| record.request),
+        batch.epoch,
         byte_budget,
     )
 }
@@ -253,7 +287,18 @@ mod tests {
     #[test]
     fn registry_demands_use_the_same_transactional_path() {
         let mut registry = ShadeDemandRegistry::default();
-        registry.replace([request()]);
+        let record = super::super::ShadeDemandRecord {
+            request: request(),
+            geometry_index: 1,
+            chart: super::super::FaceChart {
+                face: 0,
+                uv: [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                uv_min: [0.0, 0.0],
+                uv_max: [1.0, 1.0],
+                texel_extent: [8, 8],
+            },
+        };
+        registry.replace_records([record]);
         let mut residency = ShadeResidencyTable::new();
         let mut store = ShadePageStore::new(1);
         let prepared =
@@ -261,5 +306,31 @@ mod tests {
                 .expect("registry demand should open a write");
         assert!(is_write_pending(residency.state(key())));
         prepared.abort(&mut residency, &mut store).unwrap();
+    }
+
+    #[test]
+    fn mixed_epoch_registry_only_opens_the_requested_epoch_batch() {
+        let mut registry = ShadeDemandRegistry::default();
+        let first = super::super::ShadeDemandRecord {
+            request: request(),
+            geometry_index: 1,
+            chart: super::super::FaceChart {
+                face: 0,
+                uv: [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
+                uv_min: [0.0, 0.0],
+                uv_max: [1.0, 1.0],
+                texel_extent: [8, 8],
+            },
+        };
+        let mut second = first;
+        second.request.key.material_epoch = 4;
+        registry.replace_records([first, second]);
+        let mut residency = ShadeResidencyTable::new();
+        let mut store = ShadePageStore::new(2);
+        let prepared =
+            begin_shade_writes_from_registry(&mut residency, &mut store, &registry, 3, 128)
+                .expect("the requested epoch is selected as its own batch");
+        prepared.abort(&mut residency, &mut store).unwrap();
+        assert!(matches!(registry.epoch_batches(), Ok(batches) if batches.len() == 2));
     }
 }

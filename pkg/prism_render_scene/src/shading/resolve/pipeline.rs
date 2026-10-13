@@ -47,7 +47,10 @@ use bevy_render::{
     renderer::{RenderDevice, RenderQueue},
 };
 use bevy_shader::{Shader, ShaderDefVal};
+use bytemuck::Zeroable;
 
+use super::super::texel_cache::gpu::atlas::SHADE_ATLAS_FORMAT;
+use crate::shading::texel_cache::{GpuShadeChartInfo, GpuShadePageLookup, GpuShadeResolvePage};
 use crate::{ClusterBindGroup, LightBindGroup, MaterialBindGroup};
 
 use super::super::shadow::ShadowBindGroup;
@@ -103,6 +106,14 @@ pub(crate) struct ShadingResolvePipeline {
     /// Fallback 1x1 `Rgba32Float` `LTC` amplitude LUT (identity amplitude texel)
     /// bound when no real `AreaLightLtcLut` is resident.
     pub(crate) area_dummy_amp: TextureView,
+    /// group 8: independent P3 shade-cache lookup, page metadata, chart
+    /// parameterisation, atlas and enable/count uniform.
+    pub(crate) shade_cache_layout: BindGroupLayout,
+    pub(crate) shade_cache_dummy_lookup: Buffer,
+    pub(crate) shade_cache_dummy_page_table: Buffer,
+    pub(crate) shade_cache_dummy_pages: Buffer,
+    pub(crate) shade_cache_dummy_charts: Buffer,
+    pub(crate) shade_cache_dummy_atlas: TextureView,
 }
 
 /// Builds the group-0 layout entries:
@@ -240,6 +251,25 @@ fn area_light_layout_entries() -> BindGroupLayoutEntries<3> {
     )
 }
 
+/// Builds the independent P3 shade-cache consumer layout.
+///
+/// The page lookup, physical writer table, and chart/page metadata remain
+/// separate buffers so neither the Material-VT ABI nor the writer's four-word
+/// page entry can be mistaken for the resolve contract.
+fn shade_cache_layout_entries() -> BindGroupLayoutEntries<6> {
+    BindGroupLayoutEntries::sequential(
+        ShaderStages::COMPUTE,
+        (
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            storage_buffer_read_only_sized(false, None),
+            texture_2d(TextureSampleType::Float { filterable: false }),
+            uniform_buffer_sized(false, None),
+        ),
+    )
+}
+
 /// Builds a 1x1 `Rgba32Float` fallback `LTC` LUT view carrying one identity
 /// texel, bound at group 7 when no real baked [`AreaLightLtcLut`] is resident.
 fn create_area_dummy_lut(
@@ -297,6 +327,11 @@ pub(crate) fn init_shading_resolve_pipeline(
     let area_descriptor =
         BindGroupLayoutDescriptor::new("prism resolve area lights", &area_entries);
     let area_layout = device.create_bind_group_layout("prism resolve area lights", &area_entries);
+    let shade_cache_entries = shade_cache_layout_entries();
+    let shade_cache_descriptor =
+        BindGroupLayoutDescriptor::new("prism resolve shade cache", &shade_cache_entries);
+    let shade_cache_layout =
+        device.create_bind_group_layout("prism resolve shade cache", &shade_cache_entries);
 
     // Fallback VSM resources bound when a view has no resident page table /
     // physical atlas (feature off, or the upload bridge / raster fill has not
@@ -382,6 +417,51 @@ pub(crate) fn init_shading_resolve_pipeline(
         &[1.0, 1.0, 0.0, 0.0],
     );
 
+    let shade_cache_dummy_lookup = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism resolve shade cache dummy lookup"),
+        contents: bytemuck::bytes_of(&GpuShadePageLookup {
+            object_id: u32::MAX,
+            material_id: u32::MAX,
+            material_epoch_low: 0,
+            material_epoch_high: 0,
+            face_mip_channel: 0,
+            page_x: 0,
+            page_y: 0,
+            page_index: u32::MAX,
+        }),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    });
+    let shade_cache_dummy_page_table = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism resolve shade cache dummy page table"),
+        contents: bytemuck::cast_slice(&[u32::MAX; 4]),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    });
+    let shade_cache_dummy_pages = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism resolve shade cache dummy pages"),
+        contents: bytemuck::bytes_of(&GpuShadeResolvePage::zeroed()),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    });
+    let shade_cache_dummy_charts = device.create_buffer_with_data(&BufferInitDescriptor {
+        label: Some("prism resolve shade cache dummy charts"),
+        contents: bytemuck::bytes_of(&GpuShadeChartInfo::zeroed()),
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    });
+    let shade_cache_dummy_texture = device.create_texture(&TextureDescriptor {
+        label: Some("prism resolve shade cache dummy atlas"),
+        size: Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: SHADE_ATLAS_FORMAT,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let shade_cache_dummy_atlas =
+        shade_cache_dummy_texture.create_view(&TextureViewDescriptor::default());
     let shader: Handle<Shader> =
         load_embedded_asset!(asset_server.as_ref(), "../shaders/shading_resolve.wesl");
 
@@ -398,6 +478,8 @@ pub(crate) fn init_shading_resolve_pipeline(
             vsm_descriptor,
             // group 7: polygonal area lights (LTC) storage array + two LUTs.
             area_descriptor,
+            // group 8: independent P3 shade-cache consumer resources.
+            shade_cache_descriptor,
         ],
         immediate_size: size_of::<GpuShadingResolveParams>() as u32,
         shader,
@@ -422,5 +504,11 @@ pub(crate) fn init_shading_resolve_pipeline(
         area_dummy_lights,
         area_dummy_coeffs,
         area_dummy_amp,
+        shade_cache_layout,
+        shade_cache_dummy_lookup,
+        shade_cache_dummy_page_table,
+        shade_cache_dummy_pages,
+        shade_cache_dummy_charts,
+        shade_cache_dummy_atlas,
     });
 }

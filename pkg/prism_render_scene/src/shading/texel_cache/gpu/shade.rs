@@ -55,6 +55,8 @@ pub enum ShadeJobError {
     InvalidExtent,
     /// The chart does not describe the UVs in the canonical geometry row.
     InvalidChart,
+    /// The requested logical page does not intersect the chart at its mip.
+    InvalidPage,
     /// The light contains a NaN or infinity.
     NonFiniteLight,
     /// A directional light must have a non-zero direction.
@@ -183,6 +185,79 @@ impl ShadeJob {
             light_radiance,
             _light_radiance_padding: 0.0,
         })
+    }
+
+    /// Builds one page-local job from a chart and logical page coordinate.
+    ///
+    /// The writer ABI stores the UV rectangle covered by the job, not merely
+    /// the chart's full extent. This is essential when a chart spans more
+    /// than one page: every dispatch must shade only its own page rectangle,
+    /// otherwise each page overwrites the same full chart into a different
+    /// atlas allocation.
+    pub fn from_page_with_vertex_base(
+        geometry: &RenderShadingGeometry,
+        chart: FaceChart,
+        mip: u8,
+        page_x: u16,
+        page_y: u16,
+        page_size: u32,
+        vertex_base: u32,
+        atlas_origin: [u32; 2],
+        page_index: u32,
+        generation: u32,
+        epoch: u32,
+        light_direction: [f32; 3],
+        light_radiance: [f32; 3],
+    ) -> Result<Self, ShadeJobError> {
+        if page_size == 0 || mip >= 32 {
+            return Err(ShadeJobError::InvalidPage);
+        }
+
+        let shift = u32::from(mip);
+        let chart_width = chart.texel_extent[0].checked_shr(shift).unwrap_or(0).max(1);
+        let chart_height = chart.texel_extent[1].checked_shr(shift).unwrap_or(0).max(1);
+        let origin_x = u32::from(page_x)
+            .checked_mul(page_size)
+            .ok_or(ShadeJobError::InvalidPage)?;
+        let origin_y = u32::from(page_y)
+            .checked_mul(page_size)
+            .ok_or(ShadeJobError::InvalidPage)?;
+        if origin_x >= chart_width || origin_y >= chart_height {
+            return Err(ShadeJobError::InvalidPage);
+        }
+
+        let extent = [
+            page_size.min(chart_width - origin_x),
+            page_size.min(chart_height - origin_y),
+        ];
+        let uv_span = [
+            chart.uv_max[0] - chart.uv_min[0],
+            chart.uv_max[1] - chart.uv_min[1],
+        ];
+        let page_uv_min = [
+            chart.uv_min[0] + uv_span[0] * origin_x as f32 / chart_width as f32,
+            chart.uv_min[1] + uv_span[1] * origin_y as f32 / chart_height as f32,
+        ];
+        let page_uv_max = [
+            chart.uv_min[0] + uv_span[0] * (origin_x + extent[0]) as f32 / chart_width as f32,
+            chart.uv_min[1] + uv_span[1] * (origin_y + extent[1]) as f32 / chart_height as f32,
+        ];
+
+        let mut job = Self::from_face_with_vertex_base(
+            geometry,
+            chart,
+            vertex_base,
+            atlas_origin,
+            page_index,
+            generation,
+            epoch,
+            light_direction,
+            light_radiance,
+        )?;
+        job.extent = extent;
+        job.uv_min = page_uv_min;
+        job.uv_max = page_uv_max;
+        Ok(job)
     }
 
     /// Builds a shade job directly from the production geometry header.
@@ -409,6 +484,56 @@ mod tests {
                 [f32::NAN, 1.0, 1.0],
             ),
             Err(ShadeJobFromDensityError::Job(ShadeJobError::NonFiniteLight))
+        );
+    }
+
+    #[test]
+    fn page_job_carries_only_its_local_extent_and_uv_rectangle() {
+        let geometry = geometry();
+        let chart = super::super::super::chart::build_face_chart(&geometry, 0, 4.0, 4).unwrap();
+        let job = ShadeJob::from_page_with_vertex_base(
+            &geometry,
+            chart,
+            0,
+            1,
+            0,
+            2,
+            0,
+            [8, 16],
+            3,
+            1,
+            1,
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        assert_eq!(job.extent, [2, 2]);
+        assert_eq!(job.atlas_origin, [8, 16]);
+        assert_eq!(job.uv_min, [0.5, 0.0]);
+        assert_eq!(job.uv_max, [1.0, 0.5]);
+    }
+
+    #[test]
+    fn page_job_rejects_a_page_outside_the_chart_mip() {
+        let geometry = geometry();
+        let chart = super::super::super::chart::build_face_chart(&geometry, 0, 4.0, 4).unwrap();
+        assert_eq!(
+            ShadeJob::from_page_with_vertex_base(
+                &geometry,
+                chart,
+                0,
+                2,
+                0,
+                2,
+                0,
+                [0, 0],
+                0,
+                1,
+                1,
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+            ),
+            Err(ShadeJobError::InvalidPage)
         );
     }
 }

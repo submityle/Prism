@@ -127,6 +127,10 @@ pub(crate) fn dispatch_shading_resolve(
     // opt-in subsystem is on, else the pass-owned identity dummies which the
     // shader sanitizes to a zero contribution.
     pass.set_bind_group(7, &groups.area, &[]);
+    // group 8: independent P3 shade-cache lookup/page/chart metadata and
+    // atlas. The bind-group builder supplies disabled, format-correct
+    // fallbacks when no completion-safe production snapshot is resident.
+    pass.set_bind_group(8, &groups.shade_cache, &[]);
 
     let stride = size_of::<GpuShadingDispatchArgs>() as u64;
     for class in 0..MAX_SHADING_CLASSES as u32 {

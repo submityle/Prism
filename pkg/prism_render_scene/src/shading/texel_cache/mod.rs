@@ -32,15 +32,15 @@ pub use gpu::dispatch::{
     ShadeDispatchStats, SHADE_WORKGROUP_SIZE,
 };
 pub use gpu::page_table::{
-    GpuShadePageEntry, GpuShadePageLookup, ShadePageTableError, ShadePageTableRecord,
-    ShadePageTableSnapshot,
+    GpuShadeChartInfo, GpuShadePageEntry, GpuShadePageLookup, GpuShadeResolvePage,
+    ShadePageTableError, ShadePageTableRecord, ShadePageTableSnapshot,
 };
 pub use gpu::shade::{ShadeJob, ShadeJobError, ShadeJobFromDensityError};
 pub use key::{ShadeChannel, ShadePageKey};
 pub use plan::{build_shade_plan, ShadePlan, ShadePlanItem};
 pub use producer::{
-    begin_shade_writes, begin_shade_writes_from_registry, is_write_pending, PreparedShadeWrites,
-    ShadeWriteProducerError, SubmittedShadeWrites,
+    begin_shade_writes, begin_shade_writes_from_epoch_batch, begin_shade_writes_from_registry,
+    is_write_pending, PreparedShadeWrites, ShadeWriteProducerError, SubmittedShadeWrites,
 };
 pub(crate) use production::{build_shade_dispatch_batch, ShadeDispatchBuildError};
 pub use production::{build_shade_dispatch_chart, ShadeDispatchInputs, ShadeDispatchJobInput};
@@ -60,8 +60,8 @@ pub use store::{
     ShadeStoreError, ShadeStoreLookup, ShadeSubmission,
 };
 pub use visibility_demand::{
-    shade_page_request_from_visibility, ShadeDemandConfig, ShadeDemandRecord, ShadeDemandRegistry,
-    ShadeVisibilitySample,
+    shade_page_request_from_visibility, ShadeDemandBatchError, ShadeDemandConfig,
+    ShadeDemandEpochBatch, ShadeDemandRecord, ShadeDemandRegistry, ShadeVisibilitySample,
 };
 
 #[cfg(test)]

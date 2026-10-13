@@ -930,6 +930,79 @@ struct AreaLight {
 @group(7) @binding(1) var area_light_ltc_coeffs: texture_2d<f32>;
 @group(7) @binding(2) var area_light_ltc_amp: texture_2d<f32>;
 
+// --- group 8: independent P3 object/texture-space shade cache ---
+//
+// This ABI is intentionally separate from Material-VT. The page lookup is
+// key-sorted, the writer page table carries generation/epoch proof, chart rows
+// derive logical page coordinates from the actual visibility UV, and the
+// per-page rows carry the chart transform used for atlas sampling.
+struct ShadePageLookup {
+    object_id: u32,
+    material_id: u32,
+    material_epoch_low: u32,
+    material_epoch_high: u32,
+    face_mip_channel: u32,
+    page_x: u32,
+    page_y: u32,
+    page_index: u32,
+}
+
+struct ShadePageEntry {
+    atlas_x: u32,
+    atlas_y: u32,
+    generation: u32,
+    epoch: u32,
+}
+
+struct ShadeResolvePage {
+    atlas_origin: vec2<u32>,
+    chart_extent: vec2<u32>,
+    uv_min: vec2<f32>,
+    uv_max: vec2<f32>,
+    generation: u32,
+    epoch: u32,
+    page_size: u32,
+    channel: u32,
+    mip: u32,
+    reserved: u32,
+}
+
+// Scalar fields after the five-word identity keep this declaration byte-
+// identical to GpuShadeChartInfo's repr(C) storage row (no implicit vec2
+// alignment gap between face_channel and chart_extent).
+struct ShadeChartInfo {
+    object_id: u32,
+    material_id: u32,
+    material_epoch_low: u32,
+    material_epoch_high: u32,
+    face_channel: u32,
+    chart_extent_x: u32,
+    chart_extent_y: u32,
+    page_size: u32,
+    uv_min_x: f32,
+    uv_min_y: f32,
+    uv_max_x: f32,
+    uv_max_y: f32,
+}
+
+struct ShadeCacheResolveParams {
+    enabled: u32,
+    page_count: u32,
+    chart_count: u32,
+    atlas_width: u32,
+    atlas_height: u32,
+    padding0: u32,
+    padding1: u32,
+    padding2: u32,
+}
+
+@group(8) @binding(0) var<storage, read> shade_page_lookup: array<ShadePageLookup>;
+@group(8) @binding(1) var<storage, read> shade_page_table: array<ShadePageEntry>;
+@group(8) @binding(2) var<storage, read> shade_resolve_pages: array<ShadeResolvePage>;
+@group(8) @binding(3) var<storage, read> shade_chart_infos: array<ShadeChartInfo>;
+@group(8) @binding(4) var shade_atlas: texture_2d<f32>;
+@group(8) @binding(5) var<uniform> shade_cache_params: ShadeCacheResolveParams;
+
 // Near-parallel edge directions span zero solid angle (golden `MIN_SIN`).
 const AL_MIN_SIN: f32 = 1.0e-7;
 // Vertices this close to the shaded point are dropped (golden `MIN_LEN_SQ`).
@@ -1783,6 +1856,252 @@ fn shade_clearcoat(
     return accumulated + indirect + emissive;
 }
 
+fn shade_cache_channel_for_class(shading_class: u32) -> u32 {
+    if shading_class == SHADING_CLASS_NPR {
+        return 1u;
+    }
+    if shading_class == SHADING_CLASS_SUBSURFACE {
+        return 2u;
+    }
+    if shading_class == SHADING_CLASS_UNLIT {
+        return 0xffffffffu;
+    }
+    return 0u;
+}
+
+fn shade_chart_key_less(
+    row: ShadeChartInfo,
+    object_id: u32,
+    material_id: u32,
+    epoch_low: u32,
+    epoch_high: u32,
+    face_channel: u32,
+) -> bool {
+    if row.object_id != object_id { return row.object_id < object_id; }
+    if row.material_id != material_id { return row.material_id < material_id; }
+    if row.material_epoch_high != epoch_high { return row.material_epoch_high < epoch_high; }
+    if row.material_epoch_low != epoch_low { return row.material_epoch_low < epoch_low; }
+    let row_face = row.face_channel & 0xffffu;
+    let wanted_face = face_channel & 0xffffu;
+    if row_face != wanted_face { return row_face < wanted_face; }
+    let row_channel = row.face_channel >> 24u;
+    let wanted_channel = face_channel >> 24u;
+    return row_channel < wanted_channel;
+}
+
+fn shade_find_chart(
+    object_id: u32,
+    material_id: u32,
+    epoch_low: u32,
+    epoch_high: u32,
+    face_channel: u32,
+) -> u32 {
+    let count = min(shade_cache_params.chart_count, arrayLength(&shade_chart_infos));
+    var low = 0u;
+    var high = count;
+    for (var iteration = 0u; iteration < 32u && low < high; iteration = iteration + 1u) {
+        let middle = (low + high) / 2u;
+        if shade_chart_key_less(
+            shade_chart_infos[middle],
+            object_id,
+            material_id,
+            epoch_low,
+            epoch_high,
+            face_channel,
+        ) {
+            low = middle + 1u;
+        } else {
+            high = middle;
+        }
+    }
+    if low >= count { return 0xffffffffu; }
+    let row = shade_chart_infos[low];
+    if row.object_id != object_id
+        || row.material_id != material_id
+        || row.material_epoch_low != epoch_low
+        || row.material_epoch_high != epoch_high
+        || row.face_channel != face_channel {
+        return 0xffffffffu;
+    }
+    return low;
+}
+
+fn shade_page_key_less(
+    row: ShadePageLookup,
+    object_id: u32,
+    material_id: u32,
+    epoch_low: u32,
+    epoch_high: u32,
+    face_mip_channel: u32,
+    page_x: u32,
+    page_y: u32,
+) -> bool {
+    if row.object_id != object_id { return row.object_id < object_id; }
+    if row.material_id != material_id { return row.material_id < material_id; }
+    if row.material_epoch_high != epoch_high { return row.material_epoch_high < epoch_high; }
+    if row.material_epoch_low != epoch_low { return row.material_epoch_low < epoch_low; }
+    let row_face = row.face_mip_channel & 0xffffu;
+    let wanted_face = face_mip_channel & 0xffffu;
+    if row_face != wanted_face { return row_face < wanted_face; }
+    let row_mip = (row.face_mip_channel >> 16u) & 0xffu;
+    let wanted_mip = (face_mip_channel >> 16u) & 0xffu;
+    if row_mip != wanted_mip { return row_mip < wanted_mip; }
+    let row_channel = row.face_mip_channel >> 24u;
+    let wanted_channel = face_mip_channel >> 24u;
+    if row_channel != wanted_channel { return row_channel < wanted_channel; }
+    if row.page_x != page_x { return row.page_x < page_x; }
+    return row.page_y < page_y;
+}
+
+fn shade_find_page(
+    object_id: u32,
+    material_id: u32,
+    epoch_low: u32,
+    epoch_high: u32,
+    face_mip_channel: u32,
+    page_x: u32,
+    page_y: u32,
+) -> u32 {
+    let count = min(shade_cache_params.page_count, arrayLength(&shade_page_lookup));
+    var low = 0u;
+    var high = count;
+    for (var iteration = 0u; iteration < 32u && low < high; iteration = iteration + 1u) {
+        let middle = (low + high) / 2u;
+        if shade_page_key_less(
+            shade_page_lookup[middle],
+            object_id,
+            material_id,
+            epoch_low,
+            epoch_high,
+            face_mip_channel,
+            page_x,
+            page_y,
+        ) {
+            low = middle + 1u;
+        } else {
+            high = middle;
+        }
+    }
+    if low >= count { return 0xffffffffu; }
+    let row = shade_page_lookup[low];
+    if row.object_id != object_id
+        || row.material_id != material_id
+        || row.material_epoch_low != epoch_low
+        || row.material_epoch_high != epoch_high
+        || row.face_mip_channel != face_mip_channel
+        || row.page_x != page_x
+        || row.page_y != page_y {
+        return 0xffffffffu;
+    }
+    return low;
+}
+
+// Returns cached incoming irradiance in the RGB lanes and a hit bit in `.w`.
+// The lookup is chart-aware: the visible triangle's real UV is lowered through
+// the published chart transform, then exact mip zero and a bounded coarse-mip
+// fallback are searched without crossing object/material/face/channel identity.
+fn shade_cache_sample(
+    object_id: u32,
+    material_id: u32,
+    material_epoch_low: u32,
+    material_epoch_high: u32,
+    face: u32,
+    uv: vec2<f32>,
+    shading_class: u32,
+) -> vec4<f32> {
+    if shade_cache_params.enabled == 0u || shade_cache_params.page_count == 0u {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let channel = shade_cache_channel_for_class(shading_class);
+    if channel == 0xffffffffu || face > 0xffffu {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let face_channel = face | (channel << 24u);
+    let chart_index = shade_find_chart(
+        object_id,
+        material_id,
+        material_epoch_low,
+        material_epoch_high,
+        face_channel,
+    );
+    if chart_index == 0xffffffffu { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }
+    let chart = shade_chart_infos[chart_index];
+    if chart.page_size == 0u
+        || chart.chart_extent_x == 0u
+        || chart.chart_extent_y == 0u
+        || chart.uv_max_x <= chart.uv_min_x
+        || chart.uv_max_y <= chart.uv_min_y {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let normalized = clamp(
+        vec2<f32>(
+            (uv.x - chart.uv_min_x) / (chart.uv_max_x - chart.uv_min_x),
+            (uv.y - chart.uv_min_y) / (chart.uv_max_y - chart.uv_min_y),
+        ),
+        vec2<f32>(0.0),
+        vec2<f32>(1.0),
+    );
+
+    // Four levels are enough to cover the current producer's fine/coarse
+    // fallback contract while keeping the per-pixel search bounded.
+    for (var mip = 0u; mip <= 4u; mip = mip + 1u) {
+        let extent_x = max(chart.chart_extent_x >> mip, 1u);
+        let extent_y = max(chart.chart_extent_y >> mip, 1u);
+        let texel_x = min(u32(floor(normalized.x * f32(extent_x))), extent_x - 1u);
+        let texel_y = min(u32(floor(normalized.y * f32(extent_y))), extent_y - 1u);
+        let page_x = texel_x / chart.page_size;
+        let page_y = texel_y / chart.page_size;
+        let face_mip_channel = face | (mip << 16u) | (channel << 24u);
+        let lookup_index = shade_find_page(
+            object_id,
+            material_id,
+            material_epoch_low,
+            material_epoch_high,
+            face_mip_channel,
+            page_x,
+            page_y,
+        );
+        if lookup_index == 0xffffffffu { continue; }
+        let lookup = shade_page_lookup[lookup_index];
+        if lookup.page_index >= shade_cache_params.page_count
+            || lookup.page_index >= arrayLength(&shade_page_table)
+            || lookup.page_index >= arrayLength(&shade_resolve_pages) {
+            continue;
+        }
+        let physical = shade_page_table[lookup.page_index];
+        let page = shade_resolve_pages[lookup.page_index];
+        if physical.atlas_x != page.atlas_origin.x
+            || physical.atlas_y != page.atlas_origin.y
+            || physical.generation != page.generation
+            || physical.epoch != page.epoch
+            || page.channel != channel
+            || page.mip != mip
+            || page.page_size == 0u {
+            continue;
+        }
+        let page_extent_x = max(page.chart_extent.x, 1u);
+        let page_extent_y = max(page.chart_extent.y, 1u);
+        let sample_x = min(u32(floor(normalized.x * f32(page_extent_x))), page_extent_x - 1u);
+        let sample_y = min(u32(floor(normalized.y * f32(page_extent_y))), page_extent_y - 1u);
+        let page_base_x = lookup.page_x * page.page_size;
+        let page_base_y = lookup.page_y * page.page_size;
+        if sample_x < page_base_x || sample_y < page_base_y {
+            continue;
+        }
+        let local_x = sample_x - page_base_x;
+        let local_y = sample_y - page_base_y;
+        let atlas_x = page.atlas_origin.x + local_x;
+        let atlas_y = page.atlas_origin.y + local_y;
+        if atlas_x >= shade_cache_params.atlas_width
+            || atlas_y >= shade_cache_params.atlas_height {
+            continue;
+        }
+        let value = textureLoad(shade_atlas, vec2<i32>(i32(atlas_x), i32(atlas_y)), 0);
+        return vec4<f32>(max(value.rgb, vec3<f32>(0.0)), 1.0);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
 @compute @workgroup_size(64)
 fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     let local = id.x;
@@ -2148,7 +2467,29 @@ fn shading_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         indirect_result = ambient_indirect(lit, frame, env);
     }
-    let indirect = indirect_result.total;
+    // The independent shade cache replaces the diffuse source of the
+    // view-independent indirect term only after the full identity, chart,
+    // generation, epoch and atlas proof succeeds. Specular and all analytic
+    // view-dependent lobes remain on the ordinary resolve path.
+    var indirect = indirect_result.total;
+    let cached_irradiance = shade_cache_sample(
+        scene_index,
+        material_index,
+        material_header.material_epoch_low,
+        material_header.material_epoch_high,
+        primitive_index,
+        geometry.uv,
+        params.shading_class,
+    );
+    if cached_irradiance.w > 0.5 {
+        let occlusion = clamp(lit.ambient_occlusion, 0.0, 1.0);
+        let diffuse_albedo = lit.base_color * (1.0 - clamp(lit.metallic, 0.0, 1.0));
+        let cached_ambient = cached_irradiance.xyz * INV_PI * occlusion;
+        let current_diffuse = diffuse_albedo * indirect_result.ambient_irradiance;
+        let cached_diffuse = diffuse_albedo * cached_ambient;
+        indirect = indirect - current_diffuse + cached_diffuse;
+        indirect_result.ambient_irradiance = cached_ambient;
+    }
 
     // Explicit per-class dispatch. Subsurface/clearcoat/cloth/hair/water now
     // run dedicated closures; only custom still shares the principled

@@ -27,7 +27,10 @@ use crate::RenderShadingVertex;
 use super::atlas::{ShadeAtlas, ShadeAtlasError, SHADE_ATLAS_FORMAT};
 
 use super::{
-    page_table::{GpuShadePageEntry, ShadePageTableError, ShadePageTableSnapshot},
+    page_table::{
+        GpuShadeChartInfo, GpuShadePageEntry, GpuShadeResolvePage, ShadePageTableError,
+        ShadePageTableSnapshot,
+    },
     shade::ShadeJob,
 };
 
@@ -66,6 +69,8 @@ impl ShadeDispatchConfig {
         }
         checked_buffer_bytes(self.max_jobs as usize, size_of::<ShadeJob>())?;
         checked_buffer_bytes(self.max_pages as usize, size_of::<GpuShadePageEntry>())?;
+        checked_buffer_bytes(self.max_pages as usize, size_of::<GpuShadeResolvePage>())?;
+        checked_buffer_bytes(self.max_pages as usize, size_of::<GpuShadeChartInfo>())?;
         checked_buffer_bytes(self.max_vertices as usize, size_of::<RenderShadingVertex>())?;
         Ok(self)
     }
@@ -177,6 +182,8 @@ pub struct ShadeDispatch {
     jobs_buffer: Buffer,
     page_table_buffer: Buffer,
     page_lookup_buffer: Buffer,
+    resolve_page_buffer: Buffer,
+    chart_info_buffer: Buffer,
     vertices_buffer: Buffer,
     bind_group_layout: BindGroupLayout,
     bind_group: BindGroup,
@@ -204,6 +211,14 @@ impl ShadeDispatch {
             config.max_pages as usize,
             core::mem::size_of::<super::page_table::GpuShadePageLookup>(),
         )?);
+        let resolve_page_bytes = non_zero_buffer_size(checked_buffer_bytes(
+            config.max_pages as usize,
+            size_of::<GpuShadeResolvePage>(),
+        )?);
+        let chart_info_bytes = non_zero_buffer_size(checked_buffer_bytes(
+            config.max_pages as usize,
+            size_of::<GpuShadeChartInfo>(),
+        )?);
         let vertices_bytes = non_zero_buffer_size(checked_buffer_bytes(
             config.max_vertices as usize,
             size_of::<RenderShadingVertex>(),
@@ -227,6 +242,18 @@ impl ShadeDispatch {
         let page_lookup_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("prism texel-cache shade page lookup"),
             size: page_lookup_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let resolve_page_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("prism texel-cache shade resolve pages"),
+            size: resolve_page_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let chart_info_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("prism texel-cache shade chart infos"),
+            size: chart_info_bytes,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -301,6 +328,8 @@ impl ShadeDispatch {
             jobs_buffer,
             page_table_buffer,
             page_lookup_buffer,
+            resolve_page_buffer,
+            chart_info_buffer,
             vertices_buffer,
             bind_group_layout,
             bind_group,
@@ -314,11 +343,15 @@ impl ShadeDispatch {
         &self,
         jobs: &[ShadeJob],
         page_table: &ShadePageTableSnapshot,
+        resolve_pages: &[GpuShadeResolvePage],
+        chart_infos: &[GpuShadeChartInfo],
         vertices: &[RenderShadingVertex],
     ) -> Result<(), ShadeDispatchError> {
         page_table.validate()?;
         if jobs.len() > self.config.max_jobs as usize
             || page_table.len() > self.config.max_pages as usize
+            || resolve_pages.len() != page_table.len()
+            || chart_infos.len() > self.config.max_pages as usize
             || vertices.len() > self.config.max_vertices as usize
         {
             return Err(ShadeDispatchError::CapacityExceeded);
@@ -360,12 +393,14 @@ impl ShadeDispatch {
         queue: &RenderQueue,
         jobs: &[ShadeJob],
         page_table: &ShadePageTableSnapshot,
+        resolve_pages: &[GpuShadeResolvePage],
+        chart_infos: &[GpuShadeChartInfo],
         vertices: &[RenderShadingVertex],
     ) -> Result<PreparedShadeDispatch, ShadeDispatchError> {
         if self.prepared.is_some() {
             return Err(ShadeDispatchError::BatchAlreadyPrepared);
         }
-        self.validate_batch(jobs, page_table, vertices)?;
+        self.validate_batch(jobs, page_table, resolve_pages, chart_infos, vertices)?;
         self.next_serial = self
             .next_serial
             .checked_add(1)
@@ -381,6 +416,12 @@ impl ShadeDispatch {
         let lookup_entries = page_table.gpu_lookup_entries();
         if !lookup_entries.is_empty() {
             queue.write_buffer(&self.page_lookup_buffer, 0, cast_slice(lookup_entries));
+        }
+        if !resolve_pages.is_empty() {
+            queue.write_buffer(&self.resolve_page_buffer, 0, cast_slice(resolve_pages));
+        }
+        if !chart_infos.is_empty() {
+            queue.write_buffer(&self.chart_info_buffer, 0, cast_slice(chart_infos));
         }
         if !vertices.is_empty() {
             queue.write_buffer(&self.vertices_buffer, 0, cast_slice(vertices));
@@ -463,6 +504,18 @@ impl ShadeDispatch {
     #[must_use]
     pub fn page_lookup_buffer(&self) -> &Buffer {
         &self.page_lookup_buffer
+    }
+
+    /// Per-page chart transform and generation metadata used by resolve.
+    #[must_use]
+    pub fn resolve_page_buffer(&self) -> &Buffer {
+        &self.resolve_page_buffer
+    }
+
+    /// Per-chart UV parameterisation used to derive logical page coordinates.
+    #[must_use]
+    pub fn chart_info_buffer(&self) -> &Buffer {
+        &self.chart_info_buffer
     }
 
     /// Writable shade atlas owned by this dispatch.
