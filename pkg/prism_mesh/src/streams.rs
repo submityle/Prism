@@ -69,9 +69,12 @@ impl VertexStreamLayout {
     /// The layout is valid for tightly packed vertex data.
     #[must_use]
     pub fn is_within_stride(&self) -> bool {
-        self.attributes
-            .iter()
-            .all(|attribute| attribute.offset + attribute.format.size() <= self.array_stride)
+        self.attributes.iter().all(|attribute| {
+            attribute
+                .offset
+                .checked_add(attribute.format.size())
+                .is_some_and(|end| end <= self.array_stride)
+        })
     }
 
     /// Converts the device-independent stream description into the RHI layout
@@ -165,10 +168,22 @@ impl Mesh {
             }
             values.push(values_for_attribute);
         }
-        let mut data = Vec::with_capacity(self.vertex_count() * layout.array_stride as usize);
+        if !layout.is_within_stride() {
+            return None;
+        }
+        let stride = usize::try_from(layout.array_stride).ok()?;
+        let total_len = self.vertex_count().checked_mul(stride)?;
+        let mut data = vec![0_u8; total_len];
         for vertex in 0..self.vertex_count() {
-            for value in &values {
-                value.write_vertex(vertex, &mut data);
+            let vertex_base = vertex.checked_mul(stride)?;
+            for (attribute, value) in layout.attributes.iter().zip(values.iter()) {
+                let mut encoded = Vec::with_capacity(attribute.format.size() as usize);
+                value.write_vertex(vertex, &mut encoded);
+                let offset = usize::try_from(attribute.offset).ok()?;
+                let start = vertex_base.checked_add(offset)?;
+                let end = start.checked_add(encoded.len())?;
+                let destination = data.get_mut(start..end)?;
+                destination.copy_from_slice(&encoded);
             }
         }
         Some(data)
@@ -200,6 +215,36 @@ mod tests {
 
     use super::*;
     use crate::VertexAttributeValues;
+
+    #[test]
+    fn stream_buffer_data_honors_declared_padding_and_offsets() {
+        let mesh = Mesh::new(PrimitiveTopology::PointList)
+            .with_attribute(
+                MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float32x3, 0),
+                VertexAttributeValues::Float32x3(vec![[1.0, 2.0, 3.0]]),
+            )
+            .expect("position fits");
+        let layout = VertexStreamLayout {
+            kind: VertexStreamKind::Position,
+            array_stride: 32,
+            attributes: vec![StreamAttribute {
+                shader_location: 0,
+                format: VertexFormat::Float32x3,
+                offset: 16,
+            }],
+        };
+        let data = mesh.stream_buffer_data(&layout).expect("layout fits");
+        assert_eq!(data.len(), 32);
+        assert!(data[..16].iter().all(|byte| *byte == 0));
+        assert_eq!(
+            data[16..28],
+            [1.0_f32, 2.0, 3.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        assert!(data[28..].iter().all(|byte| *byte == 0));
+    }
 
     #[test]
     fn default_profile_separates_position_and_skinning() {

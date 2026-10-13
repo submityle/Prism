@@ -257,6 +257,19 @@ impl<K: Copy + Ord> PageStreamManager<K> {
         pending.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         for (key, priority) in pending {
+            let loaded_page = if self.resident_count() >= self.resident_budget {
+                // Validate the source before displacing a resident. A malformed
+                // page must not turn a full, valid pool into an empty one.
+                match self.load_page(key, source) {
+                    Ok(page) => Some(page),
+                    Err(()) => {
+                        report.deferred.push(key);
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             if self.resident_count() >= self.resident_budget {
                 // At budget: try to displace a strictly-lower-priority resident
                 // page that was not used this frame.
@@ -273,7 +286,11 @@ impl<K: Copy + Ord> PageStreamManager<K> {
                     }
                 }
             }
-            match self.stream_in(key, source) {
+            let admission = match loaded_page {
+                Some(page) => self.admit_page(key, page),
+                None => self.stream_in(key, source),
+            };
+            match admission {
                 Ok(()) => report.streamed_in.push(key),
                 Err(StreamError::NoSlotAvailable) => report.deferred.push(key),
                 Err(StreamError::BadPageSize { .. }) => {
@@ -287,18 +304,15 @@ impl<K: Copy + Ord> PageStreamManager<K> {
         report
     }
 
-    /// Streams one page in: loads its data, allocates a slot, uploads and marks
-    /// it resident. Validates the payload size before touching the pool so a bad
-    /// payload leaves no half-allocated slot.
-    fn stream_in<S: PageSource<K>>(&mut self, key: K, source: &mut S) -> Result<(), StreamError> {
+    fn load_page<S: PageSource<K>>(&self, key: K, source: &mut S) -> Result<Vec<u32>, ()> {
         let page = source.load(key);
-        let expected = self.storage.page_words() as usize;
-        if page.len() != expected {
-            return Err(StreamError::BadPageSize {
-                got: page.len(),
-                expected: self.storage.page_words(),
-            });
+        if page.len() != self.storage.page_words() as usize {
+            return Err(());
         }
+        Ok(page)
+    }
+
+    fn admit_page(&mut self, key: K, page: Vec<u32>) -> Result<(), StreamError> {
         let slot = match self.pool.allocate(key) {
             Ok(slot) => slot,
             Err(PagePoolError::PoolFull { .. }) => return Err(StreamError::NoSlotAvailable),
@@ -320,6 +334,20 @@ impl<K: Copy + Ord> PageStreamManager<K> {
         }
         self.residency.mark_resident(key);
         Ok(())
+    }
+
+    /// Streams one page in: loads its data, allocates a slot, uploads and marks
+    /// it resident. Validates the payload size before touching the pool.
+    fn stream_in<S: PageSource<K>>(&mut self, key: K, source: &mut S) -> Result<(), StreamError> {
+        let page = source.load(key);
+        let expected = self.storage.page_words() as usize;
+        if page.len() != expected {
+            return Err(StreamError::BadPageSize {
+                got: page.len(),
+                expected: self.storage.page_words(),
+            });
+        }
+        self.admit_page(key, page)
     }
 
     /// Drops a resident page from all three layers, keeping them in lockstep.
@@ -475,6 +503,25 @@ mod tests {
         assert!(mgr.slot_of(1).is_none());
         // The bad page left no slot allocated, so key 2 still fit.
         assert!(mgr.slot_of(2).is_some());
+    }
+
+    #[test]
+    fn bad_payload_does_not_evict_full_pool() {
+        let mut mgr = PageStreamManager::<u32>::new(1, 2, 1);
+        let mut src = MapSource::new(2);
+        mgr.reconcile(&batch(&[(1, 1.0)]), 1, &mut src);
+        src.overrides.insert(2, vec![7]);
+
+        let report = mgr.reconcile(&batch(&[(2, 9.0)]), 2, &mut src);
+        assert_eq!(report.streamed_in, Vec::<u32>::new());
+        assert_eq!(report.deferred, vec![2]);
+        assert_eq!(report.evicted, Vec::<u32>::new());
+        assert_eq!(mgr.resident_count(), 1);
+        assert!(mgr.slot_of(1).is_some());
+        assert_eq!(
+            mgr.storage().slot_words(mgr.slot_of(1).unwrap()),
+            Some(&[100, 101][..])
+        );
     }
 
     #[test]
