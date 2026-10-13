@@ -1,16 +1,21 @@
-//! Deterministic residency-budget decisions for runtime asset streaming.
+//! Deterministic residency-budget decisions and synchronous range I/O for
+//! runtime asset streaming.
 //!
-//! This module deliberately stops at the decision boundary. It does not read
-//! bytes, create GPU resources, or claim DirectStorage support. Callers use the
-//! returned [`StreamRequest::read_range`] tuple with the existing
-//! [`crate::AssetReader`] / [`crate::AssetSources`] contract, and may hand a
-//! completed asset to [`crate::AssetServer`].
+//! The controller remains the state and budget authority. [`StreamIoExecutor`]
+//! is the deliberately small synchronous adapter that performs a real
+//! [`crate::AssetSources::read_range`] and reports its result back to the
+//! controller. It does not create GPU resources or claim DirectStorage
+//! support; GPU and staging values are budget-ledger entries only.
 
 use crate::AssetPath;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::fmt;
 use prism_tasks::Priority;
+
+mod io;
+
+pub use io::{StreamIoError, StreamIoExecutor, SubmitAndExecuteError};
 
 /// The three independently bounded residency pools tracked by the decision
 /// layer.
