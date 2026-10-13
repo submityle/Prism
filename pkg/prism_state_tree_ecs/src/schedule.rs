@@ -87,6 +87,7 @@ fn rotate_lifecycle_events(world: &mut World) {
 }
 
 fn run_state_tree_tick(world: &mut World) {
+    let lifecycle_offsets = lifecycle_offsets(world);
     let (outcome, tick_completed) = match tick_all(world) {
         Ok(report) => (StateTreeTickOutcome::Completed(report), true),
         Err(error) => (StateTreeTickOutcome::GatherFailed(error), false),
@@ -101,21 +102,33 @@ fn run_state_tree_tick(world: &mut World) {
     }
 
     if tick_completed {
-        publish_lifecycle_notifications(world);
+        publish_lifecycle_notifications(world, &lifecycle_offsets);
     }
 }
 
-fn publish_lifecycle_notifications(world: &mut World) {
+fn lifecycle_offsets(world: &mut World) -> Vec<(Entity, usize)> {
     let query = world.query_filtered::<Entity, With<StateTreeInstance>>();
     let mut entities: Vec<Entity> = query.iter(world).collect();
     entities.sort_unstable();
+    entities
+        .into_iter()
+        .map(|entity| {
+            let count = world
+                .get::<StateTreeInstance>(entity)
+                .map(StateTreeInstance::lifecycle_event_count)
+                .unwrap_or(0);
+            (entity, count)
+        })
+        .collect()
+}
 
+fn publish_lifecycle_notifications(world: &mut World, offsets: &[(Entity, usize)]) {
     let mut notifications = Vec::new();
-    for entity in entities {
+    for &(entity, offset) in offsets {
         if let Some(mut instance) = world.get_mut::<StateTreeInstance>(entity) {
             notifications.extend(
                 instance
-                    .drain_lifecycle_events()
+                    .drain_lifecycle_events_since(offset)
                     .into_iter()
                     .map(|event| StateTreeLifecycleNotification { entity, event }),
             );
@@ -152,7 +165,7 @@ mod tests {
 
     use super::{install_tick_system, StateTreeTickOutcome, StateTreeTickReport};
     use crate::{
-        queue_spawn, StateTreeAsset, StateTreeInstance, StateTreeLifecycleEvent,
+        queue_spawn, tick_entity, StateTreeAsset, StateTreeInstance, StateTreeLifecycleEvent,
         StateTreeLifecycleNotification,
     };
 
@@ -266,6 +279,71 @@ mod tests {
                 .kind,
             NodeKind::Compound { .. }
         ));
+    }
+
+    #[test]
+    fn schedule_publishes_only_lifecycle_events_created_by_that_tick() {
+        let mut world = World::new();
+        let mut queue = CommandQueue::new();
+        let entity = {
+            let mut commands = queue.commands(world.entities());
+            queue_spawn(&mut commands, asset(), 8, MicrostepLimit(16)).expect("spawn setup")
+        };
+        queue.apply(&mut world);
+
+        assert!(tick_entity(&mut world, entity).unwrap().is_ok());
+        assert_eq!(
+            world
+                .get::<StateTreeInstance>(entity)
+                .unwrap()
+                .lifecycle_events()
+                .len(),
+            2
+        );
+
+        let mut schedule = Schedule::new();
+        install_tick_system(&mut schedule);
+        schedule.run(&mut world);
+        assert!(!world.contains_resource::<Events<StateTreeLifecycleNotification>>());
+        assert_eq!(
+            world
+                .get::<StateTreeInstance>(entity)
+                .unwrap()
+                .lifecycle_events()
+                .len(),
+            2
+        );
+
+        world
+            .get_mut::<StateTreeInstance>(entity)
+            .unwrap()
+            .request_event(Event::new(EventId(7)))
+            .expect("event fits bounded queue");
+        schedule.run(&mut world);
+
+        let events = world.resource::<Events<StateTreeLifecycleNotification>>();
+        let mut cursor = EventCursor::default();
+        let observed: Vec<_> = cursor.read(events).cloned().collect();
+        assert_eq!(
+            observed,
+            vec![
+                StateTreeLifecycleNotification {
+                    entity,
+                    event: StateTreeLifecycleEvent::Exited(StateId(1)),
+                },
+                StateTreeLifecycleNotification {
+                    entity,
+                    event: StateTreeLifecycleEvent::Entered(StateId(2)),
+                },
+                StateTreeLifecycleNotification {
+                    entity,
+                    event: StateTreeLifecycleEvent::Transitioned {
+                        source: StateId(1),
+                        target: TransitionTarget::State(StateId(2)),
+                    },
+                },
+            ]
+        );
     }
 
     #[test]

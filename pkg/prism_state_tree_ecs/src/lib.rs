@@ -169,6 +169,18 @@ impl StateTreeInstance {
         mem::take(&mut self.lifecycle_events)
     }
 
+    pub(crate) fn lifecycle_event_count(&self) -> usize {
+        self.lifecycle_events.len()
+    }
+
+    pub(crate) fn drain_lifecycle_events_since(
+        &mut self,
+        start: usize,
+    ) -> Vec<StateTreeLifecycleEvent> {
+        self.lifecycle_events
+            .split_off(start.min(self.lifecycle_events.len()))
+    }
+
     /// Queues an input event. It cannot cause a transition until the next tick.
     pub fn request_event(&mut self, event: Event) -> Result<(), EventQueueError> {
         self.runtime.send(event)
