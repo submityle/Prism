@@ -8,7 +8,7 @@ StateTree ST1 的最小 ECS 装配 crate。它让共享、不可变 `Plan` 可�
 2. 通过 `queue_spawn` 在 ECS `CommandQueue` 中预约一个实例实体，然后应用命令。
 3. 调用 `tick_entity` 做单实体初始进入，或调用 `tick_all` 让 ECS query 收集并按 Entity 顺序执行所有实例；也可以把 `install_tick_system` 注册到宿主 `Schedule`，每次 schedule run 自动执行一次同一个 gather/tick 路径，并把结果写入 `StateTreeTickReport`；之后可通过 `World::get_mut::<StateTreeInstance>` 调用 `request_event`。
 4. 启用 `app` feature 后，可用 `App::add_plugins(StateTreePlugin)` 将同一 rotation/tick 系统注册到 `prism_app::Update`；它是显式 opt-in plugin，不创建 runner、asset loader 或隐式 Context gather。
-5. 下一个 `tick_entity` 才消费事件并应用迁移。
+5. 下一个 tick（`tick_entity`、`tick_all`，或已安装的 Schedule/App 系统）才消费事件并应用迁移。
 
 带守卫的迁移可在实例上调用 `set_guard(GuardId, guard)` 安装实现 `Guard + Send + Sync` 的纯谓词；未安装的 guard id 按 core 语义拒绝该迁移。Guard 属于逐实例运行时状态，不会写回共享资产 `Plan`。
 
