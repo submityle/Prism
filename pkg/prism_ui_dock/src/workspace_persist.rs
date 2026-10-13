@@ -160,9 +160,6 @@ pub fn encode_workspace(manager: &WorkspaceManager) -> Result<Vec<u8>, Workspace
             if perspective.name().len() > limits.max_name_bytes {
                 return Err(WorkspacePersistError::ResourceLimit("name bytes"));
             }
-            if encode_layout(&perspective.layout())?.len() > limits.max_layout_bytes {
-                return Err(WorkspacePersistError::ResourceLimit("layout bytes"));
-            }
         }
     }
     if manager

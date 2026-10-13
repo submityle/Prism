@@ -295,40 +295,67 @@ impl<'a> DockView<'a> {
     }
 
     fn render_autohide(&self) -> Result<Element, DockViewError> {
-        let entries =
-            self.layout
+        let entries = self
+            .layout
+            .autohide
+            .entries
+            .iter()
+            .map(|entry| {
+                let descriptor = self
+                    .panels
+                    .resolve(&entry.panel)
+                    .ok_or_else(|| DockViewError::UnknownPanel(entry.panel.clone()))?;
+                let side = match entry.side {
+                    Side::Left => "left",
+                    Side::Right => "right",
+                    Side::Top => "top",
+                    Side::Bottom => "bottom",
+                };
+                let tab = Element::text(descriptor.title.clone())
+                    .class("pk-dock-autohide-tab")
+                    .key_str(entry.panel.clone())
+                    .class(format!("pk-dock-autohide-tab--{side}"));
+                Ok(tab)
+            })
+            .collect::<Result<Vec<_>, DockViewError>>()?;
+        let mut children = vec![Element::box_()
+            .class("pk-dock-autohide-bar")
+            .children(entries)];
+        if let Some(active) = &self.layout.autohide.active {
+            let entry = self
+                .layout
                 .autohide
                 .entries
                 .iter()
-                .map(|entry| {
-                    let descriptor = self
-                        .panels
-                        .resolve(&entry.panel)
-                        .ok_or_else(|| DockViewError::UnknownPanel(entry.panel.clone()))?;
-                    let side = match entry.side {
-                        Side::Left => "left",
-                        Side::Right => "right",
-                        Side::Top => "top",
-                        Side::Bottom => "bottom",
-                    };
-                    let tab = Element::text(descriptor.title.clone())
-                        .class("pk-dock-autohide-tab")
-                        .key_str(entry.panel.clone())
-                        .class(format_key("pk-dock-autohide-tab--", side));
-                    if self.layout.autohide.active.as_deref() == Some(entry.panel.as_str()) {
-                        let factory = self.panel_views.get(&entry.panel).ok_or_else(|| {
-                            DockViewError::MissingPanelFactory(entry.panel.clone())
-                        })?;
-                        Ok(Element::box_()
-                            .class("pk-dock-autohide-reveal")
-                            .child(tab)
-                            .child(factory().key_str(format_key("autohide", &entry.panel))))
-                    } else {
-                        Ok(tab)
-                    }
-                })
-                .collect::<Result<Vec<_>, DockViewError>>()?;
-        Ok(Element::box_().class("pk-dock-autohide").children(entries))
+                .find(|entry| &entry.panel == active)
+                .ok_or_else(|| DockViewError::UnknownPanel(active.clone()))?;
+            let descriptor = self
+                .panels
+                .resolve(active)
+                .ok_or_else(|| DockViewError::UnknownPanel(active.clone()))?;
+            let factory = self
+                .panel_views
+                .get(active)
+                .ok_or_else(|| DockViewError::MissingPanelFactory(active.clone()))?;
+            let side = match entry.side {
+                Side::Left => DockSide::Left,
+                Side::Right => DockSide::Right,
+                Side::Top => DockSide::Top,
+                Side::Bottom => DockSide::Bottom,
+            };
+            let content = factory().key_str(format_key("autohide", active));
+            let panel = DockPanel.render(
+                &DockPanelProps::new(descriptor.title.clone())
+                    .side(side)
+                    .children([content]),
+            );
+            children.push(
+                Element::box_()
+                    .class("pk-dock-autohide-reveal")
+                    .child(panel),
+            );
+        }
+        Ok(Element::box_().class("pk-dock-autohide").children(children))
     }
 }
 
@@ -411,6 +438,62 @@ mod tests {
         assert_eq!(
             element.child_elements()[0].child_elements()[0].inline_pairs()[0],
             (StyleProp::FlexGrow, StyleValue::number(500_000.0))
+        );
+    }
+
+    #[test]
+    fn autohide_active_panel_renders_reveal_and_valid_side_class() {
+        let (panels, views, documents) = registries();
+        let layout = DockLayout {
+            root: DockNode::Empty,
+            autohide: crate::AutoHideBars {
+                entries: vec![crate::AutoHideEntry {
+                    side: Side::Right,
+                    panel: String::from("inspector"),
+                }],
+                active: Some(String::from("inspector")),
+            },
+            ..DockLayout::default()
+        };
+        let element = DockView::new(&layout, &panels, &views, &documents)
+            .render()
+            .unwrap();
+        let autohide = &element.child_elements()[2];
+        assert_eq!(autohide.class_names(), ["pk-dock-autohide"]);
+        assert_eq!(autohide.child_elements().len(), 2);
+        assert_eq!(
+            autohide.child_elements()[0].child_elements()[0].class_names(),
+            ["pk-dock-autohide-tab", "pk-dock-autohide-tab--right"]
+        );
+        assert_eq!(
+            autohide.child_elements()[1].class_names(),
+            ["pk-dock-autohide-reveal"]
+        );
+        assert_eq!(
+            autohide.child_elements()[1].child_elements()[0].class_names(),
+            ["pk-dock-panel", "pk-dock-panel--right"]
+        );
+    }
+
+    #[test]
+    fn autohide_active_panel_requires_only_reveal_factory() {
+        let (panels, _views, documents) = registries();
+        let layout = DockLayout {
+            root: DockNode::Empty,
+            autohide: crate::AutoHideBars {
+                entries: vec![crate::AutoHideEntry {
+                    side: Side::Left,
+                    panel: String::from("outliner"),
+                }],
+                active: Some(String::from("outliner")),
+            },
+            ..DockLayout::default()
+        };
+        assert_eq!(
+            DockView::new(&layout, &panels, &PanelViewRegistry::new(), &documents)
+                .render()
+                .unwrap_err(),
+            DockViewError::MissingPanelFactory(String::from("outliner"))
         );
     }
 
