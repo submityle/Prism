@@ -155,54 +155,56 @@ impl AsyncStreamIoExecutor {
         let gates = Arc::clone(&self.gates);
         let gate_for_task = Arc::clone(&gate);
         Ok(self.pool.spawn_async(async move {
-            if !gate_for_task.begin_read() {
-                return Err(StreamIoError::Cancelled { id });
-            }
+            let outcome = if !gate_for_task.begin_read() {
+                // Cancellation already performed the terminal controller
+                // transition and released its reservation.
+                Err(StreamIoError::Cancelled { id })
+            } else {
+                // This is the only blocking operation in the task. No
+                // controller mutex or mutable controller borrow is held
+                // across this call.
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    sources.read_range(&request.path, request.offset, request.len)
+                }))
+                .unwrap_or_else(|_| Err(crate::ReadError::Io("source read panicked".into())));
 
-            // This is the only blocking operation in the task. No controller
-            // mutex or mutable controller borrow is held across this call.
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                sources.read_range(&request.path, request.offset, request.len)
-            }))
-            .unwrap_or_else(|_| Err(crate::ReadError::Io("source read panicked".into())));
-
-            let gate_phase = gate_for_task.phase.lock().unwrap();
-            let mut controller = controller.lock().unwrap();
-            if *gate_phase == RequestPhase::Cancelled {
+                // The gate is the linearization point shared with cancel:
+                // once this lock is held, cancellation cannot invalidate the
+                // result before the controller transition is committed.
+                let gate_phase = gate_for_task.phase.lock().unwrap();
+                let mut controller = controller.lock().unwrap();
+                let outcome = if *gate_phase == RequestPhase::Cancelled {
+                    Err(StreamIoError::Cancelled { id })
+                } else {
+                    match result {
+                        Ok(bytes) if u64::try_from(bytes.len()).ok() == Some(request.len) => {
+                            controller
+                                .complete_load(id)
+                                .map(|()| bytes)
+                                .map_err(StreamIoError::Controller)
+                        }
+                        Ok(bytes) => {
+                            let error = crate::ReadError::Io(format!(
+                                "short read: requested {} bytes, received {}",
+                                request.len,
+                                bytes.len()
+                            ));
+                            controller
+                                .fail(id, StreamFailure::Read)
+                                .map(|()| Err(StreamIoError::Read { id, error }))
+                                .unwrap_or_else(|error| Err(StreamIoError::Controller(error)))
+                        }
+                        Err(error) => controller
+                            .fail(id, StreamFailure::Read)
+                            .map(|()| Err(StreamIoError::Read { id, error }))
+                            .unwrap_or_else(|error| Err(StreamIoError::Controller(error))),
+                    }
+                };
                 drop(controller);
                 drop(gate_phase);
-                gates.lock().unwrap().remove(&id);
-                return Err(StreamIoError::Cancelled { id });
-            }
-
-            let outcome = match result {
-                Ok(bytes) if u64::try_from(bytes.len()).ok() == Some(request.len) => {
-                    controller
-                        .complete_load(id)
-                        .map_err(StreamIoError::Controller)?;
-                    Ok(bytes)
-                }
-                Ok(bytes) => {
-                    let error = crate::ReadError::Io(format!(
-                        "short read: requested {} bytes, received {}",
-                        request.len,
-                        bytes.len()
-                    ));
-                    controller
-                        .fail(id, StreamFailure::Read)
-                        .map_err(StreamIoError::Controller)?;
-                    Err(StreamIoError::Read { id, error })
-                }
-                Err(error) => {
-                    controller
-                        .fail(id, StreamFailure::Read)
-                        .map_err(StreamIoError::Controller)?;
-                    Err(StreamIoError::Read { id, error })
-                }
+                outcome
             };
-            drop(controller);
-            drop(gate_phase);
-            gates.lock().unwrap().remove(&id);
+            remove_gate(&gates, id, &gate_for_task);
             outcome
         }))
     }
@@ -264,7 +266,7 @@ impl AsyncStreamIoExecutor {
                 drop(controller);
                 drop(gate_phase);
                 if result.is_ok() {
-                    self.gates.lock().unwrap().remove(&id);
+                    remove_gate(&self.gates, id, &gate);
                 }
                 result
             }
@@ -298,6 +300,21 @@ impl AsyncStreamIoExecutor {
             .get(&id)
             .cloned()
             .ok_or(StreamIoError::Controller(StreamError::UnknownRequest(id)))
+    }
+}
+
+fn remove_gate(
+    gates: &Mutex<BTreeMap<StreamRequestId, Arc<RequestGate>>>,
+    id: StreamRequestId,
+    gate: &Arc<RequestGate>,
+) {
+    let mut gates = gates.lock().unwrap();
+    let is_same_gate = gates
+        .get(&id)
+        .map(|current| Arc::ptr_eq(current, gate))
+        .unwrap_or(false);
+    if is_same_gate {
+        gates.remove(&id);
     }
 }
 
@@ -380,6 +397,13 @@ mod tests {
         reads: Arc<AtomicUsize>,
     }
 
+    struct ParallelSource {
+        entered: Arc<AtomicUsize>,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+        release: Arc<(StdMutex<bool>, Condvar)>,
+    }
+
     struct ShortReadSource {
         bytes: &'static [u8],
     }
@@ -427,6 +451,65 @@ mod tests {
                 is_dir: false,
             })
         }
+    }
+
+    impl AssetReader for ParallelSource {
+        fn read(&self, _path: &str) -> Result<Vec<u8>, ReadError> {
+            Ok(b"data".to_vec())
+        }
+
+        fn read_range(&self, _path: &str, _offset: u64, _len: u64) -> Result<Vec<u8>, ReadError> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            self.entered.fetch_add(1, Ordering::SeqCst);
+
+            let (lock, wake) = &*self.release;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(b"data".to_vec())
+        }
+
+        fn metadata(&self, _path: &str) -> Result<AssetMeta, ReadError> {
+            Ok(AssetMeta {
+                size: 4,
+                modified_ms: None,
+                is_dir: false,
+            })
+        }
+    }
+
+    #[test]
+    fn cancellation_before_execution_performs_no_io_and_releases_no_budget() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut sources = AssetSources::new();
+        sources.mount(
+            "counting",
+            Arc::new(CountingSource {
+                reads: Arc::clone(&reads),
+                bytes: b"abcdef",
+            }),
+            0,
+        );
+        let executor = AsyncStreamIoExecutor::new(
+            Arc::new(sources),
+            StreamingController::new(ResidencyLimits::new(16, 16, 16)),
+            TaskPool::with_threads(2),
+        );
+        let id = executor.submit(request("counting://hero.bin", 3)).unwrap();
+
+        executor.cancel(id).unwrap();
+
+        assert_eq!(executor.state(id), Some(StreamState::Cancelled));
+        assert_eq!(executor.used(), Residency::default());
+        assert!(matches!(
+            executor.execute(id),
+            Err(StreamIoError::Cancelled { id: actual }) if actual == id
+        ));
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(executor.gates.lock().unwrap().len(), 0);
     }
 
     #[test]
@@ -574,6 +657,107 @@ mod tests {
         assert_eq!(executor.state(id), Some(StreamState::Cancelled));
         assert_eq!(executor.used(), Residency::default());
         assert_eq!(executor.gates.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn dropping_task_does_not_skip_residency_commit_or_gate_cleanup() {
+        let entered = Arc::new((StdMutex::new(false), Condvar::new()));
+        let release = Arc::new((StdMutex::new(false), Condvar::new()));
+        let mut sources = AssetSources::new();
+        sources.mount(
+            "blocking",
+            Arc::new(BlockingSource {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                reads: Arc::new(AtomicUsize::new(0)),
+            }),
+            0,
+        );
+        let executor = AsyncStreamIoExecutor::new(
+            Arc::new(sources),
+            StreamingController::new(ResidencyLimits::new(16, 16, 16)),
+            TaskPool::with_threads(2),
+        );
+        let id = executor.submit(request("blocking://hero.bin", 7)).unwrap();
+        let task = executor.execute(id).unwrap();
+
+        let (entered_lock, entered_wake) = &*entered;
+        let mut did_enter = entered_lock.lock().unwrap();
+        while !*did_enter {
+            did_enter = entered_wake.wait(did_enter).unwrap();
+        }
+        drop(task);
+
+        let (release_lock, release_wake) = &*release;
+        *release_lock.lock().unwrap() = true;
+        release_wake.notify_all();
+
+        let mut committed = false;
+        for _ in 0..10_000 {
+            if executor.state(id) == Some(StreamState::Resident)
+                && executor.gates.lock().unwrap().is_empty()
+            {
+                committed = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(committed, "detached task did not commit its terminal state");
+        assert_eq!(executor.used(), Residency::new(7, 7, 7));
+    }
+
+    #[test]
+    fn independent_requests_read_in_parallel_without_controller_lock() {
+        let entered = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new((StdMutex::new(false), Condvar::new()));
+        let mut sources = AssetSources::new();
+        sources.mount(
+            "parallel",
+            Arc::new(ParallelSource {
+                entered: Arc::clone(&entered),
+                active: Arc::clone(&active),
+                max_active: Arc::clone(&max_active),
+                release: Arc::clone(&release),
+            }),
+            0,
+        );
+        let executor = AsyncStreamIoExecutor::new(
+            Arc::new(sources),
+            StreamingController::new(ResidencyLimits::new(16, 16, 16)),
+            TaskPool::with_threads(2),
+        );
+        let first = executor.submit(request("parallel://first.bin", 4)).unwrap();
+        let second = executor
+            .submit(request("parallel://second.bin", 4))
+            .unwrap();
+        let first_task = executor.execute(first).unwrap();
+        let second_task = executor.execute(second).unwrap();
+
+        for _ in 0..10_000 {
+            if entered.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let both_entered = entered.load(Ordering::SeqCst) == 2;
+        assert!(executor.controller.try_lock().is_ok());
+
+        let (release_lock, release_wake) = &*release;
+        *release_lock.lock().unwrap() = true;
+        release_wake.notify_all();
+
+        assert_eq!(executor.pool().block_on(first_task).unwrap(), b"data");
+        assert_eq!(executor.pool().block_on(second_task).unwrap(), b"data");
+        assert!(
+            both_entered,
+            "both requests must reach the source concurrently"
+        );
+        assert!(max_active.load(Ordering::SeqCst) >= 2);
+        assert_eq!(executor.state(first), Some(StreamState::Resident));
+        assert_eq!(executor.state(second), Some(StreamState::Resident));
+        assert_eq!(executor.used(), Residency::new(8, 8, 8));
     }
 
     #[test]
