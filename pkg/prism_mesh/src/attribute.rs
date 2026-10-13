@@ -159,6 +159,18 @@ impl VertexAttributeValues {
                     .position(|component| !component.is_finite())
                     .map(|component| (vertex, component))
             }),
+            Self::Float16x2(values) => values.iter().enumerate().find_map(|(vertex, value)| {
+                value
+                    .iter()
+                    .position(|bits| (bits & 0x7c00) == 0x7c00)
+                    .map(|component| (vertex, component))
+            }),
+            Self::Float16x4(values) => values.iter().enumerate().find_map(|(vertex, value)| {
+                value
+                    .iter()
+                    .position(|bits| (bits & 0x7c00) == 0x7c00)
+                    .map(|component| (vertex, component))
+            }),
             _ => None,
         }
     }

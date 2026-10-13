@@ -238,6 +238,21 @@ fn validate_rejects_non_finite_float_attributes() {
             component: 0,
         })
     );
+
+    let half_inf = Mesh::new(PrimitiveTopology::TriangleList)
+        .with_attribute(
+            MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float16x2, 0),
+            VertexAttributeValues::Float16x2(vec![[0x7c00, 0x3c00]; 3]),
+        )
+        .expect("half attributes fit");
+    assert_eq!(
+        half_inf.validate(),
+        Err(MeshError::NonFiniteAttributeValue {
+            attribute: POSITION_ATTRIBUTE,
+            vertex: 0,
+            component: 0,
+        })
+    );
 }
 
 #[test]
