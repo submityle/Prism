@@ -64,6 +64,7 @@ pub struct ShadeWriteTicket {
     pub generation: u64,
     /// Material epoch being shaded.
     pub epoch: u64,
+    previous: ShadePageState,
 }
 
 /// A page lookup result used by the screen-space fallback path.
@@ -190,11 +191,12 @@ impl ShadeResidencyTable {
             .entries
             .get_mut(&key)
             .ok_or(ShadeResidencyError::UnknownPage)?;
+        let previous = entry.state;
         if !matches!(
-            entry.state,
+            previous,
             ShadePageState::Requested | ShadePageState::Stale { .. }
         ) {
-            return Err(ShadeResidencyError::InvalidTransition { from: entry.state });
+            return Err(ShadeResidencyError::InvalidTransition { from: previous });
         }
         let generation = self.next_generation;
         if let Some(next_generation) = self.next_generation.checked_add(1) {
@@ -207,7 +209,28 @@ impl ShadeResidencyTable {
             key,
             generation,
             epoch,
+            previous,
         })
+    }
+
+    /// Aborts an unsubmitted write and restores the page's pre-write state.
+    /// This is required when GPU preparation or command encoding fails; a
+    /// failed producer must not strand a page in `Writing` forever.
+    pub fn abort_write(&mut self, ticket: ShadeWriteTicket) -> Result<(), ShadeResidencyError> {
+        let entry = self
+            .entries
+            .get_mut(&ticket.key)
+            .ok_or(ShadeResidencyError::UnknownPage)?;
+        if entry.state
+            != (ShadePageState::Writing {
+                generation: ticket.generation,
+                epoch: ticket.epoch,
+            })
+        {
+            return Err(ShadeResidencyError::InvalidWrite);
+        }
+        entry.state = ticket.previous;
+        Ok(())
     }
 
     /// Publishes a completed write into the table.
@@ -341,6 +364,71 @@ mod tests {
         assert_eq!(
             table.begin_write(key, 3),
             Err(ShadeResidencyError::GenerationExhausted)
+        );
+    }
+
+    #[test]
+    fn abort_write_restores_requested_state_for_retry() {
+        let key = ShadePageKey {
+            object_id: 1,
+            material_id: 2,
+            material_epoch: 3,
+            face: 0,
+            mip: 0,
+            channel: super::super::key::ShadeChannel::LitDiffuse,
+            page_x: 0,
+            page_y: 0,
+        };
+        let mut table = ShadeResidencyTable::new();
+        table.request(
+            ShadePageRequest {
+                key,
+                priority: 1,
+                byte_cost: 16,
+                frame: 1,
+            },
+            3,
+        );
+        let ticket = table.begin_write(key, 3).unwrap();
+        assert!(matches!(table.state(key), ShadePageState::Writing { .. }));
+        table.abort_write(ticket).unwrap();
+        assert_eq!(table.state(key), ShadePageState::Requested);
+        assert!(table.begin_write(key, 3).is_ok());
+    }
+
+    #[test]
+    fn abort_write_restores_stale_generation_for_retry() {
+        let key = ShadePageKey {
+            object_id: 1,
+            material_id: 2,
+            material_epoch: 3,
+            face: 0,
+            mip: 0,
+            channel: super::super::key::ShadeChannel::LitDiffuse,
+            page_x: 0,
+            page_y: 0,
+        };
+        let mut table = ShadeResidencyTable::new();
+        table.request(
+            ShadePageRequest {
+                key,
+                priority: 1,
+                byte_cost: 16,
+                frame: 1,
+            },
+            3,
+        );
+        let first = table.begin_write(key, 3).unwrap();
+        table.commit_write(first, 1).unwrap();
+        table.invalidate(key, 4).unwrap();
+        let retry = table.begin_write(key, 4).unwrap();
+        table.abort_write(retry).unwrap();
+        assert_eq!(
+            table.state(key),
+            ShadePageState::Stale {
+                generation: first.generation,
+                epoch: 4,
+            }
         );
     }
 }
