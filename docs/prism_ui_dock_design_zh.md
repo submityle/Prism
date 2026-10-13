@@ -210,7 +210,7 @@ impl PanelRegistry {
 
 ## 9. 性能工程:成本 ∝ 变化量
 
-- **懒构建**:仅可见 tab 的 `factory()` 执行;后台 tab/autohide 折叠面板内容不进树,激活时才建、隐藏可回收。
+- **懒构建**:仅可见 tab 的 `factory()` 执行;后台 tab/autohide 折叠面板内容不进树,激活时才建、隐藏可回收。render feature 下 active autohide 会生成独立 reveal sibling 与 `DockPanel` 外壳；仅 active 项要求 panel factory，折叠 tab 仍可无 factory 展示标题。
 - **虚拟化**:tab 很多时 tab 栏用 `prism_ui_virtual` 窗口化;超长面板内容本就由各面板自行虚拟化。
 - **脏子树重算**:拖分隔条只重算该 split 子树几何(`prism_ui_layout` 局部);其余节点几何缓存不动。
 - **拖拽解耦**:拖拽 ghost 在 overlay 层独立合成,**不触发**底层布局重排,直到落下才过一次 reducer。分隔条实时比例走 store signal,面板内容经 selector 精确隔离——拖分隔条**不重渲面板内容**。
