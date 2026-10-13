@@ -8,9 +8,9 @@ use prism_state_tree_core::{
 };
 
 use crate::{
-    queue_spawn, tick_all, tick_entities, tick_entity, validate_context, BatchTickFailure,
-    BatchTickMissingReason, BatchTickOutcome, StateTreeAsset, StateTreeInstance,
-    StateTreeLifecycleEvent, ValidatedContext,
+    gather_context, queue_spawn, tick_all, tick_entities, tick_entity, validate_context,
+    BatchTickFailure, BatchTickMissingReason, BatchTickOutcome, EcsContextError, EcsSchema,
+    StateTreeAsset, StateTreeInstance, StateTreeLifecycleEvent, ValidatedContext,
 };
 
 struct TestContext<'w> {
@@ -31,11 +31,35 @@ const WRONG_SCHEMA_ID: SchemaId = SchemaId::new(0x9999);
 struct Marker;
 impl Component for Marker {}
 
+struct ContextValue(u32);
+impl Component for ContextValue {}
+
 impl Schema for TestSchema {
     type Context<'w> = TestContext<'w>;
 
     fn descriptor() -> SchemaDescriptor {
         SchemaDescriptor::new(TEST_SCHEMA_ID, SchemaVersion::new(1, 0), Default::default())
+    }
+}
+
+impl EcsSchema for TestSchema {
+    fn gather<'w>(
+        world: &'w World,
+        owner: prism_ecs::entity::Entity,
+    ) -> Result<Self::Context<'w>, EcsContextError>
+    where
+        Self: 'w,
+    {
+        if !world.contains(owner) {
+            return Err(EcsContextError::MissingOwner(owner));
+        }
+        let value = world
+            .get::<ContextValue>(owner)
+            .ok_or(EcsContextError::MissingContext(owner))?;
+        Ok(TestContext {
+            schema: TEST_SCHEMA_ID,
+            value: &value.0,
+        })
     }
 }
 
@@ -594,5 +618,24 @@ fn validates_borrowed_schema_context_without_implicit_world_gather() {
             expected: TEST_SCHEMA_ID,
             found: WRONG_SCHEMA_ID,
         })
+    ));
+}
+
+#[test]
+fn gathers_typed_context_from_the_owner_without_hidden_world_access() {
+    let mut world = World::new();
+    let owner = world.spawn(ContextValue(84));
+    let gathered = gather_context::<TestSchema>(&world, owner).expect("context gather");
+    assert_eq!(*gathered.context().value, 84);
+
+    let missing_component = world.spawn(());
+    assert!(matches!(
+        gather_context::<TestSchema>(&world, missing_component),
+        Err(EcsContextError::MissingContext(entity)) if entity == missing_component
+    ));
+    let stale = world.entities().reserve_entity();
+    assert!(matches!(
+        gather_context::<TestSchema>(&world, stale),
+        Err(EcsContextError::MissingOwner(entity)) if entity == stale
     ));
 }

@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+mod context;
 mod lifecycle;
 mod schedule;
 
@@ -29,6 +30,7 @@ use prism_state_tree_core::{
     RuntimeError, Schema, SchemaError, StateId, StepReport,
 };
 
+pub use context::{gather_context, EcsContextError, EcsSchema};
 use lifecycle::LifecycleCollector;
 pub use lifecycle::{StateTreeLifecycleEvent, StateTreeLifecycleNotification};
 
