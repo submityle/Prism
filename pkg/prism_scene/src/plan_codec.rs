@@ -5,7 +5,7 @@
 //! reinterprets those bytes as Rust values.  A materializer remains responsible
 //! for component-specific decoding at the ECS boundary.
 
-use alloc::{sync::Arc, vec::Vec};
+use alloc::vec::Vec;
 
 use crate::{
     ArchetypeGroup, ArchetypeSignature, Column, ComponentTypeId, FieldSlot, InstantiationPlan,
@@ -61,6 +61,8 @@ pub enum PlanCodecError {
     TrailingBytes,
     /// A count or byte length exceeded a configured limit.
     ResourceLimit(&'static str),
+    /// The host could not reserve memory for the decoded representation.
+    AllocationFailed,
     /// A count could not be represented as a platform `usize`.
     LengthOverflow,
     /// The wire value is structurally invalid before plan validation.
@@ -137,13 +139,16 @@ pub fn decode_plan(
     }
     let reserved_local_base = reader.u32()?;
     let groups_len = reader.count("groups", limits.max_groups)?;
-    let mut groups = Vec::with_capacity(groups_len);
+    let mut groups = checked_vec(groups_len, &reader, 12)?;
     let mut total_entities = 0usize;
     for _ in 0..groups_len {
         let signature_len = reader.count("components", limits.max_components_per_group)?;
-        let mut signature_components = Vec::with_capacity(signature_len);
+        let mut signature_components = checked_vec(signature_len, &reader, 8)?;
         for _ in 0..signature_len {
-            signature_components.push(ComponentTypeId::from_raw(reader.u64()?));
+            push_checked(
+                &mut signature_components,
+                ComponentTypeId::from_raw(reader.u64()?),
+            )?;
         }
         let signature = ArchetypeSignature::new(signature_components.clone());
         if signature.components() != signature_components.as_slice() {
@@ -159,44 +164,60 @@ pub fn decode_plan(
         if total_entities > limits.max_entities {
             return Err(PlanCodecError::ResourceLimit("entities"));
         }
-        let mut locals = Vec::with_capacity(locals_len);
+        let mut locals = checked_vec(locals_len, &reader, 4)?;
         for _ in 0..locals_len {
-            locals.push(LocalEntityId::new(reader.u32()?));
+            push_checked(&mut locals, LocalEntityId::new(reader.u32()?))?;
         }
 
         let columns_len = reader.count("components", limits.max_components_per_group)?;
-        let mut columns = Vec::with_capacity(columns_len);
+        let mut columns = checked_vec(columns_len, &reader, 12)?;
         for _ in 0..columns_len {
             let component = ComponentTypeId::from_raw(reader.u64()?);
             let byte_len = reader.count("column bytes", limits.max_column_bytes)?;
-            let blob: Arc<[u8]> = reader.take(byte_len)?.to_vec().into_boxed_slice().into();
-            columns.push(Column::new(component, blob));
+            let source = reader.take(byte_len)?;
+            let mut blob = Vec::new();
+            blob.try_reserve_exact(byte_len)
+                .map_err(|_| PlanCodecError::AllocationFailed)?;
+            blob.extend_from_slice(source);
+            push_checked(
+                &mut columns,
+                Column::new(component, blob.into_boxed_slice()),
+            )?;
         }
-        groups.push(ArchetypeGroup::new(
-            signature,
-            locals.into_boxed_slice(),
-            columns.into_boxed_slice(),
-        ));
+        push_checked(
+            &mut groups,
+            ArchetypeGroup::new(
+                signature,
+                locals.into_boxed_slice(),
+                columns.into_boxed_slice(),
+            ),
+        )?;
     }
 
     let slots_len = reader.count("field slots", limits.max_field_slots)?;
-    let mut slots = Vec::with_capacity(slots_len);
+    let mut slots = checked_vec(slots_len, &reader, 16)?;
     for _ in 0..slots_len {
-        slots.push(FieldSlot {
-            local: LocalEntityId::new(reader.u32()?),
-            group: reader.u32()?,
-            column: reader.u32()?,
-            byte_offset: reader.u32()?,
-        });
+        push_checked(
+            &mut slots,
+            FieldSlot {
+                local: LocalEntityId::new(reader.u32()?),
+                group: reader.u32()?,
+                column: reader.u32()?,
+                byte_offset: reader.u32()?,
+            },
+        )?;
     }
 
     let hierarchy_len = reader.count("hierarchy", limits.max_hierarchy_edges)?;
-    let mut hierarchy = Vec::with_capacity(hierarchy_len);
+    let mut hierarchy = checked_vec(hierarchy_len, &reader, 8)?;
     for _ in 0..hierarchy_len {
-        hierarchy.push((
-            LocalEntityId::new(reader.u32()?),
-            LocalEntityId::new(reader.u32()?),
-        ));
+        push_checked(
+            &mut hierarchy,
+            (
+                LocalEntityId::new(reader.u32()?),
+                LocalEntityId::new(reader.u32()?),
+            ),
+        )?;
     }
     if reader.offset != bytes.len() {
         return Err(PlanCodecError::TrailingBytes);
@@ -261,6 +282,17 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
+    fn require_min_bytes(&self, count: usize, width: usize) -> Result<(), PlanCodecError> {
+        let required = count
+            .checked_mul(width)
+            .ok_or(PlanCodecError::LengthOverflow)?;
+        let remaining = self.bytes.len().saturating_sub(self.offset);
+        if required > remaining {
+            return Err(PlanCodecError::Truncated);
+        }
+        Ok(())
+    }
+
     fn u16(&mut self) -> Result<u16, PlanCodecError> {
         Ok(u16::from_le_bytes(
             self.take(2)?.try_into().expect("checked width"),
@@ -278,6 +310,27 @@ impl<'a> Reader<'a> {
             self.take(8)?.try_into().expect("checked width"),
         ))
     }
+}
+
+fn checked_vec<T>(
+    capacity: usize,
+    reader: &Reader<'_>,
+    minimum_wire_width: usize,
+) -> Result<Vec<T>, PlanCodecError> {
+    reader.require_min_bytes(capacity, minimum_wire_width)?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(capacity)
+        .map_err(|_| PlanCodecError::AllocationFailed)?;
+    Ok(values)
+}
+
+fn push_checked<T>(values: &mut Vec<T>, value: T) -> Result<(), PlanCodecError> {
+    values
+        .try_reserve(1)
+        .map_err(|_| PlanCodecError::AllocationFailed)?;
+    values.push(value);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -534,6 +587,16 @@ mod tests {
                 }
             ),
             Err(PlanCodecError::ResourceLimit("hierarchy"))
+        );
+    }
+
+    #[test]
+    fn rejects_sparse_large_counts_before_allocating_the_declared_vectors() {
+        let mut bytes = encode_plan(&plan()).unwrap();
+        put_u32(&mut bytes, GROUPS_LEN_OFFSET, 1_000_000);
+        assert_eq!(
+            decode_plan(&bytes, PlanDecodeLimits::default()),
+            Err(PlanCodecError::Truncated)
         );
     }
 
