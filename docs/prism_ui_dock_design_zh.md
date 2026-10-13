@@ -260,7 +260,7 @@ reducer/validator 每次边界强制:无悬挂空节点、比例归一、每面�
 布局操作可记入命令栈(对齐编辑器命令内核),结构共享让历史廉价;「误拖散布局」可一键撤销。
 
 ### 12.5 多显示器 / DPI
-浮窗跨屏定位、DPI 缩放交平台/`prism_window` 层;本层只存逻辑 rect + 显示器 id,恢复时由平台层校正到当前显示器拓扑(屏幕消失则拉回主屏)。
+浮窗跨屏定位、DPI 缩放交平台/`prism_window` 层；当前 `FloatingWindow` 只存逻辑 `Rect` 与 `z`，不存显示器 ID，显示器拓扑关联、恢复校正和屏幕消失后的拉回策略均由后续宿主协议定义。
 
 ### 12.6 崩溃安全持久化
 原子写(临时文件 + rename)+ 保留 last-good（当前 Unix 目标替换语义完整；Windows 在目标已存在时显式返回 `AlreadyExists`，待 `ReplaceFileW` 适配后再宣称重复保存支持）；`WorkspaceFileStore` 加载失败回落 last-good → caller default。稳定 sibling lock 使用 OS advisory lock（Unix/Windows 由 `fs4` 适配），锁文件本身不删除；进程崩溃时由 OS 释放持有的锁，避免 mtime/PID stale reclaim 竞态。
