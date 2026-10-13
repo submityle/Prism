@@ -87,17 +87,30 @@ impl PanelRegistry {
         }
 
         let central = central_lane(document, bottom, policy.bottom_ratio)?;
-        let mut lanes = Vec::new();
-        if !left.is_empty() {
+        let left_weight = if left.is_empty() {
+            0
+        } else {
             if policy.left_ratio.millionths() == 0 {
                 return Err(DefaultLayoutError::ZeroLaneWeight("left_ratio"));
             }
-            lanes.push((policy.left_ratio.millionths(), tab_stack(left)));
+            policy.left_ratio.millionths()
+        };
+        let right_weight = if right.is_empty() {
+            0
+        } else {
+            if policy.right_ratio.millionths() == 0 {
+                return Err(DefaultLayoutError::ZeroLaneWeight("right_ratio"));
+            }
+            policy.right_ratio.millionths()
+        };
+        let mut lanes = Vec::new();
+        if !left.is_empty() {
+            lanes.push((left_weight, tab_stack(left)));
         }
         if let Some(node) = central {
             let weight = Ratio::SCALE
-                .checked_sub(policy.left_ratio.millionths())
-                .and_then(|remaining| remaining.checked_sub(policy.right_ratio.millionths()))
+                .checked_sub(left_weight)
+                .and_then(|remaining| remaining.checked_sub(right_weight))
                 .ok_or(DefaultLayoutError::CentralLaneOverflow)?;
             if weight == 0 {
                 return Err(DefaultLayoutError::CentralLaneOverflow);
@@ -105,10 +118,7 @@ impl PanelRegistry {
             lanes.push((weight, node));
         }
         if !right.is_empty() {
-            if policy.right_ratio.millionths() == 0 {
-                return Err(DefaultLayoutError::ZeroLaneWeight("right_ratio"));
-            }
-            lanes.push((policy.right_ratio.millionths(), tab_stack(right)));
+            lanes.push((right_weight, tab_stack(right)));
         }
 
         let root = weighted_split(Axis::Horizontal, lanes)?;
@@ -329,5 +339,24 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn empty_edge_lanes_do_not_reduce_the_central_weight() {
+        let mut registry = PanelRegistry::new();
+        registry
+            .register(PanelDescriptor::new("doc", "D").with_default_slot(DefaultSlot::Document))
+            .unwrap();
+        registry
+            .register(PanelDescriptor::new("right", "R").with_default_slot(DefaultSlot::RightBar))
+            .unwrap();
+        let layout = registry
+            .default_layout(DefaultLayoutPolicy::default())
+            .unwrap();
+        let DockNode::Split { children, .. } = layout.root else {
+            panic!("document and right lanes must split");
+        };
+        assert_eq!(children[0].ratio.millionths(), 760_000);
+        assert_eq!(children[1].ratio.millionths(), 240_000);
     }
 }
