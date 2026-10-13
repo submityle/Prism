@@ -559,8 +559,14 @@ mod tests {
             .unwrap();
         let windows = element.child_elements()[1].child_elements();
         assert_eq!(windows.len(), 2);
-        assert_eq!(windows[0].inline_pairs()[1], (StyleProp::Left, StyleValue::px(10.0)));
-        assert_eq!(windows[1].inline_pairs()[1], (StyleProp::Left, StyleValue::px(0.0)));
+        assert_eq!(
+            windows[0].inline_pairs()[1],
+            (StyleProp::Left, StyleValue::px(10.0))
+        );
+        assert_eq!(
+            windows[1].inline_pairs()[1],
+            (StyleProp::Left, StyleValue::px(0.0))
+        );
     }
 
     #[test]
