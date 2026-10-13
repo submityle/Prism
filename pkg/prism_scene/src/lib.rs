@@ -82,7 +82,7 @@ pub use path::{FieldPath, FieldSegment};
 pub use plan::{ArchetypeGroup, Column, FieldSlot, InstantiationPlan, PlanError};
 pub use plan_codec::{decode_plan, encode_plan, PlanCodecError, PlanDecodeLimits};
 #[cfg(feature = "materialize")]
-pub use property_apply::{apply_property_override, PropertyApplyError};
+pub use property_apply::{apply_property_override, apply_property_overrides, PropertyApplyError};
 pub use remap::RemapTable;
 pub use residency::{ResidencyPlan, ResidencyTier};
 pub use template::{NestedSlot, SceneTemplate};

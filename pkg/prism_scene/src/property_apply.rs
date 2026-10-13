@@ -20,6 +20,8 @@ pub enum PropertyApplyError {
     TypeMismatch,
     /// The reflected path rejected the write.
     WriteRejected,
+    /// One atomic batch targeted more than one reflected component type.
+    MixedComponent,
 }
 
 /// Applies one exact-type scalar/string property override to a live reflected component.
@@ -36,6 +38,47 @@ pub fn apply_property_override(
     let component = world
         .get_reflect_mut(entity, type_id)
         .ok_or(PropertyApplyError::MissingComponent)?;
+    apply_property_to_reflect(component, property)
+}
+
+/// Applies several properties atomically to one reflected component.
+///
+/// Every property is first applied to a reflected clone. The live ECS column
+/// is written exactly once only after all properties succeed, so a later path
+/// or type failure cannot leave an earlier override partially committed.
+pub fn apply_property_overrides(
+    world: &mut World,
+    entity: Entity,
+    properties: &[PropertyOverride],
+) -> Result<(), PropertyApplyError> {
+    let Some(first) = properties.first() else {
+        return Ok(());
+    };
+    if properties
+        .iter()
+        .any(|property| property.component != first.component)
+    {
+        return Err(PropertyApplyError::MixedComponent);
+    }
+    let type_id = StableTypeId::from_raw(first.component.raw());
+    let current = world
+        .get_reflect(entity, type_id)
+        .ok_or(PropertyApplyError::MissingComponent)?;
+    let mut staged = current.reflect_clone();
+    for property in properties {
+        apply_property_to_reflect(&mut *staged, property)?;
+    }
+    if world.insert_reflect(entity, &*staged) {
+        Ok(())
+    } else {
+        Err(PropertyApplyError::WriteRejected)
+    }
+}
+
+fn apply_property_to_reflect(
+    component: &mut dyn Reflect,
+    property: &PropertyOverride,
+) -> Result<(), PropertyApplyError> {
     let path = reflect_path_text(&property.path);
     let parsed = ParsedPath::parse(&path).map_err(|_| PropertyApplyError::InvalidPath)?;
     let slot = reflect_path_mut(component, &parsed).ok_or(PropertyApplyError::InvalidPath)?;
@@ -159,5 +202,25 @@ mod tests {
             apply_property_override(&mut world, other, &property("speed", OverrideValue::U64(9))),
             Err(PropertyApplyError::MissingComponent)
         );
+    }
+
+    #[test]
+    fn batch_application_is_atomic_on_later_failure() {
+        let mut world = World::new();
+        world.register_reflect_component::<Settings>();
+        let entity = world.spawn(Settings {
+            speed: 2,
+            enabled: false,
+            label: String::from("old"),
+        });
+        let valid = property("speed", OverrideValue::U64(9));
+        let invalid = property("label", OverrideValue::I64(4));
+        assert_eq!(
+            apply_property_overrides(&mut world, entity, &[valid, invalid]),
+            Err(PropertyApplyError::TypeMismatch)
+        );
+        let settings = world.get::<Settings>(entity).unwrap();
+        assert_eq!(settings.speed, 2);
+        assert_eq!(settings.label, "old");
     }
 }
