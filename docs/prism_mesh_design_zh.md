@@ -170,7 +170,7 @@ crates/bevy_mesh                      仅保留给未迁移示例；RHI 路径�
 
 - **已有**：`prism_mesh::Mesh` 提供属性/索引/拓扑/布局/打包/包围体/校验；`VirtualGeometryVersion=1` 的 Cluster 决策层（cull/lod/page_table/raster_path/software_raster/hierarchy/bins/page_request/frame）已存在；`geometry` 有稳定几何表与 LOD 记录；`deformation` 有句柄与预算骨架；OMM、软件光栅、GDeflate 均有 CPU golden + GPU twin 的既有范式。
 - **已补齐（M0 静态契约切片）**：`prism_mesh` 现已包含 `topology.rs`、`submesh.rs`、`limits.rs`、`morph.rs`、`skin.rs`、`streams.rs`、`hash.rs`；RHI 的 12 种当前顶点格式均有类型化授权值；`Mesh::validate()` 已检查拓扑元素数、索引范围、子网格范围/重叠，`validate_with_limits()` 已接入属性/流/顶点/材质槽预算；确定性 hash 覆盖拓扑、属性值、索引与子网格。
-- **仍有差距**：`primitives/` 尚未落地；虚拟几何无落盘资产格式与页表；无 Deformable Cluster；无 mesh→BLAS/OMM 的几何侧契约；GPU 分流上传尚未接入 `RenderMesh` 的生产路径。
+- **仍有差距**：`primitives/` 尚未落地；虚拟几何的 v1 落盘编解码契约已经存在，但尚无真正的 Cluster/LOD/分页构建器与生产流送接入；无 Deformable Cluster；无 mesh→BLAS/OMM 的几何侧契约；GPU 分流上传尚未接入 `RenderMesh` 的生产路径。
 - **本文职责**：把这些差距写成可执行规格，而不是重写已有闭环。
 
 ## 6. 核心数据模型：一件 Mesh 是什么
@@ -486,7 +486,7 @@ Mesh IR → 修复/校验 → 顶点/索引优化
 
 ### 11.2 资产格式
 
-从单体 `MeshletMesh` 扩展为可分页资产（渲染架构 §6.2 已提出，此处细化字段）：
+`pkg/prism_render_architecture::virtual_geometry::VirtualGeometryAsset` 是可分页资产的 v1 编解码契约（渲染架构 §6.2 的字段落地）：
 
 ```text
 VirtualGeometryAsset
@@ -507,6 +507,8 @@ VirtualGeometryAsset
 - 页大小固定（建议 64 KiB 起，1024 字节粒度的元数据对齐；具体值在 M2 定档并与 GPU twin 锁定）。
 - 页存储可压缩（zstd/GDeflate 形态），运行时经 `prism_gdeflate_gpu` 直通解压或 CPU 解压。
 - 必须使用显式 `schema_version` 与 `build_settings_hash`；旧缓存可检测并重建，禁止静默错读。
+
+当前代码已对 header、层级节点、页排序/大小、cluster 范围、材质槽、payload 引用和确定性编解码做校验；仍需资产构建器生成真实 Cluster/DAG/量化页，并与 `prism_gdeflate_gpu` 做逐字节解压验证。
 
 ### 11.3 运行时 cut 与剔除
 
@@ -855,7 +857,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 - 退出标准：标准网格在 `Compatible` 档可渲染并进入 Golden 图测试；分流使深度 pass 带宽下降可测。
 
 ### M2：虚拟几何资产格式落盘（6–10 周）
-- 定义 `VirtualGeometryAsset` 二进制格式与页 ABI；与 `prism_virtual_geometry_gpu` 对齐。
+- 定义 `VirtualGeometryAsset` 二进制格式与页 ABI；与 `prism_virtual_geometry_gpu` 对齐。✅ v1 编解码契约已落地
 - 资产构建 Processor：Cluster 化、DAG、量化、分页、fallback mesh。
 - 页表与流送最小闭环（先本地文件，后容器）。
 - 退出标准：同一高模在 `Standard` 档以虚拟几何渲染；缺页渲染祖先无洞。
@@ -928,11 +930,11 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 ### 25.2 诚实边界（当前未完成）
 
-- 虚拟几何**尚无落盘资产格式与页表**；`virtual_geometry` 目前是决策层 + 软件光栅 golden，不是完整流送管线。
+- 虚拟几何已有 v1 落盘编解码契约和 CPU 决策层，但尚不是完整 Cluster 构建/流送管线；页表仍未消费真实资产文件。
 - HW Mesh Shader 后端未实现；现有可见性光栅只接入标准 Mesh 的 bootstrap。
 - 无 Deformable Cluster；蒙皮仍是标准 GPU skinning 规划。
-- 无分流顶点布局；`prism_mesh` 目前单流交错。
-- 无 Morph/Skin/SubMesh/内容哈希/图元生成。
+- `prism_mesh` 已有设备无关的分流布局与实际字节打包 API，但 `RenderMesh` 生产上传仍是单流交错。
+- Morph/Skin/SubMesh/内容哈希已落地；图元生成尚未落地。
 - 形变缓存只是一组类型骨架（`DeformationHandle`/`Kind`/`Budget`），无实际调度。
 - 本文的性能数字是目标，不是实测；实现后必须替换为本机基线。
 

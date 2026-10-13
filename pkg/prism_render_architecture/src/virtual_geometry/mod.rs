@@ -26,6 +26,7 @@
 //! * [`page_request`] — per-frame page-request coalescing across clusters.
 //! * [`frame`] — per-frame composition into one virtual-geometry draw plan.
 
+pub mod asset;
 pub mod bins;
 pub mod cull;
 pub mod frame;
@@ -38,6 +39,12 @@ pub mod raster_gradients;
 pub mod raster_path;
 pub mod software_raster;
 
+pub use asset::{
+    VirtualGeometryAsset, VirtualGeometryAssetError, VirtualGeometryAssetHeader,
+    VirtualGeometryClusterRecord, VirtualGeometryCompression, VirtualGeometryPage,
+    VirtualGeometryPageRecord, DEFAULT_VIRTUAL_GEOMETRY_PAGE_SIZE, MIN_VIRTUAL_GEOMETRY_PAGE_SIZE,
+    VIRTUAL_GEOMETRY_ASSET_MAGIC, VIRTUAL_GEOMETRY_ASSET_SCHEMA,
+};
 pub use bins::{bin_cut, RasterBins};
 pub use cull::{cluster_cull, CullVerdict, Frustum, OcclusionProbe, Plane};
 pub use frame::{plan_frame, FrameView, GeometryFramePlan, RasterConfig};
