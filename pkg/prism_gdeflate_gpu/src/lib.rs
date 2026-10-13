@@ -46,5 +46,7 @@ pub mod deinterleave;
 pub mod stored;
 
 pub use context::{GpuContext, GpuProbeError};
-pub use deinterleave::{reference_deinterleave, GpuDeinterleave, GROUP, LANES, WORD};
+pub use deinterleave::{
+    reference_deinterleave, DeinterleaveError, GpuDeinterleave, GROUP, LANES, WORD,
+};
 pub use stored::{plan_stored_deflate, GpuStoredGDeflate, StoredBlockPlan, StoredPlanError};

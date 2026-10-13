@@ -70,7 +70,7 @@ fn device_matches_reference_over_many_workgroups() {
         let interleaved = lcg_bytes(GROUP * 20, 0xa5a5_1234);
         assert_eq!(interleaved.len() % GROUP, 0);
 
-        let gpu = kernel.deinterleave(ctx, &interleaved);
+        let gpu = kernel.deinterleave(ctx, &interleaved).unwrap();
         let cpu = reference_deinterleave(&interleaved);
 
         assert_eq!(gpu.len(), interleaved.len());
@@ -92,7 +92,7 @@ fn device_matches_reference_single_round() {
         // permutation is the identity (`stored == logical`), which still must
         // match the oracle exactly.
         let interleaved = lcg_bytes(GROUP, 0x0f0f_abcd);
-        let gpu = kernel.deinterleave(ctx, &interleaved);
+        let gpu = kernel.deinterleave(ctx, &interleaved).unwrap();
         let cpu = reference_deinterleave(&interleaved);
 
         assert_eq!(gpu.len(), GROUP);
@@ -131,7 +131,7 @@ fn device_deinterleave_feeds_golden_inflate() {
 
         // Device reverses the warp interleave; host truncates + inflates exactly
         // as `gdeflate_decompress` does.
-        let mut deflated = kernel.deinterleave(ctx, chunk);
+        let mut deflated = kernel.deinterleave(ctx, chunk).unwrap();
         assert_eq!(deflated.len(), padded);
         deflated.truncate(compressed_size);
 
@@ -143,7 +143,7 @@ fn device_deinterleave_feeds_golden_inflate() {
 
         // Cross-check: the device de-interleave equals the host oracle here too.
         assert_eq!(
-            kernel.deinterleave(ctx, chunk),
+            kernel.deinterleave(ctx, chunk).unwrap(),
             reference_deinterleave(chunk)
         );
     });

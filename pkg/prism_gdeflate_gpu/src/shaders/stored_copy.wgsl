@@ -9,7 +9,7 @@ struct Params {
     block_count: u32,
     output_words: u32,
     output_bytes: u32,
-    _pad: u32,
+    source_bytes: u32,
 };
 
 struct Block {
@@ -24,6 +24,9 @@ struct Block {
 @group(0) @binding(3) var<storage, read_write> destination: array<u32>;
 
 fn source_byte(byte_offset: u32) -> u32 {
+    if (byte_offset >= params.source_bytes) {
+        return 0u;
+    }
     let word = source[byte_offset >> 2u];
     return (word >> ((byte_offset & 3u) * 8u)) & 0xffu;
 }
@@ -39,10 +42,17 @@ fn output_byte(byte_offset: u32) -> u32 {
         let block = blocks[middle];
         if (byte_offset < block.destination_offset) {
             high = middle;
-        } else if (byte_offset >= block.destination_offset + block.length) {
+        } else if (block.length == 0u || byte_offset - block.destination_offset >= block.length) {
+            if (middle == 0xffffffffu) {
+                return 0u;
+            }
             low = middle + 1u;
         } else {
-            return source_byte(block.source_offset + byte_offset - block.destination_offset);
+            let delta = byte_offset - block.destination_offset;
+            if (delta > 0xffffffffu - block.source_offset) {
+                return 0u;
+            }
+            return source_byte(block.source_offset + delta);
         }
     }
     return 0u;

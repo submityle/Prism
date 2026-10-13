@@ -69,6 +69,8 @@ pub enum StoredPlanError {
     TooManyBlocks,
     /// A source, block table, output buffer, or dispatch exceeds device limits.
     DeviceLimitExceeded,
+    /// A validated range cannot be represented as a non-wrapping `u32` range.
+    RangeOverflow,
 }
 
 impl StoredBlockPlan {
@@ -80,6 +82,7 @@ impl StoredBlockPlan {
         if linear.is_empty()
             || linear.len() > u32::MAX as usize
             || expected_output_size > u32::MAX as usize
+            || padded_interleaved_size(linear.len()).is_none()
         {
             return Err(StoredPlanError::InvalidSize);
         }
@@ -96,15 +99,16 @@ impl StoredBlockPlan {
                 return Err(StoredPlanError::UnsupportedBlockType(block_type));
             }
 
+            let len_end = cursor.checked_add(4).ok_or(StoredPlanError::Truncated)?;
             let len_bytes = linear
-                .get(cursor..cursor + 4)
+                .get(cursor..len_end)
                 .ok_or(StoredPlanError::Truncated)?;
             let length = u16::from_le_bytes([len_bytes[0], len_bytes[1]]) as usize;
             let inverse = u16::from_le_bytes([len_bytes[2], len_bytes[3]]);
             if inverse != !(length as u16) {
                 return Err(StoredPlanError::LengthCheckMismatch);
             }
-            cursor += 4;
+            cursor = len_end;
 
             let end = cursor
                 .checked_add(length)
@@ -118,10 +122,16 @@ impl StoredBlockPlan {
             if next_destination > u32::MAX as usize {
                 return Err(StoredPlanError::InvalidSize);
             }
+            let source_offset =
+                u32::try_from(cursor).map_err(|_| StoredPlanError::RangeOverflow)?;
+            let destination_offset =
+                u32::try_from(destination).map_err(|_| StoredPlanError::RangeOverflow)?;
+            let length_u32 = u32::try_from(length).map_err(|_| StoredPlanError::RangeOverflow)?;
+            validate_block_ranges(source_offset, destination_offset, length_u32)?;
             blocks.push(StoredBlock {
-                source_offset: cursor as u32,
-                destination_offset: destination as u32,
-                length: length as u32,
+                source_offset,
+                destination_offset,
+                length: length_u32,
             });
             destination = next_destination;
             cursor = end;
@@ -137,9 +147,7 @@ impl StoredBlockPlan {
         if destination != expected_output_size {
             return Err(StoredPlanError::OutputSizeMismatch);
         }
-        if blocks.len() > u32::MAX as usize {
-            return Err(StoredPlanError::TooManyBlocks);
-        }
+        u32::try_from(blocks.len()).map_err(|_| StoredPlanError::TooManyBlocks)?;
         Ok(Self {
             blocks,
             compressed_size: linear.len() as u32,
@@ -173,7 +181,10 @@ impl StoredBlockPlan {
     /// mapping from lane-major words back to the linear DEFLATE stream.
     #[must_use]
     pub const fn interleaved_size(&self) -> usize {
-        (self.compressed_size as usize).div_ceil(GROUP) * GROUP
+        match padded_interleaved_size(self.compressed_size as usize) {
+            Some(size) => size,
+            None => usize::MAX,
+        }
     }
 }
 
@@ -192,7 +203,7 @@ struct Params {
     block_count: u32,
     output_words: u32,
     output_bytes: u32,
-    _pad: u32,
+    source_bytes: u32,
 }
 
 /// GPU implementation of the validated stored-block `GDeflate` fast path.
@@ -263,11 +274,21 @@ impl GpuStoredGDeflate {
         }
 
         let device = ctx.device();
-        let output_bytes = plan.output_size().div_ceil(WORD) * WORD;
+        let (output_words_usize, output_bytes) =
+            checked_output_layout(plan.output_size()).ok_or(StoredPlanError::RangeOverflow)?;
         let source_bytes = interleaved.len();
-        let block_bytes = plan.blocks.len().saturating_mul(size_of::<StoredBlock>());
+        let block_count =
+            u32::try_from(plan.blocks.len()).map_err(|_| StoredPlanError::TooManyBlocks)?;
+        let block_bytes =
+            checked_block_table_bytes(plan.blocks.len()).ok_or(StoredPlanError::RangeOverflow)?;
+        let source_bytes_u32 =
+            u32::try_from(source_bytes).map_err(|_| StoredPlanError::InvalidSize)?;
+        let output_bytes_u32 =
+            u32::try_from(plan.output_size()).map_err(|_| StoredPlanError::InvalidSize)?;
         let limits = device.limits();
-        let output_words = plan.output_size().div_ceil(WORD) as u32;
+        let output_words =
+            u32::try_from(output_words_usize).map_err(|_| StoredPlanError::RangeOverflow)?;
+        validate_plan_ranges(plan, source_bytes, plan.output_size())?;
         if source_bytes as u64 > limits.max_buffer_size
             || output_bytes as u64 > limits.max_buffer_size
             || source_bytes as u64 > limits.max_storage_buffer_binding_size
@@ -278,15 +299,18 @@ impl GpuStoredGDeflate {
         {
             return Err(StoredPlanError::DeviceLimitExceeded);
         }
-        let job = self.deinterleave.prepare(ctx, interleaved);
+        let job = self
+            .deinterleave
+            .prepare(ctx, interleaved)
+            .map_err(|_| StoredPlanError::DeviceLimitExceeded)?;
         let params = buffer::uniform(
             device,
             "prism_gdeflate_stored_params",
             &Params {
-                block_count: plan.blocks.len() as u32,
+                block_count,
                 output_words,
-                output_bytes: plan.output_size() as u32,
-                _pad: 0,
+                output_bytes: output_bytes_u32,
+                source_bytes: source_bytes_u32,
             },
         );
         let blocks = buffer::storage_read(device, "prism_gdeflate_stored_blocks", &plan.blocks);
@@ -326,13 +350,13 @@ impl GpuStoredGDeflate {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(groups(plan.output_size().div_ceil(WORD) as u32), 1, 1);
+            pass.dispatch_workgroups(groups(output_words), 1, 1);
         }
         let stage = buffer::staging(device, "prism_gdeflate_stored_stage", output_bytes as u64);
         buffer::copy(&mut encoder, &output, &stage, output_bytes as u64);
         ctx.queue().submit([encoder.finish()]);
         let mut result = buffer::read_back::<u32>(ctx, &stage);
-        result.truncate(plan.output_size().div_ceil(WORD));
+        result.truncate(output_words_usize);
         let bytes = bytemuck::cast_slice::<u32, u8>(&result);
         Ok(bytes[..plan.output_size()].to_vec())
     }
@@ -352,7 +376,57 @@ fn buffer_layout(binding: u32, ty: BufferBindingType) -> BindGroupLayoutEntry {
 }
 
 fn groups(n: u32) -> u32 {
-    n.div_ceil(256).max(1)
+    (n / 256 + u32::from(n % 256 != 0)).max(1)
+}
+
+fn validate_block_ranges(
+    source_offset: u32,
+    destination_offset: u32,
+    length: u32,
+) -> Result<(), StoredPlanError> {
+    source_offset
+        .checked_add(length)
+        .ok_or(StoredPlanError::RangeOverflow)?;
+    destination_offset
+        .checked_add(length)
+        .ok_or(StoredPlanError::RangeOverflow)?;
+    Ok(())
+}
+
+fn validate_plan_ranges(
+    plan: &StoredBlockPlan,
+    source_bytes: usize,
+    output_bytes: usize,
+) -> Result<(), StoredPlanError> {
+    for block in &plan.blocks {
+        validate_block_ranges(block.source_offset, block.destination_offset, block.length)?;
+        let source_end = usize::try_from(block.source_offset)
+            .ok()
+            .and_then(|offset| offset.checked_add(block.length as usize))
+            .ok_or(StoredPlanError::RangeOverflow)?;
+        let destination_end = usize::try_from(block.destination_offset)
+            .ok()
+            .and_then(|offset| offset.checked_add(block.length as usize))
+            .ok_or(StoredPlanError::RangeOverflow)?;
+        if source_end > source_bytes || destination_end > output_bytes {
+            return Err(StoredPlanError::InvalidSize);
+        }
+    }
+    Ok(())
+}
+
+const fn checked_block_table_bytes(block_count: usize) -> Option<usize> {
+    block_count.checked_mul(size_of::<StoredBlock>())
+}
+
+fn checked_output_layout(output_size: usize) -> Option<(usize, usize)> {
+    let words = output_size / WORD + if output_size % WORD != 0 { 1 } else { 0 };
+    words.checked_mul(WORD).map(|bytes| (words, bytes))
+}
+
+const fn padded_interleaved_size(compressed_size: usize) -> Option<usize> {
+    let groups = compressed_size / GROUP + if compressed_size % GROUP != 0 { 1 } else { 0 };
+    groups.checked_mul(GROUP)
 }
 
 #[cfg(test)]
@@ -426,5 +500,44 @@ mod tests {
         let two_group_stream = stored_stream(&[payload.as_slice()]);
         let two_group_plan = plan_stored_deflate(&two_group_stream, payload.len()).unwrap();
         assert_eq!(two_group_plan.interleaved_size(), GROUP * 2);
+    }
+
+    #[test]
+    fn plan_rejects_non_wrapping_ranges() {
+        let stream = stored_stream(&[b"abc"]);
+        let plan = plan_stored_deflate(&stream, 3).unwrap();
+        let block = plan.blocks()[0];
+        assert_eq!(block.source_offset.checked_add(block.length), Some(8));
+        assert_eq!(block.destination_offset.checked_add(block.length), Some(3));
+
+        assert_eq!(
+            validate_block_ranges(u32::MAX, 0, 1),
+            Err(StoredPlanError::RangeOverflow)
+        );
+        assert_eq!(
+            validate_block_ranges(0, u32::MAX, 1),
+            Err(StoredPlanError::RangeOverflow)
+        );
+
+        let plan = plan_stored_deflate(&stream, 3).unwrap();
+        assert!(validate_plan_ranges(&plan, stream.len(), 3).is_ok());
+        assert_eq!(
+            validate_plan_ranges(&plan, 7, 3),
+            Err(StoredPlanError::InvalidSize)
+        );
+    }
+
+    #[test]
+    fn block_table_size_uses_checked_arithmetic() {
+        assert_eq!(checked_block_table_bytes(1), Some(size_of::<StoredBlock>()));
+        assert_eq!(checked_block_table_bytes(usize::MAX), None);
+    }
+
+    #[test]
+    fn output_and_padding_sizes_reject_overflow() {
+        assert_eq!(checked_output_layout(5), Some((2, 8)));
+        assert_eq!(checked_output_layout(usize::MAX), None);
+        assert_eq!(padded_interleaved_size(GROUP), Some(GROUP));
+        assert_eq!(padded_interleaved_size(usize::MAX), None);
     }
 }

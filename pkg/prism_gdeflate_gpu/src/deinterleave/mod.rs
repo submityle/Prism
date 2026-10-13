@@ -39,6 +39,23 @@ pub const WORD: usize = 4;
 /// matches the golden container's `GROUP`).
 pub const GROUP: usize = LANES as usize * WORD;
 
+/// Why a de-interleave request cannot be submitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeinterleaveError {
+    /// The input is not a non-empty, whole lane-group payload or its ABI
+    /// fields cannot be represented without truncation.
+    InvalidInput,
+    /// The request exceeds a limit reported by the selected adapter.
+    DeviceLimitExceeded,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DeinterleaveShape {
+    word_count: u32,
+    rounds: u32,
+    bytes: u64,
+}
+
 /// Uniform block shared with `Params` in `deinterleave.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -120,6 +137,7 @@ pub(crate) struct DeinterleaveJob {
     pub(crate) output: wgpu::Buffer,
     pub(crate) bind_group: wgpu::BindGroup,
     pub(crate) output_bytes: u64,
+    pub(crate) word_count: u32,
 }
 
 impl GpuDeinterleave {
@@ -185,13 +203,17 @@ impl GpuDeinterleave {
     /// golden core exactly as `gdeflate_decompress` does. An empty input yields
     /// an empty output.
     #[must_use]
-    pub fn deinterleave(&self, ctx: &GpuContext, interleaved: &[u8]) -> Vec<u8> {
-        if interleaved.len() < WORD {
-            return Vec::new();
+    pub fn deinterleave(
+        &self,
+        ctx: &GpuContext,
+        interleaved: &[u8],
+    ) -> Result<Vec<u8>, DeinterleaveError> {
+        if interleaved.is_empty() {
+            return Ok(Vec::new());
         }
         let device = ctx.device();
 
-        let job = self.prepare(ctx, interleaved);
+        let job = self.prepare(ctx, interleaved)?;
 
         let mut enc = device.create_command_encoder(&CommandEncoderDescriptor {
             label: Some("prism_gdeflate_deinterleave_encoder"),
@@ -208,35 +230,33 @@ impl GpuDeinterleave {
 
         let mut out_words = buffer::read_back::<u32>(ctx, &stage);
         out_words.truncate(interleaved.len() / WORD);
-        from_words_le(&out_words)
+        Ok(from_words_le(&out_words))
     }
 
     /// Prepares a device-resident de-interleave job for composition with a
     /// following compute pass.
-    pub(crate) fn prepare(&self, ctx: &GpuContext, interleaved: &[u8]) -> DeinterleaveJob {
-        debug_assert!(interleaved.len() >= WORD);
+    pub(crate) fn prepare(
+        &self,
+        ctx: &GpuContext,
+        interleaved: &[u8],
+    ) -> Result<DeinterleaveJob, DeinterleaveError> {
         let device = ctx.device();
+        let shape = validate_shape(interleaved.len(), &device.limits())?;
 
         let src_words = to_words_le(interleaved);
-        let words = src_words.len();
-        let rounds = words / LANES as usize;
-        // Only the whole-lane-group prefix participates in the permutation; any
-        // trailing partial group stays zero, matching `reference_deinterleave`.
-        let active = rounds * LANES as usize;
 
         let params = buffer::uniform(
             device,
             "prism_gdeflate_params",
             &Params {
-                word_count: active as u32,
-                rounds: rounds as u32,
+                word_count: shape.word_count,
+                rounds: shape.rounds,
                 pad0: 0,
                 pad1: 0,
             },
         );
         let src_buf = buffer::storage_read(device, "prism_gdeflate_src", &src_words);
-        let out_bytes = (words.max(1) * WORD) as u64;
-        let out_buf = buffer::storage_rw_zeroed(device, "prism_gdeflate_dst", out_bytes);
+        let out_buf = buffer::storage_rw_zeroed(device, "prism_gdeflate_dst", shape.bytes);
 
         let bind = device.create_bind_group(&BindGroupDescriptor {
             label: Some("prism_gdeflate_deinterleave_bind"),
@@ -257,13 +277,14 @@ impl GpuDeinterleave {
             ],
         });
 
-        DeinterleaveJob {
+        Ok(DeinterleaveJob {
             params,
             source: src_buf,
             output: out_buf,
             bind_group: bind,
-            output_bytes: out_bytes,
-        }
+            output_bytes: shape.bytes,
+            word_count: shape.word_count,
+        })
     }
 
     /// Records the de-interleave dispatch into an existing command encoder.
@@ -275,10 +296,41 @@ impl GpuDeinterleave {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &job.bind_group, &[]);
-            let words = (job.output_bytes / WORD as u64) as u32;
-            pass.dispatch_workgroups(groups(words), 1, 1);
+            pass.dispatch_workgroups(groups(job.word_count), 1, 1);
         }
     }
+}
+
+fn validate_shape(
+    input_len: usize,
+    limits: &wgpu::Limits,
+) -> Result<DeinterleaveShape, DeinterleaveError> {
+    if input_len == 0 || input_len % GROUP != 0 {
+        return Err(DeinterleaveError::InvalidInput);
+    }
+
+    let words = input_len
+        .checked_div(WORD)
+        .ok_or(DeinterleaveError::InvalidInput)?;
+    let word_count = u32::try_from(words).map_err(|_| DeinterleaveError::InvalidInput)?;
+    let rounds_usize = words
+        .checked_div(LANES as usize)
+        .ok_or(DeinterleaveError::InvalidInput)?;
+    let rounds = u32::try_from(rounds_usize).map_err(|_| DeinterleaveError::InvalidInput)?;
+    let bytes = u64::try_from(input_len).map_err(|_| DeinterleaveError::InvalidInput)?;
+
+    if bytes > limits.max_buffer_size
+        || bytes > u64::from(limits.max_storage_buffer_binding_size)
+        || groups(word_count) > limits.max_compute_workgroups_per_dimension
+    {
+        return Err(DeinterleaveError::DeviceLimitExceeded);
+    }
+
+    Ok(DeinterleaveShape {
+        word_count,
+        rounds,
+        bytes,
+    })
 }
 
 /// One storage/uniform bind-group-layout entry visible to the compute stage.
@@ -363,5 +415,54 @@ mod tests {
     fn reference_empty_is_empty() {
         assert!(reference_deinterleave(&[]).is_empty());
         assert!(reference_deinterleave(&[0, 0, 0]).is_empty());
+    }
+
+    #[test]
+    fn validation_rejects_partial_groups() {
+        let limits = wgpu::Limits::default();
+        assert_eq!(
+            validate_shape(GROUP - WORD, &limits),
+            Err(DeinterleaveError::InvalidInput)
+        );
+        assert_eq!(
+            validate_shape(GROUP + WORD, &limits),
+            Err(DeinterleaveError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn validation_rejects_device_buffer_and_dispatch_limits() {
+        let mut limits = wgpu::Limits::default();
+        limits.max_buffer_size = GROUP as u64 - 1;
+        assert_eq!(
+            validate_shape(GROUP, &limits),
+            Err(DeinterleaveError::DeviceLimitExceeded)
+        );
+
+        let mut limits = wgpu::Limits::default();
+        limits.max_storage_buffer_binding_size = (GROUP - 1) as u64;
+        assert_eq!(
+            validate_shape(GROUP, &limits),
+            Err(DeinterleaveError::DeviceLimitExceeded)
+        );
+
+        let mut limits = wgpu::Limits::default();
+        limits.max_compute_workgroups_per_dimension = 1;
+        assert_eq!(
+            validate_shape(GROUP * 2049, &limits),
+            Err(DeinterleaveError::DeviceLimitExceeded)
+        );
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn validation_rejects_word_count_that_cannot_fit_the_abi() {
+        let limits = wgpu::Limits::default();
+        let words = (u32::MAX as usize / LANES as usize + 1) * LANES as usize;
+        let bytes = words * WORD;
+        assert_eq!(
+            validate_shape(bytes, &limits),
+            Err(DeinterleaveError::InvalidInput)
+        );
     }
 }
