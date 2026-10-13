@@ -1345,6 +1345,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 > **Shade write transaction 修订**：`begin_shade_writes` 现在把 deterministic budget plan、residency ticket、store allocation、submit、completion proof 和 publish 组织成可回滚事务；prepare/submit 失败会恢复 requested/stale 状态，不会遗留永久 `Writing` 页面。该 API 仍要求上游提供真实 page requests，不会自动猜测 visibility。
 
+> **Visibility demand seam 修订**：`visibility_demand.rs` 现在提供显式 `UV + ddx/ddy + object/material/face + chart extent` 到 `ShadePageRequest` 的确定性转换，沿用 visibility LOD 公式并拒绝非有限输入；它是 producer seam，不代表主 visibility pass 已自动接入。
+
 **破坏性说明**：屏幕空间 über 路径（§8）**保留为缓存未命中/视角相关的回退路径**，不是并行栈，不维护旧着色 API；对象空间缓存是其上的加法 pass。弱平台关闭开关即纯 §8 路径。
 
 ### 14.11 风险 → 高性能/高质解决方案总表
