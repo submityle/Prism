@@ -22,7 +22,6 @@ use crate::{
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const LOCK_WAIT_ATTEMPTS: usize = 5_000;
-const STALE_LOCK_AGE: Duration = Duration::from_secs(30);
 
 /// The source from which a workspace snapshot was loaded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +75,8 @@ impl From<WorkspacePersistError> for WorkspaceStoreError {
 /// directory before returning. This protects the codec boundary from
 /// concurrent writers and ordinary process crashes; filesystem-specific power
 /// loss guarantees remain the responsibility of the underlying filesystem.
+/// Existing lock files are never reclaimed by age; safe cross-process recovery
+/// requires an OS advisory lock or an explicit verifiable owner protocol.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceFileStore {
     primary: PathBuf,
@@ -307,12 +308,6 @@ impl StoreLock {
                     });
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    if let Ok(metadata) = fs::metadata(path)
-                        && let Ok(modified) = metadata.modified()
-                        && modified.elapsed().unwrap_or_default() > STALE_LOCK_AGE
-                    {
-                        let _ = fs::remove_file(path);
-                    }
                     thread::sleep(Duration::from_millis(1));
                 }
                 Err(error) => return Err(error),
