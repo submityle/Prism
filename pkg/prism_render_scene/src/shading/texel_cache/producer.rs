@@ -9,8 +9,8 @@
 use prism_render_architecture::gpu_scene::GpuCompletionValue;
 
 use super::{
-    build_shade_plan, ShadePageRequest, ShadePageState, ShadePageStore, ShadeResidencyError,
-    ShadeResidencyTable, ShadeStoreError, ShadeSubmission, ShadeWriteTicket,
+    build_shade_plan, ShadeDemandRegistry, ShadePageRequest, ShadePageState, ShadePageStore,
+    ShadeResidencyError, ShadeResidencyTable, ShadeStoreError, ShadeSubmission, ShadeWriteTicket,
 };
 
 /// Errors raised while opening or submitting a transactional shade batch.
@@ -82,6 +82,25 @@ pub fn begin_shade_writes(
         tickets,
         writes,
     })
+}
+
+/// Consumes the current explicit visibility-derived demand snapshot through
+/// the same transactional path as direct request callers. The registry is
+/// borrowed immutably, so failed preparation never clears or mutates feedback.
+pub fn begin_shade_writes_from_registry(
+    residency: &mut ShadeResidencyTable,
+    store: &mut ShadePageStore,
+    registry: &ShadeDemandRegistry,
+    epoch: u64,
+    byte_budget: u64,
+) -> Result<PreparedShadeWrites, ShadeWriteProducerError> {
+    begin_shade_writes(
+        residency,
+        store,
+        registry.demands().iter().copied(),
+        epoch,
+        byte_budget,
+    )
 }
 
 impl PreparedShadeWrites {
@@ -229,5 +248,18 @@ mod tests {
         let layout = ShadeAtlasLayout::new([4, 4], [4, 4]).unwrap();
         assert_eq!(store.active_entries().count(), 1);
         assert_eq!(layout.origin(0), Some([0, 0]));
+    }
+
+    #[test]
+    fn registry_demands_use_the_same_transactional_path() {
+        let mut registry = ShadeDemandRegistry::default();
+        registry.replace([request()]);
+        let mut residency = ShadeResidencyTable::new();
+        let mut store = ShadePageStore::new(1);
+        let prepared =
+            begin_shade_writes_from_registry(&mut residency, &mut store, &registry, 3, 64)
+                .expect("registry demand should open a write");
+        assert!(is_write_pending(residency.state(key())));
+        prepared.abort(&mut residency, &mut store).unwrap();
     }
 }
