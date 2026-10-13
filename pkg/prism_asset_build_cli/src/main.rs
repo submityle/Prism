@@ -4,7 +4,10 @@
 //! publication to `prism_asset_build_core`; it contains no second build
 //! implementation or format-specific cache logic.
 
+mod args;
 mod commands;
+mod error;
+mod pipeline;
 
 fn main() {
     if let Err(error) = commands::run(argh::from_env()) {
