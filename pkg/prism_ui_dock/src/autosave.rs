@@ -61,7 +61,7 @@ impl WorkspaceAutosave {
 
     /// Marks the workspace dirty and resets the debounce deadline.
     pub fn mark_dirty(&mut self, now: Instant) {
-        self.deadline = Some(now + self.throttle);
+        self.deadline = Some(now.checked_add(self.throttle).unwrap_or(now));
     }
 
     /// Polls the debounce deadline and saves once the host-provided instant is
