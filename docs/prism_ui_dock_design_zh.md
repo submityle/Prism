@@ -288,7 +288,7 @@ prism_ui_dock/
 ├── src/workspace_store.rs / autosave.rs     # `std` 文件边界与 host-driven autosave
 └── src/registry.rs                          # 纯数据 PanelDescriptor/PanelRegistry
 ```
-features: `std`(文件存储)/ `render`(Element 装配)/ `snapshot_tests`。当前无独立 `store/`、`a11y/` 模块；核心 model/reducer/persist 为 `no_std + alloc`。
+features: `std`(文件存储)/ `render`(Element 装配)。当前 Cargo manifest 未声明 `snapshot_tests` feature，也无独立 `store/`、`a11y/` 模块；核心 model/reducer/persist 为 `no_std + alloc`。
 
 ---
 
@@ -296,11 +296,11 @@ features: `std`(文件存储)/ `render`(Element 装配)/ `snapshot_tests`。当�
 
 | 里程碑 | 内容 | 依赖 |
 |---|---|---|
-| **M0** | model + reduce(split/tabify/close/resize)+ 不变量 + 属性测试 | — |
+| **M0** | model + reduce(split/tabify/close/resize)+ 不变量 + 属性测试 | 已交付 |
 | **M1** | renderer-independent 几何解算 + render plan + tab/header/splitter 元数据 | Dock model ✅ / DockPanel ✅ / `render` feature Element 装配 ✅ / retained draw-list host ✅；窗口/GPU submission 仍待完成 |
-| **M2** | 拖拽状态机 + 中心/四边 drop zone + tab 插入 + overlay 预览 | 状态机/drop-zone/reducer action 已交付；renderer overlay 预览仍待集成 |
+| **M2** | 拖拽状态机 + 中心/四边 drop zone + tab 插入 + overlay 预览 | 状态机/drop-zone/reducer action/drop-preview 几何与 Element 适配器已交付；portal/input 排除与 renderer overlay 接线仍待宿主完成 |
 | **M3** | 浮窗 + autohide 边栏 + maximize | core reducer、RenderPlan 几何与 DockView Element 已交付；原生窗口、portal overlay、pointer/focus 接线仍待宿主完成 |
-| **M4** | 持久化(序列化/校验/迁移)+ Workspace + 自动保存 | persistence core ✅ / Workspace 纯数据与 codec ✅ / host-driven autosave ✅；schema migration 仍待完成 |
+| **M4** | 持久化(序列化/校验/迁移)+ Workspace + 自动保存 | persistence core/Workspace codec/host-driven autosave 已交付；schema migration 仍待完成 |
 | **M5** | 动效 + 可达性 + 撤销集成 + 多显示器校正 | 平台层 / 命令内核 |
 
 ---
