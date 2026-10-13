@@ -168,14 +168,14 @@ pub fn encode_workspace(manager: &WorkspaceManager) -> Result<Vec<u8>, Workspace
     {
         return Err(WorkspacePersistError::ResourceLimit("name bytes"));
     }
-    let mut writer = Writer(Vec::new());
-    writer.bytes(MAGIC);
-    writer.u16(VERSION);
+    let mut writer = Writer::new(limits.max_bytes);
+    writer.bytes(MAGIC)?;
+    writer.u16(VERSION)?;
     writer.count(manager.workspace_count())?;
     match manager.active_workspace_name() {
-        None => writer.u8(0),
+        None => writer.u8(0)?,
         Some(name) => {
-            writer.u8(1);
+            writer.u8(1)?;
             writer.string(name)?;
         }
     }
@@ -184,9 +184,9 @@ pub fn encode_workspace(manager: &WorkspaceManager) -> Result<Vec<u8>, Workspace
         writer.string(workspace.name())?;
         writer.count(workspace.perspective_count())?;
         match workspace.active_perspective_name() {
-            None => writer.u8(0),
+            None => writer.u8(0)?,
             Some(name) => {
-                writer.u8(1);
+                writer.u8(1)?;
                 writer.string(name)?;
             }
         }
@@ -194,13 +194,10 @@ pub fn encode_workspace(manager: &WorkspaceManager) -> Result<Vec<u8>, Workspace
             writer.string(perspective.name())?;
             let bytes = encode_layout(&perspective.layout())?;
             writer.count(bytes.len())?;
-            writer.bytes(&bytes);
+            writer.bytes(&bytes)?;
         }
     }
-    if writer.0.len() > WorkspaceDecodeLimits::default().max_bytes {
-        return Err(WorkspacePersistError::ResourceLimit("bytes"));
-    }
-    Ok(writer.0)
+    Ok(writer.finish())
 }
 
 /// Decodes a workspace collection and validates every nested layout.
@@ -292,34 +289,59 @@ pub fn decode_workspace_with_registry(
     )
 }
 
-struct Writer(Vec<u8>);
+struct Writer {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+}
 
 impl Writer {
-    fn bytes(&mut self, value: &[u8]) {
-        self.0.extend_from_slice(value);
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_bytes,
+        }
     }
 
-    fn u8(&mut self, value: u8) {
-        self.0.push(value);
+    fn append(&mut self, value: &[u8]) -> Result<(), WorkspacePersistError> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(value.len())
+            .ok_or(WorkspacePersistError::LengthOverflow)?;
+        if next > self.max_bytes {
+            return Err(WorkspacePersistError::ResourceLimit("bytes"));
+        }
+        self.bytes.extend_from_slice(value);
+        Ok(())
     }
 
-    fn u16(&mut self, value: u16) {
-        self.bytes(&value.to_le_bytes());
+    fn bytes(&mut self, value: &[u8]) -> Result<(), WorkspacePersistError> {
+        self.append(value)
     }
 
-    fn u32(&mut self, value: u32) {
-        self.bytes(&value.to_le_bytes());
+    fn u8(&mut self, value: u8) -> Result<(), WorkspacePersistError> {
+        self.append(&[value])
+    }
+
+    fn u16(&mut self, value: u16) -> Result<(), WorkspacePersistError> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn u32(&mut self, value: u32) -> Result<(), WorkspacePersistError> {
+        self.bytes(&value.to_le_bytes())
     }
 
     fn count(&mut self, value: usize) -> Result<(), WorkspacePersistError> {
-        self.u32(u32::try_from(value).map_err(|_| WorkspacePersistError::LengthOverflow)?);
-        Ok(())
+        self.u32(u32::try_from(value).map_err(|_| WorkspacePersistError::LengthOverflow)?)
     }
 
     fn string(&mut self, value: &str) -> Result<(), WorkspacePersistError> {
         self.count(value.len())?;
-        self.bytes(value.as_bytes());
-        Ok(())
+        self.bytes(value.as_bytes())
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
     }
 }
 
