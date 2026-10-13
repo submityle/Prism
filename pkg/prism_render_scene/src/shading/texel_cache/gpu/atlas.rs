@@ -126,6 +126,7 @@ impl ShadeAtlas {
             dimension: TextureDimension::D2,
             format: SHADE_ATLAS_FORMAT,
             usage: TextureUsages::STORAGE_BINDING
+                | TextureUsages::TEXTURE_BINDING
                 | TextureUsages::COPY_SRC
                 | TextureUsages::COPY_DST,
             view_formats: &[],

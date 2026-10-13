@@ -10,6 +10,7 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
+use bytemuck::{Pod, Zeroable};
 use prism_render_architecture::gpu_scene::GpuCompletionValue;
 use prism_render_architecture::texture_streaming::TexturePageKey;
 use prism_render_driver::{BufferId, RenderQueue};
@@ -75,6 +76,51 @@ pub struct GpuShadePageEntry {
     pub epoch: u32,
 }
 
+/// Keyed lookup row consumed by a production resolve consumer.
+///
+/// The writer only needs [`GpuShadePageEntry`], but a screen-space consumer
+/// must map a visible `(object, material, epoch, face, mip, channel, page)`
+/// identity back to that indexed entry. Rows are emitted in the same sorted
+/// order as the physical page table, so a shader can binary-search this array
+/// and use `page_index` to fetch the corresponding physical entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+#[repr(C)]
+pub struct GpuShadePageLookup {
+    /// Stable render-object identity.
+    pub object_id: u32,
+    /// Stable material identity.
+    pub material_id: u32,
+    /// Low/high words of the material epoch.
+    pub material_epoch_low: u32,
+    pub material_epoch_high: u32,
+    /// Packed `(face: u16, mip: u8, channel: u8)` identity.
+    pub face_mip_channel: u32,
+    /// Logical page coordinate.
+    pub page_x: u32,
+    pub page_y: u32,
+    /// Index into the physical [`GpuShadePageEntry`] table.
+    pub page_index: u32,
+}
+
+impl GpuShadePageLookup {
+    /// Creates the GPU key row for one sorted page-table record.
+    #[must_use]
+    pub const fn from_record(record: ShadePageTableRecord, page_index: u32) -> Self {
+        Self {
+            object_id: record.key.object_id,
+            material_id: record.key.material_id,
+            material_epoch_low: record.key.material_epoch as u32,
+            material_epoch_high: (record.key.material_epoch >> 32) as u32,
+            face_mip_channel: (record.key.face as u32)
+                | ((record.key.mip as u32) << 16)
+                | ((record.key.channel as u8 as u32) << 24),
+            page_x: record.key.page_x as u32,
+            page_y: record.key.page_y as u32,
+            page_index,
+        }
+    }
+}
+
 impl GpuShadePageEntry {
     /// Returns the exact storage-buffer word order used by `PageEntry`.
     #[must_use]
@@ -113,6 +159,7 @@ pub struct ShadePageTableSnapshot {
     epoch: u64,
     records: Vec<ShadePageTableRecord>,
     gpu_entries: Vec<GpuShadePageEntry>,
+    gpu_lookup: Vec<GpuShadePageLookup>,
     indices: BTreeMap<ShadePageKey, u32>,
 }
 
@@ -155,6 +202,7 @@ impl ShadePageTableSnapshot {
         let mut origins = BTreeSet::new();
         let mut indices = BTreeMap::new();
         let mut gpu_entries = Vec::with_capacity(records.len());
+        let mut gpu_lookup = Vec::with_capacity(records.len());
 
         for (position, record) in records.iter().enumerate() {
             if !keys.insert(record.key) {
@@ -182,12 +230,14 @@ impl ShadePageTableSnapshot {
                 generation,
                 epoch: gpu_epoch,
             });
+            gpu_lookup.push(GpuShadePageLookup::from_record(*record, page_index));
         }
 
         Ok(Self {
             epoch,
             records,
             gpu_entries,
+            gpu_lookup,
             indices,
         })
     }
@@ -222,6 +272,13 @@ impl ShadePageTableSnapshot {
         &self.gpu_entries
     }
 
+    /// Keyed lookup rows in the same deterministic order as the physical
+    /// page-table entries.
+    #[must_use]
+    pub fn gpu_lookup_entries(&self) -> &[GpuShadePageLookup] {
+        &self.gpu_lookup
+    }
+
     /// Flattened `(atlas_x, atlas_y, generation, epoch)` words for upload.
     #[must_use]
     pub fn gpu_words(&self) -> Vec<u32> {
@@ -242,12 +299,19 @@ impl ShadePageTableSnapshot {
     #[must_use]
     pub fn validate(&self) -> Result<(), ShadePageTableError> {
         if self.records.len() != self.gpu_entries.len()
+            || self.records.len() != self.gpu_lookup.len()
             || self.records.len() != self.indices.len()
             || self.records.len() > u32::MAX as usize
         {
             return Err(ShadePageTableError::TooManyPages);
         }
-        for (position, (record, gpu)) in self.records.iter().zip(&self.gpu_entries).enumerate() {
+        for (position, ((record, gpu), lookup)) in self
+            .records
+            .iter()
+            .zip(&self.gpu_entries)
+            .zip(&self.gpu_lookup)
+            .enumerate()
+        {
             let page_index =
                 u32::try_from(position).map_err(|_| ShadePageTableError::TooManyPages)?;
             if self.indices.get(&record.key) != Some(&page_index) {
@@ -261,6 +325,9 @@ impl ShadePageTableSnapshot {
                 || record.atlas_x != gpu.atlas_x
                 || record.atlas_y != gpu.atlas_y
             {
+                return Err(ShadePageTableError::GpuProofOutOfRange);
+            }
+            if *lookup != GpuShadePageLookup::from_record(*record, page_index) {
                 return Err(ShadePageTableError::GpuProofOutOfRange);
             }
         }
@@ -903,6 +970,8 @@ impl MaterialVirtualTexturePageTableAdapter {
 
 #[cfg(test)]
 mod tests {
+    use core::mem::size_of;
+
     use super::super::super::key::ShadeChannel;
     use super::*;
 
@@ -941,6 +1010,26 @@ mod tests {
         let record = ShadePageTableRecord::from_handle(key, handle, layout).unwrap();
         assert_eq!([record.atlas_x, record.atlas_y], [0, 4]);
         assert_eq!(record.handle, handle);
+    }
+
+    #[test]
+    fn keyed_lookup_row_round_trips_the_page_identity() {
+        let mut record = record(9, 2, 4);
+        record.key.face = 7;
+        record.key.mip = 3;
+        record.key.channel = ShadeChannel::Subsurface;
+        record.key.page_x = 11;
+        record.key.page_y = 13;
+        let lookup = GpuShadePageLookup::from_record(record, 3);
+        assert_eq!(size_of::<GpuShadePageLookup>(), 32);
+        assert_eq!(lookup.object_id, 9);
+        assert_eq!(lookup.material_id, 3);
+        assert_eq!(lookup.material_epoch_low, 7);
+        assert_eq!(lookup.material_epoch_high, 0);
+        assert_eq!(lookup.face_mip_channel, 7 | (3 << 16) | (2 << 24));
+        assert_eq!(lookup.page_x, 11);
+        assert_eq!(lookup.page_y, 13);
+        assert_eq!(lookup.page_index, 3);
     }
 
     #[test]

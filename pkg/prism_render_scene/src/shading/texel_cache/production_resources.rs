@@ -9,7 +9,7 @@
 
 use bevy_ecs::prelude::*;
 use bevy_render::{
-    render_resource::CommandEncoder,
+    render_resource::{Buffer, CommandEncoder, TextureView},
     renderer::{RenderContext, RenderDevice, RenderQueue},
     Extract,
 };
@@ -86,6 +86,7 @@ pub struct ShadeDispatchProductionGpu {
     prepared: Option<PreparedShadeDispatch>,
     in_flight: Option<InFlightShadeDispatch>,
     status: ShadeDispatchProductionStatus,
+    active_page_count: u32,
 }
 
 impl Default for ShadeDispatchProductionGpu {
@@ -95,6 +96,7 @@ impl Default for ShadeDispatchProductionGpu {
             prepared: None,
             in_flight: None,
             status: ShadeDispatchProductionStatus::Disabled,
+            active_page_count: 0,
         }
     }
 }
@@ -104,6 +106,19 @@ impl ShadeDispatchProductionGpu {
     #[must_use]
     pub const fn status(&self) -> ShadeDispatchProductionStatus {
         self.status
+    }
+
+    /// GPU resources for the last validated page-table snapshot. The page
+    /// table is uploaded before the writer pass; the render graph must order
+    /// the writer before any consumer that samples the atlas.
+    pub(crate) fn binding(&self) -> Option<ShadeDispatchBinding> {
+        let dispatch = self.dispatch.as_ref()?;
+        (self.active_page_count != 0).then(|| ShadeDispatchBinding {
+            page_table: dispatch.page_table_buffer().clone(),
+            page_lookup: dispatch.page_lookup_buffer().clone(),
+            atlas: dispatch.atlas_view().clone(),
+            page_count: self.active_page_count,
+        })
     }
 
     fn ensure_dispatch(&mut self, device: &RenderDevice, config: ShadeDispatchConfig) {
@@ -166,6 +181,7 @@ impl ShadeDispatchProductionGpu {
         };
         match dispatch.prepare(queue, &batch.jobs, &batch.page_table, &batch.vertices) {
             Ok(prepared) => {
+                self.active_page_count = batch.page_table.len() as u32;
                 self.status = ShadeDispatchProductionStatus::Prepared {
                     job_count: prepared.job_count(),
                 };
@@ -199,6 +215,15 @@ impl ShadeDispatchProductionGpu {
             Err(_) => self.status = ShadeDispatchProductionStatus::Error,
         }
     }
+}
+
+/// Bindable page-table/atlas resources owned by the production writer.
+#[derive(Clone)]
+pub(crate) struct ShadeDispatchBinding {
+    pub(crate) page_table: Buffer,
+    pub(crate) page_lookup: Buffer,
+    pub(crate) atlas: TextureView,
+    pub(crate) page_count: u32,
 }
 
 /// Copies the main-world producer's explicit frame input into the render

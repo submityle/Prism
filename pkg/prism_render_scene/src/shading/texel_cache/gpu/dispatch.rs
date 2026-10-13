@@ -176,6 +176,7 @@ pub struct ShadeDispatch {
     atlas: ShadeAtlas,
     jobs_buffer: Buffer,
     page_table_buffer: Buffer,
+    page_lookup_buffer: Buffer,
     vertices_buffer: Buffer,
     bind_group_layout: BindGroupLayout,
     bind_group: BindGroup,
@@ -199,6 +200,10 @@ impl ShadeDispatch {
             config.max_pages as usize,
             size_of::<GpuShadePageEntry>(),
         )?);
+        let page_lookup_bytes = non_zero_buffer_size(checked_buffer_bytes(
+            config.max_pages as usize,
+            core::mem::size_of::<super::page_table::GpuShadePageLookup>(),
+        )?);
         let vertices_bytes = non_zero_buffer_size(checked_buffer_bytes(
             config.max_vertices as usize,
             size_of::<RenderShadingVertex>(),
@@ -216,6 +221,12 @@ impl ShadeDispatch {
         let page_table_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("prism texel-cache shade page table"),
             size: page_table_bytes,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let page_lookup_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("prism texel-cache shade page lookup"),
+            size: page_lookup_bytes,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -289,6 +300,7 @@ impl ShadeDispatch {
             atlas,
             jobs_buffer,
             page_table_buffer,
+            page_lookup_buffer,
             vertices_buffer,
             bind_group_layout,
             bind_group,
@@ -366,6 +378,10 @@ impl ShadeDispatch {
         if !page_words.is_empty() {
             queue.write_buffer(&self.page_table_buffer, 0, cast_slice(&page_words));
         }
+        let lookup_entries = page_table.gpu_lookup_entries();
+        if !lookup_entries.is_empty() {
+            queue.write_buffer(&self.page_lookup_buffer, 0, cast_slice(lookup_entries));
+        }
         if !vertices.is_empty() {
             queue.write_buffer(&self.vertices_buffer, 0, cast_slice(vertices));
         }
@@ -435,6 +451,18 @@ impl ShadeDispatch {
     #[must_use]
     pub const fn config(&self) -> ShadeDispatchConfig {
         self.config
+    }
+
+    /// Physical page table used by both the writer and the resolve consumer.
+    #[must_use]
+    pub fn page_table_buffer(&self) -> &Buffer {
+        &self.page_table_buffer
+    }
+
+    /// Key-sorted logical page lookup used by the resolve consumer.
+    #[must_use]
+    pub fn page_lookup_buffer(&self) -> &Buffer {
+        &self.page_lookup_buffer
     }
 
     /// Writable shade atlas owned by this dispatch.
