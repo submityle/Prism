@@ -204,6 +204,9 @@ impl SceneSpawn {
         {
             return Err(SceneAttachError::StaleRoot(root));
         }
+        if world.get::<SceneInstance>(root).is_some() {
+            return Err(SceneAttachError::AlreadyAttached(root));
+        }
         if !world.insert(root, self.scene_instance(template, tier)) {
             return Err(SceneAttachError::InsertRejected(root));
         }
@@ -232,6 +235,8 @@ pub enum SceneAttachError {
     StaleRoot(Entity),
     /// The ECS rejected the component insertion for the root.
     InsertRejected(Entity),
+    /// The root already carried a scene anchor and was not overwritten.
+    AlreadyAttached(Entity),
 }
 
 /// Strongly typed instantiation failures.
@@ -543,6 +548,14 @@ mod tests {
         assert_eq!(
             anchor.resolve(LocalEntityId::new(1)),
             spawned.resolve(LocalEntityId::new(1))
+        );
+        assert_eq!(
+            spawned.attach_instance(
+                &mut world,
+                StableGuid::from_u128(0xbeef),
+                ResidencyTier::Interactive,
+            ),
+            Err(SceneAttachError::AlreadyAttached(root))
         );
 
         despawn_instance(&mut world, &spawned);
