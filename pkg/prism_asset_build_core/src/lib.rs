@@ -37,6 +37,8 @@ pub mod types;
 pub mod validation;
 /// Canonical virtual-geometry artifact validation and encoding.
 pub mod virtual_geometry;
+/// Deterministic static mesh clusterization and page packing.
+pub mod virtual_geometry_builder;
 
 pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
 pub use ddc::{Ddc, DdcError, DerivedDataCache, LocalDdc};
@@ -62,4 +64,8 @@ pub use validation::{ArtifactQualityGate, ValidationError, ValidationPolicy, Val
 pub use virtual_geometry::{
     CanonicalVirtualGeometryProcessor, VirtualGeometryArtifact, VIRTUAL_GEOMETRY_ARTIFACT_KIND,
     VIRTUAL_GEOMETRY_ARTIFACT_SCHEMA,
+};
+pub use virtual_geometry_builder::{
+    build_static_virtual_geometry, StaticClusterBuildError, StaticClusterBuildSettings,
+    STATIC_CLUSTER_PAYLOAD_MAGIC, STATIC_CLUSTER_PAYLOAD_VERSION,
 };

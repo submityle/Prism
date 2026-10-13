@@ -858,7 +858,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 ### M2：虚拟几何资产格式落盘（6–10 周）
 - 定义 `VirtualGeometryAsset` 二进制格式与页 ABI；与 `prism_virtual_geometry_gpu` 对齐。✅ v1 编解码契约已落地
-- 资产构建 Processor：Cluster 化、DAG、量化、分页、fallback mesh。
+- 资产构建 Processor：baseline Cluster 化和固定页分页已落地；DAG 多级简化、量化、fallback mesh 仍待实现。
 - 页表与流送最小闭环（先本地文件，后容器）。
 - 退出标准：同一高模在 `Standard` 档以虚拟几何渲染；缺页渲染祖先无洞。
 
@@ -930,7 +930,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 ### 25.2 诚实边界（当前未完成）
 
-- 虚拟几何已有 v1 落盘编解码契约和 CPU 决策层，但尚不是完整 Cluster 构建/流送管线；页表仍未消费真实资产文件。
+- 虚拟几何已有 v1 落盘编解码契约、baseline 静态 Cluster/page builder 和 CPU 决策层，但尚不是完整 LOD 简化/量化/流送管线；页表仍未消费真实资产文件。
 - HW Mesh Shader 后端未实现；现有可见性光栅只接入标准 Mesh 的 bootstrap。
 - 无 Deformable Cluster；蒙皮仍是标准 GPU skinning 规划。
 - `prism_mesh` 的分流布局和实际字节打包已接入 `RenderMesh` 生产上传、queue、frame graph 与多 slot draw；深度 pass 带宽基准尚未完成。
