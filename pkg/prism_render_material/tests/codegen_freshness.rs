@@ -45,3 +45,25 @@ fn committed_rust_layout_matches_generator() {
          `cargo run -p prism_material_schema --bin prism-material-codegen -- write`"
     );
 }
+
+#[test]
+fn rust_layout_keeps_singleton_tables_rustfmt_stable() {
+    let fresh = emit_rust_layout(&surface_schema());
+    let singleton_start = fresh
+        .find("pub const SURFACE_CACHE_AUX: [CacheAuxLayout; 1] = [")
+        .expect("generated layout must contain the cache-aux table");
+    let singleton_end = fresh[singleton_start..]
+        .find("];\n")
+        .map(|offset| singleton_start + offset + 3)
+        .expect("generated cache-aux table must be terminated");
+    let singleton = &fresh[singleton_start..singleton_end];
+
+    assert!(
+        singleton.contains("[\n    CacheAuxLayout {"),
+        "singleton generated tables must use the rustfmt-stable multiline form"
+    );
+    assert!(
+        !singleton.contains("[CacheAuxLayout {"),
+        "singleton generated tables must not regress to the collapsed form"
+    );
+}
