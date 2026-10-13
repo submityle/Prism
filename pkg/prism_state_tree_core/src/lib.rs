@@ -11,11 +11,16 @@
 
 extern crate alloc;
 
+mod binding;
 mod model;
 mod runtime;
 mod schema;
 mod snapshot;
 
+pub use binding::{
+    BindingPath, BindingPathError, BindingSlot, DependencyError, DependencyPlan,
+    EvaluatorDependency,
+};
 pub use model::{
     EventId, GuardId, HistoryMode, NodeKind, Plan, PlanError, StateId, StateNode, Transition,
     TransitionKind, TransitionTarget, TreeDef, Trigger,
@@ -32,5 +37,7 @@ pub use snapshot::{RestoreError, Snapshot, SnapshotCodecError};
 #[cfg(test)]
 extern crate std;
 
+#[cfg(test)]
+mod binding_tests;
 #[cfg(test)]
 mod tests;
