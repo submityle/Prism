@@ -20,7 +20,7 @@
 >
 > 本文为**设计规格**。地基层(`prism_ui_layout` 确定性 flexbox 解算、`prism_ui_overlay` portal/浮层 + FocusTrap、
 > `prism_ui_store` 响应式状态、`prism_ui_virtual` 虚拟化、`prism_ui_input` hit_test/focus/gesture、
-> `prism_ui_component_kit::DockPanel` 面板外观)和 `prism_ui_dock` 的 M0 核心、M1 render plan + Element 装配、M2 纯数据拖拽、M3 core reducer/RenderPlan/DockView Element、M4 Workspace codec/文件存储/host-driven autosave 边界均为**已交付**(SHIPPED)，schema migration 仍 planned; retained draw-list host 已由 `prism_ui_render_backend::ElementRenderer` 提供，窗口/GPU submission、overlay/hit-test 与 schema migration 仍为 PLANNED。
+> `prism_ui_component_kit::DockPanel` 面板外观)和 `prism_ui_dock` 的 M0 核心、M1 render plan + Element 装配、M2 纯数据拖拽、M3 core reducer/RenderPlan/DockView Element、M4 Workspace codec/文件存储/host-driven autosave 边界均为**已交付**(SHIPPED)，schema migration 仍 planned; retained draw-list host 已由 `prism_ui_render_backend::ElementRenderer` 提供，窗口/GPU submission、overlay/hit-test 与 schema migration 仍为 PLANNED；其中 retained draw-list host 已交付，但应用级窗口 surface/frame submission 尚未接线。
 > 全文严格区分「已实现并通过测试」与「规划中」。
 >
 > **非目标**:不含 AI/ML/LLM;不做窗口管理器(多显示器/原生窗口由平台/`prism_window` 层承载,本层只给布局模型);
@@ -316,7 +316,8 @@ registry.register(PanelDescriptor::new("inspector", "Inspector"))?;
 let next = reduce(&layout, Action::Resize { split: split_id, ratios })?;
 
 // render feature：实际 DockView::new 接收 layout、PanelRegistry、PanelViewRegistry、DocumentViewRegistry。
-let view = DockView::new(&layout, &registry, &panel_views, &document_views); // → Result<Element, ViewError>
+let view = DockView::new(&layout, &registry, &panel_views, &document_views);
+let element = view.render()?; // → Result<Element, DockViewError>
 
 // 加载(不可信输入,校验/过滤；迁移与回落由 host/store 编排)
 let layout = decode_layout(&bytes, DecodeOptions {
