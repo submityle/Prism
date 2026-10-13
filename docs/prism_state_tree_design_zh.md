@@ -16,7 +16,7 @@
 > 本文聚焦「**语义正确 + 数据导向 + 可作者化 + 可调试 + 可网络化**」的工程路线；不复刻 UE/Unity 的对象模型与源码，只借其**状态语义边界、任务生命周期、绑定心智与调试形态**；核心抽象 `no_std + alloc` 友好，ECS/资产/编辑器/调试层需 `std`；**不依赖任何 `bevy_*` crate**。
 
 - 版本: v0.2（ST0 核心语义内核与 Schema/Context 基础契约同步版）
-- 状态: **ST0 CORE SHIPPED / ST1 ECS 最小装配切片已实现 / ST2–ST8 PLANNED**（ST1 的共享 Plan、逐实体 runtime 组件、CommandQueue 延迟 spawn、显式 tick/event 路径、确定性 ECS gather、显式 Schedule、payload lifecycle Events、typed ECS Context gather 及 core Schema/Context 基础契约已交付；typed binding、zero-config 自动插件、observer marker 迁移桥接等仍按路线图推进，依赖项落地状态见 §2.1 与 §20）
+- 状态: **ST0 CORE SHIPPED / ST1 ECS 最小装配切片已实现 / ST2–ST8 PLANNED**（ST1 的共享 Plan、逐实体 runtime 组件、CommandQueue 延迟 spawn、显式 tick/event 路径、确定性 ECS gather、显式 Schedule、opt-in `StateTreePlugin`、payload lifecycle Events、typed ECS Context gather 及 core Schema/Context 基础契约已交付；typed binding、zero-config 自动插件、observer marker 迁移桥接等仍按路线图推进，依赖项落地状态见 §2.1 与 §20）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 层级定位: **通用决策运行时，非 AI 专属**。AI 是首要消费者而非所有者。上承 `prism_gameplay_*`（AI/能力/流程/交互）、动画与 UI 流程；内嵌 `prism_ecs` 调度，**不进内核仿真内循环**（ECS 存储遍历、物理 solver、渲染 RG 永远走原生路径）
 - 关键依赖（均为 `pkg/` 下的 prism 原生 crate，落地状态见 §2.1）: `prism_ecs`（observer/reaction/relation/snapshot：迁移事件的即时响应与回滚底座）、`prism_app`（Plugin/Schedule/`fixed`/`determinism`/`state`：相位与固定步）、`prism_reflect`（`path`/`schema`/`dynamic`/`property_bridge`：动态绑定路径、资产 schema、版本迁移）、`prism_tasks`（off-thread 编译、批量并行执行）、`prism_asset`（树资产加载/mtime 监视/热重载）、`prism_diagnostic`（budget/hitch/profiler/replay：调试器与帧预算）、`prism_time`（timeline/recording/确定性时间源）、`prism_ui*` + `prism_editor_framework`（图编辑器宿主与调试 HUD）
@@ -110,7 +110,7 @@ TreeDef(文本/图资产) ──compile(off-thread)──> TreePlan(不可变·�
 | 图 IR / durable / 画布 | `prism_visual_scripting` | **未就绪**（PLANNED） | 仅设计文档，无 `pkg/prism_visual_script` |
 | 响应式绑定内核 | `prism_loom` | **未就绪**（PLANNED） | 仅设计文档，无 `pkg/prism_loom` |
 | GameplayTag 门控 | `prism_gameplay_tags` | **未就绪**（PLANNED） | 仅设计文档 |
-| 决策运行时本体 | `prism_state_tree_core` + `prism_state_tree_ecs` | **ST0 CORE SHIPPED**；ST1 最小装配切片实现（显式 Schedule、typed ECS Context、payload Events 已交付；typed binding/zero-config/observer marker 仍 PLANNED）；ST2–ST8 PLANNED | `pkg/prism_state_tree_core`、`pkg/prism_state_tree_ecs`；见 §20 ST0/ST1 实现进度 |
+| 决策运行时本体 | `prism_state_tree_core` + `prism_state_tree_ecs` | **ST0 CORE SHIPPED**；ST1 最小装配切片实现（显式 Schedule、opt-in `StateTreePlugin`、typed ECS Context、payload Events 已交付；typed binding/zero-config/observer marker 仍 PLANNED）；ST2–ST8 PLANNED | `pkg/prism_state_tree_core`、`pkg/prism_state_tree_ecs`；见 §20 ST0/ST1 实现进度 |
 
 > **诚实边界**：上表「已有代码」指模块存在，其完整能力以各 crate 自身文档与测试为准；StateTree 的 ST0 语义内核与 ST1 最小逐实体 ECS 装配已落地，不等于完整决策产品；`prism_visual_scripting` / `prism_loom` / `prism_gameplay_tags` 三项未就绪，对应 feature 在落地前为**前置待建**，不阻塞 ST0–ST4 核心（它们只影响 `graph` / `reactive` / AI 域 `GameplayTag` 门控）。
 

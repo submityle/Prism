@@ -10,6 +10,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "app")]
+mod app_plugin;
 mod context;
 mod lifecycle;
 mod schedule;
@@ -30,6 +32,8 @@ use prism_state_tree_core::{
     RuntimeError, Schema, SchemaError, StateId, StepReport,
 };
 
+#[cfg(feature = "app")]
+pub use app_plugin::StateTreePlugin;
 pub use context::{gather_context, EcsContextError, EcsSchema};
 use lifecycle::LifecycleCollector;
 pub use lifecycle::{StateTreeLifecycleEvent, StateTreeLifecycleNotification};

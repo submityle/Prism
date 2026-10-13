@@ -10,9 +10,11 @@ publish = false
 [dependencies]
 prism_ecs = { path = "../prism_ecs", default-features = false }
 prism_state_tree_core = { path = "../prism_state_tree_core" }
+prism_app = { path = "../prism_app", optional = true }
 
 [features]
 default = []
+app = ["dep:prism_app"]
 
 [lints]
 workspace = true

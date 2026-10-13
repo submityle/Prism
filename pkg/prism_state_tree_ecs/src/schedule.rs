@@ -9,8 +9,8 @@
 use alloc::vec::Vec;
 
 use prism_ecs::{
-    entity::Entity, event::Events, query::With, resource::Resource, schedule::IntoSystemConfigs,
-    schedule::Schedule, world::World,
+    entity::Entity, event::Events, query::With, resource::Resource, schedule::Schedule,
+    world::World,
 };
 
 use crate::{
@@ -66,8 +66,17 @@ impl StateTreeTickReport {
 /// intentionally installs more than one system; hosts should register a
 /// single owner for each simulation schedule.
 pub fn install_tick_system(schedule: &mut Schedule) -> &mut Schedule {
-    schedule.add_systems((rotate_lifecycle_events, run_state_tree_tick).chain());
+    schedule.add_systems(run_scheduled_tick);
     schedule
+}
+
+/// Runs lifecycle rotation followed by one deterministic `StateTree` tick.
+///
+/// This is public for the optional `prism_app` plugin and remains an exclusive
+/// whole-world system at the ECS boundary.
+pub fn run_scheduled_tick(world: &mut World) {
+    rotate_lifecycle_events(world);
+    run_state_tree_tick(world);
 }
 
 fn rotate_lifecycle_events(world: &mut World) {
