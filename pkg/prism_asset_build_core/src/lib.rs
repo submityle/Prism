@@ -47,7 +47,7 @@ pub mod virtual_geometry_lod;
 pub mod virtual_geometry_payload;
 
 pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
-pub use ddc::{Ddc, DdcError, DerivedDataCache, LocalDdc};
+pub use ddc::{Ddc, DdcCapacity, DdcError, DdcEviction, DerivedDataCache, LocalDdc};
 pub use executor::{ArtifactSpec, BuildExecution, BuildExecutionError, BuildExecutor};
 pub use graph::{BuildError, BuildGraph, BuildOutputs};
 pub use hash::{derive_artifact_key, ArtifactKeyInputs, HashError};
