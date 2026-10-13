@@ -258,6 +258,7 @@ impl VirtualGeometryAsset {
         for cluster in &self.clusters {
             if cluster.node_index as usize >= self.nodes.len()
                 || !page_by_key.contains_key(&cluster.page)
+                || self.nodes[cluster.node_index as usize].page != cluster.page
             {
                 return Err(VirtualGeometryAssetError::InvalidValue("cluster reference"));
             }
@@ -751,6 +752,19 @@ mod tests {
             Err(VirtualGeometryAssetError::MissingPage(
                 GeometryPageKey::new(7, 1)
             ))
+        );
+    }
+
+    #[test]
+    fn validation_rejects_cluster_page_mismatch() {
+        let mut invalid = asset();
+        let mut second_page = invalid.pages[0].clone();
+        second_page.record.key = GeometryPageKey::new(7, 1);
+        invalid.pages.push(second_page);
+        invalid.clusters[0].page = GeometryPageKey::new(7, 1);
+        assert_eq!(
+            invalid.validate(),
+            Err(VirtualGeometryAssetError::InvalidValue("page clusters"))
         );
     }
 
