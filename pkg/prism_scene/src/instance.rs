@@ -18,6 +18,13 @@ use crate::overrides::OverrideSet;
 use crate::remap::RemapTable;
 use crate::residency::ResidencyTier;
 
+#[cfg(feature = "materialize")]
+use crate::instantiate::SceneSpawn;
+#[cfg(feature = "materialize")]
+use crate::override_replay::{replay_overrides, OverrideReplayError};
+#[cfg(feature = "materialize")]
+use prism_ecs::world::World;
+
 /// Root anchor of a live scene instance (design §5.2).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneInstance {
@@ -84,6 +91,19 @@ impl SceneInstance {
     /// The override set, allocating an empty one on first use (COW).
     pub fn overrides_mut(&mut self) -> &mut OverrideSet {
         self.overrides.get_or_insert_with(Box::default)
+    }
+
+    /// Replays this instance's property overrides through its spawn remap.
+    /// Structural operations are rejected by the bounded runtime replay slice.
+    #[cfg(feature = "materialize")]
+    pub fn replay_overrides(
+        &self,
+        world: &mut World,
+        spawn: &SceneSpawn,
+    ) -> Result<(), OverrideReplayError> {
+        self.overrides.as_deref().map_or(Ok(()), |overrides| {
+            replay_overrides(world, spawn, overrides)
+        })
     }
 }
 

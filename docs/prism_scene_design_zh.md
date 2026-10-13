@@ -1090,7 +1090,7 @@ OFPA 每对象文件化（§15、world §11.1）让多人并行编辑同一世�
 | 模块 | 覆盖章节 | 内容 |
 |---|---|---|
 | `identity` | §6 | `LocalEntityId`（基段 / 保留段）、`NameTable`（`BTreeMap`，确定性迭代序）、`PersistentId`（FNV-1a-128 确定性派生）、`PersistentIdBuilder` |
-| `instance` | §5.2 | `SceneInstance` 根锚组件（`impl Component`，可挂 ECS 实体；COW override） |
+| `instance` | §5.2 | `SceneInstance` 根锚组件（`impl Component`，可挂 ECS 实体；COW override）；提供 `replay_overrides` 通过实例 remap 调用受限属性事务重放 |
 | `layers` | §7.3 | `compose_layers`：变体 override 层自底向上重放（上层覆盖下层同键、结构操作按层序、重复结构操作结构化报错且不重复重放、实体/组件删除后的孤儿 override 回收 + 报告） |
 | `residency` | §11.1 | `ResidencyTier`（Interactive / Streamed / Proxy）、`ResidencyPlan`（按 `LocalEntityId` 标注，缺省 Interactive、确定性迭代） |
 | `path` | §7.1 | `FieldPath` / `FieldSegment`，点号文本解析、规范化与往返 |
