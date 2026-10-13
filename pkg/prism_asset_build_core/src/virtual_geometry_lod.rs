@@ -11,6 +11,9 @@ use crate::virtual_geometry_builder::{
     build_static_virtual_geometry, StaticClusterBuildError, StaticClusterBuildSettings,
 };
 use prism_render_architecture::virtual_geometry::VirtualGeometryAsset;
+use prism_render_architecture::virtual_geometry::{
+    select_lod, GeometryLodPolicy, LodLevel, LodProjection, LodSelection,
+};
 
 /// One independently serialized level in a static LOD chain.
 #[derive(Clone, Debug, PartialEq)]
@@ -24,6 +27,86 @@ pub struct StaticVirtualGeometryLod {
     pub vertex_error: f32,
     /// Paged static virtual-geometry asset for this level.
     pub asset: VirtualGeometryAsset,
+}
+
+/// A validated LOD chain plus the runtime metrics used to select it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaticVirtualGeometryLodSet {
+    levels: Vec<StaticVirtualGeometryLod>,
+    metrics: Vec<LodLevel>,
+}
+
+/// A runtime LOD selection with concrete display and prefetch assets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StaticVirtualGeometryLodPick<'a> {
+    /// Selector result, including display and prefetch level indices.
+    pub selection: LodSelection,
+    /// Asset used for the current view.
+    pub display: &'a StaticVirtualGeometryLod,
+    /// Asset that should be requested ahead of camera motion.
+    pub prefetch: &'a StaticVirtualGeometryLod,
+}
+
+impl StaticVirtualGeometryLodSet {
+    /// Validates and indexes a built chain by level.
+    pub fn new(mut levels: Vec<StaticVirtualGeometryLod>) -> Result<Self, StaticVirtualGeometryLodError> {
+        if levels.is_empty() {
+            return Err(StaticVirtualGeometryLodError::InvalidTarget);
+        }
+        levels.sort_by_key(|level| level.level);
+        if levels.windows(2).any(|pair| {
+            pair[0].level == pair[1].level
+                || !pair[0].vertex_error.is_finite()
+                || !pair[1].vertex_error.is_finite()
+                || pair[1].vertex_error < pair[0].vertex_error
+        }) {
+            return Err(StaticVirtualGeometryLodError::InvalidTarget);
+        }
+        let metrics = levels
+            .iter()
+            .map(|level| LodLevel {
+                level: level.level,
+                geometric_error: level.vertex_error.max(0.0),
+            })
+            .collect();
+        Ok(Self { levels, metrics })
+    }
+
+    /// Selects the display and prefetch assets using the shared runtime policy.
+    #[must_use]
+    pub fn select(
+        &self,
+        projection: LodProjection,
+        view_distance: f32,
+        closing_speed: f32,
+        policy: GeometryLodPolicy,
+        previous: Option<u32>,
+    ) -> Option<StaticVirtualGeometryLodPick<'_>> {
+        let selection = select_lod(
+            &self.metrics,
+            projection,
+            view_distance,
+            closing_speed,
+            policy,
+            previous,
+        )?;
+        let display = self.levels.iter().find(|level| level.level == selection.level)?;
+        let prefetch = self
+            .levels
+            .iter()
+            .find(|level| level.level == selection.prefetch_level)?;
+        Some(StaticVirtualGeometryLodPick {
+            selection,
+            display,
+            prefetch,
+        })
+    }
+
+    /// Returns the indexed LOD levels in ascending level order.
+    #[must_use]
+    pub fn levels(&self) -> &[StaticVirtualGeometryLod] {
+        &self.levels
+    }
 }
 
 /// Failure while building a static QEM LOD chain.
@@ -261,5 +344,34 @@ mod tests {
         assert_eq!(lods.len(), 1);
         assert!(lods[0].asset.clusters.iter().any(|cluster| cluster.material_slot == 0));
         assert!(lods[0].asset.clusters.iter().any(|cluster| cluster.material_slot == 1));
+    }
+
+    #[test]
+    fn lod_set_uses_shared_hysteresis_and_prefetch_selection() {
+        let source = cube([2.0, 2.0, 2.0]).expect("cube");
+        let levels = build_static_virtual_geometry_lod_chain(
+            21,
+            &source,
+            StaticClusterBuildSettings::default(),
+            &[12, 4],
+        )
+        .expect("LOD chain");
+        let set = StaticVirtualGeometryLodSet::new(levels).expect("indexed chain");
+        let pick = set
+            .select(
+                LodProjection::from_focal_length_pixels(500.0),
+                10.0,
+                1.0,
+                GeometryLodPolicy {
+                    target_error_pixels: 0.5,
+                    hysteresis_pixels: 0.1,
+                    prefetch_velocity_scale: 2.0,
+                },
+                None,
+            )
+            .expect("selects");
+        assert!(pick.selection.prefetch_level <= pick.selection.level);
+        assert_eq!(pick.display.level, pick.selection.level);
+        assert_eq!(pick.prefetch.level, pick.selection.prefetch_level);
     }
 }
