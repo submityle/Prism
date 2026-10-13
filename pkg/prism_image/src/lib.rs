@@ -20,6 +20,7 @@ mod artifact;
 mod error;
 mod image;
 mod runtime_loader;
+mod upload;
 
 #[cfg(test)]
 mod tests;
@@ -28,3 +29,4 @@ pub use artifact::{ImageArtifact, ImageArtifactError, IMAGE_ARTIFACT_SCHEMA};
 pub use error::ImageError;
 pub use image::Image;
 pub use runtime_loader::{RuntimeImageLoadError, RuntimeImageLoader};
+pub use upload::{ImageUploadPlan, ImageUploadPlanError, IMAGE_UPLOAD_ROW_ALIGNMENT};

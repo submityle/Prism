@@ -8,12 +8,35 @@ use prism_asset_container::{
     ContainerIdentity, ContainerReader, ContainerWriter, ManifestAssetReader, ManifestRoute,
     OverlaySet, RuntimeManifest,
 };
-use prism_render_driver::{AddressMode, Extent3d, FilterMode, SamplerDescriptor, TextureFormat};
+use prism_render_driver::{
+    AddressMode, CommandBuffer, Extent3d, FilterMode, ImageDataLayout, RenderQueue,
+    SamplerDescriptor, TextureFormat, TextureId, TextureWrite,
+};
 use std::sync::Arc;
 
+use crate::upload::checked_row_range;
 use crate::{
-    Image, ImageArtifact, ImageArtifactError, ImageError, RuntimeImageLoadError, RuntimeImageLoader,
+    Image, ImageArtifact, ImageArtifactError, ImageError, ImageUploadPlan, RuntimeImageLoadError,
+    RuntimeImageLoader, IMAGE_UPLOAD_ROW_ALIGNMENT,
 };
+
+#[derive(Default)]
+struct CapturingQueue {
+    writes: std::sync::Mutex<Vec<(TextureWrite, Vec<u8>, ImageDataLayout)>>,
+}
+
+impl RenderQueue for CapturingQueue {
+    fn write_buffer(&self, _: prism_render_driver::BufferId, _: u64, _: &[u8]) {}
+
+    fn write_texture(&self, destination: TextureWrite, data: &[u8], layout: ImageDataLayout) {
+        self.writes
+            .lock()
+            .unwrap()
+            .push((destination, data.to_vec(), layout));
+    }
+
+    fn submit(&self, _: &[CommandBuffer]) {}
+}
 
 #[test]
 fn an_image_validates_its_data_against_its_extents_and_format() {
@@ -152,6 +175,89 @@ fn canonical_artifact_decodes_into_the_runtime_image_asset() {
     assert_eq!(image.extent(), Extent3d::new_2d(2, 1));
     assert_eq!(image.format(), TextureFormat::Rgba8Unorm);
     assert_eq!(image.data(), artifact.rgba8);
+}
+
+#[test]
+fn upload_plan_pads_each_row_but_preserves_tight_image_bytes() {
+    let image = Image::new(
+        Extent3d::new_2d(2, 2),
+        TextureFormat::Rgba8Unorm,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+    )
+    .unwrap();
+    let plan = ImageUploadPlan::for_image(&image).unwrap();
+
+    assert_eq!(plan.extent(), image.extent());
+    assert_eq!(plan.format(), image.format());
+    assert_eq!(plan.layout().offset, 0);
+    assert_eq!(
+        plan.layout().bytes_per_row,
+        Some(IMAGE_UPLOAD_ROW_ALIGNMENT)
+    );
+    assert_eq!(plan.layout().rows_per_image, Some(2));
+    assert_eq!(plan.len(), (IMAGE_UPLOAD_ROW_ALIGNMENT * 2) as usize);
+    assert_eq!(&plan.data()[..8], &image.data()[..8]);
+    assert_eq!(&plan.data()[256..264], &image.data()[8..16]);
+    assert!(plan.data()[8..256].iter().all(|byte| *byte == 0));
+    assert!(plan.data()[264..].iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn upload_plan_writes_only_through_the_supplied_real_texture_id() {
+    let image = Image::new(
+        Extent3d::new_2d(1, 2),
+        TextureFormat::R8Unorm,
+        vec![0x11, 0x22],
+    )
+    .unwrap();
+    let plan = ImageUploadPlan::for_image(&image).unwrap();
+    let queue = CapturingQueue::default();
+    let texture = TextureId::from_parts(9, 4);
+
+    plan.write_to(&queue, texture);
+
+    let writes = queue.writes.lock().unwrap();
+    assert_eq!(writes.len(), 1);
+    let (destination, data, layout) = &writes[0];
+    assert_eq!(destination.texture, texture);
+    assert_eq!(destination.size, image.extent());
+    assert_eq!(*layout, plan.layout());
+    assert_eq!(data, plan.data());
+}
+
+#[test]
+fn upload_plan_preserves_layer_boundaries_in_rows_per_image_layout() {
+    let extent = Extent3d {
+        width: 1,
+        height: 2,
+        depth_or_array_layers: 2,
+    };
+    let image = Image::new(extent, TextureFormat::R8Unorm, vec![1, 2, 3, 4]).unwrap();
+    let plan = ImageUploadPlan::for_image(&image).unwrap();
+
+    assert_eq!(
+        plan.layout().bytes_per_row,
+        Some(IMAGE_UPLOAD_ROW_ALIGNMENT)
+    );
+    assert_eq!(plan.layout().rows_per_image, Some(2));
+    assert_eq!(plan.len(), (IMAGE_UPLOAD_ROW_ALIGNMENT * 4) as usize);
+    assert_eq!(plan.data()[0], 1);
+    assert_eq!(plan.data()[256], 2);
+    assert_eq!(plan.data()[512], 3);
+    assert_eq!(plan.data()[768], 4);
+}
+
+#[test]
+fn upload_row_index_arithmetic_fails_closed_on_usize_overflow() {
+    assert_eq!(
+        checked_row_range(usize::MAX, 2, 1, usize::MAX),
+        Err(crate::ImageUploadPlanError::StagingSizeOverflow)
+    );
+    assert_eq!(
+        checked_row_range(usize::MAX - 1, 1, 2, usize::MAX),
+        Err(crate::ImageUploadPlanError::StagingSizeOverflow)
+    );
+    assert_eq!(checked_row_range(3, 8, 4, 32), Ok(24..28));
 }
 
 fn mounted_runtime_image() -> (RuntimeManifest, OverlaySet, StableGuid) {
