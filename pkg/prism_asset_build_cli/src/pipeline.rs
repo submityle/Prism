@@ -1,5 +1,6 @@
 use crate::args::{Package, Plan, Validate};
 use crate::error::CommandError;
+use crate::mapping;
 use prism_asset::StableGuid;
 use prism_asset_build_core::import::{
     CanonicalPngProcessor, ImageArtifact, IMAGE_ARTIFACT_KIND, IMAGE_ARTIFACT_SCHEMA,
@@ -120,14 +121,24 @@ pub fn inspect(store_root: PathBuf) -> Result<(), CommandError> {
 }
 
 pub fn package(command: Package) -> Result<(), CommandError> {
-    let prepared = prepare_package(&command.store, command.asset_id, &command.logical_path)?;
+    let prepared = prepare_package(
+        &command.store,
+        command.mapping.as_deref(),
+        command.asset_id,
+        command.logical_path.as_deref(),
+    )?;
     write_package(&command.output, &prepared)?;
     print_package_summary(&prepared);
     Ok(())
 }
 
 pub fn validate(command: Validate) -> Result<(), CommandError> {
-    let prepared = prepare_package(&command.store, command.asset_id, &command.logical_path)?;
+    let prepared = prepare_package(
+        &command.store,
+        command.mapping.as_deref(),
+        command.asset_id,
+        command.logical_path.as_deref(),
+    )?;
     validate_package_output(&command.package, &prepared)?;
     println!("validated_revision={}", prepared.revision.0);
     println!(
@@ -151,14 +162,36 @@ struct PreparedPackage {
 
 fn prepare_package(
     store_root: &Path,
-    asset_id: u128,
-    logical_path: &str,
+    mapping_path: Option<&Path>,
+    asset_id: Option<u128>,
+    logical_path: Option<&str>,
 ) -> Result<PreparedPackage, CommandError> {
-    if logical_path.is_empty() {
-        return Err(CommandError::InvalidInput(
-            "logical-path must be an explicit non-empty project-relative path".into(),
-        ));
-    }
+    let mappings = match mapping_path {
+        Some(path) => {
+            if asset_id.is_some() || logical_path.is_some() {
+                return Err(CommandError::InvalidInput(
+                    "--mapping cannot be combined with --asset-id or --logical-path".into(),
+                ));
+            }
+            let input = fs::read_to_string(path)?;
+            mapping::parse(&input).map_err(|error| {
+                CommandError::InvalidInput(format!("mapping {}: {error}", path.display()))
+            })?
+        }
+        None => {
+            let asset_id = asset_id.ok_or_else(|| {
+                CommandError::InvalidInput(
+                    "legacy package input requires --asset-id and --logical-path".into(),
+                )
+            })?;
+            let logical_path = logical_path.ok_or_else(|| {
+                CommandError::InvalidInput(
+                    "legacy package input requires --asset-id and --logical-path".into(),
+                )
+            })?;
+            legacy_mappings(asset_id, logical_path)?
+        }
+    };
     let store = RevisionStore::open(store_root)?;
     let revision = store.current_revision()?.ok_or_else(|| {
         CommandError::InvalidInput("store has no committed build revision".into())
@@ -172,7 +205,7 @@ fn prepare_package(
     let package = prism_asset_build_core::package_runtime(PackageRequest {
         manifest: &manifest,
         cas: store.cas(),
-        mappings: package_mappings(&manifest, asset_id, logical_path)?,
+        mappings: package_mappings(&manifest, mappings)?,
     })?;
     if package.source_manifest_hash != build_manifest_hash {
         return Err(CommandError::InvalidInput(
@@ -196,6 +229,33 @@ fn prepare_package(
 
 fn package_mappings(
     manifest: &prism_asset_build_core::Manifest,
+    mappings: Vec<prism_asset_build_core::AssetPackageMapping>,
+) -> Result<Vec<prism_asset_build_core::AssetPackageMapping>, CommandError> {
+    let expected = manifest
+        .entries
+        .keys()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = mappings
+        .iter()
+        .map(|mapping| mapping.asset)
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(asset) = actual.difference(&expected).next() {
+        return Err(CommandError::InvalidInput(format!(
+            "mapping references unknown manifest asset {}",
+            asset.0
+        )));
+    }
+    if let Some(asset) = expected.difference(&actual).next() {
+        return Err(CommandError::InvalidInput(format!(
+            "mapping is missing manifest asset {}",
+            asset.0
+        )));
+    }
+    Ok(mappings)
+}
+
+fn legacy_mappings(
     image_asset_id: u128,
     logical_path: &str,
 ) -> Result<Vec<prism_asset_build_core::AssetPackageMapping>, CommandError> {
@@ -206,13 +266,6 @@ fn package_mappings(
     })?;
     let image_asset = AssetId(image_asset_id);
     let source_asset = AssetId(source_asset_id);
-    if !manifest.entries.contains_key(&image_asset) || !manifest.entries.contains_key(&source_asset)
-    {
-        return Err(CommandError::InvalidInput(format!(
-            "current revision must contain image asset {} and source asset {}",
-            image_asset_id, source_asset_id
-        )));
-    }
     let image_guid = StableGuid::from_path(logical_path);
     let source_guid = StableGuid::derive_sub(image_guid, "source");
     Ok(vec![

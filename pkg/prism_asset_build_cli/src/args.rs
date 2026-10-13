@@ -84,10 +84,13 @@ pub struct Package {
     pub output: PathBuf,
     /// primary published image AssetId as a decimal u128
     #[argh(option)]
-    pub asset_id: u128,
+    pub asset_id: Option<u128>,
     /// canonical project-relative source path used for the primary runtime GUID
     #[argh(option)]
-    pub logical_path: String,
+    pub logical_path: Option<String>,
+    /// explicit versioned runtime mapping file
+    #[argh(option)]
+    pub mapping: Option<PathBuf>,
 }
 
 /// Validate a previously emitted runtime package against the current revision.
@@ -102,10 +105,13 @@ pub struct Validate {
     pub package: PathBuf,
     /// primary published image AssetId as a decimal u128
     #[argh(option)]
-    pub asset_id: u128,
+    pub asset_id: Option<u128>,
     /// canonical project-relative source path used for the primary runtime GUID
     #[argh(option)]
-    pub logical_path: String,
+    pub logical_path: Option<String>,
+    /// explicit versioned runtime mapping file
+    #[argh(option)]
+    pub mapping: Option<PathBuf>,
 }
 
 /// Inspect the current local revision and its published artifact descriptors.

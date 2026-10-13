@@ -93,6 +93,42 @@ fn validate(store: &Path, package: &Path) -> Output {
     ])
 }
 
+fn explicit_mapping(root: &Path) -> PathBuf {
+    let path = root.join("mapping.txt");
+    fs::write(
+        &path,
+        format!(
+            "version=1\nasset=6;guid=sub:{LOGICAL_PATH}#source;container=core;priority=0;chunk_priority=0\nasset=7;guid=path:{LOGICAL_PATH};container=core;priority=0;chunk_priority=1\n"
+        ),
+    )
+    .expect("mapping should be written");
+    path
+}
+
+fn package_with_mapping(store: &Path, output: &Path, mapping: &Path) -> Output {
+    run(&[
+        "package",
+        "--store",
+        store.to_str().expect("temporary paths are UTF-8"),
+        "--output",
+        output.to_str().expect("temporary paths are UTF-8"),
+        "--mapping",
+        mapping.to_str().expect("temporary paths are UTF-8"),
+    ])
+}
+
+fn validate_with_mapping(store: &Path, package: &Path, mapping: &Path) -> Output {
+    run(&[
+        "validate",
+        "--store",
+        store.to_str().expect("temporary paths are UTF-8"),
+        "--package",
+        package.to_str().expect("temporary paths are UTF-8"),
+        "--mapping",
+        mapping.to_str().expect("temporary paths are UTF-8"),
+    ])
+}
+
 #[test]
 fn cli_build_package_validate_round_trip() {
     let root = temp_dir("round-trip");
@@ -118,6 +154,47 @@ fn cli_build_package_validate_round_trip() {
         String::from_utf8_lossy(&validated.stderr)
     );
     assert!(String::from_utf8_lossy(&validated.stdout).contains("validated_revision=0"));
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}
+
+#[test]
+fn cli_package_validate_accepts_explicit_multi_asset_mapping() {
+    let root = temp_dir("explicit-mapping");
+    let (_source, store, package_dir) = build(&root);
+    let mapping = explicit_mapping(&root);
+
+    let packaged = package_with_mapping(&store, &package_dir, &mapping);
+    assert!(
+        packaged.status.success(),
+        "package failed: {}",
+        String::from_utf8_lossy(&packaged.stderr)
+    );
+    let validated = validate_with_mapping(&store, &package_dir, &mapping);
+    assert!(
+        validated.status.success(),
+        "validate failed: {}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}
+
+#[test]
+fn cli_package_rejects_unknown_asset_in_mapping() {
+    let root = temp_dir("invalid-mapping");
+    let (_source, store, package_dir) = build(&root);
+    let mapping = root.join("mapping.txt");
+    fs::write(
+        &mapping,
+        "version=1\nasset=999;guid=path:textures/unknown.png;container=core;priority=0;chunk_priority=0\n",
+    )
+    .expect("mapping should be written");
+
+    let packaged = package_with_mapping(&store, &package_dir, &mapping);
+    assert!(
+        !packaged.status.success(),
+        "unknown mapping asset was accepted"
+    );
+    assert!(String::from_utf8_lossy(&packaged.stderr).contains("unknown manifest asset"));
     fs::remove_dir_all(root).expect("test outputs should be cleaned up");
 }
 

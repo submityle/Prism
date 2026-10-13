@@ -7,6 +7,7 @@
 mod args;
 mod commands;
 mod error;
+mod mapping;
 mod pipeline;
 
 fn main() {
