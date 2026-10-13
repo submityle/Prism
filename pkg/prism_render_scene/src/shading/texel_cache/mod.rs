@@ -14,6 +14,7 @@ mod production;
 mod production_resources;
 mod residency;
 mod store;
+mod visibility_demand;
 
 /// GPU-facing shade-cache contracts.
 pub mod gpu;
@@ -56,6 +57,9 @@ pub use residency::{
 pub use store::{
     ShadeCompletionProof, ShadeFrameToken, ShadePageHandle, ShadePageStore, ShadePageWrite,
     ShadeStoreError, ShadeStoreLookup, ShadeSubmission,
+};
+pub use visibility_demand::{
+    shade_page_request_from_visibility, ShadeDemandConfig, ShadeVisibilitySample,
 };
 
 #[cfg(test)]

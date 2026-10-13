@@ -23,6 +23,21 @@ pub struct RenderShadingGeometryHeader {
 }
 impl_atomic_pod!(RenderShadingGeometryHeader, RenderShadingGeometryHeaderBlob);
 
+impl RenderShadingGeometryHeader {
+    /// Resolves a geometry-local vertex index into the packed vertex table.
+    ///
+    /// Primitive rows intentionally retain local indices. Consumers that bind
+    /// the packed render-world vertex buffer must use this checked translation
+    /// rather than indexing that buffer with the primitive row directly.
+    #[must_use]
+    pub const fn global_vertex_index(self, local_index: u32) -> Option<u32> {
+        if local_index >= self.vertex_count {
+            return None;
+        }
+        self.vertex_offset.checked_add(local_index)
+    }
+}
+
 /// Stable vertex row used by compute resolve and offline export.
 pub type RenderShadingVertex = GpuShadingVertex;
 
@@ -202,6 +217,18 @@ mod tests {
         assert_eq!(size_of::<RenderShadingGeometryHeader>(), 32);
         assert_eq!(size_of::<RenderShadingVertex>(), 64);
         assert_eq!(size_of::<RenderShadingPrimitive>(), 16);
+    }
+
+    #[test]
+    fn header_resolves_local_indices_against_the_packed_vertex_base() {
+        let header = RenderShadingGeometryHeader {
+            vertex_offset: 11,
+            vertex_count: 3,
+            ..Default::default()
+        };
+        assert_eq!(header.global_vertex_index(0), Some(11));
+        assert_eq!(header.global_vertex_index(2), Some(13));
+        assert_eq!(header.global_vertex_index(3), None);
     }
 
     #[test]

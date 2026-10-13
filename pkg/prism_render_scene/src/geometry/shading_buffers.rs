@@ -2,8 +2,10 @@
 //!
 //! The compute resolve pass binds three parallel storage buffers: a sparse,
 //! generation-addressed header table plus densely packed vertex and primitive
-//! arrays.  Headers reference their rows by absolute offset so a single
-//! dispatch can resolve any resident geometry.
+//! arrays. Headers reference their rows by absolute offset so a single
+//! dispatch can resolve any resident geometry. Primitive indices remain local
+//! to their geometry; a consumer must add the header's `vertex_offset` before
+//! indexing the packed vertex array.
 
 use bevy_ecs::{prelude::*, world::FromWorld};
 use bevy_render::{
@@ -166,6 +168,12 @@ mod tests {
         assert_eq!(buffers.headers.values()[2].flags, 0);
         assert_eq!(buffers.vertices.values().len(), 7);
         assert_eq!(buffers.primitives.values().len(), 3);
+
+        // Primitive rows are geometry-local even though vertex rows are
+        // packed globally. The second geometry's first vertex is row 3.
+        assert_eq!(second.global_vertex_index(0), Some(3));
+        assert_eq!(second.global_vertex_index(3), Some(6));
+        assert_eq!(second.global_vertex_index(4), None);
     }
 
     #[test]
