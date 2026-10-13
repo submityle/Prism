@@ -9,8 +9,8 @@
 use alloc::vec::Vec;
 
 use prism_ecs::{
-    entity::Entity, event::Events, query::With, resource::Resource, schedule::Schedule,
-    world::World,
+    entity::Entity, event::Events, query::With, resource::Resource, schedule::IntoSystemConfigs,
+    schedule::Schedule, world::World,
 };
 
 use crate::{
@@ -61,13 +61,19 @@ impl StateTreeTickReport {
 /// Installs the deterministic `StateTree` tick system into a host schedule.
 ///
 /// Register this once in the schedule that owns the simulation tick. The
-/// system is exclusive because it gathers and mutates ECS components through
-/// the whole-world [`World`] boundary. Calling this function more than once
+/// chained systems first rotate the lifecycle event buffer, then run the
+/// exclusive `StateTree` tick. Calling this function more than once
 /// intentionally installs more than one system; hosts should register a
 /// single owner for each simulation schedule.
 pub fn install_tick_system(schedule: &mut Schedule) -> &mut Schedule {
-    schedule.add_systems(run_state_tree_tick);
+    schedule.add_systems((rotate_lifecycle_events, run_state_tree_tick).chain());
     schedule
+}
+
+fn rotate_lifecycle_events(world: &mut World) {
+    if let Some(events) = world.get_resource_mut::<Events<StateTreeLifecycleNotification>>() {
+        events.update();
+    }
 }
 
 fn run_state_tree_tick(world: &mut World) {
@@ -284,6 +290,18 @@ mod tests {
             .get::<StateTreeInstance>(entity)
             .unwrap()
             .lifecycle_events()
+            .is_empty());
+
+        schedule.run(&mut world);
+        assert_eq!(
+            world
+                .resource::<Events<StateTreeLifecycleNotification>>()
+                .len(),
+            2
+        );
+        schedule.run(&mut world);
+        assert!(world
+            .resource::<Events<StateTreeLifecycleNotification>>()
             .is_empty());
     }
 }
