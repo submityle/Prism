@@ -578,6 +578,47 @@ fn budget_exhaustion_retains_unprocessed_event_and_clears_event_context() {
 }
 
 #[test]
+fn first_run_stabilizes_initial_eventless_before_queued_events() {
+    let root = StateNode::compound(
+        StateId(0),
+        None,
+        vec![StateId(1), StateId(2), StateId(3)],
+        StateId(1),
+        None,
+    );
+    let initial = StateNode::atomic(StateId(1), Some(StateId(0))).with_transition(Transition::new(
+        StateId(1),
+        TransitionTarget::State(StateId(2)),
+        Trigger::Eventless,
+        None,
+        0,
+        TransitionKind::External,
+    ));
+    let event_target =
+        StateNode::atomic(StateId(2), Some(StateId(0))).with_transition(Transition::new(
+            StateId(2),
+            TransitionTarget::State(StateId(3)),
+            Trigger::Event(EventId(9)),
+            None,
+            0,
+            TransitionKind::External,
+        ));
+    let final_state = StateNode::atomic(StateId(3), Some(StateId(0)));
+    let plan = TreeDef {
+        root: StateId(0),
+        nodes: vec![root, initial, event_target, final_state],
+    }
+    .compile()
+    .unwrap();
+    let mut instance = Instance::new(plan, 1, MicrostepLimit(4)).unwrap();
+    instance.send(Event::new(EventId(9))).unwrap();
+
+    instance.run(&mut NoopLifecycle).unwrap();
+
+    assert_eq!(instance.active_states(), &[StateId(0), StateId(3)]);
+}
+
+#[test]
 fn run_budget_includes_initial_eventless_stabilization() {
     let root = StateNode::compound(
         StateId(0),
