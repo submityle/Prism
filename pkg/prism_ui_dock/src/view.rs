@@ -144,12 +144,47 @@ impl<'a> DockView<'a> {
         self.layout
             .validate()
             .map_err(DockViewError::InvalidLayout)?;
+        self.validate_panel_registrations(&self.layout.root)?;
+        for window in &self.layout.floating {
+            self.validate_panel_registrations(&window.root)?;
+        }
+        if let Some(snapshot) = &self.layout.maximized {
+            self.validate_panel_registrations(&snapshot.root)?;
+            for window in &snapshot.floating {
+                self.validate_panel_registrations(&window.root)?;
+            }
+        }
+        for entry in &self.layout.autohide.entries {
+            if self.panels.resolve(&entry.panel).is_none() {
+                return Err(DockViewError::UnknownPanel(entry.panel.clone()));
+            }
+        }
 
         let mut root = Element::box_().class("pk-dock-root");
         root = root.child(self.render_node(&self.layout.root, DockSide::Left)?);
         root = root.child(self.render_floating()?);
         root = root.child(self.render_autohide()?);
         Ok(root)
+    }
+
+    fn validate_panel_registrations(&self, node: &DockNode) -> Result<(), DockViewError> {
+        match node {
+            DockNode::Empty | DockNode::Document { .. } => Ok(()),
+            DockNode::TabStack { tabs, .. } => {
+                for id in tabs {
+                    if self.panels.resolve(id).is_none() {
+                        return Err(DockViewError::UnknownPanel(id.clone()));
+                    }
+                }
+                Ok(())
+            }
+            DockNode::Split { children, .. } => {
+                for child in children {
+                    self.validate_panel_registrations(&child.node)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     fn render_node(&self, node: &DockNode, side: DockSide) -> Result<Element, DockViewError> {
