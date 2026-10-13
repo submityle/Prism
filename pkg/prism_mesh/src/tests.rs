@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use prism_render_driver::{IndexFormat, PrimitiveTopology, VertexFormat, VertexStepMode};
 
 use crate::{
-    Indices, Mesh, MeshBounds, MeshError, MeshVertexAttribute, VertexAttributeValues,
-    POSITION_ATTRIBUTE,
+    Indices, Mesh, MeshBounds, MeshError, MeshLimits, MeshVertexAttribute, StreamLayoutProfile,
+    VertexAttributeValues, VertexStreamKind, POSITION_ATTRIBUTE,
 };
 
 const POSITION: MeshVertexAttribute =
@@ -33,6 +33,44 @@ fn quad() -> Mesh {
         )
         .expect("uvs fit")
         .indexed(Indices::Uint16(vec![0, 1, 2, 2, 3, 0]))
+}
+
+#[test]
+fn profile_aware_limits_reject_excess_custom_streams() {
+    let mesh = Mesh::new(PrimitiveTopology::PointList)
+        .with_attribute(
+            MeshVertexAttribute::new("Custom0", VertexFormat::Float32, 0),
+            VertexAttributeValues::Float32(vec![0.0]),
+        )
+        .expect("custom0 fits")
+        .with_attribute(
+            MeshVertexAttribute::new("Custom1", VertexFormat::Float32, 1),
+            VertexAttributeValues::Float32(vec![0.0]),
+        )
+        .expect("custom1 fits")
+        .with_attribute(
+            MeshVertexAttribute::new("Custom2", VertexFormat::Float32, 2),
+            VertexAttributeValues::Float32(vec![0.0]),
+        )
+        .expect("custom2 fits")
+        .with_attribute(
+            MeshVertexAttribute::new("Custom3", VertexFormat::Float32, 3),
+            VertexAttributeValues::Float32(vec![0.0]),
+        )
+        .expect("custom3 fits");
+    let mut profile = StreamLayoutProfile::default();
+    profile.assign("Custom0", VertexStreamKind::Custom(0));
+    profile.assign("Custom1", VertexStreamKind::Custom(1));
+    profile.assign("Custom2", VertexStreamKind::Custom(2));
+    profile.assign("Custom3", VertexStreamKind::Custom(3));
+
+    assert_eq!(
+        mesh.validate_with_limits_for_profile(&MeshLimits::new(4, 4, 3), &profile),
+        Err(MeshError::StreamLimitExceeded {
+            actual: 4,
+            maximum: 3,
+        })
+    );
 }
 
 /// The layout the pipeline binds, in shader-location order, with the offsets the

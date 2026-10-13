@@ -320,8 +320,17 @@ impl Mesh {
 
     /// Validates the mesh against an explicit device/content profile.
     pub fn validate_with_limits(&self, limits: &MeshLimits) -> Result<(), MeshError> {
+        self.validate_with_limits_for_profile(limits, &StreamLayoutProfile::default())
+    }
+
+    /// Validates limits against the exact stream profile used for upload.
+    pub fn validate_with_limits_for_profile(
+        &self,
+        limits: &MeshLimits,
+        profile: &StreamLayoutProfile,
+    ) -> Result<(), MeshError> {
         self.validate()?;
-        let stream_count = self.stream_layouts(&StreamLayoutProfile::default()).len();
+        let stream_count = self.stream_layouts(profile).len();
         limits.validate_counts(self.vertex_count(), self.attribute_count(), stream_count)?;
         if !self.submeshes.is_empty() {
             let indices = self
