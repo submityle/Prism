@@ -22,17 +22,14 @@ use bevy_render::{
 use prism_render_architecture::gpu_scene::InstanceRecord;
 use prism_render_architecture::texture_streaming::TextureSemantic as StreamingTextureSemantic;
 use prism_render_material::{
-    GpuMaterialTexture, MaterialVtFormat, MaterialVtSourceSnapshot, NO_VIRTUAL_TEXTURE,
-    TextureSemantic as MaterialTextureSemantic,
+    GpuMaterialTexture, MaterialVtFormat, MaterialVtSourceSnapshot,
+    TextureSemantic as MaterialTextureSemantic, NO_VIRTUAL_TEXTURE,
 };
 use prism_render_visibility::GpuViewRecord;
 
 use crate::{
     geometry::{RenderShadingGeometry, RenderShadingGeometryRegistry},
-    material::{
-        runtime::RenderMaterialRegistry,
-        vt_source::MaterialVtSourceRegistry,
-    },
+    material::{runtime::RenderMaterialRegistry, vt_source::MaterialVtSourceRegistry},
     scene::RenderGpuScene,
     shading::{PrismShadingSettings, ViewVisibilityBuffer},
     visibility::runtime::UnifiedVisibilityState,
@@ -213,7 +210,10 @@ pub(crate) fn map_submitted_material_vt_feedback(
     device.map_buffer(&pending.buffer.slice(..), MapMode::Read, move |result| {
         let _ = sender.send(result);
     });
-    inner.state = Some(ReadbackState::Mapping(InFlightReadback { pending, receiver }));
+    inner.state = Some(ReadbackState::Mapping(InFlightReadback {
+        pending,
+        receiver,
+    }));
 }
 
 /// Consumes one complete multi-view feedback frame and writes only validated
@@ -253,7 +253,10 @@ pub(crate) fn collect_material_vt_feedback(
     let mapped = pending.buffer.slice(..).get_mapped_range().unwrap();
     let mut page_demands = Vec::new();
     for capture in &pending.views {
-        if !views.iter().any(|view| view.retained_view_entity == capture.retained) {
+        if !views
+            .iter()
+            .any(|view| view.retained_view_entity == capture.retained)
+        {
             continue;
         }
         decode_view_feedback(
@@ -289,10 +292,13 @@ fn decode_view_feedback(
 ) {
     let row_words = usize::try_from(capture.row_pitch / 4).unwrap_or(0);
     let ids_words = bytemuck::cast_slice::<u8, u32>(&bytes[capture.ids_offset as usize..]);
-    let metadata_words = bytemuck::cast_slice::<u8, u32>(&bytes[capture.metadata_offset as usize..]);
+    let metadata_words =
+        bytemuck::cast_slice::<u8, u32>(&bytes[capture.metadata_offset as usize..]);
     for y in 0..capture.size.y as usize {
         for x in 0..capture.size.x as usize {
-            let word = y.saturating_mul(row_words).saturating_add(x.saturating_mul(4));
+            let word = y
+                .saturating_mul(row_words)
+                .saturating_add(x.saturating_mul(4));
             let Some(ids) = ids_words.get(word..word.saturating_add(4)) else {
                 continue;
             };
@@ -348,12 +354,9 @@ fn decode_view_feedback(
                     layer: 0,
                     page_byte_cost: MATERIAL_VT_PAGE_BYTE_COST,
                 };
-                if let Ok(demands) = aggregate_material_vt_demands(
-                    &input,
-                    [sample],
-                    |_| None,
-                    frame,
-                ) {
+                if let Ok(demands) =
+                    aggregate_material_vt_demands(&input, [sample], |_| None, frame)
+                {
                     output.extend(demands);
                 }
             }
@@ -386,19 +389,27 @@ fn texture_semantic(value: u32) -> Option<StreamingTextureSemantic> {
         value if value == MaterialTextureSemantic::MetallicRoughness as u32 => {
             StreamingTextureSemantic::RoughnessMetalAo
         }
-        value if value == MaterialTextureSemantic::Normal as u32 => StreamingTextureSemantic::Normal,
+        value if value == MaterialTextureSemantic::Normal as u32 => {
+            StreamingTextureSemantic::Normal
+        }
         value if value == MaterialTextureSemantic::Occlusion as u32 => {
             StreamingTextureSemantic::RoughnessMetalAo
         }
-        value if value == MaterialTextureSemantic::ClearCoat as u32 => StreamingTextureSemantic::Color,
+        value if value == MaterialTextureSemantic::ClearCoat as u32 => {
+            StreamingTextureSemantic::Color
+        }
         value if value == MaterialTextureSemantic::ClearCoatRoughness as u32 => {
             StreamingTextureSemantic::RoughnessMetalAo
         }
         value if value == MaterialTextureSemantic::ClearCoatNormal as u32 => {
             StreamingTextureSemantic::Normal
         }
-        value if value == MaterialTextureSemantic::FaceShadowSdf as u32 => StreamingTextureSemantic::Mask,
-        value if value == MaterialTextureSemantic::MeasuredBrdf as u32 => StreamingTextureSemantic::Hdr,
+        value if value == MaterialTextureSemantic::FaceShadowSdf as u32 => {
+            StreamingTextureSemantic::Mask
+        }
+        value if value == MaterialTextureSemantic::MeasuredBrdf as u32 => {
+            StreamingTextureSemantic::Hdr
+        }
         value if value == MaterialTextureSemantic::IlluminationMask as u32 => {
             StreamingTextureSemantic::Mask
         }
@@ -423,7 +434,10 @@ fn decode_visibility_sample(
     let bary_x = (metadata[3] & 0xffff) as f32 / 65_535.0;
     let bary_y = (metadata[3] >> 16) as f32 / 65_535.0;
     let weights = [bary_x, bary_y, (1.0 - bary_x - bary_y).max(0.0)];
-    let uv = add3(add2(scale2(a.uv, weights[0]), scale2(b.uv, weights[1])), scale2(c.uv, weights[2]));
+    let uv = add3(
+        add2(scale2(a.uv, weights[0]), scale2(b.uv, weights[1])),
+        scale2(c.uv, weights[2]),
+    );
     if !uv.into_iter().all(f32::is_finite) {
         return None;
     }
@@ -431,8 +445,7 @@ fn decode_visibility_sample(
     let pa = screen_position(view, transform_point(instance, a.position))?;
     let pb = screen_position(view, transform_point(instance, b.position))?;
     let pc = screen_position(view, transform_point(instance, c.position))?;
-    let determinant = (pb[0] - pa[0]) * (pc[1] - pa[1])
-        - (pb[1] - pa[1]) * (pc[0] - pa[0]);
+    let determinant = (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0]);
     if !determinant.is_finite() || determinant.abs() <= f32::EPSILON {
         return None;
     }
@@ -511,13 +524,21 @@ mod tests {
     use super::*;
     use crate::geometry::{RenderShadingPrimitive, RenderShadingVertex};
     use prism_render_architecture::abi::GenerationalHandle;
-    use prism_render_architecture::gpu_scene::{GeometryHandle, SceneMaterialHandle, SceneTransform};
+    use prism_render_architecture::gpu_scene::{
+        GeometryHandle, SceneMaterialHandle, SceneTransform,
+    };
 
     fn instance() -> InstanceRecord {
         InstanceRecord {
             current_transform: SceneTransform::IDENTITY,
-            geometry: GeometryHandle { index: 2, generation: 1 },
-            material: SceneMaterialHandle { index: 7, generation: 1 },
+            geometry: GeometryHandle {
+                index: 2,
+                generation: 1,
+            },
+            material: SceneMaterialHandle {
+                index: 7,
+                generation: 1,
+            },
             ..Default::default()
         }
     }
@@ -543,11 +564,29 @@ mod tests {
     fn triangle(flags: u32) -> RenderShadingGeometry {
         RenderShadingGeometry {
             vertices: vec![
-                RenderShadingVertex { position: [0.0, 0.0, 0.0], uv: [0.0, 0.0], flags, ..Default::default() },
-                RenderShadingVertex { position: [1.0, 0.0, 0.0], uv: [1.0, 0.0], flags, ..Default::default() },
-                RenderShadingVertex { position: [0.0, 1.0, 0.0], uv: [0.0, 1.0], flags, ..Default::default() },
+                RenderShadingVertex {
+                    position: [0.0, 0.0, 0.0],
+                    uv: [0.0, 0.0],
+                    flags,
+                    ..Default::default()
+                },
+                RenderShadingVertex {
+                    position: [1.0, 0.0, 0.0],
+                    uv: [1.0, 0.0],
+                    flags,
+                    ..Default::default()
+                },
+                RenderShadingVertex {
+                    position: [0.0, 1.0, 0.0],
+                    uv: [0.0, 1.0],
+                    flags,
+                    ..Default::default()
+                },
             ],
-            primitives: vec![RenderShadingPrimitive { indices: [0, 1, 2], flags }],
+            primitives: vec![RenderShadingPrimitive {
+                indices: [0, 1, 2],
+                flags,
+            }],
             flags,
         }
     }

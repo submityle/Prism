@@ -87,8 +87,8 @@ impl Plugin for PrismMaterialPlugin {
                 ),
             );
         render_app.add_systems(
-                RenderGraph,
-                (
+            RenderGraph,
+            (
                 request_material_vt_feedback_readback
                     .after(bevy_core_pipeline::schedule::camera_driver)
                     .in_set(RenderGraphSystems::Render),
