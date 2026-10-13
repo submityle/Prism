@@ -39,6 +39,8 @@ pub mod validation;
 pub mod virtual_geometry;
 /// Deterministic static mesh clusterization and page packing.
 pub mod virtual_geometry_builder;
+/// QEM-backed static virtual-geometry LOD chain construction.
+pub mod virtual_geometry_lod;
 
 pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
 pub use ddc::{Ddc, DdcError, DerivedDataCache, LocalDdc};
@@ -68,4 +70,8 @@ pub use virtual_geometry::{
 pub use virtual_geometry_builder::{
     build_static_virtual_geometry, StaticClusterBuildError, StaticClusterBuildSettings,
     STATIC_CLUSTER_PAYLOAD_MAGIC, STATIC_CLUSTER_PAYLOAD_VERSION,
+};
+pub use virtual_geometry_lod::{
+    build_static_virtual_geometry_lod_chain, StaticVirtualGeometryLod,
+    StaticVirtualGeometryLodError,
 };
