@@ -1696,8 +1696,7 @@ mod server {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     /// Primary asset: a mesh produced from a `scene` or `cyc` source.
-    #[derive(Debug, PartialEq, Eq)]
-    #[derive(Clone)]
+    #[derive(Debug, PartialEq, Eq, Clone)]
     struct Mesh {
         verts: u32,
     }
