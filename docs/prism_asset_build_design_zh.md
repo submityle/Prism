@@ -26,6 +26,26 @@
 
 本文的 M0/M1…路线图是验收目标，不代表这些能力已经存在；只有有代码、测试和运行时对接的切片才可标为完成。
 
+### 可执行验收矩阵（2026-10-13）
+
+矩阵中的“已实现”仅表示表列出的本地切片有实现路径及回归测试，不代表 AAA 生产成熟度、跨平台保证或性能达标。`部分实现` 表示存在可验证子集；`未实现` 表示当前没有可作为产品能力验收的端到端实现。代码/测试路径是复核入口，不把本节设计要求当成证据。
+
+| 能力边界 | 状态 | 当前实现与可复核证据 | 尚未满足的验收条件 |
+| --- | --- | --- | --- |
+| Artifact 身份、确定性 DAG 规划与处理器执行 | 已实现（本地核心切片） | `prism_asset_build_core/src/hash.rs`、`graph.rs`；测试 `recipe_key_is_deterministic_and_all_declared_inputs_matter`、`topological_order_is_stable_across_insertion_orders`、`reports_missing_dependencies`、`reports_cycles_with_stable_job_ids`、`executes_real_transforms_and_preserves_declared_input_order` | 完整导入插件协议、字段级失效分析、超大图/百万资产规模证据未完成 |
+| DAG wave 并行 | 已实现（BuildGraph 层） | `graph.rs`；`parallel_execution_matches_serial_outputs`、`parallel_execution_reports_smallest_failed_job_in_wave`、`parallel_execution_rejects_zero_concurrency`、`parallel_execution_with_limit_matches_serial_outputs` | 该 API 只执行 DAG processor，不负责 DDC/CAS/Revision 发布 |
+| BuildExecutor 并行执行 | 部分实现（代码已有，专属验收不足） | `executor.rs` 提供 `execute_parallel` / `execute_parallel_with_limit`，对 ready wave 并行准备 DDC/CAS 处理，再按稳定顺序更新 DDC 与发布；当前 core 测试尚无针对这些 API 的专项并发、缓存损坏/命中及失败排序回归 | 需补串并行制品/Manifest 等价、限流、并行失败确定性、缓存损坏恢复和发布原子性测试；不代表跨进程或远程调度 |
+| 本地 CAS、DDC 与 BuildExecutor 缓存校验 | 部分实现 | `cas.rs`、`ddc.rs`、`executor.rs`；`detects_corruption_on_read`、`persists_and_restores_across_multiple_opens`、`ddc_hit_skips_processor_and_publishes_next_revision`、`corrupt_cas_blob_is_rebuilt_instead_of_returned_as_a_hit` | 分层/驱逐、远端 CAS、真实跨进程与跨平台协调测试未完成 |
+| SourceSnapshot / Recipe / PNG 导入垂直链 | 部分实现 | `source.rs`、`recipe.rs`、`import/image.rs`、`executor.rs`；`plan_binds_recipe_identity_and_declares_source_dependency`、`plan_rejects_a_recipe_for_a_different_processor`、`source_snapshot_and_recipe_drive_a_real_build_executor_chain`、`png_importer_publishes_a_canonical_image_artifact` | 当前 PNG canonical RGBA8 切片不代表通用 importer、纹理 mip/压缩/平台 Cook 或 runtime texture loader 已完成 |
+| 本地 Revision 事务与恢复 | 部分实现 | `transaction.rs`、`journal.rs`；`publishes_and_failed_transaction_keeps_previous_revision`、`reopening_after_pointer_publish_recovers_missing_commit_marker`、`reopening_truncates_a_partial_journal_tail`、`reopening_fails_closed_on_a_corrupt_journal_frame`、`separate_store_handles_serialize_concurrent_revision_publication` | 完整磁盘故障注入、非 Unix 等价锁语义、远程幂等协议和完整事务级恢复仍未完成 |
+| Runtime Manifest / raw 容器打包桥接 | 部分实现 | `package.rs`、`prism_asset_container`；`packages_manifest_cas_and_runtime_manifest_end_to_end`、`packaging_is_deterministic_across_mapping_order`、`package_runtime_consumes_chunk_capacity_alignment_and_manifest_routes` | 现有 raw v1/v2 切片不是冻结发行协议；压缩、加密、签名、Provenance、Patch/DLC 与发布回滚未实现 |
+| CLI | 部分实现（本地 PNG 工作流） | `prism_asset_build_cli/src/pipeline.rs`；`plan_is_stable_for_same_source`、`build_publishes_then_reuses_verified_ddc_artifacts`、`invalid_png_does_not_publish_a_revision` | 不代表通用 Build/Cook CLI；JSON 事件协议、目标平台 Cook、质量报告与发行命令未完成 |
+| GPU 直通/解压、远程 Build Farm、完整 Cook/发行链 | 未实现 | 当前资产构建代码中无可验收的端到端能力；目标规格见本文 §12–§18 | 需分别提供实现、失败路径、运行时接线及可重复验收证据后才能升级状态 |
+
+失败原子性采用精确定义：Processor 失败后不得发布新 Revision；`processor_failure_does_not_publish_revision` 与集成测试 `tests/publication_atomicity.rs::failed_later_job_does_not_publish_a_new_revision` 覆盖串行执行时失败不推进发布指针。缓存写入不是事务回滚，也不得描述成所有磁盘字节均回滚；BuildExecutor 并行路径的等价及失败原子性仍需单独验收。
+
+运行时资产内核的加载、热重载、流送和容器消费状态以 [`prism_asset_design_zh.md`](prism_asset_design_zh.md) 的“实施状态”为准；本矩阵只判定 Asset Build 与其运行时交付边界，不将两侧目标规格合并成已交付能力。
+
 ---
 
 ## 1. 定位与核心结论

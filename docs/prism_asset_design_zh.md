@@ -32,6 +32,8 @@
 
 因此本文下方路线图仍是目标规格；任何“已支持”表述均以上述实现状态和对应测试为准。
 
+Asset Build 与本运行时资产内核的状态分开验收：构建/缓存/Revision/打包的实现矩阵及测试证据见 [`prism_asset_build_design_zh.md`](prism_asset_build_design_zh.md) 的“可执行验收矩阵”。该矩阵不替代本节运行时 EDL、热重载、流送和容器消费的独立状态说明。
+
 ---
 
 ## 目录
