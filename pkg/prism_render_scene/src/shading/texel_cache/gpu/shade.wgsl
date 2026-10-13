@@ -17,7 +17,7 @@ struct ShadeJob {
     epoch: u32,
     _proof_padding: u32,
     vertex_indices: vec3<u32>,
-    _vertex_padding: u32,
+    vertex_base: u32,
     uv_min: vec2<f32>,
     uv_max: vec2<f32>,
     light_direction: vec3<f32>,
@@ -74,9 +74,22 @@ fn shade_pages(
         return;
     }
 
-    let v0 = vertices[job.vertex_indices.x];
-    let v1 = vertices[job.vertex_indices.y];
-    let v2 = vertices[job.vertex_indices.z];
+    // Primitive indices are local to the geometry. The CPU ABI validation
+    // checks this translation too, while these guards keep a malformed raw
+    // job from wrapping or indexing beyond the packed vertex rows.
+    if (job.vertex_base > 0xffffffffu - job.vertex_indices.x ||
+        job.vertex_base > 0xffffffffu - job.vertex_indices.y ||
+        job.vertex_base > 0xffffffffu - job.vertex_indices.z) {
+        return;
+    }
+    let vertex_indices = vec3<u32>(job.vertex_base) + job.vertex_indices;
+    let vertex_count = arrayLength(&vertices);
+    if (any(vertex_indices >= vec3<u32>(vertex_count))) {
+        return;
+    }
+    let v0 = vertices[vertex_indices.x];
+    let v1 = vertices[vertex_indices.y];
+    let v2 = vertices[vertex_indices.z];
     let extent = vec2<f32>(job.extent);
     let uv = job.uv_min + (vec2<f32>(texel) + vec2<f32>(0.5)) / extent * (job.uv_max - job.uv_min);
     let bary = barycentrics_for_uv(uv, v0.uv, v1.uv, v2.uv);

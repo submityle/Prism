@@ -7,7 +7,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::RenderShadingGeometry;
+use crate::{RenderShadingGeometry, RenderShadingGeometryHeader};
 
 use super::super::chart::{FaceChart, FaceChartError};
 
@@ -30,9 +30,10 @@ pub struct ShadeJob {
     /// Material/light epoch expected by the page table.
     pub epoch: u32,
     pub _proof_padding: u32,
-    /// Three indices into the canonical `RenderShadingVertex` table.
+    /// Three geometry-local indices from the primitive row.
     pub vertex_indices: [u32; 3],
-    pub _vertex_padding: u32,
+    /// Absolute base of this geometry in the packed render-world vertex table.
+    pub vertex_base: u32,
     /// Local chart UV bounds.
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
@@ -70,10 +71,48 @@ pub enum ShadeJobFromDensityError {
 }
 
 impl ShadeJob {
+    /// Resolves the primitive-local indices against this job's packed vertex
+    /// base. Dispatch validation and the shader use this same checked rule.
+    #[must_use]
+    pub fn global_vertex_indices(self) -> Option<[u32; 3]> {
+        let [a, b, c] = self.vertex_indices;
+        Some([
+            self.vertex_base.checked_add(a)?,
+            self.vertex_base.checked_add(b)?,
+            self.vertex_base.checked_add(c)?,
+        ])
+    }
+
     /// Builds a real shade job from the same geometry rows used by resolve.
     pub fn from_face(
         geometry: &RenderShadingGeometry,
         chart: FaceChart,
+        atlas_origin: [u32; 2],
+        page_index: u32,
+        generation: u32,
+        epoch: u32,
+        light_direction: [f32; 3],
+        light_radiance: [f32; 3],
+    ) -> Result<Self, ShadeJobError> {
+        Self::from_face_with_vertex_base(
+            geometry,
+            chart,
+            0,
+            atlas_origin,
+            page_index,
+            generation,
+            epoch,
+            light_direction,
+            light_radiance,
+        )
+    }
+
+    /// Builds a shade job whose primitive-local indices resolve through an
+    /// absolute base in the packed render-world vertex table.
+    pub fn from_face_with_vertex_base(
+        geometry: &RenderShadingGeometry,
+        chart: FaceChart,
+        vertex_base: u32,
         atlas_origin: [u32; 2],
         page_index: u32,
         generation: u32,
@@ -136,7 +175,7 @@ impl ShadeJob {
             epoch,
             _proof_padding: 0,
             vertex_indices: primitive.indices,
-            _vertex_padding: 0,
+            vertex_base,
             uv_min: chart.uv_min,
             uv_max: chart.uv_max,
             light_direction,
@@ -144,6 +183,44 @@ impl ShadeJob {
             light_radiance,
             _light_radiance_padding: 0.0,
         })
+    }
+
+    /// Builds a shade job directly from the production geometry header.
+    /// Primitive indices stay local; only the header's packed vertex offset is
+    /// copied into the explicit ABI field.
+    pub fn from_face_with_header(
+        geometry: &RenderShadingGeometry,
+        header: RenderShadingGeometryHeader,
+        chart: FaceChart,
+        atlas_origin: [u32; 2],
+        page_index: u32,
+        generation: u32,
+        epoch: u32,
+        light_direction: [f32; 3],
+        light_radiance: [f32; 3],
+    ) -> Result<Self, ShadeJobError> {
+        let primitive = geometry
+            .primitives
+            .get(usize::from(chart.face))
+            .ok_or(ShadeJobError::InvalidFace)?;
+        if primitive
+            .indices
+            .into_iter()
+            .any(|index| header.global_vertex_index(index).is_none())
+        {
+            return Err(ShadeJobError::InvalidFace);
+        }
+        Self::from_face_with_vertex_base(
+            geometry,
+            chart,
+            header.vertex_offset,
+            atlas_origin,
+            page_index,
+            generation,
+            epoch,
+            light_direction,
+            light_radiance,
+        )
     }
 
     /// Validates the independently derived chart before job construction.
@@ -159,12 +236,42 @@ impl ShadeJob {
         light_direction: [f32; 3],
         light_radiance: [f32; 3],
     ) -> Result<Self, ShadeJobFromDensityError> {
+        Self::from_face_with_density_and_vertex_base(
+            geometry,
+            face,
+            texels_per_uv,
+            max_extent,
+            0,
+            atlas_origin,
+            page_index,
+            generation,
+            epoch,
+            light_direction,
+            light_radiance,
+        )
+    }
+
+    /// Density-based variant for a geometry stored in packed global rows.
+    pub fn from_face_with_density_and_vertex_base(
+        geometry: &RenderShadingGeometry,
+        face: u32,
+        texels_per_uv: f32,
+        max_extent: u32,
+        vertex_base: u32,
+        atlas_origin: [u32; 2],
+        page_index: u32,
+        generation: u32,
+        epoch: u32,
+        light_direction: [f32; 3],
+        light_radiance: [f32; 3],
+    ) -> Result<Self, ShadeJobFromDensityError> {
         let chart =
             super::super::chart::build_face_chart(geometry, face, texels_per_uv, max_extent)
                 .map_err(ShadeJobFromDensityError::Chart)?;
-        Self::from_face(
+        Self::from_face_with_vertex_base(
             geometry,
             chart,
+            vertex_base,
             atlas_origin,
             page_index,
             generation,
@@ -178,7 +285,7 @@ impl ShadeJob {
 
 #[cfg(test)]
 mod tests {
-    use core::mem::size_of;
+    use core::mem::{offset_of, size_of};
 
     use super::*;
     use crate::{RenderShadingPrimitive, RenderShadingVertex};
@@ -202,6 +309,58 @@ mod tests {
     #[test]
     fn shade_job_layout_is_the_explicit_wgsl_abi() {
         assert_eq!(size_of::<ShadeJob>(), 96);
+        assert_eq!(offset_of!(ShadeJob, vertex_indices), 32);
+        assert_eq!(offset_of!(ShadeJob, vertex_base), 44);
+        assert_eq!(offset_of!(ShadeJob, uv_min), 48);
+    }
+
+    #[test]
+    fn shade_job_keeps_primitive_indices_local_and_carries_the_packed_base() {
+        let geometry = geometry();
+        let chart = super::super::super::chart::build_face_chart(&geometry, 0, 4.0, 4).unwrap();
+        let job = ShadeJob::from_face_with_header(
+            &geometry,
+            RenderShadingGeometryHeader {
+                vertex_offset: 19,
+                vertex_count: 3,
+                ..Default::default()
+            },
+            chart,
+            [0, 0],
+            0,
+            1,
+            1,
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+        )
+        .unwrap();
+        assert_eq!(job.vertex_indices, [0, 1, 2]);
+        assert_eq!(job.vertex_base, 19);
+        assert_eq!(job.global_vertex_indices(), Some([19, 20, 21]));
+    }
+
+    #[test]
+    fn shade_job_rejects_a_header_that_cannot_cover_the_primitive() {
+        let geometry = geometry();
+        let chart = super::super::super::chart::build_face_chart(&geometry, 0, 4.0, 4).unwrap();
+        assert_eq!(
+            ShadeJob::from_face_with_header(
+                &geometry,
+                RenderShadingGeometryHeader {
+                    vertex_offset: 19,
+                    vertex_count: 2,
+                    ..Default::default()
+                },
+                chart,
+                [0, 0],
+                0,
+                1,
+                1,
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+            ),
+            Err(ShadeJobError::InvalidFace)
+        );
     }
 
     #[test]

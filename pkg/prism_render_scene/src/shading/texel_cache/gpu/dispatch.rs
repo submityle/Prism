@@ -50,7 +50,7 @@ pub struct ShadeDispatchConfig {
     pub max_jobs: u32,
     /// Maximum number of indexed page-table entries.
     pub max_pages: u32,
-    /// Maximum number of canonical shading vertices referenced by jobs.
+    /// Maximum number of packed global shading vertices uploaded for jobs.
     pub max_vertices: u32,
 }
 
@@ -89,7 +89,8 @@ pub enum ShadeDispatchError {
     /// A job would write outside the atlas.  Partial clipping is rejected so
     /// a page can never become apparently resident with missing texels.
     AtlasBoundsExceeded,
-    /// A job references a vertex outside the uploaded canonical vertex table.
+    /// A job's local primitive index plus its packed vertex base is outside
+    /// the uploaded global vertex table, or that addition would overflow.
     InvalidVertexIndex,
     /// A previous `prepare` has not yet been consumed by `record` or canceled.
     BatchAlreadyPrepared,
@@ -114,6 +115,19 @@ fn checked_buffer_bytes(count: usize, element_size: usize) -> Result<u64, ShadeD
 
 fn non_zero_buffer_size(bytes: u64) -> u64 {
     bytes.max(1)
+}
+
+fn validate_vertex_rows(job: ShadeJob, vertex_count: usize) -> Result<(), ShadeDispatchError> {
+    let Some(global_indices) = job.global_vertex_indices() else {
+        return Err(ShadeDispatchError::InvalidVertexIndex);
+    };
+    if global_indices
+        .into_iter()
+        .any(|index| usize::try_from(index).map_or(true, |index| index >= vertex_count))
+    {
+        return Err(ShadeDispatchError::InvalidVertexIndex);
+    }
+    Ok(())
 }
 
 /// A prepared batch that has been uploaded and is ready to record exactly
@@ -321,13 +335,7 @@ impl ShadeDispatch {
             {
                 return Err(ShadeDispatchError::AtlasBoundsExceeded);
             }
-            if job
-                .vertex_indices
-                .into_iter()
-                .any(|index| index as usize >= vertices.len())
-            {
-                return Err(ShadeDispatchError::InvalidVertexIndex);
-            }
+            validate_vertex_rows(*job, vertices.len())?;
         }
         Ok(())
     }
@@ -498,5 +506,26 @@ mod tests {
             3,
         ];
         assert_eq!(groups, [3, 2, 3]);
+    }
+
+    #[test]
+    fn validates_local_indices_against_the_packed_vertex_base() {
+        use bytemuck::Zeroable;
+
+        let mut job = ShadeJob::zeroed();
+        job.vertex_base = 7;
+        job.vertex_indices = [0, 2, 3];
+        assert_eq!(validate_vertex_rows(job, 11), Ok(()));
+        assert_eq!(
+            validate_vertex_rows(job, 10),
+            Err(ShadeDispatchError::InvalidVertexIndex)
+        );
+
+        job.vertex_base = u32::MAX;
+        job.vertex_indices = [1, 0, 0];
+        assert_eq!(
+            validate_vertex_rows(job, usize::MAX),
+            Err(ShadeDispatchError::InvalidVertexIndex)
+        );
     }
 }

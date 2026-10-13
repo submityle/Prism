@@ -20,7 +20,9 @@ use wgpu::{
     TextureUsages, TextureViewDescriptor, TextureViewDimension,
 };
 
-use crate::{RenderShadingGeometry, RenderShadingPrimitive, RenderShadingVertex};
+use crate::{
+    RenderShadingGeometry, RenderShadingGeometryHeader, RenderShadingPrimitive, RenderShadingVertex,
+};
 
 use super::page_table::GpuShadePageEntry;
 use super::shade::ShadeJob;
@@ -127,8 +129,26 @@ fn gpu_shade_writes_irradiance_only_for_valid_texels_and_proofs() {
 
     let geometry = geometry();
     let chart = build_face_chart(&geometry, 0, 4.0, 4).expect("unit triangle chart");
-    let valid = ShadeJob::from_face(
+    // The first three rows deliberately form the same UV triangle with
+    // back-facing normals. If the shader treats local indices as global, the
+    // valid page receives no irradiance; only adding the production header
+    // offset reaches the intended packed rows.
+    let mut decoy_rows = geometry.vertices.clone();
+    for vertex in &mut decoy_rows {
+        vertex.normal = [0.0, 0.0, -1.0];
+    }
+    let packed_vertices = decoy_rows
+        .into_iter()
+        .chain(geometry.vertices.iter().copied())
+        .collect::<Vec<_>>();
+    let packed_header = RenderShadingGeometryHeader {
+        vertex_offset: 3,
+        vertex_count: geometry.vertices.len() as u32,
+        ..Default::default()
+    };
+    let valid = ShadeJob::from_face_with_header(
         &geometry,
+        packed_header,
         chart,
         [0, 0],
         0,
@@ -138,8 +158,9 @@ fn gpu_shade_writes_irradiance_only_for_valid_texels_and_proofs() {
         [4.0, 2.0, 1.0],
     )
     .expect("valid shade job");
-    let stale = ShadeJob::from_face(
+    let stale = ShadeJob::from_face_with_header(
         &geometry,
+        packed_header,
         chart,
         [4, 0],
         1,
@@ -149,8 +170,9 @@ fn gpu_shade_writes_irradiance_only_for_valid_texels_and_proofs() {
         [4.0, 2.0, 1.0],
     )
     .expect("stale-proof shade job");
-    let clipped = ShadeJob::from_face(
+    let clipped = ShadeJob::from_face_with_header(
         &geometry,
+        packed_header,
         chart,
         [6, 0],
         2,
@@ -196,8 +218,8 @@ fn gpu_shade_writes_irradiance_only_for_valid_texels_and_proofs() {
         usage: BufferUsages::STORAGE,
     });
     let vertices_buffer = device.create_buffer_init(&BufferInitDescriptor {
-        label: Some("shade-cache canonical shading vertices"),
-        contents: cast_slice(&geometry.vertices),
+        label: Some("shade-cache packed global shading vertices"),
+        contents: cast_slice(&packed_vertices),
         usage: BufferUsages::STORAGE,
     });
     let atlas = device.create_texture(&TextureDescriptor {

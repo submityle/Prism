@@ -249,10 +249,18 @@ use super::{
     },
 };
 
+use super::texel_cache::{
+    extract_shade_dispatch_inputs, prepare_shade_dispatch, shade_dispatch_pass,
+    ShadeDispatchProductionGpu, ShadeDispatchProductionSettings,
+};
+
 pub struct PrismShadingPlugin;
 
 impl Plugin for PrismShadingPlugin {
     fn build(&self, app: &mut App) {
+        // Main-world page producers fill this explicit input seam. The render
+        // world receives only a cloned frame snapshot during extraction.
+        app.init_resource::<super::texel_cache::ShadeDispatchInputs>();
         embedded_asset!(app, "../shaders/visibility_raster.wesl");
         embedded_asset!(app, "../shaders/material_classification.wesl");
         embedded_asset!(app, "../shaders/brdf.wesl");
@@ -261,6 +269,11 @@ impl Plugin for PrismShadingPlugin {
         embedded_asset!(app, "../shaders/hair.wesl");
         embedded_asset!(app, "../shaders/water.wesl");
         embedded_asset!(app, "../shaders/clearcoat.wesl");
+        // `material_sample.wesl` imports the VT resolver by its canonical
+        // module path. Register the imported module in the production asset
+        // graph as well as in off-GPU parity tests, otherwise runtime shader
+        // resolution depends on a test-only registration.
+        embedded_asset!(app, "../shaders/material_virtual_texture.wesl");
         embedded_asset!(app, "../shaders/material_sample.wesl");
         embedded_asset!(app, "../shaders/tangent.wesl");
         embedded_asset!(app, "../shaders/surface.wesl");
@@ -360,6 +373,9 @@ impl Plugin for PrismShadingPlugin {
             .init_gpu_resource::<SpecializedRenderPipelines<ShadingCompositePipeline>>()
             .init_gpu_resource::<SpecializedRenderPipelines<OitCompositePipeline>>()
             .init_resource::<PrismShadingSettings>()
+            .init_resource::<super::texel_cache::ShadeDispatchInputs>()
+            .init_resource::<ShadeDispatchProductionSettings>()
+            .init_resource::<ShadeDispatchProductionGpu>()
             .init_resource::<PrismShadingDiagnostics>()
             .init_resource::<ClassificationDiagnosticsReadback>()
             .init_resource::<ResolveMotionHistory>()
@@ -422,6 +438,10 @@ impl Plugin for PrismShadingPlugin {
             .add_systems(
                 RenderStartup,
                 (
+                    // The writer is lazily allocated in PrepareResources when
+                    // the opt-in setting is enabled; keeping this resource in
+                    // the normal render lifecycle makes the no-input state
+                    // explicit without allocating a fake atlas.
                     init_visibility_raster.after(MeshPipelineSystems),
                     init_oit_forward_pipeline.after(MeshPipelineSystems),
                     init_material_classification_pipeline
@@ -501,6 +521,13 @@ impl Plugin for PrismShadingPlugin {
                     init_prefiltered_env_map,
                     init_env_prefilter_pipeline,
                 ),
+            )
+            .add_systems(ExtractSchedule, extract_shade_dispatch_inputs)
+            .add_systems(
+                Render,
+                prepare_shade_dispatch
+                    .after(crate::geometry::upload_shading_geometry_buffers)
+                    .in_set(RenderSystems::PrepareResources),
             )
             .add_systems(
                 RenderStartup,
@@ -1203,6 +1230,11 @@ impl Plugin for PrismShadingPlugin {
             (
                 shadow_depth_pass.before(visibility_raster_pass),
                 visibility_raster_pass.before(bevy_core_pipeline::Core3dSystems::MainPass),
+                // The production texel writer has no current resolve/material
+                // consumer, but its explicit integration seam still records
+                // before resolve/main when a real input frame is supplied.
+                // Publication remains completion-gated in the producer.
+                shade_dispatch_pass.before(dispatch_shading_resolve),
                 dispatch_material_classification
                     .after(visibility_raster_pass)
                     .before(bevy_core_pipeline::Core3dSystems::MainPass),

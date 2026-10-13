@@ -805,6 +805,46 @@ impl RevisionStore {
         }
         Ok(requirement)
     }
+
+    fn validate_new_transaction(
+        &self,
+        transaction_id: TransactionId,
+        revision: BuildRevision,
+    ) -> Result<(), PublishError> {
+        for record in self.journal.scan()? {
+            match record {
+                JournalRecord::Prepare {
+                    transaction_id: candidate_id,
+                    revision: candidate_revision,
+                    ..
+                }
+                | JournalRecord::Commit {
+                    transaction_id: candidate_id,
+                    revision: candidate_revision,
+                    ..
+                }
+                | JournalRecord::Abort {
+                    transaction_id: candidate_id,
+                    revision: candidate_revision,
+                    ..
+                } => {
+                    if candidate_id == transaction_id {
+                        return Err(PublishError::Invalid(
+                            "transaction id has already been used",
+                        ));
+                    }
+                    if candidate_revision == revision
+                        && matches!(record, JournalRecord::Prepare { .. })
+                    {
+                        return Err(PublishError::Invalid(
+                            "revision already has a prepared transaction",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct PublishTransaction {
@@ -965,6 +1005,9 @@ impl PublishTransaction {
         let publication_hash = publication
             .as_ref()
             .map(PublicationDescriptor::content_hash);
+
+        self.store
+            .validate_new_transaction(self.transaction_id, self.revision)?;
 
         // From this point onward recovery can distinguish an interrupted
         // publication from an ordinary unused CAS blob.
@@ -1661,6 +1704,17 @@ mod tests {
                 .unwrap(),
             TransactionState::Unknown
         );
+        let mut reused =
+            store.begin_with_id(BuildRevision(1), Some(BuildRevision(0)), transaction_id);
+        reused
+            .stage(AssetId(2), descriptor(b"reused"), b"reused".to_vec())
+            .unwrap();
+        assert!(matches!(
+            reused.commit(),
+            Err(PublishError::Invalid(
+                "transaction id has already been used"
+            ))
+        ));
         fs::remove_dir_all(dir).unwrap();
     }
 

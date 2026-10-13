@@ -1339,6 +1339,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 > **2026-10-13 状态修订**：P3-a 表格中的“当前 producer 尚未消费可见性 feedback”是旧审计口径；当前代码已由 `material/virtual_texture/feedback.rs` 从 visibility attachments 做异步 GPU readback、校验 scene/geometry/material generation、执行 UV/导数 demand aggregation，并在 `PrepareResources` 前交给 Material-VT producer。尚未完成的边界是完整主 render pass 端到端硬件门禁，以及独立 P3 shade-cache 的 atlas/page-table 消费，不是 Material-VT feedback bridge 本身。
 
+> **P3-a production writer 修订**：`shading/texel_cache/production.rs` 与 `production_resources.rs` 现已接入 render-world extraction、真实 geometry/light 校验、固定容量 GPU shade writer、Core3d 记录节点和 completion 状态机；无显式 `ShadeDispatchInputs` 时保持 `NoInput`，不会猜测场景或伪造页。当前仍未完成的是上游 object/material/face 可见性 producer、shade-page publication/consumer 与主 resolve 的完整端到端门禁。
+
 **破坏性说明**：屏幕空间 über 路径（§8）**保留为缓存未命中/视角相关的回退路径**，不是并行栈，不维护旧着色 API；对象空间缓存是其上的加法 pass。弱平台关闭开关即纯 §8 路径。
 
 ### 14.11 风险 → 高性能/高质解决方案总表
