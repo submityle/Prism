@@ -857,8 +857,9 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 - 退出标准：标准网格在 `Compatible` 档可渲染并进入 Golden 图测试；分流使深度 pass 带宽下降可测。当前已具备多流 GPU draw 验证，带宽基准仍待补齐。
 
 ### M2：虚拟几何资产格式落盘（6–10 周）
-- 定义 `VirtualGeometryAsset` 二进制格式与页 ABI；与 `prism_virtual_geometry_gpu` 对齐。✅ v1 编解码契约已落地
-- 资产构建 Processor：baseline Cluster 化、固定页分页、共享溢出安全 bounds、normal cone 与 ABI checked conversion 已落地；DAG 多级简化、量化、fallback mesh 仍待实现。
+- 定义 `VirtualGeometryAsset` 二进制格式与页 ABI；与 `prism_virtual_geometry_gpu` 对齐。✅ 资产/页 ABI 与 CLST v2 量化 payload 编解码契约已落地
+- 资产构建 Processor：baseline Cluster 化、固定页分页、共享溢出安全 bounds、normal cone、量化 payload 与 ABI checked conversion 已落地；DAG 多级简化、独立 fallback mesh 仍待实现。
+- 构建器拒绝低于单三角形 3 顶点的 cluster 上限，并以共享 payload codec 作为唯一产出路径，避免构建产物与运行时解码器漂移。
 - 页表与流送最小闭环（先本地文件，后容器）。
 - 退出标准：同一高模在 `Standard` 档以虚拟几何渲染；缺页渲染祖先无洞。
 

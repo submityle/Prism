@@ -24,6 +24,15 @@ pub enum MeshError {
         /// The offending attribute's semantic name.
         attribute: &'static str,
     },
+    /// A floating-point attribute contains NaN or infinity.
+    NonFiniteAttributeValue {
+        /// The offending attribute's semantic name.
+        attribute: &'static str,
+        /// The vertex containing the non-finite component.
+        vertex: usize,
+        /// The component within that vertex.
+        component: usize,
+    },
     /// An index points outside the mesh's vertices.
     IndexOutOfRange {
         /// The largest index in the list.
@@ -143,6 +152,14 @@ impl fmt::Display for MeshError {
                     "attribute {attribute} does not match its declared format"
                 )
             }
+            Self::NonFiniteAttributeValue {
+                attribute,
+                vertex,
+                component,
+            } => write!(
+                f,
+                "attribute {attribute} vertex {vertex} component {component} is not finite"
+            ),
             Self::IndexOutOfRange {
                 max_index,
                 vertex_count,

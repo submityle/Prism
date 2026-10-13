@@ -252,6 +252,13 @@ impl Mesh {
                     attribute: attribute.name,
                 });
             }
+            if let Some((vertex, component)) = values.first_non_finite() {
+                return Err(MeshError::NonFiniteAttributeValue {
+                    attribute: attribute.name,
+                    vertex,
+                    component,
+                });
+            }
             if values.len() != self.vertex_count() {
                 return Err(MeshError::VertexCountMismatch {
                     attribute: attribute.name,

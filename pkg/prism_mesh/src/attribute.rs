@@ -133,6 +133,36 @@ impl VertexAttributeValues {
         )
     }
 
+    /// Returns the first non-finite f32 component, if any, as (vertex, component).
+    #[must_use]
+    pub(crate) fn first_non_finite(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Float32(values) => values
+                .iter()
+                .enumerate()
+                .find_map(|(vertex, value)| (!value.is_finite()).then_some((vertex, 0))),
+            Self::Float32x2(values) => values.iter().enumerate().find_map(|(vertex, value)| {
+                value
+                    .iter()
+                    .position(|component| !component.is_finite())
+                    .map(|component| (vertex, component))
+            }),
+            Self::Float32x3(values) => values.iter().enumerate().find_map(|(vertex, value)| {
+                value
+                    .iter()
+                    .position(|component| !component.is_finite())
+                    .map(|component| (vertex, component))
+            }),
+            Self::Float32x4(values) => values.iter().enumerate().find_map(|(vertex, value)| {
+                value
+                    .iter()
+                    .position(|component| !component.is_finite())
+                    .map(|component| (vertex, component))
+            }),
+            _ => None,
+        }
+    }
+
     /// Writes vertex `index`'s value into `out` as `format`'s bytes.
     ///
     /// The caller has already checked the format ([`matches`](Self::matches)),

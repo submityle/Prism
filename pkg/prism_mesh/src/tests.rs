@@ -159,6 +159,48 @@ fn indices_keep_their_authored_width() {
 /// and a mesh with no attributes has no vertex stage at all: both are refused
 /// before a device ever sees them.
 #[test]
+fn validate_rejects_non_finite_float_attributes() {
+    let position = Mesh::new(PrimitiveTopology::TriangleList)
+        .with_attribute(
+            POSITION,
+            VertexAttributeValues::Float32x3(vec![
+                [0.0, 0.0, 0.0],
+                [f32::NAN, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]),
+        )
+        .expect("positions fit");
+    assert_eq!(
+        position.validate(),
+        Err(MeshError::NonFiniteAttributeValue {
+            attribute: POSITION_ATTRIBUTE,
+            vertex: 1,
+            component: 0,
+        })
+    );
+
+    let uv = Mesh::new(PrimitiveTopology::TriangleList)
+        .with_attribute(
+            POSITION,
+            VertexAttributeValues::Float32x3(vec![[0.0, 0.0, 0.0]; 3]),
+        )
+        .expect("positions fit")
+        .with_attribute(
+            UV,
+            VertexAttributeValues::Float32x2(vec![[0.0, 0.0], [f32::INFINITY, 0.0], [1.0, 1.0]]),
+        )
+        .expect("uvs fit");
+    assert_eq!(
+        uv.validate(),
+        Err(MeshError::NonFiniteAttributeValue {
+            attribute: "Vertex_Uv",
+            vertex: 1,
+            component: 0,
+        })
+    );
+}
+
+#[test]
 fn validate_refuses_unusable_meshes() {
     let mut out_of_range = quad();
     out_of_range.with_indices(Indices::Uint16(vec![0, 1, 9]));
