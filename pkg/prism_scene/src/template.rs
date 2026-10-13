@@ -57,6 +57,13 @@ pub enum TemplateError {
     SelfDependency,
     /// The dependency closure contained the same GUID twice.
     DuplicateDependency(StableGuid),
+    /// Dependency GUIDs were not in canonical ascending order.
+    NonCanonicalDependencyOrder {
+        /// Previous dependency in the serialized closure.
+        previous: StableGuid,
+        /// Current dependency that broke canonical order.
+        current: StableGuid,
+    },
 }
 
 impl NestedSlot {
@@ -216,6 +223,7 @@ impl SceneTemplate {
             }
         }
         let mut deps = alloc::collections::BTreeSet::new();
+        let mut previous = None;
         for dependency in self.deps.iter().copied() {
             if dependency.is_nil() {
                 return Err(TemplateError::NilDependency);
@@ -223,6 +231,15 @@ impl SceneTemplate {
             if dependency == self.guid {
                 return Err(TemplateError::SelfDependency);
             }
+            if let Some(previous) = previous
+                && dependency < previous
+            {
+                return Err(TemplateError::NonCanonicalDependencyOrder {
+                    previous,
+                    current: dependency,
+                });
+            }
+            previous = Some(dependency);
             if !deps.insert(dependency) {
                 return Err(TemplateError::DuplicateDependency(dependency));
             }
@@ -371,6 +388,15 @@ mod tests {
         assert_eq!(
             template.validate(),
             Err(TemplateError::DuplicateDependency(guid(2)))
+        );
+
+        template.deps = Box::new([guid(3), guid(2)]);
+        assert_eq!(
+            template.validate(),
+            Err(TemplateError::NonCanonicalDependencyOrder {
+                previous: guid(3),
+                current: guid(2),
+            })
         );
 
         template.deps = Box::new([]);
