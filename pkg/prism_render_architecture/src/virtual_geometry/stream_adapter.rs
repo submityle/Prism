@@ -7,6 +7,7 @@ use crate::compression::gdeflate::{gdeflate_decompress, GDeflateError};
 use crate::paging::{PageSource, PageStorage, PageStreamManager, ReconcileReport, RequestBatch};
 
 use super::asset::{VirtualGeometryAsset, VirtualGeometryAssetError, VirtualGeometryCompression};
+use super::cluster_payload::{decode_cluster_payload, ClusterPayloadError};
 use super::GeometryPageKey;
 
 /// A virtual-geometry page source that pads uncompressed asset bytes to words.
@@ -70,6 +71,46 @@ impl VirtualGeometryPageStream {
                     actual,
                 });
             }
+            let cluster_start = page.record.cluster_start as usize;
+            let cluster_end = cluster_start + page.record.cluster_count as usize;
+            for (cluster_index, cluster) in asset.clusters[cluster_start..cluster_end]
+                .iter()
+                .enumerate()
+            {
+                let payload_start = usize::try_from(cluster.payload_offset).unwrap_or(usize::MAX);
+                let payload_size = usize::try_from(cluster.payload_size).unwrap_or(usize::MAX);
+                let payload_end = payload_start.checked_add(payload_size).ok_or(
+                    VirtualGeometryStreamingError::InvalidClusterPayload {
+                        key: page.record.key,
+                        cluster: page.record.cluster_start + cluster_index as u32,
+                        error: ClusterPayloadError::Truncated,
+                    },
+                )?;
+                let payload = decoded.get(payload_start..payload_end).ok_or(
+                    VirtualGeometryStreamingError::InvalidClusterPayload {
+                        key: page.record.key,
+                        cluster: page.record.cluster_start + cluster_index as u32,
+                        error: ClusterPayloadError::Truncated,
+                    },
+                )?;
+                let decoded_cluster =
+                    decode_cluster_payload(cluster.bounds, payload).map_err(|error| {
+                        VirtualGeometryStreamingError::InvalidClusterPayload {
+                            key: page.record.key,
+                            cluster: page.record.cluster_start + cluster_index as u32,
+                            error,
+                        }
+                    })?;
+                if decoded_cluster.positions.len() != cluster.vertex_count as usize
+                    || decoded_cluster.indices.len() / 3 != cluster.triangle_count as usize
+                {
+                    return Err(VirtualGeometryStreamingError::InvalidClusterPayload {
+                        key: page.record.key,
+                        cluster: page.record.cluster_start + cluster_index as u32,
+                        error: ClusterPayloadError::InvalidCounts,
+                    });
+                }
+            }
             pages.insert(page.record.key, decoded);
         }
         let page_words = asset.header.page_size / 4;
@@ -116,6 +157,15 @@ pub enum VirtualGeometryStreamingError {
     PageSizeNotWordAligned(u32),
     /// GDeflate decode failed before the page entered physical storage.
     Decompression(GDeflateError),
+    /// A decompressed cluster slice failed the CLST v2 codec or descriptor checks.
+    InvalidClusterPayload {
+        /// Page identity.
+        key: GeometryPageKey,
+        /// Global cluster descriptor index.
+        cluster: u32,
+        /// Validation failure.
+        error: ClusterPayloadError,
+    },
     /// Decoded payload length differs from the page table metadata.
     UncompressedSizeMismatch {
         /// Page identity.
@@ -135,6 +185,14 @@ impl core::fmt::Display for VirtualGeometryStreamingError {
             Self::Decompression(error) => {
                 write!(f, "virtual-geometry page decompression failed: {error:?}")
             }
+            Self::InvalidClusterPayload {
+                key,
+                cluster,
+                error,
+            } => write!(
+                f,
+                "virtual-geometry page {key:?} cluster {cluster} has invalid payload: {error}"
+            ),
             Self::UncompressedSizeMismatch {
                 key,
                 expected,
@@ -159,6 +217,7 @@ mod tests {
 
     use super::*;
     use crate::gpu_scene::SceneBounds;
+    use crate::virtual_geometry::cluster_payload::encode_cluster_payload;
     use crate::virtual_geometry::{
         ClusterNode, VirtualGeometryAssetHeader, VirtualGeometryClusterRecord, VirtualGeometryPage,
         VirtualGeometryPageRecord, VIRTUAL_GEOMETRY_ASSET_SCHEMA,
@@ -172,6 +231,13 @@ mod tests {
             half_extents: [1.0; 3],
             _padding: 0.0,
         };
+        let payload = encode_cluster_payload(
+            bounds,
+            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            &[0, 1, 2],
+        )
+        .expect("valid fixture payload");
+        let payload_size = payload.len() as u32;
         VirtualGeometryAsset {
             header: VirtualGeometryAssetHeader {
                 asset_id: 4,
@@ -189,12 +255,12 @@ mod tests {
                 record: VirtualGeometryPageRecord {
                     key,
                     compression: VirtualGeometryCompression::None,
-                    uncompressed_size: 3,
+                    uncompressed_size: payload_size,
                     priority: 1,
                     cluster_start: 0,
                     cluster_count: 1,
                 },
-                payload: vec![7, 8, 9],
+                payload,
             }],
             clusters: vec![VirtualGeometryClusterRecord {
                 node_index: 0,
@@ -203,7 +269,7 @@ mod tests {
                 vertex_count: 3,
                 triangle_count: 1,
                 payload_offset: 0,
-                payload_size: 3,
+                payload_size,
                 bounds,
                 normal_cone: [0.0, 0.0, 1.0, 1.0],
             }],
@@ -221,8 +287,8 @@ mod tests {
         assert_eq!(stream.resident_count(), 1);
         let slot = stream.entries()[0].1;
         let words = stream.storage().slot_words(slot).expect("resident words");
-        assert_eq!(words[0], 0x0009_0807);
-        assert!(words[1..].iter().all(|word| *word == 0));
+        assert_eq!(words[0], u32::from_le_bytes(*b"CLST"));
+        assert!(words[1..].iter().any(|word| *word != 0));
     }
 
     #[test]
@@ -241,6 +307,6 @@ mod tests {
         stream.reconcile(&requests, 1);
         let slot = stream.entries()[0].1;
         let words = stream.storage().slot_words(slot).expect("resident words");
-        assert_eq!(words[0], 0x0009_0807);
+        assert_eq!(words[0], u32::from_le_bytes(*b"CLST"));
     }
 }

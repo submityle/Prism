@@ -28,6 +28,7 @@
 
 pub mod asset;
 pub mod bins;
+pub mod cluster_payload;
 pub mod cull;
 pub mod frame;
 pub mod hierarchy;
@@ -48,6 +49,10 @@ pub use asset::{
     VIRTUAL_GEOMETRY_ASSET_MAGIC, VIRTUAL_GEOMETRY_ASSET_SCHEMA,
 };
 pub use bins::{bin_cut, RasterBins};
+pub use cluster_payload::{
+    decode_cluster_payload, encode_cluster_payload, ClusterPayloadError, QuantizedClusterPayload,
+    STATIC_CLUSTER_PAYLOAD_MAGIC, STATIC_CLUSTER_PAYLOAD_VERSION,
+};
 pub use cull::{cluster_cull, CullVerdict, Frustum, OcclusionProbe, Plane};
 pub use frame::{plan_frame, FrameView, GeometryFramePlan, RasterConfig};
 pub use hierarchy::{coverage_priority, ClusterHierarchy, ClusterNode, CutCluster};
