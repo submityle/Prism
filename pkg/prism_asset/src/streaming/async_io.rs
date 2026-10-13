@@ -105,7 +105,21 @@ impl AsyncStreamIoExecutor {
     /// before calling the source, so a cancellation that wins first performs
     /// no source I/O.
     pub fn execute(&self, id: StreamRequestId) -> Result<AsyncStreamTask, StreamIoError> {
-        let gate = self.gate(id)?;
+        let gate = match self.gate(id) {
+            Ok(gate) => gate,
+            Err(_) => {
+                let state = self
+                    .controller
+                    .lock()
+                    .unwrap()
+                    .state(id)
+                    .ok_or(StreamIoError::Controller(StreamError::UnknownRequest(id)))?;
+                return Err(match state {
+                    StreamState::Cancelled => StreamIoError::Cancelled { id },
+                    state => StreamIoError::AlreadyExecuted { id, state },
+                });
+            }
+        };
         let gate_phase = gate.phase.lock().unwrap();
         let mut controller = self.controller.lock().unwrap();
 
@@ -138,6 +152,7 @@ impl AsyncStreamIoExecutor {
 
         let sources = Arc::clone(&self.sources);
         let controller = Arc::clone(&self.controller);
+        let gates = Arc::clone(&self.gates);
         let gate_for_task = Arc::clone(&gate);
         Ok(self.pool.spawn_async(async move {
             if !gate_for_task.begin_read() {
@@ -154,10 +169,13 @@ impl AsyncStreamIoExecutor {
             let gate_phase = gate_for_task.phase.lock().unwrap();
             let mut controller = controller.lock().unwrap();
             if *gate_phase == RequestPhase::Cancelled {
+                drop(controller);
+                drop(gate_phase);
+                gates.lock().unwrap().remove(&id);
                 return Err(StreamIoError::Cancelled { id });
             }
 
-            match result {
+            let outcome = match result {
                 Ok(bytes) if u64::try_from(bytes.len()).ok() == Some(request.len) => {
                     controller
                         .complete_load(id)
@@ -181,7 +199,11 @@ impl AsyncStreamIoExecutor {
                         .map_err(StreamIoError::Controller)?;
                     Err(StreamIoError::Read { id, error })
                 }
-            }
+            };
+            drop(controller);
+            drop(gate_phase);
+            gates.lock().unwrap().remove(&id);
+            outcome
         }))
     }
 
@@ -203,7 +225,33 @@ impl AsyncStreamIoExecutor {
     /// synchronous read, its result is discarded and the request stays
     /// `Cancelled`.
     pub fn cancel(&self, id: StreamRequestId) -> Result<(), StreamIoError> {
-        let gate = self.gate(id)?;
+        let state = self
+            .controller
+            .lock()
+            .unwrap()
+            .state(id)
+            .ok_or(StreamIoError::Controller(StreamError::UnknownRequest(id)))?;
+        if !matches!(state, StreamState::Pending | StreamState::Loading) {
+            return Err(match state {
+                StreamState::Cancelled => StreamIoError::Cancelled { id },
+                state => StreamIoError::AlreadyExecuted { id, state },
+            });
+        }
+        let gate = match self.gate(id) {
+            Ok(gate) => gate,
+            Err(_) => {
+                let state = self
+                    .controller
+                    .lock()
+                    .unwrap()
+                    .state(id)
+                    .ok_or(StreamIoError::Controller(StreamError::UnknownRequest(id)))?;
+                return Err(match state {
+                    StreamState::Cancelled => StreamIoError::Cancelled { id },
+                    state => StreamIoError::AlreadyExecuted { id, state },
+                });
+            }
+        };
         let mut gate_phase = gate.phase.lock().unwrap();
         let mut controller = self.controller.lock().unwrap();
         let state = controller
@@ -212,7 +260,13 @@ impl AsyncStreamIoExecutor {
         match state {
             StreamState::Pending | StreamState::Loading => {
                 *gate_phase = RequestPhase::Cancelled;
-                controller.cancel(id).map_err(StreamIoError::Controller)
+                let result = controller.cancel(id).map_err(StreamIoError::Controller);
+                drop(controller);
+                drop(gate_phase);
+                if result.is_ok() {
+                    self.gates.lock().unwrap().remove(&id);
+                }
+                result
             }
             StreamState::Cancelled => Err(StreamIoError::Cancelled { id }),
             state => Err(StreamIoError::AlreadyExecuted { id, state }),
@@ -448,6 +502,7 @@ mod tests {
         assert_eq!(executor.pool().block_on(task).unwrap(), b"cde");
         assert_eq!(executor.state(id), Some(StreamState::Resident));
         assert_eq!(executor.used(), Residency::new(3, 3, 3));
+        assert_eq!(executor.gates.lock().unwrap().len(), 0);
     }
 
     #[test]
@@ -518,6 +573,7 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), 1);
         assert_eq!(executor.state(id), Some(StreamState::Cancelled));
         assert_eq!(executor.used(), Residency::default());
+        assert_eq!(executor.gates.lock().unwrap().len(), 0);
     }
 
     #[test]
@@ -576,6 +632,7 @@ mod tests {
         assert_eq!(executor.state(id), Some(StreamState::Failed));
         assert_eq!(executor.used(), Residency::default());
         assert_eq!(reads.load(Ordering::SeqCst), 1);
+        assert_eq!(executor.gates.lock().unwrap().len(), 0);
     }
 
     #[test]
