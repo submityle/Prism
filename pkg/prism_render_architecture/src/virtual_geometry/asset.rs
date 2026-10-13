@@ -262,6 +262,8 @@ impl VirtualGeometryAsset {
                 return Err(VirtualGeometryAssetError::InvalidValue("cluster reference"));
             }
             if u32::from(cluster.material_slot) >= self.header.material_slot_count
+                || cluster.vertex_count == 0
+                || cluster.triangle_count == 0
                 || cluster.vertex_count > 64
                 || cluster.triangle_count > 128
             {
