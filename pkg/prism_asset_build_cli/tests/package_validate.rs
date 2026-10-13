@@ -199,6 +199,26 @@ fn cli_package_rejects_unknown_asset_in_mapping() {
 }
 
 #[test]
+fn cli_package_rejects_duplicate_asset_in_mapping() {
+    let root = temp_dir("duplicate-mapping");
+    let (_source, store, package_dir) = build(&root);
+    let mapping = root.join("mapping.txt");
+    fs::write(
+        &mapping,
+        format!(
+            "version=1\nasset=6;guid=sub:{LOGICAL_PATH}#source;container=core;priority=0;chunk_priority=0\nasset=6;guid=path:{LOGICAL_PATH};container=core;priority=0;chunk_priority=1\nasset=7;guid=path:{LOGICAL_PATH};container=core;priority=0;chunk_priority=1\n"
+        ),
+    )
+    .expect("mapping should be written");
+
+    let packaged = package_with_mapping(&store, &package_dir, &mapping);
+    assert!(!packaged.status.success(), "duplicate mapping was accepted");
+    let stderr = String::from_utf8_lossy(&packaged.stderr);
+    assert!(stderr.contains("duplicate asset"), "{stderr}");
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}
+
+#[test]
 fn cli_validate_rejects_tampered_runtime_container() {
     let root = temp_dir("tamper");
     let (_source, store, package_dir) = build(&root);

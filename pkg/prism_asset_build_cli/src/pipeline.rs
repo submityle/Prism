@@ -231,6 +231,17 @@ fn package_mappings(
     manifest: &prism_asset_build_core::Manifest,
     mappings: Vec<prism_asset_build_core::AssetPackageMapping>,
 ) -> Result<Vec<prism_asset_build_core::AssetPackageMapping>, CommandError> {
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(duplicate) = mappings
+        .iter()
+        .map(|mapping| mapping.asset)
+        .find(|asset| !seen.insert(*asset))
+    {
+        return Err(CommandError::InvalidInput(format!(
+            "mapping contains duplicate manifest asset {}",
+            duplicate.0
+        )));
+    }
     let expected = manifest
         .entries
         .keys()
