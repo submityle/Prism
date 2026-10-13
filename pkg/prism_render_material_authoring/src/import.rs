@@ -138,10 +138,11 @@ impl From<&RuntimeSurface> for OpenPbrSurface {
 /// Adapt one OpenPBR or MaterialX Standard Surface node to Prism's canonical
 /// runtime parameter block.
 ///
-/// Only literals and direct connections to `constant` nodes are evaluated.
-/// Arbitrary graph expressions, textures, conditional nodes, and graph-output
-/// connections fail with `UnsafeConnection`; callers must explicitly bake or
-/// evaluate those graphs rather than silently accepting defaults.
+/// Literals and the bounded pure-expression subset implemented by
+/// [`crate::evaluate_connection`] are evaluated. Texture, procedural,
+/// conditional, interface, and graph-output connections fail with an explicit
+/// diagnostic; callers must bake or evaluate those graphs rather than silently
+/// accepting defaults.
 pub fn adapt_openpbr_surface(
     document: &Document,
     nodegraph: &str,
@@ -338,58 +339,18 @@ fn resolve_input<'a>(
         }
         return Ok(None); // Omitted values use the canonical OpenPBR defaults.
     };
-    let target_graph = if let Some(name) = &connection.nodegraph {
-        document
-            .nodegraphs
-            .iter()
-            .find(|candidate| candidate.name == *name)
-            .ok_or_else(|| {
-                error(
-                    DiagnosticCode::InvalidReference,
-                    format!("nodegraph '{name}' does not exist"),
-                )
-            })?
-    } else {
-        graph
-    };
-    let node_name = connection.node.as_deref().ok_or_else(|| {
-        error(
+    // Keep graph-output connections outside this adapter's contract. The
+    // evaluator deliberately rejects them too, but this check makes the
+    // authoring/runtime boundary explicit at the call site and preserves the
+    // diagnostic even if the evaluator grows additional graph support later.
+    if connection.node.is_none() {
+        return Err(error(
             DiagnosticCode::UnsafeConnection,
             "graph-output connections cannot be safely evaluated by the restricted adapter"
                 .to_owned(),
-        )
-    })?;
-    let target = target_graph
-        .nodes
-        .iter()
-        .find(|node| node.name == node_name)
-        .ok_or_else(|| {
-            error(
-                DiagnosticCode::InvalidReference,
-                format!("connected node '{node_name}' does not exist"),
-            )
-        })?;
-    if connection
-        .output
-        .as_deref()
-        .is_some_and(|output| output != "out")
-    {
-        return Err(error(DiagnosticCode::UnsafeConnection, format!("connection to constant '{}' selects output {:?}; only its implicit/default output is supported", target.name, connection.output)));
+        ));
     }
-    if target.category != "constant" {
-        return Err(error(DiagnosticCode::UnsafeConnection, format!("connected node '{}' is '{}'; arbitrary MaterialX graph evaluation requires an explicit bake", target.name, target.category)));
-    }
-    target
-        .value
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| {
-            error(
-                DiagnosticCode::InvalidValue,
-                format!("constant node '{}' has no value", target.name),
-            )
-        })
-        .map(Some)
+    crate::evaluator::evaluate_connection(document, graph, connection).map(Some)
 }
 
 fn value_type(value: &TypedValue) -> Option<&str> {

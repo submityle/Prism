@@ -354,7 +354,7 @@ fn unsupported_fields_are_reported_as_loss_without_mutating_runtime_defaults() {
 }
 
 #[test]
-fn arbitrary_graph_connections_are_rejected_not_defaulted() {
+fn pure_expression_connections_are_evaluated_into_runtime_parameters() {
     let document = parse_materialx(
         r#"<materialx><nodegraph name="g">
           <constant name="a" type="float" value="0.2"/>
@@ -364,10 +364,25 @@ fn arbitrary_graph_connections_are_rejected_not_defaulted() {
         </nodegraph></materialx>"#,
     )
     .expect("structurally valid graph");
+    let adapted = adapt_openpbr_surface(&document, "g", "s")
+        .expect("bounded pure expression is part of the authoring subset");
+    assert!((adapted.parameters.specular_roughness - 0.16).abs() < 1e-6);
+    assert_eq!(adapted.report.applied_fields, ["specular_roughness"]);
+}
+
+#[test]
+fn unsupported_expression_nodes_still_require_a_bake() {
+    let document = parse_materialx(
+        r#"<materialx><nodegraph name="g">
+          <image name="texture" type="color3"/>
+          <open_pbr_surface name="s"><input name="base_color" type="color3" nodename="texture"/></open_pbr_surface>
+        </nodegraph></materialx>"#,
+    )
+    .expect("image nodes are structurally preserved");
     let error = adapt_openpbr_surface(&document, "g", "s")
-        .expect_err("adapter keeps explicit bake boundary");
+        .expect_err("texture evaluation must not become a default or fake constant");
     assert_eq!(error.0.code, DiagnosticCode::UnsafeConnection);
-    assert!(error.to_string().contains("explicit bake"));
+    assert!(error.to_string().contains("requires a bake/runtime"));
 }
 
 #[test]
