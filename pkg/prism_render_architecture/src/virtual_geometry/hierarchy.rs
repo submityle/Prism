@@ -141,12 +141,46 @@ impl ClusterHierarchy {
         if self.roots.iter().any(|&r| r >= len) {
             return false;
         }
-        self.nodes.iter().all(|node| {
+        if !self.nodes.iter().all(|node| {
             let Some(end) = node.first_child.checked_add(node.child_count) else {
                 return false;
             };
             node.child_count == 0 || end <= len
-        })
+        }) {
+            return false;
+        }
+
+        // A malformed cycle would make the cut walk revisit nodes forever. Use
+        // iterative depth-first search so validation remains safe for deeply
+        // nested assets without consuming the call stack.
+        let mut state = alloc::vec![0_u8; self.nodes.len()];
+        for start in 0..self.nodes.len() {
+            if state[start] != 0 {
+                continue;
+            }
+            state[start] = 1; // currently being visited
+            let mut stack = alloc::vec![(start, 0_u32)];
+            while let Some((index, next_child)) = stack.last_mut() {
+                let node = self.nodes[*index];
+                if *next_child == node.child_count {
+                    state[*index] = 2; // completely visited
+                    stack.pop();
+                    continue;
+                }
+
+                let child = node.first_child + *next_child;
+                *next_child += 1;
+                match state[child as usize] {
+                    0 => {
+                        state[child as usize] = 1;
+                        stack.push((child as usize, 0));
+                    }
+                    1 => return false, // back-edge: self-reference or cycle
+                    _ => {}            // A shared child is valid in this DAG representation.
+                }
+            }
+        }
+        true
     }
 
     /// Selects the screen-space-error cut for one view.
@@ -414,6 +448,28 @@ mod tests {
             table.residency(GeometryPageKey::new(0, 0)),
             PageResidency::Unloaded
         );
+    }
+
+    #[test]
+    fn self_reference_is_rejected() {
+        let self_ref =
+            ClusterNode::interior(bounds_at(50.0, 8.0), 4.0, GeometryPageKey::new(0, 0), 0, 1);
+        let h = ClusterHierarchy::new(alloc::vec![self_ref], alloc::vec![0]);
+        assert!(!h.is_well_formed());
+        let projection = LodProjection::from_focal_length_pixels(1000.0);
+        assert!(h
+            .select_cut([0.0, 0.0, 0.0], &wide_frustum(), projection, 4.0)
+            .is_empty());
+    }
+
+    #[test]
+    fn indirect_cycle_is_rejected() {
+        let first =
+            ClusterNode::interior(bounds_at(50.0, 8.0), 4.0, GeometryPageKey::new(0, 0), 1, 1);
+        let second =
+            ClusterNode::interior(bounds_at(50.0, 4.0), 2.0, GeometryPageKey::new(0, 1), 0, 1);
+        let h = ClusterHierarchy::new(alloc::vec![first, second], alloc::vec![0]);
+        assert!(!h.is_well_formed());
     }
 
     #[test]
