@@ -1340,6 +1340,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 > **2026-10-13 状态修订**：P3-a 表格中的“当前 producer 尚未消费可见性 feedback”是旧审计口径；当前代码已由 `material/virtual_texture/feedback.rs` 从 visibility attachments 做异步 GPU readback、校验 scene/geometry/material generation、执行 UV/导数 demand aggregation，并在 `PrepareResources` 前交给 Material-VT producer。尚未完成的边界是完整主 render pass 端到端硬件门禁，以及独立 P3 shade-cache 的 atlas/page-table 消费，不是 Material-VT feedback bridge 本身。
 
 > **P3-a production writer 修订**：`shading/texel_cache/production.rs` 与 `production_resources.rs` 现已接入 render-world extraction、真实 geometry/light 校验、固定容量 GPU shade writer、Core3d 记录节点和 completion 状态机；无显式 `ShadeDispatchInputs` 时保持 `NoInput`，不会猜测场景或伪造页。当前仍未完成的是上游 object/material/face 可见性 producer、shade-page publication/consumer 与主 resolve 的完整端到端门禁。
+> **P3-a lookup/transaction 修订（2026-10-13）**：`2e01fd6e0` 增加独立的 key-sorted shade-page lookup buffer（与物理 page table 分离）并通过 production writer 暴露 atlas/page-table/lookup binding；`c9b05b9d3` 将 visibility-derived `ShadeDemandRegistry` 接入同一 residency/store transactional write path。两项都已通过定向测试和跨沙盒 GPU writer gate，但**尚未接入 `shading_resolve` 的 chart/page-size-aware lookup 与采样 fallback**，不能据此宣称独立 shade-cache consumer 完成。
 
 > **Atlas layout contract 修订**：`ShadeAtlasLayout` 现在以固定 tile extent 提供 row-major slot→atlas-origin 映射，`ShadePageTableRecord::from_handle` 只能从可寻址的 `ShadePageHandle` 构造 GPU record；越界 slot、零尺寸和不适配 tile 都明确拒绝，避免 producer 手写物理坐标。
 
