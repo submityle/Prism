@@ -19,6 +19,16 @@ pub enum MeshError {
         /// The attribute's element count.
         found: usize,
     },
+    /// Two attributes use the same semantic name at different locations.
+    DuplicateAttributeName {
+        /// The duplicated attribute semantic.
+        attribute: &'static str,
+    },
+    /// Two attributes claim the same shader location.
+    DuplicateShaderLocation {
+        /// The already-assigned shader location.
+        shader_location: u32,
+    },
     /// A value's storage does not match the attribute's declared format.
     FormatMismatch {
         /// The offending attribute's semantic name.
@@ -146,6 +156,12 @@ impl fmt::Display for MeshError {
                 f,
                 "attribute {attribute} has {found} elements, the mesh has {expected} vertices"
             ),
+            Self::DuplicateAttributeName { attribute } => {
+                write!(f, "attribute semantic {attribute} is declared more than once")
+            }
+            Self::DuplicateShaderLocation { shader_location } => {
+                write!(f, "shader location {shader_location} is already assigned")
+            }
             Self::FormatMismatch { attribute } => {
                 write!(
                     f,

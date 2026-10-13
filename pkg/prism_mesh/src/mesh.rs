@@ -52,8 +52,11 @@ impl Mesh {
         }
     }
 
-    /// Inserts `values` under `attribute`, replacing any attribute already at
-    /// that shader location.
+    /// Inserts `values` under `attribute`.
+    ///
+    /// Shader locations and persisted semantic names are unique identities; a
+    /// conflicting insertion is rejected rather than silently discarding authored
+    /// data.
     ///
     /// Fails when the value's storage does not match the attribute's declared
     /// format, or when its element count disagrees with the mesh's other
@@ -64,6 +67,20 @@ impl Mesh {
         attribute: MeshVertexAttribute,
         values: VertexAttributeValues,
     ) -> Result<(), MeshError> {
+        if self.attributes.contains_key(&attribute.shader_location) {
+            return Err(MeshError::DuplicateShaderLocation {
+                shader_location: attribute.shader_location,
+            });
+        }
+        if self
+            .attributes
+            .iter()
+            .any(|(_, (existing, _))| existing.name == attribute.name)
+        {
+            return Err(MeshError::DuplicateAttributeName {
+                attribute: attribute.name,
+            });
+        }
         if !values.matches(attribute.format) {
             return Err(MeshError::FormatMismatch {
                 attribute: attribute.name,
@@ -246,7 +263,13 @@ impl Mesh {
             return Err(MeshError::NoAttributes);
         }
         let vertex_count = checked_mesh_count(self.vertex_count(), "vertex")?;
+        let mut semantic_names = alloc::collections::BTreeSet::new();
         for (attribute, values) in self.attributes.values() {
+            if !semantic_names.insert(attribute.name) {
+                return Err(MeshError::DuplicateAttributeName {
+                    attribute: attribute.name,
+                });
+            }
             if !values.matches(attribute.format) {
                 return Err(MeshError::FormatMismatch {
                     attribute: attribute.name,

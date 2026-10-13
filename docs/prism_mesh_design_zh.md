@@ -892,11 +892,12 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 已完成的第一个可合并切片为“契约与对齐”，本切片不涉及 GPU：
 
 1. 新增 `pkg/prism_mesh/src/topology.rs`：拓扑种类与图元数计算。✅
-2. 新增静态契约模块：`submesh.rs`、`limits.rs`、`morph.rs`、`skin.rs`，并接入 `Mesh::validate()`。✅
-3. 扩展 `VertexAttributeValues`：补 `Float16x2/4`、`Uint32`、`Sint32`、`Snorm8x4`，与 `VertexFormat` 一一对齐，并加“格式矩阵全覆盖”单测。✅
-4. 新增 `pkg/prism_mesh/src/hash.rs`：确定性内容哈希（位模式、固定遍历序）。✅
-5. 新增 `streams.rs`：位置/着色/蒙皮/形变分流布局与实际字节打包，并接入 `RenderMesh` 多 buffer、queue、frame graph 和 draw slot。✅
-6. 修复 `MeshBounds` 对有限极值坐标的派生运算溢出，并加入极值回归测试；无法由 `f32` 表示的范围/半径按契约饱和至有限最大值。✅
+2. Mesh 属性语义唯一性与浮点有限性校验：重复语义、NaN/Inf 均在上传前拒绝，并保留精确诊断位置。✅
+3. 新增静态契约模块：`submesh.rs`、`limits.rs`、`morph.rs`、`skin.rs`，并接入 `Mesh::validate()`。✅
+4. 扩展 `VertexAttributeValues`：补 `Float16x2/4`、`Uint32`、`Sint32`、`Snorm8x4`，与 `VertexFormat` 一一对齐，并加“格式矩阵全覆盖”单测。✅
+5. 新增 `pkg/prism_mesh/src/hash.rs`：确定性内容哈希（位模式、固定遍历序）。✅
+6. 新增 `streams.rs`：位置/着色/蒙皮/形变分流布局与实际字节打包，并接入 `RenderMesh` 多 buffer、queue、frame graph 和 draw slot。✅
+7. 修复 `MeshBounds` 对有限极值坐标的派生运算溢出，并加入极值回归测试；无法由 `f32` 表示的范围/半径按契约饱和至有限最大值。✅
 
 理由：上述设备无关工作可独立单测，为后续构建/DDC 提供校验基础；边界数值测试确保有限输入不会因中间溢出变成 NaN/Inf。
 

@@ -93,6 +93,46 @@ fn the_vertex_buffer_bytes_match_the_declared_layout() {
 /// An attribute whose storage does not match its declared format is refused, so
 /// the GPU can never fetch reinterpreted bytes.
 #[test]
+fn duplicate_attribute_semantics_are_refused_across_locations() {
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
+    mesh.insert_attribute(
+        POSITION,
+        VertexAttributeValues::Float32x3(vec![[0.0, 0.0, 0.0]; 3]),
+    )
+    .expect("first position fits");
+    let duplicate = mesh.insert_attribute(
+        MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float32x3, 1),
+        VertexAttributeValues::Float32x3(vec![[0.0, 0.0, 0.0]; 3]),
+    );
+    assert_eq!(
+        duplicate,
+        Err(MeshError::DuplicateAttributeName {
+            attribute: POSITION_ATTRIBUTE
+        })
+    );
+}
+
+#[test]
+fn duplicate_shader_locations_are_refused_without_overwriting() {
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
+    mesh.insert_attribute(
+        POSITION,
+        VertexAttributeValues::Float32x3(vec![[1.0, 2.0, 3.0]; 3]),
+    )
+    .expect("first position fits");
+    let duplicate = mesh.insert_attribute(
+        MeshVertexAttribute::new("Other", VertexFormat::Float32x3, 0),
+        VertexAttributeValues::Float32x3(vec![[9.0, 9.0, 9.0]; 3]),
+    );
+    assert_eq!(
+        duplicate,
+        Err(MeshError::DuplicateShaderLocation { shader_location: 0 })
+    );
+    assert_eq!(mesh.attribute_count(), 1);
+    assert_eq!(mesh.vertex_buffer_data()[..4], 1.0_f32.to_le_bytes());
+}
+
+#[test]
 fn an_attribute_that_does_not_match_its_format_is_refused() {
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
     let mismatch =
