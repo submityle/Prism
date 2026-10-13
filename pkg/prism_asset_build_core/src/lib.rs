@@ -17,6 +17,8 @@ pub mod executor;
 pub mod graph;
 /// Versioned deterministic artifact-key derivation.
 pub mod hash;
+/// Mature-library-backed source importers and canonical runtime artifacts.
+pub mod import;
 /// Processor contracts and build-node declarations.
 pub mod job;
 /// Deterministic bridge from build manifests/CAS blobs to runtime containers.

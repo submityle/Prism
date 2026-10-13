@@ -457,6 +457,65 @@ mod tests {
     }
 
     #[test]
+    fn png_importer_publishes_a_canonical_image_artifact() {
+        let root = temp_dir("png-import-chain");
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[9, 8, 7]).unwrap();
+        }
+        let source = crate::SourceSnapshot::new("textures/one.png", png_bytes).unwrap();
+        let source_job = JobId(10);
+        let import_job = JobId(11);
+        let mut graph = BuildGraph::new();
+        graph.add_job(source.build_job(source_job)).unwrap();
+        graph
+            .add_job(crate::job::BuildJob::new(
+                import_job,
+                [source_job],
+                crate::import::CanonicalPngProcessor,
+            ))
+            .unwrap();
+        let recipe = crate::ImportRecipe {
+            importer_id: 0x504e47,
+            importer_version: 1,
+            canonical_settings: b"rgba8".to_vec(),
+            profile_hash: [1; 32],
+            toolchain_fingerprint: b"png-0.18".to_vec(),
+            environment_fingerprint: b"portable".to_vec(),
+        };
+        let mut specs = BTreeMap::new();
+        specs.insert(source_job, source.artifact_spec(AssetId(10)));
+        specs.insert(
+            import_job,
+            recipe.artifact_spec(
+                AssetId(11),
+                crate::import::IMAGE_ARTIFACT_KIND,
+                crate::import::IMAGE_ARTIFACT_SCHEMA,
+                4,
+            ),
+        );
+        let store = RevisionStore::open(&root).unwrap();
+        let mut ddc = DerivedDataCache::open(root.join("ddc")).unwrap();
+        let execution = BuildExecutor {
+            protocol_version: 1,
+        }
+        .execute(&graph, &specs, &store, &mut ddc, BuildRevision(0))
+        .unwrap();
+        let bytes = store
+            .cas()
+            .read(execution.published.manifest.entries[&AssetId(11)].content_hash)
+            .unwrap();
+        let image = crate::import::ImageArtifact::decode(&bytes).unwrap();
+        assert_eq!((image.width, image.height), (1, 1));
+        assert_eq!(image.rgba8, vec![9, 8, 7, 255]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn processor_failure_does_not_publish_revision() {
         let root = temp_dir("failure");
         let mut graph = BuildGraph::new();
