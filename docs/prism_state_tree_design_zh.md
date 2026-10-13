@@ -261,7 +261,7 @@ enter : 自 LCA 向下进到 target（逐层 on_enter，自浅至深）
 
 5. `TransitionKind`：`External` 走完整 exit → enter（活跃子任务按 §6.3 `InterruptPolicy` 中断）；`Internal` **不退出、不重入**，只执行 `actions`——用于「目标已活跃则什么都不做」，这正是 BT「不重启正在运行的子节点」的精确对应。
 6. `Self` 迁移 = `External` 且 target == source（退出并重入），用于「重跑当前段」；`Internal` + `Self` 即「只跑 actions、不重跑行为」。
-7. 进入 `Compound` 后**立即求值一次 `Eventless` 迁移**（SCXML 语义）——这就是「初始子状态的选择」；若一条都不成立，必须有声明式兜底（`default` 子状态或失败迁移，校验 `ST0013`）。
+7. 进入 `Compound` 后**立即求值一次 `Eventless` 迁移**（SCXML 语义）——这就是「初始子状态的选择」；若一条都不成立，必须有声明式兜底（`default` 子状态或失败迁移，校验 `ST0013`）。Event 迁移完成后触发的 eventless 级联必须在 `current_event = None` 的上下文中执行；事件只对正在选择/应用的那一条迁移可见，不能泄漏到后续无事件 guard，否则会破坏可重放性。
 8. 迁移期间**不允许**在状态树上做结构性改动；所有写操作进 `CommandQueue`，微步结束后统一 flush。
 
 ### 5.3 历史伪状态
