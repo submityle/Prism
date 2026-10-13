@@ -74,6 +74,19 @@ pub(crate) fn checked_range_end(offset: u64, len: u64) -> Result<u64, ContainerE
         .ok_or(ContainerError::IntegerOverflow)
 }
 
+/// Validates a payload-local range against its declared payload length.
+pub(crate) fn validate_range(
+    offset: u64,
+    len: u64,
+    payload_len: u64,
+) -> Result<(), ContainerError> {
+    let end = checked_range_end(offset, len)?;
+    if end > payload_len {
+        return Err(ContainerError::InvalidRange);
+    }
+    Ok(())
+}
+
 /// Computes a physical range from a container offset and a payload-local
 /// range while checking both additions independently.
 pub(crate) fn checked_physical_range(
@@ -91,9 +104,26 @@ pub(crate) fn checked_physical_range(
     Ok((start, end))
 }
 
+/// Computes and bounds a physical range against the immutable source length.
+pub(crate) fn checked_physical_range_within(
+    base: u64,
+    offset: u64,
+    len: u64,
+    source_len: u64,
+) -> Result<(u64, u64), ContainerError> {
+    let range = checked_physical_range(base, offset, len)?;
+    if range.1 > source_len {
+        return Err(ContainerError::OutOfBounds);
+    }
+    Ok(range)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{checked_physical_range, checked_range_end, RangeBatchPolicy};
+    use super::{
+        checked_physical_range, checked_physical_range_within, checked_range_end, validate_range,
+        RangeBatchPolicy,
+    };
     use crate::ContainerError;
 
     #[test]
@@ -136,5 +166,28 @@ mod tests {
         })
         .validate_request_len(4)
         .is_ok());
+    }
+
+    #[test]
+    fn range_validation_distinguishes_overflow_from_payload_bounds() {
+        assert_eq!(
+            validate_range(u64::MAX, 1, u64::MAX),
+            Err(ContainerError::IntegerOverflow)
+        );
+        assert_eq!(validate_range(8, 3, 10), Err(ContainerError::InvalidRange));
+        assert!(validate_range(10, 0, 10).is_ok());
+    }
+
+    #[test]
+    fn physical_range_validation_rejects_source_overread() {
+        assert_eq!(
+            checked_physical_range_within(8, 2, 4, 13),
+            Err(ContainerError::OutOfBounds)
+        );
+        assert_eq!(
+            checked_physical_range_within(u64::MAX, 0, 1, u64::MAX),
+            Err(ContainerError::IntegerOverflow)
+        );
+        assert_eq!(checked_physical_range_within(8, 2, 4, 14), Ok((10, 14)));
     }
 }

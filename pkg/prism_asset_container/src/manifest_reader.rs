@@ -9,7 +9,7 @@ use core::fmt;
 
 use prism_asset::StableGuid;
 
-use crate::range_batch::{checked_physical_range, checked_range_end, RangeBatchPolicy};
+use crate::range_batch::{checked_physical_range_within, validate_range, RangeBatchPolicy};
 use crate::{
     ContainerError, ContainerReader, ManifestRoute, OverlaySet, RangeRequest, RuntimeManifest,
 };
@@ -250,14 +250,6 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
             let route = self.route(request.logical_guid)?;
             let reader = self.resolve(route)?;
             let local = RangeRequest::new(route.container_guid, request.offset, request.len);
-            checked_range_end(request.offset, request.len).map_err(|error| {
-                self.map_read_error(
-                    request.logical_guid,
-                    request.offset,
-                    usize::try_from(request.len).unwrap_or(usize::MAX),
-                    error,
-                )
-            })?;
             policy
                 .validate_request_len(request.len)
                 .map_err(ManifestReadError::Container)?;
@@ -268,7 +260,21 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
                     container_guid: route.container_guid,
                 }
             })?;
-            checked_physical_range(entry.offset, request.offset, request.len).map_err(|error| {
+            validate_range(request.offset, request.len, entry.raw_len).map_err(|error| {
+                self.map_read_error(
+                    request.logical_guid,
+                    request.offset,
+                    usize::try_from(request.len).unwrap_or(usize::MAX),
+                    error,
+                )
+            })?;
+            checked_physical_range_within(
+                entry.offset,
+                request.offset,
+                request.len,
+                reader.info().total_len,
+            )
+            .map_err(|error| {
                 self.map_read_error(
                     request.logical_guid,
                     request.offset,
