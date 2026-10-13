@@ -22,7 +22,7 @@ use bevy_render::{
 use prism_render_architecture::gpu_scene::InstanceRecord;
 use prism_render_architecture::texture_streaming::TextureSemantic as StreamingTextureSemantic;
 use prism_render_material::{
-    GpuMaterialTexture, MaterialVtFormat, MaterialVtSourceSnapshot,
+    GpuMaterialTexture, Illumination, MaterialVtFormat, MaterialVtSourceSnapshot,
     TextureSemantic as MaterialTextureSemantic, NO_VIRTUAL_TEXTURE,
 };
 use prism_render_visibility::GpuViewRecord;
@@ -31,7 +31,13 @@ use crate::{
     geometry::{RenderShadingGeometry, RenderShadingGeometryRegistry},
     material::{runtime::RenderMaterialRegistry, vt_source::MaterialVtSourceRegistry},
     scene::RenderGpuScene,
-    shading::{PrismShadingSettings, ViewVisibilityBuffer},
+    shading::{
+        texel_cache::{
+            build_shade_dispatch_chart, shade_page_request_from_visibility, ShadeDemandConfig,
+            ShadeDemandRegistry, ShadeVisibilitySample,
+        },
+        PrismShadingSettings, ViewVisibilityBuffer,
+    },
     visibility::runtime::UnifiedVisibilityState,
 };
 
@@ -44,6 +50,9 @@ const VISIBILITY_TEXEL_BYTES: u64 = 16;
 const COPY_ROW_ALIGNMENT: u64 = 256;
 /// Matches the bounded material-VT producer's physical page budget.
 const MATERIAL_VT_PAGE_BYTE_COST: u64 = 70_000;
+const SHADE_PAGE_BYTE_COST: u64 = 70_000;
+const SHADE_TEXELS_PER_UV: f32 = 128.0;
+const SHADE_MAX_CHART_EXTENT: u32 = 1024;
 
 #[derive(Resource, Default)]
 pub(crate) struct MaterialVtFeedbackReadback {
@@ -222,6 +231,7 @@ pub(crate) fn collect_material_vt_feedback(
     settings: Res<PrismShadingSettings>,
     readback: Res<MaterialVtFeedbackReadback>,
     mut demands: ResMut<MaterialVtDemandRegistry>,
+    mut shade_demands: ResMut<ShadeDemandRegistry>,
     scene: Res<RenderGpuScene>,
     geometries: Res<RenderShadingGeometryRegistry>,
     materials: Res<RenderMaterialRegistry>,
@@ -232,6 +242,7 @@ pub(crate) fn collect_material_vt_feedback(
     if !settings.enable_visibility_buffer {
         inner.state = None;
         demands.clear();
+        shade_demands.clear();
         return;
     }
     let Some(ReadbackState::Mapping(in_flight)) = inner.state.take() else {
@@ -245,6 +256,7 @@ pub(crate) fn collect_material_vt_feedback(
         }
         Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
             demands.clear();
+            shade_demands.clear();
             return;
         }
     }
@@ -252,6 +264,7 @@ pub(crate) fn collect_material_vt_feedback(
     let pending = &in_flight.pending;
     let mapped = pending.buffer.slice(..).get_mapped_range().unwrap();
     let mut page_demands = Vec::new();
+    let mut shade_page_requests = Vec::new();
     for capture in &pending.views {
         if !views
             .iter()
@@ -268,6 +281,7 @@ pub(crate) fn collect_material_vt_feedback(
             &materials,
             &sources,
             &mut page_demands,
+            &mut shade_page_requests,
         );
     }
     drop(mapped);
@@ -278,6 +292,7 @@ pub(crate) fn collect_material_vt_feedback(
         // keep or synthesize a partial demand set.
         demands.clear();
     }
+    shade_demands.replace(shade_page_requests);
 }
 
 fn decode_view_feedback(
@@ -289,6 +304,7 @@ fn decode_view_feedback(
     materials: &RenderMaterialRegistry,
     sources: &MaterialVtSourceRegistry,
     output: &mut Vec<prism_render_architecture::texture_streaming::PageDemand>,
+    shade_output: &mut Vec<crate::shading::texel_cache::ShadePageRequest>,
 ) {
     let row_words = usize::try_from(capture.row_pitch / 4).unwrap_or(0);
     let ids_words = bytemuck::cast_slice::<u8, u32>(&bytes[capture.ids_offset as usize..]);
@@ -335,6 +351,44 @@ fn decode_view_feedback(
             ) else {
                 continue;
             };
+
+            let shade_channel = match material.illumination {
+                Illumination::Lit => Some(crate::shading::texel_cache::ShadeChannel::LitDiffuse),
+                Illumination::Stylized => {
+                    Some(crate::shading::texel_cache::ShadeChannel::StylizedDiffuse)
+                }
+                Illumination::Unlit | Illumination::Custom => None,
+            };
+            if let Some(channel) = shade_channel
+                && let Ok(chart) = build_shade_dispatch_chart(
+                    &geometry.geometry,
+                    ids[2],
+                    SHADE_TEXELS_PER_UV,
+                    SHADE_MAX_CHART_EXTENT,
+                )
+                && let Some(request) = shade_page_request_from_visibility(
+                    ShadeVisibilitySample {
+                        object_id: sample.object_id,
+                        material_id: sample.material_id,
+                        face_id: sample.face_id,
+                        uv: sample.uv,
+                        uv_ddx: sample.uv_ddx,
+                        uv_ddy: sample.uv_ddy,
+                        screen_importance: sample.screen_importance,
+                    },
+                    ShadeDemandConfig {
+                        chart_extent: chart.texel_extent,
+                        page_size: 128,
+                        page_byte_cost: SHADE_PAGE_BYTE_COST,
+                        frame,
+                        channel,
+                        max_mip: 8,
+                    },
+                    u64::from(material.revision),
+                )
+            {
+                shade_output.push(request);
+            }
 
             for texture in &material.textures {
                 let Some(semantic) = texture_semantic(texture.semantic) else {

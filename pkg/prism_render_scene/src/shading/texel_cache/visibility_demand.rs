@@ -4,6 +4,7 @@
 //! buffer and the validated per-face chart extent. This module performs only
 //! deterministic LOD/page math; it never invents visibility or geometry.
 
+use bevy_ecs::prelude::Resource;
 use prism_render_visibility::texture_lod;
 
 use super::{ShadeChannel, ShadePageKey, ShadePageRequest};
@@ -42,6 +43,39 @@ pub struct ShadeDemandConfig {
     pub channel: ShadeChannel,
     /// Highest mip the chart producer is willing to request.
     pub max_mip: u8,
+}
+
+/// Render-world handoff for real visibility-derived shade requests.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct ShadeDemandRegistry {
+    demands: Vec<ShadePageRequest>,
+    revision: u64,
+}
+
+impl ShadeDemandRegistry {
+    /// Replaces the current decoded visibility frame.
+    pub fn replace(&mut self, demands: impl IntoIterator<Item = ShadePageRequest>) {
+        self.demands = demands.into_iter().collect();
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    /// Clears the current feedback frame.
+    pub fn clear(&mut self) {
+        self.demands.clear();
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    /// Returns the current immutable demand slice.
+    #[must_use]
+    pub fn demands(&self) -> &[ShadePageRequest] {
+        &self.demands
+    }
+
+    /// Monotonic frame replacement revision for diagnostics.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
 }
 
 /// Converts one validated visibility sample into one deterministic page request.

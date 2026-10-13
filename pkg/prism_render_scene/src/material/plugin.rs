@@ -19,6 +19,7 @@ use super::{
         MaterialVtMaterialSourceQueries, MaterialVtSourceChangeQueue, MaterialVtSourceRegistry,
     },
 };
+use crate::shading::texel_cache::ShadeDemandRegistry;
 use bevy_app::{App, Plugin};
 use bevy_asset::embedded_asset;
 use bevy_ecs::schedule::IntoScheduleConfigs;
@@ -49,6 +50,7 @@ impl Plugin for PrismMaterialPlugin {
             .init_resource::<MaterialVtProducer>()
             .init_resource::<MaterialVtDemandRegistry>()
             .init_resource::<MaterialVtFeedbackReadback>()
+            .init_resource::<ShadeDemandRegistry>()
             .init_resource::<PrismMaterialDiagnostics>()
             .add_systems(
                 RenderStartup,

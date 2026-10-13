@@ -32,7 +32,8 @@ pub use gpu::dispatch::{
     ShadeDispatchStats, SHADE_WORKGROUP_SIZE,
 };
 pub use gpu::page_table::{
-    GpuShadePageEntry, ShadePageTableError, ShadePageTableRecord, ShadePageTableSnapshot,
+    GpuShadePageEntry, GpuShadePageLookup, ShadePageTableError, ShadePageTableRecord,
+    ShadePageTableSnapshot,
 };
 pub use gpu::shade::{ShadeJob, ShadeJobError, ShadeJobFromDensityError};
 pub use key::{ShadeChannel, ShadePageKey};
@@ -59,7 +60,8 @@ pub use store::{
     ShadeStoreError, ShadeStoreLookup, ShadeSubmission,
 };
 pub use visibility_demand::{
-    shade_page_request_from_visibility, ShadeDemandConfig, ShadeVisibilitySample,
+    shade_page_request_from_visibility, ShadeDemandConfig, ShadeDemandRegistry,
+    ShadeVisibilitySample,
 };
 
 #[cfg(test)]

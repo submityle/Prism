@@ -1347,6 +1347,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 > **Visibility demand seam 修订**：`visibility_demand.rs` 现在提供显式 `UV + ddx/ddy + object/material/face + chart extent` 到 `ShadePageRequest` 的确定性转换，沿用 visibility LOD 公式并拒绝非有限输入；它是 producer seam，不代表主 visibility pass 已自动接入。
 
+> **共享 readback 修订**：Material-VT feedback decode 现在同时填充 `ShadeDemandRegistry`，仅对 Lit/Stylized 的真实可见 face 生成请求；Unlit/Custom 不会伪造 view-independent shade page。该 registry 尚未绕过 `ShadeWriteProducer` 自动提交 GPU 工作。
+
 **破坏性说明**：屏幕空间 über 路径（§8）**保留为缓存未命中/视角相关的回退路径**，不是并行栈，不维护旧着色 API；对象空间缓存是其上的加法 pass。弱平台关闭开关即纯 §8 路径。
 
 ### 14.11 风险 → 高性能/高质解决方案总表
