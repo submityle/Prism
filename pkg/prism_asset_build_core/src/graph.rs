@@ -1,6 +1,7 @@
 use crate::job::{BuildJob, JobId, ProcessorError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::thread;
 
 /// Outputs produced by a successful graph execution, keyed by stable job ID.
 pub type BuildOutputs = BTreeMap<JobId, Vec<u8>>;
@@ -40,7 +41,10 @@ impl std::error::Error for BuildError {
     }
 }
 
-/// Deterministic, single-threaded DAG of local artifact-producing jobs.
+/// Deterministic DAG of local artifact-producing jobs.
+///
+/// [`Self::execute`] is serial; [`Self::execute_parallel`] runs independent
+/// jobs in deterministic dependency waves.
 ///
 /// The graph accepts jobs in any order. Missing references and cycles are
 /// reported when an execution order is requested or the graph is executed.
@@ -155,6 +159,93 @@ impl BuildGraph {
         }
         Ok(outputs)
     }
+
+    /// Execute independent ready jobs concurrently, one deterministic DAG wave
+    /// at a time. Dependencies are still completed before their consumers;
+    /// failures are reported by the smallest job id in the failed wave so
+    /// scheduling order cannot change the observable error.
+    pub fn execute_parallel(&self) -> Result<BuildOutputs, BuildError> {
+        let mut indegree = BTreeMap::new();
+        let mut dependents: BTreeMap<JobId, Vec<JobId>> = BTreeMap::new();
+        for (&id, job) in &self.jobs {
+            let mut degree = 0;
+            for &dependency in job.dependencies() {
+                if !self.jobs.contains_key(&dependency) {
+                    return Err(BuildError::MissingDependency {
+                        job: id,
+                        dependency,
+                    });
+                }
+                degree += 1;
+                dependents.entry(dependency).or_default().push(id);
+            }
+            indegree.insert(id, degree);
+        }
+        let mut ready: BTreeSet<JobId> = indegree
+            .iter()
+            .filter_map(|(&id, &degree)| (degree == 0).then_some(id))
+            .collect();
+        let mut outputs = BuildOutputs::new();
+        let mut completed = 0;
+
+        while !ready.is_empty() {
+            let wave: Vec<_> = ready.iter().copied().collect();
+            ready.clear();
+            let results = thread::scope(|scope| {
+                wave.iter()
+                    .map(|&id| {
+                        let job = &self.jobs[&id];
+                        let inputs: Vec<Vec<u8>> = job
+                            .dependencies()
+                            .iter()
+                            .map(|dependency| outputs[dependency].clone())
+                            .collect();
+                        let processor = job.processor();
+                        scope.spawn(move || {
+                            let input_refs: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
+                            processor
+                                .process(&input_refs)
+                                .map_err(|source| BuildError::ProcessorFailed { job: id, source })
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|handle| {
+                        handle.join().unwrap_or_else(|_| {
+                            Err(BuildError::ProcessorFailed {
+                                job: JobId(u128::MAX),
+                                source: ProcessorError::new("processor thread panicked"),
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            });
+            for (&id, result) in wave.iter().zip(results) {
+                outputs.insert(id, result?);
+                completed += 1;
+            }
+            for id in wave {
+                if let Some(children) = dependents.get(&id) {
+                    for &child in children {
+                        let degree = indegree.get_mut(&child).expect("job is in graph");
+                        *degree -= 1;
+                        if *degree == 0 {
+                            ready.insert(child);
+                        }
+                    }
+                }
+            }
+        }
+        if completed != self.jobs.len() {
+            return Err(BuildError::Cycle {
+                jobs: indegree
+                    .into_iter()
+                    .filter_map(|(id, degree)| (degree > 0).then_some(id))
+                    .collect(),
+            });
+        }
+        Ok(outputs)
+    }
 }
 
 #[cfg(test)]
@@ -168,6 +259,37 @@ mod tests {
             dependencies.iter().copied().map(JobId).collect::<Vec<_>>(),
             move |_: &[&[u8]]| Ok(output.to_vec()),
         )
+    }
+
+    #[test]
+    fn parallel_execution_matches_serial_outputs() {
+        let mut graph = BuildGraph::new();
+        graph.add_job(job(3, &[1, 2], b"ignored")).unwrap();
+        graph.add_job(job(2, &[], b"b")).unwrap();
+        graph.add_job(job(1, &[], b"a")).unwrap();
+        assert_eq!(graph.execute_parallel().unwrap(), graph.execute().unwrap());
+    }
+
+    #[test]
+    fn parallel_execution_reports_smallest_failed_job_in_wave() {
+        let mut graph = BuildGraph::new();
+        graph
+            .add_job(BuildJob::new(JobId(9), vec![], |_: &[&[u8]]| {
+                Err(ProcessorError::new("nine"))
+            }))
+            .unwrap();
+        graph
+            .add_job(BuildJob::new(JobId(4), vec![], |_: &[&[u8]]| {
+                Err(ProcessorError::new("four"))
+            }))
+            .unwrap();
+        assert_eq!(
+            graph.execute_parallel(),
+            Err(BuildError::ProcessorFailed {
+                job: JobId(4),
+                source: ProcessorError::new("four"),
+            })
+        );
     }
 
     #[test]

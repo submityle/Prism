@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 /// Stable identity used to order jobs and refer to dependencies in a build graph.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -35,17 +36,16 @@ impl std::error::Error for ProcessorError {}
 /// function of those bytes and its captured, immutable configuration: it must
 /// not read ambient state or produce nondeterministic output.
 ///
-/// The graph executor runs jobs serially, and this trait deliberately has no
-/// `Send`/`Sync` bound or mutable receiver. This is not a parallel execution
-/// contract; stateful interior-mutability can still violate determinism and is
-/// the implementor's responsibility to avoid.
-pub trait Processor {
+/// Processors are shared by the serial and parallel graph executors. They must
+/// be thread-safe and deterministic: stateful interior-mutability can still
+/// violate reproducibility and is the implementor's responsibility to avoid.
+pub trait Processor: Send + Sync {
     fn process(&self, inputs: &[&[u8]]) -> Result<Vec<u8>, ProcessorError>;
 }
 
 impl<F> Processor for F
 where
-    F: for<'a, 'b> Fn(&'a [&'b [u8]]) -> Result<Vec<u8>, ProcessorError>,
+    F: for<'a, 'b> Fn(&'a [&'b [u8]]) -> Result<Vec<u8>, ProcessorError> + Send + Sync,
 {
     fn process(&self, inputs: &[&[u8]]) -> Result<Vec<u8>, ProcessorError> {
         self(inputs)
@@ -56,7 +56,7 @@ where
 pub struct BuildJob {
     id: JobId,
     dependencies: Vec<JobId>,
-    processor: Box<dyn Processor>,
+    processor: Arc<dyn Processor>,
 }
 
 impl BuildJob {
@@ -69,7 +69,7 @@ impl BuildJob {
         Self {
             id,
             dependencies: dependencies.into(),
-            processor: Box::new(processor),
+            processor: Arc::new(processor),
         }
     }
 
@@ -83,5 +83,9 @@ impl BuildJob {
 
     pub(crate) fn process(&self, inputs: &[&[u8]]) -> Result<Vec<u8>, ProcessorError> {
         self.processor.process(inputs)
+    }
+
+    pub(crate) fn processor(&self) -> Arc<dyn Processor> {
+        Arc::clone(&self.processor)
     }
 }
