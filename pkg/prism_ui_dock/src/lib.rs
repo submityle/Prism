@@ -15,6 +15,8 @@ mod autosave;
 mod default_layout;
 mod drag;
 mod drop_preview;
+#[cfg(feature = "render")]
+mod drop_preview_view;
 mod model;
 mod persist;
 mod reducer;
@@ -37,6 +39,8 @@ pub use drag::{
     DragState, DropMapError, DropZone, PointerPosition,
 };
 pub use drop_preview::{resolve_drop_preview, DropPreview, DropPreviewError};
+#[cfg(feature = "render")]
+pub use drop_preview_view::drop_preview_element;
 pub use model::{
     AutoHideBars, AutoHideEntry, Axis, DockLayout, DockNode, DocumentId, FloatingWindow,
     MaximizeRestore, PanelId, Ratio, Rect, Side, SplitChild,
