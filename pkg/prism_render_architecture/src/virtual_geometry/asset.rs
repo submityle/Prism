@@ -580,7 +580,14 @@ fn bounds_encloses(outer: &SceneBounds, inner: &SceneBounds) -> bool {
         core::array::from_fn(|axis| inner.center[axis] - inner.half_extents[axis]);
     let inner_max: [f32; 3] =
         core::array::from_fn(|axis| inner.center[axis] + inner.half_extents[axis]);
-    (0..3).all(|axis| inner_min[axis] >= outer_min[axis] && inner_max[axis] <= outer_max[axis])
+    outer_min
+        .iter()
+        .chain(outer_max.iter())
+        .chain(inner_min.iter())
+        .chain(inner_max.iter())
+        .all(|value| value.is_finite())
+        && (0..3)
+            .all(|axis| inner_min[axis] >= outer_min[axis] && inner_max[axis] <= outer_max[axis])
 }
 
 fn bounds_finite(bounds: &SceneBounds) -> bool {
