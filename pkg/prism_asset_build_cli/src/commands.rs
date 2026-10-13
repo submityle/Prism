@@ -18,6 +18,8 @@ pub fn run(cli: PrismAssetBuild) -> Result<(), CommandError> {
             command.asset_id,
             command.store,
         ),
+        Command::Package(command) => pipeline::package(command),
+        Command::Validate(command) => pipeline::validate(command),
         Command::Inspect(command) => pipeline::inspect(command.store),
     }
 }

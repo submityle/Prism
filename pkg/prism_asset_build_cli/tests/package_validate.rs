@@ -1,0 +1,171 @@
+use png::Encoder;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const LOGICAL_PATH: &str = "textures/integration.png";
+const ASSET_ID: &str = "7";
+
+fn temp_dir(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "prism-cli-integration-{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock must be after epoch")
+            .as_nanos()
+    ))
+}
+
+fn png_bytes() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut encoder = Encoder::new(&mut bytes, 1, 1);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().expect("PNG header should encode");
+    writer
+        .write_image_data(&[11, 22, 33])
+        .expect("PNG pixel should encode");
+    drop(writer);
+    bytes
+}
+
+fn run(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_prism_asset_build_cli"))
+        .args(args)
+        .output()
+        .expect("CLI process should start")
+}
+
+fn build(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let source = root.join("integration.png");
+    let store = root.join("store");
+    let package = root.join("package");
+    fs::create_dir_all(root).expect("test root should be created");
+    fs::write(&source, png_bytes()).expect("source PNG should be written");
+    let source_arg = source.to_str().expect("temporary paths are UTF-8");
+    let store_arg = store.to_str().expect("temporary paths are UTF-8");
+    let output = run(&[
+        "build",
+        "--source",
+        source_arg,
+        "--logical-path",
+        LOGICAL_PATH,
+        "--asset-id",
+        ASSET_ID,
+        "--store",
+        store_arg,
+    ]);
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (source, store, package)
+}
+
+fn package(store: &Path, output: &Path) -> Output {
+    run(&[
+        "package",
+        "--store",
+        store.to_str().expect("temporary paths are UTF-8"),
+        "--output",
+        output.to_str().expect("temporary paths are UTF-8"),
+        "--asset-id",
+        ASSET_ID,
+        "--logical-path",
+        LOGICAL_PATH,
+    ])
+}
+
+fn validate(store: &Path, package: &Path) -> Output {
+    run(&[
+        "validate",
+        "--store",
+        store.to_str().expect("temporary paths are UTF-8"),
+        "--package",
+        package.to_str().expect("temporary paths are UTF-8"),
+        "--asset-id",
+        ASSET_ID,
+        "--logical-path",
+        LOGICAL_PATH,
+    ])
+}
+
+#[test]
+fn cli_build_package_validate_round_trip() {
+    let root = temp_dir("round-trip");
+    let (_source, store, package_dir) = build(&root);
+
+    let packaged = package(&store, &package_dir);
+    assert!(
+        packaged.status.success(),
+        "package failed: {}",
+        String::from_utf8_lossy(&packaged.stderr)
+    );
+    let summary = String::from_utf8_lossy(&packaged.stdout);
+    assert!(summary.contains("quality_checked_assets=2"), "{summary}");
+    assert!(summary.contains("container=core "), "{summary}");
+    assert!(package_dir.join("manifest.bin").is_file());
+    assert!(package_dir.join("publication.bin").is_file());
+    assert!(package_dir.join("containers/core").is_file());
+
+    let validated = validate(&store, &package_dir);
+    assert!(
+        validated.status.success(),
+        "validate failed: {}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+    assert!(String::from_utf8_lossy(&validated.stdout).contains("validated_revision=0"));
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}
+
+#[test]
+fn cli_validate_rejects_tampered_runtime_container() {
+    let root = temp_dir("tamper");
+    let (_source, store, package_dir) = build(&root);
+
+    let packaged = package(&store, &package_dir);
+    assert!(
+        packaged.status.success(),
+        "package failed: {}",
+        String::from_utf8_lossy(&packaged.stderr)
+    );
+    let container_path = package_dir.join("containers/core");
+    let mut bytes = fs::read(&container_path).expect("runtime container should exist");
+    let last = bytes.last_mut().expect("container should not be empty");
+    *last ^= 0x40;
+    fs::write(&container_path, bytes).expect("tampered container should be written");
+
+    let validated = validate(&store, &package_dir);
+    assert!(!validated.status.success(), "tampered package was accepted");
+    assert!(String::from_utf8_lossy(&validated.stderr).contains("failed"));
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}
+
+#[test]
+fn cli_validate_rejects_tampered_publication_descriptor() {
+    let root = temp_dir("publication-tamper");
+    let (_source, store, package_dir) = build(&root);
+
+    let packaged = package(&store, &package_dir);
+    assert!(
+        packaged.status.success(),
+        "package failed: {}",
+        String::from_utf8_lossy(&packaged.stderr)
+    );
+    let publication_path = package_dir.join("publication.bin");
+    let mut bytes = fs::read(&publication_path).expect("publication should exist");
+    let last = bytes.last_mut().expect("publication should not be empty");
+    *last ^= 0x01;
+    fs::write(publication_path, bytes).expect("tampered publication should be written");
+
+    let validated = validate(&store, &package_dir);
+    assert!(
+        !validated.status.success(),
+        "tampered publication was accepted"
+    );
+    assert!(String::from_utf8_lossy(&validated.stderr).contains("failed"));
+    fs::remove_dir_all(root).expect("test outputs should be cleaned up");
+}

@@ -9,7 +9,9 @@ publish = false
 
 [dependencies]
 argh = "0.1.12"
+prism_asset = { path = "../prism_asset" }
 prism_asset_build_core = { path = "../prism_asset_build_core" }
+prism_asset_container = { path = "../prism_asset_container" }
 
 [dev-dependencies]
 png = "0.18.1"

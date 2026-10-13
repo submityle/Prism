@@ -1,12 +1,15 @@
-use crate::args::Plan;
+use crate::args::{Package, Plan, Validate};
 use crate::error::CommandError;
+use prism_asset::StableGuid;
 use prism_asset_build_core::import::{
     CanonicalPngProcessor, ImageArtifact, IMAGE_ARTIFACT_KIND, IMAGE_ARTIFACT_SCHEMA,
 };
 use prism_asset_build_core::{
-    AssetId, BuildExecutor, BuildGraph, BuildRevision, DerivedDataCache, ImportRecipe, JobId,
-    RevisionStore, SourceSnapshot,
+    ArtifactQualityGate, AssetId, BuildExecutor, BuildGraph, BuildRevision, ContentHash,
+    DerivedDataCache, ImportRecipe, JobId, PackageRequest, PublicationDescriptor, RevisionStore,
+    RuntimePackage, SourceSnapshot,
 };
+use prism_asset_container::{ContainerReader, RuntimeManifest};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -114,6 +117,244 @@ pub fn inspect(store_root: PathBuf) -> Result<(), CommandError> {
         );
     }
     Ok(())
+}
+
+pub fn package(command: Package) -> Result<(), CommandError> {
+    let prepared = prepare_package(&command.store, command.asset_id, &command.logical_path)?;
+    write_package(&command.output, &prepared)?;
+    print_package_summary(&prepared);
+    Ok(())
+}
+
+pub fn validate(command: Validate) -> Result<(), CommandError> {
+    let prepared = prepare_package(&command.store, command.asset_id, &command.logical_path)?;
+    validate_package_output(&command.package, &prepared)?;
+    println!("validated_revision={}", prepared.revision.0);
+    println!(
+        "build_manifest_hash={}",
+        prepared.build_manifest_hash.to_hex()
+    );
+    println!(
+        "runtime_manifest_hash={}",
+        ContentHash::digest(&prepared.package.runtime_manifest_bytes).to_hex()
+    );
+    println!("container_count={}", prepared.package.containers.len());
+    Ok(())
+}
+
+struct PreparedPackage {
+    revision: BuildRevision,
+    build_manifest_hash: ContentHash,
+    package: RuntimePackage,
+    publication: PublicationDescriptor,
+}
+
+fn prepare_package(
+    store_root: &Path,
+    asset_id: u128,
+    logical_path: &str,
+) -> Result<PreparedPackage, CommandError> {
+    if logical_path.is_empty() {
+        return Err(CommandError::InvalidInput(
+            "logical-path must be an explicit non-empty project-relative path".into(),
+        ));
+    }
+    let store = RevisionStore::open(store_root)?;
+    let revision = store.current_revision()?.ok_or_else(|| {
+        CommandError::InvalidInput("store has no committed build revision".into())
+    })?;
+    let manifest = store.manifest(revision)?;
+    let gate = ArtifactQualityGate::default();
+    let report = gate.validate_manifest(&manifest, store.cas())?;
+    print_quality_report(&report);
+
+    let build_manifest_hash = ContentHash::digest(&manifest.canonical_bytes());
+    let package = prism_asset_build_core::package_runtime(PackageRequest {
+        manifest: &manifest,
+        cas: store.cas(),
+        mappings: package_mappings(&manifest, asset_id, logical_path)?,
+    })?;
+    if package.source_manifest_hash != build_manifest_hash {
+        return Err(CommandError::InvalidInput(
+            "runtime package source manifest hash is inconsistent".into(),
+        ));
+    }
+    let publication = PublicationDescriptor::new(
+        revision,
+        build_manifest_hash,
+        &package.runtime_manifest_bytes,
+        &package.containers,
+    )
+    .map_err(CommandError::Publication)?;
+    Ok(PreparedPackage {
+        revision,
+        build_manifest_hash,
+        package,
+        publication,
+    })
+}
+
+fn package_mappings(
+    manifest: &prism_asset_build_core::Manifest,
+    image_asset_id: u128,
+    logical_path: &str,
+) -> Result<Vec<prism_asset_build_core::AssetPackageMapping>, CommandError> {
+    let source_asset_id = image_asset_id.checked_sub(1).ok_or_else(|| {
+        CommandError::InvalidInput(
+            "asset-id must be at least 1; id-1 is reserved for the source artifact".into(),
+        )
+    })?;
+    let image_asset = AssetId(image_asset_id);
+    let source_asset = AssetId(source_asset_id);
+    if !manifest.entries.contains_key(&image_asset) || !manifest.entries.contains_key(&source_asset)
+    {
+        return Err(CommandError::InvalidInput(format!(
+            "current revision must contain image asset {} and source asset {}",
+            image_asset_id, source_asset_id
+        )));
+    }
+    let image_guid = StableGuid::from_path(logical_path);
+    let source_guid = StableGuid::derive_sub(image_guid, "source");
+    Ok(vec![
+        prism_asset_build_core::AssetPackageMapping {
+            asset: source_asset,
+            guid: source_guid,
+            container_name: "core".into(),
+            priority: 0,
+            chunk_priority: 0,
+        },
+        prism_asset_build_core::AssetPackageMapping {
+            asset: image_asset,
+            guid: image_guid,
+            container_name: "core".into(),
+            priority: 0,
+            chunk_priority: 1,
+        },
+    ])
+}
+
+fn write_package(output: &Path, prepared: &PreparedPackage) -> Result<(), CommandError> {
+    fs::create_dir_all(output)?;
+    write_immutable(
+        output.join("manifest.bin"),
+        &prepared.package.runtime_manifest_bytes,
+    )?;
+    let publication_bytes = prepared
+        .publication
+        .encode()
+        .map_err(CommandError::Publication)?;
+    write_immutable(output.join("publication.bin"), &publication_bytes)?;
+    let containers = output.join("containers");
+    fs::create_dir_all(&containers)?;
+    for (name, bytes) in &prepared.package.containers {
+        write_immutable(containers.join(name), bytes)?;
+    }
+    Ok(())
+}
+
+fn validate_package_output(output: &Path, prepared: &PreparedPackage) -> Result<(), CommandError> {
+    let runtime_manifest_bytes = fs::read(output.join("manifest.bin"))?;
+    let runtime_manifest = RuntimeManifest::decode(&runtime_manifest_bytes)
+        .map_err(|_| CommandError::InvalidInput("runtime manifest is invalid".into()))?;
+    if runtime_manifest_bytes != prepared.package.runtime_manifest_bytes
+        || runtime_manifest != prepared.package.runtime_manifest
+    {
+        return Err(CommandError::InvalidInput(
+            "runtime manifest differs from deterministic package output".into(),
+        ));
+    }
+    let publication_bytes = fs::read(output.join("publication.bin"))?;
+    let publication =
+        PublicationDescriptor::decode(&publication_bytes).map_err(CommandError::Publication)?;
+    let expected_publication = prepared
+        .publication
+        .encode()
+        .map_err(CommandError::Publication)?;
+    if publication_bytes != expected_publication || publication != prepared.publication {
+        return Err(CommandError::InvalidInput(
+            "publication descriptor differs from deterministic package output".into(),
+        ));
+    }
+    for (name, expected) in &prepared.package.containers {
+        let actual = fs::read(output.join("containers").join(name))?;
+        if actual != *expected {
+            return Err(CommandError::InvalidInput(format!(
+                "runtime container {name:?} differs from deterministic package output"
+            )));
+        }
+        let reader = ContainerReader::new(actual).map_err(|_| {
+            CommandError::InvalidInput(format!("runtime container {name:?} is invalid"))
+        })?;
+        let Some(identity) = runtime_manifest.container_identity(name) else {
+            return Err(CommandError::InvalidInput(format!(
+                "runtime manifest has no identity for container {name:?}"
+            )));
+        };
+        let info = reader.info();
+        if identity.byte_len != info.total_len
+            || identity.content_hash != info.content_hash
+            || identity.generation != info.generation
+        {
+            return Err(CommandError::InvalidInput(format!(
+                "runtime manifest identity does not match container {name:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn write_immutable(path: PathBuf, bytes: &[u8]) -> Result<(), CommandError> {
+    match fs::read(&path) {
+        Ok(existing) if existing == bytes => Ok(()),
+        Ok(_) => Err(CommandError::InvalidInput(format!(
+            "refusing to overwrite divergent package output {}",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::write(path, bytes).map_err(CommandError::Io)
+        }
+        Err(error) => Err(CommandError::Io(error)),
+    }
+}
+
+fn print_quality_report(report: &prism_asset_build_core::ValidationReport) {
+    println!("quality_checked_assets={}", report.checked_assets);
+    println!("quality_checked_artifacts={}", report.checked_artifacts);
+    println!("quality_checked_blobs={}", report.checked_blobs);
+    println!("quality_checked_bytes={}", report.checked_bytes);
+    println!(
+        "quality_checked_dependency_edges={}",
+        report.checked_dependency_edges
+    );
+}
+
+fn print_package_summary(prepared: &PreparedPackage) {
+    println!("packaged_revision={}", prepared.revision.0);
+    println!(
+        "build_manifest_hash={}",
+        prepared.build_manifest_hash.to_hex()
+    );
+    println!(
+        "runtime_manifest_hash={}",
+        ContentHash::digest(&prepared.package.runtime_manifest_bytes).to_hex()
+    );
+    println!(
+        "runtime_manifest_bytes={}",
+        prepared.package.runtime_manifest_bytes.len()
+    );
+    println!("container_count={}", prepared.package.containers.len());
+    for (name, bytes) in &prepared.package.containers {
+        let info = ContainerReader::new(bytes.clone())
+            .expect("package output was just encoded")
+            .info();
+        println!(
+            "container={} bytes={} hash={} entries={}",
+            name,
+            bytes.len(),
+            ContentHash::digest(bytes).to_hex(),
+            info.entry_count
+        );
+    }
 }
 
 fn snapshot(path: &Path, logical_path: &str) -> Result<SourceSnapshot, CommandError> {
