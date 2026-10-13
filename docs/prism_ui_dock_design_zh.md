@@ -2,9 +2,9 @@
 > v1 / 顶级次世代 AAA 级 — 可停靠 / 可拖拽 / 可持久化 / 可协同的工作台布局内核
 
 > 面向 Prism(Bevy fork)Loom Studio 编辑器(`prism_editor_framework_design_zh.md` §5「编辑器外壳 Shell」)的**停靠宿主(Dock host)**地基。
-> `pkg/prism_ui_dock` 已提供纯数据的布局模型、校验、reducer、几何计划、拖拽状态机和持久化边界；
+> `pkg/prism_ui_dock` 已提供纯数据的布局模型、校验、reducer、几何计划、拖拽状态机、Element 装配、host-driven autosave 和持久化边界；
 > `prism_ui_component_kit::editor::DockPanel` 仍是**零尺寸纯展示组件**(标题栏 + 内容区 + `DockSide` 修饰类)，作为每块面板的视觉外壳复用。
-> Element 装配、真实 renderer、overlay/hit-test 接线、自动保存 middleware 与 schema 迁移仍由后续里程碑完成。
+> 真实 renderer host、overlay/hit-test 接线与 schema 迁移仍由后续里程碑完成。
 >
 > **命名定位**:停靠是 **UI 家族的通用能力**(VS Code/Fleet 用它拼整个 IDE,不限游戏编辑器),故 crate 归入 `prism_ui_dock`
 > (与 `prism_ui_overlay`/`prism_ui_virtual`/`prism_ui_layout` 同层),编辑器外壳(E 系列)**消费**它。
@@ -20,7 +20,7 @@
 >
 > 本文为**设计规格**。地基层(`prism_ui_layout` 确定性 flexbox 解算、`prism_ui_overlay` portal/浮层 + FocusTrap、
 > `prism_ui_store` 响应式状态、`prism_ui_virtual` 虚拟化、`prism_ui_input` hit_test/focus/gesture、
-> `prism_ui_component_kit::DockPanel` 面板外观)为**已交付**(SHIPPED);**`prism_ui_dock` 当前已交付 M0 核心、M1 renderer-independent 计划、M2 纯数据拖拽和 M4 持久化/Workspace 边界，Element/renderer 等集成能力仍为 PLANNED**。
+> `prism_ui_component_kit::DockPanel` 面板外观)和 `prism_ui_dock` 的 M0 核心、M1 render plan + Element 装配、M2 纯数据拖拽、M4 Workspace/host-driven autosave 边界均为**已交付**(SHIPPED);真实 renderer host、overlay/hit-test 与 schema migration 仍为 PLANNED。
 > 全文严格区分「已实现并通过测试」与「规划中」。
 >
 > **非目标**:不含 AI/ML/LLM;不做窗口管理器(多显示器/原生窗口由平台/`prism_window` 层承载,本层只给布局模型);
@@ -299,7 +299,7 @@ features: `std`(持久化落盘)/ `anim`(动效)/ `snapshot_tests`。核心 mode
 | 里程碑 | 内容 | 依赖 |
 |---|---|---|
 | **M0** | model + reduce(split/tabify/close/resize)+ 不变量 + 属性测试 | — |
-| **M1** | renderer-independent 几何解算 + render plan + tab/header/splitter 元数据 | Dock model ✅ / DockPanel ✅；Element 装配仍待完成 |
+| **M1** | renderer-independent 几何解算 + render plan + tab/header/splitter 元数据 | Dock model ✅ / DockPanel ✅ / `render` feature Element 装配 ✅；真实 renderer host 仍待完成 |
 | **M2** | 拖拽状态机 + 五向 drop zone + overlay 预览 | 状态机/drop-zone/reducer action 已交付；renderer overlay 预览仍待集成 |
 | **M3** | 浮窗 + autohide 边栏 + maximize | M1/M2 |
 | **M4** | 持久化(序列化/校验/迁移)+ Workspace + 自动保存 | persistence core ✅ / Workspace 纯数据与 codec ✅ / host-driven autosave ✅；schema migration 仍待完成 |
