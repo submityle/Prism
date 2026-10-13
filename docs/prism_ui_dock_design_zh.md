@@ -2,9 +2,9 @@
 > v1 / 顶级次世代 AAA 级 — 可停靠 / 可拖拽 / 可持久化 / 可协同的工作台布局内核
 
 > 面向 Prism(Bevy fork)Loom Studio 编辑器(`prism_editor_framework_design_zh.md` §5「编辑器外壳 Shell」)的**停靠宿主(Dock host)**地基。
-> 当前 `pkg` 仅有 `prism_ui_component_kit::editor::DockPanel` —— 一个**零尺寸纯展示组件**(标题栏 + 内容区 + `DockSide` 修饰类),
-> **没有任何布局管理**:无 split/tab/拖拽重排/浮动窗口/布局持久化。本 crate 补齐这整套「宿主」逻辑,
-> `DockPanel` 则作为「每块面板的外观」被复用。
+> `pkg/prism_ui_dock` 已提供纯数据的布局模型、校验、reducer、几何计划、拖拽状态机和持久化边界；
+> `prism_ui_component_kit::editor::DockPanel` 仍是**零尺寸纯展示组件**(标题栏 + 内容区 + `DockSide` 修饰类)，作为每块面板的视觉外壳复用。
+> Element 装配、真实 renderer、overlay/hit-test 接线、自动保存 middleware 与 schema 迁移仍由后续里程碑完成。
 >
 > **命名定位**:停靠是 **UI 家族的通用能力**(VS Code/Fleet 用它拼整个 IDE,不限游戏编辑器),故 crate 归入 `prism_ui_dock`
 > (与 `prism_ui_overlay`/`prism_ui_virtual`/`prism_ui_layout` 同层),编辑器外壳(E 系列)**消费**它。
@@ -20,7 +20,7 @@
 >
 > 本文为**设计规格**。地基层(`prism_ui_layout` 确定性 flexbox 解算、`prism_ui_overlay` portal/浮层 + FocusTrap、
 > `prism_ui_store` 响应式状态、`prism_ui_virtual` 虚拟化、`prism_ui_input` hit_test/focus/gesture、
-> `prism_ui_component_kit::DockPanel` 面板外观)为**已交付**(SHIPPED);**`prism_ui_dock` 当前已交付 M0 核心(模型/校验/reducer)，其余集成能力仍为 PLANNED**。
+> `prism_ui_component_kit::DockPanel` 面板外观)为**已交付**(SHIPPED);**`prism_ui_dock` 当前已交付 M0 核心、M1 renderer-independent 计划、M2 纯数据拖拽和 M4 持久化/Workspace 边界，Element/renderer 等集成能力仍为 PLANNED**。
 > 全文严格区分「已实现并通过测试」与「规划中」。
 >
 > **非目标**:不含 AI/ML/LLM;不做窗口管理器(多显示器/原生窗口由平台/`prism_window` 层承载,本层只给布局模型);
