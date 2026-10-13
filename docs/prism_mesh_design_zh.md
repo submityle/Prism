@@ -930,7 +930,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 ### 25.2 诚实边界（当前未完成）
 
-- 虚拟几何已有 v1 落盘编解码契约、baseline 静态 Cluster/page builder 和 CPU 决策层，但尚不是完整 LOD 简化/量化/流送管线；页表仍未消费真实资产文件。
+- 虚拟几何已有 v1 落盘编解码契约、baseline 静态 Cluster/page builder、CPU 决策层和 CPU page store 驻留生命周期，但尚不是完整 LOD 简化/量化/GPU 上传流送管线。
 - HW Mesh Shader 后端未实现；现有可见性光栅只接入标准 Mesh 的 bootstrap。
 - 无 Deformable Cluster；蒙皮仍是标准 GPU skinning 规划。
 - `prism_mesh` 的分流布局和实际字节打包已接入 `RenderMesh` 生产上传、queue、frame graph 与多 slot draw；深度 pass 带宽基准尚未完成。
