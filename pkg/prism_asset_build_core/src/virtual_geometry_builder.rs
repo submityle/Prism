@@ -10,6 +10,9 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
+use crate::virtual_geometry_payload::{
+    encode_cluster_payload as encode_quantized_cluster_payload, ClusterPayloadError,
+};
 use prism_mesh::{content_hash, Mesh, MeshBounds, MeshError, POSITION_ATTRIBUTE};
 use prism_render_architecture::gpu_scene::SceneBounds;
 use prism_render_architecture::virtual_geometry::{
@@ -19,10 +22,10 @@ use prism_render_architecture::virtual_geometry::{
 };
 use prism_render_driver::PrimitiveTopology;
 
-/// Payload signature for one uncompressed cluster record.
-pub const STATIC_CLUSTER_PAYLOAD_MAGIC: [u8; 4] = *b"CLST";
-/// Current payload encoding version.
-pub const STATIC_CLUSTER_PAYLOAD_VERSION: u16 = 1;
+/// Payload signature and schema shared with the public cluster codec.
+pub use crate::virtual_geometry_payload::{
+    STATIC_CLUSTER_PAYLOAD_MAGIC, STATIC_CLUSTER_PAYLOAD_VERSION,
+};
 
 /// Fixed limits and page policy for the baseline clusterizer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +77,8 @@ pub enum StaticClusterBuildError {
     PageKeyOverflow,
     /// The page cluster count cannot be represented by the asset ABI.
     PageClusterCountOverflow,
+    /// Shared cluster payload encoder rejected generated data.
+    InvalidPayload(ClusterPayloadError),
     /// Generated asset cross-validation failed.
     InvalidAsset(VirtualGeometryAssetError),
     /// A material submesh table does not cover the source index buffer exactly.
@@ -106,6 +111,7 @@ impl core::fmt::Display for StaticClusterBuildError {
             }
             Self::PageKeyOverflow => f.write_str("page key exceeds the virtual-geometry ABI"),
             Self::PageClusterCountOverflow => f.write_str("page contains too many clusters"),
+            Self::InvalidPayload(error) => write!(f, "invalid cluster payload: {error}"),
             Self::InvalidAsset(error) => {
                 write!(f, "generated virtual-geometry asset is invalid: {error}")
             }
@@ -282,7 +288,7 @@ fn validate_settings(settings: StaticClusterBuildSettings) -> Result<(), StaticC
     if settings.page_size < 1024 || !settings.page_size.is_power_of_two() {
         return Err(StaticClusterBuildError::InvalidSettings("page_size"));
     }
-    if settings.max_vertices_per_cluster == 0 || settings.max_vertices_per_cluster > 64 {
+    if settings.max_vertices_per_cluster < 3 || settings.max_vertices_per_cluster > 64 {
         return Err(StaticClusterBuildError::InvalidSettings(
             "max_vertices_per_cluster",
         ));
@@ -344,7 +350,9 @@ fn flush_cluster(
     nodes: &mut Vec<ClusterNode>,
     compression: VirtualGeometryCompression,
 ) -> Result<(), StaticClusterBuildError> {
-    let payload = encode_cluster_payload(vertices, indices);
+    let bounds = cluster_bounds(vertices);
+    let payload = encode_quantized_cluster_payload(bounds, vertices, indices)
+        .map_err(StaticClusterBuildError::InvalidPayload)?;
     if payload.len() > settings.page_size as usize {
         return Err(StaticClusterBuildError::ClusterTooLarge {
             bytes: abi_u32(payload.len(), "payload byte")?,
@@ -441,32 +449,6 @@ fn finish_page(
         payload: stored,
     });
     Ok(())
-}
-
-fn encode_cluster_payload(vertices: &[[f32; 3]], indices: &[u16]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(12 + vertices.len() * 12 + indices.len() * 2);
-    bytes.extend_from_slice(&STATIC_CLUSTER_PAYLOAD_MAGIC);
-    bytes.extend_from_slice(&STATIC_CLUSTER_PAYLOAD_VERSION.to_le_bytes());
-    // validate_settings and cluster splitting guarantee <=64 vertices and <=128 triangles.
-    bytes.extend_from_slice(
-        &u16::try_from(vertices.len())
-            .expect("cluster vertex limit")
-            .to_le_bytes(),
-    );
-    bytes.extend_from_slice(
-        &u16::try_from(indices.len() / 3)
-            .expect("cluster triangle limit")
-            .to_le_bytes(),
-    );
-    for vertex in vertices {
-        for value in vertex {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
-    }
-    for index in indices {
-        bytes.extend_from_slice(&index.to_le_bytes());
-    }
-    bytes
 }
 
 fn cluster_bounds(vertices: &[[f32; 3]]) -> SceneBounds {
@@ -662,7 +644,9 @@ mod tests {
 
     #[test]
     fn normal_cone_stays_finite_for_extreme_finite_triangles() {
-        let max = f32::MAX;
+        // SceneBounds stores half-extents, so keep the range representable after
+        // converting the shared MeshBounds policy to that ABI.
+        let max = f32::MAX * 0.25;
         let source = Mesh::new(PrimitiveTopology::TriangleList)
             .with_attribute(
                 MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float32x3, 0),
@@ -681,6 +665,22 @@ mod tests {
             .normal_cone
             .iter()
             .all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn settings_reject_cluster_caps_smaller_than_one_triangle() {
+        for max_vertices_per_cluster in [1, 2] {
+            let settings = StaticClusterBuildSettings {
+                max_vertices_per_cluster,
+                ..StaticClusterBuildSettings::default()
+            };
+            assert_eq!(
+                validate_settings(settings),
+                Err(StaticClusterBuildError::InvalidSettings(
+                    "max_vertices_per_cluster"
+                ))
+            );
+        }
     }
 
     #[test]
