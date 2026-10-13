@@ -489,6 +489,20 @@ mod tests {
     }
 
     #[test]
+    fn advisory_lock_is_reusable_without_deleting_stable_path() {
+        let (_store, directory) = temp_store();
+        fs::create_dir_all(&directory).unwrap();
+        let lock_path = directory.join("workspace.prism.lock");
+        let first = StoreLock::acquire(&lock_path).unwrap();
+        assert!(lock_path.is_file());
+        drop(first);
+        let second = StoreLock::acquire(&lock_path).unwrap();
+        assert!(lock_path.is_file());
+        drop(second);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn concurrent_saves_are_serialized_and_leave_valid_snapshots() {
         let (store, directory) = temp_store();
         let first_store = store.clone();
