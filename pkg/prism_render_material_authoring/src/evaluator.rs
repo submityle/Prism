@@ -164,6 +164,12 @@ fn eval_node_inner(
                     "clamp bounds must be scalar",
                 ));
             }
+            if lo[0] > hi[0] {
+                return Err(error(
+                    DiagnosticCode::InvalidValue,
+                    "clamp lower bound exceeds upper bound",
+                ));
+            }
             typed(
                 &values[0].type_name,
                 x.into_iter().map(|v| v.clamp(lo[0], hi[0])).collect(),
