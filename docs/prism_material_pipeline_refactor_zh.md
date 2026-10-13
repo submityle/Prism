@@ -632,7 +632,7 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
   引用，且其 parity 测试仍使用 test-owned bind group；当前已有的 generation/layout 门禁
  只能证明 ABI/搜索契约，不能据此宣称主 `MaterialBindGroup`/resolve 已完成真实 adapter
  端到端硬件验证；这不表示 `shading_resolve` 缺少 Material-VT 页表消费，该消费已经接线。
- 仍未接入生产 resolve 的是独立 P3 shade-cache atlas/page-table。
+ 仍未接入生产 resolve 的是独立 P3 shade-cache atlas/page-table。当前已固化下一阶段的真实 ABI 前置契约：producer 必须随每个已发布页提供 per-pixel page index 与包含 atlas origin、chart extent、chart UV bounds、generation/epoch、page size/channel 的 `GpuShadeResolvePage`；resolve 不得从 material UV 或缺少 object/chart 身份的 WorkItem 推断 page。该契约尚未接入 bind group、producer publication 或 shader sampling，因此不能宣称 P3 consumer 已完成。
   当前已接入主 visibility attachments → readback → typed demand registry 的真实 GPU
   feedback bridge，并由材质 producer 消费；无有效 feedback 时仍保留确定性的受限 bootstrap。
   尚未完成的是把完整主 render pass（而非 production group-1 + test-owned wrapper）纳入

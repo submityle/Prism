@@ -18,6 +18,7 @@ use prism_render_driver_wgpu::WgpuQueue;
 
 use crate::GpuCompletionTracker;
 
+use super::super::chart::FaceChart;
 use super::super::key::ShadePageKey;
 use super::super::store::{ShadePageHandle, ShadePageStore};
 use super::atlas::ShadeAtlasLayout;
@@ -126,6 +127,53 @@ impl GpuShadePageEntry {
     #[must_use]
     pub const fn words(self) -> [u32; 4] {
         [self.atlas_x, self.atlas_y, self.generation, self.epoch]
+    }
+}
+
+/// Sampling contract for a page consumed by the screen-space resolve.
+///
+/// This is intentionally separate from [`GpuShadePageEntry`]: the writer only
+/// needs an atlas origin and proof, while resolve also needs the validated face
+/// chart transform. A producer must publish this row together with a
+/// per-pixel page index; resolve must never infer chart bounds from a material
+/// UV or from the page-table key alone.
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+#[repr(C)]
+pub struct GpuShadeResolvePage {
+    /// Physical atlas origin in texels.
+    pub atlas_origin: [u32; 2],
+    /// Chart extent at the page's mip in texels.
+    pub chart_extent: [u32; 2],
+    /// Lower and upper local chart UV bounds.
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
+    /// Content proof copied from the published page entry.
+    pub generation: u32,
+    pub epoch: u32,
+    /// Logical page size and channel identity for shader-side validation.
+    pub page_size: u32,
+    pub channel: u32,
+}
+
+impl GpuShadeResolvePage {
+    /// Builds the resolve row from the same validated chart used by the writer.
+    #[must_use]
+    pub const fn from_entry(
+        entry: GpuShadePageEntry,
+        chart: FaceChart,
+        page_size: u32,
+        channel: u32,
+    ) -> Self {
+        Self {
+            atlas_origin: [entry.atlas_x, entry.atlas_y],
+            chart_extent: chart.texel_extent,
+            uv_min: chart.uv_min,
+            uv_max: chart.uv_max,
+            generation: entry.generation,
+            epoch: entry.epoch,
+            page_size,
+            channel,
+        }
     }
 }
 
@@ -1030,6 +1078,33 @@ mod tests {
         let record = ShadePageTableRecord::from_handle(key, handle, layout).unwrap();
         assert_eq!([record.atlas_x, record.atlas_y], [0, 4]);
         assert_eq!(record.handle, handle);
+    }
+
+    #[test]
+    fn resolve_page_row_preserves_validated_chart_contract() {
+        let entry = GpuShadePageEntry {
+            atlas_x: 32,
+            atlas_y: 64,
+            generation: 9,
+            epoch: 7,
+        };
+        let chart = super::super::super::chart::FaceChart {
+            face: 4,
+            uv: [[0.1, 0.2], [0.9, 0.2], [0.1, 0.8]],
+            uv_min: [0.1, 0.2],
+            uv_max: [0.9, 0.8],
+            texel_extent: [128, 96],
+        };
+        let row = GpuShadeResolvePage::from_entry(entry, chart, 128, 0);
+        assert_eq!(size_of::<GpuShadeResolvePage>(), 48);
+        assert_eq!(row.atlas_origin, [32, 64]);
+        assert_eq!(row.chart_extent, [128, 96]);
+        assert_eq!(row.uv_min, chart.uv_min);
+        assert_eq!(row.uv_max, chart.uv_max);
+        assert_eq!(
+            (row.generation, row.epoch, row.page_size, row.channel),
+            (9, 7, 128, 0)
+        );
     }
 
     #[test]
