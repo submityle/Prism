@@ -43,6 +43,8 @@ pub enum TemplateError {
     InvalidTierTarget(LocalEntityId),
     /// A nested slot used a nil child template GUID.
     NilNestedTemplate,
+    /// A nested slot pointed directly back to this template.
+    SelfNestedTemplate,
     /// A nested slot root was not a base entity in this template.
     InvalidNestedRoot(LocalEntityId),
     /// Two nested slots claimed the same root entity.
@@ -51,6 +53,8 @@ pub enum TemplateError {
     MissingNestedDependency(StableGuid),
     /// A dependency entry used the reserved nil GUID.
     NilDependency,
+    /// The dependency closure contained this template's own GUID.
+    SelfDependency,
     /// The dependency closure contained the same GUID twice.
     DuplicateDependency(StableGuid),
 }
@@ -180,6 +184,9 @@ impl SceneTemplate {
             if slot.template.is_nil() {
                 return Err(TemplateError::NilNestedTemplate);
             }
+            if slot.template == self.guid {
+                return Err(TemplateError::SelfNestedTemplate);
+            }
             if !self.contains_local(slot.root) {
                 return Err(TemplateError::InvalidNestedRoot(slot.root));
             }
@@ -191,6 +198,9 @@ impl SceneTemplate {
         for dependency in self.deps.iter().copied() {
             if dependency.is_nil() {
                 return Err(TemplateError::NilDependency);
+            }
+            if dependency == self.guid {
+                return Err(TemplateError::SelfDependency);
             }
             if !deps.insert(dependency) {
                 return Err(TemplateError::DuplicateDependency(dependency));
@@ -348,6 +358,13 @@ mod tests {
             template.validate(),
             Err(TemplateError::MissingNestedDependency(guid(2)))
         );
+
+        template.deps = Box::new([guid(1)]);
+        template.nested = Box::new([]);
+        assert_eq!(template.validate(), Err(TemplateError::SelfDependency));
+
+        template.nested = Box::new([NestedSlot::new(LocalEntityId::new(0), guid(1))]);
+        assert_eq!(template.validate(), Err(TemplateError::SelfNestedTemplate));
     }
 
     #[test]
