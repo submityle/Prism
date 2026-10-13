@@ -8,6 +8,7 @@
 
 use crate::AssetPath;
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::fmt;
 use prism_tasks::Priority;
 
@@ -327,7 +328,7 @@ impl StreamingController {
     /// wall-clock recency; callers that need an LRU policy must feed that
     /// policy through their own request priorities.
     #[must_use]
-    pub fn eviction_candidates(&self) -> alloc::vec::Vec<StreamRequestId> {
+    pub fn eviction_candidates(&self) -> Vec<StreamRequestId> {
         let mut candidates = self
             .records
             .iter()
@@ -341,7 +342,7 @@ impl StreamingController {
                     *id,
                 )
             })
-            .collect::<alloc::vec::Vec<_>>();
+            .collect::<Vec<_>>();
         candidates.sort_by_key(|candidate| (candidate.0, candidate.1, candidate.2, candidate.3));
         candidates
             .into_iter()
