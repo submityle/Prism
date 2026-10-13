@@ -38,7 +38,7 @@ pub fn apply_property_override(
     let component = world
         .get_reflect_mut(entity, type_id)
         .ok_or(PropertyApplyError::MissingComponent)?;
-    apply_property_to_reflect(component, property)
+    apply_property_to_reflect_for_replay(component, property)
 }
 
 /// Applies several properties atomically to one reflected component.
@@ -66,7 +66,7 @@ pub fn apply_property_overrides(
         .ok_or(PropertyApplyError::MissingComponent)?;
     let mut staged = current.reflect_clone();
     for property in properties {
-        apply_property_to_reflect(&mut *staged, property)?;
+        apply_property_to_reflect_for_replay(&mut *staged, property)?;
     }
     if world.insert_reflect(entity, &*staged) {
         Ok(())
@@ -75,7 +75,7 @@ pub fn apply_property_overrides(
     }
 }
 
-fn apply_property_to_reflect(
+pub(crate) fn apply_property_to_reflect_for_replay(
     component: &mut dyn Reflect,
     property: &PropertyOverride,
 ) -> Result<(), PropertyApplyError> {

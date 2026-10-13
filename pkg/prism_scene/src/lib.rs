@@ -52,6 +52,8 @@ pub mod instantiate;
 pub mod layers;
 #[cfg(feature = "materialize")]
 pub mod materialize;
+#[cfg(feature = "materialize")]
+pub mod override_replay;
 pub mod overrides;
 pub mod path;
 pub mod plan;
@@ -74,6 +76,8 @@ pub use materialize::{
     materialize_plan, materialize_plan_with_limits, ComponentMaterializer, MaterializeError,
     MaterializeFailure, MaterializeLimits, MaterializerRegistry, RemappedEntityField, RowLayout,
 };
+#[cfg(feature = "materialize")]
+pub use override_replay::{replay_overrides, OverrideReplayError};
 pub use overrides::{
     ArchetypeSignature, ComponentTypeId, OverrideError, OverrideSet, OverrideValue,
     PropertyOverride, StructuralOp,
