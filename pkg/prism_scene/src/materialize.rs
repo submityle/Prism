@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use core::mem::{align_of, size_of};
 
 use crate::identity::LocalEntityId;
+use crate::instantiate::SceneAttachError;
 use crate::instantiate::SceneSpawn;
 use crate::overrides::ComponentTypeId;
 use crate::plan::{FieldSlot, InstantiationPlan, PlanError};
@@ -306,6 +307,16 @@ impl MaterializedScene {
         tier: ResidencyTier,
     ) -> crate::SceneInstance {
         self.spawn.scene_instance(template, tier)
+    }
+
+    /// Attaches the live root anchor through the materialized-scene boundary.
+    pub fn attach_instance(
+        &self,
+        world: &mut World,
+        template: StableGuid,
+        tier: ResidencyTier,
+    ) -> Result<Entity, SceneAttachError> {
+        self.spawn.attach_instance(world, template, tier)
     }
 }
 
@@ -735,6 +746,17 @@ mod tests {
         assert_eq!(
             world.get::<Payload>(second).unwrap().target_bits,
             first.to_bits()
+        );
+        let root = scene
+            .attach_instance(
+                &mut world,
+                StableGuid::from_u128(0xabc),
+                ResidencyTier::Interactive,
+            )
+            .unwrap();
+        assert_eq!(
+            world.get::<crate::SceneInstance>(root).unwrap().template,
+            StableGuid::from_u128(0xabc)
         );
     }
 
