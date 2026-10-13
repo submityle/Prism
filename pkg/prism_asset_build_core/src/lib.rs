@@ -23,6 +23,10 @@ pub mod job;
 pub mod package;
 /// Immutable binding between a build revision and its runtime package outputs.
 pub mod publication;
+/// Explicit importer/cook recipe identity.
+pub mod recipe;
+/// Immutable source snapshots and source identity.
+pub mod source;
 /// Revision manifests and atomic local publication.
 pub mod transaction;
 /// Stable IDs, hashes, descriptors, and manifest protocol types.
@@ -43,6 +47,8 @@ pub use package::{
     PackageOptions, PackageRequest, RuntimePackage,
 };
 pub use publication::{PublicationDescriptor, PublishedContainer};
+pub use recipe::ImportRecipe;
+pub use source::{SourceError, SourceSnapshot};
 pub use transaction::{
     PublishError, PublishTransaction, PublishedManifest, RevisionStore, TransactionState,
 };

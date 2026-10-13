@@ -37,6 +37,7 @@ mod indices;
 mod limits;
 mod mesh;
 mod morph;
+pub mod primitives;
 mod skin;
 mod streams;
 mod submesh;

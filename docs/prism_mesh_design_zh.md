@@ -170,7 +170,7 @@ crates/bevy_mesh                      仅保留给未迁移示例；RHI 路径�
 
 - **已有**：`prism_mesh::Mesh` 提供属性/索引/拓扑/布局/打包/包围体/校验；`VirtualGeometryVersion=1` 的 Cluster 决策层（cull/lod/page_table/raster_path/software_raster/hierarchy/bins/page_request/frame）已存在；`geometry` 有稳定几何表与 LOD 记录；`deformation` 有句柄与预算骨架；OMM、软件光栅、GDeflate 均有 CPU golden + GPU twin 的既有范式。
 - **已补齐（M0 静态契约切片）**：`prism_mesh` 现已包含 `topology.rs`、`submesh.rs`、`limits.rs`、`morph.rs`、`skin.rs`、`streams.rs`、`hash.rs`；RHI 的 12 种当前顶点格式均有类型化授权值；`Mesh::validate()` 已检查拓扑元素数、索引范围、子网格范围/重叠，`validate_with_limits()` 已接入属性/流/顶点/材质槽预算；确定性 hash 覆盖拓扑、属性值、索引与子网格。
-- **仍有差距**：`primitives/` 尚未落地；虚拟几何的 v1 落盘编解码契约已经存在，但尚无真正的 Cluster/LOD/分页构建器与生产流送接入；无 Deformable Cluster；无 mesh→BLAS/OMM 的几何侧契约；GPU 分流上传尚未接入 `RenderMesh` 的生产路径。
+- **仍有差距**：`primitives/` 已提供平面、立方体、UV 球、胶囊和采样地形片；虚拟几何的 v1 落盘编解码契约已经存在，但尚无真正的 Cluster/LOD/分页构建器与生产流送接入；无 Deformable Cluster；无 mesh→BLAS/OMM 的几何侧契约；GPU 分流上传尚未接入 `RenderMesh` 的生产路径。
 - **本文职责**：把这些差距写成可执行规格，而不是重写已有闭环。
 
 ## 6. 核心数据模型：一件 Mesh 是什么
@@ -934,7 +934,7 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 - HW Mesh Shader 后端未实现；现有可见性光栅只接入标准 Mesh 的 bootstrap。
 - 无 Deformable Cluster；蒙皮仍是标准 GPU skinning 规划。
 - `prism_mesh` 已有设备无关的分流布局与实际字节打包 API，但 `RenderMesh` 生产上传仍是单流交错。
-- Morph/Skin/SubMesh/内容哈希已落地；图元生成尚未落地。
+- Morph/Skin/SubMesh/内容哈希/内置图元已落地。
 - 形变缓存只是一组类型骨架（`DeformationHandle`/`Kind`/`Budget`），无实际调度。
 - 本文的性能数字是目标，不是实测；实现后必须替换为本机基线。
 
