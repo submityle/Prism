@@ -16,7 +16,7 @@
 > 本文聚焦「**语义正确 + 数据导向 + 可作者化 + 可调试 + 可网络化**」的工程路线；不复刻 UE/Unity 的对象模型与源码，只借其**状态语义边界、任务生命周期、绑定心智与调试形态**；核心抽象 `no_std + alloc` 友好，ECS/资产/编辑器/调试层需 `std`；**不依赖任何 `bevy_*` crate**。
 
 - 版本: v0.2（ST0 核心语义内核与 Schema/Context 基础契约同步版）
-- 状态: **ST0 CORE SHIPPED / ST1 ECS 最小装配切片已实现 / ST2–ST8 PLANNED**（ST1 的共享 Plan、逐实体 runtime 组件、CommandQueue 延迟 spawn、显式 tick/event 路径及 core Schema/Context 基础契约已交付；ECS gather、typed binding、自动调度、observer 迁移事件等仍按路线图推进，依赖项落地状态见 §2.1 与 §20）
+- 状态: **ST0 CORE SHIPPED / ST1 ECS 最小装配切片已实现 / ST2–ST8 PLANNED**（ST1 的共享 Plan、逐实体 runtime 组件、CommandQueue 延迟 spawn、显式 tick/event 路径、确定性 ECS gather 及 core Schema/Context 基础契约已交付；typed binding、自动调度、observer 迁移事件等仍按路线图推进，依赖项落地状态见 §2.1 与 §20）
 - 适用引擎: Prism（后 Bevy 时代，独立运行时）
 - 层级定位: **通用决策运行时，非 AI 专属**。AI 是首要消费者而非所有者。上承 `prism_gameplay_*`（AI/能力/流程/交互）、动画与 UI 流程；内嵌 `prism_ecs` 调度，**不进内核仿真内循环**（ECS 存储遍历、物理 solver、渲染 RG 永远走原生路径）
 - 关键依赖（均为 `pkg/` 下的 prism 原生 crate，落地状态见 §2.1）: `prism_ecs`（observer/reaction/relation/snapshot：迁移事件的即时响应与回滚底座）、`prism_app`（Plugin/Schedule/`fixed`/`determinism`/`state`：相位与固定步）、`prism_reflect`（`path`/`schema`/`dynamic`/`property_bridge`：动态绑定路径、资产 schema、版本迁移）、`prism_tasks`（off-thread 编译、批量并行执行）、`prism_asset`（树资产加载/mtime 监视/热重载）、`prism_diagnostic`（budget/hitch/profiler/replay：调试器与帧预算）、`prism_time`（timeline/recording/确定性时间源）、`prism_ui*` + `prism_editor_framework`（图编辑器宿主与调试 HUD）
@@ -877,13 +877,13 @@ impl BatchRuntime { pub fn tick_batch(&mut self, world: &mut World, agents: &[En
 - 确定性语义快照编码、针对 plan 的配置/history 校验、容量受限队列恢复；恢复错误不改变实例状态，且保留已安装 guards。
 - Parallel Deep History 恢复会跳过默认 region 初始化，避免历史子状态与默认子状态叠加；微步预算错误不返回部分 `StepReport`，调用者应检查队列与日志后重试。
 
-当前证据：当前 `cargo test -p prism_state_tree_core --offline -- --test-threads=1` 为 **31 tests + 0 doctest 全绿**；回归覆盖 Schema/Context 描述符与上下文身份校验，以及首次 `run()` 的启动 Eventless 稳定化、事件共享同一微步预算、Parallel owner 转移后所有 region 仍有活跃配置和 History 请求深度与 owner 配置不匹配时的编译期拒绝。`cargo clippy -p prism_state_tree_core --offline -- -D warnings` 通过；`prism_state_tree_ecs` 当前集成单测为 **14 tests + 0 doctest 全绿**，覆盖显式批量 tick 的顺序、重复项的实际二次执行、stale/未 materialize/缺组件三种缺失原因、错误隔离、失败后的状态快照和实例独立性。迁移/历史热路径目前使用临时 `Vec` 且日志无界增长，零分配仍是尚未满足的设计目标；完整 SCXML 一致性套件和分配计数基准也尚未交付。
+当前证据：当前 `cargo test -p prism_state_tree_core --offline -- --test-threads=1` 为 **31 tests + 0 doctest 全绿**；回归覆盖 Schema/Context 描述符与上下文身份校验，以及首次 `run()` 的启动 Eventless 稳定化、事件共享同一微步预算、Parallel owner 转移后所有 region 仍有活跃配置和 History 请求深度与 owner 配置不匹配时的编译期拒绝。`cargo clippy -p prism_state_tree_core --offline -- -D warnings` 通过；`prism_state_tree_ecs` 当前集成单测为 **15 tests + 0 doctest 全绿**，覆盖显式批量 tick 的顺序、重复项的实际二次执行、stale/未 materialize/缺组件三种缺失原因、错误隔离、失败后的状态快照、实例独立性，以及基于真实 ECS query 的 `tick_all` 确定性 gather。迁移/历史热路径目前使用临时 `Vec` 且日志无界增长，零分配仍是尚未满足的设计目标；完整 SCXML 一致性套件和分配计数基准也尚未交付。
 
-ST1 最小装配切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句柄、持有独立且长期存活 core cursor 的 `StateTreeInstance` ECS 组件、经 `CommandQueue` deferred spawn 的 `queue_spawn`，以及显式逐实体 `tick_entity` / `step`、显式按调用顺序批量执行的 `tick_entities` 和有界事件请求 API。core `Guard` 已增加 `Send + Sync` 约束，允许运行时组件满足 ECS 线程安全边界；集成测试验证 spawn 应用后初始进入，再请求事件并在后续 tick 切换状态，并覆盖事件队列满、预算错误、stale/未 materialize/缺组件三种缺失原因、重复输入顺序、重复句柄实际执行、错误隔离、失败后状态快照和实例独立性。该 crate 及其 `prism_ecs` 依赖保持 `no_std + alloc` 构建路径。
+ST1 最小装配切片：`pkg/prism_state_tree_ecs` 提供共享 `Arc<Plan>` 资产句柄、持有独立且长期存活 core cursor 的 `StateTreeInstance` ECS 组件、经 `CommandQueue` deferred spawn 的 `queue_spawn`，以及显式逐实体 `tick_entity` / `step`、显式按调用顺序批量执行的 `tick_entities`、基于 `World::query_filtered` 的确定性 `tick_all` gather 和有界事件请求 API。`tick_all` 收集所有已 materialize 的实例，按 generational `Entity` 排序后执行，但仍由调用者显式触发。core `Guard` 已增加 `Send + Sync` 约束，允许运行时组件满足 ECS 线程安全边界；集成测试验证 spawn 应用后初始进入，再请求事件并在后续 tick 切换状态，并覆盖事件队列满、预算错误、stale/未 materialize/缺组件三种缺失原因、重复输入顺序、重复句柄实际执行、错误隔离、失败后状态快照、实例独立性和 gather 排序。该 crate 及其 `prism_ecs` 依赖保持 `no_std + alloc` 构建路径。
 
 Schema/Context 基础契约已落地：`prism_state_tree_core` 提供稳定 `SchemaId`/`SchemaVersion`、能力位、只读 `ContextRef`、描述符校验和上下文 schema 身份校验；它不依赖 ECS，也不提供 World gather。
 
-诚实边界：这不是完整 StateTree 产品的假实现，也不宣称 ST0–ST8 全部完成。ST1 尚未实现 ECS gather、typed binding、批量查询、自动 Schedule 注册、observer 迁移事件桥接、资产服务器/热重载、ECS 快照回滚或 zero-config 插件；这些仍为 `PLANNED`。已交付的 `tick_entities` 是调用者显式提供实体列表的批量入口，不等于 ECS 查询或自动调度。生命周期 callback 暂由 `NoopLifecycle` 承接。当前 ST0 同样不承诺 transition 期间无堆分配或外部 callback panic 可恢复。
+诚实边界：这不是完整 StateTree 产品的假实现，也不宣称 ST0–ST8 全部完成。ST1 尚未实现 typed binding、自动 Schedule 注册、observer 迁移事件桥接、资产服务器/热重载、ECS 快照回滚或 zero-config 插件；这些仍为 `PLANNED`。已交付的 `tick_entities` 和 `tick_all` 都是调用者显式触发的入口，不提供自动调度或每帧隐式执行。生命周期 callback 暂由 `NoopLifecycle` 承接。当前 ST0 同样不承诺 transition 期间无堆分配或外部 callback panic 可恢复。
 
 ---
 

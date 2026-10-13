@@ -17,6 +17,7 @@ use core::marker::PhantomData;
 use prism_ecs::{
     component::Component,
     entity::{Entity, EntityLocation},
+    query::With,
     world::World,
 };
 use prism_state_tree_core::{
@@ -206,6 +207,13 @@ pub enum BatchTickMissingReason {
     MissingComponent,
 }
 
+/// Failure while gathering entities for [`tick_all`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchTickError {
+    /// The caller-provided world contents could not fit in the gather buffer.
+    AllocationFailed,
+}
+
 /// Outcome of one entry in an explicit [`tick_entities`] request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BatchTickOutcome {
@@ -334,6 +342,27 @@ pub fn tick_entities(world: &mut World, entities: &[Entity]) -> BatchTickReport 
     }
 
     report
+}
+
+/// Gathers every materialized [`StateTreeInstance`] and ticks them once.
+///
+/// The gather is an actual ECS query, not a scan of guessed entity ids. Results
+/// are sorted by the generational [`Entity`] handle before execution, making
+/// the batch order independent of archetype insertion order. This function is
+/// still an explicit exclusive-world operation: it does not register itself
+/// with a schedule or run automatically each frame.
+pub fn tick_all(world: &mut World) -> Result<BatchTickReport, BatchTickError> {
+    let query = world.query_filtered::<Entity, With<StateTreeInstance>>();
+    let count = query.iter(world).count();
+    let mut entities = Vec::new();
+    entities
+        .try_reserve_exact(count)
+        .map_err(|_| BatchTickError::AllocationFailed)?;
+    for entity in query.iter(world) {
+        entities.push(entity);
+    }
+    entities.sort_unstable();
+    Ok(tick_entities(world, &entities))
 }
 
 #[cfg(test)]

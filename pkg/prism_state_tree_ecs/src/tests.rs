@@ -1,4 +1,4 @@
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 
 use prism_ecs::{command::CommandQueue, world::World};
 use prism_state_tree_core::{
@@ -8,7 +8,7 @@ use prism_state_tree_core::{
 };
 
 use crate::{
-    queue_spawn, tick_entities, tick_entity, validate_context, BatchTickFailure,
+    queue_spawn, tick_all, tick_entities, tick_entity, validate_context, BatchTickFailure,
     BatchTickMissingReason, BatchTickOutcome, StateTreeAsset, StateTreeInstance, ValidatedContext,
 };
 
@@ -488,6 +488,27 @@ fn empty_batch_is_a_structured_noop() {
     assert!(report.is_empty());
     assert_eq!(report.entries(), &[]);
     assert_eq!(report.completed_count(), 0);
+    assert_eq!(report.missing_count(), 0);
+    assert_eq!(report.failed_count(), 0);
+}
+
+#[test]
+fn tick_all_gathers_only_state_tree_components_in_entity_order() {
+    let mut world = World::new();
+    let first = world.spawn(StateTreeInstance::new(asset(), 4, MicrostepLimit(8)).unwrap());
+    let _plain = world.spawn(());
+    let second = world.spawn(StateTreeInstance::new(asset(), 4, MicrostepLimit(8)).unwrap());
+
+    let report = tick_all(&mut world).expect("gather allocation");
+    assert_eq!(
+        report
+            .entries()
+            .iter()
+            .map(|entry| entry.entity)
+            .collect::<Vec<_>>(),
+        vec![first, second]
+    );
+    assert_eq!(report.completed_count(), 2);
     assert_eq!(report.missing_count(), 0);
     assert_eq!(report.failed_count(), 0);
 }
