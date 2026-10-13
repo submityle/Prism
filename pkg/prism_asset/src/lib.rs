@@ -1,10 +1,12 @@
 //! # `prism_asset`
 //!
-//! Prism's asset kernel: the in-house replacement for `bevy_asset`'s identity,
-//! storage, and dependency core. It owns *who* an asset is, *where* it lives in
-//! storage, *how many* live references point at it, and *what it depends on* —
-//! the deterministic heart that higher layers (loaders, async IO, hot-reload,
-//! the bake pipeline) build on in later milestones.
+//! Prism's asset runtime: the in-house replacement for `bevy_asset`'s identity,
+//! storage, loading, and dependency core. It owns *who* an asset is, *where* it
+//! lives in storage, *how many* live references point at it, and *what it
+//! depends on*. With `std`, it also provides synchronous source/loader execution,
+//! an `AssetServer`, a bounded scheduler facade, and hot-reload primitives. The
+//! facade currently serializes actual server work; full event-driven parallel
+//! loading and runtime streaming remain future work.
 //!
 //! ## Pieces
 //! - [`AssetIndex`]: a generational `(index, generation)` slot id. Reusing a
@@ -32,27 +34,23 @@
 //! by [`Handle`] reference counting rather than a tracing GC, mirroring the
 //! form of mature engine asset systems without copying their code.
 //!
-//! ## Milestone status
-//! - **M0 (this crate, done):** identity ([`AssetIndex`]/[`AssetId`]/
-//!   [`UntypedAssetId`]), [`AssetPath`], ref-counted [`Handle`]/[`WeakHandle`],
-//!   generational [`Assets`] storage with [`AssetEvent`]s and
-//!   [`Assets::remove_unused`], [`DependencyGraph`] (topo order + cycle
-//!   detection), and [`LoadState`]. Fully unit-tested, `no_std + alloc`, no
-//!   unsafe.
-//! - **M1 (kernel recast, done):** three-tier identity ([`StableGuid`]/
-//!   [`AssetTypeId`]), [`SoftHandle`], the [`Asset`] trait with
-//!   `visit_dependencies`, `reserve`/`fulfill`/`fail` with deferred reclaim,
-//!   incremental recursive readiness + invalidation on [`DependencyGraph`],
-//!   [`ErrorRegistry`], and the deterministic [`LoaderRegistry`] selection
-//!   policy (design §9.1). Fully unit-tested, `no_std + alloc`, no unsafe.
-//! - **M2 (planned):** `AssetServer` + `AssetLoader` execution and load
-//!   dedup/path→id interning (needs `std`, lives in `prism_asset_import`).
-//! - **M2 (planned):** async IO backends and the dependency-aware load
-//!   scheduler driving [`DependencyGraph`].
-//! - **M3 (planned):** filesystem watch + hot-reload re-emitting
-//!   [`AssetEvent::Modified`].
-//! - **M4 (planned):** the offline bake/process pipeline and content-hash
-//!   caching.
+//! ## Capability status
+//! - **Core (implemented):** generational identity, stable GUID/type identity,
+//!   ref-counted handles, `Assets` storage and events, dependency graph,
+//!   recursive readiness/invalidation, error registry, and deterministic loader
+//!   selection. This layer remains `no_std + alloc` and contains no `unsafe`.
+//! - **Standard I/O (implemented and covered by crate tests, `std`):** `AssetServer`, `AssetLoader`,
+//!   `LoadContext`, path/load deduplication, VFS sources, synchronous dependency
+//!   assembly, and a bounded scheduler facade with cancellation and backpressure.
+//! - **Hot reload (implemented in part):** watcher/event batching, reload plans,
+//!   dependency-aware reassembly, and last-known-good retention are available;
+//!   lock-free asynchronous reassembly, full labeled-revision lifecycle, and
+//!   Windows-equivalent secure path opening remain incomplete.
+//! - **Not implemented here:** offline cooking, DDC/CAS ownership, codecs,
+//!   streaming residency, DirectStorage/GPU decode, and release packaging. Those
+//!   belong to Asset Build or future runtime features. The scheduler facade does
+//!   not yet provide a parallel EDL pipeline: actual server read/decode work is
+//!   still serialized by the server lock.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
