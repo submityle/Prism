@@ -1,6 +1,6 @@
 # Prism Asset 顶级次世代 AAA 级资产内核设计方案
 
-> 面向 Prism（脱离 Bevy 后的独立引擎）的 **资产身份 + 句柄/引用计数 + 代际存储 + 依赖图 + 加载器 + 虚拟文件系统 + 事件驱动加载调度 + 按需流送 + 热重载 + 离线烘焙/打包** 内核设计。它是 `bevy_asset` 的自研替代，是渲染（网格/纹理/材质/着色器）、音频、场景/预制体、动画、UI 的统一内容基座；当前实现的 loader/AssetServer 是同步解码，异步 EDL 仍是目标规格。
+> 面向 Prism（脱离 Bevy 后的独立引擎）的 **资产身份 + 句柄/引用计数 + 代际存储 + 依赖图 + 加载器 + 虚拟文件系统 + 事件驱动加载调度 + 按需流送 + 热重载 + 离线烘焙/打包** 内核设计。它是 `bevy_asset` 的自研替代，是渲染（网格/纹理/材质/着色器）、音频、场景/预制体、动画、UI 的统一内容基座；当前 loader/AssetServer 仍是同步解码，但 `prism_asset` 已有真实的锁外异步 range executor，完整异步 EDL 仍是目标规格。
 > 借形态不抄码。借鉴：
 > - **Rust 资产人体工学**：Bevy asset（`Handle`/`AssetServer`/`AssetLoader`/`Assets<A>`/`AssetEvent`/标签子资产/`AssetProcessor` 烘焙/热重载）
 > - **容器与事件驱动加载**：Unreal IoStore（`FIoChunkId` 容器化分块 I/O）+ Zen/EDL（Event-Driven Loader 异步装配）+ Asset Registry（不加载即可查元数据）+ `.pak`/cook 管线
@@ -10,14 +10,14 @@
 > 本文为纯经典资产系统/内容管线路线，**不含任何 AI/ML 内容**，不含任何 Unreal/Unity 源码或衍生代码。
 
 - 版本：v0.2（开发中，允许破坏性调整；状态以本文“实施状态”和代码/测试为准）
-- 变更记录：本轮将 loader/AssetServer 的同步现实、RangeSource 的稳定内容前提、raw 容器能力边界和 EDL 目标规格显式分离；任何异步 API 片段均为未来 ABI 草案。
+- 变更记录：本轮补充锁外异步 streaming executor、请求取消竞态门禁、容器 range batching 边界和构建验证字节预算；继续将 loader/AssetServer 的同步现实、RangeSource 的稳定内容前提、raw 容器能力边界和完整 EDL 目标规格显式分离。
 - 本文定位：运行时资产身份、存储、加载、VFS、热重载、流送与消费契约的**目标规格**；已交付能力与目标设计分开记录，不以设计段落冒充实现。
-- 当前基线：核心身份/存储/依赖核、同步 `AssetServer`/VFS/loader、bounded scheduler facade、watch/reload 切片和 raw 容器消费切片已存在；EDL 并行装配、完整流送/GPU 解码、发行容器能力和 ECS/渲染闭环仍未交付。
+- 当前基线：核心身份/存储/依赖核、同步 `AssetServer`/VFS/loader、bounded scheduler facade、锁外异步 range executor、watch/reload 切片和 raw 容器消费切片已存在；EDL 并行装配、完整流送/GPU 解码、发行容器能力和 ECS/渲染闭环仍未交付。
 - 兼容策略：开发期不承诺旧 API/格式兼容；一旦进入发行，`StableGuid`、容器 ToC、Runtime Manifest 和资产 ABI 必须通过显式 schema 版本与迁移窗口演进。
 - 适用引擎： Prism（后 Bevy 时代，独立运行时）
 - 关键依赖： `prism_utils`（稳定哈希/句柄位打包/小容器）、`prism_tasks`（异步作业图/优先级/背压）、`prism_reflect`（导入设置/元数据序列化）、`prism_diagnostic`（计数器/trace）、可选 `prism_gdeflate_gpu`（GPU 解压）
 - 层级定位： 内容层 L5；上接场景/渲染/音频/动画/UI，下接 `prism_tasks`/`prism_vfs`/平台 I/O
-- 明确约束：身份/存储/依赖/句柄核 `no_std + alloc`；当前 `prism_asset` 实际 feature 仅提供 `std`、`ecs`、`file_watcher`；异步 EDL、process/pack、GPU streaming 和 retain-cache 等名称属于目标能力分层，不是当前已发布 feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**
+- 明确约束：身份/存储/依赖/句柄核 `no_std + alloc`；当前 `prism_asset` 实际 feature 仅提供 `std`、`ecs`、`file_watcher`；锁外异步 range executor 属于 `std` 下已实现的窄切片，完整异步 EDL、process/pack、GPU streaming 和 retain-cache 等仍属于目标能力分层，不是当前已发布 feature；工作区 `forbid(unsafe_code)`；**不依赖任何 `bevy_*` crate**
 - 烘焙/打包归属： 离线烘焙、缓存键、DDC/CAS、Revision、打包与 Patch 的唯一持有者是 `Prism Asset Build`（`docs/prism_asset_build_design_zh.md` §2.7/§4.6/§10/§14）；本 crate 只提供运行时消费契约（§13）与进程内重烘适配。派生数据分类与登记见 `docs/prism_derived_data_contract_zh.md`
 
 ### 实施状态（2026-10-14）
@@ -25,10 +25,10 @@
 以下状态只记录仓库中已存在、可运行并有测试覆盖的能力，不把设计文字当作实现。容器安全边界同时以实现的读路径为准：挂载时校验的是当时读取到的完整字节；range source 在 reader 生命周期内必须保持不可变；整 payload `read_all` 再校验 entry digest，局部 `read_range` 不提供密码学子范围认证（详见 §10.5）。
 
 - **已完成**：`prism_asset` M0/M1 核（稳定身份、句柄、代际存储、依赖图、加载状态、错误注册、loader 选择与同步 `AssetServer`/VFS）；`prism_asset_container` 的 v1 原始 payload 容器读写、严格 ToC/哈希校验、范围读取与优先级 overlay；ChunkPlanner/Writer 的起始对齐约束、Runtime Manifest 的 manifest/chunk priority 传递、同名容器 remount 替换旧 mount，以及基于 `RangeSource` 的文件按范围读取（含 positional I/O、并发读取、短读/截断/篡改门禁）均已有测试覆盖。
-- **部分完成**：M2 已有同步装配之上的 bounded scheduler facade；它能做线程池投递、同路径合并、优先级提升、容量背压、消费者取消、waiter 生命周期清理和完成通知竞态防护，并有并发测试，但底层 `AssetServer` 仍由单 mutex 串行，尚不是设计中的 EDL/I/O-CPU 分离调度。
+- **部分完成**：M2 已有同步装配之上的 bounded scheduler facade，以及 `AsyncStreamIoExecutor`；后者使用现有 `prism_tasks::TaskPool`，在 controller 锁外真实调用 `AssetSources::read_range`，覆盖提交、预算拒绝、失败释放、读前取消和读中协作取消。它仍不是依赖感知的 EDL 作业图，底层 `AssetServer` 仍由单 mutex 串行，I/O/解码/上传也尚未形成完整分离调度。
 - **部分完成**：Asset Build 已有确定性串行 `BuildGraph`/`Processor`、ArtifactKey、BLAKE3 CAS、持久化本地 DDC 描述符索引、本地 manifest revision、带 `TransactionId` 的 append-only publication journal、启动恢复和显式 reconcile；`BuildExecutor` 已把图执行、DDC/CAS 校验和、缓存损坏重建及事务发布接成单机核心闭环，并提供受限的 ready-wave 并行 DDC/CAS 处理，按稳定 JobId 顺序应用缓存、Manifest staging 和发布结果；RuntimePackage 现在以来源 Build Manifest hash 绑定到同一 Revision，且 publication 会拒绝缺失 `AssetId -> StableGuid` runtime route 的包；RevisionStore 还提供了基于已提交 Manifest roots、带 grace period 且遇到 pending transaction 自动延期的本地 CAS 可达性 sweep；本地 DDC 另提供显式 `DdcCapacity`/`evict_to_capacity` 容量回收，但不是完整分层策略；PNG→canonical RGBA8 artifact→BuildExecutor→CAS/Manifest 的真实纹理切片、可复用的 Recipe/Importer 主链和调用同一核心的 `prism_asset_build_cli`（`plan/import/build/inspect`）已落地，CLI 另有受限 `package`/`validate` 发行命令，但只支持单 PNG 垂直切片，不能视为通用 Cook；仍缺远程 CAS、runtime texture loader 的完整发行接线、真实跨进程测试、非 Unix 协调和完整磁盘故障恢复；底层 BuildExecutor 并行路径已有串并行等价、限流、缓存命中和失败不发布测试，但尚无大规模性能证据。
-- **部分完成**：M5 容器已有 v1 raw reader/writer、严格 ToC/哈希校验、范围读取、文件 `RangeSource`、overlay、Runtime Manifest v2 的容器内容身份绑定、实现 `AssetReader` 的 `ManifestAssetReader`，以及 ChunkPlanner 驱动的 v2 raw 物理布局读写；v2 对齐、跨 Chunk 依赖的物理先后顺序、当前布局读回和同名换包拒绝已有测试，但完整 wire contract（持久化 ChunkPlan/依赖/流送/平台/压缩加密/签名元数据）尚未冻结或实现。当前 runtime 新增受 `RangeBatchPolicy` 限制的确定性批量 range 调度：同一容器内的重叠/近邻请求会合并为有界物理读，`ManifestReader` 会在 manifest 身份校验后按容器分组并保持调用方结果顺序。它仍不是 CDN/DirectStorage 的按 Chunk 后端，也不等价于完整 EDL；`AssetServer` 的异步 I/O-CPU 装配和 Cook/发行闭环仍未接入。
-- **部分完成**：M3 已有文件 watcher/去抖事件模型、`Arc<AssetServer>::watch` 托管后台消费入口、可由调用方驱动的 `AssetServer::apply_change_batch` 接线、依赖闭包重装配计划、失败依赖门禁及 labeled 子资产候选图校验；source reload 现在会传播到 labeled 输出的消费者，且有 ownership promotion 回归测试，避免 source→label 与 label→source 形成永久强引用环。旧 revision 消失的 label 生命周期、staging 的 provisional ID/catalog 回滚、锁外异步重装配仍未闭环。M4 的**流送预算决策层**已提供 CPU/GPU/staging 预算、优先级滞回、取消/失败/驱逐状态机和确定性驱逐候选排序；新增同步 `StreamIoExecutor` 会真实调用 `AssetSources::read_range`，处理范围越界、预算拒绝、失败、取消和重复执行，但仍不是锁外异步 EDL、解码或 GPU 上传。压缩/加密容器、DirectStorage 形态队列和完整 GPU 解压仍未实现；`prism_gdeflate_gpu` 现在提供真实 adapter/device probe、显式失败原因、实际 de-interleave 与 stored-block GPU 快速路径，仍由 CPU 处理 Huffman/完整 GDeflate；M5/M6 的 BakeService、ECS/渲染/编辑器集成、发行闭包/patch/DLC、签名与 Provenance 仍未完成。
+- **部分完成**：M5 容器已有 v1 raw reader/writer、严格 ToC/哈希校验、范围读取、文件 `RangeSource`、overlay、Runtime Manifest v2 的容器内容身份绑定、实现 `AssetReader` 的 `ManifestAssetReader`，以及 ChunkPlanner 驱动的 v2 raw 物理布局读写；v2 对齐、跨 Chunk 依赖的物理先后顺序、当前布局读回和同名换包拒绝已有测试，但完整 wire contract（持久化 ChunkPlan/依赖/流送/平台/压缩加密/签名元数据）尚未冻结或实现。当前 runtime 新增受 `RangeBatchPolicy` 限制的确定性批量 range 调度：同一容器内的重叠/近邻请求会合并为有界物理读，单请求不得超过物理读上限，`ManifestReader` 会在 manifest 身份校验后按容器分组并保持调用方结果顺序；无序、重复、重叠、溢出、源边界和源失败均有回归测试。它仍不是 CDN/DirectStorage 的按 Chunk 后端，也不等价于完整 EDL；`AssetServer` 的异步 I/O-CPU 装配和 Cook/发行闭环仍未接入。
+- **部分完成**：M3 已有文件 watcher/去抖事件模型、`Arc<AssetServer>::watch` 托管后台消费入口、可由调用方驱动的 `AssetServer::apply_change_batch` 接线、依赖闭包重装配计划、失败依赖门禁及 labeled 子资产候选图校验；source reload 现在会传播到 labeled 输出的消费者，且有 ownership promotion 回归测试，避免 source→label 与 label→source 形成永久强引用环。旧 revision 消失的 label 生命周期、staging 的 provisional ID/catalog 回滚、锁外异步重装配仍未闭环。M4 的**流送预算决策层**已提供 CPU/GPU/staging 预算、优先级滞回、取消/失败/驱逐状态机和确定性驱逐候选排序；同步 `StreamIoExecutor` 与新增 `AsyncStreamIoExecutor` 都会真实调用 `AssetSources::read_range`，后者在 controller 锁外执行并验证取消/失败预算释放，但两者仍不是解码或 GPU 上传闭环。压缩/加密容器、DirectStorage 形态队列和完整 GPU 解压仍未实现；`prism_gdeflate_gpu` 现在提供真实 adapter/device probe、显式失败原因、实际 de-interleave 与 stored-block GPU 快速路径，仍由 CPU 处理 Huffman/完整 GDeflate；M5/M6 的 BakeService、ECS/渲染/编辑器集成、发行闭包/patch/DLC、签名与 Provenance 仍未完成。
 
 因此本文下方路线图仍是目标规格；任何“已支持”表述均以上述实现状态和对应测试为准。
 
@@ -601,7 +601,7 @@ mount("assets", patch_pak,priority=30)   // 热补丁
 
 大世界/高清资产装不下显存，必须按需换入换出。`StreamingManager` 对标 DOOM Eternal / Decima 的预算驱动流送：
 
-> **当前实现边界**：`prism_asset` 已实现预算控制器，并由同步 `StreamIoExecutor` 真实调用 `AssetSources::read_range`；它仍不拥有锁外异步 EDL、解码器、GPU 资源上传或 DirectStorage 形态批量队列。完整预取、GPU 反馈闭环和按 Chunk 流送调度仍未实现。容器层已有文件 `RangeSource` 和按范围读取，但还不能替代完整流送系统。`prism_gdeflate_gpu` 已有真实 GPU de-interleave/stored-block 子集和 CPU Huffman fallback，不能宣称已完成完整 GPU 直通解压。
+> **当前实现边界**：`prism_asset` 已实现预算控制器、同步 `StreamIoExecutor` 和使用现有 `TaskPool` 的锁外 `AsyncStreamIoExecutor`，两者都会真实调用 `AssetSources::read_range`；异步 executor 只负责有界范围读取与状态提交，仍不包含解码器、GPU 资源上传或 DirectStorage 形态批量队列。完整预取、GPU 反馈闭环和按 Chunk 流送调度仍未实现。容器层已有文件 `RangeSource`、确定性 range batching 和按范围读取，但还不能替代完整流送系统。`prism_gdeflate_gpu` 已有真实 GPU de-interleave/stored-block 子集和 CPU Huffman fallback，不能宣称已完成完整 GPU 直通解压。
 
 - **可流送资产声明分级**：纹理按 mip、网格按 LOD、虚拟纹理按 page。资产值内只常驻「低清兜底 + 元数据」，高清层级按需 `read_range` 流入。
 - **预算驱动驻留**：`StreamingBudget`（显存上限、每帧 I/O 带宽、并发解码）。管理器维护「每个可流送资产的目标层级」，由**请求器**（相机距离、屏幕占比、可见性、显式 pin）打分，预算内尽量满足高分请求，超预算则驱逐低分层级。
@@ -924,9 +924,9 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 
 - **M0 身份/存储/依赖核（已交付）**：`AssetIndex`/`AssetId`/`UntypedAssetId`、`AssetPath`、`Handle`/`WeakHandle`/`UntypedHandle`、代际 `Assets<A>` + `AssetEvent` + `remove_unused`、`DependencyGraph`（Kahn + 环检测）、`LoadState`。`no_std+alloc`、无 `unsafe`、单测绿。
 - **M1 内核重铸（已交付）**：三层身份（+`StableGuid`/`AssetTypeId`）、`SoftHandle`、类型擦除注册、`Asset` trait + `visit_dependencies`、`reserve/fulfill/fail` + 延迟回收、依赖图增量就绪/失效、`ErrorRegistry`、确定性 loader 选择。旧 API 已按开发期策略重铸。
-- **M2 加载管线（部分交付）**：`AssetServer`、`AssetLoader`/`LoadContext`、VFS、同步依赖装配与 bounded scheduler facade 已有；EDL 作业图、I/O-CPU 分离、真正并行装配仍待交付。
+- **M2 加载管线（部分交付）**：`AssetServer`、`AssetLoader`/`LoadContext`、VFS、同步依赖装配、bounded scheduler facade 和锁外异步 range executor 已有；EDL 作业图、I/O-CPU-解码分离、真正并行装配仍待交付。
 - **M3 热重载（部分交付）**：watch/去抖、失效反向传播、reload plan、失败保留 last-known-good 和 `Modified` 已有；锁外异步重装配、完整 labeled revision 生命周期和跨平台安全打开语义仍待交付。
-- **M4 流送（目标）**：`StreamingManager`、预算/滞回/预取、块级校验、DirectStorage 形态队列和 GDeflate GPU 解压；当前未交付。
+- **M4 流送（部分交付）**：预算/滞回/取消/失败/驱逐状态机、同步与锁外异步 range executor 已交付；`StreamingManager` 预取、块级解码、DirectStorage 形态队列、GPU 上传和完整 GDeflate 解压仍待交付。
 - **M5 资产包消费与容器挂载（部分交付）**：raw 容器/Manifest/overlay、范围读取和 ChunkPlanner 驱动的 v2 raw 布局已有；完整 Chunk wire contract、压缩/加密/签名、Cook/发行闭环仍待交付。
 - **M6 集成（目标）**：ECS、渲染驻留、场景/编辑器和 Asset Build 制品的端到端接线。
 
@@ -936,7 +936,7 @@ pkg/prism_vfs/                   # pak/容器打包工具 + 远程/CDN 源（可
 
 ## 22. 诚实边界与风险
 
-- **现状**：M0/M1 核与同步 AssetServer/VFS 已落地并有单测；构建核心有 CAS/ArtifactKey/Revision、支持 ready-wave 并行 DDC/CAS 的 BuildExecutor、本地 DDC 描述符索引和独立质量门禁；容器 v1 有 Runtime Manifest 路由读取、`AssetReader` 适配、overlay，且 ChunkPlanner 已接入 v2 raw 物理布局；有界异步调度 facade 已覆盖容量、去重、取消和通知竞态，AssetServer 已提供 watcher 批次应用入口和托管后台消费入口。M2 仍非 EDL 完整实现；M3 的自动 watcher 消费切片已落地，但锁外异步重装配、失败 staging 回滚和完整 revision/labeled 生命周期仍未完成；M4–M6（流送/GPU 完整解压、BakeService、ECS/渲染/编辑器集成和发行生产链）仍未完成。本文是实施规格而非对未交付能力的宣称。
+- **现状**：M0/M1 核与同步 AssetServer/VFS 已落地并有单测；构建核心有 CAS/ArtifactKey/Revision、支持 ready-wave 并行 DDC/CAS 的 BuildExecutor、本地 DDC 描述符索引和独立质量门禁；容器 v1 有 Runtime Manifest 路由读取、`AssetReader` 适配、overlay、确定性有界 range batching，且 ChunkPlanner 已接入 v2 raw 物理布局；有界异步调度 facade 已覆盖容量、去重、取消和通知竞态，AssetServer 已提供 watcher 批次应用入口和托管后台消费入口，streaming 另有真实锁外异步 range executor。M2 仍非 EDL 完整实现；M3 的自动 watcher 消费切片已落地，但锁外异步重装配、失败 staging 回滚和完整 revision/labeled 生命周期仍未完成；M4–M6（流送/GPU 完整解压、BakeService、ECS/渲染/编辑器集成和发行生产链）仍未完成。本文是实施规格而非对未交付能力的宣称。
 - **高风险项**：
   1. **StableGuid 冻结（M1/M5）**：派生规则一旦发行即不可变，变则旧存档/容器目录失效。须早定早冻、哈希算法与规范化规则定死并测「跨构建一致」。
   2. **异步装配正确性（M2）**：EDL 作业图 + 依赖增量就绪的竞态（并发 load 去重、依赖边并发更新、失败半装配回滚）是最易出错处，须压测并发加载 + 乱序完成。
