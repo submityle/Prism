@@ -39,6 +39,34 @@ struct TrackingRangeSource {
     requests: Arc<Mutex<Vec<(u64, usize)>>>,
 }
 
+#[derive(Debug)]
+struct ToggleFailureSource {
+    bytes: Arc<[u8]>,
+    fail_reads: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl RangeSource for ToggleFailureSource {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn read_range(&self, offset: u64, out: &mut [u8]) -> Result<(), RangeSourceError> {
+        if self.fail_reads.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(RangeSourceError::Io("injected range failure".into()));
+        }
+        let start = usize::try_from(offset).map_err(|_| RangeSourceError::OutOfBounds)?;
+        let end = start
+            .checked_add(out.len())
+            .ok_or(RangeSourceError::OutOfBounds)?;
+        let bytes = self
+            .bytes
+            .get(start..end)
+            .ok_or(RangeSourceError::OutOfBounds)?;
+        out.copy_from_slice(bytes);
+        Ok(())
+    }
+}
+
 impl TrackingRangeSource {
     fn new(bytes: Vec<u8>) -> (Self, Arc<Mutex<Vec<(u64, usize)>>>) {
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -402,6 +430,252 @@ fn reader_batches_overlapping_and_nearby_ranges_in_caller_order() {
         physical_reads[0],
         (expected_start, (expected_end - expected_start) as usize)
     );
+}
+
+#[test]
+fn reader_batches_duplicate_requests_without_reordering_results() {
+    let bytes = build(&[("duplicate", b"duplicate payload")]);
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    requests.lock().unwrap().clear();
+
+    let request = RangeRequest::new(guid("duplicate"), 6, 6);
+    let output = reader
+        .read_ranges(
+            &[request, RangeRequest::new(guid("duplicate"), 3, 8), request],
+            RangeBatchPolicy {
+                max_batch_bytes: 32,
+                max_gap_bytes: 1,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        output,
+        vec![b"ate pa".to_vec(), b"licate p".to_vec(), b"ate pa".to_vec()]
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn reader_batches_ranges_within_the_configured_gap() {
+    let payload: Vec<u8> = (0..32).map(|value| value as u8).collect();
+    let bytes = build(&[("near-gap", &payload)]);
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    requests.lock().unwrap().clear();
+
+    let output = reader
+        .read_ranges(
+            &[
+                RangeRequest::new(guid("near-gap"), 8, 4),
+                RangeRequest::new(guid("near-gap"), 0, 4),
+            ],
+            RangeBatchPolicy {
+                max_batch_bytes: 12,
+                max_gap_bytes: 4,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        output,
+        vec![payload[8..12].to_vec(), payload[0..4].to_vec()]
+    );
+
+    let entry = reader.entry(guid("near-gap")).unwrap();
+    assert_eq!(requests.lock().unwrap().as_slice(), &[(entry.offset, 12)]);
+}
+
+#[test]
+fn reader_batching_never_reads_past_the_source_end() {
+    let payload: Vec<u8> = (0..32).map(|value| value as u8).collect();
+    let bytes = build(&[("source-end", &payload)]);
+    let source_len = bytes.len() as u64;
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    requests.lock().unwrap().clear();
+
+    reader
+        .read_ranges(
+            &[
+                RangeRequest::new(guid("source-end"), 0, 4),
+                RangeRequest::new(guid("source-end"), 28, 4),
+            ],
+            RangeBatchPolicy {
+                max_batch_bytes: 32,
+                max_gap_bytes: 24,
+            },
+        )
+        .unwrap();
+
+    let entry = reader.entry(guid("source-end")).unwrap();
+    let physical = requests.lock().unwrap().clone();
+    assert_eq!(physical, vec![(entry.offset, 32)]);
+    assert!(physical.iter().all(|(offset, length)| {
+        offset
+            .checked_add(*length as u64)
+            .is_some_and(|end| end <= source_len)
+    }));
+}
+
+#[test]
+fn reader_batches_unsorted_overlaps_and_preserves_duplicate_results() {
+    let payload: Vec<u8> = (0..64).map(|value| b'A' + value).collect();
+    let bytes = build(&[("unsorted-overlap", &payload)]);
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    requests.lock().unwrap().clear();
+
+    let output = reader
+        .read_ranges(
+            &[
+                RangeRequest::new(guid("unsorted-overlap"), 20, 5),
+                RangeRequest::new(guid("unsorted-overlap"), 10, 15),
+                RangeRequest::new(guid("unsorted-overlap"), 20, 5),
+                RangeRequest::new(guid("unsorted-overlap"), 12, 4),
+            ],
+            RangeBatchPolicy {
+                max_batch_bytes: 32,
+                max_gap_bytes: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(output[0], payload[20..25]);
+    assert_eq!(output[1], payload[10..25]);
+    assert_eq!(output[2], payload[20..25]);
+    assert_eq!(output[3], payload[12..16]);
+    let entry = reader.entry(guid("unsorted-overlap")).unwrap();
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        &[(entry.offset + 10, 15)]
+    );
+}
+
+#[test]
+fn reader_batching_rejects_overflow_before_source_io() {
+    let bytes = build(&[("batch-overflow", b"payload")]);
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    requests.lock().unwrap().clear();
+
+    assert_eq!(
+        reader.read_ranges(
+            &[RangeRequest::new(guid("batch-overflow"), u64::MAX, 1)],
+            RangeBatchPolicy::default(),
+        ),
+        Err(ContainerError::IntegerOverflow)
+    );
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn reader_batching_propagates_source_failure_without_partial_success() {
+    let bytes = build(&[("batch-failure", b"payload")]);
+    let fail_reads = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let source = ToggleFailureSource {
+        bytes: Arc::from(bytes),
+        fail_reads: Arc::clone(&fail_reads),
+    };
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    fail_reads.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    assert!(matches!(
+        reader.read_ranges(
+            &[RangeRequest::new(guid("batch-failure"), 0, 4)],
+            RangeBatchPolicy::default(),
+        ),
+        Err(ContainerError::Source(error))
+            if error == "range source I/O failed: injected range failure"
+    ));
+}
+
+#[test]
+fn reader_batches_never_exceed_the_maximum_physical_read() {
+    let payload: Vec<u8> = (0..64).map(|value| value as u8).collect();
+    let bytes = build(&[("batch-bound", &payload)]);
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    requests.lock().unwrap().clear();
+
+    reader
+        .read_ranges(
+            &[
+                RangeRequest::new(guid("batch-bound"), 0, 8),
+                RangeRequest::new(guid("batch-bound"), 12, 8),
+                RangeRequest::new(guid("batch-bound"), 40, 8),
+            ],
+            RangeBatchPolicy {
+                max_batch_bytes: 20,
+                max_gap_bytes: 4,
+            },
+        )
+        .unwrap();
+
+    let physical = requests.lock().unwrap().clone();
+    assert_eq!(physical.len(), 2);
+    assert!(physical.iter().all(|(_, length)| *length <= 20));
+}
+
+#[test]
+fn reader_batching_rejects_offset_overflow_before_source_io() {
+    let bytes = build(&[("batch-overflow", b"payload")]);
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    requests.lock().unwrap().clear();
+
+    assert_eq!(
+        reader.read_ranges(
+            &[RangeRequest::new(guid("batch-overflow"), u64::MAX, 1)],
+            RangeBatchPolicy::default(),
+        ),
+        Err(ContainerError::IntegerOverflow)
+    );
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn manifest_batching_rejects_overflow_and_bounds_policy_before_io() {
+    let logical = guid("logical-policy");
+    let local = guid("local-policy");
+    let bytes = build(&[("local-policy", b"0123456789")]);
+    let mut overlays = OverlaySet::new();
+    overlays.mount(
+        "container-policy",
+        0,
+        ContainerReader::new(bytes.clone()).unwrap(),
+    );
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert(ManifestRoute {
+            guid: logical,
+            container_name: "container-policy".into(),
+            priority: 0,
+            container_guid: local,
+        })
+        .unwrap();
+    manifest
+        .bind_container("container-policy", identity(&bytes))
+        .unwrap();
+    let reader = manifest.bind(&overlays).unwrap();
+
+    assert_eq!(
+        reader.read_ranges(
+            &[ManifestRangeRequest::new(logical, 0, 5)],
+            RangeBatchPolicy {
+                max_batch_bytes: 4,
+                max_gap_bytes: 0,
+            },
+        ),
+        Err(ManifestReadError::Container(
+            ContainerError::InvalidBatchPolicy
+        ))
+    );
+    assert!(matches!(
+        reader.read_ranges(
+            &[ManifestRangeRequest::new(logical, u64::MAX, 1)],
+            RangeBatchPolicy::default(),
+        ),
+        Err(ManifestReadError::InvalidRange { .. })
+    ));
 }
 
 #[test]

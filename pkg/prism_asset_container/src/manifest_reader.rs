@@ -9,8 +9,10 @@ use core::fmt;
 
 use prism_asset::StableGuid;
 
-use crate::{ContainerError, ContainerReader, ManifestRoute, OverlaySet, RuntimeManifest};
-use crate::{RangeBatchPolicy, RangeRequest};
+use crate::range_batch::{checked_physical_range, checked_range_end, RangeBatchPolicy};
+use crate::{
+    ContainerError, ContainerReader, ManifestRoute, OverlaySet, RangeRequest, RuntimeManifest,
+};
 
 /// Errors raised while binding or reading a logical manifest route.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -232,6 +234,10 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
         requests: &[ManifestRangeRequest],
         policy: RangeBatchPolicy,
     ) -> Result<Vec<Vec<u8>>, ManifestReadError> {
+        policy
+            .validate()
+            .map_err(|error| ManifestReadError::Container(error))?;
+
         struct Group<'a> {
             name: String,
             reader: &'a ContainerReader,
@@ -244,6 +250,32 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
             let route = self.route(request.logical_guid)?;
             let reader = self.resolve(route)?;
             let local = RangeRequest::new(route.container_guid, request.offset, request.len);
+            checked_range_end(request.offset, request.len).map_err(|error| {
+                self.map_read_error(
+                    request.logical_guid,
+                    request.offset,
+                    usize::try_from(request.len).unwrap_or(usize::MAX),
+                    error,
+                )
+            })?;
+            policy
+                .validate_request_len(request.len)
+                .map_err(ManifestReadError::Container)?;
+            let entry = reader.entry(route.container_guid).ok_or_else(|| {
+                ManifestReadError::MissingContainerGuid {
+                    logical_guid: request.logical_guid,
+                    container_name: route.container_name.clone(),
+                    container_guid: route.container_guid,
+                }
+            })?;
+            checked_physical_range(entry.offset, request.offset, request.len).map_err(|error| {
+                self.map_read_error(
+                    request.logical_guid,
+                    request.offset,
+                    usize::try_from(request.len).unwrap_or(usize::MAX),
+                    error,
+                )
+            })?;
             reader.validate_range_request(local).map_err(|error| {
                 self.map_read_error(
                     request.logical_guid,
@@ -266,6 +298,10 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
             }
         }
 
+        // Group order must not depend on the caller's logical request order.
+        // The per-container reader still restores each group's results to
+        // caller order, while this makes cross-container source I/O stable.
+        groups.sort_by(|left, right| left.name.cmp(&right.name));
         for group in groups {
             let local_requests: Vec<_> =
                 group.requests.iter().map(|(_, _, local)| *local).collect();
