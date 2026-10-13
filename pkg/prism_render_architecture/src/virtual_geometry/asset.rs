@@ -278,12 +278,18 @@ impl VirtualGeometryAsset {
                     cluster.node_index,
                 ));
             }
-            if !bounds_finite(&cluster.bounds)
-                || !bounds_encloses(
-                    &self.nodes[cluster.node_index as usize].bounds,
-                    &cluster.bounds,
-                )
-                || !cluster.normal_cone.iter().all(|value| value.is_finite())
+            if !bounds_finite(&cluster.bounds) {
+                return Err(VirtualGeometryAssetError::InvalidCluster(
+                    cluster.node_index,
+                ));
+            }
+            if !bounds_encloses(
+                &self.nodes[cluster.node_index as usize].bounds,
+                &cluster.bounds,
+            ) {
+                return Err(VirtualGeometryAssetError::SpatialBoundsMismatch);
+            }
+            if !cluster.normal_cone.iter().all(|value| value.is_finite())
                 || !(-1.0..=1.0).contains(&cluster.normal_cone[3])
             {
                 return Err(VirtualGeometryAssetError::InvalidCluster(
@@ -792,6 +798,23 @@ mod tests {
         assert_eq!(
             invalid.validate(),
             Err(VirtualGeometryAssetError::InvalidValue("page clusters"))
+        );
+    }
+
+    #[test]
+    fn validation_rejects_spatial_bounds_mismatch() {
+        let mut invalid = asset();
+        invalid.nodes[0].bounds.center[0] = 3.0;
+        assert_eq!(
+            invalid.validate(),
+            Err(VirtualGeometryAssetError::InvalidNode(0))
+        );
+
+        let mut invalid_cluster = asset();
+        invalid_cluster.clusters[0].bounds.center[0] = 3.0;
+        assert_eq!(
+            invalid_cluster.validate(),
+            Err(VirtualGeometryAssetError::SpatialBoundsMismatch)
         );
     }
 

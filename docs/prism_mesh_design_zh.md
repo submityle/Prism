@@ -508,7 +508,7 @@ VirtualGeometryAsset
 - 页存储可压缩（zstd/GDeflate 形态），运行时经 `prism_gdeflate_gpu` 直通解压或 CPU 解压。
 - 必须使用显式 `schema_version` 与 `build_settings_hash`；旧缓存可检测并重建，禁止静默错读。
 
-当前代码已对 header、层级节点、页排序/大小、cluster 范围、非空 cluster、cluster/node page identity、材质槽、payload 引用和确定性编解码做校验；CLST v2 量化 payload 已由运行时架构 crate 统一持有，构建器通过兼容导出复用同一 codec；页面进入 `VirtualGeometryPageStream` 前会校验 magic/version、精确 framing、bounds、索引以及 descriptor 的顶点/三角形计数，错误不会污染 resident storage。仍需资产构建器生成多级简化 DAG，并与 `prism_gdeflate_gpu` 做逐字节解压验证。
+当前代码已对 header、层级节点、页排序/大小、cluster 范围、非空 cluster、cluster/node page identity、层级/Cluster AABB 包含关系、材质槽、payload 引用和确定性编解码做校验；CLST v2 量化 payload 已由运行时架构 crate 统一持有，构建器通过兼容导出复用同一 codec；页面进入 `VirtualGeometryPageStream` 前会校验 magic/version、精确 framing、bounds、索引以及 descriptor 的顶点/三角形计数，错误不会污染 resident storage。仍需资产构建器生成多级简化 DAG，并与 `prism_gdeflate_gpu` 做逐字节解压验证。
 
 ### 11.3 运行时 cut 与剔除
 
