@@ -188,6 +188,28 @@ impl SceneSpawn {
         SceneInstance::new(template, self.remap.clone(), tier)
     }
 
+    /// Attaches the live instance anchor to this spawn's root entity.
+    pub fn attach_instance(
+        &self,
+        world: &mut World,
+        template: StableGuid,
+        tier: ResidencyTier,
+    ) -> Result<Entity, SceneAttachError> {
+        let root = self.root.ok_or(SceneAttachError::EmptyScene)?;
+        if !world.entities().contains(root)
+            || world
+                .entities()
+                .location(root)
+                .is_none_or(prism_ecs::entity::EntityLocation::is_empty)
+        {
+            return Err(SceneAttachError::StaleRoot(root));
+        }
+        if !world.insert(root, self.scene_instance(template, tier)) {
+            return Err(SceneAttachError::InsertRejected(root));
+        }
+        Ok(root)
+    }
+
     /// Resolves one local entity to its live handle.
     #[must_use]
     pub fn resolve(&self, local: LocalEntityId) -> Option<Entity> {
@@ -199,6 +221,17 @@ impl SceneSpawn {
     pub fn remap(&self) -> &RemapTable {
         &self.remap
     }
+}
+
+/// Failure while attaching the root [`SceneInstance`] anchor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SceneAttachError {
+    /// The plan produced no root entity.
+    EmptyScene,
+    /// The root was stale, despawned, or still only reserved.
+    StaleRoot(Entity),
+    /// The ECS rejected the component insertion for the root.
+    InsertRejected(Entity),
 }
 
 /// Strongly typed instantiation failures.
@@ -484,6 +517,43 @@ mod tests {
         assert_eq!(spawned.root, None);
         assert!(spawned.remap.is_empty());
         assert_eq!(despawn_instance(&mut world, &spawned), 0);
+        assert_eq!(
+            spawned.attach_instance(
+                &mut world,
+                StableGuid::from_u128(1),
+                ResidencyTier::Interactive,
+            ),
+            Err(SceneAttachError::EmptyScene)
+        );
+    }
+
+    #[test]
+    fn attach_instance_installs_root_anchor_and_rejects_stale_roots() {
+        let mut world = World::new();
+        let spawned = spawn_plan(&mut world, &plan(&[0, 1], &[(1, 0)])).unwrap();
+        let root = spawned
+            .attach_instance(
+                &mut world,
+                StableGuid::from_u128(0xfeed),
+                ResidencyTier::Interactive,
+            )
+            .unwrap();
+        let anchor = world.get::<SceneInstance>(root).expect("root anchor");
+        assert_eq!(anchor.template, StableGuid::from_u128(0xfeed));
+        assert_eq!(
+            anchor.resolve(LocalEntityId::new(1)),
+            spawned.resolve(LocalEntityId::new(1))
+        );
+
+        despawn_instance(&mut world, &spawned);
+        assert_eq!(
+            spawned.attach_instance(
+                &mut world,
+                StableGuid::from_u128(0xfeed),
+                ResidencyTier::Interactive,
+            ),
+            Err(SceneAttachError::StaleRoot(root))
+        );
     }
 
     #[test]

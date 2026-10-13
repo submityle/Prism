@@ -63,8 +63,8 @@ pub mod template;
 pub use identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
 pub use instance::SceneInstance;
 pub use instantiate::{
-    despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneSpawn, SpawnContext,
-    SpawnContextError, TypedSpawnError, TypedSpawnPlan,
+    despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneAttachError, SceneSpawn,
+    SpawnContext, SpawnContextError, TypedSpawnError, TypedSpawnPlan,
 };
 pub use layers::{compose_layers, OrphanKey, OverrideComposition, OverrideCompositionError};
 #[cfg(feature = "materialize")]
@@ -88,8 +88,8 @@ pub mod prelude {
     pub use crate::identity::{LocalEntityId, NameTable, PersistentId, PersistentIdBuilder};
     pub use crate::instance::SceneInstance;
     pub use crate::instantiate::{
-        despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneSpawn, SpawnContext,
-        SpawnContextError, TypedSpawnError, TypedSpawnPlan,
+        despawn_instance, spawn_plan, spawn_typed_plan, InstantiateError, SceneAttachError,
+        SceneSpawn, SpawnContext, SpawnContextError, TypedSpawnError, TypedSpawnPlan,
     };
     pub use crate::layers::{
         compose_layers, OrphanKey, OverrideComposition, OverrideCompositionError,
