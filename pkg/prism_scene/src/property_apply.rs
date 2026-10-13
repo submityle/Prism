@@ -111,8 +111,9 @@ fn reflect_path_text(path: &crate::path::FieldPath) -> String {
                 text.push_str(name);
             }
             crate::path::FieldSegment::Index(value) => {
-                text.push('#');
+                text.push('[');
                 text.push_str(&value.to_string());
+                text.push(']');
             }
         }
     }
@@ -134,6 +135,7 @@ mod tests {
         speed: u64,
         enabled: bool,
         label: String,
+        values: Vec<u64>,
     }
     impl Component for Settings {}
 
@@ -154,6 +156,7 @@ mod tests {
             speed: 2,
             enabled: false,
             label: String::from("old"),
+            values: vec![1, 2],
         });
         apply_property_override(
             &mut world,
@@ -170,6 +173,13 @@ mod tests {
         let settings = world.get::<Settings>(entity).unwrap();
         assert_eq!(settings.speed, 9);
         assert_eq!(settings.label, "new");
+        apply_property_override(
+            &mut world,
+            entity,
+            &property("values.1", OverrideValue::U64(8)),
+        )
+        .unwrap();
+        assert_eq!(world.get::<Settings>(entity).unwrap().values, vec![1, 8]);
     }
 
     #[test]
@@ -180,6 +190,7 @@ mod tests {
             speed: 2,
             enabled: false,
             label: String::from("old"),
+            values: vec![1, 2],
         });
         assert_eq!(
             apply_property_override(
@@ -212,6 +223,7 @@ mod tests {
             speed: 2,
             enabled: false,
             label: String::from("old"),
+            values: vec![1, 2],
         });
         let valid = property("speed", OverrideValue::U64(9));
         let invalid = property("label", OverrideValue::I64(4));
