@@ -17,7 +17,10 @@ mod reducer;
 mod registry;
 mod render_plan;
 mod validate;
+#[cfg(feature = "render")]
+mod view;
 mod workspace;
+mod workspace_default;
 mod workspace_persist;
 #[cfg(feature = "std")]
 mod workspace_store;
@@ -44,7 +47,10 @@ pub use render_plan::{
     SizeRequirement, SplitterLayout, SurfaceId, TabHeader, TabId, Viewport,
 };
 pub use validate::{LayoutError, Limits, ValidationIssue};
+#[cfg(feature = "render")]
+pub use view::{DockView, DockViewError, DocumentViewRegistry, PanelViewRegistry, ViewFactory};
 pub use workspace::{NameKind, Perspective, Workspace, WorkspaceError, WorkspaceManager};
+pub use workspace_default::DefaultLayoutResetError;
 pub use workspace_persist::{
     decode_workspace, decode_workspace_with_registry, encode_workspace, WorkspaceDecodeLimits,
     WorkspaceDecodeOptions, WorkspacePersistError,

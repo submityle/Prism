@@ -9,6 +9,17 @@ publish = false
 [features]
 default = ["std"]
 std = []
+render = [
+  "std",
+  "dep:prism_ui",
+  "dep:prism_ui_component",
+  "dep:prism_ui_component_kit",
+]
+
+[dependencies]
+prism_ui = { path = "../prism_ui", optional = true }
+prism_ui_component = { path = "../prism_ui_component", optional = true }
+prism_ui_component_kit = { path = "../prism_ui_component_kit", optional = true }
 
 [lints]
 workspace = true

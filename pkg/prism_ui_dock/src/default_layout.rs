@@ -255,7 +255,11 @@ fn weighted_split(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{decode_layout, encode_layout, DefaultSlot, PanelDescriptor};
+    use crate::{
+        decode_layout, decode_layout_with_registry, encode_layout, DefaultSlot, PanelDescriptor,
+        ValidationIssue,
+    };
+    use alloc::format;
 
     fn registry() -> PanelRegistry {
         let mut registry = PanelRegistry::new();
@@ -358,5 +362,172 @@ mod tests {
         };
         assert_eq!(children[0].ratio.millionths(), 760_000);
         assert_eq!(children[1].ratio.millionths(), 240_000);
+    }
+
+    #[test]
+    fn floating_only_registry_keeps_main_root_empty() {
+        let mut registry = PanelRegistry::new();
+        registry
+            .register(PanelDescriptor::new("float.a", "A").with_default_slot(DefaultSlot::Floating))
+            .unwrap();
+        registry
+            .register(PanelDescriptor::new("float.b", "B").with_default_slot(DefaultSlot::Floating))
+            .unwrap();
+
+        let layout = registry
+            .default_layout(DefaultLayoutPolicy::default())
+            .unwrap();
+
+        assert_eq!(layout.root, DockNode::Empty);
+        assert_eq!(layout.floating.len(), 2);
+        assert_eq!(layout.floating[0].root, DockNode::panel("float.a"));
+        assert_eq!(layout.floating[1].root, DockNode::panel("float.b"));
+        assert!(layout.validate().is_ok());
+    }
+
+    #[test]
+    fn bottom_only_registry_does_not_create_a_spurious_split() {
+        let mut registry = PanelRegistry::new();
+        registry
+            .register(
+                PanelDescriptor::new("bottom", "Bottom").with_default_slot(DefaultSlot::Bottom),
+            )
+            .unwrap();
+
+        let layout = registry
+            .default_layout(DefaultLayoutPolicy::default())
+            .unwrap();
+
+        assert_eq!(
+            layout.root,
+            DockNode::TabStack {
+                tabs: vec!["bottom".into()],
+                active: 0,
+            }
+        );
+        assert!(layout.validate().is_ok());
+    }
+
+    #[test]
+    fn left_and_right_lanes_fill_the_root_without_a_central_lane() {
+        let mut registry = PanelRegistry::new();
+        registry
+            .register(PanelDescriptor::new("left", "Left"))
+            .unwrap();
+        registry
+            .register(
+                PanelDescriptor::new("right", "Right").with_default_slot(DefaultSlot::RightBar),
+            )
+            .unwrap();
+
+        let layout = registry
+            .default_layout(DefaultLayoutPolicy::default())
+            .unwrap();
+        let DockNode::Split { children, .. } = &layout.root else {
+            panic!("left and right lanes must form a split");
+        };
+        assert_eq!(children.len(), 2);
+        assert_eq!(
+            children
+                .iter()
+                .map(|child| child.ratio.millionths())
+                .sum::<u32>(),
+            Ratio::SCALE
+        );
+        assert!(!layout.root.contains_panel("document"));
+        assert!(layout.validate().is_ok());
+    }
+
+    #[test]
+    fn extreme_bottom_ratios_remain_legal_and_deterministic() {
+        let mut registry = PanelRegistry::new();
+        registry
+            .register(
+                PanelDescriptor::new("document", "Document")
+                    .with_default_slot(DefaultSlot::Document),
+            )
+            .unwrap();
+        registry
+            .register(
+                PanelDescriptor::new("bottom", "Bottom").with_default_slot(DefaultSlot::Bottom),
+            )
+            .unwrap();
+
+        for bottom_ratio in [1, Ratio::SCALE - 1] {
+            let layout = registry
+                .default_layout(DefaultLayoutPolicy {
+                    bottom_ratio: Ratio::from_millionths(bottom_ratio),
+                    ..DefaultLayoutPolicy::default()
+                })
+                .unwrap();
+            assert!(layout.validate().is_ok());
+            let bytes = encode_layout(&layout).unwrap();
+            assert_eq!(decode_layout(&bytes, Default::default()).unwrap(), layout);
+        }
+    }
+
+    #[test]
+    fn default_layout_accepts_the_default_panel_budget_but_rejects_overflow() {
+        let mut registry = PanelRegistry::new();
+        for index in 0..=crate::Limits::default().max_panels {
+            registry
+                .register(PanelDescriptor::new(
+                    format!("panel.{index}"),
+                    format!("Panel {index}"),
+                ))
+                .unwrap();
+        }
+
+        let error = registry
+            .default_layout(DefaultLayoutPolicy::default())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DefaultLayoutError::InvalidLayout(LayoutError {
+                issue: ValidationIssue::ResourceLimit("panels"),
+                ..
+            })
+        ));
+
+        let mut bounded = PanelRegistry::new();
+        for index in 0..crate::Limits::default().max_panels {
+            bounded
+                .register(PanelDescriptor::new(
+                    format!("panel.{index}"),
+                    format!("Panel {index}"),
+                ))
+                .unwrap();
+        }
+        let layout = bounded
+            .default_layout(DefaultLayoutPolicy::default())
+            .unwrap();
+        assert!(layout.root.contains_panel("panel.0"));
+        assert!(layout.root.contains_panel("panel.4095"));
+        assert!(layout.validate().is_ok());
+    }
+
+    #[test]
+    fn registry_filter_repairs_a_default_tab_stack_and_preserves_codec_legality() {
+        let mut source = PanelRegistry::new();
+        source
+            .register(PanelDescriptor::new("left.a", "A"))
+            .unwrap();
+        source
+            .register(PanelDescriptor::new("left.b", "B"))
+            .unwrap();
+        let layout = source
+            .default_layout(DefaultLayoutPolicy::default())
+            .unwrap();
+        let bytes = encode_layout(&layout).unwrap();
+
+        let mut target = PanelRegistry::new();
+        target
+            .register(PanelDescriptor::new("left.a", "A"))
+            .unwrap();
+        let filtered =
+            decode_layout_with_registry(&bytes, &target, None, Default::default()).unwrap();
+        assert_eq!(filtered.root, DockNode::panel("left.a"));
+        assert!(!filtered.root.contains_panel("left.b"));
+        assert!(filtered.validate().is_ok());
     }
 }
