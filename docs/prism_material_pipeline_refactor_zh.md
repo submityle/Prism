@@ -1341,6 +1341,8 @@ bits 48..64  reserved（不放 tier；降级不产生新 permutation）
 
 > **P3-a production writer 修订**：`shading/texel_cache/production.rs` 与 `production_resources.rs` 现已接入 render-world extraction、真实 geometry/light 校验、固定容量 GPU shade writer、Core3d 记录节点和 completion 状态机；无显式 `ShadeDispatchInputs` 时保持 `NoInput`，不会猜测场景或伪造页。当前仍未完成的是上游 object/material/face 可见性 producer、shade-page publication/consumer 与主 resolve 的完整端到端门禁。
 
+> **Atlas layout contract 修订**：`ShadeAtlasLayout` 现在以固定 tile extent 提供 row-major slot→atlas-origin 映射，`ShadePageTableRecord::from_handle` 只能从可寻址的 `ShadePageHandle` 构造 GPU record；越界 slot、零尺寸和不适配 tile 都明确拒绝，避免 producer 手写物理坐标。
+
 **破坏性说明**：屏幕空间 über 路径（§8）**保留为缓存未命中/视角相关的回退路径**，不是并行栈，不维护旧着色 API；对象空间缓存是其上的加法 pass。弱平台关闭开关即纯 §8 路径。
 
 ### 14.11 风险 → 高性能/高质解决方案总表

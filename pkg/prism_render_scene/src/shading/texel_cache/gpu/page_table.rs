@@ -19,6 +19,7 @@ use crate::GpuCompletionTracker;
 
 use super::super::key::ShadePageKey;
 use super::super::store::ShadePageHandle;
+use super::atlas::ShadeAtlasLayout;
 
 /// One record used to build an immutable shade page-table snapshot.
 ///
@@ -35,6 +36,26 @@ pub struct ShadePageTableRecord {
     pub atlas_x: u32,
     /// Y origin in atlas texels, matching the GPU writer job ABI.
     pub atlas_y: u32,
+}
+
+impl ShadePageTableRecord {
+    /// Builds a page-table record from the store's published handle and the
+    /// shared fixed-tile atlas layout. A missing slot is rejected instead of
+    /// fabricating an atlas origin.
+    #[must_use]
+    pub fn from_handle(
+        key: ShadePageKey,
+        handle: ShadePageHandle,
+        layout: ShadeAtlasLayout,
+    ) -> Option<Self> {
+        let [atlas_x, atlas_y] = layout.origin(handle.slot)?;
+        Some(Self {
+            key,
+            handle,
+            atlas_x,
+            atlas_y,
+        })
+    }
 }
 
 /// Four `u32` words matching `PageEntry` in `gpu/atlas.wgsl`.
@@ -887,6 +908,32 @@ mod tests {
             atlas_x: x,
             atlas_y: 0,
         }
+    }
+
+    #[test]
+    fn record_from_handle_uses_the_shared_atlas_layout() {
+        let layout = ShadeAtlasLayout::new([16, 8], [4, 4]).unwrap();
+        let key = record(1, 4, 0).key;
+        let handle = ShadePageHandle {
+            slot: 4,
+            generation: 10,
+            epoch: 7,
+        };
+        let record = ShadePageTableRecord::from_handle(key, handle, layout).unwrap();
+        assert_eq!([record.atlas_x, record.atlas_y], [0, 4]);
+        assert_eq!(record.handle, handle);
+    }
+
+    #[test]
+    fn record_from_handle_rejects_an_unaddressable_slot() {
+        let layout = ShadeAtlasLayout::new([16, 8], [4, 4]).unwrap();
+        let key = record(1, 8, 0).key;
+        let handle = ShadePageHandle {
+            slot: 8,
+            generation: 10,
+            epoch: 7,
+        };
+        assert!(ShadePageTableRecord::from_handle(key, handle, layout).is_none());
     }
 
     fn material_key(texture: u32, mip: u8, layer: u16, x: u16, y: u16) -> TexturePageKey {
