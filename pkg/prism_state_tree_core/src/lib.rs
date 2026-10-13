@@ -12,6 +12,7 @@
 extern crate alloc;
 
 mod binding;
+mod frame;
 mod model;
 mod runtime;
 mod schema;
@@ -21,6 +22,7 @@ pub use binding::{
     BindingPath, BindingPathError, BindingSlot, DependencyError, DependencyPlan,
     EvaluatorDependency,
 };
+pub use frame::{FrameError, FrameField, FrameLayout, InstanceFrame};
 pub use model::{
     EventId, GuardId, HistoryMode, NodeKind, Plan, PlanError, StateId, StateNode, Transition,
     TransitionKind, TransitionTarget, TreeDef, Trigger,
