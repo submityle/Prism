@@ -1,5 +1,7 @@
 //! Keeping the prepared table in step with the source assets.
 
+use alloc::collections::{BTreeMap, BTreeSet};
+
 use prism_asset::{Asset, AssetId};
 use prism_render_driver::{RenderDevice, RenderQueue};
 
@@ -60,8 +62,9 @@ impl AssetSyncReport {
 /// A prepare that returns [`PrepareAssetError::RetryNextUpdate`] leaves the
 /// previous representation untouched — a renderer must never publish a
 /// half-prepared asset — and is counted in the report, so the caller can tell
-/// "still loading" from "broken". The frame is consumed either way: a retry is
-/// driven by the source's next change, not by re-preparing the same copy.
+/// "still loading" from "broken". The copied source is retained in the
+/// extracted frame for the next prepare pass; this is important because the
+/// source may become ready without producing another asset event.
 pub fn prepare_extracted_assets<A: RenderAsset>(
     extracted: &mut ExtractedAssets<A>,
     prepared: &mut RenderAssets<A>,
@@ -70,6 +73,7 @@ pub fn prepare_extracted_assets<A: RenderAsset>(
 ) -> AssetSyncReport {
     let (assets, removed) = extracted.take();
     let mut report = AssetSyncReport::default();
+    let removed_ids: BTreeSet<_> = removed.iter().copied().collect();
     for id in removed {
         if let Some(value) = prepared.remove(id) {
             A::unload(&value, device);
@@ -77,13 +81,31 @@ pub fn prepare_extracted_assets<A: RenderAsset>(
             report.released += 1;
         }
     }
+
+    // Extract can accumulate several events for one id before prepare runs,
+    // and a retry from the previous pass is already in this same list. Keep
+    // only the last copy: it is the newest source state and prevents one
+    // deferred asset from multiplying its retry work every frame.
+    let mut latest = BTreeMap::new();
     for (id, source) in assets {
+        latest.insert(id, source);
+    }
+
+    for (id, source) in latest {
+        // Removal wins over a retry (and over stale extracted copies). Never
+        // put an asset back into the pending queue after its source is gone.
+        if removed_ids.contains(&id) {
+            continue;
+        }
         match A::prepare(&source, id, device, queue, prepared.get(id)) {
             Ok(value) => {
                 prepared.insert(id, value);
                 report.prepared += 1;
             }
-            Err(PrepareAssetError::RetryNextUpdate(_)) => report.retried += 1,
+            Err(PrepareAssetError::RetryNextUpdate(_)) => {
+                extracted.push_extracted(id, source);
+                report.retried += 1;
+            }
             Err(PrepareAssetError::Unpreparable { .. }) => report.unpreparable += 1,
         }
     }

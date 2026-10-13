@@ -1,6 +1,8 @@
 //! Behavioural tests for the render-asset table and its sync.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use prism_asset::{Asset, AssetId, AssetIndex, Assets};
 use prism_ecs::world::World;
@@ -30,6 +32,53 @@ struct GpuBlob {
     bytes: u64,
     /// Whether this prepare reused the previous representation's buffer.
     reused: bool,
+}
+
+/// A source whose dependency becomes ready between prepare passes without a
+/// source change or a new asset event.
+#[derive(Clone)]
+struct RetryOnceBlob {
+    attempts: Arc<AtomicUsize>,
+    bytes: usize,
+}
+
+impl Asset for RetryOnceBlob {
+    const TYPE_NAME: &'static str = "prism_render_app::RetryOnceBlob";
+}
+
+struct RetryOnceGpuBlob {
+    buffer: BufferId,
+    bytes: u64,
+}
+
+impl RenderAsset for RetryOnceGpuBlob {
+    type SourceAsset = RetryOnceBlob;
+
+    fn prepare(
+        source: &RetryOnceBlob,
+        id: AssetId<RetryOnceBlob>,
+        device: &dyn RenderDevice,
+        _queue: &dyn RenderQueue,
+        _previous: Option<&Self>,
+    ) -> Result<Self, PrepareAssetError<RetryOnceBlob>> {
+        if source.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(PrepareAssetError::RetryNextUpdate(id));
+        }
+        let bytes = source.bytes as u64;
+        Ok(Self {
+            buffer: device.create_buffer(&BufferDescriptor {
+                label: Some("retry-once-gpu-blob".into()),
+                size: bytes,
+                usage: BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
+            bytes,
+        })
+    }
+
+    fn unload(prepared: &Self, device: &dyn RenderDevice) {
+        device.destroy_buffer(prepared.buffer);
+    }
 }
 
 impl RenderAsset for GpuBlob {
@@ -257,6 +306,112 @@ fn a_new_asset_whose_prepare_defers_is_not_in_the_table() {
         "a deferred asset must not appear as prepared"
     );
     assert_eq!(device.live_resource_count(), 0);
+}
+
+#[test]
+fn a_retry_is_prepared_again_without_a_source_change() {
+    let (device, queue) = null_device();
+    let mut main = World::new();
+    let mut render = World::new();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut sources = Assets::new();
+    let handle = sources.insert(RetryOnceBlob {
+        attempts: attempts.clone(),
+        bytes: 6,
+    });
+    let id = handle.id();
+    main.insert_resource(sources);
+
+    let first = run_frame::<RetryOnceGpuBlob>(&mut main, &mut render, &device, &queue);
+    assert_eq!(first.retried, 1);
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert!(!render
+        .resource::<RenderAssets<RetryOnceGpuBlob>>()
+        .contains(id));
+    assert_eq!(
+        render
+            .resource::<ExtractedAssets<RetryOnceGpuBlob>>()
+            .extracted()
+            .len(),
+        1,
+        "the retry remains pending"
+    );
+
+    // No main-world mutation and therefore no new AssetEvent: the pending
+    // copied source itself drives the second attempt.
+    let second = run_frame::<RetryOnceGpuBlob>(&mut main, &mut render, &device, &queue);
+    assert_eq!(second.prepared, 1);
+    assert_eq!(second.retried, 0);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        render
+            .resource::<RenderAssets<RetryOnceGpuBlob>>()
+            .get(id)
+            .expect("the retry was prepared")
+            .bytes,
+        6
+    );
+    assert!(render
+        .resource::<ExtractedAssets<RetryOnceGpuBlob>>()
+        .is_empty());
+}
+
+#[test]
+fn removal_clears_a_pending_retry_without_requeueing_it() {
+    let (device, queue) = null_device();
+    let mut main = World::new();
+    let mut render = World::new();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let mut sources = Assets::new();
+    let handle = sources.insert(RetryOnceBlob {
+        attempts: attempts.clone(),
+        bytes: 6,
+    });
+    let id = handle.id();
+    main.insert_resource(sources);
+
+    let first = run_frame::<RetryOnceGpuBlob>(&mut main, &mut render, &device, &queue);
+    assert_eq!(first.retried, 1);
+    drop(handle);
+    main.resource_mut::<Assets<RetryOnceBlob>>().remove(id);
+
+    let second = run_frame::<RetryOnceGpuBlob>(&mut main, &mut render, &device, &queue);
+    assert_eq!(second.prepared, 0);
+    assert_eq!(second.retried, 0, "the removed retry was discarded");
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "removed assets are not retried"
+    );
+    assert!(render
+        .resource::<RenderAssets<RetryOnceGpuBlob>>()
+        .get(id)
+        .is_none());
+    assert!(render
+        .resource::<ExtractedAssets<RetryOnceGpuBlob>>()
+        .is_empty());
+}
+
+#[test]
+fn duplicate_extractions_use_the_latest_copy_and_one_retry() {
+    let (device, queue) = null_device();
+    let id = AssetId::<Blob>::new(AssetIndex::from_parts(0, 1));
+    let mut extracted = ExtractedAssets::<GpuBlob>::new();
+    let mut prepared = RenderAssets::<GpuBlob>::new();
+
+    extracted.push_extracted(id, Blob(alloc::vec![1, 2, 3]));
+    extracted.push_extracted(id, Blob(Vec::new()));
+    let report =
+        prepare_extracted_assets::<GpuBlob>(&mut extracted, &mut prepared, &device, &queue);
+
+    assert_eq!(report.prepared, 0, "the latest copy is deferred");
+    assert_eq!(
+        report.retried, 1,
+        "duplicate copies collapse to one attempt"
+    );
+    assert_eq!(extracted.extracted().len(), 1);
+    assert_eq!(extracted.extracted()[0].1, Blob(Vec::new()));
+    assert!(!prepared.contains(id));
 }
 
 /// The extract half: the render world receives an owned copy of what changed,
