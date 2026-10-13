@@ -197,7 +197,7 @@ pub struct PanelRegistry {
 impl PanelRegistry {
     pub fn register(&mut self, desc: PanelDescriptor) -> Result<(), PanelRegistryError>;
     pub fn get(&self, id: &PanelId) -> Option<&PanelDescriptor>; // 持久化白名单
-    pub fn ids(&self) -> impl Iterator<Item = &PanelId>;
+    pub fn iter(&self) -> core::slice::Iter<'_, PanelDescriptor>;
 }
 ```
 
@@ -215,7 +215,7 @@ impl PanelRegistry {
 - **脏子树重算（规划）**:宿主可对拖分隔条做局部几何重算；当前 `render_plan::solve` 每次处理完整布局。
 - **拖拽解耦**:纯数据状态机与 `drop_preview_element` 不修改布局；overlay、hit-test 排除、ghost 合成和 reducer commit 由宿主接线。
 - **结构共享（规划）**:当前 reducer 使用 owned clone，不提供持久化结构共享或 selector。
-- **可测性能**:暴露指标(可见面板数、每帧重算节点数、拖拽帧延迟),CI 门控回归。
+- **可测性能（规划）**:宿主未来可暴露可见面板数、每帧重算节点数和拖拽帧延迟；当前 crate 提供确定性求解与测试，不提供运行时指标。
 
 ---
 
