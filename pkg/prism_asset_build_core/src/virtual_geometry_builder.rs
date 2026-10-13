@@ -250,7 +250,7 @@ pub fn build_static_virtual_geometry(
             .map(|submesh| u32::from(submesh.material_slot) + 1)
             .max()
             .unwrap_or(1),
-        fallback_mesh_hash: [0; 32],
+        fallback_mesh_hash: content_hash(mesh).as_bytes(),
     };
     let asset = VirtualGeometryAsset {
         header,
@@ -557,6 +557,7 @@ mod tests {
             .clusters
             .iter()
             .all(|cluster| cluster.triangle_count <= 2));
+        assert_ne!(asset.header.fallback_mesh_hash, [0; 32]);
         assert!(asset.encode().is_ok());
     }
 
