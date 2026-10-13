@@ -1,6 +1,6 @@
 use alloc::{vec, vec::Vec};
 
-use prism_ecs::{command::CommandQueue, world::World};
+use prism_ecs::{command::CommandQueue, component::Component, world::World};
 use prism_state_tree_core::{
     ContextRef, Event, EventId, Guard, GuardContext, GuardId, MicrostepLimit, NodeKind, Schema,
     SchemaDescriptor, SchemaError, SchemaId, SchemaVersion, StateId, StateNode, Transition,
@@ -26,6 +26,9 @@ impl<'w> ContextRef<'w> for TestContext<'w> {
 struct TestSchema;
 const TEST_SCHEMA_ID: SchemaId = SchemaId::new(0x1234);
 const WRONG_SCHEMA_ID: SchemaId = SchemaId::new(0x9999);
+
+struct Marker;
+impl Component for Marker {}
 
 impl Schema for TestSchema {
     type Context<'w> = TestContext<'w>;
@@ -496,19 +499,30 @@ fn empty_batch_is_a_structured_noop() {
 fn tick_all_gathers_only_state_tree_components_in_entity_order() {
     let mut world = World::new();
     let first = world.spawn(StateTreeInstance::new(asset(), 4, MicrostepLimit(8)).unwrap());
-    let _plain = world.spawn(());
+    let marker = world.spawn((
+        StateTreeInstance::new(asset(), 4, MicrostepLimit(8)).unwrap(),
+        Marker,
+    ));
     let second = world.spawn(StateTreeInstance::new(asset(), 4, MicrostepLimit(8)).unwrap());
+    world.despawn(marker);
+    let replacement = world.spawn((
+        StateTreeInstance::new(asset(), 4, MicrostepLimit(8)).unwrap(),
+        Marker,
+    ));
 
     let report = tick_all(&mut world).expect("gather allocation");
+    let mut expected = vec![first, second, replacement];
+    expected.sort_unstable();
     assert_eq!(
         report
             .entries()
             .iter()
             .map(|entry| entry.entity)
             .collect::<Vec<_>>(),
-        vec![first, second]
+        expected
     );
-    assert_eq!(report.completed_count(), 2);
+    assert_ne!(marker, replacement);
+    assert_eq!(report.completed_count(), 3);
     assert_eq!(report.missing_count(), 0);
     assert_eq!(report.failed_count(), 0);
 }

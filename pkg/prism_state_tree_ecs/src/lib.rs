@@ -207,7 +207,11 @@ pub enum BatchTickMissingReason {
     MissingComponent,
 }
 
-/// Failure while gathering entities for [`tick_all`].
+/// Failure while reserving the explicit entity gather buffer for [`tick_all`].
+///
+/// This covers the adapter-owned gather vector only. Allocations performed by
+/// the ECS query cache or by the existing report/runtime paths remain governed
+/// by their respective host APIs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BatchTickError {
     /// The caller-provided world contents could not fit in the gather buffer.
