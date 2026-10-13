@@ -9,6 +9,7 @@ use crate::transaction::{PublishError, PublishedManifest, RevisionStore};
 use crate::types::{ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, ContentHash};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::thread;
 
 /// Immutable semantic settings and output contract for one graph node.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -160,6 +161,53 @@ impl BuildExecutor {
         ddc: &mut DerivedDataCache,
         revision: BuildRevision,
     ) -> Result<BuildExecution, BuildExecutionError> {
+        self.execute_with_limit(graph, specs, store, ddc, revision, 1)
+    }
+
+    /// Execute independent jobs concurrently, bounded by the host's available
+    /// parallelism. DDC mutations and manifest staging remain deterministic.
+    pub fn execute_parallel(
+        &self,
+        graph: &BuildGraph,
+        specs: &BTreeMap<JobId, ArtifactSpec>,
+        store: &RevisionStore,
+        ddc: &mut DerivedDataCache,
+        revision: BuildRevision,
+    ) -> Result<BuildExecution, BuildExecutionError> {
+        let limit = thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        self.execute_parallel_with_limit(graph, specs, store, ddc, revision, limit)
+    }
+
+    /// Execute independent jobs concurrently with a caller-selected maximum.
+    /// Each ready wave computes DDC/CAS work in parallel; completed results are
+    /// applied in ascending `JobId` order, so cache updates, failures, and
+    /// publication staging do not depend on thread scheduling.
+    pub fn execute_parallel_with_limit(
+        &self,
+        graph: &BuildGraph,
+        specs: &BTreeMap<JobId, ArtifactSpec>,
+        store: &RevisionStore,
+        ddc: &mut DerivedDataCache,
+        revision: BuildRevision,
+        max_concurrency: usize,
+    ) -> Result<BuildExecution, BuildExecutionError> {
+        self.execute_with_limit(graph, specs, store, ddc, revision, max_concurrency)
+    }
+
+    fn execute_with_limit(
+        &self,
+        graph: &BuildGraph,
+        specs: &BTreeMap<JobId, ArtifactSpec>,
+        store: &RevisionStore,
+        ddc: &mut DerivedDataCache,
+        revision: BuildRevision,
+        max_concurrency: usize,
+    ) -> Result<BuildExecution, BuildExecutionError> {
+        if max_concurrency == 0 {
+            return Err(BuildExecutionError::Graph(BuildError::InvalidConcurrency));
+        }
         let order = graph.execution_order()?;
         validate_specs(&order, specs)?;
 
@@ -168,90 +216,127 @@ impl BuildExecutor {
         let mut artifact_keys = BTreeMap::new();
         let mut cache_hits = BTreeSet::new();
 
-        for id in order {
-            let job = graph
-                .job(id)
-                .expect("execution order only contains graph jobs");
-            let spec = &specs[&id];
-            let input_keys: Vec<_> = job
-                .dependencies()
+        let mut completed = BTreeSet::new();
+        while completed.len() < order.len() {
+            let mut ready: Vec<_> = order
                 .iter()
-                .map(|dep| artifact_keys[dep])
+                .copied()
+                .filter(|id| {
+                    !completed.contains(id)
+                        && graph.job(*id).is_some_and(|job| {
+                            job.dependencies()
+                                .iter()
+                                .all(|dependency| completed.contains(dependency))
+                        })
+                })
                 .collect();
-            // Runtime interpretation is part of artifact identity too. Keeping
-            // it in the canonical setting envelope prevents one semantic key
-            // from aliasing two incompatible output contracts.
-            let key = spec.artifact_key(self.protocol_version, &input_keys)?;
-            let expected_dependencies = input_keys.clone();
-            let cached = ddc.get(key);
-            let mut bytes = None;
-            if let Some(descriptor) = cached {
-                if descriptor.key != key
-                    || descriptor.kind != spec.kind
-                    || descriptor.schema != spec.schema
-                    || descriptor.alignment != spec.alignment
-                    || descriptor.dependencies != expected_dependencies
-                {
-                    return Err(BuildExecutionError::DescriptorMismatch(id));
-                }
-                match store.cas().read(descriptor.content_hash) {
-                    Ok(payload)
-                        if payload.len() as u64 == descriptor.byte_len
-                            && ContentHash::digest(&payload) == descriptor.content_hash =>
-                    {
-                        bytes = Some(payload);
-                        cache_hits.insert(id);
-                    }
-                    Ok(_) | Err(CasError::Corrupt { .. }) => {
-                        ddc.invalidate(key)?;
-                    }
-                    Err(CasError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-                        ddc.invalidate(key)?;
-                    }
-                    Err(error) => return Err(BuildExecutionError::Cas(error)),
-                }
-            }
-            let output = match bytes {
-                Some(payload) => payload,
-                None => {
-                    let inputs: Vec<&[u8]> = job
-                        .dependencies()
+            ready.sort_unstable();
+            let wave: Vec<_> = ready.into_iter().take(max_concurrency).collect();
+            if wave.is_empty() {
+                // `execution_order` has already validated the graph; this is
+                // defensive against a future scheduler regression.
+                return Err(BuildExecutionError::Graph(BuildError::Cycle {
+                    jobs: order
                         .iter()
-                        .map(|dep| outputs[dep].as_slice())
-                        .collect();
-                    job.process(&inputs).map_err(|source| {
-                        BuildExecutionError::Graph(BuildError::ProcessorFailed { job: id, source })
-                    })?
-                }
-            };
-            if spec.alignment == 0 || !spec.alignment.is_power_of_two() {
-                return Err(BuildExecutionError::InvalidOutput(
+                        .copied()
+                        .filter(|id| !completed.contains(id))
+                        .collect(),
+                }));
+            }
+
+            let mut work = Vec::with_capacity(wave.len());
+            for &id in &wave {
+                let job = graph.job(id).expect("ordered job must exist");
+                let spec = &specs[&id];
+                let input_keys: Vec<_> = job
+                    .dependencies()
+                    .iter()
+                    .map(|dependency| artifact_keys[dependency])
+                    .collect();
+                let inputs: Vec<&[u8]> = job
+                    .dependencies()
+                    .iter()
+                    .map(|dependency| outputs[dependency].as_slice())
+                    .collect();
+                let key = spec.artifact_key(self.protocol_version, &input_keys)?;
+                work.push((
                     id,
-                    "alignment must be a non-zero power of two",
+                    key,
+                    spec,
+                    input_keys,
+                    job.processor(),
+                    inputs,
+                    ddc.get(key),
                 ));
             }
-            let descriptor = ArtifactDescriptor::for_bytes(
-                key,
-                spec.kind,
-                spec.schema,
-                spec.alignment,
-                expected_dependencies,
-                &output,
-            );
-            if !cache_hits.contains(&id) {
-                // CAS durability precedes the DDC index reference.
-                let stored_hash = store.cas().put(&output)?;
-                if stored_hash != descriptor.content_hash {
-                    return Err(BuildExecutionError::InvalidOutput(
-                        id,
-                        "CAS hash differs from descriptor",
-                    ));
+
+            let results = thread::scope(|scope| {
+                let handles = work
+                    .into_iter()
+                    .map(|(id, key, spec, input_keys, processor, inputs, cached)| {
+                        let store = store;
+                        (
+                            id,
+                            scope.spawn(move || {
+                                prepare_job(
+                                    id, key, spec, input_keys, processor, inputs, cached, store,
+                                )
+                            }),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|(id, handle)| {
+                        let result = handle.join().unwrap_or_else(|_| {
+                            Err((
+                                BuildExecutionError::Graph(BuildError::ProcessorFailed {
+                                    job: id,
+                                    source: crate::job::ProcessorError::new(
+                                        "build worker thread panicked",
+                                    ),
+                                }),
+                                false,
+                            ))
+                        });
+                        (id, result)
+                    })
+                    .collect::<Vec<_>>()
+            });
+
+            // `wave` is sorted because it is selected from the stable
+            // topological order. Apply cache mutations and surface failures
+            // in that same order regardless of completion timing.
+            for (id, result) in results {
+                let prepared = match result {
+                    Ok(prepared) => prepared,
+                    Err((error, invalidate_cache)) => {
+                        if invalidate_cache {
+                            let key = work_key_for(
+                                id,
+                                graph,
+                                &artifact_keys,
+                                specs,
+                                self.protocol_version,
+                            )?;
+                            ddc.invalidate(key)?;
+                        }
+                        return Err(error);
+                    }
+                };
+                if prepared.invalidate_cache {
+                    ddc.invalidate(prepared.key)?;
                 }
-                ddc.put(key, descriptor.clone())?;
+                if !prepared.cache_hit {
+                    ddc.put(prepared.key, prepared.descriptor.clone())?;
+                } else {
+                    cache_hits.insert(id);
+                }
+                artifact_keys.insert(id, prepared.key);
+                descriptors.insert(id, prepared.descriptor);
+                outputs.insert(id, prepared.output);
+                completed.insert(id);
             }
-            artifact_keys.insert(id, key);
-            descriptors.insert(id, descriptor);
-            outputs.insert(id, output);
         }
 
         let expected_current = store.current_revision()?;
@@ -270,6 +355,117 @@ impl BuildExecutor {
             cache_hits,
         })
     }
+}
+
+struct PreparedJob {
+    key: ArtifactKey,
+    descriptor: ArtifactDescriptor,
+    output: Vec<u8>,
+    cache_hit: bool,
+    invalidate_cache: bool,
+}
+
+fn work_key_for(
+    id: JobId,
+    graph: &BuildGraph,
+    artifact_keys: &BTreeMap<JobId, ArtifactKey>,
+    specs: &BTreeMap<JobId, ArtifactSpec>,
+    protocol_version: u32,
+) -> Result<ArtifactKey, BuildExecutionError> {
+    let input_keys: Vec<_> = graph
+        .job(id)
+        .expect("ordered job must exist")
+        .dependencies()
+        .iter()
+        .map(|dependency| artifact_keys[dependency])
+        .collect();
+    Ok(specs[&id].artifact_key(protocol_version, &input_keys)?)
+}
+
+fn prepare_job(
+    id: JobId,
+    key: ArtifactKey,
+    spec: &ArtifactSpec,
+    input_keys: Vec<ArtifactKey>,
+    processor: std::sync::Arc<dyn crate::job::Processor>,
+    inputs: Vec<&[u8]>,
+    cached: Option<ArtifactDescriptor>,
+    store: &RevisionStore,
+) -> Result<PreparedJob, (BuildExecutionError, bool)> {
+    let mut cached_bytes = None;
+    let mut invalidate_cache = false;
+    if let Some(descriptor) = cached {
+        if descriptor.key != key
+            || descriptor.kind != spec.kind
+            || descriptor.schema != spec.schema
+            || descriptor.alignment != spec.alignment
+            || descriptor.dependencies != input_keys
+        {
+            return Err((BuildExecutionError::DescriptorMismatch(id), false));
+        }
+        match store.cas().read(descriptor.content_hash) {
+            Ok(payload)
+                if payload.len() as u64 == descriptor.byte_len
+                    && ContentHash::digest(&payload) == descriptor.content_hash =>
+            {
+                cached_bytes = Some(payload);
+            }
+            Ok(_) | Err(CasError::Corrupt { .. }) => invalidate_cache = true,
+            Err(CasError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                invalidate_cache = true;
+            }
+            Err(error) => return Err((BuildExecutionError::Cas(error), false)),
+        }
+    }
+
+    let cache_hit = cached_bytes.is_some();
+    let output = match cached_bytes {
+        Some(payload) => payload,
+        None => {
+            let input_refs: Vec<&[u8]> = inputs.iter().copied().collect();
+            processor.process(&input_refs).map_err(|source| {
+                (
+                    BuildExecutionError::Graph(BuildError::ProcessorFailed { job: id, source }),
+                    invalidate_cache,
+                )
+            })?
+        }
+    };
+    if spec.alignment == 0 || !spec.alignment.is_power_of_two() {
+        return Err((
+            BuildExecutionError::InvalidOutput(id, "alignment must be a non-zero power of two"),
+            invalidate_cache,
+        ));
+    }
+    let descriptor = ArtifactDescriptor::for_bytes(
+        key,
+        spec.kind,
+        spec.schema,
+        spec.alignment,
+        input_keys,
+        &output,
+    );
+    if !cache_hit {
+        // Immutable CAS writes are safe to perform concurrently. The mutable
+        // DDC index is updated by the coordinator only after durable CAS put.
+        let stored_hash = store
+            .cas()
+            .put(&output)
+            .map_err(|error| (BuildExecutionError::Cas(error), invalidate_cache))?;
+        if stored_hash != descriptor.content_hash {
+            return Err((
+                BuildExecutionError::InvalidOutput(id, "CAS hash differs from descriptor"),
+                invalidate_cache,
+            ));
+        }
+    }
+    Ok(PreparedJob {
+        key,
+        descriptor,
+        output,
+        cache_hit,
+        invalidate_cache,
+    })
 }
 
 fn output_contract_settings(spec: &ArtifactSpec) -> Vec<u8> {
@@ -617,6 +813,186 @@ mod tests {
         );
         assert!(second.cache_hits.is_empty());
         assert_eq!(count.load(Ordering::Relaxed), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parallel_executor_runs_ready_jobs_and_preserves_outputs() {
+        let root = temp_dir("parallel");
+        let serial_root = temp_dir("parallel-serial-reference");
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut graph = BuildGraph::new();
+        for id in [1_u128, 2, 3, 4] {
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            graph
+                .add_job(crate::job::BuildJob::new(
+                    JobId(id),
+                    [],
+                    move |_: &[&[u8]]| {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(current, Ordering::SeqCst);
+                        thread::sleep(std::time::Duration::from_millis(20));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok(vec![id as u8])
+                    },
+                ))
+                .unwrap();
+        }
+        let mut specs = BTreeMap::new();
+        for id in [1_u128, 2, 3, 4] {
+            specs.insert(JobId(id), spec(100 + id, &[id as u8]));
+        }
+        let store = RevisionStore::open(&root).unwrap();
+        let mut ddc = DerivedDataCache::open(root.join("ddc")).unwrap();
+        let execution = BuildExecutor {
+            protocol_version: 1,
+        }
+        .execute_parallel_with_limit(&graph, &specs, &store, &mut ddc, BuildRevision(0), 4)
+        .unwrap();
+        let serial = run(&graph, &specs, &serial_root, 0);
+        assert!(peak.load(Ordering::SeqCst) > 1);
+        assert_eq!(execution.published.manifest.entries.len(), 4);
+        assert_eq!(execution.artifact_keys.len(), 4);
+        assert_eq!(execution.artifact_keys, serial.artifact_keys);
+        assert_eq!(
+            execution.published.manifest.canonical_bytes(),
+            serial.published.manifest.canonical_bytes()
+        );
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(serial_root).unwrap();
+    }
+
+    #[test]
+    fn parallel_executor_reports_smallest_failed_job_and_does_not_publish() {
+        let root = temp_dir("parallel-failure");
+        let mut graph = BuildGraph::new();
+        for id in [2_u128, 5] {
+            graph
+                .add_job(crate::job::BuildJob::new(
+                    JobId(id),
+                    [],
+                    move |_: &[&[u8]]| {
+                        if id == 2 {
+                            thread::sleep(std::time::Duration::from_millis(30));
+                        }
+                        Err(ProcessorError::new(format!("failure-{id}")))
+                    },
+                ))
+                .unwrap();
+        }
+        let mut specs = BTreeMap::new();
+        specs.insert(JobId(2), spec(102, b"two"));
+        specs.insert(JobId(5), spec(105, b"five"));
+        let store = RevisionStore::open(&root).unwrap();
+        let mut ddc = DerivedDataCache::open(root.join("ddc")).unwrap();
+        let result = BuildExecutor {
+            protocol_version: 1,
+        }
+        .execute_parallel_with_limit(&graph, &specs, &store, &mut ddc, BuildRevision(0), 2);
+        assert!(matches!(
+            result,
+            Err(BuildExecutionError::Graph(BuildError::ProcessorFailed {
+                job: JobId(2),
+                ..
+            }))
+        ));
+        assert_eq!(store.current_revision().unwrap(), None);
+        assert!(ddc.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parallel_executor_reuses_verified_ddc_and_cas_entries() {
+        let root = temp_dir("parallel-cache-hit");
+        let first_count = Arc::new(AtomicUsize::new(0));
+        let mut graph = BuildGraph::new();
+        for id in [1_u128, 2, 3] {
+            let count = Arc::clone(&first_count);
+            graph
+                .add_job(crate::job::BuildJob::new(
+                    JobId(id),
+                    [],
+                    move |_: &[&[u8]]| {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![id as u8, 0xA5])
+                    },
+                ))
+                .unwrap();
+        }
+        let mut specs = BTreeMap::new();
+        for id in [1_u128, 2, 3] {
+            specs.insert(JobId(id), spec(200 + id, &[id as u8]));
+        }
+        let store = RevisionStore::open(&root).unwrap();
+        let mut ddc = DerivedDataCache::open(root.join("ddc")).unwrap();
+        let executor = BuildExecutor {
+            protocol_version: 1,
+        };
+        executor
+            .execute_parallel_with_limit(&graph, &specs, &store, &mut ddc, BuildRevision(0), 3)
+            .unwrap();
+        assert_eq!(first_count.load(Ordering::SeqCst), 3);
+
+        let second_count = Arc::new(AtomicUsize::new(0));
+        let mut cached_graph = BuildGraph::new();
+        for id in [1_u128, 2, 3] {
+            let count = Arc::clone(&second_count);
+            cached_graph
+                .add_job(crate::job::BuildJob::new(
+                    JobId(id),
+                    [],
+                    move |_: &[&[u8]]| {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Ok(vec![0xFF])
+                    },
+                ))
+                .unwrap();
+        }
+        let second = executor
+            .execute_parallel_with_limit(
+                &cached_graph,
+                &specs,
+                &store,
+                &mut ddc,
+                BuildRevision(1),
+                3,
+            )
+            .unwrap();
+        assert_eq!(second_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            second.cache_hits,
+            [JobId(1), JobId(2), JobId(3)].into_iter().collect()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parallel_executor_rejects_zero_concurrency_without_mutating_cache() {
+        let root = temp_dir("parallel-zero-concurrency");
+        let graph = one_job(Arc::new(AtomicUsize::new(0)), b"payload");
+        let mut specs = BTreeMap::new();
+        specs.insert(JobId(1), spec(42, b"settings"));
+        let store = RevisionStore::open(&root).unwrap();
+        let mut ddc = DerivedDataCache::open(root.join("ddc")).unwrap();
+        let result = (BuildExecutor {
+            protocol_version: 1,
+        })
+        .execute_parallel_with_limit(
+            &graph,
+            &specs,
+            &store,
+            &mut ddc,
+            BuildRevision(0),
+            0,
+        );
+        assert!(matches!(
+            result,
+            Err(BuildExecutionError::Graph(BuildError::InvalidConcurrency))
+        ));
+        assert!(ddc.is_empty());
+        assert_eq!(store.current_revision().unwrap(), None);
         fs::remove_dir_all(root).unwrap();
     }
 }
