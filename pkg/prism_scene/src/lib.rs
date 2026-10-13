@@ -50,6 +50,7 @@ pub mod identity;
 pub mod instance;
 pub mod instantiate;
 pub mod layers;
+pub mod manifest;
 #[cfg(feature = "materialize")]
 pub mod materialize;
 #[cfg(feature = "materialize")]
@@ -74,6 +75,9 @@ pub use instantiate::{
     SpawnContext, SpawnContextError, TypedSpawnError, TypedSpawnPlan,
 };
 pub use layers::{compose_layers, OrphanKey, OverrideComposition, OverrideCompositionError};
+pub use manifest::{
+    decode_manifest, encode_manifest, ManifestDecodeLimits, ManifestError, SceneManifest,
+};
 #[cfg(feature = "materialize")]
 pub use materialize::{
     materialize_plan, materialize_plan_with_limits, ComponentMaterializer, MaterializeError,
