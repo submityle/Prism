@@ -245,6 +245,7 @@ impl Mesh {
         if self.attributes.is_empty() {
             return Err(MeshError::NoAttributes);
         }
+        let vertex_count = checked_mesh_count(self.vertex_count(), "vertex")?;
         for (attribute, values) in self.attributes.values() {
             if !values.matches(attribute.format) {
                 return Err(MeshError::FormatMismatch {
@@ -260,7 +261,6 @@ impl Mesh {
             }
         }
         if let Some(max_index) = self.indices.as_ref().and_then(Indices::max_index) {
-            let vertex_count = u32::try_from(self.vertex_count()).unwrap_or(u32::MAX);
             if max_index >= vertex_count {
                 return Err(MeshError::IndexOutOfRange {
                     max_index,
@@ -272,7 +272,7 @@ impl Mesh {
             .indices
             .as_ref()
             .map_or(self.vertex_count(), Indices::len);
-        let element_count = u32::try_from(element_count).unwrap_or(u32::MAX);
+        let element_count = checked_mesh_count(element_count, "element")?;
         self.primitive_topology
             .validate_element_count(element_count)?;
         if !self.submeshes.is_empty() {
@@ -281,7 +281,7 @@ impl Mesh {
             };
             validate_submeshes(
                 &self.submeshes,
-                u32::try_from(indices.len()).unwrap_or(u32::MAX),
+                checked_mesh_count(indices.len(), "index")?,
                 self.primitive_topology,
             )?;
         }
@@ -300,12 +300,39 @@ impl Mesh {
                 .ok_or(MeshError::SubMeshesRequireIndices)?;
             validate_submeshes_with_limits(
                 &self.submeshes,
-                u32::try_from(indices.len()).unwrap_or(u32::MAX),
+                checked_mesh_count(indices.len(), "index")?,
                 self.primitive_topology,
                 limits,
             )?;
         }
         Ok(())
+    }
+}
+
+fn checked_mesh_count(count: usize, kind: &'static str) -> Result<u32, MeshError> {
+    u32::try_from(count).map_err(|_| MeshError::CountExceedsU32 { kind, found: count })
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn checked_mesh_count_accepts_u32_max_and_rejects_larger_counts() {
+        assert_eq!(
+            checked_mesh_count(u32::MAX as usize, "vertex"),
+            Ok(u32::MAX)
+        );
+        if usize::BITS > u32::BITS {
+            let too_many = (u32::MAX as usize).checked_add(1).unwrap();
+            assert_eq!(
+                checked_mesh_count(too_many, "vertex"),
+                Err(MeshError::CountExceedsU32 {
+                    kind: "vertex",
+                    found: too_many,
+                })
+            );
+        }
     }
 }
 

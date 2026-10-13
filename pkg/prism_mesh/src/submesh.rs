@@ -53,6 +53,16 @@ impl SubMesh {
         if self.index_range.is_empty() {
             return Err(MeshError::EmptySubMeshIndexRange);
         }
+        if topology.is_list() {
+            let elements_per_primitive = crate::topology::elements_per_primitive(topology);
+            if self.index_range.start % elements_per_primitive != 0 {
+                return Err(MeshError::SubMeshIndexRangeMisaligned {
+                    start: self.index_range.start,
+                    topology,
+                    elements_per_primitive,
+                });
+            }
+        }
         if topology.primitive_count(self.index_count()) == Some(0) {
             return Err(MeshError::SubMeshHasNoPrimitives {
                 material_slot: self.material_slot,

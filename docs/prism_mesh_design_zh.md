@@ -170,7 +170,7 @@ crates/bevy_mesh                      仅保留给未迁移示例；RHI 路径�
 
 - **已有**：`prism_mesh::Mesh` 提供属性/索引/拓扑/布局/打包/包围体/校验；`VirtualGeometryVersion=1` 的 Cluster 决策层（cull/lod/page_table/raster_path/software_raster/hierarchy/bins/page_request/frame）已存在；`geometry` 有稳定几何表与 LOD 记录；`deformation` 有句柄与预算骨架；OMM、软件光栅、GDeflate 均有 CPU golden + GPU twin 的既有范式。
 - **已补齐（M0 静态契约切片）**：`prism_mesh` 现已包含 `topology.rs`、`submesh.rs`、`limits.rs`、`morph.rs`、`skin.rs`、`streams.rs`、`hash.rs`；RHI 的 12 种当前顶点格式均有类型化授权值；`Mesh::validate()` 已检查拓扑元素数、索引范围、子网格范围/重叠，`validate_with_limits()` 已接入属性/流/顶点/材质槽预算；确定性 hash 覆盖拓扑、属性值、索引与子网格。
-- **仍有差距**：`primitives/` 已提供平面、立方体、UV 球、胶囊和采样地形片；虚拟几何已有 baseline static Cluster/page builder、可选 GDeflate page payload、resident page store 和 v1 落盘编解码契约，但尚无连续 LOD/simplification DAG、GPU page-table/feedback 生产接入；无 Deformable Cluster；无 mesh→BLAS/OMM 的几何侧契约；分流上传已接入 `RenderMesh`、queue、frame graph 和 draw slot，但尚无深度 pass 带宽基准。
+- **仍有差距**：`primitives/` 已提供平面、立方体、UV 球、胶囊和采样地形片；虚拟几何已有 baseline static Cluster/page builder、可选 GDeflate page payload、resident page store 和 v1 落盘编解码契约，但尚无连续 LOD/simplification DAG、GPU page-table/feedback 生产接入；无 Deformable Cluster；无 mesh→BLAS/OMM 的几何侧契约；分流上传已接入 `RenderMesh`、queue、frame graph 和 draw slot，但尚无深度 pass 带宽基准。`MeshBounds` 派生中心、范围与半径时使用 `f64` 中间值，避免有限 `f32` 坐标的中间运算溢出；超出 `f32` 可表示范围的范围/半径饱和至有限最大值。
 - **本文职责**：把这些差距写成可执行规格，而不是重写已有闭环。
 
 ## 6. 核心数据模型：一件 Mesh 是什么
@@ -278,7 +278,7 @@ pub struct SubMesh {
 
 ### 6.8 校验规则集（完整清单）
 
-渲染前必须通过的校验（现状 `Mesh::validate` 覆盖前两条，其余待补）：
+渲染前必须通过的校验（现状 `Mesh::validate` 覆盖 1–6、9；Skin/Morph 与构建诊断规则由各自模块或构建阶段负责）：
 
 1. 至少一个属性（否则没有顶点阶段可绑定）。
 2. 每个属性的元素数与网格顶点数一致。
@@ -293,7 +293,7 @@ pub struct SubMesh {
 11. 属性总量与流划分满足 `Limits`。
 12. 退化三角形（零面积、重复索引）在授权态允许存在，但构建期必须报告并可移除；运行时校验不因退化而失败（脏数据不应让整个网格不可上传）。
 
-错误类型现状 `MeshError { VertexCountMismatch, FormatMismatch, IndexOutOfRange, NoAttributes }`；建议扩展为可携带上下文的枚举（属性名 + 元素数已具备），并对“构建期诊断”与“运行期致命”分级，避免把内容警告当成上传失败。
+`MeshError` 现已包含属性格式/数量、索引范围、拓扑数量、子网格范围重叠与 primitive 对齐、以及超过 `u32` ABI 能力的计数错误；构建期诊断与运行期致命错误仍按各自构建模块分级，避免把内容警告当成上传失败。
 
 ### 6.9 内容哈希与确定性
 
@@ -844,11 +844,11 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 ## 22. 路线图（M0–M6）
 
-### M0：契约与基线（2–3 周）
-- 固化 `prism_mesh` 公共语义与错误分级；补 `topology.rs`、`validate.rs`、`hash.rs`。
-- 补齐 `VertexAttributeValues` 与 `VertexFormat` 的对齐（含格式矩阵测试）。
-- 建立几何诊断指标与 CPU 基准骨架（`benches/`）。
-- 退出标准：格式矩阵、拓扑、校验、哈希全部有单测；文档与代码一致。
+### M0：契约与基线（已完成）
+- 已固化 `prism_mesh` 公共语义与错误分级；拓扑、子网格、预算、Morph、Skinning、流布局和确定性哈希均有独立模块与测试。
+- `VertexAttributeValues` 与 RHI `VertexFormat` 一一对齐，并有完整格式矩阵测试。
+- 已建立格式/拓扑/校验/哈希的 CPU 单测基线；诊断指标与性能基准仍属于后续工作，不宣称已完成。
+- 退出标准：格式矩阵、拓扑、校验、哈希全部有单测；文档与代码一致。✅
 
 ### M1：静态网格完整化（4–6 周）
 - 分流 `stream_layouts`（位置/着色/蒙皮/形变四流）+ 构建期 profile。✅ `RenderMesh` 多 buffer 与 draw slot 已接入
@@ -888,15 +888,16 @@ pub struct DeformationBudget { pub vertices_per_frame: u32, pub blas_refits_per_
 
 ## 23. 第一个可合并切片
 
-建议的第一个 PR 只做“契约与对齐”，不碰 GPU：
+已完成的第一个可合并切片为“契约与对齐”，本切片不涉及 GPU：
 
 1. 新增 `pkg/prism_mesh/src/topology.rs`：拓扑种类与图元数计算。✅
 2. 新增静态契约模块：`submesh.rs`、`limits.rs`、`morph.rs`、`skin.rs`，并接入 `Mesh::validate()`。✅
 3. 扩展 `VertexAttributeValues`：补 `Float16x2/4`、`Uint32`、`Sint32`、`Snorm8x4`，与 `VertexFormat` 一一对齐，并加“格式矩阵全覆盖”单测。✅
 4. 新增 `pkg/prism_mesh/src/hash.rs`：确定性内容哈希（位模式、固定遍历序）。✅
 5. 新增 `streams.rs`：位置/着色/蒙皮/形变分流布局与实际字节打包，并接入 `RenderMesh` 多 buffer、queue、frame graph 和 draw slot。✅
+6. 修复 `MeshBounds` 对有限极值坐标的派生运算溢出，并加入极值回归测试；无法由 `f32` 表示的范围/半径按契约饱和至有限最大值。✅
 
-理由：这四件事都是设备无关、可独立单测、零 GPU 风险，且立刻为后续构建/DDC 提供键与校验基础。
+理由：上述设备无关工作可独立单测，为后续构建/DDC 提供校验基础；边界数值测试确保有限输入不会因中间溢出变成 NaN/Inf。
 
 ## 24. 关键决策记录（ADR 候选）
 

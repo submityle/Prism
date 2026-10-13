@@ -71,6 +71,22 @@ fn submesh_ranges_are_bounded_aligned_and_non_overlapping() {
         })
     );
     assert_eq!(
+        SubMesh::new(0, 1..4).validate(6, PrimitiveTopology::TriangleList),
+        Err(MeshError::SubMeshIndexRangeMisaligned {
+            start: 1,
+            topology: PrimitiveTopology::TriangleList,
+            elements_per_primitive: 3,
+        })
+    );
+    assert_eq!(
+        SubMesh::new(0, 1..3).validate(4, PrimitiveTopology::LineList),
+        Err(MeshError::SubMeshIndexRangeMisaligned {
+            start: 1,
+            topology: PrimitiveTopology::LineList,
+            elements_per_primitive: 2,
+        })
+    );
+    assert_eq!(
         SubMesh::new(0, 5..7).validate(6, PrimitiveTopology::TriangleList),
         Err(MeshError::SubMeshIndexRangeOutOfBounds {
             start: 5,
@@ -80,8 +96,8 @@ fn submesh_ranges_are_bounded_aligned_and_non_overlapping() {
     );
     assert_eq!(
         validate_submeshes(
-            &[SubMesh::new(0, 0..3), SubMesh::new(1, 2..5)],
-            6,
+            &[SubMesh::new(0, 0..6), SubMesh::new(1, 3..6)],
+            9,
             PrimitiveTopology::TriangleList
         ),
         Err(MeshError::SubMeshIndexRangesOverlap {

@@ -35,12 +35,28 @@ pub enum MeshError {
     NoAttributes,
     /// Submeshes were supplied for a non-indexed mesh.
     SubMeshesRequireIndices,
+    /// A vertex or index count exceeds the range represented by the mesh ABI.
+    CountExceedsU32 {
+        /// The kind of count that overflowed (for example, `vertex` or `index`).
+        kind: &'static str,
+        /// The original count.
+        found: usize,
+    },
     /// A list topology was given a trailing partial primitive.
     TopologyElementCount {
         /// The RHI topology being validated.
         topology: PrimitiveTopology,
         /// The number of vertices or indices supplied.
         element_count: u32,
+    },
+    /// A list-topology submesh starts in the middle of a primitive.
+    SubMeshIndexRangeMisaligned {
+        /// Start of the half-open range.
+        start: u32,
+        /// The RHI topology being validated.
+        topology: PrimitiveTopology,
+        /// Number of indices per complete list primitive.
+        elements_per_primitive: u32,
     },
     /// A submesh index range is outside its parent index buffer.
     SubMeshIndexRangeOutOfBounds {
@@ -138,10 +154,21 @@ impl fmt::Display for MeshError {
             Self::SubMeshesRequireIndices => {
                 write!(f, "submeshes require an indexed mesh")
             }
+            Self::CountExceedsU32 { kind, found } => {
+                write!(f, "mesh {kind} count {found} exceeds the u32 limit")
+            }
             Self::TopologyElementCount {
                 topology,
                 element_count,
             } => write!(f, "{topology:?} cannot assemble {element_count} elements"),
+            Self::SubMeshIndexRangeMisaligned {
+                start,
+                topology,
+                elements_per_primitive,
+            } => write!(
+                f,
+                "submesh index range starts at {start}, not aligned to {elements_per_primitive}-element {topology:?} primitives"
+            ),
             Self::SubMeshIndexRangeOutOfBounds {
                 start,
                 end,

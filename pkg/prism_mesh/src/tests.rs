@@ -238,6 +238,33 @@ fn bounds_follow_the_positions() {
     assert_eq!(MeshBounds::from_positions(&[]), None);
 }
 
+/// Finite source coordinates must not produce non-finite derived culling values.
+#[test]
+fn bounds_derived_values_do_not_overflow_f32_intermediates() {
+    let max = f32::MAX;
+    let positive_range = MeshBounds::from_positions(&[[max * 0.5, 0.0, 0.0], [max, 0.0, 0.0]])
+        .expect("finite positions");
+    let center = positive_range.center();
+    let extents = positive_range.extents();
+    let radius = positive_range.radius();
+    assert!(center.iter().all(|value| value.is_finite()));
+    assert!(extents.iter().all(|value| value.is_finite()));
+    assert!(radius.is_finite());
+    assert_eq!(center[0], max * 0.75);
+    assert_eq!(extents[0], max * 0.5);
+    assert_eq!(radius, max * 0.25);
+
+    let full_range = MeshBounds::from_positions(&[[-max, -max, -max], [max, max, max]])
+        .expect("finite positions");
+    assert_eq!(full_range.center(), [0.0; 3]);
+    assert_eq!(
+        full_range.extents(),
+        [max; 3],
+        "unrepresentable spans saturate"
+    );
+    assert_eq!(full_range.radius(), max, "unrepresentable radius saturates");
+}
+
 /// A mesh is an asset: the renderer stores it in an `Assets<Mesh>` arena and
 /// prepares from it, so it carries the asset contract's identity.
 #[test]

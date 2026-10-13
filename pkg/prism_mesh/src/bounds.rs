@@ -57,31 +57,48 @@ impl MeshBounds {
         self.merge_point(other.max);
     }
 
-    /// The box's center.
+    /// The box's center. Finite `f32` endpoints are averaged in `f64` to avoid
+    /// overflowing their sum.
     #[must_use]
     pub fn center(&self) -> [f32; 3] {
-        [
-            (self.min[0] + self.max[0]) * 0.5,
-            (self.min[1] + self.max[1]) * 0.5,
-            (self.min[2] + self.max[2]) * 0.5,
-        ]
+        core::array::from_fn(|axis| {
+            ((f64::from(self.min[axis]) + f64::from(self.max[axis])) * 0.5) as f32
+        })
     }
 
-    /// The box's extents (its full size along each axis).
+    /// The box's extents (its full size along each axis). A span larger than
+    /// `f32::MAX` saturates to `f32::MAX`; callers that need to distinguish that
+    /// representational limit should check their input range.
     #[must_use]
     pub fn extents(&self) -> [f32; 3] {
-        [
-            self.max[0] - self.min[0],
-            self.max[1] - self.min[1],
-            self.max[2] - self.min[2],
-        ]
+        core::array::from_fn(|axis| {
+            saturating_f64_to_f32(f64::from(self.max[axis]) - f64::from(self.min[axis]))
+        })
     }
 
     /// The radius of the sphere around [`center`](Self::center) that contains the
-    /// box, which is the cheap bound a renderer uses for a culling sphere.
+    /// box, which is the cheap bound a renderer uses for a culling sphere. The
+    /// calculation uses `f64` intermediates and saturates if the result exceeds
+    /// the finite `f32` range.
     #[must_use]
     pub fn radius(&self) -> f32 {
-        let extents = self.extents();
-        (extents[0] * extents[0] + extents[1] * extents[1] + extents[2] * extents[2]).sqrt() * 0.5
+        let half_extents = core::array::from_fn::<_, 3, _>(|axis| {
+            (f64::from(self.max[axis]) - f64::from(self.min[axis])) * 0.5
+        });
+        let radius = (half_extents[0] * half_extents[0]
+            + half_extents[1] * half_extents[1]
+            + half_extents[2] * half_extents[2])
+            .sqrt();
+        saturating_f64_to_f32(radius)
+    }
+}
+
+fn saturating_f64_to_f32(value: f64) -> f32 {
+    if value > f64::from(f32::MAX) {
+        f32::MAX
+    } else if value < f64::from(f32::MIN) {
+        f32::MIN
+    } else {
+        value as f32
     }
 }

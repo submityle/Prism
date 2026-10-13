@@ -10,7 +10,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use prism_mesh::{content_hash, Mesh, MeshError, POSITION_ATTRIBUTE};
+use prism_mesh::{content_hash, Mesh, MeshBounds, MeshError, POSITION_ATTRIBUTE};
 use prism_render_architecture::gpu_scene::SceneBounds;
 use prism_render_architecture::virtual_geometry::{
     ClusterNode, GeometryPageKey, VirtualGeometryAsset, VirtualGeometryAssetError,
@@ -431,31 +431,14 @@ fn encode_cluster_payload(vertices: &[[f32; 3]], indices: &[u16]) -> Vec<u8> {
 }
 
 fn cluster_bounds(vertices: &[[f32; 3]]) -> SceneBounds {
-    let mut min = vertices[0];
-    let mut max = vertices[0];
-    for vertex in &vertices[1..] {
-        for axis in 0..3 {
-            min[axis] = min[axis].min(vertex[axis]);
-            max[axis] = max[axis].max(vertex[axis]);
-        }
-    }
-    let center = [
-        (min[0] + max[0]) * 0.5,
-        (min[1] + max[1]) * 0.5,
-        (min[2] + max[2]) * 0.5,
-    ];
-    let half_extents = [
-        (max[0] - min[0]) * 0.5,
-        (max[1] - min[1]) * 0.5,
-        (max[2] - min[2]) * 0.5,
-    ];
+    // Cluster positions are validated before clustering. Reuse MeshBounds so
+    // per-cluster culling metadata follows the shared overflow-safe policy.
+    let bounds = MeshBounds::from_positions(vertices).expect("validated cluster positions");
+    let extents = bounds.extents();
     SceneBounds {
-        center,
-        radius: (half_extents[0] * half_extents[0]
-            + half_extents[1] * half_extents[1]
-            + half_extents[2] * half_extents[2])
-            .sqrt(),
-        half_extents,
+        center: bounds.center(),
+        radius: bounds.radius(),
+        half_extents: [extents[0] * 0.5, extents[1] * 0.5, extents[2] * 0.5],
         _padding: 0.0,
     }
 }
@@ -598,6 +581,34 @@ mod tests {
             page.record.uncompressed_size as usize
         );
         assert!(asset.encode().is_ok());
+    }
+
+    #[test]
+    fn cluster_bounds_remain_finite_for_large_finite_positions() {
+        let max = f32::MAX;
+        let source = Mesh::new(PrimitiveTopology::TriangleList)
+            .with_attribute(
+                MeshVertexAttribute::new(POSITION_ATTRIBUTE, VertexFormat::Float32x3, 0),
+                VertexAttributeValues::Float32x3(vec![
+                    [max * 0.5, 0.0, 0.0],
+                    [max, 0.0, 0.0],
+                    [max * 0.75, 1.0, 0.0],
+                ]),
+            )
+            .expect("positions fit")
+            .indexed(Indices::Uint32(vec![0, 1, 2]));
+        let asset =
+            build_static_virtual_geometry(11, &source, StaticClusterBuildSettings::default())
+                .expect("large finite positions remain valid");
+        let bounds = [asset.header.bounds]
+            .into_iter()
+            .chain(asset.clusters.iter().map(|cluster| cluster.bounds));
+        for bound in bounds {
+            assert!(bound.center.iter().all(|value| value.is_finite()));
+            assert!(bound.half_extents.iter().all(|value| value.is_finite()));
+            assert!(bound.radius.is_finite());
+        }
+        assert_eq!(asset.header.bounds.half_extents[0], f32::MAX * 0.25);
     }
 
     #[test]
