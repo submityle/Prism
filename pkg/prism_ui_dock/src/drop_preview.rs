@@ -38,14 +38,14 @@ pub fn resolve_drop_preview(
         DropZone::CenterTab { target } | DropZone::Split { target, .. } => target,
         DropZone::TabInsert { target, .. } => &Target::Panel(target.clone()),
     };
-    let (surface, target_rect) = target_rect(plan, target)
+    let (surface, target_rect, tab_rect) = target_rect(plan, target)
         .ok_or_else(|| DropPreviewError::TargetNotFound(target.clone()))?;
     let highlight_rect = match zone {
         DropZone::CenterTab { .. } => target_rect,
         DropZone::Split { side, .. } => split_preview(target_rect, *side),
         DropZone::TabInsert {
             index, tab_count, ..
-        } => tab_preview(target_rect, *index, *tab_count)?,
+        } => tab_preview(tab_rect, *index, *tab_count)?,
     };
     Ok(DropPreview {
         zone: zone.clone(),
@@ -55,18 +55,18 @@ pub fn resolve_drop_preview(
     })
 }
 
-fn target_rect(plan: &RenderPlan, target: &Target) -> Option<(SurfaceId, Rect)> {
+fn target_rect(plan: &RenderPlan, target: &Target) -> Option<(SurfaceId, Rect, Rect)> {
     match target {
         Target::Panel(id) => plan
             .panels
             .iter()
             .find(|panel| panel.id == *id)
-            .map(|panel| (panel.surface, panel.rect)),
+            .map(|panel| (panel.surface, panel.rect, panel.tab_rect)),
         Target::Document(id) => plan
             .documents
             .iter()
             .find(|document| document.id == *id)
-            .map(|document| (document.surface, document.rect)),
+            .map(|document| (document.surface, document.rect, document.tab_rect)),
     }
 }
 
@@ -212,8 +212,11 @@ mod tests {
             },
         )
         .unwrap();
+        // The insertion indicator belongs to the 28px header, not the leaf.
         assert_eq!(preview.highlight_rect.x, 200);
+        assert_eq!(preview.highlight_rect.y, 0);
         assert_eq!(preview.highlight_rect.width, 200);
+        assert_eq!(preview.highlight_rect.height, 28);
         assert!(matches!(
             resolve_drop_preview(
                 &plan,
