@@ -7,9 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     ChunkInput, ChunkPlanner, ChunkPolicy, ContainerError, ContainerIdentity, ContainerReader,
-    ContainerWriter, FileRangeSource, ManifestAssetReader, ManifestError, ManifestReadError,
-    ManifestRoute, MemoryRangeSource, OverlaySet, RangeSource, RangeSourceError, RuntimeManifest,
-    FORMAT_VERSION, MAGIC,
+    ContainerWriter, FileRangeSource, ManifestAssetReader, ManifestError, ManifestRangeRequest,
+    ManifestReadError, ManifestRoute, MemoryRangeSource, OverlaySet, RangeBatchPolicy,
+    RangeRequest, RangeSource, RangeSourceError, RuntimeManifest, FORMAT_VERSION, MAGIC,
 };
 
 fn guid(name: &str) -> StableGuid {
@@ -361,6 +361,80 @@ fn reader_handles_empty_payload_and_checks_ranges_without_overflow() {
         reader.read_range(guid("absent"), 0, &mut range),
         Err(ContainerError::MissingAsset(guid("absent")))
     );
+}
+
+#[test]
+fn reader_batches_overlapping_and_nearby_ranges_in_caller_order() {
+    let bytes = build(&[
+        ("first", b"abcdefgh"),
+        ("second", b"ijklmnop"),
+        ("far", b"qrstuvwx"),
+    ]);
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    requests.lock().unwrap().clear();
+
+    let output = reader
+        .read_ranges(
+            &[
+                RangeRequest::new(guid("second"), 2, 3),
+                RangeRequest::new(guid("first"), 1, 4),
+                RangeRequest::new(guid("second"), 0, 2),
+            ],
+            RangeBatchPolicy {
+                max_batch_bytes: 64,
+                max_gap_bytes: 4096,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        output,
+        vec![b"klm".to_vec(), b"bcde".to_vec(), b"ij".to_vec()]
+    );
+
+    let physical_reads = requests.lock().unwrap().clone();
+    assert_eq!(physical_reads.len(), 1);
+    let first = reader.entry(guid("first")).unwrap();
+    let second = reader.entry(guid("second")).unwrap();
+    let expected_start = (first.offset + 1).min(second.offset);
+    let expected_end = (first.offset + 5).max(second.offset + 5);
+    assert_eq!(
+        physical_reads[0],
+        (expected_start, (expected_end - expected_start) as usize)
+    );
+}
+
+#[test]
+fn reader_batch_policy_bounds_coalescing_and_validates_before_io() {
+    let bytes = build(&[("one", b"1234"), ("two", b"5678")]);
+    let (source, requests) = TrackingRangeSource::new(bytes);
+    let reader = ContainerReader::from_range_source(Arc::new(source)).unwrap();
+    requests.lock().unwrap().clear();
+
+    let output = reader
+        .read_ranges(
+            &[
+                RangeRequest::new(guid("one"), 0, 4),
+                RangeRequest::new(guid("two"), 0, 4),
+            ],
+            RangeBatchPolicy {
+                max_batch_bytes: 4,
+                max_gap_bytes: 4096,
+            },
+        )
+        .unwrap();
+    assert_eq!(output, vec![b"1234".to_vec(), b"5678".to_vec()]);
+    assert_eq!(requests.lock().unwrap().len(), 2);
+
+    let before = requests.lock().unwrap().len();
+    assert_eq!(
+        reader.read_ranges(
+            &[RangeRequest::new(guid("one"), 3, 2)],
+            RangeBatchPolicy::default(),
+        ),
+        Err(ContainerError::InvalidRange)
+    );
+    assert_eq!(requests.lock().unwrap().len(), before);
 }
 
 #[test]
@@ -916,6 +990,63 @@ fn manifest_reader_routes_logical_guid_to_container_guid() {
     let mut range = [0; 5];
     reader.read_range(logical, 7, &mut range).unwrap();
     assert_eq!(&range, b"bytes");
+}
+
+#[test]
+fn manifest_reader_batches_ranges_per_container_and_preserves_logical_order() {
+    let first_logical = guid("logical-first.batch");
+    let second_logical = guid("logical-second.batch");
+    let first_local = guid("local-first.batch");
+    let second_local = guid("local-second.batch");
+    let first_bytes = build(&[("local-first.batch", b"first payload")]);
+    let second_bytes = build(&[("local-second.batch", b"second payload")]);
+    let mut overlays = OverlaySet::new();
+    overlays.mount(
+        "first",
+        1,
+        ContainerReader::new(first_bytes.clone()).unwrap(),
+    );
+    overlays.mount(
+        "second",
+        1,
+        ContainerReader::new(second_bytes.clone()).unwrap(),
+    );
+
+    let mut manifest = RuntimeManifest::new();
+    manifest
+        .insert(ManifestRoute {
+            guid: first_logical,
+            container_name: "first".into(),
+            priority: 1,
+            container_guid: first_local,
+        })
+        .unwrap();
+    manifest
+        .insert(ManifestRoute {
+            guid: second_logical,
+            container_name: "second".into(),
+            priority: 1,
+            container_guid: second_local,
+        })
+        .unwrap();
+    manifest
+        .bind_container("first", identity(&first_bytes))
+        .unwrap();
+    manifest
+        .bind_container("second", identity(&second_bytes))
+        .unwrap();
+
+    let reader = manifest.bind(&overlays).unwrap();
+    let output = reader
+        .read_ranges(
+            &[
+                ManifestRangeRequest::new(second_logical, 7, 7),
+                ManifestRangeRequest::new(first_logical, 0, 5),
+            ],
+            RangeBatchPolicy::default(),
+        )
+        .unwrap();
+    assert_eq!(output, vec![b"payload".to_vec(), b"first".to_vec()]);
 }
 
 #[test]

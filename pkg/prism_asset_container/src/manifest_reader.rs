@@ -10,6 +10,7 @@ use core::fmt;
 use prism_asset::StableGuid;
 
 use crate::{ContainerError, ContainerReader, ManifestRoute, OverlaySet, RuntimeManifest};
+use crate::{RangeBatchPolicy, RangeRequest};
 
 /// Errors raised while binding or reading a logical manifest route.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,6 +163,29 @@ pub struct ManifestReader<'manifest, 'overlay> {
     overlays: &'overlay OverlaySet,
 }
 
+/// One logical range request routed through a runtime manifest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ManifestRangeRequest {
+    /// Logical asset identity in the manifest.
+    pub logical_guid: StableGuid,
+    /// Offset within the routed payload.
+    pub offset: u64,
+    /// Number of bytes requested.
+    pub len: u64,
+}
+
+impl ManifestRangeRequest {
+    /// Creates a logical manifest range request.
+    #[must_use]
+    pub const fn new(logical_guid: StableGuid, offset: u64, len: u64) -> Self {
+        Self {
+            logical_guid,
+            offset,
+            len,
+        }
+    }
+}
+
 impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
     /// Validates every route against the current overlay before creating a reader.
     pub fn bind(
@@ -196,6 +220,75 @@ impl<'manifest, 'overlay> ManifestReader<'manifest, 'overlay> {
         reader
             .read_range(route.container_guid, offset, out)
             .map_err(|error| self.map_read_error(logical_guid, offset, out.len(), error))
+    }
+
+    /// Reads logical ranges with deterministic per-container coalescing.
+    ///
+    /// Every route is resolved before any payload read. Requests targeting the
+    /// same mounted container share a physical batch; results remain in input
+    /// order even when logical identities map to different local GUIDs.
+    pub fn read_ranges(
+        &self,
+        requests: &[ManifestRangeRequest],
+        policy: RangeBatchPolicy,
+    ) -> Result<Vec<Vec<u8>>, ManifestReadError> {
+        struct Group<'a> {
+            name: String,
+            reader: &'a ContainerReader,
+            requests: Vec<(usize, ManifestRangeRequest, RangeRequest)>,
+        }
+
+        let mut outputs = vec![Vec::new(); requests.len()];
+        let mut groups = Vec::<Group<'_>>::new();
+        for (index, request) in requests.iter().copied().enumerate() {
+            let route = self.route(request.logical_guid)?;
+            let reader = self.resolve(route)?;
+            let local = RangeRequest::new(route.container_guid, request.offset, request.len);
+            reader.validate_range_request(local).map_err(|error| {
+                self.map_read_error(
+                    request.logical_guid,
+                    request.offset,
+                    usize::try_from(request.len).unwrap_or(usize::MAX),
+                    error,
+                )
+            })?;
+            if let Some(group) = groups
+                .iter_mut()
+                .find(|group| group.name == route.container_name)
+            {
+                group.requests.push((index, request, local));
+            } else {
+                groups.push(Group {
+                    name: route.container_name.clone(),
+                    reader,
+                    requests: vec![(index, request, local)],
+                });
+            }
+        }
+
+        for group in groups {
+            let local_requests: Vec<_> =
+                group.requests.iter().map(|(_, _, local)| *local).collect();
+            let bytes = group
+                .reader
+                .read_ranges(&local_requests, policy)
+                .map_err(|error| {
+                    if let Some((_, logical, _)) = group.requests.first() {
+                        self.map_read_error(
+                            logical.logical_guid,
+                            logical.offset,
+                            usize::try_from(logical.len).unwrap_or(usize::MAX),
+                            error,
+                        )
+                    } else {
+                        ManifestReadError::Container(error)
+                    }
+                })?;
+            for ((index, _, _), data) in group.requests.into_iter().zip(bytes) {
+                outputs[index] = data;
+            }
+        }
+        Ok(outputs)
     }
 
     /// Returns validated metadata for the payload selected by a logical GUID.

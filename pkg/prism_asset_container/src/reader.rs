@@ -9,6 +9,7 @@ use crate::format::{
     read_u16, read_u32, read_u64, Codec, ContainerError, ContainerInfo, EntryInfo, FORMAT_VERSION,
     HEADER_SIZE, MAGIC, RECORD_SIZE,
 };
+use crate::{RangeBatchPolicy, RangeRequest};
 
 const PLANNED_FORMAT_VERSION: u16 = 2;
 
@@ -141,6 +142,107 @@ impl ContainerReader {
         }
     }
 
+    /// Reads multiple payload ranges using bounded physical range coalescing.
+    ///
+    /// All requests are validated before the first source read. The source is
+    /// read in deterministic physical order, while the returned vectors retain
+    /// the caller's request order. Overlapping requests share one physical read;
+    /// nearby requests may include a bounded gap to reduce I/O operations.
+    pub fn read_ranges(
+        &self,
+        requests: &[RangeRequest],
+        policy: RangeBatchPolicy,
+    ) -> Result<Vec<Vec<u8>>, ContainerError> {
+        if policy.max_batch_bytes == 0 {
+            return Err(ContainerError::InvalidBatchPolicy);
+        }
+
+        let mut outputs = Vec::with_capacity(requests.len());
+        let mut physical = Vec::new();
+        for (index, request) in requests.iter().copied().enumerate() {
+            let len = self.validate_range_request(request)?;
+            outputs.push(vec![0; len]);
+            if len != 0 {
+                let entry = self.entries[&request.guid];
+                let start = entry
+                    .offset
+                    .checked_add(request.offset)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                let end = start
+                    .checked_add(request.len)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                physical.push(PhysicalRange { index, start, end });
+            }
+        }
+
+        physical.sort_by_key(|range| (range.start, range.end, range.index));
+        let mut batches = Vec::new();
+        for range in physical {
+            let Some(batch) = batches.last_mut() else {
+                batches.push(PhysicalBatch::new(range));
+                continue;
+            };
+            if batch.can_merge(range, policy) {
+                batch.end = batch.end.max(range.end);
+                batch.ranges.push(range);
+            } else {
+                batches.push(PhysicalBatch::new(range));
+            }
+        }
+
+        for batch in batches {
+            let batch_len = usize::try_from(batch.end - batch.start)
+                .map_err(|_| ContainerError::IntegerOverflow)?;
+            let mut bytes = vec![0; batch_len];
+            self.read_physical_range(batch.start, &mut bytes)?;
+            for range in batch.ranges {
+                let start = usize::try_from(range.start - batch.start)
+                    .map_err(|_| ContainerError::IntegerOverflow)?;
+                let len = usize::try_from(range.end - range.start)
+                    .map_err(|_| ContainerError::IntegerOverflow)?;
+                let end = start
+                    .checked_add(len)
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                outputs[range.index]
+                    .copy_from_slice(bytes.get(start..end).ok_or(ContainerError::OutOfBounds)?);
+            }
+        }
+        Ok(outputs)
+    }
+
+    pub(crate) fn validate_range_request(
+        &self,
+        request: RangeRequest,
+    ) -> Result<usize, ContainerError> {
+        let entry = self
+            .entries
+            .get(&request.guid)
+            .ok_or(ContainerError::MissingAsset(request.guid))?;
+        let end = request
+            .offset
+            .checked_add(request.len)
+            .ok_or(ContainerError::IntegerOverflow)?;
+        if end > entry.raw_len {
+            return Err(ContainerError::InvalidRange);
+        }
+        usize::try_from(request.len).map_err(|_| ContainerError::IntegerOverflow)
+    }
+
+    fn read_physical_range(&self, offset: u64, out: &mut [u8]) -> Result<(), ContainerError> {
+        match &self.backing {
+            Backing::Memory(bytes) => {
+                let start = usize::try_from(offset).map_err(|_| ContainerError::IntegerOverflow)?;
+                let end = start
+                    .checked_add(out.len())
+                    .ok_or(ContainerError::IntegerOverflow)?;
+                let payload = bytes.get(start..end).ok_or(ContainerError::OutOfBounds)?;
+                out.copy_from_slice(payload);
+                Ok(())
+            }
+            Backing::Range(source) => read_from_source(source.as_ref(), offset, out),
+        }
+    }
+
     /// Reads and verifies the complete raw payload.
     pub fn read_all(&self, guid: StableGuid) -> Result<Vec<u8>, ContainerError> {
         let entry = self
@@ -154,6 +256,39 @@ impl ContainerReader {
             return Err(ContainerError::HashMismatch);
         }
         Ok(out)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PhysicalRange {
+    index: usize,
+    start: u64,
+    end: u64,
+}
+
+#[derive(Debug)]
+struct PhysicalBatch {
+    start: u64,
+    end: u64,
+    ranges: Vec<PhysicalRange>,
+}
+
+impl PhysicalBatch {
+    fn new(range: PhysicalRange) -> Self {
+        Self {
+            start: range.start,
+            end: range.end,
+            ranges: vec![range],
+        }
+    }
+
+    fn can_merge(&self, range: PhysicalRange, policy: RangeBatchPolicy) -> bool {
+        let gap = range.start.saturating_sub(self.end);
+        let end = self.end.max(range.end);
+        gap <= policy.max_gap_bytes
+            && end
+                .checked_sub(self.start)
+                .is_some_and(|size| size <= policy.max_batch_bytes)
     }
 }
 

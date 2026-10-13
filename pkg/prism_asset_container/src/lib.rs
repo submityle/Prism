@@ -13,6 +13,7 @@ mod format;
 mod manifest;
 mod manifest_reader;
 mod overlay;
+mod range_batch;
 mod range_source;
 mod reader;
 mod writer;
@@ -25,8 +26,9 @@ pub use manifest::{
     ContainerIdentity, ManifestError, ManifestRoute, RuntimeManifest, MANIFEST_MAGIC,
     MANIFEST_VERSION,
 };
-pub use manifest_reader::{ManifestReadError, ManifestReader};
+pub use manifest_reader::{ManifestRangeRequest, ManifestReadError, ManifestReader};
 pub use overlay::{MountedContainer, OverlaySet};
+pub use range_batch::{RangeBatchPolicy, RangeRequest};
 pub use range_source::{FileRangeSource, MemoryRangeSource, RangeSource, RangeSourceError};
 pub use reader::ContainerReader;
 pub use writer::{ContainerWriter, WriteEntry};

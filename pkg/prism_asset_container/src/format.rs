@@ -95,6 +95,8 @@ pub enum ContainerError {
     LengthMismatch,
     /// The backing range source failed while serving a request.
     Source(String),
+    /// The batch range policy cannot produce a bounded physical read.
+    InvalidBatchPolicy,
 }
 
 impl fmt::Display for ContainerError {
@@ -115,6 +117,7 @@ impl fmt::Display for ContainerError {
             Self::InvalidAlignment => f.write_str("payload alignment is invalid"),
             Self::LengthMismatch => f.write_str("output buffer length does not match range"),
             Self::Source(error) => write!(f, "container range source failed: {error}"),
+            Self::InvalidBatchPolicy => f.write_str("invalid range batch policy"),
         }
     }
 }
