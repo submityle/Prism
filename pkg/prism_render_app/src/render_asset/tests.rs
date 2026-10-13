@@ -608,6 +608,67 @@ fn contextual_replacement_unloads_old_representation_once() {
     assert_eq!(prepared.get(id).expect("replacement").bytes, 3);
 }
 
+#[test]
+fn contextual_retry_after_partial_creation_keeps_old_representation_and_refunds() {
+    let (device, queue) = null_device();
+    let id = AssetId::<Blob>::new(AssetIndex::from_parts(0, 1));
+    let mut extracted = ExtractedAssets::<TransactionalBlob>::new();
+    let mut prepared = RenderAssets::<TransactionalBlob>::new();
+    let cancellation = AtomicBool::new(false);
+    let mut budget = GpuPrepareBudget::new(32);
+
+    extracted.push_extracted(id, Blob(vec![1]));
+    let first = prepare_extracted_assets_with_context(
+        &mut extracted,
+        &mut prepared,
+        &device,
+        &queue,
+        &mut budget,
+        &cancellation,
+    );
+    assert_eq!(first.prepared, 1);
+    let old_buffer = prepared.get(id).expect("initial representation").buffer;
+    assert_eq!(device.live_resource_count(), 1);
+
+    // The contextual prepare creates a new buffer, then asks to retry. The
+    // transaction must destroy that candidate and keep the old table entry.
+    extracted.push_extracted(id, Blob(vec![1, 2]));
+    let retry = prepare_extracted_assets_with_context(
+        &mut extracted,
+        &mut prepared,
+        &device,
+        &queue,
+        &mut budget,
+        &cancellation,
+    );
+    assert_eq!(retry.retried, 1);
+    assert_eq!(
+        budget.used(),
+        1,
+        "the failed candidate reservation refunded"
+    );
+    assert_eq!(device.live_resource_count(), 1);
+    assert_eq!(
+        prepared.get(id).expect("old representation").buffer,
+        old_buffer
+    );
+
+    // The queued retry can continue with a valid source and replaces exactly
+    // one live buffer.
+    extracted.push_extracted(id, Blob(vec![1, 2, 3]));
+    let resumed = prepare_extracted_assets_with_context(
+        &mut extracted,
+        &mut prepared,
+        &device,
+        &queue,
+        &mut budget,
+        &cancellation,
+    );
+    assert_eq!(resumed.prepared, 1);
+    assert_eq!(device.live_resource_count(), 1);
+    assert_eq!(prepared.get(id).expect("replacement").bytes, 3);
+}
+
 /// The extract half: the render world receives an owned copy of what changed,
 /// and ids (not copies) of what went away. The simulation keeps its asset.
 #[test]

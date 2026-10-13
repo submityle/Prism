@@ -1,6 +1,7 @@
 //! Keeping the prepared table in step with the source assets.
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use core::sync::atomic::Ordering;
 
 use prism_asset::{Asset, AssetId};
 use prism_render_driver::{RenderDevice, RenderQueue};
@@ -124,19 +125,31 @@ pub fn prepare_extracted_assets_with_context<A: RenderAsset>(
         if removed_ids.contains(&id) {
             continue;
         }
+        // Cancellation is a stage-level gate as well as a cooperative context
+        // checkpoint. This prevents a legacy/default contextual implementation
+        // that performs no allocation through `PrepareContext` from publishing
+        // work after its owner has already cancelled the pass.
+        if cancellation.load(Ordering::Acquire) {
+            extracted.push_extracted(id, source);
+            report.retried += 1;
+            continue;
+        }
         let mut context = PrepareContext::new(device, queue, budget, cancellation);
         let result = A::prepare_with_context(&source, id, &mut context, prepared.get(id));
         match result {
             Ok(value) => {
                 let replaces_previous = context.replaces_previous();
                 context.commit();
+                let previous = prepared.insert(id, value);
                 if replaces_previous {
-                    if let Some(previous) = prepared.remove(id) {
+                    if let Some(previous) = previous {
+                        // Publish first: if an implementation's unload hook
+                        // fails, the new representation remains authoritative
+                        // instead of leaving the table empty.
                         A::unload(&previous, device);
                         drop(previous);
                     }
                 }
-                prepared.insert(id, value);
                 report.prepared += 1;
             }
             Err(PrepareAssetError::RetryNextUpdate(_)) => {
