@@ -33,6 +33,8 @@ pub struct StaticClusterBuildSettings {
     pub max_vertices_per_cluster: u16,
     /// Maximum triangles in a cluster.
     pub max_triangles_per_cluster: u16,
+    /// Codec applied to completed page payloads.
+    pub compression: VirtualGeometryCompression,
 }
 
 impl Default for StaticClusterBuildSettings {
@@ -41,6 +43,7 @@ impl Default for StaticClusterBuildSettings {
             page_size: DEFAULT_VIRTUAL_GEOMETRY_PAGE_SIZE,
             max_vertices_per_cluster: 64,
             max_triangles_per_cluster: 128,
+            compression: VirtualGeometryCompression::None,
         }
     }
 }
@@ -175,6 +178,7 @@ pub fn build_static_virtual_geometry(
                     &mut pages,
                     &mut clusters,
                     &mut nodes,
+                    settings.compression,
                 )?;
                 local_indices.clear();
                 local_vertices.clear();
@@ -209,6 +213,7 @@ pub fn build_static_virtual_geometry(
                 &mut pages,
                 &mut clusters,
                 &mut nodes,
+                settings.compression,
             )?;
         }
     }
@@ -219,6 +224,7 @@ pub fn build_static_virtual_geometry(
         &mut page_payload,
         &mut pages,
         clusters.len() as u32,
+        settings.compression,
     )?;
 
     let bounds = mesh
@@ -321,6 +327,7 @@ fn flush_cluster(
     pages: &mut Vec<VirtualGeometryPage>,
     clusters: &mut Vec<VirtualGeometryClusterRecord>,
     nodes: &mut Vec<ClusterNode>,
+    compression: VirtualGeometryCompression,
 ) -> Result<(), StaticClusterBuildError> {
     let payload = encode_cluster_payload(vertices, indices);
     if payload.len() > settings.page_size as usize {
@@ -338,6 +345,7 @@ fn flush_cluster(
             page_payload,
             pages,
             clusters.len() as u32,
+            compression,
         )?;
         page_key.page += 1;
         *page_cluster_start = clusters.len() as u32;
@@ -370,6 +378,7 @@ fn finish_page(
     payload: &mut Vec<u8>,
     pages: &mut Vec<VirtualGeometryPage>,
     cluster_end: u32,
+    compression: VirtualGeometryCompression,
 ) -> Result<(), StaticClusterBuildError> {
     if payload.is_empty() {
         return Ok(());
@@ -384,16 +393,22 @@ fn finish_page(
         });
     }
     let bytes = core::mem::take(payload);
+    let stored = match compression {
+        VirtualGeometryCompression::None => bytes.clone(),
+        VirtualGeometryCompression::GDeflate => {
+            prism_render_architecture::compression::gdeflate_compress(&bytes)
+        }
+    };
     pages.push(VirtualGeometryPage {
         record: VirtualGeometryPageRecord {
             key,
-            compression: VirtualGeometryCompression::None,
+            compression,
             uncompressed_size: bytes.len() as u32,
             priority: 0,
             cluster_start,
             cluster_count,
         },
-        payload: bytes,
+        payload: stored,
     });
     Ok(())
 }
@@ -488,10 +503,11 @@ fn normal_cone(vertices: &[[f32; 3]], indices: &[u16]) -> [f32; 4] {
 }
 
 fn settings_hash(settings: StaticClusterBuildSettings) -> [u8; 32] {
-    let mut bytes = [0u8; 8];
+    let mut bytes = [0u8; 9];
     bytes[0..4].copy_from_slice(&settings.page_size.to_le_bytes());
     bytes[4..6].copy_from_slice(&settings.max_vertices_per_cluster.to_le_bytes());
     bytes[6..8].copy_from_slice(&settings.max_triangles_per_cluster.to_le_bytes());
+    bytes[8] = settings.compression as u8;
     *blake3::hash(&bytes).as_bytes()
 }
 
@@ -531,6 +547,7 @@ mod tests {
                 page_size: 1024,
                 max_vertices_per_cluster: 64,
                 max_triangles_per_cluster: 2,
+                compression: VirtualGeometryCompression::None,
             },
         )
         .expect("clusterizes");
@@ -553,6 +570,33 @@ mod tests {
         assert_eq!(asset.clusters.len(), 2);
         assert_eq!(asset.clusters[0].material_slot, 0);
         assert_eq!(asset.clusters[1].material_slot, 1);
+    }
+
+    #[test]
+    fn clusterizer_can_emit_gdeflate_pages_with_uncompressed_cluster_offsets() {
+        let asset = build_static_virtual_geometry(
+            3,
+            &mesh(2),
+            StaticClusterBuildSettings {
+                page_size: 1024,
+                max_vertices_per_cluster: 64,
+                max_triangles_per_cluster: 128,
+                compression: VirtualGeometryCompression::GDeflate,
+            },
+        )
+        .expect("clusterizes");
+        let page = &asset.pages[0];
+        assert_eq!(
+            page.record.compression,
+            VirtualGeometryCompression::GDeflate
+        );
+        assert_eq!(
+            prism_render_architecture::compression::gdeflate_decompress(&page.payload)
+                .unwrap()
+                .len(),
+            page.record.uncompressed_size as usize
+        );
+        assert!(asset.encode().is_ok());
     }
 
     #[test]
