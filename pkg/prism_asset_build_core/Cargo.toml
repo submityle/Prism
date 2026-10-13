@@ -11,6 +11,7 @@ publish = false
 blake3 = "1.8"
 prism_asset = { path = "../prism_asset" }
 prism_asset_container = { path = "../prism_asset_container" }
+prism_render_architecture = { path = "../prism_render_architecture" }
 rustix = { version = "1.1.5", features = ["fs"] }
 tempfile = "3.27"
 
