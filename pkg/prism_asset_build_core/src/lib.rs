@@ -29,6 +29,8 @@ pub mod transaction;
 pub mod types;
 /// Independent release validation for manifests and CAS blobs.
 pub mod validation;
+/// Canonical virtual-geometry artifact validation and encoding.
+pub mod virtual_geometry;
 
 pub use cas::{CasError, CasSweepReport, ContentAddressedStore};
 pub use ddc::{Ddc, DdcError, DerivedDataCache, LocalDdc};
@@ -46,5 +48,10 @@ pub use transaction::{
 };
 pub use types::{
     ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, ContentHash, Manifest, ManifestEntry,
+    TransactionId,
 };
 pub use validation::{ArtifactQualityGate, ValidationError, ValidationPolicy, ValidationReport};
+pub use virtual_geometry::{
+    CanonicalVirtualGeometryProcessor, VirtualGeometryArtifact, VIRTUAL_GEOMETRY_ARTIFACT_KIND,
+    VIRTUAL_GEOMETRY_ARTIFACT_SCHEMA,
+};

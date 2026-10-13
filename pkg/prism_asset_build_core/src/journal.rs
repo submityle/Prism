@@ -6,7 +6,7 @@
 //! journal record is framed, checksummed, and synced before the next
 //! publication step is allowed to proceed.
 
-use crate::types::{BuildRevision, ContentHash};
+use crate::types::{BuildRevision, ContentHash, TransactionId};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -15,8 +15,8 @@ const FILE_MAGIC: &[u8] = b"PRISM-TXN-JNL\0\x02";
 const FRAME_MAGIC: &[u8; 4] = b"TXN1";
 pub(crate) const FRAME_HEADER_LEN: usize = 8;
 const CHECKSUM_LEN: usize = 32;
-const PAYLOAD_LEN: usize = 1 + 8 + 1 + 8 + 32 + 1 + 32;
-const MAX_PAYLOAD_LEN: u32 = PAYLOAD_LEN as u32;
+const LEGACY_PAYLOAD_LEN: usize = 1 + 8 + 1 + 8 + 32 + 1 + 32;
+const PAYLOAD_LEN: usize = 1 + 16 + 8 + 1 + 8 + 32 + 1 + 32;
 #[cfg(test)]
 pub(crate) const FILE_HEADER_LEN: usize = FILE_MAGIC.len();
 pub(crate) const FRAME_SIZE: usize = FRAME_HEADER_LEN + PAYLOAD_LEN + CHECKSUM_LEN;
@@ -24,17 +24,20 @@ pub(crate) const FRAME_SIZE: usize = FRAME_HEADER_LEN + PAYLOAD_LEN + CHECKSUM_L
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum JournalRecord {
     Prepare {
+        transaction_id: TransactionId,
         revision: BuildRevision,
         expected_current: Option<BuildRevision>,
         manifest_hash: ContentHash,
         publication_hash: Option<ContentHash>,
     },
     Commit {
+        transaction_id: TransactionId,
         revision: BuildRevision,
         manifest_hash: ContentHash,
         publication_hash: Option<ContentHash>,
     },
     Abort {
+        transaction_id: TransactionId,
         revision: BuildRevision,
         manifest_hash: ContentHash,
         publication_hash: Option<ContentHash>,
@@ -104,7 +107,7 @@ impl TransactionJournal {
                     .try_into()
                     .expect("journal frame header has four length bytes"),
             );
-            if payload_len != MAX_PAYLOAD_LEN {
+            if payload_len as usize != PAYLOAD_LEN && payload_len as usize != LEGACY_PAYLOAD_LEN {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "asset transaction journal has an invalid record length",
@@ -156,32 +159,52 @@ impl TransactionJournal {
 }
 
 fn encode_payload(record: JournalRecord) -> Vec<u8> {
-    let (kind, revision, expected_current, manifest_hash, publication_hash) = match record {
-        JournalRecord::Prepare {
-            revision,
-            expected_current,
-            manifest_hash,
-            publication_hash,
-        } => (
-            1u8,
-            revision,
-            expected_current,
-            manifest_hash,
-            publication_hash,
-        ),
-        JournalRecord::Commit {
-            revision,
-            manifest_hash,
-            publication_hash,
-        } => (2u8, revision, None, manifest_hash, publication_hash),
-        JournalRecord::Abort {
-            revision,
-            manifest_hash,
-            publication_hash,
-        } => (3u8, revision, None, manifest_hash, publication_hash),
-    };
+    let (kind, transaction_id, revision, expected_current, manifest_hash, publication_hash) =
+        match record {
+            JournalRecord::Prepare {
+                transaction_id,
+                revision,
+                expected_current,
+                manifest_hash,
+                publication_hash,
+            } => (
+                1u8,
+                transaction_id,
+                revision,
+                expected_current,
+                manifest_hash,
+                publication_hash,
+            ),
+            JournalRecord::Commit {
+                transaction_id,
+                revision,
+                manifest_hash,
+                publication_hash,
+            } => (
+                2u8,
+                transaction_id,
+                revision,
+                None,
+                manifest_hash,
+                publication_hash,
+            ),
+            JournalRecord::Abort {
+                transaction_id,
+                revision,
+                manifest_hash,
+                publication_hash,
+            } => (
+                3u8,
+                transaction_id,
+                revision,
+                None,
+                manifest_hash,
+                publication_hash,
+            ),
+        };
     let mut payload = Vec::with_capacity(PAYLOAD_LEN);
     payload.push(kind);
+    payload.extend_from_slice(&transaction_id.0);
     payload.extend_from_slice(&revision.0.to_le_bytes());
     match expected_current {
         Some(current) => {
@@ -208,6 +231,9 @@ fn encode_payload(record: JournalRecord) -> Vec<u8> {
 }
 
 fn decode_payload(payload: &[u8]) -> Result<JournalRecord, io::Error> {
+    if payload.len() == LEGACY_PAYLOAD_LEN {
+        return decode_legacy_payload(payload);
+    }
     if payload.len() != PAYLOAD_LEN {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -215,15 +241,20 @@ fn decode_payload(payload: &[u8]) -> Result<JournalRecord, io::Error> {
         ));
     }
     let kind = payload[0];
+    let transaction_id = TransactionId(
+        payload[1..17]
+            .try_into()
+            .expect("journal transaction id has sixteen bytes"),
+    );
     let revision = BuildRevision(u64::from_le_bytes(
-        payload[1..9]
+        payload[17..25]
             .try_into()
             .expect("journal revision has eight bytes"),
     ));
-    let expected_current = match payload[9] {
+    let expected_current = match payload[25] {
         0 => None,
         1 => Some(BuildRevision(u64::from_le_bytes(
-            payload[10..18]
+            payload[26..34]
                 .try_into()
                 .expect("journal expected revision has eight bytes"),
         ))),
@@ -235,14 +266,14 @@ fn decode_payload(payload: &[u8]) -> Result<JournalRecord, io::Error> {
         }
     };
     let manifest_hash = ContentHash(
-        payload[18..50]
+        payload[34..66]
             .try_into()
             .expect("journal manifest hash has 32 bytes"),
     );
-    let publication_hash = match payload[50] {
+    let publication_hash = match payload[66] {
         0 => None,
         1 => Some(ContentHash(
-            payload[51..83]
+            payload[67..99]
                 .try_into()
                 .expect("journal publication hash has 32 bytes"),
         )),
@@ -255,17 +286,96 @@ fn decode_payload(payload: &[u8]) -> Result<JournalRecord, io::Error> {
     };
     match kind {
         1 => Ok(JournalRecord::Prepare {
+            transaction_id,
             revision,
             expected_current,
             manifest_hash,
             publication_hash,
         }),
         2 if expected_current.is_none() => Ok(JournalRecord::Commit {
+            transaction_id,
             revision,
             manifest_hash,
             publication_hash,
         }),
         3 if expected_current.is_none() => Ok(JournalRecord::Abort {
+            transaction_id,
+            revision,
+            manifest_hash,
+            publication_hash,
+        }),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "asset transaction journal has an invalid record kind",
+        )),
+    }
+}
+
+fn decode_legacy_payload(payload: &[u8]) -> Result<JournalRecord, io::Error> {
+    let kind = payload[0];
+    let revision = BuildRevision(u64::from_le_bytes(
+        payload[1..9]
+            .try_into()
+            .expect("legacy journal revision has eight bytes"),
+    ));
+    let expected_current = match payload[9] {
+        0 => None,
+        1 => Some(BuildRevision(u64::from_le_bytes(
+            payload[10..18]
+                .try_into()
+                .expect("legacy journal expected revision has eight bytes"),
+        ))),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "asset transaction journal has an invalid optional revision",
+            ))
+        }
+    };
+    let manifest_hash = ContentHash(
+        payload[18..50]
+            .try_into()
+            .expect("legacy journal manifest hash has 32 bytes"),
+    );
+    let publication_hash = match payload[50] {
+        0 => None,
+        1 => Some(ContentHash(
+            payload[51..83]
+                .try_into()
+                .expect("legacy journal publication hash has 32 bytes"),
+        )),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "asset transaction journal has an invalid publication hash marker",
+            ))
+        }
+    };
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"PRISM-LEGACY-TXN");
+    hasher.update(&[kind]);
+    hasher.update(&revision.0.to_le_bytes());
+    hasher.update(&manifest_hash.0);
+    if let Some(hash) = publication_hash {
+        hasher.update(&hash.0);
+    }
+    let transaction_id = TransactionId(hasher.finalize().as_bytes()[..16].try_into().unwrap());
+    match kind {
+        1 => Ok(JournalRecord::Prepare {
+            transaction_id,
+            revision,
+            expected_current,
+            manifest_hash,
+            publication_hash,
+        }),
+        2 if expected_current.is_none() => Ok(JournalRecord::Commit {
+            transaction_id,
+            revision,
+            manifest_hash,
+            publication_hash,
+        }),
+        3 if expected_current.is_none() => Ok(JournalRecord::Abort {
+            transaction_id,
             revision,
             manifest_hash,
             publication_hash,

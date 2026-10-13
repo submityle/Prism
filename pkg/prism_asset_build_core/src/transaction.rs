@@ -3,7 +3,7 @@ use crate::journal::{JournalRecord, TransactionJournal};
 use crate::package::RuntimePackage;
 use crate::publication::PublicationDescriptor;
 use crate::types::{
-    ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, Manifest, ManifestEntry,
+    ArtifactDescriptor, ArtifactKey, AssetId, BuildRevision, Manifest, ManifestEntry, TransactionId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -11,11 +11,26 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use prism_asset_container::{ContainerReader, RuntimeManifest};
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static TRANSACTION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn next_transaction_id() -> TransactionId {
+    let sequence = TRANSACTION_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&std::process::id().to_le_bytes());
+    hasher.update(&timestamp.to_le_bytes());
+    hasher.update(&sequence.to_le_bytes());
+    let digest = hasher.finalize();
+    TransactionId(digest.as_bytes()[..16].try_into().unwrap())
+}
 
 const MANIFEST_MAGIC: &[u8] = b"PRISM-MANIFEST\0\x01";
 const MANIFEST_ENTRY_FIXED_BYTES: usize = 16 + 32 + 16 + 4 + 32 + 8 + 4 + 8;
@@ -29,6 +44,7 @@ pub enum PublishError {
     /// written. The revision may already be visible; callers must reconcile
     /// it instead of retrying the same revision as a fresh transaction.
     UnknownCommit {
+        transaction_id: TransactionId,
         revision: BuildRevision,
         manifest_hash: crate::types::ContentHash,
         publication_hash: Option<crate::types::ContentHash>,
@@ -285,6 +301,50 @@ impl RevisionStore {
         Ok(state)
     }
 
+    /// Reconciles a prepared transaction after an ambiguous commit result.
+    ///
+    /// Recovery validates the durable publication boundary, appends the
+    /// matching Commit/Abort marker, and returns the converged state. The
+    /// journal id is required so a caller cannot accidentally reconcile a
+    /// different transaction that reused the same revision number.
+    pub fn reconcile_transaction(
+        &self,
+        transaction_id: TransactionId,
+    ) -> Result<TransactionState, PublishError> {
+        let _publish_guard = self
+            .publish_lock
+            .lock()
+            .map_err(|_| PublishError::Invalid("publish lock poisoned"))?;
+        let _cross_process_guard = FilePublishLock::acquire(&self.root)?;
+        let revision = self
+            .journal
+            .scan()?
+            .into_iter()
+            .find_map(|record| match record {
+                JournalRecord::Prepare {
+                    transaction_id: candidate,
+                    revision,
+                    ..
+                }
+                | JournalRecord::Commit {
+                    transaction_id: candidate,
+                    revision,
+                    ..
+                }
+                | JournalRecord::Abort {
+                    transaction_id: candidate,
+                    revision,
+                    ..
+                } if candidate == transaction_id => Some(revision),
+                _ => None,
+            });
+        let Some(revision) = revision else {
+            return Ok(TransactionState::Unknown);
+        };
+        self.recover_transactions()?;
+        self.transaction_state(revision)
+    }
+
     /// Returns committed revisions after `after`, suitable for replaying a
     /// notification stream after a frontend reconnects.
     pub fn committed_revisions_since(
@@ -321,6 +381,7 @@ impl RevisionStore {
         for record in records {
             match record {
                 JournalRecord::Prepare {
+                    transaction_id,
                     revision,
                     expected_current,
                     manifest_hash,
@@ -338,22 +399,37 @@ impl RevisionStore {
                     }
                     pending.insert(
                         revision,
-                        (expected_current, manifest_hash, publication_hash),
+                        (
+                            transaction_id,
+                            expected_current,
+                            manifest_hash,
+                            publication_hash,
+                        ),
                     );
                     states.insert(revision, TransactionState::Prepared);
                 }
                 JournalRecord::Commit {
+                    transaction_id,
                     revision,
                     manifest_hash,
                     publication_hash,
                 } => {
-                    let Some((_, prepared_hash, prepared_publication_hash)) =
-                        pending.remove(&revision)
+                    let Some((
+                        prepared_transaction_id,
+                        _,
+                        prepared_hash,
+                        prepared_publication_hash,
+                    )) = pending.remove(&revision)
                     else {
                         return Err(PublishError::Invalid(
                             "transaction journal commits without a prepare",
                         ));
                     };
+                    if prepared_transaction_id != transaction_id {
+                        return Err(PublishError::Invalid(
+                            "transaction journal commit id differs from prepare",
+                        ));
+                    }
                     if prepared_hash != manifest_hash {
                         return Err(PublishError::Invalid(
                             "transaction journal commit hash differs from prepare",
@@ -367,17 +443,27 @@ impl RevisionStore {
                     states.insert(revision, TransactionState::Committed);
                 }
                 JournalRecord::Abort {
+                    transaction_id,
                     revision,
                     manifest_hash,
                     publication_hash,
                 } => {
-                    let Some((_, prepared_hash, prepared_publication_hash)) =
-                        pending.remove(&revision)
+                    let Some((
+                        prepared_transaction_id,
+                        _,
+                        prepared_hash,
+                        prepared_publication_hash,
+                    )) = pending.remove(&revision)
                     else {
                         return Err(PublishError::Invalid(
                             "transaction journal aborts without a prepare",
                         ));
                     };
+                    if prepared_transaction_id != transaction_id {
+                        return Err(PublishError::Invalid(
+                            "transaction journal abort id differs from prepare",
+                        ));
+                    }
                     if prepared_hash != manifest_hash {
                         return Err(PublishError::Invalid(
                             "transaction journal abort hash differs from prepare",
@@ -394,7 +480,7 @@ impl RevisionStore {
         }
 
         let current = self.read_current_pointer()?;
-        for (revision, (_, manifest_hash, publication_hash)) in pending {
+        for (revision, (transaction_id, _, manifest_hash, publication_hash)) in pending {
             let manifest_path = self
                 .root
                 .join("revisions")
@@ -433,6 +519,7 @@ impl RevisionStore {
                 // closure before converting that ambiguous state to committed.
                 self.validate_current_manifest(revision)?;
                 self.journal.append(JournalRecord::Commit {
+                    transaction_id,
                     revision,
                     manifest_hash,
                     publication_hash,
@@ -482,6 +569,7 @@ impl RevisionStore {
                     )?;
                 }
                 self.journal.append(JournalRecord::Abort {
+                    transaction_id,
                     revision,
                     manifest_hash,
                     publication_hash,
@@ -497,8 +585,23 @@ impl RevisionStore {
         revision: BuildRevision,
         expected_current: Option<BuildRevision>,
     ) -> PublishTransaction {
+        self.begin_with_id(revision, expected_current, next_transaction_id())
+    }
+
+    /// Begins a publication with a caller-supplied durable transaction id.
+    ///
+    /// This is intended for reconnect/retry flows that persist the id outside
+    /// the store. The journal remains authoritative and rejects an id that is
+    /// reused for a different revision or payload.
+    pub fn begin_with_id(
+        &self,
+        revision: BuildRevision,
+        expected_current: Option<BuildRevision>,
+        transaction_id: TransactionId,
+    ) -> PublishTransaction {
         PublishTransaction {
             store: self.clone(),
+            transaction_id,
             revision,
             expected_current,
             staged: BTreeMap::new(),
@@ -706,6 +809,7 @@ impl RevisionStore {
 
 pub struct PublishTransaction {
     store: RevisionStore,
+    transaction_id: TransactionId,
     revision: BuildRevision,
     expected_current: Option<BuildRevision>,
     staged: BTreeMap<AssetId, (ArtifactDescriptor, Vec<u8>)>,
@@ -713,6 +817,12 @@ pub struct PublishTransaction {
 }
 
 impl PublishTransaction {
+    /// Returns the durable identity written to the transaction journal.
+    #[must_use]
+    pub fn transaction_id(&self) -> TransactionId {
+        self.transaction_id
+    }
+
     pub fn stage(
         &mut self,
         asset: AssetId,
@@ -859,6 +969,7 @@ impl PublishTransaction {
         // From this point onward recovery can distinguish an interrupted
         // publication from an ordinary unused CAS blob.
         self.store.journal.append(JournalRecord::Prepare {
+            transaction_id: self.transaction_id,
             revision: self.revision,
             expected_current: self.expected_current,
             manifest_hash,
@@ -910,11 +1021,13 @@ impl PublishTransaction {
         // fails, CURRENT still names the prior complete revision.
         atomic_replace(&self.store.root, "CURRENT", &self.revision.0.to_le_bytes())?;
         if let Err(source) = self.store.journal.append(JournalRecord::Commit {
+            transaction_id: self.transaction_id,
             revision: self.revision,
             manifest_hash,
             publication_hash,
         }) {
             return Err(PublishError::UnknownCommit {
+                transaction_id: self.transaction_id,
                 revision: self.revision,
                 manifest_hash,
                 publication_hash,
@@ -1486,6 +1599,7 @@ mod tests {
         let store = RevisionStore::open(&dir).unwrap();
         let payload = b"commit marker recovery";
         let mut tx = store.begin(BuildRevision(0), None);
+        let transaction_id = tx.transaction_id();
         tx.stage(AssetId(1), descriptor(payload), payload.to_vec())
             .unwrap();
         tx.commit().unwrap();
@@ -1506,17 +1620,46 @@ mod tests {
             .unwrap()
             .set_len(journal_len - frame_len)
             .unwrap();
-        drop(store);
-
-        let reopened = RevisionStore::open(&dir).unwrap();
-        assert_eq!(reopened.current_revision().unwrap(), Some(BuildRevision(0)));
         assert_eq!(
-            reopened.transaction_state(BuildRevision(0)).unwrap(),
+            store.reconcile_transaction(transaction_id).unwrap(),
+            TransactionState::Committed
+        );
+        assert_eq!(store.current_revision().unwrap(), Some(BuildRevision(0)));
+        assert_eq!(
+            store.transaction_state(BuildRevision(0)).unwrap(),
             TransactionState::Committed
         );
         assert_eq!(
-            reopened.committed_revisions_since(None).unwrap(),
+            store.committed_revisions_since(None).unwrap(),
             vec![BuildRevision(0)]
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn transaction_id_round_trips_and_unknown_id_is_not_reconciled() {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let transaction_id = TransactionId([0xA5; 16]);
+        let mut tx = store.begin_with_id(BuildRevision(0), None, transaction_id);
+        assert_eq!(tx.transaction_id(), transaction_id);
+        tx.stage(
+            AssetId(1),
+            descriptor(b"identified"),
+            b"identified".to_vec(),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(
+            store.reconcile_transaction(transaction_id).unwrap(),
+            TransactionState::Committed
+        );
+        assert_eq!(
+            store
+                .reconcile_transaction(TransactionId([0x5A; 16]))
+                .unwrap(),
+            TransactionState::Unknown
         );
         fs::remove_dir_all(dir).unwrap();
     }
@@ -1541,6 +1684,7 @@ mod tests {
         store
             .journal
             .append(JournalRecord::Prepare {
+                transaction_id: TransactionId([9; 16]),
                 revision: BuildRevision(0),
                 expected_current: None,
                 manifest_hash,
@@ -1561,6 +1705,52 @@ mod tests {
         assert_eq!(
             reopened.cas().read(ContentHash::digest(payload)).unwrap(),
             payload
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_journal_frame_is_read_and_recovered() {
+        let dir = temp_dir();
+        let store = RevisionStore::open(&dir).unwrap();
+        let payload = b"legacy journal payload";
+        let manifest = Manifest::new(
+            BuildRevision(0),
+            [ManifestEntry {
+                asset: AssetId(1),
+                descriptor: descriptor(payload),
+            }],
+        )
+        .unwrap();
+        let manifest_bytes = manifest.canonical_bytes();
+        let manifest_hash = ContentHash::digest(&manifest_bytes);
+        let mut legacy_payload = Vec::with_capacity(83);
+        legacy_payload.push(1);
+        legacy_payload.extend_from_slice(&0_u64.to_le_bytes());
+        legacy_payload.push(0);
+        legacy_payload.extend_from_slice(&0_u64.to_le_bytes());
+        legacy_payload.extend_from_slice(&manifest_hash.0);
+        legacy_payload.push(0);
+        legacy_payload.extend_from_slice(&[0; 32]);
+        let checksum = blake3::hash(&legacy_payload);
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"TXN1");
+        frame.extend_from_slice(&(legacy_payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&legacy_payload);
+        frame.extend_from_slice(checksum.as_bytes());
+        let journal_path = dir.join("transactions/journal.bin");
+        let mut journal = OpenOptions::new().append(true).open(&journal_path).unwrap();
+        journal.write_all(&frame).unwrap();
+        journal.sync_all().unwrap();
+        fs::write(dir.join("revisions/0.manifest"), manifest_bytes).unwrap();
+        drop(store);
+
+        let reopened = RevisionStore::open(&dir).unwrap();
+        assert_eq!(reopened.current_revision().unwrap(), None);
+        assert!(!dir.join("revisions/0.manifest").exists());
+        assert_eq!(
+            reopened.transaction_state(BuildRevision(0)).unwrap(),
+            TransactionState::Aborted
         );
         fs::remove_dir_all(dir).unwrap();
     }

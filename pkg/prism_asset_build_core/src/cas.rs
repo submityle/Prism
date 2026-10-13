@@ -298,16 +298,20 @@ fn create_dir_all_durable(path: &Path) -> Result<(), CasError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
     fn temp_dir() -> PathBuf {
         std::env::temp_dir().join(format!(
-            "prism-cas-{}-{}",
+            "prism-cas-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            TEST_DIR_ID.fetch_add(1, Ordering::Relaxed)
         ))
     }
 

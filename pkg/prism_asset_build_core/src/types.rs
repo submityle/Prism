@@ -16,6 +16,18 @@ pub struct ContentHash(pub [u8; 32]);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BuildRevision(pub u64);
 
+/// Stable identity of one publication transaction.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TransactionId(pub [u8; 16]);
+
+impl TransactionId {
+    /// Returns the canonical lowercase hexadecimal representation.
+    #[must_use]
+    pub fn to_hex(self) -> String {
+        hex(&self.0)
+    }
+}
+
 /// A committed artifact descriptor. `kind`/`schema` are explicit protocol IDs;
 /// dependencies preserve caller-declared order. Blob integrity is checked by CAS.
 #[derive(Clone, Debug, Eq, PartialEq)]
