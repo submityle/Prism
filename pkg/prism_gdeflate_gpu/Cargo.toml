@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 prism_render_architecture = { path = "../prism_render_architecture" }
-wgpu = { version = "30", default-features = false, features = ["wgsl", "metal"] }
+wgpu = { version = "30", default-features = false, features = ["wgsl", "metal", "vulkan", "dx12"] }
 bytemuck = { version = "1.5", features = ["derive"] }
 futures-lite = "2"
 
