@@ -46,7 +46,7 @@ use bevy_render::{
     },
     renderer::{RenderDevice, RenderQueue},
 };
-use bevy_shader::Shader;
+use bevy_shader::{Shader, ShaderDefVal};
 
 use crate::{ClusterBindGroup, LightBindGroup, MaterialBindGroup};
 
@@ -401,6 +401,10 @@ pub(crate) fn init_shading_resolve_pipeline(
         ],
         immediate_size: size_of::<GpuShadingResolveParams>() as u32,
         shader,
+        shader_defs: vec![ShaderDefVal::Bool(
+            "MATERIAL_BINDLESS".into(),
+            material_bindings.bindless(),
+        )],
         entry_point: Some("shading_resolve".into()),
         ..Default::default()
     });

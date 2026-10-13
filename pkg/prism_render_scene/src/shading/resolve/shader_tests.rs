@@ -15,7 +15,120 @@
 //! import wiring resolves too.
 
 use bevy_asset::{uuid::Uuid, AssetId};
-use bevy_shader::{Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ValidateShader};
+use bevy_shader::{
+    Shader, ShaderCache, ShaderCacheError, ShaderCacheSource, ShaderDefVal, ValidateShader,
+};
+use prism_render_material::GpuMaterialTexture;
+use std::mem::{offset_of, size_of};
+
+const MATERIAL_TEXTURE_FIELDS: [(&str, &str); 8] = [
+    ("index", "u32"),
+    ("generation", "u32"),
+    ("semantic", "u32"),
+    ("sampler_index", "u32"),
+    ("virtual_texture_id", "u32"),
+    ("virtual_texture_width", "u32"),
+    ("virtual_texture_height", "u32"),
+    ("virtual_texture_page_size", "u32"),
+];
+
+const MATERIAL_VT_CONFIG_FIELDS: [(&str, &str); 8] = [
+    ("enabled", "u32"),
+    ("entry_count", "u32"),
+    ("page_size", "u32"),
+    ("tile_extent_px", "u32"),
+    ("tiles_per_row", "u32"),
+    ("atlas_layers", "u32"),
+    ("gutter_px", "u32"),
+    ("coarsest_mip", "u32"),
+];
+
+fn wesl_struct_fields(source: &str, name: &str) -> Vec<(String, String)> {
+    let declaration = format!("struct {name}");
+    let start = source
+        .find(&declaration)
+        .unwrap_or_else(|| panic!("missing WESL declaration `{name}`"));
+    let body_start = source[start..]
+        .find('{')
+        .map(|offset| start + offset + 1)
+        .expect("struct declaration must have an opening brace");
+    let body_end = source[body_start..]
+        .find('}')
+        .map(|offset| body_start + offset)
+        .expect("struct declaration must have a closing brace");
+
+    source[body_start..body_end]
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with("//") {
+                return None;
+            }
+            let (field, ty) = line
+                .trim_end_matches(',')
+                .split_once(':')
+                .unwrap_or_else(|| panic!("malformed `{name}` field: {line}"));
+            Some((field.trim().to_owned(), ty.trim().to_owned()))
+        })
+        .collect()
+}
+
+/// Guards every duplicated material-texture row against the Rust storage
+/// record's exact eight-word order, stride, and member offsets. The companion
+/// material-sample test below compiles the canonical imported WESL type.
+#[test]
+fn material_texture_wesl_abi_mirrors_rust_layout() {
+    assert_eq!(size_of::<GpuMaterialTexture>(), 8 * size_of::<u32>());
+    let rust_offsets = [
+        offset_of!(GpuMaterialTexture, index),
+        offset_of!(GpuMaterialTexture, generation),
+        offset_of!(GpuMaterialTexture, semantic),
+        offset_of!(GpuMaterialTexture, sampler_index),
+        offset_of!(GpuMaterialTexture, virtual_texture_id),
+        offset_of!(GpuMaterialTexture, virtual_texture_width),
+        offset_of!(GpuMaterialTexture, virtual_texture_height),
+        offset_of!(GpuMaterialTexture, virtual_texture_page_size),
+    ];
+    assert_eq!(rust_offsets, [0, 4, 8, 12, 16, 20, 24, 28]);
+
+    let mirrors = [
+        (
+            "material.wesl",
+            include_str!("../../shaders/material.wesl"),
+            "PrismMaterialTexture",
+        ),
+        (
+            "opaque.wesl",
+            include_str!("../../shaders/opaque.wesl"),
+            "MaterialTexture",
+        ),
+        (
+            "transparent.wesl",
+            include_str!("../../shaders/transparent.wesl"),
+            "MaterialTexture",
+        ),
+        (
+            "visibility.wesl",
+            include_str!("../../shaders/visibility.wesl"),
+            "MaterialTexture",
+        ),
+        (
+            "visibility_raster.wesl",
+            include_str!("../../shaders/visibility_raster.wesl"),
+            "MaterialTexture",
+        ),
+    ];
+    let expected_fields =
+        MATERIAL_TEXTURE_FIELDS.map(|(name, ty)| (name.to_owned(), ty.to_owned()));
+
+    for (path, source, struct_name) in mirrors {
+        assert_eq!(
+            wesl_struct_fields(source, struct_name),
+            expected_fields,
+            "{path}::{struct_name} must mirror GpuMaterialTexture field order",
+        );
+    }
+}
 
 fn load_source(
     _: &(),
@@ -319,10 +432,12 @@ fn clearcoat_wesl_compiles_and_resolves_imports() {
     });
 }
 
-/// Registers the full dependency graph (`surface`, `brdf`, `lighting`,
-/// `material`, `gpu_scene`) under their canonical module paths and compiles
+/// Registers the full production dependency graph (`surface`, `brdf`,
+/// `lighting`, `material`, `material_virtual_texture`, `gpu_scene`) under their
+/// canonical module paths and compiles
 /// `shading_resolve.wesl`, forcing every `import prism_render_scene::shaders::*`
-/// to resolve exactly as it will in the render world.
+/// to resolve exactly as it will in the render world. This also links the
+/// material consumer's group(1) bindings 3..9 against the resolve's 0..2 ABI.
 /// Byte-faithful copy of Bevy's `affine3_to_square` (transpose of the three
 /// affine rows plus a `[0,0,0,1]` bottom row), used only to satisfy the
 /// `bevy_render::maths` import while compiling `shading_resolve.wesl` off-GPU.
@@ -334,7 +449,7 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
 
     // Register each dependency under the byte-identical embedded module path
     // that `load_shader_library!` produces at runtime.
-    let deps: [(u128, &str, &str); 23] = [
+    let deps: [(u128, &str, &str); 24] = [
         (
             0x5052_4953_4d5f_5441_4e47_454e_5400_0002,
             include_str!("../../shaders/tangent.wesl"),
@@ -344,6 +459,11 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
             0x5052_4953_4d5f_4d54_5341_4d50_4c45_0002,
             include_str!("../../shaders/material_sample.wesl"),
             "embedded://prism_render_scene/shaders/material_sample.wesl",
+        ),
+        (
+            0x5052_4953_4d5f_4d41_5456_5400_0002,
+            include_str!("../../shaders/material_virtual_texture.wesl"),
+            "embedded://prism_render_scene/shaders/material_virtual_texture.wesl",
         ),
         (
             0x5052_4953_4d5f_5355_5246_4143_4500_0002,
@@ -487,9 +607,20 @@ fn shading_resolve_wesl_compiles_and_resolves_all_imports() {
         ),
     );
 
-    cache.get(0, resolve, &[]).unwrap_or_else(|error| {
-        panic!("shading_resolve.wesl failed to compile/resolve imports: {error}")
-    });
+    for (id, defs, label) in [
+        (0, &[][..], "non-bindless"),
+        (
+            1,
+            &[ShaderDefVal::Bool("MATERIAL_BINDLESS".into(), true)][..],
+            "bindless",
+        ),
+    ] {
+        cache.get(id, resolve, defs).unwrap_or_else(|error| {
+            panic!(
+                "shading_resolve.wesl {label} variant failed to compile/resolve imports: {error}"
+            )
+        });
+    }
 }
 /// Registers `material.wesl` under its canonical module path and compiles
 /// `material_sample.wesl`, forcing the importer to resolve the
@@ -513,6 +644,15 @@ fn material_sample_wesl_compiles_and_resolves_material_import() {
         ),
     );
 
+    let material_virtual_texture = shader_id(0x5052_4953_4d5f_4d41_5456_5400_0003);
+    cache.set_shader(
+        material_virtual_texture,
+        Shader::from_wesl(
+            include_str!("../../shaders/material_virtual_texture.wesl"),
+            "embedded://prism_render_scene/shaders/material_virtual_texture.wesl",
+        ),
+    );
+
     let material_sample = shader_id(0x5052_4953_4d5f_4d54_5853_414d_5000_0001);
     cache.set_shader(
         material_sample,
@@ -522,9 +662,122 @@ fn material_sample_wesl_compiles_and_resolves_material_import() {
         ),
     );
 
-    cache.get(0, material_sample, &[]).unwrap_or_else(|error| {
-        panic!("material_sample.wesl failed to compile/resolve material import: {error}")
-    });
+    for (id, defs, label) in [
+        (0, &[][..], "non-bindless"),
+        (
+            1,
+            &[ShaderDefVal::Bool("MATERIAL_BINDLESS".into(), true)][..],
+            "bindless",
+        ),
+    ] {
+        let _compiled = cache
+            .get(id, material_sample, defs)
+            .unwrap_or_else(|error| {
+                panic!("material_sample.wesl {label} variant failed to compile: {error}")
+            });
+        // The WESL frontend intentionally normalizes/removes source-level
+        // binding decorations in this cache output. The source-level ABI and
+        // specialization contract is asserted by
+        // `material_vt_production_layout_contract_is_linked_into_resolve`;
+        // this test's job is to prove that both variants actually type-check.
+    }
+}
+
+/// Pins the production material-group ABI and the real resolve consumer in the
+/// same test module. The full resolve compile above is the WESL import/link
+/// check; these assertions make a binding renumbering or a detached consumer
+/// fail close to the contract that the parent bind-group integration consumes.
+#[test]
+fn material_vt_production_layout_contract_is_linked_into_resolve() {
+    let sample = include_str!("../../shaders/material_sample.wesl");
+    let vt = include_str!("../../shaders/material_virtual_texture.wesl");
+    let resolve = include_str!("../../shaders/shading_resolve.wesl");
+
+    let expected_config =
+        MATERIAL_VT_CONFIG_FIELDS.map(|(name, ty)| (name.to_owned(), ty.to_owned()));
+    assert_eq!(
+        wesl_struct_fields(vt, "MaterialVirtualTextureConfig"),
+        expected_config,
+    );
+    for (binding, declaration) in [
+        (5, "var<storage, read> material_vt_page_table: array<u32>"),
+        (
+            6,
+            "var<storage, read> material_vt_config: MaterialVirtualTextureConfig",
+        ),
+        (7, "var material_vt_atlas: texture_2d_array<f32>"),
+        (8, "var material_vt_sampler: sampler"),
+        (
+            9,
+            "var<storage, read> material_texture_generation_table: array<u32>",
+        ),
+    ] {
+        assert!(
+            sample.contains(&format!("@group(1) @binding({binding}) {declaration};")),
+            "material VT binding {binding} ABI declaration is missing",
+        );
+    }
+    assert!(
+        sample.contains("fn sample_texture_slot(")
+            && sample.contains("material_vt_resolve(")
+            && sample.contains("sample_texture_slot_direct(record, uv, lod)")
+            && sample.contains("record.generation == 0u"),
+        "material sample consumer must retain VT and direct fallback paths",
+    );
+    assert!(
+        sample.contains("if !resolution.vt_enabled || !resolution.hit")
+            && sample.contains("return material_default_texture_texel(record.semantic);"),
+        "VT misses must preserve semantic fallback",
+    );
+    assert!(
+        sample.contains("@if(!MATERIAL_BINDLESS) {\n            return material_default_texture_texel(record.semantic);\n        }")
+            && sample.contains(
+                "return material_vt_sample_resolved(material_vt_atlas, material_vt_sampler, resolution);",
+            ),
+        "non-bindless must use the VT atlas for a resolved row and fallback otherwise",
+    );
+    assert!(
+        !sample.contains("@if(!MATERIAL_BINDLESS) @group(1) @binding(3)")
+            && !sample.contains("@if(!MATERIAL_BINDLESS) @group(1) @binding(4)"),
+        "non-bindless must not imply unavailable direct texture/sampler bindings",
+    );
+    assert!(
+        sample.contains("@if(MATERIAL_BINDLESS) @group(1) @binding(3)")
+            && sample.contains("@if(MATERIAL_BINDLESS) @group(1) @binding(4)"),
+        "material sample must keep bindless arrays conditional",
+    );
+    assert!(
+        sample.contains(
+            "@if(MATERIAL_BINDLESS) @group(1) @binding(9) var<storage, read> material_texture_generation_table"
+        )
+            && sample.contains("material_texture_generation_table[record.index] != record.generation"),
+        "bindless material sample must validate the published generation table",
+    );
+    assert!(
+        resolve.contains("sample_texture_slot(record, geometry.uv, lod)"),
+        "shading resolve must call the production material consumer",
+    );
+}
+
+/// Compiles the material VT resolver through the production WESL frontend.
+/// This is intentionally separate from VSM page-table coverage: the helper
+/// owns no bindings yet, but every invocation must still type-check against
+/// the material `GpuPageTable` word contract before production integration.
+#[test]
+fn material_virtual_texture_wesl_compiles_standalone() {
+    let mut cache = ShaderCache::new((), load_source);
+    let material_virtual_texture = shader_id(0x5052_4953_4d5f_4d41_5456_5400_0001);
+    cache.set_shader(
+        material_virtual_texture,
+        Shader::from_wesl(
+            include_str!("../../shaders/material_virtual_texture.wesl"),
+            "embedded://prism_render_scene/shaders/material_virtual_texture.wesl",
+        ),
+    );
+
+    cache
+        .get(0, material_virtual_texture, &[])
+        .unwrap_or_else(|error| panic!("material_virtual_texture.wesl failed to compile: {error}"));
 }
 
 /// Compiles `oit.wesl` standalone. It has no imports, so a green result

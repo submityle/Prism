@@ -7,7 +7,7 @@
 use bevy_ecs::prelude::Resource;
 use prism_render_visibility::texture_lod;
 
-use super::{ShadeChannel, ShadePageKey, ShadePageRequest};
+use super::{FaceChart, ShadeChannel, ShadePageKey, ShadePageRequest};
 
 /// One real visibility-buffer sample for object/texture-space shading.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -45,10 +45,23 @@ pub struct ShadeDemandConfig {
     pub max_mip: u8,
 }
 
+/// A page request plus the validated geometry/chart provenance needed by a
+/// later GPU job builder. Light selection remains a separate explicit policy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShadeDemandRecord {
+    /// Typed residency request.
+    pub request: ShadePageRequest,
+    /// Render-world geometry slot containing the face chart.
+    pub geometry_index: u32,
+    /// Validated per-face chart used to build the shade job.
+    pub chart: FaceChart,
+}
+
 /// Render-world handoff for real visibility-derived shade requests.
 #[derive(Resource, Clone, Debug, Default)]
 pub struct ShadeDemandRegistry {
     demands: Vec<ShadePageRequest>,
+    records: Vec<ShadeDemandRecord>,
     revision: u64,
 }
 
@@ -56,12 +69,22 @@ impl ShadeDemandRegistry {
     /// Replaces the current decoded visibility frame.
     pub fn replace(&mut self, demands: impl IntoIterator<Item = ShadePageRequest>) {
         self.demands = demands.into_iter().collect();
+        self.records.clear();
+        self.revision = self.revision.saturating_add(1);
+    }
+
+    /// Replaces the current frame with requests carrying geometry/chart
+    /// provenance. This is the path used by visibility feedback.
+    pub fn replace_records(&mut self, records: impl IntoIterator<Item = ShadeDemandRecord>) {
+        self.records = records.into_iter().collect();
+        self.demands = self.records.iter().map(|record| record.request).collect();
         self.revision = self.revision.saturating_add(1);
     }
 
     /// Clears the current feedback frame.
     pub fn clear(&mut self) {
         self.demands.clear();
+        self.records.clear();
         self.revision = self.revision.saturating_add(1);
     }
 
@@ -69,6 +92,12 @@ impl ShadeDemandRegistry {
     #[must_use]
     pub fn demands(&self) -> &[ShadePageRequest] {
         &self.demands
+    }
+
+    /// Returns requests with validated geometry/chart provenance.
+    #[must_use]
+    pub fn records(&self) -> &[ShadeDemandRecord] {
+        &self.records
     }
 
     /// Monotonic frame replacement revision for diagnostics.

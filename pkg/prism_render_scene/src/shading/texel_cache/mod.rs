@@ -60,7 +60,7 @@ pub use store::{
     ShadeStoreError, ShadeStoreLookup, ShadeSubmission,
 };
 pub use visibility_demand::{
-    shade_page_request_from_visibility, ShadeDemandConfig, ShadeDemandRegistry,
+    shade_page_request_from_visibility, ShadeDemandConfig, ShadeDemandRecord, ShadeDemandRegistry,
     ShadeVisibilitySample,
 };
 
