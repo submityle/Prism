@@ -13,6 +13,7 @@ pub enum BuildError {
     MissingDependency { job: JobId, dependency: JobId },
     Cycle { jobs: Vec<JobId> },
     ProcessorFailed { job: JobId, source: ProcessorError },
+    InvalidConcurrency,
 }
 
 impl fmt::Display for BuildError {
@@ -27,6 +28,9 @@ impl fmt::Display for BuildError {
             Self::Cycle { jobs } => write!(f, "build graph contains a cycle involving {jobs:?}"),
             Self::ProcessorFailed { job, source } => {
                 write!(f, "build job {} failed: {source}", job.0)
+            }
+            Self::InvalidConcurrency => {
+                f.write_str("parallel build concurrency must be greater than zero")
             }
         }
     }
@@ -160,11 +164,26 @@ impl BuildGraph {
         Ok(outputs)
     }
 
-    /// Execute independent ready jobs concurrently, one deterministic DAG wave
-    /// at a time. Dependencies are still completed before their consumers;
-    /// failures are reported by the smallest job id in the failed wave so
-    /// scheduling order cannot change the observable error.
+    /// Execute independent ready jobs concurrently using the host's available
+    /// parallelism as a safety bound.
     pub fn execute_parallel(&self) -> Result<BuildOutputs, BuildError> {
+        let limit = thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1);
+        self.execute_parallel_with_limit(limit)
+    }
+
+    /// Execute independent ready jobs concurrently, one deterministic DAG wave
+    /// at a time, with at most `max_concurrency` processors running at once.
+    /// Dependencies are still completed before their consumers; failures are
+    /// reported by ascending job ID, so scheduling cannot change the error.
+    pub fn execute_parallel_with_limit(
+        &self,
+        max_concurrency: usize,
+    ) -> Result<BuildOutputs, BuildError> {
+        if max_concurrency == 0 {
+            return Err(BuildError::InvalidConcurrency);
+        }
         let mut indegree = BTreeMap::new();
         let mut dependents: BTreeMap<JobId, Vec<JobId>> = BTreeMap::new();
         for (&id, job) in &self.jobs {
@@ -189,8 +208,10 @@ impl BuildGraph {
         let mut completed = 0;
 
         while !ready.is_empty() {
-            let wave: Vec<_> = ready.iter().copied().collect();
-            ready.clear();
+            let wave: Vec<_> = ready.iter().copied().take(max_concurrency).collect();
+            for id in &wave {
+                ready.remove(id);
+            }
             let results = thread::scope(|scope| {
                 wave.iter()
                     .map(|&id| {
@@ -289,6 +310,27 @@ mod tests {
                 job: JobId(4),
                 source: ProcessorError::new("four"),
             })
+        );
+    }
+
+    #[test]
+    fn parallel_execution_rejects_zero_concurrency() {
+        let graph = BuildGraph::new();
+        assert_eq!(
+            graph.execute_parallel_with_limit(0),
+            Err(BuildError::InvalidConcurrency)
+        );
+    }
+
+    #[test]
+    fn parallel_execution_with_limit_matches_serial_outputs() {
+        let mut graph = BuildGraph::new();
+        graph.add_job(job(3, &[1, 2], b"ignored")).unwrap();
+        graph.add_job(job(2, &[], b"b")).unwrap();
+        graph.add_job(job(1, &[], b"a")).unwrap();
+        assert_eq!(
+            graph.execute_parallel_with_limit(1).unwrap(),
+            graph.execute().unwrap()
         );
     }
 

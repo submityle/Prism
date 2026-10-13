@@ -203,7 +203,10 @@ impl VirtualGeometryAsset {
             page_by_key.insert(page.record.key, page);
         }
         for (index, node) in self.nodes.iter().enumerate() {
-            if !bounds_finite(&node.bounds) || !node.self_error.is_finite() || node.self_error < 0.0
+            if !bounds_finite(&node.bounds)
+                || !node.self_error.is_finite()
+                || node.self_error < 0.0
+                || !bounds_encloses(&self.header.bounds, &node.bounds)
             {
                 return Err(VirtualGeometryAssetError::InvalidNode(index as u32));
             }
@@ -214,6 +217,9 @@ impl VirtualGeometryAsset {
             if node.child_count != 0 {
                 for child in node.first_child..end {
                     let child_node = self.nodes[child as usize];
+                    if !bounds_encloses(&node.bounds, &child_node.bounds) {
+                        return Err(VirtualGeometryAssetError::SpatialBoundsMismatch);
+                    }
                     if child_node.self_error > node.self_error {
                         return Err(VirtualGeometryAssetError::NonMonotonicError {
                             parent: index as u32,
@@ -273,6 +279,10 @@ impl VirtualGeometryAsset {
                 ));
             }
             if !bounds_finite(&cluster.bounds)
+                || !bounds_encloses(
+                    &self.nodes[cluster.node_index as usize].bounds,
+                    &cluster.bounds,
+                )
                 || !cluster.normal_cone.iter().all(|value| value.is_finite())
                 || !(-1.0..=1.0).contains(&cluster.normal_cone[3])
             {
@@ -491,6 +501,8 @@ pub enum VirtualGeometryAssetError {
     PageTooLarge(GeometryPageKey),
     /// Uncompressed page payload length disagrees with its metadata.
     PayloadSizeMismatch(GeometryPageKey),
+    /// A hierarchy or cluster bounds record is not spatially contained.
+    SpatialBoundsMismatch,
     /// Cluster metadata violates the fixed cluster contract.
     InvalidCluster(u32),
     /// Input ended before a complete field was read.
@@ -526,6 +538,9 @@ impl fmt::Display for VirtualGeometryAssetError {
             Self::PayloadSizeMismatch(key) => {
                 write!(f, "uncompressed payload size mismatch for page {:?}", key)
             }
+            Self::SpatialBoundsMismatch => {
+                f.write_str("virtual-geometry spatial bounds are inconsistent")
+            }
             Self::InvalidCluster(node) => {
                 write!(f, "invalid virtual-geometry cluster for node {node}")
             }
@@ -548,6 +563,18 @@ fn validate_header(header: &VirtualGeometryAssetHeader) -> Result<(), VirtualGeo
         return Err(VirtualGeometryAssetError::InvalidValue("header"));
     }
     Ok(())
+}
+
+fn bounds_encloses(outer: &SceneBounds, inner: &SceneBounds) -> bool {
+    let outer_min: [f32; 3] =
+        core::array::from_fn(|axis| outer.center[axis] - outer.half_extents[axis]);
+    let outer_max: [f32; 3] =
+        core::array::from_fn(|axis| outer.center[axis] + outer.half_extents[axis]);
+    let inner_min: [f32; 3] =
+        core::array::from_fn(|axis| inner.center[axis] - inner.half_extents[axis]);
+    let inner_max: [f32; 3] =
+        core::array::from_fn(|axis| inner.center[axis] + inner.half_extents[axis]);
+    (0..3).all(|axis| inner_min[axis] >= outer_min[axis] && inner_max[axis] <= outer_max[axis])
 }
 
 fn bounds_finite(bounds: &SceneBounds) -> bool {
