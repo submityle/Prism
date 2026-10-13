@@ -3,12 +3,15 @@
 //! This crate deliberately contains no renderer, widget factory, or
 //! window-system integration. It provides a deterministic layout model,
 //! reducer, validation, and a versioned persistence core; it does not provide
-//! application-level workspace integration or autosave orchestration.
+//! application-level workspace integration or background autosave orchestration;
+//! the `std` feature exposes a host-driven debounce controller for that boundary.
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
+#[cfg(feature = "std")]
+mod autosave;
 mod default_layout;
 mod drag;
 mod model;
@@ -25,6 +28,8 @@ mod workspace_persist;
 #[cfg(feature = "std")]
 mod workspace_store;
 
+#[cfg(feature = "std")]
+pub use autosave::{AutosavePoll, WorkspaceAutosave};
 pub use default_layout::{DefaultLayoutError, DefaultLayoutPolicy};
 pub use drag::{
     calculate_drop_zone, map_drop_action, tab_insertion_index, transition, DragError, DragEvent,

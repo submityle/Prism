@@ -302,7 +302,7 @@ features: `std`(持久化落盘)/ `anim`(动效)/ `snapshot_tests`。核心 mode
 | **M1** | renderer-independent 几何解算 + render plan + tab/header/splitter 元数据 | Dock model ✅ / DockPanel ✅；Element 装配仍待完成 |
 | **M2** | 拖拽状态机 + 五向 drop zone + overlay 预览 | 状态机/drop-zone/reducer action 已交付；renderer overlay 预览仍待集成 |
 | **M3** | 浮窗 + autohide 边栏 + maximize | M1/M2 |
-| **M4** | 持久化(序列化/校验/迁移)+ Workspace + 自动保存 | persistence core ✅ / Workspace 纯数据与 codec ✅；自动保存仍待完成 |
+| **M4** | 持久化(序列化/校验/迁移)+ Workspace + 自动保存 | persistence core ✅ / Workspace 纯数据与 codec ✅ / host-driven autosave ✅；schema migration 仍待完成 |
 | **M5** | 动效 + 可达性 + 撤销集成 + 多显示器校正 | 平台层 / 命令内核 |
 
 ---
@@ -359,12 +359,13 @@ let layout = DockLayout::load(&bytes, &registry)?; // 未知面板丢弃,比例�
 - ✅ **Workspace / Perspective 纯数据管理已交付**:`WorkspaceManager`、`Workspace` 与 `Perspective` 按确定性插入顺序管理命名布局；拒绝空白/重复名称，并以 `DockLayout` 深拷贝隔离保存与切换边界。该切片只负责内存中的选择与快照，不提供文件 IO、自动保存、factory 或 renderer。
 - ✅ **Workspace 持久化 codec 已交付**:`encode_workspace`/`decode_workspace` 提供带 magic/version 的稳定 Workspace/Perspective 快照，逐个复用布局 codec，执行 active 引用、资源上限、UTF-8、枚举、截断和尾随字节校验；`decode_workspace_with_registry` 将 `PanelRegistry` 作为嵌套布局的 panel allow-list。该切片只处理内存字节。
 - ✅ **Workspace 文件存储边界已交付**（`std`）:`WorkspaceFileStore` 通过 sibling lock 串行化保存、唯一临时文件、`sync_all` 与 rename 提交，并在 Unix 上同步父目录；覆盖 primary 前先验证旧快照，再以独立临时文件更新 `last-good`，失败路径清理临时文件。加载按 primary → last-good → caller default 回退并保留诊断，并提供 Registry-aware load 防止未知 panel 进入上层。它不是 autosave middleware，不提供 schema 迁移或 renderer 装配；断电语义仍取决于底层文件系统。
+- ✅ **Host-driven autosave 调度已交付**:`WorkspaceAutosave` 维护 dirty/debounce deadline，宿主通过单调 `Instant` 调用 `poll` 或显式 `flush`；写入失败保留 dirty 状态以便重试。它不创建后台线程、不在 reducer 内隐式阻塞、不伪造 schema migration；宿主负责把调用放入 worker/executor 边界。
 - ✅ **Registry 基础契约已交付**:`PanelDescriptor`/`PanelRegistry` 提供 no_std + alloc 的纯数据贡献点、确定性注册顺序、空白/重复 ID 拒绝、查询和迭代；不包含 Element/factory/renderer。
 - ✅ **Registry → 默认布局物化已交付**:`PanelRegistry::default_layout(DefaultLayoutPolicy)` 按注册顺序把可见面板映射到 Left/Right/Bottom/Document/Floating 槽位；同槽位稳定合并为 tab stack，空槽位不产生非法空节点，浮窗 z 序确定，并在返回前执行完整布局校验。`Instancing::Multi` 在此只生成一个默认实例，不伪造多实例语义。
 - ✅ **Workspace 默认布局重置接线已交付**:`WorkspaceManager::reset_active_perspective_to_default` 与 `reset_perspective_to_default` 在提交前完整物化并校验 Registry 默认布局，成功后以深拷贝替换目标 perspective；策略错误、无活动 perspective 或未知名称均返回结构化错误且不留下半成品状态。
 - ⬜ **M3–M5 其余能力仍 PLANNED**:`store`、`a11y` 以及动画/多显示器/撤销集成。完整 UI 装配和 renderer 集成仍属于后续工作，不因 M1 计划数据或 persistence core 已存在而视为完成。
 - ⬜ **依赖未落地项**:撤销集成需编辑器命令内核;多显示器校正需平台/`prism_window` 层;动效档位依赖性能分级。
-- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核、M1 renderer-independent render plan、`render` feature 下的 Element 装配、Dock Element 的真实 GPU parity、M4 persistence core、Workspace/Perspective 纯数据管理、codec、`std` 文件存储边界、Registry 基础契约及 Registry → 默认布局物化；布局校验会在 renderer 消费前拒绝非法 maximize 恢复态。完整 GPU/renderer host 接线、overlay 预览、自动保存 middleware、schema 迁移和上层 retained-tree/focus 接线仍未交付。
+- 现状复核(本次已核验):`pkg/prism_ui_dock` 已提供 M0 宿主核心、M2 GPU-independent drag/drop 内核、M1 renderer-independent render plan、`render` feature 下的 Element 装配、Dock Element 的真实 GPU parity、M4 persistence core、Workspace/Perspective 纯数据管理、codec、`std` 文件存储边界、host-driven autosave、Registry 基础契约及 Registry → 默认布局物化；布局校验会在 renderer 消费前拒绝非法 maximize 恢复态。完整 GPU/renderer host 接线、overlay 预览、schema 迁移和上层 retained-tree/focus 接线仍未交付。
 
 ---
 
