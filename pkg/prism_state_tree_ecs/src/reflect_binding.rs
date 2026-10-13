@@ -25,6 +25,15 @@ pub enum ReflectBindingError {
         /// The underlying reflected access failure.
         error: AccessError,
     },
+    /// The requested slot is not present in this compiled plan.
+    MissingSlot(BindingSlot),
+    /// A reflected value could not be applied to the target field.
+    Write {
+        /// The slot whose field rejected the value.
+        slot: BindingSlot,
+        /// The underlying reflected access failure.
+        error: AccessError,
+    },
     /// The resolved field has a different reflected type than the contract.
     TypeMismatch {
         /// The slot whose type contract failed.
@@ -43,6 +52,12 @@ impl fmt::Display for ReflectBindingError {
             Self::DuplicateSlot(slot) => write!(f, "duplicate StateTree binding slot {}", slot.0),
             Self::Resolve { slot, error } => {
                 write!(f, "slot {} path resolution failed: {error}", slot.0)
+            }
+            Self::MissingSlot(slot) => {
+                write!(f, "slot {} is not present in the binding plan", slot.0)
+            }
+            Self::Write { slot, error } => {
+                write!(f, "slot {} reflected write failed: {error}", slot.0)
             }
             Self::TypeMismatch {
                 slot,
@@ -109,14 +124,30 @@ impl ReflectBindingPlan {
             .map(|(slot, path, _)| (*slot, path.as_str()))
     }
 
-    /// Reads one compiled slot without reparsing or string lookup.
-    #[must_use]
-    pub fn get<'a>(&self, root: &'a dyn Reflect, slot: BindingSlot) -> Option<&'a dyn Reflect> {
+    fn plan(&self, slot: BindingSlot) -> Result<&AccessPlan, ReflectBindingError> {
         let index = self
             .entries
             .binary_search_by_key(&slot, |(candidate, _, _)| *candidate)
-            .ok()?;
-        self.entries[index].2.get(root)
+            .map_err(|_| ReflectBindingError::MissingSlot(slot))?;
+        Ok(&self.entries[index].2)
+    }
+
+    /// Reads one compiled slot without reparsing or string lookup.
+    #[must_use]
+    pub fn get<'a>(&self, root: &'a dyn Reflect, slot: BindingSlot) -> Option<&'a dyn Reflect> {
+        self.plan(slot).ok()?.get(root)
+    }
+
+    /// Applies a reflected value through a compiled path without string lookup.
+    pub fn set(
+        &self,
+        root: &mut dyn Reflect,
+        slot: BindingSlot,
+        value: &dyn Reflect,
+    ) -> Result<(), ReflectBindingError> {
+        self.plan(slot)?
+            .set(root, value)
+            .map_err(|error| ReflectBindingError::Write { slot, error })
     }
 }
 
@@ -138,9 +169,14 @@ mod tests {
         current: i32,
     }
 
+    #[derive(Reflect)]
+    struct Other {
+        current: f32,
+    }
+
     #[test]
     fn compiles_paths_into_stable_slots_and_reads_without_reparsing() {
-        let target = Target {
+        let mut target = Target {
             health: Health { current: 42 },
         };
         let plan =
@@ -151,6 +187,25 @@ mod tests {
         );
         let value = plan.get(&target, BindingSlot(4)).unwrap();
         assert_eq!(value.downcast_ref::<i32>(), Some(&42));
+        let replacement = 99_i32;
+        plan.set(&mut target, BindingSlot(4), &replacement).unwrap();
+        assert_eq!(
+            plan.get(&target, BindingSlot(4))
+                .unwrap()
+                .downcast_ref::<i32>(),
+            Some(&99)
+        );
+        assert!(matches!(
+            plan.set(&mut target, BindingSlot(4), &Other { current: 1.0 }),
+            Err(ReflectBindingError::Write {
+                slot: BindingSlot(4),
+                ..
+            })
+        ));
+        assert!(matches!(
+            plan.set(&mut target, BindingSlot(8), &replacement),
+            Err(ReflectBindingError::MissingSlot(BindingSlot(8)))
+        ));
     }
 
     #[test]
