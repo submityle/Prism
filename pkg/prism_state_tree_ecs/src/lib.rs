@@ -10,6 +10,8 @@
 
 extern crate alloc;
 
+mod schedule;
+
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -106,6 +108,8 @@ pub struct StateTreeInstance {
     asset: StateTreeAsset,
     runtime: Instance,
 }
+
+pub use schedule::{install_tick_system, StateTreeTickOutcome, StateTreeTickReport};
 
 impl Component for StateTreeInstance {}
 
