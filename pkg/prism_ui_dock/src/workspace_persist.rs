@@ -417,6 +417,7 @@ impl Reader<'_> {
 mod tests {
     use super::*;
     use crate::{DockLayout, DockNode};
+    use alloc::format;
 
     fn layout(panel: &str) -> DockLayout {
         DockLayout {

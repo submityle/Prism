@@ -6,13 +6,14 @@
 //! previous primary snapshot as `last-good`, then atomically renames the
 //! temporary file into place.
 
+use fs4::fs_std::FileExt;
 use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -75,8 +76,9 @@ impl From<WorkspacePersistError> for WorkspaceStoreError {
 /// directory before returning. This protects the codec boundary from
 /// concurrent writers and ordinary process crashes; filesystem-specific power
 /// loss guarantees remain the responsibility of the underlying filesystem.
-/// Existing lock files are never reclaimed by age; safe cross-process recovery
-/// requires an OS advisory lock or an explicit verifiable owner protocol.
+/// The stable lock path is protected by an OS advisory lock; the lock file is
+/// intentionally retained so a crashed process cannot create a stale-file
+/// split-brain race. The OS releases the held lock when the process exits.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceFileStore {
     primary: PathBuf,
@@ -289,25 +291,22 @@ impl Drop for TempPath {
 }
 
 struct StoreLock {
-    path: PathBuf,
+    file: fs::File,
 }
 
 impl StoreLock {
     fn acquire(path: &Path) -> io::Result<Self> {
-        for _ in 0..LOCK_WAIT_ATTEMPTS {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-            {
-                Ok(mut file) => {
-                    let _ = writeln!(file, "pid={}", std::process::id());
-                    let _ = file.sync_all();
-                    return Ok(Self {
-                        path: path.to_path_buf(),
-                    });
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)?;
+        let deadline = Instant::now() + Duration::from_millis(LOCK_WAIT_ATTEMPTS as u64);
+        while Instant::now() < deadline {
+            match file.try_lock_exclusive() {
+                Ok(true) => return Ok(Self { file }),
+                Ok(false) => thread::sleep(Duration::from_millis(1)),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(1));
                 }
                 Err(error) => return Err(error),
@@ -322,7 +321,7 @@ impl StoreLock {
 
 impl Drop for StoreLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = self.file.unlock();
     }
 }
 

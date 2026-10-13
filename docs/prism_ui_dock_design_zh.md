@@ -263,7 +263,7 @@ reducer/validator 每次边界强制:无悬挂空节点、比例归一、每面�
 浮窗跨屏定位、DPI 缩放交平台/`prism_window` 层;本层只存逻辑 rect + 显示器 id,恢复时由平台层校正到当前显示器拓扑(屏幕消失则拉回主屏)。
 
 ### 12.6 崩溃安全持久化
-原子写(临时文件 + rename)+ 保留 last-good；`WorkspaceFileStore` 加载失败回落 last-good → caller default。锁文件不按 mtime 回收，进程崩溃后的自动释放仍需 OS advisory lock，当前实现只能超时。
+原子写(临时文件 + rename)+ 保留 last-good；`WorkspaceFileStore` 加载失败回落 last-good → caller default。稳定 sibling lock 使用 OS advisory lock（Unix/Windows 由 `fs4` 适配），锁文件本身不删除；进程崩溃时由 OS 释放持有的锁，避免 mtime/PID stale reclaim 竞态。
 
 ---
 

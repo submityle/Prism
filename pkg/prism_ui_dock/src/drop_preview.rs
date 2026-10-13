@@ -115,7 +115,7 @@ fn tab_preview(rect: Rect, index: usize, tab_count: usize) -> Result<Rect, DropP
 mod tests {
     use super::*;
     use crate::{PanelLayout, PanelVisibility, TabId};
-    use alloc::string::String;
+    use alloc::{string::String, vec, vec::Vec};
 
     fn plan() -> RenderPlan {
         RenderPlan {
