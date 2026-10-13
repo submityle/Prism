@@ -27,6 +27,25 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
         "material_shading_work",
         ResourceLifetime::Transient,
     );
+    // The classification scatter produces the bounded set of texel-space
+    // jobs for this frame.  The page table and atlas outlive the frame graph:
+    // a completed shade generation remains sampleable until the next
+    // completion-gated publication replaces it.
+    let shade_jobs = resource(
+        &mut graph,
+        "texel_space_shade_jobs",
+        ResourceLifetime::Transient,
+    );
+    let shade_page_table = resource(
+        &mut graph,
+        "texel_space_shade_page_table",
+        ResourceLifetime::Persistent,
+    );
+    let shade_atlas = resource(
+        &mut graph,
+        "texel_space_shade_atlas",
+        ResourceLifetime::Persistent,
+    );
     let class_counts = resource(
         &mut graph,
         "material_class_counts",
@@ -102,9 +121,20 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
             access(class_offsets, AccessKind::StorageRead),
             access(class_cursors, AccessKind::StorageWrite),
             access(shading_work, AccessKind::StorageWrite),
+            access(shade_jobs, AccessKind::StorageWrite),
             access(classification_diagnostics, AccessKind::StorageWrite),
         ],
         depends_on: vec![prefix],
+    });
+    let shade = graph.add_pass(PassDescriptor {
+        name: "texel_space_shade_cache".into(),
+        queue: QueueClass::Compute,
+        accesses: vec![
+            access(shade_jobs, AccessKind::StorageRead),
+            access(shade_page_table, AccessKind::StorageRead),
+            access(shade_atlas, AccessKind::StorageWrite),
+        ],
+        depends_on: vec![scatter],
     });
     graph.add_pass(PassDescriptor {
         name: "shading_resolve".into(),
@@ -118,9 +148,11 @@ pub(crate) fn shading_frame_graph() -> GpuFrameGraphBuilder {
             access(materials, AccessKind::StorageRead),
             access(shading_work, AccessKind::StorageRead),
             access(indirect_dispatch, AccessKind::IndirectRead),
+            access(shade_page_table, AccessKind::StorageRead),
+            access(shade_atlas, AccessKind::SampledRead),
             access(scene_color, AccessKind::StorageWrite),
         ],
-        depends_on: vec![scatter],
+        depends_on: vec![shade],
     });
     graph
 }
@@ -153,8 +185,10 @@ mod tests {
     fn shading_graph_orders_raster_classification_and_resolve_hazards() {
         let graph = shading_frame_graph();
         let compiled = graph.compile().unwrap();
-        assert_eq!(compiled.execution_order.len(), 5);
+        assert_eq!(compiled.execution_order.len(), 6);
         assert_eq!(graph.passes()[0].name, "visibility_raster");
+        assert_eq!(graph.passes()[4].name, "texel_space_shade_cache");
+        assert_eq!(graph.passes()[5].name, "shading_resolve");
         assert_eq!(
             graph
                 .resources()
@@ -178,6 +212,10 @@ mod tests {
         assert_eq!(
             graph.passes()[4].depends_on,
             [prism_render_architecture::frame_graph::PassId(3)]
+        );
+        assert_eq!(
+            graph.passes()[5].depends_on,
+            [prism_render_architecture::frame_graph::PassId(4)]
         );
         assert!(compiled
             .barriers
@@ -205,7 +243,9 @@ mod tests {
         assert!(has_barrier("material_pixel_classification", 1, 3));
         assert!(has_barrier("material_class_offsets", 2, 3));
         assert!(has_barrier("material_class_cursors", 2, 3));
-        assert!(has_barrier("material_shading_work", 3, 4));
-        assert!(has_barrier("shading_indirect_dispatch", 2, 4));
+        assert!(has_barrier("material_shading_work", 3, 5));
+        assert!(has_barrier("texel_space_shade_jobs", 3, 4));
+        assert!(has_barrier("texel_space_shade_atlas", 4, 5));
+        assert!(has_barrier("shading_indirect_dispatch", 2, 5));
     }
 }
